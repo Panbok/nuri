@@ -1,0 +1,6 @@
+CompileFlags:
+  CompilationDatabase: build
+Diagnostics:
+  ClangTidy:
+    Add: [performance-*,clang-analyzer-*,bugprone-*]
+    Remove: [bugprone-narrowing-conversions,performance-no-int-to-ptr,bugprone-easily-swappable-parameters]
