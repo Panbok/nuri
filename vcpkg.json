@@ -2,9 +2,6 @@
   "name": "nuri",
   "version-string": "0.1.0",
   "dependencies": [
-    "vulkan-headers",
-    "sdl3",
-    "imgui",
     "glm"
   ]
 }

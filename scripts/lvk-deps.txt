@@ -1,0 +1,10 @@
+glslang
+SPIRV-Reflect
+volk
+vulkan-headers
+vma
+minilog
+stb
+ldrutils
+imgui
+glfw

@@ -2,7 +2,7 @@
 
 #include <iostream>
 
-#include <SDL3/SDL.h>
+#include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <imgui.h>
-#include <vulkan/vulkan.hpp>
+#include <lvk/LVK.h>

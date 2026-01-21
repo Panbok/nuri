@@ -1,1 +1,6 @@
-/build
+/build*/
+/.cache/
+/vcpkg/
+.delete_test
+.cursor/
+.vscode/

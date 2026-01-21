@@ -17,8 +17,8 @@ set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 call "%~dp0bootstrap_lightweightvk.bat"
 if errorlevel 1 exit /b 1
 
-cmake -S . -B build -G Ninja ^
-  -DCMAKE_BUILD_TYPE=Debug ^
+cmake -S . -B build-release -G Ninja ^
+  -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_C_COMPILER=clang ^
   -DCMAKE_CXX_COMPILER=clang++ ^
   -DCMAKE_TOOLCHAIN_FILE="%TOOLCHAIN%" ^
@@ -26,4 +26,4 @@ cmake -S . -B build -G Ninja ^
   -DNURI_BUILD_SHARED=ON
 if errorlevel 1 exit /b 1
 
-cmake --build build
+cmake --build build-release

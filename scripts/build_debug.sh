@@ -11,6 +11,8 @@ if command -v ninja >/dev/null 2>&1; then
   generator="Ninja"
 fi
 
+./scripts/bootstrap_lightweightvk.sh
+
 cmake -S . -B build/debug -G "${generator}" \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER=clang \
