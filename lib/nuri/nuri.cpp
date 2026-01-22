@@ -1,16 +1,27 @@
 #include "nuri/nuri.h"
 
 namespace nuri {
-const char *hello() {
-  // Touch a few types so the headers are not entirely unused.
-  glm::vec3 dummy(0.0f);
-  (void)dummy;
-  (void)sizeof(ImGuiIO);
-  GLFWwindow *glfwWindow = nullptr;
-  (void)glfwWindow;
-  lvk::LVKwindow *lvkWindow = nullptr;
-  (void)lvkWindow;
+void init() {
+  minilog::initialize(nullptr, {.threadNames = false});
+  std::int32_t width = 960;
+  std::int32_t height = 540;
+  lvk::LVKwindow *window = lvk::initWindow("Nuri", width, height);
+  std::unique_ptr<lvk::IContext> context =
+      lvk::createVulkanContextWithSwapchain(window, width, height,
+                                            lvk::ContextConfig{});
 
-  return "Hello from Nuri";
+  while (!glfwWindowShouldClose(window)) {
+    glfwPollEvents();
+    glfwGetFramebufferSize(window, &width, &height);
+    if (!width || !height)
+      continue;
+    lvk::ICommandBuffer &commandBuffer = context->acquireCommandBuffer();
+    context->submit(commandBuffer, context->getCurrentSwapchainTexture());
+  }
+
+  context.reset();
+  glfwDestroyWindow(window);
+  glfwTerminate();
+  minilog::deinitialize();
 }
 } // namespace nuri
