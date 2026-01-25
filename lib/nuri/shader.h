@@ -28,13 +28,13 @@ static_assert(Stage_Count ==
 
 class NURI_API Shader {
 public:
-  Shader(const std::string &moduleName,
-         const std::unique_ptr<lvk::IContext> &ctx);
+  Shader(const std::string &moduleName, lvk::IContext &ctx);
   ~Shader();
 
   nuri::Result<std::string, std::string> load(const std::string &path);
 
-  nuri::Result<lvk::Holder<lvk::ShaderModuleHandle> *, std::string>
+  nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
+               std::string>
   compile(const std::string &code, const nuri::ShaderStage stage);
 
   [[nodiscard]] lvk::ShaderModuleHandle getHandle(ShaderStage stage) const;
@@ -73,6 +73,8 @@ public:
     default:
       break;
     }
+
+    NURI_ASSERT(false, "Invalid Nuri shader stage");
     return ShaderStage::Stage_Count; // should not happen
   }
 
@@ -111,15 +113,16 @@ public:
       break;
     }
 
+    NURI_ASSERT(false, "Invalid LVK shader stage");
     return lvk::ShaderStage::Stage_Callable; // should not happen
   }
 
 private:
   std::string moduleName_;
-  const std::unique_ptr<lvk::IContext> &ctx_;
+  lvk::IContext &ctx_;
 
   std::array<lvk::Holder<lvk::ShaderModuleHandle>, Stage_Count> shaderHandles_;
 
-  std::unordered_map<std::uint32_t, std::string> debugGLSLSourceCode;
+  std::unordered_map<ShaderStage, std::string> debug_glsl_source_code_;
 };
 } // namespace nuri
