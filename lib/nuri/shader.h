@@ -31,8 +31,12 @@ public:
   Shader(std::string_view moduleName, lvk::IContext &ctx);
   ~Shader();
 
-  nuri::Result<std::string, std::string>
-  load(std::string_view path);
+  static std::unique_ptr<Shader> create(std::string_view moduleName,
+                                        lvk::IContext &ctx) {
+    return std::make_unique<Shader>(moduleName, ctx);
+  }
+
+  nuri::Result<std::string, std::string> load(std::string_view path);
 
   nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
                std::string>
