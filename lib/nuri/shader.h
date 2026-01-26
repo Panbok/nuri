@@ -31,6 +31,11 @@ public:
   Shader(std::string_view moduleName, lvk::IContext &ctx);
   ~Shader();
 
+  Shader(const Shader &) = delete;
+  Shader &operator=(const Shader &) = delete;
+  Shader(Shader &&) = delete;
+  Shader &operator=(Shader &&) = delete;
+
   static std::unique_ptr<Shader> create(std::string_view moduleName,
                                         lvk::IContext &ctx) {
     return std::make_unique<Shader>(moduleName, ctx);
