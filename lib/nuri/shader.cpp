@@ -50,49 +50,49 @@ readFileToString(const std::filesystem::path &filePath, std::string &errorMsg) {
   return content;
 }
 
-Shader::Shader(const std::string_view &moduleName, lvk::IContext &ctx)
+Shader::Shader(std::string_view moduleName, lvk::IContext &ctx)
     : moduleName_(moduleName), ctx_(ctx), shaderHandles_{} {}
 
 Shader::~Shader() = default;
 
-nuri::Result<std::string, std::string_view>
-Shader::load(const std::string_view &path) {
+nuri::Result<std::string, std::string>
+Shader::load(std::string_view path) {
   std::string errorMsg;
   std::string content = readFileToString(std::filesystem::path(path), errorMsg);
 
   if (!errorMsg.empty()) {
-    return nuri::Result<std::string, std::string_view>::makeError(errorMsg);
+    return nuri::Result<std::string, std::string>::makeError(std::move(errorMsg));
   }
 
-  return nuri::Result<std::string, std::string_view>::makeResult(content);
+  return nuri::Result<std::string, std::string>::makeResult(content);
 }
 
 nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-             std::string_view>
+             std::string>
 Shader::compile(const std::string &code, const nuri::ShaderStage stage) {
   if (code.empty()) {
     return nuri::Result<
         std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-        std::string_view>::makeError("Shader code is empty for stage " +
-                                     std::to_string(static_cast<int>(stage)));
+        std::string>::makeError("Shader code is empty for stage " +
+                                std::to_string(static_cast<int>(stage)));
   }
 
   const auto stageIndex = static_cast<size_t>(stage);
   if (stageIndex >= Stage_Count) {
     return nuri::Result<
         std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-        std::string_view>::makeError("Invalid shader stage: " +
-                                     std::to_string(stageIndex));
+        std::string>::makeError("Invalid shader stage: " +
+                                std::to_string(stageIndex));
   }
 
   lvk::Result res;
   shaderHandles_[stageIndex] = ctx_.createShaderModule(
-      {code.c_str(), getLvkShaderStage(stage), moduleName_.data()}, &res);
+      {code.c_str(), getLvkShaderStage(stage), moduleName_.c_str()}, &res);
 
   if (!res.isOk()) {
     return nuri::Result<
         std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-        std::string_view>::makeError(res.message);
+        std::string>::makeError(std::string(res.message));
   }
 
   if (shaderHandles_[stageIndex].valid()) {
@@ -101,7 +101,7 @@ Shader::compile(const std::string &code, const nuri::ShaderStage stage) {
 
   return nuri::Result<
       std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-      std::string_view>::makeResult(std::ref(shaderHandles_[stageIndex]));
+      std::string>::makeResult(std::ref(shaderHandles_[stageIndex]));
 }
 
 lvk::ShaderModuleHandle Shader::getHandle(const ShaderStage stage) const {

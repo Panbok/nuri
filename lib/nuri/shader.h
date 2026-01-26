@@ -28,14 +28,14 @@ static_assert(Stage_Count ==
 
 class NURI_API Shader {
 public:
-  Shader(const std::string_view &moduleName, lvk::IContext &ctx);
+  Shader(std::string_view moduleName, lvk::IContext &ctx);
   ~Shader();
 
-  nuri::Result<std::string, std::string_view>
-  load(const std::string_view &path);
+  nuri::Result<std::string, std::string>
+  load(std::string_view path);
 
   nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-               std::string_view>
+               std::string>
   compile(const std::string &code, const nuri::ShaderStage stage);
 
   [[nodiscard]] lvk::ShaderModuleHandle getHandle(ShaderStage stage) const;
@@ -119,7 +119,7 @@ public:
   }
 
 private:
-  std::string_view moduleName_;
+  std::string moduleName_;
   lvk::IContext &ctx_;
 
   std::array<lvk::Holder<lvk::ShaderModuleHandle>, Stage_Count> shaderHandles_;
