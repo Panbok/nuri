@@ -1,7 +1,8 @@
 #pragma once
 
-#include "defines.h"
-#include "result.h"
+#include "nuri/core/result.h"
+#include "nuri/defines.h"
+
 
 namespace nuri {
 enum ShaderStage : uint8_t {

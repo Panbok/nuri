@@ -1,7 +1,7 @@
 #pragma once
 
-#include "defines.h"
-#include "pch.h"
+#include "nuri/defines.h"
+#include "nuri/pch.h"
 
 namespace nuri {
 
