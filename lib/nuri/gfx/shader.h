@@ -48,6 +48,10 @@ public:
                std::string>
   compile(const std::string &code, const nuri::ShaderStage stage);
 
+  nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
+               std::string>
+  compileFromFile(std::string_view path, const nuri::ShaderStage stage);
+
   [[nodiscard]] lvk::ShaderModuleHandle getHandle(ShaderStage stage) const;
 
   [[nodiscard]] inline nuri::ShaderStage

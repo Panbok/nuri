@@ -104,6 +104,32 @@ Shader::compile(const std::string &code, const nuri::ShaderStage stage) {
       std::string>::makeResult(std::ref(shaderHandles_[stageIndex]));
 }
 
+nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
+             std::string>
+Shader::compileFromFile(std::string_view path, const nuri::ShaderStage stage) {
+  using ShaderModuleResult =
+      nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
+                   std::string>;
+
+  auto codeResult = load(path);
+  if (codeResult.hasError()) {
+    const std::string pathStr{path};
+    return ShaderModuleResult::makeError("Failed to load shader file '" +
+                                         pathStr + "': " +
+                                         codeResult.error());
+  }
+
+  auto compileResult = compile(codeResult.value(), stage);
+  if (compileResult.hasError()) {
+    const std::string pathStr{path};
+    return ShaderModuleResult::makeError("Failed to compile shader file '" +
+                                         pathStr + "': " +
+                                         compileResult.error());
+  }
+
+  return compileResult;
+}
+
 lvk::ShaderModuleHandle Shader::getHandle(const ShaderStage stage) const {
   const auto stageIndex = static_cast<size_t>(stage);
   if (stageIndex >= Stage_Count || !shaderHandles_[stageIndex].valid()) {
