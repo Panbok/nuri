@@ -1,6 +1,6 @@
-#include "nuri/platform/gpu_device.h"
+#include "nuri/platform/lvk_gpu_device.h"
 
-#include "nuri/platform/window.h"
+#include "nuri/core/window.h"
 
 #include <lvk/LVK.h>
 
@@ -329,7 +329,7 @@ private:
   std::vector<uint32_t> freeList_;
 };
 
-struct GPUDevice::Impl {
+struct LvkGPUDevice::Impl {
   Window *window = nullptr;
   std::unique_ptr<lvk::IContext> context;
 
@@ -342,9 +342,9 @@ struct GPUDevice::Impl {
       computePipelines;
 };
 
-GPUDevice::GPUDevice() : impl_(std::make_unique<Impl>()) {}
+LvkGPUDevice::LvkGPUDevice() : impl_(std::make_unique<Impl>()) {}
 
-GPUDevice::~GPUDevice() {
+LvkGPUDevice::~LvkGPUDevice() {
   if (!impl_) {
     return;
   }
@@ -357,8 +357,8 @@ GPUDevice::~GPUDevice() {
   minilog::deinitialize();
 }
 
-std::unique_ptr<GPUDevice> GPUDevice::create(Window &window) {
-  auto device = std::unique_ptr<GPUDevice>(new GPUDevice());
+std::unique_ptr<LvkGPUDevice> LvkGPUDevice::create(Window &window) {
+  auto device = std::unique_ptr<LvkGPUDevice>(new LvkGPUDevice());
 
   minilog::initialize(nullptr, {.threadNames = false});
 
@@ -390,17 +390,21 @@ std::unique_ptr<GPUDevice> GPUDevice::create(Window &window) {
   return device;
 }
 
-void GPUDevice::pollEvents() {
+std::unique_ptr<GPUDevice> GPUDevice::create(Window &window) {
+  return LvkGPUDevice::create(window);
+}
+
+void LvkGPUDevice::pollEvents() {
   if (impl_->window) {
     impl_->window->pollEvents();
   }
 }
 
-bool GPUDevice::shouldClose() const {
+bool LvkGPUDevice::shouldClose() const {
   return impl_->window ? impl_->window->shouldClose() : true;
 }
 
-void GPUDevice::getFramebufferSize(int32_t &outWidth,
+void LvkGPUDevice::getFramebufferSize(int32_t &outWidth,
                                    int32_t &outHeight) const {
   if (!impl_->window) {
     outWidth = 0;
@@ -410,20 +414,20 @@ void GPUDevice::getFramebufferSize(int32_t &outWidth,
   impl_->window->getFramebufferSize(outWidth, outHeight);
 }
 
-void GPUDevice::resizeSwapchain(int32_t width, int32_t height) {
+void LvkGPUDevice::resizeSwapchain(int32_t width, int32_t height) {
   impl_->context->recreateSwapchain(width, height);
 }
 
-Format GPUDevice::getSwapchainFormat() const {
+Format LvkGPUDevice::getSwapchainFormat() const {
   return fromLvkFormat(impl_->context->getSwapchainFormat());
 }
 
-double GPUDevice::getTime() const {
+double LvkGPUDevice::getTime() const {
   return impl_->window ? impl_->window->getTime() : 0.0;
 }
 
 Result<BufferHandle, std::string>
-GPUDevice::createBuffer(const BufferDesc &desc, std::string_view debugName) {
+LvkGPUDevice::createBuffer(const BufferDesc &desc, std::string_view debugName) {
   const size_t resolvedSize = desc.size != 0 ? desc.size : desc.data.size();
   if (resolvedSize == 0) {
     return Result<BufferHandle, std::string>::makeError("Buffer size is zero");
@@ -464,7 +468,7 @@ GPUDevice::createBuffer(const BufferDesc &desc, std::string_view debugName) {
 }
 
 Result<TextureHandle, std::string>
-GPUDevice::createTexture(const TextureDesc &desc, std::string_view debugName) {
+LvkGPUDevice::createTexture(const TextureDesc &desc, std::string_view debugName) {
   if (desc.dimensions.width == 0 || desc.dimensions.height == 0) {
     return Result<TextureHandle, std::string>::makeError(
         "Texture dimensions cannot be zero");
@@ -506,7 +510,7 @@ GPUDevice::createTexture(const TextureDesc &desc, std::string_view debugName) {
 }
 
 Result<ShaderHandle, std::string>
-GPUDevice::createShaderModule(const ShaderDesc &desc) {
+LvkGPUDevice::createShaderModule(const ShaderDesc &desc) {
   if (desc.source.empty()) {
     return Result<ShaderHandle, std::string>::makeError(
         "Shader source is empty");
@@ -538,7 +542,7 @@ GPUDevice::createShaderModule(const ShaderDesc &desc) {
 }
 
 Result<RenderPipelineHandle, std::string>
-GPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
+LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
                                 std::string_view debugName) {
   if (!isValid(desc.vertexShader)) {
     return Result<RenderPipelineHandle, std::string>::makeError(
@@ -626,7 +630,7 @@ GPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
 }
 
 Result<ComputePipelineHandle, std::string>
-GPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
+LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
                                  std::string_view debugName) {
   if (!isValid(desc.computeShader)) {
     return Result<ComputePipelineHandle, std::string>::makeError(
@@ -682,31 +686,31 @@ GPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
   return Result<ComputePipelineHandle, std::string>::makeResult(nuriHandle);
 }
 
-bool GPUDevice::isValid(BufferHandle h) const {
+bool LvkGPUDevice::isValid(BufferHandle h) const {
   return impl_->buffers.isValid(h);
 }
 
-bool GPUDevice::isValid(TextureHandle h) const {
+bool LvkGPUDevice::isValid(TextureHandle h) const {
   return impl_->textures.isValid(h);
 }
 
-bool GPUDevice::isValid(ShaderHandle h) const {
+bool LvkGPUDevice::isValid(ShaderHandle h) const {
   return impl_->shaders.isValid(h);
 }
 
-bool GPUDevice::isValid(RenderPipelineHandle h) const {
+bool LvkGPUDevice::isValid(RenderPipelineHandle h) const {
   return impl_->renderPipelines.isValid(h);
 }
 
-bool GPUDevice::isValid(ComputePipelineHandle h) const {
+bool LvkGPUDevice::isValid(ComputePipelineHandle h) const {
   return impl_->computePipelines.isValid(h);
 }
 
-Format GPUDevice::getTextureFormat(TextureHandle h) const {
+Format LvkGPUDevice::getTextureFormat(TextureHandle h) const {
   return impl_->textures.getFormat(h);
 }
 
-Result<bool, std::string> GPUDevice::submitFrame(const RenderFrame &frame) {
+Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   if (frame.passes.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -830,7 +834,7 @@ Result<bool, std::string> GPUDevice::submitFrame(const RenderFrame &frame) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void GPUDevice::waitIdle() {
+void LvkGPUDevice::waitIdle() {
   if (impl_->context) {
     // Empty SubmitHandle results in vkDeviceWaitIdle
     impl_->context->wait(lvk::SubmitHandle{});
@@ -838,3 +842,4 @@ void GPUDevice::waitIdle() {
 }
 
 } // namespace nuri
+

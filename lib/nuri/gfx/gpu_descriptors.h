@@ -1,6 +1,6 @@
 #pragma once
 
-#include "nuri/platform/gpu_types.h"
+#include "nuri/gfx/gpu_types.h"
 #include "nuri/pch.h"
 
 namespace nuri {
