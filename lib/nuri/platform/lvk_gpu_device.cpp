@@ -354,13 +354,10 @@ LvkGPUDevice::~LvkGPUDevice() {
   }
 
   impl_.reset();
-  minilog::deinitialize();
 }
 
 std::unique_ptr<LvkGPUDevice> LvkGPUDevice::create(Window &window) {
   auto device = std::unique_ptr<LvkGPUDevice>(new LvkGPUDevice());
-
-  minilog::initialize(nullptr, {.threadNames = false});
 
   device->impl_->window = &window;
 
