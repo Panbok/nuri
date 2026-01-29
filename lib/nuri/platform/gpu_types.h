@@ -148,6 +148,7 @@ struct DepthState {
 
 struct SpecializationEntry {
   uint32_t constantId = 0;
+  uint32_t offset = 0;
   uint32_t size = 0;
 };
 

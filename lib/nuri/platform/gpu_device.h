@@ -1,11 +1,12 @@
 #pragma once
 
+#include "nuri/pch.h"
+
+#include "nuri/core/result.h"
+#include "nuri/defines.h"
 #include "nuri/platform/gpu_descriptors.h"
 #include "nuri/platform/gpu_render_types.h"
 #include "nuri/platform/gpu_types.h"
-#include "nuri/core/result.h"
-#include "nuri/defines.h"
-#include "nuri/pch.h"
 
 namespace nuri {
 

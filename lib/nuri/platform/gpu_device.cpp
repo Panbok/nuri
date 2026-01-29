@@ -539,7 +539,7 @@ GPUDevice::createShaderModule(const ShaderDesc &desc) {
 
 Result<RenderPipelineHandle, std::string>
 GPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
-                                 std::string_view debugName) {
+                                std::string_view debugName) {
   if (!isValid(desc.vertexShader)) {
     return Result<RenderPipelineHandle, std::string>::makeError(
         "Invalid vertex shader handle");
@@ -579,15 +579,17 @@ GPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
         desc.specInfo.entries.size(),
         static_cast<size_t>(
             lvk::SpecializationConstantDesc::LVK_SPECIALIZATION_CONSTANTS_MAX));
-    uint32_t offset = 0;
     for (size_t i = 0; i < numEntries; ++i) {
       const auto &entry = desc.specInfo.entries[i];
+      if (entry.offset + entry.size > desc.specInfo.dataSize) {
+        return Result<RenderPipelineHandle, std::string>::makeError(
+            "Specialization entry offset+size exceeds specInfo.dataSize");
+      }
       specInfo.entries[i] = {
           .constantId = entry.constantId,
-          .offset = offset,
+          .offset = entry.offset,
           .size = entry.size,
       };
-      offset += entry.size;
     }
     specInfo.data = desc.specInfo.data;
     specInfo.dataSize = desc.specInfo.dataSize;
@@ -625,7 +627,7 @@ GPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
 
 Result<ComputePipelineHandle, std::string>
 GPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
-                                  std::string_view debugName) {
+                                 std::string_view debugName) {
   if (!isValid(desc.computeShader)) {
     return Result<ComputePipelineHandle, std::string>::makeError(
         "Invalid compute shader handle");
@@ -640,15 +642,17 @@ GPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
         desc.specInfo.entries.size(),
         static_cast<size_t>(
             lvk::SpecializationConstantDesc::LVK_SPECIALIZATION_CONSTANTS_MAX));
-    uint32_t offset = 0;
     for (size_t i = 0; i < numEntries; ++i) {
       const auto &entry = desc.specInfo.entries[i];
+      if (entry.offset + entry.size > desc.specInfo.dataSize) {
+        return Result<ComputePipelineHandle, std::string>::makeError(
+            "Specialization entry offset+size exceeds specInfo.dataSize");
+      }
       specInfo.entries[i] = {
           .constantId = entry.constantId,
-          .offset = offset,
+          .offset = entry.offset,
           .size = entry.size,
       };
-      offset += entry.size;
     }
     specInfo.data = desc.specInfo.data;
     specInfo.dataSize = desc.specInfo.dataSize;
