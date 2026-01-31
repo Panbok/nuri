@@ -14,7 +14,7 @@ enum class LogLevel : uint8_t {
 };
 
 struct LogConfig {
-  std::string_view filePath = {};
+  std::string filePath;
   LogLevel logLevel = LogLevel::Debug;
   LogLevel consoleLevel = LogLevel::Info;
   bool forceFlush = true;

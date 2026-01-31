@@ -1,6 +1,5 @@
 #pragma once
 
-#include "nuri/defines.h"
 #include "nuri/pch.h"
 
 namespace nuri {

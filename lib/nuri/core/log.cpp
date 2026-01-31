@@ -4,10 +4,10 @@ namespace nuri {
 
 namespace {
 
+std::mutex g_log_mutex;
 std::unique_ptr<Log> g_log;
 LogConfig g_config;
 bool g_has_config = false;
-std::string g_file_path_storage;
 
 void writeFallback(std::string_view message) {
   if (message.empty()) {
@@ -19,35 +19,39 @@ void writeFallback(std::string_view message) {
 
 } // namespace
 
-void Log::initialize() { (void)Log::get(); }
+static Log *getOrCreateUnlocked() {
+  if (!g_log) {
+    g_log = g_has_config ? Log::create(g_config) : Log::create();
+  }
+  return g_log.get();
+}
+
+void Log::initialize() {
+  std::scoped_lock lock(g_log_mutex);
+  getOrCreateUnlocked();
+}
 
 void Log::initialize(const LogConfig &config) {
+  std::scoped_lock lock(g_log_mutex);
   if (g_log) {
     return;
   }
 
   g_config = config;
-  if (!config.filePath.empty()) {
-    g_file_path_storage = std::string(config.filePath);
-    g_config.filePath = g_file_path_storage;
-  }
-
   g_has_config = true;
-  (void)Log::get();
+  getOrCreateUnlocked();
 }
 
 void Log::shutdown() {
+  std::scoped_lock lock(g_log_mutex);
   g_log.reset();
   g_config = {};
   g_has_config = false;
-  g_file_path_storage.clear();
 }
 
 Log *Log::get() {
-  if (!g_log) {
-    g_log = g_has_config ? Log::create(g_config) : Log::create();
-  }
-  return g_log.get();
+  std::scoped_lock lock(g_log_mutex);
+  return getOrCreateUnlocked();
 }
 
 void logMessage(LogLevel level, std::string_view message) {
