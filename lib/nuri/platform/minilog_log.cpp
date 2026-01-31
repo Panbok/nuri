@@ -1,5 +1,7 @@
 #include "nuri/platform/minilog_log.h"
 
+#include <algorithm>
+#include <limits>
 #include <minilog/minilog.h>
 
 namespace nuri {
@@ -46,7 +48,7 @@ MinilogLog::MinilogLog(const LogConfig &userConfig)
 
   const char *fileName = nullptr;
   if (!userConfig.filePath.empty()) {
-    impl_->filePath = std::string(userConfig.filePath);
+    impl_->filePath = userConfig.filePath;
     fileName = impl_->filePath.c_str();
   }
 
@@ -68,7 +70,9 @@ std::unique_ptr<MinilogLog> MinilogLog::create(const LogConfig &config) {
 }
 
 void MinilogLog::write(LogLevel level, std::string_view message) {
-  const int length = static_cast<int>(message.size());
+  const size_t maxLen =
+      std::min(message.size(), static_cast<size_t>(std::numeric_limits<int>::max()));
+  const int length = static_cast<int>(maxLen);
   minilog::log(toMinilogLevel(level), "%.*s", length, message.data());
 }
 
