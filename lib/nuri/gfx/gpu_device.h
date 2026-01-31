@@ -35,6 +35,10 @@ public:
   createBuffer(const BufferDesc &desc, std::string_view debugName = {}) = 0;
   virtual Result<TextureHandle, std::string>
   createTexture(const TextureDesc &desc, std::string_view debugName = {}) = 0;
+  virtual Result<TextureHandle, std::string>
+  createFramebufferTexture(const TextureDesc &desc,
+                           std::string_view debugName = {}) = 0;
+  virtual Result<TextureHandle, std::string> createDepthBuffer() = 0;
   virtual Result<ShaderHandle, std::string>
   createShaderModule(const ShaderDesc &desc) = 0;
   virtual Result<RenderPipelineHandle, std::string>

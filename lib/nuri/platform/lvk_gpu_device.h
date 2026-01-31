@@ -19,8 +19,7 @@ public:
   // Window/Swapchain
   void pollEvents() override;
   bool shouldClose() const override;
-  void getFramebufferSize(int32_t &outWidth,
-                          int32_t &outHeight) const override;
+  void getFramebufferSize(int32_t &outWidth, int32_t &outHeight) const override;
   void resizeSwapchain(int32_t width, int32_t height) override;
   Format getSwapchainFormat() const override;
   double getTime() const override;
@@ -32,6 +31,10 @@ public:
   Result<TextureHandle, std::string>
   createTexture(const TextureDesc &desc,
                 std::string_view debugName = {}) override;
+  Result<TextureHandle, std::string>
+  createFramebufferTexture(const TextureDesc &desc,
+                           std::string_view debugName = {}) override;
+  Result<TextureHandle, std::string> createDepthBuffer() override;
   Result<ShaderHandle, std::string>
   createShaderModule(const ShaderDesc &desc) override;
   Result<RenderPipelineHandle, std::string>

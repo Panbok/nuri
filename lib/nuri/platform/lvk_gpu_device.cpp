@@ -1,5 +1,6 @@
 #include "nuri/platform/lvk_gpu_device.h"
 
+#include "nuri/core/log.h"
 #include "nuri/core/window.h"
 
 #include <lvk/LVK.h>
@@ -297,6 +298,18 @@ public:
     return NuriHandle{index, slot.generation};
   }
 
+  bool replace(NuriHandle h, lvk::Holder<LvkHandle> &&resource,
+               std::string_view debugName,
+               Format format = Format::RGBA8_UNORM) {
+    if (!isValid(h))
+      return false;
+    auto &slot = slots_[h.index];
+    slot.resource = std::move(resource);
+    slot.debugName = std::string(debugName);
+    slot.format = format;
+    return true;
+  }
+
   void deallocate(NuriHandle h) {
     if (!isValid(h))
       return;
@@ -329,6 +342,12 @@ private:
   std::vector<uint32_t> freeList_;
 };
 
+struct FramebufferTexture {
+  TextureHandle handle{};
+  TextureDesc desc{};
+  std::string debugName;
+};
+
 struct LvkGPUDevice::Impl {
   Window *window = nullptr;
   std::unique_ptr<lvk::IContext> context;
@@ -340,6 +359,7 @@ struct LvkGPUDevice::Impl {
       renderPipelines;
   ResourceTable<ComputePipelineHandle, lvk::ComputePipelineHandle>
       computePipelines;
+  std::vector<FramebufferTexture> framebufferTextures;
 };
 
 LvkGPUDevice::LvkGPUDevice() : impl_(std::make_unique<Impl>()) {}
@@ -402,7 +422,7 @@ bool LvkGPUDevice::shouldClose() const {
 }
 
 void LvkGPUDevice::getFramebufferSize(int32_t &outWidth,
-                                   int32_t &outHeight) const {
+                                      int32_t &outHeight) const {
   if (!impl_->window) {
     outWidth = 0;
     outHeight = 0;
@@ -413,6 +433,67 @@ void LvkGPUDevice::getFramebufferSize(int32_t &outWidth,
 
 void LvkGPUDevice::resizeSwapchain(int32_t width, int32_t height) {
   impl_->context->recreateSwapchain(width, height);
+  if (!width || !height) {
+    return;
+  }
+
+  const auto replaceTextureResource = [this](TextureHandle handle,
+                                             const TextureDesc &desc,
+                                             std::string_view debugName)
+      -> Result<bool, std::string> {
+    if (desc.dimensions.width == 0 || desc.dimensions.height == 0) {
+      return Result<bool, std::string>::makeError(
+          "Texture dimensions cannot be zero");
+    }
+
+    std::string debugNameStorage(debugName);
+    const char *debugNameCStr =
+        debugNameStorage.empty() ? "" : debugNameStorage.c_str();
+
+    lvk::TextureDesc textureDesc{
+        .type = toLvkTextureType(desc.type),
+        .format = toLvkFormat(desc.format),
+        .dimensions = {desc.dimensions.width, desc.dimensions.height,
+                       desc.dimensions.depth},
+        .numLayers = desc.numLayers,
+        .numSamples = desc.numSamples,
+        .usage = static_cast<uint8_t>(toLvkTextureUsage(desc.usage)),
+        .numMipLevels = desc.numMipLevels,
+        .storage = toLvkStorageType(desc.storage),
+        .debugName = debugNameCStr,
+    };
+
+    lvk::Result res;
+    lvk::Holder<lvk::TextureHandle> newHandle =
+        impl_->context->createTexture(textureDesc, debugNameCStr, &res);
+
+    if (!res.isOk()) {
+      return Result<bool, std::string>::makeError(std::string(res.message));
+    }
+    if (!newHandle.valid()) {
+      return Result<bool, std::string>::makeError("Failed to create texture");
+    }
+    if (!impl_->textures.replace(handle, std::move(newHandle),
+                                 debugNameStorage, desc.format)) {
+      return Result<bool, std::string>::makeError("Invalid texture handle");
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+
+  const auto framebufferWidth = static_cast<uint32_t>(width);
+  const auto framebufferHeight = static_cast<uint32_t>(height);
+  for (const auto &entry : impl_->framebufferTextures) {
+    TextureDesc resizedDesc = entry.desc;
+    resizedDesc.dimensions.width = framebufferWidth;
+    resizedDesc.dimensions.height = framebufferHeight;
+    auto result =
+        replaceTextureResource(entry.handle, resizedDesc, entry.debugName);
+    if (result.hasError()) {
+      logMessagef(LogLevel::Warning,
+                  "Failed to resize framebuffer texture '%s': %s",
+                  entry.debugName.c_str(), result.error().c_str());
+    }
+  }
 }
 
 Format LvkGPUDevice::getSwapchainFormat() const {
@@ -465,7 +546,8 @@ LvkGPUDevice::createBuffer(const BufferDesc &desc, std::string_view debugName) {
 }
 
 Result<TextureHandle, std::string>
-LvkGPUDevice::createTexture(const TextureDesc &desc, std::string_view debugName) {
+LvkGPUDevice::createTexture(const TextureDesc &desc,
+                            std::string_view debugName) {
   if (desc.dimensions.width == 0 || desc.dimensions.height == 0) {
     return Result<TextureHandle, std::string>::makeError(
         "Texture dimensions cannot be zero");
@@ -506,6 +588,46 @@ LvkGPUDevice::createTexture(const TextureDesc &desc, std::string_view debugName)
   return Result<TextureHandle, std::string>::makeResult(nuriHandle);
 }
 
+Result<TextureHandle, std::string>
+LvkGPUDevice::createFramebufferTexture(const TextureDesc &desc,
+                                       std::string_view debugName) {
+  int32_t width = 0;
+  int32_t height = 0;
+  impl_->window->getFramebufferSize(width, height);
+  if (!width || !height) {
+    return Result<TextureHandle, std::string>::makeError(
+        "Failed to get framebuffer size");
+  }
+
+  TextureDesc resizedDesc = desc;
+  resizedDesc.dimensions.width = static_cast<uint32_t>(width);
+  resizedDesc.dimensions.height = static_cast<uint32_t>(height);
+
+  auto result = createTexture(resizedDesc, debugName);
+  if (result.hasError()) {
+    return result;
+  }
+
+  FramebufferTexture entry{
+      .handle = result.value(),
+      .desc = desc,
+      .debugName = std::string(debugName),
+  };
+  impl_->framebufferTextures.push_back(std::move(entry));
+
+  return result;
+}
+
+Result<TextureHandle, std::string> LvkGPUDevice::createDepthBuffer() {
+  TextureDesc desc{
+      .type = TextureType::Texture2D,
+      .format = Format::D32_FLOAT,
+      .dimensions = {1, 1, 1},
+      .usage = TextureUsage::Attachment,
+  };
+  return createFramebufferTexture(desc, "Depth buffer");
+}
+
 Result<ShaderHandle, std::string>
 LvkGPUDevice::createShaderModule(const ShaderDesc &desc) {
   if (desc.source.empty()) {
@@ -540,7 +662,7 @@ LvkGPUDevice::createShaderModule(const ShaderDesc &desc) {
 
 Result<RenderPipelineHandle, std::string>
 LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
-                                std::string_view debugName) {
+                                   std::string_view debugName) {
   if (!isValid(desc.vertexShader)) {
     return Result<RenderPipelineHandle, std::string>::makeError(
         "Invalid vertex shader handle");
@@ -628,7 +750,7 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
 
 Result<ComputePipelineHandle, std::string>
 LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
-                                 std::string_view debugName) {
+                                    std::string_view debugName) {
   if (!isValid(desc.computeShader)) {
     return Result<ComputePipelineHandle, std::string>::makeError(
         "Invalid compute shader handle");
@@ -839,4 +961,3 @@ void LvkGPUDevice::waitIdle() {
 }
 
 } // namespace nuri
-
