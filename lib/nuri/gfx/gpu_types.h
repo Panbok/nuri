@@ -1,6 +1,7 @@
 #pragma once
 
-#include "nuri/pch.h"
+#include <cstdint>
+#include <span>
 
 namespace nuri {
 

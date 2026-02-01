@@ -1,9 +1,12 @@
 #pragma once
 
-#include "nuri/gfx/gpu_render_types.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
-#include "nuri/pch.h"
+#include "nuri/gfx/gpu_render_types.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
 
 namespace nuri {
 
@@ -32,5 +35,3 @@ private:
 };
 
 } // namespace nuri
-
-

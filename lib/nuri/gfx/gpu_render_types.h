@@ -1,7 +1,9 @@
 #pragma once
 
 #include "nuri/gfx/gpu_types.h"
-#include "nuri/pch.h"
+
+#include <span>
+#include <string_view>
 
 namespace nuri {
 
