@@ -1,7 +1,6 @@
 #pragma once
 
 #include "nuri/gfx/gpu_types.h"
-#include "nuri/pch.h"
 
 namespace nuri {
 
@@ -21,6 +20,8 @@ struct TextureDesc {
   uint32_t numLayers = 1;
   uint32_t numSamples = 1;
   uint32_t numMipLevels = 1;
+  std::span<const std::byte> data{};
+  uint32_t dataNumMipLevels = 1;
   bool generateMipmaps = false;
 };
 
@@ -35,9 +36,10 @@ struct RenderPipelineDesc {
   ShaderHandle vertexShader{};
   ShaderHandle fragmentShader{};
   std::array<Format, 1> colorFormats{Format::RGBA8_UNORM};
-  Format depthFormat = Format::D32_FLOAT;
+  Format depthFormat = Format::Count;
   CullMode cullMode = CullMode::Back;
   PolygonMode polygonMode = PolygonMode::Fill;
+  Topology topology = Topology::Triangle;
   SpecializationInfo specInfo{};
 };
 

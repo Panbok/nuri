@@ -51,6 +51,7 @@ public:
   bool isValid(RenderPipelineHandle h) const override;
   bool isValid(ComputePipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
+  uint32_t getTextureBindlessIndex(TextureHandle h) const override;
 
   // Rendering
   Result<bool, std::string> submitFrame(const RenderFrame &frame) override;

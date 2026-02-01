@@ -77,6 +77,16 @@ enum class CullMode : uint8_t { None, Front, Back, Count };
 
 enum class PolygonMode : uint8_t { Fill, Line, Count };
 
+enum class Topology : uint8_t {
+  Point,
+  Line,
+  LineStrip,
+  Triangle,
+  TriangleStrip,
+  Patch,
+  Count
+};
+
 enum class LoadOp : uint8_t { DontCare, Load, Clear };
 
 enum class StoreOp : uint8_t { DontCare, Store };

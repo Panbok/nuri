@@ -165,6 +165,26 @@ lvk::PolygonMode toLvkPolygonMode(PolygonMode mode) {
   return lvk::PolygonMode_Fill;
 }
 
+lvk::Topology toLvkTopology(Topology topology) {
+  switch (topology) {
+  case Topology::Point:
+    return lvk::Topology_Point;
+  case Topology::Line:
+    return lvk::Topology_Line;
+  case Topology::LineStrip:
+    return lvk::Topology_LineStrip;
+  case Topology::Triangle:
+    return lvk::Topology_Triangle;
+  case Topology::TriangleStrip:
+    return lvk::Topology_TriangleStrip;
+  case Topology::Patch:
+    return lvk::Topology_Patch;
+  case Topology::Count:
+    break;
+  }
+  return lvk::Topology_Triangle;
+}
+
 lvk::LoadOp toLvkLoadOp(LoadOp op) {
   switch (op) {
   case LoadOp::Load:
@@ -433,14 +453,14 @@ void LvkGPUDevice::getFramebufferSize(int32_t &outWidth,
 
 void LvkGPUDevice::resizeSwapchain(int32_t width, int32_t height) {
   impl_->context->recreateSwapchain(width, height);
+  impl_->context->wait(lvk::SubmitHandle{});
   if (!width || !height) {
     return;
   }
 
-  const auto replaceTextureResource = [this](TextureHandle handle,
-                                             const TextureDesc &desc,
-                                             std::string_view debugName)
-      -> Result<bool, std::string> {
+  const auto replaceTextureResource =
+      [this](TextureHandle handle, const TextureDesc &desc,
+             std::string_view debugName) -> Result<bool, std::string> {
     if (desc.dimensions.width == 0 || desc.dimensions.height == 0) {
       return Result<bool, std::string>::makeError(
           "Texture dimensions cannot be zero");
@@ -473,8 +493,8 @@ void LvkGPUDevice::resizeSwapchain(int32_t width, int32_t height) {
     if (!newHandle.valid()) {
       return Result<bool, std::string>::makeError("Failed to create texture");
     }
-    if (!impl_->textures.replace(handle, std::move(newHandle),
-                                 debugNameStorage, desc.format)) {
+    if (!impl_->textures.replace(handle, std::move(newHandle), debugNameStorage,
+                                 desc.format)) {
       return Result<bool, std::string>::makeError("Invalid texture handle");
     }
     return Result<bool, std::string>::makeResult(true);
@@ -567,6 +587,10 @@ LvkGPUDevice::createTexture(const TextureDesc &desc,
       .usage = static_cast<uint8_t>(toLvkTextureUsage(desc.usage)),
       .numMipLevels = desc.numMipLevels,
       .storage = toLvkStorageType(desc.storage),
+      .data = desc.data.empty() ? nullptr
+                                : static_cast<const void *>(desc.data.data()),
+      .dataNumMipLevels = desc.dataNumMipLevels,
+      .generateMipmaps = desc.generateMipmaps && !desc.data.empty(),
       .debugName = debugNameCStr,
   };
 
@@ -591,6 +615,11 @@ LvkGPUDevice::createTexture(const TextureDesc &desc,
 Result<TextureHandle, std::string>
 LvkGPUDevice::createFramebufferTexture(const TextureDesc &desc,
                                        std::string_view debugName) {
+  if (!impl_->window) {
+    return Result<TextureHandle, std::string>::makeError(
+        "No window available to get framebuffer size");
+  }
+
   int32_t width = 0;
   int32_t height = 0;
   impl_->window->getFramebufferSize(width, height);
@@ -719,6 +748,7 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
   }
 
   lvk::RenderPipelineDesc pipelineDesc{
+      .topology = toLvkTopology(desc.topology),
       .vertexInput = vertexInput,
       .smVert = impl_->shaders.getLvkHandle(desc.vertexShader),
       .smFrag = impl_->shaders.getLvkHandle(desc.fragmentShader),
@@ -829,6 +859,13 @@ Format LvkGPUDevice::getTextureFormat(TextureHandle h) const {
   return impl_->textures.getFormat(h);
 }
 
+uint32_t LvkGPUDevice::getTextureBindlessIndex(TextureHandle h) const {
+  if (!impl_->textures.isValid(h)) {
+    return 0;
+  }
+  return impl_->textures.getLvkHandle(h).index();
+}
+
 Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   if (frame.passes.empty()) {
     return Result<bool, std::string>::makeResult(true);
@@ -838,8 +875,8 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
 
   for (const RenderPass &pass : frame.passes) {
     if (!pass.debugLabel.empty()) {
-      commandBuffer.cmdPushDebugGroupLabel(pass.debugLabel.data(),
-                                           pass.debugColor);
+      const std::string label(pass.debugLabel);
+      commandBuffer.cmdPushDebugGroupLabel(label.c_str(), pass.debugColor);
     }
 
     lvk::RenderPass renderPass{};
@@ -880,8 +917,8 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       }
 
       if (!draw.debugLabel.empty()) {
-        commandBuffer.cmdPushDebugGroupLabel(draw.debugLabel.data(),
-                                             draw.debugColor);
+        const std::string label(draw.debugLabel);
+        commandBuffer.cmdPushDebugGroupLabel(label.c_str(), draw.debugColor);
       }
 
       commandBuffer.cmdBindRenderPipeline(

@@ -5,7 +5,6 @@
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
-#include "nuri/pch.h"
 
 namespace nuri {
 
@@ -55,6 +54,8 @@ public:
   virtual bool isValid(RenderPipelineHandle h) const = 0;
   virtual bool isValid(ComputePipelineHandle h) const = 0;
   virtual Format getTextureFormat(TextureHandle h) const = 0;
+  // Bindless index used by LVK shaders (kTextures2D[]).
+  virtual uint32_t getTextureBindlessIndex(TextureHandle h) const = 0;
 
   // Rendering
   virtual Result<bool, std::string> submitFrame(const RenderFrame &frame) = 0;
