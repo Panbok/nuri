@@ -1,7 +1,11 @@
-#include "shader.h"
+#include "nuri/gfx/shader.h"
+#include "nuri/gfx/gpu_device.h"
+
+#include "nuri/pch.h"
 
 namespace nuri {
 
+namespace {
 [[nodiscard]] std::string
 readFileToString(const std::filesystem::path &filePath, std::string &errorMsg) {
   errorMsg.clear();
@@ -49,90 +53,82 @@ readFileToString(const std::filesystem::path &filePath, std::string &errorMsg) {
 
   return content;
 }
+} // namespace
 
-Shader::Shader(std::string_view moduleName, lvk::IContext &ctx)
-    : moduleName_(moduleName), ctx_(ctx), shaderHandles_{} {}
+Shader::Shader(std::string_view moduleName, GPUDevice &gpu)
+    : moduleName_(moduleName), gpu_(gpu), shaderHandles_{} {}
 
 Shader::~Shader() = default;
 
-nuri::Result<std::string, std::string>
-Shader::load(std::string_view path) {
+Result<std::string, std::string> Shader::load(std::string_view path) {
   std::string errorMsg;
   std::string content = readFileToString(std::filesystem::path(path), errorMsg);
 
   if (!errorMsg.empty()) {
-    return nuri::Result<std::string, std::string>::makeError(std::move(errorMsg));
+    return Result<std::string, std::string>::makeError(std::move(errorMsg));
   }
 
-  return nuri::Result<std::string, std::string>::makeResult(content);
+  return Result<std::string, std::string>::makeResult(content);
 }
 
-nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-             std::string>
-Shader::compile(const std::string &code, const nuri::ShaderStage stage) {
+Result<ShaderHandle, std::string> Shader::compile(const std::string &code,
+                                                  ShaderStage stage) {
   if (code.empty()) {
-    return nuri::Result<
-        std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-        std::string>::makeError("Shader code is empty for stage " +
-                                std::to_string(static_cast<int>(stage)));
+    return Result<ShaderHandle, std::string>::makeError(
+        "Shader code is empty for stage " +
+        std::to_string(static_cast<int>(stage)));
   }
 
   const auto stageIndex = static_cast<size_t>(stage);
-  if (stageIndex >= Stage_Count) {
-    return nuri::Result<
-        std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-        std::string>::makeError("Invalid shader stage: " +
-                                std::to_string(stageIndex));
+  if (stageIndex >= static_cast<size_t>(ShaderStage::Count)) {
+    return Result<ShaderHandle, std::string>::makeError(
+        "Invalid shader stage: " + std::to_string(stageIndex));
   }
 
-  lvk::Result res;
-  shaderHandles_[stageIndex] = ctx_.createShaderModule(
-      {code.c_str(), getLvkShaderStage(stage), moduleName_.c_str()}, &res);
+  ShaderDesc desc{
+      .moduleName = moduleName_,
+      .source = code,
+      .stage = stage,
+  };
 
-  if (!res.isOk()) {
-    return nuri::Result<
-        std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-        std::string>::makeError(std::string(res.message));
+  auto result = gpu_.createShaderModule(desc);
+  if (result.hasError()) {
+    return Result<ShaderHandle, std::string>::makeError(result.error());
   }
 
-  if (shaderHandles_[stageIndex].valid()) {
+  shaderHandles_[stageIndex] = result.value();
+
+  if (nuri::isValid(shaderHandles_[stageIndex])) {
     debug_glsl_source_code_[stage] = code;
   }
 
-  return nuri::Result<
-      std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-      std::string>::makeResult(std::ref(shaderHandles_[stageIndex]));
+  return Result<ShaderHandle, std::string>::makeResult(
+      shaderHandles_[stageIndex]);
 }
 
-nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-             std::string>
-Shader::compileFromFile(std::string_view path, const nuri::ShaderStage stage) {
-  using ShaderModuleResult =
-      nuri::Result<std::reference_wrapper<lvk::Holder<lvk::ShaderModuleHandle>>,
-                   std::string>;
-
+Result<ShaderHandle, std::string> Shader::compileFromFile(std::string_view path,
+                                                          ShaderStage stage) {
   auto codeResult = load(path);
   if (codeResult.hasError()) {
     const std::string pathStr{path};
-    return ShaderModuleResult::makeError("Failed to load shader file '" +
-                                         pathStr + "': " +
-                                         codeResult.error());
+    return Result<ShaderHandle, std::string>::makeError(
+        "Failed to load shader file '" + pathStr + "': " + codeResult.error());
   }
 
   auto compileResult = compile(codeResult.value(), stage);
   if (compileResult.hasError()) {
     const std::string pathStr{path};
-    return ShaderModuleResult::makeError("Failed to compile shader file '" +
-                                         pathStr + "': " +
-                                         compileResult.error());
+    return Result<ShaderHandle, std::string>::makeError(
+        "Failed to compile shader file '" + pathStr +
+        "': " + compileResult.error());
   }
 
   return compileResult;
 }
 
-lvk::ShaderModuleHandle Shader::getHandle(const ShaderStage stage) const {
+ShaderHandle Shader::getHandle(ShaderStage stage) const {
   const auto stageIndex = static_cast<size_t>(stage);
-  if (stageIndex >= Stage_Count || !shaderHandles_[stageIndex].valid()) {
+  if (stageIndex >= static_cast<size_t>(ShaderStage::Count)) {
     return {};
   }
 
