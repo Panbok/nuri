@@ -4,6 +4,8 @@
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
+#include <filesystem>
+
 namespace nuri {
 namespace {
 unsigned int buildAssimpFlags(const MeshImportOptions &options) {
@@ -110,7 +112,13 @@ MeshImporter::loadFromFile(std::string_view path,
 
       if (mesh->HasTangentsAndBitangents()) {
         const aiVector3D &tangent = mesh->mTangents[v];
-        vertex.tangent = {tangent.x, tangent.y, tangent.z, 1.0f};
+        const aiVector3D &bitangent = mesh->mBitangents[v];
+        const auto n = vertex.normal;
+        const auto t = glm::vec3(tangent.x, tangent.y, tangent.z);
+        const auto b = glm::vec3(bitangent.x, bitangent.y, bitangent.z);
+        const float sign =
+            (glm::dot(glm::cross(n, t), b) < 0.0f) ? -1.0f : 1.0f;
+        vertex.tangent = {tangent.x, tangent.y, tangent.z, sign};
       }
 
       data.vertices.push_back(vertex);

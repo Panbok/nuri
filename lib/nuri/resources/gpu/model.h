@@ -1,13 +1,20 @@
 #pragma once
 
+#include <cstdint>
+#include <memory>
+#include <memory_resource>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "nuri/core/result.h"
+#include "nuri/gfx/gpu_device.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/mesh_importer.h"
 
 namespace nuri {
-
-class GPUDevice;
 
 class NURI_API Model final {
 public:

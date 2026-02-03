@@ -46,11 +46,7 @@ Model::create(GPUDevice &gpu, const MeshData &data,
         indexBufferResult.error());
   }
 
-  std::vector<Submesh> submeshes;
-  submeshes.reserve(data.submeshes.size());
-  submeshes.insert(submeshes.end(), data.submeshes.begin(),
-                   data.submeshes.end());
-
+  std::vector<Submesh> submeshes(data.submeshes.begin(), data.submeshes.end());
   return Result<std::unique_ptr<Model>, std::string>::makeResult(
       std::unique_ptr<Model>(
           new Model(std::move(vertexBufferResult.value()),
@@ -59,11 +55,9 @@ Model::create(GPUDevice &gpu, const MeshData &data,
                     static_cast<uint32_t>(data.indices.size()))));
 }
 
-Result<std::unique_ptr<Model>, std::string>
-Model::createFromFile(GPUDevice &gpu, std::string_view path,
-                      const MeshImportOptions &options,
-                      std::pmr::memory_resource *mem,
-                      std::string_view debugName) {
+Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
+    GPUDevice &gpu, std::string_view path, const MeshImportOptions &options,
+    std::pmr::memory_resource *mem, std::string_view debugName) {
   auto meshDataResult = MeshImporter::loadFromFile(path, options, mem);
   if (meshDataResult.hasError()) {
     return Result<std::unique_ptr<Model>, std::string>::makeError(
@@ -74,6 +68,3 @@ Model::createFromFile(GPUDevice &gpu, std::string_view path,
 }
 
 } // namespace nuri
-
-
-

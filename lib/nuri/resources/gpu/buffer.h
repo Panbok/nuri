@@ -29,10 +29,10 @@ public:
             desc.usage, desc.storage, std::string(debugName))));
   }
 
-  [[nodiscard]] BufferHandle handle() const { return handle_; }
-  [[nodiscard]] size_t size() const { return size_; }
-  [[nodiscard]] BufferUsage usage() const { return usage_; }
-  [[nodiscard]] Storage storage() const { return storage_; }
+  [[nodiscard]] BufferHandle handle() const noexcept { return handle_; }
+  [[nodiscard]] size_t size() const noexcept { return size_; }
+  [[nodiscard]] BufferUsage usage() const noexcept { return usage_; }
+  [[nodiscard]] Storage storage() const noexcept { return storage_; }
   [[nodiscard]] std::string_view debugName() const noexcept {
     return debugName_;
   }

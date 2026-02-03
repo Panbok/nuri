@@ -1,5 +1,9 @@
 #pragma once
 
+#include <memory_resource>
+#include <string>
+#include <string_view>
+
 #include "nuri/core/result.h"
 #include "nuri/resources/cpu/mesh_data.h"
 
