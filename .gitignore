@@ -4,3 +4,5 @@
 .delete_test
 .cursor/
 .vscode/
+/assets/models/
+/logs/*.log
