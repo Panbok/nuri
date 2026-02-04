@@ -34,10 +34,9 @@ Application::~Application() {
 
 void Application::run() {
   onInit();
+  double lastTime = getTime();
 
   while (!gpu_->shouldClose()) {
-    onUpdate(0.0f);
-    gpu_->pollEvents();
     std::int32_t newWidth = 0;
     std::int32_t newHeight = 0;
     gpu_->getFramebufferSize(newWidth, newHeight);
@@ -53,6 +52,12 @@ void Application::run() {
       onResize(width_, height_);
       renderer_->onResize(width_, height_);
     }
+
+    double currentTime = getTime();
+    double deltaTime = currentTime - lastTime;
+    lastTime = currentTime;
+    onUpdate(deltaTime);
+    gpu_->pollEvents();
 
     onDraw();
   }

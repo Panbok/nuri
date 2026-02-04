@@ -24,7 +24,7 @@ public:
   double getTime() const;
 
   virtual void onInit() = 0;
-  virtual void onUpdate(float deltaTime) = 0;
+  virtual void onUpdate(double deltaTime) = 0;
   virtual void onDraw() = 0;
   virtual void onResize(std::int32_t width, std::int32_t height) = 0;
   virtual void onShutdown() = 0;
@@ -53,4 +53,3 @@ private:
 };
 
 } // namespace nuri
-
