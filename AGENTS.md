@@ -2,7 +2,7 @@
 
 ## Project intent
 - This codebase builds a renderer on top of LVK (LightweightVK). Keep LVK usage behind clean abstractions where it makes sense so higher-level code is not tightly coupled to the backend.
-- Performance is the top priority, followed by correctness. Optimize for throughput and frame time while keeping behavior correct.
+- Correctness is the top priority, with performance as a critical constraint to be optimized after correctness is ensured. Optimize throughput and frame time only once behavior is correct.
 
 ## C++ and memory
 - Use C++20 and the STL for core functionality.
@@ -19,7 +19,7 @@
 - Shaders are written in GLSL.
 
 ## Build and scripts
-- DO NOT EXECUTE `cmake` COMMAND ON YOUR OWN NEVER EVER DO IT
+- Do not run `cmake` manually: it can overwrite generated files, bypass project configuration, and produce inconsistent builds; use the build scripts in `scripts/` instead.
 - CMake is the build system.
 - Build/run scripts live in `scripts/`.
 
