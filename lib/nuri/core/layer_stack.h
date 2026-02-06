@@ -4,6 +4,8 @@
 #include "nuri/defines.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <string>
 #include <memory>
 #include <memory_resource>
 #include <vector>
