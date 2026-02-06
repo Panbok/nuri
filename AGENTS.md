@@ -23,6 +23,15 @@
 - CMake is the build system.
 - Build/run scripts live in `scripts/`.
 
+## Profiling (Tracy)
+- Prefer measuring before optimizing. Use the built-in Tracy hooks when investigating performance.
+- Enable profiling via CMake: `-DNURI_WITH_TRACY=ON` (Debug builds do this by default).
+- Instrument code using `lib/nuri/core/profiling.h` macros:
+  - `NURI_PROFILER_FUNCTION()` / `NURI_PROFILER_FUNCTION_COLOR(color)`
+  - `NURI_PROFILER_ZONE(name, color)` / `NURI_PROFILER_ZONE_END()`
+  - `NURI_PROFILER_FRAME(name)` and `NURI_PROFILER_THREAD(name)`
+- Focus zones on likely bottlenecks (frame loop, render submission, shader compilation, asset loading). Keep zones coarse and meaningful; avoid spamming per-draw zones unless you’re drilling down.
+
 ## Repo layout (high level)
 - `app/` contains the application entry point and sample usage.
 - `lib/nuri/` contains engine and renderer code (pipeline, shader, result).
