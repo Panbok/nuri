@@ -55,13 +55,40 @@ target_compile_features(nuri_lib PUBLIC cxx_std_20)
 
 find_package(glm CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
+find_package(imgui CONFIG REQUIRED)
+
+if(NURI_WITH_TRACY)
+  # Tracy is provided by vcpkg (manifest mode). Target name varies between ports;
+  # accept a few common ones.
+  find_package(Tracy CONFIG QUIET)
+  find_package(tracy CONFIG QUIET)
+
+  set(NURI_TRACY_CLIENT_TARGET "")
+  if(TARGET Tracy::TracyClient)
+    set(NURI_TRACY_CLIENT_TARGET Tracy::TracyClient)
+  elseif(TARGET tracy::tracyclient)
+    set(NURI_TRACY_CLIENT_TARGET tracy::tracyclient)
+  elseif(TARGET unofficial::tracy::tracyclient)
+    set(NURI_TRACY_CLIENT_TARGET unofficial::tracy::tracyclient)
+  elseif(TARGET TracyClient)
+    set(NURI_TRACY_CLIENT_TARGET TracyClient)
+  endif()
+
+  if(NOT NURI_TRACY_CLIENT_TARGET)
+    message(FATAL_ERROR "NURI_WITH_TRACY=ON but no TracyClient target was found. Tried: Tracy::TracyClient, tracy::tracyclient, unofficial::tracy::tracyclient, TracyClient.")
+  endif()
+
+  target_compile_definitions(nuri_lib PUBLIC NURI_PROFILING=1 TRACY_ENABLE=1)
+  target_link_libraries(nuri_lib PUBLIC ${NURI_TRACY_CLIENT_TARGET})
+endif()
 
 set(LVK_DEPLOY_DEPS OFF CACHE BOOL "" FORCE)
-# LVK's ImGui helpers reference lvk::LVKwindow, which is provided when GLFW support is enabled.
 set(LVK_WITH_GLFW ON CACHE BOOL "" FORCE)
+set(LVK_USE_VCPKG_GLFW ON CACHE BOOL "" FORCE)
+set(LVK_WITH_IMGUI OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_SAMPLES OFF CACHE BOOL "" FORCE)
-set(LVK_WITH_TRACY OFF CACHE BOOL "" FORCE)
-set(LVK_WITH_TRACY_GPU OFF CACHE BOOL "" FORCE)
+set(LVK_WITH_TRACY ${NURI_WITH_TRACY} CACHE BOOL "" FORCE)
+set(LVK_WITH_TRACY_GPU ${NURI_WITH_TRACY} CACHE BOOL "" FORCE)
 set(LVK_WITH_IMPLOT OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_OPENXR OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_SLANG OFF CACHE BOOL "" FORCE)
@@ -80,6 +107,11 @@ target_link_libraries(nuri_lib
 
 target_link_libraries(nuri_lib PUBLIC assimp::assimp)
 target_link_libraries(nuri_lib PUBLIC LVKLibrary)
+if(TARGET imgui::imgui)
+  target_link_libraries(nuri_lib PUBLIC imgui::imgui)
+elseif(TARGET imgui)
+  target_link_libraries(nuri_lib PUBLIC imgui)
+endif()
 
 if(NURI_BUILD_SHARED)
   target_compile_definitions(nuri_lib PUBLIC NURI_SHARED)
