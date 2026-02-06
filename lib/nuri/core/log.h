@@ -3,6 +3,10 @@
 #include "nuri/defines.h"
 #include "nuri/pch.h"
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
 namespace nuri {
 
 enum class LogLevel : uint8_t {
@@ -49,12 +53,52 @@ protected:
 NURI_API void logMessage(LogLevel level, std::string_view message);
 NURI_API void logMessagef(LogLevel level, const char *fmt, ...);
 
+struct LogEntry {
+  LogLevel level = LogLevel::Info;
+  std::string message;
+  std::uint64_t sequence = 0;
+};
+
+struct LogReadResult {
+  std::uint64_t firstSequence = 0;
+  std::uint64_t lastSequence = 0;
+  bool truncated = false;
+};
+
+NURI_API LogReadResult readLogEntriesSince(std::uint64_t afterSequence,
+                                           std::vector<LogEntry> &out);
+
+#define NURI_LOG_TRACE(fmt, ...)                                               \
+  do {                                                                         \
+    nuri::logMessagef(nuri::LogLevel::Trace, fmt __VA_OPT__(,) __VA_ARGS__);   \
+  } while (false)
+
+#define NURI_LOG_DEBUG(fmt, ...)                                               \
+  do {                                                                         \
+    nuri::logMessagef(nuri::LogLevel::Debug, fmt __VA_OPT__(,) __VA_ARGS__);   \
+  } while (false)
+
+#define NURI_LOG_INFO(fmt, ...)                                                \
+  do {                                                                         \
+    nuri::logMessagef(nuri::LogLevel::Info, fmt __VA_OPT__(,) __VA_ARGS__);    \
+  } while (false)
+
+#define NURI_LOG_WARNING(fmt, ...)                                             \
+  do {                                                                         \
+    nuri::logMessagef(nuri::LogLevel::Warning,                                 \
+                      fmt __VA_OPT__(,) __VA_ARGS__);                          \
+  } while (false)
+
+#define NURI_LOG_FATAL(fmt, ...)                                               \
+  do {                                                                         \
+    nuri::logMessagef(nuri::LogLevel::Fatal, fmt __VA_OPT__(,) __VA_ARGS__);   \
+  } while (false)
+
 #define NURI_ASSERT(condition, fmt, ...)                                       \
   do {                                                                         \
     if (!(condition)) {                                                        \
-      nuri::logMessagef(nuri::LogLevel::Fatal,                                 \
-                        "Assertion failed: " #condition " " fmt,               \
-                        ##__VA_ARGS__);                                        \
+      NURI_LOG_FATAL("Assertion failed: " #condition " " fmt                   \
+                         __VA_OPT__(,) __VA_ARGS__);                           \
       std::terminate();                                                        \
     }                                                                          \
   } while (false)

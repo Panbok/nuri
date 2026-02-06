@@ -1,13 +1,20 @@
 #include "nuri/core/log.h"
 
+#include <deque>
+#include <vector>
+
 namespace nuri {
 
 namespace {
 
 std::mutex g_log_mutex;
+std::mutex g_log_buffer_mutex;
 std::unique_ptr<Log> g_log;
 LogConfig g_config;
 bool g_has_config = false;
+std::deque<LogEntry> g_log_entries;
+std::uint64_t g_next_sequence = 1;
+constexpr size_t k_max_log_entries = 2000;
 
 void writeFallback(std::string_view message) {
   if (message.empty()) {
@@ -15,6 +22,21 @@ void writeFallback(std::string_view message) {
   }
   std::fwrite(message.data(), sizeof(char), message.size(), stderr);
   std::fputc('\n', stderr);
+}
+
+void appendLogEntry(LogLevel level, std::string_view message) {
+  if (message.empty()) {
+    return;
+  }
+  std::scoped_lock lock(g_log_buffer_mutex);
+  LogEntry entry{};
+  entry.level = level;
+  entry.message.assign(message.data(), message.size());
+  entry.sequence = g_next_sequence++;
+  g_log_entries.push_back(std::move(entry));
+  if (g_log_entries.size() > k_max_log_entries) {
+    g_log_entries.pop_front();
+  }
 }
 
 } // namespace
@@ -55,6 +77,7 @@ Log *Log::get() {
 }
 
 void logMessage(LogLevel level, std::string_view message) {
+  appendLogEntry(level, message);
   Log *log = Log::get();
   if (!log) {
     writeFallback(message);
@@ -88,6 +111,32 @@ void logMessagef(LogLevel level, const char *fmt, ...) {
   va_end(args);
 
   logMessage(level, buffer);
+}
+
+LogReadResult readLogEntriesSince(std::uint64_t afterSequence,
+                                  std::vector<LogEntry> &out) {
+  out.clear();
+
+  std::scoped_lock lock(g_log_buffer_mutex);
+  LogReadResult result{};
+  if (g_log_entries.empty()) {
+    return result;
+  }
+
+  result.firstSequence = g_log_entries.front().sequence;
+  result.lastSequence = g_log_entries.back().sequence;
+
+  if (afterSequence != 0 && afterSequence < result.firstSequence) {
+    result.truncated = true;
+  }
+
+  for (const auto &entry : g_log_entries) {
+    if (entry.sequence > afterSequence) {
+      out.push_back(entry);
+    }
+  }
+
+  return result;
 }
 
 } // namespace nuri
