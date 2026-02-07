@@ -1,8 +1,11 @@
 #include "nuri/platform/lvk_gpu_device.h"
 
 #include "nuri/core/log.h"
+#include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
 
+#include <cstring>
+#include <deque>
 #include <lvk/LVK.h>
 
 namespace nuri {
@@ -297,6 +300,40 @@ template <typename NuriHandle, typename LvkHandle> class ResourceTable {
 public:
   ResourceTable() = default;
 
+  struct ReservedSlot {
+    NuriHandle handle{};
+    const char *debugNameCStr = "";
+  };
+
+  ReservedSlot reserve(std::string debugName,
+                       Format format = Format::RGBA8_UNORM) {
+    uint32_t index;
+    if (!freeList_.empty()) {
+      index = freeList_.back();
+      freeList_.pop_back();
+    } else {
+      index = static_cast<uint32_t>(slots_.size());
+      slots_.emplace_back();
+    }
+
+    auto &slot = slots_[index];
+    slot.resource.reset();
+    slot.generation++;
+    slot.live = true;
+    slot.debugName = std::move(debugName);
+    slot.format = format;
+
+    const char *cstr = slot.debugName.empty() ? "" : slot.debugName.c_str();
+    return ReservedSlot{NuriHandle{index, slot.generation}, cstr};
+  }
+
+  bool setResource(NuriHandle h, lvk::Holder<LvkHandle> &&resource) {
+    if (!isValid(h))
+      return false;
+    slots_[h.index].resource = std::move(resource);
+    return true;
+  }
+
   NuriHandle allocate(lvk::Holder<LvkHandle> &&resource, std::string debugName,
                       Format format = Format::RGBA8_UNORM) {
     uint32_t index;
@@ -358,7 +395,8 @@ public:
   }
 
 private:
-  std::vector<ResourceSlot<LvkHandle>> slots_;
+  // Stable element addresses (LVK stores debugName pointers for pipelines).
+  std::deque<ResourceSlot<LvkHandle>> slots_;
   std::vector<uint32_t> freeList_;
 };
 
@@ -421,6 +459,9 @@ std::unique_ptr<LvkGPUDevice> LvkGPUDevice::create(Window &window) {
       static_cast<uint32_t>(width), static_cast<uint32_t>(height), config);
 
   if (!device->impl_->context) {
+    NURI_LOG_WARNING("LvkGPUDevice::create: Failed to create Vulkan context "
+                     "with swapchain (%d x %d)",
+                     width, height);
     return nullptr;
   }
 
@@ -428,10 +469,12 @@ std::unique_ptr<LvkGPUDevice> LvkGPUDevice::create(Window &window) {
 }
 
 std::unique_ptr<GPUDevice> GPUDevice::create(Window &window) {
+  NURI_LOG_INFO("GPUDevice::create: Creating Vulkan GPU device");
   return LvkGPUDevice::create(window);
 }
 
 void LvkGPUDevice::pollEvents() {
+  NURI_PROFILER_FUNCTION();
   if (impl_->window) {
     impl_->window->pollEvents();
   }
@@ -452,6 +495,7 @@ void LvkGPUDevice::getFramebufferSize(int32_t &outWidth,
 }
 
 void LvkGPUDevice::resizeSwapchain(int32_t width, int32_t height) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   impl_->context->recreateSwapchain(width, height);
   impl_->context->wait(lvk::SubmitHandle{});
   if (!width || !height) {
@@ -509,9 +553,9 @@ void LvkGPUDevice::resizeSwapchain(int32_t width, int32_t height) {
     auto result =
         replaceTextureResource(entry.handle, resizedDesc, entry.debugName);
     if (result.hasError()) {
-      logMessagef(LogLevel::Warning,
-                  "Failed to resize framebuffer texture '%s': %s",
-                  entry.debugName.c_str(), result.error().c_str());
+      NURI_LOG_WARNING("LvkGPUDevice::resizeSwapchain: Failed to resize "
+                       "framebuffer texture '%s': %s",
+                       entry.debugName.c_str(), result.error().c_str());
     }
   }
 }
@@ -520,17 +564,29 @@ Format LvkGPUDevice::getSwapchainFormat() const {
   return fromLvkFormat(impl_->context->getSwapchainFormat());
 }
 
+uint32_t LvkGPUDevice::getSwapchainImageIndex() const {
+  return impl_->context ? impl_->context->getSwapchainCurrentImageIndex() : 0u;
+}
+
+uint32_t LvkGPUDevice::getSwapchainImageCount() const {
+  return impl_->context ? impl_->context->getNumSwapchainImages() : 1u;
+}
+
 double LvkGPUDevice::getTime() const {
   return impl_->window ? impl_->window->getTime() : 0.0;
 }
 
 Result<BufferHandle, std::string>
 LvkGPUDevice::createBuffer(const BufferDesc &desc, std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   const size_t resolvedSize = desc.size != 0 ? desc.size : desc.data.size();
   if (resolvedSize == 0) {
+    NURI_LOG_WARNING("LvkGPUDevice::createBuffer: Buffer size is zero");
     return Result<BufferHandle, std::string>::makeError("Buffer size is zero");
   }
   if (!desc.data.empty() && desc.size != 0 && desc.data.size() != desc.size) {
+    NURI_LOG_WARNING("LvkGPUDevice::createBuffer: Buffer data size must match "
+                     "buffer size");
     return Result<BufferHandle, std::string>::makeError(
         "Buffer data size must match buffer size");
   }
@@ -552,10 +608,26 @@ LvkGPUDevice::createBuffer(const BufferDesc &desc, std::string_view debugName) {
       impl_->context->createBuffer(bufferDesc, debugNameCStr, &res);
 
   if (!res.isOk()) {
+    if (debugNameCStr && debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createBuffer: Failed to create buffer '%s': %s",
+          debugNameCStr, res.message);
+    } else {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createBuffer: Failed to create buffer: %s",
+          res.message);
+    }
     return Result<BufferHandle, std::string>::makeError(
         std::string(res.message));
   }
   if (!handle.valid()) {
+    if (debugNameCStr && debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createBuffer: Failed to create buffer '%s'",
+          debugNameCStr);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createBuffer: Failed to create buffer");
+    }
     return Result<BufferHandle, std::string>::makeError(
         "Failed to create buffer");
   }
@@ -568,7 +640,10 @@ LvkGPUDevice::createBuffer(const BufferDesc &desc, std::string_view debugName) {
 Result<TextureHandle, std::string>
 LvkGPUDevice::createTexture(const TextureDesc &desc,
                             std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (desc.dimensions.width == 0 || desc.dimensions.height == 0) {
+    NURI_LOG_WARNING(
+        "LvkGPUDevice::createTexture: Texture dimensions cannot be zero");
     return Result<TextureHandle, std::string>::makeError(
         "Texture dimensions cannot be zero");
   }
@@ -599,10 +674,26 @@ LvkGPUDevice::createTexture(const TextureDesc &desc,
       impl_->context->createTexture(textureDesc, debugNameCStr, &res);
 
   if (!res.isOk()) {
+    if (debugNameCStr && debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createTexture: Failed to create texture '%s': %s",
+          debugNameCStr, res.message);
+    } else {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createTexture: Failed to create texture: %s",
+          res.message);
+    }
     return Result<TextureHandle, std::string>::makeError(
         std::string(res.message));
   }
   if (!handle.valid()) {
+    if (debugNameCStr && debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createTexture: Failed to create texture '%s'",
+          debugNameCStr);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createTexture: Failed to create texture");
+    }
     return Result<TextureHandle, std::string>::makeError(
         "Failed to create texture");
   }
@@ -615,7 +706,10 @@ LvkGPUDevice::createTexture(const TextureDesc &desc,
 Result<TextureHandle, std::string>
 LvkGPUDevice::createFramebufferTexture(const TextureDesc &desc,
                                        std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (!impl_->window) {
+    NURI_LOG_WARNING("LvkGPUDevice::createFramebufferTexture: No window "
+                     "available to get framebuffer size");
     return Result<TextureHandle, std::string>::makeError(
         "No window available to get framebuffer size");
   }
@@ -624,6 +718,8 @@ LvkGPUDevice::createFramebufferTexture(const TextureDesc &desc,
   int32_t height = 0;
   impl_->window->getFramebufferSize(width, height);
   if (!width || !height) {
+    NURI_LOG_WARNING("LvkGPUDevice::createFramebufferTexture: Failed to get "
+                     "framebuffer size");
     return Result<TextureHandle, std::string>::makeError(
         "Failed to get framebuffer size");
   }
@@ -648,6 +744,7 @@ LvkGPUDevice::createFramebufferTexture(const TextureDesc &desc,
 }
 
 Result<TextureHandle, std::string> LvkGPUDevice::createDepthBuffer() {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   TextureDesc desc{
       .type = TextureType::Texture2D,
       .format = Format::D32_FLOAT,
@@ -659,7 +756,17 @@ Result<TextureHandle, std::string> LvkGPUDevice::createDepthBuffer() {
 
 Result<ShaderHandle, std::string>
 LvkGPUDevice::createShaderModule(const ShaderDesc &desc) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (desc.source.empty()) {
+    if (!desc.moduleName.empty()) {
+      NURI_LOG_WARNING("LvkGPUDevice::createShaderModule: Shader source is "
+                       "empty for module '%.*s'",
+                       static_cast<int>(desc.moduleName.size()),
+                       desc.moduleName.data());
+    } else {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createShaderModule: Shader source is empty");
+    }
     return Result<ShaderHandle, std::string>::makeError(
         "Shader source is empty");
   }
@@ -676,10 +783,27 @@ LvkGPUDevice::createShaderModule(const ShaderDesc &desc) {
       impl_->context->createShaderModule(shaderDesc, &res);
 
   if (!res.isOk()) {
+    if (!moduleNameStorage.empty()) {
+      NURI_LOG_WARNING("LvkGPUDevice::createShaderModule: Failed to create "
+                       "shader module '%s': %s",
+                       moduleNameStorage.c_str(), res.message);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createShaderModule: Failed to create "
+                       "shader module: %s",
+                       res.message);
+    }
     return Result<ShaderHandle, std::string>::makeError(
         std::string(res.message));
   }
   if (!handle.valid()) {
+    if (!moduleNameStorage.empty()) {
+      NURI_LOG_WARNING("LvkGPUDevice::createShaderModule: Failed to create "
+                       "shader module '%s'",
+                       moduleNameStorage.c_str());
+    } else {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createShaderModule: Failed to create shader module");
+    }
     return Result<ShaderHandle, std::string>::makeError(
         "Failed to create shader module");
   }
@@ -692,16 +816,22 @@ LvkGPUDevice::createShaderModule(const ShaderDesc &desc) {
 Result<RenderPipelineHandle, std::string>
 LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
                                    std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (!isValid(desc.vertexShader)) {
+    NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Invalid vertex "
+                     "shader handle for render pipeline");
     return Result<RenderPipelineHandle, std::string>::makeError(
         "Invalid vertex shader handle");
   }
   if (!isValid(desc.fragmentShader)) {
+    NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Invalid fragment "
+                     "shader handle for render pipeline");
     return Result<RenderPipelineHandle, std::string>::makeError(
         "Invalid fragment shader handle");
   }
 
-  std::string debugNameStorage(debugName);
+  const auto reserved = impl_->renderPipelines.reserve(std::string(debugName),
+                                                       Format::RGBA8_UNORM);
 
   lvk::VertexInput vertexInput{};
   const size_t numAttribs = std::min(
@@ -734,6 +864,9 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
     for (size_t i = 0; i < numEntries; ++i) {
       const auto &entry = desc.specInfo.entries[i];
       if (entry.offset + entry.size > desc.specInfo.dataSize) {
+        NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Render pipeline "
+                         "specialization entry offset+size exceeds "
+                         "specInfo.dataSize");
         return Result<RenderPipelineHandle, std::string>::makeError(
             "Specialization entry offset+size exceeds specInfo.dataSize");
       }
@@ -753,11 +886,22 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       .smVert = impl_->shaders.getLvkHandle(desc.vertexShader),
       .smFrag = impl_->shaders.getLvkHandle(desc.fragmentShader),
       .specInfo = specInfo,
-      .color = {{.format = toLvkFormat(desc.colorFormats[0])}},
+      .color = {{.format = toLvkFormat(desc.colorFormats[0]),
+                 .blendEnabled = desc.blendEnabled,
+                 .srcRGBBlendFactor = desc.blendEnabled
+                                          ? lvk::BlendFactor_SrcAlpha
+                                          : lvk::BlendFactor_One,
+                 .srcAlphaBlendFactor = lvk::BlendFactor_One,
+                 .dstRGBBlendFactor = desc.blendEnabled
+                                          ? lvk::BlendFactor_OneMinusSrcAlpha
+                                          : lvk::BlendFactor_Zero,
+                 .dstAlphaBlendFactor = desc.blendEnabled
+                                            ? lvk::BlendFactor_OneMinusSrcAlpha
+                                            : lvk::BlendFactor_Zero}},
       .depthFormat = toLvkFormat(desc.depthFormat),
       .cullMode = toLvkCullMode(desc.cullMode),
       .polygonMode = toLvkPolygonMode(desc.polygonMode),
-      .debugName = debugNameStorage.empty() ? "" : debugNameStorage.c_str(),
+      .debugName = reserved.debugNameCStr,
   };
 
   lvk::Result res;
@@ -765,28 +909,59 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       impl_->context->createRenderPipeline(pipelineDesc, &res);
 
   if (!res.isOk()) {
+    if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to create "
+                       "render pipeline '%s': %s",
+                       reserved.debugNameCStr, res.message);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to create "
+                       "render pipeline: %s",
+                       res.message);
+    }
     return Result<RenderPipelineHandle, std::string>::makeError(
         std::string(res.message));
   }
   if (!handle.valid()) {
+    if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to create "
+                       "render pipeline '%s'",
+                       reserved.debugNameCStr);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to create "
+                       "render pipeline");
+    }
     return Result<RenderPipelineHandle, std::string>::makeError(
         "Failed to create render pipeline");
   }
 
-  RenderPipelineHandle nuriHandle = impl_->renderPipelines.allocate(
-      std::move(handle), std::move(debugNameStorage));
-  return Result<RenderPipelineHandle, std::string>::makeResult(nuriHandle);
+  if (!impl_->renderPipelines.setResource(reserved.handle, std::move(handle))) {
+    if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to store "
+                       "render pipeline resource '%s'",
+                       reserved.debugNameCStr);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to store "
+                       "render pipeline resource");
+    }
+    return Result<RenderPipelineHandle, std::string>::makeError(
+        "Failed to store render pipeline resource");
+  }
+  return Result<RenderPipelineHandle, std::string>::makeResult(reserved.handle);
 }
 
 Result<ComputePipelineHandle, std::string>
 LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
                                     std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (!isValid(desc.computeShader)) {
+    NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Invalid compute "
+                     "shader handle for compute pipeline");
     return Result<ComputePipelineHandle, std::string>::makeError(
         "Invalid compute shader handle");
   }
 
-  std::string debugNameStorage(debugName);
+  const auto reserved = impl_->computePipelines.reserve(std::string(debugName),
+                                                        Format::RGBA8_UNORM);
 
   // Build specialization info
   lvk::SpecializationConstantDesc specInfo{};
@@ -798,6 +973,9 @@ LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
     for (size_t i = 0; i < numEntries; ++i) {
       const auto &entry = desc.specInfo.entries[i];
       if (entry.offset + entry.size > desc.specInfo.dataSize) {
+        NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Compute "
+                         "pipeline specialization entry offset+size exceeds "
+                         "specInfo.dataSize");
         return Result<ComputePipelineHandle, std::string>::makeError(
             "Specialization entry offset+size exceeds specInfo.dataSize");
       }
@@ -814,7 +992,7 @@ LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
   lvk::ComputePipelineDesc pipelineDesc{
       .smComp = impl_->shaders.getLvkHandle(desc.computeShader),
       .specInfo = specInfo,
-      .debugName = debugNameStorage.empty() ? "" : debugNameStorage.c_str(),
+      .debugName = reserved.debugNameCStr,
   };
 
   lvk::Result res;
@@ -822,17 +1000,60 @@ LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
       impl_->context->createComputePipeline(pipelineDesc, &res);
 
   if (!res.isOk()) {
+    if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to create "
+                       "compute pipeline '%s': %s",
+                       reserved.debugNameCStr, res.message);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to create "
+                       "compute pipeline: %s",
+                       res.message);
+    }
     return Result<ComputePipelineHandle, std::string>::makeError(
         std::string(res.message));
   }
   if (!handle.valid()) {
+    if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to create "
+                       "compute pipeline '%s'",
+                       reserved.debugNameCStr);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to create "
+                       "compute pipeline");
+    }
     return Result<ComputePipelineHandle, std::string>::makeError(
         "Failed to create compute pipeline");
   }
 
-  ComputePipelineHandle nuriHandle = impl_->computePipelines.allocate(
-      std::move(handle), std::move(debugNameStorage));
-  return Result<ComputePipelineHandle, std::string>::makeResult(nuriHandle);
+  if (!impl_->computePipelines.setResource(reserved.handle,
+                                           std::move(handle))) {
+    if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to store "
+                       "compute pipeline resource '%s'",
+                       reserved.debugNameCStr);
+    } else {
+      NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to store "
+                       "compute pipeline resource");
+    }
+    return Result<ComputePipelineHandle, std::string>::makeError(
+        "Failed to store compute pipeline resource");
+  }
+  return Result<ComputePipelineHandle, std::string>::makeResult(
+      reserved.handle);
+}
+
+void LvkGPUDevice::destroyRenderPipeline(RenderPipelineHandle pipeline) {
+  if (!impl_) {
+    return;
+  }
+  impl_->renderPipelines.deallocate(pipeline);
+}
+
+void LvkGPUDevice::destroyComputePipeline(ComputePipelineHandle pipeline) {
+  if (!impl_) {
+    return;
+  }
+  impl_->computePipelines.deallocate(pipeline);
 }
 
 bool LvkGPUDevice::isValid(BufferHandle h) const {
@@ -867,6 +1088,7 @@ uint32_t LvkGPUDevice::getTextureBindlessIndex(TextureHandle h) const {
 }
 
 Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
   if (frame.passes.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -905,6 +1127,40 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     }
 
     commandBuffer.cmdBeginRendering(renderPass, framebuffer);
+
+    // Pipelines use dynamic viewport/scissor in LVK, so we must bind them for
+    // every pass (even if the pass didn't specify overrides).
+    Viewport vp{};
+    if (pass.useViewport) {
+      vp = pass.viewport;
+    } else {
+      const lvk::Dimensions dim =
+          impl_->context->getDimensions(framebuffer.color[0].texture);
+      vp = {
+          .x = 0.0f,
+          .y = 0.0f,
+          .width = static_cast<float>(dim.width),
+          .height = static_cast<float>(dim.height),
+          .minDepth = 0.0f,
+          .maxDepth = 1.0f,
+      };
+    }
+
+    commandBuffer.cmdBindViewport({
+        .x = vp.x,
+        .y = vp.y,
+        .width = vp.width,
+        .height = vp.height,
+        .minDepth = vp.minDepth,
+        .maxDepth = vp.maxDepth,
+    });
+    // Default scissor for the pass; individual draws may override.
+    commandBuffer.cmdBindScissorRect({
+        static_cast<uint32_t>(vp.x),
+        static_cast<uint32_t>(vp.y),
+        static_cast<uint32_t>(vp.width),
+        static_cast<uint32_t>(vp.height),
+    });
 
     for (const DrawItem &draw : pass.draws) {
       if (!impl_->renderPipelines.isValid(draw.pipeline)) {
@@ -958,6 +1214,19 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
                                       draw.depthBiasSlope, draw.depthBiasClamp);
       }
 
+      if (draw.useScissor) {
+        commandBuffer.cmdBindScissorRect({draw.scissor.x, draw.scissor.y,
+                                          draw.scissor.width,
+                                          draw.scissor.height});
+      } else {
+        commandBuffer.cmdBindScissorRect({
+            static_cast<uint32_t>(vp.x),
+            static_cast<uint32_t>(vp.y),
+            static_cast<uint32_t>(vp.width),
+            static_cast<uint32_t>(vp.height),
+        });
+      }
+
       if (!draw.pushConstants.empty()) {
         commandBuffer.cmdPushConstants(
             static_cast<const void *>(draw.pushConstants.data()),
@@ -990,7 +1259,34 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string>
+LvkGPUDevice::updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
+                           size_t offset) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  if (!impl_->buffers.isValid(buffer)) {
+    return Result<bool, std::string>::makeError("Invalid buffer handle");
+  }
+  if (data.empty()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const lvk::BufferHandle lvkBuf = impl_->buffers.getLvkHandle(buffer);
+  if (uint8_t *mapped = impl_->context->getMappedPtr(lvkBuf)) {
+    std::memcpy(mapped + offset, data.data(), data.size());
+    impl_->context->flushMappedMemory(lvkBuf, offset, data.size());
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  lvk::Result res = impl_->context->upload(
+      lvkBuf, static_cast<const void *>(data.data()), data.size(), offset);
+  if (!res.isOk()) {
+    return Result<bool, std::string>::makeError(std::string(res.message));
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
 void LvkGPUDevice::waitIdle() {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_WAIT);
   if (impl_->context) {
     // Empty SubmitHandle results in vkDeviceWaitIdle
     impl_->context->wait(lvk::SubmitHandle{});

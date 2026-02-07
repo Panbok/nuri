@@ -3,9 +3,6 @@
 #include "nuri/gfx/gpu_device.h"
 
 namespace nuri {
-
-class Window;
-
 class LvkGPUDevice final : public GPUDevice {
 public:
   static std::unique_ptr<LvkGPUDevice> create(Window &window);
@@ -22,6 +19,8 @@ public:
   void getFramebufferSize(int32_t &outWidth, int32_t &outHeight) const override;
   void resizeSwapchain(int32_t width, int32_t height) override;
   Format getSwapchainFormat() const override;
+  uint32_t getSwapchainImageIndex() const override;
+  uint32_t getSwapchainImageCount() const override;
   double getTime() const override;
 
   // Resource creation
@@ -44,6 +43,10 @@ public:
   createComputePipeline(const ComputePipelineDesc &desc,
                         std::string_view debugName = {}) override;
 
+  // Resource destruction
+  void destroyRenderPipeline(RenderPipelineHandle pipeline) override;
+  void destroyComputePipeline(ComputePipelineHandle pipeline) override;
+
   // Resource queries
   bool isValid(BufferHandle h) const override;
   bool isValid(TextureHandle h) const override;
@@ -55,6 +58,11 @@ public:
 
   // Rendering
   Result<bool, std::string> submitFrame(const RenderFrame &frame) override;
+
+  // Data updates
+  Result<bool, std::string> updateBuffer(BufferHandle buffer,
+                                         std::span<const std::byte> data,
+                                         size_t offset = 0) override;
 
   // Shutdown
   void waitIdle() override;
