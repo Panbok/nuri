@@ -1,7 +1,7 @@
 #include "nuri/gfx/renderer.h"
 
-#include "nuri/core/profiling.h"
 #include "nuri/core/layer_stack.h"
+#include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
 
 namespace nuri {
@@ -22,10 +22,8 @@ Result<bool, std::string> Renderer::render(const RenderFrame &frame,
 
   combinedPasses_.clear();
   combinedPasses_.reserve(frame.passes.size() + layers.size());
-  if (!frame.passes.empty()) {
-    combinedPasses_.insert(combinedPasses_.end(), frame.passes.begin(),
-                           frame.passes.end());
-  }
+  combinedPasses_.insert(combinedPasses_.end(), frame.passes.begin(),
+                         frame.passes.end());
 
   auto layerResult = layers.appendRenderPasses(combinedPasses_);
   if (layerResult.hasError()) {

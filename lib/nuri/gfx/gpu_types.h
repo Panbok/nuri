@@ -168,7 +168,7 @@ constexpr const char *ShaderStageToString(ShaderStage stage) {
   case ShaderStage::Callable:
     return "Callable";
   case ShaderStage::Count:
-    return "Count";
+    return "Invalid";
   default:
     return "Unknown";
   }

@@ -77,6 +77,8 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
     NURI_LOG_WARNING(
         "Model::createFromFile: Failed to create model from '%s': %s",
         pathStr.c_str(), modelResult.error().c_str());
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        modelResult.error());
   }
 
   NURI_LOG_DEBUG("Model::createFromFile: Created model from file '%.*s'",

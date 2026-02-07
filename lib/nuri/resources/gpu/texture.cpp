@@ -68,8 +68,8 @@ Texture::loadTexture(GPUDevice &gpu, const std::string &filePath,
 
   stbi_image_free(pixels);
 
-  NURI_LOG_DEBUG("Texture::loadTexture: Created texture from file '%.*s'",
-                 static_cast<int>(filePath.size()), filePath.c_str());
+  NURI_LOG_DEBUG("Texture::loadTexture: Created texture from file '%s'",
+                 filePath.c_str());
 
   return Result<std::unique_ptr<Texture>, std::string>::makeResult(
       std::unique_ptr<Texture>(

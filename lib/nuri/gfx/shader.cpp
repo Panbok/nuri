@@ -71,7 +71,7 @@ Result<std::string, std::string> Shader::load(std::string_view path) {
     return Result<std::string, std::string>::makeError(std::move(errorMsg));
   }
 
-  return Result<std::string, std::string>::makeResult(content);
+  return Result<std::string, std::string>::makeResult(std::move(content));
 }
 
 Result<ShaderHandle, std::string> Shader::compile(const std::string &code,
