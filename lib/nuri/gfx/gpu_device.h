@@ -6,6 +6,9 @@
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
 
+#include <cstddef>
+#include <span>
+
 namespace nuri {
 
 class Window;
@@ -27,6 +30,8 @@ public:
                                   int32_t &outHeight) const = 0;
   virtual void resizeSwapchain(int32_t width, int32_t height) = 0;
   virtual Format getSwapchainFormat() const = 0;
+  virtual uint32_t getSwapchainImageIndex() const = 0;
+  virtual uint32_t getSwapchainImageCount() const = 0;
   virtual double getTime() const = 0;
 
   // Resource creation
@@ -47,6 +52,9 @@ public:
   createComputePipeline(const ComputePipelineDesc &desc,
                         std::string_view debugName = {}) = 0;
 
+  virtual void destroyRenderPipeline(RenderPipelineHandle pipeline) = 0;
+  virtual void destroyComputePipeline(ComputePipelineHandle pipeline) = 0;
+
   // Resource queries
   virtual bool isValid(BufferHandle h) const = 0;
   virtual bool isValid(TextureHandle h) const = 0;
@@ -59,6 +67,11 @@ public:
 
   // Rendering
   virtual Result<bool, std::string> submitFrame(const RenderFrame &frame) = 0;
+
+  // Data updates
+  virtual Result<bool, std::string>
+  updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
+               size_t offset = 0) = 0;
 
   // Shutdown
   virtual void waitIdle() = 0;

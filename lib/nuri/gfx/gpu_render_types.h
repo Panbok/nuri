@@ -2,10 +2,27 @@
 
 #include "nuri/gfx/gpu_types.h"
 
+#include <cstddef>
 #include <span>
 #include <string_view>
 
 namespace nuri {
+
+struct Viewport {
+  float x = 0.0f;
+  float y = 0.0f;
+  float width = 0.0f;
+  float height = 0.0f;
+  float minDepth = 0.0f;
+  float maxDepth = 1.0f;
+};
+
+struct RectU32 {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
 
 struct ClearColor {
   float r = 0.0f;
@@ -41,6 +58,8 @@ struct DrawItem {
   uint32_t firstIndex = 0;
   int32_t vertexOffset = 0;
   uint32_t firstInstance = 0;
+  bool useScissor = false;
+  RectU32 scissor{};
   bool useDepthState = false;
   DepthState depthState{};
   bool depthBiasEnable = false;
@@ -56,6 +75,8 @@ struct RenderPass {
   AttachmentColor color;
   AttachmentDepth depth;
   TextureHandle depthTexture{};
+  bool useViewport = false;
+  Viewport viewport{};
   std::span<const DrawItem> draws{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;

@@ -40,6 +40,7 @@ struct RenderPipelineDesc {
   CullMode cullMode = CullMode::Back;
   PolygonMode polygonMode = PolygonMode::Fill;
   Topology topology = Topology::Triangle;
+  bool blendEnabled = false;
   SpecializationInfo specInfo{};
 };
 

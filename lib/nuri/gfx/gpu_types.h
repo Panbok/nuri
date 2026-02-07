@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
 namespace nuri {
 
@@ -36,6 +37,9 @@ constexpr bool isValid(TextureHandle h) { return h.generation != 0; }
 constexpr bool isValid(ShaderHandle h) { return h.generation != 0; }
 constexpr bool isValid(RenderPipelineHandle h) { return h.generation != 0; }
 constexpr bool isValid(ComputePipelineHandle h) { return h.generation != 0; }
+
+static_assert(std::is_trivially_destructible_v<RenderPipelineHandle>);
+static_assert(std::is_trivially_destructible_v<ComputePipelineHandle>);
 
 // GPU enums (LVK-free)
 enum class Format : uint8_t {
