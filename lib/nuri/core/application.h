@@ -1,18 +1,32 @@
 #pragma once
 
+#include "nuri/core/layer_stack.h"
+#include "nuri/core/window.h"
 #include "nuri/defines.h"
-#include "nuri/pch.h"
+#include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/renderer.h"
 
 namespace nuri {
+struct NURI_API ApplicationConfig {
+  std::string_view title = "Nuri";
+  std::int32_t width = 960;
+  std::int32_t height = 540;
 
-class GPUDevice;
-class Renderer;
-class Window;
+  // Window mode:
+  // - fullscreen=true,  borderlessFullscreen=false: exclusive fullscreen
+  // - fullscreen=true,  borderlessFullscreen=true:  borderless monitor-sized
+  //   windowed mode
+  // - fullscreen=false, width=0 and height=0:      windowed with max screen
+  //   size coverage
+  bool fullscreen = false;
+  bool borderlessFullscreen = false;
+};
 
 class NURI_API Application {
 public:
-  Application(const std::string &title, std::int32_t width,
-              std::int32_t height);
+  explicit Application(const ApplicationConfig &config);
+  Application(const std::string &title, std::int32_t width, std::int32_t height,
+              bool fullscreen = false, bool borderlessFullscreen = false);
   virtual ~Application();
 
   Application(const Application &) = delete;
@@ -42,14 +56,19 @@ public:
 
   Renderer &getRenderer();
   const Renderer &getRenderer() const;
+  LayerStack &getLayerStack();
+  const LayerStack &getLayerStack() const;
 
 private:
   std::string title_;
   std::int32_t width_;
   std::int32_t height_;
+  bool fullscreen_ = false;
+  bool borderlessFullscreen_ = false;
   std::unique_ptr<Window> window_;
   std::unique_ptr<GPUDevice> gpu_;
   std::unique_ptr<Renderer> renderer_;
+  LayerStack layerStack_;
 };
 
 } // namespace nuri
