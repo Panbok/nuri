@@ -1,10 +1,12 @@
 #pragma once
 
-#include "nuri/gfx/gpu_device.h"
 #include "nuri/core/log.h"
 #include "nuri/core/result.h"
-#include "nuri/defines.h"
-#include "nuri/pch.h"
+#include "nuri/gfx/gpu_device.h"
+
+#include <memory>
+#include <string>
+#include <string_view>
 
 namespace nuri {
 
@@ -19,7 +21,15 @@ public:
   explicit Pipeline(GPUDevice &gpu)
       : gpu_(gpu), type_(PipelineType::Count), renderPipeline_{},
         computePipeline_{} {}
-  ~Pipeline() = default;
+
+  ~Pipeline() {
+    if (type_ == PipelineType::Graphics && nuri::isValid(renderPipeline_)) {
+      gpu_.destroyRenderPipeline(renderPipeline_);
+    } else if (type_ == PipelineType::Compute &&
+               nuri::isValid(computePipeline_)) {
+      gpu_.destroyComputePipeline(computePipeline_);
+    }
+  }
 
   Pipeline(const Pipeline &) = delete;
   Pipeline &operator=(const Pipeline &) = delete;
@@ -92,6 +102,3 @@ private:
 };
 
 } // namespace nuri
-
-
-
