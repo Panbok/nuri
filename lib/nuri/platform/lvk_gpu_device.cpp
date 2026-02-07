@@ -7,6 +7,7 @@
 #include <cstring>
 #include <deque>
 #include <lvk/LVK.h>
+#include <vulkan/VulkanUtils.h>
 
 namespace nuri {
 
@@ -909,6 +910,7 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       impl_->context->createRenderPipeline(pipelineDesc, &res);
 
   if (!res.isOk()) {
+    impl_->renderPipelines.deallocate(reserved.handle);
     if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
       NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to create "
                        "render pipeline '%s': %s",
@@ -922,6 +924,7 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
         std::string(res.message));
   }
   if (!handle.valid()) {
+    impl_->renderPipelines.deallocate(reserved.handle);
     if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
       NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to create "
                        "render pipeline '%s'",
@@ -935,6 +938,7 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
   }
 
   if (!impl_->renderPipelines.setResource(reserved.handle, std::move(handle))) {
+    impl_->renderPipelines.deallocate(reserved.handle);
     if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
       NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Failed to store "
                        "render pipeline resource '%s'",
@@ -1000,6 +1004,7 @@ LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
       impl_->context->createComputePipeline(pipelineDesc, &res);
 
   if (!res.isOk()) {
+    impl_->computePipelines.deallocate(reserved.handle);
     if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
       NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to create "
                        "compute pipeline '%s': %s",
@@ -1013,6 +1018,7 @@ LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
         std::string(res.message));
   }
   if (!handle.valid()) {
+    impl_->computePipelines.deallocate(reserved.handle);
     if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
       NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to create "
                        "compute pipeline '%s'",
@@ -1027,6 +1033,7 @@ LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
 
   if (!impl_->computePipelines.setResource(reserved.handle,
                                            std::move(handle))) {
+    impl_->computePipelines.deallocate(reserved.handle);
     if (reserved.debugNameCStr && reserved.debugNameCStr[0] != '\0') {
       NURI_LOG_WARNING("LvkGPUDevice::createComputePipeline: Failed to store "
                        "compute pipeline resource '%s'",
@@ -1162,6 +1169,8 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         static_cast<uint32_t>(vp.height),
     });
 
+    bool scissorMatchesViewport = true;
+
     for (const DrawItem &draw : pass.draws) {
       if (!impl_->renderPipelines.isValid(draw.pipeline)) {
         commandBuffer.cmdEndRendering();
@@ -1218,13 +1227,15 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         commandBuffer.cmdBindScissorRect({draw.scissor.x, draw.scissor.y,
                                           draw.scissor.width,
                                           draw.scissor.height});
-      } else {
+        scissorMatchesViewport = false;
+      } else if (!scissorMatchesViewport) {
         commandBuffer.cmdBindScissorRect({
             static_cast<uint32_t>(vp.x),
             static_cast<uint32_t>(vp.y),
             static_cast<uint32_t>(vp.width),
             static_cast<uint32_t>(vp.height),
         });
+        scissorMatchesViewport = true;
       }
 
       if (!draw.pushConstants.empty()) {
@@ -1271,6 +1282,13 @@ LvkGPUDevice::updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
   }
 
   const lvk::BufferHandle lvkBuf = impl_->buffers.getLvkHandle(buffer);
+  const size_t bufferSize =
+      static_cast<size_t>(lvk::getBufferSize(impl_->context.get(), lvkBuf));
+  if (offset > bufferSize || data.size() > bufferSize - offset) {
+    return Result<bool, std::string>::makeError(
+        "updateBuffer: offset + data.size() exceeds buffer size");
+  }
+
   if (uint8_t *mapped = impl_->context->getMappedPtr(lvkBuf)) {
     std::memcpy(mapped + offset, data.data(), data.size());
     impl_->context->flushMappedMemory(lvkBuf, offset, data.size());

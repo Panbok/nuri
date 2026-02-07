@@ -38,6 +38,9 @@ constexpr bool isValid(ShaderHandle h) { return h.generation != 0; }
 constexpr bool isValid(RenderPipelineHandle h) { return h.generation != 0; }
 constexpr bool isValid(ComputePipelineHandle h) { return h.generation != 0; }
 
+static_assert(std::is_trivially_destructible_v<BufferHandle>);
+static_assert(std::is_trivially_destructible_v<TextureHandle>);
+static_assert(std::is_trivially_destructible_v<ShaderHandle>);
 static_assert(std::is_trivially_destructible_v<RenderPipelineHandle>);
 static_assert(std::is_trivially_destructible_v<ComputePipelineHandle>);
 

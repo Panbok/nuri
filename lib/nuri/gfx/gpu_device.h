@@ -1,13 +1,13 @@
 #pragma once
 
+#include <cstddef>
+#include <span>
+
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
-
-#include <cstddef>
-#include <span>
 
 namespace nuri {
 
