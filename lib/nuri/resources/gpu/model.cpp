@@ -1,5 +1,7 @@
 #include "nuri/resources/gpu/model.h"
 
+#include "nuri/core/log.h"
+#include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/resources/mesh_importer.h"
 
@@ -8,6 +10,7 @@ namespace nuri {
 Result<std::unique_ptr<Model>, std::string>
 Model::create(GPUDevice &gpu, const MeshData &data,
               std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   const std::span<const std::byte> vertexBytes{
       reinterpret_cast<const std::byte *>(data.vertices.data()),
       data.vertices.size() * sizeof(Vertex)};
@@ -58,13 +61,27 @@ Model::create(GPUDevice &gpu, const MeshData &data,
 Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
     GPUDevice &gpu, std::string_view path, const MeshImportOptions &options,
     std::pmr::memory_resource *mem, std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   auto meshDataResult = MeshImporter::loadFromFile(path, options, mem);
   if (meshDataResult.hasError()) {
+    const std::string pathStr{path};
+    NURI_LOG_WARNING("Model::createFromFile: Failed to load mesh '%s': %s",
+                     pathStr.c_str(), meshDataResult.error().c_str());
     return Result<std::unique_ptr<Model>, std::string>::makeError(
         meshDataResult.error());
   }
 
-  return create(gpu, meshDataResult.value(), debugName);
+  auto modelResult = create(gpu, meshDataResult.value(), debugName);
+  if (modelResult.hasError()) {
+    const std::string pathStr{path};
+    NURI_LOG_WARNING(
+        "Model::createFromFile: Failed to create model from '%s': %s",
+        pathStr.c_str(), modelResult.error().c_str());
+  }
+
+  NURI_LOG_DEBUG("Model::createFromFile: Created model from file '%.*s'",
+                 static_cast<int>(path.size()), path.data());
+  return modelResult;
 }
 
 } // namespace nuri
