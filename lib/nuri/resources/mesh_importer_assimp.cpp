@@ -1,5 +1,8 @@
 #include "mesh_importer.h"
 
+#include "nuri/core/log.h"
+#include "nuri/core/profiling.h"
+
 #include <assimp/Importer.hpp>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
@@ -43,7 +46,9 @@ nuri::Result<MeshData, std::string>
 MeshImporter::loadFromFile(std::string_view path,
                            const MeshImportOptions &options,
                            std::pmr::memory_resource *mem) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (path.empty()) {
+    NURI_LOG_WARNING("MeshImporter::loadFromFile: Path is empty");
     return nuri::Result<MeshData, std::string>::makeError("Path is empty");
   }
 
@@ -58,6 +63,9 @@ MeshImporter::loadFromFile(std::string_view path,
   if (!scene || !scene->HasMeshes()) {
     const std::string error =
         scene ? "Assimp scene has no meshes" : importer.GetErrorString();
+    NURI_LOG_WARNING(
+        "MeshImporter::loadFromFile: Failed to import mesh '%s': %s",
+        pathStr.c_str(), error.c_str());
     return nuri::Result<MeshData, std::string>::makeError(error);
   }
 
