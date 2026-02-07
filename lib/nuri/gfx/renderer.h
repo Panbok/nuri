@@ -6,11 +6,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <memory_resource>
 #include <string>
+#include <vector>
 
 namespace nuri {
 
 class GPUDevice;
+class LayerStack;
 
 class NURI_API Renderer {
 public:
@@ -27,11 +30,14 @@ public:
   }
 
   Result<bool, std::string> render(const RenderFrame &frame);
+  Result<bool, std::string> render(const RenderFrame &frame,
+                                   LayerStack &layers);
 
   void onResize(uint32_t width, uint32_t height);
 
 private:
   GPUDevice &gpu_;
+  std::pmr::vector<RenderPass> combinedPasses_;
 };
 
 } // namespace nuri
