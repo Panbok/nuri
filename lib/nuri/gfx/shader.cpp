@@ -1,13 +1,15 @@
 #include "nuri/gfx/shader.h"
 #include "nuri/gfx/gpu_device.h"
 
-#include "nuri/pch.h"
+#include "nuri/core/log.h"
+#include "nuri/core/profiling.h"
 
 namespace nuri {
 
 namespace {
 [[nodiscard]] std::string
 readFileToString(const std::filesystem::path &filePath, std::string &errorMsg) {
+  NURI_PROFILER_FUNCTION();
   errorMsg.clear();
 
   std::ifstream file(filePath, std::ios::binary);
@@ -61,6 +63,7 @@ Shader::Shader(std::string_view moduleName, GPUDevice &gpu)
 Shader::~Shader() = default;
 
 Result<std::string, std::string> Shader::load(std::string_view path) {
+  NURI_PROFILER_FUNCTION();
   std::string errorMsg;
   std::string content = readFileToString(std::filesystem::path(path), errorMsg);
 
@@ -73,6 +76,7 @@ Result<std::string, std::string> Shader::load(std::string_view path) {
 
 Result<ShaderHandle, std::string> Shader::compile(const std::string &code,
                                                   ShaderStage stage) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (code.empty()) {
     return Result<ShaderHandle, std::string>::makeError(
         "Shader code is empty for stage " +
@@ -108,9 +112,13 @@ Result<ShaderHandle, std::string> Shader::compile(const std::string &code,
 
 Result<ShaderHandle, std::string> Shader::compileFromFile(std::string_view path,
                                                           ShaderStage stage) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   auto codeResult = load(path);
   if (codeResult.hasError()) {
     const std::string pathStr{path};
+    NURI_LOG_WARNING(
+        "Shader::compileFromFile: Failed to load shader file '%s': %s",
+        pathStr.c_str(), codeResult.error().c_str());
     return Result<ShaderHandle, std::string>::makeError(
         "Failed to load shader file '" + pathStr + "': " + codeResult.error());
   }
@@ -118,10 +126,17 @@ Result<ShaderHandle, std::string> Shader::compileFromFile(std::string_view path,
   auto compileResult = compile(codeResult.value(), stage);
   if (compileResult.hasError()) {
     const std::string pathStr{path};
+    NURI_LOG_WARNING(
+        "Shader::compileFromFile: Failed to compile shader file '%s': %s",
+        pathStr.c_str(), compileResult.error().c_str());
     return Result<ShaderHandle, std::string>::makeError(
         "Failed to compile shader file '" + pathStr +
         "': " + compileResult.error());
   }
+
+  NURI_LOG_INFO(
+      "Shader::compileFromFile: Compiled shader file '%.*s' for stage %s",
+      static_cast<int>(path.size()), path.data(), ShaderStageToString(stage));
 
   return compileResult;
 }
