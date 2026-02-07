@@ -137,6 +137,43 @@ enum class ShaderStage : uint8_t {
   Count
 };
 
+constexpr const char *ShaderStageToString(ShaderStage stage) {
+  switch (stage) {
+  case ShaderStage::Vertex:
+    return "Vertex";
+  case ShaderStage::TessControl:
+    return "TessControl";
+  case ShaderStage::TessEval:
+    return "TessEval";
+  case ShaderStage::Geometry:
+    return "Geometry";
+  case ShaderStage::Fragment:
+    return "Fragment";
+  case ShaderStage::Compute:
+    return "Compute";
+  case ShaderStage::Task:
+    return "Task";
+  case ShaderStage::Mesh:
+    return "Mesh";
+  case ShaderStage::RayGen:
+    return "RayGen";
+  case ShaderStage::AnyHit:
+    return "AnyHit";
+  case ShaderStage::ClosestHit:
+    return "ClosestHit";
+  case ShaderStage::Miss:
+    return "Miss";
+  case ShaderStage::Intersection:
+    return "Intersection";
+  case ShaderStage::Callable:
+    return "Callable";
+  case ShaderStage::Count:
+    return "Count";
+  default:
+    return "Unknown";
+  }
+}
+
 struct TextureDimensions {
   uint32_t width = 1;
   uint32_t height = 1;
