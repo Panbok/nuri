@@ -134,7 +134,7 @@ Result<ShaderHandle, std::string> Shader::compileFromFile(std::string_view path,
         "': " + compileResult.error());
   }
 
-  NURI_LOG_INFO(
+  NURI_LOG_DEBUG(
       "Shader::compileFromFile: Compiled shader file '%.*s' for stage %s",
       static_cast<int>(path.size()), path.data(), ShaderStageToString(stage));
 
