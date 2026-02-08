@@ -3,6 +3,7 @@
 #include "nuri/core/layer.h"
 #include "nuri/defines.h"
 
+#include <functional>
 #include <memory>
 
 namespace nuri {
@@ -14,12 +15,10 @@ class Window;
 class NURI_API EditorLayer final : public Layer {
 public:
   struct UiCallback {
-    void (*fn)(void *userData);
-    void *userData;
+    std::function<void()> callback;
 
-    constexpr UiCallback() noexcept : fn(nullptr), userData(nullptr) {}
-    constexpr UiCallback(void (*callback)(void *), void *data) noexcept
-        : fn(callback), userData(data) {}
+    UiCallback() : callback{} {}
+    explicit UiCallback(std::function<void()> cb) : callback(std::move(cb)) {}
   };
 
   static std::unique_ptr<EditorLayer>
@@ -32,7 +31,9 @@ public:
   EditorLayer(EditorLayer &&) = delete;
   EditorLayer &operator=(EditorLayer &&) = delete;
 
-  void setUiCallback(UiCallback callback) { callback_ = callback; }
+  void setUiCallback(UiCallback callback) {
+    callback_ = std::move(callback);
+  }
 
   void onUpdate(double deltaTime) override;
   Result<bool, std::string> buildRenderPasses(RenderPassList &out) override;

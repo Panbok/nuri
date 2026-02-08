@@ -25,8 +25,8 @@ Result<bool, std::string> EditorLayer::buildRenderPasses(RenderPassList &out) {
   }
 
   editor_->beginFrame();
-  if (callback_.fn) {
-    callback_.fn(callback_.userData);
+  if (callback_.callback) {
+    callback_.callback();
   }
 
   editor_->setFrameDeltaSeconds(frameDeltaSeconds_);

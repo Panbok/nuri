@@ -8,9 +8,6 @@
 
 namespace nuri {
 
-class GPUDevice;
-class Window;
-
 class NURI_API Editor {
 public:
   virtual ~Editor() = default;
