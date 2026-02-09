@@ -1,16 +1,15 @@
 #pragma once
 
 #include "nuri/core/layer.h"
+#include "nuri/core/window.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/gpu_device.h"
+#include "nuri/ui/imgui_editor.h"
 
 #include <functional>
 #include <memory>
 
 namespace nuri {
-
-class GPUDevice;
-class ImGuiEditor;
-class Window;
 
 class NURI_API EditorLayer final : public Layer {
 public:
@@ -22,8 +21,7 @@ public:
   };
 
   static std::unique_ptr<EditorLayer>
-  create(Window &window, GPUDevice &gpu,
-         UiCallback callback = UiCallback{});
+  create(Window &window, GPUDevice &gpu, UiCallback callback = UiCallback{});
   ~EditorLayer() override;
 
   EditorLayer(const EditorLayer &) = delete;
@@ -31,9 +29,7 @@ public:
   EditorLayer(EditorLayer &&) = delete;
   EditorLayer &operator=(EditorLayer &&) = delete;
 
-  void setUiCallback(UiCallback callback) {
-    callback_ = std::move(callback);
-  }
+  void setUiCallback(UiCallback callback) { callback_ = std::move(callback); }
 
   void onUpdate(double deltaTime) override;
   Result<bool, std::string> buildRenderPasses(RenderPassList &out) override;
