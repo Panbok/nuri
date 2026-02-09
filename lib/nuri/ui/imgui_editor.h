@@ -1,10 +1,10 @@
 #pragma once
 
+#include <memory>
+
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/ui/editor.h"
-
-#include <memory>
 
 namespace nuri {
 class NURI_API ImGuiEditor final : public Editor {

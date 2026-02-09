@@ -17,6 +17,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -113,6 +114,26 @@ struct LogModel {
     return latest;
   }
 
+  static std::pair<LogLevel, std::string> parseLevelTag(std::string_view line) {
+    constexpr std::string_view tags[] = {"[Trace]", "[Debug]", "[Info]",
+                                         "[Warn]", "[Fatal]"};
+    constexpr LogLevel levels[] = {LogLevel::Trace, LogLevel::Debug,
+                                   LogLevel::Info, LogLevel::Warning,
+                                   LogLevel::Fatal};
+
+    for (size_t i = 0; i < std::size(tags); ++i) {
+      if (line.size() >= tags[i].size() &&
+          line.substr(0, tags[i].size()) == tags[i]) {
+        std::string msg(line.substr(tags[i].size()));
+        if (!msg.empty() && msg.front() == ' ') {
+          msg.erase(0, 1);
+        }
+        return {levels[i], std::move(msg)};
+      }
+    }
+    return {LogLevel::Info, std::string(line)};
+  }
+
   void seedFromFileIfNeeded(LogFilterState &filterState) {
     if (seededFromFile || !lines.empty() || lastSequence != 0) {
       return;
@@ -133,9 +154,10 @@ struct LogModel {
       if (!line.empty() && line.back() == '\r') {
         line.pop_back();
       }
+      auto [level, message] = parseLevelTag(line);
       LogLine entry{};
-      entry.level = LogLevel::Info;
-      entry.message = std::move(line);
+      entry.level = level;
+      entry.message = std::move(message);
       lines.push_back(std::move(entry));
     }
 
@@ -161,13 +183,12 @@ struct LogModel {
     const LogReadResult result = readLogEntriesSince(lastSequence, entries);
     if (result.truncated) {
       lines.clear();
-    }
-    if (!entries.empty()) {
       lastSequence = result.lastSequence;
     }
     if (entries.empty()) {
       seedFromFileIfNeeded(filterState);
     } else {
+      lastSequence = result.lastSequence;
       appendEntries(entries);
       filterState.requestScroll = true;
     }
@@ -197,11 +218,10 @@ struct LogStyleCatalog {
   }
 
   static ImU32 textColorFor(const ImVec4 &background) {
-    const float luma = 0.299f * background.x + 0.587f * background.y +
-                       0.114f * background.z;
-    const ImVec4 foreground =
-        luma > 0.6f ? ImVec4(0.0f, 0.0f, 0.0f, 1.0f)
-                    : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+    const float luma =
+        0.299f * background.x + 0.587f * background.y + 0.114f * background.z;
+    const ImVec4 foreground = luma > 0.6f ? ImVec4(0.0f, 0.0f, 0.0f, 1.0f)
+                                          : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
     return ImGui::ColorConvertFloat4ToU32(foreground);
   }
 
@@ -265,19 +285,32 @@ private:
   }
 
   static void drawMessages(const LogModel &model, LogFilterState &filterState) {
-    ImGui::BeginChild("LogScroll", ImVec2(0.0f, 0.0f), false,
-                      ImGuiWindowFlags_HorizontalScrollbar);
-
-    for (const auto &line : model.lines) {
+    std::vector<size_t> visibleIndices;
+    visibleIndices.reserve(model.lines.size());
+    for (size_t i = 0; i < model.lines.size(); ++i) {
+      const auto &line = model.lines[i];
       if (!filterState.levelEnabled(line.level)) {
         continue;
       }
       if (!filterState.textFilter.PassFilter(line.message.c_str())) {
         continue;
       }
-      LogStyleCatalog::drawTagPill(line.level);
-      ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-      ImGui::TextUnformatted(line.message.c_str());
+      visibleIndices.push_back(i);
+    }
+
+    ImGui::BeginChild("LogScroll", ImVec2(0.0f, 0.0f), false,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(visibleIndices.size()));
+    while (clipper.Step()) {
+      for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+        const size_t lineIdx = visibleIndices[static_cast<size_t>(i)];
+        const auto &line = model.lines[lineIdx];
+        LogStyleCatalog::drawTagPill(line.level);
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextUnformatted(line.message.c_str());
+      }
     }
 
     if (filterState.autoScroll && filterState.requestScroll) {
@@ -312,10 +345,9 @@ void setLogWindowPlacementWithoutDock(const ImGuiViewport *viewport) {
 
 void drawFpsOverlay(const FPSCounter &fpsCounter) {
   if (const ImGuiViewport *viewport = ImGui::GetMainViewport()) {
-    ImGui::SetNextWindowPos(
-        {viewport->WorkPos.x + viewport->WorkSize.x - 15.0f,
-         viewport->WorkPos.y + 15.0f},
-        ImGuiCond_Always, {1.0f, 0.0f});
+    ImGui::SetNextWindowPos({viewport->WorkPos.x + viewport->WorkSize.x - 15.0f,
+                             viewport->WorkPos.y + 15.0f},
+                            ImGuiCond_Always, {1.0f, 0.0f});
   }
   ImGui::SetNextWindowBgAlpha(0.30f);
   ImGui::SetNextWindowSize(ImVec2(ImGui::CalcTextSize("FPS : _______").x, 0));
@@ -360,8 +392,8 @@ struct DockLayoutState {
     ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->Size);
 
     ImGuiID dockMain = dockspaceId;
-    ImGuiID dockBottom = ImGui::DockBuilderSplitNode(
-        dockMain, ImGuiDir_Down, 0.25f, nullptr, &dockMain);
+    ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,
+                                                     0.25f, nullptr, &dockMain);
 
     logDockId = dockBottom;
     ImGui::DockBuilderDockWindow(kLogWindowName, dockBottom);
@@ -423,6 +455,7 @@ struct ImGuiEditor::Impl {
   }
 
   void drawDockspaceRoot() {
+#ifdef IMGUI_HAS_DOCK
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
     setDockspaceWindowPlacement(viewport);
 
@@ -437,11 +470,10 @@ struct ImGuiEditor::Impl {
     const ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_PassthruCentralNode;
     const ImGuiID dockspaceId = ImGui::GetID(kDockspaceRootId);
     ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), dockFlags);
-#ifdef IMGUI_HAS_DOCK
     dockLayoutState.ensureLayout(dockspaceId, viewport);
-#endif
 
     ImGui::End();
+#endif
   }
 
   Window &window;
@@ -477,9 +509,11 @@ ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu)
   if (io.Fonts) {
     io.Fonts->Build();
   }
+#if defined(ImGuiConfigFlags_DockingEnable) || defined(IMGUI_HAS_DOCK)
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
   // Make docking work without needing to hold Shift.
   io.ConfigDockingWithShift = false;
+#endif
   io.IniFilename = nullptr;
 
   impl_->platform = ImGuiGlfwPlatform::create(impl_->window);

@@ -3,6 +3,9 @@
 #include "nuri/core/log.h"
 #include "nuri/ui/imgui_editor.h"
 
+#include <exception>
+#include <string>
+
 namespace nuri {
 
 std::unique_ptr<EditorLayer> EditorLayer::create(Window &window, GPUDevice &gpu,
@@ -25,8 +28,20 @@ Result<bool, std::string> EditorLayer::buildRenderPasses(RenderPassList &out) {
   }
 
   editor_->beginFrame();
-  if (callback_.callback) {
-    callback_.callback();
+  try {
+    if (callback_.callback) {
+      callback_.callback();
+    }
+  } catch (const std::exception &e) {
+    editor_->setFrameDeltaSeconds(frameDeltaSeconds_);
+    (void)editor_->endFrame();
+    return Result<bool, std::string>::makeError(
+        std::string("Editor callback threw: ") + e.what());
+  } catch (...) {
+    editor_->setFrameDeltaSeconds(frameDeltaSeconds_);
+    (void)editor_->endFrame();
+    return Result<bool, std::string>::makeError(
+        "Editor callback threw unknown exception");
   }
 
   editor_->setFrameDeltaSeconds(frameDeltaSeconds_);
