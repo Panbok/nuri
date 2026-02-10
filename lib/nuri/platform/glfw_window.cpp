@@ -4,12 +4,17 @@
 
 #include <GLFW/glfw3.h>
 #include <atomic>
+#include <mutex>
 
 namespace nuri {
 
 namespace {
 
 std::atomic<int> s_glfwRefCount{0};
+std::once_flag s_glfwInitOnce;
+std::atomic<bool> s_glfwInitSucceeded{false};
+
+void doGlfwInit() { s_glfwInitSucceeded.store(glfwInit()); }
 
 void glfwKeyCallback(GLFWwindow *window, int key, int /*scancode*/, int action,
                      int /*mods*/) {
@@ -41,15 +46,13 @@ GlfwWindow::~GlfwWindow() {
 
 std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
                                                int32_t width, int32_t height,
-                                               bool fullscreen,
-                                               bool borderlessFullscreen) {
-  int const prev = s_glfwRefCount.fetch_add(1);
-  if (prev == 0) {
-    if (!glfwInit()) {
-      s_glfwRefCount--;
-      NURI_LOG_WARNING("GlfwWindow::create: glfwInit failed");
-      return nullptr;
-    }
+                                               WindowMode mode) {
+  s_glfwRefCount.fetch_add(1);
+  std::call_once(s_glfwInitOnce, doGlfwInit);
+  if (!s_glfwInitSucceeded.load()) {
+    s_glfwRefCount--;
+    NURI_LOG_WARNING("GlfwWindow::create: glfwInit failed");
+    return nullptr;
   }
 
   auto window = std::unique_ptr<GlfwWindow>(new GlfwWindow());
@@ -65,9 +68,11 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     return nullptr;
   };
 
-  const bool wantExclusiveFullscreen = fullscreen && !borderlessFullscreen;
-  const bool wantBorderlessMonitorWindow = fullscreen && borderlessFullscreen;
-  const bool wantMaxCoverageWindow = !fullscreen && (width == 0 && height == 0);
+  const bool wantExclusiveFullscreen = (mode == WindowMode::Fullscreen);
+  const bool wantBorderlessMonitorWindow =
+      (mode == WindowMode::BorderlessFullscreen);
+  const bool wantMaxCoverageWindow =
+      (mode == WindowMode::Windowed && width == 0 && height == 0);
 
   GLFWmonitor *primaryMonitor = nullptr;
   const GLFWvidmode *primaryMode = nullptr;
@@ -85,6 +90,9 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     }
   }
 
+  int workAreaX = 0;
+  int workAreaY = 0;
+
   int32_t createWidth = width;
   int32_t createHeight = height;
   if (wantExclusiveFullscreen || wantBorderlessMonitorWindow) {
@@ -96,6 +104,8 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     int workW = 0;
     int workH = 0;
     glfwGetMonitorWorkarea(primaryMonitor, &workX, &workY, &workW, &workH);
+    workAreaX = workX;
+    workAreaY = workY;
     if (workW > 0 && workH > 0) {
       createWidth = static_cast<int32_t>(workW);
       createHeight = static_cast<int32_t>(workH);
@@ -151,13 +161,8 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     int targetX = 0;
     int targetY = 0;
     if (wantMaxCoverageWindow) {
-      int workX = 0;
-      int workY = 0;
-      int workW = 0;
-      int workH = 0;
-      glfwGetMonitorWorkarea(primaryMonitor, &workX, &workY, &workW, &workH);
-      targetX = workX;
-      targetY = workY;
+      targetX = workAreaX;
+      targetY = workAreaY;
     } else {
       glfwGetMonitorPos(primaryMonitor, &targetX, &targetY);
     }
@@ -165,19 +170,20 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     glfwFocusWindow(window->impl_->window);
   }
 
-  NURI_LOG_INFO("Window::create: Creating window '%.*s' (%d x %d)%s%s",
+  const char *modeStr = (mode == WindowMode::Fullscreen) ? " [fullscreen]"
+                        : (mode == WindowMode::BorderlessFullscreen)
+                            ? " [borderless fullscreen]"
+                            : "";
+  NURI_LOG_INFO("Window::create: Creating window '%.*s' (%d x %d)%s",
                 static_cast<int>(title.size()), title.data(), createWidth,
-                createHeight, fullscreen ? " [fullscreen]" : "",
-                (fullscreen && borderlessFullscreen) ? " [borderless]" : "");
+                createHeight, modeStr);
 
   return window;
 }
 
 std::unique_ptr<Window> Window::create(std::string_view title, int32_t width,
-                                       int32_t height, bool fullscreen,
-                                       bool borderlessFullscreen) {
-  return GlfwWindow::create(title, width, height, fullscreen,
-                            borderlessFullscreen);
+                                       int32_t height, WindowMode mode) {
+  return GlfwWindow::create(title, width, height, mode);
 }
 
 void GlfwWindow::pollEvents() { glfwPollEvents(); }

@@ -8,8 +8,7 @@ class GlfwWindow final : public Window {
 public:
   static std::unique_ptr<GlfwWindow> create(std::string_view title,
                                             int32_t width, int32_t height,
-                                            bool fullscreen = false,
-                                            bool borderlessFullscreen = false);
+                                            WindowMode mode = WindowMode::Windowed);
   ~GlfwWindow() override;
 
   GlfwWindow(const GlfwWindow &) = delete;

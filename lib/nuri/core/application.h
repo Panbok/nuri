@@ -12,21 +12,16 @@ struct NURI_API ApplicationConfig {
   std::int32_t width = 960;
   std::int32_t height = 540;
 
-  // Window mode:
-  // - fullscreen=true,  borderlessFullscreen=false: exclusive fullscreen
-  // - fullscreen=true,  borderlessFullscreen=true:  borderless monitor-sized
-  //   windowed mode
-  // - fullscreen=false, width=0 and height=0:      windowed with max screen
-  //   size coverage
-  bool fullscreen = false;
-  bool borderlessFullscreen = false;
+  // Window mode (mutually exclusive).
+  // Windowed with width=0 and height=0 uses max screen size coverage.
+  WindowMode windowMode = WindowMode::Windowed;
 };
 
 class NURI_API Application {
 public:
   explicit Application(const ApplicationConfig &config);
   Application(const std::string &title, std::int32_t width, std::int32_t height,
-              bool fullscreen = false, bool borderlessFullscreen = false);
+              WindowMode windowMode = WindowMode::Windowed);
   virtual ~Application();
 
   Application(const Application &) = delete;
@@ -63,8 +58,7 @@ private:
   std::string title_;
   std::int32_t width_;
   std::int32_t height_;
-  bool fullscreen_ = false;
-  bool borderlessFullscreen_ = false;
+  WindowMode windowMode_ = WindowMode::Windowed;
   std::unique_ptr<Window> window_;
   std::unique_ptr<GPUDevice> gpu_;
   std::unique_ptr<Renderer> renderer_;

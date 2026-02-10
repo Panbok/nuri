@@ -9,8 +9,7 @@ namespace nuri {
 
 Application::Application(const ApplicationConfig &config)
     : title_(config.title), width_(config.width), height_(config.height),
-      fullscreen_(config.fullscreen),
-      borderlessFullscreen_(config.borderlessFullscreen) {
+      windowMode_(config.windowMode) {
   Log::initialize({
       .filePath =
           std::filesystem::path(
@@ -22,8 +21,7 @@ Application::Application(const ApplicationConfig &config)
       .consoleLevel = LogLevel::Debug,
       .threadNames = false,
   });
-  window_ =
-      Window::create(title_, width_, height_, fullscreen_, borderlessFullscreen_);
+  window_ = Window::create(title_, width_, height_, windowMode_);
 
   // Sync initial size to the actual window framebuffer size (important for
   // fullscreen / monitor-sized window creation which can ignore the requested
@@ -43,14 +41,12 @@ Application::Application(const ApplicationConfig &config)
 }
 
 Application::Application(const std::string &title, std::int32_t width,
-                         std::int32_t height, bool fullscreen,
-                         bool borderlessFullscreen)
+                         std::int32_t height, WindowMode windowMode)
     : Application(ApplicationConfig{
           .title = title,
           .width = width,
           .height = height,
-          .fullscreen = fullscreen,
-          .borderlessFullscreen = borderlessFullscreen,
+          .windowMode = windowMode,
       }) {}
 
 Application::~Application() {

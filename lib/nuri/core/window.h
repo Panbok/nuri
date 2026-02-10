@@ -5,11 +5,17 @@
 
 namespace nuri {
 
+enum class WindowMode {
+  Windowed,
+  Fullscreen,
+  BorderlessFullscreen,
+};
+
 class NURI_API Window {
 public:
   static std::unique_ptr<Window> create(std::string_view title, int32_t width,
-                                        int32_t height, bool fullscreen = false,
-                                        bool borderlessFullscreen = false);
+                                        int32_t height,
+                                        WindowMode mode = WindowMode::Windowed);
   virtual ~Window() = default;
 
   Window(const Window &) = delete;
