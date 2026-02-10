@@ -8,7 +8,8 @@ namespace nuri {
 class NURI_API Window {
 public:
   static std::unique_ptr<Window> create(std::string_view title, int32_t width,
-                                        int32_t height);
+                                        int32_t height, bool fullscreen = false,
+                                        bool borderlessFullscreen = false);
   virtual ~Window() = default;
 
   Window(const Window &) = delete;
