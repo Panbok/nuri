@@ -29,6 +29,13 @@
 - Use `lib/nuri/core/profiling.h` macros for instrumentation (`NURI_PROFILER_FUNCTION`, `NURI_PROFILER_ZONE`, `NURI_PROFILER_FRAME`, `NURI_PROFILER_THREAD`).
 - Prefer a few high-level zones first (frame loop, renderer submit, resource creation/loading), then add finer-grained zones only where needed.
 
+## Logging
+- `fatal`: use for paths that will crash or abort the app.
+- `error`: use for paths that return a recoverable error that can be handled by callers.
+- `warning`: use for paths where behavior is unexpected but not critical to application function.
+- `info`: use for generic app behavior and user-relevant runtime information (device info, startup phases, etc.).
+- `debug`: use in non-hot paths to trace creation/initialization of resources and systems.
+
 ## Repo layout (high level)
 - `app/` contains the application entry point and sample usage.
 - `lib/nuri/` contains engine and renderer code (pipeline, shader, result).

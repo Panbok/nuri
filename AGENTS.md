@@ -32,6 +32,13 @@
   - `NURI_PROFILER_FRAME(name)` and `NURI_PROFILER_THREAD(name)`
 - Focus zones on likely bottlenecks (frame loop, render submission, shader compilation, asset loading). Keep zones coarse and meaningful; avoid spamming per-draw zones unless you’re drilling down.
 
+## Logging
+- `fatal`: use for paths that will crash or abort the app.
+- `error`: use for paths that return a recoverable error that can be handled by callers.
+- `warning`: use for paths where behavior is unexpected but not critical to application function.
+- `info`: use for generic app behavior and user-relevant runtime information (device info, startup phases, etc.).
+- `debug`: use in non-hot paths to trace creation/initialization of resources and systems.
+
 ## Repo layout (high level)
 - `app/` contains the application entry point and sample usage.
 - `lib/nuri/` contains engine and renderer code (pipeline, shader, result).
@@ -43,4 +50,3 @@
 ## Naming conventions
 - `ModelData` is CPU-side asset data; `Model` is the GPU/renderable object.
 - `Buffer` and `Texture` refer to GPU resources (wrapping LVK handles), not raw data containers.
-
