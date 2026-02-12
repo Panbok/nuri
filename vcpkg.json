@@ -2,6 +2,20 @@
   "name": "nuri",
   "version-string": "0.1.0",
   "dependencies": [
-    "glm"
+    "glm",
+    "assimp",
+    "stb",
+    "glfw3",
+    {
+      "name": "tracy",
+      "default-features": false
+    },
+    {
+      "name": "imgui",
+      "features": [
+        "docking-experimental",
+        "glfw-binding"
+      ]
+    }
   ]
 }
