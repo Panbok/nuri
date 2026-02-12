@@ -34,6 +34,7 @@ public:
 
   void onUpdate(double deltaTime);
   void onResize(int32_t width, int32_t height);
+  bool onInput(const InputEvent &event);
 
   Result<bool, std::string> appendRenderPasses(RenderPassList &out);
 

@@ -1,4 +1,5 @@
 #include "nuri/core/layer_stack.h"
+#include "nuri/core/log.h"
 
 #include <algorithm>
 #include <memory_resource>
@@ -6,9 +7,14 @@
 namespace nuri {
 
 LayerStack::LayerStack(std::pmr::memory_resource *mem)
-    : layers_(std::pmr::polymorphic_allocator<std::unique_ptr<Layer>>(mem)) {}
+    : layers_(std::pmr::polymorphic_allocator<std::unique_ptr<Layer>>(mem)) {
+  NURI_LOG_DEBUG("LayerStack::LayerStack: Layer stack created");
+}
 
-LayerStack::~LayerStack() { clear(); }
+LayerStack::~LayerStack() {
+  clear();
+  NURI_LOG_DEBUG("LayerStack::~LayerStack: Layer stack destroyed");
+}
 
 Layer *LayerStack::pushLayer(std::unique_ptr<Layer> layer) {
   if (!layer) {
@@ -81,6 +87,19 @@ void LayerStack::onResize(int32_t width, int32_t height) {
       layer->onResize(width, height);
     }
   }
+}
+
+bool LayerStack::onInput(const InputEvent &event) {
+  for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
+    Layer *layer = it->get();
+    if (!layer) {
+      continue;
+    }
+    if (layer->onInput(event)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void LayerStack::clear() {

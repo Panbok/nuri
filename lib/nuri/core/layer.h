@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/input_events.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_render_types.h"
@@ -26,6 +27,7 @@ public:
   virtual void onDetach() {}
   virtual void onUpdate(double deltaTime) {}
   virtual void onResize(int32_t width, int32_t height) {}
+  virtual bool onInput(const InputEvent &event) { return false; }
   virtual Result<bool, std::string> buildRenderPasses(RenderPassList &out);
 
 protected:
