@@ -11,6 +11,8 @@
 namespace nuri {
 
 namespace {
+constexpr size_t kMaxIncludeDepth = 128;
+
 [[nodiscard]] std::filesystem::path
 normalizePath(const std::filesystem::path &filePath) {
   std::error_code ec;
@@ -122,14 +124,14 @@ struct IncludeDirective {
   return directive;
 }
 
-[[nodiscard]] bool expandShaderIncludesRecursive(
-    const std::filesystem::path &filePath,
-    std::vector<std::filesystem::path> &includeStack, std::string &outCode,
-    std::string &errorMsg) {
+[[nodiscard]] bool
+expandShaderIncludesRecursive(const std::filesystem::path &filePath,
+                              std::vector<std::filesystem::path> &includeStack,
+                              std::string &outCode, std::string &errorMsg) {
   const std::filesystem::path normalizedPath = normalizePath(filePath);
 
-  const auto cycleIt = std::find(includeStack.begin(), includeStack.end(),
-                                 normalizedPath);
+  const auto cycleIt =
+      std::find(includeStack.begin(), includeStack.end(), normalizedPath);
   if (cycleIt != includeStack.end()) {
     std::ostringstream oss;
     oss << "Shader include cycle detected: ";
@@ -141,6 +143,13 @@ struct IncludeDirective {
     }
     oss << " -> " << normalizedPath.string();
     errorMsg = oss.str();
+    return false;
+  }
+
+  if (includeStack.size() >= kMaxIncludeDepth) {
+    errorMsg = "Shader include depth limit exceeded (max " +
+               std::to_string(kMaxIncludeDepth) +
+               "): " + normalizedPath.string();
     return false;
   }
 
@@ -263,10 +272,10 @@ Result<ShaderHandle, std::string> Shader::compileFromFile(std::string_view path,
                                      expandedCode, expandError)) {
     const std::string pathStr{path};
     NURI_LOG_WARNING(
-        "Shader::compileFromFile: Failed to load shader file '%s': %s",
+        "Shader::compileFromFile: Failed to load/expand shader file '%s': %s",
         pathStr.c_str(), expandError.c_str());
     return Result<ShaderHandle, std::string>::makeError(
-        "Failed to load shader file '" + pathStr + "': " + expandError);
+        "Failed to load/expand shader file '" + pathStr + "': " + expandError);
   }
 
   auto compileResult = compile(expandedCode, stage);

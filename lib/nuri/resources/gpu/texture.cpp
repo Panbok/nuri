@@ -4,63 +4,12 @@
 #include "nuri/core/profiling.h"
 #include "nuri/resources/cpu/bitmap.h"
 
-#include <bit>
-#include <cstring>
-#include <vector>
+#include "nuri/pch.h"
+
 #include <stb_image.h>
 
 namespace nuri {
 namespace {
-
-[[nodiscard]] uint16_t floatToHalf(float value) {
-  const uint32_t bits = std::bit_cast<uint32_t>(value);
-  const uint16_t sign = static_cast<uint16_t>((bits >> 16u) & 0x8000u);
-  const uint32_t exponent = (bits >> 23u) & 0xffu;
-  const uint32_t mantissa = bits & 0x007fffffu;
-
-  if (exponent == 0xffu) {
-    if (mantissa == 0u) {
-      return static_cast<uint16_t>(sign | 0x7c00u);
-    }
-    return static_cast<uint16_t>(sign | 0x7e00u);
-  }
-
-  int32_t halfExponent = static_cast<int32_t>(exponent) - 127 + 15;
-  if (halfExponent >= 31) {
-    return static_cast<uint16_t>(sign | 0x7c00u);
-  }
-
-  if (halfExponent <= 0) {
-    if (halfExponent < -10) {
-      return sign;
-    }
-
-    const uint32_t denormMantissa = mantissa | 0x00800000u;
-    const uint32_t shift = static_cast<uint32_t>(14 - halfExponent);
-    uint16_t halfMantissa = static_cast<uint16_t>(denormMantissa >> shift);
-    if (((denormMantissa >> (shift - 1u)) & 1u) != 0u) {
-      halfMantissa = static_cast<uint16_t>(halfMantissa + 1u);
-    }
-    return static_cast<uint16_t>(sign | halfMantissa);
-  }
-
-  uint16_t halfMantissa = static_cast<uint16_t>(mantissa >> 13u);
-  uint16_t halfExponentBits =
-      static_cast<uint16_t>(static_cast<uint32_t>(halfExponent) << 10u);
-
-  if ((mantissa & 0x00001000u) != 0u) {
-    halfMantissa = static_cast<uint16_t>(halfMantissa + 1u);
-    if (halfMantissa == 0x0400u) {
-      halfMantissa = 0;
-      halfExponentBits = static_cast<uint16_t>(halfExponentBits + 0x0400u);
-      if (halfExponentBits >= 0x7c00u) {
-        return static_cast<uint16_t>(sign | 0x7c00u);
-      }
-    }
-  }
-
-  return static_cast<uint16_t>(sign | halfExponentBits | halfMantissa);
-}
 
 [[nodiscard]] std::vector<std::byte>
 convertFloatBitmapToHalfBytes(std::span<const uint8_t> srcBytes) {
@@ -74,7 +23,7 @@ convertFloatBitmapToHalfBytes(std::span<const uint8_t> srcBytes) {
   for (size_t i = 0; i < floatCount; ++i) {
     float value = 0.0f;
     std::memcpy(&value, srcBytes.data() + (i * sizeof(float)), sizeof(float));
-    const uint16_t half = floatToHalf(value);
+    const uint16_t half = static_cast<uint16_t>(glm::packHalf1x16(value));
     std::memcpy(dstBytes.data() + (i * sizeof(uint16_t)), &half,
                 sizeof(uint16_t));
   }
@@ -100,18 +49,19 @@ Texture::create(GPUDevice &gpu, const TextureDesc &desc,
 }
 
 Result<std::unique_ptr<Texture>, std::string>
-Texture::loadTexture(GPUDevice &gpu, const std::string &filePath,
+Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
                      std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const std::string filePathStr(filePath);
   int32_t width = 0;
   int32_t height = 0;
   int32_t channels = 0;
-  void *pixels = stbi_load(filePath.c_str(), &width, &height, &channels, 4);
+  void *pixels = stbi_load(filePathStr.c_str(), &width, &height, &channels, 4);
   if (!pixels) {
     NURI_LOG_WARNING("Texture::loadTexture: Failed to load texture '%s': %s",
-                     filePath.c_str(), stbi_failure_reason());
+                     filePathStr.c_str(), stbi_failure_reason());
     return Result<std::unique_ptr<Texture>, std::string>::makeError(
-        "Failed to load texture from file: " + filePath + " " +
+        "Failed to load texture from file: " + filePathStr + " " +
         stbi_failure_reason());
   }
 
@@ -137,7 +87,7 @@ Texture::loadTexture(GPUDevice &gpu, const std::string &filePath,
   auto result = gpu.createTexture(desc, debugName);
   if (result.hasError()) {
     NURI_LOG_WARNING("Texture::loadTexture: Failed to create texture '%s': %s",
-                     filePath.c_str(), result.error().c_str());
+                     filePathStr.c_str(), result.error().c_str());
     stbi_image_free(pixels);
     return Result<std::unique_ptr<Texture>, std::string>::makeError(
         result.error());
@@ -146,7 +96,7 @@ Texture::loadTexture(GPUDevice &gpu, const std::string &filePath,
   stbi_image_free(pixels);
 
   NURI_LOG_DEBUG("Texture::loadTexture: Created texture from file '%s'",
-                 filePath.c_str());
+                 filePathStr.c_str());
 
   return Result<std::unique_ptr<Texture>, std::string>::makeResult(
       std::unique_ptr<Texture>(
@@ -162,7 +112,8 @@ Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
   int32_t width = 0;
   int32_t height = 0;
   int32_t channels = 0;
-  float *pixels = stbi_loadf(filePathStr.c_str(), &width, &height, &channels, 4);
+  float *pixels =
+      stbi_loadf(filePathStr.c_str(), &width, &height, &channels, 4);
   if (!pixels) {
     const char *reason = stbi_failure_reason();
     NURI_LOG_WARNING(
@@ -173,6 +124,8 @@ Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
         (reason ? std::string(reason) : std::string("unknown error")));
   }
 
+  // Bitmap copies pixel data via memcpy; safe to free stbi buffer after
+  // construction.
   const Bitmap equirectangular(width, height, 4, BitmapFormat::F32, pixels);
   stbi_image_free(pixels);
 
@@ -197,7 +150,7 @@ Texture::loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
   }
 
   const std::span<const std::byte> initialData(halfBytes.data(),
-                                                halfBytes.size());
+                                               halfBytes.size());
 
   TextureDesc desc{
       .type = TextureType::TextureCube,

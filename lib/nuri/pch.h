@@ -25,3 +25,4 @@
 
 #include <glm/ext.hpp>
 #include <glm/glm.hpp>
+#include <glm/gtc/packing.hpp>

@@ -3,6 +3,8 @@
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_device.h"
 
+#include <string_view>
+
 namespace nuri {
 
 class NURI_API Texture final {
@@ -19,7 +21,7 @@ public:
          std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
-  loadTexture(GPUDevice &gpu, const std::string &filePath,
+  loadTexture(GPUDevice &gpu, std::string_view filePath,
               std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>

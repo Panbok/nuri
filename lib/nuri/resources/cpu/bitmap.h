@@ -2,10 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <cmath>
 #include <memory_resource>
 #include <span>
 #include <vector>
@@ -13,11 +13,11 @@
 #include <glm/glm.hpp>
 #include <stb_image_resize2.h>
 
-#include "nuri/defines.h"
+#include "nuri/core/log.h"
 
 namespace nuri {
 
-enum class BitmapType : uint8_t { Bitmap2D, BitmapCube, Count };
+enum class BitmapType : uint8_t { Bitmap2D, BitmapCube, Bitmap3D, Count };
 
 enum class BitmapFormat : uint8_t { U8, F32, Count };
 
@@ -25,11 +25,10 @@ class Bitmap final {
 public:
   Bitmap() = default;
 
-  Bitmap(int32_t width, int32_t height, int32_t components,
-         BitmapFormat format,
+  Bitmap(int32_t width, int32_t height, int32_t components, BitmapFormat format,
          std::pmr::memory_resource *mem = std::pmr::get_default_resource())
-      : width_(width), height_(height), components_(std::clamp(components, 1, 4)),
-        format_(format), data_(mem) {
+      : width_(width), height_(height),
+        components_(std::clamp(components, 1, 4)), format_(format), data_(mem) {
     initGetSetFuncs();
     resizeData();
   }
@@ -38,7 +37,9 @@ public:
          BitmapFormat format,
          std::pmr::memory_resource *mem = std::pmr::get_default_resource())
       : width_(width), height_(height), depth_(depth),
-        components_(std::clamp(components, 1, 4)), format_(format), data_(mem) {
+        components_(std::clamp(components, 1, 4)), format_(format),
+        type_(depth > 1 ? BitmapType::Bitmap3D : BitmapType::Bitmap2D),
+        data_(mem) {
     initGetSetFuncs();
     resizeData();
   }
@@ -46,8 +47,8 @@ public:
   Bitmap(int32_t width, int32_t height, int32_t components, BitmapFormat format,
          const void *srcData,
          std::pmr::memory_resource *mem = std::pmr::get_default_resource())
-      : width_(width), height_(height), components_(std::clamp(components, 1, 4)),
-        format_(format), data_(mem) {
+      : width_(width), height_(height),
+        components_(std::clamp(components, 1, 4)), format_(format), data_(mem) {
     initGetSetFuncs();
     resizeData();
     if (srcData != nullptr && !data_.empty()) {
@@ -57,8 +58,8 @@ public:
 
   ~Bitmap() = default;
 
-  [[nodiscard]] static constexpr int32_t getBytesPerComponent(
-      BitmapFormat format) noexcept {
+  [[nodiscard]] static constexpr int32_t
+  getBytesPerComponent(BitmapFormat format) noexcept {
     switch (format) {
     case BitmapFormat::U8:
       return 1;
@@ -163,6 +164,7 @@ private:
       getPixelFn_ = &Bitmap::getPixelF32;
       break;
     default:
+      NURI_ASSERT(false, "Unknown BitmapFormat in initGetSetFuncs");
       setPixelFn_ = &Bitmap::setPixelU8;
       getPixelFn_ = &Bitmap::getPixelU8;
       break;
@@ -227,18 +229,23 @@ private:
       return;
     }
     const size_t baseComponentOffset = componentOffset2D(x, y);
-    const glm::vec4 clamped = glm::clamp(color, glm::vec4(0.0f), glm::vec4(1.0f));
+    const glm::vec4 clamped =
+        glm::clamp(color, glm::vec4(0.0f), glm::vec4(1.0f));
     if (components_ > 0) {
-      data_[baseComponentOffset + 0U] = static_cast<uint8_t>(clamped.x * 255.0f);
+      data_[baseComponentOffset + 0U] =
+          static_cast<uint8_t>(glm::round(clamped.x * 255.0f));
     }
     if (components_ > 1) {
-      data_[baseComponentOffset + 1U] = static_cast<uint8_t>(clamped.y * 255.0f);
+      data_[baseComponentOffset + 1U] =
+          static_cast<uint8_t>(glm::round(clamped.y * 255.0f));
     }
     if (components_ > 2) {
-      data_[baseComponentOffset + 2U] = static_cast<uint8_t>(clamped.z * 255.0f);
+      data_[baseComponentOffset + 2U] =
+          static_cast<uint8_t>(glm::round(clamped.z * 255.0f));
     }
     if (components_ > 3) {
-      data_[baseComponentOffset + 3U] = static_cast<uint8_t>(clamped.w * 255.0f);
+      data_[baseComponentOffset + 3U] =
+          static_cast<uint8_t>(glm::round(clamped.w * 255.0f));
     }
   }
 
@@ -248,18 +255,18 @@ private:
     }
     const size_t baseComponentOffset = componentOffset2D(x, y);
     return glm::vec4(
-        components_ > 0 ? static_cast<float>(data_[baseComponentOffset + 0U]) /
-                              255.0f
-                        : 0.0f,
-        components_ > 1 ? static_cast<float>(data_[baseComponentOffset + 1U]) /
-                              255.0f
-                        : 0.0f,
-        components_ > 2 ? static_cast<float>(data_[baseComponentOffset + 2U]) /
-                              255.0f
-                        : 0.0f,
-        components_ > 3 ? static_cast<float>(data_[baseComponentOffset + 3U]) /
-                              255.0f
-                        : 0.0f);
+        components_ > 0
+            ? static_cast<float>(data_[baseComponentOffset + 0U]) / 255.0f
+            : 0.0f,
+        components_ > 1
+            ? static_cast<float>(data_[baseComponentOffset + 1U]) / 255.0f
+            : 0.0f,
+        components_ > 2
+            ? static_cast<float>(data_[baseComponentOffset + 2U]) / 255.0f
+            : 0.0f,
+        components_ > 3
+            ? static_cast<float>(data_[baseComponentOffset + 3U]) / 255.0f
+            : 0.0f);
   }
 
   int32_t width_ = 0;
@@ -297,7 +304,8 @@ inline float Bitmap::radicalInverseVdC(uint32_t bits) noexcept {
   return static_cast<float>(bits) * 2.3283064365386963e-10F;
 }
 
-inline glm::vec2 Bitmap::hammersley2D(uint32_t i, uint32_t sampleCount) noexcept {
+inline glm::vec2 Bitmap::hammersley2D(uint32_t i,
+                                      uint32_t sampleCount) noexcept {
   if (sampleCount == 0U) {
     return glm::vec2(0.0F);
   }
@@ -305,8 +313,9 @@ inline glm::vec2 Bitmap::hammersley2D(uint32_t i, uint32_t sampleCount) noexcept
                    radicalInverseVdC(i));
 }
 
-inline void Bitmap::convolveLambertian(std::span<const glm::vec3> data, int32_t srcW,
-                                       int32_t srcH, int32_t dstW, int32_t dstH,
+inline void Bitmap::convolveLambertian(std::span<const glm::vec3> data,
+                                       int32_t srcW, int32_t srcH, int32_t dstW,
+                                       int32_t dstH,
                                        std::span<glm::vec3> output,
                                        int32_t numMonteCarloSamples) {
   if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0 ||
@@ -342,7 +351,8 @@ inline void Bitmap::convolveLambertian(std::span<const glm::vec3> data, int32_t 
   srcH = dstH;
 
   for (int32_t y = 0; y < dstH; ++y) {
-    const float theta1 = (static_cast<float>(y) / static_cast<float>(dstH)) * kPi;
+    const float theta1 =
+        (static_cast<float>(y) / static_cast<float>(dstH)) * kPi;
     for (int32_t x = 0; x < dstW; ++x) {
       const float phi1 =
           (static_cast<float>(x) / static_cast<float>(dstW)) * kTwoPi;
@@ -355,12 +365,12 @@ inline void Bitmap::convolveLambertian(std::span<const glm::vec3> data, int32_t 
         const glm::vec2 h =
             hammersley2D(static_cast<uint32_t>(i),
                          static_cast<uint32_t>(numMonteCarloSamples));
-        const int32_t x1 = std::clamp(static_cast<int32_t>(
-                                          std::floor(h.x * static_cast<float>(srcW))),
-                                      0, srcW - 1);
-        const int32_t y1 = std::clamp(static_cast<int32_t>(
-                                          std::floor(h.y * static_cast<float>(srcH))),
-                                      0, srcH - 1);
+        const int32_t x1 = std::clamp(
+            static_cast<int32_t>(std::floor(h.x * static_cast<float>(srcW))), 0,
+            srcW - 1);
+        const int32_t y1 = std::clamp(
+            static_cast<int32_t>(std::floor(h.y * static_cast<float>(srcH))), 0,
+            srcH - 1);
 
         const float theta2 =
             (static_cast<float>(y1) / static_cast<float>(srcH)) * kPi;
@@ -378,8 +388,8 @@ inline void Bitmap::convolveLambertian(std::span<const glm::vec3> data, int32_t 
       }
 
       output[static_cast<size_t>(y) * static_cast<size_t>(dstW) +
-             static_cast<size_t>(x)] = (weight > 0.0F) ? (color / weight)
-                                                       : glm::vec3(0.0F);
+             static_cast<size_t>(x)] =
+          (weight > 0.0F) ? (color / weight) : glm::vec3(0.0F);
     }
   }
 }
@@ -426,37 +436,46 @@ inline void Bitmap::convolveGGX(std::span<const glm::vec3> data, int32_t srcW,
     const float fx = wrappedU * static_cast<float>(srcW);
     const float fy = clampedV * static_cast<float>(srcH - 1);
 
-    const int32_t x0 = std::clamp(static_cast<int32_t>(std::floor(fx)), 0, srcW - 1);
-    const int32_t y0 = std::clamp(static_cast<int32_t>(std::floor(fy)), 0, srcH - 1);
+    const int32_t x0 =
+        std::clamp(static_cast<int32_t>(std::floor(fx)), 0, srcW - 1);
+    const int32_t y0 =
+        std::clamp(static_cast<int32_t>(std::floor(fy)), 0, srcH - 1);
     const int32_t x1 = (x0 + 1) % srcW;
     const int32_t y1 = std::min(y0 + 1, srcH - 1);
 
     const float tx = fx - static_cast<float>(x0);
     const float ty = fy - static_cast<float>(y0);
 
-    const glm::vec3 c00 = data[static_cast<size_t>(y0) * static_cast<size_t>(srcW) +
-                               static_cast<size_t>(x0)];
-    const glm::vec3 c10 = data[static_cast<size_t>(y0) * static_cast<size_t>(srcW) +
-                               static_cast<size_t>(x1)];
-    const glm::vec3 c01 = data[static_cast<size_t>(y1) * static_cast<size_t>(srcW) +
-                               static_cast<size_t>(x0)];
-    const glm::vec3 c11 = data[static_cast<size_t>(y1) * static_cast<size_t>(srcW) +
-                               static_cast<size_t>(x1)];
+    const glm::vec3 c00 =
+        data[static_cast<size_t>(y0) * static_cast<size_t>(srcW) +
+             static_cast<size_t>(x0)];
+    const glm::vec3 c10 =
+        data[static_cast<size_t>(y0) * static_cast<size_t>(srcW) +
+             static_cast<size_t>(x1)];
+    const glm::vec3 c01 =
+        data[static_cast<size_t>(y1) * static_cast<size_t>(srcW) +
+             static_cast<size_t>(x0)];
+    const glm::vec3 c11 =
+        data[static_cast<size_t>(y1) * static_cast<size_t>(srcW) +
+             static_cast<size_t>(x1)];
     const glm::vec3 cx0 = glm::mix(c00, c10, tx);
     const glm::vec3 cx1 = glm::mix(c01, c11, tx);
     return glm::mix(cx0, cx1, ty);
   };
 
   for (int32_t y = 0; y < dstH; ++y) {
-    const float theta = (static_cast<float>(y) / static_cast<float>(dstH)) * kPi;
+    const float theta =
+        (static_cast<float>(y) / static_cast<float>(dstH)) * kPi;
     for (int32_t x = 0; x < dstW; ++x) {
-      const float phi = (static_cast<float>(x) / static_cast<float>(dstW)) * kTwoPi;
+      const float phi =
+          (static_cast<float>(x) / static_cast<float>(dstW)) * kTwoPi;
       const glm::vec3 n(std::sin(theta) * std::cos(phi),
                         std::sin(theta) * std::sin(phi), std::cos(theta));
       const glm::vec3 v = n;
 
-      const glm::vec3 up = (std::abs(n.z) < 0.999F) ? glm::vec3(0.0F, 0.0F, 1.0F)
-                                                     : glm::vec3(1.0F, 0.0F, 0.0F);
+      const glm::vec3 up = (std::abs(n.z) < 0.999F)
+                               ? glm::vec3(0.0F, 0.0F, 1.0F)
+                               : glm::vec3(1.0F, 0.0F, 0.0F);
       const glm::vec3 tangent = glm::normalize(glm::cross(up, n));
       const glm::vec3 bitangent = glm::cross(n, tangent);
 
@@ -476,9 +495,9 @@ inline void Bitmap::convolveGGX(std::span<const glm::vec3> data, int32_t srcW,
 
         const glm::vec3 hTangent(std::cos(phiH) * sinThetaH,
                                  std::sin(phiH) * sinThetaH, cosThetaH);
-        const glm::vec3 h = glm::normalize((tangent * hTangent.x) +
-                                           (bitangent * hTangent.y) +
-                                           (n * hTangent.z));
+        const glm::vec3 h =
+            glm::normalize((tangent * hTangent.x) + (bitangent * hTangent.y) +
+                           (n * hTangent.z));
         glm::vec3 l = (2.0F * glm::dot(v, h) * h) - v;
         const float lLenSq = glm::dot(l, l);
         if (lLenSq <= 0.0F) {
@@ -532,7 +551,11 @@ inline glm::vec3 Bitmap::faceCoordsToXYZ(int32_t i, int32_t j, int32_t faceID,
 }
 
 inline Bitmap Bitmap::convertEquirectangularMapToVerticalCross() const {
-  if (type_ != BitmapType::Bitmap2D || width_ <= 0 || height_ <= 0 || data_.empty()) {
+  if (type_ != BitmapType::Bitmap2D || width_ <= 0 || height_ <= 0 ||
+      data_.empty()) {
+    return Bitmap();
+  }
+  if (width_ != 2 * height_) {
     return Bitmap();
   }
 
@@ -546,9 +569,12 @@ inline Bitmap Bitmap::convertEquirectangularMapToVerticalCross() const {
   Bitmap result(resultW, resultH, components_, format_, memoryResource());
 
   const std::array<glm::ivec2, 6> faceOffsets{
-      glm::ivec2(faceSize, faceSize * 3), glm::ivec2(0, faceSize),
-      glm::ivec2(faceSize, faceSize), glm::ivec2(faceSize * 2, faceSize),
-      glm::ivec2(faceSize, 0), glm::ivec2(faceSize, faceSize * 2)};
+      glm::ivec2(faceSize, faceSize * 3),
+      glm::ivec2(0, faceSize),
+      glm::ivec2(faceSize, faceSize),
+      glm::ivec2(faceSize * 2, faceSize),
+      glm::ivec2(faceSize, 0),
+      glm::ivec2(faceSize, faceSize * 2)};
 
   constexpr float kPi = 3.14159265358979323846F;
 
@@ -595,7 +621,8 @@ inline Bitmap Bitmap::convertEquirectangularMapToVerticalCross() const {
 }
 
 inline Bitmap Bitmap::convertVerticalCrossToCubeMapFaces() const {
-  if (type_ != BitmapType::Bitmap2D || width_ <= 0 || height_ <= 0 || data_.empty()) {
+  if (type_ != BitmapType::Bitmap2D || width_ <= 0 || height_ <= 0 ||
+      data_.empty()) {
     return Bitmap();
   }
 
