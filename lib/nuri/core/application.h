@@ -1,5 +1,8 @@
 #pragma once
 
+#include "nuri/core/event_manager.h"
+#include "nuri/core/input_events.h"
+#include "nuri/core/input_system.h"
 #include "nuri/core/layer_stack.h"
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
@@ -36,6 +39,7 @@ public:
   virtual void onUpdate(double deltaTime) = 0;
   virtual void onDraw() = 0;
   virtual void onResize(std::int32_t width, std::int32_t height) = 0;
+  virtual bool onInput(const InputEvent &event);
   virtual void onShutdown() = 0;
 
   GPUDevice &getGPU();
@@ -53,8 +57,15 @@ public:
   const Renderer &getRenderer() const;
   LayerStack &getLayerStack();
   const LayerStack &getLayerStack() const;
+  EventManager &getEventManager();
+  const EventManager &getEventManager() const;
+  InputSystem &getInput();
+  const InputSystem &getInput() const;
 
 private:
+  static bool dispatchInputEvent(const InputEvent &event, void *user);
+  bool handleInputEvent(const InputEvent &event);
+
   std::string title_;
   std::int32_t width_;
   std::int32_t height_;
@@ -63,6 +74,10 @@ private:
   std::unique_ptr<GPUDevice> gpu_;
   std::unique_ptr<Renderer> renderer_;
   LayerStack layerStack_;
+  std::pmr::unsynchronized_pool_resource eventMemory_;
+  EventManager eventManager_;
+  InputSystem input_;
+  SubscriptionToken inputDispatchSubscription_{};
 };
 
 } // namespace nuri
