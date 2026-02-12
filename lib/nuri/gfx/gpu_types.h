@@ -49,6 +49,7 @@ enum class Format : uint8_t {
   RGBA8_UNORM,
   RGBA8_SRGB,
   RGBA8_UINT,
+  RGBA16_FLOAT,
   D32_FLOAT,
   Count
 };
