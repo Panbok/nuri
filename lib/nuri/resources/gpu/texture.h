@@ -22,6 +22,11 @@ public:
   loadTexture(GPUDevice &gpu, const std::string &filePath,
               std::string_view debugName = {});
 
+  [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
+  loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
+                                    std::string_view filePath,
+                                    std::string_view debugName = {});
+
   [[nodiscard]] TextureHandle handle() const { return handle_; }
   [[nodiscard]] TextureType type() const { return type_; }
   [[nodiscard]] Format format() const { return format_; }
