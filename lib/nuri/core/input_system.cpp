@@ -113,6 +113,8 @@ bool InputSystem::handleRawKey(const RawKeyEvent &event) {
       }
       keyDown_.reset(idx);
       break;
+    default:
+      break;
     }
   }
 
@@ -151,6 +153,8 @@ bool InputSystem::handleRawMouseButton(const RawMouseButtonEvent &event) {
         mouseReleased_.set(idx);
       }
       mouseDown_.reset(idx);
+      break;
+    default:
       break;
     }
   }
@@ -205,6 +209,9 @@ bool InputSystem::handleRawFocus(const RawFocusEvent &event) {
   if (!event.focused) {
     keyDown_.reset();
     mouseDown_.reset();
+    hasMousePosition_ = false;
+    mousePosition_ = glm::dvec2(0.0, 0.0);
+    mouseDelta_ = glm::dvec2(0.0, 0.0);
   }
 
   InputEvent out{};
@@ -216,6 +223,12 @@ bool InputSystem::handleRawFocus(const RawFocusEvent &event) {
 }
 
 bool InputSystem::handleRawCursorEnter(const RawCursorEnterEvent &event) {
+  if (!event.entered) {
+    hasMousePosition_ = false;
+    mousePosition_ = glm::dvec2(0.0, 0.0);
+    mouseDelta_ = glm::dvec2(0.0, 0.0);
+  }
+
   InputEvent out{};
   out.type = InputEventType::CursorEnter;
   out.deviceId = event.deviceId;

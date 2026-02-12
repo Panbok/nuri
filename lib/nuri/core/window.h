@@ -39,6 +39,12 @@ public:
   virtual void requestClose() = 0;
   virtual void setCursorMode(CursorMode mode) = 0;
   [[nodiscard]] virtual CursorMode getCursorMode() const = 0;
+
+  /** Binds an event manager to receive window events.
+   * @param events Non-owning pointer to the event manager; must outlive this
+   * window.
+   * Pass nullptr to unbind.
+   */
   virtual void bindEventManager(EventManager *events) = 0;
 
 protected:

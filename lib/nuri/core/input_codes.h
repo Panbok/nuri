@@ -132,6 +132,9 @@ enum class Key : uint16_t {
   Count = 512,
 };
 
+// Unknown is 0xff so that platform button indices (e.g. GLFW 0–7) map directly
+// to Left..Button7 without shifting. Default/zero-initialized MouseButton is
+// therefore Left; use explicit Unknown when “no button” is required.
 enum class MouseButton : uint8_t {
   Unknown = 0xff,
   Left = 0,

@@ -1,3 +1,5 @@
+#extension GL_EXT_buffer_reference : require
+
 layout(std430, buffer_reference) readonly buffer PerFrameData {
   mat4 model;
   mat4 view;

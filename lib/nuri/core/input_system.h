@@ -6,6 +6,8 @@
 
 #include <bitset>
 
+#include <glm/vec2.hpp>
+
 namespace nuri {
 
 class NURI_API InputSystem {
