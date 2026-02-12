@@ -1,12 +1,15 @@
 #include "nuri/gfx/renderer.h"
 
 #include "nuri/core/layer_stack.h"
+#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
 
 namespace nuri {
 
-Renderer::Renderer(GPUDevice &gpu) : gpu_(gpu) {}
+Renderer::Renderer(GPUDevice &gpu) : gpu_(gpu) {
+  NURI_LOG_DEBUG("Renderer::Renderer: Renderer created");
+}
 
 Result<bool, std::string> Renderer::render(const RenderFrame &frame) {
   NURI_PROFILER_FUNCTION();
