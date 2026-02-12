@@ -1,14 +1,21 @@
 #pragma once
 
+#include "nuri/core/event_manager.h"
 #include "nuri/defines.h"
 #include "nuri/pch.h"
 
 namespace nuri {
 
-enum class WindowMode {
+enum class WindowMode : uint8_t {
   Windowed,
   Fullscreen,
   BorderlessFullscreen,
+};
+
+enum class CursorMode : uint8_t {
+  Normal,
+  Hidden,
+  Disabled,
 };
 
 class NURI_API Window {
@@ -29,6 +36,10 @@ public:
                                   int32_t &outHeight) const = 0;
   virtual double getTime() const = 0;
   virtual void *nativeHandle() const = 0;
+  virtual void requestClose() = 0;
+  virtual void setCursorMode(CursorMode mode) = 0;
+  [[nodiscard]] virtual CursorMode getCursorMode() const = 0;
+  virtual void bindEventManager(EventManager *events) = 0;
 
 protected:
   Window() = default;
