@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +13,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -23,6 +26,12 @@
 #include <utility>
 #include <vector>
 
+#include <glm/common.hpp>
 #include <glm/ext.hpp>
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/packing.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+#include <imgui.h>
