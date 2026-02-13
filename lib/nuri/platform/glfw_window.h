@@ -22,6 +22,10 @@ public:
                           int32_t &outHeight) const override;
   double getTime() const override;
   void *nativeHandle() const override;
+  void requestClose() override;
+  void setCursorMode(CursorMode mode) override;
+  CursorMode getCursorMode() const override;
+  void bindEventManager(EventManager *events) override;
 
 private:
   GlfwWindow();

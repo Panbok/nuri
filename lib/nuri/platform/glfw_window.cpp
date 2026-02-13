@@ -1,5 +1,7 @@
 #include "nuri/platform/glfw_window.h"
 
+#include "nuri/core/event_manager.h"
+#include "nuri/core/input_events.h"
 #include "nuri/core/log.h"
 
 #include <GLFW/glfw3.h>
@@ -16,23 +18,165 @@ std::atomic<bool> s_glfwInitSucceeded{false};
 
 void doGlfwInit() { s_glfwInitSucceeded.store(glfwInit()); }
 
-void glfwKeyCallback(GLFWwindow *window, int key, int /*scancode*/, int action,
-                     int /*mods*/) {
-  if (!window) {
-    return;
-  }
-  if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-    glfwSetWindowShouldClose(window, GLFW_TRUE);
-  }
-}
-
 } // namespace
 
 struct GlfwWindow::Impl {
   GLFWwindow *window = nullptr;
+  CursorMode cursorMode = CursorMode::Normal;
 };
 
 GlfwWindow::GlfwWindow() : impl_(std::make_unique<Impl>()) {}
+
+namespace {
+
+Key mapGlfwKey(int key) {
+  if (key == GLFW_KEY_UNKNOWN) {
+    return Key::Unknown;
+  }
+  if (key < 0 || key >= static_cast<int>(Key::Count)) {
+    return Key::Unknown;
+  }
+  return static_cast<Key>(static_cast<uint16_t>(key));
+}
+
+KeyAction mapGlfwKeyAction(int action) {
+  switch (action) {
+  case GLFW_PRESS:
+    return KeyAction::Press;
+  case GLFW_RELEASE:
+    return KeyAction::Release;
+  case GLFW_REPEAT:
+    return KeyAction::Repeat;
+  default:
+    return KeyAction::Release;
+  }
+}
+
+MouseButton mapGlfwMouseButton(int button) {
+  if (button < 0 || button >= static_cast<int>(MouseButton::Count)) {
+    return MouseButton::Unknown;
+  }
+  return static_cast<MouseButton>(static_cast<uint8_t>(button));
+}
+
+MouseAction mapGlfwMouseAction(int action) {
+  return action == GLFW_PRESS ? MouseAction::Press : MouseAction::Release;
+}
+
+KeyMod mapGlfwMods(int mods) {
+  KeyMod out = KeyMod::None;
+  if ((mods & GLFW_MOD_SHIFT) != 0) {
+    out |= KeyMod::Shift;
+  }
+  if ((mods & GLFW_MOD_CONTROL) != 0) {
+    out |= KeyMod::Control;
+  }
+  if ((mods & GLFW_MOD_ALT) != 0) {
+    out |= KeyMod::Alt;
+  }
+  if ((mods & GLFW_MOD_SUPER) != 0) {
+    out |= KeyMod::Super;
+  }
+#if defined(GLFW_MOD_CAPS_LOCK)
+  if ((mods & GLFW_MOD_CAPS_LOCK) != 0) {
+    out |= KeyMod::CapsLock;
+  }
+#endif
+#if defined(GLFW_MOD_NUM_LOCK)
+  if ((mods & GLFW_MOD_NUM_LOCK) != 0) {
+    out |= KeyMod::NumLock;
+  }
+#endif
+  return out;
+}
+
+int toGlfwCursorMode(CursorMode mode) {
+  switch (mode) {
+  case CursorMode::Normal:
+    return GLFW_CURSOR_NORMAL;
+  case CursorMode::Hidden:
+    return GLFW_CURSOR_HIDDEN;
+  case CursorMode::Disabled:
+    return GLFW_CURSOR_DISABLED;
+  }
+  return GLFW_CURSOR_NORMAL;
+}
+
+EventManager *getEventManager(GLFWwindow *window) {
+  if (!window) {
+    return nullptr;
+  }
+  return static_cast<EventManager *>(glfwGetWindowUserPointer(window));
+}
+
+template <typename T> void emitRaw(GLFWwindow *window, const T &event) {
+  EventManager *events = getEventManager(window);
+  if (!events) {
+    return;
+  }
+  events->emit(event, EventChannel::RawInput);
+}
+
+void emitRawKeyEvent(GLFWwindow *window, int key, int scancode, int action,
+                     int mods) {
+  const RawKeyEvent event{
+      .key = mapGlfwKey(key),
+      .scancode = scancode,
+      .action = mapGlfwKeyAction(action),
+      .mods = mapGlfwMods(mods),
+  };
+  emitRaw(window, event);
+}
+
+void emitRawCharEvent(GLFWwindow *window, unsigned int codepoint) {
+  const RawCharEvent event{
+      .codepoint = static_cast<uint32_t>(codepoint),
+  };
+  emitRaw(window, event);
+}
+
+void emitRawMouseButtonEvent(GLFWwindow *window, int button, int action,
+                             int mods) {
+  const RawMouseButtonEvent event{
+      .button = mapGlfwMouseButton(button),
+      .action = mapGlfwMouseAction(action),
+      .mods = mapGlfwMods(mods),
+  };
+  emitRaw(window, event);
+}
+
+void emitRawMouseMoveEvent(GLFWwindow *window, double x, double y) {
+  const RawMouseMoveEvent event{
+      .x = x,
+      .y = y,
+  };
+  emitRaw(window, event);
+}
+
+void emitRawMouseScrollEvent(GLFWwindow *window, double xOffset,
+                             double yOffset) {
+  const RawMouseScrollEvent event{
+      .xOffset = xOffset,
+      .yOffset = yOffset,
+  };
+  emitRaw(window, event);
+}
+
+void emitRawFocusEvent(GLFWwindow *window, int focused) {
+  const RawFocusEvent event{
+      .focused = focused != 0,
+  };
+  emitRaw(window, event);
+}
+
+void emitRawCursorEnterEvent(GLFWwindow *window, int entered) {
+  const RawCursorEnterEvent event{
+      .entered = entered != 0,
+  };
+  emitRaw(window, event);
+}
+
+} // namespace
 
 GlfwWindow::~GlfwWindow() {
   if (impl_ && impl_->window) {
@@ -154,7 +298,16 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
     return fail();
   }
 
-  glfwSetKeyCallback(window->impl_->window, glfwKeyCallback);
+  glfwSetWindowUserPointer(window->impl_->window, nullptr);
+  glfwSetKeyCallback(window->impl_->window, emitRawKeyEvent);
+  glfwSetCharCallback(window->impl_->window, emitRawCharEvent);
+  glfwSetMouseButtonCallback(window->impl_->window, emitRawMouseButtonEvent);
+  glfwSetCursorPosCallback(window->impl_->window, emitRawMouseMoveEvent);
+  glfwSetScrollCallback(window->impl_->window, emitRawMouseScrollEvent);
+  glfwSetWindowFocusCallback(window->impl_->window, emitRawFocusEvent);
+  glfwSetCursorEnterCallback(window->impl_->window, emitRawCursorEnterEvent);
+  glfwSetInputMode(window->impl_->window, GLFW_CURSOR,
+                   toGlfwCursorMode(window->impl_->cursorMode));
 
   if ((wantBorderlessMonitorWindow || wantMaxCoverageWindow) &&
       primaryMonitor) {
@@ -174,9 +327,9 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
                         : (mode == WindowMode::BorderlessFullscreen)
                             ? " [borderless fullscreen]"
                             : "";
-  NURI_LOG_INFO("Window::create: Creating window '%.*s' (%d x %d)%s",
-                static_cast<int>(title.size()), title.data(), createWidth,
-                createHeight, modeStr);
+  NURI_LOG_DEBUG("Window::create: Creating window '%.*s' (%d x %d)%s",
+                 static_cast<int>(title.size()), title.data(), createWidth,
+                 createHeight, modeStr);
 
   return window;
 }
@@ -209,5 +362,33 @@ void GlfwWindow::getFramebufferSize(int32_t &outWidth,
 double GlfwWindow::getTime() const { return glfwGetTime(); }
 
 void *GlfwWindow::nativeHandle() const { return impl_->window; }
+
+void GlfwWindow::requestClose() {
+  if (impl_ && impl_->window) {
+    glfwSetWindowShouldClose(impl_->window, GLFW_TRUE);
+  }
+}
+
+void GlfwWindow::setCursorMode(CursorMode mode) {
+  if (!impl_ || !impl_->window) {
+    return;
+  }
+
+  impl_->cursorMode = mode;
+  glfwSetInputMode(impl_->window, GLFW_CURSOR, toGlfwCursorMode(mode));
+}
+
+CursorMode GlfwWindow::getCursorMode() const {
+  if (!impl_) {
+    return CursorMode::Normal;
+  }
+  return impl_->cursorMode;
+}
+
+void GlfwWindow::bindEventManager(EventManager *events) {
+  if (impl_ && impl_->window) {
+    glfwSetWindowUserPointer(impl_->window, events);
+  }
+}
 
 } // namespace nuri
