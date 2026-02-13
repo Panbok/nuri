@@ -4,6 +4,7 @@
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
 
+#include <algorithm>
 #include <cstring>
 #include <deque>
 #include <lvk/LVK.h>
@@ -542,6 +543,14 @@ void LvkGPUDevice::resizeSwapchain(int32_t width, int32_t height) {
     return Result<bool, std::string>::makeResult(true);
   };
 
+  impl_->framebufferTextures.erase(
+      std::remove_if(impl_->framebufferTextures.begin(),
+                     impl_->framebufferTextures.end(),
+                     [this](const FramebufferTexture &entry) {
+                       return !impl_->textures.isValid(entry.handle);
+                     }),
+      impl_->framebufferTextures.end());
+
   const auto framebufferWidth = static_cast<uint32_t>(width);
   const auto framebufferHeight = static_cast<uint32_t>(height);
   for (const auto &entry : impl_->framebufferTextures) {
@@ -1071,6 +1080,14 @@ void LvkGPUDevice::destroyTexture(TextureHandle texture) {
   if (!impl_) {
     return;
   }
+  impl_->framebufferTextures.erase(
+      std::remove_if(impl_->framebufferTextures.begin(),
+                     impl_->framebufferTextures.end(),
+                     [texture](const FramebufferTexture &entry) {
+                       return entry.handle.index == texture.index &&
+                              entry.handle.generation == texture.generation;
+                     }),
+      impl_->framebufferTextures.end());
   impl_->textures.deallocate(texture);
 }
 
