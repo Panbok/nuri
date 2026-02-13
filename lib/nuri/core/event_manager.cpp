@@ -6,11 +6,8 @@ std::atomic<uint32_t> g_nextTypeId{0};
 } // namespace
 
 EventManager::EventManager(std::pmr::memory_resource &upstream)
-    : upstream_(upstream), arena_(&upstream_), channels_{
-                                                   ChannelState(upstream_),
-                                                   ChannelState(upstream_),
-                                                   ChannelState(upstream_),
-                                               } {
+    : upstream_(upstream), arena_(&upstream_),
+      channels_(makeChannels(upstream_, std::make_index_sequence<kChannelCount>{})) {
   NURI_LOG_DEBUG("EventManager::EventManager: Event manager created");
 }
 

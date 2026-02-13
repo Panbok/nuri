@@ -4,7 +4,12 @@
 #include "nuri/defines.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstring>
+#include <utility>
+#include <memory_resource>
+#include <type_traits>
 
 namespace nuri {
 
@@ -12,6 +17,7 @@ enum class EventChannel : uint8_t {
   Generic = 0,
   RawInput = 1,
   Input = 2,
+  Count
 };
 
 struct SubscriptionToken {
@@ -45,7 +51,7 @@ public:
 
 private:
   static constexpr size_t kChannelCount =
-      static_cast<size_t>(EventChannel::Input) + 1;
+      static_cast<size_t>(EventChannel::Count);
 
   struct QueuedEvent {
     uint32_t typeId = 0;
@@ -72,7 +78,7 @@ private:
 
     bool dispatch(const void *event, bool stopOnConsume) override {
       const T &typed = *static_cast<const T *>(event);
-      inDispatch = true;
+      ++dispatchDepth;
 
       bool consumed = false;
       for (Entry &entry : entries) {
@@ -86,8 +92,8 @@ private:
         }
       }
 
-      inDispatch = false;
-      if (needsCompact) {
+      --dispatchDepth;
+      if (needsCompact && dispatchDepth == 0) {
         compact();
       }
       return consumed;
@@ -117,7 +123,7 @@ private:
           continue;
         }
 
-        if (inDispatch) {
+        if (dispatchDepth > 0) {
           entry.active = false;
           needsCompact = true;
           return true;
@@ -139,7 +145,7 @@ private:
     }
 
     std::pmr::vector<Entry> entries;
-    bool inDispatch = false;
+    int dispatchDepth = 0;
     bool needsCompact = false;
   };
 
@@ -163,6 +169,13 @@ private:
     std::destroy_at(typed);
     std::pmr::polymorphic_allocator<HandlerList<T>> alloc(&mr);
     alloc.deallocate(typed, 1);
+  }
+
+  template <size_t... Is>
+  static std::array<ChannelState, kChannelCount>
+  makeChannels(std::pmr::memory_resource &upstream,
+               std::index_sequence<Is...>) {
+    return {{((void)Is, ChannelState(upstream))...}};
   }
 
   static constexpr size_t channelIndex(EventChannel channel) {

@@ -33,14 +33,12 @@ Application::Application(const ApplicationConfig &config)
   // Sync initial size to the actual window framebuffer size (important for
   // fullscreen / monitor-sized window creation which can ignore the requested
   // width/height).
-  if (window_) {
-    int32_t fbw = 0;
-    int32_t fbh = 0;
-    window_->getFramebufferSize(fbw, fbh);
-    if (fbw > 0 && fbh > 0) {
-      width_ = fbw;
-      height_ = fbh;
-    }
+  int32_t fbw = 0;
+  int32_t fbh = 0;
+  window_->getFramebufferSize(fbw, fbh);
+  if (fbw > 0 && fbh > 0) {
+    width_ = fbw;
+    height_ = fbh;
   }
 
   gpu_ = GPUDevice::create(*window_);
