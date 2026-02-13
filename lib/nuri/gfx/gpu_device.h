@@ -24,7 +24,6 @@ public:
   GPUDevice &operator=(GPUDevice &&) = delete;
 
   // Window/Swapchain
-  virtual void pollEvents() = 0;
   virtual bool shouldClose() const = 0;
   virtual void getFramebufferSize(int32_t &outWidth,
                                   int32_t &outHeight) const = 0;
@@ -64,6 +63,9 @@ public:
   virtual Format getTextureFormat(TextureHandle h) const = 0;
   // Bindless index used by LVK shaders (kTextures2D[]).
   virtual uint32_t getTextureBindlessIndex(TextureHandle h) const = 0;
+  // GPU virtual address used by LVK shaders (GL_EXT_buffer_reference).
+  virtual uint64_t getBufferDeviceAddress(BufferHandle h,
+                                          size_t offset = 0) const = 0;
 
   // Rendering
   virtual Result<bool, std::string> submitFrame(const RenderFrame &frame) = 0;
