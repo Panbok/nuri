@@ -23,6 +23,8 @@ lvk::Format toLvkFormat(Format format) {
     return lvk::Format_RGBA_SRGB8;
   case Format::RGBA8_UINT:
     return lvk::Format_RGBA_UI32;
+  case Format::RGBA16_FLOAT:
+    return lvk::Format_RGBA_F16;
   case Format::D32_FLOAT:
     return lvk::Format_Z_F32;
   case Format::Count:
@@ -39,6 +41,8 @@ Format fromLvkFormat(lvk::Format format) {
     return Format::RGBA8_SRGB;
   case lvk::Format_RGBA_UI32:
     return Format::RGBA8_UINT;
+  case lvk::Format_RGBA_F16:
+    return Format::RGBA16_FLOAT;
   case lvk::Format_Z_F32:
     return Format::D32_FLOAT;
   default:
@@ -470,15 +474,8 @@ std::unique_ptr<LvkGPUDevice> LvkGPUDevice::create(Window &window) {
 }
 
 std::unique_ptr<GPUDevice> GPUDevice::create(Window &window) {
-  NURI_LOG_INFO("GPUDevice::create: Creating Vulkan GPU device");
+  NURI_LOG_DEBUG("GPUDevice::create: Creating Vulkan GPU device");
   return LvkGPUDevice::create(window);
-}
-
-void LvkGPUDevice::pollEvents() {
-  NURI_PROFILER_FUNCTION();
-  if (impl_->window) {
-    impl_->window->pollEvents();
-  }
 }
 
 bool LvkGPUDevice::shouldClose() const {
@@ -1092,6 +1089,19 @@ uint32_t LvkGPUDevice::getTextureBindlessIndex(TextureHandle h) const {
     return 0;
   }
   return impl_->textures.getLvkHandle(h).index();
+}
+
+uint64_t LvkGPUDevice::getBufferDeviceAddress(BufferHandle h,
+                                              size_t offset) const {
+  if (!impl_->buffers.isValid(h)) {
+    return 0;
+  }
+  if ((offset & 7u) != 0u) {
+    NURI_LOG_WARNING("LvkGPUDevice::getBufferDeviceAddress: Offset must be "
+                     "8-byte aligned");
+    return 0;
+  }
+  return impl_->context->gpuAddress(impl_->buffers.getLvkHandle(h), offset);
 }
 
 Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {

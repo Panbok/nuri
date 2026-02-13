@@ -14,7 +14,6 @@ public:
   LvkGPUDevice &operator=(LvkGPUDevice &&) = delete;
 
   // Window/Swapchain
-  void pollEvents() override;
   bool shouldClose() const override;
   void getFramebufferSize(int32_t &outWidth, int32_t &outHeight) const override;
   void resizeSwapchain(int32_t width, int32_t height) override;
@@ -55,6 +54,8 @@ public:
   bool isValid(ComputePipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
+  uint64_t getBufferDeviceAddress(BufferHandle h,
+                                  size_t offset = 0) const override;
 
   // Rendering
   Result<bool, std::string> submitFrame(const RenderFrame &frame) override;
