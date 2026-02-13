@@ -53,6 +53,9 @@ public:
 
   virtual void destroyRenderPipeline(RenderPipelineHandle pipeline) = 0;
   virtual void destroyComputePipeline(ComputePipelineHandle pipeline) = 0;
+  virtual void destroyBuffer(BufferHandle buffer) = 0;
+  virtual void destroyTexture(TextureHandle texture) = 0;
+  virtual void destroyShaderModule(ShaderHandle shader) = 0;
 
   // Resource queries
   virtual bool isValid(BufferHandle h) const = 0;

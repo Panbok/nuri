@@ -22,7 +22,10 @@ int toGlfwKeyAction(KeyAction action) {
     return GLFW_RELEASE;
   case KeyAction::Repeat:
     return GLFW_REPEAT;
+  default:
+    return GLFW_RELEASE;
   }
+
   return GLFW_RELEASE;
 }
 
@@ -38,6 +41,8 @@ int toGlfwMouseAction(MouseAction action) {
   case MouseAction::Press:
     return GLFW_PRESS;
   case MouseAction::Release:
+    return GLFW_RELEASE;
+  default:
     return GLFW_RELEASE;
   }
   return GLFW_RELEASE;

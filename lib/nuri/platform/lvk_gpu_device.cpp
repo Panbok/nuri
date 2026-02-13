@@ -1060,6 +1060,27 @@ void LvkGPUDevice::destroyComputePipeline(ComputePipelineHandle pipeline) {
   impl_->computePipelines.deallocate(pipeline);
 }
 
+void LvkGPUDevice::destroyBuffer(BufferHandle buffer) {
+  if (!impl_) {
+    return;
+  }
+  impl_->buffers.deallocate(buffer);
+}
+
+void LvkGPUDevice::destroyTexture(TextureHandle texture) {
+  if (!impl_) {
+    return;
+  }
+  impl_->textures.deallocate(texture);
+}
+
+void LvkGPUDevice::destroyShaderModule(ShaderHandle shader) {
+  if (!impl_) {
+    return;
+  }
+  impl_->shaders.deallocate(shader);
+}
+
 bool LvkGPUDevice::isValid(BufferHandle h) const {
   return impl_->buffers.isValid(h);
 }

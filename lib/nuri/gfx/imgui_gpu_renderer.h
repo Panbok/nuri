@@ -55,8 +55,8 @@ private:
 
   std::vector<DrawItem> draws_;
   struct PushConstants {
-    float LRTB[4];
-    uint32_t textureId;
+    float lrtb[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    uint32_t textureId = 0;
     uint32_t _pad0 = 0;
     uint32_t _pad1 = 0;
     uint32_t _pad2 = 0;

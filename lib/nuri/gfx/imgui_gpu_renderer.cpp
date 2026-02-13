@@ -1,15 +1,10 @@
 #include "nuri/gfx/imgui_gpu_renderer.h"
 
+#include "nuri/pch.h"
+
 #include "nuri/core/log.h"
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
-
-#include <imgui.h>
-
-#include <algorithm>
-#include <cstring>
-#include <span>
-#include <type_traits>
 
 namespace nuri {
 
@@ -29,15 +24,15 @@ layout(location = 0) out vec2 outUV;
 layout(location = 1) out vec4 outColor;
 
 layout(push_constant) uniform PushConstants {
-  vec4 LRTB; // left, right, top, bottom
+  vec4 lrtb; // left, right, top, bottom
   uint textureId;
 } pc;
 
 void main() {
-  float L = pc.LRTB.x;
-  float R = pc.LRTB.y;
-  float T = pc.LRTB.z;
-  float B = pc.LRTB.w;
+  float L = pc.lrtb.x;
+  float R = pc.lrtb.y;
+  float T = pc.lrtb.z;
+  float B = pc.lrtb.w;
 
   mat4 proj = mat4(
     2.0 / (R - L),                   0.0,  0.0, 0.0,
@@ -72,7 +67,7 @@ layout(location = 1) in vec4 inColor;
 layout(location = 0) out vec4 outColor;
 
 layout(push_constant) uniform PushConstants {
-  vec4 LRTB; // left, right, top, bottom
+  vec4 lrtb; // left, right, top, bottom
   uint textureId;
 } pc;
 
@@ -91,11 +86,17 @@ inline ImTextureID toImTextureID(uint32_t id) {
 }
 
 inline uint32_t fromImTextureID(ImTextureID id) {
-  if constexpr (std::is_pointer_v<ImTextureID>) {
-    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(id));
-  } else {
-    return static_cast<uint32_t>(static_cast<uintptr_t>(id));
+  const uintptr_t raw = std::is_pointer_v<ImTextureID>
+                            ? reinterpret_cast<uintptr_t>(id)
+                            : static_cast<uintptr_t>(id);
+  if (raw > static_cast<uintptr_t>(UINT32_MAX)) {
+    NURI_LOG_WARNING("fromImTextureID: ImTextureID value 0x%" PRIxPTR
+                     " exceeds UINT32_MAX",
+                     raw);
+    NURI_ASSERT(raw <= static_cast<uintptr_t>(UINT32_MAX),
+                "ImTextureID must fit in uint32_t");
   }
+  return static_cast<uint32_t>(raw);
 }
 
 } // namespace
@@ -127,6 +128,12 @@ Result<bool, std::string> ImGuiGpuRenderer::ensureFontTexture() {
       static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
   const std::span<const std::byte> data{
       reinterpret_cast<const std::byte *>(pixels), dataSize};
+
+  if (nuri::isValid(fontTexture_)) {
+    gpu_.destroyTexture(fontTexture_);
+    fontTexture_ = TextureHandle{};
+    fontTextureId_ = 0;
+  }
 
   TextureDesc desc{
       .type = TextureType::Texture2D,
@@ -164,6 +171,15 @@ ImGuiGpuRenderer::ensurePipeline(Format swapchainFormat) {
     return Result<bool, std::string>::makeResult(true);
   }
 
+  if (nuri::isValid(vs_)) {
+    gpu_.destroyShaderModule(vs_);
+    vs_ = ShaderHandle{};
+  }
+  if (nuri::isValid(fs_)) {
+    gpu_.destroyShaderModule(fs_);
+    fs_ = ShaderHandle{};
+  }
+
   ShaderDesc vsDesc{
       .moduleName = "imgui_vs",
       .source = kImGuiVS,
@@ -181,6 +197,7 @@ ImGuiGpuRenderer::ensurePipeline(Format swapchainFormat) {
   };
   auto fsResult = gpu_.createShaderModule(fsDesc);
   if (fsResult.hasError()) {
+    gpu_.destroyShaderModule(vsResult.value());
     return Result<bool, std::string>::makeError(fsResult.error());
   }
 
@@ -223,6 +240,10 @@ ImGuiGpuRenderer::ensurePipeline(Format swapchainFormat) {
 
   auto pipeResult = gpu_.createRenderPipeline(pipelineDesc, "ImGui Pipeline");
   if (pipeResult.hasError()) {
+    gpu_.destroyShaderModule(vs_);
+    gpu_.destroyShaderModule(fs_);
+    vs_ = ShaderHandle{};
+    fs_ = ShaderHandle{};
     return Result<bool, std::string>::makeError(pipeResult.error());
   }
   pipeline_ = pipeResult.value();
@@ -240,7 +261,12 @@ Result<bool, std::string> ImGuiGpuRenderer::ensureBuffers(uint32_t frameIndex,
   FrameBuffers &fb = frames_[frameIndex];
 
   if (!nuri::isValid(fb.vb) || fb.vbCapacityBytes < vertexBytes) {
-    const size_t newSize = std::max(vertexBytes, fb.vbCapacityBytes * 2);
+    if (nuri::isValid(fb.vb)) {
+      gpu_.destroyBuffer(fb.vb);
+      fb.vb = BufferHandle{};
+    }
+    const size_t newSize =
+        std::max({vertexBytes, fb.vbCapacityBytes * 2, size_t{1}});
     BufferDesc desc{
         .usage = BufferUsage::Vertex,
         .storage = Storage::HostVisible,
@@ -255,7 +281,12 @@ Result<bool, std::string> ImGuiGpuRenderer::ensureBuffers(uint32_t frameIndex,
   }
 
   if (!nuri::isValid(fb.ib) || fb.ibCapacityBytes < indexBytes) {
-    const size_t newSize = std::max(indexBytes, fb.ibCapacityBytes * 2);
+    if (nuri::isValid(fb.ib)) {
+      gpu_.destroyBuffer(fb.ib);
+      fb.ib = BufferHandle{};
+    }
+    const size_t newSize =
+        std::max({indexBytes, fb.ibCapacityBytes * 2, size_t{1}});
     BufferDesc desc{
         .usage = BufferUsage::Index,
         .storage = Storage::HostVisible,
@@ -391,10 +422,10 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat) {
       }
 
       PushConstants pc{};
-      pc.LRTB[0] = L;
-      pc.LRTB[1] = R;
-      pc.LRTB[2] = T;
-      pc.LRTB[3] = B;
+      pc.lrtb[0] = L;
+      pc.lrtb[1] = R;
+      pc.lrtb[2] = T;
+      pc.lrtb[3] = B;
       pc.textureId = fromImTextureID(cmd.GetTexID());
 
       pushConstants_.push_back(pc);

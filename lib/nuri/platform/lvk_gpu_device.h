@@ -45,6 +45,9 @@ public:
   // Resource destruction
   void destroyRenderPipeline(RenderPipelineHandle pipeline) override;
   void destroyComputePipeline(ComputePipelineHandle pipeline) override;
+  void destroyBuffer(BufferHandle buffer) override;
+  void destroyTexture(TextureHandle texture) override;
+  void destroyShaderModule(ShaderHandle shader) override;
 
   // Resource queries
   bool isValid(BufferHandle h) const override;
