@@ -7,11 +7,14 @@
 
 namespace nuri {
 
-Application::Application(const ApplicationConfig &config)
-    : title_(config.title), width_(config.width), height_(config.height),
-      windowMode_(config.windowMode), eventManager_(eventMemory_),
-      input_(eventManager_) {
-  Log::initialize({
+Application::LogLifetimeGuard::LogLifetimeGuard(const LogConfig &config) {
+  Log::initialize(config);
+}
+
+Application::LogLifetimeGuard::~LogLifetimeGuard() { Log::shutdown(); }
+
+LogConfig Application::makeDefaultLogConfig() {
+  return {
       .filePath =
           std::filesystem::path(
               std::format(
@@ -21,8 +24,14 @@ Application::Application(const ApplicationConfig &config)
       .logLevel = LogLevel::Debug,
       .consoleLevel = LogLevel::Debug,
       .threadNames = false,
-  });
+  };
+}
 
+Application::Application(const ApplicationConfig &config)
+    : logLifetimeGuard_(makeDefaultLogConfig()), title_(config.title),
+      width_(config.width), height_(config.height),
+      windowMode_(config.windowMode), eventManager_(eventMemory_),
+      input_(eventManager_) {
   inputDispatchSubscription_ = eventManager_.subscribe<InputEvent>(
       EventChannel::Input, &Application::dispatchInputEvent, this);
 
@@ -62,7 +71,6 @@ Application::~Application() {
   renderer_.reset();
   gpu_.reset();
   window_.reset();
-  Log::shutdown();
 }
 
 void Application::run() {

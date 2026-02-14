@@ -4,6 +4,7 @@
 #include "nuri/core/input_events.h"
 #include "nuri/core/input_system.h"
 #include "nuri/core/layer_stack.h"
+#include "nuri/core/log.h"
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
@@ -63,9 +64,17 @@ public:
   const InputSystem &getInput() const;
 
 private:
+  struct LogLifetimeGuard {
+    explicit LogLifetimeGuard(const LogConfig &config);
+    ~LogLifetimeGuard();
+  };
+
+  static LogConfig makeDefaultLogConfig();
+
   static bool dispatchInputEvent(const InputEvent &event, void *user);
   bool handleInputEvent(const InputEvent &event);
 
+  LogLifetimeGuard logLifetimeGuard_;
   std::string title_;
   std::int32_t width_;
   std::int32_t height_;
