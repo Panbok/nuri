@@ -18,11 +18,13 @@ namespace nuri {
 enum class CameraPreset : uint8_t {
   FpsDirect = 0,
   FpsMoveTo = 1,
+  Count,
 };
 
 enum class MoveToEasing : uint8_t {
   Linear = 0,
   Smoothstep = 1,
+  Count,
 };
 
 struct FpsDirectConfig {

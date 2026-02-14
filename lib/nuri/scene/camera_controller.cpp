@@ -1,8 +1,8 @@
 #include "nuri/scene/camera_controller.h"
 
-#include "nuri/core/log.h"
-
 #include "nuri/pch.h"
+
+#include "nuri/core/log.h"
 
 namespace nuri {
 
@@ -405,7 +405,23 @@ CameraController::startMoveTo(const MoveToRequest &request) {
         "MoveTo targetPosition must be finite");
   }
 
+  if (!std::isfinite(request.targetOrientation.x) ||
+      !std::isfinite(request.targetOrientation.y) ||
+      !std::isfinite(request.targetOrientation.z) ||
+      !std::isfinite(request.targetOrientation.w)) {
+    return Result<bool, std::string>::makeError(
+        "MoveTo targetOrientation must be finite");
+  }
+
+  const float orientationNorm = glm::length(request.targetOrientation);
+  if (!std::isfinite(orientationNorm) || orientationNorm <= kEpsilon) {
+    return Result<bool, std::string>::makeError(
+        "MoveTo targetOrientation must be non-degenerate");
+  }
+
   moveTo_.request = request;
+  moveTo_.request.targetOrientation =
+      glm::normalize(moveTo_.request.targetOrientation);
   moveTo_.queued = true;
   moveTo_.active = false;
   moveTo_.elapsedSeconds = 0.0f;

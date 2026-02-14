@@ -1,8 +1,8 @@
+#include "nuri/pch.h"
+
 #include "nuri/scene/camera_system.h"
 
 #include "nuri/core/log.h"
-
-#include "nuri/pch.h"
 
 namespace nuri {
 
@@ -129,14 +129,13 @@ bool CameraSystem::toggleActiveProjection() {
     return false;
   }
 
-  if (active->projectionType() == ProjectionType::Perspective) {
+  switch (active->projectionType()) {
+  case ProjectionType::Perspective:
     active->setProjectionType(ProjectionType::Orthographic);
-  } else if (active->projectionType() == ProjectionType::Orthographic) {
+    break;
+  case ProjectionType::Orthographic:
     active->setProjectionType(ProjectionType::Perspective);
-  } else {
-    NURI_LOG_WARNING("CameraSystem::toggleActiveProjection: Unknown projection "
-                     "type, resetting to perspective");
-    active->setProjectionType(ProjectionType::Perspective);
+    break;
   }
 
   NURI_LOG_INFO("CameraSystem::toggleActiveProjection: Active camera "

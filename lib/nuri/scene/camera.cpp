@@ -1,8 +1,8 @@
+#include "nuri/pch.h"
+
 #include "nuri/scene/camera.h"
 
 #include "nuri/core/log.h"
-
-#include "nuri/pch.h"
 
 namespace nuri {
 
@@ -25,7 +25,7 @@ float sanitizeAspect(float aspect) {
 } // namespace
 
 Camera::Camera(const glm::vec3 &position, const glm::quat &orientation)
-    : position_(position), orientation_(orientation) {
+    : position_(position) {
   setOrientation(orientation);
   setPerspective(kDefaultPerspective);
   setOrthographic(kDefaultOrthographic);
@@ -71,16 +71,14 @@ glm::mat4 Camera::viewMatrix() const {
 glm::mat4 Camera::projectionMatrix(float aspect) const {
   const float safeAspect = sanitizeAspect(aspect);
   if (projectionType_ == ProjectionType::Orthographic) {
-    const OrthographicParams params = sanitizeOrthographic(orthographic_);
-    const float halfHeight = 0.5f * params.height;
+    const float halfHeight = 0.5f * orthographic_.height;
     const float halfWidth = halfHeight * safeAspect;
     return glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight,
-                      params.nearPlane, params.farPlane);
+                      orthographic_.nearPlane, orthographic_.farPlane);
   }
 
-  const PerspectiveParams params = sanitizePerspective(perspective_);
-  return glm::perspective(params.fovYRadians, safeAspect, params.nearPlane,
-                          params.farPlane);
+  return glm::perspective(perspective_.fovYRadians, safeAspect,
+                          perspective_.nearPlane, perspective_.farPlane);
 }
 
 glm::mat4 Camera::viewProjectionMatrix(float aspect) const {
@@ -97,13 +95,27 @@ void Camera::setLookAt(const glm::vec3 &eye, const glm::vec3 &target,
   }
 
   glm::vec3 up = worldUp;
-  if (glm::dot(up, up) <= kEpsilon) {
-    NURI_LOG_WARNING("Camera::setLookAt: worldUp is zero, using +Y");
+  const float upLengthSquared = glm::dot(up, up);
+  if (!std::isfinite(upLengthSquared) || upLengthSquared <= kEpsilon) {
+    NURI_LOG_WARNING("Camera::setLookAt: worldUp is invalid or zero, using +Y");
     up = glm::vec3(0.0f, 1.0f, 0.0f);
   }
 
+  const glm::vec3 normalizedDirection = glm::normalize(direction);
+  glm::vec3 normalizedUp = glm::normalize(up);
+  if (std::abs(glm::dot(normalizedDirection, normalizedUp)) >=
+      1.0f - kEpsilon) {
+    NURI_LOG_WARNING("Camera::setLookAt: direction and worldUp are collinear, "
+                     "using fallback up axis");
+    normalizedUp = glm::vec3(0.0f, 0.0f, 1.0f);
+    if (std::abs(glm::dot(normalizedDirection, normalizedUp)) >=
+        1.0f - kEpsilon) {
+      normalizedUp = glm::vec3(1.0f, 0.0f, 0.0f);
+    }
+  }
+
   position_ = eye;
-  const glm::mat4 view = glm::lookAt(eye, target, glm::normalize(up));
+  const glm::mat4 view = glm::lookAt(eye, target, normalizedUp);
   const glm::mat4 world = glm::inverse(view);
   setOrientation(glm::quat_cast(world));
 }
@@ -148,7 +160,7 @@ Camera::sanitizeOrthographic(const OrthographicParams &params) {
     out.height = kDefaultOrthographic.height;
   }
 
-  if (!std::isfinite(out.nearPlane) || out.nearPlane <= kEpsilon) {
+  if (!std::isfinite(out.nearPlane) || std::abs(out.nearPlane) <= kEpsilon) {
     NURI_LOG_WARNING(
         "Camera: Invalid ortho near plane %.6f, using default %.6f",
         out.nearPlane, kDefaultOrthographic.nearPlane);
