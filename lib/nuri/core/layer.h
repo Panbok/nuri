@@ -4,6 +4,7 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_render_types.h"
+#include "nuri/gfx/layers/render_frame_context.h"
 
 #include <cstdint>
 #include <memory_resource>
@@ -28,13 +29,15 @@ public:
   virtual void onUpdate(double deltaTime) {}
   virtual void onResize(int32_t width, int32_t height) {}
   virtual bool onInput(const InputEvent &event) { return false; }
-  virtual Result<bool, std::string> buildRenderPasses(RenderPassList &out);
+  virtual Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
+                                                      RenderPassList &out);
 
 protected:
   Layer() = default;
 };
 
-inline Result<bool, std::string> Layer::buildRenderPasses(RenderPassList &) {
+inline Result<bool, std::string> Layer::buildRenderPasses(RenderFrameContext &,
+                                                          RenderPassList &) {
   return Result<bool, std::string>::makeResult(true);
 }
 

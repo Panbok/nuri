@@ -5,9 +5,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
 #include <memory>
 #include <memory_resource>
+#include <string>
 #include <vector>
 
 namespace nuri {
@@ -36,7 +36,8 @@ public:
   void onResize(int32_t width, int32_t height);
   bool onInput(const InputEvent &event);
 
-  Result<bool, std::string> appendRenderPasses(RenderPassList &out);
+  Result<bool, std::string> appendRenderPasses(RenderFrameContext &frame,
+                                               RenderPassList &out);
 
 private:
   bool removeLayer(Layer *layer);

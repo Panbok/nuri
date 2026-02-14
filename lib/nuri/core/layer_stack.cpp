@@ -112,12 +112,13 @@ void LayerStack::clear() {
   overlayStart_ = 0;
 }
 
-Result<bool, std::string> LayerStack::appendRenderPasses(RenderPassList &out) {
+Result<bool, std::string>
+LayerStack::appendRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   for (auto &layer : layers_) {
     if (!layer) {
       continue;
     }
-    auto result = layer->buildRenderPasses(out);
+    auto result = layer->buildRenderPasses(frame, out);
     if (result.hasError()) {
       return Result<bool, std::string>::makeError(result.error());
     }
