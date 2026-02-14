@@ -6,6 +6,23 @@
 #include "nuri/resources/mesh_importer.h"
 
 namespace nuri {
+namespace {
+
+BoundingBox computeModelBounds(std::span<const Vertex> vertices) {
+  if (vertices.empty()) {
+    return BoundingBox(glm::vec3(0.0f), glm::vec3(0.0f));
+  }
+
+  glm::vec3 minPos = vertices.front().position;
+  glm::vec3 maxPos = vertices.front().position;
+  for (const Vertex &vertex : vertices) {
+    minPos = glm::min(minPos, vertex.position);
+    maxPos = glm::max(maxPos, vertex.position);
+  }
+  return BoundingBox(minPos, maxPos);
+}
+
+} // namespace
 
 Result<std::unique_ptr<Model>, std::string>
 Model::create(GPUDevice &gpu, const MeshData &data,
@@ -50,12 +67,17 @@ Model::create(GPUDevice &gpu, const MeshData &data,
   }
 
   std::vector<Submesh> submeshes(data.submeshes.begin(), data.submeshes.end());
+  const BoundingBox bounds =
+      computeModelBounds(std::span<const Vertex>(data.vertices.data(),
+                                                 data.vertices.size()));
+
   return Result<std::unique_ptr<Model>, std::string>::makeResult(
       std::unique_ptr<Model>(
           new Model(std::move(vertexBufferResult.value()),
                     std::move(indexBufferResult.value()), std::move(submeshes),
                     static_cast<uint32_t>(data.vertices.size()),
-                    static_cast<uint32_t>(data.indices.size()))));
+                    static_cast<uint32_t>(data.indices.size()),
+                    std::move(bounds))));
 }
 
 Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
