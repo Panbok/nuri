@@ -12,9 +12,9 @@ namespace nuri {
 
 struct CameraControllerWidgetState {
   glm::vec3 targetPosition{0.0f, 1.0f, -1.5f};
-  float targetYawDegrees = 0.0f;
-  float targetPitchDegrees = 0.0f;
-  float durationSeconds = 1.5f;
+  float targetYawDegrees{0.0f};
+  float targetPitchDegrees{0.0f};
+  float durationSeconds{1.5f};
   std::string lastError{};
 };
 

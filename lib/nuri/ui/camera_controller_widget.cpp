@@ -6,6 +6,9 @@ namespace nuri {
 
 namespace {
 
+constexpr float kMinMoveToDurationSeconds = 0.01f;
+constexpr const char *kPresetNames[] = {"FPS + Direct", "FPS + MoveTo"};
+
 glm::quat cameraOrientationFromYawPitch(float yawRadians, float pitchRadians) {
   const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
   const glm::quat yawRotation = glm::angleAxis(yawRadians, worldUp);
@@ -41,10 +44,11 @@ void drawCameraControllerWidget(CameraSystem &cameraSystem,
     return;
   }
 
+  static_assert(static_cast<int>(CameraPreset::Count) == 2,
+                "Update presetNames when CameraPreset changes");
   int presetIndex = static_cast<int>(controller->preset());
-  const char *presetNames[] = {"FPS + Direct", "FPS + MoveTo"};
-  if (ImGui::Combo("Preset", &presetIndex, presetNames,
-                   IM_ARRAYSIZE(presetNames))) {
+  if (ImGui::Combo("Preset", &presetIndex, kPresetNames,
+                   IM_ARRAYSIZE(kPresetNames))) {
     controller->setPreset(static_cast<CameraPreset>(presetIndex));
   }
 
@@ -57,7 +61,8 @@ void drawCameraControllerWidget(CameraSystem &cameraSystem,
     ImGui::InputFloat("Target Yaw (deg)", &state.targetYawDegrees);
     ImGui::InputFloat("Target Pitch (deg)", &state.targetPitchDegrees);
     ImGui::InputFloat("Duration (sec)", &state.durationSeconds);
-    state.durationSeconds = std::max(state.durationSeconds, 0.01f);
+    state.durationSeconds =
+        std::max(state.durationSeconds, kMinMoveToDurationSeconds);
 
     if (ImGui::Button("Start MoveTo")) {
       const float yawRadians = glm::radians(state.targetYawDegrees);
