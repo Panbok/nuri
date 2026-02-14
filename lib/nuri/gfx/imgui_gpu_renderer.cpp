@@ -86,15 +86,19 @@ inline ImTextureID toImTextureID(uint32_t id) {
 }
 
 inline uint32_t fromImTextureID(ImTextureID id) {
-  const uintptr_t raw = std::is_pointer_v<ImTextureID>
-                            ? reinterpret_cast<uintptr_t>(id)
-                            : static_cast<uintptr_t>(id);
+  uintptr_t raw = 0;
+  if constexpr (std::is_pointer_v<ImTextureID>) {
+    raw = reinterpret_cast<uintptr_t>(id);
+  } else {
+    raw = static_cast<uintptr_t>(id);
+  }
   if (raw > static_cast<uintptr_t>(UINT32_MAX)) {
     NURI_LOG_WARNING("fromImTextureID: ImTextureID value 0x%" PRIxPTR
                      " exceeds UINT32_MAX",
                      raw);
     NURI_ASSERT(raw <= static_cast<uintptr_t>(UINT32_MAX),
                 "ImTextureID must fit in uint32_t");
+    return 0;
   }
   return static_cast<uint32_t>(raw);
 }
