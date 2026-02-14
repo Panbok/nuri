@@ -1,8 +1,7 @@
+#include "nuri/pch.h"
+
 #include "nuri/core/layer_stack.h"
 #include "nuri/core/log.h"
-
-#include <algorithm>
-#include <memory_resource>
 
 namespace nuri {
 
