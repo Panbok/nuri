@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/event_manager.h"
 #include "nuri/core/layer.h"
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
@@ -21,7 +22,8 @@ public:
   };
 
   static std::unique_ptr<EditorLayer>
-  create(Window &window, GPUDevice &gpu, UiCallback callback = UiCallback{});
+  create(Window &window, GPUDevice &gpu, EventManager &events,
+         UiCallback callback = UiCallback{});
   ~EditorLayer() override;
 
   EditorLayer(const EditorLayer &) = delete;
@@ -31,11 +33,14 @@ public:
 
   void setUiCallback(UiCallback callback) { callback_ = std::move(callback); }
 
+  bool onInput(const InputEvent &event) override;
   void onUpdate(double deltaTime) override;
-  Result<bool, std::string> buildRenderPasses(RenderPassList &out) override;
+  Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
+                                              RenderPassList &out) override;
 
 private:
-  EditorLayer(Window &window, GPUDevice &gpu, UiCallback callback);
+  EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
+              UiCallback callback);
 
   std::unique_ptr<ImGuiEditor> editor_;
   UiCallback callback_{};
