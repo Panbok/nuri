@@ -13,6 +13,8 @@ const char *projectionTypeToString(ProjectionType type) {
     return "Perspective";
   case ProjectionType::Orthographic:
     return "Orthographic";
+  default:
+    return "Unknown";
   }
   return "Unknown";
 }
@@ -24,7 +26,7 @@ CameraSystem::CameraSystem(std::pmr::memory_resource &memory)
 }
 
 CameraHandle CameraSystem::addCamera(const Camera &camera,
-                                     CameraController controller) {
+                                     const CameraController &controller) {
   cameras_.push_back(CameraSlot{
       .camera = camera,
       .controller = std::move(controller),
@@ -136,6 +138,10 @@ bool CameraSystem::toggleActiveProjection() {
   case ProjectionType::Orthographic:
     active->setProjectionType(ProjectionType::Perspective);
     break;
+  default:
+    NURI_LOG_WARNING(
+        "CameraSystem::toggleActiveProjection: Unknown projection type");
+    return false;
   }
 
   NURI_LOG_INFO("CameraSystem::toggleActiveProjection: Active camera "

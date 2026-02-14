@@ -90,6 +90,9 @@ float applyEasing(float t, MoveToEasing easing) {
     return clamped;
   case MoveToEasing::Smoothstep:
     return clamped * clamped * (3.0f - 2.0f * clamped);
+  default:
+    NURI_LOG_WARNING("CameraController::applyEasing: Unknown easing type");
+    return clamped;
   }
   return clamped;
 }
@@ -362,10 +365,6 @@ void CameraController::update(double deltaTime, const InputSystem &input,
   }
 
   orientation = glm::normalize(orientation);
-  if (!moveTo_.active) {
-    pitchRadians = std::clamp(pitchRadians, -pitchLimit, pitchLimit);
-    orientation = orientationFromAngles(yawRadians, pitchRadians, basis);
-  }
 
   camera.setPosition(position);
   camera.setOrientation(orientation);

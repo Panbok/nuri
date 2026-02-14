@@ -160,7 +160,7 @@ Camera::sanitizeOrthographic(const OrthographicParams &params) {
     out.height = kDefaultOrthographic.height;
   }
 
-  if (!std::isfinite(out.nearPlane) || std::abs(out.nearPlane) <= kEpsilon) {
+  if (!std::isfinite(out.nearPlane) || out.nearPlane <= kEpsilon) {
     NURI_LOG_WARNING(
         "Camera: Invalid ortho near plane %.6f, using default %.6f",
         out.nearPlane, kDefaultOrthographic.nearPlane);

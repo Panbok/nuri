@@ -27,7 +27,8 @@ public:
   CameraSystem(CameraSystem &&) = delete;
   CameraSystem &operator=(CameraSystem &&) = delete;
 
-  CameraHandle addCamera(const Camera &camera, CameraController controller);
+  CameraHandle addCamera(const Camera &camera,
+                         const CameraController &controller);
   bool setActiveCamera(CameraHandle handle, Window &window);
 
   [[nodiscard]] Camera *activeCamera();

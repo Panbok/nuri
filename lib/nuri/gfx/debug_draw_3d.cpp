@@ -48,9 +48,12 @@ void main() {
 
 } // namespace
 
-DebugDraw3D::DebugDraw3D(GPUDevice &gpu)
-    : gpu_(gpu), lines_(std::pmr::get_default_resource()),
-      frameBuffers_(std::pmr::get_default_resource()) {}
+DebugDraw3D::DebugDraw3D(GPUDevice &gpu,
+                         std::pmr::memory_resource *memoryResource)
+    : gpu_(gpu),
+      memory_resource_(memoryResource != nullptr ? memoryResource
+                                                 : std::pmr::get_default_resource()),
+      lines_(memory_resource_), frameBuffers_(memory_resource_) {}
 
 DebugDraw3D::~DebugDraw3D() {
   for (const FrameBufferState &frame : frameBuffers_) {
@@ -77,9 +80,8 @@ void DebugDraw3D::line(const glm::vec3 &p1, const glm::vec3 &p2,
 }
 
 void DebugDraw3D::plane(const glm::vec3 &o, const glm::vec3 &v1,
-                        const glm::vec3 &v2, int n1, int n2, float s1,
-                        float s2, const glm::vec4 &color,
-                        const glm::vec4 &outlineColor) {
+                        const glm::vec3 &v2, int n1, int n2, float s1, float s2,
+                        const glm::vec4 &color, const glm::vec4 &outlineColor) {
   line(o - s1 / 2.0f * v1 - s2 / 2.0f * v2, o - s1 / 2.0f * v1 + s2 / 2.0f * v2,
        outlineColor);
   line(o + s1 / 2.0f * v1 - s2 / 2.0f * v2, o + s1 / 2.0f * v1 + s2 / 2.0f * v2,
@@ -143,11 +145,10 @@ void DebugDraw3D::box(const glm::mat4 &m, const BoundingBox &box,
 
 void DebugDraw3D::frustum(const glm::mat4 &camView, const glm::mat4 &camProj,
                           const glm::vec4 &color) {
-  const glm::vec3 corners[] = {
-      glm::vec3(-1, -1, -1), glm::vec3(+1, -1, -1),
-      glm::vec3(+1, +1, -1), glm::vec3(-1, +1, -1),
-      glm::vec3(-1, -1, +1), glm::vec3(+1, -1, +1),
-      glm::vec3(+1, +1, +1), glm::vec3(-1, +1, +1)};
+  const glm::vec3 corners[] = {glm::vec3(-1, -1, -1), glm::vec3(+1, -1, -1),
+                               glm::vec3(+1, +1, -1), glm::vec3(-1, +1, -1),
+                               glm::vec3(-1, -1, +1), glm::vec3(+1, -1, +1),
+                               glm::vec3(+1, +1, +1), glm::vec3(-1, +1, +1)};
 
   glm::vec3 pp[8];
 
@@ -368,6 +369,7 @@ DebugDraw3D::buildRenderPass(TextureHandle depthTexture) {
 
   if (lines_.empty()) {
     pass.draws = {};
+    lines_.clear();
     return Result<RenderPass, std::string>::makeResult(pass);
   }
 
@@ -389,17 +391,16 @@ DebugDraw3D::buildRenderPass(TextureHandle depthTexture) {
 
   const std::span<const std::byte> lineBytes{
       reinterpret_cast<const std::byte *>(lines_.data()), requiredBytes};
-  auto updateResult = gpu_.updateBuffer(frameBuffers_[frameIndex].buffer,
-                                        lineBytes, 0);
+  auto updateResult =
+      gpu_.updateBuffer(frameBuffers_[frameIndex].buffer, lineBytes, 0);
   if (updateResult.hasError()) {
     return Result<RenderPass, std::string>::makeError(updateResult.error());
   }
 
-  const Format depthFormat =
-      nuri::isValid(depthTexture) ? gpu_.getTextureFormat(depthTexture)
-                                  : Format::Count;
-  auto pipelineResult =
-      ensurePipeline(gpu_.getSwapchainFormat(), depthFormat);
+  const Format depthFormat = nuri::isValid(depthTexture)
+                                 ? gpu_.getTextureFormat(depthTexture)
+                                 : Format::Count;
+  auto pipelineResult = ensurePipeline(gpu_.getSwapchainFormat(), depthFormat);
   if (pipelineResult.hasError()) {
     return Result<RenderPass, std::string>::makeError(pipelineResult.error());
   }

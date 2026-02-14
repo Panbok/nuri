@@ -1,6 +1,6 @@
-#include "nuri/ui/camera_controller_widget.h"
-
 #include "nuri/pch.h"
+
+#include "nuri/ui/camera_controller_widget.h"
 
 namespace nuri {
 
@@ -8,6 +8,15 @@ namespace {
 
 constexpr float kMinMoveToDurationSeconds = 0.01f;
 constexpr const char *kPresetNames[] = {"FPS + Direct", "FPS + MoveTo"};
+
+void drawCameraControlScheme() {
+  ImGui::TextUnformatted("Camera Controls");
+  ImGui::TextUnformatted("Move               : W / A / S / D");
+  ImGui::TextUnformatted("Vertical Move      : Q / E");
+  ImGui::TextUnformatted("Speed Boost        : LeftShift / RightShift");
+  ImGui::TextUnformatted("Free Camera Look   : Hold RMB + Mouse");
+  ImGui::TextUnformatted("Projection Toggle  : P");
+}
 
 glm::quat cameraOrientationFromYawPitch(float yawRadians, float pitchRadians) {
   const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
@@ -94,9 +103,12 @@ void drawCameraControllerWidget(CameraSystem &cameraSystem,
       ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Last Error: %s",
                          state.lastError.c_str());
     }
+
+    ImGui::TextUnformatted("Manual look/move input cancels MoveTo.");
   }
 
-  ImGui::TextUnformatted("Manual look/move input cancels MoveTo.");
+  ImGui::Separator();
+  drawCameraControlScheme();
 
   ImGui::End();
 }

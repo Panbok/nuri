@@ -9,7 +9,8 @@ std::atomic<uint32_t> g_nextTypeId{0};
 
 EventManager::EventManager(std::pmr::memory_resource &upstream)
     : upstream_(upstream), arena_(&upstream_),
-      channels_(makeChannels(upstream_, std::make_index_sequence<kChannelCount>{})) {
+      channels_(
+          makeChannels(upstream_, std::make_index_sequence<kChannelCount>{})) {
   NURI_LOG_DEBUG("EventManager::EventManager: Event manager created");
 }
 
@@ -74,7 +75,7 @@ void EventManager::dispatch(EventChannel channel) {
       (void)slot.list->dispatch(event.data, stopOnConsume);
     }
   } catch (...) {
-    if (nextEventIndex < localQueue.size()) {
+    if (nextEventIndex + 1 < localQueue.size()) {
       state.queue.insert(state.queue.begin(),
                          localQueue.begin() +
                              static_cast<std::ptrdiff_t>(nextEventIndex),

@@ -37,6 +37,9 @@ bool EditorLayer::onInput(const InputEvent &event) {
   case InputEventType::CursorEnter:
     return editor_->wantsCaptureMouse();
   case InputEventType::Focus:
+  default:
+    NURI_LOG_WARNING("EditorLayer::onInput: Unknown input event type: %d",
+                     static_cast<int>(event.type));
     break;
   }
   return false;

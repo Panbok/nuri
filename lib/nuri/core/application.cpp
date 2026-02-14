@@ -14,6 +14,7 @@ Application::LogLifetimeGuard::LogLifetimeGuard(const LogConfig &config) {
 Application::LogLifetimeGuard::~LogLifetimeGuard() { Log::shutdown(); }
 
 LogConfig Application::makeDefaultLogConfig() {
+  std::filesystem::create_directories("logs");
   return {
       .filePath =
           std::filesystem::path(

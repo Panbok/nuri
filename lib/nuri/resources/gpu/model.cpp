@@ -15,7 +15,8 @@ BoundingBox computeModelBounds(std::span<const Vertex> vertices) {
 
   glm::vec3 minPos = vertices.front().position;
   glm::vec3 maxPos = vertices.front().position;
-  for (const Vertex &vertex : vertices) {
+  for (size_t i = 1; i < vertices.size(); ++i) {
+    const Vertex &vertex = vertices[i];
     minPos = glm::min(minPos, vertex.position);
     maxPos = glm::max(maxPos, vertex.position);
   }
@@ -67,17 +68,14 @@ Model::create(GPUDevice &gpu, const MeshData &data,
   }
 
   std::vector<Submesh> submeshes(data.submeshes.begin(), data.submeshes.end());
-  const BoundingBox bounds =
-      computeModelBounds(std::span<const Vertex>(data.vertices.data(),
-                                                 data.vertices.size()));
+  const BoundingBox bounds = computeModelBounds(data.vertices);
 
   return Result<std::unique_ptr<Model>, std::string>::makeResult(
-      std::unique_ptr<Model>(
-          new Model(std::move(vertexBufferResult.value()),
-                    std::move(indexBufferResult.value()), std::move(submeshes),
-                    static_cast<uint32_t>(data.vertices.size()),
-                    static_cast<uint32_t>(data.indices.size()),
-                    std::move(bounds))));
+      std::unique_ptr<Model>(new Model(
+          std::move(vertexBufferResult.value()),
+          std::move(indexBufferResult.value()), std::move(submeshes),
+          static_cast<uint32_t>(data.vertices.size()),
+          static_cast<uint32_t>(data.indices.size()), std::move(bounds))));
 }
 
 Result<std::unique_ptr<Model>, std::string> Model::createFromFile(

@@ -12,13 +12,15 @@
 #include <cstdint>
 #include <memory_resource>
 #include <string>
-#include <vector>
 
 namespace nuri {
 
 class NURI_API DebugDraw3D {
 public:
-  explicit DebugDraw3D(GPUDevice &gpu);
+  explicit DebugDraw3D(
+      GPUDevice &gpu,
+      std::pmr::memory_resource *memoryResource =
+          std::pmr::get_default_resource());
   ~DebugDraw3D();
 
   DebugDraw3D(const DebugDraw3D &) = delete;
@@ -65,6 +67,7 @@ private:
 
   GPUDevice &gpu_;
   glm::mat4 mvp_ = glm::mat4(1.0f);
+  std::pmr::memory_resource *memory_resource_ = std::pmr::get_default_resource();
   std::pmr::vector<LineData> lines_;
   std::pmr::vector<FrameBufferState> frameBuffers_;
   ShaderHandle vert_{};

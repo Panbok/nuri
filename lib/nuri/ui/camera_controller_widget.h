@@ -1,12 +1,12 @@
 #pragma once
 
-#include "nuri/defines.h"
-#include "nuri/scene/camera.h"
-#include "nuri/scene/camera_system.h"
-
 #include <string>
 
 #include <glm/glm.hpp>
+
+#include "nuri/defines.h"
+#include "nuri/scene/camera.h"
+#include "nuri/scene/camera_system.h"
 
 namespace nuri {
 

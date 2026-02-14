@@ -67,6 +67,8 @@ private:
   struct LogLifetimeGuard {
     explicit LogLifetimeGuard(const LogConfig &config);
     ~LogLifetimeGuard();
+    LogLifetimeGuard(const LogLifetimeGuard &) = delete;
+    LogLifetimeGuard &operator=(const LogLifetimeGuard &) = delete;
   };
 
   static LogConfig makeDefaultLogConfig();

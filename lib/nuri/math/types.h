@@ -1,5 +1,9 @@
 #pragma once
 
+#include "nuri/core/log.h"
+
+#include <limits>
+
 #include <glm/glm.hpp>
 
 namespace nuri {
@@ -7,10 +11,15 @@ namespace nuri {
 struct BoundingBox {
   glm::vec3 min_;
   glm::vec3 max_;
-  BoundingBox() = default;
+  BoundingBox()
+      : min_(std::numeric_limits<float>::max()),
+        max_(std::numeric_limits<float>::lowest()) {}
   BoundingBox(const glm::vec3 &min, const glm::vec3 &max)
       : min_(glm::min(min, max)), max_(glm::max(min, max)) {}
   BoundingBox(const glm::vec3 *points, size_t numPoints) {
+    NURI_ASSERT(points != nullptr, "BoundingBox::BoundingBox: points is null");
+    NURI_ASSERT(numPoints > 0, "BoundingBox::BoundingBox: numPoints is 0");
+
     glm::vec3 vmin(std::numeric_limits<float>::max());
     glm::vec3 vmax(std::numeric_limits<float>::lowest());
 
@@ -22,9 +31,7 @@ struct BoundingBox {
     max_ = vmax;
   }
 
-  glm::vec3 getSize() const {
-    return glm::vec3(max_[0] - min_[0], max_[1] - min_[1], max_[2] - min_[2]);
-  }
+  glm::vec3 getSize() const { return max_ - min_; }
 
   glm::vec3 getCenter() const {
     return 0.5f *
