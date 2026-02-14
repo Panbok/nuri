@@ -7,9 +7,9 @@
 #include <array>
 #include <atomic>
 #include <cstring>
-#include <utility>
 #include <memory_resource>
 #include <type_traits>
+#include <utility>
 
 namespace nuri {
 
@@ -78,7 +78,18 @@ private:
 
     bool dispatch(const void *event, bool stopOnConsume) override {
       const T &typed = *static_cast<const T *>(event);
-      ++dispatchDepth;
+      struct DispatchGuard {
+        explicit DispatchGuard(HandlerList &owner) noexcept : owner_(owner) {
+          ++owner_.dispatchDepth;
+        }
+        ~DispatchGuard() noexcept {
+          --owner_.dispatchDepth;
+          if (owner_.needsCompact && owner_.dispatchDepth == 0) {
+            owner_.compact();
+          }
+        }
+        HandlerList &owner_;
+      } guard(*this);
 
       bool consumed = false;
       for (Entry &entry : entries) {
@@ -92,10 +103,6 @@ private:
         }
       }
 
-      --dispatchDepth;
-      if (needsCompact && dispatchDepth == 0) {
-        compact();
-      }
       return consumed;
     }
 

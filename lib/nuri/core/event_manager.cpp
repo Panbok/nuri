@@ -1,5 +1,7 @@
 #include "event_manager.h"
 
+#include <cstddef>
+
 namespace nuri {
 namespace {
 std::atomic<uint32_t> g_nextTypeId{0};
@@ -51,24 +53,43 @@ bool EventManager::unsubscribe(const SubscriptionToken &token) {
 
 void EventManager::dispatch(EventChannel channel) {
   ChannelState &state = stateFor(channel);
-  std::pmr::vector<QueuedEvent> &queue = state.queue;
+  std::pmr::vector<QueuedEvent> localQueue(&upstream_);
+  localQueue.swap(state.queue);
   std::pmr::vector<HandlerListSlot> &handlerLists = state.handlerLists;
   const bool stopOnConsume = (channel == EventChannel::Input);
+  size_t nextEventIndex = 0;
 
-  for (const QueuedEvent &event : queue) {
-    if (event.typeId >= handlerLists.size()) {
-      continue;
+  try {
+    for (; nextEventIndex < localQueue.size(); ++nextEventIndex) {
+      const QueuedEvent &event = localQueue[nextEventIndex];
+      if (event.typeId >= handlerLists.size()) {
+        continue;
+      }
+
+      HandlerListSlot &slot = handlerLists[event.typeId];
+      if (!slot.list) {
+        continue;
+      }
+
+      (void)slot.list->dispatch(event.data, stopOnConsume);
+    }
+  } catch (...) {
+    if (nextEventIndex < localQueue.size()) {
+      state.queue.insert(state.queue.begin(),
+                         localQueue.begin() +
+                             static_cast<std::ptrdiff_t>(nextEventIndex),
+                         localQueue.end());
     }
 
-    HandlerListSlot &slot = handlerLists[event.typeId];
-    if (!slot.list) {
-      continue;
+    if (allQueuesEmpty()) {
+      arena_.release();
     }
-
-    (void)slot.list->dispatch(event.data, stopOnConsume);
+    throw;
   }
 
-  clear(channel);
+  if (allQueuesEmpty()) {
+    arena_.release();
+  }
 }
 
 void EventManager::clear(EventChannel channel) {
