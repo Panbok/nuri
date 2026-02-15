@@ -17,7 +17,8 @@ Result<bool, std::string> Renderer::render(const RenderFrame &frame) {
 }
 
 Result<bool, std::string> Renderer::render(const RenderFrame &frame,
-                                           LayerStack &layers) {
+                                           LayerStack &layers,
+                                           RenderFrameContext &frameContext) {
   NURI_PROFILER_FUNCTION();
   if (layers.empty()) {
     return render(frame);
@@ -28,7 +29,7 @@ Result<bool, std::string> Renderer::render(const RenderFrame &frame,
   combinedPasses_.insert(combinedPasses_.end(), frame.passes.begin(),
                          frame.passes.end());
 
-  auto layerResult = layers.appendRenderPasses(combinedPasses_);
+  auto layerResult = layers.appendRenderPasses(frameContext, combinedPasses_);
   if (layerResult.hasError()) {
     return Result<bool, std::string>::makeError(layerResult.error());
   }

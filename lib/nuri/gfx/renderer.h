@@ -3,6 +3,7 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_render_types.h"
+#include "nuri/gfx/layers/render_frame_context.h"
 
 #include <cstdint>
 #include <memory>
@@ -31,7 +32,8 @@ public:
 
   Result<bool, std::string> render(const RenderFrame &frame);
   Result<bool, std::string> render(const RenderFrame &frame,
-                                   LayerStack &layers);
+                                   LayerStack &layers,
+                                   RenderFrameContext &frameContext);
 
   void onResize(uint32_t width, uint32_t height);
 
