@@ -1,4 +1,5 @@
 #include "nuri/pch.h"
+#include <optional>
 
 #include "nuri/gfx/layers/opaque_layer.h"
 
@@ -25,7 +26,8 @@ uint32_t clampRequestedLod(int32_t requestedLod, uint32_t lodCount) {
   return static_cast<uint32_t>(std::clamp(requestedLod, 0, maxLod));
 }
 
-uint32_t resolveAvailableLod(const Submesh &submesh, uint32_t desiredLod) {
+std::optional<uint32_t> resolveAvailableLod(const Submesh &submesh,
+                                            uint32_t desiredLod) {
   const uint32_t lodCount =
       std::clamp(submesh.lodCount, 1u, Submesh::kMaxLodCount);
 
@@ -34,14 +36,15 @@ uint32_t resolveAvailableLod(const Submesh &submesh, uint32_t desiredLod) {
     --candidate;
   }
   if (submesh.lods[candidate].indexCount == 0) {
-    return 0;
+    return std::nullopt;
   }
   return candidate;
 }
 
-uint32_t selectAutoLod(const Submesh &submesh, const glm::mat4 &modelMatrix,
-                       const glm::vec3 &cameraPosition,
-                       std::array<float, 3> thresholds) {
+std::optional<uint32_t> selectAutoLod(const Submesh &submesh,
+                                      const glm::mat4 &modelMatrix,
+                                      const glm::vec3 &cameraPosition,
+                                      std::array<float, 3> thresholds) {
   std::sort(thresholds.begin(), thresholds.end());
 
   const glm::vec3 localCenter = submesh.bounds.getCenter();
@@ -66,13 +69,11 @@ uint32_t selectAutoLod(const Submesh &submesh, const glm::mat4 &modelMatrix,
   return resolveAvailableLod(submesh, lodIndex);
 }
 
-const SubmeshLod &chooseLodRange(const Submesh *submeshPtr,
+const SubmeshLod *chooseLodRange(const Submesh *submeshPtr,
                                  const OpaqueRenderable *renderable,
                                  const RenderFrameContext &frame) {
-  static const SubmeshLod kEmptyLod{};
-
   if (!submeshPtr || !renderable) {
-    return kEmptyLod;
+    return nullptr;
   }
 
   const Submesh &submesh = *submeshPtr;
@@ -82,14 +83,13 @@ const SubmeshLod &chooseLodRange(const Submesh *submeshPtr,
   const RenderSettings &settings =
       frame.settings ? *frame.settings : fallbackSettings;
 
+  std::optional<uint32_t> lodIndex;
   if (!settings.enableMeshLod) {
-    return submesh.lods[resolveAvailableLod(submesh, 0)];
-  }
-
-  uint32_t lodIndex = 0;
-  if (settings.forcedMeshLod >= 0) {
-    lodIndex = clampRequestedLod(settings.forcedMeshLod, lodCount);
-    lodIndex = resolveAvailableLod(submesh, lodIndex);
+    lodIndex = resolveAvailableLod(submesh, 0);
+  } else if (settings.forcedMeshLod >= 0) {
+    const uint32_t requested =
+        clampRequestedLod(settings.forcedMeshLod, lodCount);
+    lodIndex = resolveAvailableLod(submesh, requested);
   } else {
     lodIndex = selectAutoLod(submesh, renderable->modelMatrix,
                              glm::vec3(frame.camera.cameraPos),
@@ -98,7 +98,10 @@ const SubmeshLod &chooseLodRange(const Submesh *submeshPtr,
                               settings.meshLodDistanceThresholds.z});
   }
 
-  return submesh.lods[lodIndex];
+  if (!lodIndex) {
+    return nullptr;
+  }
+  return &submesh.lods[*lodIndex];
 }
 
 } // namespace
@@ -129,7 +132,7 @@ void OpaqueLayer::onDetach() {
   initialized_ = false;
 }
 
-void OpaqueLayer::onResize(int32_t, int32_t) {}
+void OpaqueLayer::onResize(int32_t, int32_t) { destroyDepthTexture(); }
 
 Result<bool, std::string>
 OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
@@ -231,20 +234,23 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
     NURI_PROFILER_ZONE("OpaqueLayer.select_lod", NURI_PROFILER_COLOR_CMD_DRAW);
     for (const MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+      const SubmeshLod *lodRange = chooseLodRange(
+          templateEntry.submesh, templateEntry.renderable, frame);
+      if (!lodRange) {
+        continue;
+      }
+
       const uint64_t perFrameAddress =
           baseAddress + frameStrideBytes * templateEntry.perFrameIndex;
       drawPushConstants_.push_back(
           PushConstants{.perFrameAddress = perFrameAddress});
 
-      const SubmeshLod &lodRange = chooseLodRange(
-          templateEntry.submesh, templateEntry.renderable, frame);
-
       DrawItem meshDraw = baseMeshDraw_;
       meshDraw.vertexBuffer = templateEntry.vertexBuffer;
       meshDraw.indexBuffer = templateEntry.indexBuffer;
       meshDraw.vertexCount = templateEntry.vertexCount;
-      meshDraw.indexCount = lodRange.indexCount;
-      meshDraw.firstIndex = lodRange.indexOffset;
+      meshDraw.indexCount = lodRange->indexCount;
+      meshDraw.firstIndex = lodRange->indexOffset;
       meshDraw.pushConstants = pushConstantBytes(drawPushConstants_.back());
       drawItems_.push_back(meshDraw);
     }
@@ -283,16 +289,22 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
 
   auto depthResult = recreateDepthTexture();
   if (depthResult.hasError()) {
+    meshShader_.reset();
     return depthResult;
   }
 
   auto pipelineResult = createPipelines();
   if (pipelineResult.hasError()) {
+    meshShader_.reset();
+    destroyDepthTexture();
     return pipelineResult;
   }
 
   auto bufferResult = ensurePerFrameBufferCapacity(sizeof(PerFrameData));
   if (bufferResult.hasError()) {
+    meshShader_.reset();
+    meshPipeline_.reset();
+    destroyDepthTexture();
     return bufferResult;
   }
 
@@ -347,6 +359,11 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene) {
 
   const std::span<const OpaqueRenderable> renderables =
       scene.opaqueRenderables();
+  if (renderables.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::rebuildSceneCache: renderables count exceeds UINT32_MAX");
+  }
   renderableTemplates_.reserve(renderables.size());
 
   size_t totalMeshDraws = 0;
@@ -359,9 +376,10 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene) {
   }
   meshDrawTemplates_.reserve(totalMeshDraws);
 
-  for (size_t index = 0; index < renderables.size(); ++index) {
+  for (uint32_t index = 0; index < static_cast<uint32_t>(renderables.size());
+       ++index) {
     const OpaqueRenderable &renderable = renderables[index];
-    const uint32_t perFrameIndex = static_cast<uint32_t>(index);
+    const uint32_t perFrameIndex = index;
     renderableTemplates_.push_back(
         RenderableTemplate{.renderable = &renderable});
 
@@ -386,6 +404,10 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene) {
 
 Result<bool, std::string> OpaqueLayer::createShaders() {
   meshShader_ = Shader::create("main", gpu_);
+  if (!meshShader_) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::createShaders: failed to create meshShader_");
+  }
   struct ShaderSpec {
     Shader *shader = nullptr;
     std::string_view path{};

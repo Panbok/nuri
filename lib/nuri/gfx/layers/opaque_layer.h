@@ -43,7 +43,7 @@ private:
     glm::mat4 model{1.0f};
     glm::mat4 view{1.0f};
     glm::mat4 proj{1.0f};
-    glm::vec4 cameraPos{0.0f};
+    glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
     uint32_t albedoTexId = 0;
     uint32_t cubemapTexId = 0;
     uint32_t hasCubemap = 0;

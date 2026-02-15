@@ -26,6 +26,11 @@ void SkyboxLayer::onAttach() {
 
 void SkyboxLayer::onDetach() {
   destroyPerFrameBuffer();
+  skyboxShader_.reset();
+  skyboxPipeline_.reset();
+  skyboxVertexShader_ = {};
+  skyboxFragmentShader_ = {};
+  skyboxPipelineHandle_ = {};
   initialized_ = false;
 }
 

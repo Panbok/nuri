@@ -23,7 +23,7 @@ struct RenderSettings {
 struct CameraFrameState {
   glm::mat4 view{1.0f};
   glm::mat4 proj{1.0f};
-  glm::vec4 cameraPos{0.0f};
+  glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
   float aspectRatio = 1.0f;
 };
 

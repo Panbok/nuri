@@ -1,11 +1,11 @@
 #pragma once
 
+#include <memory>
+
 #include "nuri/core/layer.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/debug_draw_3d.h"
 #include "nuri/gfx/gpu_device.h"
-
-#include <memory>
 
 namespace nuri {
 
