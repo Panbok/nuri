@@ -9,6 +9,7 @@
 #include <memory>
 #include <memory_resource>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -44,8 +45,7 @@ public:
     return topologyVersion_;
   }
   [[nodiscard]] std::span<const OpaqueRenderable> opaqueRenderables() const {
-    return std::span<const OpaqueRenderable>(opaqueRenderables_.data(),
-                                             opaqueRenderables_.size());
+    return opaqueRenderables_;
   }
 
   void setEnvironmentCubemap(std::unique_ptr<Texture> cubemap);
