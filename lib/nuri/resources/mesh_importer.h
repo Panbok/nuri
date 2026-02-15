@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <memory_resource>
 #include <string>
 #include <string_view>
@@ -10,12 +12,18 @@
 namespace nuri {
 
 struct MeshImportOptions {
+  static constexpr uint32_t kMaxLodCount = 4;
+
   bool triangulate = true;
   bool genNormals = true;
   bool genTangents = true;
   bool flipUVs = false;
   bool joinIdenticalVertices = true;
   bool optimize = true;
+  bool generateLods = true;
+  uint32_t lodCount = kMaxLodCount;
+  std::array<float, kMaxLodCount - 1> lodTriangleRatios{0.60f, 0.35f, 0.20f};
+  float lodTargetError = 1e-2f;
 };
 
 class MeshImporter {
