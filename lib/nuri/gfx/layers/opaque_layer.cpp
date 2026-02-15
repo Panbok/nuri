@@ -10,6 +10,67 @@
 namespace nuri {
 namespace {
 constexpr float kMinLodRadius = 1.0e-4f;
+constexpr uint32_t kMeshDebugColor = 0xffcc5500;
+
+const std::array<VertexAttribute, 3> kMeshVertexAttributes = {
+    VertexAttribute{.location = 0,
+                    .binding = 0,
+                    .offset = offsetof(Vertex, position),
+                    .format = VertexFormat::Float3},
+    VertexAttribute{.location = 1,
+                    .binding = 0,
+                    .offset = offsetof(Vertex, normal),
+                    .format = VertexFormat::Float3},
+    VertexAttribute{.location = 2,
+                    .binding = 0,
+                    .offset = offsetof(Vertex, uv),
+                    .format = VertexFormat::Float2},
+};
+
+const std::array<VertexBinding, 1> kMeshVertexBindings = {
+    VertexBinding{.stride = sizeof(Vertex)},
+};
+
+const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
+  static const RenderSettings kDefaultSettings{};
+  return frame.settings ? *frame.settings : kDefaultSettings;
+}
+
+VertexInput meshVertexInput() {
+  return VertexInput{
+      .attributes = kMeshVertexAttributes,
+      .bindings = kMeshVertexBindings,
+  };
+}
+
+RenderPipelineDesc meshPipelineDesc(Format swapchainFormat, Format depthFormat,
+                                    ShaderHandle vertexShader,
+                                    ShaderHandle fragmentShader,
+                                    PolygonMode polygonMode) {
+  return RenderPipelineDesc{
+      .vertexInput = meshVertexInput(),
+      .vertexShader = vertexShader,
+      .fragmentShader = fragmentShader,
+      .colorFormats = {swapchainFormat},
+      .depthFormat = depthFormat,
+      .cullMode = CullMode::Back,
+      .polygonMode = polygonMode,
+      .topology = Topology::Triangle,
+      .blendEnabled = false,
+  };
+}
+
+DrawItem makeBaseMeshDraw(RenderPipelineHandle pipeline,
+                          std::string_view debugLabel) {
+  DrawItem draw{};
+  draw.pipeline = pipeline;
+  draw.indexFormat = IndexFormat::U32;
+  draw.useDepthState = true;
+  draw.depthState = {.compareOp = CompareOp::Less, .isDepthWriteEnabled = true};
+  draw.debugLabel = debugLabel;
+  draw.debugColor = kMeshDebugColor;
+  return draw;
+}
 
 float maxAxisScale(const glm::mat4 &transform) {
   const float sx = glm::length(glm::vec3(transform[0]));
@@ -79,23 +140,22 @@ const SubmeshLod *chooseLodRange(const Submesh *submeshPtr,
   const Submesh &submesh = *submeshPtr;
   const uint32_t lodCount =
       std::clamp(submesh.lodCount, 1u, Submesh::kMaxLodCount);
-  const RenderSettings fallbackSettings{};
-  const RenderSettings &settings =
-      frame.settings ? *frame.settings : fallbackSettings;
+  const RenderSettings &settings = settingsOrDefault(frame);
+  const RenderSettings::OpaqueSettings &opaqueSettings = settings.opaque;
 
   std::optional<uint32_t> lodIndex;
-  if (!settings.enableMeshLod) {
+  if (!opaqueSettings.enableMeshLod) {
     lodIndex = resolveAvailableLod(submesh, 0);
-  } else if (settings.forcedMeshLod >= 0) {
+  } else if (opaqueSettings.forcedMeshLod >= 0) {
     const uint32_t requested =
-        clampRequestedLod(settings.forcedMeshLod, lodCount);
+        clampRequestedLod(opaqueSettings.forcedMeshLod, lodCount);
     lodIndex = resolveAvailableLod(submesh, requested);
   } else {
     lodIndex = selectAutoLod(submesh, renderable->modelMatrix,
                              glm::vec3(frame.camera.cameraPos),
-                             {settings.meshLodDistanceThresholds.x,
-                              settings.meshLodDistanceThresholds.y,
-                              settings.meshLodDistanceThresholds.z});
+                             {opaqueSettings.meshLodDistanceThresholds.x,
+                              opaqueSettings.meshLodDistanceThresholds.y,
+                              opaqueSettings.meshLodDistanceThresholds.z});
   }
 
   if (!lodIndex) {
@@ -125,6 +185,13 @@ void OpaqueLayer::onAttach() {
 void OpaqueLayer::onDetach() {
   destroyPerFrameBuffer();
   destroyDepthTexture();
+  resetWireframePipelineState();
+  meshPipeline_.reset();
+  meshShader_.reset();
+  meshVertexShader_ = {};
+  meshFragmentShader_ = {};
+  meshFillPipelineHandle_ = {};
+  baseMeshFillDraw_ = {};
   renderableTemplates_.clear();
   meshDrawTemplates_.clear();
   cachedScene_ = nullptr;
@@ -138,7 +205,8 @@ Result<bool, std::string>
 OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   NURI_PROFILER_FUNCTION();
 
-  if (frame.settings && !frame.settings->drawOpaque) {
+  const RenderSettings &settings = settingsOrDefault(frame);
+  if (!settings.opaque.enabled) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -215,6 +283,18 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
   drawItems_.clear();
   drawPushConstants_.clear();
+  DrawItem baseDraw = baseMeshFillDraw_;
+  const bool requestedWireframe = settings.opaque.wireframe;
+  if (requestedWireframe) {
+    auto wireframeResult = ensureWireframePipeline();
+    if (wireframeResult.hasError()) {
+      return Result<bool, std::string>::makeError(wireframeResult.error());
+    }
+    if (wireframeResult.value()) {
+      baseDraw = baseMeshWireframeDraw_;
+    }
+  }
+
   const size_t drawCount = meshDrawTemplates_.size();
   drawItems_.reserve(drawCount);
   drawPushConstants_.reserve(drawCount);
@@ -245,7 +325,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       drawPushConstants_.push_back(
           PushConstants{.perFrameAddress = perFrameAddress});
 
-      DrawItem meshDraw = baseMeshDraw_;
+      DrawItem meshDraw = baseDraw;
       meshDraw.vertexBuffer = templateEntry.vertexBuffer;
       meshDraw.indexBuffer = templateEntry.indexBuffer;
       meshDraw.vertexCount = templateEntry.vertexCount;
@@ -257,7 +337,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     NURI_PROFILER_ZONE_END();
   }
 
-  const bool shouldLoadColor = !frame.settings || frame.settings->drawSkybox;
+  const bool shouldLoadColor = settings.skybox.enabled;
 
   RenderPass pass{};
   pass.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
@@ -290,12 +370,17 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
   auto depthResult = recreateDepthTexture();
   if (depthResult.hasError()) {
     meshShader_.reset();
+    meshVertexShader_ = {};
+    meshFragmentShader_ = {};
     return depthResult;
   }
 
   auto pipelineResult = createPipelines();
   if (pipelineResult.hasError()) {
     meshShader_.reset();
+    meshVertexShader_ = {};
+    meshFragmentShader_ = {};
+    meshFillPipelineHandle_ = {};
     destroyDepthTexture();
     return pipelineResult;
   }
@@ -304,6 +389,11 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
   if (bufferResult.hasError()) {
     meshShader_.reset();
     meshPipeline_.reset();
+    meshVertexShader_ = {};
+    meshFragmentShader_ = {};
+    meshFillPipelineHandle_ = {};
+    baseMeshFillDraw_ = {};
+    baseMeshWireframeDraw_ = {};
     destroyDepthTexture();
     return bufferResult;
   }
@@ -441,40 +531,9 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
   const Format depthFormat = nuri::isValid(depthTexture_)
                                  ? gpu_.getTextureFormat(depthTexture_)
                                  : Format::D32_FLOAT;
-
-  const VertexAttribute vertexAttributes[] = {
-      {.location = 0,
-       .binding = 0,
-       .offset = offsetof(Vertex, position),
-       .format = VertexFormat::Float3},
-      {.location = 1,
-       .binding = 0,
-       .offset = offsetof(Vertex, normal),
-       .format = VertexFormat::Float3},
-      {.location = 2,
-       .binding = 0,
-       .offset = offsetof(Vertex, uv),
-       .format = VertexFormat::Float2},
-  };
-  const VertexBinding vertexBindings[] = {
-      {.stride = sizeof(Vertex)},
-  };
-  const VertexInput vertexInput{
-      .attributes = vertexAttributes,
-      .bindings = vertexBindings,
-  };
-
-  const RenderPipelineDesc meshDesc{
-      .vertexInput = vertexInput,
-      .vertexShader = meshVertexShader_,
-      .fragmentShader = meshFragmentShader_,
-      .colorFormats = {gpu_.getSwapchainFormat()},
-      .depthFormat = depthFormat,
-      .cullMode = CullMode::Back,
-      .polygonMode = PolygonMode::Fill,
-      .topology = Topology::Triangle,
-      .blendEnabled = false,
-  };
+  const RenderPipelineDesc meshDesc = meshPipelineDesc(
+      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_,
+      meshFragmentShader_, PolygonMode::Fill);
   if (!meshPipeline_) {
     return Result<bool, std::string>::makeError(
         "OpaqueLayer::createPipelines: failed to create mesh pipeline");
@@ -485,18 +544,61 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }
-  meshPipelineHandle_ = meshPipeline_->getRenderPipeline();
+  meshFillPipelineHandle_ = meshPipeline_->getRenderPipeline();
 
-  baseMeshDraw_ = DrawItem{};
-  baseMeshDraw_.pipeline = meshPipelineHandle_;
-  baseMeshDraw_.indexFormat = IndexFormat::U32;
-  baseMeshDraw_.useDepthState = true;
-  baseMeshDraw_.depthState = {.compareOp = CompareOp::Less,
-                              .isDepthWriteEnabled = true};
-  baseMeshDraw_.debugLabel = "OpaqueMesh";
-  baseMeshDraw_.debugColor = 0xffcc5500;
+  baseMeshFillDraw_ = makeBaseMeshDraw(meshFillPipelineHandle_, "OpaqueMesh");
+  resetWireframePipelineState();
 
   return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueLayer::ensureWireframePipeline() {
+  if (wireframePipelineInitialized_ &&
+      nuri::isValid(meshWireframePipelineHandle_)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (wireframePipelineUnsupported_) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!nuri::isValid(meshFillPipelineHandle_)) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::ensureWireframePipeline: fill pipeline is invalid");
+  }
+
+  const Format depthFormat = nuri::isValid(depthTexture_)
+                                 ? gpu_.getTextureFormat(depthTexture_)
+                                 : Format::D32_FLOAT;
+  const RenderPipelineDesc wireframeDesc = meshPipelineDesc(
+      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_,
+      meshFragmentShader_, PolygonMode::Line);
+
+  auto pipelineResult =
+      gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_wireframe");
+  if (pipelineResult.hasError()) {
+    wireframePipelineUnsupported_ = true;
+    NURI_LOG_WARNING("OpaqueLayer::ensureWireframePipeline: %s",
+                     pipelineResult.error().c_str());
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  meshWireframePipelineHandle_ = pipelineResult.value();
+  wireframePipelineInitialized_ = true;
+
+  baseMeshWireframeDraw_ = baseMeshFillDraw_;
+  baseMeshWireframeDraw_.pipeline = meshWireframePipelineHandle_;
+  baseMeshWireframeDraw_.debugLabel = "OpaqueMeshWireframe";
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+void OpaqueLayer::resetWireframePipelineState() {
+  if (nuri::isValid(meshWireframePipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshWireframePipelineHandle_);
+  }
+  meshWireframePipelineHandle_ = {};
+  wireframePipelineInitialized_ = false;
+  wireframePipelineUnsupported_ = false;
+  baseMeshWireframeDraw_ = {};
 }
 
 void OpaqueLayer::destroyDepthTexture() {

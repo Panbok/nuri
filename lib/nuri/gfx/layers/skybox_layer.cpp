@@ -40,7 +40,7 @@ Result<bool, std::string>
 SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   NURI_PROFILER_FUNCTION();
 
-  if (frame.settings && !frame.settings->drawSkybox) {
+  if (frame.settings && !frame.settings->skybox.enabled) {
     return Result<bool, std::string>::makeResult(true);
   }
 

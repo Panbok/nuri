@@ -73,6 +73,8 @@ private:
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
+  Result<bool, std::string> ensureWireframePipeline();
+  void resetWireframePipelineState();
   void destroyDepthTexture();
   void destroyPerFrameBuffer();
 
@@ -84,10 +86,13 @@ private:
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshFragmentShader_{};
-  RenderPipelineHandle meshPipelineHandle_{};
+  RenderPipelineHandle meshFillPipelineHandle_{};
+  RenderPipelineHandle meshWireframePipelineHandle_{};
 
   size_t perFrameBufferCapacityBytes_ = 0;
   bool initialized_ = false;
+  bool wireframePipelineInitialized_ = false;
+  bool wireframePipelineUnsupported_ = false;
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -96,7 +101,8 @@ private:
   std::pmr::vector<PerFrameData> perFrameEntries_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
-  DrawItem baseMeshDraw_{};
+  DrawItem baseMeshFillDraw_{};
+  DrawItem baseMeshWireframeDraw_{};
 };
 
 } // namespace nuri

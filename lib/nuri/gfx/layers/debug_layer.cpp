@@ -15,8 +15,8 @@ DebugLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   if (!debugDraw3D_ || !frame.scene) {
     return Result<bool, std::string>::makeResult(true);
   }
-  if (!frame.settings || !frame.settings->drawDebug ||
-      !frame.settings->drawModelBounds) {
+  if (!frame.settings || !frame.settings->debug.enabled ||
+      !frame.settings->debug.modelBounds) {
     return Result<bool, std::string>::makeResult(true);
   }
   if (!nuri::isValid(frame.sharedDepthTexture)) {

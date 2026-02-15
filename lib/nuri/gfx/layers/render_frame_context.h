@@ -11,13 +11,26 @@ namespace nuri {
 class RenderScene;
 
 struct RenderSettings {
-  bool drawModelBounds = true;
-  bool drawSkybox = true;
-  bool drawOpaque = true;
-  bool drawDebug = false;
-  bool enableMeshLod = true;
-  int32_t forcedMeshLod = -1;
-  glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
+  struct SkyboxSettings {
+    bool enabled = true;
+  };
+
+  struct OpaqueSettings {
+    bool enabled = true;
+    bool wireframe = false;
+    bool enableMeshLod = true;
+    int32_t forcedMeshLod = -1;
+    glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
+  };
+
+  struct DebugSettings {
+    bool enabled = false;
+    bool modelBounds = false;
+  };
+
+  SkyboxSettings skybox{};
+  OpaqueSettings opaque{};
+  DebugSettings debug{};
 };
 
 struct CameraFrameState {
