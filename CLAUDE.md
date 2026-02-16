@@ -9,6 +9,9 @@
 - Use `std::string_view` for immutable strings (debug names, string literals, error/debug/info messages etc.)
 - Use `std::span` for non-owning views on containers
 - Prefer PMR types and custom allocators to control allocations and reduce churn.
+- For transient allocations with clear scope lifetime (loop iteration/task/frame slice), prefer `ScratchArena` + `ScopedScratch` from `lib/nuri/core/pmr_scratch.h`.
+- Do not let scratch-backed allocations escape the guard scope; all scratch-backed objects must be destroyed before `ScopedScratch` exits.
+- Do not nest `ScopedScratch` over the same `ScratchArena`.
 - Avoid exceptions when possible; use `lib/nuri/result.h` for error handling.
 
 ## Performance style
