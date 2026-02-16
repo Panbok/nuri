@@ -16,6 +16,8 @@
         "docking-experimental",
         "glfw-binding"
       ]
-    }
+    },
+    "implot",
+    "meshoptimizer"
   ]
 }

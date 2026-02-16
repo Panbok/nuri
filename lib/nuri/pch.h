@@ -36,3 +36,15 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <imgui.h>
+
+#if __has_include(<implot.h>)
+#include <implot.h>
+#else
+#include <implot/implot.h>
+#endif
+
+#if __has_include(<meshoptimizer.h>)
+#include <meshoptimizer.h>
+#elif __has_include(<meshoptimizer/meshoptimizer.h>)
+#include <meshoptimizer/meshoptimizer.h>
+#endif
