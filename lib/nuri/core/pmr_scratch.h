@@ -1,6 +1,7 @@
 #pragma once
 
-#include <exception>
+#include "nuri/core/log.h"
+
 #include <memory_resource>
 
 namespace nuri {
@@ -33,9 +34,7 @@ private:
 class ScopedScratch final {
 public:
   explicit ScopedScratch(ScratchArena &arena) noexcept : arena_(arena) {
-    if (arena_.scopeActive_) {
-      std::terminate();
-    }
+    NURI_ASSERT(!arena_.scopeActive_, "Nested scope detected for ScratchArena");
     arena_.scopeActive_ = true;
   }
   ~ScopedScratch() noexcept {
