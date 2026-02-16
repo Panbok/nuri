@@ -88,10 +88,10 @@ private:
   WindowMode windowMode_ = WindowMode::Windowed;
   std::unique_ptr<Window> window_;
   std::unique_ptr<GPUDevice> gpu_;
+  std::pmr::unsynchronized_pool_resource rendererMemory_;
   std::unique_ptr<Renderer> renderer_;
   std::pmr::unsynchronized_pool_resource layerMemory_;
   LayerStack layerStack_;
-  std::pmr::unsynchronized_pool_resource rendererMemory_;
   std::pmr::unsynchronized_pool_resource eventMemory_;
   EventManager eventManager_;
   InputSystem input_;

@@ -10,7 +10,7 @@
 - Use `std::span` for non-owning views on containers
 - Prefer PMR types and custom allocators to control allocations and reduce churn.
 - For transient allocations with clear scope lifetime (loop iteration/task/frame slice), prefer `ScratchArena` + `ScopedScratch` from `lib/nuri/core/pmr_scratch.h`.
-- Do not let scratch-backed allocations escape the guard scope; all scratch-backed objects must be destroyed before `ScopedScratch` exits.
+- Do not let scratch-backed allocations escape the scope of the `ScopedScratch` object; all scratch-backed objects must be destroyed before the `ScopedScratch` exits.
 - Do not nest `ScopedScratch` over the same `ScratchArena`.
 - Avoid exceptions when possible; use `lib/nuri/result.h` for error handling.
 

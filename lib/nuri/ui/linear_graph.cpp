@@ -1,6 +1,6 @@
-#include "nuri/ui/linear_graph.h"
-
 #include "nuri/pch.h"
+
+#include "nuri/ui/linear_graph.h"
 
 namespace nuri {
 
@@ -16,7 +16,8 @@ const char *cacheText(std::pmr::string &buffer, std::string_view text) {
 class ImPlotLinearGraph final : public LinearGraph {
 public:
   explicit ImPlotLinearGraph(std::size_t capacity)
-      : capacity_(std::max<std::size_t>(capacity, 1)),
+      : capacity_(std::clamp<std::size_t>(capacity, 1,
+                                          static_cast<std::size_t>(INT_MAX))),
         samples_(&memoryResource_), contiguousSamples_(&memoryResource_),
         plotIdBuffer_(&memoryResource_), seriesLabelBuffer_(&memoryResource_),
         shadedLabelBuffer_(&memoryResource_) {
