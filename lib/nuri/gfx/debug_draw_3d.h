@@ -67,7 +67,6 @@ private:
 
   GPUDevice &gpu_;
   glm::mat4 mvp_ = glm::mat4(1.0f);
-  std::pmr::memory_resource *memory_resource_ = std::pmr::get_default_resource();
   std::pmr::vector<LineData> lines_;
   std::pmr::vector<FrameBufferState> frameBuffers_;
   ShaderHandle vert_{};

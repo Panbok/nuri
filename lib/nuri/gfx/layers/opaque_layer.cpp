@@ -12,6 +12,11 @@ namespace {
 constexpr float kMinLodRadius = 1.0e-4f;
 constexpr uint32_t kMeshDebugColor = 0xffcc5500;
 
+std::pmr::memory_resource *
+resolveMemoryResource(std::pmr::memory_resource *memory) {
+  return memory != nullptr ? memory : std::pmr::get_default_resource();
+}
+
 const std::array<VertexAttribute, 3> kMeshVertexAttributes = {
     VertexAttribute{.location = 0,
                     .binding = 0,
@@ -166,12 +171,13 @@ const SubmeshLod *chooseLodRange(const Submesh *submeshPtr,
 
 } // namespace
 
-OpaqueLayer::OpaqueLayer(GPUDevice &gpu)
-    : gpu_(gpu), renderableTemplates_(std::pmr::get_default_resource()),
-      meshDrawTemplates_(std::pmr::get_default_resource()),
-      perFrameEntries_(std::pmr::get_default_resource()),
-      drawPushConstants_(std::pmr::get_default_resource()),
-      drawItems_(std::pmr::get_default_resource()) {}
+OpaqueLayer::OpaqueLayer(GPUDevice &gpu, std::pmr::memory_resource *memory)
+    : gpu_(gpu),
+      renderableTemplates_(resolveMemoryResource(memory)),
+      meshDrawTemplates_(resolveMemoryResource(memory)),
+      perFrameEntries_(resolveMemoryResource(memory)),
+      drawPushConstants_(resolveMemoryResource(memory)),
+      drawItems_(resolveMemoryResource(memory)) {}
 
 OpaqueLayer::~OpaqueLayer() { onDetach(); }
 

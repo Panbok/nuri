@@ -31,8 +31,8 @@ LogConfig Application::makeDefaultLogConfig() {
 Application::Application(const ApplicationConfig &config)
     : logLifetimeGuard_(makeDefaultLogConfig()), title_(config.title),
       width_(config.width), height_(config.height),
-      windowMode_(config.windowMode), eventManager_(eventMemory_),
-      input_(eventManager_) {
+      windowMode_(config.windowMode), layerStack_(&layerMemory_),
+      eventManager_(eventMemory_), input_(eventManager_) {
   inputDispatchSubscription_ = eventManager_.subscribe<InputEvent>(
       EventChannel::Input, &Application::dispatchInputEvent, this);
 
@@ -53,7 +53,7 @@ Application::Application(const ApplicationConfig &config)
 
   gpu_ = GPUDevice::create(*window_);
   NURI_ASSERT(gpu_ != nullptr, "Failed to create GPU device");
-  renderer_ = Renderer::create(*gpu_);
+  renderer_ = Renderer::create(*gpu_, &rendererMemory_);
   NURI_ASSERT(renderer_ != nullptr, "Failed to create renderer");
 }
 

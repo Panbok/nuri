@@ -63,6 +63,11 @@ public:
   InputSystem &getInput();
   const InputSystem &getInput() const;
 
+protected:
+  [[nodiscard]] std::pmr::memory_resource *layerMemoryResource() noexcept {
+    return &layerMemory_;
+  }
+
 private:
   struct LogLifetimeGuard {
     explicit LogLifetimeGuard(const LogConfig &config);
@@ -84,7 +89,9 @@ private:
   std::unique_ptr<Window> window_;
   std::unique_ptr<GPUDevice> gpu_;
   std::unique_ptr<Renderer> renderer_;
+  std::pmr::unsynchronized_pool_resource layerMemory_;
   LayerStack layerStack_;
+  std::pmr::unsynchronized_pool_resource rendererMemory_;
   std::pmr::unsynchronized_pool_resource eventMemory_;
   EventManager eventManager_;
   InputSystem input_;

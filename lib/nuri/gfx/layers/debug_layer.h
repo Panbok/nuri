@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <memory_resource>
 
 #include "nuri/core/layer.h"
 #include "nuri/defines.h"
@@ -11,7 +12,9 @@ namespace nuri {
 
 class NURI_API DebugLayer final : public Layer {
 public:
-  explicit DebugLayer(GPUDevice &gpu);
+  explicit DebugLayer(
+      GPUDevice &gpu,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~DebugLayer() override = default;
 
   DebugLayer(const DebugLayer &) = delete;
@@ -19,8 +22,10 @@ public:
   DebugLayer(DebugLayer &&) = delete;
   DebugLayer &operator=(DebugLayer &&) = delete;
 
-  static std::unique_ptr<DebugLayer> create(GPUDevice &gpu) {
-    return std::make_unique<DebugLayer>(gpu);
+  static std::unique_ptr<DebugLayer> create(
+      GPUDevice &gpu,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
+    return std::make_unique<DebugLayer>(gpu, memory);
   }
 
   Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,

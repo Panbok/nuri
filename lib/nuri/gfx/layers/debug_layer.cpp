@@ -5,8 +5,10 @@
 
 namespace nuri {
 
-DebugLayer::DebugLayer(GPUDevice &gpu)
-    : debugDraw3D_(std::make_unique<DebugDraw3D>(gpu)) {}
+DebugLayer::DebugLayer(GPUDevice &gpu, std::pmr::memory_resource *memory)
+    : debugDraw3D_(std::make_unique<DebugDraw3D>(
+          gpu, memory != nullptr ? memory : std::pmr::get_default_resource())) {
+}
 
 Result<bool, std::string>
 DebugLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/pmr_scratch.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
@@ -42,6 +43,7 @@ private:
   };
 
   GPUDevice &gpu_;
+  ScratchArena scratch_;
 
   Format pipelineFormat_ = Format::Count;
   ShaderHandle vs_{};

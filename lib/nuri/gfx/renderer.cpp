@@ -7,7 +7,10 @@
 
 namespace nuri {
 
-Renderer::Renderer(GPUDevice &gpu) : gpu_(gpu) {
+Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource *memory)
+    : gpu_(gpu),
+      combinedPasses_(memory != nullptr ? memory
+                                        : std::pmr::get_default_resource()) {
   NURI_LOG_DEBUG("Renderer::Renderer: Renderer created");
 }
 

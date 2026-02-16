@@ -350,8 +350,11 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat) {
 
   // Upload combined vertex/index data.
   {
-    std::vector<std::byte> vtxData(vtxBytes);
-    std::vector<std::byte> idxData(idxBytes);
+    ScopedScratch scopedScratch(scratch_);
+    std::pmr::vector<std::byte> vtxData(scopedScratch.resource());
+    std::pmr::vector<std::byte> idxData(scopedScratch.resource());
+    vtxData.resize(vtxBytes);
+    idxData.resize(idxBytes);
 
     std::byte *vtxDst = vtxData.data();
     std::byte *idxDst = idxData.data();

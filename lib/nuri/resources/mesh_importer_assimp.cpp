@@ -3,6 +3,7 @@
 #include "mesh_importer.h"
 
 #include "nuri/core/log.h"
+#include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 
 #include <assimp/Importer.hpp>
@@ -388,12 +389,7 @@ MeshImporter::loadFromFile(std::string_view path,
     data.name.assign(stem.data(), stem.size());
   }
 
-  std::pmr::unsynchronized_pool_resource scratchMemory(mem);
-  std::pmr::vector<Vertex> meshVertices(&scratchMemory);
-  std::pmr::vector<uint32_t> lod0Indices(&scratchMemory);
-  std::array<std::pmr::vector<uint32_t>, Submesh::kMaxLodCount>
-      lodIndexBuffers = makeLodIndexBuffers(&scratchMemory);
-  std::array<float, Submesh::kMaxLodCount> lodErrors{};
+  ScratchArena scratch(mem);
 
   for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
     const aiMesh *mesh = scene->mMeshes[i];
@@ -401,12 +397,12 @@ MeshImporter::loadFromFile(std::string_view path,
       continue;
     }
 
-    meshVertices.clear();
-    lod0Indices.clear();
-    for (auto &lodIndices : lodIndexBuffers) {
-      lodIndices.clear();
-    }
-    lodErrors.fill(0.0f);
+    ScopedScratch scopedScratch(scratch);
+    std::pmr::vector<Vertex> meshVertices(scopedScratch.resource());
+    std::pmr::vector<uint32_t> lod0Indices(scopedScratch.resource());
+    std::array<std::pmr::vector<uint32_t>, Submesh::kMaxLodCount>
+        lodIndexBuffers = makeLodIndexBuffers(scopedScratch.resource());
+    std::array<float, Submesh::kMaxLodCount> lodErrors{};
 
     extractMeshGeometry(*mesh, meshVertices, lod0Indices);
 

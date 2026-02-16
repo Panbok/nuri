@@ -46,14 +46,18 @@ void main() {
 }
 )";
 
+std::pmr::memory_resource *
+resolveMemoryResource(std::pmr::memory_resource *memoryResource) {
+  return memoryResource != nullptr ? memoryResource
+                                   : std::pmr::get_default_resource();
+}
+
 } // namespace
 
 DebugDraw3D::DebugDraw3D(GPUDevice &gpu,
                          std::pmr::memory_resource *memoryResource)
-    : gpu_(gpu),
-      memory_resource_(memoryResource != nullptr ? memoryResource
-                                                 : std::pmr::get_default_resource()),
-      lines_(memory_resource_), frameBuffers_(memory_resource_) {}
+    : gpu_(gpu), lines_(resolveMemoryResource(memoryResource)),
+      frameBuffers_(resolveMemoryResource(memoryResource)) {}
 
 DebugDraw3D::~DebugDraw3D() {
   for (const FrameBufferState &frame : frameBuffers_) {

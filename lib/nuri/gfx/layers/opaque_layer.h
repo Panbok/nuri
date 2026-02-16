@@ -20,7 +20,9 @@ namespace nuri {
 
 class NURI_API OpaqueLayer final : public Layer {
 public:
-  explicit OpaqueLayer(GPUDevice &gpu);
+  explicit OpaqueLayer(
+      GPUDevice &gpu,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~OpaqueLayer() override;
 
   OpaqueLayer(const OpaqueLayer &) = delete;
@@ -28,8 +30,10 @@ public:
   OpaqueLayer(OpaqueLayer &&) = delete;
   OpaqueLayer &operator=(OpaqueLayer &&) = delete;
 
-  static std::unique_ptr<OpaqueLayer> create(GPUDevice &gpu) {
-    return std::make_unique<OpaqueLayer>(gpu);
+  static std::unique_ptr<OpaqueLayer> create(
+      GPUDevice &gpu,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
+    return std::make_unique<OpaqueLayer>(gpu, memory);
   }
 
   void onAttach() override;
