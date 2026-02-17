@@ -17,35 +17,9 @@ resolveMemoryResource(std::pmr::memory_resource *memory) {
   return memory != nullptr ? memory : std::pmr::get_default_resource();
 }
 
-const std::array<VertexAttribute, 3> kMeshVertexAttributes = {
-    VertexAttribute{.location = 0,
-                    .binding = 0,
-                    .offset = offsetof(Vertex, position),
-                    .format = VertexFormat::Float3},
-    VertexAttribute{.location = 1,
-                    .binding = 0,
-                    .offset = offsetof(Vertex, normal),
-                    .format = VertexFormat::Float3},
-    VertexAttribute{.location = 2,
-                    .binding = 0,
-                    .offset = offsetof(Vertex, uv),
-                    .format = VertexFormat::Float2},
-};
-
-const std::array<VertexBinding, 1> kMeshVertexBindings = {
-    VertexBinding{.stride = sizeof(Vertex)},
-};
-
 const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
   static const RenderSettings kDefaultSettings{};
   return frame.settings ? *frame.settings : kDefaultSettings;
-}
-
-VertexInput meshVertexInput() {
-  return VertexInput{
-      .attributes = kMeshVertexAttributes,
-      .bindings = kMeshVertexBindings,
-  };
 }
 
 RenderPipelineDesc meshPipelineDesc(Format swapchainFormat, Format depthFormat,
@@ -53,7 +27,7 @@ RenderPipelineDesc meshPipelineDesc(Format swapchainFormat, Format depthFormat,
                                     ShaderHandle fragmentShader,
                                     PolygonMode polygonMode) {
   return RenderPipelineDesc{
-      .vertexInput = meshVertexInput(),
+      .vertexInput = {},
       .vertexShader = vertexShader,
       .fragmentShader = fragmentShader,
       .colorFormats = {swapchainFormat},
@@ -172,8 +146,7 @@ const SubmeshLod *chooseLodRange(const Submesh *submeshPtr,
 } // namespace
 
 OpaqueLayer::OpaqueLayer(GPUDevice &gpu, std::pmr::memory_resource *memory)
-    : gpu_(gpu),
-      renderableTemplates_(resolveMemoryResource(memory)),
+    : gpu_(gpu), renderableTemplates_(resolveMemoryResource(memory)),
       meshDrawTemplates_(resolveMemoryResource(memory)),
       perFrameEntries_(resolveMemoryResource(memory)),
       drawPushConstants_(resolveMemoryResource(memory)),
@@ -325,18 +298,46 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       if (!lodRange) {
         continue;
       }
+      if (!templateEntry.model) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueLayer::buildRenderPasses: mesh template has null model");
+      }
+
+      GeometryAllocationView geometry{};
+      if (!gpu_.resolveGeometry(templateEntry.model->geometryHandle(),
+                                geometry)) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueLayer::buildRenderPasses: failed to resolve geometry "
+            "allocation");
+      }
+      if (!nuri::isValid(geometry.vertexBuffer) ||
+          !nuri::isValid(geometry.indexBuffer)) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueLayer::buildRenderPasses: resolved geometry uses invalid "
+            "buffers");
+      }
+
+      const uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
+          geometry.vertexBuffer, geometry.vertexByteOffset);
+      if (vertexBufferAddress == 0) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueLayer::buildRenderPasses: invalid geometry vertex buffer "
+            "address");
+      }
 
       const uint64_t perFrameAddress =
           baseAddress + frameStrideBytes * templateEntry.perFrameIndex;
-      drawPushConstants_.push_back(
-          PushConstants{.perFrameAddress = perFrameAddress});
+      drawPushConstants_.push_back(PushConstants{
+          .perFrameAddress = perFrameAddress,
+          .vertexBufferAddress = vertexBufferAddress,
+      });
 
       DrawItem meshDraw = baseDraw;
-      meshDraw.vertexBuffer = templateEntry.vertexBuffer;
-      meshDraw.indexBuffer = templateEntry.indexBuffer;
-      meshDraw.vertexCount = templateEntry.vertexCount;
+      meshDraw.indexBuffer = geometry.indexBuffer;
+      meshDraw.indexBufferOffset = geometry.indexByteOffset;
       meshDraw.indexCount = lodRange->indexCount;
       meshDraw.firstIndex = lodRange->indexOffset;
+      meshDraw.vertexOffset = 0;
       meshDraw.pushConstants = pushConstantBytes(drawPushConstants_.back());
       drawItems_.push_back(meshDraw);
     }
@@ -484,11 +485,9 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene) {
          ++submeshIndex) {
       meshDrawTemplates_.push_back(MeshDrawTemplate{
           .renderable = &renderable,
+          .model = renderable.model.get(),
           .submesh = &submeshes[submeshIndex],
           .perFrameIndex = perFrameIndex,
-          .vertexBuffer = renderable.model->vertexBuffer()->handle(),
-          .indexBuffer = renderable.model->indexBuffer()->handle(),
-          .vertexCount = renderable.model->vertexCount(),
       });
     }
   }

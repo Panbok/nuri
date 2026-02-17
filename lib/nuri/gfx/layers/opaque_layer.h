@@ -20,9 +20,8 @@ namespace nuri {
 
 class NURI_API OpaqueLayer final : public Layer {
 public:
-  explicit OpaqueLayer(
-      GPUDevice &gpu,
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
+  explicit OpaqueLayer(GPUDevice &gpu, std::pmr::memory_resource *memory =
+                                           std::pmr::get_default_resource());
   ~OpaqueLayer() override;
 
   OpaqueLayer(const OpaqueLayer &) = delete;
@@ -30,9 +29,9 @@ public:
   OpaqueLayer(OpaqueLayer &&) = delete;
   OpaqueLayer &operator=(OpaqueLayer &&) = delete;
 
-  static std::unique_ptr<OpaqueLayer> create(
-      GPUDevice &gpu,
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
+  static std::unique_ptr<OpaqueLayer>
+  create(GPUDevice &gpu,
+         std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
     return std::make_unique<OpaqueLayer>(gpu, memory);
   }
 
@@ -56,6 +55,7 @@ private:
 
   struct PushConstants {
     uint64_t perFrameAddress = 0;
+    uint64_t vertexBufferAddress = 0;
   };
 
   struct RenderableTemplate {
@@ -64,11 +64,9 @@ private:
 
   struct MeshDrawTemplate {
     const OpaqueRenderable *renderable = nullptr;
+    const Model *model = nullptr;
     const Submesh *submesh = nullptr;
     uint32_t perFrameIndex = 0;
-    BufferHandle vertexBuffer{};
-    BufferHandle indexBuffer{};
-    uint32_t vertexCount = 0;
   };
 
   Result<bool, std::string> ensureInitialized();
