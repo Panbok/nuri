@@ -24,6 +24,10 @@ size_t meshIndexCount(const aiMesh &mesh) {
 }
 
 float lodRatioFor(const MeshImportOptions &options, uint32_t lodIndex) {
+  if (options.lodTriangleRatios.empty()) {
+    return 0.5f;
+  }
+
   const size_t ratioIndex =
       std::min<size_t>(lodIndex - 1, options.lodTriangleRatios.size() - 1);
   return std::max(options.lodTriangleRatios[ratioIndex], 0.0f);

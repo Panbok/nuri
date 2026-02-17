@@ -12,14 +12,13 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/math/types.h"
 #include "nuri/resources/cpu/mesh_data.h"
-#include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/mesh_importer.h"
 
 namespace nuri {
 
 class NURI_API Model final {
 public:
-  ~Model() = default;
+  ~Model();
 
   Model(const Model &) = delete;
   Model &operator=(const Model &) = delete;
@@ -36,11 +35,8 @@ public:
       std::pmr::memory_resource *mem = std::pmr::get_default_resource(),
       std::string_view debugName = {});
 
-  [[nodiscard]] const Buffer *vertexBuffer() const noexcept {
-    return vertexBuffer_.get();
-  }
-  [[nodiscard]] const Buffer *indexBuffer() const noexcept {
-    return indexBuffer_.get();
+  [[nodiscard]] GeometryAllocationHandle geometryHandle() const noexcept {
+    return geometry_;
   }
   [[nodiscard]] std::span<const Submesh> submeshes() const noexcept {
     return submeshes_;
@@ -50,16 +46,15 @@ public:
   [[nodiscard]] const BoundingBox &bounds() const noexcept { return bounds_; }
 
 private:
-  Model(std::unique_ptr<Buffer> &&vertexBuffer,
-        std::unique_ptr<Buffer> &&indexBuffer, std::vector<Submesh> submeshes,
-        uint32_t vertexCount, uint32_t indexCount, BoundingBox bounds)
-      : vertexBuffer_(std::move(vertexBuffer)),
-        indexBuffer_(std::move(indexBuffer)), submeshes_(std::move(submeshes)),
+  Model(GPUDevice &gpu, GeometryAllocationHandle geometry,
+        std::vector<Submesh> submeshes, uint32_t vertexCount,
+        uint32_t indexCount, BoundingBox bounds)
+      : gpu_(&gpu), geometry_(geometry), submeshes_(std::move(submeshes)),
         vertexCount_(vertexCount), indexCount_(indexCount),
         bounds_(std::move(bounds)) {}
 
-  std::unique_ptr<Buffer> vertexBuffer_;
-  std::unique_ptr<Buffer> indexBuffer_;
+  GPUDevice *gpu_ = nullptr;
+  GeometryAllocationHandle geometry_{};
   std::vector<Submesh> submeshes_;
   uint32_t vertexCount_ = 0;
   uint32_t indexCount_ = 0;
