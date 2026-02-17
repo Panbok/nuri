@@ -1,12 +1,13 @@
 #include "common.sp"
 
-layout(location = 0) in vec3 pos;
-layout(location = 1) in vec3 normal;
-layout(location = 2) in vec2 uv;
-
 layout(location = 0) out PerVertex vtx;
 
 void main() {
+  const PackedVertex packed = pc.vertexBuffer.vertices[gl_VertexIndex];
+  const vec3 pos = decodePackedPosition(packed);
+  const vec3 normal = decodePackedNormal(packed);
+  const vec2 uv = decodePackedUv(packed);
+
   const mat4 model = pc.perFrame.model;
   const mat4 view = pc.perFrame.view;
   const mat4 proj = pc.perFrame.proj;
