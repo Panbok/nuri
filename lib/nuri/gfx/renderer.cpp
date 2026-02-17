@@ -1,6 +1,6 @@
-#include "nuri/gfx/renderer.h"
+#include "nuri/pch.h"
 
-#include <cassert>
+#include "nuri/gfx/renderer.h"
 
 #include "nuri/core/layer_stack.h"
 #include "nuri/core/log.h"
@@ -9,9 +9,8 @@
 
 namespace nuri {
 
-Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource *memory)
-    : gpu_(gpu), combinedPasses_(memory) {
-  NURI_ASSERT(memory != nullptr, "Memory resource cannot be nullptr");
+Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
+    : gpu_(gpu), combinedPasses_(&memory) {
   NURI_LOG_DEBUG("Renderer::Renderer: Renderer created");
 }
 

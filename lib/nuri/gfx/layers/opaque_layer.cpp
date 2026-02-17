@@ -1,5 +1,4 @@
 #include "nuri/pch.h"
-#include <optional>
 
 #include "nuri/gfx/layers/opaque_layer.h"
 

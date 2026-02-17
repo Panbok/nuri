@@ -1,12 +1,9 @@
+#include "nuri/pch.h"
+
 #include "nuri/resources/gpu/geometry_pool.h"
 
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
-
-#include <algorithm>
-#include <array>
-#include <limits>
-#include <optional>
 
 namespace nuri {
 namespace {
@@ -22,8 +19,7 @@ struct PoolSourceRef {
 
 GeometryPool::GeometryPool(GPUDevice &gpu, GeometryPoolConfig config,
                            std::pmr::memory_resource *memory)
-    : gpu_(gpu), config_(config),
-      memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
+    : gpu_(gpu), config_(config), memory_(ensureMemory(memory)),
       vertexChunks_(memory_), indexChunks_(memory_), allocations_(memory_),
       freeAllocationIndices_(memory_), retiredVertexChunks_(memory_),
       retiredIndexChunks_(memory_) {}
@@ -55,8 +51,17 @@ size_t GeometryPool::alignUp(size_t value, size_t alignment) {
   if (alignment == 0) {
     return value;
   }
-  const size_t mask = alignment - 1;
-  return (value + mask) & ~mask;
+  // Bitmask trick only works for power-of-two alignments.
+  const bool isPowerOfTwo = (alignment & (alignment - 1)) == 0;
+  NURI_ASSERT(isPowerOfTwo,
+              "alignUp: alignment must be a power of two (e.g. 1, 2, 4, 8)");
+  if (isPowerOfTwo) {
+    const size_t mask = alignment - 1;
+    return (value + mask) & ~mask;
+  }
+  // Generic round-up for non-power-of-two alignment (correct but slower).
+  const size_t remainder = value % alignment;
+  return remainder == 0 ? value : value + (alignment - remainder);
 }
 
 Result<bool, std::string>

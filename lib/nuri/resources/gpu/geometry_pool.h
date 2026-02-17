@@ -41,6 +41,11 @@ private:
   static constexpr size_t kVertexAlignment = 16;
   static constexpr size_t kIndexAlignment = 4;
 
+  static std::pmr::memory_resource *
+  ensureMemory(std::pmr::memory_resource *memory) {
+    return memory != nullptr ? memory : std::pmr::get_default_resource();
+  }
+
   struct Block {
     size_t offset = 0;
     size_t size = 0;
@@ -53,8 +58,7 @@ private:
     std::pmr::vector<Block> freeBlocks;
 
     explicit Chunk(std::pmr::memory_resource *memory)
-        : freeBlocks(memory != nullptr ? memory
-                                       : std::pmr::get_default_resource()) {}
+        : freeBlocks(ensureMemory(memory)) {}
   };
 
   struct SubAllocation {
@@ -76,8 +80,7 @@ private:
     std::pmr::string debugName;
 
     explicit AllocationEntry(std::pmr::memory_resource *memory)
-        : debugName(memory != nullptr ? memory
-                                      : std::pmr::get_default_resource()) {}
+        : debugName(ensureMemory(memory)) {}
   };
 
   struct RetiredChunk {
@@ -102,12 +105,8 @@ private:
     std::pmr::vector<PoolCompactionMove> moves;
 
     explicit PoolCompactionPlan(std::pmr::memory_resource *memory)
-        : newChunks(memory != nullptr ? memory
-                                      : std::pmr::get_default_resource()),
-          copyRegions(memory != nullptr ? memory
-                                        : std::pmr::get_default_resource()),
-          moves(memory != nullptr ? memory : std::pmr::get_default_resource()) {
-    }
+        : newChunks(ensureMemory(memory)), copyRegions(ensureMemory(memory)),
+          moves(ensureMemory(memory)) {}
   };
 
   [[nodiscard]] static size_t alignUp(size_t value, size_t alignment);

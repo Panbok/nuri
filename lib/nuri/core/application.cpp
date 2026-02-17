@@ -53,7 +53,7 @@ Application::Application(const ApplicationConfig &config)
 
   gpu_ = GPUDevice::create(*window_);
   NURI_ASSERT(gpu_ != nullptr, "Failed to create GPU device");
-  renderer_ = Renderer::create(*gpu_, &rendererMemory_);
+  renderer_ = Renderer::create(*gpu_, rendererMemory_);
   NURI_ASSERT(renderer_ != nullptr, "Failed to create renderer");
 }
 

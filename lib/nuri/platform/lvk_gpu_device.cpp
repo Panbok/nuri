@@ -1,3 +1,5 @@
+#include "nuri/pch.h"
+
 #include "nuri/platform/lvk_gpu_device.h"
 
 #include "nuri/core/log.h"
@@ -5,9 +7,6 @@
 #include "nuri/core/window.h"
 #include "nuri/resources/gpu/geometry_pool.h"
 
-#include <algorithm>
-#include <cstring>
-#include <deque>
 #include <lvk/LVK.h>
 #include <vulkan/VulkanUtils.h>
 
@@ -1395,8 +1394,9 @@ LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
-  bool hasCopyCommands = false;
+  // Validate all regions before acquiring a command buffer so we never
+  // acquire without submitting.
+  size_t copyCount = 0;
   for (const BufferCopyRegion &region : regions) {
     if (region.size == 0) {
       continue;
@@ -1423,13 +1423,22 @@ LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
       return Result<bool, std::string>::makeError(
           "copyBufferRegions: destination copy range is out of bounds");
     }
+    ++copyCount;
+  }
 
+  if (copyCount == 0) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
+  for (const BufferCopyRegion &region : regions) {
+    if (region.size == 0) {
+      continue;
+    }
+    const lvk::BufferHandle src = impl_->buffers.getLvkHandle(region.srcBuffer);
+    const lvk::BufferHandle dst = impl_->buffers.getLvkHandle(region.dstBuffer);
     commandBuffer.cmdCopyBuffer(src, dst, region.srcOffset, region.dstOffset,
                                 region.size);
-    hasCopyCommands = true;
-  }
-  if (!hasCopyCommands) {
-    return Result<bool, std::string>::makeResult(true);
   }
 
   // TODO: move this to an async pre-pass copy path once frame graph support

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cinttypes>
 #include <cmath>
 #include <cstdarg>

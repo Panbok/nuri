@@ -1,3 +1,5 @@
+#include "nuri/pch.h"
+
 #include "nuri/resources/gpu/model.h"
 
 #include "nuri/core/log.h"
@@ -5,9 +7,6 @@
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/resources/mesh_importer.h"
-
-#include <bit>
-#include <cmath>
 
 namespace nuri {
 namespace {
