@@ -2,8 +2,10 @@
 
 #include <cstddef>
 #include <span>
+#include <string_view>
 
 #include "nuri/core/result.h"
+#include "nuri/core/window.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_render_types.h"
@@ -11,11 +13,10 @@
 
 namespace nuri {
 
-class Window;
-
 class NURI_API GPUDevice {
 public:
-  static std::unique_ptr<GPUDevice> create(Window &window);
+  static std::unique_ptr<GPUDevice>
+  create(Window &window, const GPUDeviceCreateDesc &desc = {});
   virtual ~GPUDevice() = default;
 
   GPUDevice(const GPUDevice &) = delete;
@@ -69,9 +70,19 @@ public:
   // GPU virtual address used by LVK shaders (GL_EXT_buffer_reference).
   virtual uint64_t getBufferDeviceAddress(BufferHandle h,
                                           size_t offset = 0) const = 0;
+  virtual bool resolveGeometry(GeometryAllocationHandle h,
+                               GeometryAllocationView &out) const = 0;
 
   // Rendering
+  virtual Result<bool, std::string> beginFrame(uint64_t frameIndex) = 0;
   virtual Result<bool, std::string> submitFrame(const RenderFrame &frame) = 0;
+  virtual Result<GeometryAllocationHandle, std::string>
+  allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
+                   std::span<const std::byte> indexBytes, uint32_t indexCount,
+                   std::string_view debugName = {}) = 0;
+  virtual void releaseGeometry(GeometryAllocationHandle h) = 0;
+  virtual Result<bool, std::string>
+  copyBufferRegions(std::span<const BufferCopyRegion> regions) = 0;
 
   // Data updates
   virtual Result<bool, std::string>

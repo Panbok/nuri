@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <type_traits>
@@ -32,17 +33,24 @@ struct ComputePipelineHandle {
   uint32_t generation = 0;
 };
 
+struct GeometryAllocationHandle {
+  uint32_t index = 0;
+  uint32_t generation = 0;
+};
+
 constexpr bool isValid(BufferHandle h) { return h.generation != 0; }
 constexpr bool isValid(TextureHandle h) { return h.generation != 0; }
 constexpr bool isValid(ShaderHandle h) { return h.generation != 0; }
 constexpr bool isValid(RenderPipelineHandle h) { return h.generation != 0; }
 constexpr bool isValid(ComputePipelineHandle h) { return h.generation != 0; }
+constexpr bool isValid(GeometryAllocationHandle h) { return h.generation != 0; }
 
 static_assert(std::is_trivially_destructible_v<BufferHandle>);
 static_assert(std::is_trivially_destructible_v<TextureHandle>);
 static_assert(std::is_trivially_destructible_v<ShaderHandle>);
 static_assert(std::is_trivially_destructible_v<RenderPipelineHandle>);
 static_assert(std::is_trivially_destructible_v<ComputePipelineHandle>);
+static_assert(std::is_trivially_destructible_v<GeometryAllocationHandle>);
 
 // GPU enums (LVK-free)
 enum class Format : uint8_t {
@@ -179,6 +187,37 @@ struct TextureDimensions {
   uint32_t width = 1;
   uint32_t height = 1;
   uint32_t depth = 1;
+};
+
+struct GeometryAllocationView {
+  BufferHandle vertexBuffer{};
+  uint64_t vertexByteOffset = 0;
+  uint64_t vertexByteSize = 0;
+  BufferHandle indexBuffer{};
+  uint64_t indexByteOffset = 0;
+  uint64_t indexByteSize = 0;
+  uint32_t vertexCount = 0;
+  uint32_t indexCount = 0;
+};
+
+struct GeometryPoolConfig {
+  size_t vertexChunkSizeBytes = 64u * 1024u * 1024u;
+  size_t indexChunkSizeBytes = 32u * 1024u * 1024u;
+  uint64_t compactionIntervalFrames = 300;
+  float compactionFragmentationThreshold = 0.3f;
+  bool enableCompaction = true;
+};
+
+struct GPUDeviceCreateDesc {
+  GeometryPoolConfig geometryPool{};
+};
+
+struct BufferCopyRegion {
+  BufferHandle srcBuffer{};
+  BufferHandle dstBuffer{};
+  uint64_t srcOffset = 0;
+  uint64_t dstOffset = 0;
+  uint64_t size = 0;
 };
 
 struct VertexAttribute {
