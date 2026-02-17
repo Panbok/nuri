@@ -18,9 +18,8 @@ namespace nuri {
 
 class NURI_API Renderer {
 public:
-  explicit Renderer(
-      GPUDevice &gpu,
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
+  explicit Renderer(GPUDevice &gpu, std::pmr::memory_resource *memory =
+                                        std::pmr::get_default_resource());
   ~Renderer() = default;
 
   Renderer(const Renderer &) = delete;
@@ -28,9 +27,9 @@ public:
   Renderer(Renderer &&) = delete;
   Renderer &operator=(Renderer &&) = delete;
 
-  static std::unique_ptr<Renderer> create(
-      GPUDevice &gpu,
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
+  static std::unique_ptr<Renderer>
+  create(GPUDevice &gpu,
+         std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
     return std::make_unique<Renderer>(gpu, memory);
   }
 
@@ -43,6 +42,7 @@ public:
 private:
   GPUDevice &gpu_;
   std::pmr::vector<RenderPass> combinedPasses_;
+  uint64_t standaloneFrameIndex_ = 0;
 };
 
 } // namespace nuri

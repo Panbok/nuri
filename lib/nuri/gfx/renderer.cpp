@@ -1,5 +1,7 @@
 #include "nuri/gfx/renderer.h"
 
+#include <cassert>
+
 #include "nuri/core/layer_stack.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
@@ -8,14 +10,17 @@
 namespace nuri {
 
 Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource *memory)
-    : gpu_(gpu),
-      combinedPasses_(memory != nullptr ? memory
-                                        : std::pmr::get_default_resource()) {
+    : gpu_(gpu), combinedPasses_(memory) {
+  NURI_ASSERT(memory != nullptr, "Memory resource cannot be nullptr");
   NURI_LOG_DEBUG("Renderer::Renderer: Renderer created");
 }
 
 Result<bool, std::string> Renderer::render(const RenderFrame &frame) {
   NURI_PROFILER_FUNCTION();
+  auto frameResult = gpu_.beginFrame(standaloneFrameIndex_++);
+  if (frameResult.hasError()) {
+    return frameResult;
+  }
   return gpu_.submitFrame(frame);
 }
 
@@ -23,8 +28,13 @@ Result<bool, std::string> Renderer::render(const RenderFrame &frame,
                                            LayerStack &layers,
                                            RenderFrameContext &frameContext) {
   NURI_PROFILER_FUNCTION();
+  auto frameResult = gpu_.beginFrame(frameContext.frameIndex);
+  if (frameResult.hasError()) {
+    return frameResult;
+  }
+
   if (layers.empty()) {
-    return render(frame);
+    return gpu_.submitFrame(frame);
   }
 
   combinedPasses_.clear();
