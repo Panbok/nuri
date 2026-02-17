@@ -3,6 +3,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
+#include "nuri/resources/gpu/geometry_pool.h"
 
 #include <algorithm>
 #include <cstring>
@@ -424,6 +425,7 @@ struct LvkGPUDevice::Impl {
   ResourceTable<ComputePipelineHandle, lvk::ComputePipelineHandle>
       computePipelines;
   std::vector<FramebufferTexture> framebufferTextures;
+  std::unique_ptr<GeometryPool> geometryPool;
 };
 
 LvkGPUDevice::LvkGPUDevice() : impl_(std::make_unique<Impl>()) {}
@@ -440,7 +442,8 @@ LvkGPUDevice::~LvkGPUDevice() {
   impl_.reset();
 }
 
-std::unique_ptr<LvkGPUDevice> LvkGPUDevice::create(Window &window) {
+std::unique_ptr<LvkGPUDevice>
+LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
   auto device = std::unique_ptr<LvkGPUDevice>(new LvkGPUDevice());
 
   device->impl_->window = &window;
@@ -471,12 +474,16 @@ std::unique_ptr<LvkGPUDevice> LvkGPUDevice::create(Window &window) {
     return nullptr;
   }
 
+  device->impl_->geometryPool =
+      std::make_unique<GeometryPool>(*device, desc.geometryPool);
+
   return device;
 }
 
-std::unique_ptr<GPUDevice> GPUDevice::create(Window &window) {
+std::unique_ptr<GPUDevice> GPUDevice::create(Window &window,
+                                             const GPUDeviceCreateDesc &desc) {
   NURI_LOG_DEBUG("GPUDevice::create: Creating Vulkan GPU device");
-  return LvkGPUDevice::create(window);
+  return LvkGPUDevice::create(window, desc);
 }
 
 bool LvkGPUDevice::shouldClose() const {
@@ -581,6 +588,13 @@ uint32_t LvkGPUDevice::getSwapchainImageCount() const {
 
 double LvkGPUDevice::getTime() const {
   return impl_->window ? impl_->window->getTime() : 0.0;
+}
+
+Result<bool, std::string> LvkGPUDevice::beginFrame(uint64_t frameIndex) {
+  if (!impl_->geometryPool) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  return impl_->geometryPool->beginFrame(frameIndex);
 }
 
 Result<BufferHandle, std::string>
@@ -1142,6 +1156,29 @@ uint64_t LvkGPUDevice::getBufferDeviceAddress(BufferHandle h,
   return impl_->context->gpuAddress(impl_->buffers.getLvkHandle(h), offset);
 }
 
+bool LvkGPUDevice::resolveGeometry(GeometryAllocationHandle h,
+                                   GeometryAllocationView &out) const {
+  return impl_->geometryPool ? impl_->geometryPool->resolve(h, out) : false;
+}
+
+Result<GeometryAllocationHandle, std::string> LvkGPUDevice::allocateGeometry(
+    std::span<const std::byte> vertexBytes, uint32_t vertexCount,
+    std::span<const std::byte> indexBytes, uint32_t indexCount,
+    std::string_view debugName) {
+  if (!impl_->geometryPool) {
+    return Result<GeometryAllocationHandle, std::string>::makeError(
+        "Geometry pool is not initialized");
+  }
+  return impl_->geometryPool->allocate(vertexBytes, vertexCount, indexBytes,
+                                       indexCount, debugName);
+}
+
+void LvkGPUDevice::releaseGeometry(GeometryAllocationHandle h) {
+  if (impl_->geometryPool) {
+    impl_->geometryPool->release(h);
+  }
+}
+
 Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
   if (frame.passes.empty()) {
@@ -1348,6 +1385,57 @@ LvkGPUDevice::updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
   if (!res.isOk()) {
     return Result<bool, std::string>::makeError(std::string(res.message));
   }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  if (regions.empty()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
+  bool hasCopyCommands = false;
+  for (const BufferCopyRegion &region : regions) {
+    if (region.size == 0) {
+      continue;
+    }
+    if (!impl_->buffers.isValid(region.srcBuffer) ||
+        !impl_->buffers.isValid(region.dstBuffer)) {
+      return Result<bool, std::string>::makeError(
+          "copyBufferRegions: invalid source or destination buffer");
+    }
+
+    const lvk::BufferHandle src = impl_->buffers.getLvkHandle(region.srcBuffer);
+    const lvk::BufferHandle dst = impl_->buffers.getLvkHandle(region.dstBuffer);
+    const size_t srcSize =
+        static_cast<size_t>(lvk::getBufferSize(impl_->context.get(), src));
+    const size_t dstSize =
+        static_cast<size_t>(lvk::getBufferSize(impl_->context.get(), dst));
+    if (region.srcOffset > srcSize ||
+        region.size > srcSize - region.srcOffset) {
+      return Result<bool, std::string>::makeError(
+          "copyBufferRegions: source copy range is out of bounds");
+    }
+    if (region.dstOffset > dstSize ||
+        region.size > dstSize - region.dstOffset) {
+      return Result<bool, std::string>::makeError(
+          "copyBufferRegions: destination copy range is out of bounds");
+    }
+
+    commandBuffer.cmdCopyBuffer(src, dst, region.srcOffset, region.dstOffset,
+                                region.size);
+    hasCopyCommands = true;
+  }
+  if (!hasCopyCommands) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  // TODO: move this to an async pre-pass copy path once frame graph support
+  // exists.
+  const lvk::SubmitHandle submitHandle = impl_->context->submit(commandBuffer);
+  impl_->context->wait(submitHandle);
   return Result<bool, std::string>::makeResult(true);
 }
 

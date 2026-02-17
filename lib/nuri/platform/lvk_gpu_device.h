@@ -5,7 +5,8 @@
 namespace nuri {
 class LvkGPUDevice final : public GPUDevice {
 public:
-  static std::unique_ptr<LvkGPUDevice> create(Window &window);
+  static std::unique_ptr<LvkGPUDevice>
+  create(Window &window, const GPUDeviceCreateDesc &desc = {});
   ~LvkGPUDevice() override;
 
   LvkGPUDevice(const LvkGPUDevice &) = delete;
@@ -59,9 +60,19 @@ public:
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
   uint64_t getBufferDeviceAddress(BufferHandle h,
                                   size_t offset = 0) const override;
+  bool resolveGeometry(GeometryAllocationHandle h,
+                       GeometryAllocationView &out) const override;
 
   // Rendering
+  Result<bool, std::string> beginFrame(uint64_t frameIndex) override;
   Result<bool, std::string> submitFrame(const RenderFrame &frame) override;
+  Result<GeometryAllocationHandle, std::string>
+  allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
+                   std::span<const std::byte> indexBytes, uint32_t indexCount,
+                   std::string_view debugName = {}) override;
+  void releaseGeometry(GeometryAllocationHandle h) override;
+  Result<bool, std::string>
+  copyBufferRegions(std::span<const BufferCopyRegion> regions) override;
 
   // Data updates
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
