@@ -95,7 +95,10 @@ SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
           "SkyboxLayer::buildRenderPasses: invalid per-frame buffer address");
     }
 
-    pushConstants_ = PushConstants{.perFrameAddress = baseAddress};
+    pushConstants_ = PushConstants{
+        .perFrameAddress = baseAddress,
+        .vertexBufferAddress = 0,
+    };
 
     drawItem_ = DrawItem{};
     drawItem_.pipeline = skyboxPipelineHandle_;

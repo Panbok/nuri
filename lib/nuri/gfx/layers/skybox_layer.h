@@ -49,6 +49,7 @@ private:
 
   struct PushConstants {
     uint64_t perFrameAddress = 0;
+    uint64_t vertexBufferAddress = 0;
   };
 
   Result<bool, std::string> ensureInitialized();
