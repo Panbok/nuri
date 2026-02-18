@@ -17,8 +17,8 @@
 namespace nuri {
 
 struct NURI_API OpaqueRenderable {
-  std::unique_ptr<Model> model{};
-  std::unique_ptr<Texture> albedoTexture{};
+  std::shared_ptr<Model> model{};
+  std::shared_ptr<Texture> albedoTexture{};
   glm::mat4 modelMatrix{1.0f};
 };
 
@@ -37,6 +37,13 @@ public:
   addOpaqueRenderable(std::unique_ptr<Model> model,
                       std::unique_ptr<Texture> albedoTexture,
                       const glm::mat4 &modelMatrix = glm::mat4(1.0f));
+  [[nodiscard]] Result<uint32_t, std::string>
+  addOpaqueRenderable(std::shared_ptr<Model> model,
+                      std::shared_ptr<Texture> albedoTexture,
+                      const glm::mat4 &modelMatrix = glm::mat4(1.0f));
+  [[nodiscard]] Result<uint32_t, std::string> addOpaqueRenderablesInstanced(
+      std::shared_ptr<Model> model, std::shared_ptr<Texture> albedoTexture,
+      std::span<const glm::mat4> modelMatrices);
   [[nodiscard]] bool setOpaqueRenderableTransform(uint32_t index,
                                                   const glm::mat4 &modelMatrix);
 
@@ -44,9 +51,13 @@ public:
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
     return topologyVersion_;
   }
+  [[nodiscard]] uint64_t transformVersion() const noexcept {
+    return transformVersion_;
+  }
   [[nodiscard]] std::span<const OpaqueRenderable> opaqueRenderables() const {
     return opaqueRenderables_;
   }
+  void clearOpaqueRenderables();
 
   void setEnvironmentCubemap(std::unique_ptr<Texture> cubemap);
   [[nodiscard]] Texture *environmentCubemap() {
@@ -60,6 +71,7 @@ private:
   std::pmr::vector<OpaqueRenderable> opaqueRenderables_;
   std::unique_ptr<Texture> environmentCubemap_;
   uint64_t topologyVersion_ = 0;
+  uint64_t transformVersion_ = 0;
 };
 
 } // namespace nuri
