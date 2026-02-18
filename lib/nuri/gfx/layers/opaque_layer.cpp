@@ -548,16 +548,17 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     activeFastAutoLodSubmesh = &submesh;
 
     const bool canReuseFastAutoLodCache =
-        autoLodCacheValid_ && autoLodSubmesh_ == &submesh &&
-        autoLodInstanceCount_ == instanceCount &&
-        autoLodRemapCount_ == instanceRemap_.size() &&
-        nearlyEqualVec3(autoLodCameraPos_, cameraPosition, kAutoLodCacheEpsilon) &&
-        nearlyEqualThresholds(autoLodThresholds_, sortedLodThresholds,
+        autoLodCache_.valid && autoLodCache_.submesh == &submesh &&
+        autoLodCache_.instanceCount == instanceCount &&
+        autoLodCache_.remapCount == instanceRemap_.size() &&
+        nearlyEqualVec3(autoLodCache_.cameraPos, cameraPosition,
+                       kAutoLodCacheEpsilon) &&
+        nearlyEqualThresholds(autoLodCache_.thresholds, sortedLodThresholds,
                              kAutoLodCacheEpsilon);
 
     if (canReuseFastAutoLodCache) {
-      autoLodBucketCounts = autoLodBucketCounts_;
-      remapCount = autoLodRemapCount_;
+      autoLodBucketCounts = autoLodCache_.bucketCounts;
+      remapCount = autoLodCache_.remapCount;
       reusedUniformAutoLodFastPath = true;
     } else {
       if (instanceLodCentersInvRadiusSq_.size() != instanceCount) {
@@ -1463,11 +1464,11 @@ void OpaqueLayer::resetWireframePipelineState() {
 }
 
 void OpaqueLayer::invalidateAutoLodCache() {
-  autoLodCacheValid_ = false;
-  autoLodRemapCount_ = 0;
-  autoLodInstanceCount_ = 0;
-  autoLodSubmesh_ = nullptr;
-  autoLodBucketCounts_.fill(0);
+  autoLodCache_.valid = false;
+  autoLodCache_.remapCount = 0;
+  autoLodCache_.instanceCount = 0;
+  autoLodCache_.submesh = nullptr;
+  autoLodCache_.bucketCounts.fill(0);
 }
 
 void OpaqueLayer::updateFastAutoLodCache(
@@ -1480,13 +1481,13 @@ void OpaqueLayer::updateFastAutoLodCache(
     return;
   }
 
-  autoLodCacheValid_ = true;
-  autoLodCameraPos_ = cameraPosition;
-  autoLodThresholds_ = sortedLodThresholds;
-  autoLodBucketCounts_ = bucketCounts;
-  autoLodRemapCount_ = remapCount;
-  autoLodInstanceCount_ = instanceCount;
-  autoLodSubmesh_ = submesh;
+  autoLodCache_.valid = true;
+  autoLodCache_.cameraPos = cameraPosition;
+  autoLodCache_.thresholds = sortedLodThresholds;
+  autoLodCache_.bucketCounts = bucketCounts;
+  autoLodCache_.remapCount = remapCount;
+  autoLodCache_.instanceCount = instanceCount;
+  autoLodCache_.submesh = submesh;
 }
 
 void OpaqueLayer::destroyDepthTexture() {

@@ -146,13 +146,18 @@ private:
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   bool instanceStaticBuffersDirty_ = true;
   bool uniformSingleSubmeshPath_ = false;
-  bool autoLodCacheValid_ = false;
-  glm::vec3 autoLodCameraPos_{0.0f};
-  std::array<float, 3> autoLodThresholds_ = {0.0f, 0.0f, 0.0f};
-  std::array<size_t, Submesh::kMaxLodCount> autoLodBucketCounts_{};
-  size_t autoLodRemapCount_ = 0;
-  size_t autoLodInstanceCount_ = 0;
-  const Submesh *autoLodSubmesh_ = nullptr;
+
+  struct AutoLodCache {
+    bool valid = false;
+    glm::vec3 cameraPos{0.0f};
+    std::array<float, 3> thresholds = {0.0f, 0.0f, 0.0f};
+    std::array<size_t, Submesh::kMaxLodCount> bucketCounts{};
+    size_t remapCount = 0;
+    size_t instanceCount = 0;
+    const Submesh *submesh = nullptr;
+  };
+  AutoLodCache autoLodCache_{};
+
   std::pmr::vector<RenderableTemplate> renderableTemplates_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<uint32_t> templateBatchIndices_;

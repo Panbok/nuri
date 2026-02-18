@@ -255,14 +255,14 @@ ImGuiGpuRenderer::ensurePipeline(Format swapchainFormat) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> ImGuiGpuRenderer::ensureBuffers(uint32_t frameIndex,
+Result<bool, std::string> ImGuiGpuRenderer::ensureBuffers(uint64_t frameIndex,
                                                           size_t vertexBytes,
                                                           size_t indexBytes) {
-  if (frameIndex >= frames_.size()) {
+  if (frameIndex >= static_cast<uint64_t>(frames_.size())) {
     return Result<bool, std::string>::makeError("Invalid ImGui frame index");
   }
 
-  FrameBuffers &fb = frames_[frameIndex];
+  FrameBuffers &fb = frames_[static_cast<size_t>(frameIndex)];
 
   if (!nuri::isValid(fb.vb) || fb.vbCapacityBytes < vertexBytes) {
     if (nuri::isValid(fb.vb)) {
@@ -336,8 +336,8 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
   if (frames_.size() != imageCount) {
     frames_.assign(imageCount, FrameBuffers{});
   }
-  const uint32_t frameSlot = static_cast<uint32_t>(frameIndex % imageCount);
-  const FrameBuffers &fb = frames_[frameSlot];
+  const uint64_t frameSlot = frameIndex % static_cast<uint64_t>(imageCount);
+  const FrameBuffers &fb = frames_[static_cast<size_t>(frameSlot)];
 
   const size_t vtxBytes =
       static_cast<size_t>(dd->TotalVtxCount) * sizeof(ImDrawVert);

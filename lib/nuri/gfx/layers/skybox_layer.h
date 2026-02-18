@@ -59,21 +59,21 @@ private:
   };
 
   Result<bool, std::string> ensureInitialized();
-  Result<bool, std::string> ensurePerFrameBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string> ensureFrameBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipeline();
-  void destroyPerFrameBuffer();
+  void destroyFrameBuffer();
 
   GPUDevice &gpu_;
   std::unique_ptr<Shader> skyboxShader_;
   std::unique_ptr<Pipeline> skyboxPipeline_;
-  std::unique_ptr<Buffer> perFrameBuffer_;
+  std::unique_ptr<Buffer> frameBuffer_;
 
   ShaderHandle skyboxVertexShader_{};
   ShaderHandle skyboxFragmentShader_{};
   RenderPipelineHandle skyboxPipelineHandle_{};
 
-  size_t perFrameBufferCapacityBytes_ = 0;
+  size_t frameBufferCapacityBytes_ = 0;
   bool initialized_ = false;
 
   FrameData frameData_{};

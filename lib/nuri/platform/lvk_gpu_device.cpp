@@ -1193,8 +1193,8 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   }
   const auto fillDependencies =
       [this](std::span<const BufferHandle> dependencyBuffers,
-             lvk::Dependencies &deps, std::string_view context)
-      -> Result<bool, std::string> {
+             lvk::Dependencies &deps,
+             std::string_view context) -> Result<bool, std::string> {
     if (dependencyBuffers.size() >
         lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES) {
       return Result<bool, std::string>::makeError(
@@ -1247,9 +1247,9 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     }
 
     {
-      NURI_PROFILER_ZONE("LvkGPUDevice.compute_dispatch_submission",
-                         NURI_PROFILER_COLOR_CMD_DISPATCH);
       for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
+        NURI_PROFILER_ZONE("LvkGPUDevice.compute_dispatch_submission",
+                           NURI_PROFILER_COLOR_CMD_DISPATCH);
         if (!impl_->computePipelines.isValid(dispatch.pipeline)) {
           if (!pass.debugLabel.empty()) {
             commandBuffer.cmdPopDebugGroupLabel();
@@ -1267,9 +1267,9 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         }
 
         lvk::Dependencies dispatchDependencies{};
-        auto dispatchDepsResult = fillDependencies(
-            dispatch.dependencyBuffers, dispatchDependencies,
-            "LvkGPUDevice::submitFrame compute dispatch");
+        auto dispatchDepsResult =
+            fillDependencies(dispatch.dependencyBuffers, dispatchDependencies,
+                             "LvkGPUDevice::submitFrame compute dispatch");
         if (dispatchDepsResult.hasError()) {
           if (!pass.debugLabel.empty()) {
             commandBuffer.cmdPopDebugGroupLabel();
@@ -1290,11 +1290,10 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
               static_cast<const void *>(dispatch.pushConstants.data()),
               dispatch.pushConstants.size(), 0);
         }
-        commandBuffer.cmdDispatchThreadGroups(
-            {.width = dispatch.dispatch.x,
-             .height = dispatch.dispatch.y,
-             .depth = dispatch.dispatch.z},
-            dispatchDependencies);
+        commandBuffer.cmdDispatchThreadGroups({.width = dispatch.dispatch.x,
+                                               .height = dispatch.dispatch.y,
+                                               .depth = dispatch.dispatch.z},
+                                              dispatchDependencies);
 
         if (!dispatch.debugLabel.empty()) {
           commandBuffer.cmdPopDebugGroupLabel();
@@ -1314,7 +1313,8 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       return renderDepsResult;
     }
 
-    commandBuffer.cmdBeginRendering(renderPass, framebuffer, renderDependencies);
+    commandBuffer.cmdBeginRendering(renderPass, framebuffer,
+                                    renderDependencies);
 
     // Pipelines use dynamic viewport/scissor in LVK, so we must bind them for
     // every pass (even if the pass didn't specify overrides).

@@ -34,7 +34,7 @@ private:
   Result<bool, std::string> ensurePipeline(Format swapchainFormat);
   Result<bool, std::string> ensureFontTexture();
   Result<bool, std::string>
-  ensureBuffers(uint32_t frameIndex, size_t vertexBytes, size_t indexBytes);
+  ensureBuffers(uint64_t frameIndex, size_t vertexBytes, size_t indexBytes);
 
   struct FrameBuffers {
     BufferHandle vb{};

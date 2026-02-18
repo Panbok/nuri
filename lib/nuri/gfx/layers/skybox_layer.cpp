@@ -25,7 +25,7 @@ void SkyboxLayer::onAttach() {
 }
 
 void SkyboxLayer::onDetach() {
-  destroyPerFrameBuffer();
+  destroyFrameBuffer();
   skyboxShader_.reset();
   skyboxPipeline_.reset();
   skyboxVertexShader_ = {};
@@ -74,24 +74,24 @@ SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     };
 
     const size_t requiredBytes = sizeof(frameData_);
-    auto bufferResult = ensurePerFrameBufferCapacity(requiredBytes);
+    auto bufferResult = ensureFrameBufferCapacity(requiredBytes);
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
 
-    const std::span<const std::byte> perFrameBytes{
+    const std::span<const std::byte> frameBytes{
         reinterpret_cast<const std::byte *>(&frameData_), requiredBytes};
     auto updateResult =
-        gpu_.updateBuffer(perFrameBuffer_->handle(), perFrameBytes, 0);
+        gpu_.updateBuffer(frameBuffer_->handle(), frameBytes, 0);
     if (updateResult.hasError()) {
       return Result<bool, std::string>::makeError(updateResult.error());
     }
 
     const uint64_t baseAddress =
-        gpu_.getBufferDeviceAddress(perFrameBuffer_->handle());
+        gpu_.getBufferDeviceAddress(frameBuffer_->handle());
     if (baseAddress == 0) {
       return Result<bool, std::string>::makeError(
-          "SkyboxLayer::buildRenderPasses: invalid per-frame buffer address");
+          "SkyboxLayer::buildRenderPasses: invalid frame buffer address");
     }
 
     pushConstants_ = PushConstants{.frameDataAddress = baseAddress};
@@ -127,7 +127,7 @@ Result<bool, std::string> SkyboxLayer::ensureInitialized() {
     return pipelineResult;
   }
 
-  auto bufferResult = ensurePerFrameBufferCapacity(sizeof(FrameData));
+  auto bufferResult = ensureFrameBufferCapacity(sizeof(FrameData));
   if (bufferResult.hasError()) {
     return bufferResult;
   }
@@ -137,28 +137,28 @@ Result<bool, std::string> SkyboxLayer::ensureInitialized() {
 }
 
 Result<bool, std::string>
-SkyboxLayer::ensurePerFrameBufferCapacity(size_t requiredBytes) {
+SkyboxLayer::ensureFrameBufferCapacity(size_t requiredBytes) {
   const size_t requested = std::max(requiredBytes, sizeof(FrameData));
-  if (perFrameBuffer_ && perFrameBuffer_->valid() &&
-      perFrameBufferCapacityBytes_ >= requested) {
+  if (frameBuffer_ && frameBuffer_->valid() &&
+      frameBufferCapacityBytes_ >= requested) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  destroyPerFrameBuffer();
+  destroyFrameBuffer();
 
-  const BufferDesc perFrameDesc{
+  const BufferDesc frameBufferDesc{
       .usage = BufferUsage::Storage,
       .storage = Storage::Device,
       .size = requested,
   };
-  auto perFrameResult =
-      Buffer::create(gpu_, perFrameDesc, "skybox_per_frame_buffer");
-  if (perFrameResult.hasError()) {
-    return Result<bool, std::string>::makeError(perFrameResult.error());
+  auto bufferResult =
+      Buffer::create(gpu_, frameBufferDesc, "skybox_frame_buffer");
+  if (bufferResult.hasError()) {
+    return Result<bool, std::string>::makeError(bufferResult.error());
   }
 
-  perFrameBuffer_ = std::move(perFrameResult.value());
-  perFrameBufferCapacityBytes_ = requested;
+  frameBuffer_ = std::move(bufferResult.value());
+  frameBufferCapacityBytes_ = requested;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -221,12 +221,12 @@ Result<bool, std::string> SkyboxLayer::createPipeline() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void SkyboxLayer::destroyPerFrameBuffer() {
-  if (perFrameBuffer_ && perFrameBuffer_->valid()) {
-    gpu_.destroyBuffer(perFrameBuffer_->handle());
+void SkyboxLayer::destroyFrameBuffer() {
+  if (frameBuffer_ && frameBuffer_->valid()) {
+    gpu_.destroyBuffer(frameBuffer_->handle());
   }
-  perFrameBuffer_.reset();
-  perFrameBufferCapacityBytes_ = 0;
+  frameBuffer_.reset();
+  frameBufferCapacityBytes_ = 0;
 }
 
 } // namespace nuri
