@@ -1,6 +1,6 @@
-#include "nuri/scene/render_scene.h"
+#include "nuri/pch.h"
 
-#include <limits>
+#include "nuri/scene/render_scene.h"
 
 namespace nuri {
 
@@ -75,7 +75,8 @@ Result<uint32_t, std::string> RenderScene::addOpaqueRenderablesInstanced(
 
   const size_t startIndex = opaqueRenderables_.size();
   const size_t requiredSize = startIndex + modelMatrices.size();
-  if (requiredSize > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+  if (requiredSize >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
     return Result<uint32_t, std::string>::makeError(
         "RenderScene::addOpaqueRenderablesInstanced: total renderable count "
         "exceeds UINT32_MAX");
