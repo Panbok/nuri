@@ -9,10 +9,12 @@
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/scene/render_scene.h"
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <memory>
 #include <memory_resource>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -42,20 +44,26 @@ public:
                                               RenderPassList &out) override;
 
 private:
-  struct PerFrameData {
-    glm::mat4 model{1.0f};
+  struct FrameData {
     glm::mat4 view{1.0f};
     glm::mat4 proj{1.0f};
     glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
-    uint32_t albedoTexId = 0;
     uint32_t cubemapTexId = 0;
     uint32_t hasCubemap = 0;
     uint32_t _padding0 = 0;
+    uint32_t _padding1 = 0;
   };
 
   struct PushConstants {
-    uint64_t perFrameAddress = 0;
+    uint64_t frameDataAddress = 0;
     uint64_t vertexBufferAddress = 0;
+    uint64_t instanceMatricesAddress = 0;
+    uint64_t instanceRemapAddress = 0;
+    uint64_t instanceMetaAddress = 0;
+    uint64_t instanceCentersPhaseAddress = 0;
+    uint64_t instanceBaseMatricesAddress = 0;
+    uint32_t instanceCount = 0;
+    float timeSeconds = 0.0f;
   };
 
   struct RenderableTemplate {
@@ -64,47 +72,107 @@ private:
 
   struct MeshDrawTemplate {
     const OpaqueRenderable *renderable = nullptr;
-    const Model *model = nullptr;
     const Submesh *submesh = nullptr;
-    uint32_t perFrameIndex = 0;
+    uint32_t instanceIndex = 0;
+    GeometryAllocationHandle geometryHandle{};
+    BufferHandle indexBuffer{};
+    uint64_t indexBufferOffset = 0;
+    uint64_t vertexBufferAddress = 0;
+  };
+
+  struct DynamicBufferSlot {
+    std::unique_ptr<Buffer> buffer;
+    size_t capacityBytes = 0;
   };
 
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> recreateDepthTexture();
-  Result<bool, std::string> ensurePerFrameBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string> ensureFrameDataBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureCentersPhaseBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureInstanceBaseMatricesBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureInstanceMetaBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
+  Result<bool, std::string>
+  ensureInstanceMatricesRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
   Result<bool, std::string> ensureWireframePipeline();
   void resetWireframePipelineState();
+  void invalidateAutoLodCache();
+  void updateFastAutoLodCache(
+      const Submesh *submesh, const glm::vec3 &cameraPosition,
+      const std::array<float, 3> &sortedLodThresholds,
+      const std::array<size_t, Submesh::kMaxLodCount> &bucketCounts,
+      size_t remapCount, size_t instanceCount);
   void destroyDepthTexture();
-  void destroyPerFrameBuffer();
+  void destroyBuffers();
 
   GPUDevice &gpu_;
   std::unique_ptr<Shader> meshShader_;
+  std::unique_ptr<Shader> computeShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
-  std::unique_ptr<Buffer> perFrameBuffer_;
+  std::unique_ptr<Pipeline> computePipeline_;
+  std::unique_ptr<Buffer> frameDataBuffer_;
+  std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
+  std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
+  std::unique_ptr<Buffer> instanceMetaBuffer_;
+  std::vector<DynamicBufferSlot> instanceMatricesRing_;
+  std::vector<DynamicBufferSlot> instanceRemapRing_;
   TextureHandle depthTexture_{};
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshFragmentShader_{};
+  ShaderHandle computeShaderHandle_{};
   RenderPipelineHandle meshFillPipelineHandle_{};
   RenderPipelineHandle meshWireframePipelineHandle_{};
+  ComputePipelineHandle computePipelineHandle_{};
 
-  size_t perFrameBufferCapacityBytes_ = 0;
+  size_t frameDataBufferCapacityBytes_ = 0;
+  size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
+  size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
+  size_t instanceMetaBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool wireframePipelineInitialized_ = false;
   bool wireframePipelineUnsupported_ = false;
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
+  uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
+  bool instanceStaticBuffersDirty_ = true;
+  bool uniformSingleSubmeshPath_ = false;
+  bool autoLodCacheValid_ = false;
+  glm::vec3 autoLodCameraPos_{0.0f};
+  std::array<float, 3> autoLodThresholds_ = {0.0f, 0.0f, 0.0f};
+  std::array<size_t, Submesh::kMaxLodCount> autoLodBucketCounts_{};
+  size_t autoLodRemapCount_ = 0;
+  size_t autoLodInstanceCount_ = 0;
+  const Submesh *autoLodSubmesh_ = nullptr;
   std::pmr::vector<RenderableTemplate> renderableTemplates_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
-  std::pmr::vector<PerFrameData> perFrameEntries_;
+  std::pmr::vector<uint32_t> templateBatchIndices_;
+  std::pmr::vector<size_t> batchWriteOffsets_;
+  std::pmr::vector<glm::vec4> instanceCentersPhase_;
+  std::pmr::vector<glm::mat4> instanceBaseMatrices_;
+  std::pmr::vector<glm::vec4> instanceLodCentersInvRadiusSq_;
+  std::pmr::vector<uint32_t> instanceAlbedoTexIds_;
+  std::pmr::vector<uint32_t> instanceAutoLodLevels_;
+  std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
+  std::pmr::vector<ComputeDispatchItem> preDispatches_;
+  std::pmr::vector<BufferHandle> passDependencyBuffers_;
+  std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
+  FrameData frameData_{};
+  PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};
+  uint64_t statsLogFrameCounter_ = 0;
 };
 
 } // namespace nuri
