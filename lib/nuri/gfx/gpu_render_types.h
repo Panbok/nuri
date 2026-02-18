@@ -44,6 +44,21 @@ struct AttachmentDepth {
   uint32_t clearStencil = 0;
 };
 
+struct DispatchSize {
+  uint32_t x = 1;
+  uint32_t y = 1;
+  uint32_t z = 1;
+};
+
+struct ComputeDispatchItem {
+  ComputePipelineHandle pipeline{};
+  DispatchSize dispatch{};
+  std::span<const std::byte> pushConstants{};
+  std::span<const BufferHandle> dependencyBuffers{};
+  std::string_view debugLabel{};
+  uint32_t debugColor = 0xffffffffu;
+};
+
 struct DrawItem {
   RenderPipelineHandle pipeline{};
   BufferHandle vertexBuffer{};
@@ -77,6 +92,8 @@ struct RenderPass {
   TextureHandle depthTexture{};
   bool useViewport = false;
   Viewport viewport{};
+  std::span<const ComputeDispatchItem> preDispatches{};
+  std::span<const BufferHandle> dependencyBuffers{};
   std::span<const DrawItem> draws{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;

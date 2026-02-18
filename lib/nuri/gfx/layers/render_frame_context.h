@@ -40,10 +40,23 @@ struct CameraFrameState {
   float aspectRatio = 1.0f;
 };
 
+struct OpaqueFrameMetrics {
+  uint32_t totalInstances = 0;
+  uint32_t visibleInstances = 0;
+  uint32_t instancedDraws = 0;
+  uint32_t computeDispatches = 0;
+  uint32_t computeDispatchX = 0;
+};
+
+struct RenderFrameMetrics {
+  OpaqueFrameMetrics opaque{};
+};
+
 struct RenderFrameContext {
   const RenderScene *scene = nullptr;
   CameraFrameState camera{};
   RenderSettings *settings = nullptr;
+  RenderFrameMetrics metrics{};
   TextureHandle sharedDepthTexture{};
   double timeSeconds = 0.0;
   uint64_t frameIndex = 0;
