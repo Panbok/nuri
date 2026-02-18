@@ -1185,6 +1185,36 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   }
 
   lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
+  const lvk::TextureHandle swapchainTexture =
+      impl_->context->getCurrentSwapchainTexture();
+  if (!swapchainTexture.valid()) {
+    return Result<bool, std::string>::makeError(
+        "LvkGPUDevice::submitFrame: invalid swapchain texture");
+  }
+  const auto fillDependencies =
+      [this](std::span<const BufferHandle> dependencyBuffers,
+             lvk::Dependencies &deps, std::string_view context)
+      -> Result<bool, std::string> {
+    if (dependencyBuffers.size() >
+        lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES) {
+      return Result<bool, std::string>::makeError(
+          std::string(context) + ": dependency buffer count exceeds " +
+          std::to_string(lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES));
+    }
+
+    size_t dstIndex = 0;
+    for (const BufferHandle bufferHandle : dependencyBuffers) {
+      if (!nuri::isValid(bufferHandle)) {
+        continue;
+      }
+      if (!impl_->buffers.isValid(bufferHandle)) {
+        return Result<bool, std::string>::makeError(
+            std::string(context) + ": dependency buffer is invalid");
+      }
+      deps.buffers[dstIndex++] = impl_->buffers.getLvkHandle(bufferHandle);
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
 
   for (const RenderPass &pass : frame.passes) {
     if (!pass.debugLabel.empty()) {
@@ -1201,8 +1231,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     };
 
     lvk::Framebuffer framebuffer{};
-    framebuffer.color[0] = {.texture =
-                                impl_->context->getCurrentSwapchainTexture()};
+    framebuffer.color[0] = {.texture = swapchainTexture};
 
     if (nuri::isValid(pass.depthTexture)) {
       renderPass.depth = {
@@ -1217,7 +1246,75 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       renderPass.depth.loadOp = lvk::LoadOp_Invalid;
     }
 
-    commandBuffer.cmdBeginRendering(renderPass, framebuffer);
+    {
+      NURI_PROFILER_ZONE("LvkGPUDevice.compute_dispatch_submission",
+                         NURI_PROFILER_COLOR_CMD_DISPATCH);
+      for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
+        if (!impl_->computePipelines.isValid(dispatch.pipeline)) {
+          if (!pass.debugLabel.empty()) {
+            commandBuffer.cmdPopDebugGroupLabel();
+          }
+          return Result<bool, std::string>::makeError(
+              "Invalid compute pipeline handle");
+        }
+        if (dispatch.dispatch.x == 0 || dispatch.dispatch.y == 0 ||
+            dispatch.dispatch.z == 0) {
+          if (!pass.debugLabel.empty()) {
+            commandBuffer.cmdPopDebugGroupLabel();
+          }
+          return Result<bool, std::string>::makeError(
+              "Invalid compute dispatch size");
+        }
+
+        lvk::Dependencies dispatchDependencies{};
+        auto dispatchDepsResult = fillDependencies(
+            dispatch.dependencyBuffers, dispatchDependencies,
+            "LvkGPUDevice::submitFrame compute dispatch");
+        if (dispatchDepsResult.hasError()) {
+          if (!pass.debugLabel.empty()) {
+            commandBuffer.cmdPopDebugGroupLabel();
+          }
+          return dispatchDepsResult;
+        }
+
+        if (!dispatch.debugLabel.empty()) {
+          const std::string label(dispatch.debugLabel);
+          commandBuffer.cmdPushDebugGroupLabel(label.c_str(),
+                                               dispatch.debugColor);
+        }
+
+        commandBuffer.cmdBindComputePipeline(
+            impl_->computePipelines.getLvkHandle(dispatch.pipeline));
+        if (!dispatch.pushConstants.empty()) {
+          commandBuffer.cmdPushConstants(
+              static_cast<const void *>(dispatch.pushConstants.data()),
+              dispatch.pushConstants.size(), 0);
+        }
+        commandBuffer.cmdDispatchThreadGroups(
+            {.width = dispatch.dispatch.x,
+             .height = dispatch.dispatch.y,
+             .depth = dispatch.dispatch.z},
+            dispatchDependencies);
+
+        if (!dispatch.debugLabel.empty()) {
+          commandBuffer.cmdPopDebugGroupLabel();
+        }
+      }
+      NURI_PROFILER_ZONE_END();
+    }
+
+    lvk::Dependencies renderDependencies{};
+    auto renderDepsResult =
+        fillDependencies(pass.dependencyBuffers, renderDependencies,
+                         "LvkGPUDevice::submitFrame render pass");
+    if (renderDepsResult.hasError()) {
+      if (!pass.debugLabel.empty()) {
+        commandBuffer.cmdPopDebugGroupLabel();
+      }
+      return renderDepsResult;
+    }
+
+    commandBuffer.cmdBeginRendering(renderPass, framebuffer, renderDependencies);
 
     // Pipelines use dynamic viewport/scissor in LVK, so we must bind them for
     // every pass (even if the pass didn't specify overrides).
@@ -1349,8 +1446,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     }
   }
 
-  impl_->context->submit(commandBuffer,
-                         impl_->context->getCurrentSwapchainTexture());
+  impl_->context->submit(commandBuffer, swapchainTexture);
   return Result<bool, std::string>::makeResult(true);
 }
 
