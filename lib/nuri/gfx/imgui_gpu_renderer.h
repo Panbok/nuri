@@ -25,7 +25,8 @@ public:
   ImGuiGpuRenderer(ImGuiGpuRenderer &&) = delete;
   ImGuiGpuRenderer &operator=(ImGuiGpuRenderer &&) = delete;
 
-  Result<RenderPass, std::string> buildRenderPass(Format swapchainFormat);
+  Result<RenderPass, std::string> buildRenderPass(Format swapchainFormat,
+                                                  uint64_t frameIndex);
 
 private:
   explicit ImGuiGpuRenderer(GPUDevice &gpu);

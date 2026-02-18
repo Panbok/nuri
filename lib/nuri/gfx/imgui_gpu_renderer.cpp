@@ -308,7 +308,7 @@ Result<bool, std::string> ImGuiGpuRenderer::ensureBuffers(uint32_t frameIndex,
 }
 
 Result<RenderPass, std::string>
-ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat) {
+ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
   ImDrawData *dd = ImGui::GetDrawData();
   if (!dd) {
     return Result<RenderPass, std::string>::makeError(
@@ -336,14 +336,14 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat) {
   if (frames_.size() != imageCount) {
     frames_.assign(imageCount, FrameBuffers{});
   }
-  const uint32_t frameIndex = gpu_.getSwapchainImageIndex() % imageCount;
-  const FrameBuffers &fb = frames_[frameIndex];
+  const uint32_t frameSlot = static_cast<uint32_t>(frameIndex % imageCount);
+  const FrameBuffers &fb = frames_[frameSlot];
 
   const size_t vtxBytes =
       static_cast<size_t>(dd->TotalVtxCount) * sizeof(ImDrawVert);
   const size_t idxBytes =
       static_cast<size_t>(dd->TotalIdxCount) * sizeof(ImDrawIdx);
-  auto bufOk = ensureBuffers(frameIndex, vtxBytes, idxBytes);
+  auto bufOk = ensureBuffers(frameSlot, vtxBytes, idxBytes);
   if (bufOk.hasError()) {
     return Result<RenderPass, std::string>::makeError(bufOk.error());
   }
