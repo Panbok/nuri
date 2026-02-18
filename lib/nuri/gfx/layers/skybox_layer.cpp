@@ -63,25 +63,24 @@ SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
   const Texture *cubemap = frame.scene->environmentCubemap();
   if (cubemap && cubemap->valid()) {
-    perFrameData_ = PerFrameData{
-        .model = glm::mat4(1.0f),
+    frameData_ = FrameData{
         .view = frame.camera.view,
         .proj = frame.camera.proj,
         .cameraPos = frame.camera.cameraPos,
-        .albedoTexId = 0,
         .cubemapTexId = gpu_.getTextureBindlessIndex(cubemap->handle()),
         .hasCubemap = 1,
         ._padding0 = 0,
+        ._padding1 = 0,
     };
 
-    const size_t requiredBytes = sizeof(perFrameData_);
+    const size_t requiredBytes = sizeof(frameData_);
     auto bufferResult = ensurePerFrameBufferCapacity(requiredBytes);
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
 
     const std::span<const std::byte> perFrameBytes{
-        reinterpret_cast<const std::byte *>(&perFrameData_), requiredBytes};
+        reinterpret_cast<const std::byte *>(&frameData_), requiredBytes};
     auto updateResult =
         gpu_.updateBuffer(perFrameBuffer_->handle(), perFrameBytes, 0);
     if (updateResult.hasError()) {
@@ -95,10 +94,7 @@ SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
           "SkyboxLayer::buildRenderPasses: invalid per-frame buffer address");
     }
 
-    pushConstants_ = PushConstants{
-        .perFrameAddress = baseAddress,
-        .vertexBufferAddress = 0,
-    };
+    pushConstants_ = PushConstants{.frameDataAddress = baseAddress};
 
     drawItem_ = DrawItem{};
     drawItem_.pipeline = skyboxPipelineHandle_;
@@ -131,7 +127,7 @@ Result<bool, std::string> SkyboxLayer::ensureInitialized() {
     return pipelineResult;
   }
 
-  auto bufferResult = ensurePerFrameBufferCapacity(sizeof(PerFrameData));
+  auto bufferResult = ensurePerFrameBufferCapacity(sizeof(FrameData));
   if (bufferResult.hasError()) {
     return bufferResult;
   }
@@ -142,7 +138,7 @@ Result<bool, std::string> SkyboxLayer::ensureInitialized() {
 
 Result<bool, std::string>
 SkyboxLayer::ensurePerFrameBufferCapacity(size_t requiredBytes) {
-  const size_t requested = std::max(requiredBytes, sizeof(PerFrameData));
+  const size_t requested = std::max(requiredBytes, sizeof(FrameData));
   if (perFrameBuffer_ && perFrameBuffer_->valid() &&
       perFrameBufferCapacityBytes_ >= requested) {
     return Result<bool, std::string>::makeResult(true);

@@ -36,20 +36,26 @@ public:
                                               RenderPassList &out) override;
 
 private:
-  struct PerFrameData {
-    glm::mat4 model{1.0f};
+  struct FrameData {
     glm::mat4 view{1.0f};
     glm::mat4 proj{1.0f};
     glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
-    uint32_t albedoTexId = 0;
     uint32_t cubemapTexId = 0;
     uint32_t hasCubemap = 0;
     uint32_t _padding0 = 0;
+    uint32_t _padding1 = 0;
   };
 
   struct PushConstants {
-    uint64_t perFrameAddress = 0;
+    uint64_t frameDataAddress = 0;
     uint64_t vertexBufferAddress = 0;
+    uint64_t instanceMatricesAddress = 0;
+    uint64_t instanceRemapAddress = 0;
+    uint64_t instanceMetaAddress = 0;
+    uint64_t instanceCentersPhaseAddress = 0;
+    uint64_t instanceBaseMatricesAddress = 0;
+    uint32_t instanceCount = 0;
+    float timeSeconds = 0.0f;
   };
 
   Result<bool, std::string> ensureInitialized();
@@ -70,7 +76,7 @@ private:
   size_t perFrameBufferCapacityBytes_ = 0;
   bool initialized_ = false;
 
-  PerFrameData perFrameData_{};
+  FrameData frameData_{};
   PushConstants pushConstants_{};
   DrawItem drawItem_{};
 };
