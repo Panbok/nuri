@@ -26,6 +26,7 @@ struct RenderSettings {
   struct DebugSettings {
     bool enabled = false;
     bool modelBounds = false;
+    bool grid = false;
   };
 
   SkyboxSettings skybox{};
