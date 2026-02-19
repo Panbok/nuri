@@ -29,7 +29,7 @@ vec4 gridColor(vec2 uv, vec2 camPos) {
   float lod2 = lod1 * 10.0;
 
   // each anti-aliased line covers up to 4 pixels
-  dudv *= 4.0;
+  dudv = max(dudv * 4.0, vec2(1e-6));
 
   // set grid coordinates to the centers of anti-aliased lines for subsequent alpha calculations
   uv += dudv * 0.5;
