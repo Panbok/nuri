@@ -1,14 +1,13 @@
 #extension GL_EXT_buffer_reference : require
 
-layout(std430, buffer_reference) readonly buffer PerFrameData {
-  mat4 model;
+layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   mat4 view;
   mat4 proj;
   vec4 cameraPos;
-  uint albedoTexId;
   uint cubemapTexId;
   uint hasCubemap;
   uint _padding0;
+  uint _padding1;
 };
 
 struct PackedVertex {
@@ -32,9 +31,40 @@ layout(std430, buffer_reference) readonly buffer PackedVertexBuffer {
   PackedVertex vertices[];
 };
 
+layout(std430, buffer_reference) readonly buffer InstanceCentersPhaseBuffer {
+  vec4 values[];
+};
+
+layout(std430, buffer_reference) readonly buffer InstanceBaseMatricesBuffer {
+  mat4 matrices[];
+};
+
+layout(std430, buffer_reference) readonly buffer InstanceMetaBuffer {
+  uint albedoTexIds[];
+};
+
+layout(std430, buffer_reference) readonly buffer InstanceRemapBuffer {
+  uint ids[];
+};
+
+layout(std430, buffer_reference) buffer InstanceMatricesBuffer {
+  mat4 matrices[];
+};
+
 layout(push_constant) uniform PushConstants {
-  PerFrameData perFrame;
+  FrameDataBuffer frameData;
   PackedVertexBuffer vertexBuffer;
+  InstanceMatricesBuffer instanceMatrices;
+  InstanceRemapBuffer instanceRemap;
+  InstanceMetaBuffer instanceMeta;
+  InstanceCentersPhaseBuffer instanceCentersPhase;
+  InstanceBaseMatricesBuffer instanceBaseMatrices;
+  uint instanceCount;
+  float timeSeconds;
+  float tessNearDistance;
+  float tessFarDistance;
+  float tessMinFactor;
+  float tessMaxFactor;
 } pc;
 
 vec2 unpackSnorm2x16Custom(uint packed) {

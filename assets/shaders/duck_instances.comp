@@ -1,0 +1,50 @@
+#include "common.sp"
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+mat4 translate(mat4 m, vec3 v) {
+  mat4 result = m;
+  result[3] = m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[3];
+  return result;
+}
+
+mat4 rotate(mat4 m, float angle, vec3 v) {
+  float c = cos(angle);
+  float s = sin(angle);
+
+  vec3 axis = normalize(v);
+  vec3 temp = (1.0 - c) * axis;
+
+  mat4 r = mat4(1.0);
+  r[0][0] = c + temp[0] * axis[0];
+  r[0][1] = temp[0] * axis[1] + s * axis[2];
+  r[0][2] = temp[0] * axis[2] - s * axis[1];
+
+  r[1][0] = temp[1] * axis[0] - s * axis[2];
+  r[1][1] = c + temp[1] * axis[1];
+  r[1][2] = temp[1] * axis[2] + s * axis[0];
+
+  r[2][0] = temp[2] * axis[0] + s * axis[1];
+  r[2][1] = temp[2] * axis[1] - s * axis[0];
+  r[2][2] = c + temp[2] * axis[2];
+
+  mat4 result = mat4(1.0);
+  result[0] = m[0] * r[0][0] + m[1] * r[0][1] + m[2] * r[0][2];
+  result[1] = m[0] * r[1][0] + m[1] * r[1][1] + m[2] * r[1][2];
+  result[2] = m[0] * r[2][0] + m[1] * r[2][1] + m[2] * r[2][2];
+  result[3] = m[3];
+  return result;
+}
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  if (idx >= pc.instanceCount) {
+    return;
+  }
+
+  vec4 centerPhase = pc.instanceCentersPhase.values[idx];
+  mat4 baseMatrix = pc.instanceBaseMatrices.matrices[idx];
+  mat4 model = rotate(translate(mat4(1.0), centerPhase.xyz),
+                      pc.timeSeconds + centerPhase.w, vec3(1.0, 1.0, 1.0));
+  pc.instanceMatrices.matrices[idx] = model * baseMatrix;
+}
