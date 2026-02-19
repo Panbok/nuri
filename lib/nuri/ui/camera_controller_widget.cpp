@@ -113,4 +113,25 @@ void drawCameraControllerWidget(CameraSystem &cameraSystem,
   ImGui::End();
 }
 
+bool drawScenePresetWidget(std::span<const char *const> presetNames,
+                           int &selectedIndex,
+                           std::string_view hotkeyHint) {
+  if (presetNames.empty()) {
+    return false;
+  }
+  if (!ImGui::Begin("Scene Preset")) {
+    ImGui::End();
+    return false;
+  }
+
+  selectedIndex = std::clamp(selectedIndex, 0,
+                             static_cast<int>(presetNames.size()) - 1);
+  const bool changed = ImGui::Combo("Preset", &selectedIndex,
+                                    presetNames.data(),
+                                    static_cast<int>(presetNames.size()));
+  ImGui::Text("%.*s", static_cast<int>(hotkeyHint.size()), hotkeyHint.data());
+  ImGui::End();
+  return changed;
+}
+
 } // namespace nuri

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <string_view>
+#include <span>
 
 #include <glm/glm.hpp>
 
@@ -24,5 +26,9 @@ syncCameraControllerWidgetStateFromCamera(const Camera &camera,
 
 NURI_API void drawCameraControllerWidget(CameraSystem &cameraSystem,
                                          CameraControllerWidgetState &state);
+
+NURI_API bool drawScenePresetWidget(std::span<const char *const> presetNames,
+                                    int &selectedIndex,
+                                    std::string_view hotkeyHint = "Hotkey: F6");
 
 } // namespace nuri
