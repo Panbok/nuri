@@ -34,12 +34,15 @@ struct ShaderDesc {
 struct RenderPipelineDesc {
   VertexInput vertexInput{};
   ShaderHandle vertexShader{};
+  ShaderHandle tessControlShader{};
+  ShaderHandle tessEvalShader{};
   ShaderHandle fragmentShader{};
   std::array<Format, 1> colorFormats{Format::RGBA8_UNORM};
   Format depthFormat = Format::Count;
   CullMode cullMode = CullMode::Back;
   PolygonMode polygonMode = PolygonMode::Fill;
   Topology topology = Topology::Triangle;
+  uint32_t patchControlPoints = 0;
   bool blendEnabled = false;
   SpecializationInfo specInfo{};
 };
