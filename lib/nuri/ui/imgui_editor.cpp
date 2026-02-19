@@ -1,23 +1,29 @@
 #include "nuri/ui/imgui_editor.h"
 
-#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/imgui_gpu_renderer.h"
 #include "nuri/platform/imgui_glfw_platform.h"
-#include "nuri/utils/FPSCounter.h"
+#include "nuri/ui/linear_graph.h"
+#include "nuri/utils/fsp_counter.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#if __has_include(<implot.h>)
+#include <implot.h>
+#else
+#include <implot/implot.h>
+#endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -27,11 +33,58 @@ namespace {
 
 constexpr size_t kMaxLogLines = 2000;
 constexpr float kLogFilterWidth = 200.0f;
-constexpr float kTagHorizontalPadding = 6.0f;
-constexpr float kTagCornerRounding = 3.0f;
+constexpr float kLayerPanelWidth = 360.0f;
+constexpr float kLayerListWidth = 140.0f;
+constexpr double kMetricGraphUpdateIntervalSeconds = 0.04;
+constexpr double kLogUpdateIntervalSeconds = 0.10;
+constexpr float kMetricGraphWindowWidth = 300.0f;
+constexpr float kMetricGraphWindowHeight = 280.0f;
+constexpr double kMetricSampleMinDeltaSeconds = 1.0e-6;
+constexpr std::size_t kMetricGraphSampleCount = 240;
+constexpr uint32_t kUiMaxTessInstances = 65536u;
 constexpr const char *kDockspaceWindowName = "NuriDockspace";
 constexpr const char *kDockspaceRootId = "NuriDockspace##Root";
 constexpr const char *kLogWindowName = "Log";
+constexpr const char *kCameraControllerWindowName = "Camera Controller";
+
+enum class LayerSelection : uint8_t {
+  Skybox,
+  Opaque,
+  Debug,
+};
+
+const std::array<LayerSelection, 3> kRenderLayers = {
+    LayerSelection::Skybox,
+    LayerSelection::Opaque,
+    LayerSelection::Debug,
+};
+
+const char *layerDisplayName(LayerSelection layer) {
+  switch (layer) {
+  case LayerSelection::Skybox:
+    return "Skybox";
+  case LayerSelection::Opaque:
+    return "Opaque";
+  case LayerSelection::Debug:
+    return "Debug";
+  }
+  return "Unknown";
+}
+
+struct LogLevelMeta {
+  LogLevel level;
+  std::string_view tag;
+};
+
+constexpr LogLevelMeta kLogLevels[] = {
+    {LogLevel::Trace, "[Trace]"}, {LogLevel::Debug, "[Debug]"},
+    {LogLevel::Info, "[Info]"},   {LogLevel::Warning, "[Warn]"},
+    {LogLevel::Fatal, "[Fatal]"},
+};
+
+float sanitizeSample(float value) {
+  return std::isfinite(value) ? value : 0.0f;
+}
 
 struct LogLine {
   LogLevel level = LogLevel::Info;
@@ -115,29 +168,24 @@ struct LogModel {
   }
 
   static std::pair<LogLevel, std::string> parseLevelTag(std::string_view line) {
-    constexpr std::string_view tags[] = {"[Trace]", "[Debug]", "[Info]",
-                                         "[Warn]", "[Fatal]"};
-    constexpr LogLevel levels[] = {LogLevel::Trace, LogLevel::Debug,
-                                   LogLevel::Info, LogLevel::Warning,
-                                   LogLevel::Fatal};
-
-    for (size_t i = 0; i < std::size(tags); ++i) {
-      if (line.size() >= tags[i].size() &&
-          line.substr(0, tags[i].size()) == tags[i]) {
-        std::string msg(line.substr(tags[i].size()));
+    for (const auto &meta : kLogLevels) {
+      if (line.size() >= meta.tag.size() &&
+          line.substr(0, meta.tag.size()) == meta.tag) {
+        std::string msg(line.substr(meta.tag.size()));
         if (!msg.empty() && msg.front() == ' ') {
           msg.erase(0, 1);
         }
-        return {levels[i], std::move(msg)};
+        return {meta.level, std::move(msg)};
       }
     }
     return {LogLevel::Info, std::string(line)};
   }
 
   void seedFromFileIfNeeded(LogFilterState &filterState) {
-    if (seededFromFile || !lines.empty() || lastSequence != 0) {
+    if (seededFromFile) {
       return;
     }
+    seededFromFile = true;
 
     const std::filesystem::path logPath = findLatestLogFile();
     if (logPath.empty()) {
@@ -165,7 +213,6 @@ struct LogModel {
     if (!lines.empty()) {
       filterState.requestScroll = true;
     }
-    seededFromFile = true;
   }
 
   void appendEntries(const std::vector<LogEntry> &entries) {
@@ -179,15 +226,15 @@ struct LogModel {
   }
 
   void update(LogFilterState &filterState) {
+    seedFromFileIfNeeded(filterState);
+
     std::vector<LogEntry> entries;
     const LogReadResult result = readLogEntriesSince(lastSequence, entries);
     if (result.truncated) {
       lines.clear();
       lastSequence = result.lastSequence;
     }
-    if (entries.empty()) {
-      seedFromFileIfNeeded(filterState);
-    } else {
+    if (!entries.empty()) {
       lastSequence = result.lastSequence;
       appendEntries(entries);
       filterState.requestScroll = true;
@@ -195,131 +242,220 @@ struct LogModel {
   }
 };
 
-struct LogStyle {
-  const char *tag;
-  ImVec4 color;
-};
-
-struct LogStyleCatalog {
-  static LogStyle styleFor(LogLevel level) {
-    switch (level) {
-    case LogLevel::Trace:
-      return {"[Trace]", ImVec4(0.7f, 0.7f, 0.7f, 1.0f)};
-    case LogLevel::Debug:
-      return {"[Debug]", ImVec4(0.4f, 0.8f, 0.9f, 1.0f)};
-    case LogLevel::Info:
-      return {"[Info]", ImVec4(0.9f, 0.9f, 0.9f, 1.0f)};
-    case LogLevel::Warning:
-      return {"[Warn]", ImVec4(1.0f, 0.8f, 0.2f, 1.0f)};
-    case LogLevel::Fatal:
-      return {"[Fatal]", ImVec4(1.0f, 0.3f, 0.3f, 1.0f)};
+std::string_view logTagFor(LogLevel level) {
+  for (const auto &meta : kLogLevels) {
+    if (meta.level == level) {
+      return meta.tag;
     }
-    return {"[Info]", ImVec4(0.9f, 0.9f, 0.9f, 1.0f)};
   }
-
-  static ImU32 textColorFor(const ImVec4 &background) {
-    const float luma =
-        0.299f * background.x + 0.587f * background.y + 0.114f * background.z;
-    const ImVec4 foreground = luma > 0.6f ? ImVec4(0.0f, 0.0f, 0.0f, 1.0f)
-                                          : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-    return ImGui::ColorConvertFloat4ToU32(foreground);
-  }
-
-  static void drawTagPill(LogLevel level) {
-    const LogStyle style = styleFor(level);
-    const ImU32 backgroundColor = ImGui::ColorConvertFloat4ToU32(style.color);
-    const ImU32 foregroundColor = textColorFor(style.color);
-
-    const ImVec2 textSize = ImGui::CalcTextSize(style.tag);
-    const ImGuiStyle &imguiStyle = ImGui::GetStyle();
-    const ImVec2 padding(kTagHorizontalPadding,
-                         std::max(2.0f, imguiStyle.FramePadding.y * 0.5f));
-    const ImVec2 size(textSize.x + padding.x * 2.0f,
-                      textSize.y + padding.y * 2.0f);
-
-    const ImVec2 position = ImGui::GetCursorScreenPos();
-    ImDrawList *drawList = ImGui::GetWindowDrawList();
-    drawList->AddRectFilled(position,
-                            ImVec2(position.x + size.x, position.y + size.y),
-                            backgroundColor, kTagCornerRounding);
-    drawList->AddText(ImVec2(position.x + padding.x, position.y + padding.y),
-                      foregroundColor, style.tag);
-    ImGui::Dummy(size);
-  }
-};
-
-void drawInlineItemGap() {
-  ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+  return "[Info]";
 }
 
-void drawInlineLevelToggle(const char *label, bool &value) {
-  drawInlineItemGap();
+void drawInlineCheckbox(const char *label, bool &value) {
+  ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
   ImGui::Checkbox(label, &value);
 }
 
-struct LogWindowWidget {
-  static void draw(LogModel &model, LogFilterState &filterState) {
-    drawToolbar(model, filterState);
-    ImGui::Separator();
-    drawMessages(model, filterState);
+void drawLogToolbar(LogModel &model, LogFilterState &filterState) {
+  if (ImGui::Button("Clear")) {
+    model.clear();
+    filterState.requestScroll = true;
   }
 
-private:
-  static void drawToolbar(LogModel &model, LogFilterState &filterState) {
-    if (ImGui::Button("Clear")) {
-      model.clear();
-      filterState.requestScroll = true;
+  drawInlineCheckbox("Auto-scroll", filterState.autoScroll);
+
+  ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+  filterState.textFilter.Draw("Filter", kLogFilterWidth);
+
+  struct Toggle {
+    const char *label;
+    bool *enabled;
+  };
+  Toggle toggles[] = {
+      {"Trace", &filterState.showTrace}, {"Debug", &filterState.showDebug},
+      {"Info", &filterState.showInfo},   {"Warn", &filterState.showWarning},
+      {"Fatal", &filterState.showFatal},
+  };
+  for (const Toggle &toggle : toggles) {
+    drawInlineCheckbox(toggle.label, *toggle.enabled);
+  }
+}
+
+void drawLogMessages(const LogModel &model, LogFilterState &filterState) {
+  std::vector<size_t> visibleIndices;
+  visibleIndices.reserve(model.lines.size());
+  for (size_t lineIndex = 0; lineIndex < model.lines.size(); ++lineIndex) {
+    const auto &line = model.lines[lineIndex];
+    if (!filterState.levelEnabled(line.level)) {
+      continue;
     }
-
-    drawInlineItemGap();
-    ImGui::Checkbox("Auto-scroll", &filterState.autoScroll);
-
-    drawInlineItemGap();
-    filterState.textFilter.Draw("Filter", kLogFilterWidth);
-
-    drawInlineLevelToggle("Trace", filterState.showTrace);
-    drawInlineLevelToggle("Debug", filterState.showDebug);
-    drawInlineLevelToggle("Info", filterState.showInfo);
-    drawInlineLevelToggle("Warn", filterState.showWarning);
-    drawInlineLevelToggle("Fatal", filterState.showFatal);
+    if (!filterState.textFilter.PassFilter(line.message.c_str())) {
+      continue;
+    }
+    visibleIndices.push_back(lineIndex);
   }
 
-  static void drawMessages(const LogModel &model, LogFilterState &filterState) {
-    std::vector<size_t> visibleIndices;
-    visibleIndices.reserve(model.lines.size());
-    for (size_t i = 0; i < model.lines.size(); ++i) {
-      const auto &line = model.lines[i];
-      if (!filterState.levelEnabled(line.level)) {
-        continue;
-      }
-      if (!filterState.textFilter.PassFilter(line.message.c_str())) {
-        continue;
-      }
-      visibleIndices.push_back(i);
-    }
+  ImGui::BeginChild("LogScroll", ImVec2(0.0f, 0.0f), false,
+                    ImGuiWindowFlags_HorizontalScrollbar);
 
-    ImGui::BeginChild("LogScroll", ImVec2(0.0f, 0.0f), false,
-                      ImGuiWindowFlags_HorizontalScrollbar);
-
-    ImGuiListClipper clipper;
-    clipper.Begin(static_cast<int>(visibleIndices.size()));
-    while (clipper.Step()) {
-      for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-        const size_t lineIdx = visibleIndices[static_cast<size_t>(i)];
-        const auto &line = model.lines[lineIdx];
-        LogStyleCatalog::drawTagPill(line.level);
-        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-        ImGui::TextUnformatted(line.message.c_str());
-      }
+  ImGuiListClipper clipper;
+  clipper.Begin(static_cast<int>(visibleIndices.size()));
+  while (clipper.Step()) {
+    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+      const size_t visibleLineIndex = visibleIndices[static_cast<size_t>(i)];
+      const LogLine &line = model.lines[visibleLineIndex];
+      const std::string_view tag = logTagFor(line.level);
+      ImGui::TextUnformatted(tag.data(), tag.data() + tag.size());
+      ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+      ImGui::TextUnformatted(line.message.c_str());
     }
-
-    if (filterState.autoScroll && filterState.requestScroll) {
-      ImGui::SetScrollHereY(1.0f);
-      filterState.requestScroll = false;
-    }
-    ImGui::EndChild();
   }
-};
+
+  if (filterState.autoScroll && filterState.requestScroll) {
+    ImGui::SetScrollHereY(1.0f);
+    filterState.requestScroll = false;
+  }
+  ImGui::EndChild();
+}
+
+void drawInspectorHeader(LayerSelection layer) {
+  ImGui::TextUnformatted(layerDisplayName(layer));
+  ImGui::Separator();
+}
+
+void drawSkyboxSettings(RenderSettings::SkyboxSettings &skybox) {
+  ImGui::Checkbox("Enabled##SkyboxLayer", &skybox.enabled);
+}
+
+void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
+  ImGui::Checkbox("Enabled##OpaqueLayer", &opaque.enabled);
+  ImGui::Checkbox("Wireframe##OpaqueLayer", &opaque.wireframe);
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Mesh LOD");
+  ImGui::Checkbox("Enable Mesh LOD##OpaqueLayer", &opaque.enableMeshLod);
+  ImGui::SliderInt("Forced LOD##OpaqueLayer", &opaque.forcedMeshLod, -1, 3);
+
+  float lodThresholds[3] = {
+      opaque.meshLodDistanceThresholds.x,
+      opaque.meshLodDistanceThresholds.y,
+      opaque.meshLodDistanceThresholds.z,
+  };
+  if (ImGui::SliderFloat3("LOD Distance##OpaqueLayer", lodThresholds, 0.5f,
+                          128.0f, "%.1f")) {
+    std::sort(std::begin(lodThresholds), std::end(lodThresholds));
+    opaque.meshLodDistanceThresholds =
+        glm::vec3(lodThresholds[0], lodThresholds[1], lodThresholds[2]);
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Tessellation");
+  ImGui::Checkbox("Enable Tessellation##OpaqueLayer",
+                  &opaque.enableTessellation);
+  ImGui::SliderFloat("Tess Near##OpaqueLayer", &opaque.tessNearDistance, 0.0f,
+                     256.0f, "%.2f");
+  ImGui::SliderFloat("Tess Far##OpaqueLayer", &opaque.tessFarDistance, 0.0f,
+                     512.0f, "%.2f");
+  ImGui::SliderFloat("Tess Min##OpaqueLayer", &opaque.tessMinFactor, 1.0f,
+                     64.0f, "%.2f");
+  ImGui::SliderFloat("Tess Max##OpaqueLayer", &opaque.tessMaxFactor, 1.0f,
+                     64.0f, "%.2f");
+  int tessMaxInstances =
+      static_cast<int>(std::min<uint32_t>(opaque.tessMaxInstances,
+                                          kUiMaxTessInstances));
+  if (ImGui::SliderInt("Tess Max Inst##OpaqueLayer", &tessMaxInstances, 0,
+                       4096)) {
+    opaque.tessMaxInstances =
+        static_cast<uint32_t>(std::max(tessMaxInstances, 0));
+  }
+  opaque.tessNearDistance = std::max(0.0f, opaque.tessNearDistance);
+  opaque.tessFarDistance =
+      std::max(opaque.tessFarDistance, opaque.tessNearDistance + 1.0e-3f);
+  opaque.tessMinFactor = std::clamp(opaque.tessMinFactor, 1.0f, 64.0f);
+  opaque.tessMaxFactor =
+      std::clamp(opaque.tessMaxFactor, opaque.tessMinFactor, 64.0f);
+  opaque.tessMaxInstances =
+      std::min<uint32_t>(opaque.tessMaxInstances, kUiMaxTessInstances);
+}
+
+void drawDebugSettings(RenderSettings::DebugSettings &debug) {
+  ImGui::Checkbox("Enabled##DebugLayer", &debug.enabled);
+  ImGui::Checkbox("Model Bounds##DebugLayer", &debug.modelBounds);
+  ImGui::Checkbox("Grid##DebugLayer", &debug.grid);
+}
+
+void drawLayerList(LayerSelection &selectedLayer) {
+  ImGui::TextUnformatted("Layers");
+  ImGui::Separator();
+  for (const LayerSelection layer : kRenderLayers) {
+    const bool isSelected = selectedLayer == layer;
+    if (ImGui::Selectable(layerDisplayName(layer), isSelected)) {
+      selectedLayer = layer;
+    }
+  }
+}
+
+void drawLayerInspector(RenderSettings &renderSettings,
+                        LayerSelection &selectedLayer) {
+  ImGui::BeginChild("LayerPanel", ImVec2(0.0f, 0.0f), false,
+                    ImGuiWindowFlags_NoScrollbar);
+
+  if (ImGui::BeginTable("LayerInspectorTable", 2,
+                        ImGuiTableFlags_BordersInnerV |
+                            ImGuiTableFlags_SizingStretchProp)) {
+    ImGui::TableSetupColumn("LayerList", ImGuiTableColumnFlags_WidthFixed,
+                            kLayerListWidth);
+    ImGui::TableSetupColumn("LayerSettings", ImGuiTableColumnFlags_WidthStretch,
+                            0.0f);
+
+    ImGui::TableNextColumn();
+    drawLayerList(selectedLayer);
+
+    ImGui::TableNextColumn();
+    drawInspectorHeader(selectedLayer);
+    switch (selectedLayer) {
+    case LayerSelection::Skybox:
+      drawSkyboxSettings(renderSettings.skybox);
+      break;
+    case LayerSelection::Opaque:
+      drawOpaqueSettings(renderSettings.opaque);
+      break;
+    case LayerSelection::Debug:
+      drawDebugSettings(renderSettings.debug);
+      break;
+    }
+
+    ImGui::EndTable();
+  }
+
+  ImGui::EndChild();
+}
+
+void drawLogWindow(LogModel &model, LogFilterState &filterState,
+                   RenderSettings &renderSettings,
+                   LayerSelection &selectedLayer) {
+  drawLogToolbar(model, filterState);
+  ImGui::Separator();
+
+  const ImGuiTableFlags tableFlags =
+      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
+  if (!ImGui::BeginTable("LogAndLayerTable", 2, tableFlags)) {
+    drawLogMessages(model, filterState);
+    return;
+  }
+
+  ImGui::TableSetupColumn("Logs", ImGuiTableColumnFlags_WidthStretch, 0.0f);
+  ImGui::TableSetupColumn("Layer Inspector", ImGuiTableColumnFlags_WidthFixed,
+                          kLayerPanelWidth);
+
+  ImGui::TableNextColumn();
+  drawLogMessages(model, filterState);
+
+  ImGui::TableNextColumn();
+  drawLayerInspector(renderSettings, selectedLayer);
+
+  ImGui::EndTable();
+}
 
 void setDockspaceWindowPlacement(const ImGuiViewport *viewport) {
   if (!viewport) {
@@ -343,17 +479,20 @@ void setLogWindowPlacementWithoutDock(const ImGuiViewport *viewport) {
   ImGui::SetNextWindowViewport(viewport->ID);
 }
 
-void drawFpsOverlay(const FPSCounter &fpsCounter) {
+void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
+                    LinearGraph &frametimeGraph,
+                    const RenderFrameMetrics &frameMetrics) {
   if (const ImGuiViewport *viewport = ImGui::GetMainViewport()) {
     ImGui::SetNextWindowPos({viewport->WorkPos.x + viewport->WorkSize.x - 15.0f,
                              viewport->WorkPos.y + 15.0f},
                             ImGuiCond_Always, {1.0f, 0.0f});
   }
   ImGui::SetNextWindowBgAlpha(0.30f);
-  ImGui::SetNextWindowSize(ImVec2(ImGui::CalcTextSize("FPS : _______").x, 0));
+  ImGui::SetNextWindowSize(
+      ImVec2(kMetricGraphWindowWidth, kMetricGraphWindowHeight),
+      ImGuiCond_Always);
   if (ImGui::Begin("##FPS", nullptr,
                    ImGuiWindowFlags_NoDecoration |
-                       ImGuiWindowFlags_AlwaysAutoResize |
                        ImGuiWindowFlags_NoSavedSettings |
                        ImGuiWindowFlags_NoFocusOnAppearing |
                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove)) {
@@ -361,6 +500,34 @@ void drawFpsOverlay(const FPSCounter &fpsCounter) {
     const float milliseconds = fps > 0.0f ? 1000.0f / fps : 0.0f;
     ImGui::Text("FPS : %i", static_cast<int>(fps));
     ImGui::Text("Ms  : %.1f", milliseconds);
+    ImGui::Text("Inst: %u / %u",
+                frameMetrics.opaque.visibleInstances,
+                frameMetrics.opaque.totalInstances);
+    ImGui::Text("Draw: %u (Tess: %u)  Tess Inst: %u",
+                frameMetrics.opaque.instancedDraws,
+                frameMetrics.opaque.tessellatedDraws,
+                frameMetrics.opaque.tessellatedInstances);
+    ImGui::Text("Dispatch: %u x%u",
+                frameMetrics.opaque.computeDispatches,
+                frameMetrics.opaque.computeDispatchX);
+    ImGui::Separator();
+
+    const float availableGraphHeight = ImGui::GetContentRegionAvail().y;
+    const float perGraphHeight = std::max(availableGraphHeight * 0.5f, 1.0f);
+    const ImVec2 itemSpacing = ImGui::GetStyle().ItemSpacing;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(itemSpacing.x, 0.0f));
+
+    LinearGraphStyle graphStyle{
+        .heightPixels = perGraphHeight,
+        .lineColorRgba = IM_COL32(64, 224, 128, 255),
+        .fillUnderLine = true,
+    };
+    fpsGraph.draw("FPS Graph##Metrics", "FPS", graphStyle);
+
+    graphStyle.lineColorRgba = IM_COL32(255, 160, 64, 255);
+    frametimeGraph.draw("Frametime Graph##Metrics", "Frametime (ms)",
+                        graphStyle);
+    ImGui::PopStyleVar();
   }
   ImGui::End();
 }
@@ -394,9 +561,12 @@ struct DockLayoutState {
     ImGuiID dockMain = dockspaceId;
     ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,
                                                      0.25f, nullptr, &dockMain);
+    ImGuiID dockBottomLeft = ImGui::DockBuilderSplitNode(
+        dockBottom, ImGuiDir_Left, 0.28f, nullptr, &dockBottom);
 
     logDockId = dockBottom;
-    ImGui::DockBuilderDockWindow(kLogWindowName, dockBottom);
+    ImGui::DockBuilderDockWindow(kCameraControllerWindowName, dockBottomLeft);
+    ImGui::DockBuilderDockWindow(kLogWindowName, logDockId);
     ImGui::DockBuilderFinish(dockspaceId);
     built = true;
   }
@@ -414,6 +584,24 @@ struct MaybeDockLayoutState {};
 struct ImGuiEditor::Impl {
   Impl(Window &windowIn, GPUDevice &gpuIn) : window(windowIn), gpu(gpuIn) {}
 
+  void updateMetricGraphs(double deltaSeconds) {
+    graphSampleAccumulatorSeconds += deltaSeconds;
+    if (graphSampleAccumulatorSeconds < kMetricGraphUpdateIntervalSeconds) {
+      return;
+    }
+
+    const float frametimeMs =
+        sanitizeSample(static_cast<float>(deltaSeconds * 1000.0));
+    const float instantFps =
+        sanitizeSample(deltaSeconds > kMetricSampleMinDeltaSeconds
+                           ? static_cast<float>(1.0 / deltaSeconds)
+                           : 0.0f);
+    fpsGraph->pushSample(instantFps);
+    frametimeGraph->pushSample(frametimeMs);
+    graphSampleAccumulatorSeconds = std::fmod(
+        graphSampleAccumulatorSeconds, kMetricGraphUpdateIntervalSeconds);
+  }
+
   void beginFrame() {
     NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
     platform->newFrame();
@@ -429,7 +617,14 @@ struct ImGuiEditor::Impl {
     }
 
     fpsCounter.tick(frameDeltaSeconds, true);
-    logModel.update(logFilterState);
+    updateMetricGraphs(std::max(frameDeltaSeconds, 0.0));
+
+    logUpdateAccumulatorSeconds += std::max(frameDeltaSeconds, 0.0);
+    if (logUpdateAccumulatorSeconds >= kLogUpdateIntervalSeconds) {
+      logModel.update(logFilterState);
+      logUpdateAccumulatorSeconds = std::fmod(
+          logUpdateAccumulatorSeconds, kLogUpdateIntervalSeconds);
+    }
 
 #ifdef IMGUI_HAS_DOCK
     if (dockLayoutState.logDockId != 0) {
@@ -443,15 +638,15 @@ struct ImGuiEditor::Impl {
 #endif
 
     ImGui::Begin(kLogWindowName);
-    LogWindowWidget::draw(logModel, logFilterState);
+    drawLogWindow(logModel, logFilterState, renderSettings, selectedLayer);
     ImGui::End();
 
-    drawFpsOverlay(fpsCounter);
+    drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, frameMetrics);
 
     ImGui::EndFrame();
     ImGui::Render();
 
-    return renderer->buildRenderPass(gpu.getSwapchainFormat());
+    return renderer->buildRenderPass(gpu.getSwapchainFormat(), frameIndex);
   }
 
   void drawDockspaceRoot() {
@@ -481,22 +676,33 @@ struct ImGuiEditor::Impl {
   std::unique_ptr<ImGuiGlfwPlatform> platform;
   std::unique_ptr<ImGuiGpuRenderer> renderer;
   FPSCounter fpsCounter{0.5f};
+  std::unique_ptr<LinearGraph> fpsGraph =
+      createImPlotLinearGraph(kMetricGraphSampleCount);
+  std::unique_ptr<LinearGraph> frametimeGraph =
+      createImPlotLinearGraph(kMetricGraphSampleCount);
+  double graphSampleAccumulatorSeconds = kMetricGraphUpdateIntervalSeconds;
+  double logUpdateAccumulatorSeconds = kLogUpdateIntervalSeconds;
   bool showMetricsWindow = false;
+  RenderSettings renderSettings{};
+  RenderFrameMetrics frameMetrics{};
+  LayerSelection selectedLayer = LayerSelection::Opaque;
   double frameDeltaSeconds = 0.0;
+  uint64_t frameIndex = 0;
   LogModel logModel;
   LogFilterState logFilterState;
   MaybeDockLayoutState dockLayoutState;
 };
 
-std::unique_ptr<ImGuiEditor> ImGuiEditor::create(Window &window,
-                                                 GPUDevice &gpu) {
-  return std::unique_ptr<ImGuiEditor>(new ImGuiEditor(window, gpu));
+std::unique_ptr<ImGuiEditor> ImGuiEditor::create(Window &window, GPUDevice &gpu,
+                                                 EventManager &events) {
+  return std::unique_ptr<ImGuiEditor>(new ImGuiEditor(window, gpu, events));
 }
 
-ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu)
+ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu, EventManager &events)
     : impl_(std::make_unique<Impl>(window, gpu)) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
+  ImPlot::CreateContext();
 
   ImGuiIO &io = ImGui::GetIO();
   // Ensure the default font exists before the first NewFrame().
@@ -516,13 +722,16 @@ ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu)
 #endif
   io.IniFilename = nullptr;
 
-  impl_->platform = ImGuiGlfwPlatform::create(impl_->window);
+  impl_->platform = ImGuiGlfwPlatform::create(impl_->window, events);
   impl_->renderer = ImGuiGpuRenderer::create(impl_->gpu);
 }
 
 ImGuiEditor::~ImGuiEditor() {
   impl_->renderer.reset();
   impl_->platform.reset();
+  if (ImPlot::GetCurrentContext() != nullptr) {
+    ImPlot::DestroyContext();
+  }
   ImGui::DestroyContext();
 }
 
@@ -535,6 +744,47 @@ void ImGuiEditor::setFrameDeltaSeconds(double deltaTime) {
     return;
   }
   impl_->frameDeltaSeconds = deltaTime;
+}
+
+void ImGuiEditor::setFrameIndex(uint64_t frameIndex) {
+  if (!impl_) {
+    return;
+  }
+  impl_->frameIndex = frameIndex;
+}
+
+void ImGuiEditor::setFrameMetrics(const RenderFrameMetrics &metrics) {
+  if (!impl_) {
+    return;
+  }
+  impl_->frameMetrics = metrics;
+}
+
+void ImGuiEditor::setRenderSettings(const RenderSettings &settings) {
+  if (!impl_) {
+    return;
+  }
+  impl_->renderSettings = settings;
+}
+
+RenderSettings ImGuiEditor::renderSettings() const {
+  return impl_ ? impl_->renderSettings : RenderSettings{};
+}
+
+bool ImGuiEditor::wantsCaptureKeyboard() const {
+  if (!ImGui::GetCurrentContext()) {
+    return false;
+  }
+  const ImGuiIO &io = ImGui::GetIO();
+  return io.WantCaptureKeyboard;
+}
+
+bool ImGuiEditor::wantsCaptureMouse() const {
+  if (!ImGui::GetCurrentContext()) {
+    return false;
+  }
+  const ImGuiIO &io = ImGui::GetIO();
+  return io.WantCaptureMouse;
 }
 
 void ImGuiEditor::beginFrame() { impl_->beginFrame(); }

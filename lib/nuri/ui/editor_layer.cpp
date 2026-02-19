@@ -27,6 +27,13 @@ bool EditorLayer::onInput(const InputEvent &event) {
     return false;
   }
 
+  if (event.type == InputEventType::Key &&
+      event.payload.key.action == KeyAction::Press &&
+      event.payload.key.key == Key::F6) {
+    // Let application-level hotkeys toggle the editor overlay.
+    return false;
+  }
+
   switch (event.type) {
   case InputEventType::Key:
   case InputEventType::Character:
@@ -57,6 +64,8 @@ EditorLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   if (frame.settings) {
     editor_->setRenderSettings(*frame.settings);
   }
+  editor_->setFrameIndex(frame.frameIndex);
+  editor_->setFrameMetrics(frame.metrics);
 
   editor_->beginFrame();
   try {
