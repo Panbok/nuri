@@ -850,6 +850,59 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
         "Invalid fragment shader handle");
   }
 
+  const bool hasTessControlShader = isValid(desc.tessControlShader);
+  const bool hasTessEvalShader = isValid(desc.tessEvalShader);
+  if (nuri::isValid(desc.tessControlShader) && !hasTessControlShader) {
+    NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Invalid tessellation "
+                     "control shader handle for render pipeline");
+    return Result<RenderPipelineHandle, std::string>::makeError(
+        "Invalid tessellation control shader handle");
+  }
+  if (nuri::isValid(desc.tessEvalShader) && !hasTessEvalShader) {
+    NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Invalid tessellation "
+                     "evaluation shader handle for render pipeline");
+    return Result<RenderPipelineHandle, std::string>::makeError(
+        "Invalid tessellation evaluation shader handle");
+  }
+  if (hasTessControlShader != hasTessEvalShader) {
+    NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Tessellation "
+                     "control/eval shaders must both be valid or both be "
+                     "unset");
+    return Result<RenderPipelineHandle, std::string>::makeError(
+        "Tessellation control/eval shaders must both be valid or both be "
+        "unset");
+  }
+
+  const bool hasTessellation = hasTessControlShader && hasTessEvalShader;
+  if (hasTessellation) {
+    if (desc.topology != Topology::Patch) {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Tessellation "
+                       "requires patch topology");
+      return Result<RenderPipelineHandle, std::string>::makeError(
+          "Tessellation requires patch topology");
+    }
+    if (desc.patchControlPoints == 0) {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Tessellation "
+                       "requires patchControlPoints > 0");
+      return Result<RenderPipelineHandle, std::string>::makeError(
+          "Tessellation requires patchControlPoints > 0");
+    }
+  } else {
+    if (desc.patchControlPoints != 0) {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: "
+                       "patchControlPoints must be 0 when tessellation is "
+                       "disabled");
+      return Result<RenderPipelineHandle, std::string>::makeError(
+          "patchControlPoints must be 0 when tessellation is disabled");
+    }
+    if (desc.topology == Topology::Patch) {
+      NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Patch topology "
+                       "requires tessellation shaders");
+      return Result<RenderPipelineHandle, std::string>::makeError(
+          "Patch topology requires tessellation shaders");
+    }
+  }
+
   const auto reserved = impl_->renderPipelines.reserve(std::string(debugName),
                                                        Format::RGBA8_UNORM);
 
@@ -904,6 +957,8 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       .topology = toLvkTopology(desc.topology),
       .vertexInput = vertexInput,
       .smVert = impl_->shaders.getLvkHandle(desc.vertexShader),
+      .smTesc = impl_->shaders.getLvkHandle(desc.tessControlShader),
+      .smTese = impl_->shaders.getLvkHandle(desc.tessEvalShader),
       .smFrag = impl_->shaders.getLvkHandle(desc.fragmentShader),
       .specInfo = specInfo,
       .color = {{.format = toLvkFormat(desc.colorFormats[0]),
@@ -921,6 +976,7 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       .depthFormat = toLvkFormat(desc.depthFormat),
       .cullMode = toLvkCullMode(desc.cullMode),
       .polygonMode = toLvkPolygonMode(desc.polygonMode),
+      .patchControlPoints = desc.patchControlPoints,
       .debugName = reserved.debugNameCStr,
   };
 

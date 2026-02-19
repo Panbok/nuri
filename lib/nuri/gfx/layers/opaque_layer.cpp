@@ -18,11 +18,13 @@ constexpr uint32_t kOpaquePassDebugColor = 0xff0000ff;
 constexpr uint32_t kMeshDebugColor = 0xffcc5500;
 constexpr uint32_t kComputeDispatchColor = 0xff33aa33;
 constexpr uint32_t kComputeWorkgroupSize = 32;
+constexpr uint32_t kTessellationPatchControlPoints = 3;
+constexpr uint32_t kUnlimitedTessInstanceCap = 0u;
 constexpr uint32_t kAutoLodCacheInvalidationSeed = 1664525u;
 constexpr uint32_t kAutoLodCacheInvalidationMagic = 1013904223u;
 // Phase hash: normalize 24-bit hash to [0, 1] then scale to [0, 2*pi]
 constexpr uint32_t kPhaseHashMask = 0x00ffffffu;
-constexpr float kPhaseNormDivisor = 16777215.0f;  // 2^24 - 1
+constexpr float kPhaseNormDivisor = 16777215.0f; // 2^24 - 1
 constexpr uint32_t kPhaseHashMixMultiplier = 2246822519u;
 constexpr uint32_t kPhaseHashShift1 = 16u;
 constexpr uint32_t kPhaseHashShift2 = 13u;
@@ -37,19 +39,23 @@ const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
   return frame.settings ? *frame.settings : kDefaultSettings;
 }
 
-RenderPipelineDesc meshPipelineDesc(Format swapchainFormat, Format depthFormat,
-                                    ShaderHandle vertexShader,
-                                    ShaderHandle fragmentShader,
-                                    PolygonMode polygonMode) {
+RenderPipelineDesc meshPipelineDesc(
+    Format swapchainFormat, Format depthFormat, ShaderHandle vertexShader,
+    ShaderHandle tessControlShader, ShaderHandle tessEvalShader,
+    ShaderHandle fragmentShader, PolygonMode polygonMode,
+    Topology topology = Topology::Triangle, uint32_t patchControlPoints = 0) {
   return RenderPipelineDesc{
       .vertexInput = {},
       .vertexShader = vertexShader,
+      .tessControlShader = tessControlShader,
+      .tessEvalShader = tessEvalShader,
       .fragmentShader = fragmentShader,
       .colorFormats = {swapchainFormat},
       .depthFormat = depthFormat,
       .cullMode = CullMode::Back,
       .polygonMode = polygonMode,
-      .topology = Topology::Triangle,
+      .topology = topology,
+      .patchControlPoints = patchControlPoints,
       .blendEnabled = false,
   };
 }
@@ -158,6 +164,8 @@ OpaqueLayer::OpaqueLayer(GPUDevice &gpu, std::pmr::memory_resource *memory)
       instanceLodCentersInvRadiusSq_(resolveMemoryResource(memory)),
       instanceAlbedoTexIds_(resolveMemoryResource(memory)),
       instanceAutoLodLevels_(resolveMemoryResource(memory)),
+      instanceTessSelection_(resolveMemoryResource(memory)),
+      tessCandidates_(resolveMemoryResource(memory)),
       instanceRemap_(resolveMemoryResource(memory)),
       drawPushConstants_(resolveMemoryResource(memory)),
       drawItems_(resolveMemoryResource(memory)),
@@ -178,15 +186,25 @@ void OpaqueLayer::onDetach() {
   destroyBuffers();
   destroyDepthTexture();
   resetWireframePipelineState();
+  if (nuri::isValid(meshTessPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+    meshTessPipelineHandle_ = {};
+  }
   meshPipeline_.reset();
   computePipeline_.reset();
   meshShader_.reset();
+  meshTessShader_.reset();
   computeShader_.reset();
   meshVertexShader_ = {};
+  meshTessVertexShader_ = {};
+  meshTessControlShader_ = {};
+  meshTessEvalShader_ = {};
   meshFragmentShader_ = {};
   computeShaderHandle_ = {};
   meshFillPipelineHandle_ = {};
+  meshTessPipelineHandle_ = {};
   computePipelineHandle_ = {};
+  tessellationUnsupported_ = false;
   baseMeshFillDraw_ = {};
   renderableTemplates_.clear();
   meshDrawTemplates_.clear();
@@ -194,6 +212,8 @@ void OpaqueLayer::onDetach() {
   batchWriteOffsets_.clear();
   instanceLodCentersInvRadiusSq_.clear();
   instanceAutoLodLevels_.clear();
+  instanceTessSelection_.clear();
+  tessCandidates_.clear();
   cachedScene_ = nullptr;
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
@@ -286,7 +306,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
       const BoundingBox &bounds = renderable->model->bounds();
       const glm::vec3 localCenter = bounds.getCenter();
-      const float localRadius = kBoundsRadiusHalf * glm::length(bounds.getSize());
+      const float localRadius =
+          kBoundsRadiusHalf * glm::length(bounds.getSize());
       const glm::vec3 worldCenter =
           glm::vec3(renderable->modelMatrix * glm::vec4(localCenter, 1.0f));
       const float worldRadius = std::max(
@@ -418,6 +439,23 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       baseDraw = baseMeshWireframeDraw_;
     }
   }
+  const float tessNearDistance =
+      std::max(0.0f, settings.opaque.tessNearDistance);
+  const float tessFarDistance =
+      std::max(settings.opaque.tessFarDistance, tessNearDistance + 1.0e-3f);
+  const float tessFarDistanceSq = tessFarDistance * tessFarDistance;
+  const float tessMinFactor =
+      std::clamp(settings.opaque.tessMinFactor, 1.0f, 64.0f);
+  const float tessMaxFactor =
+      std::clamp(settings.opaque.tessMaxFactor, tessMinFactor, 64.0f);
+  const size_t tessInstanceCap =
+      settings.opaque.tessMaxInstances == kUnlimitedTessInstanceCap
+          ? std::numeric_limits<size_t>::max()
+          : static_cast<size_t>(settings.opaque.tessMaxInstances);
+  const bool tessellationRequested =
+      settings.opaque.enableTessellation && !requestedWireframe &&
+      settings.opaque.forcedMeshLod < 1 && !tessellationUnsupported_ &&
+      nuri::isValid(meshTessPipelineHandle_);
 
   struct BatchEntry {
     DrawItem draw{};
@@ -431,6 +469,29 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   const size_t batchReserve =
       std::min<size_t>(meshDrawTemplates_.size(), kMaxBatchReserve);
   batches.reserve(batchReserve);
+  const auto appendBatch = [&baseDraw, &batches](
+                               RenderPipelineHandle pipeline,
+                               BufferHandle indexBuffer,
+                               uint64_t indexBufferOffset,
+                               const SubmeshLod &lodRange,
+                               uint64_t vertexBufferAddress, size_t count,
+                               size_t firstInstance) {
+    if (count == 0) {
+      return;
+    }
+    BatchEntry entry{};
+    entry.draw = baseDraw;
+    entry.draw.pipeline = pipeline;
+    entry.draw.indexBuffer = indexBuffer;
+    entry.draw.indexBufferOffset = indexBufferOffset;
+    entry.draw.indexCount = lodRange.indexCount;
+    entry.draw.firstIndex = lodRange.indexOffset;
+    entry.draw.vertexOffset = 0;
+    entry.vertexBufferAddress = vertexBufferAddress;
+    entry.instanceCount = count;
+    entry.firstInstance = firstInstance;
+    batches.push_back(entry);
+  };
   std::unordered_map<BatchKey, size_t, BatchKeyHash> batchLookup;
   batchLookup.reserve(batchReserve);
   std::array<float, 3> sortedLodThresholds = {
@@ -516,9 +577,13 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   bool usedUniformFastPath = false;
   bool usedUniformAutoLodFastPath = false;
   bool reusedUniformAutoLodFastPath = false;
+  bool usedUniformAutoLodTessSplit = false;
   std::array<size_t, Submesh::kMaxLodCount> autoLodBucketStarts{};
   std::array<size_t, Submesh::kMaxLodCount> autoLodBucketWrites{};
   std::array<size_t, Submesh::kMaxLodCount> autoLodBucketCounts{};
+  size_t autoLodTessBucketStart = 0;
+  size_t autoLodTessBucketWrite = 0;
+  size_t autoLodTessBucketCount = 0;
   const Submesh *activeFastAutoLodSubmesh = nullptr;
   size_t remapCount = 0;
 
@@ -548,13 +613,14 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     activeFastAutoLodSubmesh = &submesh;
 
     const bool canReuseFastAutoLodCache =
-        autoLodCache_.valid && autoLodCache_.submesh == &submesh &&
+        !tessellationRequested && autoLodCache_.valid &&
+        autoLodCache_.submesh == &submesh &&
         autoLodCache_.instanceCount == instanceCount &&
         autoLodCache_.remapCount == instanceRemap_.size() &&
         nearlyEqualVec3(autoLodCache_.cameraPos, cameraPosition,
-                       kAutoLodCacheEpsilon) &&
+                        kAutoLodCacheEpsilon) &&
         nearlyEqualThresholds(autoLodCache_.thresholds, sortedLodThresholds,
-                             kAutoLodCacheEpsilon);
+                              kAutoLodCacheEpsilon);
 
     if (canReuseFastAutoLodCache) {
       autoLodBucketCounts = autoLodCache_.bucketCounts;
@@ -568,6 +634,13 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       }
       instanceAutoLodLevels_.clear();
       instanceAutoLodLevels_.resize(instanceCount, 0u);
+      if (tessellationRequested) {
+        instanceTessSelection_.clear();
+        instanceTessSelection_.resize(instanceCount, 0u);
+        tessCandidates_.clear();
+        // We gather all near LOD0 candidates before applying the cap.
+        tessCandidates_.reserve(instanceCount);
+      }
 
       const std::array<float, 3> squaredLodThresholds{
           sortedLodThresholds[0] * sortedLodThresholds[0],
@@ -593,8 +666,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         const float dx = cameraX - lodCache.x;
         const float dy = cameraY - lodCache.y;
         const float dz = cameraZ - lodCache.z;
-        const float normalizedDistanceSq =
-            (dx * dx + dy * dy + dz * dz) * lodCache.w;
+        const float worldDistanceSq = dx * dx + dy * dy + dz * dz;
+        const float normalizedDistanceSq = worldDistanceSq * lodCache.w;
 
         uint32_t requestedLod = 0;
         if (normalizedDistanceSq >= squaredLodThresholds[2]) {
@@ -613,31 +686,98 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         instanceAutoLodLevels_[i] = resolvedLod;
         ++autoLodBucketCounts[resolvedLod];
         ++remapCount;
+        if (tessellationRequested && resolvedLod == 0 &&
+            worldDistanceSq <= tessFarDistanceSq) {
+          tessCandidates_.push_back(TessCandidate{
+              .distanceSq = worldDistanceSq,
+              .instanceId = static_cast<uint32_t>(i),
+          });
+        }
+      }
+
+      if (tessellationRequested && !tessCandidates_.empty()) {
+        const auto candidateCloser = [](const TessCandidate &a,
+                                        const TessCandidate &b) {
+          if (a.distanceSq != b.distanceSq) {
+            return a.distanceSq < b.distanceSq;
+          }
+          return a.instanceId < b.instanceId;
+        };
+        const size_t cappedTessCount =
+            std::min(tessInstanceCap, tessCandidates_.size());
+        if (cappedTessCount < tessCandidates_.size()) {
+          std::nth_element(tessCandidates_.begin(),
+                           tessCandidates_.begin() + cappedTessCount,
+                           tessCandidates_.end(), candidateCloser);
+        }
+
+        autoLodTessBucketCount = cappedTessCount;
+        for (size_t i = 0; i < cappedTessCount; ++i) {
+          const uint32_t instanceId = tessCandidates_[i].instanceId;
+          if (instanceId >= instanceTessSelection_.size()) {
+            continue;
+          }
+          instanceTessSelection_[instanceId] = 1u;
+        }
+        if (autoLodBucketCounts[0] >= autoLodTessBucketCount) {
+          autoLodBucketCounts[0] -= autoLodTessBucketCount;
+        } else {
+          autoLodBucketCounts[0] = 0;
+        }
       }
     }
 
     size_t firstInstance = 0;
-    for (uint32_t lod = 0; lod < Submesh::kMaxLodCount; ++lod) {
-      autoLodBucketStarts[lod] = firstInstance;
-      autoLodBucketWrites[lod] = firstInstance;
-      const size_t count = autoLodBucketCounts[lod];
-      if (count == 0) {
-        continue;
-      }
-      const SubmeshLod &lodRange = submesh.lods[lod];
+    if (tessellationRequested) {
+      const SubmeshLod &lod0Range = submesh.lods[0];
+      autoLodBucketStarts[0] = firstInstance;
+      autoLodBucketWrites[0] = firstInstance;
+      appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
+                  templateEntry.indexBufferOffset, lod0Range,
+                  templateEntry.vertexBufferAddress, autoLodBucketCounts[0],
+                  firstInstance);
+      firstInstance += autoLodBucketCounts[0];
 
-      BatchEntry entry{};
-      entry.draw = baseDraw;
-      entry.draw.indexBuffer = templateEntry.indexBuffer;
-      entry.draw.indexBufferOffset = templateEntry.indexBufferOffset;
-      entry.draw.indexCount = lodRange.indexCount;
-      entry.draw.firstIndex = lodRange.indexOffset;
-      entry.draw.vertexOffset = 0;
-      entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
-      entry.instanceCount = count;
-      entry.firstInstance = firstInstance;
-      batches.push_back(entry);
-      firstInstance += count;
+      autoLodTessBucketStart = firstInstance;
+      autoLodTessBucketWrite = firstInstance;
+      appendBatch(meshTessPipelineHandle_, templateEntry.indexBuffer,
+                  templateEntry.indexBufferOffset, lod0Range,
+                  templateEntry.vertexBufferAddress, autoLodTessBucketCount,
+                  firstInstance);
+      if (autoLodTessBucketCount > 0) {
+        usedUniformAutoLodTessSplit = true;
+      }
+      firstInstance += autoLodTessBucketCount;
+
+      for (uint32_t lod = 1; lod < Submesh::kMaxLodCount; ++lod) {
+        autoLodBucketStarts[lod] = firstInstance;
+        autoLodBucketWrites[lod] = firstInstance;
+        const size_t count = autoLodBucketCounts[lod];
+        if (count == 0) {
+          continue;
+        }
+        const SubmeshLod &lodRange = submesh.lods[lod];
+
+        appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
+                    templateEntry.indexBufferOffset, lodRange,
+                    templateEntry.vertexBufferAddress, count, firstInstance);
+        firstInstance += count;
+      }
+    } else {
+      for (uint32_t lod = 0; lod < Submesh::kMaxLodCount; ++lod) {
+        autoLodBucketStarts[lod] = firstInstance;
+        autoLodBucketWrites[lod] = firstInstance;
+        const size_t count = autoLodBucketCounts[lod];
+        if (count == 0) {
+          continue;
+        }
+        const SubmeshLod &lodRange = submesh.lods[lod];
+
+        appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
+                    templateEntry.indexBufferOffset, lodRange,
+                    templateEntry.vertexBufferAddress, count, firstInstance);
+        firstInstance += count;
+      }
     }
 
     if (remapCount > 0) {
@@ -648,7 +788,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   }
 
   if (!usedUniformFastPath && uniformSingleSubmeshPath_ &&
-      !meshDrawTemplates_.empty() && !useAutoLod &&
+      !tessellationRequested && !meshDrawTemplates_.empty() && !useAutoLod &&
       instanceCount == meshDrawTemplates_.size()) {
     NURI_PROFILER_ZONE("OpaqueLayer.batch_build_fast",
                        NURI_PROFILER_COLOR_CMD_DRAW);
@@ -677,16 +817,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       }
 
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
-      BatchEntry entry{};
-      entry.draw = baseDraw;
-      entry.draw.indexBuffer = templateEntry.indexBuffer;
-      entry.draw.indexBufferOffset = templateEntry.indexBufferOffset;
-      entry.draw.indexCount = lodRange.indexCount;
-      entry.draw.firstIndex = lodRange.indexOffset;
-      entry.draw.vertexOffset = 0;
-      entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
-      entry.instanceCount = instanceCount;
-      batches.push_back(entry);
+      appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
+                  templateEntry.indexBufferOffset, lodRange,
+                  templateEntry.vertexBufferAddress, instanceCount, 0);
       remapCount = instanceCount;
       templateBatchIndices_.clear();
       templateBatchIndices_.resize(meshDrawTemplates_.size(), 0u);
@@ -737,8 +870,22 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         }
       }
 
+      RenderPipelineHandle selectedPipeline = baseDraw.pipeline;
+      if (tessellationRequested && *lodIndex == 0 &&
+          templateEntry.instanceIndex < instanceLodCentersInvRadiusSq_.size()) {
+        const glm::vec4 centerInvRadiusSq =
+            instanceLodCentersInvRadiusSq_[templateEntry.instanceIndex];
+        const float dx = cameraPosition.x - centerInvRadiusSq.x;
+        const float dy = cameraPosition.y - centerInvRadiusSq.y;
+        const float dz = cameraPosition.z - centerInvRadiusSq.z;
+        const float distanceSq = dx * dx + dy * dy + dz * dz;
+        if (distanceSq <= tessFarDistanceSq) {
+          selectedPipeline = meshTessPipelineHandle_;
+        }
+      }
+
       const BatchKey key{
-          .pipeline = baseDraw.pipeline,
+          .pipeline = selectedPipeline,
           .indexBuffer = templateEntry.indexBuffer,
           .indexBufferOffset = templateEntry.indexBufferOffset,
           .indexCount = lodRange.indexCount,
@@ -750,6 +897,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       if (it == batchLookup.end()) {
         BatchEntry entry{};
         entry.draw = baseDraw;
+        entry.draw.pipeline = selectedPipeline;
         entry.draw.indexBuffer = templateEntry.indexBuffer;
         entry.draw.indexBufferOffset = templateEntry.indexBufferOffset;
         entry.draw.indexCount = lodRange.indexCount;
@@ -808,9 +956,16 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       for (uint32_t lod = 0; lod < Submesh::kMaxLodCount; ++lod) {
         autoLodBucketWrites[lod] = autoLodBucketStarts[lod];
       }
+      autoLodTessBucketWrite = autoLodTessBucketStart;
       for (uint32_t instanceId = 0; instanceId < instanceCount; ++instanceId) {
         const uint32_t lod = instanceAutoLodLevels_[instanceId];
         if (lod >= Submesh::kMaxLodCount) {
+          continue;
+        }
+        if (usedUniformAutoLodTessSplit && lod == 0 &&
+            instanceId < instanceTessSelection_.size() &&
+            instanceTessSelection_[instanceId] != 0u) {
+          instanceRemap_[autoLodTessBucketWrite++] = instanceId;
           continue;
         }
         const size_t writeOffset = autoLodBucketWrites[lod]++;
@@ -843,6 +998,10 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       constants.instanceBaseMatricesAddress = instanceBaseMatricesAddress;
       constants.instanceCount = static_cast<uint32_t>(instanceCount);
       constants.timeSeconds = static_cast<float>(frame.timeSeconds);
+      constants.tessNearDistance = tessNearDistance;
+      constants.tessFarDistance = tessFarDistance;
+      constants.tessMinFactor = tessMinFactor;
+      constants.tessMaxFactor = tessMaxFactor;
       drawPushConstants_.push_back(constants);
 
       DrawItem draw = batch.draw;
@@ -856,7 +1015,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     NURI_PROFILER_ZONE_END();
   }
 
-  if (usedUniformAutoLodFastPath) {
+  if (usedUniformAutoLodFastPath && !tessellationRequested) {
     updateFastAutoLodCache(activeFastAutoLodSubmesh, cameraPosition,
                            sortedLodThresholds, autoLodBucketCounts, remapCount,
                            instanceCount);
@@ -900,6 +1059,10 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       .instanceBaseMatricesAddress = instanceBaseMatricesAddress,
       .instanceCount = static_cast<uint32_t>(instanceCount),
       .timeSeconds = static_cast<float>(frame.timeSeconds),
+      .tessNearDistance = tessNearDistance,
+      .tessFarDistance = tessFarDistance,
+      .tessMinFactor = tessMinFactor,
+      .tessMaxFactor = tessMaxFactor,
   };
 
   uint32_t computeDispatchX = 0;
@@ -936,12 +1099,28 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     NURI_PROFILER_ZONE_END();
   }
 
+  size_t tessellatedDraws = 0;
+  size_t tessellatedInstances = 0;
+  if (nuri::isValid(meshTessPipelineHandle_)) {
+    for (const DrawItem &draw : drawItems_) {
+      if (draw.pipeline.index == meshTessPipelineHandle_.index &&
+          draw.pipeline.generation == meshTessPipelineHandle_.generation) {
+        ++tessellatedDraws;
+        tessellatedInstances += draw.instanceCount;
+      }
+    }
+  }
+
   frame.metrics.opaque.totalInstances = static_cast<uint32_t>(
       std::min(instanceCount, size_t(std::numeric_limits<uint32_t>::max())));
   frame.metrics.opaque.visibleInstances = static_cast<uint32_t>(
       std::min(remapCount, size_t(std::numeric_limits<uint32_t>::max())));
   frame.metrics.opaque.instancedDraws = static_cast<uint32_t>(std::min(
       drawItems_.size(), size_t(std::numeric_limits<uint32_t>::max())));
+  frame.metrics.opaque.tessellatedDraws = static_cast<uint32_t>(
+      std::min(tessellatedDraws, size_t(std::numeric_limits<uint32_t>::max())));
+  frame.metrics.opaque.tessellatedInstances = static_cast<uint32_t>(std::min(
+      tessellatedInstances, size_t(std::numeric_limits<uint32_t>::max())));
   frame.metrics.opaque.computeDispatches = static_cast<uint32_t>(std::min(
       preDispatches_.size(), size_t(std::numeric_limits<uint32_t>::max())));
   frame.metrics.opaque.computeDispatchX = computeDispatchX;
@@ -951,16 +1130,18 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   if (shouldLogStats) {
     NURI_LOG_DEBUG("OpaqueLayer::buildRenderPasses: totalInstances=%zu "
                    "visibleInstances=%zu "
-                   "instancedDraws=%zu",
-                   instanceCount, remapCount, drawItems_.size());
+                   "instancedDraws=%zu tessellatedDraws=%zu "
+                   "tessellatedInstances=%zu",
+                   instanceCount, remapCount, drawItems_.size(),
+                   tessellatedDraws, tessellatedInstances);
   }
 
   const bool shouldLoadColor = settings.skybox.enabled;
   RenderPass pass{};
   pass.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
                 .storeOp = StoreOp::Store,
-                .clearColor = {kClearColorWhite, kClearColorWhite, kClearColorWhite,
-                              kClearColorWhite}};
+                .clearColor = {kClearColorWhite, kClearColorWhite,
+                               kClearColorWhite, kClearColorWhite}};
   pass.depth = {.loadOp = LoadOp::Clear,
                 .storeOp = StoreOp::Store,
                 .clearDepth = kClearDepthOne,
@@ -992,22 +1173,37 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
   auto depthResult = recreateDepthTexture();
   if (depthResult.hasError()) {
     meshShader_.reset();
+    meshTessShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
+    meshTessVertexShader_ = {};
+    meshTessControlShader_ = {};
+    meshTessEvalShader_ = {};
     meshFragmentShader_ = {};
     computeShaderHandle_ = {};
+    meshTessPipelineHandle_ = {};
+    tessellationUnsupported_ = false;
     return depthResult;
   }
 
   auto pipelineResult = createPipelines();
   if (pipelineResult.hasError()) {
+    if (nuri::isValid(meshTessPipelineHandle_)) {
+      gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+    }
     meshShader_.reset();
+    meshTessShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
+    meshTessVertexShader_ = {};
+    meshTessControlShader_ = {};
+    meshTessEvalShader_ = {};
     meshFragmentShader_ = {};
     computeShaderHandle_ = {};
     meshFillPipelineHandle_ = {};
+    meshTessPipelineHandle_ = {};
     computePipelineHandle_ = {};
+    tessellationUnsupported_ = false;
     destroyDepthTexture();
     return pipelineResult;
   }
@@ -1341,11 +1537,20 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene) {
 
 Result<bool, std::string> OpaqueLayer::createShaders() {
   meshShader_ = Shader::create("main", gpu_);
+  meshTessShader_ = Shader::create("main_tess", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
-  if (!meshShader_ || !computeShader_) {
+  if (!meshShader_ || !meshTessShader_ || !computeShader_) {
     return Result<bool, std::string>::makeError(
         "OpaqueLayer::createShaders: failed to create shader objects");
   }
+
+  meshVertexShader_ = {};
+  meshTessVertexShader_ = {};
+  meshTessControlShader_ = {};
+  meshTessEvalShader_ = {};
+  meshFragmentShader_ = {};
+  computeShaderHandle_ = {};
+  tessellationUnsupported_ = false;
 
   struct ShaderSpec {
     Shader *shader = nullptr;
@@ -1374,6 +1579,40 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
     *spec.outHandle = compileResult.value();
   }
 
+  const std::array<ShaderSpec, 3> tessShaderSpecs = {
+      ShaderSpec{meshTessShader_.get(), "assets/shaders/main_tess.vert",
+                 ShaderStage::Vertex, &meshTessVertexShader_},
+      ShaderSpec{meshTessShader_.get(), "assets/shaders/main.tesc",
+                 ShaderStage::TessControl, &meshTessControlShader_},
+      ShaderSpec{meshTessShader_.get(), "assets/shaders/main.tese",
+                 ShaderStage::TessEval, &meshTessEvalShader_},
+  };
+  for (const ShaderSpec &spec : tessShaderSpecs) {
+    if (!spec.shader || !spec.outHandle) {
+      tessellationUnsupported_ = true;
+      meshTessVertexShader_ = {};
+      meshTessControlShader_ = {};
+      meshTessEvalShader_ = {};
+      NURI_LOG_WARNING(
+          "OpaqueLayer::createShaders: invalid tessellation shader spec");
+      break;
+    }
+
+    auto compileResult = spec.shader->compileFromFile(spec.path, spec.stage);
+    if (compileResult.hasError()) {
+      tessellationUnsupported_ = true;
+      meshTessVertexShader_ = {};
+      meshTessControlShader_ = {};
+      meshTessEvalShader_ = {};
+      NURI_LOG_WARNING("OpaqueLayer::createShaders: Tessellation shader path "
+                       "'%.*s' failed, fallback to non-tessellation path: %s",
+                       static_cast<int>(spec.path.size()), spec.path.data(),
+                       compileResult.error().c_str());
+      break;
+    }
+    *spec.outHandle = compileResult.value();
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1389,7 +1628,7 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
                                  ? gpu_.getTextureFormat(depthTexture_)
                                  : Format::D32_FLOAT;
   const RenderPipelineDesc meshDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_,
+      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {},
       meshFragmentShader_, PolygonMode::Fill);
   auto meshResult =
       meshPipeline_->createRenderPipeline(meshDesc, "opaque_mesh");
@@ -1397,6 +1636,30 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
     return Result<bool, std::string>::makeError(meshResult.error());
   }
   meshFillPipelineHandle_ = meshPipeline_->getRenderPipeline();
+  meshTessPipelineHandle_ = {};
+
+  const bool canCreateTessPipeline =
+      !tessellationUnsupported_ && nuri::isValid(meshTessVertexShader_) &&
+      nuri::isValid(meshTessControlShader_) &&
+      nuri::isValid(meshTessEvalShader_) && nuri::isValid(meshFragmentShader_);
+  if (canCreateTessPipeline) {
+    const RenderPipelineDesc tessDesc = meshPipelineDesc(
+        gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
+        meshTessControlShader_, meshTessEvalShader_, meshFragmentShader_,
+        PolygonMode::Fill, Topology::Patch, kTessellationPatchControlPoints);
+    auto tessResult = gpu_.createRenderPipeline(tessDesc, "opaque_mesh_tess");
+    if (tessResult.hasError()) {
+      tessellationUnsupported_ = true;
+      meshTessPipelineHandle_ = {};
+      NURI_LOG_WARNING("OpaqueLayer::createPipelines: Tessellation pipeline "
+                       "failed, fallback to non-tessellation path: %s",
+                       tessResult.error().c_str());
+    } else {
+      meshTessPipelineHandle_ = tessResult.value();
+    }
+  } else {
+    tessellationUnsupported_ = true;
+  }
 
   const ComputePipelineDesc computeDesc{
       .computeShader = computeShaderHandle_,
@@ -1404,6 +1667,10 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
   auto computeResult = computePipeline_->createComputePipeline(
       computeDesc, "opaque_instance_compute");
   if (computeResult.hasError()) {
+    if (nuri::isValid(meshTessPipelineHandle_)) {
+      gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+      meshTessPipelineHandle_ = {};
+    }
     return Result<bool, std::string>::makeError(computeResult.error());
   }
   computePipelineHandle_ = computePipeline_->getComputePipeline();
@@ -1431,7 +1698,7 @@ Result<bool, std::string> OpaqueLayer::ensureWireframePipeline() {
                                  ? gpu_.getTextureFormat(depthTexture_)
                                  : Format::D32_FLOAT;
   const RenderPipelineDesc wireframeDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_,
+      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {},
       meshFragmentShader_, PolygonMode::Line);
 
   auto pipelineResult =

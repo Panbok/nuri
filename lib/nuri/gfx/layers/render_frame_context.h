@@ -21,6 +21,13 @@ struct RenderSettings {
     bool enableMeshLod = true;
     int32_t forcedMeshLod = -1;
     glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
+    bool enableTessellation = false;
+    float tessNearDistance = 1.0f;
+    float tessFarDistance = 8.0f;
+    float tessMinFactor = 1.0f;
+    float tessMaxFactor = 6.0f;
+    // 0 means "no cap".
+    uint32_t tessMaxInstances = 256;
   };
 
   struct DebugSettings {
@@ -45,6 +52,8 @@ struct OpaqueFrameMetrics {
   uint32_t totalInstances = 0;
   uint32_t visibleInstances = 0;
   uint32_t instancedDraws = 0;
+  uint32_t tessellatedDraws = 0;
+  uint32_t tessellatedInstances = 0;
   uint32_t computeDispatches = 0;
   uint32_t computeDispatchX = 0;
 };

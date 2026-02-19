@@ -64,7 +64,13 @@ private:
     uint64_t instanceBaseMatricesAddress = 0;
     uint32_t instanceCount = 0;
     float timeSeconds = 0.0f;
+    float tessNearDistance = 1.0f;
+    float tessFarDistance = 8.0f;
+    float tessMinFactor = 1.0f;
+    float tessMaxFactor = 6.0f;
   };
+  static_assert(sizeof(PushConstants) <= 128,
+                "OpaqueLayer::PushConstants exceeds Vulkan minimum guarantee");
 
   struct RenderableTemplate {
     const OpaqueRenderable *renderable = nullptr;
@@ -78,6 +84,11 @@ private:
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
     uint64_t vertexBufferAddress = 0;
+  };
+
+  struct TessCandidate {
+    float distanceSq = 0.0f;
+    uint32_t instanceId = 0;
   };
 
   struct DynamicBufferSlot {
@@ -115,6 +126,7 @@ private:
 
   GPUDevice &gpu_;
   std::unique_ptr<Shader> meshShader_;
+  std::unique_ptr<Shader> meshTessShader_;
   std::unique_ptr<Shader> computeShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
   std::unique_ptr<Pipeline> computePipeline_;
@@ -127,9 +139,13 @@ private:
   TextureHandle depthTexture_{};
 
   ShaderHandle meshVertexShader_{};
+  ShaderHandle meshTessVertexShader_{};
+  ShaderHandle meshTessControlShader_{};
+  ShaderHandle meshTessEvalShader_{};
   ShaderHandle meshFragmentShader_{};
   ShaderHandle computeShaderHandle_{};
   RenderPipelineHandle meshFillPipelineHandle_{};
+  RenderPipelineHandle meshTessPipelineHandle_{};
   RenderPipelineHandle meshWireframePipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
 
@@ -138,6 +154,7 @@ private:
   size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
   size_t instanceMetaBufferCapacityBytes_ = 0;
   bool initialized_ = false;
+  bool tessellationUnsupported_ = false;
   bool wireframePipelineInitialized_ = false;
   bool wireframePipelineUnsupported_ = false;
 
@@ -167,6 +184,8 @@ private:
   std::pmr::vector<glm::vec4> instanceLodCentersInvRadiusSq_;
   std::pmr::vector<uint32_t> instanceAlbedoTexIds_;
   std::pmr::vector<uint32_t> instanceAutoLodLevels_;
+  std::pmr::vector<uint8_t> instanceTessSelection_;
+  std::pmr::vector<TessCandidate> tessCandidates_;
   std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
