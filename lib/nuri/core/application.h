@@ -84,7 +84,6 @@ private:
 
   LogLifetimeGuard logLifetimeGuard_;
   ApplicationConfig appConfig_{};
-  std::string title_;
   std::int32_t width_;
   std::int32_t height_;
   WindowMode windowMode_ = WindowMode::Windowed;

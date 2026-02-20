@@ -21,7 +21,8 @@ constexpr std::string_view kDefaultOpaqueOverlayGeometryShader =
 constexpr std::string_view kDefaultOpaqueOverlayFragmentShader =
     "mesh_debug_overlay.frag";
 constexpr std::string_view kDefaultConfigPath = "app.config.json";
-constexpr std::string_view kAppConfigEnvVar = "NURI_APP_CONFIG";
+constexpr const char kAppConfigEnvVarCStr[] = "NURI_APP_CONFIG";
+constexpr std::string_view kAppConfigEnvVar = kAppConfigEnvVarCStr;
 
 constexpr std::array<std::string_view, 3> kRootObjectKeys = {"window", "roots",
                                                              "shaders"};
@@ -635,7 +636,7 @@ Result<RuntimeConfig, std::string> loadRuntimeConfigFromEnvOrDefault() {
   char *envConfigPathRaw = nullptr;
   size_t envConfigPathSize = 0;
   const int envReadError =
-      _dupenv_s(&envConfigPathRaw, &envConfigPathSize, kAppConfigEnvVar.data());
+      _dupenv_s(&envConfigPathRaw, &envConfigPathSize, kAppConfigEnvVarCStr);
   std::unique_ptr<char, CFreeDeleter> envConfigPath(envConfigPathRaw);
   if (envReadError != 0) {
     return makeError<RuntimeConfig>("Failed to read environment variable '" +
@@ -648,7 +649,7 @@ Result<RuntimeConfig, std::string> loadRuntimeConfigFromEnvOrDefault() {
     return loadRuntimeConfig(std::filesystem::path{envConfigPath.get()});
   }
 #else
-  const char *envConfigPath = std::getenv(kAppConfigEnvVar.data());
+  const char *envConfigPath = std::getenv(kAppConfigEnvVarCStr);
   if (envConfigPath != nullptr && envConfigPath[0] != '\0') {
     return loadRuntimeConfig(std::filesystem::path{envConfigPath});
   }

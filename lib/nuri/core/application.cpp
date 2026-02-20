@@ -30,14 +30,14 @@ LogConfig Application::makeDefaultLogConfig() {
 
 Application::Application(const ApplicationConfig &config)
     : logLifetimeGuard_(makeDefaultLogConfig()), appConfig_(config),
-      title_(appConfig_.title), width_(appConfig_.width),
-      height_(appConfig_.height), windowMode_(appConfig_.windowMode),
+      width_(appConfig_.width), height_(appConfig_.height),
+      windowMode_(appConfig_.windowMode),
       layerStack_(&layerMemory_),
       eventManager_(eventMemory_), input_(eventManager_) {
   inputDispatchSubscription_ = eventManager_.subscribe<InputEvent>(
       EventChannel::Input, &Application::dispatchInputEvent, this);
 
-  window_ = Window::create(title_, width_, height_, windowMode_);
+  window_ = Window::create(appConfig_.title, width_, height_, windowMode_);
   NURI_ASSERT(window_ != nullptr, "Failed to create window");
   window_->bindEventManager(&eventManager_);
 

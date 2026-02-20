@@ -179,9 +179,10 @@ Result<bool, std::string> SkyboxLayer::createShaders() {
   };
 
   for (const ShaderSpec &spec : shaderSpecs) {
-    if (!spec.shader || !spec.outHandle || !spec.path) {
+    if (!spec.shader || !spec.outHandle || !spec.path ||
+        spec.path->string().empty()) {
       return Result<bool, std::string>::makeError(
-          "SkyboxLayer::createShaders: invalid shader spec");
+          "SkyboxLayer::createShaders: empty shader path");
     }
     const std::string shaderPath = spec.path->string();
     auto compileResult =

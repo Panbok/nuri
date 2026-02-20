@@ -43,6 +43,12 @@ Result<bool, std::string> DebugLayer::createGridShaders() {
     return Result<bool, std::string>::makeResult(true);
   }
 
+  if (config_.vertex.empty() || config_.fragment.empty()) {
+    return Result<bool, std::string>::makeError(
+        "DebugLayer::createGridShaders: vertex or fragment shader path is "
+        "empty");
+  }
+
   gridShader_ = Shader::create("debug_grid", gpu_);
   if (!gridShader_) {
     return Result<bool, std::string>::makeError(
@@ -80,7 +86,8 @@ Result<bool, std::string> DebugLayer::ensureGridPipeline(Format colorFormat,
     return shaderResult;
   }
 
-  if (nuri::isValid(gridPipelineHandle_) && gridPipelineColorFormat_ == colorFormat &&
+  if (nuri::isValid(gridPipelineHandle_) &&
+      gridPipelineColorFormat_ == colorFormat &&
       gridPipelineDepthFormat_ == depthFormat) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -91,7 +98,8 @@ Result<bool, std::string> DebugLayer::ensureGridPipeline(Format colorFormat,
   gridPipeline_ = Pipeline::create(gpu_);
   if (!gridPipeline_) {
     return Result<bool, std::string>::makeError(
-        "DebugLayer::ensureGridPipeline: failed to create grid pipeline wrapper");
+        "DebugLayer::ensureGridPipeline: failed to create grid pipeline "
+        "wrapper");
   }
 
   const RenderPipelineDesc desc{
@@ -106,7 +114,8 @@ Result<bool, std::string> DebugLayer::ensureGridPipeline(Format colorFormat,
       .blendEnabled = true,
   };
 
-  auto pipelineResult = gridPipeline_->createRenderPipeline(desc, kGridPipelineName);
+  auto pipelineResult =
+      gridPipeline_->createRenderPipeline(desc, kGridPipelineName);
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }
@@ -125,7 +134,8 @@ DebugLayer::buildGridPass(const RenderFrameContext &frame,
   const Format depthFormat =
       hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
 
-  auto pipelineResult = ensureGridPipeline(gpu_.getSwapchainFormat(), depthFormat);
+  auto pipelineResult =
+      ensureGridPipeline(gpu_.getSwapchainFormat(), depthFormat);
   if (pipelineResult.hasError()) {
     return Result<RenderPass, std::string>::makeError(pipelineResult.error());
   }
@@ -188,7 +198,8 @@ void DebugLayer::resetGridState() {
 Result<bool, std::string>
 DebugLayer::appendModelBoundsPass(const RenderFrameContext &frame,
                                   RenderPassList &out) {
-  if (!debugDraw3D_ || !frame.scene || !nuri::isValid(frame.sharedDepthTexture)) {
+  if (!debugDraw3D_ || !frame.scene ||
+      !nuri::isValid(frame.sharedDepthTexture)) {
     return Result<bool, std::string>::makeResult(true);
   }
 
