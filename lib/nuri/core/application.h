@@ -12,7 +12,7 @@
 
 namespace nuri {
 struct NURI_API ApplicationConfig {
-  std::string_view title = "Nuri";
+  std::string title = "Nuri";
   std::int32_t width = 960;
   std::int32_t height = 540;
 
@@ -53,6 +53,7 @@ public:
   }
   inline std::int32_t getWidth() const { return width_; }
   inline std::int32_t getHeight() const { return height_; }
+  const ApplicationConfig &config() const;
 
   Renderer &getRenderer();
   const Renderer &getRenderer() const;
@@ -82,6 +83,7 @@ private:
   bool handleInputEvent(const InputEvent &event);
 
   LogLifetimeGuard logLifetimeGuard_;
+  ApplicationConfig appConfig_{};
   std::string title_;
   std::int32_t width_;
   std::int32_t height_;

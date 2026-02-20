@@ -164,8 +164,10 @@ struct BatchKeyHash {
 
 } // namespace
 
-OpaqueLayer::OpaqueLayer(GPUDevice &gpu, std::pmr::memory_resource *memory)
-    : gpu_(gpu), renderableTemplates_(resolveMemoryResource(memory)),
+OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
+                         std::pmr::memory_resource *memory)
+    : gpu_(gpu), config_(std::move(config)),
+      renderableTemplates_(resolveMemoryResource(memory)),
       meshDrawTemplates_(resolveMemoryResource(memory)),
       templateBatchIndices_(resolveMemoryResource(memory)),
       batchWriteOffsets_(resolveMemoryResource(memory)),
@@ -1722,25 +1724,27 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
 
   struct ShaderSpec {
     Shader *shader = nullptr;
-    std::string_view path{};
+    const std::filesystem::path *path = nullptr;
     ShaderStage stage = ShaderStage::Vertex;
     ShaderHandle *outHandle = nullptr;
   };
   const std::array<ShaderSpec, 3> shaderSpecs = {
-      ShaderSpec{meshShader_.get(), "assets/shaders/main.vert",
-                 ShaderStage::Vertex, &meshVertexShader_},
-      ShaderSpec{meshShader_.get(), "assets/shaders/main.frag",
+      ShaderSpec{meshShader_.get(), &config_.meshVertex, ShaderStage::Vertex,
+                 &meshVertexShader_},
+      ShaderSpec{meshShader_.get(), &config_.meshFragment,
                  ShaderStage::Fragment, &meshFragmentShader_},
-      ShaderSpec{computeShader_.get(), "assets/shaders/duck_instances.comp",
+      ShaderSpec{computeShader_.get(), &config_.computeInstances,
                  ShaderStage::Compute, &computeShaderHandle_},
   };
 
   for (const ShaderSpec &spec : shaderSpecs) {
-    if (!spec.shader || !spec.outHandle) {
+    if (!spec.shader || !spec.outHandle || !spec.path) {
       return Result<bool, std::string>::makeError(
           "OpaqueLayer::createShaders: invalid shader spec");
     }
-    auto compileResult = spec.shader->compileFromFile(spec.path, spec.stage);
+    const std::string shaderPath = spec.path->string();
+    auto compileResult =
+        spec.shader->compileFromFile(shaderPath, spec.stage);
     if (compileResult.hasError()) {
       return Result<bool, std::string>::makeError(compileResult.error());
     }
@@ -1748,15 +1752,15 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
   }
 
   const std::array<ShaderSpec, 3> tessShaderSpecs = {
-      ShaderSpec{meshTessShader_.get(), "assets/shaders/main_tess.vert",
+      ShaderSpec{meshTessShader_.get(), &config_.tessVertex,
                  ShaderStage::Vertex, &meshTessVertexShader_},
-      ShaderSpec{meshTessShader_.get(), "assets/shaders/main.tesc",
+      ShaderSpec{meshTessShader_.get(), &config_.tessControl,
                  ShaderStage::TessControl, &meshTessControlShader_},
-      ShaderSpec{meshTessShader_.get(), "assets/shaders/main.tese",
+      ShaderSpec{meshTessShader_.get(), &config_.tessEval,
                  ShaderStage::TessEval, &meshTessEvalShader_},
   };
   for (const ShaderSpec &spec : tessShaderSpecs) {
-    if (!spec.shader || !spec.outHandle) {
+    if (!spec.shader || !spec.outHandle || !spec.path) {
       tessellationUnsupported_ = true;
       meshTessVertexShader_ = {};
       meshTessControlShader_ = {};
@@ -1766,16 +1770,17 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
       break;
     }
 
-    auto compileResult = spec.shader->compileFromFile(spec.path, spec.stage);
+    const std::string shaderPath = spec.path->string();
+    auto compileResult =
+        spec.shader->compileFromFile(shaderPath, spec.stage);
     if (compileResult.hasError()) {
       tessellationUnsupported_ = true;
       meshTessVertexShader_ = {};
       meshTessControlShader_ = {};
       meshTessEvalShader_ = {};
       NURI_LOG_WARNING("OpaqueLayer::createShaders: Tessellation shader path "
-                       "'%.*s' failed, fallback to non-tessellation path: %s",
-                       static_cast<int>(spec.path.size()), spec.path.data(),
-                       compileResult.error().c_str());
+                       "'%s' failed, fallback to non-tessellation path: %s",
+                       shaderPath.c_str(), compileResult.error().c_str());
       break;
     }
     *spec.outHandle = compileResult.value();
@@ -1790,15 +1795,13 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
   }
 
   const std::array<ShaderSpec, 2> overlayShaderSpecs = {
-      ShaderSpec{meshDebugOverlayShader_.get(),
-                 "assets/shaders/mesh_debug_overlay.geom",
+      ShaderSpec{meshDebugOverlayShader_.get(), &config_.overlayGeometry,
                  ShaderStage::Geometry, &meshDebugOverlayGeometryShader_},
-      ShaderSpec{meshDebugOverlayShader_.get(),
-                 "assets/shaders/mesh_debug_overlay.frag",
+      ShaderSpec{meshDebugOverlayShader_.get(), &config_.overlayFragment,
                  ShaderStage::Fragment, &meshDebugOverlayFragmentShader_},
   };
   for (const ShaderSpec &spec : overlayShaderSpecs) {
-    if (!spec.shader || !spec.outHandle) {
+    if (!spec.shader || !spec.outHandle || !spec.path) {
       gsOverlayPipelineUnsupported_ = true;
       gsTessOverlayPipelineUnsupported_ = true;
       meshDebugOverlayGeometryShader_ = {};
@@ -1807,16 +1810,17 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
           "OpaqueLayer::createShaders: invalid debug overlay shader spec");
       break;
     }
-    auto compileResult = spec.shader->compileFromFile(spec.path, spec.stage);
+    const std::string shaderPath = spec.path->string();
+    auto compileResult =
+        spec.shader->compileFromFile(shaderPath, spec.stage);
     if (compileResult.hasError()) {
       gsOverlayPipelineUnsupported_ = true;
       gsTessOverlayPipelineUnsupported_ = true;
       meshDebugOverlayGeometryShader_ = {};
       meshDebugOverlayFragmentShader_ = {};
       NURI_LOG_WARNING("OpaqueLayer::createShaders: Debug overlay shader path "
-                       "'%.*s' failed, fallback to line pipelines: %s",
-                       static_cast<int>(spec.path.size()), spec.path.data(),
-                       compileResult.error().c_str());
+                       "'%s' failed, fallback to line pipelines: %s",
+                       shaderPath.c_str(), compileResult.error().c_str());
       break;
     }
     *spec.outHandle = compileResult.value();

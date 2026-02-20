@@ -2,13 +2,17 @@
 
 #include <memory>
 #include <memory_resource>
+#include <utility>
 
 #include "nuri/core/layer.h"
+#include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 
 #include <glm/glm.hpp>
 
 namespace nuri {
+
+using DebugLayerConfig = RuntimeDebugShaderConfig;
 
 class DebugDraw3D;
 class GPUDevice;
@@ -17,8 +21,9 @@ class Shader;
 
 class NURI_API DebugLayer final : public Layer {
 public:
-  explicit DebugLayer(GPUDevice &gpu, std::pmr::memory_resource *memory =
-                                          std::pmr::get_default_resource());
+  explicit DebugLayer(
+      GPUDevice &gpu, DebugLayerConfig config,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~DebugLayer() override;
 
   DebugLayer(const DebugLayer &) = delete;
@@ -27,9 +32,9 @@ public:
   DebugLayer &operator=(DebugLayer &&) = delete;
 
   static std::unique_ptr<DebugLayer>
-  create(GPUDevice &gpu,
+  create(GPUDevice &gpu, DebugLayerConfig config,
          std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
-    return std::make_unique<DebugLayer>(gpu, memory);
+    return std::make_unique<DebugLayer>(gpu, std::move(config), memory);
   }
 
   void onDetach() override;
@@ -54,6 +59,7 @@ private:
   void resetGridState();
 
   GPUDevice &gpu_;
+  DebugLayerConfig config_{};
   std::unique_ptr<DebugDraw3D> debugDraw3D_;
   std::unique_ptr<Shader> gridShader_;
   std::unique_ptr<Pipeline> gridPipeline_;

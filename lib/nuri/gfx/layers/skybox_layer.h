@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/core/layer.h"
+#include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline.h"
@@ -10,14 +11,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 #include <glm/glm.hpp>
 
 namespace nuri {
 
+using SkyboxLayerConfig = RuntimeSkyboxShaderConfig;
+
 class NURI_API SkyboxLayer final : public Layer {
 public:
-  explicit SkyboxLayer(GPUDevice &gpu);
+  explicit SkyboxLayer(GPUDevice &gpu, SkyboxLayerConfig config);
   ~SkyboxLayer() override;
 
   SkyboxLayer(const SkyboxLayer &) = delete;
@@ -25,8 +29,9 @@ public:
   SkyboxLayer(SkyboxLayer &&) = delete;
   SkyboxLayer &operator=(SkyboxLayer &&) = delete;
 
-  static std::unique_ptr<SkyboxLayer> create(GPUDevice &gpu) {
-    return std::make_unique<SkyboxLayer>(gpu);
+  static std::unique_ptr<SkyboxLayer> create(GPUDevice &gpu,
+                                             SkyboxLayerConfig config) {
+    return std::make_unique<SkyboxLayer>(gpu, std::move(config));
   }
 
   void onAttach() override;
@@ -65,6 +70,7 @@ private:
   void destroyFrameBuffer();
 
   GPUDevice &gpu_;
+  SkyboxLayerConfig config_{};
   std::unique_ptr<Shader> skyboxShader_;
   std::unique_ptr<Pipeline> skyboxPipeline_;
   std::unique_ptr<Buffer> frameBuffer_;

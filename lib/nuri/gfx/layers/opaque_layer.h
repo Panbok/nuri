@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/core/layer.h"
+#include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline.h"
@@ -14,16 +15,20 @@
 #include <limits>
 #include <memory>
 #include <memory_resource>
+#include <utility>
 #include <vector>
 
 #include <glm/glm.hpp>
 
 namespace nuri {
 
+using OpaqueLayerConfig = RuntimeOpaqueShaderConfig;
+
 class NURI_API OpaqueLayer final : public Layer {
 public:
-  explicit OpaqueLayer(GPUDevice &gpu, std::pmr::memory_resource *memory =
-                                           std::pmr::get_default_resource());
+  explicit OpaqueLayer(
+      GPUDevice &gpu, OpaqueLayerConfig config,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~OpaqueLayer() override;
 
   OpaqueLayer(const OpaqueLayer &) = delete;
@@ -32,9 +37,9 @@ public:
   OpaqueLayer &operator=(OpaqueLayer &&) = delete;
 
   static std::unique_ptr<OpaqueLayer>
-  create(GPUDevice &gpu,
+  create(GPUDevice &gpu, OpaqueLayerConfig config,
          std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
-    return std::make_unique<OpaqueLayer>(gpu, memory);
+    return std::make_unique<OpaqueLayer>(gpu, std::move(config), memory);
   }
 
   void onAttach() override;
@@ -129,6 +134,7 @@ private:
   void destroyBuffers();
 
   GPUDevice &gpu_;
+  OpaqueLayerConfig config_{};
   std::unique_ptr<Shader> meshShader_;
   std::unique_ptr<Shader> meshTessShader_;
   std::unique_ptr<Shader> meshDebugOverlayShader_;

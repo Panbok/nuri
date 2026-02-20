@@ -56,9 +56,13 @@ void main() {
       dot(inWorldNormal[1], inWorldNormal[1]) < 1.0e-6 ||
       dot(inWorldNormal[2], inWorldNormal[2]) < 1.0e-6;
 
-  const vec3 n0 = normalize(inWorldNormal[0]);
-  const vec3 n1 = normalize(inWorldNormal[1]);
-  const vec3 n2 = normalize(inWorldNormal[2]);
+  const vec3 fallbackNormal = vec3(0.0, 1.0, 0.0);
+  const vec3 n0 =
+      hasDegenerateNormals ? fallbackNormal : normalize(inWorldNormal[0]);
+  const vec3 n1 =
+      hasDegenerateNormals ? fallbackNormal : normalize(inWorldNormal[1]);
+  const vec3 n2 =
+      hasDegenerateNormals ? fallbackNormal : normalize(inWorldNormal[2]);
 
   const vec3 linearPos = p0 * bary.x + p1 * bary.y + p2 * bary.z;
   const vec3 linearNormal = normalize(n0 * bary.x + n1 * bary.y + n2 * bary.z);

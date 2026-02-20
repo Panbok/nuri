@@ -1,0 +1,14 @@
+{
+  "window": {
+    "title": "Nuri",
+    "width": 1920,
+    "height": 1080,
+    "mode": "windowed"
+  },
+  "roots": {
+    "assets": "assets",
+    "shaders": "assets/shaders",
+    "models": "assets/models",
+    "textures": "assets/textures"
+  }
+}

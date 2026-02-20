@@ -29,9 +29,10 @@ LogConfig Application::makeDefaultLogConfig() {
 }
 
 Application::Application(const ApplicationConfig &config)
-    : logLifetimeGuard_(makeDefaultLogConfig()), title_(config.title),
-      width_(config.width), height_(config.height),
-      windowMode_(config.windowMode), layerStack_(&layerMemory_),
+    : logLifetimeGuard_(makeDefaultLogConfig()), appConfig_(config),
+      title_(appConfig_.title), width_(appConfig_.width),
+      height_(appConfig_.height), windowMode_(appConfig_.windowMode),
+      layerStack_(&layerMemory_),
       eventManager_(eventMemory_), input_(eventManager_) {
   inputDispatchSubscription_ = eventManager_.subscribe<InputEvent>(
       EventChannel::Input, &Application::dispatchInputEvent, this);
@@ -182,6 +183,8 @@ const EventManager &Application::getEventManager() const {
 InputSystem &Application::getInput() { return input_; }
 
 const InputSystem &Application::getInput() const { return input_; }
+
+const ApplicationConfig &Application::config() const { return appConfig_; }
 
 bool Application::dispatchInputEvent(const InputEvent &event, void *user) {
   if (!user) {

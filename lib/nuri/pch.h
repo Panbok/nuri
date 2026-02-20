@@ -21,6 +21,7 @@
 #include <memory_resource>
 #include <mutex>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -44,6 +45,8 @@
 #else
 #include <implot/implot.h>
 #endif
+
+#include <yyjson.h>
 
 #if __has_include(<meshoptimizer.h>)
 #include <meshoptimizer.h>

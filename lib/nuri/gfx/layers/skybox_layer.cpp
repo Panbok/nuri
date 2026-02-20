@@ -13,7 +13,8 @@ constexpr uint32_t kSkyboxVertexCount = 36;
 
 } // namespace
 
-SkyboxLayer::SkyboxLayer(GPUDevice &gpu) : gpu_(gpu) {}
+SkyboxLayer::SkyboxLayer(GPUDevice &gpu, SkyboxLayerConfig config)
+    : gpu_(gpu), config_(std::move(config)) {}
 
 SkyboxLayer::~SkyboxLayer() { onDetach(); }
 
@@ -166,23 +167,25 @@ Result<bool, std::string> SkyboxLayer::createShaders() {
   skyboxShader_ = Shader::create("skybox", gpu_);
   struct ShaderSpec {
     Shader *shader = nullptr;
-    std::string_view path{};
+    const std::filesystem::path *path = nullptr;
     ShaderStage stage = ShaderStage::Vertex;
     ShaderHandle *outHandle = nullptr;
   };
   const std::array<ShaderSpec, 2> shaderSpecs = {
-      ShaderSpec{skyboxShader_.get(), "assets/shaders/skybox.vert",
-                 ShaderStage::Vertex, &skyboxVertexShader_},
-      ShaderSpec{skyboxShader_.get(), "assets/shaders/skybox.frag",
-                 ShaderStage::Fragment, &skyboxFragmentShader_},
+      ShaderSpec{skyboxShader_.get(), &config_.vertex, ShaderStage::Vertex,
+                 &skyboxVertexShader_},
+      ShaderSpec{skyboxShader_.get(), &config_.fragment, ShaderStage::Fragment,
+                 &skyboxFragmentShader_},
   };
 
   for (const ShaderSpec &spec : shaderSpecs) {
-    if (!spec.shader || !spec.outHandle) {
+    if (!spec.shader || !spec.outHandle || !spec.path) {
       return Result<bool, std::string>::makeError(
           "SkyboxLayer::createShaders: invalid shader spec");
     }
-    auto compileResult = spec.shader->compileFromFile(spec.path, spec.stage);
+    const std::string shaderPath = spec.path->string();
+    auto compileResult =
+        spec.shader->compileFromFile(shaderPath, spec.stage);
     if (compileResult.hasError()) {
       return Result<bool, std::string>::makeError(compileResult.error());
     }

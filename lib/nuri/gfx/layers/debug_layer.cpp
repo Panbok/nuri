@@ -13,18 +13,17 @@ namespace {
 constexpr uint32_t kGridPassDebugColor = 0xff66aaff;
 constexpr uint32_t kGridDrawDebugColor = 0xff66aaff;
 constexpr uint32_t kGridVertexCount = 6;
-constexpr std::string_view kGridVertexShaderPath = "assets/shaders/grid.vert";
-constexpr std::string_view kGridFragmentShaderPath = "assets/shaders/grid.frag";
 constexpr std::string_view kGridPipelineName = "debug_grid";
 constexpr std::string_view kGridPassLabel = "DebugGrid Pass";
 constexpr std::string_view kGridDrawLabel = "DebugGrid Draw";
 
 } // namespace
 
-DebugLayer::DebugLayer(GPUDevice &gpu, std::pmr::memory_resource *memory)
-    : gpu_(gpu), debugDraw3D_(std::make_unique<DebugDraw3D>(
-                      gpu, memory != nullptr ? memory
-                                             : std::pmr::get_default_resource())) {
+DebugLayer::DebugLayer(GPUDevice &gpu, DebugLayerConfig config,
+                       std::pmr::memory_resource *memory)
+    : gpu_(gpu), config_(std::move(config)),
+      debugDraw3D_(std::make_unique<DebugDraw3D>(
+          gpu, memory != nullptr ? memory : std::pmr::get_default_resource())) {
 }
 
 DebugLayer::~DebugLayer() { onDetach(); }
@@ -50,16 +49,18 @@ Result<bool, std::string> DebugLayer::createGridShaders() {
         "DebugLayer::createGridShaders: failed to create grid shader wrapper");
   }
 
+  const std::string vertexShaderPath = config_.vertex.string();
   auto vertexResult =
-      gridShader_->compileFromFile(kGridVertexShaderPath, ShaderStage::Vertex);
+      gridShader_->compileFromFile(vertexShaderPath, ShaderStage::Vertex);
   if (vertexResult.hasError()) {
     gridVertexShader_ = {};
     gridFragmentShader_ = {};
     gridShader_.reset();
     return Result<bool, std::string>::makeError(vertexResult.error());
   }
+  const std::string fragmentShaderPath = config_.fragment.string();
   auto fragmentResult =
-      gridShader_->compileFromFile(kGridFragmentShaderPath, ShaderStage::Fragment);
+      gridShader_->compileFromFile(fragmentShaderPath, ShaderStage::Fragment);
   if (fragmentResult.hasError()) {
     gridVertexShader_ = {};
     gridFragmentShader_ = {};
