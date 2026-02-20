@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -37,7 +38,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <imgui.h>
-
+#include <imgui_internal.h>
 #if __has_include(<implot.h>)
 #include <implot.h>
 #else
