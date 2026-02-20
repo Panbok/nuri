@@ -318,7 +318,8 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
       "Tess Patch (Edges + Heatmap)",
   };
   int debugMode = static_cast<int>(opaque.debugVisualization);
-  debugMode = std::clamp(debugMode, 0, 2);
+  debugMode =
+      std::clamp(debugMode, 0, static_cast<int>(IM_ARRAYSIZE(kDebugModes)) - 1);
   if (ImGui::Combo("Debug Visualization##OpaqueLayer", &debugMode, kDebugModes,
                    IM_ARRAYSIZE(kDebugModes))) {
     opaque.debugVisualization =
