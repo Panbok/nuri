@@ -114,8 +114,7 @@ void drawCameraControllerWidget(CameraSystem &cameraSystem,
 }
 
 bool drawScenePresetWidget(std::span<const char *const> presetNames,
-                           int &selectedIndex,
-                           std::string_view hotkeyHint) {
+                           int &selectedIndex, std::string_view hotkeyHint) {
   if (presetNames.empty()) {
     return false;
   }
@@ -124,12 +123,13 @@ bool drawScenePresetWidget(std::span<const char *const> presetNames,
     return false;
   }
 
-  selectedIndex = std::clamp(selectedIndex, 0,
-                             static_cast<int>(presetNames.size()) - 1);
-  const bool changed = ImGui::Combo("Preset", &selectedIndex,
-                                    presetNames.data(),
-                                    static_cast<int>(presetNames.size()));
-  ImGui::Text("%.*s", static_cast<int>(hotkeyHint.size()), hotkeyHint.data());
+  selectedIndex =
+      std::clamp(selectedIndex, 0, static_cast<int>(presetNames.size()) - 1);
+  const bool changed =
+      ImGui::Combo("Preset", &selectedIndex, presetNames.data(),
+                   static_cast<int>(presetNames.size()));
+  ImGui::TextUnformatted(hotkeyHint.data(),
+                         hotkeyHint.data() + hotkeyHint.size());
   ImGui::End();
   return changed;
 }

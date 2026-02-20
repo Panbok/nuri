@@ -1,3 +1,5 @@
+#include "nuri/pch.h"
+
 #include "nuri/ui/imgui_editor.h"
 
 #include "nuri/core/profiling.h"
@@ -7,25 +9,6 @@
 #include "nuri/platform/imgui_glfw_platform.h"
 #include "nuri/ui/linear_graph.h"
 #include "nuri/utils/fsp_counter.h"
-
-#include <imgui.h>
-#include <imgui_internal.h>
-#if __has_include(<implot.h>)
-#include <implot.h>
-#else
-#include <implot/implot.h>
-#endif
-
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <filesystem>
-#include <fstream>
-#include <string>
-#include <vector>
 
 namespace nuri {
 
@@ -329,7 +312,23 @@ void drawSkyboxSettings(RenderSettings::SkyboxSettings &skybox) {
 
 void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
   ImGui::Checkbox("Enabled##OpaqueLayer", &opaque.enabled);
-  ImGui::Checkbox("Wireframe##OpaqueLayer", &opaque.wireframe);
+  constexpr const char *kDebugModes[] = {
+      "None",
+      "Wire Overlay",
+      "Tess Patch (Edges + Heatmap)",
+  };
+  int debugMode = static_cast<int>(opaque.debugVisualization);
+  debugMode = std::clamp(debugMode, 0, 2);
+  if (ImGui::Combo("Debug Visualization##OpaqueLayer", &debugMode, kDebugModes,
+                   IM_ARRAYSIZE(kDebugModes))) {
+    opaque.debugVisualization =
+        static_cast<OpaqueDebugVisualization>(debugMode);
+  }
+  if (opaque.debugVisualization ==
+      OpaqueDebugVisualization::TessPatchEdgesHeatmap) {
+    ImGui::TextUnformatted(
+        "Patch mode auto-enables tessellation for visualization.");
+  }
 
   ImGui::Separator();
   ImGui::TextUnformatted("Mesh LOD");
@@ -360,9 +359,8 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
                      64.0f, "%.2f");
   ImGui::SliderFloat("Tess Max##OpaqueLayer", &opaque.tessMaxFactor, 1.0f,
                      64.0f, "%.2f");
-  int tessMaxInstances =
-      static_cast<int>(std::min<uint32_t>(opaque.tessMaxInstances,
-                                          kUiMaxTessInstances));
+  int tessMaxInstances = static_cast<int>(
+      std::min<uint32_t>(opaque.tessMaxInstances, kUiMaxTessInstances));
   if (ImGui::SliderInt("Tess Max Inst##OpaqueLayer", &tessMaxInstances, 0,
                        4096)) {
     opaque.tessMaxInstances =
@@ -500,15 +498,18 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
     const float milliseconds = fps > 0.0f ? 1000.0f / fps : 0.0f;
     ImGui::Text("FPS : %i", static_cast<int>(fps));
     ImGui::Text("Ms  : %.1f", milliseconds);
-    ImGui::Text("Inst: %u / %u",
-                frameMetrics.opaque.visibleInstances,
+    ImGui::Text("Inst: %u / %u", frameMetrics.opaque.visibleInstances,
                 frameMetrics.opaque.totalInstances);
     ImGui::Text("Draw: %u (Tess: %u)  Tess Inst: %u",
                 frameMetrics.opaque.instancedDraws,
                 frameMetrics.opaque.tessellatedDraws,
                 frameMetrics.opaque.tessellatedInstances);
-    ImGui::Text("Dispatch: %u x%u",
-                frameMetrics.opaque.computeDispatches,
+    ImGui::Text("Overlay: %u (Fallback: %u)",
+                frameMetrics.opaque.debugOverlayDraws,
+                frameMetrics.opaque.debugOverlayFallbackDraws);
+    ImGui::Text("Patch Heatmap: %u",
+                frameMetrics.opaque.debugPatchHeatmapDraws);
+    ImGui::Text("Dispatch: %u x%u", frameMetrics.opaque.computeDispatches,
                 frameMetrics.opaque.computeDispatchX);
     ImGui::Separator();
 
@@ -622,8 +623,8 @@ struct ImGuiEditor::Impl {
     logUpdateAccumulatorSeconds += std::max(frameDeltaSeconds, 0.0);
     if (logUpdateAccumulatorSeconds >= kLogUpdateIntervalSeconds) {
       logModel.update(logFilterState);
-      logUpdateAccumulatorSeconds = std::fmod(
-          logUpdateAccumulatorSeconds, kLogUpdateIntervalSeconds);
+      logUpdateAccumulatorSeconds =
+          std::fmod(logUpdateAccumulatorSeconds, kLogUpdateIntervalSeconds);
     }
 
 #ifdef IMGUI_HAS_DOCK
