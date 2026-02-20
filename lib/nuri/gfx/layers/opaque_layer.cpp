@@ -20,6 +20,8 @@ constexpr uint32_t kComputeDispatchColor = 0xff33aa33;
 constexpr uint32_t kComputeWorkgroupSize = 32;
 constexpr uint32_t kTessellationPatchControlPoints = 3;
 constexpr uint32_t kUnlimitedTessInstanceCap = 0u;
+constexpr float kOverlayDepthBiasConstant = -1.0f;
+constexpr float kOverlayDepthBiasSlope = -1.0f;
 constexpr uint32_t kAutoLodCacheInvalidationSeed = 1664525u;
 constexpr uint32_t kAutoLodCacheInvalidationMagic = 1013904223u;
 // Phase hash: normalize 24-bit hash to [0, 1] then scale to [0, 2*pi]
@@ -42,13 +44,15 @@ const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
 RenderPipelineDesc meshPipelineDesc(
     Format swapchainFormat, Format depthFormat, ShaderHandle vertexShader,
     ShaderHandle tessControlShader, ShaderHandle tessEvalShader,
-    ShaderHandle fragmentShader, PolygonMode polygonMode,
-    Topology topology = Topology::Triangle, uint32_t patchControlPoints = 0) {
+    ShaderHandle geometryShader, ShaderHandle fragmentShader,
+    PolygonMode polygonMode, Topology topology = Topology::Triangle,
+    uint32_t patchControlPoints = 0, bool blendEnabled = false) {
   return RenderPipelineDesc{
       .vertexInput = {},
       .vertexShader = vertexShader,
       .tessControlShader = tessControlShader,
       .tessEvalShader = tessEvalShader,
+      .geometryShader = geometryShader,
       .fragmentShader = fragmentShader,
       .colorFormats = {swapchainFormat},
       .depthFormat = depthFormat,
@@ -56,8 +60,14 @@ RenderPipelineDesc meshPipelineDesc(
       .polygonMode = polygonMode,
       .topology = topology,
       .patchControlPoints = patchControlPoints,
-      .blendEnabled = false,
+      .blendEnabled = blendEnabled,
   };
+}
+
+bool isTessPipelineHandle(RenderPipelineHandle handle,
+                          RenderPipelineHandle tessPipeline) {
+  return handle.index == tessPipeline.index &&
+         handle.generation == tessPipeline.generation;
 }
 
 DrawItem makeBaseMeshDraw(RenderPipelineHandle pipeline,
@@ -169,6 +179,8 @@ OpaqueLayer::OpaqueLayer(GPUDevice &gpu, std::pmr::memory_resource *memory)
       instanceRemap_(resolveMemoryResource(memory)),
       drawPushConstants_(resolveMemoryResource(memory)),
       drawItems_(resolveMemoryResource(memory)),
+      overlayDrawItems_(resolveMemoryResource(memory)),
+      passDrawItems_(resolveMemoryResource(memory)),
       preDispatches_(resolveMemoryResource(memory)),
       passDependencyBuffers_(resolveMemoryResource(memory)),
       dispatchDependencyBuffers_(resolveMemoryResource(memory)) {}
@@ -185,7 +197,7 @@ void OpaqueLayer::onAttach() {
 void OpaqueLayer::onDetach() {
   destroyBuffers();
   destroyDepthTexture();
-  resetWireframePipelineState();
+  resetOverlayPipelineState();
   if (nuri::isValid(meshTessPipelineHandle_)) {
     gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
     meshTessPipelineHandle_ = {};
@@ -194,18 +206,22 @@ void OpaqueLayer::onDetach() {
   computePipeline_.reset();
   meshShader_.reset();
   meshTessShader_.reset();
+  meshDebugOverlayShader_.reset();
   computeShader_.reset();
   meshVertexShader_ = {};
   meshTessVertexShader_ = {};
   meshTessControlShader_ = {};
   meshTessEvalShader_ = {};
   meshFragmentShader_ = {};
+  meshDebugOverlayGeometryShader_ = {};
+  meshDebugOverlayFragmentShader_ = {};
   computeShaderHandle_ = {};
   meshFillPipelineHandle_ = {};
   meshTessPipelineHandle_ = {};
   computePipelineHandle_ = {};
   tessellationUnsupported_ = false;
   baseMeshFillDraw_ = {};
+  baseMeshWireframeDraw_ = {};
   renderableTemplates_.clear();
   meshDrawTemplates_.clear();
   templateBatchIndices_.clear();
@@ -214,6 +230,14 @@ void OpaqueLayer::onDetach() {
   instanceAutoLodLevels_.clear();
   instanceTessSelection_.clear();
   tessCandidates_.clear();
+  instanceRemap_.clear();
+  drawPushConstants_.clear();
+  drawItems_.clear();
+  overlayDrawItems_.clear();
+  passDrawItems_.clear();
+  preDispatches_.clear();
+  passDependencyBuffers_.clear();
+  dispatchDependencyBuffers_.clear();
   cachedScene_ = nullptr;
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
@@ -428,17 +452,15 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         "OpaqueLayer::buildRenderPasses: invalid GPU buffer address");
   }
 
+  const OpaqueDebugVisualization debugVisualization =
+      settings.opaque.debugVisualization;
+  const bool overlayRequested =
+      debugVisualization != OpaqueDebugVisualization::None;
+  const bool patchHeatmapRequested =
+      debugVisualization == OpaqueDebugVisualization::TessPatchEdgesHeatmap;
+  const uint32_t debugVisualizationMode =
+      static_cast<uint32_t>(debugVisualization);
   DrawItem baseDraw = baseMeshFillDraw_;
-  const bool requestedWireframe = settings.opaque.wireframe;
-  if (requestedWireframe) {
-    auto wireframeResult = ensureWireframePipeline();
-    if (wireframeResult.hasError()) {
-      return Result<bool, std::string>::makeError(wireframeResult.error());
-    }
-    if (wireframeResult.value()) {
-      baseDraw = baseMeshWireframeDraw_;
-    }
-  }
   const float tessNearDistance =
       std::max(0.0f, settings.opaque.tessNearDistance);
   const float tessFarDistance =
@@ -453,7 +475,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
           ? std::numeric_limits<size_t>::max()
           : static_cast<size_t>(settings.opaque.tessMaxInstances);
   const bool tessellationRequested =
-      settings.opaque.enableTessellation && !requestedWireframe &&
+      (settings.opaque.enableTessellation || patchHeatmapRequested) &&
       settings.opaque.forcedMeshLod < 1 && !tessellationUnsupported_ &&
       nuri::isValid(meshTessPipelineHandle_);
 
@@ -1002,6 +1024,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       constants.tessFarDistance = tessFarDistance;
       constants.tessMinFactor = tessMinFactor;
       constants.tessMaxFactor = tessMaxFactor;
+      constants.debugVisualizationMode = debugVisualizationMode;
       drawPushConstants_.push_back(constants);
 
       DrawItem draw = batch.draw;
@@ -1063,6 +1086,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       .tessFarDistance = tessFarDistance,
       .tessMinFactor = tessMinFactor,
       .tessMaxFactor = tessMaxFactor,
+      .debugVisualizationMode = debugVisualizationMode,
   };
 
   uint32_t computeDispatchX = 0;
@@ -1103,13 +1127,134 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   size_t tessellatedInstances = 0;
   if (nuri::isValid(meshTessPipelineHandle_)) {
     for (const DrawItem &draw : drawItems_) {
-      if (draw.pipeline.index == meshTessPipelineHandle_.index &&
-          draw.pipeline.generation == meshTessPipelineHandle_.generation) {
+      if (isTessPipelineHandle(draw.pipeline, meshTessPipelineHandle_)) {
         ++tessellatedDraws;
         tessellatedInstances += draw.instanceCount;
       }
     }
   }
+
+  size_t debugOverlayDraws = 0;
+  size_t debugOverlayFallbackDraws = 0;
+  size_t debugPatchHeatmapDraws = 0;
+  overlayDrawItems_.clear();
+  passDrawItems_.clear();
+  if (overlayRequested && !drawItems_.empty()) {
+    bool gsOverlayAvailable = false;
+    bool gsTessOverlayAvailable = false;
+    bool lineOverlayAvailable = false;
+    bool lineTessOverlayAvailable = false;
+
+    auto gsOverlayResult = ensureGsOverlayPipeline();
+    if (gsOverlayResult.hasError()) {
+      if (!loggedGsOverlayUnsupported_) {
+        loggedGsOverlayUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+                         "GS overlay pipeline: %s",
+                         gsOverlayResult.error().c_str());
+      }
+    } else {
+      gsOverlayAvailable = gsOverlayResult.value();
+    }
+
+    auto gsTessOverlayResult = ensureGsTessOverlayPipeline();
+    if (gsTessOverlayResult.hasError()) {
+      if (!loggedGsTessOverlayUnsupported_) {
+        loggedGsTessOverlayUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+                         "GS tess overlay pipeline: %s",
+                         gsTessOverlayResult.error().c_str());
+      }
+    } else {
+      gsTessOverlayAvailable = gsTessOverlayResult.value();
+    }
+
+    if (!gsOverlayAvailable) {
+      auto lineResult = ensureWireframePipeline();
+      if (lineResult.hasError()) {
+        if (!loggedWireframeFallbackUnsupported_) {
+          loggedWireframeFallbackUnsupported_ = true;
+          NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+                           "line overlay fallback pipeline: %s",
+                           lineResult.error().c_str());
+        }
+      } else {
+        lineOverlayAvailable = lineResult.value();
+      }
+    }
+    if (!gsTessOverlayAvailable) {
+      auto lineTessResult = ensureTessWireframePipeline();
+      if (lineTessResult.hasError()) {
+        if (!loggedTessWireframeFallbackUnsupported_) {
+          loggedTessWireframeFallbackUnsupported_ = true;
+          NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+                           "line tess overlay fallback pipeline: %s",
+                           lineTessResult.error().c_str());
+        }
+      } else {
+        lineTessOverlayAvailable = lineTessResult.value();
+      }
+    }
+
+    overlayDrawItems_.reserve(drawItems_.size());
+    for (const DrawItem &baseItem : drawItems_) {
+      const bool isTessDraw =
+          isTessPipelineHandle(baseItem.pipeline, meshTessPipelineHandle_);
+      RenderPipelineHandle overlayPipeline{};
+      bool usedFallback = false;
+      if (isTessDraw) {
+        if (gsTessOverlayAvailable) {
+          overlayPipeline = meshGsTessOverlayPipelineHandle_;
+        } else if (lineTessOverlayAvailable) {
+          overlayPipeline = meshTessWireframePipelineHandle_;
+          usedFallback = true;
+        }
+      } else {
+        if (gsOverlayAvailable) {
+          overlayPipeline = meshGsOverlayPipelineHandle_;
+        } else if (lineOverlayAvailable) {
+          overlayPipeline = meshWireframePipelineHandle_;
+          usedFallback = true;
+        }
+      }
+
+      if (!nuri::isValid(overlayPipeline)) {
+        continue;
+      }
+
+      DrawItem overlayItem = baseItem;
+      overlayItem.pipeline = overlayPipeline;
+      overlayItem.useDepthState = true;
+      overlayItem.depthState = {.compareOp = CompareOp::LessEqual,
+                                .isDepthWriteEnabled = false};
+      overlayItem.depthBiasEnable = true;
+      overlayItem.depthBiasConstant = kOverlayDepthBiasConstant;
+      overlayItem.depthBiasSlope = kOverlayDepthBiasSlope;
+      overlayItem.depthBiasClamp = 0.0f;
+      if (usedFallback) {
+        overlayItem.debugLabel = isTessDraw ? "OpaqueMeshTessOverlayFallback"
+                                            : "OpaqueMeshOverlayFallback";
+      } else {
+        overlayItem.debugLabel =
+            isTessDraw ? "OpaqueMeshTessOverlay" : "OpaqueMeshOverlay";
+      }
+      overlayDrawItems_.push_back(overlayItem);
+
+      ++debugOverlayDraws;
+      if (usedFallback) {
+        ++debugOverlayFallbackDraws;
+      }
+      if (patchHeatmapRequested && isTessDraw && !usedFallback) {
+        ++debugPatchHeatmapDraws;
+      }
+    }
+  }
+
+  passDrawItems_.reserve(drawItems_.size() + overlayDrawItems_.size());
+  passDrawItems_.insert(passDrawItems_.end(), drawItems_.begin(),
+                        drawItems_.end());
+  passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
+                        overlayDrawItems_.end());
 
   frame.metrics.opaque.totalInstances = static_cast<uint32_t>(
       std::min(instanceCount, size_t(std::numeric_limits<uint32_t>::max())));
@@ -1121,6 +1266,14 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       std::min(tessellatedDraws, size_t(std::numeric_limits<uint32_t>::max())));
   frame.metrics.opaque.tessellatedInstances = static_cast<uint32_t>(std::min(
       tessellatedInstances, size_t(std::numeric_limits<uint32_t>::max())));
+  frame.metrics.opaque.debugOverlayDraws = static_cast<uint32_t>(std::min(
+      debugOverlayDraws, size_t(std::numeric_limits<uint32_t>::max())));
+  frame.metrics.opaque.debugOverlayFallbackDraws =
+      static_cast<uint32_t>(std::min(
+          debugOverlayFallbackDraws,
+          size_t(std::numeric_limits<uint32_t>::max())));
+  frame.metrics.opaque.debugPatchHeatmapDraws = static_cast<uint32_t>(std::min(
+      debugPatchHeatmapDraws, size_t(std::numeric_limits<uint32_t>::max())));
   frame.metrics.opaque.computeDispatches = static_cast<uint32_t>(std::min(
       preDispatches_.size(), size_t(std::numeric_limits<uint32_t>::max())));
   frame.metrics.opaque.computeDispatchX = computeDispatchX;
@@ -1131,9 +1284,11 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     NURI_LOG_DEBUG("OpaqueLayer::buildRenderPasses: totalInstances=%zu "
                    "visibleInstances=%zu "
                    "instancedDraws=%zu tessellatedDraws=%zu "
-                   "tessellatedInstances=%zu",
+                   "tessellatedInstances=%zu overlayDraws=%zu "
+                   "overlayFallbackDraws=%zu",
                    instanceCount, remapCount, drawItems_.size(),
-                   tessellatedDraws, tessellatedInstances);
+                   tessellatedDraws, tessellatedInstances, debugOverlayDraws,
+                   debugOverlayFallbackDraws);
   }
 
   const bool shouldLoadColor = settings.skybox.enabled;
@@ -1151,7 +1306,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       preDispatches_.data(), preDispatches_.size());
   pass.dependencyBuffers = std::span<const BufferHandle>(
       passDependencyBuffers_.data(), passDependencyBuffers_.size());
-  pass.draws = std::span<const DrawItem>(drawItems_.data(), drawItems_.size());
+  pass.draws = std::span<const DrawItem>(passDrawItems_.data(),
+                                         passDrawItems_.size());
   pass.debugLabel = "Opaque Pass";
   pass.debugColor = kOpaquePassDebugColor;
 
@@ -1174,12 +1330,15 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
   if (depthResult.hasError()) {
     meshShader_.reset();
     meshTessShader_.reset();
+    meshDebugOverlayShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
     meshTessVertexShader_ = {};
     meshTessControlShader_ = {};
     meshTessEvalShader_ = {};
     meshFragmentShader_ = {};
+    meshDebugOverlayGeometryShader_ = {};
+    meshDebugOverlayFragmentShader_ = {};
     computeShaderHandle_ = {};
     meshTessPipelineHandle_ = {};
     tessellationUnsupported_ = false;
@@ -1188,17 +1347,21 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
 
   auto pipelineResult = createPipelines();
   if (pipelineResult.hasError()) {
+    resetOverlayPipelineState();
     if (nuri::isValid(meshTessPipelineHandle_)) {
       gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
     }
     meshShader_.reset();
     meshTessShader_.reset();
+    meshDebugOverlayShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
     meshTessVertexShader_ = {};
     meshTessControlShader_ = {};
     meshTessEvalShader_ = {};
     meshFragmentShader_ = {};
+    meshDebugOverlayGeometryShader_ = {};
+    meshDebugOverlayFragmentShader_ = {};
     computeShaderHandle_ = {};
     meshFillPipelineHandle_ = {};
     meshTessPipelineHandle_ = {};
@@ -1538,6 +1701,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene) {
 Result<bool, std::string> OpaqueLayer::createShaders() {
   meshShader_ = Shader::create("main", gpu_);
   meshTessShader_ = Shader::create("main_tess", gpu_);
+  meshDebugOverlayShader_ = Shader::create("mesh_debug_overlay", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
   if (!meshShader_ || !meshTessShader_ || !computeShader_) {
     return Result<bool, std::string>::makeError(
@@ -1549,8 +1713,12 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
   meshTessControlShader_ = {};
   meshTessEvalShader_ = {};
   meshFragmentShader_ = {};
+  meshDebugOverlayGeometryShader_ = {};
+  meshDebugOverlayFragmentShader_ = {};
   computeShaderHandle_ = {};
   tessellationUnsupported_ = false;
+  gsOverlayPipelineUnsupported_ = false;
+  gsTessOverlayPipelineUnsupported_ = false;
 
   struct ShaderSpec {
     Shader *shader = nullptr;
@@ -1613,6 +1781,47 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
     *spec.outHandle = compileResult.value();
   }
 
+  if (!meshDebugOverlayShader_) {
+    gsOverlayPipelineUnsupported_ = true;
+    gsTessOverlayPipelineUnsupported_ = true;
+    NURI_LOG_WARNING("OpaqueLayer::createShaders: failed to create debug "
+                     "overlay shader object, fallback to line pipelines");
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const std::array<ShaderSpec, 2> overlayShaderSpecs = {
+      ShaderSpec{meshDebugOverlayShader_.get(),
+                 "assets/shaders/mesh_debug_overlay.geom",
+                 ShaderStage::Geometry, &meshDebugOverlayGeometryShader_},
+      ShaderSpec{meshDebugOverlayShader_.get(),
+                 "assets/shaders/mesh_debug_overlay.frag",
+                 ShaderStage::Fragment, &meshDebugOverlayFragmentShader_},
+  };
+  for (const ShaderSpec &spec : overlayShaderSpecs) {
+    if (!spec.shader || !spec.outHandle) {
+      gsOverlayPipelineUnsupported_ = true;
+      gsTessOverlayPipelineUnsupported_ = true;
+      meshDebugOverlayGeometryShader_ = {};
+      meshDebugOverlayFragmentShader_ = {};
+      NURI_LOG_WARNING(
+          "OpaqueLayer::createShaders: invalid debug overlay shader spec");
+      break;
+    }
+    auto compileResult = spec.shader->compileFromFile(spec.path, spec.stage);
+    if (compileResult.hasError()) {
+      gsOverlayPipelineUnsupported_ = true;
+      gsTessOverlayPipelineUnsupported_ = true;
+      meshDebugOverlayGeometryShader_ = {};
+      meshDebugOverlayFragmentShader_ = {};
+      NURI_LOG_WARNING("OpaqueLayer::createShaders: Debug overlay shader path "
+                       "'%.*s' failed, fallback to line pipelines: %s",
+                       static_cast<int>(spec.path.size()), spec.path.data(),
+                       compileResult.error().c_str());
+      break;
+    }
+    *spec.outHandle = compileResult.value();
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1629,7 +1838,7 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
                                  : Format::D32_FLOAT;
   const RenderPipelineDesc meshDesc = meshPipelineDesc(
       gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {},
-      meshFragmentShader_, PolygonMode::Fill);
+      {}, meshFragmentShader_, PolygonMode::Fill);
   auto meshResult =
       meshPipeline_->createRenderPipeline(meshDesc, "opaque_mesh");
   if (meshResult.hasError()) {
@@ -1645,7 +1854,7 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
   if (canCreateTessPipeline) {
     const RenderPipelineDesc tessDesc = meshPipelineDesc(
         gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
-        meshTessControlShader_, meshTessEvalShader_, meshFragmentShader_,
+        meshTessControlShader_, meshTessEvalShader_, {}, meshFragmentShader_,
         PolygonMode::Fill, Topology::Patch, kTessellationPatchControlPoints);
     auto tessResult = gpu_.createRenderPipeline(tessDesc, "opaque_mesh_tess");
     if (tessResult.hasError()) {
@@ -1676,7 +1885,7 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
   computePipelineHandle_ = computePipeline_->getComputePipeline();
 
   baseMeshFillDraw_ = makeBaseMeshDraw(meshFillPipelineHandle_, "OpaqueMesh");
-  resetWireframePipelineState();
+  resetOverlayPipelineState();
 
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1699,14 +1908,17 @@ Result<bool, std::string> OpaqueLayer::ensureWireframePipeline() {
                                  : Format::D32_FLOAT;
   const RenderPipelineDesc wireframeDesc = meshPipelineDesc(
       gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {},
-      meshFragmentShader_, PolygonMode::Line);
+      {}, meshFragmentShader_, PolygonMode::Line, Topology::Triangle, 0, true);
 
   auto pipelineResult =
       gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_wireframe");
   if (pipelineResult.hasError()) {
     wireframePipelineUnsupported_ = true;
-    NURI_LOG_WARNING("OpaqueLayer::ensureWireframePipeline: %s",
-                     pipelineResult.error().c_str());
+    if (!loggedWireframeFallbackUnsupported_) {
+      loggedWireframeFallbackUnsupported_ = true;
+      NURI_LOG_WARNING("OpaqueLayer::ensureWireframePipeline: %s",
+                       pipelineResult.error().c_str());
+    }
     return Result<bool, std::string>::makeResult(false);
   }
 
@@ -1720,13 +1932,167 @@ Result<bool, std::string> OpaqueLayer::ensureWireframePipeline() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void OpaqueLayer::resetWireframePipelineState() {
+Result<bool, std::string> OpaqueLayer::ensureTessWireframePipeline() {
+  if (tessWireframePipelineInitialized_ &&
+      nuri::isValid(meshTessWireframePipelineHandle_)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (tessWireframePipelineUnsupported_) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!nuri::isValid(meshTessPipelineHandle_)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  const Format depthFormat = nuri::isValid(depthTexture_)
+                                 ? gpu_.getTextureFormat(depthTexture_)
+                                 : Format::D32_FLOAT;
+  const RenderPipelineDesc wireframeDesc = meshPipelineDesc(
+      gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
+      meshTessControlShader_, meshTessEvalShader_, {}, meshFragmentShader_,
+      PolygonMode::Line, Topology::Patch, kTessellationPatchControlPoints,
+      true);
+
+  auto pipelineResult = gpu_.createRenderPipeline(
+      wireframeDesc, "opaque_mesh_tess_wireframe");
+  if (pipelineResult.hasError()) {
+    tessWireframePipelineUnsupported_ = true;
+    if (!loggedTessWireframeFallbackUnsupported_) {
+      loggedTessWireframeFallbackUnsupported_ = true;
+      NURI_LOG_WARNING("OpaqueLayer::ensureTessWireframePipeline: %s",
+                       pipelineResult.error().c_str());
+    }
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  meshTessWireframePipelineHandle_ = pipelineResult.value();
+  tessWireframePipelineInitialized_ = true;
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueLayer::ensureGsOverlayPipeline() {
+  if (gsOverlayPipelineInitialized_ &&
+      nuri::isValid(meshGsOverlayPipelineHandle_)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (gsOverlayPipelineUnsupported_) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!nuri::isValid(meshDebugOverlayGeometryShader_) ||
+      !nuri::isValid(meshDebugOverlayFragmentShader_)) {
+    gsOverlayPipelineUnsupported_ = true;
+    if (!loggedGsOverlayUnsupported_) {
+      loggedGsOverlayUnsupported_ = true;
+      NURI_LOG_WARNING("OpaqueLayer::ensureGsOverlayPipeline: debug overlay "
+                       "shaders are unavailable, fallback to line overlay");
+    }
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  const Format depthFormat = nuri::isValid(depthTexture_)
+                                 ? gpu_.getTextureFormat(depthTexture_)
+                                 : Format::D32_FLOAT;
+  const RenderPipelineDesc overlayDesc = meshPipelineDesc(
+      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {},
+      meshDebugOverlayGeometryShader_, meshDebugOverlayFragmentShader_,
+      PolygonMode::Fill, Topology::Triangle, 0, true);
+
+  auto pipelineResult =
+      gpu_.createRenderPipeline(overlayDesc, "opaque_mesh_overlay_gs");
+  if (pipelineResult.hasError()) {
+    gsOverlayPipelineUnsupported_ = true;
+    if (!loggedGsOverlayUnsupported_) {
+      loggedGsOverlayUnsupported_ = true;
+      NURI_LOG_WARNING("OpaqueLayer::ensureGsOverlayPipeline: %s",
+                       pipelineResult.error().c_str());
+    }
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  meshGsOverlayPipelineHandle_ = pipelineResult.value();
+  gsOverlayPipelineInitialized_ = true;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueLayer::ensureGsTessOverlayPipeline() {
+  if (gsTessOverlayPipelineInitialized_ &&
+      nuri::isValid(meshGsTessOverlayPipelineHandle_)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (gsTessOverlayPipelineUnsupported_) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!nuri::isValid(meshTessPipelineHandle_)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!nuri::isValid(meshDebugOverlayGeometryShader_) ||
+      !nuri::isValid(meshDebugOverlayFragmentShader_)) {
+    gsTessOverlayPipelineUnsupported_ = true;
+    if (!loggedGsTessOverlayUnsupported_) {
+      loggedGsTessOverlayUnsupported_ = true;
+      NURI_LOG_WARNING("OpaqueLayer::ensureGsTessOverlayPipeline: debug "
+                       "overlay shaders are unavailable, fallback to line "
+                       "overlay");
+    }
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  const Format depthFormat = nuri::isValid(depthTexture_)
+                                 ? gpu_.getTextureFormat(depthTexture_)
+                                 : Format::D32_FLOAT;
+  const RenderPipelineDesc overlayDesc = meshPipelineDesc(
+      gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
+      meshTessControlShader_, meshTessEvalShader_, meshDebugOverlayGeometryShader_,
+      meshDebugOverlayFragmentShader_, PolygonMode::Fill, Topology::Patch,
+      kTessellationPatchControlPoints, true);
+
+  auto pipelineResult =
+      gpu_.createRenderPipeline(overlayDesc, "opaque_mesh_tess_overlay_gs");
+  if (pipelineResult.hasError()) {
+    gsTessOverlayPipelineUnsupported_ = true;
+    if (!loggedGsTessOverlayUnsupported_) {
+      loggedGsTessOverlayUnsupported_ = true;
+      NURI_LOG_WARNING("OpaqueLayer::ensureGsTessOverlayPipeline: %s",
+                       pipelineResult.error().c_str());
+    }
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  meshGsTessOverlayPipelineHandle_ = pipelineResult.value();
+  gsTessOverlayPipelineInitialized_ = true;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+void OpaqueLayer::resetOverlayPipelineState() {
+  if (nuri::isValid(meshGsOverlayPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshGsOverlayPipelineHandle_);
+  }
+  if (nuri::isValid(meshGsTessOverlayPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshGsTessOverlayPipelineHandle_);
+  }
   if (nuri::isValid(meshWireframePipelineHandle_)) {
     gpu_.destroyRenderPipeline(meshWireframePipelineHandle_);
   }
+  if (nuri::isValid(meshTessWireframePipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshTessWireframePipelineHandle_);
+  }
+  meshGsOverlayPipelineHandle_ = {};
+  meshGsTessOverlayPipelineHandle_ = {};
   meshWireframePipelineHandle_ = {};
+  meshTessWireframePipelineHandle_ = {};
+  gsOverlayPipelineInitialized_ = false;
+  gsTessOverlayPipelineInitialized_ = false;
   wireframePipelineInitialized_ = false;
+  tessWireframePipelineInitialized_ = false;
+  gsOverlayPipelineUnsupported_ = false;
+  gsTessOverlayPipelineUnsupported_ = false;
   wireframePipelineUnsupported_ = false;
+  tessWireframePipelineUnsupported_ = false;
+  loggedWireframeFallbackUnsupported_ = false;
+  loggedTessWireframeFallbackUnsupported_ = false;
+  loggedGsOverlayUnsupported_ = false;
+  loggedGsTessOverlayUnsupported_ = false;
   baseMeshWireframeDraw_ = {};
 }
 

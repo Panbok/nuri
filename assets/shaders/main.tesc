@@ -11,6 +11,8 @@ layout(location = 0) out vec2 outUv[];
 layout(location = 1) out vec3 outWorldNormal[];
 layout(location = 2) out vec3 outWorldPos[];
 layout(location = 3) flat out uint outInstanceId[];
+layout(location = 4) patch out vec3 outPatchOuterFactors;
+layout(location = 5) patch out float outPatchInnerFactor;
 
 float distanceToTessFactor(float distanceToCamera) {
   const float nearDistance = max(pc.tessNearDistance, 0.0);
@@ -46,4 +48,6 @@ void main() {
   gl_TessLevelOuter[1] = outer1;
   gl_TessLevelOuter[2] = outer2;
   gl_TessLevelInner[0] = (outer0 + outer1 + outer2) * (1.0 / 3.0);
+  outPatchOuterFactors = vec3(outer0, outer1, outer2);
+  outPatchInnerFactor = gl_TessLevelInner[0];
 }

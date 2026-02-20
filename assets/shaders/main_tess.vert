@@ -15,7 +15,7 @@ void main() {
 
   const mat4 model = pc.instanceMatrices.matrices[globalInstanceId];
   const vec3 worldPos = (model * vec4(pos, 1.0)).xyz;
-  const vec3 worldNormal = normalize(mat3(model) * normal);
+  const vec3 worldNormal = normalize(transpose(inverse(mat3(model))) * normal);
 
   outUv = uv;
   outWorldNormal = worldNormal;

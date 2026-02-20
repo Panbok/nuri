@@ -1,7 +1,7 @@
 #include "common.sp"
 
 layout(location = 0) in PerVertex vtx;
-layout(location = 3) flat in uint inInstanceId;
+layout(location = 9) flat in uint inInstanceId;
 
 layout(location = 0) out vec4 out_FragColor;
 

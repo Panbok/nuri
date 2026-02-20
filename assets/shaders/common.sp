@@ -65,7 +65,12 @@ layout(push_constant) uniform PushConstants {
   float tessFarDistance;
   float tessMinFactor;
   float tessMaxFactor;
+  uint debugVisualizationMode;
 } pc;
+
+const uint kDebugVisualizationNone = 0u;
+const uint kDebugVisualizationWireOverlay = 1u;
+const uint kDebugVisualizationTessPatchEdgesHeatmap = 2u;
 
 vec2 unpackSnorm2x16Custom(uint packed) {
   const int x = int(packed << 16u) >> 16;
@@ -90,4 +95,9 @@ struct PerVertex {
   vec2 uv;
   vec3 worldNormal;
   vec3 worldPos;
+  vec3 patchBarycentric;
+  vec3 triBarycentric;
+  vec3 patchOuterFactors;
+  float patchInnerFactor;
+  float tessellatedFlag;
 };

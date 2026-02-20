@@ -6,9 +6,11 @@ layout(location = 0) in vec2 inUv[];
 layout(location = 1) in vec3 inWorldNormal[];
 layout(location = 2) in vec3 inWorldPos[];
 layout(location = 3) flat in uint inInstanceId[];
+layout(location = 4) patch in vec3 inPatchOuterFactors;
+layout(location = 5) patch in float inPatchInnerFactor;
 
 layout(location = 0) out PerVertex vtx;
-layout(location = 3) flat out uint outInstanceId;
+layout(location = 9) flat out uint outInstanceId;
 
 vec3 evaluatePnPosition(vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2,
                         vec3 bary) {
@@ -37,9 +39,8 @@ vec3 evaluatePnPosition(vec3 p0, vec3 p1, vec3 p2, vec3 n0, vec3 n1, vec3 n2,
   const float ww = w * w;
 
   return b300 * (uu * u) + b030 * (vv * v) + b003 * (ww * w) +
-         b210 * (3.0 * uu * v) + b120 * (3.0 * u * vv) +
-         b201 * (3.0 * uu * w) + b102 * (3.0 * u * ww) +
-         b021 * (3.0 * vv * w) + b012 * (3.0 * v * ww) +
+         b210 * (3.0 * uu * v) + b120 * (3.0 * u * vv) + b201 * (3.0 * uu * w) +
+         b102 * (3.0 * u * ww) + b021 * (3.0 * vv * w) + b012 * (3.0 * v * ww) +
          b111 * (6.0 * u * v * w);
 }
 
@@ -50,18 +51,20 @@ void main() {
   const vec3 p1 = inWorldPos[1];
   const vec3 p2 = inWorldPos[2];
 
+  const bool hasDegenerateNormals =
+      dot(inWorldNormal[0], inWorldNormal[0]) < 1.0e-6 ||
+      dot(inWorldNormal[1], inWorldNormal[1]) < 1.0e-6 ||
+      dot(inWorldNormal[2], inWorldNormal[2]) < 1.0e-6;
+
   const vec3 n0 = normalize(inWorldNormal[0]);
   const vec3 n1 = normalize(inWorldNormal[1]);
   const vec3 n2 = normalize(inWorldNormal[2]);
 
   const vec3 linearPos = p0 * bary.x + p1 * bary.y + p2 * bary.z;
-  const vec3 linearNormal =
-      normalize(n0 * bary.x + n1 * bary.y + n2 * bary.z);
+  const vec3 linearNormal = normalize(n0 * bary.x + n1 * bary.y + n2 * bary.z);
 
   const float area2 = length(cross(p1 - p0, p2 - p0));
   const bool hasDegenerateTriangle = area2 < 1.0e-6;
-  const bool hasDegenerateNormals =
-      dot(n0, n0) < 1.0e-6 || dot(n1, n1) < 1.0e-6 || dot(n2, n2) < 1.0e-6;
   vec3 worldPos = linearPos;
   if (!hasDegenerateTriangle && !hasDegenerateNormals) {
     worldPos = evaluatePnPosition(p0, p1, p2, n0, n1, n2, bary);
@@ -73,6 +76,11 @@ void main() {
   vtx.uv = uv;
   vtx.worldNormal = worldNormal;
   vtx.worldPos = worldPos;
+  vtx.patchBarycentric = bary;
+  vtx.triBarycentric = vec3(0.0);
+  vtx.patchOuterFactors = inPatchOuterFactors;
+  vtx.patchInnerFactor = inPatchInnerFactor;
+  vtx.tessellatedFlag = 1.0;
   outInstanceId = inInstanceId[0];
   gl_Position = pc.frameData.proj * pc.frameData.view * vec4(worldPos, 1.0);
 }

@@ -852,6 +852,7 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
 
   const bool hasTessControlShader = isValid(desc.tessControlShader);
   const bool hasTessEvalShader = isValid(desc.tessEvalShader);
+  const bool hasGeometryShader = isValid(desc.geometryShader);
   if (nuri::isValid(desc.tessControlShader) && !hasTessControlShader) {
     NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Invalid tessellation "
                      "control shader handle for render pipeline");
@@ -863,6 +864,12 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
                      "evaluation shader handle for render pipeline");
     return Result<RenderPipelineHandle, std::string>::makeError(
         "Invalid tessellation evaluation shader handle");
+  }
+  if (nuri::isValid(desc.geometryShader) && !hasGeometryShader) {
+    NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Invalid geometry "
+                     "shader handle for render pipeline");
+    return Result<RenderPipelineHandle, std::string>::makeError(
+        "Invalid geometry shader handle");
   }
   if (hasTessControlShader != hasTessEvalShader) {
     NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Tessellation "
@@ -959,6 +966,7 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       .smVert = impl_->shaders.getLvkHandle(desc.vertexShader),
       .smTesc = impl_->shaders.getLvkHandle(desc.tessControlShader),
       .smTese = impl_->shaders.getLvkHandle(desc.tessEvalShader),
+      .smGeom = impl_->shaders.getLvkHandle(desc.geometryShader),
       .smFrag = impl_->shaders.getLvkHandle(desc.fragmentShader),
       .specInfo = specInfo,
       .color = {{.format = toLvkFormat(desc.colorFormats[0]),

@@ -10,6 +10,12 @@ namespace nuri {
 
 class RenderScene;
 
+enum class OpaqueDebugVisualization : uint8_t {
+  None = 0,
+  WireOverlay = 1,
+  TessPatchEdgesHeatmap = 2,
+};
+
 struct RenderSettings {
   struct SkyboxSettings {
     bool enabled = true;
@@ -17,7 +23,8 @@ struct RenderSettings {
 
   struct OpaqueSettings {
     bool enabled = true;
-    bool wireframe = false;
+    OpaqueDebugVisualization debugVisualization =
+        OpaqueDebugVisualization::None;
     bool enableMeshLod = true;
     int32_t forcedMeshLod = -1;
     glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
@@ -54,6 +61,9 @@ struct OpaqueFrameMetrics {
   uint32_t instancedDraws = 0;
   uint32_t tessellatedDraws = 0;
   uint32_t tessellatedInstances = 0;
+  uint32_t debugOverlayDraws = 0;
+  uint32_t debugOverlayFallbackDraws = 0;
+  uint32_t debugPatchHeatmapDraws = 0;
   uint32_t computeDispatches = 0;
   uint32_t computeDispatchX = 0;
 };

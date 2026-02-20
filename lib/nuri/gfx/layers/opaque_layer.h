@@ -68,6 +68,7 @@ private:
     float tessFarDistance = 8.0f;
     float tessMinFactor = 1.0f;
     float tessMaxFactor = 6.0f;
+    uint32_t debugVisualizationMode = 0;
   };
   static_assert(sizeof(PushConstants) <= 128,
                 "OpaqueLayer::PushConstants exceeds Vulkan minimum guarantee");
@@ -114,7 +115,10 @@ private:
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
   Result<bool, std::string> ensureWireframePipeline();
-  void resetWireframePipelineState();
+  Result<bool, std::string> ensureTessWireframePipeline();
+  Result<bool, std::string> ensureGsOverlayPipeline();
+  Result<bool, std::string> ensureGsTessOverlayPipeline();
+  void resetOverlayPipelineState();
   void invalidateAutoLodCache();
   void updateFastAutoLodCache(
       const Submesh *submesh, const glm::vec3 &cameraPosition,
@@ -127,6 +131,7 @@ private:
   GPUDevice &gpu_;
   std::unique_ptr<Shader> meshShader_;
   std::unique_ptr<Shader> meshTessShader_;
+  std::unique_ptr<Shader> meshDebugOverlayShader_;
   std::unique_ptr<Shader> computeShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
   std::unique_ptr<Pipeline> computePipeline_;
@@ -143,10 +148,15 @@ private:
   ShaderHandle meshTessControlShader_{};
   ShaderHandle meshTessEvalShader_{};
   ShaderHandle meshFragmentShader_{};
+  ShaderHandle meshDebugOverlayGeometryShader_{};
+  ShaderHandle meshDebugOverlayFragmentShader_{};
   ShaderHandle computeShaderHandle_{};
   RenderPipelineHandle meshFillPipelineHandle_{};
   RenderPipelineHandle meshTessPipelineHandle_{};
+  RenderPipelineHandle meshGsOverlayPipelineHandle_{};
+  RenderPipelineHandle meshGsTessOverlayPipelineHandle_{};
   RenderPipelineHandle meshWireframePipelineHandle_{};
+  RenderPipelineHandle meshTessWireframePipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
 
   size_t frameDataBufferCapacityBytes_ = 0;
@@ -157,6 +167,16 @@ private:
   bool tessellationUnsupported_ = false;
   bool wireframePipelineInitialized_ = false;
   bool wireframePipelineUnsupported_ = false;
+  bool tessWireframePipelineInitialized_ = false;
+  bool tessWireframePipelineUnsupported_ = false;
+  bool gsOverlayPipelineInitialized_ = false;
+  bool gsOverlayPipelineUnsupported_ = false;
+  bool gsTessOverlayPipelineInitialized_ = false;
+  bool gsTessOverlayPipelineUnsupported_ = false;
+  bool loggedWireframeFallbackUnsupported_ = false;
+  bool loggedTessWireframeFallbackUnsupported_ = false;
+  bool loggedGsOverlayUnsupported_ = false;
+  bool loggedGsTessOverlayUnsupported_ = false;
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -189,6 +209,8 @@ private:
   std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
+  std::pmr::vector<DrawItem> overlayDrawItems_;
+  std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<ComputeDispatchItem> preDispatches_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;

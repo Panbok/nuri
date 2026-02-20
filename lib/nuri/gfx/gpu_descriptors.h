@@ -36,6 +36,7 @@ struct RenderPipelineDesc {
   ShaderHandle vertexShader{};
   ShaderHandle tessControlShader{};
   ShaderHandle tessEvalShader{};
+  ShaderHandle geometryShader{};
   ShaderHandle fragmentShader{};
   std::array<Format, 1> colorFormats{Format::RGBA8_UNORM};
   Format depthFormat = Format::Count;
