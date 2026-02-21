@@ -670,10 +670,13 @@ struct ImGuiEditor::Impl {
     NURI_PROFILER_ZONE_END();
 
     const auto passResult = [&]() {
+      Result<RenderPass, std::string> result =
+          Result<RenderPass, std::string>::makeError(std::string{});
       NURI_PROFILER_ZONE("ImGuiEditor::BuildRenderPass",
                          NURI_PROFILER_COLOR_CMD_DRAW);
-      return renderer->buildRenderPass(gpu.getSwapchainFormat(), frameIndex);
+      result = renderer->buildRenderPass(gpu.getSwapchainFormat(), frameIndex);
       NURI_PROFILER_ZONE_END();
+      return result;
     }();
     return passResult;
   }

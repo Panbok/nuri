@@ -19,6 +19,9 @@ struct MeshImportOptions {
   bool genTangents = true;
   bool flipUVs = false;
   bool joinIdenticalVertices = true;
+  bool genUVCoords = true;
+  bool removeRedundantMaterials = true;
+  bool limitBoneWeights = true;
   bool optimize = true;
   bool generateLods = true;
   uint32_t lodCount = kMaxLodCount;

@@ -304,7 +304,10 @@ void appendSubmeshToMeshData(
 }
 
 unsigned int buildAssimpFlags(const MeshImportOptions &options) {
-  unsigned int flags = 0;
+  // Keep flags: baseline import sanitation for the meshopt pipeline.
+  unsigned int flags =
+      aiProcess_SortByPType | aiProcess_FindDegenerates | aiProcess_FindInvalidData;
+
   if (options.triangulate) {
     flags |= aiProcess_Triangulate;
   }
@@ -314,7 +317,7 @@ unsigned int buildAssimpFlags(const MeshImportOptions &options) {
   }
 
   if (options.genNormals) {
-    flags |= aiProcess_GenNormals;
+    flags |= aiProcess_GenSmoothNormals;
   }
 
   if (options.genTangents) {
@@ -325,11 +328,22 @@ unsigned int buildAssimpFlags(const MeshImportOptions &options) {
     flags |= aiProcess_FlipUVs;
   }
 
+  if (options.genUVCoords) {
+    flags |= aiProcess_GenUVCoords;
+  }
+
+  if (options.removeRedundantMaterials) {
+    flags |= aiProcess_RemoveRedundantMaterials;
+  }
+
+  if (options.limitBoneWeights) {
+    flags |= aiProcess_LimitBoneWeights;
+  }
+
   if (options.optimize) {
     flags |= aiProcess_OptimizeMeshes;
   }
 
-  flags |= aiProcess_SortByPType;
   return flags;
 }
 } // namespace

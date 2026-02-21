@@ -91,6 +91,8 @@ public:
   // Returns a persistent mapped pointer for host-visible buffers, or nullptr
   // when direct mapping is unavailable for this buffer/backend.
   virtual std::byte *getMappedBufferPtr(BufferHandle buffer) = 0;
+  // Flushes a region of a previously mapped buffer to ensure host writes are
+  // visible to the GPU. No-op if the buffer is not host-visible or not mapped.
   virtual void flushMappedBuffer(BufferHandle buffer, size_t offset,
                                  size_t size) = 0;
 

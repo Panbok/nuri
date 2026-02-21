@@ -1561,6 +1561,11 @@ void LvkGPUDevice::flushMappedBuffer(BufferHandle buffer, size_t offset,
     return;
   }
   const lvk::BufferHandle lvkBuf = impl_->buffers.getLvkHandle(buffer);
+  const size_t bufferSize =
+      static_cast<size_t>(lvk::getBufferSize(impl_->context.get(), lvkBuf));
+  if (offset > bufferSize || size > bufferSize - offset) {
+    return;
+  }
   impl_->context->flushMappedMemory(lvkBuf, offset, size);
 }
 
