@@ -561,10 +561,13 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
   const OpaqueDebugVisualization debugVisualization =
       settings.opaque.debugVisualization;
-  const bool overlayRequested =
-      debugVisualization != OpaqueDebugVisualization::None;
+  const bool wireOverlayRequested =
+      debugVisualization == OpaqueDebugVisualization::WireframeOverlay;
+  const bool wireframeOnlyRequested =
+      debugVisualization == OpaqueDebugVisualization::WireframeOnly;
   const bool patchHeatmapRequested =
       debugVisualization == OpaqueDebugVisualization::TessPatchEdgesHeatmap;
+  const bool overlayRequested = wireOverlayRequested || patchHeatmapRequested;
   const uint32_t debugVisualizationMode =
       static_cast<uint32_t>(debugVisualization);
   DrawItem baseDraw = baseMeshFillDraw_;
@@ -1419,132 +1422,204 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     }
   }
 
-  size_t debugOverlayDraws = 0;
-  size_t debugOverlayFallbackDraws = 0;
-  size_t debugPatchHeatmapDraws = 0;
-  overlayDrawItems_.clear();
-  passDrawItems_.clear();
-  if (overlayRequested && !drawItems_.empty()) {
-    bool gsOverlayAvailable = false;
-    bool gsTessOverlayAvailable = false;
-    bool lineOverlayAvailable = false;
-    bool lineTessOverlayAvailable = false;
-
-    auto gsOverlayResult = ensureGsOverlayPipeline();
-    if (gsOverlayResult.hasError()) {
-      if (!loggedGsOverlayUnsupported_) {
-        loggedGsOverlayUnsupported_ = true;
-        NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
-                         "GS overlay pipeline: %s",
-                         gsOverlayResult.error().c_str());
-      }
-    } else {
-      gsOverlayAvailable = gsOverlayResult.value();
-    }
-
-    auto gsTessOverlayResult = ensureGsTessOverlayPipeline();
-    if (gsTessOverlayResult.hasError()) {
-      if (!loggedGsTessOverlayUnsupported_) {
-        loggedGsTessOverlayUnsupported_ = true;
-        NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
-                         "GS tess overlay pipeline: %s",
-                         gsTessOverlayResult.error().c_str());
-      }
-    } else {
-      gsTessOverlayAvailable = gsTessOverlayResult.value();
-    }
-
-    if (!gsOverlayAvailable) {
-      auto lineResult = ensureWireframePipeline();
-      if (lineResult.hasError()) {
-        if (!loggedWireframeFallbackUnsupported_) {
-          loggedWireframeFallbackUnsupported_ = true;
-          NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
-                           "line overlay fallback pipeline: %s",
-                           lineResult.error().c_str());
-        }
-      } else {
-        lineOverlayAvailable = lineResult.value();
-      }
-    }
-    if (!gsTessOverlayAvailable) {
-      auto lineTessResult = ensureTessWireframePipeline();
-      if (lineTessResult.hasError()) {
-        if (!loggedTessWireframeFallbackUnsupported_) {
-          loggedTessWireframeFallbackUnsupported_ = true;
-          NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
-                           "line tess overlay fallback pipeline: %s",
-                           lineTessResult.error().c_str());
-        }
-      } else {
-        lineTessOverlayAvailable = lineTessResult.value();
-      }
-    }
-
-    overlayDrawItems_.reserve(drawItems_.size());
-    for (const DrawItem &baseItem : drawItems_) {
-      const bool isTessDraw =
-          isTessPipelineHandle(baseItem.pipeline, meshTessPipelineHandle_);
-      RenderPipelineHandle overlayPipeline{};
-      bool usedFallback = false;
-      if (isTessDraw) {
-        if (gsTessOverlayAvailable) {
-          overlayPipeline = meshGsTessOverlayPipelineHandle_;
-        } else if (lineTessOverlayAvailable) {
-          overlayPipeline = meshTessWireframePipelineHandle_;
-          usedFallback = true;
-        }
-      } else {
-        if (gsOverlayAvailable) {
-          overlayPipeline = meshGsOverlayPipelineHandle_;
-        } else if (lineOverlayAvailable) {
-          overlayPipeline = meshWireframePipelineHandle_;
-          usedFallback = true;
-        }
-      }
-
-      if (!nuri::isValid(overlayPipeline)) {
-        continue;
-      }
-
-      DrawItem overlayItem = baseItem;
-      overlayItem.pipeline = overlayPipeline;
-      overlayItem.useDepthState = true;
-      overlayItem.depthState = {.compareOp = CompareOp::LessEqual,
-                                .isDepthWriteEnabled = false};
-      overlayItem.depthBiasEnable = true;
-      overlayItem.depthBiasConstant = kOverlayDepthBiasConstant;
-      overlayItem.depthBiasSlope = kOverlayDepthBiasSlope;
-      overlayItem.depthBiasClamp = 0.0f;
-      if (usedFallback) {
-        overlayItem.debugLabel = isTessDraw ? "OpaqueMeshTessOverlayFallback"
-                                            : "OpaqueMeshOverlayFallback";
-      } else {
-        overlayItem.debugLabel =
-            isTessDraw ? "OpaqueMeshTessOverlay" : "OpaqueMeshOverlay";
-      }
-      overlayDrawItems_.push_back(overlayItem);
-
-      ++debugOverlayDraws;
-      if (usedFallback) {
-        ++debugOverlayFallbackDraws;
-      }
-      if (patchHeatmapRequested && isTessDraw && !usedFallback) {
-        ++debugPatchHeatmapDraws;
-      }
-    }
-  }
-
   const std::span<const DrawItem> baseDrawItems =
       indirectDrawItems_.empty()
           ? std::span<const DrawItem>(drawItems_.data(), drawItems_.size())
           : std::span<const DrawItem>(indirectDrawItems_.data(),
                                       indirectDrawItems_.size());
-  passDrawItems_.reserve(baseDrawItems.size() + overlayDrawItems_.size());
-  passDrawItems_.insert(passDrawItems_.end(), baseDrawItems.begin(),
-                        baseDrawItems.end());
-  passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
-                        overlayDrawItems_.end());
+
+  size_t debugOverlayDraws = 0;
+  size_t debugOverlayFallbackDraws = 0;
+  size_t debugPatchHeatmapDraws = 0;
+  overlayDrawItems_.clear();
+  passDrawItems_.clear();
+  if (wireframeOnlyRequested && !baseDrawItems.empty()) {
+    bool lineOverlayAvailable = false;
+    bool lineTessOverlayAvailable = false;
+
+    auto lineResult = ensureWireframePipeline();
+    if (lineResult.hasError()) {
+      if (!loggedWireframeFallbackUnsupported_) {
+        loggedWireframeFallbackUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+                         "wireframe pipeline: %s",
+                         lineResult.error().c_str());
+      }
+    } else {
+      lineOverlayAvailable = lineResult.value();
+    }
+
+    auto lineTessResult = ensureTessWireframePipeline();
+    if (lineTessResult.hasError()) {
+      if (!loggedTessWireframeFallbackUnsupported_) {
+        loggedTessWireframeFallbackUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+                         "tess wireframe pipeline: %s",
+                         lineTessResult.error().c_str());
+      }
+    } else {
+      lineTessOverlayAvailable = lineTessResult.value();
+    }
+
+    overlayDrawItems_.reserve(baseDrawItems.size());
+    for (const DrawItem &baseItem : baseDrawItems) {
+      const bool isTessDraw =
+          isTessPipelineHandle(baseItem.pipeline, meshTessPipelineHandle_);
+      RenderPipelineHandle wireframePipeline{};
+      bool usedFallback = false;
+      if (isTessDraw && lineTessOverlayAvailable) {
+        wireframePipeline = meshTessWireframePipelineHandle_;
+      } else if (lineOverlayAvailable) {
+        wireframePipeline = meshWireframePipelineHandle_;
+        usedFallback = isTessDraw;
+      }
+
+      if (!nuri::isValid(wireframePipeline)) {
+        continue;
+      }
+
+      DrawItem wireframeItem = baseItem;
+      wireframeItem.pipeline = wireframePipeline;
+      if (isTessDraw) {
+        wireframeItem.debugLabel = usedFallback ? "OpaqueMeshTessWireframeOnlyFallback"
+                                                : "OpaqueMeshTessWireframeOnly";
+      } else {
+        wireframeItem.debugLabel = "OpaqueMeshWireframeOnly";
+      }
+      overlayDrawItems_.push_back(wireframeItem);
+
+      ++debugOverlayDraws;
+      if (usedFallback) {
+        ++debugOverlayFallbackDraws;
+      }
+    }
+
+    passDrawItems_.reserve(baseDrawItems.size());
+    if (overlayDrawItems_.empty()) {
+      passDrawItems_.insert(passDrawItems_.end(), baseDrawItems.begin(),
+                            baseDrawItems.end());
+    } else {
+      passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
+                            overlayDrawItems_.end());
+    }
+  } else {
+    if (overlayRequested && !baseDrawItems.empty()) {
+      bool gsOverlayAvailable = false;
+      bool gsTessOverlayAvailable = false;
+      bool lineOverlayAvailable = false;
+      bool lineTessOverlayAvailable = false;
+
+      auto gsOverlayResult = ensureGsOverlayPipeline();
+      if (gsOverlayResult.hasError()) {
+        if (!loggedGsOverlayUnsupported_) {
+          loggedGsOverlayUnsupported_ = true;
+          NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+                           "GS overlay pipeline: %s",
+                           gsOverlayResult.error().c_str());
+        }
+      } else {
+        gsOverlayAvailable = gsOverlayResult.value();
+      }
+
+      auto gsTessOverlayResult = ensureGsTessOverlayPipeline();
+      if (gsTessOverlayResult.hasError()) {
+        if (!loggedGsTessOverlayUnsupported_) {
+          loggedGsTessOverlayUnsupported_ = true;
+          NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+                           "GS tess overlay pipeline: %s",
+                           gsTessOverlayResult.error().c_str());
+        }
+      } else {
+        gsTessOverlayAvailable = gsTessOverlayResult.value();
+      }
+
+      if (!gsOverlayAvailable) {
+        auto lineResult = ensureWireframePipeline();
+        if (lineResult.hasError()) {
+          if (!loggedWireframeFallbackUnsupported_) {
+            loggedWireframeFallbackUnsupported_ = true;
+            NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to "
+                             "create line overlay fallback pipeline: %s",
+                             lineResult.error().c_str());
+          }
+        } else {
+          lineOverlayAvailable = lineResult.value();
+        }
+      }
+      if (!gsTessOverlayAvailable) {
+        auto lineTessResult = ensureTessWireframePipeline();
+        if (lineTessResult.hasError()) {
+          if (!loggedTessWireframeFallbackUnsupported_) {
+            loggedTessWireframeFallbackUnsupported_ = true;
+            NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to "
+                             "create line tess overlay fallback pipeline: %s",
+                             lineTessResult.error().c_str());
+          }
+        } else {
+          lineTessOverlayAvailable = lineTessResult.value();
+        }
+      }
+
+      overlayDrawItems_.reserve(baseDrawItems.size());
+      for (const DrawItem &baseItem : baseDrawItems) {
+        const bool isTessDraw =
+            isTessPipelineHandle(baseItem.pipeline, meshTessPipelineHandle_);
+        RenderPipelineHandle overlayPipeline{};
+        bool usedFallback = false;
+        if (isTessDraw) {
+          if (gsTessOverlayAvailable) {
+            overlayPipeline = meshGsTessOverlayPipelineHandle_;
+          } else if (lineTessOverlayAvailable) {
+            overlayPipeline = meshTessWireframePipelineHandle_;
+            usedFallback = true;
+          }
+        } else {
+          if (gsOverlayAvailable) {
+            overlayPipeline = meshGsOverlayPipelineHandle_;
+          } else if (lineOverlayAvailable) {
+            overlayPipeline = meshWireframePipelineHandle_;
+            usedFallback = true;
+          }
+        }
+
+        if (!nuri::isValid(overlayPipeline)) {
+          continue;
+        }
+
+        DrawItem overlayItem = baseItem;
+        overlayItem.pipeline = overlayPipeline;
+        overlayItem.useDepthState = true;
+        overlayItem.depthState = {.compareOp = CompareOp::LessEqual,
+                                  .isDepthWriteEnabled = false};
+        overlayItem.depthBiasEnable = true;
+        overlayItem.depthBiasConstant = kOverlayDepthBiasConstant;
+        overlayItem.depthBiasSlope = kOverlayDepthBiasSlope;
+        overlayItem.depthBiasClamp = 0.0f;
+        if (usedFallback) {
+          overlayItem.debugLabel = isTessDraw ? "OpaqueMeshTessOverlayFallback"
+                                              : "OpaqueMeshOverlayFallback";
+        } else {
+          overlayItem.debugLabel =
+              isTessDraw ? "OpaqueMeshTessOverlay" : "OpaqueMeshOverlay";
+        }
+        overlayDrawItems_.push_back(overlayItem);
+
+        ++debugOverlayDraws;
+        if (usedFallback) {
+          ++debugOverlayFallbackDraws;
+        }
+        if (patchHeatmapRequested && isTessDraw && !usedFallback) {
+          ++debugPatchHeatmapDraws;
+        }
+      }
+    }
+
+    passDrawItems_.reserve(baseDrawItems.size() + overlayDrawItems_.size());
+    passDrawItems_.insert(passDrawItems_.end(), baseDrawItems.begin(),
+                          baseDrawItems.end());
+    passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
+                          overlayDrawItems_.end());
+  }
 
   size_t indirectCommandCount = 0;
   for (const DrawItem &indirectDraw : indirectDrawItems_) {

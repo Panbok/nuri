@@ -318,6 +318,7 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
   constexpr const char *kDebugModes[] = {
       "None",
       "Wire Overlay",
+      "Wireframe Only",
       "Tess Patch (Edges + Heatmap)",
   };
   int debugMode = static_cast<int>(opaque.debugVisualization);
@@ -509,7 +510,10 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                 frameMetrics.opaque.instancedDraws,
                 frameMetrics.opaque.tessellatedDraws,
                 frameMetrics.opaque.tessellatedInstances);
-    ImGui::Text("Overlay: %u (Fallback: %u)",
+    ImGui::Text("Indirect: %u calls / %u cmds",
+                frameMetrics.opaque.indirectDrawCalls,
+                frameMetrics.opaque.indirectCommands);
+    ImGui::Text("Debug Draws: %u (Fallback: %u)",
                 frameMetrics.opaque.debugOverlayDraws,
                 frameMetrics.opaque.debugOverlayFallbackDraws);
     ImGui::Text("Patch Heatmap: %u",

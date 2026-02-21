@@ -12,8 +12,9 @@ class RenderScene;
 
 enum class OpaqueDebugVisualization : uint8_t {
   None = 0,
-  WireOverlay = 1,
-  TessPatchEdgesHeatmap = 2,
+  WireframeOverlay = 1,
+  WireframeOnly = 2,
+  TessPatchEdgesHeatmap = 3,
 };
 
 struct RenderSettings {
