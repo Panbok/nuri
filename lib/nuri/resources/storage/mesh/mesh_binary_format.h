@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
@@ -11,7 +10,7 @@ constexpr uint16_t kMeshBinaryFormatMajorVersion = 1;
 constexpr uint16_t kMeshBinaryFormatMinorVersion = 0;
 
 constexpr std::array<char, 8> kMeshBinaryMagic = {'N', 'U', 'R', 'I',
-                                                   'M', 'S', 'H', '\0'};
+                                                  'M', 'S', 'H', '\0'};
 
 constexpr uint32_t kMeshBinaryHeaderFlagLittleEndian = 1u << 0u;
 constexpr uint32_t kMeshBinaryHeaderFlagCompressed = 1u << 1u;
@@ -45,6 +44,7 @@ constexpr uint32_t kMeshBinaryPackedAttributeUv = 1u << 1u;
 constexpr uint32_t kMeshBinaryPackedAttributeNormal = 1u << 2u;
 constexpr uint32_t kMeshBinaryPackedAttributeTangent = 1u << 3u;
 
+#pragma pack(push, 1)
 struct MeshBinaryHeader {
   std::array<char, 8> magic{};
   uint16_t majorVersion = 0;
@@ -64,6 +64,7 @@ struct MeshBinaryHeader {
   float modelBoundsMax[3] = {0.0f, 0.0f, 0.0f};
   uint32_t reserved1[4] = {0, 0, 0, 0};
 };
+#pragma pack(pop)
 
 struct MeshBinarySectionTocEntry {
   uint32_t fourcc = 0;
@@ -77,10 +78,9 @@ struct MeshBinarySectionTocEntry {
 struct MeshBinaryVertexLayoutRecord {
   uint32_t layoutId = kMeshBinaryLayoutIdPacked32;
   uint32_t strideBytes = kMeshBinaryPackedVertexStrideBytes;
-  uint32_t attributeMask = kMeshBinaryPackedAttributePosition |
-                           kMeshBinaryPackedAttributeUv |
-                           kMeshBinaryPackedAttributeNormal |
-                           kMeshBinaryPackedAttributeTangent;
+  uint32_t attributeMask =
+      kMeshBinaryPackedAttributePosition | kMeshBinaryPackedAttributeUv |
+      kMeshBinaryPackedAttributeNormal | kMeshBinaryPackedAttributeTangent;
   uint32_t reserved = 0;
 };
 
@@ -108,7 +108,7 @@ struct MeshBinaryBufferSectionHeader {
   uint32_t reserved = 0;
 };
 
-static_assert(sizeof(MeshBinaryHeader) == 120);
+static_assert(sizeof(MeshBinaryHeader) == 116);
 static_assert(sizeof(MeshBinarySectionTocEntry) == 32);
 static_assert(sizeof(MeshBinaryVertexLayoutRecord) == 16);
 static_assert(sizeof(MeshBinarySubmeshRecord) == 48);

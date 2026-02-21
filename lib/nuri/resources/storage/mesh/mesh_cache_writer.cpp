@@ -27,7 +27,8 @@ MeshCacheWriterService &MeshCacheWriterService::instance() {
   return writer;
 }
 
-MeshCacheWriterService::MeshCacheWriterService() : impl_(std::make_unique<Impl>()) {
+MeshCacheWriterService::MeshCacheWriterService()
+    : impl_(std::make_unique<Impl>()) {
   impl_->worker = std::thread([this]() { workerLoop(); });
 }
 
@@ -42,19 +43,18 @@ MeshCacheWriterService::~MeshCacheWriterService() {
   }
   impl_->cv.notify_one();
 
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(500);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
   {
     std::unique_lock<std::mutex> lock(impl_->mutex);
-    const bool drained = impl_->drainedCv.wait_until(
-        lock, deadline,
-        [this]() { return impl_->queue.empty() && !impl_->activeWrite; });
+    const bool drained = impl_->drainedCv.wait_until(lock, deadline, [this]() {
+      return impl_->queue.empty() && !impl_->activeWrite;
+    });
     if (!drained) {
       impl_->queue.clear();
     }
   }
 
-  impl_->cv.notify_one();
   if (impl_->worker.joinable()) {
     impl_->worker.join();
   }
@@ -90,8 +90,9 @@ void MeshCacheWriterService::workerLoop() {
     WriteJob job{};
     {
       std::unique_lock<std::mutex> lock(impl_->mutex);
-      impl_->cv.wait(
-          lock, [this]() { return impl_->stopRequested || !impl_->queue.empty(); });
+      impl_->cv.wait(lock, [this]() {
+        return impl_->stopRequested || !impl_->queue.empty();
+      });
 
       if (impl_->queue.empty()) {
         impl_->drainedCv.notify_all();

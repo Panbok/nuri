@@ -36,12 +36,18 @@ template <typename T, typename... Args>
   return true;
 }
 
-[[nodiscard]] uint64_t alignUpU64(uint64_t value, uint64_t alignment) {
+[[nodiscard]] bool alignUpU64(uint64_t value, uint64_t alignment,
+                              uint64_t &out) {
   if (alignment <= 1u) {
-    return value;
+    out = value;
+    return true;
   }
   const uint64_t mask = alignment - 1u;
-  return (value + mask) & ~mask;
+  if (value > (std::numeric_limits<uint64_t>::max() - mask)) {
+    return false;
+  }
+  out = (value + mask) & ~mask;
+  return true;
 }
 
 template <typename T>
@@ -53,15 +59,32 @@ void appendPod(std::vector<std::byte> &out, const T &value) {
 }
 
 template <typename T>
-void appendPodArray(std::vector<std::byte> &out, std::span<const T> values) {
+[[nodiscard]] bool appendPodArray(std::vector<std::byte> &out,
+                                  std::span<const T> values) {
   static_assert(std::is_trivially_copyable_v<T>);
   if (values.empty()) {
-    return;
+    return true;
   }
-  const size_t bytes = values.size() * sizeof(T);
-  const size_t offset = out.size();
-  out.resize(offset + bytes);
-  std::memcpy(out.data() + offset, values.data(), bytes);
+
+  uint64_t byteCount = 0;
+  if (!checkedMulToU64(static_cast<uint64_t>(values.size()), sizeof(T),
+                       byteCount)) {
+    return false;
+  }
+
+  const uint64_t offset = static_cast<uint64_t>(out.size());
+  uint64_t resizedCount = 0;
+  if (!checkedAddToU64(offset, byteCount, resizedCount) ||
+      resizedCount >
+          static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    return false;
+  }
+
+  const size_t byteCountSizeT = static_cast<size_t>(byteCount);
+  const size_t offsetSizeT = out.size();
+  out.resize(static_cast<size_t>(resizedCount));
+  std::memcpy(out.data() + offsetSizeT, values.data(), byteCountSizeT);
+  return true;
 }
 
 template <typename T>
@@ -78,9 +101,9 @@ template <typename T>
 }
 
 template <typename T, typename Allocator>
-[[nodiscard]] bool
-readPodArray(std::span<const std::byte> bytes, uint64_t offset, uint32_t count,
-             std::vector<T, Allocator> &out) {
+[[nodiscard]] bool readPodArray(std::span<const std::byte> bytes,
+                                uint64_t offset, uint32_t count,
+                                std::vector<T, Allocator> &out) {
   static_assert(std::is_trivially_copyable_v<T>);
   uint64_t bytesSize = 0;
   if (!checkedMulToU64(static_cast<uint64_t>(count), sizeof(T), bytesSize)) {
@@ -100,8 +123,12 @@ readPodArray(std::span<const std::byte> bytes, uint64_t offset, uint32_t count,
 }
 
 [[nodiscard]] bool isLittleEndianHost() {
+#if defined(__cpp_lib_endian) && (__cpp_lib_endian >= 201907L)
+  return std::endian::native == std::endian::little;
+#else
   constexpr uint16_t value = 0x1;
   return *reinterpret_cast<const uint8_t *>(&value) == 0x1;
+#endif
 }
 
 struct SerializedSection {
@@ -130,6 +157,10 @@ buildSubmeshAndLodSections(std::span<const Submesh> submeshes) {
   SerializedSection submeshSection{};
   submeshSection.fourcc = kMeshBinarySectionSmes;
   submeshSection.flags = 0;
+  if (submeshes.size() > std::numeric_limits<uint32_t>::max()) {
+    return makeSerializerError<std::pair<SerializedSection, SerializedSection>>(
+        "meshBinarySerialize: submesh count exceeds uint32");
+  }
   submeshSection.count = static_cast<uint32_t>(submeshes.size());
   submeshSection.stride = sizeof(MeshBinarySubmeshRecord);
 
@@ -208,7 +239,10 @@ buildVertexBufferSection(std::span<const std::byte> packedVertexBytes,
   meta.elementStrideBytes = vertexStrideBytes;
   meta.encodedSizeBytes = static_cast<uint32_t>(encoded.size());
   appendPod(section.payload, meta);
-  appendPodArray(section.payload, std::span<const std::byte>(encoded));
+  if (!appendPodArray(section.payload, std::span<const std::byte>(encoded))) {
+    return makeSerializerError<SerializedSection>(
+        "meshBinarySerialize: vertex section payload size overflow");
+  }
 
   return Result<SerializedSection, std::string>::makeResult(std::move(section));
 }
@@ -238,7 +272,10 @@ buildIndexBufferSection(std::span<const uint32_t> indices,
   meta.elementStrideBytes = sizeof(uint32_t);
   meta.encodedSizeBytes = static_cast<uint32_t>(encoded.size());
   appendPod(section.payload, meta);
-  appendPodArray(section.payload, std::span<const std::byte>(encoded));
+  if (!appendPodArray(section.payload, std::span<const std::byte>(encoded))) {
+    return makeSerializerError<SerializedSection>(
+        "meshBinarySerialize: index section payload size overflow");
+  }
 
   return Result<SerializedSection, std::string>::makeResult(std::move(section));
 }
@@ -383,7 +420,10 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
     return makeSerializerError<std::vector<std::byte>>(
         "meshBinarySerialize: section start overflow");
   }
-  sectionStart = alignUpU64(sectionStart, 16u);
+  if (!alignUpU64(sectionStart, 16u, sectionStart)) {
+    return makeSerializerError<std::vector<std::byte>>(
+        "meshBinarySerialize: section alignment overflow");
+  }
 
   std::pmr::vector<MeshBinarySectionTocEntry> tocEntries(
       scopedScratch.resource());
@@ -391,7 +431,10 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
 
   uint64_t cursor = sectionStart;
   for (size_t i = 0; i < sections.size(); ++i) {
-    cursor = alignUpU64(cursor, 16u);
+    if (!alignUpU64(cursor, 16u, cursor)) {
+      return makeSerializerError<std::vector<std::byte>>(
+          "meshBinarySerialize: section cursor alignment overflow");
+    }
     const SerializedSection &section = sections[i];
     MeshBinarySectionTocEntry &entry = tocEntries[i];
     entry.fourcc = section.fourcc;
@@ -406,7 +449,11 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
     }
   }
 
-  const uint64_t fileSize = alignUpU64(cursor, 16u);
+  uint64_t fileSize = 0;
+  if (!alignUpU64(cursor, 16u, fileSize)) {
+    return makeSerializerError<std::vector<std::byte>>(
+        "meshBinarySerialize: final file alignment overflow");
+  }
   if (fileSize > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
     return makeSerializerError<std::vector<std::byte>>(
         "meshBinarySerialize: file size exceeds platform limits");

@@ -29,15 +29,15 @@ template <typename T> void fnv1aAddPod(uint64_t &hash, const T &value) {
   fnv1aAddBytes(hash, bytes);
 }
 
-std::string hexU64(uint64_t value) {
-  return std::format("{:016x}", value);
-}
+std::string hexU64(uint64_t value) { return std::format("{:016x}", value); }
 
 } // namespace
 
-std::filesystem::path normalizeMeshSourcePath(const std::filesystem::path &path) {
+std::filesystem::path
+normalizeMeshSourcePath(const std::filesystem::path &path) {
   std::error_code ec;
-  std::filesystem::path normalized = std::filesystem::weakly_canonical(path, ec);
+  std::filesystem::path normalized =
+      std::filesystem::weakly_canonical(path, ec);
   if (ec) {
     ec.clear();
     normalized = std::filesystem::absolute(path, ec);
@@ -64,6 +64,9 @@ uint64_t hashMeshImportOptions(const MeshImportOptions &options) {
   addBool(options.optimize);
   addBool(options.generateLods);
   fnv1aAddPod(hash, options.lodCount);
+  const uint32_t lodRatioCount =
+      static_cast<uint32_t>(options.lodTriangleRatios.size());
+  fnv1aAddPod(hash, lodRatioCount);
   for (const float ratio : options.lodTriangleRatios) {
     const uint32_t bits = std::bit_cast<uint32_t>(ratio);
     fnv1aAddPod(hash, bits);
@@ -79,7 +82,8 @@ buildMeshCacheKey(const std::filesystem::path &sourcePath,
   MeshCacheKey key{};
   key.normalizedSourcePath = normalizeMeshSourcePath(sourcePath);
 
-  const std::string normalizedString = key.normalizedSourcePath.generic_string();
+  const std::string normalizedString =
+      key.normalizedSourcePath.generic_string();
   if (normalizedString.empty()) {
     return Result<MeshCacheKey, std::string>::makeError(
         "buildMeshCacheKey: normalized source path is empty");
@@ -103,9 +107,9 @@ buildMeshCacheKey(const std::filesystem::path &sourcePath,
     stem = "mesh";
   }
 
-  const std::string fileName = std::format(
-      "{}_{}_{}_v{}.nmesh", stem, hexU64(pathHash), hexU64(optionsHash),
-      kMeshBinaryFormatMajorVersion);
+  const std::string fileName =
+      std::format("{}_{}_{}_v{}.nmesh", stem, hexU64(pathHash),
+                  hexU64(optionsHash), kMeshBinaryFormatMajorVersion);
   key.cachePath = cacheDir / fileName;
 
   return Result<MeshCacheKey, std::string>::makeResult(std::move(key));
@@ -134,9 +138,9 @@ queryMeshSourceFingerprint(const std::filesystem::path &sourcePath) {
     return fingerprint;
   }
 
-  const auto mtimeNs =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(mtime.time_since_epoch())
-          .count();
+  const auto mtimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           mtime.time_since_epoch())
+                           .count();
 
   fingerprint.exists = true;
   fingerprint.sizeBytes = sizeBytes;
@@ -155,7 +159,8 @@ readBinaryFile(const std::filesystem::path &path) {
   const std::streampos sizePos = input.tellg();
   if (sizePos < 0) {
     return Result<std::vector<std::byte>, std::string>::makeError(
-        "readBinaryFile: failed to query file size for '" + path.string() + "'");
+        "readBinaryFile: failed to query file size for '" + path.string() +
+        "'");
   }
 
   const uint64_t fileSize = static_cast<uint64_t>(sizePos);
@@ -166,10 +171,16 @@ readBinaryFile(const std::filesystem::path &path) {
 
   std::vector<std::byte> bytes(static_cast<size_t>(fileSize));
   input.seekg(0, std::ios::beg);
+  if (input.fail()) {
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        "readBinaryFile: failed to seek in file '" + path.string() + "'");
+  }
   if (!bytes.empty()) {
     input.read(reinterpret_cast<char *>(bytes.data()), bytes.size());
   }
-  if (input.bad() || (!bytes.empty() && input.gcount() != static_cast<std::streamsize>(bytes.size()))) {
+  if (input.bad() ||
+      (!bytes.empty() &&
+       input.gcount() != static_cast<std::streamsize>(bytes.size()))) {
     return Result<std::vector<std::byte>, std::string>::makeError(
         "readBinaryFile: failed to read file '" + path.string() + "'");
   }
@@ -178,8 +189,9 @@ readBinaryFile(const std::filesystem::path &path) {
       std::move(bytes));
 }
 
-Result<bool, std::string> writeBinaryFileAtomic(const std::filesystem::path &path,
-                                                std::span<const std::byte> bytes) {
+Result<bool, std::string>
+writeBinaryFileAtomic(const std::filesystem::path &path,
+                      std::span<const std::byte> bytes) {
   if (path.empty()) {
     return Result<bool, std::string>::makeError(
         "writeBinaryFileAtomic: destination path is empty");
@@ -196,7 +208,12 @@ Result<bool, std::string> writeBinaryFileAtomic(const std::filesystem::path &pat
     }
   }
 
-  const std::filesystem::path tempPath = path.string() + ".tmp";
+  static std::atomic<uint64_t> counter{0};
+  const auto threadIdHash = std::hash<std::thread::id>{}(std::this_thread::get_id());
+  const std::string tempSuffix =
+      std::format(".tmp.{:x}.{}", threadIdHash,
+                  counter.fetch_add(1, std::memory_order_relaxed));
+  const std::filesystem::path tempPath = path.string() + tempSuffix;
   {
     std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
