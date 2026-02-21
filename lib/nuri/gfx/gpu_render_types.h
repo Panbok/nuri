@@ -8,6 +8,11 @@
 
 namespace nuri {
 
+// Public render-graph contract: a submit item may depend on up to 4 buffers.
+// Backends can impose stricter limits, but higher-level layers should respect
+// this cap to avoid backend-specific failures.
+constexpr size_t kMaxDependencyBuffers = 4;
+
 struct Viewport {
   float x = 0.0f;
   float y = 0.0f;
@@ -59,12 +64,25 @@ struct ComputeDispatchItem {
   uint32_t debugColor = 0xffffffffu;
 };
 
+enum class DrawCommandType : uint8_t {
+  Direct,
+  IndexedIndirect,
+  IndexedIndirectCount,
+};
+
 struct DrawItem {
+  DrawCommandType command = DrawCommandType::Direct;
   RenderPipelineHandle pipeline{};
   BufferHandle vertexBuffer{};
   uint64_t vertexBufferOffset = 0;
   BufferHandle indexBuffer{};
   uint64_t indexBufferOffset = 0;
+  BufferHandle indirectBuffer{};
+  uint64_t indirectBufferOffset = 0;
+  BufferHandle indirectCountBuffer{};
+  uint64_t indirectCountBufferOffset = 0;
+  uint32_t indirectDrawCount = 0;
+  uint32_t indirectStride = 0;
   IndexFormat indexFormat = IndexFormat::U32;
   uint32_t vertexCount = 0;
   uint32_t indexCount = 0;

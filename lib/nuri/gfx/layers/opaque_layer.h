@@ -116,6 +116,10 @@ private:
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureIndirectCommandRingCapacity(size_t requiredBytes);
+  Result<bool, std::string> buildIndirectDraws(uint32_t frameSlot,
+                                               size_t remapCount);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
@@ -147,6 +151,7 @@ private:
   std::unique_ptr<Buffer> instanceMetaBuffer_;
   std::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::vector<DynamicBufferSlot> instanceRemapRing_;
+  std::vector<DynamicBufferSlot> indirectCommandRing_;
   TextureHandle depthTexture_{};
 
   ShaderHandle meshVertexShader_{};
@@ -215,6 +220,9 @@ private:
   std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
+  std::pmr::vector<PushConstants> indirectPushConstants_;
+  std::pmr::vector<DrawItem> indirectDrawItems_;
+  std::pmr::vector<std::byte> indirectCommandUploadBytes_;
   std::pmr::vector<DrawItem> overlayDrawItems_;
   std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<ComputeDispatchItem> preDispatches_;

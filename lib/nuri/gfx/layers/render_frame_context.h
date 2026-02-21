@@ -25,9 +25,11 @@ struct RenderSettings {
     bool enabled = true;
     OpaqueDebugVisualization debugVisualization =
         OpaqueDebugVisualization::None;
+    bool enableInstanceCompute = true;
     bool enableMeshLod = true;
     int32_t forcedMeshLod = -1;
     glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
+    bool enableInstanceAnimation = true;
     bool enableTessellation = false;
     float tessNearDistance = 1.0f;
     float tessFarDistance = 8.0f;
@@ -59,6 +61,8 @@ struct OpaqueFrameMetrics {
   uint32_t totalInstances = 0;
   uint32_t visibleInstances = 0;
   uint32_t instancedDraws = 0;
+  uint32_t indirectDrawCalls = 0;
+  uint32_t indirectCommands = 0;
   uint32_t tessellatedDraws = 0;
   uint32_t tessellatedInstances = 0;
   uint32_t debugOverlayDraws = 0;

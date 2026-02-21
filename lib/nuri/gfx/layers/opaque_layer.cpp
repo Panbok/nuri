@@ -3,6 +3,7 @@
 #include "nuri/gfx/layers/opaque_layer.h"
 
 #include "nuri/core/log.h"
+#include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/scene/render_scene.h"
 
@@ -19,6 +20,9 @@ constexpr uint32_t kMeshDebugColor = 0xffcc5500;
 constexpr uint32_t kComputeDispatchColor = 0xff33aa33;
 constexpr uint32_t kComputeWorkgroupSize = 32;
 constexpr uint32_t kTessellationPatchControlPoints = 3;
+constexpr size_t kIndirectCountHeaderBytes = sizeof(uint32_t);
+constexpr uint32_t kMaxIndirectCommandsPerDraw = 1024u;
+constexpr size_t kMaxDrawItemsForIndirectPath = 8192u;
 constexpr uint32_t kUnlimitedTessInstanceCap = 0u;
 constexpr float kOverlayDepthBiasConstant = -1.0f;
 constexpr float kOverlayDepthBiasSlope = -1.0f;
@@ -100,6 +104,35 @@ bool nearlyEqualThresholds(const std::array<float, 3> &a,
          std::abs(a[2] - b[2]) <= epsilon;
 }
 
+bool isSameBufferHandle(BufferHandle a, BufferHandle b) {
+  return a.index == b.index && a.generation == b.generation;
+}
+
+Result<bool, std::string>
+appendUniqueDependency(std::pmr::vector<BufferHandle> &dependencies,
+                       BufferHandle handle, std::string_view context) {
+  if (!nuri::isValid(handle)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  for (const BufferHandle existing : dependencies) {
+    if (isSameBufferHandle(existing, handle)) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+  }
+  if (dependencies.size() >= kMaxDependencyBuffers) {
+    return Result<bool, std::string>::makeError(
+        std::string(context) + ": dependency buffer count exceeds " +
+        std::to_string(kMaxDependencyBuffers));
+  }
+  dependencies.push_back(handle);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+uint32_t saturateToU32(size_t value) {
+  return static_cast<uint32_t>(
+      std::min(value, size_t(std::numeric_limits<uint32_t>::max())));
+}
+
 std::optional<uint32_t> resolveAvailableLod(const Submesh &submesh,
                                             uint32_t desiredLod) {
   const uint32_t lodCount =
@@ -162,6 +195,51 @@ struct BatchKeyHash {
   }
 };
 
+struct DrawIndexedIndirectCommand {
+  uint32_t indexCount = 0;
+  uint32_t instanceCount = 0;
+  uint32_t firstIndex = 0;
+  int32_t vertexOffset = 0;
+  uint32_t firstInstance = 0;
+};
+static_assert(sizeof(DrawIndexedIndirectCommand) == 20);
+
+struct IndirectGroupKey {
+  RenderPipelineHandle pipeline{};
+  BufferHandle indexBuffer{};
+  uint64_t indexBufferOffset = 0;
+  IndexFormat indexFormat = IndexFormat::U32;
+  uint64_t vertexBufferAddress = 0;
+
+  bool operator==(const IndirectGroupKey &other) const {
+    return pipeline.index == other.pipeline.index &&
+           pipeline.generation == other.pipeline.generation &&
+           indexBuffer.index == other.indexBuffer.index &&
+           indexBuffer.generation == other.indexBuffer.generation &&
+           indexBufferOffset == other.indexBufferOffset &&
+           indexFormat == other.indexFormat &&
+           vertexBufferAddress == other.vertexBufferAddress;
+  }
+};
+
+struct IndirectGroupKeyHash {
+  size_t operator()(const IndirectGroupKey &key) const noexcept {
+    size_t h = 1469598103934665603ull;
+    const auto mix = [&h](uint64_t v) {
+      h ^= static_cast<size_t>(v);
+      h *= 1099511628211ull;
+    };
+    mix((static_cast<uint64_t>(key.pipeline.generation) << 32u) |
+        key.pipeline.index);
+    mix((static_cast<uint64_t>(key.indexBuffer.generation) << 32u) |
+        key.indexBuffer.index);
+    mix(key.indexBufferOffset);
+    mix(static_cast<uint64_t>(key.indexFormat));
+    mix(key.vertexBufferAddress);
+    return h;
+  }
+};
+
 } // namespace
 
 OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
@@ -181,6 +259,9 @@ OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
       instanceRemap_(resolveMemoryResource(memory)),
       drawPushConstants_(resolveMemoryResource(memory)),
       drawItems_(resolveMemoryResource(memory)),
+      indirectPushConstants_(resolveMemoryResource(memory)),
+      indirectDrawItems_(resolveMemoryResource(memory)),
+      indirectCommandUploadBytes_(resolveMemoryResource(memory)),
       overlayDrawItems_(resolveMemoryResource(memory)),
       passDrawItems_(resolveMemoryResource(memory)),
       preDispatches_(resolveMemoryResource(memory)),
@@ -235,6 +316,9 @@ void OpaqueLayer::onDetach() {
   instanceRemap_.clear();
   drawPushConstants_.clear();
   drawItems_.clear();
+  indirectPushConstants_.clear();
+  indirectDrawItems_.clear();
+  indirectCommandUploadBytes_.clear();
   overlayDrawItems_.clear();
   passDrawItems_.clear();
   preDispatches_.clear();
@@ -312,6 +396,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     instanceLodCentersInvRadiusSq_.reserve(instanceCount);
     instanceAlbedoTexIds_.reserve(instanceCount);
 
+    const bool animateInstances = settings.opaque.enableInstanceAnimation;
     for (size_t i = 0; i < instanceCount; ++i) {
       const OpaqueRenderable *renderable = renderableTemplates_[i].renderable;
       if (!renderable || !renderable->albedoTexture || !renderable->model) {
@@ -324,8 +409,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       }
 
       const glm::vec3 center = glm::vec3(renderable->modelMatrix[3]);
-      instanceCentersPhase_.push_back(
-          glm::vec4(center, deterministicPhase(static_cast<uint32_t>(i))));
+      instanceCentersPhase_.push_back(glm::vec4(
+          center, animateInstances ? deterministicPhase(static_cast<uint32_t>(i))
+                                   : 0.0f));
       glm::mat4 baseMatrix = renderable->modelMatrix;
       baseMatrix[3] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
       instanceBaseMatrices_.push_back(baseMatrix);
@@ -574,30 +660,65 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     NURI_PROFILER_ZONE_END();
   }
   const auto refreshTemplateGeometry =
-      [this](MeshDrawTemplate &templateEntry,
-             std::string_view context) -> Result<bool, std::string> {
+      [this](MeshDrawTemplate &templateEntry) -> Result<bool, std::string> {
     GeometryAllocationView geometry{};
     if (!gpu_.resolveGeometry(templateEntry.geometryHandle, geometry)) {
       return Result<bool, std::string>::makeError(
-          std::string(context) + ": failed to refresh geometry");
+          "OpaqueLayer::buildRenderPasses: failed to refresh geometry");
     }
     if (!nuri::isValid(geometry.vertexBuffer) ||
         !nuri::isValid(geometry.indexBuffer) ||
+        !gpu_.isValid(geometry.vertexBuffer) ||
         !gpu_.isValid(geometry.indexBuffer)) {
       return Result<bool, std::string>::makeError(
-          std::string(context) + ": refreshed geometry is invalid");
+          "OpaqueLayer::buildRenderPasses: refreshed geometry is invalid");
     }
     const uint64_t refreshedVertexAddress = gpu_.getBufferDeviceAddress(
         geometry.vertexBuffer, geometry.vertexByteOffset);
     if (refreshedVertexAddress == 0) {
       return Result<bool, std::string>::makeError(
-          std::string(context) + ": refreshed vertex address is invalid");
+          "OpaqueLayer::buildRenderPasses: refreshed vertex address is "
+          "invalid");
     }
     templateEntry.indexBuffer = geometry.indexBuffer;
     templateEntry.indexBufferOffset = geometry.indexByteOffset;
     templateEntry.vertexBufferAddress = refreshedVertexAddress;
     return Result<bool, std::string>::makeResult(true);
   };
+  {
+    NURI_PROFILER_ZONE("OpaqueLayer.sync_template_geometry",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    GeometryAllocationHandle cachedHandle{};
+    BufferHandle cachedIndexBuffer{};
+    uint64_t cachedIndexBufferOffset = 0;
+    uint64_t cachedVertexBufferAddress = 0;
+    bool hasCachedGeometry = false;
+
+    for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+      const bool sameAsCached =
+          hasCachedGeometry &&
+          templateEntry.geometryHandle.index == cachedHandle.index &&
+          templateEntry.geometryHandle.generation == cachedHandle.generation;
+      if (sameAsCached) {
+        templateEntry.indexBuffer = cachedIndexBuffer;
+        templateEntry.indexBufferOffset = cachedIndexBufferOffset;
+        templateEntry.vertexBufferAddress = cachedVertexBufferAddress;
+        continue;
+      }
+
+      auto refreshResult = refreshTemplateGeometry(templateEntry);
+      if (refreshResult.hasError()) {
+        return refreshResult;
+      }
+
+      cachedHandle = templateEntry.geometryHandle;
+      cachedIndexBuffer = templateEntry.indexBuffer;
+      cachedIndexBufferOffset = templateEntry.indexBufferOffset;
+      cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
+      hasCachedGeometry = true;
+    }
+    NURI_PROFILER_ZONE_END();
+  }
   bool usedUniformFastPath = false;
   bool usedUniformAutoLodFastPath = false;
   bool reusedUniformAutoLodFastPath = false;
@@ -618,19 +739,6 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (!templateEntry.submesh) {
       return Result<bool, std::string>::makeError(
           "OpaqueLayer::buildRenderPasses: invalid auto-LOD submesh");
-    }
-    if (!gpu_.isValid(templateEntry.indexBuffer) ||
-        templateEntry.vertexBufferAddress == 0) {
-      auto refreshResult = refreshTemplateGeometry(
-          templateEntry, "OpaqueLayer::buildRenderPasses auto-LOD");
-      if (refreshResult.hasError()) {
-        return refreshResult;
-      }
-      for (MeshDrawTemplate &entry : meshDrawTemplates_) {
-        entry.indexBuffer = templateEntry.indexBuffer;
-        entry.indexBufferOffset = templateEntry.indexBufferOffset;
-        entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
-      }
     }
 
     const Submesh &submesh = *templateEntry.submesh;
@@ -826,20 +934,6 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     const auto lodIndex =
         resolveAvailableLod(*templateEntry.submesh, requestedLod);
     if (lodIndex) {
-      if (!gpu_.isValid(templateEntry.indexBuffer) ||
-          templateEntry.vertexBufferAddress == 0) {
-        auto refreshResult = refreshTemplateGeometry(
-            templateEntry, "OpaqueLayer::buildRenderPasses fast path");
-        if (refreshResult.hasError()) {
-          return refreshResult;
-        }
-        for (MeshDrawTemplate &entry : meshDrawTemplates_) {
-          entry.indexBuffer = templateEntry.indexBuffer;
-          entry.indexBufferOffset = templateEntry.indexBufferOffset;
-          entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
-        }
-      }
-
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
       appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
                   templateEntry.indexBufferOffset, lodRange,
@@ -884,15 +978,6 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         continue;
       }
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
-
-      if (!gpu_.isValid(templateEntry.indexBuffer) ||
-          templateEntry.vertexBufferAddress == 0) {
-        auto refreshResult = refreshTemplateGeometry(
-            templateEntry, "OpaqueLayer::buildRenderPasses generic");
-        if (refreshResult.hasError()) {
-          return refreshResult;
-        }
-      }
 
       RenderPipelineHandle selectedPipeline = baseDraw.pipeline;
       if (tessellationRequested && *lodIndex == 0 &&
@@ -968,12 +1053,24 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     batchWriteOffsets_.clear();
     batchWriteOffsets_.resize(batches.size(), 0);
 
-    size_t firstInstance = 0;
-    for (size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
-      BatchEntry &batch = batches[batchIndex];
-      batch.firstInstance = firstInstance;
-      batchWriteOffsets_[batchIndex] = firstInstance;
-      firstInstance += batch.instanceCount;
+    const bool singleRenderableInstance = instanceCount == 1;
+    if (singleRenderableInstance) {
+      size_t singleRemapCount = 0;
+      for (size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
+        BatchEntry &batch = batches[batchIndex];
+        batch.firstInstance = 0;
+        batchWriteOffsets_[batchIndex] = 0;
+        singleRemapCount = std::max(singleRemapCount, batch.instanceCount);
+      }
+      remapCount = singleRemapCount;
+    } else {
+      size_t firstInstance = 0;
+      for (size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
+        BatchEntry &batch = batches[batchIndex];
+        batch.firstInstance = firstInstance;
+        batchWriteOffsets_[batchIndex] = firstInstance;
+        firstInstance += batch.instanceCount;
+      }
     }
 
     if (shouldBuildRemap && usedUniformAutoLodFastPath) {
@@ -995,6 +1092,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         const size_t writeOffset = autoLodBucketWrites[lod]++;
         instanceRemap_[writeOffset] = instanceId;
       }
+    } else if (shouldBuildRemap && singleRenderableInstance) {
+      std::fill(instanceRemap_.begin(), instanceRemap_.end(), 0u);
     } else if (shouldBuildRemap && usedUniformFastPath) {
       for (uint32_t instanceId = 0; instanceId < instanceCount; ++instanceId) {
         instanceRemap_[instanceId] = instanceId;
@@ -1021,7 +1120,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       constants.instanceCentersPhaseAddress = instanceCentersPhaseAddress;
       constants.instanceBaseMatricesAddress = instanceBaseMatricesAddress;
       constants.instanceCount = static_cast<uint32_t>(instanceCount);
-      constants.timeSeconds = static_cast<float>(frame.timeSeconds);
+      constants.timeSeconds = settings.opaque.enableInstanceAnimation
+                                  ? static_cast<float>(frame.timeSeconds)
+                                  : 0.0f;
       constants.tessNearDistance = tessNearDistance;
       constants.tessFarDistance = tessFarDistance;
       constants.tessMinFactor = tessMinFactor;
@@ -1074,6 +1175,11 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     constants.instanceRemapAddress = instanceRemapAddress;
   }
 
+  auto indirectBuildResult = buildIndirectDraws(frameSlot, remapCount);
+  if (indirectBuildResult.hasError()) {
+    return indirectBuildResult;
+  }
+
   computePushConstants_ = PushConstants{
       .frameDataAddress = frameDataAddress,
       .vertexBufferAddress = 0,
@@ -1083,13 +1189,41 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       .instanceCentersPhaseAddress = instanceCentersPhaseAddress,
       .instanceBaseMatricesAddress = instanceBaseMatricesAddress,
       .instanceCount = static_cast<uint32_t>(instanceCount),
-      .timeSeconds = static_cast<float>(frame.timeSeconds),
+      .timeSeconds = settings.opaque.enableInstanceAnimation
+                         ? static_cast<float>(frame.timeSeconds)
+                         : 0.0f,
       .tessNearDistance = tessNearDistance,
       .tessFarDistance = tessFarDistance,
       .tessMinFactor = tessMinFactor,
       .tessMaxFactor = tessMaxFactor,
       .debugVisualizationMode = debugVisualizationMode,
   };
+
+  const bool useComputePass = settings.opaque.enableInstanceCompute;
+  if (!useComputePass && instanceCount > 0) {
+    NURI_PROFILER_ZONE("OpaqueLayer.instance_matrices_cpu",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    ScratchArena scratch;
+    ScopedScratch scopedScratch(scratch);
+    std::pmr::vector<glm::mat4> instanceMatrices(scopedScratch.resource());
+    instanceMatrices.resize(instanceCount);
+
+    for (size_t i = 0; i < instanceCount; ++i) {
+      const glm::vec3 center = glm::vec3(instanceCentersPhase_[i]);
+      const glm::mat4 translation = glm::translate(glm::mat4(1.0f), center);
+      instanceMatrices[i] = translation * instanceBaseMatrices_[i];
+    }
+
+    const std::span<const std::byte> matricesBytes{
+        reinterpret_cast<const std::byte *>(instanceMatrices.data()),
+        instanceMatrices.size() * sizeof(glm::mat4)};
+    auto updateResult = gpu_.updateBuffer(
+        instanceMatricesRing_[frameSlot].buffer->handle(), matricesBytes, 0);
+    if (updateResult.hasError()) {
+      return updateResult;
+    }
+    NURI_PROFILER_ZONE_END();
+  }
 
   uint32_t computeDispatchX = 0;
   {
@@ -1099,28 +1233,97 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     dispatchDependencyBuffers_.clear();
     passDependencyBuffers_.clear();
 
+    const bool hasIndirectDraws = !indirectDrawItems_.empty();
+    if (!hasIndirectDraws && frameDataBuffer_ && frameDataBuffer_->valid()) {
+      auto depResult = appendUniqueDependency(
+          passDependencyBuffers_, frameDataBuffer_->handle(),
+          "OpaqueLayer::buildRenderPasses(pass)");
+      if (depResult.hasError()) {
+        return depResult;
+      }
+    }
+    if (instanceMetaBuffer_ && instanceMetaBuffer_->valid()) {
+      auto depResult = appendUniqueDependency(
+          passDependencyBuffers_, instanceMetaBuffer_->handle(),
+          "OpaqueLayer::buildRenderPasses(pass)");
+      if (depResult.hasError()) {
+        return depResult;
+      }
+    }
+    if (frameSlot < instanceRemapRing_.size() && instanceRemapRing_[frameSlot].buffer &&
+        instanceRemapRing_[frameSlot].buffer->valid()) {
+      auto depResult = appendUniqueDependency(
+          passDependencyBuffers_,
+          instanceRemapRing_[frameSlot].buffer->handle(),
+          "OpaqueLayer::buildRenderPasses(pass)");
+      if (depResult.hasError()) {
+        return depResult;
+      }
+    }
+
+    if (hasIndirectDraws) {
+      auto depResult = appendUniqueDependency(
+          passDependencyBuffers_,
+          indirectCommandRing_[frameSlot].buffer->handle(),
+          "OpaqueLayer::buildRenderPasses(pass)");
+      if (depResult.hasError()) {
+        return depResult;
+      }
+    }
+
     if (instanceCount > 0) {
-      dispatchDependencyBuffers_.push_back(
-          instanceMatricesRing_[frameSlot].buffer->handle());
-      passDependencyBuffers_.push_back(
-          instanceMatricesRing_[frameSlot].buffer->handle());
+      auto passDepResult = appendUniqueDependency(
+          passDependencyBuffers_,
+          instanceMatricesRing_[frameSlot].buffer->handle(),
+          "OpaqueLayer::buildRenderPasses(pass)");
+      if (passDepResult.hasError()) {
+        return passDepResult;
+      }
 
-      const uint32_t dispatchX =
-          static_cast<uint32_t>((instanceCount + (kComputeWorkgroupSize - 1)) /
-                                kComputeWorkgroupSize);
-      computeDispatchX = std::max(dispatchX, 1u);
+      if (useComputePass) {
+        if (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid()) {
+          auto depResult = appendUniqueDependency(
+              dispatchDependencyBuffers_, instanceCentersPhaseBuffer_->handle(),
+              "OpaqueLayer::buildRenderPasses(dispatch)");
+          if (depResult.hasError()) {
+            return depResult;
+          }
+        }
+        if (instanceBaseMatricesBuffer_ &&
+            instanceBaseMatricesBuffer_->valid()) {
+          auto depResult = appendUniqueDependency(
+              dispatchDependencyBuffers_, instanceBaseMatricesBuffer_->handle(),
+              "OpaqueLayer::buildRenderPasses(dispatch)");
+          if (depResult.hasError()) {
+            return depResult;
+          }
+        }
+        auto dispatchDepResult = appendUniqueDependency(
+            dispatchDependencyBuffers_,
+            instanceMatricesRing_[frameSlot].buffer->handle(),
+            "OpaqueLayer::buildRenderPasses(dispatch)");
+        if (dispatchDepResult.hasError()) {
+          return dispatchDepResult;
+        }
 
-      ComputeDispatchItem dispatch{};
-      dispatch.pipeline = computePipelineHandle_;
-      dispatch.dispatch = {.x = computeDispatchX, .y = 1u, .z = 1u};
-      dispatch.pushConstants = std::span<const std::byte>(
-          reinterpret_cast<const std::byte *>(&computePushConstants_),
-          sizeof(computePushConstants_));
-      dispatch.dependencyBuffers = std::span<const BufferHandle>(
-          dispatchDependencyBuffers_.data(), dispatchDependencyBuffers_.size());
-      dispatch.debugLabel = "Opaque Instance Compute";
-      dispatch.debugColor = kComputeDispatchColor;
-      preDispatches_.push_back(dispatch);
+        const uint32_t dispatchX = static_cast<uint32_t>(
+            (instanceCount + (kComputeWorkgroupSize - 1)) /
+            kComputeWorkgroupSize);
+        computeDispatchX = std::max(dispatchX, 1u);
+
+        ComputeDispatchItem dispatch{};
+        dispatch.pipeline = computePipelineHandle_;
+        dispatch.dispatch = {.x = computeDispatchX, .y = 1u, .z = 1u};
+        dispatch.pushConstants = std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(&computePushConstants_),
+            sizeof(computePushConstants_));
+        dispatch.dependencyBuffers = std::span<const BufferHandle>(
+            dispatchDependencyBuffers_.data(),
+            dispatchDependencyBuffers_.size());
+        dispatch.debugLabel = "Opaque Instance Compute";
+        dispatch.debugColor = kComputeDispatchColor;
+        preDispatches_.push_back(dispatch);
+      }
     }
     NURI_PROFILER_ZONE_END();
   }
@@ -1252,32 +1455,37 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     }
   }
 
-  passDrawItems_.reserve(drawItems_.size() + overlayDrawItems_.size());
-  passDrawItems_.insert(passDrawItems_.end(), drawItems_.begin(),
-                        drawItems_.end());
+  const std::span<const DrawItem> baseDrawItems =
+      indirectDrawItems_.empty()
+          ? std::span<const DrawItem>(drawItems_.data(), drawItems_.size())
+          : std::span<const DrawItem>(indirectDrawItems_.data(),
+                                      indirectDrawItems_.size());
+  passDrawItems_.reserve(baseDrawItems.size() + overlayDrawItems_.size());
+  passDrawItems_.insert(passDrawItems_.end(), baseDrawItems.begin(),
+                        baseDrawItems.end());
   passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
                         overlayDrawItems_.end());
 
-  frame.metrics.opaque.totalInstances = static_cast<uint32_t>(
-      std::min(instanceCount, size_t(std::numeric_limits<uint32_t>::max())));
-  frame.metrics.opaque.visibleInstances = static_cast<uint32_t>(
-      std::min(remapCount, size_t(std::numeric_limits<uint32_t>::max())));
-  frame.metrics.opaque.instancedDraws = static_cast<uint32_t>(std::min(
-      drawItems_.size(), size_t(std::numeric_limits<uint32_t>::max())));
-  frame.metrics.opaque.tessellatedDraws = static_cast<uint32_t>(
-      std::min(tessellatedDraws, size_t(std::numeric_limits<uint32_t>::max())));
-  frame.metrics.opaque.tessellatedInstances = static_cast<uint32_t>(std::min(
-      tessellatedInstances, size_t(std::numeric_limits<uint32_t>::max())));
-  frame.metrics.opaque.debugOverlayDraws = static_cast<uint32_t>(std::min(
-      debugOverlayDraws, size_t(std::numeric_limits<uint32_t>::max())));
+  size_t indirectCommandCount = 0;
+  for (const DrawItem &indirectDraw : indirectDrawItems_) {
+    indirectCommandCount += indirectDraw.indirectDrawCount;
+  }
+
+  frame.metrics.opaque.totalInstances = saturateToU32(instanceCount);
+  frame.metrics.opaque.visibleInstances = saturateToU32(remapCount);
+  frame.metrics.opaque.instancedDraws = saturateToU32(drawItems_.size());
+  frame.metrics.opaque.indirectDrawCalls =
+      saturateToU32(indirectDrawItems_.size());
+  frame.metrics.opaque.indirectCommands = saturateToU32(indirectCommandCount);
+  frame.metrics.opaque.tessellatedDraws = saturateToU32(tessellatedDraws);
+  frame.metrics.opaque.tessellatedInstances =
+      saturateToU32(tessellatedInstances);
+  frame.metrics.opaque.debugOverlayDraws = saturateToU32(debugOverlayDraws);
   frame.metrics.opaque.debugOverlayFallbackDraws =
-      static_cast<uint32_t>(std::min(
-          debugOverlayFallbackDraws,
-          size_t(std::numeric_limits<uint32_t>::max())));
-  frame.metrics.opaque.debugPatchHeatmapDraws = static_cast<uint32_t>(std::min(
-      debugPatchHeatmapDraws, size_t(std::numeric_limits<uint32_t>::max())));
-  frame.metrics.opaque.computeDispatches = static_cast<uint32_t>(std::min(
-      preDispatches_.size(), size_t(std::numeric_limits<uint32_t>::max())));
+      saturateToU32(debugOverlayFallbackDraws);
+  frame.metrics.opaque.debugPatchHeatmapDraws =
+      saturateToU32(debugPatchHeatmapDraws);
+  frame.metrics.opaque.computeDispatches = saturateToU32(preDispatches_.size());
   frame.metrics.opaque.computeDispatchX = computeDispatchX;
 
   ++statsLogFrameCounter_;
@@ -1286,10 +1494,14 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     NURI_LOG_DEBUG("OpaqueLayer::buildRenderPasses: totalInstances=%zu "
                    "visibleInstances=%zu "
                    "instancedDraws=%zu tessellatedDraws=%zu "
-                   "tessellatedInstances=%zu overlayDraws=%zu "
+                   "tessellatedInstances=%zu indirectDrawCalls=%zu "
+                   "indirectCommands=%zu "
+                   "overlayDraws=%zu "
                    "overlayFallbackDraws=%zu",
                    instanceCount, remapCount, drawItems_.size(),
-                   tessellatedDraws, tessellatedInstances, debugOverlayDraws,
+                   tessellatedDraws, tessellatedInstances,
+                   indirectDrawItems_.size(), indirectCommandCount,
+                   debugOverlayDraws,
                    debugOverlayFallbackDraws);
   }
 
@@ -1315,6 +1527,184 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
   frame.sharedDepthTexture = depthTexture_;
   out.push_back(pass);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
+                                                           size_t remapCount) {
+  indirectPushConstants_.clear();
+  indirectDrawItems_.clear();
+  indirectCommandUploadBytes_.clear();
+
+  const bool canUseIndirectPath =
+      !drawItems_.empty() &&
+      drawItems_.size() <= kMaxDrawItemsForIndirectPath;
+  if (!canUseIndirectPath) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  NURI_PROFILER_ZONE("OpaqueLayer.indirect_pack",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
+  if (drawItems_.size() != drawPushConstants_.size()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::buildIndirectDraws: draw and push constant count "
+        "mismatch");
+  }
+
+  ScratchArena scratch;
+  ScopedScratch scopedScratch(scratch);
+
+  struct IndirectGroup {
+    DrawItem baseDraw{};
+    PushConstants constants{};
+    std::pmr::vector<DrawIndexedIndirectCommand> commands;
+
+    explicit IndirectGroup(std::pmr::memory_resource *mem) : commands(mem) {}
+  };
+
+  std::pmr::vector<IndirectGroup> indirectGroups(scopedScratch.resource());
+  indirectGroups.reserve(drawItems_.size());
+  std::pmr::unordered_map<IndirectGroupKey, size_t, IndirectGroupKeyHash>
+      indirectLookup(scopedScratch.resource());
+  indirectLookup.reserve(drawItems_.size());
+
+  for (size_t i = 0; i < drawItems_.size(); ++i) {
+    const DrawItem &draw = drawItems_[i];
+    if (draw.indexCount == 0) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildIndirectDraws: non-indexed opaque draws are not "
+          "supported in indirect mode");
+    }
+    if (draw.instanceCount == 0) {
+      continue;
+    }
+    if (draw.firstInstance > remapCount ||
+        draw.instanceCount > remapCount - draw.firstInstance) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildIndirectDraws: indirect draw instance range is "
+          "out of remap bounds");
+    }
+
+    const PushConstants &constants = drawPushConstants_[i];
+    const IndirectGroupKey key{
+        .pipeline = draw.pipeline,
+        .indexBuffer = draw.indexBuffer,
+        .indexBufferOffset = draw.indexBufferOffset,
+        .indexFormat = draw.indexFormat,
+        .vertexBufferAddress = constants.vertexBufferAddress,
+    };
+
+    auto it = indirectLookup.find(key);
+    if (it == indirectLookup.end()) {
+      indirectGroups.emplace_back(scopedScratch.resource());
+      IndirectGroup &group = indirectGroups.back();
+      group.baseDraw = draw;
+      group.constants = constants;
+      group.commands.reserve(4);
+      const size_t groupIndex = indirectGroups.size() - 1;
+      indirectLookup.emplace(key, groupIndex);
+      it = indirectLookup.find(key);
+    }
+
+    DrawIndexedIndirectCommand command{};
+    command.indexCount = draw.indexCount;
+    command.instanceCount = draw.instanceCount;
+    command.firstIndex = draw.firstIndex;
+    command.vertexOffset = draw.vertexOffset;
+    command.firstInstance = draw.firstInstance;
+    indirectGroups[it->second].commands.push_back(command);
+  }
+
+  size_t requiredBytes = 0;
+  size_t totalIndirectDrawItems = 0;
+  for (const IndirectGroup &group : indirectGroups) {
+    const size_t commandCount = group.commands.size();
+    if (commandCount == 0) {
+      continue;
+    }
+    const size_t chunkCount =
+        (commandCount + (kMaxIndirectCommandsPerDraw - 1u)) /
+        kMaxIndirectCommandsPerDraw;
+    totalIndirectDrawItems += chunkCount;
+    requiredBytes +=
+        chunkCount * kIndirectCountHeaderBytes +
+        commandCount * sizeof(DrawIndexedIndirectCommand);
+  }
+  requiredBytes = std::max(requiredBytes, kIndirectCountHeaderBytes);
+  auto indirectCapacityResult = ensureIndirectCommandRingCapacity(requiredBytes);
+  if (indirectCapacityResult.hasError()) {
+    return indirectCapacityResult;
+  }
+  if (frameSlot >= indirectCommandRing_.size() ||
+      !indirectCommandRing_[frameSlot].buffer ||
+      !indirectCommandRing_[frameSlot].buffer->valid()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::buildIndirectDraws: indirect ring buffer slot is "
+        "invalid");
+  }
+
+  if (!indirectGroups.empty()) {
+    indirectCommandUploadBytes_.reserve(requiredBytes);
+
+    indirectPushConstants_.reserve(totalIndirectDrawItems);
+    indirectDrawItems_.reserve(totalIndirectDrawItems);
+    const BufferHandle indirectBufferHandle =
+        indirectCommandRing_[frameSlot].buffer->handle();
+
+    for (const IndirectGroup &group : indirectGroups) {
+      if (group.commands.empty()) {
+        continue;
+      }
+
+      size_t commandCursor = 0;
+      while (commandCursor < group.commands.size()) {
+        const size_t remaining = group.commands.size() - commandCursor;
+        const uint32_t drawCount = static_cast<uint32_t>(std::min<size_t>(
+            remaining, static_cast<size_t>(kMaxIndirectCommandsPerDraw)));
+        const size_t commandByteOffset =
+            commandCursor * sizeof(DrawIndexedIndirectCommand);
+        const size_t commandByteSize =
+            static_cast<size_t>(drawCount) * sizeof(DrawIndexedIndirectCommand);
+
+        const size_t chunkOffset = indirectCommandUploadBytes_.size();
+        indirectCommandUploadBytes_.insert(
+            indirectCommandUploadBytes_.end(),
+            reinterpret_cast<const std::byte *>(&drawCount),
+            reinterpret_cast<const std::byte *>(&drawCount) +
+                kIndirectCountHeaderBytes);
+        indirectCommandUploadBytes_.insert(
+            indirectCommandUploadBytes_.end(),
+            reinterpret_cast<const std::byte *>(group.commands.data()) +
+                commandByteOffset,
+            reinterpret_cast<const std::byte *>(group.commands.data()) +
+                commandByteOffset + commandByteSize);
+
+        indirectPushConstants_.push_back(group.constants);
+        DrawItem indirectDraw = group.baseDraw;
+        indirectDraw.command = DrawCommandType::IndexedIndirect;
+        indirectDraw.indirectBuffer = indirectBufferHandle;
+        indirectDraw.indirectBufferOffset = chunkOffset + kIndirectCountHeaderBytes;
+        indirectDraw.indirectDrawCount = drawCount;
+        indirectDraw.indirectStride = sizeof(DrawIndexedIndirectCommand);
+        indirectDraw.pushConstants = std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(&indirectPushConstants_.back()),
+            sizeof(PushConstants));
+        indirectDrawItems_.push_back(indirectDraw);
+
+        commandCursor += drawCount;
+      }
+    }
+
+    const std::span<const std::byte> uploadBytes{
+        indirectCommandUploadBytes_.data(), indirectCommandUploadBytes_.size()};
+    auto updateIndirectResult = gpu_.updateBuffer(
+        indirectCommandRing_[frameSlot].buffer->handle(), uploadBytes, 0);
+    if (updateIndirectResult.hasError()) {
+      return updateIndirectResult;
+    }
+  }
+
+  NURI_PROFILER_ZONE_END();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1418,6 +1808,7 @@ OpaqueLayer::ensureFrameDataBufferCapacity(size_t requiredBytes) {
   }
 
   if (frameDataBuffer_ && frameDataBuffer_->valid()) {
+    gpu_.waitIdle();
     gpu_.destroyBuffer(frameDataBuffer_->handle());
     frameDataBuffer_.reset();
     frameDataBufferCapacityBytes_ = 0;
@@ -1446,6 +1837,7 @@ OpaqueLayer::ensureCentersPhaseBufferCapacity(size_t requiredBytes) {
   }
 
   if (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid()) {
+    gpu_.waitIdle();
     gpu_.destroyBuffer(instanceCentersPhaseBuffer_->handle());
     instanceCentersPhaseBuffer_.reset();
     instanceCentersPhaseBufferCapacityBytes_ = 0;
@@ -1475,6 +1867,7 @@ OpaqueLayer::ensureInstanceBaseMatricesBufferCapacity(size_t requiredBytes) {
   }
 
   if (instanceBaseMatricesBuffer_ && instanceBaseMatricesBuffer_->valid()) {
+    gpu_.waitIdle();
     gpu_.destroyBuffer(instanceBaseMatricesBuffer_->handle());
     instanceBaseMatricesBuffer_.reset();
     instanceBaseMatricesBufferCapacityBytes_ = 0;
@@ -1504,6 +1897,7 @@ OpaqueLayer::ensureInstanceMetaBufferCapacity(size_t requiredBytes) {
   }
 
   if (instanceMetaBuffer_ && instanceMetaBuffer_->valid()) {
+    gpu_.waitIdle();
     gpu_.destroyBuffer(instanceMetaBuffer_->handle());
     instanceMetaBuffer_.reset();
     instanceMetaBufferCapacityBytes_ = 0;
@@ -1529,9 +1923,12 @@ OpaqueLayer::ensureRingBufferCount(uint32_t requiredCount) {
     requiredCount = 1;
   }
   if (instanceMatricesRing_.size() == requiredCount &&
-      instanceRemapRing_.size() == requiredCount) {
+      instanceRemapRing_.size() == requiredCount &&
+      indirectCommandRing_.size() == requiredCount) {
     return Result<bool, std::string>::makeResult(true);
   }
+
+  gpu_.waitIdle();
 
   for (DynamicBufferSlot &slot : instanceMatricesRing_) {
     if (slot.buffer && slot.buffer->valid()) {
@@ -1543,17 +1940,34 @@ OpaqueLayer::ensureRingBufferCount(uint32_t requiredCount) {
       gpu_.destroyBuffer(slot.buffer->handle());
     }
   }
+  for (DynamicBufferSlot &slot : indirectCommandRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+  }
 
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
+  indirectCommandRing_.clear();
   instanceMatricesRing_.resize(requiredCount);
   instanceRemapRing_.resize(requiredCount);
+  indirectCommandRing_.resize(requiredCount);
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
 OpaqueLayer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
   const size_t requested = std::max(requiredBytes, sizeof(glm::mat4));
+  bool needsGrowth = false;
+  for (const DynamicBufferSlot &slot : instanceMatricesRing_) {
+    if (slot.buffer && slot.buffer->valid() && slot.capacityBytes < requested) {
+      needsGrowth = true;
+      break;
+    }
+  }
+  if (needsGrowth) {
+    gpu_.waitIdle();
+  }
   for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceMatricesRing_[i];
     if (slot.buffer && slot.buffer->valid() &&
@@ -1585,6 +1999,16 @@ OpaqueLayer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
 Result<bool, std::string>
 OpaqueLayer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
   const size_t requested = std::max(requiredBytes, sizeof(uint32_t));
+  bool needsGrowth = false;
+  for (const DynamicBufferSlot &slot : instanceRemapRing_) {
+    if (slot.buffer && slot.buffer->valid() && slot.capacityBytes < requested) {
+      needsGrowth = true;
+      break;
+    }
+  }
+  if (needsGrowth) {
+    gpu_.waitIdle();
+  }
   for (size_t i = 0; i < instanceRemapRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceRemapRing_[i];
     if (slot.buffer && slot.buffer->valid() &&
@@ -1604,6 +2028,47 @@ OpaqueLayer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
     };
     auto createResult = Buffer::create(
         gpu_, desc, "opaque_instance_remap_buffer_" + std::to_string(i));
+    if (createResult.hasError()) {
+      return Result<bool, std::string>::makeError(createResult.error());
+    }
+    slot.buffer = std::move(createResult.value());
+    slot.capacityBytes = requested;
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+OpaqueLayer::ensureIndirectCommandRingCapacity(size_t requiredBytes) {
+  const size_t requested = std::max(requiredBytes, kIndirectCountHeaderBytes);
+  bool needsGrowth = false;
+  for (const DynamicBufferSlot &slot : indirectCommandRing_) {
+    if (slot.buffer && slot.buffer->valid() && slot.capacityBytes < requested) {
+      needsGrowth = true;
+      break;
+    }
+  }
+  if (needsGrowth) {
+    gpu_.waitIdle();
+  }
+  for (size_t i = 0; i < indirectCommandRing_.size(); ++i) {
+    DynamicBufferSlot &slot = indirectCommandRing_[i];
+    if (slot.buffer && slot.buffer->valid() &&
+        slot.capacityBytes >= requested) {
+      continue;
+    }
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+      slot.buffer.reset();
+      slot.capacityBytes = 0;
+    }
+
+    const BufferDesc desc{
+        .usage = BufferUsage::Storage | BufferUsage::Indirect,
+        .storage = Storage::Device,
+        .size = requested,
+    };
+    auto createResult = Buffer::create(
+        gpu_, desc, "opaque_indirect_commands_buffer_" + std::to_string(i));
     if (createResult.hasError()) {
       return Result<bool, std::string>::makeError(createResult.error());
     }
@@ -2173,8 +2638,16 @@ void OpaqueLayer::destroyBuffers() {
     slot.buffer.reset();
     slot.capacityBytes = 0;
   }
+  for (DynamicBufferSlot &slot : indirectCommandRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0;
+  }
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
+  indirectCommandRing_.clear();
 }
 
 } // namespace nuri

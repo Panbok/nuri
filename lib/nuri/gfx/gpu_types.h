@@ -62,7 +62,33 @@ enum class Format : uint8_t {
   Count
 };
 
-enum class BufferUsage : uint8_t { Vertex, Index, Uniform, Storage, Count };
+enum class BufferUsage : uint8_t {
+  None = 0,
+  Vertex = 1u << 0u,
+  Index = 1u << 1u,
+  Uniform = 1u << 2u,
+  Storage = 1u << 3u,
+  Indirect = 1u << 4u,
+};
+
+constexpr BufferUsage operator|(BufferUsage lhs, BufferUsage rhs) {
+  return static_cast<BufferUsage>(static_cast<uint8_t>(lhs) |
+                                  static_cast<uint8_t>(rhs));
+}
+
+constexpr BufferUsage operator&(BufferUsage lhs, BufferUsage rhs) {
+  return static_cast<BufferUsage>(static_cast<uint8_t>(lhs) &
+                                  static_cast<uint8_t>(rhs));
+}
+
+constexpr BufferUsage &operator|=(BufferUsage &lhs, BufferUsage rhs) {
+  lhs = lhs | rhs;
+  return lhs;
+}
+
+constexpr bool hasBufferUsage(BufferUsage usage, BufferUsage flags) {
+  return (usage & flags) != BufferUsage::None;
+}
 
 enum class TextureUsage : uint8_t {
   Sampled,

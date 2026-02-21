@@ -52,20 +52,24 @@ Format fromLvkFormat(lvk::Format format) {
   return Format::RGBA8_UNORM;
 }
 
-lvk::BufferUsageBits toLvkBufferUsage(BufferUsage usage) {
-  switch (usage) {
-  case BufferUsage::Vertex:
-    return lvk::BufferUsageBits_Vertex;
-  case BufferUsage::Index:
-    return lvk::BufferUsageBits_Index;
-  case BufferUsage::Uniform:
-    return lvk::BufferUsageBits_Uniform;
-  case BufferUsage::Storage:
-    return lvk::BufferUsageBits_Storage;
-  case BufferUsage::Count:
-    break;
+uint8_t toLvkBufferUsage(BufferUsage usage) {
+  uint8_t bits = 0;
+  if (hasBufferUsage(usage, BufferUsage::Vertex)) {
+    bits |= lvk::BufferUsageBits_Vertex;
   }
-  return lvk::BufferUsageBits_Vertex;
+  if (hasBufferUsage(usage, BufferUsage::Index)) {
+    bits |= lvk::BufferUsageBits_Index;
+  }
+  if (hasBufferUsage(usage, BufferUsage::Uniform)) {
+    bits |= lvk::BufferUsageBits_Uniform;
+  }
+  if (hasBufferUsage(usage, BufferUsage::Storage)) {
+    bits |= lvk::BufferUsageBits_Storage;
+  }
+  if (hasBufferUsage(usage, BufferUsage::Indirect)) {
+    bits |= lvk::BufferUsageBits_Indirect;
+  }
+  return bits;
 }
 
 lvk::StorageType toLvkStorageType(Storage storage) {
@@ -614,9 +618,15 @@ LvkGPUDevice::createBuffer(const BufferDesc &desc, std::string_view debugName) {
   std::string debugNameStorage(debugName);
   const char *debugNameCStr =
       debugNameStorage.empty() ? "" : debugNameStorage.c_str();
+  const uint8_t lvkUsage = toLvkBufferUsage(desc.usage);
+  if (lvkUsage == 0) {
+    NURI_LOG_WARNING("LvkGPUDevice::createBuffer: Buffer usage is empty");
+    return Result<BufferHandle, std::string>::makeError(
+        "Buffer usage is empty");
+  }
 
   lvk::BufferDesc bufferDesc{
-      .usage = static_cast<uint8_t>(toLvkBufferUsage(desc.usage)),
+      .usage = lvkUsage,
       .storage = toLvkStorageType(desc.storage),
       .size = resolvedSize,
       .data = desc.data.empty() ? nullptr : desc.data.data(),
@@ -1244,6 +1254,8 @@ void LvkGPUDevice::releaseGeometry(GeometryAllocationHandle h) {
 
 Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
+  static_assert(kMaxDependencyBuffers <=
+                lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES);
   if (frame.passes.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -1259,11 +1271,16 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       [this](std::span<const BufferHandle> dependencyBuffers,
              lvk::Dependencies &deps,
              std::string_view context) -> Result<bool, std::string> {
+    if (dependencyBuffers.size() > kMaxDependencyBuffers) {
+      return Result<bool, std::string>::makeError(
+          std::string(context) + ": dependency buffer count exceeds " +
+          std::to_string(kMaxDependencyBuffers));
+    }
     if (dependencyBuffers.size() >
         lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES) {
       return Result<bool, std::string>::makeError(
-          std::string(context) + ": dependency buffer count exceeds " +
-          std::to_string(lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES));
+          std::string(context) + ": dependency buffer count exceeds backend "
+          "submit limit");
     }
 
     size_t dstIndex = 0;
@@ -1440,7 +1457,13 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
             draw.vertexBufferOffset);
       }
 
-      if (draw.indexCount > 0) {
+      const bool isDirectDraw = draw.command == DrawCommandType::Direct;
+      const bool isIndexedIndirectDraw =
+          draw.command == DrawCommandType::IndexedIndirect ||
+          draw.command == DrawCommandType::IndexedIndirectCount;
+      const bool requiresIndexBuffer = isIndexedIndirectDraw ||
+                                       (isDirectDraw && draw.indexCount > 0);
+      if (requiresIndexBuffer) {
         if (!impl_->buffers.isValid(draw.indexBuffer)) {
           commandBuffer.cmdEndRendering();
           if (!pass.debugLabel.empty()) {
@@ -1489,7 +1512,47 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
             draw.pushConstants.size(), 0);
       }
 
-      if (draw.indexCount > 0) {
+      if (draw.command == DrawCommandType::IndexedIndirect) {
+        if (!impl_->buffers.isValid(draw.indirectBuffer)) {
+          commandBuffer.cmdEndRendering();
+          if (!pass.debugLabel.empty()) {
+            commandBuffer.cmdPopDebugGroupLabel();
+          }
+          return Result<bool, std::string>::makeError(
+              "Indirect buffer is invalid");
+        }
+        if (draw.indirectDrawCount > 0) {
+          commandBuffer.cmdDrawIndexedIndirect(
+              impl_->buffers.getLvkHandle(draw.indirectBuffer),
+              draw.indirectBufferOffset, draw.indirectDrawCount,
+              draw.indirectStride);
+        }
+      } else if (draw.command == DrawCommandType::IndexedIndirectCount) {
+        if (!impl_->buffers.isValid(draw.indirectBuffer) ||
+            !impl_->buffers.isValid(draw.indirectCountBuffer)) {
+          commandBuffer.cmdEndRendering();
+          if (!pass.debugLabel.empty()) {
+            commandBuffer.cmdPopDebugGroupLabel();
+          }
+          return Result<bool, std::string>::makeError(
+              "Indirect or count buffer is invalid");
+        }
+        if (draw.indirectDrawCount > 0) {
+          if (impl_->context->supportsDrawIndexedIndirectCount()) {
+            commandBuffer.cmdDrawIndexedIndirectCount(
+                impl_->buffers.getLvkHandle(draw.indirectBuffer),
+                draw.indirectBufferOffset,
+                impl_->buffers.getLvkHandle(draw.indirectCountBuffer),
+                draw.indirectCountBufferOffset, draw.indirectDrawCount,
+                draw.indirectStride);
+          } else {
+            commandBuffer.cmdDrawIndexedIndirect(
+                impl_->buffers.getLvkHandle(draw.indirectBuffer),
+                draw.indirectBufferOffset, draw.indirectDrawCount,
+                draw.indirectStride);
+          }
+        }
+      } else if (draw.indexCount > 0) {
         commandBuffer.cmdDrawIndexed(draw.indexCount, draw.instanceCount,
                                      draw.firstIndex, draw.vertexOffset,
                                      draw.firstInstance);
