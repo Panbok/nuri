@@ -1547,6 +1547,23 @@ LvkGPUDevice::updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
   return Result<bool, std::string>::makeResult(true);
 }
 
+std::byte *LvkGPUDevice::getMappedBufferPtr(BufferHandle buffer) {
+  if (!impl_->buffers.isValid(buffer)) {
+    return nullptr;
+  }
+  const lvk::BufferHandle lvkBuf = impl_->buffers.getLvkHandle(buffer);
+  return reinterpret_cast<std::byte *>(impl_->context->getMappedPtr(lvkBuf));
+}
+
+void LvkGPUDevice::flushMappedBuffer(BufferHandle buffer, size_t offset,
+                                     size_t size) {
+  if (!impl_->buffers.isValid(buffer) || size == 0) {
+    return;
+  }
+  const lvk::BufferHandle lvkBuf = impl_->buffers.getLvkHandle(buffer);
+  impl_->context->flushMappedMemory(lvkBuf, offset, size);
+}
+
 Result<bool, std::string>
 LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);

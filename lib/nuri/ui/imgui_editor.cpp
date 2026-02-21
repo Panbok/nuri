@@ -2,6 +2,7 @@
 
 #include "nuri/ui/imgui_editor.h"
 
+#include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
@@ -264,8 +265,10 @@ void drawLogToolbar(LogModel &model, LogFilterState &filterState) {
   }
 }
 
-void drawLogMessages(const LogModel &model, LogFilterState &filterState) {
-  std::vector<size_t> visibleIndices;
+void drawLogMessages(const LogModel &model, LogFilterState &filterState,
+                     std::pmr::memory_resource *scratchResource) {
+  std::pmr::vector<size_t> visibleIndices(
+      scratchResource ? scratchResource : std::pmr::get_default_resource());
   visibleIndices.reserve(model.lines.size());
   for (size_t lineIndex = 0; lineIndex < model.lines.size(); ++lineIndex) {
     const auto &line = model.lines[lineIndex];
@@ -432,14 +435,15 @@ void drawLayerInspector(RenderSettings &renderSettings,
 
 void drawLogWindow(LogModel &model, LogFilterState &filterState,
                    RenderSettings &renderSettings,
-                   LayerSelection &selectedLayer) {
+                   LayerSelection &selectedLayer,
+                   std::pmr::memory_resource *scratchResource) {
   drawLogToolbar(model, filterState);
   ImGui::Separator();
 
   const ImGuiTableFlags tableFlags =
       ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
   if (!ImGui::BeginTable("LogAndLayerTable", 2, tableFlags)) {
-    drawLogMessages(model, filterState);
+    drawLogMessages(model, filterState, scratchResource);
     return;
   }
 
@@ -448,7 +452,7 @@ void drawLogWindow(LogModel &model, LogFilterState &filterState,
                           kLayerPanelWidth);
 
   ImGui::TableNextColumn();
-  drawLogMessages(model, filterState);
+  drawLogMessages(model, filterState, scratchResource);
 
   ImGui::TableNextColumn();
   drawLayerInspector(renderSettings, selectedLayer);
@@ -615,9 +619,14 @@ struct ImGuiEditor::Impl {
     NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
 
     if (showMetricsWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::ShowMetricsWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
       ImGui::ShowMetricsWindow(&showMetricsWindow);
+      NURI_PROFILER_ZONE_END();
     }
 
+    NURI_PROFILER_ZONE("ImGuiEditor::UpdateMetricsAndLogs",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
     fpsCounter.tick(frameDeltaSeconds, true);
     updateMetricGraphs(std::max(frameDeltaSeconds, 0.0));
 
@@ -627,6 +636,7 @@ struct ImGuiEditor::Impl {
       logUpdateAccumulatorSeconds =
           std::fmod(logUpdateAccumulatorSeconds, kLogUpdateIntervalSeconds);
     }
+    NURI_PROFILER_ZONE_END();
 
 #ifdef IMGUI_HAS_DOCK
     if (dockLayoutState.logDockId != 0) {
@@ -639,16 +649,33 @@ struct ImGuiEditor::Impl {
     setLogWindowPlacementWithoutDock(viewport);
 #endif
 
+    NURI_PROFILER_ZONE("ImGuiEditor::DrawLogWindow",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    ScopedScratch scopedScratch(scratchArena);
     ImGui::Begin(kLogWindowName);
-    drawLogWindow(logModel, logFilterState, renderSettings, selectedLayer);
+    drawLogWindow(logModel, logFilterState, renderSettings, selectedLayer,
+                  scopedScratch.resource());
     ImGui::End();
+    NURI_PROFILER_ZONE_END();
 
+    NURI_PROFILER_ZONE("ImGuiEditor::DrawFpsOverlay",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
     drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, frameMetrics);
+    NURI_PROFILER_ZONE_END();
 
+    NURI_PROFILER_ZONE("ImGuiEditor::FinalizeImGuiFrame",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
     ImGui::EndFrame();
     ImGui::Render();
+    NURI_PROFILER_ZONE_END();
 
-    return renderer->buildRenderPass(gpu.getSwapchainFormat(), frameIndex);
+    const auto passResult = [&]() {
+      NURI_PROFILER_ZONE("ImGuiEditor::BuildRenderPass",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      return renderer->buildRenderPass(gpu.getSwapchainFormat(), frameIndex);
+      NURI_PROFILER_ZONE_END();
+    }();
+    return passResult;
   }
 
   void drawDockspaceRoot() {
@@ -693,6 +720,7 @@ struct ImGuiEditor::Impl {
   LogModel logModel;
   LogFilterState logFilterState;
   MaybeDockLayoutState dockLayoutState;
+  ScratchArena scratchArena;
 };
 
 std::unique_ptr<ImGuiEditor> ImGuiEditor::create(Window &window, GPUDevice &gpu,

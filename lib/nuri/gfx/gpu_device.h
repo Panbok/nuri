@@ -88,6 +88,11 @@ public:
   virtual Result<bool, std::string>
   updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
                size_t offset = 0) = 0;
+  // Returns a persistent mapped pointer for host-visible buffers, or nullptr
+  // when direct mapping is unavailable for this buffer/backend.
+  virtual std::byte *getMappedBufferPtr(BufferHandle buffer) = 0;
+  virtual void flushMappedBuffer(BufferHandle buffer, size_t offset,
+                                 size_t size) = 0;
 
   // Shutdown
   virtual void waitIdle() = 0;

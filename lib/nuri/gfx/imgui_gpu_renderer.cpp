@@ -3,6 +3,7 @@
 #include "nuri/pch.h"
 
 #include "nuri/core/log.h"
+#include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
 
@@ -309,6 +310,7 @@ Result<bool, std::string> ImGuiGpuRenderer::ensureBuffers(uint64_t frameIndex,
 
 Result<RenderPass, std::string>
 ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   ImDrawData *dd = ImGui::GetDrawData();
   if (!dd) {
     return Result<RenderPass, std::string>::makeError(
@@ -323,6 +325,8 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
     return Result<RenderPass, std::string>::makeResult(empty);
   }
 
+  NURI_PROFILER_ZONE("ImGuiGpuRenderer::EnsurePipelineAndFont",
+                     NURI_PROFILER_COLOR_CREATE);
   auto pipelineOk = ensurePipeline(swapchainFormat);
   if (pipelineOk.hasError()) {
     return Result<RenderPass, std::string>::makeError(pipelineOk.error());
@@ -331,6 +335,7 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
   if (fontOk.hasError()) {
     return Result<RenderPass, std::string>::makeError(fontOk.error());
   }
+  NURI_PROFILER_ZONE_END();
 
   const uint32_t imageCount = std::max(1u, gpu_.getSwapchainImageCount());
   if (frames_.size() != imageCount) {
@@ -343,49 +348,76 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
       static_cast<size_t>(dd->TotalVtxCount) * sizeof(ImDrawVert);
   const size_t idxBytes =
       static_cast<size_t>(dd->TotalIdxCount) * sizeof(ImDrawIdx);
+  NURI_PROFILER_ZONE("ImGuiGpuRenderer::EnsureBuffers",
+                     NURI_PROFILER_COLOR_CREATE);
   auto bufOk = ensureBuffers(frameSlot, vtxBytes, idxBytes);
   if (bufOk.hasError()) {
     return Result<RenderPass, std::string>::makeError(bufOk.error());
   }
+  NURI_PROFILER_ZONE_END();
 
   // Upload combined vertex/index data.
+  NURI_PROFILER_ZONE("ImGuiGpuRenderer::UploadDrawData",
+                     NURI_PROFILER_COLOR_CMD_COPY);
   {
-    ScopedScratch scopedScratch(scratch_);
-    std::pmr::vector<std::byte> vtxData(scopedScratch.resource());
-    std::pmr::vector<std::byte> idxData(scopedScratch.resource());
-    vtxData.resize(vtxBytes);
-    idxData.resize(idxBytes);
+    if (std::byte *vtxDst = gpu_.getMappedBufferPtr(fb.vb),
+                  *idxDst = gpu_.getMappedBufferPtr(fb.ib);
+        vtxDst != nullptr && idxDst != nullptr) {
+      // Keep ImGui upload single-copy on the fast path:
+      // ImGui cmd lists -> persistently mapped host-visible buffers.
+      for (const ImDrawList *cmdList : dd->CmdLists) {
+        const size_t vbSize =
+            static_cast<size_t>(cmdList->VtxBuffer.Size) * sizeof(ImDrawVert);
+        const size_t ibSize =
+            static_cast<size_t>(cmdList->IdxBuffer.Size) * sizeof(ImDrawIdx);
+        std::memcpy(vtxDst, cmdList->VtxBuffer.Data, vbSize);
+        std::memcpy(idxDst, cmdList->IdxBuffer.Data, ibSize);
+        vtxDst += vbSize;
+        idxDst += ibSize;
+      }
+      gpu_.flushMappedBuffer(fb.vb, 0, vtxBytes);
+      gpu_.flushMappedBuffer(fb.ib, 0, idxBytes);
+    } else {
+      ScopedScratch scopedScratch(scratch_);
+      std::pmr::vector<std::byte> vtxData(scopedScratch.resource());
+      std::pmr::vector<std::byte> idxData(scopedScratch.resource());
+      vtxData.resize(vtxBytes);
+      idxData.resize(idxBytes);
 
-    std::byte *vtxDst = vtxData.data();
-    std::byte *idxDst = idxData.data();
-    for (const ImDrawList *cmdList : dd->CmdLists) {
-      const size_t vbSize =
-          static_cast<size_t>(cmdList->VtxBuffer.Size) * sizeof(ImDrawVert);
-      const size_t ibSize =
-          static_cast<size_t>(cmdList->IdxBuffer.Size) * sizeof(ImDrawIdx);
-      std::memcpy(vtxDst, cmdList->VtxBuffer.Data, vbSize);
-      std::memcpy(idxDst, cmdList->IdxBuffer.Data, ibSize);
-      vtxDst += vbSize;
-      idxDst += ibSize;
-    }
+      std::byte *vtxCopyDst = vtxData.data();
+      std::byte *idxCopyDst = idxData.data();
+      for (const ImDrawList *cmdList : dd->CmdLists) {
+        const size_t vbSize =
+            static_cast<size_t>(cmdList->VtxBuffer.Size) * sizeof(ImDrawVert);
+        const size_t ibSize =
+            static_cast<size_t>(cmdList->IdxBuffer.Size) * sizeof(ImDrawIdx);
+        std::memcpy(vtxCopyDst, cmdList->VtxBuffer.Data, vbSize);
+        std::memcpy(idxCopyDst, cmdList->IdxBuffer.Data, ibSize);
+        vtxCopyDst += vbSize;
+        idxCopyDst += ibSize;
+      }
 
-    auto upVb =
-        gpu_.updateBuffer(fb.vb, std::span<const std::byte>(vtxData), 0);
-    if (upVb.hasError()) {
-      return Result<RenderPass, std::string>::makeError(upVb.error());
-    }
-    auto upIb =
-        gpu_.updateBuffer(fb.ib, std::span<const std::byte>(idxData), 0);
-    if (upIb.hasError()) {
-      return Result<RenderPass, std::string>::makeError(upIb.error());
+      auto upVb =
+          gpu_.updateBuffer(fb.vb, std::span<const std::byte>(vtxData), 0);
+      if (upVb.hasError()) {
+        return Result<RenderPass, std::string>::makeError(upVb.error());
+      }
+      auto upIb =
+          gpu_.updateBuffer(fb.ib, std::span<const std::byte>(idxData), 0);
+      if (upIb.hasError()) {
+        return Result<RenderPass, std::string>::makeError(upIb.error());
+      }
     }
   }
+  NURI_PROFILER_ZONE_END();
 
   draws_.clear();
   pushConstants_.clear();
 
   // We create one DrawItem per ImDrawCmd.
   size_t totalCmdCount = 0;
+  NURI_PROFILER_ZONE("ImGuiGpuRenderer::BuildDrawItems",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
   for (const ImDrawList *cmdList : dd->CmdLists) {
     totalCmdCount += static_cast<size_t>(cmdList->CmdBuffer.Size);
   }
@@ -469,8 +501,11 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
     globalIdxOffset += static_cast<uint32_t>(cmdList->IdxBuffer.Size);
     globalVtxOffset += static_cast<uint32_t>(cmdList->VtxBuffer.Size);
   }
+  NURI_PROFILER_ZONE_END();
 
   RenderPass pass{};
+  NURI_PROFILER_ZONE("ImGuiGpuRenderer::BuildRenderPassStruct",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
   pass.color.loadOp = LoadOp::Load;
   pass.color.storeOp = StoreOp::Store;
   pass.useViewport = true;
@@ -485,7 +520,7 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
   pass.draws = std::span<const DrawItem>(draws_.data(), draws_.size());
   pass.debugLabel = "ImGui Pass";
   pass.debugColor = 0xff00ff00u;
-
+  NURI_PROFILER_ZONE_END();
   return Result<RenderPass, std::string>::makeResult(pass);
 }
 

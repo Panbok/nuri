@@ -78,6 +78,9 @@ public:
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
                                          std::span<const std::byte> data,
                                          size_t offset = 0) override;
+  std::byte *getMappedBufferPtr(BufferHandle buffer) override;
+  void flushMappedBuffer(BufferHandle buffer, size_t offset,
+                         size_t size) override;
 
   // Shutdown
   void waitIdle() override;
