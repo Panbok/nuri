@@ -7,6 +7,10 @@
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/resources/mesh_importer.h"
+#include "nuri/resources/storage/mesh/mesh_binary_format.h"
+#include "nuri/resources/storage/mesh/mesh_binary_serializer.h"
+#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
+#include "nuri/resources/storage/mesh/mesh_cache_writer.h"
 
 namespace nuri {
 namespace {
@@ -64,8 +68,8 @@ PackedVertexWords packVertex(const Vertex &vertex) {
   return packed;
 }
 
-void packVertices(std::span<const Vertex> vertices,
-                  std::pmr::vector<PackedVertexWords> &packed) {
+template <typename PackedVector>
+void packVertices(std::span<const Vertex> vertices, PackedVector &packed) {
   packed.resize(vertices.size());
   for (size_t i = 0; i < vertices.size(); ++i) {
     packed[i] = packVertex(vertices[i]);
@@ -85,6 +89,137 @@ BoundingBox computeModelBounds(std::span<const Vertex> vertices) {
     maxPos = glm::max(maxPos, vertex.position);
   }
   return BoundingBox(minPos, maxPos);
+}
+
+std::vector<std::byte>
+packVerticesToByteBuffer(std::span<const Vertex> vertices) {
+  ScratchArena scratch;
+  ScopedScratch scopedScratch(scratch);
+  std::pmr::vector<PackedVertexWords> packed(scopedScratch.resource());
+  packVertices(vertices, packed);
+
+  std::vector<std::byte> packedBytes(packed.size() * sizeof(PackedVertexWords));
+  if (!packedBytes.empty()) {
+    std::memcpy(packedBytes.data(), packed.data(), packedBytes.size());
+  }
+  return packedBytes;
+}
+
+bool isMeshCacheReadEnabled() {
+  std::optional<std::string> envValueStorage;
+#if defined(_WIN32)
+  char *rawValue = nullptr;
+  size_t valueLength = 0;
+  if (_dupenv_s(&rawValue, &valueLength, "NURI_MESH_CACHE_READ") == 0 &&
+      rawValue != nullptr) {
+    envValueStorage = rawValue;
+    std::free(rawValue);
+  }
+#else
+  if (const char *value = std::getenv("NURI_MESH_CACHE_READ");
+      value != nullptr) {
+    envValueStorage = value;
+  }
+#endif
+  if (!envValueStorage.has_value()) {
+    return true;
+  }
+
+  const std::string_view value = envValueStorage.value();
+  if (value == "0" || value == "false" || value == "FALSE" || value == "off" ||
+      value == "OFF") {
+    return false;
+  }
+  return true;
+}
+
+void maybeQueueMeshCacheWrite(const MeshCacheKey &cacheKey,
+                              const MeshImportOptions &options,
+                              std::span<const std::byte> packedVertexBytes,
+                              uint32_t vertexCount,
+                              std::span<const uint32_t> indices,
+                              std::span<const Submesh> submeshes,
+                              const BoundingBox &bounds) {
+  if (packedVertexBytes.empty() || indices.empty()) {
+    return;
+  }
+
+  const MeshSourceFingerprint fingerprint =
+      queryMeshSourceFingerprint(cacheKey.normalizedSourcePath);
+
+  MeshBinarySerializeInput input{};
+  input.sourcePathHash = cacheKey.sourcePathHash;
+  input.importOptionsHash = hashMeshImportOptions(options);
+  input.sourceSizeBytes = fingerprint.exists ? fingerprint.sizeBytes : 0u;
+  input.sourceMtimeNs = fingerprint.exists ? fingerprint.mtimeNs : 0;
+  input.bounds = bounds;
+  input.packedVertexBytes = packedVertexBytes;
+  input.vertexCount = vertexCount;
+  input.vertexStrideBytes = kMeshBinaryPackedVertexStrideBytes;
+  input.indices = indices;
+  input.submeshes = submeshes;
+
+  auto serializeResult = meshBinarySerialize(input);
+  if (serializeResult.hasError()) {
+    NURI_LOG_WARNING(
+        "Model::createFromFile: Failed to serialize mesh cache '%s': %s",
+        cacheKey.cachePath.string().c_str(), serializeResult.error().c_str());
+    return;
+  }
+
+  MeshCacheWriterService::instance().enqueue(
+      cacheKey.cachePath, std::move(serializeResult.value()));
+  NURI_LOG_DEBUG("Model::createFromFile: Queued mesh cache write '%s'",
+                 cacheKey.cachePath.string().c_str());
+}
+
+std::optional<MeshBinaryDecodedMesh>
+tryLoadMeshCache(std::string_view sourcePath, const MeshCacheKey &cacheKey,
+                 const MeshImportOptions &options) {
+  std::error_code ec;
+  const bool cacheExists =
+      std::filesystem::exists(cacheKey.cachePath, ec) && !ec &&
+      std::filesystem::is_regular_file(cacheKey.cachePath, ec) && !ec;
+  if (!cacheExists) {
+    return std::nullopt;
+  }
+
+  auto cacheReadResult = readBinaryFile(cacheKey.cachePath);
+  if (cacheReadResult.hasError()) {
+    NURI_LOG_WARNING(
+        "Model::createFromFile: Failed to read mesh cache '%s': %s",
+        cacheKey.cachePath.string().c_str(), cacheReadResult.error().c_str());
+    return std::nullopt;
+  }
+
+  const MeshSourceFingerprint sourceFingerprint =
+      queryMeshSourceFingerprint(cacheKey.normalizedSourcePath);
+  MeshBinaryDeserializeContext context{};
+  context.expectedSourcePathHash = cacheKey.sourcePathHash;
+  context.expectedImportOptionsHash = hashMeshImportOptions(options);
+  context.validateSourceFingerprint = true;
+  context.sourceExists = sourceFingerprint.exists;
+  context.sourceSizeBytes = sourceFingerprint.sizeBytes;
+  context.sourceMtimeNs = sourceFingerprint.mtimeNs;
+
+  auto decodeResult = meshBinaryDeserialize(cacheReadResult.value(), context);
+  if (decodeResult.hasError()) {
+    const std::string &error = decodeResult.error();
+    const bool stale = error.find("stale") != std::string::npos;
+    if (stale) {
+      NURI_LOG_DEBUG("Model::createFromFile: Mesh cache is stale '%s'",
+                     cacheKey.cachePath.string().c_str());
+    } else {
+      NURI_LOG_WARNING(
+          "Model::createFromFile: Failed to decode mesh cache '%s': %s",
+          cacheKey.cachePath.string().c_str(), error.c_str());
+    }
+    return std::nullopt;
+  }
+
+  NURI_LOG_DEBUG("Model::createFromFile: Loaded mesh cache for '%.*s'",
+                 static_cast<int>(sourcePath.size()), sourcePath.data());
+  return std::move(decodeResult.value());
 }
 
 } // namespace
@@ -111,6 +246,7 @@ Model::create(GPUDevice &gpu, const MeshData &data,
   const std::span<const std::byte> indexBytes{
       reinterpret_cast<const std::byte *>(data.indices.data()),
       data.indices.size() * sizeof(uint32_t)};
+  const BoundingBox bounds = computeModelBounds(data.vertices);
 
   auto geometryResult = gpu.allocateGeometry(
       vertexBytes, static_cast<uint32_t>(data.vertices.size()), indexBytes,
@@ -120,20 +256,56 @@ Model::create(GPUDevice &gpu, const MeshData &data,
         geometryResult.error());
   }
 
-  std::vector<Submesh> submeshes(data.submeshes.begin(), data.submeshes.end());
-  const BoundingBox bounds = computeModelBounds(data.vertices);
-
+  std::vector<Submesh> ownedSubmeshes(data.submeshes.begin(),
+                                      data.submeshes.end());
   return Result<std::unique_ptr<Model>, std::string>::makeResult(
-      std::unique_ptr<Model>(new Model(
-          gpu, geometryResult.value(), std::move(submeshes),
-          static_cast<uint32_t>(data.vertices.size()),
-          static_cast<uint32_t>(data.indices.size()), std::move(bounds))));
+      std::unique_ptr<Model>(
+          new Model(gpu, geometryResult.value(), std::move(ownedSubmeshes),
+                    static_cast<uint32_t>(data.vertices.size()),
+                    static_cast<uint32_t>(data.indices.size()), bounds)));
 }
 
 Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
     GPUDevice &gpu, std::string_view path, const MeshImportOptions &options,
     std::pmr::memory_resource *mem, std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const std::filesystem::path sourcePath{std::string(path)};
+  auto cacheKeyResult = buildMeshCacheKey(sourcePath, options);
+  if (cacheKeyResult.hasError()) {
+    NURI_LOG_WARNING(
+        "Model::createFromFile: Failed to build mesh cache key for '%.*s': %s",
+        static_cast<int>(path.size()), path.data(),
+        cacheKeyResult.error().c_str());
+  } else if (isMeshCacheReadEnabled()) {
+    const MeshCacheKey &cacheKey = cacheKeyResult.value();
+    if (auto cachedMesh = tryLoadMeshCache(path, cacheKey, options);
+        cachedMesh.has_value()) {
+      const std::span<const std::byte> vertexBytes{
+          cachedMesh->packedVertexBytes.data(),
+          cachedMesh->packedVertexBytes.size()};
+      const std::span<const std::byte> indexBytes{
+          reinterpret_cast<const std::byte *>(cachedMesh->indices.data()),
+          cachedMesh->indices.size() * sizeof(uint32_t)};
+      auto geometryResult = gpu.allocateGeometry(
+          vertexBytes, cachedMesh->vertexCount, indexBytes,
+          static_cast<uint32_t>(cachedMesh->indices.size()), debugName);
+      if (!geometryResult.hasError()) {
+        return Result<std::unique_ptr<Model>, std::string>::makeResult(
+            std::unique_ptr<Model>(new Model(
+                gpu, geometryResult.value(), std::move(cachedMesh->submeshes),
+                cachedMesh->vertexCount,
+                static_cast<uint32_t>(cachedMesh->indices.size()),
+                cachedMesh->bounds)));
+      }
+      NURI_LOG_WARNING(
+          "Model::createFromFile: Failed to create model from cache '%s': %s",
+          cacheKey.cachePath.string().c_str(), geometryResult.error().c_str());
+    }
+  } else {
+    NURI_LOG_DEBUG("Model::createFromFile: Mesh cache read disabled for '%.*s'",
+                   static_cast<int>(path.size()), path.data());
+  }
+
   auto meshDataResult = MeshImporter::loadFromFile(path, options, mem);
   if (meshDataResult.hasError()) {
     const std::string pathStr{path};
@@ -151,6 +323,19 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
         pathStr.c_str(), modelResult.error().c_str());
     return Result<std::unique_ptr<Model>, std::string>::makeError(
         modelResult.error());
+  }
+
+  if (!cacheKeyResult.hasError()) {
+    const std::vector<std::byte> packedBytes =
+        packVerticesToByteBuffer(meshDataResult.value().vertices);
+    maybeQueueMeshCacheWrite(
+        cacheKeyResult.value(), options, packedBytes,
+        static_cast<uint32_t>(meshDataResult.value().vertices.size()),
+        std::span<const uint32_t>(meshDataResult.value().indices.data(),
+                                  meshDataResult.value().indices.size()),
+        std::span<const Submesh>(meshDataResult.value().submeshes.data(),
+                                 meshDataResult.value().submeshes.size()),
+        modelResult.value()->bounds());
   }
 
   NURI_LOG_DEBUG("Model::createFromFile: Created model from file '%.*s'",
