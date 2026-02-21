@@ -34,6 +34,19 @@ constexpr float kPhaseNormDivisor = 16777215.0f; // 2^24 - 1
 constexpr uint32_t kPhaseHashMixMultiplier = 2246822519u;
 constexpr uint32_t kPhaseHashShift1 = 16u;
 constexpr uint32_t kPhaseHashShift2 = 13u;
+constexpr uint64_t kFnvOffsetBasis64 = 1469598103934665603ull;
+constexpr uint64_t kFnvPrime64 = 1099511628211ull;
+constexpr uint64_t kInvalidDrawSignature = std::numeric_limits<uint64_t>::max();
+
+uint64_t hashCombine64(uint64_t hash, uint64_t value) {
+  hash ^= value;
+  hash *= kFnvPrime64;
+  return hash;
+}
+
+uint64_t foldHandle(uint32_t index, uint32_t generation) {
+  return (static_cast<uint64_t>(generation) << 32u) | index;
+}
 
 std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
@@ -245,8 +258,11 @@ struct IndirectGroupKeyHash {
 OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
                          std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
+      singleInstanceBatchCache_(resolveMemoryResource(memory)),
       renderableTemplates_(resolveMemoryResource(memory)),
       meshDrawTemplates_(resolveMemoryResource(memory)),
+      indirectSourceDrawIndices_(resolveMemoryResource(memory)),
+      indirectUploadSignatures_(resolveMemoryResource(memory)),
       templateBatchIndices_(resolveMemoryResource(memory)),
       batchWriteOffsets_(resolveMemoryResource(memory)),
       instanceCentersPhase_(resolveMemoryResource(memory)),
@@ -316,6 +332,7 @@ void OpaqueLayer::onDetach() {
   instanceRemap_.clear();
   drawPushConstants_.clear();
   drawItems_.clear();
+  indirectUploadSignatures_.clear();
   indirectPushConstants_.clear();
   indirectDrawItems_.clear();
   indirectCommandUploadBytes_.clear();
@@ -330,6 +347,8 @@ void OpaqueLayer::onDetach() {
   instanceStaticBuffersDirty_ = true;
   uniformSingleSubmeshPath_ = false;
   invalidateAutoLodCache();
+  invalidateSingleInstanceBatchCache();
+  invalidateIndirectPackCache();
   initialized_ = false;
 }
 
@@ -685,6 +704,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     templateEntry.vertexBufferAddress = refreshedVertexAddress;
     return Result<bool, std::string>::makeResult(true);
   };
+  uint64_t meshTemplateSignature = kFnvOffsetBasis64;
   {
     NURI_PROFILER_ZONE("OpaqueLayer.sync_template_geometry",
                        NURI_PROFILER_COLOR_CMD_DRAW);
@@ -703,22 +723,45 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         templateEntry.indexBuffer = cachedIndexBuffer;
         templateEntry.indexBufferOffset = cachedIndexBufferOffset;
         templateEntry.vertexBufferAddress = cachedVertexBufferAddress;
-        continue;
+      } else {
+        auto refreshResult = refreshTemplateGeometry(templateEntry);
+        if (refreshResult.hasError()) {
+          return refreshResult;
+        }
+
+        cachedHandle = templateEntry.geometryHandle;
+        cachedIndexBuffer = templateEntry.indexBuffer;
+        cachedIndexBufferOffset = templateEntry.indexBufferOffset;
+        cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
+        hasCachedGeometry = true;
       }
 
-      auto refreshResult = refreshTemplateGeometry(templateEntry);
-      if (refreshResult.hasError()) {
-        return refreshResult;
-      }
-
-      cachedHandle = templateEntry.geometryHandle;
-      cachedIndexBuffer = templateEntry.indexBuffer;
-      cachedIndexBufferOffset = templateEntry.indexBufferOffset;
-      cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
-      hasCachedGeometry = true;
+      meshTemplateSignature =
+          hashCombine64(meshTemplateSignature,
+                        foldHandle(templateEntry.geometryHandle.index,
+                                   templateEntry.geometryHandle.generation));
+      meshTemplateSignature = hashCombine64(
+          meshTemplateSignature,
+          foldHandle(templateEntry.indexBuffer.index,
+                     templateEntry.indexBuffer.generation));
+      meshTemplateSignature =
+          hashCombine64(meshTemplateSignature, templateEntry.indexBufferOffset);
+      meshTemplateSignature =
+          hashCombine64(meshTemplateSignature, templateEntry.vertexBufferAddress);
+      meshTemplateSignature = hashCombine64(
+          meshTemplateSignature,
+          reinterpret_cast<uint64_t>(templateEntry.submesh));
     }
     NURI_PROFILER_ZONE_END();
   }
+  meshTemplateSignature =
+      hashCombine64(meshTemplateSignature, meshDrawTemplates_.size());
+  meshTemplateSignature = hashCombine64(
+      meshTemplateSignature,
+      foldHandle(baseDraw.pipeline.index, baseDraw.pipeline.generation));
+  meshTemplateSignature = hashCombine64(
+      meshTemplateSignature,
+      foldHandle(meshTessPipelineHandle_.index, meshTessPipelineHandle_.generation));
   bool usedUniformFastPath = false;
   bool usedUniformAutoLodFastPath = false;
   bool reusedUniformAutoLodFastPath = false;
@@ -915,6 +958,119 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (remapCount > 0) {
       usedUniformFastPath = true;
       usedUniformAutoLodFastPath = true;
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+
+  const bool isSingleRenderableInstance = instanceCount == 1;
+  if (!usedUniformFastPath && isSingleRenderableInstance &&
+      !meshDrawTemplates_.empty() && !uniformSingleSubmeshPath_) {
+    NURI_PROFILER_ZONE("OpaqueLayer.batch_build_single_instance_cache",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+
+    uint32_t requestedLod = 0;
+    if (!settings.opaque.enableMeshLod) {
+      requestedLod = 0;
+    } else if (settings.opaque.forcedMeshLod >= 0) {
+      requestedLod = forcedLod;
+    } else if (!instanceAutoLodLevels_.empty()) {
+      requestedLod = instanceAutoLodLevels_.front();
+    }
+
+    bool tessPipelineEnabled = false;
+    if (tessellationRequested && requestedLod == 0 &&
+        !instanceLodCentersInvRadiusSq_.empty()) {
+      const glm::vec4 centerInvRadiusSq = instanceLodCentersInvRadiusSq_.front();
+      const float dx = cameraPosition.x - centerInvRadiusSq.x;
+      const float dy = cameraPosition.y - centerInvRadiusSq.y;
+      const float dz = cameraPosition.z - centerInvRadiusSq.z;
+      const float distanceSq = dx * dx + dy * dy + dz * dz;
+      tessPipelineEnabled = distanceSq <= tessFarDistanceSq;
+    }
+
+    const bool canReuseSingleInstanceCache =
+        singleInstanceBatchCache_.valid &&
+        singleInstanceBatchCache_.requestedLod == requestedLod &&
+        singleInstanceBatchCache_.tessPipelineEnabled == tessPipelineEnabled &&
+        singleInstanceBatchCache_.templateSignature == meshTemplateSignature;
+
+    if (!canReuseSingleInstanceCache) {
+      ScratchArena scratch;
+      ScopedScratch scopedScratch(scratch);
+      std::pmr::unordered_map<BatchKey, size_t, BatchKeyHash> singleBatchLookup(
+          scopedScratch.resource());
+      singleBatchLookup.reserve(meshDrawTemplates_.size());
+      singleInstanceBatchCache_.batches.clear();
+      singleInstanceBatchCache_.remapCount = 0;
+
+      for (const MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+        if (!templateEntry.renderable || !templateEntry.submesh) {
+          return Result<bool, std::string>::makeError(
+              "OpaqueLayer::buildRenderPasses: invalid mesh template");
+        }
+
+        const auto lodIndex =
+            resolveAvailableLod(*templateEntry.submesh, requestedLod);
+        if (!lodIndex) {
+          continue;
+        }
+
+        RenderPipelineHandle selectedPipeline = baseDraw.pipeline;
+        if (tessPipelineEnabled && *lodIndex == 0) {
+          selectedPipeline = meshTessPipelineHandle_;
+        }
+
+        const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
+        const BatchKey key{
+            .pipeline = selectedPipeline,
+            .indexBuffer = templateEntry.indexBuffer,
+            .indexBufferOffset = templateEntry.indexBufferOffset,
+            .indexCount = lodRange.indexCount,
+            .firstIndex = lodRange.indexOffset,
+            .vertexBufferAddress = templateEntry.vertexBufferAddress,
+        };
+
+        auto it = singleBatchLookup.find(key);
+        if (it == singleBatchLookup.end()) {
+          SingleInstanceBatchEntry entry{};
+          entry.draw = baseDraw;
+          entry.draw.pipeline = selectedPipeline;
+          entry.draw.indexBuffer = templateEntry.indexBuffer;
+          entry.draw.indexBufferOffset = templateEntry.indexBufferOffset;
+          entry.draw.indexCount = lodRange.indexCount;
+          entry.draw.firstIndex = lodRange.indexOffset;
+          entry.draw.vertexOffset = 0;
+          entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
+          singleInstanceBatchCache_.batches.push_back(entry);
+          const size_t insertedIndex = singleInstanceBatchCache_.batches.size() - 1;
+          singleBatchLookup.emplace(key, insertedIndex);
+          it = singleBatchLookup.find(key);
+        }
+
+        ++singleInstanceBatchCache_.batches[it->second].instanceCount;
+        ++singleInstanceBatchCache_.remapCount;
+      }
+
+      singleInstanceBatchCache_.requestedLod = requestedLod;
+      singleInstanceBatchCache_.tessPipelineEnabled = tessPipelineEnabled;
+      singleInstanceBatchCache_.templateSignature = meshTemplateSignature;
+      singleInstanceBatchCache_.valid = true;
+    }
+
+    remapCount = singleInstanceBatchCache_.remapCount;
+    if (remapCount > 0) {
+      batches.clear();
+      batches.reserve(singleInstanceBatchCache_.batches.size());
+      for (const SingleInstanceBatchEntry &cachedBatch :
+           singleInstanceBatchCache_.batches) {
+        BatchEntry batch{};
+        batch.draw = cachedBatch.draw;
+        batch.vertexBufferAddress = cachedBatch.vertexBufferAddress;
+        batch.instanceCount = cachedBatch.instanceCount;
+        batch.firstInstance = 0;
+        batches.push_back(batch);
+      }
+      usedUniformFastPath = true;
     }
     NURI_PROFILER_ZONE_END();
   }
@@ -1532,14 +1688,14 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
 Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
                                                            size_t remapCount) {
-  indirectPushConstants_.clear();
-  indirectDrawItems_.clear();
-  indirectCommandUploadBytes_.clear();
-
   const bool canUseIndirectPath =
       !drawItems_.empty() &&
       drawItems_.size() <= kMaxDrawItemsForIndirectPath;
   if (!canUseIndirectPath) {
+    invalidateIndirectPackCache();
+    indirectPushConstants_.clear();
+    indirectDrawItems_.clear();
+    indirectCommandUploadBytes_.clear();
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -1551,12 +1707,88 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
         "mismatch");
   }
 
+  const uint64_t drawSignature = computeIndirectDrawSignature(remapCount);
+  const bool canReusePackedCommands = canReuseIndirectPack(drawSignature);
+
+  const size_t requiredBytes = canReusePackedCommands
+                                   ? indirectPackCache_.requiredBytes
+                                   : kIndirectCountHeaderBytes;
+  auto indirectCapacityResult =
+      ensureIndirectCommandRingCapacity(std::max(requiredBytes, kIndirectCountHeaderBytes));
+  if (indirectCapacityResult.hasError()) {
+    return indirectCapacityResult;
+  }
+  if (frameSlot >= indirectCommandRing_.size() ||
+      !indirectCommandRing_[frameSlot].buffer ||
+      !indirectCommandRing_[frameSlot].buffer->valid()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::buildIndirectDraws: indirect ring buffer slot is "
+        "invalid");
+  }
+
+  if (indirectUploadSignatures_.size() != indirectCommandRing_.size()) {
+    indirectUploadSignatures_.assign(indirectCommandRing_.size(),
+                                     kInvalidDrawSignature);
+  }
+
+  auto packResult = canReusePackedCommands
+                        ? refreshCachedIndirectPack(frameSlot, drawSignature)
+                        : rebuildIndirectPack(frameSlot, remapCount, drawSignature);
+  if (packResult.hasError()) {
+    return packResult;
+  }
+
+  NURI_PROFILER_ZONE_END();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+uint64_t OpaqueLayer::computeIndirectDrawSignature(size_t remapCount) const {
+  uint64_t drawSignature = kFnvOffsetBasis64;
+  drawSignature = hashCombine64(drawSignature, drawItems_.size());
+  drawSignature = hashCombine64(drawSignature, remapCount);
+  for (size_t i = 0; i < drawItems_.size(); ++i) {
+    const DrawItem &draw = drawItems_[i];
+    drawSignature =
+        hashCombine64(drawSignature, static_cast<uint64_t>(draw.command));
+    drawSignature = hashCombine64(
+        drawSignature, foldHandle(draw.pipeline.index, draw.pipeline.generation));
+    drawSignature = hashCombine64(
+        drawSignature,
+        foldHandle(draw.indexBuffer.index, draw.indexBuffer.generation));
+    drawSignature = hashCombine64(drawSignature, draw.indexBufferOffset);
+    drawSignature =
+        hashCombine64(drawSignature, static_cast<uint64_t>(draw.indexFormat));
+    drawSignature = hashCombine64(drawSignature, draw.indexCount);
+    drawSignature = hashCombine64(drawSignature, draw.instanceCount);
+    drawSignature = hashCombine64(drawSignature, draw.firstIndex);
+    drawSignature =
+        hashCombine64(drawSignature, static_cast<uint64_t>(draw.vertexOffset));
+    drawSignature = hashCombine64(drawSignature, draw.firstInstance);
+    drawSignature =
+        hashCombine64(drawSignature, drawPushConstants_[i].vertexBufferAddress);
+  }
+  return drawSignature;
+}
+
+bool OpaqueLayer::canReuseIndirectPack(uint64_t drawSignature) const {
+  return indirectPackCache_.valid &&
+         indirectPackCache_.drawSignature == drawSignature &&
+         indirectSourceDrawIndices_.size() == indirectDrawItems_.size() &&
+         indirectSourceDrawIndices_.size() == indirectPushConstants_.size() &&
+         indirectPackCache_.requiredBytes >= kIndirectCountHeaderBytes &&
+         indirectCommandUploadBytes_.size() <= indirectPackCache_.requiredBytes;
+}
+
+Result<bool, std::string>
+OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
+                                 uint64_t drawSignature) {
   ScratchArena scratch;
   ScopedScratch scopedScratch(scratch);
 
   struct IndirectGroup {
     DrawItem baseDraw{};
     PushConstants constants{};
+    size_t sourceDrawIndex = 0;
     std::pmr::vector<DrawIndexedIndirectCommand> commands;
 
     explicit IndirectGroup(std::pmr::memory_resource *mem) : commands(mem) {}
@@ -1600,6 +1832,7 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
       IndirectGroup &group = indirectGroups.back();
       group.baseDraw = draw;
       group.constants = constants;
+      group.sourceDrawIndex = i;
       group.commands.reserve(4);
       const size_t groupIndex = indirectGroups.size() - 1;
       indirectLookup.emplace(key, groupIndex);
@@ -1615,26 +1848,26 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
     indirectGroups[it->second].commands.push_back(command);
   }
 
-  size_t requiredBytes = 0;
+  size_t packedRequiredBytes = 0;
   size_t totalIndirectDrawItems = 0;
   for (const IndirectGroup &group : indirectGroups) {
     const size_t commandCount = group.commands.size();
     if (commandCount == 0) {
       continue;
     }
-    const size_t chunkCount =
-        (commandCount + (kMaxIndirectCommandsPerDraw - 1u)) /
-        kMaxIndirectCommandsPerDraw;
+    const size_t chunkCount = (commandCount + (kMaxIndirectCommandsPerDraw - 1u)) /
+                              kMaxIndirectCommandsPerDraw;
     totalIndirectDrawItems += chunkCount;
-    requiredBytes +=
-        chunkCount * kIndirectCountHeaderBytes +
-        commandCount * sizeof(DrawIndexedIndirectCommand);
+    packedRequiredBytes += chunkCount * kIndirectCountHeaderBytes +
+                           commandCount * sizeof(DrawIndexedIndirectCommand);
   }
-  requiredBytes = std::max(requiredBytes, kIndirectCountHeaderBytes);
-  auto indirectCapacityResult = ensureIndirectCommandRingCapacity(requiredBytes);
-  if (indirectCapacityResult.hasError()) {
-    return indirectCapacityResult;
+  packedRequiredBytes = std::max(packedRequiredBytes, kIndirectCountHeaderBytes);
+
+  auto packedCapacityResult = ensureIndirectCommandRingCapacity(packedRequiredBytes);
+  if (packedCapacityResult.hasError()) {
+    return packedCapacityResult;
   }
+
   if (frameSlot >= indirectCommandRing_.size() ||
       !indirectCommandRing_[frameSlot].buffer ||
       !indirectCommandRing_[frameSlot].buffer->valid()) {
@@ -1643,11 +1876,17 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
         "invalid");
   }
 
-  if (!indirectGroups.empty()) {
-    indirectCommandUploadBytes_.reserve(requiredBytes);
+  indirectPushConstants_.clear();
+  indirectDrawItems_.clear();
+  indirectCommandUploadBytes_.clear();
+  indirectSourceDrawIndices_.clear();
 
+  if (!indirectGroups.empty()) {
+    indirectCommandUploadBytes_.reserve(packedRequiredBytes);
     indirectPushConstants_.reserve(totalIndirectDrawItems);
     indirectDrawItems_.reserve(totalIndirectDrawItems);
+    indirectSourceDrawIndices_.reserve(totalIndirectDrawItems);
+
     const BufferHandle indirectBufferHandle =
         indirectCommandRing_[frameSlot].buffer->handle();
 
@@ -1690,21 +1929,62 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
             reinterpret_cast<const std::byte *>(&indirectPushConstants_.back()),
             sizeof(PushConstants));
         indirectDrawItems_.push_back(indirectDraw);
+        indirectSourceDrawIndices_.push_back(group.sourceDrawIndex);
 
         commandCursor += drawCount;
       }
     }
+  }
 
-    const std::span<const std::byte> uploadBytes{
-        indirectCommandUploadBytes_.data(), indirectCommandUploadBytes_.size()};
+  const std::span<const std::byte> uploadBytes{indirectCommandUploadBytes_.data(),
+                                                indirectCommandUploadBytes_.size()};
+  auto updateIndirectResult = gpu_.updateBuffer(
+      indirectCommandRing_[frameSlot].buffer->handle(), uploadBytes, 0);
+  if (updateIndirectResult.hasError()) {
+    return updateIndirectResult;
+  }
+
+  indirectPackCache_.valid = true;
+  indirectPackCache_.drawSignature = drawSignature;
+  indirectPackCache_.requiredBytes = packedRequiredBytes;
+  indirectUploadSignatures_[frameSlot] = drawSignature;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+OpaqueLayer::refreshCachedIndirectPack(uint32_t frameSlot, uint64_t drawSignature) {
+  if (indirectSourceDrawIndices_.size() != indirectDrawItems_.size()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::buildIndirectDraws: cached indirect source mapping is "
+        "invalid");
+  }
+  const BufferHandle indirectBufferHandle =
+      indirectCommandRing_[frameSlot].buffer->handle();
+  for (size_t i = 0; i < indirectSourceDrawIndices_.size(); ++i) {
+    const size_t sourceIndex = indirectSourceDrawIndices_[i];
+    if (sourceIndex >= drawPushConstants_.size()) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildIndirectDraws: cached indirect source index is "
+          "out of range");
+    }
+    indirectPushConstants_[i] = drawPushConstants_[sourceIndex];
+    indirectDrawItems_[i].indirectBuffer = indirectBufferHandle;
+    indirectDrawItems_[i].pushConstants = std::span<const std::byte>(
+        reinterpret_cast<const std::byte *>(&indirectPushConstants_[i]),
+        sizeof(PushConstants));
+  }
+
+  if (indirectUploadSignatures_[frameSlot] != drawSignature) {
+    const std::span<const std::byte> uploadBytes{indirectCommandUploadBytes_.data(),
+                                                 indirectCommandUploadBytes_.size()};
     auto updateIndirectResult = gpu_.updateBuffer(
         indirectCommandRing_[frameSlot].buffer->handle(), uploadBytes, 0);
     if (updateIndirectResult.hasError()) {
       return updateIndirectResult;
     }
+    indirectUploadSignatures_[frameSlot] = drawSignature;
   }
 
-  NURI_PROFILER_ZONE_END();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1952,6 +2232,7 @@ OpaqueLayer::ensureRingBufferCount(uint32_t requiredCount) {
   instanceMatricesRing_.resize(requiredCount);
   instanceRemapRing_.resize(requiredCount);
   indirectCommandRing_.resize(requiredCount);
+  indirectUploadSignatures_.assign(requiredCount, kInvalidDrawSignature);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2074,6 +2355,9 @@ OpaqueLayer::ensureIndirectCommandRingCapacity(size_t requiredBytes) {
     }
     slot.buffer = std::move(createResult.value());
     slot.capacityBytes = requested;
+    if (i < indirectUploadSignatures_.size()) {
+      indirectUploadSignatures_[i] = kInvalidDrawSignature;
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -2162,6 +2446,8 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene) {
     }
   }
   instanceStaticBuffersDirty_ = true;
+  invalidateSingleInstanceBatchCache();
+  invalidateIndirectPackCache();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2573,6 +2859,25 @@ void OpaqueLayer::invalidateAutoLodCache() {
   autoLodCache_.bucketCounts.fill(0);
 }
 
+void OpaqueLayer::invalidateSingleInstanceBatchCache() {
+  singleInstanceBatchCache_.valid = false;
+  singleInstanceBatchCache_.requestedLod = 0;
+  singleInstanceBatchCache_.tessPipelineEnabled = false;
+  singleInstanceBatchCache_.templateSignature = std::numeric_limits<uint64_t>::max();
+  singleInstanceBatchCache_.remapCount = 0;
+  singleInstanceBatchCache_.batches.clear();
+}
+
+void OpaqueLayer::invalidateIndirectPackCache() {
+  indirectPackCache_.valid = false;
+  indirectPackCache_.drawSignature = kInvalidDrawSignature;
+  indirectPackCache_.requiredBytes = 0;
+  indirectSourceDrawIndices_.clear();
+  for (uint64_t &slotSignature : indirectUploadSignatures_) {
+    slotSignature = kInvalidDrawSignature;
+  }
+}
+
 void OpaqueLayer::updateFastAutoLodCache(
     const Submesh *submesh, const glm::vec3 &cameraPosition,
     const std::array<float, 3> &sortedLodThresholds,
@@ -2648,6 +2953,8 @@ void OpaqueLayer::destroyBuffers() {
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
   indirectCommandRing_.clear();
+  indirectUploadSignatures_.clear();
+  invalidateIndirectPackCache();
 }
 
 } // namespace nuri

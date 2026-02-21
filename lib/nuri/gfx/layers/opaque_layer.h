@@ -102,6 +102,30 @@ private:
     size_t capacityBytes = 0;
   };
 
+  struct SingleInstanceBatchEntry {
+    DrawItem draw{};
+    uint64_t vertexBufferAddress = 0;
+    size_t instanceCount = 0;
+  };
+
+  struct SingleInstanceBatchCache {
+    bool valid = false;
+    uint32_t requestedLod = 0;
+    bool tessPipelineEnabled = false;
+    uint64_t templateSignature = std::numeric_limits<uint64_t>::max();
+    size_t remapCount = 0;
+    std::pmr::vector<SingleInstanceBatchEntry> batches;
+
+    explicit SingleInstanceBatchCache(std::pmr::memory_resource *memory)
+        : batches(memory) {}
+  };
+
+  struct IndirectPackCache {
+    bool valid = false;
+    uint64_t drawSignature = std::numeric_limits<uint64_t>::max();
+    size_t requiredBytes = 0;
+  };
+
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> recreateDepthTexture();
   Result<bool, std::string> ensureFrameDataBufferCapacity(size_t requiredBytes);
@@ -120,6 +144,13 @@ private:
   ensureIndirectCommandRingCapacity(size_t requiredBytes);
   Result<bool, std::string> buildIndirectDraws(uint32_t frameSlot,
                                                size_t remapCount);
+  [[nodiscard]] uint64_t computeIndirectDrawSignature(size_t remapCount) const;
+  [[nodiscard]] bool canReuseIndirectPack(uint64_t drawSignature) const;
+  Result<bool, std::string> rebuildIndirectPack(uint32_t frameSlot,
+                                                size_t remapCount,
+                                                uint64_t drawSignature);
+  Result<bool, std::string> refreshCachedIndirectPack(uint32_t frameSlot,
+                                                      uint64_t drawSignature);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
@@ -134,6 +165,8 @@ private:
       const std::array<float, 3> &sortedLodThresholds,
       const std::array<size_t, Submesh::kMaxLodCount> &bucketCounts,
       size_t remapCount, size_t instanceCount);
+  void invalidateSingleInstanceBatchCache();
+  void invalidateIndirectPackCache();
   void destroyDepthTexture();
   void destroyBuffers();
 
@@ -205,9 +238,13 @@ private:
     const Submesh *submesh = nullptr;
   };
   AutoLodCache autoLodCache_{};
+  SingleInstanceBatchCache singleInstanceBatchCache_;
+  IndirectPackCache indirectPackCache_{};
 
   std::pmr::vector<RenderableTemplate> renderableTemplates_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
+  std::pmr::vector<size_t> indirectSourceDrawIndices_;
+  std::pmr::vector<uint64_t> indirectUploadSignatures_;
   std::pmr::vector<uint32_t> templateBatchIndices_;
   std::pmr::vector<size_t> batchWriteOffsets_;
   std::pmr::vector<glm::vec4> instanceCentersPhase_;
