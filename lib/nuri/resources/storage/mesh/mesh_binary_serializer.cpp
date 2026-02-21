@@ -10,10 +10,37 @@ namespace nuri {
 namespace {
 
 template <typename T, typename... Args>
+  requires(!std::is_same_v<T, MeshBinaryDecodedMesh>)
 [[nodiscard]] Result<T, std::string> makeSerializerError(Args &&...args) {
   std::ostringstream oss;
   (oss << ... << std::forward<Args>(args));
   return Result<T, std::string>::makeError(oss.str());
+}
+
+template <typename T = MeshBinaryDecodedMesh, typename... Args>
+  requires(std::is_same_v<T, MeshBinaryDecodedMesh>)
+[[nodiscard]] Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
+makeSerializerError(Args &&...args) {
+  std::ostringstream oss;
+  (oss << ... << std::forward<Args>(args));
+  return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+      MeshBinaryDeserializeError{
+          .code = MeshBinaryDeserializeErrorCode::InvalidData,
+          .message = oss.str(),
+      });
+}
+
+template <typename T = MeshBinaryDecodedMesh, typename... Args>
+  requires(std::is_same_v<T, MeshBinaryDecodedMesh>)
+[[nodiscard]] Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
+makeSerializerError(MeshBinaryDeserializeErrorCode code, Args &&...args) {
+  std::ostringstream oss;
+  (oss << ... << std::forward<Args>(args));
+  return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+      MeshBinaryDeserializeError{
+          .code = code,
+          .message = oss.str(),
+      });
 }
 
 [[nodiscard]] bool checkedAddToU64(uint64_t a, uint64_t b, uint64_t &out) {
@@ -502,7 +529,7 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
       std::move(fileBytes));
 }
 
-Result<MeshBinaryDecodedMesh, std::string>
+Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
 meshBinaryDeserialize(std::span<const std::byte> fileBytes,
                       const MeshBinaryDeserializeContext &context) {
   ScratchArena scratch;
@@ -550,6 +577,7 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
     if (header.sourceSizeBytes != context.sourceSizeBytes ||
         header.sourceMtimeNs != context.sourceMtimeNs) {
       return makeSerializerError<MeshBinaryDecodedMesh>(
+          MeshBinaryDeserializeErrorCode::StaleCache,
           "meshBinaryDeserialize: cache is stale for current source file");
     }
   }
@@ -789,7 +817,7 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
     decoded.submeshes.push_back(submesh);
   }
 
-  return Result<MeshBinaryDecodedMesh, std::string>::makeResult(
+  return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeResult(
       std::move(decoded));
 }
 

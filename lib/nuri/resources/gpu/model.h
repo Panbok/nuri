@@ -46,6 +46,11 @@ public:
   [[nodiscard]] const BoundingBox &bounds() const noexcept { return bounds_; }
 
 private:
+  [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
+  createFromPackedVertices(GPUDevice &gpu, const MeshData &data,
+                           std::span<const std::byte> packedVertexBytes,
+                           std::string_view debugName);
+
   Model(GPUDevice &gpu, GeometryAllocationHandle geometry,
         std::vector<Submesh> submeshes, uint32_t vertexCount,
         uint32_t indexCount, BoundingBox bounds)

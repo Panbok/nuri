@@ -43,10 +43,25 @@ struct MeshBinaryDecodedMesh {
   BoundingBox bounds{glm::vec3(0.0f), glm::vec3(0.0f)};
 };
 
+enum class MeshBinaryDeserializeErrorCode : uint8_t {
+  InvalidData = 0,
+  StaleCache = 1,
+};
+
+struct MeshBinaryDeserializeError {
+  MeshBinaryDeserializeErrorCode code =
+      MeshBinaryDeserializeErrorCode::InvalidData;
+  std::string message;
+
+  [[nodiscard]] bool isStale() const noexcept {
+    return code == MeshBinaryDeserializeErrorCode::StaleCache;
+  }
+};
+
 [[nodiscard]] Result<std::vector<std::byte>, std::string>
 meshBinarySerialize(const MeshBinarySerializeInput &input);
 
-[[nodiscard]] Result<MeshBinaryDecodedMesh, std::string>
+[[nodiscard]] Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
 meshBinaryDeserialize(std::span<const std::byte> fileBytes,
                       const MeshBinaryDeserializeContext &context);
 

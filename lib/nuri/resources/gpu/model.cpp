@@ -204,15 +204,15 @@ tryLoadMeshCache(std::string_view sourcePath, const MeshCacheKey &cacheKey,
 
   auto decodeResult = meshBinaryDeserialize(cacheReadResult.value(), context);
   if (decodeResult.hasError()) {
-    const std::string &error = decodeResult.error();
-    const bool stale = error.find("stale") != std::string::npos;
-    if (stale) {
-      NURI_LOG_DEBUG("Model::createFromFile: Mesh cache is stale '%s'",
-                     cacheKey.cachePath.string().c_str());
+    const MeshBinaryDeserializeError &error = decodeResult.error();
+    if (error.isStale()) {
+      NURI_LOG_DEBUG(
+          "Model::createFromFile: Mesh cache is stale '%s': %s",
+          cacheKey.cachePath.string().c_str(), error.message.c_str());
     } else {
       NURI_LOG_WARNING(
           "Model::createFromFile: Failed to decode mesh cache '%s': %s",
-          cacheKey.cachePath.string().c_str(), error.c_str());
+          cacheKey.cachePath.string().c_str(), error.message.c_str());
     }
     return std::nullopt;
   }
@@ -234,15 +234,27 @@ Model::~Model() {
 Result<std::unique_ptr<Model>, std::string>
 Model::create(GPUDevice &gpu, const MeshData &data,
               std::string_view debugName) {
+  const std::vector<std::byte> packedBytes =
+      packVerticesToByteBuffer(data.vertices);
+  return createFromPackedVertices(
+      gpu, data,
+      std::span<const std::byte>(packedBytes.data(), packedBytes.size()),
+      debugName);
+}
+
+Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
+    GPUDevice &gpu, const MeshData &data,
+    std::span<const std::byte> packedVertexBytes, std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  ScratchArena scratch;
-  ScopedScratch scopedScratch(scratch);
-  std::pmr::vector<PackedVertexWords> packedVertices(scopedScratch.resource());
-  packVertices(data.vertices, packedVertices);
+  const size_t expectedPackedByteCount =
+      data.vertices.size() * sizeof(PackedVertexWords);
+  if (packedVertexBytes.size() != expectedPackedByteCount) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        "Model::createFromPackedVertices: packed vertex byte count mismatch");
+  }
 
   const std::span<const std::byte> vertexBytes{
-      reinterpret_cast<const std::byte *>(packedVertices.data()),
-      packedVertices.size() * sizeof(PackedVertexWords)};
+      packedVertexBytes.data(), packedVertexBytes.size()};
   const std::span<const std::byte> indexBytes{
       reinterpret_cast<const std::byte *>(data.indices.data()),
       data.indices.size() * sizeof(uint32_t)};
@@ -315,7 +327,20 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
         meshDataResult.error());
   }
 
-  auto modelResult = create(gpu, meshDataResult.value(), debugName);
+  const MeshData &meshData = meshDataResult.value();
+  const bool canWriteMeshCache = !cacheKeyResult.hasError();
+  std::vector<std::byte> packedBytes;
+  if (canWriteMeshCache) {
+    packedBytes = packVerticesToByteBuffer(meshData.vertices);
+  }
+
+  auto modelResult = canWriteMeshCache
+                         ? createFromPackedVertices(
+                               gpu, meshData,
+                               std::span<const std::byte>(packedBytes.data(),
+                                                          packedBytes.size()),
+                               debugName)
+                         : create(gpu, meshData, debugName);
   if (modelResult.hasError()) {
     const std::string pathStr{path};
     NURI_LOG_WARNING(
@@ -325,16 +350,13 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
         modelResult.error());
   }
 
-  if (!cacheKeyResult.hasError()) {
-    const std::vector<std::byte> packedBytes =
-        packVerticesToByteBuffer(meshDataResult.value().vertices);
+  if (canWriteMeshCache) {
     maybeQueueMeshCacheWrite(
         cacheKeyResult.value(), options, packedBytes,
-        static_cast<uint32_t>(meshDataResult.value().vertices.size()),
-        std::span<const uint32_t>(meshDataResult.value().indices.data(),
-                                  meshDataResult.value().indices.size()),
-        std::span<const Submesh>(meshDataResult.value().submeshes.data(),
-                                 meshDataResult.value().submeshes.size()),
+        static_cast<uint32_t>(meshData.vertices.size()),
+        std::span<const uint32_t>(meshData.indices.data(), meshData.indices.size()),
+        std::span<const Submesh>(meshData.submeshes.data(),
+                                 meshData.submeshes.size()),
         modelResult.value()->bounds());
   }
 
