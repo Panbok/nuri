@@ -142,6 +142,15 @@ private:
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureIndirectCommandRingCapacity(size_t requiredBytes);
+  [[nodiscard]] uint32_t
+  resolveSingleInstanceRequestedLod(const RenderSettings &settings,
+                                    uint32_t forcedLod) const;
+  [[nodiscard]] bool shouldEnableSingleInstanceTessPipeline(
+      bool tessellationRequested, uint32_t requestedLod,
+      const glm::vec3 &cameraPosition, float tessFarDistanceSq) const;
+  Result<bool, std::string> ensureSingleInstanceBatchCache(
+      uint32_t requestedLod, bool tessPipelineEnabled,
+      uint64_t meshTemplateSignature, const DrawItem &baseDraw);
   Result<bool, std::string> buildIndirectDraws(uint32_t frameSlot,
                                                size_t remapCount);
   [[nodiscard]] uint64_t computeIndirectDrawSignature(size_t remapCount) const;

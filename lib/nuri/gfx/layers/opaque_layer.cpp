@@ -621,6 +621,19 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     entry.firstInstance = firstInstance;
     batches.push_back(entry);
   };
+  const auto materializeBatchesFromSingleInstanceCache = [this, &batches]() {
+    batches.clear();
+    batches.reserve(singleInstanceBatchCache_.batches.size());
+    for (const SingleInstanceBatchEntry &cachedBatch :
+         singleInstanceBatchCache_.batches) {
+      BatchEntry batch{};
+      batch.draw = cachedBatch.draw;
+      batch.vertexBufferAddress = cachedBatch.vertexBufferAddress;
+      batch.instanceCount = cachedBatch.instanceCount;
+      batch.firstInstance = 0;
+      batches.push_back(batch);
+    }
+  };
   std::unordered_map<BatchKey, size_t, BatchKeyHash> batchLookup;
   batchLookup.reserve(batchReserve);
   std::array<float, 3> sortedLodThresholds = {
@@ -968,108 +981,19 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     NURI_PROFILER_ZONE("OpaqueLayer.batch_build_single_instance_cache",
                        NURI_PROFILER_COLOR_CMD_DRAW);
 
-    uint32_t requestedLod = 0;
-    if (!settings.opaque.enableMeshLod) {
-      requestedLod = 0;
-    } else if (settings.opaque.forcedMeshLod >= 0) {
-      requestedLod = forcedLod;
-    } else if (!instanceAutoLodLevels_.empty()) {
-      requestedLod = instanceAutoLodLevels_.front();
-    }
-
-    bool tessPipelineEnabled = false;
-    if (tessellationRequested && requestedLod == 0 &&
-        !instanceLodCentersInvRadiusSq_.empty()) {
-      const glm::vec4 centerInvRadiusSq = instanceLodCentersInvRadiusSq_.front();
-      const float dx = cameraPosition.x - centerInvRadiusSq.x;
-      const float dy = cameraPosition.y - centerInvRadiusSq.y;
-      const float dz = cameraPosition.z - centerInvRadiusSq.z;
-      const float distanceSq = dx * dx + dy * dy + dz * dz;
-      tessPipelineEnabled = distanceSq <= tessFarDistanceSq;
-    }
-
-    const bool canReuseSingleInstanceCache =
-        singleInstanceBatchCache_.valid &&
-        singleInstanceBatchCache_.requestedLod == requestedLod &&
-        singleInstanceBatchCache_.tessPipelineEnabled == tessPipelineEnabled &&
-        singleInstanceBatchCache_.templateSignature == meshTemplateSignature;
-
-    if (!canReuseSingleInstanceCache) {
-      ScratchArena scratch;
-      ScopedScratch scopedScratch(scratch);
-      std::pmr::unordered_map<BatchKey, size_t, BatchKeyHash> singleBatchLookup(
-          scopedScratch.resource());
-      singleBatchLookup.reserve(meshDrawTemplates_.size());
-      singleInstanceBatchCache_.batches.clear();
-      singleInstanceBatchCache_.remapCount = 0;
-
-      for (const MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
-        if (!templateEntry.renderable || !templateEntry.submesh) {
-          return Result<bool, std::string>::makeError(
-              "OpaqueLayer::buildRenderPasses: invalid mesh template");
-        }
-
-        const auto lodIndex =
-            resolveAvailableLod(*templateEntry.submesh, requestedLod);
-        if (!lodIndex) {
-          continue;
-        }
-
-        RenderPipelineHandle selectedPipeline = baseDraw.pipeline;
-        if (tessPipelineEnabled && *lodIndex == 0) {
-          selectedPipeline = meshTessPipelineHandle_;
-        }
-
-        const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
-        const BatchKey key{
-            .pipeline = selectedPipeline,
-            .indexBuffer = templateEntry.indexBuffer,
-            .indexBufferOffset = templateEntry.indexBufferOffset,
-            .indexCount = lodRange.indexCount,
-            .firstIndex = lodRange.indexOffset,
-            .vertexBufferAddress = templateEntry.vertexBufferAddress,
-        };
-
-        auto it = singleBatchLookup.find(key);
-        if (it == singleBatchLookup.end()) {
-          SingleInstanceBatchEntry entry{};
-          entry.draw = baseDraw;
-          entry.draw.pipeline = selectedPipeline;
-          entry.draw.indexBuffer = templateEntry.indexBuffer;
-          entry.draw.indexBufferOffset = templateEntry.indexBufferOffset;
-          entry.draw.indexCount = lodRange.indexCount;
-          entry.draw.firstIndex = lodRange.indexOffset;
-          entry.draw.vertexOffset = 0;
-          entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
-          singleInstanceBatchCache_.batches.push_back(entry);
-          const size_t insertedIndex = singleInstanceBatchCache_.batches.size() - 1;
-          singleBatchLookup.emplace(key, insertedIndex);
-          it = singleBatchLookup.find(key);
-        }
-
-        ++singleInstanceBatchCache_.batches[it->second].instanceCount;
-        ++singleInstanceBatchCache_.remapCount;
-      }
-
-      singleInstanceBatchCache_.requestedLod = requestedLod;
-      singleInstanceBatchCache_.tessPipelineEnabled = tessPipelineEnabled;
-      singleInstanceBatchCache_.templateSignature = meshTemplateSignature;
-      singleInstanceBatchCache_.valid = true;
+    const uint32_t requestedLod =
+        resolveSingleInstanceRequestedLod(settings, forcedLod);
+    const bool tessPipelineEnabled = shouldEnableSingleInstanceTessPipeline(
+        tessellationRequested, requestedLod, cameraPosition, tessFarDistanceSq);
+    auto singleInstanceCacheResult = ensureSingleInstanceBatchCache(
+        requestedLod, tessPipelineEnabled, meshTemplateSignature, baseDraw);
+    if (singleInstanceCacheResult.hasError()) {
+      return singleInstanceCacheResult;
     }
 
     remapCount = singleInstanceBatchCache_.remapCount;
     if (remapCount > 0) {
-      batches.clear();
-      batches.reserve(singleInstanceBatchCache_.batches.size());
-      for (const SingleInstanceBatchEntry &cachedBatch :
-           singleInstanceBatchCache_.batches) {
-        BatchEntry batch{};
-        batch.draw = cachedBatch.draw;
-        batch.vertexBufferAddress = cachedBatch.vertexBufferAddress;
-        batch.instanceCount = cachedBatch.instanceCount;
-        batch.firstInstance = 0;
-        batches.push_back(batch);
-      }
+      materializeBatchesFromSingleInstanceCache();
       usedUniformFastPath = true;
     }
     NURI_PROFILER_ZONE_END();
@@ -1683,6 +1607,112 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
   frame.sharedDepthTexture = depthTexture_;
   out.push_back(pass);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+uint32_t OpaqueLayer::resolveSingleInstanceRequestedLod(
+    const RenderSettings &settings, uint32_t forcedLod) const {
+  if (!settings.opaque.enableMeshLod) {
+    return 0;
+  }
+  if (settings.opaque.forcedMeshLod >= 0) {
+    return forcedLod;
+  }
+  if (!instanceAutoLodLevels_.empty()) {
+    return instanceAutoLodLevels_.front();
+  }
+  return 0;
+}
+
+bool OpaqueLayer::shouldEnableSingleInstanceTessPipeline(
+    bool tessellationRequested, uint32_t requestedLod,
+    const glm::vec3 &cameraPosition, float tessFarDistanceSq) const {
+  if (!tessellationRequested || requestedLod != 0 ||
+      instanceLodCentersInvRadiusSq_.empty()) {
+    return false;
+  }
+
+  const glm::vec4 centerInvRadiusSq = instanceLodCentersInvRadiusSq_.front();
+  const float dx = cameraPosition.x - centerInvRadiusSq.x;
+  const float dy = cameraPosition.y - centerInvRadiusSq.y;
+  const float dz = cameraPosition.z - centerInvRadiusSq.z;
+  const float distanceSq = dx * dx + dy * dy + dz * dz;
+  return distanceSq <= tessFarDistanceSq;
+}
+
+Result<bool, std::string> OpaqueLayer::ensureSingleInstanceBatchCache(
+    uint32_t requestedLod, bool tessPipelineEnabled,
+    uint64_t meshTemplateSignature, const DrawItem &baseDraw) {
+  const bool canReuseSingleInstanceCache =
+      singleInstanceBatchCache_.valid &&
+      singleInstanceBatchCache_.requestedLod == requestedLod &&
+      singleInstanceBatchCache_.tessPipelineEnabled == tessPipelineEnabled &&
+      singleInstanceBatchCache_.templateSignature == meshTemplateSignature;
+  if (canReuseSingleInstanceCache) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  ScratchArena scratch;
+  ScopedScratch scopedScratch(scratch);
+  std::pmr::unordered_map<BatchKey, size_t, BatchKeyHash> singleBatchLookup(
+      scopedScratch.resource());
+  singleBatchLookup.reserve(meshDrawTemplates_.size());
+
+  singleInstanceBatchCache_.batches.clear();
+  singleInstanceBatchCache_.remapCount = 0;
+
+  for (const MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+    if (!templateEntry.renderable || !templateEntry.submesh) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildRenderPasses: invalid mesh template");
+    }
+
+    const auto lodIndex =
+        resolveAvailableLod(*templateEntry.submesh, requestedLod);
+    if (!lodIndex) {
+      continue;
+    }
+
+    RenderPipelineHandle selectedPipeline = baseDraw.pipeline;
+    if (tessPipelineEnabled && *lodIndex == 0) {
+      selectedPipeline = meshTessPipelineHandle_;
+    }
+
+    const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
+    const BatchKey key{
+        .pipeline = selectedPipeline,
+        .indexBuffer = templateEntry.indexBuffer,
+        .indexBufferOffset = templateEntry.indexBufferOffset,
+        .indexCount = lodRange.indexCount,
+        .firstIndex = lodRange.indexOffset,
+        .vertexBufferAddress = templateEntry.vertexBufferAddress,
+    };
+
+    auto it = singleBatchLookup.find(key);
+    if (it == singleBatchLookup.end()) {
+      SingleInstanceBatchEntry entry{};
+      entry.draw = baseDraw;
+      entry.draw.pipeline = selectedPipeline;
+      entry.draw.indexBuffer = templateEntry.indexBuffer;
+      entry.draw.indexBufferOffset = templateEntry.indexBufferOffset;
+      entry.draw.indexCount = lodRange.indexCount;
+      entry.draw.firstIndex = lodRange.indexOffset;
+      entry.draw.vertexOffset = 0;
+      entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
+      singleInstanceBatchCache_.batches.push_back(entry);
+      const size_t insertedIndex = singleInstanceBatchCache_.batches.size() - 1;
+      singleBatchLookup.emplace(key, insertedIndex);
+      it = singleBatchLookup.find(key);
+    }
+
+    ++singleInstanceBatchCache_.batches[it->second].instanceCount;
+    ++singleInstanceBatchCache_.remapCount;
+  }
+
+  singleInstanceBatchCache_.requestedLod = requestedLod;
+  singleInstanceBatchCache_.tessPipelineEnabled = tessPipelineEnabled;
+  singleInstanceBatchCache_.templateSignature = meshTemplateSignature;
+  singleInstanceBatchCache_.valid = true;
   return Result<bool, std::string>::makeResult(true);
 }
 
