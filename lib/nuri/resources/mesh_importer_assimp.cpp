@@ -18,7 +18,11 @@ constexpr size_t kTriangleIndexCount = 3;
 size_t meshIndexCount(const aiMesh &mesh) {
   size_t count = 0;
   for (unsigned int faceIndex = 0; faceIndex < mesh.mNumFaces; ++faceIndex) {
-    count += mesh.mFaces[faceIndex].mNumIndices;
+    const aiFace &face = mesh.mFaces[faceIndex];
+    if (face.mNumIndices != kTriangleIndexCount) {
+      continue;
+    }
+    count += kTriangleIndexCount;
   }
   return count;
 }
@@ -154,7 +158,10 @@ void extractMeshGeometry(const aiMesh &mesh,
   outIndices.reserve(mesh.mNumFaces * kTriangleIndexCount);
   for (unsigned int faceIndex = 0; faceIndex < mesh.mNumFaces; ++faceIndex) {
     const aiFace &face = mesh.mFaces[faceIndex];
-    for (unsigned int i = 0; i < face.mNumIndices; ++i) {
+    if (face.mNumIndices != kTriangleIndexCount) {
+      continue;
+    }
+    for (unsigned int i = 0; i < kTriangleIndexCount; ++i) {
       outIndices.push_back(face.mIndices[i]);
     }
   }
@@ -305,8 +312,8 @@ void appendSubmeshToMeshData(
 
 unsigned int buildAssimpFlags(const MeshImportOptions &options) {
   // Keep flags: baseline import sanitation for the meshopt pipeline.
-  unsigned int flags =
-      aiProcess_SortByPType | aiProcess_FindDegenerates | aiProcess_FindInvalidData;
+  unsigned int flags = aiProcess_SortByPType | aiProcess_FindDegenerates |
+                       aiProcess_FindInvalidData;
 
   if (options.triangulate) {
     flags |= aiProcess_Triangulate;
@@ -365,6 +372,10 @@ MeshImporter::loadFromFile(std::string_view path,
   Assimp::Importer importer;
   const std::string pathStr(path);
   const unsigned int flags = buildAssimpFlags(options);
+
+  NURI_LOG_DEBUG(
+      "MeshImporter::loadFromFile: Importing mesh '%s' with flags %u",
+      pathStr.c_str(), flags);
   const aiScene *scene = importer.ReadFile(pathStr, flags);
   if (!scene || !scene->HasMeshes()) {
     const std::string error =
@@ -374,6 +385,10 @@ MeshImporter::loadFromFile(std::string_view path,
         pathStr.c_str(), error.c_str());
     return nuri::Result<MeshData, std::string>::makeError(error);
   }
+
+  NURI_LOG_DEBUG(
+      "MeshImporter::loadFromFile: Imported model '%s' with %u meshes",
+      pathStr.c_str(), scene->mNumMeshes);
 
   MeshData data(mem);
   const uint32_t requestedLodCount = clampLodCount(options);
@@ -408,7 +423,11 @@ MeshImporter::loadFromFile(std::string_view path,
   }
 
   ScratchArena scratch(mem);
+  size_t insufficientGeometryMeshCount = 0;
+  std::array<uint32_t, 8> insufficientGeometryMeshSamples{};
+  size_t insufficientGeometrySampleCount = 0;
 
+  NURI_LOG_DEBUG("MeshImporter::loadFromFile: Mesh optimization processing");
   for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
     const aiMesh *mesh = scene->mMeshes[i];
     if (!mesh) {
@@ -425,8 +444,11 @@ MeshImporter::loadFromFile(std::string_view path,
     extractMeshGeometry(*mesh, meshVertices, lod0Indices);
 
     if (meshVertices.empty() || lod0Indices.size() < kTriangleIndexCount) {
-      NURI_LOG_WARNING(
-          "MeshImporter::loadFromFile: Mesh %u has insufficient geometry", i);
+      ++insufficientGeometryMeshCount;
+      if (insufficientGeometrySampleCount <
+          insufficientGeometryMeshSamples.size()) {
+        insufficientGeometryMeshSamples[insufficientGeometrySampleCount++] = i;
+      }
       continue;
     }
 
@@ -451,6 +473,23 @@ MeshImporter::loadFromFile(std::string_view path,
     const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
     appendSubmeshToMeshData(data, *mesh, meshVertices, submeshBounds,
                             generatedLodCount, lodIndexBuffers, lodErrors, i);
+  }
+  NURI_LOG_DEBUG(
+      "MeshImporter::loadFromFile: Mesh optimization processing complete");
+
+  if (insufficientGeometryMeshCount > 0) {
+    std::ostringstream sampleStream;
+    for (size_t sampleIndex = 0; sampleIndex < insufficientGeometrySampleCount;
+         ++sampleIndex) {
+      if (sampleIndex > 0) {
+        sampleStream << ", ";
+      }
+      sampleStream << insufficientGeometryMeshSamples[sampleIndex];
+    }
+    NURI_LOG_WARNING(
+        "MeshImporter::loadFromFile: skipped %zu mesh(es) with insufficient "
+        "triangle geometry (sample indices: %s)",
+        insufficientGeometryMeshCount, sampleStream.str().c_str());
   }
 
   return nuri::Result<MeshData, std::string>::makeResult(std::move(data));

@@ -105,6 +105,64 @@ packVerticesToByteBuffer(std::span<const Vertex> vertices) {
   return packedBytes;
 }
 
+Result<bool, std::string>
+validateMeshTopology(std::span<const uint32_t> indices, uint32_t vertexCount,
+                     std::span<const Submesh> submeshes,
+                     std::string_view context) {
+  const std::string contextString(context);
+  if (vertexCount == 0) {
+    return Result<bool, std::string>::makeError(
+        contextString + ": vertex count is zero");
+  }
+  if (indices.empty()) {
+    return Result<bool, std::string>::makeError(
+        contextString + ": index buffer is empty");
+  }
+  if (submeshes.empty()) {
+    return Result<bool, std::string>::makeError(
+        contextString + ": submesh list is empty");
+  }
+
+  uint32_t maxIndex = 0;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    const uint32_t indexValue = indices[i];
+    maxIndex = std::max(maxIndex, indexValue);
+    if (indexValue >= vertexCount) {
+      return Result<bool, std::string>::makeError(
+          contextString + ": index out of range at position " +
+          std::to_string(i) + " (" + std::to_string(indexValue) + " >= " +
+          std::to_string(vertexCount) + ")");
+    }
+  }
+
+  for (size_t submeshIndex = 0; submeshIndex < submeshes.size();
+       ++submeshIndex) {
+    const Submesh &submesh = submeshes[submeshIndex];
+    if (submesh.lodCount == 0 || submesh.lodCount > Submesh::kMaxLodCount) {
+      return Result<bool, std::string>::makeError(
+          contextString + ": invalid LOD count in submesh " +
+          std::to_string(submeshIndex));
+    }
+    for (uint32_t lodIndex = 0; lodIndex < submesh.lodCount; ++lodIndex) {
+      const SubmeshLod &lod = submesh.lods[lodIndex];
+      const uint64_t end =
+          static_cast<uint64_t>(lod.indexOffset) + lod.indexCount;
+      if (end > indices.size()) {
+        return Result<bool, std::string>::makeError(
+            contextString + ": submesh " + std::to_string(submeshIndex) +
+            " LOD " +
+            std::to_string(lodIndex) + " index range exceeds index buffer");
+      }
+    }
+  }
+
+  NURI_LOG_DEBUG("%s: mesh validated (vertices=%u indices=%zu submeshes=%zu "
+                 "maxIndex=%u)",
+                 contextString.c_str(), vertexCount, indices.size(),
+                 submeshes.size(), maxIndex);
+  return Result<bool, std::string>::makeResult(true);
+}
+
 bool isMeshCacheReadEnabled() {
   std::optional<std::string> envValueStorage;
 #if defined(_WIN32)
@@ -217,12 +275,136 @@ tryLoadMeshCache(std::string_view sourcePath, const MeshCacheKey &cacheKey,
     return std::nullopt;
   }
 
+  MeshBinaryDecodedMesh decodedMesh = std::move(decodeResult.value());
+  auto topologyValidation = validateMeshTopology(
+      std::span<const uint32_t>(decodedMesh.indices.data(),
+                                decodedMesh.indices.size()),
+      decodedMesh.vertexCount,
+      std::span<const Submesh>(decodedMesh.submeshes.data(),
+                               decodedMesh.submeshes.size()),
+      "Model::createFromFile cache validation");
+  if (topologyValidation.hasError()) {
+    NURI_LOG_WARNING("Model::createFromFile: Rejected mesh cache '%s': %s",
+                     cacheKey.cachePath.string().c_str(),
+                     topologyValidation.error().c_str());
+    return std::nullopt;
+  }
+
   NURI_LOG_DEBUG("Model::createFromFile: Loaded mesh cache for '%.*s'",
                  static_cast<int>(sourcePath.size()), sourcePath.data());
-  return std::move(decodeResult.value());
+  return decodedMesh;
 }
 
 } // namespace
+
+bool ModelAsyncLoad::valid() const noexcept {
+  return !sourcePath_.empty() &&
+         (warmupCompleted_ || warmupFuture_.valid() || finalized_);
+}
+
+bool ModelAsyncLoad::isInFlight() const noexcept {
+  if (!valid() || warmupCompleted_ || !warmupFuture_.valid()) {
+    return false;
+  }
+  return warmupFuture_.wait_for(std::chrono::milliseconds(0)) !=
+         std::future_status::ready;
+}
+
+bool ModelAsyncLoad::isReady() const {
+  if (!valid()) {
+    return false;
+  }
+  if (warmupCompleted_) {
+    return true;
+  }
+  if (!warmupFuture_.valid()) {
+    return true;
+  }
+  return warmupFuture_.wait_for(std::chrono::milliseconds(0)) ==
+         std::future_status::ready;
+}
+
+std::optional<bool> ModelAsyncLoad::cacheHit() const noexcept {
+  if (!warmupCompleted_ || !warmupError_.empty()) {
+    return std::nullopt;
+  }
+  return warmupCacheHit_;
+}
+
+std::string_view ModelAsyncLoad::warmupError() const noexcept {
+  return warmupError_;
+}
+
+Result<bool, std::string> ModelAsyncLoad::resolveWarmup() {
+  if (!valid()) {
+    return Result<bool, std::string>::makeError(
+        "ModelAsyncLoad::resolveWarmup: async load handle is invalid");
+  }
+  if (warmupCompleted_) {
+    if (!warmupError_.empty()) {
+      return Result<bool, std::string>::makeError(warmupError_);
+    }
+    return Result<bool, std::string>::makeResult(warmupCacheHit_);
+  }
+  if (!warmupFuture_.valid()) {
+    warmupCompleted_ = true;
+    warmupError_ = "ModelAsyncLoad::resolveWarmup: warmup future is invalid";
+    return Result<bool, std::string>::makeError(warmupError_);
+  }
+  if (warmupFuture_.wait_for(std::chrono::milliseconds(0)) !=
+      std::future_status::ready) {
+    return Result<bool, std::string>::makeError(
+        "ModelAsyncLoad::resolveWarmup: warmup is still in progress");
+  }
+
+  try {
+    Result<bool, std::string> warmupResult = warmupFuture_.get();
+    warmupCompleted_ = true;
+    if (warmupResult.hasError()) {
+      warmupError_ = warmupResult.error();
+      return Result<bool, std::string>::makeError(warmupError_);
+    }
+    warmupCacheHit_ = warmupResult.value();
+    return Result<bool, std::string>::makeResult(warmupCacheHit_);
+  } catch (const std::exception &e) {
+    warmupCompleted_ = true;
+    warmupError_ = std::string("ModelAsyncLoad::resolveWarmup exception: ") +
+                   e.what();
+    return Result<bool, std::string>::makeError(warmupError_);
+  } catch (...) {
+    warmupCompleted_ = true;
+    warmupError_ = "ModelAsyncLoad::resolveWarmup unknown exception";
+    return Result<bool, std::string>::makeError(warmupError_);
+  }
+}
+
+Result<std::unique_ptr<Model>, std::string>
+ModelAsyncLoad::finalize(GPUDevice &gpu, std::pmr::memory_resource *mem,
+                         std::string_view debugName) {
+  if (!valid()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        "ModelAsyncLoad::finalize: async load handle is invalid");
+  }
+  if (finalized_) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        "ModelAsyncLoad::finalize: model was already finalized");
+  }
+
+  auto warmupResult = resolveWarmup();
+  if (warmupResult.hasError() && !warmupCompleted_) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        warmupResult.error());
+  }
+
+  // Warmup is best-effort; fall back to direct createFromFile path.
+  auto modelResult =
+      Model::createFromFile(gpu, sourcePath_, options_, mem, debugName);
+  if (modelResult.hasError()) {
+    return modelResult;
+  }
+  finalized_ = true;
+  return modelResult;
+}
 
 Model::~Model() {
   if (gpu_ != nullptr && nuri::isValid(geometry_)) {
@@ -251,6 +433,15 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
   if (packedVertexBytes.size() != expectedPackedByteCount) {
     return Result<std::unique_ptr<Model>, std::string>::makeError(
         "Model::createFromPackedVertices: packed vertex byte count mismatch");
+  }
+  auto topologyValidation = validateMeshTopology(
+      std::span<const uint32_t>(data.indices.data(), data.indices.size()),
+      static_cast<uint32_t>(data.vertices.size()),
+      std::span<const Submesh>(data.submeshes.data(), data.submeshes.size()),
+      "Model::createFromPackedVertices");
+  if (topologyValidation.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        topologyValidation.error());
   }
 
   const std::span<const std::byte> vertexBytes{
@@ -292,26 +483,39 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
     const MeshCacheKey &cacheKey = cacheKeyResult.value();
     if (auto cachedMesh = tryLoadMeshCache(path, cacheKey, options);
         cachedMesh.has_value()) {
-      const std::span<const std::byte> vertexBytes{
-          cachedMesh->packedVertexBytes.data(),
-          cachedMesh->packedVertexBytes.size()};
-      const std::span<const std::byte> indexBytes{
-          reinterpret_cast<const std::byte *>(cachedMesh->indices.data()),
-          cachedMesh->indices.size() * sizeof(uint32_t)};
-      auto geometryResult = gpu.allocateGeometry(
-          vertexBytes, cachedMesh->vertexCount, indexBytes,
-          static_cast<uint32_t>(cachedMesh->indices.size()), debugName);
-      if (!geometryResult.hasError()) {
-        return Result<std::unique_ptr<Model>, std::string>::makeResult(
-            std::unique_ptr<Model>(new Model(
-                gpu, geometryResult.value(), std::move(cachedMesh->submeshes),
-                cachedMesh->vertexCount,
-                static_cast<uint32_t>(cachedMesh->indices.size()),
-                cachedMesh->bounds)));
+      const size_t expectedPackedByteCount =
+          static_cast<size_t>(cachedMesh->vertexCount) *
+          sizeof(PackedVertexWords);
+      if (cachedMesh->packedVertexBytes.size() != expectedPackedByteCount) {
+        NURI_LOG_WARNING(
+            "Model::createFromFile: Cache vertex byte count mismatch for '%s' "
+            "(expected=%zu actual=%zu), rebuilding from source",
+            cacheKey.cachePath.string().c_str(), expectedPackedByteCount,
+            cachedMesh->packedVertexBytes.size());
+      } else {
+        const std::span<const std::byte> vertexBytes{
+            cachedMesh->packedVertexBytes.data(),
+            cachedMesh->packedVertexBytes.size()};
+        const std::span<const std::byte> indexBytes{
+            reinterpret_cast<const std::byte *>(cachedMesh->indices.data()),
+            cachedMesh->indices.size() * sizeof(uint32_t)};
+        auto geometryResult = gpu.allocateGeometry(
+            vertexBytes, cachedMesh->vertexCount, indexBytes,
+            static_cast<uint32_t>(cachedMesh->indices.size()), debugName);
+        if (!geometryResult.hasError()) {
+          return Result<std::unique_ptr<Model>, std::string>::makeResult(
+              std::unique_ptr<Model>(new Model(
+                  gpu, geometryResult.value(),
+                  std::move(cachedMesh->submeshes), cachedMesh->vertexCount,
+                  static_cast<uint32_t>(cachedMesh->indices.size()),
+                  cachedMesh->bounds)));
+        }
+        NURI_LOG_WARNING(
+            "Model::createFromFile: Failed to create model from cache '%s': "
+            "%s",
+            cacheKey.cachePath.string().c_str(),
+            geometryResult.error().c_str());
       }
-      NURI_LOG_WARNING(
-          "Model::createFromFile: Failed to create model from cache '%s': %s",
-          cacheKey.cachePath.string().c_str(), geometryResult.error().c_str());
     }
   } else {
     NURI_LOG_DEBUG("Model::createFromFile: Mesh cache read disabled for '%.*s'",
@@ -363,6 +567,135 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
   NURI_LOG_DEBUG("Model::createFromFile: Created model from file '%.*s'",
                  static_cast<int>(path.size()), path.data());
   return modelResult;
+}
+
+Result<ModelAsyncLoad, std::string>
+Model::createFromFileAsync(std::string_view path,
+                           const MeshImportOptions &options) {
+  if (path.empty()) {
+    return Result<ModelAsyncLoad, std::string>::makeError(
+        "Model::createFromFileAsync: path is empty");
+  }
+
+  std::filesystem::path sourcePath{std::string(path)};
+  std::error_code ec;
+  std::filesystem::path normalizedPath =
+      std::filesystem::weakly_canonical(sourcePath, ec);
+  if (ec) {
+    normalizedPath = sourcePath.lexically_normal();
+  }
+  const std::string sourcePathString = normalizedPath.string();
+
+  std::error_code existsEc;
+  if (!std::filesystem::exists(sourcePathString, existsEc) ||
+      !std::filesystem::is_regular_file(sourcePathString, existsEc)) {
+    return Result<ModelAsyncLoad, std::string>::makeError(
+        "Model::createFromFileAsync: source path does not exist: " +
+        sourcePathString);
+  }
+
+  std::future<Result<bool, std::string>> warmupFuture;
+  try {
+    warmupFuture = std::async(
+        std::launch::async,
+        [sourcePathString, options]() -> Result<bool, std::string> {
+          std::pmr::unsynchronized_pool_resource importMemory;
+          return Model::warmFileCache(sourcePathString, options, &importMemory);
+        });
+  } catch (const std::exception &e) {
+    return Result<ModelAsyncLoad, std::string>::makeError(
+        std::string("Model::createFromFileAsync: failed to launch warmup: ") +
+        e.what());
+  } catch (...) {
+    return Result<ModelAsyncLoad, std::string>::makeError(
+        "Model::createFromFileAsync: failed to launch warmup");
+  }
+
+  return Result<ModelAsyncLoad, std::string>::makeResult(
+      ModelAsyncLoad(sourcePathString, options, std::move(warmupFuture)));
+}
+
+Result<bool, std::string>
+Model::warmFileCache(std::string_view path, const MeshImportOptions &options,
+                     std::pmr::memory_resource *mem) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const std::filesystem::path sourcePath{std::string(path)};
+  auto cacheKeyResult = buildMeshCacheKey(sourcePath, options);
+  if (cacheKeyResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        "Model::warmFileCache: Failed to build mesh cache key: " +
+        cacheKeyResult.error());
+  }
+  const MeshCacheKey &cacheKey = cacheKeyResult.value();
+
+  if (auto cachedMesh = tryLoadMeshCache(path, cacheKey, options);
+      cachedMesh.has_value()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  auto meshDataResult = MeshImporter::loadFromFile(path, options, mem);
+  if (meshDataResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        "Model::warmFileCache: Failed to import mesh: " + meshDataResult.error());
+  }
+
+  const MeshData &meshData = meshDataResult.value();
+  if (meshData.vertices.empty() || meshData.indices.empty()) {
+    return Result<bool, std::string>::makeError(
+        "Model::warmFileCache: Imported mesh has no vertices or indices");
+  }
+  auto topologyValidation = validateMeshTopology(
+      std::span<const uint32_t>(meshData.indices.data(), meshData.indices.size()),
+      static_cast<uint32_t>(meshData.vertices.size()),
+      std::span<const Submesh>(meshData.submeshes.data(),
+                               meshData.submeshes.size()),
+      "Model::warmFileCache");
+  if (topologyValidation.hasError()) {
+    return Result<bool, std::string>::makeError(topologyValidation.error());
+  }
+
+  const std::vector<std::byte> packedBytes =
+      packVerticesToByteBuffer(meshData.vertices);
+  if (packedBytes.empty()) {
+    return Result<bool, std::string>::makeError(
+        "Model::warmFileCache: Packed vertex buffer is empty");
+  }
+
+  const MeshSourceFingerprint fingerprint =
+      queryMeshSourceFingerprint(cacheKey.normalizedSourcePath);
+  MeshBinarySerializeInput input{};
+  input.sourcePathHash = cacheKey.sourcePathHash;
+  input.importOptionsHash = hashMeshImportOptions(options);
+  input.sourceSizeBytes = fingerprint.exists ? fingerprint.sizeBytes : 0u;
+  input.sourceMtimeNs = fingerprint.exists ? fingerprint.mtimeNs : 0;
+  input.bounds = computeModelBounds(meshData.vertices);
+  input.packedVertexBytes = std::span<const std::byte>(packedBytes.data(),
+                                                       packedBytes.size());
+  input.vertexCount = static_cast<uint32_t>(meshData.vertices.size());
+  input.vertexStrideBytes = kMeshBinaryPackedVertexStrideBytes;
+  input.indices = std::span<const uint32_t>(meshData.indices.data(),
+                                            meshData.indices.size());
+  input.submeshes = std::span<const Submesh>(meshData.submeshes.data(),
+                                             meshData.submeshes.size());
+
+  auto serializeResult = meshBinarySerialize(input);
+  if (serializeResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        "Model::warmFileCache: Failed to serialize mesh cache: " +
+        serializeResult.error());
+  }
+
+  auto writeResult = writeBinaryFileAtomic(cacheKey.cachePath,
+                                           serializeResult.value());
+  if (writeResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        "Model::warmFileCache: Failed to write mesh cache '" +
+        cacheKey.cachePath.string() + "': " + writeResult.error());
+  }
+
+  NURI_LOG_INFO("Model::warmFileCache: Built mesh cache '%s'",
+                cacheKey.cachePath.string().c_str());
+  return Result<bool, std::string>::makeResult(false);
 }
 
 } // namespace nuri

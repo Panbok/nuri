@@ -9,7 +9,7 @@ namespace {
 
 constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
-constexpr uint32_t kMeshCacheContentVersion = 3u;
+constexpr uint32_t kMeshCacheContentVersion = 5u;
 
 void fnv1aAddByte(uint64_t &hash, uint8_t byte) {
   hash ^= byte;

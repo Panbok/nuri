@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/defines.h"
 #include <array>
 #include <cstdint>
 #include <memory_resource>
@@ -29,7 +30,7 @@ struct MeshImportOptions {
   float lodTargetError = 1e-2f;
 };
 
-class MeshImporter {
+class NURI_API MeshImporter {
 public:
   [[nodiscard]] static nuri::Result<MeshData, std::string> loadFromFile(
       std::string_view path, const MeshImportOptions &options = {},
