@@ -85,6 +85,7 @@ private:
   struct MeshDrawTemplate {
     const OpaqueRenderable *renderable = nullptr;
     const Submesh *submesh = nullptr;
+    uint32_t submeshIndex = 0;
     uint32_t instanceIndex = 0;
     GeometryAllocationHandle geometryHandle{};
     BufferHandle indexBuffer{};

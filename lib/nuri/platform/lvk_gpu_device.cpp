@@ -1276,12 +1276,6 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
           std::string(context) + ": dependency buffer count exceeds " +
           std::to_string(kMaxDependencyBuffers));
     }
-    if (dependencyBuffers.size() >
-        lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES) {
-      return Result<bool, std::string>::makeError(
-          std::string(context) + ": dependency buffer count exceeds backend "
-          "submit limit");
-    }
 
     size_t dstIndex = 0;
     for (const BufferHandle bufferHandle : dependencyBuffers) {
@@ -1461,8 +1455,8 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       const bool isIndexedIndirectDraw =
           draw.command == DrawCommandType::IndexedIndirect ||
           draw.command == DrawCommandType::IndexedIndirectCount;
-      const bool requiresIndexBuffer = isIndexedIndirectDraw ||
-                                       (isDirectDraw && draw.indexCount > 0);
+      const bool requiresIndexBuffer =
+          isIndexedIndirectDraw || (isDirectDraw && draw.indexCount > 0);
       if (requiresIndexBuffer) {
         if (!impl_->buffers.isValid(draw.indexBuffer)) {
           commandBuffer.cmdEndRendering();
@@ -1515,6 +1509,9 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       if (draw.command == DrawCommandType::IndexedIndirect) {
         if (!impl_->buffers.isValid(draw.indirectBuffer)) {
           commandBuffer.cmdEndRendering();
+          if (!draw.debugLabel.empty()) {
+            commandBuffer.cmdPopDebugGroupLabel();
+          }
           if (!pass.debugLabel.empty()) {
             commandBuffer.cmdPopDebugGroupLabel();
           }
@@ -1531,6 +1528,9 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         if (!impl_->buffers.isValid(draw.indirectBuffer) ||
             !impl_->buffers.isValid(draw.indirectCountBuffer)) {
           commandBuffer.cmdEndRendering();
+          if (!draw.debugLabel.empty()) {
+            commandBuffer.cmdPopDebugGroupLabel();
+          }
           if (!pass.debugLabel.empty()) {
             commandBuffer.cmdPopDebugGroupLabel();
           }

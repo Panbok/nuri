@@ -34,7 +34,7 @@ constexpr float kPhaseNormDivisor = 16777215.0f; // 2^24 - 1
 constexpr uint32_t kPhaseHashMixMultiplier = 2246822519u;
 constexpr uint32_t kPhaseHashShift1 = 16u;
 constexpr uint32_t kPhaseHashShift2 = 13u;
-constexpr uint64_t kFnvOffsetBasis64 = 1469598103934665603ull;
+constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr uint64_t kInvalidDrawSignature = std::numeric_limits<uint64_t>::max();
 
@@ -58,12 +58,13 @@ const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
   return frame.settings ? *frame.settings : kDefaultSettings;
 }
 
-RenderPipelineDesc meshPipelineDesc(
-    Format swapchainFormat, Format depthFormat, ShaderHandle vertexShader,
-    ShaderHandle tessControlShader, ShaderHandle tessEvalShader,
-    ShaderHandle geometryShader, ShaderHandle fragmentShader,
-    PolygonMode polygonMode, Topology topology = Topology::Triangle,
-    uint32_t patchControlPoints = 0, bool blendEnabled = false) {
+RenderPipelineDesc
+meshPipelineDesc(Format swapchainFormat, Format depthFormat,
+                 ShaderHandle vertexShader, ShaderHandle tessControlShader,
+                 ShaderHandle tessEvalShader, ShaderHandle geometryShader,
+                 ShaderHandle fragmentShader, PolygonMode polygonMode,
+                 Topology topology = Topology::Triangle,
+                 uint32_t patchControlPoints = 0, bool blendEnabled = false) {
   return RenderPipelineDesc{
       .vertexInput = {},
       .vertexShader = vertexShader,
@@ -192,7 +193,7 @@ struct BatchKey {
 
 struct BatchKeyHash {
   size_t operator()(const BatchKey &key) const noexcept {
-    size_t h = 1469598103934665603ull;
+    size_t h = kFnvOffsetBasis64;
     const auto mix = [&h](uint64_t v) {
       h ^= static_cast<size_t>(v);
       h *= 1099511628211ull;
@@ -237,7 +238,7 @@ struct IndirectGroupKey {
 
 struct IndirectGroupKeyHash {
   size_t operator()(const IndirectGroupKey &key) const noexcept {
-    size_t h = 1469598103934665603ull;
+    size_t h = kFnvOffsetBasis64;
     const auto mix = [&h](uint64_t v) {
       h ^= static_cast<size_t>(v);
       h *= 1099511628211ull;
@@ -428,9 +429,10 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       }
 
       const glm::vec3 center = glm::vec3(renderable->modelMatrix[3]);
-      instanceCentersPhase_.push_back(glm::vec4(
-          center, animateInstances ? deterministicPhase(static_cast<uint32_t>(i))
-                                   : 0.0f));
+      instanceCentersPhase_.push_back(
+          glm::vec4(center, animateInstances
+                                ? deterministicPhase(static_cast<uint32_t>(i))
+                                : 0.0f));
       glm::mat4 baseMatrix = renderable->modelMatrix;
       baseMatrix[3] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
       instanceBaseMatrices_.push_back(baseMatrix);
@@ -601,29 +603,27 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   const size_t batchReserve =
       std::min<size_t>(meshDrawTemplates_.size(), kMaxBatchReserve);
   batches.reserve(batchReserve);
-  const auto appendBatch = [&baseDraw, &batches](
-                               RenderPipelineHandle pipeline,
-                               BufferHandle indexBuffer,
-                               uint64_t indexBufferOffset,
-                               const SubmeshLod &lodRange,
-                               uint64_t vertexBufferAddress, size_t count,
-                               size_t firstInstance) {
-    if (count == 0) {
-      return;
-    }
-    BatchEntry entry{};
-    entry.draw = baseDraw;
-    entry.draw.pipeline = pipeline;
-    entry.draw.indexBuffer = indexBuffer;
-    entry.draw.indexBufferOffset = indexBufferOffset;
-    entry.draw.indexCount = lodRange.indexCount;
-    entry.draw.firstIndex = lodRange.indexOffset;
-    entry.draw.vertexOffset = 0;
-    entry.vertexBufferAddress = vertexBufferAddress;
-    entry.instanceCount = count;
-    entry.firstInstance = firstInstance;
-    batches.push_back(entry);
-  };
+  const auto appendBatch =
+      [&baseDraw, &batches](
+          RenderPipelineHandle pipeline, BufferHandle indexBuffer,
+          uint64_t indexBufferOffset, const SubmeshLod &lodRange,
+          uint64_t vertexBufferAddress, size_t count, size_t firstInstance) {
+        if (count == 0) {
+          return;
+        }
+        BatchEntry entry{};
+        entry.draw = baseDraw;
+        entry.draw.pipeline = pipeline;
+        entry.draw.indexBuffer = indexBuffer;
+        entry.draw.indexBufferOffset = indexBufferOffset;
+        entry.draw.indexCount = lodRange.indexCount;
+        entry.draw.firstIndex = lodRange.indexOffset;
+        entry.draw.vertexOffset = 0;
+        entry.vertexBufferAddress = vertexBufferAddress;
+        entry.instanceCount = count;
+        entry.firstInstance = firstInstance;
+        batches.push_back(entry);
+      };
   const auto materializeBatchesFromSingleInstanceCache = [this, &batches]() {
     batches.clear();
     batches.reserve(singleInstanceBatchCache_.batches.size());
@@ -756,17 +756,17 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
           hashCombine64(meshTemplateSignature,
                         foldHandle(templateEntry.geometryHandle.index,
                                    templateEntry.geometryHandle.generation));
-      meshTemplateSignature = hashCombine64(
-          meshTemplateSignature,
-          foldHandle(templateEntry.indexBuffer.index,
-                     templateEntry.indexBuffer.generation));
+      meshTemplateSignature =
+          hashCombine64(meshTemplateSignature,
+                        foldHandle(templateEntry.indexBuffer.index,
+                                   templateEntry.indexBuffer.generation));
       meshTemplateSignature =
           hashCombine64(meshTemplateSignature, templateEntry.indexBufferOffset);
+      meshTemplateSignature = hashCombine64(meshTemplateSignature,
+                                            templateEntry.vertexBufferAddress);
       meshTemplateSignature =
-          hashCombine64(meshTemplateSignature, templateEntry.vertexBufferAddress);
-      meshTemplateSignature = hashCombine64(
-          meshTemplateSignature,
-          reinterpret_cast<uint64_t>(templateEntry.submesh));
+          hashCombine64(meshTemplateSignature,
+                        static_cast<uint64_t>(templateEntry.submeshIndex));
     }
     NURI_PROFILER_ZONE_END();
   }
@@ -776,8 +776,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       meshTemplateSignature,
       foldHandle(baseDraw.pipeline.index, baseDraw.pipeline.generation));
   meshTemplateSignature = hashCombine64(
-      meshTemplateSignature,
-      foldHandle(meshTessPipelineHandle_.index, meshTessPipelineHandle_.generation));
+      meshTemplateSignature, foldHandle(meshTessPipelineHandle_.index,
+                                        meshTessPipelineHandle_.generation));
   bool usedUniformFastPath = false;
   bool usedUniformAutoLodFastPath = false;
   bool reusedUniformAutoLodFastPath = false;
@@ -1098,8 +1098,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
         batches.push_back(std::move(entry));
         const size_t insertedIndex = batches.size() - 1;
-        batchLookup.emplace(key, insertedIndex);
-        it = batchLookup.find(key);
+        auto [insertedIt, _] = batchLookup.emplace(key, insertedIndex);
+        it = insertedIt;
       }
 
       const uint32_t batchIndex = static_cast<uint32_t>(it->second);
@@ -1333,12 +1333,13 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         return depResult;
       }
     }
-    if (frameSlot < instanceRemapRing_.size() && instanceRemapRing_[frameSlot].buffer &&
+    if (frameSlot < instanceRemapRing_.size() &&
+        instanceRemapRing_[frameSlot].buffer &&
         instanceRemapRing_[frameSlot].buffer->valid()) {
-      auto depResult = appendUniqueDependency(
-          passDependencyBuffers_,
-          instanceRemapRing_[frameSlot].buffer->handle(),
-          "OpaqueLayer::buildRenderPasses(pass)");
+      auto depResult =
+          appendUniqueDependency(passDependencyBuffers_,
+                                 instanceRemapRing_[frameSlot].buffer->handle(),
+                                 "OpaqueLayer::buildRenderPasses(pass)");
       if (depResult.hasError()) {
         return depResult;
       }
@@ -1364,7 +1365,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       }
 
       if (useComputePass) {
-        if (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid()) {
+        if (instanceCentersPhaseBuffer_ &&
+            instanceCentersPhaseBuffer_->valid()) {
           auto depResult = appendUniqueDependency(
               dispatchDependencyBuffers_, instanceCentersPhaseBuffer_->handle(),
               "OpaqueLayer::buildRenderPasses(dispatch)");
@@ -1400,9 +1402,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         dispatch.pushConstants = std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&computePushConstants_),
             sizeof(computePushConstants_));
-        dispatch.dependencyBuffers = std::span<const BufferHandle>(
-            dispatchDependencyBuffers_.data(),
-            dispatchDependencyBuffers_.size());
+        dispatch.dependencyBuffers =
+            std::span<const BufferHandle>(dispatchDependencyBuffers_.data(),
+                                          dispatchDependencyBuffers_.size());
         dispatch.debugLabel = "Opaque Instance Compute";
         dispatch.debugColor = kComputeDispatchColor;
         preDispatches_.push_back(dispatch);
@@ -1481,8 +1483,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       DrawItem wireframeItem = baseItem;
       wireframeItem.pipeline = wireframePipeline;
       if (isTessDraw) {
-        wireframeItem.debugLabel = usedFallback ? "OpaqueMeshTessWireframeOnlyFallback"
-                                                : "OpaqueMeshTessWireframeOnly";
+        wireframeItem.debugLabel = usedFallback
+                                       ? "OpaqueMeshTessWireframeOnlyFallback"
+                                       : "OpaqueMeshTessWireframeOnly";
       } else {
         wireframeItem.debugLabel = "OpaqueMeshWireframeOnly";
       }
@@ -1656,8 +1659,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
                    instanceCount, remapCount, drawItems_.size(),
                    tessellatedDraws, tessellatedInstances,
                    indirectDrawItems_.size(), indirectCommandCount,
-                   debugOverlayDraws,
-                   debugOverlayFallbackDraws);
+                   debugOverlayDraws, debugOverlayFallbackDraws);
   }
 
   const bool shouldLoadColor = settings.skybox.enabled;
@@ -1675,8 +1677,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       preDispatches_.data(), preDispatches_.size());
   pass.dependencyBuffers = std::span<const BufferHandle>(
       passDependencyBuffers_.data(), passDependencyBuffers_.size());
-  pass.draws = std::span<const DrawItem>(passDrawItems_.data(),
-                                         passDrawItems_.size());
+  pass.draws =
+      std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size());
   pass.debugLabel = "Opaque Pass";
   pass.debugColor = kOpaquePassDebugColor;
 
@@ -1685,8 +1687,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-uint32_t OpaqueLayer::resolveSingleInstanceRequestedLod(
-    const RenderSettings &settings, uint32_t forcedLod) const {
+uint32_t
+OpaqueLayer::resolveSingleInstanceRequestedLod(const RenderSettings &settings,
+                                               uint32_t forcedLod) const {
   if (!settings.opaque.enableMeshLod) {
     return 0;
   }
@@ -1776,8 +1779,8 @@ Result<bool, std::string> OpaqueLayer::ensureSingleInstanceBatchCache(
       entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
       singleInstanceBatchCache_.batches.push_back(entry);
       const size_t insertedIndex = singleInstanceBatchCache_.batches.size() - 1;
-      singleBatchLookup.emplace(key, insertedIndex);
-      it = singleBatchLookup.find(key);
+      auto [insertedIt, _] = singleBatchLookup.emplace(key, insertedIndex);
+      it = insertedIt;
     }
 
     ++singleInstanceBatchCache_.batches[it->second].instanceCount;
@@ -1792,10 +1795,9 @@ Result<bool, std::string> OpaqueLayer::ensureSingleInstanceBatchCache(
 }
 
 Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
-                                                           size_t remapCount) {
+                                                          size_t remapCount) {
   const bool canUseIndirectPath =
-      !drawItems_.empty() &&
-      drawItems_.size() <= kMaxDrawItemsForIndirectPath;
+      !drawItems_.empty() && drawItems_.size() <= kMaxDrawItemsForIndirectPath;
   if (!canUseIndirectPath) {
     invalidateIndirectPackCache();
     indirectPushConstants_.clear();
@@ -1804,8 +1806,7 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  NURI_PROFILER_ZONE("OpaqueLayer.indirect_pack",
-                     NURI_PROFILER_COLOR_CMD_DRAW);
+  NURI_PROFILER_ZONE("OpaqueLayer.indirect_pack", NURI_PROFILER_COLOR_CMD_DRAW);
   if (drawItems_.size() != drawPushConstants_.size()) {
     return Result<bool, std::string>::makeError(
         "OpaqueLayer::buildIndirectDraws: draw and push constant count "
@@ -1815,20 +1816,12 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
   const uint64_t drawSignature = computeIndirectDrawSignature(remapCount);
   const bool canReusePackedCommands = canReuseIndirectPack(drawSignature);
 
-  const size_t requiredBytes = canReusePackedCommands
-                                   ? indirectPackCache_.requiredBytes
-                                   : kIndirectCountHeaderBytes;
-  auto indirectCapacityResult =
-      ensureIndirectCommandRingCapacity(std::max(requiredBytes, kIndirectCountHeaderBytes));
-  if (indirectCapacityResult.hasError()) {
-    return indirectCapacityResult;
-  }
-  if (frameSlot >= indirectCommandRing_.size() ||
-      !indirectCommandRing_[frameSlot].buffer ||
-      !indirectCommandRing_[frameSlot].buffer->valid()) {
-    return Result<bool, std::string>::makeError(
-        "OpaqueLayer::buildIndirectDraws: indirect ring buffer slot is "
-        "invalid");
+  if (canReusePackedCommands) {
+    auto indirectCapacityResult = ensureIndirectCommandRingCapacity(
+        std::max(indirectPackCache_.requiredBytes, kIndirectCountHeaderBytes));
+    if (indirectCapacityResult.hasError()) {
+      return indirectCapacityResult;
+    }
   }
 
   if (indirectUploadSignatures_.size() != indirectCommandRing_.size()) {
@@ -1836,11 +1829,19 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
                                      kInvalidDrawSignature);
   }
 
-  auto packResult = canReusePackedCommands
-                        ? refreshCachedIndirectPack(frameSlot, drawSignature)
-                        : rebuildIndirectPack(frameSlot, remapCount, drawSignature);
+  auto packResult =
+      canReusePackedCommands
+          ? refreshCachedIndirectPack(frameSlot, drawSignature)
+          : rebuildIndirectPack(frameSlot, remapCount, drawSignature);
   if (packResult.hasError()) {
     return packResult;
+  }
+  if (frameSlot >= indirectCommandRing_.size() ||
+      !indirectCommandRing_[frameSlot].buffer ||
+      !indirectCommandRing_[frameSlot].buffer->valid()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::buildIndirectDraws: indirect ring buffer slot is "
+        "invalid");
   }
 
   NURI_PROFILER_ZONE_END();
@@ -1855,11 +1856,12 @@ uint64_t OpaqueLayer::computeIndirectDrawSignature(size_t remapCount) const {
     const DrawItem &draw = drawItems_[i];
     drawSignature =
         hashCombine64(drawSignature, static_cast<uint64_t>(draw.command));
-    drawSignature = hashCombine64(
-        drawSignature, foldHandle(draw.pipeline.index, draw.pipeline.generation));
-    drawSignature = hashCombine64(
-        drawSignature,
-        foldHandle(draw.indexBuffer.index, draw.indexBuffer.generation));
+    drawSignature =
+        hashCombine64(drawSignature, foldHandle(draw.pipeline.index,
+                                                draw.pipeline.generation));
+    drawSignature =
+        hashCombine64(drawSignature, foldHandle(draw.indexBuffer.index,
+                                                draw.indexBuffer.generation));
     drawSignature = hashCombine64(drawSignature, draw.indexBufferOffset);
     drawSignature =
         hashCombine64(drawSignature, static_cast<uint64_t>(draw.indexFormat));
@@ -1960,15 +1962,18 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
     if (commandCount == 0) {
       continue;
     }
-    const size_t chunkCount = (commandCount + (kMaxIndirectCommandsPerDraw - 1u)) /
-                              kMaxIndirectCommandsPerDraw;
+    const size_t chunkCount =
+        (commandCount + (kMaxIndirectCommandsPerDraw - 1u)) /
+        kMaxIndirectCommandsPerDraw;
     totalIndirectDrawItems += chunkCount;
     packedRequiredBytes += chunkCount * kIndirectCountHeaderBytes +
                            commandCount * sizeof(DrawIndexedIndirectCommand);
   }
-  packedRequiredBytes = std::max(packedRequiredBytes, kIndirectCountHeaderBytes);
+  packedRequiredBytes =
+      std::max(packedRequiredBytes, kIndirectCountHeaderBytes);
 
-  auto packedCapacityResult = ensureIndirectCommandRingCapacity(packedRequiredBytes);
+  auto packedCapacityResult =
+      ensureIndirectCommandRingCapacity(packedRequiredBytes);
   if (packedCapacityResult.hasError()) {
     return packedCapacityResult;
   }
@@ -2027,7 +2032,8 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
         DrawItem indirectDraw = group.baseDraw;
         indirectDraw.command = DrawCommandType::IndexedIndirect;
         indirectDraw.indirectBuffer = indirectBufferHandle;
-        indirectDraw.indirectBufferOffset = chunkOffset + kIndirectCountHeaderBytes;
+        indirectDraw.indirectBufferOffset =
+            chunkOffset + kIndirectCountHeaderBytes;
         indirectDraw.indirectDrawCount = drawCount;
         indirectDraw.indirectStride = sizeof(DrawIndexedIndirectCommand);
         indirectDraw.pushConstants = std::span<const std::byte>(
@@ -2041,8 +2047,8 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
     }
   }
 
-  const std::span<const std::byte> uploadBytes{indirectCommandUploadBytes_.data(),
-                                                indirectCommandUploadBytes_.size()};
+  const std::span<const std::byte> uploadBytes{
+      indirectCommandUploadBytes_.data(), indirectCommandUploadBytes_.size()};
   auto updateIndirectResult = gpu_.updateBuffer(
       indirectCommandRing_[frameSlot].buffer->handle(), uploadBytes, 0);
   if (updateIndirectResult.hasError()) {
@@ -2057,7 +2063,8 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
 }
 
 Result<bool, std::string>
-OpaqueLayer::refreshCachedIndirectPack(uint32_t frameSlot, uint64_t drawSignature) {
+OpaqueLayer::refreshCachedIndirectPack(uint32_t frameSlot,
+                                       uint64_t drawSignature) {
   if (indirectSourceDrawIndices_.size() != indirectDrawItems_.size()) {
     return Result<bool, std::string>::makeError(
         "OpaqueLayer::buildIndirectDraws: cached indirect source mapping is "
@@ -2080,8 +2087,8 @@ OpaqueLayer::refreshCachedIndirectPack(uint32_t frameSlot, uint64_t drawSignatur
   }
 
   if (indirectUploadSignatures_[frameSlot] != drawSignature) {
-    const std::span<const std::byte> uploadBytes{indirectCommandUploadBytes_.data(),
-                                                 indirectCommandUploadBytes_.size()};
+    const std::span<const std::byte> uploadBytes{
+        indirectCommandUploadBytes_.data(), indirectCommandUploadBytes_.size()};
     auto updateIndirectResult = gpu_.updateBuffer(
         indirectCommandRing_[frameSlot].buffer->handle(), uploadBytes, 0);
     if (updateIndirectResult.hasError()) {
@@ -2523,6 +2530,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene) {
       meshDrawTemplates_.push_back(MeshDrawTemplate{
           .renderable = &renderable,
           .submesh = &submeshes[submeshIndex],
+          .submeshIndex = static_cast<uint32_t>(submeshIndex),
           .instanceIndex = index,
           .geometryHandle = renderable.model->geometryHandle(),
           .indexBuffer = geometry.indexBuffer,
@@ -2599,8 +2607,7 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
           "OpaqueLayer::createShaders: invalid shader spec");
     }
     const std::string shaderPath = spec.path->string();
-    auto compileResult =
-        spec.shader->compileFromFile(shaderPath, spec.stage);
+    auto compileResult = spec.shader->compileFromFile(shaderPath, spec.stage);
     if (compileResult.hasError()) {
       return Result<bool, std::string>::makeError(compileResult.error());
     }
@@ -2627,8 +2634,7 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
     }
 
     const std::string shaderPath = spec.path->string();
-    auto compileResult =
-        spec.shader->compileFromFile(shaderPath, spec.stage);
+    auto compileResult = spec.shader->compileFromFile(shaderPath, spec.stage);
     if (compileResult.hasError()) {
       tessellationUnsupported_ = true;
       meshTessVertexShader_ = {};
@@ -2667,8 +2673,7 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
       break;
     }
     const std::string shaderPath = spec.path->string();
-    auto compileResult =
-        spec.shader->compileFromFile(shaderPath, spec.stage);
+    auto compileResult = spec.shader->compileFromFile(shaderPath, spec.stage);
     if (compileResult.hasError()) {
       gsOverlayPipelineUnsupported_ = true;
       gsTessOverlayPipelineUnsupported_ = true;
@@ -2697,8 +2702,8 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
                                  ? gpu_.getTextureFormat(depthTexture_)
                                  : Format::D32_FLOAT;
   const RenderPipelineDesc meshDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {},
-      {}, meshFragmentShader_, PolygonMode::Fill);
+      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {}, {},
+      meshFragmentShader_, PolygonMode::Fill);
   auto meshResult =
       meshPipeline_->createRenderPipeline(meshDesc, "opaque_mesh");
   if (meshResult.hasError()) {
@@ -2767,8 +2772,8 @@ Result<bool, std::string> OpaqueLayer::ensureWireframePipeline() {
                                  ? gpu_.getTextureFormat(depthTexture_)
                                  : Format::D32_FLOAT;
   const RenderPipelineDesc wireframeDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {},
-      {}, meshFragmentShader_, PolygonMode::Line, Topology::Triangle, 0, true);
+      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {}, {},
+      meshFragmentShader_, PolygonMode::Line, Topology::Triangle, 0, true);
 
   auto pipelineResult =
       gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_wireframe");
@@ -2813,8 +2818,8 @@ Result<bool, std::string> OpaqueLayer::ensureTessWireframePipeline() {
       PolygonMode::Line, Topology::Patch, kTessellationPatchControlPoints,
       true);
 
-  auto pipelineResult = gpu_.createRenderPipeline(
-      wireframeDesc, "opaque_mesh_tess_wireframe");
+  auto pipelineResult =
+      gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_tess_wireframe");
   if (pipelineResult.hasError()) {
     tessWireframePipelineUnsupported_ = true;
     if (!loggedTessWireframeFallbackUnsupported_) {
@@ -2901,11 +2906,12 @@ Result<bool, std::string> OpaqueLayer::ensureGsTessOverlayPipeline() {
   const Format depthFormat = nuri::isValid(depthTexture_)
                                  ? gpu_.getTextureFormat(depthTexture_)
                                  : Format::D32_FLOAT;
-  const RenderPipelineDesc overlayDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
-      meshTessControlShader_, meshTessEvalShader_, meshDebugOverlayGeometryShader_,
-      meshDebugOverlayFragmentShader_, PolygonMode::Fill, Topology::Patch,
-      kTessellationPatchControlPoints, true);
+  const RenderPipelineDesc overlayDesc =
+      meshPipelineDesc(gpu_.getSwapchainFormat(), depthFormat,
+                       meshTessVertexShader_, meshTessControlShader_,
+                       meshTessEvalShader_, meshDebugOverlayGeometryShader_,
+                       meshDebugOverlayFragmentShader_, PolygonMode::Fill,
+                       Topology::Patch, kTessellationPatchControlPoints, true);
 
   auto pipelineResult =
       gpu_.createRenderPipeline(overlayDesc, "opaque_mesh_tess_overlay_gs");
@@ -2968,7 +2974,8 @@ void OpaqueLayer::invalidateSingleInstanceBatchCache() {
   singleInstanceBatchCache_.valid = false;
   singleInstanceBatchCache_.requestedLod = 0;
   singleInstanceBatchCache_.tessPipelineEnabled = false;
-  singleInstanceBatchCache_.templateSignature = std::numeric_limits<uint64_t>::max();
+  singleInstanceBatchCache_.templateSignature =
+      std::numeric_limits<uint64_t>::max();
   singleInstanceBatchCache_.remapCount = 0;
   singleInstanceBatchCache_.batches.clear();
 }

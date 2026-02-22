@@ -318,7 +318,7 @@ bool ModelAsyncLoad::isReady() const {
     return true;
   }
   if (!warmupFuture_.valid()) {
-    return true;
+    return false;
   }
   return warmupFuture_.wait_for(std::chrono::milliseconds(0)) ==
          std::future_status::ready;
@@ -587,11 +587,18 @@ Model::createFromFileAsync(std::string_view path,
   const std::string sourcePathString = normalizedPath.string();
 
   std::error_code existsEc;
-  if (!std::filesystem::exists(sourcePathString, existsEc) ||
-      !std::filesystem::is_regular_file(sourcePathString, existsEc)) {
+  if (!std::filesystem::exists(sourcePathString, existsEc)) {
     return Result<ModelAsyncLoad, std::string>::makeError(
         "Model::createFromFileAsync: source path does not exist: " +
-        sourcePathString);
+        sourcePathString +
+        (existsEc ? (" (" + existsEc.message() + ")") : ""));
+  }
+  std::error_code isRegEc;
+  if (!std::filesystem::is_regular_file(sourcePathString, isRegEc)) {
+    return Result<ModelAsyncLoad, std::string>::makeError(
+        "Model::createFromFileAsync: source path is not a regular file: " +
+        sourcePathString +
+        (isRegEc ? (" (" + isRegEc.message() + ")") : ""));
   }
 
   std::future<Result<bool, std::string>> warmupFuture;

@@ -20,6 +20,9 @@ namespace nuri {
 
 class Model;
 
+// Handle for asynchronous model loading. Uses std::shared_future for warmup so
+// that the destructor does not block (std::future's destructor would wait for
+// the async task); the shared state is released when the last reference goes away.
 class NURI_API ModelAsyncLoad final {
 public:
   ModelAsyncLoad() = default;
@@ -57,7 +60,7 @@ private:
 
   std::string sourcePath_{};
   MeshImportOptions options_{};
-  std::future<Result<bool, std::string>> warmupFuture_{};
+  std::shared_future<Result<bool, std::string>> warmupFuture_{};
   bool warmupCompleted_ = false;
   bool warmupCacheHit_ = false;
   std::string warmupError_{};
