@@ -1345,12 +1345,19 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   for (const RenderPass &pass : frame.passes) {
     const bool passLabelPushed =
         pushDebugLabel(commandBuffer, pass.debugLabel, pass.debugColor);
-    const auto returnPassError = [&](std::string_view message)
-        -> Result<bool, std::string> {
+    const auto returnPassError =
+        [&](std::string_view message) -> Result<bool, std::string> {
       if (passLabelPushed) {
         commandBuffer.cmdPopDebugGroupLabel();
       }
       return Result<bool, std::string>::makeError(std::string(message));
+    };
+    const auto returnPassErrorResult =
+        [&](Result<bool, std::string> result) -> Result<bool, std::string> {
+      if (passLabelPushed) {
+        commandBuffer.cmdPopDebugGroupLabel();
+      }
+      return result;
     };
 
     lvk::RenderPass renderPass{};
@@ -1418,10 +1425,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
             fillDependencies(dispatch.dependencyBuffers, dispatchDependencies,
                              "LvkGPUDevice::submitFrame compute dispatch");
         if (dispatchDepsResult.hasError()) {
-          if (passLabelPushed) {
-            commandBuffer.cmdPopDebugGroupLabel();
-          }
-          return dispatchDepsResult;
+          return returnPassErrorResult(dispatchDepsResult);
         }
 
         const bool dispatchLabelPushed = pushDebugLabel(
@@ -1451,17 +1455,14 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         fillDependencies(pass.dependencyBuffers, renderDependencies,
                          "LvkGPUDevice::submitFrame render pass");
     if (renderDepsResult.hasError()) {
-      if (passLabelPushed) {
-        commandBuffer.cmdPopDebugGroupLabel();
-      }
-      return renderDepsResult;
+      return returnPassErrorResult(renderDepsResult);
     }
 
     commandBuffer.cmdBeginRendering(renderPass, framebuffer,
                                     renderDependencies);
-    const auto returnDrawError = [&](std::string_view message,
-                                     bool drawLabelPushed)
-        -> Result<bool, std::string> {
+    const auto returnDrawError =
+        [&](std::string_view message,
+            bool drawLabelPushed) -> Result<bool, std::string> {
       commandBuffer.cmdEndRendering();
       if (drawLabelPushed) {
         commandBuffer.cmdPopDebugGroupLabel();
