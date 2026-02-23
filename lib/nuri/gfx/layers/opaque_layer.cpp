@@ -118,6 +118,14 @@ bool nearlyEqualThresholds(const std::array<float, 3> &a,
          std::abs(a[2] - b[2]) <= epsilon;
 }
 
+uint64_t computeRemapSignature(std::span<const uint32_t> remap) {
+  uint64_t signature = hashCombine64(kFnvOffsetBasis64, remap.size());
+  for (const uint32_t value : remap) {
+    signature = hashCombine64(signature, static_cast<uint64_t>(value));
+  }
+  return signature;
+}
+
 bool isSameBufferHandle(BufferHandle a, BufferHandle b) {
   return a.index == b.index && a.generation == b.generation;
 }
@@ -264,6 +272,7 @@ OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
       meshDrawTemplates_(resolveMemoryResource(memory)),
       indirectSourceDrawIndices_(resolveMemoryResource(memory)),
       indirectUploadSignatures_(resolveMemoryResource(memory)),
+      remapUploadSignatures_(resolveMemoryResource(memory)),
       templateBatchIndices_(resolveMemoryResource(memory)),
       batchWriteOffsets_(resolveMemoryResource(memory)),
       instanceCentersPhase_(resolveMemoryResource(memory)),
@@ -785,64 +794,120 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     templateEntry.vertexBufferAddress = refreshedVertexAddress;
     return Result<bool, std::string>::makeResult(true);
   };
+  const bool shouldComputeTemplateSignature =
+      instanceCount == 1 && !uniformSingleSubmeshPath_;
   uint64_t meshTemplateSignature = kFnvOffsetBasis64;
   {
     NURI_PROFILER_ZONE("OpaqueLayer.sync_template_geometry",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    GeometryAllocationHandle cachedHandle{};
-    BufferHandle cachedIndexBuffer{};
-    uint64_t cachedIndexBufferOffset = 0;
-    uint64_t cachedVertexBufferAddress = 0;
-    bool hasCachedGeometry = false;
+    if (!meshDrawTemplates_.empty() && uniformSingleSubmeshPath_) {
+      MeshDrawTemplate &firstTemplate = meshDrawTemplates_.front();
+      const BufferHandle previousIndexBuffer = firstTemplate.indexBuffer;
+      const uint64_t previousIndexBufferOffset = firstTemplate.indexBufferOffset;
+      const uint64_t previousVertexBufferAddress =
+          firstTemplate.vertexBufferAddress;
 
-    for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
-      const bool sameAsCached =
-          hasCachedGeometry &&
-          templateEntry.geometryHandle.index == cachedHandle.index &&
-          templateEntry.geometryHandle.generation == cachedHandle.generation;
-      if (sameAsCached) {
-        templateEntry.indexBuffer = cachedIndexBuffer;
-        templateEntry.indexBufferOffset = cachedIndexBufferOffset;
-        templateEntry.vertexBufferAddress = cachedVertexBufferAddress;
-      } else {
-        auto refreshResult = refreshTemplateGeometry(templateEntry);
-        if (refreshResult.hasError()) {
-          return refreshResult;
-        }
-
-        cachedHandle = templateEntry.geometryHandle;
-        cachedIndexBuffer = templateEntry.indexBuffer;
-        cachedIndexBufferOffset = templateEntry.indexBufferOffset;
-        cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
-        hasCachedGeometry = true;
+      auto refreshResult = refreshTemplateGeometry(firstTemplate);
+      if (refreshResult.hasError()) {
+        return refreshResult;
       }
 
-      meshTemplateSignature =
-          hashCombine64(meshTemplateSignature,
-                        foldHandle(templateEntry.geometryHandle.index,
-                                   templateEntry.geometryHandle.generation));
-      meshTemplateSignature =
-          hashCombine64(meshTemplateSignature,
-                        foldHandle(templateEntry.indexBuffer.index,
-                                   templateEntry.indexBuffer.generation));
-      meshTemplateSignature =
-          hashCombine64(meshTemplateSignature, templateEntry.indexBufferOffset);
-      meshTemplateSignature = hashCombine64(meshTemplateSignature,
-                                            templateEntry.vertexBufferAddress);
-      meshTemplateSignature =
-          hashCombine64(meshTemplateSignature,
-                        static_cast<uint64_t>(templateEntry.submeshIndex));
+      const bool geometryChanged =
+          firstTemplate.indexBuffer.index != previousIndexBuffer.index ||
+          firstTemplate.indexBuffer.generation != previousIndexBuffer.generation ||
+          firstTemplate.indexBufferOffset != previousIndexBufferOffset ||
+          firstTemplate.vertexBufferAddress != previousVertexBufferAddress;
+      if (geometryChanged) {
+        for (size_t i = 1; i < meshDrawTemplates_.size(); ++i) {
+          MeshDrawTemplate &templateEntry = meshDrawTemplates_[i];
+          templateEntry.indexBuffer = firstTemplate.indexBuffer;
+          templateEntry.indexBufferOffset = firstTemplate.indexBufferOffset;
+          templateEntry.vertexBufferAddress = firstTemplate.vertexBufferAddress;
+        }
+      }
+    } else {
+      GeometryAllocationHandle cachedHandle{};
+      BufferHandle cachedIndexBuffer{};
+      uint64_t cachedIndexBufferOffset = 0;
+      uint64_t cachedVertexBufferAddress = 0;
+      bool hasCachedGeometry = false;
+
+      if (shouldComputeTemplateSignature) {
+        for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+          const bool sameAsCached =
+              hasCachedGeometry &&
+              templateEntry.geometryHandle.index == cachedHandle.index &&
+              templateEntry.geometryHandle.generation == cachedHandle.generation;
+          if (sameAsCached) {
+            templateEntry.indexBuffer = cachedIndexBuffer;
+            templateEntry.indexBufferOffset = cachedIndexBufferOffset;
+            templateEntry.vertexBufferAddress = cachedVertexBufferAddress;
+          } else {
+            auto refreshResult = refreshTemplateGeometry(templateEntry);
+            if (refreshResult.hasError()) {
+              return refreshResult;
+            }
+
+            cachedHandle = templateEntry.geometryHandle;
+            cachedIndexBuffer = templateEntry.indexBuffer;
+            cachedIndexBufferOffset = templateEntry.indexBufferOffset;
+            cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
+            hasCachedGeometry = true;
+          }
+
+          meshTemplateSignature =
+              hashCombine64(meshTemplateSignature,
+                            foldHandle(templateEntry.geometryHandle.index,
+                                       templateEntry.geometryHandle.generation));
+          meshTemplateSignature =
+              hashCombine64(meshTemplateSignature,
+                            foldHandle(templateEntry.indexBuffer.index,
+                                       templateEntry.indexBuffer.generation));
+          meshTemplateSignature = hashCombine64(meshTemplateSignature,
+                                                templateEntry.indexBufferOffset);
+          meshTemplateSignature = hashCombine64(meshTemplateSignature,
+                                                templateEntry.vertexBufferAddress);
+          meshTemplateSignature =
+              hashCombine64(meshTemplateSignature,
+                            static_cast<uint64_t>(templateEntry.submeshIndex));
+        }
+      } else {
+        for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+          const bool sameAsCached =
+              hasCachedGeometry &&
+              templateEntry.geometryHandle.index == cachedHandle.index &&
+              templateEntry.geometryHandle.generation == cachedHandle.generation;
+          if (sameAsCached) {
+            templateEntry.indexBuffer = cachedIndexBuffer;
+            templateEntry.indexBufferOffset = cachedIndexBufferOffset;
+            templateEntry.vertexBufferAddress = cachedVertexBufferAddress;
+          } else {
+            auto refreshResult = refreshTemplateGeometry(templateEntry);
+            if (refreshResult.hasError()) {
+              return refreshResult;
+            }
+
+            cachedHandle = templateEntry.geometryHandle;
+            cachedIndexBuffer = templateEntry.indexBuffer;
+            cachedIndexBufferOffset = templateEntry.indexBufferOffset;
+            cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
+            hasCachedGeometry = true;
+          }
+        }
+      }
     }
     NURI_PROFILER_ZONE_END();
   }
-  meshTemplateSignature =
-      hashCombine64(meshTemplateSignature, meshDrawTemplates_.size());
-  meshTemplateSignature = hashCombine64(
-      meshTemplateSignature,
-      foldHandle(baseDraw.pipeline.index, baseDraw.pipeline.generation));
-  meshTemplateSignature = hashCombine64(
-      meshTemplateSignature, foldHandle(meshTessPipelineHandle_.index,
-                                        meshTessPipelineHandle_.generation));
+  if (shouldComputeTemplateSignature) {
+    meshTemplateSignature =
+        hashCombine64(meshTemplateSignature, meshDrawTemplates_.size());
+    meshTemplateSignature = hashCombine64(
+        meshTemplateSignature,
+        foldHandle(baseDraw.pipeline.index, baseDraw.pipeline.generation));
+    meshTemplateSignature = hashCombine64(
+        meshTemplateSignature, foldHandle(meshTessPipelineHandle_.index,
+                                          meshTessPipelineHandle_.generation));
+  }
   bool usedUniformFastPath = false;
   bool usedUniformAutoLodFastPath = false;
   bool reusedUniformAutoLodFastPath = false;
@@ -1289,6 +1354,73 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     NURI_PROFILER_ZONE_END();
   }
 
+  if (!settings.opaque.enableInstancedDraw && !drawItems_.empty()) {
+    NURI_PROFILER_ZONE("OpaqueLayer.instancing_expand",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    if (drawItems_.size() != drawPushConstants_.size()) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildRenderPasses: draw and push constant count "
+          "mismatch before instancing expansion");
+    }
+
+    size_t expandedDrawCount = 0;
+    for (const DrawItem &draw : drawItems_) {
+      expandedDrawCount += draw.instanceCount;
+    }
+    if (expandedDrawCount > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildRenderPasses: expanded draw count exceeds "
+          "UINT32_MAX");
+    }
+
+    if (expandedDrawCount != drawItems_.size()) {
+      std::pmr::vector<PushConstants> expandedPushConstants(
+          drawPushConstants_.get_allocator().resource());
+      std::pmr::vector<DrawItem> expandedDrawItems(
+          drawItems_.get_allocator().resource());
+      expandedPushConstants.reserve(expandedDrawCount);
+      expandedDrawItems.reserve(expandedDrawCount);
+
+      for (size_t i = 0; i < drawItems_.size(); ++i) {
+        const DrawItem &sourceDraw = drawItems_[i];
+        const PushConstants &sourceConstants = drawPushConstants_[i];
+        if (sourceDraw.instanceCount == 0) {
+          continue;
+        }
+        if (sourceDraw.instanceCount > 1 &&
+            sourceDraw.firstInstance >
+                (std::numeric_limits<uint32_t>::max() -
+                 (sourceDraw.instanceCount - 1u))) {
+          return Result<bool, std::string>::makeError(
+              "OpaqueLayer::buildRenderPasses: expanded instance range "
+              "overflows UINT32_MAX");
+        }
+
+        for (uint32_t instanceOffset = 0; instanceOffset < sourceDraw.instanceCount;
+             ++instanceOffset) {
+          expandedPushConstants.push_back(sourceConstants);
+
+          DrawItem expandedDraw = sourceDraw;
+          expandedDraw.instanceCount = 1;
+          expandedDraw.firstInstance = sourceDraw.firstInstance + instanceOffset;
+          expandedDraw.pushConstants = std::span<const std::byte>(
+              reinterpret_cast<const std::byte *>(&expandedPushConstants.back()),
+              sizeof(PushConstants));
+          expandedDrawItems.push_back(expandedDraw);
+        }
+      }
+
+      drawPushConstants_ = std::move(expandedPushConstants);
+      drawItems_ = std::move(expandedDrawItems);
+      for (size_t i = 0; i < drawItems_.size(); ++i) {
+        drawItems_[i].pushConstants = std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(&drawPushConstants_[i]),
+            sizeof(PushConstants));
+      }
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+
   if (usedUniformAutoLodFastPath && !tessellationRequested) {
     updateFastAutoLodCache(activeFastAutoLodSubmesh, cameraPosition,
                            sortedLodThresholds, autoLodBucketCounts, remapCount,
@@ -1306,26 +1438,46 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   }
 
   if (!instanceRemap_.empty()) {
-    NURI_PROFILER_ZONE("OpaqueLayer.remap_upload",
-                       NURI_PROFILER_COLOR_CMD_COPY);
-    const std::span<const std::byte> remapBytes{
-        reinterpret_cast<const std::byte *>(instanceRemap_.data()),
-        instanceRemap_.size() * sizeof(uint32_t)};
-    auto updateResult = gpu_.updateBuffer(
-        instanceRemapRing_[frameSlot].buffer->handle(), remapBytes, 0);
-    if (updateResult.hasError()) {
-      return updateResult;
+    const uint64_t remapSignature = computeRemapSignature(
+        std::span<const uint32_t>(instanceRemap_.data(), instanceRemap_.size()));
+    const bool hasRemapSlotSignature = frameSlot < remapUploadSignatures_.size();
+    const bool remapAlreadyUploadedForSlot =
+        hasRemapSlotSignature &&
+        remapUploadSignatures_[frameSlot] == remapSignature;
+    if (!remapAlreadyUploadedForSlot) {
+      NURI_PROFILER_ZONE("OpaqueLayer.remap_upload",
+                         NURI_PROFILER_COLOR_CMD_COPY);
+      const std::span<const std::byte> remapBytes{
+          reinterpret_cast<const std::byte *>(instanceRemap_.data()),
+          instanceRemap_.size() * sizeof(uint32_t)};
+      auto updateResult = gpu_.updateBuffer(
+          instanceRemapRing_[frameSlot].buffer->handle(), remapBytes, 0);
+      if (updateResult.hasError()) {
+        return updateResult;
+      }
+      if (hasRemapSlotSignature) {
+        remapUploadSignatures_[frameSlot] = remapSignature;
+      }
+      NURI_PROFILER_ZONE_END();
     }
-    NURI_PROFILER_ZONE_END();
+  } else if (frameSlot < remapUploadSignatures_.size()) {
+    remapUploadSignatures_[frameSlot] = kInvalidDrawSignature;
   }
 
   for (PushConstants &constants : drawPushConstants_) {
     constants.instanceRemapAddress = instanceRemapAddress;
   }
 
-  auto indirectBuildResult = buildIndirectDraws(frameSlot, remapCount);
-  if (indirectBuildResult.hasError()) {
-    return indirectBuildResult;
+  if (settings.opaque.enableIndirectDraw) {
+    auto indirectBuildResult = buildIndirectDraws(frameSlot, remapCount);
+    if (indirectBuildResult.hasError()) {
+      return indirectBuildResult;
+    }
+  } else {
+    invalidateIndirectPackCache();
+    indirectPushConstants_.clear();
+    indirectDrawItems_.clear();
+    indirectCommandUploadBytes_.clear();
   }
 
   computePushConstants_ = PushConstants{
@@ -2531,6 +2683,7 @@ OpaqueLayer::ensureRingBufferCount(uint32_t requiredCount) {
   instanceRemapRing_.resize(requiredCount);
   indirectCommandRing_.resize(requiredCount);
   indirectUploadSignatures_.assign(requiredCount, kInvalidDrawSignature);
+  remapUploadSignatures_.assign(requiredCount, kInvalidDrawSignature);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2612,6 +2765,9 @@ OpaqueLayer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
     }
     slot.buffer = std::move(createResult.value());
     slot.capacityBytes = requested;
+    if (i < remapUploadSignatures_.size()) {
+      remapUploadSignatures_[i] = kInvalidDrawSignature;
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -3314,6 +3470,7 @@ void OpaqueLayer::destroyBuffers() {
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
   indirectCommandRing_.clear();
+  remapUploadSignatures_.clear();
   indirectUploadSignatures_.clear();
   invalidateIndirectPackCache();
 }

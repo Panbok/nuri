@@ -300,6 +300,55 @@ lvk::ShaderStage toLvkShaderStage(ShaderStage stage) {
   return lvk::ShaderStage::Stage_Vert;
 }
 
+template <typename HandleType>
+[[nodiscard]] constexpr bool areSameHandle(HandleType a, HandleType b) {
+  return a.index == b.index && a.generation == b.generation;
+}
+
+[[nodiscard]] bool pushDebugLabel(lvk::ICommandBuffer &commandBuffer,
+                                  std::string_view label, uint32_t color) {
+  if (label.empty()) {
+    return false;
+  }
+
+  // Avoid heap allocations for common short labels.
+  constexpr size_t kInlineDebugLabelCapacity = 128;
+  if (label.size() < kInlineDebugLabelCapacity) {
+    std::array<char, kInlineDebugLabelCapacity> inlineLabel{};
+    std::memcpy(inlineLabel.data(), label.data(), label.size());
+    inlineLabel[label.size()] = '\0';
+    commandBuffer.cmdPushDebugGroupLabel(inlineLabel.data(), color);
+    return true;
+  }
+
+  std::string heapLabel(label);
+  commandBuffer.cmdPushDebugGroupLabel(heapLabel.c_str(), color);
+  return true;
+}
+
+[[nodiscard]] Result<bool, std::string>
+makeDependencyError(std::string_view context, std::string_view detail) {
+  std::string message;
+  message.reserve(context.size() + 2 + detail.size());
+  message.append(context);
+  message.append(": ");
+  message.append(detail);
+  return Result<bool, std::string>::makeError(std::move(message));
+}
+
+[[nodiscard]] Result<bool, std::string>
+makeDependencyCountExceededError(std::string_view context) {
+  std::array<char, 96> detail{};
+  const int written = std::snprintf(
+      detail.data(), detail.size(), "dependency buffer count exceeds %u",
+      static_cast<unsigned>(kMaxDependencyBuffers));
+  if (written > 0 && static_cast<size_t>(written) < detail.size()) {
+    return makeDependencyError(
+        context, std::string_view(detail.data(), static_cast<size_t>(written)));
+  }
+  return makeDependencyError(context, "dependency buffer count exceeds limit");
+}
+
 } // namespace
 
 template <typename LvkHandle> struct ResourceSlot {
@@ -1175,8 +1224,7 @@ void LvkGPUDevice::destroyTexture(TextureHandle texture) {
       std::remove_if(impl_->framebufferTextures.begin(),
                      impl_->framebufferTextures.end(),
                      [texture](const FramebufferTexture &entry) {
-                       return entry.handle.index == texture.index &&
-                              entry.handle.generation == texture.generation;
+                       return areSameHandle(entry.handle, texture);
                      }),
       impl_->framebufferTextures.end());
   impl_->textures.deallocate(texture);
@@ -1276,9 +1324,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
              lvk::Dependencies &deps,
              std::string_view context) -> Result<bool, std::string> {
     if (dependencyBuffers.size() > kMaxDependencyBuffers) {
-      return Result<bool, std::string>::makeError(
-          std::string(context) + ": dependency buffer count exceeds " +
-          std::to_string(kMaxDependencyBuffers));
+      return makeDependencyCountExceededError(context);
     }
 
     size_t dstIndex = 0;
@@ -1287,19 +1333,25 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         continue;
       }
       if (!impl_->buffers.isValid(bufferHandle)) {
-        return Result<bool, std::string>::makeError(
-            std::string(context) + ": dependency buffer is invalid");
+        return makeDependencyError(context, "dependency buffer is invalid");
       }
       deps.buffers[dstIndex++] = impl_->buffers.getLvkHandle(bufferHandle);
     }
     return Result<bool, std::string>::makeResult(true);
   };
+  const bool supportsIndexedIndirectCount =
+      impl_->context->supportsDrawIndexedIndirectCount();
 
   for (const RenderPass &pass : frame.passes) {
-    if (!pass.debugLabel.empty()) {
-      const std::string label(pass.debugLabel);
-      commandBuffer.cmdPushDebugGroupLabel(label.c_str(), pass.debugColor);
-    }
+    const bool passLabelPushed =
+        pushDebugLabel(commandBuffer, pass.debugLabel, pass.debugColor);
+    const auto returnPassError = [&](std::string_view message)
+        -> Result<bool, std::string> {
+      if (passLabelPushed) {
+        commandBuffer.cmdPopDebugGroupLabel();
+      }
+      return Result<bool, std::string>::makeError(std::string(message));
+    };
 
     lvk::RenderPass renderPass{};
     renderPass.color[0] = {
@@ -1312,18 +1364,12 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     lvk::TextureHandle colorTexture = swapchainTexture;
     if (nuri::isValid(pass.colorTexture)) {
       if (!impl_->textures.isValid(pass.colorTexture)) {
-        if (!pass.debugLabel.empty()) {
-          commandBuffer.cmdPopDebugGroupLabel();
-        }
-        return Result<bool, std::string>::makeError(
+        return returnPassError(
             "LvkGPUDevice::submitFrame: invalid pass color texture handle");
       }
       colorTexture = impl_->textures.getLvkHandle(pass.colorTexture);
       if (!colorTexture.valid()) {
-        if (!pass.debugLabel.empty()) {
-          commandBuffer.cmdPopDebugGroupLabel();
-        }
-        return Result<bool, std::string>::makeError(
+        return returnPassError(
             "LvkGPUDevice::submitFrame: invalid LVK pass color texture "
             "handle");
       }
@@ -1333,14 +1379,24 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     framebuffer.color[0] = {.texture = colorTexture};
 
     if (nuri::isValid(pass.depthTexture)) {
+      if (!impl_->textures.isValid(pass.depthTexture)) {
+        return returnPassError(
+            "LvkGPUDevice::submitFrame: invalid pass depth texture handle");
+      }
+      const lvk::TextureHandle depthTexture =
+          impl_->textures.getLvkHandle(pass.depthTexture);
+      if (!depthTexture.valid()) {
+        return returnPassError(
+            "LvkGPUDevice::submitFrame: invalid LVK pass depth texture "
+            "handle");
+      }
       renderPass.depth = {
           .loadOp = toLvkLoadOp(pass.depth.loadOp),
           .storeOp = toLvkStoreOp(pass.depth.storeOp),
           .clearDepth = pass.depth.clearDepth,
           .clearStencil = pass.depth.clearStencil,
       };
-      framebuffer.depthStencil = {
-          .texture = impl_->textures.getLvkHandle(pass.depthTexture)};
+      framebuffer.depthStencil = {.texture = depthTexture};
     } else {
       renderPass.depth.loadOp = lvk::LoadOp_Invalid;
     }
@@ -1350,19 +1406,11 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         NURI_PROFILER_ZONE("LvkGPUDevice.compute_dispatch_submission",
                            NURI_PROFILER_COLOR_CMD_DISPATCH);
         if (!impl_->computePipelines.isValid(dispatch.pipeline)) {
-          if (!pass.debugLabel.empty()) {
-            commandBuffer.cmdPopDebugGroupLabel();
-          }
-          return Result<bool, std::string>::makeError(
-              "Invalid compute pipeline handle");
+          return returnPassError("Invalid compute pipeline handle");
         }
         if (dispatch.dispatch.x == 0 || dispatch.dispatch.y == 0 ||
             dispatch.dispatch.z == 0) {
-          if (!pass.debugLabel.empty()) {
-            commandBuffer.cmdPopDebugGroupLabel();
-          }
-          return Result<bool, std::string>::makeError(
-              "Invalid compute dispatch size");
+          return returnPassError("Invalid compute dispatch size");
         }
 
         lvk::Dependencies dispatchDependencies{};
@@ -1370,17 +1418,14 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
             fillDependencies(dispatch.dependencyBuffers, dispatchDependencies,
                              "LvkGPUDevice::submitFrame compute dispatch");
         if (dispatchDepsResult.hasError()) {
-          if (!pass.debugLabel.empty()) {
+          if (passLabelPushed) {
             commandBuffer.cmdPopDebugGroupLabel();
           }
           return dispatchDepsResult;
         }
 
-        if (!dispatch.debugLabel.empty()) {
-          const std::string label(dispatch.debugLabel);
-          commandBuffer.cmdPushDebugGroupLabel(label.c_str(),
-                                               dispatch.debugColor);
-        }
+        const bool dispatchLabelPushed = pushDebugLabel(
+            commandBuffer, dispatch.debugLabel, dispatch.debugColor);
 
         commandBuffer.cmdBindComputePipeline(
             impl_->computePipelines.getLvkHandle(dispatch.pipeline));
@@ -1394,7 +1439,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
                                                .depth = dispatch.dispatch.z},
                                               dispatchDependencies);
 
-        if (!dispatch.debugLabel.empty()) {
+        if (dispatchLabelPushed) {
           commandBuffer.cmdPopDebugGroupLabel();
         }
       }
@@ -1406,7 +1451,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         fillDependencies(pass.dependencyBuffers, renderDependencies,
                          "LvkGPUDevice::submitFrame render pass");
     if (renderDepsResult.hasError()) {
-      if (!pass.debugLabel.empty()) {
+      if (passLabelPushed) {
         commandBuffer.cmdPopDebugGroupLabel();
       }
       return renderDepsResult;
@@ -1414,6 +1459,18 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
 
     commandBuffer.cmdBeginRendering(renderPass, framebuffer,
                                     renderDependencies);
+    const auto returnDrawError = [&](std::string_view message,
+                                     bool drawLabelPushed)
+        -> Result<bool, std::string> {
+      commandBuffer.cmdEndRendering();
+      if (drawLabelPushed) {
+        commandBuffer.cmdPopDebugGroupLabel();
+      }
+      if (passLabelPushed) {
+        commandBuffer.cmdPopDebugGroupLabel();
+      }
+      return Result<bool, std::string>::makeError(std::string(message));
+    };
 
     // Pipelines use dynamic viewport/scissor in LVK, so we must bind them for
     // every pass (even if the pass didn't specify overrides).
@@ -1421,8 +1478,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     if (pass.useViewport) {
       vp = pass.viewport;
     } else {
-      const lvk::Dimensions dim =
-          impl_->context->getDimensions(colorTexture);
+      const lvk::Dimensions dim = impl_->context->getDimensions(colorTexture);
       vp = {
           .x = 0.0f,
           .y = 0.0f,
@@ -1442,37 +1498,64 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         .maxDepth = vp.maxDepth,
     });
     // Default scissor for the pass; individual draws may override.
-    commandBuffer.cmdBindScissorRect({
+    const lvk::ScissorRect viewportScissor = {
         static_cast<uint32_t>(vp.x),
         static_cast<uint32_t>(vp.y),
         static_cast<uint32_t>(vp.width),
         static_cast<uint32_t>(vp.height),
-    });
+    };
+    commandBuffer.cmdBindScissorRect(viewportScissor);
 
     bool scissorMatchesViewport = true;
+    bool pipelineBound = false;
+    RenderPipelineHandle boundPipeline{};
+    bool vertexBindingBound = false;
+    BufferHandle boundVertexBuffer{};
+    uint64_t boundVertexBufferOffset = 0;
+    bool indexBindingBound = false;
+    BufferHandle boundIndexBuffer{};
+    uint64_t boundIndexBufferOffset = 0;
+    IndexFormat boundIndexFormat = IndexFormat::U32;
+    bool depthStateBound = false;
+    DepthState boundDepthState{};
+    bool depthBiasEnableKnown = false;
+    bool depthBiasEnabled = false;
+    bool depthBiasParamsKnown = false;
+    float boundDepthBiasConstant = 0.0f;
+    float boundDepthBiasSlope = 0.0f;
+    float boundDepthBiasClamp = 0.0f;
 
     for (const DrawItem &draw : pass.draws) {
-      if (!impl_->renderPipelines.isValid(draw.pipeline)) {
-        commandBuffer.cmdEndRendering();
-        if (!pass.debugLabel.empty()) {
-          commandBuffer.cmdPopDebugGroupLabel();
+      const bool drawLabelPushed =
+          pushDebugLabel(commandBuffer, draw.debugLabel, draw.debugColor);
+
+      if (!pipelineBound || !areSameHandle(draw.pipeline, boundPipeline)) {
+        if (!impl_->renderPipelines.isValid(draw.pipeline)) {
+          return returnDrawError("Invalid render pipeline handle",
+                                 drawLabelPushed);
         }
-        return Result<bool, std::string>::makeError(
-            "Invalid render pipeline handle");
+        commandBuffer.cmdBindRenderPipeline(
+            impl_->renderPipelines.getLvkHandle(draw.pipeline));
+        boundPipeline = draw.pipeline;
+        pipelineBound = true;
       }
-
-      if (!draw.debugLabel.empty()) {
-        const std::string label(draw.debugLabel);
-        commandBuffer.cmdPushDebugGroupLabel(label.c_str(), draw.debugColor);
-      }
-
-      commandBuffer.cmdBindRenderPipeline(
-          impl_->renderPipelines.getLvkHandle(draw.pipeline));
 
       if (nuri::isValid(draw.vertexBuffer)) {
-        commandBuffer.cmdBindVertexBuffer(
-            0, impl_->buffers.getLvkHandle(draw.vertexBuffer),
-            draw.vertexBufferOffset);
+        if (!impl_->buffers.isValid(draw.vertexBuffer)) {
+          return returnDrawError("Vertex buffer is invalid", drawLabelPushed);
+        }
+        const bool vertexBindingChanged =
+            !vertexBindingBound ||
+            !areSameHandle(draw.vertexBuffer, boundVertexBuffer) ||
+            boundVertexBufferOffset != draw.vertexBufferOffset;
+        if (vertexBindingChanged) {
+          commandBuffer.cmdBindVertexBuffer(
+              0, impl_->buffers.getLvkHandle(draw.vertexBuffer),
+              draw.vertexBufferOffset);
+          boundVertexBuffer = draw.vertexBuffer;
+          boundVertexBufferOffset = draw.vertexBufferOffset;
+          vertexBindingBound = true;
+        }
       }
 
       const bool isDirectDraw = draw.command == DrawCommandType::Direct;
@@ -1482,31 +1565,63 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       const bool requiresIndexBuffer =
           isIndexedIndirectDraw || (isDirectDraw && draw.indexCount > 0);
       if (requiresIndexBuffer) {
-        if (!impl_->buffers.isValid(draw.indexBuffer)) {
-          commandBuffer.cmdEndRendering();
-          if (!pass.debugLabel.empty()) {
-            commandBuffer.cmdPopDebugGroupLabel();
+        const bool indexBindingChanged =
+            !indexBindingBound ||
+            !areSameHandle(draw.indexBuffer, boundIndexBuffer) ||
+            boundIndexBufferOffset != draw.indexBufferOffset ||
+            boundIndexFormat != draw.indexFormat;
+        if (indexBindingChanged) {
+          if (!impl_->buffers.isValid(draw.indexBuffer)) {
+            return returnDrawError("Index buffer is invalid", drawLabelPushed);
           }
-          return Result<bool, std::string>::makeError(
-              "Index buffer is invalid");
+          commandBuffer.cmdBindIndexBuffer(
+              impl_->buffers.getLvkHandle(draw.indexBuffer),
+              toLvkIndexFormat(draw.indexFormat), draw.indexBufferOffset);
+          boundIndexBuffer = draw.indexBuffer;
+          boundIndexBufferOffset = draw.indexBufferOffset;
+          boundIndexFormat = draw.indexFormat;
+          indexBindingBound = true;
         }
-        commandBuffer.cmdBindIndexBuffer(
-            impl_->buffers.getLvkHandle(draw.indexBuffer),
-            toLvkIndexFormat(draw.indexFormat), draw.indexBufferOffset);
       }
 
       if (draw.useDepthState) {
-        lvk::DepthState depthState{
-            .compareOp = toLvkCompareOp(draw.depthState.compareOp),
-            .isDepthWriteEnabled = draw.depthState.isDepthWriteEnabled,
-        };
-        commandBuffer.cmdBindDepthState(depthState);
+        const bool depthStateChanged =
+            !depthStateBound ||
+            boundDepthState.compareOp != draw.depthState.compareOp ||
+            boundDepthState.isDepthWriteEnabled !=
+                draw.depthState.isDepthWriteEnabled;
+        if (depthStateChanged) {
+          lvk::DepthState depthState{
+              .compareOp = toLvkCompareOp(draw.depthState.compareOp),
+              .isDepthWriteEnabled = draw.depthState.isDepthWriteEnabled,
+          };
+          commandBuffer.cmdBindDepthState(depthState);
+          boundDepthState = draw.depthState;
+          depthStateBound = true;
+        }
       }
 
-      commandBuffer.cmdSetDepthBiasEnable(draw.depthBiasEnable);
+      const bool depthBiasEnableChanged =
+          !depthBiasEnableKnown || depthBiasEnabled != draw.depthBiasEnable;
+      if (depthBiasEnableChanged) {
+        commandBuffer.cmdSetDepthBiasEnable(draw.depthBiasEnable);
+        depthBiasEnableKnown = true;
+        depthBiasEnabled = draw.depthBiasEnable;
+      }
       if (draw.depthBiasEnable) {
-        commandBuffer.cmdSetDepthBias(draw.depthBiasConstant,
-                                      draw.depthBiasSlope, draw.depthBiasClamp);
+        const bool depthBiasParamsChanged =
+            !depthBiasParamsKnown || depthBiasEnableChanged ||
+            boundDepthBiasConstant != draw.depthBiasConstant ||
+            boundDepthBiasSlope != draw.depthBiasSlope ||
+            boundDepthBiasClamp != draw.depthBiasClamp;
+        if (depthBiasParamsChanged) {
+          commandBuffer.cmdSetDepthBias(
+              draw.depthBiasConstant, draw.depthBiasSlope, draw.depthBiasClamp);
+          boundDepthBiasConstant = draw.depthBiasConstant;
+          boundDepthBiasSlope = draw.depthBiasSlope;
+          boundDepthBiasClamp = draw.depthBiasClamp;
+          depthBiasParamsKnown = true;
+        }
       }
 
       if (draw.useScissor) {
@@ -1515,12 +1630,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
                                           draw.scissor.height});
         scissorMatchesViewport = false;
       } else if (!scissorMatchesViewport) {
-        commandBuffer.cmdBindScissorRect({
-            static_cast<uint32_t>(vp.x),
-            static_cast<uint32_t>(vp.y),
-            static_cast<uint32_t>(vp.width),
-            static_cast<uint32_t>(vp.height),
-        });
+        commandBuffer.cmdBindScissorRect(viewportScissor);
         scissorMatchesViewport = true;
       }
 
@@ -1532,15 +1642,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
 
       if (draw.command == DrawCommandType::IndexedIndirect) {
         if (!impl_->buffers.isValid(draw.indirectBuffer)) {
-          commandBuffer.cmdEndRendering();
-          if (!draw.debugLabel.empty()) {
-            commandBuffer.cmdPopDebugGroupLabel();
-          }
-          if (!pass.debugLabel.empty()) {
-            commandBuffer.cmdPopDebugGroupLabel();
-          }
-          return Result<bool, std::string>::makeError(
-              "Indirect buffer is invalid");
+          return returnDrawError("Indirect buffer is invalid", drawLabelPushed);
         }
         if (draw.indirectDrawCount > 0) {
           commandBuffer.cmdDrawIndexedIndirect(
@@ -1551,18 +1653,11 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       } else if (draw.command == DrawCommandType::IndexedIndirectCount) {
         if (!impl_->buffers.isValid(draw.indirectBuffer) ||
             !impl_->buffers.isValid(draw.indirectCountBuffer)) {
-          commandBuffer.cmdEndRendering();
-          if (!draw.debugLabel.empty()) {
-            commandBuffer.cmdPopDebugGroupLabel();
-          }
-          if (!pass.debugLabel.empty()) {
-            commandBuffer.cmdPopDebugGroupLabel();
-          }
-          return Result<bool, std::string>::makeError(
-              "Indirect or count buffer is invalid");
+          return returnDrawError("Indirect or count buffer is invalid",
+                                 drawLabelPushed);
         }
         if (draw.indirectDrawCount > 0) {
-          if (impl_->context->supportsDrawIndexedIndirectCount()) {
+          if (supportsIndexedIndirectCount) {
             commandBuffer.cmdDrawIndexedIndirectCount(
                 impl_->buffers.getLvkHandle(draw.indirectBuffer),
                 draw.indirectBufferOffset,
@@ -1585,14 +1680,14 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
                               draw.firstVertex, draw.firstInstance);
       }
 
-      if (!draw.debugLabel.empty()) {
+      if (drawLabelPushed) {
         commandBuffer.cmdPopDebugGroupLabel();
       }
     }
 
     commandBuffer.cmdEndRendering();
 
-    if (!pass.debugLabel.empty()) {
+    if (passLabelPushed) {
       commandBuffer.cmdPopDebugGroupLabel();
     }
   }
@@ -1715,9 +1810,9 @@ LvkGPUDevice::readTexture(TextureHandle texture,
         "readTexture: readback region is out of bounds");
   }
 
-  const uint64_t expectedSize =
-      static_cast<uint64_t>(region.width) * static_cast<uint64_t>(region.height) *
-      static_cast<uint64_t>(bytesPerPixel);
+  const uint64_t expectedSize = static_cast<uint64_t>(region.width) *
+                                static_cast<uint64_t>(region.height) *
+                                static_cast<uint64_t>(bytesPerPixel);
   if (expectedSize > std::numeric_limits<size_t>::max()) {
     return Result<bool, std::string>::makeError(
         "readTexture: readback size overflows size_t");
@@ -1731,14 +1826,16 @@ LvkGPUDevice::readTexture(TextureHandle texture,
       .offset = {.x = static_cast<int32_t>(region.x),
                  .y = static_cast<int32_t>(region.y),
                  .z = 0},
-      .dimensions = {.width = region.width, .height = region.height, .depth = 1},
+      .dimensions = {.width = region.width,
+                     .height = region.height,
+                     .depth = 1},
       .layer = region.layer,
       .numLayers = 1,
       .mipLevel = region.mipLevel,
       .numMipLevels = 1,
   };
-  lvk::Result result =
-      impl_->context->download(lvkTexture, range, static_cast<void *>(outBytes.data()));
+  lvk::Result result = impl_->context->download(
+      lvkTexture, range, static_cast<void *>(outBytes.data()));
   if (!result.isOk()) {
     return Result<bool, std::string>::makeError(std::string(result.message));
   }

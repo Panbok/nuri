@@ -264,6 +264,7 @@ private:
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<size_t> indirectSourceDrawIndices_;
   std::pmr::vector<uint64_t> indirectUploadSignatures_;
+  std::pmr::vector<uint64_t> remapUploadSignatures_;
   std::pmr::vector<uint32_t> templateBatchIndices_;
   std::pmr::vector<size_t> batchWriteOffsets_;
   std::pmr::vector<glm::vec4> instanceCentersPhase_;

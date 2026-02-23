@@ -28,6 +28,8 @@ struct RenderSettings {
     OpaqueDebugVisualization debugVisualization =
         OpaqueDebugVisualization::None;
     bool enableInstanceCompute = true;
+    bool enableIndirectDraw = true;
+    bool enableInstancedDraw = true;
     bool enableMeshLod = true;
     int32_t forcedMeshLod = -1;
     glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
