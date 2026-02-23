@@ -280,6 +280,7 @@ OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
       indirectDrawItems_(resolveMemoryResource(memory)),
       indirectCommandUploadBytes_(resolveMemoryResource(memory)),
       overlayDrawItems_(resolveMemoryResource(memory)),
+      pickDrawItems_(resolveMemoryResource(memory)),
       passDrawItems_(resolveMemoryResource(memory)),
       preDispatches_(resolveMemoryResource(memory)),
       passDependencyBuffers_(resolveMemoryResource(memory)),
@@ -294,10 +295,24 @@ void OpaqueLayer::onAttach() {
   }
 }
 
+void OpaqueLayer::resetPickState() {
+  pendingPickRequest_.reset();
+  inFlightPickReadback_.reset();
+}
+
 void OpaqueLayer::onDetach() {
   destroyBuffers();
   destroyDepthTexture();
+  destroyPickTexture();
   resetOverlayPipelineState();
+  if (nuri::isValid(meshPickPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshPickPipelineHandle_);
+    meshPickPipelineHandle_ = {};
+  }
+  if (nuri::isValid(meshPickTessPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshPickTessPipelineHandle_);
+    meshPickTessPipelineHandle_ = {};
+  }
   if (nuri::isValid(meshTessPipelineHandle_)) {
     gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
     meshTessPipelineHandle_ = {};
@@ -307,6 +322,7 @@ void OpaqueLayer::onDetach() {
   meshShader_.reset();
   meshTessShader_.reset();
   meshDebugOverlayShader_.reset();
+  meshPickShader_.reset();
   computeShader_.reset();
   meshVertexShader_ = {};
   meshTessVertexShader_ = {};
@@ -315,9 +331,12 @@ void OpaqueLayer::onDetach() {
   meshFragmentShader_ = {};
   meshDebugOverlayGeometryShader_ = {};
   meshDebugOverlayFragmentShader_ = {};
+  meshPickFragmentShader_ = {};
   computeShaderHandle_ = {};
   meshFillPipelineHandle_ = {};
   meshTessPipelineHandle_ = {};
+  meshPickPipelineHandle_ = {};
+  meshPickTessPipelineHandle_ = {};
   computePipelineHandle_ = {};
   tessellationUnsupported_ = false;
   baseMeshFillDraw_ = {};
@@ -342,6 +361,7 @@ void OpaqueLayer::onDetach() {
   preDispatches_.clear();
   passDependencyBuffers_.clear();
   dispatchDependencyBuffers_.clear();
+  pickDrawItems_.clear();
   cachedScene_ = nullptr;
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
@@ -350,15 +370,25 @@ void OpaqueLayer::onDetach() {
   invalidateAutoLodCache();
   invalidateSingleInstanceBatchCache();
   invalidateIndirectPackCache();
+  resetPickState();
   initialized_ = false;
 }
 
-void OpaqueLayer::onResize(int32_t, int32_t) { destroyDepthTexture(); }
+void OpaqueLayer::onResize(int32_t, int32_t) {
+  destroyDepthTexture();
+  destroyPickTexture();
+  resetPickState();
+}
 
 Result<bool, std::string>
 OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   NURI_PROFILER_FUNCTION();
   frame.metrics.opaque = {};
+  frame.opaquePickResult.reset();
+  if (frame.opaquePickRequest.has_value()) {
+    pendingPickRequest_ = frame.opaquePickRequest;
+    frame.opaquePickRequest.reset();
+  }
 
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.opaque.enabled) {
@@ -379,6 +409,41 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (depthResult.hasError()) {
       return depthResult;
     }
+  }
+  if (!nuri::isValid(pickIdTexture_)) {
+    auto pickTextureResult = recreatePickTexture();
+    if (pickTextureResult.hasError()) {
+      return pickTextureResult;
+    }
+  }
+  if (inFlightPickReadback_.has_value() &&
+      frame.frameIndex > inFlightPickReadback_->submissionFrame) {
+    NURI_PROFILER_ZONE("OpaqueLayer.pick_readback", NURI_PROFILER_COLOR_CMD_COPY);
+    std::array<std::byte, sizeof(uint32_t)> pickBytes{};
+    const TextureReadbackRegion readbackRegion{
+        .x = inFlightPickReadback_->request.x,
+        .y = inFlightPickReadback_->request.y,
+        .width = 1,
+        .height = 1,
+        .mipLevel = 0,
+        .layer = 0,
+    };
+    auto readResult =
+        gpu_.readTexture(pickIdTexture_, readbackRegion, pickBytes);
+    if (readResult.hasError()) {
+      NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: pick readback failed: %s",
+                       readResult.error().c_str());
+    } else {
+      uint32_t encodedId = 0;
+      std::memcpy(&encodedId, pickBytes.data(), sizeof(encodedId));
+      OpaquePickResult result{};
+      result.requestId = inFlightPickReadback_->request.requestId;
+      result.hit = encodedId > 0;
+      result.renderableIndex = result.hit ? (encodedId - 1u) : 0u;
+      frame.opaquePickResult = result;
+    }
+    inFlightPickReadback_.reset();
+    NURI_PROFILER_ZONE_END();
   }
   const bool topologyDirty =
       cachedScene_ != frame.scene ||
@@ -1662,6 +1727,64 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
                    debugOverlayDraws, debugOverlayFallbackDraws);
   }
 
+  bool pickPassSubmitted = false;
+  if (pendingPickRequest_.has_value() && nuri::isValid(pickIdTexture_) &&
+      nuri::isValid(meshPickPipelineHandle_)) {
+    NURI_PROFILER_ZONE("OpaqueLayer.pick_pass", NURI_PROFILER_COLOR_CMD_DRAW);
+    pickDrawItems_.clear();
+    pickDrawItems_.reserve(baseDrawItems.size());
+
+    for (const DrawItem &baseItem : baseDrawItems) {
+      DrawItem pickItem = baseItem;
+      const bool isTessDraw =
+          isTessPipelineHandle(baseItem.pipeline, meshTessPipelineHandle_);
+      if (isTessDraw && nuri::isValid(meshPickTessPipelineHandle_)) {
+        pickItem.pipeline = meshPickTessPipelineHandle_;
+      } else {
+        pickItem.pipeline = meshPickPipelineHandle_;
+      }
+      pickItem.debugLabel = "OpaqueMeshPick";
+      pickItem.debugColor = kOpaquePassDebugColor;
+      pickDrawItems_.push_back(pickItem);
+    }
+
+    int32_t framebufferWidth = 0;
+    int32_t framebufferHeight = 0;
+    gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+    const uint32_t safeWidth =
+        static_cast<uint32_t>(std::max(framebufferWidth, 1));
+    const uint32_t safeHeight =
+        static_cast<uint32_t>(std::max(framebufferHeight, 1));
+    pendingPickRequest_->x = std::min(pendingPickRequest_->x, safeWidth - 1u);
+    pendingPickRequest_->y = std::min(pendingPickRequest_->y, safeHeight - 1u);
+
+    RenderPass pickPass{};
+    pickPass.color = {.loadOp = LoadOp::Clear,
+                      .storeOp = StoreOp::Store,
+                      .clearColor = {0.0f, 0.0f, 0.0f, 0.0f}};
+    pickPass.colorTexture = pickIdTexture_;
+    pickPass.depth = {.loadOp = LoadOp::Clear,
+                      .storeOp = StoreOp::Store,
+                      .clearDepth = kClearDepthOne,
+                      .clearStencil = 0};
+    pickPass.depthTexture = depthTexture_;
+    pickPass.preDispatches = std::span<const ComputeDispatchItem>(
+        preDispatches_.data(), preDispatches_.size());
+    pickPass.dependencyBuffers = std::span<const BufferHandle>(
+        passDependencyBuffers_.data(), passDependencyBuffers_.size());
+    pickPass.draws =
+        std::span<const DrawItem>(pickDrawItems_.data(), pickDrawItems_.size());
+    pickPass.debugLabel = "Opaque Pick Pass";
+    pickPass.debugColor = kOpaquePassDebugColor;
+    out.push_back(pickPass);
+
+    inFlightPickReadback_ = InFlightPickReadback{
+        .request = *pendingPickRequest_, .submissionFrame = frame.frameIndex};
+    pendingPickRequest_.reset();
+    pickPassSubmitted = true;
+    NURI_PROFILER_ZONE_END();
+  }
+
   const bool shouldLoadColor = settings.skybox.enabled;
   RenderPass pass{};
   pass.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
@@ -1673,8 +1796,10 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
                 .clearDepth = kClearDepthOne,
                 .clearStencil = 0};
   pass.depthTexture = depthTexture_;
-  pass.preDispatches = std::span<const ComputeDispatchItem>(
-      preDispatches_.data(), preDispatches_.size());
+  if (!pickPassSubmitted) {
+    pass.preDispatches = std::span<const ComputeDispatchItem>(
+        preDispatches_.data(), preDispatches_.size());
+  }
   pass.dependencyBuffers = std::span<const BufferHandle>(
       passDependencyBuffers_.data(), passDependencyBuffers_.size());
   pass.draws =
@@ -2115,6 +2240,7 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
     meshShader_.reset();
     meshTessShader_.reset();
     meshDebugOverlayShader_.reset();
+    meshPickShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
     meshTessVertexShader_ = {};
@@ -2123,10 +2249,37 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
     meshFragmentShader_ = {};
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
+    meshPickFragmentShader_ = {};
     computeShaderHandle_ = {};
+    meshPickPipelineHandle_ = {};
+    meshPickTessPipelineHandle_ = {};
     meshTessPipelineHandle_ = {};
     tessellationUnsupported_ = false;
     return depthResult;
+  }
+
+  auto pickTextureResult = recreatePickTexture();
+  if (pickTextureResult.hasError()) {
+    meshShader_.reset();
+    meshTessShader_.reset();
+    meshDebugOverlayShader_.reset();
+    meshPickShader_.reset();
+    computeShader_.reset();
+    meshVertexShader_ = {};
+    meshTessVertexShader_ = {};
+    meshTessControlShader_ = {};
+    meshTessEvalShader_ = {};
+    meshFragmentShader_ = {};
+    meshDebugOverlayGeometryShader_ = {};
+    meshDebugOverlayFragmentShader_ = {};
+    meshPickFragmentShader_ = {};
+    computeShaderHandle_ = {};
+    meshPickPipelineHandle_ = {};
+    meshPickTessPipelineHandle_ = {};
+    meshTessPipelineHandle_ = {};
+    tessellationUnsupported_ = false;
+    destroyDepthTexture();
+    return pickTextureResult;
   }
 
   auto pipelineResult = createPipelines();
@@ -2138,6 +2291,7 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
     meshShader_.reset();
     meshTessShader_.reset();
     meshDebugOverlayShader_.reset();
+    meshPickShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
     meshTessVertexShader_ = {};
@@ -2146,12 +2300,16 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
     meshFragmentShader_ = {};
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
+    meshPickFragmentShader_ = {};
     computeShaderHandle_ = {};
     meshFillPipelineHandle_ = {};
     meshTessPipelineHandle_ = {};
+    meshPickPipelineHandle_ = {};
+    meshPickTessPipelineHandle_ = {};
     computePipelineHandle_ = {};
     tessellationUnsupported_ = false;
     destroyDepthTexture();
+    destroyPickTexture();
     return pipelineResult;
   }
 
@@ -2188,6 +2346,34 @@ Result<bool, std::string> OpaqueLayer::recreateDepthTexture() {
     return Result<bool, std::string>::makeError(depthResult.error());
   }
   depthTexture_ = depthResult.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueLayer::recreatePickTexture() {
+  if (nuri::isValid(pickIdTexture_)) {
+    gpu_.destroyTexture(pickIdTexture_);
+    pickIdTexture_ = TextureHandle{};
+  }
+
+  const TextureDesc pickDesc{
+      .type = TextureType::Texture2D,
+      .format = Format::R32_UINT,
+      .dimensions = {1, 1, 1},
+      .usage = TextureUsage::Attachment,
+      .storage = Storage::Device,
+      .numLayers = 1,
+      .numSamples = 1,
+      .numMipLevels = 1,
+      .data = {},
+      .dataNumMipLevels = 1,
+      .generateMipmaps = false,
+  };
+  auto pickResult =
+      gpu_.createFramebufferTexture(pickDesc, "opaque_pick_id_texture");
+  if (pickResult.hasError()) {
+    return Result<bool, std::string>::makeError(pickResult.error());
+  }
+  pickIdTexture_ = pickResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2568,8 +2754,9 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
   meshShader_ = Shader::create("main", gpu_);
   meshTessShader_ = Shader::create("main_tess", gpu_);
   meshDebugOverlayShader_ = Shader::create("mesh_debug_overlay", gpu_);
+  meshPickShader_ = Shader::create("main_id", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
-  if (!meshShader_ || !meshTessShader_ || !computeShader_) {
+  if (!meshShader_ || !meshTessShader_ || !meshPickShader_ || !computeShader_) {
     return Result<bool, std::string>::makeError(
         "OpaqueLayer::createShaders: failed to create shader objects");
   }
@@ -2581,6 +2768,7 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
   meshFragmentShader_ = {};
   meshDebugOverlayGeometryShader_ = {};
   meshDebugOverlayFragmentShader_ = {};
+  meshPickFragmentShader_ = {};
   computeShaderHandle_ = {};
   tessellationUnsupported_ = false;
   gsOverlayPipelineUnsupported_ = false;
@@ -2612,6 +2800,16 @@ Result<bool, std::string> OpaqueLayer::createShaders() {
       return Result<bool, std::string>::makeError(compileResult.error());
     }
     *spec.outHandle = compileResult.value();
+  }
+
+  {
+    const std::string shaderPath = config_.pickFragment.string();
+    auto compileResult =
+        meshPickShader_->compileFromFile(shaderPath, ShaderStage::Fragment);
+    if (compileResult.hasError()) {
+      return Result<bool, std::string>::makeError(compileResult.error());
+    }
+    meshPickFragmentShader_ = compileResult.value();
   }
 
   const std::array<ShaderSpec, 3> tessShaderSpecs = {
@@ -2711,6 +2909,8 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
   }
   meshFillPipelineHandle_ = meshPipeline_->getRenderPipeline();
   meshTessPipelineHandle_ = {};
+  meshPickPipelineHandle_ = {};
+  meshPickTessPipelineHandle_ = {};
 
   const bool canCreateTessPipeline =
       !tessellationUnsupported_ && nuri::isValid(meshTessVertexShader_) &&
@@ -2735,12 +2935,54 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
     tessellationUnsupported_ = true;
   }
 
+  {
+    const RenderPipelineDesc pickDesc =
+        meshPipelineDesc(Format::R32_UINT, depthFormat, meshVertexShader_, {},
+                         {}, {}, meshPickFragmentShader_, PolygonMode::Fill);
+    auto pickPipelineResult =
+        gpu_.createRenderPipeline(pickDesc, "opaque_mesh_pick");
+    if (pickPipelineResult.hasError()) {
+      if (nuri::isValid(meshTessPipelineHandle_)) {
+        gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+        meshTessPipelineHandle_ = {};
+      }
+      return Result<bool, std::string>::makeError(pickPipelineResult.error());
+    }
+    meshPickPipelineHandle_ = pickPipelineResult.value();
+  }
+
+  if (canCreateTessPipeline) {
+    const RenderPipelineDesc pickTessDesc = meshPipelineDesc(
+        Format::R32_UINT, depthFormat, meshTessVertexShader_,
+        meshTessControlShader_, meshTessEvalShader_, {}, meshPickFragmentShader_,
+        PolygonMode::Fill, Topology::Patch, kTessellationPatchControlPoints);
+    auto pickTessResult =
+        gpu_.createRenderPipeline(pickTessDesc, "opaque_mesh_tess_pick");
+    if (pickTessResult.hasError()) {
+      meshPickTessPipelineHandle_ = {};
+      NURI_LOG_WARNING(
+          "OpaqueLayer::createPipelines: tessellation pick pipeline failed, "
+          "falling back to non-tessellation pick pipeline: %s",
+          pickTessResult.error().c_str());
+    } else {
+      meshPickTessPipelineHandle_ = pickTessResult.value();
+    }
+  }
+
   const ComputePipelineDesc computeDesc{
       .computeShader = computeShaderHandle_,
   };
   auto computeResult = computePipeline_->createComputePipeline(
       computeDesc, "opaque_instance_compute");
   if (computeResult.hasError()) {
+    if (nuri::isValid(meshPickPipelineHandle_)) {
+      gpu_.destroyRenderPipeline(meshPickPipelineHandle_);
+      meshPickPipelineHandle_ = {};
+    }
+    if (nuri::isValid(meshPickTessPipelineHandle_)) {
+      gpu_.destroyRenderPipeline(meshPickTessPipelineHandle_);
+      meshPickTessPipelineHandle_ = {};
+    }
     if (nuri::isValid(meshTessPipelineHandle_)) {
       gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
       meshTessPipelineHandle_ = {};
@@ -3013,6 +3255,13 @@ void OpaqueLayer::destroyDepthTexture() {
   if (nuri::isValid(depthTexture_)) {
     gpu_.destroyTexture(depthTexture_);
     depthTexture_ = TextureHandle{};
+  }
+}
+
+void OpaqueLayer::destroyPickTexture() {
+  if (nuri::isValid(pickIdTexture_)) {
+    gpu_.destroyTexture(pickIdTexture_);
+    pickIdTexture_ = TextureHandle{};
   }
 }
 

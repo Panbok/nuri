@@ -106,6 +106,7 @@ struct DrawItem {
 
 struct RenderPass {
   AttachmentColor color;
+  TextureHandle colorTexture{};
   AttachmentDepth depth;
   TextureHandle depthTexture{};
   bool useViewport = false;

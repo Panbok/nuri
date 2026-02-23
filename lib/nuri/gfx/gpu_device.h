@@ -13,6 +13,15 @@
 
 namespace nuri {
 
+struct TextureReadbackRegion {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint32_t width = 1;
+  uint32_t height = 1;
+  uint32_t mipLevel = 0;
+  uint32_t layer = 0;
+};
+
 class NURI_API GPUDevice {
 public:
   static std::unique_ptr<GPUDevice>
@@ -95,6 +104,9 @@ public:
   // visible to the GPU. No-op if the buffer is not host-visible or not mapped.
   virtual void flushMappedBuffer(BufferHandle buffer, size_t offset,
                                  size_t size) = 0;
+  virtual Result<bool, std::string>
+  readTexture(TextureHandle texture, const TextureReadbackRegion &region,
+              std::span<std::byte> outBytes) = 0;
 
   // Shutdown
   virtual void waitIdle() = 0;

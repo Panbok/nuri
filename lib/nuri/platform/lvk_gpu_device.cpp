@@ -18,6 +18,8 @@ namespace {
 
 lvk::Format toLvkFormat(Format format) {
   switch (format) {
+  case Format::R32_UINT:
+    return lvk::Format_R_UI32;
   case Format::RGBA8_UNORM:
     return lvk::Format_RGBA_UN8;
   case Format::RGBA8_SRGB:
@@ -36,6 +38,8 @@ lvk::Format toLvkFormat(Format format) {
 
 Format fromLvkFormat(lvk::Format format) {
   switch (format) {
+  case lvk::Format_R_UI32:
+    return Format::R32_UINT;
   case lvk::Format_RGBA_UN8:
     return Format::RGBA8_UNORM;
   case lvk::Format_RGBA_SRGB8:
@@ -1305,8 +1309,28 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
                        pass.color.clearColor.b, pass.color.clearColor.a},
     };
 
+    lvk::TextureHandle colorTexture = swapchainTexture;
+    if (nuri::isValid(pass.colorTexture)) {
+      if (!impl_->textures.isValid(pass.colorTexture)) {
+        if (!pass.debugLabel.empty()) {
+          commandBuffer.cmdPopDebugGroupLabel();
+        }
+        return Result<bool, std::string>::makeError(
+            "LvkGPUDevice::submitFrame: invalid pass color texture handle");
+      }
+      colorTexture = impl_->textures.getLvkHandle(pass.colorTexture);
+      if (!colorTexture.valid()) {
+        if (!pass.debugLabel.empty()) {
+          commandBuffer.cmdPopDebugGroupLabel();
+        }
+        return Result<bool, std::string>::makeError(
+            "LvkGPUDevice::submitFrame: invalid LVK pass color texture "
+            "handle");
+      }
+    }
+
     lvk::Framebuffer framebuffer{};
-    framebuffer.color[0] = {.texture = swapchainTexture};
+    framebuffer.color[0] = {.texture = colorTexture};
 
     if (nuri::isValid(pass.depthTexture)) {
       renderPass.depth = {
@@ -1398,7 +1422,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       vp = pass.viewport;
     } else {
       const lvk::Dimensions dim =
-          impl_->context->getDimensions(framebuffer.color[0].texture);
+          impl_->context->getDimensions(colorTexture);
       vp = {
           .x = 0.0f,
           .y = 0.0f,
@@ -1630,6 +1654,95 @@ void LvkGPUDevice::flushMappedBuffer(BufferHandle buffer, size_t offset,
     return;
   }
   impl_->context->flushMappedMemory(lvkBuf, offset, size);
+}
+
+Result<bool, std::string>
+LvkGPUDevice::readTexture(TextureHandle texture,
+                          const TextureReadbackRegion &region,
+                          std::span<std::byte> outBytes) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  if (!impl_->textures.isValid(texture)) {
+    return Result<bool, std::string>::makeError(
+        "readTexture: invalid texture handle");
+  }
+  if (region.width == 0 || region.height == 0) {
+    return Result<bool, std::string>::makeError(
+        "readTexture: readback region size must be non-zero");
+  }
+
+  const Format format = impl_->textures.getFormat(texture);
+  size_t bytesPerPixel = 0;
+  switch (format) {
+  case Format::R32_UINT:
+    bytesPerPixel = sizeof(uint32_t);
+    break;
+  case Format::RGBA8_UNORM:
+  case Format::RGBA8_SRGB:
+  case Format::RGBA8_UINT:
+    bytesPerPixel = 4;
+    break;
+  case Format::RGBA16_FLOAT:
+    bytesPerPixel = 8;
+    break;
+  case Format::D32_FLOAT:
+    bytesPerPixel = sizeof(float);
+    break;
+  case Format::Count:
+    break;
+  }
+  if (bytesPerPixel == 0) {
+    return Result<bool, std::string>::makeError(
+        "readTexture: unsupported texture format for readback");
+  }
+
+  const lvk::TextureHandle lvkTexture = impl_->textures.getLvkHandle(texture);
+  if (!lvkTexture.valid()) {
+    return Result<bool, std::string>::makeError(
+        "readTexture: invalid LVK texture handle");
+  }
+  const lvk::Dimensions dimensions = impl_->context->getDimensions(lvkTexture);
+  const uint32_t mipWidth =
+      std::max(1u, dimensions.width >> std::min(region.mipLevel, 31u));
+  const uint32_t mipHeight =
+      std::max(1u, dimensions.height >> std::min(region.mipLevel, 31u));
+  if (region.x >= mipWidth || region.y >= mipHeight) {
+    return Result<bool, std::string>::makeError(
+        "readTexture: readback origin is out of bounds");
+  }
+  if (region.width > mipWidth - region.x ||
+      region.height > mipHeight - region.y) {
+    return Result<bool, std::string>::makeError(
+        "readTexture: readback region is out of bounds");
+  }
+
+  const uint64_t expectedSize =
+      static_cast<uint64_t>(region.width) * static_cast<uint64_t>(region.height) *
+      static_cast<uint64_t>(bytesPerPixel);
+  if (expectedSize > std::numeric_limits<size_t>::max()) {
+    return Result<bool, std::string>::makeError(
+        "readTexture: readback size overflows size_t");
+  }
+  if (outBytes.size() < static_cast<size_t>(expectedSize)) {
+    return Result<bool, std::string>::makeError(
+        "readTexture: output buffer is too small");
+  }
+
+  const lvk::TextureRangeDesc range{
+      .offset = {.x = static_cast<int32_t>(region.x),
+                 .y = static_cast<int32_t>(region.y),
+                 .z = 0},
+      .dimensions = {.width = region.width, .height = region.height, .depth = 1},
+      .layer = region.layer,
+      .numLayers = 1,
+      .mipLevel = region.mipLevel,
+      .numMipLevels = 1,
+  };
+  lvk::Result result =
+      impl_->context->download(lvkTexture, range, static_cast<void *>(outBytes.data()));
+  if (!result.isOk()) {
+    return Result<bool, std::string>::makeError(std::string(result.message));
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>

@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <memory_resource>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -129,6 +130,7 @@ private:
 
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> recreateDepthTexture();
+  Result<bool, std::string> recreatePickTexture();
   Result<bool, std::string> ensureFrameDataBufferCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureCentersPhaseBufferCapacity(size_t requiredBytes);
@@ -177,7 +179,9 @@ private:
       size_t remapCount, size_t instanceCount);
   void invalidateSingleInstanceBatchCache();
   void invalidateIndirectPackCache();
+  void resetPickState();
   void destroyDepthTexture();
+  void destroyPickTexture();
   void destroyBuffers();
 
   GPUDevice &gpu_;
@@ -185,6 +189,7 @@ private:
   std::unique_ptr<Shader> meshShader_;
   std::unique_ptr<Shader> meshTessShader_;
   std::unique_ptr<Shader> meshDebugOverlayShader_;
+  std::unique_ptr<Shader> meshPickShader_;
   std::unique_ptr<Shader> computeShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
   std::unique_ptr<Pipeline> computePipeline_;
@@ -196,6 +201,7 @@ private:
   std::vector<DynamicBufferSlot> instanceRemapRing_;
   std::vector<DynamicBufferSlot> indirectCommandRing_;
   TextureHandle depthTexture_{};
+  TextureHandle pickIdTexture_{};
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshTessVertexShader_{};
@@ -204,6 +210,7 @@ private:
   ShaderHandle meshFragmentShader_{};
   ShaderHandle meshDebugOverlayGeometryShader_{};
   ShaderHandle meshDebugOverlayFragmentShader_{};
+  ShaderHandle meshPickFragmentShader_{};
   ShaderHandle computeShaderHandle_{};
   RenderPipelineHandle meshFillPipelineHandle_{};
   RenderPipelineHandle meshTessPipelineHandle_{};
@@ -211,6 +218,8 @@ private:
   RenderPipelineHandle meshGsTessOverlayPipelineHandle_{};
   RenderPipelineHandle meshWireframePipelineHandle_{};
   RenderPipelineHandle meshTessWireframePipelineHandle_{};
+  RenderPipelineHandle meshPickPipelineHandle_{};
+  RenderPipelineHandle meshPickTessPipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
 
   size_t frameDataBufferCapacityBytes_ = 0;
@@ -271,6 +280,7 @@ private:
   std::pmr::vector<DrawItem> indirectDrawItems_;
   std::pmr::vector<std::byte> indirectCommandUploadBytes_;
   std::pmr::vector<DrawItem> overlayDrawItems_;
+  std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<ComputeDispatchItem> preDispatches_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
@@ -280,6 +290,13 @@ private:
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};
   uint64_t statsLogFrameCounter_ = 0;
+  std::optional<OpaquePickRequest> pendingPickRequest_{};
+
+  struct InFlightPickReadback {
+    OpaquePickRequest request{};
+    uint64_t submissionFrame = 0;
+  };
+  std::optional<InFlightPickReadback> inFlightPickReadback_{};
 };
 
 } // namespace nuri

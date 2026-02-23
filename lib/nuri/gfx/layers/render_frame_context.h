@@ -3,6 +3,7 @@
 #include "nuri/gfx/gpu_types.h"
 
 #include <cstdint>
+#include <optional>
 
 #include <glm/glm.hpp>
 
@@ -77,11 +78,26 @@ struct RenderFrameMetrics {
   OpaqueFrameMetrics opaque{};
 };
 
+struct OpaquePickRequest {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint64_t requestId = 0;
+};
+
+struct OpaquePickResult {
+  uint64_t requestId = 0;
+  bool hit = false;
+  uint32_t renderableIndex = 0;
+};
+
 struct RenderFrameContext {
   const RenderScene *scene = nullptr;
   CameraFrameState camera{};
   RenderSettings *settings = nullptr;
   RenderFrameMetrics metrics{};
+  // Frame-scoped one-shot opaque pick request/result channel.
+  std::optional<OpaquePickRequest> opaquePickRequest{};
+  std::optional<OpaquePickResult> opaquePickResult{};
   TextureHandle sharedDepthTexture{};
   double timeSeconds = 0.0;
   uint64_t frameIndex = 0;

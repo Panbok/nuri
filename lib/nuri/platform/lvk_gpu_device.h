@@ -81,6 +81,9 @@ public:
   std::byte *getMappedBufferPtr(BufferHandle buffer) override;
   void flushMappedBuffer(BufferHandle buffer, size_t offset,
                          size_t size) override;
+  Result<bool, std::string>
+  readTexture(TextureHandle texture, const TextureReadbackRegion &region,
+              std::span<std::byte> outBytes) override;
 
   // Shutdown
   void waitIdle() override;
