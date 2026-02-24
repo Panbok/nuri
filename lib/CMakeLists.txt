@@ -11,6 +11,7 @@ endif()
 
 add_library(nuri_lib ${NURI_LIBRARY_TYPE}
   ${LIB_SOURCES}
+  ${CMAKE_SOURCE_DIR}/vendor/im-guizmo/ImGuizmo.cpp
 )
 
 if(MSVC)
@@ -48,6 +49,7 @@ endif()
 target_include_directories(nuri_lib
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/vendor/im-guizmo
     PRIVATE ${Vulkan_INCLUDE_DIRS}
 )
 
@@ -104,6 +106,14 @@ endif()
 
 add_subdirectory("${LVK_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/lightweightvk-build")
 
+if(NURI_WITH_TRACY_GPU_DRAW_ZONES)
+  if(NURI_WITH_TRACY AND TARGET LVKVulkan)
+    target_compile_definitions(LVKVulkan PUBLIC "LVK_WITH_TRACY_GPU_DRAW_ZONES=1")
+  else()
+    message(WARNING "NURI_WITH_TRACY_GPU_DRAW_ZONES=ON requires NURI_WITH_TRACY=ON and target LVKVulkan; per-draw Tracy GPU zones remain disabled.")
+  endif()
+endif()
+
 target_link_libraries(nuri_lib
   PUBLIC
     glm::glm
@@ -149,7 +159,13 @@ endif()
 
 set_source_files_properties(
   nuri/resources/stb_image.cpp
+  ${CMAKE_SOURCE_DIR}/vendor/im-guizmo/ImGuizmo.cpp
   PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+)
+
+set_source_files_properties(
+  ${CMAKE_SOURCE_DIR}/vendor/im-guizmo/ImGuizmo.cpp
+  PROPERTIES COMPILE_DEFINITIONS IMGUI_DEFINE_MATH_OPERATORS
 )
 
 target_precompile_headers(nuri_lib PRIVATE nuri/pch.h)
