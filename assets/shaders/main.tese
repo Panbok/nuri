@@ -20,9 +20,13 @@ void main() {
   const vec3 p2 = inWorldPos[2];
 
   const vec3 linearPos = p0 * bary.x + p1 * bary.y + p2 * bary.z;
-  const vec3 linearNormal = normalize(inWorldNormal[0] * bary.x +
-                                      inWorldNormal[1] * bary.y +
-                                      inWorldNormal[2] * bary.z);
+  const vec3 weightedNormal = inWorldNormal[0] * bary.x +
+                              inWorldNormal[1] * bary.y +
+                              inWorldNormal[2] * bary.z;
+  const float lenSq = dot(weightedNormal, weightedNormal);
+  const float eps = 1e-6;
+  const vec3 linearNormal = (lenSq > eps) ? normalize(weightedNormal)
+                                          : inWorldNormal[0];
 
   const vec2 uv = inUv[0] * bary.x + inUv[1] * bary.y + inUv[2] * bary.z;
 
