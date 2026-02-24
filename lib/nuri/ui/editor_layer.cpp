@@ -2,6 +2,7 @@
 
 #include "nuri/core/log.h"
 #include "nuri/ui/imgui_editor.h"
+#include "nuri/ui/imgui_gizmo_controller.h"
 
 #include <exception>
 #include <string>
@@ -10,17 +11,46 @@ namespace nuri {
 
 std::unique_ptr<EditorLayer> EditorLayer::create(Window &window, GPUDevice &gpu,
                                                  EventManager &events,
-                                                 UiCallback callback) {
+                                                 UiCallback callback,
+                                                 const EditorServices
+                                                     &services) {
   NURI_LOG_DEBUG("EditorLayer::create: Creating editor layer");
   return std::unique_ptr<EditorLayer>(
-      new EditorLayer(window, gpu, events, callback));
+      new EditorLayer(window, gpu, events, std::move(callback), services));
 }
 
 EditorLayer::EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
-                         UiCallback callback)
-    : editor_(ImGuiEditor::create(window, gpu, events)), callback_(callback) {}
+                         UiCallback callback,
+                         const EditorServices &services)
+    : editor_(ImGuiEditor::create(window, gpu, events)),
+      callback_(std::move(callback)) {
+  if (services.hasGizmoDependencies()) {
+    gizmoController_ = createImGuizmoController(services);
+    if (!gizmoController_) {
+      NURI_LOG_WARNING("EditorLayer: failed to create gizmo controller");
+    }
+    return;
+  }
+
+  const bool hasAnyGizmoService = services.scene != nullptr ||
+                                  services.cameraSystem != nullptr ||
+                                  services.gpu != nullptr;
+  if (hasAnyGizmoService) {
+    NURI_LOG_WARNING(
+        "EditorLayer: incomplete EditorServices for gizmo "
+        "(scene=%d cameraSystem=%d gpu=%d); gizmo disabled",
+        services.scene != nullptr, services.cameraSystem != nullptr,
+        services.gpu != nullptr);
+  }
+}
 
 EditorLayer::~EditorLayer() = default;
+
+void EditorLayer::resetControllers() {
+  if (gizmoController_) {
+    gizmoController_->reset();
+  }
+}
 
 bool EditorLayer::onInput(const InputEvent &event) {
   if (!editor_) {
@@ -42,8 +72,15 @@ bool EditorLayer::onInput(const InputEvent &event) {
   case InputEventType::MouseMove:
   case InputEventType::MouseScroll:
   case InputEventType::CursorEnter:
-    return editor_->wantsCaptureMouse();
+    if (editor_->wantsCaptureMouse()) {
+      return true;
+    }
+    if (gizmoController_ && gizmoController_->onInput(event)) {
+      return true;
+    }
+    return false;
   case InputEventType::Focus:
+    return false;
   default:
     NURI_LOG_WARNING("EditorLayer::onInput: Unknown input event type: %d",
                      static_cast<int>(event.type));
@@ -53,6 +90,12 @@ bool EditorLayer::onInput(const InputEvent &event) {
 }
 
 void EditorLayer::onUpdate(double deltaTime) { frameDeltaSeconds_ = deltaTime; }
+
+void EditorLayer::prepareFrameContext(RenderFrameContext &frame) {
+  if (gizmoController_) {
+    gizmoController_->onFrame(frame);
+  }
+}
 
 Result<bool, std::string>
 EditorLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
@@ -71,6 +114,9 @@ EditorLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   try {
     if (callback_.callback) {
       callback_.callback();
+    }
+    if (gizmoController_) {
+      gizmoController_->drawUi();
     }
   } catch (const std::exception &e) {
     editor_->setFrameDeltaSeconds(frameDeltaSeconds_);

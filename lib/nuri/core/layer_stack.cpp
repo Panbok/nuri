@@ -113,6 +113,16 @@ void LayerStack::clear() {
 
 Result<bool, std::string>
 LayerStack::appendRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
+  // Prepare in reverse input order so overlays can inject frame-scoped data
+  // before render layers consume it.
+  for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
+    Layer *layer = it->get();
+    if (!layer) {
+      continue;
+    }
+    layer->prepareFrameContext(frame);
+  }
+
   for (auto &layer : layers_) {
     if (!layer) {
       continue;

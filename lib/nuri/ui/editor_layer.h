@@ -5,12 +5,15 @@
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/ui/imgui_editor.h"
+#include "nuri/ui/editor.h"
+#include "nuri/ui/editor_services.h"
 
 #include <functional>
 #include <memory>
 
 namespace nuri {
+
+class ImGuiEditor;
 
 class NURI_API EditorLayer final : public Layer {
 public:
@@ -23,7 +26,8 @@ public:
 
   static std::unique_ptr<EditorLayer>
   create(Window &window, GPUDevice &gpu, EventManager &events,
-         UiCallback callback = UiCallback{});
+         UiCallback callback = UiCallback{},
+         const EditorServices &services = {});
   ~EditorLayer() override;
 
   EditorLayer(const EditorLayer &) = delete;
@@ -32,18 +36,21 @@ public:
   EditorLayer &operator=(EditorLayer &&) = delete;
 
   void setUiCallback(UiCallback callback) { callback_ = std::move(callback); }
+  void resetControllers();
 
   bool onInput(const InputEvent &event) override;
   void onUpdate(double deltaTime) override;
+  void prepareFrameContext(RenderFrameContext &frame) override;
   Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
                                               RenderPassList &out) override;
 
 private:
   EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
-              UiCallback callback);
+              UiCallback callback, const EditorServices &services);
 
   std::unique_ptr<ImGuiEditor> editor_;
   UiCallback callback_{};
+  std::shared_ptr<GizmoController> gizmoController_{};
   double frameDeltaSeconds_ = 0.0;
 };
 
