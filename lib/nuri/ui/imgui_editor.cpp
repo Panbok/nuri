@@ -30,6 +30,8 @@ constexpr const char *kDockspaceWindowName = "NuriDockspace";
 constexpr const char *kDockspaceRootId = "NuriDockspace##Root";
 constexpr const char *kLogWindowName = "Log";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
+constexpr const char *kScenePresetWindowName = "Scene Preset";
+constexpr const char *kSelectionWindowName = "Selection";
 
 enum class LayerSelection : uint8_t {
   Skybox,
@@ -337,6 +339,10 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
 
   ImGui::Separator();
   ImGui::TextUnformatted("Mesh LOD");
+  ImGui::Checkbox("Enable Indirect Draws##OpaqueLayer",
+                  &opaque.enableIndirectDraw);
+  ImGui::Checkbox("Enable Instanced Draws##OpaqueLayer",
+                  &opaque.enableInstancedDraw);
   ImGui::Checkbox("Enable Mesh LOD##OpaqueLayer", &opaque.enableMeshLod);
   ImGui::SliderInt("Forced LOD##OpaqueLayer", &opaque.forcedMeshLod, -1, 3);
 
@@ -576,6 +582,8 @@ struct DockLayoutState {
 
     logDockId = dockBottom;
     ImGui::DockBuilderDockWindow(kCameraControllerWindowName, dockBottomLeft);
+    ImGui::DockBuilderDockWindow(kScenePresetWindowName, dockBottomLeft);
+    ImGui::DockBuilderDockWindow(kSelectionWindowName, dockBottomLeft);
     ImGui::DockBuilderDockWindow(kLogWindowName, logDockId);
     ImGui::DockBuilderFinish(dockspaceId);
     built = true;
