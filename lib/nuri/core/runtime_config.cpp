@@ -12,6 +12,7 @@ constexpr std::string_view kDefaultSkyboxVertexShader = "skybox.vert";
 constexpr std::string_view kDefaultSkyboxFragmentShader = "skybox.frag";
 constexpr std::string_view kDefaultOpaqueMeshVertexShader = "main.vert";
 constexpr std::string_view kDefaultOpaqueMeshFragmentShader = "main.frag";
+constexpr std::string_view kDefaultOpaquePickFragmentShader = "main_id.frag";
 constexpr std::string_view kDefaultOpaqueComputeShader = "duck_instances.comp";
 constexpr std::string_view kDefaultOpaqueTessVertexShader = "main_tess.vert";
 constexpr std::string_view kDefaultOpaqueTessControlShader = "main.tesc";
@@ -36,9 +37,10 @@ constexpr std::array<std::string_view, 2> kDebugGridShaderKeys = {"vertex",
                                                                   "fragment"};
 constexpr std::array<std::string_view, 2> kSkyboxShaderKeys = {"vertex",
                                                                "fragment"};
-constexpr std::array<std::string_view, 8> kOpaqueShaderKeys = {
-    "mesh_vertex",  "mesh_fragment", "compute_instances", "tess_vertex",
-    "tess_control", "tess_eval",     "overlay_geometry",  "overlay_fragment",
+constexpr std::array<std::string_view, 9> kOpaqueShaderKeys = {
+    "mesh_vertex",  "mesh_fragment", "pick_fragment",   "compute_instances",
+    "tess_vertex",  "tess_control",  "tess_eval",       "overlay_geometry",
+    "overlay_fragment",
 };
 
 template <typename T>
@@ -545,6 +547,12 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (meshFragmentPath.hasError()) {
     return makeError<RuntimeConfig>(meshFragmentPath.error());
   }
+  auto pickFragmentPath = resolveShaderFileWithDefault(
+      opaqueObj, "pick_fragment", "shaders.opaque",
+      kDefaultOpaquePickFragmentShader, shadersRoot.value());
+  if (pickFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(pickFragmentPath.error());
+  }
   auto computeInstancesPath = resolveShaderFileWithDefault(
       opaqueObj, "compute_instances", "shaders.opaque",
       kDefaultOpaqueComputeShader, shadersRoot.value());
@@ -611,6 +619,7 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
           RuntimeOpaqueShaderConfig{
               .meshVertex = meshVertexPath.value(),
               .meshFragment = meshFragmentPath.value(),
+              .pickFragment = pickFragmentPath.value(),
               .computeInstances = computeInstancesPath.value(),
               .tessVertex = tessVertexPath.value(),
               .tessControl = tessControlPath.value(),
