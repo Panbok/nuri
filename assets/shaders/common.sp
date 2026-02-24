@@ -70,7 +70,8 @@ layout(push_constant) uniform PushConstants {
 
 const uint kDebugVisualizationNone = 0u;
 const uint kDebugVisualizationWireOverlay = 1u;
-const uint kDebugVisualizationTessPatchEdgesHeatmap = 2u;
+const uint kDebugVisualizationWireframeOnly = 2u;
+const uint kDebugVisualizationTessPatchEdgesHeatmap = 3u;
 
 vec2 unpackSnorm2x16Custom(uint packed) {
   const int x = int(packed << 16u) >> 16;

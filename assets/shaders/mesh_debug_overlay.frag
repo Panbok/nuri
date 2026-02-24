@@ -37,6 +37,9 @@ void main() {
     out_FragColor = vec4(0.18, 0.82, 0.92, alpha);
     return;
   }
+  if (pc.debugVisualizationMode == kDebugVisualizationWireframeOnly) {
+    discard;
+  }
 
   if (!isTessellated) {
     const float alpha = smoothstep(0.10, 0.95, triEdge) * 0.70;
