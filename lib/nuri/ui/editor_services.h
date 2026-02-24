@@ -13,7 +13,7 @@ struct EditorServices {
   CameraSystem *cameraSystem = nullptr;
   GPUDevice *gpu = nullptr;
 
-  [[nodiscard]] bool hasGizmoDependencies() const {
+  [[nodiscard]] bool hasAllDependencies() const {
     return scene != nullptr && cameraSystem != nullptr && gpu != nullptr;
   }
 };

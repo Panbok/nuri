@@ -24,7 +24,7 @@ EditorLayer::EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
                          const EditorServices &services)
     : editor_(ImGuiEditor::create(window, gpu, events)),
       callback_(std::move(callback)) {
-  if (services.hasGizmoDependencies()) {
+  if (services.hasAllDependencies()) {
     gizmoController_ = createImGuizmoController(services);
     if (!gizmoController_) {
       NURI_LOG_WARNING("EditorLayer: failed to create gizmo controller");

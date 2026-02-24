@@ -30,7 +30,9 @@ public:
   virtual void onResize(int32_t width, int32_t height) {}
   virtual bool onInput(const InputEvent &event) { return false; }
   // Called once per frame before any buildRenderPasses() calls.
-  // Overlays can use this to publish frame-scoped requests consumed by layers.
+  // Any layer (commonly overlays) may override this to publish frame-scoped
+  // state into RenderFrameContext before other layers consume it via
+  // buildRenderPasses().
   virtual void prepareFrameContext(RenderFrameContext &frame) {}
   virtual Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
                                                       RenderPassList &out);

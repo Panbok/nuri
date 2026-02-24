@@ -14,6 +14,7 @@
 namespace nuri {
 
 class ImGuiEditor;
+class GizmoController;
 
 class NURI_API EditorLayer final : public Layer {
 public:

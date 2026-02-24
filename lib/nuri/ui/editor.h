@@ -12,12 +12,19 @@ namespace nuri {
 
 class NURI_API GizmoController {
 public:
-  virtual ~GizmoController() = default;
+  GizmoController(const GizmoController &) = delete;
+  GizmoController &operator=(const GizmoController &) = delete;
+  GizmoController(GizmoController &&) = delete;
+  GizmoController &operator=(GizmoController &&) = delete;
 
-  virtual bool onInput(const InputEvent &event) = 0;
+  [[nodiscard]] virtual bool onInput(const InputEvent &event) = 0;
   virtual void onFrame(RenderFrameContext &frame) = 0;
   virtual void drawUi() = 0;
   virtual void reset() = 0;
+
+protected:
+  GizmoController() = default;
+  virtual ~GizmoController() = default;
 };
 
 class NURI_API Editor {
