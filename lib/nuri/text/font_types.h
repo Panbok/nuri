@@ -3,35 +3,37 @@
 #include "nuri/defines.h"
 
 #include <array>
-#include <cstddef>
+#include <cassert>
 #include <cstdint>
 #include <memory_resource>
-#include <span>
-#include <string_view>
+#include <string>
 #include <vector>
 
 namespace nuri {
 
-static constexpr uint32_t kTextHandleIndexBits = 20;
-static constexpr uint32_t kTextHandleGenerationBits = 12;
-static constexpr uint32_t kTextHandleIndexMask =
+inline constexpr uint32_t kTextHandleIndexBits = 20;
+inline constexpr uint32_t kTextHandleGenerationBits = 12;
+inline constexpr uint32_t kTextHandleIndexMask =
     (1u << kTextHandleIndexBits) - 1u;
-static constexpr uint32_t kTextHandleGenerationMask =
+inline constexpr uint32_t kTextHandleGenerationMask =
     (1u << kTextHandleGenerationBits) - 1u;
 
 struct FontHandle {
   uint32_t value = 0;
+  auto operator<=>(const FontHandle &) const = default;
 };
 struct AtlasPageHandle {
   uint32_t value = 0;
+  auto operator<=>(const AtlasPageHandle &) const = default;
 };
 struct ShaperFaceHandle {
   uint32_t value = 0;
+  auto operator<=>(const ShaperFaceHandle &) const = default;
 };
 
-static constexpr FontHandle kInvalidFontHandle{};
-static constexpr AtlasPageHandle kInvalidAtlasPageHandle{};
-static constexpr ShaperFaceHandle kInvalidShaperFaceHandle{};
+inline constexpr FontHandle kInvalidFontHandle{};
+inline constexpr AtlasPageHandle kInvalidAtlasPageHandle{};
+inline constexpr ShaperFaceHandle kInvalidShaperFaceHandle{};
 
 [[nodiscard]] constexpr bool isValid(FontHandle h) noexcept {
   return h.value != 0;
@@ -45,6 +47,10 @@ static constexpr ShaperFaceHandle kInvalidShaperFaceHandle{};
 
 [[nodiscard]] constexpr uint32_t
 packTextHandleValue(uint32_t index, uint32_t generation) noexcept {
+  assert((index & ~kTextHandleIndexMask) == 0u);
+  assert((generation & ~kTextHandleGenerationMask) == 0u);
+  // Generation 0 is reserved to represent invalid handles.
+  assert(generation != 0u);
   if (generation == 0) {
     return 0;
   }
@@ -78,7 +84,6 @@ struct FontMetrics {
 
 struct GlyphMetrics {
   GlyphId glyphId = 0;
-  uint16_t localPageIndex = 0;
   float advance = 0.0f;
   float bearingX = 0.0f;
   float bearingY = 0.0f;
@@ -90,11 +95,12 @@ struct GlyphMetrics {
   float uvMinY = 0.0f;
   float uvMaxX = 0.0f;
   float uvMaxY = 0.0f;
+  uint16_t localPageIndex = 0;
 };
 
 struct FontLoadDesc {
-  std::string_view path;
-  std::string_view debugName;
+  std::string path;
+  std::string debugName;
   std::pmr::memory_resource *memory = std::pmr::get_default_resource();
 };
 
@@ -139,7 +145,7 @@ struct MtsdfParams {
 };
 
 struct Text2DDesc {
-  std::string_view utf8;
+  std::string utf8;
   TextStyle style;
   TextLayoutParams layout;
   TextColor fillColor;
@@ -151,14 +157,19 @@ struct Text2DDesc {
 };
 
 struct Text3DDesc {
-  std::string_view utf8;
+  std::string utf8;
   TextStyle style;
   TextLayoutParams layout;
   TextColor fillColor;
   TextColor outlineColor;
   MtsdfParams mtsdf;
-  std::array<float, 16> worldFromText{};
-  TextBillboardMode billboard = TextBillboardMode::Spherical;
+  std::array<float, 16> worldFromText{
+      1.0f, 0.0f, 0.0f, 0.0f, //
+      0.0f, 1.0f, 0.0f, 0.0f, //
+      0.0f, 0.0f, 1.0f, 0.0f, //
+      0.0f, 0.0f, 0.0f, 1.0f  //
+  };
+  TextBillboardMode billboard = TextBillboardMode::None;
   float maxScreenSizePx = 0.0f;
 };
 

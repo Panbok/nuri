@@ -57,7 +57,8 @@ readBinaryFile(const std::filesystem::path &path) {
     }
   }
 
-  return Result<std::vector<std::byte>, std::string>::makeResult(std::move(data));
+  return Result<std::vector<std::byte>, std::string>::makeResult(
+      std::move(data));
 }
 
 [[nodiscard]] uint32_t computeMipLevels2D(uint32_t width, uint32_t height) {
@@ -75,9 +76,10 @@ readBinaryFile(const std::filesystem::path &path) {
 class FontManagerImpl final : public FontManager {
 public:
   explicit FontManagerImpl(const CreateDesc &desc)
-      : gpu_(desc.gpu), memory_(desc.memory), fontRecords_(&memory_),
-        atlasPageRecords_(&memory_), fontFreeList_(&memory_),
-        atlasPageFreeList_(&memory_), retiredTextures_(&memory_) {
+      : FontManager(), gpu_(desc.gpu), memory_(desc.memory),
+        fontRecords_(&memory_), atlasPageRecords_(&memory_),
+        fontFreeList_(&memory_), atlasPageFreeList_(&memory_),
+        retiredTextures_(&memory_) {
     fontRecords_.reserve(desc.initialFontCapacity);
     atlasPageRecords_.reserve(desc.initialAtlasPageCapacity);
     fontFreeList_.reserve(desc.initialFontCapacity);
@@ -100,19 +102,20 @@ public:
                                    fileBytesResult.error());
     }
 
-    auto decodedResult =
-        nfontBinaryDeserialize(std::span<const std::byte>(fileBytesResult.value()));
+    auto decodedResult = nfontBinaryDeserialize(
+        std::span<const std::byte>(fileBytesResult.value()));
     if (decodedResult.hasError()) {
       return makeError<FontHandle>("FontManager::loadFont: failed to parse '",
-                                   path.string(), "' (",
-                                   decodedResult.error(), ")");
+                                   path.string(), "' (", decodedResult.error(),
+                                   ")");
     }
 
     NFontBinaryData &decoded = decodedResult.value();
 
     std::pmr::vector<AtlasPageHandle> createdPages(&memory_);
     createdPages.reserve(decoded.atlasPages.size());
-    for (size_t pageIndex = 0; pageIndex < decoded.atlasPages.size(); ++pageIndex) {
+    for (size_t pageIndex = 0; pageIndex < decoded.atlasPages.size();
+         ++pageIndex) {
       const std::string debugName = buildAtlasDebugName(desc, path, pageIndex);
       auto createPageResult =
           createAtlasPage(decoded.atlasPages[pageIndex], debugName);
@@ -143,11 +146,11 @@ public:
     record.sourcePath = path.string();
     record.glyphToIndex.clear();
     record.glyphToIndex.reserve(record.glyphs.size());
-    for (size_t glyphIndex = 0; glyphIndex < record.glyphs.size(); ++glyphIndex) {
+    for (size_t glyphIndex = 0; glyphIndex < record.glyphs.size();
+         ++glyphIndex) {
       const GlyphMetrics &glyph = record.glyphs[glyphIndex];
       if (glyph.localPageIndex >= record.atlasPages.size()) {
         releaseFontRecord(index);
-        destroyAtlasPages(createdPages);
         return makeError<FontHandle>(
             "FontManager::loadFont: glyph page index out of range in '",
             path.string(), "'");
@@ -156,7 +159,6 @@ public:
           record.glyphToIndex.emplace(glyph.glyphId, glyphIndex);
       if (!inserted) {
         releaseFontRecord(index);
-        destroyAtlasPages(createdPages);
         return makeError<FontHandle>(
             "FontManager::loadFont: duplicate glyph id ", glyph.glyphId,
             " in '", path.string(), "'");
@@ -182,9 +184,10 @@ public:
         .value = packTextHandleValue(index, record.generation),
     };
 
-    NURI_LOG_INFO("FontManager: loaded font '%s' from '%s' (glyphs=%zu pages=%zu)",
-                  record.debugName.c_str(), record.sourcePath.c_str(),
-                  record.glyphs.size(), record.atlasPages.size());
+    NURI_LOG_INFO(
+        "FontManager: loaded font '%s' from '%s' (glyphs=%zu pages=%zu)",
+        record.debugName.c_str(), record.sourcePath.c_str(),
+        record.glyphs.size(), record.atlasPages.size());
     return Result<FontHandle, std::string>::makeResult(handle);
   }
 
@@ -196,7 +199,9 @@ public:
 
     const uint32_t index = textHandleIndex(font.value);
     releaseFontRecord(index);
-    --liveFonts_;
+    if (liveFonts_ > 0) {
+      --liveFonts_;
+    }
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -280,16 +285,47 @@ public:
   }
 
   Result<bool, std::string>
-  setFallbackChain(FontHandle font, std::span<const FontHandle> chain) override {
+  setFallbackChain(FontHandle font,
+                   std::span<const FontHandle> chain) override {
     FontRecord *record = resolveFont(font);
     if (record == nullptr) {
-      return makeError<bool>("FontManager::setFallbackChain: invalid font handle");
+      return makeError<bool>(
+          "FontManager::setFallbackChain: invalid font handle");
     }
 
+    std::pmr::vector<FontHandle> pending(&memory_);
+    std::pmr::unordered_map<uint32_t, bool> visited(&memory_);
     for (const FontHandle chainFont : chain) {
+      if (chainFont.value == font.value) {
+        return makeError<bool>("FontManager::setFallbackChain: chain contains "
+                               "direct self-reference");
+      }
       if (resolveFont(chainFont) == nullptr) {
-        return makeError<bool>(
-            "FontManager::setFallbackChain: chain contains invalid font handle");
+        return makeError<bool>("FontManager::setFallbackChain: chain contains "
+                               "invalid font handle");
+      }
+
+      pending.clear();
+      visited.clear();
+      pending.push_back(chainFont);
+      visited.emplace(chainFont.value, true);
+      while (!pending.empty()) {
+        const FontHandle current = pending.back();
+        pending.pop_back();
+
+        const FontRecord *currentRecord = resolveFont(current);
+        if (currentRecord == nullptr) {
+          continue;
+        }
+        for (const FontHandle fallbackFont : currentRecord->fallback) {
+          if (fallbackFont.value == font.value) {
+            return makeError<bool>("FontManager::setFallbackChain: chain "
+                                   "introduces fallback cycle");
+          }
+          if (visited.emplace(fallbackFont.value, true).second) {
+            pending.push_back(fallbackFont);
+          }
+        }
       }
     }
 
@@ -323,9 +359,9 @@ public:
     retiredTextures_.resize(writeIndex);
 
     if (destroyed > 0) {
-      NURI_LOG_DEBUG(
-          "FontManager: garbage-collected %u retired atlas textures (remaining=%zu)",
-          destroyed, retiredTextures_.size());
+      NURI_LOG_DEBUG("FontManager: garbage-collected %u retired atlas textures "
+                     "(remaining=%zu)",
+                     destroyed, retiredTextures_.size());
     }
   }
 
@@ -352,8 +388,9 @@ private:
     std::pmr::string sourcePath;
 
     explicit FontRecord(std::pmr::memory_resource *memory)
-        : glyphs(memory), glyphToIndex(memory), cmap(memory), atlasPages(memory),
-          fallback(memory), debugName(memory), sourcePath(memory) {}
+        : glyphs(memory), glyphToIndex(memory), cmap(memory),
+          atlasPages(memory), fallback(memory), debugName(memory),
+          sourcePath(memory) {}
   };
 
   struct AtlasPageRecord {
@@ -411,7 +448,8 @@ private:
   }
 
   [[nodiscard]] Result<AtlasPageHandle, std::string>
-  createAtlasPage(const NFontBinaryAtlasImage &page, std::string_view debugName) {
+  createAtlasPage(const NFontBinaryAtlasImage &page,
+                  std::string_view debugName) {
     if (page.width == 0 || page.height == 0) {
       return makeError<AtlasPageHandle>(
           "FontManager::loadFont: atlas page has invalid dimensions");
@@ -419,13 +457,9 @@ private:
 
     const uint64_t pixelCount =
         static_cast<uint64_t>(page.width) * static_cast<uint64_t>(page.height);
-    if (pixelCount == 0) {
-      return makeError<AtlasPageHandle>(
-          "FontManager::loadFont: atlas page pixel count is zero");
-    }
     if (page.imageBytes.size() % pixelCount != 0) {
-      return makeError<AtlasPageHandle>(
-          "FontManager::loadFont: atlas image size is not divisible by pixel count");
+      return makeError<AtlasPageHandle>("FontManager::loadFont: atlas image "
+                                        "size is not divisible by pixel count");
     }
 
     const uint64_t bytesPerPixel =
@@ -450,8 +484,8 @@ private:
     textureDesc.numLayers = 1;
     textureDesc.numSamples = 1;
     textureDesc.numMipLevels = computeMipLevels2D(page.width, page.height);
-    textureDesc.data =
-        std::span<const std::byte>(page.imageBytes.data(), page.imageBytes.size());
+    textureDesc.data = std::span<const std::byte>(page.imageBytes.data(),
+                                                  page.imageBytes.size());
     textureDesc.dataNumMipLevels = 1;
     textureDesc.generateMipmaps = textureDesc.numMipLevels > 1;
 
@@ -628,7 +662,8 @@ private:
   }
 
   [[nodiscard]] std::string
-  buildAtlasDebugName(const FontLoadDesc &desc, const std::filesystem::path &path,
+  buildAtlasDebugName(const FontLoadDesc &desc,
+                      const std::filesystem::path &path,
                       size_t pageIndex) const {
     std::ostringstream oss;
     oss << buildFontDebugName(desc, path) << "_atlas_" << pageIndex;

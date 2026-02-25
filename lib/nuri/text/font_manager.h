@@ -5,6 +5,7 @@
 #include "nuri/text/font_types.h"
 
 #include <memory>
+#include <memory_resource>
 #include <span>
 #include <string>
 
@@ -14,6 +15,8 @@ class GPUDevice;
 
 class NURI_API FontManager {
 public:
+  FontManager() = default;
+
   struct CreateDesc {
     GPUDevice &gpu;
     std::pmr::memory_resource &memory;
@@ -30,6 +33,11 @@ public:
   static std::unique_ptr<FontManager> create(const CreateDesc &desc);
   virtual ~FontManager() = default;
 
+  FontManager(const FontManager &) = delete;
+  FontManager &operator=(const FontManager &) = delete;
+  FontManager(FontManager &&) = delete;
+  FontManager &operator=(FontManager &&) = delete;
+
   virtual Result<FontHandle, std::string>
   loadFont(const FontLoadDesc &desc) = 0;
   virtual Result<bool, std::string> unloadFont(FontHandle font) = 0;
@@ -37,7 +45,8 @@ public:
   virtual bool isValid(FontHandle font) const = 0;
   virtual FontMetrics metrics(FontHandle font) const = 0;
   virtual float pxRange(FontHandle font) const = 0;
-  virtual const GlyphMetrics *findGlyph(FontHandle font, GlyphId glyph) const = 0;
+  virtual const GlyphMetrics *findGlyph(FontHandle font,
+                                        GlyphId glyph) const = 0;
   virtual GlyphId lookupGlyphForCodepoint(FontHandle font,
                                           uint32_t codepoint) const = 0;
   virtual std::span<const FontHandle> fallbackChain(FontHandle font) const = 0;
