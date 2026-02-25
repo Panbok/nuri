@@ -21,6 +21,14 @@ constexpr std::string_view kDefaultOpaqueOverlayGeometryShader =
     "mesh_debug_overlay.geom";
 constexpr std::string_view kDefaultOpaqueOverlayFragmentShader =
     "mesh_debug_overlay.frag";
+constexpr std::string_view kDefaultTextMtsdfUiVertexShader =
+    "text_2d_mtsdf.vert";
+constexpr std::string_view kDefaultTextMtsdfUiFragmentShader =
+    "text_2d_mtsdf.frag";
+constexpr std::string_view kDefaultTextMtsdfWorldVertexShader =
+    "text_3d_mtsdf.vert";
+constexpr std::string_view kDefaultTextMtsdfWorldFragmentShader =
+    "text_3d_mtsdf.frag";
 constexpr std::string_view kDefaultConfigPath = "app.config.json";
 constexpr const char kAppConfigEnvVarCStr[] = "NURI_APP_CONFIG";
 constexpr std::string_view kAppConfigEnvVar = kAppConfigEnvVarCStr;
@@ -29,10 +37,10 @@ constexpr std::array<std::string_view, 3> kRootObjectKeys = {"window", "roots",
                                                              "shaders"};
 constexpr std::array<std::string_view, 4> kWindowKeys = {"title", "width",
                                                          "height", "mode"};
-constexpr std::array<std::string_view, 4> kRootsKeys = {"assets", "shaders",
-                                                        "models", "textures"};
-constexpr std::array<std::string_view, 3> kShadersKeys = {"debug_grid",
-                                                          "skybox", "opaque"};
+constexpr std::array<std::string_view, 5> kRootsKeys = {
+    "assets", "shaders", "models", "textures", "fonts"};
+constexpr std::array<std::string_view, 4> kShadersKeys = {
+    "debug_grid", "skybox", "opaque", "text_mtsdf"};
 constexpr std::array<std::string_view, 2> kDebugGridShaderKeys = {"vertex",
                                                                   "fragment"};
 constexpr std::array<std::string_view, 2> kSkyboxShaderKeys = {"vertex",
@@ -42,6 +50,8 @@ constexpr std::array<std::string_view, 9> kOpaqueShaderKeys = {
     "tess_vertex",  "tess_control",  "tess_eval",       "overlay_geometry",
     "overlay_fragment",
 };
+constexpr std::array<std::string_view, 4> kTextMtsdfShaderKeys = {
+    "ui_vertex", "ui_fragment", "world_vertex", "world_fragment"};
 
 template <typename T>
 [[nodiscard]] Result<T, std::string> makeError(std::string message) {
@@ -423,10 +433,16 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (opaqueObjResult.hasError()) {
     return makeError<RuntimeConfig>(opaqueObjResult.error());
   }
+  auto textMtsdfObjResult =
+      optionalObjectField(shadersObj, "text_mtsdf", "shaders");
+  if (textMtsdfObjResult.hasError()) {
+    return makeError<RuntimeConfig>(textMtsdfObjResult.error());
+  }
 
   yyjson_val *debugGridObj = debugGridObjResult.value();
   yyjson_val *skyboxObj = skyboxObjResult.value();
   yyjson_val *opaqueObj = opaqueObjResult.value();
+  yyjson_val *textMtsdfObj = textMtsdfObjResult.value();
 
   if (debugGridObj != nullptr) {
     auto result = validateUnknownKeys(debugGridObj, "shaders.debug_grid",
@@ -445,6 +461,13 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (opaqueObj != nullptr) {
     auto result =
         validateUnknownKeys(opaqueObj, "shaders.opaque", kOpaqueShaderKeys);
+    if (result.hasError()) {
+      return makeError<RuntimeConfig>(result.error());
+    }
+  }
+  if (textMtsdfObj != nullptr) {
+    auto result = validateUnknownKeys(textMtsdfObj, "shaders.text_mtsdf",
+                                      kTextMtsdfShaderKeys);
     if (result.hasError()) {
       return makeError<RuntimeConfig>(result.error());
     }
@@ -487,6 +510,10 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (texturesRootText.hasError()) {
     return makeError<RuntimeConfig>(texturesRootText.error());
   }
+  auto fontsRootText = requireStringField(rootsObj, "fonts", "roots");
+  if (fontsRootText.hasError()) {
+    return makeError<RuntimeConfig>(fontsRootText.error());
+  }
 
   const std::filesystem::path configDir = normalizedConfigPath.parent_path();
   auto assetsRoot =
@@ -508,6 +535,11 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
       resolveDirectory(texturesRootText.value(), configDir, "roots.textures");
   if (texturesRoot.hasError()) {
     return makeError<RuntimeConfig>(texturesRoot.error());
+  }
+  auto fontsRoot =
+      resolveDirectory(fontsRootText.value(), configDir, "roots.fonts");
+  if (fontsRoot.hasError()) {
+    return makeError<RuntimeConfig>(fontsRoot.error());
   }
 
   auto debugGridVertexPath = resolveShaderFileWithDefault(
@@ -589,6 +621,30 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (overlayFragmentPath.hasError()) {
     return makeError<RuntimeConfig>(overlayFragmentPath.error());
   }
+  auto textMtsdfUiVertexPath = resolveShaderFileWithDefault(
+      textMtsdfObj, "ui_vertex", "shaders.text_mtsdf",
+      kDefaultTextMtsdfUiVertexShader, shadersRoot.value());
+  if (textMtsdfUiVertexPath.hasError()) {
+    return makeError<RuntimeConfig>(textMtsdfUiVertexPath.error());
+  }
+  auto textMtsdfUiFragmentPath = resolveShaderFileWithDefault(
+      textMtsdfObj, "ui_fragment", "shaders.text_mtsdf",
+      kDefaultTextMtsdfUiFragmentShader, shadersRoot.value());
+  if (textMtsdfUiFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(textMtsdfUiFragmentPath.error());
+  }
+  auto textMtsdfWorldVertexPath = resolveShaderFileWithDefault(
+      textMtsdfObj, "world_vertex", "shaders.text_mtsdf",
+      kDefaultTextMtsdfWorldVertexShader, shadersRoot.value());
+  if (textMtsdfWorldVertexPath.hasError()) {
+    return makeError<RuntimeConfig>(textMtsdfWorldVertexPath.error());
+  }
+  auto textMtsdfWorldFragmentPath = resolveShaderFileWithDefault(
+      textMtsdfObj, "world_fragment", "shaders.text_mtsdf",
+      kDefaultTextMtsdfWorldFragmentShader, shadersRoot.value());
+  if (textMtsdfWorldFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(textMtsdfWorldFragmentPath.error());
+  }
 
   RuntimeConfig config{};
   config.sourcePath = normalizedConfigPath;
@@ -603,6 +659,7 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
       .shaders = shadersRoot.value(),
       .models = modelsRoot.value(),
       .textures = texturesRoot.value(),
+      .fonts = fontsRoot.value(),
   };
   config.shaders = RuntimeShaderConfig{
       .debugGrid =
@@ -626,6 +683,13 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
               .tessEval = tessEvalPath.value(),
               .overlayGeometry = overlayGeometryPath.value(),
               .overlayFragment = overlayFragmentPath.value(),
+          },
+      .textMtsdf =
+          RuntimeTextMtsdfShaderConfig{
+              .uiVertex = textMtsdfUiVertexPath.value(),
+              .uiFragment = textMtsdfUiFragmentPath.value(),
+              .worldVertex = textMtsdfWorldVertexPath.value(),
+              .worldFragment = textMtsdfWorldFragmentPath.value(),
           },
   };
 

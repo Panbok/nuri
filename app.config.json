@@ -9,6 +9,15 @@
     "assets": "assets",
     "shaders": "assets/shaders",
     "models": "assets/models",
-    "textures": "assets/textures"
+    "textures": "assets/textures",
+    "fonts": "assets/fonts"
+  },
+  "shaders": {
+    "text_mtsdf": {
+      "ui_vertex": "text_2d_mtsdf.vert",
+      "ui_fragment": "text_2d_mtsdf.frag",
+      "world_vertex": "text_3d_mtsdf.vert",
+      "world_fragment": "text_3d_mtsdf.frag"
+    }
   }
 }

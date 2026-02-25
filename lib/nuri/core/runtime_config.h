@@ -22,6 +22,7 @@ struct NURI_API RuntimeRootsConfig {
   std::filesystem::path shaders;
   std::filesystem::path models;
   std::filesystem::path textures;
+  std::filesystem::path fonts;
 };
 
 struct NURI_API RuntimeDebugShaderConfig {
@@ -46,10 +47,18 @@ struct NURI_API RuntimeOpaqueShaderConfig {
   std::filesystem::path overlayFragment;
 };
 
+struct NURI_API RuntimeTextMtsdfShaderConfig {
+  std::filesystem::path uiVertex;
+  std::filesystem::path uiFragment;
+  std::filesystem::path worldVertex;
+  std::filesystem::path worldFragment;
+};
+
 struct NURI_API RuntimeShaderConfig {
   RuntimeDebugShaderConfig debugGrid;
   RuntimeSkyboxShaderConfig skybox;
   RuntimeOpaqueShaderConfig opaque;
+  RuntimeTextMtsdfShaderConfig textMtsdf;
 };
 
 struct NURI_API RuntimeConfig {
