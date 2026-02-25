@@ -299,6 +299,10 @@ nfontBinarySerialize(const NFontBinaryData &input) {
           "nfontBinarySerialize: atlas image payload size overflow");
     }
   }
+  if (imageSection.payload.size() > std::numeric_limits<uint32_t>::max()) {
+    return makeSerializeError(
+        "nfontBinarySerialize: concatenated image payload exceeds uint32");
+  }
   imageSection.count = static_cast<uint32_t>(imageSection.payload.size());
 
   std::array<SerializedSection, 6> sections = {

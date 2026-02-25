@@ -15,6 +15,9 @@ namespace {
 constexpr uint32_t kLatin1FirstCodePoint = 0x20u; // space, first printable
 constexpr uint32_t kLatin1LastCodePoint = 0x00FFu;
 
+// Angle threshold (radians) for msdfgen ink-trap edge coloring; corners sharper than this are split
+constexpr double kMsdfCornerAngle = 3.0;
+
 template <typename T, typename... Args>
 [[nodiscard]] Result<T, std::string> makeError(Args &&...args) {
   std::ostringstream oss;
@@ -44,9 +47,11 @@ convertAtlasToRgba8(const msdfgen::BitmapConstRef<float, 4> &atlas) {
   auto *dst = reinterpret_cast<uint8_t *>(out.data());
   for (int y = 0; y < h; ++y) {
     // Y_DOWNWARD: source row index is (h - 1 - y)
-    const float *src =
-        atlas.pixels + static_cast<ptrdiff_t>((h - 1 - y) * w * 4);
-    const float *const src_end = src + static_cast<ptrdiff_t>(w * 4);
+    const ptrdiff_t rowOffset = static_cast<ptrdiff_t>(h - 1 - y) *
+                                static_cast<ptrdiff_t>(w) * 4;
+    const ptrdiff_t rowWidth = static_cast<ptrdiff_t>(w) * 4;
+    const float *src = atlas.pixels + rowOffset;
+    const float *const src_end = src + rowWidth;
     while (src != src_end) {
       const float clamped = std::clamp(*src++, 0.0f, 1.0f);
       *dst++ = static_cast<uint8_t>(clamped * 255.0f + 0.5f);
@@ -64,13 +69,14 @@ convertAtlasToRgba16f(const msdfgen::BitmapConstRef<float, 4> &atlas) {
 
   auto *dst = reinterpret_cast<uint16_t *>(out.data());
   for (int y = 0; y < h; ++y) {
-    const float *src =
-        atlas.pixels + static_cast<ptrdiff_t>((h - 1 - y) * w * 4);
+    const ptrdiff_t rowOffset = static_cast<ptrdiff_t>(h - 1 - y) *
+                                static_cast<ptrdiff_t>(w) * 4;
+    const float *src = atlas.pixels + rowOffset;
     for (int x = 0; x < w; ++x, src += 4, dst += 4) {
       const glm::vec4 clamped =
           glm::clamp(glm::vec4(src[0], src[1], src[2], src[3]), 0.0f, 1.0f);
-      const uint64_t packed = glm::packHalf4x16(clamped);
-      std::memcpy(dst, &packed, sizeof(uint64_t));
+      const auto packed = glm::packHalf4x16(clamped);
+      std::memcpy(dst, &packed, sizeof(packed));
     }
   }
   return out;
@@ -155,6 +161,11 @@ compileNFontFromFontFile(const NFontCompileConfig &config) {
     return makeError<NFontCompileReport>(
         "compileNFontFromFontFile: outerPixelPadding must be >= 0");
   }
+  if ((config.maxAtlasWidth > 0) != (config.maxAtlasHeight > 0)) {
+    return makeError<NFontCompileReport>(
+        "compileNFontFromFontFile: maxAtlasWidth and maxAtlasHeight must both "
+        "be > 0 when constraining atlas dimensions");
+  }
 
   std::unique_ptr<msdfgen::FreetypeHandle, FreetypeHandleDeleter> ft(
       msdfgen::initializeFreetype());
@@ -181,9 +192,8 @@ compileNFontFromFontFile(const NFontCompileConfig &config) {
         "compileNFontFromFontFile: no glyphs were loaded from charset");
   }
 
-  const double cornerAngle = 3.0;
   for (msdf_atlas::GlyphGeometry &glyph : glyphs) {
-    glyph.edgeColoring(&msdfgen::edgeColoringInkTrap, cornerAngle, 0);
+    glyph.edgeColoring(&msdfgen::edgeColoringInkTrap, kMsdfCornerAngle, 0);
   }
 
   msdf_atlas::TightAtlasPacker packer;
@@ -222,10 +232,13 @@ compileNFontFromFontFile(const NFontCompileConfig &config) {
   msdf_atlas::GeneratorAttributes attributes{};
   attributes.scanlinePass = true;
   generator.setAttributes(attributes);
-  generator.setThreadCount(
-      config.threadCount > 0
-          ? static_cast<int>(config.threadCount)
-          : static_cast<int>(std::thread::hardware_concurrency()));
+  uint32_t threadCount = config.threadCount > 0
+                             ? config.threadCount
+                             : std::thread::hardware_concurrency();
+  if (threadCount == 0) {
+    threadCount = 1;
+  }
+  generator.setThreadCount(static_cast<int>(threadCount));
   generator.generate(glyphs.data(), static_cast<int>(glyphs.size()));
 
   const msdfgen::BitmapConstRef<float, 4> atlas = generator.atlasStorage();

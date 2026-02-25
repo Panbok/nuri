@@ -2,6 +2,7 @@
 
 #include "nuri/core/result.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>

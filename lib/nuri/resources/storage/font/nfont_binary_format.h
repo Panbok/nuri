@@ -49,6 +49,7 @@ struct NFontBinaryHeader {
 };
 #pragma pack(pop)
 
+#pragma pack(push, 1)
 struct NFontBinarySectionTocEntry {
   uint32_t fourcc = 0;
   uint32_t flags = 0;
@@ -102,7 +103,11 @@ struct NFontBinaryAtlasPageRecord {
   uint32_t imageOffset = 0;
   uint32_t imageSize = 0;
 };
+#pragma pack(pop)
 
+static_assert(sizeof(float) == 4, "float must be 32-bit");
+static_assert(std::numeric_limits<float>::is_iec559,
+              "float must be IEEE 754 / IEC 559");
 static_assert(sizeof(NFontBinaryHeader) == 44);
 static_assert(sizeof(NFontBinarySectionTocEntry) == 32);
 static_assert(sizeof(NFontBinaryHeadRecord) == 32);
