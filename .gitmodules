@@ -1,3 +1,6 @@
 [submodule "external/lightweightvk"]
 	path = external/lightweightvk
 	url = https://github.com/Panbok/lightweightvk
+[submodule "external/msdf-atlas-gen"]
+	path = external/msdf-atlas-gen
+	url = https://github.com/Chlumsky/msdf-atlas-gen
