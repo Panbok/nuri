@@ -2,6 +2,7 @@
 
 #include "nuri/text/font_manager.h"
 
+#include "nuri/core/containers/hash_map.h"
 #include "nuri/core/log.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/resources/storage/font/nfont_binary_codec.h"
@@ -294,7 +295,7 @@ public:
     }
 
     std::pmr::vector<FontHandle> pending(&memory_);
-    std::pmr::unordered_map<uint32_t, bool> visited(&memory_);
+    PmrHashMap<uint32_t, bool> visited(&memory_);
     for (const FontHandle chainFont : chain) {
       if (chainFont.value == font.value) {
         return makeError<bool>("FontManager::setFallbackChain: chain contains "
@@ -380,8 +381,8 @@ private:
     FontMetrics metrics{};
     float pxRange = 4.0f;
     std::pmr::vector<GlyphMetrics> glyphs;
-    std::pmr::unordered_map<GlyphId, size_t> glyphToIndex;
-    std::pmr::unordered_map<uint32_t, GlyphId> cmap;
+    PmrHashMap<GlyphId, size_t> glyphToIndex;
+    PmrHashMap<uint32_t, GlyphId> cmap;
     std::pmr::vector<AtlasPageHandle> atlasPages;
     std::pmr::vector<FontHandle> fallback;
     std::pmr::string debugName;
