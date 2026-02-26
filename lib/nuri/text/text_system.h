@@ -5,7 +5,9 @@
 
 #include <filesystem>
 #include <memory>
+#include <memory_resource>
 #include <string>
+#include <string_view>
 
 namespace nuri {
 
@@ -21,7 +23,13 @@ public:
 
   static Result<std::unique_ptr<TextSystem>, std::string>
   create(const CreateDesc &desc);
+  TextSystem() = default;
   virtual ~TextSystem() = default;
+
+  TextSystem(const TextSystem &) = delete;
+  TextSystem &operator=(const TextSystem &) = delete;
+  TextSystem(TextSystem &&) = delete;
+  TextSystem &operator=(TextSystem &&) = delete;
 
   virtual FontManager &fonts() = 0;
   virtual TextRenderer &renderer() = 0;

@@ -22,6 +22,8 @@ struct ShapedGlyph {
 };
 
 struct ShapedRun {
+  ShapedRun() = default;
+  explicit ShapedRun(std::pmr::memory_resource *r) : glyphs(r) {}
   std::pmr::vector<ShapedGlyph> glyphs;
   TextDirection direction = TextDirection::Ltr;
   TextBounds inkBounds{};
@@ -37,6 +39,15 @@ public:
   static std::unique_ptr<TextShaper> create(const CreateDesc &desc);
   virtual ~TextShaper() = default;
 
+  TextShaper(const TextShaper &) = delete;
+  TextShaper &operator=(const TextShaper &) = delete;
+  TextShaper(TextShaper &&) = delete;
+  TextShaper &operator=(TextShaper &&) = delete;
+
+protected:
+  TextShaper() = default;
+
+public:
   virtual Result<ShapedRun, std::string>
   shapeUtf8(std::string_view utf8, const TextStyle &style,
             const TextLayoutParams &params,

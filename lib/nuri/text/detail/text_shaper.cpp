@@ -3,6 +3,7 @@
 #include "nuri/text/text_shaper.h"
 
 #include "nuri/core/containers/hash_map.h"
+#include "nuri/core/containers/hash_set.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 
@@ -120,13 +121,12 @@ void buildFallbackCandidates(const FontManager &fonts, const TextStyle &style,
                              FontHandle primaryFont, bool allowFallback,
                              std::pmr::vector<FontHandle> &out) {
   out.clear();
-  HashMap<uint32_t, bool> seen;
+  HashSet<uint32_t> seen;
   const auto tryAppend = [&](FontHandle font) {
     if (!::nuri::isValid(font) || !fonts.isValid(font)) {
       return;
     }
-    auto [_, inserted] = seen.try_emplace(font.value, true);
-    if (inserted) {
+    if (seen.insert(font.value).second) {
       out.push_back(font);
     }
   };
@@ -218,7 +218,11 @@ void buildFallbackCandidates(const FontManager &fonts, const TextStyle &style,
     if (c1 == 0xffu) {
       return 0;
     }
-    return (static_cast<uint32_t>(b0 & 0x1fu) << 6u) | c1;
+    const uint32_t cp = (static_cast<uint32_t>(b0 & 0x1fu) << 6u) | c1;
+    if (cp < 0x80u) {
+      return 0; // overlong 2-byte
+    }
+    return cp;
   }
   if ((b0 & 0xf0u) == 0xe0u) {
     const uint8_t c1 = continuation(index + 1u);
@@ -226,8 +230,15 @@ void buildFallbackCandidates(const FontManager &fonts, const TextStyle &style,
     if (c1 == 0xffu || c2 == 0xffu) {
       return 0;
     }
-    return (static_cast<uint32_t>(b0 & 0x0fu) << 12u) |
-           (static_cast<uint32_t>(c1) << 6u) | c2;
+    const uint32_t cp = (static_cast<uint32_t>(b0 & 0x0fu) << 12u) |
+                        (static_cast<uint32_t>(c1) << 6u) | c2;
+    if (cp < 0x800u) {
+      return 0; // overlong 3-byte
+    }
+    if (cp >= 0xd800u && cp <= 0xdfffu) {
+      return 0; // surrogate
+    }
+    return cp;
   }
   if ((b0 & 0xf8u) == 0xf0u) {
     const uint8_t c1 = continuation(index + 1u);
@@ -236,9 +247,13 @@ void buildFallbackCandidates(const FontManager &fonts, const TextStyle &style,
     if (c1 == 0xffu || c2 == 0xffu || c3 == 0xffu) {
       return 0;
     }
-    return (static_cast<uint32_t>(b0 & 0x07u) << 18u) |
-           (static_cast<uint32_t>(c1) << 12u) |
-           (static_cast<uint32_t>(c2) << 6u) | c3;
+    const uint32_t cp = (static_cast<uint32_t>(b0 & 0x07u) << 18u) |
+                        (static_cast<uint32_t>(c1) << 12u) |
+                        (static_cast<uint32_t>(c2) << 6u) | c3;
+    if (cp < 0x10000u || cp > 0x10ffffu) {
+      return 0; // overlong or out of BMP range
+    }
+    return cp;
   }
   return 0;
 }
@@ -299,7 +314,7 @@ void growBounds(TextBounds &bounds, bool &hasBounds, float minX, float minY,
 class TextShaperHb final : public TextShaper {
 public:
   explicit TextShaperHb(const CreateDesc &desc)
-      : fonts_(desc.fonts), memory_(desc.memory) {}
+      : TextShaper(), fonts_(desc.fonts), memory_(desc.memory) {}
   ~TextShaperHb() override {
     if (hbFont_ != nullptr) {
       hb_font_destroy(hbFont_);
@@ -311,16 +326,17 @@ public:
     }
   }
 
+  TextShaperHb(const TextShaperHb &) = delete;
+  TextShaperHb &operator=(const TextShaperHb &) = delete;
+  TextShaperHb(TextShaperHb &&) = delete;
+  TextShaperHb &operator=(TextShaperHb &&) = delete;
+
   Result<ShapedRun, std::string>
   shapeUtf8(std::string_view utf8, const TextStyle &style,
             const TextLayoutParams &params,
             std::pmr::memory_resource &scratch) override {
     NURI_PROFILER_FUNCTION();
-    ShapedRun run{
-        .glyphs = std::pmr::vector<ShapedGlyph>(&scratch),
-        .direction = TextDirection::Ltr,
-        .inkBounds = {},
-    };
+    ShapedRun run{&memory_};
 
     if (utf8.empty()) {
       return Result<ShapedRun, std::string>::makeResult(std::move(run));
@@ -356,9 +372,12 @@ public:
     hbContext_.font = primaryFont;
     hbContext_.scale = primaryScale;
 
+    if (utf8.size() > static_cast<size_t>(INT_MAX)) {
+      return makeError("TextShaper::shapeUtf8: UTF-8 length exceeds INT_MAX");
+    }
+    const int utf8Len = static_cast<int>(utf8.size());
     hb_buffer_reset(hbBuffer_);
-    hb_buffer_add_utf8(hbBuffer_, utf8.data(), static_cast<int>(utf8.size()), 0,
-                       static_cast<int>(utf8.size()));
+    hb_buffer_add_utf8(hbBuffer_, utf8.data(), utf8Len, 0, utf8Len);
     const hb_direction_t requestedDirection = toHbDirection(params.direction);
     if (requestedDirection != HB_DIRECTION_INVALID) {
       hb_buffer_set_direction(hbBuffer_, requestedDirection);
@@ -385,7 +404,7 @@ public:
       FontHandle rFont{};
       uint32_t rIdx = 0;
       GlyphId rId = lookupGlyphFromCandidates(fonts_, candidateSpan, 0xfffdu,
-                                               &rFont, &rIdx);
+                                              &rFont, &rIdx);
       if (rId == 0) {
         rId = lookupGlyphFromCandidates(
             fonts_, candidateSpan, static_cast<uint32_t>('?'), &rFont, &rIdx);
@@ -427,8 +446,8 @@ public:
       if (!fromCache) {
         FontHandle rFont = primaryFont;
         uint32_t rIdx = 0;
-        GlyphId rId = lookupGlyphFromCandidates(
-            fonts_, candidateSpan, sourceCodepoint, &rFont, &rIdx);
+        GlyphId rId = lookupGlyphFromCandidates(fonts_, candidateSpan,
+                                                sourceCodepoint, &rFont, &rIdx);
         if (rId == 0 &&
             fonts_.findGlyph(primaryFont, infos[i].codepoint) != nullptr) {
           rId = static_cast<GlyphId>(infos[i].codepoint);
@@ -470,11 +489,10 @@ public:
             makeTelemetryKey(primaryFont.value, resolved.font.value);
         const uint32_t switchCount = ++fallbackSwitchCounts_[key];
         if (switchCount == 1u) {
-          NURI_LOG_INFO(
-              "TextShaper: fallback font switch primary=0x%08X "
-              "fallback=0x%08X",
-              static_cast<unsigned int>(primaryFont.value),
-              static_cast<unsigned int>(resolved.font.value));
+          NURI_LOG_INFO("TextShaper: fallback font switch primary=0x%08X "
+                        "fallback=0x%08X",
+                        static_cast<unsigned int>(primaryFont.value),
+                        static_cast<unsigned int>(resolved.font.value));
         }
       }
 
@@ -499,22 +517,18 @@ public:
       }
       glyph.advanceY = 0.0f;
       glyph.offsetX = static_cast<float>(positions[i].x_offset) / 64.0f;
-      glyph.offsetY = 0.0f;
+      glyph.offsetY = static_cast<float>(positions[i].y_offset) / 64.0f;
       run.glyphs.push_back(glyph);
 
       if (resolved.metrics != nullptr) {
-        const float minX =
-            penX + glyph.offsetX +
-            (resolved.metrics->planeMinX * resolvedScale);
-        const float minY =
-            penY + glyph.offsetY +
-            (resolved.metrics->planeMinY * resolvedScale);
-        const float maxX =
-            penX + glyph.offsetX +
-            (resolved.metrics->planeMaxX * resolvedScale);
-        const float maxY =
-            penY + glyph.offsetY +
-            (resolved.metrics->planeMaxY * resolvedScale);
+        const float minX = penX + glyph.offsetX +
+                           (resolved.metrics->planeMinX * resolvedScale);
+        const float minY = penY + glyph.offsetY +
+                           (resolved.metrics->planeMinY * resolvedScale);
+        const float maxX = penX + glyph.offsetX +
+                           (resolved.metrics->planeMaxX * resolvedScale);
+        const float maxY = penY + glyph.offsetY +
+                           (resolved.metrics->planeMaxY * resolvedScale);
         growBounds(run.inkBounds, hasBounds, minX, minY, maxX, maxY);
       }
 
@@ -539,15 +553,18 @@ private:
   Result<bool, std::string> ensureHbObjects() {
     if (hbBuffer_ == nullptr) {
       hbBuffer_ = hb_buffer_create();
-      if (hbBuffer_ == nullptr) {
-        return Result<bool, std::string>::makeError("hb_buffer_create failed");
+      if (!hb_buffer_allocation_successful(hbBuffer_)) {
+        return Result<bool, std::string>::makeError(
+            "hb_buffer_create allocation failed");
       }
     }
     if (hbFont_ == nullptr) {
-      hbFont_ = hb_font_create(hb_face_get_empty());
-      if (hbFont_ == nullptr) {
-        return Result<bool, std::string>::makeError("hb_font_create failed");
+      hb_font_t *newFont = hb_font_create(hb_face_get_empty());
+      if (newFont == hb_font_get_empty()) {
+        return Result<bool, std::string>::makeError(
+            "hb_font_create allocation failed");
       }
+      hbFont_ = newFont;
       hb_font_set_funcs(hbFont_, hbFontFuncs(), &hbContext_, nullptr);
     }
     return Result<bool, std::string>::makeResult(true);

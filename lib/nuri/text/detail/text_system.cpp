@@ -6,6 +6,10 @@
 namespace nuri {
 namespace {
 
+constexpr float MIN_FONT_SIZE_PX = 8.0f;
+constexpr float MAX_FONT_SIZE_PX = 256.0f;
+constexpr float DEFAULT_FONT_SIZE_PX = 42.0f;
+
 template <typename T, typename... Args>
 [[nodiscard]] Result<T, std::string> makeError(Args &&...args) {
   std::ostringstream oss;
@@ -151,7 +155,7 @@ public:
   float defaultFontSizePx() const override { return defaultFontSizePx_; }
 
   void setDefaultFontSizePx(float sizePx) override {
-    defaultFontSizePx_ = std::clamp(sizePx, 8.0f, 256.0f);
+    defaultFontSizePx_ = std::clamp(sizePx, MIN_FONT_SIZE_PX, MAX_FONT_SIZE_PX);
   }
 
 private:
@@ -161,7 +165,7 @@ private:
   bool requireDefaultFont_ = false;
   TextRenderer::ShaderPaths shaderPaths_{};
   FontHandle defaultFont_ = kInvalidFontHandle;
-  float defaultFontSizePx_ = 42.0f;
+  float defaultFontSizePx_ = DEFAULT_FONT_SIZE_PX;
   std::unique_ptr<FontManager> fonts_;
   std::unique_ptr<TextShaper> shaper_;
   std::unique_ptr<TextLayouter> layouter_;
@@ -172,13 +176,7 @@ private:
 
 Result<std::unique_ptr<TextSystem>, std::string>
 TextSystem::create(const CreateDesc &desc) {
-  auto system = std::make_unique<TextSystemImpl>(CreateDesc{
-      .gpu = desc.gpu,
-      .memory = desc.memory,
-      .defaultFontPath = desc.defaultFontPath,
-      .requireDefaultFont = desc.requireDefaultFont,
-      .shaderPaths = desc.shaderPaths,
-  });
+  auto system = std::make_unique<TextSystemImpl>(desc);
   auto initResult = system->initialize();
   if (initResult.hasError()) {
     return Result<std::unique_ptr<TextSystem>, std::string>::makeError(
