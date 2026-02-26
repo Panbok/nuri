@@ -32,6 +32,7 @@ public:
 
   virtual void pollEvents() = 0;
   virtual bool shouldClose() const = 0;
+  virtual void getWindowSize(int32_t &outWidth, int32_t &outHeight) const = 0;
   virtual void getFramebufferSize(int32_t &outWidth,
                                   int32_t &outHeight) const = 0;
   virtual double getTime() const = 0;

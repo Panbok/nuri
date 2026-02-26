@@ -35,6 +35,7 @@ public:
 
   // Window/Swapchain
   virtual bool shouldClose() const = 0;
+  virtual void getWindowSize(int32_t &outWidth, int32_t &outHeight) const = 0;
   virtual void getFramebufferSize(int32_t &outWidth,
                                   int32_t &outHeight) const = 0;
   virtual void resizeSwapchain(int32_t width, int32_t height) = 0;

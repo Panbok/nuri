@@ -18,6 +18,7 @@ public:
 
   void pollEvents() override;
   bool shouldClose() const override;
+  void getWindowSize(int32_t &outWidth, int32_t &outHeight) const override;
   void getFramebufferSize(int32_t &outWidth,
                           int32_t &outHeight) const override;
   double getTime() const override;

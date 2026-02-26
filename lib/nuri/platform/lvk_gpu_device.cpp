@@ -546,6 +546,15 @@ bool LvkGPUDevice::shouldClose() const {
   return impl_->window ? impl_->window->shouldClose() : true;
 }
 
+void LvkGPUDevice::getWindowSize(int32_t &outWidth, int32_t &outHeight) const {
+  if (!impl_->window) {
+    outWidth = 0;
+    outHeight = 0;
+    return;
+  }
+  impl_->window->getWindowSize(outWidth, outHeight);
+}
+
 void LvkGPUDevice::getFramebufferSize(int32_t &outWidth,
                                       int32_t &outHeight) const {
   if (!impl_->window) {

@@ -345,6 +345,19 @@ bool GlfwWindow::shouldClose() const {
   return impl_->window && glfwWindowShouldClose(impl_->window);
 }
 
+void GlfwWindow::getWindowSize(int32_t &outWidth, int32_t &outHeight) const {
+  if (!impl_->window) {
+    outWidth = 0;
+    outHeight = 0;
+    return;
+  }
+  int width = 0;
+  int height = 0;
+  glfwGetWindowSize(impl_->window, &width, &height);
+  outWidth = static_cast<int32_t>(width);
+  outHeight = static_cast<int32_t>(height);
+}
+
 void GlfwWindow::getFramebufferSize(int32_t &outWidth,
                                     int32_t &outHeight) const {
   if (!impl_->window) {

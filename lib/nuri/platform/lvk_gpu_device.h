@@ -16,6 +16,7 @@ public:
 
   // Window/Swapchain
   bool shouldClose() const override;
+  void getWindowSize(int32_t &outWidth, int32_t &outHeight) const override;
   void getFramebufferSize(int32_t &outWidth, int32_t &outHeight) const override;
   void resizeSwapchain(int32_t width, int32_t height) override;
   Format getSwapchainFormat() const override;
