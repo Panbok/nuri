@@ -602,8 +602,8 @@ void drawLogWindow(LogModel &model, LogFilterState &filterState,
   ImGui::EndTable();
 }
 
-void drawFontCompilerWindow(FontCompilerUiState &state,
-                            TextSystem *textSystem) {
+void drawFontCompilerWindow(FontCompilerUiState &state, TextSystem *textSystem,
+                            void *ownerWindowHandle) {
   if (!state.nfontListInitialized) {
     refreshNfontAssetList(state);
     state.nfontListInitialized = true;
@@ -643,7 +643,8 @@ void drawFontCompilerWindow(FontCompilerUiState &state,
       "Source TTF/OTF", state.sourcePath.data(), state.sourcePath.size());
   ImGui::SameLine();
   if (ImGui::Button("Browse...##FontSource")) {
-    if (const auto selectedPath = state.fileDialog.openFontFile()) {
+    if (const auto selectedPath =
+            state.fileDialog.openFontFile(ownerWindowHandle)) {
       setPathText(state.sourcePath, selectedPath->generic_string());
       sourceEdited = true;
     }
@@ -708,7 +709,8 @@ void drawFontCompilerWindow(FontCompilerUiState &state,
 
   ImGui::SliderInt("Threads", &state.threadCount, 0, 32);
 
-  if (state.compileInFlight) {
+  const bool wasCompileInFlight = state.compileInFlight;
+  if (wasCompileInFlight) {
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Generate .nfont")) {
@@ -740,7 +742,7 @@ void drawFontCompilerWindow(FontCompilerUiState &state,
                           }).share();
     state.compileInFlight = true;
   }
-  if (state.compileInFlight) {
+  if (wasCompileInFlight) {
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextUnformatted("Compiling...");
@@ -1050,7 +1052,8 @@ struct ImGuiEditor::Impl {
     drawLogWindow(logModel, logFilterState, renderSettings, selectedLayer,
                   scopedScratch.resource());
     ImGui::End();
-    drawFontCompilerWindow(fontCompilerState, textSystem);
+    drawFontCompilerWindow(fontCompilerState, textSystem,
+                           window.nativeHandle());
     NURI_PROFILER_ZONE_END();
 
     NURI_PROFILER_ZONE("ImGuiEditor::DrawFpsOverlay",

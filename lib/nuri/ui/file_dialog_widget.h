@@ -19,6 +19,8 @@ struct OpenFileRequest {
   std::string_view title;
   std::span<const FileDialogFilter> filters;
   std::string_view defaultExtension;
+  // Backend window handle used to anchor native dialogs (GLFWwindow* in app).
+  void *ownerWindowHandle = nullptr;
 };
 
 class NURI_API FileDialogWidget {
@@ -34,7 +36,8 @@ public:
   }
 #endif
 
-  [[nodiscard]] std::optional<std::filesystem::path> openFontFile() const {
+  [[nodiscard]] std::optional<std::filesystem::path>
+  openFontFile(void *ownerWindowHandle = nullptr) const {
     static constexpr std::array<FileDialogFilter, 4> kFontFilters = {
         FileDialogFilter{"Font Files (*.ttf;*.otf)", "*.ttf;*.otf"},
         FileDialogFilter{"TrueType (*.ttf)", "*.ttf"},
@@ -46,6 +49,7 @@ public:
     request.title = "Select Font File";
     request.filters = kFontFilters;
     request.defaultExtension = "ttf";
+    request.ownerWindowHandle = ownerWindowHandle;
     return openFile(request);
   }
 };
