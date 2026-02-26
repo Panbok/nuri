@@ -2,6 +2,7 @@
 
 #include "nuri/gfx/layers/opaque_layer.h"
 
+#include "nuri/core/containers/hash_map.h"
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
@@ -711,7 +712,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       batches.push_back(batch);
     }
   };
-  std::unordered_map<BatchKey, size_t, BatchKeyHash> batchLookup;
+  HashMap<BatchKey, size_t, BatchKeyHash> batchLookup;
   batchLookup.reserve(batchReserve);
   std::array<float, 3> sortedLodThresholds = {
       settings.opaque.meshLodDistanceThresholds.x,
@@ -2009,7 +2010,7 @@ Result<bool, std::string> OpaqueLayer::ensureSingleInstanceBatchCache(
 
   ScratchArena scratch;
   ScopedScratch scopedScratch(scratch);
-  std::pmr::unordered_map<BatchKey, size_t, BatchKeyHash> singleBatchLookup(
+  PmrHashMap<BatchKey, size_t, BatchKeyHash> singleBatchLookup(
       scopedScratch.resource());
   singleBatchLookup.reserve(meshDrawTemplates_.size());
 
@@ -2180,8 +2181,8 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
 
   std::pmr::vector<IndirectGroup> indirectGroups(scopedScratch.resource());
   indirectGroups.reserve(drawItems_.size());
-  std::pmr::unordered_map<IndirectGroupKey, size_t, IndirectGroupKeyHash>
-      indirectLookup(scopedScratch.resource());
+  PmrHashMap<IndirectGroupKey, size_t, IndirectGroupKeyHash> indirectLookup(
+      scopedScratch.resource());
   indirectLookup.reserve(drawItems_.size());
 
   for (size_t i = 0; i < drawItems_.size(); ++i) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/core/result.h"
+#include "nuri/core/containers/hash_map.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_types.h"
 
@@ -8,9 +9,6 @@
 #include <memory>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-
-
 namespace nuri {
 
 class GPUDevice;
@@ -45,7 +43,7 @@ private:
   GPUDevice &gpu_;
   std::array<ShaderHandle, static_cast<size_t>(ShaderStage::Count)>
       shaderHandles_{};
-  std::unordered_map<ShaderStage, std::string> debug_glsl_source_code_;
+  HashMap<ShaderStage, std::string> debug_glsl_source_code_;
 };
 
 } // namespace nuri

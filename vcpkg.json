@@ -5,6 +5,7 @@
     "glm",
     "assimp",
     "stb",
+    "harfbuzz",
     "glfw3",
     {
       "name": "tracy",
@@ -19,6 +20,7 @@
     },
     "implot",
     "meshoptimizer",
-    "yyjson"
+    "yyjson",
+    "unordered-dense"
   ]
 }
