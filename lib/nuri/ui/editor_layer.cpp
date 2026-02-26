@@ -1,28 +1,24 @@
+#include "nuri/pch.h"
+
 #include "nuri/ui/editor_layer.h"
 
 #include "nuri/core/log.h"
 #include "nuri/ui/imgui_editor.h"
 #include "nuri/ui/imgui_gizmo_controller.h"
 
-#include <exception>
-#include <string>
-
 namespace nuri {
 
-std::unique_ptr<EditorLayer> EditorLayer::create(Window &window, GPUDevice &gpu,
-                                                 EventManager &events,
-                                                 UiCallback callback,
-                                                 const EditorServices
-                                                     &services) {
+std::unique_ptr<EditorLayer>
+EditorLayer::create(Window &window, GPUDevice &gpu, EventManager &events,
+                    UiCallback callback, const EditorServices &services) {
   NURI_LOG_DEBUG("EditorLayer::create: Creating editor layer");
   return std::unique_ptr<EditorLayer>(
       new EditorLayer(window, gpu, events, std::move(callback), services));
 }
 
 EditorLayer::EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
-                         UiCallback callback,
-                         const EditorServices &services)
-    : editor_(ImGuiEditor::create(window, gpu, events)),
+                         UiCallback callback, const EditorServices &services)
+    : editor_(ImGuiEditor::create(window, gpu, events, services)),
       callback_(std::move(callback)) {
   if (services.hasAllDependencies()) {
     gizmoController_ = createImGuizmoController(services);
@@ -36,11 +32,10 @@ EditorLayer::EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
                                   services.cameraSystem != nullptr ||
                                   services.gpu != nullptr;
   if (hasAnyGizmoService) {
-    NURI_LOG_WARNING(
-        "EditorLayer: incomplete EditorServices for gizmo "
-        "(scene=%d cameraSystem=%d gpu=%d); gizmo disabled",
-        services.scene != nullptr, services.cameraSystem != nullptr,
-        services.gpu != nullptr);
+    NURI_LOG_WARNING("EditorLayer: incomplete EditorServices for gizmo "
+                     "(scene=%d cameraSystem=%d gpu=%d); gizmo disabled",
+                     services.scene != nullptr,
+                     services.cameraSystem != nullptr, services.gpu != nullptr);
   }
 }
 

@@ -4,10 +4,14 @@
 
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
+#include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/imgui_gpu_renderer.h"
 #include "nuri/platform/imgui_glfw_platform.h"
+#include "nuri/resources/storage/font/nfont_compiler.h"
+#include "nuri/text/text_system.h"
+#include "nuri/ui/file_dialog_widget.h"
 #include "nuri/ui/linear_graph.h"
 #include "nuri/utils/fsp_counter.h"
 
@@ -29,6 +33,7 @@ constexpr uint32_t kUiMaxTessInstances = 65536u;
 constexpr const char *kDockspaceWindowName = "NuriDockspace";
 constexpr const char *kDockspaceRootId = "NuriDockspace##Root";
 constexpr const char *kLogWindowName = "Log";
+constexpr const char *kFontCompilerWindowName = "Font Compiler";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
 constexpr const char *kScenePresetWindowName = "Scene Preset";
 constexpr const char *kSelectionWindowName = "Selection";
@@ -103,6 +108,136 @@ struct LogFilterState {
     return true;
   }
 };
+
+struct FontCompilerUiState {
+  std::filesystem::path outputDirectory;
+  std::vector<std::filesystem::path> availableNfonts;
+  std::array<char, 512> sourcePath = {};
+  std::array<char, 512> outputPath = {};
+  std::array<char, 512> selectedNfontPath = {};
+  bool autoOutputName = true;
+  int charsetPreset = 0;
+  float minimumEmSize = 40.0f;
+  float pxRange = 4.0f;
+  float outerPixelPadding = 2.0f;
+  int atlasSpacing = 1;
+  bool useRgba16fAtlas = true;
+  int atlasWidthPreset = 1;
+  int atlasHeightPreset = 1;
+  int maxAtlasWidth = 2048;
+  int maxAtlasHeight = 2048;
+  int threadCount = 0;
+  int selectedNfontIndex = -1;
+  float globalFontSizePx = 42.0f;
+  std::shared_future<Result<NFontCompileReport, std::string>> compileFuture;
+  bool compileInFlight = false;
+  bool nfontListInitialized = false;
+  std::string status;
+  std::string error;
+  std::string globalStatus;
+  std::string globalError;
+  NFontCompileReport lastReport{};
+  FileDialogWidget fileDialog{};
+
+  FontCompilerUiState() {
+    auto runtimeConfigResult = loadRuntimeConfigFromEnvOrDefault();
+    if (runtimeConfigResult.hasError()) {
+      outputDirectory = std::filesystem::path("assets") / "fonts";
+    } else {
+      outputDirectory = runtimeConfigResult.value().roots.fonts;
+    }
+    outputDirectory = outputDirectory.lexically_normal();
+
+    const std::string defaultOutput = (outputDirectory / "generated_ui.nfont")
+                                          .lexically_normal()
+                                          .generic_string();
+    std::memcpy(outputPath.data(), defaultOutput.c_str(),
+                std::min(outputPath.size() - 1, defaultOutput.size()));
+  }
+};
+
+constexpr std::array<int, 5> kAtlasResolutionSteps = {1024, 2048, 3072, 4096,
+                                                      8192};
+
+constexpr std::array<const char *, 5> kAtlasResolutionStepLabels = {
+    "1K (1024)", "2K (2048)", "3K (3072)", "4K (4096)", "8K (8192)"};
+
+void setPathText(std::array<char, 512> &buffer, std::string_view value) {
+  buffer.fill('\0');
+  const size_t copyCount = std::min(buffer.size() - 1u, value.size());
+  if (copyCount > 0) {
+    std::memcpy(buffer.data(), value.data(), copyCount);
+  }
+  buffer[copyCount] = '\0';
+}
+
+void syncOutputPathFromSource(FontCompilerUiState &state) {
+  const std::filesystem::path sourcePath{std::string(state.sourcePath.data())};
+  const std::string stem = sourcePath.stem().string();
+  if (stem.empty()) {
+    return;
+  }
+
+  if (state.outputDirectory.empty()) {
+    state.outputDirectory = std::filesystem::path("assets") / "fonts";
+  }
+  const std::filesystem::path resolved =
+      (state.outputDirectory / (stem + ".nfont")).lexically_normal();
+  setPathText(state.outputPath, resolved.generic_string());
+}
+
+void refreshNfontAssetList(FontCompilerUiState &state) {
+  state.availableNfonts.clear();
+  std::error_code ec;
+  if (!std::filesystem::exists(state.outputDirectory, ec) ||
+      !std::filesystem::is_directory(state.outputDirectory, ec)) {
+    state.selectedNfontIndex = -1;
+    return;
+  }
+
+  for (const auto &entry :
+       std::filesystem::directory_iterator(state.outputDirectory, ec)) {
+    if (ec) {
+      break;
+    }
+    if (!entry.is_regular_file(ec)) {
+      continue;
+    }
+    const std::filesystem::path path = entry.path();
+    if (path.extension() == ".nfont") {
+      state.availableNfonts.push_back(path.lexically_normal());
+    }
+  }
+  std::sort(state.availableNfonts.begin(), state.availableNfonts.end());
+
+  const std::filesystem::path currentPath{
+      std::string(state.selectedNfontPath.data())};
+  state.selectedNfontIndex = -1;
+  for (size_t i = 0; i < state.availableNfonts.size(); ++i) {
+    if (state.availableNfonts[i] == currentPath) {
+      state.selectedNfontIndex = static_cast<int>(i);
+      break;
+    }
+  }
+  if (state.selectedNfontIndex < 0 && !state.availableNfonts.empty()) {
+    state.selectedNfontIndex = 0;
+    setPathText(state.selectedNfontPath,
+                state.availableNfonts.front().generic_string());
+  }
+}
+
+[[nodiscard]] int closestAtlasStepIndex(int value) {
+  int bestIndex = 0;
+  int bestDistance = std::abs(kAtlasResolutionSteps[0] - value);
+  for (size_t i = 1; i < kAtlasResolutionSteps.size(); ++i) {
+    const int distance = std::abs(kAtlasResolutionSteps[i] - value);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = static_cast<int>(i);
+    }
+  }
+  return bestIndex;
+}
 
 struct LogModel {
   std::deque<LogLine> lines;
@@ -467,6 +602,251 @@ void drawLogWindow(LogModel &model, LogFilterState &filterState,
   ImGui::EndTable();
 }
 
+void drawFontCompilerWindow(FontCompilerUiState &state,
+                            TextSystem *textSystem) {
+  if (!state.nfontListInitialized) {
+    refreshNfontAssetList(state);
+    state.nfontListInitialized = true;
+  }
+
+  if (state.compileInFlight && state.compileFuture.valid()) {
+    const auto waitResult =
+        state.compileFuture.wait_for(std::chrono::seconds(0));
+    if (waitResult == std::future_status::ready) {
+      auto compileResult = state.compileFuture.get();
+      state.compileInFlight = false;
+      if (compileResult.hasError()) {
+        state.error = compileResult.error();
+      } else {
+        state.lastReport = compileResult.value();
+        std::ostringstream status;
+        status << "Generated " << state.lastReport.outputPath.string()
+               << " | glyphs=" << state.lastReport.glyphCount
+               << " atlas=" << state.lastReport.atlasWidth << "x"
+               << state.lastReport.atlasHeight
+               << " bytes=" << state.lastReport.bytesWritten;
+        state.status = status.str();
+        setPathText(
+            state.selectedNfontPath,
+            state.lastReport.outputPath.lexically_normal().generic_string());
+        refreshNfontAssetList(state);
+      }
+    }
+  }
+
+  if (!ImGui::Begin(kFontCompilerWindowName)) {
+    ImGui::End();
+    return;
+  }
+
+  bool sourceEdited = ImGui::InputText(
+      "Source TTF/OTF", state.sourcePath.data(), state.sourcePath.size());
+  ImGui::SameLine();
+  if (ImGui::Button("Browse...##FontSource")) {
+    if (const auto selectedPath = state.fileDialog.openFontFile()) {
+      setPathText(state.sourcePath, selectedPath->generic_string());
+      sourceEdited = true;
+    }
+  }
+
+  if (sourceEdited && state.autoOutputName) {
+    syncOutputPathFromSource(state);
+  }
+
+  ImGui::InputText("Output .nfont", state.outputPath.data(),
+                   state.outputPath.size());
+  ImGui::SameLine();
+  if (ImGui::Checkbox("Auto name", &state.autoOutputName) &&
+      state.autoOutputName) {
+    syncOutputPathFromSource(state);
+  }
+
+  constexpr const char *kCharsetOptions[] = {"ASCII", "Latin-1"};
+  ImGui::Combo("Charset", &state.charsetPreset, kCharsetOptions,
+               IM_ARRAYSIZE(kCharsetOptions));
+
+  ImGui::SliderFloat("Minimum EM Size", &state.minimumEmSize, 8.0f, 128.0f,
+                     "%.1f");
+  ImGui::SliderFloat("PX Range", &state.pxRange, 1.0f, 16.0f, "%.1f");
+  ImGui::SliderFloat("Outer PX Padding", &state.outerPixelPadding, 0.0f, 16.0f,
+                     "%.1f");
+  ImGui::SliderInt("Atlas Spacing", &state.atlasSpacing, 0, 16);
+  ImGui::Checkbox("RGBA16F Atlas", &state.useRgba16fAtlas);
+  if (ImGui::SliderInt("Atlas Width Step", &state.atlasWidthPreset, 0,
+                       static_cast<int>(kAtlasResolutionSteps.size()) - 1)) {
+    state.atlasWidthPreset =
+        std::clamp(state.atlasWidthPreset, 0,
+                   static_cast<int>(kAtlasResolutionSteps.size()) - 1);
+    state.maxAtlasWidth =
+        kAtlasResolutionSteps[static_cast<size_t>(state.atlasWidthPreset)];
+  }
+  ImGui::SameLine();
+  ImGui::TextUnformatted(kAtlasResolutionStepLabels[static_cast<size_t>(
+      std::clamp(state.atlasWidthPreset, 0,
+                 static_cast<int>(kAtlasResolutionStepLabels.size()) - 1))]);
+  if (ImGui::InputInt("Max Atlas Width", &state.maxAtlasWidth)) {
+    state.maxAtlasWidth = std::clamp(state.maxAtlasWidth, 1, 8192);
+    state.atlasWidthPreset = closestAtlasStepIndex(state.maxAtlasWidth);
+  }
+
+  if (ImGui::SliderInt("Atlas Height Step", &state.atlasHeightPreset, 0,
+                       static_cast<int>(kAtlasResolutionSteps.size()) - 1)) {
+    state.atlasHeightPreset =
+        std::clamp(state.atlasHeightPreset, 0,
+                   static_cast<int>(kAtlasResolutionSteps.size()) - 1);
+    state.maxAtlasHeight =
+        kAtlasResolutionSteps[static_cast<size_t>(state.atlasHeightPreset)];
+  }
+  ImGui::SameLine();
+  ImGui::TextUnformatted(kAtlasResolutionStepLabels[static_cast<size_t>(
+      std::clamp(state.atlasHeightPreset, 0,
+                 static_cast<int>(kAtlasResolutionStepLabels.size()) - 1))]);
+  if (ImGui::InputInt("Max Atlas Height", &state.maxAtlasHeight)) {
+    state.maxAtlasHeight = std::clamp(state.maxAtlasHeight, 1, 8192);
+    state.atlasHeightPreset = closestAtlasStepIndex(state.maxAtlasHeight);
+  }
+
+  ImGui::SliderInt("Threads", &state.threadCount, 0, 32);
+
+  if (state.compileInFlight) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Generate .nfont")) {
+    state.status.clear();
+    state.error.clear();
+
+    NFontCompileConfig config{};
+    config.sourceFontPath = std::string(state.sourcePath.data());
+    config.outputFontPath = std::string(state.outputPath.data());
+    config.charset = state.charsetPreset == 0 ? NFontCharsetPreset::Ascii
+                                              : NFontCharsetPreset::Latin1;
+    config.minimumEmSize = state.minimumEmSize;
+    config.pxRange = state.pxRange;
+    config.outerPixelPadding = state.outerPixelPadding;
+    config.atlasSpacing =
+        state.atlasSpacing > 0 ? static_cast<uint32_t>(state.atlasSpacing) : 0u;
+    config.useRgba16fAtlas = state.useRgba16fAtlas;
+    config.maxAtlasWidth = state.maxAtlasWidth > 0
+                               ? static_cast<uint32_t>(state.maxAtlasWidth)
+                               : 0u;
+    config.maxAtlasHeight = state.maxAtlasHeight > 0
+                                ? static_cast<uint32_t>(state.maxAtlasHeight)
+                                : 0u;
+    config.threadCount =
+        state.threadCount > 0 ? static_cast<uint32_t>(state.threadCount) : 0u;
+
+    state.compileFuture = std::async(std::launch::async, [config]() {
+                            return compileNFontFromFontFile(config);
+                          }).share();
+    state.compileInFlight = true;
+  }
+  if (state.compileInFlight) {
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Compiling...");
+  }
+
+  if (!state.status.empty()) {
+    ImGui::Spacing();
+    ImGui::TextUnformatted(state.status.c_str());
+  }
+  if (!state.error.empty()) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+                       state.error.c_str());
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Global Text Font");
+
+  if (textSystem == nullptr) {
+    ImGui::TextUnformatted("TextSystem is not available.");
+    ImGui::End();
+    return;
+  }
+
+  if (ImGui::Button("Refresh .nfont List")) {
+    refreshNfontAssetList(state);
+  }
+  ImGui::SameLine();
+  ImGui::Text("Dir: %s", state.outputDirectory.generic_string().c_str());
+
+  const std::string previewLabel =
+      state.selectedNfontIndex >= 0 &&
+              static_cast<size_t>(state.selectedNfontIndex) <
+                  state.availableNfonts.size()
+          ? state.availableNfonts[static_cast<size_t>(state.selectedNfontIndex)]
+                .filename()
+                .string()
+          : std::string("<none>");
+  if (ImGui::BeginCombo("Available .nfont", previewLabel.c_str())) {
+    for (size_t i = 0; i < state.availableNfonts.size(); ++i) {
+      const bool selected = state.selectedNfontIndex == static_cast<int>(i);
+      const std::string label = state.availableNfonts[i].filename().string();
+      if (ImGui::Selectable(label.c_str(), selected)) {
+        state.selectedNfontIndex = static_cast<int>(i);
+        setPathText(state.selectedNfontPath,
+                    state.availableNfonts[i].generic_string());
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+
+  if (ImGui::InputText("Selected .nfont", state.selectedNfontPath.data(),
+                       state.selectedNfontPath.size())) {
+    const std::filesystem::path selectedPath(
+        std::string(state.selectedNfontPath.data()));
+    state.selectedNfontIndex = -1;
+    for (size_t i = 0; i < state.availableNfonts.size(); ++i) {
+      if (state.availableNfonts[i] == selectedPath) {
+        state.selectedNfontIndex = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+
+  state.globalFontSizePx = std::clamp(state.globalFontSizePx, 8.0f, 256.0f);
+  ImGui::SliderFloat("Global Font Size (px)", &state.globalFontSizePx, 8.0f,
+                     256.0f, "%.1f");
+  if (ImGui::Button("Apply Global Font")) {
+    state.globalStatus.clear();
+    state.globalError.clear();
+    textSystem->setDefaultFontSizePx(state.globalFontSizePx);
+
+    const std::filesystem::path selectedPath(
+        std::string(state.selectedNfontPath.data()));
+    if (selectedPath.empty()) {
+      state.globalError = "No .nfont selected";
+    } else {
+      auto loadResult = textSystem->loadAndSetDefaultFont(
+          selectedPath.generic_string(), selectedPath.stem().string());
+      if (loadResult.hasError()) {
+        state.globalError = loadResult.error();
+      } else {
+        std::ostringstream oss;
+        oss << "Applied " << selectedPath.filename().string() << " at "
+            << state.globalFontSizePx << "px";
+        state.globalStatus = oss.str();
+      }
+    }
+  }
+
+  if (!state.globalStatus.empty()) {
+    ImGui::Spacing();
+    ImGui::TextUnformatted(state.globalStatus.c_str());
+  }
+  if (!state.globalError.empty()) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+                       state.globalError.c_str());
+  }
+
+  ImGui::End();
+}
+
 void setDockspaceWindowPlacement(const ImGuiViewport *viewport) {
   if (!viewport) {
     return;
@@ -585,6 +965,7 @@ struct DockLayoutState {
     ImGui::DockBuilderDockWindow(kScenePresetWindowName, dockBottomLeft);
     ImGui::DockBuilderDockWindow(kSelectionWindowName, dockBottomLeft);
     ImGui::DockBuilderDockWindow(kLogWindowName, logDockId);
+    ImGui::DockBuilderDockWindow(kFontCompilerWindowName, logDockId);
     ImGui::DockBuilderFinish(dockspaceId);
     built = true;
   }
@@ -600,7 +981,8 @@ struct MaybeDockLayoutState {};
 } // namespace
 
 struct ImGuiEditor::Impl {
-  Impl(Window &windowIn, GPUDevice &gpuIn) : window(windowIn), gpu(gpuIn) {}
+  Impl(Window &windowIn, GPUDevice &gpuIn, const EditorServices &services)
+      : window(windowIn), gpu(gpuIn), textSystem(services.textSystem) {}
 
   void updateMetricGraphs(double deltaSeconds) {
     graphSampleAccumulatorSeconds += deltaSeconds;
@@ -668,6 +1050,7 @@ struct ImGuiEditor::Impl {
     drawLogWindow(logModel, logFilterState, renderSettings, selectedLayer,
                   scopedScratch.resource());
     ImGui::End();
+    drawFontCompilerWindow(fontCompilerState, textSystem);
     NURI_PROFILER_ZONE_END();
 
     NURI_PROFILER_ZONE("ImGuiEditor::DrawFpsOverlay",
@@ -734,17 +1117,22 @@ struct ImGuiEditor::Impl {
   uint64_t frameIndex = 0;
   LogModel logModel;
   LogFilterState logFilterState;
+  FontCompilerUiState fontCompilerState;
   MaybeDockLayoutState dockLayoutState;
   ScratchArena scratchArena;
+  TextSystem *textSystem = nullptr;
 };
 
-std::unique_ptr<ImGuiEditor> ImGuiEditor::create(Window &window, GPUDevice &gpu,
-                                                 EventManager &events) {
-  return std::unique_ptr<ImGuiEditor>(new ImGuiEditor(window, gpu, events));
+std::unique_ptr<ImGuiEditor>
+ImGuiEditor::create(Window &window, GPUDevice &gpu, EventManager &events,
+                    const EditorServices &services) {
+  return std::unique_ptr<ImGuiEditor>(
+      new ImGuiEditor(window, gpu, events, services));
 }
 
-ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu, EventManager &events)
-    : impl_(std::make_unique<Impl>(window, gpu)) {
+ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu, EventManager &events,
+                         const EditorServices &services)
+    : impl_(std::make_unique<Impl>(window, gpu, services)) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImPlot::CreateContext();

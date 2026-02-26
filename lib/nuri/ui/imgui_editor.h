@@ -7,12 +7,14 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/layers/render_frame_context.h"
 #include "nuri/ui/editor.h"
+#include "nuri/ui/editor_services.h"
 
 namespace nuri {
 class NURI_API ImGuiEditor final : public Editor {
 public:
   static std::unique_ptr<ImGuiEditor> create(Window &window, GPUDevice &gpu,
-                                             EventManager &events);
+                                             EventManager &events,
+                                             const EditorServices &services = {});
   ~ImGuiEditor() override;
 
   ImGuiEditor(const ImGuiEditor &) = delete;
@@ -33,7 +35,8 @@ public:
 private:
   struct Impl;
 
-  ImGuiEditor(Window &window, GPUDevice &gpu, EventManager &events);
+  ImGuiEditor(Window &window, GPUDevice &gpu, EventManager &events,
+              const EditorServices &services);
 
   std::unique_ptr<Impl> impl_;
 };
