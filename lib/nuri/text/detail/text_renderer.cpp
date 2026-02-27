@@ -45,6 +45,8 @@ template <typename T, typename... Args>
 }
 
 [[nodiscard]] constexpr size_t alignUp(size_t value, size_t alignment) {
+  NURI_ASSERT(alignment > 0 && (alignment & (alignment - 1)) == 0,
+              "alignment must be power of two");
   return (value + (alignment - 1u)) & ~(alignment - 1u);
 }
 
@@ -65,7 +67,6 @@ void growBounds(TextBounds &bounds, bool &hasBounds, float minX, float minY,
   bounds.maxX = std::max(bounds.maxX, maxX);
   bounds.maxY = std::max(bounds.maxY, maxY);
 }
-
 
 [[nodiscard]] glm::mat4 decodeWorld(const std::array<float, 16> &raw) {
   bool any = false;
@@ -266,8 +267,7 @@ TextRenderer::resolveWorldFromBillboard(const WorldTransform &transform,
     glm::vec3 toCamera = basis.cameraPos - translation;
     toCamera.y = 0.0f;
     forward = safeNormalize(toCamera, glm::vec3(0.0f, 0.0f, 1.0f));
-    right =
-        safeNormalize(glm::cross(up, forward), glm::vec3(1.0f, 0.0f, 0.0f));
+    right = safeNormalize(glm::cross(up, forward), glm::vec3(1.0f, 0.0f, 0.0f));
     forward = safeNormalize(glm::cross(right, up), forward);
     // Glyph quads are laid out in Y-down text space; convert billboard basis
     // from Y-up world convention while preserving handedness.
@@ -285,8 +285,8 @@ TextRenderer::resolveWorldFromBillboard(const WorldTransform &transform,
 
 TextRenderer::TextRenderer(const CreateDesc &desc)
     : gpu_(desc.gpu), fonts_(desc.fonts), layouter_(desc.layouter),
-      memory_(desc.memory), shaderPaths_(desc.shaderPaths),
-      uiQueue_(&memory_), worldQueue_(&memory_), worldTransforms_(&memory_),
+      memory_(desc.memory), shaderPaths_(desc.shaderPaths), uiQueue_(&memory_),
+      worldQueue_(&memory_), worldTransforms_(&memory_),
       resolvedWorldTransforms_(&memory_), worldInstances_(&memory_),
       uiVerts_(&memory_), uiBatches_(&memory_), worldBatches_(&memory_),
       uiDraws_(&memory_), worldDraws_(&memory_), uiPcs_(&memory_),
@@ -310,7 +310,7 @@ Result<bool, std::string> TextRenderer::beginFrame(uint64_t frameIndex) {
 
 Result<TextBounds, std::string>
 TextRenderer::enqueue2D(const Text2DDesc &desc,
-                              std::pmr::memory_resource &scratch) {
+                        std::pmr::memory_resource &scratch) {
   NURI_PROFILER_FUNCTION();
   auto layoutResult = layouter_.layoutUtf8(desc.utf8, desc.style, desc.layout,
                                            scratch, scratch);
@@ -388,7 +388,7 @@ TextRenderer::enqueue2D(const Text2DDesc &desc,
 
 Result<TextBounds, std::string>
 TextRenderer::enqueue3D(const Text3DDesc &desc,
-                              std::pmr::memory_resource &scratch) {
+                        std::pmr::memory_resource &scratch) {
   NURI_PROFILER_FUNCTION();
   auto layoutResult = layouter_.layoutUtf8(desc.utf8, desc.style, desc.layout,
                                            scratch, scratch);
@@ -498,7 +498,7 @@ void TextRenderer::clear() {
   worldHasBillboards_ = false;
   worldGlyphBufferAddress_ = 0;
   worldTransformBufferAddress_ = 0;
-  worldDependencyBuffers_[0] = {};
+  worldDependencyBuffer_ = {};
 }
 
 void TextRenderer::resetPerfCounters() { perf_ = PerfCounters{}; }
@@ -588,8 +588,7 @@ Result<bool, std::string> TextRenderer::compileWorldShaders() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-TextRenderer::ensureUiPipeline(Format colorFormat) {
+Result<bool, std::string> TextRenderer::ensureUiPipeline(Format colorFormat) {
   if (::nuri::isValid(uiPipeline_) && uiPipelineColor_ == colorFormat) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -644,8 +643,7 @@ TextRenderer::ensureUiPipeline(Format colorFormat) {
 }
 
 Result<bool, std::string>
-TextRenderer::ensureWorldPipeline(Format colorFormat,
-                                        Format depthFormat) {
+TextRenderer::ensureWorldPipeline(Format colorFormat, Format depthFormat) {
   if (::nuri::isValid(worldPipeline_) && worldPipelineColor_ == colorFormat &&
       worldPipelineDepth_ == depthFormat) {
     return Result<bool, std::string>::makeResult(true);
@@ -707,8 +705,7 @@ uint32_t TextRenderer::frameSlot(std::pmr::vector<FrameBuffers> &frames) {
 
 Result<bool, std::string>
 TextRenderer::ensureFrameBuffers(FrameBuffers &frame, size_t vbBytes,
-                                       size_t ibQuads,
-                                       std::string_view debugPrefix) {
+                                 size_t ibQuads, std::string_view debugPrefix) {
   constexpr size_t kIndicesPerQuad = 6u;
   constexpr size_t kVerticesPerQuad = 4u;
   if (!::nuri::isValid(frame.vb) || frame.vbBytes < vbBytes) {
@@ -783,7 +780,7 @@ TextRenderer::ensureFrameBuffers(FrameBuffers &frame, size_t vbBytes,
 
 Result<bool, std::string>
 TextRenderer::ensureWorldInstanceBuffer(FrameBuffers &frame, size_t bytes,
-                                              std::string_view debugPrefix) {
+                                        std::string_view debugPrefix) {
   if (!::nuri::isValid(frame.vb) || frame.vbBytes < bytes) {
     if (::nuri::isValid(frame.vb)) {
       gpu_.destroyBuffer(frame.vb);
@@ -812,7 +809,6 @@ Result<bool, std::string> TextRenderer::uploadUi(uint32_t slot) {
   FrameBuffers &frame = uiFrames_[slot];
   const size_t vbBytes = uiVerts_.size() * sizeof(UiVertex);
   const size_t quadCount = uiVerts_.size() / kVerticesPerQuad;
-  const size_t ibBytes = quadCount * kIndicesPerQuad * sizeof(uint32_t);
   perf_.uiVertexUploadBytes = vbBytes;
   perf_.uiIndexUploadBytes = 0;
   auto ensure = ensureFrameBuffers(frame, vbBytes, quadCount, "text_ui");
@@ -830,7 +826,6 @@ Result<bool, std::string> TextRenderer::uploadUi(uint32_t slot) {
       return Result<bool, std::string>::makeError(up.error());
     }
   }
-  (void)ibBytes;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -986,8 +981,7 @@ void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
 }
 
 Result<bool, std::string>
-TextRenderer::append3DPasses(RenderFrameContext &frame,
-                                   RenderPassList &out) {
+TextRenderer::append3DPasses(RenderFrameContext &frame, RenderPassList &out) {
   NURI_PROFILER_FUNCTION();
   if (worldQueue_.empty() || worldAppended_) {
     return Result<bool, std::string>::makeResult(true);
@@ -1059,7 +1053,7 @@ TextRenderer::append3DPasses(RenderFrameContext &frame,
     }
     worldDraws_.push_back(d);
   }
-  worldDependencyBuffers_[0] = buffers.vb;
+  worldDependencyBuffer_ = buffers.vb;
 
   int32_t w = 0;
   int32_t h = 0;
@@ -1084,8 +1078,8 @@ TextRenderer::append3DPasses(RenderFrameContext &frame,
   }
   pass.draws =
       std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
-  pass.dependencyBuffers = std::span<const BufferHandle>(
-      worldDependencyBuffers_.data(), worldDependencyBuffers_.size());
+  pass.dependencyBuffers =
+      std::span<const BufferHandle>(&worldDependencyBuffer_, 1);
   pass.debugLabel = "Text3D Pass";
   pass.debugColor = 0xff44cc88u;
   out.push_back(pass);
@@ -1093,8 +1087,8 @@ TextRenderer::append3DPasses(RenderFrameContext &frame,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-TextRenderer::append2DPasses(RenderFrameContext &, RenderPassList &out) {
+Result<bool, std::string> TextRenderer::append2DPasses(RenderFrameContext &,
+                                                       RenderPassList &out) {
   NURI_PROFILER_FUNCTION();
   if (uiQueue_.empty() || uiAppended_) {
     return Result<bool, std::string>::makeResult(true);

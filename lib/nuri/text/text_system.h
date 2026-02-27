@@ -36,7 +36,7 @@ public:
   TextRenderer &renderer();
   FontHandle defaultFont() const;
   Result<FontHandle, std::string>
-  loadAndSetDefaultFont(std::string_view nfontPath,
+  loadAndSetDefaultFont(std::string_view fontPath,
                         std::string_view debugName = {});
   float defaultFontSizePx() const;
   void setDefaultFontSizePx(float sizePx);

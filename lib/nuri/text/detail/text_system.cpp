@@ -36,10 +36,19 @@ Result<bool, std::string> TextSystem::initialize() {
         "TextSystem: failed to create FontManager");
   }
 
-  auto shaper = std::make_unique<TextShaper>(TextShaper::CreateDesc{
-      .fonts = *fonts,
-      .memory = memory_,
-  });
+  std::unique_ptr<TextShaper> shaper;
+  try {
+    shaper = std::make_unique<TextShaper>(TextShaper::CreateDesc{
+        .fonts = *fonts,
+        .memory = memory_,
+    });
+  } catch (const std::exception &e) {
+    return makeError<bool>("TextSystem: failed to create TextShaper (",
+                          e.what(), ")");
+  } catch (...) {
+    return Result<bool, std::string>::makeError(
+        "TextSystem: failed to create TextShaper (unknown exception)");
+  }
 
   auto layouter = TextLayouter::create(TextLayouter::CreateDesc{
       .fonts = *fonts,
@@ -51,13 +60,22 @@ Result<bool, std::string> TextSystem::initialize() {
         "TextSystem: failed to create TextLayouter");
   }
 
-  auto rendererPtr = std::make_unique<TextRenderer>(TextRenderer::CreateDesc{
-      .gpu = gpu_,
-      .fonts = *fonts,
-      .layouter = *layouter,
-      .memory = memory_,
-      .shaderPaths = shaderPaths_,
-  });
+  std::unique_ptr<TextRenderer> rendererPtr;
+  try {
+    rendererPtr = std::make_unique<TextRenderer>(TextRenderer::CreateDesc{
+        .gpu = gpu_,
+        .fonts = *fonts,
+        .layouter = *layouter,
+        .memory = memory_,
+        .shaderPaths = shaderPaths_,
+    });
+  } catch (const std::exception &e) {
+    return makeError<bool>("TextSystem: failed to create TextRenderer (",
+                           e.what(), ")");
+  } catch (...) {
+    return Result<bool, std::string>::makeError(
+        "TextSystem: failed to create TextRenderer (unknown exception)");
+  }
 
   if (!defaultFontPath_.empty()) {
     const std::string defaultFontPathString = defaultFontPath_.string();
@@ -101,18 +119,18 @@ TextRenderer &TextSystem::renderer() {
 FontHandle TextSystem::defaultFont() const { return defaultFont_; }
 
 Result<FontHandle, std::string>
-TextSystem::loadAndSetDefaultFont(std::string_view nfontPath,
+TextSystem::loadAndSetDefaultFont(std::string_view fontPath,
                                   std::string_view debugName) {
-  if (nfontPath.empty()) {
+  if (fontPath.empty()) {
     return makeError<FontHandle>(
-        "TextSystem::loadAndSetDefaultFont: nfontPath is empty");
+        "TextSystem::loadAndSetDefaultFont: font path is empty");
   }
   if (fonts_ == nullptr) {
     return makeError<FontHandle>(
         "TextSystem::loadAndSetDefaultFont: FontManager is not initialized");
   }
 
-  const std::filesystem::path path{std::string(nfontPath)};
+  const std::filesystem::path path{std::string(fontPath)};
   const std::string pathString = path.string();
   const std::string resolvedDebugName =
       !debugName.empty() ? std::string(debugName) : path.stem().string();

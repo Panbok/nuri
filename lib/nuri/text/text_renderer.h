@@ -5,7 +5,6 @@
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/text/text_layouter.h"
 
-#include <array>
 #include <filesystem>
 #include <limits>
 #include <memory_resource>
@@ -38,12 +37,14 @@ public:
 
   TextRenderer(const TextRenderer &) = delete;
   TextRenderer &operator=(const TextRenderer &) = delete;
+  TextRenderer(TextRenderer &&) = delete;
+  TextRenderer &operator=(TextRenderer &&) = delete;
 
   Result<bool, std::string> beginFrame(uint64_t frameIndex);
-  Result<TextBounds, std::string>
-  enqueue2D(const Text2DDesc &desc, std::pmr::memory_resource &scratch);
-  Result<TextBounds, std::string>
-  enqueue3D(const Text3DDesc &desc, std::pmr::memory_resource &scratch);
+  Result<TextBounds, std::string> enqueue2D(const Text2DDesc &desc,
+                                            std::pmr::memory_resource &scratch);
+  Result<TextBounds, std::string> enqueue3D(const Text3DDesc &desc,
+                                            std::pmr::memory_resource &scratch);
   Result<bool, std::string> append3DPasses(RenderFrameContext &frame,
                                            RenderPassList &out);
   Result<bool, std::string> append2DPasses(RenderFrameContext &frame,
@@ -160,9 +161,8 @@ private:
   static bool worldBatchLess(const WorldQuad &a, const WorldQuad &b);
   static BillboardFrameBasis
   buildBillboardFrameBasis(const CameraFrameState &camera);
-  static glm::mat4
-  resolveWorldFromBillboard(const WorldTransform &transform,
-                            const BillboardFrameBasis &basis);
+  static glm::mat4 resolveWorldFromBillboard(const WorldTransform &transform,
+                                             const BillboardFrameBasis &basis);
 
   Result<bool, std::string> compileUiShaders();
   Result<bool, std::string> compileWorldShaders();
@@ -233,7 +233,7 @@ private:
   bool worldHasBillboards_ = false;
   uint64_t worldGlyphBufferAddress_ = 0;
   uint64_t worldTransformBufferAddress_ = 0;
-  std::array<BufferHandle, 1> worldDependencyBuffers_{};
+  BufferHandle worldDependencyBuffer_{};
 };
 
 } // namespace nuri
