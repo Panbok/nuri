@@ -27,6 +27,7 @@
 - Use ZII (zero-is-initialization) as a reuse strategy for transient state: reset reusable records/metadata to zero or explicit invalid sentinels before reuse.
 - ZII does not replace destruction for owning GPU resources: always release backend/driver resources explicitly, then invalidate handles/state.
 - Reuse pooled GPU resources only after GPU completion is proven (fence/timeline); never recycle in-flight resources.
+- Avoid virtual methods and opaque pointer indirection where ever possible
 - Never `memset` non-trivial C++ objects; prefer explicit `reset()` logic for correctness.
 
 ## Abstractions and deps
