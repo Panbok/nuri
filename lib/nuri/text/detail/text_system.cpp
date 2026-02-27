@@ -54,17 +54,13 @@ public:
           "TextSystem: failed to create TextLayouter");
     }
 
-    auto renderer = TextRenderer::create(TextRenderer::CreateDesc{
+    auto renderer = std::make_unique<TextRenderer>(TextRenderer::CreateDesc{
         .gpu = gpu_,
         .fonts = *fonts,
         .layouter = *layouter,
         .memory = memory_,
         .shaderPaths = shaderPaths_,
     });
-    if (!renderer) {
-      return Result<bool, std::string>::makeError(
-          "TextSystem: failed to create TextRenderer");
-    }
 
     if (!defaultFontPath_.empty()) {
       const std::string defaultFontPathString = defaultFontPath_.string();

@@ -30,8 +30,6 @@ template <typename T, typename... Args>
   return (a << 24u) | (b << 16u) | (g << 8u) | r;
 }
 
-constexpr uint64_t kHashSeed = 1469598103934665603ull;
-
 [[nodiscard]] uint32_t floatBits(float value) {
   uint32_t bits = 0u;
   static_assert(sizeof(bits) == sizeof(value));
@@ -68,157 +66,6 @@ void growBounds(TextBounds &bounds, bool &hasBounds, float minX, float minY,
   bounds.maxY = std::max(bounds.maxY, maxY);
 }
 
-struct FrameBuffers {
-  BufferHandle vb{};
-  BufferHandle ib{};
-  size_t vbBytes = 0;
-  size_t ibBytes = 0;
-  size_t ibQuadCapacity = 0;
-};
-
-struct UiQuad {
-  float minX = 0.0f;
-  float minY = 0.0f;
-  float maxX = 0.0f;
-  float maxY = 0.0f;
-  float uvMinX = 0.0f;
-  float uvMinY = 0.0f;
-  float uvMaxX = 0.0f;
-  float uvMaxY = 0.0f;
-  float pxRange = 4.0f;
-  uint32_t color = 0xffffffffu;
-  uint32_t atlas = 0;
-};
-
-struct WorldQuad {
-  float minX = 0.0f;
-  float minY = 0.0f;
-  float maxX = 0.0f;
-  float maxY = 0.0f;
-  float uvMinX = 0.0f;
-  float uvMinY = 0.0f;
-  float uvMaxX = 0.0f;
-  float uvMaxY = 0.0f;
-  float pxRange = 4.0f;
-  uint32_t color = 0xffffffffu;
-  uint32_t atlas = 0;
-  uint32_t transformId = 0;
-};
-
-struct WorldTransform {
-  glm::mat4 worldFromText{1.0f};
-  TextBillboardMode billboard = TextBillboardMode::None;
-};
-
-struct ResolvedWorldTransform {
-  glm::vec4 basisX{1.0f, 0.0f, 0.0f, 0.0f};
-  glm::vec4 basisY{0.0f, 1.0f, 0.0f, 0.0f};
-  glm::vec4 translation{0.0f, 0.0f, 0.0f, 0.0f};
-};
-
-struct WorldGlyphInstance {
-  glm::vec4 rectMinMax{0.0f}; // minX, minY, maxX, maxY
-  glm::vec4 uvMinMax{0.0f};   // uvMinX, uvMinY, uvMaxX, uvMaxY
-  uint32_t color = 0xffffffffu;
-  uint32_t transformIndex = 0;
-  uint32_t _pad0 = 0;
-  uint32_t _pad1 = 0;
-};
-
-void hashWorldTransform(uint64_t &hash, const WorldTransform &transform) {
-  hash = hashMix(hash, static_cast<uint64_t>(transform.billboard));
-  for (int c = 0; c < 4; ++c) {
-    for (int r = 0; r < 4; ++r) {
-      hash = hashMix(hash, floatBits(transform.worldFromText[c][r]));
-    }
-  }
-}
-
-void hashWorldQuad(uint64_t &hash, const WorldQuad &quad) {
-  hash = hashMix(hash, floatBits(quad.minX));
-  hash = hashMix(hash, floatBits(quad.minY));
-  hash = hashMix(hash, floatBits(quad.maxX));
-  hash = hashMix(hash, floatBits(quad.maxY));
-  hash = hashMix(hash, floatBits(quad.uvMinX));
-  hash = hashMix(hash, floatBits(quad.uvMinY));
-  hash = hashMix(hash, floatBits(quad.uvMaxX));
-  hash = hashMix(hash, floatBits(quad.uvMaxY));
-  hash = hashMix(hash, floatBits(quad.pxRange));
-  hash = hashMix(hash, quad.color);
-  hash = hashMix(hash, quad.atlas);
-  hash = hashMix(hash, quad.transformId);
-}
-
-[[nodiscard]] uint64_t hashCameraFrameState(const CameraFrameState &camera) {
-  uint64_t hash = kHashSeed;
-  for (int c = 0; c < 4; ++c) {
-    for (int r = 0; r < 4; ++r) {
-      hash = hashMix(hash, floatBits(camera.view[c][r]));
-    }
-  }
-  hash = hashMix(hash, floatBits(camera.cameraPos.x));
-  hash = hashMix(hash, floatBits(camera.cameraPos.y));
-  hash = hashMix(hash, floatBits(camera.cameraPos.z));
-  return hash;
-}
-
-[[nodiscard]] bool uiBatchLess(const UiQuad &a, const UiQuad &b) {
-  if (a.atlas != b.atlas) {
-    return a.atlas < b.atlas;
-  }
-  return a.pxRange < b.pxRange;
-}
-
-[[nodiscard]] bool worldBatchLess(const WorldQuad &a, const WorldQuad &b) {
-  if (a.atlas != b.atlas) {
-    return a.atlas < b.atlas;
-  }
-  return a.pxRange < b.pxRange;
-}
-
-struct UiVertex {
-  glm::vec2 pos{0.0f};
-  glm::vec2 uv{0.0f};
-  uint32_t color = 0xffffffffu;
-};
-
-struct WorldVertex {
-  glm::vec3 pos{0.0f};
-  glm::vec2 uv{0.0f};
-  uint32_t color = 0xffffffffu;
-};
-
-struct UiBatch {
-  uint32_t atlas = 0;
-  float pxRange = 4.0f;
-  uint32_t firstIndex = 0;
-  uint32_t indexCount = 0;
-};
-
-struct WorldBatch {
-  uint32_t atlas = 0;
-  float pxRange = 4.0f;
-  uint32_t firstInstance = 0;
-  uint32_t instanceCount = 0;
-};
-
-struct UiPC {
-  glm::mat4 proj{1.0f};
-  uint32_t atlas = 0;
-  float pxRange = 4.0f;
-  float pad0 = 0.0f;
-  float pad1 = 0.0f;
-};
-
-struct WorldPC {
-  glm::mat4 viewProj{1.0f};
-  uint64_t glyphBufferAddress = 0;
-  uint64_t transformBufferAddress = 0;
-  uint32_t atlas = 0;
-  float pxRange = 4.0f;
-  float pad0 = 0.0f;
-  float pad1 = 0.0f;
-};
 
 [[nodiscard]] glm::mat4 decodeWorld(const std::array<float, 16> &raw) {
   bool any = false;
@@ -254,7 +101,8 @@ struct WorldPC {
                                                float anchorX, float anchorY) {
   const float width = std::max(localBounds.maxX - localBounds.minX, 0.0f);
   const float height = std::max(localBounds.maxY - localBounds.minY, 0.0f);
-  const float containerWidth = params.maxWidthPx > 0.0f ? params.maxWidthPx : width;
+  const float containerWidth =
+      params.maxWidthPx > 0.0f ? params.maxWidthPx : width;
   const float containerHeight =
       params.maxHeightPx > 0.0f ? params.maxHeightPx : height;
 
@@ -296,8 +144,9 @@ struct WorldPC {
   return glm::vec2(dx, dy);
 }
 
-[[nodiscard]] glm::vec2 computeAlignedOffsetLocal(const TextBounds &localBounds,
-                                                  const TextLayoutParams &params) {
+[[nodiscard]] glm::vec2
+computeAlignedOffsetLocal(const TextBounds &localBounds,
+                          const TextLayoutParams &params) {
   return computeAlignedOffset2D(localBounds, params, 0.0f, 0.0f);
 }
 
@@ -318,15 +167,62 @@ struct WorldPC {
                    std::max(sz, 1.0e-4f));
 }
 
-struct BillboardFrameBasis {
-  glm::vec3 sphericalRight{1.0f, 0.0f, 0.0f};
-  glm::vec3 sphericalUp{0.0f, -1.0f, 0.0f};
-  glm::vec3 sphericalForward{0.0f, 0.0f, -1.0f};
-  glm::vec3 cameraPos{0.0f};
-};
+} // namespace
 
-[[nodiscard]] BillboardFrameBasis
-buildBillboardFrameBasis(const CameraFrameState &camera) {
+void TextRenderer::hashWorldTransform(uint64_t &hash,
+                                      const WorldTransform &transform) {
+  hash = hashMix(hash, static_cast<uint64_t>(transform.billboard));
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      hash = hashMix(hash, floatBits(transform.worldFromText[c][r]));
+    }
+  }
+}
+
+void TextRenderer::hashWorldQuad(uint64_t &hash, const WorldQuad &quad) {
+  hash = hashMix(hash, floatBits(quad.minX));
+  hash = hashMix(hash, floatBits(quad.minY));
+  hash = hashMix(hash, floatBits(quad.maxX));
+  hash = hashMix(hash, floatBits(quad.maxY));
+  hash = hashMix(hash, floatBits(quad.uvMinX));
+  hash = hashMix(hash, floatBits(quad.uvMinY));
+  hash = hashMix(hash, floatBits(quad.uvMaxX));
+  hash = hashMix(hash, floatBits(quad.uvMaxY));
+  hash = hashMix(hash, floatBits(quad.pxRange));
+  hash = hashMix(hash, quad.color);
+  hash = hashMix(hash, quad.atlas);
+  hash = hashMix(hash, quad.transformId);
+}
+
+uint64_t TextRenderer::hashCameraFrameState(const CameraFrameState &camera) {
+  uint64_t hash = kHashSeed;
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      hash = hashMix(hash, floatBits(camera.view[c][r]));
+    }
+  }
+  hash = hashMix(hash, floatBits(camera.cameraPos.x));
+  hash = hashMix(hash, floatBits(camera.cameraPos.y));
+  hash = hashMix(hash, floatBits(camera.cameraPos.z));
+  return hash;
+}
+
+bool TextRenderer::uiBatchLess(const UiQuad &a, const UiQuad &b) {
+  if (a.atlas != b.atlas) {
+    return a.atlas < b.atlas;
+  }
+  return a.pxRange < b.pxRange;
+}
+
+bool TextRenderer::worldBatchLess(const WorldQuad &a, const WorldQuad &b) {
+  if (a.atlas != b.atlas) {
+    return a.atlas < b.atlas;
+  }
+  return a.pxRange < b.pxRange;
+}
+
+TextRenderer::BillboardFrameBasis
+TextRenderer::buildBillboardFrameBasis(const CameraFrameState &camera) {
   BillboardFrameBasis basis{};
   basis.cameraPos = glm::vec3(camera.cameraPos);
 
@@ -347,9 +243,9 @@ buildBillboardFrameBasis(const CameraFrameState &camera) {
   return basis;
 }
 
-[[nodiscard]] glm::mat4
-resolveWorldFromBillboard(const WorldTransform &transform,
-                          const BillboardFrameBasis &basis) {
+glm::mat4
+TextRenderer::resolveWorldFromBillboard(const WorldTransform &transform,
+                                        const BillboardFrameBasis &basis) {
   if (transform.billboard == TextBillboardMode::None) {
     return transform.worldFromText;
   }
@@ -370,7 +266,8 @@ resolveWorldFromBillboard(const WorldTransform &transform,
     glm::vec3 toCamera = basis.cameraPos - translation;
     toCamera.y = 0.0f;
     forward = safeNormalize(toCamera, glm::vec3(0.0f, 0.0f, 1.0f));
-    right = safeNormalize(glm::cross(up, forward), glm::vec3(1.0f, 0.0f, 0.0f));
+    right =
+        safeNormalize(glm::cross(up, forward), glm::vec3(1.0f, 0.0f, 0.0f));
     forward = safeNormalize(glm::cross(right, up), forward);
     // Glyph quads are laid out in Y-down text space; convert billboard basis
     // from Y-up world convention while preserving handedness.
@@ -386,113 +283,18 @@ resolveWorldFromBillboard(const WorldTransform &transform,
   return out;
 }
 
-class TextRendererImpl final : public TextRenderer {
-public:
-  explicit TextRendererImpl(const CreateDesc &desc)
-      : gpu_(desc.gpu), fonts_(desc.fonts), layouter_(desc.layouter),
-        memory_(desc.memory), shaderPaths_(desc.shaderPaths), uiQueue_(&memory_),
-        worldQueue_(&memory_), worldTransforms_(&memory_),
-        resolvedWorldTransforms_(&memory_), worldInstances_(&memory_),
-        uiVerts_(&memory_), uiBatches_(&memory_), worldBatches_(&memory_),
-        uiDraws_(&memory_), worldDraws_(&memory_), uiPcs_(&memory_),
-        worldPcs_(&memory_), uiFrames_(&memory_), worldFrames_(&memory_) {}
+TextRenderer::TextRenderer(const CreateDesc &desc)
+    : gpu_(desc.gpu), fonts_(desc.fonts), layouter_(desc.layouter),
+      memory_(desc.memory), shaderPaths_(desc.shaderPaths),
+      uiQueue_(&memory_), worldQueue_(&memory_), worldTransforms_(&memory_),
+      resolvedWorldTransforms_(&memory_), worldInstances_(&memory_),
+      uiVerts_(&memory_), uiBatches_(&memory_), worldBatches_(&memory_),
+      uiDraws_(&memory_), worldDraws_(&memory_), uiPcs_(&memory_),
+      worldPcs_(&memory_), uiFrames_(&memory_), worldFrames_(&memory_) {}
 
-  ~TextRendererImpl() override { destroyGpu(); }
+TextRenderer::~TextRenderer() { destroyGpu(); }
 
-  Result<bool, std::string> beginFrame(uint64_t frameIndex) override;
-  Result<TextBounds, std::string>
-  enqueue2D(const Text2DDesc &desc, std::pmr::memory_resource &scratch) override;
-  Result<TextBounds, std::string>
-  enqueue3D(const Text3DDesc &desc, std::pmr::memory_resource &scratch) override;
-  Result<bool, std::string>
-  append3DPasses(RenderFrameContext &frame, RenderPassList &out) override;
-  Result<bool, std::string>
-  append2DPasses(RenderFrameContext &frame, RenderPassList &out) override;
-  void clear() override;
-
-private:
-  Result<bool, std::string> compileUiShaders();
-  Result<bool, std::string> compileWorldShaders();
-  Result<bool, std::string> ensureUiPipeline(Format colorFormat);
-  Result<bool, std::string> ensureWorldPipeline(Format colorFormat,
-                                                Format depthFormat);
-  void syncFrames(std::pmr::vector<FrameBuffers> &frames);
-  uint32_t frameSlot(std::pmr::vector<FrameBuffers> &frames);
-  Result<bool, std::string> ensureFrameBuffers(FrameBuffers &frame,
-                                               size_t vbBytes, size_t ibQuads,
-                                               std::string_view debugPrefix);
-  Result<bool, std::string> ensureWorldInstanceBuffer(FrameBuffers &frame,
-                                                      size_t bytes,
-                                                      std::string_view debugPrefix);
-  Result<bool, std::string> uploadUi(uint32_t slot);
-  Result<bool, std::string> uploadWorld(uint32_t slot);
-  void buildUiGeometry();
-  void buildWorldGeometry(const CameraFrameState &camera);
-  void resetPerfCounters();
-  void emitPerfValidation(uint64_t frameIndex);
-  void destroyGpu();
-
-private:
-  GPUDevice &gpu_;
-  FontManager &fonts_;
-  TextLayouter &layouter_;
-  std::pmr::memory_resource &memory_;
-  ShaderPaths shaderPaths_{};
-
-  uint64_t frameIndex_ = std::numeric_limits<uint64_t>::max();
-  bool uiAppended_ = false;
-  bool worldAppended_ = false;
-  bool uiQueueNeedsSort_ = false;
-  bool worldQueueNeedsSort_ = false;
-  uint64_t lastPerfValidationFrame_ = 0;
-
-  struct PerfCounters {
-    uint32_t uiGlyphs = 0;
-    uint32_t uiBatches = 0;
-    uint32_t worldGlyphs = 0;
-    uint32_t worldBatches = 0;
-    size_t uiVertexUploadBytes = 0;
-    size_t uiIndexUploadBytes = 0;
-    size_t worldVertexUploadBytes = 0;
-    size_t worldIndexUploadBytes = 0;
-  } perf_;
-
-  ShaderHandle uiVs_{};
-  ShaderHandle uiFs_{};
-  ShaderHandle worldVs_{};
-  ShaderHandle worldFs_{};
-  RenderPipelineHandle uiPipeline_{};
-  RenderPipelineHandle worldPipeline_{};
-  Format uiPipelineColor_ = Format::Count;
-  Format worldPipelineColor_ = Format::Count;
-  Format worldPipelineDepth_ = Format::Count;
-
-  std::pmr::vector<UiQuad> uiQueue_;
-  std::pmr::vector<WorldQuad> worldQueue_;
-  std::pmr::vector<WorldTransform> worldTransforms_;
-  std::pmr::vector<ResolvedWorldTransform> resolvedWorldTransforms_;
-  std::pmr::vector<WorldGlyphInstance> worldInstances_;
-  std::pmr::vector<UiVertex> uiVerts_;
-  std::pmr::vector<UiBatch> uiBatches_;
-  std::pmr::vector<WorldBatch> worldBatches_;
-  std::pmr::vector<DrawItem> uiDraws_;
-  std::pmr::vector<DrawItem> worldDraws_;
-  std::pmr::vector<UiPC> uiPcs_;
-  std::pmr::vector<WorldPC> worldPcs_;
-  std::pmr::vector<FrameBuffers> uiFrames_;
-  std::pmr::vector<FrameBuffers> worldFrames_;
-
-  uint64_t worldQueueHash_ = kHashSeed;
-  uint64_t lastBuiltWorldQueueHash_ = 0;
-  uint64_t lastBuiltWorldCameraHash_ = 0;
-  bool worldGeometryValid_ = false;
-  bool worldHasBillboards_ = false;
-  uint64_t worldGlyphBufferAddress_ = 0;
-  uint64_t worldTransformBufferAddress_ = 0;
-  std::array<BufferHandle, 1> worldDependencyBuffers_{};
-};
-
-Result<bool, std::string> TextRendererImpl::beginFrame(uint64_t frameIndex) {
+Result<bool, std::string> TextRenderer::beginFrame(uint64_t frameIndex) {
   if (frameIndex_ == frameIndex) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -507,11 +309,11 @@ Result<bool, std::string> TextRendererImpl::beginFrame(uint64_t frameIndex) {
 }
 
 Result<TextBounds, std::string>
-TextRendererImpl::enqueue2D(const Text2DDesc &desc,
-                            std::pmr::memory_resource &scratch) {
+TextRenderer::enqueue2D(const Text2DDesc &desc,
+                              std::pmr::memory_resource &scratch) {
   NURI_PROFILER_FUNCTION();
-  auto layoutResult =
-      layouter_.layoutUtf8(desc.utf8, desc.style, desc.layout, scratch, scratch);
+  auto layoutResult = layouter_.layoutUtf8(desc.utf8, desc.style, desc.layout,
+                                           scratch, scratch);
   if (layoutResult.hasError()) {
     return makeError<TextBounds>("TextRenderer::enqueue2D: ",
                                  layoutResult.error());
@@ -522,20 +324,27 @@ TextRendererImpl::enqueue2D(const Text2DDesc &desc,
     return Result<TextBounds, std::string>::makeResult(TextBounds{});
   }
 
-  std::pmr::vector<UiQuad> localQuads(&scratch);
-  localQuads.reserve(layout.glyphs.size());
   const uint32_t color = packColor(desc.fillColor);
+  const size_t queueStart = uiQueue_.size();
+  uiQueue_.reserve(queueStart + layout.glyphs.size());
+
   TextBounds localBounds{};
   bool hasLocalBounds = false;
+  FontHandle lastFont = kInvalidFontHandle;
+  float cachedPxRange = 4.0f;
+
   for (const LayoutGlyph &glyph : layout.glyphs) {
     const uint32_t atlas = fonts_.atlasBindlessIndex(glyph.atlasPage);
     if (atlas == 0) {
       continue;
     }
+    if (glyph.font != lastFont) {
+      lastFont = glyph.font;
+      cachedPxRange = fonts_.pxRange(glyph.font);
+    }
 
     UiQuad quad{};
     quad.minX = glyph.x + glyph.metrics.planeMinX;
-    // MSDF plane coordinates are Y-up; screen/UI space is Y-down.
     quad.minY = glyph.y - glyph.metrics.planeMaxY;
     quad.maxX = glyph.x + glyph.metrics.planeMaxX;
     quad.maxY = glyph.y - glyph.metrics.planeMinY;
@@ -543,91 +352,46 @@ TextRendererImpl::enqueue2D(const Text2DDesc &desc,
     quad.uvMinY = glyph.metrics.uvMinY;
     quad.uvMaxX = glyph.metrics.uvMaxX;
     quad.uvMaxY = glyph.metrics.uvMaxY;
-    quad.pxRange = fonts_.pxRange(glyph.font);
+    quad.pxRange = cachedPxRange;
     quad.color = color;
     quad.atlas = atlas;
-    localQuads.push_back(quad);
+    if (queueStart > 0 && uiQueue_.size() == queueStart &&
+        uiBatchLess(quad, uiQueue_[queueStart - 1u])) {
+      uiQueueNeedsSort_ = true;
+    }
+    uiQueue_.push_back(quad);
 
     growBounds(localBounds, hasLocalBounds, quad.minX, quad.minY, quad.maxX,
                quad.maxY);
   }
 
-  if (!hasLocalBounds || localQuads.empty()) {
+  if (!hasLocalBounds || uiQueue_.size() == queueStart) {
     return Result<TextBounds, std::string>::makeResult(TextBounds{});
   }
 
-  const glm::vec2 shift = computeAlignedOffset2D(localBounds, desc.layout, desc.x, desc.y);
-  const size_t queueStart = uiQueue_.size();
+  const glm::vec2 shift =
+      computeAlignedOffset2D(localBounds, desc.layout, desc.x, desc.y);
+  for (size_t i = queueStart; i < uiQueue_.size(); ++i) {
+    uiQueue_[i].minX += shift.x;
+    uiQueue_[i].maxX += shift.x;
+    uiQueue_[i].minY += shift.y;
+    uiQueue_[i].maxY += shift.y;
+  }
+
   TextBounds finalBounds{};
-  bool hasFinalBounds = false;
-  for (UiQuad quad : localQuads) {
-    quad.minX += shift.x;
-    quad.maxX += shift.x;
-    quad.minY += shift.y;
-    quad.maxY += shift.y;
-    if (!uiQueue_.empty() && uiBatchLess(quad, uiQueue_.back())) {
-      uiQueueNeedsSort_ = true;
-    }
-    uiQueue_.push_back(quad);
-
-    growBounds(finalBounds, hasFinalBounds, quad.minX, quad.minY, quad.maxX,
-               quad.maxY);
-  }
-
-  const float finalWidth = std::max(finalBounds.maxX - finalBounds.minX, 0.0f);
-  const float finalHeight = std::max(finalBounds.maxY - finalBounds.minY, 0.0f);
-  const float containerWidth =
-      desc.layout.maxWidthPx > 0.0f ? desc.layout.maxWidthPx : finalWidth;
-  const float containerHeight =
-      desc.layout.maxHeightPx > 0.0f ? desc.layout.maxHeightPx : finalHeight;
-
-  float desiredMinX = finalBounds.minX;
-  switch (desc.layout.alignH) {
-  case TextAlignH::Left:
-    desiredMinX = desc.x;
-    break;
-  case TextAlignH::Center:
-    desiredMinX = desc.x + (containerWidth - finalWidth) * 0.5f;
-    break;
-  case TextAlignH::Right:
-    desiredMinX = desc.x + (containerWidth - finalWidth);
-    break;
-  }
-
-  float desiredMinY = finalBounds.minY;
-  if (desc.layout.alignV == TextAlignV::Top) {
-    desiredMinY = desc.y;
-  } else if (desc.layout.alignV == TextAlignV::Middle) {
-    desiredMinY = desc.y + (containerHeight - finalHeight) * 0.5f;
-  } else if (desc.layout.alignV == TextAlignV::Bottom) {
-    desiredMinY = desc.y + (containerHeight - finalHeight);
-  }
-
-  const float corrX = desiredMinX - finalBounds.minX;
-  const float corrY = desiredMinY - finalBounds.minY;
-  if (std::abs(corrX) > kBatchPxRangeEpsilon ||
-      std::abs(corrY) > kBatchPxRangeEpsilon) {
-    for (size_t i = queueStart; i < uiQueue_.size(); ++i) {
-      uiQueue_[i].minX += corrX;
-      uiQueue_[i].maxX += corrX;
-      uiQueue_[i].minY += corrY;
-      uiQueue_[i].maxY += corrY;
-    }
-    finalBounds.minX += corrX;
-    finalBounds.maxX += corrX;
-    finalBounds.minY += corrY;
-    finalBounds.maxY += corrY;
-  }
-
+  finalBounds.minX = localBounds.minX + shift.x;
+  finalBounds.maxX = localBounds.maxX + shift.x;
+  finalBounds.minY = localBounds.minY + shift.y;
+  finalBounds.maxY = localBounds.maxY + shift.y;
   return Result<TextBounds, std::string>::makeResult(finalBounds);
 }
 
 Result<TextBounds, std::string>
-TextRendererImpl::enqueue3D(const Text3DDesc &desc,
-                            std::pmr::memory_resource &scratch) {
+TextRenderer::enqueue3D(const Text3DDesc &desc,
+                              std::pmr::memory_resource &scratch) {
   NURI_PROFILER_FUNCTION();
-  auto layoutResult =
-      layouter_.layoutUtf8(desc.utf8, desc.style, desc.layout, scratch, scratch);
+  auto layoutResult = layouter_.layoutUtf8(desc.utf8, desc.style, desc.layout,
+                                           scratch, scratch);
   if (layoutResult.hasError()) {
     return makeError<TextBounds>("TextRenderer::enqueue3D: ",
                                  layoutResult.error());
@@ -635,28 +399,6 @@ TextRendererImpl::enqueue3D(const Text3DDesc &desc,
 
   const TextLayout &layout = layoutResult.value();
   if (layout.glyphs.empty()) {
-    return Result<TextBounds, std::string>::makeResult(TextBounds{});
-  }
-
-  TextBounds localBounds{};
-  bool hasLocalBounds = false;
-  size_t validGlyphCount = 0;
-  for (const LayoutGlyph &glyph : layout.glyphs) {
-    const uint32_t atlas = fonts_.atlasBindlessIndex(glyph.atlasPage);
-    if (atlas == 0) {
-      continue;
-    }
-    ++validGlyphCount;
-
-    const float minX = glyph.x + glyph.metrics.planeMinX;
-    const float minY = glyph.y - glyph.metrics.planeMaxY;
-    const float maxX = glyph.x + glyph.metrics.planeMaxX;
-    const float maxY = glyph.y - glyph.metrics.planeMinY;
-
-    growBounds(localBounds, hasLocalBounds, minX, minY, maxX, maxY);
-  }
-
-  if (!hasLocalBounds || validGlyphCount == 0) {
     return Result<TextBounds, std::string>::makeResult(TextBounds{});
   }
 
@@ -673,43 +415,71 @@ TextRendererImpl::enqueue3D(const Text3DDesc &desc,
   worldHasBillboards_ =
       worldHasBillboards_ || (desc.billboard != TextBillboardMode::None);
   const uint32_t color = packColor(desc.fillColor);
-  worldQueue_.reserve(worldQueue_.size() + validGlyphCount);
 
-  const glm::vec2 shift = computeAlignedOffsetLocal(localBounds, desc.layout);
-  TextBounds finalBounds{};
-  finalBounds.minX = localBounds.minX + shift.x;
-  finalBounds.maxX = localBounds.maxX + shift.x;
-  finalBounds.minY = localBounds.minY + shift.y;
-  finalBounds.maxY = localBounds.maxY + shift.y;
+  const size_t queueStart = worldQueue_.size();
+  worldQueue_.reserve(queueStart + layout.glyphs.size());
+
+  TextBounds localBounds{};
+  bool hasLocalBounds = false;
+  FontHandle lastFont = kInvalidFontHandle;
+  float cachedPxRange = 4.0f;
+
   for (const LayoutGlyph &glyph : layout.glyphs) {
     const uint32_t atlas = fonts_.atlasBindlessIndex(glyph.atlasPage);
     if (atlas == 0) {
       continue;
     }
+    if (glyph.font != lastFont) {
+      lastFont = glyph.font;
+      cachedPxRange = fonts_.pxRange(glyph.font);
+    }
+
     WorldQuad quad{};
-    quad.minX = glyph.x + glyph.metrics.planeMinX + shift.x;
-    quad.minY = glyph.y - glyph.metrics.planeMaxY + shift.y;
-    quad.maxX = glyph.x + glyph.metrics.planeMaxX + shift.x;
-    quad.maxY = glyph.y - glyph.metrics.planeMinY + shift.y;
+    quad.minX = glyph.x + glyph.metrics.planeMinX;
+    quad.minY = glyph.y - glyph.metrics.planeMaxY;
+    quad.maxX = glyph.x + glyph.metrics.planeMaxX;
+    quad.maxY = glyph.y - glyph.metrics.planeMinY;
     quad.uvMinX = glyph.metrics.uvMinX;
     quad.uvMinY = glyph.metrics.uvMinY;
     quad.uvMaxX = glyph.metrics.uvMaxX;
     quad.uvMaxY = glyph.metrics.uvMaxY;
-    quad.pxRange = fonts_.pxRange(glyph.font);
+    quad.pxRange = cachedPxRange;
     quad.color = color;
     quad.atlas = atlas;
     quad.transformId = transformId;
     hashWorldQuad(worldQueueHash_, quad);
-    if (!worldQueue_.empty() && worldBatchLess(quad, worldQueue_.back())) {
+    if (queueStart > 0 && worldQueue_.size() == queueStart &&
+        worldBatchLess(quad, worldQueue_[queueStart - 1u])) {
       worldQueueNeedsSort_ = true;
     }
     worldQueue_.push_back(quad);
+
+    growBounds(localBounds, hasLocalBounds, quad.minX, quad.minY, quad.maxX,
+               quad.maxY);
   }
 
+  if (!hasLocalBounds || worldQueue_.size() == queueStart) {
+    worldTransforms_.pop_back();
+    return Result<TextBounds, std::string>::makeResult(TextBounds{});
+  }
+
+  const glm::vec2 shift = computeAlignedOffsetLocal(localBounds, desc.layout);
+  for (size_t i = queueStart; i < worldQueue_.size(); ++i) {
+    worldQueue_[i].minX += shift.x;
+    worldQueue_[i].minY += shift.y;
+    worldQueue_[i].maxX += shift.x;
+    worldQueue_[i].maxY += shift.y;
+  }
+
+  TextBounds finalBounds{};
+  finalBounds.minX = localBounds.minX + shift.x;
+  finalBounds.maxX = localBounds.maxX + shift.x;
+  finalBounds.minY = localBounds.minY + shift.y;
+  finalBounds.maxY = localBounds.maxY + shift.y;
   return Result<TextBounds, std::string>::makeResult(finalBounds);
 }
 
-void TextRendererImpl::clear() {
+void TextRenderer::clear() {
   uiQueue_.clear();
   worldQueue_.clear();
   worldTransforms_.clear();
@@ -731,9 +501,9 @@ void TextRendererImpl::clear() {
   worldDependencyBuffers_[0] = {};
 }
 
-void TextRendererImpl::resetPerfCounters() { perf_ = PerfCounters{}; }
+void TextRenderer::resetPerfCounters() { perf_ = PerfCounters{}; }
 
-void TextRendererImpl::emitPerfValidation(uint64_t frameIndex) {
+void TextRenderer::emitPerfValidation(uint64_t frameIndex) {
   constexpr uint64_t kValidationIntervalFrames = 120;
   if (frameIndex < lastPerfValidationFrame_ + kValidationIntervalFrames) {
     return;
@@ -746,11 +516,11 @@ void TextRendererImpl::emitPerfValidation(uint64_t frameIndex) {
       static_cast<unsigned int>(perf_.uiGlyphs),
       static_cast<unsigned int>(perf_.uiBatches), perf_.uiVertexUploadBytes,
       perf_.uiIndexUploadBytes, static_cast<unsigned int>(perf_.worldGlyphs),
-      static_cast<unsigned int>(perf_.worldBatches), perf_.worldVertexUploadBytes,
-      perf_.worldIndexUploadBytes);
+      static_cast<unsigned int>(perf_.worldBatches),
+      perf_.worldVertexUploadBytes, perf_.worldIndexUploadBytes);
 }
 
-Result<bool, std::string> TextRendererImpl::compileUiShaders() {
+Result<bool, std::string> TextRenderer::compileUiShaders() {
   if (::nuri::isValid(uiVs_) && ::nuri::isValid(uiFs_)) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -784,7 +554,7 @@ Result<bool, std::string> TextRendererImpl::compileUiShaders() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> TextRendererImpl::compileWorldShaders() {
+Result<bool, std::string> TextRenderer::compileWorldShaders() {
   if (::nuri::isValid(worldVs_) && ::nuri::isValid(worldFs_)) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -819,7 +589,7 @@ Result<bool, std::string> TextRendererImpl::compileWorldShaders() {
 }
 
 Result<bool, std::string>
-TextRendererImpl::ensureUiPipeline(Format colorFormat) {
+TextRenderer::ensureUiPipeline(Format colorFormat) {
   if (::nuri::isValid(uiPipeline_) && uiPipelineColor_ == colorFormat) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -874,7 +644,8 @@ TextRendererImpl::ensureUiPipeline(Format colorFormat) {
 }
 
 Result<bool, std::string>
-TextRendererImpl::ensureWorldPipeline(Format colorFormat, Format depthFormat) {
+TextRenderer::ensureWorldPipeline(Format colorFormat,
+                                        Format depthFormat) {
   if (::nuri::isValid(worldPipeline_) && worldPipelineColor_ == colorFormat &&
       worldPipelineDepth_ == depthFormat) {
     return Result<bool, std::string>::makeResult(true);
@@ -909,7 +680,7 @@ TextRendererImpl::ensureWorldPipeline(Format colorFormat, Format depthFormat) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void TextRendererImpl::syncFrames(std::pmr::vector<FrameBuffers> &frames) {
+void TextRenderer::syncFrames(std::pmr::vector<FrameBuffers> &frames) {
   const uint32_t swapchainCount = std::max(1u, gpu_.getSwapchainImageCount());
   if (frames.size() == swapchainCount) {
     return;
@@ -927,7 +698,7 @@ void TextRendererImpl::syncFrames(std::pmr::vector<FrameBuffers> &frames) {
   frames.assign(swapchainCount, FrameBuffers{});
 }
 
-uint32_t TextRendererImpl::frameSlot(std::pmr::vector<FrameBuffers> &frames) {
+uint32_t TextRenderer::frameSlot(std::pmr::vector<FrameBuffers> &frames) {
   syncFrames(frames);
   const uint32_t count = static_cast<uint32_t>(frames.size());
   NURI_ASSERT(count > 0, "TextRenderer frame buffer count must be > 0");
@@ -935,9 +706,9 @@ uint32_t TextRendererImpl::frameSlot(std::pmr::vector<FrameBuffers> &frames) {
 }
 
 Result<bool, std::string>
-TextRendererImpl::ensureFrameBuffers(FrameBuffers &frame, size_t vbBytes,
-                                     size_t ibQuads,
-                                     std::string_view debugPrefix) {
+TextRenderer::ensureFrameBuffers(FrameBuffers &frame, size_t vbBytes,
+                                       size_t ibQuads,
+                                       std::string_view debugPrefix) {
   constexpr size_t kIndicesPerQuad = 6u;
   constexpr size_t kVerticesPerQuad = 4u;
   if (!::nuri::isValid(frame.vb) || frame.vbBytes < vbBytes) {
@@ -983,8 +754,7 @@ TextRendererImpl::ensureFrameBuffers(FrameBuffers &frame, size_t vbBytes,
     std::pmr::vector<uint32_t> indexPattern(&memory_);
     indexPattern.resize(newQuadCapacity * kIndicesPerQuad);
     for (size_t i = 0; i < newQuadCapacity; ++i) {
-      const uint32_t baseVertex =
-          static_cast<uint32_t>(i * kVerticesPerQuad);
+      const uint32_t baseVertex = static_cast<uint32_t>(i * kVerticesPerQuad);
       const size_t idx = i * kIndicesPerQuad;
       indexPattern[idx + 0u] = baseVertex + 0u;
       indexPattern[idx + 1u] = baseVertex + 1u;
@@ -1012,8 +782,8 @@ TextRendererImpl::ensureFrameBuffers(FrameBuffers &frame, size_t vbBytes,
 }
 
 Result<bool, std::string>
-TextRendererImpl::ensureWorldInstanceBuffer(FrameBuffers &frame, size_t bytes,
-                                            std::string_view debugPrefix) {
+TextRenderer::ensureWorldInstanceBuffer(FrameBuffers &frame, size_t bytes,
+                                              std::string_view debugPrefix) {
   if (!::nuri::isValid(frame.vb) || frame.vbBytes < bytes) {
     if (::nuri::isValid(frame.vb)) {
       gpu_.destroyBuffer(frame.vb);
@@ -1035,7 +805,7 @@ TextRendererImpl::ensureWorldInstanceBuffer(FrameBuffers &frame, size_t bytes,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> TextRendererImpl::uploadUi(uint32_t slot) {
+Result<bool, std::string> TextRenderer::uploadUi(uint32_t slot) {
   NURI_PROFILER_FUNCTION();
   constexpr size_t kVerticesPerQuad = 4u;
   constexpr size_t kIndicesPerQuad = 6u;
@@ -1064,13 +834,14 @@ Result<bool, std::string> TextRendererImpl::uploadUi(uint32_t slot) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> TextRendererImpl::uploadWorld(uint32_t slot) {
+Result<bool, std::string> TextRenderer::uploadWorld(uint32_t slot) {
   NURI_PROFILER_FUNCTION();
   FrameBuffers &frame = worldFrames_[slot];
   const size_t transformBytes =
       resolvedWorldTransforms_.size() * sizeof(ResolvedWorldTransform);
   const size_t instancesOffset = alignUp(transformBytes, 16u);
-  const size_t instanceBytes = worldInstances_.size() * sizeof(WorldGlyphInstance);
+  const size_t instanceBytes =
+      worldInstances_.size() * sizeof(WorldGlyphInstance);
   const size_t totalBytes = instancesOffset + instanceBytes;
   perf_.worldVertexUploadBytes = totalBytes;
   perf_.worldIndexUploadBytes = 0;
@@ -1082,9 +853,9 @@ Result<bool, std::string> TextRendererImpl::uploadWorld(uint32_t slot) {
   if (transformBytes > 0) {
     auto up = gpu_.updateBuffer(
         frame.vb,
-        std::span<const std::byte>(
-            reinterpret_cast<const std::byte *>(resolvedWorldTransforms_.data()),
-            transformBytes),
+        std::span<const std::byte>(reinterpret_cast<const std::byte *>(
+                                       resolvedWorldTransforms_.data()),
+                                   transformBytes),
         0);
     if (up.hasError()) {
       return Result<bool, std::string>::makeError(up.error());
@@ -1109,22 +880,22 @@ Result<bool, std::string> TextRendererImpl::uploadWorld(uint32_t slot) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void TextRendererImpl::buildUiGeometry() {
-  NURI_PROFILER_ZONE("TextRenderer::buildUiGeometry", NURI_PROFILER_COLOR_CMD_DRAW);
+void TextRenderer::buildUiGeometry() {
+  NURI_PROFILER_ZONE("TextRenderer::buildUiGeometry",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
   if (uiQueueNeedsSort_) {
-    std::stable_sort(uiQueue_.begin(), uiQueue_.end(), uiBatchLess);
+    std::sort(uiQueue_.begin(), uiQueue_.end(), uiBatchLess);
     uiQueueNeedsSort_ = false;
   }
   uiVerts_.clear();
   uiBatches_.clear();
 
   const size_t quadCount = uiQueue_.size();
-  uiVerts_.resize(quadCount * 4u);
-  uiBatches_.reserve(uiQueue_.size());
+  uiVerts_.reserve(quadCount * 4u);
+  uiBatches_.reserve(16u);
 
   uint32_t currentAtlas = std::numeric_limits<uint32_t>::max();
   float currentPxRange = -1.0f;
-  size_t vertexWrite = 0;
   size_t indexWrite = 0;
   for (const UiQuad &q : uiQueue_) {
     if (currentAtlas != q.atlas ||
@@ -1139,41 +910,40 @@ void TextRendererImpl::buildUiGeometry() {
       });
     }
 
-    uiVerts_[vertexWrite + 0u] =
-        UiVertex{{q.minX, q.minY}, {q.uvMinX, q.uvMinY}, q.color};
-    uiVerts_[vertexWrite + 1u] =
-        UiVertex{{q.maxX, q.minY}, {q.uvMaxX, q.uvMinY}, q.color};
-    uiVerts_[vertexWrite + 2u] =
-        UiVertex{{q.maxX, q.maxY}, {q.uvMaxX, q.uvMaxY}, q.color};
-    uiVerts_[vertexWrite + 3u] =
-        UiVertex{{q.minX, q.maxY}, {q.uvMinX, q.uvMaxY}, q.color};
-    vertexWrite += 4u;
+    uiVerts_.push_back(
+        UiVertex{{q.minX, q.minY}, {q.uvMinX, q.uvMinY}, q.color});
+    uiVerts_.push_back(
+        UiVertex{{q.maxX, q.minY}, {q.uvMaxX, q.uvMinY}, q.color});
+    uiVerts_.push_back(
+        UiVertex{{q.maxX, q.maxY}, {q.uvMaxX, q.uvMaxY}, q.color});
+    uiVerts_.push_back(
+        UiVertex{{q.minX, q.maxY}, {q.uvMinX, q.uvMaxY}, q.color});
     indexWrite += 6u;
     uiBatches_.back().indexCount += 6u;
   }
-  uiVerts_.resize(vertexWrite);
   perf_.uiGlyphs = static_cast<uint32_t>(uiVerts_.size() / 4u);
   perf_.uiBatches = static_cast<uint32_t>(uiBatches_.size());
   NURI_PROFILER_ZONE_END();
 }
 
-void TextRendererImpl::buildWorldGeometry(const CameraFrameState &camera) {
+void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
   NURI_PROFILER_ZONE("TextRenderer::buildWorldGeometry",
                      NURI_PROFILER_COLOR_CMD_DRAW);
   if (worldQueueNeedsSort_) {
-    std::stable_sort(worldQueue_.begin(), worldQueue_.end(), worldBatchLess);
+    std::sort(worldQueue_.begin(), worldQueue_.end(), worldBatchLess);
     worldQueueNeedsSort_ = false;
   }
   worldInstances_.clear();
   worldBatches_.clear();
 
   const size_t quadCount = worldQueue_.size();
-  worldInstances_.resize(quadCount);
-  worldBatches_.reserve(worldQueue_.size());
+  worldInstances_.reserve(quadCount);
+  worldBatches_.reserve(16u);
   const BillboardFrameBasis basis = buildBillboardFrameBasis(camera);
   resolvedWorldTransforms_.resize(worldTransforms_.size());
   for (size_t i = 0; i < worldTransforms_.size(); ++i) {
-    const glm::mat4 world = resolveWorldFromBillboard(worldTransforms_[i], basis);
+    const glm::mat4 world =
+        resolveWorldFromBillboard(worldTransforms_[i], basis);
     resolvedWorldTransforms_[i].basisX = glm::vec4(glm::vec3(world[0]), 0.0f);
     resolvedWorldTransforms_[i].basisY = glm::vec4(glm::vec3(world[1]), 0.0f);
     resolvedWorldTransforms_[i].translation =
@@ -1182,7 +952,6 @@ void TextRendererImpl::buildWorldGeometry(const CameraFrameState &camera) {
 
   uint32_t currentAtlas = std::numeric_limits<uint32_t>::max();
   float currentPxRange = -1.0f;
-  uint32_t instanceWrite = 0;
   for (const WorldQuad &q : worldQueue_) {
     if (currentAtlas != q.atlas ||
         std::abs(currentPxRange - q.pxRange) > kBatchPxRangeEpsilon) {
@@ -1191,7 +960,7 @@ void TextRendererImpl::buildWorldGeometry(const CameraFrameState &camera) {
       worldBatches_.push_back(WorldBatch{
           .atlas = q.atlas,
           .pxRange = q.pxRange,
-          .firstInstance = instanceWrite,
+          .firstInstance = static_cast<uint32_t>(worldInstances_.size()),
           .instanceCount = 0,
       });
     }
@@ -1203,23 +972,22 @@ void TextRendererImpl::buildWorldGeometry(const CameraFrameState &camera) {
     if (transformIdx >= resolvedWorldTransforms_.size()) {
       continue;
     }
-    WorldGlyphInstance inst{};
-    inst.rectMinMax = glm::vec4(q.minX, q.minY, q.maxX, q.maxY);
-    inst.uvMinMax = glm::vec4(q.uvMinX, q.uvMinY, q.uvMaxX, q.uvMaxY);
-    inst.color = q.color;
-    inst.transformIndex = static_cast<uint32_t>(transformIdx);
-    worldInstances_[instanceWrite] = inst;
-    ++instanceWrite;
+    worldInstances_.push_back(WorldGlyphInstance{
+        .rectMinMax = glm::vec4(q.minX, q.minY, q.maxX, q.maxY),
+        .uvMinMax = glm::vec4(q.uvMinX, q.uvMinY, q.uvMaxX, q.uvMaxY),
+        .color = q.color,
+        .transformIndex = static_cast<uint32_t>(transformIdx),
+    });
     worldBatches_.back().instanceCount += 1u;
   }
-  worldInstances_.resize(instanceWrite);
   perf_.worldGlyphs = static_cast<uint32_t>(worldInstances_.size());
   perf_.worldBatches = static_cast<uint32_t>(worldBatches_.size());
   NURI_PROFILER_ZONE_END();
 }
 
 Result<bool, std::string>
-TextRendererImpl::append3DPasses(RenderFrameContext &frame, RenderPassList &out) {
+TextRenderer::append3DPasses(RenderFrameContext &frame,
+                                   RenderPassList &out) {
   NURI_PROFILER_FUNCTION();
   if (worldQueue_.empty() || worldAppended_) {
     return Result<bool, std::string>::makeResult(true);
@@ -1242,7 +1010,8 @@ TextRendererImpl::append3DPasses(RenderFrameContext &frame, RenderPassList &out)
 
   const bool hasDepth = ::nuri::isValid(frame.sharedDepthTexture);
   const Format depthFormat =
-      hasDepth ? gpu_.getTextureFormat(frame.sharedDepthTexture) : Format::Count;
+      hasDepth ? gpu_.getTextureFormat(frame.sharedDepthTexture)
+               : Format::Count;
   auto pipeline = ensureWorldPipeline(gpu_.getSwapchainFormat(), depthFormat);
   if (pipeline.hasError()) {
     return pipeline;
@@ -1313,7 +1082,8 @@ TextRendererImpl::append3DPasses(RenderFrameContext &frame, RenderPassList &out)
                   .clearDepth = 1.0f,
                   .clearStencil = 0};
   }
-  pass.draws = std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
+  pass.draws =
+      std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
   pass.dependencyBuffers = std::span<const BufferHandle>(
       worldDependencyBuffers_.data(), worldDependencyBuffers_.size());
   pass.debugLabel = "Text3D Pass";
@@ -1324,7 +1094,7 @@ TextRendererImpl::append3DPasses(RenderFrameContext &frame, RenderPassList &out)
 }
 
 Result<bool, std::string>
-TextRendererImpl::append2DPasses(RenderFrameContext &, RenderPassList &out) {
+TextRenderer::append2DPasses(RenderFrameContext &, RenderPassList &out) {
   NURI_PROFILER_FUNCTION();
   if (uiQueue_.empty() || uiAppended_) {
     return Result<bool, std::string>::makeResult(true);
@@ -1362,13 +1132,13 @@ TextRendererImpl::append2DPasses(RenderFrameContext &, RenderPassList &out) {
     logicalH = fbH;
   }
 
-  const glm::mat4 proj =
-      glm::ortho(0.0f, std::max(1.0f, static_cast<float>(logicalW)),
-                 std::max(1.0f, static_cast<float>(logicalH)), 0.0f, -1.0f,
-                 1.0f);
+  const glm::mat4 proj = glm::ortho(
+      0.0f, std::max(1.0f, static_cast<float>(logicalW)),
+      std::max(1.0f, static_cast<float>(logicalH)), 0.0f, -1.0f, 1.0f);
   const FrameBuffers &buffers = uiFrames_[slot];
   for (const UiBatch &b : uiBatches_) {
-    uiPcs_.push_back(UiPC{.proj = proj, .atlas = b.atlas, .pxRange = b.pxRange});
+    uiPcs_.push_back(
+        UiPC{.proj = proj, .atlas = b.atlas, .pxRange = b.pxRange});
     const UiPC &pc = uiPcs_.back();
     DrawItem d{};
     d.pipeline = uiPipeline_;
@@ -1404,7 +1174,7 @@ TextRendererImpl::append2DPasses(RenderFrameContext &, RenderPassList &out) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void TextRendererImpl::destroyGpu() {
+void TextRenderer::destroyGpu() {
   auto destroyFrames = [this](std::pmr::vector<FrameBuffers> &frames) {
     for (FrameBuffers &f : frames) {
       if (::nuri::isValid(f.vb)) {
@@ -1444,11 +1214,6 @@ void TextRendererImpl::destroyGpu() {
     gpu_.destroyShaderModule(worldFs_);
     worldFs_ = {};
   }
-}
-} // namespace
-
-std::unique_ptr<TextRenderer> TextRenderer::create(const CreateDesc &desc) {
-  return std::make_unique<TextRendererImpl>(desc);
 }
 
 } // namespace nuri
