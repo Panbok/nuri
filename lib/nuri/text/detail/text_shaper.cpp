@@ -2,7 +2,6 @@
 
 #include "nuri/text/text_shaper.h"
 
-#include "nuri/core/containers/hash_map.h"
 #include "nuri/core/containers/hash_set.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
@@ -18,12 +17,6 @@ template <typename... Args>
   (oss << ... << std::forward<Args>(args));
   return Result<ShapedRun, std::string>::makeError(oss.str());
 }
-
-struct HbFontContext {
-  const FontManager *fonts = nullptr;
-  FontHandle font = kInvalidFontHandle;
-  float scale = 1.0f;
-};
 
 struct ResolvedGlyph {
   FontHandle font = kInvalidFontHandle;
@@ -311,278 +304,258 @@ void growBounds(TextBounds &bounds, bool &hasBounds, float minX, float minY,
   return pxSize / metrics.unitsPerEm;
 }
 
-class TextShaperHb final : public TextShaper {
-public:
-  explicit TextShaperHb(const CreateDesc &desc)
-      : TextShaper(), fonts_(desc.fonts), memory_(desc.memory) {}
-  ~TextShaperHb() override {
-    if (hbFont_ != nullptr) {
-      hb_font_destroy(hbFont_);
-      hbFont_ = nullptr;
-    }
-    if (hbBuffer_ != nullptr) {
-      hb_buffer_destroy(hbBuffer_);
-      hbBuffer_ = nullptr;
-    }
+} // namespace
+
+TextShaper::TextShaper(const CreateDesc &desc)
+    : fonts_(desc.fonts), memory_(desc.memory) {}
+
+TextShaper::~TextShaper() {
+  if (hbFont_ != nullptr) {
+    hb_font_destroy(hbFont_);
+    hbFont_ = nullptr;
   }
+  if (hbBuffer_ != nullptr) {
+    hb_buffer_destroy(hbBuffer_);
+    hbBuffer_ = nullptr;
+  }
+}
 
-  TextShaperHb(const TextShaperHb &) = delete;
-  TextShaperHb &operator=(const TextShaperHb &) = delete;
-  TextShaperHb(TextShaperHb &&) = delete;
-  TextShaperHb &operator=(TextShaperHb &&) = delete;
+Result<ShapedRun, std::string>
+TextShaper::shapeUtf8(std::string_view utf8, const TextStyle &style,
+                      const TextLayoutParams &params,
+                      std::pmr::memory_resource &scratch) {
+  NURI_PROFILER_FUNCTION();
+  ShapedRun run{&memory_};
 
-  Result<ShapedRun, std::string>
-  shapeUtf8(std::string_view utf8, const TextStyle &style,
-            const TextLayoutParams &params,
-            std::pmr::memory_resource &scratch) override {
-    NURI_PROFILER_FUNCTION();
-    ShapedRun run{&memory_};
-
-    if (utf8.empty()) {
-      return Result<ShapedRun, std::string>::makeResult(std::move(run));
-    }
-
-    const FontHandle primaryFont = pickPrimaryFont(fonts_, style);
-    if (!::nuri::isValid(primaryFont)) {
-      return makeError(
-          "TextShaper::shapeUtf8: no valid font in style/fallback");
-    }
-    std::pmr::vector<FontHandle> candidates(&scratch);
-    candidates.reserve(16);
-    NURI_PROFILER_ZONE("TextShaper::buildFallbackCandidates",
-                       NURI_PROFILER_COLOR_CMD_DISPATCH);
-    buildFallbackCandidates(fonts_, style, primaryFont, params.allowFallback,
-                            candidates);
-    NURI_PROFILER_ZONE_END();
-    if (candidates.empty()) {
-      return makeError(
-          "TextShaper::shapeUtf8: fallback candidate set is empty");
-    }
-    const std::span<const FontHandle> candidateSpan(candidates.data(),
-                                                    candidates.size());
-
-    const float primaryScale =
-        fontScaleForPxSize(fonts_, primaryFont, style.pxSize);
-    auto ensureHb = ensureHbObjects();
-    if (ensureHb.hasError()) {
-      return makeError("TextShaper::shapeUtf8: ", ensureHb.error());
-    }
-
-    hbContext_.fonts = &fonts_;
-    hbContext_.font = primaryFont;
-    hbContext_.scale = primaryScale;
-
-    if (utf8.size() > static_cast<size_t>(INT_MAX)) {
-      return makeError("TextShaper::shapeUtf8: UTF-8 length exceeds INT_MAX");
-    }
-    const int utf8Len = static_cast<int>(utf8.size());
-    hb_buffer_reset(hbBuffer_);
-    hb_buffer_add_utf8(hbBuffer_, utf8.data(), utf8Len, 0, utf8Len);
-    const hb_direction_t requestedDirection = toHbDirection(params.direction);
-    if (requestedDirection != HB_DIRECTION_INVALID) {
-      hb_buffer_set_direction(hbBuffer_, requestedDirection);
-    }
-    hb_buffer_guess_segment_properties(hbBuffer_);
-    NURI_PROFILER_ZONE("TextShaper::hbShape", NURI_PROFILER_COLOR_CMD_DISPATCH);
-    hb_shape(hbFont_, hbBuffer_, nullptr, 0);
-    NURI_PROFILER_ZONE_END();
-
-    const unsigned int count = hb_buffer_get_length(hbBuffer_);
-    const hb_glyph_info_t *infos =
-        hb_buffer_get_glyph_infos(hbBuffer_, nullptr);
-    const hb_glyph_position_t *positions =
-        hb_buffer_get_glyph_positions(hbBuffer_, nullptr);
-
-    run.glyphs.reserve(count);
-    run.direction = fromHbDirection(hb_buffer_get_direction(hbBuffer_));
-
-    std::pmr::vector<uint32_t> codepointByOffset(&scratch);
-    preDecodeUtf8Offsets(utf8, codepointByOffset);
-
-    ResolvedGlyph replacementGlyph{};
-    {
-      FontHandle rFont{};
-      uint32_t rIdx = 0;
-      GlyphId rId = lookupGlyphFromCandidates(fonts_, candidateSpan, 0xfffdu,
-                                              &rFont, &rIdx);
-      if (rId == 0) {
-        rId = lookupGlyphFromCandidates(
-            fonts_, candidateSpan, static_cast<uint32_t>('?'), &rFont, &rIdx);
-      }
-      if (rId != 0) {
-        replacementGlyph = {rFont, rId, fonts_.findGlyph(rFont, rId)};
-      }
-    }
-
-    HashMap<uint32_t, ResolvedGlyph> resolveCache;
-    resolveCache.reserve(std::min(count, 256u));
-
-    HashMap<uint32_t, float> scaleCache;
-    scaleCache.reserve(candidates.size());
-    scaleCache[primaryFont.value] = primaryScale;
-
-    float penX = 0.0f;
-    float penY = 0.0f;
-    bool hasBounds = false;
-    uint32_t fallbackGlyphCount = 0;
-    uint32_t missingGlyphCount = 0;
-    NURI_PROFILER_ZONE("TextShaper::resolveGlyphs",
-                       NURI_PROFILER_COLOR_CMD_DRAW);
-    for (unsigned int i = 0; i < count; ++i) {
-      const uint32_t cluster = infos[i].cluster;
-      const uint32_t sourceCodepoint =
-          (cluster < codepointByOffset.size()) ? codepointByOffset[cluster] : 0;
-
-      ResolvedGlyph resolved{};
-      bool fromCache = false;
-      if (sourceCodepoint != 0) {
-        auto cacheIt = resolveCache.find(sourceCodepoint);
-        if (cacheIt != resolveCache.end()) {
-          resolved = cacheIt->second;
-          fromCache = true;
-        }
-      }
-
-      if (!fromCache) {
-        FontHandle rFont = primaryFont;
-        uint32_t rIdx = 0;
-        GlyphId rId = lookupGlyphFromCandidates(fonts_, candidateSpan,
-                                                sourceCodepoint, &rFont, &rIdx);
-        if (rId == 0 &&
-            fonts_.findGlyph(primaryFont, infos[i].codepoint) != nullptr) {
-          rId = static_cast<GlyphId>(infos[i].codepoint);
-          rFont = primaryFont;
-        }
-        if (rId != 0) {
-          resolved = {rFont, rId, fonts_.findGlyph(rFont, rId)};
-        } else {
-          resolved = replacementGlyph;
-          if (resolved.glyphId == 0) {
-            resolved.font = primaryFont;
-          }
-        }
-        if (sourceCodepoint != 0) {
-          resolveCache[sourceCodepoint] = resolved;
-        }
-      }
-
-      if (resolved.glyphId == 0) {
-        ++missingGlyphCount;
-        const uint32_t missingCp =
-            sourceCodepoint != 0 ? sourceCodepoint : 0xfffdu;
-        const uint64_t key = makeTelemetryKey(primaryFont.value, missingCp);
-        const uint32_t hitCount = ++missingGlyphCounts_[key];
-        if (hitCount == 1u) {
-          NURI_LOG_WARNING("TextShaper: missing glyph U+%06X for font=0x%08X",
-                           static_cast<unsigned int>(missingCp),
-                           static_cast<unsigned int>(primaryFont.value));
-        } else if ((hitCount & 63u) == 0u) {
-          NURI_LOG_DEBUG("TextShaper: missing glyph U+%06X repeated %u times "
-                         "for font=0x%08X",
-                         static_cast<unsigned int>(missingCp),
-                         static_cast<unsigned int>(hitCount),
-                         static_cast<unsigned int>(primaryFont.value));
-        }
-      } else if (resolved.font.value != primaryFont.value) {
-        ++fallbackGlyphCount;
-        const uint64_t key =
-            makeTelemetryKey(primaryFont.value, resolved.font.value);
-        const uint32_t switchCount = ++fallbackSwitchCounts_[key];
-        if (switchCount == 1u) {
-          NURI_LOG_INFO("TextShaper: fallback font switch primary=0x%08X "
-                        "fallback=0x%08X",
-                        static_cast<unsigned int>(primaryFont.value),
-                        static_cast<unsigned int>(resolved.font.value));
-        }
-      }
-
-      auto [scaleIt, scaleInserted] =
-          scaleCache.try_emplace(resolved.font.value, 0.0f);
-      if (scaleInserted) {
-        scaleIt->second =
-            fontScaleForPxSize(fonts_, resolved.font, style.pxSize);
-      }
-      const float resolvedScale = scaleIt->second;
-
-      ShapedGlyph glyph{};
-      glyph.font = resolved.font;
-      glyph.glyphId = resolved.glyphId;
-      glyph.cluster = cluster;
-      glyph.codepoint = sourceCodepoint;
-      if (resolved.font.value != primaryFont.value &&
-          resolved.metrics != nullptr) {
-        glyph.advanceX = resolved.metrics->advance * resolvedScale;
-      } else {
-        glyph.advanceX = static_cast<float>(positions[i].x_advance) / 64.0f;
-      }
-      glyph.advanceY = 0.0f;
-      glyph.offsetX = static_cast<float>(positions[i].x_offset) / 64.0f;
-      glyph.offsetY = static_cast<float>(positions[i].y_offset) / 64.0f;
-      run.glyphs.push_back(glyph);
-
-      if (resolved.metrics != nullptr) {
-        const float minX = penX + glyph.offsetX +
-                           (resolved.metrics->planeMinX * resolvedScale);
-        const float minY = penY + glyph.offsetY +
-                           (resolved.metrics->planeMinY * resolvedScale);
-        const float maxX = penX + glyph.offsetX +
-                           (resolved.metrics->planeMaxX * resolvedScale);
-        const float maxY = penY + glyph.offsetY +
-                           (resolved.metrics->planeMaxY * resolvedScale);
-        growBounds(run.inkBounds, hasBounds, minX, minY, maxX, maxY);
-      }
-
-      penX += glyph.advanceX;
-      penY += glyph.advanceY;
-    }
-    NURI_PROFILER_ZONE_END();
-
-    if (fallbackGlyphCount > 0 || missingGlyphCount > 0) {
-      NURI_LOG_DEBUG("TextShaper: run telemetry primary=0x%08X glyphs=%u "
-                     "fallback=%u missing=%u",
-                     static_cast<unsigned int>(primaryFont.value),
-                     static_cast<unsigned int>(count),
-                     static_cast<unsigned int>(fallbackGlyphCount),
-                     static_cast<unsigned int>(missingGlyphCount));
-    }
-
+  if (utf8.empty()) {
     return Result<ShapedRun, std::string>::makeResult(std::move(run));
   }
 
-private:
-  Result<bool, std::string> ensureHbObjects() {
-    if (hbBuffer_ == nullptr) {
-      hbBuffer_ = hb_buffer_create();
-      if (!hb_buffer_allocation_successful(hbBuffer_)) {
-        return Result<bool, std::string>::makeError(
-            "hb_buffer_create allocation failed");
-      }
-    }
-    if (hbFont_ == nullptr) {
-      hb_font_t *newFont = hb_font_create(hb_face_get_empty());
-      if (newFont == hb_font_get_empty()) {
-        return Result<bool, std::string>::makeError(
-            "hb_font_create allocation failed");
-      }
-      hbFont_ = newFont;
-      hb_font_set_funcs(hbFont_, hbFontFuncs(), &hbContext_, nullptr);
-    }
-    return Result<bool, std::string>::makeResult(true);
+  const FontHandle primaryFont = pickPrimaryFont(fonts_, style);
+  if (!::nuri::isValid(primaryFont)) {
+    return makeError(
+        "TextShaper::shapeUtf8: no valid font in style/fallback");
+  }
+  std::pmr::vector<FontHandle> candidates(&scratch);
+  candidates.reserve(16);
+  NURI_PROFILER_ZONE("TextShaper::buildFallbackCandidates",
+                     NURI_PROFILER_COLOR_CMD_DISPATCH);
+  buildFallbackCandidates(fonts_, style, primaryFont, params.allowFallback,
+                          candidates);
+  NURI_PROFILER_ZONE_END();
+  if (candidates.empty()) {
+    return makeError(
+        "TextShaper::shapeUtf8: fallback candidate set is empty");
+  }
+  const std::span<const FontHandle> candidateSpan(candidates.data(),
+                                                  candidates.size());
+
+  const float primaryScale =
+      fontScaleForPxSize(fonts_, primaryFont, style.pxSize);
+  auto ensureHb = ensureHbObjects();
+  if (ensureHb.hasError()) {
+    return makeError("TextShaper::shapeUtf8: ", ensureHb.error());
   }
 
-  FontManager &fonts_;
-  std::pmr::memory_resource &memory_;
-  HashMap<uint64_t, uint32_t> missingGlyphCounts_;
-  HashMap<uint64_t, uint32_t> fallbackSwitchCounts_;
-  HbFontContext hbContext_{};
-  hb_buffer_t *hbBuffer_ = nullptr;
-  hb_font_t *hbFont_ = nullptr;
-};
+  hbContext_.fonts = &fonts_;
+  hbContext_.font = primaryFont;
+  hbContext_.scale = primaryScale;
 
-} // namespace
+  if (utf8.size() > static_cast<size_t>(INT_MAX)) {
+    return makeError("TextShaper::shapeUtf8: UTF-8 length exceeds INT_MAX");
+  }
+  const int utf8Len = static_cast<int>(utf8.size());
+  hb_buffer_reset(hbBuffer_);
+  hb_buffer_add_utf8(hbBuffer_, utf8.data(), utf8Len, 0, utf8Len);
+  const hb_direction_t requestedDirection = toHbDirection(params.direction);
+  if (requestedDirection != HB_DIRECTION_INVALID) {
+    hb_buffer_set_direction(hbBuffer_, requestedDirection);
+  }
+  hb_buffer_guess_segment_properties(hbBuffer_);
+  NURI_PROFILER_ZONE("TextShaper::hbShape", NURI_PROFILER_COLOR_CMD_DISPATCH);
+  hb_shape(hbFont_, hbBuffer_, nullptr, 0);
+  NURI_PROFILER_ZONE_END();
 
-std::unique_ptr<TextShaper> TextShaper::create(const CreateDesc &desc) {
-  return std::make_unique<TextShaperHb>(desc);
+  const unsigned int count = hb_buffer_get_length(hbBuffer_);
+  const hb_glyph_info_t *infos =
+      hb_buffer_get_glyph_infos(hbBuffer_, nullptr);
+  const hb_glyph_position_t *positions =
+      hb_buffer_get_glyph_positions(hbBuffer_, nullptr);
+
+  run.glyphs.reserve(count);
+  run.direction = fromHbDirection(hb_buffer_get_direction(hbBuffer_));
+
+  std::pmr::vector<uint32_t> codepointByOffset(&scratch);
+  preDecodeUtf8Offsets(utf8, codepointByOffset);
+
+  ResolvedGlyph replacementGlyph{};
+  {
+    FontHandle rFont{};
+    uint32_t rIdx = 0;
+    GlyphId rId = lookupGlyphFromCandidates(fonts_, candidateSpan, 0xfffdu,
+                                            &rFont, &rIdx);
+    if (rId == 0) {
+      rId = lookupGlyphFromCandidates(
+          fonts_, candidateSpan, static_cast<uint32_t>('?'), &rFont, &rIdx);
+    }
+    if (rId != 0) {
+      replacementGlyph = {rFont, rId, fonts_.findGlyph(rFont, rId)};
+    }
+  }
+
+  HashMap<uint32_t, ResolvedGlyph> resolveCache;
+  resolveCache.reserve(std::min(count, 256u));
+
+  HashMap<uint32_t, float> scaleCache;
+  scaleCache.reserve(candidates.size());
+  scaleCache[primaryFont.value] = primaryScale;
+
+  float penX = 0.0f;
+  float penY = 0.0f;
+  bool hasBounds = false;
+  uint32_t fallbackGlyphCount = 0;
+  uint32_t missingGlyphCount = 0;
+  NURI_PROFILER_ZONE("TextShaper::resolveGlyphs",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
+  for (unsigned int i = 0; i < count; ++i) {
+    const uint32_t cluster = infos[i].cluster;
+    const uint32_t sourceCodepoint =
+        (cluster < codepointByOffset.size()) ? codepointByOffset[cluster] : 0;
+
+    ResolvedGlyph resolved{};
+    bool fromCache = false;
+    if (sourceCodepoint != 0) {
+      auto cacheIt = resolveCache.find(sourceCodepoint);
+      if (cacheIt != resolveCache.end()) {
+        resolved = cacheIt->second;
+        fromCache = true;
+      }
+    }
+
+    if (!fromCache) {
+      FontHandle rFont = primaryFont;
+      uint32_t rIdx = 0;
+      GlyphId rId = lookupGlyphFromCandidates(fonts_, candidateSpan,
+                                              sourceCodepoint, &rFont, &rIdx);
+      if (rId == 0 &&
+          fonts_.findGlyph(primaryFont, infos[i].codepoint) != nullptr) {
+        rId = static_cast<GlyphId>(infos[i].codepoint);
+        rFont = primaryFont;
+      }
+      if (rId != 0) {
+        resolved = {rFont, rId, fonts_.findGlyph(rFont, rId)};
+      } else {
+        resolved = replacementGlyph;
+        if (resolved.glyphId == 0) {
+          resolved.font = primaryFont;
+        }
+      }
+      if (sourceCodepoint != 0) {
+        resolveCache[sourceCodepoint] = resolved;
+      }
+    }
+
+    if (resolved.glyphId == 0) {
+      ++missingGlyphCount;
+      const uint32_t missingCp =
+          sourceCodepoint != 0 ? sourceCodepoint : 0xfffdu;
+      const uint64_t key = makeTelemetryKey(primaryFont.value, missingCp);
+      const uint32_t hitCount = ++missingGlyphCounts_[key];
+      if (hitCount == 1u) {
+        NURI_LOG_WARNING("TextShaper: missing glyph U+%06X for font=0x%08X",
+                         static_cast<unsigned int>(missingCp),
+                         static_cast<unsigned int>(primaryFont.value));
+      } else if ((hitCount & 63u) == 0u) {
+        NURI_LOG_DEBUG("TextShaper: missing glyph U+%06X repeated %u times "
+                       "for font=0x%08X",
+                       static_cast<unsigned int>(missingCp),
+                       static_cast<unsigned int>(hitCount),
+                       static_cast<unsigned int>(primaryFont.value));
+      }
+    } else if (resolved.font.value != primaryFont.value) {
+      ++fallbackGlyphCount;
+      const uint64_t key =
+          makeTelemetryKey(primaryFont.value, resolved.font.value);
+      const uint32_t switchCount = ++fallbackSwitchCounts_[key];
+      if (switchCount == 1u) {
+        NURI_LOG_INFO("TextShaper: fallback font switch primary=0x%08X "
+                      "fallback=0x%08X",
+                      static_cast<unsigned int>(primaryFont.value),
+                      static_cast<unsigned int>(resolved.font.value));
+      }
+    }
+
+    auto [scaleIt, scaleInserted] =
+        scaleCache.try_emplace(resolved.font.value, 0.0f);
+    if (scaleInserted) {
+      scaleIt->second =
+          fontScaleForPxSize(fonts_, resolved.font, style.pxSize);
+    }
+    const float resolvedScale = scaleIt->second;
+
+    ShapedGlyph glyph{};
+    glyph.font = resolved.font;
+    glyph.glyphId = resolved.glyphId;
+    glyph.cluster = cluster;
+    glyph.codepoint = sourceCodepoint;
+    if (resolved.font.value != primaryFont.value &&
+        resolved.metrics != nullptr) {
+      glyph.advanceX = resolved.metrics->advance * resolvedScale;
+    } else {
+      glyph.advanceX = static_cast<float>(positions[i].x_advance) / 64.0f;
+    }
+    glyph.advanceY = 0.0f;
+    glyph.offsetX = static_cast<float>(positions[i].x_offset) / 64.0f;
+    glyph.offsetY = static_cast<float>(positions[i].y_offset) / 64.0f;
+    run.glyphs.push_back(glyph);
+
+    if (resolved.metrics != nullptr) {
+      const float minX = penX + glyph.offsetX +
+                         (resolved.metrics->planeMinX * resolvedScale);
+      const float minY = penY + glyph.offsetY +
+                         (resolved.metrics->planeMinY * resolvedScale);
+      const float maxX = penX + glyph.offsetX +
+                         (resolved.metrics->planeMaxX * resolvedScale);
+      const float maxY = penY + glyph.offsetY +
+                         (resolved.metrics->planeMaxY * resolvedScale);
+      growBounds(run.inkBounds, hasBounds, minX, minY, maxX, maxY);
+    }
+
+    penX += glyph.advanceX;
+    penY += glyph.advanceY;
+  }
+  NURI_PROFILER_ZONE_END();
+
+  if (fallbackGlyphCount > 0 || missingGlyphCount > 0) {
+    NURI_LOG_DEBUG("TextShaper: run telemetry primary=0x%08X glyphs=%u "
+                   "fallback=%u missing=%u",
+                   static_cast<unsigned int>(primaryFont.value),
+                   static_cast<unsigned int>(count),
+                   static_cast<unsigned int>(fallbackGlyphCount),
+                   static_cast<unsigned int>(missingGlyphCount));
+  }
+
+  return Result<ShapedRun, std::string>::makeResult(std::move(run));
+}
+
+Result<bool, std::string> TextShaper::ensureHbObjects() {
+  if (hbBuffer_ == nullptr) {
+    hbBuffer_ = hb_buffer_create();
+    if (!hb_buffer_allocation_successful(hbBuffer_)) {
+      return Result<bool, std::string>::makeError(
+          "hb_buffer_create allocation failed");
+    }
+  }
+  if (hbFont_ == nullptr) {
+    hb_font_t *newFont = hb_font_create(hb_face_get_empty());
+    if (newFont == hb_font_get_empty()) {
+      return Result<bool, std::string>::makeError(
+          "hb_font_create allocation failed");
+    }
+    hbFont_ = newFont;
+    hb_font_set_funcs(hbFont_, hbFontFuncs(), &hbContext_, nullptr);
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 } // namespace nuri

@@ -1,12 +1,15 @@
 #pragma once
 
+#include "nuri/core/containers/hash_map.h"
 #include "nuri/core/result.h"
 #include "nuri/text/font_manager.h"
 
-#include <memory>
 #include <memory_resource>
 #include <string>
-#include <vector>
+#include <string_view>
+
+struct hb_buffer_t;
+struct hb_font_t;
 
 namespace nuri {
 
@@ -29,6 +32,12 @@ struct ShapedRun {
   TextBounds inkBounds{};
 };
 
+struct HbFontContext {
+  const FontManager *fonts = nullptr;
+  FontHandle font = kInvalidFontHandle;
+  float scale = 1.0f;
+};
+
 class NURI_API TextShaper {
 public:
   struct CreateDesc {
@@ -36,22 +45,29 @@ public:
     std::pmr::memory_resource &memory;
   };
 
-  static std::unique_ptr<TextShaper> create(const CreateDesc &desc);
-  virtual ~TextShaper() = default;
+  explicit TextShaper(const CreateDesc &desc);
+  ~TextShaper();
 
   TextShaper(const TextShaper &) = delete;
   TextShaper &operator=(const TextShaper &) = delete;
   TextShaper(TextShaper &&) = delete;
   TextShaper &operator=(TextShaper &&) = delete;
 
-protected:
-  TextShaper() = default;
-
-public:
-  virtual Result<ShapedRun, std::string>
+  Result<ShapedRun, std::string>
   shapeUtf8(std::string_view utf8, const TextStyle &style,
             const TextLayoutParams &params,
-            std::pmr::memory_resource &scratch) = 0;
+            std::pmr::memory_resource &scratch);
+
+private:
+  Result<bool, std::string> ensureHbObjects();
+
+  FontManager &fonts_;
+  std::pmr::memory_resource &memory_;
+  HashMap<uint64_t, uint32_t> missingGlyphCounts_;
+  HashMap<uint64_t, uint32_t> fallbackSwitchCounts_;
+  HbFontContext hbContext_{};
+  hb_buffer_t *hbBuffer_ = nullptr;
+  hb_font_t *hbFont_ = nullptr;
 };
 
 } // namespace nuri
