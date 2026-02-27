@@ -49,6 +49,8 @@ public:
                                            RenderPassList &out);
   Result<bool, std::string> append2DPasses(RenderFrameContext &frame,
                                            RenderPassList &out);
+  void setWorldAlphaDiscardThreshold(float threshold);
+  [[nodiscard]] float worldAlphaDiscardThreshold() const;
   void clear();
 
 private:
@@ -131,7 +133,7 @@ private:
     uint64_t transformBufferAddress = 0;
     uint32_t atlas = 0;
     float pxRange = 4.0f;
-    float pad0 = 0.0f;
+    float alphaDiscardThreshold = 1.0e-3f;
     float pad1 = 0.0f;
   };
 
@@ -233,6 +235,7 @@ private:
   bool worldHasBillboards_ = false;
   uint64_t worldGlyphBufferAddress_ = 0;
   uint64_t worldTransformBufferAddress_ = 0;
+  float worldAlphaDiscardThreshold_ = 1.0e-3f;
   BufferHandle worldDependencyBuffer_{};
 };
 

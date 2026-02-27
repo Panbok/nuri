@@ -294,6 +294,14 @@ TextRenderer::TextRenderer(const CreateDesc &desc)
 
 TextRenderer::~TextRenderer() { destroyGpu(); }
 
+void TextRenderer::setWorldAlphaDiscardThreshold(float threshold) {
+  worldAlphaDiscardThreshold_ = std::clamp(threshold, 0.0f, 1.0f);
+}
+
+float TextRenderer::worldAlphaDiscardThreshold() const {
+  return worldAlphaDiscardThreshold_;
+}
+
 Result<bool, std::string> TextRenderer::beginFrame(uint64_t frameIndex) {
   if (frameIndex_ == frameIndex) {
     return Result<bool, std::string>::makeResult(true);
@@ -1034,6 +1042,7 @@ TextRenderer::append3DPasses(RenderFrameContext &frame, RenderPassList &out) {
         .transformBufferAddress = worldTransformBufferAddress_,
         .atlas = b.atlas,
         .pxRange = b.pxRange,
+        .alphaDiscardThreshold = worldAlphaDiscardThreshold_,
     });
     const WorldPC &pc = worldPcs_.back();
     DrawItem d{};
@@ -1049,7 +1058,7 @@ TextRenderer::append3DPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (hasDepth) {
       d.useDepthState = true;
       d.depthState = {.compareOp = CompareOp::LessEqual,
-                      .isDepthWriteEnabled = false};
+                      .isDepthWriteEnabled = true};
     }
     worldDraws_.push_back(d);
   }

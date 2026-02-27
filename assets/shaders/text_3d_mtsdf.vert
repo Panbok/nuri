@@ -34,9 +34,10 @@ layout(push_constant) uniform PushConstants {
   TransformBuffer transformBuffer;
   uint atlasBindless;
   float pxRange;
-  float _pad0;
+  float alphaDiscardThreshold;
   float _pad1;
-} pc;
+}
+pc;
 
 vec4 unpackColor(uint packed) {
   const float r = float((packed >> 0u) & 0xffu) / 255.0;
@@ -51,14 +52,8 @@ void main() {
   const ResolvedTransform transform =
       pc.transformBuffer.transforms[glyph.transformIndex];
 
-  uint corner = uint(gl_VertexIndex);
-  if (corner == 3u) {
-    corner = 2u;
-  } else if (corner == 4u) {
-    corner = 3u;
-  } else if (corner == 5u) {
-    corner = 0u;
-  }
+  const uint cornerLUT[6] = uint[6](0u, 1u, 2u, 2u, 3u, 0u);
+  uint corner = cornerLUT[gl_VertexIndex];
 
   vec2 local = vec2(0.0);
   vec2 uv = vec2(0.0);
