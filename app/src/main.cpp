@@ -29,6 +29,7 @@ enum class ScenePreset : uint8_t {
   SingleDuck,
   InstancedDuck32K,
   BistroExterior,
+  DamagedHelmet,
   Text3DTest,
 };
 
@@ -48,11 +49,16 @@ constexpr std::string_view kBistroExteriorModelRelativePath =
     "bistro/exterior/exterior.obj";
 constexpr std::string_view kBistroExteriorAbsolutePath =
     "E:/install/nuri/assets/models/bistro/exterior/exterior.obj";
+constexpr std::string_view kDamagedHelmetModelRelativePath =
+    "DamagedHelmet/DamagedHelmet.gltf";
+constexpr std::string_view kDamagedHelmetAlbedoRelativePath =
+    "DamagedHelmet/Default_albedo.jpg";
 constexpr float kBistroTargetRadius = 120.0f;
 constexpr float kBistroMinScale = 0.0005f;
 constexpr float kBistroMaxScale = 2.0f;
 constexpr const char *kScenePresetNames[] = {
-    "Single Duck", "Instanced Duck 32K", "Bistro Exterior", "Text 3D Test"};
+    "Single Duck",      "Instanced Duck 32K", "Bistro Exterior",
+    "Damaged Helmet",   "Text 3D Test"};
 
 int scenePresetToIndex(ScenePreset preset) {
   switch (preset) {
@@ -62,8 +68,10 @@ int scenePresetToIndex(ScenePreset preset) {
     return 1;
   case ScenePreset::BistroExterior:
     return 2;
-  case ScenePreset::Text3DTest:
+  case ScenePreset::DamagedHelmet:
     return 3;
+  case ScenePreset::Text3DTest:
+    return 4;
   }
   return 0;
 }
@@ -77,6 +85,8 @@ ScenePreset scenePresetFromIndex(int index) {
   case 2:
     return ScenePreset::BistroExterior;
   case 3:
+    return ScenePreset::DamagedHelmet;
+  case 4:
     return ScenePreset::Text3DTest;
   default:
     return ScenePreset::SingleDuck;
@@ -730,6 +740,10 @@ private:
         (config_.roots.models / kSampleDuckModelRelativePath).string();
     const std::string duckAlbedoPath =
         (config_.roots.models / kSampleDuckAlbedoRelativePath).string();
+    const std::string helmetModelPath =
+        (config_.roots.models / kDamagedHelmetModelRelativePath).string();
+    const std::string helmetAlbedoPath =
+        (config_.roots.models / kDamagedHelmetAlbedoRelativePath).string();
     const std::string environmentHdrPath =
         (config_.roots.textures / kSampleEnvironmentHdrRelativePath).string();
 
@@ -743,6 +757,30 @@ private:
         nuri::Texture::loadTexture(getGPU(), duckAlbedoPath, "duck_albedo");
     NURI_ASSERT(!albedoResult.hasError(), "Failed to load albedo texture: %s",
                 albedoResult.error().c_str());
+
+    auto helmetModelResult = nuri::Model::createFromFile(
+        getGPU(), helmetModelPath, {}, &meshImportMemory, "damaged_helmet");
+    if (helmetModelResult.hasError()) {
+      NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to load "
+                       "DamagedHelmet model '%s': %s",
+                       helmetModelPath.c_str(),
+                       helmetModelResult.error().c_str());
+    }
+    NURI_ASSERT(!helmetModelResult.hasError(),
+                "Failed to create DamagedHelmet model: %s",
+                helmetModelResult.error().c_str());
+
+    auto helmetAlbedoResult = nuri::Texture::loadTexture(
+        getGPU(), helmetAlbedoPath, "damaged_helmet_albedo");
+    if (helmetAlbedoResult.hasError()) {
+      NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to load "
+                       "DamagedHelmet albedo '%s': %s",
+                       helmetAlbedoPath.c_str(),
+                       helmetAlbedoResult.error().c_str());
+    }
+    NURI_ASSERT(!helmetAlbedoResult.hasError(),
+                "Failed to load DamagedHelmet albedo: %s",
+                helmetAlbedoResult.error().c_str());
 
     auto cubemapResult = nuri::Texture::loadCubemapFromEquirectangularHDR(
         getGPU(), environmentHdrPath, "duck_cubemap");
@@ -776,8 +814,17 @@ private:
     duckModel_ = std::shared_ptr<nuri::Model>(std::move(modelResult.value()));
     duckAlbedo_ =
         std::shared_ptr<nuri::Texture>(std::move(albedoResult.value()));
+    helmetModel_ =
+        std::shared_ptr<nuri::Model>(std::move(helmetModelResult.value()));
+    helmetAlbedo_ =
+        std::shared_ptr<nuri::Texture>(std::move(helmetAlbedoResult.value()));
     bistroAlbedoFallback_ =
         std::shared_ptr<nuri::Texture>(std::move(whiteAlbedoResult.value()));
+    NURI_LOG_INFO(
+        "NuriApplication::loadSceneResources: DamagedHelmet loaded "
+        "(submeshes=%zu vertices=%u indices=%u)",
+        helmetModel_->submeshes().size(), helmetModel_->vertexCount(),
+        helmetModel_->indexCount());
 
     applyScenePreset(scenePreset_);
   }
@@ -1033,6 +1080,59 @@ private:
                                                     cameraWidgetState_);
   }
 
+  void setupDamagedHelmetScene() {
+    NURI_ASSERT(helmetModel_ != nullptr, "DamagedHelmet model is not loaded");
+    NURI_ASSERT(helmetAlbedo_ != nullptr,
+                "DamagedHelmet albedo texture is not loaded");
+    if (helmetRenderableIndex_ != std::numeric_limits<uint32_t>::max()) {
+      return;
+    }
+
+    renderSettings_.opaque.enableInstanceCompute = false;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.enableTessellation = false;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.meshLodDistanceThresholds =
+        glm::vec3(8.0f, 16.0f, 32.0f);
+    renderSettings_.opaque.enableInstanceAnimation = false;
+
+    const nuri::BoundingBox &bounds = helmetModel_->bounds();
+    auto addResult = scene_.addOpaqueRenderable(
+        helmetModel_, helmetAlbedo_, helmetBaseModel_);
+    NURI_ASSERT(!addResult.hasError(),
+                "Failed to add DamagedHelmet renderable: %s",
+                addResult.error().c_str());
+    helmetRenderableIndex_ = addResult.value();
+
+    const float rawRadius =
+        std::max(0.5f * glm::length(bounds.getSize()), 0.25f);
+    const glm::vec3 center =
+        glm::vec3(helmetBaseModel_ * glm::vec4(bounds.getCenter(), 1.0f));
+    const float radius = std::max(0.25f, rawRadius);
+    const float cameraDistance = std::max(radius * 2.4f, 2.0f);
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    nuri::PerspectiveParams perspective = camera->perspective();
+    perspective.nearPlane = std::max(0.01f, cameraDistance / 3000.0f);
+    perspective.farPlane = std::max(500.0f, cameraDistance + radius * 12.0f);
+    camera->setProjectionType(nuri::ProjectionType::Perspective);
+    camera->setPerspective(perspective);
+    camera->setLookAt(center + glm::vec3(-cameraDistance * 0.38f,
+                                         radius * 0.18f + 0.2f,
+                                         -cameraDistance),
+                      center + glm::vec3(0.0f, radius * 0.03f, 0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
+    nuri::syncCameraControllerWidgetStateFromCamera(*camera,
+                                                    cameraWidgetState_);
+    NURI_LOG_INFO("NuriApplication: DamagedHelmet scene stats submeshes=%zu "
+                  "vertices=%u indices=%u rawRadius=%.2f radius=%.2f "
+                  "near=%.3f far=%.2f",
+                  helmetModel_->submeshes().size(), helmetModel_->vertexCount(),
+                  helmetModel_->indexCount(), rawRadius, radius,
+                  perspective.nearPlane, perspective.farPlane);
+  }
+
   void applyScenePreset(ScenePreset preset) {
     NURI_ASSERT(duckModel_ != nullptr, "Duck model is not loaded");
     NURI_ASSERT(duckAlbedo_ != nullptr, "Duck albedo texture is not loaded");
@@ -1043,6 +1143,7 @@ private:
     }
     duckRenderableIndex_ = std::numeric_limits<uint32_t>::max();
     bistroRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+    helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
     scenePreset_ = preset;
 
     if (scenePreset_ == ScenePreset::InstancedDuck32K) {
@@ -1051,6 +1152,8 @@ private:
       bistroLoadFailed_ = false;
       bistroLoadError_.clear();
       setupBistroExteriorScene();
+    } else if (scenePreset_ == ScenePreset::DamagedHelmet) {
+      setupDamagedHelmetScene();
     } else if (scenePreset_ == ScenePreset::Text3DTest) {
       setupText3DTestScene();
     } else {
@@ -1120,6 +1223,8 @@ private:
   nuri::RenderScene scene_;
   std::shared_ptr<nuri::Model> duckModel_{};
   std::shared_ptr<nuri::Texture> duckAlbedo_{};
+  std::shared_ptr<nuri::Model> helmetModel_{};
+  std::shared_ptr<nuri::Texture> helmetAlbedo_{};
   std::shared_ptr<nuri::Model> bistroModel_{};
   std::shared_ptr<nuri::Texture> bistroAlbedoFallback_{};
   std::optional<nuri::ModelAsyncLoad> bistroAsyncLoad_{};
@@ -1129,9 +1234,12 @@ private:
   double bistroLastProgressLogTimeSeconds_ = 0.0;
   nuri::CameraHandle mainCameraHandle_{};
   uint32_t duckRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+  uint32_t helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
   uint32_t bistroRenderableIndex_ = std::numeric_limits<uint32_t>::max();
   glm::mat4 duckBaseModel_ =
       glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1, 0, 0));
+  glm::mat4 helmetBaseModel_ =
+      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0));
 
   nuri::RenderSettings renderSettings_{};
   nuri::RenderFrameContext frameContext_{};
