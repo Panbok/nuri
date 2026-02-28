@@ -50,15 +50,11 @@ Result<bool, std::string> TextSystem::initialize() {
         "TextSystem: failed to create TextShaper (unknown exception)");
   }
 
-  auto layouter = TextLayouter::create(TextLayouter::CreateDesc{
+  auto layouter = std::make_unique<TextLayouter>(TextLayouter::CreateDesc{
       .fonts = *fonts,
       .shaper = *shaper,
       .memory = memory_,
   });
-  if (!layouter) {
-    return Result<bool, std::string>::makeError(
-        "TextSystem: failed to create TextLayouter");
-  }
 
   std::unique_ptr<TextRenderer> rendererPtr;
   try {

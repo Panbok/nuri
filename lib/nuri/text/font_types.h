@@ -98,6 +98,11 @@ struct GlyphMetrics {
   uint16_t localPageIndex = 0;
 };
 
+struct GlyphLookupResult {
+  const GlyphMetrics *metrics = nullptr;
+  AtlasPageHandle atlasPage = kInvalidAtlasPageHandle;
+};
+
 struct FontLoadDesc {
   std::string path;
   std::string debugName;

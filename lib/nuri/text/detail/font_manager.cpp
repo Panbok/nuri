@@ -269,6 +269,23 @@ public:
     return record->atlasPages[localPageIndex];
   }
 
+  GlyphLookupResult resolveGlyph(FontHandle font, GlyphId glyph) const override {
+    const FontRecord *record = resolveFont(font);
+    if (record == nullptr) {
+      return {};
+    }
+    const auto it = record->glyphToIndex.find(glyph);
+    if (it == record->glyphToIndex.end()) {
+      return {};
+    }
+    const GlyphMetrics &m = record->glyphs[it->second];
+    AtlasPageHandle page = kInvalidAtlasPageHandle;
+    if (m.localPageIndex < record->atlasPages.size()) {
+      page = record->atlasPages[m.localPageIndex];
+    }
+    return {&m, page};
+  }
+
   TextureHandle atlasTexture(AtlasPageHandle page) const override {
     const AtlasPageRecord *record = resolveAtlasPageRecord(page);
     if (record == nullptr) {
