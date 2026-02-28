@@ -67,6 +67,8 @@ public:
   // Rendering
   Result<bool, std::string> beginFrame(uint64_t frameIndex) override;
   Result<bool, std::string> submitFrame(const RenderFrame &frame) override;
+  Result<bool, std::string> submitComputeDispatches(
+      std::span<const ComputeDispatchItem> dispatches) override;
   Result<GeometryAllocationHandle, std::string>
   allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
@@ -79,6 +81,9 @@ public:
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
                                          std::span<const std::byte> data,
                                          size_t offset = 0) override;
+  Result<bool, std::string>
+  readBuffer(BufferHandle buffer, size_t offset,
+             std::span<std::byte> outBytes) override;
   std::byte *getMappedBufferPtr(BufferHandle buffer) override;
   void flushMappedBuffer(BufferHandle buffer, size_t offset,
                          size_t size) override;

@@ -1706,6 +1706,82 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
+    std::span<const ComputeDispatchItem> dispatches) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DISPATCH);
+  static_assert(kMaxDependencyBuffers <=
+                lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES);
+  if (dispatches.empty()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
+  const auto fillDependencies =
+      [this](std::span<const BufferHandle> dependencyBuffers,
+             lvk::Dependencies &deps,
+             std::string_view context) -> Result<bool, std::string> {
+    if (dependencyBuffers.size() > kMaxDependencyBuffers) {
+      return makeDependencyCountExceededError(context);
+    }
+
+    size_t dstIndex = 0;
+    for (const BufferHandle bufferHandle : dependencyBuffers) {
+      if (!nuri::isValid(bufferHandle)) {
+        continue;
+      }
+      if (!impl_->buffers.isValid(bufferHandle)) {
+        return makeDependencyError(context, "dependency buffer is invalid");
+      }
+      deps.buffers[dstIndex++] = impl_->buffers.getLvkHandle(bufferHandle);
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+
+  for (const ComputeDispatchItem &dispatch : dispatches) {
+    if (!impl_->computePipelines.isValid(dispatch.pipeline)) {
+      return Result<bool, std::string>::makeError(
+          "submitComputeDispatches: invalid compute pipeline handle");
+    }
+    if (dispatch.dispatch.x == 0 || dispatch.dispatch.y == 0 ||
+        dispatch.dispatch.z == 0) {
+      return Result<bool, std::string>::makeError(
+          "submitComputeDispatches: invalid compute dispatch size");
+    }
+
+    lvk::Dependencies dispatchDependencies{};
+    auto dispatchDepsResult = fillDependencies(
+        dispatch.dependencyBuffers, dispatchDependencies,
+        "LvkGPUDevice::submitComputeDispatches");
+    if (dispatchDepsResult.hasError()) {
+      return dispatchDepsResult;
+    }
+
+    const bool dispatchLabelPushed =
+        pushDebugLabel(commandBuffer, dispatch.debugLabel, dispatch.debugColor);
+
+    commandBuffer.cmdBindComputePipeline(
+        impl_->computePipelines.getLvkHandle(dispatch.pipeline));
+    if (!dispatch.pushConstants.empty()) {
+      commandBuffer.cmdPushConstants(
+          static_cast<const void *>(dispatch.pushConstants.data()),
+          dispatch.pushConstants.size(), 0);
+    }
+    commandBuffer.cmdDispatchThreadGroups(
+        {.width = dispatch.dispatch.x,
+         .height = dispatch.dispatch.y,
+         .depth = dispatch.dispatch.z},
+        dispatchDependencies);
+
+    if (dispatchLabelPushed) {
+      commandBuffer.cmdPopDebugGroupLabel();
+    }
+  }
+
+  const lvk::SubmitHandle submitHandle = impl_->context->submit(commandBuffer);
+  impl_->context->wait(submitHandle);
+  return Result<bool, std::string>::makeResult(true);
+}
+
 Result<bool, std::string>
 LvkGPUDevice::updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
                            size_t offset) {
@@ -1736,6 +1812,35 @@ LvkGPUDevice::updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
   if (!res.isOk()) {
     return Result<bool, std::string>::makeError(std::string(res.message));
   }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+LvkGPUDevice::readBuffer(BufferHandle buffer, size_t offset,
+                         std::span<std::byte> outBytes) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  if (!impl_->buffers.isValid(buffer)) {
+    return Result<bool, std::string>::makeError("readBuffer: invalid buffer");
+  }
+  if (outBytes.empty()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const lvk::BufferHandle lvkBuf = impl_->buffers.getLvkHandle(buffer);
+  const size_t bufferSize =
+      static_cast<size_t>(lvk::getBufferSize(impl_->context.get(), lvkBuf));
+  if (offset > bufferSize || outBytes.size() > bufferSize - offset) {
+    return Result<bool, std::string>::makeError(
+        "readBuffer: offset + outBytes.size() exceeds buffer size");
+  }
+
+  lvk::Result res =
+      impl_->context->download(lvkBuf, static_cast<void *>(outBytes.data()),
+                               outBytes.size(), offset);
+  if (!res.isOk()) {
+    return Result<bool, std::string>::makeError(std::string(res.message));
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 

@@ -86,6 +86,8 @@ public:
   // Rendering
   virtual Result<bool, std::string> beginFrame(uint64_t frameIndex) = 0;
   virtual Result<bool, std::string> submitFrame(const RenderFrame &frame) = 0;
+  virtual Result<bool, std::string> submitComputeDispatches(
+      std::span<const ComputeDispatchItem> dispatches) = 0;
   virtual Result<GeometryAllocationHandle, std::string>
   allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
@@ -98,6 +100,9 @@ public:
   virtual Result<bool, std::string>
   updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
                size_t offset = 0) = 0;
+  virtual Result<bool, std::string>
+  readBuffer(BufferHandle buffer, size_t offset,
+             std::span<std::byte> outBytes) = 0;
   // Returns a persistent mapped pointer for host-visible buffers, or nullptr
   // when direct mapping is unavailable for this buffer/backend.
   virtual std::byte *getMappedBufferPtr(BufferHandle buffer) = 0;
