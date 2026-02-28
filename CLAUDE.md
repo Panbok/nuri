@@ -31,7 +31,7 @@
 - Never `memset` non-trivial C++ objects; prefer explicit `reset()` logic for correctness.
 
 ## Abstractions and deps
-- Use the PIMPL pattern when you need to hide third-party deps, reduce rebuilds, or keep ABI stable.
+- Use the PIMPL pattern when you need to hide third-party deps or reduce rebuilds.
 - Examples: `GPUDevice` and `Window` use `struct Impl` to hide LVK/GLFW types from public headers.
 
 ## Shaders
