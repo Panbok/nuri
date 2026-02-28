@@ -1834,6 +1834,11 @@ LvkGPUDevice::readBuffer(BufferHandle buffer, size_t offset,
         "readBuffer: offset + outBytes.size() exceeds buffer size");
   }
 
+  if (const uint8_t *mapped = impl_->context->getMappedPtr(lvkBuf)) {
+    std::memcpy(outBytes.data(), mapped + offset, outBytes.size());
+    return Result<bool, std::string>::makeResult(true);
+  }
+
   lvk::Result res =
       impl_->context->download(lvkBuf, static_cast<void *>(outBytes.data()),
                                outBytes.size(), offset);
