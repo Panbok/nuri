@@ -1,3 +1,4 @@
+#include "nuri/core/log.h"
 #include "nuri/pch.h"
 
 #include "nuri/text/text_layouter.h"
@@ -57,8 +58,22 @@ struct FontScaleInfo {
 }
 
 [[nodiscard]] bool isBreakableWhitespace(uint32_t codepoint) {
-  return codepoint == static_cast<uint32_t>(' ') ||
-         codepoint == static_cast<uint32_t>('\t');
+  if (codepoint == static_cast<uint32_t>(' ') ||
+      codepoint == static_cast<uint32_t>('\t')) {
+    return true;
+  }
+
+  if (codepoint == 0x1680u) {
+    return true;
+  }
+  if (codepoint >= 0x2000u && codepoint <= 0x200Au) {
+    return true;
+  }
+  if (codepoint == 0x202Fu || codepoint == 0x205Fu || codepoint == 0x3000u) {
+    return true;
+  }
+
+  return false;
 }
 
 constexpr float kAdvanceCollapseAbsEpsilon = 1.0e-4f;
@@ -427,7 +442,7 @@ uint32_t TextLayouter::allocateSlot() {
     return static_cast<uint32_t>(pool_.size() - 1);
   }
   const uint32_t victim = lruTail_;
-  assert(victim != kNoSlot);
+  NURI_ASSERT(victim != kNoSlot, "TextLayouter: no free slot available");
   lruRemove(victim);
   if (auto it = cacheMap_.find(pool_[victim].hash);
       it != cacheMap_.end() && it->second == victim) {

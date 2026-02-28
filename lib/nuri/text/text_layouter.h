@@ -37,6 +37,8 @@ public:
 
   TextLayouter(const TextLayouter &) = delete;
   TextLayouter &operator=(const TextLayouter &) = delete;
+  TextLayouter(TextLayouter &&) = delete;
+  TextLayouter &operator=(TextLayouter &&) = delete;
 
   Result<TextLayout, std::string>
   layoutUtf8(std::string_view utf8, const TextStyle &style,
