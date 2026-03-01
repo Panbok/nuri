@@ -21,6 +21,7 @@
     "implot",
     "meshoptimizer",
     "yyjson",
-    "unordered-dense"
+    "unordered-dense",
+    "ktx"
   ]
 }
