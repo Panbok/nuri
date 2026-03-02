@@ -389,20 +389,52 @@ struct BakerySystem::Impl {
 
   void handleCacheCheck(JobRecord &job) {
     NURI_PROFILER_ZONE("BakerySystem::cacheCheck", NURI_PROFILER_COLOR_CREATE);
-    if (job.kind == BakeJobKind::BrdfLut) {
-      const auto *request = std::get_if<BrdfLutBakeRequest>(&job.request);
-      if (request == nullptr) {
-        setFailed(job, "BakerySystem: BRDF request payload mismatch");
+    const auto run = [&]() {
+      if (job.kind == BakeJobKind::BrdfLut) {
+        const auto *request = std::get_if<BrdfLutBakeRequest>(&job.request);
+        if (request == nullptr) {
+          setFailed(job, "BakerySystem: BRDF request payload mismatch");
+          return;
+        }
+
+        auto planResult = detail::planBrdfLutBake(config, request->forceRebuild);
+        if (planResult.hasError()) {
+          setFailed(job, planResult.error());
+          return;
+        }
+
+        detail::BrdfBakePlan plan = std::move(planResult.value());
+        if (!plan.shouldBake) {
+          job.state = BakeJobState::Skipped;
+          job.summary = "Up-to-date";
+          job.error.clear();
+          return;
+        }
+
+        BrdfJobData data{};
+        data.plan = std::move(plan);
+        job.data = std::move(data);
+        job.totalSteps = detail::brdfTotalSteps();
+        job.completedSteps = 0u;
+        job.summary = "Cache check complete";
+        job.state = BakeJobState::GpuSetup;
         return;
       }
 
-      auto planResult = detail::planBrdfLutBake(config, request->forceRebuild);
+      const auto *request = std::get_if<EnvmapPrefilterBakeRequest>(&job.request);
+      if (request == nullptr) {
+        setFailed(job, "BakerySystem: envmap request payload mismatch");
+        return;
+      }
+
+      auto planResult = detail::planEnvmapPrefilterBake(
+          config, request->environmentHdrPath, request->forceRebuild);
       if (planResult.hasError()) {
         setFailed(job, planResult.error());
         return;
       }
 
-      detail::BrdfBakePlan plan = std::move(planResult.value());
+      detail::EnvBakePlan plan = std::move(planResult.value());
       if (!plan.shouldBake) {
         job.state = BakeJobState::Skipped;
         job.summary = "Up-to-date";
@@ -410,148 +442,125 @@ struct BakerySystem::Impl {
         return;
       }
 
-      BrdfJobData data{};
+      EnvJobData data{};
       data.plan = std::move(plan);
       job.data = std::move(data);
-      job.totalSteps = detail::brdfTotalSteps();
+      job.totalSteps = 0u;
       job.completedSteps = 0u;
       job.summary = "Cache check complete";
       job.state = BakeJobState::GpuSetup;
-      return;
-    }
-
-    const auto *request = std::get_if<EnvmapPrefilterBakeRequest>(&job.request);
-    if (request == nullptr) {
-      setFailed(job, "BakerySystem: envmap request payload mismatch");
-      return;
-    }
-
-    auto planResult = detail::planEnvmapPrefilterBake(
-        config, request->environmentHdrPath, request->forceRebuild);
-    if (planResult.hasError()) {
-      setFailed(job, planResult.error());
-      return;
-    }
-
-    detail::EnvBakePlan plan = std::move(planResult.value());
-    if (!plan.shouldBake) {
-      job.state = BakeJobState::Skipped;
-      job.summary = "Up-to-date";
-      job.error.clear();
-      return;
-    }
-
-    EnvJobData data{};
-    data.plan = std::move(plan);
-    job.data = std::move(data);
-    job.totalSteps = 0u;
-    job.completedSteps = 0u;
-    job.summary = "Cache check complete";
-    job.state = BakeJobState::GpuSetup;
+    };
+    run();
     NURI_PROFILER_ZONE_END();
   }
 
   void handleGpuSetup(JobRecord &job) {
     NURI_PROFILER_ZONE("BakerySystem::gpuSetup", NURI_PROFILER_COLOR_CREATE);
-    if (job.kind == BakeJobKind::BrdfLut) {
-      auto *data = std::get_if<BrdfJobData>(&job.data);
-      if (data == nullptr) {
-        setFailed(job, "BakerySystem: missing BRDF job data");
+    const auto run = [&]() {
+      if (job.kind == BakeJobKind::BrdfLut) {
+        auto *data = std::get_if<BrdfJobData>(&job.data);
+        if (data == nullptr) {
+          setFailed(job, "BakerySystem: missing BRDF job data");
+          return;
+        }
+        auto setupResult =
+            detail::setupBrdfLutBake(*gpu, data->plan.shaderPath, data->gpu);
+        if (setupResult.hasError()) {
+          setFailed(job, setupResult.error());
+          return;
+        }
+        job.state = BakeJobState::GpuStep;
+        job.summary = "GPU setup complete";
         return;
       }
+
+      auto *data = std::get_if<EnvJobData>(&job.data);
+      if (data == nullptr) {
+        setFailed(job, "BakerySystem: missing envmap job data");
+        return;
+      }
+      if (data->gpu.bakeTileSize == 0u) {
+        data->gpu.bakeTileSize = bakeTileSizeForProfile(profile);
+      }
       auto setupResult =
-          detail::setupBrdfLutBake(*gpu, data->plan.shaderPath, data->gpu);
+          detail::advanceEnvmapPrefilterSetup(*gpu, data->plan, data->gpu);
       if (setupResult.hasError()) {
         setFailed(job, setupResult.error());
         return;
       }
-      job.state = BakeJobState::GpuStep;
-      job.summary = "GPU setup complete";
-      return;
-    }
-
-    auto *data = std::get_if<EnvJobData>(&job.data);
-    if (data == nullptr) {
-      setFailed(job, "BakerySystem: missing envmap job data");
-      return;
-    }
-    if (data->gpu.bakeTileSize == 0u) {
-      data->gpu.bakeTileSize = bakeTileSizeForProfile(profile);
-    }
-    auto setupResult =
-        detail::advanceEnvmapPrefilterSetup(*gpu, data->plan, data->gpu);
-    if (setupResult.hasError()) {
-      setFailed(job, setupResult.error());
-      return;
-    }
-    job.summary = setupResult.value().summary;
-    if (setupResult.value().status == detail::EnvSetupStatus::InProgress) {
-      return;
-    }
-    if (setupResult.value().status == detail::EnvSetupStatus::Skipped) {
-      job.state = BakeJobState::Skipped;
       job.summary = setupResult.value().summary;
-      job.error.clear();
-      return;
-    }
+      if (setupResult.value().status == detail::EnvSetupStatus::InProgress) {
+        return;
+      }
+      if (setupResult.value().status == detail::EnvSetupStatus::Skipped) {
+        job.state = BakeJobState::Skipped;
+        job.summary = setupResult.value().summary;
+        job.error.clear();
+        return;
+      }
 
-    job.totalSteps = data->gpu.totalSteps;
-    job.completedSteps = 0u;
-    job.state = BakeJobState::GpuStep;
-    job.summary = setupResult.value().summary;
+      job.totalSteps = data->gpu.totalSteps;
+      job.completedSteps = 0u;
+      job.state = BakeJobState::GpuStep;
+      job.summary = setupResult.value().summary;
+    };
+    run();
     NURI_PROFILER_ZONE_END();
   }
 
   void handleGpuStep(JobRecord &job) {
     NURI_PROFILER_ZONE("BakerySystem::gpuStep", NURI_PROFILER_COLOR_CREATE);
-    if (job.kind == BakeJobKind::BrdfLut) {
-      auto *data = std::get_if<BrdfJobData>(&job.data);
-      if (data == nullptr) {
-        setFailed(job, "BakerySystem: missing BRDF job data");
+    const auto run = [&]() {
+      if (job.kind == BakeJobKind::BrdfLut) {
+        auto *data = std::get_if<BrdfJobData>(&job.data);
+        if (data == nullptr) {
+          setFailed(job, "BakerySystem: missing BRDF job data");
+          return;
+        }
+
+        auto stepResult = detail::runBrdfLutBakeStep(*gpu, data->gpu);
+        if (stepResult.hasError()) {
+          setFailed(job, stepResult.error());
+          return;
+        }
+        data->outputBytes = std::move(stepResult.value());
+        job.completedSteps = job.totalSteps;
+        detail::cleanupBrdfLutBake(*gpu, data->gpu);
+        job.state = BakeJobState::WriteQueued;
+        job.summary = "GPU bake complete";
         return;
       }
 
-      auto stepResult = detail::runBrdfLutBakeStep(*gpu, data->gpu);
+      auto *data = std::get_if<EnvJobData>(&job.data);
+      if (data == nullptr) {
+        setFailed(job, "BakerySystem: missing envmap job data");
+        return;
+      }
+
+      auto stepResult = detail::runEnvmapPrefilterBakeOneStep(*gpu, data->gpu);
       if (stepResult.hasError()) {
         setFailed(job, stepResult.error());
         return;
       }
-      data->outputBytes = std::move(stepResult.value());
-      job.completedSteps = job.totalSteps;
-      detail::cleanupBrdfLutBake(*gpu, data->gpu);
+
+      job.completedSteps = stepResult.value().completedSteps;
+      job.totalSteps = stepResult.value().totalSteps;
+      if (!stepResult.value().finished) {
+        job.summary = "GPU bake in progress";
+        if (job.cancelRequested) {
+          detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
+          job.state = BakeJobState::Canceled;
+          job.summary = "Canceled";
+        }
+        return;
+      }
+
+      data->payload = detail::collectEnvWritePayload(data->gpu);
+      detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
       job.state = BakeJobState::WriteQueued;
       job.summary = "GPU bake complete";
-      return;
-    }
-
-    auto *data = std::get_if<EnvJobData>(&job.data);
-    if (data == nullptr) {
-      setFailed(job, "BakerySystem: missing envmap job data");
-      return;
-    }
-
-    auto stepResult = detail::runEnvmapPrefilterBakeOneStep(*gpu, data->gpu);
-    if (stepResult.hasError()) {
-      setFailed(job, stepResult.error());
-      return;
-    }
-
-    job.completedSteps = stepResult.value().completedSteps;
-    job.totalSteps = stepResult.value().totalSteps;
-    if (!stepResult.value().finished) {
-      job.summary = "GPU bake in progress";
-      if (job.cancelRequested) {
-        detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
-        job.state = BakeJobState::Canceled;
-        job.summary = "Canceled";
-      }
-      return;
-    }
-
-    data->payload = detail::collectEnvWritePayload(data->gpu);
-    detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
-    job.state = BakeJobState::WriteQueued;
-    job.summary = "GPU bake complete";
+    };
+    run();
     NURI_PROFILER_ZONE_END();
   }
 

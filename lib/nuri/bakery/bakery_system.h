@@ -34,7 +34,7 @@ public:
 
   Result<BakeJobId, std::string> enqueue(BakeRequest request);
   void tick();
-  std::pmr::vector<BakeJobSnapshot>
+  [[nodiscard]] std::pmr::vector<BakeJobSnapshot>
   snapshotJobs(std::pmr::memory_resource *mem) const;
   [[nodiscard]] bool hasActiveJobs() const noexcept;
   void requestCancel(BakeJobId id);

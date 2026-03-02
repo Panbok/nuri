@@ -28,6 +28,9 @@ enum class EnvDistribution : uint32_t {
   Charlie = 2u,
 };
 
+constexpr std::size_t kEnvDistributionCount =
+    static_cast<std::size_t>(EnvDistribution::Charlie) + 1u;
+
 struct EnvOutputPaths {
   std::filesystem::path irradiance;
   std::filesystem::path ggx;
@@ -41,7 +44,7 @@ struct EnvBakePlan {
   EnvOutputPaths outputs{};
   uint32_t irradianceFaceSize = 0;
   uint32_t specularFaceSize = 0;
-  std::array<uint32_t, 3> mipCounts{};
+  std::array<uint32_t, kEnvDistributionCount> mipCounts{};
 };
 
 struct EnvDistributionRuntime {
@@ -92,7 +95,7 @@ struct EnvBakeGpuState {
       sourcePrepFuture{};
   bool sourcePrepInFlight = false;
   EnvSetupPhase setupPhase = EnvSetupPhase::StartCpuPrep;
-  std::array<EnvDistributionRuntime, 3> runs{};
+  std::array<EnvDistributionRuntime, kEnvDistributionCount> runs{};
   uint32_t activeDistributionIndex = 0;
   uint32_t activeMipLevel = 0;
   uint32_t activeFace = 0;
@@ -111,7 +114,7 @@ struct EnvWriteDistributionPayload {
 };
 
 struct EnvWritePayload {
-  std::array<EnvWriteDistributionPayload, 3> distributions{};
+  std::array<EnvWriteDistributionPayload, kEnvDistributionCount> distributions{};
 };
 
 struct EnvGpuStepProgress {

@@ -26,8 +26,10 @@ constexpr uint32_t kLocalSize = 8u;
 constexpr ktx_uint32_t kGlRgba32f = 0x8814u;
 constexpr std::string_view kPrefilterShaderFileName = "envmap_prefilter.comp";
 constexpr std::string_view kSourceCubemapDebugName = "env_prefilter_source";
-constexpr std::string_view kComputePipelineDebugName = "envmap_prefilter_compute";
-constexpr std::string_view kComputeOutputBufferDebugName = "env_prefilter_output";
+constexpr std::string_view kComputePipelineDebugName =
+    "envmap_prefilter_compute";
+constexpr std::string_view kComputeOutputBufferDebugName =
+    "env_prefilter_output";
 
 struct PrefilterPushConstants {
   uint32_t faceSize = 0;
@@ -113,9 +115,9 @@ prepareSourceCubemapCpu(const std::filesystem::path &hdrPath) {
 }
 
 Result<std::unique_ptr<Texture>, std::string>
-createSourceCubemapTextureFromPrepared(GPUDevice &gpu,
-                                       const EnvPreparedCubemapCpuData &prepared,
-                                       std::string_view debugName) {
+createSourceCubemapTextureFromPrepared(
+    GPUDevice &gpu, const EnvPreparedCubemapCpuData &prepared,
+    std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (prepared.faceSize == 0u || prepared.floatBytes.empty()) {
     return Result<std::unique_ptr<Texture>, std::string>::makeError(
@@ -163,8 +165,8 @@ createSourceCubemapTextureFromPrepared(GPUDevice &gpu,
       uint32_t prevWidth = prepared.faceSize;
       uint32_t prevHeight = prepared.faceSize;
       {
-        const std::byte *srcFace =
-            prepared.floatBytes.data() + static_cast<size_t>(face) * baseFaceBytes;
+        const std::byte *srcFace = prepared.floatBytes.data() +
+                                   static_cast<size_t>(face) * baseFaceBytes;
         std::memcpy(prevLevel.data(), srcFace, baseFaceBytes);
       }
 
@@ -225,7 +227,7 @@ createSourceCubemapTextureFromPrepared(GPUDevice &gpu,
   }
 
   const std::span<const std::byte> initialData(mipChainBytes.data(),
-                                                mipChainBytes.size());
+                                               mipChainBytes.size());
   TextureDesc desc{
       .type = TextureType::TextureCube,
       .format = Format::RGBA32_FLOAT,
@@ -272,18 +274,15 @@ bool hasExpectedKtxProperties(const std::filesystem::path &path,
 }
 
 bool outputsMatchExpectedShape(const EnvBakePlan &plan) {
-  return hasExpectedKtxProperties(plan.outputs.irradiance,
-                                  VK_FORMAT_R32G32B32A32_SFLOAT,
-                                  plan.irradianceFaceSize,
-                                  plan.irradianceFaceSize, 1u) &&
-         hasExpectedKtxProperties(plan.outputs.ggx,
-                                  VK_FORMAT_R32G32B32A32_SFLOAT,
-                                  plan.specularFaceSize, plan.specularFaceSize,
-                                  plan.mipCounts[1]) &&
-         hasExpectedKtxProperties(plan.outputs.charlie,
-                                  VK_FORMAT_R32G32B32A32_SFLOAT,
-                                  plan.specularFaceSize, plan.specularFaceSize,
-                                  plan.mipCounts[2]);
+  return hasExpectedKtxProperties(
+             plan.outputs.irradiance, VK_FORMAT_R32G32B32A32_SFLOAT,
+             plan.irradianceFaceSize, plan.irradianceFaceSize, 1u) &&
+         hasExpectedKtxProperties(
+             plan.outputs.ggx, VK_FORMAT_R32G32B32A32_SFLOAT,
+             plan.specularFaceSize, plan.specularFaceSize, plan.mipCounts[1]) &&
+         hasExpectedKtxProperties(
+             plan.outputs.charlie, VK_FORMAT_R32G32B32A32_SFLOAT,
+             plan.specularFaceSize, plan.specularFaceSize, plan.mipCounts[2]);
 }
 
 bool outputsUpToDateByTimestampOnly(const EnvBakePlan &plan) {
@@ -299,9 +298,8 @@ bool outputsUpToDateByTimestampOnly(const EnvBakePlan &plan) {
     return false;
   }
 
-  const std::array<std::filesystem::path, 3> outputs = {plan.outputs.irradiance,
-                                                         plan.outputs.ggx,
-                                                         plan.outputs.charlie};
+  const std::array<std::filesystem::path, 3> outputs = {
+      plan.outputs.irradiance, plan.outputs.ggx, plan.outputs.charlie};
   for (const auto &output : outputs) {
     std::error_code ecExists;
     if (!std::filesystem::exists(output, ecExists) || ecExists) {
@@ -316,17 +314,14 @@ bool outputsUpToDateByTimestampOnly(const EnvBakePlan &plan) {
   return true;
 }
 
-Result<bool, std::string>
-dispatchPrefilterTile(GPUDevice &gpu, ComputePipelineHandle pipeline,
-                      BufferHandle outputBuffer, uint64_t outputBufferAddress,
-                      uint32_t envMapTexId, uint32_t envMapSamplerId,
-                      uint32_t envMapWidth,
-                      uint32_t envMapHeight,
-                      EnvDistribution distribution, uint32_t faceSize,
-                      uint32_t faceIndex, uint32_t tileOffsetX,
-                      uint32_t tileOffsetY, uint32_t tileWidth,
-                      uint32_t tileHeight, float roughness,
-                      uint32_t sampleCount, std::span<std::byte> outBytes) {
+Result<bool, std::string> dispatchPrefilterTile(
+    GPUDevice &gpu, ComputePipelineHandle pipeline, BufferHandle outputBuffer,
+    uint64_t outputBufferAddress, uint32_t envMapTexId,
+    uint32_t envMapSamplerId, uint32_t envMapWidth, uint32_t envMapHeight,
+    EnvDistribution distribution, uint32_t faceSize, uint32_t faceIndex,
+    uint32_t tileOffsetX, uint32_t tileOffsetY, uint32_t tileWidth,
+    uint32_t tileHeight, float roughness, uint32_t sampleCount,
+    std::span<std::byte> outBytes) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (faceSize == 0u) {
     return Result<bool, std::string>::makeError(
@@ -346,7 +341,8 @@ dispatchPrefilterTile(GPUDevice &gpu, ComputePipelineHandle pipeline,
         "Env prefilter dispatch: tile size must be non-zero");
   }
   if (tileOffsetX >= faceSize || tileOffsetY >= faceSize ||
-      tileOffsetX + tileWidth > faceSize || tileOffsetY + tileHeight > faceSize) {
+      tileOffsetX + tileWidth > faceSize ||
+      tileOffsetY + tileHeight > faceSize) {
     return Result<bool, std::string>::makeError(
         "Env prefilter dispatch: tile bounds exceed face size");
   }
@@ -412,14 +408,14 @@ dispatchPrefilterTile(GPUDevice &gpu, ComputePipelineHandle pipeline,
   auto submitResult = gpu.submitComputeDispatches(
       std::span<const ComputeDispatchItem>(&dispatch, 1));
   if (submitResult.hasError()) {
-    errorText =
-        "Env prefilter dispatch: compute submission failed: " + submitResult.error();
+    errorText = "Env prefilter dispatch: compute submission failed: " +
+                submitResult.error();
   } else {
-    auto readResult = gpu.readBuffer(outputBuffer, 0u, outBytes.first(faceBytes));
+    auto readResult =
+        gpu.readBuffer(outputBuffer, 0u, outBytes.first(faceBytes));
     if (readResult.hasError()) {
-      errorText =
-          "Env prefilter dispatch: failed to read output buffer: " +
-          readResult.error();
+      errorText = "Env prefilter dispatch: failed to read output buffer: " +
+                  readResult.error();
     }
   }
   NURI_PROFILER_ZONE_END();
@@ -482,8 +478,7 @@ writeCubemapKtx2Rgba32f(const std::filesystem::path &outputPath,
   for (uint32_t level = 0; level < levelData.size(); ++level) {
     const uint32_t faceSize = std::max(1u, baseFaceSize >> level);
     const size_t faceBytes = static_cast<size_t>(faceSize) *
-                             static_cast<size_t>(faceSize) * 4u *
-                             sizeof(float);
+                             static_cast<size_t>(faceSize) * 4u * sizeof(float);
     const size_t expectedLevelBytes = faceBytes * 6u;
     if (levelData[level].size() != expectedLevelBytes) {
       ktxTexture_Destroy(texture);
@@ -496,8 +491,8 @@ writeCubemapKtx2Rgba32f(const std::filesystem::path &outputPath,
       const std::byte *src =
           levelData[level].data() + (face * static_cast<size_t>(faceBytes));
       const KTX_error_code setError = ktxTexture_SetImageFromMemory(
-          texture, level, 0u, face,
-          reinterpret_cast<const ktx_uint8_t *>(src), faceBytes);
+          texture, level, 0u, face, reinterpret_cast<const ktx_uint8_t *>(src),
+          faceBytes);
       if (setError != KTX_SUCCESS) {
         ktxTexture_Destroy(texture);
         return Result<bool, std::string>::makeError(
@@ -532,6 +527,8 @@ std::string_view envDistributionName(EnvDistribution distribution) {
     return "GGX";
   case EnvDistribution::Charlie:
     return "Charlie";
+  default:
+    break;
   }
   return "Unknown";
 }
@@ -583,8 +580,8 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
   case EnvSetupPhase::StartCpuPrep: {
     cleanupEnvmapPrefilterBake(gpu, state);
     try {
-      state.sourcePrepFuture = std::async(
-          std::launch::async, [hdrPath = plan.hdrPath]() {
+      state.sourcePrepFuture =
+          std::async(std::launch::async, [hdrPath = plan.hdrPath]() {
             return prepareSourceCubemapCpu(hdrPath);
           }).share();
     } catch (const std::exception &e) {
@@ -607,7 +604,8 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
       return Result<EnvSetupProgress, std::string>::makeError(
           "Env prefilter baker: CPU prepare future is invalid");
     }
-    const auto waitResult = state.sourcePrepFuture.wait_for(std::chrono::seconds(0));
+    const auto waitResult =
+        state.sourcePrepFuture.wait_for(std::chrono::seconds(0));
     if (waitResult != std::future_status::ready) {
       return Result<EnvSetupProgress, std::string>::makeResult(
           EnvSetupProgress{.status = EnvSetupStatus::InProgress,
@@ -649,15 +647,13 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
         outputsMatchExpectedShape(resolvedPlan)) {
       cleanupEnvmapPrefilterBake(gpu, state);
       state.setupPhase = EnvSetupPhase::Done;
-      return Result<EnvSetupProgress, std::string>::makeResult(
-          EnvSetupProgress{.status = EnvSetupStatus::Skipped,
-                           .summary = "Up-to-date"});
+      return Result<EnvSetupProgress, std::string>::makeResult(EnvSetupProgress{
+          .status = EnvSetupStatus::Skipped, .summary = "Up-to-date"});
     }
 
     state.setupPhase = EnvSetupPhase::CreateTexture;
-    return Result<EnvSetupProgress, std::string>::makeResult(
-        EnvSetupProgress{.status = EnvSetupStatus::InProgress,
-                         .summary = "HDR prepared"});
+    return Result<EnvSetupProgress, std::string>::makeResult(EnvSetupProgress{
+        .status = EnvSetupStatus::InProgress, .summary = "HDR prepared"});
   }
 
   case EnvSetupPhase::CreateTexture: {
@@ -706,13 +702,13 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
     }
     state.computeShader = compileResult.value();
     state.setupPhase = EnvSetupPhase::CreatePipeline;
-    return Result<EnvSetupProgress, std::string>::makeResult(
-        EnvSetupProgress{.status = EnvSetupStatus::InProgress,
-                         .summary = "Shader compiled"});
+    return Result<EnvSetupProgress, std::string>::makeResult(EnvSetupProgress{
+        .status = EnvSetupStatus::InProgress, .summary = "Shader compiled"});
   }
 
   case EnvSetupPhase::CreatePipeline: {
-    const ComputePipelineDesc pipelineDesc{.computeShader = state.computeShader};
+    const ComputePipelineDesc pipelineDesc{.computeShader =
+                                               state.computeShader};
     auto pipelineResult =
         gpu.createComputePipeline(pipelineDesc, kComputePipelineDebugName);
     if (pipelineResult.hasError()) {
@@ -721,12 +717,12 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
           pipelineResult.error());
     }
     state.computePipeline = pipelineResult.value();
-    state.envMapTexId = gpu.getTextureBindlessIndex(state.sourceCubemap->handle());
+    state.envMapTexId =
+        gpu.getTextureBindlessIndex(state.sourceCubemap->handle());
     state.envMapSamplerId = gpu.getCubemapSamplerBindlessIndex();
     state.setupPhase = EnvSetupPhase::Finalize;
-    return Result<EnvSetupProgress, std::string>::makeResult(
-        EnvSetupProgress{.status = EnvSetupStatus::InProgress,
-                         .summary = "Pipeline created"});
+    return Result<EnvSetupProgress, std::string>::makeResult(EnvSetupProgress{
+        .status = EnvSetupStatus::InProgress, .summary = "Pipeline created"});
   }
 
   case EnvSetupPhase::Finalize: {
@@ -749,9 +745,9 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
           (state.bakeTileSize > 0u) ? state.bakeTileSize : 64u;
       const uint32_t maxFace = std::max(kIrradianceFaceSize, specularFace);
       const uint32_t effectiveTile = std::min(tileSize, maxFace);
-      const size_t maxTileBytes =
-          static_cast<size_t>(effectiveTile) *
-          static_cast<size_t>(effectiveTile) * 4u * sizeof(float);
+      const size_t maxTileBytes = static_cast<size_t>(effectiveTile) *
+                                  static_cast<size_t>(effectiveTile) * 4u *
+                                  sizeof(float);
 
       const BufferDesc outputDesc{
           .usage = BufferUsage::Storage,
@@ -769,7 +765,8 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
       state.tileOutputBufferBytes = maxTileBytes;
       state.tileScratchBytes.resize(maxTileBytes);
     }
-    state.tileOutputBufferAddress = gpu.getBufferDeviceAddress(state.tileOutputBuffer);
+    state.tileOutputBufferAddress =
+        gpu.getBufferDeviceAddress(state.tileOutputBuffer);
     if (state.tileOutputBufferAddress == 0u) {
       return Result<EnvSetupProgress, std::string>::makeError(
           "Env prefilter baker: tile output buffer address is invalid");
@@ -807,8 +804,7 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
     state.completedSteps = 0u;
     state.totalSteps = 0u;
     {
-      const uint32_t ts =
-          (state.bakeTileSize > 0u) ? state.bakeTileSize : 64u;
+      const uint32_t ts = (state.bakeTileSize > 0u) ? state.bakeTileSize : 64u;
       for (const EnvDistributionRuntime &run : state.runs) {
         for (uint32_t mip = 0u; mip < run.mipLevels; ++mip) {
           const uint32_t mipFace = std::max(1u, run.baseFaceSize >> mip);
@@ -820,20 +816,17 @@ advanceEnvmapPrefilterSetup(GPUDevice &gpu, const EnvBakePlan &plan,
     }
     state.initialized = true;
     state.setupPhase = EnvSetupPhase::Done;
-    return Result<EnvSetupProgress, std::string>::makeResult(
-        EnvSetupProgress{.status = EnvSetupStatus::Ready,
-                         .summary = "GPU setup complete"});
+    return Result<EnvSetupProgress, std::string>::makeResult(EnvSetupProgress{
+        .status = EnvSetupStatus::Ready, .summary = "GPU setup complete"});
   }
 
   case EnvSetupPhase::Done:
     if (state.initialized) {
-      return Result<EnvSetupProgress, std::string>::makeResult(
-          EnvSetupProgress{.status = EnvSetupStatus::Ready,
-                           .summary = "GPU setup complete"});
+      return Result<EnvSetupProgress, std::string>::makeResult(EnvSetupProgress{
+          .status = EnvSetupStatus::Ready, .summary = "GPU setup complete"});
     }
-    return Result<EnvSetupProgress, std::string>::makeResult(
-        EnvSetupProgress{.status = EnvSetupStatus::Skipped,
-                         .summary = "Up-to-date"});
+    return Result<EnvSetupProgress, std::string>::makeResult(EnvSetupProgress{
+        .status = EnvSetupStatus::Skipped, .summary = "Up-to-date"});
   }
 
   return Result<EnvSetupProgress, std::string>::makeError(
@@ -849,11 +842,12 @@ runEnvmapPrefilterBakeOneStep(GPUDevice &gpu, EnvBakeGpuState &state) {
   }
 
   if (state.activeDistributionIndex >= state.runs.size()) {
-    return Result<EnvGpuStepProgress, std::string>::makeResult(EnvGpuStepProgress{
-        .completedSteps = state.completedSteps,
-        .totalSteps = state.totalSteps,
-        .finished = true,
-    });
+    return Result<EnvGpuStepProgress, std::string>::makeResult(
+        EnvGpuStepProgress{
+            .completedSteps = state.completedSteps,
+            .totalSteps = state.totalSteps,
+            .finished = true,
+        });
   }
 
   EnvDistributionRuntime &run = state.runs[state.activeDistributionIndex];
@@ -867,7 +861,8 @@ runEnvmapPrefilterBakeOneStep(GPUDevice &gpu, EnvBakeGpuState &state) {
   }
 
   const uint32_t ts = (state.bakeTileSize > 0u) ? state.bakeTileSize : 64u;
-  const uint32_t faceSize = std::max(1u, run.baseFaceSize >> state.activeMipLevel);
+  const uint32_t faceSize =
+      std::max(1u, run.baseFaceSize >> state.activeMipLevel);
   const uint32_t tilesX = (faceSize + (ts - 1u)) / ts;
   const uint32_t tilesY = (faceSize + (ts - 1u)) / ts;
   const uint32_t tilesPerFace = tilesX * tilesY;
@@ -887,8 +882,7 @@ runEnvmapPrefilterBakeOneStep(GPUDevice &gpu, EnvBakeGpuState &state) {
   const uint32_t tileWidth = std::min(ts, faceSize - tileOffsetX);
   const uint32_t tileHeight = std::min(ts, faceSize - tileOffsetY);
   const size_t tileBytes = static_cast<size_t>(tileWidth) *
-                           static_cast<size_t>(tileHeight) * 4u *
-                           sizeof(float);
+                           static_cast<size_t>(tileHeight) * 4u * sizeof(float);
   if (tileBytes > state.tileOutputBufferBytes ||
       tileBytes > state.tileScratchBytes.size()) {
     return Result<EnvGpuStepProgress, std::string>::makeError(
@@ -898,11 +892,10 @@ runEnvmapPrefilterBakeOneStep(GPUDevice &gpu, EnvBakeGpuState &state) {
     return Result<EnvGpuStepProgress, std::string>::makeError(
         "Env prefilter bake: tile output buffer address is invalid");
   }
-  const float roughness =
-      (run.mipLevels > 1u)
-          ? static_cast<float>(state.activeMipLevel) /
-                static_cast<float>(run.mipLevels - 1u)
-          : 0.0f;
+  const float roughness = (run.mipLevels > 1u)
+                              ? static_cast<float>(state.activeMipLevel) /
+                                    static_cast<float>(run.mipLevels - 1u)
+                              : 0.0f;
   if (state.sourceCubemapWidth == 0u || state.sourceCubemapHeight == 0u) {
     return Result<EnvGpuStepProgress, std::string>::makeError(
         "Env prefilter bake: source cubemap dimensions are invalid");
@@ -916,16 +909,17 @@ runEnvmapPrefilterBakeOneStep(GPUDevice &gpu, EnvBakeGpuState &state) {
       std::span<std::byte>(state.tileScratchBytes.data(), tileBytes));
   if (tileResult.hasError()) {
     return Result<EnvGpuStepProgress, std::string>::makeError(
-        "Env prefilter bake (" + std::string(envDistributionName(run.distribution)) +
-        ", mip=" + std::to_string(state.activeMipLevel) + ", face=" +
-        std::to_string(state.activeFace) + ", tile=" +
+        "Env prefilter bake (" +
+        std::string(envDistributionName(run.distribution)) +
+        ", mip=" + std::to_string(state.activeMipLevel) +
+        ", face=" + std::to_string(state.activeFace) + ", tile=" +
         std::to_string(state.activeTileIndex) + "): " + tileResult.error());
   }
 
   constexpr size_t kPixelBytes = 4u * sizeof(float);
-  const size_t singleFaceBytes =
-      static_cast<size_t>(faceSize) * static_cast<size_t>(faceSize) * 4u *
-      sizeof(float);
+  const size_t singleFaceBytes = static_cast<size_t>(faceSize) *
+                                 static_cast<size_t>(faceSize) * 4u *
+                                 sizeof(float);
   const size_t levelBytes = singleFaceBytes * 6u;
   std::vector<std::byte> &level = run.levels[state.activeMipLevel];
   if (level.empty()) {
@@ -936,14 +930,15 @@ runEnvmapPrefilterBakeOneStep(GPUDevice &gpu, EnvBakeGpuState &state) {
         "Env prefilter bake: invalid level byte size allocation");
   }
 
-  const size_t faceBaseOffset = static_cast<size_t>(state.activeFace) * singleFaceBytes;
+  const size_t faceBaseOffset =
+      static_cast<size_t>(state.activeFace) * singleFaceBytes;
   if (tileWidth == faceSize && tileHeight == faceSize) {
-    std::memcpy(level.data() + faceBaseOffset,
-                state.tileScratchBytes.data(), singleFaceBytes);
+    std::memcpy(level.data() + faceBaseOffset, state.tileScratchBytes.data(),
+                singleFaceBytes);
   } else {
     for (uint32_t row = 0u; row < tileHeight; ++row) {
-      const size_t srcOffset =
-          static_cast<size_t>(row) * static_cast<size_t>(tileWidth) * kPixelBytes;
+      const size_t srcOffset = static_cast<size_t>(row) *
+                               static_cast<size_t>(tileWidth) * kPixelBytes;
       const size_t dstOffset =
           faceBaseOffset +
           ((static_cast<size_t>(tileOffsetY) + static_cast<size_t>(row)) *
@@ -1010,6 +1005,9 @@ void cleanupEnvmapPrefilterBake(GPUDevice &gpu, EnvBakeGpuState &state) {
     gpu.destroyBuffer(state.tileOutputBuffer);
     state.tileOutputBuffer = {};
   }
+  if (state.sourcePrepInFlight && state.sourcePrepFuture.valid()) {
+    state.sourcePrepFuture.wait();
+  }
 
   state.envMapTexId = 0u;
   state.envMapSamplerId = 0u;
@@ -1035,17 +1033,15 @@ void cleanupEnvmapPrefilterBake(GPUDevice &gpu, EnvBakeGpuState &state) {
 Result<bool, std::string>
 writeEnvmapPrefilterOutputs(const EnvWritePayload &payload) {
   for (const auto &distribution : payload.distributions) {
-    auto writeResult =
-        writeCubemapKtx2Rgba32f(distribution.outputPath,
-                                distribution.baseFaceSize,
-                                std::span<const std::vector<std::byte>>(
-                                    distribution.levelData.data(),
-                                    distribution.levelData.size()));
+    auto writeResult = writeCubemapKtx2Rgba32f(
+        distribution.outputPath, distribution.baseFaceSize,
+        std::span<const std::vector<std::byte>>(distribution.levelData.data(),
+                                                distribution.levelData.size()));
     if (writeResult.hasError()) {
       return Result<bool, std::string>::makeError(
           "Env prefilter write (" +
-          std::string(envDistributionName(distribution.distribution)) + "): " +
-          writeResult.error());
+          std::string(envDistributionName(distribution.distribution)) +
+          "): " + writeResult.error());
     }
   }
   return Result<bool, std::string>::makeResult(true);

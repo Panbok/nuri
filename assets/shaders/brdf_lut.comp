@@ -1,5 +1,8 @@
 // based on:
 // https://github.com/SaschaWillems/Vulkan-glTF-PBR/blob/master/data/shaders/genbrdflut.frag
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_buffer_reference : require
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
@@ -17,6 +20,7 @@ layout(push_constant) uniform constants {
 pc;
 
 const float PI = 3.1415926536;
+const float EPSILON = 1e-6;
 
 vec2 hammersley2d(uint i, uint N) {
   // Radical inverse based on:
@@ -81,6 +85,7 @@ vec3 importanceSampleCharlie(vec2 xi, float roughness, vec3 normal) {
 vec3 BRDF(float NoV, float roughness) {
   const vec3 N = vec3(0.0, 0.0, 1.0);
   vec3 V = vec3(sqrt(1.0 - NoV * NoV), 0.0, NoV);
+  float dotNV = max(dot(N, V), 0.0);
 
   vec3 LUT = vec3(0.0);
   for (uint i = 0u; i < NUM_SAMPLES; i++) {
@@ -89,32 +94,26 @@ vec3 BRDF(float NoV, float roughness) {
     vec3 L = 2.0 * dot(V, H) * H - V;
 
     float dotNL = max(dot(N, L), 0.0);
-    float dotNV = max(dot(N, V), 0.0);
     float dotVH = max(dot(V, H), 0.0);
     float dotNH = max(dot(H, N), 0.0);
 
     if (dotNL > 0.0) {
       float G = GSchlicksmithGGX(dotNL, dotNV, roughness);
-      float GVis = (G * dotVH) / (dotNH * dotNV);
+      float denom = max(dotNH * dotNV, EPSILON);
+      float GVis = (G * dotVH) / denom;
       float Fc = pow(1.0 - dotVH, 5.0);
       LUT.rg += vec2((1.0 - Fc) * GVis, Fc * GVis);
     }
-  }
+    vec3 Hc = importanceSampleCharlie(Xi, roughness, N);
+    vec3 Lc = 2.0 * dot(V, Hc) * Hc - V;
+    float dotNLc = max(dot(N, Lc), 0.0);
+    float dotVHc = max(dot(V, Hc), 0.0);
+    float dotNHc = max(dot(Hc, N), 0.0);
 
-  for (uint i = 0u; i < NUM_SAMPLES; i++) {
-    vec2 Xi = hammersley2d(i, NUM_SAMPLES);
-    vec3 H = importanceSampleCharlie(Xi, roughness, N);
-    vec3 L = 2.0 * dot(V, H) * H - V;
-
-    float dotNL = max(dot(N, L), 0.0);
-    float dotNV = max(dot(N, V), 0.0);
-    float dotVH = max(dot(V, H), 0.0);
-    float dotNH = max(dot(H, N), 0.0);
-
-    if (dotNL > 0.0) {
-      float sheenDistribution = DCharlie(roughness, dotNH);
-      float sheenVisibility = VAshikhmin(dotNL, dotNV);
-      LUT.b += sheenVisibility * sheenDistribution * dotNL * dotVH;
+    if (dotNLc > 0.0) {
+      float sheenDistribution = DCharlie(roughness, dotNHc);
+      float sheenVisibility = VAshikhmin(dotNLc, dotNV);
+      LUT.b += sheenVisibility * sheenDistribution * dotNLc * dotVHc;
     }
   }
 

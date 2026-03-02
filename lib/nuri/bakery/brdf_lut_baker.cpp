@@ -19,9 +19,9 @@ constexpr uint32_t kBrdfLutHeight = 256u;
 constexpr uint32_t kBrdfLutChannels = 4u;
 constexpr uint32_t kBrdfLutLocalSize = 16u;
 constexpr uint32_t kBrdfLutNumSamples = 1024u;
-constexpr size_t kBrdfLutValueCount =
-    static_cast<size_t>(kBrdfLutWidth) * static_cast<size_t>(kBrdfLutHeight) *
-    static_cast<size_t>(kBrdfLutChannels);
+constexpr size_t kBrdfLutValueCount = static_cast<size_t>(kBrdfLutWidth) *
+                                      static_cast<size_t>(kBrdfLutHeight) *
+                                      static_cast<size_t>(kBrdfLutChannels);
 constexpr size_t kBrdfLutBytes = kBrdfLutValueCount * sizeof(uint16_t);
 
 struct BrdfLutPushConstants {
@@ -34,8 +34,8 @@ static_assert(sizeof(BrdfLutPushConstants) <= 128,
 
 } // namespace
 
-Result<BrdfBakePlan, std::string>
-planBrdfLutBake(const RuntimeConfig &config, bool forceRebuild) {
+Result<BrdfBakePlan, std::string> planBrdfLutBake(const RuntimeConfig &config,
+                                                  bool forceRebuild) {
   BrdfBakePlan plan{};
   plan.shaderPath = config.roots.shaders / "brdf_lut.comp";
   plan.outputPath = config.roots.textures / "brdf_lut.ktx2";
@@ -135,7 +135,8 @@ setupBrdfLutBake(GPUDevice &gpu, const std::filesystem::path &shaderPath,
 
 Result<std::vector<std::byte>, std::string>
 runBrdfLutBakeStep(GPUDevice &gpu, const BrdfBakeGpuState &state) {
-  if (!nuri::isValid(state.computePipeline) || !nuri::isValid(state.outputBuffer)) {
+  if (!nuri::isValid(state.computePipeline) ||
+      !nuri::isValid(state.outputBuffer)) {
     return Result<std::vector<std::byte>, std::string>::makeError(
         "BRDF LUT baker: GPU state is not initialized");
   }
@@ -153,7 +154,8 @@ runBrdfLutBakeStep(GPUDevice &gpu, const BrdfBakeGpuState &state) {
       .pipeline = state.computePipeline,
       .dispatch =
           {
-              .x = (kBrdfLutWidth + (kBrdfLutLocalSize - 1u)) / kBrdfLutLocalSize,
+              .x = (kBrdfLutWidth + (kBrdfLutLocalSize - 1u)) /
+                   kBrdfLutLocalSize,
               .y = (kBrdfLutHeight + (kBrdfLutLocalSize - 1u)) /
                    kBrdfLutLocalSize,
               .z = 1u,
@@ -164,18 +166,17 @@ runBrdfLutBakeStep(GPUDevice &gpu, const BrdfBakeGpuState &state) {
       .debugLabel = "BRDF LUT Bake",
       .debugColor = 0xff2288ccu,
   };
-  auto dispatchResult =
-      gpu.submitComputeDispatches(std::span<const ComputeDispatchItem>(&dispatch,
-                                                                       1));
+  auto dispatchResult = gpu.submitComputeDispatches(
+      std::span<const ComputeDispatchItem>(&dispatch, 1));
   if (dispatchResult.hasError()) {
     return Result<std::vector<std::byte>, std::string>::makeError(
         "BRDF LUT baker: compute dispatch failed: " + dispatchResult.error());
   }
 
   std::vector<std::byte> lutBytes(kBrdfLutBytes);
-  auto readResult = gpu.readBuffer(
-      state.outputBuffer, 0u,
-      std::span<std::byte>(lutBytes.data(), lutBytes.size()));
+  auto readResult =
+      gpu.readBuffer(state.outputBuffer, 0u,
+                     std::span<std::byte>(lutBytes.data(), lutBytes.size()));
   if (readResult.hasError()) {
     return Result<std::vector<std::byte>, std::string>::makeError(
         "BRDF LUT baker: failed to read output buffer: " + readResult.error());
@@ -237,6 +238,10 @@ writeBrdfLutKtx2(std::span<const std::byte> bytes,
   const auto createError = ktxTexture2_Create(
       &createInfo, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &textureKtx2);
   if (createError != KTX_SUCCESS || textureKtx2 == nullptr) {
+    if (textureKtx2 != nullptr) {
+      ktxTexture_Destroy(ktxTexture(textureKtx2));
+      textureKtx2 = nullptr;
+    }
     return Result<bool, std::string>::makeError(
         "BRDF LUT write: ktxTexture2_Create failed with code " +
         std::to_string(static_cast<int>(createError)));
