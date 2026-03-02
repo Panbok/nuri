@@ -1,0 +1,240 @@
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform textureCube kTexturesCube[];
+layout(set = 0, binding = 1) uniform sampler kSamplers[];
+
+vec4 textureBindlessCube(uint textureid, uint samplerid, vec3 uvw) {
+  return texture(
+      nonuniformEXT(samplerCube(kTexturesCube[textureid], kSamplers[samplerid])),
+      uvw);
+}
+
+vec4 textureBindlessCubeLod(uint textureid, uint samplerid, vec3 uvw, float lod) {
+  return textureLod(
+      nonuniformEXT(samplerCube(kTexturesCube[textureid], kSamplers[samplerid])),
+      uvw, lod);
+}
+
+layout(std430, buffer_reference) buffer OutputBuffer {
+  vec4 values[];
+};
+
+layout(push_constant) uniform constants {
+  uint faceSize;
+  uint tileOffsetX;
+  uint tileOffsetY;
+  uint tileWidth;
+  uint tileHeight;
+  float roughness;
+  uint sampleCount;
+  uint envMapTexId;
+  uint envMapSamplerId;
+  uint envMapWidth;
+  uint envMapHeight;
+  uint distribution;
+  uint faceIndex;
+  uint _padding0;
+  OutputBuffer outBuffer;
+}
+pc;
+
+const uint kDistributionLambertian = 0u;
+const uint kDistributionGGX = 1u;
+const uint kDistributionCharlie = 2u;
+
+const float PI = 3.14159265358979323846;
+const float TWO_PI = 6.28318530717958647692;
+
+vec2 hammersley2d(uint i, uint N) {
+  uint bits = (i << 16u) | (i >> 16u);
+  bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+  bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+  bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+  bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+  float rdi = float(bits) * 2.3283064365386963e-10;
+  return vec2(float(i) / float(N), rdi);
+}
+
+void buildOrthonormalBasis(vec3 n, out vec3 tangent, out vec3 bitangent) {
+  vec3 up = abs(n.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+  tangent = normalize(cross(up, n));
+  bitangent = cross(n, tangent);
+}
+
+vec3 faceUvToDir(uint face, vec2 uv) {
+  // Must match Packt UtilsCubemap conversion and 03_FilterEnvmap shader.
+  if (face == 0u) {
+    return normalize(vec3(1.0, uv.y, -uv.x));
+  }
+  if (face == 1u) {
+    return normalize(vec3(-1.0, uv.y, uv.x));
+  }
+  if (face == 2u) {
+    return normalize(vec3(uv.x, 1.0, -uv.y));
+  }
+  if (face == 3u) {
+    return normalize(vec3(uv.x, -1.0, uv.y));
+  }
+  if (face == 4u) {
+    return normalize(vec3(uv.x, uv.y, 1.0));
+  }
+  return normalize(vec3(-uv.x, uv.y, -1.0));
+}
+
+struct MicrofacetDistributionSample {
+  float pdf;
+  float cosTheta;
+  float sinTheta;
+  float phi;
+};
+
+float D_GGX(float ndoth, float roughness) {
+  float a = ndoth * roughness;
+  float k = roughness / (1.0 - ndoth * ndoth + a * a);
+  return k * k * (1.0 / PI);
+}
+
+MicrofacetDistributionSample sampleGGX(vec2 xi, float roughness) {
+  MicrofacetDistributionSample ggx;
+  float alpha = roughness * roughness;
+  ggx.cosTheta =
+      clamp(sqrt((1.0 - xi.y) / (1.0 + (alpha * alpha - 1.0) * xi.y)), 0.0, 1.0);
+  ggx.sinTheta = sqrt(max(0.0, 1.0 - ggx.cosTheta * ggx.cosTheta));
+  ggx.phi = TWO_PI * xi.x;
+  ggx.pdf = D_GGX(ggx.cosTheta, alpha) * 0.25;
+  return ggx;
+}
+
+float D_Charlie(float sheenRoughness, float ndoth) {
+  sheenRoughness = max(sheenRoughness, 0.000001);
+  float invR = 1.0 / sheenRoughness;
+  float cos2h = ndoth * ndoth;
+  float sin2h = 1.0 - cos2h;
+  return (2.0 + invR) * pow(sin2h, invR * 0.5) / (2.0 * PI);
+}
+
+MicrofacetDistributionSample sampleCharlie(vec2 xi, float roughness) {
+  MicrofacetDistributionSample charlie;
+  float alpha = roughness * roughness;
+  charlie.sinTheta = pow(xi.y, alpha / (2.0 * alpha + 1.0));
+  charlie.cosTheta = sqrt(max(0.0, 1.0 - charlie.sinTheta * charlie.sinTheta));
+  charlie.phi = TWO_PI * xi.x;
+  charlie.pdf = D_Charlie(alpha, charlie.cosTheta) * 0.25;
+  return charlie;
+}
+
+MicrofacetDistributionSample sampleLambertian(vec2 xi) {
+  MicrofacetDistributionSample lambertian;
+  lambertian.cosTheta = sqrt(max(0.0, 1.0 - xi.y));
+  lambertian.sinTheta = sqrt(max(0.0, xi.y));
+  lambertian.phi = TWO_PI * xi.x;
+  lambertian.pdf = lambertian.cosTheta / PI;
+  return lambertian;
+}
+
+mat3 generateTBN(vec3 normal) {
+  vec3 bitangent = vec3(0.0, 1.0, 0.0);
+  float nDotUp = dot(normal, vec3(0.0, 1.0, 0.0));
+  if (1.0 - abs(nDotUp) <= 1.0e-7) {
+    bitangent = (nDotUp > 0.0) ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 0.0, -1.0);
+  }
+  vec3 tangent = normalize(cross(bitangent, normal));
+  bitangent = cross(normal, tangent);
+  return mat3(tangent, bitangent, normal);
+}
+
+vec4 getImportanceSample(uint sampleIndex, vec3 n, float roughness) {
+  vec2 xi = hammersley2d(sampleIndex, max(pc.sampleCount, 1u));
+  MicrofacetDistributionSample s;
+  if (pc.distribution == kDistributionLambertian) {
+    s = sampleLambertian(xi);
+  } else if (pc.distribution == kDistributionGGX) {
+    s = sampleGGX(xi, roughness);
+  } else {
+    s = sampleCharlie(xi, roughness);
+  }
+
+  vec3 localDir = normalize(vec3(s.sinTheta * cos(s.phi), s.sinTheta * sin(s.phi),
+                                 s.cosTheta));
+  vec3 direction = generateTBN(n) * localDir;
+  return vec4(direction, s.pdf);
+}
+
+float computeLod(float pdf) {
+  float width = float(max(pc.envMapWidth, 1u));
+  float height = float(max(pc.envMapHeight, 1u));
+  float sampleCount = float(max(pc.sampleCount, 1u));
+  float safePdf = max(pdf, 1.0e-6);
+  return 0.5 * log2(6.0 * width * height / (sampleCount * safePdf));
+}
+
+vec3 prefilterLambertian(vec3 n, float roughness) {
+  vec3 filtered = vec3(0.0);
+  uint sampleCount = max(pc.sampleCount, 1u);
+  for (uint i = 0u; i < sampleCount; ++i) {
+    vec4 importanceSample = getImportanceSample(i, n, roughness);
+    vec3 h = importanceSample.xyz;
+    float lod = computeLod(importanceSample.w);
+    filtered +=
+        textureBindlessCubeLod(pc.envMapTexId, pc.envMapSamplerId, h, lod).rgb;
+  }
+  return filtered / float(sampleCount);
+}
+
+vec3 prefilterSpecular(vec3 n, float roughness) {
+  vec3 filtered = vec3(0.0);
+  float totalWeight = 0.0;
+  uint sampleCount = max(pc.sampleCount, 1u);
+  vec3 v = n; // Isotropic prefilter assumes V == N.
+  for (uint i = 0u; i < sampleCount; ++i) {
+    vec4 importanceSample = getImportanceSample(i, n, roughness);
+    vec3 h = importanceSample.xyz;
+    float lod = computeLod(importanceSample.w);
+    vec3 l = normalize(2.0 * dot(v, h) * h - v);
+    float nDotL = max(dot(n, l), 0.0);
+    if (nDotL > 0.0) {
+      if (roughness == 0.0) {
+        lod = 0.0;
+      }
+      filtered += textureBindlessCubeLod(pc.envMapTexId, pc.envMapSamplerId, l,
+                                         lod)
+                      .rgb *
+                  nDotL;
+      totalWeight += nDotL;
+    }
+  }
+  return (totalWeight > 0.0) ? (filtered / totalWeight) : vec3(0.0);
+}
+
+void main() {
+  if (gl_GlobalInvocationID.x >= pc.tileWidth ||
+      gl_GlobalInvocationID.y >= pc.tileHeight) {
+    return;
+  }
+  if (pc.faceIndex >= 6u) {
+    return;
+  }
+
+  uint pixelX = pc.tileOffsetX + gl_GlobalInvocationID.x;
+  uint pixelY = pc.tileOffsetY + gl_GlobalInvocationID.y;
+  vec2 uv;
+  uv.x = ((float(pixelX) + 0.5) / float(pc.faceSize)) * 2.0 - 1.0;
+  // Match Packt's rasterized fullscreen pass orientation (Vulkan framebuffer Y).
+  uv.y = 1.0 - ((float(pixelY) + 0.5) / float(pc.faceSize)) * 2.0;
+  vec3 n = faceUvToDir(pc.faceIndex, uv);
+
+  vec3 color = vec3(0.0);
+  if (pc.distribution == kDistributionLambertian) {
+    color = prefilterLambertian(n, pc.roughness);
+  } else if (pc.distribution == kDistributionGGX) {
+    color = prefilterSpecular(n, pc.roughness);
+  } else {
+    color = prefilterSpecular(n, pc.roughness);
+  }
+
+  uint pixelIndex = gl_GlobalInvocationID.y * pc.tileWidth +
+                    gl_GlobalInvocationID.x;
+  pc.outBuffer.values[pixelIndex] = vec4(color, 1.0);
+}
