@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -28,8 +29,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <glm/common.hpp>
