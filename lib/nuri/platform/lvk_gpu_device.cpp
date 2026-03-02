@@ -28,6 +28,8 @@ lvk::Format toLvkFormat(Format format) {
     return lvk::Format_RGBA_UI32;
   case Format::RGBA16_FLOAT:
     return lvk::Format_RGBA_F16;
+  case Format::RGBA32_FLOAT:
+    return lvk::Format_RGBA_F32;
   case Format::D32_FLOAT:
     return lvk::Format_Z_F32;
   case Format::Count:
@@ -48,6 +50,8 @@ Format fromLvkFormat(lvk::Format format) {
     return Format::RGBA8_UINT;
   case lvk::Format_RGBA_F16:
     return Format::RGBA16_FLOAT;
+  case lvk::Format_RGBA_F32:
+    return Format::RGBA32_FLOAT;
   case lvk::Format_Z_F32:
     return Format::D32_FLOAT;
   default:
@@ -472,6 +476,8 @@ struct FramebufferTexture {
 struct LvkGPUDevice::Impl {
   Window *window = nullptr;
   std::unique_ptr<lvk::IContext> context;
+  lvk::Holder<lvk::SamplerHandle> cubemapSampler{};
+  uint32_t cubemapSamplerBindlessIndex = 0u;
 
   ResourceTable<BufferHandle, lvk::BufferHandle> buffers;
   ResourceTable<TextureHandle, lvk::TextureHandle> textures;
@@ -528,6 +534,33 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
                      "with swapchain (%d x %d)",
                      width, height);
     return nullptr;
+  }
+
+  {
+    lvk::SamplerStateDesc cubemapSamplerDesc{};
+    cubemapSamplerDesc.minFilter = lvk::SamplerFilter_Linear;
+    cubemapSamplerDesc.magFilter = lvk::SamplerFilter_Linear;
+    cubemapSamplerDesc.mipMap = lvk::SamplerMip_Linear;
+    cubemapSamplerDesc.wrapU = lvk::SamplerWrap_Clamp;
+    cubemapSamplerDesc.wrapV = lvk::SamplerWrap_Clamp;
+    cubemapSamplerDesc.wrapW = lvk::SamplerWrap_Clamp;
+    cubemapSamplerDesc.debugName = "nuri_cubemap_sampler";
+
+    lvk::Result samplerResult;
+    device->impl_->cubemapSampler =
+        device->impl_->context->createSampler(cubemapSamplerDesc,
+                                              &samplerResult);
+    if (!samplerResult.isOk() || !device->impl_->cubemapSampler.valid()) {
+      NURI_LOG_WARNING("LvkGPUDevice::create: Failed to create cubemap "
+                       "sampler, falling back to sampler index 0: %s",
+                       samplerResult.message ? samplerResult.message
+                                             : "unknown error");
+      device->impl_->cubemapSamplerBindlessIndex = 0u;
+      device->impl_->cubemapSampler.reset();
+    } else {
+      device->impl_->cubemapSamplerBindlessIndex =
+          device->impl_->cubemapSampler.index();
+    }
   }
 
   device->impl_->geometryPool =
@@ -1277,6 +1310,12 @@ uint32_t LvkGPUDevice::getTextureBindlessIndex(TextureHandle h) const {
   return impl_->textures.getLvkHandle(h).index();
 }
 
+uint32_t LvkGPUDevice::getDefaultSamplerBindlessIndex() const { return 0u; }
+
+uint32_t LvkGPUDevice::getCubemapSamplerBindlessIndex() const {
+  return impl_->cubemapSamplerBindlessIndex;
+}
+
 uint64_t LvkGPUDevice::getBufferDeviceAddress(BufferHandle h,
                                               size_t offset) const {
   if (!impl_->buffers.isValid(h)) {
@@ -1834,11 +1873,13 @@ LvkGPUDevice::readBuffer(BufferHandle buffer, size_t offset,
         "readBuffer: offset + outBytes.size() exceeds buffer size");
   }
 
-  if (const uint8_t *mapped = impl_->context->getMappedPtr(lvkBuf)) {
-    std::memcpy(outBytes.data(), mapped + offset, outBytes.size());
-    return Result<bool, std::string>::makeResult(true);
+  if (impl_->context->getMappedPtr(lvkBuf) == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "readBuffer: buffer is not host-visible/mapped");
   }
 
+  // Always route readback through LVK's download path so non-coherent mapped
+  // memory gets invalidated correctly before host reads.
   lvk::Result res =
       impl_->context->download(lvkBuf, static_cast<void *>(outBytes.data()),
                                outBytes.size(), offset);
@@ -1898,6 +1939,9 @@ LvkGPUDevice::readTexture(TextureHandle texture,
     break;
   case Format::RGBA16_FLOAT:
     bytesPerPixel = 8;
+    break;
+  case Format::RGBA32_FLOAT:
+    bytesPerPixel = 16;
     break;
   case Format::D32_FLOAT:
     bytesPerPixel = sizeof(float);

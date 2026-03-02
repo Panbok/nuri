@@ -59,6 +59,8 @@ public:
   bool isValid(ComputePipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
+  uint32_t getDefaultSamplerBindlessIndex() const override;
+  uint32_t getCubemapSamplerBindlessIndex() const override;
   uint64_t getBufferDeviceAddress(BufferHandle h,
                                   size_t offset = 0) const override;
   bool resolveGeometry(GeometryAllocationHandle h,
