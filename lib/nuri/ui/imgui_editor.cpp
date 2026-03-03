@@ -5,6 +5,7 @@
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
+#include "nuri/bakery/bakery_system.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/imgui_gpu_renderer.h"
@@ -34,6 +35,7 @@ constexpr const char *kDockspaceWindowName = "NuriDockspace";
 constexpr const char *kDockspaceRootId = "NuriDockspace##Root";
 constexpr const char *kLogWindowName = "Log";
 constexpr const char *kFontCompilerWindowName = "Font Compiler";
+constexpr const char *kBakeryWindowName = "Bakery";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
 constexpr const char *kScenePresetWindowName = "Scene Preset";
 constexpr const char *kSelectionWindowName = "Selection";
@@ -58,6 +60,42 @@ const char *layerDisplayName(LayerSelection layer) {
     return "Opaque";
   case LayerSelection::Debug:
     return "Debug";
+  }
+  return "Unknown";
+}
+
+const char *bakeJobKindName(bakery::BakeJobKind kind) {
+  switch (kind) {
+  case bakery::BakeJobKind::BrdfLut:
+    return "BRDF LUT";
+  case bakery::BakeJobKind::EnvmapPrefilter:
+    return "Envmap Prefilter";
+  }
+  return "Unknown";
+}
+
+const char *bakeJobStateName(bakery::BakeJobState state) {
+  switch (state) {
+  case bakery::BakeJobState::Queued:
+    return "Queued";
+  case bakery::BakeJobState::CacheCheck:
+    return "CacheCheck";
+  case bakery::BakeJobState::GpuSetup:
+    return "GpuSetup";
+  case bakery::BakeJobState::GpuStep:
+    return "GpuStep";
+  case bakery::BakeJobState::WriteQueued:
+    return "WriteQueued";
+  case bakery::BakeJobState::WriteInFlight:
+    return "WriteInFlight";
+  case bakery::BakeJobState::Succeeded:
+    return "Succeeded";
+  case bakery::BakeJobState::Skipped:
+    return "Skipped";
+  case bakery::BakeJobState::Failed:
+    return "Failed";
+  case bakery::BakeJobState::Canceled:
+    return "Canceled";
   }
   return "Unknown";
 }
@@ -153,6 +191,24 @@ struct FontCompilerUiState {
                                           .generic_string();
     std::memcpy(outputPath.data(), defaultOutput.c_str(),
                 std::min(outputPath.size() - 1, defaultOutput.size()));
+  }
+};
+
+struct BakeryUiState {
+  std::array<char, 512> envHdrPath = {};
+  bool forceRebuild = false;
+  std::string status{};
+  std::string error{};
+  FileDialogWidget fileDialog{};
+
+  BakeryUiState() {
+    constexpr std::string_view kDefaultEnvHdr = "piazza_bologni_1k.hdr";
+    const size_t copyCount =
+        std::min(envHdrPath.size() - 1u, kDefaultEnvHdr.size());
+    if (copyCount > 0) {
+      std::memcpy(envHdrPath.data(), kDefaultEnvHdr.data(), copyCount);
+    }
+    envHdrPath[copyCount] = '\0';
   }
 };
 
@@ -849,6 +905,130 @@ void drawFontCompilerWindow(FontCompilerUiState &state, TextSystem *textSystem,
   ImGui::End();
 }
 
+void drawBakeryWindow(BakeryUiState &state, bakery::BakerySystem *bakery,
+                      std::pmr::memory_resource *scratchResource,
+                      void *ownerWindowHandle) {
+  if (!ImGui::Begin(kBakeryWindowName)) {
+    ImGui::End();
+    return;
+  }
+
+  if (bakery == nullptr) {
+    ImGui::TextUnformatted("Bakery system is not available.");
+    ImGui::End();
+    return;
+  }
+
+  ImGui::Checkbox("Force Rebuild", &state.forceRebuild);
+
+  if (ImGui::Button("Queue BRDF LUT")) {
+    state.status.clear();
+    state.error.clear();
+    auto enqueueResult = bakery->enqueue(bakery::BakeRequest{bakery::BrdfLutBakeRequest{
+        .forceRebuild = state.forceRebuild,
+    }});
+    if (enqueueResult.hasError()) {
+      state.error = enqueueResult.error();
+    } else {
+      std::ostringstream oss;
+      oss << "Queued BRDF LUT job #" << enqueueResult.value().value;
+      state.status = oss.str();
+    }
+  }
+
+  ImGui::InputText("Env HDR Path", state.envHdrPath.data(), state.envHdrPath.size());
+  ImGui::SameLine();
+  if (ImGui::Button("Browse...##EnvHdr")) {
+    static constexpr std::array<FileDialogFilter, 4> kHdrFilters = {
+        FileDialogFilter{"HDR Files (*.hdr;*.exr)", "*.hdr;*.exr"},
+        FileDialogFilter{"Radiance HDR (*.hdr)", "*.hdr"},
+        FileDialogFilter{"OpenEXR (*.exr)", "*.exr"},
+        FileDialogFilter{"All Files (*.*)", "*.*"},
+    };
+    OpenFileRequest request{};
+    request.title = "Select Environment HDR";
+    request.filters = kHdrFilters;
+    request.defaultExtension = "hdr";
+    request.ownerWindowHandle = ownerWindowHandle;
+    if (const auto selectedPath = state.fileDialog.openFile(request)) {
+      setPathText(state.envHdrPath, selectedPath->generic_string());
+    }
+  }
+  if (ImGui::Button("Queue Env Prefilter")) {
+    state.status.clear();
+    state.error.clear();
+    auto enqueueResult = bakery->enqueue(
+        bakery::BakeRequest{bakery::EnvmapPrefilterBakeRequest{
+        .environmentHdrPath = std::filesystem::path(std::string(state.envHdrPath.data())),
+        .forceRebuild = state.forceRebuild,
+    }});
+    if (enqueueResult.hasError()) {
+      state.error = enqueueResult.error();
+    } else {
+      std::ostringstream oss;
+      oss << "Queued Env Prefilter job #" << enqueueResult.value().value;
+      state.status = oss.str();
+    }
+  }
+
+  if (!state.status.empty()) {
+    ImGui::Spacing();
+    ImGui::TextUnformatted(state.status.c_str());
+  }
+  if (!state.error.empty()) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+                       state.error.c_str());
+  }
+
+  std::pmr::vector<bakery::BakeJobSnapshot> jobs =
+      bakery->snapshotJobs(scratchResource);
+  ImGui::Separator();
+  ImGui::Text("Jobs: %d", static_cast<int>(jobs.size()));
+  if (ImGui::BeginTable(
+          "BakeryJobs", 6,
+          ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
+              ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
+          ImVec2(0.0f, 240.0f))) {
+    ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+    ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+    ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+    ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+    ImGui::TableSetupColumn("Summary", ImGuiTableColumnFlags_WidthStretch, 0.0f);
+    ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthStretch, 0.0f);
+    ImGui::TableHeadersRow();
+
+    for (const bakery::BakeJobSnapshot &job : jobs) {
+      ImGui::TableNextRow();
+
+      ImGui::TableNextColumn();
+      ImGui::Text("%llu", static_cast<unsigned long long>(job.id.value));
+
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(bakeJobKindName(job.kind));
+
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(bakeJobStateName(job.state));
+
+      ImGui::TableNextColumn();
+      ImGui::Text("%.0f%%", std::clamp(job.progress01, 0.0f, 1.0f) * 100.0f);
+
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(job.summary.c_str());
+
+      ImGui::TableNextColumn();
+      if (job.error.empty()) {
+        ImGui::TextUnformatted("-");
+      } else {
+        ImGui::TextWrapped("%s", job.error.c_str());
+      }
+    }
+    ImGui::EndTable();
+  }
+
+  ImGui::End();
+}
+
 void setDockspaceWindowPlacement(const ImGuiViewport *viewport) {
   if (!viewport) {
     return;
@@ -968,6 +1148,7 @@ struct DockLayoutState {
     ImGui::DockBuilderDockWindow(kSelectionWindowName, dockBottomLeft);
     ImGui::DockBuilderDockWindow(kLogWindowName, logDockId);
     ImGui::DockBuilderDockWindow(kFontCompilerWindowName, logDockId);
+    ImGui::DockBuilderDockWindow(kBakeryWindowName, logDockId);
     ImGui::DockBuilderFinish(dockspaceId);
     built = true;
   }
@@ -984,7 +1165,8 @@ struct MaybeDockLayoutState {};
 
 struct ImGuiEditor::Impl {
   Impl(Window &windowIn, GPUDevice &gpuIn, const EditorServices &services)
-      : window(windowIn), gpu(gpuIn), textSystem(services.textSystem) {}
+      : window(windowIn), gpu(gpuIn), textSystem(services.textSystem),
+        bakery(services.bakery) {}
 
   void updateMetricGraphs(double deltaSeconds) {
     graphSampleAccumulatorSeconds += deltaSeconds;
@@ -1054,6 +1236,8 @@ struct ImGuiEditor::Impl {
     ImGui::End();
     drawFontCompilerWindow(fontCompilerState, textSystem,
                            window.nativeHandle());
+    drawBakeryWindow(bakeryState, bakery, scopedScratch.resource(),
+                     window.nativeHandle());
     NURI_PROFILER_ZONE_END();
 
     NURI_PROFILER_ZONE("ImGuiEditor::DrawFpsOverlay",
@@ -1121,9 +1305,11 @@ struct ImGuiEditor::Impl {
   LogModel logModel;
   LogFilterState logFilterState;
   FontCompilerUiState fontCompilerState;
+  BakeryUiState bakeryState;
   MaybeDockLayoutState dockLayoutState;
   ScratchArena scratchArena;
   TextSystem *textSystem = nullptr;
+  bakery::BakerySystem *bakery = nullptr;
 };
 
 std::unique_ptr<ImGuiEditor>
