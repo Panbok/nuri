@@ -7,6 +7,11 @@
 
 namespace nuri {
 
+struct TextureLoadOptions {
+  bool srgb = false;
+  bool generateMipmaps = false;
+};
+
 class NURI_API Texture final {
 public:
   ~Texture() = default;
@@ -23,11 +28,23 @@ public:
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadTexture(GPUDevice &gpu, std::string_view filePath,
               std::string_view debugName = {});
+  [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
+  loadTexture(GPUDevice &gpu, std::string_view filePath,
+              const TextureLoadOptions &options,
+              std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
                                     std::string_view filePath,
                                     std::string_view debugName = {});
+
+  [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
+  loadTextureKtx2(GPUDevice &gpu, std::string_view filePath,
+                  std::string_view debugName = {});
+
+  [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
+  loadCubemapKtx2(GPUDevice &gpu, std::string_view filePath,
+                  std::string_view debugName = {});
 
   [[nodiscard]] TextureHandle handle() const { return handle_; }
   [[nodiscard]] TextureType type() const { return type_; }
