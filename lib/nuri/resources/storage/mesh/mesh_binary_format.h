@@ -36,13 +36,14 @@ constexpr uint32_t kMeshBinarySectionIbuf =
     makeMeshBinaryFourCC('I', 'B', 'U', 'F');
 
 constexpr uint32_t kMeshBinaryLayoutIdPacked32 = 0u;
-constexpr uint32_t kMeshBinaryPackedVertexStrideBytes = 32u;
+constexpr uint32_t kMeshBinaryPackedVertexStrideBytes = 36u;
 
 // Attribute bitmask for the packed v1 shader layout.
 constexpr uint32_t kMeshBinaryPackedAttributePosition = 1u << 0u;
 constexpr uint32_t kMeshBinaryPackedAttributeUv = 1u << 1u;
-constexpr uint32_t kMeshBinaryPackedAttributeNormal = 1u << 2u;
-constexpr uint32_t kMeshBinaryPackedAttributeTangent = 1u << 3u;
+constexpr uint32_t kMeshBinaryPackedAttributeUv1 = 1u << 2u;
+constexpr uint32_t kMeshBinaryPackedAttributeNormal = 1u << 3u;
+constexpr uint32_t kMeshBinaryPackedAttributeTangent = 1u << 4u;
 
 #pragma pack(push, 1)
 struct MeshBinaryHeader {
@@ -80,7 +81,8 @@ struct MeshBinaryVertexLayoutRecord {
   uint32_t strideBytes = kMeshBinaryPackedVertexStrideBytes;
   uint32_t attributeMask =
       kMeshBinaryPackedAttributePosition | kMeshBinaryPackedAttributeUv |
-      kMeshBinaryPackedAttributeNormal | kMeshBinaryPackedAttributeTangent;
+      kMeshBinaryPackedAttributeUv1 | kMeshBinaryPackedAttributeNormal |
+      kMeshBinaryPackedAttributeTangent;
   uint32_t reserved = 0;
 };
 
