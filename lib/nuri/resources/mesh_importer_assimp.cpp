@@ -34,9 +34,9 @@ std::string normalizeExternalTexturePath(const std::filesystem::path &modelPath,
   return texturePath.lexically_normal().string();
 }
 
-ImportedMaterialTexture readMaterialTextureSlot(const aiMaterial &material,
-                                                aiTextureType textureType,
-                                                const std::filesystem::path &modelPath) {
+ImportedMaterialTexture
+readMaterialTextureSlot(const aiMaterial &material, aiTextureType textureType,
+                        const std::filesystem::path &modelPath) {
   aiString texturePath;
   aiTextureMapping textureMapping = aiTextureMapping_UV;
   uint32_t uvIndex = 0;
@@ -59,9 +59,10 @@ ImportedMaterialTexture readMaterialTextureSlot(const aiMaterial &material,
   return out;
 }
 
-ImportedMaterialTexture firstAvailableTextureSlot(
-    const aiMaterial &material, const std::filesystem::path &modelPath,
-    std::span<const aiTextureType> textureTypes) {
+ImportedMaterialTexture
+firstAvailableTextureSlot(const aiMaterial &material,
+                          const std::filesystem::path &modelPath,
+                          std::span<const aiTextureType> textureTypes) {
   for (const aiTextureType textureType : textureTypes) {
     ImportedMaterialTexture slot =
         readMaterialTextureSlot(material, textureType, modelPath);
@@ -117,9 +118,9 @@ ImportedMaterialInfo parseMaterial(const aiMaterial &material,
       aiReturn_SUCCESS) {
     parsed.sheenColorFactor =
         glm::vec3(sheenColor.r, sheenColor.g, sheenColor.b);
-    const float sheenMax =
-        std::max(parsed.sheenColorFactor.x,
-                 std::max(parsed.sheenColorFactor.y, parsed.sheenColorFactor.z));
+    const float sheenMax = std::max(
+        parsed.sheenColorFactor.x,
+        std::max(parsed.sheenColorFactor.y, parsed.sheenColorFactor.z));
     parsed.sheenWeight = sheenMax > 0.0f ? 1.0f : 0.0f;
   }
   ai_real sheenRoughness = 0.0f;
@@ -127,7 +128,9 @@ ImportedMaterialInfo parseMaterial(const aiMaterial &material,
       aiReturn_SUCCESS) {
     parsed.sheenRoughnessFactor =
         std::clamp(static_cast<float>(sheenRoughness), 0.0f, 1.0f);
-    parsed.sheenWeight = parsed.sheenRoughnessFactor > 0.0f ? 1.0f : 0.0f;
+    if (parsed.sheenWeight == 0.0f && parsed.sheenRoughnessFactor > 0.0f) {
+      parsed.sheenWeight = 1.0f;
+    }
   }
 
 #if NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS
@@ -170,8 +173,9 @@ ImportedMaterialInfo parseMaterial(const aiMaterial &material,
 #endif
 
   parsed.baseColor = firstAvailableTextureSlot(
-      material, modelPath, std::array<aiTextureType, 2>{
-                             aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE});
+      material, modelPath,
+      std::array<aiTextureType, 2>{aiTextureType_BASE_COLOR,
+                                   aiTextureType_DIFFUSE});
   parsed.metallicRoughness = firstAvailableTextureSlot(
       material, modelPath,
       std::array<aiTextureType, 2>{aiTextureType_METALNESS,
@@ -183,7 +187,8 @@ ImportedMaterialInfo parseMaterial(const aiMaterial &material,
       std::array<aiTextureType, 2>{aiTextureType_AMBIENT_OCCLUSION,
                                    aiTextureType_LIGHTMAP});
   parsed.emissive = firstAvailableTextureSlot(
-      material, modelPath, std::array<aiTextureType, 1>{aiTextureType_EMISSIVE});
+      material, modelPath,
+      std::array<aiTextureType, 1>{aiTextureType_EMISSIVE});
 
   return parsed;
 }

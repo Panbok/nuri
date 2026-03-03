@@ -517,15 +517,6 @@ void TextRenderer::emitPerfValidation(uint64_t frameIndex) {
     return;
   }
   lastPerfValidationFrame_ = frameIndex;
-  NURI_LOG_DEBUG(
-      "TextRenderer Perf frame=%llu ui(glyphs=%u batches=%u vb=%zu ib=%zu) "
-      "world(glyphs=%u batches=%u vb=%zu ib=%zu)",
-      static_cast<unsigned long long>(frameIndex),
-      static_cast<unsigned int>(perf_.uiGlyphs),
-      static_cast<unsigned int>(perf_.uiBatches), perf_.uiVertexUploadBytes,
-      perf_.uiIndexUploadBytes, static_cast<unsigned int>(perf_.worldGlyphs),
-      static_cast<unsigned int>(perf_.worldBatches),
-      perf_.worldVertexUploadBytes, perf_.worldIndexUploadBytes);
 }
 
 Result<bool, std::string> TextRenderer::compileUiShaders() {

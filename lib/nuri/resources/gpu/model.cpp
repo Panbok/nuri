@@ -95,15 +95,14 @@ BoundingBox computeModelBounds(std::span<const Vertex> vertices) {
 
 Result<uint32_t, std::string>
 computeSourceMaterialCount(std::span<const Submesh> submeshes) {
+  if (submeshes.empty()) {
+    return Result<uint32_t, std::string>::makeResult(0u);
+  }
+
   uint64_t maxSourceMaterial = 0;
-  bool hasAnyMaterial = false;
   for (const Submesh &submesh : submeshes) {
     maxSourceMaterial =
         std::max(maxSourceMaterial, static_cast<uint64_t>(submesh.materialIndex));
-    hasAnyMaterial = true;
-  }
-  if (!hasAnyMaterial) {
-    return Result<uint32_t, std::string>::makeResult(0u);
   }
   if (maxSourceMaterial >=
       static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
