@@ -28,7 +28,7 @@ struct MaterialData {
   glm::vec3 emissiveFactor{0.0f};
   float metallicFactor = 1.0f;
   float roughnessFactor = 1.0f;
-  glm::vec3 sheenColorFactor{1.0f, 1.0f, 1.0f};
+  glm::vec3 sheenColorFactor{1.0f};
   float sheenWeight = 0.0f;
   float sheenRoughnessFactor = 0.0f;
   float normalScale = 1.0f;

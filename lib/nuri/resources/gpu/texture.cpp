@@ -1,14 +1,13 @@
+#include "nuri/pch.h"
+
 #include "nuri/resources/gpu/texture.h"
 
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/resources/cpu/bitmap.h"
 
-#include "nuri/pch.h"
-
 #include <ktx.h>
 #include <stb_image.h>
-#include <vulkan/vulkan_core.h>
 
 namespace nuri {
 namespace {
@@ -41,10 +40,15 @@ constexpr ktx_uint32_t kGlRgba8 = 0x8058u;
 constexpr ktx_uint32_t kGlSrgb8Alpha8 = 0x8C43u;
 constexpr ktx_uint32_t kGlRgba16f = 0x881Au;
 constexpr ktx_uint32_t kGlRgba32f = 0x8814u;
+// KTX2 stores Vulkan format ids in the file container. Keep numeric ids local
+// to avoid a direct dependency on Vulkan headers in this high-level module.
+constexpr ktx_uint32_t kKtxVkFormatR8G8B8A8Unorm = 37u;
+constexpr ktx_uint32_t kKtxVkFormatR8G8B8A8Srgb = 43u;
+constexpr ktx_uint32_t kKtxVkFormatR16G16B16A16Sfloat = 97u;
+constexpr ktx_uint32_t kKtxVkFormatR32G32B32A32Sfloat = 109u;
 
 [[nodiscard]] Result<Format, std::string>
-resolveKtxTextureFormat(const ktxTexture *texture,
-                        std::string_view filePath) {
+resolveKtxTextureFormat(const ktxTexture *texture, std::string_view filePath) {
   if (texture == nullptr) {
     return Result<Format, std::string>::makeError(
         "Texture::resolveKtxTextureFormat: texture is null");
@@ -53,19 +57,19 @@ resolveKtxTextureFormat(const ktxTexture *texture,
   if (texture->classId == ktxTexture2_c) {
     const auto *texture2 = reinterpret_cast<const ktxTexture2 *>(texture);
     switch (texture2->vkFormat) {
-    case VK_FORMAT_R8G8B8A8_UNORM:
+    case kKtxVkFormatR8G8B8A8Unorm:
       return Result<Format, std::string>::makeResult(Format::RGBA8_UNORM);
-    case VK_FORMAT_R8G8B8A8_SRGB:
+    case kKtxVkFormatR8G8B8A8Srgb:
       return Result<Format, std::string>::makeResult(Format::RGBA8_SRGB);
-    case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case kKtxVkFormatR16G16B16A16Sfloat:
       return Result<Format, std::string>::makeResult(Format::RGBA16_FLOAT);
-    case VK_FORMAT_R32G32B32A32_SFLOAT:
+    case kKtxVkFormatR32G32B32A32Sfloat:
       return Result<Format, std::string>::makeResult(Format::RGBA32_FLOAT);
     default:
       return Result<Format, std::string>::makeError(
           "Texture::resolveKtxTextureFormat: unsupported KTX2 vkFormat " +
-          std::to_string(texture2->vkFormat) + " in '" +
-          std::string(filePath) + "'");
+          std::to_string(texture2->vkFormat) + " in '" + std::string(filePath) +
+          "'");
     }
   }
 
@@ -82,7 +86,8 @@ resolveKtxTextureFormat(const ktxTexture *texture,
       return Result<Format, std::string>::makeResult(Format::RGBA32_FLOAT);
     default:
       return Result<Format, std::string>::makeError(
-          "Texture::resolveKtxTextureFormat: unsupported KTX1 glInternalformat " +
+          "Texture::resolveKtxTextureFormat: unsupported KTX1 "
+          "glInternalformat " +
           std::to_string(texture1->glInternalformat) + " in '" +
           std::string(filePath) + "'");
     }
@@ -149,7 +154,8 @@ loadKtxPayload(std::string_view filePath, std::string_view debugName,
   const uint32_t depth = std::max(1u, texture->baseDepth);
   const uint32_t mipLevels = std::max(1u, texture->numLevels);
   const uint32_t numLayers = std::max(1u, texture->numLayers);
-  const size_t srcDataSize = static_cast<size_t>(ktxTexture_GetDataSize(texture));
+  const size_t srcDataSize =
+      static_cast<size_t>(ktxTexture_GetDataSize(texture));
   const uint8_t *srcData = ktxTexture_GetData(texture);
   if (srcData == nullptr || srcDataSize == 0u) {
     return Result<KtxLoadPayload, std::string>::makeError(
@@ -171,8 +177,7 @@ loadKtxPayload(std::string_view filePath, std::string_view debugName,
 
   auto formatResult = resolveKtxTextureFormat(texture, filePathStr);
   if (formatResult.hasError()) {
-    return Result<KtxLoadPayload, std::string>::makeError(
-        formatResult.error());
+    return Result<KtxLoadPayload, std::string>::makeError(formatResult.error());
   }
   payload.desc.format = formatResult.value();
 
@@ -204,10 +209,9 @@ loadKtxPayload(std::string_view filePath, std::string_view debugName,
     const uint32_t levelWidth = std::max(1u, width >> level);
     const uint32_t levelHeight = std::max(1u, height >> level);
     const uint32_t levelDepth = std::max(1u, depth >> level);
-    const size_t imageBytes = static_cast<size_t>(levelWidth) *
-                              static_cast<size_t>(levelHeight) *
-                              static_cast<size_t>(levelDepth) *
-                              static_cast<size_t>(bytesPerPixel);
+    const size_t imageBytes =
+        static_cast<size_t>(levelWidth) * static_cast<size_t>(levelHeight) *
+        static_cast<size_t>(levelDepth) * static_cast<size_t>(bytesPerPixel);
     tightSizeBytes += imageBytes * static_cast<size_t>(numLayers) *
                       static_cast<size_t>(numFaces);
   }
@@ -218,15 +222,14 @@ loadKtxPayload(std::string_view filePath, std::string_view debugName,
     const uint32_t levelWidth = std::max(1u, width >> level);
     const uint32_t levelHeight = std::max(1u, height >> level);
     const uint32_t levelDepth = std::max(1u, depth >> level);
-    const size_t imageBytes = static_cast<size_t>(levelWidth) *
-                              static_cast<size_t>(levelHeight) *
-                              static_cast<size_t>(levelDepth) *
-                              static_cast<size_t>(bytesPerPixel);
+    const size_t imageBytes =
+        static_cast<size_t>(levelWidth) * static_cast<size_t>(levelHeight) *
+        static_cast<size_t>(levelDepth) * static_cast<size_t>(bytesPerPixel);
     for (uint32_t layer = 0u; layer < numLayers; ++layer) {
       for (uint32_t face = 0u; face < numFaces; ++face) {
         ktx_size_t srcOffset = 0u;
-        const KTX_error_code offsetError = ktxTexture_GetImageOffset(
-            texture, level, layer, face, &srcOffset);
+        const KTX_error_code offsetError =
+            ktxTexture_GetImageOffset(texture, level, layer, face, &srcOffset);
         if (offsetError != KTX_SUCCESS) {
           return Result<KtxLoadPayload, std::string>::makeError(
               "Texture::loadKtxPayload: failed to get KTX image offset in '" +
@@ -237,14 +240,16 @@ loadKtxPayload(std::string_view filePath, std::string_view debugName,
         if (static_cast<size_t>(srcOffset) > srcDataSize ||
             imageBytes > (srcDataSize - static_cast<size_t>(srcOffset))) {
           return Result<KtxLoadPayload, std::string>::makeError(
-              "Texture::loadKtxPayload: KTX image offset is out of bounds in '" +
+              "Texture::loadKtxPayload: KTX image offset is out of bounds in "
+              "'" +
               filePathStr + "'");
         }
 
         if (dstOffset > payload.bytes.size() ||
             imageBytes > (payload.bytes.size() - dstOffset)) {
           return Result<KtxLoadPayload, std::string>::makeError(
-              "Texture::loadKtxPayload: packed KTX output buffer overflow in '" +
+              "Texture::loadKtxPayload: packed KTX output buffer overflow in "
+              "'" +
               filePathStr + "'");
         }
 
