@@ -7,13 +7,186 @@
 #include "nuri/core/profiling.h"
 
 #include <assimp/Importer.hpp>
+#include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
+#if __has_include(<assimp/GltfMaterial.h>)
+#include <assimp/GltfMaterial.h>
+#define NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS 1
+#else
+#define NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS 0
+#endif
 
 namespace nuri {
 namespace {
 constexpr float kMeshoptOverdrawThreshold = 1.05f;
 constexpr size_t kTriangleIndexCount = 3;
+
+std::string normalizeExternalTexturePath(const std::filesystem::path &modelPath,
+                                         std::string_view rawPath) {
+  if (rawPath.empty()) {
+    return {};
+  }
+  std::filesystem::path texturePath{std::string(rawPath)};
+  if (!texturePath.is_absolute()) {
+    texturePath = modelPath.parent_path() / texturePath;
+  }
+  return texturePath.lexically_normal().string();
+}
+
+ImportedMaterialTexture readMaterialTextureSlot(const aiMaterial &material,
+                                                aiTextureType textureType,
+                                                const std::filesystem::path &modelPath) {
+  aiString texturePath;
+  aiTextureMapping textureMapping = aiTextureMapping_UV;
+  uint32_t uvIndex = 0;
+  ai_real blendFactor = 1.0f;
+  aiTextureOp textureOp = aiTextureOp_Multiply;
+  aiTextureMapMode mapMode[2] = {aiTextureMapMode_Wrap, aiTextureMapMode_Wrap};
+  const aiReturn result =
+      material.GetTexture(textureType, 0, &texturePath, &textureMapping,
+                          &uvIndex, &blendFactor, &textureOp, mapMode);
+  if (result != aiReturn_SUCCESS || texturePath.length == 0) {
+    return {};
+  }
+
+  ImportedMaterialTexture out{};
+  out.uvSet = uvIndex;
+  const std::string_view rawPath(texturePath.C_Str(), texturePath.length);
+  out.isEmbedded = !rawPath.empty() && rawPath.front() == '*';
+  out.path = out.isEmbedded ? std::string(rawPath)
+                            : normalizeExternalTexturePath(modelPath, rawPath);
+  return out;
+}
+
+ImportedMaterialTexture firstAvailableTextureSlot(
+    const aiMaterial &material, const std::filesystem::path &modelPath,
+    std::span<const aiTextureType> textureTypes) {
+  for (const aiTextureType textureType : textureTypes) {
+    ImportedMaterialTexture slot =
+        readMaterialTextureSlot(material, textureType, modelPath);
+    if (!slot.path.empty()) {
+      return slot;
+    }
+  }
+  return {};
+}
+
+ImportedMaterialInfo parseMaterial(const aiMaterial &material,
+                                   const std::filesystem::path &modelPath) {
+  ImportedMaterialInfo parsed{};
+
+  if (material.GetName().length > 0) {
+    parsed.name.assign(material.GetName().C_Str(), material.GetName().length);
+  }
+
+  aiColor4D baseColor(1.0f, 1.0f, 1.0f, 1.0f);
+#if NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS
+  if (material.Get(AI_MATKEY_BASE_COLOR, baseColor) == aiReturn_SUCCESS) {
+    parsed.baseColorFactor =
+        glm::vec4(baseColor.r, baseColor.g, baseColor.b, baseColor.a);
+  } else
+#endif
+      if (material.Get(AI_MATKEY_COLOR_DIFFUSE, baseColor) ==
+          aiReturn_SUCCESS) {
+    parsed.baseColorFactor =
+        glm::vec4(baseColor.r, baseColor.g, baseColor.b, baseColor.a);
+  }
+
+  aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
+  if (material.Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor) ==
+      aiReturn_SUCCESS) {
+    parsed.emissiveFactor =
+        glm::vec3(emissiveColor.r, emissiveColor.g, emissiveColor.b);
+  }
+
+  ai_real metallicFactor = 1.0f;
+  if (material.Get(AI_MATKEY_METALLIC_FACTOR, metallicFactor) ==
+      aiReturn_SUCCESS) {
+    parsed.metallicFactor = static_cast<float>(metallicFactor);
+  }
+
+  ai_real roughnessFactor = 1.0f;
+  if (material.Get(AI_MATKEY_ROUGHNESS_FACTOR, roughnessFactor) ==
+      aiReturn_SUCCESS) {
+    parsed.roughnessFactor = static_cast<float>(roughnessFactor);
+  }
+
+  aiColor3D sheenColor(1.0f, 1.0f, 1.0f);
+  if (material.Get(AI_MATKEY_SHEEN_COLOR_FACTOR, sheenColor) ==
+      aiReturn_SUCCESS) {
+    parsed.sheenColorFactor =
+        glm::vec3(sheenColor.r, sheenColor.g, sheenColor.b);
+    const float sheenMax =
+        std::max(parsed.sheenColorFactor.x,
+                 std::max(parsed.sheenColorFactor.y, parsed.sheenColorFactor.z));
+    parsed.sheenWeight = sheenMax > 0.0f ? 1.0f : 0.0f;
+  }
+  ai_real sheenRoughness = 0.0f;
+  if (material.Get(AI_MATKEY_SHEEN_ROUGHNESS_FACTOR, sheenRoughness) ==
+      aiReturn_SUCCESS) {
+    parsed.sheenRoughnessFactor =
+        std::clamp(static_cast<float>(sheenRoughness), 0.0f, 1.0f);
+    parsed.sheenWeight = parsed.sheenRoughnessFactor > 0.0f ? 1.0f : 0.0f;
+  }
+
+#if NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS
+  ai_real normalScale = 1.0f;
+  if (material.Get(AI_MATKEY_GLTF_TEXTURE_SCALE(aiTextureType_NORMALS, 0),
+                   normalScale) == aiReturn_SUCCESS) {
+    parsed.normalScale = static_cast<float>(normalScale);
+  }
+  ai_real occlusionStrength = 1.0f;
+  if (material.Get(
+          AI_MATKEY_GLTF_TEXTURE_SCALE(aiTextureType_AMBIENT_OCCLUSION, 0),
+          occlusionStrength) == aiReturn_SUCCESS) {
+    parsed.occlusionStrength = static_cast<float>(occlusionStrength);
+  }
+#endif
+
+  int32_t doubleSided = 0;
+  if (material.Get(AI_MATKEY_TWOSIDED, doubleSided) == aiReturn_SUCCESS) {
+    parsed.doubleSided = doubleSided != 0;
+  }
+
+#if NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS
+  aiString alphaMode;
+  if (material.Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == aiReturn_SUCCESS) {
+    const std::string_view alphaModeStr(alphaMode.C_Str(), alphaMode.length);
+    if (alphaModeStr == "MASK") {
+      parsed.alphaMode = ImportedMaterialAlphaMode::Mask;
+    } else if (alphaModeStr == "BLEND") {
+      parsed.alphaMode = ImportedMaterialAlphaMode::Blend;
+    } else {
+      parsed.alphaMode = ImportedMaterialAlphaMode::Opaque;
+    }
+  }
+
+  ai_real alphaCutoff = parsed.alphaCutoff;
+  if (material.Get(AI_MATKEY_GLTF_ALPHACUTOFF, alphaCutoff) ==
+      aiReturn_SUCCESS) {
+    parsed.alphaCutoff = static_cast<float>(alphaCutoff);
+  }
+#endif
+
+  parsed.baseColor = firstAvailableTextureSlot(
+      material, modelPath, std::array<aiTextureType, 2>{
+                             aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE});
+  parsed.metallicRoughness = firstAvailableTextureSlot(
+      material, modelPath,
+      std::array<aiTextureType, 2>{aiTextureType_METALNESS,
+                                   aiTextureType_DIFFUSE_ROUGHNESS});
+  parsed.normal = firstAvailableTextureSlot(
+      material, modelPath, std::array<aiTextureType, 1>{aiTextureType_NORMALS});
+  parsed.occlusion = firstAvailableTextureSlot(
+      material, modelPath,
+      std::array<aiTextureType, 2>{aiTextureType_AMBIENT_OCCLUSION,
+                                   aiTextureType_LIGHTMAP});
+  parsed.emissive = firstAvailableTextureSlot(
+      material, modelPath, std::array<aiTextureType, 1>{aiTextureType_EMISSIVE});
+
+  return parsed;
+}
 
 size_t meshIndexCount(const aiMesh &mesh) {
   size_t count = 0;
@@ -139,6 +312,10 @@ void extractMeshGeometry(const aiMesh &mesh,
     if (mesh.HasTextureCoords(0)) {
       const aiVector3D &uv = mesh.mTextureCoords[0][vertexIndex];
       vertex.uv = {uv.x, uv.y};
+    }
+    if (mesh.HasTextureCoords(1)) {
+      const aiVector3D &uv1 = mesh.mTextureCoords[1][vertexIndex];
+      vertex.uv1 = {uv1.x, uv1.y};
     }
 
     if (mesh.HasTangentsAndBitangents()) {
@@ -493,6 +670,60 @@ MeshImporter::loadFromFile(std::string_view path,
   }
 
   return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
+}
+
+nuri::Result<ImportedMaterialSet, std::string>
+MeshImporter::loadMaterialInfoFromFile(std::string_view path) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (path.empty()) {
+    return nuri::Result<ImportedMaterialSet, std::string>::makeError(
+        "MeshImporter::loadMaterialInfoFromFile: path is empty");
+  }
+
+  Assimp::Importer importer;
+  const std::string pathStr(path);
+  constexpr unsigned int kMaterialOnlyFlags =
+      aiProcess_SortByPType | aiProcess_FindInvalidData;
+  const aiScene *scene = importer.ReadFile(pathStr, kMaterialOnlyFlags);
+  if (!scene) {
+    return nuri::Result<ImportedMaterialSet, std::string>::makeError(
+        std::string("MeshImporter::loadMaterialInfoFromFile: Assimp error: ") +
+        importer.GetErrorString());
+  }
+
+  ImportedMaterialSet set{};
+  const std::filesystem::path modelPath(pathStr);
+  if (!scene->HasMaterials()) {
+    NURI_LOG_WARNING("MeshImporter::loadMaterialInfoFromFile: scene '%s' has "
+                     "no materials",
+                     pathStr.c_str());
+    return nuri::Result<ImportedMaterialSet, std::string>::makeResult(
+        std::move(set));
+  }
+
+  set.materials.reserve(scene->mNumMaterials);
+  for (uint32_t materialIndex = 0; materialIndex < scene->mNumMaterials;
+       ++materialIndex) {
+    const aiMaterial *material = scene->mMaterials[materialIndex];
+    if (!material) {
+      ImportedMaterialInfo fallback{};
+      fallback.name = "material_" + std::to_string(materialIndex);
+      set.materials.push_back(std::move(fallback));
+      continue;
+    }
+
+    ImportedMaterialInfo parsed = parseMaterial(*material, modelPath);
+    if (parsed.name.empty()) {
+      parsed.name = "material_" + std::to_string(materialIndex);
+    }
+    set.materials.push_back(std::move(parsed));
+  }
+
+  NURI_LOG_DEBUG("MeshImporter::loadMaterialInfoFromFile: extracted %zu "
+                 "material(s) from '%s'",
+                 set.materials.size(), pathStr.c_str());
+  return nuri::Result<ImportedMaterialSet, std::string>::makeResult(
+      std::move(set));
 }
 
 } // namespace nuri

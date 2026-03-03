@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "nuri/core/result.h"
+#include "nuri/resources/cpu/material_data.h"
 #include "nuri/resources/cpu/mesh_data.h"
 
 namespace nuri {
@@ -30,11 +31,22 @@ struct MeshImportOptions {
   float lodTargetError = 1e-2f;
 };
 
+using ImportedMaterialAlphaMode = MaterialAlphaMode;
+using ImportedMaterialTexture = MaterialTextureSlotData;
+using ImportedMaterialInfo = MaterialData;
+using ImportedMaterialSet = MaterialDataSet;
+
 class NURI_API MeshImporter {
 public:
   [[nodiscard]] static nuri::Result<MeshData, std::string> loadFromFile(
       std::string_view path, const MeshImportOptions &options = {},
       std::pmr::memory_resource *mem = std::pmr::get_default_resource());
+
+  // Extracts material factors and texture slots from source files via Assimp.
+  // Texture paths are resolved to normalized absolute paths when external;
+  // embedded textures are returned as raw "*N" paths with isEmbedded=true.
+  [[nodiscard]] static nuri::Result<ImportedMaterialSet, std::string>
+  loadMaterialInfoFromFile(std::string_view path);
 };
 
 } // namespace nuri
