@@ -24,9 +24,10 @@ struct PackedVertexWords {
   uint32_t word5 = 0;
   uint32_t word6 = 0;
   uint32_t word7 = 0;
+  uint32_t word8 = 0;
 };
 
-static_assert(sizeof(PackedVertexWords) == 32);
+static_assert(sizeof(PackedVertexWords) == 36);
 
 uint16_t packSnorm16(float value) {
   const float clamped = std::clamp(value, -1.0f, 1.0f);
@@ -64,6 +65,7 @@ PackedVertexWords packVertex(const Vertex &vertex) {
   packed.word5 = packSnorm2x16Custom(glm::vec2(normal.z, 0.0f));
   packed.word6 = packSnorm2x16Custom(glm::vec2(tangent.x, tangent.y));
   packed.word7 = packSnorm2x16Custom(glm::vec2(tangent.z, tangent.w));
+  packed.word8 = glm::packHalf2x16(vertex.uv1);
 
   return packed;
 }
@@ -89,6 +91,27 @@ BoundingBox computeModelBounds(std::span<const Vertex> vertices) {
     maxPos = glm::max(maxPos, vertex.position);
   }
   return BoundingBox(minPos, maxPos);
+}
+
+Result<uint32_t, std::string>
+computeSourceMaterialCount(std::span<const Submesh> submeshes) {
+  uint64_t maxSourceMaterial = 0;
+  bool hasAnyMaterial = false;
+  for (const Submesh &submesh : submeshes) {
+    maxSourceMaterial =
+        std::max(maxSourceMaterial, static_cast<uint64_t>(submesh.materialIndex));
+    hasAnyMaterial = true;
+  }
+  if (!hasAnyMaterial) {
+    return Result<uint32_t, std::string>::makeResult(0u);
+  }
+  if (maxSourceMaterial >=
+      static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+    return Result<uint32_t, std::string>::makeError(
+        "Model::create: source material index exceeds UINT32_MAX");
+  }
+  return Result<uint32_t, std::string>::makeResult(
+      static_cast<uint32_t>(maxSourceMaterial + 1u));
 }
 
 std::vector<std::byte>
@@ -413,6 +436,36 @@ Model::~Model() {
   }
 }
 
+uint32_t Model::materialIndexForSource(uint32_t sourceMaterialIndex) const
+    noexcept {
+  if (sourceMaterialIndex >= sourceMaterialToRuntime_.size()) {
+    return kInvalidMaterialIndex;
+  }
+  return sourceMaterialToRuntime_[sourceMaterialIndex];
+}
+
+uint32_t Model::materialIndexForSubmesh(uint32_t submeshIndex) const noexcept {
+  if (submeshIndex >= submeshes_.size()) {
+    return kInvalidMaterialIndex;
+  }
+  return materialIndexForSource(submeshes_[submeshIndex].materialIndex);
+}
+
+bool Model::setMaterialIndexForSource(uint32_t sourceMaterialIndex,
+                                      uint32_t materialIndex) noexcept {
+  if (sourceMaterialIndex >= sourceMaterialToRuntime_.size()) {
+    return false;
+  }
+  sourceMaterialToRuntime_[sourceMaterialIndex] = materialIndex;
+  return true;
+}
+
+void Model::setMaterialIndexForAllSources(uint32_t materialIndex) noexcept {
+  for (uint32_t &mappedIndex : sourceMaterialToRuntime_) {
+    mappedIndex = materialIndex;
+  }
+}
+
 Result<std::unique_ptr<Model>, std::string>
 Model::create(GPUDevice &gpu, const MeshData &data,
               std::string_view debugName) {
@@ -428,6 +481,8 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
     GPUDevice &gpu, const MeshData &data,
     std::span<const std::byte> packedVertexBytes, std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  std::pmr::memory_resource *const storageMemory =
+      std::pmr::get_default_resource();
   const size_t expectedPackedByteCount =
       data.vertices.size() * sizeof(PackedVertexWords);
   if (packedVertexBytes.size() != expectedPackedByteCount) {
@@ -459,19 +514,33 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
         geometryResult.error());
   }
 
-  std::vector<Submesh> ownedSubmeshes(data.submeshes.begin(),
-                                      data.submeshes.end());
+  std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
+  ownedSubmeshes.assign(data.submeshes.begin(), data.submeshes.end());
+  auto sourceMaterialCountResult = computeSourceMaterialCount(
+      std::span<const Submesh>(ownedSubmeshes.data(), ownedSubmeshes.size()));
+  if (sourceMaterialCountResult.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        sourceMaterialCountResult.error());
+  }
+  std::pmr::vector<uint32_t> sourceMaterialToRuntime(
+      sourceMaterialCountResult.value(), Model::kInvalidMaterialIndex,
+      storageMemory);
   return Result<std::unique_ptr<Model>, std::string>::makeResult(
       std::unique_ptr<Model>(
           new Model(gpu, geometryResult.value(), std::move(ownedSubmeshes),
                     static_cast<uint32_t>(data.vertices.size()),
-                    static_cast<uint32_t>(data.indices.size()), bounds)));
+                    static_cast<uint32_t>(data.indices.size()), bounds,
+                    std::move(sourceMaterialToRuntime))));
 }
 
 Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
     GPUDevice &gpu, std::string_view path, const MeshImportOptions &options,
     std::pmr::memory_resource *mem, std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  std::pmr::memory_resource *const storageMemory =
+      std::pmr::get_default_resource();
+  std::pmr::memory_resource *const importMemory =
+      mem ? mem : std::pmr::get_default_resource();
   const std::filesystem::path sourcePath{std::string(path)};
   auto cacheKeyResult = buildMeshCacheKey(sourcePath, options);
   if (cacheKeyResult.hasError()) {
@@ -503,12 +572,25 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
             vertexBytes, cachedMesh->vertexCount, indexBytes,
             static_cast<uint32_t>(cachedMesh->indices.size()), debugName);
         if (!geometryResult.hasError()) {
+          std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
+          ownedSubmeshes.assign(cachedMesh->submeshes.begin(),
+                                cachedMesh->submeshes.end());
+          auto sourceMaterialCountResult = computeSourceMaterialCount(
+              std::span<const Submesh>(ownedSubmeshes.data(),
+                                       ownedSubmeshes.size()));
+          if (sourceMaterialCountResult.hasError()) {
+            return Result<std::unique_ptr<Model>, std::string>::makeError(
+                sourceMaterialCountResult.error());
+          }
+          std::pmr::vector<uint32_t> sourceMaterialToRuntime(
+              sourceMaterialCountResult.value(), Model::kInvalidMaterialIndex,
+              storageMemory);
           return Result<std::unique_ptr<Model>, std::string>::makeResult(
               std::unique_ptr<Model>(new Model(
-                  gpu, geometryResult.value(),
-                  std::move(cachedMesh->submeshes), cachedMesh->vertexCount,
+                  gpu, geometryResult.value(), std::move(ownedSubmeshes),
+                  cachedMesh->vertexCount,
                   static_cast<uint32_t>(cachedMesh->indices.size()),
-                  cachedMesh->bounds)));
+                  cachedMesh->bounds, std::move(sourceMaterialToRuntime))));
         }
         NURI_LOG_WARNING(
             "Model::createFromFile: Failed to create model from cache '%s': "
@@ -522,7 +604,7 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
                    static_cast<int>(path.size()), path.data());
   }
 
-  auto meshDataResult = MeshImporter::loadFromFile(path, options, mem);
+  auto meshDataResult = MeshImporter::loadFromFile(path, options, importMemory);
   if (meshDataResult.hasError()) {
     const std::string pathStr{path};
     NURI_LOG_WARNING("Model::createFromFile: Failed to load mesh '%s': %s",
