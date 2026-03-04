@@ -8,6 +8,8 @@
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
+#include "nuri/resources/gpu/material.h"
+#include "nuri/resources/gpu/model.h"
 #include "nuri/scene/render_scene.h"
 
 #include <array>
@@ -24,6 +26,7 @@
 namespace nuri {
 
 using OpaqueLayerConfig = RuntimeOpaqueShaderConfig;
+class ResourceManager;
 
 class NURI_API OpaqueLayer final : public Layer {
 public:
@@ -56,8 +59,16 @@ private:
     glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
     uint32_t cubemapTexId = 0;
     uint32_t hasCubemap = 0;
-    uint32_t _padding0 = 0;
-    uint32_t _padding1 = 0;
+    uint32_t irradianceTexId = 0;
+    uint32_t prefilteredGgxTexId = 0;
+    uint32_t prefilteredCharlieTexId = 0;
+    uint32_t brdfLutTexId = 0;
+    uint32_t hasIblDiffuse = 0;
+    uint32_t hasIblSpecular = 0;
+    uint32_t hasIblSheen = 0;
+    uint32_t hasBrdfLut = 0;
+    uint32_t outputLinearToSrgb = 0;
+    uint32_t cubemapSamplerId = 0;
   };
 
   struct PushConstants {
@@ -65,10 +76,11 @@ private:
     uint64_t vertexBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
-    uint64_t instanceMetaAddress = 0;
+    uint64_t materialBufferAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
     uint32_t instanceCount = 0;
+    uint32_t materialIndex = 0;
     float timeSeconds = 0.0f;
     float tessNearDistance = 1.0f;
     float tessFarDistance = 8.0f;
@@ -81,6 +93,7 @@ private:
 
   struct RenderableTemplate {
     const OpaqueRenderable *renderable = nullptr;
+    const Model *model = nullptr;
   };
 
   struct MeshDrawTemplate {
@@ -92,6 +105,7 @@ private:
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
     uint64_t vertexBufferAddress = 0;
+    uint32_t materialIndex = kInvalidMaterialIndex;
   };
 
   struct TessCandidate {
@@ -107,6 +121,7 @@ private:
   struct SingleInstanceBatchEntry {
     DrawItem draw{};
     uint64_t vertexBufferAddress = 0;
+    uint32_t materialIndex = kInvalidMaterialIndex;
     size_t instanceCount = 0;
   };
 
@@ -136,8 +151,7 @@ private:
   ensureCentersPhaseBufferCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceBaseMatricesBufferCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureInstanceMetaBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string> ensureMaterialBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
@@ -163,7 +177,9 @@ private:
                                                 uint64_t drawSignature);
   Result<bool, std::string> refreshCachedIndirectPack(uint32_t frameSlot,
                                                       uint64_t drawSignature);
-  Result<bool, std::string> rebuildSceneCache(const RenderScene &scene);
+  Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
+                                              const ResourceManager &resources,
+                                              uint32_t materialCount);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
   Result<bool, std::string> ensureWireframePipeline();
@@ -196,7 +212,7 @@ private:
   std::unique_ptr<Buffer> frameDataBuffer_;
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
-  std::unique_ptr<Buffer> instanceMetaBuffer_;
+  std::unique_ptr<Buffer> materialBuffer_;
   std::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::vector<DynamicBufferSlot> instanceRemapRing_;
   std::vector<DynamicBufferSlot> indirectCommandRing_;
@@ -225,7 +241,7 @@ private:
   size_t frameDataBufferCapacityBytes_ = 0;
   size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
   size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
-  size_t instanceMetaBufferCapacityBytes_ = 0;
+  size_t materialBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool tessellationUnsupported_ = false;
   bool wireframePipelineInitialized_ = false;
@@ -240,10 +256,12 @@ private:
   bool loggedTessWireframeFallbackUnsupported_ = false;
   bool loggedGsOverlayUnsupported_ = false;
   bool loggedGsTessOverlayUnsupported_ = false;
+  bool loggedMaterialFallbackWarning_ = false;
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
+  uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   bool instanceStaticBuffersDirty_ = true;
   bool uniformSingleSubmeshPath_ = false;
 
@@ -270,7 +288,7 @@ private:
   std::pmr::vector<glm::vec4> instanceCentersPhase_;
   std::pmr::vector<glm::mat4> instanceBaseMatrices_;
   std::pmr::vector<glm::vec4> instanceLodCentersInvRadiusSq_;
-  std::pmr::vector<uint32_t> instanceAlbedoTexIds_;
+  std::pmr::vector<MaterialGpuData> materialGpuDataCache_;
   std::pmr::vector<uint32_t> instanceAutoLodLevels_;
   std::pmr::vector<uint8_t> instanceTessSelection_;
   std::pmr::vector<TessCandidate> tessCandidates_;
