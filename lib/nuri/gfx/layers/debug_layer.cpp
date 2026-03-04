@@ -5,6 +5,7 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline.h"
 #include "nuri/gfx/shader.h"
+#include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 
 namespace nuri {
@@ -199,7 +200,7 @@ Result<bool, std::string>
 DebugLayer::appendModelBoundsPass(const RenderFrameContext &frame,
                                   RenderPassList &out) {
   if (!debugDraw3D_ || !frame.scene ||
-      !nuri::isValid(frame.sharedDepthTexture)) {
+      !nuri::isValid(frame.sharedDepthTexture) || !frame.resources) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -212,10 +213,11 @@ DebugLayer::appendModelBoundsPass(const RenderFrameContext &frame,
   debugDraw3D_->clear();
   debugDraw3D_->setMatrix(frame.camera.proj * frame.camera.view);
   for (const OpaqueRenderable &renderable : renderables) {
-    if (!renderable.model) {
+    const ModelRecord *modelRecord = frame.resources->tryGet(renderable.model);
+    if (!modelRecord || !modelRecord->model) {
       continue;
     }
-    debugDraw3D_->box(renderable.modelMatrix, renderable.model->bounds(),
+    debugDraw3D_->box(renderable.modelMatrix, modelRecord->model->bounds(),
                       glm::vec4(1.0f, 1.0f, 0.0f, 1.0f));
   }
 
