@@ -561,29 +561,26 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   uint32_t prefilteredGgxTexId = kInvalidTextureBindlessIndex;
   uint32_t prefilteredCharlieTexId = kInvalidTextureBindlessIndex;
   uint32_t brdfLutTexId = kInvalidTextureBindlessIndex;
-  uint32_t hasIblDiffuse = 0;
-  uint32_t hasIblSpecular = 0;
-  uint32_t hasIblSheen = 0;
-  uint32_t hasBrdfLut = 0;
+  uint32_t frameFlags = 0;
 
   if (const TextureRecord *irradiance =
           frame.resources->tryGet(environment.irradiance);
       irradiance != nullptr && nuri::isValid(irradiance->texture)) {
     irradianceTexId = irradiance->bindlessIndex;
-    hasIblDiffuse = 1;
+    frameFlags |= FrameDataFlags::HasIblDiffuse;
   } else if (hasCubemap != 0u) {
     irradianceTexId = cubemapTexId;
-    hasIblDiffuse = 1;
+    frameFlags |= FrameDataFlags::HasIblDiffuse;
   }
 
   if (const TextureRecord *prefilteredGgx =
           frame.resources->tryGet(environment.prefilteredGgx);
       prefilteredGgx != nullptr && nuri::isValid(prefilteredGgx->texture)) {
     prefilteredGgxTexId = prefilteredGgx->bindlessIndex;
-    hasIblSpecular = 1;
+    frameFlags |= FrameDataFlags::HasIblSpecular;
   } else if (hasCubemap != 0u) {
     prefilteredGgxTexId = cubemapTexId;
-    hasIblSpecular = 1;
+    frameFlags |= FrameDataFlags::HasIblSpecular;
   }
 
   if (const TextureRecord *prefilteredCharlie =
@@ -591,20 +588,21 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       prefilteredCharlie != nullptr &&
       nuri::isValid(prefilteredCharlie->texture)) {
     prefilteredCharlieTexId = prefilteredCharlie->bindlessIndex;
-    hasIblSheen = 1;
-  } else if (hasIblSpecular != 0u) {
+    frameFlags |= FrameDataFlags::HasIblSheen;
+  } else if ((frameFlags & FrameDataFlags::HasIblSpecular) != 0u) {
     prefilteredCharlieTexId = prefilteredGgxTexId;
-    hasIblSheen = 1;
+    frameFlags |= FrameDataFlags::HasIblSheen;
   }
 
   if (const TextureRecord *brdfLut =
           frame.resources->tryGet(environment.brdfLut);
       brdfLut != nullptr && nuri::isValid(brdfLut->texture)) {
     brdfLutTexId = brdfLut->bindlessIndex;
-    hasBrdfLut = 1;
+    frameFlags |= FrameDataFlags::HasBrdfLut;
   }
-  const bool outputLinearToSrgb =
-      gpu_.getSwapchainFormat() != Format::RGBA8_SRGB;
+  if (gpu_.getSwapchainFormat() != Format::RGBA8_SRGB) {
+    frameFlags |= FrameDataFlags::OutputLinearToSrgb;
+  }
 
   frameData_ = FrameData{
       .view = frame.camera.view,
@@ -616,11 +614,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       .prefilteredGgxTexId = prefilteredGgxTexId,
       .prefilteredCharlieTexId = prefilteredCharlieTexId,
       .brdfLutTexId = brdfLutTexId,
-      .hasIblDiffuse = hasIblDiffuse,
-      .hasIblSpecular = hasIblSpecular,
-      .hasIblSheen = hasIblSheen,
-      .hasBrdfLut = hasBrdfLut,
-      .outputLinearToSrgb = outputLinearToSrgb ? 1u : 0u,
+      .flags = frameFlags,
       .cubemapSamplerId = cubemapSamplerId,
   };
 

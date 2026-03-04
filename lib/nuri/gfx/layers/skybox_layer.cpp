@@ -80,11 +80,7 @@ SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         .prefilteredGgxTexId = 0,
         .prefilteredCharlieTexId = 0,
         .brdfLutTexId = 0,
-        .hasIblDiffuse = 0,
-        .hasIblSpecular = 0,
-        .hasIblSheen = 0,
-        .hasBrdfLut = 0,
-        .outputLinearToSrgb = 0,
+        .flags = 0,
         .cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex(),
     };
 

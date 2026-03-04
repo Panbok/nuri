@@ -53,6 +53,14 @@ public:
                                               RenderPassList &out) override;
 
 private:
+  enum FrameDataFlags : uint32_t {
+    HasIblDiffuse = 1u << 0u,
+    HasIblSpecular = 1u << 1u,
+    HasIblSheen = 1u << 2u,
+    HasBrdfLut = 1u << 3u,
+    OutputLinearToSrgb = 1u << 4u,
+  };
+
   struct FrameData {
     glm::mat4 view{1.0f};
     glm::mat4 proj{1.0f};
@@ -63,13 +71,12 @@ private:
     uint32_t prefilteredGgxTexId = 0;
     uint32_t prefilteredCharlieTexId = 0;
     uint32_t brdfLutTexId = 0;
-    uint32_t hasIblDiffuse = 0;
-    uint32_t hasIblSpecular = 0;
-    uint32_t hasIblSheen = 0;
-    uint32_t hasBrdfLut = 0;
-    uint32_t outputLinearToSrgb = 0;
+    uint32_t flags = 0;
     uint32_t cubemapSamplerId = 0;
   };
+  static_assert(sizeof(FrameData) == 176,
+                "OpaqueLayer::FrameData must match shader FrameDataBuffer "
+                "layout");
 
   struct PushConstants {
     uint64_t frameDataAddress = 0;
