@@ -47,8 +47,16 @@ private:
     glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
     uint32_t cubemapTexId = 0;
     uint32_t hasCubemap = 0;
-    uint32_t _padding0 = 0;
-    uint32_t _padding1 = 0;
+    uint32_t irradianceTexId = 0;
+    uint32_t prefilteredGgxTexId = 0;
+    uint32_t prefilteredCharlieTexId = 0;
+    uint32_t brdfLutTexId = 0;
+    uint32_t hasIblDiffuse = 0;
+    uint32_t hasIblSpecular = 0;
+    uint32_t hasIblSheen = 0;
+    uint32_t hasBrdfLut = 0;
+    uint32_t outputLinearToSrgb = 0;
+    uint32_t cubemapSamplerId = 0;
   };
 
   struct PushConstants {
@@ -56,10 +64,11 @@ private:
     uint64_t vertexBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
-    uint64_t instanceMetaAddress = 0;
+    uint64_t materialBufferAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
     uint32_t instanceCount = 0;
+    uint32_t materialIndex = 0;
     float timeSeconds = 0.0f;
   };
 

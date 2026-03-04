@@ -4,6 +4,7 @@
 
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
+#include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 
 namespace nuri {
@@ -49,6 +50,10 @@ SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     return Result<bool, std::string>::makeError(
         "SkyboxLayer::buildRenderPasses: frame scene is null");
   }
+  if (!frame.resources) {
+    return Result<bool, std::string>::makeError(
+        "SkyboxLayer::buildRenderPasses: frame resources are null");
+  }
 
   auto initResult = ensureInitialized();
   if (initResult.hasError()) {
@@ -62,16 +67,25 @@ SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   pass.debugLabel = "Skybox Pass";
   pass.debugColor = 0xff3366ff;
 
-  const Texture *cubemap = frame.scene->environmentCubemap();
-  if (cubemap && cubemap->valid()) {
+  const TextureRecord *cubemap =
+      frame.resources->tryGet(frame.scene->environment().cubemap);
+  if (cubemap != nullptr && nuri::isValid(cubemap->texture)) {
     frameData_ = FrameData{
         .view = frame.camera.view,
         .proj = frame.camera.proj,
         .cameraPos = frame.camera.cameraPos,
-        .cubemapTexId = gpu_.getTextureBindlessIndex(cubemap->handle()),
+        .cubemapTexId = cubemap->bindlessIndex,
         .hasCubemap = 1,
-        ._padding0 = 0,
-        ._padding1 = 0,
+        .irradianceTexId = 0,
+        .prefilteredGgxTexId = 0,
+        .prefilteredCharlieTexId = 0,
+        .brdfLutTexId = 0,
+        .hasIblDiffuse = 0,
+        .hasIblSpecular = 0,
+        .hasIblSheen = 0,
+        .hasBrdfLut = 0,
+        .outputLinearToSrgb = 0,
+        .cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex(),
     };
 
     const size_t requiredBytes = sizeof(frameData_);
