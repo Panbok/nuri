@@ -53,7 +53,7 @@ float geometryOcclusion(float ndotl, float ndotv, float alphaRoughness) {
 float microfacetDistribution(float ndoth, float alphaRoughness) {
   float roughnessSq = alphaRoughness * alphaRoughness;
   float f = (ndoth * roughnessSq - ndoth) * ndoth + 1.0;
-  return roughnessSq / (kBrdfPi * f * f);
+  return roughnessSq / max(kBrdfPi * f * f, kBrdfEpsilon);
 }
 
 mat3 cotangentFrame(vec3 normal, vec3 worldPos, vec2 uv) {
@@ -74,10 +74,10 @@ mat3 cotangentFrame(vec3 normal, vec3 worldPos, vec2 uv) {
     return mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), normal);
   }
 
-  float invMax = inversesqrt(maxLen2);
   float handedness = dot(cross(normal, tangent), bitangent) < 0.0 ? -1.0 : 1.0;
-  tangent *= handedness;
-  return mat3(tangent * invMax, bitangent * invMax, normal);
+  tangent = normalize(tangent) * handedness;
+  bitangent = normalize(bitangent);
+  return mat3(tangent, bitangent, normal);
 }
 
 vec3 applyNormalMap(vec3 baseNormal, vec3 worldPos, vec2 uv,
