@@ -6,16 +6,28 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   vec4 cameraPos;
   uint cubemapTexId;
   uint hasCubemap;
-  uint _padding0;
-  uint _padding1;
+  uint irradianceTexId;
+  uint prefilteredGgxTexId;
+  uint prefilteredCharlieTexId;
+  uint brdfLutTexId;
+  uint flags;
+  uint cubemapSamplerId;
 };
 
+const uint kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
+const uint kFrameDataFlagHasIblDiffuse = 1u << 0u;
+const uint kFrameDataFlagHasIblSpecular = 1u << 1u;
+const uint kFrameDataFlagHasIblSheen = 1u << 2u;
+const uint kFrameDataFlagHasBrdfLut = 1u << 3u;
+const uint kFrameDataFlagOutputLinearToSrgb = 1u << 4u;
+
 struct PackedVertex {
-  // CPU packs each vertex into 8 x 32-bit words:
+  // CPU packs each vertex into 9 x 32-bit words:
   // 0..2 = position.xyz as raw float bits
-  // 3    = uv as half2
+  // 3    = uv0 as half2
   // 4..5 = normal packed as snorm16 pairs (xy, then z + pad)
   // 6..7 = tangent packed as snorm16 pairs (xy, then zw)
+  // 8    = uv1 as half2
   // Decode uses uintBitsToFloat/unpackHalf2x16/custom snorm16 unpack.
   uint word0;
   uint word1;
@@ -25,6 +37,7 @@ struct PackedVertex {
   uint word5;
   uint word6;
   uint word7;
+  uint word8;
 };
 
 layout(std430, buffer_reference) readonly buffer PackedVertexBuffer {
@@ -39,8 +52,22 @@ layout(std430, buffer_reference) readonly buffer InstanceBaseMatricesBuffer {
   mat4 matrices[];
 };
 
-layout(std430, buffer_reference) readonly buffer InstanceMetaBuffer {
-  uint albedoTexIds[];
+struct MaterialGpuData {
+  vec4 baseColorFactor;
+  vec4 emissiveFactorNormalScale;
+  vec4 metallicRoughnessOcclusionAlphaCutoff;
+  vec4 sheenColorFactorWeight;
+  vec4 sheenRoughnessReserved;
+  uvec4 textureIndices0;
+  uvec4 textureIndices1;
+  uvec4 textureUvSets0;
+  uvec4 textureUvSets1;
+  uvec4 textureSamplerIndices0;
+  uvec4 textureSamplerIndices1;
+};
+
+layout(std430, buffer_reference) readonly buffer MaterialBuffer {
+  MaterialGpuData materials[];
 };
 
 layout(std430, buffer_reference) readonly buffer InstanceRemapBuffer {
@@ -56,10 +83,11 @@ layout(push_constant) uniform PushConstants {
   PackedVertexBuffer vertexBuffer;
   InstanceMatricesBuffer instanceMatrices;
   InstanceRemapBuffer instanceRemap;
-  InstanceMetaBuffer instanceMeta;
+  MaterialBuffer materialBuffer;
   InstanceCentersPhaseBuffer instanceCentersPhase;
   InstanceBaseMatricesBuffer instanceBaseMatrices;
   uint instanceCount;
+  uint materialIndex;
   float timeSeconds;
   float tessNearDistance;
   float tessFarDistance;
@@ -85,6 +113,7 @@ vec3 decodePackedPosition(PackedVertex vertex) {
 }
 
 vec2 decodePackedUv(PackedVertex vertex) { return unpackHalf2x16(vertex.word3); }
+vec2 decodePackedUv1(PackedVertex vertex) { return unpackHalf2x16(vertex.word8); }
 
 vec3 decodePackedNormal(PackedVertex vertex) {
   const vec2 normalXY = unpackSnorm2x16Custom(vertex.word4);
@@ -92,9 +121,25 @@ vec3 decodePackedNormal(PackedVertex vertex) {
   return normalize(vec3(normalXY, normalZ.x));
 }
 
+vec4 decodePackedTangent(PackedVertex vertex) {
+  const vec2 tangentXY = unpackSnorm2x16Custom(vertex.word6);
+  const vec2 tangentZW = unpackSnorm2x16Custom(vertex.word7);
+  vec3 tangent = vec3(tangentXY, tangentZW.x);
+  const float tangentLen = length(tangent);
+  if (tangentLen > 1.0e-6) {
+    tangent /= tangentLen;
+  } else {
+    tangent = vec3(1.0, 0.0, 0.0);
+  }
+  float handedness = tangentZW.y >= 0.0 ? 1.0 : -1.0;
+  return vec4(tangent, handedness);
+}
+
 struct PerVertex {
-  vec2 uv;
+  vec2 uv0;
+  vec2 uv1;
   vec3 worldNormal;
+  vec4 worldTangent;
   vec3 worldPos;
   vec3 patchBarycentric;
   vec3 triBarycentric;
