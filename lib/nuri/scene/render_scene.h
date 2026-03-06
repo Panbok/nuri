@@ -2,11 +2,9 @@
 
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
-#include "nuri/resources/gpu/model.h"
-#include "nuri/resources/gpu/texture.h"
+#include "nuri/resources/gpu/resource_handles.h"
 
 #include <cstdint>
-#include <memory>
 #include <memory_resource>
 #include <span>
 #include <string>
@@ -15,18 +13,27 @@
 #include <glm/glm.hpp>
 
 namespace nuri {
+class ResourceManager;
 
 struct NURI_API OpaqueRenderable {
-  std::shared_ptr<Model> model{};
-  std::shared_ptr<Texture> albedoTexture{};
+  ModelRef model = kInvalidModelRef;
+  MaterialRef material = kInvalidMaterialRef;
   glm::mat4 modelMatrix{1.0f};
+};
+
+struct NURI_API EnvironmentHandles {
+  TextureRef cubemap = kInvalidTextureRef;
+  TextureRef irradiance = kInvalidTextureRef;
+  TextureRef prefilteredGgx = kInvalidTextureRef;
+  TextureRef prefilteredCharlie = kInvalidTextureRef;
+  TextureRef brdfLut = kInvalidTextureRef;
 };
 
 class NURI_API RenderScene {
 public:
   explicit RenderScene(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  ~RenderScene() = default;
+  ~RenderScene();
 
   RenderScene(const RenderScene &) = delete;
   RenderScene &operator=(const RenderScene &) = delete;
@@ -34,15 +41,10 @@ public:
   RenderScene &operator=(RenderScene &&) = delete;
 
   [[nodiscard]] Result<uint32_t, std::string>
-  addOpaqueRenderable(std::unique_ptr<Model> model,
-                      std::unique_ptr<Texture> albedoTexture,
-                      const glm::mat4 &modelMatrix = glm::mat4(1.0f));
-  [[nodiscard]] Result<uint32_t, std::string>
-  addOpaqueRenderable(std::shared_ptr<Model> model,
-                      std::shared_ptr<Texture> albedoTexture,
+  addOpaqueRenderable(ModelRef model, MaterialRef material,
                       const glm::mat4 &modelMatrix = glm::mat4(1.0f));
   [[nodiscard]] Result<uint32_t, std::string> addOpaqueRenderablesInstanced(
-      std::shared_ptr<Model> model, std::shared_ptr<Texture> albedoTexture,
+      ModelRef model, MaterialRef material,
       std::span<const glm::mat4> modelMatrices);
   [[nodiscard]] bool setOpaqueRenderableTransform(uint32_t index,
                                                   const glm::mat4 &modelMatrix);
@@ -58,18 +60,22 @@ public:
     return opaqueRenderables_;
   }
   void clearOpaqueRenderables();
+  void bindResources(ResourceManager *resources);
 
-  void setEnvironmentCubemap(std::unique_ptr<Texture> cubemap);
-  [[nodiscard]] Texture *environmentCubemap() {
-    return environmentCubemap_.get();
-  }
-  [[nodiscard]] const Texture *environmentCubemap() const {
-    return environmentCubemap_.get();
+  void setEnvironment(EnvironmentHandles handles);
+  [[nodiscard]] const EnvironmentHandles &environment() const noexcept {
+    return environment_;
   }
 
 private:
+  void retainRenderable(const OpaqueRenderable &renderable);
+  void releaseRenderable(const OpaqueRenderable &renderable);
+  void retainEnvironment(const EnvironmentHandles &handles);
+  void releaseEnvironment(const EnvironmentHandles &handles);
+
   std::pmr::vector<OpaqueRenderable> opaqueRenderables_;
-  std::unique_ptr<Texture> environmentCubemap_;
+  ResourceManager *resources_ = nullptr;
+  EnvironmentHandles environment_{};
   uint64_t topologyVersion_ = 0;
   uint64_t transformVersion_ = 0;
 };
