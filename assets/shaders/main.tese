@@ -27,18 +27,19 @@ void main() {
                               inWorldNormal[2] * bary.z;
   const float lenSq = dot(weightedNormal, weightedNormal);
   const float eps = 1e-6;
-  const vec3 linearNormal = (lenSq > eps) ? normalize(weightedNormal)
-                                          : inWorldNormal[0];
+  const vec3 linearNormal =
+      (lenSq > eps) ? normalize(weightedNormal) : inWorldNormal[0];
 
   const vec2 uv0 = inUv0[0] * bary.x + inUv0[1] * bary.y + inUv0[2] * bary.z;
   const vec2 uv1 = inUv1[0] * bary.x + inUv1[1] * bary.y + inUv1[2] * bary.z;
-  vec3 weightedTangent = inWorldTangent[0].xyz * bary.x +
-                         inWorldTangent[1].xyz * bary.y +
-                         inWorldTangent[2].xyz * bary.z;
+  const vec3 weightedTangent = inWorldTangent[0].xyz * bary.x +
+                               inWorldTangent[1].xyz * bary.y +
+                               inWorldTangent[2].xyz * bary.z;
   const float tangentLenSq = dot(weightedTangent, weightedTangent);
-  const vec3 linearTangent = tangentLenSq > eps ? normalize(weightedTangent)
-                                                 : vec3(1.0, 0.0, 0.0);
-  const float tangentW = inWorldTangent[0].w * bary.x + inWorldTangent[1].w * bary.y +
+  const vec3 linearTangent =
+      tangentLenSq > eps ? normalize(weightedTangent) : vec3(1.0, 0.0, 0.0);
+  const float tangentW = inWorldTangent[0].w * bary.x +
+                         inWorldTangent[1].w * bary.y +
                          inWorldTangent[2].w * bary.z;
 
   vtx.uv0 = uv0;
