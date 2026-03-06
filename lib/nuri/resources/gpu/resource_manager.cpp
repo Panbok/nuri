@@ -24,6 +24,39 @@ template <typename SlotT, typename RefT>
   return slot.live && slot.generation == parts.generation;
 }
 
+template <typename SlotT, typename RefT>
+[[nodiscard]] SlotT *tryGetSlotImpl(std::pmr::vector<SlotT> &slots, RefT ref) {
+  if (!isValid(ref)) {
+    return nullptr;
+  }
+  const ResourceHandleParts parts = unpackResourceHandle(ref.value);
+  if (parts.index >= slots.size()) {
+    return nullptr;
+  }
+  SlotT &slot = slots[parts.index];
+  if (!slot.live || slot.generation != parts.generation) {
+    return nullptr;
+  }
+  return &slot;
+}
+
+template <typename SlotT, typename RefT>
+[[nodiscard]] const SlotT *tryGetSlotImpl(const std::pmr::vector<SlotT> &slots,
+                                          RefT ref) {
+  if (!isValid(ref)) {
+    return nullptr;
+  }
+  const ResourceHandleParts parts = unpackResourceHandle(ref.value);
+  if (parts.index >= slots.size()) {
+    return nullptr;
+  }
+  const SlotT &slot = slots[parts.index];
+  if (!slot.live || slot.generation != parts.generation) {
+    return nullptr;
+  }
+  return &slot;
+}
+
 template <typename Fn>
 void forEachTextureRef(const MaterialRequest::TextureRefs &refs, Fn &&fn) {
   fn(refs.baseColor);
@@ -89,96 +122,30 @@ ModelRef ResourceManager::makeModelRefForSlot(uint32_t index) const {
 }
 
 ResourceManager::TextureSlot *ResourceManager::tryGetSlot(TextureRef ref) {
-  if (!isValid(ref)) {
-    return nullptr;
-  }
-  const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= textureSlots_.size()) {
-    return nullptr;
-  }
-  TextureSlot &slot = textureSlots_[parts.index];
-  if (!slot.live || slot.generation != parts.generation) {
-    return nullptr;
-  }
-  return &slot;
+  return tryGetSlotImpl(textureSlots_, ref);
 }
 
 ResourceManager::MaterialSlot *ResourceManager::tryGetSlot(MaterialRef ref) {
-  if (!isValid(ref)) {
-    return nullptr;
-  }
-  const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= materialSlots_.size()) {
-    return nullptr;
-  }
-  MaterialSlot &slot = materialSlots_[parts.index];
-  if (!slot.live || slot.generation != parts.generation) {
-    return nullptr;
-  }
-  return &slot;
+  return tryGetSlotImpl(materialSlots_, ref);
 }
 
 ResourceManager::ModelSlot *ResourceManager::tryGetSlot(ModelRef ref) {
-  if (!isValid(ref)) {
-    return nullptr;
-  }
-  const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= modelSlots_.size()) {
-    return nullptr;
-  }
-  ModelSlot &slot = modelSlots_[parts.index];
-  if (!slot.live || slot.generation != parts.generation) {
-    return nullptr;
-  }
-  return &slot;
+  return tryGetSlotImpl(modelSlots_, ref);
 }
 
 const ResourceManager::TextureSlot *
 ResourceManager::tryGetSlot(TextureRef ref) const {
-  if (!isValid(ref)) {
-    return nullptr;
-  }
-  const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= textureSlots_.size()) {
-    return nullptr;
-  }
-  const TextureSlot &slot = textureSlots_[parts.index];
-  if (!slot.live || slot.generation != parts.generation) {
-    return nullptr;
-  }
-  return &slot;
+  return tryGetSlotImpl(textureSlots_, ref);
 }
 
 const ResourceManager::MaterialSlot *
 ResourceManager::tryGetSlot(MaterialRef ref) const {
-  if (!isValid(ref)) {
-    return nullptr;
-  }
-  const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= materialSlots_.size()) {
-    return nullptr;
-  }
-  const MaterialSlot &slot = materialSlots_[parts.index];
-  if (!slot.live || slot.generation != parts.generation) {
-    return nullptr;
-  }
-  return &slot;
+  return tryGetSlotImpl(materialSlots_, ref);
 }
 
 const ResourceManager::ModelSlot *
 ResourceManager::tryGetSlot(ModelRef ref) const {
-  if (!isValid(ref)) {
-    return nullptr;
-  }
-  const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= modelSlots_.size()) {
-    return nullptr;
-  }
-  const ModelSlot &slot = modelSlots_[parts.index];
-  if (!slot.live || slot.generation != parts.generation) {
-    return nullptr;
-  }
-  return &slot;
+  return tryGetSlotImpl(modelSlots_, ref);
 }
 
 uint32_t ResourceManager::allocateTextureSlot() {
@@ -285,8 +252,6 @@ void ResourceManager::destroyModelSlot(uint32_t index) {
   };
   modelCache_.erase(key);
 
-  slot.record.model.reset();
-  slot.record.sourceMaterialToRuntime.clear();
   slot.live = false;
   slot.refCount = 0;
   slot.retireAfterFrame = kRetireFrameUnset;

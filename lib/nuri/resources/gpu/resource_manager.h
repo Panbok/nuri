@@ -114,7 +114,7 @@ struct NURI_API ModelRecord {
   [[nodiscard]] MaterialRef materialForSubmesh(uint32_t submeshIndex) const;
 };
 
-struct MaterialTableSnapshot {
+struct NURI_API MaterialTableSnapshot {
   std::span<const MaterialGpuData> gpuData{};
   uint64_t version = 0;
 };
@@ -263,7 +263,7 @@ private:
                            const MaterialTextureHandles &textures);
 
   GPUDevice &gpu_;
-  std::pmr::memory_resource *memory_ = nullptr;
+  std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   uint64_t currentFrameIndex_ = 0;
 
   std::pmr::vector<TextureSlot> textureSlots_;
