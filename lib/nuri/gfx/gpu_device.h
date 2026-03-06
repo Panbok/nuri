@@ -86,6 +86,7 @@ public:
                                           size_t offset = 0) const = 0;
   virtual bool resolveGeometry(GeometryAllocationHandle h,
                                GeometryAllocationView &out) const = 0;
+  virtual uint64_t geometryMutationVersion() const { return 0; }
 
   // Rendering
   virtual Result<bool, std::string> beginFrame(uint64_t frameIndex) = 0;
