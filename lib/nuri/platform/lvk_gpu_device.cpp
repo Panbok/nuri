@@ -330,6 +330,8 @@ template <typename HandleType>
   return true;
 }
 
+constexpr bool kEnablePerDrawDebugLabels = false;
+
 [[nodiscard]] Result<bool, std::string>
 makeDependencyError(std::string_view context, std::string_view detail) {
   std::string message;
@@ -1334,6 +1336,10 @@ bool LvkGPUDevice::resolveGeometry(GeometryAllocationHandle h,
   return impl_->geometryPool ? impl_->geometryPool->resolve(h, out) : false;
 }
 
+uint64_t LvkGPUDevice::geometryMutationVersion() const {
+  return impl_->geometryPool ? impl_->geometryPool->mutationVersion() : 0;
+}
+
 Result<GeometryAllocationHandle, std::string> LvkGPUDevice::allocateGeometry(
     std::span<const std::byte> vertexBytes, uint32_t vertexCount,
     std::span<const std::byte> indexBytes, uint32_t indexCount,
@@ -1457,6 +1463,8 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     }
 
     {
+      bool computePipelineBound = false;
+      ComputePipelineHandle boundComputePipeline{};
       for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
         NURI_PROFILER_ZONE("LvkGPUDevice.compute_dispatch_submission",
                            NURI_PROFILER_COLOR_CMD_DISPATCH);
@@ -1479,8 +1487,13 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         const bool dispatchLabelPushed = pushDebugLabel(
             commandBuffer, dispatch.debugLabel, dispatch.debugColor);
 
-        commandBuffer.cmdBindComputePipeline(
-            impl_->computePipelines.getLvkHandle(dispatch.pipeline));
+        if (!computePipelineBound ||
+            !areSameHandle(dispatch.pipeline, boundComputePipeline)) {
+          commandBuffer.cmdBindComputePipeline(
+              impl_->computePipelines.getLvkHandle(dispatch.pipeline));
+          boundComputePipeline = dispatch.pipeline;
+          computePipelineBound = true;
+        }
         if (!dispatch.pushConstants.empty()) {
           commandBuffer.cmdPushConstants(
               static_cast<const void *>(dispatch.pushConstants.data()),
@@ -1576,6 +1589,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
 
     for (const DrawItem &draw : pass.draws) {
       const bool drawLabelPushed =
+          kEnablePerDrawDebugLabels &&
           pushDebugLabel(commandBuffer, draw.debugLabel, draw.debugColor);
 
       if (!pipelineBound || !areSameHandle(draw.pipeline, boundPipeline)) {
@@ -1776,6 +1790,8 @@ Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
     return Result<bool, std::string>::makeResult(true);
   };
 
+  bool computePipelineBound = false;
+  ComputePipelineHandle boundComputePipeline{};
   for (const ComputeDispatchItem &dispatch : dispatches) {
     if (!impl_->computePipelines.isValid(dispatch.pipeline)) {
       return Result<bool, std::string>::makeError(
@@ -1798,8 +1814,13 @@ Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
     const bool dispatchLabelPushed =
         pushDebugLabel(commandBuffer, dispatch.debugLabel, dispatch.debugColor);
 
-    commandBuffer.cmdBindComputePipeline(
-        impl_->computePipelines.getLvkHandle(dispatch.pipeline));
+    if (!computePipelineBound ||
+        !areSameHandle(dispatch.pipeline, boundComputePipeline)) {
+      commandBuffer.cmdBindComputePipeline(
+          impl_->computePipelines.getLvkHandle(dispatch.pipeline));
+      boundComputePipeline = dispatch.pipeline;
+      computePipelineBound = true;
+    }
     if (!dispatch.pushConstants.empty()) {
       commandBuffer.cmdPushConstants(
           static_cast<const void *>(dispatch.pushConstants.data()),

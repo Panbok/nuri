@@ -65,6 +65,7 @@ public:
                                   size_t offset = 0) const override;
   bool resolveGeometry(GeometryAllocationHandle h,
                        GeometryAllocationView &out) const override;
+  uint64_t geometryMutationVersion() const override;
 
   // Rendering
   Result<bool, std::string> beginFrame(uint64_t frameIndex) override;
