@@ -8,7 +8,9 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/gpu_render_types.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory_resource>
 #include <span>
 #include <string>
@@ -69,7 +71,7 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   std::span<const DrawItem> draws{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
-  bool markColorAsFrameOutput = true;
+  bool markColorAsFrameOutput = false;
   bool markImplicitOutputSideEffect = true;
 };
 
@@ -344,6 +346,26 @@ private:
         : debugName(memory) {}
   };
 
+  struct OwnedPassPayload {
+    std::pmr::string debugLabel;
+    std::pmr::vector<ComputeDispatchItem> preDispatches;
+    std::pmr::vector<std::pmr::string> preDispatchDebugLabels;
+    std::pmr::vector<std::pmr::vector<std::byte>> preDispatchPushConstants;
+    std::pmr::vector<std::pmr::vector<BufferHandle>>
+        preDispatchDependencyBuffers;
+    std::pmr::vector<BufferHandle> dependencyBuffers;
+    std::pmr::vector<DrawItem> draws;
+    std::pmr::vector<std::pmr::string> drawDebugLabels;
+    std::pmr::vector<std::pmr::vector<std::byte>> drawPushConstants;
+
+    explicit OwnedPassPayload(
+        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : debugLabel(memory), preDispatches(memory),
+          preDispatchDebugLabels(memory), preDispatchPushConstants(memory),
+          preDispatchDependencyBuffers(memory), dependencyBuffers(memory),
+          draws(memory), drawDebugLabels(memory), drawPushConstants(memory) {}
+  };
+
   [[nodiscard]] bool isValidPassIndex(uint32_t passIndex) const {
     return passIndex < passes_.size();
   }
@@ -361,13 +383,23 @@ private:
                           RenderGraphAccessMode mode, bool inferred);
   [[nodiscard]] Result<bool, std::string>
   markPassSideEffectInternal(RenderGraphPassId pass, bool inferred);
+  [[nodiscard]] OwnedPassPayload
+  clonePassPayload(const RenderGraphGraphicsPassDesc &desc) const;
+  [[nodiscard]] Result<bool, std::string>
+  bindImplicitPassResources(RenderGraphPassId pass,
+                            const RenderGraphGraphicsPassDesc &desc);
+  [[nodiscard]] Result<bool, std::string>
+  applyImplicitPassRoots(RenderGraphPassId pass,
+                         const RenderGraphGraphicsPassDesc &desc);
   [[nodiscard]] Result<RenderGraphPassId, std::string>
-  addPassRecord(const RenderPass &pass, std::string_view debugName);
+  addPassRecord(RenderPass pass, OwnedPassPayload ownedPayload,
+                std::string_view debugName);
 
   std::pmr::memory_resource *memory_ = nullptr;
   uint64_t frameIndex_ = 0;
   std::pmr::vector<TextureResource> textures_;
   std::pmr::vector<BufferResource> buffers_;
+  std::pmr::deque<OwnedPassPayload> ownedPassPayloads_;
   std::pmr::vector<RenderPass> passes_;
   std::pmr::vector<std::pmr::string> passDebugNames_;
   std::pmr::vector<uint32_t> passColorTextureBindings_;
