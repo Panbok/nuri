@@ -370,7 +370,6 @@ DebugDraw3D::buildGraphPass(TextureHandle depthTexture) {
 
   if (lines_.empty()) {
     pass.desc.draws = {};
-    lines_.clear();
     return Result<PreparedGraphPass, std::string>::makeResult(pass);
   }
 

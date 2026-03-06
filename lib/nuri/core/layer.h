@@ -7,7 +7,6 @@
 #include "nuri/gfx/render_graph/render_graph.h"
 
 #include <cstdint>
-#include <memory_resource>
 #include <string>
 
 namespace nuri {

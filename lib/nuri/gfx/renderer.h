@@ -10,6 +10,7 @@
 #include "nuri/resources/gpu/resource_manager.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <memory_resource>
 #include <string>
@@ -42,6 +43,9 @@ public:
   }
 
 private:
+  [[nodiscard]] std::filesystem::path
+  makeRenderGraphDumpPath(uint64_t frameIndex) const;
+
   [[nodiscard]] Result<bool, std::string>
   compileAndExecuteRenderGraph(uint64_t frameIndex);
 
@@ -49,6 +53,7 @@ private:
   ResourceManager resources_;
   RenderGraphBuilder renderGraphBuilder_;
   RenderGraphExecutor renderGraphExecutor_;
+  std::filesystem::path renderGraphDumpDirectory_;
   bool suppressInferredSideEffects_ = false;
   uint64_t standaloneFrameIndex_ = 0;
 };

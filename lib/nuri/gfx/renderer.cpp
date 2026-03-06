@@ -16,7 +16,7 @@ namespace {
 [[nodiscard]] std::filesystem::path resolveRenderGraphDumpDirectory() {
   const std::optional<std::string> dumpEnv =
       readEnvVar("NURI_RENDER_GRAPH_DUMP");
-  if (!dumpEnv.has_value() || dumpEnv->front() == '0') {
+  if (!dumpEnv.has_value() || dumpEnv->empty() || dumpEnv->front() == '0') {
     return {};
   }
 
@@ -38,23 +38,12 @@ namespace {
   return value == "1" || value == "true" || value == "TRUE";
 }
 
-[[nodiscard]] std::filesystem::path
-makeRenderGraphDumpPath(uint64_t frameIndex) {
-  const std::filesystem::path directory = resolveRenderGraphDumpDirectory();
-  if (directory.empty()) {
-    return {};
-  }
-
-  std::ostringstream fileName;
-  fileName << "render_graph_frame_" << frameIndex << ".txt";
-  return directory / fileName.str();
-}
-
 } // namespace
 
 Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
     : gpu_(gpu), resources_(gpu, &memory), renderGraphBuilder_(&memory),
       renderGraphExecutor_(&memory),
+      renderGraphDumpDirectory_(resolveRenderGraphDumpDirectory()),
       suppressInferredSideEffects_(resolveSuppressInferredSideEffectsFlag()) {
   renderGraphBuilder_.setInferredSideEffectSuppression(
       suppressInferredSideEffects_);
@@ -66,6 +55,17 @@ Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
   NURI_LOG_DEBUG("Renderer::Renderer: Renderer created");
 }
 
+std::filesystem::path Renderer::makeRenderGraphDumpPath(
+    uint64_t frameIndex) const {
+  if (renderGraphDumpDirectory_.empty()) {
+    return {};
+  }
+
+  std::ostringstream fileName;
+  fileName << "render_graph_frame_" << frameIndex << ".txt";
+  return renderGraphDumpDirectory_ / fileName.str();
+}
+
 Result<bool, std::string> Renderer::render() {
   NURI_PROFILER_FUNCTION();
   const uint64_t frameIndex = standaloneFrameIndex_++;
@@ -75,8 +75,6 @@ Result<bool, std::string> Renderer::render() {
     return frameResult;
   }
   renderGraphBuilder_.beginFrame(frameIndex);
-  renderGraphBuilder_.setInferredSideEffectSuppression(
-      suppressInferredSideEffects_);
   auto submitResult = compileAndExecuteRenderGraph(frameIndex);
   resources_.collectGarbage(frameIndex);
   return submitResult;
@@ -92,8 +90,6 @@ Result<bool, std::string> Renderer::render(LayerStack &layers,
   }
 
   renderGraphBuilder_.beginFrame(frameContext.frameIndex);
-  renderGraphBuilder_.setInferredSideEffectSuppression(
-      suppressInferredSideEffects_);
 
   if (!layers.empty()) {
     auto layerResult =

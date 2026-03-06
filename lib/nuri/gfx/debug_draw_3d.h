@@ -18,11 +18,16 @@ namespace nuri {
 
 class NURI_API DebugDraw3D {
 public:
-  explicit DebugDraw3D(
-      GPUDevice &gpu,
-      std::pmr::memory_resource *memoryResource =
-          std::pmr::get_default_resource());
+  explicit DebugDraw3D(GPUDevice &gpu,
+                       std::pmr::memory_resource *memoryResource =
+                           std::pmr::get_default_resource());
   ~DebugDraw3D();
+
+  struct PreparedGraphPass {
+    RenderGraphGraphicsPassDesc desc{};
+    TextureHandle colorTextureHandle{};
+    TextureHandle depthTextureHandle{};
+  };
 
   DebugDraw3D(const DebugDraw3D &) = delete;
   DebugDraw3D &operator=(const DebugDraw3D &) = delete;
@@ -38,12 +43,6 @@ public:
   void box(const glm::mat4 &m, const glm::vec3 &size, const glm::vec4 &color);
   void frustum(const glm::mat4 &camView, const glm::mat4 &camProj,
                const glm::vec4 &color);
-
-  struct PreparedGraphPass {
-    RenderGraphGraphicsPassDesc desc{};
-    TextureHandle colorTextureHandle{};
-    TextureHandle depthTextureHandle{};
-  };
 
   void setMatrix(const glm::mat4 &mvp) { mvp_ = mvp; }
   [[nodiscard]] Result<PreparedGraphPass, std::string>
