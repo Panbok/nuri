@@ -198,61 +198,41 @@ struct NURI_API RenderGraphCompileResult {
   std::pmr::vector<PassDispatchRange> preDispatchRangesByPass;
   std::pmr::vector<PassDrawRange> drawRangesByPass;
   std::pmr::vector<BufferHandle> resolvedPreDispatchDependencyBuffers;
-  std::pmr::vector<DispatchDependencyBufferRange>
-      preDispatchDependencyRanges;
+  std::pmr::vector<DispatchDependencyBufferRange> preDispatchDependencyRanges;
   std::pmr::vector<UnresolvedPreDispatchDependencyBufferBinding>
       unresolvedPreDispatchDependencyBufferBindings;
   std::pmr::vector<UnresolvedDrawBufferBinding> unresolvedDrawBufferBindings;
 
   explicit RenderGraphCompileResult(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : orderedPasses(memory != nullptr ? memory
-                                        : std::pmr::get_default_resource()),
-        orderedPassIndices(memory != nullptr ? memory
-                                             : std::pmr::get_default_resource()),
-        passDebugNames(memory != nullptr ? memory
-                                         : std::pmr::get_default_resource()),
-        edges(memory != nullptr ? memory : std::pmr::get_default_resource()),
-        transientTextureLifetimes(memory != nullptr ? memory
-                                                    : std::pmr::get_default_resource()),
-        transientBufferLifetimes(memory != nullptr ? memory
-                                                   : std::pmr::get_default_resource()),
-        transientTextureAllocations(memory != nullptr ? memory
-                                                      : std::pmr::get_default_resource()),
-        transientBufferAllocations(memory != nullptr ? memory
-                                                     : std::pmr::get_default_resource()),
-        transientTextureAllocationByResource(memory != nullptr ? memory
-                                                               : std::pmr::get_default_resource()),
-        transientBufferAllocationByResource(memory != nullptr ? memory
-                                                              : std::pmr::get_default_resource()),
-        transientTexturePhysicalAllocations(memory != nullptr ? memory
-                                                              : std::pmr::get_default_resource()),
-        transientBufferPhysicalAllocations(memory != nullptr ? memory
-                                                             : std::pmr::get_default_resource()),
-        unresolvedTextureBindings(memory != nullptr ? memory
-                                                    : std::pmr::get_default_resource()),
-        resolvedDependencyBuffers(memory != nullptr ? memory
-                                                    : std::pmr::get_default_resource()),
-        dependencyBufferRangesByPass(memory != nullptr ? memory
-                                                       : std::pmr::get_default_resource()),
-        unresolvedDependencyBufferBindings(memory != nullptr ? memory
-                                                             : std::pmr::get_default_resource()),
-        ownedPreDispatches(memory != nullptr ? memory
-                                             : std::pmr::get_default_resource()),
-        ownedDrawItems(memory != nullptr ? memory
-                                         : std::pmr::get_default_resource()),
-        preDispatchRangesByPass(memory != nullptr ? memory
-                                                  : std::pmr::get_default_resource()),
-        drawRangesByPass(memory != nullptr ? memory
-                                           : std::pmr::get_default_resource()),
-        resolvedPreDispatchDependencyBuffers(memory != nullptr ? memory
-                                                               : std::pmr::get_default_resource()),
-        preDispatchDependencyRanges(memory != nullptr ? memory
-                                                      : std::pmr::get_default_resource()),
-        unresolvedPreDispatchDependencyBufferBindings(
-            memory != nullptr ? memory : std::pmr::get_default_resource()),
-        unresolvedDrawBufferBindings(memory != nullptr ? memory
-                                                       : std::pmr::get_default_resource()) {}
+      : orderedPasses(ensureMemory(memory)),
+        orderedPassIndices(ensureMemory(memory)),
+        passDebugNames(ensureMemory(memory)), edges(ensureMemory(memory)),
+        transientTextureLifetimes(ensureMemory(memory)),
+        transientBufferLifetimes(ensureMemory(memory)),
+        transientTextureAllocations(ensureMemory(memory)),
+        transientBufferAllocations(ensureMemory(memory)),
+        transientTextureAllocationByResource(ensureMemory(memory)),
+        transientBufferAllocationByResource(ensureMemory(memory)),
+        transientTexturePhysicalAllocations(ensureMemory(memory)),
+        transientBufferPhysicalAllocations(ensureMemory(memory)),
+        unresolvedTextureBindings(ensureMemory(memory)),
+        resolvedDependencyBuffers(ensureMemory(memory)),
+        dependencyBufferRangesByPass(ensureMemory(memory)),
+        unresolvedDependencyBufferBindings(ensureMemory(memory)),
+        ownedPreDispatches(ensureMemory(memory)),
+        ownedDrawItems(ensureMemory(memory)),
+        preDispatchRangesByPass(ensureMemory(memory)),
+        drawRangesByPass(ensureMemory(memory)),
+        resolvedPreDispatchDependencyBuffers(ensureMemory(memory)),
+        preDispatchDependencyRanges(ensureMemory(memory)),
+        unresolvedPreDispatchDependencyBufferBindings(ensureMemory(memory)),
+        unresolvedDrawBufferBindings(ensureMemory(memory)) {}
+
+private:
+  static std::pmr::memory_resource *ensureMemory(std::pmr::memory_resource *m) {
+    return m != nullptr ? m : std::pmr::get_default_resource();
+  }
 };
 
 class NURI_API RenderGraphBuilder {
@@ -291,14 +271,12 @@ public:
   bindPassColorTexture(RenderGraphPassId pass, RenderGraphTextureId texture);
   [[nodiscard]] Result<bool, std::string>
   bindPassDepthTexture(RenderGraphPassId pass, RenderGraphTextureId texture);
-  [[nodiscard]] Result<bool, std::string>
-  bindPassDependencyBuffer(
+  [[nodiscard]] Result<bool, std::string> bindPassDependencyBuffer(
       RenderGraphPassId pass, uint32_t dependencyIndex,
       RenderGraphBufferId buffer,
       RenderGraphAccessMode mode = RenderGraphAccessMode::Read |
                                    RenderGraphAccessMode::Write);
-  [[nodiscard]] Result<bool, std::string>
-  bindPreDispatchDependencyBuffer(
+  [[nodiscard]] Result<bool, std::string> bindPreDispatchDependencyBuffer(
       RenderGraphPassId pass, uint32_t preDispatchIndex,
       uint32_t dependencyIndex, RenderGraphBufferId buffer,
       RenderGraphAccessMode mode = RenderGraphAccessMode::Read |
@@ -352,8 +330,7 @@ private:
 
     explicit TextureResource(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : debugName(memory != nullptr ? memory
-                                      : std::pmr::get_default_resource()) {}
+        : debugName(memory) {}
   };
 
   struct BufferResource {
@@ -364,8 +341,7 @@ private:
 
     explicit BufferResource(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : debugName(memory != nullptr ? memory
-                                      : std::pmr::get_default_resource()) {}
+        : debugName(memory) {}
   };
 
   [[nodiscard]] bool isValidPassIndex(uint32_t passIndex) const {
@@ -412,14 +388,10 @@ private:
   std::pmr::vector<uint32_t> drawIndirectCountBindingResourceIndices_;
   PmrHashMap<uint64_t, uint32_t> importedTextureIndicesByHandle_;
   PmrHashMap<uint64_t, uint32_t> importedBufferIndicesByHandle_;
-  PmrHashMap<uint64_t, uint32_t>
-      explicitTextureAccessIndicesByPassResource_;
-  PmrHashMap<uint64_t, uint32_t>
-      inferredTextureAccessIndicesByPassResource_;
-  PmrHashMap<uint64_t, uint32_t>
-      explicitBufferAccessIndicesByPassResource_;
-  PmrHashMap<uint64_t, uint32_t>
-      inferredBufferAccessIndicesByPassResource_;
+  PmrHashMap<uint64_t, uint32_t> explicitTextureAccessIndicesByPassResource_;
+  PmrHashMap<uint64_t, uint32_t> inferredTextureAccessIndicesByPassResource_;
+  PmrHashMap<uint64_t, uint32_t> explicitBufferAccessIndicesByPassResource_;
+  PmrHashMap<uint64_t, uint32_t> inferredBufferAccessIndicesByPassResource_;
   PmrHashSet<uint64_t> dependencyEdgeKeys_;
   std::pmr::vector<DependencyEdge> dependencies_;
   std::pmr::vector<PassResourceAccess> passResourceAccesses_;
@@ -447,13 +419,8 @@ private:
 
     explicit PendingFrameResources(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-        : textures(memory != nullptr ? memory
-                                     : std::pmr::get_default_resource()),
-          buffers(memory != nullptr ? memory : std::pmr::get_default_resource()),
-          textureDescs(memory != nullptr ? memory
-                                         : std::pmr::get_default_resource()),
-          bufferDescs(memory != nullptr ? memory
-                                        : std::pmr::get_default_resource()) {}
+        : textures(memory), buffers(memory), textureDescs(memory),
+          bufferDescs(memory) {}
   };
 
   struct ReusableTextureResource {
