@@ -35,6 +35,9 @@ public:
   void release(GeometryAllocationHandle handle);
   [[nodiscard]] bool resolve(GeometryAllocationHandle handle,
                              GeometryAllocationView &out) const;
+  [[nodiscard]] uint64_t mutationVersion() const noexcept {
+    return mutationVersion_;
+  }
 
 private:
   static constexpr uint32_t kInvalidChunkIndex = UINT32_MAX;
@@ -149,6 +152,7 @@ private:
   std::pmr::vector<uint32_t> freeAllocationIndices_;
   std::pmr::deque<RetiredChunk> retiredVertexChunks_;
   std::pmr::deque<RetiredChunk> retiredIndexChunks_;
+  uint64_t mutationVersion_ = 1;
 };
 
 } // namespace nuri
