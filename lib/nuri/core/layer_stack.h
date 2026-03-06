@@ -2,6 +2,7 @@
 
 #include "nuri/core/layer.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -36,8 +37,8 @@ public:
   void onResize(int32_t width, int32_t height);
   bool onInput(const InputEvent &event);
 
-  Result<bool, std::string> appendRenderPasses(RenderFrameContext &frame,
-                                               RenderPassList &out);
+  Result<bool, std::string> buildRenderGraph(RenderFrameContext &frame,
+                                             RenderGraphBuilder &graph);
 
 private:
   bool removeLayer(Layer *layer);

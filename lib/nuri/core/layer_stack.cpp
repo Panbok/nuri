@@ -112,26 +112,26 @@ void LayerStack::clear() {
 }
 
 Result<bool, std::string>
-LayerStack::appendRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
-  // Prepare in reverse input order so overlays can inject frame-scoped data
-  // before render layers consume it.
+LayerStack::buildRenderGraph(RenderFrameContext &frame,
+                             RenderGraphBuilder &graph) {
   for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
     Layer *layer = it->get();
     if (!layer) {
       continue;
     }
-    layer->prepareFrameContext(frame);
+    layer->publishFrameData(frame);
   }
 
   for (auto &layer : layers_) {
     if (!layer) {
       continue;
     }
-    auto result = layer->buildRenderPasses(frame, out);
+    auto result = layer->buildRenderGraph(frame, graph);
     if (result.hasError()) {
       return Result<bool, std::string>::makeError(result.error());
     }
   }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
