@@ -5,6 +5,7 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/math/types.h"
 
 #include <glm/glm.hpp>
@@ -38,9 +39,15 @@ public:
   void frustum(const glm::mat4 &camView, const glm::mat4 &camProj,
                const glm::vec4 &color);
 
+  struct PreparedGraphPass {
+    RenderGraphGraphicsPassDesc desc{};
+    TextureHandle colorTextureHandle{};
+    TextureHandle depthTextureHandle{};
+  };
+
   void setMatrix(const glm::mat4 &mvp) { mvp_ = mvp; }
-  [[nodiscard]] Result<RenderPass, std::string>
-  buildRenderPass(TextureHandle depthTexture);
+  [[nodiscard]] Result<PreparedGraphPass, std::string>
+  buildGraphPass(TextureHandle depthTexture);
 
 private:
   struct LineData {

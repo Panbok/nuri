@@ -3,9 +3,6 @@
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_descriptors.h"
 
-#include <algorithm>
-#include <limits>
-
 namespace nuri {
 namespace {
 
@@ -353,32 +350,32 @@ DebugDraw3D::ensureLineBufferCapacity(uint32_t frameIndex,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<RenderPass, std::string>
-DebugDraw3D::buildRenderPass(TextureHandle depthTexture) {
+Result<DebugDraw3D::PreparedGraphPass, std::string>
+DebugDraw3D::buildGraphPass(TextureHandle depthTexture) {
   NURI_PROFILER_FUNCTION();
 
-  RenderPass pass{};
-  pass.color.loadOp = LoadOp::Load;
-  pass.color.storeOp = StoreOp::Store;
-  pass.debugLabel = "DebugDraw3D Pass";
-  pass.debugColor = 0xffffcc00u;
+  PreparedGraphPass pass{};
+  pass.desc.color.loadOp = LoadOp::Load;
+  pass.desc.color.storeOp = StoreOp::Store;
+  pass.desc.debugLabel = "DebugDraw3D Pass";
+  pass.desc.debugColor = 0xffffcc00u;
 
   if (nuri::isValid(depthTexture)) {
-    pass.depthTexture = depthTexture;
-    pass.depth.loadOp = LoadOp::Load;
-    pass.depth.storeOp = StoreOp::Store;
-    pass.depth.clearDepth = 1.0f;
-    pass.depth.clearStencil = 0;
+    pass.depthTextureHandle = depthTexture;
+    pass.desc.depth.loadOp = LoadOp::Load;
+    pass.desc.depth.storeOp = StoreOp::Store;
+    pass.desc.depth.clearDepth = 1.0f;
+    pass.desc.depth.clearStencil = 0;
   }
 
   if (lines_.empty()) {
-    pass.draws = {};
+    pass.desc.draws = {};
     lines_.clear();
-    return Result<RenderPass, std::string>::makeResult(pass);
+    return Result<PreparedGraphPass, std::string>::makeResult(pass);
   }
 
   if (lines_.size() > std::numeric_limits<uint32_t>::max()) {
-    return Result<RenderPass, std::string>::makeError(
+    return Result<PreparedGraphPass, std::string>::makeError(
         "DebugDraw3D: vertex count exceeds uint32_t range");
   }
 
@@ -390,7 +387,8 @@ DebugDraw3D::buildRenderPass(TextureHandle depthTexture) {
 
   auto lineBufferResult = ensureLineBufferCapacity(frameIndex, requiredBytes);
   if (lineBufferResult.hasError()) {
-    return Result<RenderPass, std::string>::makeError(lineBufferResult.error());
+    return Result<PreparedGraphPass, std::string>::makeError(
+        lineBufferResult.error());
   }
 
   const std::span<const std::byte> lineBytes{
@@ -398,7 +396,8 @@ DebugDraw3D::buildRenderPass(TextureHandle depthTexture) {
   auto updateResult =
       gpu_.updateBuffer(frameBuffers_[frameIndex].buffer, lineBytes, 0);
   if (updateResult.hasError()) {
-    return Result<RenderPass, std::string>::makeError(updateResult.error());
+    return Result<PreparedGraphPass, std::string>::makeError(
+        updateResult.error());
   }
 
   const Format depthFormat = nuri::isValid(depthTexture)
@@ -406,13 +405,14 @@ DebugDraw3D::buildRenderPass(TextureHandle depthTexture) {
                                  : Format::Count;
   auto pipelineResult = ensurePipeline(gpu_.getSwapchainFormat(), depthFormat);
   if (pipelineResult.hasError()) {
-    return Result<RenderPass, std::string>::makeError(pipelineResult.error());
+    return Result<PreparedGraphPass, std::string>::makeError(
+        pipelineResult.error());
   }
 
   const uint64_t address =
       gpu_.getBufferDeviceAddress(frameBuffers_[frameIndex].buffer);
   if (address == 0) {
-    return Result<RenderPass, std::string>::makeError(
+    return Result<PreparedGraphPass, std::string>::makeError(
         "DebugDraw3D: invalid line buffer GPU address");
   }
 
@@ -436,8 +436,8 @@ DebugDraw3D::buildRenderPass(TextureHandle depthTexture) {
     };
   }
 
-  pass.draws = std::span<const DrawItem>(&drawItem_, 1);
-  return Result<RenderPass, std::string>::makeResult(pass);
+  pass.desc.draws = std::span<const DrawItem>(&drawItem_, 1u);
+  return Result<PreparedGraphPass, std::string>::makeResult(pass);
 }
 
 } // namespace nuri
