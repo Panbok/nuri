@@ -1,9 +1,11 @@
 #include "common.sp"
 
-layout(location = 0) out vec2 outUv;
-layout(location = 1) out vec3 outWorldNormal;
-layout(location = 2) out vec3 outWorldPos;
-layout(location = 3) flat out uint outInstanceId;
+layout(location = 0) out vec2 outUv0;
+layout(location = 1) out vec2 outUv1;
+layout(location = 2) out vec3 outWorldNormal;
+layout(location = 3) out vec3 outWorldPos;
+layout(location = 4) out vec4 outWorldTangent;
+layout(location = 5) flat out uint outInstanceId;
 
 void main() {
   const uint globalInstanceId = pc.instanceRemap.ids[gl_InstanceIndex];
@@ -11,17 +13,21 @@ void main() {
 
   const vec3 pos = decodePackedPosition(packed);
   const vec3 normal = decodePackedNormal(packed);
-  const vec2 uv = decodePackedUv(packed);
+  const vec4 tangent = decodePackedTangent(packed);
+  const vec2 uv0 = decodePackedUv(packed);
+  const vec2 uv1 = decodePackedUv1(packed);
 
   const mat4 model = pc.instanceMatrices.matrices[globalInstanceId];
   const vec3 worldPos = (model * vec4(pos, 1.0)).xyz;
-  // Instance transforms are rigid/uniform in this path, so inverse-transpose
-  // is equivalent to mat3(model) and much cheaper per vertex.
-  const vec3 worldNormal = normalize(mat3(model) * normal);
+  const mat3 normalMatrix = transpose(inverse(mat3(model)));
+  const vec3 worldNormal = normalize(normalMatrix * normal);
+  const vec3 worldTangent = normalize(normalMatrix * tangent.xyz);
 
-  outUv = uv;
+  outUv0 = uv0;
+  outUv1 = uv1;
   outWorldNormal = worldNormal;
   outWorldPos = worldPos;
+  outWorldTangent = vec4(worldTangent, tangent.w);
   outInstanceId = globalInstanceId;
   gl_Position = vec4(worldPos, 1.0);
 }

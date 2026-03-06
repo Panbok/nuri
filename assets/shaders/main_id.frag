@@ -1,6 +1,6 @@
 #include "common.sp"
 
-layout(location = 9) flat in uint inInstanceId;
+layout(location = 10) flat in uint inInstanceId;
 
 layout(location = 0) out uint outObjectId;
 

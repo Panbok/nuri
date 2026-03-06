@@ -2,15 +2,17 @@
 
 layout(triangles, fractional_odd_spacing, cw) in;
 
-layout(location = 0) in vec2 inUv[];
-layout(location = 1) in vec3 inWorldNormal[];
-layout(location = 2) in vec3 inWorldPos[];
-layout(location = 3) flat in uint inInstanceId[];
-layout(location = 4) patch in vec3 inPatchOuterFactors;
-layout(location = 5) patch in float inPatchInnerFactor;
+layout(location = 0) in vec2 inUv0[];
+layout(location = 1) in vec2 inUv1[];
+layout(location = 2) in vec3 inWorldNormal[];
+layout(location = 3) in vec3 inWorldPos[];
+layout(location = 4) in vec4 inWorldTangent[];
+layout(location = 5) flat in uint inInstanceId[];
+layout(location = 6) patch in vec3 inPatchOuterFactors;
+layout(location = 7) patch in float inPatchInnerFactor;
 
 layout(location = 0) out PerVertex vtx;
-layout(location = 9) flat out uint outInstanceId;
+layout(location = 10) flat out uint outInstanceId;
 
 void main() {
   const vec3 bary = gl_TessCoord;
@@ -28,10 +30,21 @@ void main() {
   const vec3 linearNormal = (lenSq > eps) ? normalize(weightedNormal)
                                           : inWorldNormal[0];
 
-  const vec2 uv = inUv[0] * bary.x + inUv[1] * bary.y + inUv[2] * bary.z;
+  const vec2 uv0 = inUv0[0] * bary.x + inUv0[1] * bary.y + inUv0[2] * bary.z;
+  const vec2 uv1 = inUv1[0] * bary.x + inUv1[1] * bary.y + inUv1[2] * bary.z;
+  vec3 weightedTangent = inWorldTangent[0].xyz * bary.x +
+                         inWorldTangent[1].xyz * bary.y +
+                         inWorldTangent[2].xyz * bary.z;
+  const float tangentLenSq = dot(weightedTangent, weightedTangent);
+  const vec3 linearTangent = tangentLenSq > eps ? normalize(weightedTangent)
+                                                 : vec3(1.0, 0.0, 0.0);
+  const float tangentW = inWorldTangent[0].w * bary.x + inWorldTangent[1].w * bary.y +
+                         inWorldTangent[2].w * bary.z;
 
-  vtx.uv = uv;
+  vtx.uv0 = uv0;
+  vtx.uv1 = uv1;
   vtx.worldNormal = linearNormal;
+  vtx.worldTangent = vec4(linearTangent, tangentW >= 0.0 ? 1.0 : -1.0);
   vtx.worldPos = linearPos;
   vtx.patchBarycentric = bary;
   vtx.triBarycentric = vec3(0.0);
