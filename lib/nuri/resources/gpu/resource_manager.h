@@ -174,6 +174,10 @@ public:
   void retain(MaterialRef ref);
   void release(MaterialRef ref);
 
+  [[nodiscard]] bool owns(TextureRef ref) const noexcept;
+  [[nodiscard]] bool owns(ModelRef ref) const noexcept;
+  [[nodiscard]] bool owns(MaterialRef ref) const noexcept;
+
   [[nodiscard]] const TextureRecord *tryGet(TextureRef ref) const;
   [[nodiscard]] const ModelRecord *tryGet(ModelRef ref) const;
   [[nodiscard]] const MaterialRecord *tryGet(MaterialRef ref) const;

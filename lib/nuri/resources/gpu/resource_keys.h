@@ -26,7 +26,7 @@ enum class TextureRequestKind : uint8_t {
 struct TextureKey {
   std::string canonicalPath{};
   uint64_t optionsHash = 0;
-  uint8_t kind = static_cast<uint8_t>(TextureRequestKind::Texture2D);
+  TextureRequestKind kind = TextureRequestKind::Texture2D;
 
   bool operator==(const TextureKey &rhs) const noexcept {
     return optionsHash == rhs.optionsHash && kind == rhs.kind &&
@@ -38,7 +38,7 @@ struct TextureKeyHash {
   size_t operator()(const TextureKey &key) const noexcept {
     const size_t h1 = std::hash<std::string>{}(key.canonicalPath);
     const size_t h2 = std::hash<uint64_t>{}(key.optionsHash);
-    const size_t h3 = std::hash<uint8_t>{}(key.kind);
+    const size_t h3 = std::hash<uint8_t>{}(static_cast<uint8_t>(key.kind));
     return h1 ^ (h2 + 0x9e3779b9u + (h1 << 6u) + (h1 >> 2u)) ^
            (h3 + 0x9e3779b9u + (h2 << 6u) + (h2 >> 2u));
   }

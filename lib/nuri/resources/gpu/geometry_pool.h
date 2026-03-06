@@ -139,6 +139,7 @@ private:
   [[nodiscard]] Result<bool, std::string> compactIfNeeded();
 
   [[nodiscard]] bool isHandleLive(GeometryAllocationHandle handle) const;
+  void bumpMutationVersion() noexcept;
 
   GPUDevice &gpu_;
   GeometryPoolConfig config_{};

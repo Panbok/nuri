@@ -424,10 +424,7 @@ GeometryPool::applyCompactionPlan(std::pmr::vector<Chunk> &chunks,
           .buffer = chunk.buffer, .retireFrame = currentFrameIndex_});
     }
     chunks.clear();
-    ++mutationVersion_;
-    if (mutationVersion_ == 0) {
-      mutationVersion_ = 1;
-    }
+    bumpMutationVersion();
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -464,10 +461,7 @@ GeometryPool::applyCompactionPlan(std::pmr::vector<Chunk> &chunks,
                                             .retireFrame = currentFrameIndex_});
   }
   chunks = std::move(plan.newChunks);
-  ++mutationVersion_;
-  if (mutationVersion_ == 0) {
-    mutationVersion_ = 1;
-  }
+  bumpMutationVersion();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -516,6 +510,13 @@ bool GeometryPool::isHandleLive(GeometryAllocationHandle handle) const {
   const AllocationEntry &entry = allocations_[handle.index];
   return entry.generation == handle.generation &&
          entry.state == AllocationEntry::State::Live;
+}
+
+void GeometryPool::bumpMutationVersion() noexcept {
+  ++mutationVersion_;
+  if (mutationVersion_ == 0) {
+    mutationVersion_ = 1;
+  }
 }
 
 Result<bool, std::string> GeometryPool::beginFrame(uint64_t frameIndex) {
@@ -600,10 +601,7 @@ GeometryPool::allocate(std::span<const std::byte> vertexBytes,
   entry.indexCount = indexCount;
   entry.retireFrame = 0;
   entry.debugName.assign(debugName.data(), debugName.size());
-  ++mutationVersion_;
-  if (mutationVersion_ == 0) {
-    mutationVersion_ = 1;
-  }
+  bumpMutationVersion();
 
   return Result<GeometryAllocationHandle, std::string>::makeResult(
       GeometryAllocationHandle{
@@ -620,10 +618,7 @@ void GeometryPool::release(GeometryAllocationHandle handle) {
   AllocationEntry &entry = allocations_[handle.index];
   entry.state = AllocationEntry::State::PendingFree;
   entry.retireFrame = currentFrameIndex_;
-  ++mutationVersion_;
-  if (mutationVersion_ == 0) {
-    mutationVersion_ = 1;
-  }
+  bumpMutationVersion();
 }
 
 bool GeometryPool::resolve(GeometryAllocationHandle handle,

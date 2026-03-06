@@ -60,9 +60,9 @@ RenderScene::addOpaqueRenderable(ModelRef model, MaterialRef material,
   renderable.model = model;
   renderable.material = material;
   renderable.modelMatrix = modelMatrix;
-  retainRenderable(renderable);
 
-  opaqueRenderables_.push_back(std::move(renderable));
+  opaqueRenderables_.emplace_back(renderable);
+  retainRenderable(renderable);
   ++topologyVersion_;
   ++transformVersion_;
   return Result<uint32_t, std::string>::makeResult(
@@ -173,12 +173,40 @@ void RenderScene::bindResources(ResourceManager *resources) {
 
   resources_ = resources;
 
-  if (resources_ != nullptr) {
-    for (const OpaqueRenderable &renderable : opaqueRenderables_) {
-      retainRenderable(renderable);
-    }
-    retainEnvironment(environment_);
+  if (resources_ == nullptr) {
+    return;
   }
+
+  size_t writeIndex = 0;
+  for (size_t readIndex = 0; readIndex < opaqueRenderables_.size();
+       ++readIndex) {
+    const OpaqueRenderable renderable = opaqueRenderables_[readIndex];
+    if (!resources_->owns(renderable.model) ||
+        !resources_->owns(renderable.material)) {
+      continue;
+    }
+    opaqueRenderables_[writeIndex] = renderable;
+    retainRenderable(opaqueRenderables_[writeIndex]);
+    ++writeIndex;
+  }
+
+  if (writeIndex != opaqueRenderables_.size()) {
+    opaqueRenderables_.resize(writeIndex);
+    ++topologyVersion_;
+    ++transformVersion_;
+  }
+
+  const auto sanitizeTextureRef = [this](TextureRef &ref) {
+    if (isValid(ref) && !resources_->owns(ref)) {
+      ref = kInvalidTextureRef;
+    }
+  };
+  sanitizeTextureRef(environment_.cubemap);
+  sanitizeTextureRef(environment_.irradiance);
+  sanitizeTextureRef(environment_.prefilteredGgx);
+  sanitizeTextureRef(environment_.prefilteredCharlie);
+  sanitizeTextureRef(environment_.brdfLut);
+  retainEnvironment(environment_);
 }
 
 void RenderScene::setEnvironment(EnvironmentHandles handles) {

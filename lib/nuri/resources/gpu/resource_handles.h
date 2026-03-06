@@ -8,6 +8,8 @@ namespace nuri {
 
 inline constexpr uint32_t kResourceHandleIndexBits = 20u;
 inline constexpr uint32_t kResourceHandleGenerationBits = 12u;
+static_assert(kResourceHandleIndexBits + kResourceHandleGenerationBits == 32u,
+              "Resource handle bits must sum to 32");
 inline constexpr uint32_t kResourceHandleIndexMask =
     (1u << kResourceHandleIndexBits) - 1u;
 inline constexpr uint32_t kResourceHandleGenerationMask =
@@ -15,6 +17,13 @@ inline constexpr uint32_t kResourceHandleGenerationMask =
 
 struct NURI_API TextureRef {
   uint32_t value = 0;
+
+  constexpr bool operator==(TextureRef other) const {
+    return value == other.value;
+  }
+  constexpr bool operator!=(TextureRef other) const {
+    return value != other.value;
+  }
 };
 
 struct NURI_API MaterialRef {

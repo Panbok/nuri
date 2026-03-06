@@ -192,7 +192,7 @@ void ResourceManager::destroyTextureSlot(uint32_t index) {
   const TextureKey key{
       .canonicalPath = std::string(slot.record.canonicalPath),
       .optionsHash = hashTextureLoadOptions(slot.record.loadOptions),
-      .kind = static_cast<uint8_t>(slot.record.sourceKind),
+      .kind = slot.record.sourceKind,
   };
   textureCache_.erase(key);
 
@@ -272,7 +272,7 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
   TextureKey key{
       .canonicalPath = canonicalPath,
       .optionsHash = hashTextureLoadOptions(request.loadOptions),
-      .kind = static_cast<uint8_t>(request.kind),
+      .kind = request.kind,
   };
 
   if (auto it = textureCache_.find(key); it != textureCache_.end()) {
@@ -818,6 +818,18 @@ void ResourceManager::release(MaterialRef ref) {
   if (slot->refCount == 0u) {
     slot->retireAfterFrame = currentFrameIndex_ + retireLagFrames();
   }
+}
+
+bool ResourceManager::owns(TextureRef ref) const noexcept {
+  return isSlotLiveForRef(textureSlots_, ref);
+}
+
+bool ResourceManager::owns(ModelRef ref) const noexcept {
+  return isSlotLiveForRef(modelSlots_, ref);
+}
+
+bool ResourceManager::owns(MaterialRef ref) const noexcept {
+  return isSlotLiveForRef(materialSlots_, ref);
 }
 
 const TextureRecord *ResourceManager::tryGet(TextureRef ref) const {
