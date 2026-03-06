@@ -13,7 +13,6 @@ void main() {
 
   const vec3 pos = decodePackedPosition(packed);
   const vec3 normal = decodePackedNormal(packed);
-  const vec4 tangent = decodePackedTangent(packed);
   const vec2 uv0 = decodePackedUv(packed);
   const vec2 uv1 = decodePackedUv1(packed);
 
@@ -21,13 +20,12 @@ void main() {
   const vec3 worldPos = (model * vec4(pos, 1.0)).xyz;
   const mat3 normalMatrix = transpose(inverse(mat3(model)));
   const vec3 worldNormal = normalize(normalMatrix * normal);
-  const vec3 worldTangent = normalize(normalMatrix * tangent.xyz);
 
   outUv0 = uv0;
   outUv1 = uv1;
   outWorldNormal = worldNormal;
   outWorldPos = worldPos;
-  outWorldTangent = vec4(worldTangent, tangent.w);
+  outWorldTangent = vec4(0.0, 0.0, 0.0, 1.0);
   outInstanceId = globalInstanceId;
   gl_Position = vec4(worldPos, 1.0);
 }

@@ -8,7 +8,6 @@ void main() {
   const PackedVertex packed = pc.vertexBuffer.vertices[gl_VertexIndex];
   const vec3 pos = decodePackedPosition(packed);
   const vec3 normal = decodePackedNormal(packed);
-  const vec4 tangent = decodePackedTangent(packed);
   const vec2 uv0 = decodePackedUv(packed);
   const vec2 uv1 = decodePackedUv1(packed);
 
@@ -23,7 +22,7 @@ void main() {
   vtx.uv0 = uv0;
   vtx.uv1 = uv1;
   vtx.worldNormal = normalize(normalMatrix * normal);
-  vtx.worldTangent = vec4(normalize(normalMatrix * tangent.xyz), tangent.w);
+  vtx.worldTangent = vec4(0.0, 0.0, 0.0, 1.0);
   vtx.worldPos = worldPos4.xyz;
   vtx.patchBarycentric = vec3(0.0);
   vtx.triBarycentric = vec3(0.0);

@@ -32,20 +32,11 @@ void main() {
 
   const vec2 uv0 = inUv0[0] * bary.x + inUv0[1] * bary.y + inUv0[2] * bary.z;
   const vec2 uv1 = inUv1[0] * bary.x + inUv1[1] * bary.y + inUv1[2] * bary.z;
-  const vec3 weightedTangent = inWorldTangent[0].xyz * bary.x +
-                               inWorldTangent[1].xyz * bary.y +
-                               inWorldTangent[2].xyz * bary.z;
-  const float tangentLenSq = dot(weightedTangent, weightedTangent);
-  const vec3 linearTangent =
-      tangentLenSq > eps ? normalize(weightedTangent) : vec3(1.0, 0.0, 0.0);
-  const float tangentW = inWorldTangent[0].w * bary.x +
-                         inWorldTangent[1].w * bary.y +
-                         inWorldTangent[2].w * bary.z;
 
   vtx.uv0 = uv0;
   vtx.uv1 = uv1;
   vtx.worldNormal = linearNormal;
-  vtx.worldTangent = vec4(linearTangent, tangentW >= 0.0 ? 1.0 : -1.0);
+  vtx.worldTangent = vec4(0.0, 0.0, 0.0, 1.0);
   vtx.worldPos = linearPos;
   vtx.patchBarycentric = bary;
   vtx.triBarycentric = vec3(0.0);

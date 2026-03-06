@@ -98,8 +98,6 @@ void main() {
   }
 
   vec3 v = normalize(pc.frameData.cameraPos.xyz - vtx.worldPos);
-  vec3 r = reflect(-v, n);
-
   float ndotv = max(dot(n, v), 0.001);
 
   vec3 f0 = mix(vec3(0.04), baseColor.rgb, metallic);
@@ -111,20 +109,25 @@ void main() {
   const vec3 lightPos = vec3(0.0, 0.0, -5.0);
   const vec3 lightColor = vec3(1.0);
   vec3 l = normalize(lightPos - vtx.worldPos);
-  vec3 h = normalize(v + l);
   float ndotl = max(dot(n, l), 0.0);
-  float ndoth = max(dot(n, h), 0.0);
-  float ldoth = max(dot(l, h), 0.0);
-  float vdoth = max(dot(v, h), 0.0);
+  vec3 directLighting = vec3(0.0);
+  vec3 halfVector = v + l;
+  float halfLenSq = dot(halfVector, halfVector);
+  if (ndotl > 0.0 && halfLenSq > kBrdfEpsilon) {
+    vec3 h = halfVector * inversesqrt(halfLenSq);
+    float ndoth = max(dot(n, h), 0.0);
+    float ldoth = max(dot(l, h), 0.0);
+    float vdoth = max(dot(v, h), 0.0);
 
-  vec3 f = specularReflection(vdoth, f0, reflectance90);
-  float g = geometryOcclusion(ndotl, ndotv, alphaRoughness);
-  float d = microfacetDistribution(ndoth, alphaRoughness);
-  vec3 diffuse = (1.0 - f) *
-                 diffuseBurley(diffuseColor, ndotl, ndotv, ldoth,
-                               alphaRoughness);
-  vec3 specular = f * g * d / max(4.0 * ndotl * ndotv, kBrdfEpsilon);
-  vec3 directLighting = ndotl * lightColor * (diffuse + specular);
+    vec3 f = specularReflection(vdoth, f0, reflectance90);
+    float g = geometryOcclusion(ndotl, ndotv, alphaRoughness);
+    float d = microfacetDistribution(ndoth, alphaRoughness);
+    vec3 diffuse = (1.0 - f) *
+                   diffuseBurley(diffuseColor, ndotl, ndotv, ldoth,
+                                 alphaRoughness);
+    vec3 specular = f * g * d / max(4.0 * ndotl * ndotv, kBrdfEpsilon);
+    directLighting = ndotl * lightColor * (diffuse + specular);
+  }
 
   vec3 brdfLutSample = vec3(0.0);
   bool hasBrdfLut = (pc.frameData.flags & kFrameDataFlagHasBrdfLut) != 0u &&
@@ -136,6 +139,9 @@ void main() {
   }
 
   vec3 iblDiffuse = vec3(0.0);
+  vec3 iblSpecular = vec3(0.0);
+  vec3 iblSheen = vec3(0.0);
+  bool hasIndirectLighting = false;
   if ((pc.frameData.flags & kFrameDataFlagHasIblDiffuse) != 0u &&
       pc.frameData.irradianceTexId != kInvalidTextureBindlessIndex) {
     vec3 irradiance =
@@ -148,11 +154,12 @@ void main() {
     } else {
       iblDiffuse = diffuseColor * irradiance;
     }
+    hasIndirectLighting = true;
   }
 
-  vec3 iblSpecular = vec3(0.0);
   if ((pc.frameData.flags & kFrameDataFlagHasIblSpecular) != 0u &&
       pc.frameData.prefilteredGgxTexId != kInvalidTextureBindlessIndex) {
+    vec3 r = reflect(-v, n);
     if (hasBrdfLut) {
       float mipCount =
           float(textureBindlessQueryLevelsCube(pc.frameData.prefilteredGgxTexId));
@@ -170,9 +177,9 @@ void main() {
               .rgb *
           fresnelSchlick(ndotv, f0);
     }
+    hasIndirectLighting = true;
   }
 
-  vec3 iblSheen = vec3(0.0);
   float sheenWeight = saturate(material.sheenColorFactorWeight.w);
   float sheenRoughness =
       clamp(material.sheenRoughnessReserved.x, kBrdfMinRoughness, 1.0);
@@ -180,6 +187,7 @@ void main() {
   if ((pc.frameData.flags & kFrameDataFlagHasIblSheen) != 0u &&
       pc.frameData.prefilteredCharlieTexId != kInvalidTextureBindlessIndex &&
       hasBrdfLut && sheenWeight > 0.0) {
+    vec3 r = reflect(-v, n);
     float mipCount = float(
         textureBindlessQueryLevelsCube(pc.frameData.prefilteredCharlieTexId));
     float lod = sheenRoughness * max(mipCount - 1.0, 0.0);
@@ -188,10 +196,14 @@ void main() {
                                pc.frameData.cubemapSamplerId, r, lod)
             .rgb;
     iblSheen = computeIblSheen(sheenColor, sheenWeight, sheenEnv, brdfLutSample);
+    hasIndirectLighting = true;
   }
 
-  vec3 color = (directLighting + iblDiffuse + iblSpecular + iblSheen) * ao +
-               emissive;
+  vec3 indirectLighting = iblDiffuse + iblSpecular + iblSheen;
+  if (hasIndirectLighting) {
+    indirectLighting *= ao;
+  }
+  vec3 color = directLighting + indirectLighting + emissive;
   color = max(color, vec3(0.0));
   if ((pc.frameData.flags & kFrameDataFlagOutputLinearToSrgb) != 0u) {
     color = pow(color, vec3(1.0 / 2.2));

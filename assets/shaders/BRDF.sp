@@ -3,9 +3,13 @@ const float kBrdfMinRoughness = 0.04;
 const float kBrdfEpsilon = 1.0e-5;
 
 float saturate(float x) { return clamp(x, 0.0, 1.0); }
+float pow5(float x) {
+  float x2 = x * x;
+  return x2 * x2 * x;
+}
 
 vec3 fresnelSchlick(float cosTheta, vec3 f0) {
-  return f0 + (1.0 - f0) * pow(1.0 - saturate(cosTheta), 5.0);
+  return f0 + (1.0 - f0) * pow5(1.0 - saturate(cosTheta));
 }
 
 float distributionGGX(float ndoth, float roughness) {
@@ -31,14 +35,14 @@ vec3 diffuseBurley(vec3 diffuseColor, float ndotl, float ndotv, float ldoth,
                    float alphaRoughness) {
   float f90 = 2.0 * ldoth * ldoth * alphaRoughness - 0.5;
   return (diffuseColor / kBrdfPi) *
-         (1.0 + f90 * pow(1.0 - ndotl, 5.0)) *
-         (1.0 + f90 * pow(1.0 - ndotv, 5.0));
+         (1.0 + f90 * pow5(1.0 - ndotl)) *
+         (1.0 + f90 * pow5(1.0 - ndotv));
 }
 
 vec3 specularReflection(float vdoth, vec3 reflectance0, vec3 reflectance90) {
   return reflectance0 +
          (reflectance90 - reflectance0) *
-             pow(clamp(1.0 - vdoth, 0.0, 1.0), 5.0);
+             pow5(clamp(1.0 - vdoth, 0.0, 1.0));
 }
 
 float geometryOcclusion(float ndotl, float ndotv, float alphaRoughness) {
@@ -102,7 +106,7 @@ vec3 applyNormalMap(vec3 baseNormal, vec4 worldTangent, vec3 worldPos, vec2 uv,
 vec3 computeIblDiffuse(vec3 diffuseColor, vec3 f0, float roughness, float ndotv,
                        vec3 irradiance, vec3 brdfLutSample) {
   vec3 fr = max(vec3(1.0 - roughness), f0) - f0;
-  vec3 kS = f0 + fr * pow(1.0 - ndotv, 5.0);
+  vec3 kS = f0 + fr * pow5(1.0 - ndotv);
   vec3 fssEss = kS * brdfLutSample.x + brdfLutSample.y;
 
   float ems = 1.0 - (brdfLutSample.x + brdfLutSample.y);
@@ -116,7 +120,7 @@ vec3 computeIblDiffuse(vec3 diffuseColor, vec3 f0, float roughness, float ndotv,
 vec3 computeIblSpecular(vec3 f0, float roughness, float ndotv, vec3 prefiltered,
                         vec3 brdfLutSample) {
   vec3 fr = max(vec3(1.0 - roughness), f0) - f0;
-  vec3 kS = f0 + fr * pow(1.0 - ndotv, 5.0);
+  vec3 kS = f0 + fr * pow5(1.0 - ndotv);
   vec3 fssEss = kS * brdfLutSample.x + brdfLutSample.y;
   return prefiltered * fssEss;
 }
