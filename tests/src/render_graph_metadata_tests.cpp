@@ -27,7 +27,7 @@ TEST(RenderGraphMetadataTest, TransientTextureBindingMetadata) {
       "test_color_tex");
   auto transientDepthResult = builder.createTransientTexture(
       makeTransientTextureDesc(Format::D32_FLOAT, 16u, 16u), "test_depth_tex");
-  if (!(!transientColorResult.hasError() && !transientDepthResult.hasError())) {
+  if (transientColorResult.hasError() || transientDepthResult.hasError()) {
     ADD_FAILURE() << "createTransientTexture should succeed";
     return;
   }
@@ -37,25 +37,25 @@ TEST(RenderGraphMetadataTest, TransientTextureBindingMetadata) {
   RenderPass pass{};
   pass.debugLabel = "rg_test_transient_tex_binding";
   auto addPassResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(!addPassResult.hasError())) {
+  if (addPassResult.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass should succeed";
     return;
   }
   const RenderGraphPassId passId = addPassResult.value();
 
   auto bindResult = builder.bindPassColorTexture(passId, transientColor);
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassColorTexture transient should succeed";
     return;
   }
   bindResult = builder.bindPassDepthTexture(passId, transientDepth);
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassDepthTexture transient should succeed";
     return;
   }
 
   auto compileResult = builder.compile();
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
       std::cerr << compileResult.error() << "\n";
@@ -95,10 +95,8 @@ TEST(RenderGraphMetadataTest, TransientTextureBindingMetadata) {
       }
       sawDepthBinding = true;
     } else {
-      if (true) {
-        ADD_FAILURE() << "unexpected unresolved texture binding target";
-        return;
-      }
+      ADD_FAILURE() << "unexpected unresolved texture binding target";
+      return;
     }
   }
 
@@ -120,7 +118,7 @@ TEST(RenderGraphMetadataTest, ImportedTextureBindingMetadataResolved) {
       builder.importTexture(importedColor, "test_imported_color");
   auto importedDepthResult =
       builder.importTexture(importedDepth, "test_imported_depth");
-  if (!(!importedColorResult.hasError() && !importedDepthResult.hasError())) {
+  if (importedColorResult.hasError() || importedDepthResult.hasError()) {
     ADD_FAILURE() << "importTexture should succeed";
     return;
   }
@@ -128,7 +126,7 @@ TEST(RenderGraphMetadataTest, ImportedTextureBindingMetadataResolved) {
   RenderPass pass{};
   pass.debugLabel = "rg_test_imported_tex_binding";
   auto addPassResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(!addPassResult.hasError())) {
+  if (addPassResult.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass should succeed";
     return;
   }
@@ -136,19 +134,19 @@ TEST(RenderGraphMetadataTest, ImportedTextureBindingMetadataResolved) {
 
   auto bindResult =
       builder.bindPassColorTexture(passId, importedColorResult.value());
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassColorTexture imported should succeed";
     return;
   }
   bindResult =
       builder.bindPassDepthTexture(passId, importedDepthResult.value());
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassDepthTexture imported should succeed";
     return;
   }
 
   auto compileResult = builder.compile();
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
       std::cerr << compileResult.error() << "\n";
@@ -188,7 +186,7 @@ TEST(RenderGraphMetadataTest, ImportedResourceDedupAndFrameReset) {
       builder.importTexture(importedTexture, "dedup_imported_texture_a");
   auto importTextureResultB =
       builder.importTexture(importedTexture, "dedup_imported_texture_b");
-  if (!(!importTextureResultA.hasError() && !importTextureResultB.hasError())) {
+  if (importTextureResultA.hasError() || importTextureResultB.hasError()) {
     ADD_FAILURE() << "importTexture dedup inserts should succeed";
     return;
   }
@@ -203,7 +201,7 @@ TEST(RenderGraphMetadataTest, ImportedResourceDedupAndFrameReset) {
       builder.importBuffer(importedBuffer, "dedup_imported_buffer_a");
   auto importBufferResultB =
       builder.importBuffer(importedBuffer, "dedup_imported_buffer_b");
-  if (!(!importBufferResultA.hasError() && !importBufferResultB.hasError())) {
+  if (importBufferResultA.hasError() || importBufferResultB.hasError()) {
     ADD_FAILURE() << "importBuffer dedup inserts should succeed";
     return;
   }
@@ -219,8 +217,7 @@ TEST(RenderGraphMetadataTest, ImportedResourceDedupAndFrameReset) {
       builder.importTexture(importedTexture, "frame_reset_texture");
   auto frameResetBufferResult =
       builder.importBuffer(importedBuffer, "frame_reset_buffer");
-  if (!(!frameResetTextureResult.hasError() &&
-        !frameResetBufferResult.hasError())) {
+  if (frameResetTextureResult.hasError() || frameResetBufferResult.hasError()) {
     ADD_FAILURE() << "frame-reset imports should succeed";
     return;
   }
@@ -262,7 +259,7 @@ TEST(RenderGraphMetadataTest, ExplicitLegacyRegistrationWithoutInference) {
   pass.draws = std::span<const DrawItem>(draws.data(), draws.size());
 
   auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel, false);
-  if (!(!addResult.hasError())) {
+  if (addResult.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass explicit path should succeed";
     if (addResult.hasError()) {
       std::cerr << addResult.error() << "\n";
@@ -281,48 +278,46 @@ TEST(RenderGraphMetadataTest, ExplicitLegacyRegistrationWithoutInference) {
       builder.importBuffer(vertexBuffer, "metadata_explicit_vb");
   auto ibImportResult =
       builder.importBuffer(indexBuffer, "metadata_explicit_ib");
-  if (!(!colorImportResult.hasError() && !depthImportResult.hasError() &&
-        !depImportResult.hasError() && !vbImportResult.hasError() &&
-        !ibImportResult.hasError())) {
+  if (colorImportResult.hasError() || depthImportResult.hasError() || depImportResult.hasError() || vbImportResult.hasError() || ibImportResult.hasError()) {
     ADD_FAILURE() << "explicit registration imports should succeed";
     return;
   }
 
   auto bindResult =
       builder.bindPassColorTexture(passId, colorImportResult.value());
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassColorTexture explicit path should succeed";
     return;
   }
   bindResult = builder.bindPassDepthTexture(passId, depthImportResult.value());
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassDepthTexture explicit path should succeed";
     return;
   }
   bindResult = builder.bindPassDependencyBuffer(
       passId, 0u, depImportResult.value(),
       RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassDependencyBuffer explicit path should succeed";
     return;
   }
   bindResult = builder.bindDrawBuffer(
       passId, 0u, RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
       vbImportResult.value(), RenderGraphAccessMode::Read);
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindDrawBuffer vertex explicit path should succeed";
     return;
   }
   bindResult = builder.bindDrawBuffer(
       passId, 0u, RenderGraphCompileResult::DrawBufferBindingTarget::Index,
       ibImportResult.value(), RenderGraphAccessMode::Read);
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindDrawBuffer index explicit path should succeed";
     return;
   }
 
   auto compileResult = builder.compile();
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed for explicit registration path";
     if (compileResult.hasError()) {
       std::cerr << compileResult.error() << "\n";
@@ -402,7 +397,7 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
 
   auto transientBufferResultA = builder.createTransientBuffer(
       makeTransientBufferDesc(64u), "frame_a_buf");
-  if (!(!transientBufferResultA.hasError())) {
+  if (transientBufferResultA.hasError()) {
     ADD_FAILURE() << "frame A createTransientBuffer should succeed";
     return;
   }
@@ -410,37 +405,37 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
   RenderPass passA{};
   passA.debugLabel = "frame_a_pass";
   auto passAResult = addTestGraphicsPass(builder, passA, passA.debugLabel);
-  if (!(!passAResult.hasError())) {
+  if (passAResult.hasError()) {
     ADD_FAILURE() << "frame A addLegacyRenderPass should succeed";
     return;
   }
 
   auto accessResult = builder.addBufferRead(passAResult.value(),
                                             transientBufferResultA.value());
-  if (!(!accessResult.hasError())) {
+  if (accessResult.hasError()) {
     ADD_FAILURE() << "frame A first addBufferRead should succeed";
     return;
   }
   accessResult = builder.addBufferRead(passAResult.value(),
                                        transientBufferResultA.value());
-  if (!(!accessResult.hasError())) {
+  if (accessResult.hasError()) {
     ADD_FAILURE() << "frame A duplicate addBufferRead should succeed";
     return;
   }
 
   auto sideEffectResult = builder.markPassSideEffect(passAResult.value());
-  if (!(!sideEffectResult.hasError())) {
+  if (sideEffectResult.hasError()) {
     ADD_FAILURE() << "frame A first markPassSideEffect should succeed";
     return;
   }
   sideEffectResult = builder.markPassSideEffect(passAResult.value());
-  if (!(!sideEffectResult.hasError())) {
+  if (sideEffectResult.hasError()) {
     ADD_FAILURE() << "frame A duplicate markPassSideEffect should succeed";
     return;
   }
 
   auto compileAResult = builder.compile();
-  if (!(!compileAResult.hasError())) {
+  if (compileAResult.hasError()) {
     ADD_FAILURE() << "frame A compile should succeed";
     if (compileAResult.hasError()) {
       std::cerr << compileAResult.error() << "\n";
@@ -451,7 +446,7 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
   builder.beginFrame(308u);
   auto transientBufferResultB = builder.createTransientBuffer(
       makeTransientBufferDesc(64u), "frame_b_buf");
-  if (!(!transientBufferResultB.hasError())) {
+  if (transientBufferResultB.hasError()) {
     ADD_FAILURE() << "frame B createTransientBuffer should succeed";
     return;
   }
@@ -459,25 +454,25 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
   RenderPass passB{};
   passB.debugLabel = "frame_b_pass";
   auto passBResult = addTestGraphicsPass(builder, passB, passB.debugLabel);
-  if (!(!passBResult.hasError())) {
+  if (passBResult.hasError()) {
     ADD_FAILURE() << "frame B addLegacyRenderPass should succeed";
     return;
   }
 
   accessResult = builder.addBufferRead(passBResult.value(),
                                        transientBufferResultB.value());
-  if (!(!accessResult.hasError())) {
+  if (accessResult.hasError()) {
     ADD_FAILURE() << "frame B addBufferRead should succeed";
     return;
   }
   sideEffectResult = builder.markPassSideEffect(passBResult.value());
-  if (!(!sideEffectResult.hasError())) {
+  if (sideEffectResult.hasError()) {
     ADD_FAILURE() << "frame B markPassSideEffect should succeed";
     return;
   }
 
   auto compileBResult = builder.compile();
-  if (!(!compileBResult.hasError())) {
+  if (compileBResult.hasError()) {
     ADD_FAILURE() << "frame B compile should succeed";
     if (compileBResult.hasError()) {
       std::cerr << compileBResult.error() << "\n";
@@ -502,7 +497,7 @@ TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
 
   auto transientResult =
       builder.createTransientBuffer(makeTransientBufferDesc(64u), "test_buf");
-  if (!(!transientResult.hasError())) {
+  if (transientResult.hasError()) {
     ADD_FAILURE() << "createTransientBuffer should succeed";
     return;
   }
@@ -525,7 +520,7 @@ TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
   pass.debugLabel = "rg_test_unresolved";
 
   auto addPassResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(!addPassResult.hasError())) {
+  if (addPassResult.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass should succeed";
     return;
   }
@@ -534,7 +529,7 @@ TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
   auto bindPassDepResult = builder.bindPassDependencyBuffer(
       passId, 0u, transientBuffer,
       RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (!(!bindPassDepResult.hasError())) {
+  if (bindPassDepResult.hasError()) {
     ADD_FAILURE() << "bindPassDependencyBuffer should succeed";
     return;
   }
@@ -542,7 +537,7 @@ TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
   auto bindPreDispatchDepResult = builder.bindPreDispatchDependencyBuffer(
       passId, 0u, 0u, transientBuffer,
       RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (!(!bindPreDispatchDepResult.hasError())) {
+  if (bindPreDispatchDepResult.hasError()) {
     ADD_FAILURE() << "bindPreDispatchDependencyBuffer should succeed";
     return;
   }
@@ -550,13 +545,13 @@ TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
   auto bindDrawBufferResult = builder.bindDrawBuffer(
       passId, 0u, RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
       transientBuffer, RenderGraphAccessMode::Read);
-  if (!(!bindDrawBufferResult.hasError())) {
+  if (bindDrawBufferResult.hasError()) {
     ADD_FAILURE() << "bindDrawBuffer should succeed";
     return;
   }
 
   auto compileResult = builder.compile();
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
       std::cerr << compileResult.error() << "\n";
@@ -694,13 +689,13 @@ TEST(RenderGraphMetadataTest, ResolvedImportedBindingMetadata) {
   pass.debugLabel = "rg_test_resolved";
 
   auto addPassResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(!addPassResult.hasError())) {
+  if (addPassResult.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass should succeed";
     return;
   }
 
   auto compileResult = builder.compile();
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
       std::cerr << compileResult.error() << "\n";
@@ -747,13 +742,13 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
 
   auto transientAResult = builder.createTransientBuffer(
       makeTransientBufferDesc(64u), "multi_transient_a");
-  if (!(!transientAResult.hasError())) {
+  if (transientAResult.hasError()) {
     ADD_FAILURE() << "createTransientBuffer A should succeed";
     return;
   }
   auto transientBResult = builder.createTransientBuffer(
       makeTransientBufferDesc(64u), "multi_transient_b");
-  if (!(!transientBResult.hasError())) {
+  if (transientBResult.hasError()) {
     ADD_FAILURE() << "createTransientBuffer B should succeed";
     return;
   }
@@ -785,12 +780,12 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   pass1.debugLabel = "rg_test_multi_pass1";
 
   auto pass0Result = addTestGraphicsPass(builder, pass0, pass0.debugLabel);
-  if (!(!pass0Result.hasError())) {
+  if (pass0Result.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass pass0 should succeed";
     return;
   }
   auto pass1Result = addTestGraphicsPass(builder, pass1, pass1.debugLabel);
-  if (!(!pass1Result.hasError())) {
+  if (pass1Result.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass pass1 should succeed";
     return;
   }
@@ -799,14 +794,14 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   auto bindResult = builder.bindPassDependencyBuffer(
       pass0Id, 0u, transientA,
       RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassDependencyBuffer pass0 slot0 should succeed";
     return;
   }
   bindResult = builder.bindPassDependencyBuffer(
       pass0Id, 1u, transientB,
       RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (!(!bindResult.hasError())) {
+  if (bindResult.hasError()) {
     ADD_FAILURE() << "bindPassDependencyBuffer pass0 slot1 should succeed";
     return;
   }
@@ -814,7 +809,7 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   auto bindPreResult = builder.bindPreDispatchDependencyBuffer(
       pass0Id, 0u, 0u, transientA,
       RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (!(!bindPreResult.hasError())) {
+  if (bindPreResult.hasError()) {
     ADD_FAILURE() << "bindPreDispatchDependencyBuffer pass0 dispatch0 should "
                      "succeed";
     return;
@@ -822,7 +817,7 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   bindPreResult = builder.bindPreDispatchDependencyBuffer(
       pass0Id, 1u, 0u, transientB,
       RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
-  if (!(!bindPreResult.hasError())) {
+  if (bindPreResult.hasError()) {
     ADD_FAILURE() << "bindPreDispatchDependencyBuffer pass0 dispatch1 should "
                      "succeed";
     return;
@@ -831,20 +826,20 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   auto bindDrawResult = builder.bindDrawBuffer(
       pass0Id, 0u, RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
       transientA, RenderGraphAccessMode::Read);
-  if (!(!bindDrawResult.hasError())) {
+  if (bindDrawResult.hasError()) {
     ADD_FAILURE() << "bindDrawBuffer pass0 draw0 should succeed";
     return;
   }
   bindDrawResult = builder.bindDrawBuffer(
       pass0Id, 1u, RenderGraphCompileResult::DrawBufferBindingTarget::Index,
       transientB, RenderGraphAccessMode::Read);
-  if (!(!bindDrawResult.hasError())) {
+  if (bindDrawResult.hasError()) {
     ADD_FAILURE() << "bindDrawBuffer pass0 draw1 should succeed";
     return;
   }
 
   auto compileResult = builder.compile();
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
       std::cerr << compileResult.error() << "\n";
@@ -961,7 +956,7 @@ TEST(RenderGraphMetadataTest, StructuralCompileMetadataIntegrity) {
   implicitPass.debugLabel = "struct_implicit";
   auto implicitResult =
       addTestGraphicsPass(builder, implicitPass, implicitPass.debugLabel);
-  if (!(!implicitResult.hasError())) {
+  if (implicitResult.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass implicit should succeed";
     return;
   }
@@ -971,7 +966,7 @@ TEST(RenderGraphMetadataTest, StructuralCompileMetadataIntegrity) {
   producerPass.colorTexture = colorA;
   auto producerResult =
       addTestGraphicsPass(builder, producerPass, producerPass.debugLabel);
-  if (!(!producerResult.hasError())) {
+  if (producerResult.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass producer should succeed";
     return;
   }
@@ -981,32 +976,32 @@ TEST(RenderGraphMetadataTest, StructuralCompileMetadataIntegrity) {
   outputPass.colorTexture = colorB;
   auto outputResult =
       addTestGraphicsPass(builder, outputPass, outputPass.debugLabel);
-  if (!(!outputResult.hasError())) {
+  if (outputResult.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass output should succeed";
     return;
   }
 
   auto depResult =
       builder.addDependency(producerResult.value(), outputResult.value());
-  if (!(!depResult.hasError())) {
+  if (depResult.hasError()) {
     ADD_FAILURE() << "addDependency producer->output should succeed";
     return;
   }
 
   auto outputImportResult = builder.importTexture(colorB, "struct_output_tex");
-  if (!(!outputImportResult.hasError())) {
+  if (outputImportResult.hasError()) {
     ADD_FAILURE() << "importTexture output should succeed";
     return;
   }
   auto markResult =
       builder.markTextureAsFrameOutput(outputImportResult.value());
-  if (!(!markResult.hasError())) {
+  if (markResult.hasError()) {
     ADD_FAILURE() << "markTextureAsFrameOutput should succeed";
     return;
   }
 
   auto compileResult = builder.compile();
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
       std::cerr << compileResult.error() << "\n";
@@ -1059,7 +1054,7 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
   RenderPass pass0{};
   pass0.debugLabel = "alloc_meta_pass0";
   auto pass0Result = addTestGraphicsPass(builder, pass0, pass0.debugLabel);
-  if (!(!pass0Result.hasError())) {
+  if (pass0Result.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass pass0 should succeed";
     return;
   }
@@ -1067,14 +1062,14 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
   RenderPass pass1{};
   pass1.debugLabel = "alloc_meta_pass1";
   auto pass1Result = addTestGraphicsPass(builder, pass1, pass1.debugLabel);
-  if (!(!pass1Result.hasError())) {
+  if (pass1Result.hasError()) {
     ADD_FAILURE() << "addLegacyRenderPass pass1 should succeed";
     return;
   }
 
   auto depResult =
       builder.addDependency(pass0Result.value(), pass1Result.value());
-  if (!(!depResult.hasError())) {
+  if (depResult.hasError()) {
     ADD_FAILURE() << "addDependency pass0->pass1 should succeed";
     return;
   }
@@ -1087,41 +1082,38 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
       makeTransientBufferDesc(64u), "alloc_buf_a");
   auto transientBufferBResult = builder.createTransientBuffer(
       makeTransientBufferDesc(64u), "alloc_buf_b");
-  if (!(!transientTextureAResult.hasError() &&
-        !transientTextureBResult.hasError() &&
-        !transientBufferAResult.hasError() &&
-        !transientBufferBResult.hasError())) {
+  if (transientTextureAResult.hasError() || transientTextureBResult.hasError() || transientBufferAResult.hasError() || transientBufferBResult.hasError()) {
     ADD_FAILURE() << "createTransientTexture/Buffer should succeed";
     return;
   }
 
   auto accessResult = builder.addTextureWrite(pass0Result.value(),
                                               transientTextureAResult.value());
-  if (!(!accessResult.hasError())) {
+  if (accessResult.hasError()) {
     ADD_FAILURE() << "addTextureWrite pass0 texA should succeed";
     return;
   }
   accessResult = builder.addTextureWrite(pass1Result.value(),
                                          transientTextureBResult.value());
-  if (!(!accessResult.hasError())) {
+  if (accessResult.hasError()) {
     ADD_FAILURE() << "addTextureWrite pass1 texB should succeed";
     return;
   }
   auto bufferAccessResult = builder.addBufferWrite(
       pass0Result.value(), transientBufferAResult.value());
-  if (!(!bufferAccessResult.hasError())) {
+  if (bufferAccessResult.hasError()) {
     ADD_FAILURE() << "addBufferWrite pass0 bufA should succeed";
     return;
   }
   bufferAccessResult = builder.addBufferWrite(pass1Result.value(),
                                               transientBufferBResult.value());
-  if (!(!bufferAccessResult.hasError())) {
+  if (bufferAccessResult.hasError()) {
     ADD_FAILURE() << "addBufferWrite pass1 bufB should succeed";
     return;
   }
 
   auto compileResult = builder.compile();
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
       std::cerr << compileResult.error() << "\n";
@@ -1169,9 +1161,11 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
       return;
     }
     if (i > 0u) {
-      ASSERT_TRUE(allocation.resourceIndex > previousTextureResourceIndex)
-          << "transient texture allocations should be strictly ordered "
-             "by resource index";
+      if (!(allocation.resourceIndex > previousTextureResourceIndex)) {
+        ADD_FAILURE() << "transient texture allocations should be strictly "
+                         "ordered by resource index";
+        return;
+      }
     }
     previousTextureResourceIndex = allocation.resourceIndex;
     if (!(compiled
@@ -1199,9 +1193,11 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
       return;
     }
     if (i > 0u) {
-      ASSERT_TRUE(allocation.resourceIndex > previousBufferResourceIndex)
-          << "transient buffer allocations should be strictly ordered "
-             "by resource index";
+      if (!(allocation.resourceIndex > previousBufferResourceIndex)) {
+        ADD_FAILURE() << "transient buffer allocations should be strictly "
+                         "ordered by resource index";
+        return;
+      }
     }
     previousBufferResourceIndex = allocation.resourceIndex;
     if (!(compiled

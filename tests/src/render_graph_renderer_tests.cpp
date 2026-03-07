@@ -79,23 +79,17 @@ TEST(RenderGraphRendererTest,
   LayerStack layers(&memory);
   auto *baseLayer =
       layers.pushLayer(std::make_unique<BaseImplicitOutputLayer>());
-  if (!(baseLayer != nullptr)) {
-    ADD_FAILURE() << "pushLayer for base pass should succeed";
-    return;
-  }
+  ASSERT_NE(baseLayer, nullptr) << "pushLayer for base pass should succeed";
   const TextureHandle explicitOutputTexture{.index = 501u, .generation = 1u};
   auto *layer = layers.pushLayer(
       std::make_unique<ExplicitFrameOutputLayer>(explicitOutputTexture));
-  if (!(layer != nullptr)) {
-    ADD_FAILURE() << "pushLayer should succeed";
-    return;
-  }
+  ASSERT_NE(layer, nullptr) << "pushLayer should succeed";
 
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 1u;
 
   auto renderResult = renderer.render(layers, frameContext);
-  if (!(!renderResult.hasError() && renderResult.value())) {
+  if (renderResult.hasError() || !renderResult.value()) {
     ADD_FAILURE() << "renderer render should succeed";
     if (renderResult.hasError()) {
       std::cerr << renderResult.error() << "\n";
@@ -103,22 +97,14 @@ TEST(RenderGraphRendererTest,
     return;
   }
 
-  if (!(gpu.submitCount == 1u)) {
-    ADD_FAILURE() << "renderer should submit one frame";
-    return;
-  }
-  if (!(gpu.submittedPassCount == 2u)) {
-    ADD_FAILURE() << "renderer should keep base implicit pass and explicit "
-                     "output layer pass";
-    return;
-  }
-  if (!(hasPassLabel(gpu, "Base Implicit Output Pass") &&
-        hasPassLabel(gpu, "Layer Explicit Output Pass"))) {
-    ADD_FAILURE()
-        << "submitted frame should contain both base implicit and layer output "
-           "passes";
-    return;
-  }
+  ASSERT_EQ(gpu.submitCount, 1u) << "renderer should submit one frame";
+  ASSERT_EQ(gpu.submittedPassCount, 2u)
+      << "renderer should keep base implicit pass and explicit output layer "
+         "pass";
+  ASSERT_TRUE(hasPassLabel(gpu, "Base Implicit Output Pass") &&
+              hasPassLabel(gpu, "Layer Explicit Output Pass"))
+      << "submitted frame should contain both base implicit and layer output "
+         "passes";
 }
 
 } // namespace

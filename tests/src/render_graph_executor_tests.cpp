@@ -148,127 +148,86 @@ buildTwoPassCompiledFrameWithDependency(uint64_t frameIndex) {
 TEST_F(RenderGraphExecutorTest,
        ExecutorMaterializesRewritesAndRetiresTransients) {
   auto compileResult = buildExecutorCompiledFrame(100u);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
+  ASSERT_FALSE(compileResult.hasError());
   const RenderGraphCompileResult &compiled = compileResult.value();
-  if (!(compiled.unresolvedTextureBindings.size() == 2u)) {
-    ADD_FAILURE() << "expected unresolved transient color/depth bindings";
-    return;
-  }
-  if (!(compiled.unresolvedDependencyBufferBindings.size() == 1u &&
-        compiled.unresolvedPreDispatchDependencyBufferBindings.size() == 1u &&
-        compiled.unresolvedDrawBufferBindings.size() == 1u)) {
-    ADD_FAILURE() << "expected unresolved transient buffer rewrite bindings";
-    return;
-  }
+  ASSERT_EQ(compiled.unresolvedTextureBindings.size(), 2u)
+      << "expected unresolved transient color/depth bindings";
+  ASSERT_EQ(compiled.unresolvedDependencyBufferBindings.size(), 1u)
+      << "expected unresolved transient buffer dependency bindings";
+  ASSERT_EQ(compiled.unresolvedPreDispatchDependencyBufferBindings.size(), 1u)
+      << "expected unresolved transient pre-dispatch bindings";
+  ASSERT_EQ(compiled.unresolvedDrawBufferBindings.size(), 1u)
+      << "expected unresolved transient draw bindings";
 
   FakeExecutorGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executor.execute(gpu, compiled);
-  if (!(!executeResult.hasError() && executeResult.value())) {
-    ADD_FAILURE() << "executor should succeed for transient rewrite graph";
-    if (executeResult.hasError()) {
-      std::cerr << executeResult.error() << "\n";
-    }
-    return;
-  }
+  ASSERT_FALSE(executeResult.hasError());
+  ASSERT_TRUE(executeResult.value())
+      << "executor should succeed for transient rewrite graph";
 
-  if (!(gpu.submitCount == 1u && gpu.lastSubmitPassCount == 1u)) {
-    ADD_FAILURE() << "executor should submit one pass";
-    return;
-  }
-  if (!(nuri::isValid(gpu.lastColorTexture) &&
-        nuri::isValid(gpu.lastDepthTexture))) {
-    ADD_FAILURE()
-        << "submitted pass should have materialized transient textures";
-    return;
-  }
-  if (!(!sameTexture(gpu.lastColorTexture, gpu.lastDepthTexture))) {
-    ADD_FAILURE()
-        << "color/depth transient textures should be distinct in this graph";
-    return;
-  }
-  if (!(nuri::isValid(gpu.lastDependencyBuffer) &&
-        nuri::isValid(gpu.lastPreDispatchDependencyBuffer) &&
-        nuri::isValid(gpu.lastDrawVertexBuffer))) {
-    ADD_FAILURE()
-        << "submitted pass should have materialized transient buffers";
-    return;
-  }
-  if (!(sameBuffer(gpu.lastDependencyBuffer,
-                   gpu.lastPreDispatchDependencyBuffer) &&
-        sameBuffer(gpu.lastDependencyBuffer, gpu.lastDrawVertexBuffer))) {
-    ADD_FAILURE() << "all rewritten buffer slots should resolve to same "
-                     "transient allocation";
-    return;
-  }
-  if (!(gpu.createdTextureCount == compiled.transientTexturePhysicalCount &&
-        gpu.createdBufferCount == compiled.transientBufferPhysicalCount)) {
-    ADD_FAILURE()
-        << "materialized transient allocation counts should match compile "
-           "metadata";
-    return;
-  }
-  if (!(gpu.destroyedTextureCount == 0u && gpu.destroyedBufferCount == 0u)) {
-    ADD_FAILURE() << "newly materialized transient resources should not retire "
-                     "immediately";
-    return;
-  }
+  ASSERT_EQ(gpu.submitCount, 1u);
+  ASSERT_EQ(gpu.lastSubmitPassCount, 1u) << "executor should submit one pass";
+  ASSERT_TRUE(nuri::isValid(gpu.lastColorTexture) &&
+              nuri::isValid(gpu.lastDepthTexture))
+      << "submitted pass should have materialized transient textures";
+  ASSERT_NE(sameTexture(gpu.lastColorTexture, gpu.lastDepthTexture), true)
+      << "color/depth transient textures should be distinct in this graph";
+  ASSERT_TRUE(nuri::isValid(gpu.lastDependencyBuffer) &&
+              nuri::isValid(gpu.lastPreDispatchDependencyBuffer) &&
+              nuri::isValid(gpu.lastDrawVertexBuffer))
+      << "submitted pass should have materialized transient buffers";
+  ASSERT_TRUE(sameBuffer(gpu.lastDependencyBuffer,
+                         gpu.lastPreDispatchDependencyBuffer) &&
+              sameBuffer(gpu.lastDependencyBuffer, gpu.lastDrawVertexBuffer))
+      << "all rewritten buffer slots should resolve to same transient "
+         "allocation";
+  ASSERT_EQ(gpu.createdTextureCount, compiled.transientTexturePhysicalCount)
+      << "materialized transient texture allocation counts should match "
+         "compile metadata";
+  ASSERT_EQ(gpu.createdBufferCount, compiled.transientBufferPhysicalCount)
+      << "materialized transient buffer allocation counts should match "
+         "compile metadata";
+  ASSERT_EQ(gpu.destroyedTextureCount, 0u)
+      << "newly materialized transient textures should not retire "
+         "immediately";
+  ASSERT_EQ(gpu.destroyedBufferCount, 0u)
+      << "newly materialized transient buffers should not retire immediately";
 
   auto compile102 = buildEmptyCompiledFrame(102u);
-  if (!(!compile102.hasError())) {
-    ADD_FAILURE() << "empty frame 102 compile should succeed";
-    return;
-  }
+  ASSERT_FALSE(compile102.hasError());
   executeResult = executor.execute(gpu, compile102.value());
-  if (!(!executeResult.hasError() && executeResult.value())) {
-    ADD_FAILURE() << "executor should succeed for empty frame 102";
-    return;
-  }
-  if (!(gpu.destroyedTextureCount == 0u && gpu.destroyedBufferCount == 0u)) {
-    ADD_FAILURE() << "retirement should not occur before retire frame";
-    return;
-  }
+  ASSERT_FALSE(executeResult.hasError());
+  ASSERT_TRUE(executeResult.value())
+      << "executor should succeed for empty frame 102";
+  ASSERT_EQ(gpu.destroyedTextureCount, 0u)
+      << "retirement should not occur before retire frame";
+  ASSERT_EQ(gpu.destroyedBufferCount, 0u)
+      << "retirement should not occur before retire frame";
 
   auto compile103 = buildEmptyCompiledFrame(103u);
-  if (!(!compile103.hasError())) {
-    ADD_FAILURE() << "empty frame 103 compile should succeed";
-    return;
-  }
+  ASSERT_FALSE(compile103.hasError());
   executeResult = executor.execute(gpu, compile103.value());
-  if (!(!executeResult.hasError() && executeResult.value())) {
-    ADD_FAILURE() << "executor should succeed for empty frame 103";
-    return;
-  }
-  if (!(gpu.destroyedTextureCount <= gpu.createdTextureCount &&
-        gpu.destroyedBufferCount <= gpu.createdBufferCount)) {
-    ADD_FAILURE() << "retirement should not over-destroy transient resources";
-    return;
-  }
+  ASSERT_FALSE(executeResult.hasError());
+  ASSERT_TRUE(executeResult.value())
+      << "executor should succeed for empty frame 103";
+  EXPECT_LE(gpu.destroyedTextureCount, gpu.createdTextureCount)
+      << "retirement should not over-destroy transient textures";
+  EXPECT_LE(gpu.destroyedBufferCount, gpu.createdBufferCount)
+      << "retirement should not over-destroy transient buffers";
 
   const uint32_t createdTextureCountBeforeReuse = gpu.createdTextureCount;
   const uint32_t createdBufferCountBeforeReuse = gpu.createdBufferCount;
   auto compile104 = buildExecutorCompiledFrame(104u);
-  if (!(!compile104.hasError())) {
-    ADD_FAILURE() << "non-empty frame 104 compile should succeed";
-    return;
-  }
+  ASSERT_FALSE(compile104.hasError());
   executeResult = executor.execute(gpu, compile104.value());
-  if (!(!executeResult.hasError() && executeResult.value())) {
-    ADD_FAILURE() << "executor should succeed for frame 104 reuse check";
-    return;
-  }
-  if (!(gpu.createdTextureCount == createdTextureCountBeforeReuse &&
-        gpu.createdBufferCount == createdBufferCountBeforeReuse)) {
-    ADD_FAILURE() << "retired transient resources should be reused without "
-                     "re-creation";
-    return;
-  }
+  ASSERT_FALSE(executeResult.hasError());
+  ASSERT_TRUE(executeResult.value())
+      << "executor should succeed for frame 104 reuse check";
+  EXPECT_EQ(gpu.createdTextureCount, createdTextureCountBeforeReuse)
+      << "retired transient textures should be reused without re-creation";
+  EXPECT_EQ(gpu.createdBufferCount, createdBufferCountBeforeReuse)
+      << "retired transient buffers should be reused without re-creation";
 }
 
 TEST_F(RenderGraphExecutorTest,

@@ -33,6 +33,14 @@ Release build:
 .\scripts\build_release.bat
 ```
 
+Tests:
+
+```powershell
+.\scripts\run_tests.bat
+```
+
+`run_tests` enables the manifest `tests` feature automatically. If you consume `nuri` as a vcpkg port instead of using this repo in manifest mode, install `nuri[tests]` before running the test targets.
+
 ## Linux/macOS (bash)
 
 ```bash
@@ -44,10 +52,19 @@ export VCPKG_ROOT="$HOME/vcpkg"   # adjust
 ./scripts/build_debug.sh
 ```
 
+Tests:
+
+```bash
+./scripts/run_tests.sh
+```
+
+`run_tests` enables the manifest `tests` feature automatically. If you consume `nuri` as a vcpkg port instead of using this repo in manifest mode, install `nuri[tests]` before running the test targets.
+
 ## Notes
 
 - LVK’s bootstrap downloads and builds third-party deps into `external/lightweightvk/third-party/deps` (first run can take a while).
 - The warning about Python packages `paramiko`/`scp` can be ignored; they’re only needed for optional bootstrap features.
+- Regular `build_debug`/`build_release` runs leave `NURI_BUILD_TESTS=OFF`; enable tests explicitly when you need them.
 
 ## Project layout (high level)
 

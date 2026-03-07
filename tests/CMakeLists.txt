@@ -3,10 +3,22 @@ include(GoogleTest)
 
 get_filename_component(NURI_CXX_COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
 
+if(DEFINED VCPKG_TARGET_TRIPLET AND NOT "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
+  set(_nuri_vcpkg_bin_dirs
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin"
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/bin"
+  )
+else()
+  file(GLOB _nuri_vcpkg_bin_dirs
+    LIST_DIRECTORIES true
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/*/bin"
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/*/debug/bin"
+  )
+endif()
+
 set(_nuri_test_path
   "${CMAKE_BINARY_DIR}/lib"
-  "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin"
-  "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin"
+  ${_nuri_vcpkg_bin_dirs}
   "${NURI_CXX_COMPILER_BIN_DIR}"
   "$ENV{PATH}"
 )
@@ -41,9 +53,17 @@ exec \"$@\"
 endif()
 
 function(nuri_add_gtest_suite target source_file test_prefix)
+  cmake_parse_arguments(NURI_TEST "" "" "SUPPORT_FILES" ${ARGN})
+
+  if(DEFINED NURI_TEST_SUPPORT_FILES)
+    set(_nuri_test_support_files ${NURI_TEST_SUPPORT_FILES})
+  else()
+    set(_nuri_test_support_files src/render_graph_test_support.cpp)
+  endif()
+
   add_executable(${target}
     ${source_file}
-    src/render_graph_test_support.cpp
+    ${_nuri_test_support_files}
   )
 
   target_link_libraries(${target}

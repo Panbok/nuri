@@ -11,6 +11,12 @@ if command -v ninja >/dev/null 2>&1; then
   generator="Ninja"
 fi
 
+build_tests="${NURI_BUILD_TESTS:-OFF}"
+manifest_feature_args=()
+if [[ -n "${VCPKG_MANIFEST_FEATURES:-}" ]]; then
+  manifest_feature_args=(-DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}")
+fi
+
 ./scripts/bootstrap_lightweightvk.sh
 
 cmake -S . -B build/release -G "${generator}" \
@@ -18,8 +24,9 @@ cmake -S . -B build/release -G "${generator}" \
   -DCMAKE_C_COMPILER=clang \
   -DCMAKE_CXX_COMPILER=clang++ \
   -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+  -DNURI_BUILD_TESTS="${build_tests}" \
+  "${manifest_feature_args[@]}" \
   -DVCPKG_BUILD_TYPE=release \
   -DNURI_BUILD_SHARED=OFF
 
 cmake --build build/release --config Release
-

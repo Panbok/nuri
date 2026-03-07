@@ -5,7 +5,6 @@
     "glm",
     "assimp",
     "stb",
-    "gtest",
     "harfbuzz",
     "glfw3",
     {
@@ -24,5 +23,13 @@
     "yyjson",
     "unordered-dense",
     "ktx"
-  ]
+  ],
+  "features": {
+    "tests": {
+      "description": "Build the nuri test targets",
+      "dependencies": [
+        "gtest"
+      ]
+    }
+  }
 }

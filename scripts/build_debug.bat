@@ -13,6 +13,10 @@ if %errorlevel% neq 0 (
 )
 
 set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
+set "BUILD_TESTS=%NURI_BUILD_TESTS%"
+if "%BUILD_TESTS%"=="" set "BUILD_TESTS=OFF"
+set "MANIFEST_FEATURES_ARG="
+if not "%VCPKG_MANIFEST_FEATURES%"=="" set "MANIFEST_FEATURES_ARG=-DVCPKG_MANIFEST_FEATURES=%VCPKG_MANIFEST_FEATURES%"
 
 call "%~dp0bootstrap_lightweightvk.bat"
 if errorlevel 1 exit /b 1
@@ -24,7 +28,9 @@ cmake -S . -B build -G Ninja ^
   -DCMAKE_TOOLCHAIN_FILE="%TOOLCHAIN%" ^
   -DCMAKE_CXX_FLAGS="-DLVK_WITH_TRACY_GPU_DRAW_ZONES=1" ^
   -DVCPKG_APPLOCAL_DEPS=OFF ^
+  %MANIFEST_FEATURES_ARG% ^
   -DVCPKG_BUILD_TYPE=release ^
+  -DNURI_BUILD_TESTS="%BUILD_TESTS%" ^
   -DNURI_BUILD_SHARED=ON ^
   -DNURI_WITH_TRACY=ON
 if errorlevel 1 exit /b 1

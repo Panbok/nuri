@@ -121,7 +121,8 @@ EnvVarGuard::~EnvVarGuard() {
   if (hadOldValue_) {
     _putenv_s(name_.c_str(), oldValue_.c_str());
   } else {
-    _putenv_s(name_.c_str(), "");
+    std::string env = name_ + "=";
+    _putenv(env.c_str());
   }
 #else
   if (hadOldValue_) {
@@ -132,33 +133,55 @@ EnvVarGuard::~EnvVarGuard() {
 #endif
 }
 
-bool FakeExecutorGPUDevice::shouldClose() const { return false; }
+bool FakeGPUDeviceBase::shouldClose() const { return false; }
 
-void FakeExecutorGPUDevice::getWindowSize(int32_t &outWidth,
-                                          int32_t &outHeight) const {
+void FakeGPUDeviceBase::getWindowSize(int32_t &outWidth,
+                                      int32_t &outHeight) const {
   outWidth = 1280;
   outHeight = 720;
 }
 
-void FakeExecutorGPUDevice::getFramebufferSize(int32_t &outWidth,
-                                               int32_t &outHeight) const {
+void FakeGPUDeviceBase::getFramebufferSize(int32_t &outWidth,
+                                           int32_t &outHeight) const {
   outWidth = 1280;
   outHeight = 720;
 }
 
-void FakeExecutorGPUDevice::resizeSwapchain(int32_t, int32_t) {}
+void FakeGPUDeviceBase::resizeSwapchain(int32_t, int32_t) {}
 
-Format FakeExecutorGPUDevice::getSwapchainFormat() const {
+Format FakeGPUDeviceBase::getSwapchainFormat() const {
   return Format::RGBA8_UNORM;
 }
 
-uint32_t FakeExecutorGPUDevice::getSwapchainImageIndex() const { return 0u; }
+uint32_t FakeGPUDeviceBase::getSwapchainImageIndex() const { return 0u; }
 
-uint32_t FakeExecutorGPUDevice::getSwapchainImageCount() const {
+uint32_t FakeGPUDeviceBase::getSwapchainImageCount() const {
   return swapchainImageCount;
 }
 
-double FakeExecutorGPUDevice::getTime() const { return 0.0; }
+double FakeGPUDeviceBase::getTime() const { return 0.0; }
+
+Result<BufferHandle, std::string>
+FakeGPUDeviceBase::createBuffer(const BufferDesc &, std::string_view) {
+  return createBufferImpl();
+}
+
+Result<TextureHandle, std::string>
+FakeGPUDeviceBase::createTexture(const TextureDesc &, std::string_view) {
+  return createTextureImpl();
+}
+
+Result<BufferHandle, std::string> FakeGPUDeviceBase::createBufferImpl() {
+  BufferHandle handle{.index = nextBufferIndex_++, .generation = 1u};
+  ++createdBufferCount;
+  return Result<BufferHandle, std::string>::makeResult(handle);
+}
+
+Result<TextureHandle, std::string> FakeGPUDeviceBase::createTextureImpl() {
+  TextureHandle handle{.index = nextTextureIndex_++, .generation = 1u};
+  ++createdTextureCount;
+  return Result<TextureHandle, std::string>::makeResult(handle);
+}
 
 Result<BufferHandle, std::string>
 FakeExecutorGPUDevice::createBuffer(const BufferDesc &, std::string_view) {
@@ -168,9 +191,7 @@ FakeExecutorGPUDevice::createBuffer(const BufferDesc &, std::string_view) {
     return Result<BufferHandle, std::string>::makeError(
         "fake createBuffer failure");
   }
-  BufferHandle handle{.index = nextBufferIndex++, .generation = 1u};
-  ++createdBufferCount;
-  return Result<BufferHandle, std::string>::makeResult(handle);
+  return createBufferImpl();
 }
 
 Result<TextureHandle, std::string>
@@ -181,115 +202,127 @@ FakeExecutorGPUDevice::createTexture(const TextureDesc &, std::string_view) {
     return Result<TextureHandle, std::string>::makeError(
         "fake createTexture failure");
   }
-  TextureHandle handle{.index = nextTextureIndex++, .generation = 1u};
-  ++createdTextureCount;
-  return Result<TextureHandle, std::string>::makeResult(handle);
+  return createTextureImpl();
 }
 
 Result<TextureHandle, std::string>
-FakeExecutorGPUDevice::createFramebufferTexture(const TextureDesc &,
-                                                std::string_view) {
+FakeGPUDeviceBase::createFramebufferTexture(const TextureDesc &,
+                                            std::string_view) {
   return Result<TextureHandle, std::string>::makeError(
       "not implemented in fake device");
 }
 
-Result<TextureHandle, std::string> FakeExecutorGPUDevice::createDepthBuffer() {
+Result<TextureHandle, std::string> FakeGPUDeviceBase::createDepthBuffer() {
   return Result<TextureHandle, std::string>::makeError(
       "not implemented in fake device");
 }
 
 Result<ShaderHandle, std::string>
-FakeExecutorGPUDevice::createShaderModule(const ShaderDesc &) {
+FakeGPUDeviceBase::createShaderModule(const ShaderDesc &) {
   return Result<ShaderHandle, std::string>::makeError(
       "not implemented in fake device");
 }
 
 Result<RenderPipelineHandle, std::string>
-FakeExecutorGPUDevice::createRenderPipeline(const RenderPipelineDesc &,
-                                            std::string_view) {
+FakeGPUDeviceBase::createRenderPipeline(const RenderPipelineDesc &,
+                                        std::string_view) {
   return Result<RenderPipelineHandle, std::string>::makeError(
       "not implemented in fake device");
 }
 
 Result<ComputePipelineHandle, std::string>
-FakeExecutorGPUDevice::createComputePipeline(const ComputePipelineDesc &,
-                                             std::string_view) {
+FakeGPUDeviceBase::createComputePipeline(const ComputePipelineDesc &,
+                                         std::string_view) {
   return Result<ComputePipelineHandle, std::string>::makeError(
       "not implemented in fake device");
 }
 
-void FakeExecutorGPUDevice::destroyRenderPipeline(RenderPipelineHandle) {}
+void FakeGPUDeviceBase::destroyRenderPipeline(RenderPipelineHandle) {}
 
-void FakeExecutorGPUDevice::destroyComputePipeline(ComputePipelineHandle) {}
+void FakeGPUDeviceBase::destroyComputePipeline(ComputePipelineHandle) {}
 
-void FakeExecutorGPUDevice::destroyBuffer(BufferHandle buffer) {
+void FakeGPUDeviceBase::destroyBuffer(BufferHandle buffer) {
+  destroyBufferImpl(buffer);
+}
+
+void FakeGPUDeviceBase::destroyTexture(TextureHandle texture) {
+  destroyTextureImpl(texture);
+}
+
+void FakeGPUDeviceBase::destroyBufferImpl(BufferHandle buffer) {
   if (nuri::isValid(buffer)) {
     ++destroyedBufferCount;
   }
 }
 
-void FakeExecutorGPUDevice::destroyTexture(TextureHandle texture) {
+void FakeGPUDeviceBase::destroyTextureImpl(TextureHandle texture) {
   if (nuri::isValid(texture)) {
     ++destroyedTextureCount;
   }
 }
 
-void FakeExecutorGPUDevice::destroyShaderModule(ShaderHandle) {}
+void FakeGPUDeviceBase::destroyShaderModule(ShaderHandle) {}
 
-bool FakeExecutorGPUDevice::isValid(BufferHandle h) const {
+bool FakeGPUDeviceBase::isValid(BufferHandle h) const {
   return nuri::isValid(h);
 }
 
-bool FakeExecutorGPUDevice::isValid(TextureHandle h) const {
+bool FakeGPUDeviceBase::isValid(TextureHandle h) const {
   return nuri::isValid(h);
 }
 
-bool FakeExecutorGPUDevice::isValid(ShaderHandle h) const {
+bool FakeGPUDeviceBase::isValid(ShaderHandle h) const {
   return nuri::isValid(h);
 }
 
-bool FakeExecutorGPUDevice::isValid(RenderPipelineHandle h) const {
+bool FakeGPUDeviceBase::isValid(RenderPipelineHandle h) const {
   return nuri::isValid(h);
 }
 
-bool FakeExecutorGPUDevice::isValid(ComputePipelineHandle h) const {
+bool FakeGPUDeviceBase::isValid(ComputePipelineHandle h) const {
   return nuri::isValid(h);
 }
 
-Format FakeExecutorGPUDevice::getTextureFormat(TextureHandle) const {
+Format FakeGPUDeviceBase::getTextureFormat(TextureHandle) const {
   return Format::RGBA8_UNORM;
 }
 
-uint32_t FakeExecutorGPUDevice::getTextureBindlessIndex(TextureHandle) const {
+uint32_t FakeGPUDeviceBase::getTextureBindlessIndex(TextureHandle) const {
   return 0u;
 }
 
-uint32_t FakeExecutorGPUDevice::getDefaultSamplerBindlessIndex() const {
+uint32_t FakeGPUDeviceBase::getDefaultSamplerBindlessIndex() const {
   return 0u;
 }
 
-uint32_t FakeExecutorGPUDevice::getCubemapSamplerBindlessIndex() const {
+uint32_t FakeGPUDeviceBase::getCubemapSamplerBindlessIndex() const {
   return 0u;
 }
 
-uint64_t FakeExecutorGPUDevice::getBufferDeviceAddress(BufferHandle,
-                                                       size_t) const {
+uint64_t FakeGPUDeviceBase::getBufferDeviceAddress(BufferHandle, size_t) const {
   return 0ull;
 }
 
-bool FakeExecutorGPUDevice::resolveGeometry(GeometryAllocationHandle,
-                                            GeometryAllocationView &) const {
+bool FakeGPUDeviceBase::resolveGeometry(GeometryAllocationHandle,
+                                        GeometryAllocationView &) const {
   return false;
 }
 
-Result<bool, std::string>
-FakeExecutorGPUDevice::beginFrame(uint64_t) {
+Result<bool, std::string> FakeGPUDeviceBase::beginFrame(uint64_t) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-FakeExecutorGPUDevice::submitFrame(const RenderFrame &frame) {
-  ++submitCount;
+void FakeGPUDeviceBase::recordSubmitFrame(const RenderFrame &) { ++submitCount; }
+
+Result<bool, std::string> FakeGPUDeviceBase::submitFrame(
+    const RenderFrame &frame) {
+  recordSubmitFrame(frame);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> FakeExecutorGPUDevice::submitFrame(
+    const RenderFrame &frame) {
+  recordSubmitFrame(frame);
   lastSubmitPassCount = frame.passes.size();
 
   lastColorTexture = {};
@@ -326,186 +359,53 @@ FakeExecutorGPUDevice::submitFrame(const RenderFrame &frame) {
 }
 
 Result<bool, std::string>
-FakeExecutorGPUDevice::submitComputeDispatches(
-    std::span<const ComputeDispatchItem>) {
+FakeGPUDeviceBase::submitComputeDispatches(std::span<const ComputeDispatchItem>) {
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<GeometryAllocationHandle, std::string>
-FakeExecutorGPUDevice::allocateGeometry(std::span<const std::byte>, uint32_t,
-                                        std::span<const std::byte>, uint32_t,
-                                        std::string_view) {
+FakeGPUDeviceBase::allocateGeometry(std::span<const std::byte>, uint32_t,
+                                    std::span<const std::byte>, uint32_t,
+                                    std::string_view) {
   return Result<GeometryAllocationHandle, std::string>::makeError(
       "not implemented in fake device");
 }
 
-void FakeExecutorGPUDevice::releaseGeometry(GeometryAllocationHandle) {}
+void FakeGPUDeviceBase::releaseGeometry(GeometryAllocationHandle) {}
 
 Result<bool, std::string>
-FakeExecutorGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion>) {
+FakeGPUDeviceBase::copyBufferRegions(std::span<const BufferCopyRegion>) {
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
-FakeExecutorGPUDevice::updateBuffer(BufferHandle, std::span<const std::byte>,
-                                    size_t) {
+FakeGPUDeviceBase::updateBuffer(BufferHandle, std::span<const std::byte>,
+                                size_t) {
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
-FakeExecutorGPUDevice::readBuffer(BufferHandle, size_t, std::span<std::byte>) {
+FakeGPUDeviceBase::readBuffer(BufferHandle, size_t, std::span<std::byte>) {
   return Result<bool, std::string>::makeError("not implemented in fake device");
 }
 
-std::byte *FakeExecutorGPUDevice::getMappedBufferPtr(BufferHandle) {
+std::byte *FakeGPUDeviceBase::getMappedBufferPtr(BufferHandle) {
   return nullptr;
 }
 
-void FakeExecutorGPUDevice::flushMappedBuffer(BufferHandle, size_t, size_t) {}
+void FakeGPUDeviceBase::flushMappedBuffer(BufferHandle, size_t, size_t) {}
 
 Result<bool, std::string>
-FakeExecutorGPUDevice::readTexture(TextureHandle,
-                                   const TextureReadbackRegion &,
-                                   std::span<std::byte>) {
+FakeGPUDeviceBase::readTexture(TextureHandle, const TextureReadbackRegion &,
+                               std::span<std::byte>) {
   return Result<bool, std::string>::makeError("not implemented in fake device");
 }
 
-void FakeExecutorGPUDevice::waitIdle() {}
-
-bool FakeRendererGPUDevice::shouldClose() const { return false; }
-
-void FakeRendererGPUDevice::getWindowSize(int32_t &outWidth,
-                                          int32_t &outHeight) const {
-  outWidth = 1280;
-  outHeight = 720;
-}
-
-void FakeRendererGPUDevice::getFramebufferSize(int32_t &outWidth,
-                                               int32_t &outHeight) const {
-  outWidth = 1280;
-  outHeight = 720;
-}
-
-void FakeRendererGPUDevice::resizeSwapchain(int32_t, int32_t) {}
-
-Format FakeRendererGPUDevice::getSwapchainFormat() const {
-  return Format::RGBA8_UNORM;
-}
-
-uint32_t FakeRendererGPUDevice::getSwapchainImageIndex() const { return 0u; }
-
-uint32_t FakeRendererGPUDevice::getSwapchainImageCount() const { return 2u; }
-
-double FakeRendererGPUDevice::getTime() const { return 0.0; }
-
-Result<BufferHandle, std::string>
-FakeRendererGPUDevice::createBuffer(const BufferDesc &, std::string_view) {
-  return Result<BufferHandle, std::string>::makeResult(
-      BufferHandle{.index = 1u, .generation = 1u});
-}
-
-Result<TextureHandle, std::string>
-FakeRendererGPUDevice::createTexture(const TextureDesc &, std::string_view) {
-  return Result<TextureHandle, std::string>::makeResult(
-      TextureHandle{.index = 1u, .generation = 1u});
-}
-
-Result<TextureHandle, std::string>
-FakeRendererGPUDevice::createFramebufferTexture(const TextureDesc &,
-                                                std::string_view) {
-  return Result<TextureHandle, std::string>::makeError(
-      "not implemented in fake device");
-}
-
-Result<TextureHandle, std::string> FakeRendererGPUDevice::createDepthBuffer() {
-  return Result<TextureHandle, std::string>::makeError(
-      "not implemented in fake device");
-}
-
-Result<ShaderHandle, std::string>
-FakeRendererGPUDevice::createShaderModule(const ShaderDesc &) {
-  return Result<ShaderHandle, std::string>::makeError(
-      "not implemented in fake device");
-}
-
-Result<RenderPipelineHandle, std::string>
-FakeRendererGPUDevice::createRenderPipeline(const RenderPipelineDesc &,
-                                            std::string_view) {
-  return Result<RenderPipelineHandle, std::string>::makeError(
-      "not implemented in fake device");
-}
-
-Result<ComputePipelineHandle, std::string>
-FakeRendererGPUDevice::createComputePipeline(const ComputePipelineDesc &,
-                                             std::string_view) {
-  return Result<ComputePipelineHandle, std::string>::makeError(
-      "not implemented in fake device");
-}
-
-void FakeRendererGPUDevice::destroyRenderPipeline(RenderPipelineHandle) {}
-
-void FakeRendererGPUDevice::destroyComputePipeline(ComputePipelineHandle) {}
-
-void FakeRendererGPUDevice::destroyBuffer(BufferHandle) {}
-
-void FakeRendererGPUDevice::destroyTexture(TextureHandle) {}
-
-void FakeRendererGPUDevice::destroyShaderModule(ShaderHandle) {}
-
-bool FakeRendererGPUDevice::isValid(BufferHandle h) const {
-  return nuri::isValid(h);
-}
-
-bool FakeRendererGPUDevice::isValid(TextureHandle h) const {
-  return nuri::isValid(h);
-}
-
-bool FakeRendererGPUDevice::isValid(ShaderHandle h) const {
-  return nuri::isValid(h);
-}
-
-bool FakeRendererGPUDevice::isValid(RenderPipelineHandle h) const {
-  return nuri::isValid(h);
-}
-
-bool FakeRendererGPUDevice::isValid(ComputePipelineHandle h) const {
-  return nuri::isValid(h);
-}
-
-Format FakeRendererGPUDevice::getTextureFormat(TextureHandle) const {
-  return Format::RGBA8_UNORM;
-}
-
-uint32_t FakeRendererGPUDevice::getTextureBindlessIndex(TextureHandle) const {
-  return 0u;
-}
-
-uint32_t FakeRendererGPUDevice::getDefaultSamplerBindlessIndex() const {
-  return 0u;
-}
-
-uint32_t FakeRendererGPUDevice::getCubemapSamplerBindlessIndex() const {
-  return 0u;
-}
-
-uint64_t FakeRendererGPUDevice::getBufferDeviceAddress(BufferHandle,
-                                                       size_t) const {
-  return 0ull;
-}
-
-bool FakeRendererGPUDevice::resolveGeometry(GeometryAllocationHandle,
-                                            GeometryAllocationView &) const {
-  return false;
-}
-
-Result<bool, std::string>
-FakeRendererGPUDevice::beginFrame(uint64_t) {
-  return Result<bool, std::string>::makeResult(true);
-}
+void FakeGPUDeviceBase::waitIdle() {}
 
 Result<bool, std::string>
 FakeRendererGPUDevice::submitFrame(const RenderFrame &frame) {
-  ++submitCount;
+  recordSubmitFrame(frame);
   submittedPassCount = frame.passes.size();
   submittedPassLabels.clear();
   submittedPassLabels.reserve(frame.passes.size());
@@ -514,53 +414,6 @@ FakeRendererGPUDevice::submitFrame(const RenderFrame &frame) {
   }
   return Result<bool, std::string>::makeResult(true);
 }
-
-Result<bool, std::string>
-FakeRendererGPUDevice::submitComputeDispatches(
-    std::span<const ComputeDispatchItem>) {
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<GeometryAllocationHandle, std::string>
-FakeRendererGPUDevice::allocateGeometry(std::span<const std::byte>, uint32_t,
-                                        std::span<const std::byte>, uint32_t,
-                                        std::string_view) {
-  return Result<GeometryAllocationHandle, std::string>::makeError(
-      "not implemented in fake device");
-}
-
-void FakeRendererGPUDevice::releaseGeometry(GeometryAllocationHandle) {}
-
-Result<bool, std::string>
-FakeRendererGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion>) {
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string>
-FakeRendererGPUDevice::updateBuffer(BufferHandle, std::span<const std::byte>,
-                                    size_t) {
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string>
-FakeRendererGPUDevice::readBuffer(BufferHandle, size_t, std::span<std::byte>) {
-  return Result<bool, std::string>::makeError("not implemented in fake device");
-}
-
-std::byte *FakeRendererGPUDevice::getMappedBufferPtr(BufferHandle) {
-  return nullptr;
-}
-
-void FakeRendererGPUDevice::flushMappedBuffer(BufferHandle, size_t, size_t) {}
-
-Result<bool, std::string>
-FakeRendererGPUDevice::readTexture(TextureHandle,
-                                   const TextureReadbackRegion &,
-                                   std::span<std::byte>) {
-  return Result<bool, std::string>::makeError("not implemented in fake device");
-}
-
-void FakeRendererGPUDevice::waitIdle() {}
 
 bool hasPassLabel(const FakeRendererGPUDevice &gpu, std::string_view label) {
   for (const std::string &entry : gpu.submittedPassLabels) {

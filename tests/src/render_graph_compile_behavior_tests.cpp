@@ -26,11 +26,9 @@ TEST(RenderGraphCompileBehaviorTest, CompileDeterminismAndTieBreak) {
       addTestGraphicsPass(builder, makeTestPass("det_p1"), "det_p1");
   auto pass2Result =
       addTestGraphicsPass(builder, makeTestPass("det_p2"), "det_p2");
-  if (!(!pass0Result.hasError() && !pass1Result.hasError() &&
-        !pass2Result.hasError())) {
-    ADD_FAILURE() << "addLegacyRenderPass should succeed for determinism graph";
-    return;
-  }
+  ASSERT_FALSE(pass0Result.hasError());
+  ASSERT_FALSE(pass1Result.hasError());
+  ASSERT_FALSE(pass2Result.hasError());
 
   auto depResult =
       builder.addDependency(pass1Result.value(), pass2Result.value());
@@ -753,8 +751,7 @@ TEST(RenderGraphCompileBehaviorTest, ExplicitSideEffectUpgradesInferredMark) {
   }
 }
 
-TEST(RenderGraphCompileBehaviorTest,
-     DefaultPolicyKeepsInferredSideEffectRoots) {
+TEST(RenderGraphCompileBehaviorTest, DefaultPolicyCullsUnmarkedPasses) {
   RenderGraphBuilder builder;
   builder.beginFrame(208u);
 
