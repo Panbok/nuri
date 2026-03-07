@@ -5,6 +5,7 @@
     "glm",
     "assimp",
     "stb",
+    "gtest",
     "harfbuzz",
     "glfw3",
     {
