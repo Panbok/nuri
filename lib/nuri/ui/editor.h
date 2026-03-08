@@ -3,8 +3,8 @@
 #include "nuri/core/input_events.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
-#include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/layers/render_frame_context.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 
 #include <string>
 
@@ -37,7 +37,7 @@ public:
   Editor &operator=(Editor &&) = delete;
 
   virtual void beginFrame() = 0;
-  virtual Result<RenderPass, std::string> endFrame() = 0;
+  virtual Result<RenderGraphGraphicsPassDesc, std::string> endFrame() = 0;
 
 protected:
   Editor() = default;

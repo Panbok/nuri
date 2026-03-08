@@ -42,8 +42,8 @@ public:
   bool onInput(const InputEvent &event) override;
   void onUpdate(double deltaTime) override;
   void prepareFrameContext(RenderFrameContext &frame) override;
-  Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
-                                              RenderPassList &out) override;
+  Result<bool, std::string>
+  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
 
 private:
   EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,

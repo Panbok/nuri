@@ -7,7 +7,6 @@
 #include "nuri/ui/imgui_gizmo_controller.h"
 
 namespace nuri {
-
 std::unique_ptr<EditorLayer>
 EditorLayer::create(Window &window, GPUDevice &gpu, EventManager &events,
                     UiCallback callback, const EditorServices &services) {
@@ -93,7 +92,8 @@ void EditorLayer::prepareFrameContext(RenderFrameContext &frame) {
 }
 
 Result<bool, std::string>
-EditorLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
+EditorLayer::buildRenderGraph(RenderFrameContext &frame,
+                              RenderGraphBuilder &graph) {
   if (!editor_) {
     return Result<bool, std::string>::makeError(
         "EditorLayer has no ImGui editor");
@@ -135,7 +135,11 @@ EditorLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     *frame.settings = editor_->renderSettings();
   }
 
-  out.push_back(passResult.value());
+  auto addResult = graph.addGraphicsPass(passResult.value());
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 

@@ -8,6 +8,7 @@ class RenderScene;
 class CameraSystem;
 class GPUDevice;
 class TextSystem;
+class RenderGraphTelemetryService;
 namespace bakery {
 class BakerySystem;
 }
@@ -18,6 +19,7 @@ struct EditorServices {
   GPUDevice *gpu = nullptr;
   TextSystem *textSystem = nullptr;
   bakery::BakerySystem *bakery = nullptr;
+  RenderGraphTelemetryService *renderGraphTelemetry = nullptr;
 
   [[nodiscard]] bool hasAllDependencies() const {
     // Gizmo controller dependencies.
