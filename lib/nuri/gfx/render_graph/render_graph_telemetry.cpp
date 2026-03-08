@@ -8,9 +8,33 @@ namespace nuri {
 
 namespace {
 
+constexpr std::string_view kUnnamedPassName = "unnamed_pass";
+
 [[nodiscard]] std::pmr::memory_resource *
 ensureMemory(std::pmr::memory_resource *memory) {
   return memory != nullptr ? memory : std::pmr::get_default_resource();
+}
+
+[[nodiscard]] std::filesystem::path defaultRenderGraphDumpDirectory() {
+  return std::filesystem::path("logs/render_graph");
+}
+
+[[nodiscard]] bool equalsIgnoreAsciiCase(std::string_view lhs,
+                                         std::string_view rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    const auto normalize = [](char c) {
+      return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    };
+    if (normalize(lhs[i]) != normalize(rhs[i])) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 [[nodiscard]] std::filesystem::path resolveRenderGraphDumpDirectory() {
@@ -25,8 +49,12 @@ ensureMemory(std::pmr::memory_resource *memory) {
     return {};
   }
 
-  if (value == "1" || value == "true" || value == "TRUE") {
-    return std::filesystem::path("logs/render_graph");
+  if (value == "1" || equalsIgnoreAsciiCase(value, "true")) {
+    return defaultRenderGraphDumpDirectory();
+  }
+
+  if (equalsIgnoreAsciiCase(value, "false")) {
+    return {};
   }
 
   return std::filesystem::path(value);
@@ -36,71 +64,16 @@ ensureMemory(std::pmr::memory_resource *memory) {
 resolvePassName(const RenderGraphTelemetrySnapshot &snapshot,
                 uint32_t passIndex) {
   if (passIndex >= snapshot.passNames.size()) {
-    return "unnamed_pass";
+    return kUnnamedPassName;
   }
   const std::pmr::string &name = snapshot.passNames[passIndex];
-  return name.empty() ? std::string_view("unnamed_pass")
+  return name.empty() ? kUnnamedPassName
                       : std::string_view(name.data(), name.size());
 }
 
-} // namespace
-
-RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
-    std::pmr::memory_resource *memory)
-    : passNames(ensureMemory(memory)), orderedPassIndices(ensureMemory(memory)),
-      edges(ensureMemory(memory)),
-      transientTextureLifetimes(ensureMemory(memory)),
-      transientBufferLifetimes(ensureMemory(memory)),
-      transientTextureAllocations(ensureMemory(memory)),
-      transientBufferAllocations(ensureMemory(memory)),
-      transientTextureAllocationByResource(ensureMemory(memory)),
-      transientBufferAllocationByResource(ensureMemory(memory)),
-      transientTexturePhysicalAllocations(ensureMemory(memory)),
-      transientBufferPhysicalAllocations(ensureMemory(memory)),
-      unresolvedTextureBindings(ensureMemory(memory)),
-      resolvedDependencyBuffers(ensureMemory(memory)),
-      dependencyBufferRangesByPass(ensureMemory(memory)),
-      unresolvedDependencyBufferBindings(ensureMemory(memory)),
-      preDispatchRangesByPass(ensureMemory(memory)),
-      preDispatchDependencyRanges(ensureMemory(memory)),
-      unresolvedPreDispatchDependencyBufferBindings(ensureMemory(memory)),
-      drawRangesByPass(ensureMemory(memory)),
-      unresolvedDrawBufferBindings(ensureMemory(memory)) {}
-
-void RenderGraphTelemetrySnapshot::reset() {
-  summary = Summary{};
-  passNames.clear();
-  orderedPassIndices.clear();
-  edges.clear();
-  transientTextureLifetimes.clear();
-  transientBufferLifetimes.clear();
-  transientTextureAllocations.clear();
-  transientBufferAllocations.clear();
-  transientTextureAllocationByResource.clear();
-  transientBufferAllocationByResource.clear();
-  transientTexturePhysicalAllocations.clear();
-  transientBufferPhysicalAllocations.clear();
-  unresolvedTextureBindings.clear();
-  resolvedDependencyBuffers.clear();
-  dependencyBufferRangesByPass.clear();
-  unresolvedDependencyBufferBindings.clear();
-  preDispatchRangesByPass.clear();
-  preDispatchDependencyRanges.clear();
-  unresolvedPreDispatchDependencyBufferBindings.clear();
-  drawRangesByPass.clear();
-  unresolvedDrawBufferBindings.clear();
-}
-
-RenderGraphTelemetryService::RenderGraphTelemetryService(
-    std::pmr::memory_resource *memory)
-    : memory_(ensureMemory(memory)), snapshot_(ensureMemory(memory)),
-      defaultDumpDirectory_(resolveRenderGraphDumpDirectory()) {}
-
-void RenderGraphTelemetryService::capture(
-    const RenderGraphCompileResult &compiled) {
-  snapshot_.reset();
-
-  RenderGraphTelemetrySnapshot::Summary &summary = snapshot_.summary;
+[[nodiscard]] RenderGraphTelemetrySnapshot::Summary
+buildSummary(const RenderGraphCompileResult &compiled) {
+  RenderGraphTelemetrySnapshot::Summary summary{};
   summary.frameIndex = compiled.frameIndex;
   summary.declaredPassCount = compiled.declaredPassCount;
   summary.culledPassCount = compiled.culledPassCount;
@@ -143,70 +116,185 @@ void RenderGraphTelemetryService::capture(
           compiled.unresolvedPreDispatchDependencyBufferBindings.size());
   summary.unresolvedDrawBufferBindingCount =
       static_cast<uint32_t>(compiled.unresolvedDrawBufferBindings.size());
+  return summary;
+}
 
-  snapshot_.passNames.assign(compiled.passDebugNames.begin(),
-                             compiled.passDebugNames.end());
-  snapshot_.orderedPassIndices.assign(compiled.orderedPassIndices.begin(),
-                                      compiled.orderedPassIndices.end());
-  snapshot_.edges.assign(compiled.edges.begin(), compiled.edges.end());
-  snapshot_.transientTextureLifetimes.assign(
-      compiled.transientTextureLifetimes.begin(),
-      compiled.transientTextureLifetimes.end());
-  snapshot_.transientBufferLifetimes.assign(
-      compiled.transientBufferLifetimes.begin(),
-      compiled.transientBufferLifetimes.end());
-  snapshot_.transientTextureAllocations.assign(
-      compiled.transientTextureAllocations.begin(),
-      compiled.transientTextureAllocations.end());
-  snapshot_.transientBufferAllocations.assign(
-      compiled.transientBufferAllocations.begin(),
-      compiled.transientBufferAllocations.end());
-  snapshot_.transientTextureAllocationByResource.assign(
-      compiled.transientTextureAllocationByResource.begin(),
-      compiled.transientTextureAllocationByResource.end());
-  snapshot_.transientBufferAllocationByResource.assign(
-      compiled.transientBufferAllocationByResource.begin(),
-      compiled.transientBufferAllocationByResource.end());
-  snapshot_.transientTexturePhysicalAllocations.assign(
-      compiled.transientTexturePhysicalAllocations.begin(),
-      compiled.transientTexturePhysicalAllocations.end());
-  snapshot_.transientBufferPhysicalAllocations.assign(
-      compiled.transientBufferPhysicalAllocations.begin(),
-      compiled.transientBufferPhysicalAllocations.end());
-  snapshot_.unresolvedTextureBindings.assign(
-      compiled.unresolvedTextureBindings.begin(),
-      compiled.unresolvedTextureBindings.end());
-  snapshot_.resolvedDependencyBuffers.assign(
-      compiled.resolvedDependencyBuffers.begin(),
-      compiled.resolvedDependencyBuffers.end());
-  snapshot_.dependencyBufferRangesByPass.assign(
-      compiled.dependencyBufferRangesByPass.begin(),
-      compiled.dependencyBufferRangesByPass.end());
-  snapshot_.unresolvedDependencyBufferBindings.assign(
-      compiled.unresolvedDependencyBufferBindings.begin(),
-      compiled.unresolvedDependencyBufferBindings.end());
-  snapshot_.preDispatchRangesByPass.assign(
-      compiled.preDispatchRangesByPass.begin(),
-      compiled.preDispatchRangesByPass.end());
-  snapshot_.preDispatchDependencyRanges.assign(
-      compiled.preDispatchDependencyRanges.begin(),
-      compiled.preDispatchDependencyRanges.end());
-  snapshot_.unresolvedPreDispatchDependencyBufferBindings.assign(
-      compiled.unresolvedPreDispatchDependencyBufferBindings.begin(),
-      compiled.unresolvedPreDispatchDependencyBufferBindings.end());
-  snapshot_.drawRangesByPass.assign(compiled.drawRangesByPass.begin(),
-                                    compiled.drawRangesByPass.end());
-  snapshot_.unresolvedDrawBufferBindings.assign(
-      compiled.unresolvedDrawBufferBindings.begin(),
-      compiled.unresolvedDrawBufferBindings.end());
+template <typename T>
+void copyVector(std::pmr::vector<T> &destination,
+                const std::pmr::vector<T> &source) {
+  destination.assign(source.begin(), source.end());
+}
 
+template <typename Value>
+void writeKeyValue(std::ostream &stream, std::string_view key, Value value) {
+  stream << key << ": " << value << "\n";
+}
+
+template <typename T, typename Writer>
+void writeSection(std::ostream &stream, std::string_view title,
+                  std::span<const T> items, Writer &&writer) {
+  stream << title << ":\n";
+  bool wroteAny = false;
+  for (const T &item : items) {
+    wroteAny = writer(item) || wroteAny;
+  }
+  if (!wroteAny) {
+    stream << "  <none>\n";
+  }
+  stream << "\n";
+}
+
+template <typename T, typename Writer>
+void writeIndexedSection(std::ostream &stream, std::string_view title,
+                         std::span<const T> items, Writer &&writer) {
+  stream << title << ":\n";
+  bool wroteAny = false;
+  for (uint32_t index = 0; index < items.size(); ++index) {
+    wroteAny = writer(index, items[index]) || wroteAny;
+  }
+  if (!wroteAny) {
+    stream << "  <none>\n";
+  }
+  stream << "\n";
+}
+
+[[nodiscard]] std::string_view resolveTextureBindingTarget(
+    RenderGraphCompileResult::PassTextureBindingTarget target) {
+  switch (target) {
+  case RenderGraphCompileResult::PassTextureBindingTarget::Color:
+    return "color";
+  case RenderGraphCompileResult::PassTextureBindingTarget::Depth:
+    return "depth";
+  }
+
+  return "unknown";
+}
+
+[[nodiscard]] std::string_view resolveDrawBufferBindingTarget(
+    RenderGraphCompileResult::DrawBufferBindingTarget target) {
+  switch (target) {
+  case RenderGraphCompileResult::DrawBufferBindingTarget::Vertex:
+    return "vertex";
+  case RenderGraphCompileResult::DrawBufferBindingTarget::Index:
+    return "index";
+  case RenderGraphCompileResult::DrawBufferBindingTarget::Indirect:
+    return "indirect";
+  case RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount:
+    return "indirect_count";
+  }
+
+  return "unknown";
+}
+
+[[nodiscard]] std::string
+makeOpenErrorMessage(const std::filesystem::path &path, int errorNumber) {
+  std::string message = "writeRenderGraphTelemetryTextDump: failed to open '" +
+                        path.string() + "'";
+  if (errorNumber != 0) {
+    message +=
+        ": " + std::error_code(errorNumber, std::generic_category()).message();
+  }
+  return message;
+}
+
+} // namespace
+
+RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
+    std::pmr::memory_resource *memory)
+    : passNames(ensureMemory(memory)), orderedPassIndices(ensureMemory(memory)),
+      edges(ensureMemory(memory)),
+      transientTextureLifetimes(ensureMemory(memory)),
+      transientBufferLifetimes(ensureMemory(memory)),
+      transientTextureAllocations(ensureMemory(memory)),
+      transientBufferAllocations(ensureMemory(memory)),
+      transientTextureAllocationByResource(ensureMemory(memory)),
+      transientBufferAllocationByResource(ensureMemory(memory)),
+      transientTexturePhysicalAllocations(ensureMemory(memory)),
+      transientBufferPhysicalAllocations(ensureMemory(memory)),
+      unresolvedTextureBindings(ensureMemory(memory)),
+      resolvedDependencyBuffers(ensureMemory(memory)),
+      dependencyBufferRangesByPass(ensureMemory(memory)),
+      unresolvedDependencyBufferBindings(ensureMemory(memory)),
+      preDispatchRangesByPass(ensureMemory(memory)),
+      preDispatchDependencyRanges(ensureMemory(memory)),
+      unresolvedPreDispatchDependencyBufferBindings(ensureMemory(memory)),
+      drawRangesByPass(ensureMemory(memory)),
+      unresolvedDrawBufferBindings(ensureMemory(memory)) {}
+
+void RenderGraphTelemetrySnapshot::captureFrom(
+    const RenderGraphCompileResult &compiled) {
+  reset();
+  summary = buildSummary(compiled);
+
+  copyVector(passNames, compiled.passDebugNames);
+  copyVector(orderedPassIndices, compiled.orderedPassIndices);
+  copyVector(edges, compiled.edges);
+  copyVector(transientTextureLifetimes, compiled.transientTextureLifetimes);
+  copyVector(transientBufferLifetimes, compiled.transientBufferLifetimes);
+  copyVector(transientTextureAllocations, compiled.transientTextureAllocations);
+  copyVector(transientBufferAllocations, compiled.transientBufferAllocations);
+  copyVector(transientTextureAllocationByResource,
+             compiled.transientTextureAllocationByResource);
+  copyVector(transientBufferAllocationByResource,
+             compiled.transientBufferAllocationByResource);
+  copyVector(transientTexturePhysicalAllocations,
+             compiled.transientTexturePhysicalAllocations);
+  copyVector(transientBufferPhysicalAllocations,
+             compiled.transientBufferPhysicalAllocations);
+  copyVector(unresolvedTextureBindings, compiled.unresolvedTextureBindings);
+  copyVector(resolvedDependencyBuffers, compiled.resolvedDependencyBuffers);
+  copyVector(dependencyBufferRangesByPass,
+             compiled.dependencyBufferRangesByPass);
+  copyVector(unresolvedDependencyBufferBindings,
+             compiled.unresolvedDependencyBufferBindings);
+  copyVector(preDispatchRangesByPass, compiled.preDispatchRangesByPass);
+  copyVector(preDispatchDependencyRanges, compiled.preDispatchDependencyRanges);
+  copyVector(unresolvedPreDispatchDependencyBufferBindings,
+             compiled.unresolvedPreDispatchDependencyBufferBindings);
+  copyVector(drawRangesByPass, compiled.drawRangesByPass);
+  copyVector(unresolvedDrawBufferBindings,
+             compiled.unresolvedDrawBufferBindings);
+}
+
+void RenderGraphTelemetrySnapshot::reset() {
+  summary = Summary{};
+  passNames.clear();
+  orderedPassIndices.clear();
+  edges.clear();
+  transientTextureLifetimes.clear();
+  transientBufferLifetimes.clear();
+  transientTextureAllocations.clear();
+  transientBufferAllocations.clear();
+  transientTextureAllocationByResource.clear();
+  transientBufferAllocationByResource.clear();
+  transientTexturePhysicalAllocations.clear();
+  transientBufferPhysicalAllocations.clear();
+  unresolvedTextureBindings.clear();
+  resolvedDependencyBuffers.clear();
+  dependencyBufferRangesByPass.clear();
+  unresolvedDependencyBufferBindings.clear();
+  preDispatchRangesByPass.clear();
+  preDispatchDependencyRanges.clear();
+  unresolvedPreDispatchDependencyBufferBindings.clear();
+  drawRangesByPass.clear();
+  unresolvedDrawBufferBindings.clear();
+}
+
+RenderGraphTelemetryService::RenderGraphTelemetryService(
+    std::pmr::memory_resource *memory)
+    : snapshot_(ensureMemory(memory)),
+      configuredDumpDirectory_(resolveRenderGraphDumpDirectory()) {}
+
+void RenderGraphTelemetryService::capture(
+    const RenderGraphCompileResult &compiled) {
+  snapshot_.captureFrom(compiled);
   hasSnapshot_ = true;
 }
 
 std::filesystem::path RenderGraphTelemetryService::suggestDumpPath() const {
   const std::filesystem::path dumpDirectory =
-      defaultDumpDirectory_.empty() ? std::filesystem::path("logs/render_graph")
-                                    : defaultDumpDirectory_;
+      configuredDumpDirectory_.empty() ? defaultRenderGraphDumpDirectory()
+                                       : configuredDumpDirectory_;
   std::ostringstream fileName;
   fileName << "render_graph_frame_"
            << (hasSnapshot_ ? snapshot_.summary.frameIndex : 0ull) << ".txt";
@@ -242,327 +330,265 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
     }
   }
 
+  errno = 0;
   std::ofstream file(path, std::ios::out | std::ios::trunc);
-
-  std::error_code ec(errno, std::generic_category());
   if (!file.is_open()) {
     return Result<bool, std::string>::makeError(
-        "writeRenderGraphTelemetryTextDump: failed to open '" + path.string() +
-        "': " + ec.message());
+        makeOpenErrorMessage(path, errno));
   }
 
   const auto &summary = snapshot.summary;
   file << "RenderGraph Frame Dump\n";
-  file << "frame_index: " << summary.frameIndex << "\n";
-  file << "declared_pass_count: " << summary.declaredPassCount << "\n";
-  file << "culled_pass_count: " << summary.culledPassCount << "\n";
-  file << "root_pass_count: " << summary.rootPassCount << "\n";
-  file << "pass_count: " << summary.passCount << "\n";
-  file << "edge_count: " << summary.edgeCount << "\n";
-  file << "imported_textures: " << summary.importedTextures << "\n";
-  file << "transient_textures: " << summary.transientTextures << "\n";
-  file << "imported_buffers: " << summary.importedBuffers << "\n";
-  file << "transient_buffers: " << summary.transientBuffers << "\n";
-  file << "transient_texture_lifetimes: "
-       << summary.transientTextureLifetimeCount << "\n";
-  file << "transient_buffer_lifetimes: " << summary.transientBufferLifetimeCount
-       << "\n";
-  file << "transient_texture_physical_count: "
-       << summary.transientTexturePhysicalCount << "\n";
-  file << "transient_buffer_physical_count: "
-       << summary.transientBufferPhysicalCount << "\n";
-  file << "transient_texture_allocation_map_size: "
-       << summary.transientTextureAllocationMapSize << "\n";
-  file << "transient_buffer_allocation_map_size: "
-       << summary.transientBufferAllocationMapSize << "\n";
-  file << "transient_texture_physical_allocations: "
-       << summary.transientTexturePhysicalAllocationCount << "\n";
-  file << "transient_buffer_physical_allocations: "
-       << summary.transientBufferPhysicalAllocationCount << "\n";
-  file << "unresolved_texture_bindings: "
-       << summary.unresolvedTextureBindingCount << "\n";
-  file << "resolved_dependency_buffer_slots: "
-       << summary.resolvedDependencyBufferSlotCount << "\n";
-  file << "unresolved_dependency_buffer_bindings: "
-       << summary.unresolvedDependencyBufferBindingCount << "\n";
-  file << "owned_pre_dispatches: " << summary.ownedPreDispatchCount << "\n";
-  file << "owned_draw_items: " << summary.ownedDrawItemCount << "\n";
-  file << "resolved_pre_dispatch_dependency_buffer_slots: "
-       << summary.resolvedPreDispatchDependencyBufferSlotCount << "\n";
-  file << "unresolved_pre_dispatch_dependency_buffer_bindings: "
-       << summary.unresolvedPreDispatchDependencyBufferBindingCount << "\n";
-  file << "unresolved_draw_buffer_bindings: "
-       << summary.unresolvedDrawBufferBindingCount << "\n";
+  writeKeyValue(file, "frame_index", summary.frameIndex);
+  writeKeyValue(file, "declared_pass_count", summary.declaredPassCount);
+  writeKeyValue(file, "culled_pass_count", summary.culledPassCount);
+  writeKeyValue(file, "root_pass_count", summary.rootPassCount);
+  writeKeyValue(file, "pass_count", summary.passCount);
+  writeKeyValue(file, "edge_count", summary.edgeCount);
+  writeKeyValue(file, "imported_textures", summary.importedTextures);
+  writeKeyValue(file, "transient_textures", summary.transientTextures);
+  writeKeyValue(file, "imported_buffers", summary.importedBuffers);
+  writeKeyValue(file, "transient_buffers", summary.transientBuffers);
+  writeKeyValue(file, "transient_texture_lifetimes",
+                summary.transientTextureLifetimeCount);
+  writeKeyValue(file, "transient_buffer_lifetimes",
+                summary.transientBufferLifetimeCount);
+  writeKeyValue(file, "transient_texture_physical_count",
+                summary.transientTexturePhysicalCount);
+  writeKeyValue(file, "transient_buffer_physical_count",
+                summary.transientBufferPhysicalCount);
+  writeKeyValue(file, "transient_texture_allocation_map_size",
+                summary.transientTextureAllocationMapSize);
+  writeKeyValue(file, "transient_buffer_allocation_map_size",
+                summary.transientBufferAllocationMapSize);
+  writeKeyValue(file, "transient_texture_physical_allocations",
+                summary.transientTexturePhysicalAllocationCount);
+  writeKeyValue(file, "transient_buffer_physical_allocations",
+                summary.transientBufferPhysicalAllocationCount);
+  writeKeyValue(file, "unresolved_texture_bindings",
+                summary.unresolvedTextureBindingCount);
+  writeKeyValue(file, "resolved_dependency_buffer_slots",
+                summary.resolvedDependencyBufferSlotCount);
+  writeKeyValue(file, "unresolved_dependency_buffer_bindings",
+                summary.unresolvedDependencyBufferBindingCount);
+  writeKeyValue(file, "owned_pre_dispatches", summary.ownedPreDispatchCount);
+  writeKeyValue(file, "owned_draw_items", summary.ownedDrawItemCount);
+  writeKeyValue(file, "resolved_pre_dispatch_dependency_buffer_slots",
+                summary.resolvedPreDispatchDependencyBufferSlotCount);
+  writeKeyValue(file, "unresolved_pre_dispatch_dependency_buffer_bindings",
+                summary.unresolvedPreDispatchDependencyBufferBindingCount);
+  writeKeyValue(file, "unresolved_draw_buffer_bindings",
+                summary.unresolvedDrawBufferBindingCount);
   file << "\n";
 
-  file << "Passes:\n";
-  for (uint32_t passIndex = 0; passIndex < snapshot.passNames.size();
-       ++passIndex) {
-    file << "  [" << passIndex << "] " << resolvePassName(snapshot, passIndex)
-         << "\n";
-  }
-  file << "\n";
+  writeIndexedSection(file, "Passes", std::span{snapshot.passNames},
+                      [&](uint32_t passIndex, const std::pmr::string &) {
+                        file << "  [" << passIndex << "] "
+                             << resolvePassName(snapshot, passIndex) << "\n";
+                        return true;
+                      });
 
-  file << "Dependencies:\n";
-  for (const RenderGraphCompileResult::Edge &edge : snapshot.edges) {
-    file << "  " << edge.before << " -> " << edge.after << "  ("
-         << resolvePassName(snapshot, edge.before) << " -> "
-         << resolvePassName(snapshot, edge.after) << ")\n";
-  }
-  if (snapshot.edges.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(file, "Dependencies", std::span{snapshot.edges},
+               [&](const RenderGraphCompileResult::Edge &edge) {
+                 file << "  " << edge.before << " -> " << edge.after << "  ("
+                      << resolvePassName(snapshot, edge.before) << " -> "
+                      << resolvePassName(snapshot, edge.after) << ")\n";
+                 return true;
+               });
 
-  file << "Execution Order:\n";
-  for (uint32_t rank = 0; rank < snapshot.orderedPassIndices.size(); ++rank) {
-    const uint32_t passIndex = snapshot.orderedPassIndices[rank];
-    file << "  #" << rank << ": [" << passIndex << "] "
-         << resolvePassName(snapshot, passIndex) << "\n";
-  }
-  if (snapshot.orderedPassIndices.empty()) {
-    file << "  <empty>\n";
-  }
-  file << "\n";
+  writeIndexedSection(file, "Execution Order",
+                      std::span{snapshot.orderedPassIndices},
+                      [&](uint32_t rank, uint32_t passIndex) {
+                        file << "  #" << rank << ": [" << passIndex << "] "
+                             << resolvePassName(snapshot, passIndex) << "\n";
+                        return true;
+                      });
 
-  file << "Transient Texture Lifetimes:\n";
-  for (const auto &lifetime : snapshot.transientTextureLifetimes) {
-    file << "  tex[" << lifetime.resourceIndex
-         << "] first_exec=" << lifetime.firstExecutionIndex
-         << " last_exec=" << lifetime.lastExecutionIndex << "\n";
-  }
-  if (snapshot.transientTextureLifetimes.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Transient Texture Lifetimes",
+      std::span{snapshot.transientTextureLifetimes},
+      [&](const RenderGraphCompileResult::TransientLifetime &lifetime) {
+        file << "  tex[" << lifetime.resourceIndex
+             << "] first_exec=" << lifetime.firstExecutionIndex
+             << " last_exec=" << lifetime.lastExecutionIndex << "\n";
+        return true;
+      });
 
-  file << "Transient Buffer Lifetimes:\n";
-  for (const auto &lifetime : snapshot.transientBufferLifetimes) {
-    file << "  buf[" << lifetime.resourceIndex
-         << "] first_exec=" << lifetime.firstExecutionIndex
-         << " last_exec=" << lifetime.lastExecutionIndex << "\n";
-  }
-  if (snapshot.transientBufferLifetimes.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Transient Buffer Lifetimes",
+      std::span{snapshot.transientBufferLifetimes},
+      [&](const RenderGraphCompileResult::TransientLifetime &lifetime) {
+        file << "  buf[" << lifetime.resourceIndex
+             << "] first_exec=" << lifetime.firstExecutionIndex
+             << " last_exec=" << lifetime.lastExecutionIndex << "\n";
+        return true;
+      });
 
-  file << "Transient Texture Allocations:\n";
-  for (const auto &allocation : snapshot.transientTextureAllocations) {
-    file << "  tex[" << allocation.resourceIndex << "] -> phys["
-         << allocation.allocationIndex << "]\n";
-  }
-  if (snapshot.transientTextureAllocations.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Transient Texture Allocations",
+      std::span{snapshot.transientTextureAllocations},
+      [&](const RenderGraphCompileResult::TransientAllocation &allocation) {
+        file << "  tex[" << allocation.resourceIndex << "] -> phys["
+             << allocation.allocationIndex << "]\n";
+        return true;
+      });
 
-  file << "Transient Buffer Allocations:\n";
-  for (const auto &allocation : snapshot.transientBufferAllocations) {
-    file << "  buf[" << allocation.resourceIndex << "] -> phys["
-         << allocation.allocationIndex << "]\n";
-  }
-  if (snapshot.transientBufferAllocations.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Transient Buffer Allocations",
+      std::span{snapshot.transientBufferAllocations},
+      [&](const RenderGraphCompileResult::TransientAllocation &allocation) {
+        file << "  buf[" << allocation.resourceIndex << "] -> phys["
+             << allocation.allocationIndex << "]\n";
+        return true;
+      });
 
-  file << "Transient Texture Allocation Map:\n";
-  bool wroteTextureAllocationMap = false;
-  for (uint32_t resourceIndex = 0;
-       resourceIndex < snapshot.transientTextureAllocationByResource.size();
-       ++resourceIndex) {
-    const uint32_t allocationIndex =
-        snapshot.transientTextureAllocationByResource[resourceIndex];
-    if (allocationIndex == UINT32_MAX) {
-      continue;
-    }
-    file << "  tex[" << resourceIndex << "] -> phys[" << allocationIndex
-         << "]\n";
-    wroteTextureAllocationMap = true;
-  }
-  if (!wroteTextureAllocationMap) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeIndexedSection(file, "Transient Texture Allocation Map",
+                      std::span{snapshot.transientTextureAllocationByResource},
+                      [&](uint32_t resourceIndex, uint32_t allocationIndex) {
+                        if (allocationIndex == UINT32_MAX) {
+                          return false;
+                        }
+                        file << "  tex[" << resourceIndex << "] -> phys["
+                             << allocationIndex << "]\n";
+                        return true;
+                      });
 
-  file << "Transient Buffer Allocation Map:\n";
-  bool wroteBufferAllocationMap = false;
-  for (uint32_t resourceIndex = 0;
-       resourceIndex < snapshot.transientBufferAllocationByResource.size();
-       ++resourceIndex) {
-    const uint32_t allocationIndex =
-        snapshot.transientBufferAllocationByResource[resourceIndex];
-    if (allocationIndex == UINT32_MAX) {
-      continue;
-    }
-    file << "  buf[" << resourceIndex << "] -> phys[" << allocationIndex
-         << "]\n";
-    wroteBufferAllocationMap = true;
-  }
-  if (!wroteBufferAllocationMap) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeIndexedSection(file, "Transient Buffer Allocation Map",
+                      std::span{snapshot.transientBufferAllocationByResource},
+                      [&](uint32_t resourceIndex, uint32_t allocationIndex) {
+                        if (allocationIndex == UINT32_MAX) {
+                          return false;
+                        }
+                        file << "  buf[" << resourceIndex << "] -> phys["
+                             << allocationIndex << "]\n";
+                        return true;
+                      });
 
-  file << "Transient Texture Physical Allocations:\n";
-  for (const auto &physical : snapshot.transientTexturePhysicalAllocations) {
-    const TextureDesc &desc = physical.desc;
-    file << "  phys[" << physical.allocationIndex
-         << "] repr_tex=" << physical.representativeResourceIndex
-         << " fmt=" << static_cast<uint32_t>(desc.format)
-         << " dims=" << desc.dimensions.width << "x" << desc.dimensions.height
-         << "x" << desc.dimensions.depth << " layers=" << desc.numLayers
-         << " samples=" << desc.numSamples << " mips=" << desc.numMipLevels
-         << "\n";
-  }
-  if (snapshot.transientTexturePhysicalAllocations.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Transient Texture Physical Allocations",
+      std::span{snapshot.transientTexturePhysicalAllocations},
+      [&](const RenderGraphCompileResult::TransientTexturePhysicalAllocation
+              &physical) {
+        const TextureDesc &desc = physical.desc;
+        file << "  phys[" << physical.allocationIndex
+             << "] repr_tex=" << physical.representativeResourceIndex
+             << " fmt=" << static_cast<uint32_t>(desc.format)
+             << " dims=" << desc.dimensions.width << "x"
+             << desc.dimensions.height << "x" << desc.dimensions.depth
+             << " layers=" << desc.numLayers << " samples=" << desc.numSamples
+             << " mips=" << desc.numMipLevels << "\n";
+        return true;
+      });
 
-  file << "Transient Buffer Physical Allocations:\n";
-  for (const auto &physical : snapshot.transientBufferPhysicalAllocations) {
-    const BufferDesc &desc = physical.desc;
-    file << "  phys[" << physical.allocationIndex
-         << "] repr_buf=" << physical.representativeResourceIndex
-         << " usage=" << static_cast<uint32_t>(desc.usage)
-         << " storage=" << static_cast<uint32_t>(desc.storage)
-         << " size=" << desc.size << "\n";
-  }
-  if (snapshot.transientBufferPhysicalAllocations.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Transient Buffer Physical Allocations",
+      std::span{snapshot.transientBufferPhysicalAllocations},
+      [&](const RenderGraphCompileResult::TransientBufferPhysicalAllocation
+              &physical) {
+        const BufferDesc &desc = physical.desc;
+        file << "  phys[" << physical.allocationIndex
+             << "] repr_buf=" << physical.representativeResourceIndex
+             << " usage=" << static_cast<uint32_t>(desc.usage)
+             << " storage=" << static_cast<uint32_t>(desc.storage)
+             << " size=" << desc.size << "\n";
+        return true;
+      });
 
-  file << "Unresolved Pass Texture Bindings:\n";
-  for (const auto &binding : snapshot.unresolvedTextureBindings) {
-    const std::string_view target =
-        binding.target ==
-                RenderGraphCompileResult::PassTextureBindingTarget::Color
-            ? "color"
-            : "depth";
-    file << "  pass_exec[" << binding.orderedPassIndex << "]." << target
-         << " <- tex[" << binding.textureResourceIndex << "]\n";
-  }
-  if (snapshot.unresolvedTextureBindings.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Unresolved Pass Texture Bindings",
+      std::span{snapshot.unresolvedTextureBindings},
+      [&](const RenderGraphCompileResult::PassTextureBinding &binding) {
+        file << "  pass_exec[" << binding.orderedPassIndex << "]."
+             << resolveTextureBindingTarget(binding.target) << " <- tex["
+             << binding.textureResourceIndex << "]\n";
+        return true;
+      });
 
-  file << "Pass Dependency Buffer Ranges:\n";
-  for (uint32_t passIndex = 0;
-       passIndex < snapshot.dependencyBufferRangesByPass.size(); ++passIndex) {
-    const auto &range = snapshot.dependencyBufferRangesByPass[passIndex];
-    file << "  pass_exec[" << passIndex << "] offset=" << range.offset
-         << " count=" << range.count << "\n";
-  }
-  if (snapshot.dependencyBufferRangesByPass.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeIndexedSection(
+      file, "Pass Dependency Buffer Ranges",
+      std::span{snapshot.dependencyBufferRangesByPass},
+      [&](uint32_t passIndex,
+          const RenderGraphCompileResult::PassDependencyBufferRange &range) {
+        file << "  pass_exec[" << passIndex << "] offset=" << range.offset
+             << " count=" << range.count << "\n";
+        return true;
+      });
 
-  file << "Resolved Dependency Buffers:\n";
-  bool wroteResolvedDependencyBuffer = false;
-  for (uint32_t i = 0; i < snapshot.resolvedDependencyBuffers.size(); ++i) {
-    const BufferHandle handle = snapshot.resolvedDependencyBuffers[i];
-    if (!nuri::isValid(handle)) {
-      continue;
-    }
-    file << "  slot[" << i << "] handle=(" << handle.index << ","
-         << handle.generation << ")\n";
-    wroteResolvedDependencyBuffer = true;
-  }
-  if (!wroteResolvedDependencyBuffer) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeIndexedSection(file, "Resolved Dependency Buffers",
+                      std::span{snapshot.resolvedDependencyBuffers},
+                      [&](uint32_t index, BufferHandle handle) {
+                        if (!nuri::isValid(handle)) {
+                          return false;
+                        }
+                        file << "  slot[" << index << "] handle=("
+                             << handle.index << "," << handle.generation
+                             << ")\n";
+                        return true;
+                      });
 
-  file << "Unresolved Dependency Buffer Bindings:\n";
-  for (const auto &binding : snapshot.unresolvedDependencyBufferBindings) {
-    file << "  pass_exec[" << binding.orderedPassIndex << "].dep["
-         << binding.dependencyBufferIndex << "] <- buf["
-         << binding.bufferResourceIndex << "]\n";
-  }
-  if (snapshot.unresolvedDependencyBufferBindings.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Unresolved Dependency Buffer Bindings",
+      std::span{snapshot.unresolvedDependencyBufferBindings},
+      [&](const RenderGraphCompileResult::UnresolvedDependencyBufferBinding
+              &binding) {
+        file << "  pass_exec[" << binding.orderedPassIndex << "].dep["
+             << binding.dependencyBufferIndex << "] <- buf["
+             << binding.bufferResourceIndex << "]\n";
+        return true;
+      });
 
-  file << "Pass Pre-Dispatch Ranges:\n";
-  for (uint32_t passIndex = 0;
-       passIndex < snapshot.preDispatchRangesByPass.size(); ++passIndex) {
-    const auto &range = snapshot.preDispatchRangesByPass[passIndex];
-    file << "  pass_exec[" << passIndex << "] offset=" << range.offset
-         << " count=" << range.count << "\n";
-  }
-  if (snapshot.preDispatchRangesByPass.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeIndexedSection(
+      file, "Pass Pre-Dispatch Ranges",
+      std::span{snapshot.preDispatchRangesByPass},
+      [&](uint32_t passIndex,
+          const RenderGraphCompileResult::PassDispatchRange &range) {
+        file << "  pass_exec[" << passIndex << "] offset=" << range.offset
+             << " count=" << range.count << "\n";
+        return true;
+      });
 
-  file << "Pre-Dispatch Dependency Ranges:\n";
-  for (uint32_t dispatchIndex = 0;
-       dispatchIndex < snapshot.preDispatchDependencyRanges.size();
-       ++dispatchIndex) {
-    const auto &range = snapshot.preDispatchDependencyRanges[dispatchIndex];
-    file << "  pre_dispatch[" << dispatchIndex << "] offset=" << range.offset
-         << " count=" << range.count << "\n";
-  }
-  if (snapshot.preDispatchDependencyRanges.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeIndexedSection(
+      file, "Pre-Dispatch Dependency Ranges",
+      std::span{snapshot.preDispatchDependencyRanges},
+      [&](uint32_t dispatchIndex,
+          const RenderGraphCompileResult::DispatchDependencyBufferRange
+              &range) {
+        file << "  pre_dispatch[" << dispatchIndex
+             << "] offset=" << range.offset << " count=" << range.count << "\n";
+        return true;
+      });
 
-  file << "Unresolved Pre-Dispatch Dependency Buffer Bindings:\n";
-  for (const auto &binding :
-       snapshot.unresolvedPreDispatchDependencyBufferBindings) {
-    file << "  pass_exec[" << binding.orderedPassIndex << "].pre_dispatch["
-         << binding.preDispatchIndex << "].dep["
-         << binding.dependencyBufferIndex << "] <- buf["
-         << binding.bufferResourceIndex << "]\n";
-  }
-  if (snapshot.unresolvedPreDispatchDependencyBufferBindings.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(
+      file, "Unresolved Pre-Dispatch Dependency Buffer Bindings",
+      std::span{snapshot.unresolvedPreDispatchDependencyBufferBindings},
+      [&](const RenderGraphCompileResult::
+              UnresolvedPreDispatchDependencyBufferBinding &binding) {
+        file << "  pass_exec[" << binding.orderedPassIndex << "].pre_dispatch["
+             << binding.preDispatchIndex << "].dep["
+             << binding.dependencyBufferIndex << "] <- buf["
+             << binding.bufferResourceIndex << "]\n";
+        return true;
+      });
 
-  file << "Pass Draw Ranges:\n";
-  for (uint32_t passIndex = 0; passIndex < snapshot.drawRangesByPass.size();
-       ++passIndex) {
-    const auto &range = snapshot.drawRangesByPass[passIndex];
-    file << "  pass_exec[" << passIndex << "] offset=" << range.offset
-         << " count=" << range.count << "\n";
-  }
-  if (snapshot.drawRangesByPass.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeIndexedSection(
+      file, "Pass Draw Ranges", std::span{snapshot.drawRangesByPass},
+      [&](uint32_t passIndex,
+          const RenderGraphCompileResult::PassDrawRange &range) {
+        file << "  pass_exec[" << passIndex << "] offset=" << range.offset
+             << " count=" << range.count << "\n";
+        return true;
+      });
 
-  file << "Unresolved Draw Buffer Bindings:\n";
-  for (const auto &binding : snapshot.unresolvedDrawBufferBindings) {
-    const std::string_view target = [&]() {
-      switch (binding.target) {
-      case RenderGraphCompileResult::DrawBufferBindingTarget::Vertex:
-        return std::string_view("vertex");
-      case RenderGraphCompileResult::DrawBufferBindingTarget::Index:
-        return std::string_view("index");
-      case RenderGraphCompileResult::DrawBufferBindingTarget::Indirect:
-        return std::string_view("indirect");
-      case RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount:
-        return std::string_view("indirect_count");
-      default:
-        return std::string_view("unknown");
-      }
-    }();
-    file << "  pass_exec[" << binding.orderedPassIndex << "].draw["
-         << binding.drawIndex << "]." << target << " <- buf["
-         << binding.bufferResourceIndex << "]\n";
-  }
-  if (snapshot.unresolvedDrawBufferBindings.empty()) {
-    file << "  <none>\n";
-  }
-  file << "\n";
+  writeSection(file, "Unresolved Draw Buffer Bindings",
+               std::span{snapshot.unresolvedDrawBufferBindings},
+               [&](const RenderGraphCompileResult::UnresolvedDrawBufferBinding
+                       &binding) {
+                 file << "  pass_exec[" << binding.orderedPassIndex << "].draw["
+                      << binding.drawIndex << "]."
+                      << resolveDrawBufferBindingTarget(binding.target)
+                      << " <- buf[" << binding.bufferResourceIndex << "]\n";
+                 return true;
+               });
 
   file.flush();
   if (file.fail()) {

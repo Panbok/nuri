@@ -80,6 +80,7 @@ struct NURI_API RenderGraphTelemetrySnapshot {
   explicit RenderGraphTelemetrySnapshot(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 
+  void captureFrom(const RenderGraphCompileResult &compiled);
   void reset();
 };
 
@@ -99,9 +100,8 @@ public:
   writeLatestTextDump(std::string_view outputPath) const;
 
 private:
-  std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   RenderGraphTelemetrySnapshot snapshot_;
-  std::filesystem::path defaultDumpDirectory_;
+  std::filesystem::path configuredDumpDirectory_;
   bool hasSnapshot_ = false;
 };
 
