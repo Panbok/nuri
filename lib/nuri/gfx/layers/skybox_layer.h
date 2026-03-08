@@ -37,8 +37,8 @@ public:
   void onAttach() override;
   void onDetach() override;
   void onResize(int32_t width, int32_t height) override;
-  Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
-                                              RenderPassList &out) override;
+  Result<bool, std::string>
+  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
 
 private:
   enum FrameDataFlags : uint32_t {
@@ -83,6 +83,7 @@ private:
   Result<bool, std::string> ensureFrameBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipeline();
+  Result<bool, std::string> prepareSkyboxDraw(RenderFrameContext &frame);
   void destroyFrameBuffer();
 
   GPUDevice &gpu_;

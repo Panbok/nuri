@@ -39,20 +39,74 @@ void SkyboxLayer::onDetach() {
 void SkyboxLayer::onResize(int32_t, int32_t) {}
 
 Result<bool, std::string>
-SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
+SkyboxLayer::buildRenderGraph(RenderFrameContext &frame,
+                              RenderGraphBuilder &graph) {
   NURI_PROFILER_FUNCTION();
-
   if (frame.settings && !frame.settings->skybox.enabled) {
     return Result<bool, std::string>::makeResult(true);
   }
 
+  auto drawResult = prepareSkyboxDraw(frame);
+  if (drawResult.hasError()) {
+    return Result<bool, std::string>::makeError(drawResult.error());
+  }
+
+  RenderGraphGraphicsPassDesc passDesc{};
+  passDesc.color = {.loadOp = LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+  passDesc.draws = drawResult.value()
+                       ? std::span<const DrawItem>(&drawItem_, 1u)
+                       : std::span<const DrawItem>{};
+  passDesc.debugLabel = "Skybox Pass";
+  passDesc.debugColor = 0xff3366ff;
+
+  auto addResult = graph.addGraphicsPass(passDesc);
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
+  const RenderGraphPassId passId = addResult.value();
+
+  if (drawResult.value() && frameBuffer_ && frameBuffer_->valid()) {
+    auto frameBufferResult =
+        graph.importBuffer(frameBuffer_->handle(), "skybox_frame_data_buffer");
+    if (frameBufferResult.hasError()) {
+      return Result<bool, std::string>::makeError(frameBufferResult.error());
+    }
+    auto accessResult = graph.addBufferRead(passId, frameBufferResult.value());
+    if (accessResult.hasError()) {
+      return Result<bool, std::string>::makeError(accessResult.error());
+    }
+  }
+
+  if (drawResult.value() && frame.scene != nullptr && frame.resources != nullptr) {
+    const TextureRecord *cubemap =
+        frame.resources->tryGet(frame.scene->environment().cubemap);
+    if (cubemap != nullptr && nuri::isValid(cubemap->texture)) {
+      auto cubemapResult =
+          graph.importTexture(cubemap->texture, "skybox_environment_cubemap");
+      if (cubemapResult.hasError()) {
+        return Result<bool, std::string>::makeError(cubemapResult.error());
+      }
+      auto accessResult = graph.addTextureRead(passId, cubemapResult.value());
+      if (accessResult.hasError()) {
+        return Result<bool, std::string>::makeError(accessResult.error());
+      }
+    }
+  }
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
   if (!frame.scene) {
     return Result<bool, std::string>::makeError(
-        "SkyboxLayer::buildRenderPasses: frame scene is null");
+        "SkyboxLayer::prepareSkyboxDraw: frame scene is null");
   }
   if (!frame.resources) {
     return Result<bool, std::string>::makeError(
-        "SkyboxLayer::buildRenderPasses: frame resources are null");
+        "SkyboxLayer::prepareSkyboxDraw: frame resources are null");
   }
 
   auto initResult = ensureInitialized();
@@ -60,66 +114,58 @@ SkyboxLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     return Result<bool, std::string>::makeError(initResult.error());
   }
 
-  RenderPass pass{};
-  pass.color = {.loadOp = LoadOp::Clear,
-                .storeOp = StoreOp::Store,
-                .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
-  pass.debugLabel = "Skybox Pass";
-  pass.debugColor = 0xff3366ff;
+  drawItem_ = DrawItem{};
 
   const TextureRecord *cubemap =
       frame.resources->tryGet(frame.scene->environment().cubemap);
-  if (cubemap != nullptr && nuri::isValid(cubemap->texture)) {
-    frameData_ = FrameData{
-        .view = frame.camera.view,
-        .proj = frame.camera.proj,
-        .cameraPos = frame.camera.cameraPos,
-        .cubemapTexId = cubemap->bindlessIndex,
-        .hasCubemap = 1,
-        .irradianceTexId = 0,
-        .prefilteredGgxTexId = 0,
-        .prefilteredCharlieTexId = 0,
-        .brdfLutTexId = 0,
-        .flags = 0,
-        .cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex(),
-    };
-
-    const size_t requiredBytes = sizeof(frameData_);
-    auto bufferResult = ensureFrameBufferCapacity(requiredBytes);
-    if (bufferResult.hasError()) {
-      return Result<bool, std::string>::makeError(bufferResult.error());
-    }
-
-    const std::span<const std::byte> frameBytes{
-        reinterpret_cast<const std::byte *>(&frameData_), requiredBytes};
-    auto updateResult =
-        gpu_.updateBuffer(frameBuffer_->handle(), frameBytes, 0);
-    if (updateResult.hasError()) {
-      return Result<bool, std::string>::makeError(updateResult.error());
-    }
-
-    const uint64_t baseAddress =
-        gpu_.getBufferDeviceAddress(frameBuffer_->handle());
-    if (baseAddress == 0) {
-      return Result<bool, std::string>::makeError(
-          "SkyboxLayer::buildRenderPasses: invalid frame buffer address");
-    }
-
-    pushConstants_ = PushConstants{.frameDataAddress = baseAddress};
-
-    drawItem_ = DrawItem{};
-    drawItem_.pipeline = skyboxPipelineHandle_;
-    drawItem_.vertexCount = kSkyboxVertexCount;
-    drawItem_.pushConstants = std::span<const std::byte>(
-        reinterpret_cast<const std::byte *>(&pushConstants_),
-        sizeof(pushConstants_));
-    drawItem_.debugLabel = "Skybox";
-    drawItem_.debugColor = 0xff3366ff;
-
-    pass.draws = std::span<const DrawItem>(&drawItem_, 1);
+  if (cubemap == nullptr || !nuri::isValid(cubemap->texture)) {
+    return Result<bool, std::string>::makeResult(false);
   }
 
-  out.push_back(pass);
+  frameData_ = FrameData{
+      .view = frame.camera.view,
+      .proj = frame.camera.proj,
+      .cameraPos = frame.camera.cameraPos,
+      .cubemapTexId = cubemap->bindlessIndex,
+      .hasCubemap = 1,
+      .irradianceTexId = 0,
+      .prefilteredGgxTexId = 0,
+      .prefilteredCharlieTexId = 0,
+      .brdfLutTexId = 0,
+      .flags = 0,
+      .cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex(),
+  };
+
+  const size_t requiredBytes = sizeof(frameData_);
+  auto bufferResult = ensureFrameBufferCapacity(requiredBytes);
+  if (bufferResult.hasError()) {
+    return Result<bool, std::string>::makeError(bufferResult.error());
+  }
+
+  const std::span<const std::byte> frameBytes{
+      reinterpret_cast<const std::byte *>(&frameData_), requiredBytes};
+  auto updateResult = gpu_.updateBuffer(frameBuffer_->handle(), frameBytes, 0);
+  if (updateResult.hasError()) {
+    return Result<bool, std::string>::makeError(updateResult.error());
+  }
+
+  const uint64_t baseAddress = gpu_.getBufferDeviceAddress(frameBuffer_->handle());
+  if (baseAddress == 0) {
+    return Result<bool, std::string>::makeError(
+        "SkyboxLayer::prepareSkyboxDraw: invalid frame buffer address");
+  }
+
+  pushConstants_ = PushConstants{.frameDataAddress = baseAddress};
+
+  drawItem_ = DrawItem{};
+  drawItem_.pipeline = skyboxPipelineHandle_;
+  drawItem_.vertexCount = kSkyboxVertexCount;
+  drawItem_.pushConstants = std::span<const std::byte>(
+      reinterpret_cast<const std::byte *>(&pushConstants_),
+      sizeof(pushConstants_));
+  drawItem_.debugLabel = "Skybox";
+  drawItem_.debugColor = 0xff3366ff;
+
   return Result<bool, std::string>::makeResult(true);
 }
 
