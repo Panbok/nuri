@@ -30,7 +30,7 @@ public:
   bool wantsCaptureKeyboard() const;
   bool wantsCaptureMouse() const;
   void beginFrame() override;
-  Result<RenderPass, std::string> endFrame() override;
+  Result<RenderGraphGraphicsPassDesc, std::string> endFrame() override;
 
 private:
   struct Impl;

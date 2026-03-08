@@ -9,6 +9,7 @@
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/imgui_gpu_renderer.h"
+#include "nuri/gfx/render_graph/render_graph_telemetry.h"
 #include "nuri/platform/imgui_glfw_platform.h"
 #include "nuri/resources/storage/font/nfont_compiler.h"
 #include "nuri/text/text_system.h"
@@ -34,6 +35,8 @@ constexpr uint32_t kUiMaxTessInstances = 65536u;
 constexpr const char *kDockspaceWindowName = "NuriDockspace";
 constexpr const char *kDockspaceRootId = "NuriDockspace##Root";
 constexpr const char *kLogWindowName = "Log";
+constexpr const char *kRenderGraphTelemetryWindowName =
+    "Render Graph Telemetry";
 constexpr const char *kFontCompilerWindowName = "Font Compiler";
 constexpr const char *kBakeryWindowName = "Bakery";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
@@ -210,6 +213,15 @@ struct BakeryUiState {
     }
     envHdrPath[copyCount] = '\0';
   }
+};
+
+struct RenderGraphTelemetryUiState {
+  std::array<char, 512> outputPath = {};
+  std::string status{};
+  std::string error{};
+  std::string lastSuggestedPath{};
+  FileDialogWidget fileDialog{};
+  bool initializedOutputPath = false;
 };
 
 constexpr std::array<int, 5> kAtlasResolutionSteps = {1024, 2048, 3072, 4096,
@@ -1029,6 +1041,556 @@ void drawBakeryWindow(BakeryUiState &state, bakery::BakerySystem *bakery,
   ImGui::End();
 }
 
+[[nodiscard]] std::string_view
+resolveTelemetryPassName(const RenderGraphTelemetrySnapshot &snapshot,
+                         uint32_t passIndex) {
+  if (passIndex >= snapshot.passNames.size()) {
+    return "unnamed_pass";
+  }
+  const std::pmr::string &name = snapshot.passNames[passIndex];
+  return name.empty() ? std::string_view("unnamed_pass")
+                      : std::string_view(name.data(), name.size());
+}
+
+const char *drawBufferBindingTargetName(
+    RenderGraphCompileResult::DrawBufferBindingTarget target) {
+  switch (target) {
+  case RenderGraphCompileResult::DrawBufferBindingTarget::Vertex:
+    return "vertex";
+  case RenderGraphCompileResult::DrawBufferBindingTarget::Index:
+    return "index";
+  case RenderGraphCompileResult::DrawBufferBindingTarget::Indirect:
+    return "indirect";
+  case RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount:
+    return "indirect_count";
+  }
+  return "unknown";
+}
+
+const char *passTextureBindingTargetName(
+    RenderGraphCompileResult::PassTextureBindingTarget target) {
+  switch (target) {
+  case RenderGraphCompileResult::PassTextureBindingTarget::Color:
+    return "color";
+  case RenderGraphCompileResult::PassTextureBindingTarget::Depth:
+    return "depth";
+  }
+  return "unknown";
+}
+
+void syncTelemetryDumpPath(RenderGraphTelemetryUiState &state,
+                           const RenderGraphTelemetryService *telemetry) {
+  if (telemetry == nullptr) {
+    return;
+  }
+  const std::string currentPath = state.outputPath.data();
+  const std::string suggestedPath = telemetry->suggestDumpPath().generic_string();
+  if (state.initializedOutputPath && currentPath != state.lastSuggestedPath) {
+    return;
+  }
+  setPathText(state.outputPath, suggestedPath);
+  state.lastSuggestedPath = suggestedPath;
+  state.initializedOutputPath = true;
+}
+
+void drawTextView(std::string_view text) {
+  ImGui::TextUnformatted(text.data(), text.data() + text.size());
+}
+
+void drawTelemetrySummary(const RenderGraphTelemetrySnapshot::Summary &summary) {
+  if (!ImGui::BeginTable("RenderGraphTelemetrySummary", 2,
+                         ImGuiTableFlags_BordersInnerV |
+                             ImGuiTableFlags_SizingStretchProp)) {
+    return;
+  }
+
+  const auto drawRow = [](const char *label, auto value) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(label);
+    ImGui::TableNextColumn();
+    ImGui::Text("%llu", static_cast<unsigned long long>(value));
+  };
+
+  drawRow("Frame Index", summary.frameIndex);
+  drawRow("Declared Passes", summary.declaredPassCount);
+  drawRow("Culled Passes", summary.culledPassCount);
+  drawRow("Root Passes", summary.rootPassCount);
+  drawRow("Pass Count", summary.passCount);
+  drawRow("Edge Count", summary.edgeCount);
+  drawRow("Imported Textures", summary.importedTextures);
+  drawRow("Transient Textures", summary.transientTextures);
+  drawRow("Imported Buffers", summary.importedBuffers);
+  drawRow("Transient Buffers", summary.transientBuffers);
+  drawRow("Texture Lifetimes", summary.transientTextureLifetimeCount);
+  drawRow("Buffer Lifetimes", summary.transientBufferLifetimeCount);
+  drawRow("Texture Physicals", summary.transientTexturePhysicalCount);
+  drawRow("Buffer Physicals", summary.transientBufferPhysicalCount);
+  drawRow("Resolved Dependency Slots", summary.resolvedDependencyBufferSlotCount);
+  drawRow("Resolved Pre-Dispatch Slots",
+          summary.resolvedPreDispatchDependencyBufferSlotCount);
+  drawRow("Unresolved Texture Bindings", summary.unresolvedTextureBindingCount);
+  drawRow("Unresolved Dependency Bindings",
+          summary.unresolvedDependencyBufferBindingCount);
+  drawRow("Unresolved Pre-Dispatch Bindings",
+          summary.unresolvedPreDispatchDependencyBufferBindingCount);
+  drawRow("Unresolved Draw Bindings", summary.unresolvedDrawBufferBindingCount);
+
+  ImGui::EndTable();
+}
+
+template <typename Fn>
+void drawTelemetryTableSection(const char *header, const char *tableId,
+                               int columns, bool hasRows, float height,
+                               Fn &&drawRows) {
+  if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+    return;
+  }
+  if (!hasRows) {
+    ImGui::TextUnformatted("<none>");
+    return;
+  }
+
+  if (ImGui::BeginTable(tableId, columns,
+                        ImGuiTableFlags_BordersInnerV |
+                            ImGuiTableFlags_RowBg |
+                            ImGuiTableFlags_Resizable |
+                            ImGuiTableFlags_ScrollY,
+                        ImVec2(0.0f, height))) {
+    drawRows();
+    ImGui::EndTable();
+  }
+}
+
+void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
+                                    RenderGraphTelemetryService *telemetry,
+                                    void *ownerWindowHandle) {
+  syncTelemetryDumpPath(state, telemetry);
+
+  ImGui::InputText("Output .txt", state.outputPath.data(), state.outputPath.size());
+  ImGui::SameLine();
+  if (ImGui::Button("Browse...##RenderGraphTelemetry")) {
+    static constexpr std::array<FileDialogFilter, 2> kTelemetryFilters = {
+        FileDialogFilter{"Text Files (*.txt)", "*.txt"},
+        FileDialogFilter{"All Files (*.*)", "*.*"},
+    };
+    SaveFileRequest request{};
+    request.title = "Save Render Graph Telemetry";
+    request.filters = kTelemetryFilters;
+    request.defaultExtension = "txt";
+    request.initialPath = state.outputPath.data();
+    request.ownerWindowHandle = ownerWindowHandle;
+    if (const auto selectedPath = state.fileDialog.saveFile(request)) {
+      setPathText(state.outputPath, selectedPath->generic_string());
+      state.initializedOutputPath = true;
+    }
+  }
+
+  const bool canDump = telemetry != nullptr && telemetry->hasSnapshot();
+  if (!canDump) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Dump Current Telemetry")) {
+    state.status.clear();
+    state.error.clear();
+    auto dumpResult = telemetry->writeLatestTextDump(state.outputPath.data());
+    if (dumpResult.hasError()) {
+      state.error = dumpResult.error();
+    } else {
+      state.status = std::string("Wrote telemetry to ") + state.outputPath.data();
+    }
+  }
+  if (!canDump) {
+    ImGui::EndDisabled();
+  }
+
+  if (!state.status.empty()) {
+    ImGui::Spacing();
+    ImGui::TextUnformatted(state.status.c_str());
+  }
+  if (!state.error.empty()) {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s",
+                       state.error.c_str());
+  }
+
+  const RenderGraphTelemetrySnapshot *snapshot =
+      telemetry != nullptr ? telemetry->latestSnapshot() : nullptr;
+  if (snapshot == nullptr) {
+    ImGui::Spacing();
+    ImGui::TextUnformatted("No render-graph telemetry has been captured yet.");
+    return;
+  }
+
+  ImGui::Separator();
+  drawTelemetrySummary(snapshot->summary);
+
+  drawTelemetryTableSection(
+      "Passes", "RenderGraphTelemetryPasses", 2, !snapshot->passNames.empty(),
+      160.0f, [&]() {
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (uint32_t passIndex = 0; passIndex < snapshot->passNames.size();
+             ++passIndex) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", passIndex);
+          ImGui::TableNextColumn();
+          drawTextView(resolveTelemetryPassName(*snapshot, passIndex));
+        }
+      });
+
+  drawTelemetryTableSection(
+      "Edges", "RenderGraphTelemetryEdges", 4, !snapshot->edges.empty(), 140.0f,
+      [&]() {
+        ImGui::TableSetupColumn("Before", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Before Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("After", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("After Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const auto &edge : snapshot->edges) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", edge.before);
+          ImGui::TableNextColumn();
+          drawTextView(resolveTelemetryPassName(*snapshot, edge.before));
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", edge.after);
+          ImGui::TableNextColumn();
+          drawTextView(resolveTelemetryPassName(*snapshot, edge.after));
+        }
+      });
+
+  drawTelemetryTableSection(
+      "Execution Order", "RenderGraphTelemetryExecution", 3,
+      !snapshot->orderedPassIndices.empty(), 140.0f, [&]() {
+        ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (uint32_t rank = 0; rank < snapshot->orderedPassIndices.size();
+             ++rank) {
+          const uint32_t passIndex = snapshot->orderedPassIndices[rank];
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", rank);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", passIndex);
+          ImGui::TableNextColumn();
+          drawTextView(resolveTelemetryPassName(*snapshot, passIndex));
+        }
+      });
+
+  drawTelemetryTableSection(
+      "Transient Lifetimes", "RenderGraphTelemetryTextureLifetimes", 4,
+      !snapshot->transientTextureLifetimes.empty() ||
+          !snapshot->transientBufferLifetimes.empty(),
+      180.0f, [&]() {
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("First", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Last", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableHeadersRow();
+        for (const auto &lifetime : snapshot->transientTextureLifetimes) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("tex");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", lifetime.resourceIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", lifetime.firstExecutionIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", lifetime.lastExecutionIndex);
+        }
+        for (const auto &lifetime : snapshot->transientBufferLifetimes) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("buf");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", lifetime.resourceIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", lifetime.firstExecutionIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", lifetime.lastExecutionIndex);
+        }
+      });
+
+  drawTelemetryTableSection(
+      "Allocations", "RenderGraphTelemetryAllocations", 4,
+      !snapshot->transientTextureAllocations.empty() ||
+          !snapshot->transientBufferAllocations.empty(),
+      180.0f, [&]() {
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Map", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const auto &allocation : snapshot->transientTextureAllocations) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("tex");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", allocation.resourceIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", allocation.allocationIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("tex[%u] -> phys[%u]", allocation.resourceIndex,
+                      allocation.allocationIndex);
+        }
+        for (const auto &allocation : snapshot->transientBufferAllocations) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("buf");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", allocation.resourceIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", allocation.allocationIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("buf[%u] -> phys[%u]", allocation.resourceIndex,
+                      allocation.allocationIndex);
+        }
+      });
+
+  drawTelemetryTableSection(
+      "Allocation Maps", "RenderGraphTelemetryAllocationMaps", 3,
+      !snapshot->transientTextureAllocationByResource.empty() ||
+          !snapshot->transientBufferAllocationByResource.empty(),
+      180.0f, [&]() {
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableHeadersRow();
+        for (uint32_t i = 0; i < snapshot->transientTextureAllocationByResource.size();
+             ++i) {
+          const uint32_t physical =
+              snapshot->transientTextureAllocationByResource[i];
+          if (physical == UINT32_MAX) {
+            continue;
+          }
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("tex");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", physical);
+        }
+        for (uint32_t i = 0; i < snapshot->transientBufferAllocationByResource.size();
+             ++i) {
+          const uint32_t physical =
+              snapshot->transientBufferAllocationByResource[i];
+          if (physical == UINT32_MAX) {
+            continue;
+          }
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("buf");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", physical);
+        }
+      });
+
+  drawTelemetryTableSection(
+      "Physical Allocations", "RenderGraphTelemetryPhysicalAllocations", 5,
+      !snapshot->transientTexturePhysicalAllocations.empty() ||
+          !snapshot->transientBufferPhysicalAllocations.empty(),
+      200.0f, [&]() {
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Representative", ImGuiTableColumnFlags_WidthFixed,
+                                110.0f);
+        ImGui::TableSetupColumn("Format/Usage", ImGuiTableColumnFlags_WidthFixed,
+                                110.0f);
+        ImGui::TableSetupColumn("Details", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const auto &physical : snapshot->transientTexturePhysicalAllocations) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("tex");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", physical.allocationIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", physical.representativeResourceIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", static_cast<uint32_t>(physical.desc.format));
+          ImGui::TableNextColumn();
+          ImGui::Text("%ux%ux%u layers=%u samples=%u mips=%u",
+                      physical.desc.dimensions.width,
+                      physical.desc.dimensions.height,
+                      physical.desc.dimensions.depth, physical.desc.numLayers,
+                      physical.desc.numSamples, physical.desc.numMipLevels);
+        }
+        for (const auto &physical : snapshot->transientBufferPhysicalAllocations) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("buf");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", physical.allocationIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", physical.representativeResourceIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", static_cast<uint32_t>(physical.desc.usage));
+          ImGui::TableNextColumn();
+          ImGui::Text("storage=%u size=%zu",
+                      static_cast<uint32_t>(physical.desc.storage),
+                      physical.desc.size);
+        }
+      });
+
+  drawTelemetryTableSection(
+      "Bindings", "RenderGraphTelemetryBindings", 5,
+      !snapshot->unresolvedTextureBindings.empty() ||
+          !snapshot->resolvedDependencyBuffers.empty() ||
+          !snapshot->unresolvedDependencyBufferBindings.empty() ||
+          !snapshot->unresolvedPreDispatchDependencyBufferBindings.empty() ||
+          !snapshot->unresolvedDrawBufferBindings.empty(),
+      220.0f, [&]() {
+        ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const auto &binding : snapshot->unresolvedTextureBindings) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("pass_tex");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", binding.orderedPassIndex);
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("-");
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(passTextureBindingTargetName(binding.target));
+          ImGui::TableNextColumn();
+          ImGui::Text("tex[%u]", binding.textureResourceIndex);
+        }
+        for (uint32_t slot = 0; slot < snapshot->resolvedDependencyBuffers.size();
+             ++slot) {
+          const BufferHandle handle = snapshot->resolvedDependencyBuffers[slot];
+          if (!nuri::isValid(handle)) {
+            continue;
+          }
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("dep_slot");
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("-");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", slot);
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("resolved");
+          ImGui::TableNextColumn();
+          ImGui::Text("handle=(%u,%u)", handle.index, handle.generation);
+        }
+        for (const auto &binding : snapshot->unresolvedDependencyBufferBindings) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("dep_buf");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", binding.orderedPassIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", binding.dependencyBufferIndex);
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("dependency");
+          ImGui::TableNextColumn();
+          ImGui::Text("buf[%u]", binding.bufferResourceIndex);
+        }
+        for (const auto &binding :
+             snapshot->unresolvedPreDispatchDependencyBufferBindings) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("pre_dep");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", binding.orderedPassIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u/%u", binding.preDispatchIndex,
+                      binding.dependencyBufferIndex);
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("pre_dispatch");
+          ImGui::TableNextColumn();
+          ImGui::Text("buf[%u]", binding.bufferResourceIndex);
+        }
+        for (const auto &binding : snapshot->unresolvedDrawBufferBindings) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("draw_buf");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", binding.orderedPassIndex);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", binding.drawIndex);
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(drawBufferBindingTargetName(binding.target));
+          ImGui::TableNextColumn();
+          ImGui::Text("buf[%u]", binding.bufferResourceIndex);
+        }
+      });
+
+  drawTelemetryTableSection(
+      "Ranges", "RenderGraphTelemetryRanges", 4,
+      !snapshot->dependencyBufferRangesByPass.empty() ||
+          !snapshot->preDispatchRangesByPass.empty() ||
+          !snapshot->preDispatchDependencyRanges.empty() ||
+          !snapshot->drawRangesByPass.empty(),
+      220.0f, [&]() {
+        ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Offset", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableHeadersRow();
+        for (uint32_t i = 0; i < snapshot->dependencyBufferRangesByPass.size(); ++i) {
+          const auto &range = snapshot->dependencyBufferRangesByPass[i];
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("dep_pass");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", range.offset);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", range.count);
+        }
+        for (uint32_t i = 0; i < snapshot->preDispatchRangesByPass.size(); ++i) {
+          const auto &range = snapshot->preDispatchRangesByPass[i];
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("pre_pass");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", range.offset);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", range.count);
+        }
+        for (uint32_t i = 0; i < snapshot->preDispatchDependencyRanges.size(); ++i) {
+          const auto &range = snapshot->preDispatchDependencyRanges[i];
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("pre_dep");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", range.offset);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", range.count);
+        }
+        for (uint32_t i = 0; i < snapshot->drawRangesByPass.size(); ++i) {
+          const auto &range = snapshot->drawRangesByPass[i];
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted("draw_pass");
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", i);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", range.offset);
+          ImGui::TableNextColumn();
+          ImGui::Text("%u", range.count);
+        }
+      });
+}
+
 void setDockspaceWindowPlacement(const ImGuiViewport *viewport) {
   if (!viewport) {
     return;
@@ -1147,6 +1709,7 @@ struct DockLayoutState {
     ImGui::DockBuilderDockWindow(kScenePresetWindowName, dockBottomLeft);
     ImGui::DockBuilderDockWindow(kSelectionWindowName, dockBottomLeft);
     ImGui::DockBuilderDockWindow(kLogWindowName, logDockId);
+    ImGui::DockBuilderDockWindow(kRenderGraphTelemetryWindowName, logDockId);
     ImGui::DockBuilderDockWindow(kFontCompilerWindowName, logDockId);
     ImGui::DockBuilderDockWindow(kBakeryWindowName, logDockId);
     ImGui::DockBuilderFinish(dockspaceId);
@@ -1166,7 +1729,8 @@ struct MaybeDockLayoutState {};
 struct ImGuiEditor::Impl {
   Impl(Window &windowIn, GPUDevice &gpuIn, const EditorServices &services)
       : window(windowIn), gpu(gpuIn), textSystem(services.textSystem),
-        bakery(services.bakery) {}
+        bakery(services.bakery),
+        renderGraphTelemetry(services.renderGraphTelemetry) {}
 
   void updateMetricGraphs(double deltaSeconds) {
     graphSampleAccumulatorSeconds += deltaSeconds;
@@ -1193,7 +1757,7 @@ struct ImGuiEditor::Impl {
     drawDockspaceRoot();
   }
 
-  Result<RenderPass, std::string> endFrame() {
+  Result<RenderGraphGraphicsPassDesc, std::string> endFrame() {
     NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
 
     if (showMetricsWindow) {
@@ -1234,6 +1798,16 @@ struct ImGuiEditor::Impl {
     drawLogWindow(logModel, logFilterState, renderSettings, selectedLayer,
                   scopedScratch.resource());
     ImGui::End();
+#ifdef IMGUI_HAS_DOCK
+    if (dockLayoutState.logDockId != 0) {
+      ImGui::SetNextWindowDockID(dockLayoutState.logDockId, ImGuiCond_Once);
+    }
+#endif
+    if (ImGui::Begin(kRenderGraphTelemetryWindowName)) {
+      drawRenderGraphTelemetryWindow(telemetryState, renderGraphTelemetry,
+                                     window.nativeHandle());
+    }
+    ImGui::End();
     drawFontCompilerWindow(fontCompilerState, textSystem,
                            window.nativeHandle());
     drawBakeryWindow(bakeryState, bakery, scopedScratch.resource(),
@@ -1252,11 +1826,13 @@ struct ImGuiEditor::Impl {
     NURI_PROFILER_ZONE_END();
 
     const auto passResult = [&]() {
-      Result<RenderPass, std::string> result =
-          Result<RenderPass, std::string>::makeError(std::string{});
-      NURI_PROFILER_ZONE("ImGuiEditor::BuildRenderPass",
+      Result<RenderGraphGraphicsPassDesc, std::string> result =
+          Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
+              std::string{});
+      NURI_PROFILER_ZONE("ImGuiEditor::BuildGraphicsPassDesc",
                          NURI_PROFILER_COLOR_CMD_DRAW);
-      result = renderer->buildRenderPass(gpu.getSwapchainFormat(), frameIndex);
+      result =
+          renderer->buildGraphicsPassDesc(gpu.getSwapchainFormat(), frameIndex);
       NURI_PROFILER_ZONE_END();
       return result;
     }();
@@ -1304,12 +1880,14 @@ struct ImGuiEditor::Impl {
   uint64_t frameIndex = 0;
   LogModel logModel;
   LogFilterState logFilterState;
+  RenderGraphTelemetryUiState telemetryState;
   FontCompilerUiState fontCompilerState;
   BakeryUiState bakeryState;
   MaybeDockLayoutState dockLayoutState;
   ScratchArena scratchArena;
   TextSystem *textSystem = nullptr;
   bakery::BakerySystem *bakery = nullptr;
+  RenderGraphTelemetryService *renderGraphTelemetry = nullptr;
 };
 
 std::unique_ptr<ImGuiEditor>
@@ -1411,7 +1989,7 @@ bool ImGuiEditor::wantsCaptureMouse() const {
 
 void ImGuiEditor::beginFrame() { impl_->beginFrame(); }
 
-Result<RenderPass, std::string> ImGuiEditor::endFrame() {
+Result<RenderGraphGraphicsPassDesc, std::string> ImGuiEditor::endFrame() {
   return impl_->endFrame();
 }
 

@@ -110,6 +110,12 @@ HWND resolveDialogOwnerWindow(const OpenFileRequest &request) {
   return nullptr;
 }
 
+HWND resolveDialogOwnerWindow(const SaveFileRequest &request) {
+  OpenFileRequest openRequest{};
+  openRequest.ownerWindowHandle = request.ownerWindowHandle;
+  return resolveDialogOwnerWindow(openRequest);
+}
+
 } // namespace
 
 std::optional<std::filesystem::path>
@@ -139,6 +145,49 @@ FileDialogWidget::openFile(const OpenFileRequest &request) const {
     }
 
     NURI_LOG_WARNING("FileDialogWidget::openFile: GetOpenFileNameW failed "
+                     "(CommDlgExtendedError=%lu)",
+                     static_cast<unsigned long>(dialogError));
+    return std::nullopt;
+  }
+  return std::filesystem::path(selectedPath.data());
+}
+
+std::optional<std::filesystem::path>
+FileDialogWidget::saveFile(const SaveFileRequest &request) const {
+  std::array<wchar_t, 4096> selectedPath = {};
+  const std::wstring initialPath = utf8ToWide(request.initialPath);
+  if (!initialPath.empty()) {
+    const size_t copyCount =
+        std::min(selectedPath.size() - 1u, initialPath.size());
+    std::memcpy(selectedPath.data(), initialPath.data(),
+                copyCount * sizeof(wchar_t));
+    selectedPath[copyCount] = L'\0';
+  }
+
+  std::wstring windowsTitle = utf8ToWide(request.title);
+  std::wstring windowsDefaultExtension = utf8ToWide(request.defaultExtension);
+  std::wstring windowsFilters = buildWindowsFilterBuffer(request.filters);
+
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = resolveDialogOwnerWindow(request);
+  ofn.lpstrFile = selectedPath.data();
+  ofn.nMaxFile = static_cast<DWORD>(selectedPath.size());
+  ofn.lpstrFilter = windowsFilters.c_str();
+  ofn.nFilterIndex = 1;
+  ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+  ofn.lpstrTitle = windowsTitle.empty() ? nullptr : windowsTitle.c_str();
+  ofn.lpstrDefExt = windowsDefaultExtension.empty()
+                        ? nullptr
+                        : windowsDefaultExtension.c_str();
+
+  if (GetSaveFileNameW(&ofn) == FALSE) {
+    const DWORD dialogError = CommDlgExtendedError();
+    if (dialogError == 0) {
+      return std::nullopt;
+    }
+
+    NURI_LOG_WARNING("FileDialogWidget::saveFile: GetSaveFileNameW failed "
                      "(CommDlgExtendedError=%lu)",
                      static_cast<unsigned long>(dialogError));
     return std::nullopt;

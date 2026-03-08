@@ -23,14 +23,30 @@ struct OpenFileRequest {
   void *ownerWindowHandle = nullptr;
 };
 
+struct SaveFileRequest {
+  std::string_view title;
+  std::span<const FileDialogFilter> filters;
+  std::string_view defaultExtension;
+  std::string_view initialPath;
+  void *ownerWindowHandle = nullptr;
+};
+
 class NURI_API FileDialogWidget {
 public:
 #if defined(_WIN32)
   [[nodiscard]] std::optional<std::filesystem::path>
   openFile(const OpenFileRequest &request) const;
+  [[nodiscard]] std::optional<std::filesystem::path>
+  saveFile(const SaveFileRequest &request) const;
 #else
   [[nodiscard]] std::optional<std::filesystem::path>
   openFile(const OpenFileRequest &request) const {
+    (void)request;
+    return std::nullopt;
+  }
+
+  [[nodiscard]] std::optional<std::filesystem::path>
+  saveFile(const SaveFileRequest &request) const {
     (void)request;
     return std::nullopt;
   }

@@ -2,6 +2,7 @@
 
 #include "nuri/ui/imgui_gizmo_controller.h"
 
+#include "nuri/gfx/gpu_device.h"
 #include "nuri/scene/camera_system.h"
 #include "nuri/scene/render_scene.h"
 
