@@ -38,8 +38,8 @@ public:
   }
 
   void onDetach() override;
-  Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
-                                              RenderPassList &out) override;
+  Result<bool, std::string>
+  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
 
 private:
   struct GridPushConstants {
@@ -52,10 +52,11 @@ private:
   [[nodiscard]] Result<bool, std::string> createGridShaders();
   [[nodiscard]] Result<bool, std::string> ensureGridPipeline(
       Format colorFormat, Format depthFormat);
-  [[nodiscard]] Result<RenderPass, std::string>
-  buildGridPass(const RenderFrameContext &frame, bool hasPriorColorPass);
   [[nodiscard]] Result<bool, std::string>
-  appendModelBoundsPass(const RenderFrameContext &frame, RenderPassList &out);
+  appendModelBoundsGraphPass(const RenderFrameContext &frame,
+                             RenderGraphBuilder &graph,
+                             TextureHandle sceneDepthTexture,
+                             RenderGraphTextureId sceneDepthGraphTexture);
   void resetGridState();
 
   GPUDevice &gpu_;

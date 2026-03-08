@@ -18,6 +18,10 @@ constexpr std::string_view kGridPipelineName = "debug_grid";
 constexpr std::string_view kGridPassLabel = "DebugGrid Pass";
 constexpr std::string_view kGridDrawLabel = "DebugGrid Draw";
 
+[[nodiscard]] bool isSameTextureHandle(TextureHandle a, TextureHandle b) {
+  return a.index == b.index && a.generation == b.generation;
+}
+
 } // namespace
 
 DebugLayer::DebugLayer(GPUDevice &gpu, DebugLayerConfig config,
@@ -127,61 +131,6 @@ Result<bool, std::string> DebugLayer::ensureGridPipeline(Format colorFormat,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<RenderPass, std::string>
-DebugLayer::buildGridPass(const RenderFrameContext &frame,
-                          bool hasPriorColorPass) {
-  const TextureHandle depthTexture = frame.sharedDepthTexture;
-  const bool hasDepth = nuri::isValid(depthTexture);
-  const Format depthFormat =
-      hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
-
-  auto pipelineResult =
-      ensureGridPipeline(gpu_.getSwapchainFormat(), depthFormat);
-  if (pipelineResult.hasError()) {
-    return Result<RenderPass, std::string>::makeError(pipelineResult.error());
-  }
-
-  gridPushConstants_ = GridPushConstants{
-      .mvp = frame.camera.proj * frame.camera.view,
-      .cameraPos = frame.camera.cameraPos,
-      .origin = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f),
-  };
-
-  gridDrawItem_ = DrawItem{};
-  gridDrawItem_.pipeline = gridPipelineHandle_;
-  gridDrawItem_.vertexCount = kGridVertexCount;
-  gridDrawItem_.instanceCount = 1;
-  gridDrawItem_.pushConstants = std::span<const std::byte>(
-      reinterpret_cast<const std::byte *>(&gridPushConstants_),
-      sizeof(gridPushConstants_));
-  gridDrawItem_.debugLabel = kGridDrawLabel;
-  gridDrawItem_.debugColor = kGridDrawDebugColor;
-  if (hasDepth) {
-    gridDrawItem_.useDepthState = true;
-    gridDrawItem_.depthState = {
-        .compareOp = CompareOp::LessEqual,
-        .isDepthWriteEnabled = false,
-    };
-  }
-
-  RenderPass pass{};
-  pass.color = {.loadOp = hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
-                .storeOp = StoreOp::Store,
-                .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
-  pass.debugLabel = kGridPassLabel;
-  pass.debugColor = kGridPassDebugColor;
-  if (hasDepth) {
-    pass.depthTexture = depthTexture;
-    pass.depth = {.loadOp = LoadOp::Load,
-                  .storeOp = StoreOp::Store,
-                  .clearDepth = 1.0f,
-                  .clearStencil = 0};
-  }
-  pass.draws = std::span<const DrawItem>(&gridDrawItem_, 1);
-
-  return Result<RenderPass, std::string>::makeResult(pass);
-}
-
 void DebugLayer::resetGridState() {
   gridPipeline_.reset();
   gridShader_.reset();
@@ -197,10 +146,12 @@ void DebugLayer::resetGridState() {
 }
 
 Result<bool, std::string>
-DebugLayer::appendModelBoundsPass(const RenderFrameContext &frame,
-                                  RenderPassList &out) {
-  if (!debugDraw3D_ || !frame.scene ||
-      !nuri::isValid(frame.sharedDepthTexture) || !frame.resources) {
+DebugLayer::appendModelBoundsGraphPass(
+    const RenderFrameContext &frame, RenderGraphBuilder &graph,
+    TextureHandle sceneDepthTexture, RenderGraphTextureId sceneDepthGraphTexture) {
+  const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
+  if (!debugDraw3D_ || !frame.scene || !nuri::isValid(depthTexture) ||
+      !frame.resources) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -221,38 +172,138 @@ DebugLayer::appendModelBoundsPass(const RenderFrameContext &frame,
                       glm::vec4(1.0f, 1.0f, 0.0f, 1.0f));
   }
 
-  auto linePassResult = debugDraw3D_->buildRenderPass(frame.sharedDepthTexture);
+  auto linePassResult = debugDraw3D_->buildGraphPass(depthTexture);
   if (linePassResult.hasError()) {
     return Result<bool, std::string>::makeError(linePassResult.error());
   }
 
-  out.push_back(linePassResult.value());
+  DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
+  if (nuri::isValid(pass.colorTextureHandle)) {
+    auto colorImportResult =
+        graph.importTexture(pass.colorTextureHandle, "debug_pass_color_texture");
+    if (colorImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(colorImportResult.error());
+    }
+    pass.desc.colorTexture = colorImportResult.value();
+  }
+  if (nuri::isValid(pass.depthTextureHandle)) {
+    const bool useDepthOverride =
+        nuri::isValid(sceneDepthTexture) && nuri::isValid(sceneDepthGraphTexture) &&
+        isSameTextureHandle(pass.depthTextureHandle, sceneDepthTexture);
+    if (useDepthOverride) {
+      pass.desc.depthTexture = sceneDepthGraphTexture;
+    } else {
+      auto depthImportResult =
+          graph.importTexture(pass.depthTextureHandle, "debug_pass_depth_texture");
+      if (depthImportResult.hasError()) {
+        return Result<bool, std::string>::makeError(depthImportResult.error());
+      }
+      pass.desc.depthTexture = depthImportResult.value();
+    }
+  }
+
+  auto addResult = graph.addGraphicsPass(pass.desc);
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
-DebugLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
+DebugLayer::buildRenderGraph(RenderFrameContext &frame,
+                             RenderGraphBuilder &graph) {
   NURI_PROFILER_FUNCTION();
 
   if (!frame.settings || !frame.settings->debug.enabled) {
     return Result<bool, std::string>::makeResult(true);
   }
 
+  const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
+  RenderGraphTextureId sceneDepthGraphTexture{};
+  if (const RenderGraphTextureId *publishedSceneDepth =
+          frame.channels.tryGet<RenderGraphTextureId>(
+              kFrameChannelSceneDepthGraphTexture);
+      publishedSceneDepth != nullptr) {
+    sceneDepthGraphTexture = *publishedSceneDepth;
+  }
+
   if (frame.settings->debug.grid) {
-    const bool hasPriorColorPass = !out.empty();
-    auto gridPassResult = buildGridPass(frame, hasPriorColorPass);
-    if (gridPassResult.hasError()) {
-      return Result<bool, std::string>::makeError(gridPassResult.error());
+    const bool hasPriorColorPass = graph.passCount() > 0;
+    const bool hasDepth = nuri::isValid(sceneDepthTexture);
+    const Format depthFormat =
+        hasDepth ? gpu_.getTextureFormat(sceneDepthTexture) : Format::Count;
+    auto pipelineResult =
+        ensureGridPipeline(gpu_.getSwapchainFormat(), depthFormat);
+    if (pipelineResult.hasError()) {
+      return Result<bool, std::string>::makeError(pipelineResult.error());
     }
-    out.push_back(gridPassResult.value());
+
+    gridPushConstants_ = GridPushConstants{
+        .mvp = frame.camera.proj * frame.camera.view,
+        .cameraPos = frame.camera.cameraPos,
+        .origin = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f),
+    };
+
+    gridDrawItem_ = DrawItem{};
+    gridDrawItem_.pipeline = gridPipelineHandle_;
+    gridDrawItem_.vertexCount = kGridVertexCount;
+    gridDrawItem_.instanceCount = 1;
+    gridDrawItem_.pushConstants = std::span<const std::byte>(
+        reinterpret_cast<const std::byte *>(&gridPushConstants_),
+        sizeof(gridPushConstants_));
+    gridDrawItem_.debugLabel = kGridDrawLabel;
+    gridDrawItem_.debugColor = kGridDrawDebugColor;
+    if (hasDepth) {
+      gridDrawItem_.useDepthState = true;
+      gridDrawItem_.depthState = {
+          .compareOp = CompareOp::LessEqual,
+          .isDepthWriteEnabled = false,
+      };
+    }
+
+    RenderGraphTextureId depthTextureId{};
+    if (hasDepth) {
+      if (nuri::isValid(sceneDepthGraphTexture)) {
+        depthTextureId = sceneDepthGraphTexture;
+      } else {
+        auto importResult = graph.importTexture(sceneDepthTexture, "debug_depth_texture");
+        if (importResult.hasError()) {
+          return Result<bool, std::string>::makeError(importResult.error());
+        }
+        depthTextureId = importResult.value();
+      }
+    }
+
+    RenderGraphGraphicsPassDesc gridPass{};
+    gridPass.color = {.loadOp = hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
+                      .storeOp = StoreOp::Store,
+                      .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+    if (hasDepth) {
+      gridPass.depth = {.loadOp = LoadOp::Load,
+                        .storeOp = StoreOp::Store,
+                        .clearDepth = 1.0f,
+                        .clearStencil = 0};
+      gridPass.depthTexture = depthTextureId;
+    }
+    gridPass.draws = std::span<const DrawItem>(&gridDrawItem_, 1u);
+    gridPass.debugLabel = kGridPassLabel;
+    gridPass.debugColor = kGridPassDebugColor;
+
+    auto addResult = graph.addGraphicsPass(gridPass);
+    if (addResult.hasError()) {
+      return Result<bool, std::string>::makeError(addResult.error());
+    }
   }
 
   if (frame.settings->debug.modelBounds) {
-    auto boundsPassResult = appendModelBoundsPass(frame, out);
+    auto boundsPassResult = appendModelBoundsGraphPass(
+        frame, graph, sceneDepthTexture, sceneDepthGraphTexture);
     if (boundsPassResult.hasError()) {
       return boundsPassResult;
     }
   }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
