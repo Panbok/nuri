@@ -9,7 +9,9 @@
 #include "nuri/gfx/renderer.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <memory_resource>
 #include <span>
@@ -18,6 +20,14 @@ namespace {
 
 using namespace nuri;
 using namespace nuri::test_support;
+
+std::filesystem::path makeTempRendererPath(std::string_view stem) {
+  const auto tick = std::chrono::high_resolution_clock::now()
+                        .time_since_epoch()
+                        .count();
+  return std::filesystem::temp_directory_path() /
+         ("nuri_" + std::string(stem) + "_" + std::to_string(tick));
+}
 
 class ExplicitFrameOutputLayer final : public Layer {
 public:
@@ -105,6 +115,43 @@ TEST(RenderGraphRendererTest,
               hasPassLabel(gpu, "Layer Explicit Output Pass"))
       << "submitted frame should contain both base implicit and layer output "
          "passes";
+}
+
+TEST(RenderGraphRendererTest, RendererCapturesTelemetryWithoutAutomaticDump) {
+  const std::filesystem::path dumpDirectory =
+      makeTempRendererPath("renderer_telemetry_dir");
+  EnvVarGuard envGuard("NURI_RENDER_GRAPH_DUMP", dumpDirectory.generic_string());
+
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeRendererGPUDevice gpu;
+  Renderer renderer(gpu, memory);
+
+  LayerStack layers(&memory);
+  auto *baseLayer =
+      layers.pushLayer(std::make_unique<BaseImplicitOutputLayer>());
+  ASSERT_NE(baseLayer, nullptr);
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 7u;
+
+  auto renderResult = renderer.render(layers, frameContext);
+  ASSERT_FALSE(renderResult.hasError());
+  ASSERT_TRUE(renderResult.value());
+
+  const RenderGraphTelemetrySnapshot *snapshot =
+      renderer.renderGraphTelemetry().latestSnapshot();
+  ASSERT_NE(snapshot, nullptr);
+  EXPECT_EQ(snapshot->summary.frameIndex, 7u);
+  EXPECT_EQ(snapshot->summary.passCount, 1u);
+
+  const std::filesystem::path suggested =
+      renderer.renderGraphTelemetry().suggestDumpPath();
+  EXPECT_EQ(suggested.parent_path(), dumpDirectory);
+  EXPECT_EQ(suggested.filename(), "render_graph_frame_7.txt");
+  EXPECT_FALSE(std::filesystem::exists(dumpDirectory))
+      << "renderer should not create or write the dump directory per frame";
 }
 
 } // namespace

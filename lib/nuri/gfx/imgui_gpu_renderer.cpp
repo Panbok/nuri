@@ -308,32 +308,35 @@ Result<bool, std::string> ImGuiGpuRenderer::ensureBuffers(uint64_t frameIndex,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<RenderPass, std::string>
-ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
+Result<RenderGraphGraphicsPassDesc, std::string>
+ImGuiGpuRenderer::buildGraphicsPassDesc(Format swapchainFormat,
+                                        uint64_t frameIndex) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   ImDrawData *dd = ImGui::GetDrawData();
   if (!dd) {
-    return Result<RenderPass, std::string>::makeError(
+    return Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
         "ImGui draw data is null");
   }
 
   const float fbWidth = dd->DisplaySize.x * dd->FramebufferScale.x;
   const float fbHeight = dd->DisplaySize.y * dd->FramebufferScale.y;
   if (fbWidth <= 0.0f || fbHeight <= 0.0f || dd->CmdListsCount == 0) {
-    RenderPass empty{};
+    RenderGraphGraphicsPassDesc empty{};
     empty.color.loadOp = LoadOp::Load;
-    return Result<RenderPass, std::string>::makeResult(empty);
+    return Result<RenderGraphGraphicsPassDesc, std::string>::makeResult(empty);
   }
 
   NURI_PROFILER_ZONE("ImGuiGpuRenderer::EnsurePipelineAndFont",
                      NURI_PROFILER_COLOR_CREATE);
   auto pipelineOk = ensurePipeline(swapchainFormat);
   if (pipelineOk.hasError()) {
-    return Result<RenderPass, std::string>::makeError(pipelineOk.error());
+    return Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
+        pipelineOk.error());
   }
   auto fontOk = ensureFontTexture();
   if (fontOk.hasError()) {
-    return Result<RenderPass, std::string>::makeError(fontOk.error());
+    return Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
+        fontOk.error());
   }
   NURI_PROFILER_ZONE_END();
 
@@ -352,7 +355,8 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
                      NURI_PROFILER_COLOR_CREATE);
   auto bufOk = ensureBuffers(frameSlot, vtxBytes, idxBytes);
   if (bufOk.hasError()) {
-    return Result<RenderPass, std::string>::makeError(bufOk.error());
+    return Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
+        bufOk.error());
   }
   NURI_PROFILER_ZONE_END();
 
@@ -400,12 +404,14 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
       auto upVb =
           gpu_.updateBuffer(fb.vb, std::span<const std::byte>(vtxData), 0);
       if (upVb.hasError()) {
-        return Result<RenderPass, std::string>::makeError(upVb.error());
+        return Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
+            upVb.error());
       }
       auto upIb =
           gpu_.updateBuffer(fb.ib, std::span<const std::byte>(idxData), 0);
       if (upIb.hasError()) {
-        return Result<RenderPass, std::string>::makeError(upIb.error());
+        return Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
+            upIb.error());
       }
     }
   }
@@ -503,7 +509,7 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
   }
   NURI_PROFILER_ZONE_END();
 
-  RenderPass pass{};
+  RenderGraphGraphicsPassDesc pass{};
   NURI_PROFILER_ZONE("ImGuiGpuRenderer::BuildRenderPassStruct",
                      NURI_PROFILER_COLOR_CMD_DRAW);
   pass.color.loadOp = LoadOp::Load;
@@ -521,7 +527,7 @@ ImGuiGpuRenderer::buildRenderPass(Format swapchainFormat, uint64_t frameIndex) {
   pass.debugLabel = "ImGui Pass";
   pass.debugColor = 0xff00ff00u;
   NURI_PROFILER_ZONE_END();
-  return Result<RenderPass, std::string>::makeResult(pass);
+  return Result<RenderGraphGraphicsPassDesc, std::string>::makeResult(pass);
 }
 
 } // namespace nuri

@@ -6,26 +6,12 @@
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/render_graph/render_graph_debug_dump.h"
+#include "nuri/gfx/render_graph/render_graph_telemetry.h"
 #include "nuri/utils/env_utils.h"
 
 namespace nuri {
 
 namespace {
-
-[[nodiscard]] std::filesystem::path resolveRenderGraphDumpDirectory() {
-  const std::optional<std::string> dumpEnv =
-      readEnvVar("NURI_RENDER_GRAPH_DUMP");
-  if (!dumpEnv.has_value() || dumpEnv->empty() || dumpEnv->front() == '0') {
-    return {};
-  }
-
-  const std::string &value = *dumpEnv;
-  if (value == "1" || value == "true" || value == "TRUE") {
-    return std::filesystem::path("logs/render_graph");
-  }
-  return std::filesystem::path(value);
-}
 
 [[nodiscard]] bool resolveSuppressInferredSideEffectsFlag() {
   const std::optional<std::string> env =
@@ -42,8 +28,7 @@ namespace {
 
 Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
     : gpu_(gpu), resources_(gpu, &memory), renderGraphBuilder_(&memory),
-      renderGraphExecutor_(&memory),
-      renderGraphDumpDirectory_(resolveRenderGraphDumpDirectory()),
+      renderGraphExecutor_(&memory), renderGraphTelemetry_(&memory),
       suppressInferredSideEffects_(resolveSuppressInferredSideEffectsFlag()) {
   renderGraphBuilder_.setInferredSideEffectSuppression(
       suppressInferredSideEffects_);
@@ -55,17 +40,6 @@ Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
   NURI_LOG_DEBUG("Renderer::Renderer: Renderer created");
 }
 
-std::filesystem::path Renderer::makeRenderGraphDumpPath(
-    uint64_t frameIndex) const {
-  if (renderGraphDumpDirectory_.empty()) {
-    return {};
-  }
-
-  std::ostringstream fileName;
-  fileName << "render_graph_frame_" << frameIndex << ".txt";
-  return renderGraphDumpDirectory_ / fileName.str();
-}
-
 Result<bool, std::string> Renderer::render() {
   NURI_PROFILER_FUNCTION();
   const uint64_t frameIndex = standaloneFrameIndex_++;
@@ -75,7 +49,7 @@ Result<bool, std::string> Renderer::render() {
     return frameResult;
   }
   renderGraphBuilder_.beginFrame(frameIndex);
-  auto submitResult = compileAndExecuteRenderGraph(frameIndex);
+  auto submitResult = compileAndExecuteRenderGraph();
   resources_.collectGarbage(frameIndex);
   return submitResult;
 }
@@ -99,30 +73,18 @@ Result<bool, std::string> Renderer::render(LayerStack &layers,
     }
   }
 
-  auto submitResult = compileAndExecuteRenderGraph(frameContext.frameIndex);
+  auto submitResult = compileAndExecuteRenderGraph();
   resources_.collectGarbage(frameContext.frameIndex);
   return submitResult;
 }
 
-Result<bool, std::string>
-Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
+Result<bool, std::string> Renderer::compileAndExecuteRenderGraph() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
   auto compileResult = renderGraphBuilder_.compile();
   if (compileResult.hasError()) {
     return Result<bool, std::string>::makeError(compileResult.error());
   }
-
-  const std::filesystem::path dumpPath = makeRenderGraphDumpPath(frameIndex);
-  if (!dumpPath.empty()) {
-    auto dumpResult =
-        writeRenderGraphTextDump(compileResult.value(), dumpPath.string());
-    if (dumpResult.hasError()) {
-      NURI_LOG_WARNING(
-          "Renderer::compileAndExecuteRenderGraph: failed to write graph dump "
-          "'%s': %s",
-          dumpPath.string().c_str(), dumpResult.error().c_str());
-    }
-  }
+  renderGraphTelemetry_.capture(compileResult.value());
 
   auto executeResult =
       renderGraphExecutor_.execute(gpu_, compileResult.value());

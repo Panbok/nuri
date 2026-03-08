@@ -122,3 +122,9 @@ nuri_add_gtest_suite(
   src/render_graph_renderer_tests.cpp
   "renderer::"
 )
+
+nuri_add_gtest_suite(
+  nuri_render_graph_telemetry_tests
+  src/render_graph_telemetry_tests.cpp
+  "telemetry::"
+)

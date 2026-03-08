@@ -6,11 +6,11 @@
 
 #include "nuri/core/layer_stack.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/render_graph/render_graph_telemetry.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <memory_resource>
 #include <string>
@@ -41,19 +41,22 @@ public:
   [[nodiscard]] const ResourceManager &resources() const noexcept {
     return resources_;
   }
+  [[nodiscard]] RenderGraphTelemetryService &renderGraphTelemetry() noexcept {
+    return renderGraphTelemetry_;
+  }
+  [[nodiscard]] const RenderGraphTelemetryService &
+  renderGraphTelemetry() const noexcept {
+    return renderGraphTelemetry_;
+  }
 
 private:
-  [[nodiscard]] std::filesystem::path
-  makeRenderGraphDumpPath(uint64_t frameIndex) const;
-
-  [[nodiscard]] Result<bool, std::string>
-  compileAndExecuteRenderGraph(uint64_t frameIndex);
+  [[nodiscard]] Result<bool, std::string> compileAndExecuteRenderGraph();
 
   GPUDevice &gpu_;
   ResourceManager resources_;
   RenderGraphBuilder renderGraphBuilder_;
   RenderGraphExecutor renderGraphExecutor_;
-  std::filesystem::path renderGraphDumpDirectory_;
+  RenderGraphTelemetryService renderGraphTelemetry_;
   bool suppressInferredSideEffects_ = false;
   uint64_t standaloneFrameIndex_ = 0;
 };

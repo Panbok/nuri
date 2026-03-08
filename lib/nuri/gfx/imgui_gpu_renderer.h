@@ -4,8 +4,8 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,8 +25,8 @@ public:
   ImGuiGpuRenderer(ImGuiGpuRenderer &&) = delete;
   ImGuiGpuRenderer &operator=(ImGuiGpuRenderer &&) = delete;
 
-  Result<RenderPass, std::string> buildRenderPass(Format swapchainFormat,
-                                                  uint64_t frameIndex);
+  Result<RenderGraphGraphicsPassDesc, std::string>
+  buildGraphicsPassDesc(Format swapchainFormat, uint64_t frameIndex);
 
 private:
   explicit ImGuiGpuRenderer(GPUDevice &gpu);
