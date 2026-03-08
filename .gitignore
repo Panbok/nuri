@@ -5,4 +5,5 @@
 .cursor/
 .vscode/
 /assets/models/
+/assets/textures/
 /logs/*.log

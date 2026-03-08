@@ -11,20 +11,25 @@
       "name": "tracy",
       "default-features": false
     },
-    {
-      "name": "imgui",
-      "features": [
-        "docking-experimental",
-        "glfw-binding"
-      ]
-    },
-    "implot",
     "meshoptimizer",
     "yyjson",
     "unordered-dense",
     "ktx"
   ],
   "features": {
+    "editor": {
+      "description": "Build the nuri editor target",
+      "dependencies": [
+        {
+          "name": "imgui",
+          "features": [
+            "docking-experimental",
+            "glfw-binding"
+          ]
+        },
+        "implot"
+      ]
+    },
     "tests": {
       "description": "Build the nuri test targets",
       "dependencies": [

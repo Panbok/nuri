@@ -15,8 +15,19 @@ if %errorlevel% neq 0 (
 set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 set "BUILD_TESTS=%NURI_BUILD_TESTS%"
 if "%BUILD_TESTS%"=="" set "BUILD_TESTS=OFF"
+set "BUILD_EDITOR=%NURI_BUILD_EDITOR%"
+if "%BUILD_EDITOR%"=="" set "BUILD_EDITOR=ON"
+set "MANIFEST_FEATURES=%VCPKG_MANIFEST_FEATURES%"
+if /I "%BUILD_EDITOR%"=="ON" (
+  if "%MANIFEST_FEATURES%"=="" (
+    set "MANIFEST_FEATURES=editor"
+  ) else (
+    echo ,%MANIFEST_FEATURES%, | findstr /I /C:",editor," >nul
+    if errorlevel 1 set "MANIFEST_FEATURES=%MANIFEST_FEATURES%,editor"
+  )
+)
 set "MANIFEST_FEATURES_ARG="
-if not "%VCPKG_MANIFEST_FEATURES%"=="" set "MANIFEST_FEATURES_ARG=-DVCPKG_MANIFEST_FEATURES=%VCPKG_MANIFEST_FEATURES%"
+if not "%MANIFEST_FEATURES%"=="" set "MANIFEST_FEATURES_ARG=-DVCPKG_MANIFEST_FEATURES=%MANIFEST_FEATURES%"
 
 call "%~dp0bootstrap_lightweightvk.bat"
 if errorlevel 1 exit /b 1
@@ -31,6 +42,7 @@ cmake -S . -B build -G Ninja ^
   %MANIFEST_FEATURES_ARG% ^
   -DVCPKG_BUILD_TYPE=release ^
   -DNURI_BUILD_TESTS="%BUILD_TESTS%" ^
+  -DNURI_BUILD_EDITOR="%BUILD_EDITOR%" ^
   -DNURI_BUILD_SHARED=ON ^
   -DNURI_WITH_TRACY=ON
 if errorlevel 1 exit /b 1

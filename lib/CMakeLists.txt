@@ -1,30 +1,69 @@
 cmake_minimum_required(VERSION 3.27)
 
-project(nuri_lib)
-
-file(GLOB_RECURSE LIB_SOURCES CONFIGURE_DEPENDS */*.cpp */*.h)
+project(nuri_renderer)
 
 set(NURI_LIBRARY_TYPE STATIC)
 if(NURI_BUILD_SHARED)
   set(NURI_LIBRARY_TYPE SHARED)
 endif()
 
-add_library(nuri_lib ${NURI_LIBRARY_TYPE}
-  ${LIB_SOURCES}
-  ${CMAKE_SOURCE_DIR}/vendor/im-guizmo/ImGuizmo.cpp
+set(NURI_RENDERER_SOURCES
+  nuri/core/application.cpp
+  nuri/core/event_manager.cpp
+  nuri/core/input_system.cpp
+  nuri/core/layer_stack.cpp
+  nuri/core/log.cpp
+  nuri/core/runtime_config.cpp
+  nuri/gfx/debug_draw_3d.cpp
+  nuri/gfx/layers/debug_layer.cpp
+  nuri/gfx/layers/opaque_layer.cpp
+  nuri/gfx/layers/skybox_layer.cpp
+  nuri/gfx/render_graph/render_graph.cpp
+  nuri/gfx/render_graph/render_graph_telemetry.cpp
+  nuri/gfx/renderer.cpp
+  nuri/gfx/shader.cpp
+  nuri/platform/glfw_window.cpp
+  nuri/platform/lvk_gpu_device.cpp
+  nuri/platform/minilog_log.cpp
+  nuri/resources/gpu/geometry_pool.cpp
+  nuri/resources/gpu/material.cpp
+  nuri/resources/gpu/model.cpp
+  nuri/resources/gpu/resource_manager.cpp
+  nuri/resources/gpu/texture.cpp
+  nuri/resources/mesh_importer_assimp.cpp
+  nuri/resources/stb_image.cpp
+  nuri/resources/storage/font/nfont_binary_codec.cpp
+  nuri/resources/storage/mesh/mesh_binary_codec.cpp
+  nuri/resources/storage/mesh/mesh_binary_serializer.cpp
+  nuri/resources/storage/mesh/mesh_cache_utils.cpp
+  nuri/resources/storage/mesh/mesh_cache_writer.cpp
+  nuri/scene/camera.cpp
+  nuri/scene/camera_controller.cpp
+  nuri/scene/camera_system.cpp
+  nuri/scene/render_scene.cpp
+  nuri/text/detail/font_manager.cpp
+  nuri/text/detail/text_layouter.cpp
+  nuri/text/detail/text_layer_2d.cpp
+  nuri/text/detail/text_layer_3d.cpp
+  nuri/text/detail/text_renderer.cpp
+  nuri/text/detail/text_shaper.cpp
+  nuri/text/detail/text_system.cpp
+  nuri/utils/env_utils.cpp
+  nuri/utils/fsp_counter.cpp
+)
+
+add_library(nuri_renderer ${NURI_LIBRARY_TYPE}
+  ${NURI_RENDERER_SOURCES}
 )
 
 if(MSVC)
-    target_compile_options(nuri_lib PRIVATE /arch:AVX2)
+  target_compile_options(nuri_renderer PRIVATE /arch:AVX2)
 else()
-    target_compile_options(nuri_lib PRIVATE -march=native)
+  target_compile_options(nuri_renderer PRIVATE -march=native)
 endif()
 
-# Find Vulkan package
 find_package(Vulkan REQUIRED)
 
-# CMake's FindVulkan on Windows can result in Vulkan::Vulkan missing Debug locations.
-# This project uses Ninja + Debug builds; ensure the imported target is configured.
 if(WIN32 AND TARGET Vulkan::Vulkan)
   set_property(TARGET Vulkan::Vulkan PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
 
@@ -46,19 +85,17 @@ if(WIN32 AND TARGET Vulkan::Vulkan)
   endif()
 endif()
 
-target_include_directories(nuri_lib
+target_include_directories(nuri_renderer
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/vendor/im-guizmo
-    PRIVATE ${Vulkan_INCLUDE_DIRS}
+  PRIVATE
+    ${Vulkan_INCLUDE_DIRS}
 )
 
-target_compile_features(nuri_lib PUBLIC cxx_std_20)
+target_compile_features(nuri_renderer PUBLIC cxx_std_20)
 
 find_package(glm CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
-find_package(imgui CONFIG REQUIRED)
-find_package(implot CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
 find_package(Ktx CONFIG QUIET)
 if(NOT Ktx_FOUND)
@@ -70,8 +107,6 @@ find_package(harfbuzz CONFIG QUIET)
 find_package(HarfBuzz CONFIG QUIET)
 
 if(NURI_WITH_TRACY)
-  # Tracy is provided by vcpkg (manifest mode). Target name varies between ports;
-  # accept a few common ones.
   find_package(Tracy CONFIG QUIET)
   find_package(tracy CONFIG QUIET)
 
@@ -90,8 +125,8 @@ if(NURI_WITH_TRACY)
     message(FATAL_ERROR "NURI_WITH_TRACY=ON but no TracyClient target was found. Tried: Tracy::TracyClient, tracy::tracyclient, unofficial::tracy::tracyclient, TracyClient.")
   endif()
 
-  target_compile_definitions(nuri_lib PUBLIC NURI_PROFILING=1 TRACY_ENABLE=1)
-  target_link_libraries(nuri_lib PUBLIC ${NURI_TRACY_CLIENT_TARGET})
+  target_compile_definitions(nuri_renderer PUBLIC NURI_PROFILING=1 TRACY_ENABLE=1)
+  target_link_libraries(nuri_renderer PUBLIC ${NURI_TRACY_CLIENT_TARGET})
 endif()
 
 set(LVK_DEPLOY_DEPS OFF CACHE BOOL "" FORCE)
@@ -113,29 +148,6 @@ endif()
 
 add_subdirectory("${LVK_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/lightweightvk-build")
 
-set(MSDF_ATLAS_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/msdf-atlas-gen")
-if(NOT EXISTS "${MSDF_ATLAS_SOURCE_DIR}/CMakeLists.txt")
-  message(FATAL_ERROR "msdf-atlas-gen submodule is missing at: ${MSDF_ATLAS_SOURCE_DIR}. Run: git submodule update --init --recursive")
-endif()
-
-set(MSDF_ATLAS_BUILD_STANDALONE OFF CACHE BOOL "" FORCE)
-set(MSDF_ATLAS_USE_VCPKG ON CACHE BOOL "" FORCE)
-set(MSDF_ATLAS_USE_SKIA OFF CACHE BOOL "" FORCE)
-set(MSDF_ATLAS_INSTALL OFF CACHE BOOL "" FORCE)
-set(NURI_MSDF_DYNAMIC_RUNTIME ON)
-if(NURI_USE_STATIC_CRT)
-  set(NURI_MSDF_DYNAMIC_RUNTIME OFF)
-endif()
-set(MSDF_ATLAS_DYNAMIC_RUNTIME ${NURI_MSDF_DYNAMIC_RUNTIME} CACHE BOOL "" FORCE)
-set(MSDF_ATLAS_MSDFGEN_EXTERNAL OFF CACHE BOOL "" FORCE)
-set(MSDFGEN_BUILD_STANDALONE OFF CACHE BOOL "" FORCE)
-set(MSDFGEN_USE_SKIA OFF CACHE BOOL "" FORCE)
-set(MSDFGEN_USE_OPENMP OFF CACHE BOOL "" FORCE)
-set(MSDFGEN_INSTALL OFF CACHE BOOL "" FORCE)
-set(MSDFGEN_DYNAMIC_RUNTIME ${NURI_MSDF_DYNAMIC_RUNTIME} CACHE BOOL "" FORCE)
-
-add_subdirectory("${MSDF_ATLAS_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/msdf-atlas-gen-build")
-
 if(NURI_WITH_TRACY_GPU_DRAW_ZONES)
   if(NURI_WITH_TRACY AND TARGET LVKVulkan)
     target_compile_definitions(LVKVulkan PUBLIC "LVK_WITH_TRACY_GPU_DRAW_ZONES=1")
@@ -144,13 +156,13 @@ if(NURI_WITH_TRACY_GPU_DRAW_ZONES)
   endif()
 endif()
 
-target_link_libraries(nuri_lib
+target_link_libraries(nuri_renderer
   PUBLIC
     glm::glm
+    assimp::assimp
+    LVKLibrary
 )
 
-target_link_libraries(nuri_lib PUBLIC assimp::assimp)
-target_link_libraries(nuri_lib PUBLIC LVKLibrary)
 set(NURI_KTX_TARGET "")
 if(TARGET KTX::ktx)
   set(NURI_KTX_TARGET KTX::ktx)
@@ -160,17 +172,8 @@ endif()
 if(NOT NURI_KTX_TARGET)
   message(FATAL_ERROR "ktx package was found but no target was available. Tried: KTX::ktx, ktx")
 endif()
-target_link_libraries(nuri_lib PRIVATE ${NURI_KTX_TARGET})
-set(NURI_MSDF_ATLAS_TARGET "")
-if(TARGET msdf-atlas-gen::msdf-atlas-gen)
-  set(NURI_MSDF_ATLAS_TARGET msdf-atlas-gen::msdf-atlas-gen)
-elseif(TARGET msdf-atlas-gen)
-  set(NURI_MSDF_ATLAS_TARGET msdf-atlas-gen)
-endif()
-if(NOT NURI_MSDF_ATLAS_TARGET)
-  message(FATAL_ERROR "msdf-atlas-gen target was not found. Tried: msdf-atlas-gen::msdf-atlas-gen, msdf-atlas-gen")
-endif()
-target_link_libraries(nuri_lib PRIVATE ${NURI_MSDF_ATLAS_TARGET})
+target_link_libraries(nuri_renderer PRIVATE ${NURI_KTX_TARGET})
+
 set(NURI_MESHOPT_TARGET "")
 if(TARGET meshoptimizer::meshoptimizer)
   set(NURI_MESHOPT_TARGET meshoptimizer::meshoptimizer)
@@ -180,7 +183,7 @@ endif()
 if(NOT NURI_MESHOPT_TARGET)
   message(FATAL_ERROR "meshoptimizer package was found but no target was available. Tried: meshoptimizer::meshoptimizer, meshoptimizer")
 endif()
-target_link_libraries(nuri_lib PUBLIC ${NURI_MESHOPT_TARGET})
+target_link_libraries(nuri_renderer PUBLIC ${NURI_MESHOPT_TARGET})
 
 set(NURI_YYJSON_TARGET "")
 if(TARGET yyjson::yyjson)
@@ -193,7 +196,8 @@ endif()
 if(NOT NURI_YYJSON_TARGET)
   message(FATAL_ERROR "yyjson package was found but no target was available. Tried: yyjson::yyjson, yyjson, unofficial::yyjson::yyjson")
 endif()
-target_link_libraries(nuri_lib PUBLIC ${NURI_YYJSON_TARGET})
+target_link_libraries(nuri_renderer PUBLIC ${NURI_YYJSON_TARGET})
+
 set(NURI_UNORDERED_DENSE_TARGET "")
 if(TARGET unordered_dense::unordered_dense)
   set(NURI_UNORDERED_DENSE_TARGET unordered_dense::unordered_dense)
@@ -205,7 +209,7 @@ endif()
 if(NOT NURI_UNORDERED_DENSE_TARGET)
   message(FATAL_ERROR "unordered-dense package was found but no target was available. Tried: unordered_dense::unordered_dense, ankerl::unordered_dense, unordered_dense")
 endif()
-target_link_libraries(nuri_lib PUBLIC ${NURI_UNORDERED_DENSE_TARGET})
+target_link_libraries(nuri_renderer PUBLIC ${NURI_UNORDERED_DENSE_TARGET})
 
 set(NURI_HARFBUZZ_TARGET "")
 if(TARGET harfbuzz::harfbuzz)
@@ -220,29 +224,31 @@ endif()
 if(NOT NURI_HARFBUZZ_TARGET)
   message(FATAL_ERROR "Failed to resolve a HarfBuzz target. Ensure vcpkg harfbuzz is installed. Tried: harfbuzz::harfbuzz, HarfBuzz::harfbuzz, HarfBuzz::HarfBuzz, harfbuzz")
 endif()
-target_link_libraries(nuri_lib PUBLIC ${NURI_HARFBUZZ_TARGET})
-
-if(TARGET imgui::imgui)
-  target_link_libraries(nuri_lib PUBLIC imgui::imgui)
-elseif(TARGET imgui)
-  target_link_libraries(nuri_lib PUBLIC imgui)
-endif()
-target_link_libraries(nuri_lib PUBLIC implot::implot)
+target_link_libraries(nuri_renderer PUBLIC ${NURI_HARFBUZZ_TARGET})
 
 if(NURI_BUILD_SHARED)
-  target_compile_definitions(nuri_lib PUBLIC NURI_SHARED)
-  target_compile_definitions(nuri_lib PRIVATE NURI_EXPORTS)
+  target_compile_definitions(nuri_renderer PUBLIC NURI_SHARED)
+  target_compile_definitions(nuri_renderer PRIVATE NURI_EXPORTS)
 endif()
 
 set_source_files_properties(
   nuri/resources/stb_image.cpp
-  ${CMAKE_SOURCE_DIR}/vendor/im-guizmo/ImGuizmo.cpp
   PROPERTIES SKIP_PRECOMPILE_HEADERS ON
 )
 
-set_source_files_properties(
-  ${CMAKE_SOURCE_DIR}/vendor/im-guizmo/ImGuizmo.cpp
-  PROPERTIES COMPILE_DEFINITIONS IMGUI_DEFINE_MATH_OPERATORS
+target_precompile_headers(nuri_renderer PRIVATE nuri/pch.h)
+
+set_target_properties(nuri_renderer PROPERTIES
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
 
-target_precompile_headers(nuri_lib PRIVATE nuri/pch.h)
+foreach(_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+  string(TOUPPER "${_cfg}" _cfg_upper)
+  set_target_properties(nuri_renderer PROPERTIES
+    "ARCHIVE_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+    "LIBRARY_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+    "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+  )
+endforeach()

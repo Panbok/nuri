@@ -9,6 +9,7 @@ if errorlevel 1 exit /b 1
 set "MODE=debug"
 set "arg=%~1"
 set "NURI_BUILD_TESTS=ON"
+set "NURI_BUILD_EDITOR=OFF"
 set "NURI_TEST_MANIFEST_FEATURES=%VCPKG_MANIFEST_FEATURES%"
 if "%NURI_TEST_MANIFEST_FEATURES%"=="" (
   set "NURI_TEST_MANIFEST_FEATURES=tests"

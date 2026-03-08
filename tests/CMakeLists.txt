@@ -62,20 +62,20 @@ function(nuri_add_gtest_suite target source_file test_prefix)
   endif()
 
   add_executable(${target}
-    ${source_file}
-    ${_nuri_test_support_files}
+      ${source_file}
+      ${_nuri_test_support_files}
   )
 
   target_link_libraries(${target}
-    PRIVATE
-      nuri_lib
+      PRIVATE
+      nuri_renderer
       GTest::gtest
       GTest::gtest_main
   )
 
   target_include_directories(${target}
     PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
   )
 
   set_target_properties(${target} PROPERTIES

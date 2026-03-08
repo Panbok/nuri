@@ -16,8 +16,19 @@ set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 set "BUILD_DIR=%CD%\build_release"
 set "BUILD_TESTS=%NURI_BUILD_TESTS%"
 if "%BUILD_TESTS%"=="" set "BUILD_TESTS=OFF"
+set "BUILD_EDITOR=%NURI_BUILD_EDITOR%"
+if "%BUILD_EDITOR%"=="" set "BUILD_EDITOR=ON"
+set "MANIFEST_FEATURES=%VCPKG_MANIFEST_FEATURES%"
+if /I "%BUILD_EDITOR%"=="ON" (
+  if "%MANIFEST_FEATURES%"=="" (
+    set "MANIFEST_FEATURES=editor"
+  ) else (
+    echo ,%MANIFEST_FEATURES%, | findstr /I /C:",editor," >nul
+    if errorlevel 1 set "MANIFEST_FEATURES=%MANIFEST_FEATURES%,editor"
+  )
+)
 set "MANIFEST_FEATURES_ARG="
-if not "%VCPKG_MANIFEST_FEATURES%"=="" set "MANIFEST_FEATURES_ARG=-DVCPKG_MANIFEST_FEATURES=%VCPKG_MANIFEST_FEATURES%"
+if not "%MANIFEST_FEATURES%"=="" set "MANIFEST_FEATURES_ARG=-DVCPKG_MANIFEST_FEATURES=%MANIFEST_FEATURES%"
 
 if exist "%BUILD_DIR%\build.ninja" (
   findstr /C:"--dependent-lib=msvcrt" "%BUILD_DIR%\build.ninja" >nul 2>nul
@@ -40,6 +51,7 @@ cmake -S . -B "%BUILD_DIR%" -G Ninja ^
   %MANIFEST_FEATURES_ARG% ^
   -DVCPKG_BUILD_TYPE=release ^
   -DNURI_BUILD_TESTS="%BUILD_TESTS%" ^
+  -DNURI_BUILD_EDITOR="%BUILD_EDITOR%" ^
   -DNURI_BUILD_SHARED=OFF
 if errorlevel 1 exit /b 1
 

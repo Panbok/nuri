@@ -97,9 +97,13 @@ endif()
 option(NURI_BUILD_SHARED "Build nuri as a shared library" ON)
 option(NURI_WITH_TRACY "Enable Tracy CPU+GPU profiling" OFF)
 option(NURI_WITH_TRACY_GPU_DRAW_ZONES "Enable per-draw Tracy GPU zones in LVK (requires NURI_WITH_TRACY=ON)" OFF)
+option(NURI_BUILD_EDITOR "Build nuri editor target" ON)
 option(NURI_BUILD_TESTS "Build nuri test targets" OFF)
 
 add_subdirectory(lib)
+if(NURI_BUILD_EDITOR)
+  add_subdirectory(editor)
+endif()
 add_subdirectory(app)
 
 if(NURI_BUILD_TESTS)

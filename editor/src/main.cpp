@@ -1,5 +1,6 @@
-#include "nuri/pch.h"
+#include "nuri/editor_pch.h"
 
+#include "nuri/bakery/bakery_system.h"
 #include "nuri/core/application.h"
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
@@ -18,18 +19,117 @@
 #include "nuri/text/text_layer_2d.h"
 #include "nuri/text/text_layer_3d.h"
 #include "nuri/text/text_system.h"
+#include "nuri/ui/camera_controller_widget.h"
+#include "nuri/ui/editor_layer.h"
 
 #include <ctime>
 #include <glm/gtc/matrix_transform.hpp>
 
 namespace {
 
+enum class ScenePreset : uint8_t {
+  SingleDuck,
+  InstancedDuck32K,
+  BistroExterior,
+  DamagedHelmet,
+  Text3DTest,
+};
+
+constexpr ScenePreset kScenePreset = ScenePreset::SingleDuck;
+constexpr uint32_t kDuckGridSide = 32;
+constexpr uint32_t kDuckInstanceCount =
+    kDuckGridSide * kDuckGridSide * kDuckGridSide;
+constexpr float kDuckSpacing = 18.0f;
+constexpr float kDuckJitter = 3.0f;
 constexpr std::string_view kSampleDuckModelRelativePath =
     "rubber_duck/scene.gltf";
 constexpr std::string_view kSampleDuckAlbedoRelativePath =
     "rubber_duck/textures/Duck_baseColor.png";
 constexpr std::string_view kSampleEnvironmentHdrRelativePath =
     "qwantani_moon_noon_puresky_4k.hdr";
+constexpr std::string_view kBistroExteriorModelRelativePath =
+    "bistro/exterior/exterior.obj";
+constexpr std::string_view kBistroExteriorAbsolutePath =
+    "E:/install/nuri/assets/models/bistro/exterior/exterior.obj";
+constexpr std::string_view kDamagedHelmetModelRelativePath =
+    "DamagedHelmet/DamagedHelmet.gltf";
+constexpr float kBistroTargetRadius = 120.0f;
+constexpr float kBistroMinScale = 0.0005f;
+constexpr float kBistroMaxScale = 2.0f;
+constexpr const char *kScenePresetNames[] = {
+    "Single Duck", "Instanced Duck 32K", "Bistro Exterior", "Damaged Helmet",
+    "Text 3D Test"};
+
+int scenePresetToIndex(ScenePreset preset) {
+  switch (preset) {
+  case ScenePreset::SingleDuck:
+    return 0;
+  case ScenePreset::InstancedDuck32K:
+    return 1;
+  case ScenePreset::BistroExterior:
+    return 2;
+  case ScenePreset::DamagedHelmet:
+    return 3;
+  case ScenePreset::Text3DTest:
+    return 4;
+  }
+  return 0;
+}
+
+ScenePreset scenePresetFromIndex(int index) {
+  switch (index) {
+  case 0:
+    return ScenePreset::SingleDuck;
+  case 1:
+    return ScenePreset::InstancedDuck32K;
+  case 2:
+    return ScenePreset::BistroExterior;
+  case 3:
+    return ScenePreset::DamagedHelmet;
+  case 4:
+    return ScenePreset::Text3DTest;
+  default:
+    return ScenePreset::SingleDuck;
+  }
+}
+
+float hashToUnitFloat(uint32_t value) {
+  uint32_t x = value;
+  x ^= x >> 17u;
+  x *= 0xed5ad4bbu;
+  x ^= x >> 11u;
+  x *= 0xac4c1b51u;
+  x ^= x >> 15u;
+  x *= 0x31848babu;
+  x ^= x >> 14u;
+  return static_cast<float>(x & 0x00ffffffu) / 16777215.0f;
+}
+
+glm::vec3 instancePositionFromGrid(uint32_t index) {
+  const uint32_t x = index % kDuckGridSide;
+  const uint32_t y = (index / kDuckGridSide) % kDuckGridSide;
+  const uint32_t z = index / (kDuckGridSide * kDuckGridSide);
+
+  const glm::vec3 centered =
+      glm::vec3(static_cast<float>(x), static_cast<float>(y),
+                static_cast<float>(z)) -
+      glm::vec3((static_cast<float>(kDuckGridSide) - 1.0f) * 0.5f);
+  glm::vec3 pos = centered * kDuckSpacing;
+
+  const glm::vec3 jitter(
+      (hashToUnitFloat(index * 3u + 1u) - 0.5f) * 2.0f * kDuckJitter,
+      (hashToUnitFloat(index * 3u + 2u) - 0.5f) * 2.0f * kDuckJitter,
+      (hashToUnitFloat(index * 3u + 3u) - 0.5f) * 2.0f * kDuckJitter);
+  pos += jitter;
+  return pos;
+}
+
+float computeBistroScale(const nuri::BoundingBox &bounds) {
+  const float rawRadius =
+      std::max(0.5f * glm::length(bounds.getSize()), 1.0e-3f);
+  const float targetScale = kBistroTargetRadius / rawRadius;
+  return std::clamp(targetScale, kBistroMinScale, kBistroMaxScale);
+}
 
 nuri::ApplicationConfig toApplicationConfig(const nuri::RuntimeConfig &config) {
   return nuri::ApplicationConfig{
@@ -136,11 +236,23 @@ public:
   void onInit() override {
     NURI_PROFILER_FUNCTION();
     scene_.bindResources(&getRenderer().resources());
+    auto bakeryResult = nuri::bakery::BakerySystem::create({
+        .gpu = getGPU(),
+        .config = config_,
+        .profile = nuri::bakery::BakeryExecutionProfile::Interactive,
+    });
+    if (bakeryResult.hasError()) {
+      NURI_LOG_WARNING("NuriApplication::onInit: failed to create bakery "
+                       "system: %s",
+                       bakeryResult.error().c_str());
+    } else {
+      bakerySystem_ = std::move(bakeryResult.value());
+    }
     initializeCamera();
     initializeTextSystem();
     loadSceneResources();
     initializeRenderLayers();
-    initializeTextOverlayLayer();
+    initializeEditorLayer();
 
     NURI_LOG_INFO("Application was initialized");
   }
@@ -150,6 +262,9 @@ public:
 
     const nuri::Camera *activeCamera = cameraSystem_.activeCamera();
     NURI_ASSERT(activeCamera != nullptr, "No active camera");
+
+    applyPendingScenePreset();
+    updateBistroSceneStreaming();
 
     const double timeSeconds = getTime();
     buildFrameContext(*activeCamera, timeSeconds);
@@ -171,13 +286,22 @@ public:
       fpsAccumulatorSeconds_ = 0.0;
       fpsFrameCount_ = 0;
     }
-
     cameraSystem_.update(deltaTime, getInput());
+    if (bakerySystem_) {
+      bakerySystem_->tick();
+    }
   }
 
   void onResize(std::int32_t, std::int32_t) override {}
 
   bool onInput(const nuri::InputEvent &event) override {
+    if (event.type == nuri::InputEventType::Key &&
+        event.payload.key.action == nuri::KeyAction::Press &&
+        event.payload.key.key == nuri::Key::F6) {
+      toggleEditorLayer();
+      return true;
+    }
+
     if (cameraSystem_.onInput(event, getWindow())) {
       return true;
     }
@@ -189,6 +313,7 @@ public:
     scene_.setEnvironment(nuri::EnvironmentHandles{});
     releaseOwnedResourceHandles();
     scene_.bindResources(nullptr);
+    bistroAsyncLoad_.reset();
     getWindow().setCursorMode(nuri::CursorMode::Normal);
     NURI_LOG_INFO("Application was shutdown");
   }
@@ -209,8 +334,10 @@ private:
         cameraSystem_.setActiveCamera(mainCameraHandle_, getWindow());
     NURI_ASSERT(setActive, "Failed to activate main camera");
 
+    nuri::syncCameraControllerWidgetStateFromCamera(camera, cameraWidgetState_);
     NURI_LOG_INFO("NuriApplication::initializeCamera: Main camera initialized "
-                  "(WASD/QE move, RMB look, P projection toggle)");
+                  "(WASD/QE move, RMB look, P projection toggle, ImGui camera "
+                  "controller panel)");
   }
 
   void initializeRenderLayers() {
@@ -241,20 +368,6 @@ private:
           getLayerStack().pushLayer(std::move(textLayer3D)));
       NURI_ASSERT(textLayer3D_ != nullptr, "Failed to push 3D text layer");
     }
-  }
-
-  void initializeTextOverlayLayer() {
-    if (textLayer2D_ != nullptr || textSystem_ == nullptr) {
-      return;
-    }
-
-    auto textLayer2D = nuri::TextLayer2D::create({
-        .text = *textSystem_,
-    });
-    NURI_ASSERT(textLayer2D != nullptr, "Failed to create 2D text layer");
-    textLayer2D_ = static_cast<nuri::TextLayer2D *>(
-        getLayerStack().pushOverlay(std::move(textLayer2D)));
-    NURI_ASSERT(textLayer2D_ != nullptr, "Failed to push 2D text layer");
   }
 
   void initializeTextSystem() {
@@ -310,7 +423,7 @@ private:
       (void)enqueue2DTextSamples(defaultFont, baseFontSizePx, scratch);
     }
 
-    if (textLayer3D_ != nullptr) {
+    if (scenePreset_ == ScenePreset::Text3DTest && textLayer3D_ != nullptr) {
       (void)enqueue3DTextSamples(defaultFont, baseFontSizePx, scratch);
     }
   }
@@ -522,7 +635,133 @@ private:
       return false;
     }
 
+    const float uiTextScale = 0.0085f;
+    const float uiAnchorX = -3.2f;
+    float uiCursorY = 0.65f;
+    auto enqueueUiStress3D = [&](std::string_view text, float pxScale,
+                                 const nuri::TextColor &color, float gapAfterPx,
+                                 bool wrap, float wrapWidthPx, bool multiline) {
+      nuri::Text3DDesc sample{};
+      sample.utf8 = text;
+      sample.style.font = defaultFont;
+      sample.style.pxSize = baseFontSizePx * pxScale;
+      sample.layout.alignH = nuri::TextAlignH::Left;
+      sample.layout.alignV = nuri::TextAlignV::Top;
+      if (wrap) {
+        sample.layout.wrapMode = nuri::TextWrapMode::Word;
+        sample.layout.maxWidthPx = wrapWidthPx;
+      }
+      if (multiline) {
+        sample.layout.wrapMode = nuri::TextWrapMode::None;
+      }
+      configureAsciiLayout(sample.layout);
+      sample.fillColor = color;
+      sample.billboard = nuri::TextBillboardMode::Spherical;
+      glm::mat4 world(1.0f);
+      world = glm::translate(world, glm::vec3(uiAnchorX, uiCursorY, 0.0f));
+      world = glm::scale(world, glm::vec3(uiTextScale));
+      sample.worldFromText = encodeWorld(world);
+      const std::optional<nuri::TextBounds> bounds = enqueueSample(sample);
+      if (!bounds.has_value()) {
+        return false;
+      }
+      const float blockHeightPx = std::max(bounds->maxY - bounds->minY, 0.0f);
+      uiCursorY -= (blockHeightPx + gapAfterPx) * uiTextScale;
+      return true;
+    };
+
+    if (!enqueueUiStress3D("MTSDF 2D Raster Test 0123456789 AaBbCc", 1.0f,
+                           {.r = 1.0f, .g = 1.0f, .b = 1.0f, .a = 1.0f}, 14.0f,
+                           false, 0.0f, false)) {
+      return false;
+    }
+    if (!enqueueUiStress3D("Kerning: AV AVATAR To WA TA YA LT", 0.67f,
+                           {.r = 0.86f, .g = 0.92f, .b = 1.0f, .a = 1.0f},
+                           14.0f, false, 0.0f, false)) {
+      return false;
+    }
+    if (!enqueueUiStress3D(
+            "Wrap(320px): The quick brown fox jumps over the lazy dog near the "
+            "river bank.",
+            0.62f, {.r = 0.9f, .g = 1.0f, .b = 0.9f, .a = 1.0f}, 18.0f, true,
+            320.0f, false)) {
+      return false;
+    }
+    if (!enqueueUiStress3D("Manual newline:\nLine 1\nLine 2\nLine 3", 0.57f,
+                           {.r = 1.0f, .g = 0.95f, .b = 0.85f, .a = 1.0f}, 0.0f,
+                           false, 0.0f, true)) {
+      return false;
+    }
     return true;
+  }
+
+  void initializeTextOverlayLayer() {
+    if (textLayer2D_ != nullptr || textSystem_ == nullptr ||
+        editorLayer_ != nullptr) {
+      return;
+    }
+
+    auto textLayer2D = nuri::TextLayer2D::create({
+        .text = *textSystem_,
+    });
+    NURI_ASSERT(textLayer2D != nullptr, "Failed to create 2D text layer");
+    textLayer2D_ = static_cast<nuri::TextLayer2D *>(
+        getLayerStack().pushOverlay(std::move(textLayer2D)));
+    NURI_ASSERT(textLayer2D_ != nullptr, "Failed to push 2D text layer");
+  }
+
+  void removeTextOverlayLayer() {
+    if (textLayer2D_ == nullptr) {
+      return;
+    }
+    const bool removed = getLayerStack().popOverlay(textLayer2D_);
+    NURI_ASSERT(removed, "Failed to remove 2D text layer");
+    textLayer2D_ = nullptr;
+  }
+
+  void initializeEditorLayer() {
+    if (editorLayer_ != nullptr) {
+      return;
+    }
+    removeTextOverlayLayer();
+    const nuri::EditorServices editorServices{
+        .scene = &scene_,
+        .cameraSystem = &cameraSystem_,
+        .gpu = &getGPU(),
+        .textSystem = textSystem_.get(),
+        .bakery = bakerySystem_.get(),
+        .renderGraphTelemetry = &getRenderer().renderGraphTelemetry(),
+    };
+    auto editorLayer = nuri::EditorLayer::create(
+        getWindow(), getGPU(), getEventManager(),
+        nuri::EditorLayer::UiCallback([this]() {
+          nuri::drawCameraControllerWidget(cameraSystem_, cameraWidgetState_);
+          drawScenePresetPanel();
+        }),
+        editorServices);
+    NURI_ASSERT(editorLayer != nullptr, "Failed to create editor layer");
+    editorLayer_ = static_cast<nuri::EditorLayer *>(
+        getLayerStack().pushOverlay(std::move(editorLayer)));
+    NURI_ASSERT(editorLayer_ != nullptr, "Failed to push editor layer");
+  }
+
+  void removeEditorLayer() {
+    if (editorLayer_ == nullptr) {
+      return;
+    }
+
+    const bool removed = getLayerStack().popOverlay(editorLayer_);
+    NURI_ASSERT(removed, "Failed to remove editor layer");
+    editorLayer_ = nullptr;
+    initializeTextOverlayLayer();
+  }
+
+  void toggleEditorLayer() {
+    if (editorLayer_ != nullptr) {
+      removeEditorLayer();
+      return;
+    }
+    initializeEditorLayer();
   }
 
   void loadSceneResources() {
@@ -535,6 +774,8 @@ private:
         (config_.roots.models / kSampleDuckModelRelativePath).string();
     const std::string duckAlbedoPath =
         (config_.roots.models / kSampleDuckAlbedoRelativePath).string();
+    const std::string helmetModelPath =
+        (config_.roots.models / kDamagedHelmetModelRelativePath).string();
     const std::string environmentHdrPath =
         (config_.roots.textures / kSampleEnvironmentHdrRelativePath).string();
 
@@ -558,6 +799,23 @@ private:
         resources.tryGet(duckAlbedoRefResult.value());
     NURI_ASSERT(duckAlbedoRecord != nullptr,
                 "Duck albedo record lookup failed");
+
+    nuri::MeshImportOptions helmetImportOptions{};
+    helmetImportOptions.flipUVs = true;
+    auto helmetModelResult = resources.acquireModel(nuri::ModelRequest{
+        .path = helmetModelPath,
+        .importOptions = helmetImportOptions,
+        .debugName = "damaged_helmet",
+    });
+    if (helmetModelResult.hasError()) {
+      NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to load "
+                       "DamagedHelmet model '%s': %s",
+                       helmetModelPath.c_str(),
+                       helmetModelResult.error().c_str());
+    }
+    NURI_ASSERT(!helmetModelResult.hasError(),
+                "Failed to create DamagedHelmet model: %s",
+                helmetModelResult.error().c_str());
 
     auto cubemapResult = resources.acquireTexture(nuri::TextureRequest{
         .path = environmentHdrPath,
@@ -736,28 +994,310 @@ private:
       resources.release(brdfLutTexture);
     }
 
-    nuri::MaterialDesc duckMaterialDesc{};
-    duckMaterialDesc.textures.baseColor = duckAlbedoRecord->texture;
-    auto addDuckMaterialResult = resources.acquireMaterial(nuri::MaterialRequest{
-        .desc = duckMaterialDesc,
-        .textureRefs =
-            nuri::MaterialRequest::TextureRefs{
-                .baseColor = duckAlbedoRefResult.value(),
-            },
-        .debugName = "duck_material",
-    });
-    NURI_ASSERT(!addDuckMaterialResult.hasError(),
-                "Failed to acquire duck material: %s",
-                addDuckMaterialResult.error().c_str());
-    duckMaterialIndex_ = addDuckMaterialResult.value();
-    resources.setModelMaterialForAllSources(duckModel_, duckMaterialIndex_);
+    helmetModel_ = helmetModelResult.value();
+
+    {
+      nuri::MaterialDesc duckMaterialDesc{};
+      duckMaterialDesc.textures.baseColor = duckAlbedoRecord->texture;
+      auto addDuckMaterialResult =
+          resources.acquireMaterial(nuri::MaterialRequest{
+              .desc = duckMaterialDesc,
+              .textureRefs =
+                  nuri::MaterialRequest::TextureRefs{
+                      .baseColor = duckAlbedoRefResult.value(),
+                  },
+              .debugName = "duck_material"});
+      NURI_ASSERT(!addDuckMaterialResult.hasError(),
+                  "Failed to acquire duck material: %s",
+                  addDuckMaterialResult.error().c_str());
+      duckMaterialIndex_ = addDuckMaterialResult.value();
+      resources.setModelMaterialForAllSources(duckModel_, duckMaterialIndex_);
+    }
     resources.release(duckAlbedoRefResult.value());
+
+    {
+      nuri::MaterialDesc bistroMaterialDesc{};
+      auto addBistroMaterialResult = resources.acquireMaterial(
+          nuri::MaterialRequest{.desc = bistroMaterialDesc,
+                                .debugName = "bistro_fallback_material"});
+      NURI_ASSERT(!addBistroMaterialResult.hasError(),
+                  "Failed to acquire Bistro fallback material: %s",
+                  addBistroMaterialResult.error().c_str());
+      bistroMaterialIndex_ = addBistroMaterialResult.value();
+    }
+
+    auto helmetLoadResult =
+        resources.acquireMaterialsFromModel(nuri::ImportedMaterialRequest{
+            .modelPath = helmetModelPath,
+            .model = helmetModel_,
+            .debugNamePrefix = "damaged_helmet",
+        });
+    if (helmetLoadResult.hasError()) {
+      NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to import "
+                       "DamagedHelmet materials from '%s': %s",
+                       helmetModelPath.c_str(),
+                       helmetLoadResult.error().c_str());
+    }
+
+    helmetFallbackMaterialIndex_ = helmetLoadResult.hasError()
+                                       ? nuri::kInvalidMaterialRef
+                                       : helmetLoadResult.value().firstMaterial;
+    if (!nuri::isValid(helmetFallbackMaterialIndex_)) {
+      helmetFallbackMaterialIndex_ = bistroMaterialIndex_;
+    }
+
+    const nuri::ModelRecord *helmetRecord = resources.tryGet(helmetModel_);
+    NURI_ASSERT(helmetRecord != nullptr && helmetRecord->model != nullptr,
+                "DamagedHelmet model record lookup failed");
+
+    NURI_LOG_INFO("NuriApplication::loadSceneResources: DamagedHelmet loaded "
+                  "(submeshes=%zu vertices=%u indices=%u)",
+                  helmetRecord->model->submeshes().size(),
+                  helmetRecord->model->vertexCount(),
+                  helmetRecord->model->indexCount());
+
+    applyScenePreset(scenePreset_);
+  }
+
+  void loadSingleDuckSceneResources() {
+    renderSettings_.opaque.enableInstanceCompute = true;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.meshLodDistanceThresholds =
+        glm::vec3(8.0f, 16.0f, 32.0f);
+    renderSettings_.opaque.enableInstanceAnimation = false;
 
     auto addResult = scene_.addOpaqueRenderable(duckModel_, duckMaterialIndex_,
                                                 duckBaseModel_);
     NURI_ASSERT(!addResult.hasError(), "Failed to add duck renderable: %s",
                 addResult.error().c_str());
     duckRenderableIndex_ = addResult.value();
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    camera->setLookAt(glm::vec3(0.0f, 1.0f, -1.5f), glm::vec3(0.0f, 0.5f, 0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
+    nuri::syncCameraControllerWidgetStateFromCamera(*camera,
+                                                    cameraWidgetState_);
+  }
+
+  void setupInstancedDuckScene32k() {
+    // Benchmark defaults: keep auto LOD enabled and push far instances to
+    // lower LODs earlier to reduce GPU pressure.
+    renderSettings_.opaque.enableInstanceCompute = true;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.meshLodDistanceThresholds =
+        glm::vec3(4.0f, 8.0f, 16.0f);
+    renderSettings_.opaque.enableInstanceAnimation = true;
+
+    std::vector<glm::mat4> transforms;
+    transforms.reserve(kDuckInstanceCount);
+    for (uint32_t i = 0; i < kDuckInstanceCount; ++i) {
+      const glm::vec3 position = instancePositionFromGrid(i);
+      transforms.push_back(glm::translate(glm::mat4(1.0f), position) *
+                           duckBaseModel_);
+    }
+
+    auto addResult = scene_.addOpaqueRenderablesInstanced(
+        duckModel_, duckMaterialIndex_, transforms);
+    NURI_ASSERT(!addResult.hasError(),
+                "Failed to add instanced duck renderables: %s",
+                addResult.error().c_str());
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    camera->setLookAt(glm::vec3(0.0f, 120.0f, -760.0f), glm::vec3(0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
+    nuri::syncCameraControllerWidgetStateFromCamera(*camera,
+                                                    cameraWidgetState_);
+
+    NURI_LOG_INFO(
+        "NuriApplication::setupInstancedDuckScene32k: spawned %u ducks in a "
+        "32x32x32 grid",
+        kDuckInstanceCount);
+  }
+
+  std::filesystem::path resolveBistroExteriorPath() const {
+    std::filesystem::path preferredPath =
+        config_.roots.models / kBistroExteriorModelRelativePath;
+    std::error_code ec;
+    if (std::filesystem::exists(preferredPath, ec) &&
+        std::filesystem::is_regular_file(preferredPath, ec)) {
+      return preferredPath;
+    }
+
+    std::filesystem::path fallbackPath{kBistroExteriorAbsolutePath};
+    ec.clear();
+    if (std::filesystem::exists(fallbackPath, ec) &&
+        std::filesystem::is_regular_file(fallbackPath, ec)) {
+      return fallbackPath;
+    }
+    return preferredPath;
+  }
+
+  void beginBistroModelLoad() {
+    const bool hasAsyncLoadInFlight = bistroAsyncLoad_ &&
+                                      bistroAsyncLoad_->valid() &&
+                                      !bistroAsyncLoad_->isFinalized();
+    if (nuri::isValid(bistroModel_) || hasAsyncLoadInFlight ||
+        bistroLoadFailed_) {
+      return;
+    }
+    bistroLoadFailed_ = false;
+    bistroLoadError_.clear();
+    bistroLoadStartTimeSeconds_ = getTime();
+    bistroLastProgressLogTimeSeconds_ = bistroLoadStartTimeSeconds_;
+
+    const std::string path = resolveBistroExteriorPath().string();
+
+    auto asyncLoadResult =
+        nuri::Model::createFromFileAsync(path, nuri::MeshImportOptions{});
+    if (asyncLoadResult.hasError()) {
+      bistroLoadFailed_ = true;
+      bistroLoadError_ = asyncLoadResult.error();
+      NURI_LOG_WARNING("NuriApplication: Bistro async load start failed: %s",
+                       bistroLoadError_.c_str());
+      return;
+    }
+
+    bistroAsyncLoad_ = std::move(asyncLoadResult.value());
+    NURI_LOG_INFO("NuriApplication: started Bistro async model load from '%s'",
+                  path.c_str());
+  }
+
+  void updateBistroSceneStreaming() {
+    nuri::ResourceManager &resources = getRenderer().resources();
+    if (!bistroAsyncLoad_ || !bistroAsyncLoad_->valid()) {
+      if (scenePreset_ == ScenePreset::BistroExterior &&
+          nuri::isValid(bistroModel_) &&
+          bistroRenderableIndex_ == std::numeric_limits<uint32_t>::max()) {
+        setupBistroExteriorScene();
+      }
+      return;
+    }
+
+    if (!bistroAsyncLoad_->isReady()) {
+      const double now = getTime();
+      if (now - bistroLastProgressLogTimeSeconds_ >= 5.0) {
+        bistroLastProgressLogTimeSeconds_ = now;
+        NURI_LOG_INFO("NuriApplication: Bistro load in progress (%.1f s)",
+                      now - bistroLoadStartTimeSeconds_);
+      }
+      return;
+    }
+
+    auto warmupResult = bistroAsyncLoad_->resolveWarmup();
+    const std::optional<bool> warmupCacheHit =
+        warmupResult.hasError() ? std::nullopt
+                                : std::optional<bool>(warmupResult.value());
+    const std::string warmupError =
+        std::string(bistroAsyncLoad_->warmupError());
+    const double totalLoadSeconds = getTime() - bistroLoadStartTimeSeconds_;
+
+    auto modelResult = resources.acquireModel(nuri::ModelRequest{
+        .path = resolveBistroExteriorPath().string(),
+        .debugName = "bistro_exterior",
+    });
+    if (modelResult.hasError()) {
+      bistroLoadFailed_ = true;
+      bistroLoadError_ = modelResult.error();
+      if (!warmupError.empty()) {
+        NURI_LOG_WARNING("NuriApplication: Bistro async warmup failed: %s",
+                         warmupError.c_str());
+      }
+      NURI_LOG_WARNING("NuriApplication: Bistro GPU model creation failed: %s",
+                       bistroLoadError_.c_str());
+      bistroAsyncLoad_.reset();
+      return;
+    }
+
+    if (warmupCacheHit.has_value()) {
+      NURI_LOG_INFO("NuriApplication: Bistro cache %s in %.1f s",
+                    warmupCacheHit.value() ? "hit" : "rebuilt",
+                    totalLoadSeconds);
+    } else if (!warmupError.empty()) {
+      NURI_LOG_WARNING("NuriApplication: Bistro async warmup failed: %s "
+                       "(load completed via direct path)",
+                       warmupError.c_str());
+    }
+    bistroAsyncLoad_.reset();
+
+    bistroModel_ = modelResult.value();
+    resources.setModelMaterialForAllSources(bistroModel_, bistroMaterialIndex_);
+    NURI_LOG_INFO("NuriApplication: Bistro model is ready in %.1f s",
+                  getTime() - bistroLoadStartTimeSeconds_);
+
+    if (scenePreset_ == ScenePreset::BistroExterior &&
+        bistroRenderableIndex_ == std::numeric_limits<uint32_t>::max()) {
+      setupBistroExteriorScene();
+    }
+  }
+
+  void setupBistroExteriorScene() {
+    nuri::ResourceManager &resources = getRenderer().resources();
+    if (!nuri::isValid(bistroModel_)) {
+      if (bistroLoadFailed_) {
+        return;
+      }
+      beginBistroModelLoad();
+      return;
+    }
+    if (bistroRenderableIndex_ != std::numeric_limits<uint32_t>::max()) {
+      return;
+    }
+    NURI_ASSERT(nuri::isValid(bistroMaterialIndex_),
+                "Bistro fallback material is not loaded");
+    const nuri::ModelRecord *bistroRecord = resources.tryGet(bistroModel_);
+    NURI_ASSERT(bistroRecord != nullptr && bistroRecord->model != nullptr,
+                "Bistro model is not available in resource manager");
+    const nuri::Model &bistroModel = *bistroRecord->model;
+
+    // Keep tessellation off for stable performance; use generated mesh LODs.
+    renderSettings_.opaque.enableInstanceCompute = false;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.enableTessellation = false;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.meshLodDistanceThresholds =
+        glm::vec3(8.0f, 24.0f, 48.0f);
+    renderSettings_.opaque.enableInstanceAnimation = false;
+    const nuri::BoundingBox &bounds = bistroModel.bounds();
+    const float bistroScale = computeBistroScale(bounds);
+    const glm::mat4 bistroModelMatrix =
+        glm::scale(glm::mat4(1.0f), glm::vec3(bistroScale));
+
+    auto addResult = scene_.addOpaqueRenderable(
+        bistroModel_, bistroMaterialIndex_, bistroModelMatrix);
+    NURI_ASSERT(!addResult.hasError(), "Failed to add Bistro renderable: %s",
+                addResult.error().c_str());
+    bistroRenderableIndex_ = addResult.value();
+
+    const float rawRadius =
+        std::max(0.5f * glm::length(bounds.getSize()), 1.0f);
+    const glm::vec3 center = bounds.getCenter() * bistroScale;
+    const float radius = std::max(1.0f, rawRadius * bistroScale);
+    const float cameraDistance = std::max(radius * 1.2f, 25.0f);
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    nuri::PerspectiveParams perspective = camera->perspective();
+    perspective.nearPlane = std::max(0.05f, cameraDistance / 5000.0f);
+    perspective.farPlane = std::max(2000.0f, cameraDistance + radius * 3.0f);
+    camera->setProjectionType(nuri::ProjectionType::Perspective);
+    camera->setPerspective(perspective);
+    camera->setLookAt(center + glm::vec3(-cameraDistance * 0.32f,
+                                         radius * 0.14f + 4.0f,
+                                         -cameraDistance),
+                      center + glm::vec3(0.0f, radius * 0.03f, 0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
+    nuri::syncCameraControllerWidgetStateFromCamera(*camera,
+                                                    cameraWidgetState_);
+    NURI_LOG_INFO("NuriApplication: Bistro scene stats submeshes=%zu "
+                  "vertices=%u indices=%u rawRadius=%.2f scale=%.6f "
+                  "radius=%.2f near=%.3f far=%.2f",
+                  bistroModel.submeshes().size(), bistroModel.vertexCount(),
+                  bistroModel.indexCount(), rawRadius, bistroScale, radius,
+                  perspective.nearPlane, perspective.farPlane);
   }
 
   void releaseOwnedResourceHandles() {
@@ -770,7 +1310,152 @@ private:
     };
 
     releaseRef(duckModel_, nuri::kInvalidModelRef);
+    releaseRef(helmetModel_, nuri::kInvalidModelRef);
+    releaseRef(bistroModel_, nuri::kInvalidModelRef);
     releaseRef(duckMaterialIndex_, nuri::kInvalidMaterialRef);
+    releaseRef(helmetFallbackMaterialIndex_, nuri::kInvalidMaterialRef);
+    releaseRef(bistroMaterialIndex_, nuri::kInvalidMaterialRef);
+  }
+
+  void setupText3DTestScene() {
+    renderSettings_.opaque.enableInstanceCompute = false;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.enableTessellation = false;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.enableInstanceAnimation = false;
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    nuri::PerspectiveParams perspective = camera->perspective();
+    perspective.nearPlane = 0.01f;
+    perspective.farPlane = 500.0f;
+    camera->setProjectionType(nuri::ProjectionType::Perspective);
+    camera->setPerspective(perspective);
+    camera->setLookAt(glm::vec3(0.0f, 1.2f, -4.2f), glm::vec3(0.0f, 1.2f, 0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
+    nuri::syncCameraControllerWidgetStateFromCamera(*camera,
+                                                    cameraWidgetState_);
+  }
+
+  void setupDamagedHelmetScene() {
+    nuri::ResourceManager &resources = getRenderer().resources();
+    NURI_ASSERT(nuri::isValid(helmetModel_),
+                "DamagedHelmet model is not loaded");
+    NURI_ASSERT(nuri::isValid(helmetFallbackMaterialIndex_),
+                "DamagedHelmet material is not loaded");
+    if (helmetRenderableIndex_ != std::numeric_limits<uint32_t>::max()) {
+      return;
+    }
+    const nuri::ModelRecord *helmetRecord = resources.tryGet(helmetModel_);
+    NURI_ASSERT(helmetRecord != nullptr && helmetRecord->model != nullptr,
+                "DamagedHelmet model record lookup failed");
+    const nuri::Model &helmetModel = *helmetRecord->model;
+
+    renderSettings_.opaque.enableInstanceCompute = false;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.enableTessellation = false;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.meshLodDistanceThresholds =
+        glm::vec3(8.0f, 16.0f, 32.0f);
+    renderSettings_.opaque.enableInstanceAnimation = false;
+
+    const nuri::BoundingBox &bounds = helmetModel.bounds();
+    auto addResult = scene_.addOpaqueRenderable(
+        helmetModel_, helmetFallbackMaterialIndex_, helmetBaseModel_);
+    NURI_ASSERT(!addResult.hasError(),
+                "Failed to add DamagedHelmet renderable: %s",
+                addResult.error().c_str());
+    helmetRenderableIndex_ = addResult.value();
+
+    const float rawRadius =
+        std::max(0.5f * glm::length(bounds.getSize()), 0.25f);
+    const glm::vec3 center =
+        glm::vec3(helmetBaseModel_ * glm::vec4(bounds.getCenter(), 1.0f));
+    const float radius = std::max(0.25f, rawRadius);
+    const float cameraDistance = std::max(radius * 2.4f, 2.0f);
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    nuri::PerspectiveParams perspective = camera->perspective();
+    perspective.nearPlane = std::max(0.01f, cameraDistance / 3000.0f);
+    perspective.farPlane = std::max(500.0f, cameraDistance + radius * 12.0f);
+    camera->setProjectionType(nuri::ProjectionType::Perspective);
+    camera->setPerspective(perspective);
+    camera->setLookAt(center + glm::vec3(-cameraDistance * 0.38f,
+                                         radius * 0.18f + 0.2f,
+                                         -cameraDistance),
+                      center + glm::vec3(0.0f, radius * 0.03f, 0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
+    nuri::syncCameraControllerWidgetStateFromCamera(*camera,
+                                                    cameraWidgetState_);
+    NURI_LOG_INFO("NuriApplication: DamagedHelmet scene stats submeshes=%zu "
+                  "vertices=%u indices=%u rawRadius=%.2f radius=%.2f "
+                  "near=%.3f far=%.2f",
+                  helmetModel.submeshes().size(), helmetModel.vertexCount(),
+                  helmetModel.indexCount(), rawRadius, radius,
+                  perspective.nearPlane, perspective.farPlane);
+  }
+
+  void applyScenePreset(ScenePreset preset) {
+    NURI_ASSERT(nuri::isValid(duckModel_), "Duck model is not loaded");
+    NURI_ASSERT(nuri::isValid(duckMaterialIndex_),
+                "Duck material is not loaded");
+
+    scene_.clearOpaqueRenderables();
+    if (editorLayer_ != nullptr) {
+      editorLayer_->resetControllers();
+    }
+    duckRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+    bistroRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+    helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+    scenePreset_ = preset;
+
+    if (scenePreset_ == ScenePreset::InstancedDuck32K) {
+      setupInstancedDuckScene32k();
+    } else if (scenePreset_ == ScenePreset::BistroExterior) {
+      bistroLoadFailed_ = false;
+      bistroLoadError_.clear();
+      setupBistroExteriorScene();
+    } else if (scenePreset_ == ScenePreset::DamagedHelmet) {
+      setupDamagedHelmetScene();
+    } else if (scenePreset_ == ScenePreset::Text3DTest) {
+      setupText3DTestScene();
+    } else {
+      loadSingleDuckSceneResources();
+    }
+  }
+
+  void requestScenePreset(ScenePreset preset) {
+    if (preset == scenePreset_) {
+      return;
+    }
+    pendingScenePreset_ = preset;
+  }
+
+  void applyPendingScenePreset() {
+    if (!pendingScenePreset_.has_value()) {
+      return;
+    }
+
+    const ScenePreset preset = *pendingScenePreset_;
+    pendingScenePreset_.reset();
+    applyScenePreset(preset);
+    NURI_LOG_INFO("NuriApplication::toggleScenePreset: switched to %s",
+                  kScenePresetNames[scenePresetToIndex(scenePreset_)]);
+  }
+
+  void drawScenePresetPanel() {
+    int presetIndex = scenePresetToIndex(scenePreset_);
+    const std::span<const char *const> presetNames{
+        kScenePresetNames, static_cast<size_t>(sizeof(kScenePresetNames) /
+                                               sizeof(kScenePresetNames[0]))};
+    if (nuri::drawScenePresetWidget(presetNames, presetIndex,
+                                    "Toggle Editor: F6")) {
+      const ScenePreset selectedPreset = scenePresetFromIndex(presetIndex);
+      if (selectedPreset != scenePreset_) {
+        requestScenePreset(selectedPreset);
+      }
+    }
   }
 
   void buildFrameContext(const nuri::Camera &camera, double timeSeconds) {
@@ -795,16 +1480,31 @@ private:
   }
 
   const nuri::RuntimeConfig config_;
+  ScenePreset scenePreset_ = kScenePreset;
   std::pmr::unsynchronized_pool_resource cameraMemory_;
   std::pmr::unsynchronized_pool_resource sceneMemory_;
   nuri::CameraSystem cameraSystem_;
   nuri::RenderScene scene_;
   nuri::ModelRef duckModel_ = nuri::kInvalidModelRef;
+  nuri::ModelRef helmetModel_ = nuri::kInvalidModelRef;
+  nuri::ModelRef bistroModel_ = nuri::kInvalidModelRef;
+  std::unique_ptr<nuri::bakery::BakerySystem> bakerySystem_{};
   nuri::MaterialRef duckMaterialIndex_ = nuri::kInvalidMaterialRef;
+  nuri::MaterialRef helmetFallbackMaterialIndex_ = nuri::kInvalidMaterialRef;
+  nuri::MaterialRef bistroMaterialIndex_ = nuri::kInvalidMaterialRef;
+  std::optional<nuri::ModelAsyncLoad> bistroAsyncLoad_{};
+  bool bistroLoadFailed_ = false;
+  std::string bistroLoadError_{};
+  double bistroLoadStartTimeSeconds_ = 0.0;
+  double bistroLastProgressLogTimeSeconds_ = 0.0;
   nuri::CameraHandle mainCameraHandle_{};
   uint32_t duckRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+  uint32_t helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+  uint32_t bistroRenderableIndex_ = std::numeric_limits<uint32_t>::max();
   glm::mat4 duckBaseModel_ =
       glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1, 0, 0));
+  glm::mat4 helmetBaseModel_ =
+      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0));
 
   nuri::RenderSettings renderSettings_{};
   nuri::RenderFrameContext frameContext_{};
@@ -815,8 +1515,11 @@ private:
   float currentFps_ = 0.0f;
   std::unique_ptr<nuri::TextSystem> textSystem_{};
   nuri::ScratchArena textScratchArena_{};
+  nuri::CameraControllerWidgetState cameraWidgetState_{};
   nuri::TextLayer3D *textLayer3D_ = nullptr;
   nuri::TextLayer2D *textLayer2D_ = nullptr;
+  nuri::EditorLayer *editorLayer_ = nullptr;
+  std::optional<ScenePreset> pendingScenePreset_{};
 };
 
 int main() {

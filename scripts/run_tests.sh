@@ -39,6 +39,7 @@ if [[ "$mode" == "debug" ]]; then
   (
     cd "$REPO_ROOT"
     NURI_BUILD_TESTS=ON \
+    NURI_BUILD_EDITOR=OFF \
     VCPKG_MANIFEST_FEATURES="$manifest_features" \
     "$SCRIPT_DIR/build_debug.sh"
   )
@@ -47,6 +48,7 @@ else
   (
     cd "$REPO_ROOT"
     NURI_BUILD_TESTS=ON \
+    NURI_BUILD_EDITOR=OFF \
     VCPKG_MANIFEST_FEATURES="$manifest_features" \
     "$SCRIPT_DIR/build_release.sh"
   )

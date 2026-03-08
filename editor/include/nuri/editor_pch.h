@@ -43,6 +43,14 @@
 #include <glm/gtc/packing.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <imgui.h>
+#include <imgui_internal.h>
+#if __has_include(<implot.h>)
+#include <implot.h>
+#else
+#include <implot/implot.h>
+#endif
+
 #include <yyjson.h>
 
 #if __has_include(<meshoptimizer.h>)
