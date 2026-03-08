@@ -4,8 +4,6 @@
 
 #include "nuri/utils/env_utils.h"
 
-#include <fstream>
-
 namespace nuri {
 
 namespace {
@@ -18,14 +16,19 @@ ensureMemory(std::pmr::memory_resource *memory) {
 [[nodiscard]] std::filesystem::path resolveRenderGraphDumpDirectory() {
   const std::optional<std::string> dumpEnv =
       readEnvVar("NURI_RENDER_GRAPH_DUMP");
-  if (!dumpEnv.has_value() || dumpEnv->empty() || dumpEnv->front() == '0') {
+  if (!dumpEnv.has_value()) {
     return {};
   }
 
   const std::string &value = *dumpEnv;
+  if (value.empty() || value == "0") {
+    return {};
+  }
+
   if (value == "1" || value == "true" || value == "TRUE") {
     return std::filesystem::path("logs/render_graph");
   }
+
   return std::filesystem::path(value);
 }
 
@@ -40,31 +43,12 @@ resolvePassName(const RenderGraphTelemetrySnapshot &snapshot,
                       : std::string_view(name.data(), name.size());
 }
 
-template <typename T>
-void copyVector(std::pmr::vector<T> &dst, const std::pmr::vector<T> &src) {
-  dst.clear();
-  dst.reserve(src.size());
-  for (const T &value : src) {
-    dst.push_back(value);
-  }
-}
-
-void copyPassNames(std::pmr::vector<std::pmr::string> &dst,
-                   const std::pmr::vector<std::pmr::string> &src) {
-  dst.clear();
-  dst.reserve(src.size());
-  for (const std::pmr::string &name : src) {
-    dst.emplace_back();
-    dst.back().assign(name.data(), name.size());
-  }
-}
-
 } // namespace
 
 RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
     std::pmr::memory_resource *memory)
-    : passNames(ensureMemory(memory)),
-      orderedPassIndices(ensureMemory(memory)), edges(ensureMemory(memory)),
+    : passNames(ensureMemory(memory)), orderedPassIndices(ensureMemory(memory)),
+      edges(ensureMemory(memory)),
       transientTextureLifetimes(ensureMemory(memory)),
       transientBufferLifetimes(ensureMemory(memory)),
       transientTextureAllocations(ensureMemory(memory)),
@@ -109,8 +93,7 @@ void RenderGraphTelemetrySnapshot::reset() {
 
 RenderGraphTelemetryService::RenderGraphTelemetryService(
     std::pmr::memory_resource *memory)
-    : memory_(ensureMemory(memory)),
-      snapshot_(ensureMemory(memory)),
+    : memory_(ensureMemory(memory)), snapshot_(ensureMemory(memory)),
       defaultDumpDirectory_(resolveRenderGraphDumpDirectory()) {}
 
 void RenderGraphTelemetryService::capture(
@@ -141,14 +124,14 @@ void RenderGraphTelemetryService::capture(
       compiled.transientBufferAllocationByResource.size());
   summary.transientTexturePhysicalAllocationCount = static_cast<uint32_t>(
       compiled.transientTexturePhysicalAllocations.size());
-  summary.transientBufferPhysicalAllocationCount = static_cast<uint32_t>(
-      compiled.transientBufferPhysicalAllocations.size());
+  summary.transientBufferPhysicalAllocationCount =
+      static_cast<uint32_t>(compiled.transientBufferPhysicalAllocations.size());
   summary.unresolvedTextureBindingCount =
       static_cast<uint32_t>(compiled.unresolvedTextureBindings.size());
   summary.resolvedDependencyBufferSlotCount =
       static_cast<uint32_t>(compiled.resolvedDependencyBuffers.size());
-  summary.unresolvedDependencyBufferBindingCount = static_cast<uint32_t>(
-      compiled.unresolvedDependencyBufferBindings.size());
+  summary.unresolvedDependencyBufferBindingCount =
+      static_cast<uint32_t>(compiled.unresolvedDependencyBufferBindings.size());
   summary.ownedPreDispatchCount =
       static_cast<uint32_t>(compiled.ownedPreDispatches.size());
   summary.ownedDrawItemCount =
@@ -161,41 +144,61 @@ void RenderGraphTelemetryService::capture(
   summary.unresolvedDrawBufferBindingCount =
       static_cast<uint32_t>(compiled.unresolvedDrawBufferBindings.size());
 
-  copyPassNames(snapshot_.passNames, compiled.passDebugNames);
-  copyVector(snapshot_.orderedPassIndices, compiled.orderedPassIndices);
-  copyVector(snapshot_.edges, compiled.edges);
-  copyVector(snapshot_.transientTextureLifetimes,
-             compiled.transientTextureLifetimes);
-  copyVector(snapshot_.transientBufferLifetimes,
-             compiled.transientBufferLifetimes);
-  copyVector(snapshot_.transientTextureAllocations,
-             compiled.transientTextureAllocations);
-  copyVector(snapshot_.transientBufferAllocations,
-             compiled.transientBufferAllocations);
-  copyVector(snapshot_.transientTextureAllocationByResource,
-             compiled.transientTextureAllocationByResource);
-  copyVector(snapshot_.transientBufferAllocationByResource,
-             compiled.transientBufferAllocationByResource);
-  copyVector(snapshot_.transientTexturePhysicalAllocations,
-             compiled.transientTexturePhysicalAllocations);
-  copyVector(snapshot_.transientBufferPhysicalAllocations,
-             compiled.transientBufferPhysicalAllocations);
-  copyVector(snapshot_.unresolvedTextureBindings,
-             compiled.unresolvedTextureBindings);
-  copyVector(snapshot_.resolvedDependencyBuffers,
-             compiled.resolvedDependencyBuffers);
-  copyVector(snapshot_.dependencyBufferRangesByPass,
-             compiled.dependencyBufferRangesByPass);
-  copyVector(snapshot_.unresolvedDependencyBufferBindings,
-             compiled.unresolvedDependencyBufferBindings);
-  copyVector(snapshot_.preDispatchRangesByPass, compiled.preDispatchRangesByPass);
-  copyVector(snapshot_.preDispatchDependencyRanges,
-             compiled.preDispatchDependencyRanges);
-  copyVector(snapshot_.unresolvedPreDispatchDependencyBufferBindings,
-             compiled.unresolvedPreDispatchDependencyBufferBindings);
-  copyVector(snapshot_.drawRangesByPass, compiled.drawRangesByPass);
-  copyVector(snapshot_.unresolvedDrawBufferBindings,
-             compiled.unresolvedDrawBufferBindings);
+  snapshot_.passNames.assign(compiled.passDebugNames.begin(),
+                             compiled.passDebugNames.end());
+  snapshot_.orderedPassIndices.assign(compiled.orderedPassIndices.begin(),
+                                      compiled.orderedPassIndices.end());
+  snapshot_.edges.assign(compiled.edges.begin(), compiled.edges.end());
+  snapshot_.transientTextureLifetimes.assign(
+      compiled.transientTextureLifetimes.begin(),
+      compiled.transientTextureLifetimes.end());
+  snapshot_.transientBufferLifetimes.assign(
+      compiled.transientBufferLifetimes.begin(),
+      compiled.transientBufferLifetimes.end());
+  snapshot_.transientTextureAllocations.assign(
+      compiled.transientTextureAllocations.begin(),
+      compiled.transientTextureAllocations.end());
+  snapshot_.transientBufferAllocations.assign(
+      compiled.transientBufferAllocations.begin(),
+      compiled.transientBufferAllocations.end());
+  snapshot_.transientTextureAllocationByResource.assign(
+      compiled.transientTextureAllocationByResource.begin(),
+      compiled.transientTextureAllocationByResource.end());
+  snapshot_.transientBufferAllocationByResource.assign(
+      compiled.transientBufferAllocationByResource.begin(),
+      compiled.transientBufferAllocationByResource.end());
+  snapshot_.transientTexturePhysicalAllocations.assign(
+      compiled.transientTexturePhysicalAllocations.begin(),
+      compiled.transientTexturePhysicalAllocations.end());
+  snapshot_.transientBufferPhysicalAllocations.assign(
+      compiled.transientBufferPhysicalAllocations.begin(),
+      compiled.transientBufferPhysicalAllocations.end());
+  snapshot_.unresolvedTextureBindings.assign(
+      compiled.unresolvedTextureBindings.begin(),
+      compiled.unresolvedTextureBindings.end());
+  snapshot_.resolvedDependencyBuffers.assign(
+      compiled.resolvedDependencyBuffers.begin(),
+      compiled.resolvedDependencyBuffers.end());
+  snapshot_.dependencyBufferRangesByPass.assign(
+      compiled.dependencyBufferRangesByPass.begin(),
+      compiled.dependencyBufferRangesByPass.end());
+  snapshot_.unresolvedDependencyBufferBindings.assign(
+      compiled.unresolvedDependencyBufferBindings.begin(),
+      compiled.unresolvedDependencyBufferBindings.end());
+  snapshot_.preDispatchRangesByPass.assign(
+      compiled.preDispatchRangesByPass.begin(),
+      compiled.preDispatchRangesByPass.end());
+  snapshot_.preDispatchDependencyRanges.assign(
+      compiled.preDispatchDependencyRanges.begin(),
+      compiled.preDispatchDependencyRanges.end());
+  snapshot_.unresolvedPreDispatchDependencyBufferBindings.assign(
+      compiled.unresolvedPreDispatchDependencyBufferBindings.begin(),
+      compiled.unresolvedPreDispatchDependencyBufferBindings.end());
+  snapshot_.drawRangesByPass.assign(compiled.drawRangesByPass.begin(),
+                                    compiled.drawRangesByPass.end());
+  snapshot_.unresolvedDrawBufferBindings.assign(
+      compiled.unresolvedDrawBufferBindings.begin(),
+      compiled.unresolvedDrawBufferBindings.end());
 
   hasSnapshot_ = true;
 }
@@ -210,8 +213,7 @@ std::filesystem::path RenderGraphTelemetryService::suggestDumpPath() const {
   return dumpDirectory / fileName.str();
 }
 
-Result<bool, std::string>
-RenderGraphTelemetryService::writeLatestTextDump(
+Result<bool, std::string> RenderGraphTelemetryService::writeLatestTextDump(
     std::string_view outputPath) const {
   if (!hasSnapshot_) {
     return Result<bool, std::string>::makeError(
@@ -241,10 +243,12 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
   }
 
   std::ofstream file(path, std::ios::out | std::ios::trunc);
+
+  std::error_code ec(errno, std::generic_category());
   if (!file.is_open()) {
     return Result<bool, std::string>::makeError(
         "writeRenderGraphTelemetryTextDump: failed to open '" + path.string() +
-        "'");
+        "': " + ec.message());
   }
 
   const auto &summary = snapshot.summary;
@@ -261,8 +265,8 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
   file << "transient_buffers: " << summary.transientBuffers << "\n";
   file << "transient_texture_lifetimes: "
        << summary.transientTextureLifetimeCount << "\n";
-  file << "transient_buffer_lifetimes: "
-       << summary.transientBufferLifetimeCount << "\n";
+  file << "transient_buffer_lifetimes: " << summary.transientBufferLifetimeCount
+       << "\n";
   file << "transient_texture_physical_count: "
        << summary.transientTexturePhysicalCount << "\n";
   file << "transient_buffer_physical_count: "
@@ -323,9 +327,9 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
 
   file << "Transient Texture Lifetimes:\n";
   for (const auto &lifetime : snapshot.transientTextureLifetimes) {
-    file << "  tex[" << lifetime.resourceIndex << "] first_exec="
-         << lifetime.firstExecutionIndex << " last_exec="
-         << lifetime.lastExecutionIndex << "\n";
+    file << "  tex[" << lifetime.resourceIndex
+         << "] first_exec=" << lifetime.firstExecutionIndex
+         << " last_exec=" << lifetime.lastExecutionIndex << "\n";
   }
   if (snapshot.transientTextureLifetimes.empty()) {
     file << "  <none>\n";
@@ -334,9 +338,9 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
 
   file << "Transient Buffer Lifetimes:\n";
   for (const auto &lifetime : snapshot.transientBufferLifetimes) {
-    file << "  buf[" << lifetime.resourceIndex << "] first_exec="
-         << lifetime.firstExecutionIndex << " last_exec="
-         << lifetime.lastExecutionIndex << "\n";
+    file << "  buf[" << lifetime.resourceIndex
+         << "] first_exec=" << lifetime.firstExecutionIndex
+         << " last_exec=" << lifetime.lastExecutionIndex << "\n";
   }
   if (snapshot.transientBufferLifetimes.empty()) {
     file << "  <none>\n";
@@ -408,10 +412,9 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
          << "] repr_tex=" << physical.representativeResourceIndex
          << " fmt=" << static_cast<uint32_t>(desc.format)
          << " dims=" << desc.dimensions.width << "x" << desc.dimensions.height
-         << "x" << desc.dimensions.depth
-         << " layers=" << desc.numLayers
-         << " samples=" << desc.numSamples
-         << " mips=" << desc.numMipLevels << "\n";
+         << "x" << desc.dimensions.depth << " layers=" << desc.numLayers
+         << " samples=" << desc.numSamples << " mips=" << desc.numMipLevels
+         << "\n";
   }
   if (snapshot.transientTexturePhysicalAllocations.empty()) {
     file << "  <none>\n";

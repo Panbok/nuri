@@ -91,10 +91,9 @@ buildWindowsFilterBuffer(std::span<const FileDialogFilter> filters) {
   return buffer;
 }
 
-HWND resolveDialogOwnerWindow(const OpenFileRequest &request) {
-  if (request.ownerWindowHandle != nullptr) {
-    auto *const glfwWindow =
-        static_cast<GLFWwindow *>(request.ownerWindowHandle);
+HWND resolveDialogOwnerWindowFromHandle(void *ownerWindowHandle) {
+  if (ownerWindowHandle != nullptr) {
+    auto *const glfwWindow = static_cast<GLFWwindow *>(ownerWindowHandle);
     if (glfwWindow != nullptr) {
       HWND hwnd = glfwGetWin32Window(glfwWindow);
       if (hwnd != nullptr && IsWindow(hwnd) != FALSE) {
@@ -110,10 +109,12 @@ HWND resolveDialogOwnerWindow(const OpenFileRequest &request) {
   return nullptr;
 }
 
+HWND resolveDialogOwnerWindow(const OpenFileRequest &request) {
+  return resolveDialogOwnerWindowFromHandle(request.ownerWindowHandle);
+}
+
 HWND resolveDialogOwnerWindow(const SaveFileRequest &request) {
-  OpenFileRequest openRequest{};
-  openRequest.ownerWindowHandle = request.ownerWindowHandle;
-  return resolveDialogOwnerWindow(openRequest);
+  return resolveDialogOwnerWindowFromHandle(request.ownerWindowHandle);
 }
 
 } // namespace

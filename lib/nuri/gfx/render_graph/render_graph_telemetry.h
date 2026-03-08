@@ -6,7 +6,6 @@
 
 #include <filesystem>
 #include <memory_resource>
-#include <optional>
 #include <string>
 #include <string_view>
 
@@ -91,8 +90,8 @@ public:
 
   void capture(const RenderGraphCompileResult &compiled);
   [[nodiscard]] bool hasSnapshot() const noexcept { return hasSnapshot_; }
-  [[nodiscard]] const RenderGraphTelemetrySnapshot *latestSnapshot() const
-      noexcept {
+  [[nodiscard]] const RenderGraphTelemetrySnapshot *
+  latestSnapshot() const noexcept {
     return hasSnapshot_ ? &snapshot_ : nullptr;
   }
   [[nodiscard]] std::filesystem::path suggestDumpPath() const;
