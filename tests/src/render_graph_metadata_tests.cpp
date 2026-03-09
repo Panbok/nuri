@@ -278,7 +278,9 @@ TEST(RenderGraphMetadataTest, ExplicitLegacyRegistrationWithoutInference) {
       builder.importBuffer(vertexBuffer, "metadata_explicit_vb");
   auto ibImportResult =
       builder.importBuffer(indexBuffer, "metadata_explicit_ib");
-  if (colorImportResult.hasError() || depthImportResult.hasError() || depImportResult.hasError() || vbImportResult.hasError() || ibImportResult.hasError()) {
+  if (colorImportResult.hasError() || depthImportResult.hasError() ||
+      depImportResult.hasError() || vbImportResult.hasError() ||
+      ibImportResult.hasError()) {
     ADD_FAILURE() << "explicit registration imports should succeed";
     return;
   }
@@ -1082,7 +1084,9 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
       makeTransientBufferDesc(64u), "alloc_buf_a");
   auto transientBufferBResult = builder.createTransientBuffer(
       makeTransientBufferDesc(64u), "alloc_buf_b");
-  if (transientTextureAResult.hasError() || transientTextureBResult.hasError() || transientBufferAResult.hasError() || transientBufferBResult.hasError()) {
+  if (transientTextureAResult.hasError() ||
+      transientTextureBResult.hasError() || transientBufferAResult.hasError() ||
+      transientBufferBResult.hasError()) {
     ADD_FAILURE() << "createTransientTexture/Buffer should succeed";
     return;
   }

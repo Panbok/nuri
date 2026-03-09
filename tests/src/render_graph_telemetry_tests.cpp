@@ -19,9 +19,8 @@ using namespace nuri;
 using namespace nuri::test_support;
 
 std::filesystem::path makeTempPath(std::string_view stem) {
-  const auto tick = std::chrono::high_resolution_clock::now()
-                        .time_since_epoch()
-                        .count();
+  const auto tick =
+      std::chrono::high_resolution_clock::now().time_since_epoch().count();
   return std::filesystem::temp_directory_path() /
          ("nuri_" + std::string(stem) + "_" + std::to_string(tick));
 }
@@ -39,27 +38,37 @@ void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
   compiled.transientTexturePhysicalCount = 8u;
   compiled.transientBufferPhysicalCount = 9u;
 
-  compiled.passDebugNames.emplace_back("first_pass", memory);
-  compiled.passDebugNames.emplace_back("second_pass", memory);
+  std::pmr::string firstPassName(memory);
+  firstPassName = "first_pass";
+  compiled.passDebugNames.push_back(std::move(firstPassName));
+
+  std::pmr::string secondPassName(memory);
+  secondPassName = "second_pass";
+  compiled.passDebugNames.push_back(std::move(secondPassName));
   compiled.orderedPassIndices.push_back(1u);
   compiled.orderedPassIndices.push_back(0u);
   compiled.edges.push_back({.before = 0u, .after = 1u});
 
-  compiled.transientTextureLifetimes.push_back(
-      {.resourceIndex = 3u, .firstExecutionIndex = 0u, .lastExecutionIndex = 2u});
-  compiled.transientBufferLifetimes.push_back(
-      {.resourceIndex = 4u, .firstExecutionIndex = 1u, .lastExecutionIndex = 3u});
+  compiled.transientTextureLifetimes.push_back({.resourceIndex = 3u,
+                                                .firstExecutionIndex = 0u,
+                                                .lastExecutionIndex = 2u});
+  compiled.transientBufferLifetimes.push_back({.resourceIndex = 4u,
+                                               .firstExecutionIndex = 1u,
+                                               .lastExecutionIndex = 3u});
   compiled.transientTextureAllocations.push_back(
       {.resourceIndex = 3u, .allocationIndex = 1u});
   compiled.transientBufferAllocations.push_back(
       {.resourceIndex = 4u, .allocationIndex = 2u});
-  compiled.transientTextureAllocationByResource = {UINT32_MAX, 1u, UINT32_MAX, 1u};
+  compiled.transientTextureAllocationByResource = {UINT32_MAX, 1u, UINT32_MAX,
+                                                   1u};
   compiled.transientBufferAllocationByResource = {2u, UINT32_MAX, UINT32_MAX};
 
-  RenderGraphCompileResult::TransientTexturePhysicalAllocation texturePhysical{};
+  RenderGraphCompileResult::TransientTexturePhysicalAllocation
+      texturePhysical{};
   texturePhysical.allocationIndex = 1u;
   texturePhysical.representativeResourceIndex = 3u;
-  texturePhysical.desc = makeTransientTextureDesc(Format::RGBA8_UNORM, 64u, 32u);
+  texturePhysical.desc =
+      makeTransientTextureDesc(Format::RGBA8_UNORM, 64u, 32u);
   compiled.transientTexturePhysicalAllocations.push_back(texturePhysical);
 
   RenderGraphCompileResult::TransientBufferPhysicalAllocation bufferPhysical{};
@@ -76,7 +85,9 @@ void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
       BufferHandle{.index = 11u, .generation = 2u});
   compiled.dependencyBufferRangesByPass.push_back({.offset = 0u, .count = 1u});
   compiled.unresolvedDependencyBufferBindings.push_back(
-      {.orderedPassIndex = 0u, .dependencyBufferIndex = 0u, .bufferResourceIndex = 4u});
+      {.orderedPassIndex = 0u,
+       .dependencyBufferIndex = 0u,
+       .bufferResourceIndex = 4u});
   compiled.preDispatchRangesByPass.push_back({.offset = 0u, .count = 1u});
   compiled.preDispatchDependencyRanges.push_back({.offset = 0u, .count = 1u});
   compiled.unresolvedPreDispatchDependencyBufferBindings.push_back(
@@ -146,7 +157,8 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
 
   EXPECT_TRUE(telemetry.writeLatestTextDump("").hasError());
 
-  const std::filesystem::path outputPath = makeTempPath("render_graph_dump.txt");
+  const std::filesystem::path outputPath =
+      makeTempPath("render_graph_dump.txt");
   const auto dumpResult =
       telemetry.writeLatestTextDump(outputPath.generic_string());
   ASSERT_FALSE(dumpResult.hasError());
@@ -166,7 +178,8 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
 
 TEST(RenderGraphTelemetryTest, SuggestDumpPathUsesEnvDirectorySeed) {
   const std::filesystem::path dumpDirectory = makeTempPath("telemetry_seed");
-  EnvVarGuard envGuard("NURI_RENDER_GRAPH_DUMP", dumpDirectory.generic_string());
+  EnvVarGuard envGuard("NURI_RENDER_GRAPH_DUMP",
+                       dumpDirectory.generic_string());
 
   RenderGraphTelemetryService telemetry;
 

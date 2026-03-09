@@ -22,9 +22,8 @@ using namespace nuri;
 using namespace nuri::test_support;
 
 std::filesystem::path makeTempRendererPath(std::string_view stem) {
-  const auto tick = std::chrono::high_resolution_clock::now()
-                        .time_since_epoch()
-                        .count();
+  const auto tick =
+      std::chrono::high_resolution_clock::now().time_since_epoch().count();
   return std::filesystem::temp_directory_path() /
          ("nuri_" + std::string(stem) + "_" + std::to_string(tick));
 }
@@ -120,7 +119,8 @@ TEST(RenderGraphRendererTest,
 TEST(RenderGraphRendererTest, RendererCapturesTelemetryWithoutAutomaticDump) {
   const std::filesystem::path dumpDirectory =
       makeTempRendererPath("renderer_telemetry_dir");
-  EnvVarGuard envGuard("NURI_RENDER_GRAPH_DUMP", dumpDirectory.generic_string());
+  EnvVarGuard envGuard("NURI_RENDER_GRAPH_DUMP",
+                       dumpDirectory.generic_string());
 
   std::array<std::byte, 64 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),

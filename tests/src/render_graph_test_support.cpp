@@ -12,7 +12,9 @@ bool sameHandle(TextureHandle lhs, TextureHandle rhs) {
   return lhs.index == rhs.index && lhs.generation == rhs.generation;
 }
 
-bool sameBuffer(BufferHandle lhs, BufferHandle rhs) { return sameHandle(lhs, rhs); }
+bool sameBuffer(BufferHandle lhs, BufferHandle rhs) {
+  return sameHandle(lhs, rhs);
+}
 
 bool sameTexture(TextureHandle lhs, TextureHandle rhs) {
   return sameHandle(lhs, rhs);
@@ -312,16 +314,18 @@ Result<bool, std::string> FakeGPUDeviceBase::beginFrame(uint64_t) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void FakeGPUDeviceBase::recordSubmitFrame(const RenderFrame &) { ++submitCount; }
+void FakeGPUDeviceBase::recordSubmitFrame(const RenderFrame &) {
+  ++submitCount;
+}
 
-Result<bool, std::string> FakeGPUDeviceBase::submitFrame(
-    const RenderFrame &frame) {
+Result<bool, std::string>
+FakeGPUDeviceBase::submitFrame(const RenderFrame &frame) {
   recordSubmitFrame(frame);
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> FakeExecutorGPUDevice::submitFrame(
-    const RenderFrame &frame) {
+Result<bool, std::string>
+FakeExecutorGPUDevice::submitFrame(const RenderFrame &frame) {
   recordSubmitFrame(frame);
   lastSubmitPassCount = frame.passes.size();
 
@@ -358,8 +362,8 @@ Result<bool, std::string> FakeExecutorGPUDevice::submitFrame(
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-FakeGPUDeviceBase::submitComputeDispatches(std::span<const ComputeDispatchItem>) {
+Result<bool, std::string> FakeGPUDeviceBase::submitComputeDispatches(
+    std::span<const ComputeDispatchItem>) {
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -384,8 +388,8 @@ FakeGPUDeviceBase::updateBuffer(BufferHandle, std::span<const std::byte>,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-FakeGPUDeviceBase::readBuffer(BufferHandle, size_t, std::span<std::byte>) {
+Result<bool, std::string> FakeGPUDeviceBase::readBuffer(BufferHandle, size_t,
+                                                        std::span<std::byte>) {
   return Result<bool, std::string>::makeError("not implemented in fake device");
 }
 

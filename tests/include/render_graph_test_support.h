@@ -20,7 +20,8 @@ bool sameTexture(TextureHandle lhs, TextureHandle rhs);
 BufferDesc makeTransientBufferDesc(size_t bytes);
 TextureDesc makeTransientTextureDesc(Format format, uint32_t width,
                                      uint32_t height);
-RenderPass makeTestPass(std::string_view label, TextureHandle colorTexture = {});
+RenderPass makeTestPass(std::string_view label,
+                        TextureHandle colorTexture = {});
 
 Result<RenderGraphPassId, std::string>
 addTestGraphicsPass(RenderGraphBuilder &builder, const RenderPass &pass,
@@ -102,18 +103,17 @@ public:
   Result<bool, std::string>
   copyBufferRegions(std::span<const BufferCopyRegion> regions) override;
 
-  Result<bool, std::string>
-  updateBuffer(BufferHandle buffer, std::span<const std::byte> data,
-               size_t offset) override;
-  Result<bool, std::string>
-  readBuffer(BufferHandle buffer, size_t offset,
-             std::span<std::byte> outBytes) override;
+  Result<bool, std::string> updateBuffer(BufferHandle buffer,
+                                         std::span<const std::byte> data,
+                                         size_t offset) override;
+  Result<bool, std::string> readBuffer(BufferHandle buffer, size_t offset,
+                                       std::span<std::byte> outBytes) override;
   std::byte *getMappedBufferPtr(BufferHandle buffer) override;
   void flushMappedBuffer(BufferHandle buffer, size_t offset,
                          size_t size) override;
-  Result<bool, std::string>
-  readTexture(TextureHandle texture, const TextureReadbackRegion &region,
-              std::span<std::byte> outBytes) override;
+  Result<bool, std::string> readTexture(TextureHandle texture,
+                                        const TextureReadbackRegion &region,
+                                        std::span<std::byte> outBytes) override;
 
   void waitIdle() override;
 
