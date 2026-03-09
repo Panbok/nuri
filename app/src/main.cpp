@@ -5,7 +5,6 @@
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
-#include "nuri/gfx/layers/debug_layer.h"
 #include "nuri/gfx/layers/opaque_layer.h"
 #include "nuri/gfx/layers/render_frame_context.h"
 #include "nuri/gfx/layers/skybox_layer.h"
@@ -16,20 +15,17 @@
 #include "nuri/scene/camera_system.h"
 #include "nuri/scene/render_scene.h"
 #include "nuri/text/text_layer_2d.h"
-#include "nuri/text/text_layer_3d.h"
 #include "nuri/text/text_system.h"
 
-#include <ctime>
 #include <glm/gtc/matrix_transform.hpp>
 
 namespace {
 
-constexpr std::string_view kSampleDuckModelRelativePath =
-    "rubber_duck/scene.gltf";
-constexpr std::string_view kSampleDuckAlbedoRelativePath =
-    "rubber_duck/textures/Duck_baseColor.png";
+constexpr std::string_view kDamagedHelmetModelRelativePath =
+    "DamagedHelmet/DamagedHelmet.gltf";
 constexpr std::string_view kSampleEnvironmentHdrRelativePath =
     "qwantani_moon_noon_puresky_4k.hdr";
+constexpr float kHelmetRotationSpeedRadians = glm::radians(35.0f);
 
 nuri::ApplicationConfig toApplicationConfig(const nuri::RuntimeConfig &config) {
   return nuri::ApplicationConfig{
@@ -93,37 +89,6 @@ std::filesystem::path pickDefaultNfontPath(const nuri::RuntimeConfig &config) {
   return (fontsRoot / "default_ui.nfont").lexically_normal();
 }
 
-[[nodiscard]] std::array<float, 16> encodeWorld(const glm::mat4 &m) {
-  std::array<float, 16> out{};
-  for (int c = 0; c < 4; ++c) {
-    for (int r = 0; r < 4; ++r) {
-      out[static_cast<size_t>(c * 4 + r)] = m[c][r];
-    }
-  }
-  return out;
-}
-
-[[nodiscard]] std::string formatLocalTimeHhMmSs() {
-  const std::time_t now = std::time(nullptr);
-  std::tm localTime{};
-#if defined(_WIN32)
-  if (localtime_s(&localTime, &now) != 0) {
-    return "00:00:00";
-  }
-#else
-  if (localtime_r(&now, &localTime) == nullptr) {
-    return "00:00:00";
-  }
-#endif
-
-  std::array<char, 16> buffer{};
-  if (std::strftime(buffer.data(), buffer.size(), "%H:%M:%S", &localTime) ==
-      0) {
-    return "00:00:00";
-  }
-  return std::string(buffer.data());
-}
-
 } // namespace
 
 class NuriApplication : public nuri::Application {
@@ -151,27 +116,14 @@ public:
     const nuri::Camera *activeCamera = cameraSystem_.activeCamera();
     NURI_ASSERT(activeCamera != nullptr, "No active camera");
 
-    const double timeSeconds = getTime();
-    buildFrameContext(*activeCamera, timeSeconds);
-    queueTextSamples();
+    buildFrameContext(*activeCamera, getTime());
+    queuePerformanceOverlay();
     submitLayeredFrame();
   }
 
   void onUpdate(double deltaTime) override {
-    frameDeltaSeconds_ =
-        (std::isfinite(deltaTime) && deltaTime >= 0.0) ? deltaTime : 0.0;
-    fpsFrameCount_++;
-    fpsAccumulatorSeconds_ += frameDeltaSeconds_;
-    constexpr double kFpsAverageWindowSeconds = 0.5;
-    if (fpsAccumulatorSeconds_ >= kFpsAverageWindowSeconds) {
-      currentFps_ =
-          fpsAccumulatorSeconds_ > 0.0
-              ? static_cast<float>(fpsFrameCount_ / fpsAccumulatorSeconds_)
-              : 0.0f;
-      fpsAccumulatorSeconds_ = 0.0;
-      fpsFrameCount_ = 0;
-    }
-
+    updatePerformanceMetrics(deltaTime);
+    updateHelmetRotation(deltaTime);
     cameraSystem_.update(deltaTime, getInput());
   }
 
@@ -196,8 +148,6 @@ public:
 private:
   void initializeCamera() {
     nuri::Camera camera{};
-    camera.setLookAt(glm::vec3(0.0f, 1.0f, -1.5f), glm::vec3(0.0f, 0.5f, 0.0f),
-                     glm::vec3(0.0f, 1.0f, 0.0f));
     camera.setProjectionType(nuri::ProjectionType::Perspective);
 
     nuri::CameraController controller = nuri::makeFpsDirectController();
@@ -208,9 +158,6 @@ private:
     const bool setActive =
         cameraSystem_.setActiveCamera(mainCameraHandle_, getWindow());
     NURI_ASSERT(setActive, "Failed to activate main camera");
-
-    NURI_LOG_INFO("NuriApplication::initializeCamera: Main camera initialized "
-                  "(WASD/QE move, RMB look, P projection toggle)");
   }
 
   void initializeRenderLayers() {
@@ -225,22 +172,6 @@ private:
     NURI_ASSERT(opaqueLayer != nullptr, "Failed to create opaque layer");
     NURI_ASSERT(getLayerStack().pushLayer(std::move(opaqueLayer)) != nullptr,
                 "Failed to push opaque layer");
-
-    auto debugLayer = nuri::DebugLayer::create(
-        getGPU(), config_.shaders.debugGrid, layerMemoryResource());
-    NURI_ASSERT(debugLayer != nullptr, "Failed to create debug layer");
-    NURI_ASSERT(getLayerStack().pushLayer(std::move(debugLayer)) != nullptr,
-                "Failed to push debug layer");
-
-    if (textSystem_) {
-      auto textLayer3D = nuri::TextLayer3D::create({
-          .text = *textSystem_,
-      });
-      NURI_ASSERT(textLayer3D != nullptr, "Failed to create 3D text layer");
-      textLayer3D_ = static_cast<nuri::TextLayer3D *>(
-          getLayerStack().pushLayer(std::move(textLayer3D)));
-      NURI_ASSERT(textLayer3D_ != nullptr, "Failed to push 3D text layer");
-    }
   }
 
   void initializeTextOverlayLayer() {
@@ -284,8 +215,8 @@ private:
     NURI_ASSERT(textSystem_ != nullptr, "Text system was not created");
   }
 
-  void queueTextSamples() {
-    if (textSystem_ == nullptr) {
+  void queuePerformanceOverlay() {
+    if (textSystem_ == nullptr || textLayer2D_ == nullptr) {
       return;
     }
 
@@ -303,226 +234,28 @@ private:
 
     const float baseFontSizePx =
         std::clamp(textSystem_->defaultFontSizePx(), 8.0f, 256.0f);
+    std::array<char, 64> perfText{};
+    std::snprintf(perfText.data(), perfText.size(), "FPS: %.1f\nFT: %.2f ms",
+                  currentFps_, static_cast<float>(frameDeltaSeconds_ * 1000.0));
+
     nuri::ScopedScratch scopedScratch(textScratchArena_);
     std::pmr::memory_resource &scratch = *scopedScratch.resource();
 
-    if (textLayer2D_ != nullptr) {
-      (void)enqueue2DTextSamples(defaultFont, baseFontSizePx, scratch);
+    nuri::Text2DDesc perf{};
+    perf.utf8 = perfText.data();
+    perf.style.font = defaultFont;
+    perf.style.pxSize = baseFontSizePx * 0.55f;
+    perf.layout.alignH = nuri::TextAlignH::Left;
+    perf.layout.alignV = nuri::TextAlignV::Top;
+    perf.fillColor = {.r = 0.95f, .g = 1.0f, .b = 0.95f, .a = 1.0f};
+    perf.x = 20.0f;
+    perf.y = 20.0f;
+
+    auto enqueue = textSystem_->renderer().enqueue2D(perf, scratch);
+    if (enqueue.hasError()) {
+      NURI_LOG_WARNING("NuriApplication: failed to enqueue overlay text: %s",
+                       enqueue.error().c_str());
     }
-
-    if (textLayer3D_ != nullptr) {
-      (void)enqueue3DTextSamples(defaultFont, baseFontSizePx, scratch);
-    }
-  }
-
-  [[nodiscard]] bool enqueue2DTextSamples(nuri::FontHandle defaultFont,
-                                          float baseFontSizePx,
-                                          std::pmr::memory_resource &scratch) {
-    auto enqueueSample =
-        [&](const nuri::Text2DDesc &sample) -> std::optional<nuri::TextBounds> {
-      auto enqueue = textSystem_->renderer().enqueue2D(sample, scratch);
-      if (enqueue.hasError()) {
-        NURI_LOG_WARNING(
-            "NuriApplication: failed to enqueue 2D text sample: %s",
-            enqueue.error().c_str());
-        return std::nullopt;
-      }
-      return enqueue.value();
-    };
-    const auto configureAsciiLayout = [](nuri::TextLayoutParams &layout) {
-      (void)layout;
-    };
-
-    nuri::Text2DDesc headline{};
-    headline.utf8 = "MTSDF 2D Raster Test 0123456789 AaBbCc";
-    headline.style.font = defaultFont;
-    headline.style.pxSize = baseFontSizePx;
-    headline.layout.alignH = nuri::TextAlignH::Left;
-    headline.layout.alignV = nuri::TextAlignV::Top;
-    configureAsciiLayout(headline.layout);
-    headline.fillColor = {.r = 1.0f, .g = 1.0f, .b = 1.0f, .a = 1.0f};
-    headline.x = 20.0f;
-    headline.y = 20.0f;
-    const std::optional<nuri::TextBounds> headlineBounds =
-        enqueueSample(headline);
-    if (!headlineBounds.has_value()) {
-      return false;
-    }
-
-    nuri::Text2DDesc kerning{};
-    kerning.utf8 = "Kerning: AV AVATAR To WA TA YA LT";
-    kerning.style.font = defaultFont;
-    kerning.style.pxSize = baseFontSizePx * 0.67f;
-    kerning.layout.alignH = nuri::TextAlignH::Left;
-    kerning.layout.alignV = nuri::TextAlignV::Top;
-    configureAsciiLayout(kerning.layout);
-    kerning.fillColor = {.r = 0.86f, .g = 0.92f, .b = 1.0f, .a = 1.0f};
-    kerning.x = 20.0f;
-    kerning.y = headlineBounds->maxY + 14.0f;
-    const std::optional<nuri::TextBounds> kerningBounds =
-        enqueueSample(kerning);
-    if (!kerningBounds.has_value()) {
-      return false;
-    }
-
-    nuri::Text2DDesc wrap{};
-    wrap.utf8 = "Wrap(320px): The quick brown fox jumps over the lazy dog near "
-                "the river bank.";
-    wrap.style.font = defaultFont;
-    wrap.style.pxSize = baseFontSizePx * 0.62f;
-    wrap.layout.wrapMode = nuri::TextWrapMode::Word;
-    wrap.layout.maxWidthPx = 320.0f;
-    wrap.layout.alignH = nuri::TextAlignH::Left;
-    wrap.layout.alignV = nuri::TextAlignV::Top;
-    configureAsciiLayout(wrap.layout);
-    wrap.fillColor = {.r = 0.9f, .g = 1.0f, .b = 0.9f, .a = 1.0f};
-    wrap.x = 20.0f;
-    wrap.y = kerningBounds->maxY + 14.0f;
-    const std::optional<nuri::TextBounds> wrapBounds = enqueueSample(wrap);
-    if (!wrapBounds.has_value()) {
-      return false;
-    }
-
-    nuri::Text2DDesc multiline{};
-    multiline.utf8 = "Manual newline:\nLine 1\nLine 2\nLine 3";
-    multiline.style.font = defaultFont;
-    multiline.style.pxSize = baseFontSizePx * 0.57f;
-    multiline.layout.alignH = nuri::TextAlignH::Left;
-    multiline.layout.alignV = nuri::TextAlignV::Top;
-    configureAsciiLayout(multiline.layout);
-    multiline.fillColor = {.r = 1.0f, .g = 0.95f, .b = 0.85f, .a = 1.0f};
-    multiline.x = 20.0f;
-    multiline.y = wrapBounds->maxY + 18.0f;
-    if (!enqueueSample(multiline).has_value()) {
-      return false;
-    }
-
-    int32_t windowWidth = 0;
-    int32_t windowHeight = 0;
-    getWindow().getWindowSize(windowWidth, windowHeight);
-    if (windowWidth <= 0 || windowHeight <= 0) {
-      getWindow().getFramebufferSize(windowWidth, windowHeight);
-    }
-    const float overlayWidth =
-        std::max(static_cast<float>(windowWidth) - 40.0f, 0.0f);
-    if (overlayWidth > 0.0f) {
-      const float fps = currentFps_;
-      const float frameTimeMs = fps > 0.0f ? 1000.0f / fps : 0.0f;
-      std::array<char, 96> perfText{};
-      std::snprintf(perfText.data(), perfText.size(), "FPS: %.1f\nFT: %.2f ms",
-                    fps, frameTimeMs);
-
-      nuri::Text2DDesc perf{};
-      perf.utf8 = perfText.data();
-      perf.style.font = defaultFont;
-      perf.style.pxSize = baseFontSizePx * 0.52f;
-      perf.layout.alignH = nuri::TextAlignH::Right;
-      perf.layout.alignV = nuri::TextAlignV::Top;
-      perf.layout.maxWidthPx = overlayWidth;
-      configureAsciiLayout(perf.layout);
-      perf.fillColor = {.r = 0.95f, .g = 1.0f, .b = 0.95f, .a = 1.0f};
-      perf.x = 20.0f;
-      perf.y = 20.0f;
-      if (!enqueueSample(perf).has_value()) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  [[nodiscard]] bool enqueue3DTextSamples(nuri::FontHandle defaultFont,
-                                          float baseFontSizePx,
-                                          std::pmr::memory_resource &scratch) {
-    auto enqueueSample =
-        [&](const nuri::Text3DDesc &sample) -> std::optional<nuri::TextBounds> {
-      auto enqueue = textSystem_->renderer().enqueue3D(sample, scratch);
-      if (enqueue.hasError()) {
-        NURI_LOG_WARNING(
-            "NuriApplication: failed to enqueue 3D text sample: %s",
-            enqueue.error().c_str());
-        return std::nullopt;
-      }
-      return enqueue.value();
-    };
-    const auto configureAsciiLayout = [](nuri::TextLayoutParams &layout) {
-      (void)layout;
-    };
-
-    nuri::Text3DDesc spherical{};
-    spherical.utf8 = "MTSDF 3D BILLBOARD";
-    spherical.style.font = defaultFont;
-    spherical.style.pxSize = baseFontSizePx * 0.75f;
-    spherical.layout.alignH = nuri::TextAlignH::Center;
-    spherical.layout.alignV = nuri::TextAlignV::Middle;
-    configureAsciiLayout(spherical.layout);
-    spherical.fillColor = {.r = 1.0f, .g = 1.0f, .b = 1.0f, .a = 1.0f};
-    spherical.billboard = nuri::TextBillboardMode::Spherical;
-    glm::mat4 sphericalWorld(1.0f);
-    sphericalWorld =
-        glm::translate(sphericalWorld, glm::vec3(0.0f, 2.2f, 0.0f));
-    sphericalWorld = glm::scale(sphericalWorld, glm::vec3(0.025f));
-    spherical.worldFromText = encodeWorld(sphericalWorld);
-    if (!enqueueSample(spherical).has_value()) {
-      return false;
-    }
-
-    nuri::Text3DDesc cylindrical{};
-    cylindrical.utf8 = "CYLINDRICAL Y";
-    cylindrical.style.font = defaultFont;
-    cylindrical.style.pxSize = baseFontSizePx * 0.52f;
-    cylindrical.layout.alignH = nuri::TextAlignH::Center;
-    cylindrical.layout.alignV = nuri::TextAlignV::Middle;
-    configureAsciiLayout(cylindrical.layout);
-    cylindrical.fillColor = {.r = 0.85f, .g = 1.0f, .b = 0.85f, .a = 1.0f};
-    cylindrical.billboard = nuri::TextBillboardMode::CylindricalY;
-    glm::mat4 cylindricalWorld(1.0f);
-    cylindricalWorld =
-        glm::translate(cylindricalWorld, glm::vec3(-2.3f, 1.5f, 0.0f));
-    cylindricalWorld = glm::scale(cylindricalWorld, glm::vec3(0.02f));
-    cylindrical.worldFromText = encodeWorld(cylindricalWorld);
-    if (!enqueueSample(cylindrical).has_value()) {
-      return false;
-    }
-
-    nuri::Text3DDesc clock{};
-    const std::string clockText = formatLocalTimeHhMmSs();
-    clock.utf8 = clockText;
-    clock.style.font = defaultFont;
-    clock.style.pxSize = baseFontSizePx * 0.62f;
-    clock.layout.alignH = nuri::TextAlignH::Center;
-    clock.layout.alignV = nuri::TextAlignV::Middle;
-    configureAsciiLayout(clock.layout);
-    clock.fillColor = {.r = 1.0f, .g = 0.95f, .b = 0.82f, .a = 1.0f};
-    clock.billboard = nuri::TextBillboardMode::Spherical;
-    glm::mat4 clockWorld(1.0f);
-    clockWorld = glm::translate(clockWorld, glm::vec3(0.0f, 0.85f, 1.15f));
-    clockWorld = glm::scale(clockWorld, glm::vec3(0.02f));
-    clock.worldFromText = encodeWorld(clockWorld);
-    if (!enqueueSample(clock).has_value()) {
-      return false;
-    }
-
-    nuri::Text3DDesc fixed{};
-    fixed.utf8 = "WORLD FIXED";
-    fixed.style.font = defaultFont;
-    fixed.style.pxSize = baseFontSizePx * 0.50f;
-    fixed.layout.alignH = nuri::TextAlignH::Center;
-    fixed.layout.alignV = nuri::TextAlignV::Middle;
-    configureAsciiLayout(fixed.layout);
-    fixed.fillColor = {.r = 0.85f, .g = 0.9f, .b = 1.0f, .a = 1.0f};
-    fixed.billboard = nuri::TextBillboardMode::None;
-    glm::mat4 fixedWorld(1.0f);
-    fixedWorld = glm::translate(fixedWorld, glm::vec3(2.3f, 1.5f, 0.0f));
-    fixedWorld = glm::rotate(fixedWorld, glm::radians(145.0f),
-                             glm::vec3(0.0f, 1.0f, 0.0f));
-    fixedWorld = glm::scale(fixedWorld, glm::vec3(0.02f, -0.02f, 0.02f));
-    fixed.worldFromText = encodeWorld(fixedWorld);
-    if (!enqueueSample(fixed).has_value()) {
-      return false;
-    }
-
-    return true;
   }
 
   void loadSceneResources() {
@@ -531,33 +264,22 @@ private:
     scene_.setEnvironment(nuri::EnvironmentHandles{});
     releaseOwnedResourceHandles();
 
-    const std::string duckModelPath =
-        (config_.roots.models / kSampleDuckModelRelativePath).string();
-    const std::string duckAlbedoPath =
-        (config_.roots.models / kSampleDuckAlbedoRelativePath).string();
+    const std::string helmetModelPath =
+        (config_.roots.models / kDamagedHelmetModelRelativePath).string();
     const std::string environmentHdrPath =
         (config_.roots.textures / kSampleEnvironmentHdrRelativePath).string();
 
-    auto duckModelResult = resources.acquireModel(
-        nuri::ModelRequest{.path = duckModelPath, .debugName = "rubber_duck"});
-    NURI_ASSERT(!duckModelResult.hasError(), "Failed to create model: %s",
-                duckModelResult.error().c_str());
-    duckModel_ = duckModelResult.value();
-
-    auto duckAlbedoRefResult = resources.acquireTexture(nuri::TextureRequest{
-        .path = duckAlbedoPath,
-        .loadOptions =
-            nuri::TextureLoadOptions{.srgb = true, .generateMipmaps = true},
-        .kind = nuri::TextureRequestKind::Texture2D,
-        .debugName = "duck_albedo",
+    nuri::MeshImportOptions helmetImportOptions{};
+    helmetImportOptions.flipUVs = true;
+    auto helmetModelResult = resources.acquireModel(nuri::ModelRequest{
+        .path = helmetModelPath,
+        .importOptions = helmetImportOptions,
+        .debugName = "damaged_helmet",
     });
-    NURI_ASSERT(!duckAlbedoRefResult.hasError(),
-                "Failed to load albedo texture: %s",
-                duckAlbedoRefResult.error().c_str());
-    const nuri::TextureRecord *duckAlbedoRecord =
-        resources.tryGet(duckAlbedoRefResult.value());
-    NURI_ASSERT(duckAlbedoRecord != nullptr,
-                "Duck albedo record lookup failed");
+    NURI_ASSERT(!helmetModelResult.hasError(),
+                "Failed to create DamagedHelmet model: %s",
+                helmetModelResult.error().c_str());
+    helmetModel_ = helmetModelResult.value();
 
     auto cubemapResult = resources.acquireTexture(nuri::TextureRequest{
         .path = environmentHdrPath,
@@ -667,9 +389,6 @@ private:
                          resolvedPath.string().c_str(), result.error().c_str());
         return nuri::kInvalidTextureRef;
       }
-      NURI_LOG_INFO("NuriApplication::loadSceneResources: loaded IBL cubemap "
-                    "'%s'",
-                    resolvedPath.string().c_str());
       return result.value();
     };
 
@@ -702,8 +421,6 @@ private:
                          resolvedPath.string().c_str(), result.error().c_str());
         return nuri::kInvalidTextureRef;
       }
-      NURI_LOG_INFO("NuriApplication::loadSceneResources: loaded BRDF LUT '%s'",
-                    resolvedPath.string().c_str());
       return result.value();
     };
 
@@ -736,28 +453,76 @@ private:
       resources.release(brdfLutTexture);
     }
 
-    nuri::MaterialDesc duckMaterialDesc{};
-    duckMaterialDesc.textures.baseColor = duckAlbedoRecord->texture;
-    auto addDuckMaterialResult = resources.acquireMaterial(nuri::MaterialRequest{
-        .desc = duckMaterialDesc,
-        .textureRefs =
-            nuri::MaterialRequest::TextureRefs{
-                .baseColor = duckAlbedoRefResult.value(),
-            },
-        .debugName = "duck_material",
-    });
-    NURI_ASSERT(!addDuckMaterialResult.hasError(),
-                "Failed to acquire duck material: %s",
-                addDuckMaterialResult.error().c_str());
-    duckMaterialIndex_ = addDuckMaterialResult.value();
-    resources.setModelMaterialForAllSources(duckModel_, duckMaterialIndex_);
-    resources.release(duckAlbedoRefResult.value());
+    auto importedMaterialsResult =
+        resources.acquireMaterialsFromModel(nuri::ImportedMaterialRequest{
+            .modelPath = helmetModelPath,
+            .model = helmetModel_,
+            .debugNamePrefix = "damaged_helmet",
+        });
+    if (!importedMaterialsResult.hasError() &&
+        nuri::isValid(importedMaterialsResult.value().firstMaterial)) {
+      helmetMaterial_ = importedMaterialsResult.value().firstMaterial;
+    } else {
+      if (importedMaterialsResult.hasError()) {
+        NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to "
+                         "import DamagedHelmet materials from '%s': %s",
+                         helmetModelPath.c_str(),
+                         importedMaterialsResult.error().c_str());
+      }
 
-    auto addResult = scene_.addOpaqueRenderable(duckModel_, duckMaterialIndex_,
-                                                duckBaseModel_);
-    NURI_ASSERT(!addResult.hasError(), "Failed to add duck renderable: %s",
+      auto fallbackMaterialResult =
+          resources.acquireMaterial(nuri::MaterialRequest{
+              .desc = nuri::MaterialDesc{},
+              .debugName = "damaged_helmet_fallback_material",
+          });
+      NURI_ASSERT(!fallbackMaterialResult.hasError(),
+                  "Failed to acquire DamagedHelmet fallback material: %s",
+                  fallbackMaterialResult.error().c_str());
+      helmetMaterial_ = fallbackMaterialResult.value();
+      resources.setModelMaterialForAllSources(helmetModel_, helmetMaterial_);
+    }
+
+    const nuri::ModelRecord *helmetRecord = resources.tryGet(helmetModel_);
+    NURI_ASSERT(helmetRecord != nullptr && helmetRecord->model != nullptr,
+                "DamagedHelmet model record lookup failed");
+    const nuri::Model &helmetModel = *helmetRecord->model;
+
+    renderSettings_.opaque.enableInstanceCompute = false;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.enableTessellation = false;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.meshLodDistanceThresholds =
+        glm::vec3(8.0f, 16.0f, 32.0f);
+    renderSettings_.opaque.enableInstanceAnimation = false;
+
+    helmetRotationRadians_ = 0.0f;
+    auto addResult = scene_.addOpaqueRenderable(helmetModel_, helmetMaterial_,
+                                                helmetBaseModel_);
+    NURI_ASSERT(!addResult.hasError(),
+                "Failed to add DamagedHelmet renderable: %s",
                 addResult.error().c_str());
-    duckRenderableIndex_ = addResult.value();
+    helmetRenderableIndex_ = addResult.value();
+
+    const nuri::BoundingBox &bounds = helmetModel.bounds();
+    const float rawRadius =
+        std::max(0.5f * glm::length(bounds.getSize()), 0.25f);
+    const glm::vec3 center =
+        glm::vec3(helmetBaseModel_ * glm::vec4(bounds.getCenter(), 1.0f));
+    const float radius = std::max(0.25f, rawRadius);
+    const float cameraDistance = std::max(radius * 2.4f, 2.0f);
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    nuri::PerspectiveParams perspective = camera->perspective();
+    perspective.nearPlane = std::max(0.01f, cameraDistance / 3000.0f);
+    perspective.farPlane = std::max(500.0f, cameraDistance + radius * 12.0f);
+    camera->setProjectionType(nuri::ProjectionType::Perspective);
+    camera->setPerspective(perspective);
+    camera->setLookAt(center + glm::vec3(-cameraDistance * 0.38f,
+                                         radius * 0.18f + 0.2f,
+                                         -cameraDistance),
+                      center + glm::vec3(0.0f, radius * 0.03f, 0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
   }
 
   void releaseOwnedResourceHandles() {
@@ -769,8 +534,44 @@ private:
       ref = invalidRef;
     };
 
-    releaseRef(duckModel_, nuri::kInvalidModelRef);
-    releaseRef(duckMaterialIndex_, nuri::kInvalidMaterialRef);
+    releaseRef(helmetModel_, nuri::kInvalidModelRef);
+    releaseRef(helmetMaterial_, nuri::kInvalidMaterialRef);
+    helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+  }
+
+  void updatePerformanceMetrics(double deltaTime) {
+    frameDeltaSeconds_ =
+        (std::isfinite(deltaTime) && deltaTime >= 0.0) ? deltaTime : 0.0;
+    fpsFrameCount_++;
+    fpsAccumulatorSeconds_ += frameDeltaSeconds_;
+    constexpr double kFpsAverageWindowSeconds = 0.5;
+    if (fpsAccumulatorSeconds_ >= kFpsAverageWindowSeconds) {
+      currentFps_ =
+          fpsAccumulatorSeconds_ > 0.0
+              ? static_cast<float>(fpsFrameCount_ / fpsAccumulatorSeconds_)
+              : 0.0f;
+      fpsAccumulatorSeconds_ = 0.0;
+      fpsFrameCount_ = 0;
+    }
+  }
+
+  void updateHelmetRotation(double deltaTime) {
+    if (helmetRenderableIndex_ == std::numeric_limits<uint32_t>::max() ||
+        !std::isfinite(deltaTime) || deltaTime <= 0.0) {
+      return;
+    }
+
+    helmetRotationRadians_ +=
+        static_cast<float>(deltaTime) * kHelmetRotationSpeedRadians;
+    if (helmetRotationRadians_ >= glm::radians(360.0f)) {
+      helmetRotationRadians_ -= glm::radians(360.0f);
+    }
+
+    const glm::mat4 modelMatrix = glm::rotate(
+        helmetBaseModel_, helmetRotationRadians_, glm::vec3(0.0f, 0.0f, 1.0f));
+    const bool updated = scene_.setOpaqueRenderableTransform(
+        helmetRenderableIndex_, modelMatrix);
+    NURI_ASSERT(updated, "Failed to update DamagedHelmet transform");
   }
 
   void buildFrameContext(const nuri::Camera &camera, double timeSeconds) {
@@ -799,12 +600,12 @@ private:
   std::pmr::unsynchronized_pool_resource sceneMemory_;
   nuri::CameraSystem cameraSystem_;
   nuri::RenderScene scene_;
-  nuri::ModelRef duckModel_ = nuri::kInvalidModelRef;
-  nuri::MaterialRef duckMaterialIndex_ = nuri::kInvalidMaterialRef;
+  nuri::ModelRef helmetModel_ = nuri::kInvalidModelRef;
+  nuri::MaterialRef helmetMaterial_ = nuri::kInvalidMaterialRef;
   nuri::CameraHandle mainCameraHandle_{};
-  uint32_t duckRenderableIndex_ = std::numeric_limits<uint32_t>::max();
-  glm::mat4 duckBaseModel_ =
-      glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1, 0, 0));
+  uint32_t helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+  glm::mat4 helmetBaseModel_ =
+      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0));
 
   nuri::RenderSettings renderSettings_{};
   nuri::RenderFrameContext frameContext_{};
@@ -813,9 +614,9 @@ private:
   double fpsAccumulatorSeconds_ = 0.0;
   uint32_t fpsFrameCount_ = 0;
   float currentFps_ = 0.0f;
+  float helmetRotationRadians_ = 0.0f;
   std::unique_ptr<nuri::TextSystem> textSystem_{};
   nuri::ScratchArena textScratchArena_{};
-  nuri::TextLayer3D *textLayer3D_ = nullptr;
   nuri::TextLayer2D *textLayer2D_ = nullptr;
 };
 
