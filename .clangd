@@ -10,4 +10,4 @@ If:
     - tests/src/.*
     - tests/include/.*
 CompileFlags:
-  CompilationDatabase: build/debug/tests
+  CompilationDatabase: build_tests
