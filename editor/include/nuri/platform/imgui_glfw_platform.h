@@ -5,8 +5,8 @@
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
 
-#include <array>
 #include <GLFW/glfw3.h>
+#include <array>
 #include <memory>
 
 namespace nuri {

@@ -1,8 +1,8 @@
 #pragma once
 
+#include <span>
 #include <string>
 #include <string_view>
-#include <span>
 
 #include <glm/glm.hpp>
 
@@ -20,9 +20,8 @@ struct CameraControllerWidgetState {
   std::string lastError{};
 };
 
-void
-syncCameraControllerWidgetStateFromCamera(const Camera &camera,
-                                          CameraControllerWidgetState &state);
+void syncCameraControllerWidgetStateFromCamera(
+    const Camera &camera, CameraControllerWidgetState &state);
 
 void drawCameraControllerWidget(CameraSystem &cameraSystem,
                                 CameraControllerWidgetState &state);

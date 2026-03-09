@@ -114,7 +114,8 @@ struct EnvWriteDistributionPayload {
 };
 
 struct EnvWritePayload {
-  std::array<EnvWriteDistributionPayload, kEnvDistributionCount> distributions{};
+  std::array<EnvWriteDistributionPayload, kEnvDistributionCount>
+      distributions{};
 };
 
 struct EnvGpuStepProgress {
@@ -142,6 +143,7 @@ void cleanupEnvmapPrefilterBake(GPUDevice &gpu, EnvBakeGpuState &state);
 [[nodiscard]] Result<bool, std::string>
 writeEnvmapPrefilterOutputs(const EnvWritePayload &payload);
 
-[[nodiscard]] std::string_view envDistributionName(EnvDistribution distribution);
+[[nodiscard]] std::string_view
+envDistributionName(EnvDistribution distribution);
 
 } // namespace nuri::bakery::detail

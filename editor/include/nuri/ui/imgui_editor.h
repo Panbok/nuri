@@ -12,9 +12,9 @@
 namespace nuri {
 class ImGuiEditor final : public Editor {
 public:
-  static std::unique_ptr<ImGuiEditor> create(Window &window, GPUDevice &gpu,
-                                             EventManager &events,
-                                             const EditorServices &services = {});
+  static std::unique_ptr<ImGuiEditor>
+  create(Window &window, GPUDevice &gpu, EventManager &events,
+         const EditorServices &services = {});
   ~ImGuiEditor() override;
 
   ImGuiEditor(const ImGuiEditor &) = delete;

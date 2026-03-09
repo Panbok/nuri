@@ -37,7 +37,8 @@ struct EnvmapPrefilterBakeRequest {
   bool forceRebuild = false;
 };
 
-using BakeRequest = std::variant<BrdfLutBakeRequest, EnvmapPrefilterBakeRequest>;
+using BakeRequest =
+    std::variant<BrdfLutBakeRequest, EnvmapPrefilterBakeRequest>;
 
 struct BakeJobSnapshot {
   BakeJobId id{};

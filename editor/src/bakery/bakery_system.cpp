@@ -397,7 +397,8 @@ struct BakerySystem::Impl {
           return;
         }
 
-        auto planResult = detail::planBrdfLutBake(config, request->forceRebuild);
+        auto planResult =
+            detail::planBrdfLutBake(config, request->forceRebuild);
         if (planResult.hasError()) {
           setFailed(job, planResult.error());
           return;
@@ -421,7 +422,8 @@ struct BakerySystem::Impl {
         return;
       }
 
-      const auto *request = std::get_if<EnvmapPrefilterBakeRequest>(&job.request);
+      const auto *request =
+          std::get_if<EnvmapPrefilterBakeRequest>(&job.request);
       if (request == nullptr) {
         setFailed(job, "BakerySystem: envmap request payload mismatch");
         return;

@@ -2,10 +2,10 @@
 
 #include "nuri/ui/imgui_editor.h"
 
+#include "nuri/bakery/bakery_system.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
-#include "nuri/bakery/bakery_system.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/imgui_gpu_renderer.h"
@@ -46,12 +46,14 @@ constexpr const char *kSelectionWindowName = "Selection";
 enum class LayerSelection : uint8_t {
   Skybox,
   Opaque,
+  Transparent,
   Debug,
 };
 
-const std::array<LayerSelection, 3> kRenderLayers = {
+const std::array<LayerSelection, 4> kRenderLayers = {
     LayerSelection::Skybox,
     LayerSelection::Opaque,
+    LayerSelection::Transparent,
     LayerSelection::Debug,
 };
 
@@ -61,6 +63,8 @@ const char *layerDisplayName(LayerSelection layer) {
     return "Skybox";
   case LayerSelection::Opaque:
     return "Opaque";
+  case LayerSelection::Transparent:
+    return "Transparent";
   case LayerSelection::Debug:
     return "Debug";
   }
@@ -596,6 +600,10 @@ void drawDebugSettings(RenderSettings::DebugSettings &debug) {
   ImGui::Checkbox("Grid##DebugLayer", &debug.grid);
 }
 
+void drawTransparentSettings(RenderSettings::TransparentSettings &transparent) {
+  ImGui::Checkbox("Enabled##TransparentLayer", &transparent.enabled);
+}
+
 void drawLayerList(LayerSelection &selectedLayer) {
   ImGui::TextUnformatted("Layers");
   ImGui::Separator();
@@ -631,6 +639,9 @@ void drawLayerInspector(RenderSettings &renderSettings,
       break;
     case LayerSelection::Opaque:
       drawOpaqueSettings(renderSettings.opaque);
+      break;
+    case LayerSelection::Transparent:
+      drawTransparentSettings(renderSettings.transparent);
       break;
     case LayerSelection::Debug:
       drawDebugSettings(renderSettings.debug);
@@ -936,9 +947,10 @@ void drawBakeryWindow(BakeryUiState &state, bakery::BakerySystem *bakery,
   if (ImGui::Button("Queue BRDF LUT")) {
     state.status.clear();
     state.error.clear();
-    auto enqueueResult = bakery->enqueue(bakery::BakeRequest{bakery::BrdfLutBakeRequest{
-        .forceRebuild = state.forceRebuild,
-    }});
+    auto enqueueResult =
+        bakery->enqueue(bakery::BakeRequest{bakery::BrdfLutBakeRequest{
+            .forceRebuild = state.forceRebuild,
+        }});
     if (enqueueResult.hasError()) {
       state.error = enqueueResult.error();
     } else {
@@ -948,7 +960,8 @@ void drawBakeryWindow(BakeryUiState &state, bakery::BakerySystem *bakery,
     }
   }
 
-  ImGui::InputText("Env HDR Path", state.envHdrPath.data(), state.envHdrPath.size());
+  ImGui::InputText("Env HDR Path", state.envHdrPath.data(),
+                   state.envHdrPath.size());
   ImGui::SameLine();
   if (ImGui::Button("Browse...##EnvHdr")) {
     static constexpr std::array<FileDialogFilter, 4> kHdrFilters = {
@@ -969,11 +982,12 @@ void drawBakeryWindow(BakeryUiState &state, bakery::BakerySystem *bakery,
   if (ImGui::Button("Queue Env Prefilter")) {
     state.status.clear();
     state.error.clear();
-    auto enqueueResult = bakery->enqueue(
-        bakery::BakeRequest{bakery::EnvmapPrefilterBakeRequest{
-        .environmentHdrPath = std::filesystem::path(std::string(state.envHdrPath.data())),
-        .forceRebuild = state.forceRebuild,
-    }});
+    auto enqueueResult =
+        bakery->enqueue(bakery::BakeRequest{bakery::EnvmapPrefilterBakeRequest{
+            .environmentHdrPath =
+                std::filesystem::path(std::string(state.envHdrPath.data())),
+            .forceRebuild = state.forceRebuild,
+        }});
     if (enqueueResult.hasError()) {
       state.error = enqueueResult.error();
     } else {
@@ -997,16 +1011,18 @@ void drawBakeryWindow(BakeryUiState &state, bakery::BakerySystem *bakery,
       bakery->snapshotJobs(scratchResource);
   ImGui::Separator();
   ImGui::Text("Jobs: %d", static_cast<int>(jobs.size()));
-  if (ImGui::BeginTable(
-          "BakeryJobs", 6,
-          ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
-              ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
-          ImVec2(0.0f, 240.0f))) {
+  if (ImGui::BeginTable("BakeryJobs", 6,
+                        ImGuiTableFlags_BordersInnerV |
+                            ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
+                            ImGuiTableFlags_ScrollY,
+                        ImVec2(0.0f, 240.0f))) {
     ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 52.0f);
     ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 120.0f);
     ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-    ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-    ImGui::TableSetupColumn("Summary", ImGuiTableColumnFlags_WidthStretch, 0.0f);
+    ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed,
+                            90.0f);
+    ImGui::TableSetupColumn("Summary", ImGuiTableColumnFlags_WidthStretch,
+                            0.0f);
     ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthStretch, 0.0f);
     ImGui::TableHeadersRow();
 
@@ -1084,7 +1100,8 @@ void syncTelemetryDumpPath(RenderGraphTelemetryUiState &state,
     return;
   }
   const std::string currentPath = state.outputPath.data();
-  const std::string suggestedPath = telemetry->suggestDumpPath().generic_string();
+  const std::string suggestedPath =
+      telemetry->suggestDumpPath().generic_string();
   if (state.initializedOutputPath && currentPath != state.lastSuggestedPath) {
     return;
   }
@@ -1097,7 +1114,8 @@ void drawTextView(std::string_view text) {
   ImGui::TextUnformatted(text.data(), text.data() + text.size());
 }
 
-void drawTelemetrySummary(const RenderGraphTelemetrySnapshot::Summary &summary) {
+void drawTelemetrySummary(
+    const RenderGraphTelemetrySnapshot::Summary &summary) {
   if (!ImGui::BeginTable("RenderGraphTelemetrySummary", 2,
                          ImGuiTableFlags_BordersInnerV |
                              ImGuiTableFlags_SizingStretchProp)) {
@@ -1126,7 +1144,8 @@ void drawTelemetrySummary(const RenderGraphTelemetrySnapshot::Summary &summary) 
   drawRow("Buffer Lifetimes", summary.transientBufferLifetimeCount);
   drawRow("Texture Physicals", summary.transientTexturePhysicalCount);
   drawRow("Buffer Physicals", summary.transientBufferPhysicalCount);
-  drawRow("Resolved Dependency Slots", summary.resolvedDependencyBufferSlotCount);
+  drawRow("Resolved Dependency Slots",
+          summary.resolvedDependencyBufferSlotCount);
   drawRow("Resolved Pre-Dispatch Slots",
           summary.resolvedPreDispatchDependencyBufferSlotCount);
   drawRow("Unresolved Texture Bindings", summary.unresolvedTextureBindingCount);
@@ -1152,10 +1171,8 @@ void drawTelemetryTableSection(const char *header, const char *tableId,
   }
 
   if (ImGui::BeginTable(tableId, columns,
-                        ImGuiTableFlags_BordersInnerV |
-                            ImGuiTableFlags_RowBg |
-                            ImGuiTableFlags_Resizable |
-                            ImGuiTableFlags_ScrollY,
+                        ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                            ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
                         ImVec2(0.0f, height))) {
     drawRows();
     ImGui::EndTable();
@@ -1167,7 +1184,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                                     void *ownerWindowHandle) {
   syncTelemetryDumpPath(state, telemetry);
 
-  ImGui::InputText("Output .txt", state.outputPath.data(), state.outputPath.size());
+  ImGui::InputText("Output .txt", state.outputPath.data(),
+                   state.outputPath.size());
   ImGui::SameLine();
   if (ImGui::Button("Browse...##RenderGraphTelemetry")) {
     static constexpr std::array<FileDialogFilter, 2> kTelemetryFilters = {
@@ -1197,7 +1215,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
     if (dumpResult.hasError()) {
       state.error = dumpResult.error();
     } else {
-      state.status = std::string("Wrote telemetry to ") + state.outputPath.data();
+      state.status =
+          std::string("Wrote telemetry to ") + state.outputPath.data();
     }
   }
   if (!canDump) {
@@ -1228,7 +1247,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
   drawTelemetryTableSection(
       "Passes", "RenderGraphTelemetryPasses", 2, !snapshot->passNames.empty(),
       160.0f, [&]() {
-        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed,
+                                64.0f);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (uint32_t passIndex = 0; passIndex < snapshot->passNames.size();
@@ -1244,10 +1264,14 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
   drawTelemetryTableSection(
       "Edges", "RenderGraphTelemetryEdges", 4, !snapshot->edges.empty(), 140.0f,
       [&]() {
-        ImGui::TableSetupColumn("Before", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Before Name", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("After", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("After Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Before", ImGuiTableColumnFlags_WidthFixed,
+                                60.0f);
+        ImGui::TableSetupColumn("Before Name",
+                                ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("After", ImGuiTableColumnFlags_WidthFixed,
+                                60.0f);
+        ImGui::TableSetupColumn("After Name",
+                                ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (const auto &edge : snapshot->edges) {
           ImGui::TableNextRow();
@@ -1265,8 +1289,10 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
   drawTelemetryTableSection(
       "Execution Order", "RenderGraphTelemetryExecution", 3,
       !snapshot->orderedPassIndices.empty(), 140.0f, [&]() {
-        ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Rank", ImGuiTableColumnFlags_WidthFixed,
+                                60.0f);
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed,
+                                60.0f);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (uint32_t rank = 0; rank < snapshot->orderedPassIndices.size();
@@ -1287,10 +1313,14 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
       !snapshot->transientTextureLifetimes.empty() ||
           !snapshot->transientBufferLifetimes.empty(),
       180.0f, [&]() {
-        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("First", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Last", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("First", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Last", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
         ImGui::TableHeadersRow();
         for (const auto &lifetime : snapshot->transientTextureLifetimes) {
           ImGui::TableNextRow();
@@ -1321,9 +1351,12 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
       !snapshot->transientTextureAllocations.empty() ||
           !snapshot->transientBufferAllocations.empty(),
       180.0f, [&]() {
-        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
         ImGui::TableSetupColumn("Map", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (const auto &allocation : snapshot->transientTextureAllocations) {
@@ -1357,12 +1390,15 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
       !snapshot->transientTextureAllocationByResource.empty() ||
           !snapshot->transientBufferAllocationByResource.empty(),
       180.0f, [&]() {
-        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
         ImGui::TableHeadersRow();
-        for (uint32_t i = 0; i < snapshot->transientTextureAllocationByResource.size();
-             ++i) {
+        for (uint32_t i = 0;
+             i < snapshot->transientTextureAllocationByResource.size(); ++i) {
           const uint32_t physical =
               snapshot->transientTextureAllocationByResource[i];
           if (physical == UINT32_MAX) {
@@ -1376,8 +1412,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", physical);
         }
-        for (uint32_t i = 0; i < snapshot->transientBufferAllocationByResource.size();
-             ++i) {
+        for (uint32_t i = 0;
+             i < snapshot->transientBufferAllocationByResource.size(); ++i) {
           const uint32_t physical =
               snapshot->transientBufferAllocationByResource[i];
           if (physical == UINT32_MAX) {
@@ -1398,15 +1434,18 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
       !snapshot->transientTexturePhysicalAllocations.empty() ||
           !snapshot->transientBufferPhysicalAllocations.empty(),
       200.0f, [&]() {
-        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Representative", ImGuiTableColumnFlags_WidthFixed,
-                                110.0f);
-        ImGui::TableSetupColumn("Format/Usage", ImGuiTableColumnFlags_WidthFixed,
-                                110.0f);
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Physical", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Representative",
+                                ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("Format/Usage",
+                                ImGuiTableColumnFlags_WidthFixed, 110.0f);
         ImGui::TableSetupColumn("Details", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto &physical : snapshot->transientTexturePhysicalAllocations) {
+        for (const auto &physical :
+             snapshot->transientTexturePhysicalAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("tex");
@@ -1423,7 +1462,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
                       physical.desc.dimensions.depth, physical.desc.numLayers,
                       physical.desc.numSamples, physical.desc.numMipLevels);
         }
-        for (const auto &physical : snapshot->transientBufferPhysicalAllocations) {
+        for (const auto &physical :
+             snapshot->transientBufferPhysicalAllocations) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("buf");
@@ -1448,10 +1488,14 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           !snapshot->unresolvedPreDispatchDependencyBufferBindings.empty() ||
           !snapshot->unresolvedDrawBufferBindings.empty(),
       220.0f, [&]() {
-        ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-        ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed,
+                                110.0f);
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed,
+                                60.0f);
+        ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthFixed,
+                                80.0f);
+        ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed,
+                                110.0f);
         ImGui::TableSetupColumn("Resource", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
         for (const auto &binding : snapshot->unresolvedTextureBindings) {
@@ -1467,8 +1511,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("tex[%u]", binding.textureResourceIndex);
         }
-        for (uint32_t slot = 0; slot < snapshot->resolvedDependencyBuffers.size();
-             ++slot) {
+        for (uint32_t slot = 0;
+             slot < snapshot->resolvedDependencyBuffers.size(); ++slot) {
           const BufferHandle handle = snapshot->resolvedDependencyBuffers[slot];
           if (!nuri::isValid(handle)) {
             continue;
@@ -1485,7 +1529,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("handle=(%u,%u)", handle.index, handle.generation);
         }
-        for (const auto &binding : snapshot->unresolvedDependencyBufferBindings) {
+        for (const auto &binding :
+             snapshot->unresolvedDependencyBufferBindings) {
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           ImGui::TextUnformatted("dep_buf");
@@ -1535,12 +1580,17 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           !snapshot->preDispatchDependencyRanges.empty() ||
           !snapshot->drawRangesByPass.empty(),
       220.0f, [&]() {
-        ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-        ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Offset", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed,
+                                110.0f);
+        ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Offset", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
+        ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed,
+                                70.0f);
         ImGui::TableHeadersRow();
-        for (uint32_t i = 0; i < snapshot->dependencyBufferRangesByPass.size(); ++i) {
+        for (uint32_t i = 0; i < snapshot->dependencyBufferRangesByPass.size();
+             ++i) {
           const auto &range = snapshot->dependencyBufferRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
@@ -1552,7 +1602,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", range.count);
         }
-        for (uint32_t i = 0; i < snapshot->preDispatchRangesByPass.size(); ++i) {
+        for (uint32_t i = 0; i < snapshot->preDispatchRangesByPass.size();
+             ++i) {
           const auto &range = snapshot->preDispatchRangesByPass[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
@@ -1564,7 +1615,8 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", range.count);
         }
-        for (uint32_t i = 0; i < snapshot->preDispatchDependencyRanges.size(); ++i) {
+        for (uint32_t i = 0; i < snapshot->preDispatchDependencyRanges.size();
+             ++i) {
           const auto &range = snapshot->preDispatchDependencyRanges[i];
           ImGui::TableNextRow();
           ImGui::TableNextColumn();

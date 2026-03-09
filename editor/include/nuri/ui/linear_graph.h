@@ -25,7 +25,6 @@ public:
                     const LinearGraphStyle &style) = 0;
 };
 
-std::unique_ptr<LinearGraph>
-createImPlotLinearGraph(std::size_t capacity);
+std::unique_ptr<LinearGraph> createImPlotLinearGraph(std::size_t capacity);
 
 } // namespace nuri

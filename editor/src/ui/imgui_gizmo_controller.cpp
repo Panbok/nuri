@@ -143,8 +143,8 @@ struct ImGuizmoController::Impl {
         glm::value_ptr(view), glm::value_ptr(proj), gizmoOperation, gizmoMode,
         glm::value_ptr(modelMatrix), nullptr, snap);
     gizmoHoverOrUsing = ImGuizmo::IsOver() || ImGuizmo::IsUsing();
-    if (manipulated &&
-        !scene.setOpaqueRenderableTransform(*selectedOpaqueIndex, modelMatrix)) {
+    if (manipulated && !scene.setOpaqueRenderableTransform(*selectedOpaqueIndex,
+                                                           modelMatrix)) {
       clearSelectionState();
     }
   }

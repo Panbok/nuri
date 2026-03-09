@@ -365,7 +365,7 @@ ImGuiGpuRenderer::buildGraphicsPassDesc(Format swapchainFormat,
                      NURI_PROFILER_COLOR_CMD_COPY);
   {
     if (std::byte *vtxDst = gpu_.getMappedBufferPtr(fb.vb),
-                  *idxDst = gpu_.getMappedBufferPtr(fb.ib);
+        *idxDst = gpu_.getMappedBufferPtr(fb.ib);
         vtxDst != nullptr && idxDst != nullptr) {
       // Keep ImGui upload single-copy on the fast path:
       // ImGui cmd lists -> persistently mapped host-visible buffers.

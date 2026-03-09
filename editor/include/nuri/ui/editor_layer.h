@@ -43,7 +43,8 @@ public:
   void onUpdate(double deltaTime) override;
   void prepareFrameContext(RenderFrameContext &frame) override;
   Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
+  buildRenderGraph(RenderFrameContext &frame,
+                   RenderGraphBuilder &graph) override;
 
 private:
   EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,

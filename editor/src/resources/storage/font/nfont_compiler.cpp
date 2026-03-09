@@ -15,7 +15,8 @@ namespace {
 constexpr uint32_t kLatin1FirstCodePoint = 0x20u; // space, first printable
 constexpr uint32_t kLatin1LastCodePoint = 0x00FFu;
 
-// Angle threshold (radians) for msdfgen ink-trap edge coloring; corners sharper than this are split
+// Angle threshold (radians) for msdfgen ink-trap edge coloring; corners sharper
+// than this are split
 constexpr double kMsdfCornerAngle = 3.0;
 
 template <typename T, typename... Args>
@@ -47,8 +48,8 @@ convertAtlasToRgba8(const msdfgen::BitmapConstRef<float, 4> &atlas) {
   auto *dst = reinterpret_cast<uint8_t *>(out.data());
   for (int y = 0; y < h; ++y) {
     // Y_DOWNWARD: source row index is (h - 1 - y)
-    const ptrdiff_t rowOffset = static_cast<ptrdiff_t>(h - 1 - y) *
-                                static_cast<ptrdiff_t>(w) * 4;
+    const ptrdiff_t rowOffset =
+        static_cast<ptrdiff_t>(h - 1 - y) * static_cast<ptrdiff_t>(w) * 4;
     const ptrdiff_t rowWidth = static_cast<ptrdiff_t>(w) * 4;
     const float *src = atlas.pixels + rowOffset;
     const float *const src_end = src + rowWidth;
@@ -69,8 +70,8 @@ convertAtlasToRgba16f(const msdfgen::BitmapConstRef<float, 4> &atlas) {
 
   auto *dst = reinterpret_cast<uint16_t *>(out.data());
   for (int y = 0; y < h; ++y) {
-    const ptrdiff_t rowOffset = static_cast<ptrdiff_t>(h - 1 - y) *
-                                static_cast<ptrdiff_t>(w) * 4;
+    const ptrdiff_t rowOffset =
+        static_cast<ptrdiff_t>(h - 1 - y) * static_cast<ptrdiff_t>(w) * 4;
     const float *src = atlas.pixels + rowOffset;
     for (int x = 0; x < w; ++x, src += 4, dst += 4) {
       const glm::vec4 clamped =
@@ -315,8 +316,8 @@ compileNFontFromFontFile(const NFontCompileConfig &config) {
             });
 
   std::vector<std::byte> atlasBytes = config.useRgba16fAtlas
-                                         ? convertAtlasToRgba16f(atlas)
-                                         : convertAtlasToRgba8(atlas);
+                                          ? convertAtlasToRgba16f(atlas)
+                                          : convertAtlasToRgba8(atlas);
   nfontData.atlasPages.push_back(NFontBinaryAtlasImage{
       .width = static_cast<uint32_t>(width),
       .height = static_cast<uint32_t>(height),

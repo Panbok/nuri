@@ -1,9 +1,9 @@
 #pragma once
 
 #include "nuri/core/result.h"
-#include <cstdint>
 #include "nuri/core/runtime_config.h"
 #include "nuri/gfx/gpu_types.h"
+#include <cstdint>
 
 #include <filesystem>
 #include <span>
