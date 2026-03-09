@@ -23,14 +23,19 @@ git submodule update --init --recursive   # safe to re-run
 # Point to your vcpkg installation
 $env:VCPKG_ROOT = "E:\install\vcpkg"   # adjust
 
-# Build + run (bootstraps LVK deps automatically)
-.\scripts\run_debug.bat
+# Build + run app (debug by default; bootstraps LVK deps automatically)
+.\scripts\run_app.bat
+
+# Build + run editor
+.\scripts\run_editor.bat
 ```
 
 Release build:
 
 ```powershell
-.\scripts\build_release.bat
+.\scripts\build_app.bat release
+.\scripts\build_editor.bat release
+.\scripts\build_lib.bat release
 ```
 
 Tests:
@@ -49,7 +54,11 @@ cd nuri
 git submodule update --init --recursive   # safe to re-run
 
 export VCPKG_ROOT="$HOME/vcpkg"   # adjust
-./scripts/build_debug.sh
+./scripts/build_app.sh
+./scripts/build_editor.sh
+./scripts/build_lib.sh
+./scripts/run_app.sh
+./scripts/run_editor.sh
 ```
 
 Tests:
@@ -64,7 +73,8 @@ Tests:
 
 - LVK’s bootstrap downloads and builds third-party deps into `external/lightweightvk/third-party/deps` (first run can take a while).
 - The warning about Python packages `paramiko`/`scp` can be ignored; they’re only needed for optional bootstrap features.
-- Regular `build_debug`/`build_release` runs leave `NURI_BUILD_TESTS=OFF`; enable tests explicitly when you need them.
+- Target-specific scripts configure a minimal build tree per mode and target set under `build/<mode>/<target>/`.
+- `build_debug`/`build_release` remain as compatibility wrappers and default to the `app` profile.
 
 ## Project layout (high level)
 
