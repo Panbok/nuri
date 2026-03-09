@@ -35,7 +35,13 @@ ctest --test-dir "%BUILD_DIR%" --output-on-failure%CTEST_ARGS%
 exit /b %errorlevel%
 
 :set_build_dir
-set "BUILD_ROOT=%~1\build\%~2"
-if /I "%~2"=="release" set "BUILD_ROOT=%~1\build_release"
-set "BUILD_DIR=%BUILD_ROOT%\%~3"
+if /I "%~2"=="release" (
+  set "BUILD_DIR=%~1\build_release\%~3"
+  exit /b 0
+)
+if /I "%~3"=="app" (
+  set "BUILD_DIR=%~1\build"
+  exit /b 0
+)
+set "BUILD_DIR=%~1\build_%~3"
 exit /b 0

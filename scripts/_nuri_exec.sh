@@ -12,7 +12,13 @@ shift 2
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-build_dir="${repo_root}/build/${mode}/${profile}"
+if [[ "${mode}" == "release" ]]; then
+  build_dir="${repo_root}/build_release/${profile}"
+elif [[ "${profile}" == "app" ]]; then
+  build_dir="${repo_root}/build"
+else
+  build_dir="${repo_root}/build_${profile}"
+fi
 
 case "${profile}" in
   app)

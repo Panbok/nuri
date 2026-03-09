@@ -64,7 +64,25 @@ case "${profile}" in
     ;;
 esac
 
-build_dir="${repo_root}/build/${mode}/${profile}"
+resolve_build_dir() {
+  local repo_root="$1"
+  local mode="$2"
+  local profile="$3"
+
+  if [[ "${mode}" == "release" ]]; then
+    printf '%s\n' "${repo_root}/build_release/${profile}"
+    return
+  fi
+
+  if [[ "${profile}" == "app" ]]; then
+    printf '%s\n' "${repo_root}/build"
+    return
+  fi
+
+  printf '%s\n' "${repo_root}/build_${profile}"
+}
+
+build_dir="$(resolve_build_dir "${repo_root}" "${mode}" "${profile}")"
 
 manifest_feature_args=()
 if [[ -n "${manifest_features}" ]]; then

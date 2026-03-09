@@ -23,7 +23,11 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-build_dir="${REPO_ROOT}/build/${mode}/tests"
+if [[ "${mode}" == "release" ]]; then
+  build_dir="${REPO_ROOT}/build_release/tests"
+else
+  build_dir="${REPO_ROOT}/build_tests"
+fi
 "${SCRIPT_DIR}/_nuri_build.sh" "${mode}" tests
 
 ctest --test-dir "$build_dir" --output-on-failure "$@"
