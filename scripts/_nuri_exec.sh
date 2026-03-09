@@ -16,10 +16,10 @@ build_dir="${repo_root}/build/${mode}/${profile}"
 
 case "${profile}" in
   app)
-    app_path="${build_dir}/app/nuri"
+    app_path="${build_dir}/nuri"
     ;;
   editor)
-    app_path="${build_dir}/editor/nuri_editor"
+    app_path="${build_dir}/nuri_editor"
     ;;
   *)
     echo "Usage: $(basename "$0") <debug|release> <app|editor> [args...]"

@@ -73,7 +73,7 @@ Tests:
 
 - LVK’s bootstrap downloads and builds third-party deps into `external/lightweightvk/third-party/deps` (first run can take a while).
 - The warning about Python packages `paramiko`/`scp` can be ignored; they’re only needed for optional bootstrap features.
-- Target-specific scripts configure a minimal build tree per mode and target set under `build/<mode>/<target>/`.
+- Target-specific scripts configure a minimal build tree per mode and target set. Bash scripts use `build/<mode>/<target>/`; Windows batch scripts use `build/debug/<target>/` for Debug and `build_release/<target>/` for Release.
 - `build_debug`/`build_release` remain as compatibility wrappers and default to the `app` profile.
 
 ## Project layout (high level)

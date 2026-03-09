@@ -10,15 +10,15 @@ shift
 shift
 
 for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
-set "BUILD_DIR=%REPO_ROOT%\build\%MODE%\%PROFILE%"
+call :set_build_dir "%REPO_ROOT%" "%MODE%" "%PROFILE%"
 set "APP="
 set "VCPKG_BIN="
 
 if /I "%PROFILE%"=="app" (
-  set "APP=%BUILD_DIR%\app\nuri.exe"
+  set "APP=%BUILD_DIR%\nuri.exe"
   set "VCPKG_BIN=%BUILD_DIR%\vcpkg_installed\x64-windows\bin"
 ) else if /I "%PROFILE%"=="editor" (
-  set "APP=%BUILD_DIR%\editor\nuri_editor.exe"
+  set "APP=%BUILD_DIR%\nuri_editor.exe"
   set "VCPKG_BIN=%BUILD_DIR%\vcpkg_installed\x64-windows\bin"
 ) else (
   goto usage
@@ -40,6 +40,12 @@ if defined CLANG_BIN set "PATH=%CLANG_BIN%;%PATH%"
 
 "%APP%" %*
 exit /b %errorlevel%
+
+:set_build_dir
+set "BUILD_ROOT=%~1\build\%~2"
+if /I "%~2"=="release" set "BUILD_ROOT=%~1\build_release"
+set "BUILD_DIR=%BUILD_ROOT%\%~3"
+exit /b 0
 
 :usage
 echo Usage: %~nx0 ^<debug^|release^> ^<app^|editor^> [args...]

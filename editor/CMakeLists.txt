@@ -26,6 +26,17 @@ add_executable(nuri_editor
   ${NURI_EDITOR_SOURCES}
 )
 
+set_target_properties(nuri_editor PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+
+foreach(_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+  string(TOUPPER "${_cfg}" _cfg_upper)
+  set_target_properties(nuri_editor PROPERTIES
+    "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}"
+  )
+endforeach()
+
 if(CMAKE_GENERATOR MATCHES "Visual Studio")
   set_property(TARGET nuri_editor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/")
 endif()

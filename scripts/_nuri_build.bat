@@ -42,21 +42,10 @@ if %errorlevel% neq 0 (
 )
 
 for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
-set "BUILD_DIR=%REPO_ROOT%\build\%MODE%\%PROFILE%"
+call :set_build_dir "%REPO_ROOT%" "%MODE%" "%PROFILE%"
 set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 set "MANIFEST_FEATURES_ARG="
 if not "%MANIFEST_FEATURES%"=="" set "MANIFEST_FEATURES_ARG=-DVCPKG_MANIFEST_FEATURES=%MANIFEST_FEATURES%"
-
-if /I "%MODE%"=="release" (
-  if exist "%BUILD_DIR%\build.ninja" (
-    findstr /C:"--dependent-lib=msvcrt" "%BUILD_DIR%\build.ninja" >nul 2>nul
-    if %errorlevel% equ 0 (
-      echo Stale runtime flags detected in %BUILD_DIR%\build.ninja
-      echo Delete %BUILD_DIR% and run this script again.
-      exit /b 1
-    )
-  )
-)
 
 call "%SCRIPT_DIR%bootstrap_lightweightvk.bat"
 if errorlevel 1 exit /b 1
@@ -113,6 +102,12 @@ if "%MANIFEST_FEATURES%"=="" (
 )
 echo ,%MANIFEST_FEATURES%, | findstr /I /C:",%~1," >nul
 if errorlevel 1 set "MANIFEST_FEATURES=%MANIFEST_FEATURES%,%~1"
+exit /b 0
+
+:set_build_dir
+set "BUILD_ROOT=%~1\build\%~2"
+if /I "%~2"=="release" set "BUILD_ROOT=%~1\build_release"
+set "BUILD_DIR=%BUILD_ROOT%\%~3"
 exit /b 0
 
 :usage
