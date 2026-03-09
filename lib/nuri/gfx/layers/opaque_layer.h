@@ -49,8 +49,8 @@ public:
   void onAttach() override;
   void onDetach() override;
   void onResize(int32_t width, int32_t height) override;
-  Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
-                                              RenderPassList &out) override;
+  Result<bool, std::string>
+  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
 
 private:
   enum FrameDataFlags : uint32_t {
@@ -113,6 +113,7 @@ private:
     uint64_t indexBufferOffset = 0;
     uint64_t vertexBufferAddress = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
+    bool doubleSided = false;
   };
 
   struct TessCandidate {
@@ -136,12 +137,27 @@ private:
     bool valid = false;
     uint32_t requestedLod = 0;
     bool tessPipelineEnabled = false;
-    uint64_t templateSignature = std::numeric_limits<uint64_t>::max();
+    RenderPipelineHandle basePipeline{};
+    RenderPipelineHandle doubleSidedBasePipeline{};
+    RenderPipelineHandle tessPipeline{};
+    RenderPipelineHandle doubleSidedTessPipeline{};
+    uint64_t templateRevision = 0;
     size_t remapCount = 0;
     std::pmr::vector<SingleInstanceBatchEntry> batches;
 
     explicit SingleInstanceBatchCache(std::pmr::memory_resource *memory)
         : batches(memory) {}
+  };
+
+  struct PreparedGraphPass {
+    RenderGraphGraphicsPassDesc desc{};
+    TextureHandle colorTextureHandle{};
+    TextureHandle depthTextureHandle{};
+    bool hasDraws = false;
+    bool hasPreDispatch = false;
+    bool hasIndirectDraws = false;
+    bool isMainPass = false;
+    bool isPickPass = false;
   };
 
   struct IndirectPackCache {
@@ -174,9 +190,13 @@ private:
       const glm::vec3 &cameraPosition, float tessFarDistanceSq) const;
   Result<bool, std::string> ensureSingleInstanceBatchCache(
       uint32_t requestedLod, bool tessPipelineEnabled,
-      uint64_t meshTemplateSignature, const DrawItem &baseDraw);
+      const DrawItem &baseDraw);
+  [[nodiscard]] size_t singleInstanceCacheIndex(
+      uint32_t requestedLod, bool tessPipelineEnabled) const;
   Result<bool, std::string> buildIndirectDraws(uint32_t frameSlot,
-                                               size_t remapCount);
+                                               size_t remapCount,
+                                               uint64_t drawSignature,
+                                               bool drawSignatureValid);
   [[nodiscard]] uint64_t computeIndirectDrawSignature(size_t remapCount) const;
   [[nodiscard]] bool canReuseIndirectPack(uint64_t drawSignature) const;
   Result<bool, std::string> rebuildIndirectPack(uint32_t frameSlot,
@@ -187,8 +207,19 @@ private:
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
                                               uint32_t materialCount);
+  Result<bool, std::string>
+  rebuildMaterialTextureAccessCache(const RenderScene &scene,
+                                    const ResourceManager &resources);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
+  Result<bool, std::string> buildOpaquePasses(RenderFrameContext &frame,
+                                              std::pmr::vector<PreparedGraphPass> &out);
+  [[nodiscard]] RenderPipelineHandle selectMeshPipeline(
+      bool doubleSided, bool tessellated) const;
+  [[nodiscard]] RenderPipelineHandle
+  selectPickPipeline(RenderPipelineHandle sourcePipeline) const;
+  [[nodiscard]] bool isDoubleSidedPipeline(RenderPipelineHandle handle) const;
+  [[nodiscard]] bool isTessPipeline(RenderPipelineHandle handle) const;
   Result<bool, std::string> ensureWireframePipeline();
   Result<bool, std::string> ensureTessWireframePipeline();
   Result<bool, std::string> ensureGsOverlayPipeline();
@@ -199,10 +230,12 @@ private:
       const Submesh *submesh, const glm::vec3 &cameraPosition,
       const std::array<float, 3> &sortedLodThresholds,
       const std::array<size_t, Submesh::kMaxLodCount> &bucketCounts,
-      size_t remapCount, size_t instanceCount);
+      size_t remapCount, size_t instanceCount, uint64_t frameIndex);
   void invalidateSingleInstanceBatchCache();
   void invalidateIndirectPackCache();
   void resetPickState();
+  void destroyMeshPipelineState();
+  void resetMeshPipelineState();
   void destroyDepthTexture();
   void destroyPickTexture();
   void destroyBuffers();
@@ -220,9 +253,9 @@ private:
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
   std::unique_ptr<Buffer> materialBuffer_;
-  std::vector<DynamicBufferSlot> instanceMatricesRing_;
-  std::vector<DynamicBufferSlot> instanceRemapRing_;
-  std::vector<DynamicBufferSlot> indirectCommandRing_;
+  std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
+  std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
+  std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
   TextureHandle depthTexture_{};
   TextureHandle pickIdTexture_{};
 
@@ -236,13 +269,17 @@ private:
   ShaderHandle meshPickFragmentShader_{};
   ShaderHandle computeShaderHandle_{};
   RenderPipelineHandle meshFillPipelineHandle_{};
+  RenderPipelineHandle meshDoubleSidedFillPipelineHandle_{};
   RenderPipelineHandle meshTessPipelineHandle_{};
+  RenderPipelineHandle meshDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle meshGsOverlayPipelineHandle_{};
   RenderPipelineHandle meshGsTessOverlayPipelineHandle_{};
   RenderPipelineHandle meshWireframePipelineHandle_{};
   RenderPipelineHandle meshTessWireframePipelineHandle_{};
   RenderPipelineHandle meshPickPipelineHandle_{};
+  RenderPipelineHandle meshPickDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshPickTessPipelineHandle_{};
+  RenderPipelineHandle meshPickDoubleSidedTessPipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
 
   size_t frameDataBufferCapacityBytes_ = 0;
@@ -264,11 +301,14 @@ private:
   bool loggedGsOverlayUnsupported_ = false;
   bool loggedGsTessOverlayUnsupported_ = false;
   bool loggedMaterialFallbackWarning_ = false;
+  bool loggedBlendMaterialUnsupportedWarning_ = false;
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
+  uint64_t cachedGeometryMutationVersion_ =
+      std::numeric_limits<uint64_t>::max();
   bool instanceStaticBuffersDirty_ = true;
   bool uniformSingleSubmeshPath_ = false;
 
@@ -280,9 +320,13 @@ private:
     size_t remapCount = 0;
     size_t instanceCount = 0;
     const Submesh *submesh = nullptr;
+    uint64_t frameIndex = std::numeric_limits<uint64_t>::max();
   };
+  static constexpr size_t kSingleInstanceCacheVariantCount =
+      static_cast<size_t>(Submesh::kMaxLodCount) * 2u;
   AutoLodCache autoLodCache_{};
-  SingleInstanceBatchCache singleInstanceBatchCache_;
+  std::pmr::vector<SingleInstanceBatchCache> singleInstanceBatchCaches_;
+  uint64_t singleInstanceTemplateRevision_ = 1;
   IndirectPackCache indirectPackCache_{};
 
   std::pmr::vector<RenderableTemplate> renderableTemplates_;
@@ -296,13 +340,13 @@ private:
   std::pmr::vector<glm::mat4> instanceBaseMatrices_;
   std::pmr::vector<glm::vec4> instanceLodCentersInvRadiusSq_;
   std::pmr::vector<MaterialGpuData> materialGpuDataCache_;
+  std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
   std::pmr::vector<uint32_t> instanceAutoLodLevels_;
   std::pmr::vector<uint8_t> instanceTessSelection_;
   std::pmr::vector<TessCandidate> tessCandidates_;
   std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
-  std::pmr::vector<PushConstants> indirectPushConstants_;
   std::pmr::vector<DrawItem> indirectDrawItems_;
   std::pmr::vector<std::byte> indirectCommandUploadBytes_;
   std::pmr::vector<DrawItem> overlayDrawItems_;
@@ -312,9 +356,13 @@ private:
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
   FrameData frameData_{};
+  FrameData uploadedFrameData_{};
+  bool frameDataUploadValid_ = false;
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};
+  uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();
+  bool cachedRemapSignatureValid_ = false;
   uint64_t statsLogFrameCounter_ = 0;
   std::optional<OpaquePickRequest> pendingPickRequest_{};
 

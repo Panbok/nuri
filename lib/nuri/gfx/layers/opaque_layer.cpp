@@ -3,6 +3,7 @@
 #include "nuri/gfx/layers/opaque_layer.h"
 
 #include "nuri/core/containers/hash_map.h"
+#include "nuri/core/containers/hash_set.h"
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
@@ -12,7 +13,10 @@
 namespace nuri {
 namespace {
 constexpr float kMinLodRadius = 1.0e-4f;
-constexpr float kAutoLodCacheEpsilon = 1.0e-4f;
+constexpr float kAutoLodCameraReuseEpsilon = 2.5e-2f;
+constexpr float kAutoLodThresholdReuseEpsilon = 1.0e-4f;
+constexpr size_t kAutoLodTemporalReuseMinInstances = 4096u;
+constexpr uint64_t kAutoLodTemporalReuseFrameInterval = 2ull;
 constexpr float kBoundsRadiusHalf = 0.5f;
 constexpr size_t kMaxBatchReserve = 128;
 constexpr float kClearDepthOne = 1.0f;
@@ -39,6 +43,8 @@ constexpr uint32_t kPhaseHashShift2 = 13u;
 constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr uint64_t kInvalidDrawSignature = std::numeric_limits<uint64_t>::max();
+constexpr std::string_view kOpaquePickPassLabel = "Opaque Pick Pass";
+constexpr std::string_view kOpaqueMainPassLabel = "Opaque Pass";
 
 uint64_t hashCombine64(uint64_t hash, uint64_t value) {
   hash ^= value;
@@ -66,7 +72,8 @@ meshPipelineDesc(Format swapchainFormat, Format depthFormat,
                  ShaderHandle tessEvalShader, ShaderHandle geometryShader,
                  ShaderHandle fragmentShader, PolygonMode polygonMode,
                  Topology topology = Topology::Triangle,
-                 uint32_t patchControlPoints = 0, bool blendEnabled = false) {
+                 uint32_t patchControlPoints = 0, bool blendEnabled = false,
+                 CullMode cullMode = CullMode::Back) {
   return RenderPipelineDesc{
       .vertexInput = {},
       .vertexShader = vertexShader,
@@ -76,7 +83,7 @@ meshPipelineDesc(Format swapchainFormat, Format depthFormat,
       .fragmentShader = fragmentShader,
       .colorFormats = {swapchainFormat},
       .depthFormat = depthFormat,
-      .cullMode = CullMode::Back,
+      .cullMode = cullMode,
       .polygonMode = polygonMode,
       .topology = topology,
       .patchControlPoints = patchControlPoints,
@@ -84,10 +91,20 @@ meshPipelineDesc(Format swapchainFormat, Format depthFormat,
   };
 }
 
-bool isTessPipelineHandle(RenderPipelineHandle handle,
-                          RenderPipelineHandle tessPipeline) {
-  return handle.index == tessPipeline.index &&
-         handle.generation == tessPipeline.generation;
+bool isSamePipelineHandle(RenderPipelineHandle lhs, RenderPipelineHandle rhs) {
+  return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
+bool isSameGeometryAllocationHandle(GeometryAllocationHandle lhs,
+                                    GeometryAllocationHandle rhs) {
+  return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
+void destroyPipelineHandle(GPUDevice &gpu, RenderPipelineHandle &handle) {
+  if (nuri::isValid(handle)) {
+    gpu.destroyRenderPipeline(handle);
+    handle = {};
+  }
 }
 
 DrawItem makeBaseMeshDraw(RenderPipelineHandle pipeline,
@@ -192,10 +209,8 @@ struct BatchKey {
   uint32_t materialIndex = kInvalidMaterialIndex;
 
   bool operator==(const BatchKey &other) const {
-    return pipeline.index == other.pipeline.index &&
-           pipeline.generation == other.pipeline.generation &&
-           indexBuffer.index == other.indexBuffer.index &&
-           indexBuffer.generation == other.indexBuffer.generation &&
+    return isSamePipelineHandle(pipeline, other.pipeline) &&
+           isSameBufferHandle(indexBuffer, other.indexBuffer) &&
            indexBufferOffset == other.indexBufferOffset &&
            indexCount == other.indexCount && firstIndex == other.firstIndex &&
            vertexBufferAddress == other.vertexBufferAddress &&
@@ -240,10 +255,8 @@ struct IndirectGroupKey {
   uint32_t materialIndex = kInvalidMaterialIndex;
 
   bool operator==(const IndirectGroupKey &other) const {
-    return pipeline.index == other.pipeline.index &&
-           pipeline.generation == other.pipeline.generation &&
-           indexBuffer.index == other.indexBuffer.index &&
-           indexBuffer.generation == other.indexBuffer.generation &&
+    return isSamePipelineHandle(pipeline, other.pipeline) &&
+           isSameBufferHandle(indexBuffer, other.indexBuffer) &&
            indexBufferOffset == other.indexBufferOffset &&
            indexFormat == other.indexFormat &&
            vertexBufferAddress == other.vertexBufferAddress &&
@@ -275,7 +288,10 @@ struct IndirectGroupKeyHash {
 OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
                          std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
-      singleInstanceBatchCache_(resolveMemoryResource(memory)),
+      instanceMatricesRing_(resolveMemoryResource(memory)),
+      instanceRemapRing_(resolveMemoryResource(memory)),
+      indirectCommandRing_(resolveMemoryResource(memory)),
+      singleInstanceBatchCaches_(resolveMemoryResource(memory)),
       renderableTemplates_(resolveMemoryResource(memory)),
       meshDrawTemplates_(resolveMemoryResource(memory)),
       indirectSourceDrawIndices_(resolveMemoryResource(memory)),
@@ -287,13 +303,13 @@ OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
       instanceBaseMatrices_(resolveMemoryResource(memory)),
       instanceLodCentersInvRadiusSq_(resolveMemoryResource(memory)),
       materialGpuDataCache_(resolveMemoryResource(memory)),
+      materialTextureAccessHandles_(resolveMemoryResource(memory)),
       instanceAutoLodLevels_(resolveMemoryResource(memory)),
       instanceTessSelection_(resolveMemoryResource(memory)),
       tessCandidates_(resolveMemoryResource(memory)),
       instanceRemap_(resolveMemoryResource(memory)),
       drawPushConstants_(resolveMemoryResource(memory)),
       drawItems_(resolveMemoryResource(memory)),
-      indirectPushConstants_(resolveMemoryResource(memory)),
       indirectDrawItems_(resolveMemoryResource(memory)),
       indirectCommandUploadBytes_(resolveMemoryResource(memory)),
       overlayDrawItems_(resolveMemoryResource(memory)),
@@ -301,7 +317,13 @@ OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
       passDrawItems_(resolveMemoryResource(memory)),
       preDispatches_(resolveMemoryResource(memory)),
       passDependencyBuffers_(resolveMemoryResource(memory)),
-      dispatchDependencyBuffers_(resolveMemoryResource(memory)) {}
+      dispatchDependencyBuffers_(resolveMemoryResource(memory)) {
+  auto *resource = resolveMemoryResource(memory);
+  singleInstanceBatchCaches_.reserve(kSingleInstanceCacheVariantCount);
+  for (size_t i = 0; i < kSingleInstanceCacheVariantCount; ++i) {
+    singleInstanceBatchCaches_.emplace_back(resource);
+  }
+}
 
 OpaqueLayer::~OpaqueLayer() { onDetach(); }
 
@@ -322,18 +344,7 @@ void OpaqueLayer::onDetach() {
   destroyDepthTexture();
   destroyPickTexture();
   resetOverlayPipelineState();
-  if (nuri::isValid(meshPickPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(meshPickPipelineHandle_);
-    meshPickPipelineHandle_ = {};
-  }
-  if (nuri::isValid(meshPickTessPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(meshPickTessPipelineHandle_);
-    meshPickTessPipelineHandle_ = {};
-  }
-  if (nuri::isValid(meshTessPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
-    meshTessPipelineHandle_ = {};
-  }
+  destroyMeshPipelineState();
   meshPipeline_.reset();
   computePipeline_.reset();
   meshShader_.reset();
@@ -350,20 +361,15 @@ void OpaqueLayer::onDetach() {
   meshDebugOverlayFragmentShader_ = {};
   meshPickFragmentShader_ = {};
   computeShaderHandle_ = {};
-  meshFillPipelineHandle_ = {};
-  meshTessPipelineHandle_ = {};
-  meshPickPipelineHandle_ = {};
-  meshPickTessPipelineHandle_ = {};
   computePipelineHandle_ = {};
   tessellationUnsupported_ = false;
-  baseMeshFillDraw_ = {};
-  baseMeshWireframeDraw_ = {};
   renderableTemplates_.clear();
   meshDrawTemplates_.clear();
   templateBatchIndices_.clear();
   batchWriteOffsets_.clear();
   instanceLodCentersInvRadiusSq_.clear();
   materialGpuDataCache_.clear();
+  materialTextureAccessHandles_.clear();
   instanceAutoLodLevels_.clear();
   instanceTessSelection_.clear();
   tessCandidates_.clear();
@@ -371,7 +377,6 @@ void OpaqueLayer::onDetach() {
   drawPushConstants_.clear();
   drawItems_.clear();
   indirectUploadSignatures_.clear();
-  indirectPushConstants_.clear();
   indirectDrawItems_.clear();
   indirectCommandUploadBytes_.clear();
   overlayDrawItems_.clear();
@@ -384,11 +389,14 @@ void OpaqueLayer::onDetach() {
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   instanceStaticBuffersDirty_ = true;
   uniformSingleSubmeshPath_ = false;
   invalidateAutoLodCache();
   invalidateSingleInstanceBatchCache();
   invalidateIndirectPackCache();
+  cachedRemapSignature_ = kInvalidDrawSignature;
+  cachedRemapSignatureValid_ = false;
   resetPickState();
   initialized_ = false;
 }
@@ -400,7 +408,8 @@ void OpaqueLayer::onResize(int32_t, int32_t) {
 }
 
 Result<bool, std::string>
-OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
+OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
+                               std::pmr::vector<PreparedGraphPass> &out) {
   NURI_PROFILER_FUNCTION();
   frame.metrics.opaque = {};
   frame.opaquePickResult.reset();
@@ -416,11 +425,11 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
   if (!frame.scene) {
     return Result<bool, std::string>::makeError(
-        "OpaqueLayer::buildRenderPasses: frame scene is null");
+        "OpaqueLayer::buildOpaquePasses: frame scene is null");
   }
   if (!frame.resources) {
     return Result<bool, std::string>::makeError(
-        "OpaqueLayer::buildRenderPasses: frame resources are null");
+        "OpaqueLayer::buildOpaquePasses: frame resources are null");
   }
   const MaterialTableSnapshot materialSnapshot =
       frame.resources->materialSnapshot();
@@ -458,7 +467,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         gpu_.readTexture(pickIdTexture_, readbackRegion, pickBytes);
     if (readResult.hasError()) {
       NURI_LOG_WARNING(
-          "OpaqueLayer::buildRenderPasses: pick readback failed: %s",
+          "OpaqueLayer::buildOpaquePasses: pick readback failed: %s",
           readResult.error().c_str());
     } else {
       uint32_t encodedId = 0;
@@ -475,19 +484,24 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   const bool topologyDirty =
       cachedScene_ != frame.scene ||
       cachedTopologyVersion_ != frame.scene->topologyVersion();
-  if (topologyDirty) {
+  const bool materialDirty = topologyDirty || cachedScene_ != frame.scene ||
+                             cachedMaterialVersion_ != materialSnapshot.version;
+  const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
+  const bool hasGeometryMutationTracking = geometryMutationVersion != 0;
+  if (topologyDirty || materialDirty) {
     auto cacheResult = rebuildSceneCache(
         *frame.scene, *frame.resources,
         static_cast<uint32_t>(materialSnapshot.gpuData.size()));
     if (cacheResult.hasError()) {
       return cacheResult;
     }
+    if (hasGeometryMutationTracking) {
+      cachedGeometryMutationVersion_ = geometryMutationVersion;
+    }
   }
   const bool transformDirty =
       topologyDirty ||
       cachedTransformVersion_ != frame.scene->transformVersion();
-  const bool materialDirty = topologyDirty || cachedScene_ != frame.scene ||
-                             cachedMaterialVersion_ != materialSnapshot.version;
   if (topologyDirty || transformDirty) {
     invalidateAutoLodCache();
   }
@@ -517,7 +531,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       const Model *model = templ.model;
       if (!renderable || !model) {
         return Result<bool, std::string>::makeError(
-            "OpaqueLayer::buildRenderPasses: invalid opaque renderable");
+            "OpaqueLayer::buildOpaquePasses: invalid opaque renderable");
       }
 
       const glm::vec3 center = glm::vec3(renderable->modelMatrix[3]);
@@ -646,12 +660,19 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   }
 
   {
-    const std::span<const std::byte> frameDataBytes{
-        reinterpret_cast<const std::byte *>(&frameData_), sizeof(frameData_)};
-    auto updateResult =
-        gpu_.updateBuffer(frameDataBuffer_->handle(), frameDataBytes, 0);
-    if (updateResult.hasError()) {
-      return updateResult;
+    const bool shouldUploadFrameData =
+        !frameDataUploadValid_ ||
+        std::memcmp(&uploadedFrameData_, &frameData_, sizeof(FrameData)) != 0;
+    if (shouldUploadFrameData) {
+      const std::span<const std::byte> frameDataBytes{
+          reinterpret_cast<const std::byte *>(&frameData_), sizeof(frameData_)};
+      auto updateResult =
+          gpu_.updateBuffer(frameDataBuffer_->handle(), frameDataBytes, 0);
+      if (updateResult.hasError()) {
+        return updateResult;
+      }
+      uploadedFrameData_ = frameData_;
+      frameDataUploadValid_ = true;
     }
   }
 
@@ -699,6 +720,13 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     }
     cachedMaterialVersion_ = materialSnapshot.version;
   }
+  if (materialDirty || materialTextureAccessHandles_.empty()) {
+    auto materialAccessCacheResult =
+        rebuildMaterialTextureAccessCache(*frame.scene, *frame.resources);
+    if (materialAccessCacheResult.hasError()) {
+      return materialAccessCacheResult;
+    }
+  }
 
   const uint64_t frameDataAddress =
       gpu_.getBufferDeviceAddress(frameDataBuffer_->handle());
@@ -714,7 +742,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       instanceBaseMatricesAddress == 0 || materialBufferAddress == 0 ||
       instanceMatricesAddress == 0) {
     return Result<bool, std::string>::makeError(
-        "OpaqueLayer::buildRenderPasses: invalid GPU buffer address");
+        "OpaqueLayer::buildOpaquePasses: invalid GPU buffer address");
   }
 
   const OpaqueDebugVisualization debugVisualization =
@@ -756,7 +784,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   };
   constexpr uint32_t kInvalidBatchIndex = std::numeric_limits<uint32_t>::max();
 
-  std::vector<BatchEntry> batches;
+  ScratchArena batchScratchArena;
+  ScopedScratch batchScratch(batchScratchArena);
+  std::pmr::vector<BatchEntry> batches(batchScratch.resource());
   const size_t batchReserve =
       std::min<size_t>(meshDrawTemplates_.size(), kMaxBatchReserve);
   batches.reserve(batchReserve);
@@ -783,22 +813,6 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         entry.firstInstance = firstInstance;
         batches.push_back(entry);
       };
-  const auto materializeBatchesFromSingleInstanceCache = [this, &batches]() {
-    batches.clear();
-    batches.reserve(singleInstanceBatchCache_.batches.size());
-    for (const SingleInstanceBatchEntry &cachedBatch :
-         singleInstanceBatchCache_.batches) {
-      BatchEntry batch{};
-      batch.draw = cachedBatch.draw;
-      batch.vertexBufferAddress = cachedBatch.vertexBufferAddress;
-      batch.materialIndex = cachedBatch.materialIndex;
-      batch.instanceCount = cachedBatch.instanceCount;
-      batch.firstInstance = 0;
-      batches.push_back(batch);
-    }
-  };
-  HashMap<BatchKey, size_t, BatchKeyHash> batchLookup;
-  batchLookup.reserve(batchReserve);
   std::array<float, 3> sortedLodThresholds = {
       settings.opaque.meshLodDistanceThresholds.x,
       settings.opaque.meshLodDistanceThresholds.y,
@@ -820,7 +834,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
                        NURI_PROFILER_COLOR_CMD_DRAW);
     if (instanceLodCentersInvRadiusSq_.size() != renderableTemplates_.size()) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: LOD cache size mismatch");
+          "OpaqueLayer::buildOpaquePasses: LOD cache size mismatch");
     }
 
     instanceAutoLodLevels_.clear();
@@ -859,20 +873,20 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     GeometryAllocationView geometry{};
     if (!gpu_.resolveGeometry(templateEntry.geometryHandle, geometry)) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: failed to refresh geometry");
+          "OpaqueLayer::buildOpaquePasses: failed to refresh geometry");
     }
     if (!nuri::isValid(geometry.vertexBuffer) ||
         !nuri::isValid(geometry.indexBuffer) ||
         !gpu_.isValid(geometry.vertexBuffer) ||
         !gpu_.isValid(geometry.indexBuffer)) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: refreshed geometry is invalid");
+          "OpaqueLayer::buildOpaquePasses: refreshed geometry is invalid");
     }
     const uint64_t refreshedVertexAddress = gpu_.getBufferDeviceAddress(
         geometry.vertexBuffer, geometry.vertexByteOffset);
     if (refreshedVertexAddress == 0) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: refreshed vertex address is "
+          "OpaqueLayer::buildOpaquePasses: refreshed vertex address is "
           "invalid");
     }
     templateEntry.indexBuffer = geometry.indexBuffer;
@@ -880,96 +894,61 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     templateEntry.vertexBufferAddress = refreshedVertexAddress;
     return Result<bool, std::string>::makeResult(true);
   };
-  const bool shouldComputeTemplateSignature =
-      instanceCount == 1 && !uniformSingleSubmeshPath_;
-  uint64_t meshTemplateSignature = kFnvOffsetBasis64;
-  {
-    NURI_PROFILER_ZONE("OpaqueLayer.sync_template_geometry",
-                       NURI_PROFILER_COLOR_CMD_DRAW);
-    if (!meshDrawTemplates_.empty() && uniformSingleSubmeshPath_) {
-      MeshDrawTemplate &firstTemplate = meshDrawTemplates_.front();
-      const BufferHandle previousIndexBuffer = firstTemplate.indexBuffer;
-      const uint64_t previousIndexBufferOffset =
-          firstTemplate.indexBufferOffset;
-      const uint64_t previousVertexBufferAddress =
-          firstTemplate.vertexBufferAddress;
+  const bool shouldRefreshTemplateGeometry =
+      !meshDrawTemplates_.empty() &&
+      (!hasGeometryMutationTracking ||
+       cachedGeometryMutationVersion_ != geometryMutationVersion);
+  if (shouldRefreshTemplateGeometry) {
+    bool templateGeometryChanged = false;
+    {
+      NURI_PROFILER_ZONE("OpaqueLayer.sync_template_geometry",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      if (uniformSingleSubmeshPath_) {
+        MeshDrawTemplate &firstTemplate = meshDrawTemplates_.front();
+        const BufferHandle previousIndexBuffer = firstTemplate.indexBuffer;
+        const uint64_t previousIndexBufferOffset =
+            firstTemplate.indexBufferOffset;
+        const uint64_t previousVertexBufferAddress =
+            firstTemplate.vertexBufferAddress;
 
-      auto refreshResult = refreshTemplateGeometry(firstTemplate);
-      if (refreshResult.hasError()) {
-        return refreshResult;
-      }
-
-      const bool geometryChanged =
-          firstTemplate.indexBuffer.index != previousIndexBuffer.index ||
-          firstTemplate.indexBuffer.generation !=
-              previousIndexBuffer.generation ||
-          firstTemplate.indexBufferOffset != previousIndexBufferOffset ||
-          firstTemplate.vertexBufferAddress != previousVertexBufferAddress;
-      if (geometryChanged) {
-        for (size_t i = 1; i < meshDrawTemplates_.size(); ++i) {
-          MeshDrawTemplate &templateEntry = meshDrawTemplates_[i];
-          templateEntry.indexBuffer = firstTemplate.indexBuffer;
-          templateEntry.indexBufferOffset = firstTemplate.indexBufferOffset;
-          templateEntry.vertexBufferAddress = firstTemplate.vertexBufferAddress;
+        auto refreshResult = refreshTemplateGeometry(firstTemplate);
+        if (refreshResult.hasError()) {
+          return refreshResult;
         }
-      }
-    } else {
-      GeometryAllocationHandle cachedHandle{};
-      BufferHandle cachedIndexBuffer{};
-      uint64_t cachedIndexBufferOffset = 0;
-      uint64_t cachedVertexBufferAddress = 0;
-      bool hasCachedGeometry = false;
 
-      if (shouldComputeTemplateSignature) {
-        for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
-          const bool sameAsCached =
-              hasCachedGeometry &&
-              templateEntry.geometryHandle.index == cachedHandle.index &&
-              templateEntry.geometryHandle.generation ==
-                  cachedHandle.generation;
-          if (sameAsCached) {
-            templateEntry.indexBuffer = cachedIndexBuffer;
-            templateEntry.indexBufferOffset = cachedIndexBufferOffset;
-            templateEntry.vertexBufferAddress = cachedVertexBufferAddress;
-          } else {
-            auto refreshResult = refreshTemplateGeometry(templateEntry);
-            if (refreshResult.hasError()) {
-              return refreshResult;
-            }
-
-            cachedHandle = templateEntry.geometryHandle;
-            cachedIndexBuffer = templateEntry.indexBuffer;
-            cachedIndexBufferOffset = templateEntry.indexBufferOffset;
-            cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
-            hasCachedGeometry = true;
+        const bool geometryChanged =
+            !isSameBufferHandle(firstTemplate.indexBuffer,
+                                previousIndexBuffer) ||
+            firstTemplate.indexBufferOffset != previousIndexBufferOffset ||
+            firstTemplate.vertexBufferAddress != previousVertexBufferAddress;
+        templateGeometryChanged = geometryChanged;
+        if (geometryChanged) {
+          for (size_t i = 1; i < meshDrawTemplates_.size(); ++i) {
+            MeshDrawTemplate &templateEntry = meshDrawTemplates_[i];
+            templateEntry.indexBuffer = firstTemplate.indexBuffer;
+            templateEntry.indexBufferOffset = firstTemplate.indexBufferOffset;
+            templateEntry.vertexBufferAddress =
+                firstTemplate.vertexBufferAddress;
           }
-
-          meshTemplateSignature = hashCombine64(
-              meshTemplateSignature,
-              foldHandle(templateEntry.geometryHandle.index,
-                         templateEntry.geometryHandle.generation));
-          meshTemplateSignature =
-              hashCombine64(meshTemplateSignature,
-                            foldHandle(templateEntry.indexBuffer.index,
-                                       templateEntry.indexBuffer.generation));
-          meshTemplateSignature = hashCombine64(
-              meshTemplateSignature, templateEntry.indexBufferOffset);
-          meshTemplateSignature = hashCombine64(
-              meshTemplateSignature, templateEntry.vertexBufferAddress);
-          meshTemplateSignature =
-              hashCombine64(meshTemplateSignature,
-                            static_cast<uint64_t>(templateEntry.submeshIndex));
-          meshTemplateSignature =
-              hashCombine64(meshTemplateSignature,
-                            static_cast<uint64_t>(templateEntry.materialIndex));
         }
       } else {
+        GeometryAllocationHandle cachedHandle{};
+        BufferHandle cachedIndexBuffer{};
+        uint64_t cachedIndexBufferOffset = 0;
+        uint64_t cachedVertexBufferAddress = 0;
+        bool hasCachedGeometry = false;
+
         for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+          const BufferHandle previousIndexBuffer = templateEntry.indexBuffer;
+          const uint64_t previousIndexBufferOffset =
+              templateEntry.indexBufferOffset;
+          const uint64_t previousVertexBufferAddress =
+              templateEntry.vertexBufferAddress;
+
           const bool sameAsCached =
-              hasCachedGeometry &&
-              templateEntry.geometryHandle.index == cachedHandle.index &&
-              templateEntry.geometryHandle.generation ==
-                  cachedHandle.generation;
+              hasCachedGeometry && isSameGeometryAllocationHandle(
+                                       templateEntry.geometryHandle,
+                                       cachedHandle);
           if (sameAsCached) {
             templateEntry.indexBuffer = cachedIndexBuffer;
             templateEntry.indexBufferOffset = cachedIndexBufferOffset;
@@ -986,20 +965,24 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
             cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
             hasCachedGeometry = true;
           }
+
+          const bool geometryChanged =
+              !isSameBufferHandle(templateEntry.indexBuffer,
+                                  previousIndexBuffer) ||
+              templateEntry.indexBufferOffset != previousIndexBufferOffset ||
+              templateEntry.vertexBufferAddress != previousVertexBufferAddress;
+          templateGeometryChanged = templateGeometryChanged || geometryChanged;
         }
       }
+      NURI_PROFILER_ZONE_END();
     }
-    NURI_PROFILER_ZONE_END();
-  }
-  if (shouldComputeTemplateSignature) {
-    meshTemplateSignature =
-        hashCombine64(meshTemplateSignature, meshDrawTemplates_.size());
-    meshTemplateSignature = hashCombine64(
-        meshTemplateSignature,
-        foldHandle(baseDraw.pipeline.index, baseDraw.pipeline.generation));
-    meshTemplateSignature = hashCombine64(
-        meshTemplateSignature, foldHandle(meshTessPipelineHandle_.index,
-                                          meshTessPipelineHandle_.generation));
+    if (templateGeometryChanged) {
+      invalidateSingleInstanceBatchCache();
+      invalidateIndirectPackCache();
+    }
+    if (hasGeometryMutationTracking) {
+      cachedGeometryMutationVersion_ = geometryMutationVersion;
+    }
   }
   bool usedUniformFastPath = false;
   bool usedUniformAutoLodFastPath = false;
@@ -1013,6 +996,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   size_t autoLodTessBucketCount = 0;
   const Submesh *activeFastAutoLodSubmesh = nullptr;
   size_t remapCount = 0;
+  const SingleInstanceBatchCache *activeSingleInstanceCache = nullptr;
 
   if (canUseUniformAutoLodFastPath) {
     NURI_PROFILER_ZONE("OpaqueLayer.batch_build_auto_lod",
@@ -1020,21 +1004,28 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     MeshDrawTemplate &templateEntry = meshDrawTemplates_.front();
     if (!templateEntry.submesh) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: invalid auto-LOD submesh");
+          "OpaqueLayer::buildOpaquePasses: invalid auto-LOD submesh");
     }
 
     const Submesh &submesh = *templateEntry.submesh;
     activeFastAutoLodSubmesh = &submesh;
 
+    const bool canTemporallyReuseFastAutoLod =
+        instanceCount >= kAutoLodTemporalReuseMinInstances &&
+        autoLodCache_.frameIndex != std::numeric_limits<uint64_t>::max() &&
+        frame.frameIndex > autoLodCache_.frameIndex &&
+        (frame.frameIndex - autoLodCache_.frameIndex) <
+            kAutoLodTemporalReuseFrameInterval;
+    const bool cameraStableForReuse = nearlyEqualVec3(
+        autoLodCache_.cameraPos, cameraPosition, kAutoLodCameraReuseEpsilon);
     const bool canReuseFastAutoLodCache =
         !tessellationRequested && autoLodCache_.valid &&
         autoLodCache_.submesh == &submesh &&
         autoLodCache_.instanceCount == instanceCount &&
         autoLodCache_.remapCount == instanceRemap_.size() &&
-        nearlyEqualVec3(autoLodCache_.cameraPos, cameraPosition,
-                        kAutoLodCacheEpsilon) &&
+        (cameraStableForReuse || canTemporallyReuseFastAutoLod) &&
         nearlyEqualThresholds(autoLodCache_.thresholds, sortedLodThresholds,
-                              kAutoLodCacheEpsilon);
+                              kAutoLodThresholdReuseEpsilon);
 
     if (canReuseFastAutoLodCache) {
       autoLodBucketCounts = autoLodCache_.bucketCounts;
@@ -1043,7 +1034,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     } else {
       if (instanceLodCentersInvRadiusSq_.size() != instanceCount) {
         return Result<bool, std::string>::makeError(
-            "OpaqueLayer::buildRenderPasses: auto-LOD cache size "
+            "OpaqueLayer::buildOpaquePasses: auto-LOD cache size "
             "mismatch");
       }
       instanceAutoLodLevels_.clear();
@@ -1146,18 +1137,18 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       const SubmeshLod &lod0Range = submesh.lods[0];
       autoLodBucketStarts[0] = firstInstance;
       autoLodBucketWrites[0] = firstInstance;
-      appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
-                  templateEntry.indexBufferOffset, lod0Range,
-                  templateEntry.vertexBufferAddress,
+      appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
+                  templateEntry.indexBuffer, templateEntry.indexBufferOffset,
+                  lod0Range, templateEntry.vertexBufferAddress,
                   templateEntry.materialIndex, autoLodBucketCounts[0],
                   firstInstance);
       firstInstance += autoLodBucketCounts[0];
 
       autoLodTessBucketStart = firstInstance;
       autoLodTessBucketWrite = firstInstance;
-      appendBatch(meshTessPipelineHandle_, templateEntry.indexBuffer,
-                  templateEntry.indexBufferOffset, lod0Range,
-                  templateEntry.vertexBufferAddress,
+      appendBatch(selectMeshPipeline(templateEntry.doubleSided, true),
+                  templateEntry.indexBuffer, templateEntry.indexBufferOffset,
+                  lod0Range, templateEntry.vertexBufferAddress,
                   templateEntry.materialIndex, autoLodTessBucketCount,
                   firstInstance);
       if (autoLodTessBucketCount > 0) {
@@ -1174,9 +1165,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         }
         const SubmeshLod &lodRange = submesh.lods[lod];
 
-        appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
-                    templateEntry.indexBufferOffset, lodRange,
-                    templateEntry.vertexBufferAddress,
+        appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
+                    templateEntry.indexBuffer, templateEntry.indexBufferOffset,
+                    lodRange, templateEntry.vertexBufferAddress,
                     templateEntry.materialIndex, count, firstInstance);
         firstInstance += count;
       }
@@ -1190,9 +1181,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         }
         const SubmeshLod &lodRange = submesh.lods[lod];
 
-        appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
-                    templateEntry.indexBufferOffset, lodRange,
-                    templateEntry.vertexBufferAddress,
+        appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
+                    templateEntry.indexBuffer, templateEntry.indexBufferOffset,
+                    lodRange, templateEntry.vertexBufferAddress,
                     templateEntry.materialIndex, count, firstInstance);
         firstInstance += count;
       }
@@ -1216,14 +1207,23 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     const bool tessPipelineEnabled = shouldEnableSingleInstanceTessPipeline(
         tessellationRequested, requestedLod, cameraPosition, tessFarDistanceSq);
     auto singleInstanceCacheResult = ensureSingleInstanceBatchCache(
-        requestedLod, tessPipelineEnabled, meshTemplateSignature, baseDraw);
+        requestedLod, tessPipelineEnabled, baseDraw);
     if (singleInstanceCacheResult.hasError()) {
       return singleInstanceCacheResult;
     }
 
-    remapCount = singleInstanceBatchCache_.remapCount;
+    const size_t cacheIndex =
+        singleInstanceCacheIndex(requestedLod, tessPipelineEnabled);
+    if (cacheIndex >= singleInstanceBatchCaches_.size()) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildOpaquePasses: single-instance cache index out of "
+          "range");
+    }
+    const SingleInstanceBatchCache &activeCache =
+        singleInstanceBatchCaches_[cacheIndex];
+    remapCount = activeCache.remapCount;
     if (remapCount > 0) {
-      materializeBatchesFromSingleInstanceCache();
+      activeSingleInstanceCache = &activeCache;
       usedUniformFastPath = true;
     }
     NURI_PROFILER_ZONE_END();
@@ -1237,7 +1237,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     MeshDrawTemplate &templateEntry = meshDrawTemplates_.front();
     if (!templateEntry.submesh) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: invalid fast-path submesh");
+          "OpaqueLayer::buildOpaquePasses: invalid fast-path submesh");
     }
     const uint32_t requestedLod =
         settings.opaque.enableMeshLod ? forcedLod : 0u;
@@ -1245,9 +1245,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         resolveAvailableLod(*templateEntry.submesh, requestedLod);
     if (lodIndex) {
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
-      appendBatch(baseDraw.pipeline, templateEntry.indexBuffer,
-                  templateEntry.indexBufferOffset, lodRange,
-                  templateEntry.vertexBufferAddress,
+      appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
+                  templateEntry.indexBuffer, templateEntry.indexBufferOffset,
+                  lodRange, templateEntry.vertexBufferAddress,
                   templateEntry.materialIndex, instanceCount, 0);
       remapCount = instanceCount;
       templateBatchIndices_.clear();
@@ -1258,6 +1258,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   }
 
   if (!usedUniformFastPath) {
+    PmrHashMap<BatchKey, size_t, BatchKeyHash> batchLookup(
+        batchScratch.resource());
+    batchLookup.reserve(batchReserve);
     templateBatchIndices_.clear();
     templateBatchIndices_.resize(meshDrawTemplates_.size(), kInvalidBatchIndex);
     NURI_PROFILER_ZONE("OpaqueLayer.batch_build", NURI_PROFILER_COLOR_CMD_DRAW);
@@ -1266,7 +1269,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       MeshDrawTemplate &templateEntry = meshDrawTemplates_[templateIndex];
       if (!templateEntry.renderable || !templateEntry.submesh) {
         return Result<bool, std::string>::makeError(
-            "OpaqueLayer::buildRenderPasses: invalid mesh template");
+            "OpaqueLayer::buildOpaquePasses: invalid mesh template");
       }
 
       uint32_t requestedLod = 0;
@@ -1277,7 +1280,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       } else {
         if (templateEntry.instanceIndex >= instanceAutoLodLevels_.size()) {
           return Result<bool, std::string>::makeError(
-              "OpaqueLayer::buildRenderPasses: instance LOD cache out of "
+              "OpaqueLayer::buildOpaquePasses: instance LOD cache out of "
               "range");
         }
         requestedLod = instanceAutoLodLevels_[templateEntry.instanceIndex];
@@ -1290,7 +1293,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       }
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
 
-      RenderPipelineHandle selectedPipeline = baseDraw.pipeline;
+      RenderPipelineHandle selectedPipeline =
+          selectMeshPipeline(templateEntry.doubleSided, false);
       if (tessellationRequested && *lodIndex == 0 &&
           templateEntry.instanceIndex < instanceLodCentersInvRadiusSq_.size()) {
         const glm::vec4 centerInvRadiusSq =
@@ -1300,7 +1304,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         const float dz = cameraPosition.z - centerInvRadiusSq.z;
         const float distanceSq = dx * dx + dy * dy + dz * dz;
         if (distanceSq <= tessFarDistanceSq) {
-          selectedPipeline = meshTessPipelineHandle_;
+          selectedPipeline =
+              selectMeshPipeline(templateEntry.doubleSided, true);
         }
       }
 
@@ -1346,70 +1351,117 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     return remapCapacityResult;
   }
 
+  uint64_t remapSignature = kInvalidDrawSignature;
+  bool remapSignatureValid = false;
+  uint64_t indirectDrawSignature = kInvalidDrawSignature;
+  bool indirectDrawSignatureValid = false;
   {
     NURI_PROFILER_ZONE("OpaqueLayer.draw_list_emit",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     const bool shouldReuseFastAutoLodRemap =
         usedUniformAutoLodFastPath && reusedUniformAutoLodFastPath;
     const bool shouldBuildRemap = !shouldReuseFastAutoLodRemap;
-    if (shouldBuildRemap) {
-      instanceRemap_.clear();
-      instanceRemap_.resize(remapCount);
-    } else if (instanceRemap_.size() != remapCount) {
-      return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: auto-LOD remap reuse mismatch");
-    }
-    drawItems_.clear();
-    drawPushConstants_.clear();
-    drawItems_.reserve(batches.size());
-    drawPushConstants_.reserve(batches.size());
-    batchWriteOffsets_.clear();
-    batchWriteOffsets_.resize(batches.size(), 0);
+    const bool useCachedSingleInstanceBatches =
+        activeSingleInstanceCache != nullptr;
+    const size_t batchCount = useCachedSingleInstanceBatches
+                                  ? activeSingleInstanceCache->batches.size()
+                                  : batches.size();
+    drawItems_.resize(batchCount);
+    drawPushConstants_.resize(batchCount);
 
     const bool singleRenderableInstance = instanceCount == 1;
+    const bool needsBatchWriteOffsets =
+        shouldBuildRemap && !singleRenderableInstance && !usedUniformFastPath;
+    if (needsBatchWriteOffsets) {
+      batchWriteOffsets_.resize(batchCount);
+    }
     if (singleRenderableInstance) {
       size_t singleRemapCount = 0;
-      for (size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
-        BatchEntry &batch = batches[batchIndex];
-        batch.firstInstance = 0;
-        batchWriteOffsets_[batchIndex] = 0;
-        singleRemapCount = std::max(singleRemapCount, batch.instanceCount);
+      if (useCachedSingleInstanceBatches) {
+        for (size_t batchIndex = 0;
+             batchIndex < activeSingleInstanceCache->batches.size();
+             ++batchIndex) {
+          const SingleInstanceBatchEntry &batch =
+              activeSingleInstanceCache->batches[batchIndex];
+          singleRemapCount = std::max(singleRemapCount, batch.instanceCount);
+        }
+      } else {
+        for (size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
+          BatchEntry &batch = batches[batchIndex];
+          batch.firstInstance = 0;
+          singleRemapCount = std::max(singleRemapCount, batch.instanceCount);
+        }
       }
       remapCount = singleRemapCount;
     } else {
+      if (useCachedSingleInstanceBatches) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueLayer::buildOpaquePasses: cached single-instance batches "
+            "used for multi-instance draw list");
+      }
       size_t firstInstance = 0;
       for (size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
         BatchEntry &batch = batches[batchIndex];
         batch.firstInstance = firstInstance;
-        batchWriteOffsets_[batchIndex] = firstInstance;
+        if (needsBatchWriteOffsets) {
+          batchWriteOffsets_[batchIndex] = firstInstance;
+        }
         firstInstance += batch.instanceCount;
       }
+    }
+    if (shouldBuildRemap) {
+      if (instanceRemap_.size() != remapCount) {
+        instanceRemap_.resize(remapCount);
+      }
+    } else if (instanceRemap_.size() != remapCount) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildOpaquePasses: auto-LOD remap reuse mismatch");
+    }
+    if (shouldBuildRemap) {
+      remapSignature = hashCombine64(kFnvOffsetBasis64, remapCount);
+      remapSignatureValid = true;
     }
 
     if (shouldBuildRemap && usedUniformAutoLodFastPath) {
       for (uint32_t lod = 0; lod < Submesh::kMaxLodCount; ++lod) {
         autoLodBucketWrites[lod] = autoLodBucketStarts[lod];
       }
-      autoLodTessBucketWrite = autoLodTessBucketStart;
-      for (uint32_t instanceId = 0; instanceId < instanceCount; ++instanceId) {
-        const uint32_t lod = instanceAutoLodLevels_[instanceId];
-        if (lod >= Submesh::kMaxLodCount) {
-          continue;
+      if (usedUniformAutoLodTessSplit) {
+        autoLodTessBucketWrite = autoLodTessBucketStart;
+        for (uint32_t instanceId = 0; instanceId < instanceCount;
+             ++instanceId) {
+          const uint32_t lod = instanceAutoLodLevels_[instanceId];
+          if (lod == 0 && instanceTessSelection_[instanceId] != 0u) {
+            instanceRemap_[autoLodTessBucketWrite++] = instanceId;
+            remapSignature = hashCombine64(remapSignature,
+                                           static_cast<uint64_t>(instanceId));
+            continue;
+          }
+          const size_t writeOffset = autoLodBucketWrites[lod]++;
+          instanceRemap_[writeOffset] = instanceId;
+          remapSignature =
+              hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
         }
-        if (usedUniformAutoLodTessSplit && lod == 0 &&
-            instanceId < instanceTessSelection_.size() &&
-            instanceTessSelection_[instanceId] != 0u) {
-          instanceRemap_[autoLodTessBucketWrite++] = instanceId;
-          continue;
+      } else {
+        for (uint32_t instanceId = 0; instanceId < instanceCount;
+             ++instanceId) {
+          const uint32_t lod = instanceAutoLodLevels_[instanceId];
+          const size_t writeOffset = autoLodBucketWrites[lod]++;
+          instanceRemap_[writeOffset] = instanceId;
+          remapSignature =
+              hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
         }
-        const size_t writeOffset = autoLodBucketWrites[lod]++;
-        instanceRemap_[writeOffset] = instanceId;
       }
     } else if (shouldBuildRemap && singleRenderableInstance) {
-      std::fill(instanceRemap_.begin(), instanceRemap_.end(), 0u);
+      for (size_t i = 0; i < instanceRemap_.size(); ++i) {
+        instanceRemap_[i] = 0u;
+        remapSignature = hashCombine64(remapSignature, 0u);
+      }
     } else if (shouldBuildRemap && usedUniformFastPath) {
       for (uint32_t instanceId = 0; instanceId < instanceCount; ++instanceId) {
         instanceRemap_[instanceId] = instanceId;
+        remapSignature =
+            hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
       }
     } else if (shouldBuildRemap) {
       for (size_t templateIndex = 0; templateIndex < meshDrawTemplates_.size();
@@ -1419,38 +1471,149 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
           continue;
         }
         const size_t writeOffset = batchWriteOffsets_[batchIndex]++;
-        instanceRemap_[writeOffset] =
+        const uint32_t instanceId =
             meshDrawTemplates_[templateIndex].instanceIndex;
+        instanceRemap_[writeOffset] = instanceId;
+        remapSignature =
+            hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
       }
     }
+    if (shouldBuildRemap) {
+      cachedRemapSignature_ = remapSignature;
+      cachedRemapSignatureValid_ = true;
+    } else if (cachedRemapSignatureValid_) {
+      remapSignature = cachedRemapSignature_;
+      remapSignatureValid = true;
+    }
 
-    for (const BatchEntry &batch : batches) {
-      PushConstants constants{};
-      constants.frameDataAddress = frameDataAddress;
-      constants.vertexBufferAddress = batch.vertexBufferAddress;
-      constants.instanceMatricesAddress = instanceMatricesAddress;
-      constants.materialBufferAddress = materialBufferAddress;
-      constants.instanceCentersPhaseAddress = instanceCentersPhaseAddress;
-      constants.instanceBaseMatricesAddress = instanceBaseMatricesAddress;
-      constants.instanceCount = static_cast<uint32_t>(instanceCount);
-      constants.materialIndex = batch.materialIndex;
-      constants.timeSeconds = settings.opaque.enableInstanceAnimation
-                                  ? static_cast<float>(frame.timeSeconds)
-                                  : 0.0f;
-      constants.tessNearDistance = tessNearDistance;
-      constants.tessFarDistance = tessFarDistance;
-      constants.tessMinFactor = tessMinFactor;
-      constants.tessMaxFactor = tessMaxFactor;
-      constants.debugVisualizationMode = debugVisualizationMode;
-      drawPushConstants_.push_back(constants);
+    if (settings.opaque.enableIndirectDraw) {
+      indirectDrawSignature = hashCombine64(kFnvOffsetBasis64, batchCount);
+      indirectDrawSignature = hashCombine64(indirectDrawSignature, remapCount);
+      indirectDrawSignatureValid = true;
+    }
+    if (useCachedSingleInstanceBatches) {
+      for (size_t batchIndex = 0;
+           batchIndex < activeSingleInstanceCache->batches.size();
+           ++batchIndex) {
+        const SingleInstanceBatchEntry &batch =
+            activeSingleInstanceCache->batches[batchIndex];
+        PushConstants &constants = drawPushConstants_[batchIndex];
+        constants.frameDataAddress = frameDataAddress;
+        constants.vertexBufferAddress = batch.vertexBufferAddress;
+        constants.instanceMatricesAddress = instanceMatricesAddress;
+        constants.instanceRemapAddress = 0;
+        constants.materialBufferAddress = materialBufferAddress;
+        constants.instanceCentersPhaseAddress = instanceCentersPhaseAddress;
+        constants.instanceBaseMatricesAddress = instanceBaseMatricesAddress;
+        constants.instanceCount = static_cast<uint32_t>(instanceCount);
+        constants.materialIndex = batch.materialIndex;
+        constants.timeSeconds = settings.opaque.enableInstanceAnimation
+                                    ? static_cast<float>(frame.timeSeconds)
+                                    : 0.0f;
+        constants.tessNearDistance = tessNearDistance;
+        constants.tessFarDistance = tessFarDistance;
+        constants.tessMinFactor = tessMinFactor;
+        constants.tessMaxFactor = tessMaxFactor;
+        constants.debugVisualizationMode = debugVisualizationMode;
 
-      DrawItem draw = batch.draw;
-      draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
-      draw.firstInstance = static_cast<uint32_t>(batch.firstInstance);
-      draw.pushConstants = std::span<const std::byte>(
-          reinterpret_cast<const std::byte *>(&drawPushConstants_.back()),
-          sizeof(PushConstants));
-      drawItems_.push_back(draw);
+        DrawItem &draw = drawItems_[batchIndex];
+        draw = batch.draw;
+        draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
+        draw.firstInstance = 0;
+        draw.pushConstants = std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(&constants),
+            sizeof(PushConstants));
+
+        if (indirectDrawSignatureValid) {
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature, static_cast<uint64_t>(draw.command));
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature,
+              foldHandle(draw.pipeline.index, draw.pipeline.generation));
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature,
+              foldHandle(draw.indexBuffer.index, draw.indexBuffer.generation));
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.indexBufferOffset);
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature, static_cast<uint64_t>(draw.indexFormat));
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.indexCount);
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.instanceCount);
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.firstIndex);
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature, static_cast<uint64_t>(draw.vertexOffset));
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.firstInstance);
+          indirectDrawSignature = hashCombine64(indirectDrawSignature,
+                                                constants.vertexBufferAddress);
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature,
+                            static_cast<uint64_t>(constants.materialIndex));
+        }
+      }
+    } else {
+      for (size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
+        const BatchEntry &batch = batches[batchIndex];
+        PushConstants &constants = drawPushConstants_[batchIndex];
+        constants.frameDataAddress = frameDataAddress;
+        constants.vertexBufferAddress = batch.vertexBufferAddress;
+        constants.instanceMatricesAddress = instanceMatricesAddress;
+        constants.instanceRemapAddress = 0;
+        constants.materialBufferAddress = materialBufferAddress;
+        constants.instanceCentersPhaseAddress = instanceCentersPhaseAddress;
+        constants.instanceBaseMatricesAddress = instanceBaseMatricesAddress;
+        constants.instanceCount = static_cast<uint32_t>(instanceCount);
+        constants.materialIndex = batch.materialIndex;
+        constants.timeSeconds = settings.opaque.enableInstanceAnimation
+                                    ? static_cast<float>(frame.timeSeconds)
+                                    : 0.0f;
+        constants.tessNearDistance = tessNearDistance;
+        constants.tessFarDistance = tessFarDistance;
+        constants.tessMinFactor = tessMinFactor;
+        constants.tessMaxFactor = tessMaxFactor;
+        constants.debugVisualizationMode = debugVisualizationMode;
+
+        DrawItem &draw = drawItems_[batchIndex];
+        draw = batch.draw;
+        draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
+        draw.firstInstance = static_cast<uint32_t>(batch.firstInstance);
+        draw.pushConstants = std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(&constants),
+            sizeof(PushConstants));
+
+        if (indirectDrawSignatureValid) {
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature, static_cast<uint64_t>(draw.command));
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature,
+              foldHandle(draw.pipeline.index, draw.pipeline.generation));
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature,
+              foldHandle(draw.indexBuffer.index, draw.indexBuffer.generation));
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.indexBufferOffset);
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature, static_cast<uint64_t>(draw.indexFormat));
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.indexCount);
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.instanceCount);
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.firstIndex);
+          indirectDrawSignature = hashCombine64(
+              indirectDrawSignature, static_cast<uint64_t>(draw.vertexOffset));
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature, draw.firstInstance);
+          indirectDrawSignature = hashCombine64(indirectDrawSignature,
+                                                constants.vertexBufferAddress);
+          indirectDrawSignature =
+              hashCombine64(indirectDrawSignature,
+                            static_cast<uint64_t>(constants.materialIndex));
+        }
+      }
     }
     NURI_PROFILER_ZONE_END();
   }
@@ -1460,7 +1623,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
                        NURI_PROFILER_COLOR_CMD_DRAW);
     if (drawItems_.size() != drawPushConstants_.size()) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: draw and push constant count "
+          "OpaqueLayer::buildOpaquePasses: draw and push constant count "
           "mismatch before instancing expansion");
     }
 
@@ -1471,7 +1634,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (expandedDrawCount >
         static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: expanded draw count exceeds "
+          "OpaqueLayer::buildOpaquePasses: expanded draw count exceeds "
           "UINT32_MAX");
     }
 
@@ -1493,7 +1656,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
             sourceDraw.firstInstance > (std::numeric_limits<uint32_t>::max() -
                                         (sourceDraw.instanceCount - 1u))) {
           return Result<bool, std::string>::makeError(
-              "OpaqueLayer::buildRenderPasses: expanded instance range "
+              "OpaqueLayer::buildOpaquePasses: expanded instance range "
               "overflows UINT32_MAX");
         }
 
@@ -1527,7 +1690,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   if (usedUniformAutoLodFastPath && !tessellationRequested) {
     updateFastAutoLodCache(activeFastAutoLodSubmesh, cameraPosition,
                            sortedLodThresholds, autoLodBucketCounts, remapCount,
-                           instanceCount);
+                           instanceCount, frame.frameIndex);
   } else {
     invalidateAutoLodCache();
   }
@@ -1536,14 +1699,18 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       instanceRemapRing_[frameSlot].buffer->handle());
   if (instanceRemapAddress == 0) {
     return Result<bool, std::string>::makeError(
-        "OpaqueLayer::buildRenderPasses: invalid instance remap buffer "
+        "OpaqueLayer::buildOpaquePasses: invalid instance remap buffer "
         "address");
   }
 
   if (!instanceRemap_.empty()) {
-    const uint64_t remapSignature =
-        computeRemapSignature(std::span<const uint32_t>(instanceRemap_.data(),
-                                                        instanceRemap_.size()));
+    if (!remapSignatureValid) {
+      remapSignature = computeRemapSignature(std::span<const uint32_t>(
+          instanceRemap_.data(), instanceRemap_.size()));
+      remapSignatureValid = true;
+      cachedRemapSignature_ = remapSignature;
+      cachedRemapSignatureValid_ = true;
+    }
     const bool hasRemapSlotSignature =
         frameSlot < remapUploadSignatures_.size();
     const bool remapAlreadyUploadedForSlot =
@@ -1567,6 +1734,8 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     }
   } else if (frameSlot < remapUploadSignatures_.size()) {
     remapUploadSignatures_[frameSlot] = kInvalidDrawSignature;
+    cachedRemapSignature_ = kInvalidDrawSignature;
+    cachedRemapSignatureValid_ = false;
   }
 
   for (PushConstants &constants : drawPushConstants_) {
@@ -1574,13 +1743,14 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   }
 
   if (settings.opaque.enableIndirectDraw) {
-    auto indirectBuildResult = buildIndirectDraws(frameSlot, remapCount);
+    auto indirectBuildResult =
+        buildIndirectDraws(frameSlot, remapCount, indirectDrawSignature,
+                           indirectDrawSignatureValid);
     if (indirectBuildResult.hasError()) {
       return indirectBuildResult;
     }
   } else {
     invalidateIndirectPackCache();
-    indirectPushConstants_.clear();
     indirectDrawItems_.clear();
     indirectCommandUploadBytes_.clear();
   }
@@ -1643,7 +1813,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (!hasIndirectDraws && frameDataBuffer_ && frameDataBuffer_->valid()) {
       auto depResult = appendUniqueDependency(
           passDependencyBuffers_, frameDataBuffer_->handle(),
-          "OpaqueLayer::buildRenderPasses(pass)");
+          "OpaqueLayer::buildOpaquePasses(pass)");
       if (depResult.hasError()) {
         return depResult;
       }
@@ -1651,7 +1821,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (materialBuffer_ && materialBuffer_->valid()) {
       auto depResult = appendUniqueDependency(
           passDependencyBuffers_, materialBuffer_->handle(),
-          "OpaqueLayer::buildRenderPasses(pass)");
+          "OpaqueLayer::buildOpaquePasses(pass)");
       if (depResult.hasError()) {
         return depResult;
       }
@@ -1662,7 +1832,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       auto depResult =
           appendUniqueDependency(passDependencyBuffers_,
                                  instanceRemapRing_[frameSlot].buffer->handle(),
-                                 "OpaqueLayer::buildRenderPasses(pass)");
+                                 "OpaqueLayer::buildOpaquePasses(pass)");
       if (depResult.hasError()) {
         return depResult;
       }
@@ -1672,7 +1842,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       auto depResult = appendUniqueDependency(
           passDependencyBuffers_,
           indirectCommandRing_[frameSlot].buffer->handle(),
-          "OpaqueLayer::buildRenderPasses(pass)");
+          "OpaqueLayer::buildOpaquePasses(pass)");
       if (depResult.hasError()) {
         return depResult;
       }
@@ -1682,7 +1852,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       auto passDepResult = appendUniqueDependency(
           passDependencyBuffers_,
           instanceMatricesRing_[frameSlot].buffer->handle(),
-          "OpaqueLayer::buildRenderPasses(pass)");
+          "OpaqueLayer::buildOpaquePasses(pass)");
       if (passDepResult.hasError()) {
         return passDepResult;
       }
@@ -1692,7 +1862,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
             instanceCentersPhaseBuffer_->valid()) {
           auto depResult = appendUniqueDependency(
               dispatchDependencyBuffers_, instanceCentersPhaseBuffer_->handle(),
-              "OpaqueLayer::buildRenderPasses(dispatch)");
+              "OpaqueLayer::buildOpaquePasses(dispatch)");
           if (depResult.hasError()) {
             return depResult;
           }
@@ -1701,7 +1871,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
             instanceBaseMatricesBuffer_->valid()) {
           auto depResult = appendUniqueDependency(
               dispatchDependencyBuffers_, instanceBaseMatricesBuffer_->handle(),
-              "OpaqueLayer::buildRenderPasses(dispatch)");
+              "OpaqueLayer::buildOpaquePasses(dispatch)");
           if (depResult.hasError()) {
             return depResult;
           }
@@ -1709,7 +1879,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         auto dispatchDepResult = appendUniqueDependency(
             dispatchDependencyBuffers_,
             instanceMatricesRing_[frameSlot].buffer->handle(),
-            "OpaqueLayer::buildRenderPasses(dispatch)");
+            "OpaqueLayer::buildOpaquePasses(dispatch)");
         if (dispatchDepResult.hasError()) {
           return dispatchDepResult;
         }
@@ -1738,26 +1908,28 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
   size_t tessellatedDraws = 0;
   size_t tessellatedInstances = 0;
-  if (nuri::isValid(meshTessPipelineHandle_)) {
+  if (tessellationRequested && nuri::isValid(meshTessPipelineHandle_)) {
     for (const DrawItem &draw : drawItems_) {
-      if (isTessPipelineHandle(draw.pipeline, meshTessPipelineHandle_)) {
+      if (isTessPipeline(draw.pipeline)) {
         ++tessellatedDraws;
         tessellatedInstances += draw.instanceCount;
       }
     }
   }
 
+  const bool hasIndirectBaseDraws = !indirectDrawItems_.empty();
   const std::span<const DrawItem> baseDrawItems =
-      indirectDrawItems_.empty()
-          ? std::span<const DrawItem>(drawItems_.data(), drawItems_.size())
-          : std::span<const DrawItem>(indirectDrawItems_.data(),
-                                      indirectDrawItems_.size());
+      hasIndirectBaseDraws
+          ? std::span<const DrawItem>(indirectDrawItems_.data(),
+                                      indirectDrawItems_.size())
+          : std::span<const DrawItem>(drawItems_.data(), drawItems_.size());
 
   size_t debugOverlayDraws = 0;
   size_t debugOverlayFallbackDraws = 0;
   size_t debugPatchHeatmapDraws = 0;
   overlayDrawItems_.clear();
   passDrawItems_.clear();
+  std::span<const DrawItem> finalPassDrawItems = baseDrawItems;
   if (wireframeOnlyRequested && !baseDrawItems.empty()) {
     bool lineOverlayAvailable = false;
     bool lineTessOverlayAvailable = false;
@@ -1766,7 +1938,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (lineResult.hasError()) {
       if (!loggedWireframeFallbackUnsupported_) {
         loggedWireframeFallbackUnsupported_ = true;
-        NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+        NURI_LOG_WARNING("OpaqueLayer::buildOpaquePasses: failed to create "
                          "wireframe pipeline: %s",
                          lineResult.error().c_str());
       }
@@ -1778,7 +1950,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (lineTessResult.hasError()) {
       if (!loggedTessWireframeFallbackUnsupported_) {
         loggedTessWireframeFallbackUnsupported_ = true;
-        NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+        NURI_LOG_WARNING("OpaqueLayer::buildOpaquePasses: failed to create "
                          "tess wireframe pipeline: %s",
                          lineTessResult.error().c_str());
       }
@@ -1788,8 +1960,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
     overlayDrawItems_.reserve(baseDrawItems.size());
     for (const DrawItem &baseItem : baseDrawItems) {
-      const bool isTessDraw =
-          isTessPipelineHandle(baseItem.pipeline, meshTessPipelineHandle_);
+      const bool isTessDraw = isTessPipeline(baseItem.pipeline);
       RenderPipelineHandle wireframePipeline{};
       bool usedFallback = false;
       if (isTessDraw && lineTessOverlayAvailable) {
@@ -1820,13 +1991,9 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       }
     }
 
-    passDrawItems_.reserve(baseDrawItems.size());
-    if (overlayDrawItems_.empty()) {
-      passDrawItems_.insert(passDrawItems_.end(), baseDrawItems.begin(),
-                            baseDrawItems.end());
-    } else {
-      passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
-                            overlayDrawItems_.end());
+    if (!overlayDrawItems_.empty()) {
+      finalPassDrawItems = std::span<const DrawItem>(overlayDrawItems_.data(),
+                                                     overlayDrawItems_.size());
     }
   } else {
     if (overlayRequested && !baseDrawItems.empty()) {
@@ -1839,7 +2006,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       if (gsOverlayResult.hasError()) {
         if (!loggedGsOverlayUnsupported_) {
           loggedGsOverlayUnsupported_ = true;
-          NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+          NURI_LOG_WARNING("OpaqueLayer::buildOpaquePasses: failed to create "
                            "GS overlay pipeline: %s",
                            gsOverlayResult.error().c_str());
         }
@@ -1851,7 +2018,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       if (gsTessOverlayResult.hasError()) {
         if (!loggedGsTessOverlayUnsupported_) {
           loggedGsTessOverlayUnsupported_ = true;
-          NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to create "
+          NURI_LOG_WARNING("OpaqueLayer::buildOpaquePasses: failed to create "
                            "GS tess overlay pipeline: %s",
                            gsTessOverlayResult.error().c_str());
         }
@@ -1864,7 +2031,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         if (lineResult.hasError()) {
           if (!loggedWireframeFallbackUnsupported_) {
             loggedWireframeFallbackUnsupported_ = true;
-            NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to "
+            NURI_LOG_WARNING("OpaqueLayer::buildOpaquePasses: failed to "
                              "create line overlay fallback pipeline: %s",
                              lineResult.error().c_str());
           }
@@ -1877,7 +2044,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
         if (lineTessResult.hasError()) {
           if (!loggedTessWireframeFallbackUnsupported_) {
             loggedTessWireframeFallbackUnsupported_ = true;
-            NURI_LOG_WARNING("OpaqueLayer::buildRenderPasses: failed to "
+            NURI_LOG_WARNING("OpaqueLayer::buildOpaquePasses: failed to "
                              "create line tess overlay fallback pipeline: %s",
                              lineTessResult.error().c_str());
           }
@@ -1888,8 +2055,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
       overlayDrawItems_.reserve(baseDrawItems.size());
       for (const DrawItem &baseItem : baseDrawItems) {
-        const bool isTessDraw =
-            isTessPipelineHandle(baseItem.pipeline, meshTessPipelineHandle_);
+        const bool isTessDraw = isTessPipeline(baseItem.pipeline);
         RenderPipelineHandle overlayPipeline{};
         bool usedFallback = false;
         if (isTessDraw) {
@@ -1940,11 +2106,15 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
       }
     }
 
-    passDrawItems_.reserve(baseDrawItems.size() + overlayDrawItems_.size());
-    passDrawItems_.insert(passDrawItems_.end(), baseDrawItems.begin(),
-                          baseDrawItems.end());
-    passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
-                          overlayDrawItems_.end());
+    if (!overlayDrawItems_.empty()) {
+      passDrawItems_.reserve(baseDrawItems.size() + overlayDrawItems_.size());
+      passDrawItems_.insert(passDrawItems_.end(), baseDrawItems.begin(),
+                            baseDrawItems.end());
+      passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
+                            overlayDrawItems_.end());
+      finalPassDrawItems = std::span<const DrawItem>(passDrawItems_.data(),
+                                                     passDrawItems_.size());
+    }
   }
 
   size_t indirectCommandCount = 0;
@@ -1972,7 +2142,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   ++statsLogFrameCounter_;
   const bool shouldLogStats = (statsLogFrameCounter_ & 511ull) == 0ull;
   if (shouldLogStats) {
-    // NURI_LOG_DEBUG("OpaqueLayer::buildRenderPasses: totalInstances=%zu "
+    // NURI_LOG_DEBUG("OpaqueLayer::buildOpaquePasses: totalInstances=%zu "
     //                "visibleInstances=%zu "
     //                "instancedDraws=%zu tessellatedDraws=%zu "
     //                "tessellatedInstances=%zu indirectDrawCalls=%zu "
@@ -1994,13 +2164,7 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
 
     for (const DrawItem &baseItem : baseDrawItems) {
       DrawItem pickItem = baseItem;
-      const bool isTessDraw =
-          isTessPipelineHandle(baseItem.pipeline, meshTessPipelineHandle_);
-      if (isTessDraw && nuri::isValid(meshPickTessPipelineHandle_)) {
-        pickItem.pipeline = meshPickTessPipelineHandle_;
-      } else {
-        pickItem.pipeline = meshPickPipelineHandle_;
-      }
+      pickItem.pipeline = selectPickPipeline(baseItem.pipeline);
       pickItem.debugLabel = "OpaqueMeshPick";
       pickItem.debugColor = kOpaquePassDebugColor;
       pickDrawItems_.push_back(pickItem);
@@ -2016,24 +2180,28 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
     pendingPickRequest_->x = std::min(pendingPickRequest_->x, safeWidth - 1u);
     pendingPickRequest_->y = std::min(pendingPickRequest_->y, safeHeight - 1u);
 
-    RenderPass pickPass{};
-    pickPass.color = {.loadOp = LoadOp::Clear,
-                      .storeOp = StoreOp::Store,
-                      .clearColor = {0.0f, 0.0f, 0.0f, 0.0f}};
-    pickPass.colorTexture = pickIdTexture_;
-    pickPass.depth = {.loadOp = LoadOp::Clear,
-                      .storeOp = StoreOp::Store,
-                      .clearDepth = kClearDepthOne,
-                      .clearStencil = 0};
-    pickPass.depthTexture = depthTexture_;
-    pickPass.preDispatches = std::span<const ComputeDispatchItem>(
+    PreparedGraphPass pickPass{};
+    pickPass.desc.color = {.loadOp = LoadOp::Clear,
+                           .storeOp = StoreOp::Store,
+                           .clearColor = {0.0f, 0.0f, 0.0f, 0.0f}};
+    pickPass.colorTextureHandle = pickIdTexture_;
+    pickPass.desc.depth = {.loadOp = LoadOp::Clear,
+                           .storeOp = StoreOp::Store,
+                           .clearDepth = kClearDepthOne,
+                           .clearStencil = 0};
+    pickPass.depthTextureHandle = depthTexture_;
+    pickPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
-    pickPass.dependencyBuffers = std::span<const BufferHandle>(
+    pickPass.desc.dependencyBuffers = std::span<const BufferHandle>(
         passDependencyBuffers_.data(), passDependencyBuffers_.size());
-    pickPass.draws =
+    pickPass.desc.draws =
         std::span<const DrawItem>(pickDrawItems_.data(), pickDrawItems_.size());
-    pickPass.debugLabel = "Opaque Pick Pass";
-    pickPass.debugColor = kOpaquePassDebugColor;
+    pickPass.desc.debugLabel = kOpaquePickPassLabel;
+    pickPass.desc.debugColor = kOpaquePassDebugColor;
+    pickPass.hasDraws = !pickDrawItems_.empty();
+    pickPass.hasPreDispatch = !preDispatches_.empty();
+    pickPass.hasIndirectDraws = false;
+    pickPass.isPickPass = true;
     out.push_back(pickPass);
 
     inFlightPickReadback_ = InFlightPickReadback{
@@ -2044,29 +2212,335 @@ OpaqueLayer::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
   }
 
   const bool shouldLoadColor = settings.skybox.enabled;
-  RenderPass pass{};
-  pass.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
-                .storeOp = StoreOp::Store,
-                .clearColor = {kClearColorWhite, kClearColorWhite,
-                               kClearColorWhite, kClearColorWhite}};
-  pass.depth = {.loadOp = LoadOp::Clear,
-                .storeOp = StoreOp::Store,
-                .clearDepth = kClearDepthOne,
-                .clearStencil = 0};
-  pass.depthTexture = depthTexture_;
+  PreparedGraphPass pass{};
+  pass.desc.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
+                     .storeOp = StoreOp::Store,
+                     .clearColor = {kClearColorWhite, kClearColorWhite,
+                                    kClearColorWhite, kClearColorWhite}};
+  pass.desc.depth = {.loadOp = LoadOp::Clear,
+                     .storeOp = StoreOp::Store,
+                     .clearDepth = kClearDepthOne,
+                     .clearStencil = 0};
+  pass.depthTextureHandle = depthTexture_;
   if (!pickPassSubmitted) {
-    pass.preDispatches = std::span<const ComputeDispatchItem>(
+    pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
   }
-  pass.dependencyBuffers = std::span<const BufferHandle>(
+  pass.desc.dependencyBuffers = std::span<const BufferHandle>(
       passDependencyBuffers_.data(), passDependencyBuffers_.size());
-  pass.draws =
-      std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size());
-  pass.debugLabel = "Opaque Pass";
-  pass.debugColor = kOpaquePassDebugColor;
+  pass.desc.draws = finalPassDrawItems;
+  pass.desc.debugLabel = kOpaqueMainPassLabel;
+  pass.desc.debugColor = kOpaquePassDebugColor;
+  pass.hasDraws = !finalPassDrawItems.empty();
+  pass.hasPreDispatch = !pickPassSubmitted && !preDispatches_.empty();
+  pass.hasIndirectDraws = hasIndirectBaseDraws;
+  pass.isMainPass = true;
 
   frame.sharedDepthTexture = depthTexture_;
+  frame.channels.publish<TextureHandle>(kFrameChannelSceneDepthTexture,
+                                        depthTexture_);
   out.push_back(pass);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
+                              RenderGraphBuilder &graph) {
+  NURI_PROFILER_FUNCTION();
+
+  std::pmr::memory_resource *const memory =
+      renderableTemplates_.get_allocator().resource();
+  std::pmr::vector<PreparedGraphPass> localPasses(memory);
+  auto buildResult = buildOpaquePasses(frame, localPasses);
+  if (buildResult.hasError()) {
+    return buildResult;
+  }
+
+  std::pmr::vector<RenderGraphPassId> addedPassIds(memory);
+  addedPassIds.reserve(localPasses.size());
+  std::pmr::vector<RenderGraphPassId> opaqueShadingPassIds(memory);
+  opaqueShadingPassIds.reserve(localPasses.size());
+  std::pmr::vector<RenderGraphPassId> opaqueWorkPassIds(memory);
+  opaqueWorkPassIds.reserve(localPasses.size());
+  std::pmr::vector<RenderGraphPassId> opaquePreDispatchPassIds(memory);
+  opaquePreDispatchPassIds.reserve(localPasses.size());
+  std::pmr::vector<RenderGraphPassId> opaqueIndirectPassIds(memory);
+  opaqueIndirectPassIds.reserve(localPasses.size());
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+  const uint32_t safeWidth =
+      static_cast<uint32_t>(std::max(framebufferWidth, 1));
+  const uint32_t safeHeight =
+      static_cast<uint32_t>(std::max(framebufferHeight, 1));
+
+  for (const PreparedGraphPass &pass : localPasses) {
+    RenderGraphGraphicsPassDesc passDesc = pass.desc;
+
+    if (nuri::isValid(pass.colorTextureHandle)) {
+      auto colorImportResult = graph.importTexture(pass.colorTextureHandle,
+                                                   "opaque_pass_color_texture");
+      if (colorImportResult.hasError()) {
+        return Result<bool, std::string>::makeError(colorImportResult.error());
+      }
+      passDesc.colorTexture = colorImportResult.value();
+    }
+
+    if (nuri::isValid(pass.depthTextureHandle)) {
+      auto depthImportResult = graph.importTexture(pass.depthTextureHandle,
+                                                   "opaque_pass_depth_texture");
+      if (depthImportResult.hasError()) {
+        return Result<bool, std::string>::makeError(depthImportResult.error());
+      }
+      passDesc.depthTexture = depthImportResult.value();
+    }
+
+    auto addResult = graph.addGraphicsPass(passDesc);
+    if (addResult.hasError()) {
+      return Result<bool, std::string>::makeError(addResult.error());
+    }
+    const RenderGraphPassId passId = addResult.value();
+    addedPassIds.push_back(passId);
+
+    const bool hasPreDispatch = pass.hasPreDispatch;
+    const bool hasDraws = pass.hasDraws;
+    const bool hasIndirectDraws = pass.hasIndirectDraws;
+    if (hasDraws || hasPreDispatch) {
+      opaqueWorkPassIds.push_back(passId);
+    }
+    if (hasPreDispatch) {
+      opaquePreDispatchPassIds.push_back(passId);
+    }
+    if (hasPreDispatch || hasIndirectDraws) {
+      opaqueIndirectPassIds.push_back(passId);
+    }
+    if (pass.isMainPass) {
+      opaqueShadingPassIds.push_back(passId);
+    }
+
+    if (pass.isPickPass) {
+      const Format pickDepthFormat =
+          nuri::isValid(pass.depthTextureHandle)
+              ? gpu_.getTextureFormat(pass.depthTextureHandle)
+              : Format::D32_FLOAT;
+      const TextureDesc pickDepthTransientDesc{
+          .type = TextureType::Texture2D,
+          .format = pickDepthFormat,
+          .dimensions = {safeWidth, safeHeight, 1},
+          .usage = TextureUsage::Attachment,
+          .storage = Storage::Device,
+          .numLayers = 1,
+          .numSamples = 1,
+          .numMipLevels = 1,
+          .data = {},
+          .dataNumMipLevels = 1,
+          .generateMipmaps = false,
+      };
+      auto pickDepthResult = graph.createTransientTexture(
+          pickDepthTransientDesc, "opaque_pick_transient_depth");
+      if (pickDepthResult.hasError()) {
+        return Result<bool, std::string>::makeError(pickDepthResult.error());
+      }
+      auto bindPickDepthResult =
+          graph.bindPassDepthTexture(passId, pickDepthResult.value());
+      if (bindPickDepthResult.hasError()) {
+        return Result<bool, std::string>::makeError(
+            bindPickDepthResult.error());
+      }
+    }
+
+    if (pass.isMainPass && nuri::isValid(pass.depthTextureHandle)) {
+      const Format sceneDepthFormat =
+          gpu_.getTextureFormat(pass.depthTextureHandle);
+      const TextureDesc sceneDepthTransientDesc{
+          .type = TextureType::Texture2D,
+          .format = sceneDepthFormat,
+          .dimensions = {safeWidth, safeHeight, 1},
+          .usage = TextureUsage::Attachment,
+          .storage = Storage::Device,
+          .numLayers = 1,
+          .numSamples = 1,
+          .numMipLevels = 1,
+          .data = {},
+          .dataNumMipLevels = 1,
+          .generateMipmaps = false,
+      };
+      auto sceneDepthResult = graph.createTransientTexture(
+          sceneDepthTransientDesc, "opaque_scene_transient_depth");
+      if (sceneDepthResult.hasError()) {
+        return Result<bool, std::string>::makeError(sceneDepthResult.error());
+      }
+      auto bindSceneDepthResult =
+          graph.bindPassDepthTexture(passId, sceneDepthResult.value());
+      if (bindSceneDepthResult.hasError()) {
+        return Result<bool, std::string>::makeError(
+            bindSceneDepthResult.error());
+      }
+      frame.channels.publish<RenderGraphTextureId>(
+          kFrameChannelSceneDepthGraphTexture, sceneDepthResult.value());
+    }
+  }
+
+  if (addedPassIds.empty()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const auto registerBufferAccessForPasses =
+      [&graph](std::span<const RenderGraphPassId> passIds, BufferHandle handle,
+               RenderGraphAccessMode mode,
+               std::string_view debugName) -> Result<bool, std::string> {
+    if (passIds.empty()) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+    if (!nuri::isValid(handle)) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+
+    auto importResult = graph.importBuffer(handle, debugName);
+    if (importResult.hasError()) {
+      return Result<bool, std::string>::makeError(importResult.error());
+    }
+
+    for (const RenderGraphPassId passId : passIds) {
+      auto accessResult =
+          graph.addBufferAccess(passId, importResult.value(), mode);
+      if (accessResult.hasError()) {
+        return Result<bool, std::string>::makeError(accessResult.error());
+      }
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+  const auto registerTextureAccessForPasses =
+      [&graph](std::span<const RenderGraphPassId> passIds, TextureHandle handle,
+               RenderGraphAccessMode mode,
+               std::string_view debugName) -> Result<bool, std::string> {
+    if (passIds.empty()) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+    if (!nuri::isValid(handle)) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+
+    auto importResult = graph.importTexture(handle, debugName);
+    if (importResult.hasError()) {
+      return Result<bool, std::string>::makeError(importResult.error());
+    }
+
+    for (const RenderGraphPassId passId : passIds) {
+      auto accessResult =
+          graph.addTextureAccess(passId, importResult.value(), mode);
+      if (accessResult.hasError()) {
+        return Result<bool, std::string>::makeError(accessResult.error());
+      }
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+
+  constexpr RenderGraphAccessMode kReadOnly = RenderGraphAccessMode::Read;
+  constexpr RenderGraphAccessMode kReadWrite =
+      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write;
+  auto registerResult = registerBufferAccessForPasses(
+      opaqueWorkPassIds,
+      frameDataBuffer_ && frameDataBuffer_->valid() ? frameDataBuffer_->handle()
+                                                    : BufferHandle{},
+      kReadOnly, "opaque_frame_data_buffer");
+  if (registerResult.hasError()) {
+    return registerResult;
+  }
+  registerResult = registerBufferAccessForPasses(
+      opaqueWorkPassIds,
+      instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid()
+          ? instanceCentersPhaseBuffer_->handle()
+          : BufferHandle{},
+      kReadOnly, "opaque_instance_centers_phase_buffer");
+  if (registerResult.hasError()) {
+    return registerResult;
+  }
+  registerResult = registerBufferAccessForPasses(
+      opaqueWorkPassIds,
+      instanceBaseMatricesBuffer_ && instanceBaseMatricesBuffer_->valid()
+          ? instanceBaseMatricesBuffer_->handle()
+          : BufferHandle{},
+      kReadOnly, "opaque_instance_base_matrices_buffer");
+  if (registerResult.hasError()) {
+    return registerResult;
+  }
+  registerResult = registerBufferAccessForPasses(
+      opaqueShadingPassIds,
+      materialBuffer_ && materialBuffer_->valid() ? materialBuffer_->handle()
+                                                  : BufferHandle{},
+      kReadOnly, "opaque_material_buffer");
+  if (registerResult.hasError()) {
+    return registerResult;
+  }
+
+  const uint32_t swapchainImageCount =
+      std::max(1u, gpu_.getSwapchainImageCount());
+  const uint32_t frameSlot =
+      static_cast<uint32_t>(frame.frameIndex % swapchainImageCount);
+  if (frameSlot < instanceMatricesRing_.size() &&
+      instanceMatricesRing_[frameSlot].buffer &&
+      instanceMatricesRing_[frameSlot].buffer->valid()) {
+    auto registerResult = registerBufferAccessForPasses(
+        opaqueWorkPassIds, instanceMatricesRing_[frameSlot].buffer->handle(),
+        kReadWrite, "opaque_instance_matrices_ring_buffer");
+    if (registerResult.hasError()) {
+      return registerResult;
+    }
+  }
+  if (frameSlot < instanceRemapRing_.size() &&
+      instanceRemapRing_[frameSlot].buffer &&
+      instanceRemapRing_[frameSlot].buffer->valid()) {
+    auto registerResult = registerBufferAccessForPasses(
+        opaquePreDispatchPassIds,
+        instanceRemapRing_[frameSlot].buffer->handle(), kReadWrite,
+        "opaque_instance_remap_ring_buffer");
+    if (registerResult.hasError()) {
+      return registerResult;
+    }
+  }
+  if (frameSlot < indirectCommandRing_.size() &&
+      indirectCommandRing_[frameSlot].buffer &&
+      indirectCommandRing_[frameSlot].buffer->valid()) {
+    auto registerResult = registerBufferAccessForPasses(
+        opaqueIndirectPassIds, indirectCommandRing_[frameSlot].buffer->handle(),
+        kReadWrite, "opaque_indirect_command_ring_buffer");
+    if (registerResult.hasError()) {
+      return registerResult;
+    }
+  }
+
+  if (frame.scene != nullptr && frame.resources != nullptr) {
+    const EnvironmentHandles &environment = frame.scene->environment();
+    const std::array<std::pair<TextureRef, std::string_view>, 5> envTextures = {
+        {
+            {environment.cubemap, "opaque_env_cubemap"},
+            {environment.irradiance, "opaque_env_irradiance"},
+            {environment.prefilteredGgx, "opaque_env_prefiltered_ggx"},
+            {environment.prefilteredCharlie, "opaque_env_prefiltered_charlie"},
+            {environment.brdfLut, "opaque_env_brdf_lut"},
+        }};
+
+    for (const auto &[ref, name] : envTextures) {
+      const TextureRecord *record = frame.resources->tryGet(ref);
+      if (record == nullptr || !nuri::isValid(record->texture)) {
+        continue;
+      }
+      auto registerResult = registerTextureAccessForPasses(
+          opaqueShadingPassIds, record->texture, kReadOnly, name);
+      if (registerResult.hasError()) {
+        return registerResult;
+      }
+    }
+    for (const TextureHandle texture : materialTextureAccessHandles_) {
+      auto registerResult = registerTextureAccessForPasses(
+          opaqueShadingPassIds, texture, kReadOnly, "opaque_material_texture");
+      if (registerResult.hasError()) {
+        return registerResult;
+      }
+    }
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2101,14 +2575,33 @@ bool OpaqueLayer::shouldEnableSingleInstanceTessPipeline(
   return distanceSq <= tessFarDistanceSq;
 }
 
+size_t OpaqueLayer::singleInstanceCacheIndex(uint32_t requestedLod,
+                                             bool tessPipelineEnabled) const {
+  const uint32_t clampedLod =
+      std::min(requestedLod, Submesh::kMaxLodCount - 1u);
+  return static_cast<size_t>(clampedLod) * 2u + (tessPipelineEnabled ? 1u : 0u);
+}
+
 Result<bool, std::string> OpaqueLayer::ensureSingleInstanceBatchCache(
-    uint32_t requestedLod, bool tessPipelineEnabled,
-    uint64_t meshTemplateSignature, const DrawItem &baseDraw) {
+    uint32_t requestedLod, bool tessPipelineEnabled, const DrawItem &baseDraw) {
+  const size_t cacheIndex =
+      singleInstanceCacheIndex(requestedLod, tessPipelineEnabled);
+  if (cacheIndex >= singleInstanceBatchCaches_.size()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::buildOpaquePasses: single-instance cache index out of "
+        "range");
+  }
+  SingleInstanceBatchCache &cache = singleInstanceBatchCaches_[cacheIndex];
   const bool canReuseSingleInstanceCache =
-      singleInstanceBatchCache_.valid &&
-      singleInstanceBatchCache_.requestedLod == requestedLod &&
-      singleInstanceBatchCache_.tessPipelineEnabled == tessPipelineEnabled &&
-      singleInstanceBatchCache_.templateSignature == meshTemplateSignature;
+      cache.valid && cache.requestedLod == requestedLod &&
+      cache.tessPipelineEnabled == tessPipelineEnabled &&
+      cache.templateRevision == singleInstanceTemplateRevision_ &&
+      isSamePipelineHandle(cache.basePipeline, baseDraw.pipeline) &&
+      isSamePipelineHandle(cache.doubleSidedBasePipeline,
+                           meshDoubleSidedFillPipelineHandle_) &&
+      isSamePipelineHandle(cache.tessPipeline, meshTessPipelineHandle_) &&
+      isSamePipelineHandle(cache.doubleSidedTessPipeline,
+                           meshDoubleSidedTessPipelineHandle_);
   if (canReuseSingleInstanceCache) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -2119,13 +2612,13 @@ Result<bool, std::string> OpaqueLayer::ensureSingleInstanceBatchCache(
       scopedScratch.resource());
   singleBatchLookup.reserve(meshDrawTemplates_.size());
 
-  singleInstanceBatchCache_.batches.clear();
-  singleInstanceBatchCache_.remapCount = 0;
+  cache.batches.clear();
+  cache.remapCount = 0;
 
   for (const MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
     if (!templateEntry.renderable || !templateEntry.submesh) {
       return Result<bool, std::string>::makeError(
-          "OpaqueLayer::buildRenderPasses: invalid mesh template");
+          "OpaqueLayer::buildOpaquePasses: invalid mesh template");
     }
 
     const auto lodIndex =
@@ -2134,10 +2627,9 @@ Result<bool, std::string> OpaqueLayer::ensureSingleInstanceBatchCache(
       continue;
     }
 
-    RenderPipelineHandle selectedPipeline = baseDraw.pipeline;
-    if (tessPipelineEnabled && *lodIndex == 0) {
-      selectedPipeline = meshTessPipelineHandle_;
-    }
+    const bool useTessPipeline = tessPipelineEnabled && *lodIndex == 0;
+    RenderPipelineHandle selectedPipeline =
+        selectMeshPipeline(templateEntry.doubleSided, useTessPipeline);
 
     const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
     const BatchKey key{
@@ -2162,30 +2654,35 @@ Result<bool, std::string> OpaqueLayer::ensureSingleInstanceBatchCache(
       entry.draw.vertexOffset = 0;
       entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
       entry.materialIndex = templateEntry.materialIndex;
-      singleInstanceBatchCache_.batches.push_back(entry);
-      const size_t insertedIndex = singleInstanceBatchCache_.batches.size() - 1;
+      cache.batches.push_back(entry);
+      const size_t insertedIndex = cache.batches.size() - 1;
       auto [insertedIt, _] = singleBatchLookup.emplace(key, insertedIndex);
       it = insertedIt;
     }
 
-    ++singleInstanceBatchCache_.batches[it->second].instanceCount;
-    ++singleInstanceBatchCache_.remapCount;
+    ++cache.batches[it->second].instanceCount;
+    ++cache.remapCount;
   }
 
-  singleInstanceBatchCache_.requestedLod = requestedLod;
-  singleInstanceBatchCache_.tessPipelineEnabled = tessPipelineEnabled;
-  singleInstanceBatchCache_.templateSignature = meshTemplateSignature;
-  singleInstanceBatchCache_.valid = true;
+  cache.requestedLod = requestedLod;
+  cache.tessPipelineEnabled = tessPipelineEnabled;
+  cache.basePipeline = baseDraw.pipeline;
+  cache.doubleSidedBasePipeline = meshDoubleSidedFillPipelineHandle_;
+  cache.tessPipeline = meshTessPipelineHandle_;
+  cache.doubleSidedTessPipeline = meshDoubleSidedTessPipelineHandle_;
+  cache.templateRevision = singleInstanceTemplateRevision_;
+  cache.valid = true;
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
-                                                          size_t remapCount) {
+Result<bool, std::string>
+OpaqueLayer::buildIndirectDraws(uint32_t frameSlot, size_t remapCount,
+                                uint64_t drawSignature,
+                                bool drawSignatureValid) {
   const bool canUseIndirectPath =
       !drawItems_.empty() && drawItems_.size() <= kMaxDrawItemsForIndirectPath;
   if (!canUseIndirectPath) {
     invalidateIndirectPackCache();
-    indirectPushConstants_.clear();
     indirectDrawItems_.clear();
     indirectCommandUploadBytes_.clear();
     return Result<bool, std::string>::makeResult(true);
@@ -2198,7 +2695,9 @@ Result<bool, std::string> OpaqueLayer::buildIndirectDraws(uint32_t frameSlot,
         "mismatch");
   }
 
-  const uint64_t drawSignature = computeIndirectDrawSignature(remapCount);
+  if (!drawSignatureValid) {
+    drawSignature = computeIndirectDrawSignature(remapCount);
+  }
   const bool canReusePackedCommands = canReuseIndirectPack(drawSignature);
 
   if (canReusePackedCommands) {
@@ -2268,7 +2767,6 @@ bool OpaqueLayer::canReuseIndirectPack(uint64_t drawSignature) const {
   return indirectPackCache_.valid &&
          indirectPackCache_.drawSignature == drawSignature &&
          indirectSourceDrawIndices_.size() == indirectDrawItems_.size() &&
-         indirectSourceDrawIndices_.size() == indirectPushConstants_.size() &&
          indirectPackCache_.requiredBytes >= kIndirectCountHeaderBytes &&
          indirectCommandUploadBytes_.size() <= indirectPackCache_.requiredBytes;
 }
@@ -2281,7 +2779,6 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
 
   struct IndirectGroup {
     DrawItem baseDraw{};
-    PushConstants constants{};
     size_t sourceDrawIndex = 0;
     std::pmr::vector<DrawIndexedIndirectCommand> commands;
 
@@ -2326,7 +2823,6 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
       indirectGroups.emplace_back(scopedScratch.resource());
       IndirectGroup &group = indirectGroups.back();
       group.baseDraw = draw;
-      group.constants = constants;
       group.sourceDrawIndex = i;
       group.commands.reserve(4);
       const size_t groupIndex = indirectGroups.size() - 1;
@@ -2374,14 +2870,12 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
         "invalid");
   }
 
-  indirectPushConstants_.clear();
   indirectDrawItems_.clear();
   indirectCommandUploadBytes_.clear();
   indirectSourceDrawIndices_.clear();
 
   if (!indirectGroups.empty()) {
     indirectCommandUploadBytes_.reserve(packedRequiredBytes);
-    indirectPushConstants_.reserve(totalIndirectDrawItems);
     indirectDrawItems_.reserve(totalIndirectDrawItems);
     indirectSourceDrawIndices_.reserve(totalIndirectDrawItems);
 
@@ -2416,7 +2910,6 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
             reinterpret_cast<const std::byte *>(group.commands.data()) +
                 commandByteOffset + commandByteSize);
 
-        indirectPushConstants_.push_back(group.constants);
         DrawItem indirectDraw = group.baseDraw;
         indirectDraw.command = DrawCommandType::IndexedIndirect;
         indirectDraw.indirectBuffer = indirectBufferHandle;
@@ -2424,8 +2917,14 @@ OpaqueLayer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
             chunkOffset + kIndirectCountHeaderBytes;
         indirectDraw.indirectDrawCount = drawCount;
         indirectDraw.indirectStride = sizeof(DrawIndexedIndirectCommand);
+        if (group.sourceDrawIndex >= drawPushConstants_.size()) {
+          return Result<bool, std::string>::makeError(
+              "OpaqueLayer::buildIndirectDraws: indirect source index is out "
+              "of range");
+        }
         indirectDraw.pushConstants = std::span<const std::byte>(
-            reinterpret_cast<const std::byte *>(&indirectPushConstants_.back()),
+            reinterpret_cast<const std::byte *>(
+                &drawPushConstants_[group.sourceDrawIndex]),
             sizeof(PushConstants));
         indirectDrawItems_.push_back(indirectDraw);
         indirectSourceDrawIndices_.push_back(group.sourceDrawIndex);
@@ -2467,10 +2966,9 @@ OpaqueLayer::refreshCachedIndirectPack(uint32_t frameSlot,
           "OpaqueLayer::buildIndirectDraws: cached indirect source index is "
           "out of range");
     }
-    indirectPushConstants_[i] = drawPushConstants_[sourceIndex];
     indirectDrawItems_[i].indirectBuffer = indirectBufferHandle;
     indirectDrawItems_[i].pushConstants = std::span<const std::byte>(
-        reinterpret_cast<const std::byte *>(&indirectPushConstants_[i]),
+        reinterpret_cast<const std::byte *>(&drawPushConstants_[sourceIndex]),
         sizeof(PushConstants));
   }
 
@@ -2514,9 +3012,7 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
     meshDebugOverlayFragmentShader_ = {};
     meshPickFragmentShader_ = {};
     computeShaderHandle_ = {};
-    meshPickPipelineHandle_ = {};
-    meshPickTessPipelineHandle_ = {};
-    meshTessPipelineHandle_ = {};
+    resetMeshPipelineState();
     tessellationUnsupported_ = false;
     return depthResult;
   }
@@ -2537,9 +3033,7 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
     meshDebugOverlayFragmentShader_ = {};
     meshPickFragmentShader_ = {};
     computeShaderHandle_ = {};
-    meshPickPipelineHandle_ = {};
-    meshPickTessPipelineHandle_ = {};
-    meshTessPipelineHandle_ = {};
+    resetMeshPipelineState();
     tessellationUnsupported_ = false;
     destroyDepthTexture();
     return pickTextureResult;
@@ -2548,9 +3042,9 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
   auto pipelineResult = createPipelines();
   if (pipelineResult.hasError()) {
     resetOverlayPipelineState();
-    if (nuri::isValid(meshTessPipelineHandle_)) {
-      gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
-    }
+    destroyMeshPipelineState();
+    meshPipeline_.reset();
+    computePipeline_.reset();
     meshShader_.reset();
     meshTessShader_.reset();
     meshDebugOverlayShader_.reset();
@@ -2565,10 +3059,6 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
     meshDebugOverlayFragmentShader_ = {};
     meshPickFragmentShader_ = {};
     computeShaderHandle_ = {};
-    meshFillPipelineHandle_ = {};
-    meshTessPipelineHandle_ = {};
-    meshPickPipelineHandle_ = {};
-    meshPickTessPipelineHandle_ = {};
     computePipelineHandle_ = {};
     tessellationUnsupported_ = false;
     destroyDepthTexture();
@@ -2653,6 +3143,7 @@ OpaqueLayer::ensureFrameDataBufferCapacity(size_t requiredBytes) {
     gpu_.destroyBuffer(frameDataBuffer_->handle());
     frameDataBuffer_.reset();
     frameDataBufferCapacityBytes_ = 0;
+    frameDataUploadValid_ = false;
   }
 
   const BufferDesc desc{
@@ -2666,6 +3157,7 @@ OpaqueLayer::ensureFrameDataBufferCapacity(size_t requiredBytes) {
   }
   frameDataBuffer_ = std::move(createResult.value());
   frameDataBufferCapacityBytes_ = requested;
+  frameDataUploadValid_ = false;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2954,6 +3446,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
   }
   meshDrawTemplates_.reserve(totalMeshDraws);
   size_t invalidMaterialFallbackCount = 0;
+  size_t skippedBlendSubmeshCount = 0;
 
   for (uint32_t index = 0; index < static_cast<uint32_t>(renderables.size());
        ++index) {
@@ -2995,6 +3488,14 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
       const MaterialRef resolvedMaterial = isValid(resolvedModelMaterial)
                                                ? resolvedModelMaterial
                                                : renderable.material;
+      const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
+      const bool doubleSided =
+          materialRecord != nullptr && materialRecord->desc.doubleSided;
+      if (materialRecord != nullptr &&
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Blend) {
+        ++skippedBlendSubmeshCount;
+        continue;
+      }
       uint32_t finalMaterialIndex =
           resources.materialTableIndex(resolvedMaterial);
       if (materialCount == 0u || finalMaterialIndex >= materialCount) {
@@ -3011,6 +3512,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
           .indexBufferOffset = geometry.indexByteOffset,
           .vertexBufferAddress = vertexBufferAddress,
           .materialIndex = finalMaterialIndex,
+          .doubleSided = doubleSided,
       });
     }
   }
@@ -3026,9 +3528,21 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
   } else {
     loggedMaterialFallbackWarning_ = false;
   }
+  if (skippedBlendSubmeshCount > 0u) {
+    if (!loggedBlendMaterialUnsupportedWarning_) {
+      NURI_LOG_WARNING(
+          "OpaqueLayer::rebuildSceneCache: skipped %zu alpha-blend submesh "
+          "draw(s); transparent materials require a dedicated pass",
+          skippedBlendSubmeshCount);
+      loggedBlendMaterialUnsupportedWarning_ = true;
+    }
+  } else {
+    loggedBlendMaterialUnsupportedWarning_ = false;
+  }
 
   cachedScene_ = &scene;
   cachedTopologyVersion_ = scene.topologyVersion();
+  cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
   uniformSingleSubmeshPath_ = false;
   if (!meshDrawTemplates_.empty() &&
       meshDrawTemplates_.size() == renderableTemplates_.size()) {
@@ -3049,6 +3563,51 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
   instanceStaticBuffersDirty_ = true;
   invalidateSingleInstanceBatchCache();
   invalidateIndirectPackCache();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueLayer::rebuildMaterialTextureAccessCache(
+    const RenderScene &scene, const ResourceManager &resources) {
+  NURI_PROFILER_FUNCTION();
+  materialTextureAccessHandles_.clear();
+  if (scene.opaqueRenderables().empty()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  ScratchArena scratch;
+  ScopedScratch scopedScratch(scratch);
+  PmrHashSet<uint64_t> textureKeys(scopedScratch.resource());
+  textureKeys.reserve(scene.opaqueRenderables().size());
+  materialTextureAccessHandles_.reserve(scene.opaqueRenderables().size());
+
+  for (const OpaqueRenderable &renderable : scene.opaqueRenderables()) {
+    const MaterialRecord *materialRecord =
+        resources.tryGet(renderable.material);
+    if (materialRecord == nullptr) {
+      continue;
+    }
+
+    const std::array<TextureRef, 5> refs = {
+        materialRecord->textureRefs.baseColor,
+        materialRecord->textureRefs.metallicRoughness,
+        materialRecord->textureRefs.normal,
+        materialRecord->textureRefs.occlusion,
+        materialRecord->textureRefs.emissive,
+    };
+    for (const TextureRef ref : refs) {
+      const TextureRecord *record = resources.tryGet(ref);
+      if (record == nullptr || !nuri::isValid(record->texture)) {
+        continue;
+      }
+      const uint64_t key =
+          foldHandle(record->texture.index, record->texture.generation);
+      if (!textureKeys.insert(key).second) {
+        continue;
+      }
+      materialTextureAccessHandles_.push_back(record->texture);
+    }
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -3198,6 +3757,7 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
         "OpaqueLayer::createPipelines: failed to create pipeline wrappers");
   }
 
+  resetMeshPipelineState();
   const Format depthFormat = nuri::isValid(depthTexture_)
                                  ? gpu_.getTextureFormat(depthTexture_)
                                  : Format::D32_FLOAT;
@@ -3210,9 +3770,20 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
     return Result<bool, std::string>::makeError(meshResult.error());
   }
   meshFillPipelineHandle_ = meshPipeline_->getRenderPipeline();
-  meshTessPipelineHandle_ = {};
-  meshPickPipelineHandle_ = {};
-  meshPickTessPipelineHandle_ = {};
+
+  {
+    const RenderPipelineDesc doubleSidedMeshDesc = meshPipelineDesc(
+        gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {}, {},
+        meshFragmentShader_, PolygonMode::Fill, Topology::Triangle, 0, false,
+        CullMode::None);
+    auto doubleSidedMeshResult = gpu_.createRenderPipeline(
+        doubleSidedMeshDesc, "opaque_mesh_double_sided");
+    if (doubleSidedMeshResult.hasError()) {
+      return Result<bool, std::string>::makeError(
+          doubleSidedMeshResult.error());
+    }
+    meshDoubleSidedFillPipelineHandle_ = doubleSidedMeshResult.value();
+  }
 
   const bool canCreateTessPipeline =
       !tessellationUnsupported_ && nuri::isValid(meshTessVertexShader_) &&
@@ -3233,6 +3804,29 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
     } else {
       meshTessPipelineHandle_ = tessResult.value();
     }
+    if (!tessellationUnsupported_) {
+      const RenderPipelineDesc doubleSidedTessDesc = meshPipelineDesc(
+          gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
+          meshTessControlShader_, meshTessEvalShader_, {}, meshFragmentShader_,
+          PolygonMode::Fill, Topology::Patch, kTessellationPatchControlPoints,
+          false, CullMode::None);
+      auto doubleSidedTessResult = gpu_.createRenderPipeline(
+          doubleSidedTessDesc, "opaque_mesh_tess_double_sided");
+      if (doubleSidedTessResult.hasError()) {
+        tessellationUnsupported_ = true;
+        if (nuri::isValid(meshTessPipelineHandle_)) {
+          gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+          meshTessPipelineHandle_ = {};
+        }
+        meshDoubleSidedTessPipelineHandle_ = {};
+        NURI_LOG_WARNING("OpaqueLayer::createPipelines: double-sided "
+                         "tessellation pipeline failed, fallback to "
+                         "non-tessellation path: %s",
+                         doubleSidedTessResult.error().c_str());
+      } else {
+        meshDoubleSidedTessPipelineHandle_ = doubleSidedTessResult.value();
+      }
+    }
   } else {
     tessellationUnsupported_ = true;
   }
@@ -3248,9 +3842,47 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
         gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
         meshTessPipelineHandle_ = {};
       }
+      if (nuri::isValid(meshDoubleSidedTessPipelineHandle_)) {
+        gpu_.destroyRenderPipeline(meshDoubleSidedTessPipelineHandle_);
+        meshDoubleSidedTessPipelineHandle_ = {};
+      }
+      if (nuri::isValid(meshDoubleSidedFillPipelineHandle_)) {
+        gpu_.destroyRenderPipeline(meshDoubleSidedFillPipelineHandle_);
+        meshDoubleSidedFillPipelineHandle_ = {};
+      }
       return Result<bool, std::string>::makeError(pickPipelineResult.error());
     }
     meshPickPipelineHandle_ = pickPipelineResult.value();
+  }
+
+  {
+    const RenderPipelineDesc doubleSidedPickDesc =
+        meshPipelineDesc(Format::R32_UINT, depthFormat, meshVertexShader_, {},
+                         {}, {}, meshPickFragmentShader_, PolygonMode::Fill,
+                         Topology::Triangle, 0, false, CullMode::None);
+    auto doubleSidedPickResult = gpu_.createRenderPipeline(
+        doubleSidedPickDesc, "opaque_mesh_pick_double_sided");
+    if (doubleSidedPickResult.hasError()) {
+      if (nuri::isValid(meshPickPipelineHandle_)) {
+        gpu_.destroyRenderPipeline(meshPickPipelineHandle_);
+        meshPickPipelineHandle_ = {};
+      }
+      if (nuri::isValid(meshTessPipelineHandle_)) {
+        gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+        meshTessPipelineHandle_ = {};
+      }
+      if (nuri::isValid(meshDoubleSidedTessPipelineHandle_)) {
+        gpu_.destroyRenderPipeline(meshDoubleSidedTessPipelineHandle_);
+        meshDoubleSidedTessPipelineHandle_ = {};
+      }
+      if (nuri::isValid(meshDoubleSidedFillPipelineHandle_)) {
+        gpu_.destroyRenderPipeline(meshDoubleSidedFillPipelineHandle_);
+        meshDoubleSidedFillPipelineHandle_ = {};
+      }
+      return Result<bool, std::string>::makeError(
+          doubleSidedPickResult.error());
+    }
+    meshPickDoubleSidedPipelineHandle_ = doubleSidedPickResult.value();
   }
 
   if (canCreateTessPipeline) {
@@ -3270,6 +3902,25 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
     } else {
       meshPickTessPipelineHandle_ = pickTessResult.value();
     }
+    if (!tessellationUnsupported_) {
+      const RenderPipelineDesc doubleSidedPickTessDesc = meshPipelineDesc(
+          Format::R32_UINT, depthFormat, meshTessVertexShader_,
+          meshTessControlShader_, meshTessEvalShader_, {},
+          meshPickFragmentShader_, PolygonMode::Fill, Topology::Patch,
+          kTessellationPatchControlPoints, false, CullMode::None);
+      auto doubleSidedPickTessResult = gpu_.createRenderPipeline(
+          doubleSidedPickTessDesc, "opaque_mesh_tess_pick_double_sided");
+      if (doubleSidedPickTessResult.hasError()) {
+        meshPickDoubleSidedTessPipelineHandle_ = {};
+        NURI_LOG_WARNING("OpaqueLayer::createPipelines: double-sided "
+                         "tessellation pick pipeline failed, falling back to "
+                         "non-tessellation pick pipeline: %s",
+                         doubleSidedPickTessResult.error().c_str());
+      } else {
+        meshPickDoubleSidedTessPipelineHandle_ =
+            doubleSidedPickTessResult.value();
+      }
+    }
   }
 
   const ComputePipelineDesc computeDesc{
@@ -3278,18 +3929,7 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
   auto computeResult = computePipeline_->createComputePipeline(
       computeDesc, "opaque_instance_compute");
   if (computeResult.hasError()) {
-    if (nuri::isValid(meshPickPipelineHandle_)) {
-      gpu_.destroyRenderPipeline(meshPickPipelineHandle_);
-      meshPickPipelineHandle_ = {};
-    }
-    if (nuri::isValid(meshPickTessPipelineHandle_)) {
-      gpu_.destroyRenderPipeline(meshPickTessPipelineHandle_);
-      meshPickTessPipelineHandle_ = {};
-    }
-    if (nuri::isValid(meshTessPipelineHandle_)) {
-      gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
-      meshTessPipelineHandle_ = {};
-    }
+    destroyMeshPipelineState();
     return Result<bool, std::string>::makeError(computeResult.error());
   }
   computePipelineHandle_ = computePipeline_->getComputePipeline();
@@ -3298,6 +3938,48 @@ Result<bool, std::string> OpaqueLayer::createPipelines() {
   resetOverlayPipelineState();
 
   return Result<bool, std::string>::makeResult(true);
+}
+
+RenderPipelineHandle OpaqueLayer::selectMeshPipeline(bool doubleSided,
+                                                     bool tessellated) const {
+  if (tessellated) {
+    if (doubleSided && nuri::isValid(meshDoubleSidedTessPipelineHandle_)) {
+      return meshDoubleSidedTessPipelineHandle_;
+    }
+    return meshTessPipelineHandle_;
+  }
+  if (doubleSided && nuri::isValid(meshDoubleSidedFillPipelineHandle_)) {
+    return meshDoubleSidedFillPipelineHandle_;
+  }
+  return meshFillPipelineHandle_;
+}
+
+RenderPipelineHandle
+OpaqueLayer::selectPickPipeline(RenderPipelineHandle sourcePipeline) const {
+  const bool tessellated = isTessPipeline(sourcePipeline);
+  const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
+  if (tessellated) {
+    if (doubleSided && nuri::isValid(meshPickDoubleSidedTessPipelineHandle_)) {
+      return meshPickDoubleSidedTessPipelineHandle_;
+    }
+    if (nuri::isValid(meshPickTessPipelineHandle_)) {
+      return meshPickTessPipelineHandle_;
+    }
+  }
+  if (doubleSided && nuri::isValid(meshPickDoubleSidedPipelineHandle_)) {
+    return meshPickDoubleSidedPipelineHandle_;
+  }
+  return meshPickPipelineHandle_;
+}
+
+bool OpaqueLayer::isDoubleSidedPipeline(RenderPipelineHandle handle) const {
+  return isSamePipelineHandle(handle, meshDoubleSidedFillPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshDoubleSidedTessPipelineHandle_);
+}
+
+bool OpaqueLayer::isTessPipeline(RenderPipelineHandle handle) const {
+  return isSamePipelineHandle(handle, meshTessPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshDoubleSidedTessPipelineHandle_);
 }
 
 Result<bool, std::string> OpaqueLayer::ensureWireframePipeline() {
@@ -3512,17 +4194,27 @@ void OpaqueLayer::invalidateAutoLodCache() {
   autoLodCache_.remapCount = 0;
   autoLodCache_.instanceCount = 0;
   autoLodCache_.submesh = nullptr;
+  autoLodCache_.frameIndex = std::numeric_limits<uint64_t>::max();
   autoLodCache_.bucketCounts.fill(0);
 }
 
 void OpaqueLayer::invalidateSingleInstanceBatchCache() {
-  singleInstanceBatchCache_.valid = false;
-  singleInstanceBatchCache_.requestedLod = 0;
-  singleInstanceBatchCache_.tessPipelineEnabled = false;
-  singleInstanceBatchCache_.templateSignature =
-      std::numeric_limits<uint64_t>::max();
-  singleInstanceBatchCache_.remapCount = 0;
-  singleInstanceBatchCache_.batches.clear();
+  ++singleInstanceTemplateRevision_;
+  if (singleInstanceTemplateRevision_ == 0) {
+    singleInstanceTemplateRevision_ = 1;
+  }
+  for (SingleInstanceBatchCache &cache : singleInstanceBatchCaches_) {
+    cache.valid = false;
+    cache.requestedLod = 0;
+    cache.tessPipelineEnabled = false;
+    cache.basePipeline = {};
+    cache.doubleSidedBasePipeline = {};
+    cache.tessPipeline = {};
+    cache.doubleSidedTessPipeline = {};
+    cache.templateRevision = 0;
+    cache.remapCount = 0;
+    cache.batches.clear();
+  }
 }
 
 void OpaqueLayer::invalidateIndirectPackCache() {
@@ -3535,11 +4227,34 @@ void OpaqueLayer::invalidateIndirectPackCache() {
   }
 }
 
+void OpaqueLayer::destroyMeshPipelineState() {
+  destroyPipelineHandle(gpu_, meshPickDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshPickTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshPickDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshPickPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDoubleSidedFillPipelineHandle_);
+  resetMeshPipelineState();
+}
+
+void OpaqueLayer::resetMeshPipelineState() {
+  meshFillPipelineHandle_ = {};
+  meshDoubleSidedFillPipelineHandle_ = {};
+  meshTessPipelineHandle_ = {};
+  meshDoubleSidedTessPipelineHandle_ = {};
+  meshPickPipelineHandle_ = {};
+  meshPickDoubleSidedPipelineHandle_ = {};
+  meshPickTessPipelineHandle_ = {};
+  meshPickDoubleSidedTessPipelineHandle_ = {};
+  baseMeshFillDraw_ = {};
+}
+
 void OpaqueLayer::updateFastAutoLodCache(
     const Submesh *submesh, const glm::vec3 &cameraPosition,
     const std::array<float, 3> &sortedLodThresholds,
     const std::array<size_t, Submesh::kMaxLodCount> &bucketCounts,
-    size_t remapCount, size_t instanceCount) {
+    size_t remapCount, size_t instanceCount, uint64_t frameIndex) {
   if (submesh == nullptr) {
     invalidateAutoLodCache();
     return;
@@ -3552,6 +4267,7 @@ void OpaqueLayer::updateFastAutoLodCache(
   autoLodCache_.remapCount = remapCount;
   autoLodCache_.instanceCount = instanceCount;
   autoLodCache_.submesh = submesh;
+  autoLodCache_.frameIndex = frameIndex;
 }
 
 void OpaqueLayer::destroyDepthTexture() {
@@ -3574,6 +4290,7 @@ void OpaqueLayer::destroyBuffers() {
   }
   frameDataBuffer_.reset();
   frameDataBufferCapacityBytes_ = 0;
+  frameDataUploadValid_ = false;
 
   if (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid()) {
     gpu_.destroyBuffer(instanceCentersPhaseBuffer_->handle());
