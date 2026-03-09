@@ -1,6 +1,10 @@
 find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
 
+set(NURI_TEST_PCH_HEADER
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/tests_pch.h"
+)
+
 get_filename_component(NURI_CXX_COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
 
 if(DEFINED VCPKG_TARGET_TRIPLET AND NOT "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
@@ -52,31 +56,52 @@ exec \"$@\"
   )
 endif()
 
+add_library(nuri_render_graph_test_support STATIC
+  src/render_graph_test_support.cpp
+)
+
+target_link_libraries(nuri_render_graph_test_support
+  PUBLIC
+    nuri_renderer
+    GTest::gtest
+)
+
+target_include_directories(nuri_render_graph_test_support
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_precompile_headers(nuri_render_graph_test_support PRIVATE
+  "${NURI_TEST_PCH_HEADER}"
+)
+
+set_target_properties(nuri_render_graph_test_support PROPERTIES
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+
+foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+  string(TOUPPER "${_cfg}" _cfg_upper)
+  set_target_properties(nuri_render_graph_test_support PROPERTIES
+    "ARCHIVE_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+    "LIBRARY_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+    "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+  )
+endforeach()
+
 function(nuri_add_gtest_suite target source_file test_prefix)
-  cmake_parse_arguments(NURI_TEST "" "" "SUPPORT_FILES" ${ARGN})
-
-  if(DEFINED NURI_TEST_SUPPORT_FILES)
-    set(_nuri_test_support_files ${NURI_TEST_SUPPORT_FILES})
-  else()
-    set(_nuri_test_support_files src/render_graph_test_support.cpp)
-  endif()
-
   add_executable(${target}
-      ${source_file}
-      ${_nuri_test_support_files}
+    ${source_file}
   )
 
   target_link_libraries(${target}
-      PRIVATE
-      nuri_renderer
-      GTest::gtest
+    PRIVATE
+      nuri_render_graph_test_support
       GTest::gtest_main
   )
 
-  target_include_directories(${target}
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-  )
+  target_precompile_headers(${target} REUSE_FROM nuri_render_graph_test_support)
 
   set_target_properties(${target} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
