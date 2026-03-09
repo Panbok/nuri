@@ -7,6 +7,13 @@ Diagnostics:
 ---
 If:
   PathMatch:
+    - editor/src/.*
+    - editor/include/.*
+CompileFlags:
+  CompilationDatabase: build_editor
+---
+If:
+  PathMatch:
     - tests/src/.*
     - tests/include/.*
 CompileFlags:
