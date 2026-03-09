@@ -23,36 +23,7 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-manifest_features="${VCPKG_MANIFEST_FEATURES:-}"
-case ",${manifest_features}," in
-  *,tests,*)
-    ;;
-  ",,")
-    manifest_features="tests"
-    ;;
-  *)
-    manifest_features="${manifest_features},tests"
-    ;;
-esac
-
-if [[ "$mode" == "debug" ]]; then
-  (
-    cd "$REPO_ROOT"
-    NURI_BUILD_TESTS=ON \
-    NURI_BUILD_EDITOR=OFF \
-    VCPKG_MANIFEST_FEATURES="$manifest_features" \
-    "$SCRIPT_DIR/build_debug.sh"
-  )
-  build_dir="${REPO_ROOT}/build/debug"
-else
-  (
-    cd "$REPO_ROOT"
-    NURI_BUILD_TESTS=ON \
-    NURI_BUILD_EDITOR=OFF \
-    VCPKG_MANIFEST_FEATURES="$manifest_features" \
-    "$SCRIPT_DIR/build_release.sh"
-  )
-  build_dir="${REPO_ROOT}/build/release"
-fi
+build_dir="${REPO_ROOT}/build/${mode}/tests"
+"${SCRIPT_DIR}/_nuri_build.sh" "${mode}" tests
 
 ctest --test-dir "$build_dir" --output-on-failure "$@"
