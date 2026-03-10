@@ -45,10 +45,16 @@ public:
                                             std::pmr::memory_resource &scratch);
   Result<TextBounds, std::string> enqueue3D(const Text3DDesc &desc,
                                             std::pmr::memory_resource &scratch);
-  Result<bool, std::string> append3DPasses(RenderFrameContext &frame,
-                                           RenderPassList &out);
-  Result<bool, std::string> append2DPasses(RenderFrameContext &frame,
-                                           RenderPassList &out);
+  Result<bool, std::string>
+  append3DGraphPass(RenderFrameContext &frame, RenderGraphBuilder &graph,
+                    RenderGraphTextureId sceneDepthGraphTexture = {},
+                    bool hasPriorColorPass = false);
+  Result<bool, std::string>
+  buildTransparentStageContribution(RenderFrameContext &frame,
+                                    TransparentStageContribution &out);
+  Result<bool, std::string>
+  append2DGraphPass(RenderFrameContext &frame, RenderGraphBuilder &graph,
+                    bool hasPriorColorPass = false);
   void setWorldAlphaDiscardThreshold(float threshold);
   [[nodiscard]] float worldAlphaDiscardThreshold() const;
   void clear();
@@ -77,6 +83,7 @@ private:
     uint32_t color = 0xffffffffu;
     uint32_t atlas = 0;
     uint32_t transformId = 0;
+    TextureHandle atlasTexture{};
   };
 
   struct WorldTransform {
@@ -117,6 +124,8 @@ private:
     float pxRange = 4.0f;
     uint32_t firstInstance = 0;
     uint32_t instanceCount = 0;
+    TextureHandle atlasTexture{};
+    float sortDepth = 0.0f;
   };
 
   struct UiPC {
@@ -223,10 +232,13 @@ private:
   std::pmr::vector<WorldBatch> worldBatches_;
   std::pmr::vector<DrawItem> uiDraws_;
   std::pmr::vector<DrawItem> worldDraws_;
+  std::pmr::vector<TransparentStageSortableDraw> worldTransparentDraws_;
   std::pmr::vector<UiPC> uiPcs_;
   std::pmr::vector<WorldPC> worldPcs_;
   std::pmr::vector<FrameBuffers> uiFrames_;
   std::pmr::vector<FrameBuffers> worldFrames_;
+  std::pmr::vector<TextureHandle> worldTransparentTextureReads_;
+  std::pmr::vector<BufferHandle> worldTransparentDependencyBuffers_;
 
   uint64_t worldQueueHash_ = kHashSeed;
   uint64_t lastBuiltWorldQueueHash_ = 0;

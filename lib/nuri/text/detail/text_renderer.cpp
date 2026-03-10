@@ -168,6 +168,10 @@ computeAlignedOffsetLocal(const TextBounds &localBounds,
                    std::max(sz, 1.0e-4f));
 }
 
+[[nodiscard]] bool isSameTextureHandle(TextureHandle lhs, TextureHandle rhs) {
+  return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
 } // namespace
 
 void TextRenderer::hashWorldTransform(uint64_t &hash,
@@ -289,8 +293,11 @@ TextRenderer::TextRenderer(const CreateDesc &desc)
       worldQueue_(&memory_), worldTransforms_(&memory_),
       resolvedWorldTransforms_(&memory_), worldInstances_(&memory_),
       uiVerts_(&memory_), uiBatches_(&memory_), worldBatches_(&memory_),
-      uiDraws_(&memory_), worldDraws_(&memory_), uiPcs_(&memory_),
-      worldPcs_(&memory_), uiFrames_(&memory_), worldFrames_(&memory_) {}
+      uiDraws_(&memory_), worldDraws_(&memory_),
+      worldTransparentDraws_(&memory_), uiPcs_(&memory_), worldPcs_(&memory_),
+      uiFrames_(&memory_), worldFrames_(&memory_),
+      worldTransparentTextureReads_(&memory_),
+      worldTransparentDependencyBuffers_(&memory_) {}
 
 TextRenderer::~TextRenderer() { destroyGpu(); }
 
@@ -455,6 +462,7 @@ TextRenderer::enqueue3D(const Text3DDesc &desc,
     quad.color = color;
     quad.atlas = atlas;
     quad.transformId = transformId;
+    quad.atlasTexture = fonts_.atlasTexture(glyph.atlasPage);
     hashWorldQuad(worldQueueHash_, quad);
     if (queueStart > 0 && worldQueue_.size() == queueStart &&
         worldBatchLess(quad, worldQueue_[queueStart - 1u])) {
@@ -496,6 +504,7 @@ void TextRenderer::clear() {
   uiBatches_.clear();
   uiDraws_.clear();
   worldDraws_.clear();
+  worldTransparentDraws_.clear();
   uiPcs_.clear();
   worldPcs_.clear();
   uiAppended_ = false;
@@ -507,6 +516,8 @@ void TextRenderer::clear() {
   worldGlyphBufferAddress_ = 0;
   worldTransformBufferAddress_ = 0;
   worldDependencyBuffer_ = {};
+  worldTransparentTextureReads_.clear();
+  worldTransparentDependencyBuffers_.clear();
 }
 
 void TextRenderer::resetPerfCounters() { perf_ = PerfCounters{}; }
@@ -945,17 +956,32 @@ void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
   }
 
   uint32_t currentAtlas = std::numeric_limits<uint32_t>::max();
+  uint32_t currentTransformId = std::numeric_limits<uint32_t>::max();
   float currentPxRange = -1.0f;
+  const glm::mat4 view = camera.view;
   for (const WorldQuad &q : worldQueue_) {
     if (currentAtlas != q.atlas ||
+        currentTransformId != q.transformId ||
         std::abs(currentPxRange - q.pxRange) > kBatchPxRangeEpsilon) {
       currentAtlas = q.atlas;
+      currentTransformId = q.transformId;
       currentPxRange = q.pxRange;
+      const size_t transformIdx =
+          q.transformId == 0u ? std::numeric_limits<size_t>::max()
+                              : static_cast<size_t>(q.transformId - 1u);
+      float sortDepth = 0.0f;
+      if (transformIdx < resolvedWorldTransforms_.size()) {
+        const glm::vec3 translation =
+            glm::vec3(resolvedWorldTransforms_[transformIdx].translation);
+        sortDepth = -(view * glm::vec4(translation, 1.0f)).z;
+      }
       worldBatches_.push_back(WorldBatch{
           .atlas = q.atlas,
           .pxRange = q.pxRange,
           .firstInstance = static_cast<uint32_t>(worldInstances_.size()),
           .instanceCount = 0,
+          .atlasTexture = q.atlasTexture,
+          .sortDepth = sortDepth,
       });
     }
 
@@ -980,7 +1006,10 @@ void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
 }
 
 Result<bool, std::string>
-TextRenderer::append3DPasses(RenderFrameContext &frame, RenderPassList &out) {
+TextRenderer::append3DGraphPass(RenderFrameContext &frame,
+                                RenderGraphBuilder &graph,
+                                RenderGraphTextureId sceneDepthGraphTexture,
+                                bool hasPriorColorPass) {
   NURI_PROFILER_FUNCTION();
   if (worldQueue_.empty() || worldAppended_) {
     return Result<bool, std::string>::makeResult(true);
@@ -1001,10 +1030,10 @@ TextRenderer::append3DPasses(RenderFrameContext &frame, RenderPassList &out) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  const bool hasDepth = ::nuri::isValid(frame.sharedDepthTexture);
+  const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
+  const bool hasDepth = ::nuri::isValid(depthTexture);
   const Format depthFormat =
-      hasDepth ? gpu_.getTextureFormat(frame.sharedDepthTexture)
-               : Format::Count;
+      hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
   auto pipeline = ensureWorldPipeline(gpu_.getSwapchainFormat(), depthFormat);
   if (pipeline.hasError()) {
     return pipeline;
@@ -1017,13 +1046,14 @@ TextRenderer::append3DPasses(RenderFrameContext &frame, RenderPassList &out) {
   }
   if (worldGlyphBufferAddress_ == 0u || worldTransformBufferAddress_ == 0u) {
     return makeError<bool>(
-        "TextRenderer::append3DPasses: invalid world buffer device address");
+        "TextRenderer::append3DGraphPass: invalid world buffer device address");
   }
 
   worldDraws_.clear();
   worldPcs_.clear();
   worldDraws_.reserve(worldBatches_.size());
   worldPcs_.reserve(worldBatches_.size());
+  worldTransparentTextureReads_.clear();
   const glm::mat4 viewProj = frame.camera.proj * frame.camera.view;
   const FrameBuffers &buffers = worldFrames_[slot];
   for (const WorldBatch &b : worldBatches_) {
@@ -1049,46 +1079,196 @@ TextRenderer::append3DPasses(RenderFrameContext &frame, RenderPassList &out) {
     if (hasDepth) {
       d.useDepthState = true;
       d.depthState = {.compareOp = CompareOp::LessEqual,
-                      .isDepthWriteEnabled = true};
+                      .isDepthWriteEnabled = false};
     }
     worldDraws_.push_back(d);
+    if (::nuri::isValid(b.atlasTexture)) {
+      bool alreadyTracked = false;
+      for (const TextureHandle handle : worldTransparentTextureReads_) {
+        if (isSameTextureHandle(handle, b.atlasTexture)) {
+          alreadyTracked = true;
+          break;
+        }
+      }
+      if (!alreadyTracked) {
+        worldTransparentTextureReads_.push_back(b.atlasTexture);
+      }
+    }
   }
   worldDependencyBuffer_ = buffers.vb;
 
   int32_t w = 0;
   int32_t h = 0;
   gpu_.getFramebufferSize(w, h);
-  RenderPass pass{};
-  pass.color = {.loadOp = out.empty() ? LoadOp::Clear : LoadOp::Load,
+
+  RenderGraphGraphicsPassDesc desc{};
+  desc.color = {.loadOp = hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
                 .storeOp = StoreOp::Store,
                 .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  pass.useViewport = true;
-  pass.viewport = {.x = 0.0f,
+  desc.useViewport = true;
+  desc.viewport = {.x = 0.0f,
                    .y = 0.0f,
                    .width = std::max(1.0f, static_cast<float>(w)),
                    .height = std::max(1.0f, static_cast<float>(h)),
                    .minDepth = 0.0f,
                    .maxDepth = 1.0f};
   if (hasDepth) {
-    pass.depthTexture = frame.sharedDepthTexture;
-    pass.depth = {.loadOp = LoadOp::Load,
+    desc.depth = {.loadOp = LoadOp::Load,
                   .storeOp = StoreOp::Store,
                   .clearDepth = 1.0f,
                   .clearStencil = 0};
+    if (::nuri::isValid(sceneDepthGraphTexture)) {
+      desc.depthTexture = sceneDepthGraphTexture;
+    } else {
+      auto depthImportResult =
+          graph.importTexture(depthTexture, "text3d_pass_depth_texture");
+      if (depthImportResult.hasError()) {
+        return Result<bool, std::string>::makeError(depthImportResult.error());
+      }
+      desc.depthTexture = depthImportResult.value();
+    }
   }
-  pass.draws =
-      std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
-  pass.dependencyBuffers =
-      std::span<const BufferHandle>(&worldDependencyBuffer_, 1);
-  pass.debugLabel = "Text3D Pass";
-  pass.debugColor = 0xff44cc88u;
-  out.push_back(pass);
+  desc.draws = std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
+  desc.dependencyBuffers =
+      std::span<const BufferHandle>(&worldDependencyBuffer_, 1u);
+  desc.debugLabel = "Text3D Pass";
+  desc.debugColor = 0xff44cc88u;
+
+  auto addResult = graph.addGraphicsPass(desc);
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
+  for (const TextureHandle texture : worldTransparentTextureReads_) {
+    auto textureImportResult =
+        graph.importTexture(texture, "text3d_atlas_texture");
+    if (textureImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(textureImportResult.error());
+    }
+    auto textureReadResult =
+        graph.addTextureRead(addResult.value(), textureImportResult.value());
+    if (textureReadResult.hasError()) {
+      return Result<bool, std::string>::makeError(textureReadResult.error());
+    }
+  }
   worldAppended_ = true;
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> TextRenderer::append2DPasses(RenderFrameContext &,
-                                                       RenderPassList &out) {
+Result<bool, std::string>
+TextRenderer::buildTransparentStageContribution(RenderFrameContext &frame,
+                                                TransparentStageContribution &out) {
+  NURI_PROFILER_FUNCTION();
+  out = {};
+  if (worldQueue_.empty() || worldAppended_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const uint64_t cameraHash =
+      worldHasBillboards_ ? hashCameraFrameState(frame.camera) : 0ull;
+  const bool canReuseWorldGeometry =
+      worldGeometryValid_ && worldQueueHash_ == lastBuiltWorldQueueHash_ &&
+      cameraHash == lastBuiltWorldCameraHash_;
+  if (!canReuseWorldGeometry) {
+    buildWorldGeometry(frame.camera);
+    worldGeometryValid_ = true;
+    lastBuiltWorldQueueHash_ = worldQueueHash_;
+    lastBuiltWorldCameraHash_ = cameraHash;
+  }
+  if (worldBatches_.empty()) {
+    worldAppended_ = true;
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
+  const Format depthFormat =
+      ::nuri::isValid(depthTexture) ? gpu_.getTextureFormat(depthTexture)
+                                    : Format::Count;
+  auto pipeline = ensureWorldPipeline(gpu_.getSwapchainFormat(), depthFormat);
+  if (pipeline.hasError()) {
+    return pipeline;
+  }
+
+  const uint32_t slot = frameSlot(worldFrames_);
+  auto upload = uploadWorld(slot);
+  if (upload.hasError()) {
+    return upload;
+  }
+  if (worldGlyphBufferAddress_ == 0u || worldTransformBufferAddress_ == 0u) {
+    return makeError<bool>("TextRenderer::buildTransparentStageContribution: "
+                           "invalid world buffer device address");
+  }
+
+  worldTransparentDraws_.clear();
+  worldPcs_.clear();
+  worldTransparentTextureReads_.clear();
+  worldTransparentDependencyBuffers_.clear();
+  worldTransparentDraws_.reserve(worldBatches_.size());
+  worldPcs_.reserve(worldBatches_.size());
+  const glm::mat4 viewProj = frame.camera.proj * frame.camera.view;
+  const FrameBuffers &buffers = worldFrames_[slot];
+  for (size_t i = 0; i < worldBatches_.size(); ++i) {
+    const WorldBatch &b = worldBatches_[i];
+    worldPcs_.push_back(WorldPC{
+        .viewProj = viewProj,
+        .glyphBufferAddress = worldGlyphBufferAddress_,
+        .transformBufferAddress = worldTransformBufferAddress_,
+        .atlas = b.atlas,
+        .pxRange = b.pxRange,
+        .alphaDiscardThreshold = worldAlphaDiscardThreshold_,
+    });
+    const WorldPC &pc = worldPcs_.back();
+
+    DrawItem d{};
+    d.pipeline = worldPipeline_;
+    d.vertexCount = 6;
+    d.instanceCount = b.instanceCount;
+    d.firstVertex = 0;
+    d.firstInstance = b.firstInstance;
+    d.pushConstants = std::span<const std::byte>(
+        reinterpret_cast<const std::byte *>(&pc), sizeof(pc));
+    d.debugLabel = "Text3D Batch";
+    d.debugColor = 0xff44cc88u;
+    if (::nuri::isValid(depthTexture)) {
+      d.useDepthState = true;
+      d.depthState = {.compareOp = CompareOp::LessEqual,
+                      .isDepthWriteEnabled = false};
+    }
+    worldTransparentDraws_.push_back(TransparentStageSortableDraw{
+        .draw = d,
+        .sortDepth = b.sortDepth,
+        .stableOrder = static_cast<uint32_t>(i),
+    });
+    if (::nuri::isValid(b.atlasTexture)) {
+      bool alreadyTracked = false;
+      for (const TextureHandle handle : worldTransparentTextureReads_) {
+        if (isSameTextureHandle(handle, b.atlasTexture)) {
+          alreadyTracked = true;
+          break;
+        }
+      }
+      if (!alreadyTracked) {
+        worldTransparentTextureReads_.push_back(b.atlasTexture);
+      }
+    }
+  }
+
+  worldTransparentDependencyBuffers_.push_back(buffers.vb);
+  out.sortableDraws = std::span<const TransparentStageSortableDraw>(
+      worldTransparentDraws_.data(), worldTransparentDraws_.size());
+  out.fixedDraws = {};
+  out.dependencyBuffers = std::span<const BufferHandle>(
+      worldTransparentDependencyBuffers_.data(),
+      worldTransparentDependencyBuffers_.size());
+  out.textureReads = std::span<const TextureHandle>(
+      worldTransparentTextureReads_.data(), worldTransparentTextureReads_.size());
+  worldAppended_ = true;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+TextRenderer::append2DGraphPass(RenderFrameContext &frame,
+                                RenderGraphBuilder &graph,
+                                bool hasPriorColorPass) {
   NURI_PROFILER_FUNCTION();
   if (uiQueue_.empty() || uiAppended_) {
     return Result<bool, std::string>::makeResult(true);
@@ -1149,21 +1329,25 @@ Result<bool, std::string> TextRenderer::append2DPasses(RenderFrameContext &,
     uiDraws_.push_back(d);
   }
 
-  RenderPass pass{};
-  pass.color = {.loadOp = out.empty() ? LoadOp::Clear : LoadOp::Load,
+  RenderGraphGraphicsPassDesc desc{};
+  desc.color = {.loadOp = hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
                 .storeOp = StoreOp::Store,
                 .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  pass.useViewport = true;
-  pass.viewport = {.x = 0.0f,
+  desc.useViewport = true;
+  desc.viewport = {.x = 0.0f,
                    .y = 0.0f,
                    .width = std::max(1.0f, static_cast<float>(fbW)),
                    .height = std::max(1.0f, static_cast<float>(fbH)),
                    .minDepth = 0.0f,
                    .maxDepth = 1.0f};
-  pass.draws = std::span<const DrawItem>(uiDraws_.data(), uiDraws_.size());
-  pass.debugLabel = "Text2D Pass";
-  pass.debugColor = 0xffcc8844u;
-  out.push_back(pass);
+  desc.draws = std::span<const DrawItem>(uiDraws_.data(), uiDraws_.size());
+  desc.debugLabel = "Text2D Pass";
+  desc.debugColor = 0xffcc8844u;
+
+  auto addResult = graph.addGraphicsPass(desc);
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
   uiAppended_ = true;
   return Result<bool, std::string>::makeResult(true);
 }

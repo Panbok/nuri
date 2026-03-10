@@ -7,7 +7,7 @@
 
 namespace nuri {
 
-class NURI_API TextLayer3D final : public Layer {
+class NURI_API TextLayer3D final : public Layer, public TransparentStageProducer {
 public:
   struct CreateDesc {
     TextSystem &text;
@@ -16,8 +16,12 @@ public:
   static std::unique_ptr<TextLayer3D> create(const CreateDesc &desc);
   ~TextLayer3D() override = default;
 
-  Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
-                                              RenderPassList &out) override;
+  void publishFrameData(RenderFrameContext &frame) override;
+  Result<bool, std::string>
+  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
+  Result<bool, std::string>
+  buildTransparentStageContribution(RenderFrameContext &frame,
+                                    TransparentStageContribution &out) override;
 
 private:
   explicit TextLayer3D(const CreateDesc &desc);

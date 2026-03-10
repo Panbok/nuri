@@ -13,12 +13,16 @@ TextLayer2D::TextLayer2D(const CreateDesc &desc)
 }
 
 Result<bool, std::string>
-TextLayer2D::buildRenderPasses(RenderFrameContext &frame, RenderPassList &out) {
+TextLayer2D::buildRenderGraph(RenderFrameContext &frame,
+                              RenderGraphBuilder &graph) {
   auto begin = text_.renderer().beginFrame(frame.frameIndex);
   if (begin.hasError()) {
     return Result<bool, std::string>::makeError(begin.error());
   }
-  return text_.renderer().append2DPasses(frame, out);
+
+  const bool hasPriorColorPass = graph.passCount() > 0;
+
+  return text_.renderer().append2DGraphPass(frame, graph, hasPriorColorPass);
 }
 
 } // namespace nuri

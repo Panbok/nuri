@@ -16,8 +16,8 @@ public:
   static std::unique_ptr<TextLayer2D> create(const CreateDesc &desc);
   ~TextLayer2D() override = default;
 
-  Result<bool, std::string> buildRenderPasses(RenderFrameContext &frame,
-                                              RenderPassList &out) override;
+  Result<bool, std::string>
+  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
 
 private:
   explicit TextLayer2D(const CreateDesc &desc);
