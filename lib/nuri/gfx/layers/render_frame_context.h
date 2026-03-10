@@ -1,5 +1,7 @@
 #pragma once
 
+#include "nuri/core/result.h"
+#include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
 
 #include <any>
@@ -17,6 +19,17 @@ namespace nuri {
 
 class RenderScene;
 class ResourceManager;
+struct RenderFrameContext;
+struct TransparentStageContribution;
+
+class TransparentStageProducer {
+public:
+  virtual ~TransparentStageProducer() = default;
+
+  virtual Result<bool, std::string>
+  buildTransparentStageContribution(RenderFrameContext &frame,
+                                    TransparentStageContribution &out) = 0;
+};
 
 enum class OpaqueDebugVisualization : uint8_t {
   None = 0,
@@ -56,8 +69,13 @@ struct RenderSettings {
     bool grid = false;
   };
 
+  struct TransparentSettings {
+    bool enabled = true;
+  };
+
   SkyboxSettings skybox{};
   OpaqueSettings opaque{};
+  TransparentSettings transparent{};
   DebugSettings debug{};
 };
 
@@ -85,6 +103,12 @@ struct OpaqueFrameMetrics {
 
 struct RenderFrameMetrics {
   OpaqueFrameMetrics opaque{};
+  struct TransparentFrameMetrics {
+    uint32_t meshDraws = 0;
+    uint32_t contributorSortableDraws = 0;
+    uint32_t contributorFixedDraws = 0;
+    uint32_t pickDraws = 0;
+  } transparent{};
 };
 
 struct OpaquePickRequest {
@@ -148,9 +172,63 @@ private:
   std::pmr::vector<Entry> entries_;
 };
 
+struct TransparentStageSortableDraw {
+  DrawItem draw{};
+  float sortDepth = 0.0f;
+  uint32_t stableOrder = 0;
+};
+
+struct TransparentStageContribution {
+  std::span<const TransparentStageSortableDraw> sortableDraws{};
+  std::span<const DrawItem> fixedDraws{};
+  std::span<const BufferHandle> dependencyBuffers{};
+  std::span<const TextureHandle> textureReads{};
+};
+
+class TransparentStageRegistry {
+public:
+  explicit TransparentStageRegistry(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : producers_(memory != nullptr ? memory : std::pmr::get_default_resource()) {
+  }
+
+  void clear() { producers_.clear(); }
+
+  void registerProducer(const TransparentStageProducer *producer) {
+    registerProducer(const_cast<TransparentStageProducer *>(producer));
+  }
+
+  void registerProducer(TransparentStageProducer *producer) {
+    if (producer == nullptr) {
+      return;
+    }
+    for (TransparentStageProducer *existing : producers_) {
+      if (existing == producer) {
+        return;
+      }
+    }
+    producers_.push_back(producer);
+  }
+
+  [[nodiscard]] std::span<TransparentStageProducer *const>
+  producers() const {
+    return std::span<TransparentStageProducer *const>(producers_.data(),
+                                                      producers_.size());
+  }
+
+private:
+  std::pmr::vector<TransparentStageProducer *> producers_;
+};
+
 constexpr std::string_view kFrameChannelSceneDepthTexture = "SceneDepthTexture";
 constexpr std::string_view kFrameChannelSceneDepthGraphTexture =
     "SceneDepthGraphTexture";
+constexpr std::string_view kFrameChannelTransparentStageEnabled =
+    "TransparentStageEnabled";
+constexpr std::string_view kFrameChannelOpaquePickGraphTexture =
+    "OpaquePickGraphTexture";
+constexpr std::string_view kFrameChannelOpaquePickDepthGraphTexture =
+    "OpaquePickDepthGraphTexture";
 
 struct RenderFrameContext {
   const RenderScene *scene = nullptr;
@@ -161,6 +239,7 @@ struct RenderFrameContext {
   std::optional<OpaquePickRequest> opaquePickRequest{};
   std::optional<OpaquePickResult> opaquePickResult{};
   FrameChannelRegistry channels{};
+  TransparentStageRegistry transparentStage{};
   TextureHandle sharedDepthTexture{};
   const ResourceManager *resources = nullptr;
   double timeSeconds = 0.0;
