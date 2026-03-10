@@ -39,7 +39,11 @@ public:
 
   void onDetach() override;
   Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
+  buildRenderGraph(RenderFrameContext &frame,
+                   RenderGraphBuilder &graph) override;
+  Result<bool, std::string>
+  buildTransparentStageContribution(RenderFrameContext &frame,
+                                    TransparentStageContribution &out) override;
 
 private:
   struct GridPushConstants {
@@ -50,8 +54,8 @@ private:
 
   [[nodiscard]] Result<bool, std::string> ensureGridInitialized();
   [[nodiscard]] Result<bool, std::string> createGridShaders();
-  [[nodiscard]] Result<bool, std::string> ensureGridPipeline(
-      Format colorFormat, Format depthFormat);
+  [[nodiscard]] Result<bool, std::string>
+  ensureGridPipeline(Format colorFormat, Format depthFormat);
   [[nodiscard]] Result<bool, std::string>
   appendModelBoundsGraphPass(const RenderFrameContext &frame,
                              RenderGraphBuilder &graph,
@@ -61,6 +65,7 @@ private:
 
   GPUDevice &gpu_;
   DebugLayerConfig config_{};
+  std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<DebugDraw3D> debugDraw3D_;
   std::unique_ptr<Shader> gridShader_;
   std::unique_ptr<Pipeline> gridPipeline_;
@@ -74,6 +79,9 @@ private:
 
   GridPushConstants gridPushConstants_{};
   DrawItem gridDrawItem_{};
+  std::pmr::vector<TransparentStageSortableDraw> transparentSortableDraws_;
+  std::pmr::vector<DrawItem> transparentFixedDraws_;
+  std::pmr::vector<BufferHandle> transparentDependencyBuffers_;
 };
 
 } // namespace nuri
