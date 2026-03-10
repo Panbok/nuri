@@ -168,10 +168,6 @@ computeAlignedOffsetLocal(const TextBounds &localBounds,
                    std::max(sz, 1.0e-4f));
 }
 
-[[nodiscard]] bool isSameTextureHandle(TextureHandle lhs, TextureHandle rhs) {
-  return lhs.index == rhs.index && lhs.generation == rhs.generation;
-}
-
 } // namespace
 
 void TextRenderer::hashWorldTransform(uint64_t &hash,
@@ -296,7 +292,8 @@ TextRenderer::TextRenderer(const CreateDesc &desc)
       uiDraws_(&memory_), worldDraws_(&memory_),
       worldTransparentDraws_(&memory_), uiPcs_(&memory_), worldPcs_(&memory_),
       uiFrames_(&memory_), worldFrames_(&memory_),
-      worldTransparentTextureReads_(&memory_),
+      worldTransparentTextureReadList_(&memory_),
+      worldTransparentTextureReadSet_(&memory_),
       worldTransparentDependencyBuffers_(&memory_) {}
 
 TextRenderer::~TextRenderer() { destroyGpu(); }
@@ -516,8 +513,10 @@ void TextRenderer::clear() {
   worldGlyphBufferAddress_ = 0;
   worldTransformBufferAddress_ = 0;
   worldDependencyBuffer_ = {};
-  worldTransparentTextureReads_.clear();
+  worldTransparentTextureReadList_.clear();
+  worldTransparentTextureReadSet_.clear();
   worldTransparentDependencyBuffers_.clear();
+  worldPreparedSlot_ = 0;
 }
 
 void TextRenderer::resetPerfCounters() { perf_ = PerfCounters{}; }
@@ -1006,14 +1005,13 @@ void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
 }
 
 Result<bool, std::string>
-TextRenderer::append3DGraphPass(RenderFrameContext &frame,
-                                RenderGraphBuilder &graph,
-                                RenderGraphTextureId sceneDepthGraphTexture,
-                                bool hasPriorColorPass) {
-  NURI_PROFILER_FUNCTION();
+TextRenderer::prepareWorldRenderState(RenderFrameContext &frame,
+                                      TextureHandle &outDepth,
+                                      Format &outDepthFormat) {
   if (worldQueue_.empty() || worldAppended_) {
-    return Result<bool, std::string>::makeResult(true);
+    return Result<bool, std::string>::makeResult(false);
   }
+
   const uint64_t cameraHash =
       worldHasBillboards_ ? hashCameraFrameState(frame.camera) : 0ull;
   const bool canReuseWorldGeometry =
@@ -1027,35 +1025,65 @@ TextRenderer::append3DGraphPass(RenderFrameContext &frame,
   }
   if (worldBatches_.empty()) {
     worldAppended_ = true;
-    return Result<bool, std::string>::makeResult(true);
+    return Result<bool, std::string>::makeResult(false);
   }
 
-  const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
-  const bool hasDepth = ::nuri::isValid(depthTexture);
-  const Format depthFormat =
-      hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
-  auto pipeline = ensureWorldPipeline(gpu_.getSwapchainFormat(), depthFormat);
+  outDepth = resolveFrameDepthTexture(frame);
+  outDepthFormat = ::nuri::isValid(outDepth) ? gpu_.getTextureFormat(outDepth)
+                                             : Format::Count;
+  auto pipeline =
+      ensureWorldPipeline(gpu_.getSwapchainFormat(), outDepthFormat);
   if (pipeline.hasError()) {
     return pipeline;
   }
 
-  const uint32_t slot = frameSlot(worldFrames_);
-  auto upload = uploadWorld(slot);
+  worldPreparedSlot_ = frameSlot(worldFrames_);
+  auto upload = uploadWorld(worldPreparedSlot_);
   if (upload.hasError()) {
     return upload;
   }
   if (worldGlyphBufferAddress_ == 0u || worldTransformBufferAddress_ == 0u) {
     return makeError<bool>(
-        "TextRenderer::append3DGraphPass: invalid world buffer device address");
+        "TextRenderer::prepareWorldRenderState: invalid world buffer device address");
   }
+
+  worldDependencyBuffer_ = worldFrames_[worldPreparedSlot_].vb;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+void TextRenderer::appendWorldTransparentTextureRead(TextureHandle texture) {
+  if (!::nuri::isValid(texture)) {
+    return;
+  }
+  if (worldTransparentTextureReadSet_.insert(texture).second) {
+    worldTransparentTextureReadList_.push_back(texture);
+  }
+}
+
+Result<bool, std::string>
+TextRenderer::append3DGraphPass(RenderFrameContext &frame,
+                                RenderGraphBuilder &graph,
+                                RenderGraphTextureId sceneDepthGraphTexture,
+                                bool hasPriorColorPass) {
+  NURI_PROFILER_FUNCTION();
+  TextureHandle depthTexture{};
+  [[maybe_unused]] Format depthFormat = Format::Count;
+  auto prepare = prepareWorldRenderState(frame, depthTexture, depthFormat);
+  if (prepare.hasError()) {
+    return prepare;
+  }
+  if (!prepare.value()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  const bool hasDepth = ::nuri::isValid(depthTexture);
 
   worldDraws_.clear();
   worldPcs_.clear();
   worldDraws_.reserve(worldBatches_.size());
   worldPcs_.reserve(worldBatches_.size());
-  worldTransparentTextureReads_.clear();
+  worldTransparentTextureReadList_.clear();
+  worldTransparentTextureReadSet_.clear();
   const glm::mat4 viewProj = frame.camera.proj * frame.camera.view;
-  const FrameBuffers &buffers = worldFrames_[slot];
   for (const WorldBatch &b : worldBatches_) {
     worldPcs_.push_back(WorldPC{
         .viewProj = viewProj,
@@ -1082,20 +1110,8 @@ TextRenderer::append3DGraphPass(RenderFrameContext &frame,
                       .isDepthWriteEnabled = false};
     }
     worldDraws_.push_back(d);
-    if (::nuri::isValid(b.atlasTexture)) {
-      bool alreadyTracked = false;
-      for (const TextureHandle handle : worldTransparentTextureReads_) {
-        if (isSameTextureHandle(handle, b.atlasTexture)) {
-          alreadyTracked = true;
-          break;
-        }
-      }
-      if (!alreadyTracked) {
-        worldTransparentTextureReads_.push_back(b.atlasTexture);
-      }
-    }
+    appendWorldTransparentTextureRead(b.atlasTexture);
   }
-  worldDependencyBuffer_ = buffers.vb;
 
   int32_t w = 0;
   int32_t h = 0;
@@ -1138,7 +1154,7 @@ TextRenderer::append3DGraphPass(RenderFrameContext &frame,
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
-  for (const TextureHandle texture : worldTransparentTextureReads_) {
+  for (const TextureHandle texture : worldTransparentTextureReadList_) {
     auto textureImportResult =
         graph.importTexture(texture, "text3d_atlas_texture");
     if (textureImportResult.hasError()) {
@@ -1159,53 +1175,24 @@ TextRenderer::buildTransparentStageContribution(RenderFrameContext &frame,
                                                 TransparentStageContribution &out) {
   NURI_PROFILER_FUNCTION();
   out = {};
-  if (worldQueue_.empty() || worldAppended_) {
+  TextureHandle depthTexture{};
+  [[maybe_unused]] Format depthFormat = Format::Count;
+  auto prepare = prepareWorldRenderState(frame, depthTexture, depthFormat);
+  if (prepare.hasError()) {
+    return prepare;
+  }
+  if (!prepare.value()) {
     return Result<bool, std::string>::makeResult(true);
-  }
-
-  const uint64_t cameraHash =
-      worldHasBillboards_ ? hashCameraFrameState(frame.camera) : 0ull;
-  const bool canReuseWorldGeometry =
-      worldGeometryValid_ && worldQueueHash_ == lastBuiltWorldQueueHash_ &&
-      cameraHash == lastBuiltWorldCameraHash_;
-  if (!canReuseWorldGeometry) {
-    buildWorldGeometry(frame.camera);
-    worldGeometryValid_ = true;
-    lastBuiltWorldQueueHash_ = worldQueueHash_;
-    lastBuiltWorldCameraHash_ = cameraHash;
-  }
-  if (worldBatches_.empty()) {
-    worldAppended_ = true;
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-  const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
-  const Format depthFormat =
-      ::nuri::isValid(depthTexture) ? gpu_.getTextureFormat(depthTexture)
-                                    : Format::Count;
-  auto pipeline = ensureWorldPipeline(gpu_.getSwapchainFormat(), depthFormat);
-  if (pipeline.hasError()) {
-    return pipeline;
-  }
-
-  const uint32_t slot = frameSlot(worldFrames_);
-  auto upload = uploadWorld(slot);
-  if (upload.hasError()) {
-    return upload;
-  }
-  if (worldGlyphBufferAddress_ == 0u || worldTransformBufferAddress_ == 0u) {
-    return makeError<bool>("TextRenderer::buildTransparentStageContribution: "
-                           "invalid world buffer device address");
   }
 
   worldTransparentDraws_.clear();
   worldPcs_.clear();
-  worldTransparentTextureReads_.clear();
+  worldTransparentTextureReadList_.clear();
+  worldTransparentTextureReadSet_.clear();
   worldTransparentDependencyBuffers_.clear();
   worldTransparentDraws_.reserve(worldBatches_.size());
   worldPcs_.reserve(worldBatches_.size());
   const glm::mat4 viewProj = frame.camera.proj * frame.camera.view;
-  const FrameBuffers &buffers = worldFrames_[slot];
   for (size_t i = 0; i < worldBatches_.size(); ++i) {
     const WorldBatch &b = worldBatches_[i];
     worldPcs_.push_back(WorldPC{
@@ -1238,21 +1225,10 @@ TextRenderer::buildTransparentStageContribution(RenderFrameContext &frame,
         .sortDepth = b.sortDepth,
         .stableOrder = static_cast<uint32_t>(i),
     });
-    if (::nuri::isValid(b.atlasTexture)) {
-      bool alreadyTracked = false;
-      for (const TextureHandle handle : worldTransparentTextureReads_) {
-        if (isSameTextureHandle(handle, b.atlasTexture)) {
-          alreadyTracked = true;
-          break;
-        }
-      }
-      if (!alreadyTracked) {
-        worldTransparentTextureReads_.push_back(b.atlasTexture);
-      }
-    }
+    appendWorldTransparentTextureRead(b.atlasTexture);
   }
 
-  worldTransparentDependencyBuffers_.push_back(buffers.vb);
+  worldTransparentDependencyBuffers_.push_back(worldDependencyBuffer_);
   out.sortableDraws = std::span<const TransparentStageSortableDraw>(
       worldTransparentDraws_.data(), worldTransparentDraws_.size());
   out.fixedDraws = {};
@@ -1260,7 +1236,8 @@ TextRenderer::buildTransparentStageContribution(RenderFrameContext &frame,
       worldTransparentDependencyBuffers_.data(),
       worldTransparentDependencyBuffers_.size());
   out.textureReads = std::span<const TextureHandle>(
-      worldTransparentTextureReads_.data(), worldTransparentTextureReads_.size());
+      worldTransparentTextureReadList_.data(),
+      worldTransparentTextureReadList_.size());
   worldAppended_ = true;
   return Result<bool, std::string>::makeResult(true);
 }

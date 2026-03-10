@@ -88,6 +88,8 @@ settingsOrDefault(const RenderFrameContext &frame) {
 
 [[nodiscard]] std::optional<SubmeshLod>
 resolveTransparentLod(const Submesh &submesh, const RenderSettings &settings) {
+  // Transparent meshes intentionally reuse the opaque forced-LOD override so a
+  // single debug knob forces the same mesh LOD across both queues.
   if (settings.opaque.forcedMeshLod < 0) {
     if (submesh.indexCount > 0) {
       return SubmeshLod{.indexOffset = submesh.indexOffset,
@@ -390,8 +392,7 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
       .cubemapSamplerId = cubemapSamplerId,
   };
 
-  if (!frameDataUploadValid_ ||
-      std::memcmp(&uploadedFrameData_, &frameData_, sizeof(FrameData)) != 0) {
+  if (!frameDataUploadValid_ || !(uploadedFrameData_ == frameData_)) {
     const std::span<const std::byte> frameDataBytes{
         reinterpret_cast<const std::byte *>(&frameData_), sizeof(frameData_)};
     auto updateResult =
@@ -890,9 +891,13 @@ TransparentLayer::rebuildSceneCache(const RenderScene &scene,
         ++invalidMaterialFallbackCount;
       }
 
+      // Cached pointers stay valid only while scene.topologyVersion() is
+      // unchanged; any topology mutation must bump that version so this cache
+      // is rebuilt before meshDrawTemplates_ is reused.
       meshDrawTemplates_.push_back(MeshDrawTemplate{
           .renderable = &renderable,
           .submesh = &submeshes[submeshIndex],
+          .submeshIndex = static_cast<uint32_t>(submeshIndex),
           .indexBuffer = geometry.indexBuffer,
           .indexBufferOffset = geometry.indexByteOffset,
           .vertexBufferAddress = vertexBufferAddress,
@@ -934,13 +939,11 @@ Result<bool, std::string> TransparentLayer::rebuildMaterialTextureAccessCache(
       continue;
     }
     const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
-    const ptrdiff_t submeshOffset = entry.submesh - submeshes.data();
-    if (submeshOffset < 0 ||
-        static_cast<size_t>(submeshOffset) >= submeshes.size()) {
+    if (entry.submeshIndex >= submeshes.size()) {
       continue;
     }
     const MaterialRef modelMaterial =
-        modelRecord->materialForSubmesh(static_cast<uint32_t>(submeshOffset));
+        modelRecord->materialForSubmesh(entry.submeshIndex);
     const MaterialRef resolvedMaterial = nuri::isValid(modelMaterial)
                                              ? modelMaterial
                                              : entry.renderable->material;

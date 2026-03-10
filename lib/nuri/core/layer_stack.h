@@ -4,14 +4,28 @@
 #include "nuri/defines.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <memory_resource>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace nuri {
+
+namespace detail {
+
+template <typename ResultT>
+concept LayerReverseResult = requires(
+    std::remove_reference_t<ResultT> &result) {
+  { result.hasError() } -> std::convertible_to<bool>;
+  { result.error() } -> std::convertible_to<std::string>;
+};
+
+} // namespace detail
 
 class NURI_API LayerStack {
 public:
@@ -42,6 +56,8 @@ public:
   }
 
   template <typename Fn>
+    requires std::invocable<Fn &, Layer &> &&
+             detail::LayerReverseResult<std::invoke_result_t<Fn &, Layer &>>
   Result<bool, std::string> forEachLayerReverseResult(Fn &&fn) const {
     for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
       if (Layer *layer = it->get(); layer != nullptr) {

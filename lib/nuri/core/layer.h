@@ -33,10 +33,12 @@ public:
   virtual void publishFrameData(RenderFrameContext &frame) {
     prepareFrameContext(frame);
   }
+  // `out` exposes non-owning spans into contributor-managed frame data.
+  // Callers must consume or copy them before the contributor's next
+  // clear()/beginFrame()-style reset invalidates the backing storage.
   virtual Result<bool, std::string>
-  buildTransparentStageContribution(RenderFrameContext &frame,
+  buildTransparentStageContribution([[maybe_unused]] RenderFrameContext &frame,
                                     TransparentStageContribution &out) {
-    static_cast<void>(frame);
     out = {};
     return Result<bool, std::string>::makeResult(true);
   }

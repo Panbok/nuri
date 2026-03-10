@@ -135,6 +135,42 @@ Result<bool, std::string> DebugLayer::ensureGridPipeline(Format colorFormat,
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string>
+DebugLayer::prepareGridDraw(const RenderFrameContext &frame,
+                            TextureHandle depthTexture) {
+  const bool hasDepth = nuri::isValid(depthTexture);
+  const Format depthFormat =
+      hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
+  auto pipelineResult =
+      ensureGridPipeline(gpu_.getSwapchainFormat(), depthFormat);
+  if (pipelineResult.hasError()) {
+    return Result<bool, std::string>::makeError(pipelineResult.error());
+  }
+
+  gridPushConstants_ = GridPushConstants{
+      .mvp = frame.camera.proj * frame.camera.view,
+      .cameraPos = frame.camera.cameraPos,
+      .origin = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f),
+  };
+
+  gridDrawItem_ = DrawItem{};
+  gridDrawItem_.pipeline = gridPipelineHandle_;
+  gridDrawItem_.vertexCount = kGridVertexCount;
+  gridDrawItem_.instanceCount = 1;
+  gridDrawItem_.pushConstants = std::span<const std::byte>(
+      reinterpret_cast<const std::byte *>(&gridPushConstants_),
+      sizeof(gridPushConstants_));
+  gridDrawItem_.debugLabel = kGridDrawLabel;
+  gridDrawItem_.debugColor = kGridDrawDebugColor;
+  if (hasDepth) {
+    gridDrawItem_.useDepthState = true;
+    gridDrawItem_.depthState = {.compareOp = CompareOp::LessEqual,
+                                .isDepthWriteEnabled = false};
+  }
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
 void DebugLayer::resetGridState() {
   gridPipeline_.reset();
   gridShader_.reset();
@@ -242,35 +278,9 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
   if (frame.settings->debug.grid) {
     const bool hasPriorColorPass = graph.passCount() > 0;
     const bool hasDepth = nuri::isValid(sceneDepthTexture);
-    const Format depthFormat =
-        hasDepth ? gpu_.getTextureFormat(sceneDepthTexture) : Format::Count;
-    auto pipelineResult =
-        ensureGridPipeline(gpu_.getSwapchainFormat(), depthFormat);
-    if (pipelineResult.hasError()) {
-      return Result<bool, std::string>::makeError(pipelineResult.error());
-    }
-
-    gridPushConstants_ = GridPushConstants{
-        .mvp = frame.camera.proj * frame.camera.view,
-        .cameraPos = frame.camera.cameraPos,
-        .origin = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f),
-    };
-
-    gridDrawItem_ = DrawItem{};
-    gridDrawItem_.pipeline = gridPipelineHandle_;
-    gridDrawItem_.vertexCount = kGridVertexCount;
-    gridDrawItem_.instanceCount = 1;
-    gridDrawItem_.pushConstants = std::span<const std::byte>(
-        reinterpret_cast<const std::byte *>(&gridPushConstants_),
-        sizeof(gridPushConstants_));
-    gridDrawItem_.debugLabel = kGridDrawLabel;
-    gridDrawItem_.debugColor = kGridDrawDebugColor;
-    if (hasDepth) {
-      gridDrawItem_.useDepthState = true;
-      gridDrawItem_.depthState = {
-          .compareOp = CompareOp::LessEqual,
-          .isDepthWriteEnabled = false,
-      };
+    auto gridResult = prepareGridDraw(frame, sceneDepthTexture);
+    if (gridResult.hasError()) {
+      return gridResult;
     }
 
     RenderGraphTextureId depthTextureId{};
@@ -364,48 +374,26 @@ Result<bool, std::string> DebugLayer::buildTransparentStageContribution(
       }
       const DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
       if (!pass.desc.draws.empty()) {
-        transparentSortableDraws_.push_back(TransparentStageSortableDraw{
-            .draw = pass.desc.draws.front(),
-            .sortDepth = farthestDepth,
-            .stableOrder = 0u,
-        });
-        for (const BufferHandle buffer : pass.desc.dependencyBuffers) {
-          if (nuri::isValid(buffer)) {
-            transparentDependencyBuffers_.push_back(buffer);
-          }
+        for (size_t i = 0; i < pass.desc.draws.size(); ++i) {
+          transparentSortableDraws_.push_back(TransparentStageSortableDraw{
+              .draw = pass.desc.draws[i],
+              .sortDepth = farthestDepth,
+              .stableOrder = static_cast<uint32_t>(i),
+          });
+        }
+      }
+      for (const BufferHandle buffer : pass.desc.dependencyBuffers) {
+        if (nuri::isValid(buffer)) {
+          transparentDependencyBuffers_.push_back(buffer);
         }
       }
     }
   }
 
   if (frame.settings->debug.grid) {
-    const Format depthFormat =
-        hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
-    auto pipelineResult =
-        ensureGridPipeline(gpu_.getSwapchainFormat(), depthFormat);
-    if (pipelineResult.hasError()) {
-      return Result<bool, std::string>::makeError(pipelineResult.error());
-    }
-
-    gridPushConstants_ = GridPushConstants{
-        .mvp = frame.camera.proj * frame.camera.view,
-        .cameraPos = frame.camera.cameraPos,
-        .origin = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f),
-    };
-
-    gridDrawItem_ = DrawItem{};
-    gridDrawItem_.pipeline = gridPipelineHandle_;
-    gridDrawItem_.vertexCount = kGridVertexCount;
-    gridDrawItem_.instanceCount = 1;
-    gridDrawItem_.pushConstants = std::span<const std::byte>(
-        reinterpret_cast<const std::byte *>(&gridPushConstants_),
-        sizeof(gridPushConstants_));
-    gridDrawItem_.debugLabel = kGridDrawLabel;
-    gridDrawItem_.debugColor = kGridDrawDebugColor;
-    if (hasDepth) {
-      gridDrawItem_.useDepthState = true;
-      gridDrawItem_.depthState = {.compareOp = CompareOp::LessEqual,
-                                  .isDepthWriteEnabled = false};
+    auto gridResult = prepareGridDraw(frame, depthTexture);
+    if (gridResult.hasError()) {
+      return gridResult;
     }
     transparentFixedDraws_.push_back(gridDrawItem_);
   }

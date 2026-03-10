@@ -10,6 +10,8 @@
 #include <memory_resource>
 #include <string>
 #include <string_view>
+#include <unordered_set>
+#include <vector>
 
 namespace nuri {
 
@@ -49,6 +51,8 @@ public:
   append3DGraphPass(RenderFrameContext &frame, RenderGraphBuilder &graph,
                     RenderGraphTextureId sceneDepthGraphTexture = {},
                     bool hasPriorColorPass = false);
+  // `out` contains non-owning spans into renderer-managed frame data and is
+  // valid only until the next clear()/beginFrame() reset.
   Result<bool, std::string>
   buildTransparentStageContribution(RenderFrameContext &frame,
                                     TransparentStageContribution &out);
@@ -128,6 +132,22 @@ private:
     float sortDepth = 0.0f;
   };
 
+  struct TextureHandleHash {
+    [[nodiscard]] size_t operator()(TextureHandle handle) const noexcept {
+      const uint64_t key =
+          (static_cast<uint64_t>(handle.generation) << 32u) |
+          static_cast<uint64_t>(handle.index);
+      return std::hash<uint64_t>{}(key);
+    }
+  };
+
+  struct TextureHandleEqual {
+    [[nodiscard]] bool operator()(TextureHandle lhs,
+                                  TextureHandle rhs) const noexcept {
+      return lhs.index == rhs.index && lhs.generation == rhs.generation;
+    }
+  };
+
   struct UiPC {
     glm::mat4 proj{1.0f};
     uint32_t atlas = 0;
@@ -190,8 +210,12 @@ private:
                             std::string_view debugPrefix);
   Result<bool, std::string> uploadUi(uint32_t slot);
   Result<bool, std::string> uploadWorld(uint32_t slot);
+  Result<bool, std::string> prepareWorldRenderState(RenderFrameContext &frame,
+                                                    TextureHandle &outDepth,
+                                                    Format &outDepthFormat);
   void buildUiGeometry();
   void buildWorldGeometry(const CameraFrameState &camera);
+  void appendWorldTransparentTextureRead(TextureHandle texture);
   void resetPerfCounters();
   void emitPerfValidation(uint64_t frameIndex);
   void destroyGpu();
@@ -237,7 +261,9 @@ private:
   std::pmr::vector<WorldPC> worldPcs_;
   std::pmr::vector<FrameBuffers> uiFrames_;
   std::pmr::vector<FrameBuffers> worldFrames_;
-  std::pmr::vector<TextureHandle> worldTransparentTextureReads_;
+  std::pmr::vector<TextureHandle> worldTransparentTextureReadList_;
+  std::pmr::unordered_set<TextureHandle, TextureHandleHash, TextureHandleEqual>
+      worldTransparentTextureReadSet_;
   std::pmr::vector<BufferHandle> worldTransparentDependencyBuffers_;
 
   uint64_t worldQueueHash_ = kHashSeed;
@@ -249,6 +275,7 @@ private:
   uint64_t worldTransformBufferAddress_ = 0;
   float worldAlphaDiscardThreshold_ = 1.0e-3f;
   BufferHandle worldDependencyBuffer_{};
+  uint32_t worldPreparedSlot_ = 0;
 };
 
 } // namespace nuri

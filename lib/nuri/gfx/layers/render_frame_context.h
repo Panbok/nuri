@@ -20,8 +20,6 @@ namespace nuri {
 class LayerStack;
 class RenderScene;
 class ResourceManager;
-struct RenderFrameContext;
-struct TransparentStageContribution;
 
 enum class OpaqueDebugVisualization : uint8_t {
   None = 0,
@@ -171,6 +169,10 @@ struct TransparentStageSortableDraw {
   uint32_t stableOrder = 0;
 };
 
+// These spans are non-owning views into contributor-managed frame storage.
+// They are valid only for the current frame and may be invalidated by the
+// contributor's next clear()/beginFrame()-style reset. Copy the data if it
+// must outlive the current frame.
 struct TransparentStageContribution {
   std::span<const TransparentStageSortableDraw> sortableDraws{};
   std::span<const DrawItem> fixedDraws{};

@@ -57,6 +57,8 @@ private:
   [[nodiscard]] Result<bool, std::string>
   ensureGridPipeline(Format colorFormat, Format depthFormat);
   [[nodiscard]] Result<bool, std::string>
+  prepareGridDraw(const RenderFrameContext &frame, TextureHandle depthTexture);
+  [[nodiscard]] Result<bool, std::string>
   appendModelBoundsGraphPass(const RenderFrameContext &frame,
                              RenderGraphBuilder &graph,
                              TextureHandle sceneDepthTexture,

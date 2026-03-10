@@ -65,6 +65,29 @@ private:
     uint32_t brdfLutTexId = 0;
     uint32_t flags = 0;
     uint32_t cubemapSamplerId = 0;
+
+    [[nodiscard]] bool operator==(const FrameData &other) const noexcept {
+      for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+          if (view[column][row] != other.view[column][row] ||
+              proj[column][row] != other.proj[column][row]) {
+            return false;
+          }
+        }
+      }
+      return cameraPos.x == other.cameraPos.x &&
+             cameraPos.y == other.cameraPos.y &&
+             cameraPos.z == other.cameraPos.z &&
+             cameraPos.w == other.cameraPos.w &&
+             cubemapTexId == other.cubemapTexId &&
+             hasCubemap == other.hasCubemap &&
+             irradianceTexId == other.irradianceTexId &&
+             prefilteredGgxTexId == other.prefilteredGgxTexId &&
+             prefilteredCharlieTexId == other.prefilteredCharlieTexId &&
+             brdfLutTexId == other.brdfLutTexId &&
+             flags == other.flags &&
+             cubemapSamplerId == other.cubemapSamplerId;
+    }
   };
   static_assert(sizeof(FrameData) == 176,
                 "TransparentLayer::FrameData must match shader layout");
@@ -90,8 +113,11 @@ private:
                 "TransparentLayer::PushConstants exceeds Vulkan guarantee");
 
   struct MeshDrawTemplate {
+    // These pointers reference scene-owned topology and remain valid only
+    // while RenderScene::topologyVersion() is unchanged.
     const Renderable *renderable = nullptr;
     const Submesh *submesh = nullptr;
+    uint32_t submeshIndex = 0;
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
     uint64_t vertexBufferAddress = 0;
