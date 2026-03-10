@@ -34,6 +34,13 @@ public:
     prepareFrameContext(frame);
   }
   virtual Result<bool, std::string>
+  buildTransparentStageContribution(RenderFrameContext &frame,
+                                    TransparentStageContribution &out) {
+    static_cast<void>(frame);
+    out = {};
+    return Result<bool, std::string>::makeResult(true);
+  }
+  virtual Result<bool, std::string>
   buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) = 0;
 
 protected:

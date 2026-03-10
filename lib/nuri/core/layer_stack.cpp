@@ -114,13 +114,9 @@ void LayerStack::clear() {
 Result<bool, std::string>
 LayerStack::buildRenderGraph(RenderFrameContext &frame,
                              RenderGraphBuilder &graph) {
-  for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
-    Layer *layer = it->get();
-    if (!layer) {
-      continue;
-    }
-    layer->publishFrameData(frame);
-  }
+  frame.layerStack = this;
+  forEachLayerReverse(
+      [&frame](Layer &layer) { layer.publishFrameData(frame); });
 
   for (auto &layer : layers_) {
     if (!layer) {

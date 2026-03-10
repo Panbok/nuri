@@ -17,19 +17,11 @@
 
 namespace nuri {
 
+class LayerStack;
 class RenderScene;
 class ResourceManager;
 struct RenderFrameContext;
 struct TransparentStageContribution;
-
-class TransparentStageProducer {
-public:
-  virtual ~TransparentStageProducer() = default;
-
-  virtual Result<bool, std::string>
-  buildTransparentStageContribution(RenderFrameContext &frame,
-                                    TransparentStageContribution &out) = 0;
-};
 
 enum class OpaqueDebugVisualization : uint8_t {
   None = 0,
@@ -148,7 +140,8 @@ public:
     entries_.push_back(std::move(entry));
   }
 
-  template <typename T> [[nodiscard]] const T *tryGet(std::string_view key) const {
+  template <typename T>
+  [[nodiscard]] const T *tryGet(std::string_view key) const {
     for (const Entry &entry : entries_) {
       if (entry.key != key || entry.type != std::type_index(typeid(T))) {
         continue;
@@ -185,41 +178,6 @@ struct TransparentStageContribution {
   std::span<const TextureHandle> textureReads{};
 };
 
-class TransparentStageRegistry {
-public:
-  explicit TransparentStageRegistry(
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : producers_(memory != nullptr ? memory : std::pmr::get_default_resource()) {
-  }
-
-  void clear() { producers_.clear(); }
-
-  void registerProducer(const TransparentStageProducer *producer) {
-    registerProducer(const_cast<TransparentStageProducer *>(producer));
-  }
-
-  void registerProducer(TransparentStageProducer *producer) {
-    if (producer == nullptr) {
-      return;
-    }
-    for (TransparentStageProducer *existing : producers_) {
-      if (existing == producer) {
-        return;
-      }
-    }
-    producers_.push_back(producer);
-  }
-
-  [[nodiscard]] std::span<TransparentStageProducer *const>
-  producers() const {
-    return std::span<TransparentStageProducer *const>(producers_.data(),
-                                                      producers_.size());
-  }
-
-private:
-  std::pmr::vector<TransparentStageProducer *> producers_;
-};
-
 constexpr std::string_view kFrameChannelSceneDepthTexture = "SceneDepthTexture";
 constexpr std::string_view kFrameChannelSceneDepthGraphTexture =
     "SceneDepthGraphTexture";
@@ -239,7 +197,7 @@ struct RenderFrameContext {
   std::optional<OpaquePickRequest> opaquePickRequest{};
   std::optional<OpaquePickResult> opaquePickResult{};
   FrameChannelRegistry channels{};
-  TransparentStageRegistry transparentStage{};
+  const LayerStack *layerStack = nullptr;
   TextureHandle sharedDepthTexture{};
   const ResourceManager *resources = nullptr;
   double timeSeconds = 0.0;

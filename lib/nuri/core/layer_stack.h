@@ -33,6 +33,27 @@ public:
   bool empty() const { return layers_.empty(); }
   size_t size() const { return layers_.size(); }
 
+  template <typename Fn> void forEachLayerReverse(Fn &&fn) const {
+    for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
+      if (Layer *layer = it->get(); layer != nullptr) {
+        fn(*layer);
+      }
+    }
+  }
+
+  template <typename Fn>
+  Result<bool, std::string> forEachLayerReverseResult(Fn &&fn) const {
+    for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
+      if (Layer *layer = it->get(); layer != nullptr) {
+        auto result = fn(*layer);
+        if (result.hasError()) {
+          return Result<bool, std::string>::makeError(result.error());
+        }
+      }
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
+
   void onUpdate(double deltaTime);
   void onResize(int32_t width, int32_t height);
   bool onInput(const InputEvent &event);
