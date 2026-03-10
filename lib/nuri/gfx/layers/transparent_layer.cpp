@@ -2,6 +2,7 @@
 
 #include "nuri/gfx/layers/transparent_layer.h"
 
+#include "nuri/core/layer_stack.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/shader.h"
@@ -978,44 +979,49 @@ TransparentLayer::collectContributorDraws(RenderFrameContext &frame) {
   contributorFixedDraws_.reserve(8u);
   contributorTextureReads_.reserve(8u);
 
-  for (TransparentStageProducer *producer :
-       frame.transparentStage.producers()) {
-    if (producer == nullptr) {
-      continue;
-    }
+  if (frame.layerStack == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "TransparentLayer::collectContributorDraws: frame layer stack is null");
+  }
 
-    TransparentStageContribution contribution{};
-    auto contributionResult =
-        producer->buildTransparentStageContribution(frame, contribution);
-    if (contributionResult.hasError()) {
-      return contributionResult;
-    }
+  auto collectResult =
+      frame.layerStack->forEachLayerReverseResult([&](Layer &contributor) {
+        TransparentStageContribution contribution{};
+        auto contributionResult =
+            contributor.buildTransparentStageContribution(frame, contribution);
+        if (contributionResult.hasError()) {
+          return contributionResult;
+        }
 
-    const uint32_t stableOrderBase =
-        saturateToU32(contributorSortableDraws_.size());
-    for (const TransparentStageSortableDraw &source :
-         contribution.sortableDraws) {
-      DrawItem draw = source.draw;
-      applyContributorDependencies(draw, contribution.dependencyBuffers);
-      contributorSortableDraws_.push_back(TransparentStageSortableDraw{
-          .draw = draw,
-          .sortDepth = source.sortDepth,
-          .stableOrder = stableOrderBase + source.stableOrder,
+        const uint32_t stableOrderBase =
+            saturateToU32(contributorSortableDraws_.size());
+        for (const TransparentStageSortableDraw &source :
+             contribution.sortableDraws) {
+          DrawItem draw = source.draw;
+          applyContributorDependencies(draw, contribution.dependencyBuffers);
+          contributorSortableDraws_.push_back(TransparentStageSortableDraw{
+              .draw = draw,
+              .sortDepth = source.sortDepth,
+              .stableOrder = stableOrderBase + source.stableOrder,
+          });
+        }
+        for (const DrawItem &source : contribution.fixedDraws) {
+          DrawItem draw = source;
+          applyContributorDependencies(draw, contribution.dependencyBuffers);
+          contributorFixedDraws_.push_back(draw);
+        }
+        for (const TextureHandle handle : contribution.textureReads) {
+          appendUniqueTexture(contributorTextureReads_, handle);
+        }
+
+        frame.metrics.transparent.contributorSortableDraws +=
+            saturateToU32(contribution.sortableDraws.size());
+        frame.metrics.transparent.contributorFixedDraws +=
+            saturateToU32(contribution.fixedDraws.size());
+        return Result<bool, std::string>::makeResult(true);
       });
-    }
-    for (const DrawItem &source : contribution.fixedDraws) {
-      DrawItem draw = source;
-      applyContributorDependencies(draw, contribution.dependencyBuffers);
-      contributorFixedDraws_.push_back(draw);
-    }
-    for (const TextureHandle handle : contribution.textureReads) {
-      appendUniqueTexture(contributorTextureReads_, handle);
-    }
-
-    frame.metrics.transparent.contributorSortableDraws +=
-        saturateToU32(contribution.sortableDraws.size());
-    frame.metrics.transparent.contributorFixedDraws +=
-        saturateToU32(contribution.fixedDraws.size());
+  if (collectResult.hasError()) {
+    return collectResult;
   }
 
   return Result<bool, std::string>::makeResult(true);

@@ -39,9 +39,9 @@ public:
   TransparentLayer(TransparentLayer &&) = delete;
   TransparentLayer &operator=(TransparentLayer &&) = delete;
 
-  static std::unique_ptr<TransparentLayer> create(
-      GPUDevice &gpu, TransparentLayerConfig config,
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
+  static std::unique_ptr<TransparentLayer>
+  create(GPUDevice &gpu, TransparentLayerConfig config,
+         std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
     return std::make_unique<TransparentLayer>(gpu, std::move(config), memory);
   }
 
@@ -49,7 +49,8 @@ public:
   void onDetach() override;
   void publishFrameData(RenderFrameContext &frame) override;
   Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
+  buildRenderGraph(RenderFrameContext &frame,
+                   RenderGraphBuilder &graph) override;
 
 private:
   struct FrameData {
@@ -121,15 +122,16 @@ private:
   Result<bool, std::string>
   rebuildMaterialTextureAccessCache(const ResourceManager &resources);
   Result<bool, std::string> collectContributorDraws(RenderFrameContext &frame);
+  Result<bool, std::string> appendTransparentPass(
+      RenderGraphBuilder &graph, TextureHandle depthTexture,
+      RenderGraphTextureId sceneDepthGraphTexture,
+      std::span<const TransparentStageSortableDraw> sortableDraws,
+      std::span<const DrawItem> fixedDraws,
+      std::span<const TextureHandle> textureReads,
+      std::span<const BufferHandle> dependencyBuffers);
   Result<bool, std::string>
-  appendTransparentPass(RenderGraphBuilder &graph, TextureHandle depthTexture,
-                        RenderGraphTextureId sceneDepthGraphTexture,
-                        std::span<const TransparentStageSortableDraw> sortableDraws,
-                        std::span<const DrawItem> fixedDraws,
-                        std::span<const TextureHandle> textureReads,
-                        std::span<const BufferHandle> dependencyBuffers);
-  Result<bool, std::string>
-  appendTransparentPickPass(RenderFrameContext &frame, RenderGraphBuilder &graph);
+  appendTransparentPickPass(RenderFrameContext &frame,
+                            RenderGraphBuilder &graph);
   void collectEnvironmentTextureReads(const RenderScene &scene,
                                       const ResourceManager &resources);
   void resetCachedState();
