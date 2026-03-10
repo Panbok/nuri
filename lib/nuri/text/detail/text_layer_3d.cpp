@@ -10,10 +10,6 @@ std::unique_ptr<TextLayer3D> TextLayer3D::create(const CreateDesc &desc) {
 
 TextLayer3D::TextLayer3D(const CreateDesc &desc) : text_(desc.text) {}
 
-void TextLayer3D::publishFrameData(RenderFrameContext &frame) {
-  frame.transparentStage.registerProducer(this);
-}
-
 Result<bool, std::string>
 TextLayer3D::buildRenderGraph(RenderFrameContext &frame,
                               RenderGraphBuilder &graph) {
