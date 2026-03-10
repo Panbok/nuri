@@ -83,6 +83,7 @@ private:
 
   PushConstants pushConstants_{};
   DrawItem drawItem_{};
+  BufferHandle dependencyBuffer_{};
 };
 
 } // namespace nuri

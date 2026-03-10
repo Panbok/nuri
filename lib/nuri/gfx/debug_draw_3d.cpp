@@ -427,6 +427,7 @@ DebugDraw3D::buildGraphPass(TextureHandle depthTexture) {
       sizeof(pushConstants_));
   drawItem_.debugLabel = "DebugDraw3D Draw";
   drawItem_.debugColor = 0xffffcc00u;
+  dependencyBuffer_ = frameBuffers_[frameIndex].buffer;
   if (nuri::isValid(depthTexture)) {
     drawItem_.useDepthState = true;
     drawItem_.depthState = {
@@ -436,6 +437,8 @@ DebugDraw3D::buildGraphPass(TextureHandle depthTexture) {
   }
 
   pass.desc.draws = std::span<const DrawItem>(&drawItem_, 1u);
+  pass.desc.dependencyBuffers =
+      std::span<const BufferHandle>(&dependencyBuffer_, 1u);
   return Result<PreparedGraphPass, std::string>::makeResult(pass);
 }
 
