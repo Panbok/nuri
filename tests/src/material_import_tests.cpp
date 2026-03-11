@@ -50,7 +50,10 @@ TEST(MaterialImportTests, DamagedHelmetLeavesClearcoatDisabled) {
   const nuri::ImportedMaterialSet &set = result.value();
   ASSERT_FALSE(set.materials.empty());
 
-  for (const nuri::ImportedMaterialInfo &material : set.materials) {
+  for (size_t i = 0; i < set.materials.size(); ++i) {
+    const nuri::ImportedMaterialInfo &material = set.materials[i];
+    SCOPED_TRACE(::testing::Message()
+                 << "material[" << i << "] name=\"" << material.name << "\"");
     EXPECT_FLOAT_EQ(material.clearcoatFactor, 0.0f);
     EXPECT_FLOAT_EQ(material.clearcoatRoughnessFactor, 0.0f);
     EXPECT_FLOAT_EQ(material.clearcoatNormalScale, 1.0f);

@@ -565,6 +565,13 @@ MaterialDesc ResourceManager::materialDescFromImported(
   if (desc.sheenWeight > 0.0f) {
     desc.featureMask |= kMaterialFeatureSheen;
   }
+  const bool hasAnyClearcoatTexture =
+      nuri::isValid(textures.clearcoat) ||
+      nuri::isValid(textures.clearcoatRoughness) ||
+      nuri::isValid(textures.clearcoatNormal);
+  if (desc.clearcoatFactor > 0.0f && hasAnyClearcoatTexture) {
+    desc.featureMask |= kMaterialFeatureClearcoat;
+  }
   desc.textures = textures;
   desc.uvSets = MaterialTextureUvSets{
       .baseColor = imported.baseColor.uvSet,

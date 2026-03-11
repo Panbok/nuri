@@ -10,6 +10,7 @@
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
+#include <limits>
 #if __has_include(<assimp/GltfMaterial.h>)
 #include <assimp/GltfMaterial.h>
 #define NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS 1
@@ -98,6 +99,27 @@ bool tryReadJsonFloat(yyjson_val *value, float &out) {
   return false;
 }
 
+bool tryReadJsonUint32(yyjson_val *value, uint32_t &out) {
+  if (yyjson_is_uint(value)) {
+    const uint64_t raw = yyjson_get_uint(value);
+    if (raw > std::numeric_limits<uint32_t>::max()) {
+      return false;
+    }
+    out = static_cast<uint32_t>(raw);
+    return true;
+  }
+  if (yyjson_is_sint(value)) {
+    const int64_t raw = yyjson_get_sint(value);
+    if (raw < 0 ||
+        raw > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+      return false;
+    }
+    out = static_cast<uint32_t>(raw);
+    return true;
+  }
+  return false;
+}
+
 ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
                                              const std::filesystem::path &path,
                                              yyjson_val *textureInfo,
@@ -110,7 +132,10 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
   if (!yyjson_is_uint(indexValue) && !yyjson_is_sint(indexValue)) {
     return {};
   }
-  const uint32_t textureIndex = yyjson_get_uint(indexValue);
+  uint32_t textureIndex = 0;
+  if (!tryReadJsonUint32(indexValue, textureIndex)) {
+    return {};
+  }
 
   yyjson_val *textures = yyjson_obj_get(root, "textures");
   if (!yyjson_is_arr(textures)) {
@@ -128,12 +153,16 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
   if ((!yyjson_is_uint(sourceValue) && !yyjson_is_sint(sourceValue))) {
     return {};
   }
+  uint32_t sourceIndex = 0;
+  if (!tryReadJsonUint32(sourceValue, sourceIndex)) {
+    return {};
+  }
 
   yyjson_val *images = yyjson_obj_get(root, "images");
   if (!yyjson_is_arr(images)) {
     return {};
   }
-  yyjson_val *imageValue = yyjson_arr_get(images, yyjson_get_uint(sourceValue));
+  yyjson_val *imageValue = yyjson_arr_get(images, sourceIndex);
   if (!yyjson_is_obj(imageValue)) {
     return {};
   }
@@ -153,11 +182,12 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
 
   ImportedMaterialTexture texture{};
   texture.path = normalizeExternalTexturePath(path, uri);
-  if ((yyjson_is_uint(texCoordValue) || yyjson_is_sint(texCoordValue))) {
-    texture.uvSet = yyjson_get_uint(texCoordValue);
+  if (uint32_t uvSet = 0; tryReadJsonUint32(texCoordValue, uvSet)) {
+    texture.uvSet = uvSet;
   }
-  if ((yyjson_is_uint(samplerValue) || yyjson_is_sint(samplerValue))) {
-    texture.samplerIndex = yyjson_get_uint(samplerValue);
+  if (uint32_t samplerIndex = 0;
+      tryReadJsonUint32(samplerValue, samplerIndex)) {
+    texture.samplerIndex = samplerIndex;
   }
   if (scale != nullptr) {
     (void)tryReadJsonFloat(scaleValue, *scale);

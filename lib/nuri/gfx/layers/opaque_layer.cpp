@@ -3532,11 +3532,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
   } else {
     loggedMaterialFallbackWarning_ = false;
   }
-  if (skippedBlendSubmeshCount > 0u) {
-    loggedBlendMaterialUnsupportedWarning_ = false;
-  } else {
-    loggedBlendMaterialUnsupportedWarning_ = false;
-  }
+  loggedBlendMaterialUnsupportedWarning_ = false;
 
   cachedScene_ = &scene;
   cachedTopologyVersion_ = scene.topologyVersion();
