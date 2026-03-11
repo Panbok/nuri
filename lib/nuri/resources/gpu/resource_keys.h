@@ -79,8 +79,8 @@ struct MaterialKeyHash {
   }
 };
 
-[[nodiscard]] inline std::string canonicalizeResourcePath(
-    std::string_view inputPath) {
+[[nodiscard]] inline std::string
+canonicalizeResourcePath(std::string_view inputPath) {
   if (inputPath.empty()) {
     return {};
   }
@@ -102,8 +102,8 @@ struct MaterialKeyHash {
   return path;
 }
 
-[[nodiscard]] inline uint64_t hashTextureLoadOptions(
-    const TextureLoadOptions &options) {
+[[nodiscard]] inline uint64_t
+hashTextureLoadOptions(const TextureLoadOptions &options) {
   uint64_t hash = 1469598103934665603ull;
   const auto mix = [&hash](uint64_t value) {
     hash ^= value;
@@ -114,8 +114,8 @@ struct MaterialKeyHash {
   return hash;
 }
 
-[[nodiscard]] inline uint64_t hashModelImportOptions(
-    const MeshImportOptions &options) {
+[[nodiscard]] inline uint64_t
+hashModelImportOptions(const MeshImportOptions &options) {
   return hashMeshImportOptions(options);
 }
 
@@ -145,12 +145,16 @@ struct MaterialKeyHash {
   mixFloat(desc.sheenColorFactor.z);
   mixFloat(desc.sheenWeight);
   mixFloat(desc.sheenRoughnessFactor);
+  mixFloat(desc.clearcoatFactor);
+  mixFloat(desc.clearcoatRoughnessFactor);
+  mixFloat(desc.clearcoatNormalScale);
   mixFloat(desc.normalScale);
   mixFloat(desc.occlusionStrength);
   mixFloat(desc.alphaCutoff);
 
   mix(desc.doubleSided ? 1ull : 0ull);
   mix(static_cast<uint64_t>(desc.alphaMode));
+  mix(desc.featureMask);
 
   mix(desc.textures.baseColor.index);
   mix(desc.textures.baseColor.generation);
@@ -162,18 +166,30 @@ struct MaterialKeyHash {
   mix(desc.textures.occlusion.generation);
   mix(desc.textures.emissive.index);
   mix(desc.textures.emissive.generation);
+  mix(desc.textures.clearcoat.index);
+  mix(desc.textures.clearcoat.generation);
+  mix(desc.textures.clearcoatRoughness.index);
+  mix(desc.textures.clearcoatRoughness.generation);
+  mix(desc.textures.clearcoatNormal.index);
+  mix(desc.textures.clearcoatNormal.generation);
 
   mix(desc.uvSets.baseColor);
   mix(desc.uvSets.metallicRoughness);
   mix(desc.uvSets.normal);
   mix(desc.uvSets.occlusion);
   mix(desc.uvSets.emissive);
+  mix(desc.uvSets.clearcoat);
+  mix(desc.uvSets.clearcoatRoughness);
+  mix(desc.uvSets.clearcoatNormal);
 
   mix(desc.samplers.baseColor);
   mix(desc.samplers.metallicRoughness);
   mix(desc.samplers.normal);
   mix(desc.samplers.occlusion);
   mix(desc.samplers.emissive);
+  mix(desc.samplers.clearcoat);
+  mix(desc.samplers.clearcoatRoughness);
+  mix(desc.samplers.clearcoatNormal);
 
   return hash;
 }

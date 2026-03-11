@@ -73,6 +73,215 @@ firstAvailableTextureSlot(const aiMaterial &material,
   return {};
 }
 
+bool hasExtension(std::string_view path, std::string_view extension) {
+  const std::filesystem::path fsPath(path);
+  return fsPath.has_extension() && fsPath.extension().string() == extension;
+}
+
+bool isUnsupportedGltfImageUri(std::string_view uri) {
+  return uri.empty() || uri.starts_with("data:");
+}
+
+bool tryReadJsonFloat(yyjson_val *value, float &out) {
+  if (yyjson_is_uint(value)) {
+    out = static_cast<float>(yyjson_get_uint(value));
+    return true;
+  }
+  if (yyjson_is_sint(value)) {
+    out = static_cast<float>(yyjson_get_sint(value));
+    return true;
+  }
+  if (yyjson_is_real(value) || yyjson_is_num(value)) {
+    out = static_cast<float>(yyjson_get_real(value));
+    return true;
+  }
+  return false;
+}
+
+ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
+                                             const std::filesystem::path &path,
+                                             yyjson_val *textureInfo,
+                                             float *scale = nullptr) {
+  if (!yyjson_is_obj(textureInfo)) {
+    return {};
+  }
+
+  yyjson_val *indexValue = yyjson_obj_get(textureInfo, "index");
+  if (!yyjson_is_uint(indexValue) && !yyjson_is_sint(indexValue)) {
+    return {};
+  }
+  const uint32_t textureIndex = yyjson_get_uint(indexValue);
+
+  yyjson_val *textures = yyjson_obj_get(root, "textures");
+  if (!yyjson_is_arr(textures)) {
+    return {};
+  }
+  yyjson_val *textureValue = yyjson_arr_get(textures, textureIndex);
+  if (!yyjson_is_obj(textureValue)) {
+    return {};
+  }
+
+  yyjson_val *texCoordValue = yyjson_obj_get(textureInfo, "texCoord");
+  yyjson_val *samplerValue = yyjson_obj_get(textureValue, "sampler");
+  yyjson_val *scaleValue = yyjson_obj_get(textureInfo, "scale");
+  yyjson_val *sourceValue = yyjson_obj_get(textureValue, "source");
+  if ((!yyjson_is_uint(sourceValue) && !yyjson_is_sint(sourceValue))) {
+    return {};
+  }
+
+  yyjson_val *images = yyjson_obj_get(root, "images");
+  if (!yyjson_is_arr(images)) {
+    return {};
+  }
+  yyjson_val *imageValue = yyjson_arr_get(images, yyjson_get_uint(sourceValue));
+  if (!yyjson_is_obj(imageValue)) {
+    return {};
+  }
+
+  yyjson_val *uriValue = yyjson_obj_get(imageValue, "uri");
+  if (!yyjson_is_str(uriValue)) {
+    return {};
+  }
+  const char *uriRaw = yyjson_get_str(uriValue);
+  if (uriRaw == nullptr) {
+    return {};
+  }
+  const std::string_view uri(uriRaw);
+  if (isUnsupportedGltfImageUri(uri)) {
+    return {};
+  }
+
+  ImportedMaterialTexture texture{};
+  texture.path = normalizeExternalTexturePath(path, uri);
+  if ((yyjson_is_uint(texCoordValue) || yyjson_is_sint(texCoordValue))) {
+    texture.uvSet = yyjson_get_uint(texCoordValue);
+  }
+  if ((yyjson_is_uint(samplerValue) || yyjson_is_sint(samplerValue))) {
+    texture.samplerIndex = yyjson_get_uint(samplerValue);
+  }
+  if (scale != nullptr) {
+    (void)tryReadJsonFloat(scaleValue, *scale);
+  }
+  return texture;
+}
+
+void resetClearcoatState(ImportedMaterialInfo &material) {
+  material.clearcoatFactor = 0.0f;
+  material.clearcoatRoughnessFactor = 0.0f;
+  material.clearcoatNormalScale = 1.0f;
+  material.clearcoat = ImportedMaterialTexture{};
+  material.clearcoatRoughness = ImportedMaterialTexture{};
+  material.clearcoatNormal = ImportedMaterialTexture{};
+}
+
+Result<bool, std::string> overlayClearcoatFromGltf(std::string_view path,
+                                                   ImportedMaterialSet &set) {
+  const std::filesystem::path modelPath(path);
+  std::ifstream file(modelPath, std::ios::binary);
+  if (!file.is_open()) {
+    return Result<bool, std::string>::makeError(
+        "Failed to open glTF for clearcoat overlay");
+  }
+
+  std::ostringstream jsonStream;
+  jsonStream << file.rdbuf();
+  std::string jsonText = jsonStream.str();
+  yyjson_read_err parseError{};
+  yyjson_doc *rawDoc = yyjson_read_opts(jsonText.data(), jsonText.size(), 0,
+                                        nullptr, &parseError);
+  if (rawDoc == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "yyjson parse failed at offset " + std::to_string(parseError.pos));
+  }
+  std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> doc(rawDoc,
+                                                              &yyjson_doc_free);
+  yyjson_val *root = yyjson_doc_get_root(doc.get());
+  if (!yyjson_is_obj(root)) {
+    return Result<bool, std::string>::makeError(
+        "glTF root is not a JSON object");
+  }
+
+  yyjson_val *materials = yyjson_obj_get(root, "materials");
+  if (!yyjson_is_arr(materials)) {
+    return Result<bool, std::string>::makeError(
+        "glTF materials array is missing");
+  }
+
+  const size_t materialCount = yyjson_arr_size(materials);
+  if (materialCount > set.materials.size()) {
+    return Result<bool, std::string>::makeError(
+        "glTF material count exceeds Assimp material count");
+  }
+
+  const size_t materialOffset = set.materials.size() - materialCount;
+  if (materialOffset > 0u) {
+    NURI_LOG_WARNING(
+        "MeshImporter::loadMaterialInfoFromFile: Assimp reported %zu extra "
+        "material(s) for '%s'; applying clearcoat overlay to trailing subset",
+        materialOffset, std::string(path).c_str());
+  }
+
+  for (ImportedMaterialInfo &material : set.materials) {
+    resetClearcoatState(material);
+  }
+
+  for (size_t materialIndex = 0; materialIndex < materialCount;
+       ++materialIndex) {
+    yyjson_val *materialValue = yyjson_arr_get(materials, materialIndex);
+    if (!yyjson_is_obj(materialValue)) {
+      continue;
+    }
+
+    size_t targetIndex = materialIndex + materialOffset;
+    yyjson_val *materialNameValue = yyjson_obj_get(materialValue, "name");
+    if (yyjson_is_str(materialNameValue)) {
+      const char *materialNameRaw = yyjson_get_str(materialNameValue);
+      if (materialNameRaw != nullptr) {
+        const std::string_view materialName(materialNameRaw);
+        auto it =
+            std::find_if(set.materials.begin(), set.materials.end(),
+                         [materialName](const ImportedMaterialInfo &candidate) {
+                           return candidate.name == materialName;
+                         });
+        if (it != set.materials.end()) {
+          targetIndex = static_cast<size_t>(it - set.materials.begin());
+        }
+      }
+    }
+
+    ImportedMaterialInfo &material = set.materials[targetIndex];
+    yyjson_val *extensions = yyjson_obj_get(materialValue, "extensions");
+    if (!yyjson_is_obj(extensions)) {
+      continue;
+    }
+    yyjson_val *clearcoatExt =
+        yyjson_obj_get(extensions, "KHR_materials_clearcoat");
+    if (!yyjson_is_obj(clearcoatExt)) {
+      continue;
+    }
+
+    yyjson_val *clearcoatFactorValue =
+        yyjson_obj_get(clearcoatExt, "clearcoatFactor");
+    (void)tryReadJsonFloat(clearcoatFactorValue, material.clearcoatFactor);
+
+    yyjson_val *clearcoatRoughnessFactorValue =
+        yyjson_obj_get(clearcoatExt, "clearcoatRoughnessFactor");
+    (void)tryReadJsonFloat(clearcoatRoughnessFactorValue,
+                           material.clearcoatRoughnessFactor);
+
+    material.clearcoat = parseGltfTextureSlot(
+        root, modelPath, yyjson_obj_get(clearcoatExt, "clearcoatTexture"));
+    material.clearcoatRoughness = parseGltfTextureSlot(
+        root, modelPath,
+        yyjson_obj_get(clearcoatExt, "clearcoatRoughnessTexture"));
+    material.clearcoatNormal = parseGltfTextureSlot(
+        root, modelPath, yyjson_obj_get(clearcoatExt, "clearcoatNormalTexture"),
+        &material.clearcoatNormalScale);
+  }
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
 ImportedMaterialInfo parseMaterial(const aiMaterial &material,
                                    const std::filesystem::path &modelPath) {
   ImportedMaterialInfo parsed{};
@@ -722,6 +931,20 @@ MeshImporter::loadMaterialInfoFromFile(std::string_view path) {
       parsed.name = "material_" + std::to_string(materialIndex);
     }
     set.materials.push_back(std::move(parsed));
+  }
+
+  if (hasExtension(path, ".gltf")) {
+    auto clearcoatOverlayResult = overlayClearcoatFromGltf(path, set);
+    if (clearcoatOverlayResult.hasError()) {
+      NURI_LOG_WARNING(
+          "MeshImporter::loadMaterialInfoFromFile: clearcoat glTF overlay "
+          "skipped for '%s': %s",
+          pathStr.c_str(), clearcoatOverlayResult.error().c_str());
+    }
+  } else if (hasExtension(path, ".glb")) {
+    NURI_LOG_WARNING("MeshImporter::loadMaterialInfoFromFile: .glb clearcoat "
+                     "fallback is unsupported for '%s'; relying on Assimp only",
+                     pathStr.c_str());
   }
 
   NURI_LOG_DEBUG("MeshImporter::loadMaterialInfoFromFile: extracted %zu "

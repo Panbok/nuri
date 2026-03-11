@@ -20,6 +20,9 @@ const uint kFrameDataFlagHasIblSpecular = 1u << 1u;
 const uint kFrameDataFlagHasIblSheen = 1u << 2u;
 const uint kFrameDataFlagHasBrdfLut = 1u << 3u;
 const uint kFrameDataFlagOutputLinearToSrgb = 1u << 4u;
+const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
+const uint kMaterialFeatureSheen = 1u << 1u;
+const uint kMaterialFeatureClearcoat = 1u << 2u;
 
 struct PackedVertex {
   // CPU packs each vertex into 9 x 32-bit words:
@@ -57,13 +60,14 @@ struct MaterialGpuData {
   vec4 emissiveFactorNormalScale;
   vec4 metallicRoughnessOcclusionAlphaCutoff;
   vec4 sheenColorFactorWeight;
-  vec4 sheenRoughnessReserved;
+  vec4 sheenRoughnessClearcoatFactors;
   uvec4 textureIndices0;
   uvec4 textureIndices1;
   uvec4 textureUvSets0;
   uvec4 textureUvSets1;
   uvec4 textureSamplerIndices0;
   uvec4 textureSamplerIndices1;
+  uvec4 materialFlags;
 };
 
 layout(std430, buffer_reference) readonly buffer MaterialBuffer {

@@ -41,6 +41,9 @@ struct NURI_API MaterialRequest {
     TextureRef normal = kInvalidTextureRef;
     TextureRef occlusion = kInvalidTextureRef;
     TextureRef emissive = kInvalidTextureRef;
+    TextureRef clearcoat = kInvalidTextureRef;
+    TextureRef clearcoatRoughness = kInvalidTextureRef;
+    TextureRef clearcoatNormal = kInvalidTextureRef;
   } textureRefs{};
   std::string debugName{};
   std::string sourceIdentity{};

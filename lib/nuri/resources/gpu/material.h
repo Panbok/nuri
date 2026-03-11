@@ -20,12 +20,22 @@ inline constexpr uint32_t kInvalidTextureBindlessIndex =
 inline constexpr uint32_t kInvalidMaterialIndex =
     std::numeric_limits<uint32_t>::max();
 
+enum MaterialFeatureBits : uint32_t {
+  kMaterialFeatureNone = 0u,
+  kMaterialFeatureMetallicRoughness = 1u << 0u,
+  kMaterialFeatureSheen = 1u << 1u,
+  kMaterialFeatureClearcoat = 1u << 2u,
+};
+
 struct MaterialTextureHandles {
   TextureHandle baseColor{};
   TextureHandle metallicRoughness{};
   TextureHandle normal{};
   TextureHandle occlusion{};
   TextureHandle emissive{};
+  TextureHandle clearcoat{};
+  TextureHandle clearcoatRoughness{};
+  TextureHandle clearcoatNormal{};
 };
 
 struct MaterialTextureUvSets {
@@ -34,6 +44,9 @@ struct MaterialTextureUvSets {
   uint32_t normal = 0;
   uint32_t occlusion = 0;
   uint32_t emissive = 0;
+  uint32_t clearcoat = 0;
+  uint32_t clearcoatRoughness = 0;
+  uint32_t clearcoatNormal = 0;
 };
 
 struct MaterialTextureSamplers {
@@ -42,6 +55,9 @@ struct MaterialTextureSamplers {
   uint32_t normal = 0;
   uint32_t occlusion = 0;
   uint32_t emissive = 0;
+  uint32_t clearcoat = 0;
+  uint32_t clearcoatRoughness = 0;
+  uint32_t clearcoatNormal = 0;
 };
 
 struct MaterialDesc {
@@ -52,11 +68,15 @@ struct MaterialDesc {
   glm::vec3 sheenColorFactor{1.0f, 1.0f, 1.0f};
   float sheenWeight = 0.0f;
   float sheenRoughnessFactor = 0.0f;
+  float clearcoatFactor = 0.0f;
+  float clearcoatRoughnessFactor = 0.0f;
+  float clearcoatNormalScale = 1.0f;
   float normalScale = 1.0f;
   float occlusionStrength = 1.0f;
   float alphaCutoff = 0.5f;
   bool doubleSided = false;
   MaterialAlphaMode alphaMode = MaterialAlphaMode::Opaque;
+  uint32_t featureMask = kMaterialFeatureMetallicRoughness;
   MaterialTextureHandles textures{};
   MaterialTextureUvSets uvSets{};
   MaterialTextureSamplers samplers{};
@@ -68,17 +88,19 @@ struct alignas(16) MaterialGpuData {
   glm::vec4 emissiveFactorNormalScale{0.0f, 0.0f, 0.0f, 1.0f};
   glm::vec4 metallicRoughnessOcclusionAlphaCutoff{1.0f, 1.0f, 1.0f, 0.5f};
   glm::vec4 sheenColorFactorWeight{1.0f, 1.0f, 1.0f, 0.0f};
-  glm::vec4 sheenRoughnessReserved{0.0f, 0.0f, 0.0f, 0.0f};
+  glm::vec4 sheenRoughnessClearcoatFactors{0.0f, 0.0f, 0.0f, 1.0f};
   glm::uvec4 textureIndices0{
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex};
-  glm::uvec4 textureIndices1{kInvalidTextureBindlessIndex,
-                             static_cast<uint32_t>(MaterialAlphaMode::Opaque),
-                             0u, 0u};
+  glm::uvec4 textureIndices1{
+      kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
+      kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex};
   glm::uvec4 textureUvSets0{0u, 0u, 0u, 0u};
   glm::uvec4 textureUvSets1{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices0{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices1{0u, 0u, 0u, 0u};
+  glm::uvec4 materialFlags{static_cast<uint32_t>(MaterialAlphaMode::Opaque), 0u,
+                           kMaterialFeatureMetallicRoughness, 0u};
 };
 static_assert(sizeof(MaterialGpuData) % 16u == 0u,
               "MaterialGpuData must be 16-byte aligned for std430");

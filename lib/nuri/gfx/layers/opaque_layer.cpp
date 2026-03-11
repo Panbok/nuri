@@ -946,9 +946,9 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
               templateEntry.vertexBufferAddress;
 
           const bool sameAsCached =
-              hasCachedGeometry && isSameGeometryAllocationHandle(
-                                       templateEntry.geometryHandle,
-                                       cachedHandle);
+              hasCachedGeometry &&
+              isSameGeometryAllocationHandle(templateEntry.geometryHandle,
+                                             cachedHandle);
           if (sameAsCached) {
             templateEntry.indexBuffer = cachedIndexBuffer;
             templateEntry.indexBufferOffset = cachedIndexBufferOffset;
@@ -2319,6 +2319,8 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
     }
 
     if (pass.isPickPass) {
+      frame.channels.publish<RenderGraphTextureId>(
+          kFrameChannelOpaquePickGraphTexture, passDesc.colorTexture);
       const Format pickDepthFormat =
           nuri::isValid(pass.depthTextureHandle)
               ? gpu_.getTextureFormat(pass.depthTextureHandle)
@@ -2347,6 +2349,8 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
         return Result<bool, std::string>::makeError(
             bindPickDepthResult.error());
       }
+      frame.channels.publish<RenderGraphTextureId>(
+          kFrameChannelOpaquePickDepthGraphTexture, pickDepthResult.value());
     }
 
     if (pass.isMainPass && nuri::isValid(pass.depthTextureHandle)) {
@@ -3529,13 +3533,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
     loggedMaterialFallbackWarning_ = false;
   }
   if (skippedBlendSubmeshCount > 0u) {
-    if (!loggedBlendMaterialUnsupportedWarning_) {
-      NURI_LOG_WARNING(
-          "OpaqueLayer::rebuildSceneCache: skipped %zu alpha-blend submesh "
-          "draw(s); transparent materials require a dedicated pass",
-          skippedBlendSubmeshCount);
-      loggedBlendMaterialUnsupportedWarning_ = true;
-    }
+    loggedBlendMaterialUnsupportedWarning_ = false;
   } else {
     loggedBlendMaterialUnsupportedWarning_ = false;
   }
@@ -3587,12 +3585,15 @@ Result<bool, std::string> OpaqueLayer::rebuildMaterialTextureAccessCache(
       continue;
     }
 
-    const std::array<TextureRef, 5> refs = {
+    const std::array<TextureRef, 8> refs = {
         materialRecord->textureRefs.baseColor,
         materialRecord->textureRefs.metallicRoughness,
         materialRecord->textureRefs.normal,
         materialRecord->textureRefs.occlusion,
         materialRecord->textureRefs.emissive,
+        materialRecord->textureRefs.clearcoat,
+        materialRecord->textureRefs.clearcoatRoughness,
+        materialRecord->textureRefs.clearcoatNormal,
     };
     for (const TextureRef ref : refs) {
       const TextureRecord *record = resources.tryGet(ref);

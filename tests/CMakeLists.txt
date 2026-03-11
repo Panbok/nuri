@@ -153,3 +153,9 @@ nuri_add_gtest_suite(
   src/render_graph_telemetry_tests.cpp
   "telemetry::"
 )
+
+nuri_add_gtest_suite(
+  nuri_material_import_tests
+  src/material_import_tests.cpp
+  "material_import::"
+)

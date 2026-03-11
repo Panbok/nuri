@@ -36,6 +36,10 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
   const float sheenWeight = std::clamp(desc.sheenWeight, 0.0f, 1.0f);
   const float sheenRoughness =
       std::clamp(desc.sheenRoughnessFactor, 0.0f, 1.0f);
+  const float clearcoat = std::clamp(desc.clearcoatFactor, 0.0f, 1.0f);
+  const float clearcoatRoughness =
+      std::clamp(desc.clearcoatRoughnessFactor, 0.0f, 1.0f);
+  const uint32_t featureMask = desc.featureMask;
 
   MaterialGpuData gpuData{};
   gpuData.baseColorFactor = desc.baseColorFactor;
@@ -45,7 +49,8 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
       glm::vec4(metallic, roughness, occlusion, alphaCutoff);
   gpuData.sheenColorFactorWeight =
       glm::vec4(desc.sheenColorFactor, sheenWeight);
-  gpuData.sheenRoughnessReserved = glm::vec4(sheenRoughness, 0.0f, 0.0f, 0.0f);
+  gpuData.sheenRoughnessClearcoatFactors = glm::vec4(
+      sheenRoughness, clearcoat, clearcoatRoughness, desc.clearcoatNormalScale);
 
   auto baseColorIdx =
       resolveBindlessIndex(gpu, desc.textures.baseColor, "baseColor");
@@ -74,24 +79,48 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
   if (emissiveIdx.hasError()) {
     return Result<MaterialGpuData, std::string>::makeError(emissiveIdx.error());
   }
+  auto clearcoatIdx =
+      resolveBindlessIndex(gpu, desc.textures.clearcoat, "clearcoat");
+  if (clearcoatIdx.hasError()) {
+    return Result<MaterialGpuData, std::string>::makeError(
+        clearcoatIdx.error());
+  }
+  auto clearcoatRoughnessIdx = resolveBindlessIndex(
+      gpu, desc.textures.clearcoatRoughness, "clearcoatRoughness");
+  if (clearcoatRoughnessIdx.hasError()) {
+    return Result<MaterialGpuData, std::string>::makeError(
+        clearcoatRoughnessIdx.error());
+  }
+  auto clearcoatNormalIdx = resolveBindlessIndex(
+      gpu, desc.textures.clearcoatNormal, "clearcoatNormal");
+  if (clearcoatNormalIdx.hasError()) {
+    return Result<MaterialGpuData, std::string>::makeError(
+        clearcoatNormalIdx.error());
+  }
 
   gpuData.textureIndices0 =
       glm::uvec4(baseColorIdx.value(), metallicRoughnessIdx.value(),
                  normalIdx.value(), occlusionIdx.value());
   gpuData.textureIndices1 =
-      glm::uvec4(emissiveIdx.value(), static_cast<uint32_t>(desc.alphaMode),
-                 desc.doubleSided ? 1u : 0u, 0u);
+      glm::uvec4(emissiveIdx.value(), clearcoatIdx.value(),
+                 clearcoatRoughnessIdx.value(), clearcoatNormalIdx.value());
   gpuData.textureUvSets0 = glm::uvec4(clampUvSet(desc.uvSets.baseColor),
                                       clampUvSet(desc.uvSets.metallicRoughness),
                                       clampUvSet(desc.uvSets.normal),
                                       clampUvSet(desc.uvSets.occlusion));
-  gpuData.textureUvSets1 =
-      glm::uvec4(clampUvSet(desc.uvSets.emissive), 0u, 0u, 0u);
+  gpuData.textureUvSets1 = glm::uvec4(
+      clampUvSet(desc.uvSets.emissive), clampUvSet(desc.uvSets.clearcoat),
+      clampUvSet(desc.uvSets.clearcoatRoughness),
+      clampUvSet(desc.uvSets.clearcoatNormal));
   gpuData.textureSamplerIndices0 =
       glm::uvec4(desc.samplers.baseColor, desc.samplers.metallicRoughness,
                  desc.samplers.normal, desc.samplers.occlusion);
-  gpuData.textureSamplerIndices1 =
-      glm::uvec4(desc.samplers.emissive, 0u, 0u, 0u);
+  gpuData.textureSamplerIndices1 = glm::uvec4(
+      desc.samplers.emissive, desc.samplers.clearcoat,
+      desc.samplers.clearcoatRoughness, desc.samplers.clearcoatNormal);
+  gpuData.materialFlags =
+      glm::uvec4(static_cast<uint32_t>(desc.alphaMode),
+                 desc.doubleSided ? 1u : 0u, featureMask, 0u);
   return Result<MaterialGpuData, std::string>::makeResult(gpuData);
 }
 
@@ -124,11 +153,24 @@ Material::createFromImported(GPUDevice &gpu, const MaterialData &materialData,
   desc.sheenColorFactor = materialData.sheenColorFactor;
   desc.sheenWeight = materialData.sheenWeight;
   desc.sheenRoughnessFactor = materialData.sheenRoughnessFactor;
+  desc.clearcoatFactor = materialData.clearcoatFactor;
+  desc.clearcoatRoughnessFactor = materialData.clearcoatRoughnessFactor;
+  desc.clearcoatNormalScale = materialData.clearcoatNormalScale;
   desc.normalScale = materialData.normalScale;
   desc.occlusionStrength = materialData.occlusionStrength;
   desc.alphaCutoff = materialData.alphaCutoff;
   desc.doubleSided = materialData.doubleSided;
   desc.alphaMode = materialData.alphaMode;
+  desc.featureMask = kMaterialFeatureMetallicRoughness;
+  if (desc.sheenWeight > 0.0f) {
+    desc.featureMask |= kMaterialFeatureSheen;
+  }
+  if (desc.clearcoatFactor > 0.0f &&
+      (nuri::isValid(textures.clearcoat) ||
+       nuri::isValid(textures.clearcoatRoughness) ||
+       nuri::isValid(textures.clearcoatNormal))) {
+    desc.featureMask |= kMaterialFeatureClearcoat;
+  }
   desc.textures = textures;
   desc.uvSets = MaterialTextureUvSets{
       .baseColor = materialData.baseColor.uvSet,
@@ -136,6 +178,9 @@ Material::createFromImported(GPUDevice &gpu, const MaterialData &materialData,
       .normal = materialData.normal.uvSet,
       .occlusion = materialData.occlusion.uvSet,
       .emissive = materialData.emissive.uvSet,
+      .clearcoat = materialData.clearcoat.uvSet,
+      .clearcoatRoughness = materialData.clearcoatRoughness.uvSet,
+      .clearcoatNormal = materialData.clearcoatNormal.uvSet,
   };
   desc.samplers = MaterialTextureSamplers{
       .baseColor = materialData.baseColor.samplerIndex,
@@ -143,6 +188,9 @@ Material::createFromImported(GPUDevice &gpu, const MaterialData &materialData,
       .normal = materialData.normal.samplerIndex,
       .occlusion = materialData.occlusion.samplerIndex,
       .emissive = materialData.emissive.samplerIndex,
+      .clearcoat = materialData.clearcoat.samplerIndex,
+      .clearcoatRoughness = materialData.clearcoatRoughness.samplerIndex,
+      .clearcoatNormal = materialData.clearcoatNormal.samplerIndex,
   };
 
   const std::string_view name =

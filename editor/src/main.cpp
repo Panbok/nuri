@@ -33,6 +33,8 @@ enum class ScenePreset : uint8_t {
   InstancedDuck32K,
   BistroExterior,
   DamagedHelmet,
+  ClearcoatWicker,
+  SheenChair,
   Text3DTest,
 };
 
@@ -54,11 +56,16 @@ constexpr std::string_view kBistroExteriorAbsolutePath =
     "E:/install/nuri/assets/models/bistro/exterior/exterior.obj";
 constexpr std::string_view kDamagedHelmetModelRelativePath =
     "DamagedHelmet/DamagedHelmet.gltf";
+constexpr std::string_view kClearcoatWickerModelRelativePath =
+    "ClearcoatWicker/ClearcoatWicker.gltf";
+constexpr std::string_view kSheenChairModelRelativePath =
+    "SheenChair/SheenChair.gltf";
 constexpr float kBistroTargetRadius = 120.0f;
 constexpr float kBistroMinScale = 0.0005f;
 constexpr float kBistroMaxScale = 2.0f;
 constexpr const char *kScenePresetNames[] = {
-    "Single Duck", "Instanced Duck 32K", "Bistro Exterior", "Damaged Helmet",
+    "Single Duck",    "Instanced Duck 32K", "Bistro Exterior",
+    "Damaged Helmet", "Clearcoat Wicker",   "Sheen Chair",
     "Text 3D Test"};
 
 int scenePresetToIndex(ScenePreset preset) {
@@ -71,8 +78,12 @@ int scenePresetToIndex(ScenePreset preset) {
     return 2;
   case ScenePreset::DamagedHelmet:
     return 3;
-  case ScenePreset::Text3DTest:
+  case ScenePreset::ClearcoatWicker:
     return 4;
+  case ScenePreset::SheenChair:
+    return 5;
+  case ScenePreset::Text3DTest:
+    return 6;
   }
   return 0;
 }
@@ -88,6 +99,10 @@ ScenePreset scenePresetFromIndex(int index) {
   case 3:
     return ScenePreset::DamagedHelmet;
   case 4:
+    return ScenePreset::ClearcoatWicker;
+  case 5:
+    return ScenePreset::SheenChair;
+  case 6:
     return ScenePreset::Text3DTest;
   default:
     return ScenePreset::SingleDuck;
@@ -785,6 +800,10 @@ private:
         (config_.roots.models / kSampleDuckAlbedoRelativePath).string();
     const std::string helmetModelPath =
         (config_.roots.models / kDamagedHelmetModelRelativePath).string();
+    const std::string clearcoatModelPath =
+        (config_.roots.models / kClearcoatWickerModelRelativePath).string();
+    const std::string sheenChairModelPath =
+        (config_.roots.models / kSheenChairModelRelativePath).string();
     const std::string environmentHdrPath =
         (config_.roots.textures / kSampleEnvironmentHdrRelativePath).string();
 
@@ -825,6 +844,36 @@ private:
     NURI_ASSERT(!helmetModelResult.hasError(),
                 "Failed to create DamagedHelmet model: %s",
                 helmetModelResult.error().c_str());
+
+    auto clearcoatModelResult = resources.acquireModel(nuri::ModelRequest{
+        .path = clearcoatModelPath,
+        .importOptions = helmetImportOptions,
+        .debugName = "clearcoat_wicker",
+    });
+    if (clearcoatModelResult.hasError()) {
+      NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to load "
+                       "ClearcoatWicker model '%s': %s",
+                       clearcoatModelPath.c_str(),
+                       clearcoatModelResult.error().c_str());
+    }
+    NURI_ASSERT(!clearcoatModelResult.hasError(),
+                "Failed to create ClearcoatWicker model: %s",
+                clearcoatModelResult.error().c_str());
+
+    auto sheenChairModelResult = resources.acquireModel(nuri::ModelRequest{
+        .path = sheenChairModelPath,
+        .importOptions = helmetImportOptions,
+        .debugName = "sheen_chair",
+    });
+    if (sheenChairModelResult.hasError()) {
+      NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to load "
+                       "SheenChair model '%s': %s",
+                       sheenChairModelPath.c_str(),
+                       sheenChairModelResult.error().c_str());
+    }
+    NURI_ASSERT(!sheenChairModelResult.hasError(),
+                "Failed to create SheenChair model: %s",
+                sheenChairModelResult.error().c_str());
 
     auto cubemapResult = resources.acquireTexture(nuri::TextureRequest{
         .path = environmentHdrPath,
@@ -1004,6 +1053,8 @@ private:
     }
 
     helmetModel_ = helmetModelResult.value();
+    clearcoatModel_ = clearcoatModelResult.value();
+    sheenChairModel_ = sheenChairModelResult.value();
 
     {
       nuri::MaterialDesc duckMaterialDesc{};
@@ -1055,6 +1106,66 @@ private:
       helmetFallbackMaterialIndex_ = bistroMaterialIndex_;
     }
 
+    auto clearcoatLoadResult =
+        resources.acquireMaterialsFromModel(nuri::ImportedMaterialRequest{
+            .modelPath = clearcoatModelPath,
+            .model = clearcoatModel_,
+            .debugNamePrefix = "clearcoat_wicker",
+        });
+    if (!clearcoatLoadResult.hasError() &&
+        nuri::isValid(clearcoatLoadResult.value().firstMaterial)) {
+      clearcoatMaterial_ = clearcoatLoadResult.value().firstMaterial;
+    } else {
+      if (clearcoatLoadResult.hasError()) {
+        NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to "
+                         "import ClearcoatWicker materials from '%s': %s",
+                         clearcoatModelPath.c_str(),
+                         clearcoatLoadResult.error().c_str());
+      }
+
+      auto fallbackMaterialResult =
+          resources.acquireMaterial(nuri::MaterialRequest{
+              .desc = nuri::MaterialDesc{},
+              .debugName = "clearcoat_wicker_fallback_material",
+          });
+      NURI_ASSERT(!fallbackMaterialResult.hasError(),
+                  "Failed to acquire ClearcoatWicker fallback material: %s",
+                  fallbackMaterialResult.error().c_str());
+      clearcoatMaterial_ = fallbackMaterialResult.value();
+      resources.setModelMaterialForAllSources(clearcoatModel_,
+                                              clearcoatMaterial_);
+    }
+
+    auto sheenChairLoadResult =
+        resources.acquireMaterialsFromModel(nuri::ImportedMaterialRequest{
+            .modelPath = sheenChairModelPath,
+            .model = sheenChairModel_,
+            .debugNamePrefix = "sheen_chair",
+        });
+    if (!sheenChairLoadResult.hasError() &&
+        nuri::isValid(sheenChairLoadResult.value().firstMaterial)) {
+      sheenChairMaterial_ = sheenChairLoadResult.value().firstMaterial;
+    } else {
+      if (sheenChairLoadResult.hasError()) {
+        NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to "
+                         "import SheenChair materials from '%s': %s",
+                         sheenChairModelPath.c_str(),
+                         sheenChairLoadResult.error().c_str());
+      }
+
+      auto fallbackMaterialResult =
+          resources.acquireMaterial(nuri::MaterialRequest{
+              .desc = nuri::MaterialDesc{},
+              .debugName = "sheen_chair_fallback_material",
+          });
+      NURI_ASSERT(!fallbackMaterialResult.hasError(),
+                  "Failed to acquire SheenChair fallback material: %s",
+                  fallbackMaterialResult.error().c_str());
+      sheenChairMaterial_ = fallbackMaterialResult.value();
+      resources.setModelMaterialForAllSources(sheenChairModel_,
+                                              sheenChairMaterial_);
+    }
+
     const nuri::ModelRecord *helmetRecord = resources.tryGet(helmetModel_);
     NURI_ASSERT(helmetRecord != nullptr && helmetRecord->model != nullptr,
                 "DamagedHelmet model record lookup failed");
@@ -1064,6 +1175,27 @@ private:
                   helmetRecord->model->submeshes().size(),
                   helmetRecord->model->vertexCount(),
                   helmetRecord->model->indexCount());
+
+    const nuri::ModelRecord *clearcoatRecord =
+        resources.tryGet(clearcoatModel_);
+    NURI_ASSERT(clearcoatRecord != nullptr && clearcoatRecord->model != nullptr,
+                "ClearcoatWicker model record lookup failed");
+    NURI_LOG_INFO("NuriApplication::loadSceneResources: ClearcoatWicker loaded "
+                  "(submeshes=%zu vertices=%u indices=%u)",
+                  clearcoatRecord->model->submeshes().size(),
+                  clearcoatRecord->model->vertexCount(),
+                  clearcoatRecord->model->indexCount());
+
+    const nuri::ModelRecord *sheenChairRecord =
+        resources.tryGet(sheenChairModel_);
+    NURI_ASSERT(sheenChairRecord != nullptr &&
+                    sheenChairRecord->model != nullptr,
+                "SheenChair model record lookup failed");
+    NURI_LOG_INFO("NuriApplication::loadSceneResources: SheenChair loaded "
+                  "(submeshes=%zu vertices=%u indices=%u)",
+                  sheenChairRecord->model->submeshes().size(),
+                  sheenChairRecord->model->vertexCount(),
+                  sheenChairRecord->model->indexCount());
 
     applyScenePreset(scenePreset_);
   }
@@ -1320,9 +1452,13 @@ private:
 
     releaseRef(duckModel_, nuri::kInvalidModelRef);
     releaseRef(helmetModel_, nuri::kInvalidModelRef);
+    releaseRef(clearcoatModel_, nuri::kInvalidModelRef);
+    releaseRef(sheenChairModel_, nuri::kInvalidModelRef);
     releaseRef(bistroModel_, nuri::kInvalidModelRef);
     releaseRef(duckMaterialIndex_, nuri::kInvalidMaterialRef);
     releaseRef(helmetFallbackMaterialIndex_, nuri::kInvalidMaterialRef);
+    releaseRef(clearcoatMaterial_, nuri::kInvalidMaterialRef);
+    releaseRef(sheenChairMaterial_, nuri::kInvalidMaterialRef);
     releaseRef(bistroMaterialIndex_, nuri::kInvalidMaterialRef);
   }
 
@@ -1405,6 +1541,127 @@ private:
                   perspective.nearPlane, perspective.farPlane);
   }
 
+  void setupClearcoatWickerScene() {
+    nuri::ResourceManager &resources = getRenderer().resources();
+    NURI_ASSERT(nuri::isValid(clearcoatModel_),
+                "ClearcoatWicker model is not loaded");
+    NURI_ASSERT(nuri::isValid(clearcoatMaterial_),
+                "ClearcoatWicker material is not loaded");
+    if (clearcoatRenderableIndex_ != std::numeric_limits<uint32_t>::max()) {
+      return;
+    }
+    const nuri::ModelRecord *clearcoatRecord =
+        resources.tryGet(clearcoatModel_);
+    NURI_ASSERT(clearcoatRecord != nullptr && clearcoatRecord->model != nullptr,
+                "ClearcoatWicker model record lookup failed");
+    const nuri::Model &clearcoatModel = *clearcoatRecord->model;
+
+    renderSettings_.opaque.enableInstanceCompute = false;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.enableTessellation = false;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.meshLodDistanceThresholds =
+        glm::vec3(8.0f, 16.0f, 32.0f);
+    renderSettings_.opaque.enableInstanceAnimation = false;
+
+    const nuri::BoundingBox &bounds = clearcoatModel.bounds();
+    auto addResult = scene_.addOpaqueRenderable(
+        clearcoatModel_, clearcoatMaterial_, clearcoatBaseModel_);
+    NURI_ASSERT(!addResult.hasError(),
+                "Failed to add ClearcoatWicker renderable: %s",
+                addResult.error().c_str());
+    clearcoatRenderableIndex_ = addResult.value();
+
+    const float rawRadius =
+        std::max(0.5f * glm::length(bounds.getSize()), 0.25f);
+    const glm::vec3 center =
+        glm::vec3(clearcoatBaseModel_ * glm::vec4(bounds.getCenter(), 1.0f));
+    const float radius = std::max(0.25f, rawRadius);
+    const float cameraDistance = std::max(radius * 2.4f, 2.0f);
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    nuri::PerspectiveParams perspective = camera->perspective();
+    perspective.nearPlane = std::max(0.01f, cameraDistance / 3000.0f);
+    perspective.farPlane = std::max(500.0f, cameraDistance + radius * 12.0f);
+    camera->setProjectionType(nuri::ProjectionType::Perspective);
+    camera->setPerspective(perspective);
+    camera->setLookAt(center + glm::vec3(-cameraDistance * 0.28f,
+                                         radius * 0.12f + 0.15f,
+                                         -cameraDistance),
+                      center + glm::vec3(0.0f, radius * 0.03f, 0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
+    nuri::syncCameraControllerWidgetStateFromCamera(*camera,
+                                                    cameraWidgetState_);
+    NURI_LOG_INFO("NuriApplication: ClearcoatWicker scene stats submeshes=%zu "
+                  "vertices=%u indices=%u rawRadius=%.2f radius=%.2f "
+                  "near=%.3f far=%.2f",
+                  clearcoatModel.submeshes().size(),
+                  clearcoatModel.vertexCount(), clearcoatModel.indexCount(),
+                  rawRadius, radius, perspective.nearPlane,
+                  perspective.farPlane);
+  }
+
+  void setupSheenChairScene() {
+    nuri::ResourceManager &resources = getRenderer().resources();
+    NURI_ASSERT(nuri::isValid(sheenChairModel_),
+                "SheenChair model is not loaded");
+    NURI_ASSERT(nuri::isValid(sheenChairMaterial_),
+                "SheenChair material is not loaded");
+    if (sheenChairRenderableIndex_ != std::numeric_limits<uint32_t>::max()) {
+      return;
+    }
+    const nuri::ModelRecord *sheenChairRecord = resources.tryGet(sheenChairModel_);
+    NURI_ASSERT(sheenChairRecord != nullptr &&
+                    sheenChairRecord->model != nullptr,
+                "SheenChair model record lookup failed");
+    const nuri::Model &sheenChairModel = *sheenChairRecord->model;
+
+    renderSettings_.opaque.enableInstanceCompute = false;
+    renderSettings_.opaque.enableMeshLod = true;
+    renderSettings_.opaque.enableTessellation = false;
+    renderSettings_.opaque.forcedMeshLod = -1;
+    renderSettings_.opaque.meshLodDistanceThresholds =
+        glm::vec3(6.0f, 12.0f, 24.0f);
+    renderSettings_.opaque.enableInstanceAnimation = false;
+
+    const nuri::BoundingBox &bounds = sheenChairModel.bounds();
+    auto addResult = scene_.addOpaqueRenderable(
+        sheenChairModel_, sheenChairMaterial_, glm::mat4(1.0f));
+    NURI_ASSERT(!addResult.hasError(),
+                "Failed to add SheenChair renderable: %s",
+                addResult.error().c_str());
+    sheenChairRenderableIndex_ = addResult.value();
+
+    const float rawRadius =
+        std::max(0.5f * glm::length(bounds.getSize()), 0.25f);
+    const glm::vec3 center = bounds.getCenter();
+    const float radius = std::max(0.25f, rawRadius);
+    const float cameraDistance = std::max(radius * 2.5f, 2.0f);
+
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+    nuri::PerspectiveParams perspective = camera->perspective();
+    perspective.nearPlane = std::max(0.01f, cameraDistance / 3000.0f);
+    perspective.farPlane = std::max(500.0f, cameraDistance + radius * 12.0f);
+    camera->setProjectionType(nuri::ProjectionType::Perspective);
+    camera->setPerspective(perspective);
+    camera->setLookAt(center + glm::vec3(-cameraDistance * 0.52f,
+                                         radius * 0.52f,
+                                         -cameraDistance),
+                      center + glm::vec3(0.0f, radius * 0.1f, 0.0f),
+                      glm::vec3(0.0f, 1.0f, 0.0f));
+    nuri::syncCameraControllerWidgetStateFromCamera(*camera,
+                                                    cameraWidgetState_);
+    NURI_LOG_INFO("NuriApplication: SheenChair scene stats submeshes=%zu "
+                  "vertices=%u indices=%u rawRadius=%.2f radius=%.2f "
+                  "near=%.3f far=%.2f",
+                  sheenChairModel.submeshes().size(),
+                  sheenChairModel.vertexCount(), sheenChairModel.indexCount(),
+                  rawRadius, radius, perspective.nearPlane,
+                  perspective.farPlane);
+  }
+
   void applyScenePreset(ScenePreset preset) {
     NURI_ASSERT(nuri::isValid(duckModel_), "Duck model is not loaded");
     NURI_ASSERT(nuri::isValid(duckMaterialIndex_),
@@ -1417,6 +1674,8 @@ private:
     duckRenderableIndex_ = std::numeric_limits<uint32_t>::max();
     bistroRenderableIndex_ = std::numeric_limits<uint32_t>::max();
     helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+    clearcoatRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+    sheenChairRenderableIndex_ = std::numeric_limits<uint32_t>::max();
     scenePreset_ = preset;
 
     if (scenePreset_ == ScenePreset::InstancedDuck32K) {
@@ -1427,6 +1686,10 @@ private:
       setupBistroExteriorScene();
     } else if (scenePreset_ == ScenePreset::DamagedHelmet) {
       setupDamagedHelmetScene();
+    } else if (scenePreset_ == ScenePreset::ClearcoatWicker) {
+      setupClearcoatWickerScene();
+    } else if (scenePreset_ == ScenePreset::SheenChair) {
+      setupSheenChairScene();
     } else if (scenePreset_ == ScenePreset::Text3DTest) {
       setupText3DTestScene();
     } else {
@@ -1477,7 +1740,7 @@ private:
     frameContext_.settings = &renderSettings_;
     frameContext_.metrics = {};
     frameContext_.channels.clear();
-    frameContext_.transparentStage.clear();
+    frameContext_.layerStack = nullptr;
     frameContext_.sharedDepthTexture = {};
     frameContext_.timeSeconds = timeSeconds;
     frameContext_.frameIndex = frameIndex_++;
@@ -1497,10 +1760,14 @@ private:
   nuri::RenderScene scene_;
   nuri::ModelRef duckModel_ = nuri::kInvalidModelRef;
   nuri::ModelRef helmetModel_ = nuri::kInvalidModelRef;
+  nuri::ModelRef clearcoatModel_ = nuri::kInvalidModelRef;
+  nuri::ModelRef sheenChairModel_ = nuri::kInvalidModelRef;
   nuri::ModelRef bistroModel_ = nuri::kInvalidModelRef;
   std::unique_ptr<nuri::bakery::BakerySystem> bakerySystem_{};
   nuri::MaterialRef duckMaterialIndex_ = nuri::kInvalidMaterialRef;
   nuri::MaterialRef helmetFallbackMaterialIndex_ = nuri::kInvalidMaterialRef;
+  nuri::MaterialRef clearcoatMaterial_ = nuri::kInvalidMaterialRef;
+  nuri::MaterialRef sheenChairMaterial_ = nuri::kInvalidMaterialRef;
   nuri::MaterialRef bistroMaterialIndex_ = nuri::kInvalidMaterialRef;
   std::optional<nuri::ModelAsyncLoad> bistroAsyncLoad_{};
   bool bistroLoadFailed_ = false;
@@ -1510,11 +1777,14 @@ private:
   nuri::CameraHandle mainCameraHandle_{};
   uint32_t duckRenderableIndex_ = std::numeric_limits<uint32_t>::max();
   uint32_t helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+  uint32_t clearcoatRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+  uint32_t sheenChairRenderableIndex_ = std::numeric_limits<uint32_t>::max();
   uint32_t bistroRenderableIndex_ = std::numeric_limits<uint32_t>::max();
   glm::mat4 duckBaseModel_ =
       glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1, 0, 0));
   glm::mat4 helmetBaseModel_ =
       glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0));
+  glm::mat4 clearcoatBaseModel_ = glm::mat4(1.0f);
 
   nuri::RenderSettings renderSettings_{};
   nuri::RenderFrameContext frameContext_{};

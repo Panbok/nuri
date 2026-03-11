@@ -64,6 +64,9 @@ void forEachTextureRef(const MaterialRequest::TextureRefs &refs, Fn &&fn) {
   fn(refs.normal);
   fn(refs.occlusion);
   fn(refs.emissive);
+  fn(refs.clearcoat);
+  fn(refs.clearcoatRoughness);
+  fn(refs.clearcoatNormal);
 }
 
 } // namespace
@@ -453,6 +456,38 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   if (emissiveResult.hasError()) {
     return Result<MaterialRef, std::string>::makeError(emissiveResult.error());
   }
+  auto clearcoatResult =
+      resolveTextureSlot(request.textureRefs.clearcoat,
+                         resolvedDesc.textures.clearcoat, "clearcoat");
+  if (clearcoatResult.hasError()) {
+    return Result<MaterialRef, std::string>::makeError(clearcoatResult.error());
+  }
+  auto clearcoatRoughnessResult = resolveTextureSlot(
+      request.textureRefs.clearcoatRoughness,
+      resolvedDesc.textures.clearcoatRoughness, "clearcoatRoughness");
+  if (clearcoatRoughnessResult.hasError()) {
+    return Result<MaterialRef, std::string>::makeError(
+        clearcoatRoughnessResult.error());
+  }
+  auto clearcoatNormalResult = resolveTextureSlot(
+      request.textureRefs.clearcoatNormal,
+      resolvedDesc.textures.clearcoatNormal, "clearcoatNormal");
+  if (clearcoatNormalResult.hasError()) {
+    return Result<MaterialRef, std::string>::makeError(
+        clearcoatNormalResult.error());
+  }
+
+  resolvedDesc.featureMask = kMaterialFeatureMetallicRoughness;
+  if (resolvedDesc.sheenWeight > 0.0f) {
+    resolvedDesc.featureMask |= kMaterialFeatureSheen;
+  }
+  const bool hasAnyClearcoatTexture =
+      isValid(request.textureRefs.clearcoat) ||
+      isValid(request.textureRefs.clearcoatRoughness) ||
+      isValid(request.textureRefs.clearcoatNormal);
+  if (resolvedDesc.clearcoatFactor > 0.0f && hasAnyClearcoatTexture) {
+    resolvedDesc.featureMask |= kMaterialFeatureClearcoat;
+  }
 
   const uint64_t descHash = hashMaterialDesc(resolvedDesc);
   MaterialKey key{.descHash = descHash,
@@ -518,11 +553,18 @@ MaterialDesc ResourceManager::materialDescFromImported(
   desc.sheenColorFactor = imported.sheenColorFactor;
   desc.sheenWeight = imported.sheenWeight;
   desc.sheenRoughnessFactor = imported.sheenRoughnessFactor;
+  desc.clearcoatFactor = imported.clearcoatFactor;
+  desc.clearcoatRoughnessFactor = imported.clearcoatRoughnessFactor;
+  desc.clearcoatNormalScale = imported.clearcoatNormalScale;
   desc.normalScale = imported.normalScale;
   desc.occlusionStrength = imported.occlusionStrength;
   desc.alphaCutoff = imported.alphaCutoff;
   desc.doubleSided = imported.doubleSided;
   desc.alphaMode = imported.alphaMode;
+  desc.featureMask = kMaterialFeatureMetallicRoughness;
+  if (desc.sheenWeight > 0.0f) {
+    desc.featureMask |= kMaterialFeatureSheen;
+  }
   desc.textures = textures;
   desc.uvSets = MaterialTextureUvSets{
       .baseColor = imported.baseColor.uvSet,
@@ -530,6 +572,9 @@ MaterialDesc ResourceManager::materialDescFromImported(
       .normal = imported.normal.uvSet,
       .occlusion = imported.occlusion.uvSet,
       .emissive = imported.emissive.uvSet,
+      .clearcoat = imported.clearcoat.uvSet,
+      .clearcoatRoughness = imported.clearcoatRoughness.uvSet,
+      .clearcoatNormal = imported.clearcoatNormal.uvSet,
   };
   desc.samplers = MaterialTextureSamplers{
       .baseColor = imported.baseColor.samplerIndex,
@@ -537,6 +582,9 @@ MaterialDesc ResourceManager::materialDescFromImported(
       .normal = imported.normal.samplerIndex,
       .occlusion = imported.occlusion.samplerIndex,
       .emissive = imported.emissive.samplerIndex,
+      .clearcoat = imported.clearcoat.samplerIndex,
+      .clearcoatRoughness = imported.clearcoatRoughness.samplerIndex,
+      .clearcoatNormal = imported.clearcoatNormal.samplerIndex,
   };
   return desc;
 }
@@ -662,6 +710,46 @@ ResourceManager::acquireMaterialsFromModel(
     } else {
       textureRefs.emissive = emissiveResult.value();
     }
+
+    auto clearcoatResult =
+        acquireTextureRef(imported.clearcoat, false,
+                          request.debugNamePrefix + "_clearcoat_" +
+                              std::to_string(sourceMaterialIndex));
+    if (clearcoatResult.hasError()) {
+      NURI_LOG_WARNING(
+          "ResourceManager::acquireMaterialsFromModel: clearcoat load failed "
+          "for material %u: %s",
+          sourceMaterialIndex, clearcoatResult.error().c_str());
+    } else {
+      textureRefs.clearcoat = clearcoatResult.value();
+    }
+
+    auto clearcoatRoughnessResult =
+        acquireTextureRef(imported.clearcoatRoughness, false,
+                          request.debugNamePrefix + "_clearcoat_roughness_" +
+                              std::to_string(sourceMaterialIndex));
+    if (clearcoatRoughnessResult.hasError()) {
+      NURI_LOG_WARNING(
+          "ResourceManager::acquireMaterialsFromModel: clearcoat roughness "
+          "load failed for material %u: %s",
+          sourceMaterialIndex, clearcoatRoughnessResult.error().c_str());
+    } else {
+      textureRefs.clearcoatRoughness = clearcoatRoughnessResult.value();
+    }
+
+    auto clearcoatNormalResult =
+        acquireTextureRef(imported.clearcoatNormal, false,
+                          request.debugNamePrefix + "_clearcoat_normal_" +
+                              std::to_string(sourceMaterialIndex));
+    if (clearcoatNormalResult.hasError()) {
+      NURI_LOG_WARNING(
+          "ResourceManager::acquireMaterialsFromModel: clearcoat normal load "
+          "failed for material %u: %s",
+          sourceMaterialIndex, clearcoatNormalResult.error().c_str());
+    } else {
+      textureRefs.clearcoatNormal = clearcoatNormalResult.value();
+    }
+
     const MaterialTextureHandles emptyHandles{};
     const MaterialDesc desc = materialDescFromImported(imported, emptyHandles);
     const std::string sourceIdentity =
