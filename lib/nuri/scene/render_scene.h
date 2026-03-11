@@ -21,6 +21,8 @@ struct NURI_API OpaqueRenderable {
   glm::mat4 modelMatrix{1.0f};
 };
 
+using Renderable = OpaqueRenderable;
+
 struct NURI_API EnvironmentHandles {
   TextureRef cubemap = kInvalidTextureRef;
   TextureRef irradiance = kInvalidTextureRef;
@@ -41,6 +43,15 @@ public:
   RenderScene &operator=(RenderScene &&) = delete;
 
   [[nodiscard]] Result<uint32_t, std::string>
+  addRenderable(ModelRef model, MaterialRef material,
+                const glm::mat4 &modelMatrix = glm::mat4(1.0f));
+  [[nodiscard]] Result<uint32_t, std::string> addRenderablesInstanced(
+      ModelRef model, MaterialRef material,
+      std::span<const glm::mat4> modelMatrices);
+  [[nodiscard]] bool setRenderableTransform(uint32_t index,
+                                            const glm::mat4 &modelMatrix);
+
+  [[nodiscard]] Result<uint32_t, std::string>
   addOpaqueRenderable(ModelRef model, MaterialRef material,
                       const glm::mat4 &modelMatrix = glm::mat4(1.0f));
   [[nodiscard]] Result<uint32_t, std::string> addOpaqueRenderablesInstanced(
@@ -48,6 +59,12 @@ public:
       std::span<const glm::mat4> modelMatrices);
   [[nodiscard]] bool setOpaqueRenderableTransform(uint32_t index,
                                                   const glm::mat4 &modelMatrix);
+
+  [[nodiscard]] const Renderable *renderable(uint32_t index) const;
+  [[nodiscard]] std::span<const Renderable> renderables() const {
+    return renderables_;
+  }
+  void clearRenderables();
 
   [[nodiscard]] const OpaqueRenderable *opaqueRenderable(uint32_t index) const;
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
@@ -57,7 +74,7 @@ public:
     return transformVersion_;
   }
   [[nodiscard]] std::span<const OpaqueRenderable> opaqueRenderables() const {
-    return opaqueRenderables_;
+    return renderables_;
   }
   void clearOpaqueRenderables();
   void bindResources(ResourceManager *resources);
@@ -68,12 +85,12 @@ public:
   }
 
 private:
-  void retainRenderable(const OpaqueRenderable &renderable);
-  void releaseRenderable(const OpaqueRenderable &renderable);
+  void retainRenderable(const Renderable &renderable);
+  void releaseRenderable(const Renderable &renderable);
   void retainEnvironment(const EnvironmentHandles &handles);
   void releaseEnvironment(const EnvironmentHandles &handles);
 
-  std::pmr::vector<OpaqueRenderable> opaqueRenderables_;
+  std::pmr::vector<Renderable> renderables_;
   ResourceManager *resources_ = nullptr;
   EnvironmentHandles environment_{};
   uint64_t topologyVersion_ = 0;
