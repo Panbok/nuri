@@ -44,6 +44,8 @@ struct NURI_API MaterialRequest {
     TextureRef clearcoat = kInvalidTextureRef;
     TextureRef clearcoatRoughness = kInvalidTextureRef;
     TextureRef clearcoatNormal = kInvalidTextureRef;
+    TextureRef sheenColor = kInvalidTextureRef;
+    TextureRef sheenRoughness = kInvalidTextureRef;
   } textureRefs{};
   std::string debugName{};
   std::string sourceIdentity{};

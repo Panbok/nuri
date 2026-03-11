@@ -2,7 +2,10 @@ const float kBrdfPi = 3.14159265359;
 const float kBrdfMinRoughness = 0.04;
 const float kBrdfEpsilon = 1.0e-5;
 
+#include "sheen.sp"
+
 float saturate(float x) { return clamp(x, 0.0, 1.0); }
+float max3(vec3 v) { return max(max(v.x, v.y), v.z); }
 float pow5(float x) {
   float x2 = x * x;
   return x2 * x2 * x;
@@ -128,4 +131,29 @@ vec3 computeIblSpecular(vec3 f0, float roughness, float ndotv, vec3 prefiltered,
 vec3 computeIblSheen(vec3 sheenColor, float sheenWeight, vec3 sheenEnv,
                      vec3 brdfLutSample) {
   return sheenEnv * sheenColor * (brdfLutSample.z * sheenWeight);
+}
+
+vec3 computeDirectSheen(vec3 sheenColor, float sheenWeight,
+                        float sheenRoughness, float ndotl, float ndotv,
+                        float ndoth, vec3 lightColor) {
+  float sheenDistribution = DCharlie(sheenRoughness, ndoth);
+  float sheenVisibility = VSheen(ndotl, ndotv, sheenRoughness);
+  return sheenWeight * ndotl * lightColor * sheenColor *
+         (sheenDistribution * sheenVisibility);
+}
+
+float computeSheenAlbedoScalingIndirect(vec3 sheenColor,
+                                        vec3 brdfLutSample) {
+  return saturate(1.0 - max3(sheenColor) * brdfLutSample.z);
+}
+
+float computeSheenAlbedoScalingDirect(vec3 sheenColor, float ndotv,
+                                      float ndotl, float sheenRoughness) {
+  float energyV =
+      1.0 - max3(sheenColor) *
+                albedoSheenScalingFactor(ndotv, sheenRoughness);
+  float energyL =
+      1.0 - max3(sheenColor) *
+                albedoSheenScalingFactor(ndotl, sheenRoughness);
+  return saturate(min(energyV, energyL));
 }

@@ -23,6 +23,8 @@ void main() {
   const uint clearcoatTexId = material.textureIndices1.y;
   const uint clearcoatRoughnessTexId = material.textureIndices1.z;
   const uint clearcoatNormalTexId = material.textureIndices1.w;
+  const uint sheenColorTexId = material.textureIndices2.x;
+  const uint sheenRoughnessTexId = material.textureIndices2.y;
   const uint alphaMode = material.materialFlags.x;
   const uint featureMask = material.materialFlags.z;
 
@@ -34,6 +36,8 @@ void main() {
   const uint clearcoatUvSet = material.textureUvSets1.y;
   const uint clearcoatRoughnessUvSet = material.textureUvSets1.z;
   const uint clearcoatNormalUvSet = material.textureUvSets1.w;
+  const uint sheenColorUvSet = material.textureUvSets2.x;
+  const uint sheenRoughnessUvSet = material.textureUvSets2.y;
 
   const uint baseColorSampler = material.textureSamplerIndices0.x;
   const uint metallicRoughnessSampler = material.textureSamplerIndices0.y;
@@ -43,18 +47,49 @@ void main() {
   const uint clearcoatSampler = material.textureSamplerIndices1.y;
   const uint clearcoatRoughnessSampler = material.textureSamplerIndices1.z;
   const uint clearcoatNormalSampler = material.textureSamplerIndices1.w;
+  const uint sheenColorSampler = material.textureSamplerIndices2.x;
+  const uint sheenRoughnessSampler = material.textureSamplerIndices2.y;
 
-  const vec2 uvBaseColor = selectUv(vtx.uv0, vtx.uv1, baseColorUvSet);
-  const vec2 uvMetallicRoughness =
-      selectUv(vtx.uv0, vtx.uv1, metallicRoughnessUvSet);
-  const vec2 uvNormal = selectUv(vtx.uv0, vtx.uv1, normalUvSet);
-  const vec2 uvOcclusion = selectUv(vtx.uv0, vtx.uv1, occlusionUvSet);
-  const vec2 uvEmissive = selectUv(vtx.uv0, vtx.uv1, emissiveUvSet);
-  const vec2 uvClearcoat = selectUv(vtx.uv0, vtx.uv1, clearcoatUvSet);
-  const vec2 uvClearcoatRoughness =
-      selectUv(vtx.uv0, vtx.uv1, clearcoatRoughnessUvSet);
-  const vec2 uvClearcoatNormal =
-      selectUv(vtx.uv0, vtx.uv1, clearcoatNormalUvSet);
+  const vec2 uvBaseColor = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, baseColorUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotBaseColor],
+      material.textureTransformRotation[kMaterialTextureSlotBaseColor]);
+  const vec2 uvMetallicRoughness = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, metallicRoughnessUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotMetallicRoughness],
+      material.textureTransformRotation[kMaterialTextureSlotMetallicRoughness]);
+  const vec2 uvNormal = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, normalUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotNormal],
+      material.textureTransformRotation[kMaterialTextureSlotNormal]);
+  const vec2 uvOcclusion = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, occlusionUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotOcclusion],
+      material.textureTransformRotation[kMaterialTextureSlotOcclusion]);
+  const vec2 uvEmissive = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, emissiveUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotEmissive],
+      material.textureTransformRotation[kMaterialTextureSlotEmissive]);
+  const vec2 uvClearcoat = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, clearcoatUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotClearcoat],
+      material.textureTransformRotation[kMaterialTextureSlotClearcoat]);
+  const vec2 uvClearcoatRoughness = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, clearcoatRoughnessUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotClearcoatRoughness],
+      material.textureTransformRotation[kMaterialTextureSlotClearcoatRoughness]);
+  const vec2 uvClearcoatNormal = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, clearcoatNormalUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotClearcoatNormal],
+      material.textureTransformRotation[kMaterialTextureSlotClearcoatNormal]);
+  const vec2 uvSheenColor = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, sheenColorUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotSheenColor],
+      material.textureTransformRotation[kMaterialTextureSlotSheenColor]);
+  const vec2 uvSheenRoughness = applyTextureTransform(
+      selectUv(vtx.uv0, vtx.uv1, sheenRoughnessUvSet),
+      material.textureTransformOffsetScale[kMaterialTextureSlotSheenRoughness],
+      material.textureTransformRotation[kMaterialTextureSlotSheenRoughness]);
 
   vec4 baseColor = material.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {
@@ -81,7 +116,8 @@ void main() {
 
   float occlusion = 1.0;
   if (occlusionTexId != kInvalidTextureBindlessIndex) {
-    occlusion = textureBindless2D(occlusionTexId, occlusionSampler, uvOcclusion).r;
+    occlusion =
+        textureBindless2D(occlusionTexId, occlusionSampler, uvOcclusion).r;
   } else if (metallicRoughnessTexId != kInvalidTextureBindlessIndex) {
     occlusion = mrSample.r;
   }
@@ -161,7 +197,8 @@ void main() {
 
   vec3 emissive = material.emissiveFactorNormalScale.xyz;
   if (emissiveTexId != kInvalidTextureBindlessIndex) {
-    emissive *= textureBindless2D(emissiveTexId, emissiveSampler, uvEmissive).rgb;
+    emissive *=
+        textureBindless2D(emissiveTexId, emissiveSampler, uvEmissive).rgb;
   }
 
   vec3 v = normalize(pc.frameData.cameraPos.xyz - vtx.worldPos);
@@ -173,6 +210,25 @@ void main() {
   float alphaRoughness = roughness * roughness;
   float reflectance = max(max(f0.r, f0.g), f0.b);
   vec3 reflectance90 = vec3(clamp(reflectance * 25.0, 0.0, 1.0));
+  float sheenWeight =
+      ((featureMask & kMaterialFeatureSheen) != 0u)
+          ? saturate(material.sheenColorFactorWeight.w)
+          : 0.0;
+  float sheenRoughness = clamp(material.sheenRoughnessClearcoatFactors.x,
+                               kBrdfMinRoughness, 1.0);
+  vec3 sheenColor = material.sheenColorFactorWeight.xyz;
+  if (sheenColorTexId != kInvalidTextureBindlessIndex) {
+    sheenColor *=
+        textureBindless2D(sheenColorTexId, sheenColorSampler, uvSheenColor).rgb;
+  }
+  if (sheenRoughnessTexId != kInvalidTextureBindlessIndex) {
+    sheenRoughness =
+        clamp(sheenRoughness *
+                  textureBindless2D(sheenRoughnessTexId, sheenRoughnessSampler,
+                                    uvSheenRoughness)
+                      .a,
+              kBrdfMinRoughness, 1.0);
+  }
   if (hasClearcoat) {
     vec3 clearcoatLayerF = fresnelSchlick(clearcoatNdotV, clearcoatF0);
     clearcoatAttenuation = vec3(1.0) - clearcoat * clearcoatLayerF;
@@ -184,6 +240,7 @@ void main() {
   float ndotl = max(dot(nBase, l), 0.0);
   float clearcoatNdotL = max(dot(nClearcoat, l), 0.0);
   vec3 baseDirectLighting = vec3(0.0);
+  vec3 directSheen = vec3(0.0);
   vec3 clearcoatDirectLighting = vec3(0.0);
   vec3 halfVector = v + l;
   float halfLenSq = dot(halfVector, halfVector);
@@ -201,6 +258,9 @@ void main() {
                                  alphaRoughness);
     vec3 specular = f * g * d / max(4.0 * ndotl * ndotv, kBrdfEpsilon);
     baseDirectLighting = ndotl * lightColor * (diffuse + specular);
+    directSheen =
+        computeDirectSheen(sheenColor, sheenWeight, sheenRoughness, ndotl,
+                           ndotv, ndoth, lightColor);
   }
   if (hasClearcoat && clearcoat > 0.0 && clearcoatNdotL > 0.0 &&
       halfLenSq > kBrdfEpsilon) {
@@ -221,13 +281,31 @@ void main() {
         clearcoat * clearcoatNdotL * lightColor * clearcoatSpecular;
   }
 
-  vec3 brdfLutSample = vec3(0.0);
+  vec3 baseBrdfLutSample = vec3(0.0);
+  vec3 sheenBrdfLutSample = vec3(0.0);
   bool hasBrdfLut = (pc.frameData.flags & kFrameDataFlagHasBrdfLut) != 0u &&
                     pc.frameData.brdfLutTexId != kInvalidTextureBindlessIndex;
   if (hasBrdfLut) {
-    vec2 brdfUv = clamp(vec2(ndotv, 1.0 - roughness * roughness), vec2(0.0),
-                        vec2(1.0));
-    brdfLutSample = textureBindless2D(pc.frameData.brdfLutTexId, 0, brdfUv).rgb;
+    vec2 baseBrdfUv = clamp(vec2(ndotv, 1.0 - roughness * roughness),
+                            vec2(0.0), vec2(1.0));
+    baseBrdfLutSample =
+        textureBindless2D(pc.frameData.brdfLutTexId, 0, baseBrdfUv).rgb;
+    if (sheenWeight > 0.0) {
+      vec2 sheenBrdfUv = clamp(vec2(ndotv, 1.0 - sheenRoughness * sheenRoughness),
+                               vec2(0.0), vec2(1.0));
+      sheenBrdfLutSample =
+          textureBindless2D(pc.frameData.brdfLutTexId, 0, sheenBrdfUv).rgb;
+    }
+  }
+  float directScale = 1.0;
+  float indirectScale = 1.0;
+  if (sheenWeight > 0.0) {
+    directScale = computeSheenAlbedoScalingDirect(
+        sheenColor, ndotv, ndotl, sheenRoughness);
+    if (hasBrdfLut) {
+      indirectScale =
+          computeSheenAlbedoScalingIndirect(sheenColor, sheenBrdfLutSample);
+    }
   }
 
   vec3 iblDiffuse = vec3(0.0);
@@ -243,7 +321,7 @@ void main() {
             .rgb;
     if (hasBrdfLut) {
       iblDiffuse = computeIblDiffuse(diffuseColor, f0, roughness, ndotv,
-                                     irradiance, brdfLutSample);
+                                     irradiance, baseBrdfLutSample);
     } else {
       iblDiffuse = diffuseColor * irradiance;
     }
@@ -262,7 +340,8 @@ void main() {
                                  pc.frameData.cubemapSamplerId, r, lod)
               .rgb;
       iblSpecular =
-          computeIblSpecular(f0, roughness, ndotv, prefiltered, brdfLutSample);
+          computeIblSpecular(f0, roughness, ndotv, prefiltered,
+                             baseBrdfLutSample);
     } else {
       iblSpecular =
           textureBindlessCube(pc.frameData.prefilteredGgxTexId,
@@ -273,13 +352,6 @@ void main() {
     hasIndirectLighting = true;
   }
 
-  float sheenWeight =
-      ((featureMask & kMaterialFeatureSheen) != 0u)
-          ? saturate(material.sheenColorFactorWeight.w)
-          : 0.0;
-  float sheenRoughness = clamp(material.sheenRoughnessClearcoatFactors.x,
-                               kBrdfMinRoughness, 1.0);
-  vec3 sheenColor = material.sheenColorFactorWeight.xyz;
   if ((pc.frameData.flags & kFrameDataFlagHasIblSheen) != 0u &&
       pc.frameData.prefilteredCharlieTexId != kInvalidTextureBindlessIndex &&
       hasBrdfLut && sheenWeight > 0.0) {
@@ -291,7 +363,8 @@ void main() {
         textureBindlessCubeLod(pc.frameData.prefilteredCharlieTexId,
                                pc.frameData.cubemapSamplerId, r, lod)
             .rgb;
-    iblSheen = computeIblSheen(sheenColor, sheenWeight, sheenEnv, brdfLutSample);
+    iblSheen = computeIblSheen(sheenColor, sheenWeight, sheenEnv,
+                               sheenBrdfLutSample);
     hasIndirectLighting = true;
   }
 
@@ -328,14 +401,17 @@ void main() {
   }
 
   vec3 indirectLighting =
-      clearcoatAttenuation * (iblDiffuse + iblSpecular) + iblSheen +
+      clearcoatAttenuation *
+          (iblSheen + indirectScale * (iblDiffuse + iblSpecular)) +
       clearcoatIblSpecular;
   if (hasIndirectLighting) {
     indirectLighting *= ao;
   }
   vec3 directLighting =
-      clearcoatAttenuation * baseDirectLighting + clearcoatDirectLighting;
-  vec3 color = directLighting + indirectLighting + clearcoatAttenuation * emissive;
+      clearcoatAttenuation * (directSheen + directScale * baseDirectLighting) +
+      clearcoatDirectLighting;
+  vec3 color =
+      directLighting + indirectLighting + clearcoatAttenuation * emissive;
   color = max(color, vec3(0.0));
   if ((pc.frameData.flags & kFrameDataFlagOutputLinearToSrgb) != 0u) {
     color = pow(color, vec3(1.0 / 2.2));

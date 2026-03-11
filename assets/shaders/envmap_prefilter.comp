@@ -46,6 +46,8 @@ const uint kDistributionCharlie = 2u;
 const float PI = 3.14159265358979323846;
 const float TWO_PI = 6.28318530717958647692;
 
+#include "sheen.sp"
+
 vec2 hammersley2d(uint i, uint N) {
   uint bits = (i << 16u) | (i >> 16u);
   bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
@@ -102,21 +104,13 @@ MicrofacetDistributionSample sampleGGX(vec2 xi, float roughness) {
   return ggx;
 }
 
-float D_Charlie(float sheenRoughness, float ndoth) {
-  sheenRoughness = max(sheenRoughness, 0.000001);
-  float invR = 1.0 / sheenRoughness;
-  float cos2h = ndoth * ndoth;
-  float sin2h = 1.0 - cos2h;
-  return (2.0 + invR) * pow(sin2h, invR * 0.5) / (2.0 * PI);
-}
-
 MicrofacetDistributionSample sampleCharlie(vec2 xi, float roughness) {
   MicrofacetDistributionSample charlie;
   float alpha = roughness * roughness;
   charlie.sinTheta = pow(xi.y, alpha / (2.0 * alpha + 1.0));
   charlie.cosTheta = sqrt(max(0.0, 1.0 - charlie.sinTheta * charlie.sinTheta));
   charlie.phi = TWO_PI * xi.x;
-  charlie.pdf = D_Charlie(alpha, charlie.cosTheta) * 0.25;
+  charlie.pdf = DCharlie(alpha, charlie.cosTheta) * 0.25;
   return charlie;
 }
 

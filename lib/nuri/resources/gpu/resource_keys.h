@@ -172,6 +172,10 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.textures.clearcoatRoughness.generation);
   mix(desc.textures.clearcoatNormal.index);
   mix(desc.textures.clearcoatNormal.generation);
+  mix(desc.textures.sheenColor.index);
+  mix(desc.textures.sheenColor.generation);
+  mix(desc.textures.sheenRoughness.index);
+  mix(desc.textures.sheenRoughness.generation);
 
   mix(desc.uvSets.baseColor);
   mix(desc.uvSets.metallicRoughness);
@@ -181,6 +185,8 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.uvSets.clearcoat);
   mix(desc.uvSets.clearcoatRoughness);
   mix(desc.uvSets.clearcoatNormal);
+  mix(desc.uvSets.sheenColor);
+  mix(desc.uvSets.sheenRoughness);
 
   mix(desc.samplers.baseColor);
   mix(desc.samplers.metallicRoughness);
@@ -190,6 +196,19 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.samplers.clearcoat);
   mix(desc.samplers.clearcoatRoughness);
   mix(desc.samplers.clearcoatNormal);
+  mix(desc.samplers.sheenColor);
+  mix(desc.samplers.sheenRoughness);
+
+  for (uint32_t slotIndex = 0; slotIndex < kMaterialTextureSlotCount;
+       ++slotIndex) {
+    const MaterialTextureTransformData &transform =
+        desc.transforms.slots[slotIndex];
+    mixFloat(transform.offset.x);
+    mixFloat(transform.offset.y);
+    mixFloat(transform.scale.x);
+    mixFloat(transform.scale.y);
+    mixFloat(transform.rotationRadians);
+  }
 
   return hash;
 }

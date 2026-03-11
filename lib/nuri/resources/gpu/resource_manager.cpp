@@ -67,6 +67,18 @@ void forEachTextureRef(const MaterialRequest::TextureRefs &refs, Fn &&fn) {
   fn(refs.clearcoat);
   fn(refs.clearcoatRoughness);
   fn(refs.clearcoatNormal);
+  fn(refs.sheenColor);
+  fn(refs.sheenRoughness);
+}
+
+[[nodiscard]] bool hasSheenData(const MaterialDesc &desc,
+                                const MaterialRequest::TextureRefs &refs) {
+  const float sheenMax =
+      std::max(desc.sheenColorFactor.x,
+               std::max(desc.sheenColorFactor.y, desc.sheenColorFactor.z));
+  return sheenMax > 0.0f || desc.sheenRoughnessFactor > 0.0f ||
+         isValid(refs.sheenColor) || isValid(refs.sheenRoughness) ||
+         isValid(desc.textures.sheenColor) || isValid(desc.textures.sheenRoughness);
 }
 
 } // namespace
@@ -476,10 +488,24 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
     return Result<MaterialRef, std::string>::makeError(
         clearcoatNormalResult.error());
   }
+  auto sheenColorResult = resolveTextureSlot(
+      request.textureRefs.sheenColor, resolvedDesc.textures.sheenColor,
+      "sheenColor");
+  if (sheenColorResult.hasError()) {
+    return Result<MaterialRef, std::string>::makeError(sheenColorResult.error());
+  }
+  auto sheenRoughnessResult = resolveTextureSlot(
+      request.textureRefs.sheenRoughness, resolvedDesc.textures.sheenRoughness,
+      "sheenRoughness");
+  if (sheenRoughnessResult.hasError()) {
+    return Result<MaterialRef, std::string>::makeError(
+        sheenRoughnessResult.error());
+  }
 
   resolvedDesc.featureMask = kMaterialFeatureMetallicRoughness;
-  if (resolvedDesc.sheenWeight > 0.0f) {
+  if (hasSheenData(resolvedDesc, request.textureRefs)) {
     resolvedDesc.featureMask |= kMaterialFeatureSheen;
+    resolvedDesc.sheenWeight = 1.0f;
   }
   const bool hasAnyClearcoatTexture =
       isValid(request.textureRefs.clearcoat) ||
@@ -562,8 +588,11 @@ MaterialDesc ResourceManager::materialDescFromImported(
   desc.doubleSided = imported.doubleSided;
   desc.alphaMode = imported.alphaMode;
   desc.featureMask = kMaterialFeatureMetallicRoughness;
-  if (desc.sheenWeight > 0.0f) {
+  const bool hasAnySheenTexture =
+      nuri::isValid(textures.sheenColor) || nuri::isValid(textures.sheenRoughness);
+  if (desc.sheenWeight > 0.0f || hasAnySheenTexture) {
     desc.featureMask |= kMaterialFeatureSheen;
+    desc.sheenWeight = 1.0f;
   }
   const bool hasAnyClearcoatTexture =
       nuri::isValid(textures.clearcoat) ||
@@ -582,6 +611,8 @@ MaterialDesc ResourceManager::materialDescFromImported(
       .clearcoat = imported.clearcoat.uvSet,
       .clearcoatRoughness = imported.clearcoatRoughness.uvSet,
       .clearcoatNormal = imported.clearcoatNormal.uvSet,
+      .sheenColor = imported.sheenColor.uvSet,
+      .sheenRoughness = imported.sheenRoughness.uvSet,
   };
   desc.samplers = MaterialTextureSamplers{
       .baseColor = imported.baseColor.samplerIndex,
@@ -592,7 +623,28 @@ MaterialDesc ResourceManager::materialDescFromImported(
       .clearcoat = imported.clearcoat.samplerIndex,
       .clearcoatRoughness = imported.clearcoatRoughness.samplerIndex,
       .clearcoatNormal = imported.clearcoatNormal.samplerIndex,
+      .sheenColor = imported.sheenColor.samplerIndex,
+      .sheenRoughness = imported.sheenRoughness.samplerIndex,
   };
+  desc.transforms.slots[kMaterialTextureSlotBaseColor] =
+      imported.baseColor.transform;
+  desc.transforms.slots[kMaterialTextureSlotMetallicRoughness] =
+      imported.metallicRoughness.transform;
+  desc.transforms.slots[kMaterialTextureSlotNormal] = imported.normal.transform;
+  desc.transforms.slots[kMaterialTextureSlotOcclusion] =
+      imported.occlusion.transform;
+  desc.transforms.slots[kMaterialTextureSlotEmissive] =
+      imported.emissive.transform;
+  desc.transforms.slots[kMaterialTextureSlotClearcoat] =
+      imported.clearcoat.transform;
+  desc.transforms.slots[kMaterialTextureSlotClearcoatRoughness] =
+      imported.clearcoatRoughness.transform;
+  desc.transforms.slots[kMaterialTextureSlotClearcoatNormal] =
+      imported.clearcoatNormal.transform;
+  desc.transforms.slots[kMaterialTextureSlotSheenColor] =
+      imported.sheenColor.transform;
+  desc.transforms.slots[kMaterialTextureSlotSheenRoughness] =
+      imported.sheenRoughness.transform;
   return desc;
 }
 
@@ -755,6 +807,32 @@ ResourceManager::acquireMaterialsFromModel(
           sourceMaterialIndex, clearcoatNormalResult.error().c_str());
     } else {
       textureRefs.clearcoatNormal = clearcoatNormalResult.value();
+    }
+
+    auto sheenColorResult =
+        acquireTextureRef(imported.sheenColor, true,
+                          request.debugNamePrefix + "_sheen_color_" +
+                              std::to_string(sourceMaterialIndex));
+    if (sheenColorResult.hasError()) {
+      NURI_LOG_WARNING(
+          "ResourceManager::acquireMaterialsFromModel: sheen color load "
+          "failed for material %u: %s",
+          sourceMaterialIndex, sheenColorResult.error().c_str());
+    } else {
+      textureRefs.sheenColor = sheenColorResult.value();
+    }
+
+    auto sheenRoughnessResult =
+        acquireTextureRef(imported.sheenRoughness, false,
+                          request.debugNamePrefix + "_sheen_roughness_" +
+                              std::to_string(sourceMaterialIndex));
+    if (sheenRoughnessResult.hasError()) {
+      NURI_LOG_WARNING(
+          "ResourceManager::acquireMaterialsFromModel: sheen roughness load "
+          "failed for material %u: %s",
+          sourceMaterialIndex, sheenRoughnessResult.error().c_str());
+    } else {
+      textureRefs.sheenRoughness = sheenRoughnessResult.value();
     }
 
     const MaterialTextureHandles emptyHandles{};

@@ -23,6 +23,17 @@ const uint kFrameDataFlagOutputLinearToSrgb = 1u << 4u;
 const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
 const uint kMaterialFeatureSheen = 1u << 1u;
 const uint kMaterialFeatureClearcoat = 1u << 2u;
+const uint kMaterialTextureSlotBaseColor = 0u;
+const uint kMaterialTextureSlotMetallicRoughness = 1u;
+const uint kMaterialTextureSlotNormal = 2u;
+const uint kMaterialTextureSlotOcclusion = 3u;
+const uint kMaterialTextureSlotEmissive = 4u;
+const uint kMaterialTextureSlotClearcoat = 5u;
+const uint kMaterialTextureSlotClearcoatRoughness = 6u;
+const uint kMaterialTextureSlotClearcoatNormal = 7u;
+const uint kMaterialTextureSlotSheenColor = 8u;
+const uint kMaterialTextureSlotSheenRoughness = 9u;
+const uint kMaterialTextureSlotCount = 10u;
 
 struct PackedVertex {
   // CPU packs each vertex into 9 x 32-bit words:
@@ -60,14 +71,19 @@ struct MaterialGpuData {
   vec4 emissiveFactorNormalScale;
   vec4 metallicRoughnessOcclusionAlphaCutoff;
   vec4 sheenColorFactorWeight;
-  vec4 sheenRoughnessClearcoatFactors;
-  uvec4 textureIndices0;
-  uvec4 textureIndices1;
-  uvec4 textureUvSets0;
-  uvec4 textureUvSets1;
+  vec4 sheenRoughnessClearcoatFactors; // (sheenRoughness, clearcoatFactor, clearcoatRoughness, clearcoatNormalScale)
+  uvec4 textureIndices0; // (baseColor, metallicRoughness, normal, occlusion)
+  uvec4 textureIndices1; // (emissive, clearcoat, clearcoatRoughness, clearcoatNormal)
+  uvec4 textureIndices2; // (sheenColor, sheenRoughness, unused, unused)
+  uvec4 textureUvSets0; // UV sets for (baseColor, metallicRoughness, normal, occlusion)
+  uvec4 textureUvSets1; // UV sets for (emissive, clearcoat, clearcoatRoughness, clearcoatNormal)
+  uvec4 textureUvSets2; // UV sets for (sheenColor, sheenRoughness, unused, unused)
   uvec4 textureSamplerIndices0;
   uvec4 textureSamplerIndices1;
-  uvec4 materialFlags;
+  uvec4 textureSamplerIndices2;
+  vec4 textureTransformOffsetScale[kMaterialTextureSlotCount];
+  vec4 textureTransformRotation[kMaterialTextureSlotCount];
+  uvec4 materialFlags; // Full std430 slot: x=alphaMode, y=doubleSided, z=featureMask, w=reserved
 };
 
 layout(std430, buffer_reference) readonly buffer MaterialBuffer {
@@ -118,6 +134,14 @@ vec3 decodePackedPosition(PackedVertex vertex) {
 
 vec2 decodePackedUv(PackedVertex vertex) { return unpackHalf2x16(vertex.word3); }
 vec2 decodePackedUv1(PackedVertex vertex) { return unpackHalf2x16(vertex.word8); }
+
+vec2 applyTextureTransform(vec2 uv, vec4 offsetScale, vec4 rotationCs) {
+  vec2 scaled = uv * offsetScale.zw;
+  vec2 rotated =
+      vec2(rotationCs.x * scaled.x - rotationCs.y * scaled.y,
+           rotationCs.y * scaled.x + rotationCs.x * scaled.y);
+  return offsetScale.xy + rotated;
+}
 
 vec3 decodePackedNormal(PackedVertex vertex) {
   const vec2 normalXY = unpackSnorm2x16Custom(vertex.word4);

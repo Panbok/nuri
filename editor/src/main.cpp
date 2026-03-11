@@ -1196,6 +1196,9 @@ private:
                   sheenChairRecord->model->submeshes().size(),
                   sheenChairRecord->model->vertexCount(),
                   sheenChairRecord->model->indexCount());
+    NURI_LOG_INFO("NuriApplication::loadSceneResources: SheenChair uses "
+                  "default glTF material assignments; "
+                  "KHR_materials_variants is not supported yet");
 
     applyScenePreset(scenePreset_);
   }

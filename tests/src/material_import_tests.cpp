@@ -10,6 +10,16 @@ std::string modelPath(std::string_view relativePath) {
       .string();
 }
 
+const nuri::ImportedMaterialInfo *findMaterialByName(
+    const nuri::ImportedMaterialSet &set, std::string_view name) {
+  const auto it = std::find_if(
+      set.materials.begin(), set.materials.end(),
+      [name](const nuri::ImportedMaterialInfo &material) {
+        return material.name == name;
+      });
+  return (it == set.materials.end()) ? nullptr : &(*it);
+}
+
 TEST(MaterialImportTests, ClearcoatWickerOverlayImportsClearcoatData) {
   auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
       modelPath("ClearcoatWicker/ClearcoatWicker.gltf"));
@@ -70,6 +80,90 @@ TEST(MaterialImportTests, DamagedHelmetLeavesClearcoatDisabled) {
   ASSERT_NE(texturedIt, set.materials.end());
   EXPECT_FALSE(texturedIt->normal.path.empty());
   EXPECT_FALSE(texturedIt->metallicRoughness.path.empty());
+}
+
+TEST(MaterialImportTests, SheenChairImportsSheenFactorsAndTextures) {
+  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
+      modelPath("SheenChair/SheenChair.gltf"));
+  ASSERT_FALSE(result.hasError()) << result.error();
+
+  const nuri::ImportedMaterialSet &set = result.value();
+  ASSERT_FALSE(set.materials.empty());
+
+  const nuri::ImportedMaterialInfo *mangoVelvet =
+      findMaterialByName(set, "fabric Mystere Mango Velvet");
+  ASSERT_NE(mangoVelvet, nullptr);
+  EXPECT_FLOAT_EQ(mangoVelvet->sheenColorFactor.x, 1.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->sheenColorFactor.y, 0.329f);
+  EXPECT_FLOAT_EQ(mangoVelvet->sheenColorFactor.z, 0.1f);
+  EXPECT_FLOAT_EQ(mangoVelvet->sheenRoughnessFactor, 0.8f);
+  EXPECT_FLOAT_EQ(mangoVelvet->sheenWeight, 1.0f);
+  EXPECT_TRUE(mangoVelvet->sheenColor.path.empty());
+  EXPECT_TRUE(mangoVelvet->sheenRoughness.path.empty());
+
+  const nuri::ImportedMaterialInfo *peacockVelvet =
+      findMaterialByName(set, "fabric Mystere Peacock Velvet");
+  ASSERT_NE(peacockVelvet, nullptr);
+  EXPECT_FLOAT_EQ(peacockVelvet->sheenColorFactor.x, 0.013f);
+  EXPECT_FLOAT_EQ(peacockVelvet->sheenColorFactor.y, 0.284f);
+  EXPECT_FLOAT_EQ(peacockVelvet->sheenColorFactor.z, 0.298f);
+  EXPECT_FLOAT_EQ(peacockVelvet->sheenRoughnessFactor, 0.8f);
+  EXPECT_FLOAT_EQ(peacockVelvet->sheenWeight, 1.0f);
+}
+
+TEST(MaterialImportTests, SheenChairImportsTextureTransforms) {
+  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
+      modelPath("SheenChair/SheenChair.gltf"));
+  ASSERT_FALSE(result.hasError()) << result.error();
+
+  const nuri::ImportedMaterialSet &set = result.value();
+  const nuri::ImportedMaterialInfo *mangoVelvet =
+      findMaterialByName(set, "fabric Mystere Mango Velvet");
+  ASSERT_NE(mangoVelvet, nullptr);
+
+  EXPECT_EQ(mangoVelvet->baseColor.uvSet, 0u);
+  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.offset.x, -3.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.offset.y, 3.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.scale.x, 7.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.scale.y, 7.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->baseColor.transform.rotationRadians, 0.0f);
+
+  EXPECT_EQ(mangoVelvet->normal.uvSet, 0u);
+  EXPECT_FLOAT_EQ(mangoVelvet->normalScale, 0.6f);
+  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.offset.x, -0.5f);
+  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.offset.y, 0.5f);
+  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.scale.x, 2.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.scale.y, 2.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->normal.transform.rotationRadians, 0.0f);
+
+  EXPECT_EQ(mangoVelvet->occlusion.uvSet, 1u);
+  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.offset.x, 0.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.offset.y, 0.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.scale.x, 1.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.scale.y, 1.0f);
+  EXPECT_FLOAT_EQ(mangoVelvet->occlusion.transform.rotationRadians, 0.0f);
+
+  const nuri::ImportedMaterialInfo *woodBrown =
+      findMaterialByName(set, "wood Brown");
+  ASSERT_NE(woodBrown, nullptr);
+  EXPECT_EQ(woodBrown->baseColor.uvSet, 0u);
+  EXPECT_NEAR(woodBrown->baseColor.transform.offset.x, -0.8635584f, 1.0e-6f);
+  EXPECT_NEAR(woodBrown->baseColor.transform.offset.y, 1.12502563f, 1.0e-6f);
+  EXPECT_FLOAT_EQ(woodBrown->baseColor.transform.scale.x, 3.0f);
+  EXPECT_FLOAT_EQ(woodBrown->baseColor.transform.scale.y, 3.0f);
+  EXPECT_NEAR(woodBrown->baseColor.transform.rotationRadians, 0.08726647f,
+              1.0e-6f);
+}
+
+TEST(MaterialImportTests, SheenChairLeavesVariantsUnapplied) {
+  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
+      modelPath("SheenChair/SheenChair.gltf"));
+  ASSERT_FALSE(result.hasError()) << result.error();
+
+  const nuri::ImportedMaterialSet &set = result.value();
+  ASSERT_FALSE(set.materials.empty());
+  EXPECT_NE(findMaterialByName(set, "fabric Mystere Mango Velvet"), nullptr);
+  EXPECT_NE(findMaterialByName(set, "fabric Mystere Peacock Velvet"), nullptr);
 }
 
 } // namespace

@@ -6,6 +6,7 @@
 #include "nuri/resources/cpu/material_data.h"
 
 #include <cstdint>
+#include <array>
 #include <limits>
 #include <memory>
 #include <string>
@@ -27,6 +28,20 @@ enum MaterialFeatureBits : uint32_t {
   kMaterialFeatureClearcoat = 1u << 2u,
 };
 
+enum MaterialTextureSlot : uint32_t {
+  kMaterialTextureSlotBaseColor = 0u,
+  kMaterialTextureSlotMetallicRoughness = 1u,
+  kMaterialTextureSlotNormal = 2u,
+  kMaterialTextureSlotOcclusion = 3u,
+  kMaterialTextureSlotEmissive = 4u,
+  kMaterialTextureSlotClearcoat = 5u,
+  kMaterialTextureSlotClearcoatRoughness = 6u,
+  kMaterialTextureSlotClearcoatNormal = 7u,
+  kMaterialTextureSlotSheenColor = 8u,
+  kMaterialTextureSlotSheenRoughness = 9u,
+  kMaterialTextureSlotCount = 10u,
+};
+
 struct MaterialTextureHandles {
   TextureHandle baseColor{};
   TextureHandle metallicRoughness{};
@@ -36,6 +51,8 @@ struct MaterialTextureHandles {
   TextureHandle clearcoat{};
   TextureHandle clearcoatRoughness{};
   TextureHandle clearcoatNormal{};
+  TextureHandle sheenColor{};
+  TextureHandle sheenRoughness{};
 };
 
 struct MaterialTextureUvSets {
@@ -47,6 +64,8 @@ struct MaterialTextureUvSets {
   uint32_t clearcoat = 0;
   uint32_t clearcoatRoughness = 0;
   uint32_t clearcoatNormal = 0;
+  uint32_t sheenColor = 0;
+  uint32_t sheenRoughness = 0;
 };
 
 struct MaterialTextureSamplers {
@@ -58,6 +77,12 @@ struct MaterialTextureSamplers {
   uint32_t clearcoat = 0;
   uint32_t clearcoatRoughness = 0;
   uint32_t clearcoatNormal = 0;
+  uint32_t sheenColor = 0;
+  uint32_t sheenRoughness = 0;
+};
+
+struct MaterialTextureTransforms {
+  std::array<MaterialTextureTransformData, kMaterialTextureSlotCount> slots{};
 };
 
 struct MaterialDesc {
@@ -65,7 +90,7 @@ struct MaterialDesc {
   glm::vec3 emissiveFactor{0.0f};
   float metallicFactor = 1.0f;
   float roughnessFactor = 1.0f;
-  glm::vec3 sheenColorFactor{1.0f, 1.0f, 1.0f};
+  glm::vec3 sheenColorFactor{0.0f, 0.0f, 0.0f};
   float sheenWeight = 0.0f;
   float sheenRoughnessFactor = 0.0f;
   float clearcoatFactor = 0.0f;
@@ -80,6 +105,7 @@ struct MaterialDesc {
   MaterialTextureHandles textures{};
   MaterialTextureUvSets uvSets{};
   MaterialTextureSamplers samplers{};
+  MaterialTextureTransforms transforms{};
 };
 
 // std430-friendly packed material payload uploaded to GPU storage buffers.
@@ -99,13 +125,45 @@ struct alignas(16) MaterialGpuData {
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
       kInvalidTextureBindlessIndex,
       kInvalidTextureBindlessIndex}; // (emissive, clearcoat, clearcoatRoughness, clearcoatNormal)
+  glm::uvec4 textureIndices2{
+      kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
+      kInvalidTextureBindlessIndex,
+      kInvalidTextureBindlessIndex}; // (sheenColor, sheenRoughness, unused, unused)
   glm::uvec4 textureUvSets0{0u, 0u, 0u,
                             0u}; // UV sets for (baseColor, metallicRoughness, normal, occlusion)
   glm::uvec4 textureUvSets1{
       0u, 0u, 0u,
       0u}; // UV sets for (emissive, clearcoat, clearcoatRoughness, clearcoatNormal)
+  glm::uvec4 textureUvSets2{
+      0u, 0u, 0u,
+      0u}; // UV sets for (sheenColor, sheenRoughness, unused, unused)
   glm::uvec4 textureSamplerIndices0{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices1{0u, 0u, 0u, 0u};
+  glm::uvec4 textureSamplerIndices2{0u, 0u, 0u, 0u};
+  std::array<glm::vec4, kMaterialTextureSlotCount> textureTransformOffsetScale{
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+  };
+  std::array<glm::vec4, kMaterialTextureSlotCount> textureTransformRotation{
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+  };
   glm::uvec4 materialFlags{
       static_cast<uint32_t>(MaterialAlphaMode::Opaque), 0u,
       kMaterialFeatureMetallicRoughness,

@@ -22,6 +22,8 @@ pc;
 const float PI = 3.1415926536;
 const float EPSILON = 1e-6;
 
+#include "sheen.sp"
+
 vec2 hammersley2d(uint i, uint N) {
   // Radical inverse based on:
   // http://holger.dammertz.org/stuff/notes_HammersleyOnHemisphere.html.
@@ -54,19 +56,6 @@ float GSchlicksmithGGX(float dotNL, float dotNV, float roughness) {
   float GL = dotNL / (dotNL * (1.0 - k) + k);
   float GV = dotNV / (dotNV * (1.0 - k) + k);
   return GL * GV;
-}
-
-// https://github.com/google/filament/blob/master/shaders/src/brdf.fs#L136
-float VAshikhmin(float NdotL, float NdotV) {
-  return clamp(1.0 / (4.0 * (NdotL + NdotV - NdotL * NdotV)), 0.0, 1.0);
-}
-
-float DCharlie(float sheenRoughness, float NdotH) {
-  sheenRoughness = max(sheenRoughness, 0.000001);
-  float invR = 1.0 / sheenRoughness;
-  float cos2h = NdotH * NdotH;
-  float sin2h = 1.0 - cos2h;
-  return (2.0 + invR) * pow(sin2h, invR * 0.5) / (2.0 * PI);
 }
 
 vec3 importanceSampleCharlie(vec2 xi, float roughness, vec3 normal) {
@@ -112,7 +101,7 @@ vec3 BRDF(float NoV, float roughness) {
 
     if (dotNLc > 0.0) {
       float sheenDistribution = DCharlie(roughness, dotNHc);
-      float sheenVisibility = VAshikhmin(dotNLc, dotNV);
+      float sheenVisibility = VSheen(dotNLc, dotNV, roughness);
       LUT.b += sheenVisibility * sheenDistribution * dotNLc * dotVHc;
     }
   }

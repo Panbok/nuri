@@ -8,6 +8,7 @@
 #include "nuri/gfx/layers/opaque_layer.h"
 #include "nuri/gfx/layers/render_frame_context.h"
 #include "nuri/gfx/layers/skybox_layer.h"
+#include "nuri/gfx/layers/transparent_layer.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/resources/gpu/resource_manager.h"
@@ -172,6 +173,14 @@ private:
     NURI_ASSERT(opaqueLayer != nullptr, "Failed to create opaque layer");
     NURI_ASSERT(getLayerStack().pushLayer(std::move(opaqueLayer)) != nullptr,
                 "Failed to push opaque layer");
+
+    auto transparentLayer = nuri::TransparentLayer::create(
+        getGPU(), config_.shaders.opaque, layerMemoryResource());
+    NURI_ASSERT(transparentLayer != nullptr,
+                "Failed to create transparent layer");
+    NURI_ASSERT(getLayerStack().pushLayer(std::move(transparentLayer)) !=
+                    nullptr,
+                "Failed to push transparent layer");
   }
 
   void initializeTextOverlayLayer() {
@@ -584,6 +593,7 @@ private:
     frameContext_.settings = &renderSettings_;
     frameContext_.metrics = {};
     frameContext_.channels.clear();
+    frameContext_.layerStack = nullptr;
     frameContext_.sharedDepthTexture = {};
     frameContext_.timeSeconds = timeSeconds;
     frameContext_.frameIndex = frameIndex_++;
