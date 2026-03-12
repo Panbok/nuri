@@ -80,6 +80,13 @@ buildSummary(const RenderGraphCompileResult &compiled) {
   summary.rootPassCount = compiled.rootPassCount;
   summary.passCount = static_cast<uint32_t>(compiled.passDebugNames.size());
   summary.edgeCount = static_cast<uint32_t>(compiled.edges.size());
+  summary.recordedGraphicsPassCount =
+      static_cast<uint32_t>(compiled.recordedGraphicsPasses.size());
+  summary.passBarrierPlanCount =
+      static_cast<uint32_t>(compiled.passBarrierPlans.size());
+  summary.finalBarrierRecordCount = compiled.finalBarrierPlan.barrierCount;
+  summary.passBarrierRecordCount =
+      static_cast<uint32_t>(compiled.passBarrierRecords.size());
   summary.importedTextures = compiled.resourceStats.importedTextures;
   summary.transientTextures = compiled.resourceStats.transientTextures;
   summary.importedBuffers = compiled.resourceStats.importedBuffers;
@@ -116,6 +123,145 @@ buildSummary(const RenderGraphCompileResult &compiled) {
           compiled.unresolvedPreDispatchDependencyBufferBindings.size());
   summary.unresolvedDrawBufferBindingCount =
       static_cast<uint32_t>(compiled.unresolvedDrawBufferBindings.size());
+  summary.usedParallelCompile = compiled.usedParallelCompile;
+  summary.usedParallelValidation = compiled.usedParallelValidation;
+  summary.usedParallelPayloadResolution =
+      compiled.usedParallelPayloadResolution;
+  summary.usedParallelHazardAnalysis = compiled.usedParallelHazardAnalysis;
+  summary.usedParallelLifetimeAnalysis = compiled.usedParallelLifetimeAnalysis;
+  return summary;
+}
+
+[[nodiscard]] uint64_t fingerprintSeed() {
+  return 1469598103934665603ull;
+}
+
+void fingerprintBytes(uint64_t &hash, const void *data, size_t size) {
+  const auto *bytes = static_cast<const uint8_t *>(data);
+  for (size_t i = 0; i < size; ++i) {
+    hash ^= static_cast<uint64_t>(bytes[i]);
+    hash *= 1099511628211ull;
+  }
+}
+
+template <typename T> void fingerprintPod(uint64_t &hash, const T &value) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  fingerprintBytes(hash, &value, sizeof(T));
+}
+
+void fingerprintString(uint64_t &hash, std::string_view value) {
+  const uint32_t size = static_cast<uint32_t>(value.size());
+  fingerprintPod(hash, size);
+  if (!value.empty()) {
+    fingerprintBytes(hash, value.data(), value.size());
+  }
+}
+
+[[nodiscard]] uint64_t computeCompileFingerprint(
+    const RenderGraphCompileResult &compiled) {
+  uint64_t hash = fingerprintSeed();
+  fingerprintPod(hash, compiled.frameIndex);
+  fingerprintPod(hash, compiled.declaredPassCount);
+  fingerprintPod(hash, compiled.culledPassCount);
+  fingerprintPod(hash, compiled.rootPassCount);
+  fingerprintPod(hash, compiled.usedParallelCompile);
+  fingerprintPod(hash, compiled.usedParallelValidation);
+  fingerprintPod(hash, compiled.usedParallelPayloadResolution);
+  fingerprintPod(hash, compiled.usedParallelHazardAnalysis);
+  fingerprintPod(hash, compiled.usedParallelLifetimeAnalysis);
+  for (const auto &name : compiled.passDebugNames) {
+    fingerprintString(hash, name);
+  }
+  for (const uint32_t orderedPassIndex : compiled.orderedPassIndices) {
+    fingerprintPod(hash, orderedPassIndex);
+  }
+  for (const auto &edge : compiled.edges) {
+    fingerprintPod(hash, edge.before);
+    fingerprintPod(hash, edge.after);
+  }
+  for (const auto &meta : compiled.recordedGraphicsPasses) {
+    fingerprintPod(hash, meta.orderedPassIndex);
+    fingerprintPod(hash, meta.declaredPassIndex);
+  }
+  for (const auto &lifetime : compiled.transientTextureLifetimes) {
+    fingerprintPod(hash, lifetime.resourceIndex);
+    fingerprintPod(hash, lifetime.firstExecutionIndex);
+    fingerprintPod(hash, lifetime.lastExecutionIndex);
+  }
+  for (const auto &lifetime : compiled.transientBufferLifetimes) {
+    fingerprintPod(hash, lifetime.resourceIndex);
+    fingerprintPod(hash, lifetime.firstExecutionIndex);
+    fingerprintPod(hash, lifetime.lastExecutionIndex);
+  }
+  for (const auto &allocation : compiled.transientTextureAllocations) {
+    fingerprintPod(hash, allocation.resourceIndex);
+    fingerprintPod(hash, allocation.allocationIndex);
+  }
+  for (const auto &allocation : compiled.transientBufferAllocations) {
+    fingerprintPod(hash, allocation.resourceIndex);
+    fingerprintPod(hash, allocation.allocationIndex);
+  }
+  return hash;
+}
+
+[[nodiscard]] uint64_t computeBarrierFingerprint(
+    const RenderGraphCompileResult &compiled) {
+  uint64_t hash = fingerprintSeed();
+  for (const auto &plan : compiled.passBarrierPlans) {
+    fingerprintPod(hash, plan.orderedPassIndex);
+    fingerprintPod(hash, plan.barrierOffset);
+    fingerprintPod(hash, plan.barrierCount);
+  }
+  fingerprintPod(hash, compiled.finalBarrierPlan.barrierOffset);
+  fingerprintPod(hash, compiled.finalBarrierPlan.barrierCount);
+  for (const auto &record : compiled.passBarrierRecords) {
+    fingerprintPod(hash, static_cast<uint8_t>(record.resourceKind));
+    fingerprintPod(hash, record.resourceIndex);
+    fingerprintPod(hash, static_cast<uint8_t>(record.beforeAccess));
+    fingerprintPod(hash, static_cast<uint8_t>(record.afterAccess));
+    fingerprintPod(hash, static_cast<uint8_t>(record.beforeState));
+    fingerprintPod(hash, static_cast<uint8_t>(record.afterState));
+  }
+  return hash;
+}
+
+[[nodiscard]] uint64_t computeExecutionFingerprint(
+    const RenderGraphExecutionMetadata &execution) {
+  uint64_t hash = fingerprintSeed();
+  fingerprintPod(hash, execution.usedParallelCompile);
+  fingerprintPod(hash, execution.usedParallelRecording);
+  for (const auto &meta : execution.recordedCommandBuffers) {
+    fingerprintPod(hash, meta.firstOrderedPassIndex);
+    fingerprintPod(hash, meta.passCount);
+  }
+  for (const auto &batch : execution.submitBatches) {
+    fingerprintPod(hash, batch.commandBufferOffset);
+    fingerprintPod(hash, batch.commandBufferCount);
+    fingerprintPod(hash, batch.presentsFrameOutput);
+  }
+  for (const auto &range : execution.passRanges) {
+    fingerprintPod(hash, range.workerIndex);
+    fingerprintPod(hash, range.firstOrderedPassIndex);
+    fingerprintPod(hash, range.passCount);
+  }
+  return hash;
+}
+
+[[nodiscard]] RenderGraphTelemetrySnapshot::Summary
+buildSummary(const RenderGraphCompileResult &compiled,
+             const RenderGraphExecutionMetadata *execution) {
+  RenderGraphTelemetrySnapshot::Summary summary = buildSummary(compiled);
+  if (execution != nullptr) {
+    summary.recordedCommandBufferCount =
+        static_cast<uint32_t>(execution->recordedCommandBuffers.size());
+    summary.submitBatchCount =
+        static_cast<uint32_t>(execution->submitBatches.size());
+    summary.passRangeCount = static_cast<uint32_t>(execution->passRanges.size());
+    summary.usedParallelRecording = execution->usedParallelRecording;
+    summary.executionFingerprint = computeExecutionFingerprint(*execution);
+  }
+  summary.compileFingerprint = computeCompileFingerprint(compiled);
+  summary.barrierFingerprint = computeBarrierFingerprint(compiled);
   return summary;
 }
 
@@ -202,7 +348,13 @@ makeOpenErrorMessage(const std::filesystem::path &path, int errorNumber) {
 RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
     std::pmr::memory_resource *memory)
     : passNames(ensureMemory(memory)), orderedPassIndices(ensureMemory(memory)),
+      recordedGraphicsPasses(ensureMemory(memory)),
       edges(ensureMemory(memory)),
+      passBarrierPlans(ensureMemory(memory)),
+      passBarrierRecords(ensureMemory(memory)),
+      recordedCommandBuffers(ensureMemory(memory)),
+      submitBatches(ensureMemory(memory)),
+      passRanges(ensureMemory(memory)),
       transientTextureLifetimes(ensureMemory(memory)),
       transientBufferLifetimes(ensureMemory(memory)),
       transientTextureAllocations(ensureMemory(memory)),
@@ -224,11 +376,15 @@ RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
 void RenderGraphTelemetrySnapshot::captureFrom(
     const RenderGraphCompileResult &compiled) {
   reset();
-  summary = buildSummary(compiled);
+  summary = buildSummary(compiled, nullptr);
 
   copyVector(passNames, compiled.passDebugNames);
   copyVector(orderedPassIndices, compiled.orderedPassIndices);
+  copyVector(recordedGraphicsPasses, compiled.recordedGraphicsPasses);
   copyVector(edges, compiled.edges);
+  copyVector(passBarrierPlans, compiled.passBarrierPlans);
+  finalBarrierPlan = compiled.finalBarrierPlan;
+  copyVector(passBarrierRecords, compiled.passBarrierRecords);
   copyVector(transientTextureLifetimes, compiled.transientTextureLifetimes);
   copyVector(transientBufferLifetimes, compiled.transientBufferLifetimes);
   copyVector(transientTextureAllocations, compiled.transientTextureAllocations);
@@ -256,11 +412,28 @@ void RenderGraphTelemetrySnapshot::captureFrom(
              compiled.unresolvedDrawBufferBindings);
 }
 
+void RenderGraphTelemetrySnapshot::captureFrom(
+    const RenderGraphCompileResult &compiled,
+    const RenderGraphExecutionMetadata &execution) {
+  captureFrom(compiled);
+  summary = buildSummary(compiled, &execution);
+  copyVector(recordedCommandBuffers, execution.recordedCommandBuffers);
+  copyVector(submitBatches, execution.submitBatches);
+  copyVector(passRanges, execution.passRanges);
+}
+
 void RenderGraphTelemetrySnapshot::reset() {
   summary = Summary{};
   passNames.clear();
   orderedPassIndices.clear();
+  recordedGraphicsPasses.clear();
   edges.clear();
+  passBarrierPlans.clear();
+  finalBarrierPlan = FinalBarrierPlan{};
+  passBarrierRecords.clear();
+  recordedCommandBuffers.clear();
+  submitBatches.clear();
+  passRanges.clear();
   transientTextureLifetimes.clear();
   transientBufferLifetimes.clear();
   transientTextureAllocations.clear();
@@ -288,6 +461,13 @@ RenderGraphTelemetryService::RenderGraphTelemetryService(
 void RenderGraphTelemetryService::capture(
     const RenderGraphCompileResult &compiled) {
   snapshot_.captureFrom(compiled);
+  hasSnapshot_ = true;
+}
+
+void RenderGraphTelemetryService::capture(
+    const RenderGraphCompileResult &compiled,
+    const RenderGraphExecutionMetadata &execution) {
+  snapshot_.captureFrom(compiled, execution);
   hasSnapshot_ = true;
 }
 
@@ -345,6 +525,18 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
   writeKeyValue(file, "root_pass_count", summary.rootPassCount);
   writeKeyValue(file, "pass_count", summary.passCount);
   writeKeyValue(file, "edge_count", summary.edgeCount);
+  writeKeyValue(file, "recorded_graphics_pass_count",
+                summary.recordedGraphicsPassCount);
+  writeKeyValue(file, "pass_barrier_plan_count",
+                summary.passBarrierPlanCount);
+  writeKeyValue(file, "final_barrier_record_count",
+                summary.finalBarrierRecordCount);
+  writeKeyValue(file, "pass_barrier_record_count",
+                summary.passBarrierRecordCount);
+  writeKeyValue(file, "recorded_command_buffer_count",
+                summary.recordedCommandBufferCount);
+  writeKeyValue(file, "submit_batch_count", summary.submitBatchCount);
+  writeKeyValue(file, "pass_range_count", summary.passRangeCount);
   writeKeyValue(file, "imported_textures", summary.importedTextures);
   writeKeyValue(file, "transient_textures", summary.transientTextures);
   writeKeyValue(file, "imported_buffers", summary.importedBuffers);
@@ -379,6 +571,19 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
                 summary.unresolvedPreDispatchDependencyBufferBindingCount);
   writeKeyValue(file, "unresolved_draw_buffer_bindings",
                 summary.unresolvedDrawBufferBindingCount);
+  writeKeyValue(file, "used_parallel_compile", summary.usedParallelCompile);
+  writeKeyValue(file, "used_parallel_validation",
+                summary.usedParallelValidation);
+  writeKeyValue(file, "used_parallel_payload_resolution",
+                summary.usedParallelPayloadResolution);
+  writeKeyValue(file, "used_parallel_hazard_analysis",
+                summary.usedParallelHazardAnalysis);
+  writeKeyValue(file, "used_parallel_lifetime_analysis",
+                summary.usedParallelLifetimeAnalysis);
+  writeKeyValue(file, "used_parallel_recording", summary.usedParallelRecording);
+  writeKeyValue(file, "compile_fingerprint", summary.compileFingerprint);
+  writeKeyValue(file, "barrier_fingerprint", summary.barrierFingerprint);
+  writeKeyValue(file, "execution_fingerprint", summary.executionFingerprint);
   file << "\n";
 
   writeIndexedSection(file, "Passes", std::span{snapshot.passNames},
@@ -403,6 +608,78 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
                              << resolvePassName(snapshot, passIndex) << "\n";
                         return true;
                       });
+
+  writeSection(file, "Recorded Graphics Passes",
+               std::span{snapshot.recordedGraphicsPasses},
+               [&](const RecordedGraphicsPassMeta &meta) {
+                 file << "  pass_exec[" << meta.orderedPassIndex << "] -> ["
+                      << meta.declaredPassIndex << "] "
+                      << resolvePassName(snapshot, meta.declaredPassIndex)
+                      << "\n";
+                 return true;
+               });
+
+  writeSection(file, "Pass Barrier Plans", std::span{snapshot.passBarrierPlans},
+               [&](const PassBarrierPlan &plan) {
+                 file << "  pass_exec[" << plan.orderedPassIndex
+                      << "] offset=" << plan.barrierOffset
+                      << " count=" << plan.barrierCount << "\n";
+                 return true;
+               });
+
+  file << "Final Barrier Plan:\n";
+  if (snapshot.finalBarrierPlan.barrierCount == 0u) {
+    file << "  <none>\n\n";
+  } else {
+    file << "  offset=" << snapshot.finalBarrierPlan.barrierOffset
+         << " count=" << snapshot.finalBarrierPlan.barrierCount << "\n\n";
+  }
+
+  writeSection(file, "Pass Barrier Records",
+               std::span{snapshot.passBarrierRecords},
+               [&](const RenderGraphBarrierRecord &record) {
+                 file << "  "
+                      << (record.resourceKind ==
+                                  RenderGraphBarrierResourceKind::Texture
+                              ? "tex"
+                              : "buf")
+                      << "[" << record.resourceIndex
+                      << "] before_access="
+                      << static_cast<uint32_t>(record.beforeAccess)
+                      << " after_access="
+                      << static_cast<uint32_t>(record.afterAccess)
+                      << " before_state="
+                      << static_cast<uint32_t>(record.beforeState)
+                      << " after_state="
+                      << static_cast<uint32_t>(record.afterState) << "\n";
+                 return true;
+               });
+
+  writeSection(file, "Recorded Command Buffers",
+               std::span{snapshot.recordedCommandBuffers},
+               [&](const RecordedCommandBufferMeta &meta) {
+                 file << "  first_pass=" << meta.firstOrderedPassIndex
+                      << " pass_count=" << meta.passCount << "\n";
+                 return true;
+               });
+
+  writeSection(file, "Submit Batches", std::span{snapshot.submitBatches},
+               [&](const SubmitBatchMeta &batch) {
+                 file << "  offset=" << batch.commandBufferOffset
+                      << " count=" << batch.commandBufferCount
+                      << " presents="
+                      << (batch.presentsFrameOutput ? "true" : "false")
+                      << "\n";
+                 return true;
+               });
+
+  writeSection(file, "Pass Ranges", std::span{snapshot.passRanges},
+               [&](const RenderGraphPassRange &range) {
+                 file << "  worker=" << range.workerIndex
+                      << " first_pass=" << range.firstOrderedPassIndex
+                      << " pass_count=" << range.passCount << "\n";
+                 return true;
+               });
 
   writeSection(
       file, "Transient Texture Lifetimes",

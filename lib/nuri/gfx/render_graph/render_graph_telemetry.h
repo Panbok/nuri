@@ -19,6 +19,13 @@ struct NURI_API RenderGraphTelemetrySnapshot {
     uint32_t rootPassCount = 0;
     uint32_t passCount = 0;
     uint32_t edgeCount = 0;
+    uint32_t recordedGraphicsPassCount = 0;
+    uint32_t passBarrierPlanCount = 0;
+    uint32_t finalBarrierRecordCount = 0;
+    uint32_t passBarrierRecordCount = 0;
+    uint32_t recordedCommandBufferCount = 0;
+    uint32_t submitBatchCount = 0;
+    uint32_t passRangeCount = 0;
     uint32_t importedTextures = 0;
     uint32_t transientTextures = 0;
     uint32_t importedBuffers = 0;
@@ -39,12 +46,28 @@ struct NURI_API RenderGraphTelemetrySnapshot {
     uint32_t resolvedPreDispatchDependencyBufferSlotCount = 0;
     uint32_t unresolvedPreDispatchDependencyBufferBindingCount = 0;
     uint32_t unresolvedDrawBufferBindingCount = 0;
+    bool usedParallelCompile = false;
+    bool usedParallelValidation = false;
+    bool usedParallelPayloadResolution = false;
+    bool usedParallelHazardAnalysis = false;
+    bool usedParallelLifetimeAnalysis = false;
+    bool usedParallelRecording = false;
+    uint64_t compileFingerprint = 0;
+    uint64_t barrierFingerprint = 0;
+    uint64_t executionFingerprint = 0;
   };
 
   Summary summary{};
   std::pmr::vector<std::pmr::string> passNames;
   std::pmr::vector<uint32_t> orderedPassIndices;
+  std::pmr::vector<RecordedGraphicsPassMeta> recordedGraphicsPasses;
   std::pmr::vector<RenderGraphCompileResult::Edge> edges;
+  std::pmr::vector<PassBarrierPlan> passBarrierPlans;
+  FinalBarrierPlan finalBarrierPlan{};
+  std::pmr::vector<RenderGraphBarrierRecord> passBarrierRecords;
+  std::pmr::vector<RecordedCommandBufferMeta> recordedCommandBuffers;
+  std::pmr::vector<SubmitBatchMeta> submitBatches;
+  std::pmr::vector<RenderGraphPassRange> passRanges;
   std::pmr::vector<RenderGraphCompileResult::TransientLifetime>
       transientTextureLifetimes;
   std::pmr::vector<RenderGraphCompileResult::TransientLifetime>
@@ -81,6 +104,8 @@ struct NURI_API RenderGraphTelemetrySnapshot {
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 
   void captureFrom(const RenderGraphCompileResult &compiled);
+  void captureFrom(const RenderGraphCompileResult &compiled,
+                   const RenderGraphExecutionMetadata &execution);
   void reset();
 };
 
@@ -90,6 +115,8 @@ public:
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 
   void capture(const RenderGraphCompileResult &compiled);
+  void capture(const RenderGraphCompileResult &compiled,
+               const RenderGraphExecutionMetadata &execution);
   [[nodiscard]] bool hasSnapshot() const noexcept { return hasSnapshot_; }
   [[nodiscard]] const RenderGraphTelemetrySnapshot *
   latestSnapshot() const noexcept {
