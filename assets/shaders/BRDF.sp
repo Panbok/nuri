@@ -142,9 +142,9 @@ vec3 computeDirectSheen(vec3 sheenColor, float sheenWeight,
          (sheenDistribution * sheenVisibility);
 }
 
-float computeSheenAlbedoScalingIndirect(vec3 sheenColor,
+float computeSheenAlbedoScalingIndirect(vec3 sheenColor, float sheenWeight,
                                         vec3 brdfLutSample) {
-  return saturate(1.0 - max3(sheenColor) * brdfLutSample.z);
+  return saturate(1.0 - max3(sheenColor) * sheenWeight * brdfLutSample.z);
 }
 
 float computeSheenAlbedoScalingDirect(vec3 sheenColor, float ndotv,

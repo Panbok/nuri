@@ -15,40 +15,69 @@ vec2 selectUv(vec2 uv0, vec2 uv1, uint uvSet) {
 void main() {
   const MaterialGpuData material = pc.materialBuffer.materials[pc.materialIndex];
 
-  const uint baseColorTexId = material.textureIndices0.x;
-  const uint metallicRoughnessTexId = material.textureIndices0.y;
-  const uint normalTexId = material.textureIndices0.z;
-  const uint occlusionTexId = material.textureIndices0.w;
-  const uint emissiveTexId = material.textureIndices1.x;
-  const uint clearcoatTexId = material.textureIndices1.y;
-  const uint clearcoatRoughnessTexId = material.textureIndices1.z;
-  const uint clearcoatNormalTexId = material.textureIndices1.w;
-  const uint sheenColorTexId = material.textureIndices2.x;
-  const uint sheenRoughnessTexId = material.textureIndices2.y;
+  const uint baseColorTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotBaseColor);
+  const uint metallicRoughnessTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotMetallicRoughness);
+  const uint normalTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotNormal);
+  const uint occlusionTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotOcclusion);
+  const uint emissiveTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotEmissive);
+  const uint clearcoatTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotClearcoat);
+  const uint clearcoatRoughnessTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotClearcoatRoughness);
+  const uint clearcoatNormalTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotClearcoatNormal);
+  const uint sheenColorTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotSheenColor);
+  const uint sheenRoughnessTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotSheenRoughness);
   const uint alphaMode = material.materialFlags.x;
   const uint featureMask = material.materialFlags.z;
 
-  const uint baseColorUvSet = material.textureUvSets0.x;
-  const uint metallicRoughnessUvSet = material.textureUvSets0.y;
-  const uint normalUvSet = material.textureUvSets0.z;
-  const uint occlusionUvSet = material.textureUvSets0.w;
-  const uint emissiveUvSet = material.textureUvSets1.x;
-  const uint clearcoatUvSet = material.textureUvSets1.y;
-  const uint clearcoatRoughnessUvSet = material.textureUvSets1.z;
-  const uint clearcoatNormalUvSet = material.textureUvSets1.w;
-  const uint sheenColorUvSet = material.textureUvSets2.x;
-  const uint sheenRoughnessUvSet = material.textureUvSets2.y;
+  const uint baseColorUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotBaseColor);
+  const uint metallicRoughnessUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotMetallicRoughness);
+  const uint normalUvSet = GET_UV_SET(material, kMaterialTextureSlotNormal);
+  const uint occlusionUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotOcclusion);
+  const uint emissiveUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotEmissive);
+  const uint clearcoatUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotClearcoat);
+  const uint clearcoatRoughnessUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotClearcoatRoughness);
+  const uint clearcoatNormalUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotClearcoatNormal);
+  const uint sheenColorUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotSheenColor);
+  const uint sheenRoughnessUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotSheenRoughness);
 
-  const uint baseColorSampler = material.textureSamplerIndices0.x;
-  const uint metallicRoughnessSampler = material.textureSamplerIndices0.y;
-  const uint normalSampler = material.textureSamplerIndices0.z;
-  const uint occlusionSampler = material.textureSamplerIndices0.w;
-  const uint emissiveSampler = material.textureSamplerIndices1.x;
-  const uint clearcoatSampler = material.textureSamplerIndices1.y;
-  const uint clearcoatRoughnessSampler = material.textureSamplerIndices1.z;
-  const uint clearcoatNormalSampler = material.textureSamplerIndices1.w;
-  const uint sheenColorSampler = material.textureSamplerIndices2.x;
-  const uint sheenRoughnessSampler = material.textureSamplerIndices2.y;
+  const uint baseColorSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotBaseColor);
+  const uint metallicRoughnessSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotMetallicRoughness);
+  const uint normalSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotNormal);
+  const uint occlusionSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotOcclusion);
+  const uint emissiveSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotEmissive);
+  const uint clearcoatSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotClearcoat);
+  const uint clearcoatRoughnessSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotClearcoatRoughness);
+  const uint clearcoatNormalSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotClearcoatNormal);
+  const uint sheenColorSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotSheenColor);
+  const uint sheenRoughnessSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotSheenRoughness);
 
   const vec2 uvBaseColor = applyTextureTransform(
       selectUv(vtx.uv0, vtx.uv1, baseColorUvSet),
@@ -303,8 +332,8 @@ void main() {
     directScale = computeSheenAlbedoScalingDirect(
         sheenColor, ndotv, ndotl, sheenRoughness);
     if (hasBrdfLut) {
-      indirectScale =
-          computeSheenAlbedoScalingIndirect(sheenColor, sheenBrdfLutSample);
+      indirectScale = computeSheenAlbedoScalingIndirect(
+          sheenColor, sheenWeight, sheenBrdfLutSample);
     }
   }
 

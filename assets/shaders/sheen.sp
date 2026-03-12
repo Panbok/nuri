@@ -25,16 +25,19 @@ float lambdaSheenNumericHelper(float x, float alphaG) {
 }
 
 float lambdaSheen(float cosTheta, float alphaG) {
-  if (abs(cosTheta) < 0.5) {
-    return exp(lambdaSheenNumericHelper(cosTheta, alphaG));
+  float safeCosTheta = clamp(abs(cosTheta), 0.0, 1.0);
+  if (safeCosTheta < 0.5) {
+    return exp(lambdaSheenNumericHelper(safeCosTheta, alphaG));
   }
 
   return exp(2.0 * lambdaSheenNumericHelper(0.5, alphaG) -
-             lambdaSheenNumericHelper(1.0 - cosTheta, alphaG));
+             lambdaSheenNumericHelper(1.0 - safeCosTheta, alphaG));
 }
 
 float VSheen(float ndotl, float ndotv, float sheenRoughness) {
   float alphaG = sheenAlpha(sheenRoughness);
+  ndotv = max(ndotv, kSheenEpsilon);
+  ndotl = max(ndotl, kSheenEpsilon);
   return clamp(1.0 / ((1.0 + lambdaSheen(ndotv, alphaG) +
                        lambdaSheen(ndotl, alphaG)) *
                       (4.0 * ndotv * ndotl)),
@@ -42,6 +45,7 @@ float VSheen(float ndotl, float ndotv, float sheenRoughness) {
 }
 
 float albedoSheenScalingFactor(float ndotv, float sheenRoughness) {
+  ndotv = clamp(ndotv, kSheenEpsilon, 1.0);
   float c = 1.0 - ndotv;
   float c3 = c * c * c;
   return 0.65584461 * c3 +

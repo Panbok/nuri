@@ -72,12 +72,19 @@ struct MaterialGpuData {
   vec4 metallicRoughnessOcclusionAlphaCutoff;
   vec4 sheenColorFactorWeight;
   vec4 sheenRoughnessClearcoatFactors; // (sheenRoughness, clearcoatFactor, clearcoatRoughness, clearcoatNormalScale)
-  uvec4 textureIndices0; // (baseColor, metallicRoughness, normal, occlusion)
-  uvec4 textureIndices1; // (emissive, clearcoat, clearcoatRoughness, clearcoatNormal)
-  uvec4 textureIndices2; // (sheenColor, sheenRoughness, unused, unused)
-  uvec4 textureUvSets0; // UV sets for (baseColor, metallicRoughness, normal, occlusion)
-  uvec4 textureUvSets1; // UV sets for (emissive, clearcoat, clearcoatRoughness, clearcoatNormal)
-  uvec4 textureUvSets2; // UV sets for (sheenColor, sheenRoughness, unused, unused)
+  // Packed texture slot mapping shared by textureIndices*, textureUvSets*,
+  // and textureSamplerIndices*:
+  // 0=baseColor -> *0.x, 1=metallicRoughness -> *0.y,
+  // 2=normal -> *0.z, 3=occlusion -> *0.w,
+  // 4=emissive -> *1.x, 5=clearcoat -> *1.y,
+  // 6=clearcoatRoughness -> *1.z, 7=clearcoatNormal -> *1.w,
+  // 8=sheenColor -> *2.x, 9=sheenRoughness -> *2.y.
+  uvec4 textureIndices0;
+  uvec4 textureIndices1;
+  uvec4 textureIndices2;
+  uvec4 textureUvSets0;
+  uvec4 textureUvSets1;
+  uvec4 textureUvSets2;
   uvec4 textureSamplerIndices0;
   uvec4 textureSamplerIndices1;
   uvec4 textureSamplerIndices2;
@@ -85,6 +92,34 @@ struct MaterialGpuData {
   vec4 textureTransformRotation[kMaterialTextureSlotCount];
   uvec4 materialFlags; // Full std430 slot: x=alphaMode, y=doubleSided, z=featureMask, w=reserved
 };
+
+uint getPackedMaterialSlotValue(uvec4 packed0, uvec4 packed1, uvec4 packed2,
+                                uint slot, uint defaultValue) {
+  if (slot < 4u) {
+    return packed0[int(slot)];
+  }
+  if (slot < 8u) {
+    return packed1[int(slot - 4u)];
+  }
+  if (slot < kMaterialTextureSlotCount) {
+    return packed2[int(slot - 8u)];
+  }
+  return defaultValue;
+}
+
+#define GET_TEXTURE_INDEX(material, slot)                                      \
+  getPackedMaterialSlotValue((material).textureIndices0,                       \
+                             (material).textureIndices1,                       \
+                             (material).textureIndices2, (slot),               \
+                             kInvalidTextureBindlessIndex)
+#define GET_UV_SET(material, slot)                                             \
+  getPackedMaterialSlotValue((material).textureUvSets0,                        \
+                             (material).textureUvSets1,                        \
+                             (material).textureUvSets2, (slot), 0u)
+#define GET_SAMPLER_INDEX(material, slot)                                      \
+  getPackedMaterialSlotValue((material).textureSamplerIndices0,                \
+                             (material).textureSamplerIndices1,                \
+                             (material).textureSamplerIndices2, (slot), 0u)
 
 layout(std430, buffer_reference) readonly buffer MaterialBuffer {
   MaterialGpuData materials[];

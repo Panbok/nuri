@@ -11,9 +11,12 @@ vec2 selectUv(vec2 uv0, vec2 uv1, uint uvSet) {
 
 void main() {
   const MaterialGpuData material = pc.materialBuffer.materials[pc.materialIndex];
-  const uint baseColorTexId = material.textureIndices0.x;
-  const uint baseColorUvSet = material.textureUvSets0.x;
-  const uint baseColorSampler = material.textureSamplerIndices0.x;
+  const uint baseColorTexId =
+      GET_TEXTURE_INDEX(material, kMaterialTextureSlotBaseColor);
+  const uint baseColorUvSet =
+      GET_UV_SET(material, kMaterialTextureSlotBaseColor);
+  const uint baseColorSampler =
+      GET_SAMPLER_INDEX(material, kMaterialTextureSlotBaseColor);
 
   vec2 baseColorUv = applyTextureTransform(
       selectUv(vtx.uv0, vtx.uv1, baseColorUvSet),
