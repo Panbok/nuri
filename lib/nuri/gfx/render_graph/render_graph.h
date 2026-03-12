@@ -7,6 +7,7 @@
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/gpu_render_types.h"
+#include "nuri/gfx/render_graph/render_graph_runtime.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -73,6 +74,90 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   uint32_t debugColor = 0xffffffffu;
   bool markColorAsFrameOutput = false;
   bool markImplicitOutputSideEffect = true;
+};
+
+struct NURI_API RecordedGraphicsPassMeta {
+  uint32_t orderedPassIndex = UINT32_MAX;
+  uint32_t declaredPassIndex = UINT32_MAX;
+};
+
+struct NURI_API RecordedCommandBufferMeta {
+  uint32_t firstOrderedPassIndex = UINT32_MAX;
+  uint32_t passCount = 0u;
+};
+
+enum class RenderGraphBarrierResourceKind : uint8_t {
+  Texture = 0,
+  Buffer = 1,
+};
+
+enum class RenderGraphResourceState : uint8_t {
+  Unknown = 0,
+  Read = 1,
+  Write = 2,
+  Attachment = 3,
+  Present = 4,
+};
+
+struct NURI_API RenderGraphBarrierRecord {
+  RenderGraphBarrierResourceKind resourceKind =
+      RenderGraphBarrierResourceKind::Texture;
+  uint32_t resourceIndex = UINT32_MAX;
+  RenderGraphAccessMode beforeAccess = RenderGraphAccessMode::None;
+  RenderGraphAccessMode afterAccess = RenderGraphAccessMode::None;
+  RenderGraphResourceState beforeState = RenderGraphResourceState::Unknown;
+  RenderGraphResourceState afterState = RenderGraphResourceState::Unknown;
+};
+
+struct NURI_API PassBarrierPlan {
+  uint32_t orderedPassIndex = UINT32_MAX;
+  uint32_t barrierOffset = 0u;
+  uint32_t barrierCount = 0u;
+};
+
+struct NURI_API FinalBarrierPlan {
+  uint32_t barrierOffset = 0u;
+  uint32_t barrierCount = 0u;
+};
+
+struct NURI_API RenderGraphPassRange {
+  uint32_t workerIndex = UINT32_MAX;
+  uint32_t firstOrderedPassIndex = UINT32_MAX;
+  uint32_t passCount = 0u;
+};
+
+enum class RenderGraphExecutionFailureStage : uint8_t {
+  ValidateCompiledMetadata = 0,
+  MaterializeTransients,
+  BuildExecutablePayload,
+  PatchUnresolvedBindings,
+  ResolveBarriers,
+  AcquireRecordingContext,
+  RecordGraphicsBarriers,
+  RecordGraphicsPasses,
+  FinishRecordingContext,
+  SubmitRecordedFrame,
+};
+
+[[nodiscard]] NURI_API std::string_view
+toString(RenderGraphExecutionFailureStage stage) noexcept;
+
+struct NURI_API RenderGraphExecutionMetadata {
+  std::pmr::vector<RecordedCommandBufferMeta> recordedCommandBuffers;
+  std::pmr::vector<SubmitBatchMeta> submitBatches;
+  std::pmr::vector<RenderGraphPassRange> passRanges;
+  bool usedParallelCompile = false;
+  bool usedParallelRecording = false;
+
+  explicit RenderGraphExecutionMetadata(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : recordedCommandBuffers(ensureMemory(memory)),
+        submitBatches(ensureMemory(memory)), passRanges(ensureMemory(memory)) {}
+
+private:
+  static std::pmr::memory_resource *ensureMemory(std::pmr::memory_resource *m) {
+    return m != nullptr ? m : std::pmr::get_default_resource();
+  }
 };
 
 struct NURI_API RenderGraphCompileResult {
@@ -175,11 +260,22 @@ struct NURI_API RenderGraphCompileResult {
   uint32_t rootPassCount = 0;
   uint32_t transientTexturePhysicalCount = 0;
   uint32_t transientBufferPhysicalCount = 0;
+  bool usedParallelCompile = false;
+  bool usedParallelValidation = false;
+  bool usedParallelPayloadResolution = false;
+  bool usedParallelHazardAnalysis = false;
+  bool usedParallelLifetimeAnalysis = false;
   ResourceStats resourceStats{};
+  std::pmr::vector<TextureHandle> textureHandlesByResource;
+  std::pmr::vector<BufferHandle> bufferHandlesByResource;
   std::pmr::vector<RenderPass> orderedPasses;
   std::pmr::vector<uint32_t> orderedPassIndices;
+  std::pmr::vector<RecordedGraphicsPassMeta> recordedGraphicsPasses;
   std::pmr::vector<std::pmr::string> passDebugNames;
   std::pmr::vector<Edge> edges;
+  std::pmr::vector<PassBarrierPlan> passBarrierPlans;
+  FinalBarrierPlan finalBarrierPlan{};
+  std::pmr::vector<RenderGraphBarrierRecord> passBarrierRecords;
   std::pmr::vector<TransientLifetime> transientTextureLifetimes;
   std::pmr::vector<TransientLifetime> transientBufferLifetimes;
   std::pmr::vector<TransientAllocation> transientTextureAllocations;
@@ -207,9 +303,14 @@ struct NURI_API RenderGraphCompileResult {
 
   explicit RenderGraphCompileResult(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : orderedPasses(ensureMemory(memory)),
+      : textureHandlesByResource(ensureMemory(memory)),
+        bufferHandlesByResource(ensureMemory(memory)),
+        orderedPasses(ensureMemory(memory)),
         orderedPassIndices(ensureMemory(memory)),
+        recordedGraphicsPasses(ensureMemory(memory)),
         passDebugNames(ensureMemory(memory)), edges(ensureMemory(memory)),
+        passBarrierPlans(ensureMemory(memory)),
+        passBarrierRecords(ensureMemory(memory)),
         transientTextureLifetimes(ensureMemory(memory)),
         transientBufferLifetimes(ensureMemory(memory)),
         transientTextureAllocations(ensureMemory(memory)),
@@ -297,7 +398,8 @@ public:
   void setInferredSideEffectSuppression(bool enabled) noexcept {
     suppressInferredSideEffectsWhenExplicitOutputs_ = enabled;
   }
-  [[nodiscard]] Result<RenderGraphCompileResult, std::string> compile() const;
+  [[nodiscard]] Result<RenderGraphCompileResult, std::string>
+  compile(RenderGraphRuntime &runtime) const;
   [[nodiscard]] size_t passCount() const noexcept { return passes_.size(); }
 
 private:
@@ -366,6 +468,22 @@ private:
           draws(memory), drawDebugLabels(memory), drawPushConstants(memory) {}
   };
 
+  struct CompileWorkState {
+    uint32_t passCount = 0u;
+    uint32_t activePassCount = 0u;
+    bool usedParallelValidation = false;
+    bool usedParallelHazardAnalysis = false;
+    std::pmr::vector<uint8_t> activePassMask;
+    std::pmr::vector<DependencyEdge> scheduledDependencies;
+    std::pmr::vector<uint32_t> order;
+    std::pmr::vector<PassResourceAccess> compiledAccesses;
+
+    explicit CompileWorkState(
+        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : activePassMask(memory), scheduledDependencies(memory), order(memory),
+          compiledAccesses(memory) {}
+  };
+
   [[nodiscard]] bool isValidPassIndex(uint32_t passIndex) const {
     return passIndex < passes_.size();
   }
@@ -394,6 +512,30 @@ private:
   [[nodiscard]] Result<RenderGraphPassId, std::string>
   addPassRecord(RenderPass pass, OwnedPassPayload ownedPayload,
                 std::string_view debugName);
+  [[nodiscard]] Result<bool, std::string>
+  compileStageC0ValidateInputs(RenderGraphRuntime &runtime,
+                               RenderGraphCompileResult &compiled,
+                               CompileWorkState &work) const;
+  [[nodiscard]] Result<bool, std::string>
+  compileStageC1C2BuildTopology(RenderGraphRuntime &runtime,
+                                RenderGraphCompileResult &compiled,
+                                CompileWorkState &work) const;
+  [[nodiscard]] Result<bool, std::string>
+  compileStageC3ResolvePassPayloads(RenderGraphRuntime &runtime,
+                                    RenderGraphCompileResult &compiled,
+                                    const CompileWorkState &work) const;
+  [[nodiscard]] Result<bool, std::string>
+  compileStageC4PlanBarriers(RenderGraphCompileResult &compiled,
+                             const CompileWorkState &work) const;
+  [[nodiscard]] Result<bool, std::string>
+  compileStageC5PlanTransientLifetimes(RenderGraphRuntime &runtime,
+                                       RenderGraphCompileResult &compiled,
+                                       CompileWorkState &work) const;
+  [[nodiscard]] Result<bool, std::string>
+  compileStageC6PlanTransientAliasing(RenderGraphCompileResult &compiled) const;
+  [[nodiscard]] Result<bool, std::string>
+  compileStageC7ValidateCompiledMetadata(
+      const RenderGraphCompileResult &compiled) const;
 
   std::pmr::memory_resource *memory_ = nullptr;
   uint64_t frameIndex_ = 0;
@@ -438,12 +580,18 @@ class NURI_API RenderGraphExecutor {
 public:
   explicit RenderGraphExecutor(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  [[nodiscard]] Result<bool, std::string>
-  execute(GPUDevice &gpu, const RenderGraphCompileResult &compiled);
+  [[nodiscard]] Result<RenderGraphExecutionMetadata, std::string>
+  execute(RenderGraphRuntime &runtime, GPUDevice &gpu,
+          const RenderGraphCompileResult &compiled);
 
 private:
+  [[nodiscard]] Result<bool, std::string>
+  executeInternal(RenderGraphRuntime *runtime, GPUDevice &gpu,
+                  const RenderGraphCompileResult &compiled,
+                  RenderGraphExecutionMetadata *metadata);
+
   struct PendingFrameResources {
-    uint64_t retireAfterFrame = 0;
+    SubmissionHandle submission{};
     std::pmr::vector<TextureHandle> textures;
     std::pmr::vector<BufferHandle> buffers;
     std::pmr::vector<TextureDesc> textureDescs;
@@ -465,7 +613,7 @@ private:
     BufferDesc desc{};
   };
 
-  void collectRetiredResources(GPUDevice &gpu, uint64_t completedFrameIndex);
+  void collectRetiredResources(GPUDevice &gpu);
 
   std::pmr::memory_resource *memory_ = nullptr;
   std::pmr::vector<PendingFrameResources> pendingFrames_;
