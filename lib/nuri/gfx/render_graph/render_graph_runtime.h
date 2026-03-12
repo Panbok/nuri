@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/defines.h"
@@ -31,7 +32,7 @@ class NURI_API RenderGraphRuntime {
 public:
   explicit RenderGraphRuntime(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  RenderGraphRuntime(
+  explicit RenderGraphRuntime(
       RenderGraphRuntimeConfig config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~RenderGraphRuntime();
@@ -58,6 +59,10 @@ public:
   }
   [[nodiscard]] ScratchArena &
   workerScratchArena(uint32_t workerIndex) noexcept {
+    NURI_ASSERT(workerIndex < workers_.size(), "Worker index out of bounds");
+    if (workerIndex >= workers_.size()) [[unlikely]] {
+      return workers_.front()->scratch;
+    }
     return workers_[workerIndex]->scratch;
   }
 

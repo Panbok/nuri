@@ -13,7 +13,11 @@ namespace {
     return defaultValue;
   }
 
-  return *value == "1" || *value == "true" || *value == "TRUE";
+  std::string normalized = *value;
+  std::transform(
+      normalized.begin(), normalized.end(), normalized.begin(),
+      [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return normalized == "1" || normalized == "true";
 }
 
 [[nodiscard]] uint32_t parseWorkerCountEnv() {
@@ -115,20 +119,27 @@ void RenderGraphRuntime::runRangesImpl(
     return;
   }
 
+  const uint32_t totalRangeCount = static_cast<uint32_t>(ranges.size());
+  const uint32_t scheduledRangeCount =
+      std::min(totalRangeCount, config_.workerCount);
   {
     NURI_PROFILER_ZONE("RenderGraphRuntime.run_ranges.schedule",
                        NURI_PROFILER_COLOR_CMD_COPY);
     std::unique_lock lock(mutex_);
     currentRanges_.assign(ranges.begin(), ranges.end());
     currentTask_ = task;
-    activeRangeCount_ = static_cast<uint32_t>(ranges.size());
-    pendingWorkers_ = activeRangeCount_ > 0u ? activeRangeCount_ - 1u : 0u;
+    activeRangeCount_ = scheduledRangeCount;
+    pendingWorkers_ = scheduledRangeCount - 1u;
     ++generation_;
     NURI_PROFILER_ZONE_END();
   }
   cvWork_.notify_all();
 
   task(0u, ranges[0u]);
+  for (uint32_t rangeIndex = activeRangeCount_; rangeIndex < totalRangeCount;
+       ++rangeIndex) {
+    task(rangeIndex, ranges[rangeIndex]);
+  }
 
   {
     NURI_PROFILER_ZONE("RenderGraphRuntime.run_ranges.wait",
