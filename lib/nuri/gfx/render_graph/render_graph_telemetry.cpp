@@ -133,7 +133,7 @@ buildSummary(const RenderGraphCompileResult &compiled) {
 }
 
 [[nodiscard]] uint64_t fingerprintSeed() {
-  return 1469598103934665603ull;
+  return 14695981039346656037ull;
 }
 
 void fingerprintBytes(uint64_t &hash, const void *data, size_t size) {
@@ -271,6 +271,49 @@ void copyVector(std::pmr::vector<T> &destination,
   destination.assign(source.begin(), source.end());
 }
 
+void copyCompileSnapshotData(RenderGraphTelemetrySnapshot &snapshot,
+                             const RenderGraphCompileResult &compiled) {
+  copyVector(snapshot.passNames, compiled.passDebugNames);
+  copyVector(snapshot.orderedPassIndices, compiled.orderedPassIndices);
+  copyVector(snapshot.recordedGraphicsPasses, compiled.recordedGraphicsPasses);
+  copyVector(snapshot.edges, compiled.edges);
+  copyVector(snapshot.passBarrierPlans, compiled.passBarrierPlans);
+  snapshot.finalBarrierPlan = compiled.finalBarrierPlan;
+  copyVector(snapshot.passBarrierRecords, compiled.passBarrierRecords);
+  copyVector(snapshot.transientTextureLifetimes,
+             compiled.transientTextureLifetimes);
+  copyVector(snapshot.transientBufferLifetimes,
+             compiled.transientBufferLifetimes);
+  copyVector(snapshot.transientTextureAllocations,
+             compiled.transientTextureAllocations);
+  copyVector(snapshot.transientBufferAllocations,
+             compiled.transientBufferAllocations);
+  copyVector(snapshot.transientTextureAllocationByResource,
+             compiled.transientTextureAllocationByResource);
+  copyVector(snapshot.transientBufferAllocationByResource,
+             compiled.transientBufferAllocationByResource);
+  copyVector(snapshot.transientTexturePhysicalAllocations,
+             compiled.transientTexturePhysicalAllocations);
+  copyVector(snapshot.transientBufferPhysicalAllocations,
+             compiled.transientBufferPhysicalAllocations);
+  copyVector(snapshot.unresolvedTextureBindings,
+             compiled.unresolvedTextureBindings);
+  copyVector(snapshot.resolvedDependencyBuffers,
+             compiled.resolvedDependencyBuffers);
+  copyVector(snapshot.dependencyBufferRangesByPass,
+             compiled.dependencyBufferRangesByPass);
+  copyVector(snapshot.unresolvedDependencyBufferBindings,
+             compiled.unresolvedDependencyBufferBindings);
+  copyVector(snapshot.preDispatchRangesByPass, compiled.preDispatchRangesByPass);
+  copyVector(snapshot.preDispatchDependencyRanges,
+             compiled.preDispatchDependencyRanges);
+  copyVector(snapshot.unresolvedPreDispatchDependencyBufferBindings,
+             compiled.unresolvedPreDispatchDependencyBufferBindings);
+  copyVector(snapshot.drawRangesByPass, compiled.drawRangesByPass);
+  copyVector(snapshot.unresolvedDrawBufferBindings,
+             compiled.unresolvedDrawBufferBindings);
+}
+
 template <typename Value>
 void writeKeyValue(std::ostream &stream, std::string_view key, Value value) {
   stream << key << ": " << value << "\n";
@@ -377,46 +420,15 @@ void RenderGraphTelemetrySnapshot::captureFrom(
     const RenderGraphCompileResult &compiled) {
   reset();
   summary = buildSummary(compiled, nullptr);
-
-  copyVector(passNames, compiled.passDebugNames);
-  copyVector(orderedPassIndices, compiled.orderedPassIndices);
-  copyVector(recordedGraphicsPasses, compiled.recordedGraphicsPasses);
-  copyVector(edges, compiled.edges);
-  copyVector(passBarrierPlans, compiled.passBarrierPlans);
-  finalBarrierPlan = compiled.finalBarrierPlan;
-  copyVector(passBarrierRecords, compiled.passBarrierRecords);
-  copyVector(transientTextureLifetimes, compiled.transientTextureLifetimes);
-  copyVector(transientBufferLifetimes, compiled.transientBufferLifetimes);
-  copyVector(transientTextureAllocations, compiled.transientTextureAllocations);
-  copyVector(transientBufferAllocations, compiled.transientBufferAllocations);
-  copyVector(transientTextureAllocationByResource,
-             compiled.transientTextureAllocationByResource);
-  copyVector(transientBufferAllocationByResource,
-             compiled.transientBufferAllocationByResource);
-  copyVector(transientTexturePhysicalAllocations,
-             compiled.transientTexturePhysicalAllocations);
-  copyVector(transientBufferPhysicalAllocations,
-             compiled.transientBufferPhysicalAllocations);
-  copyVector(unresolvedTextureBindings, compiled.unresolvedTextureBindings);
-  copyVector(resolvedDependencyBuffers, compiled.resolvedDependencyBuffers);
-  copyVector(dependencyBufferRangesByPass,
-             compiled.dependencyBufferRangesByPass);
-  copyVector(unresolvedDependencyBufferBindings,
-             compiled.unresolvedDependencyBufferBindings);
-  copyVector(preDispatchRangesByPass, compiled.preDispatchRangesByPass);
-  copyVector(preDispatchDependencyRanges, compiled.preDispatchDependencyRanges);
-  copyVector(unresolvedPreDispatchDependencyBufferBindings,
-             compiled.unresolvedPreDispatchDependencyBufferBindings);
-  copyVector(drawRangesByPass, compiled.drawRangesByPass);
-  copyVector(unresolvedDrawBufferBindings,
-             compiled.unresolvedDrawBufferBindings);
+  copyCompileSnapshotData(*this, compiled);
 }
 
 void RenderGraphTelemetrySnapshot::captureFrom(
     const RenderGraphCompileResult &compiled,
     const RenderGraphExecutionMetadata &execution) {
-  captureFrom(compiled);
+  reset();
   summary = buildSummary(compiled, &execution);
+  copyCompileSnapshotData(*this, compiled);
   copyVector(recordedCommandBuffers, execution.recordedCommandBuffers);
   copyVector(submitBatches, execution.submitBatches);
   copyVector(passRanges, execution.passRanges);

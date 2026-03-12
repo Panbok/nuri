@@ -5,6 +5,8 @@
 #include "nuri/core/containers/hash_set.h"
 #include "nuri/core/profiling.h"
 
+#include <queue>
+
 namespace nuri {
 namespace {
 
@@ -1845,21 +1847,23 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
     outgoingEdges[cursor] = edge.after;
   }
 
-  std::pmr::vector<uint32_t> ready(memory_);
-  ready.reserve(work.passCount);
+  std::pmr::vector<uint32_t> readyStorage(memory_);
+  readyStorage.reserve(work.passCount);
+  std::priority_queue<uint32_t, std::pmr::vector<uint32_t>,
+                      std::greater<uint32_t>>
+      ready(std::greater<uint32_t>{}, std::move(readyStorage));
   for (uint32_t i = 0; i < indegree.size(); ++i) {
     if (work.activePassMask[i] != 0u && indegree[i] == 0u) {
-      ready.push_back(i);
+      ready.push(i);
     }
   }
 
   work.order.reserve(work.activePassCount);
   while (!ready.empty()) {
-    auto minIt = std::min_element(ready.begin(), ready.end());
-    NURI_ASSERT(minIt != ready.end(),
+    NURI_ASSERT(!ready.empty(),
                 "RenderGraphBuilder::compile: ready set is unexpectedly empty");
-    const uint32_t current = *minIt;
-    ready.erase(minIt);
+    const uint32_t current = ready.top();
+    ready.pop();
     work.order.push_back(current);
 
     const uint32_t start = outgoingOffsets[current];
@@ -1872,7 +1876,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC1C2BuildTopology(
       }
       --indegree[next];
       if (indegree[next] == 0u) {
-        ready.push_back(next);
+        ready.push(next);
       }
     }
   }
@@ -2804,111 +2808,164 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
   std::pmr::vector<uint32_t> transientBufferLastRank(memory_);
   transientBufferFirstRank.resize(buffers_.size(), UINT32_MAX);
   transientBufferLastRank.resize(buffers_.size(), 0u);
-
-  const auto analyzeTextureRange = [&](uint32_t workerIndex,
-                                       RenderGraphContiguousRange range) {
-    (void)workerIndex;
-    for (const PassResourceAccess &access : work.compiledAccesses) {
-      if (access.resourceKind != AccessResourceKind::Texture ||
-          access.passIndex >= work.passCount ||
-          work.activePassMask[access.passIndex] == 0u ||
-          access.resourceIndex < range.offset ||
-          access.resourceIndex >= range.offset + range.count ||
-          access.resourceIndex >= textures_.size() ||
-          textures_[access.resourceIndex].imported) {
-        continue;
-      }
-      const uint32_t rank = executionRankByPass[access.passIndex];
-      if (rank == UINT32_MAX) {
-        continue;
-      }
-      if (transientTextureFirstRank[access.resourceIndex] == UINT32_MAX) {
-        transientTextureFirstRank[access.resourceIndex] = rank;
-        transientTextureLastRank[access.resourceIndex] = rank;
-      } else {
-        transientTextureFirstRank[access.resourceIndex] =
-            std::min(transientTextureFirstRank[access.resourceIndex], rank);
-        transientTextureLastRank[access.resourceIndex] =
-            std::max(transientTextureLastRank[access.resourceIndex], rank);
-      }
+  const auto updateLifetimeRanks = [](std::span<uint32_t> firstRanks,
+                                      std::span<uint32_t> lastRanks,
+                                      uint32_t resourceIndex,
+                                      uint32_t rank) {
+    if (firstRanks[resourceIndex] == UINT32_MAX ||
+        rank < firstRanks[resourceIndex]) {
+      firstRanks[resourceIndex] = rank;
+    }
+    if (rank > lastRanks[resourceIndex]) {
+      lastRanks[resourceIndex] = rank;
     }
   };
-  const auto analyzeBufferRange = [&](uint32_t workerIndex,
+
+  const auto analyzeAccessRange = [&](std::span<uint32_t> textureFirstRanks,
+                                      std::span<uint32_t> textureLastRanks,
+                                      std::span<uint32_t> bufferFirstRanks,
+                                      std::span<uint32_t> bufferLastRanks,
                                       RenderGraphContiguousRange range) {
-    (void)workerIndex;
-    for (const PassResourceAccess &access : work.compiledAccesses) {
-      if (access.resourceKind != AccessResourceKind::Buffer ||
-          access.passIndex >= work.passCount ||
-          work.activePassMask[access.passIndex] == 0u ||
-          access.resourceIndex < range.offset ||
-          access.resourceIndex >= range.offset + range.count ||
-          access.resourceIndex >= buffers_.size() ||
-          buffers_[access.resourceIndex].imported) {
+    for (uint32_t accessIndex = range.offset;
+         accessIndex < range.offset + range.count; ++accessIndex) {
+      const PassResourceAccess &access = work.compiledAccesses[accessIndex];
+      if (access.passIndex >= work.passCount ||
+          work.activePassMask[access.passIndex] == 0u) {
         continue;
       }
+
       const uint32_t rank = executionRankByPass[access.passIndex];
       if (rank == UINT32_MAX) {
         continue;
       }
-      if (transientBufferFirstRank[access.resourceIndex] == UINT32_MAX) {
-        transientBufferFirstRank[access.resourceIndex] = rank;
-        transientBufferLastRank[access.resourceIndex] = rank;
-      } else {
-        transientBufferFirstRank[access.resourceIndex] =
-            std::min(transientBufferFirstRank[access.resourceIndex], rank);
-        transientBufferLastRank[access.resourceIndex] =
-            std::max(transientBufferLastRank[access.resourceIndex], rank);
+
+      if (access.resourceKind == AccessResourceKind::Texture) {
+        if (access.resourceIndex >= textures_.size() ||
+            textures_[access.resourceIndex].imported) {
+          continue;
+        }
+        updateLifetimeRanks(textureFirstRanks, textureLastRanks,
+                            access.resourceIndex, rank);
+        continue;
+      }
+
+      if (access.resourceKind == AccessResourceKind::Buffer) {
+        if (access.resourceIndex >= buffers_.size() ||
+            buffers_[access.resourceIndex].imported) {
+          continue;
+        }
+        updateLifetimeRanks(bufferFirstRanks, bufferLastRanks,
+                            access.resourceIndex, rank);
       }
     }
   };
 
-  bool usedParallelTextureAnalysis = false;
-  if (runtime.parallelCompileEnabled() && textures_.size() > 1u) {
-    const std::vector<RenderGraphContiguousRange> stdRanges =
-        makeLifetimeRanges(static_cast<uint32_t>(textures_.size()),
-                           runtime.workerCount());
-    if (stdRanges.size() > 1u) {
-      std::pmr::vector<RenderGraphContiguousRange> ranges(memory_);
-      ranges.assign(stdRanges.begin(), stdRanges.end());
-      runtime.runRanges(std::span<const RenderGraphContiguousRange>(
-                            ranges.data(), ranges.size()),
-                        analyzeTextureRange);
-      usedParallelTextureAnalysis = true;
-    } else if (!stdRanges.empty()) {
-      analyzeTextureRange(0u, stdRanges[0u]);
-    }
-  } else if (!textures_.empty()) {
-    analyzeTextureRange(
-        0u,
-        RenderGraphContiguousRange{
-            .offset = 0u, .count = static_cast<uint32_t>(textures_.size())});
-  }
+  struct WorkerLifetimeRanks {
+    std::pmr::vector<uint32_t> textureFirst;
+    std::pmr::vector<uint32_t> textureLast;
+    std::pmr::vector<uint32_t> bufferFirst;
+    std::pmr::vector<uint32_t> bufferLast;
 
-  bool usedParallelBufferAnalysis = false;
-  if (runtime.parallelCompileEnabled() && buffers_.size() > 1u) {
+    WorkerLifetimeRanks(std::pmr::memory_resource *memory, size_t textureCount,
+                        size_t bufferCount)
+        : textureFirst(memory),
+          textureLast(memory),
+          bufferFirst(memory),
+          bufferLast(memory) {
+      textureFirst.resize(textureCount, UINT32_MAX);
+      textureLast.resize(textureCount, 0u);
+      bufferFirst.resize(bufferCount, UINT32_MAX);
+      bufferLast.resize(bufferCount, 0u);
+    }
+  };
+
+  bool usedParallelLifetimeAnalysis = false;
+  if (!work.compiledAccesses.empty()) {
     const std::vector<RenderGraphContiguousRange> stdRanges =
-        makeLifetimeRanges(static_cast<uint32_t>(buffers_.size()),
-                           runtime.workerCount());
+        runtime.parallelCompileEnabled() && work.compiledAccesses.size() > 1u
+            ? makeLifetimeRanges(
+                  static_cast<uint32_t>(work.compiledAccesses.size()),
+                  runtime.workerCount())
+            : std::vector<RenderGraphContiguousRange>{};
     if (stdRanges.size() > 1u) {
+      std::vector<WorkerLifetimeRanks> workerRanks{};
+      workerRanks.reserve(stdRanges.size());
+      for (size_t i = 0; i < stdRanges.size(); ++i) {
+        workerRanks.emplace_back(memory_, textures_.size(), buffers_.size());
+      }
+
       std::pmr::vector<RenderGraphContiguousRange> ranges(memory_);
       ranges.assign(stdRanges.begin(), stdRanges.end());
-      runtime.runRanges(std::span<const RenderGraphContiguousRange>(
-                            ranges.data(), ranges.size()),
-                        analyzeBufferRange);
-      usedParallelBufferAnalysis = true;
-    } else if (!stdRanges.empty()) {
-      analyzeBufferRange(0u, stdRanges[0u]);
+      runtime.runRanges(
+          std::span<const RenderGraphContiguousRange>(ranges.data(),
+                                                      ranges.size()),
+          [&](uint32_t workerIndex, RenderGraphContiguousRange range) {
+            WorkerLifetimeRanks &worker = workerRanks[workerIndex];
+            analyzeAccessRange(
+                std::span<uint32_t>(worker.textureFirst.data(),
+                                    worker.textureFirst.size()),
+                std::span<uint32_t>(worker.textureLast.data(),
+                                    worker.textureLast.size()),
+                std::span<uint32_t>(worker.bufferFirst.data(),
+                                    worker.bufferFirst.size()),
+                std::span<uint32_t>(worker.bufferLast.data(),
+                                    worker.bufferLast.size()),
+                range);
+          });
+      usedParallelLifetimeAnalysis = true;
+
+      for (const WorkerLifetimeRanks &worker : workerRanks) {
+        for (uint32_t textureIndex = 0; textureIndex < textures_.size();
+             ++textureIndex) {
+          if (worker.textureFirst[textureIndex] == UINT32_MAX) {
+            continue;
+          }
+          updateLifetimeRanks(
+              std::span<uint32_t>(transientTextureFirstRank.data(),
+                                  transientTextureFirstRank.size()),
+              std::span<uint32_t>(transientTextureLastRank.data(),
+                                  transientTextureLastRank.size()),
+              textureIndex, worker.textureFirst[textureIndex]);
+          transientTextureLastRank[textureIndex] = std::max(
+              transientTextureLastRank[textureIndex],
+              worker.textureLast[textureIndex]);
+        }
+
+        for (uint32_t bufferIndex = 0; bufferIndex < buffers_.size();
+             ++bufferIndex) {
+          if (worker.bufferFirst[bufferIndex] == UINT32_MAX) {
+            continue;
+          }
+          updateLifetimeRanks(
+              std::span<uint32_t>(transientBufferFirstRank.data(),
+                                  transientBufferFirstRank.size()),
+              std::span<uint32_t>(transientBufferLastRank.data(),
+                                  transientBufferLastRank.size()),
+              bufferIndex, worker.bufferFirst[bufferIndex]);
+          transientBufferLastRank[bufferIndex] =
+              std::max(transientBufferLastRank[bufferIndex],
+                       worker.bufferLast[bufferIndex]);
+        }
+      }
+    } else {
+      analyzeAccessRange(
+          std::span<uint32_t>(transientTextureFirstRank.data(),
+                              transientTextureFirstRank.size()),
+          std::span<uint32_t>(transientTextureLastRank.data(),
+                              transientTextureLastRank.size()),
+          std::span<uint32_t>(transientBufferFirstRank.data(),
+                              transientBufferFirstRank.size()),
+          std::span<uint32_t>(transientBufferLastRank.data(),
+                              transientBufferLastRank.size()),
+          RenderGraphContiguousRange{
+              .offset = 0u,
+              .count = static_cast<uint32_t>(work.compiledAccesses.size())});
     }
-  } else if (!buffers_.empty()) {
-    analyzeBufferRange(
-        0u, RenderGraphContiguousRange{
-                .offset = 0u, .count = static_cast<uint32_t>(buffers_.size())});
   }
 
   compiled.usedParallelValidation = work.usedParallelValidation;
   compiled.usedParallelHazardAnalysis = work.usedParallelHazardAnalysis;
-  compiled.usedParallelLifetimeAnalysis =
-      usedParallelTextureAnalysis || usedParallelBufferAnalysis;
+  compiled.usedParallelLifetimeAnalysis = usedParallelLifetimeAnalysis;
   compiled.usedParallelCompile = compiled.usedParallelValidation ||
                                  compiled.usedParallelPayloadResolution ||
                                  compiled.usedParallelHazardAnalysis ||

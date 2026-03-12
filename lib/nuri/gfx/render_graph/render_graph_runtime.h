@@ -59,10 +59,8 @@ public:
   }
   [[nodiscard]] ScratchArena &
   workerScratchArena(uint32_t workerIndex) noexcept {
+    NURI_ASSERT(!workers_.empty(), "RenderGraphRuntime has no workers");
     NURI_ASSERT(workerIndex < workers_.size(), "Worker index out of bounds");
-    if (workerIndex >= workers_.size()) [[unlikely]] {
-      return workers_.front()->scratch;
-    }
     return workers_[workerIndex]->scratch;
   }
 
