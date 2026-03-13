@@ -195,7 +195,7 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
     return Result<bool, std::string>::makeResult(true);
   }
 
-  const std::span<const OpaqueRenderable> renderables =
+  const std::span<const Renderable> renderables =
       frame.scene->opaqueRenderables();
   if (renderables.empty()) {
     return Result<bool, std::string>::makeResult(true);
@@ -203,7 +203,7 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
 
   debugDraw3D_->clear();
   debugDraw3D_->setMatrix(frame.camera.proj * frame.camera.view);
-  for (const OpaqueRenderable &renderable : renderables) {
+  for (const Renderable &renderable : renderables) {
     const ModelRecord *modelRecord = frame.resources->tryGet(renderable.model);
     if (!modelRecord || !modelRecord->model) {
       continue;
@@ -212,7 +212,8 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
                       glm::vec4(1.0f, 1.0f, 0.0f, 1.0f));
   }
 
-  auto linePassResult = debugDraw3D_->buildGraphPass(depthTexture);
+  auto linePassResult =
+      debugDraw3D_->buildGraphPass(frame.frameIndex, depthTexture);
   if (linePassResult.hasError()) {
     return Result<bool, std::string>::makeError(linePassResult.error());
   }
@@ -368,7 +369,8 @@ Result<bool, std::string> DebugLayer::buildTransparentStageContribution(
             std::max(farthestDepth, -(view * glm::vec4(center, 1.0f)).z);
       }
 
-      auto linePassResult = debugDraw3D_->buildGraphPass(depthTexture);
+      auto linePassResult =
+          debugDraw3D_->buildGraphPass(frame.frameIndex, depthTexture);
       if (linePassResult.hasError()) {
         return Result<bool, std::string>::makeError(linePassResult.error());
       }

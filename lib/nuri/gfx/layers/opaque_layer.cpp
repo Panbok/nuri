@@ -527,7 +527,7 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
     const bool animateInstances = settings.opaque.enableInstanceAnimation;
     for (size_t i = 0; i < instanceCount; ++i) {
       const RenderableTemplate &templ = renderableTemplates_[i];
-      const OpaqueRenderable *renderable = templ.renderable;
+      const Renderable *renderable = templ.renderable;
       const Model *model = templ.model;
       if (!renderable || !model) {
         return Result<bool, std::string>::makeError(
@@ -3430,8 +3430,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
   renderableTemplates_.clear();
   meshDrawTemplates_.clear();
 
-  const std::span<const OpaqueRenderable> renderables =
-      scene.opaqueRenderables();
+  const std::span<const Renderable> renderables = scene.opaqueRenderables();
   if (renderables.size() >
       static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
     return Result<bool, std::string>::makeError(
@@ -3440,7 +3439,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
   renderableTemplates_.reserve(renderables.size());
 
   size_t totalMeshDraws = 0;
-  for (const OpaqueRenderable &renderable : renderables) {
+  for (const Renderable &renderable : renderables) {
     const ModelRecord *modelRecord = resources.tryGet(renderable.model);
     if (!modelRecord || !modelRecord->model) {
       return Result<bool, std::string>::makeError(
@@ -3454,7 +3453,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
 
   for (uint32_t index = 0; index < static_cast<uint32_t>(renderables.size());
        ++index) {
-    const OpaqueRenderable &renderable = renderables[index];
+    const Renderable &renderable = renderables[index];
     const ModelRecord *modelRecord = resources.tryGet(renderable.model);
     if (!modelRecord || !modelRecord->model) {
       return Result<bool, std::string>::makeError(
@@ -3574,7 +3573,7 @@ Result<bool, std::string> OpaqueLayer::rebuildMaterialTextureAccessCache(
   textureKeys.reserve(scene.opaqueRenderables().size());
   materialTextureAccessHandles_.reserve(scene.opaqueRenderables().size());
 
-  for (const OpaqueRenderable &renderable : scene.opaqueRenderables()) {
+  for (const Renderable &renderable : scene.opaqueRenderables()) {
     const MaterialRecord *materialRecord =
         resources.tryGet(renderable.material);
     if (materialRecord == nullptr) {

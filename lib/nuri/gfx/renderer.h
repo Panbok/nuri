@@ -6,8 +6,8 @@
 
 #include "nuri/core/layer_stack.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/render_graph/render_graph_telemetry.h"
 #include "nuri/gfx/render_graph/render_graph.h"
+#include "nuri/gfx/render_graph/render_graph_telemetry.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
 #include <cstdint>
@@ -54,6 +54,7 @@ private:
 
   GPUDevice &gpu_;
   ResourceManager resources_;
+  RenderGraphRuntime renderGraphRuntime_;
   RenderGraphBuilder renderGraphBuilder_;
   RenderGraphExecutor renderGraphExecutor_;
   RenderGraphTelemetryService renderGraphTelemetry_;

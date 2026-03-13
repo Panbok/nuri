@@ -351,7 +351,8 @@ DebugDraw3D::ensureLineBufferCapacity(uint32_t frameIndex,
 }
 
 Result<DebugDraw3D::PreparedGraphPass, std::string>
-DebugDraw3D::buildGraphPass(TextureHandle depthTexture) {
+DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
+                            TextureHandle depthTexture) {
   NURI_PROFILER_FUNCTION();
 
   PreparedGraphPass pass{};
@@ -381,7 +382,10 @@ DebugDraw3D::buildGraphPass(TextureHandle depthTexture) {
   syncFrameBufferCount(gpu_.getSwapchainImageCount());
 
   const uint32_t imageCount = static_cast<uint32_t>(frameBuffers_.size());
-  const uint32_t frameIndex = gpu_.getSwapchainImageIndex() % imageCount;
+  // Use the renderer's logical frame index here as well to avoid forcing a
+  // swapchain acquire while only preparing upload buffers.
+  const uint32_t frameIndex =
+      static_cast<uint32_t>(frameIndexValue % imageCount);
   const size_t requiredBytes = lines_.size() * sizeof(LineData);
 
   auto lineBufferResult = ensureLineBufferCapacity(frameIndex, requiredBytes);

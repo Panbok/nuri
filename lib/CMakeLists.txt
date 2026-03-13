@@ -20,6 +20,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/layers/skybox_layer.cpp
   nuri/gfx/layers/transparent_layer.cpp
   nuri/gfx/render_graph/render_graph.cpp
+  nuri/gfx/render_graph/render_graph_runtime.cpp
   nuri/gfx/render_graph/render_graph_telemetry.cpp
   nuri/gfx/renderer.cpp
   nuri/gfx/shader.cpp

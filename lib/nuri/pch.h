@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cinttypes>
@@ -23,6 +24,7 @@
 #include <memory>
 #include <memory_resource>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <sstream>

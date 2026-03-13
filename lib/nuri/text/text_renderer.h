@@ -56,9 +56,9 @@ public:
   Result<bool, std::string>
   buildTransparentStageContribution(RenderFrameContext &frame,
                                     TransparentStageContribution &out);
-  Result<bool, std::string>
-  append2DGraphPass(RenderFrameContext &frame, RenderGraphBuilder &graph,
-                    bool hasPriorColorPass = false);
+  Result<bool, std::string> append2DGraphPass(RenderFrameContext &frame,
+                                              RenderGraphBuilder &graph,
+                                              bool hasPriorColorPass = false);
   void setWorldAlphaDiscardThreshold(float threshold);
   [[nodiscard]] float worldAlphaDiscardThreshold() const;
   void clear();
@@ -70,6 +70,8 @@ private:
     size_t vbBytes = 0;
     size_t ibBytes = 0;
     size_t ibQuadCapacity = 0;
+    uint64_t lastUploadHash = 0;
+    bool hasUploadHash = false;
   };
 
   struct UiQuad {
@@ -134,9 +136,8 @@ private:
 
   struct TextureHandleHash {
     [[nodiscard]] size_t operator()(TextureHandle handle) const noexcept {
-      const uint64_t key =
-          (static_cast<uint64_t>(handle.generation) << 32u) |
-          static_cast<uint64_t>(handle.index);
+      const uint64_t key = (static_cast<uint64_t>(handle.generation) << 32u) |
+                           static_cast<uint64_t>(handle.index);
       return std::hash<uint64_t>{}(key);
     }
   };
@@ -186,7 +187,12 @@ private:
 
   static void hashWorldTransform(uint64_t &hash,
                                  const WorldTransform &transform);
+  static void hashUiQuad(uint64_t &hash, const UiQuad &quad);
   static void hashWorldQuad(uint64_t &hash, const WorldQuad &quad);
+  static void resetUploadCache(FrameBuffers &frame) noexcept;
+  [[nodiscard]] static bool hasMatchingUploadCache(const FrameBuffers &frame,
+                                                   uint64_t hash) noexcept;
+  static void updateUploadCache(FrameBuffers &frame, uint64_t hash) noexcept;
   static uint64_t hashCameraFrameState(const CameraFrameState &camera);
   static bool uiBatchLess(const UiQuad &a, const UiQuad &b);
   static bool worldBatchLess(const WorldQuad &a, const WorldQuad &b);
@@ -266,6 +272,9 @@ private:
       worldTransparentTextureReadSet_;
   std::pmr::vector<BufferHandle> worldTransparentDependencyBuffers_;
 
+  uint64_t uiQueueHash_ = kHashSeed;
+  uint64_t lastBuiltUiQueueHash_ = 0;
+  bool uiGeometryValid_ = false;
   uint64_t worldQueueHash_ = kHashSeed;
   uint64_t lastBuiltWorldQueueHash_ = 0;
   uint64_t lastBuiltWorldCameraHash_ = 0;

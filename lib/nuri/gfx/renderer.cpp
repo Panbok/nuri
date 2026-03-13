@@ -27,8 +27,9 @@ namespace {
 } // namespace
 
 Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
-    : gpu_(gpu), resources_(gpu, &memory), renderGraphBuilder_(&memory),
-      renderGraphExecutor_(&memory), renderGraphTelemetry_(&memory),
+    : gpu_(gpu), resources_(gpu, &memory), renderGraphRuntime_(&memory),
+      renderGraphBuilder_(&memory), renderGraphExecutor_(&memory),
+      renderGraphTelemetry_(&memory),
       suppressInferredSideEffects_(resolveSuppressInferredSideEffectsFlag()) {
   renderGraphBuilder_.setInferredSideEffectSuppression(
       suppressInferredSideEffects_);
@@ -80,15 +81,18 @@ Result<bool, std::string> Renderer::render(LayerStack &layers,
 
 Result<bool, std::string> Renderer::compileAndExecuteRenderGraph() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
-  auto compileResult = renderGraphBuilder_.compile();
+  auto compileResult = renderGraphBuilder_.compile(renderGraphRuntime_);
   if (compileResult.hasError()) {
     return Result<bool, std::string>::makeError(compileResult.error());
   }
-  renderGraphTelemetry_.capture(compileResult.value());
 
-  auto executeResult =
-      renderGraphExecutor_.execute(gpu_, compileResult.value());
-  return executeResult;
+  auto executeResult = renderGraphExecutor_.execute(renderGraphRuntime_, gpu_,
+                                                    compileResult.value());
+  if (executeResult.hasError()) {
+    return Result<bool, std::string>::makeError(executeResult.error());
+  }
+  renderGraphTelemetry_.capture(compileResult.value(), executeResult.value());
+  return Result<bool, std::string>::makeResult(true);
 }
 
 void Renderer::onResize(uint32_t width, uint32_t height) {

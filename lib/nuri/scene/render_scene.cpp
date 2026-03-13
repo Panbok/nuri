@@ -156,24 +156,7 @@ void RenderScene::clearRenderables() {
   ++transformVersion_;
 }
 
-Result<uint32_t, std::string>
-RenderScene::addOpaqueRenderable(ModelRef model, MaterialRef material,
-                                 const glm::mat4 &modelMatrix) {
-  return addRenderable(model, material, modelMatrix);
-}
-
-Result<uint32_t, std::string> RenderScene::addOpaqueRenderablesInstanced(
-    ModelRef model, MaterialRef material,
-    std::span<const glm::mat4> modelMatrices) {
-  return addRenderablesInstanced(model, material, modelMatrices);
-}
-
-bool RenderScene::setOpaqueRenderableTransform(uint32_t index,
-                                               const glm::mat4 &modelMatrix) {
-  return setRenderableTransform(index, modelMatrix);
-}
-
-const OpaqueRenderable *RenderScene::opaqueRenderable(uint32_t index) const {
+const Renderable *RenderScene::opaqueRenderable(uint32_t index) const {
   return renderable(index);
 }
 

@@ -78,7 +78,8 @@ void forEachTextureRef(const MaterialRequest::TextureRefs &refs, Fn &&fn) {
                std::max(desc.sheenColorFactor.y, desc.sheenColorFactor.z));
   return sheenMax > 0.0f || desc.sheenRoughnessFactor > 0.0f ||
          isValid(refs.sheenColor) || isValid(refs.sheenRoughness) ||
-         isValid(desc.textures.sheenColor) || isValid(desc.textures.sheenRoughness);
+         isValid(desc.textures.sheenColor) ||
+         isValid(desc.textures.sheenRoughness);
 }
 
 } // namespace
@@ -488,11 +489,12 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
     return Result<MaterialRef, std::string>::makeError(
         clearcoatNormalResult.error());
   }
-  auto sheenColorResult = resolveTextureSlot(
-      request.textureRefs.sheenColor, resolvedDesc.textures.sheenColor,
-      "sheenColor");
+  auto sheenColorResult =
+      resolveTextureSlot(request.textureRefs.sheenColor,
+                         resolvedDesc.textures.sheenColor, "sheenColor");
   if (sheenColorResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(sheenColorResult.error());
+    return Result<MaterialRef, std::string>::makeError(
+        sheenColorResult.error());
   }
   auto sheenRoughnessResult = resolveTextureSlot(
       request.textureRefs.sheenRoughness, resolvedDesc.textures.sheenRoughness,
@@ -588,11 +590,17 @@ MaterialDesc ResourceManager::materialDescFromImported(
   desc.doubleSided = imported.doubleSided;
   desc.alphaMode = imported.alphaMode;
   desc.featureMask = kMaterialFeatureMetallicRoughness;
-  const bool hasAnySheenTexture =
-      nuri::isValid(textures.sheenColor) || nuri::isValid(textures.sheenRoughness);
-  if (desc.sheenWeight > 0.0f || hasAnySheenTexture) {
+  const float sheenMax =
+      std::max(desc.sheenColorFactor.x,
+               std::max(desc.sheenColorFactor.y, desc.sheenColorFactor.z));
+  const bool hasAnySheenTexture = nuri::isValid(textures.sheenColor) ||
+                                  nuri::isValid(textures.sheenRoughness);
+  if (desc.sheenWeight > 0.0f || sheenMax > 0.0f ||
+      desc.sheenRoughnessFactor > 0.0f || hasAnySheenTexture) {
     desc.featureMask |= kMaterialFeatureSheen;
-    desc.sheenWeight = 1.0f;
+    if (desc.sheenWeight <= 0.0f) {
+      desc.sheenWeight = 1.0f;
+    }
   }
   const bool hasAnyClearcoatTexture =
       nuri::isValid(textures.clearcoat) ||

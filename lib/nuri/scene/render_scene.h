@@ -15,13 +15,11 @@
 namespace nuri {
 class ResourceManager;
 
-struct NURI_API OpaqueRenderable {
+struct NURI_API Renderable {
   ModelRef model = kInvalidModelRef;
   MaterialRef material = kInvalidMaterialRef;
   glm::mat4 modelMatrix{1.0f};
 };
-
-using Renderable = OpaqueRenderable;
 
 struct NURI_API EnvironmentHandles {
   TextureRef cubemap = kInvalidTextureRef;
@@ -45,20 +43,11 @@ public:
   [[nodiscard]] Result<uint32_t, std::string>
   addRenderable(ModelRef model, MaterialRef material,
                 const glm::mat4 &modelMatrix = glm::mat4(1.0f));
-  [[nodiscard]] Result<uint32_t, std::string> addRenderablesInstanced(
-      ModelRef model, MaterialRef material,
-      std::span<const glm::mat4> modelMatrices);
+  [[nodiscard]] Result<uint32_t, std::string>
+  addRenderablesInstanced(ModelRef model, MaterialRef material,
+                          std::span<const glm::mat4> modelMatrices);
   [[nodiscard]] bool setRenderableTransform(uint32_t index,
                                             const glm::mat4 &modelMatrix);
-
-  [[nodiscard]] Result<uint32_t, std::string>
-  addOpaqueRenderable(ModelRef model, MaterialRef material,
-                      const glm::mat4 &modelMatrix = glm::mat4(1.0f));
-  [[nodiscard]] Result<uint32_t, std::string> addOpaqueRenderablesInstanced(
-      ModelRef model, MaterialRef material,
-      std::span<const glm::mat4> modelMatrices);
-  [[nodiscard]] bool setOpaqueRenderableTransform(uint32_t index,
-                                                  const glm::mat4 &modelMatrix);
 
   [[nodiscard]] const Renderable *renderable(uint32_t index) const;
   [[nodiscard]] std::span<const Renderable> renderables() const {
@@ -66,14 +55,14 @@ public:
   }
   void clearRenderables();
 
-  [[nodiscard]] const OpaqueRenderable *opaqueRenderable(uint32_t index) const;
+  [[nodiscard]] const Renderable *opaqueRenderable(uint32_t index) const;
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
     return topologyVersion_;
   }
   [[nodiscard]] uint64_t transformVersion() const noexcept {
     return transformVersion_;
   }
-  [[nodiscard]] std::span<const OpaqueRenderable> opaqueRenderables() const {
+  [[nodiscard]] std::span<const Renderable> opaqueRenderables() const {
     return renderables_;
   }
   void clearOpaqueRenderables();

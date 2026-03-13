@@ -180,6 +180,20 @@ void TextRenderer::hashWorldTransform(uint64_t &hash,
   }
 }
 
+void TextRenderer::hashUiQuad(uint64_t &hash, const UiQuad &quad) {
+  hash = hashMix(hash, floatBits(quad.minX));
+  hash = hashMix(hash, floatBits(quad.minY));
+  hash = hashMix(hash, floatBits(quad.maxX));
+  hash = hashMix(hash, floatBits(quad.maxY));
+  hash = hashMix(hash, floatBits(quad.uvMinX));
+  hash = hashMix(hash, floatBits(quad.uvMinY));
+  hash = hashMix(hash, floatBits(quad.uvMaxX));
+  hash = hashMix(hash, floatBits(quad.uvMaxY));
+  hash = hashMix(hash, floatBits(quad.pxRange));
+  hash = hashMix(hash, quad.color);
+  hash = hashMix(hash, quad.atlas);
+}
+
 void TextRenderer::hashWorldQuad(uint64_t &hash, const WorldQuad &quad) {
   hash = hashMix(hash, floatBits(quad.minX));
   hash = hashMix(hash, floatBits(quad.minY));
@@ -193,6 +207,22 @@ void TextRenderer::hashWorldQuad(uint64_t &hash, const WorldQuad &quad) {
   hash = hashMix(hash, quad.color);
   hash = hashMix(hash, quad.atlas);
   hash = hashMix(hash, quad.transformId);
+}
+
+void TextRenderer::resetUploadCache(FrameBuffers &frame) noexcept {
+  frame.lastUploadHash = 0;
+  frame.hasUploadHash = false;
+}
+
+bool TextRenderer::hasMatchingUploadCache(const FrameBuffers &frame,
+                                          uint64_t hash) noexcept {
+  return frame.hasUploadHash && frame.lastUploadHash == hash;
+}
+
+void TextRenderer::updateUploadCache(FrameBuffers &frame,
+                                     uint64_t hash) noexcept {
+  frame.lastUploadHash = hash;
+  frame.hasUploadHash = true;
 }
 
 uint64_t TextRenderer::hashCameraFrameState(const CameraFrameState &camera) {
@@ -388,6 +418,7 @@ TextRenderer::enqueue2D(const Text2DDesc &desc,
     uiQueue_[i].maxX += shift.x;
     uiQueue_[i].minY += shift.y;
     uiQueue_[i].maxY += shift.y;
+    hashUiQuad(uiQueueHash_, uiQueue_[i]);
   }
 
   TextBounds finalBounds{};
@@ -423,7 +454,6 @@ TextRenderer::enqueue3D(const Text3DDesc &desc,
   worldTransforms_.push_back(
       WorldTransform{.worldFromText = world, .billboard = desc.billboard});
   const uint32_t transformId = static_cast<uint32_t>(worldTransforms_.size());
-  hashWorldTransform(worldQueueHash_, worldTransforms_.back());
   worldHasBillboards_ =
       worldHasBillboards_ || (desc.billboard != TextBillboardMode::None);
   const uint32_t color = packColor(desc.fillColor);
@@ -460,7 +490,6 @@ TextRenderer::enqueue3D(const Text3DDesc &desc,
     quad.atlas = atlas;
     quad.transformId = transformId;
     quad.atlasTexture = fonts_.atlasTexture(glyph.atlasPage);
-    hashWorldQuad(worldQueueHash_, quad);
     if (queueStart > 0 && worldQueue_.size() == queueStart &&
         worldBatchLess(quad, worldQueue_[queueStart - 1u])) {
       worldQueueNeedsSort_ = true;
@@ -477,11 +506,13 @@ TextRenderer::enqueue3D(const Text3DDesc &desc,
   }
 
   const glm::vec2 shift = computeAlignedOffsetLocal(localBounds, desc.layout);
+  hashWorldTransform(worldQueueHash_, worldTransforms_.back());
   for (size_t i = queueStart; i < worldQueue_.size(); ++i) {
     worldQueue_[i].minX += shift.x;
     worldQueue_[i].minY += shift.y;
     worldQueue_[i].maxX += shift.x;
     worldQueue_[i].maxY += shift.y;
+    hashWorldQuad(worldQueueHash_, worldQueue_[i]);
   }
 
   TextBounds finalBounds{};
@@ -496,9 +527,7 @@ void TextRenderer::clear() {
   uiQueue_.clear();
   worldQueue_.clear();
   worldTransforms_.clear();
-  uiVerts_.clear();
-  // Keep previously built world geometry/batches for hash-based reuse.
-  uiBatches_.clear();
+  // Keep previously built UI/world geometry for hash-based reuse.
   uiDraws_.clear();
   worldDraws_.clear();
   worldTransparentDraws_.clear();
@@ -508,6 +537,7 @@ void TextRenderer::clear() {
   worldAppended_ = false;
   uiQueueNeedsSort_ = false;
   worldQueueNeedsSort_ = false;
+  uiQueueHash_ = kHashSeed;
   worldQueueHash_ = kHashSeed;
   worldHasBillboards_ = false;
   worldGlyphBufferAddress_ = 0;
@@ -709,7 +739,9 @@ uint32_t TextRenderer::frameSlot(std::pmr::vector<FrameBuffers> &frames) {
   syncFrames(frames);
   const uint32_t count = static_cast<uint32_t>(frames.size());
   NURI_ASSERT(count > 0, "TextRenderer frame buffer count must be > 0");
-  return gpu_.getSwapchainImageIndex() % count;
+  // Keep transient upload slots on the logical frame timeline so graph
+  // building does not force an early swapchain acquire through the backend.
+  return static_cast<uint32_t>(frameIndex_ % count);
 }
 
 Result<bool, std::string>
@@ -734,6 +766,7 @@ TextRenderer::ensureFrameBuffers(FrameBuffers &frame, size_t vbBytes,
     }
     frame.vb = vb.value();
     frame.vbBytes = newSize;
+    resetUploadCache(frame);
   }
 
   if (!::nuri::isValid(frame.ib) || frame.ibQuadCapacity < ibQuads) {
@@ -814,15 +847,18 @@ TextRenderer::ensureWorldInstanceBuffer(FrameBuffers &frame, size_t bytes,
 Result<bool, std::string> TextRenderer::uploadUi(uint32_t slot) {
   NURI_PROFILER_FUNCTION();
   constexpr size_t kVerticesPerQuad = 4u;
-  constexpr size_t kIndicesPerQuad = 6u;
   FrameBuffers &frame = uiFrames_[slot];
   const size_t vbBytes = uiVerts_.size() * sizeof(UiVertex);
   const size_t quadCount = uiVerts_.size() / kVerticesPerQuad;
-  perf_.uiVertexUploadBytes = vbBytes;
-  perf_.uiIndexUploadBytes = 0;
   auto ensure = ensureFrameBuffers(frame, vbBytes, quadCount, "text_ui");
   if (ensure.hasError()) {
     return ensure;
+  }
+
+  if (hasMatchingUploadCache(frame, uiQueueHash_)) {
+    perf_.uiVertexUploadBytes = 0;
+    perf_.uiIndexUploadBytes = 0;
+    return Result<bool, std::string>::makeResult(true);
   }
 
   if (vbBytes > 0) {
@@ -835,6 +871,9 @@ Result<bool, std::string> TextRenderer::uploadUi(uint32_t slot) {
       return Result<bool, std::string>::makeError(up.error());
     }
   }
+  updateUploadCache(frame, uiQueueHash_);
+  perf_.uiVertexUploadBytes = vbBytes;
+  perf_.uiIndexUploadBytes = 0;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -885,8 +924,14 @@ Result<bool, std::string> TextRenderer::uploadWorld(uint32_t slot) {
 }
 
 void TextRenderer::buildUiGeometry() {
-  NURI_PROFILER_ZONE("TextRenderer::buildUiGeometry",
-                     NURI_PROFILER_COLOR_CMD_DRAW);
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
+  const bool canReuseUiGeometry =
+      uiGeometryValid_ && uiQueueHash_ == lastBuiltUiQueueHash_;
+  if (canReuseUiGeometry) {
+    perf_.uiGlyphs = static_cast<uint32_t>(uiVerts_.size() / 4u);
+    perf_.uiBatches = static_cast<uint32_t>(uiBatches_.size());
+    return;
+  }
   if (uiQueueNeedsSort_) {
     std::sort(uiQueue_.begin(), uiQueue_.end(), uiBatchLess);
     uiQueueNeedsSort_ = false;
@@ -927,7 +972,8 @@ void TextRenderer::buildUiGeometry() {
   }
   perf_.uiGlyphs = static_cast<uint32_t>(uiVerts_.size() / 4u);
   perf_.uiBatches = static_cast<uint32_t>(uiBatches_.size());
-  NURI_PROFILER_ZONE_END();
+  uiGeometryValid_ = true;
+  lastBuiltUiQueueHash_ = uiQueueHash_;
 }
 
 void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
@@ -959,15 +1005,14 @@ void TextRenderer::buildWorldGeometry(const CameraFrameState &camera) {
   float currentPxRange = -1.0f;
   const glm::mat4 view = camera.view;
   for (const WorldQuad &q : worldQueue_) {
-    if (currentAtlas != q.atlas ||
-        currentTransformId != q.transformId ||
+    if (currentAtlas != q.atlas || currentTransformId != q.transformId ||
         std::abs(currentPxRange - q.pxRange) > kBatchPxRangeEpsilon) {
       currentAtlas = q.atlas;
       currentTransformId = q.transformId;
       currentPxRange = q.pxRange;
-      const size_t transformIdx =
-          q.transformId == 0u ? std::numeric_limits<size_t>::max()
-                              : static_cast<size_t>(q.transformId - 1u);
+      const size_t transformIdx = q.transformId == 0u
+                                      ? std::numeric_limits<size_t>::max()
+                                      : static_cast<size_t>(q.transformId - 1u);
       float sortDepth = 0.0f;
       if (transformIdx < resolvedWorldTransforms_.size()) {
         const glm::vec3 translation =
@@ -1043,8 +1088,8 @@ TextRenderer::prepareWorldRenderState(RenderFrameContext &frame,
     return upload;
   }
   if (worldGlyphBufferAddress_ == 0u || worldTransformBufferAddress_ == 0u) {
-    return makeError<bool>(
-        "TextRenderer::prepareWorldRenderState: invalid world buffer device address");
+    return makeError<bool>("TextRenderer::prepareWorldRenderState: invalid "
+                           "world buffer device address");
   }
 
   worldDependencyBuffer_ = worldFrames_[worldPreparedSlot_].vb;
@@ -1060,11 +1105,9 @@ void TextRenderer::appendWorldTransparentTextureRead(TextureHandle texture) {
   }
 }
 
-Result<bool, std::string>
-TextRenderer::append3DGraphPass(RenderFrameContext &frame,
-                                RenderGraphBuilder &graph,
-                                RenderGraphTextureId sceneDepthGraphTexture,
-                                bool hasPriorColorPass) {
+Result<bool, std::string> TextRenderer::append3DGraphPass(
+    RenderFrameContext &frame, RenderGraphBuilder &graph,
+    RenderGraphTextureId sceneDepthGraphTexture, bool hasPriorColorPass) {
   NURI_PROFILER_FUNCTION();
   TextureHandle depthTexture{};
   [[maybe_unused]] Format depthFormat = Format::Count;
@@ -1144,7 +1187,8 @@ TextRenderer::append3DGraphPass(RenderFrameContext &frame,
       desc.depthTexture = depthImportResult.value();
     }
   }
-  desc.draws = std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
+  desc.draws =
+      std::span<const DrawItem>(worldDraws_.data(), worldDraws_.size());
   desc.dependencyBuffers =
       std::span<const BufferHandle>(&worldDependencyBuffer_, 1u);
   desc.debugLabel = "Text3D Pass";
@@ -1170,9 +1214,8 @@ TextRenderer::append3DGraphPass(RenderFrameContext &frame,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-TextRenderer::buildTransparentStageContribution(RenderFrameContext &frame,
-                                                TransparentStageContribution &out) {
+Result<bool, std::string> TextRenderer::buildTransparentStageContribution(
+    RenderFrameContext &frame, TransparentStageContribution &out) {
   NURI_PROFILER_FUNCTION();
   out = {};
   TextureHandle depthTexture{};
@@ -1232,12 +1275,12 @@ TextRenderer::buildTransparentStageContribution(RenderFrameContext &frame,
   out.sortableDraws = std::span<const TransparentStageSortableDraw>(
       worldTransparentDraws_.data(), worldTransparentDraws_.size());
   out.fixedDraws = {};
-  out.dependencyBuffers = std::span<const BufferHandle>(
-      worldTransparentDependencyBuffers_.data(),
-      worldTransparentDependencyBuffers_.size());
-  out.textureReads = std::span<const TextureHandle>(
-      worldTransparentTextureReadList_.data(),
-      worldTransparentTextureReadList_.size());
+  out.dependencyBuffers =
+      std::span<const BufferHandle>(worldTransparentDependencyBuffers_.data(),
+                                    worldTransparentDependencyBuffers_.size());
+  out.textureReads =
+      std::span<const TextureHandle>(worldTransparentTextureReadList_.data(),
+                                     worldTransparentTextureReadList_.size());
   worldAppended_ = true;
   return Result<bool, std::string>::makeResult(true);
 }

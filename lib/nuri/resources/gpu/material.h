@@ -5,8 +5,9 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/resources/cpu/material_data.h"
 
-#include <cstdint>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -115,25 +116,29 @@ struct alignas(16) MaterialGpuData {
   glm::vec4 metallicRoughnessOcclusionAlphaCutoff{1.0f, 1.0f, 1.0f, 0.5f};
   glm::vec4 sheenColorFactorWeight{1.0f, 1.0f, 1.0f, 0.0f};
   glm::vec4 sheenRoughnessClearcoatFactors{
-      0.0f, 0.0f, 0.0f,
-      1.0f}; // (sheenRoughness, clearcoatFactor, clearcoatRoughness, clearcoatNormalScale)
+      0.0f, 0.0f, 0.0f, 1.0f}; // (sheenRoughness, clearcoatFactor,
+                               // clearcoatRoughness, clearcoatNormalScale)
   glm::uvec4 textureIndices0{
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
       kInvalidTextureBindlessIndex,
-      kInvalidTextureBindlessIndex}; // (baseColor, metallicRoughness, normal, occlusion)
+      kInvalidTextureBindlessIndex}; // (baseColor, metallicRoughness, normal,
+                                     // occlusion)
   glm::uvec4 textureIndices1{
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
       kInvalidTextureBindlessIndex,
-      kInvalidTextureBindlessIndex}; // (emissive, clearcoat, clearcoatRoughness, clearcoatNormal)
+      kInvalidTextureBindlessIndex}; // (emissive, clearcoat,
+                                     // clearcoatRoughness, clearcoatNormal)
   glm::uvec4 textureIndices2{
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
       kInvalidTextureBindlessIndex,
-      kInvalidTextureBindlessIndex}; // (sheenColor, sheenRoughness, unused, unused)
-  glm::uvec4 textureUvSets0{0u, 0u, 0u,
-                            0u}; // UV sets for (baseColor, metallicRoughness, normal, occlusion)
-  glm::uvec4 textureUvSets1{
+      kInvalidTextureBindlessIndex}; // (sheenColor, sheenRoughness, unused,
+                                     // unused)
+  glm::uvec4 textureUvSets0{
       0u, 0u, 0u,
-      0u}; // UV sets for (emissive, clearcoat, clearcoatRoughness, clearcoatNormal)
+      0u}; // UV sets for (baseColor, metallicRoughness, normal, occlusion)
+  glm::uvec4 textureUvSets1{0u, 0u, 0u,
+                            0u}; // UV sets for (emissive, clearcoat,
+                                 // clearcoatRoughness, clearcoatNormal)
   glm::uvec4 textureUvSets2{
       0u, 0u, 0u,
       0u}; // UV sets for (sheenColor, sheenRoughness, unused, unused)
@@ -141,34 +146,27 @@ struct alignas(16) MaterialGpuData {
   glm::uvec4 textureSamplerIndices1{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices2{0u, 0u, 0u, 0u};
   std::array<glm::vec4, kMaterialTextureSlotCount> textureTransformOffsetScale{
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
-      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f), glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f), glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f), glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f), glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
+      glm::vec4(0.0f, 0.0f, 1.0f, 1.0f), glm::vec4(0.0f, 0.0f, 1.0f, 1.0f),
   };
   std::array<glm::vec4, kMaterialTextureSlotCount> textureTransformRotation{
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
   };
-  glm::uvec4 materialFlags{
-      static_cast<uint32_t>(MaterialAlphaMode::Opaque), 0u,
-      kMaterialFeatureMetallicRoughness,
-      0u}; // Kept as a full std430 slot: (alphaMode, doubleSided, featureMask, reserved)
+  glm::uvec4 materialFlags{static_cast<uint32_t>(MaterialAlphaMode::Opaque), 0u,
+                           kMaterialFeatureMetallicRoughness,
+                           0u}; // Kept as a full std430 slot: (alphaMode,
+                                // doubleSided, featureMask, reserved)
 };
+inline constexpr size_t kMaterialGpuDataStd430Size = 35u * sizeof(glm::vec4);
+static_assert(sizeof(MaterialGpuData) == kMaterialGpuDataStd430Size,
+              "MaterialGpuData size mismatch - update shader struct");
 static_assert(sizeof(MaterialGpuData) % 16u == 0u,
               "MaterialGpuData must be 16-byte aligned for std430");
 

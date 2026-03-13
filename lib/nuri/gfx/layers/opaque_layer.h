@@ -50,7 +50,8 @@ public:
   void onDetach() override;
   void onResize(int32_t width, int32_t height) override;
   Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
+  buildRenderGraph(RenderFrameContext &frame,
+                   RenderGraphBuilder &graph) override;
 
 private:
   enum FrameDataFlags : uint32_t {
@@ -99,12 +100,12 @@ private:
                 "OpaqueLayer::PushConstants exceeds Vulkan minimum guarantee");
 
   struct RenderableTemplate {
-    const OpaqueRenderable *renderable = nullptr;
+    const Renderable *renderable = nullptr;
     const Model *model = nullptr;
   };
 
   struct MeshDrawTemplate {
-    const OpaqueRenderable *renderable = nullptr;
+    const Renderable *renderable = nullptr;
     const Submesh *submesh = nullptr;
     uint32_t submeshIndex = 0;
     uint32_t instanceIndex = 0;
@@ -188,11 +189,12 @@ private:
   [[nodiscard]] bool shouldEnableSingleInstanceTessPipeline(
       bool tessellationRequested, uint32_t requestedLod,
       const glm::vec3 &cameraPosition, float tessFarDistanceSq) const;
-  Result<bool, std::string> ensureSingleInstanceBatchCache(
-      uint32_t requestedLod, bool tessPipelineEnabled,
-      const DrawItem &baseDraw);
-  [[nodiscard]] size_t singleInstanceCacheIndex(
-      uint32_t requestedLod, bool tessPipelineEnabled) const;
+  Result<bool, std::string>
+  ensureSingleInstanceBatchCache(uint32_t requestedLod,
+                                 bool tessPipelineEnabled,
+                                 const DrawItem &baseDraw);
+  [[nodiscard]] size_t singleInstanceCacheIndex(uint32_t requestedLod,
+                                                bool tessPipelineEnabled) const;
   Result<bool, std::string> buildIndirectDraws(uint32_t frameSlot,
                                                size_t remapCount,
                                                uint64_t drawSignature,
@@ -212,10 +214,11 @@ private:
                                     const ResourceManager &resources);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
-  Result<bool, std::string> buildOpaquePasses(RenderFrameContext &frame,
-                                              std::pmr::vector<PreparedGraphPass> &out);
-  [[nodiscard]] RenderPipelineHandle selectMeshPipeline(
-      bool doubleSided, bool tessellated) const;
+  Result<bool, std::string>
+  buildOpaquePasses(RenderFrameContext &frame,
+                    std::pmr::vector<PreparedGraphPass> &out);
+  [[nodiscard]] RenderPipelineHandle selectMeshPipeline(bool doubleSided,
+                                                        bool tessellated) const;
   [[nodiscard]] RenderPipelineHandle
   selectPickPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] bool isDoubleSidedPipeline(RenderPipelineHandle handle) const;
