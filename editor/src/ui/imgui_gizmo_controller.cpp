@@ -48,7 +48,7 @@ struct ImGuizmoController::Impl {
 
     const Renderable *selectedRenderable = nullptr;
     if (selectedOpaqueIndex.has_value()) {
-      selectedRenderable = scene.opaqueRenderable(*selectedOpaqueIndex);
+      selectedRenderable = scene.renderable(*selectedOpaqueIndex);
       if (selectedRenderable == nullptr) {
         clearSelectionState();
       }
@@ -212,7 +212,7 @@ private:
       return;
     }
 
-    if (scene.opaqueRenderable(pickResult.renderableIndex) == nullptr) {
+    if (scene.renderable(pickResult.renderableIndex) == nullptr) {
       clearSelectionState();
       return;
     }

@@ -23,7 +23,7 @@ RenderScene::RenderScene(std::pmr::memory_resource *memory)
     : renderables_(memory ? memory : std::pmr::get_default_resource()) {}
 
 RenderScene::~RenderScene() {
-  clearOpaqueRenderables();
+  clearRenderables();
   setEnvironment(EnvironmentHandles{});
 }
 
@@ -155,12 +155,6 @@ void RenderScene::clearRenderables() {
   ++topologyVersion_;
   ++transformVersion_;
 }
-
-const Renderable *RenderScene::opaqueRenderable(uint32_t index) const {
-  return renderable(index);
-}
-
-void RenderScene::clearOpaqueRenderables() { clearRenderables(); }
 
 void RenderScene::bindResources(ResourceManager *resources) {
   if (resources_ == resources) {

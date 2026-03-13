@@ -471,12 +471,8 @@ void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
   if (yyjson_is_obj(sheenExt)) {
     (void)tryReadJsonVec3(yyjson_obj_get(sheenExt, "sheenColorFactor"),
                           material.sheenColorFactor);
-    material.sheenColorFactor.x =
-        std::clamp(material.sheenColorFactor.x, 0.0f, 1.0f);
-    material.sheenColorFactor.y =
-        std::clamp(material.sheenColorFactor.y, 0.0f, 1.0f);
-    material.sheenColorFactor.z =
-        std::clamp(material.sheenColorFactor.z, 0.0f, 1.0f);
+    material.sheenColorFactor =
+        glm::clamp(material.sheenColorFactor, 0.0f, 1.0f);
     (void)tryReadJsonFloat(yyjson_obj_get(sheenExt, "sheenRoughnessFactor"),
                            material.sheenRoughnessFactor);
     material.sheenRoughnessFactor =

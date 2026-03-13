@@ -195,8 +195,7 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
     return Result<bool, std::string>::makeResult(true);
   }
 
-  const std::span<const Renderable> renderables =
-      frame.scene->opaqueRenderables();
+  const std::span<const Renderable> renderables = frame.scene->renderables();
   if (renderables.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }

@@ -54,18 +54,12 @@ public:
     return renderables_;
   }
   void clearRenderables();
-
-  [[nodiscard]] const Renderable *opaqueRenderable(uint32_t index) const;
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
     return topologyVersion_;
   }
   [[nodiscard]] uint64_t transformVersion() const noexcept {
     return transformVersion_;
   }
-  [[nodiscard]] std::span<const Renderable> opaqueRenderables() const {
-    return renderables_;
-  }
-  void clearOpaqueRenderables();
   void bindResources(ResourceManager *resources);
 
   void setEnvironment(EnvironmentHandles handles);

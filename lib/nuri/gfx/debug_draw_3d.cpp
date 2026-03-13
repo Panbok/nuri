@@ -315,14 +315,14 @@ void DebugDraw3D::syncFrameBufferCount(uint32_t swapchainImageCount) {
 }
 
 Result<bool, std::string>
-DebugDraw3D::ensureLineBufferCapacity(uint32_t frameIndex,
+DebugDraw3D::ensureLineBufferCapacity(uint64_t frameIndex,
                                       size_t requiredSize) {
   if (frameIndex >= frameBuffers_.size()) {
     return Result<bool, std::string>::makeError(
         "DebugDraw3D: frame index out of range");
   }
 
-  FrameBufferState &frame = frameBuffers_[frameIndex];
+  FrameBufferState &frame = frameBuffers_[static_cast<size_t>(frameIndex)];
   if (nuri::isValid(frame.buffer) && frame.capacityBytes >= requiredSize) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -381,11 +381,11 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
 
   syncFrameBufferCount(gpu_.getSwapchainImageCount());
 
-  const uint32_t imageCount = static_cast<uint32_t>(frameBuffers_.size());
+  const uint64_t imageCount = static_cast<uint64_t>(frameBuffers_.size());
   // Use the renderer's logical frame index here as well to avoid forcing a
   // swapchain acquire while only preparing upload buffers.
-  const uint32_t frameIndex =
-      static_cast<uint32_t>(frameIndexValue % imageCount);
+  const uint64_t frameIndex = frameIndexValue % imageCount;
+  const size_t frameSlot = static_cast<size_t>(frameIndex);
   const size_t requiredBytes = lines_.size() * sizeof(LineData);
 
   auto lineBufferResult = ensureLineBufferCapacity(frameIndex, requiredBytes);
@@ -397,7 +397,7 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
   const std::span<const std::byte> lineBytes{
       reinterpret_cast<const std::byte *>(lines_.data()), requiredBytes};
   auto updateResult =
-      gpu_.updateBuffer(frameBuffers_[frameIndex].buffer, lineBytes, 0);
+      gpu_.updateBuffer(frameBuffers_[frameSlot].buffer, lineBytes, 0);
   if (updateResult.hasError()) {
     return Result<PreparedGraphPass, std::string>::makeError(
         updateResult.error());
@@ -413,7 +413,7 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
   }
 
   const uint64_t address =
-      gpu_.getBufferDeviceAddress(frameBuffers_[frameIndex].buffer);
+      gpu_.getBufferDeviceAddress(frameBuffers_[frameSlot].buffer);
   if (address == 0) {
     return Result<PreparedGraphPass, std::string>::makeError(
         "DebugDraw3D: invalid line buffer GPU address");
@@ -431,7 +431,7 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
       sizeof(pushConstants_));
   drawItem_.debugLabel = "DebugDraw3D Draw";
   drawItem_.debugColor = 0xffffcc00u;
-  dependencyBuffer_ = frameBuffers_[frameIndex].buffer;
+  dependencyBuffer_ = frameBuffers_[frameSlot].buffer;
   if (nuri::isValid(depthTexture)) {
     drawItem_.useDepthState = true;
     drawItem_.depthState = {

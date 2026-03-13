@@ -507,7 +507,9 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   resolvedDesc.featureMask = kMaterialFeatureMetallicRoughness;
   if (hasSheenData(resolvedDesc, request.textureRefs)) {
     resolvedDesc.featureMask |= kMaterialFeatureSheen;
-    resolvedDesc.sheenWeight = 1.0f;
+    if (resolvedDesc.sheenWeight <= 0.0f) {
+      resolvedDesc.sheenWeight = 1.0f;
+    }
   }
   const bool hasAnyClearcoatTexture =
       isValid(request.textureRefs.clearcoat) ||

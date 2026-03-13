@@ -3430,7 +3430,7 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
   renderableTemplates_.clear();
   meshDrawTemplates_.clear();
 
-  const std::span<const Renderable> renderables = scene.opaqueRenderables();
+  const std::span<const Renderable> renderables = scene.renderables();
   if (renderables.size() >
       static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
     return Result<bool, std::string>::makeError(
@@ -3563,17 +3563,18 @@ Result<bool, std::string> OpaqueLayer::rebuildMaterialTextureAccessCache(
     const RenderScene &scene, const ResourceManager &resources) {
   NURI_PROFILER_FUNCTION();
   materialTextureAccessHandles_.clear();
-  if (scene.opaqueRenderables().empty()) {
+  const std::span<const Renderable> renderables = scene.renderables();
+  if (renderables.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
 
   ScratchArena scratch;
   ScopedScratch scopedScratch(scratch);
   PmrHashSet<uint64_t> textureKeys(scopedScratch.resource());
-  textureKeys.reserve(scene.opaqueRenderables().size());
-  materialTextureAccessHandles_.reserve(scene.opaqueRenderables().size());
+  textureKeys.reserve(renderables.size());
+  materialTextureAccessHandles_.reserve(renderables.size());
 
-  for (const Renderable &renderable : scene.opaqueRenderables()) {
+  for (const Renderable &renderable : renderables) {
     const MaterialRecord *materialRecord =
         resources.tryGet(renderable.material);
     if (materialRecord == nullptr) {

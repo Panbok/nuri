@@ -69,7 +69,7 @@ private:
                                                          Format depthFormat);
   void syncFrameBufferCount(uint32_t swapchainImageCount);
   [[nodiscard]] Result<bool, std::string>
-  ensureLineBufferCapacity(uint32_t frameIndex, size_t requiredSize);
+  ensureLineBufferCapacity(uint64_t frameIndex, size_t requiredSize);
 
   GPUDevice &gpu_;
   glm::mat4 mvp_ = glm::mat4(1.0f);
