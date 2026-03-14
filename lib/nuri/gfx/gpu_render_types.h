@@ -64,6 +64,48 @@ struct ComputeDispatchItem {
   uint32_t debugColor = 0xffffffffu;
 };
 
+enum class GraphicsBarrierResourceKind : uint8_t {
+  Texture = 0,
+  Buffer = 1,
+};
+
+enum class GraphicsBarrierAccessMode : uint8_t {
+  None = 0,
+  Read = 1u << 0u,
+  Write = 1u << 1u,
+};
+
+[[nodiscard]] constexpr GraphicsBarrierAccessMode
+operator|(GraphicsBarrierAccessMode lhs, GraphicsBarrierAccessMode rhs) {
+  return static_cast<GraphicsBarrierAccessMode>(static_cast<uint8_t>(lhs) |
+                                                static_cast<uint8_t>(rhs));
+}
+
+[[nodiscard]] constexpr bool
+hasGraphicsBarrierAccessFlag(GraphicsBarrierAccessMode mode,
+                             GraphicsBarrierAccessMode flag) {
+  return (static_cast<uint8_t>(mode) & static_cast<uint8_t>(flag)) != 0u;
+}
+
+enum class GraphicsBarrierState : uint8_t {
+  Unknown = 0,
+  Read = 1,
+  Write = 2,
+  Attachment = 3,
+  Present = 4,
+};
+
+struct GraphicsBarrierRecord {
+  GraphicsBarrierResourceKind resourceKind =
+      GraphicsBarrierResourceKind::Texture;
+  TextureHandle texture{};
+  BufferHandle buffer{};
+  GraphicsBarrierAccessMode beforeAccess = GraphicsBarrierAccessMode::None;
+  GraphicsBarrierAccessMode afterAccess = GraphicsBarrierAccessMode::None;
+  GraphicsBarrierState beforeState = GraphicsBarrierState::Unknown;
+  GraphicsBarrierState afterState = GraphicsBarrierState::Unknown;
+};
+
 enum class DrawCommandType : uint8_t {
   Direct,
   IndexedIndirect,
@@ -116,6 +158,12 @@ struct RenderPass {
   std::span<const DrawItem> draws{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
+};
+
+struct SubmitBatchMeta {
+  uint32_t commandBufferOffset = 0u;
+  uint32_t commandBufferCount = 0u;
+  bool presentsFrameOutput = false;
 };
 
 struct RenderFrame {

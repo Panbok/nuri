@@ -8,6 +8,7 @@
 #include "nuri/resources/gpu/geometry_pool.h"
 
 #include <lvk/LVK.h>
+#include <lvk/vulkan/VulkanClasses.h>
 #include <vulkan/VulkanUtils.h>
 
 namespace nuri {
@@ -116,6 +117,9 @@ lvk::TextureUsageBits toLvkTextureUsage(TextureUsage usage) {
     return lvk::TextureUsageBits_Storage;
   case TextureUsage::Attachment:
     return lvk::TextureUsageBits_Attachment;
+  case TextureUsage::AttachmentSampled:
+    return static_cast<lvk::TextureUsageBits>(lvk::TextureUsageBits_Attachment |
+                                              lvk::TextureUsageBits_Sampled);
   case TextureUsage::InputAttachment:
     return lvk::TextureUsageBits_InputAttachment;
   case TextureUsage::Count:
@@ -309,6 +313,26 @@ template <typename HandleType>
   return a.index == b.index && a.generation == b.generation;
 }
 
+[[nodiscard]] SubmissionHandle
+toNuriSubmissionHandle(lvk::SubmitHandle handle) {
+  if (handle.empty()) {
+    return {};
+  }
+  return SubmissionHandle{
+      .index = handle.bufferIndex_,
+      .generation = handle.submitId_,
+  };
+}
+
+[[nodiscard]] lvk::SubmitHandle toLvkSubmitHandle(SubmissionHandle handle) {
+  if (!isValid(handle)) {
+    return {};
+  }
+  const uint64_t packed =
+      (static_cast<uint64_t>(handle.generation) << 32u) + handle.index;
+  return lvk::SubmitHandle(packed);
+}
+
 [[nodiscard]] bool pushDebugLabel(lvk::ICommandBuffer &commandBuffer,
                                   std::string_view label, uint32_t color) {
   if (label.empty()) {
@@ -353,6 +377,30 @@ makeDependencyCountExceededError(std::string_view context) {
         context, std::string_view(detail.data(), static_cast<size_t>(written)));
   }
   return makeDependencyError(context, "dependency buffer count exceeds limit");
+}
+
+[[nodiscard]] VkPipelineStageFlags2
+graphicsBarrierStages(GraphicsBarrierState state, bool isDepthTexture) {
+  switch (state) {
+  case GraphicsBarrierState::Attachment:
+    return isDepthTexture ? (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                             VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT)
+                          : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+  case GraphicsBarrierState::Present:
+    return VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+  case GraphicsBarrierState::Read:
+  case GraphicsBarrierState::Write:
+  case GraphicsBarrierState::Unknown:
+  default:
+    return VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+           VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+           VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+           VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+           VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+           VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+  }
 }
 
 } // namespace
@@ -475,6 +523,17 @@ struct FramebufferTexture {
   std::string debugName;
 };
 
+struct ActiveGraphicsRecordingContext {
+  RecordingContextHandle handle{};
+  lvk::ICommandBuffer *commandBuffer = nullptr;
+  uint32_t workerIndex = 0u;
+};
+
+struct RecordedGraphicsCommandBuffer {
+  RecordedCommandBufferHandle handle{};
+  lvk::ICommandBuffer *commandBuffer = nullptr;
+};
+
 struct LvkGPUDevice::Impl {
   Window *window = nullptr;
   std::unique_ptr<lvk::IContext> context;
@@ -489,6 +548,13 @@ struct LvkGPUDevice::Impl {
   ResourceTable<ComputePipelineHandle, lvk::ComputePipelineHandle>
       computePipelines;
   std::vector<FramebufferTexture> framebufferTextures;
+  mutable std::mutex contextImmediateMutex;
+  std::mutex graphicsContextMutex;
+  std::vector<ActiveGraphicsRecordingContext> activeGraphicsContexts;
+  std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
+  lvk::TextureHandle currentFrameSwapchainTexture{};
+  uint32_t nextRecordingContextIndex = 1u;
+  uint32_t nextRecordedCommandBufferIndex = 1u;
   std::unique_ptr<GeometryPool> geometryPool;
 };
 
@@ -549,9 +615,8 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
     cubemapSamplerDesc.debugName = "nuri_cubemap_sampler";
 
     lvk::Result samplerResult;
-    device->impl_->cubemapSampler =
-        device->impl_->context->createSampler(cubemapSamplerDesc,
-                                              &samplerResult);
+    device->impl_->cubemapSampler = device->impl_->context->createSampler(
+        cubemapSamplerDesc, &samplerResult);
     if (!samplerResult.isOk() || !device->impl_->cubemapSampler.valid()) {
       NURI_LOG_WARNING("LvkGPUDevice::create: Failed to create cubemap "
                        "sampler, falling back to sampler index 0: %s",
@@ -602,6 +667,10 @@ void LvkGPUDevice::getFramebufferSize(int32_t &outWidth,
 
 void LvkGPUDevice::resizeSwapchain(int32_t width, int32_t height) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  {
+    std::lock_guard immediateLock(impl_->contextImmediateMutex);
+    impl_->currentFrameSwapchainTexture = {};
+  }
   impl_->context->recreateSwapchain(width, height);
   impl_->context->wait(lvk::SubmitHandle{});
   if (!width || !height) {
@@ -691,10 +760,37 @@ double LvkGPUDevice::getTime() const {
 }
 
 Result<bool, std::string> LvkGPUDevice::beginFrame(uint64_t frameIndex) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_WAIT);
+  {
+    std::lock_guard immediateLock(impl_->contextImmediateMutex);
+    impl_->currentFrameSwapchainTexture = {};
+  }
   if (!impl_->geometryPool) {
     return Result<bool, std::string>::makeResult(true);
   }
   return impl_->geometryPool->beginFrame(frameIndex);
+}
+
+Result<bool, std::string> LvkGPUDevice::prepareFrameOutput() {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_WAIT);
+  if (!impl_ || !impl_->context) {
+    return Result<bool, std::string>::makeError(
+        "LvkGPUDevice::prepareFrameOutput: context is null");
+  }
+  std::lock_guard immediateLock(impl_->contextImmediateMutex);
+  if (!impl_->currentFrameSwapchainTexture.valid()) {
+    NURI_PROFILER_ZONE("LvkGPUDevice.acquire_swapchain_texture",
+                       NURI_PROFILER_COLOR_WAIT);
+    impl_->currentFrameSwapchainTexture =
+        impl_->context->getCurrentSwapchainTexture();
+    NURI_PROFILER_ZONE_END();
+  }
+  if (!impl_->currentFrameSwapchainTexture.valid()) {
+    return Result<bool, std::string>::makeError(
+        "LvkGPUDevice::prepareFrameOutput: failed to acquire swapchain "
+        "texture");
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<BufferHandle, std::string>
@@ -1358,21 +1454,17 @@ void LvkGPUDevice::releaseGeometry(GeometryAllocationHandle h) {
   }
 }
 
-Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
+Result<bool, std::string>
+LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
+                                 std::span<const RenderPass> passes) {
   static_assert(kMaxDependencyBuffers <=
                 lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES);
-  if (frame.passes.empty()) {
+  if (passes.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
   const lvk::TextureHandle swapchainTexture =
-      impl_->context->getCurrentSwapchainTexture();
-  if (!swapchainTexture.valid()) {
-    return Result<bool, std::string>::makeError(
-        "LvkGPUDevice::submitFrame: invalid swapchain texture");
-  }
+      impl_->currentFrameSwapchainTexture;
   const auto fillDependencies =
       [this](std::span<const BufferHandle> dependencyBuffers,
              lvk::Dependencies &deps,
@@ -1396,7 +1488,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
   const bool supportsIndexedIndirectCount =
       impl_->context->supportsDrawIndexedIndirectCount();
 
-  for (const RenderPass &pass : frame.passes) {
+  for (const RenderPass &pass : passes) {
     const bool passLabelPushed =
         pushDebugLabel(commandBuffer, pass.debugLabel, pass.debugColor);
     const auto returnPassError =
@@ -1422,17 +1514,24 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
                        pass.color.clearColor.b, pass.color.clearColor.a},
     };
 
-    lvk::TextureHandle colorTexture = swapchainTexture;
+    lvk::TextureHandle colorTexture{};
     if (nuri::isValid(pass.colorTexture)) {
       if (!impl_->textures.isValid(pass.colorTexture)) {
         return returnPassError(
-            "LvkGPUDevice::submitFrame: invalid pass color texture handle");
+            "LvkGPUDevice::recordGraphicsPass: invalid pass color texture "
+            "handle");
       }
       colorTexture = impl_->textures.getLvkHandle(pass.colorTexture);
       if (!colorTexture.valid()) {
         return returnPassError(
-            "LvkGPUDevice::submitFrame: invalid LVK pass color texture "
+            "LvkGPUDevice::recordGraphicsPass: invalid LVK pass color texture "
             "handle");
+      }
+    } else {
+      colorTexture = swapchainTexture;
+      if (!colorTexture.valid()) {
+        return returnPassError(
+            "LvkGPUDevice::recordGraphicsPass: invalid swapchain texture");
       }
     }
 
@@ -1442,13 +1541,14 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     if (nuri::isValid(pass.depthTexture)) {
       if (!impl_->textures.isValid(pass.depthTexture)) {
         return returnPassError(
-            "LvkGPUDevice::submitFrame: invalid pass depth texture handle");
+            "LvkGPUDevice::recordGraphicsPass: invalid pass depth texture "
+            "handle");
       }
       const lvk::TextureHandle depthTexture =
           impl_->textures.getLvkHandle(pass.depthTexture);
       if (!depthTexture.valid()) {
         return returnPassError(
-            "LvkGPUDevice::submitFrame: invalid LVK pass depth texture "
+            "LvkGPUDevice::recordGraphicsPass: invalid LVK pass depth texture "
             "handle");
       }
       renderPass.depth = {
@@ -1477,9 +1577,9 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         }
 
         lvk::Dependencies dispatchDependencies{};
-        auto dispatchDepsResult =
-            fillDependencies(dispatch.dependencyBuffers, dispatchDependencies,
-                             "LvkGPUDevice::submitFrame compute dispatch");
+        auto dispatchDepsResult = fillDependencies(
+            dispatch.dependencyBuffers, dispatchDependencies,
+            "LvkGPUDevice::recordGraphicsPass compute dispatch");
         if (dispatchDepsResult.hasError()) {
           return returnPassErrorResult(dispatchDepsResult);
         }
@@ -1514,7 +1614,7 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     lvk::Dependencies renderDependencies{};
     auto renderDepsResult =
         fillDependencies(pass.dependencyBuffers, renderDependencies,
-                         "LvkGPUDevice::submitFrame render pass");
+                         "LvkGPUDevice::recordGraphicsPass render pass");
     if (renderDepsResult.hasError()) {
       return returnPassErrorResult(renderDepsResult);
     }
@@ -1534,8 +1634,6 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
       return Result<bool, std::string>::makeError(std::string(message));
     };
 
-    // Pipelines use dynamic viewport/scissor in LVK, so we must bind them for
-    // every pass (even if the pass didn't specify overrides).
     Viewport vp{};
     if (pass.useViewport) {
       vp = pass.viewport;
@@ -1559,7 +1657,6 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
         .minDepth = vp.minDepth,
         .maxDepth = vp.maxDepth,
     });
-    // Default scissor for the pass; individual draws may override.
     const lvk::ScissorRect viewportScissor = {
         static_cast<uint32_t>(vp.x),
         static_cast<uint32_t>(vp.y),
@@ -1755,8 +1852,289 @@ Result<bool, std::string> LvkGPUDevice::submitFrame(const RenderFrame &frame) {
     }
   }
 
-  impl_->context->submit(commandBuffer, swapchainTexture);
   return Result<bool, std::string>::makeResult(true);
+}
+
+bool LvkGPUDevice::supportsParallelGraphicsRecording() const { return true; }
+
+uint32_t LvkGPUDevice::maxParallelGraphicsRecordingContexts() const {
+  return 8u;
+}
+
+Result<RecordingContextHandle, std::string>
+LvkGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
+  if (!impl_->context) {
+    return Result<RecordingContextHandle, std::string>::makeError(
+        "LvkGPUDevice::acquireGraphicsRecordingContext: context is null");
+  }
+  std::scoped_lock lock(impl_->contextImmediateMutex,
+                        impl_->graphicsContextMutex);
+  lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
+  RecordingContextHandle handle{};
+  handle = RecordingContextHandle{.index = impl_->nextRecordingContextIndex++,
+                                  .generation = 1u};
+  impl_->activeGraphicsContexts.push_back(ActiveGraphicsRecordingContext{
+      .handle = handle,
+      .commandBuffer = &commandBuffer,
+      .workerIndex = workerIndex,
+  });
+  return Result<RecordingContextHandle, std::string>::makeResult(handle);
+}
+
+Result<bool, std::string>
+LvkGPUDevice::recordGraphicsBarriers(RecordingContextHandle ctx,
+                                     const GraphicsBarrierRecord *barriers,
+                                     uint32_t barrierCount) {
+  if (barrierCount == 0u) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (barriers == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "LvkGPUDevice::recordGraphicsBarriers: barrier array is null");
+  }
+
+  lvk::ICommandBuffer *rawCommandBuffer = nullptr;
+  {
+    std::lock_guard lock(impl_->graphicsContextMutex);
+    for (const auto &entry : impl_->activeGraphicsContexts) {
+      if (!areSameHandle(entry.handle, ctx)) {
+        continue;
+      }
+      rawCommandBuffer = entry.commandBuffer;
+      break;
+    }
+  }
+  if (rawCommandBuffer == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "LvkGPUDevice::recordGraphicsBarriers: unknown recording context");
+  }
+
+  auto *commandBuffer = dynamic_cast<lvk::CommandBuffer *>(rawCommandBuffer);
+  if (commandBuffer == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "LvkGPUDevice::recordGraphicsBarriers: command buffer type is "
+        "unsupported");
+  }
+
+  for (uint32_t i = 0u; i < barrierCount; ++i) {
+    const GraphicsBarrierRecord &barrier = barriers[i];
+    if (barrier.resourceKind == GraphicsBarrierResourceKind::Texture) {
+      if (!nuri::isValid(barrier.texture) ||
+          !impl_->textures.isValid(barrier.texture)) {
+        return Result<bool, std::string>::makeError(
+            "LvkGPUDevice::recordGraphicsBarriers: texture barrier handle "
+            "is invalid");
+      }
+
+      const lvk::TextureHandle texture =
+          impl_->textures.getLvkHandle(barrier.texture);
+      switch (barrier.afterState) {
+      case GraphicsBarrierState::Read:
+        rawCommandBuffer->transitionToShaderReadOnly(texture);
+        break;
+      case GraphicsBarrierState::Attachment:
+        commandBuffer->transitionTextureLayout(
+            texture, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL);
+        break;
+      case GraphicsBarrierState::Write:
+        commandBuffer->transitionTextureLayout(texture,
+                                               VK_IMAGE_LAYOUT_GENERAL);
+        break;
+      case GraphicsBarrierState::Present:
+        commandBuffer->transitionTextureLayout(texture,
+                                               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        break;
+      case GraphicsBarrierState::Unknown:
+      default:
+        break;
+      }
+      continue;
+    }
+
+    if (!nuri::isValid(barrier.buffer) ||
+        !impl_->buffers.isValid(barrier.buffer)) {
+      return Result<bool, std::string>::makeError(
+          "LvkGPUDevice::recordGraphicsBarriers: buffer barrier handle is "
+          "invalid");
+    }
+
+    const VkPipelineStageFlags2 srcStage =
+        graphicsBarrierStages(barrier.beforeState, false);
+    const VkPipelineStageFlags2 dstStage =
+        graphicsBarrierStages(barrier.afterState, false);
+    commandBuffer->bufferBarrier(impl_->buffers.getLvkHandle(barrier.buffer),
+                                 srcStage, dstStage);
+  }
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+LvkGPUDevice::recordGraphicsPass(RecordingContextHandle ctx,
+                                 const RenderPass &pass) {
+  lvk::ICommandBuffer *commandBuffer = nullptr;
+  {
+    std::lock_guard lock(impl_->graphicsContextMutex);
+    for (const auto &entry : impl_->activeGraphicsContexts) {
+      if (areSameHandle(entry.handle, ctx)) {
+        commandBuffer = entry.commandBuffer;
+        break;
+      }
+    }
+  }
+  if (commandBuffer != nullptr) {
+    return recordRenderPasses(*commandBuffer,
+                              std::span<const RenderPass>(&pass, 1u));
+  }
+  return Result<bool, std::string>::makeError(
+      "LvkGPUDevice::recordGraphicsPass: unknown recording context");
+}
+
+Result<RecordedCommandBufferHandle, std::string>
+LvkGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
+  std::lock_guard lock(impl_->graphicsContextMutex);
+  for (size_t i = 0u; i < impl_->activeGraphicsContexts.size(); ++i) {
+    if (!areSameHandle(impl_->activeGraphicsContexts[i].handle, ctx)) {
+      continue;
+    }
+
+    const RecordedCommandBufferHandle handle{
+        .index = impl_->nextRecordedCommandBufferIndex++, .generation = 1u};
+    impl_->recordedGraphicsCommandBuffers.push_back(
+        RecordedGraphicsCommandBuffer{
+            .handle = handle,
+            .commandBuffer = impl_->activeGraphicsContexts[i].commandBuffer,
+        });
+    impl_->activeGraphicsContexts.erase(impl_->activeGraphicsContexts.begin() +
+                                        i);
+    return Result<RecordedCommandBufferHandle, std::string>::makeResult(handle);
+  }
+
+  return Result<RecordedCommandBufferHandle, std::string>::makeError(
+      "LvkGPUDevice::finishGraphicsRecordingContext: unknown recording "
+      "context");
+}
+
+Result<bool, std::string>
+LvkGPUDevice::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
+  std::scoped_lock lock(impl_->contextImmediateMutex,
+                        impl_->graphicsContextMutex);
+  for (size_t i = 0u; i < impl_->activeGraphicsContexts.size(); ++i) {
+    if (!areSameHandle(impl_->activeGraphicsContexts[i].handle, ctx)) {
+      continue;
+    }
+
+    impl_->context->discard(*impl_->activeGraphicsContexts[i].commandBuffer);
+    impl_->activeGraphicsContexts.erase(impl_->activeGraphicsContexts.begin() +
+                                        i);
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  return Result<bool, std::string>::makeError(
+      "LvkGPUDevice::discardGraphicsRecordingContext: unknown recording "
+      "context");
+}
+
+Result<bool, std::string> LvkGPUDevice::discardRecordedGraphicsCommandBuffer(
+    RecordedCommandBufferHandle commandBuffer) {
+  std::scoped_lock lock(impl_->contextImmediateMutex,
+                        impl_->graphicsContextMutex);
+  for (size_t i = 0u; i < impl_->recordedGraphicsCommandBuffers.size(); ++i) {
+    if (!areSameHandle(impl_->recordedGraphicsCommandBuffers[i].handle,
+                       commandBuffer)) {
+      continue;
+    }
+
+    impl_->context->discard(
+        *impl_->recordedGraphicsCommandBuffers[i].commandBuffer);
+    impl_->recordedGraphicsCommandBuffers.erase(
+        impl_->recordedGraphicsCommandBuffers.begin() + i);
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  return Result<bool, std::string>::makeError(
+      "LvkGPUDevice::discardRecordedGraphicsCommandBuffer: unknown command "
+      "buffer");
+}
+
+Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
+    std::span<const RecordedCommandBufferHandle> commandBuffers,
+    std::span<const SubmitBatchMeta> batches) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
+  if (commandBuffers.empty()) {
+    return Result<SubmissionHandle, std::string>::makeResult({});
+  }
+
+  std::scoped_lock lock(impl_->contextImmediateMutex,
+                        impl_->graphicsContextMutex);
+  std::vector<uint8_t> presentFlags(commandBuffers.size(), 0u);
+  for (const SubmitBatchMeta &batch : batches) {
+    if (batch.commandBufferOffset > commandBuffers.size() ||
+        batch.commandBufferCount >
+            commandBuffers.size() - batch.commandBufferOffset) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "LvkGPUDevice::submitRecordedGraphicsFrame: submit batch range is "
+          "out of bounds");
+    }
+    if (batch.presentsFrameOutput && batch.commandBufferCount > 0u) {
+      presentFlags[batch.commandBufferOffset + batch.commandBufferCount - 1u] =
+          1u;
+    }
+  }
+
+  const bool wantsPresent = std::find(presentFlags.begin(), presentFlags.end(),
+                                      1u) != presentFlags.end();
+  const lvk::TextureHandle swapchainTexture =
+      wantsPresent ? impl_->currentFrameSwapchainTexture : lvk::TextureHandle{};
+  if (wantsPresent && !swapchainTexture.valid()) {
+    return Result<SubmissionHandle, std::string>::makeError(
+        "LvkGPUDevice::submitRecordedGraphicsFrame: invalid swapchain "
+        "texture");
+  }
+
+  lvk::SubmitHandle lastSubmitHandle{};
+  for (uint32_t i = 0u; i < commandBuffers.size(); ++i) {
+    lvk::ICommandBuffer *commandBuffer = nullptr;
+    size_t foundIndex = impl_->recordedGraphicsCommandBuffers.size();
+    for (size_t j = 0u; j < impl_->recordedGraphicsCommandBuffers.size(); ++j) {
+      if (areSameHandle(impl_->recordedGraphicsCommandBuffers[j].handle,
+                        commandBuffers[i])) {
+        commandBuffer = impl_->recordedGraphicsCommandBuffers[j].commandBuffer;
+        foundIndex = j;
+        break;
+      }
+    }
+
+    if (commandBuffer == nullptr) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "LvkGPUDevice::submitRecordedGraphicsFrame: unknown recorded "
+          "command buffer");
+    }
+
+    lastSubmitHandle = impl_->context->submit(
+        *commandBuffer,
+        presentFlags[i] != 0u ? swapchainTexture : lvk::TextureHandle{});
+    impl_->recordedGraphicsCommandBuffers.erase(
+        impl_->recordedGraphicsCommandBuffers.begin() + foundIndex);
+  }
+
+  if (wantsPresent) {
+    impl_->currentFrameSwapchainTexture = {};
+  }
+
+  return Result<SubmissionHandle, std::string>::makeResult(
+      toNuriSubmissionHandle(lastSubmitHandle));
+}
+
+bool LvkGPUDevice::isSubmissionComplete(SubmissionHandle handle) const {
+  if (!nuri::isValid(handle)) {
+    return true;
+  }
+  if (!impl_ || !impl_->context) {
+    return false;
+  }
+  std::lock_guard immediateLock(impl_->contextImmediateMutex);
+  return impl_->context->isReady(toLvkSubmitHandle(handle));
 }
 
 Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
@@ -1768,6 +2146,7 @@ Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
     return Result<bool, std::string>::makeResult(true);
   }
 
+  std::lock_guard immediateLock(impl_->contextImmediateMutex);
   lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
   const auto fillDependencies =
       [this](std::span<const BufferHandle> dependencyBuffers,
@@ -1804,9 +2183,9 @@ Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
     }
 
     lvk::Dependencies dispatchDependencies{};
-    auto dispatchDepsResult = fillDependencies(
-        dispatch.dependencyBuffers, dispatchDependencies,
-        "LvkGPUDevice::submitComputeDispatches");
+    auto dispatchDepsResult =
+        fillDependencies(dispatch.dependencyBuffers, dispatchDependencies,
+                         "LvkGPUDevice::submitComputeDispatches");
     if (dispatchDepsResult.hasError()) {
       return dispatchDepsResult;
     }
@@ -1826,11 +2205,10 @@ Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
           static_cast<const void *>(dispatch.pushConstants.data()),
           dispatch.pushConstants.size(), 0);
     }
-    commandBuffer.cmdDispatchThreadGroups(
-        {.width = dispatch.dispatch.x,
-         .height = dispatch.dispatch.y,
-         .depth = dispatch.dispatch.z},
-        dispatchDependencies);
+    commandBuffer.cmdDispatchThreadGroups({.width = dispatch.dispatch.x,
+                                           .height = dispatch.dispatch.y,
+                                           .depth = dispatch.dispatch.z},
+                                          dispatchDependencies);
 
     if (dispatchLabelPushed) {
       commandBuffer.cmdPopDebugGroupLabel();
@@ -1901,9 +2279,8 @@ LvkGPUDevice::readBuffer(BufferHandle buffer, size_t offset,
 
   // Always route readback through LVK's download path so non-coherent mapped
   // memory gets invalidated correctly before host reads.
-  lvk::Result res =
-      impl_->context->download(lvkBuf, static_cast<void *>(outBytes.data()),
-                               outBytes.size(), offset);
+  lvk::Result res = impl_->context->download(
+      lvkBuf, static_cast<void *>(outBytes.data()), outBytes.size(), offset);
   if (!res.isOk()) {
     return Result<bool, std::string>::makeError(std::string(res.message));
   }
@@ -2070,6 +2447,7 @@ LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
     return Result<bool, std::string>::makeResult(true);
   }
 
+  std::lock_guard immediateLock(impl_->contextImmediateMutex);
   lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
   for (const BufferCopyRegion &region : regions) {
     if (region.size == 0) {

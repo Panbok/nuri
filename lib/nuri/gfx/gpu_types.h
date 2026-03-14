@@ -33,6 +33,21 @@ struct ComputePipelineHandle {
   uint32_t generation = 0;
 };
 
+struct RecordingContextHandle {
+  uint32_t index = 0;
+  uint32_t generation = 0;
+};
+
+struct RecordedCommandBufferHandle {
+  uint32_t index = 0;
+  uint32_t generation = 0;
+};
+
+struct SubmissionHandle {
+  uint32_t index = 0;
+  uint32_t generation = 0;
+};
+
 struct GeometryAllocationHandle {
   uint32_t index = 0;
   uint32_t generation = 0;
@@ -43,6 +58,11 @@ constexpr bool isValid(TextureHandle h) { return h.generation != 0; }
 constexpr bool isValid(ShaderHandle h) { return h.generation != 0; }
 constexpr bool isValid(RenderPipelineHandle h) { return h.generation != 0; }
 constexpr bool isValid(ComputePipelineHandle h) { return h.generation != 0; }
+constexpr bool isValid(RecordingContextHandle h) { return h.generation != 0; }
+constexpr bool isValid(RecordedCommandBufferHandle h) {
+  return h.generation != 0;
+}
+constexpr bool isValid(SubmissionHandle h) { return h.generation != 0; }
 constexpr bool isValid(GeometryAllocationHandle h) { return h.generation != 0; }
 
 static_assert(std::is_trivially_destructible_v<BufferHandle>);
@@ -50,6 +70,9 @@ static_assert(std::is_trivially_destructible_v<TextureHandle>);
 static_assert(std::is_trivially_destructible_v<ShaderHandle>);
 static_assert(std::is_trivially_destructible_v<RenderPipelineHandle>);
 static_assert(std::is_trivially_destructible_v<ComputePipelineHandle>);
+static_assert(std::is_trivially_destructible_v<RecordingContextHandle>);
+static_assert(std::is_trivially_destructible_v<RecordedCommandBufferHandle>);
+static_assert(std::is_trivially_destructible_v<SubmissionHandle>);
 static_assert(std::is_trivially_destructible_v<GeometryAllocationHandle>);
 
 // GPU enums (LVK-free)
@@ -96,6 +119,7 @@ enum class TextureUsage : uint8_t {
   Sampled,
   Storage,
   Attachment,
+  AttachmentSampled,
   InputAttachment,
   Count
 };

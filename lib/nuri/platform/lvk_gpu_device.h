@@ -2,6 +2,10 @@
 
 #include "nuri/gfx/gpu_device.h"
 
+namespace lvk {
+class ICommandBuffer;
+}
+
 namespace nuri {
 class LvkGPUDevice final : public GPUDevice {
 public:
@@ -69,7 +73,27 @@ public:
 
   // Rendering
   Result<bool, std::string> beginFrame(uint64_t frameIndex) override;
-  Result<bool, std::string> submitFrame(const RenderFrame &frame) override;
+  Result<bool, std::string> prepareFrameOutput() override;
+  bool supportsParallelGraphicsRecording() const override;
+  uint32_t maxParallelGraphicsRecordingContexts() const override;
+  Result<RecordingContextHandle, std::string>
+  acquireGraphicsRecordingContext(uint32_t workerIndex) override;
+  Result<bool, std::string>
+  recordGraphicsBarriers(RecordingContextHandle ctx,
+                         const GraphicsBarrierRecord *barriers,
+                         uint32_t barrierCount) override;
+  Result<bool, std::string> recordGraphicsPass(RecordingContextHandle ctx,
+                                               const RenderPass &pass) override;
+  Result<RecordedCommandBufferHandle, std::string>
+  finishGraphicsRecordingContext(RecordingContextHandle ctx) override;
+  Result<bool, std::string>
+  discardGraphicsRecordingContext(RecordingContextHandle ctx) override;
+  Result<bool, std::string> discardRecordedGraphicsCommandBuffer(
+      RecordedCommandBufferHandle commandBuffer) override;
+  Result<SubmissionHandle, std::string> submitRecordedGraphicsFrame(
+      std::span<const RecordedCommandBufferHandle> commandBuffers,
+      std::span<const SubmitBatchMeta> batches) override;
+  bool isSubmissionComplete(SubmissionHandle handle) const override;
   Result<bool, std::string> submitComputeDispatches(
       std::span<const ComputeDispatchItem> dispatches) override;
   Result<GeometryAllocationHandle, std::string>
@@ -84,21 +108,23 @@ public:
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
                                          std::span<const std::byte> data,
                                          size_t offset = 0) override;
-  Result<bool, std::string>
-  readBuffer(BufferHandle buffer, size_t offset,
-             std::span<std::byte> outBytes) override;
+  Result<bool, std::string> readBuffer(BufferHandle buffer, size_t offset,
+                                       std::span<std::byte> outBytes) override;
   std::byte *getMappedBufferPtr(BufferHandle buffer) override;
   void flushMappedBuffer(BufferHandle buffer, size_t offset,
                          size_t size) override;
-  Result<bool, std::string>
-  readTexture(TextureHandle texture, const TextureReadbackRegion &region,
-              std::span<std::byte> outBytes) override;
+  Result<bool, std::string> readTexture(TextureHandle texture,
+                                        const TextureReadbackRegion &region,
+                                        std::span<std::byte> outBytes) override;
 
   // Shutdown
   void waitIdle() override;
 
 private:
   LvkGPUDevice();
+  [[nodiscard]] Result<bool, std::string>
+  recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
+                     std::span<const RenderPass> passes);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

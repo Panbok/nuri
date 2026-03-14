@@ -89,10 +89,32 @@ public:
   virtual uint64_t geometryMutationVersion() const { return 0; }
 
   // Rendering
+  virtual bool supportsParallelGraphicsRecording() const { return false; }
+  virtual uint32_t maxParallelGraphicsRecordingContexts() const { return 1u; }
   virtual Result<bool, std::string> beginFrame(uint64_t frameIndex) = 0;
-  virtual Result<bool, std::string> submitFrame(const RenderFrame &frame) = 0;
-  virtual Result<bool, std::string> submitComputeDispatches(
-      std::span<const ComputeDispatchItem> dispatches) = 0;
+  virtual Result<bool, std::string> prepareFrameOutput() {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  virtual Result<RecordingContextHandle, std::string>
+  acquireGraphicsRecordingContext(uint32_t workerIndex) = 0;
+  virtual Result<bool, std::string>
+  recordGraphicsBarriers(RecordingContextHandle ctx,
+                         const GraphicsBarrierRecord *barriers,
+                         uint32_t barrierCount) = 0;
+  virtual Result<bool, std::string>
+  recordGraphicsPass(RecordingContextHandle ctx, const RenderPass &pass) = 0;
+  virtual Result<RecordedCommandBufferHandle, std::string>
+  finishGraphicsRecordingContext(RecordingContextHandle ctx) = 0;
+  virtual Result<bool, std::string>
+  discardGraphicsRecordingContext(RecordingContextHandle ctx) = 0;
+  virtual Result<bool, std::string> discardRecordedGraphicsCommandBuffer(
+      RecordedCommandBufferHandle commandBuffer) = 0;
+  virtual Result<SubmissionHandle, std::string> submitRecordedGraphicsFrame(
+      std::span<const RecordedCommandBufferHandle> commandBuffers,
+      std::span<const SubmitBatchMeta> batches) = 0;
+  virtual bool isSubmissionComplete(SubmissionHandle handle) const = 0;
+  virtual Result<bool, std::string>
+  submitComputeDispatches(std::span<const ComputeDispatchItem> dispatches) = 0;
   virtual Result<GeometryAllocationHandle, std::string>
   allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
