@@ -145,6 +145,14 @@ TEST(RenderGraphRendererTest, RendererCapturesTelemetryWithoutAutomaticDump) {
   ASSERT_NE(snapshot, nullptr);
   EXPECT_EQ(snapshot->summary.frameIndex, 7u);
   EXPECT_EQ(snapshot->summary.passCount, 1u);
+  EXPECT_EQ(snapshot->summary.recordedCommandBufferCount, 1u);
+  EXPECT_EQ(snapshot->summary.submitBatchCount, 1u);
+  EXPECT_EQ(snapshot->summary.passRangeCount, 1u);
+  EXPECT_FALSE(snapshot->summary.usedParallelRecording);
+  ASSERT_EQ(snapshot->recordedCommandBuffers.size(), 1u);
+  EXPECT_EQ(snapshot->recordedCommandBuffers[0].firstOrderedPassIndex, 0u);
+  ASSERT_EQ(snapshot->submitBatches.size(), 1u);
+  EXPECT_TRUE(snapshot->submitBatches[0].presentsFrameOutput);
 
   const std::filesystem::path suggested =
       renderer.renderGraphTelemetry().suggestDumpPath();

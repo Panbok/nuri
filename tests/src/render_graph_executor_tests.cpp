@@ -20,6 +20,47 @@ using FakeGPUDevice = FakeExecutorGPUDevice;
 class RenderGraphExecutorTest : public ::testing::Test {};
 
 Result<RenderGraphCompileResult, std::string>
+compileBuilder(RenderGraphBuilder &builder) {
+  RenderGraphRuntime runtime;
+  return builder.compile(runtime);
+}
+
+Result<bool, std::string>
+executeCompiled(RenderGraphExecutor &executor, GPUDevice &gpu,
+                const RenderGraphCompileResult &compiled) {
+  auto beginResult = gpu.beginFrame(compiled.frameIndex);
+  if (beginResult.hasError()) {
+    return Result<bool, std::string>::makeError(beginResult.error());
+  }
+  RenderGraphRuntime runtime;
+  auto result = executor.execute(runtime, gpu, compiled);
+  if (result.hasError()) {
+    return Result<bool, std::string>::makeError(result.error());
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<RenderGraphExecutionMetadata, std::string>
+executeCompiledWithConfig(RenderGraphExecutor &executor, GPUDevice &gpu,
+                          const RenderGraphCompileResult &compiled,
+                          const RenderGraphRuntimeConfig &config) {
+  auto beginResult = gpu.beginFrame(compiled.frameIndex);
+  if (beginResult.hasError()) {
+    return Result<RenderGraphExecutionMetadata, std::string>::makeError(
+        beginResult.error());
+  }
+  RenderGraphRuntime runtime(config);
+  return executor.execute(runtime, gpu, compiled);
+}
+
+bool hasExecutionFailureStage(const std::string &error,
+                              RenderGraphExecutionFailureStage stage) {
+  const std::string expectedTag =
+      "[stage=" + std::string(toString(stage)) + "]";
+  return error.find(expectedTag) != std::string::npos;
+}
+
+Result<RenderGraphCompileResult, std::string>
 buildExecutorCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -107,14 +148,14 @@ buildExecutorCompiledFrame(uint64_t frameIndex) {
         bindResult.error());
   }
 
-  return builder.compile();
+  return compileBuilder(builder);
 }
 
 Result<RenderGraphCompileResult, std::string>
 buildEmptyCompiledFrame(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
-  return builder.compile();
+  return compileBuilder(builder);
 }
 
 Result<RenderGraphCompileResult, std::string>
@@ -142,7 +183,124 @@ buildTwoPassCompiledFrameWithDependency(uint64_t frameIndex) {
         depResult.error());
   }
 
-  return builder.compile();
+  return compileBuilder(builder);
+}
+
+Result<RenderGraphCompileResult, std::string>
+buildIndependentParallelCompiledFrame(uint64_t frameIndex, uint32_t passCount) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(frameIndex);
+
+  for (uint32_t passIndex = 0u; passIndex < passCount; ++passIndex) {
+    RenderPass pass{};
+    const std::string label =
+        "parallel_pass_" + std::to_string(static_cast<unsigned>(passIndex));
+    pass.debugLabel = label;
+    auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
+    if (addResult.hasError()) {
+      return Result<RenderGraphCompileResult, std::string>::makeError(
+          "buildIndependentParallelCompiledFrame: addLegacyRenderPass "
+          "failed: " +
+          addResult.error());
+    }
+    auto sideEffectResult = builder.markPassSideEffect(addResult.value());
+    if (sideEffectResult.hasError()) {
+      return Result<RenderGraphCompileResult, std::string>::makeError(
+          "buildIndependentParallelCompiledFrame: markPassSideEffect failed: " +
+          sideEffectResult.error());
+    }
+  }
+
+  return compileBuilder(builder);
+}
+
+Result<RenderGraphCompileResult, std::string>
+buildBarrierTrackedCompiledFrame(uint64_t frameIndex) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(frameIndex);
+
+  auto bufferResult = builder.createTransientBuffer(
+      makeTransientBufferDesc(64u), "barrier_buf");
+  if (bufferResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildBarrierTrackedCompiledFrame: createTransientBuffer failed: " +
+        bufferResult.error());
+  }
+
+  RenderPass passA{};
+  passA.debugLabel = "barrier_pass_a";
+  RenderPass passB{};
+  passB.debugLabel = "barrier_pass_b";
+
+  auto passAResult = addTestGraphicsPass(builder, passA, passA.debugLabel);
+  auto passBResult = addTestGraphicsPass(builder, passB, passB.debugLabel);
+  if (passAResult.hasError() || passBResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildBarrierTrackedCompiledFrame: addLegacyRenderPass failed");
+  }
+
+  auto accessResult =
+      builder.addBufferWrite(passAResult.value(), bufferResult.value());
+  if (accessResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildBarrierTrackedCompiledFrame: addBufferWrite failed: " +
+        accessResult.error());
+  }
+  accessResult =
+      builder.addBufferRead(passBResult.value(), bufferResult.value());
+  if (accessResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildBarrierTrackedCompiledFrame: addBufferRead failed: " +
+        accessResult.error());
+  }
+  auto sideEffectResult = builder.markPassSideEffect(passBResult.value());
+  if (sideEffectResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildBarrierTrackedCompiledFrame: markPassSideEffect failed: " +
+        sideEffectResult.error());
+  }
+
+  return compileBuilder(builder);
+}
+
+Result<RenderGraphCompileResult, std::string>
+buildFrameOutputCompiledFrame(uint64_t frameIndex) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(frameIndex);
+
+  const TextureHandle outputTexture{.index = 701u, .generation = 1u};
+  auto importResult = builder.importTexture(outputTexture, "frame_output");
+  if (importResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildFrameOutputCompiledFrame: importTexture failed: " +
+        importResult.error());
+  }
+
+  RenderPass pass{};
+  pass.colorTexture = outputTexture;
+  pass.debugLabel = "frame_output_pass";
+  auto passResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
+  if (passResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildFrameOutputCompiledFrame: addLegacyRenderPass failed: " +
+        passResult.error());
+  }
+
+  auto bindResult =
+      builder.bindPassColorTexture(passResult.value(), importResult.value());
+  if (bindResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildFrameOutputCompiledFrame: bindPassColorTexture failed: " +
+        bindResult.error());
+  }
+  auto outputResult = builder.markTextureAsFrameOutput(importResult.value());
+  if (outputResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        "buildFrameOutputCompiledFrame: markTextureAsFrameOutput failed: " +
+        outputResult.error());
+  }
+
+  return compileBuilder(builder);
 }
 
 TEST_F(RenderGraphExecutorTest,
@@ -161,7 +319,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeExecutorGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, compiled);
+  auto executeResult = executeCompiled(executor, gpu, compiled);
   ASSERT_FALSE(executeResult.hasError());
   ASSERT_TRUE(executeResult.value())
       << "executor should succeed for transient rewrite graph";
@@ -193,10 +351,12 @@ TEST_F(RenderGraphExecutorTest,
          "immediately";
   ASSERT_EQ(gpu.destroyedBufferCount, 0u)
       << "newly materialized transient buffers should not retire immediately";
+  ASSERT_EQ(gpu.waitIdleCallCount, 0u)
+      << "executor retirement should not block on waitIdle after submit";
 
   auto compile102 = buildEmptyCompiledFrame(102u);
   ASSERT_FALSE(compile102.hasError());
-  executeResult = executor.execute(gpu, compile102.value());
+  executeResult = executeCompiled(executor, gpu, compile102.value());
   ASSERT_FALSE(executeResult.hasError());
   ASSERT_TRUE(executeResult.value())
       << "executor should succeed for empty frame 102";
@@ -204,10 +364,12 @@ TEST_F(RenderGraphExecutorTest,
       << "retirement should not occur before retire frame";
   ASSERT_EQ(gpu.destroyedBufferCount, 0u)
       << "retirement should not occur before retire frame";
+  ASSERT_EQ(gpu.waitIdleCallCount, 0u)
+      << "executor retirement polling should remain non-blocking";
 
   auto compile103 = buildEmptyCompiledFrame(103u);
   ASSERT_FALSE(compile103.hasError());
-  executeResult = executor.execute(gpu, compile103.value());
+  executeResult = executeCompiled(executor, gpu, compile103.value());
   ASSERT_FALSE(executeResult.hasError());
   ASSERT_TRUE(executeResult.value())
       << "executor should succeed for empty frame 103";
@@ -215,12 +377,14 @@ TEST_F(RenderGraphExecutorTest,
       << "retirement should not over-destroy transient textures";
   EXPECT_LE(gpu.destroyedBufferCount, gpu.createdBufferCount)
       << "retirement should not over-destroy transient buffers";
+  EXPECT_EQ(gpu.waitIdleCallCount, 0u)
+      << "executor retirement should not fall back to waitIdle";
 
   const uint32_t createdTextureCountBeforeReuse = gpu.createdTextureCount;
   const uint32_t createdBufferCountBeforeReuse = gpu.createdBufferCount;
   auto compile104 = buildExecutorCompiledFrame(104u);
   ASSERT_FALSE(compile104.hasError());
-  executeResult = executor.execute(gpu, compile104.value());
+  executeResult = executeCompiled(executor, gpu, compile104.value());
   ASSERT_FALSE(executeResult.hasError());
   ASSERT_TRUE(executeResult.value())
       << "executor should succeed for frame 104 reuse check";
@@ -242,7 +406,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeExecutorGPUDevice gpu;
   gpu.failCreateBufferAtCall = 1u;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, compiled);
+  auto executeResult = executeCompiled(executor, gpu, compiled);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should fail when buffer materialization fails";
     return;
@@ -250,6 +414,12 @@ TEST_F(RenderGraphExecutorTest,
   if (((executeResult.error()).find("failed to create transient buffer") ==
        std::string_view::npos)) {
     ADD_FAILURE() << "expected transient buffer creation failure message";
+    return;
+  }
+  if (!hasExecutionFailureStage(
+          executeResult.error(),
+          RenderGraphExecutionFailureStage::MaterializeTransients)) {
+    ADD_FAILURE() << "expected materialize-transients failure stage tag";
     return;
   }
   if (!(gpu.submitCount == 0u)) {
@@ -284,7 +454,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeExecutorGPUDevice gpu;
   gpu.failSubmitFrame = true;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, compiled);
+  auto executeResult = executeCompiled(executor, gpu, compiled);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should propagate submit failure";
     return;
@@ -292,6 +462,12 @@ TEST_F(RenderGraphExecutorTest,
   if (((executeResult.error()).find("fake submitFrame failure") ==
        std::string_view::npos)) {
     ADD_FAILURE() << "submit failure reason should propagate";
+    return;
+  }
+  if (!hasExecutionFailureStage(
+          executeResult.error(),
+          RenderGraphExecutionFailureStage::SubmitRecordedFrame)) {
+    ADD_FAILURE() << "expected submit-recorded-frame failure stage tag";
     return;
   }
   if (!(gpu.submitCount == 1u)) {
@@ -315,7 +491,7 @@ TEST_F(RenderGraphExecutorTest,
     ADD_FAILURE() << "empty frame 123 compile should succeed";
     return;
   }
-  executeResult = executor.execute(gpu, compile123.value());
+  executeResult = executeCompiled(executor, gpu, compile123.value());
   if (!(!executeResult.hasError() && executeResult.value())) {
     ADD_FAILURE() << "executor should succeed for retirement frame";
     return;
@@ -333,7 +509,7 @@ TEST_F(RenderGraphExecutorTest,
     ADD_FAILURE() << "non-empty frame 124 compile should succeed";
     return;
   }
-  executeResult = executor.execute(gpu, compile124.value());
+  executeResult = executeCompiled(executor, gpu, compile124.value());
   if (!(!executeResult.hasError() && executeResult.value())) {
     ADD_FAILURE() << "executor should succeed for frame 124 reuse check";
     return;
@@ -344,6 +520,159 @@ TEST_F(RenderGraphExecutorTest,
                      "re-creation";
     return;
   }
+}
+
+TEST_F(RenderGraphExecutorTest, ExecutorResolvesAndRecordsPerPassBarriers) {
+  auto compileResult = buildBarrierTrackedCompiledFrame(140u);
+  ASSERT_FALSE(compileResult.hasError());
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.passBarrierPlans.size(), 2u);
+  ASSERT_EQ(compiled.passBarrierRecords.size(), 2u);
+
+  FakeExecutorGPUDevice gpu;
+  RenderGraphExecutor executor;
+  auto executeResult = executeCompiled(executor, gpu, compiled);
+  ASSERT_FALSE(executeResult.hasError());
+  ASSERT_TRUE(executeResult.value());
+
+  ASSERT_EQ(gpu.recordedBarrierBatchCounts.size(), 2u);
+  EXPECT_EQ(gpu.recordedBarrierBatchCounts[0], 1u);
+  EXPECT_EQ(gpu.recordedBarrierBatchCounts[1], 1u);
+}
+
+TEST_F(RenderGraphExecutorTest,
+       ExecutorRecordsFinalPresentBarrierAfterLastPass) {
+  auto compileResult = buildFrameOutputCompiledFrame(142u);
+  ASSERT_FALSE(compileResult.hasError());
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.passBarrierPlans.size(), 1u);
+  ASSERT_EQ(compiled.finalBarrierPlan.barrierCount, 1u);
+
+  FakeExecutorGPUDevice gpu;
+  RenderGraphExecutor executor;
+  auto executeResult = executeCompiled(executor, gpu, compiled);
+  ASSERT_FALSE(executeResult.hasError());
+  ASSERT_TRUE(executeResult.value());
+
+  ASSERT_EQ(gpu.recordedBarrierBatchCounts.size(), 2u);
+  EXPECT_EQ(gpu.recordedBarrierBatchCounts[0], 1u);
+  EXPECT_EQ(gpu.recordedBarrierBatchCounts[1], 1u);
+}
+
+TEST_F(RenderGraphExecutorTest, ExecutorTagsBarrierResolutionFailuresByStage) {
+  auto compileResult = buildBarrierTrackedCompiledFrame(141u);
+  ASSERT_FALSE(compileResult.hasError());
+
+  RenderGraphCompileResult invalid = compileResult.value();
+  ASSERT_FALSE(invalid.passBarrierRecords.empty());
+  invalid.passBarrierRecords[0].resourceKind =
+      RenderGraphBarrierResourceKind::Buffer;
+  invalid.passBarrierRecords[0].resourceIndex =
+      static_cast<uint32_t>(invalid.bufferHandlesByResource.size());
+
+  FakeExecutorGPUDevice gpu;
+  RenderGraphExecutor executor;
+  auto executeResult = executeCompiled(executor, gpu, invalid);
+  ASSERT_TRUE(executeResult.hasError());
+  EXPECT_TRUE(hasExecutionFailureStage(
+      executeResult.error(),
+      RenderGraphExecutionFailureStage::ResolveBarriers));
+  EXPECT_NE(executeResult.error().find(
+                "buffer barrier resource index is out of range"),
+            std::string_view::npos);
+  EXPECT_EQ(gpu.submitCount, 0u);
+}
+
+TEST_F(RenderGraphExecutorTest,
+       ExecutorParallelAcquireFailureDiscardsAllContextsAndSubmitsNothing) {
+  auto compileResult = buildIndependentParallelCompiledFrame(125u, 8u);
+  ASSERT_FALSE(compileResult.hasError());
+
+  FakeExecutorGPUDevice gpu;
+  gpu.maxRecordingContexts = 4u;
+  gpu.failAcquireWorkerIndex = 0;
+  RenderGraphExecutor executor;
+  const RenderGraphRuntimeConfig config{
+      .workerCount = 4u,
+      .parallelCompile = true,
+      .parallelGraphicsRecording = true,
+  };
+
+  auto executeResult =
+      executeCompiledWithConfig(executor, gpu, compileResult.value(), config);
+  ASSERT_TRUE(executeResult.hasError());
+  EXPECT_TRUE(hasExecutionFailureStage(
+      executeResult.error(),
+      RenderGraphExecutionFailureStage::AcquireRecordingContext));
+  EXPECT_NE(executeResult.error().find(
+                "failed to acquire graphics recording context"),
+            std::string_view::npos);
+  EXPECT_EQ(gpu.submitCount, 0u);
+  EXPECT_EQ(gpu.finishedRecordingContextCount, 0u);
+  EXPECT_EQ(gpu.discardedRecordedCommandBufferCount, 0u);
+  EXPECT_EQ(gpu.discardedRecordingContextCount,
+            gpu.acquiredRecordingContextCount);
+}
+
+TEST_F(RenderGraphExecutorTest,
+       ExecutorParallelRecordFailureDiscardsAllContextsAndSubmitsNothing) {
+  auto compileResult = buildIndependentParallelCompiledFrame(126u, 8u);
+  ASSERT_FALSE(compileResult.hasError());
+
+  FakeExecutorGPUDevice gpu;
+  gpu.maxRecordingContexts = 2u;
+  gpu.failRecordPassLabel = "parallel_pass_2";
+  RenderGraphExecutor executor;
+  const RenderGraphRuntimeConfig config{
+      .workerCount = 2u,
+      .parallelCompile = true,
+      .parallelGraphicsRecording = true,
+  };
+
+  auto executeResult =
+      executeCompiledWithConfig(executor, gpu, compileResult.value(), config);
+  ASSERT_TRUE(executeResult.hasError());
+  EXPECT_TRUE(hasExecutionFailureStage(
+      executeResult.error(),
+      RenderGraphExecutionFailureStage::RecordGraphicsPasses));
+  EXPECT_NE(executeResult.error().find("failed to record graphics pass"),
+            std::string_view::npos);
+  EXPECT_EQ(gpu.submitCount, 0u);
+  EXPECT_EQ(gpu.finishedRecordingContextCount, 0u);
+  EXPECT_EQ(gpu.discardedRecordedCommandBufferCount, 0u);
+  EXPECT_EQ(gpu.discardedRecordingContextCount,
+            gpu.acquiredRecordingContextCount);
+}
+
+TEST_F(RenderGraphExecutorTest,
+       ExecutorParallelFinishFailureDiscardsRecordedBuffersAndSubmitsNothing) {
+  auto compileResult = buildIndependentParallelCompiledFrame(127u, 8u);
+  ASSERT_FALSE(compileResult.hasError());
+
+  FakeExecutorGPUDevice gpu;
+  gpu.maxRecordingContexts = 2u;
+  gpu.failFinishAtCall = 2u;
+  RenderGraphExecutor executor;
+  const RenderGraphRuntimeConfig config{
+      .workerCount = 2u,
+      .parallelCompile = true,
+      .parallelGraphicsRecording = true,
+  };
+
+  auto executeResult =
+      executeCompiledWithConfig(executor, gpu, compileResult.value(), config);
+  ASSERT_TRUE(executeResult.hasError());
+  EXPECT_TRUE(hasExecutionFailureStage(
+      executeResult.error(),
+      RenderGraphExecutionFailureStage::FinishRecordingContext));
+  EXPECT_NE(
+      executeResult.error().find("failed to finish graphics recording context"),
+      std::string_view::npos);
+  EXPECT_EQ(gpu.submitCount, 0u);
+  EXPECT_EQ(gpu.acquiredRecordingContextCount, 2u);
+  EXPECT_EQ(gpu.finishedRecordingContextCount, 1u);
+  EXPECT_EQ(gpu.discardedRecordedCommandBufferCount, 1u);
+  EXPECT_EQ(gpu.discardedRecordingContextCount, 1u);
 }
 
 TEST_F(RenderGraphExecutorTest,
@@ -359,7 +688,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeExecutorGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject invalid allocation metadata";
     return;
@@ -396,7 +725,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject ordered pass index metadata count "
                      "mismatch";
@@ -431,7 +760,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject declared/ordered/culled pass count "
@@ -472,7 +801,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject pass debug-name metadata count "
                      "mismatch";
@@ -506,7 +835,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsRootPassCountOverDeclared) {
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject root pass count over declared pass count";
@@ -545,7 +874,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject dependency edge pass index out of "
                      "range";
@@ -583,7 +912,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDependencyEdgeSelfCycle) {
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject dependency edge self-cycle";
     return;
@@ -623,7 +952,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject dependency edge referencing culled "
@@ -661,7 +990,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedDependencyEdge) {
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject duplicated dependency edge";
     return;
@@ -699,7 +1028,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject dependency edge topology "
                      "violation";
@@ -738,7 +1067,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject out-of-range transient texture "
                      "allocation index";
@@ -780,7 +1109,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject out-of-range transient buffer "
                      "allocation index";
@@ -828,7 +1157,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsOrderedPassIndexOutOfRange) {
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject ordered pass index out of range";
     return;
@@ -869,7 +1198,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedOrderedPassIndex) {
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject duplicated ordered pass index";
     return;
@@ -912,7 +1241,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject duplicated transient texture "
                      "allocation index";
@@ -967,7 +1296,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject duplicated transient buffer "
                      "allocation index";
@@ -1016,7 +1345,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject out-of-range unresolved texture "
                      "binding resource index";
@@ -1064,7 +1393,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject out-of-range unresolved draw "
                      "binding index";
@@ -1107,7 +1436,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject pre-dispatch dependency range "
                      "metadata count mismatch";
@@ -1153,7 +1482,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeOutOfBounds) {
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject out-of-bounds pass draw range";
     return;
@@ -1192,7 +1521,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "index out of range";
@@ -1237,7 +1566,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject unresolved dependency binding slot "
@@ -1281,7 +1610,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved dependency binding "
                      "resource index out of range";
@@ -1326,7 +1655,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject out-of-bounds pre-dispatch "
                      "dependency range";
@@ -1368,7 +1697,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved draw binding invalid "
                      "target";
@@ -1411,7 +1740,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject unresolved texture binding invalid "
@@ -1462,7 +1791,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject unresolved texture binding without "
@@ -1514,7 +1843,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved dependency binding "
                      "without materialized allocation";
@@ -1566,7 +1895,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "without materialized allocation";
@@ -1618,7 +1947,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved draw binding without "
                      "materialized allocation";
@@ -1656,7 +1985,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject pass dependency range metadata "
                      "count mismatch";
@@ -1702,7 +2031,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject pass dependency range over "
                      "kMaxDependencyBuffers";
@@ -1740,7 +2069,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject pass pre-dispatch range metadata "
                      "count mismatch";
@@ -1786,7 +2115,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject pre-dispatch dependency range over "
@@ -1824,7 +2153,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeCountMismatch) {
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject pass draw range metadata count "
                      "mismatch";
@@ -1865,7 +2194,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDependencyRangeOutOfBounds) {
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject out-of-bounds pass dependency "
                      "buffer range";
@@ -1906,7 +2235,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject out-of-bounds pass pre-dispatch "
                      "range";
@@ -1947,7 +2276,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved texture binding pass "
                      "index out of range";
@@ -1989,7 +2318,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject unresolved dependency binding pass "
@@ -2034,7 +2363,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "pass index out of range";
@@ -2077,7 +2406,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE()
         << "executor should reject unresolved draw binding pass index "
@@ -2121,7 +2450,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "resource index out of range";
@@ -2166,7 +2495,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "slot index out of range";
@@ -2209,7 +2538,7 @@ TEST_F(RenderGraphExecutorTest,
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
-  auto executeResult = executor.execute(gpu, invalid);
+  auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!(executeResult.hasError())) {
     ADD_FAILURE() << "executor should reject unresolved draw binding resource "
                      "index out of range";

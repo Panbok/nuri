@@ -31,6 +31,11 @@ void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
   compiled.declaredPassCount = 3u;
   compiled.culledPassCount = 1u;
   compiled.rootPassCount = 2u;
+  compiled.usedParallelCompile = true;
+  compiled.usedParallelValidation = true;
+  compiled.usedParallelPayloadResolution = true;
+  compiled.usedParallelHazardAnalysis = true;
+  compiled.usedParallelLifetimeAnalysis = false;
   compiled.resourceStats.importedTextures = 4u;
   compiled.resourceStats.transientTextures = 5u;
   compiled.resourceStats.importedBuffers = 6u;
@@ -48,6 +53,32 @@ void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
   compiled.orderedPassIndices.push_back(1u);
   compiled.orderedPassIndices.push_back(0u);
   compiled.edges.push_back({.before = 0u, .after = 1u});
+  compiled.passBarrierPlans.push_back(
+      {.orderedPassIndex = 0u, .barrierOffset = 0u, .barrierCount = 1u});
+  compiled.passBarrierPlans.push_back(
+      {.orderedPassIndex = 1u, .barrierOffset = 1u, .barrierCount = 1u});
+  compiled.finalBarrierPlan = {.barrierOffset = 2u, .barrierCount = 1u};
+  compiled.passBarrierRecords.push_back(
+      {.resourceKind = RenderGraphBarrierResourceKind::Texture,
+       .resourceIndex = 0u,
+       .beforeAccess = RenderGraphAccessMode::None,
+       .afterAccess = RenderGraphAccessMode::Write,
+       .beforeState = RenderGraphResourceState::Unknown,
+       .afterState = RenderGraphResourceState::Attachment});
+  compiled.passBarrierRecords.push_back(
+      {.resourceKind = RenderGraphBarrierResourceKind::Buffer,
+       .resourceIndex = 4u,
+       .beforeAccess = RenderGraphAccessMode::Write,
+       .afterAccess = RenderGraphAccessMode::Read,
+       .beforeState = RenderGraphResourceState::Write,
+       .afterState = RenderGraphResourceState::Read});
+  compiled.passBarrierRecords.push_back(
+      {.resourceKind = RenderGraphBarrierResourceKind::Texture,
+       .resourceIndex = 0u,
+       .beforeAccess = RenderGraphAccessMode::Write,
+       .afterAccess = RenderGraphAccessMode::None,
+       .beforeState = RenderGraphResourceState::Attachment,
+       .afterState = RenderGraphResourceState::Present});
 
   compiled.transientTextureLifetimes.push_back({.resourceIndex = 3u,
                                                 .firstExecutionIndex = 0u,
@@ -107,6 +138,23 @@ void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
   compiled.ownedDrawItems.push_back(DrawItem{});
 }
 
+void populateTelemetryExecutionMetadata(
+    RenderGraphExecutionMetadata &execution) {
+  execution.usedParallelCompile = true;
+  execution.usedParallelRecording = true;
+  execution.recordedCommandBuffers.push_back(
+      {.firstOrderedPassIndex = 0u, .passCount = 1u});
+  execution.recordedCommandBuffers.push_back(
+      {.firstOrderedPassIndex = 1u, .passCount = 1u});
+  execution.submitBatches.push_back({.commandBufferOffset = 0u,
+                                     .commandBufferCount = 2u,
+                                     .presentsFrameOutput = true});
+  execution.passRanges.push_back(
+      {.workerIndex = 0u, .firstOrderedPassIndex = 0u, .passCount = 1u});
+  execution.passRanges.push_back(
+      {.workerIndex = 1u, .firstOrderedPassIndex = 1u, .passCount = 1u});
+}
+
 TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   std::array<std::byte, 32 * 1024> serviceBytes{};
   std::pmr::monotonic_buffer_resource serviceMemory(serviceBytes.data(),
@@ -118,8 +166,10 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
     std::pmr::monotonic_buffer_resource compileMemory(compileBytes.data(),
                                                       compileBytes.size());
     RenderGraphCompileResult compiled(&compileMemory);
+    RenderGraphExecutionMetadata execution(&compileMemory);
     populateTelemetryCompileResult(compiled, &compileMemory);
-    telemetry.capture(compiled);
+    populateTelemetryExecutionMetadata(execution);
+    telemetry.capture(compiled, execution);
   }
 
   const RenderGraphTelemetrySnapshot *snapshot = telemetry.latestSnapshot();
@@ -133,6 +183,22 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   ASSERT_EQ(snapshot->orderedPassIndices.size(), 2u);
   EXPECT_EQ(snapshot->orderedPassIndices[0], 1u);
   EXPECT_EQ(snapshot->orderedPassIndices[1], 0u);
+  ASSERT_EQ(snapshot->recordedCommandBuffers.size(), 2u);
+  EXPECT_EQ(snapshot->recordedCommandBuffers[0].firstOrderedPassIndex, 0u);
+  EXPECT_EQ(snapshot->submitBatches.size(), 1u);
+  EXPECT_TRUE(snapshot->submitBatches[0].presentsFrameOutput);
+  ASSERT_EQ(snapshot->passRanges.size(), 2u);
+  EXPECT_TRUE(snapshot->summary.usedParallelCompile);
+  EXPECT_TRUE(snapshot->summary.usedParallelValidation);
+  EXPECT_TRUE(snapshot->summary.usedParallelPayloadResolution);
+  EXPECT_TRUE(snapshot->summary.usedParallelHazardAnalysis);
+  EXPECT_FALSE(snapshot->summary.usedParallelLifetimeAnalysis);
+  EXPECT_TRUE(snapshot->summary.usedParallelRecording);
+  EXPECT_NE(snapshot->summary.compileFingerprint, 0ull);
+  EXPECT_NE(snapshot->summary.barrierFingerprint, 0ull);
+  EXPECT_NE(snapshot->summary.executionFingerprint, 0ull);
+  EXPECT_EQ(snapshot->summary.finalBarrierRecordCount, 1u);
+  EXPECT_EQ(snapshot->finalBarrierPlan.barrierCount, 1u);
   ASSERT_EQ(snapshot->edges.size(), 1u);
   EXPECT_EQ(snapshot->edges[0].before, 0u);
   EXPECT_EQ(snapshot->edges[0].after, 1u);
@@ -152,8 +218,10 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
   std::pmr::monotonic_buffer_resource compileMemory(compileBytes.data(),
                                                     compileBytes.size());
   RenderGraphCompileResult compiled(&compileMemory);
+  RenderGraphExecutionMetadata execution(&compileMemory);
   populateTelemetryCompileResult(compiled, &compileMemory);
-  telemetry.capture(compiled);
+  populateTelemetryExecutionMetadata(execution);
+  telemetry.capture(compiled, execution);
 
   EXPECT_TRUE(telemetry.writeLatestTextDump("").hasError());
 
@@ -169,6 +237,14 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
                              std::istreambuf_iterator<char>());
   EXPECT_NE(contents.find("frame_index: 42"), std::string::npos);
   EXPECT_NE(contents.find("first_pass"), std::string::npos);
+  EXPECT_NE(contents.find("compile_fingerprint:"), std::string::npos);
+  EXPECT_NE(contents.find("final_barrier_record_count: 1"), std::string::npos);
+  EXPECT_NE(contents.find("used_parallel_validation: 1"), std::string::npos);
+  EXPECT_NE(contents.find("used_parallel_payload_resolution: 1"),
+            std::string::npos);
+  EXPECT_NE(contents.find("Recorded Command Buffers:"), std::string::npos);
+  EXPECT_NE(contents.find("Submit Batches:"), std::string::npos);
+  EXPECT_NE(contents.find("Final Barrier Plan:"), std::string::npos);
   EXPECT_NE(contents.find("pass_exec[0].draw[0].vertex <- buf[4]"),
             std::string::npos);
 
@@ -187,8 +263,10 @@ TEST(RenderGraphTelemetryTest, SuggestDumpPathUsesEnvDirectorySeed) {
   std::pmr::monotonic_buffer_resource compileMemory(compileBytes.data(),
                                                     compileBytes.size());
   RenderGraphCompileResult compiled(&compileMemory);
+  RenderGraphExecutionMetadata execution(&compileMemory);
   populateTelemetryCompileResult(compiled, &compileMemory);
-  telemetry.capture(compiled);
+  populateTelemetryExecutionMetadata(execution);
+  telemetry.capture(compiled, execution);
 
   const std::filesystem::path suggested = telemetry.suggestDumpPath();
   EXPECT_EQ(suggested.parent_path(), dumpDirectory);

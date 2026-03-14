@@ -12,6 +12,19 @@ bool sameHandle(TextureHandle lhs, TextureHandle rhs) {
   return lhs.index == rhs.index && lhs.generation == rhs.generation;
 }
 
+bool sameHandle(RecordingContextHandle lhs, RecordingContextHandle rhs) {
+  return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
+bool sameHandle(RecordedCommandBufferHandle lhs,
+                RecordedCommandBufferHandle rhs) {
+  return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
+bool sameHandle(SubmissionHandle lhs, SubmissionHandle rhs) {
+  return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
 bool sameBuffer(BufferHandle lhs, BufferHandle rhs) {
   return sameHandle(lhs, rhs);
 }
@@ -310,24 +323,211 @@ bool FakeGPUDeviceBase::resolveGeometry(GeometryAllocationHandle,
   return false;
 }
 
-Result<bool, std::string> FakeGPUDeviceBase::beginFrame(uint64_t) {
+Result<bool, std::string> FakeGPUDeviceBase::beginFrame(uint64_t frameIndex) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  currentFrameIndex_ = frameIndex;
+  activeRecordingContexts_.clear();
+  finishedCommandBuffers_.clear();
+  finishCallCount_ = 0u;
+  recordedPasses.clear();
+  submittedCommandBuffers.clear();
+  submittedBatches.clear();
   return Result<bool, std::string>::makeResult(true);
 }
 
-void FakeGPUDeviceBase::recordSubmitFrame(const RenderFrame &) {
+Result<bool, std::string> FakeGPUDeviceBase::prepareFrameOutput() {
+  return Result<bool, std::string>::makeResult(true);
+}
+
+bool FakeGPUDeviceBase::supportsParallelGraphicsRecording() const {
+  return maxRecordingContexts > 1u;
+}
+
+uint32_t FakeGPUDeviceBase::maxParallelGraphicsRecordingContexts() const {
+  return maxRecordingContexts;
+}
+
+Result<RecordingContextHandle, std::string>
+FakeGPUDeviceBase::acquireGraphicsRecordingContext(uint32_t workerIndex) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  if (failAcquireWorkerIndex >= 0 &&
+      workerIndex == static_cast<uint32_t>(failAcquireWorkerIndex)) {
+    return Result<RecordingContextHandle, std::string>::makeError(
+        "fake acquireGraphicsRecordingContext injected failure");
+  }
+  if (activeRecordingContexts_.size() >= maxRecordingContexts) {
+    return Result<RecordingContextHandle, std::string>::makeError(
+        "fake acquireGraphicsRecordingContext limit exceeded");
+  }
+
+  RecordingContextState state{};
+  state.handle = RecordingContextHandle{.index = nextRecordingContextIndex_++,
+                                        .generation = 1u};
+  state.workerIndex = workerIndex;
+  activeRecordingContexts_.push_back(state);
+  ++acquiredRecordingContextCount;
+  return Result<RecordingContextHandle, std::string>::makeResult(
+      activeRecordingContexts_.back().handle);
+}
+
+Result<bool, std::string>
+FakeGPUDeviceBase::recordGraphicsBarriers(RecordingContextHandle ctx,
+                                          const GraphicsBarrierRecord *,
+                                          uint32_t barrierCount) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  for (auto &state : activeRecordingContexts_) {
+    if (sameHandle(state.handle, ctx)) {
+      recordedBarrierBatchCounts.push_back(barrierCount);
+      return Result<bool, std::string>::makeResult(true);
+    }
+  }
+  return Result<bool, std::string>::makeError(
+      "fake recordGraphicsBarriers: unknown recording context");
+}
+
+Result<bool, std::string>
+FakeGPUDeviceBase::recordGraphicsPass(RecordingContextHandle ctx,
+                                      const RenderPass &pass) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  if (!failRecordPassLabel.empty() && pass.debugLabel == failRecordPassLabel) {
+    return Result<bool, std::string>::makeError(
+        "fake recordGraphicsPass injected failure");
+  }
+  for (auto &state : activeRecordingContexts_) {
+    if (sameHandle(state.handle, ctx)) {
+      state.passes.push_back(pass);
+      return Result<bool, std::string>::makeResult(true);
+    }
+  }
+  return Result<bool, std::string>::makeError(
+      "fake recordGraphicsPass: unknown recording context");
+}
+
+Result<RecordedCommandBufferHandle, std::string>
+FakeGPUDeviceBase::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  ++finishCallCount_;
+  if (failFinishAtCall != 0u && finishCallCount_ == failFinishAtCall) {
+    return Result<RecordedCommandBufferHandle, std::string>::makeError(
+        "fake finishGraphicsRecordingContext injected failure");
+  }
+  for (size_t i = 0u; i < activeRecordingContexts_.size(); ++i) {
+    if (!sameHandle(activeRecordingContexts_[i].handle, ctx)) {
+      continue;
+    }
+
+    RecordedCommandBufferState finished{};
+    finished.handle = RecordedCommandBufferHandle{
+        .index = nextRecordedCommandBufferIndex_++, .generation = 1u};
+    finished.passes = activeRecordingContexts_[i].passes;
+    finishedCommandBuffers_.push_back(std::move(finished));
+    activeRecordingContexts_.erase(activeRecordingContexts_.begin() + i);
+    ++finishedRecordingContextCount;
+    return Result<RecordedCommandBufferHandle, std::string>::makeResult(
+        finishedCommandBuffers_.back().handle);
+  }
+
+  return Result<RecordedCommandBufferHandle, std::string>::makeError(
+      "fake finishGraphicsRecordingContext: unknown recording context");
+}
+
+Result<bool, std::string>
+FakeGPUDeviceBase::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  for (size_t i = 0u; i < activeRecordingContexts_.size(); ++i) {
+    if (sameHandle(activeRecordingContexts_[i].handle, ctx)) {
+      activeRecordingContexts_.erase(activeRecordingContexts_.begin() + i);
+      ++discardedRecordingContextCount;
+      return Result<bool, std::string>::makeResult(true);
+    }
+  }
+  return Result<bool, std::string>::makeError(
+      "fake discardGraphicsRecordingContext: unknown recording context");
+}
+
+Result<bool, std::string>
+FakeGPUDeviceBase::discardRecordedGraphicsCommandBuffer(
+    RecordedCommandBufferHandle commandBuffer) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  for (size_t i = 0u; i < finishedCommandBuffers_.size(); ++i) {
+    if (sameHandle(finishedCommandBuffers_[i].handle, commandBuffer)) {
+      finishedCommandBuffers_.erase(finishedCommandBuffers_.begin() + i);
+      ++discardedRecordedCommandBufferCount;
+      return Result<bool, std::string>::makeResult(true);
+    }
+  }
+  return Result<bool, std::string>::makeError(
+      "fake discardRecordedGraphicsCommandBuffer: unknown command buffer");
+}
+
+void FakeGPUDeviceBase::recordSubmitFrame(
+    std::span<const RenderPass> passes,
+    std::span<const RecordedCommandBufferHandle> commandBuffers,
+    std::span<const SubmitBatchMeta> batches) {
   ++submitCount;
+  recordedPasses.assign(passes.begin(), passes.end());
+  submittedCommandBuffers.assign(commandBuffers.begin(), commandBuffers.end());
+  submittedBatches.assign(batches.begin(), batches.end());
 }
 
-Result<bool, std::string>
-FakeGPUDeviceBase::submitFrame(const RenderFrame &frame) {
-  recordSubmitFrame(frame);
-  return Result<bool, std::string>::makeResult(true);
+Result<SubmissionHandle, std::string>
+FakeGPUDeviceBase::submitRecordedGraphicsFrame(
+    std::span<const RecordedCommandBufferHandle> commandBuffers,
+    std::span<const SubmitBatchMeta> batches) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  std::vector<RenderPass> submittedPasses{};
+  for (const RecordedCommandBufferHandle handle : commandBuffers) {
+    bool found = false;
+    for (const auto &finished : finishedCommandBuffers_) {
+      if (!sameHandle(finished.handle, handle)) {
+        continue;
+      }
+      submittedPasses.insert(submittedPasses.end(), finished.passes.begin(),
+                             finished.passes.end());
+      found = true;
+      break;
+    }
+    if (!found) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "fake submitRecordedGraphicsFrame: unknown command buffer");
+    }
+  }
+  recordSubmitFrame(submittedPasses, commandBuffers, batches);
+  lastSubmittedFrameHandle =
+      SubmissionHandle{.index = nextSubmissionIndex_++, .generation = 1u};
+  const uint64_t retireLag =
+      static_cast<uint64_t>(std::max(1u, swapchainImageCount)) + 1ull;
+  submissions_.push_back(SubmissionState{
+      .handle = lastSubmittedFrameHandle,
+      .readyFrameIndex = currentFrameIndex_ + retireLag,
+  });
+  return Result<SubmissionHandle, std::string>::makeResult(
+      lastSubmittedFrameHandle);
 }
 
-Result<bool, std::string>
-FakeExecutorGPUDevice::submitFrame(const RenderFrame &frame) {
-  recordSubmitFrame(frame);
-  lastSubmitPassCount = frame.passes.size();
+bool FakeGPUDeviceBase::isSubmissionComplete(SubmissionHandle handle) const {
+  if (!nuri::isValid(handle)) {
+    return true;
+  }
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  for (const SubmissionState &submission : submissions_) {
+    if (sameHandle(submission.handle, handle)) {
+      return currentFrameIndex_ >= submission.readyFrameIndex;
+    }
+  }
+  return false;
+}
+
+Result<SubmissionHandle, std::string>
+FakeExecutorGPUDevice::submitRecordedGraphicsFrame(
+    std::span<const RecordedCommandBufferHandle> commandBuffers,
+    std::span<const SubmitBatchMeta> batches) {
+  auto baseResult =
+      FakeGPUDeviceBase::submitRecordedGraphicsFrame(commandBuffers, batches);
+  if (baseResult.hasError()) {
+    return baseResult;
+  }
+  lastSubmitPassCount = recordedPasses.size();
 
   lastColorTexture = {};
   lastDepthTexture = {};
@@ -335,11 +535,11 @@ FakeExecutorGPUDevice::submitFrame(const RenderFrame &frame) {
   lastPreDispatchDependencyBuffer = {};
   lastDrawVertexBuffer = {};
 
-  if (frame.passes.empty()) {
-    return Result<bool, std::string>::makeResult(true);
+  if (recordedPasses.empty()) {
+    return baseResult;
   }
 
-  const RenderPass &pass = frame.passes[0u];
+  const RenderPass &pass = recordedPasses[0u];
   lastColorTexture = pass.colorTexture;
   lastDepthTexture = pass.depthTexture;
 
@@ -356,10 +556,11 @@ FakeExecutorGPUDevice::submitFrame(const RenderFrame &frame) {
   }
 
   if (failSubmitFrame) {
-    return Result<bool, std::string>::makeError("fake submitFrame failure");
+    return Result<SubmissionHandle, std::string>::makeError(
+        "fake submitFrame failure");
   }
 
-  return Result<bool, std::string>::makeResult(true);
+  return baseResult;
 }
 
 Result<bool, std::string> FakeGPUDeviceBase::submitComputeDispatches(
@@ -405,18 +606,30 @@ FakeGPUDeviceBase::readTexture(TextureHandle, const TextureReadbackRegion &,
   return Result<bool, std::string>::makeError("not implemented in fake device");
 }
 
-void FakeGPUDeviceBase::waitIdle() {}
+void FakeGPUDeviceBase::waitIdle() {
+  ++waitIdleCallCount;
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  for (SubmissionState &submission : submissions_) {
+    submission.readyFrameIndex = currentFrameIndex_;
+  }
+}
 
-Result<bool, std::string>
-FakeRendererGPUDevice::submitFrame(const RenderFrame &frame) {
-  recordSubmitFrame(frame);
-  submittedPassCount = frame.passes.size();
+Result<SubmissionHandle, std::string>
+FakeRendererGPUDevice::submitRecordedGraphicsFrame(
+    std::span<const RecordedCommandBufferHandle> commandBuffers,
+    std::span<const SubmitBatchMeta> batches) {
+  auto baseResult =
+      FakeGPUDeviceBase::submitRecordedGraphicsFrame(commandBuffers, batches);
+  if (baseResult.hasError()) {
+    return baseResult;
+  }
+  submittedPassCount = recordedPasses.size();
   submittedPassLabels.clear();
-  submittedPassLabels.reserve(frame.passes.size());
-  for (const RenderPass &pass : frame.passes) {
+  submittedPassLabels.reserve(recordedPasses.size());
+  for (const RenderPass &pass : recordedPasses) {
     submittedPassLabels.emplace_back(pass.debugLabel);
   }
-  return Result<bool, std::string>::makeResult(true);
+  return baseResult;
 }
 
 bool hasPassLabel(const FakeRendererGPUDevice &gpu, std::string_view label) {

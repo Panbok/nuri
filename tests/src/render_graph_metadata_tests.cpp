@@ -18,6 +18,12 @@ bool sameTextureHandle(TextureHandle lhs, TextureHandle rhs) {
   return sameHandle(lhs, rhs);
 }
 
+Result<RenderGraphCompileResult, std::string>
+compileBuilder(RenderGraphBuilder &builder) {
+  RenderGraphRuntime runtime;
+  return builder.compile(runtime);
+}
+
 TEST(RenderGraphMetadataTest, TransientTextureBindingMetadata) {
   RenderGraphBuilder builder;
   builder.beginFrame(104u);
@@ -54,7 +60,7 @@ TEST(RenderGraphMetadataTest, TransientTextureBindingMetadata) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
@@ -145,7 +151,7 @@ TEST(RenderGraphMetadataTest, ImportedTextureBindingMetadataResolved) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
@@ -318,7 +324,7 @@ TEST(RenderGraphMetadataTest, ExplicitLegacyRegistrationWithoutInference) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed for explicit registration path";
     if (compileResult.hasError()) {
@@ -436,7 +442,7 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
     return;
   }
 
-  auto compileAResult = builder.compile();
+  auto compileAResult = compileBuilder(builder);
   if (compileAResult.hasError()) {
     ADD_FAILURE() << "frame A compile should succeed";
     if (compileAResult.hasError()) {
@@ -473,7 +479,7 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
     return;
   }
 
-  auto compileBResult = builder.compile();
+  auto compileBResult = compileBuilder(builder);
   if (compileBResult.hasError()) {
     ADD_FAILURE() << "frame B compile should succeed";
     if (compileBResult.hasError()) {
@@ -491,6 +497,88 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
     ADD_FAILURE() << "frame B should preserve side-effect root marking";
     return;
   }
+}
+
+TEST(RenderGraphMetadataTest, BarrierPlansTrackStablePerPassTransitions) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(309u);
+
+  auto transientBufferResult = builder.createTransientBuffer(
+      makeTransientBufferDesc(64u), "barrier_buf");
+  if (transientBufferResult.hasError()) {
+    ADD_FAILURE() << "createTransientBuffer should succeed";
+    return;
+  }
+
+  RenderPass passA{};
+  passA.debugLabel = "barrier_pass_a";
+  RenderPass passB{};
+  passB.debugLabel = "barrier_pass_b";
+
+  auto passAResult = addTestGraphicsPass(builder, passA, passA.debugLabel);
+  auto passBResult = addTestGraphicsPass(builder, passB, passB.debugLabel);
+  if (passAResult.hasError() || passBResult.hasError()) {
+    ADD_FAILURE() << "addLegacyRenderPass should succeed";
+    return;
+  }
+
+  auto accessResult = builder.addBufferWrite(passAResult.value(),
+                                             transientBufferResult.value());
+  if (accessResult.hasError()) {
+    ADD_FAILURE() << "addBufferWrite should succeed";
+    return;
+  }
+  accessResult =
+      builder.addBufferRead(passBResult.value(), transientBufferResult.value());
+  if (accessResult.hasError()) {
+    ADD_FAILURE() << "addBufferRead should succeed";
+    return;
+  }
+  auto depResult =
+      builder.addDependency(passAResult.value(), passBResult.value());
+  if (depResult.hasError()) {
+    ADD_FAILURE() << "addDependency should succeed";
+    return;
+  }
+  auto rootResult = builder.markPassSideEffect(passBResult.value());
+  if (rootResult.hasError()) {
+    ADD_FAILURE() << "markPassSideEffect should succeed";
+    return;
+  }
+
+  auto compileResult = compileBuilder(builder);
+  if (compileResult.hasError()) {
+    ADD_FAILURE() << "compile should succeed";
+    std::cerr << compileResult.error() << "\n";
+    return;
+  }
+  const RenderGraphCompileResult &compiled = compileResult.value();
+
+  ASSERT_EQ(compiled.passBarrierPlans.size(), 2u);
+  ASSERT_EQ(compiled.passBarrierRecords.size(), 2u);
+
+  const PassBarrierPlan &planA = compiled.passBarrierPlans[0u];
+  const PassBarrierPlan &planB = compiled.passBarrierPlans[1u];
+  ASSERT_EQ(planA.orderedPassIndex, 0u);
+  ASSERT_EQ(planB.orderedPassIndex, 1u);
+  ASSERT_EQ(planA.barrierCount, 1u);
+  ASSERT_EQ(planB.barrierCount, 1u);
+
+  const RenderGraphBarrierRecord &recordA =
+      compiled.passBarrierRecords[planA.barrierOffset];
+  EXPECT_EQ(recordA.resourceKind, RenderGraphBarrierResourceKind::Buffer);
+  EXPECT_EQ(recordA.resourceIndex, transientBufferResult.value().value);
+  EXPECT_EQ(recordA.beforeState, RenderGraphResourceState::Unknown);
+  EXPECT_EQ(recordA.afterState, RenderGraphResourceState::Write);
+
+  const RenderGraphBarrierRecord &recordB =
+      compiled.passBarrierRecords[planB.barrierOffset];
+  EXPECT_EQ(recordB.resourceKind, RenderGraphBarrierResourceKind::Buffer);
+  EXPECT_EQ(recordB.resourceIndex, transientBufferResult.value().value);
+  EXPECT_EQ(recordB.beforeState, RenderGraphResourceState::Write);
+  EXPECT_EQ(recordB.afterState, RenderGraphResourceState::Read);
+  EXPECT_EQ(recordB.beforeAccess, RenderGraphAccessMode::Write);
+  EXPECT_EQ(recordB.afterAccess, RenderGraphAccessMode::Read);
 }
 
 TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
@@ -552,7 +640,7 @@ TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
@@ -667,6 +755,45 @@ TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
   }
 }
 
+TEST(RenderGraphMetadataTest, FrameOutputTexturesEmitFinalPresentBarrierPlan) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(111u);
+
+  const TextureHandle outputTexture{.index = 901u, .generation = 1u};
+  auto importResult = builder.importTexture(outputTexture, "metadata_output");
+  ASSERT_FALSE(importResult.hasError());
+
+  RenderPass pass{};
+  pass.colorTexture = outputTexture;
+  pass.debugLabel = "metadata_frame_output";
+  auto passResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
+  ASSERT_FALSE(passResult.hasError());
+
+  auto bindResult =
+      builder.bindPassColorTexture(passResult.value(), importResult.value());
+  ASSERT_FALSE(bindResult.hasError());
+  auto outputResult = builder.markTextureAsFrameOutput(importResult.value());
+  ASSERT_FALSE(outputResult.hasError());
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError());
+  const RenderGraphCompileResult &compiled = compileResult.value();
+
+  ASSERT_EQ(compiled.passBarrierPlans.size(), 1u);
+  ASSERT_EQ(compiled.finalBarrierPlan.barrierCount, 1u);
+  ASSERT_LT(compiled.finalBarrierPlan.barrierOffset,
+            compiled.passBarrierRecords.size());
+
+  const RenderGraphBarrierRecord &record =
+      compiled.passBarrierRecords[compiled.finalBarrierPlan.barrierOffset];
+  EXPECT_EQ(record.resourceKind, RenderGraphBarrierResourceKind::Texture);
+  EXPECT_EQ(record.resourceIndex, importResult.value().value);
+  EXPECT_EQ(record.beforeState, RenderGraphResourceState::Attachment);
+  EXPECT_EQ(record.afterState, RenderGraphResourceState::Present);
+  EXPECT_EQ(record.beforeAccess, RenderGraphAccessMode::Write);
+  EXPECT_EQ(record.afterAccess, RenderGraphAccessMode::None);
+}
+
 TEST(RenderGraphMetadataTest, ResolvedImportedBindingMetadata) {
   RenderGraphBuilder builder;
   builder.beginFrame(102u);
@@ -696,7 +823,7 @@ TEST(RenderGraphMetadataTest, ResolvedImportedBindingMetadata) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
@@ -840,7 +967,7 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
@@ -1002,7 +1129,7 @@ TEST(RenderGraphMetadataTest, StructuralCompileMetadataIntegrity) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {
@@ -1116,7 +1243,7 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     if (compileResult.hasError()) {

@@ -16,6 +16,19 @@ namespace {
 using namespace nuri;
 using namespace nuri::test_support;
 
+Result<RenderGraphCompileResult, std::string>
+compileBuilder(RenderGraphBuilder &builder) {
+  RenderGraphRuntime runtime;
+  return builder.compile(runtime);
+}
+
+Result<RenderGraphCompileResult, std::string>
+compileBuilderWithConfig(RenderGraphBuilder &builder,
+                         const RenderGraphRuntimeConfig &config) {
+  RenderGraphRuntime runtime(config);
+  return builder.compile(runtime);
+}
+
 TEST(RenderGraphCompileBehaviorTest, CompileDeterminismAndTieBreak) {
   RenderGraphBuilder builder;
   builder.beginFrame(201u);
@@ -42,8 +55,8 @@ TEST(RenderGraphCompileBehaviorTest, CompileDeterminismAndTieBreak) {
     return;
   }
 
-  auto compileAResult = builder.compile();
-  auto compileBResult = builder.compile();
+  auto compileAResult = compileBuilder(builder);
+  auto compileBResult = compileBuilder(builder);
   if (!(!compileAResult.hasError() && !compileBResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for determinism graph";
     if (compileAResult.hasError()) {
@@ -88,6 +101,349 @@ TEST(RenderGraphCompileBehaviorTest, CompileDeterminismAndTieBreak) {
 }
 
 TEST(RenderGraphCompileBehaviorTest,
+     ParallelCompilePreservesDeterministicLifetimesAndBarrierPlans) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(202u);
+  constexpr uint32_t kParallelBufferChainLength = 64u;
+  std::vector<RenderGraphBufferId> buffers;
+  std::vector<RenderGraphPassId> passes;
+  buffers.reserve(kParallelBufferChainLength);
+  passes.reserve(kParallelBufferChainLength);
+
+  for (uint32_t i = 0u; i < kParallelBufferChainLength; ++i) {
+    const std::string bufferName = "pc_buf_" + std::to_string(i);
+    auto bufferResult =
+        builder.createTransientBuffer(makeTransientBufferDesc(64u), bufferName);
+    ASSERT_FALSE(bufferResult.hasError());
+    buffers.push_back(bufferResult.value());
+
+    const std::string passName = "pc_p" + std::to_string(i);
+    auto passResult =
+        addTestGraphicsPass(builder, makeTestPass(passName), passName);
+    ASSERT_FALSE(passResult.hasError());
+    passes.push_back(passResult.value());
+  }
+
+  ASSERT_EQ(buffers.size(), kParallelBufferChainLength);
+  ASSERT_EQ(passes.size(), kParallelBufferChainLength);
+
+  ASSERT_FALSE(
+      builder.addBufferWrite(passes.front(), buffers.front()).hasError());
+  for (uint32_t i = 1u; i < kParallelBufferChainLength; ++i) {
+    ASSERT_FALSE(builder.addBufferRead(passes[i], buffers[i - 1u]).hasError());
+    ASSERT_FALSE(builder.addBufferWrite(passes[i], buffers[i]).hasError());
+  }
+  ASSERT_FALSE(builder.markPassSideEffect(passes.back()).hasError());
+
+  const RenderGraphRuntimeConfig serialConfig{
+      .workerCount = 1u,
+      .parallelCompile = true,
+      .parallelGraphicsRecording = false,
+  };
+  const RenderGraphRuntimeConfig parallelConfig{
+      .workerCount = 4u,
+      .parallelCompile = true,
+      .parallelGraphicsRecording = false,
+  };
+
+  auto serialCompile = compileBuilderWithConfig(builder, serialConfig);
+  auto parallelCompile = compileBuilderWithConfig(builder, parallelConfig);
+  ASSERT_FALSE(serialCompile.hasError());
+  ASSERT_FALSE(parallelCompile.hasError());
+
+  const RenderGraphCompileResult &serial = serialCompile.value();
+  const RenderGraphCompileResult &parallel = parallelCompile.value();
+
+  EXPECT_FALSE(serial.usedParallelCompile);
+  EXPECT_TRUE(parallel.usedParallelCompile);
+  EXPECT_EQ(serial.orderedPassIndices, parallel.orderedPassIndices);
+  EXPECT_EQ(serial.edges.size(), parallel.edges.size());
+  EXPECT_EQ(serial.transientBufferLifetimes.size(),
+            parallel.transientBufferLifetimes.size());
+  EXPECT_EQ(serial.passBarrierPlans.size(), parallel.passBarrierPlans.size());
+  EXPECT_EQ(serial.passBarrierRecords.size(),
+            parallel.passBarrierRecords.size());
+
+  for (size_t i = 0; i < serial.edges.size(); ++i) {
+    const auto &lhs = serial.edges[i];
+    const auto &rhs = parallel.edges[i];
+    EXPECT_EQ(lhs.before, rhs.before);
+    EXPECT_EQ(lhs.after, rhs.after);
+  }
+
+  for (size_t i = 0; i < serial.transientBufferLifetimes.size(); ++i) {
+    const auto &lhs = serial.transientBufferLifetimes[i];
+    const auto &rhs = parallel.transientBufferLifetimes[i];
+    EXPECT_EQ(lhs.resourceIndex, rhs.resourceIndex);
+    EXPECT_EQ(lhs.firstExecutionIndex, rhs.firstExecutionIndex);
+    EXPECT_EQ(lhs.lastExecutionIndex, rhs.lastExecutionIndex);
+  }
+
+  for (size_t i = 0; i < serial.passBarrierPlans.size(); ++i) {
+    const auto &lhs = serial.passBarrierPlans[i];
+    const auto &rhs = parallel.passBarrierPlans[i];
+    EXPECT_EQ(lhs.orderedPassIndex, rhs.orderedPassIndex);
+    EXPECT_EQ(lhs.barrierCount, rhs.barrierCount);
+  }
+
+  for (size_t i = 0; i < serial.passBarrierRecords.size(); ++i) {
+    const auto &lhs = serial.passBarrierRecords[i];
+    const auto &rhs = parallel.passBarrierRecords[i];
+    EXPECT_EQ(lhs.resourceKind, rhs.resourceKind);
+    EXPECT_EQ(lhs.resourceIndex, rhs.resourceIndex);
+    EXPECT_EQ(lhs.beforeAccess, rhs.beforeAccess);
+    EXPECT_EQ(lhs.afterAccess, rhs.afterAccess);
+    EXPECT_EQ(lhs.beforeState, rhs.beforeState);
+    EXPECT_EQ(lhs.afterState, rhs.afterState);
+  }
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     ParallelCompilePreservesResolvedBindingMetadata) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(230u);
+
+  auto transientColorResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::RGBA8_UNORM, 64u, 64u), "c3_color");
+  auto importedDepthResult = builder.importTexture(
+      TextureHandle{.index = 90u, .generation = 1u}, "c3_depth");
+  auto transientDependencyResult =
+      builder.createTransientBuffer(makeTransientBufferDesc(64u), "c3_dep");
+  auto transientDispatchDependencyResult =
+      builder.createTransientBuffer(makeTransientBufferDesc(64u), "c3_pre_dep");
+  auto transientDrawVertexResult = builder.createTransientBuffer(
+      makeTransientBufferDesc(64u), "c3_draw_vertex");
+  ASSERT_FALSE(transientColorResult.hasError());
+  ASSERT_FALSE(importedDepthResult.hasError());
+  ASSERT_FALSE(transientDependencyResult.hasError());
+  ASSERT_FALSE(transientDispatchDependencyResult.hasError());
+  ASSERT_FALSE(transientDrawVertexResult.hasError());
+
+  const std::array<BufferHandle, 2u> dependencyBuffers{
+      BufferHandle{.index = 11u, .generation = 1u}, BufferHandle{}};
+  const std::array<BufferHandle, 2u> dispatchDependencyBuffers{
+      BufferHandle{.index = 12u, .generation = 1u}, BufferHandle{}};
+  ComputeDispatchItem dispatch{};
+  dispatch.dependencyBuffers = std::span<const BufferHandle>(
+      dispatchDependencyBuffers.data(), dispatchDependencyBuffers.size());
+  dispatch.debugLabel = "c3_dispatch";
+  const std::array<ComputeDispatchItem, 1u> preDispatches{dispatch};
+
+  DrawItem draw{};
+  draw.vertexBuffer = {};
+  draw.indexBuffer = BufferHandle{.index = 13u, .generation = 1u};
+  draw.debugLabel = "c3_draw";
+  const std::array<DrawItem, 1u> draws{draw};
+
+  RenderGraphGraphicsPassDesc complexDesc{};
+  complexDesc.colorTexture = transientColorResult.value();
+  complexDesc.depthTexture = importedDepthResult.value();
+  complexDesc.preDispatches = std::span<const ComputeDispatchItem>(
+      preDispatches.data(), preDispatches.size());
+  complexDesc.dependencyBuffers = std::span<const BufferHandle>(
+      dependencyBuffers.data(), dependencyBuffers.size());
+  complexDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
+  complexDesc.debugLabel = "c3_pass0";
+  complexDesc.markImplicitOutputSideEffect = false;
+
+  auto pass0Result = builder.addGraphicsPass(complexDesc);
+  ASSERT_FALSE(pass0Result.hasError());
+  ASSERT_FALSE(builder
+                   .bindPassDependencyBuffer(pass0Result.value(), 1u,
+                                             transientDependencyResult.value(),
+                                             RenderGraphAccessMode::Read)
+                   .hasError());
+  ASSERT_FALSE(builder
+                   .bindPreDispatchDependencyBuffer(
+                       pass0Result.value(), 0u, 1u,
+                       transientDispatchDependencyResult.value(),
+                       RenderGraphAccessMode::Read)
+                   .hasError());
+  ASSERT_FALSE(
+      builder
+          .bindDrawBuffer(
+              pass0Result.value(), 0u,
+              RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
+              transientDrawVertexResult.value(), RenderGraphAccessMode::Read)
+          .hasError());
+  ASSERT_FALSE(builder.markPassSideEffect(pass0Result.value()).hasError());
+
+  auto pass1Result =
+      addTestGraphicsPass(builder, makeTestPass("c3_pass1"), "c3_pass1");
+  ASSERT_FALSE(pass1Result.hasError());
+  ASSERT_FALSE(builder.markPassSideEffect(pass1Result.value()).hasError());
+  constexpr uint32_t kExtraParallelPayloadPassCount = 14u;
+  for (uint32_t i = 0u; i < kExtraParallelPayloadPassCount; ++i) {
+    const std::string passName = "c3_extra_pass_" + std::to_string(i);
+    auto extraPassResult =
+        addTestGraphicsPass(builder, makeTestPass(passName), passName);
+    ASSERT_FALSE(extraPassResult.hasError());
+    ASSERT_FALSE(
+        builder.markPassSideEffect(extraPassResult.value()).hasError());
+  }
+
+  const RenderGraphRuntimeConfig serialConfig{
+      .workerCount = 1u,
+      .parallelCompile = true,
+      .parallelGraphicsRecording = false,
+  };
+  const RenderGraphRuntimeConfig parallelConfig{
+      .workerCount = 4u,
+      .parallelCompile = true,
+      .parallelGraphicsRecording = false,
+  };
+
+  auto serialCompile = compileBuilderWithConfig(builder, serialConfig);
+  auto parallelCompile = compileBuilderWithConfig(builder, parallelConfig);
+  ASSERT_FALSE(serialCompile.hasError());
+  ASSERT_FALSE(parallelCompile.hasError());
+
+  const RenderGraphCompileResult &serial = serialCompile.value();
+  const RenderGraphCompileResult &parallel = parallelCompile.value();
+
+  EXPECT_FALSE(serial.usedParallelPayloadResolution);
+  EXPECT_TRUE(parallel.usedParallelPayloadResolution);
+  EXPECT_EQ(serial.orderedPassIndices, parallel.orderedPassIndices);
+  EXPECT_EQ(serial.unresolvedTextureBindings.size(),
+            parallel.unresolvedTextureBindings.size());
+  EXPECT_EQ(serial.resolvedDependencyBuffers.size(),
+            parallel.resolvedDependencyBuffers.size());
+  EXPECT_EQ(serial.dependencyBufferRangesByPass.size(),
+            parallel.dependencyBufferRangesByPass.size());
+  EXPECT_EQ(serial.preDispatchRangesByPass.size(),
+            parallel.preDispatchRangesByPass.size());
+  EXPECT_EQ(serial.preDispatchDependencyRanges.size(),
+            parallel.preDispatchDependencyRanges.size());
+  EXPECT_EQ(serial.resolvedPreDispatchDependencyBuffers.size(),
+            parallel.resolvedPreDispatchDependencyBuffers.size());
+  EXPECT_EQ(serial.ownedPreDispatches.size(),
+            parallel.ownedPreDispatches.size());
+  EXPECT_EQ(serial.unresolvedPreDispatchDependencyBufferBindings.size(),
+            parallel.unresolvedPreDispatchDependencyBufferBindings.size());
+  EXPECT_EQ(serial.drawRangesByPass.size(), parallel.drawRangesByPass.size());
+  EXPECT_EQ(serial.ownedDrawItems.size(), parallel.ownedDrawItems.size());
+  EXPECT_EQ(serial.unresolvedDrawBufferBindings.size(),
+            parallel.unresolvedDrawBufferBindings.size());
+
+  ASSERT_EQ(serial.orderedPasses.size(), parallel.orderedPasses.size());
+  ASSERT_EQ(serial.orderedPasses.size(), 2u + kExtraParallelPayloadPassCount);
+  EXPECT_FALSE(nuri::isValid(serial.orderedPasses[0].colorTexture));
+  EXPECT_FALSE(nuri::isValid(parallel.orderedPasses[0].colorTexture));
+  EXPECT_TRUE(nuri::isValid(serial.orderedPasses[0].depthTexture));
+  EXPECT_TRUE(sameTexture(serial.orderedPasses[0].depthTexture,
+                          parallel.orderedPasses[0].depthTexture));
+  EXPECT_EQ(serial.orderedPasses[0].debugLabel,
+            parallel.orderedPasses[0].debugLabel);
+  EXPECT_EQ(serial.orderedPasses[1].debugLabel,
+            parallel.orderedPasses[1].debugLabel);
+
+  for (size_t i = 0; i < serial.dependencyBufferRangesByPass.size(); ++i) {
+    EXPECT_EQ(serial.dependencyBufferRangesByPass[i].offset,
+              parallel.dependencyBufferRangesByPass[i].offset);
+    EXPECT_EQ(serial.dependencyBufferRangesByPass[i].count,
+              parallel.dependencyBufferRangesByPass[i].count);
+  }
+  for (size_t i = 0; i < serial.preDispatchRangesByPass.size(); ++i) {
+    EXPECT_EQ(serial.preDispatchRangesByPass[i].offset,
+              parallel.preDispatchRangesByPass[i].offset);
+    EXPECT_EQ(serial.preDispatchRangesByPass[i].count,
+              parallel.preDispatchRangesByPass[i].count);
+  }
+  for (size_t i = 0; i < serial.preDispatchDependencyRanges.size(); ++i) {
+    EXPECT_EQ(serial.preDispatchDependencyRanges[i].offset,
+              parallel.preDispatchDependencyRanges[i].offset);
+    EXPECT_EQ(serial.preDispatchDependencyRanges[i].count,
+              parallel.preDispatchDependencyRanges[i].count);
+  }
+  for (size_t i = 0; i < serial.drawRangesByPass.size(); ++i) {
+    EXPECT_EQ(serial.drawRangesByPass[i].offset,
+              parallel.drawRangesByPass[i].offset);
+    EXPECT_EQ(serial.drawRangesByPass[i].count,
+              parallel.drawRangesByPass[i].count);
+  }
+
+  ASSERT_EQ(serial.resolvedDependencyBuffers.size(), 2u);
+  EXPECT_TRUE(sameBuffer(serial.resolvedDependencyBuffers[0],
+                         parallel.resolvedDependencyBuffers[0]));
+  EXPECT_FALSE(nuri::isValid(serial.resolvedDependencyBuffers[1]));
+  EXPECT_FALSE(nuri::isValid(parallel.resolvedDependencyBuffers[1]));
+
+  ASSERT_EQ(serial.resolvedPreDispatchDependencyBuffers.size(), 2u);
+  EXPECT_TRUE(sameBuffer(serial.resolvedPreDispatchDependencyBuffers[0],
+                         parallel.resolvedPreDispatchDependencyBuffers[0]));
+  EXPECT_FALSE(nuri::isValid(serial.resolvedPreDispatchDependencyBuffers[1]));
+  EXPECT_FALSE(nuri::isValid(parallel.resolvedPreDispatchDependencyBuffers[1]));
+
+  ASSERT_EQ(serial.ownedPreDispatches.size(), 1u);
+  ASSERT_EQ(parallel.ownedPreDispatches.size(), 1u);
+  EXPECT_EQ(serial.ownedPreDispatches[0].debugLabel,
+            parallel.ownedPreDispatches[0].debugLabel);
+  ASSERT_EQ(serial.ownedPreDispatches[0].dependencyBuffers.size(),
+            parallel.ownedPreDispatches[0].dependencyBuffers.size());
+  ASSERT_EQ(serial.ownedPreDispatches[0].dependencyBuffers.size(), 2u);
+  EXPECT_TRUE(sameBuffer(serial.ownedPreDispatches[0].dependencyBuffers[0],
+                         parallel.ownedPreDispatches[0].dependencyBuffers[0]));
+  EXPECT_FALSE(
+      nuri::isValid(serial.ownedPreDispatches[0].dependencyBuffers[1]));
+  EXPECT_FALSE(
+      nuri::isValid(parallel.ownedPreDispatches[0].dependencyBuffers[1]));
+
+  ASSERT_EQ(serial.ownedDrawItems.size(), 1u);
+  ASSERT_EQ(parallel.ownedDrawItems.size(), 1u);
+  EXPECT_EQ(serial.ownedDrawItems[0].debugLabel,
+            parallel.ownedDrawItems[0].debugLabel);
+  EXPECT_FALSE(nuri::isValid(serial.ownedDrawItems[0].vertexBuffer));
+  EXPECT_FALSE(nuri::isValid(parallel.ownedDrawItems[0].vertexBuffer));
+  EXPECT_TRUE(sameBuffer(serial.ownedDrawItems[0].indexBuffer,
+                         parallel.ownedDrawItems[0].indexBuffer));
+
+  ASSERT_EQ(serial.unresolvedTextureBindings.size(), 1u);
+  EXPECT_EQ(serial.unresolvedTextureBindings[0].orderedPassIndex,
+            parallel.unresolvedTextureBindings[0].orderedPassIndex);
+  EXPECT_EQ(serial.unresolvedTextureBindings[0].textureResourceIndex,
+            parallel.unresolvedTextureBindings[0].textureResourceIndex);
+  EXPECT_EQ(serial.unresolvedTextureBindings[0].target,
+            parallel.unresolvedTextureBindings[0].target);
+
+  ASSERT_EQ(serial.unresolvedDependencyBufferBindings.size(), 1u);
+  EXPECT_EQ(serial.unresolvedDependencyBufferBindings[0].orderedPassIndex,
+            parallel.unresolvedDependencyBufferBindings[0].orderedPassIndex);
+  EXPECT_EQ(
+      serial.unresolvedDependencyBufferBindings[0].dependencyBufferIndex,
+      parallel.unresolvedDependencyBufferBindings[0].dependencyBufferIndex);
+  EXPECT_EQ(serial.unresolvedDependencyBufferBindings[0].bufferResourceIndex,
+            parallel.unresolvedDependencyBufferBindings[0].bufferResourceIndex);
+
+  ASSERT_EQ(serial.unresolvedPreDispatchDependencyBufferBindings.size(), 1u);
+  EXPECT_EQ(
+      serial.unresolvedPreDispatchDependencyBufferBindings[0].orderedPassIndex,
+      parallel.unresolvedPreDispatchDependencyBufferBindings[0]
+          .orderedPassIndex);
+  EXPECT_EQ(
+      serial.unresolvedPreDispatchDependencyBufferBindings[0].preDispatchIndex,
+      parallel.unresolvedPreDispatchDependencyBufferBindings[0]
+          .preDispatchIndex);
+  EXPECT_EQ(serial.unresolvedPreDispatchDependencyBufferBindings[0]
+                .dependencyBufferIndex,
+            parallel.unresolvedPreDispatchDependencyBufferBindings[0]
+                .dependencyBufferIndex);
+  EXPECT_EQ(serial.unresolvedPreDispatchDependencyBufferBindings[0]
+                .bufferResourceIndex,
+            parallel.unresolvedPreDispatchDependencyBufferBindings[0]
+                .bufferResourceIndex);
+
+  ASSERT_EQ(serial.unresolvedDrawBufferBindings.size(), 1u);
+  EXPECT_EQ(serial.unresolvedDrawBufferBindings[0].orderedPassIndex,
+            parallel.unresolvedDrawBufferBindings[0].orderedPassIndex);
+  EXPECT_EQ(serial.unresolvedDrawBufferBindings[0].drawIndex,
+            parallel.unresolvedDrawBufferBindings[0].drawIndex);
+  EXPECT_EQ(serial.unresolvedDrawBufferBindings[0].target,
+            parallel.unresolvedDrawBufferBindings[0].target);
+  EXPECT_EQ(serial.unresolvedDrawBufferBindings[0].bufferResourceIndex,
+            parallel.unresolvedDrawBufferBindings[0].bufferResourceIndex);
+}
+
+TEST(RenderGraphCompileBehaviorTest,
      DuplicateExplicitDependenciesAreDeduplicated) {
   RenderGraphBuilder builder;
   builder.beginFrame(216u);
@@ -120,7 +476,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE()
         << "compile should succeed for explicit dependency dedup graph";
@@ -192,7 +548,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for overlap dedup graph";
     if (compileResult.hasError()) {
@@ -266,7 +622,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileA = builder.compile();
+  auto compileA = compileBuilder(builder);
   if (!(!compileA.hasError())) {
     ADD_FAILURE() << "frame A compile should succeed";
     if (compileA.hasError()) {
@@ -309,7 +665,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileB = builder.compile();
+  auto compileB = compileBuilder(builder);
   if (!(!compileB.hasError())) {
     ADD_FAILURE() << "frame B compile should succeed";
     if (compileB.hasError()) {
@@ -347,7 +703,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for color-binding case";
     return;
@@ -374,7 +730,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for dependency-binding case";
     return;
@@ -427,7 +783,7 @@ TEST(RenderGraphCompileBehaviorTest, AddGraphicsPassNativeDeclarationPath) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for native declaration path";
     if (compileResult.hasError()) {
@@ -513,7 +869,7 @@ TEST(RenderGraphCompileBehaviorTest, DeadPassCullingFromFrameOutputRoots) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for culling graph";
     if (compileResult.hasError()) {
@@ -581,7 +937,7 @@ TEST(RenderGraphCompileBehaviorTest, CycleDiagnosticsIncludePassNames) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(compileResult.hasError())) {
     ADD_FAILURE() << "compile should fail on dependency cycle";
     return;
@@ -644,7 +1000,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE()
         << "compile should succeed for inferred-root suppression graph";
@@ -721,7 +1077,7 @@ TEST(RenderGraphCompileBehaviorTest, ExplicitSideEffectUpgradesInferredMark) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for explicit-upgrade graph";
     if (compileResult.hasError()) {
@@ -781,7 +1137,7 @@ TEST(RenderGraphCompileBehaviorTest, DefaultPolicyCullsUnmarkedPasses) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for default-policy graph";
     if (compileResult.hasError()) {
@@ -921,7 +1277,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for default legacy bridge test";
     if (compileResult.hasError()) {
@@ -987,7 +1343,7 @@ TEST(RenderGraphCompileBehaviorTest,
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for depth override bridge test";
     if (compileResult.hasError()) {
@@ -1280,7 +1636,7 @@ TEST(RenderGraphCompileBehaviorTest, TransientAliasAllocationCorrectness) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for aliasing graph";
     if (compileResult.hasError()) {
@@ -1437,7 +1793,7 @@ TEST(RenderGraphCompileBehaviorTest, ExplicitAccessOverridesLegacyInference) {
     return;
   }
 
-  auto compileResult = builder.compile();
+  auto compileResult = compileBuilder(builder);
   if (!(!compileResult.hasError())) {
     ADD_FAILURE() << "compile should succeed for access override graph";
     if (compileResult.hasError()) {
