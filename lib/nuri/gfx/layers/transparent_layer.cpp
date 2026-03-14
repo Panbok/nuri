@@ -254,6 +254,12 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
   }
 
   const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
+  TextureHandle colorTexture{};
+  if (const TextureHandle *publishedFrameColor =
+          frame.channels.tryGet<TextureHandle>(kFrameChannelFrameColorTexture);
+      publishedFrameColor != nullptr && nuri::isValid(*publishedFrameColor)) {
+    colorTexture = *publishedFrameColor;
+  }
   RenderGraphTextureId sceneDepthGraphTexture{};
   if (const RenderGraphTextureId *published =
           frame.channels.tryGet<RenderGraphTextureId>(
@@ -267,7 +273,7 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
     sortTransparentDraws(std::span<TransparentStageSortableDraw>(
         contributorSortableDraws_.data(), contributorSortableDraws_.size()));
     return appendTransparentPass(
-        graph, depthTexture, sceneDepthGraphTexture,
+        graph, colorTexture, depthTexture, sceneDepthGraphTexture,
         std::span<const TransparentStageSortableDraw>(
             contributorSortableDraws_.data(), contributorSortableDraws_.size()),
         std::span<const DrawItem>(contributorFixedDraws_.data(),
@@ -390,6 +396,10 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
       .brdfLutTexId = brdfLutTexId,
       .flags = frameFlags,
       .cubemapSamplerId = cubemapSamplerId,
+      .sceneColorTexId = 0u,
+      .sceneColorSamplerId = 0u,
+      .reserved0 = 0u,
+      .reserved1 = 0u,
   };
 
   if (!frameDataUploadValid_ || !(uploadedFrameData_ == frameData_)) {
@@ -466,7 +476,10 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
   const Format depthFormat = nuri::isValid(depthTexture)
                                  ? gpu_.getTextureFormat(depthTexture)
                                  : Format::Count;
-  auto pipelineResult = ensurePipelines(gpu_.getSwapchainFormat(), depthFormat);
+  const Format colorFormat = nuri::isValid(colorTexture)
+                                 ? gpu_.getTextureFormat(colorTexture)
+                                 : gpu_.getSwapchainFormat();
+  auto pipelineResult = ensurePipelines(colorFormat, depthFormat);
   if (pipelineResult.hasError()) {
     return pipelineResult;
   }
@@ -591,7 +604,7 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
   appendUniqueBuffer(passDependencyBuffers_,
                      instanceRemapRing_[frameSlot].buffer->handle());
   auto passResult = appendTransparentPass(
-      graph, depthTexture, sceneDepthGraphTexture,
+      graph, colorTexture, depthTexture, sceneDepthGraphTexture,
       std::span<const TransparentStageSortableDraw>(sortableDraws_.data(),
                                                     sortableDraws_.size()),
       std::span<const DrawItem>(fixedDraws_.data(), fixedDraws_.size()),
@@ -952,23 +965,13 @@ Result<bool, std::string> TransparentLayer::rebuildMaterialTextureAccessCache(
       continue;
     }
 
-    const std::array<TextureRef, 8> refs = {
-        materialRecord->textureRefs.baseColor,
-        materialRecord->textureRefs.metallicRoughness,
-        materialRecord->textureRefs.normal,
-        materialRecord->textureRefs.occlusion,
-        materialRecord->textureRefs.emissive,
-        materialRecord->textureRefs.clearcoat,
-        materialRecord->textureRefs.clearcoatRoughness,
-        materialRecord->textureRefs.clearcoatNormal,
-    };
-    for (const TextureRef ref : refs) {
+    forEachMaterialTextureRef(materialRecord->textureRefs, [&](TextureRef ref) {
       const TextureRecord *record = resources.tryGet(ref);
       if (record == nullptr || !nuri::isValid(record->texture)) {
-        continue;
+        return;
       }
       appendUniqueTexture(materialTextureAccessHandles_, record->texture);
-    }
+    });
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1031,8 +1034,8 @@ TransparentLayer::collectContributorDraws(RenderFrameContext &frame) {
 }
 
 Result<bool, std::string> TransparentLayer::appendTransparentPass(
-    RenderGraphBuilder &graph, TextureHandle depthTexture,
-    RenderGraphTextureId sceneDepthGraphTexture,
+    RenderGraphBuilder &graph, TextureHandle colorTexture,
+    TextureHandle depthTexture, RenderGraphTextureId sceneDepthGraphTexture,
     std::span<const TransparentStageSortableDraw> sortableDraws,
     std::span<const DrawItem> fixedDraws,
     std::span<const TextureHandle> textureReads,
@@ -1050,11 +1053,20 @@ Result<bool, std::string> TransparentLayer::appendTransparentPass(
     passDrawItems_.push_back(draw);
   }
 
-  const bool hasPriorColorPass = graph.passCount() > 0u;
+  const bool hasPriorColorPass =
+      nuri::isValid(colorTexture) || graph.passCount() > 0u;
   RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
                     .storeOp = StoreOp::Store,
                     .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+  if (nuri::isValid(colorTexture)) {
+    auto colorImportResult =
+        graph.importTexture(colorTexture, "transparent_frame_color");
+    if (colorImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(colorImportResult.error());
+    }
+    passDesc.colorTexture = colorImportResult.value();
+  }
   if (nuri::isValid(depthTexture)) {
     passDesc.depth = {.loadOp = LoadOp::Load,
                       .storeOp = StoreOp::Store,

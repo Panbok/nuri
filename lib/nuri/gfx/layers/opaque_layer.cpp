@@ -66,6 +66,11 @@ const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
   return frame.settings ? *frame.settings : kDefaultSettings;
 }
 
+[[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
+  return material.desc.alphaMode != MaterialAlphaMode::Blend &&
+         (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
+}
+
 RenderPipelineDesc
 meshPipelineDesc(Format swapchainFormat, Format depthFormat,
                  ShaderHandle vertexShader, ShaderHandle tessControlShader,
@@ -317,7 +322,12 @@ OpaqueLayer::OpaqueLayer(GPUDevice &gpu, OpaqueLayerConfig config,
       passDrawItems_(resolveMemoryResource(memory)),
       preDispatches_(resolveMemoryResource(memory)),
       passDependencyBuffers_(resolveMemoryResource(memory)),
-      dispatchDependencyBuffers_(resolveMemoryResource(memory)) {
+      dispatchDependencyBuffers_(resolveMemoryResource(memory)),
+      preparedGraphPasses_(resolveMemoryResource(memory)),
+      shadingPassIds_(resolveMemoryResource(memory)),
+      workPassIds_(resolveMemoryResource(memory)),
+      preDispatchPassIds_(resolveMemoryResource(memory)),
+      indirectPassIds_(resolveMemoryResource(memory)) {
   auto *resource = resolveMemoryResource(memory);
   singleInstanceBatchCaches_.reserve(kSingleInstanceCacheVariantCount);
   for (size_t i = 0; i < kSingleInstanceCacheVariantCount; ++i) {
@@ -630,6 +640,10 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
       .brdfLutTexId = brdfLutTexId,
       .flags = frameFlags,
       .cubemapSamplerId = cubemapSamplerId,
+      .sceneColorTexId = 0u,
+      .sceneColorSamplerId = 0u,
+      .reserved0 = 0u,
+      .reserved1 = 0u,
   };
 
   auto frameDataResult = ensureFrameDataBufferCapacity(sizeof(FrameData));
@@ -2212,6 +2226,10 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
   }
 
   const bool shouldLoadColor = settings.skybox.enabled;
+  const bool transmissionStageEnabled =
+      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled) !=
+          nullptr &&
+      *frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
   PreparedGraphPass pass{};
   pass.desc.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
                      .storeOp = StoreOp::Store,
@@ -2235,6 +2253,16 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
   pass.hasPreDispatch = !pickPassSubmitted && !preDispatches_.empty();
   pass.hasIndirectDraws = hasIndirectBaseDraws;
   pass.isMainPass = true;
+  if (transmissionStageEnabled) {
+    const TextureHandle *sceneColorTexture =
+        frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
+    if (sceneColorTexture == nullptr || !nuri::isValid(*sceneColorTexture)) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueLayer::buildOpaquePasses: transmission stage enabled but "
+          "scene color texture is unavailable");
+    }
+    pass.colorTextureHandle = *sceneColorTexture;
+  }
 
   frame.sharedDepthTexture = depthTexture_;
   frame.channels.publish<TextureHandle>(kFrameChannelSceneDepthTexture,
@@ -2248,24 +2276,27 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
                               RenderGraphBuilder &graph) {
   NURI_PROFILER_FUNCTION();
 
-  std::pmr::memory_resource *const memory =
-      renderableTemplates_.get_allocator().resource();
-  std::pmr::vector<PreparedGraphPass> localPasses(memory);
-  auto buildResult = buildOpaquePasses(frame, localPasses);
+  preparedGraphPasses_.clear();
+  shadingPassIds_.clear();
+  workPassIds_.clear();
+  preDispatchPassIds_.clear();
+  indirectPassIds_.clear();
+
+  Result<bool, std::string> buildResult =
+      Result<bool, std::string>::makeResult(true);
+  {
+    NURI_PROFILER_ZONE("OpaqueLayer.graph_prepare_passes",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    buildResult = buildOpaquePasses(frame, preparedGraphPasses_);
+    NURI_PROFILER_ZONE_END();
+  }
   if (buildResult.hasError()) {
     return buildResult;
   }
-
-  std::pmr::vector<RenderGraphPassId> addedPassIds(memory);
-  addedPassIds.reserve(localPasses.size());
-  std::pmr::vector<RenderGraphPassId> opaqueShadingPassIds(memory);
-  opaqueShadingPassIds.reserve(localPasses.size());
-  std::pmr::vector<RenderGraphPassId> opaqueWorkPassIds(memory);
-  opaqueWorkPassIds.reserve(localPasses.size());
-  std::pmr::vector<RenderGraphPassId> opaquePreDispatchPassIds(memory);
-  opaquePreDispatchPassIds.reserve(localPasses.size());
-  std::pmr::vector<RenderGraphPassId> opaqueIndirectPassIds(memory);
-  opaqueIndirectPassIds.reserve(localPasses.size());
+  shadingPassIds_.reserve(preparedGraphPasses_.size());
+  workPassIds_.reserve(preparedGraphPasses_.size());
+  preDispatchPassIds_.reserve(preparedGraphPasses_.size());
+  indirectPassIds_.reserve(preparedGraphPasses_.size());
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
   gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
@@ -2274,118 +2305,129 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
   const uint32_t safeHeight =
       static_cast<uint32_t>(std::max(framebufferHeight, 1));
 
-  for (const PreparedGraphPass &pass : localPasses) {
-    RenderGraphGraphicsPassDesc passDesc = pass.desc;
+  {
+    NURI_PROFILER_ZONE("OpaqueLayer.graph_add_passes",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    for (const PreparedGraphPass &pass : preparedGraphPasses_) {
+      RenderGraphGraphicsPassDesc passDesc = pass.desc;
 
-    if (nuri::isValid(pass.colorTextureHandle)) {
-      auto colorImportResult = graph.importTexture(pass.colorTextureHandle,
-                                                   "opaque_pass_color_texture");
-      if (colorImportResult.hasError()) {
-        return Result<bool, std::string>::makeError(colorImportResult.error());
+      if (nuri::isValid(pass.colorTextureHandle)) {
+        auto colorImportResult = graph.importTexture(
+            pass.colorTextureHandle, "opaque_pass_color_texture");
+        if (colorImportResult.hasError()) {
+          return Result<bool, std::string>::makeError(
+              colorImportResult.error());
+        }
+        passDesc.colorTexture = colorImportResult.value();
       }
-      passDesc.colorTexture = colorImportResult.value();
-    }
 
-    if (nuri::isValid(pass.depthTextureHandle)) {
-      auto depthImportResult = graph.importTexture(pass.depthTextureHandle,
-                                                   "opaque_pass_depth_texture");
-      if (depthImportResult.hasError()) {
-        return Result<bool, std::string>::makeError(depthImportResult.error());
+      if (nuri::isValid(pass.depthTextureHandle)) {
+        auto depthImportResult = graph.importTexture(
+            pass.depthTextureHandle, "opaque_pass_depth_texture");
+        if (depthImportResult.hasError()) {
+          return Result<bool, std::string>::makeError(
+              depthImportResult.error());
+        }
+        passDesc.depthTexture = depthImportResult.value();
       }
-      passDesc.depthTexture = depthImportResult.value();
-    }
 
-    auto addResult = graph.addGraphicsPass(passDesc);
-    if (addResult.hasError()) {
-      return Result<bool, std::string>::makeError(addResult.error());
-    }
-    const RenderGraphPassId passId = addResult.value();
-    addedPassIds.push_back(passId);
+      auto addResult = graph.addGraphicsPass(passDesc);
+      if (addResult.hasError()) {
+        return Result<bool, std::string>::makeError(addResult.error());
+      }
+      const RenderGraphPassId passId = addResult.value();
 
-    const bool hasPreDispatch = pass.hasPreDispatch;
-    const bool hasDraws = pass.hasDraws;
-    const bool hasIndirectDraws = pass.hasIndirectDraws;
-    if (hasDraws || hasPreDispatch) {
-      opaqueWorkPassIds.push_back(passId);
-    }
-    if (hasPreDispatch) {
-      opaquePreDispatchPassIds.push_back(passId);
-    }
-    if (hasPreDispatch || hasIndirectDraws) {
-      opaqueIndirectPassIds.push_back(passId);
-    }
-    if (pass.isMainPass) {
-      opaqueShadingPassIds.push_back(passId);
-    }
+      const bool hasPreDispatch = pass.hasPreDispatch;
+      const bool hasDraws = pass.hasDraws;
+      const bool hasIndirectDraws = pass.hasIndirectDraws;
+      if (hasDraws || hasPreDispatch) {
+        workPassIds_.push_back(passId);
+      }
+      if (hasPreDispatch) {
+        preDispatchPassIds_.push_back(passId);
+      }
+      if (hasPreDispatch || hasIndirectDraws) {
+        indirectPassIds_.push_back(passId);
+      }
+      if (pass.isMainPass) {
+        shadingPassIds_.push_back(passId);
+      }
 
-    if (pass.isPickPass) {
-      frame.channels.publish<RenderGraphTextureId>(
-          kFrameChannelOpaquePickGraphTexture, passDesc.colorTexture);
-      const Format pickDepthFormat =
-          nuri::isValid(pass.depthTextureHandle)
-              ? gpu_.getTextureFormat(pass.depthTextureHandle)
-              : Format::D32_FLOAT;
-      const TextureDesc pickDepthTransientDesc{
-          .type = TextureType::Texture2D,
-          .format = pickDepthFormat,
-          .dimensions = {safeWidth, safeHeight, 1},
-          .usage = TextureUsage::Attachment,
-          .storage = Storage::Device,
-          .numLayers = 1,
-          .numSamples = 1,
-          .numMipLevels = 1,
-          .data = {},
-          .dataNumMipLevels = 1,
-          .generateMipmaps = false,
-      };
-      auto pickDepthResult = graph.createTransientTexture(
-          pickDepthTransientDesc, "opaque_pick_transient_depth");
-      if (pickDepthResult.hasError()) {
-        return Result<bool, std::string>::makeError(pickDepthResult.error());
+      if (pass.isPickPass) {
+        frame.channels.publish<RenderGraphTextureId>(
+            kFrameChannelOpaquePickGraphTexture, passDesc.colorTexture);
+        const Format pickDepthFormat =
+            nuri::isValid(pass.depthTextureHandle)
+                ? gpu_.getTextureFormat(pass.depthTextureHandle)
+                : Format::D32_FLOAT;
+        const TextureDesc pickDepthTransientDesc{
+            .type = TextureType::Texture2D,
+            .format = pickDepthFormat,
+            .dimensions = {safeWidth, safeHeight, 1},
+            .usage = TextureUsage::Attachment,
+            .storage = Storage::Device,
+            .numLayers = 1,
+            .numSamples = 1,
+            .numMipLevels = 1,
+            .data = {},
+            .dataNumMipLevels = 1,
+            .generateMipmaps = false,
+        };
+        auto pickDepthResult = graph.createTransientTexture(
+            pickDepthTransientDesc, "opaque_pick_transient_depth");
+        if (pickDepthResult.hasError()) {
+          return Result<bool, std::string>::makeError(pickDepthResult.error());
+        }
+        auto bindPickDepthResult =
+            graph.bindPassDepthTexture(passId, pickDepthResult.value());
+        if (bindPickDepthResult.hasError()) {
+          return Result<bool, std::string>::makeError(
+              bindPickDepthResult.error());
+        }
+        frame.channels.publish<RenderGraphTextureId>(
+            kFrameChannelOpaquePickDepthGraphTexture, pickDepthResult.value());
       }
-      auto bindPickDepthResult =
-          graph.bindPassDepthTexture(passId, pickDepthResult.value());
-      if (bindPickDepthResult.hasError()) {
-        return Result<bool, std::string>::makeError(
-            bindPickDepthResult.error());
-      }
-      frame.channels.publish<RenderGraphTextureId>(
-          kFrameChannelOpaquePickDepthGraphTexture, pickDepthResult.value());
-    }
 
-    if (pass.isMainPass && nuri::isValid(pass.depthTextureHandle)) {
-      const Format sceneDepthFormat =
-          gpu_.getTextureFormat(pass.depthTextureHandle);
-      const TextureDesc sceneDepthTransientDesc{
-          .type = TextureType::Texture2D,
-          .format = sceneDepthFormat,
-          .dimensions = {safeWidth, safeHeight, 1},
-          .usage = TextureUsage::Attachment,
-          .storage = Storage::Device,
-          .numLayers = 1,
-          .numSamples = 1,
-          .numMipLevels = 1,
-          .data = {},
-          .dataNumMipLevels = 1,
-          .generateMipmaps = false,
-      };
-      auto sceneDepthResult = graph.createTransientTexture(
-          sceneDepthTransientDesc, "opaque_scene_transient_depth");
-      if (sceneDepthResult.hasError()) {
-        return Result<bool, std::string>::makeError(sceneDepthResult.error());
+      if (pass.isMainPass && nuri::isValid(pass.depthTextureHandle)) {
+        const Format sceneDepthFormat =
+            gpu_.getTextureFormat(pass.depthTextureHandle);
+        const TextureDesc sceneDepthTransientDesc{
+            .type = TextureType::Texture2D,
+            .format = sceneDepthFormat,
+            .dimensions = {safeWidth, safeHeight, 1},
+            .usage = TextureUsage::Attachment,
+            .storage = Storage::Device,
+            .numLayers = 1,
+            .numSamples = 1,
+            .numMipLevels = 1,
+            .data = {},
+            .dataNumMipLevels = 1,
+            .generateMipmaps = false,
+        };
+        auto sceneDepthResult = graph.createTransientTexture(
+            sceneDepthTransientDesc, "opaque_scene_transient_depth");
+        if (sceneDepthResult.hasError()) {
+          return Result<bool, std::string>::makeError(sceneDepthResult.error());
+        }
+        auto bindSceneDepthResult =
+            graph.bindPassDepthTexture(passId, sceneDepthResult.value());
+        if (bindSceneDepthResult.hasError()) {
+          return Result<bool, std::string>::makeError(
+              bindSceneDepthResult.error());
+        }
+        frame.channels.publish<RenderGraphTextureId>(
+            kFrameChannelSceneDepthGraphTexture, sceneDepthResult.value());
       }
-      auto bindSceneDepthResult =
-          graph.bindPassDepthTexture(passId, sceneDepthResult.value());
-      if (bindSceneDepthResult.hasError()) {
-        return Result<bool, std::string>::makeError(
-            bindSceneDepthResult.error());
+
+      if (pass.isMainPass && nuri::isValid(pass.colorTextureHandle)) {
+        frame.channels.publish<RenderGraphTextureId>(
+            kFrameChannelSceneColorGraphTexture, passDesc.colorTexture);
       }
-      frame.channels.publish<RenderGraphTextureId>(
-          kFrameChannelSceneDepthGraphTexture, sceneDepthResult.value());
     }
+    NURI_PROFILER_ZONE_END();
   }
 
-  if (addedPassIds.empty()) {
+  if (preparedGraphPasses_.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -2443,8 +2485,12 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
   constexpr RenderGraphAccessMode kReadOnly = RenderGraphAccessMode::Read;
   constexpr RenderGraphAccessMode kReadWrite =
       RenderGraphAccessMode::Read | RenderGraphAccessMode::Write;
-  auto registerResult = registerBufferAccessForPasses(
-      opaqueWorkPassIds,
+  Result<bool, std::string> registerResult =
+      Result<bool, std::string>::makeResult(true);
+  NURI_PROFILER_ZONE("OpaqueLayer.graph_register_resources",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
+  registerResult = registerBufferAccessForPasses(
+      workPassIds_,
       frameDataBuffer_ && frameDataBuffer_->valid() ? frameDataBuffer_->handle()
                                                     : BufferHandle{},
       kReadOnly, "opaque_frame_data_buffer");
@@ -2452,7 +2498,7 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
     return registerResult;
   }
   registerResult = registerBufferAccessForPasses(
-      opaqueWorkPassIds,
+      workPassIds_,
       instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid()
           ? instanceCentersPhaseBuffer_->handle()
           : BufferHandle{},
@@ -2461,7 +2507,7 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
     return registerResult;
   }
   registerResult = registerBufferAccessForPasses(
-      opaqueWorkPassIds,
+      workPassIds_,
       instanceBaseMatricesBuffer_ && instanceBaseMatricesBuffer_->valid()
           ? instanceBaseMatricesBuffer_->handle()
           : BufferHandle{},
@@ -2470,7 +2516,7 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
     return registerResult;
   }
   registerResult = registerBufferAccessForPasses(
-      opaqueShadingPassIds,
+      shadingPassIds_,
       materialBuffer_ && materialBuffer_->valid() ? materialBuffer_->handle()
                                                   : BufferHandle{},
       kReadOnly, "opaque_material_buffer");
@@ -2486,7 +2532,7 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
       instanceMatricesRing_[frameSlot].buffer &&
       instanceMatricesRing_[frameSlot].buffer->valid()) {
     auto registerResult = registerBufferAccessForPasses(
-        opaqueWorkPassIds, instanceMatricesRing_[frameSlot].buffer->handle(),
+        workPassIds_, instanceMatricesRing_[frameSlot].buffer->handle(),
         kReadWrite, "opaque_instance_matrices_ring_buffer");
     if (registerResult.hasError()) {
       return registerResult;
@@ -2496,9 +2542,8 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
       instanceRemapRing_[frameSlot].buffer &&
       instanceRemapRing_[frameSlot].buffer->valid()) {
     auto registerResult = registerBufferAccessForPasses(
-        opaquePreDispatchPassIds,
-        instanceRemapRing_[frameSlot].buffer->handle(), kReadWrite,
-        "opaque_instance_remap_ring_buffer");
+        preDispatchPassIds_, instanceRemapRing_[frameSlot].buffer->handle(),
+        kReadWrite, "opaque_instance_remap_ring_buffer");
     if (registerResult.hasError()) {
       return registerResult;
     }
@@ -2507,7 +2552,7 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
       indirectCommandRing_[frameSlot].buffer &&
       indirectCommandRing_[frameSlot].buffer->valid()) {
     auto registerResult = registerBufferAccessForPasses(
-        opaqueIndirectPassIds, indirectCommandRing_[frameSlot].buffer->handle(),
+        indirectPassIds_, indirectCommandRing_[frameSlot].buffer->handle(),
         kReadWrite, "opaque_indirect_command_ring_buffer");
     if (registerResult.hasError()) {
       return registerResult;
@@ -2531,19 +2576,20 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
         continue;
       }
       auto registerResult = registerTextureAccessForPasses(
-          opaqueShadingPassIds, record->texture, kReadOnly, name);
+          shadingPassIds_, record->texture, kReadOnly, name);
       if (registerResult.hasError()) {
         return registerResult;
       }
     }
     for (const TextureHandle texture : materialTextureAccessHandles_) {
       auto registerResult = registerTextureAccessForPasses(
-          opaqueShadingPassIds, texture, kReadOnly, "opaque_material_texture");
+          shadingPassIds_, texture, kReadOnly, "opaque_material_texture");
       if (registerResult.hasError()) {
         return registerResult;
       }
     }
   }
+  NURI_PROFILER_ZONE_END();
 
   return Result<bool, std::string>::makeResult(true);
 }
@@ -3495,7 +3541,8 @@ OpaqueLayer::rebuildSceneCache(const RenderScene &scene,
       const bool doubleSided =
           materialRecord != nullptr && materialRecord->desc.doubleSided;
       if (materialRecord != nullptr &&
-          materialRecord->desc.alphaMode == MaterialAlphaMode::Blend) {
+          (materialRecord->desc.alphaMode == MaterialAlphaMode::Blend ||
+           isTransmissionMaterial(*materialRecord))) {
         ++skippedBlendSubmeshCount;
         continue;
       }
@@ -3575,33 +3622,36 @@ Result<bool, std::string> OpaqueLayer::rebuildMaterialTextureAccessCache(
   materialTextureAccessHandles_.reserve(renderables.size());
 
   for (const Renderable &renderable : renderables) {
-    const MaterialRecord *materialRecord =
-        resources.tryGet(renderable.material);
-    if (materialRecord == nullptr) {
+    const ModelRecord *modelRecord = resources.tryGet(renderable.model);
+    if (modelRecord == nullptr || modelRecord->model == nullptr) {
       continue;
     }
-
-    const std::array<TextureRef, 8> refs = {
-        materialRecord->textureRefs.baseColor,
-        materialRecord->textureRefs.metallicRoughness,
-        materialRecord->textureRefs.normal,
-        materialRecord->textureRefs.occlusion,
-        materialRecord->textureRefs.emissive,
-        materialRecord->textureRefs.clearcoat,
-        materialRecord->textureRefs.clearcoatRoughness,
-        materialRecord->textureRefs.clearcoatNormal,
-    };
-    for (const TextureRef ref : refs) {
-      const TextureRecord *record = resources.tryGet(ref);
-      if (record == nullptr || !nuri::isValid(record->texture)) {
+    for (size_t submeshIndex = 0;
+         submeshIndex < modelRecord->model->submeshes().size();
+         ++submeshIndex) {
+      const MaterialRef modelMaterial =
+          modelRecord->materialForSubmesh(static_cast<uint32_t>(submeshIndex));
+      const MaterialRef resolvedMaterial =
+          nuri::isValid(modelMaterial) ? modelMaterial : renderable.material;
+      const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
+      if (materialRecord == nullptr ||
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Blend ||
+          isTransmissionMaterial(*materialRecord)) {
         continue;
       }
-      const uint64_t key =
-          foldHandle(record->texture.index, record->texture.generation);
-      if (!textureKeys.insert(key).second) {
-        continue;
-      }
-      materialTextureAccessHandles_.push_back(record->texture);
+      forEachMaterialTextureRef(
+          materialRecord->textureRefs, [&](TextureRef ref) {
+            const TextureRecord *record = resources.tryGet(ref);
+            if (record == nullptr || !nuri::isValid(record->texture)) {
+              return;
+            }
+            const uint64_t key =
+                foldHandle(record->texture.index, record->texture.generation);
+            if (!textureKeys.insert(key).second) {
+              return;
+            }
+            materialTextureAccessHandles_.push_back(record->texture);
+          });
     }
   }
 

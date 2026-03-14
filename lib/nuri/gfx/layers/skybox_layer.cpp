@@ -55,6 +55,27 @@ SkyboxLayer::buildRenderGraph(RenderFrameContext &frame,
   passDesc.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+  const bool transmissionStageEnabled =
+      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled) !=
+          nullptr &&
+      *frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
+  if (transmissionStageEnabled) {
+    const TextureHandle *sceneColorTexture =
+        frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
+    if (sceneColorTexture == nullptr || !nuri::isValid(*sceneColorTexture)) {
+      return Result<bool, std::string>::makeError(
+          "SkyboxLayer::buildRenderGraph: transmission stage enabled but "
+          "scene color texture is unavailable");
+    }
+    auto sceneColorImport =
+        graph.importTexture(*sceneColorTexture, "skybox_scene_color");
+    if (sceneColorImport.hasError()) {
+      return Result<bool, std::string>::makeError(sceneColorImport.error());
+    }
+    passDesc.colorTexture = sceneColorImport.value();
+    frame.channels.publish<RenderGraphTextureId>(
+        kFrameChannelSceneColorGraphTexture, sceneColorImport.value());
+  }
   passDesc.draws = drawResult.value()
                        ? std::span<const DrawItem>(&drawItem_, 1u)
                        : std::span<const DrawItem>{};
@@ -79,7 +100,8 @@ SkyboxLayer::buildRenderGraph(RenderFrameContext &frame,
     }
   }
 
-  if (drawResult.value() && frame.scene != nullptr && frame.resources != nullptr) {
+  if (drawResult.value() && frame.scene != nullptr &&
+      frame.resources != nullptr) {
     const TextureRecord *cubemap =
         frame.resources->tryGet(frame.scene->environment().cubemap);
     if (cubemap != nullptr && nuri::isValid(cubemap->texture)) {
@@ -134,6 +156,10 @@ SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
       .brdfLutTexId = 0,
       .flags = 0,
       .cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex(),
+      .sceneColorTexId = 0,
+      .sceneColorSamplerId = 0,
+      .reserved0 = 0,
+      .reserved1 = 0,
   };
 
   const size_t requiredBytes = sizeof(frameData_);
@@ -149,7 +175,8 @@ SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
     return Result<bool, std::string>::makeError(updateResult.error());
   }
 
-  const uint64_t baseAddress = gpu_.getBufferDeviceAddress(frameBuffer_->handle());
+  const uint64_t baseAddress =
+      gpu_.getBufferDeviceAddress(frameBuffer_->handle());
   if (baseAddress == 0) {
     return Result<bool, std::string>::makeError(
         "SkyboxLayer::prepareSkyboxDraw: invalid frame buffer address");
@@ -241,8 +268,7 @@ Result<bool, std::string> SkyboxLayer::createShaders() {
           "SkyboxLayer::createShaders: empty shader path");
     }
     const std::string shaderPath = spec.path->string();
-    auto compileResult =
-        spec.shader->compileFromFile(shaderPath, spec.stage);
+    auto compileResult = spec.shader->compileFromFile(shaderPath, spec.stage);
     if (compileResult.hasError()) {
       return Result<bool, std::string>::makeError(compileResult.error());
     }

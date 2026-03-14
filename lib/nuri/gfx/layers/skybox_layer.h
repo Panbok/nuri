@@ -38,7 +38,8 @@ public:
   void onDetach() override;
   void onResize(int32_t width, int32_t height) override;
   Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame, RenderGraphBuilder &graph) override;
+  buildRenderGraph(RenderFrameContext &frame,
+                   RenderGraphBuilder &graph) override;
 
 private:
   enum FrameDataFlags : uint32_t {
@@ -47,6 +48,7 @@ private:
     HasIblSheen = 1u << 2u,
     HasBrdfLut = 1u << 3u,
     OutputLinearToSrgb = 1u << 4u,
+    HasSceneColor = 1u << 5u,
   };
 
   struct FrameData {
@@ -61,8 +63,12 @@ private:
     uint32_t brdfLutTexId = 0;
     uint32_t flags = 0;
     uint32_t cubemapSamplerId = 0;
+    uint32_t sceneColorTexId = 0;
+    uint32_t sceneColorSamplerId = 0;
+    uint32_t reserved0 = 0;
+    uint32_t reserved1 = 0;
   };
-  static_assert(sizeof(FrameData) == 176,
+  static_assert(sizeof(FrameData) == 192,
                 "SkyboxLayer::FrameData must match shader FrameDataBuffer "
                 "layout");
 

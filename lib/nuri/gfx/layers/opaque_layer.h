@@ -60,6 +60,7 @@ private:
     HasIblSheen = 1u << 2u,
     HasBrdfLut = 1u << 3u,
     OutputLinearToSrgb = 1u << 4u,
+    HasSceneColor = 1u << 5u,
   };
 
   struct FrameData {
@@ -74,8 +75,12 @@ private:
     uint32_t brdfLutTexId = 0;
     uint32_t flags = 0;
     uint32_t cubemapSamplerId = 0;
+    uint32_t sceneColorTexId = 0;
+    uint32_t sceneColorSamplerId = 0;
+    uint32_t reserved0 = 0;
+    uint32_t reserved1 = 0;
   };
-  static_assert(sizeof(FrameData) == 176,
+  static_assert(sizeof(FrameData) == 192,
                 "OpaqueLayer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
@@ -358,6 +363,11 @@ private:
   std::pmr::vector<ComputeDispatchItem> preDispatches_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
+  std::pmr::vector<PreparedGraphPass> preparedGraphPasses_;
+  std::pmr::vector<RenderGraphPassId> shadingPassIds_;
+  std::pmr::vector<RenderGraphPassId> workPassIds_;
+  std::pmr::vector<RenderGraphPassId> preDispatchPassIds_;
+  std::pmr::vector<RenderGraphPassId> indirectPassIds_;
   FrameData frameData_{};
   FrameData uploadedFrameData_{};
   bool frameDataUploadValid_ = false;

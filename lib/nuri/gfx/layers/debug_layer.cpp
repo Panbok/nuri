@@ -218,9 +218,17 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
   }
 
   DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
-  if (nuri::isValid(pass.colorTextureHandle)) {
-    auto colorImportResult = graph.importTexture(pass.colorTextureHandle,
-                                                 "debug_pass_color_texture");
+  TextureHandle colorTexture{};
+  if (const TextureHandle *publishedFrameColor =
+          frame.channels.tryGet<TextureHandle>(kFrameChannelFrameColorTexture);
+      publishedFrameColor != nullptr && nuri::isValid(*publishedFrameColor)) {
+    colorTexture = *publishedFrameColor;
+  } else {
+    colorTexture = pass.colorTextureHandle;
+  }
+  if (nuri::isValid(colorTexture)) {
+    auto colorImportResult =
+        graph.importTexture(colorTexture, "debug_pass_color_texture");
     if (colorImportResult.hasError()) {
       return Result<bool, std::string>::makeError(colorImportResult.error());
     }
@@ -274,9 +282,16 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
       publishedSceneDepth != nullptr) {
     sceneDepthGraphTexture = *publishedSceneDepth;
   }
+  TextureHandle frameColorTexture{};
+  if (const TextureHandle *publishedFrameColor =
+          frame.channels.tryGet<TextureHandle>(kFrameChannelFrameColorTexture);
+      publishedFrameColor != nullptr && nuri::isValid(*publishedFrameColor)) {
+    frameColorTexture = *publishedFrameColor;
+  }
 
   if (frame.settings->debug.grid) {
-    const bool hasPriorColorPass = graph.passCount() > 0;
+    const bool hasPriorColorPass =
+        nuri::isValid(frameColorTexture) || graph.passCount() > 0;
     const bool hasDepth = nuri::isValid(sceneDepthTexture);
     auto gridResult = prepareGridDraw(frame, sceneDepthTexture);
     if (gridResult.hasError()) {
@@ -302,6 +317,14 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
                           hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
                       .storeOp = StoreOp::Store,
                       .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+    if (nuri::isValid(frameColorTexture)) {
+      auto colorImportResult =
+          graph.importTexture(frameColorTexture, "debug_grid_color_texture");
+      if (colorImportResult.hasError()) {
+        return Result<bool, std::string>::makeError(colorImportResult.error());
+      }
+      gridPass.colorTexture = colorImportResult.value();
+    }
     if (hasDepth) {
       gridPass.depth = {.loadOp = LoadOp::Load,
                         .storeOp = StoreOp::Store,

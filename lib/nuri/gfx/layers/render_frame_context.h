@@ -63,8 +63,13 @@ struct RenderSettings {
     bool enabled = true;
   };
 
+  struct TransmissionSettings {
+    bool enabled = true;
+  };
+
   SkyboxSettings skybox{};
   OpaqueSettings opaque{};
+  TransmissionSettings transmission{};
   TransparentSettings transparent{};
   DebugSettings debug{};
 };
@@ -183,6 +188,12 @@ struct TransparentStageContribution {
 constexpr std::string_view kFrameChannelSceneDepthTexture = "SceneDepthTexture";
 constexpr std::string_view kFrameChannelSceneDepthGraphTexture =
     "SceneDepthGraphTexture";
+constexpr std::string_view kFrameChannelSceneColorTexture = "SceneColorTexture";
+constexpr std::string_view kFrameChannelSceneColorGraphTexture =
+    "SceneColorGraphTexture";
+constexpr std::string_view kFrameChannelFrameColorTexture = "FrameColorTexture";
+constexpr std::string_view kFrameChannelTransmissionStageEnabled =
+    "TransmissionStageEnabled";
 constexpr std::string_view kFrameChannelTransparentStageEnabled =
     "TransparentStageEnabled";
 constexpr std::string_view kFrameChannelOpaquePickGraphTexture =

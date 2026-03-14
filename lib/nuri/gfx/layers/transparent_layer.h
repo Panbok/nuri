@@ -65,6 +65,10 @@ private:
     uint32_t brdfLutTexId = 0;
     uint32_t flags = 0;
     uint32_t cubemapSamplerId = 0;
+    uint32_t sceneColorTexId = 0;
+    uint32_t sceneColorSamplerId = 0;
+    uint32_t reserved0 = 0;
+    uint32_t reserved1 = 0;
 
     [[nodiscard]] bool operator==(const FrameData &other) const noexcept {
       for (int column = 0; column < 4; ++column) {
@@ -84,12 +88,14 @@ private:
              irradianceTexId == other.irradianceTexId &&
              prefilteredGgxTexId == other.prefilteredGgxTexId &&
              prefilteredCharlieTexId == other.prefilteredCharlieTexId &&
-             brdfLutTexId == other.brdfLutTexId &&
-             flags == other.flags &&
-             cubemapSamplerId == other.cubemapSamplerId;
+             brdfLutTexId == other.brdfLutTexId && flags == other.flags &&
+             cubemapSamplerId == other.cubemapSamplerId &&
+             sceneColorTexId == other.sceneColorTexId &&
+             sceneColorSamplerId == other.sceneColorSamplerId &&
+             reserved0 == other.reserved0 && reserved1 == other.reserved1;
     }
   };
-  static_assert(sizeof(FrameData) == 176,
+  static_assert(sizeof(FrameData) == 192,
                 "TransparentLayer::FrameData must match shader layout");
 
   struct PushConstants {
@@ -149,8 +155,8 @@ private:
   rebuildMaterialTextureAccessCache(const ResourceManager &resources);
   Result<bool, std::string> collectContributorDraws(RenderFrameContext &frame);
   Result<bool, std::string> appendTransparentPass(
-      RenderGraphBuilder &graph, TextureHandle depthTexture,
-      RenderGraphTextureId sceneDepthGraphTexture,
+      RenderGraphBuilder &graph, TextureHandle colorTexture,
+      TextureHandle depthTexture, RenderGraphTextureId sceneDepthGraphTexture,
       std::span<const TransparentStageSortableDraw> sortableDraws,
       std::span<const DrawItem> fixedDraws,
       std::span<const TextureHandle> textureReads,

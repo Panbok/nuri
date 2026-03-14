@@ -2,6 +2,7 @@
 
 #include "nuri/core/layer_stack.h"
 #include "nuri/core/log.h"
+#include "nuri/core/profiling.h"
 
 namespace nuri {
 
@@ -114,18 +115,29 @@ void LayerStack::clear() {
 Result<bool, std::string>
 LayerStack::buildRenderGraph(RenderFrameContext &frame,
                              RenderGraphBuilder &graph) {
+  NURI_PROFILER_FUNCTION();
   frame.layerStack = this;
-  forEachLayerReverse(
-      [&frame](Layer &layer) { layer.publishFrameData(frame); });
+  {
+    NURI_PROFILER_ZONE("LayerStack.publish_frame_data",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    forEachLayerReverse(
+        [&frame](Layer &layer) { layer.publishFrameData(frame); });
+    NURI_PROFILER_ZONE_END();
+  }
 
-  for (auto &layer : layers_) {
-    if (!layer) {
-      continue;
+  {
+    NURI_PROFILER_ZONE("LayerStack.build_layer_graphs",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    for (auto &layer : layers_) {
+      if (!layer) {
+        continue;
+      }
+      auto result = layer->buildRenderGraph(frame, graph);
+      if (result.hasError()) {
+        return Result<bool, std::string>::makeError(result.error());
+      }
     }
-    auto result = layer->buildRenderGraph(frame, graph);
-    if (result.hasError()) {
-      return Result<bool, std::string>::makeError(result.error());
-    }
+    NURI_PROFILER_ZONE_END();
   }
 
   return Result<bool, std::string>::makeResult(true);
