@@ -81,6 +81,18 @@ operator|(GraphicsBarrierAccessMode lhs, GraphicsBarrierAccessMode rhs) {
                                                 static_cast<uint8_t>(rhs));
 }
 
+[[nodiscard]] constexpr GraphicsBarrierAccessMode
+operator&(GraphicsBarrierAccessMode lhs, GraphicsBarrierAccessMode rhs) {
+  return static_cast<GraphicsBarrierAccessMode>(static_cast<uint8_t>(lhs) &
+                                                static_cast<uint8_t>(rhs));
+}
+
+constexpr GraphicsBarrierAccessMode &operator|=(GraphicsBarrierAccessMode &lhs,
+                                                GraphicsBarrierAccessMode rhs) {
+  lhs = lhs | rhs;
+  return lhs;
+}
+
 [[nodiscard]] constexpr bool
 hasGraphicsBarrierAccessFlag(GraphicsBarrierAccessMode mode,
                              GraphicsBarrierAccessMode flag) {
@@ -95,15 +107,79 @@ enum class GraphicsBarrierState : uint8_t {
   Present = 4,
 };
 
+union GraphicsBarrierResourceStorage {
+  constexpr GraphicsBarrierResourceStorage() noexcept : texture{} {}
+
+  TextureHandle texture;
+  BufferHandle buffer;
+};
+
 struct GraphicsBarrierRecord {
   GraphicsBarrierResourceKind resourceKind =
       GraphicsBarrierResourceKind::Texture;
-  TextureHandle texture{};
-  BufferHandle buffer{};
+  GraphicsBarrierResourceStorage resource{};
   GraphicsBarrierAccessMode beforeAccess = GraphicsBarrierAccessMode::None;
   GraphicsBarrierAccessMode afterAccess = GraphicsBarrierAccessMode::None;
   GraphicsBarrierState beforeState = GraphicsBarrierState::Unknown;
   GraphicsBarrierState afterState = GraphicsBarrierState::Unknown;
+
+  [[nodiscard]] static constexpr GraphicsBarrierRecord ForTexture(
+      TextureHandle textureHandle,
+      GraphicsBarrierAccessMode beforeAccessMode =
+          GraphicsBarrierAccessMode::None,
+      GraphicsBarrierAccessMode afterAccessMode =
+          GraphicsBarrierAccessMode::None,
+      GraphicsBarrierState beforeBarrierState = GraphicsBarrierState::Unknown,
+      GraphicsBarrierState afterBarrierState =
+          GraphicsBarrierState::Unknown) noexcept {
+    GraphicsBarrierRecord record{};
+    record.setTextureHandle(textureHandle);
+    record.beforeAccess = beforeAccessMode;
+    record.afterAccess = afterAccessMode;
+    record.beforeState = beforeBarrierState;
+    record.afterState = afterBarrierState;
+    return record;
+  }
+
+  [[nodiscard]] static constexpr GraphicsBarrierRecord ForBuffer(
+      BufferHandle bufferHandle,
+      GraphicsBarrierAccessMode beforeAccessMode =
+          GraphicsBarrierAccessMode::None,
+      GraphicsBarrierAccessMode afterAccessMode =
+          GraphicsBarrierAccessMode::None,
+      GraphicsBarrierState beforeBarrierState = GraphicsBarrierState::Unknown,
+      GraphicsBarrierState afterBarrierState =
+          GraphicsBarrierState::Unknown) noexcept {
+    GraphicsBarrierRecord record{};
+    record.setBufferHandle(bufferHandle);
+    record.beforeAccess = beforeAccessMode;
+    record.afterAccess = afterAccessMode;
+    record.beforeState = beforeBarrierState;
+    record.afterState = afterBarrierState;
+    return record;
+  }
+
+  constexpr void setTextureHandle(TextureHandle textureHandle) noexcept {
+    resourceKind = GraphicsBarrierResourceKind::Texture;
+    resource.texture = textureHandle;
+  }
+
+  constexpr void setBufferHandle(BufferHandle bufferHandle) noexcept {
+    resourceKind = GraphicsBarrierResourceKind::Buffer;
+    resource.buffer = bufferHandle;
+  }
+
+  [[nodiscard]] constexpr bool isTexture() const noexcept {
+    return resourceKind == GraphicsBarrierResourceKind::Texture;
+  }
+
+  [[nodiscard]] constexpr TextureHandle textureHandle() const noexcept {
+    return isTexture() ? resource.texture : TextureHandle{};
+  }
+
+  [[nodiscard]] constexpr BufferHandle bufferHandle() const noexcept {
+    return isTexture() ? BufferHandle{} : resource.buffer;
+  }
 };
 
 enum class DrawCommandType : uint8_t {

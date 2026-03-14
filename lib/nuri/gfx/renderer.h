@@ -50,6 +50,10 @@ public:
   }
 
 private:
+  [[nodiscard]] Result<bool, std::string>
+  beginFrameSequence(uint64_t frameIndex);
+  void renderGraphBeginFrame(uint64_t frameIndex);
+  [[nodiscard]] Result<bool, std::string> endFrameSequence(uint64_t frameIndex);
   [[nodiscard]] Result<bool, std::string> compileAndExecuteRenderGraph();
 
   GPUDevice &gpu_;

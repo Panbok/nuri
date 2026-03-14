@@ -397,7 +397,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorCleansUpOnPartialMaterializationFailure) {
   auto compileResult = buildExecutorCompiledFrame(110u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -407,7 +407,7 @@ TEST_F(RenderGraphExecutorTest,
   gpu.failCreateBufferAtCall = 1u;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, compiled);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should fail when buffer materialization fails";
     return;
   }
@@ -445,7 +445,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorSubmitFailureDefersThenRetiresResources) {
   auto compileResult = buildExecutorCompiledFrame(120u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -455,7 +455,7 @@ TEST_F(RenderGraphExecutorTest,
   gpu.failSubmitFrame = true;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, compiled);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should propagate submit failure";
     return;
   }
@@ -487,12 +487,12 @@ TEST_F(RenderGraphExecutorTest,
 
   gpu.failSubmitFrame = false;
   auto compile123 = buildEmptyCompiledFrame(123u);
-  if (!(!compile123.hasError())) {
+  if (compile123.hasError()) {
     ADD_FAILURE() << "empty frame 123 compile should succeed";
     return;
   }
   executeResult = executeCompiled(executor, gpu, compile123.value());
-  if (!(!executeResult.hasError() && executeResult.value())) {
+  if (executeResult.hasError() || !executeResult.value()) {
     ADD_FAILURE() << "executor should succeed for retirement frame";
     return;
   }
@@ -505,12 +505,12 @@ TEST_F(RenderGraphExecutorTest,
   const uint32_t createdTextureCountBeforeReuse = gpu.createdTextureCount;
   const uint32_t createdBufferCountBeforeReuse = gpu.createdBufferCount;
   auto compile124 = buildExecutorCompiledFrame(124u);
-  if (!(!compile124.hasError())) {
+  if (compile124.hasError()) {
     ADD_FAILURE() << "non-empty frame 124 compile should succeed";
     return;
   }
   executeResult = executeCompiled(executor, gpu, compile124.value());
-  if (!(!executeResult.hasError() && executeResult.value())) {
+  if (executeResult.hasError() || !executeResult.value()) {
     ADD_FAILURE() << "executor should succeed for frame 124 reuse check";
     return;
   }
@@ -678,7 +678,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsInvalidAllocationMetadataBeforeCreate) {
   auto compileResult = buildExecutorCompiledFrame(130u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -689,7 +689,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeExecutorGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject invalid allocation metadata";
     return;
   }
@@ -711,7 +711,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsOrderedPassIndexMetadataCountMismatch) {
   auto compileResult = buildExecutorCompiledFrame(132u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -726,7 +726,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject ordered pass index metadata count "
                      "mismatch";
     return;
@@ -750,7 +750,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsDeclaredOrderedCulledPassCountInconsistency) {
   auto compileResult = buildExecutorCompiledFrame(133u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -761,7 +761,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject declared/ordered/culled pass count "
            "inconsistency";
@@ -787,7 +787,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsPassDebugNameMetadataCountMismatch) {
   auto compileResult = buildExecutorCompiledFrame(134u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -802,7 +802,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject pass debug-name metadata count "
                      "mismatch";
     return;
@@ -825,7 +825,7 @@ TEST_F(RenderGraphExecutorTest,
 
 TEST_F(RenderGraphExecutorTest, ExecutorRejectsRootPassCountOverDeclared) {
   auto compileResult = buildExecutorCompiledFrame(1341u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -836,7 +836,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsRootPassCountOverDeclared) {
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject root pass count over declared pass count";
     return;
@@ -860,7 +860,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsRootPassCountOverDeclared) {
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsDependencyEdgePassIndexOutOfRange) {
   auto compileResult = buildTwoPassCompiledFrameWithDependency(1342u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -875,7 +875,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject dependency edge pass index out of "
                      "range";
     return;
@@ -898,7 +898,7 @@ TEST_F(RenderGraphExecutorTest,
 
 TEST_F(RenderGraphExecutorTest, ExecutorRejectsDependencyEdgeSelfCycle) {
   auto compileResult = buildTwoPassCompiledFrameWithDependency(1343u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -913,7 +913,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDependencyEdgeSelfCycle) {
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject dependency edge self-cycle";
     return;
   }
@@ -935,7 +935,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDependencyEdgeSelfCycle) {
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsDependencyEdgeReferencingCulledPass) {
   auto compileResult = buildTwoPassCompiledFrameWithDependency(1344u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -953,7 +953,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject dependency edge referencing culled "
            "pass";
@@ -976,7 +976,7 @@ TEST_F(RenderGraphExecutorTest,
 
 TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedDependencyEdge) {
   auto compileResult = buildTwoPassCompiledFrameWithDependency(1345u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -991,7 +991,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedDependencyEdge) {
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject duplicated dependency edge";
     return;
   }
@@ -1013,7 +1013,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedDependencyEdge) {
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsDependencyEdgeTopologyViolation) {
   auto compileResult = buildTwoPassCompiledFrameWithDependency(1346u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1029,7 +1029,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject dependency edge topology "
                      "violation";
     return;
@@ -1053,7 +1053,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsOutOfRangeTransientTextureAllocationIndex) {
   auto compileResult = buildExecutorCompiledFrame(135u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1068,7 +1068,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject out-of-range transient texture "
                      "allocation index";
     return;
@@ -1095,7 +1095,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsOutOfRangeTransientBufferAllocationIndex) {
   auto compileResult = buildExecutorCompiledFrame(136u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1110,7 +1110,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject out-of-range transient buffer "
                      "allocation index";
     return;
@@ -1143,7 +1143,7 @@ TEST_F(RenderGraphExecutorTest,
 
 TEST_F(RenderGraphExecutorTest, ExecutorRejectsOrderedPassIndexOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(137u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1158,7 +1158,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsOrderedPassIndexOutOfRange) {
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject ordered pass index out of range";
     return;
   }
@@ -1179,7 +1179,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsOrderedPassIndexOutOfRange) {
 
 TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedOrderedPassIndex) {
   auto compileResult = buildExecutorCompiledFrame(138u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1199,7 +1199,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedOrderedPassIndex) {
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject duplicated ordered pass index";
     return;
   }
@@ -1221,7 +1221,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedOrderedPassIndex) {
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsDuplicatedTransientTextureAllocationIndex) {
   auto compileResult = buildExecutorCompiledFrame(137u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1242,7 +1242,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject duplicated transient texture "
                      "allocation index";
     return;
@@ -1276,7 +1276,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsDuplicatedTransientBufferAllocationIndex) {
   auto compileResult = buildExecutorCompiledFrame(138u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1297,7 +1297,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject duplicated transient buffer "
                      "allocation index";
     return;
@@ -1332,7 +1332,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsOutOfRangeUnresolvedTextureBindingResource) {
   auto compileResult = buildExecutorCompiledFrame(140u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1346,7 +1346,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject out-of-range unresolved texture "
                      "binding resource index";
     return;
@@ -1380,7 +1380,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsOutOfRangeUnresolvedDrawBindingIndex) {
   auto compileResult = buildExecutorCompiledFrame(150u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1394,7 +1394,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject out-of-range unresolved draw "
                      "binding index";
     return;
@@ -1427,7 +1427,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsPreDispatchDependencyRangeCountMismatch) {
   auto compileResult = buildExecutorCompiledFrame(160u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1437,7 +1437,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject pre-dispatch dependency range "
                      "metadata count mismatch";
     return;
@@ -1469,7 +1469,7 @@ TEST_F(RenderGraphExecutorTest,
 
 TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeOutOfBounds) {
   auto compileResult = buildExecutorCompiledFrame(170u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1483,7 +1483,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeOutOfBounds) {
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject out-of-bounds pass draw range";
     return;
   }
@@ -1507,7 +1507,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeOutOfBounds) {
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedPreDispatchBindingIndexOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(180u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1522,7 +1522,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "index out of range";
     return;
@@ -1552,7 +1552,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedDependencyBindingSlotOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(190u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1567,7 +1567,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject unresolved dependency binding slot "
            "index out of range";
@@ -1596,7 +1596,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedDependencyBindingResourceOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(200u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1611,7 +1611,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved dependency binding "
                      "resource index out of range";
     return;
@@ -1640,7 +1640,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsPreDispatchDependencyRangeOutOfBounds) {
   auto compileResult = buildExecutorCompiledFrame(210u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1656,7 +1656,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject out-of-bounds pre-dispatch "
                      "dependency range";
     return;
@@ -1683,7 +1683,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedDrawBindingInvalidTarget) {
   auto compileResult = buildExecutorCompiledFrame(220u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1698,7 +1698,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved draw binding invalid "
                      "target";
     return;
@@ -1726,7 +1726,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedTextureBindingInvalidTarget) {
   auto compileResult = buildExecutorCompiledFrame(225u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1741,7 +1741,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject unresolved texture binding invalid "
            "target";
@@ -1770,7 +1770,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedTextureBindingWithoutAllocation) {
   auto compileResult = buildExecutorCompiledFrame(230u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1792,7 +1792,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject unresolved texture binding without "
            "materialized allocation";
@@ -1822,7 +1822,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedDependencyBindingWithoutAllocation) {
   auto compileResult = buildExecutorCompiledFrame(240u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1844,7 +1844,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved dependency binding "
                      "without materialized allocation";
     return;
@@ -1872,7 +1872,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedPreDispatchBindingWithoutAllocation) {
   auto compileResult = buildExecutorCompiledFrame(250u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1896,7 +1896,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "without materialized allocation";
     return;
@@ -1925,7 +1925,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedDrawBindingWithoutAllocation) {
   auto compileResult = buildExecutorCompiledFrame(260u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1948,7 +1948,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved draw binding without "
                      "materialized allocation";
     return;
@@ -1976,7 +1976,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsPassDependencyRangeCountMismatch) {
   auto compileResult = buildExecutorCompiledFrame(270u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -1986,7 +1986,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject pass dependency range metadata "
                      "count mismatch";
     return;
@@ -2013,7 +2013,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsPassDependencyRangeOverContractLimit) {
   auto compileResult = buildExecutorCompiledFrame(275u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2032,7 +2032,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject pass dependency range over "
                      "kMaxDependencyBuffers";
     return;
@@ -2060,7 +2060,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsPassPreDispatchRangeCountMismatch) {
   auto compileResult = buildExecutorCompiledFrame(280u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2070,7 +2070,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject pass pre-dispatch range metadata "
                      "count mismatch";
     return;
@@ -2097,7 +2097,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsPreDispatchDependencyRangeOverContractLimit) {
   auto compileResult = buildExecutorCompiledFrame(285u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2116,7 +2116,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject pre-dispatch dependency range over "
            "kMaxDependencyBuffers";
@@ -2144,7 +2144,7 @@ TEST_F(RenderGraphExecutorTest,
 
 TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeCountMismatch) {
   auto compileResult = buildExecutorCompiledFrame(290u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2154,7 +2154,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeCountMismatch) {
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject pass draw range metadata count "
                      "mismatch";
     return;
@@ -2179,7 +2179,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDrawRangeCountMismatch) {
 
 TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDependencyRangeOutOfBounds) {
   auto compileResult = buildExecutorCompiledFrame(300u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2195,7 +2195,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDependencyRangeOutOfBounds) {
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject out-of-bounds pass dependency "
                      "buffer range";
     return;
@@ -2222,7 +2222,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsPassDependencyRangeOutOfBounds) {
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsPassPreDispatchRangeOutOfBounds) {
   auto compileResult = buildExecutorCompiledFrame(310u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2236,7 +2236,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject out-of-bounds pass pre-dispatch "
                      "range";
     return;
@@ -2263,7 +2263,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedTextureBindingPassIndexOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(320u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2277,7 +2277,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved texture binding pass "
                      "index out of range";
     return;
@@ -2305,7 +2305,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedDependencyBindingPassIndexOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(330u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2319,7 +2319,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject unresolved dependency binding pass "
            "index out of range";
@@ -2349,7 +2349,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedPreDispatchBindingPassIndexOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(340u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2364,7 +2364,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "pass index out of range";
     return;
@@ -2393,7 +2393,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedDrawBindingPassIndexOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(350u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2407,7 +2407,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject unresolved draw binding pass index "
            "out of range";
@@ -2436,7 +2436,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedPreDispatchBindingResourceOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(360u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2451,7 +2451,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "resource index out of range";
     return;
@@ -2481,7 +2481,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedPreDispatchBindingSlotOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(370u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2496,7 +2496,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved pre-dispatch binding "
                      "slot index out of range";
     return;
@@ -2525,7 +2525,7 @@ TEST_F(RenderGraphExecutorTest,
 TEST_F(RenderGraphExecutorTest,
        ExecutorRejectsUnresolvedDrawBindingResourceOutOfRange) {
   auto compileResult = buildExecutorCompiledFrame(380u);
-  if (!(!compileResult.hasError())) {
+  if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
     return;
   }
@@ -2539,7 +2539,7 @@ TEST_F(RenderGraphExecutorTest,
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
   auto executeResult = executeCompiled(executor, gpu, invalid);
-  if (!(executeResult.hasError())) {
+  if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject unresolved draw binding resource "
                      "index out of range";
     return;

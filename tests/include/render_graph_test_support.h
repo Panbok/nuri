@@ -102,10 +102,9 @@ public:
   uint32_t maxParallelGraphicsRecordingContexts() const override;
   Result<RecordingContextHandle, std::string>
   acquireGraphicsRecordingContext(uint32_t workerIndex) override;
-  Result<bool, std::string>
-  recordGraphicsBarriers(RecordingContextHandle ctx,
-                         const GraphicsBarrierRecord *barriers,
-                         uint32_t barrierCount) override;
+  Result<bool, std::string> recordGraphicsBarriers(
+      RecordingContextHandle ctx,
+      std::span<const GraphicsBarrierRecord> barriers) override;
   Result<bool, std::string> recordGraphicsPass(RecordingContextHandle ctx,
                                                const RenderPass &pass) override;
   Result<RecordedCommandBufferHandle, std::string>
@@ -168,6 +167,9 @@ protected:
   Result<TextureHandle, std::string> createTextureImpl();
   void destroyBufferImpl(BufferHandle buffer);
   void destroyTextureImpl(TextureHandle texture);
+  // Caller must hold recordingStateMutex_ before recordSubmitFrame mutates
+  // submitCount, recordedPasses, submittedCommandBuffers, and submittedBatches.
+  // submitRecordedGraphicsFrame is the intended locked entry point.
   void recordSubmitFrame(
       std::span<const RenderPass> passes,
       std::span<const RecordedCommandBufferHandle> commandBuffers = {},

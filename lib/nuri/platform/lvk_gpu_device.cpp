@@ -8,7 +8,12 @@
 #include "nuri/resources/gpu/geometry_pool.h"
 
 #include <lvk/LVK.h>
+#if __has_include(<lvk/vulkan/VulkanClasses.h>)
 #include <lvk/vulkan/VulkanClasses.h>
+#define NURI_LVK_HAS_VULKAN_COMMAND_BUFFER 1
+#else
+#define NURI_LVK_HAS_VULKAN_COMMAND_BUFFER 0
+#endif
 #include <vulkan/VulkanUtils.h>
 
 namespace nuri {
@@ -313,6 +318,46 @@ template <typename HandleType>
   return a.index == b.index && a.generation == b.generation;
 }
 
+[[nodiscard]] Result<uint32_t, std::string>
+allocateMonotonicHandleIndex(uint32_t &nextIndex, std::string_view context) {
+  if (nextIndex == std::numeric_limits<uint32_t>::max()) {
+    std::string message;
+    message.reserve(context.size() + 24u);
+    message.append(context);
+    message.append(": handle index overflow");
+    return Result<uint32_t, std::string>::makeError(std::move(message));
+  }
+
+  return Result<uint32_t, std::string>::makeResult(nextIndex++);
+}
+
+[[nodiscard]] uint32_t nextHandleGeneration(std::vector<uint32_t> &generations,
+                                            uint32_t index) {
+  if (index >= generations.size()) {
+    generations.resize(static_cast<size_t>(index) + 1u, 0u);
+  }
+
+  uint32_t &generation = generations[index];
+  ++generation;
+  if (generation == 0u) {
+    ++generation;
+  }
+  return generation;
+}
+
+[[nodiscard]] Result<bool, std::string>
+makeLvkBarrierApiError(std::string_view context) {
+  std::string message;
+  message.reserve(context.size() + 240u);
+  message.append(context);
+  message.append(": buffer barriers and explicit texture layout transitions "
+                 "require the vendored Vulkan lvk::CommandBuffer "
+                 "implementation from the current external/lightweightvk "
+                 "snapshot because this LVK ICommandBuffer API only exposes "
+                 "shader-read texture transitions");
+  return Result<bool, std::string>::makeError(std::move(message));
+}
+
 [[nodiscard]] SubmissionHandle
 toNuriSubmissionHandle(lvk::SubmitHandle handle) {
   if (handle.empty()) {
@@ -553,6 +598,8 @@ struct LvkGPUDevice::Impl {
   std::vector<ActiveGraphicsRecordingContext> activeGraphicsContexts;
   std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
   lvk::TextureHandle currentFrameSwapchainTexture{};
+  std::vector<uint32_t> recordingContextGenerations;
+  std::vector<uint32_t> recordedCommandBufferGenerations;
   uint32_t nextRecordingContextIndex = 1u;
   uint32_t nextRecordedCommandBufferIndex = 1u;
   std::unique_ptr<GeometryPool> geometryPool;
@@ -777,13 +824,24 @@ Result<bool, std::string> LvkGPUDevice::prepareFrameOutput() {
     return Result<bool, std::string>::makeError(
         "LvkGPUDevice::prepareFrameOutput: context is null");
   }
-  std::lock_guard immediateLock(impl_->contextImmediateMutex);
-  if (!impl_->currentFrameSwapchainTexture.valid()) {
+  {
+    std::lock_guard immediateLock(impl_->contextImmediateMutex);
+    if (impl_->currentFrameSwapchainTexture.valid()) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+  }
+
+  lvk::TextureHandle swapchainTexture{};
+  {
     NURI_PROFILER_ZONE("LvkGPUDevice.acquire_swapchain_texture",
                        NURI_PROFILER_COLOR_WAIT);
-    impl_->currentFrameSwapchainTexture =
-        impl_->context->getCurrentSwapchainTexture();
+    swapchainTexture = impl_->context->getCurrentSwapchainTexture();
     NURI_PROFILER_ZONE_END();
+  }
+
+  std::lock_guard immediateLock(impl_->contextImmediateMutex);
+  if (!impl_->currentFrameSwapchainTexture.valid()) {
+    impl_->currentFrameSwapchainTexture = swapchainTexture;
   }
   if (!impl_->currentFrameSwapchainTexture.valid()) {
     return Result<bool, std::string>::makeError(
@@ -1463,8 +1521,13 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  const lvk::TextureHandle swapchainTexture =
-      impl_->currentFrameSwapchainTexture;
+  lvk::TextureHandle swapchainTexture{};
+  {
+    // beginFrame() and resizeSwapchain() reset currentFrameSwapchainTexture
+    // while holding contextImmediateMutex, so copy it under the same lock.
+    std::lock_guard immediateLock(impl_->contextImmediateMutex);
+    swapchainTexture = impl_->currentFrameSwapchainTexture;
+  }
   const auto fillDependencies =
       [this](std::span<const BufferHandle> dependencyBuffers,
              lvk::Dependencies &deps,
@@ -1870,9 +1933,19 @@ LvkGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
   std::scoped_lock lock(impl_->contextImmediateMutex,
                         impl_->graphicsContextMutex);
   lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
-  RecordingContextHandle handle{};
-  handle = RecordingContextHandle{.index = impl_->nextRecordingContextIndex++,
-                                  .generation = 1u};
+  auto indexResult = allocateMonotonicHandleIndex(
+      impl_->nextRecordingContextIndex,
+      "LvkGPUDevice::acquireGraphicsRecordingContext");
+  if (indexResult.hasError()) {
+    return Result<RecordingContextHandle, std::string>::makeError(
+        indexResult.error());
+  }
+
+  const uint32_t index = indexResult.value();
+  const RecordingContextHandle handle{
+      .index = index,
+      .generation =
+          nextHandleGeneration(impl_->recordingContextGenerations, index)};
   impl_->activeGraphicsContexts.push_back(ActiveGraphicsRecordingContext{
       .handle = handle,
       .commandBuffer = &commandBuffer,
@@ -1881,16 +1954,11 @@ LvkGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
   return Result<RecordingContextHandle, std::string>::makeResult(handle);
 }
 
-Result<bool, std::string>
-LvkGPUDevice::recordGraphicsBarriers(RecordingContextHandle ctx,
-                                     const GraphicsBarrierRecord *barriers,
-                                     uint32_t barrierCount) {
-  if (barrierCount == 0u) {
+Result<bool, std::string> LvkGPUDevice::recordGraphicsBarriers(
+    RecordingContextHandle ctx,
+    std::span<const GraphicsBarrierRecord> barriers) {
+  if (barriers.empty()) {
     return Result<bool, std::string>::makeResult(true);
-  }
-  if (barriers == nullptr) {
-    return Result<bool, std::string>::makeError(
-        "LvkGPUDevice::recordGraphicsBarriers: barrier array is null");
   }
 
   lvk::ICommandBuffer *rawCommandBuffer = nullptr;
@@ -1909,40 +1977,75 @@ LvkGPUDevice::recordGraphicsBarriers(RecordingContextHandle ctx,
         "LvkGPUDevice::recordGraphicsBarriers: unknown recording context");
   }
 
-  auto *commandBuffer = dynamic_cast<lvk::CommandBuffer *>(rawCommandBuffer);
-  if (commandBuffer == nullptr) {
-    return Result<bool, std::string>::makeError(
-        "LvkGPUDevice::recordGraphicsBarriers: command buffer type is "
-        "unsupported");
+  const bool needsInternalBarrierApi =
+      std::find_if(barriers.begin(), barriers.end(),
+                   [](const GraphicsBarrierRecord &barrier) {
+                     return barrier.resourceKind ==
+                                GraphicsBarrierResourceKind::Buffer ||
+                            (barrier.resourceKind ==
+                                 GraphicsBarrierResourceKind::Texture &&
+                             barrier.afterState != GraphicsBarrierState::Read &&
+                             barrier.afterState !=
+                                 GraphicsBarrierState::Unknown);
+                   }) != barriers.end();
+  lvk::ICommandBuffer *commandBuffer = nullptr;
+#if NURI_LVK_HAS_VULKAN_COMMAND_BUFFER
+  commandBuffer = needsInternalBarrierApi ? rawCommandBuffer : nullptr;
+#else
+  if (needsInternalBarrierApi) {
+    return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
   }
+#endif
 
-  for (uint32_t i = 0u; i < barrierCount; ++i) {
-    const GraphicsBarrierRecord &barrier = barriers[i];
+  for (const GraphicsBarrierRecord &barrier : barriers) {
     if (barrier.resourceKind == GraphicsBarrierResourceKind::Texture) {
-      if (!nuri::isValid(barrier.texture) ||
-          !impl_->textures.isValid(barrier.texture)) {
+      const TextureHandle textureHandle = barrier.textureHandle();
+      if (!nuri::isValid(textureHandle) ||
+          !impl_->textures.isValid(textureHandle)) {
         return Result<bool, std::string>::makeError(
             "LvkGPUDevice::recordGraphicsBarriers: texture barrier handle "
             "is invalid");
       }
 
       const lvk::TextureHandle texture =
-          impl_->textures.getLvkHandle(barrier.texture);
+          impl_->textures.getLvkHandle(textureHandle);
       switch (barrier.afterState) {
       case GraphicsBarrierState::Read:
         rawCommandBuffer->transitionToShaderReadOnly(texture);
         break;
       case GraphicsBarrierState::Attachment:
-        commandBuffer->transitionTextureLayout(
-            texture, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL);
+#if NURI_LVK_HAS_VULKAN_COMMAND_BUFFER
+        if (commandBuffer == nullptr) {
+          return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
+        }
+        static_cast<lvk::CommandBuffer *>(commandBuffer)
+            ->transitionTextureLayout(texture,
+                                      VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL);
+#else
+        return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
+#endif
         break;
       case GraphicsBarrierState::Write:
-        commandBuffer->transitionTextureLayout(texture,
-                                               VK_IMAGE_LAYOUT_GENERAL);
+#if NURI_LVK_HAS_VULKAN_COMMAND_BUFFER
+        if (commandBuffer == nullptr) {
+          return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
+        }
+        static_cast<lvk::CommandBuffer *>(commandBuffer)
+            ->transitionTextureLayout(texture, VK_IMAGE_LAYOUT_GENERAL);
+#else
+        return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
+#endif
         break;
       case GraphicsBarrierState::Present:
-        commandBuffer->transitionTextureLayout(texture,
-                                               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+#if NURI_LVK_HAS_VULKAN_COMMAND_BUFFER
+        if (commandBuffer == nullptr) {
+          return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
+        }
+        static_cast<lvk::CommandBuffer *>(commandBuffer)
+            ->transitionTextureLayout(texture, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+#else
+        return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
+#endif
         break;
       case GraphicsBarrierState::Unknown:
       default:
@@ -1951,19 +2054,27 @@ LvkGPUDevice::recordGraphicsBarriers(RecordingContextHandle ctx,
       continue;
     }
 
-    if (!nuri::isValid(barrier.buffer) ||
-        !impl_->buffers.isValid(barrier.buffer)) {
+    const BufferHandle bufferHandle = barrier.bufferHandle();
+    if (!nuri::isValid(bufferHandle) || !impl_->buffers.isValid(bufferHandle)) {
       return Result<bool, std::string>::makeError(
           "LvkGPUDevice::recordGraphicsBarriers: buffer barrier handle is "
           "invalid");
+    }
+    if (commandBuffer == nullptr) {
+      return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
     }
 
     const VkPipelineStageFlags2 srcStage =
         graphicsBarrierStages(barrier.beforeState, false);
     const VkPipelineStageFlags2 dstStage =
         graphicsBarrierStages(barrier.afterState, false);
-    commandBuffer->bufferBarrier(impl_->buffers.getLvkHandle(barrier.buffer),
-                                 srcStage, dstStage);
+#if NURI_LVK_HAS_VULKAN_COMMAND_BUFFER
+    static_cast<lvk::CommandBuffer *>(commandBuffer)
+        ->bufferBarrier(impl_->buffers.getLvkHandle(bufferHandle), srcStage,
+                        dstStage);
+#else
+    return makeLvkBarrierApiError("LvkGPUDevice::recordGraphicsBarriers");
+#endif
   }
 
   return Result<bool, std::string>::makeResult(true);
@@ -1998,8 +2109,19 @@ LvkGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
       continue;
     }
 
+    auto indexResult = allocateMonotonicHandleIndex(
+        impl_->nextRecordedCommandBufferIndex,
+        "LvkGPUDevice::finishGraphicsRecordingContext");
+    if (indexResult.hasError()) {
+      return Result<RecordedCommandBufferHandle, std::string>::makeError(
+          indexResult.error());
+    }
+
+    const uint32_t index = indexResult.value();
     const RecordedCommandBufferHandle handle{
-        .index = impl_->nextRecordedCommandBufferIndex++, .generation = 1u};
+        .index = index,
+        .generation = nextHandleGeneration(
+            impl_->recordedCommandBufferGenerations, index)};
     impl_->recordedGraphicsCommandBuffers.push_back(
         RecordedGraphicsCommandBuffer{
             .handle = handle,
@@ -2090,6 +2212,23 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
     return Result<SubmissionHandle, std::string>::makeError(
         "LvkGPUDevice::submitRecordedGraphicsFrame: invalid swapchain "
         "texture");
+  }
+
+  for (const RecordedCommandBufferHandle requestedHandle : commandBuffers) {
+    size_t foundIndex = impl_->recordedGraphicsCommandBuffers.size();
+    for (size_t j = 0u; j < impl_->recordedGraphicsCommandBuffers.size(); ++j) {
+      if (areSameHandle(impl_->recordedGraphicsCommandBuffers[j].handle,
+                        requestedHandle)) {
+        foundIndex = j;
+        break;
+      }
+    }
+
+    if (foundIndex == impl_->recordedGraphicsCommandBuffers.size()) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "LvkGPUDevice::submitRecordedGraphicsFrame: unknown recorded "
+          "command buffer");
+    }
   }
 
   lvk::SubmitHandle lastSubmitHandle{};

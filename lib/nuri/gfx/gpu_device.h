@@ -99,8 +99,7 @@ public:
   acquireGraphicsRecordingContext(uint32_t workerIndex) = 0;
   virtual Result<bool, std::string>
   recordGraphicsBarriers(RecordingContextHandle ctx,
-                         const GraphicsBarrierRecord *barriers,
-                         uint32_t barrierCount) = 0;
+                         std::span<const GraphicsBarrierRecord> barriers) = 0;
   virtual Result<bool, std::string>
   recordGraphicsPass(RecordingContextHandle ctx, const RenderPass &pass) = 0;
   virtual Result<RecordedCommandBufferHandle, std::string>

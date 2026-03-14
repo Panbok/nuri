@@ -2810,8 +2810,7 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
   transientBufferLastRank.resize(buffers_.size(), 0u);
   const auto updateLifetimeRanks = [](std::span<uint32_t> firstRanks,
                                       std::span<uint32_t> lastRanks,
-                                      uint32_t resourceIndex,
-                                      uint32_t rank) {
+                                      uint32_t resourceIndex, uint32_t rank) {
     if (firstRanks[resourceIndex] == UINT32_MAX ||
         rank < firstRanks[resourceIndex]) {
       firstRanks[resourceIndex] = rank;
@@ -2868,9 +2867,7 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
 
     WorkerLifetimeRanks(std::pmr::memory_resource *memory, size_t textureCount,
                         size_t bufferCount)
-        : textureFirst(memory),
-          textureLast(memory),
-          bufferFirst(memory),
+        : textureFirst(memory), textureLast(memory), bufferFirst(memory),
           bufferLast(memory) {
       textureFirst.resize(textureCount, UINT32_MAX);
       textureLast.resize(textureCount, 0u);
@@ -2901,16 +2898,15 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
                                                       ranges.size()),
           [&](uint32_t workerIndex, RenderGraphContiguousRange range) {
             WorkerLifetimeRanks &worker = workerRanks[workerIndex];
-            analyzeAccessRange(
-                std::span<uint32_t>(worker.textureFirst.data(),
-                                    worker.textureFirst.size()),
-                std::span<uint32_t>(worker.textureLast.data(),
-                                    worker.textureLast.size()),
-                std::span<uint32_t>(worker.bufferFirst.data(),
-                                    worker.bufferFirst.size()),
-                std::span<uint32_t>(worker.bufferLast.data(),
-                                    worker.bufferLast.size()),
-                range);
+            analyzeAccessRange(std::span<uint32_t>(worker.textureFirst.data(),
+                                                   worker.textureFirst.size()),
+                               std::span<uint32_t>(worker.textureLast.data(),
+                                                   worker.textureLast.size()),
+                               std::span<uint32_t>(worker.bufferFirst.data(),
+                                                   worker.bufferFirst.size()),
+                               std::span<uint32_t>(worker.bufferLast.data(),
+                                                   worker.bufferLast.size()),
+                               range);
           });
       usedParallelLifetimeAnalysis = true;
 
@@ -2926,9 +2922,9 @@ RenderGraphBuilder::compileStageC5PlanTransientLifetimes(
               std::span<uint32_t>(transientTextureLastRank.data(),
                                   transientTextureLastRank.size()),
               textureIndex, worker.textureFirst[textureIndex]);
-          transientTextureLastRank[textureIndex] = std::max(
-              transientTextureLastRank[textureIndex],
-              worker.textureLast[textureIndex]);
+          transientTextureLastRank[textureIndex] =
+              std::max(transientTextureLastRank[textureIndex],
+                       worker.textureLast[textureIndex]);
         }
 
         for (uint32_t bufferIndex = 0; bufferIndex < buffers_.size();
@@ -4570,14 +4566,16 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
 
     for (const RenderGraphBarrierRecord &barrier :
          compiled.passBarrierRecords) {
-      GraphicsBarrierRecord resolved{};
-      resolved.beforeAccess = toGraphicsAccess(barrier.beforeAccess);
-      resolved.afterAccess = toGraphicsAccess(barrier.afterAccess);
-      resolved.beforeState = toGraphicsState(barrier.beforeState);
-      resolved.afterState = toGraphicsState(barrier.afterState);
+      const GraphicsBarrierAccessMode beforeAccess =
+          toGraphicsAccess(barrier.beforeAccess);
+      const GraphicsBarrierAccessMode afterAccess =
+          toGraphicsAccess(barrier.afterAccess);
+      const GraphicsBarrierState beforeState =
+          toGraphicsState(barrier.beforeState);
+      const GraphicsBarrierState afterState =
+          toGraphicsState(barrier.afterState);
 
       if (barrier.resourceKind == RenderGraphBarrierResourceKind::Texture) {
-        resolved.resourceKind = GraphicsBarrierResourceKind::Texture;
         if (barrier.resourceIndex >= compiled.textureHandlesByResource.size()) {
           destroyMaterializedResources();
           return fail(
@@ -4612,9 +4610,9 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
           texture = transientTextureHandles[allocationIndex];
         }
 
-        resolved.texture = texture;
+        executableBarrierRecords.push_back(GraphicsBarrierRecord::ForTexture(
+            texture, beforeAccess, afterAccess, beforeState, afterState));
       } else {
-        resolved.resourceKind = GraphicsBarrierResourceKind::Buffer;
         if (barrier.resourceIndex >= compiled.bufferHandlesByResource.size()) {
           destroyMaterializedResources();
           return fail(
@@ -4649,10 +4647,9 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
           buffer = transientBufferHandles[allocationIndex];
         }
 
-        resolved.buffer = buffer;
+        executableBarrierRecords.push_back(GraphicsBarrierRecord::ForBuffer(
+            buffer, beforeAccess, afterAccess, beforeState, afterState));
       }
-
-      executableBarrierRecords.push_back(resolved);
     }
     NURI_PROFILER_ZONE_END();
   }
@@ -4775,8 +4772,9 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
           if (barrierPlan.barrierCount > 0u) {
             auto barrierResult = gpu.recordGraphicsBarriers(
                 recordingContexts[workerIndex],
-                executableBarrierRecords.data() + barrierPlan.barrierOffset,
-                barrierPlan.barrierCount);
+                std::span<const GraphicsBarrierRecord>(executableBarrierRecords)
+                    .subspan(barrierPlan.barrierOffset,
+                             barrierPlan.barrierCount));
             if (barrierResult.hasError()) {
               setRecordingFailure(makeExecutionStageError(
                   RenderGraphExecutionFailureStage::RecordGraphicsBarriers,
@@ -4803,9 +4801,9 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
             compiled.finalBarrierPlan.barrierCount > 0u) {
           auto finalBarrierResult = gpu.recordGraphicsBarriers(
               recordingContexts[workerIndex],
-              executableBarrierRecords.data() +
-                  compiled.finalBarrierPlan.barrierOffset,
-              compiled.finalBarrierPlan.barrierCount);
+              std::span<const GraphicsBarrierRecord>(executableBarrierRecords)
+                  .subspan(compiled.finalBarrierPlan.barrierOffset,
+                           compiled.finalBarrierPlan.barrierCount));
           if (finalBarrierResult.hasError()) {
             setRecordingFailure(makeExecutionStageError(
                 RenderGraphExecutionFailureStage::RecordGraphicsBarriers,

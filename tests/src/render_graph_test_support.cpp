@@ -370,14 +370,14 @@ FakeGPUDeviceBase::acquireGraphicsRecordingContext(uint32_t workerIndex) {
       activeRecordingContexts_.back().handle);
 }
 
-Result<bool, std::string>
-FakeGPUDeviceBase::recordGraphicsBarriers(RecordingContextHandle ctx,
-                                          const GraphicsBarrierRecord *,
-                                          uint32_t barrierCount) {
+Result<bool, std::string> FakeGPUDeviceBase::recordGraphicsBarriers(
+    RecordingContextHandle ctx,
+    std::span<const GraphicsBarrierRecord> barriers) {
   const std::lock_guard<std::mutex> lock(recordingStateMutex_);
   for (auto &state : activeRecordingContexts_) {
     if (sameHandle(state.handle, ctx)) {
-      recordedBarrierBatchCounts.push_back(barrierCount);
+      recordedBarrierBatchCounts.push_back(
+          static_cast<uint32_t>(barriers.size()));
       return Result<bool, std::string>::makeResult(true);
     }
   }

@@ -44,67 +44,24 @@ Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
 Result<bool, std::string> Renderer::render() {
   NURI_PROFILER_FUNCTION();
   const uint64_t frameIndex = standaloneFrameIndex_++;
-  {
-    NURI_PROFILER_ZONE("Renderer.begin_frame", NURI_PROFILER_COLOR_CMD_COPY);
-    resources_.beginFrame(frameIndex);
-    NURI_PROFILER_ZONE_END();
-  }
-  Result<bool, std::string> frameResult =
-      Result<bool, std::string>::makeResult(true);
-  {
-    NURI_PROFILER_ZONE("Renderer.gpu_begin_frame", NURI_PROFILER_COLOR_WAIT);
-    frameResult = gpu_.beginFrame(frameIndex);
-    NURI_PROFILER_ZONE_END();
-  }
+  Result<bool, std::string> frameResult = beginFrameSequence(frameIndex);
   if (frameResult.hasError()) {
     return frameResult;
   }
-  {
-    NURI_PROFILER_ZONE("Renderer.render_graph_begin_frame",
-                       NURI_PROFILER_COLOR_CMD_COPY);
-    renderGraphBuilder_.beginFrame(frameIndex);
-    NURI_PROFILER_ZONE_END();
-  }
-  Result<bool, std::string> submitResult =
-      Result<bool, std::string>::makeResult(true);
-  {
-    NURI_PROFILER_ZONE("Renderer.compile_execute", NURI_PROFILER_COLOR_SUBMIT);
-    submitResult = compileAndExecuteRenderGraph();
-    NURI_PROFILER_ZONE_END();
-  }
-  {
-    NURI_PROFILER_ZONE("Renderer.resource_gc", NURI_PROFILER_COLOR_DESTROY);
-    resources_.collectGarbage(frameIndex);
-    NURI_PROFILER_ZONE_END();
-  }
-  return submitResult;
+  renderGraphBeginFrame(frameIndex);
+  return endFrameSequence(frameIndex);
 }
 
 Result<bool, std::string> Renderer::render(LayerStack &layers,
                                            RenderFrameContext &frameContext) {
   NURI_PROFILER_FUNCTION();
-  {
-    NURI_PROFILER_ZONE("Renderer.begin_frame", NURI_PROFILER_COLOR_CMD_COPY);
-    resources_.beginFrame(frameContext.frameIndex);
-    NURI_PROFILER_ZONE_END();
-  }
   Result<bool, std::string> frameResult =
-      Result<bool, std::string>::makeResult(true);
-  {
-    NURI_PROFILER_ZONE("Renderer.gpu_begin_frame", NURI_PROFILER_COLOR_WAIT);
-    frameResult = gpu_.beginFrame(frameContext.frameIndex);
-    NURI_PROFILER_ZONE_END();
-  }
+      beginFrameSequence(frameContext.frameIndex);
   if (frameResult.hasError()) {
     return frameResult;
   }
 
-  {
-    NURI_PROFILER_ZONE("Renderer.render_graph_begin_frame",
-                       NURI_PROFILER_COLOR_CMD_COPY);
-    renderGraphBuilder_.beginFrame(frameContext.frameIndex);
-    NURI_PROFILER_ZONE_END();
-  }
+  renderGraphBeginFrame(frameContext.frameIndex);
 
   if (!layers.empty()) {
     Result<bool, std::string> layerResult =
@@ -120,6 +77,34 @@ Result<bool, std::string> Renderer::render(LayerStack &layers,
     }
   }
 
+  return endFrameSequence(frameContext.frameIndex);
+}
+
+Result<bool, std::string> Renderer::beginFrameSequence(uint64_t frameIndex) {
+  {
+    NURI_PROFILER_ZONE("Renderer.begin_frame", NURI_PROFILER_COLOR_CMD_COPY);
+    resources_.beginFrame(frameIndex);
+    NURI_PROFILER_ZONE_END();
+  }
+
+  Result<bool, std::string> frameResult =
+      Result<bool, std::string>::makeResult(true);
+  {
+    NURI_PROFILER_ZONE("Renderer.gpu_begin_frame", NURI_PROFILER_COLOR_WAIT);
+    frameResult = gpu_.beginFrame(frameIndex);
+    NURI_PROFILER_ZONE_END();
+  }
+  return frameResult;
+}
+
+void Renderer::renderGraphBeginFrame(uint64_t frameIndex) {
+  NURI_PROFILER_ZONE("Renderer.render_graph_begin_frame",
+                     NURI_PROFILER_COLOR_CMD_COPY);
+  renderGraphBuilder_.beginFrame(frameIndex);
+  NURI_PROFILER_ZONE_END();
+}
+
+Result<bool, std::string> Renderer::endFrameSequence(uint64_t frameIndex) {
   Result<bool, std::string> submitResult =
       Result<bool, std::string>::makeResult(true);
   {
@@ -129,7 +114,7 @@ Result<bool, std::string> Renderer::render(LayerStack &layers,
   }
   {
     NURI_PROFILER_ZONE("Renderer.resource_gc", NURI_PROFILER_COLOR_DESTROY);
-    resources_.collectGarbage(frameContext.frameIndex);
+    resources_.collectGarbage(frameIndex);
     NURI_PROFILER_ZONE_END();
   }
   return submitResult;
@@ -137,28 +122,25 @@ Result<bool, std::string> Renderer::render(LayerStack &layers,
 
 Result<bool, std::string> Renderer::compileAndExecuteRenderGraph() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
-  Result<RenderGraphCompileResult, std::string> compileResult =
-      Result<RenderGraphCompileResult, std::string>::makeError(std::string{});
-  {
+  const Result<RenderGraphCompileResult, std::string> compileResult =
+      [&]() -> Result<RenderGraphCompileResult, std::string> {
     NURI_PROFILER_ZONE("Renderer.render_graph_compile",
                        NURI_PROFILER_COLOR_BARRIER);
-    compileResult = renderGraphBuilder_.compile(renderGraphRuntime_);
+    return renderGraphBuilder_.compile(renderGraphRuntime_);
     NURI_PROFILER_ZONE_END();
-  }
+  }();
   if (compileResult.hasError()) {
     return Result<bool, std::string>::makeError(compileResult.error());
   }
 
-  Result<RenderGraphExecutionMetadata, std::string> executeResult =
-      Result<RenderGraphExecutionMetadata, std::string>::makeError(
-          std::string{});
-  {
+  const Result<RenderGraphExecutionMetadata, std::string> executeResult =
+      [&]() -> Result<RenderGraphExecutionMetadata, std::string> {
     NURI_PROFILER_ZONE("Renderer.render_graph_execute",
                        NURI_PROFILER_COLOR_SUBMIT);
-    executeResult = renderGraphExecutor_.execute(renderGraphRuntime_, gpu_,
-                                                 compileResult.value());
+    return renderGraphExecutor_.execute(renderGraphRuntime_, gpu_,
+                                        compileResult.value());
     NURI_PROFILER_ZONE_END();
-  }
+  }();
   if (executeResult.hasError()) {
     return Result<bool, std::string>::makeError(executeResult.error());
   }

@@ -63,9 +63,7 @@ TEST(RenderGraphMetadataTest, TransientTextureBindingMetadata) {
   auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
+    std::cerr << compileResult.error() << "\n";
     return;
   }
   const RenderGraphCompileResult &compiled = compileResult.value();
@@ -154,9 +152,7 @@ TEST(RenderGraphMetadataTest, ImportedTextureBindingMetadataResolved) {
   auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
+    std::cerr << compileResult.error() << "\n";
     return;
   }
   const RenderGraphCompileResult &compiled = compileResult.value();
@@ -327,9 +323,7 @@ TEST(RenderGraphMetadataTest, ExplicitLegacyRegistrationWithoutInference) {
   auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed for explicit registration path";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
+    std::cerr << compileResult.error() << "\n";
     return;
   }
   const RenderGraphCompileResult &compiled = compileResult.value();
@@ -445,9 +439,7 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
   auto compileAResult = compileBuilder(builder);
   if (compileAResult.hasError()) {
     ADD_FAILURE() << "frame A compile should succeed";
-    if (compileAResult.hasError()) {
-      std::cerr << compileAResult.error() << "\n";
-    }
+    std::cerr << compileAResult.error() << "\n";
     return;
   }
 
@@ -501,7 +493,7 @@ TEST(RenderGraphMetadataTest, AccessAndSideEffectDedupStateResetsAcrossFrames) {
 
 TEST(RenderGraphMetadataTest, BarrierPlansTrackStablePerPassTransitions) {
   RenderGraphBuilder builder;
-  builder.beginFrame(309u);
+  builder.beginFrame(310u);
 
   auto transientBufferResult = builder.createTransientBuffer(
       makeTransientBufferDesc(64u), "barrier_buf");
@@ -554,31 +546,79 @@ TEST(RenderGraphMetadataTest, BarrierPlansTrackStablePerPassTransitions) {
   }
   const RenderGraphCompileResult &compiled = compileResult.value();
 
-  ASSERT_EQ(compiled.passBarrierPlans.size(), 2u);
-  ASSERT_EQ(compiled.passBarrierRecords.size(), 2u);
+  if (!(compiled.passBarrierPlans.size() == 2u)) {
+    ADD_FAILURE() << "expected two pass barrier plans";
+    return;
+  }
+  if (!(compiled.passBarrierRecords.size() == 2u)) {
+    ADD_FAILURE() << "expected two pass barrier records";
+    return;
+  }
 
   const PassBarrierPlan &planA = compiled.passBarrierPlans[0u];
   const PassBarrierPlan &planB = compiled.passBarrierPlans[1u];
-  ASSERT_EQ(planA.orderedPassIndex, 0u);
-  ASSERT_EQ(planB.orderedPassIndex, 1u);
-  ASSERT_EQ(planA.barrierCount, 1u);
-  ASSERT_EQ(planB.barrierCount, 1u);
+  if (!(planA.orderedPassIndex == 0u)) {
+    ADD_FAILURE() << "expected plan A ordered pass index = 0";
+    return;
+  }
+  if (!(planB.orderedPassIndex == 1u)) {
+    ADD_FAILURE() << "expected plan B ordered pass index = 1";
+    return;
+  }
+  if (!(planA.barrierCount == 1u)) {
+    ADD_FAILURE() << "expected plan A barrier count = 1";
+    return;
+  }
+  if (!(planB.barrierCount == 1u)) {
+    ADD_FAILURE() << "expected plan B barrier count = 1";
+    return;
+  }
 
   const RenderGraphBarrierRecord &recordA =
       compiled.passBarrierRecords[planA.barrierOffset];
-  EXPECT_EQ(recordA.resourceKind, RenderGraphBarrierResourceKind::Buffer);
-  EXPECT_EQ(recordA.resourceIndex, transientBufferResult.value().value);
-  EXPECT_EQ(recordA.beforeState, RenderGraphResourceState::Unknown);
-  EXPECT_EQ(recordA.afterState, RenderGraphResourceState::Write);
+  if (!(recordA.resourceKind == RenderGraphBarrierResourceKind::Buffer)) {
+    ADD_FAILURE() << "expected plan A to target a buffer barrier";
+    return;
+  }
+  if (!(recordA.resourceIndex == transientBufferResult.value().value)) {
+    ADD_FAILURE() << "expected plan A buffer resource index to match";
+    return;
+  }
+  if (!(recordA.beforeState == RenderGraphResourceState::Unknown)) {
+    ADD_FAILURE() << "expected plan A before-state = Unknown";
+    return;
+  }
+  if (!(recordA.afterState == RenderGraphResourceState::Write)) {
+    ADD_FAILURE() << "expected plan A after-state = Write";
+    return;
+  }
 
   const RenderGraphBarrierRecord &recordB =
       compiled.passBarrierRecords[planB.barrierOffset];
-  EXPECT_EQ(recordB.resourceKind, RenderGraphBarrierResourceKind::Buffer);
-  EXPECT_EQ(recordB.resourceIndex, transientBufferResult.value().value);
-  EXPECT_EQ(recordB.beforeState, RenderGraphResourceState::Write);
-  EXPECT_EQ(recordB.afterState, RenderGraphResourceState::Read);
-  EXPECT_EQ(recordB.beforeAccess, RenderGraphAccessMode::Write);
-  EXPECT_EQ(recordB.afterAccess, RenderGraphAccessMode::Read);
+  if (!(recordB.resourceKind == RenderGraphBarrierResourceKind::Buffer)) {
+    ADD_FAILURE() << "expected plan B to target a buffer barrier";
+    return;
+  }
+  if (!(recordB.resourceIndex == transientBufferResult.value().value)) {
+    ADD_FAILURE() << "expected plan B buffer resource index to match";
+    return;
+  }
+  if (!(recordB.beforeState == RenderGraphResourceState::Write)) {
+    ADD_FAILURE() << "expected plan B before-state = Write";
+    return;
+  }
+  if (!(recordB.afterState == RenderGraphResourceState::Read)) {
+    ADD_FAILURE() << "expected plan B after-state = Read";
+    return;
+  }
+  if (!(recordB.beforeAccess == RenderGraphAccessMode::Write)) {
+    ADD_FAILURE() << "expected plan B before-access = Write";
+    return;
+  }
+  if (!(recordB.afterAccess == RenderGraphAccessMode::Read)) {
+    ADD_FAILURE() << "expected plan B after-access = Read";
+    return;
+  }
 }
 
 TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
@@ -643,9 +683,7 @@ TEST(RenderGraphMetadataTest, UnresolvedTransientBindingMetadata) {
   auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
+    std::cerr << compileResult.error() << "\n";
     return;
   }
   const RenderGraphCompileResult &compiled = compileResult.value();
@@ -826,9 +864,7 @@ TEST(RenderGraphMetadataTest, ResolvedImportedBindingMetadata) {
   auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
+    std::cerr << compileResult.error() << "\n";
     return;
   }
   const RenderGraphCompileResult &compiled = compileResult.value();
@@ -970,9 +1006,7 @@ TEST(RenderGraphMetadataTest, MultiPassRangeMetadataIntegrity) {
   auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
+    std::cerr << compileResult.error() << "\n";
     return;
   }
   const RenderGraphCompileResult &compiled = compileResult.value();
@@ -1132,9 +1166,7 @@ TEST(RenderGraphMetadataTest, StructuralCompileMetadataIntegrity) {
   auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
+    std::cerr << compileResult.error() << "\n";
     return;
   }
   const RenderGraphCompileResult &compiled = compileResult.value();
@@ -1246,9 +1278,7 @@ TEST(RenderGraphMetadataTest, TransientAllocationMetadataIntegrity) {
   auto compileResult = compileBuilder(builder);
   if (compileResult.hasError()) {
     ADD_FAILURE() << "compile should succeed";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
+    std::cerr << compileResult.error() << "\n";
     return;
   }
   const RenderGraphCompileResult &compiled = compileResult.value();

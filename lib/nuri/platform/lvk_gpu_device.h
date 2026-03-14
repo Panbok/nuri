@@ -78,10 +78,9 @@ public:
   uint32_t maxParallelGraphicsRecordingContexts() const override;
   Result<RecordingContextHandle, std::string>
   acquireGraphicsRecordingContext(uint32_t workerIndex) override;
-  Result<bool, std::string>
-  recordGraphicsBarriers(RecordingContextHandle ctx,
-                         const GraphicsBarrierRecord *barriers,
-                         uint32_t barrierCount) override;
+  Result<bool, std::string> recordGraphicsBarriers(
+      RecordingContextHandle ctx,
+      std::span<const GraphicsBarrierRecord> barriers) override;
   Result<bool, std::string> recordGraphicsPass(RecordingContextHandle ctx,
                                                const RenderPass &pass) override;
   Result<RecordedCommandBufferHandle, std::string>

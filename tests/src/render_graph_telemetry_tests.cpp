@@ -139,7 +139,12 @@ void populateTelemetryCompileResult(RenderGraphCompileResult &compiled,
 }
 
 void populateTelemetryExecutionMetadata(
-    RenderGraphExecutionMetadata &execution) {
+    RenderGraphExecutionMetadata &execution,
+    std::pmr::memory_resource *memoryResource = nullptr) {
+  std::pmr::memory_resource *executionMemory =
+      memoryResource != nullptr ? memoryResource
+                                : std::pmr::get_default_resource();
+  static_cast<void>(executionMemory);
   execution.usedParallelCompile = true;
   execution.usedParallelRecording = true;
   execution.recordedCommandBuffers.push_back(
@@ -168,7 +173,7 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
     RenderGraphCompileResult compiled(&compileMemory);
     RenderGraphExecutionMetadata execution(&compileMemory);
     populateTelemetryCompileResult(compiled, &compileMemory);
-    populateTelemetryExecutionMetadata(execution);
+    populateTelemetryExecutionMetadata(execution, &compileMemory);
     telemetry.capture(compiled, execution);
   }
 
@@ -188,6 +193,12 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   EXPECT_EQ(snapshot->submitBatches.size(), 1u);
   EXPECT_TRUE(snapshot->submitBatches[0].presentsFrameOutput);
   ASSERT_EQ(snapshot->passRanges.size(), 2u);
+  EXPECT_EQ(snapshot->passRanges[0].workerIndex, 0u);
+  EXPECT_EQ(snapshot->passRanges[0].firstOrderedPassIndex, 0u);
+  EXPECT_EQ(snapshot->passRanges[0].passCount, 1u);
+  EXPECT_EQ(snapshot->passRanges[1].workerIndex, 1u);
+  EXPECT_EQ(snapshot->passRanges[1].firstOrderedPassIndex, 1u);
+  EXPECT_EQ(snapshot->passRanges[1].passCount, 1u);
   EXPECT_TRUE(snapshot->summary.usedParallelCompile);
   EXPECT_TRUE(snapshot->summary.usedParallelValidation);
   EXPECT_TRUE(snapshot->summary.usedParallelPayloadResolution);
@@ -220,7 +231,7 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
   RenderGraphCompileResult compiled(&compileMemory);
   RenderGraphExecutionMetadata execution(&compileMemory);
   populateTelemetryCompileResult(compiled, &compileMemory);
-  populateTelemetryExecutionMetadata(execution);
+  populateTelemetryExecutionMetadata(execution, &compileMemory);
   telemetry.capture(compiled, execution);
 
   EXPECT_TRUE(telemetry.writeLatestTextDump("").hasError());
@@ -265,7 +276,7 @@ TEST(RenderGraphTelemetryTest, SuggestDumpPathUsesEnvDirectorySeed) {
   RenderGraphCompileResult compiled(&compileMemory);
   RenderGraphExecutionMetadata execution(&compileMemory);
   populateTelemetryCompileResult(compiled, &compileMemory);
-  populateTelemetryExecutionMetadata(execution);
+  populateTelemetryExecutionMetadata(execution, &compileMemory);
   telemetry.capture(compiled, execution);
 
   const std::filesystem::path suggested = telemetry.suggestDumpPath();
