@@ -45,7 +45,7 @@ struct MaterialData {
   float thicknessFactor = 0.0f;
   glm::vec3 attenuationColor{1.0f};
   float attenuationDistance = 0.0f;
-  float ior = 1.5f;
+  float ior = 1.5f; // Valid domain: {0} U [1, +inf); 0 keeps glTF compat mode.
   float normalScale = 1.0f;
   float occlusionStrength = 1.0f;
   float alphaCutoff = 0.5f;

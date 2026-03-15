@@ -54,8 +54,21 @@ struct NURI_API MaterialRequest {
 };
 
 template <typename Fn>
-void forEachMaterialTextureRef(const MaterialRequest::TextureRefs &refs,
-                               Fn &&fn) {
+constexpr void forEachMaterialTextureRef(
+    const MaterialRequest::TextureRefs &refs,
+    Fn &&fn) noexcept(noexcept(fn(refs.baseColor)) &&
+                      noexcept(fn(refs.metallicRoughness)) &&
+                      noexcept(fn(refs.normal)) &&
+                      noexcept(fn(refs.occlusion)) &&
+                      noexcept(fn(refs.emissive)) &&
+                      noexcept(fn(refs.clearcoat)) &&
+                      noexcept(fn(refs.clearcoatRoughness)) &&
+                      noexcept(fn(refs.clearcoatNormal)) &&
+                      noexcept(fn(refs.sheenColor)) &&
+                      noexcept(fn(refs.sheenRoughness)) &&
+                      noexcept(fn(refs.transmission)) &&
+                      noexcept(fn(refs.thickness))) {
+  // Keep this enumeration in sync with MaterialRequest::TextureRefs.
   fn(refs.baseColor);
   fn(refs.metallicRoughness);
   fn(refs.normal);

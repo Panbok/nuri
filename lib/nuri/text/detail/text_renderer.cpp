@@ -1110,6 +1110,7 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
     RenderGraphTextureId sceneDepthGraphTexture, bool hasPriorColorPass) {
   NURI_PROFILER_FUNCTION();
   TextureHandle depthTexture{};
+  TextureHandle colorTexture{};
   [[maybe_unused]] Format depthFormat = Format::Count;
   auto prepare = prepareWorldRenderState(frame, depthTexture, depthFormat);
   if (prepare.hasError()) {
@@ -1119,6 +1120,11 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
     return Result<bool, std::string>::makeResult(true);
   }
   const bool hasDepth = ::nuri::isValid(depthTexture);
+  if (const TextureHandle *publishedFrameColor =
+          frame.channels.tryGet<TextureHandle>(kFrameChannelFrameColorTexture);
+      publishedFrameColor != nullptr && ::nuri::isValid(*publishedFrameColor)) {
+    colorTexture = *publishedFrameColor;
+  }
 
   worldDraws_.clear();
   worldPcs_.clear();
@@ -1161,9 +1167,19 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
   gpu_.getFramebufferSize(w, h);
 
   RenderGraphGraphicsPassDesc desc{};
-  desc.color = {.loadOp = hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
+  desc.color = {.loadOp = (hasPriorColorPass || ::nuri::isValid(colorTexture))
+                              ? LoadOp::Load
+                              : LoadOp::Clear,
                 .storeOp = StoreOp::Store,
                 .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+  if (::nuri::isValid(colorTexture)) {
+    auto colorImportResult =
+        graph.importTexture(colorTexture, "text3d_pass_color_texture");
+    if (colorImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(colorImportResult.error());
+    }
+    desc.colorTexture = colorImportResult.value();
+  }
   desc.useViewport = true;
   desc.viewport = {.x = 0.0f,
                    .y = 0.0f,

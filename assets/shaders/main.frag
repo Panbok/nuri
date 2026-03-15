@@ -230,11 +230,14 @@ void main() {
         textureBindless2D(emissiveTexId, emissiveSampler, uvEmissive).rgb;
   }
 
+  float ior = material.transmissionThicknessIorPadding.z;
+  bool iorCompatMode = isIorCompatMode(ior);
   vec3 v = normalize(pc.frameData.cameraPos.xyz - vtx.worldPos);
   float ndotv = max(dot(nBase, v), 0.001);
   float clearcoatNdotV = max(dot(nClearcoat, v), 0.001);
 
-  vec3 f0 = mix(vec3(0.04), baseColor.rgb, metallic);
+  float dielectricF0 = dielectricF0FromIor(ior);
+  vec3 f0 = mix(vec3(dielectricF0), baseColor.rgb, metallic);
   vec3 diffuseColor = mix(baseColor.rgb, vec3(0.0), metallic);
   float alphaRoughness = roughness * roughness;
   float reflectance = max(max(f0.r, f0.g), f0.b);
@@ -348,7 +351,9 @@ void main() {
         textureBindlessCube(pc.frameData.irradianceTexId,
                             pc.frameData.cubemapSamplerId, nBase)
             .rgb;
-    if (hasBrdfLut) {
+    if (iorCompatMode) {
+      iblDiffuse = vec3(0.0);
+    } else if (hasBrdfLut) {
       iblDiffuse = computeIblDiffuse(diffuseColor, f0, roughness, ndotv,
                                      irradiance, baseBrdfLutSample);
     } else {

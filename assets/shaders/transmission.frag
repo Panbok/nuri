@@ -20,18 +20,28 @@ vec2 transformedUv(MaterialGpuData material, uint slot) {
                                material.textureTransformRotation[slot]);
 }
 
-float dielectricF0FromIor(float ior) {
-  float ratio = (ior - 1.0) / (ior + 1.0);
-  return ratio * ratio;
-}
-
 float applyIorToRoughness(float roughness, float ior) {
+  if (isIorCompatMode(ior)) {
+    return roughness;
+  }
   return roughness * clamp(ior * 2.0 - 2.0, 0.0, 1.0);
 }
 
 vec3 getAuthoredScale() {
+  // Transmission uses the shared mesh push-constant layout from common.sp, so
+  // the tessellation distance/factor slots carry imported local-space authored
+  // scale for this pass instead of tessellation settings.
   return max(vec3(pc.tessNearDistance, pc.tessFarDistance, pc.tessMinFactor),
              vec3(1.0e-6));
+}
+
+vec3 srgbFromLinear(vec3 linearColor) {
+  const bvec3 useLinearSegment =
+      lessThanEqual(linearColor, vec3(0.0031308));
+  const vec3 linearSegment = linearColor * 12.92;
+  const vec3 nonlinearSegment =
+      1.055 * pow(max(linearColor, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+  return mix(nonlinearSegment, linearSegment, useLinearSegment);
 }
 
 vec3 getVolumeTransmissionRay(vec3 n, vec3 v, float thickness, float ior,
@@ -353,12 +363,18 @@ void main() {
   }
   thickness = max(thickness, 0.0);
 
-  float ior = max(material.transmissionThicknessIorPadding.z, 1.0);
+  float ior = material.transmissionThicknessIorPadding.z;
+  bool iorCompatMode = isIorCompatMode(ior);
   vec3 attenuationColor = clamp(material.attenuationColorDistance.rgb, vec3(0.0),
                                 vec3(1.0));
   float attenuationDistance = max(material.attenuationColorDistance.w, 0.0);
 
   vec3 v = normalize(pc.frameData.cameraPos.xyz - vtx.worldPos);
+  const bool hasTransmission = transmissionFactor > 0.0 && !iorCompatMode;
+  mat4 modelMatrix = mat4(1.0);
+  if (hasTransmission) {
+    modelMatrix = pc.instanceMatrices.matrices[inInstanceId];
+  }
   float ndotv = max(dot(nBase, v), 0.001);
   float clearcoatNdotV = max(dot(nClearcoat, v), 0.001);
 
@@ -441,8 +457,7 @@ void main() {
         clearcoat * clearcoatNdotL * lightColor * clearcoatSpecular;
   }
 
-  if (transmissionFactor > 0.0) {
-    mat4 modelMatrix = pc.instanceMatrices.matrices[inInstanceId];
+  if (hasTransmission) {
     vec3 transmissionRay =
         getVolumeTransmissionRay(nBase, v, thickness, ior, modelMatrix);
     vec3 pointToLight = lightPos - vtx.worldPos - transmissionRay;
@@ -498,7 +513,9 @@ void main() {
         textureBindlessCube(pc.frameData.irradianceTexId,
                             pc.frameData.cubemapSamplerId, nBase)
             .rgb;
-    if (hasBrdfLut) {
+    if (iorCompatMode) {
+      iblDiffuse = vec3(0.0);
+    } else if (hasBrdfLut) {
       iblDiffuse = computeIblDiffuse(diffuseColor, f0, roughness, ndotv,
                                      irradiance, baseBrdfLutSample);
     } else {
@@ -579,10 +596,9 @@ void main() {
     hasIndirectLighting = true;
   }
 
-  if (transmissionFactor > 0.0 &&
+  if (hasTransmission &&
       (pc.frameData.flags & kFrameDataFlagHasSceneColor) != 0u &&
       pc.frameData.sceneColorTexId != kInvalidTextureBindlessIndex) {
-    mat4 modelMatrix = pc.instanceMatrices.matrices[inInstanceId];
     indirectTransmission = getIndirectTransmission(
         nBase, v, roughness, diffuseColor, f0, f90, vtx.worldPos, modelMatrix,
         ior, thickness, attenuationColor, attenuationDistance);
@@ -609,7 +625,7 @@ void main() {
       directLighting + indirectLighting + clearcoatAttenuation * emissive;
   color = max(color, vec3(0.0));
   if ((pc.frameData.flags & kFrameDataFlagOutputLinearToSrgb) != 0u) {
-    color = pow(color, vec3(1.0 / 2.2));
+    color = srgbFromLinear(color);
   }
 
   float outAlpha = (alphaMode == kAlphaModeOpaque) ? 1.0 : baseColor.a;

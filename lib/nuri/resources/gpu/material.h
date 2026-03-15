@@ -111,7 +111,7 @@ struct MaterialDesc {
   float thicknessFactor = 0.0f;
   glm::vec3 attenuationColor{1.0f, 1.0f, 1.0f};
   float attenuationDistance = 0.0f;
-  float ior = 1.5f;
+  float ior = 1.5f; // Valid domain: {0} U [1, +inf); 0 keeps glTF compat mode.
   float normalScale = 1.0f;
   float occlusionStrength = 1.0f;
   float alphaCutoff = 0.5f;
@@ -136,9 +136,9 @@ struct alignas(16) MaterialGpuData {
   glm::vec4 transmissionThicknessIorPadding{
       0.0f, 0.0f, 1.5f,
       0.0f}; // (transmissionFactor, thicknessFactor, ior, reserved)
+             // IOR keeps the same {0} U [1, +inf) contract as MaterialDesc.
   glm::vec4 attenuationColorDistance{
-      1.0f, 1.0f, 1.0f,
-      0.0f}; // (attenuationColor.rgb, attenuationDistance)
+      1.0f, 1.0f, 1.0f, 0.0f}; // (attenuationColor.rgb, attenuationDistance)
   glm::uvec4 textureIndices0{
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
       kInvalidTextureBindlessIndex,
@@ -159,10 +159,9 @@ struct alignas(16) MaterialGpuData {
   glm::uvec4 textureUvSets1{0u, 0u, 0u,
                             0u}; // UV sets for (emissive, clearcoat,
                                  // clearcoatRoughness, clearcoatNormal)
-  glm::uvec4 textureUvSets2{
-      0u, 0u, 0u,
-      0u}; // UV sets for (sheenColor, sheenRoughness, transmission,
-           // thickness)
+  glm::uvec4 textureUvSets2{0u, 0u, 0u,
+                            0u}; // UV sets for (sheenColor, sheenRoughness,
+                                 // transmission, thickness)
   glm::uvec4 textureSamplerIndices0{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices1{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices2{0u, 0u, 0u, 0u};

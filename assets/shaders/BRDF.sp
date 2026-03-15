@@ -11,6 +11,16 @@ float pow5(float x) {
   return x2 * x2 * x;
 }
 
+bool isIorCompatMode(float ior) { return ior == 0.0; }
+
+float dielectricF0FromIor(float ior) {
+  if (isIorCompatMode(ior)) {
+    return 1.0;
+  }
+  float ratio = (ior - 1.0) / (ior + 1.0);
+  return ratio * ratio;
+}
+
 vec3 fresnelSchlick(float cosTheta, vec3 f0) {
   return f0 + (1.0 - f0) * pow5(1.0 - saturate(cosTheta));
 }
