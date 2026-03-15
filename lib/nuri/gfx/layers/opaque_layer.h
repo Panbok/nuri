@@ -77,8 +77,8 @@ private:
     uint32_t cubemapSamplerId = 0;
     uint32_t sceneColorTexId = 0;
     uint32_t sceneColorSamplerId = 0;
-    uint32_t reserved0 = 0;
-    uint32_t reserved1 = 0;
+    uint32_t sceneColorHalfResTexId = 0;
+    uint32_t sceneColorQuarterResTexId = 0;
   };
   static_assert(sizeof(FrameData) == 192,
                 "OpaqueLayer::FrameData must match shader FrameDataBuffer "

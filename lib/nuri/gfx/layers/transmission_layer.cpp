@@ -488,8 +488,8 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
       .cubemapSamplerId = cubemapSamplerId,
       .sceneColorTexId = sceneColorTexId,
       .sceneColorSamplerId = sceneColorSamplerId,
-      .reserved0 = sceneColorMip1TexId,
-      .reserved1 = sceneColorMip2TexId,
+      .sceneColorHalfResTexId = sceneColorMip1TexId,
+      .sceneColorQuarterResTexId = sceneColorMip2TexId,
   };
 
   if (!frameDataUploadValid_ || !(uploadedFrameData_ == frameData_)) {

@@ -177,8 +177,8 @@ SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
       .cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex(),
       .sceneColorTexId = sceneColorTexId,
       .sceneColorSamplerId = sceneColorSamplerId,
-      .reserved0 = 0,
-      .reserved1 = 0,
+      .sceneColorHalfResTexId = 0,
+      .sceneColorQuarterResTexId = 0,
   };
 
   const size_t requiredBytes = sizeof(frameData_);

@@ -659,8 +659,8 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
       .cubemapSamplerId = cubemapSamplerId,
       .sceneColorTexId = sceneColorTexId,
       .sceneColorSamplerId = sceneColorSamplerId,
-      .reserved0 = 0u,
-      .reserved1 = 0u,
+      .sceneColorHalfResTexId = 0u,
+      .sceneColorQuarterResTexId = 0u,
   };
 
   auto frameDataResult = ensureFrameDataBufferCapacity(sizeof(FrameData));

@@ -398,8 +398,8 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
       .cubemapSamplerId = cubemapSamplerId,
       .sceneColorTexId = 0u,
       .sceneColorSamplerId = 0u,
-      .reserved0 = 0u,
-      .reserved1 = 0u,
+      .sceneColorHalfResTexId = 0u,
+      .sceneColorQuarterResTexId = 0u,
   };
 
   if (!frameDataUploadValid_ || !(uploadedFrameData_ == frameData_)) {

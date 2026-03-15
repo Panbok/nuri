@@ -1,6 +1,6 @@
 #extension GL_EXT_buffer_reference : require
 
-layout(location = 0) in vec2 outUv;
+layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 out_FragColor;
 
 const uint kCopyFlagDownsample = 1u << 0u;
@@ -29,9 +29,9 @@ vec4 sampleDownsampled(vec2 uv) {
 
 void main() {
   if ((pc.flags & kCopyFlagDownsample) != 0u) {
-    out_FragColor = sampleDownsampled(outUv);
+    out_FragColor = sampleDownsampled(uv);
     return;
   }
 
-  out_FragColor = sampleSource(outUv);
+  out_FragColor = sampleSource(uv);
 }

@@ -14,8 +14,8 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint cubemapSamplerId;
   uint sceneColorTexId;
   uint sceneColorSamplerId;
-  uint reserved0; // Half-resolution scene-color pyramid level.
-  uint reserved1; // Quarter-resolution scene-color pyramid level.
+  uint sceneColorHalfResTexId;
+  uint sceneColorQuarterResTexId;
 };
 
 const uint kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
@@ -124,10 +124,10 @@ uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {
     return frameData.sceneColorTexId;
   }
   if (level == 1u) {
-    return frameData.reserved0;
+    return frameData.sceneColorHalfResTexId;
   }
   if (level == 2u) {
-    return frameData.reserved1;
+    return frameData.sceneColorQuarterResTexId;
   }
   return kInvalidTextureBindlessIndex;
 }

@@ -15,9 +15,11 @@ set(NURI_RENDERER_SOURCES
   nuri/core/log.cpp
   nuri/core/runtime_config.cpp
   nuri/gfx/debug_draw_3d.cpp
+  nuri/gfx/layers/composite_layer.cpp
   nuri/gfx/layers/debug_layer.cpp
   nuri/gfx/layers/opaque_layer.cpp
   nuri/gfx/layers/skybox_layer.cpp
+  nuri/gfx/layers/transmission_layer.cpp
   nuri/gfx/layers/transparent_layer.cpp
   nuri/gfx/render_graph/render_graph.cpp
   nuri/gfx/render_graph/render_graph_runtime.cpp

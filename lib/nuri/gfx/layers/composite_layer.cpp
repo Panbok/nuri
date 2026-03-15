@@ -106,8 +106,8 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
       .cubemapSamplerId = 0u,
       .sceneColorTexId = sceneColorTexId,
       .sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex(),
-      .reserved0 = 0u,
-      .reserved1 = 0u,
+      .sceneColorHalfResTexId = 0u,
+      .sceneColorQuarterResTexId = 0u,
   };
 
   if (!frameDataUploadValid_ || uploadedFrameData_ != frameData_) {
