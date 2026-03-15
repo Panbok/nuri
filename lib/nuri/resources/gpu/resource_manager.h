@@ -46,10 +46,29 @@ struct NURI_API MaterialRequest {
     TextureRef clearcoatNormal = kInvalidTextureRef;
     TextureRef sheenColor = kInvalidTextureRef;
     TextureRef sheenRoughness = kInvalidTextureRef;
+    TextureRef transmission = kInvalidTextureRef;
+    TextureRef thickness = kInvalidTextureRef;
   } textureRefs{};
   std::string debugName{};
   std::string sourceIdentity{};
 };
+
+template <typename Fn>
+void forEachMaterialTextureRef(const MaterialRequest::TextureRefs &refs,
+                               Fn &&fn) {
+  fn(refs.baseColor);
+  fn(refs.metallicRoughness);
+  fn(refs.normal);
+  fn(refs.occlusion);
+  fn(refs.emissive);
+  fn(refs.clearcoat);
+  fn(refs.clearcoatRoughness);
+  fn(refs.clearcoatNormal);
+  fn(refs.sheenColor);
+  fn(refs.sheenRoughness);
+  fn(refs.transmission);
+  fn(refs.thickness);
+}
 
 struct NURI_API ImportedMaterialRequest {
   std::string modelPath{};

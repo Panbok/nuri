@@ -10,6 +10,80 @@ namespace nuri {
 
 namespace {
 
+struct MaterialTextureResolveSpec {
+  const char *slotName = nullptr;
+  TextureRef MaterialRequest::TextureRefs::*ref = nullptr;
+  TextureHandle MaterialTextureHandles::*handle = nullptr;
+};
+
+struct ImportedTextureAcquireSpec {
+  const char *logName = nullptr;
+  const char *debugSuffix = nullptr;
+  bool srgb = false;
+  MaterialTextureSlotData MaterialData::*slot = nullptr;
+  TextureRef MaterialRequest::TextureRefs::*outRef = nullptr;
+};
+
+constexpr std::array<MaterialTextureResolveSpec, kMaterialTextureSlotCount>
+    kMaterialTextureResolveSpecs{{
+        {"baseColor", &MaterialRequest::TextureRefs::baseColor,
+         &MaterialTextureHandles::baseColor},
+        {"metallicRoughness", &MaterialRequest::TextureRefs::metallicRoughness,
+         &MaterialTextureHandles::metallicRoughness},
+        {"normal", &MaterialRequest::TextureRefs::normal,
+         &MaterialTextureHandles::normal},
+        {"occlusion", &MaterialRequest::TextureRefs::occlusion,
+         &MaterialTextureHandles::occlusion},
+        {"emissive", &MaterialRequest::TextureRefs::emissive,
+         &MaterialTextureHandles::emissive},
+        {"clearcoat", &MaterialRequest::TextureRefs::clearcoat,
+         &MaterialTextureHandles::clearcoat},
+        {"clearcoatRoughness", &MaterialRequest::TextureRefs::clearcoatRoughness,
+         &MaterialTextureHandles::clearcoatRoughness},
+        {"clearcoatNormal", &MaterialRequest::TextureRefs::clearcoatNormal,
+         &MaterialTextureHandles::clearcoatNormal},
+        {"sheenColor", &MaterialRequest::TextureRefs::sheenColor,
+         &MaterialTextureHandles::sheenColor},
+        {"sheenRoughness", &MaterialRequest::TextureRefs::sheenRoughness,
+         &MaterialTextureHandles::sheenRoughness},
+        {"transmission", &MaterialRequest::TextureRefs::transmission,
+         &MaterialTextureHandles::transmission},
+        {"thickness", &MaterialRequest::TextureRefs::thickness,
+         &MaterialTextureHandles::thickness},
+    }};
+
+constexpr std::array<ImportedTextureAcquireSpec, kMaterialTextureSlotCount>
+    kImportedTextureAcquireSpecs{{
+        {"baseColor", "_base_color_", true, &MaterialData::baseColor,
+         &MaterialRequest::TextureRefs::baseColor},
+        {"metal/rough", "_metal_rough_", false,
+         &MaterialData::metallicRoughness,
+         &MaterialRequest::TextureRefs::metallicRoughness},
+        {"normal", "_normal_", false, &MaterialData::normal,
+         &MaterialRequest::TextureRefs::normal},
+        {"occlusion", "_occlusion_", false, &MaterialData::occlusion,
+         &MaterialRequest::TextureRefs::occlusion},
+        {"emissive", "_emissive_", true, &MaterialData::emissive,
+         &MaterialRequest::TextureRefs::emissive},
+        {"clearcoat", "_clearcoat_", false, &MaterialData::clearcoat,
+         &MaterialRequest::TextureRefs::clearcoat},
+        {"clearcoat roughness", "_clearcoat_roughness_", false,
+         &MaterialData::clearcoatRoughness,
+         &MaterialRequest::TextureRefs::clearcoatRoughness},
+        {"clearcoat normal", "_clearcoat_normal_", false,
+         &MaterialData::clearcoatNormal,
+         &MaterialRequest::TextureRefs::clearcoatNormal},
+        {"sheen color", "_sheen_color_", true, &MaterialData::sheenColor,
+         &MaterialRequest::TextureRefs::sheenColor},
+        {"sheen roughness", "_sheen_roughness_", false,
+         &MaterialData::sheenRoughness,
+         &MaterialRequest::TextureRefs::sheenRoughness},
+        {"transmission", "_transmission_", false, &MaterialData::transmission,
+         &MaterialRequest::TextureRefs::transmission},
+        {"thickness", "_thickness_", false, &MaterialData::thickness,
+         &MaterialRequest::TextureRefs::thickness},
+    }};
+
 template <typename SlotT, typename RefT>
 [[nodiscard]] bool isSlotLiveForRef(const std::pmr::vector<SlotT> &slots,
                                     RefT ref) {
@@ -55,31 +129,6 @@ template <typename SlotT, typename RefT>
     return nullptr;
   }
   return &slot;
-}
-
-template <typename Fn>
-void forEachTextureRef(const MaterialRequest::TextureRefs &refs, Fn &&fn) {
-  fn(refs.baseColor);
-  fn(refs.metallicRoughness);
-  fn(refs.normal);
-  fn(refs.occlusion);
-  fn(refs.emissive);
-  fn(refs.clearcoat);
-  fn(refs.clearcoatRoughness);
-  fn(refs.clearcoatNormal);
-  fn(refs.sheenColor);
-  fn(refs.sheenRoughness);
-}
-
-[[nodiscard]] bool hasSheenData(const MaterialDesc &desc,
-                                const MaterialRequest::TextureRefs &refs) {
-  const float sheenMax =
-      std::max(desc.sheenColorFactor.x,
-               std::max(desc.sheenColorFactor.y, desc.sheenColorFactor.z));
-  return sheenMax > 0.0f || desc.sheenRoughnessFactor > 0.0f ||
-         isValid(refs.sheenColor) || isValid(refs.sheenRoughness) ||
-         isValid(desc.textures.sheenColor) ||
-         isValid(desc.textures.sheenRoughness);
 }
 
 } // namespace
@@ -226,7 +275,8 @@ void ResourceManager::destroyMaterialSlot(uint32_t index) {
     return;
   }
 
-  forEachTextureRef(slot.record.textureRefs, [this](TextureRef textureRef) {
+  forEachMaterialTextureRef(slot.record.textureRefs,
+                            [this](TextureRef textureRef) {
     if (isValid(textureRef)) {
       release(textureRef);
     }
@@ -440,84 +490,17 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
     return Result<bool, std::string>::makeResult(true);
   };
 
-  auto baseColorResult =
-      resolveTextureSlot(request.textureRefs.baseColor,
-                         resolvedDesc.textures.baseColor, "baseColor");
-  if (baseColorResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(baseColorResult.error());
-  }
-  auto metallicRoughnessResult = resolveTextureSlot(
-      request.textureRefs.metallicRoughness,
-      resolvedDesc.textures.metallicRoughness, "metallicRoughness");
-  if (metallicRoughnessResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(
-        metallicRoughnessResult.error());
-  }
-  auto normalResult = resolveTextureSlot(
-      request.textureRefs.normal, resolvedDesc.textures.normal, "normal");
-  if (normalResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(normalResult.error());
-  }
-  auto occlusionResult =
-      resolveTextureSlot(request.textureRefs.occlusion,
-                         resolvedDesc.textures.occlusion, "occlusion");
-  if (occlusionResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(occlusionResult.error());
-  }
-  auto emissiveResult = resolveTextureSlot(
-      request.textureRefs.emissive, resolvedDesc.textures.emissive, "emissive");
-  if (emissiveResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(emissiveResult.error());
-  }
-  auto clearcoatResult =
-      resolveTextureSlot(request.textureRefs.clearcoat,
-                         resolvedDesc.textures.clearcoat, "clearcoat");
-  if (clearcoatResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(clearcoatResult.error());
-  }
-  auto clearcoatRoughnessResult = resolveTextureSlot(
-      request.textureRefs.clearcoatRoughness,
-      resolvedDesc.textures.clearcoatRoughness, "clearcoatRoughness");
-  if (clearcoatRoughnessResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(
-        clearcoatRoughnessResult.error());
-  }
-  auto clearcoatNormalResult = resolveTextureSlot(
-      request.textureRefs.clearcoatNormal,
-      resolvedDesc.textures.clearcoatNormal, "clearcoatNormal");
-  if (clearcoatNormalResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(
-        clearcoatNormalResult.error());
-  }
-  auto sheenColorResult =
-      resolveTextureSlot(request.textureRefs.sheenColor,
-                         resolvedDesc.textures.sheenColor, "sheenColor");
-  if (sheenColorResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(
-        sheenColorResult.error());
-  }
-  auto sheenRoughnessResult = resolveTextureSlot(
-      request.textureRefs.sheenRoughness, resolvedDesc.textures.sheenRoughness,
-      "sheenRoughness");
-  if (sheenRoughnessResult.hasError()) {
-    return Result<MaterialRef, std::string>::makeError(
-        sheenRoughnessResult.error());
-  }
-
-  resolvedDesc.featureMask = kMaterialFeatureMetallicRoughness;
-  if (hasSheenData(resolvedDesc, request.textureRefs)) {
-    resolvedDesc.featureMask |= kMaterialFeatureSheen;
-    if (resolvedDesc.sheenWeight <= 0.0f) {
-      resolvedDesc.sheenWeight = 1.0f;
+  for (const MaterialTextureResolveSpec &spec : kMaterialTextureResolveSpecs) {
+    auto resolveResult = resolveTextureSlot(request.textureRefs.*(spec.ref),
+                                            resolvedDesc.textures.*(spec.handle),
+                                            spec.slotName);
+    if (resolveResult.hasError()) {
+      return Result<MaterialRef, std::string>::makeError(
+          resolveResult.error());
     }
   }
-  const bool hasAnyClearcoatTexture =
-      isValid(request.textureRefs.clearcoat) ||
-      isValid(request.textureRefs.clearcoatRoughness) ||
-      isValid(request.textureRefs.clearcoatNormal);
-  if (resolvedDesc.clearcoatFactor > 0.0f && hasAnyClearcoatTexture) {
-    resolvedDesc.featureMask |= kMaterialFeatureClearcoat;
-  }
+
+  Material::finalizeDesc(resolvedDesc);
 
   const uint64_t descHash = hashMaterialDesc(resolvedDesc);
   MaterialKey key{.descHash = descHash,
@@ -556,7 +539,8 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   slot.record.debugName = request.debugName;
   slot.record.sourceIdentity = request.sourceIdentity;
 
-  forEachTextureRef(slot.record.textureRefs, [this](TextureRef textureRef) {
+  forEachMaterialTextureRef(slot.record.textureRefs,
+                            [this](TextureRef textureRef) {
     if (isValid(textureRef)) {
       retain(textureRef);
     }
@@ -575,87 +559,7 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
 MaterialDesc ResourceManager::materialDescFromImported(
     const ImportedMaterialInfo &imported,
     const MaterialTextureHandles &textures) {
-  MaterialDesc desc{};
-  desc.baseColorFactor = imported.baseColorFactor;
-  desc.emissiveFactor = imported.emissiveFactor;
-  desc.metallicFactor = imported.metallicFactor;
-  desc.roughnessFactor = imported.roughnessFactor;
-  desc.sheenColorFactor = imported.sheenColorFactor;
-  desc.sheenWeight = imported.sheenWeight;
-  desc.sheenRoughnessFactor = imported.sheenRoughnessFactor;
-  desc.clearcoatFactor = imported.clearcoatFactor;
-  desc.clearcoatRoughnessFactor = imported.clearcoatRoughnessFactor;
-  desc.clearcoatNormalScale = imported.clearcoatNormalScale;
-  desc.normalScale = imported.normalScale;
-  desc.occlusionStrength = imported.occlusionStrength;
-  desc.alphaCutoff = imported.alphaCutoff;
-  desc.doubleSided = imported.doubleSided;
-  desc.alphaMode = imported.alphaMode;
-  desc.featureMask = kMaterialFeatureMetallicRoughness;
-  const float sheenMax =
-      std::max(desc.sheenColorFactor.x,
-               std::max(desc.sheenColorFactor.y, desc.sheenColorFactor.z));
-  const bool hasAnySheenTexture = nuri::isValid(textures.sheenColor) ||
-                                  nuri::isValid(textures.sheenRoughness);
-  if (desc.sheenWeight > 0.0f || sheenMax > 0.0f ||
-      desc.sheenRoughnessFactor > 0.0f || hasAnySheenTexture) {
-    desc.featureMask |= kMaterialFeatureSheen;
-    if (desc.sheenWeight <= 0.0f) {
-      desc.sheenWeight = 1.0f;
-    }
-  }
-  const bool hasAnyClearcoatTexture =
-      nuri::isValid(textures.clearcoat) ||
-      nuri::isValid(textures.clearcoatRoughness) ||
-      nuri::isValid(textures.clearcoatNormal);
-  if (desc.clearcoatFactor > 0.0f && hasAnyClearcoatTexture) {
-    desc.featureMask |= kMaterialFeatureClearcoat;
-  }
-  desc.textures = textures;
-  desc.uvSets = MaterialTextureUvSets{
-      .baseColor = imported.baseColor.uvSet,
-      .metallicRoughness = imported.metallicRoughness.uvSet,
-      .normal = imported.normal.uvSet,
-      .occlusion = imported.occlusion.uvSet,
-      .emissive = imported.emissive.uvSet,
-      .clearcoat = imported.clearcoat.uvSet,
-      .clearcoatRoughness = imported.clearcoatRoughness.uvSet,
-      .clearcoatNormal = imported.clearcoatNormal.uvSet,
-      .sheenColor = imported.sheenColor.uvSet,
-      .sheenRoughness = imported.sheenRoughness.uvSet,
-  };
-  desc.samplers = MaterialTextureSamplers{
-      .baseColor = imported.baseColor.samplerIndex,
-      .metallicRoughness = imported.metallicRoughness.samplerIndex,
-      .normal = imported.normal.samplerIndex,
-      .occlusion = imported.occlusion.samplerIndex,
-      .emissive = imported.emissive.samplerIndex,
-      .clearcoat = imported.clearcoat.samplerIndex,
-      .clearcoatRoughness = imported.clearcoatRoughness.samplerIndex,
-      .clearcoatNormal = imported.clearcoatNormal.samplerIndex,
-      .sheenColor = imported.sheenColor.samplerIndex,
-      .sheenRoughness = imported.sheenRoughness.samplerIndex,
-  };
-  desc.transforms.slots[kMaterialTextureSlotBaseColor] =
-      imported.baseColor.transform;
-  desc.transforms.slots[kMaterialTextureSlotMetallicRoughness] =
-      imported.metallicRoughness.transform;
-  desc.transforms.slots[kMaterialTextureSlotNormal] = imported.normal.transform;
-  desc.transforms.slots[kMaterialTextureSlotOcclusion] =
-      imported.occlusion.transform;
-  desc.transforms.slots[kMaterialTextureSlotEmissive] =
-      imported.emissive.transform;
-  desc.transforms.slots[kMaterialTextureSlotClearcoat] =
-      imported.clearcoat.transform;
-  desc.transforms.slots[kMaterialTextureSlotClearcoatRoughness] =
-      imported.clearcoatRoughness.transform;
-  desc.transforms.slots[kMaterialTextureSlotClearcoatNormal] =
-      imported.clearcoatNormal.transform;
-  desc.transforms.slots[kMaterialTextureSlotSheenColor] =
-      imported.sheenColor.transform;
-  desc.transforms.slots[kMaterialTextureSlotSheenRoughness] =
-      imported.sheenRoughness.transform;
-  return desc;
+  return Material::descFromImported(imported, textures);
 }
 
 Result<ImportedMaterialBatch, std::string>
@@ -683,6 +587,8 @@ ResourceManager::acquireMaterialsFromModel(
 
   const ImportedMaterialSet &materialSet = materialInfoResult.value();
   ImportedMaterialBatch batch{};
+  const std::string canonicalModelPath =
+      canonicalizeResourcePath(request.modelPath);
 
   const auto acquireTextureRef =
       [this](const ImportedMaterialTexture &slotData, bool srgb,
@@ -714,142 +620,25 @@ ResourceManager::acquireMaterialsFromModel(
         materialSet.materials[sourceMaterialIndex];
 
     MaterialRequest::TextureRefs textureRefs{};
-
-    auto baseColorResult =
-        acquireTextureRef(imported.baseColor, true,
-                          request.debugNamePrefix + "_base_color_" +
-                              std::to_string(sourceMaterialIndex));
-    if (baseColorResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: baseColor load failed "
-          "for material %u: %s",
-          sourceMaterialIndex, baseColorResult.error().c_str());
-    } else {
-      textureRefs.baseColor = baseColorResult.value();
-    }
-
-    auto metallicRoughnessResult =
-        acquireTextureRef(imported.metallicRoughness, false,
-                          request.debugNamePrefix + "_metal_rough_" +
-                              std::to_string(sourceMaterialIndex));
-    if (metallicRoughnessResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: metal/rough load "
-          "failed for material %u: %s",
-          sourceMaterialIndex, metallicRoughnessResult.error().c_str());
-    } else {
-      textureRefs.metallicRoughness = metallicRoughnessResult.value();
-    }
-
-    auto normalResult =
-        acquireTextureRef(imported.normal, false,
-                          request.debugNamePrefix + "_normal_" +
-                              std::to_string(sourceMaterialIndex));
-    if (normalResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: normal load failed "
-          "for material %u: %s",
-          sourceMaterialIndex, normalResult.error().c_str());
-    } else {
-      textureRefs.normal = normalResult.value();
-    }
-
-    auto occlusionResult =
-        acquireTextureRef(imported.occlusion, false,
-                          request.debugNamePrefix + "_occlusion_" +
-                              std::to_string(sourceMaterialIndex));
-    if (occlusionResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: occlusion load failed "
-          "for material %u: %s",
-          sourceMaterialIndex, occlusionResult.error().c_str());
-    } else {
-      textureRefs.occlusion = occlusionResult.value();
-    }
-
-    auto emissiveResult =
-        acquireTextureRef(imported.emissive, true,
-                          request.debugNamePrefix + "_emissive_" +
-                              std::to_string(sourceMaterialIndex));
-    if (emissiveResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: emissive load failed "
-          "for material %u: %s",
-          sourceMaterialIndex, emissiveResult.error().c_str());
-    } else {
-      textureRefs.emissive = emissiveResult.value();
-    }
-
-    auto clearcoatResult =
-        acquireTextureRef(imported.clearcoat, false,
-                          request.debugNamePrefix + "_clearcoat_" +
-                              std::to_string(sourceMaterialIndex));
-    if (clearcoatResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: clearcoat load failed "
-          "for material %u: %s",
-          sourceMaterialIndex, clearcoatResult.error().c_str());
-    } else {
-      textureRefs.clearcoat = clearcoatResult.value();
-    }
-
-    auto clearcoatRoughnessResult =
-        acquireTextureRef(imported.clearcoatRoughness, false,
-                          request.debugNamePrefix + "_clearcoat_roughness_" +
-                              std::to_string(sourceMaterialIndex));
-    if (clearcoatRoughnessResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: clearcoat roughness "
-          "load failed for material %u: %s",
-          sourceMaterialIndex, clearcoatRoughnessResult.error().c_str());
-    } else {
-      textureRefs.clearcoatRoughness = clearcoatRoughnessResult.value();
-    }
-
-    auto clearcoatNormalResult =
-        acquireTextureRef(imported.clearcoatNormal, false,
-                          request.debugNamePrefix + "_clearcoat_normal_" +
-                              std::to_string(sourceMaterialIndex));
-    if (clearcoatNormalResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: clearcoat normal load "
-          "failed for material %u: %s",
-          sourceMaterialIndex, clearcoatNormalResult.error().c_str());
-    } else {
-      textureRefs.clearcoatNormal = clearcoatNormalResult.value();
-    }
-
-    auto sheenColorResult =
-        acquireTextureRef(imported.sheenColor, true,
-                          request.debugNamePrefix + "_sheen_color_" +
-                              std::to_string(sourceMaterialIndex));
-    if (sheenColorResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: sheen color load "
-          "failed for material %u: %s",
-          sourceMaterialIndex, sheenColorResult.error().c_str());
-    } else {
-      textureRefs.sheenColor = sheenColorResult.value();
-    }
-
-    auto sheenRoughnessResult =
-        acquireTextureRef(imported.sheenRoughness, false,
-                          request.debugNamePrefix + "_sheen_roughness_" +
-                              std::to_string(sourceMaterialIndex));
-    if (sheenRoughnessResult.hasError()) {
-      NURI_LOG_WARNING(
-          "ResourceManager::acquireMaterialsFromModel: sheen roughness load "
-          "failed for material %u: %s",
-          sourceMaterialIndex, sheenRoughnessResult.error().c_str());
-    } else {
-      textureRefs.sheenRoughness = sheenRoughnessResult.value();
+    for (const ImportedTextureAcquireSpec &spec : kImportedTextureAcquireSpecs) {
+      auto textureResult = acquireTextureRef(
+          imported.*(spec.slot), spec.srgb,
+          request.debugNamePrefix + spec.debugSuffix +
+              std::to_string(sourceMaterialIndex));
+      if (textureResult.hasError()) {
+        NURI_LOG_WARNING(
+            "ResourceManager::acquireMaterialsFromModel: %s load failed for "
+            "material %u: %s",
+            spec.logName, sourceMaterialIndex, textureResult.error().c_str());
+        continue;
+      }
+      textureRefs.*(spec.outRef) = textureResult.value();
     }
 
     const MaterialTextureHandles emptyHandles{};
     const MaterialDesc desc = materialDescFromImported(imported, emptyHandles);
     const std::string sourceIdentity =
-        canonicalizeResourcePath(request.modelPath) + "#" +
-        std::to_string(sourceMaterialIndex);
+        canonicalModelPath + "#" + std::to_string(sourceMaterialIndex);
     const std::string debugName =
         imported.name.empty() ? request.debugNamePrefix + "_material_" +
                                     std::to_string(sourceMaterialIndex)
@@ -861,7 +650,7 @@ ResourceManager::acquireMaterialsFromModel(
         .debugName = debugName,
         .sourceIdentity = sourceIdentity,
     });
-    forEachTextureRef(textureRefs, [this](TextureRef textureRef) {
+    forEachMaterialTextureRef(textureRefs, [this](TextureRef textureRef) {
       if (isValid(textureRef)) {
         release(textureRef);
       }

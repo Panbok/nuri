@@ -7,6 +7,47 @@
 namespace nuri {
 namespace {
 
+struct ImportedTextureMapping {
+  uint32_t slotIndex = 0u;
+  MaterialTextureSlotData MaterialData::*slot = nullptr;
+  uint32_t MaterialTextureUvSets::*uvSet = nullptr;
+  uint32_t MaterialTextureSamplers::*sampler = nullptr;
+};
+
+constexpr std::array<ImportedTextureMapping, kMaterialTextureSlotCount>
+    kImportedTextureMappings{{
+        {kMaterialTextureSlotBaseColor, &MaterialData::baseColor,
+         &MaterialTextureUvSets::baseColor, &MaterialTextureSamplers::baseColor},
+        {kMaterialTextureSlotMetallicRoughness, &MaterialData::metallicRoughness,
+         &MaterialTextureUvSets::metallicRoughness,
+         &MaterialTextureSamplers::metallicRoughness},
+        {kMaterialTextureSlotNormal, &MaterialData::normal,
+         &MaterialTextureUvSets::normal, &MaterialTextureSamplers::normal},
+        {kMaterialTextureSlotOcclusion, &MaterialData::occlusion,
+         &MaterialTextureUvSets::occlusion, &MaterialTextureSamplers::occlusion},
+        {kMaterialTextureSlotEmissive, &MaterialData::emissive,
+         &MaterialTextureUvSets::emissive, &MaterialTextureSamplers::emissive},
+        {kMaterialTextureSlotClearcoat, &MaterialData::clearcoat,
+         &MaterialTextureUvSets::clearcoat, &MaterialTextureSamplers::clearcoat},
+        {kMaterialTextureSlotClearcoatRoughness,
+         &MaterialData::clearcoatRoughness,
+         &MaterialTextureUvSets::clearcoatRoughness,
+         &MaterialTextureSamplers::clearcoatRoughness},
+        {kMaterialTextureSlotClearcoatNormal, &MaterialData::clearcoatNormal,
+         &MaterialTextureUvSets::clearcoatNormal,
+         &MaterialTextureSamplers::clearcoatNormal},
+        {kMaterialTextureSlotSheenColor, &MaterialData::sheenColor,
+         &MaterialTextureUvSets::sheenColor, &MaterialTextureSamplers::sheenColor},
+        {kMaterialTextureSlotSheenRoughness, &MaterialData::sheenRoughness,
+         &MaterialTextureUvSets::sheenRoughness,
+         &MaterialTextureSamplers::sheenRoughness},
+        {kMaterialTextureSlotTransmission, &MaterialData::transmission,
+         &MaterialTextureUvSets::transmission,
+         &MaterialTextureSamplers::transmission},
+        {kMaterialTextureSlotThickness, &MaterialData::thickness,
+         &MaterialTextureUvSets::thickness, &MaterialTextureSamplers::thickness},
+    }};
+
 [[nodiscard]] bool hasSheenData(const MaterialDesc &desc) {
   const float sheenMax =
       std::max(desc.sheenColorFactor.x,
@@ -14,6 +55,37 @@ namespace {
   return sheenMax > 0.0f || desc.sheenRoughnessFactor > 0.0f ||
          nuri::isValid(desc.textures.sheenColor) ||
          nuri::isValid(desc.textures.sheenRoughness);
+}
+
+[[nodiscard]] bool hasClearcoatData(const MaterialDesc &desc) {
+  return desc.clearcoatFactor > 0.0f ||
+         nuri::isValid(desc.textures.clearcoat) ||
+         nuri::isValid(desc.textures.clearcoatRoughness) ||
+         nuri::isValid(desc.textures.clearcoatNormal);
+}
+
+[[nodiscard]] bool hasTransmissionData(const MaterialDesc &desc) {
+  return desc.transmissionFactor > 0.0f ||
+         nuri::isValid(desc.textures.transmission);
+}
+
+[[nodiscard]] bool hasVolumeData(const MaterialDesc &desc) {
+  const bool hasAttenuationColor =
+      desc.attenuationColor.x != 1.0f || desc.attenuationColor.y != 1.0f ||
+      desc.attenuationColor.z != 1.0f;
+  return desc.thicknessFactor > 0.0f || desc.attenuationDistance > 0.0f ||
+         hasAttenuationColor ||
+         nuri::isValid(desc.textures.thickness);
+}
+
+void copyImportedTextureMetadata(MaterialDesc &desc,
+                                 const MaterialData &materialData) {
+  for (const ImportedTextureMapping &mapping : kImportedTextureMappings) {
+    const MaterialTextureSlotData &slot = materialData.*(mapping.slot);
+    desc.uvSets.*(mapping.uvSet) = slot.uvSet;
+    desc.samplers.*(mapping.sampler) = slot.samplerIndex;
+    desc.transforms.slots[mapping.slotIndex] = slot.transform;
+  }
 }
 
 Result<uint32_t, std::string> resolveBindlessIndex(GPUDevice &gpu,
@@ -48,6 +120,12 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
   const float clearcoat = std::clamp(desc.clearcoatFactor, 0.0f, 1.0f);
   const float clearcoatRoughness =
       std::clamp(desc.clearcoatRoughnessFactor, 0.0f, 1.0f);
+  const float transmission = std::clamp(desc.transmissionFactor, 0.0f, 1.0f);
+  const float thickness = std::max(desc.thicknessFactor, 0.0f);
+  const float ior = std::max(desc.ior, 1.0f);
+  const glm::vec3 attenuationColor =
+      glm::clamp(desc.attenuationColor, 0.0f, 1.0f);
+  const float attenuationDistance = std::max(desc.attenuationDistance, 0.0f);
   const uint32_t featureMask = desc.featureMask;
 
   MaterialGpuData gpuData{};
@@ -60,6 +138,10 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
       glm::vec4(desc.sheenColorFactor, sheenWeight);
   gpuData.sheenRoughnessClearcoatFactors = glm::vec4(
       sheenRoughness, clearcoat, clearcoatRoughness, desc.clearcoatNormalScale);
+  gpuData.transmissionThicknessIorPadding =
+      glm::vec4(transmission, thickness, ior, 0.0f);
+  gpuData.attenuationColorDistance =
+      glm::vec4(attenuationColor, attenuationDistance);
 
   auto baseColorIdx =
       resolveBindlessIndex(gpu, desc.textures.baseColor, "baseColor");
@@ -118,6 +200,18 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
     return Result<MaterialGpuData, std::string>::makeError(
         sheenRoughnessIdx.error());
   }
+  auto transmissionIdx =
+      resolveBindlessIndex(gpu, desc.textures.transmission, "transmission");
+  if (transmissionIdx.hasError()) {
+    return Result<MaterialGpuData, std::string>::makeError(
+        transmissionIdx.error());
+  }
+  auto thicknessIdx =
+      resolveBindlessIndex(gpu, desc.textures.thickness, "thickness");
+  if (thicknessIdx.hasError()) {
+    return Result<MaterialGpuData, std::string>::makeError(
+        thicknessIdx.error());
+  }
 
   gpuData.textureIndices0 =
       glm::uvec4(baseColorIdx.value(), metallicRoughnessIdx.value(),
@@ -127,7 +221,7 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
                  clearcoatRoughnessIdx.value(), clearcoatNormalIdx.value());
   gpuData.textureIndices2 =
       glm::uvec4(sheenColorIdx.value(), sheenRoughnessIdx.value(),
-                 kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex);
+                 transmissionIdx.value(), thicknessIdx.value());
   gpuData.textureUvSets0 = glm::uvec4(clampUvSet(desc.uvSets.baseColor),
                                       clampUvSet(desc.uvSets.metallicRoughness),
                                       clampUvSet(desc.uvSets.normal),
@@ -138,7 +232,9 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
       clampUvSet(desc.uvSets.clearcoatNormal));
   gpuData.textureUvSets2 =
       glm::uvec4(clampUvSet(desc.uvSets.sheenColor),
-                 clampUvSet(desc.uvSets.sheenRoughness), 0u, 0u);
+                 clampUvSet(desc.uvSets.sheenRoughness),
+                 clampUvSet(desc.uvSets.transmission),
+                 clampUvSet(desc.uvSets.thickness));
   gpuData.textureSamplerIndices0 =
       glm::uvec4(desc.samplers.baseColor, desc.samplers.metallicRoughness,
                  desc.samplers.normal, desc.samplers.occlusion);
@@ -146,7 +242,8 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
       desc.samplers.emissive, desc.samplers.clearcoat,
       desc.samplers.clearcoatRoughness, desc.samplers.clearcoatNormal);
   gpuData.textureSamplerIndices2 = glm::uvec4(
-      desc.samplers.sheenColor, desc.samplers.sheenRoughness, 0u, 0u);
+      desc.samplers.sheenColor, desc.samplers.sheenRoughness,
+      desc.samplers.transmission, desc.samplers.thickness);
   for (uint32_t slotIndex = 0; slotIndex < kMaterialTextureSlotCount;
        ++slotIndex) {
     const MaterialTextureTransformData &transform =
@@ -179,11 +276,8 @@ Material::create(GPUDevice &gpu, const MaterialDesc &desc,
           new Material(desc, gpuDataResult.value(), std::string(debugName))));
 }
 
-Result<std::unique_ptr<Material>, std::string>
-Material::createFromImported(GPUDevice &gpu, const MaterialData &materialData,
-                             const MaterialTextureHandles &textures,
-                             std::string_view debugName) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+MaterialDesc Material::descFromImported(const MaterialData &materialData,
+                                        const MaterialTextureHandles &textures) {
   MaterialDesc desc{};
   desc.baseColorFactor = materialData.baseColorFactor;
   desc.emissiveFactor = materialData.emissiveFactor;
@@ -195,12 +289,23 @@ Material::createFromImported(GPUDevice &gpu, const MaterialData &materialData,
   desc.clearcoatFactor = materialData.clearcoatFactor;
   desc.clearcoatRoughnessFactor = materialData.clearcoatRoughnessFactor;
   desc.clearcoatNormalScale = materialData.clearcoatNormalScale;
+  desc.transmissionFactor = materialData.transmissionFactor;
+  desc.thicknessFactor = materialData.thicknessFactor;
+  desc.attenuationColor = materialData.attenuationColor;
+  desc.attenuationDistance = materialData.attenuationDistance;
+  desc.ior = materialData.ior;
   desc.normalScale = materialData.normalScale;
   desc.occlusionStrength = materialData.occlusionStrength;
   desc.alphaCutoff = materialData.alphaCutoff;
   desc.doubleSided = materialData.doubleSided;
   desc.alphaMode = materialData.alphaMode;
   desc.textures = textures;
+  copyImportedTextureMetadata(desc, materialData);
+  finalizeDesc(desc);
+  return desc;
+}
+
+void Material::finalizeDesc(MaterialDesc &desc) {
   desc.featureMask = kMaterialFeatureMetallicRoughness;
   if (hasSheenData(desc)) {
     desc.featureMask |= kMaterialFeatureSheen;
@@ -208,56 +313,23 @@ Material::createFromImported(GPUDevice &gpu, const MaterialData &materialData,
       desc.sheenWeight = 1.0f;
     }
   }
-  if (desc.clearcoatFactor > 0.0f &&
-      (nuri::isValid(textures.clearcoat) ||
-       nuri::isValid(textures.clearcoatRoughness) ||
-       nuri::isValid(textures.clearcoatNormal))) {
+  if (hasClearcoatData(desc)) {
     desc.featureMask |= kMaterialFeatureClearcoat;
   }
-  desc.uvSets = MaterialTextureUvSets{
-      .baseColor = materialData.baseColor.uvSet,
-      .metallicRoughness = materialData.metallicRoughness.uvSet,
-      .normal = materialData.normal.uvSet,
-      .occlusion = materialData.occlusion.uvSet,
-      .emissive = materialData.emissive.uvSet,
-      .clearcoat = materialData.clearcoat.uvSet,
-      .clearcoatRoughness = materialData.clearcoatRoughness.uvSet,
-      .clearcoatNormal = materialData.clearcoatNormal.uvSet,
-      .sheenColor = materialData.sheenColor.uvSet,
-      .sheenRoughness = materialData.sheenRoughness.uvSet,
-  };
-  desc.samplers = MaterialTextureSamplers{
-      .baseColor = materialData.baseColor.samplerIndex,
-      .metallicRoughness = materialData.metallicRoughness.samplerIndex,
-      .normal = materialData.normal.samplerIndex,
-      .occlusion = materialData.occlusion.samplerIndex,
-      .emissive = materialData.emissive.samplerIndex,
-      .clearcoat = materialData.clearcoat.samplerIndex,
-      .clearcoatRoughness = materialData.clearcoatRoughness.samplerIndex,
-      .clearcoatNormal = materialData.clearcoatNormal.samplerIndex,
-      .sheenColor = materialData.sheenColor.samplerIndex,
-      .sheenRoughness = materialData.sheenRoughness.samplerIndex,
-  };
-  desc.transforms.slots[kMaterialTextureSlotBaseColor] =
-      materialData.baseColor.transform;
-  desc.transforms.slots[kMaterialTextureSlotMetallicRoughness] =
-      materialData.metallicRoughness.transform;
-  desc.transforms.slots[kMaterialTextureSlotNormal] =
-      materialData.normal.transform;
-  desc.transforms.slots[kMaterialTextureSlotOcclusion] =
-      materialData.occlusion.transform;
-  desc.transforms.slots[kMaterialTextureSlotEmissive] =
-      materialData.emissive.transform;
-  desc.transforms.slots[kMaterialTextureSlotClearcoat] =
-      materialData.clearcoat.transform;
-  desc.transforms.slots[kMaterialTextureSlotClearcoatRoughness] =
-      materialData.clearcoatRoughness.transform;
-  desc.transforms.slots[kMaterialTextureSlotClearcoatNormal] =
-      materialData.clearcoatNormal.transform;
-  desc.transforms.slots[kMaterialTextureSlotSheenColor] =
-      materialData.sheenColor.transform;
-  desc.transforms.slots[kMaterialTextureSlotSheenRoughness] =
-      materialData.sheenRoughness.transform;
+  if (hasTransmissionData(desc)) {
+    desc.featureMask |= kMaterialFeatureTransmission;
+  }
+  if (hasVolumeData(desc)) {
+    desc.featureMask |= kMaterialFeatureVolume;
+  }
+}
+
+Result<std::unique_ptr<Material>, std::string>
+Material::createFromImported(GPUDevice &gpu, const MaterialData &materialData,
+                             const MaterialTextureHandles &textures,
+                             std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  MaterialDesc desc = descFromImported(materialData, textures);
 
   const std::string_view name =
       debugName.empty() ? std::string_view(materialData.name) : debugName;

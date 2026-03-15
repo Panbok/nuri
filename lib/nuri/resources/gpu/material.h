@@ -27,6 +27,8 @@ enum MaterialFeatureBits : uint32_t {
   kMaterialFeatureMetallicRoughness = 1u << 0u,
   kMaterialFeatureSheen = 1u << 1u,
   kMaterialFeatureClearcoat = 1u << 2u,
+  kMaterialFeatureTransmission = 1u << 3u,
+  kMaterialFeatureVolume = 1u << 4u,
 };
 
 enum MaterialTextureSlot : uint32_t {
@@ -40,7 +42,9 @@ enum MaterialTextureSlot : uint32_t {
   kMaterialTextureSlotClearcoatNormal = 7u,
   kMaterialTextureSlotSheenColor = 8u,
   kMaterialTextureSlotSheenRoughness = 9u,
-  kMaterialTextureSlotCount = 10u,
+  kMaterialTextureSlotTransmission = 10u,
+  kMaterialTextureSlotThickness = 11u,
+  kMaterialTextureSlotCount = 12u,
 };
 
 struct MaterialTextureHandles {
@@ -54,6 +58,8 @@ struct MaterialTextureHandles {
   TextureHandle clearcoatNormal{};
   TextureHandle sheenColor{};
   TextureHandle sheenRoughness{};
+  TextureHandle transmission{};
+  TextureHandle thickness{};
 };
 
 struct MaterialTextureUvSets {
@@ -67,6 +73,8 @@ struct MaterialTextureUvSets {
   uint32_t clearcoatNormal = 0;
   uint32_t sheenColor = 0;
   uint32_t sheenRoughness = 0;
+  uint32_t transmission = 0;
+  uint32_t thickness = 0;
 };
 
 struct MaterialTextureSamplers {
@@ -80,6 +88,8 @@ struct MaterialTextureSamplers {
   uint32_t clearcoatNormal = 0;
   uint32_t sheenColor = 0;
   uint32_t sheenRoughness = 0;
+  uint32_t transmission = 0;
+  uint32_t thickness = 0;
 };
 
 struct MaterialTextureTransforms {
@@ -97,6 +107,11 @@ struct MaterialDesc {
   float clearcoatFactor = 0.0f;
   float clearcoatRoughnessFactor = 0.0f;
   float clearcoatNormalScale = 1.0f;
+  float transmissionFactor = 0.0f;
+  float thicknessFactor = 0.0f;
+  glm::vec3 attenuationColor{1.0f, 1.0f, 1.0f};
+  float attenuationDistance = 0.0f;
+  float ior = 1.5f;
   float normalScale = 1.0f;
   float occlusionStrength = 1.0f;
   float alphaCutoff = 0.5f;
@@ -118,6 +133,12 @@ struct alignas(16) MaterialGpuData {
   glm::vec4 sheenRoughnessClearcoatFactors{
       0.0f, 0.0f, 0.0f, 1.0f}; // (sheenRoughness, clearcoatFactor,
                                // clearcoatRoughness, clearcoatNormalScale)
+  glm::vec4 transmissionThicknessIorPadding{
+      0.0f, 0.0f, 1.5f,
+      0.0f}; // (transmissionFactor, thicknessFactor, ior, reserved)
+  glm::vec4 attenuationColorDistance{
+      1.0f, 1.0f, 1.0f,
+      0.0f}; // (attenuationColor.rgb, attenuationDistance)
   glm::uvec4 textureIndices0{
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
       kInvalidTextureBindlessIndex,
@@ -130,9 +151,8 @@ struct alignas(16) MaterialGpuData {
                                      // clearcoatRoughness, clearcoatNormal)
   glm::uvec4 textureIndices2{
       kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
-      kInvalidTextureBindlessIndex,
-      kInvalidTextureBindlessIndex}; // (sheenColor, sheenRoughness, unused,
-                                     // unused)
+      kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex};
+  // (sheenColor, sheenRoughness, transmission, thickness)
   glm::uvec4 textureUvSets0{
       0u, 0u, 0u,
       0u}; // UV sets for (baseColor, metallicRoughness, normal, occlusion)
@@ -141,7 +161,8 @@ struct alignas(16) MaterialGpuData {
                                  // clearcoatRoughness, clearcoatNormal)
   glm::uvec4 textureUvSets2{
       0u, 0u, 0u,
-      0u}; // UV sets for (sheenColor, sheenRoughness, unused, unused)
+      0u}; // UV sets for (sheenColor, sheenRoughness, transmission,
+           // thickness)
   glm::uvec4 textureSamplerIndices0{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices1{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices2{0u, 0u, 0u, 0u};
@@ -164,7 +185,7 @@ struct alignas(16) MaterialGpuData {
                            0u}; // Kept as a full std430 slot: (alphaMode,
                                 // doubleSided, featureMask, reserved)
 };
-inline constexpr size_t kMaterialGpuDataStd430Size = 35u * sizeof(glm::vec4);
+inline constexpr size_t kMaterialGpuDataStd430Size = 41u * sizeof(glm::vec4);
 static_assert(sizeof(MaterialGpuData) == kMaterialGpuDataStd430Size,
               "MaterialGpuData size mismatch - update shader struct");
 static_assert(sizeof(MaterialGpuData) % 16u == 0u,
@@ -182,6 +203,11 @@ public:
   [[nodiscard]] static Result<std::unique_ptr<Material>, std::string>
   create(GPUDevice &gpu, const MaterialDesc &desc,
          std::string_view debugName = {});
+
+  [[nodiscard]] static MaterialDesc
+  descFromImported(const MaterialData &materialData,
+                   const MaterialTextureHandles &textures = {});
+  static void finalizeDesc(MaterialDesc &desc);
 
   [[nodiscard]] static Result<std::unique_ptr<Material>, std::string>
   createFromImported(GPUDevice &gpu, const MaterialData &materialData,

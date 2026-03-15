@@ -26,6 +26,7 @@ struct Submesh {
   uint32_t indexCount = 0;
   uint32_t materialIndex = 0;
   BoundingBox bounds{glm::vec3(0.0f), glm::vec3(0.0f)};
+  glm::vec3 authoredScale{1.0f};
   uint32_t lodCount = 1;
   std::array<SubmeshLod, kMaxLodCount> lods{};
 };

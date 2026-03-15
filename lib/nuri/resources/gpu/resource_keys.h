@@ -148,6 +148,13 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mixFloat(desc.clearcoatFactor);
   mixFloat(desc.clearcoatRoughnessFactor);
   mixFloat(desc.clearcoatNormalScale);
+  mixFloat(desc.transmissionFactor);
+  mixFloat(desc.thicknessFactor);
+  mixFloat(desc.attenuationColor.x);
+  mixFloat(desc.attenuationColor.y);
+  mixFloat(desc.attenuationColor.z);
+  mixFloat(desc.attenuationDistance);
+  mixFloat(desc.ior);
   mixFloat(desc.normalScale);
   mixFloat(desc.occlusionStrength);
   mixFloat(desc.alphaCutoff);
@@ -176,6 +183,10 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.textures.sheenColor.generation);
   mix(desc.textures.sheenRoughness.index);
   mix(desc.textures.sheenRoughness.generation);
+  mix(desc.textures.transmission.index);
+  mix(desc.textures.transmission.generation);
+  mix(desc.textures.thickness.index);
+  mix(desc.textures.thickness.generation);
 
   mix(desc.uvSets.baseColor);
   mix(desc.uvSets.metallicRoughness);
@@ -187,6 +198,8 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.uvSets.clearcoatNormal);
   mix(desc.uvSets.sheenColor);
   mix(desc.uvSets.sheenRoughness);
+  mix(desc.uvSets.transmission);
+  mix(desc.uvSets.thickness);
 
   mix(desc.samplers.baseColor);
   mix(desc.samplers.metallicRoughness);
@@ -198,6 +211,8 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.samplers.clearcoatNormal);
   mix(desc.samplers.sheenColor);
   mix(desc.samplers.sheenRoughness);
+  mix(desc.samplers.transmission);
+  mix(desc.samplers.thickness);
 
   for (uint32_t slotIndex = 0; slotIndex < kMaterialTextureSlotCount;
        ++slotIndex) {

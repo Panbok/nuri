@@ -41,6 +41,11 @@ struct MaterialData {
   float clearcoatFactor = 0.0f;
   float clearcoatRoughnessFactor = 0.0f;
   float clearcoatNormalScale = 1.0f;
+  float transmissionFactor = 0.0f;
+  float thicknessFactor = 0.0f;
+  glm::vec3 attenuationColor{1.0f};
+  float attenuationDistance = 0.0f;
+  float ior = 1.5f;
   float normalScale = 1.0f;
   float occlusionStrength = 1.0f;
   float alphaCutoff = 0.5f;
@@ -56,6 +61,8 @@ struct MaterialData {
   MaterialTextureSlotData clearcoatNormal{};
   MaterialTextureSlotData sheenColor{};
   MaterialTextureSlotData sheenRoughness{};
+  MaterialTextureSlotData transmission{};
+  MaterialTextureSlotData thickness{};
 };
 
 struct MaterialDataSet {
