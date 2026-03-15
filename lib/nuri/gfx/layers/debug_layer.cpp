@@ -22,6 +22,15 @@ constexpr std::string_view kGridDrawLabel = "DebugGrid Draw";
   return a.index == b.index && a.generation == b.generation;
 }
 
+[[nodiscard]] TextureHandle resolvePublishedTexture(
+    const FrameChannelRegistry &channels, std::string_view key) {
+  if (const TextureHandle *published = channels.tryGet<TextureHandle>(key);
+      published != nullptr && nuri::isValid(*published)) {
+    return *published;
+  }
+  return {};
+}
+
 } // namespace
 
 DebugLayer::DebugLayer(GPUDevice &gpu, DebugLayerConfig config,
@@ -218,12 +227,9 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
   }
 
   DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
-  TextureHandle colorTexture{};
-  if (const TextureHandle *publishedFrameColor =
-          frame.channels.tryGet<TextureHandle>(kFrameChannelFrameColorTexture);
-      publishedFrameColor != nullptr && nuri::isValid(*publishedFrameColor)) {
-    colorTexture = *publishedFrameColor;
-  } else {
+  TextureHandle colorTexture =
+      resolvePublishedTexture(frame.channels, kFrameChannelFrameColorTexture);
+  if (!nuri::isValid(colorTexture)) {
     colorTexture = pass.colorTextureHandle;
   }
   if (nuri::isValid(colorTexture)) {
@@ -282,12 +288,8 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
       publishedSceneDepth != nullptr) {
     sceneDepthGraphTexture = *publishedSceneDepth;
   }
-  TextureHandle frameColorTexture{};
-  if (const TextureHandle *publishedFrameColor =
-          frame.channels.tryGet<TextureHandle>(kFrameChannelFrameColorTexture);
-      publishedFrameColor != nullptr && nuri::isValid(*publishedFrameColor)) {
-    frameColorTexture = *publishedFrameColor;
-  }
+  TextureHandle frameColorTexture =
+      resolvePublishedTexture(frame.channels, kFrameChannelFrameColorTexture);
 
   if (frame.settings->debug.grid) {
     const bool hasPriorColorPass =

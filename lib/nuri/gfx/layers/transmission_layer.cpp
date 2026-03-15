@@ -47,11 +47,12 @@ void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
   if (!nuri::isValid(handle)) {
     return;
   }
-  for (const TextureHandle existing : handles) {
-    if (existing.index == handle.index &&
-        existing.generation == handle.generation) {
-      return;
-    }
+  if (std::find_if(handles.begin(), handles.end(),
+                   [handle](const TextureHandle existing) {
+                     return existing.index == handle.index &&
+                            existing.generation == handle.generation;
+                   }) != handles.end()) {
+    return;
   }
   handles.push_back(handle);
 }
@@ -61,11 +62,12 @@ void appendUniqueBuffer(std::pmr::vector<BufferHandle> &handles,
   if (!nuri::isValid(handle)) {
     return;
   }
-  for (const BufferHandle existing : handles) {
-    if (existing.index == handle.index &&
-        existing.generation == handle.generation) {
-      return;
-    }
+  if (std::find_if(handles.begin(), handles.end(),
+                   [handle](const BufferHandle existing) {
+                     return existing.index == handle.index &&
+                            existing.generation == handle.generation;
+                   }) != handles.end()) {
+    return;
   }
   handles.push_back(handle);
 }
@@ -313,14 +315,16 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   const bool needsGeometryRebuild =
       geometryDirty && !meshDrawTemplates_.empty();
   if (topologyDirty || materialDirty || needsGeometryRebuild) {
-    Result<bool, std::string> rebuildResult =
-        Result<bool, std::string>::makeResult(true);
-    NURI_PROFILER_ZONE("TransmissionLayer.cache_rebuild",
-                       NURI_PROFILER_COLOR_CMD_DRAW);
-    rebuildResult = rebuildSceneCache(
-        *frame.scene, *frame.resources,
-        static_cast<uint32_t>(materialSnapshot.gpuData.size()));
-    NURI_PROFILER_ZONE_END();
+    Result<bool, std::string> rebuildResult = [&]() -> Result<bool, std::string> {
+      std::optional<Result<bool, std::string>> result;
+      NURI_PROFILER_ZONE("TransmissionLayer.cache_rebuild",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      result.emplace(rebuildSceneCache(
+          *frame.scene, *frame.resources,
+          static_cast<uint32_t>(materialSnapshot.gpuData.size())));
+      NURI_PROFILER_ZONE_END();
+      return std::move(*result);
+    }();
     if (rebuildResult.hasError()) {
       return rebuildResult;
     }
@@ -336,12 +340,14 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     NURI_PROFILER_ZONE_END();
   }
   if (materialDirty || materialTextureAccessHandles_.empty()) {
-    Result<bool, std::string> cacheResult =
-        Result<bool, std::string>::makeResult(true);
-    NURI_PROFILER_ZONE("TransmissionLayer.material_texture_cache",
-                       NURI_PROFILER_COLOR_CMD_DRAW);
-    cacheResult = rebuildMaterialTextureAccessCache(*frame.resources);
-    NURI_PROFILER_ZONE_END();
+    Result<bool, std::string> cacheResult = [&]() -> Result<bool, std::string> {
+      std::optional<Result<bool, std::string>> result;
+      NURI_PROFILER_ZONE("TransmissionLayer.material_texture_cache",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      result.emplace(rebuildMaterialTextureAccessCache(*frame.resources));
+      NURI_PROFILER_ZONE_END();
+      return std::move(*result);
+    }();
     if (cacheResult.hasError()) {
       return cacheResult;
     }
@@ -655,6 +661,10 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
 
   const bool copySceneColorToSwapchain =
       hasSceneColorInput && sceneColorTexId != kInvalidTextureBindlessIndex;
+  const size_t expectedCopyDrawCount =
+      static_cast<size_t>(kTransmissionSceneColorLevelCount - 1u) +
+      (copySceneColorToSwapchain ? 1u : 0u);
+  copyPushConstantsRing_.reserve(expectedCopyDrawCount);
   auto buildCopyDraw = [this](uint32_t sourceTexId, uint32_t sourceSamplerId,
                               uint32_t flags) -> DrawItem {
     copyPushConstantsRing_.push_back(CopyPushConstants{
@@ -1176,6 +1186,7 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
   }
 
   size_t invalidMaterialFallbackCount = 0u;
+  bool hasTransmissionContent = false;
   for (uint32_t renderableIndex = 0;
        renderableIndex < static_cast<uint32_t>(renderables.size());
        ++renderableIndex) {
@@ -1211,6 +1222,7 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
           !isTransmissionMaterial(*materialRecord)) {
         continue;
       }
+      hasTransmissionContent = true;
 
       uint32_t materialIndex = resources.materialTableIndex(resolvedMaterial);
       if (materialCount == 0u || materialIndex >= materialCount) {
@@ -1247,6 +1259,12 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
 
   cachedScene_ = &scene;
   cachedTopologyVersion_ = scene.topologyVersion();
+  cachedMaterialVersion_ = resources.materialSnapshot().version;
+  cachedTransmissionContentScene_ = &scene;
+  cachedTransmissionContentTopologyVersion_ = scene.topologyVersion();
+  cachedTransmissionContentMaterialVersion_ = resources.materialSnapshot().version;
+  cachedTransmissionContentValid_ = true;
+  cachedTransmissionContent_ = hasTransmissionContent;
   cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1427,41 +1445,19 @@ bool TransmissionLayer::hasTransmissionContent(
       cachedTransmissionContentMaterialVersion_ == materialSnapshot.version) {
     return cachedTransmissionContent_;
   }
-
-  const std::span<const Renderable> renderables = frame.scene->renderables();
-  bool hasTransmission = false;
-  for (const Renderable &renderable : renderables) {
-    const ModelRecord *modelRecord = frame.resources->tryGet(renderable.model);
-    if (modelRecord == nullptr || modelRecord->model == nullptr) {
-      continue;
-    }
-    const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
-    for (uint32_t submeshIndex = 0;
-         submeshIndex < static_cast<uint32_t>(submeshes.size());
-         ++submeshIndex) {
-      const MaterialRef modelMaterial =
-          modelRecord->materialForSubmesh(submeshIndex);
-      const MaterialRef resolvedMaterial =
-          nuri::isValid(modelMaterial) ? modelMaterial : renderable.material;
-      const MaterialRecord *materialRecord =
-          frame.resources->tryGet(resolvedMaterial);
-      if (materialRecord != nullptr &&
-          isTransmissionMaterial(*materialRecord)) {
-        hasTransmission = true;
-        break;
-      }
-    }
-    if (hasTransmission) {
-      break;
-    }
+  auto rebuildResult = rebuildSceneCache(
+      *frame.scene, *frame.resources,
+      static_cast<uint32_t>(materialSnapshot.gpuData.size()));
+  if (rebuildResult.hasError()) {
+    NURI_LOG_WARNING("TransmissionLayer::hasTransmissionContent: %s",
+                     rebuildResult.error().c_str());
+    return false;
   }
-
-  cachedTransmissionContentScene_ = frame.scene;
-  cachedTransmissionContentTopologyVersion_ = topologyVersion;
-  cachedTransmissionContentMaterialVersion_ = materialSnapshot.version;
-  cachedTransmissionContentValid_ = true;
-  cachedTransmissionContent_ = hasTransmission;
-  return hasTransmission;
+  return cachedTransmissionContentValid_ &&
+         cachedTransmissionContentScene_ == frame.scene &&
+         cachedTransmissionContentTopologyVersion_ == topologyVersion &&
+         cachedTransmissionContentMaterialVersion_ == materialSnapshot.version &&
+         cachedTransmissionContent_;
 }
 
 RenderPipelineHandle

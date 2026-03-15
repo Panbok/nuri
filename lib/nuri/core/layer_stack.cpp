@@ -126,6 +126,8 @@ LayerStack::buildRenderGraph(RenderFrameContext &frame,
   }
 
   {
+    Result<bool, std::string> layerBuildResult =
+        Result<bool, std::string>::makeResult(true);
     NURI_PROFILER_ZONE("LayerStack.build_layer_graphs",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     for (auto &layer : layers_) {
@@ -134,10 +136,14 @@ LayerStack::buildRenderGraph(RenderFrameContext &frame,
       }
       auto result = layer->buildRenderGraph(frame, graph);
       if (result.hasError()) {
-        return Result<bool, std::string>::makeError(result.error());
+        layerBuildResult = Result<bool, std::string>::makeError(result.error());
+        break;
       }
     }
     NURI_PROFILER_ZONE_END();
+    if (layerBuildResult.hasError()) {
+      return layerBuildResult;
+    }
   }
 
   return Result<bool, std::string>::makeResult(true);

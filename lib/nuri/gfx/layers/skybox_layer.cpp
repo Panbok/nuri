@@ -55,10 +55,10 @@ SkyboxLayer::buildRenderGraph(RenderFrameContext &frame,
   passDesc.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+  const bool *transmissionStageEnabledPtr =
+      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
   const bool transmissionStageEnabled =
-      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled) !=
-          nullptr &&
-      *frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
+      transmissionStageEnabledPtr != nullptr && *transmissionStageEnabledPtr;
   if (transmissionStageEnabled) {
     const TextureHandle *sceneColorTexture =
         frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
@@ -144,6 +144,25 @@ SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
     return Result<bool, std::string>::makeResult(false);
   }
 
+  uint32_t frameFlags = 0u;
+  uint32_t sceneColorTexId = 0u;
+  uint32_t sceneColorSamplerId = 0u;
+  const bool *transmissionStageEnabledPtr =
+      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
+  const bool transmissionStageEnabled =
+      transmissionStageEnabledPtr != nullptr && *transmissionStageEnabledPtr;
+  if (transmissionStageEnabled) {
+    if (const TextureHandle *sceneColorTexture =
+            frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
+        sceneColorTexture != nullptr && nuri::isValid(*sceneColorTexture)) {
+      sceneColorTexId = gpu_.getTextureBindlessIndex(*sceneColorTexture);
+      sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+      if (sceneColorTexId != kInvalidTextureBindlessIndex) {
+        frameFlags |= HasSceneColor;
+      }
+    }
+  }
+
   frameData_ = FrameData{
       .view = frame.camera.view,
       .proj = frame.camera.proj,
@@ -154,10 +173,10 @@ SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
       .prefilteredGgxTexId = 0,
       .prefilteredCharlieTexId = 0,
       .brdfLutTexId = 0,
-      .flags = 0,
+      .flags = frameFlags,
       .cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex(),
-      .sceneColorTexId = 0,
-      .sceneColorSamplerId = 0,
+      .sceneColorTexId = sceneColorTexId,
+      .sceneColorSamplerId = sceneColorSamplerId,
       .reserved0 = 0,
       .reserved1 = 0,
   };

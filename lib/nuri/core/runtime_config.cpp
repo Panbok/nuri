@@ -674,6 +674,7 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
           },
       .opaque =
           RuntimeOpaqueShaderConfig{
+              .shaderBasePath = shadersRoot.value(),
               .meshVertex = meshVertexPath.value(),
               .meshFragment = meshFragmentPath.value(),
               .pickFragment = pickFragmentPath.value(),

@@ -586,6 +586,23 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
   uint32_t prefilteredCharlieTexId = kInvalidTextureBindlessIndex;
   uint32_t brdfLutTexId = kInvalidTextureBindlessIndex;
   uint32_t frameFlags = 0;
+  uint32_t sceneColorTexId = kInvalidTextureBindlessIndex;
+  uint32_t sceneColorSamplerId = 0u;
+  const bool *transmissionStageEnabledPtr =
+      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
+  const bool transmissionStageEnabled =
+      transmissionStageEnabledPtr != nullptr && *transmissionStageEnabledPtr;
+  if (transmissionStageEnabled) {
+    if (const TextureHandle *sceneColorTexture =
+            frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
+        sceneColorTexture != nullptr && nuri::isValid(*sceneColorTexture)) {
+      sceneColorTexId = gpu_.getTextureBindlessIndex(*sceneColorTexture);
+      sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+      if (sceneColorTexId != kInvalidTextureBindlessIndex) {
+        frameFlags |= FrameDataFlags::HasSceneColor;
+      }
+    }
+  }
 
   if (const TextureRecord *irradiance =
           frame.resources->tryGet(environment.irradiance);
@@ -640,8 +657,8 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
       .brdfLutTexId = brdfLutTexId,
       .flags = frameFlags,
       .cubemapSamplerId = cubemapSamplerId,
-      .sceneColorTexId = 0u,
-      .sceneColorSamplerId = 0u,
+      .sceneColorTexId = sceneColorTexId,
+      .sceneColorSamplerId = sceneColorSamplerId,
       .reserved0 = 0u,
       .reserved1 = 0u,
   };
@@ -2226,10 +2243,6 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
   }
 
   const bool shouldLoadColor = settings.skybox.enabled;
-  const bool transmissionStageEnabled =
-      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled) !=
-          nullptr &&
-      *frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
   PreparedGraphPass pass{};
   pass.desc.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
                      .storeOp = StoreOp::Store,

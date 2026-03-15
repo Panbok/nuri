@@ -7,6 +7,7 @@
 #include "nuri/resources/gpu/buffer.h"
 
 #include <cstddef>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -60,28 +61,11 @@ private:
     uint32_t reserved1 = 0;
 
     [[nodiscard]] bool operator==(const FrameData &other) const noexcept {
-      for (int column = 0; column < 4; ++column) {
-        for (int row = 0; row < 4; ++row) {
-          if (view[column][row] != other.view[column][row] ||
-              proj[column][row] != other.proj[column][row]) {
-            return false;
-          }
-        }
-      }
-      return cameraPos.x == other.cameraPos.x &&
-             cameraPos.y == other.cameraPos.y &&
-             cameraPos.z == other.cameraPos.z &&
-             cameraPos.w == other.cameraPos.w &&
-             cubemapTexId == other.cubemapTexId &&
-             hasCubemap == other.hasCubemap &&
-             irradianceTexId == other.irradianceTexId &&
-             prefilteredGgxTexId == other.prefilteredGgxTexId &&
-             prefilteredCharlieTexId == other.prefilteredCharlieTexId &&
-             brdfLutTexId == other.brdfLutTexId && flags == other.flags &&
-             cubemapSamplerId == other.cubemapSamplerId &&
-             sceneColorTexId == other.sceneColorTexId &&
-             sceneColorSamplerId == other.sceneColorSamplerId &&
-             reserved0 == other.reserved0 && reserved1 == other.reserved1;
+      return std::memcmp(this, &other, sizeof(FrameData)) == 0;
+    }
+
+    [[nodiscard]] bool operator!=(const FrameData &other) const noexcept {
+      return !(*this == other);
     }
   };
   static_assert(sizeof(FrameData) == 192,
