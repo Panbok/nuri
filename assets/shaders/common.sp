@@ -12,6 +12,10 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint brdfLutTexId;
   uint flags;
   uint cubemapSamplerId;
+  uint sceneColorTexId;
+  uint sceneColorSamplerId;
+  uint reserved0; // Half-resolution scene-color pyramid level.
+  uint reserved1; // Quarter-resolution scene-color pyramid level.
 };
 
 const uint kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
@@ -20,9 +24,12 @@ const uint kFrameDataFlagHasIblSpecular = 1u << 1u;
 const uint kFrameDataFlagHasIblSheen = 1u << 2u;
 const uint kFrameDataFlagHasBrdfLut = 1u << 3u;
 const uint kFrameDataFlagOutputLinearToSrgb = 1u << 4u;
+const uint kFrameDataFlagHasSceneColor = 1u << 5u;
 const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
 const uint kMaterialFeatureSheen = 1u << 1u;
 const uint kMaterialFeatureClearcoat = 1u << 2u;
+const uint kMaterialFeatureTransmission = 1u << 3u;
+const uint kMaterialFeatureVolume = 1u << 4u;
 const uint kMaterialTextureSlotBaseColor = 0u;
 const uint kMaterialTextureSlotMetallicRoughness = 1u;
 const uint kMaterialTextureSlotNormal = 2u;
@@ -33,7 +40,9 @@ const uint kMaterialTextureSlotClearcoatRoughness = 6u;
 const uint kMaterialTextureSlotClearcoatNormal = 7u;
 const uint kMaterialTextureSlotSheenColor = 8u;
 const uint kMaterialTextureSlotSheenRoughness = 9u;
-const uint kMaterialTextureSlotCount = 10u;
+const uint kMaterialTextureSlotTransmission = 10u;
+const uint kMaterialTextureSlotThickness = 11u;
+const uint kMaterialTextureSlotCount = 12u;
 
 struct PackedVertex {
   // CPU packs each vertex into 9 x 32-bit words:
@@ -72,13 +81,16 @@ struct MaterialGpuData {
   vec4 metallicRoughnessOcclusionAlphaCutoff;
   vec4 sheenColorFactorWeight;
   vec4 sheenRoughnessClearcoatFactors; // (sheenRoughness, clearcoatFactor, clearcoatRoughness, clearcoatNormalScale)
+  vec4 transmissionThicknessIorPadding; // (transmissionFactor, thicknessFactor, ior, reserved)
+  vec4 attenuationColorDistance; // (attenuationColor.rgb, attenuationDistance)
   // Packed texture slot mapping shared by textureIndices*, textureUvSets*,
   // and textureSamplerIndices*:
   // 0=baseColor -> *0.x, 1=metallicRoughness -> *0.y,
   // 2=normal -> *0.z, 3=occlusion -> *0.w,
   // 4=emissive -> *1.x, 5=clearcoat -> *1.y,
   // 6=clearcoatRoughness -> *1.z, 7=clearcoatNormal -> *1.w,
-  // 8=sheenColor -> *2.x, 9=sheenRoughness -> *2.y.
+  // 8=sheenColor -> *2.x, 9=sheenRoughness -> *2.y,
+  // 10=transmission -> *2.z, 11=thickness -> *2.w.
   uvec4 textureIndices0;
   uvec4 textureIndices1;
   uvec4 textureIndices2;
@@ -105,6 +117,19 @@ uint getPackedMaterialSlotValue(uvec4 packed0, uvec4 packed1, uvec4 packed2,
     return packed2[int(slot - 8u)];
   }
   return defaultValue;
+}
+
+uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {
+  if (level == 0u) {
+    return frameData.sceneColorTexId;
+  }
+  if (level == 1u) {
+    return frameData.reserved0;
+  }
+  if (level == 2u) {
+    return frameData.reserved1;
+  }
+  return kInvalidTextureBindlessIndex;
 }
 
 #define GET_TEXTURE_INDEX(material, slot)                                      \
