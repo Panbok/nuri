@@ -35,6 +35,10 @@ vec3 fresnelSchlick(float cosTheta, vec3 f0) {
   return f0 + (1.0 - f0) * pow5(1.0 - saturate(cosTheta));
 }
 
+vec3 fresnelSchlick(float cosTheta, vec3 f0, vec3 f90) {
+  return f0 + (f90 - f0) * pow5(1.0 - saturate(cosTheta));
+}
+
 float distributionGGX(float ndoth, float roughness) {
   float alpha = roughness * roughness;
   float alpha2 = alpha * alpha;
@@ -137,7 +141,7 @@ vec3 computeIblDiffuse(vec3 diffuseColor, vec3 f0, vec3 f90,
          irradiance;
 }
 
-vec3 computeIblSpecular(vec3 f0, vec3 f90, float roughness, float ndotv, vec3 prefiltered,
+vec3 computeIblSpecular(vec3 f0, vec3 f90, vec3 prefiltered,
                         vec3 brdfLutSample) {
   return prefiltered * (f0 * brdfLutSample.x + f90 * brdfLutSample.y);
 }

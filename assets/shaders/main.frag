@@ -333,7 +333,8 @@ void main() {
           computeIblDiffuse(diffuseColor, f0, f90, irradiance, baseBrdfLutSample);
     } else {
       iblDiffuse =
-          diffuseColor * (1.0 - max3(fresnelSchlick(ndotv, f0))) * irradiance;
+          diffuseColor * (1.0 - max3(fresnelSchlick(ndotv, f0, f90))) *
+          irradiance;
     }
     hasIndirectLighting = true;
   }
@@ -350,8 +351,7 @@ void main() {
                                  pc.frameData.cubemapSamplerId, r, lod)
               .rgb;
       iblSpecular =
-          computeIblSpecular(f0, f90, roughness, ndotv, prefiltered,
-                             baseBrdfLutSample);
+          computeIblSpecular(f0, f90, prefiltered, baseBrdfLutSample);
     } else {
       iblSpecular =
           textureBindlessCube(pc.frameData.prefilteredGgxTexId,
@@ -397,9 +397,8 @@ void main() {
               .rgb;
       clearcoatIblSpecular =
           clearcoat *
-          computeIblSpecular(clearcoatF0, clearcoatReflectance90,
-                             clearcoatRoughness, clearcoatNdotV,
-                             prefiltered, clearcoatBrdfLutSample);
+          computeIblSpecular(clearcoatF0, clearcoatReflectance90, prefiltered,
+                             clearcoatBrdfLutSample);
     } else {
       clearcoatIblSpecular =
           clearcoat *
