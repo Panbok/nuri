@@ -21,6 +21,16 @@ float dielectricF0FromIor(float ior) {
   return ratio * ratio;
 }
 
+void computeDielectricSpecularTerms(float ior, vec3 specularColor,
+                                    float specularWeight,
+                                    out vec3 dielectricF0,
+                                    out vec3 dielectricF90) {
+  float baseF0 = dielectricF0FromIor(ior);
+  dielectricF0 = min(vec3(baseF0) * specularColor, vec3(1.0)) *
+                 specularWeight;
+  dielectricF90 = vec3(specularWeight);
+}
+
 vec3 fresnelSchlick(float cosTheta, vec3 f0) {
   return f0 + (1.0 - f0) * pow5(1.0 - saturate(cosTheta));
 }
@@ -116,26 +126,20 @@ vec3 applyNormalMap(vec3 baseNormal, vec4 worldTangent, vec3 worldPos, vec2 uv,
   return normalize(tbn * tangentNormal);
 }
 
-vec3 computeIblDiffuse(vec3 diffuseColor, vec3 f0, float roughness, float ndotv,
-                       vec3 irradiance, vec3 brdfLutSample) {
-  vec3 fr = max(vec3(1.0 - roughness), f0) - f0;
-  vec3 kS = f0 + fr * pow5(1.0 - ndotv);
-  vec3 fssEss = kS * brdfLutSample.x + brdfLutSample.y;
-
-  float ems = 1.0 - (brdfLutSample.x + brdfLutSample.y);
-  vec3 fAvg = f0 + (1.0 - f0) / 21.0;
-  vec3 fmsEms = (ems * fssEss * fAvg) /
-                max(vec3(kBrdfEpsilon), 1.0 - fAvg * ems);
-  vec3 kdIbl = diffuseColor * (1.0 - fssEss + fmsEms);
-  return (fmsEms + kdIbl) * irradiance;
+float computeFresnelMaxFromBrdf(vec3 f0, vec3 f90, vec3 brdfLutSample) {
+  return max3(f0 * brdfLutSample.x + f90 * brdfLutSample.y);
 }
 
-vec3 computeIblSpecular(vec3 f0, float roughness, float ndotv, vec3 prefiltered,
+vec3 computeIblDiffuse(vec3 diffuseColor, vec3 f0, vec3 f90,
+                       vec3 irradiance, vec3 brdfLutSample) {
+  return diffuseColor *
+         (1.0 - computeFresnelMaxFromBrdf(f0, f90, brdfLutSample)) *
+         irradiance;
+}
+
+vec3 computeIblSpecular(vec3 f0, vec3 f90, float roughness, float ndotv, vec3 prefiltered,
                         vec3 brdfLutSample) {
-  vec3 fr = max(vec3(1.0 - roughness), f0) - f0;
-  vec3 kS = f0 + fr * pow5(1.0 - ndotv);
-  vec3 fssEss = kS * brdfLutSample.x + brdfLutSample.y;
-  return prefiltered * fssEss;
+  return prefiltered * (f0 * brdfLutSample.x + f90 * brdfLutSample.y);
 }
 
 vec3 computeIblSheen(vec3 sheenColor, float sheenWeight, vec3 sheenEnv,

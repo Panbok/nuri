@@ -44,6 +44,8 @@ struct NURI_API MaterialRequest {
     TextureRef clearcoat = kInvalidTextureRef;
     TextureRef clearcoatRoughness = kInvalidTextureRef;
     TextureRef clearcoatNormal = kInvalidTextureRef;
+    TextureRef specular = kInvalidTextureRef;
+    TextureRef specularColor = kInvalidTextureRef;
     TextureRef sheenColor = kInvalidTextureRef;
     TextureRef sheenRoughness = kInvalidTextureRef;
     TextureRef transmission = kInvalidTextureRef;
@@ -64,6 +66,8 @@ constexpr void forEachMaterialTextureRef(
                       noexcept(fn(refs.clearcoat)) &&
                       noexcept(fn(refs.clearcoatRoughness)) &&
                       noexcept(fn(refs.clearcoatNormal)) &&
+                      noexcept(fn(refs.specular)) &&
+                      noexcept(fn(refs.specularColor)) &&
                       noexcept(fn(refs.sheenColor)) &&
                       noexcept(fn(refs.sheenRoughness)) &&
                       noexcept(fn(refs.transmission)) &&
@@ -77,6 +81,8 @@ constexpr void forEachMaterialTextureRef(
   fn(refs.clearcoat);
   fn(refs.clearcoatRoughness);
   fn(refs.clearcoatNormal);
+  fn(refs.specular);
+  fn(refs.specularColor);
   fn(refs.sheenColor);
   fn(refs.sheenRoughness);
   fn(refs.transmission);

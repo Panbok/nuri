@@ -35,6 +35,8 @@ struct MaterialData {
   glm::vec3 emissiveFactor{0.0f};
   float metallicFactor = 1.0f;
   float roughnessFactor = 1.0f;
+  glm::vec3 specularColorFactor{1.0f};
+  float specularFactor = 1.0f;
   glm::vec3 sheenColorFactor{0.0f};
   float sheenWeight = 0.0f;
   float sheenRoughnessFactor = 0.0f;
@@ -59,6 +61,8 @@ struct MaterialData {
   MaterialTextureSlotData clearcoat{};
   MaterialTextureSlotData clearcoatRoughness{};
   MaterialTextureSlotData clearcoatNormal{};
+  MaterialTextureSlotData specular{};
+  MaterialTextureSlotData specularColor{};
   MaterialTextureSlotData sheenColor{};
   MaterialTextureSlotData sheenRoughness{};
   MaterialTextureSlotData transmission{};

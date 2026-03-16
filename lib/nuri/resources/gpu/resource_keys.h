@@ -140,6 +140,10 @@ hashModelImportOptions(const MeshImportOptions &options) {
 
   mixFloat(desc.metallicFactor);
   mixFloat(desc.roughnessFactor);
+  mixFloat(desc.specularColorFactor.x);
+  mixFloat(desc.specularColorFactor.y);
+  mixFloat(desc.specularColorFactor.z);
+  mixFloat(desc.specularFactor);
   mixFloat(desc.sheenColorFactor.x);
   mixFloat(desc.sheenColorFactor.y);
   mixFloat(desc.sheenColorFactor.z);
@@ -179,6 +183,10 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.textures.clearcoatRoughness.generation);
   mix(desc.textures.clearcoatNormal.index);
   mix(desc.textures.clearcoatNormal.generation);
+  mix(desc.textures.specular.index);
+  mix(desc.textures.specular.generation);
+  mix(desc.textures.specularColor.index);
+  mix(desc.textures.specularColor.generation);
   mix(desc.textures.sheenColor.index);
   mix(desc.textures.sheenColor.generation);
   mix(desc.textures.sheenRoughness.index);
@@ -196,6 +204,8 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.uvSets.clearcoat);
   mix(desc.uvSets.clearcoatRoughness);
   mix(desc.uvSets.clearcoatNormal);
+  mix(desc.uvSets.specular);
+  mix(desc.uvSets.specularColor);
   mix(desc.uvSets.sheenColor);
   mix(desc.uvSets.sheenRoughness);
   mix(desc.uvSets.transmission);
@@ -209,6 +219,8 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.samplers.clearcoat);
   mix(desc.samplers.clearcoatRoughness);
   mix(desc.samplers.clearcoatNormal);
+  mix(desc.samplers.specular);
+  mix(desc.samplers.specularColor);
   mix(desc.samplers.sheenColor);
   mix(desc.samplers.sheenRoughness);
   mix(desc.samplers.transmission);

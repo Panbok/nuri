@@ -30,6 +30,7 @@ const uint kMaterialFeatureSheen = 1u << 1u;
 const uint kMaterialFeatureClearcoat = 1u << 2u;
 const uint kMaterialFeatureTransmission = 1u << 3u;
 const uint kMaterialFeatureVolume = 1u << 4u;
+const uint kMaterialFeatureSpecular = 1u << 5u;
 const uint kMaterialTextureSlotBaseColor = 0u;
 const uint kMaterialTextureSlotMetallicRoughness = 1u;
 const uint kMaterialTextureSlotNormal = 2u;
@@ -38,11 +39,13 @@ const uint kMaterialTextureSlotEmissive = 4u;
 const uint kMaterialTextureSlotClearcoat = 5u;
 const uint kMaterialTextureSlotClearcoatRoughness = 6u;
 const uint kMaterialTextureSlotClearcoatNormal = 7u;
-const uint kMaterialTextureSlotSheenColor = 8u;
-const uint kMaterialTextureSlotSheenRoughness = 9u;
-const uint kMaterialTextureSlotTransmission = 10u;
-const uint kMaterialTextureSlotThickness = 11u;
-const uint kMaterialTextureSlotCount = 12u;
+const uint kMaterialTextureSlotSpecular = 8u;
+const uint kMaterialTextureSlotSpecularColor = 9u;
+const uint kMaterialTextureSlotSheenColor = 10u;
+const uint kMaterialTextureSlotSheenRoughness = 11u;
+const uint kMaterialTextureSlotTransmission = 12u;
+const uint kMaterialTextureSlotThickness = 13u;
+const uint kMaterialTextureSlotCount = 14u;
 
 struct PackedVertex {
   // CPU packs each vertex into 9 x 32-bit words:
@@ -79,6 +82,7 @@ struct MaterialGpuData {
   vec4 baseColorFactor;
   vec4 emissiveFactorNormalScale;
   vec4 metallicRoughnessOcclusionAlphaCutoff;
+  vec4 specularColorFactorSpecular;
   vec4 sheenColorFactorWeight;
   vec4 sheenRoughnessClearcoatFactors; // (sheenRoughness, clearcoatFactor, clearcoatRoughness, clearcoatNormalScale)
   vec4 transmissionThicknessIorPadding; // (transmissionFactor, thicknessFactor, ior, reserved)
@@ -89,32 +93,40 @@ struct MaterialGpuData {
   // 2=normal -> *0.z, 3=occlusion -> *0.w,
   // 4=emissive -> *1.x, 5=clearcoat -> *1.y,
   // 6=clearcoatRoughness -> *1.z, 7=clearcoatNormal -> *1.w,
-  // 8=sheenColor -> *2.x, 9=sheenRoughness -> *2.y,
-  // 10=transmission -> *2.z, 11=thickness -> *2.w.
+  // 8=specular -> *2.x, 9=specularColor -> *2.y,
+  // 10=sheenColor -> *2.z, 11=sheenRoughness -> *2.w,
+  // 12=transmission -> *3.x, 13=thickness -> *3.y.
   uvec4 textureIndices0;
   uvec4 textureIndices1;
   uvec4 textureIndices2;
+  uvec4 textureIndices3;
   uvec4 textureUvSets0;
   uvec4 textureUvSets1;
   uvec4 textureUvSets2;
+  uvec4 textureUvSets3;
   uvec4 textureSamplerIndices0;
   uvec4 textureSamplerIndices1;
   uvec4 textureSamplerIndices2;
+  uvec4 textureSamplerIndices3;
   vec4 textureTransformOffsetScale[kMaterialTextureSlotCount];
   vec4 textureTransformRotation[kMaterialTextureSlotCount];
   uvec4 materialFlags; // Full std430 slot: x=alphaMode, y=doubleSided, z=featureMask, w=reserved
 };
 
 uint getPackedMaterialSlotValue(uvec4 packed0, uvec4 packed1, uvec4 packed2,
-                                uint slot, uint defaultValue) {
+                                uvec4 packed3, uint slot,
+                                uint defaultValue) {
   if (slot < 4u) {
     return packed0[int(slot)];
   }
   if (slot < 8u) {
     return packed1[int(slot - 4u)];
   }
-  if (slot < kMaterialTextureSlotCount) {
+  if (slot < 12u) {
     return packed2[int(slot - 8u)];
+  }
+  if (slot < kMaterialTextureSlotCount) {
+    return packed3[int(slot - 12u)];
   }
   return defaultValue;
 }
@@ -135,16 +147,19 @@ uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {
 #define GET_TEXTURE_INDEX(material, slot)                                      \
   getPackedMaterialSlotValue((material).textureIndices0,                       \
                              (material).textureIndices1,                       \
-                             (material).textureIndices2, (slot),               \
+                             (material).textureIndices2,                       \
+                             (material).textureIndices3, (slot),               \
                              kInvalidTextureBindlessIndex)
 #define GET_UV_SET(material, slot)                                             \
   getPackedMaterialSlotValue((material).textureUvSets0,                        \
                              (material).textureUvSets1,                        \
-                             (material).textureUvSets2, (slot), 0u)
+                             (material).textureUvSets2,                        \
+                             (material).textureUvSets3, (slot), 0u)
 #define GET_SAMPLER_INDEX(material, slot)                                      \
   getPackedMaterialSlotValue((material).textureSamplerIndices0,                \
                              (material).textureSamplerIndices1,                \
-                             (material).textureSamplerIndices2, (slot), 0u)
+                             (material).textureSamplerIndices2,                \
+                             (material).textureSamplerIndices3, (slot), 0u)
 
 layout(std430, buffer_reference) readonly buffer MaterialBuffer {
   MaterialGpuData materials[];
@@ -203,6 +218,10 @@ vec2 applyTextureTransform(vec2 uv, vec4 offsetScale, vec4 rotationCs) {
   return offsetScale.xy + rotated;
 }
 
+vec2 selectUv(vec2 uv0, vec2 uv1, uint uvSet) {
+  return (uvSet == 1u) ? uv1 : uv0;
+}
+
 vec3 decodePackedNormal(PackedVertex vertex) {
   const vec2 normalXY = unpackSnorm2x16Custom(vertex.word4);
   const vec2 normalZ = unpackSnorm2x16Custom(vertex.word5);
@@ -235,3 +254,10 @@ struct PerVertex {
   float patchInnerFactor;
   float tessellatedFlag;
 };
+
+vec2 transformedUv(MaterialGpuData material, PerVertex vertex, uint slot) {
+  return applyTextureTransform(selectUv(vertex.uv0, vertex.uv1,
+                                        GET_UV_SET(material, slot)),
+                               material.textureTransformOffsetScale[slot],
+                               material.textureTransformRotation[slot]);
+}

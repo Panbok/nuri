@@ -5,23 +5,15 @@ layout(location = 10) flat in uint inInstanceId;
 
 layout(location = 0) out uint outObjectId;
 
-vec2 selectUv(vec2 uv0, vec2 uv1, uint uvSet) {
-  return (uvSet == 1u) ? uv1 : uv0;
-}
-
 void main() {
   const MaterialGpuData material = pc.materialBuffer.materials[pc.materialIndex];
   const uint baseColorTexId =
       GET_TEXTURE_INDEX(material, kMaterialTextureSlotBaseColor);
-  const uint baseColorUvSet =
-      GET_UV_SET(material, kMaterialTextureSlotBaseColor);
   const uint baseColorSampler =
       GET_SAMPLER_INDEX(material, kMaterialTextureSlotBaseColor);
 
-  vec2 baseColorUv = applyTextureTransform(
-      selectUv(vtx.uv0, vtx.uv1, baseColorUvSet),
-      material.textureTransformOffsetScale[kMaterialTextureSlotBaseColor],
-      material.textureTransformRotation[kMaterialTextureSlotBaseColor]);
+  const vec2 baseColorUv =
+      transformedUv(material, vtx, kMaterialTextureSlotBaseColor);
 
   vec4 baseColor = material.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {
