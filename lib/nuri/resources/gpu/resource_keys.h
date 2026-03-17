@@ -137,6 +137,7 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mixFloat(desc.emissiveFactor.x);
   mixFloat(desc.emissiveFactor.y);
   mixFloat(desc.emissiveFactor.z);
+  mixFloat(desc.emissiveStrength);
 
   mixFloat(desc.metallicFactor);
   mixFloat(desc.roughnessFactor);

@@ -108,6 +108,7 @@ struct MaterialTextureTransforms {
 struct MaterialDesc {
   glm::vec4 baseColorFactor{1.0f};
   glm::vec3 emissiveFactor{0.0f};
+  float emissiveStrength = 1.0f;
   float metallicFactor = 1.0f;
   float roughnessFactor = 1.0f;
   glm::vec3 specularColorFactor{1.0f, 1.0f, 1.0f};
@@ -138,7 +139,8 @@ struct MaterialDesc {
 // std430-friendly packed material payload uploaded to GPU storage buffers.
 struct alignas(16) MaterialGpuData {
   glm::vec4 baseColorFactor{1.0f};
-  glm::vec4 emissiveFactorNormalScale{0.0f, 0.0f, 0.0f, 1.0f};
+  glm::vec4 emissiveFactorNormalScale{
+      0.0f, 0.0f, 0.0f, 1.0f}; // (emissiveFactor.rgb, emissiveStrength)
   glm::vec4 metallicRoughnessOcclusionAlphaCutoff{1.0f, 1.0f, 1.0f, 0.5f};
   glm::vec4 specularColorFactorSpecular{1.0f, 1.0f, 1.0f, 1.0f};
   glm::vec4 sheenColorFactorWeight{1.0f, 1.0f, 1.0f, 0.0f};
@@ -147,7 +149,7 @@ struct alignas(16) MaterialGpuData {
                                // clearcoatRoughness, clearcoatNormalScale)
   glm::vec4 transmissionThicknessIorPadding{
       0.0f, 0.0f, 1.5f,
-      0.0f}; // (transmissionFactor, thicknessFactor, ior, reserved)
+      1.0f}; // (transmissionFactor, thicknessFactor, ior, normalScale)
              // IOR keeps the same {0} U [1, +inf) contract as MaterialDesc.
   glm::vec4 attenuationColorDistance{
       1.0f, 1.0f, 1.0f, 0.0f}; // (attenuationColor.rgb, attenuationDistance)
@@ -178,9 +180,8 @@ struct alignas(16) MaterialGpuData {
   glm::uvec4 textureUvSets2{0u, 0u, 0u,
                             0u}; // UV sets for (specular, specularColor,
                                  // sheenColor, sheenRoughness)
-  glm::uvec4 textureUvSets3{0u, 0u, 0u,
-                            0u}; // UV sets for (transmission, thickness,
-                                 // reserved, reserved)
+  glm::uvec4 textureUvSets3{0u, 0u, 0u, 0u}; // UV sets for (transmission,
+                                             // thickness, reserved, reserved)
   glm::uvec4 textureSamplerIndices0{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices1{0u, 0u, 0u, 0u};
   glm::uvec4 textureSamplerIndices2{0u, 0u, 0u, 0u};

@@ -33,6 +33,7 @@ struct MaterialData {
   std::string name{};
   glm::vec4 baseColorFactor{1.0f};
   glm::vec3 emissiveFactor{0.0f};
+  float emissiveStrength = 1.0f;
   float metallicFactor = 1.0f;
   float roughnessFactor = 1.0f;
   glm::vec3 specularColorFactor{1.0f};
