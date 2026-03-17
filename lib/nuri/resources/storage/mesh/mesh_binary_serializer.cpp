@@ -8,6 +8,7 @@
 
 namespace nuri {
 namespace {
+constexpr uint64_t kMeshBinarySectionAlignment = 16u;
 
 template <typename T, typename... Args>
   requires(!std::is_same_v<T, MeshBinaryDecodedMesh>)
@@ -37,6 +38,30 @@ makeSerializerError(MeshBinaryDeserializeErrorCode code, Args &&...args) {
   std::ostringstream oss;
   (oss << ... << std::forward<Args>(args));
   return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+      MeshBinaryDeserializeError{
+          .code = code,
+          .message = oss.str(),
+      });
+}
+
+template <typename T, typename... Args>
+[[nodiscard]] Result<T, MeshBinaryDeserializeError>
+makeDeserializeError(Args &&...args) {
+  std::ostringstream oss;
+  (oss << ... << std::forward<Args>(args));
+  return Result<T, MeshBinaryDeserializeError>::makeError(
+      MeshBinaryDeserializeError{
+          .code = MeshBinaryDeserializeErrorCode::InvalidData,
+          .message = oss.str(),
+      });
+}
+
+template <typename T, typename... Args>
+[[nodiscard]] Result<T, MeshBinaryDeserializeError>
+makeDeserializeError(MeshBinaryDeserializeErrorCode code, Args &&...args) {
+  std::ostringstream oss;
+  (oss << ... << std::forward<Args>(args));
+  return Result<T, MeshBinaryDeserializeError>::makeError(
       MeshBinaryDeserializeError{
           .code = code,
           .message = oss.str(),
@@ -166,6 +191,14 @@ struct SerializedSection {
   std::vector<std::byte> payload;
 };
 
+struct MeshBinaryRequiredSections {
+  const MeshBinarySectionTocEntry *vlay = nullptr;
+  const MeshBinarySectionTocEntry *smes = nullptr;
+  const MeshBinarySectionTocEntry *lods = nullptr;
+  const MeshBinarySectionTocEntry *vbuf = nullptr;
+  const MeshBinarySectionTocEntry *ibuf = nullptr;
+};
+
 [[nodiscard]] Result<SerializedSection, std::string>
 buildVertexLayoutSection() {
   SerializedSection section{};
@@ -215,6 +248,9 @@ buildSubmeshAndLodSections(std::span<const Submesh> submeshes) {
     submeshRecord.boundsMax[0] = submesh.bounds.max_.x;
     submeshRecord.boundsMax[1] = submesh.bounds.max_.y;
     submeshRecord.boundsMax[2] = submesh.bounds.max_.z;
+    submeshRecord.authoredScale[0] = submesh.authoredScale.x;
+    submeshRecord.authoredScale[1] = submesh.authoredScale.y;
+    submeshRecord.authoredScale[2] = submesh.authoredScale.z;
     appendPod(submeshSection.payload, submeshRecord);
 
     for (uint32_t lodIndex = 0; lodIndex < submesh.lodCount; ++lodIndex) {
@@ -241,6 +277,38 @@ buildSubmeshAndLodSections(std::span<const Submesh> submeshes) {
 }
 
 [[nodiscard]] Result<SerializedSection, std::string>
+buildCompressedBufferSection(uint32_t fourcc,
+                             std::span<const std::byte> encoded,
+                             uint32_t elementCount, uint32_t elementStrideBytes,
+                             std::string_view sectionName) {
+  if (encoded.size() >
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    return makeSerializerError<SerializedSection>(
+        "meshBinarySerialize: encoded ", std::string(sectionName),
+        " payload is too large");
+  }
+
+  SerializedSection section{};
+  section.fourcc = fourcc;
+  section.flags = kMeshBinarySectionFlagCompressed;
+  section.count = 1;
+  section.stride = sizeof(MeshBinaryBufferSectionHeader);
+
+  MeshBinaryBufferSectionHeader meta{};
+  meta.elementCount = elementCount;
+  meta.elementStrideBytes = elementStrideBytes;
+  meta.encodedSizeBytes = static_cast<uint32_t>(encoded.size());
+  appendPod(section.payload, meta);
+  if (!appendPodArray(section.payload, encoded)) {
+    return makeSerializerError<SerializedSection>(
+        "meshBinarySerialize: ", std::string(sectionName),
+        " section payload size overflow");
+  }
+
+  return Result<SerializedSection, std::string>::makeResult(std::move(section));
+}
+
+[[nodiscard]] Result<SerializedSection, std::string>
 buildVertexBufferSection(std::span<const std::byte> packedVertexBytes,
                          uint32_t vertexCount, uint32_t vertexStrideBytes) {
   auto encodedResult =
@@ -249,29 +317,9 @@ buildVertexBufferSection(std::span<const std::byte> packedVertexBytes,
     return makeSerializerError<SerializedSection>(encodedResult.error());
   }
 
-  const std::vector<std::byte> &encoded = encodedResult.value();
-  if (encoded.size() > std::numeric_limits<uint32_t>::max()) {
-    return makeSerializerError<SerializedSection>(
-        "meshBinarySerialize: encoded vertex payload is too large");
-  }
-
-  SerializedSection section{};
-  section.fourcc = kMeshBinarySectionVbuf;
-  section.flags = kMeshBinarySectionFlagCompressed;
-  section.count = 1;
-  section.stride = sizeof(MeshBinaryBufferSectionHeader);
-
-  MeshBinaryBufferSectionHeader meta{};
-  meta.elementCount = vertexCount;
-  meta.elementStrideBytes = vertexStrideBytes;
-  meta.encodedSizeBytes = static_cast<uint32_t>(encoded.size());
-  appendPod(section.payload, meta);
-  if (!appendPodArray(section.payload, std::span<const std::byte>(encoded))) {
-    return makeSerializerError<SerializedSection>(
-        "meshBinarySerialize: vertex section payload size overflow");
-  }
-
-  return Result<SerializedSection, std::string>::makeResult(std::move(section));
+  return buildCompressedBufferSection(kMeshBinarySectionVbuf,
+                                      encodedResult.value(), vertexCount,
+                                      vertexStrideBytes, "vertex");
 }
 
 [[nodiscard]] Result<SerializedSection, std::string>
@@ -282,29 +330,9 @@ buildIndexBufferSection(std::span<const uint32_t> indices,
     return makeSerializerError<SerializedSection>(encodedResult.error());
   }
 
-  const std::vector<std::byte> &encoded = encodedResult.value();
-  if (encoded.size() > std::numeric_limits<uint32_t>::max()) {
-    return makeSerializerError<SerializedSection>(
-        "meshBinarySerialize: encoded index payload is too large");
-  }
-
-  SerializedSection section{};
-  section.fourcc = kMeshBinarySectionIbuf;
-  section.flags = kMeshBinarySectionFlagCompressed;
-  section.count = 1;
-  section.stride = sizeof(MeshBinaryBufferSectionHeader);
-
-  MeshBinaryBufferSectionHeader meta{};
-  meta.elementCount = static_cast<uint32_t>(indices.size());
-  meta.elementStrideBytes = sizeof(uint32_t);
-  meta.encodedSizeBytes = static_cast<uint32_t>(encoded.size());
-  appendPod(section.payload, meta);
-  if (!appendPodArray(section.payload, std::span<const std::byte>(encoded))) {
-    return makeSerializerError<SerializedSection>(
-        "meshBinarySerialize: index section payload size overflow");
-  }
-
-  return Result<SerializedSection, std::string>::makeResult(std::move(section));
+  return buildCompressedBufferSection(
+      kMeshBinarySectionIbuf, encodedResult.value(),
+      static_cast<uint32_t>(indices.size()), sizeof(uint32_t), "index");
 }
 
 [[nodiscard]] Result<const MeshBinarySectionTocEntry *, std::string>
@@ -347,6 +375,116 @@ sectionSizeMatchesCountStride(const MeshBinarySectionTocEntry &entry) {
     return false;
   }
   return expectedBytes == entry.sizeBytes;
+}
+
+[[nodiscard]] Result<MeshBinaryRequiredSections, MeshBinaryDeserializeError>
+findRequiredSections(std::span<const MeshBinarySectionTocEntry> toc) {
+  auto requireSection = [toc](uint32_t fourcc, std::string_view name)
+      -> Result<const MeshBinarySectionTocEntry *, MeshBinaryDeserializeError> {
+    auto sectionResult = findRequiredSection(toc, fourcc, name);
+    if (sectionResult.hasError()) {
+      return makeDeserializeError<const MeshBinarySectionTocEntry *>(
+          sectionResult.error());
+    }
+    return Result<const MeshBinarySectionTocEntry *,
+                  MeshBinaryDeserializeError>::makeResult(sectionResult
+                                                              .value());
+  };
+
+  MeshBinaryRequiredSections sections{};
+  auto vlay = requireSection(kMeshBinarySectionVlay, "VLAY");
+  if (vlay.hasError()) {
+    return Result<MeshBinaryRequiredSections,
+                  MeshBinaryDeserializeError>::makeError(vlay.error());
+  }
+  sections.vlay = vlay.value();
+
+  auto smes = requireSection(kMeshBinarySectionSmes, "SMES");
+  if (smes.hasError()) {
+    return Result<MeshBinaryRequiredSections,
+                  MeshBinaryDeserializeError>::makeError(smes.error());
+  }
+  sections.smes = smes.value();
+
+  auto lods = requireSection(kMeshBinarySectionLods, "LODS");
+  if (lods.hasError()) {
+    return Result<MeshBinaryRequiredSections,
+                  MeshBinaryDeserializeError>::makeError(lods.error());
+  }
+  sections.lods = lods.value();
+
+  auto vbuf = requireSection(kMeshBinarySectionVbuf, "VBUF");
+  if (vbuf.hasError()) {
+    return Result<MeshBinaryRequiredSections,
+                  MeshBinaryDeserializeError>::makeError(vbuf.error());
+  }
+  sections.vbuf = vbuf.value();
+
+  auto ibuf = requireSection(kMeshBinarySectionIbuf, "IBUF");
+  if (ibuf.hasError()) {
+    return Result<MeshBinaryRequiredSections,
+                  MeshBinaryDeserializeError>::makeError(ibuf.error());
+  }
+  sections.ibuf = ibuf.value();
+
+  return Result<MeshBinaryRequiredSections,
+                MeshBinaryDeserializeError>::makeResult(sections);
+}
+
+[[nodiscard]] Result<bool, MeshBinaryDeserializeError>
+validateFixedSectionLayout(const MeshBinarySectionTocEntry &entry,
+                           uint32_t expectedCount, uint32_t expectedStride,
+                           bool requireCountStrideMatch,
+                           std::string_view errorMessage) {
+  if (entry.count != expectedCount || entry.stride != expectedStride ||
+      (requireCountStrideMatch && !sectionSizeMatchesCountStride(entry))) {
+    return makeDeserializeError<bool>(std::string(errorMessage));
+  }
+  return Result<bool, MeshBinaryDeserializeError>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, MeshBinaryDeserializeError>
+validateVariableSectionLayout(const MeshBinarySectionTocEntry &entry,
+                              uint32_t expectedStride,
+                              std::string_view errorMessage) {
+  if (entry.stride != expectedStride || !sectionSizeMatchesCountStride(entry)) {
+    return makeDeserializeError<bool>(std::string(errorMessage));
+  }
+  return Result<bool, MeshBinaryDeserializeError>::makeResult(true);
+}
+
+[[nodiscard]] Result<MeshBinaryBufferSectionHeader, MeshBinaryDeserializeError>
+readBufferSectionHeader(std::span<const std::byte> fileBytes,
+                        const MeshBinarySectionTocEntry &entry,
+                        std::string_view sectionName) {
+  if (entry.count != 1 ||
+      entry.stride != sizeof(MeshBinaryBufferSectionHeader)) {
+    return makeDeserializeError<MeshBinaryBufferSectionHeader>(
+        "meshBinaryDeserialize: invalid ", std::string(sectionName),
+        " metadata layout");
+  }
+  if (entry.sizeBytes < sizeof(MeshBinaryBufferSectionHeader)) {
+    return makeDeserializeError<MeshBinaryBufferSectionHeader>(
+        "meshBinaryDeserialize: ", std::string(sectionName),
+        " section too small");
+  }
+
+  MeshBinaryBufferSectionHeader meta{};
+  if (!readPod(fileBytes, entry.offset, meta)) {
+    return makeDeserializeError<MeshBinaryBufferSectionHeader>(
+        "meshBinaryDeserialize: failed to read ", std::string(sectionName),
+        " metadata");
+  }
+
+  const uint64_t expectedSize =
+      sizeof(MeshBinaryBufferSectionHeader) + meta.encodedSizeBytes;
+  if (expectedSize != entry.sizeBytes) {
+    return makeDeserializeError<MeshBinaryBufferSectionHeader>(
+        "meshBinaryDeserialize: ", std::string(sectionName), " size mismatch");
+  }
+
+  return Result<MeshBinaryBufferSectionHeader,
+                MeshBinaryDeserializeError>::makeResult(meta);
 }
 
 } // namespace
@@ -447,7 +585,7 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
     return makeSerializerError<std::vector<std::byte>>(
         "meshBinarySerialize: section start overflow");
   }
-  if (!alignUpU64(sectionStart, 16u, sectionStart)) {
+  if (!alignUpU64(sectionStart, kMeshBinarySectionAlignment, sectionStart)) {
     return makeSerializerError<std::vector<std::byte>>(
         "meshBinarySerialize: section alignment overflow");
   }
@@ -458,7 +596,7 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
 
   uint64_t cursor = sectionStart;
   for (size_t i = 0; i < sections.size(); ++i) {
-    if (!alignUpU64(cursor, 16u, cursor)) {
+    if (!alignUpU64(cursor, kMeshBinarySectionAlignment, cursor)) {
       return makeSerializerError<std::vector<std::byte>>(
           "meshBinarySerialize: section cursor alignment overflow");
     }
@@ -477,7 +615,7 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
   }
 
   uint64_t fileSize = 0;
-  if (!alignUpU64(cursor, 16u, fileSize)) {
+  if (!alignUpU64(cursor, kMeshBinarySectionAlignment, fileSize)) {
     return makeSerializerError<std::vector<std::byte>>(
         "meshBinarySerialize: final file alignment overflow");
   }
@@ -607,67 +745,39 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
     }
   }
 
-  auto vlaySectionResult =
-      findRequiredSection(toc, kMeshBinarySectionVlay, "VLAY");
-  if (vlaySectionResult.hasError()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        vlaySectionResult.error());
+  auto requiredSectionsResult = findRequiredSections(toc);
+  if (requiredSectionsResult.hasError()) {
+    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+        requiredSectionsResult.error());
   }
-  auto smesSectionResult =
-      findRequiredSection(toc, kMeshBinarySectionSmes, "SMES");
-  if (smesSectionResult.hasError()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        smesSectionResult.error());
-  }
-  auto lodsSectionResult =
-      findRequiredSection(toc, kMeshBinarySectionLods, "LODS");
-  if (lodsSectionResult.hasError()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        lodsSectionResult.error());
-  }
-  auto vbufSectionResult =
-      findRequiredSection(toc, kMeshBinarySectionVbuf, "VBUF");
-  if (vbufSectionResult.hasError()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        vbufSectionResult.error());
-  }
-  auto ibufSectionResult =
-      findRequiredSection(toc, kMeshBinarySectionIbuf, "IBUF");
-  if (ibufSectionResult.hasError()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        ibufSectionResult.error());
-  }
+  const MeshBinaryRequiredSections &requiredSections =
+      requiredSectionsResult.value();
+  const MeshBinarySectionTocEntry &vlayEntry = *requiredSections.vlay;
+  const MeshBinarySectionTocEntry &smesEntry = *requiredSections.smes;
+  const MeshBinarySectionTocEntry &lodsEntry = *requiredSections.lods;
+  const MeshBinarySectionTocEntry &vbufEntry = *requiredSections.vbuf;
+  const MeshBinarySectionTocEntry &ibufEntry = *requiredSections.ibuf;
 
-  const MeshBinarySectionTocEntry &vlayEntry = *vlaySectionResult.value();
-  const MeshBinarySectionTocEntry &smesEntry = *smesSectionResult.value();
-  const MeshBinarySectionTocEntry &lodsEntry = *lodsSectionResult.value();
-  const MeshBinarySectionTocEntry &vbufEntry = *vbufSectionResult.value();
-  const MeshBinarySectionTocEntry &ibufEntry = *ibufSectionResult.value();
-
-  if (vlayEntry.stride != sizeof(MeshBinaryVertexLayoutRecord) ||
-      vlayEntry.count != 1 || !sectionSizeMatchesCountStride(vlayEntry)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: invalid VLAY layout");
+  auto vlayLayoutResult = validateFixedSectionLayout(
+      vlayEntry, 1u, sizeof(MeshBinaryVertexLayoutRecord), true,
+      "meshBinaryDeserialize: invalid VLAY layout");
+  if (vlayLayoutResult.hasError()) {
+    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+        vlayLayoutResult.error());
   }
-  if (smesEntry.stride != sizeof(MeshBinarySubmeshRecord) ||
-      !sectionSizeMatchesCountStride(smesEntry)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: invalid SMES stride");
+  auto smesLayoutResult = validateVariableSectionLayout(
+      smesEntry, sizeof(MeshBinarySubmeshRecord),
+      "meshBinaryDeserialize: invalid SMES stride");
+  if (smesLayoutResult.hasError()) {
+    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+        smesLayoutResult.error());
   }
-  if (lodsEntry.stride != sizeof(MeshBinaryLodRecord) ||
-      !sectionSizeMatchesCountStride(lodsEntry)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: invalid LODS stride");
-  }
-  if (vbufEntry.count != 1 ||
-      vbufEntry.stride != sizeof(MeshBinaryBufferSectionHeader)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: invalid VBUF metadata layout");
-  }
-  if (ibufEntry.count != 1 ||
-      ibufEntry.stride != sizeof(MeshBinaryBufferSectionHeader)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: invalid IBUF metadata layout");
+  auto lodsLayoutResult = validateVariableSectionLayout(
+      lodsEntry, sizeof(MeshBinaryLodRecord),
+      "meshBinaryDeserialize: invalid LODS stride");
+  if (lodsLayoutResult.hasError()) {
+    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+        lodsLayoutResult.error());
   }
 
   MeshBinaryVertexLayoutRecord layoutRecord{};
@@ -681,38 +791,18 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
         "meshBinaryDeserialize: unsupported vertex layout");
   }
 
-  if (vbufEntry.sizeBytes < sizeof(MeshBinaryBufferSectionHeader)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: VBUF section too small");
+  auto vbufMetaResult = readBufferSectionHeader(fileBytes, vbufEntry, "VBUF");
+  if (vbufMetaResult.hasError()) {
+    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+        vbufMetaResult.error());
   }
-  if (ibufEntry.sizeBytes < sizeof(MeshBinaryBufferSectionHeader)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: IBUF section too small");
+  auto ibufMetaResult = readBufferSectionHeader(fileBytes, ibufEntry, "IBUF");
+  if (ibufMetaResult.hasError()) {
+    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+        ibufMetaResult.error());
   }
-
-  MeshBinaryBufferSectionHeader vbufMeta{};
-  if (!readPod(fileBytes, vbufEntry.offset, vbufMeta)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: failed to read VBUF metadata");
-  }
-  MeshBinaryBufferSectionHeader ibufMeta{};
-  if (!readPod(fileBytes, ibufEntry.offset, ibufMeta)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: failed to read IBUF metadata");
-  }
-
-  const uint64_t vbufExpectedSize =
-      sizeof(MeshBinaryBufferSectionHeader) + vbufMeta.encodedSizeBytes;
-  if (vbufExpectedSize != vbufEntry.sizeBytes) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: VBUF size mismatch");
-  }
-  const uint64_t ibufExpectedSize =
-      sizeof(MeshBinaryBufferSectionHeader) + ibufMeta.encodedSizeBytes;
-  if (ibufExpectedSize != ibufEntry.sizeBytes) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: IBUF size mismatch");
-  }
+  const MeshBinaryBufferSectionHeader vbufMeta = vbufMetaResult.value();
+  const MeshBinaryBufferSectionHeader ibufMeta = ibufMetaResult.value();
 
   const std::span<const std::byte> encodedVertices(
       fileBytes.data() + static_cast<size_t>(vbufEntry.offset) +
@@ -791,6 +881,9 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
                               record.boundsMin[2]),
                     glm::vec3(record.boundsMax[0], record.boundsMax[1],
                               record.boundsMax[2]));
+    submesh.authoredScale =
+        glm::vec3(record.authoredScale[0], record.authoredScale[1],
+                  record.authoredScale[2]);
     submesh.lodCount = record.lodCount;
 
     for (uint32_t lodIndex = 0; lodIndex < record.lodCount; ++lodIndex) {

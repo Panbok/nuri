@@ -10,6 +10,8 @@
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
+#include <cmath>
+#include <cstdint>
 #include <limits>
 #if __has_include(<assimp/GltfMaterial.h>)
 #include <assimp/GltfMaterial.h>
@@ -22,6 +24,26 @@ namespace nuri {
 namespace {
 constexpr float kMeshoptOverdrawThreshold = 1.05f;
 constexpr size_t kTriangleIndexCount = 3;
+constexpr float kDefaultTextureScale = 1.0f;
+constexpr float kDefaultAttenuationDistance = 0.0f;
+constexpr float kDefaultIor = 1.5f;
+constexpr glm::vec3 kDefaultAttenuationColor(1.0f);
+constexpr uint32_t kGlbMagic = 0x46546C67u;
+constexpr uint32_t kGlbVersion2 = 2u;
+constexpr uint32_t kGlbChunkTypeJson = 0x4E4F534Au;
+using YyJsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+using YyJsonDocResult = Result<YyJsonDocPtr, std::string>;
+
+struct AssimpMeshInstance {
+  const aiMesh *mesh = nullptr;
+  uint32_t meshIndex = 0;
+  aiMatrix4x4 transform{};
+};
+
+struct GltfMeshInstanceScale {
+  uint32_t meshIndex = 0;
+  glm::vec3 scale{1.0f};
+};
 
 std::string normalizeExternalTexturePath(const std::filesystem::path &modelPath,
                                          std::string_view rawPath) {
@@ -37,6 +59,7 @@ std::string normalizeExternalTexturePath(const std::filesystem::path &modelPath,
 
 ImportedMaterialTexture
 readMaterialTextureSlot(const aiMaterial &material, aiTextureType textureType,
+                        uint32_t textureIndex,
                         const std::filesystem::path &modelPath) {
   aiString texturePath;
   aiTextureMapping textureMapping = aiTextureMapping_UV;
@@ -44,9 +67,9 @@ readMaterialTextureSlot(const aiMaterial &material, aiTextureType textureType,
   ai_real blendFactor = 1.0f;
   aiTextureOp textureOp = aiTextureOp_Multiply;
   aiTextureMapMode mapMode[2] = {aiTextureMapMode_Wrap, aiTextureMapMode_Wrap};
-  const aiReturn result =
-      material.GetTexture(textureType, 0, &texturePath, &textureMapping,
-                          &uvIndex, &blendFactor, &textureOp, mapMode);
+  const aiReturn result = material.GetTexture(
+      textureType, textureIndex, &texturePath, &textureMapping, &uvIndex,
+      &blendFactor, &textureOp, mapMode);
   if (result != aiReturn_SUCCESS || texturePath.length == 0) {
     return {};
   }
@@ -66,7 +89,7 @@ firstAvailableTextureSlot(const aiMaterial &material,
                           std::span<const aiTextureType> textureTypes) {
   for (const aiTextureType textureType : textureTypes) {
     ImportedMaterialTexture slot =
-        readMaterialTextureSlot(material, textureType, modelPath);
+        readMaterialTextureSlot(material, textureType, 0u, modelPath);
     if (!slot.path.empty()) {
       return slot;
     }
@@ -74,9 +97,21 @@ firstAvailableTextureSlot(const aiMaterial &material,
   return {};
 }
 
+bool hasExtension(const std::filesystem::path &path,
+                  std::string_view extension) {
+  return path.has_extension() && path.extension().string() == extension;
+}
+
 bool hasExtension(std::string_view path, std::string_view extension) {
-  const std::filesystem::path fsPath(path);
-  return fsPath.has_extension() && fsPath.extension().string() == extension;
+  return hasExtension(std::filesystem::path(path), extension);
+}
+
+[[nodiscard]] bool isGltfJsonAssetPath(const std::filesystem::path &path) {
+  return hasExtension(path, ".gltf") || hasExtension(path, ".glb");
+}
+
+[[nodiscard]] bool isGltfJsonAssetPath(std::string_view path) {
+  return isGltfJsonAssetPath(std::filesystem::path(path));
 }
 
 bool isUnsupportedGltfImageUri(std::string_view uri) {
@@ -339,17 +374,29 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
 }
 
 void resetGltfOverlayState(ImportedMaterialInfo &material) {
+  material.emissiveStrength = 1.0f;
   material.clearcoatFactor = 0.0f;
   material.clearcoatRoughnessFactor = 0.0f;
-  material.clearcoatNormalScale = 1.0f;
+  material.clearcoatNormalScale = kDefaultTextureScale;
   material.clearcoat = ImportedMaterialTexture{};
   material.clearcoatRoughness = ImportedMaterialTexture{};
   material.clearcoatNormal = ImportedMaterialTexture{};
+  material.specularFactor = 1.0f;
+  material.specularColorFactor = glm::vec3(1.0f);
+  material.specular = ImportedMaterialTexture{};
+  material.specularColor = ImportedMaterialTexture{};
   material.sheenColorFactor = glm::vec3(0.0f);
   material.sheenWeight = 0.0f;
   material.sheenRoughnessFactor = 0.0f;
   material.sheenColor = ImportedMaterialTexture{};
   material.sheenRoughness = ImportedMaterialTexture{};
+  material.transmissionFactor = 0.0f;
+  material.thicknessFactor = 0.0f;
+  material.attenuationColor = kDefaultAttenuationColor;
+  material.attenuationDistance = kDefaultAttenuationDistance;
+  material.ior = kDefaultIor;
+  material.transmission = ImportedMaterialTexture{};
+  material.thickness = ImportedMaterialTexture{};
 }
 
 void updateDerivedSheenState(ImportedMaterialInfo &material) {
@@ -364,6 +411,75 @@ void updateDerivedSheenState(ImportedMaterialInfo &material) {
           : 0.0f;
 }
 
+void updateDerivedTransmissionState(ImportedMaterialInfo &material) {
+  material.transmissionFactor =
+      std::clamp(material.transmissionFactor, 0.0f, 1.0f);
+  material.thicknessFactor = std::max(material.thicknessFactor, 0.0f);
+  material.attenuationColor = glm::clamp(material.attenuationColor, 0.0f, 1.0f);
+  material.attenuationDistance = std::max(material.attenuationDistance, 0.0f);
+}
+
+[[nodiscard]] float sanitizeImportedIor(float ior, const char *context,
+                                        const char *materialName = nullptr) {
+  if (ior == 0.0f) {
+    return 0.0f;
+  }
+  if (std::isfinite(ior) && ior >= 1.0f) {
+    return ior;
+  }
+
+  if (materialName != nullptr) {
+    NURI_LOG_WARNING("%s: invalid IOR %.6f for material '%s'; clamping to 1.0",
+                     context, static_cast<double>(ior), materialName);
+  } else {
+    NURI_LOG_WARNING("%s: invalid IOR %.6f; clamping to 1.0", context,
+                     static_cast<double>(ior));
+  }
+  return 1.0f;
+}
+
+[[nodiscard]] float sanitizeImportedEmissiveStrength(float emissiveStrength) {
+  return std::max(emissiveStrength, 0.0f);
+}
+
+[[nodiscard]] bool
+hasTransmissionContent(const ImportedMaterialInfo &material) {
+  return material.transmissionFactor > 0.0f ||
+         !material.transmission.path.empty();
+}
+
+void warnOnTransmissionBlendCombination(const ImportedMaterialInfo &material,
+                                        const char *context) {
+  if (!hasTransmissionContent(material) ||
+      material.alphaMode != ImportedMaterialAlphaMode::Blend) {
+    return;
+  }
+
+  if (!material.name.empty()) {
+    NURI_LOG_WARNING("%s: material '%s' combines transmission with alphaMode "
+                     "BLEND; glTF optical transparency is expected to use "
+                     "OPAQUE or MASK",
+                     context, material.name.c_str());
+  } else {
+    NURI_LOG_WARNING("%s: unnamed material combines transmission with "
+                     "alphaMode BLEND; glTF optical transparency is expected "
+                     "to use OPAQUE or MASK",
+                     context);
+  }
+}
+
+void finalizeImportedMaterialState(ImportedMaterialInfo &material) {
+  updateDerivedSheenState(material);
+  updateDerivedTransmissionState(material);
+  material.emissiveStrength =
+      sanitizeImportedEmissiveStrength(material.emissiveStrength);
+  material.ior = sanitizeImportedIor(
+      material.ior, "MeshImporter::finalizeImportedMaterialState",
+      material.name.empty() ? nullptr : material.name.c_str());
+  warnOnTransmissionBlendCombination(
+      material, "MeshImporter::finalizeImportedMaterialState");
+}
+
 void overlayTextureSlot(ImportedMaterialTexture &target, yyjson_val *root,
                         const std::filesystem::path &modelPath,
                         yyjson_val *textureInfo, float *scale = nullptr) {
@@ -371,6 +487,289 @@ void overlayTextureSlot(ImportedMaterialTexture &target, yyjson_val *root,
     return;
   }
   target = parseGltfTextureSlot(root, modelPath, textureInfo, scale);
+}
+
+void overlayEmissiveStrengthExtension(ImportedMaterialInfo &material,
+                                      yyjson_val *emissiveStrengthExt) {
+  if (!yyjson_is_obj(emissiveStrengthExt)) {
+    return;
+  }
+
+  (void)tryReadJsonFloat(
+      yyjson_obj_get(emissiveStrengthExt, "emissiveStrength"),
+      material.emissiveStrength);
+  material.emissiveStrength =
+      sanitizeImportedEmissiveStrength(material.emissiveStrength);
+}
+
+void overlayClearcoatExtension(ImportedMaterialInfo &material, yyjson_val *root,
+                               const std::filesystem::path &modelPath,
+                               yyjson_val *clearcoatExt) {
+  if (!yyjson_is_obj(clearcoatExt)) {
+    return;
+  }
+
+  (void)tryReadJsonFloat(yyjson_obj_get(clearcoatExt, "clearcoatFactor"),
+                         material.clearcoatFactor);
+  material.clearcoatFactor = std::clamp(material.clearcoatFactor, 0.0f, 1.0f);
+
+  (void)tryReadJsonFloat(
+      yyjson_obj_get(clearcoatExt, "clearcoatRoughnessFactor"),
+      material.clearcoatRoughnessFactor);
+  material.clearcoatRoughnessFactor =
+      std::clamp(material.clearcoatRoughnessFactor, 0.0f, 1.0f);
+
+  overlayTextureSlot(material.clearcoat, root, modelPath,
+                     yyjson_obj_get(clearcoatExt, "clearcoatTexture"));
+  overlayTextureSlot(material.clearcoatRoughness, root, modelPath,
+                     yyjson_obj_get(clearcoatExt, "clearcoatRoughnessTexture"));
+  overlayTextureSlot(material.clearcoatNormal, root, modelPath,
+                     yyjson_obj_get(clearcoatExt, "clearcoatNormalTexture"),
+                     &material.clearcoatNormalScale);
+}
+
+void overlaySheenExtension(ImportedMaterialInfo &material, yyjson_val *root,
+                           const std::filesystem::path &modelPath,
+                           yyjson_val *sheenExt) {
+  if (!yyjson_is_obj(sheenExt)) {
+    return;
+  }
+
+  (void)tryReadJsonVec3(yyjson_obj_get(sheenExt, "sheenColorFactor"),
+                        material.sheenColorFactor);
+  material.sheenColorFactor = glm::clamp(material.sheenColorFactor, 0.0f, 1.0f);
+
+  (void)tryReadJsonFloat(yyjson_obj_get(sheenExt, "sheenRoughnessFactor"),
+                         material.sheenRoughnessFactor);
+  material.sheenRoughnessFactor =
+      std::clamp(material.sheenRoughnessFactor, 0.0f, 1.0f);
+
+  overlayTextureSlot(material.sheenColor, root, modelPath,
+                     yyjson_obj_get(sheenExt, "sheenColorTexture"));
+  overlayTextureSlot(material.sheenRoughness, root, modelPath,
+                     yyjson_obj_get(sheenExt, "sheenRoughnessTexture"));
+}
+
+void overlaySpecularExtension(ImportedMaterialInfo &material, yyjson_val *root,
+                              const std::filesystem::path &modelPath,
+                              yyjson_val *specularExt) {
+  if (!yyjson_is_obj(specularExt)) {
+    return;
+  }
+
+  (void)tryReadJsonFloat(yyjson_obj_get(specularExt, "specularFactor"),
+                         material.specularFactor);
+  material.specularFactor = std::clamp(material.specularFactor, 0.0f, 1.0f);
+
+  (void)tryReadJsonVec3(yyjson_obj_get(specularExt, "specularColorFactor"),
+                        material.specularColorFactor);
+  material.specularColorFactor = glm::max(material.specularColorFactor, 0.0f);
+
+  overlayTextureSlot(material.specular, root, modelPath,
+                     yyjson_obj_get(specularExt, "specularTexture"));
+  overlayTextureSlot(material.specularColor, root, modelPath,
+                     yyjson_obj_get(specularExt, "specularColorTexture"));
+}
+
+void overlayTransmissionExtension(ImportedMaterialInfo &material,
+                                  yyjson_val *root,
+                                  const std::filesystem::path &modelPath,
+                                  yyjson_val *transmissionExt) {
+  if (!yyjson_is_obj(transmissionExt)) {
+    return;
+  }
+
+  (void)tryReadJsonFloat(yyjson_obj_get(transmissionExt, "transmissionFactor"),
+                         material.transmissionFactor);
+  material.transmissionFactor =
+      std::clamp(material.transmissionFactor, 0.0f, 1.0f);
+  overlayTextureSlot(material.transmission, root, modelPath,
+                     yyjson_obj_get(transmissionExt, "transmissionTexture"));
+}
+
+void overlayVolumeExtension(ImportedMaterialInfo &material, yyjson_val *root,
+                            const std::filesystem::path &modelPath,
+                            yyjson_val *volumeExt) {
+  if (!yyjson_is_obj(volumeExt)) {
+    return;
+  }
+
+  (void)tryReadJsonFloat(yyjson_obj_get(volumeExt, "thicknessFactor"),
+                         material.thicknessFactor);
+  material.thicknessFactor = std::max(material.thicknessFactor, 0.0f);
+  (void)tryReadJsonVec3(yyjson_obj_get(volumeExt, "attenuationColor"),
+                        material.attenuationColor);
+  material.attenuationColor = glm::clamp(material.attenuationColor, 0.0f, 1.0f);
+  (void)tryReadJsonFloat(yyjson_obj_get(volumeExt, "attenuationDistance"),
+                         material.attenuationDistance);
+  material.attenuationDistance = std::max(material.attenuationDistance, 0.0f);
+  overlayTextureSlot(material.thickness, root, modelPath,
+                     yyjson_obj_get(volumeExt, "thicknessTexture"));
+}
+
+void overlayIorExtension(ImportedMaterialInfo &material, yyjson_val *iorExt) {
+  if (!yyjson_is_obj(iorExt)) {
+    return;
+  }
+
+  (void)tryReadJsonFloat(yyjson_obj_get(iorExt, "ior"), material.ior);
+  material.ior = sanitizeImportedIor(
+      material.ior, "MeshImporter::overlayIorExtension",
+      material.name.empty() ? nullptr : material.name.c_str());
+}
+
+glm::vec3 extractTransformScale(const aiMatrix4x4 &transform) {
+  const aiVector3D origin = transform * aiVector3D(0.0f, 0.0f, 0.0f);
+  const aiVector3D xAxis = transform * aiVector3D(1.0f, 0.0f, 0.0f) - origin;
+  const aiVector3D yAxis = transform * aiVector3D(0.0f, 1.0f, 0.0f) - origin;
+  const aiVector3D zAxis = transform * aiVector3D(0.0f, 0.0f, 1.0f) - origin;
+  return glm::max(glm::vec3(xAxis.Length(), yAxis.Length(), zAxis.Length()),
+                  glm::vec3(1.0e-6f));
+}
+
+glm::vec3 readGltfNodeLocalScale(yyjson_val *nodeValue) {
+  if (!yyjson_is_obj(nodeValue)) {
+    return glm::vec3(1.0f);
+  }
+
+  glm::vec3 scale(1.0f);
+  if (tryReadJsonVec3(yyjson_obj_get(nodeValue, "scale"), scale)) {
+    return scale;
+  }
+
+  yyjson_val *matrixValue = yyjson_obj_get(nodeValue, "matrix");
+  if (!yyjson_is_arr(matrixValue) || yyjson_arr_size(matrixValue) < 16u) {
+    return scale;
+  }
+
+  std::array<float, 16> matrix{};
+  for (uint32_t i = 0; i < 16u; ++i) {
+    if (!tryReadJsonFloat(yyjson_arr_get(matrixValue, i), matrix[i])) {
+      return glm::vec3(1.0f);
+    }
+  }
+
+  const glm::vec3 basisX(matrix[0], matrix[1], matrix[2]);
+  const glm::vec3 basisY(matrix[4], matrix[5], matrix[6]);
+  const glm::vec3 basisZ(matrix[8], matrix[9], matrix[10]);
+  return glm::max(
+      glm::vec3(glm::length(basisX), glm::length(basisY), glm::length(basisZ)),
+      glm::vec3(1.0e-6f));
+}
+
+void collectGltfMeshInstanceScalesRecursive(
+    yyjson_val *nodes, yyjson_val *nodeValue, const glm::vec3 &parentScale,
+    std::pmr::vector<GltfMeshInstanceScale> &out) {
+  if (!yyjson_is_obj(nodeValue)) {
+    return;
+  }
+
+  const glm::vec3 localScale = readGltfNodeLocalScale(nodeValue);
+  const glm::vec3 globalScale = parentScale * localScale;
+
+  uint32_t meshIndex = 0;
+  if (tryReadJsonUint32(yyjson_obj_get(nodeValue, "mesh"), meshIndex)) {
+    out.push_back(GltfMeshInstanceScale{
+        .meshIndex = meshIndex,
+        .scale = globalScale,
+    });
+  }
+
+  yyjson_val *childrenValue = yyjson_obj_get(nodeValue, "children");
+  if (!yyjson_is_arr(childrenValue)) {
+    return;
+  }
+
+  yyjson_arr_iter childIter = yyjson_arr_iter_with(childrenValue);
+  yyjson_val *childValue = nullptr;
+  while ((childValue = yyjson_arr_iter_next(&childIter)) != nullptr) {
+    uint32_t childIndex = 0;
+    if (!tryReadJsonUint32(childValue, childIndex)) {
+      continue;
+    }
+    yyjson_val *childNode = yyjson_arr_get(nodes, childIndex);
+    collectGltfMeshInstanceScalesRecursive(nodes, childNode, globalScale, out);
+  }
+}
+
+YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path);
+
+Result<std::pmr::vector<GltfMeshInstanceScale>, std::string>
+loadGltfMeshInstanceScales(std::string_view path,
+                           std::pmr::memory_resource *mem) {
+  if (!isGltfJsonAssetPath(path)) {
+    return Result<std::pmr::vector<GltfMeshInstanceScale>, std::string>::
+        makeResult(std::pmr::vector<GltfMeshInstanceScale>(mem));
+  }
+
+  auto docResult = loadGltfJsonDocument(std::filesystem::path(path));
+  if (docResult.hasError()) {
+    return Result<std::pmr::vector<GltfMeshInstanceScale>,
+                  std::string>::makeError(docResult.error());
+  }
+
+  yyjson_doc *doc = docResult.value().get();
+  yyjson_val *root = yyjson_doc_get_root(doc);
+  if (!yyjson_is_obj(root)) {
+    return Result<std::pmr::vector<GltfMeshInstanceScale>,
+                  std::string>::makeError("glTF root is not an object");
+  }
+
+  yyjson_val *nodes = yyjson_obj_get(root, "nodes");
+  yyjson_val *scenes = yyjson_obj_get(root, "scenes");
+  if (!yyjson_is_arr(nodes) || !yyjson_is_arr(scenes)) {
+    return Result<std::pmr::vector<GltfMeshInstanceScale>, std::string>::
+        makeResult(std::pmr::vector<GltfMeshInstanceScale>(mem));
+  }
+
+  uint32_t sceneIndex = 0u;
+  (void)tryReadJsonUint32(yyjson_obj_get(root, "scene"), sceneIndex);
+  yyjson_val *sceneValue = yyjson_arr_get(scenes, sceneIndex);
+  if (!yyjson_is_obj(sceneValue)) {
+    sceneValue = yyjson_arr_get(scenes, 0u);
+  }
+  if (!yyjson_is_obj(sceneValue)) {
+    return Result<std::pmr::vector<GltfMeshInstanceScale>, std::string>::
+        makeResult(std::pmr::vector<GltfMeshInstanceScale>(mem));
+  }
+
+  std::pmr::vector<GltfMeshInstanceScale> out(mem);
+  yyjson_val *sceneNodes = yyjson_obj_get(sceneValue, "nodes");
+  if (!yyjson_is_arr(sceneNodes)) {
+    return Result<std::pmr::vector<GltfMeshInstanceScale>,
+                  std::string>::makeResult(std::move(out));
+  }
+
+  out.reserve(yyjson_arr_size(sceneNodes));
+  yyjson_arr_iter nodeIter = yyjson_arr_iter_with(sceneNodes);
+  yyjson_val *nodeIndexValue = nullptr;
+  while ((nodeIndexValue = yyjson_arr_iter_next(&nodeIter)) != nullptr) {
+    uint32_t nodeIndex = 0;
+    if (!tryReadJsonUint32(nodeIndexValue, nodeIndex)) {
+      continue;
+    }
+    yyjson_val *nodeValue = yyjson_arr_get(nodes, nodeIndex);
+    collectGltfMeshInstanceScalesRecursive(nodes, nodeValue, glm::vec3(1.0f),
+                                           out);
+  }
+
+  return Result<std::pmr::vector<GltfMeshInstanceScale>,
+                std::string>::makeResult(std::move(out));
+}
+
+glm::vec3
+resolveAuthoredScale(const AssimpMeshInstance &instance,
+                     std::span<const GltfMeshInstanceScale> gltfInstanceScales,
+                     size_t instanceOrdinal) {
+  glm::vec3 authoredScale = extractTransformScale(instance.transform);
+  if (instanceOrdinal < gltfInstanceScales.size()) {
+    const GltfMeshInstanceScale &gltfScale =
+        gltfInstanceScales[instanceOrdinal];
+    if (gltfScale.meshIndex == instance.meshIndex) {
+      return gltfScale.scale;
+    }
+  }
+  return authoredScale;
 }
 
 void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
@@ -438,78 +837,124 @@ void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
 
   yyjson_val *extensions = yyjson_obj_get(materialValue, "extensions");
   if (!yyjson_is_obj(extensions)) {
-    updateDerivedSheenState(material);
+    finalizeImportedMaterialState(material);
     return;
   }
 
-  yyjson_val *clearcoatExt =
-      yyjson_obj_get(extensions, "KHR_materials_clearcoat");
-  if (yyjson_is_obj(clearcoatExt)) {
-    yyjson_val *clearcoatFactorValue =
-        yyjson_obj_get(clearcoatExt, "clearcoatFactor");
-    (void)tryReadJsonFloat(clearcoatFactorValue, material.clearcoatFactor);
-    material.clearcoatFactor = std::clamp(material.clearcoatFactor, 0.0f, 1.0f);
-
-    yyjson_val *clearcoatRoughnessFactorValue =
-        yyjson_obj_get(clearcoatExt, "clearcoatRoughnessFactor");
-    (void)tryReadJsonFloat(clearcoatRoughnessFactorValue,
-                           material.clearcoatRoughnessFactor);
-    material.clearcoatRoughnessFactor =
-        std::clamp(material.clearcoatRoughnessFactor, 0.0f, 1.0f);
-
-    overlayTextureSlot(material.clearcoat, root, modelPath,
-                       yyjson_obj_get(clearcoatExt, "clearcoatTexture"));
-    overlayTextureSlot(
-        material.clearcoatRoughness, root, modelPath,
-        yyjson_obj_get(clearcoatExt, "clearcoatRoughnessTexture"));
-    overlayTextureSlot(material.clearcoatNormal, root, modelPath,
-                       yyjson_obj_get(clearcoatExt, "clearcoatNormalTexture"),
-                       &material.clearcoatNormalScale);
-  }
-
-  yyjson_val *sheenExt = yyjson_obj_get(extensions, "KHR_materials_sheen");
-  if (yyjson_is_obj(sheenExt)) {
-    (void)tryReadJsonVec3(yyjson_obj_get(sheenExt, "sheenColorFactor"),
-                          material.sheenColorFactor);
-    material.sheenColorFactor =
-        glm::clamp(material.sheenColorFactor, 0.0f, 1.0f);
-    (void)tryReadJsonFloat(yyjson_obj_get(sheenExt, "sheenRoughnessFactor"),
-                           material.sheenRoughnessFactor);
-    material.sheenRoughnessFactor =
-        std::clamp(material.sheenRoughnessFactor, 0.0f, 1.0f);
-
-    overlayTextureSlot(material.sheenColor, root, modelPath,
-                       yyjson_obj_get(sheenExt, "sheenColorTexture"));
-    overlayTextureSlot(material.sheenRoughness, root, modelPath,
-                       yyjson_obj_get(sheenExt, "sheenRoughnessTexture"));
-  }
-
-  updateDerivedSheenState(material);
+  overlayEmissiveStrengthExtension(
+      material, yyjson_obj_get(extensions, "KHR_materials_emissive_strength"));
+  overlayClearcoatExtension(
+      material, root, modelPath,
+      yyjson_obj_get(extensions, "KHR_materials_clearcoat"));
+  overlaySpecularExtension(
+      material, root, modelPath,
+      yyjson_obj_get(extensions, "KHR_materials_specular"));
+  overlaySheenExtension(material, root, modelPath,
+                        yyjson_obj_get(extensions, "KHR_materials_sheen"));
+  overlayTransmissionExtension(
+      material, root, modelPath,
+      yyjson_obj_get(extensions, "KHR_materials_transmission"));
+  overlayVolumeExtension(material, root, modelPath,
+                         yyjson_obj_get(extensions, "KHR_materials_volume"));
+  overlayIorExtension(material,
+                      yyjson_obj_get(extensions, "KHR_materials_ior"));
+  finalizeImportedMaterialState(material);
 }
 
-Result<std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>, std::string>
-loadGltfJsonDocument(const std::filesystem::path &path) {
+YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path) {
+  const auto parseJsonDocument = [](std::string jsonText) -> YyJsonDocResult {
+    yyjson_read_err parseError{};
+    yyjson_doc *rawDoc = yyjson_read_opts(jsonText.data(), jsonText.size(), 0,
+                                          nullptr, &parseError);
+    if (rawDoc == nullptr) {
+      return YyJsonDocResult::makeError("yyjson parse failed at offset " +
+                                        std::to_string(parseError.pos));
+    }
+    return YyJsonDocResult::makeResult(YyJsonDocPtr(rawDoc, &yyjson_doc_free));
+  };
+  const auto readU32 = [](std::span<const uint8_t> bytes, size_t offset,
+                          uint32_t &out) -> bool {
+    if (offset + sizeof(uint32_t) > bytes.size()) {
+      return false;
+    }
+    out = static_cast<uint32_t>(bytes[offset]) |
+          (static_cast<uint32_t>(bytes[offset + 1u]) << 8u) |
+          (static_cast<uint32_t>(bytes[offset + 2u]) << 16u) |
+          (static_cast<uint32_t>(bytes[offset + 3u]) << 24u);
+    return true;
+  };
+
   std::ifstream file(path, std::ios::binary);
   if (!file.is_open()) {
-    return Result<std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>,
-                  std::string>::makeError("Failed to open glTF overlay JSON");
+    return YyJsonDocResult::makeError(
+        "Failed to open glTF material overlay source");
   }
 
-  std::ostringstream jsonStream;
-  jsonStream << file.rdbuf();
-  std::string jsonText = jsonStream.str();
-  yyjson_read_err parseError{};
-  yyjson_doc *rawDoc = yyjson_read_opts(jsonText.data(), jsonText.size(), 0,
-                                        nullptr, &parseError);
-  if (rawDoc == nullptr) {
-    return Result<std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>,
-                  std::string>::makeError("yyjson parse failed at offset " +
-                                          std::to_string(parseError.pos));
+  if (hasExtension(path, ".gltf")) {
+    std::ostringstream jsonStream;
+    jsonStream << file.rdbuf();
+    return parseJsonDocument(jsonStream.str());
   }
-  return Result<std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>,
-                std::string>::
-      makeResult(std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>(
-          rawDoc, &yyjson_doc_free));
+
+  if (!hasExtension(path, ".glb")) {
+    return YyJsonDocResult::makeError(
+        "Unsupported glTF material overlay file extension");
+  }
+
+  file.seekg(0, std::ios::end);
+  const std::streamoff fileSize = file.tellg();
+  if (fileSize < 0) {
+    return YyJsonDocResult::makeError("Failed to determine .glb file size");
+  }
+  file.seekg(0, std::ios::beg);
+
+  std::vector<uint8_t> bytes(static_cast<size_t>(fileSize));
+  if (!bytes.empty() &&
+      !file.read(reinterpret_cast<char *>(bytes.data()), fileSize)) {
+    return YyJsonDocResult::makeError("Failed to read .glb file");
+  }
+  if (bytes.size() < 20u) {
+    return YyJsonDocResult::makeError(".glb file is too small");
+  }
+
+  uint32_t magic = 0u;
+  uint32_t version = 0u;
+  uint32_t declaredLength = 0u;
+  if (!readU32(bytes, 0u, magic) || !readU32(bytes, 4u, version) ||
+      !readU32(bytes, 8u, declaredLength)) {
+    return YyJsonDocResult::makeError("Failed to read .glb header");
+  }
+  if (magic != kGlbMagic) {
+    return YyJsonDocResult::makeError(".glb magic mismatch");
+  }
+  if (version != kGlbVersion2) {
+    return YyJsonDocResult::makeError(".glb version is not 2");
+  }
+  if (declaredLength != bytes.size()) {
+    return YyJsonDocResult::makeError(".glb declared length mismatch");
+  }
+
+  size_t chunkOffset = 12u;
+  while (chunkOffset + 8u <= bytes.size()) {
+    uint32_t chunkLength = 0u;
+    uint32_t chunkType = 0u;
+    if (!readU32(bytes, chunkOffset, chunkLength) ||
+        !readU32(bytes, chunkOffset + 4u, chunkType)) {
+      return YyJsonDocResult::makeError("Failed to read .glb chunk header");
+    }
+    chunkOffset += 8u;
+    if (chunkLength > bytes.size() - chunkOffset) {
+      return YyJsonDocResult::makeError(".glb chunk exceeds file bounds");
+    }
+    if (chunkType == kGlbChunkTypeJson) {
+      return parseJsonDocument(std::string(
+          reinterpret_cast<const char *>(bytes.data() + chunkOffset),
+          chunkLength));
+    }
+    chunkOffset += chunkLength;
+  }
+
+  return YyJsonDocResult::makeError(".glb JSON chunk is missing");
 }
 
 Result<bool, std::string>
@@ -519,8 +964,7 @@ overlayMaterialInfoFromGltf(std::string_view path, ImportedMaterialSet &set) {
   if (docResult.hasError()) {
     return Result<bool, std::string>::makeError(docResult.error());
   }
-  std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> doc =
-      std::move(docResult.value());
+  YyJsonDocPtr doc = std::move(docResult.value());
   yyjson_val *root = yyjson_doc_get_root(doc.get());
   if (!yyjson_is_obj(root)) {
     return Result<bool, std::string>::makeError(
@@ -644,12 +1088,47 @@ ImportedMaterialInfo parseMaterial(const aiMaterial &material,
   }
 
 #if NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS
-  ai_real normalScale = 1.0f;
+  ai_real transmissionFactor = 0.0f;
+  if (material.Get(AI_MATKEY_TRANSMISSION_FACTOR, transmissionFactor) ==
+      aiReturn_SUCCESS) {
+    parsed.transmissionFactor =
+        std::clamp(static_cast<float>(transmissionFactor), 0.0f, 1.0f);
+  }
+  ai_real thicknessFactor = 0.0f;
+  if (material.Get(AI_MATKEY_VOLUME_THICKNESS_FACTOR, thicknessFactor) ==
+      aiReturn_SUCCESS) {
+    parsed.thicknessFactor =
+        std::max(static_cast<float>(thicknessFactor), 0.0f);
+  }
+  ai_real attenuationDistance = 0.0f;
+  if (material.Get(AI_MATKEY_VOLUME_ATTENUATION_DISTANCE,
+                   attenuationDistance) == aiReturn_SUCCESS) {
+    parsed.attenuationDistance =
+        std::max(static_cast<float>(attenuationDistance), 0.0f);
+  }
+  aiColor4D attenuationColor(1.0f, 1.0f, 1.0f, 1.0f);
+  if (material.Get(AI_MATKEY_VOLUME_ATTENUATION_COLOR, attenuationColor) ==
+      aiReturn_SUCCESS) {
+    parsed.attenuationColor = glm::clamp(
+        glm::vec3(attenuationColor.r, attenuationColor.g, attenuationColor.b),
+        0.0f, 1.0f);
+  }
+#endif
+
+  ai_real ior = kDefaultIor;
+  if (material.Get(AI_MATKEY_REFRACTI, ior) == aiReturn_SUCCESS) {
+    parsed.ior = sanitizeImportedIor(
+        static_cast<float>(ior), "MeshImporter::parseMaterial",
+        parsed.name.empty() ? nullptr : parsed.name.c_str());
+  }
+
+#if NURI_ASSIMP_HAS_GLTF_MATERIAL_KEYS
+  ai_real normalScale = kDefaultTextureScale;
   if (material.Get(AI_MATKEY_GLTF_TEXTURE_SCALE(aiTextureType_NORMALS, 0),
                    normalScale) == aiReturn_SUCCESS) {
     parsed.normalScale = static_cast<float>(normalScale);
   }
-  ai_real occlusionStrength = 1.0f;
+  ai_real occlusionStrength = kDefaultTextureScale;
   if (material.Get(
           AI_MATKEY_GLTF_TEXTURE_SCALE(aiTextureType_AMBIENT_OCCLUSION, 0),
           occlusionStrength) == aiReturn_SUCCESS) {
@@ -666,13 +1145,7 @@ ImportedMaterialInfo parseMaterial(const aiMaterial &material,
   aiString alphaMode;
   if (material.Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == aiReturn_SUCCESS) {
     const std::string_view alphaModeStr(alphaMode.C_Str(), alphaMode.length);
-    if (alphaModeStr == "MASK") {
-      parsed.alphaMode = ImportedMaterialAlphaMode::Mask;
-    } else if (alphaModeStr == "BLEND") {
-      parsed.alphaMode = ImportedMaterialAlphaMode::Blend;
-    } else {
-      parsed.alphaMode = ImportedMaterialAlphaMode::Opaque;
-    }
+    parsed.alphaMode = parseGltfAlphaMode(alphaModeStr);
   }
 
   ai_real alphaCutoff = parsed.alphaCutoff;
@@ -699,6 +1172,12 @@ ImportedMaterialInfo parseMaterial(const aiMaterial &material,
   parsed.emissive = firstAvailableTextureSlot(
       material, modelPath,
       std::array<aiTextureType, 1>{aiTextureType_EMISSIVE});
+  parsed.transmission = readMaterialTextureSlot(
+      material, aiTextureType_TRANSMISSION, 0u, modelPath);
+  parsed.thickness = readMaterialTextureSlot(
+      material, aiTextureType_TRANSMISSION, 1u, modelPath);
+  updateDerivedSheenState(parsed);
+  updateDerivedTransmissionState(parsed);
 
   return parsed;
 }
@@ -807,21 +1286,94 @@ void remapMeshVertices(std::pmr::vector<Vertex> &vertices,
   vertices.swap(remappedVertices);
 }
 
-void extractMeshGeometry(const aiMesh &mesh,
+glm::vec3 normalizeTransformedDirection(const aiVector3D &direction) {
+  const glm::vec3 value(direction.x, direction.y, direction.z);
+  const float length2 = glm::dot(value, value);
+  if (length2 <= std::numeric_limits<float>::epsilon()) {
+    return glm::vec3(0.0f);
+  }
+  return value * glm::inversesqrt(length2);
+}
+
+void collectMeshInstancesRecursive(const aiScene &scene, const aiNode &node,
+                                   const aiMatrix4x4 &parentTransform,
+                                   std::pmr::vector<AssimpMeshInstance> &out) {
+  const aiMatrix4x4 globalTransform = parentTransform * node.mTransformation;
+
+  for (unsigned int meshSlot = 0; meshSlot < node.mNumMeshes; ++meshSlot) {
+    const unsigned int meshIndex = node.mMeshes[meshSlot];
+    if (meshIndex >= scene.mNumMeshes) {
+      continue;
+    }
+    const aiMesh *mesh = scene.mMeshes[meshIndex];
+    if (!mesh) {
+      continue;
+    }
+    out.push_back(AssimpMeshInstance{
+        .mesh = mesh,
+        .meshIndex = meshIndex,
+        .transform = globalTransform,
+    });
+  }
+
+  for (unsigned int childIndex = 0; childIndex < node.mNumChildren;
+       ++childIndex) {
+    const aiNode *child = node.mChildren[childIndex];
+    if (!child) {
+      continue;
+    }
+    collectMeshInstancesRecursive(scene, *child, globalTransform, out);
+  }
+}
+
+std::pmr::vector<AssimpMeshInstance>
+collectMeshInstances(const aiScene &scene, std::pmr::memory_resource *mem) {
+  std::pmr::vector<AssimpMeshInstance> instances(mem);
+  if (scene.mRootNode != nullptr) {
+    collectMeshInstancesRecursive(scene, *scene.mRootNode, aiMatrix4x4(),
+                                  instances);
+  }
+
+  if (!instances.empty()) {
+    return instances;
+  }
+
+  instances.reserve(scene.mNumMeshes);
+  for (unsigned int meshIndex = 0; meshIndex < scene.mNumMeshes; ++meshIndex) {
+    const aiMesh *mesh = scene.mMeshes[meshIndex];
+    if (!mesh) {
+      continue;
+    }
+    instances.push_back(AssimpMeshInstance{
+        .mesh = mesh,
+        .meshIndex = meshIndex,
+        .transform = aiMatrix4x4(),
+    });
+  }
+  return instances;
+}
+
+void extractMeshGeometry(const aiMesh &mesh, const aiMatrix4x4 &transform,
                          std::pmr::vector<Vertex> &outVertices,
                          std::pmr::vector<uint32_t> &outIndices) {
   outVertices.clear();
   outVertices.reserve(mesh.mNumVertices);
+  aiMatrix3x3 normalTransform(transform);
+  normalTransform.Inverse().Transpose();
+  const float tangentHandednessScale =
+      normalTransform.Determinant() < 0.0f ? -1.0f : 1.0f;
 
   for (unsigned int vertexIndex = 0; vertexIndex < mesh.mNumVertices;
        ++vertexIndex) {
     Vertex vertex{};
     const aiVector3D &pos = mesh.mVertices[vertexIndex];
-    vertex.position = {pos.x, pos.y, pos.z};
+    const aiVector3D transformedPosition = transform * pos;
+    vertex.position = {transformedPosition.x, transformedPosition.y,
+                       transformedPosition.z};
 
     if (mesh.HasNormals()) {
       const aiVector3D &normal = mesh.mNormals[vertexIndex];
-      vertex.normal = {normal.x, normal.y, normal.z};
+      vertex.normal = normalizeTransformedDirection(normalTransform * normal);
     }
 
     if (mesh.HasTextureCoords(0)) {
@@ -837,10 +1389,12 @@ void extractMeshGeometry(const aiMesh &mesh,
       const aiVector3D &tangent = mesh.mTangents[vertexIndex];
       const aiVector3D &bitangent = mesh.mBitangents[vertexIndex];
       const glm::vec3 n = vertex.normal;
-      const glm::vec3 t = glm::vec3(tangent.x, tangent.y, tangent.z);
-      const glm::vec3 b = glm::vec3(bitangent.x, bitangent.y, bitangent.z);
+      const glm::vec3 t =
+          normalizeTransformedDirection(normalTransform * tangent);
+      const glm::vec3 b =
+          normalizeTransformedDirection(normalTransform * bitangent);
       const float sign = (glm::dot(glm::cross(n, t), b) < 0.0f) ? -1.0f : 1.0f;
-      vertex.tangent = {tangent.x, tangent.y, tangent.z, sign};
+      vertex.tangent = {t.x, t.y, t.z, sign * tangentHandednessScale};
     }
 
     outVertices.push_back(vertex);
@@ -962,7 +1516,8 @@ void optimizeVertexFetchForAllLods(
 
 void appendSubmeshToMeshData(
     MeshData &data, const aiMesh &mesh, std::span<const Vertex> vertices,
-    const BoundingBox &bounds, uint32_t lodCount,
+    const BoundingBox &bounds, const glm::vec3 &authoredScale,
+    uint32_t lodCount,
     std::span<const std::pmr::vector<uint32_t>> lodIndexBuffers,
     const std::array<float, Submesh::kMaxLodCount> &lodErrors,
     uint32_t meshIndex) {
@@ -972,6 +1527,7 @@ void appendSubmeshToMeshData(
   Submesh submesh{};
   submesh.materialIndex = mesh.mMaterialIndex;
   submesh.bounds = bounds;
+  submesh.authoredScale = authoredScale;
   submesh.lodCount = lodCount;
 
   for (uint32_t lodIndex = 0; lodIndex < lodCount; ++lodIndex) {
@@ -1003,9 +1559,11 @@ void appendSubmeshToMeshData(
 }
 
 unsigned int buildAssimpFlags(const MeshImportOptions &options) {
-  // Keep flags: baseline import sanitation for the meshopt pipeline.
+  // Pre-transform vertices because the runtime model format does not retain
+  // source scene-graph transforms.
   unsigned int flags = aiProcess_SortByPType | aiProcess_FindDegenerates |
-                       aiProcess_FindInvalidData;
+                       aiProcess_FindInvalidData |
+                       aiProcess_PreTransformVertices;
 
   if (options.triangulate) {
     flags |= aiProcess_Triangulate;
@@ -1081,14 +1639,34 @@ MeshImporter::loadFromFile(std::string_view path,
   NURI_LOG_DEBUG(
       "MeshImporter::loadFromFile: Imported model '%s' with %u meshes",
       pathStr.c_str(), scene->mNumMeshes);
+  std::pmr::vector<AssimpMeshInstance> meshInstances =
+      collectMeshInstances(*scene, mem);
+  std::pmr::vector<GltfMeshInstanceScale> gltfInstanceScales(mem);
+  auto gltfScaleResult = loadGltfMeshInstanceScales(path, mem);
+  if (gltfScaleResult.hasError()) {
+    NURI_LOG_WARNING("MeshImporter::loadFromFile: Failed to load glTF node "
+                     "scales for '%s': %s",
+                     pathStr.c_str(), gltfScaleResult.error().c_str());
+  } else {
+    gltfInstanceScales = std::move(gltfScaleResult.value());
+  }
+  if (meshInstances.empty()) {
+    NURI_LOG_WARNING("MeshImporter::loadFromFile: Scene '%s' has no mesh "
+                     "instances after node traversal",
+                     pathStr.c_str());
+    return nuri::Result<MeshData, std::string>::makeError(
+        "Assimp scene has no mesh instances");
+  }
 
   MeshData data(mem);
   const uint32_t requestedLodCount = clampLodCount(options);
 
   size_t totalVertices = 0;
   size_t totalIndices = 0;
-  for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
-    const aiMesh *mesh = scene->mMeshes[i];
+  for (size_t instanceOrdinal = 0; instanceOrdinal < meshInstances.size();
+       ++instanceOrdinal) {
+    const AssimpMeshInstance &instance = meshInstances[instanceOrdinal];
+    const aiMesh *mesh = instance.mesh;
     if (!mesh) {
       continue;
     }
@@ -1105,7 +1683,7 @@ MeshImporter::loadFromFile(std::string_view path,
 
   data.vertices.reserve(totalVertices);
   data.indices.reserve(totalIndices);
-  data.submeshes.reserve(scene->mNumMeshes);
+  data.submeshes.reserve(meshInstances.size());
 
   if (scene->mName.length > 0) {
     data.name.assign(scene->mName.C_Str(), scene->mName.length);
@@ -1120,8 +1698,10 @@ MeshImporter::loadFromFile(std::string_view path,
   size_t insufficientGeometrySampleCount = 0;
 
   NURI_LOG_DEBUG("MeshImporter::loadFromFile: Mesh optimization processing");
-  for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
-    const aiMesh *mesh = scene->mMeshes[i];
+  for (size_t instanceOrdinal = 0; instanceOrdinal < meshInstances.size();
+       ++instanceOrdinal) {
+    const AssimpMeshInstance &instance = meshInstances[instanceOrdinal];
+    const aiMesh *mesh = instance.mesh;
     if (!mesh) {
       continue;
     }
@@ -1133,13 +1713,14 @@ MeshImporter::loadFromFile(std::string_view path,
         lodIndexBuffers = makeLodIndexBuffers(scopedScratch.resource());
     std::array<float, Submesh::kMaxLodCount> lodErrors{};
 
-    extractMeshGeometry(*mesh, meshVertices, lod0Indices);
+    extractMeshGeometry(*mesh, instance.transform, meshVertices, lod0Indices);
 
     if (meshVertices.empty() || lod0Indices.size() < kTriangleIndexCount) {
       ++insufficientGeometryMeshCount;
       if (insufficientGeometrySampleCount <
           insufficientGeometryMeshSamples.size()) {
-        insufficientGeometryMeshSamples[insufficientGeometrySampleCount++] = i;
+        insufficientGeometryMeshSamples[insufficientGeometrySampleCount++] =
+            instance.meshIndex;
       }
       continue;
     }
@@ -1153,9 +1734,9 @@ MeshImporter::loadFromFile(std::string_view path,
     }
 
     lodIndexBuffers[0] = std::move(lod0Indices);
-    const uint32_t generatedLodCount =
-        buildLodIndexBuffers(options, requestedLodCount, i, meshVertices,
-                             options.optimize, lodIndexBuffers, lodErrors);
+    const uint32_t generatedLodCount = buildLodIndexBuffers(
+        options, requestedLodCount, instance.meshIndex, meshVertices,
+        options.optimize, lodIndexBuffers, lodErrors);
 
     if (options.optimize) {
       optimizeVertexFetchForAllLods(meshVertices, generatedLodCount,
@@ -1163,8 +1744,11 @@ MeshImporter::loadFromFile(std::string_view path,
     }
 
     const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
+    const glm::vec3 authoredScale =
+        resolveAuthoredScale(instance, gltfInstanceScales, instanceOrdinal);
     appendSubmeshToMeshData(data, *mesh, meshVertices, submeshBounds,
-                            generatedLodCount, lodIndexBuffers, lodErrors, i);
+                            authoredScale, generatedLodCount, lodIndexBuffers,
+                            lodErrors, instance.meshIndex);
   }
   NURI_LOG_DEBUG(
       "MeshImporter::loadFromFile: Mesh optimization processing complete");
@@ -1234,7 +1818,7 @@ MeshImporter::loadMaterialInfoFromFile(std::string_view path) {
     set.materials.push_back(std::move(parsed));
   }
 
-  if (hasExtension(path, ".gltf")) {
+  if (isGltfJsonAssetPath(path)) {
     auto overlayResult = overlayMaterialInfoFromGltf(path, set);
     if (overlayResult.hasError()) {
       NURI_LOG_WARNING(
@@ -1242,11 +1826,6 @@ MeshImporter::loadMaterialInfoFromFile(std::string_view path) {
           "skipped for '%s': %s",
           pathStr.c_str(), overlayResult.error().c_str());
     }
-  } else if (hasExtension(path, ".glb")) {
-    NURI_LOG_WARNING("MeshImporter::loadMaterialInfoFromFile: .glb glTF "
-                     "material overlay is unsupported for '%s'; relying on "
-                     "Assimp only",
-                     pathStr.c_str());
   }
 
   NURI_LOG_DEBUG("MeshImporter::loadMaterialInfoFromFile: extracted %zu "

@@ -93,7 +93,8 @@ struct MeshBinarySubmeshRecord {
   uint32_t layoutId = kMeshBinaryLayoutIdPacked32;
   float boundsMin[3] = {0.0f, 0.0f, 0.0f};
   float boundsMax[3] = {0.0f, 0.0f, 0.0f};
-  uint32_t reserved[2] = {0, 0};
+  float authoredScale[3] = {1.0f, 1.0f, 1.0f};
+  uint32_t reserved = 0;
 };
 
 struct MeshBinaryLodRecord {
@@ -113,7 +114,7 @@ struct MeshBinaryBufferSectionHeader {
 static_assert(sizeof(MeshBinaryHeader) == 116);
 static_assert(sizeof(MeshBinarySectionTocEntry) == 32);
 static_assert(sizeof(MeshBinaryVertexLayoutRecord) == 16);
-static_assert(sizeof(MeshBinarySubmeshRecord) == 48);
+static_assert(sizeof(MeshBinarySubmeshRecord) == 56);
 static_assert(sizeof(MeshBinaryLodRecord) == 16);
 static_assert(sizeof(MeshBinaryBufferSectionHeader) == 16);
 static_assert(std::is_standard_layout_v<MeshBinaryHeader>);
