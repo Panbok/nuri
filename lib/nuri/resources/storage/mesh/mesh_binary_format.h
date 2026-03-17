@@ -7,7 +7,7 @@
 namespace nuri {
 
 constexpr uint16_t kMeshBinaryFormatMajorVersion = 1;
-constexpr uint16_t kMeshBinaryFormatMinorVersion = 0;
+constexpr uint16_t kMeshBinaryFormatMinorVersion = 1;
 
 constexpr std::array<char, 8> kMeshBinaryMagic = {'N', 'U', 'R', 'I',
                                                   'M', 'S', 'H', '\0'};
@@ -97,6 +97,16 @@ struct MeshBinarySubmeshRecord {
   uint32_t reserved = 0;
 };
 
+struct MeshBinarySubmeshRecordV0 {
+  uint32_t materialIndex = 0;
+  uint32_t lodFirst = 0;
+  uint32_t lodCount = 0;
+  uint32_t layoutId = kMeshBinaryLayoutIdPacked32;
+  float boundsMin[3] = {0.0f, 0.0f, 0.0f};
+  float boundsMax[3] = {0.0f, 0.0f, 0.0f};
+  uint32_t reserved[2] = {0, 0};
+};
+
 struct MeshBinaryLodRecord {
   uint32_t indexOffset = 0;
   uint32_t indexCount = 0;
@@ -115,18 +125,21 @@ static_assert(sizeof(MeshBinaryHeader) == 116);
 static_assert(sizeof(MeshBinarySectionTocEntry) == 32);
 static_assert(sizeof(MeshBinaryVertexLayoutRecord) == 16);
 static_assert(sizeof(MeshBinarySubmeshRecord) == 56);
+static_assert(sizeof(MeshBinarySubmeshRecordV0) == 48);
 static_assert(sizeof(MeshBinaryLodRecord) == 16);
 static_assert(sizeof(MeshBinaryBufferSectionHeader) == 16);
 static_assert(std::is_standard_layout_v<MeshBinaryHeader>);
 static_assert(std::is_standard_layout_v<MeshBinarySectionTocEntry>);
 static_assert(std::is_standard_layout_v<MeshBinaryVertexLayoutRecord>);
 static_assert(std::is_standard_layout_v<MeshBinarySubmeshRecord>);
+static_assert(std::is_standard_layout_v<MeshBinarySubmeshRecordV0>);
 static_assert(std::is_standard_layout_v<MeshBinaryLodRecord>);
 static_assert(std::is_standard_layout_v<MeshBinaryBufferSectionHeader>);
 static_assert(std::is_trivially_copyable_v<MeshBinaryHeader>);
 static_assert(std::is_trivially_copyable_v<MeshBinarySectionTocEntry>);
 static_assert(std::is_trivially_copyable_v<MeshBinaryVertexLayoutRecord>);
 static_assert(std::is_trivially_copyable_v<MeshBinarySubmeshRecord>);
+static_assert(std::is_trivially_copyable_v<MeshBinarySubmeshRecordV0>);
 static_assert(std::is_trivially_copyable_v<MeshBinaryLodRecord>);
 static_assert(std::is_trivially_copyable_v<MeshBinaryBufferSectionHeader>);
 

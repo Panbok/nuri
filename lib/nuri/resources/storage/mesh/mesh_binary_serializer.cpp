@@ -18,32 +18,6 @@ template <typename T, typename... Args>
   return Result<T, std::string>::makeError(oss.str());
 }
 
-template <typename T = MeshBinaryDecodedMesh, typename... Args>
-  requires(std::is_same_v<T, MeshBinaryDecodedMesh>)
-[[nodiscard]] Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
-makeSerializerError(Args &&...args) {
-  std::ostringstream oss;
-  (oss << ... << std::forward<Args>(args));
-  return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
-      MeshBinaryDeserializeError{
-          .code = MeshBinaryDeserializeErrorCode::InvalidData,
-          .message = oss.str(),
-      });
-}
-
-template <typename T = MeshBinaryDecodedMesh, typename... Args>
-  requires(std::is_same_v<T, MeshBinaryDecodedMesh>)
-[[nodiscard]] Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
-makeSerializerError(MeshBinaryDeserializeErrorCode code, Args &&...args) {
-  std::ostringstream oss;
-  (oss << ... << std::forward<Args>(args));
-  return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
-      MeshBinaryDeserializeError{
-          .code = code,
-          .message = oss.str(),
-      });
-}
-
 template <typename T, typename... Args>
 [[nodiscard]] Result<T, MeshBinaryDeserializeError>
 makeDeserializeError(Args &&...args) {
@@ -329,6 +303,10 @@ buildIndexBufferSection(std::span<const uint32_t> indices,
   if (encodedResult.hasError()) {
     return makeSerializerError<SerializedSection>(encodedResult.error());
   }
+  if (indices.size() > std::numeric_limits<uint32_t>::max()) {
+    return makeSerializerError<SerializedSection>(
+        "meshBinarySerialize: index count exceeds uint32_t");
+  }
 
   return buildCompressedBufferSection(
       kMeshBinarySectionIbuf, encodedResult.value(),
@@ -392,65 +370,111 @@ findRequiredSections(std::span<const MeshBinarySectionTocEntry> toc) {
   };
 
   MeshBinaryRequiredSections sections{};
-  auto vlay = requireSection(kMeshBinarySectionVlay, "VLAY");
+  auto requireAndSet =
+      [&](const MeshBinarySectionTocEntry *MeshBinaryRequiredSections::*member,
+          uint32_t fourcc, std::string_view name)
+      -> Result<std::monostate, MeshBinaryDeserializeError> {
+    auto sectionResult = requireSection(fourcc, name);
+    if (sectionResult.hasError()) {
+      return Result<std::monostate, MeshBinaryDeserializeError>::makeError(
+          sectionResult.error());
+    }
+    sections.*member = sectionResult.value();
+    return Result<std::monostate, MeshBinaryDeserializeError>::makeResult({});
+  };
+
+  auto vlay = requireAndSet(&MeshBinaryRequiredSections::vlay,
+                            kMeshBinarySectionVlay, "VLAY");
   if (vlay.hasError()) {
     return Result<MeshBinaryRequiredSections,
                   MeshBinaryDeserializeError>::makeError(vlay.error());
   }
-  sections.vlay = vlay.value();
-
-  auto smes = requireSection(kMeshBinarySectionSmes, "SMES");
+  auto smes = requireAndSet(&MeshBinaryRequiredSections::smes,
+                            kMeshBinarySectionSmes, "SMES");
   if (smes.hasError()) {
     return Result<MeshBinaryRequiredSections,
                   MeshBinaryDeserializeError>::makeError(smes.error());
   }
-  sections.smes = smes.value();
-
-  auto lods = requireSection(kMeshBinarySectionLods, "LODS");
+  auto lods = requireAndSet(&MeshBinaryRequiredSections::lods,
+                            kMeshBinarySectionLods, "LODS");
   if (lods.hasError()) {
     return Result<MeshBinaryRequiredSections,
                   MeshBinaryDeserializeError>::makeError(lods.error());
   }
-  sections.lods = lods.value();
-
-  auto vbuf = requireSection(kMeshBinarySectionVbuf, "VBUF");
+  auto vbuf = requireAndSet(&MeshBinaryRequiredSections::vbuf,
+                            kMeshBinarySectionVbuf, "VBUF");
   if (vbuf.hasError()) {
     return Result<MeshBinaryRequiredSections,
                   MeshBinaryDeserializeError>::makeError(vbuf.error());
   }
-  sections.vbuf = vbuf.value();
-
-  auto ibuf = requireSection(kMeshBinarySectionIbuf, "IBUF");
+  auto ibuf = requireAndSet(&MeshBinaryRequiredSections::ibuf,
+                            kMeshBinarySectionIbuf, "IBUF");
   if (ibuf.hasError()) {
     return Result<MeshBinaryRequiredSections,
                   MeshBinaryDeserializeError>::makeError(ibuf.error());
   }
-  sections.ibuf = ibuf.value();
 
   return Result<MeshBinaryRequiredSections,
                 MeshBinaryDeserializeError>::makeResult(sections);
 }
 
-[[nodiscard]] Result<bool, MeshBinaryDeserializeError>
+[[nodiscard]] Result<std::monostate, MeshBinaryDeserializeError>
 validateFixedSectionLayout(const MeshBinarySectionTocEntry &entry,
                            uint32_t expectedCount, uint32_t expectedStride,
                            bool requireCountStrideMatch,
                            std::string_view errorMessage) {
   if (entry.count != expectedCount || entry.stride != expectedStride ||
       (requireCountStrideMatch && !sectionSizeMatchesCountStride(entry))) {
-    return makeDeserializeError<bool>(std::string(errorMessage));
+    return makeDeserializeError<std::monostate>(std::string(errorMessage));
   }
-  return Result<bool, MeshBinaryDeserializeError>::makeResult(true);
+  return Result<std::monostate, MeshBinaryDeserializeError>::makeResult({});
 }
 
-[[nodiscard]] Result<bool, MeshBinaryDeserializeError>
+[[nodiscard]] Result<std::monostate, MeshBinaryDeserializeError>
 validateVariableSectionLayout(const MeshBinarySectionTocEntry &entry,
                               uint32_t expectedStride,
                               std::string_view errorMessage) {
   if (entry.stride != expectedStride || !sectionSizeMatchesCountStride(entry)) {
-    return makeDeserializeError<bool>(std::string(errorMessage));
+    return makeDeserializeError<std::monostate>(std::string(errorMessage));
   }
-  return Result<bool, MeshBinaryDeserializeError>::makeResult(true);
+  return Result<std::monostate, MeshBinaryDeserializeError>::makeResult({});
+}
+
+[[nodiscard]] Result<std::pmr::vector<MeshBinarySubmeshRecord>,
+                     MeshBinaryDeserializeError>
+readSubmeshRecords(std::span<const std::byte> fileBytes,
+                   const MeshBinarySectionTocEntry &entry, bool legacyLayout,
+                   std::pmr::memory_resource *memory) {
+  std::pmr::vector<MeshBinarySubmeshRecord> records(memory);
+  if (!legacyLayout) {
+    if (!readPodArray(fileBytes, entry.offset, entry.count, records)) {
+      return makeDeserializeError<std::pmr::vector<MeshBinarySubmeshRecord>>(
+          "meshBinaryDeserialize: failed to read submesh records");
+    }
+    return Result<std::pmr::vector<MeshBinarySubmeshRecord>,
+                  MeshBinaryDeserializeError>::makeResult(std::move(records));
+  }
+
+  std::pmr::vector<MeshBinarySubmeshRecordV0> legacyRecords(memory);
+  if (!readPodArray(fileBytes, entry.offset, entry.count, legacyRecords)) {
+    return makeDeserializeError<std::pmr::vector<MeshBinarySubmeshRecord>>(
+        "meshBinaryDeserialize: failed to read submesh records");
+  }
+
+  records.reserve(legacyRecords.size());
+  for (const MeshBinarySubmeshRecordV0 &legacy : legacyRecords) {
+    MeshBinarySubmeshRecord record{};
+    record.materialIndex = legacy.materialIndex;
+    record.lodFirst = legacy.lodFirst;
+    record.lodCount = legacy.lodCount;
+    record.layoutId = legacy.layoutId;
+    std::memcpy(record.boundsMin, legacy.boundsMin, sizeof(record.boundsMin));
+    std::memcpy(record.boundsMax, legacy.boundsMax, sizeof(record.boundsMax));
+    records.push_back(record);
+  }
+
+  return Result<std::pmr::vector<MeshBinarySubmeshRecord>,
+                MeshBinaryDeserializeError>::makeResult(std::move(records));
 }
 
 [[nodiscard]] Result<MeshBinaryBufferSectionHeader, MeshBinaryDeserializeError>
@@ -674,11 +698,11 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   ScopedScratch scopedScratch(scratch);
 
   if (!isLittleEndianHost()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: unsupported host endianness");
   }
   if (fileBytes.size() < sizeof(MeshBinaryHeader)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: file too small");
   }
 
@@ -686,35 +710,39 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   std::memcpy(&header, fileBytes.data(), sizeof(header));
 
   if (header.magic != kMeshBinaryMagic) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: magic mismatch");
   }
   if (header.majorVersion != kMeshBinaryFormatMajorVersion) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: unsupported format major version");
   }
+  if (header.minorVersion > kMeshBinaryFormatMinorVersion) {
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
+        "meshBinaryDeserialize: unsupported format minor version");
+  }
   if ((header.flags & kMeshBinaryHeaderFlagLittleEndian) == 0u) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: unsupported endian flag");
   }
   if (header.headerSize != sizeof(MeshBinaryHeader) ||
       header.tocEntrySize != sizeof(MeshBinarySectionTocEntry)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: header or TOC entry size mismatch");
   }
   if (header.fileSize != fileBytes.size()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: file size mismatch");
   }
   if (header.sourcePathHash != context.expectedSourcePathHash ||
       header.importOptionsHash != context.expectedImportOptionsHash) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: source or options hash mismatch");
   }
   if (context.validateSourceFingerprint && context.sourceExists) {
     if (header.sourceSizeBytes != context.sourceSizeBytes ||
         header.sourceMtimeNs != context.sourceMtimeNs) {
-      return makeSerializerError<MeshBinaryDecodedMesh>(
+      return makeDeserializeError<MeshBinaryDecodedMesh>(
           MeshBinaryDeserializeErrorCode::StaleCache,
           "meshBinaryDeserialize: cache is stale for current source file");
     }
@@ -723,24 +751,24 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   uint64_t tocBytes = 0;
   if (!checkedMulToU64(header.tocCount, sizeof(MeshBinarySectionTocEntry),
                        tocBytes)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: TOC byte size overflow");
   }
   uint64_t tocEnd = 0;
   if (!checkedAddToU64(header.tocOffset, tocBytes, tocEnd) ||
       tocEnd > fileBytes.size()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: invalid TOC bounds");
   }
 
   std::pmr::vector<MeshBinarySectionTocEntry> toc(scopedScratch.resource());
   if (!readPodArray(fileBytes, header.tocOffset, header.tocCount, toc)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: failed to read TOC");
   }
   for (const MeshBinarySectionTocEntry &entry : toc) {
     if (!validateSectionBounds(entry, fileBytes.size())) {
-      return makeSerializerError<MeshBinaryDecodedMesh>(
+      return makeDeserializeError<MeshBinaryDecodedMesh>(
           "meshBinaryDeserialize: section exceeds file bounds");
     }
   }
@@ -758,6 +786,7 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   const MeshBinarySectionTocEntry &vbufEntry = *requiredSections.vbuf;
   const MeshBinarySectionTocEntry &ibufEntry = *requiredSections.ibuf;
 
+  const bool legacySubmeshLayout = header.minorVersion == 0u;
   auto vlayLayoutResult = validateFixedSectionLayout(
       vlayEntry, 1u, sizeof(MeshBinaryVertexLayoutRecord), true,
       "meshBinaryDeserialize: invalid VLAY layout");
@@ -766,7 +795,9 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
         vlayLayoutResult.error());
   }
   auto smesLayoutResult = validateVariableSectionLayout(
-      smesEntry, sizeof(MeshBinarySubmeshRecord),
+      smesEntry,
+      legacySubmeshLayout ? sizeof(MeshBinarySubmeshRecordV0)
+                          : sizeof(MeshBinarySubmeshRecord),
       "meshBinaryDeserialize: invalid SMES stride");
   if (smesLayoutResult.hasError()) {
     return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
@@ -782,12 +813,12 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
 
   MeshBinaryVertexLayoutRecord layoutRecord{};
   if (!readPod(fileBytes, vlayEntry.offset, layoutRecord)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: failed to read VLAY record");
   }
   if (layoutRecord.layoutId != kMeshBinaryLayoutIdPacked32 ||
       layoutRecord.strideBytes != kMeshBinaryPackedVertexStrideBytes) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: unsupported vertex layout");
   }
 
@@ -816,26 +847,27 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   auto decodedVerticesResult = meshBinaryDecodeVertexBuffer(
       encodedVertices, vbufMeta.elementCount, vbufMeta.elementStrideBytes);
   if (decodedVerticesResult.hasError()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         decodedVerticesResult.error());
   }
   auto decodedIndicesResult = meshBinaryDecodeIndexBuffer(
       encodedIndices, ibufMeta.elementCount, ibufMeta.elementStrideBytes);
   if (decodedIndicesResult.hasError()) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         decodedIndicesResult.error());
   }
 
-  std::pmr::vector<MeshBinarySubmeshRecord> submeshRecords(
-      scopedScratch.resource());
-  if (!readPodArray(fileBytes, smesEntry.offset, smesEntry.count,
-                    submeshRecords)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
-        "meshBinaryDeserialize: failed to read submesh records");
+  auto submeshRecordsResult = readSubmeshRecords(
+      fileBytes, smesEntry, legacySubmeshLayout, scopedScratch.resource());
+  if (submeshRecordsResult.hasError()) {
+    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+        submeshRecordsResult.error());
   }
+  std::pmr::vector<MeshBinarySubmeshRecord> submeshRecords =
+      std::move(submeshRecordsResult.value());
   std::pmr::vector<MeshBinaryLodRecord> lodRecords(scopedScratch.resource());
   if (!readPodArray(fileBytes, lodsEntry.offset, lodsEntry.count, lodRecords)) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: failed to read LOD records");
   }
 
@@ -852,7 +884,7 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   const std::vector<std::byte> &decodedIndexBytes =
       decodedIndicesResult.value();
   if ((decodedIndexBytes.size() % sizeof(uint32_t)) != 0u) {
-    return makeSerializerError<MeshBinaryDecodedMesh>(
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: decoded index bytes are not uint32 aligned");
   }
   decoded.indices.resize(decodedIndexBytes.size() / sizeof(uint32_t));
@@ -864,13 +896,13 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   decoded.submeshes.reserve(submeshRecords.size());
   for (const MeshBinarySubmeshRecord &record : submeshRecords) {
     if (record.lodCount == 0 || record.lodCount > Submesh::kMaxLodCount) {
-      return makeSerializerError<MeshBinaryDecodedMesh>(
+      return makeDeserializeError<MeshBinaryDecodedMesh>(
           "meshBinaryDeserialize: invalid submesh LOD count");
     }
     uint64_t lodEnd = 0;
     if (!checkedAddToU64(record.lodFirst, record.lodCount, lodEnd) ||
         lodEnd > lodRecords.size()) {
-      return makeSerializerError<MeshBinaryDecodedMesh>(
+      return makeDeserializeError<MeshBinaryDecodedMesh>(
           "meshBinaryDeserialize: submesh LOD range out of bounds");
     }
 
@@ -893,7 +925,7 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
       if (!checkedAddToU64(lodRecord.indexOffset, lodRecord.indexCount,
                            indexRangeEnd) ||
           indexRangeEnd > decoded.indices.size()) {
-        return makeSerializerError<MeshBinaryDecodedMesh>(
+        return makeDeserializeError<MeshBinaryDecodedMesh>(
             "meshBinaryDeserialize: submesh index range out of bounds");
       }
       submesh.lods[lodIndex] = SubmeshLod{
