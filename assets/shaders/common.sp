@@ -80,12 +80,12 @@ layout(std430, buffer_reference) readonly buffer InstanceBaseMatricesBuffer {
 
 struct MaterialGpuData {
   vec4 baseColorFactor;
-  vec4 emissiveFactorNormalScale;
+  vec4 emissiveFactorNormalScale; // (emissiveFactor.rgb, emissiveStrength)
   vec4 metallicRoughnessOcclusionAlphaCutoff;
   vec4 specularColorFactorSpecular;
   vec4 sheenColorFactorWeight;
   vec4 sheenRoughnessClearcoatFactors; // (sheenRoughness, clearcoatFactor, clearcoatRoughness, clearcoatNormalScale)
-  vec4 transmissionThicknessIorPadding; // (transmissionFactor, thicknessFactor, ior, reserved)
+  vec4 transmissionThicknessIorPadding; // (transmissionFactor, thicknessFactor, ior, normalScale)
   vec4 attenuationColorDistance; // (attenuationColor.rgb, attenuationDistance)
   // Packed texture slot mapping shared by textureIndices*, textureUvSets*,
   // and textureSamplerIndices*:
@@ -129,6 +129,14 @@ uint getPackedMaterialSlotValue(uvec4 packed0, uvec4 packed1, uvec4 packed2,
     return packed3[int(slot - 12u)];
   }
   return defaultValue;
+}
+
+float materialEmissiveStrength(MaterialGpuData material) {
+  return material.emissiveFactorNormalScale.w;
+}
+
+float materialNormalScale(MaterialGpuData material) {
+  return material.transmissionThicknessIorPadding.w;
 }
 
 uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {

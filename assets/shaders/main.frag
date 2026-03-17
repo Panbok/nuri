@@ -155,7 +155,7 @@ void main() {
   if (normalTexId != kInvalidTextureBindlessIndex) {
     vec3 normalTexel =
         textureBindless2D(normalTexId, normalSampler, uvNormal).xyz * 2.0 - 1.0;
-    normalTexel.xy *= material.emissiveFactorNormalScale.w;
+    normalTexel.xy *= materialNormalScale(material);
     float normalTexelLen = length(normalTexel);
     if (normalTexelLen > kBrdfEpsilon) {
       normalTexel /= normalTexelLen;
@@ -198,6 +198,7 @@ void main() {
     emissive *=
         textureBindless2D(emissiveTexId, emissiveSampler, uvEmissive).rgb;
   }
+  emissive *= materialEmissiveStrength(material);
 
   float ior = material.transmissionThicknessIorPadding.z;
   bool iorCompatMode = isIorCompatMode(ior);
