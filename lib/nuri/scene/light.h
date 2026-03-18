@@ -48,6 +48,9 @@ inline constexpr LightId kInvalidLightId{};
   return LightId{type, packResourceHandle(index, generation)};
 }
 
+// LocalLightGpuType starts at zero because directional lights are packed in a
+// separate GPU buffer. Do not cast directly between LocalLightGpuType and
+// LightType: LightType::Point is 1 while LocalLightGpuType::Point is 0.
 enum class LocalLightGpuType : uint32_t {
   Point = 0u,
   Spot = 1u,
@@ -77,6 +80,10 @@ struct alignas(16) LocalLightGpuData {
   glm::vec4 positionRange{0.0f, 0.0f, 0.0f, 0.0f};
   glm::vec4 directionOuterCos{0.0f, 0.0f, -1.0f, -1.0f};
   glm::vec4 colorIntensity{1.0f, 1.0f, 1.0f, 1.0f};
+  // LocalLightGpuData::innerCosTypeEnabledReserved must stay std430-friendly
+  // and match the shader unpacking: .x stores inner cone cosine as float bits,
+  // .y stores LocalLightGpuType, .z stores the enabled flag plus future packed
+  // bits, and .w is reserved. Mirror any layout changes in shader decode code.
   glm::uvec4 innerCosTypeEnabledReserved{0u, 0u, 0u, 0u};
 };
 static_assert(sizeof(LocalLightGpuData) == 4u * sizeof(glm::vec4),

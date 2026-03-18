@@ -4,6 +4,7 @@
 
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/utils/utils.h"
 
 namespace nuri {
 namespace {
@@ -45,23 +46,6 @@ GeometryPool::~GeometryPool() {
       gpu_.destroyBuffer(chunk.buffer);
     }
   }
-}
-
-size_t GeometryPool::alignUp(size_t value, size_t alignment) {
-  if (alignment == 0) {
-    return value;
-  }
-  // Bitmask trick only works for power-of-two alignments.
-  const bool isPowerOfTwo = (alignment & (alignment - 1)) == 0;
-  NURI_ASSERT(isPowerOfTwo,
-              "alignUp: alignment must be a power of two (e.g. 1, 2, 4, 8)");
-  if (isPowerOfTwo) {
-    const size_t mask = alignment - 1;
-    return (value + mask) & ~mask;
-  }
-  // Generic round-up for non-power-of-two alignment (correct but slower).
-  const size_t remainder = value % alignment;
-  return remainder == 0 ? value : value + (alignment - remainder);
 }
 
 Result<bool, std::string>

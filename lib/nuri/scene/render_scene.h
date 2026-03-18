@@ -93,23 +93,18 @@ public:
   }
   [[nodiscard]] std::span<const DirectionalLightGpuData>
   packedDirectionalLights() const noexcept {
-    return std::span<const DirectionalLightGpuData>(
-        directionalLights_.packedGpu.data(),
-        directionalLights_.packedGpu.size());
+    return std::span(directionalLights_.packedGpu);
   }
   [[nodiscard]] std::span<const LocalLightGpuData>
   packedLocalLights() const noexcept {
-    return std::span<const LocalLightGpuData>(packedLocalLights_.data(),
-                                              packedLocalLights_.size());
+    return std::span(packedLocalLights_);
   }
   [[nodiscard]] std::span<const LightId>
   packedDirectionalLightIds() const noexcept {
-    return std::span<const LightId>(directionalLights_.packedIds.data(),
-                                    directionalLights_.packedIds.size());
+    return std::span(directionalLights_.packedIds);
   }
   [[nodiscard]] std::span<const LightId> packedLocalLightIds() const noexcept {
-    return std::span<const LightId>(packedLocalLightIds_.data(),
-                                    packedLocalLightIds_.size());
+    return std::span(packedLocalLightIds_);
   }
   [[nodiscard]] uint64_t lightTopologyVersion() const noexcept {
     return lightTopologyVersion_;

@@ -5,6 +5,7 @@
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/resources/storage/mesh/mesh_binary_codec.h"
 #include "nuri/resources/storage/mesh/mesh_binary_format.h"
+#include "nuri/utils/utils.h"
 
 namespace nuri {
 namespace {
@@ -59,20 +60,6 @@ makeDeserializeError(MeshBinaryDeserializeErrorCode code, Args &&...args) {
     return false;
   }
   out = a * b;
-  return true;
-}
-
-[[nodiscard]] bool alignUpU64(uint64_t value, uint64_t alignment,
-                              uint64_t &out) {
-  if (alignment <= 1u) {
-    out = value;
-    return true;
-  }
-  const uint64_t mask = alignment - 1u;
-  if (value > (std::numeric_limits<uint64_t>::max() - mask)) {
-    return false;
-  }
-  out = (value + mask) & ~mask;
   return true;
 }
 

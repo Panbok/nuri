@@ -2,8 +2,11 @@
 
 #include "nuri/resources/gltf_scene_importer.h"
 
+#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/math/light.h"
+
+#include <cctype>
 
 namespace nuri {
 namespace {
@@ -28,7 +31,30 @@ struct ParsedNode {
 
 [[nodiscard]] bool hasExtension(const std::filesystem::path &path,
                                 std::string_view extension) {
-  return path.has_extension() && path.extension().string() == extension;
+  if (!path.has_extension()) {
+    return false;
+  }
+
+  const std::string pathExtension = path.extension().string();
+  const auto trimLeadingDot = [](std::string_view value) {
+    return value.starts_with('.') ? value.substr(1) : value;
+  };
+
+  const std::string_view normalizedPathExtension =
+      trimLeadingDot(pathExtension);
+  const std::string_view normalizedExtension = trimLeadingDot(extension);
+  if (normalizedPathExtension.size() != normalizedExtension.size()) {
+    return false;
+  }
+
+  for (size_t i = 0; i < normalizedPathExtension.size(); ++i) {
+    const auto lhs = static_cast<unsigned char>(normalizedPathExtension[i]);
+    const auto rhs = static_cast<unsigned char>(normalizedExtension[i]);
+    if (std::tolower(lhs) != std::tolower(rhs)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 [[nodiscard]] bool isGltfJsonAssetPath(const std::filesystem::path &path) {
@@ -258,9 +284,18 @@ loadGltfJsonDocument(const std::filesystem::path &path) {
   }
 
   if (hasExtension(path, ".gltf")) {
-    std::ostringstream jsonStream;
-    jsonStream << file.rdbuf();
-    return parseJsonDocument(jsonStream.str());
+    file.seekg(0, std::ios::end);
+    const std::streamoff fileSize = file.tellg();
+    if (fileSize < 0) {
+      return YyJsonDocResult::makeError("Failed to determine .gltf file size");
+    }
+    file.seekg(0, std::ios::beg);
+
+    std::string jsonText(static_cast<size_t>(fileSize), '\0');
+    if (!jsonText.empty() && !file.read(jsonText.data(), fileSize)) {
+      return YyJsonDocResult::makeError("Failed to read .gltf file");
+    }
+    return parseJsonDocument(jsonText);
   }
 
   if (!hasExtension(path, ".glb")) {
@@ -554,6 +589,11 @@ resolveSceneRootNodes(yyjson_val *root, size_t nodeCount) {
     }
   }
   if (roots.empty()) {
+    NURI_LOG_DEBUG(
+        "GltfSceneImporter::resolveSceneRootNodes: no root nodes found for %u "
+        "nodes; every node was referenced, falling back to traversing all "
+        "nodes (possible cycles or self-references)",
+        nodeCount);
     for (uint32_t nodeIndex = 0u; nodeIndex < nodeCount; ++nodeIndex) {
       roots.push_back(nodeIndex);
     }
@@ -625,6 +665,7 @@ GltfSceneImporter::loadLightsFromFile(std::string_view path) {
 
   ImportedLightSet importedLights;
   std::vector<uint8_t> active(nodes.size(), 0u);
+  std::vector<uint8_t> visited(nodes.size(), 0u);
 
   std::function<std::optional<std::string>(uint32_t, const glm::mat4 &)>
       traverseNode;
@@ -637,8 +678,12 @@ GltfSceneImporter::loadLightsFromFile(std::string_view path) {
     if (active[nodeIndex] != 0u) {
       return std::string("glTF node hierarchy contains a cycle");
     }
+    if (visited[nodeIndex] != 0u) {
+      return std::nullopt;
+    }
 
     active[nodeIndex] = 1u;
+    visited[nodeIndex] = 1u;
     const ParsedNode &node = nodes[nodeIndex];
     const glm::mat4 worldMatrix = parentWorld * node.localMatrix;
 
@@ -660,7 +705,6 @@ GltfSceneImporter::loadLightsFromFile(std::string_view path) {
         imported.sourceName = imported.desc.name;
       }
       imported.sourceNodeIndex = static_cast<int32_t>(nodeIndex);
-      imported.desc = sanitizeImportedLightDesc(imported.desc);
       importedLights.push_back(std::move(imported));
     }
 

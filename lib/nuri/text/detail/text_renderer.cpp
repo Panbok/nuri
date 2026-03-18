@@ -7,6 +7,7 @@
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/shader.h"
+#include "nuri/utils/utils.h"
 
 namespace nuri {
 namespace {
@@ -42,12 +43,6 @@ template <typename T, typename... Args>
   hash ^= value;
   hash *= kFnvPrime;
   return hash;
-}
-
-[[nodiscard]] constexpr size_t alignUp(size_t value, size_t alignment) {
-  NURI_ASSERT(alignment > 0 && (alignment & (alignment - 1)) == 0,
-              "alignment must be power of two");
-  return (value + (alignment - 1u)) & ~(alignment - 1u);
 }
 
 constexpr float kBatchPxRangeEpsilon = 1.0e-4f;

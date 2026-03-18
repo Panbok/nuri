@@ -112,8 +112,6 @@ private:
           moves(ensureMemory(memory)) {}
   };
 
-  [[nodiscard]] static size_t alignUp(size_t value, size_t alignment);
-
   [[nodiscard]] Result<bool, std::string>
   createChunk(std::pmr::vector<Chunk> &chunks, size_t minimumSize,
               BufferUsage usage, std::string_view debugPrefix);

@@ -516,10 +516,10 @@ void main() {
                                                 max(dot(nBase, l), 0.0),
                                                 sheenRoughness)
               : 1.0;
-      vec3 pointToLight = l;
+      vec3 lightDir = l; // For directional lights l is a direction, not a position offset.
       vec3 transmissionContribution =
           lightRadiance *
-          getDirectTransmission(nBase, v, pointToLight, alphaRoughness, f0, f90,
+          getDirectTransmission(nBase, v, lightDir, alphaRoughness, f0, f90,
                                 diffuseColor, ior);
       if ((featureMask & kMaterialFeatureVolume) != 0u) {
         transmissionContribution = applyVolumeAttenuation(

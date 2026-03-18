@@ -311,7 +311,8 @@ float punctualRangeAttenuation(float distanceSq, float range) {
 
 float spotAngularAttenuation(vec3 lightDirection, vec3 pointToLight,
                              float innerCos, float outerCos) {
-  float cosTheta = dot(normalize(lightDirection), normalize(-pointToLight));
+  // Expects normalized lightDirection from LocalLightGpuData upload.
+  float cosTheta = dot(lightDirection, normalize(-pointToLight));
   if (cosTheta <= outerCos) {
     return 0.0;
   }

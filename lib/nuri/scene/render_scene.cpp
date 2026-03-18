@@ -663,8 +663,8 @@ bool RenderScene::setLightTransform(LightId id, const glm::vec3 &position,
       directionalLights_.packedGpu[packedIndex] = packDirectionalLight(
           sanitizedRotation, directionalLights_.colors[index],
           directionalLights_.intensities[index]);
+      noteLightTransformChanged();
     }
-    noteLightTransformChanged();
     return true;
   case LightType::Point:
     if (!pointSlotValid(id)) {
@@ -684,8 +684,8 @@ bool RenderScene::setLightTransform(LightId id, const glm::vec3 &position,
       packedLocalLights_[packedIndex] = packPointLight(
           sanitizedPosition, sanitizedRotation, pointLights_.colors[index],
           pointLights_.intensities[index], pointLights_.ranges[index]);
+      noteLightTransformChanged();
     }
-    noteLightTransformChanged();
     return true;
   case LightType::Spot:
     if (!spotSlotValid(id)) {
@@ -707,8 +707,8 @@ bool RenderScene::setLightTransform(LightId id, const glm::vec3 &position,
           spotLights_.intensities[index], spotLights_.ranges[index],
           spotLights_.innerConeAngles[index],
           spotLights_.outerConeAngles[index]);
+      noteLightTransformChanged();
     }
-    noteLightTransformChanged();
     return true;
   }
 
