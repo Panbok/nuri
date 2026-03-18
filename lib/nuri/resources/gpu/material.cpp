@@ -165,7 +165,7 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
 
   MaterialGpuData gpuData{};
   gpuData.baseColorFactor = desc.baseColorFactor;
-  gpuData.emissiveFactorNormalScale =
+  gpuData.emissiveFactorStrength =
       glm::vec4(desc.emissiveFactor, emissiveStrength);
   gpuData.metallicRoughnessOcclusionAlphaCutoff =
       glm::vec4(metallic, roughness, occlusion, alphaCutoff);

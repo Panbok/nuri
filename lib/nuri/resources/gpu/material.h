@@ -139,7 +139,7 @@ struct MaterialDesc {
 // std430-friendly packed material payload uploaded to GPU storage buffers.
 struct alignas(16) MaterialGpuData {
   glm::vec4 baseColorFactor{1.0f};
-  glm::vec4 emissiveFactorNormalScale{
+  glm::vec4 emissiveFactorStrength{
       0.0f, 0.0f, 0.0f, 1.0f}; // (emissiveFactor.rgb, emissiveStrength)
   glm::vec4 metallicRoughnessOcclusionAlphaCutoff{1.0f, 1.0f, 1.0f, 0.5f};
   glm::vec4 specularColorFactorSpecular{1.0f, 1.0f, 1.0f, 1.0f};
