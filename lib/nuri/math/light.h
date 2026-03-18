@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/math/utils.h"
 #include "nuri/scene/light.h"
 
 #include <cmath>
@@ -47,6 +48,17 @@ transformLightDesc(const LightDesc &source, const glm::mat4 &modelMatrix) {
   transformed.rotation =
       rotationFromMatrixOrIdentity(modelMatrix) * source.rotation;
   return transformed;
+}
+
+[[nodiscard]] inline glm::vec3
+lightDirectionFromRotation(const glm::quat &rotation) {
+  const glm::vec3 direction =
+      sanitizeRotation(rotation) * glm::vec3(0.0f, 0.0f, -1.0f);
+  const float length = glm::length(direction);
+  if (!std::isfinite(length) || length <= 1.0e-6f) {
+    return glm::vec3(0.0f, 0.0f, -1.0f);
+  }
+  return direction / length;
 }
 
 } // namespace nuri
