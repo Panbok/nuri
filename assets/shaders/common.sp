@@ -1,23 +1,5 @@
 #extension GL_EXT_buffer_reference : require
 
-layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
-  mat4 view;
-  mat4 proj;
-  vec4 cameraPos;
-  uint cubemapTexId;
-  uint hasCubemap;
-  uint irradianceTexId;
-  uint prefilteredGgxTexId;
-  uint prefilteredCharlieTexId;
-  uint brdfLutTexId;
-  uint flags;
-  uint cubemapSamplerId;
-  uint sceneColorTexId;
-  uint sceneColorSamplerId;
-  uint sceneColorHalfResTexId;
-  uint sceneColorQuarterResTexId;
-};
-
 const uint kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
 const uint kFrameDataFlagHasIblDiffuse = 1u << 0u;
 const uint kFrameDataFlagHasIblSpecular = 1u << 1u;
@@ -80,7 +62,7 @@ layout(std430, buffer_reference) readonly buffer InstanceBaseMatricesBuffer {
 
 struct MaterialGpuData {
   vec4 baseColorFactor;
-  vec4 emissiveFactorNormalScale; // (emissiveFactor.rgb, emissiveStrength)
+  vec4 emissiveFactorStrength; // (emissiveFactor.rgb, emissiveStrength)
   vec4 metallicRoughnessOcclusionAlphaCutoff;
   vec4 specularColorFactorSpecular;
   vec4 sheenColorFactorWeight;
@@ -132,24 +114,11 @@ uint getPackedMaterialSlotValue(uvec4 packed0, uvec4 packed1, uvec4 packed2,
 }
 
 float materialEmissiveStrength(MaterialGpuData material) {
-  return material.emissiveFactorNormalScale.w;
+  return material.emissiveFactorStrength.w;
 }
 
 float materialNormalScale(MaterialGpuData material) {
   return material.transmissionThicknessIorPadding.w;
-}
-
-uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {
-  if (level == 0u) {
-    return frameData.sceneColorTexId;
-  }
-  if (level == 1u) {
-    return frameData.sceneColorHalfResTexId;
-  }
-  if (level == 2u) {
-    return frameData.sceneColorQuarterResTexId;
-  }
-  return kInvalidTextureBindlessIndex;
 }
 
 #define GET_TEXTURE_INDEX(material, slot)                                      \
@@ -172,6 +141,61 @@ uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {
 layout(std430, buffer_reference) readonly buffer MaterialBuffer {
   MaterialGpuData materials[];
 };
+
+struct DirectionalLightGpuData {
+  vec4 directionIlluminance;
+  vec4 colorReserved;
+};
+
+struct LocalLightGpuData {
+  vec4 positionRange;
+  vec4 directionOuterCos;
+  vec4 colorIntensity;
+  uvec4 innerCosTypeEnabledReserved;
+};
+
+layout(std430, buffer_reference) readonly buffer DirectionalLightBuffer {
+  DirectionalLightGpuData lights[];
+};
+
+layout(std430, buffer_reference) readonly buffer LocalLightBuffer {
+  LocalLightGpuData lights[];
+};
+
+layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
+  mat4 view;
+  mat4 proj;
+  vec4 cameraPos;
+  uint cubemapTexId;
+  uint hasCubemap;
+  uint irradianceTexId;
+  uint prefilteredGgxTexId;
+  uint prefilteredCharlieTexId;
+  uint brdfLutTexId;
+  uint flags;
+  uint cubemapSamplerId;
+  uint sceneColorTexId;
+  uint sceneColorSamplerId;
+  uint sceneColorHalfResTexId;
+  uint sceneColorQuarterResTexId;
+  DirectionalLightBuffer directionalLightBuffer;
+  LocalLightBuffer localLightBuffer;
+  uint directionalLightCount;
+  uint localLightCount;
+};
+
+uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {
+  if (level == 0u) {
+    return frameData.sceneColorTexId;
+  }
+  if (level == 1u) {
+    return frameData.sceneColorHalfResTexId;
+  }
+  if (level == 2u) {
+    return frameData.sceneColorQuarterResTexId;
+  }
+  return kInvalidTextureBindlessIndex;
+}
 
 layout(std430, buffer_reference) readonly buffer InstanceRemapBuffer {
   uint ids[];
@@ -203,6 +227,8 @@ const uint kDebugVisualizationNone = 0u;
 const uint kDebugVisualizationWireOverlay = 1u;
 const uint kDebugVisualizationWireframeOnly = 2u;
 const uint kDebugVisualizationTessPatchEdgesHeatmap = 3u;
+const uint kLocalLightTypePoint = 0u;
+const uint kLocalLightTypeSpot = 1u;
 
 vec2 unpackSnorm2x16Custom(uint packed) {
   const int x = int(packed << 16u) >> 16;
@@ -228,6 +254,70 @@ vec2 applyTextureTransform(vec2 uv, vec4 offsetScale, vec4 rotationCs) {
 
 vec2 selectUv(vec2 uv0, vec2 uv1, uint uvSet) {
   return (uvSet == 1u) ? uv1 : uv0;
+}
+
+vec3 directionalLightDirection(DirectionalLightGpuData light) {
+  return light.directionIlluminance.xyz;
+}
+
+float directionalLightIlluminance(DirectionalLightGpuData light) {
+  return light.directionIlluminance.w;
+}
+
+vec3 directionalLightColor(DirectionalLightGpuData light) {
+  return light.colorReserved.rgb;
+}
+
+vec3 localLightPosition(LocalLightGpuData light) { return light.positionRange.xyz; }
+
+float localLightRange(LocalLightGpuData light) { return light.positionRange.w; }
+
+vec3 localLightDirection(LocalLightGpuData light) {
+  return light.directionOuterCos.xyz;
+}
+
+float localLightOuterCos(LocalLightGpuData light) {
+  return light.directionOuterCos.w;
+}
+
+vec3 localLightColor(LocalLightGpuData light) { return light.colorIntensity.rgb; }
+
+float localLightIntensity(LocalLightGpuData light) {
+  return light.colorIntensity.w;
+}
+
+float localLightInnerCos(LocalLightGpuData light) {
+  return uintBitsToFloat(light.innerCosTypeEnabledReserved.x);
+}
+
+uint localLightType(LocalLightGpuData light) {
+  return light.innerCosTypeEnabledReserved.y;
+}
+
+bool localLightEnabled(LocalLightGpuData light) {
+  return light.innerCosTypeEnabledReserved.z != 0u;
+}
+
+float punctualRangeAttenuation(float distanceSq, float range) {
+  const float epsilon = 1.0e-6;
+  if (range <= 0.0) {
+    return 1.0 / max(distanceSq, epsilon);
+  }
+  float distance = sqrt(max(distanceSq, epsilon));
+  float normalizedDistance = distance / max(range, epsilon);
+  float window = clamp(1.0 - pow(normalizedDistance, 4.0), 0.0, 1.0);
+  return (window * window) / max(distanceSq, epsilon);
+}
+
+float spotAngularAttenuation(vec3 lightDirection, vec3 pointToLight,
+                             float innerCos, float outerCos) {
+  float cosTheta = dot(normalize(lightDirection), normalize(-pointToLight));
+  if (cosTheta <= outerCos) {
+    return 0.0;
+  }
+  float denom = max(innerCos - outerCos, 1.0e-4);
+  float weight = clamp((cosTheta - outerCos) / denom, 0.0, 1.0);
+  return weight * weight;
 }
 
 vec3 decodePackedNormal(PackedVertex vertex) {

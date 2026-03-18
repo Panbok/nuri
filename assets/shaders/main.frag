@@ -9,6 +9,61 @@ layout(location = 0) out vec4 out_FragColor;
 const uint kAlphaModeOpaque = 0u;
 const uint kAlphaModeMask = 1u;
 
+void accumulateDirectLightContribution(
+    vec3 lightRadiance, vec3 l, vec3 v, vec3 nBase, vec3 nClearcoat,
+    vec3 diffuseColor, vec3 f0, vec3 f90, float ndotv, float clearcoatNdotV,
+    float alphaRoughness, vec3 sheenColor, float sheenWeight,
+    float sheenRoughness, bool hasClearcoat, float clearcoat,
+    float clearcoatRoughness, vec3 clearcoatF0, vec3 clearcoatReflectance90,
+    inout vec3 baseDirectLighting, inout vec3 directSheen,
+    inout vec3 clearcoatDirectLighting) {
+  float ndotl = max(dot(nBase, l), 0.0);
+  float clearcoatNdotL = max(dot(nClearcoat, l), 0.0);
+  vec3 halfVector = v + l;
+  float halfLenSq = dot(halfVector, halfVector);
+  if (ndotl > 0.0 && halfLenSq > kBrdfEpsilon) {
+    vec3 h = halfVector * inversesqrt(halfLenSq);
+    float ndoth = max(dot(nBase, h), 0.0);
+    float ldoth = max(dot(l, h), 0.0);
+    float vdoth = max(dot(v, h), 0.0);
+
+    vec3 f = specularReflection(vdoth, f0, f90);
+    float g = geometryOcclusion(ndotl, ndotv, alphaRoughness);
+    float d = microfacetDistribution(ndoth, alphaRoughness);
+    vec3 diffuse = (1.0 - max3(f)) *
+                   diffuseBurley(diffuseColor, ndotl, ndotv, ldoth,
+                                 alphaRoughness);
+    vec3 specular = f * g * d / max(4.0 * ndotl * ndotv, kBrdfEpsilon);
+    float sheenDirectScale =
+        sheenWeight > 0.0
+            ? computeSheenAlbedoScalingDirect(sheenColor, ndotv, ndotl,
+                                              sheenRoughness)
+            : 1.0;
+    baseDirectLighting +=
+        sheenDirectScale * (ndotl * lightRadiance * (diffuse + specular));
+    directSheen += computeDirectSheen(sheenColor, sheenWeight, sheenRoughness,
+                                      ndotl, ndotv, ndoth, lightRadiance);
+  }
+  if (hasClearcoat && clearcoat > 0.0 && clearcoatNdotL > 0.0 &&
+      halfLenSq > kBrdfEpsilon) {
+    vec3 h = halfVector * inversesqrt(halfLenSq);
+    float clearcoatNdotH = max(dot(nClearcoat, h), 0.0);
+    float clearcoatVdotH = max(dot(v, h), 0.0);
+    float clearcoatAlphaRoughness = clearcoatRoughness * clearcoatRoughness;
+    vec3 clearcoatF = specularReflection(clearcoatVdotH, clearcoatF0,
+                                         clearcoatReflectance90);
+    float clearcoatG =
+        geometryOcclusion(clearcoatNdotL, clearcoatNdotV, clearcoatAlphaRoughness);
+    float clearcoatD =
+        microfacetDistribution(clearcoatNdotH, clearcoatAlphaRoughness);
+    vec3 clearcoatSpecular =
+        clearcoatF * clearcoatG * clearcoatD /
+        max(4.0 * clearcoatNdotL * clearcoatNdotV, kBrdfEpsilon);
+    clearcoatDirectLighting +=
+        clearcoat * clearcoatNdotL * lightRadiance * clearcoatSpecular;
+  }
+}
+
 void main() {
   const MaterialGpuData material = pc.materialBuffer.materials[pc.materialIndex];
 
@@ -193,7 +248,7 @@ void main() {
         normalize(mix(nClearcoat, perturbedClearcoatNormal, clearcoatNormalBlend));
   }
 
-  vec3 emissive = material.emissiveFactorNormalScale.xyz;
+  vec3 emissive = material.emissiveFactorStrength.xyz;
   if (emissiveTexId != kInvalidTextureBindlessIndex) {
     emissive *=
         textureBindless2D(emissiveTexId, emissiveSampler, uvEmissive).rgb;
@@ -242,51 +297,52 @@ void main() {
     clearcoatAttenuation = vec3(1.0) - clearcoat * clearcoatLayerF;
   }
 
-  const vec3 lightPos = vec3(0.0, 0.0, -5.0);
-  const vec3 lightColor = vec3(1.0);
-  vec3 l = normalize(lightPos - vtx.worldPos);
-  float ndotl = max(dot(nBase, l), 0.0);
-  float clearcoatNdotL = max(dot(nClearcoat, l), 0.0);
   vec3 baseDirectLighting = vec3(0.0);
   vec3 directSheen = vec3(0.0);
   vec3 clearcoatDirectLighting = vec3(0.0);
-  vec3 halfVector = v + l;
-  float halfLenSq = dot(halfVector, halfVector);
-  if (ndotl > 0.0 && halfLenSq > kBrdfEpsilon) {
-    vec3 h = halfVector * inversesqrt(halfLenSq);
-    float ndoth = max(dot(nBase, h), 0.0);
-    float ldoth = max(dot(l, h), 0.0);
-    float vdoth = max(dot(v, h), 0.0);
-
-    vec3 f = specularReflection(vdoth, f0, f90);
-    float g = geometryOcclusion(ndotl, ndotv, alphaRoughness);
-    float d = microfacetDistribution(ndoth, alphaRoughness);
-    vec3 diffuse = (1.0 - max3(f)) *
-                   diffuseBurley(diffuseColor, ndotl, ndotv, ldoth,
-                                 alphaRoughness);
-    vec3 specular = f * g * d / max(4.0 * ndotl * ndotv, kBrdfEpsilon);
-    baseDirectLighting = ndotl * lightColor * (diffuse + specular);
-    directSheen =
-        computeDirectSheen(sheenColor, sheenWeight, sheenRoughness, ndotl,
-                           ndotv, ndoth, lightColor);
+  for (uint lightIndex = 0u; lightIndex < pc.frameData.directionalLightCount;
+       ++lightIndex) {
+    DirectionalLightGpuData light =
+        pc.frameData.directionalLightBuffer.lights[lightIndex];
+    vec3 l = normalize(-directionalLightDirection(light));
+    vec3 lightRadiance =
+        directionalLightColor(light) * directionalLightIlluminance(light);
+    accumulateDirectLightContribution(
+        lightRadiance, l, v, nBase, nClearcoat, diffuseColor, f0, f90, ndotv,
+        clearcoatNdotV, alphaRoughness, sheenColor, sheenWeight,
+        sheenRoughness, hasClearcoat, clearcoat, clearcoatRoughness,
+        clearcoatF0, clearcoatReflectance90, baseDirectLighting, directSheen,
+        clearcoatDirectLighting);
   }
-  if (hasClearcoat && clearcoat > 0.0 && clearcoatNdotL > 0.0 &&
-      halfLenSq > kBrdfEpsilon) {
-    vec3 h = halfVector * inversesqrt(halfLenSq);
-    float clearcoatNdotH = max(dot(nClearcoat, h), 0.0);
-    float clearcoatVdotH = max(dot(v, h), 0.0);
-    float clearcoatAlphaRoughness = clearcoatRoughness * clearcoatRoughness;
-    vec3 clearcoatF = specularReflection(clearcoatVdotH, clearcoatF0,
-                                         clearcoatReflectance90);
-    float clearcoatG =
-        geometryOcclusion(clearcoatNdotL, clearcoatNdotV, clearcoatAlphaRoughness);
-    float clearcoatD =
-        microfacetDistribution(clearcoatNdotH, clearcoatAlphaRoughness);
-    vec3 clearcoatSpecular =
-        clearcoatF * clearcoatG * clearcoatD /
-        max(4.0 * clearcoatNdotL * clearcoatNdotV, kBrdfEpsilon);
-    clearcoatDirectLighting =
-        clearcoat * clearcoatNdotL * lightColor * clearcoatSpecular;
+  for (uint lightIndex = 0u; lightIndex < pc.frameData.localLightCount;
+       ++lightIndex) {
+    LocalLightGpuData light = pc.frameData.localLightBuffer.lights[lightIndex];
+    vec3 pointToLight = localLightPosition(light) - vtx.worldPos;
+    float distanceSq = dot(pointToLight, pointToLight);
+    if (distanceSq <= kBrdfEpsilon) {
+      continue;
+    }
+
+    vec3 l = pointToLight * inversesqrt(distanceSq);
+    float attenuation =
+        punctualRangeAttenuation(distanceSq, localLightRange(light));
+    if (localLightType(light) == kLocalLightTypeSpot) {
+      attenuation *= spotAngularAttenuation(
+          localLightDirection(light), pointToLight, localLightInnerCos(light),
+          localLightOuterCos(light));
+    }
+    if (attenuation <= 0.0) {
+      continue;
+    }
+
+    vec3 lightRadiance =
+        localLightColor(light) * localLightIntensity(light) * attenuation;
+    accumulateDirectLightContribution(
+        lightRadiance, l, v, nBase, nClearcoat, diffuseColor, f0, f90, ndotv,
+        clearcoatNdotV, alphaRoughness, sheenColor, sheenWeight,
+        sheenRoughness, hasClearcoat, clearcoat, clearcoatRoughness,
+        clearcoatF0, clearcoatReflectance90, baseDirectLighting, directSheen,
+        clearcoatDirectLighting);
   }
 
   vec3 baseBrdfLutSample = vec3(0.0);
@@ -305,15 +361,10 @@ void main() {
           textureBindless2D(pc.frameData.brdfLutTexId, 0, sheenBrdfUv).rgb;
     }
   }
-  float directScale = 1.0;
   float indirectScale = 1.0;
-  if (sheenWeight > 0.0) {
-    directScale = computeSheenAlbedoScalingDirect(
-        sheenColor, ndotv, ndotl, sheenRoughness);
-    if (hasBrdfLut) {
-      indirectScale = computeSheenAlbedoScalingIndirect(
-          sheenColor, sheenWeight, sheenBrdfLutSample);
-    }
+  if (sheenWeight > 0.0 && hasBrdfLut) {
+    indirectScale = computeSheenAlbedoScalingIndirect(
+        sheenColor, sheenWeight, sheenBrdfLutSample);
   }
 
   vec3 iblDiffuse = vec3(0.0);
@@ -419,7 +470,7 @@ void main() {
     indirectLighting *= ao;
   }
   vec3 directLighting =
-      clearcoatAttenuation * (directSheen + directScale * baseDirectLighting) +
+      clearcoatAttenuation * (directSheen + baseDirectLighting) +
       clearcoatDirectLighting;
   vec3 color =
       directLighting + indirectLighting + clearcoatAttenuation * emissive;
