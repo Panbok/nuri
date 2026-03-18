@@ -18,6 +18,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/layers/composite_layer.cpp
   nuri/gfx/layers/debug_layer.cpp
   nuri/gfx/layers/opaque_layer.cpp
+  nuri/gfx/layers/scene_lighting_layer.cpp
   nuri/gfx/layers/skybox_layer.cpp
   nuri/gfx/layers/transmission_layer.cpp
   nuri/gfx/layers/transparent_layer.cpp
@@ -34,6 +35,7 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/gpu/model.cpp
   nuri/resources/gpu/resource_manager.cpp
   nuri/resources/gpu/texture.cpp
+  nuri/resources/gltf_scene_importer.cpp
   nuri/resources/mesh_importer_assimp.cpp
   nuri/resources/stb_image.cpp
   nuri/resources/storage/font/nfont_binary_codec.cpp
@@ -52,8 +54,10 @@ set(NURI_RENDERER_SOURCES
   nuri/text/detail/text_renderer.cpp
   nuri/text/detail/text_shaper.cpp
   nuri/text/detail/text_system.cpp
+  nuri/math/utils.cpp
   nuri/utils/env_utils.cpp
   nuri/utils/fsp_counter.cpp
+  nuri/utils/utils.cpp
 )
 
 add_library(nuri_renderer ${NURI_LIBRARY_TYPE}

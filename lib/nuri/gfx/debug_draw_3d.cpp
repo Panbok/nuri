@@ -336,7 +336,7 @@ DebugDraw3D::ensureLineBufferCapacity(uint64_t frameIndex,
       std::max({requiredSize, frame.capacityBytes * 2, size_t{1}});
   auto bufferResult = gpu_.createBuffer(
       BufferDesc{
-          .usage = BufferUsage::Storage,
+          .usage = BufferUsage::Storage | BufferUsage::Vertex,
           .storage = Storage::HostVisible,
           .size = newSize,
       },
