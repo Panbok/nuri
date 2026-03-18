@@ -10,7 +10,6 @@
 #include "nuri/resources/gpu/model.h"
 #include "nuri/scene/render_scene.h"
 
-#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -54,28 +53,8 @@ public:
                    RenderGraphBuilder &graph) override;
 
 private:
-  struct FrameData {
-    glm::mat4 view{1.0f};
-    glm::mat4 proj{1.0f};
-    glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
-    uint32_t cubemapTexId = 0;
-    uint32_t hasCubemap = 0;
-    uint32_t irradianceTexId = 0;
-    uint32_t prefilteredGgxTexId = 0;
-    uint32_t prefilteredCharlieTexId = 0;
-    uint32_t brdfLutTexId = 0;
-    uint32_t flags = 0;
-    uint32_t cubemapSamplerId = 0;
-    uint32_t sceneColorTexId = 0;
-    uint32_t sceneColorSamplerId = 0;
-    uint32_t sceneColorHalfResTexId = 0;
-    uint32_t sceneColorQuarterResTexId = 0;
-
-    [[nodiscard]] bool operator==(const FrameData &other) const noexcept {
-      return std::memcmp(this, &other, sizeof(FrameData)) == 0;
-    }
-  };
-  static_assert(sizeof(FrameData) == 192,
+  using FrameData = ForwardSceneFrameData;
+  static_assert(sizeof(FrameData) == 216,
                 "TransparentLayer::FrameData must match shader layout");
 
   struct PushConstants {
@@ -121,7 +100,6 @@ private:
   Result<bool, std::string> createShaders();
   Result<bool, std::string> ensurePipelines(Format colorFormat,
                                             Format depthFormat);
-  Result<bool, std::string> ensureFrameDataBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureMaterialBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
@@ -161,7 +139,6 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> meshShader_;
   std::unique_ptr<Shader> meshPickShader_;
-  std::unique_ptr<Buffer> frameDataBuffer_;
   std::unique_ptr<Buffer> materialBuffer_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
@@ -178,7 +155,6 @@ private:
   Format meshPipelineDepthFormat_ = Format::Count;
   Format pickPipelineDepthFormat_ = Format::Count;
 
-  size_t frameDataBufferCapacityBytes_ = 0;
   size_t materialBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;
@@ -209,9 +185,6 @@ private:
   std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
-  FrameData frameData_{};
-  FrameData uploadedFrameData_{};
-  bool frameDataUploadValid_ = false;
   std::filesystem::path alphaPickFragmentPath_{};
 };
 

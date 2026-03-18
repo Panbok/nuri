@@ -108,6 +108,10 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
       .sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex(),
       .sceneColorHalfResTexId = 0u,
       .sceneColorQuarterResTexId = 0u,
+      .directionalLightBufferAddress = 0u,
+      .localLightBufferAddress = 0u,
+      .directionalLightCount = 0u,
+      .localLightCount = 0u,
   };
 
   if (!frameDataUploadValid_ || uploadedFrameData_ != frameData_) {

@@ -54,33 +54,8 @@ public:
                    RenderGraphBuilder &graph) override;
 
 private:
-  enum FrameDataFlags : uint32_t {
-    HasIblDiffuse = 1u << 0u,
-    HasIblSpecular = 1u << 1u,
-    HasIblSheen = 1u << 2u,
-    HasBrdfLut = 1u << 3u,
-    OutputLinearToSrgb = 1u << 4u,
-    HasSceneColor = 1u << 5u,
-  };
-
-  struct FrameData {
-    glm::mat4 view{1.0f};
-    glm::mat4 proj{1.0f};
-    glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
-    uint32_t cubemapTexId = 0;
-    uint32_t hasCubemap = 0;
-    uint32_t irradianceTexId = 0;
-    uint32_t prefilteredGgxTexId = 0;
-    uint32_t prefilteredCharlieTexId = 0;
-    uint32_t brdfLutTexId = 0;
-    uint32_t flags = 0;
-    uint32_t cubemapSamplerId = 0;
-    uint32_t sceneColorTexId = 0;
-    uint32_t sceneColorSamplerId = 0;
-    uint32_t sceneColorHalfResTexId = 0;
-    uint32_t sceneColorQuarterResTexId = 0;
-  };
-  static_assert(sizeof(FrameData) == 192,
+  using FrameData = ForwardSceneFrameData;
+  static_assert(sizeof(FrameData) == 216,
                 "OpaqueLayer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
@@ -175,7 +150,6 @@ private:
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> recreateDepthTexture();
   Result<bool, std::string> recreatePickTexture();
-  Result<bool, std::string> ensureFrameDataBufferCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureCentersPhaseBufferCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -257,7 +231,6 @@ private:
   std::unique_ptr<Shader> computeShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
   std::unique_ptr<Pipeline> computePipeline_;
-  std::unique_ptr<Buffer> frameDataBuffer_;
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
   std::unique_ptr<Buffer> materialBuffer_;
@@ -290,7 +263,6 @@ private:
   RenderPipelineHandle meshPickDoubleSidedTessPipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
 
-  size_t frameDataBufferCapacityBytes_ = 0;
   size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
   size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
   size_t materialBufferCapacityBytes_ = 0;
@@ -368,9 +340,6 @@ private:
   std::pmr::vector<RenderGraphPassId> workPassIds_;
   std::pmr::vector<RenderGraphPassId> preDispatchPassIds_;
   std::pmr::vector<RenderGraphPassId> indirectPassIds_;
-  FrameData frameData_{};
-  FrameData uploadedFrameData_{};
-  bool frameDataUploadValid_ = false;
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};

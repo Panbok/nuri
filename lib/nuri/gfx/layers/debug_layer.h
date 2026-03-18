@@ -63,6 +63,10 @@ private:
                              RenderGraphBuilder &graph,
                              TextureHandle sceneDepthTexture,
                              RenderGraphTextureId sceneDepthGraphTexture);
+  [[nodiscard]] bool hasDebugWork(const RenderFrameContext &frame) const;
+  [[nodiscard]] Result<bool, std::string>
+  buildSceneDebugLines(const RenderFrameContext &frame, TextureHandle depthTexture,
+                       float &outSortDepth);
   void resetGridState();
 
   GPUDevice &gpu_;

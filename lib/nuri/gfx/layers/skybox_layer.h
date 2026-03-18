@@ -67,8 +67,12 @@ private:
     uint32_t sceneColorSamplerId = 0;
     uint32_t sceneColorHalfResTexId = 0;
     uint32_t sceneColorQuarterResTexId = 0;
+    uint64_t directionalLightBufferAddress = 0;
+    uint64_t localLightBufferAddress = 0;
+    uint32_t directionalLightCount = 0;
+    uint32_t localLightCount = 0;
   };
-  static_assert(sizeof(FrameData) == 192,
+  static_assert(sizeof(FrameData) == 216,
                 "SkyboxLayer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
@@ -83,8 +87,14 @@ private:
     uint32_t instanceCount = 0;
     uint32_t materialIndex = 0;
     float timeSeconds = 0.0f;
+    float tessNearDistance = 1.0f;
+    float tessFarDistance = 8.0f;
+    float tessMinFactor = 1.0f;
+    float tessMaxFactor = 1.0f;
+    uint32_t debugVisualizationMode = 0;
   };
-
+  static_assert(sizeof(PushConstants) <= 128,
+                "SkyboxLayer::PushConstants exceeds Vulkan guarantee");
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> ensureFrameBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> createShaders();

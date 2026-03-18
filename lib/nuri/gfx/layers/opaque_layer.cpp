@@ -570,102 +570,12 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
     instanceStaticBuffersDirty_ = true;
   }
 
-  uint32_t cubemapTexId = kInvalidTextureBindlessIndex;
-  const uint32_t cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex();
-  uint32_t hasCubemap = 0;
-  const EnvironmentHandles &environment = frame.scene->environment();
-  if (const TextureRecord *cubemap =
-          frame.resources->tryGet(environment.cubemap);
-      cubemap != nullptr && nuri::isValid(cubemap->texture)) {
-    cubemapTexId = cubemap->bindlessIndex;
-    hasCubemap = 1;
-  }
-
-  uint32_t irradianceTexId = kInvalidTextureBindlessIndex;
-  uint32_t prefilteredGgxTexId = kInvalidTextureBindlessIndex;
-  uint32_t prefilteredCharlieTexId = kInvalidTextureBindlessIndex;
-  uint32_t brdfLutTexId = kInvalidTextureBindlessIndex;
-  uint32_t frameFlags = 0;
-  uint32_t sceneColorTexId = kInvalidTextureBindlessIndex;
-  uint32_t sceneColorSamplerId = 0u;
-  const bool *transmissionStageEnabledPtr =
-      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
-  const bool transmissionStageEnabled =
-      transmissionStageEnabledPtr != nullptr && *transmissionStageEnabledPtr;
-  if (transmissionStageEnabled) {
-    if (const TextureHandle *sceneColorTexture =
-            frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
-        sceneColorTexture != nullptr && nuri::isValid(*sceneColorTexture)) {
-      sceneColorTexId = gpu_.getTextureBindlessIndex(*sceneColorTexture);
-      sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex();
-      if (sceneColorTexId != kInvalidTextureBindlessIndex) {
-        frameFlags |= FrameDataFlags::HasSceneColor;
-      }
-    }
-  }
-
-  if (const TextureRecord *irradiance =
-          frame.resources->tryGet(environment.irradiance);
-      irradiance != nullptr && nuri::isValid(irradiance->texture)) {
-    irradianceTexId = irradiance->bindlessIndex;
-    frameFlags |= FrameDataFlags::HasIblDiffuse;
-  } else if (hasCubemap != 0u) {
-    irradianceTexId = cubemapTexId;
-    frameFlags |= FrameDataFlags::HasIblDiffuse;
-  }
-
-  if (const TextureRecord *prefilteredGgx =
-          frame.resources->tryGet(environment.prefilteredGgx);
-      prefilteredGgx != nullptr && nuri::isValid(prefilteredGgx->texture)) {
-    prefilteredGgxTexId = prefilteredGgx->bindlessIndex;
-    frameFlags |= FrameDataFlags::HasIblSpecular;
-  } else if (hasCubemap != 0u) {
-    prefilteredGgxTexId = cubemapTexId;
-    frameFlags |= FrameDataFlags::HasIblSpecular;
-  }
-
-  if (const TextureRecord *prefilteredCharlie =
-          frame.resources->tryGet(environment.prefilteredCharlie);
-      prefilteredCharlie != nullptr &&
-      nuri::isValid(prefilteredCharlie->texture)) {
-    prefilteredCharlieTexId = prefilteredCharlie->bindlessIndex;
-    frameFlags |= FrameDataFlags::HasIblSheen;
-  } else if ((frameFlags & FrameDataFlags::HasIblSpecular) != 0u) {
-    prefilteredCharlieTexId = prefilteredGgxTexId;
-    frameFlags |= FrameDataFlags::HasIblSheen;
-  }
-
-  if (const TextureRecord *brdfLut =
-          frame.resources->tryGet(environment.brdfLut);
-      brdfLut != nullptr && nuri::isValid(brdfLut->texture)) {
-    brdfLutTexId = brdfLut->bindlessIndex;
-    frameFlags |= FrameDataFlags::HasBrdfLut;
-  }
-  if (gpu_.getSwapchainFormat() != Format::RGBA8_SRGB) {
-    frameFlags |= FrameDataFlags::OutputLinearToSrgb;
-  }
-
-  frameData_ = FrameData{
-      .view = frame.camera.view,
-      .proj = frame.camera.proj,
-      .cameraPos = frame.camera.cameraPos,
-      .cubemapTexId = cubemapTexId,
-      .hasCubemap = hasCubemap,
-      .irradianceTexId = irradianceTexId,
-      .prefilteredGgxTexId = prefilteredGgxTexId,
-      .prefilteredCharlieTexId = prefilteredCharlieTexId,
-      .brdfLutTexId = brdfLutTexId,
-      .flags = frameFlags,
-      .cubemapSamplerId = cubemapSamplerId,
-      .sceneColorTexId = sceneColorTexId,
-      .sceneColorSamplerId = sceneColorSamplerId,
-      .sceneColorHalfResTexId = 0u,
-      .sceneColorQuarterResTexId = 0u,
-  };
-
-  auto frameDataResult = ensureFrameDataBufferCapacity(sizeof(FrameData));
-  if (frameDataResult.hasError()) {
-    return frameDataResult;
+  const ForwardSceneGpuData *sceneGpu =
+      frame.channels.tryGet<ForwardSceneGpuData>(kFrameChannelForwardSceneGpuData);
+  if (sceneGpu == nullptr || !nuri::isValid(sceneGpu->buffer) ||
+      sceneGpu->frameDataAddress == 0u) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueLayer::buildOpaquePasses: forward scene GPU data is unavailable");
   }
   auto centersResult = ensureCentersPhaseBufferCapacity(
       std::max(instanceCount * sizeof(glm::vec4), sizeof(glm::vec4)));
@@ -689,24 +599,6 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
   if (materialBufferResult.hasError()) {
     return materialBufferResult;
   }
-
-  {
-    const bool shouldUploadFrameData =
-        !frameDataUploadValid_ ||
-        std::memcmp(&uploadedFrameData_, &frameData_, sizeof(FrameData)) != 0;
-    if (shouldUploadFrameData) {
-      const std::span<const std::byte> frameDataBytes{
-          reinterpret_cast<const std::byte *>(&frameData_), sizeof(frameData_)};
-      auto updateResult =
-          gpu_.updateBuffer(frameDataBuffer_->handle(), frameDataBytes, 0);
-      if (updateResult.hasError()) {
-        return updateResult;
-      }
-      uploadedFrameData_ = frameData_;
-      frameDataUploadValid_ = true;
-    }
-  }
-
   if (instanceStaticBuffersDirty_) {
     if (!instanceCentersPhase_.empty()) {
       const std::span<const std::byte> centersBytes{
@@ -759,19 +651,24 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
     }
   }
 
-  const uint64_t frameDataAddress =
-      gpu_.getBufferDeviceAddress(frameDataBuffer_->handle());
+  const uint64_t frameDataAddress = sceneGpu->frameDataAddress;
   const uint64_t instanceCentersPhaseAddress =
       gpu_.getBufferDeviceAddress(instanceCentersPhaseBuffer_->handle());
   const uint64_t instanceBaseMatricesAddress =
       gpu_.getBufferDeviceAddress(instanceBaseMatricesBuffer_->handle());
   const uint64_t materialBufferAddress =
       gpu_.getBufferDeviceAddress(materialBuffer_->handle());
+  const uint64_t directionalLightBufferAddress =
+      sceneGpu->directionalLightBufferAddress;
+  const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
   const uint64_t instanceMatricesAddress = gpu_.getBufferDeviceAddress(
       instanceMatricesRing_[frameSlot].buffer->handle());
   if (frameDataAddress == 0 || instanceCentersPhaseAddress == 0 ||
       instanceBaseMatricesAddress == 0 || materialBufferAddress == 0 ||
-      instanceMatricesAddress == 0) {
+      instanceMatricesAddress == 0 ||
+      (sceneGpu->directionalLightCount > 0u &&
+       directionalLightBufferAddress == 0u) ||
+      (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
     return Result<bool, std::string>::makeError(
         "OpaqueLayer::buildOpaquePasses: invalid GPU buffer address");
   }
@@ -1546,7 +1443,6 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
         constants.tessMinFactor = tessMinFactor;
         constants.tessMaxFactor = tessMaxFactor;
         constants.debugVisualizationMode = debugVisualizationMode;
-
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
         draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
@@ -1606,7 +1502,6 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
         constants.tessMinFactor = tessMinFactor;
         constants.tessMaxFactor = tessMaxFactor;
         constants.debugVisualizationMode = debugVisualizationMode;
-
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
         draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
@@ -1841,9 +1736,9 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
     passDependencyBuffers_.clear();
 
     const bool hasIndirectDraws = !indirectDrawItems_.empty();
-    if (!hasIndirectDraws && frameDataBuffer_ && frameDataBuffer_->valid()) {
+    if (!hasIndirectDraws && nuri::isValid(sceneGpu->buffer)) {
       auto depResult = appendUniqueDependency(
-          passDependencyBuffers_, frameDataBuffer_->handle(),
+          passDependencyBuffers_, sceneGpu->buffer,
           "OpaqueLayer::buildOpaquePasses(pass)");
       if (depResult.hasError()) {
         return depResult;
@@ -2266,6 +2161,10 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
   pass.hasPreDispatch = !pickPassSubmitted && !preDispatches_.empty();
   pass.hasIndirectDraws = hasIndirectBaseDraws;
   pass.isMainPass = true;
+  const bool *transmissionStageEnabledPtr =
+      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
+  const bool transmissionStageEnabled =
+      transmissionStageEnabledPtr != nullptr && *transmissionStageEnabledPtr;
   if (transmissionStageEnabled) {
     const TextureHandle *sceneColorTexture =
         frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
@@ -2444,6 +2343,9 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
     return Result<bool, std::string>::makeResult(true);
   }
 
+  const ForwardSceneGpuData *sceneGpu =
+      frame.channels.tryGet<ForwardSceneGpuData>(kFrameChannelForwardSceneGpuData);
+
   const auto registerBufferAccessForPasses =
       [&graph](std::span<const RenderGraphPassId> passIds, BufferHandle handle,
                RenderGraphAccessMode mode,
@@ -2504,8 +2406,7 @@ OpaqueLayer::buildRenderGraph(RenderFrameContext &frame,
                      NURI_PROFILER_COLOR_CMD_DRAW);
   registerResult = registerBufferAccessForPasses(
       workPassIds_,
-      frameDataBuffer_ && frameDataBuffer_->valid() ? frameDataBuffer_->handle()
-                                                    : BufferHandle{},
+      sceneGpu != nullptr ? sceneGpu->buffer : BufferHandle{},
       kReadOnly, "opaque_frame_data_buffer");
   if (registerResult.hasError()) {
     return registerResult;
@@ -3129,10 +3030,6 @@ Result<bool, std::string> OpaqueLayer::ensureInitialized() {
     return pipelineResult;
   }
 
-  auto frameBufferResult = ensureFrameDataBufferCapacity(sizeof(FrameData));
-  if (frameBufferResult.hasError()) {
-    return frameBufferResult;
-  }
   auto centersResult = ensureCentersPhaseBufferCapacity(sizeof(glm::vec4));
   if (centersResult.hasError()) {
     return centersResult;
@@ -3190,37 +3087,6 @@ Result<bool, std::string> OpaqueLayer::recreatePickTexture() {
     return Result<bool, std::string>::makeError(pickResult.error());
   }
   pickIdTexture_ = pickResult.value();
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string>
-OpaqueLayer::ensureFrameDataBufferCapacity(size_t requiredBytes) {
-  const size_t requested = std::max(requiredBytes, sizeof(FrameData));
-  if (frameDataBuffer_ && frameDataBuffer_->valid() &&
-      frameDataBufferCapacityBytes_ >= requested) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-  if (frameDataBuffer_ && frameDataBuffer_->valid()) {
-    gpu_.waitIdle();
-    gpu_.destroyBuffer(frameDataBuffer_->handle());
-    frameDataBuffer_.reset();
-    frameDataBufferCapacityBytes_ = 0;
-    frameDataUploadValid_ = false;
-  }
-
-  const BufferDesc desc{
-      .usage = BufferUsage::Storage,
-      .storage = Storage::Device,
-      .size = requested,
-  };
-  auto createResult = Buffer::create(gpu_, desc, "opaque_frame_data_buffer");
-  if (createResult.hasError()) {
-    return Result<bool, std::string>::makeError(createResult.error());
-  }
-  frameDataBuffer_ = std::move(createResult.value());
-  frameDataBufferCapacityBytes_ = requested;
-  frameDataUploadValid_ = false;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -4345,13 +4211,6 @@ void OpaqueLayer::destroyPickTexture() {
 }
 
 void OpaqueLayer::destroyBuffers() {
-  if (frameDataBuffer_ && frameDataBuffer_->valid()) {
-    gpu_.destroyBuffer(frameDataBuffer_->handle());
-  }
-  frameDataBuffer_.reset();
-  frameDataBufferCapacityBytes_ = 0;
-  frameDataUploadValid_ = false;
-
   if (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid()) {
     gpu_.destroyBuffer(instanceCentersPhaseBuffer_->handle());
   }

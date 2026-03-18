@@ -59,6 +59,10 @@ private:
     uint32_t sceneColorSamplerId = 0;
     uint32_t sceneColorHalfResTexId = 0;
     uint32_t sceneColorQuarterResTexId = 0;
+    uint64_t directionalLightBufferAddress = 0;
+    uint64_t localLightBufferAddress = 0;
+    uint32_t directionalLightCount = 0;
+    uint32_t localLightCount = 0;
 
     [[nodiscard]] bool operator==(const FrameData &other) const noexcept {
       return std::memcmp(this, &other, sizeof(FrameData)) == 0;
@@ -68,11 +72,25 @@ private:
       return !(*this == other);
     }
   };
-  static_assert(sizeof(FrameData) == 192,
+  static_assert(sizeof(FrameData) == 216,
                 "CompositeLayer::FrameData must match shader layout");
 
   struct PushConstants {
     uint64_t frameDataAddress = 0;
+    uint64_t vertexBufferAddress = 0;
+    uint64_t instanceMatricesAddress = 0;
+    uint64_t instanceRemapAddress = 0;
+    uint64_t materialBufferAddress = 0;
+    uint64_t instanceCentersPhaseAddress = 0;
+    uint64_t instanceBaseMatricesAddress = 0;
+    uint32_t instanceCount = 0;
+    uint32_t materialIndex = 0;
+    float timeSeconds = 0.0f;
+    float tessNearDistance = 1.0f;
+    float tessFarDistance = 8.0f;
+    float tessMinFactor = 1.0f;
+    float tessMaxFactor = 1.0f;
+    uint32_t debugVisualizationMode = 0;
   };
   static_assert(sizeof(PushConstants) <= 128,
                 "CompositeLayer::PushConstants exceeds Vulkan guarantee");

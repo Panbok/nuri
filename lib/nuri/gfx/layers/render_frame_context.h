@@ -57,6 +57,7 @@ struct RenderSettings {
     bool enabled = false;
     bool modelBounds = false;
     bool grid = false;
+    bool lightIcons = true;
   };
 
   struct TransparentSettings {
@@ -79,6 +80,39 @@ struct CameraFrameState {
   glm::mat4 proj{1.0f};
   glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
   float aspectRatio = 1.0f;
+};
+
+struct ForwardSceneFrameData {
+  glm::mat4 view{1.0f};
+  glm::mat4 proj{1.0f};
+  glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
+  uint32_t cubemapTexId = 0;
+  uint32_t hasCubemap = 0;
+  uint32_t irradianceTexId = 0;
+  uint32_t prefilteredGgxTexId = 0;
+  uint32_t prefilteredCharlieTexId = 0;
+  uint32_t brdfLutTexId = 0;
+  uint32_t flags = 0;
+  uint32_t cubemapSamplerId = 0;
+  uint32_t sceneColorTexId = 0;
+  uint32_t sceneColorSamplerId = 0;
+  uint32_t sceneColorHalfResTexId = 0;
+  uint32_t sceneColorQuarterResTexId = 0;
+  uint64_t directionalLightBufferAddress = 0;
+  uint64_t localLightBufferAddress = 0;
+  uint32_t directionalLightCount = 0;
+  uint32_t localLightCount = 0;
+};
+static_assert(sizeof(ForwardSceneFrameData) == 216,
+              "ForwardSceneFrameData must match shader FrameDataBuffer layout");
+
+struct ForwardSceneGpuData {
+  BufferHandle buffer{};
+  uint64_t frameDataAddress = 0;
+  uint64_t directionalLightBufferAddress = 0;
+  uint64_t localLightBufferAddress = 0;
+  uint32_t directionalLightCount = 0;
+  uint32_t localLightCount = 0;
 };
 
 struct OpaqueFrameMetrics {
@@ -189,6 +223,10 @@ constexpr std::string_view kFrameChannelSceneDepthTexture = "SceneDepthTexture";
 constexpr std::string_view kFrameChannelSceneDepthGraphTexture =
     "SceneDepthGraphTexture";
 constexpr std::string_view kFrameChannelSceneColorTexture = "SceneColorTexture";
+constexpr std::string_view kFrameChannelSceneColorHalfResTexture =
+    "SceneColorHalfResTexture";
+constexpr std::string_view kFrameChannelSceneColorQuarterResTexture =
+    "SceneColorQuarterResTexture";
 constexpr std::string_view kFrameChannelSceneColorGraphTexture =
     "SceneColorGraphTexture";
 constexpr std::string_view kFrameChannelFrameColorTexture = "FrameColorTexture";
@@ -200,6 +238,9 @@ constexpr std::string_view kFrameChannelOpaquePickGraphTexture =
     "OpaquePickGraphTexture";
 constexpr std::string_view kFrameChannelOpaquePickDepthGraphTexture =
     "OpaquePickDepthGraphTexture";
+constexpr std::string_view kFrameChannelSelectedLightId = "SelectedLightId";
+constexpr std::string_view kFrameChannelForwardSceneGpuData =
+    "ForwardSceneGpuData";
 
 struct RenderFrameContext {
   const RenderScene *scene = nullptr;

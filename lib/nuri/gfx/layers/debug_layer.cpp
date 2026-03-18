@@ -13,10 +13,15 @@ namespace {
 
 constexpr uint32_t kGridPassDebugColor = 0xff66aaff;
 constexpr uint32_t kGridDrawDebugColor = 0xff66aaff;
+constexpr uint32_t kLightIconPassDebugColor = 0xfff0c040;
 constexpr uint32_t kGridVertexCount = 6;
 constexpr std::string_view kGridPipelineName = "debug_grid";
 constexpr std::string_view kGridPassLabel = "DebugGrid Pass";
 constexpr std::string_view kGridDrawLabel = "DebugGrid Draw";
+const glm::vec4 kDirectionalLightIconColor(1.0f, 0.88f, 0.25f, 1.0f);
+const glm::vec4 kPointLightIconColor(0.35f, 0.82f, 1.0f, 1.0f);
+const glm::vec4 kSpotLightIconColor(1.0f, 0.55f, 0.24f, 1.0f);
+const glm::vec4 kSelectedLightIconColor(1.0f, 0.28f, 0.16f, 1.0f);
 
 [[nodiscard]] bool isSameTextureHandle(TextureHandle a, TextureHandle b) {
   return a.index == b.index && a.generation == b.generation;
@@ -29,6 +34,87 @@ constexpr std::string_view kGridDrawLabel = "DebugGrid Draw";
     return *published;
   }
   return {};
+}
+
+[[nodiscard]] glm::vec3 safeNormalize(const glm::vec3 &value,
+                                      const glm::vec3 &fallback) {
+  const float length = glm::length(value);
+  if (!std::isfinite(length) || length <= 1.0e-6f) {
+    return fallback;
+  }
+  return value / length;
+}
+
+[[nodiscard]] float lightIconScale(const CameraFrameState &camera,
+                                   const glm::vec3 &position) {
+  const float distance = glm::length(glm::vec3(camera.cameraPos) - position);
+  return std::clamp(distance * 0.08f, 0.2f, 3.0f);
+}
+
+void buildLightBasis(const glm::vec3 &direction, glm::vec3 &outRight,
+                     glm::vec3 &outUp) {
+  const glm::vec3 dir = safeNormalize(direction, glm::vec3(0.0f, 0.0f, -1.0f));
+  const glm::vec3 fallbackUp =
+      std::abs(dir.y) > 0.95f ? glm::vec3(1.0f, 0.0f, 0.0f)
+                              : glm::vec3(0.0f, 1.0f, 0.0f);
+  outRight = safeNormalize(glm::cross(fallbackUp, dir),
+                           glm::vec3(1.0f, 0.0f, 0.0f));
+  outUp = safeNormalize(glm::cross(dir, outRight), glm::vec3(0.0f, 1.0f, 0.0f));
+}
+
+void drawDirectionalLightIcon(DebugDraw3D &debugDraw, const glm::vec3 &position,
+                              const glm::vec3 &direction, float scale,
+                              const glm::vec4 &color) {
+  const glm::vec3 dir = safeNormalize(direction, glm::vec3(0.0f, 0.0f, -1.0f));
+  glm::vec3 right(1.0f, 0.0f, 0.0f);
+  glm::vec3 up(0.0f, 1.0f, 0.0f);
+  buildLightBasis(dir, right, up);
+
+  const glm::vec3 end = position + dir * (scale * 2.4f);
+  const glm::vec3 headBase = end - dir * (scale * 0.8f);
+  debugDraw.line(position, end, color);
+  debugDraw.line(end, headBase + right * (scale * 0.45f), color);
+  debugDraw.line(end, headBase - right * (scale * 0.45f), color);
+  debugDraw.line(end, headBase + up * (scale * 0.45f), color);
+  debugDraw.line(end, headBase - up * (scale * 0.45f), color);
+}
+
+void drawPointLightIcon(DebugDraw3D &debugDraw, const glm::vec3 &position,
+                        float scale, const glm::vec4 &color) {
+  const glm::vec3 x(scale, 0.0f, 0.0f);
+  const glm::vec3 y(0.0f, scale, 0.0f);
+  const glm::vec3 z(0.0f, 0.0f, scale);
+  debugDraw.line(position - x, position + x, color);
+  debugDraw.line(position - y, position + y, color);
+  debugDraw.line(position - z, position + z, color);
+  debugDraw.line(position + x, position + y, color);
+  debugDraw.line(position + y, position - x, color);
+  debugDraw.line(position - x, position - y, color);
+  debugDraw.line(position - y, position + x, color);
+}
+
+void drawSpotLightIcon(DebugDraw3D &debugDraw, const glm::vec3 &position,
+                       const glm::vec3 &direction, float scale,
+                       const glm::vec4 &color) {
+  const glm::vec3 dir = safeNormalize(direction, glm::vec3(0.0f, 0.0f, -1.0f));
+  glm::vec3 right(1.0f, 0.0f, 0.0f);
+  glm::vec3 up(0.0f, 1.0f, 0.0f);
+  buildLightBasis(dir, right, up);
+
+  const glm::vec3 baseCenter = position + dir * (scale * 2.2f);
+  const float radius = scale * 0.9f;
+  const glm::vec3 p0 = baseCenter + right * radius;
+  const glm::vec3 p1 = baseCenter + up * radius;
+  const glm::vec3 p2 = baseCenter - right * radius;
+  const glm::vec3 p3 = baseCenter - up * radius;
+  debugDraw.line(position, p0, color);
+  debugDraw.line(position, p1, color);
+  debugDraw.line(position, p2, color);
+  debugDraw.line(position, p3, color);
+  debugDraw.line(p0, p1, color);
+  debugDraw.line(p1, p2, color);
+  debugDraw.line(p2, p3, color);
+  debugDraw.line(p3, p0, color);
 }
 
 } // namespace
@@ -265,6 +351,89 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
   return Result<bool, std::string>::makeResult(true);
 }
 
+bool DebugLayer::hasDebugWork(const RenderFrameContext &frame) const {
+  if (frame.settings == nullptr) {
+    return false;
+  }
+  const RenderSettings::DebugSettings &debug = frame.settings->debug;
+  return debug.enabled || debug.modelBounds || debug.grid || debug.lightIcons;
+}
+
+Result<bool, std::string>
+DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
+                                 TextureHandle depthTexture,
+                                 float &outSortDepth) {
+  outSortDepth = 0.0f;
+  if (!debugDraw3D_ || !frame.scene || !nuri::isValid(depthTexture)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  debugDraw3D_->clear();
+  debugDraw3D_->setMatrix(frame.camera.proj * frame.camera.view);
+
+  const LightId selectedLightId =
+      frame.channels.tryGet<LightId>(kFrameChannelSelectedLightId) != nullptr
+          ? *frame.channels.tryGet<LightId>(kFrameChannelSelectedLightId)
+          : kInvalidLightId;
+  bool hasLines = false;
+  const glm::mat4 view = frame.camera.view;
+
+  if (frame.settings != nullptr && frame.settings->debug.modelBounds &&
+      frame.resources != nullptr) {
+    const std::span<const Renderable> renderables = frame.scene->renderables();
+    for (const Renderable &renderable : renderables) {
+      const ModelRecord *modelRecord = frame.resources->tryGet(renderable.model);
+      if (!modelRecord || !modelRecord->model) {
+        continue;
+      }
+      debugDraw3D_->box(renderable.modelMatrix, modelRecord->model->bounds(),
+                        glm::vec4(1.0f, 1.0f, 0.0f, 1.0f));
+      const glm::vec3 center = glm::vec3(
+          renderable.modelMatrix *
+          glm::vec4(modelRecord->model->bounds().getCenter(), 1.0f));
+      outSortDepth = std::max(outSortDepth, -(view * glm::vec4(center, 1.0f)).z);
+      hasLines = true;
+    }
+  }
+
+  if (frame.settings != nullptr && frame.settings->debug.lightIcons) {
+    frame.scene->forEachLightId([&](LightId lightId) {
+      LightDesc light{};
+      if (!frame.scene->getLightDesc(lightId, light)) {
+        return;
+      }
+
+      const float scale = lightIconScale(frame.camera, light.position);
+      const bool selected = isValid(selectedLightId) && selectedLightId == lightId;
+      const glm::vec4 color =
+          selected
+              ? kSelectedLightIconColor
+              : (light.type == LightType::Directional
+                     ? kDirectionalLightIconColor
+                     : (light.type == LightType::Point ? kPointLightIconColor
+                                                       : kSpotLightIconColor));
+      const glm::vec3 direction = light.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+      switch (light.type) {
+      case LightType::Directional:
+        drawDirectionalLightIcon(*debugDraw3D_, light.position, direction, scale,
+                                 color);
+        break;
+      case LightType::Point:
+        drawPointLightIcon(*debugDraw3D_, light.position, scale, color);
+        break;
+      case LightType::Spot:
+        drawSpotLightIcon(*debugDraw3D_, light.position, direction, scale, color);
+        break;
+      }
+      outSortDepth =
+          std::max(outSortDepth, -(view * glm::vec4(light.position, 1.0f)).z);
+      hasLines = true;
+    });
+  }
+
+  return Result<bool, std::string>::makeResult(hasLines);
+}
+
 Result<bool, std::string>
 DebugLayer::buildRenderGraph(RenderFrameContext &frame,
                              RenderGraphBuilder &graph) {
@@ -276,7 +445,7 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  if (!frame.settings || !frame.settings->debug.enabled) {
+  if (!hasDebugWork(frame)) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -344,11 +513,54 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
     }
   }
 
-  if (frame.settings->debug.modelBounds) {
-    auto boundsPassResult = appendModelBoundsGraphPass(
-        frame, graph, sceneDepthTexture, sceneDepthGraphTexture);
-    if (boundsPassResult.hasError()) {
-      return boundsPassResult;
+  float debugSortDepth = 0.0f;
+  auto buildLinesResult =
+      buildSceneDebugLines(frame, sceneDepthTexture, debugSortDepth);
+  if (buildLinesResult.hasError()) {
+    return buildLinesResult;
+  }
+  if (buildLinesResult.value()) {
+    auto linePassResult =
+        debugDraw3D_->buildGraphPass(frame.frameIndex, sceneDepthTexture);
+    if (linePassResult.hasError()) {
+      return Result<bool, std::string>::makeError(linePassResult.error());
+    }
+
+    DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
+    TextureHandle colorTexture =
+        resolvePublishedTexture(frame.channels, kFrameChannelFrameColorTexture);
+    if (!nuri::isValid(colorTexture)) {
+      colorTexture = pass.colorTextureHandle;
+    }
+    if (nuri::isValid(colorTexture)) {
+      auto colorImportResult =
+          graph.importTexture(colorTexture, "debug_pass_color_texture");
+      if (colorImportResult.hasError()) {
+        return Result<bool, std::string>::makeError(colorImportResult.error());
+      }
+      pass.desc.colorTexture = colorImportResult.value();
+    }
+    if (nuri::isValid(pass.depthTextureHandle)) {
+      const bool useDepthOverride =
+          nuri::isValid(sceneDepthTexture) &&
+          nuri::isValid(sceneDepthGraphTexture) &&
+          isSameTextureHandle(pass.depthTextureHandle, sceneDepthTexture);
+      if (useDepthOverride) {
+        pass.desc.depthTexture = sceneDepthGraphTexture;
+      } else {
+        auto depthImportResult =
+            graph.importTexture(pass.depthTextureHandle, "debug_pass_depth_texture");
+        if (depthImportResult.hasError()) {
+          return Result<bool, std::string>::makeError(depthImportResult.error());
+        }
+        pass.desc.depthTexture = depthImportResult.value();
+      }
+    }
+    pass.desc.debugColor = kLightIconPassDebugColor;
+
+    auto addResult = graph.addGraphicsPass(pass.desc);
+    if (addResult.hasError()) {
+      return Result<bool, std::string>::makeError(addResult.error());
     }
   }
 
@@ -363,36 +575,19 @@ Result<bool, std::string> DebugLayer::buildTransparentStageContribution(
   transparentFixedDraws_.clear();
   transparentDependencyBuffers_.clear();
 
-  if (!frame.settings || !frame.settings->debug.enabled) {
+  if (!hasDebugWork(frame)) {
     return Result<bool, std::string>::makeResult(true);
   }
 
   const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
-  const bool hasDepth = nuri::isValid(depthTexture);
-  const glm::mat4 view = frame.camera.view;
-
-  if (frame.settings->debug.modelBounds && debugDraw3D_ && frame.scene &&
-      frame.resources && hasDepth) {
-    const std::span<const Renderable> renderables = frame.scene->renderables();
-    if (!renderables.empty()) {
-      debugDraw3D_->clear();
-      debugDraw3D_->setMatrix(frame.camera.proj * frame.camera.view);
-      float farthestDepth = 0.0f;
-      for (const Renderable &renderable : renderables) {
-        const ModelRecord *modelRecord =
-            frame.resources->tryGet(renderable.model);
-        if (!modelRecord || !modelRecord->model) {
-          continue;
-        }
-        debugDraw3D_->box(renderable.modelMatrix, modelRecord->model->bounds(),
-                          glm::vec4(1.0f, 1.0f, 0.0f, 1.0f));
-        const glm::vec3 center = glm::vec3(
-            renderable.modelMatrix *
-            glm::vec4(modelRecord->model->bounds().getCenter(), 1.0f));
-        farthestDepth =
-            std::max(farthestDepth, -(view * glm::vec4(center, 1.0f)).z);
-      }
-
+  if (nuri::isValid(depthTexture)) {
+    float debugSortDepth = 0.0f;
+    auto buildLinesResult =
+        buildSceneDebugLines(frame, depthTexture, debugSortDepth);
+    if (buildLinesResult.hasError()) {
+      return Result<bool, std::string>::makeError(buildLinesResult.error());
+    }
+    if (buildLinesResult.value()) {
       auto linePassResult =
           debugDraw3D_->buildGraphPass(frame.frameIndex, depthTexture);
       if (linePassResult.hasError()) {
@@ -403,7 +598,7 @@ Result<bool, std::string> DebugLayer::buildTransparentStageContribution(
         for (size_t i = 0; i < pass.desc.draws.size(); ++i) {
           transparentSortableDraws_.push_back(TransparentStageSortableDraw{
               .draw = pass.desc.draws[i],
-              .sortDepth = farthestDepth,
+              .sortDepth = debugSortDepth,
               .stableOrder = static_cast<uint32_t>(i),
           });
         }

@@ -179,6 +179,10 @@ SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
       .sceneColorSamplerId = sceneColorSamplerId,
       .sceneColorHalfResTexId = 0,
       .sceneColorQuarterResTexId = 0,
+      .directionalLightBufferAddress = 0u,
+      .localLightBufferAddress = 0u,
+      .directionalLightCount = 0u,
+      .localLightCount = 0u,
   };
 
   const size_t requiredBytes = sizeof(frameData_);

@@ -243,6 +243,18 @@ void TransmissionLayer::publishFrameData(RenderFrameContext &frame) {
   frame.channels.publish<bool>(kFrameChannelTransmissionStageEnabled, true);
   frame.channels.publish<TextureHandle>(kFrameChannelSceneColorTexture,
                                         sceneColorTexture);
+  const TextureHandle sceneColorHalfResTexture =
+      currentSceneColorTextureMip(frame.frameIndex, 1u);
+  if (nuri::isValid(sceneColorHalfResTexture)) {
+    frame.channels.publish<TextureHandle>(kFrameChannelSceneColorHalfResTexture,
+                                          sceneColorHalfResTexture);
+  }
+  const TextureHandle sceneColorQuarterResTexture =
+      currentSceneColorTextureMip(frame.frameIndex, 2u);
+  if (nuri::isValid(sceneColorQuarterResTexture)) {
+    frame.channels.publish<TextureHandle>(
+        kFrameChannelSceneColorQuarterResTexture, sceneColorQuarterResTexture);
+  }
 }
 
 Result<bool, std::string>
@@ -353,9 +365,12 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     }
   }
 
-  auto frameDataBufferResult = ensureFrameDataBufferCapacity(sizeof(FrameData));
-  if (frameDataBufferResult.hasError()) {
-    return frameDataBufferResult;
+  const ForwardSceneGpuData *sceneGpu =
+      frame.channels.tryGet<ForwardSceneGpuData>(kFrameChannelForwardSceneGpuData);
+  if (sceneGpu == nullptr || !nuri::isValid(sceneGpu->buffer) ||
+      sceneGpu->frameDataAddress == 0u) {
+    return Result<bool, std::string>::makeError(
+        "TransmissionLayer::buildRenderGraph: forward scene GPU data is unavailable");
   }
 
   const std::span<const Renderable> renderables = frame.scene->renderables();
@@ -409,105 +424,10 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     }
   }
 
-  uint32_t cubemapTexId = kInvalidTextureBindlessIndex;
-  uint32_t hasCubemap = 0u;
-  uint32_t irradianceTexId = kInvalidTextureBindlessIndex;
-  uint32_t prefilteredGgxTexId = kInvalidTextureBindlessIndex;
-  uint32_t prefilteredCharlieTexId = kInvalidTextureBindlessIndex;
-  uint32_t brdfLutTexId = kInvalidTextureBindlessIndex;
-  uint32_t frameFlags = 0u;
-  const uint32_t cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex();
   const uint32_t sceneColorTexId =
       hasSceneColorInput ? gpu_.getTextureBindlessIndex(*sceneColorTexture)
                          : kInvalidTextureBindlessIndex;
-  const uint32_t sceneColorMip1TexId =
-      hasSceneColorInput
-          ? gpu_.getTextureBindlessIndex(
-                currentSceneColorTextureMip(frame.frameIndex, 1u))
-          : kInvalidTextureBindlessIndex;
-  const uint32_t sceneColorMip2TexId =
-      hasSceneColorInput
-          ? gpu_.getTextureBindlessIndex(
-                currentSceneColorTextureMip(frame.frameIndex, 2u))
-          : kInvalidTextureBindlessIndex;
   const uint32_t sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex();
-  const EnvironmentHandles environment = frame.scene->environment();
-
-  if (const TextureRecord *cubemap =
-          frame.resources->tryGet(environment.cubemap);
-      cubemap != nullptr && nuri::isValid(cubemap->texture)) {
-    cubemapTexId = cubemap->bindlessIndex;
-    hasCubemap = 1u;
-  }
-  if (const TextureRecord *irradiance =
-          frame.resources->tryGet(environment.irradiance);
-      irradiance != nullptr && nuri::isValid(irradiance->texture)) {
-    irradianceTexId = irradiance->bindlessIndex;
-    frameFlags |= HasIblDiffuse;
-  }
-  if (const TextureRecord *prefilteredGgx =
-          frame.resources->tryGet(environment.prefilteredGgx);
-      prefilteredGgx != nullptr && nuri::isValid(prefilteredGgx->texture)) {
-    prefilteredGgxTexId = prefilteredGgx->bindlessIndex;
-    frameFlags |= HasIblSpecular;
-  }
-  if (const TextureRecord *prefilteredCharlie =
-          frame.resources->tryGet(environment.prefilteredCharlie);
-      prefilteredCharlie != nullptr &&
-      nuri::isValid(prefilteredCharlie->texture)) {
-    prefilteredCharlieTexId = prefilteredCharlie->bindlessIndex;
-    frameFlags |= HasIblSheen;
-  } else if ((frameFlags & HasIblSpecular) != 0u) {
-    prefilteredCharlieTexId = prefilteredGgxTexId;
-    frameFlags |= HasIblSheen;
-  }
-  if (const TextureRecord *brdfLut =
-          frame.resources->tryGet(environment.brdfLut);
-      brdfLut != nullptr && nuri::isValid(brdfLut->texture)) {
-    brdfLutTexId = brdfLut->bindlessIndex;
-    frameFlags |= HasBrdfLut;
-  }
-  if (hasSceneColorInput && sceneColorTexId != kInvalidTextureBindlessIndex) {
-    frameFlags |= HasSceneColor;
-  }
-  if (gpu_.getSwapchainFormat() != Format::RGBA8_SRGB) {
-    frameFlags |= OutputLinearToSrgb;
-  }
-
-  frameData_ = FrameData{
-      .view = frame.camera.view,
-      .proj = frame.camera.proj,
-      .cameraPos = frame.camera.cameraPos,
-      .cubemapTexId = cubemapTexId,
-      .hasCubemap = hasCubemap,
-      .irradianceTexId = irradianceTexId,
-      .prefilteredGgxTexId = prefilteredGgxTexId,
-      .prefilteredCharlieTexId = prefilteredCharlieTexId,
-      .brdfLutTexId = brdfLutTexId,
-      .flags = frameFlags,
-      .cubemapSamplerId = cubemapSamplerId,
-      .sceneColorTexId = sceneColorTexId,
-      .sceneColorSamplerId = sceneColorSamplerId,
-      .sceneColorHalfResTexId = sceneColorMip1TexId,
-      .sceneColorQuarterResTexId = sceneColorMip2TexId,
-  };
-
-  if (!frameDataUploadValid_ || !(uploadedFrameData_ == frameData_)) {
-    Result<bool, std::string> updateResult =
-        Result<bool, std::string>::makeResult(true);
-    NURI_PROFILER_ZONE("TransmissionLayer.frame_data_upload",
-                       NURI_PROFILER_COLOR_CMD_COPY);
-    const std::span<const std::byte> frameDataBytes{
-        reinterpret_cast<const std::byte *>(&frameData_), sizeof(frameData_)};
-    updateResult =
-        gpu_.updateBuffer(frameDataBuffer_->handle(), frameDataBytes, 0);
-    NURI_PROFILER_ZONE_END();
-    if (updateResult.hasError()) {
-      return updateResult;
-    }
-    uploadedFrameData_ = frameData_;
-    frameDataUploadValid_ = true;
-  }
 
   const Format depthFormat = nuri::isValid(depthTexture)
                                  ? gpu_.getTextureFormat(depthTexture)
@@ -574,16 +494,21 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
 
     NURI_PROFILER_ZONE("TransmissionLayer.mesh_draw_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    const uint64_t frameDataAddress =
-        gpu_.getBufferDeviceAddress(frameDataBuffer_->handle());
+    const uint64_t frameDataAddress = sceneGpu->frameDataAddress;
     const uint64_t materialBufferAddress =
         gpu_.getBufferDeviceAddress(materialBuffer_->handle());
+    const uint64_t directionalLightBufferAddress =
+        sceneGpu->directionalLightBufferAddress;
+    const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
     const uint64_t instanceMatricesAddress = gpu_.getBufferDeviceAddress(
         instanceMatricesRing_[frameSlot].buffer->handle());
     const uint64_t instanceRemapAddress = gpu_.getBufferDeviceAddress(
         instanceRemapRing_[frameSlot].buffer->handle());
     if (frameDataAddress == 0u || materialBufferAddress == 0u ||
-        instanceMatricesAddress == 0u || instanceRemapAddress == 0u) {
+        instanceMatricesAddress == 0u || instanceRemapAddress == 0u ||
+        (sceneGpu->directionalLightCount > 0u &&
+         directionalLightBufferAddress == 0u) ||
+        (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
       return Result<bool, std::string>::makeError(
           "TransmissionLayer::buildRenderGraph: invalid GPU buffer address");
     }
@@ -645,6 +570,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
       passDrawItems_.push_back(draw);
     }
 
+    appendUniqueBuffer(passDependencyBuffers_, sceneGpu->buffer);
     appendUniqueBuffer(passDependencyBuffers_, materialBuffer_->handle());
     appendUniqueBuffer(passDependencyBuffers_,
                        instanceMatricesRing_[frameSlot].buffer->handle());
@@ -939,31 +865,6 @@ TransmissionLayer::ensurePipelines(Format colorFormat, Format depthFormat) {
   meshPipelineDepthFormat_ = depthFormat;
   copyPipelineColorFormat_ = colorFormat;
   copyPipelineDepthFormat_ = Format::Count;
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string>
-TransmissionLayer::ensureFrameDataBufferCapacity(size_t requiredBytes) {
-  const size_t requested = std::max(requiredBytes, sizeof(FrameData));
-  if (frameDataBuffer_ && frameDataBuffer_->valid() &&
-      frameDataBufferCapacityBytes_ >= requested) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  if (frameDataBuffer_ && frameDataBuffer_->valid()) {
-    gpu_.destroyBuffer(frameDataBuffer_->handle());
-  }
-  frameDataBuffer_.reset();
-  auto bufferResult = Buffer::create(gpu_,
-                                     BufferDesc{.usage = BufferUsage::Storage,
-                                                .storage = Storage::Device,
-                                                .size = requested},
-                                     "transmission_frame_data");
-  if (bufferResult.hasError()) {
-    return Result<bool, std::string>::makeError(bufferResult.error());
-  }
-  frameDataBuffer_ = std::move(bufferResult.value());
-  frameDataBufferCapacityBytes_ = requested;
-  frameDataUploadValid_ = false;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1345,9 +1246,6 @@ void TransmissionLayer::resetCachedState() {
   materialGpuDataCache_.clear();
   materialTextureAccessHandles_.clear();
   environmentTextureAccessHandles_.clear();
-  frameData_ = {};
-  uploadedFrameData_ = {};
-  frameDataUploadValid_ = false;
 }
 
 void TransmissionLayer::resetFrameBuildState() {
@@ -1397,13 +1295,6 @@ void TransmissionLayer::destroyShaders() {
 }
 
 void TransmissionLayer::destroyBuffers() {
-  if (frameDataBuffer_ && frameDataBuffer_->valid()) {
-    gpu_.destroyBuffer(frameDataBuffer_->handle());
-  }
-  frameDataBuffer_.reset();
-  frameDataBufferCapacityBytes_ = 0;
-  frameDataUploadValid_ = false;
-
   if (materialBuffer_ && materialBuffer_->valid()) {
     gpu_.destroyBuffer(materialBuffer_->handle());
   }
