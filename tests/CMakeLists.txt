@@ -27,7 +27,6 @@ set(_nuri_test_path
   "$ENV{PATH}"
 )
 list(JOIN _nuri_test_path ";" _nuri_test_path_joined)
-string(REPLACE ";" "\\;" _nuri_test_path_escaped "${_nuri_test_path_joined}")
 
 if(WIN32)
   set(NURI_GTEST_LAUNCHER "${CMAKE_CURRENT_BINARY_DIR}/nuri_gtest_launcher.bat")
@@ -119,8 +118,6 @@ function(nuri_add_gtest_suite target source_file test_prefix)
     TEST_PREFIX "${test_prefix}"
     DISCOVERY_MODE PRE_TEST
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    PROPERTIES
-      ENVIRONMENT "PATH=${_nuri_test_path_escaped}"
   )
 endfunction()
 
@@ -158,4 +155,16 @@ nuri_add_gtest_suite(
   nuri_material_import_tests
   src/material_import_tests.cpp
   "material_import::"
+)
+
+nuri_add_gtest_suite(
+  nuri_render_scene_light_store_tests
+  src/render_scene_light_store_tests.cpp
+  "render_scene_light_store::"
+)
+
+nuri_add_gtest_suite(
+  nuri_gltf_light_import_tests
+  src/gltf_light_import_tests.cpp
+  "gltf_light_import::"
 )
