@@ -6,6 +6,7 @@
 
 #include <any>
 #include <cstdint>
+#include <cstring>
 #include <memory_resource>
 #include <optional>
 #include <string>
@@ -102,10 +103,26 @@ struct ForwardSceneFrameData {
   uint64_t localLightBufferAddress = 0;
   uint32_t directionalLightCount = 0;
   uint32_t localLightCount = 0;
+
+  [[nodiscard]] bool
+  operator==(const ForwardSceneFrameData &other) const noexcept {
+    return std::memcmp(this, &other, sizeof(ForwardSceneFrameData)) == 0;
+  }
+
+  [[nodiscard]] bool
+  operator!=(const ForwardSceneFrameData &other) const noexcept {
+    return !(*this == other);
+  }
 };
 static_assert(sizeof(ForwardSceneFrameData) == 216,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
 
+// GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.
+// The CPU owns allocation and updates of ForwardSceneFrameData, then derives
+// the resolved GPU addresses/counts below before publishing them for consumers.
+// Keep this struct in sync with ForwardSceneFrameData's layout/semantics for
+// directional/local light buffer addresses and counts to avoid
+// desynchronization bugs when the CPU-side contract changes.
 struct ForwardSceneGpuData {
   BufferHandle buffer{};
   uint64_t frameDataAddress = 0;

@@ -43,9 +43,7 @@ makeSceneDataBufferLayout(size_t frameDataBytes, size_t directionalLightBytes,
 
 } // namespace
 
-SceneLightingLayer::SceneLightingLayer(GPUDevice &gpu,
-                                       std::pmr::memory_resource *memory)
-    : gpu_(gpu) {}
+SceneLightingLayer::SceneLightingLayer(GPUDevice &gpu) : gpu_(gpu) {}
 
 SceneLightingLayer::~SceneLightingLayer() { onDetach(); }
 
@@ -123,9 +121,9 @@ SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
     flags |= kForwardSceneHasBrdfLut;
   }
 
-  uint32_t sceneColorTexId = 0u;
-  uint32_t sceneColorHalfResTexId = 0u;
-  uint32_t sceneColorQuarterResTexId = 0u;
+  uint32_t sceneColorTexId = kInvalidTextureBindlessIndex;
+  uint32_t sceneColorHalfResTexId = kInvalidTextureBindlessIndex;
+  uint32_t sceneColorQuarterResTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneColorSamplerId = 0u;
   if (const TextureHandle *sceneColorTexture =
           frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
@@ -198,8 +196,7 @@ SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
   };
 
   const bool frameDataDirty =
-      !frameDataUploadValid_ ||
-      std::memcmp(&uploadedFrameData_, &frameData, sizeof(frameData)) != 0;
+      !frameDataUploadValid_ || uploadedFrameData_ != frameData;
   if (frameDataDirty) {
     const std::span<const std::byte> frameDataBytes{
         reinterpret_cast<const std::byte *>(&frameData), sizeof(frameData)};

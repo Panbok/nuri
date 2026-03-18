@@ -308,11 +308,13 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
   }
 
   const ForwardSceneGpuData *sceneGpu =
-      frame.channels.tryGet<ForwardSceneGpuData>(kFrameChannelForwardSceneGpuData);
+      frame.channels.tryGet<ForwardSceneGpuData>(
+          kFrameChannelForwardSceneGpuData);
   if (sceneGpu == nullptr || !nuri::isValid(sceneGpu->buffer) ||
       sceneGpu->frameDataAddress == 0u) {
     return Result<bool, std::string>::makeError(
-        "TransparentLayer::buildRenderGraph: forward scene GPU data is unavailable");
+        "TransparentLayer::buildRenderGraph: forward scene GPU data is "
+        "unavailable");
   }
 
   auto materialBufferResult = ensureMaterialBufferCapacity(
@@ -399,9 +401,7 @@ TransparentLayer::buildRenderGraph(RenderFrameContext &frame,
       instanceRemapAddress == 0u ||
       (sceneGpu->directionalLightCount > 0u &&
        directionalLightBufferAddress == 0u) ||
-      (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u) ||
-      frameDataAddress == 0u ||
-      !nuri::isValid(sceneGpu->buffer)) {
+      (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
     return Result<bool, std::string>::makeError(
         "TransparentLayer::buildRenderGraph: invalid GPU buffer address");
   }

@@ -4,6 +4,7 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/layers/render_frame_context.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/gpu/material.h"

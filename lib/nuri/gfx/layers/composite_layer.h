@@ -4,16 +4,14 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/layers/render_frame_context.h"
 #include "nuri/resources/gpu/buffer.h"
 
 #include <cstddef>
-#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <utility>
-
-#include <glm/glm.hpp>
 
 namespace nuri {
 
@@ -43,38 +41,6 @@ public:
                    RenderGraphBuilder &graph) override;
 
 private:
-  struct FrameData {
-    glm::mat4 view{1.0f};
-    glm::mat4 proj{1.0f};
-    glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
-    uint32_t cubemapTexId = 0;
-    uint32_t hasCubemap = 0;
-    uint32_t irradianceTexId = 0;
-    uint32_t prefilteredGgxTexId = 0;
-    uint32_t prefilteredCharlieTexId = 0;
-    uint32_t brdfLutTexId = 0;
-    uint32_t flags = 0;
-    uint32_t cubemapSamplerId = 0;
-    uint32_t sceneColorTexId = 0;
-    uint32_t sceneColorSamplerId = 0;
-    uint32_t sceneColorHalfResTexId = 0;
-    uint32_t sceneColorQuarterResTexId = 0;
-    uint64_t directionalLightBufferAddress = 0;
-    uint64_t localLightBufferAddress = 0;
-    uint32_t directionalLightCount = 0;
-    uint32_t localLightCount = 0;
-
-    [[nodiscard]] bool operator==(const FrameData &other) const noexcept {
-      return std::memcmp(this, &other, sizeof(FrameData)) == 0;
-    }
-
-    [[nodiscard]] bool operator!=(const FrameData &other) const noexcept {
-      return !(*this == other);
-    }
-  };
-  static_assert(sizeof(FrameData) == 216,
-                "CompositeLayer::FrameData must match shader layout");
-
   struct PushConstants {
     uint64_t frameDataAddress = 0;
     uint64_t vertexBufferAddress = 0;
@@ -116,8 +82,8 @@ private:
   bool initialized_ = false;
   bool frameDataUploadValid_ = false;
 
-  FrameData frameData_{};
-  FrameData uploadedFrameData_{};
+  ForwardSceneFrameData frameData_{};
+  ForwardSceneFrameData uploadedFrameData_{};
   PushConstants pushConstants_{};
   DrawItem drawItem_{};
   std::filesystem::path vertexPath_{};

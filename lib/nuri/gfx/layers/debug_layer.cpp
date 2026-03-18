@@ -27,8 +27,9 @@ const glm::vec4 kSelectedLightIconColor(1.0f, 0.28f, 0.16f, 1.0f);
   return a.index == b.index && a.generation == b.generation;
 }
 
-[[nodiscard]] TextureHandle resolvePublishedTexture(
-    const FrameChannelRegistry &channels, std::string_view key) {
+[[nodiscard]] TextureHandle
+resolvePublishedTexture(const FrameChannelRegistry &channels,
+                        std::string_view key) {
   if (const TextureHandle *published = channels.tryGet<TextureHandle>(key);
       published != nullptr && nuri::isValid(*published)) {
     return *published;
@@ -54,11 +55,11 @@ const glm::vec4 kSelectedLightIconColor(1.0f, 0.28f, 0.16f, 1.0f);
 void buildLightBasis(const glm::vec3 &direction, glm::vec3 &outRight,
                      glm::vec3 &outUp) {
   const glm::vec3 dir = safeNormalize(direction, glm::vec3(0.0f, 0.0f, -1.0f));
-  const glm::vec3 fallbackUp =
-      std::abs(dir.y) > 0.95f ? glm::vec3(1.0f, 0.0f, 0.0f)
-                              : glm::vec3(0.0f, 1.0f, 0.0f);
-  outRight = safeNormalize(glm::cross(fallbackUp, dir),
-                           glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::vec3 fallbackUp = std::abs(dir.y) > 0.95f
+                                   ? glm::vec3(1.0f, 0.0f, 0.0f)
+                                   : glm::vec3(0.0f, 1.0f, 0.0f);
+  outRight =
+      safeNormalize(glm::cross(fallbackUp, dir), glm::vec3(1.0f, 0.0f, 0.0f));
   outUp = safeNormalize(glm::cross(dir, outRight), glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
@@ -371,10 +372,10 @@ DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
   debugDraw3D_->clear();
   debugDraw3D_->setMatrix(frame.camera.proj * frame.camera.view);
 
+  const LightId *selectedLightIdPtr =
+      frame.channels.tryGet<LightId>(kFrameChannelSelectedLightId);
   const LightId selectedLightId =
-      frame.channels.tryGet<LightId>(kFrameChannelSelectedLightId) != nullptr
-          ? *frame.channels.tryGet<LightId>(kFrameChannelSelectedLightId)
-          : kInvalidLightId;
+      selectedLightIdPtr != nullptr ? *selectedLightIdPtr : kInvalidLightId;
   bool hasLines = false;
   const glm::mat4 view = frame.camera.view;
 
@@ -382,16 +383,18 @@ DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
       frame.resources != nullptr) {
     const std::span<const Renderable> renderables = frame.scene->renderables();
     for (const Renderable &renderable : renderables) {
-      const ModelRecord *modelRecord = frame.resources->tryGet(renderable.model);
+      const ModelRecord *modelRecord =
+          frame.resources->tryGet(renderable.model);
       if (!modelRecord || !modelRecord->model) {
         continue;
       }
       debugDraw3D_->box(renderable.modelMatrix, modelRecord->model->bounds(),
                         glm::vec4(1.0f, 1.0f, 0.0f, 1.0f));
-      const glm::vec3 center = glm::vec3(
-          renderable.modelMatrix *
-          glm::vec4(modelRecord->model->bounds().getCenter(), 1.0f));
-      outSortDepth = std::max(outSortDepth, -(view * glm::vec4(center, 1.0f)).z);
+      const glm::vec3 center =
+          glm::vec3(renderable.modelMatrix *
+                    glm::vec4(modelRecord->model->bounds().getCenter(), 1.0f));
+      outSortDepth =
+          std::max(outSortDepth, -(view * glm::vec4(center, 1.0f)).z);
       hasLines = true;
     }
   }
@@ -404,7 +407,8 @@ DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
       }
 
       const float scale = lightIconScale(frame.camera, light.position);
-      const bool selected = isValid(selectedLightId) && selectedLightId == lightId;
+      const bool selected =
+          isValid(selectedLightId) && selectedLightId == lightId;
       const glm::vec4 color =
           selected
               ? kSelectedLightIconColor
@@ -415,14 +419,15 @@ DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
       const glm::vec3 direction = light.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
       switch (light.type) {
       case LightType::Directional:
-        drawDirectionalLightIcon(*debugDraw3D_, light.position, direction, scale,
-                                 color);
+        drawDirectionalLightIcon(*debugDraw3D_, light.position, direction,
+                                 scale, color);
         break;
       case LightType::Point:
         drawPointLightIcon(*debugDraw3D_, light.position, scale, color);
         break;
       case LightType::Spot:
-        drawSpotLightIcon(*debugDraw3D_, light.position, direction, scale, color);
+        drawSpotLightIcon(*debugDraw3D_, light.position, direction, scale,
+                          color);
         break;
       }
       outSortDepth =
@@ -548,10 +553,11 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
       if (useDepthOverride) {
         pass.desc.depthTexture = sceneDepthGraphTexture;
       } else {
-        auto depthImportResult =
-            graph.importTexture(pass.depthTextureHandle, "debug_pass_depth_texture");
+        auto depthImportResult = graph.importTexture(
+            pass.depthTextureHandle, "debug_pass_depth_texture");
         if (depthImportResult.hasError()) {
-          return Result<bool, std::string>::makeError(depthImportResult.error());
+          return Result<bool, std::string>::makeError(
+              depthImportResult.error());
         }
         pass.desc.depthTexture = depthImportResult.value();
       }

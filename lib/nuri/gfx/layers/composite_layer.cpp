@@ -35,9 +35,9 @@ RenderPipelineDesc compositePipelineDesc(Format colorFormat,
 
 CompositeLayer::CompositeLayer(GPUDevice &gpu, CompositeLayerConfig config)
     : gpu_(gpu) {
-  const std::filesystem::path basePath =
-      config.shaderBasePath.empty() ? config.meshFragment.parent_path()
-                                    : config.shaderBasePath;
+  const std::filesystem::path basePath = config.shaderBasePath.empty()
+                                             ? config.meshFragment.parent_path()
+                                             : config.shaderBasePath;
   vertexPath_ = basePath / "present_copy.vert";
   fragmentPath_ = basePath / "fullscreen_copy.frag";
 }
@@ -75,7 +75,7 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
   if (initResult.hasError()) {
     return initResult;
   }
-  auto bufferResult = ensureFrameBufferCapacity(sizeof(FrameData));
+  auto bufferResult = ensureFrameBufferCapacity(sizeof(ForwardSceneFrameData));
   if (bufferResult.hasError()) {
     return bufferResult;
   }
@@ -92,7 +92,7 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
         "index");
   }
 
-  frameData_ = FrameData{
+  frameData_ = ForwardSceneFrameData{
       .view = glm::mat4(1.0f),
       .proj = glm::mat4(1.0f),
       .cameraPos = glm::vec4(0.0f),
@@ -115,7 +115,8 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
   };
 
   if (!frameDataUploadValid_ || uploadedFrameData_ != frameData_) {
-    Result<bool, std::string> updateResult = [&]() -> Result<bool, std::string> {
+    Result<bool, std::string> updateResult =
+        [&]() -> Result<bool, std::string> {
       std::optional<Result<bool, std::string>> result;
       NURI_PROFILER_ZONE("CompositeLayer.frame_data_upload",
                          NURI_PROFILER_COLOR_CMD_COPY);
@@ -139,7 +140,8 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
         "CompositeLayer::buildRenderGraph: invalid frame data address");
   }
 
-  Result<bool, std::string> passBuildResult = [&]() -> Result<bool, std::string> {
+  Result<bool, std::string> passBuildResult =
+      [&]() -> Result<bool, std::string> {
     std::optional<Result<bool, std::string>> result;
     NURI_PROFILER_ZONE("CompositeLayer.pass_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
@@ -168,8 +170,8 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
         break;
       }
 
-      auto bufferImportResult = graph.importBuffer(frameBuffer_->handle(),
-                                                   "composite_frame_data_buffer");
+      auto bufferImportResult = graph.importBuffer(
+          frameBuffer_->handle(), "composite_frame_data_buffer");
       if (bufferImportResult.hasError()) {
         result.emplace(
             Result<bool, std::string>::makeError(bufferImportResult.error()));
@@ -193,7 +195,8 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
       auto readResult =
           graph.addTextureRead(addResult.value(), textureImportResult.value());
       if (readResult.hasError()) {
-        result.emplace(Result<bool, std::string>::makeError(readResult.error()));
+        result.emplace(
+            Result<bool, std::string>::makeError(readResult.error()));
         break;
       }
 
@@ -219,7 +222,7 @@ Result<bool, std::string> CompositeLayer::ensureInitialized() {
   if (shaderResult.hasError()) {
     return shaderResult;
   }
-  auto bufferResult = ensureFrameBufferCapacity(sizeof(FrameData));
+  auto bufferResult = ensureFrameBufferCapacity(sizeof(ForwardSceneFrameData));
   if (bufferResult.hasError()) {
     return bufferResult;
   }
@@ -278,7 +281,8 @@ Result<bool, std::string> CompositeLayer::ensurePipeline() {
 
 Result<bool, std::string>
 CompositeLayer::ensureFrameBufferCapacity(size_t requiredBytes) {
-  const size_t requested = std::max(requiredBytes, sizeof(FrameData));
+  const size_t requested =
+      std::max(requiredBytes, sizeof(ForwardSceneFrameData));
   if (frameBuffer_ && frameBuffer_->valid() &&
       frameBufferCapacityBytes_ >= requested) {
     return Result<bool, std::string>::makeResult(true);

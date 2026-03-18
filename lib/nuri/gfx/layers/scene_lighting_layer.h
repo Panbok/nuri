@@ -3,19 +3,20 @@
 #include "nuri/core/layer.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/layers/render_frame_context.h"
 #include "nuri/resources/gpu/buffer.h"
 
 #include <limits>
 #include <memory>
-#include <memory_resource>
 
 namespace nuri {
 
+struct RenderFrameContext;
+class RenderGraphBuilder;
+
 class NURI_API SceneLightingLayer final : public Layer {
 public:
-  explicit SceneLightingLayer(
-      GPUDevice &gpu,
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
+  explicit SceneLightingLayer(GPUDevice &gpu);
   ~SceneLightingLayer() override;
 
   SceneLightingLayer(const SceneLightingLayer &) = delete;
@@ -23,10 +24,8 @@ public:
   SceneLightingLayer(SceneLightingLayer &&) = delete;
   SceneLightingLayer &operator=(SceneLightingLayer &&) = delete;
 
-  static std::unique_ptr<SceneLightingLayer>
-  create(GPUDevice &gpu,
-         std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
-    return std::make_unique<SceneLightingLayer>(gpu, memory);
+  static std::unique_ptr<SceneLightingLayer> create(GPUDevice &gpu) {
+    return std::make_unique<SceneLightingLayer>(gpu);
   }
 
   void onDetach() override;
