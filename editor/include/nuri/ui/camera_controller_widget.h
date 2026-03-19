@@ -23,11 +23,13 @@ struct CameraControllerWidgetState {
 void syncCameraControllerWidgetStateFromCamera(
     const Camera &camera, CameraControllerWidgetState &state);
 
-void drawCameraControllerWidget(CameraSystem &cameraSystem,
-                                CameraControllerWidgetState &state);
+void drawCameraControllerContents(CameraSystem &cameraSystem,
+                                  CameraControllerWidgetState &state);
 
-bool drawScenePresetWidget(std::span<const char *const> presetNames,
-                           int &selectedIndex,
-                           std::string_view hotkeyHint = "Hotkey: F6");
+void drawCameraHelpContents();
+
+bool drawScenePresetContents(std::span<const char *const> presetNames,
+                             int &selectedIndex,
+                             std::string_view hotkeyHint = "Hotkey: F6");
 
 } // namespace nuri

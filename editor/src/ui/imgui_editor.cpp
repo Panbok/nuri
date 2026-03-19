@@ -13,6 +13,7 @@
 #include "nuri/platform/imgui_glfw_platform.h"
 #include "nuri/resources/storage/font/nfont_compiler.h"
 #include "nuri/text/text_system.h"
+#include "nuri/ui/camera_controller_widget.h"
 #include "nuri/ui/file_dialog_widget.h"
 #include "nuri/ui/linear_graph.h"
 #include "nuri/utils/fsp_counter.h"
@@ -23,7 +24,6 @@ namespace {
 
 constexpr size_t kMaxLogLines = 2000;
 constexpr float kLogFilterWidth = 200.0f;
-constexpr float kLayerPanelWidth = 360.0f;
 constexpr float kLayerListWidth = 140.0f;
 constexpr double kMetricGraphUpdateIntervalSeconds = 0.04;
 constexpr double kLogUpdateIntervalSeconds = 0.10;
@@ -39,22 +39,27 @@ constexpr const char *kRenderGraphTelemetryWindowName =
     "Render Graph Telemetry";
 constexpr const char *kFontCompilerWindowName = "Font Compiler";
 constexpr const char *kBakeryWindowName = "Bakery";
+constexpr const char *kLightsWindowName = "Lights";
+constexpr const char *kLayersWindowName = "Layers";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
+constexpr const char *kCameraHelpWindowName = "Camera Help";
 constexpr const char *kScenePresetWindowName = "Scene Preset";
-constexpr const char *kSelectionWindowName = "Selection";
+constexpr const char *kGizmoControlsWindowName = "Gizmo Controls";
+constexpr const char *kTelemetryWindowName = "Telemetry";
 
 enum class LayerSelection : uint8_t {
   Skybox,
   Opaque,
+  Transmission,
   Transparent,
+  Composite,
   Debug,
 };
 
-const std::array<LayerSelection, 4> kRenderLayers = {
-    LayerSelection::Skybox,
-    LayerSelection::Opaque,
-    LayerSelection::Transparent,
-    LayerSelection::Debug,
+const std::array<LayerSelection, 6> kRenderLayers = {
+    LayerSelection::Skybox,       LayerSelection::Opaque,
+    LayerSelection::Transmission, LayerSelection::Transparent,
+    LayerSelection::Composite,    LayerSelection::Debug,
 };
 
 const char *layerDisplayName(LayerSelection layer) {
@@ -63,8 +68,12 @@ const char *layerDisplayName(LayerSelection layer) {
     return "Skybox";
   case LayerSelection::Opaque:
     return "Opaque";
+  case LayerSelection::Transmission:
+    return "Transmission";
   case LayerSelection::Transparent:
     return "Transparent";
+  case LayerSelection::Composite:
+    return "Composite";
   case LayerSelection::Debug:
     return "Debug";
   }
@@ -226,6 +235,53 @@ struct RenderGraphTelemetryUiState {
   std::string lastSuggestedPath{};
   FileDialogWidget fileDialog{};
   bool initializedOutputPath = false;
+};
+
+struct TelemetryOverlayUiState {
+  bool overlayEnabled = true;
+  bool showFpsMs = true;
+  bool showInstanceStats = true;
+  bool showDrawTessStats = true;
+  bool showIndirectStats = true;
+  bool showDebugDrawStats = true;
+  bool showPatchHeatmap = true;
+  bool showDispatchStats = true;
+  bool showGraphs = true;
+  bool showImGuiMetricsWindow = false;
+};
+
+struct ScenePresetUiState {
+  std::vector<std::string> names{};
+  std::vector<const char *> nameViews{};
+  std::string hotkeyHint = "Toggle Editor: F6";
+  int selectedIndex = 0;
+  std::optional<int> pendingSelectionRequest{};
+
+  void set(std::span<const char *const> presetNames, int currentSelectedIndex,
+           std::string_view hotkeyHintIn) {
+    names.clear();
+    names.reserve(presetNames.size());
+    for (const char *name : presetNames) {
+      names.emplace_back(name != nullptr ? name : "");
+    }
+    nameViews.clear();
+    nameViews.reserve(names.size());
+    for (const std::string &name : names) {
+      nameViews.push_back(name.c_str());
+    }
+    if (hotkeyHintIn.empty()) {
+      hotkeyHint = "Toggle Editor: F6";
+    } else {
+      hotkeyHint.assign(hotkeyHintIn.data(), hotkeyHintIn.size());
+    }
+    if (nameViews.empty()) {
+      selectedIndex = 0;
+      pendingSelectionRequest.reset();
+      return;
+    }
+    selectedIndex = std::clamp(currentSelectedIndex, 0,
+                               static_cast<int>(nameViews.size()) - 1);
+  }
 };
 
 constexpr std::array<int, 5> kAtlasResolutionSteps = {1024, 2048, 3072, 4096,
@@ -598,10 +654,21 @@ void drawDebugSettings(RenderSettings::DebugSettings &debug) {
   ImGui::Checkbox("Enabled##DebugLayer", &debug.enabled);
   ImGui::Checkbox("Model Bounds##DebugLayer", &debug.modelBounds);
   ImGui::Checkbox("Grid##DebugLayer", &debug.grid);
+  ImGui::Checkbox("Light Icons##DebugLayer", &debug.lightIcons);
 }
 
 void drawTransparentSettings(RenderSettings::TransparentSettings &transparent) {
   ImGui::Checkbox("Enabled##TransparentLayer", &transparent.enabled);
+}
+
+void drawTransmissionSettings(
+    RenderSettings::TransmissionSettings &transmission) {
+  ImGui::Checkbox("Enabled##TransmissionLayer", &transmission.enabled);
+}
+
+void drawCompositeSettings() {
+  ImGui::TextUnformatted("Composite pass is always active when frame color");
+  ImGui::TextUnformatted("is routed through the layered renderer.");
 }
 
 void drawLayerList(LayerSelection &selectedLayer) {
@@ -640,8 +707,14 @@ void drawLayerInspector(RenderSettings &renderSettings,
     case LayerSelection::Opaque:
       drawOpaqueSettings(renderSettings.opaque);
       break;
+    case LayerSelection::Transmission:
+      drawTransmissionSettings(renderSettings.transmission);
+      break;
     case LayerSelection::Transparent:
       drawTransparentSettings(renderSettings.transparent);
+      break;
+    case LayerSelection::Composite:
+      drawCompositeSettings();
       break;
     case LayerSelection::Debug:
       drawDebugSettings(renderSettings.debug);
@@ -655,34 +728,24 @@ void drawLayerInspector(RenderSettings &renderSettings,
 }
 
 void drawLogWindow(LogModel &model, LogFilterState &filterState,
-                   RenderSettings &renderSettings,
-                   LayerSelection &selectedLayer,
                    std::pmr::memory_resource *scratchResource) {
   drawLogToolbar(model, filterState);
   ImGui::Separator();
-
-  const ImGuiTableFlags tableFlags =
-      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
-  if (!ImGui::BeginTable("LogAndLayerTable", 2, tableFlags)) {
-    drawLogMessages(model, filterState, scratchResource);
-    return;
-  }
-
-  ImGui::TableSetupColumn("Logs", ImGuiTableColumnFlags_WidthStretch, 0.0f);
-  ImGui::TableSetupColumn("Layer Inspector", ImGuiTableColumnFlags_WidthFixed,
-                          kLayerPanelWidth);
-
-  ImGui::TableNextColumn();
   drawLogMessages(model, filterState, scratchResource);
-
-  ImGui::TableNextColumn();
-  drawLayerInspector(renderSettings, selectedLayer);
-
-  ImGui::EndTable();
 }
 
-void drawFontCompilerWindow(FontCompilerUiState &state, TextSystem *textSystem,
-                            void *ownerWindowHandle) {
+void drawLayersWindow(bool &open, RenderSettings &renderSettings,
+                      LayerSelection &selectedLayer) {
+  if (!ImGui::Begin(kLayersWindowName, &open)) {
+    ImGui::End();
+    return;
+  }
+  drawLayerInspector(renderSettings, selectedLayer);
+  ImGui::End();
+}
+
+void drawFontCompilerWindow(bool &open, FontCompilerUiState &state,
+                            TextSystem *textSystem, void *ownerWindowHandle) {
   if (!state.nfontListInitialized) {
     refreshNfontAssetList(state);
     state.nfontListInitialized = true;
@@ -713,7 +776,7 @@ void drawFontCompilerWindow(FontCompilerUiState &state, TextSystem *textSystem,
     }
   }
 
-  if (!ImGui::Begin(kFontCompilerWindowName)) {
+  if (!ImGui::Begin(kFontCompilerWindowName, &open)) {
     ImGui::End();
     return;
   }
@@ -928,10 +991,11 @@ void drawFontCompilerWindow(FontCompilerUiState &state, TextSystem *textSystem,
   ImGui::End();
 }
 
-void drawBakeryWindow(BakeryUiState &state, bakery::BakerySystem *bakery,
+void drawBakeryWindow(bool &open, BakeryUiState &state,
+                      bakery::BakerySystem *bakery,
                       std::pmr::memory_resource *scratchResource,
                       void *ownerWindowHandle) {
-  if (!ImGui::Begin(kBakeryWindowName)) {
+  if (!ImGui::Begin(kBakeryWindowName, &open)) {
     ImGui::End();
     return;
   }
@@ -1643,12 +1707,33 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
       });
 }
 
+void drawScenePresetWindow(bool &open, ScenePresetUiState &state) {
+  if (!ImGui::Begin(kScenePresetWindowName, &open)) {
+    ImGui::End();
+    return;
+  }
+  if (state.nameViews.empty()) {
+    ImGui::TextUnformatted("No scene presets available.");
+    ImGui::End();
+    return;
+  }
+
+  int selectedIndex = state.selectedIndex;
+  if (drawScenePresetContents(state.nameViews, selectedIndex,
+                              state.hotkeyHint) &&
+      selectedIndex != state.selectedIndex) {
+    state.selectedIndex = selectedIndex;
+    state.pendingSelectionRequest = selectedIndex;
+  }
+  ImGui::End();
+}
+
 void setDockspaceWindowPlacement(const ImGuiViewport *viewport) {
   if (!viewport) {
     return;
   }
-  ImGui::SetNextWindowPos(viewport->Pos);
-  ImGui::SetNextWindowSize(viewport->Size);
+  ImGui::SetNextWindowPos(viewport->WorkPos);
+  ImGui::SetNextWindowSize(viewport->WorkSize);
   ImGui::SetNextWindowViewport(viewport->ID);
 }
 
@@ -1667,16 +1752,21 @@ void setLogWindowPlacementWithoutDock(const ImGuiViewport *viewport) {
 
 void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                     LinearGraph &frametimeGraph,
-                    const RenderFrameMetrics &frameMetrics) {
+                    const RenderFrameMetrics &frameMetrics,
+                    const TelemetryOverlayUiState &telemetryState) {
+  if (!telemetryState.overlayEnabled) {
+    return;
+  }
   if (const ImGuiViewport *viewport = ImGui::GetMainViewport()) {
     ImGui::SetNextWindowPos({viewport->WorkPos.x + viewport->WorkSize.x - 15.0f,
                              viewport->WorkPos.y + 15.0f},
                             ImGuiCond_Always, {1.0f, 0.0f});
   }
   ImGui::SetNextWindowBgAlpha(0.30f);
-  ImGui::SetNextWindowSize(
-      ImVec2(kMetricGraphWindowWidth, kMetricGraphWindowHeight),
-      ImGuiCond_Always);
+  const float overlayHeight =
+      telemetryState.showGraphs ? kMetricGraphWindowHeight : 140.0f;
+  ImGui::SetNextWindowSize(ImVec2(kMetricGraphWindowWidth, overlayHeight),
+                           ImGuiCond_Always);
   if (ImGui::Begin("##FPS", nullptr,
                    ImGuiWindowFlags_NoDecoration |
                        ImGuiWindowFlags_NoSavedSettings |
@@ -1684,42 +1774,69 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove)) {
     const float fps = fpsCounter.getFPS();
     const float milliseconds = fps > 0.0f ? 1000.0f / fps : 0.0f;
-    ImGui::Text("FPS : %i", static_cast<int>(fps));
-    ImGui::Text("Ms  : %.1f", milliseconds);
-    ImGui::Text("Inst: %u / %u", frameMetrics.opaque.visibleInstances,
-                frameMetrics.opaque.totalInstances);
-    ImGui::Text("Draw: %u (Tess: %u)  Tess Inst: %u",
-                frameMetrics.opaque.instancedDraws,
-                frameMetrics.opaque.tessellatedDraws,
-                frameMetrics.opaque.tessellatedInstances);
-    ImGui::Text("Indirect: %u calls / %u cmds",
-                frameMetrics.opaque.indirectDrawCalls,
-                frameMetrics.opaque.indirectCommands);
-    ImGui::Text("Debug Draws: %u (Fallback: %u)",
-                frameMetrics.opaque.debugOverlayDraws,
-                frameMetrics.opaque.debugOverlayFallbackDraws);
-    ImGui::Text("Patch Heatmap: %u",
-                frameMetrics.opaque.debugPatchHeatmapDraws);
-    ImGui::Text("Dispatch: %u x%u", frameMetrics.opaque.computeDispatches,
-                frameMetrics.opaque.computeDispatchX);
-    ImGui::Separator();
+    bool drewStats = false;
+    if (telemetryState.showFpsMs) {
+      ImGui::Text("FPS : %i", static_cast<int>(fps));
+      ImGui::Text("Ms  : %.1f", milliseconds);
+      drewStats = true;
+    }
+    if (telemetryState.showInstanceStats) {
+      ImGui::Text("Inst: %u / %u", frameMetrics.opaque.visibleInstances,
+                  frameMetrics.opaque.totalInstances);
+      drewStats = true;
+    }
+    if (telemetryState.showDrawTessStats) {
+      ImGui::Text("Draw: %u (Tess: %u)  Tess Inst: %u",
+                  frameMetrics.opaque.instancedDraws,
+                  frameMetrics.opaque.tessellatedDraws,
+                  frameMetrics.opaque.tessellatedInstances);
+      drewStats = true;
+    }
+    if (telemetryState.showIndirectStats) {
+      ImGui::Text("Indirect: %u calls / %u cmds",
+                  frameMetrics.opaque.indirectDrawCalls,
+                  frameMetrics.opaque.indirectCommands);
+      drewStats = true;
+    }
+    if (telemetryState.showDebugDrawStats) {
+      ImGui::Text("Debug Draws: %u (Fallback: %u)",
+                  frameMetrics.opaque.debugOverlayDraws,
+                  frameMetrics.opaque.debugOverlayFallbackDraws);
+      drewStats = true;
+    }
+    if (telemetryState.showPatchHeatmap) {
+      ImGui::Text("Patch Heatmap: %u",
+                  frameMetrics.opaque.debugPatchHeatmapDraws);
+      drewStats = true;
+    }
+    if (telemetryState.showDispatchStats) {
+      ImGui::Text("Dispatch: %u x%u", frameMetrics.opaque.computeDispatches,
+                  frameMetrics.opaque.computeDispatchX);
+      drewStats = true;
+    }
 
-    const float availableGraphHeight = ImGui::GetContentRegionAvail().y;
-    const float perGraphHeight = std::max(availableGraphHeight * 0.5f, 1.0f);
-    const ImVec2 itemSpacing = ImGui::GetStyle().ItemSpacing;
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(itemSpacing.x, 0.0f));
+    if (telemetryState.showGraphs) {
+      if (drewStats) {
+        ImGui::Separator();
+      }
+      const float availableGraphHeight = ImGui::GetContentRegionAvail().y;
+      const float perGraphHeight = std::max(availableGraphHeight * 0.5f, 1.0f);
+      const ImVec2 itemSpacing = ImGui::GetStyle().ItemSpacing;
+      ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                          ImVec2(itemSpacing.x, 0.0f));
 
-    LinearGraphStyle graphStyle{
-        .heightPixels = perGraphHeight,
-        .lineColorRgba = IM_COL32(64, 224, 128, 255),
-        .fillUnderLine = true,
-    };
-    fpsGraph.draw("FPS Graph##Metrics", "FPS", graphStyle);
+      LinearGraphStyle graphStyle{
+          .heightPixels = perGraphHeight,
+          .lineColorRgba = IM_COL32(64, 224, 128, 255),
+          .fillUnderLine = true,
+      };
+      fpsGraph.draw("FPS Graph##Metrics", "FPS", graphStyle);
 
-    graphStyle.lineColorRgba = IM_COL32(255, 160, 64, 255);
-    frametimeGraph.draw("Frametime Graph##Metrics", "Frametime (ms)",
-                        graphStyle);
-    ImGui::PopStyleVar();
+      graphStyle.lineColorRgba = IM_COL32(255, 160, 64, 255);
+      frametimeGraph.draw("Frametime Graph##Metrics", "Frametime (ms)",
+                          graphStyle);
+      ImGui::PopStyleVar();
+    }
   }
   ImGui::End();
 }
@@ -1748,22 +1865,14 @@ struct DockLayoutState {
 
     ImGui::DockBuilderRemoveNode(dockspaceId);
     ImGui::DockBuilderAddNode(dockspaceId, dockNodeFlags);
-    ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->Size);
+    ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
 
     ImGuiID dockMain = dockspaceId;
     ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,
                                                      0.25f, nullptr, &dockMain);
-    ImGuiID dockBottomLeft = ImGui::DockBuilderSplitNode(
-        dockBottom, ImGuiDir_Left, 0.28f, nullptr, &dockBottom);
 
     logDockId = dockBottom;
-    ImGui::DockBuilderDockWindow(kCameraControllerWindowName, dockBottomLeft);
-    ImGui::DockBuilderDockWindow(kScenePresetWindowName, dockBottomLeft);
-    ImGui::DockBuilderDockWindow(kSelectionWindowName, dockBottomLeft);
     ImGui::DockBuilderDockWindow(kLogWindowName, logDockId);
-    ImGui::DockBuilderDockWindow(kRenderGraphTelemetryWindowName, logDockId);
-    ImGui::DockBuilderDockWindow(kFontCompilerWindowName, logDockId);
-    ImGui::DockBuilderDockWindow(kBakeryWindowName, logDockId);
     ImGui::DockBuilderFinish(dockspaceId);
     built = true;
   }
@@ -1781,8 +1890,39 @@ struct MaybeDockLayoutState {};
 struct ImGuiEditor::Impl {
   Impl(Window &windowIn, GPUDevice &gpuIn, const EditorServices &services)
       : window(windowIn), gpu(gpuIn), textSystem(services.textSystem),
-        bakery(services.bakery),
+        cameraSystem(services.cameraSystem), bakery(services.bakery),
         renderGraphTelemetry(services.renderGraphTelemetry) {}
+
+  void drawMainMenuBar() {
+    if (!ImGui::BeginMainMenuBar()) {
+      return;
+    }
+
+    if (ImGui::BeginMenu("Menu")) {
+      ImGui::MenuItem("Bakery", nullptr, &showBakeryWindow);
+      ImGui::MenuItem("Font Compiler", nullptr, &showFontCompilerWindow);
+      ImGui::MenuItem("Layers", nullptr, &showLayersWindow);
+      ImGui::MenuItem("Lights", nullptr, &showLightsWindow);
+      ImGui::MenuItem("Scene Preset", nullptr, &showScenePresetWindow);
+      ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Debug")) {
+      ImGui::MenuItem("Render Graph Telemetry", nullptr,
+                      &showRenderGraphTelemetryWindow);
+      ImGui::MenuItem("Gizmo Controls", nullptr, &showGizmoControlsWindow);
+      ImGui::MenuItem("Telemetry", nullptr, &showTelemetrySettingsWindow);
+      ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Camera")) {
+      ImGui::MenuItem("Controller", nullptr, &showCameraControllerWindow);
+      ImGui::MenuItem("Help", nullptr, &showCameraHelpWindow);
+      ImGui::EndMenu();
+    }
+
+    ImGui::EndMainMenuBar();
+  }
 
   void updateMetricGraphs(double deltaSeconds) {
     graphSampleAccumulatorSeconds += deltaSeconds;
@@ -1806,16 +1946,17 @@ struct ImGuiEditor::Impl {
     NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
     platform->newFrame();
     ImGui::NewFrame();
+    drawMainMenuBar();
     drawDockspaceRoot();
   }
 
   Result<RenderGraphGraphicsPassDesc, std::string> endFrame() {
     NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
 
-    if (showMetricsWindow) {
+    if (telemetryOverlayState.showImGuiMetricsWindow) {
       NURI_PROFILER_ZONE("ImGuiEditor::ShowMetricsWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
-      ImGui::ShowMetricsWindow(&showMetricsWindow);
+      ImGui::ShowMetricsWindow(&telemetryOverlayState.showImGuiMetricsWindow);
       NURI_PROFILER_ZONE_END();
     }
 
@@ -1847,28 +1988,79 @@ struct ImGuiEditor::Impl {
                        NURI_PROFILER_COLOR_CMD_DRAW);
     ScopedScratch scopedScratch(scratchArena);
     ImGui::Begin(kLogWindowName);
-    drawLogWindow(logModel, logFilterState, renderSettings, selectedLayer,
-                  scopedScratch.resource());
+    drawLogWindow(logModel, logFilterState, scopedScratch.resource());
     ImGui::End();
-#ifdef IMGUI_HAS_DOCK
-    if (dockLayoutState.logDockId != 0) {
-      ImGui::SetNextWindowDockID(dockLayoutState.logDockId, ImGuiCond_Once);
+
+    if (showRenderGraphTelemetryWindow) {
+      if (ImGui::Begin(kRenderGraphTelemetryWindowName,
+                       &showRenderGraphTelemetryWindow)) {
+        drawRenderGraphTelemetryWindow(telemetryState, renderGraphTelemetry,
+                                       window.nativeHandle());
+      }
+      ImGui::End();
     }
-#endif
-    if (ImGui::Begin(kRenderGraphTelemetryWindowName)) {
-      drawRenderGraphTelemetryWindow(telemetryState, renderGraphTelemetry,
-                                     window.nativeHandle());
+    if (showFontCompilerWindow) {
+      drawFontCompilerWindow(showFontCompilerWindow, fontCompilerState,
+                             textSystem, window.nativeHandle());
     }
-    ImGui::End();
-    drawFontCompilerWindow(fontCompilerState, textSystem,
-                           window.nativeHandle());
-    drawBakeryWindow(bakeryState, bakery, scopedScratch.resource(),
-                     window.nativeHandle());
+    if (showBakeryWindow) {
+      drawBakeryWindow(showBakeryWindow, bakeryState, bakery,
+                       scopedScratch.resource(), window.nativeHandle());
+    }
+    if (showLayersWindow) {
+      drawLayersWindow(showLayersWindow, renderSettings, selectedLayer);
+    }
+    if (showScenePresetWindow) {
+      drawScenePresetWindow(showScenePresetWindow, scenePresetState);
+    }
+    if (showCameraControllerWindow) {
+      if (cameraSystem != nullptr &&
+          ImGui::Begin(kCameraControllerWindowName,
+                       &showCameraControllerWindow)) {
+        drawCameraControllerContents(*cameraSystem, cameraControllerState);
+      }
+      if (cameraSystem == nullptr) {
+        showCameraControllerWindow = false;
+      } else {
+        ImGui::End();
+      }
+    }
+    if (showCameraHelpWindow) {
+      if (ImGui::Begin(kCameraHelpWindowName, &showCameraHelpWindow)) {
+        drawCameraHelpContents();
+      }
+      ImGui::End();
+    }
+    if (showTelemetrySettingsWindow) {
+      if (ImGui::Begin(kTelemetryWindowName, &showTelemetrySettingsWindow)) {
+        ImGui::Checkbox("Show Overlay", &telemetryOverlayState.overlayEnabled);
+        ImGui::Separator();
+        ImGui::Checkbox("FPS + ms", &telemetryOverlayState.showFpsMs);
+        ImGui::Checkbox("Instance counts",
+                        &telemetryOverlayState.showInstanceStats);
+        ImGui::Checkbox("Draw / tess stats",
+                        &telemetryOverlayState.showDrawTessStats);
+        ImGui::Checkbox("Indirect stats",
+                        &telemetryOverlayState.showIndirectStats);
+        ImGui::Checkbox("Debug draw stats",
+                        &telemetryOverlayState.showDebugDrawStats);
+        ImGui::Checkbox("Patch heatmap",
+                        &telemetryOverlayState.showPatchHeatmap);
+        ImGui::Checkbox("Dispatch stats",
+                        &telemetryOverlayState.showDispatchStats);
+        ImGui::Checkbox("Graphs", &telemetryOverlayState.showGraphs);
+        ImGui::Separator();
+        ImGui::Checkbox("ImGui Metrics Window",
+                        &telemetryOverlayState.showImGuiMetricsWindow);
+      }
+      ImGui::End();
+    }
     NURI_PROFILER_ZONE_END();
 
     NURI_PROFILER_ZONE("ImGuiEditor::DrawFpsOverlay",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, frameMetrics);
+    drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, frameMetrics,
+                   telemetryOverlayState);
     NURI_PROFILER_ZONE_END();
 
     NURI_PROFILER_ZONE("ImGuiEditor::FinalizeImGuiFrame",
@@ -1924,7 +2116,16 @@ struct ImGuiEditor::Impl {
       createImPlotLinearGraph(kMetricGraphSampleCount);
   double graphSampleAccumulatorSeconds = kMetricGraphUpdateIntervalSeconds;
   double logUpdateAccumulatorSeconds = kLogUpdateIntervalSeconds;
-  bool showMetricsWindow = false;
+  bool showBakeryWindow = false;
+  bool showFontCompilerWindow = false;
+  bool showLayersWindow = false;
+  bool showLightsWindow = false;
+  bool showScenePresetWindow = false;
+  bool showRenderGraphTelemetryWindow = false;
+  bool showGizmoControlsWindow = false;
+  bool showTelemetrySettingsWindow = false;
+  bool showCameraControllerWindow = false;
+  bool showCameraHelpWindow = false;
   RenderSettings renderSettings{};
   RenderFrameMetrics frameMetrics{};
   LayerSelection selectedLayer = LayerSelection::Opaque;
@@ -1933,11 +2134,15 @@ struct ImGuiEditor::Impl {
   LogModel logModel;
   LogFilterState logFilterState;
   RenderGraphTelemetryUiState telemetryState;
+  TelemetryOverlayUiState telemetryOverlayState;
   FontCompilerUiState fontCompilerState;
   BakeryUiState bakeryState;
+  ScenePresetUiState scenePresetState;
+  CameraControllerWidgetState cameraControllerState{};
   MaybeDockLayoutState dockLayoutState;
   ScratchArena scratchArena;
   TextSystem *textSystem = nullptr;
+  CameraSystem *cameraSystem = nullptr;
   bakery::BakerySystem *bakery = nullptr;
   RenderGraphTelemetryService *renderGraphTelemetry = nullptr;
 };
@@ -2017,6 +2222,50 @@ void ImGuiEditor::setRenderSettings(const RenderSettings &settings) {
     return;
   }
   impl_->renderSettings = settings;
+}
+
+void ImGuiEditor::syncCameraControllerWidgetStateFromCamera(
+    const Camera &camera) {
+  if (!impl_) {
+    return;
+  }
+  nuri::syncCameraControllerWidgetStateFromCamera(camera,
+                                                  impl_->cameraControllerState);
+}
+
+void ImGuiEditor::setScenePresetUi(std::span<const char *const> presetNames,
+                                   int selectedIndex,
+                                   std::string_view hotkeyHint) {
+  if (!impl_) {
+    return;
+  }
+  impl_->scenePresetState.set(presetNames, selectedIndex, hotkeyHint);
+}
+
+std::optional<int> ImGuiEditor::takeScenePresetSelectionRequest() {
+  if (!impl_ || !impl_->scenePresetState.pendingSelectionRequest.has_value()) {
+    return std::nullopt;
+  }
+  const std::optional<int> result =
+      impl_->scenePresetState.pendingSelectionRequest;
+  impl_->scenePresetState.pendingSelectionRequest.reset();
+  return result;
+}
+
+bool *ImGuiEditor::gizmoControlsWindowOpenState() {
+  return impl_ ? &impl_->showGizmoControlsWindow : nullptr;
+}
+
+bool *ImGuiEditor::lightsWindowOpenState() {
+  return impl_ ? &impl_->showLightsWindow : nullptr;
+}
+
+bool ImGuiEditor::isGizmoControlsWindowOpen() const {
+  return impl_ != nullptr && impl_->showGizmoControlsWindow;
+}
+
+bool ImGuiEditor::isLightsWindowOpen() const {
+  return impl_ != nullptr && impl_->showLightsWindow;
 }
 
 RenderSettings ImGuiEditor::renderSettings() const {

@@ -5,11 +5,15 @@
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/scene/camera.h"
 #include "nuri/ui/editor.h"
 #include "nuri/ui/editor_services.h"
 
 #include <functional>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string_view>
 
 namespace nuri {
 
@@ -38,6 +42,11 @@ public:
 
   void setUiCallback(UiCallback callback) { callback_ = std::move(callback); }
   void resetControllers();
+  void syncCameraControllerWidgetStateFromCamera(const Camera &camera);
+  void setScenePresetUi(std::span<const char *const> presetNames,
+                        int selectedIndex,
+                        std::string_view hotkeyHint = "Toggle Editor: F6");
+  [[nodiscard]] std::optional<int> takeScenePresetSelectionRequest();
 
   bool onInput(const InputEvent &event) override;
   void onUpdate(double deltaTime) override;

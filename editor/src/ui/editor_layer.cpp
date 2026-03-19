@@ -46,6 +46,25 @@ void EditorLayer::resetControllers() {
   }
 }
 
+void EditorLayer::syncCameraControllerWidgetStateFromCamera(
+    const Camera &camera) {
+  if (editor_) {
+    editor_->syncCameraControllerWidgetStateFromCamera(camera);
+  }
+}
+
+void EditorLayer::setScenePresetUi(std::span<const char *const> presetNames,
+                                   int selectedIndex,
+                                   std::string_view hotkeyHint) {
+  if (editor_) {
+    editor_->setScenePresetUi(presetNames, selectedIndex, hotkeyHint);
+  }
+}
+
+std::optional<int> EditorLayer::takeScenePresetSelectionRequest() {
+  return editor_ ? editor_->takeScenePresetSelectionRequest() : std::nullopt;
+}
+
 bool EditorLayer::onInput(const InputEvent &event) {
   if (!editor_) {
     return false;
@@ -111,7 +130,12 @@ EditorLayer::buildRenderGraph(RenderFrameContext &frame,
       callback_.callback();
     }
     if (gizmoController_) {
-      gizmoController_->drawUi();
+      gizmoController_->drawUi({
+          .showControlsWindow = editor_->gizmoControlsWindowOpenState(),
+          .controlsWindowTitle = "Gizmo Controls",
+          .showLightsWindow = editor_->lightsWindowOpenState(),
+          .lightsWindowTitle = "Lights",
+      });
     }
   } catch (const std::exception &e) {
     editor_->setFrameDeltaSeconds(frameDeltaSeconds_);

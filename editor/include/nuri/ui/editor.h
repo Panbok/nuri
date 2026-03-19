@@ -7,8 +7,16 @@
 #include "nuri/gfx/render_graph/render_graph.h"
 
 #include <string>
+#include <string_view>
 
 namespace nuri {
+
+struct GizmoUiDrawConfig {
+  bool *showControlsWindow = nullptr;
+  std::string_view controlsWindowTitle = "Gizmo Controls";
+  bool *showLightsWindow = nullptr;
+  std::string_view lightsWindowTitle = "Lights";
+};
 
 class GizmoController {
 public:
@@ -19,7 +27,7 @@ public:
 
   [[nodiscard]] virtual bool onInput(const InputEvent &event) = 0;
   virtual void onFrame(RenderFrameContext &frame) = 0;
-  virtual void drawUi() = 0;
+  virtual void drawUi(const GizmoUiDrawConfig &config) = 0;
   virtual void reset() = 0;
 
 protected:

@@ -38,18 +38,12 @@ void syncCameraControllerWidgetStateFromCamera(
   state.targetYawDegrees = glm::degrees(std::atan2(forward.x, -forward.z));
 }
 
-void drawCameraControllerWidget(CameraSystem &cameraSystem,
-                                CameraControllerWidgetState &state) {
-  if (!ImGui::Begin("Camera Controller")) {
-    ImGui::End();
-    return;
-  }
-
+void drawCameraControllerContents(CameraSystem &cameraSystem,
+                                  CameraControllerWidgetState &state) {
   CameraController *controller = cameraSystem.activeController();
   Camera *camera = cameraSystem.activeCamera();
   if (!controller || !camera) {
     ImGui::TextUnformatted("No active camera/controller");
-    ImGui::End();
     return;
   }
 
@@ -106,20 +100,13 @@ void drawCameraControllerWidget(CameraSystem &cameraSystem,
 
     ImGui::TextUnformatted("Manual look/move input cancels MoveTo.");
   }
-
-  ImGui::Separator();
-  drawCameraControlScheme();
-
-  ImGui::End();
 }
 
-bool drawScenePresetWidget(std::span<const char *const> presetNames,
-                           int &selectedIndex, std::string_view hotkeyHint) {
+void drawCameraHelpContents() { drawCameraControlScheme(); }
+
+bool drawScenePresetContents(std::span<const char *const> presetNames,
+                             int &selectedIndex, std::string_view hotkeyHint) {
   if (presetNames.empty()) {
-    return false;
-  }
-  if (!ImGui::Begin("Scene Preset")) {
-    ImGui::End();
     return false;
   }
 
@@ -130,7 +117,6 @@ bool drawScenePresetWidget(std::span<const char *const> presetNames,
                    static_cast<int>(presetNames.size()));
   ImGui::TextUnformatted(hotkeyHint.data(),
                          hotkeyHint.data() + hotkeyHint.size());
-  ImGui::End();
   return changed;
 }
 

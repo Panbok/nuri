@@ -1,11 +1,15 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <span>
+#include <string_view>
 
 #include "nuri/core/event_manager.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/layers/render_frame_context.h"
+#include "nuri/scene/camera.h"
 #include "nuri/ui/editor.h"
 #include "nuri/ui/editor_services.h"
 
@@ -26,6 +30,15 @@ public:
   void setFrameIndex(uint64_t frameIndex);
   void setFrameMetrics(const RenderFrameMetrics &metrics);
   void setRenderSettings(const RenderSettings &settings);
+  void syncCameraControllerWidgetStateFromCamera(const Camera &camera);
+  void setScenePresetUi(std::span<const char *const> presetNames,
+                        int selectedIndex,
+                        std::string_view hotkeyHint = "Toggle Editor: F6");
+  [[nodiscard]] std::optional<int> takeScenePresetSelectionRequest();
+  [[nodiscard]] bool *gizmoControlsWindowOpenState();
+  [[nodiscard]] bool *lightsWindowOpenState();
+  [[nodiscard]] bool isGizmoControlsWindowOpen() const;
+  [[nodiscard]] bool isLightsWindowOpen() const;
   [[nodiscard]] RenderSettings renderSettings() const;
   bool wantsCaptureKeyboard() const;
   bool wantsCaptureMouse() const;
