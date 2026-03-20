@@ -19,6 +19,14 @@ makePackedSlotOverflowError(std::string_view context) {
       std::string(context) + ": slot pool exhausted");
 }
 
+template <typename Pool>
+[[nodiscard]] bool slotPoolExhausted(const Pool &pool,
+                                     uint32_t maxIndex) noexcept {
+  const uint32_t slotCount = pool.slotCount();
+  return slotCount > maxIndex + 1u ||
+         (slotCount == maxIndex + 1u && pool.liveCount() == slotCount);
+}
+
 } // namespace
 
 SceneGraph::SceneGraph(std::pmr::memory_resource *memory)
@@ -61,8 +69,7 @@ void SceneGraph::clear() {
 }
 
 Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {
-  if (nodes_.slots.slotCount() == kResourceHandleIndexMask + 1u &&
-      nodes_.slots.liveCount() == nodes_.slots.slotCount()) {
+  if (slotPoolExhausted(nodes_.slots, kResourceHandleIndexMask)) {
     return makePackedSlotOverflowError("SceneGraph::allocateNodeSlot");
   }
   const SlotReservation slot = nodes_.slots.acquire();
@@ -82,10 +89,8 @@ Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {
 }
 
 Result<SlotReservation, std::string> SceneGraph::allocateRenderableSlot() {
-  if (renderableComponents_.slots.slotCount() ==
-          kResourceHandleIndexMask + 1u &&
-      renderableComponents_.slots.liveCount() ==
-          renderableComponents_.slots.slotCount()) {
+  if (slotPoolExhausted(renderableComponents_.slots,
+                        kResourceHandleIndexMask)) {
     return makePackedSlotOverflowError("SceneGraph::allocateRenderableSlot");
   }
   const SlotReservation slot = renderableComponents_.slots.acquire();
@@ -101,9 +106,8 @@ Result<SlotReservation, std::string> SceneGraph::allocateRenderableSlot() {
 
 Result<SlotReservation, std::string>
 SceneGraph::allocateDirectionalLightSlot() {
-  if (directionalLights_.slots.slotCount() == kResourceHandleIndexMask + 1u &&
-      directionalLights_.slots.liveCount() ==
-          directionalLights_.slots.slotCount()) {
+  if (slotPoolExhausted(directionalLights_.slots,
+                        kResourceHandleIndexMask)) {
     return makePackedSlotOverflowError(
         "SceneGraph::allocateDirectionalLightSlot");
   }
@@ -122,8 +126,7 @@ SceneGraph::allocateDirectionalLightSlot() {
 }
 
 Result<SlotReservation, std::string> SceneGraph::allocatePointLightSlot() {
-  if (pointLights_.slots.slotCount() == kResourceHandleIndexMask + 1u &&
-      pointLights_.slots.liveCount() == pointLights_.slots.slotCount()) {
+  if (slotPoolExhausted(pointLights_.slots, kResourceHandleIndexMask)) {
     return makePackedSlotOverflowError("SceneGraph::allocatePointLightSlot");
   }
   const SlotReservation slot = pointLights_.slots.acquire();
@@ -142,8 +145,7 @@ Result<SlotReservation, std::string> SceneGraph::allocatePointLightSlot() {
 }
 
 Result<SlotReservation, std::string> SceneGraph::allocateSpotLightSlot() {
-  if (spotLights_.slots.slotCount() == kResourceHandleIndexMask + 1u &&
-      spotLights_.slots.liveCount() == spotLights_.slots.slotCount()) {
+  if (slotPoolExhausted(spotLights_.slots, kResourceHandleIndexMask)) {
     return makePackedSlotOverflowError("SceneGraph::allocateSpotLightSlot");
   }
   const SlotReservation slot = spotLights_.slots.acquire();

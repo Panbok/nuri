@@ -117,12 +117,7 @@ void RenderScene::sanitizeGraphRenderableRefs() {
       sceneGraph_.renderableTopologyDirty_ = true;
       continue;
     }
-    components.node[index] = kInvalidIndex;
-    components.models[index] = kInvalidModelRef;
-    components.materials[index] = kInvalidMaterialRef;
-    components.materialOverrides[index] = kInvalidMaterialRef;
-    components.flatRenderableIndex[index] = kInvalidIndex;
-    components.slots.release(index);
+    sceneGraph_.recycleRenderableSlot(index);
     sceneGraph_.renderableTopologyDirty_ = true;
   }
 }
