@@ -4,6 +4,7 @@
 #include "nuri/resources/gpu/resource_handles.h"
 
 #include <cstdint>
+#include <functional>
 
 namespace nuri {
 
@@ -67,3 +68,19 @@ makeRenderableId(uint32_t index, uint32_t generation) noexcept {
 }
 
 } // namespace nuri
+
+namespace std {
+
+template <> struct hash<nuri::NodeId> {
+  size_t operator()(nuri::NodeId id) const noexcept {
+    return hash<uint32_t>{}(id.value);
+  }
+};
+
+template <> struct hash<nuri::RenderableId> {
+  size_t operator()(nuri::RenderableId id) const noexcept {
+    return hash<uint32_t>{}(id.value);
+  }
+};
+
+} // namespace std

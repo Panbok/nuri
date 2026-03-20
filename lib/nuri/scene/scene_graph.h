@@ -81,14 +81,9 @@ public:
       return;
     }
     const uint32_t nodeIndex = indexOf(node);
-    for (uint32_t index = 0; index < renderableComponents_.slots.slotCount();
-         ++index) {
-      if (!renderableComponents_.slots.isLive(index) ||
-          renderableComponents_.node[index] != nodeIndex) {
-        continue;
-      }
-      fn(makeRenderableId(index,
-                          renderableComponents_.slots.generation(index)));
+    for (uint32_t index = nodes_.renderableHead[nodeIndex]; index != kInvalidIndex;
+         index = renderableComponents_.nextOnNode[index]) {
+      fn(makeRenderableId(index, renderableComponents_.slots.generation(index)));
     }
   }
 
@@ -108,9 +103,29 @@ public:
       return;
     }
     const uint32_t nodeIndex = indexOf(node);
+    const auto visitStore = [&](const auto &store, const auto &head,
+                                LightType type) {
+      for (uint32_t index = head[nodeIndex]; index != kInvalidIndex;
+           index = store.nextOnNode[index]) {
+        fn(makeLightId(type, index, store.slots.generation(index)));
+      }
+    };
+
+    visitStore(directionalLights_, nodes_.directionalLightHead,
+               LightType::Directional);
+    visitStore(pointLights_, nodes_.pointLightHead, LightType::Point);
+    visitStore(spotLights_, nodes_.spotLightHead, LightType::Spot);
+  }
+
+  [[nodiscard]] Result<NodeId, std::string>
+  instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
+                    const ScenePrefabAssets &assets,
+                    SceneInstantiationMap *outMap = nullptr);
+
+  template <typename Fn> void forEachLightId(Fn &&fn) const {
     const auto visitStore = [&](const auto &store, LightType type) {
       for (uint32_t index = 0; index < store.slots.slotCount(); ++index) {
-        if (!store.slots.isLive(index) || store.node[index] != nodeIndex) {
+        if (!store.slots.isLive(index)) {
           continue;
         }
         fn(makeLightId(type, index, store.slots.generation(index)));
@@ -120,36 +135,6 @@ public:
     visitStore(directionalLights_, LightType::Directional);
     visitStore(pointLights_, LightType::Point);
     visitStore(spotLights_, LightType::Spot);
-  }
-
-  [[nodiscard]] Result<NodeId, std::string>
-  instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
-                    const ScenePrefabAssets &assets,
-                    SceneInstantiationMap *outMap = nullptr);
-
-  template <typename Fn> void forEachLightId(Fn &&fn) const {
-    for (uint32_t index = 0; index < directionalLights_.slots.slotCount();
-         ++index) {
-      if (!directionalLights_.slots.isLive(index)) {
-        continue;
-      }
-      fn(makeLightId(LightType::Directional, index,
-                     directionalLights_.slots.generation(index)));
-    }
-    for (uint32_t index = 0; index < pointLights_.slots.slotCount(); ++index) {
-      if (!pointLights_.slots.isLive(index)) {
-        continue;
-      }
-      fn(makeLightId(LightType::Point, index,
-                     pointLights_.slots.generation(index)));
-    }
-    for (uint32_t index = 0; index < spotLights_.slots.slotCount(); ++index) {
-      if (!spotLights_.slots.isLive(index)) {
-        continue;
-      }
-      fn(makeLightId(LightType::Spot, index,
-                     spotLights_.slots.generation(index)));
-    }
   }
 
   void clearRenderables();
@@ -169,7 +154,10 @@ private:
         : slots(memory), parent(memory), firstChild(memory),
           nextSibling(memory), prevSibling(memory), depth(memory),
           localFromParent(memory), worldFromRoot(memory), dirty(memory),
-          dirtyRootQueued(memory), names(memory) {}
+          dirtyRootQueued(memory), names(memory), renderableHead(memory),
+          renderableTail(memory), directionalLightHead(memory),
+          directionalLightTail(memory), pointLightHead(memory),
+          pointLightTail(memory), spotLightHead(memory), spotLightTail(memory) {}
 
     SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
         slots;
@@ -183,13 +171,22 @@ private:
     std::pmr::vector<uint8_t> dirty;
     std::pmr::vector<uint8_t> dirtyRootQueued;
     std::pmr::vector<std::pmr::string> names;
+    std::pmr::vector<uint32_t> renderableHead;
+    std::pmr::vector<uint32_t> renderableTail;
+    std::pmr::vector<uint32_t> directionalLightHead;
+    std::pmr::vector<uint32_t> directionalLightTail;
+    std::pmr::vector<uint32_t> pointLightHead;
+    std::pmr::vector<uint32_t> pointLightTail;
+    std::pmr::vector<uint32_t> spotLightHead;
+    std::pmr::vector<uint32_t> spotLightTail;
   };
 
   struct RenderableStore {
     explicit RenderableStore(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
         : slots(memory), node(memory), models(memory), materials(memory),
-          materialOverrides(memory), flatRenderableIndex(memory) {}
+          materialOverrides(memory), flatRenderableIndex(memory),
+          nextOnNode(memory), prevOnNode(memory) {}
 
     SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
         slots;
@@ -198,6 +195,8 @@ private:
     std::pmr::vector<MaterialRef> materials;
     std::pmr::vector<MaterialRef> materialOverrides;
     std::pmr::vector<uint32_t> flatRenderableIndex;
+    std::pmr::vector<uint32_t> nextOnNode;
+    std::pmr::vector<uint32_t> prevOnNode;
   };
 
   struct DirectionalLightStore {
@@ -205,7 +204,8 @@ private:
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
         : slots(memory), packedIndices(memory), node(memory), names(memory),
           localPositions(memory), localRotations(memory), colors(memory),
-          intensities(memory), enabled(memory) {}
+          intensities(memory), enabled(memory), nextOnNode(memory),
+          prevOnNode(memory) {}
 
     SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
         slots;
@@ -217,6 +217,8 @@ private:
     std::pmr::vector<glm::vec3> colors;
     std::pmr::vector<float> intensities;
     std::pmr::vector<uint8_t> enabled;
+    std::pmr::vector<uint32_t> nextOnNode;
+    std::pmr::vector<uint32_t> prevOnNode;
   };
 
   struct PointLightStore {
@@ -224,7 +226,8 @@ private:
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
         : slots(memory), packedIndices(memory), node(memory), names(memory),
           localPositions(memory), localRotations(memory), colors(memory),
-          intensities(memory), ranges(memory), enabled(memory) {}
+          intensities(memory), ranges(memory), enabled(memory),
+          nextOnNode(memory), prevOnNode(memory) {}
 
     SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
         slots;
@@ -237,6 +240,8 @@ private:
     std::pmr::vector<float> intensities;
     std::pmr::vector<float> ranges;
     std::pmr::vector<uint8_t> enabled;
+    std::pmr::vector<uint32_t> nextOnNode;
+    std::pmr::vector<uint32_t> prevOnNode;
   };
 
   struct SpotLightStore {
@@ -245,7 +250,8 @@ private:
         : slots(memory), packedIndices(memory), node(memory), names(memory),
           localPositions(memory), localRotations(memory), colors(memory),
           intensities(memory), ranges(memory), innerConeAngles(memory),
-          outerConeAngles(memory), enabled(memory) {}
+          outerConeAngles(memory), enabled(memory), nextOnNode(memory),
+          prevOnNode(memory) {}
 
     SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
         slots;
@@ -260,6 +266,8 @@ private:
     std::pmr::vector<float> innerConeAngles;
     std::pmr::vector<float> outerConeAngles;
     std::pmr::vector<uint8_t> enabled;
+    std::pmr::vector<uint32_t> nextOnNode;
+    std::pmr::vector<uint32_t> prevOnNode;
   };
 
   [[nodiscard]] bool nodeSlotValid(NodeId id) const noexcept;

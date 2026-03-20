@@ -11,6 +11,8 @@ namespace {
 
 constexpr uint32_t kMaxDirectionalLightCount = 4u;
 constexpr uint32_t kMaxLocalLightCount = 64u;
+constexpr uint32_t kInvalidSceneGraphIndex =
+    std::numeric_limits<uint32_t>::max();
 constexpr glm::quat kIdentityRotation(1.0f, 0.0f, 0.0f, 0.0f);
 
 [[nodiscard]] Result<SlotReservation, std::string>
@@ -25,6 +27,62 @@ template <typename Pool>
   const uint32_t slotCount = pool.slotCount();
   return slotCount > maxIndex + 1u ||
          (slotCount == maxIndex + 1u && pool.liveCount() == slotCount);
+}
+
+template <typename Store>
+void attachComponentToNode(Store &store, std::pmr::vector<uint32_t> &head,
+                           std::pmr::vector<uint32_t> &tail,
+                           uint32_t componentIndex, uint32_t nodeIndex) {
+  store.node[componentIndex] = nodeIndex;
+  store.prevOnNode[componentIndex] = tail[nodeIndex];
+  store.nextOnNode[componentIndex] = kInvalidSceneGraphIndex;
+  if (tail[nodeIndex] != kInvalidSceneGraphIndex) {
+    store.nextOnNode[tail[nodeIndex]] = componentIndex;
+  } else {
+    head[nodeIndex] = componentIndex;
+  }
+  tail[nodeIndex] = componentIndex;
+}
+
+template <typename Store>
+void detachComponentFromNode(Store &store, std::pmr::vector<uint32_t> &head,
+                             std::pmr::vector<uint32_t> &tail,
+                             uint32_t componentIndex) {
+  const uint32_t nodeIndex = store.node[componentIndex];
+  if (nodeIndex == kInvalidSceneGraphIndex || nodeIndex >= head.size()) {
+    store.node[componentIndex] = kInvalidSceneGraphIndex;
+    store.prevOnNode[componentIndex] = kInvalidSceneGraphIndex;
+    store.nextOnNode[componentIndex] = kInvalidSceneGraphIndex;
+    return;
+  }
+
+  const uint32_t prevIndex = store.prevOnNode[componentIndex];
+  const uint32_t nextIndex = store.nextOnNode[componentIndex];
+  if (prevIndex != kInvalidSceneGraphIndex) {
+    store.nextOnNode[prevIndex] = nextIndex;
+  } else {
+    head[nodeIndex] = nextIndex;
+  }
+  if (nextIndex != kInvalidSceneGraphIndex) {
+    store.prevOnNode[nextIndex] = prevIndex;
+  } else {
+    tail[nodeIndex] = prevIndex;
+  }
+
+  store.node[componentIndex] = kInvalidSceneGraphIndex;
+  store.prevOnNode[componentIndex] = kInvalidSceneGraphIndex;
+  store.nextOnNode[componentIndex] = kInvalidSceneGraphIndex;
+}
+
+template <typename Store>
+void recycleLightSlot(Store &store, std::pmr::vector<uint32_t> &head,
+                      std::pmr::vector<uint32_t> &tail,
+                      uint32_t lightIndex) {
+  detachComponentFromNode(store, head, tail, lightIndex);
+  store.packedIndices[lightIndex] = kInvalidSceneGraphIndex;
+  store.names[lightIndex].clear();
+  store.enabled[lightIndex] = 0u;
+  store.slots.release(lightIndex);
 }
 
 } // namespace
@@ -65,6 +123,14 @@ void SceneGraph::clear() {
   nodes_.dirty[rootIndex] = 0u;
   nodes_.dirtyRootQueued[rootIndex] = 0u;
   nodes_.names[rootIndex] = "Root";
+  nodes_.renderableHead[rootIndex] = kInvalidIndex;
+  nodes_.renderableTail[rootIndex] = kInvalidIndex;
+  nodes_.directionalLightHead[rootIndex] = kInvalidIndex;
+  nodes_.directionalLightTail[rootIndex] = kInvalidIndex;
+  nodes_.pointLightHead[rootIndex] = kInvalidIndex;
+  nodes_.pointLightTail[rootIndex] = kInvalidIndex;
+  nodes_.spotLightHead[rootIndex] = kInvalidIndex;
+  nodes_.spotLightTail[rootIndex] = kInvalidIndex;
   rootNode_ = makeNodeId(rootIndex, root.generation);
 }
 
@@ -84,6 +150,14 @@ Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {
     nodes_.dirty.push_back(0u);
     nodes_.dirtyRootQueued.push_back(0u);
     nodes_.names.emplace_back();
+    nodes_.renderableHead.push_back(kInvalidIndex);
+    nodes_.renderableTail.push_back(kInvalidIndex);
+    nodes_.directionalLightHead.push_back(kInvalidIndex);
+    nodes_.directionalLightTail.push_back(kInvalidIndex);
+    nodes_.pointLightHead.push_back(kInvalidIndex);
+    nodes_.pointLightTail.push_back(kInvalidIndex);
+    nodes_.spotLightHead.push_back(kInvalidIndex);
+    nodes_.spotLightTail.push_back(kInvalidIndex);
   }
   return Result<SlotReservation, std::string>::makeResult(slot);
 }
@@ -100,6 +174,8 @@ Result<SlotReservation, std::string> SceneGraph::allocateRenderableSlot() {
     renderableComponents_.materials.push_back(kInvalidMaterialRef);
     renderableComponents_.materialOverrides.push_back(kInvalidMaterialRef);
     renderableComponents_.flatRenderableIndex.push_back(kInvalidIndex);
+    renderableComponents_.nextOnNode.push_back(kInvalidIndex);
+    renderableComponents_.prevOnNode.push_back(kInvalidIndex);
   }
   return Result<SlotReservation, std::string>::makeResult(slot);
 }
@@ -121,6 +197,8 @@ SceneGraph::allocateDirectionalLightSlot() {
     directionalLights_.colors.push_back(glm::vec3(1.0f));
     directionalLights_.intensities.push_back(1.0f);
     directionalLights_.enabled.push_back(0u);
+    directionalLights_.nextOnNode.push_back(kInvalidIndex);
+    directionalLights_.prevOnNode.push_back(kInvalidIndex);
   }
   return Result<SlotReservation, std::string>::makeResult(slot);
 }
@@ -140,6 +218,8 @@ Result<SlotReservation, std::string> SceneGraph::allocatePointLightSlot() {
     pointLights_.intensities.push_back(1.0f);
     pointLights_.ranges.push_back(0.0f);
     pointLights_.enabled.push_back(0u);
+    pointLights_.nextOnNode.push_back(kInvalidIndex);
+    pointLights_.prevOnNode.push_back(kInvalidIndex);
   }
   return Result<SlotReservation, std::string>::makeResult(slot);
 }
@@ -161,6 +241,8 @@ Result<SlotReservation, std::string> SceneGraph::allocateSpotLightSlot() {
     spotLights_.innerConeAngles.push_back(0.0f);
     spotLights_.outerConeAngles.push_back(glm::quarter_pi<float>());
     spotLights_.enabled.push_back(0u);
+    spotLights_.nextOnNode.push_back(kInvalidIndex);
+    spotLights_.prevOnNode.push_back(kInvalidIndex);
   }
   return Result<SlotReservation, std::string>::makeResult(slot);
 }
@@ -262,11 +344,15 @@ void SceneGraph::markTransformDependentsDirty() noexcept {
 }
 
 void SceneGraph::recycleRenderableSlot(uint32_t index) noexcept {
+  detachComponentFromNode(renderableComponents_, nodes_.renderableHead,
+                          nodes_.renderableTail, index);
   renderableComponents_.node[index] = kInvalidIndex;
   renderableComponents_.models[index] = kInvalidModelRef;
   renderableComponents_.materials[index] = kInvalidMaterialRef;
   renderableComponents_.materialOverrides[index] = kInvalidMaterialRef;
   renderableComponents_.flatRenderableIndex[index] = kInvalidIndex;
+  renderableComponents_.nextOnNode[index] = kInvalidIndex;
+  renderableComponents_.prevOnNode[index] = kInvalidIndex;
   renderableComponents_.slots.release(index);
 }
 
@@ -421,6 +507,14 @@ SceneGraph::createNode(NodeId parent, std::string_view name,
   nodes_.dirty[index] = 0u;
   nodes_.dirtyRootQueued[index] = 0u;
   nodes_.names[index].assign(name.data(), name.size());
+  nodes_.renderableHead[index] = kInvalidIndex;
+  nodes_.renderableTail[index] = kInvalidIndex;
+  nodes_.directionalLightHead[index] = kInvalidIndex;
+  nodes_.directionalLightTail[index] = kInvalidIndex;
+  nodes_.pointLightHead[index] = kInvalidIndex;
+  nodes_.pointLightTail[index] = kInvalidIndex;
+  nodes_.spotLightHead[index] = kInvalidIndex;
+  nodes_.spotLightTail[index] = kInvalidIndex;
   attachNode(index, indexOf(parent));
   markSubtreeDirty(index);
   markTransformDependentsDirty();
@@ -437,18 +531,14 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
   const uint32_t rootIndex = indexOf(node);
   std::pmr::vector<uint32_t> nodeStack(memory_);
   std::pmr::vector<uint32_t> nodesToDestroy(memory_);
-  std::pmr::vector<uint8_t> killNodes(memory_);
-  killNodes.resize(nodes_.slots.slotCount(), 0u);
 
   nodeStack.push_back(rootIndex);
   while (!nodeStack.empty()) {
     const uint32_t nodeIndex = nodeStack.back();
     nodeStack.pop_back();
-    if (nodeIndex >= nodes_.slots.slotCount() ||
-        !nodes_.slots.isLive(nodeIndex) || killNodes[nodeIndex] != 0u) {
+    if (nodeIndex >= nodes_.slots.slotCount() || !nodes_.slots.isLive(nodeIndex)) {
       continue;
     }
-    killNodes[nodeIndex] = 1u;
     nodesToDestroy.push_back(nodeIndex);
     for (uint32_t child = nodes_.firstChild[nodeIndex]; child != kInvalidIndex;
          child = nodes_.nextSibling[child]) {
@@ -456,42 +546,27 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
     }
   }
 
-  for (uint32_t index = 0; index < renderableComponents_.slots.slotCount();
-       ++index) {
-    if (!renderableComponents_.slots.isLive(index)) {
-      continue;
-    }
-    const uint32_t nodeIndex = renderableComponents_.node[index];
-    if (nodeIndex < killNodes.size() && killNodes[nodeIndex] != 0u) {
-      recycleRenderableSlot(index);
-      renderableTopologyDirty_ = true;
-    }
-  }
-
-  const auto removeDeadLights = [this, &killNodes](auto &store) {
-    for (uint32_t index = 0; index < store.slots.slotCount(); ++index) {
-      if (!store.slots.isLive(index)) {
-        continue;
-      }
-      const uint32_t nodeIndex = store.node[index];
-      if (nodeIndex >= killNodes.size() || killNodes[nodeIndex] == 0u) {
-        continue;
-      }
-      store.node[index] = kInvalidIndex;
-      store.packedIndices[index] = kInvalidPackedLightIndex;
-      store.names[index].clear();
-      store.enabled[index] = 0u;
-      store.slots.release(index);
-      lightTopologyDirty_ = true;
-      lightDataDirty_ = true;
-    }
-  };
-  removeDeadLights(directionalLights_);
-  removeDeadLights(pointLights_);
-  removeDeadLights(spotLights_);
-
   detachNode(rootIndex);
   for (const uint32_t nodeIndex : nodesToDestroy) {
+    while (nodes_.renderableHead[nodeIndex] != kInvalidIndex) {
+      recycleRenderableSlot(nodes_.renderableHead[nodeIndex]);
+      renderableTopologyDirty_ = true;
+    }
+
+    const auto removeLightsOnNode = [this, nodeIndex](auto &store, auto &head,
+                                                      auto &tail) {
+      while (head[nodeIndex] != kInvalidIndex) {
+        recycleLightSlot(store, head, tail, head[nodeIndex]);
+        lightTopologyDirty_ = true;
+        lightDataDirty_ = true;
+      }
+    };
+    removeLightsOnNode(directionalLights_, nodes_.directionalLightHead,
+                       nodes_.directionalLightTail);
+    removeLightsOnNode(pointLights_, nodes_.pointLightHead,
+                       nodes_.pointLightTail);
+    removeLightsOnNode(spotLights_, nodes_.spotLightHead, nodes_.spotLightTail);
+
     nodes_.parent[nodeIndex] = kInvalidIndex;
     nodes_.firstChild[nodeIndex] = kInvalidIndex;
     nodes_.nextSibling[nodeIndex] = kInvalidIndex;
@@ -502,6 +577,14 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
     nodes_.dirty[nodeIndex] = 0u;
     nodes_.dirtyRootQueued[nodeIndex] = 0u;
     nodes_.names[nodeIndex].clear();
+    nodes_.renderableHead[nodeIndex] = kInvalidIndex;
+    nodes_.renderableTail[nodeIndex] = kInvalidIndex;
+    nodes_.directionalLightHead[nodeIndex] = kInvalidIndex;
+    nodes_.directionalLightTail[nodeIndex] = kInvalidIndex;
+    nodes_.pointLightHead[nodeIndex] = kInvalidIndex;
+    nodes_.pointLightTail[nodeIndex] = kInvalidIndex;
+    nodes_.spotLightHead[nodeIndex] = kInvalidIndex;
+    nodes_.spotLightTail[nodeIndex] = kInvalidIndex;
     nodes_.slots.release(nodeIndex);
   }
   markTransformDependentsDirty();
@@ -662,7 +745,8 @@ SceneGraph::addRenderable(NodeId node, ModelRef model, MaterialRef material) {
   }
   const SlotReservation slot = slotResult.value();
   const uint32_t index = slot.index;
-  renderableComponents_.node[index] = indexOf(node);
+  attachComponentToNode(renderableComponents_, nodes_.renderableHead,
+                        nodes_.renderableTail, index, indexOf(node));
   renderableComponents_.models[index] = model;
   renderableComponents_.materials[index] = material;
   renderableComponents_.materialOverrides[index] = kInvalidMaterialRef;
@@ -682,14 +766,25 @@ SceneGraph::addRenderablesInstanced(ModelRef model, MaterialRef material,
         "SceneGraph::addRenderablesInstanced: modelMatrices is empty");
   }
 
+  std::pmr::vector<NodeId> createdNodes(memory_);
+  createdNodes.reserve(modelMatrices.size());
+  const auto rollback = [this, &createdNodes]() {
+    for (auto it = createdNodes.rbegin(); it != createdNodes.rend(); ++it) {
+      (void)destroyNodeSubtree(*it);
+    }
+  };
+
   uint32_t firstIndex = kInvalidIndex;
   for (const glm::mat4 &modelMatrix : modelMatrices) {
     auto nodeResult = createNode(rootNode_, {}, modelMatrix);
     if (nodeResult.hasError()) {
+      rollback();
       return Result<uint32_t, std::string>::makeError(nodeResult.error());
     }
+    createdNodes.push_back(nodeResult.value());
     auto renderableResult = addRenderable(nodeResult.value(), model, material);
     if (renderableResult.hasError()) {
+      rollback();
       return Result<uint32_t, std::string>::makeError(renderableResult.error());
     }
     if (firstIndex == kInvalidIndex) {
@@ -828,7 +923,8 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
     const SlotReservation slot = slotResult.value();
     const uint32_t index = slot.index;
     directionalLights_.packedIndices[index] = kInvalidPackedLightIndex;
-    directionalLights_.node[index] = indexOf(node);
+    attachComponentToNode(directionalLights_, nodes_.directionalLightHead,
+                          nodes_.directionalLightTail, index, indexOf(node));
     directionalLights_.names[index].assign(sanitized.name.data(),
                                            sanitized.name.size());
     directionalLights_.localPositions[index] = sanitized.position;
@@ -853,7 +949,8 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
     const SlotReservation slot = slotResult.value();
     const uint32_t index = slot.index;
     pointLights_.packedIndices[index] = kInvalidPackedLightIndex;
-    pointLights_.node[index] = indexOf(node);
+    attachComponentToNode(pointLights_, nodes_.pointLightHead,
+                          nodes_.pointLightTail, index, indexOf(node));
     pointLights_.names[index].assign(sanitized.name.data(),
                                      sanitized.name.size());
     pointLights_.localPositions[index] = sanitized.position;
@@ -879,7 +976,8 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
     const SlotReservation slot = slotResult.value();
     const uint32_t index = slot.index;
     spotLights_.packedIndices[index] = kInvalidPackedLightIndex;
-    spotLights_.node[index] = indexOf(node);
+    attachComponentToNode(spotLights_, nodes_.spotLightHead,
+                          nodes_.spotLightTail, index, indexOf(node));
     spotLights_.names[index].assign(sanitized.name.data(),
                                     sanitized.name.size());
     spotLights_.localPositions[index] = sanitized.position;
@@ -907,13 +1005,10 @@ bool SceneGraph::removeLight(LightId id) {
     return false;
   }
 
-  const auto removeFromStore = [this](auto &store, LightId lightId) {
+  const auto removeFromStore = [this](auto &store, auto &head, auto &tail,
+                                      LightId lightId) {
     const uint32_t index = indexOf(lightId);
-    store.node[index] = kInvalidIndex;
-    store.packedIndices[index] = kInvalidPackedLightIndex;
-    store.names[index].clear();
-    store.enabled[index] = 0u;
-    store.slots.release(index);
+    recycleLightSlot(store, head, tail, index);
     lightTopologyDirty_ = true;
     lightDataDirty_ = true;
   };
@@ -923,19 +1018,22 @@ bool SceneGraph::removeLight(LightId id) {
     if (!directionalSlotValid(id)) {
       return false;
     }
-    removeFromStore(directionalLights_, id);
+    removeFromStore(directionalLights_, nodes_.directionalLightHead,
+                    nodes_.directionalLightTail, id);
     return true;
   case LightType::Point:
     if (!pointSlotValid(id)) {
       return false;
     }
-    removeFromStore(pointLights_, id);
+    removeFromStore(pointLights_, nodes_.pointLightHead,
+                    nodes_.pointLightTail, id);
     return true;
   case LightType::Spot:
     if (!spotSlotValid(id)) {
       return false;
     }
-    removeFromStore(spotLights_, id);
+    removeFromStore(spotLights_, nodes_.spotLightHead, nodes_.spotLightTail,
+                    id);
     return true;
   }
   return false;
@@ -962,7 +1060,6 @@ bool SceneGraph::getLightDesc(LightId id, LightDesc &outLocal) const {
       return false;
     }
     outLocal = nuri::makeLocalLightDesc(pointLights_, indexOf(id), id.type);
-    outLocal.range = pointLights_.ranges[indexOf(id)];
     outLocal.innerConeAngleRadians = 0.0f;
     outLocal.outerConeAngleRadians = 0.0f;
     return true;
@@ -971,9 +1068,6 @@ bool SceneGraph::getLightDesc(LightId id, LightDesc &outLocal) const {
       return false;
     }
     outLocal = nuri::makeLocalLightDesc(spotLights_, indexOf(id), id.type);
-    outLocal.range = spotLights_.ranges[indexOf(id)];
-    outLocal.innerConeAngleRadians = spotLights_.innerConeAngles[indexOf(id)];
-    outLocal.outerConeAngleRadians = spotLights_.outerConeAngles[indexOf(id)];
     return true;
   }
   return false;
@@ -1143,7 +1237,11 @@ bool SceneGraph::setLightNode(LightId id, NodeId node,
     if (!directionalSlotValid(id)) {
       return false;
     }
-    directionalLights_.node[indexOf(id)] = indexOf(node);
+    detachComponentFromNode(directionalLights_, nodes_.directionalLightHead,
+                            nodes_.directionalLightTail, indexOf(id));
+    attachComponentToNode(directionalLights_, nodes_.directionalLightHead,
+                          nodes_.directionalLightTail, indexOf(id),
+                          indexOf(node));
     directionalLights_.localPositions[indexOf(id)] = localDesc.position;
     directionalLights_.localRotations[indexOf(id)] = localDesc.rotation;
     break;
@@ -1151,7 +1249,10 @@ bool SceneGraph::setLightNode(LightId id, NodeId node,
     if (!pointSlotValid(id)) {
       return false;
     }
-    pointLights_.node[indexOf(id)] = indexOf(node);
+    detachComponentFromNode(pointLights_, nodes_.pointLightHead,
+                            nodes_.pointLightTail, indexOf(id));
+    attachComponentToNode(pointLights_, nodes_.pointLightHead,
+                          nodes_.pointLightTail, indexOf(id), indexOf(node));
     pointLights_.localPositions[indexOf(id)] = localDesc.position;
     pointLights_.localRotations[indexOf(id)] = localDesc.rotation;
     break;
@@ -1159,7 +1260,10 @@ bool SceneGraph::setLightNode(LightId id, NodeId node,
     if (!spotSlotValid(id)) {
       return false;
     }
-    spotLights_.node[indexOf(id)] = indexOf(node);
+    detachComponentFromNode(spotLights_, nodes_.spotLightHead,
+                            nodes_.spotLightTail, indexOf(id));
+    attachComponentToNode(spotLights_, nodes_.spotLightHead,
+                          nodes_.spotLightTail, indexOf(id), indexOf(node));
     spotLights_.localPositions[indexOf(id)] = localDesc.position;
     spotLights_.localRotations[indexOf(id)] = localDesc.rotation;
     break;
@@ -1186,6 +1290,17 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
   localMap.nodes.resize(prefab.nodes.size(), kInvalidNodeId);
   localMap.renderables.reserve(prefab.renderables.size());
   localMap.lights.reserve(prefab.lights.size());
+  std::pmr::vector<NodeId> createdRoots(memory_);
+
+  const auto rollbackAndReturnError = [&](std::string error) {
+    for (auto it = createdRoots.rbegin(); it != createdRoots.rend(); ++it) {
+      (void)destroyNodeSubtree(*it);
+    }
+    if (outMap != nullptr) {
+      *outMap = std::move(localMap);
+    }
+    return Result<NodeId, std::string>::makeError(std::move(error));
+  };
 
   NodeId firstRoot = kInvalidNodeId;
   for (uint32_t prefabNodeIndex = 0; prefabNodeIndex < prefab.nodes.size();
@@ -1197,9 +1312,12 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
     auto createResult =
         createNode(parentNode, prefabNode.name, prefabNode.localFromParent);
     if (createResult.hasError()) {
-      return Result<NodeId, std::string>::makeError(createResult.error());
+      return rollbackAndReturnError(createResult.error());
     }
     localMap.nodes[prefabNodeIndex] = createResult.value();
+    if (prefabNode.parentIndex == kInvalidScenePrefabIndex) {
+      createdRoots.push_back(createResult.value());
+    }
     if (!isValid(firstRoot)) {
       firstRoot = createResult.value();
     }
@@ -1215,13 +1333,13 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
 
   for (const ScenePrefabRenderable &prefabRenderable : prefab.renderables) {
     if (prefabRenderable.nodeIndex >= localMap.nodes.size()) {
-      return Result<NodeId, std::string>::makeError(
+      return rollbackAndReturnError(
           "SceneGraph::instantiatePrefab: prefab renderable node index is "
           "invalid");
     }
     if (prefabRenderable.meshIndex >= assets.models.size() ||
         !isValid(assets.models[prefabRenderable.meshIndex])) {
-      return Result<NodeId, std::string>::makeError(
+      return rollbackAndReturnError(
           "SceneGraph::instantiatePrefab: prefab model asset is unresolved");
     }
     MaterialRef material = fallbackMaterial;
@@ -1230,27 +1348,27 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
       material = assets.materials[prefabRenderable.materialIndex];
     }
     if (!isValid(material)) {
-      return Result<NodeId, std::string>::makeError(
+      return rollbackAndReturnError(
           "SceneGraph::instantiatePrefab: prefab material asset is unresolved");
     }
     auto renderableResult =
         addRenderable(localMap.nodes[prefabRenderable.nodeIndex],
                       assets.models[prefabRenderable.meshIndex], material);
     if (renderableResult.hasError()) {
-      return Result<NodeId, std::string>::makeError(renderableResult.error());
+      return rollbackAndReturnError(renderableResult.error());
     }
     localMap.renderables.push_back(renderableResult.value());
   }
 
   for (const ScenePrefabLight &prefabLight : prefab.lights) {
     if (prefabLight.nodeIndex >= localMap.nodes.size()) {
-      return Result<NodeId, std::string>::makeError(
+      return rollbackAndReturnError(
           "SceneGraph::instantiatePrefab: prefab light node index is invalid");
     }
     auto lightResult =
         addLight(localMap.nodes[prefabLight.nodeIndex], prefabLight.light);
     if (lightResult.hasError()) {
-      return Result<NodeId, std::string>::makeError(lightResult.error());
+      return rollbackAndReturnError(lightResult.error());
     }
     localMap.lights.push_back(lightResult.value());
   }
@@ -1264,6 +1382,10 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
 void SceneGraph::clearRenderables() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   renderableComponents_ = RenderableStore(memory_);
+  std::fill(nodes_.renderableHead.begin(), nodes_.renderableHead.end(),
+            kInvalidIndex);
+  std::fill(nodes_.renderableTail.begin(), nodes_.renderableTail.end(),
+            kInvalidIndex);
   renderableTopologyDirty_ = true;
   renderableTransformsDirty_ = false;
 }
@@ -1273,6 +1395,18 @@ void SceneGraph::clearLights() {
   directionalLights_ = DirectionalLightStore(memory_);
   pointLights_ = PointLightStore(memory_);
   spotLights_ = SpotLightStore(memory_);
+  std::fill(nodes_.directionalLightHead.begin(), nodes_.directionalLightHead.end(),
+            kInvalidIndex);
+  std::fill(nodes_.directionalLightTail.begin(), nodes_.directionalLightTail.end(),
+            kInvalidIndex);
+  std::fill(nodes_.pointLightHead.begin(), nodes_.pointLightHead.end(),
+            kInvalidIndex);
+  std::fill(nodes_.pointLightTail.begin(), nodes_.pointLightTail.end(),
+            kInvalidIndex);
+  std::fill(nodes_.spotLightHead.begin(), nodes_.spotLightHead.end(),
+            kInvalidIndex);
+  std::fill(nodes_.spotLightTail.begin(), nodes_.spotLightTail.end(),
+            kInvalidIndex);
   lightTopologyDirty_ = true;
   lightDataDirty_ = false;
 }

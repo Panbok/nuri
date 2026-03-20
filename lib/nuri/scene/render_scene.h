@@ -51,6 +51,8 @@ public:
   [[nodiscard]] SceneGraph &graph() noexcept { return sceneGraph_; }
   [[nodiscard]] const SceneGraph &graph() const noexcept { return sceneGraph_; }
 
+  // commit() returns true when derived renderer-facing caches changed and false
+  // when the authored scene state was already up to date.
   [[nodiscard]] Result<bool, std::string> commit();
 
   [[nodiscard]] const Renderable *renderable(uint32_t index) const;

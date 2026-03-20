@@ -209,14 +209,13 @@ void RenderScene::rebuildPackedLocalLights() {
     }
     LightDesc local =
         nuri::makeLocalLightDesc(pointStore, index, LightType::Point);
-    local.range = pointStore.ranges[index];
     const LightDesc world =
         transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
     pointStore.packedIndices[index] =
         static_cast<uint32_t>(packedLocalLights_.size());
     packedLocalLights_.push_back(
         nuri::packPointLight(world.position, world.rotation, world.color,
-                             world.intensity, world.range));
+                             world.intensity, world.range, world.enabled));
     packedLocalLightIds_.push_back(makeLightId(
         LightType::Point, index, pointStore.slots.generation(index)));
   }
@@ -234,9 +233,6 @@ void RenderScene::rebuildPackedLocalLights() {
     }
     LightDesc local =
         nuri::makeLocalLightDesc(spotStore, index, LightType::Spot);
-    local.range = spotStore.ranges[index];
-    local.innerConeAngleRadians = spotStore.innerConeAngles[index];
-    local.outerConeAngleRadians = spotStore.outerConeAngles[index];
     const LightDesc world =
         transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
     spotStore.packedIndices[index] =
@@ -341,6 +337,7 @@ void RenderScene::bindResources(ResourceManager *resources) {
   }
 
   sanitizeGraphRenderableRefs();
+  rebuildFlatRenderables();
 
   for (const Renderable &renderable : renderables_) {
     retainRenderableRefs(renderable.model, renderable.material,

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <memory_resource>
 #include <string>
 #include <vector>
@@ -20,6 +21,8 @@ inline constexpr uint32_t kInvalidScenePrefabIndex =
     std::numeric_limits<uint32_t>::max();
 
 struct NURI_API ScenePrefabNode {
+  using allocator_type = std::pmr::polymorphic_allocator<>;
+
   uint32_t parentIndex = kInvalidScenePrefabIndex;
   glm::mat4 localFromParent{1.0f};
   std::pmr::string name;
@@ -27,6 +30,54 @@ struct NURI_API ScenePrefabNode {
   explicit ScenePrefabNode(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : name(memory) {}
+
+  template <typename T>
+  ScenePrefabNode(std::pmr::memory_resource *memory,
+                  const std::pmr::polymorphic_allocator<T> &alloc)
+      : name(memory != nullptr ? memory : alloc.resource()) {}
+
+  template <typename T>
+  explicit ScenePrefabNode(const std::pmr::polymorphic_allocator<T> &alloc)
+      : name(alloc.resource()) {}
+
+  template <typename T>
+  ScenePrefabNode(std::allocator_arg_t,
+                  const std::pmr::polymorphic_allocator<T> &alloc,
+                  std::pmr::memory_resource *memory)
+      : name(memory != nullptr ? memory : alloc.resource()) {}
+
+  template <typename T>
+  ScenePrefabNode(std::allocator_arg_t,
+                  const std::pmr::polymorphic_allocator<T> &alloc)
+      : name(alloc.resource()) {}
+
+  template <typename T>
+  ScenePrefabNode(const ScenePrefabNode &other,
+                  const std::pmr::polymorphic_allocator<T> &alloc)
+      : parentIndex(other.parentIndex),
+        localFromParent(other.localFromParent), name(other.name, alloc.resource()) {}
+
+  template <typename T>
+  ScenePrefabNode(ScenePrefabNode &&other,
+                  const std::pmr::polymorphic_allocator<T> &alloc)
+      : parentIndex(other.parentIndex),
+        localFromParent(other.localFromParent),
+        name(std::move(other.name), alloc.resource()) {}
+
+  template <typename T>
+  ScenePrefabNode(std::allocator_arg_t,
+                  const std::pmr::polymorphic_allocator<T> &alloc,
+                  const ScenePrefabNode &other)
+      : parentIndex(other.parentIndex),
+        localFromParent(other.localFromParent), name(other.name, alloc.resource()) {}
+
+  template <typename T>
+  ScenePrefabNode(std::allocator_arg_t,
+                  const std::pmr::polymorphic_allocator<T> &alloc,
+                  ScenePrefabNode &&other)
+      : parentIndex(other.parentIndex),
+        localFromParent(other.localFromParent),
+        name(std::move(other.name), alloc.resource()) {}
 };
 
 struct NURI_API ScenePrefabRenderable {
@@ -76,3 +127,11 @@ struct NURI_API SceneInstantiationMap {
 };
 
 } // namespace nuri
+
+namespace std {
+
+template <typename T>
+struct uses_allocator<nuri::ScenePrefabNode,
+                      std::pmr::polymorphic_allocator<T>> : true_type {};
+
+} // namespace std
