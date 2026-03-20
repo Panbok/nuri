@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <memory_resource>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -40,6 +41,16 @@ class NURI_API MeshImporter {
 public:
   [[nodiscard]] static nuri::Result<MeshData, std::string> loadFromFile(
       std::string_view path, const MeshImportOptions &options = {},
+      std::pmr::memory_resource *mem = std::pmr::get_default_resource());
+  [[nodiscard]] static nuri::Result<MeshData, std::string>
+  loadSceneMeshFromFile(
+      std::string_view path, uint32_t sceneMeshIndex,
+      const MeshImportOptions &options = {},
+      std::pmr::memory_resource *mem = std::pmr::get_default_resource());
+  [[nodiscard]] static nuri::Result<std::pmr::vector<MeshData>, std::string>
+  loadSceneMeshesFromFile(
+      std::string_view path, std::span<const uint32_t> sceneMeshIndices,
+      const MeshImportOptions &options = {},
       std::pmr::memory_resource *mem = std::pmr::get_default_resource());
 
   // Extracts material factors and texture slots from source files via Assimp.

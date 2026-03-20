@@ -1558,12 +1558,109 @@ void appendSubmeshToMeshData(
   data.submeshes.push_back(submesh);
 }
 
-unsigned int buildAssimpFlags(const MeshImportOptions &options) {
-  // Pre-transform vertices because the runtime model format does not retain
-  // source scene-graph transforms.
+[[nodiscard]] std::string importedSceneName(const aiScene &scene,
+                                            std::string_view path) {
+  if (scene.mName.length > 0u) {
+    return std::string(scene.mName.C_Str(), scene.mName.length);
+  }
+  return std::filesystem::path(std::string(path)).stem().string();
+}
+
+unsigned int buildAssimpFlags(const MeshImportOptions &options,
+                              bool preTransformVertices);
+
+[[nodiscard]] nuri::Result<const aiScene *, std::string>
+loadSceneMeshImportScene(Assimp::Importer &importer, std::string_view path,
+                         const nuri::MeshImportOptions &options) {
+  const std::string pathStr(path);
+  const unsigned int flags = buildAssimpFlags(options, false);
+  const aiScene *scene = importer.ReadFile(pathStr, flags);
+  if (!scene || !scene->HasMeshes()) {
+    const std::string error =
+        scene ? "Assimp scene has no meshes" : importer.GetErrorString();
+    return nuri::Result<const aiScene *, std::string>::makeError(error);
+  }
+  return nuri::Result<const aiScene *, std::string>::makeResult(scene);
+}
+
+[[nodiscard]] nuri::Result<const aiMesh *, std::string>
+resolveSceneMesh(const aiScene &scene, uint32_t sceneMeshIndex,
+                 std::string_view context) {
+  if (sceneMeshIndex == std::numeric_limits<uint32_t>::max()) {
+    return nuri::Result<const aiMesh *, std::string>::makeError(
+        std::string(context) + ": mesh index is invalid");
+  }
+  if (sceneMeshIndex >= scene.mNumMeshes ||
+      scene.mMeshes[sceneMeshIndex] == nullptr) {
+    return nuri::Result<const aiMesh *, std::string>::makeError(
+        std::string(context) + ": mesh index " +
+        std::to_string(sceneMeshIndex) + " is out of range");
+  }
+  return nuri::Result<const aiMesh *, std::string>::makeResult(
+      scene.mMeshes[sceneMeshIndex]);
+}
+
+[[nodiscard]] nuri::Result<MeshData, std::string>
+buildSceneMeshData(const aiMesh &mesh, uint32_t sceneMeshIndex,
+                   std::string_view sceneName,
+                   const nuri::MeshImportOptions &options,
+                   ScratchArena &scratch, std::pmr::memory_resource *mem) {
+  MeshData data(mem);
+  data.name.assign(sceneName.data(), sceneName.size());
+
+  const uint32_t requestedLodCount = clampLodCount(options);
+  ScopedScratch scopedScratch(scratch);
+  std::pmr::vector<Vertex> meshVertices(scopedScratch.resource());
+  std::pmr::vector<uint32_t> lod0Indices(scopedScratch.resource());
+  std::array<std::pmr::vector<uint32_t>, Submesh::kMaxLodCount>
+      lodIndexBuffers = makeLodIndexBuffers(scopedScratch.resource());
+  std::array<float, Submesh::kMaxLodCount> lodErrors{};
+
+  extractMeshGeometry(mesh, aiMatrix4x4(), meshVertices, lod0Indices);
+  if (meshVertices.empty() || lod0Indices.size() < kTriangleIndexCount) {
+    return nuri::Result<MeshData, std::string>::makeError(
+        "mesh has insufficient geometry");
+  }
+
+  if (options.optimize) {
+    NURI_PROFILER_ZONE("MeshImporter.scene_mesh_optimize",
+                       NURI_PROFILER_COLOR_CREATE);
+    remapMeshVertices(meshVertices, lod0Indices);
+    optimizeIndexOrder(lod0Indices, meshVertices);
+    NURI_PROFILER_ZONE_END();
+  }
+
+  lodIndexBuffers[0] = std::move(lod0Indices);
+  const uint32_t generatedLodCount = buildLodIndexBuffers(
+      options, requestedLodCount, sceneMeshIndex, meshVertices,
+      options.optimize, lodIndexBuffers, lodErrors);
+  if (options.optimize) {
+    optimizeVertexFetchForAllLods(meshVertices, generatedLodCount,
+                                  lodIndexBuffers);
+  }
+
+  data.vertices.reserve(meshVertices.size());
+  size_t totalIndexCount = 0;
+  for (uint32_t lodIndex = 0; lodIndex < generatedLodCount; ++lodIndex) {
+    totalIndexCount += lodIndexBuffers[lodIndex].size();
+  }
+  data.indices.reserve(totalIndexCount);
+  const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
+  appendSubmeshToMeshData(data, mesh, meshVertices, submeshBounds,
+                          glm::vec3(1.0f), generatedLodCount, lodIndexBuffers,
+                          lodErrors, sceneMeshIndex);
+  return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
+}
+
+unsigned int buildAssimpFlags(const MeshImportOptions &options,
+                              bool preTransformVertices) {
   unsigned int flags = aiProcess_SortByPType | aiProcess_FindDegenerates |
-                       aiProcess_FindInvalidData |
-                       aiProcess_PreTransformVertices;
+                       aiProcess_FindInvalidData;
+  if (preTransformVertices) {
+    // Pre-transform vertices because the runtime model format does not retain
+    // source scene-graph transforms.
+    flags |= aiProcess_PreTransformVertices;
+  }
 
   if (options.triangulate) {
     flags |= aiProcess_Triangulate;
@@ -1621,7 +1718,7 @@ MeshImporter::loadFromFile(std::string_view path,
 
   Assimp::Importer importer;
   const std::string pathStr(path);
-  const unsigned int flags = buildAssimpFlags(options);
+  const unsigned int flags = buildAssimpFlags(options, true);
 
   NURI_LOG_DEBUG(
       "MeshImporter::loadFromFile: Importing mesh '%s' with flags %u",
@@ -1769,6 +1866,95 @@ MeshImporter::loadFromFile(std::string_view path,
   }
 
   return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
+}
+
+nuri::Result<MeshData, std::string> MeshImporter::loadSceneMeshFromFile(
+    std::string_view path, uint32_t sceneMeshIndex,
+    const MeshImportOptions &options, std::pmr::memory_resource *mem) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (path.empty()) {
+    return nuri::Result<MeshData, std::string>::makeError(
+        "MeshImporter::loadSceneMeshFromFile: path is empty");
+  }
+  if (!mem) {
+    mem = std::pmr::get_default_resource();
+  }
+
+  Assimp::Importer importer;
+  auto sceneResult = loadSceneMeshImportScene(importer, path, options);
+  if (sceneResult.hasError()) {
+    return nuri::Result<MeshData, std::string>::makeError(sceneResult.error());
+  }
+  const aiScene *scene = sceneResult.value();
+
+  auto meshResult = resolveSceneMesh(*scene, sceneMeshIndex,
+                                     "MeshImporter::loadSceneMeshFromFile");
+  if (meshResult.hasError()) {
+    return nuri::Result<MeshData, std::string>::makeError(meshResult.error());
+  }
+
+  const std::string sceneName = importedSceneName(*scene, path);
+  ScratchArena scratch(mem);
+  auto meshDataResult = buildSceneMeshData(*meshResult.value(), sceneMeshIndex,
+                                           sceneName, options, scratch, mem);
+  if (meshDataResult.hasError()) {
+    return nuri::Result<MeshData, std::string>::makeError(
+        "MeshImporter::loadSceneMeshFromFile: " + meshDataResult.error());
+  }
+  return meshDataResult;
+}
+
+nuri::Result<std::pmr::vector<MeshData>, std::string>
+MeshImporter::loadSceneMeshesFromFile(
+    std::string_view path, std::span<const uint32_t> sceneMeshIndices,
+    const MeshImportOptions &options, std::pmr::memory_resource *mem) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (path.empty()) {
+    return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
+        "MeshImporter::loadSceneMeshesFromFile: path is empty");
+  }
+  if (!mem) {
+    mem = std::pmr::get_default_resource();
+  }
+
+  std::pmr::vector<MeshData> meshData(mem);
+  if (sceneMeshIndices.empty()) {
+    return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeResult(
+        std::move(meshData));
+  }
+
+  Assimp::Importer importer;
+  auto sceneResult = loadSceneMeshImportScene(importer, path, options);
+  if (sceneResult.hasError()) {
+    return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
+        sceneResult.error());
+  }
+  const aiScene *scene = sceneResult.value();
+
+  meshData.reserve(sceneMeshIndices.size());
+  const std::string sceneName = importedSceneName(*scene, path);
+  ScratchArena scratch(mem);
+
+  for (const uint32_t sceneMeshIndex : sceneMeshIndices) {
+    auto meshResult = resolveSceneMesh(*scene, sceneMeshIndex,
+                                       "MeshImporter::loadSceneMeshesFromFile");
+    if (meshResult.hasError()) {
+      return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
+          meshResult.error());
+    }
+
+    auto meshDataResult = buildSceneMeshData(
+        *meshResult.value(), sceneMeshIndex, sceneName, options, scratch, mem);
+    if (meshDataResult.hasError()) {
+      return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
+          "MeshImporter::loadSceneMeshesFromFile: mesh index " +
+          std::to_string(sceneMeshIndex) + ": " + meshDataResult.error());
+    }
+    meshData.push_back(std::move(meshDataResult.value()));
+  }
+
+  return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeResult(
+      std::move(meshData));
 }
 
 nuri::Result<ImportedMaterialSet, std::string>

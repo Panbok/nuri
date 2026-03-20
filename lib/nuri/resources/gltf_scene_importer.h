@@ -3,6 +3,7 @@
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/scene/light.h"
+#include "nuri/scene/scene_prefab.h"
 
 #include <cstdint>
 #include <string>
@@ -29,6 +30,9 @@ class NURI_API GltfSceneImporter {
 public:
   [[nodiscard]] static Result<ImportedLightSet, std::string>
   loadLightsFromFile(std::string_view path);
+  [[nodiscard]] static Result<ScenePrefab, std::string> loadScenePrefabFromFile(
+      std::string_view path,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 };
 
 } // namespace nuri

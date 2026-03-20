@@ -5,6 +5,11 @@
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/math/light.h"
+#include "nuri/resources/gpu/resource_keys.h"
+
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
 
 #include <cctype>
 
@@ -28,6 +33,27 @@ struct ParsedNode {
   std::vector<uint32_t> children{};
   std::optional<uint32_t> lightIndex{};
 };
+
+[[nodiscard]] glm::mat4 aiMatrix4x4ToMat4(const aiMatrix4x4 &matrix) {
+  glm::mat4 out(1.0f);
+  out[0][0] = matrix.a1;
+  out[1][0] = matrix.a2;
+  out[2][0] = matrix.a3;
+  out[3][0] = matrix.a4;
+  out[0][1] = matrix.b1;
+  out[1][1] = matrix.b2;
+  out[2][1] = matrix.b3;
+  out[3][1] = matrix.b4;
+  out[0][2] = matrix.c1;
+  out[1][2] = matrix.c2;
+  out[2][2] = matrix.c3;
+  out[3][2] = matrix.c4;
+  out[0][3] = matrix.d1;
+  out[1][3] = matrix.d2;
+  out[2][3] = matrix.d3;
+  out[3][3] = matrix.d4;
+  return out;
+}
 
 [[nodiscard]] bool hasExtension(const std::filesystem::path &path,
                                 std::string_view extension) {
@@ -732,6 +758,155 @@ GltfSceneImporter::loadLightsFromFile(std::string_view path) {
 
   return Result<ImportedLightSet, std::string>::makeResult(
       std::move(importedLights));
+}
+
+Result<ScenePrefab, std::string>
+GltfSceneImporter::loadScenePrefabFromFile(std::string_view path,
+                                           std::pmr::memory_resource *memory) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (memory == nullptr) {
+    memory = std::pmr::get_default_resource();
+  }
+
+  const std::filesystem::path assetPath(path);
+  if (!isGltfJsonAssetPath(assetPath)) {
+    return Result<ScenePrefab, std::string>::makeError(
+        "GltfSceneImporter::loadScenePrefabFromFile: path is not .gltf/.glb");
+  }
+
+  ScenePrefab prefab(memory);
+  prefab.sourcePath = canonicalizeResourcePath(path);
+
+  auto docResult = loadGltfJsonDocument(assetPath);
+  if (docResult.hasError()) {
+    return Result<ScenePrefab, std::string>::makeError(docResult.error());
+  }
+  YyJsonDocPtr doc = std::move(docResult.value());
+  yyjson_val *root = yyjson_doc_get_root(doc.get());
+  if (!yyjson_is_obj(root)) {
+    return Result<ScenePrefab, std::string>::makeError(
+        "glTF root is not a JSON object");
+  }
+
+  auto lightsResult = parseLightDefinitions(root);
+  if (lightsResult.hasError()) {
+    return Result<ScenePrefab, std::string>::makeError(lightsResult.error());
+  }
+  std::vector<ParsedLightDef> lights = std::move(lightsResult.value());
+
+  auto nodesResult = parseNodes(root);
+  if (nodesResult.hasError()) {
+    return Result<ScenePrefab, std::string>::makeError(nodesResult.error());
+  }
+  std::vector<ParsedNode> parsedNodes = std::move(nodesResult.value());
+
+  yyjson_val *scenesValue = yyjson_obj_get(root, "scenes");
+  if (yyjson_is_arr(scenesValue) && yyjson_arr_size(scenesValue) > 0u) {
+    uint32_t sceneIndex = 0u;
+    if (!tryReadJsonUint32(yyjson_obj_get(root, "scene"), sceneIndex)) {
+      sceneIndex = 0u;
+    }
+    if (sceneIndex < yyjson_arr_size(scenesValue)) {
+      yyjson_val *sceneValue = yyjson_arr_get(scenesValue, sceneIndex);
+      const std::string_view sceneName = readJsonStringView(sceneValue, "name");
+      prefab.sourceSceneName.assign(sceneName.data(), sceneName.size());
+    }
+  }
+
+  Assimp::Importer importer;
+  constexpr unsigned int kScenePrefabAssimpFlags =
+      aiProcess_SortByPType | aiProcess_FindInvalidData;
+  const std::string pathString(path);
+  const aiScene *scene = importer.ReadFile(pathString, kScenePrefabAssimpFlags);
+  if (scene == nullptr || scene->mRootNode == nullptr) {
+    return Result<ScenePrefab, std::string>::makeError(
+        std::string(
+            "GltfSceneImporter::loadScenePrefabFromFile: Assimp error: ") +
+        importer.GetErrorString());
+  }
+
+  prefab.meshCount = scene->mNumMeshes;
+  prefab.materialCount = scene->mNumMaterials;
+  std::unordered_map<std::string, uint32_t> nameToPrefabNode;
+
+  std::function<void(const aiNode *, uint32_t)> addAssimpNode;
+  addAssimpNode = [&](const aiNode *node, uint32_t parentIndex) {
+    if (node == nullptr) {
+      return;
+    }
+    const uint32_t prefabIndex = static_cast<uint32_t>(prefab.nodes.size());
+    prefab.nodes.emplace_back(memory);
+    ScenePrefabNode &prefabNode = prefab.nodes.back();
+    prefabNode.parentIndex = parentIndex;
+    prefabNode.localFromParent = aiMatrix4x4ToMat4(node->mTransformation);
+    if (node->mName.length > 0u) {
+      prefabNode.name.assign(node->mName.C_Str(), node->mName.length);
+      if (!prefabNode.name.empty() &&
+          !nameToPrefabNode.contains(std::string(prefabNode.name))) {
+        nameToPrefabNode.emplace(std::string(prefabNode.name), prefabIndex);
+      }
+    }
+
+    for (unsigned int meshSlot = 0; meshSlot < node->mNumMeshes; ++meshSlot) {
+      const uint32_t meshIndex = node->mMeshes[meshSlot];
+      if (meshIndex >= scene->mNumMeshes ||
+          scene->mMeshes[meshIndex] == nullptr) {
+        continue;
+      }
+      prefab.renderables.push_back(ScenePrefabRenderable{
+          .nodeIndex = prefabIndex,
+          .meshIndex = meshIndex,
+          .materialIndex = scene->mMeshes[meshIndex]->mMaterialIndex,
+      });
+    }
+
+    for (unsigned int childIndex = 0; childIndex < node->mNumChildren;
+         ++childIndex) {
+      addAssimpNode(node->mChildren[childIndex], prefabIndex);
+    }
+  };
+  addAssimpNode(scene->mRootNode, kInvalidScenePrefabIndex);
+
+  for (uint32_t parsedNodeIndex = 0; parsedNodeIndex < parsedNodes.size();
+       ++parsedNodeIndex) {
+    const ParsedNode &parsedNode = parsedNodes[parsedNodeIndex];
+    if (!parsedNode.lightIndex.has_value()) {
+      continue;
+    }
+    if (*parsedNode.lightIndex >= lights.size()) {
+      return Result<ScenePrefab, std::string>::makeError(
+          "glTF punctual light index is out of range");
+    }
+
+    uint32_t targetPrefabNode = kInvalidScenePrefabIndex;
+    if (!parsedNode.name.empty()) {
+      auto it = nameToPrefabNode.find(parsedNode.name);
+      if (it != nameToPrefabNode.end()) {
+        targetPrefabNode = it->second;
+      }
+    }
+    if (targetPrefabNode == kInvalidScenePrefabIndex &&
+        parsedNodeIndex < prefab.nodes.size()) {
+      targetPrefabNode = parsedNodeIndex;
+    }
+    if (targetPrefabNode == kInvalidScenePrefabIndex) {
+      continue;
+    }
+
+    ScenePrefabLight prefabLight{};
+    prefabLight.nodeIndex = targetPrefabNode;
+    prefabLight.light = lights[*parsedNode.lightIndex].desc;
+    prefabLight.light.position = glm::vec3(0.0f);
+    prefabLight.light.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    if (!parsedNode.name.empty()) {
+      prefabLight.light.name = parsedNode.name;
+    } else if (prefabLight.light.name.empty()) {
+      prefabLight.light.name = makeFallbackLightName(*parsedNode.lightIndex);
+    }
+    prefab.lights.push_back(std::move(prefabLight));
+  }
+
+  return Result<ScenePrefab, std::string>::makeResult(std::move(prefab));
 }
 
 } // namespace nuri
