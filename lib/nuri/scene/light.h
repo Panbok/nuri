@@ -3,8 +3,11 @@
 #include "nuri/defines.h"
 #include "nuri/resources/gpu/resource_handles.h"
 
+#include <cmath>
 #include <cstdint>
 #include <string>
+
+#include "nuri/math/utils.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -88,5 +91,77 @@ struct alignas(16) LocalLightGpuData {
 };
 static_assert(sizeof(LocalLightGpuData) == 4u * sizeof(glm::vec4),
               "LocalLightGpuData must remain std430-friendly");
+
+[[nodiscard]] inline glm::vec3
+lightDirectionFromRotationForLocalLights(const glm::quat &rotation) {
+  // Keep a local implementation here to avoid including `nuri/math/light.h`
+  // (which already includes this header and would create a cycle).
+  constexpr float kMinLength = 1.0e-6f;
+  const glm::vec3 direction =
+      sanitizeRotation(rotation) * glm::vec3(0.0f, 0.0f, -1.0f);
+  const float length = glm::length(direction);
+  if (!std::isfinite(length) || length <= kMinLength) {
+    return glm::vec3(0.0f, 0.0f, -1.0f);
+  }
+  return direction / length;
+}
+
+[[nodiscard]] inline DirectionalLightGpuData
+packDirectionalLight(const glm::quat &rotation, const glm::vec3 &color,
+                     float intensity) {
+  const glm::vec3 direction =
+      lightDirectionFromRotationForLocalLights(rotation);
+  return DirectionalLightGpuData{
+      .directionIlluminance =
+          glm::vec4(direction.x, direction.y, direction.z, intensity),
+      .colorReserved = glm::vec4(color, 0.0f),
+  };
+}
+
+[[nodiscard]] inline LocalLightGpuData
+packPointLight(const glm::vec3 &position, const glm::quat &rotation,
+               const glm::vec3 &color, float intensity, float range) {
+  const glm::vec3 direction =
+      lightDirectionFromRotationForLocalLights(rotation);
+  return LocalLightGpuData{
+      .positionRange = glm::vec4(position, range),
+      .directionOuterCos = glm::vec4(direction, -1.0f),
+      .colorIntensity = glm::vec4(color, intensity),
+      .innerCosTypeEnabledReserved =
+          glm::uvec4(floatBitsToUint(-1.0f),
+                     static_cast<uint32_t>(LocalLightGpuType::Point), 1u, 0u),
+  };
+}
+
+[[nodiscard]] inline LocalLightGpuData
+packSpotLight(const glm::vec3 &position, const glm::quat &rotation,
+              const glm::vec3 &color, float intensity, float range,
+              float innerConeAngleRadians, float outerConeAngleRadians) {
+  const glm::vec3 direction =
+      lightDirectionFromRotationForLocalLights(rotation);
+  return LocalLightGpuData{
+      .positionRange = glm::vec4(position, range),
+      .directionOuterCos =
+          glm::vec4(direction, std::cos(outerConeAngleRadians)),
+      .colorIntensity = glm::vec4(color, intensity),
+      .innerCosTypeEnabledReserved =
+          glm::uvec4(floatBitsToUint(std::cos(innerConeAngleRadians)),
+                     static_cast<uint32_t>(LocalLightGpuType::Spot), 1u, 0u),
+  };
+}
+
+template <typename Store>
+[[nodiscard]] inline LightDesc
+makeLocalLightDesc(const Store &store, uint32_t index, LightType type) {
+  LightDesc out{};
+  out.type = type;
+  out.name = store.names[index];
+  out.position = store.localPositions[index];
+  out.rotation = store.localRotations[index];
+  out.color = store.colors[index];
+  out.intensity = store.intensities[index];
+  out.enabled = store.enabled[index] != 0u;
+  return out;
+}
 
 } // namespace nuri

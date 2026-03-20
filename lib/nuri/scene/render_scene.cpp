@@ -4,6 +4,7 @@
 
 #include "nuri/core/profiling.h"
 #include "nuri/math/light.h"
+#include "nuri/math/utils.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
 namespace nuri {
@@ -29,14 +30,6 @@ void releaseResourceIfOwned(ResourceManager *resources, Ref ref) {
   }
 }
 
-[[nodiscard]] glm::quat sanitizeRotation(const glm::quat &rotation) {
-  const float length = glm::length(rotation);
-  if (!std::isfinite(length) || length <= 1.0e-6f) {
-    return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-  }
-  return glm::normalize(rotation);
-}
-
 template <typename Fn>
 void forEachEnvironmentTextureRef(const EnvironmentHandles &handles, Fn &&fn) {
   fn(handles.cubemap);
@@ -44,76 +37,6 @@ void forEachEnvironmentTextureRef(const EnvironmentHandles &handles, Fn &&fn) {
   fn(handles.prefilteredGgx);
   fn(handles.prefilteredCharlie);
   fn(handles.brdfLut);
-}
-
-[[nodiscard]] glm::vec3 lightDirectionFromRotation(const glm::quat &rotation) {
-  const glm::vec3 direction =
-      sanitizeRotation(rotation) * glm::vec3(0.0f, 0.0f, -1.0f);
-  const float length = glm::length(direction);
-  if (!std::isfinite(length) || length <= 1.0e-6f) {
-    return glm::vec3(0.0f, 0.0f, -1.0f);
-  }
-  return direction / length;
-}
-
-[[nodiscard]] uint32_t floatBitsToUint(float value) {
-  return std::bit_cast<uint32_t>(value);
-}
-
-[[nodiscard]] DirectionalLightGpuData
-packDirectionalLight(const glm::quat &rotation, const glm::vec3 &color,
-                     float intensity) {
-  const glm::vec3 direction = lightDirectionFromRotation(rotation);
-  return DirectionalLightGpuData{
-      .directionIlluminance =
-          glm::vec4(direction.x, direction.y, direction.z, intensity),
-      .colorReserved = glm::vec4(color, 0.0f),
-  };
-}
-
-[[nodiscard]] LocalLightGpuData packPointLight(const glm::vec3 &position,
-                                               const glm::quat &rotation,
-                                               const glm::vec3 &color,
-                                               float intensity, float range) {
-  const glm::vec3 direction = lightDirectionFromRotation(rotation);
-  return LocalLightGpuData{
-      .positionRange = glm::vec4(position, range),
-      .directionOuterCos = glm::vec4(direction, -1.0f),
-      .colorIntensity = glm::vec4(color, intensity),
-      .innerCosTypeEnabledReserved =
-          glm::uvec4(floatBitsToUint(-1.0f),
-                     static_cast<uint32_t>(LocalLightGpuType::Point), 1u, 0u),
-  };
-}
-
-[[nodiscard]] LocalLightGpuData
-packSpotLight(const glm::vec3 &position, const glm::quat &rotation,
-              const glm::vec3 &color, float intensity, float range,
-              float innerConeAngleRadians, float outerConeAngleRadians) {
-  const glm::vec3 direction = lightDirectionFromRotation(rotation);
-  return LocalLightGpuData{
-      .positionRange = glm::vec4(position, range),
-      .directionOuterCos =
-          glm::vec4(direction, std::cos(outerConeAngleRadians)),
-      .colorIntensity = glm::vec4(color, intensity),
-      .innerCosTypeEnabledReserved =
-          glm::uvec4(floatBitsToUint(std::cos(innerConeAngleRadians)),
-                     static_cast<uint32_t>(LocalLightGpuType::Spot), 1u, 0u),
-  };
-}
-
-template <typename Store>
-[[nodiscard]] LightDesc makeLocalLightDesc(const Store &store, uint32_t index,
-                                           LightType type) {
-  LightDesc out{};
-  out.type = type;
-  out.name = store.names[index];
-  out.position = store.localPositions[index];
-  out.rotation = store.localRotations[index];
-  out.color = store.colors[index];
-  out.intensity = store.intensities[index];
-  out.enabled = store.enabled[index] != 0u;
-  return out;
 }
 
 } // namespace
@@ -177,8 +100,8 @@ void RenderScene::sanitizeGraphRenderableRefs() {
   }
 
   auto &components = sceneGraph_.renderableComponents_;
-  for (uint32_t index = 0; index < components.generations.size(); ++index) {
-    if (components.live[index] == 0u) {
+  for (uint32_t index = 0; index < components.slots.slotCount(); ++index) {
+    if (!components.slots.isLive(index)) {
       continue;
     }
     const ModelRef model = components.models[index];
@@ -194,15 +117,12 @@ void RenderScene::sanitizeGraphRenderableRefs() {
       sceneGraph_.renderableTopologyDirty_ = true;
       continue;
     }
-    components.live[index] = 0u;
     components.node[index] = kInvalidIndex;
     components.models[index] = kInvalidModelRef;
     components.materials[index] = kInvalidMaterialRef;
     components.materialOverrides[index] = kInvalidMaterialRef;
     components.flatRenderableIndex[index] = kInvalidIndex;
-    components.generations[index] =
-        nextResourceGeneration(components.generations[index]);
-    components.freeSlots.push_back(index);
+    components.slots.release(index);
     sceneGraph_.renderableTopologyDirty_ = true;
   }
 }
@@ -212,32 +132,29 @@ void RenderScene::rebuildFlatRenderables() {
   auto &components = sceneGraph_.renderableComponents_;
   const auto &nodes = sceneGraph_.nodes_;
 
-  size_t liveCount = 0u;
-  for (uint32_t index = 0; index < components.generations.size(); ++index) {
-    if (components.live[index] != 0u) {
-      ++liveCount;
-    }
+  const size_t liveCount = components.slots.liveCount();
+  for (uint32_t index = 0; index < components.slots.slotCount(); ++index) {
     if (index < components.flatRenderableIndex.size()) {
       components.flatRenderableIndex[index] = kInvalidIndex;
     }
   }
 
   renderables_.reserve(liveCount);
-  for (uint32_t index = 0; index < components.generations.size(); ++index) {
-    if (components.live[index] == 0u) {
+  for (uint32_t index = 0; index < components.slots.slotCount(); ++index) {
+    if (!components.slots.isLive(index)) {
       continue;
     }
     const uint32_t nodeIndex = components.node[index];
     const glm::mat4 world =
-        nodeIndex < nodes.worldFromRoot.size() && nodes.live[nodeIndex] != 0u
+        nodeIndex < nodes.worldFromRoot.size() && nodes.slots.isLive(nodeIndex)
             ? nodes.worldFromRoot[nodeIndex]
             : glm::mat4(1.0f);
     components.flatRenderableIndex[index] =
         static_cast<uint32_t>(renderables_.size());
     renderables_.push_back(Renderable{
-        .id = makeRenderableId(index, components.generations[index]),
-        .node = nodeIndex < nodes.generations.size()
-                    ? makeNodeId(nodeIndex, nodes.generations[nodeIndex])
+        .id = makeRenderableId(index, components.slots.generation(index)),
+        .node = nodeIndex < nodes.slots.slotCount()
+                    ? makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex))
                     : kInvalidNodeId,
         .model = components.models[index],
         .material = components.materials[index],
@@ -253,17 +170,18 @@ void RenderScene::rebuildPackedDirectionalLights() {
 
   auto &store = sceneGraph_.directionalLights_;
   const auto &nodes = sceneGraph_.nodes_;
-  for (uint32_t index = 0; index < store.generations.size(); ++index) {
+  for (uint32_t index = 0; index < store.slots.slotCount(); ++index) {
     store.packedIndices[index] = SceneGraph::kInvalidPackedLightIndex;
-    if (store.live[index] == 0u || store.enabled[index] == 0u) {
+    if (!store.slots.isLive(index) || store.enabled[index] == 0u) {
       continue;
     }
     const uint32_t nodeIndex = store.node[index];
     if (nodeIndex >= nodes.worldFromRoot.size() ||
-        nodes.live[nodeIndex] == 0u) {
+        !nodes.slots.isLive(nodeIndex)) {
       continue;
     }
-    LightDesc local = makeLocalLightDesc(store, index, LightType::Directional);
+    LightDesc local =
+        nuri::makeLocalLightDesc(store, index, LightType::Directional);
     local.range = 0.0f;
     local.innerConeAngleRadians = 0.0f;
     local.outerConeAngleRadians = 0.0f;
@@ -271,10 +189,10 @@ void RenderScene::rebuildPackedDirectionalLights() {
         transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
     store.packedIndices[index] =
         static_cast<uint32_t>(packedDirectionalLights_.size());
-    packedDirectionalLights_.push_back(
-        packDirectionalLight(world.rotation, world.color, world.intensity));
-    packedDirectionalLightIds_.push_back(
-        makeLightId(LightType::Directional, index, store.generations[index]));
+    packedDirectionalLights_.push_back(nuri::packDirectionalLight(
+        world.rotation, world.color, world.intensity));
+    packedDirectionalLightIds_.push_back(makeLightId(
+        LightType::Directional, index, store.slots.generation(index)));
   }
 }
 
@@ -284,41 +202,43 @@ void RenderScene::rebuildPackedLocalLights() {
   const auto &nodes = sceneGraph_.nodes_;
 
   auto &pointStore = sceneGraph_.pointLights_;
-  for (uint32_t index = 0; index < pointStore.generations.size(); ++index) {
+  for (uint32_t index = 0; index < pointStore.slots.slotCount(); ++index) {
     pointStore.packedIndices[index] = SceneGraph::kInvalidPackedLightIndex;
-    if (pointStore.live[index] == 0u || pointStore.enabled[index] == 0u) {
+    if (!pointStore.slots.isLive(index) || pointStore.enabled[index] == 0u) {
       continue;
     }
     const uint32_t nodeIndex = pointStore.node[index];
     if (nodeIndex >= nodes.worldFromRoot.size() ||
-        nodes.live[nodeIndex] == 0u) {
+        !nodes.slots.isLive(nodeIndex)) {
       continue;
     }
-    LightDesc local = makeLocalLightDesc(pointStore, index, LightType::Point);
+    LightDesc local =
+        nuri::makeLocalLightDesc(pointStore, index, LightType::Point);
     local.range = pointStore.ranges[index];
     const LightDesc world =
         transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
     pointStore.packedIndices[index] =
         static_cast<uint32_t>(packedLocalLights_.size());
-    packedLocalLights_.push_back(packPointLight(world.position, world.rotation,
-                                                world.color, world.intensity,
-                                                world.range));
-    packedLocalLightIds_.push_back(
-        makeLightId(LightType::Point, index, pointStore.generations[index]));
+    packedLocalLights_.push_back(
+        nuri::packPointLight(world.position, world.rotation, world.color,
+                             world.intensity, world.range));
+    packedLocalLightIds_.push_back(makeLightId(
+        LightType::Point, index, pointStore.slots.generation(index)));
   }
 
   auto &spotStore = sceneGraph_.spotLights_;
-  for (uint32_t index = 0; index < spotStore.generations.size(); ++index) {
+  for (uint32_t index = 0; index < spotStore.slots.slotCount(); ++index) {
     spotStore.packedIndices[index] = SceneGraph::kInvalidPackedLightIndex;
-    if (spotStore.live[index] == 0u || spotStore.enabled[index] == 0u) {
+    if (!spotStore.slots.isLive(index) || spotStore.enabled[index] == 0u) {
       continue;
     }
     const uint32_t nodeIndex = spotStore.node[index];
     if (nodeIndex >= nodes.worldFromRoot.size() ||
-        nodes.live[nodeIndex] == 0u) {
+        !nodes.slots.isLive(nodeIndex)) {
       continue;
     }
-    LightDesc local = makeLocalLightDesc(spotStore, index, LightType::Spot);
+    LightDesc local =
+        nuri::makeLocalLightDesc(spotStore, index, LightType::Spot);
     local.range = spotStore.ranges[index];
     local.innerConeAngleRadians = spotStore.innerConeAngles[index];
     local.outerConeAngleRadians = spotStore.outerConeAngles[index];
@@ -326,11 +246,11 @@ void RenderScene::rebuildPackedLocalLights() {
         transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
     spotStore.packedIndices[index] =
         static_cast<uint32_t>(packedLocalLights_.size());
-    packedLocalLights_.push_back(packSpotLight(
+    packedLocalLights_.push_back(nuri::packSpotLight(
         world.position, world.rotation, world.color, world.intensity,
         world.range, world.innerConeAngleRadians, world.outerConeAngleRadians));
     packedLocalLightIds_.push_back(
-        makeLightId(LightType::Spot, index, spotStore.generations[index]));
+        makeLightId(LightType::Spot, index, spotStore.slots.generation(index)));
   }
 }
 
@@ -366,20 +286,20 @@ Result<bool, std::string> RenderScene::commit() {
     bool updatedAny = false;
     const auto &components = sceneGraph_.renderableComponents_;
     const auto &nodes = sceneGraph_.nodes_;
-    for (uint32_t index = 0; index < components.generations.size(); ++index) {
-      if (components.live[index] == 0u) {
+    for (uint32_t index = 0; index < components.slots.slotCount(); ++index) {
+      if (!components.slots.isLive(index)) {
         continue;
       }
       const uint32_t flatIndex = components.flatRenderableIndex[index];
       const uint32_t nodeIndex = components.node[index];
       if (flatIndex == kInvalidIndex || flatIndex >= renderables_.size() ||
           nodeIndex >= nodes.worldFromRoot.size() ||
-          nodes.live[nodeIndex] == 0u) {
+          !nodes.slots.isLive(nodeIndex)) {
         continue;
       }
       renderables_[flatIndex].modelMatrix = nodes.worldFromRoot[nodeIndex];
       renderables_[flatIndex].node =
-          makeNodeId(nodeIndex, nodes.generations[nodeIndex]);
+          makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex));
       updatedAny = true;
     }
     if (updatedAny) {

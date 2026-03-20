@@ -4,6 +4,7 @@
 
 #include "nuri/core/profiling.h"
 #include "nuri/math/light.h"
+#include "nuri/math/utils.h"
 
 namespace nuri {
 namespace {
@@ -12,126 +13,10 @@ constexpr uint32_t kMaxDirectionalLightCount = 4u;
 constexpr uint32_t kMaxLocalLightCount = 64u;
 constexpr glm::quat kIdentityRotation(1.0f, 0.0f, 0.0f, 0.0f);
 
-[[nodiscard]] glm::vec3 sanitizeFiniteVec3(const glm::vec3 &value,
-                                           const glm::vec3 &fallback) {
-  if (!std::isfinite(value.x) || !std::isfinite(value.y) ||
-      !std::isfinite(value.z)) {
-    return fallback;
-  }
-  return value;
-}
-
-[[nodiscard]] glm::quat sanitizeRotation(const glm::quat &rotation) {
-  const float length = glm::length(rotation);
-  if (!std::isfinite(length) || length <= 1.0e-6f) {
-    return kIdentityRotation;
-  }
-  return glm::normalize(rotation);
-}
-
-[[nodiscard]] float sanitizeNonNegative(float value, float fallback = 0.0f) {
-  if (!std::isfinite(value)) {
-    return fallback;
-  }
-  return std::max(value, 0.0f);
-}
-
-[[nodiscard]] LightDesc sanitizeLightDesc(const LightDesc &desc) {
-  LightDesc sanitized = desc;
-  sanitized.position = sanitizeFiniteVec3(desc.position, glm::vec3(0.0f));
-  sanitized.rotation = sanitizeRotation(desc.rotation);
-  sanitized.color = glm::max(sanitizeFiniteVec3(desc.color, glm::vec3(1.0f)),
-                             glm::vec3(0.0f));
-  sanitized.intensity = sanitizeNonNegative(desc.intensity, 1.0f);
-  sanitized.enabled = desc.enabled;
-
-  switch (sanitized.type) {
-  case LightType::Directional:
-    sanitized.range = 0.0f;
-    sanitized.innerConeAngleRadians = 0.0f;
-    sanitized.outerConeAngleRadians = 0.0f;
-    break;
-  case LightType::Point:
-    sanitized.range = sanitizeNonNegative(desc.range, 0.0f);
-    sanitized.innerConeAngleRadians = 0.0f;
-    sanitized.outerConeAngleRadians = 0.0f;
-    break;
-  case LightType::Spot:
-    sanitized.range = sanitizeNonNegative(desc.range, 0.0f);
-    sanitized.outerConeAngleRadians =
-        std::clamp(sanitizeNonNegative(desc.outerConeAngleRadians,
-                                       glm::quarter_pi<float>()),
-                   0.0f, glm::half_pi<float>() - 1.0e-4f);
-    sanitized.innerConeAngleRadians =
-        std::clamp(sanitizeNonNegative(desc.innerConeAngleRadians, 0.0f), 0.0f,
-                   sanitized.outerConeAngleRadians);
-    break;
-  }
-
-  return sanitized;
-}
-
-[[nodiscard]] uint32_t nextSlotIndex(std::pmr::vector<uint32_t> &freeSlots,
-                                     size_t currentSize) {
-  if (!freeSlots.empty()) {
-    const uint32_t index = freeSlots.back();
-    freeSlots.pop_back();
-    return index;
-  }
-  return static_cast<uint32_t>(currentSize);
-}
-
-[[nodiscard]] bool vec3ExactEqual(const glm::vec3 &lhs, const glm::vec3 &rhs) {
-  return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
-}
-
-[[nodiscard]] bool quatExactEqual(const glm::quat &lhs, const glm::quat &rhs) {
-  return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z && lhs.w == rhs.w;
-}
-
-[[nodiscard]] bool mat4ExactEqual(const glm::mat4 &lhs, const glm::mat4 &rhs) {
-  for (uint32_t column = 0; column < 4u; ++column) {
-    for (uint32_t row = 0; row < 4u; ++row) {
-      if (lhs[column][row] != rhs[column][row]) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-[[nodiscard]] glm::mat4 safeInverseOrIdentity(const glm::mat4 &matrix) {
-  const float determinant = glm::determinant(matrix);
-  if (!std::isfinite(determinant) || std::abs(determinant) <= 1.0e-8f) {
-    return glm::mat4(1.0f);
-  }
-  return glm::inverse(matrix);
-}
-
-[[nodiscard]] LightDesc lightLocalFromWorld(const LightDesc &worldDesc,
-                                            const glm::mat4 &nodeWorld) {
-  LightDesc local = worldDesc;
-  const glm::mat4 inverseNodeWorld = safeInverseOrIdentity(nodeWorld);
-  local.position =
-      glm::vec3(inverseNodeWorld * glm::vec4(worldDesc.position, 1.0f));
-  const glm::quat nodeRotation = rotationFromMatrixOrIdentity(nodeWorld);
-  local.rotation =
-      sanitizeRotation(glm::inverse(nodeRotation) * worldDesc.rotation);
-  return sanitizeLightDesc(local);
-}
-
-template <typename Store>
-[[nodiscard]] LightDesc makeLocalLightDesc(const Store &store, uint32_t index,
-                                           LightType type) {
-  LightDesc out{};
-  out.type = type;
-  out.name = store.names[index];
-  out.position = store.localPositions[index];
-  out.rotation = store.localRotations[index];
-  out.color = store.colors[index];
-  out.intensity = store.intensities[index];
-  out.enabled = store.enabled[index] != 0u;
-  return out;
+[[nodiscard]] Result<SlotReservation, std::string>
+makePackedSlotOverflowError(std::string_view context) {
+  return Result<SlotReservation, std::string>::makeError(
+      std::string(context) + ": slot pool exhausted");
 }
 
 } // namespace
@@ -160,8 +45,8 @@ void SceneGraph::clear() {
   NURI_ASSERT(!rootResult.hasError(),
               "SceneGraph::clear: failed to create root node: %s",
               rootResult.error().c_str());
-  const uint32_t rootIndex = rootResult.value();
-  nodes_.live[rootIndex] = 1u;
+  const SlotReservation root = rootResult.value();
+  const uint32_t rootIndex = root.index;
   nodes_.parent[rootIndex] = kInvalidIndex;
   nodes_.firstChild[rootIndex] = kInvalidIndex;
   nodes_.nextSibling[rootIndex] = kInvalidIndex;
@@ -172,15 +57,16 @@ void SceneGraph::clear() {
   nodes_.dirty[rootIndex] = 0u;
   nodes_.dirtyRootQueued[rootIndex] = 0u;
   nodes_.names[rootIndex] = "Root";
-  rootNode_ = makeNodeId(rootIndex, nodes_.generations[rootIndex]);
+  rootNode_ = makeNodeId(rootIndex, root.generation);
 }
 
-Result<uint32_t, std::string> SceneGraph::allocateNodeSlot() {
-  const uint32_t index =
-      nextSlotIndex(nodes_.freeSlots, nodes_.generations.size());
-  if (index == nodes_.generations.size()) {
-    nodes_.generations.push_back(1u);
-    nodes_.live.push_back(0u);
+Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {
+  if (nodes_.slots.slotCount() == kResourceHandleIndexMask + 1u &&
+      nodes_.slots.liveCount() == nodes_.slots.slotCount()) {
+    return makePackedSlotOverflowError("SceneGraph::allocateNodeSlot");
+  }
+  const SlotReservation slot = nodes_.slots.acquire();
+  if (slot.appended) {
     nodes_.parent.push_back(kInvalidIndex);
     nodes_.firstChild.push_back(kInvalidIndex);
     nodes_.nextSibling.push_back(kInvalidIndex);
@@ -192,31 +78,37 @@ Result<uint32_t, std::string> SceneGraph::allocateNodeSlot() {
     nodes_.dirtyRootQueued.push_back(0u);
     nodes_.names.emplace_back();
   }
-  return Result<uint32_t, std::string>::makeResult(index);
+  return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
-uint32_t SceneGraph::allocateRenderableSlot() {
-  const uint32_t index =
-      nextSlotIndex(renderableComponents_.freeSlots,
-                    renderableComponents_.generations.size());
-  if (index == renderableComponents_.generations.size()) {
-    renderableComponents_.generations.push_back(1u);
-    renderableComponents_.live.push_back(0u);
+Result<SlotReservation, std::string> SceneGraph::allocateRenderableSlot() {
+  if (renderableComponents_.slots.slotCount() ==
+          kResourceHandleIndexMask + 1u &&
+      renderableComponents_.slots.liveCount() ==
+          renderableComponents_.slots.slotCount()) {
+    return makePackedSlotOverflowError("SceneGraph::allocateRenderableSlot");
+  }
+  const SlotReservation slot = renderableComponents_.slots.acquire();
+  if (slot.appended) {
     renderableComponents_.node.push_back(kInvalidIndex);
     renderableComponents_.models.push_back(kInvalidModelRef);
     renderableComponents_.materials.push_back(kInvalidMaterialRef);
     renderableComponents_.materialOverrides.push_back(kInvalidMaterialRef);
     renderableComponents_.flatRenderableIndex.push_back(kInvalidIndex);
   }
-  return index;
+  return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
-uint32_t SceneGraph::allocateDirectionalLightSlot() {
-  const uint32_t index = nextSlotIndex(directionalLights_.freeSlots,
-                                       directionalLights_.generations.size());
-  if (index == directionalLights_.generations.size()) {
-    directionalLights_.generations.push_back(1u);
-    directionalLights_.live.push_back(0u);
+Result<SlotReservation, std::string>
+SceneGraph::allocateDirectionalLightSlot() {
+  if (directionalLights_.slots.slotCount() == kResourceHandleIndexMask + 1u &&
+      directionalLights_.slots.liveCount() ==
+          directionalLights_.slots.slotCount()) {
+    return makePackedSlotOverflowError(
+        "SceneGraph::allocateDirectionalLightSlot");
+  }
+  const SlotReservation slot = directionalLights_.slots.acquire();
+  if (slot.appended) {
     directionalLights_.packedIndices.push_back(kInvalidPackedLightIndex);
     directionalLights_.node.push_back(kInvalidIndex);
     directionalLights_.names.emplace_back();
@@ -226,15 +118,16 @@ uint32_t SceneGraph::allocateDirectionalLightSlot() {
     directionalLights_.intensities.push_back(1.0f);
     directionalLights_.enabled.push_back(0u);
   }
-  return index;
+  return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
-uint32_t SceneGraph::allocatePointLightSlot() {
-  const uint32_t index =
-      nextSlotIndex(pointLights_.freeSlots, pointLights_.generations.size());
-  if (index == pointLights_.generations.size()) {
-    pointLights_.generations.push_back(1u);
-    pointLights_.live.push_back(0u);
+Result<SlotReservation, std::string> SceneGraph::allocatePointLightSlot() {
+  if (pointLights_.slots.slotCount() == kResourceHandleIndexMask + 1u &&
+      pointLights_.slots.liveCount() == pointLights_.slots.slotCount()) {
+    return makePackedSlotOverflowError("SceneGraph::allocatePointLightSlot");
+  }
+  const SlotReservation slot = pointLights_.slots.acquire();
+  if (slot.appended) {
     pointLights_.packedIndices.push_back(kInvalidPackedLightIndex);
     pointLights_.node.push_back(kInvalidIndex);
     pointLights_.names.emplace_back();
@@ -245,15 +138,16 @@ uint32_t SceneGraph::allocatePointLightSlot() {
     pointLights_.ranges.push_back(0.0f);
     pointLights_.enabled.push_back(0u);
   }
-  return index;
+  return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
-uint32_t SceneGraph::allocateSpotLightSlot() {
-  const uint32_t index =
-      nextSlotIndex(spotLights_.freeSlots, spotLights_.generations.size());
-  if (index == spotLights_.generations.size()) {
-    spotLights_.generations.push_back(1u);
-    spotLights_.live.push_back(0u);
+Result<SlotReservation, std::string> SceneGraph::allocateSpotLightSlot() {
+  if (spotLights_.slots.slotCount() == kResourceHandleIndexMask + 1u &&
+      spotLights_.slots.liveCount() == spotLights_.slots.slotCount()) {
+    return makePackedSlotOverflowError("SceneGraph::allocateSpotLightSlot");
+  }
+  const SlotReservation slot = spotLights_.slots.acquire();
+  if (slot.appended) {
     spotLights_.packedIndices.push_back(kInvalidPackedLightIndex);
     spotLights_.node.push_back(kInvalidIndex);
     spotLights_.names.emplace_back();
@@ -266,56 +160,42 @@ uint32_t SceneGraph::allocateSpotLightSlot() {
     spotLights_.outerConeAngles.push_back(glm::quarter_pi<float>());
     spotLights_.enabled.push_back(0u);
   }
-  return index;
+  return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
 bool SceneGraph::nodeSlotValid(NodeId id) const noexcept {
   if (!isValid(id)) {
     return false;
   }
-  const uint32_t index = indexOf(id);
-  return index < nodes_.generations.size() && nodes_.live[index] != 0u &&
-         nodes_.generations[index] == generationOf(id);
+  return nodes_.slots.isValid(indexOf(id), generationOf(id));
 }
 
 bool SceneGraph::renderableSlotValid(RenderableId id) const noexcept {
   if (!isValid(id)) {
     return false;
   }
-  const uint32_t index = indexOf(id);
-  return index < renderableComponents_.generations.size() &&
-         renderableComponents_.live[index] != 0u &&
-         renderableComponents_.generations[index] == generationOf(id);
+  return renderableComponents_.slots.isValid(indexOf(id), generationOf(id));
 }
 
 bool SceneGraph::directionalSlotValid(LightId id) const noexcept {
   if (id.type != LightType::Directional || !isValid(id)) {
     return false;
   }
-  const uint32_t index = indexOf(id);
-  return index < directionalLights_.generations.size() &&
-         directionalLights_.live[index] != 0u &&
-         directionalLights_.generations[index] == generationOf(id);
+  return directionalLights_.slots.isValid(indexOf(id), generationOf(id));
 }
 
 bool SceneGraph::pointSlotValid(LightId id) const noexcept {
   if (id.type != LightType::Point || !isValid(id)) {
     return false;
   }
-  const uint32_t index = indexOf(id);
-  return index < pointLights_.generations.size() &&
-         pointLights_.live[index] != 0u &&
-         pointLights_.generations[index] == generationOf(id);
+  return pointLights_.slots.isValid(indexOf(id), generationOf(id));
 }
 
 bool SceneGraph::spotSlotValid(LightId id) const noexcept {
   if (id.type != LightType::Spot || !isValid(id)) {
     return false;
   }
-  const uint32_t index = indexOf(id);
-  return index < spotLights_.generations.size() &&
-         spotLights_.live[index] != 0u &&
-         spotLights_.generations[index] == generationOf(id);
+  return spotLights_.slots.isValid(indexOf(id), generationOf(id));
 }
 
 void SceneGraph::attachNode(uint32_t childIndex, uint32_t parentIndex) {
@@ -380,21 +260,16 @@ void SceneGraph::markTransformDependentsDirty() noexcept {
 }
 
 void SceneGraph::recycleRenderableSlot(uint32_t index) noexcept {
-  renderableComponents_.live[index] = 0u;
   renderableComponents_.node[index] = kInvalidIndex;
   renderableComponents_.models[index] = kInvalidModelRef;
   renderableComponents_.materials[index] = kInvalidMaterialRef;
   renderableComponents_.materialOverrides[index] = kInvalidMaterialRef;
   renderableComponents_.flatRenderableIndex[index] = kInvalidIndex;
-  renderableComponents_.generations[index] =
-      nextResourceGeneration(renderableComponents_.generations[index]);
-  renderableComponents_.freeSlots.push_back(index);
+  renderableComponents_.slots.release(index);
 }
 
 uint32_t SceneGraph::localLightCount() const noexcept {
-  return static_cast<uint32_t>(
-      pointLights_.generations.size() - pointLights_.freeSlots.size() +
-      spotLights_.generations.size() - spotLights_.freeSlots.size());
+  return pointLights_.slots.liveCount() + spotLights_.slots.liveCount();
 }
 
 bool SceneGraph::tryGetLightNodeIndex(LightId id,
@@ -429,8 +304,8 @@ bool SceneGraph::tryGetLightNodeIndex(LightId id,
 }
 
 void SceneGraph::markSubtreeDirty(uint32_t rootIndex) {
-  if (rootIndex == kInvalidIndex || rootIndex >= nodes_.live.size() ||
-      nodes_.live[rootIndex] == 0u) {
+  if (rootIndex == kInvalidIndex || rootIndex >= nodes_.slots.slotCount() ||
+      !nodes_.slots.isLive(rootIndex)) {
     return;
   }
 
@@ -444,7 +319,7 @@ void SceneGraph::markSubtreeDirty(uint32_t rootIndex) {
   while (!stack.empty()) {
     const uint32_t nodeIndex = stack.back();
     stack.pop_back();
-    if (nodes_.live[nodeIndex] == 0u) {
+    if (!nodes_.slots.isLive(nodeIndex)) {
       continue;
     }
     nodes_.dirty[nodeIndex] = 1u;
@@ -463,7 +338,8 @@ bool SceneGraph::syncWorldTransforms() {
   std::pmr::vector<uint32_t> roots(memory_);
   roots.reserve(dirtyRoots_.size());
   for (const uint32_t rootIndex : dirtyRoots_) {
-    if (rootIndex < nodes_.live.size() && nodes_.live[rootIndex] != 0u &&
+    if (rootIndex < nodes_.slots.slotCount() &&
+        nodes_.slots.isLive(rootIndex) &&
         nodes_.dirtyRootQueued[rootIndex] != 0u) {
       roots.push_back(rootIndex);
     }
@@ -497,7 +373,8 @@ bool SceneGraph::syncWorldTransforms() {
     while (!stack.empty()) {
       const uint32_t nodeIndex = stack.back();
       stack.pop_back();
-      if (nodeIndex >= nodes_.live.size() || nodes_.live[nodeIndex] == 0u) {
+      if (nodeIndex >= nodes_.slots.slotCount() ||
+          !nodes_.slots.isLive(nodeIndex)) {
         continue;
       }
       const uint32_t parentIndex = nodes_.parent[nodeIndex];
@@ -532,8 +409,8 @@ SceneGraph::createNode(NodeId parent, std::string_view name,
   if (slotResult.hasError()) {
     return Result<NodeId, std::string>::makeError(slotResult.error());
   }
-  const uint32_t index = slotResult.value();
-  nodes_.live[index] = 1u;
+  const SlotReservation slot = slotResult.value();
+  const uint32_t index = slot.index;
   nodes_.firstChild[index] = kInvalidIndex;
   nodes_.nextSibling[index] = kInvalidIndex;
   nodes_.prevSibling[index] = kInvalidIndex;
@@ -546,7 +423,7 @@ SceneGraph::createNode(NodeId parent, std::string_view name,
   markSubtreeDirty(index);
   markTransformDependentsDirty();
   return Result<NodeId, std::string>::makeResult(
-      makeNodeId(index, nodes_.generations[index]));
+      makeNodeId(index, slot.generation));
 }
 
 bool SceneGraph::destroyNodeSubtree(NodeId node) {
@@ -559,14 +436,14 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
   std::pmr::vector<uint32_t> nodeStack(memory_);
   std::pmr::vector<uint32_t> nodesToDestroy(memory_);
   std::pmr::vector<uint8_t> killNodes(memory_);
-  killNodes.resize(nodes_.live.size(), 0u);
+  killNodes.resize(nodes_.slots.slotCount(), 0u);
 
   nodeStack.push_back(rootIndex);
   while (!nodeStack.empty()) {
     const uint32_t nodeIndex = nodeStack.back();
     nodeStack.pop_back();
-    if (nodeIndex >= nodes_.live.size() || nodes_.live[nodeIndex] == 0u ||
-        killNodes[nodeIndex] != 0u) {
+    if (nodeIndex >= nodes_.slots.slotCount() ||
+        !nodes_.slots.isLive(nodeIndex) || killNodes[nodeIndex] != 0u) {
       continue;
     }
     killNodes[nodeIndex] = 1u;
@@ -577,9 +454,9 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
     }
   }
 
-  for (uint32_t index = 0; index < renderableComponents_.generations.size();
+  for (uint32_t index = 0; index < renderableComponents_.slots.slotCount();
        ++index) {
-    if (renderableComponents_.live[index] == 0u) {
+    if (!renderableComponents_.slots.isLive(index)) {
       continue;
     }
     const uint32_t nodeIndex = renderableComponents_.node[index];
@@ -590,22 +467,19 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
   }
 
   const auto removeDeadLights = [this, &killNodes](auto &store) {
-    for (uint32_t index = 0; index < store.generations.size(); ++index) {
-      if (store.live[index] == 0u) {
+    for (uint32_t index = 0; index < store.slots.slotCount(); ++index) {
+      if (!store.slots.isLive(index)) {
         continue;
       }
       const uint32_t nodeIndex = store.node[index];
       if (nodeIndex >= killNodes.size() || killNodes[nodeIndex] == 0u) {
         continue;
       }
-      store.live[index] = 0u;
       store.node[index] = kInvalidIndex;
       store.packedIndices[index] = kInvalidPackedLightIndex;
       store.names[index].clear();
       store.enabled[index] = 0u;
-      store.generations[index] =
-          nextResourceGeneration(store.generations[index]);
-      store.freeSlots.push_back(index);
+      store.slots.release(index);
       lightTopologyDirty_ = true;
       lightDataDirty_ = true;
     }
@@ -616,7 +490,6 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
 
   detachNode(rootIndex);
   for (const uint32_t nodeIndex : nodesToDestroy) {
-    nodes_.live[nodeIndex] = 0u;
     nodes_.parent[nodeIndex] = kInvalidIndex;
     nodes_.firstChild[nodeIndex] = kInvalidIndex;
     nodes_.nextSibling[nodeIndex] = kInvalidIndex;
@@ -627,9 +500,7 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
     nodes_.dirty[nodeIndex] = 0u;
     nodes_.dirtyRootQueued[nodeIndex] = 0u;
     nodes_.names[nodeIndex].clear();
-    nodes_.generations[nodeIndex] =
-        nextResourceGeneration(nodes_.generations[nodeIndex]);
-    nodes_.freeSlots.push_back(nodeIndex);
+    nodes_.slots.release(nodeIndex);
   }
   markTransformDependentsDirty();
   return true;
@@ -665,7 +536,7 @@ bool SceneGraph::setNodeParent(NodeId node, NodeId newParent,
   updateSubtreeDepth(nodeIndex);
   if (preserveWorldTransform) {
     nodes_.localFromParent[nodeIndex] =
-        safeInverseOrIdentity(nodes_.worldFromRoot[newParentIndex]) *
+        nuri::safeInverseOrIdentity(nodes_.worldFromRoot[newParentIndex]) *
         preservedWorld;
   }
   markSubtreeDirty(nodeIndex);
@@ -680,7 +551,8 @@ bool SceneGraph::setNodeLocalTransform(NodeId node,
     return false;
   }
   const uint32_t nodeIndex = indexOf(node);
-  if (mat4ExactEqual(nodes_.localFromParent[nodeIndex], localFromParent)) {
+  if (nuri::mat4ExactEqual(nodes_.localFromParent[nodeIndex],
+                           localFromParent)) {
     return true;
   }
   nodes_.localFromParent[nodeIndex] = localFromParent;
@@ -697,7 +569,8 @@ bool SceneGraph::getNodeLocalTransform(NodeId node, glm::mat4 &out) const {
   return true;
 }
 
-bool SceneGraph::getCachedNodeWorldTransform(NodeId node, glm::mat4 &out) const {
+bool SceneGraph::getCachedNodeWorldTransform(NodeId node,
+                                             glm::mat4 &out) const {
   if (!nodeSlotValid(node)) {
     return false;
   }
@@ -710,13 +583,12 @@ bool SceneGraph::getNodeParent(NodeId node, NodeId &out) const {
     return false;
   }
   const uint32_t parentIndex = nodes_.parent[indexOf(node)];
-  if (parentIndex == kInvalidIndex ||
-      parentIndex >= nodes_.generations.size() ||
-      nodes_.live[parentIndex] == 0u) {
+  if (parentIndex == kInvalidIndex || parentIndex >= nodes_.slots.slotCount() ||
+      !nodes_.slots.isLive(parentIndex)) {
     out = kInvalidNodeId;
     return true;
   }
-  out = makeNodeId(parentIndex, nodes_.generations[parentIndex]);
+  out = makeNodeId(parentIndex, nodes_.slots.generation(parentIndex));
   return true;
 }
 
@@ -725,12 +597,12 @@ bool SceneGraph::getNodeFirstChild(NodeId node, NodeId &out) const {
     return false;
   }
   const uint32_t childIndex = nodes_.firstChild[indexOf(node)];
-  if (childIndex == kInvalidIndex || childIndex >= nodes_.generations.size() ||
-      nodes_.live[childIndex] == 0u) {
+  if (childIndex == kInvalidIndex || childIndex >= nodes_.slots.slotCount() ||
+      !nodes_.slots.isLive(childIndex)) {
     out = kInvalidNodeId;
     return true;
   }
-  out = makeNodeId(childIndex, nodes_.generations[childIndex]);
+  out = makeNodeId(childIndex, nodes_.slots.generation(childIndex));
   return true;
 }
 
@@ -740,12 +612,12 @@ bool SceneGraph::getNodeNextSibling(NodeId node, NodeId &out) const {
   }
   const uint32_t siblingIndex = nodes_.nextSibling[indexOf(node)];
   if (siblingIndex == kInvalidIndex ||
-      siblingIndex >= nodes_.generations.size() ||
-      nodes_.live[siblingIndex] == 0u) {
+      siblingIndex >= nodes_.slots.slotCount() ||
+      !nodes_.slots.isLive(siblingIndex)) {
     out = kInvalidNodeId;
     return true;
   }
-  out = makeNodeId(siblingIndex, nodes_.generations[siblingIndex]);
+  out = makeNodeId(siblingIndex, nodes_.slots.generation(siblingIndex));
   return true;
 }
 
@@ -782,8 +654,12 @@ SceneGraph::addRenderable(NodeId node, ModelRef model, MaterialRef material) {
         "SceneGraph::addRenderable: material handle is invalid");
   }
 
-  const uint32_t index = allocateRenderableSlot();
-  renderableComponents_.live[index] = 1u;
+  auto slotResult = allocateRenderableSlot();
+  if (slotResult.hasError()) {
+    return Result<RenderableId, std::string>::makeError(slotResult.error());
+  }
+  const SlotReservation slot = slotResult.value();
+  const uint32_t index = slot.index;
   renderableComponents_.node[index] = indexOf(node);
   renderableComponents_.models[index] = model;
   renderableComponents_.materials[index] = material;
@@ -792,7 +668,7 @@ SceneGraph::addRenderable(NodeId node, ModelRef model, MaterialRef material) {
   renderableTopologyDirty_ = true;
   markTransformDependentsDirty();
   return Result<RenderableId, std::string>::makeResult(
-      makeRenderableId(index, renderableComponents_.generations[index]));
+      makeRenderableId(index, slot.generation));
 }
 
 Result<uint32_t, std::string>
@@ -920,10 +796,11 @@ bool SceneGraph::getRenderableNode(RenderableId id, NodeId &out) const {
     return false;
   }
   const uint32_t nodeIndex = renderableComponents_.node[indexOf(id)];
-  if (nodeIndex >= nodes_.generations.size() || nodes_.live[nodeIndex] == 0u) {
+  if (nodeIndex >= nodes_.slots.slotCount() ||
+      !nodes_.slots.isLive(nodeIndex)) {
     return false;
   }
-  out = makeNodeId(nodeIndex, nodes_.generations[nodeIndex]);
+  out = makeNodeId(nodeIndex, nodes_.slots.generation(nodeIndex));
   return true;
 }
 
@@ -935,18 +812,19 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
         "SceneGraph::addLight: node is invalid");
   }
 
-  const LightDesc sanitized = sanitizeLightDesc(desc);
+  const LightDesc sanitized = nuri::sanitizeLightDesc(desc);
   switch (sanitized.type) {
   case LightType::Directional: {
-    const uint32_t liveCount =
-        static_cast<uint32_t>(directionalLights_.generations.size() -
-                              directionalLights_.freeSlots.size());
-    if (liveCount >= kMaxDirectionalLightCount) {
+    if (directionalLights_.slots.liveCount() >= kMaxDirectionalLightCount) {
       return Result<LightId, std::string>::makeError(
           "SceneGraph::addLight: directional light cap reached");
     }
-    const uint32_t index = allocateDirectionalLightSlot();
-    directionalLights_.live[index] = 1u;
+    auto slotResult = allocateDirectionalLightSlot();
+    if (slotResult.hasError()) {
+      return Result<LightId, std::string>::makeError(slotResult.error());
+    }
+    const SlotReservation slot = slotResult.value();
+    const uint32_t index = slot.index;
     directionalLights_.packedIndices[index] = kInvalidPackedLightIndex;
     directionalLights_.node[index] = indexOf(node);
     directionalLights_.names[index].assign(sanitized.name.data(),
@@ -958,16 +836,20 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
     directionalLights_.enabled[index] = sanitized.enabled ? 1u : 0u;
     lightTopologyDirty_ = true;
     lightDataDirty_ = true;
-    return Result<LightId, std::string>::makeResult(makeLightId(
-        LightType::Directional, index, directionalLights_.generations[index]));
+    return Result<LightId, std::string>::makeResult(
+        makeLightId(LightType::Directional, index, slot.generation));
   }
   case LightType::Point: {
     if (localLightCount() >= kMaxLocalLightCount) {
       return Result<LightId, std::string>::makeError(
           "SceneGraph::addLight: local light cap reached");
     }
-    const uint32_t index = allocatePointLightSlot();
-    pointLights_.live[index] = 1u;
+    auto slotResult = allocatePointLightSlot();
+    if (slotResult.hasError()) {
+      return Result<LightId, std::string>::makeError(slotResult.error());
+    }
+    const SlotReservation slot = slotResult.value();
+    const uint32_t index = slot.index;
     pointLights_.packedIndices[index] = kInvalidPackedLightIndex;
     pointLights_.node[index] = indexOf(node);
     pointLights_.names[index].assign(sanitized.name.data(),
@@ -981,15 +863,19 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
     lightTopologyDirty_ = true;
     lightDataDirty_ = true;
     return Result<LightId, std::string>::makeResult(
-        makeLightId(LightType::Point, index, pointLights_.generations[index]));
+        makeLightId(LightType::Point, index, slot.generation));
   }
   case LightType::Spot: {
     if (localLightCount() >= kMaxLocalLightCount) {
       return Result<LightId, std::string>::makeError(
           "SceneGraph::addLight: local light cap reached");
     }
-    const uint32_t index = allocateSpotLightSlot();
-    spotLights_.live[index] = 1u;
+    auto slotResult = allocateSpotLightSlot();
+    if (slotResult.hasError()) {
+      return Result<LightId, std::string>::makeError(slotResult.error());
+    }
+    const SlotReservation slot = slotResult.value();
+    const uint32_t index = slot.index;
     spotLights_.packedIndices[index] = kInvalidPackedLightIndex;
     spotLights_.node[index] = indexOf(node);
     spotLights_.names[index].assign(sanitized.name.data(),
@@ -1005,7 +891,7 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
     lightTopologyDirty_ = true;
     lightDataDirty_ = true;
     return Result<LightId, std::string>::makeResult(
-        makeLightId(LightType::Spot, index, spotLights_.generations[index]));
+        makeLightId(LightType::Spot, index, slot.generation));
   }
   }
 
@@ -1021,13 +907,11 @@ bool SceneGraph::removeLight(LightId id) {
 
   const auto removeFromStore = [this](auto &store, LightId lightId) {
     const uint32_t index = indexOf(lightId);
-    store.live[index] = 0u;
     store.node[index] = kInvalidIndex;
     store.packedIndices[index] = kInvalidPackedLightIndex;
     store.names[index].clear();
     store.enabled[index] = 0u;
-    store.generations[index] = nextResourceGeneration(store.generations[index]);
-    store.freeSlots.push_back(index);
+    store.slots.release(index);
     lightTopologyDirty_ = true;
     lightDataDirty_ = true;
   };
@@ -1065,7 +949,8 @@ bool SceneGraph::getLightDesc(LightId id, LightDesc &outLocal) const {
     if (!directionalSlotValid(id)) {
       return false;
     }
-    outLocal = makeLocalLightDesc(directionalLights_, indexOf(id), id.type);
+    outLocal =
+        nuri::makeLocalLightDesc(directionalLights_, indexOf(id), id.type);
     outLocal.range = 0.0f;
     outLocal.innerConeAngleRadians = 0.0f;
     outLocal.outerConeAngleRadians = 0.0f;
@@ -1074,7 +959,7 @@ bool SceneGraph::getLightDesc(LightId id, LightDesc &outLocal) const {
     if (!pointSlotValid(id)) {
       return false;
     }
-    outLocal = makeLocalLightDesc(pointLights_, indexOf(id), id.type);
+    outLocal = nuri::makeLocalLightDesc(pointLights_, indexOf(id), id.type);
     outLocal.range = pointLights_.ranges[indexOf(id)];
     outLocal.innerConeAngleRadians = 0.0f;
     outLocal.outerConeAngleRadians = 0.0f;
@@ -1083,7 +968,7 @@ bool SceneGraph::getLightDesc(LightId id, LightDesc &outLocal) const {
     if (!spotSlotValid(id)) {
       return false;
     }
-    outLocal = makeLocalLightDesc(spotLights_, indexOf(id), id.type);
+    outLocal = nuri::makeLocalLightDesc(spotLights_, indexOf(id), id.type);
     outLocal.range = spotLights_.ranges[indexOf(id)];
     outLocal.innerConeAngleRadians = spotLights_.innerConeAngles[indexOf(id)];
     outLocal.outerConeAngleRadians = spotLights_.outerConeAngles[indexOf(id)];
@@ -1104,7 +989,7 @@ bool SceneGraph::getCachedLightWorldDesc(LightId id,
     return false;
   }
   if (nodeIndex >= nodes_.worldFromRoot.size() ||
-      nodes_.live[nodeIndex] == 0u) {
+      !nodes_.slots.isLive(nodeIndex)) {
     return false;
   }
 
@@ -1125,10 +1010,11 @@ bool SceneGraph::getLightNode(LightId id, NodeId &out) const {
   if (!tryGetLightNodeIndex(id, nodeIndex)) {
     return false;
   }
-  if (nodeIndex >= nodes_.generations.size() || nodes_.live[nodeIndex] == 0u) {
+  if (nodeIndex >= nodes_.slots.slotCount() ||
+      !nodes_.slots.isLive(nodeIndex)) {
     return false;
   }
-  out = makeNodeId(nodeIndex, nodes_.generations[nodeIndex]);
+  out = makeNodeId(nodeIndex, nodes_.slots.generation(nodeIndex));
   return true;
 }
 
@@ -1137,7 +1023,7 @@ bool SceneGraph::updateLight(LightId id, const LightDesc &desc) {
   if (!isValid(id) || desc.type != id.type) {
     return false;
   }
-  const LightDesc sanitized = sanitizeLightDesc(desc);
+  const LightDesc sanitized = nuri::sanitizeLightDesc(desc);
 
   switch (id.type) {
   case LightType::Directional: {
@@ -1148,11 +1034,12 @@ bool SceneGraph::updateLight(LightId id, const LightDesc &desc) {
     const bool topologyChanged =
         (directionalLights_.enabled[index] != 0u) != sanitized.enabled;
     const bool derivedDataChanged =
-        !vec3ExactEqual(directionalLights_.localPositions[index],
-                        sanitized.position) ||
-        !quatExactEqual(directionalLights_.localRotations[index],
-                        sanitized.rotation) ||
-        !vec3ExactEqual(directionalLights_.colors[index], sanitized.color) ||
+        !nuri::vec3ExactEqual(directionalLights_.localPositions[index],
+                              sanitized.position) ||
+        !nuri::quatExactEqual(directionalLights_.localRotations[index],
+                              sanitized.rotation) ||
+        !nuri::vec3ExactEqual(directionalLights_.colors[index],
+                              sanitized.color) ||
         directionalLights_.intensities[index] != sanitized.intensity;
     directionalLights_.names[index].assign(sanitized.name.data(),
                                            sanitized.name.size());
@@ -1173,11 +1060,11 @@ bool SceneGraph::updateLight(LightId id, const LightDesc &desc) {
     const bool topologyChanged =
         (pointLights_.enabled[index] != 0u) != sanitized.enabled;
     const bool derivedDataChanged =
-        !vec3ExactEqual(pointLights_.localPositions[index],
-                        sanitized.position) ||
-        !quatExactEqual(pointLights_.localRotations[index],
-                        sanitized.rotation) ||
-        !vec3ExactEqual(pointLights_.colors[index], sanitized.color) ||
+        !nuri::vec3ExactEqual(pointLights_.localPositions[index],
+                              sanitized.position) ||
+        !nuri::quatExactEqual(pointLights_.localRotations[index],
+                              sanitized.rotation) ||
+        !nuri::vec3ExactEqual(pointLights_.colors[index], sanitized.color) ||
         pointLights_.intensities[index] != sanitized.intensity ||
         pointLights_.ranges[index] != sanitized.range;
     pointLights_.names[index].assign(sanitized.name.data(),
@@ -1200,11 +1087,11 @@ bool SceneGraph::updateLight(LightId id, const LightDesc &desc) {
     const bool topologyChanged =
         (spotLights_.enabled[index] != 0u) != sanitized.enabled;
     const bool derivedDataChanged =
-        !vec3ExactEqual(spotLights_.localPositions[index],
-                        sanitized.position) ||
-        !quatExactEqual(spotLights_.localRotations[index],
-                        sanitized.rotation) ||
-        !vec3ExactEqual(spotLights_.colors[index], sanitized.color) ||
+        !nuri::vec3ExactEqual(spotLights_.localPositions[index],
+                              sanitized.position) ||
+        !nuri::quatExactEqual(spotLights_.localRotations[index],
+                              sanitized.rotation) ||
+        !nuri::vec3ExactEqual(spotLights_.colors[index], sanitized.color) ||
         spotLights_.intensities[index] != sanitized.intensity ||
         spotLights_.ranges[index] != sanitized.range ||
         spotLights_.innerConeAngles[index] != sanitized.innerConeAngleRadians ||
@@ -1245,8 +1132,8 @@ bool SceneGraph::setLightNode(LightId id, NodeId node,
     if (!getCachedLightWorldDesc(id, worldDesc)) {
       return false;
     }
-    localDesc =
-        lightLocalFromWorld(worldDesc, nodes_.worldFromRoot[indexOf(node)]);
+    localDesc = nuri::lightLocalFromWorld(worldDesc,
+                                          nodes_.worldFromRoot[indexOf(node)]);
   }
 
   switch (id.type) {
