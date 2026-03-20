@@ -120,7 +120,8 @@ packDirectionalLight(const glm::quat &rotation, const glm::vec3 &color,
 
 [[nodiscard]] inline LocalLightGpuData
 packPointLight(const glm::vec3 &position, const glm::quat &rotation,
-               const glm::vec3 &color, float intensity, float range) {
+               const glm::vec3 &color, float intensity, float range,
+               bool enabled) {
   const glm::vec3 direction =
       lightDirectionFromRotationForLocalLights(rotation);
   return LocalLightGpuData{
@@ -129,7 +130,8 @@ packPointLight(const glm::vec3 &position, const glm::quat &rotation,
       .colorIntensity = glm::vec4(color, intensity),
       .innerCosTypeEnabledReserved =
           glm::uvec4(floatBitsToUint(-1.0f),
-                     static_cast<uint32_t>(LocalLightGpuType::Point), 1u, 0u),
+                     static_cast<uint32_t>(LocalLightGpuType::Point),
+                     enabled ? 1u : 0u, 0u),
   };
 }
 
@@ -160,6 +162,15 @@ makeLocalLightDesc(const Store &store, uint32_t index, LightType type) {
   out.rotation = store.localRotations[index];
   out.color = store.colors[index];
   out.intensity = store.intensities[index];
+  if constexpr (requires { store.ranges[index]; }) {
+    out.range = store.ranges[index];
+  }
+  if constexpr (requires { store.innerConeAngles[index]; }) {
+    out.innerConeAngleRadians = store.innerConeAngles[index];
+  }
+  if constexpr (requires { store.outerConeAngles[index]; }) {
+    out.outerConeAngleRadians = store.outerConeAngles[index];
+  }
   out.enabled = store.enabled[index] != 0u;
   return out;
 }

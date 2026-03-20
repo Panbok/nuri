@@ -3,9 +3,11 @@
 #include "nuri/math/utils.h"
 #include "nuri/scene/light.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/constants.hpp>
 
 namespace nuri {
 
@@ -38,6 +40,53 @@ rotationFromMatrixOrIdentity(const glm::mat4 &matrix) {
     basis[0] = -basis[0];
   }
   return glm::normalize(glm::quat_cast(basis));
+}
+
+[[nodiscard]] inline LightDesc sanitizeLightDesc(const LightDesc &desc) {
+  LightDesc sanitized = desc;
+  sanitized.position = sanitizeFiniteVec3(desc.position, glm::vec3(0.0f));
+  sanitized.rotation = sanitizeRotation(desc.rotation);
+  sanitized.color = glm::max(sanitizeFiniteVec3(desc.color, glm::vec3(1.0f)),
+                             glm::vec3(0.0f));
+  sanitized.intensity = sanitizeNonNegative(desc.intensity, 1.0f);
+  sanitized.enabled = desc.enabled;
+
+  switch (sanitized.type) {
+  case LightType::Directional:
+    sanitized.range = 0.0f;
+    sanitized.innerConeAngleRadians = 0.0f;
+    sanitized.outerConeAngleRadians = 0.0f;
+    break;
+  case LightType::Point:
+    sanitized.range = sanitizeNonNegative(desc.range, 0.0f);
+    sanitized.innerConeAngleRadians = 0.0f;
+    sanitized.outerConeAngleRadians = 0.0f;
+    break;
+  case LightType::Spot:
+    sanitized.range = sanitizeNonNegative(desc.range, 0.0f);
+    sanitized.outerConeAngleRadians =
+        std::clamp(sanitizeNonNegative(desc.outerConeAngleRadians,
+                                       glm::quarter_pi<float>()),
+                   0.0f, glm::half_pi<float>() - 1.0e-4f);
+    sanitized.innerConeAngleRadians =
+        std::clamp(sanitizeNonNegative(desc.innerConeAngleRadians, 0.0f), 0.0f,
+                   sanitized.outerConeAngleRadians);
+    break;
+  }
+
+  return sanitized;
+}
+
+[[nodiscard]] inline LightDesc lightLocalFromWorld(const LightDesc &worldDesc,
+                                                      const glm::mat4 &nodeWorld) {
+  LightDesc local = worldDesc;
+  const glm::mat4 inverseNodeWorld = safeInverseOrIdentity(nodeWorld);
+  local.position =
+      glm::vec3(inverseNodeWorld * glm::vec4(worldDesc.position, 1.0f));
+  const glm::quat nodeRotation = rotationFromMatrixOrIdentity(nodeWorld);
+  local.rotation =
+      sanitizeRotation(glm::inverse(nodeRotation) * worldDesc.rotation);
+  return sanitizeLightDesc(local);
 }
 
 [[nodiscard]] inline LightDesc
