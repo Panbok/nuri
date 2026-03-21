@@ -54,8 +54,12 @@ public:
       std::pmr::memory_resource *mem = std::pmr::get_default_resource());
 
   // Extracts material factors and texture slots from source files via Assimp.
-  // Texture paths are resolved to normalized absolute paths when external;
-  // embedded textures are returned as raw "*N" paths with isEmbedded=true.
+  // Texture paths are resolved to normalized absolute paths when external.
+  // Embedded scene textures use the identifier carried by
+  // `ImportedMaterialTexture` (`MaterialTextureSlotData`): the
+  // `sourceKind`/`embeddedIndex` fields form a `sourceKind:embeddedIndex`
+  // pair, for example `EmbeddedSceneTexture:3`. See `ImportedMaterialTexture`
+  // for the field definitions and expected consumer-side population.
   [[nodiscard]] static nuri::Result<ImportedMaterialSet, std::string>
   loadMaterialInfoFromFile(std::string_view path);
 };

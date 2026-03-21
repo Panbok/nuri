@@ -5,6 +5,9 @@
 #include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
+#include "nuri/resources/detail/gltf_json_utils.h"
+#include "nuri/resources/detail/scene_asset_build_backend.h"
+#include "nuri/resources/scene_importer.h"
 
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
@@ -28,22 +31,8 @@ constexpr float kDefaultTextureScale = 1.0f;
 constexpr float kDefaultAttenuationDistance = 0.0f;
 constexpr float kDefaultIor = 1.5f;
 constexpr glm::vec3 kDefaultAttenuationColor(1.0f);
-constexpr uint32_t kGlbMagic = 0x46546C67u;
-constexpr uint32_t kGlbVersion2 = 2u;
-constexpr uint32_t kGlbChunkTypeJson = 0x4E4F534Au;
 using YyJsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
 using YyJsonDocResult = Result<YyJsonDocPtr, std::string>;
-
-struct AssimpMeshInstance {
-  const aiMesh *mesh = nullptr;
-  uint32_t meshIndex = 0;
-  aiMatrix4x4 transform{};
-};
-
-struct GltfMeshInstanceScale {
-  uint32_t meshIndex = 0;
-  glm::vec3 scale{1.0f};
-};
 
 std::string normalizeExternalTexturePath(const std::filesystem::path &modelPath,
                                          std::string_view rawPath) {
@@ -77,9 +66,19 @@ readMaterialTextureSlot(const aiMaterial &material, aiTextureType textureType,
   ImportedMaterialTexture out{};
   out.uvSet = uvIndex;
   const std::string_view rawPath(texturePath.C_Str(), texturePath.length);
-  out.isEmbedded = !rawPath.empty() && rawPath.front() == '*';
-  out.path = out.isEmbedded ? std::string(rawPath)
-                            : normalizeExternalTexturePath(modelPath, rawPath);
+  if (!rawPath.empty() && rawPath.front() == '*') {
+    out.sourceKind = MaterialTextureSourceKind::EmbeddedSceneTexture;
+    const std::string_view indexView = rawPath.substr(1u);
+    const auto parsedIndex =
+        std::from_chars(indexView.data(), indexView.data() + indexView.size(),
+                        out.embeddedIndex);
+    if (parsedIndex.ec != std::errc()) {
+      out.embeddedIndex = kInvalidEmbeddedSceneTextureIndex;
+    }
+  } else {
+    out.sourceKind = MaterialTextureSourceKind::ExternalFile;
+    out.path = normalizeExternalTexturePath(modelPath, rawPath);
+  }
   return out;
 }
 
@@ -99,7 +98,7 @@ firstAvailableTextureSlot(const aiMaterial &material,
 
 bool hasExtension(const std::filesystem::path &path,
                   std::string_view extension) {
-  return path.has_extension() && path.extension().string() == extension;
+  return detail::hasExtensionCaseInsensitive(path, extension);
 }
 
 bool hasExtension(std::string_view path, std::string_view extension) {
@@ -107,11 +106,11 @@ bool hasExtension(std::string_view path, std::string_view extension) {
 }
 
 [[nodiscard]] bool isGltfJsonAssetPath(const std::filesystem::path &path) {
-  return hasExtension(path, ".gltf") || hasExtension(path, ".glb");
+  return detail::isGltfJsonAssetPath(path);
 }
 
 [[nodiscard]] bool isGltfJsonAssetPath(std::string_view path) {
-  return isGltfJsonAssetPath(std::filesystem::path(path));
+  return detail::isGltfJsonAssetPath(path);
 }
 
 bool isUnsupportedGltfImageUri(std::string_view uri) {
@@ -119,88 +118,23 @@ bool isUnsupportedGltfImageUri(std::string_view uri) {
 }
 
 bool tryReadJsonFloat(yyjson_val *value, float &out) {
-  if (yyjson_is_uint(value)) {
-    out = static_cast<float>(yyjson_get_uint(value));
-    return true;
-  }
-  if (yyjson_is_sint(value)) {
-    out = static_cast<float>(yyjson_get_sint(value));
-    return true;
-  }
-  if (yyjson_is_real(value) || yyjson_is_num(value)) {
-    out = static_cast<float>(yyjson_get_real(value));
-    return true;
-  }
-  return false;
+  return detail::tryReadJsonFloat(value, out);
 }
 
 bool tryReadJsonUint32(yyjson_val *value, uint32_t &out) {
-  if (yyjson_is_uint(value)) {
-    const uint64_t raw = yyjson_get_uint(value);
-    if (raw > std::numeric_limits<uint32_t>::max()) {
-      return false;
-    }
-    out = static_cast<uint32_t>(raw);
-    return true;
-  }
-  if (yyjson_is_sint(value)) {
-    const int64_t raw = yyjson_get_sint(value);
-    if (raw < 0 ||
-        raw > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
-      return false;
-    }
-    out = static_cast<uint32_t>(raw);
-    return true;
-  }
-  return false;
+  return detail::tryReadJsonUint32(value, out);
 }
 
 bool tryReadJsonVec2(yyjson_val *value, glm::vec2 &out) {
-  if (!yyjson_is_arr(value) || yyjson_arr_size(value) < 2u) {
-    return false;
-  }
-  float x = 0.0f;
-  float y = 0.0f;
-  if (!tryReadJsonFloat(yyjson_arr_get(value, 0u), x) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 1u), y)) {
-    return false;
-  }
-  out = glm::vec2(x, y);
-  return true;
+  return detail::tryReadJsonVec2(value, out);
 }
 
 bool tryReadJsonVec3(yyjson_val *value, glm::vec3 &out) {
-  if (!yyjson_is_arr(value) || yyjson_arr_size(value) < 3u) {
-    return false;
-  }
-  float x = 0.0f;
-  float y = 0.0f;
-  float z = 0.0f;
-  if (!tryReadJsonFloat(yyjson_arr_get(value, 0u), x) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 1u), y) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 2u), z)) {
-    return false;
-  }
-  out = glm::vec3(x, y, z);
-  return true;
+  return detail::tryReadJsonVec3(value, out);
 }
 
 bool tryReadJsonVec4(yyjson_val *value, glm::vec4 &out) {
-  if (!yyjson_is_arr(value) || yyjson_arr_size(value) < 4u) {
-    return false;
-  }
-  float x = 0.0f;
-  float y = 0.0f;
-  float z = 0.0f;
-  float w = 0.0f;
-  if (!tryReadJsonFloat(yyjson_arr_get(value, 0u), x) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 1u), y) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 2u), z) ||
-      !tryReadJsonFloat(yyjson_arr_get(value, 3u), w)) {
-    return false;
-  }
-  out = glm::vec4(x, y, z, w);
-  return true;
+  return detail::tryReadJsonVec4(value, out);
 }
 
 bool tryReadJsonBool(yyjson_val *value, bool &out) {
@@ -214,19 +148,12 @@ bool tryReadJsonBool(yyjson_val *value, bool &out) {
 constexpr size_t kInvalidMaterialIndex = std::numeric_limits<size_t>::max();
 
 [[nodiscard]] std::string_view readJsonStringView(yyjson_val *value) {
-  if (!yyjson_is_str(value)) {
-    return {};
-  }
-  const char *raw = yyjson_get_str(value);
-  return raw != nullptr ? std::string_view(raw) : std::string_view{};
+  return detail::readJsonStringView(value);
 }
 
 [[nodiscard]] std::string_view readJsonStringView(yyjson_val *object,
                                                   const char *key) {
-  if (!yyjson_is_obj(object)) {
-    return {};
-  }
-  return readJsonStringView(yyjson_obj_get(object, key));
+  return detail::readJsonStringView(object, key);
 }
 
 void assignMaterialNameFromGltf(ImportedMaterialInfo &material,
@@ -341,6 +268,7 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
   }
 
   ImportedMaterialTexture texture{};
+  texture.sourceKind = MaterialTextureSourceKind::ExternalFile;
   texture.path = normalizeExternalTexturePath(path, uri);
   if (uint32_t uvSet = 0; tryReadJsonUint32(texCoordValue, uvSet)) {
     texture.uvSet = uvSet;
@@ -627,150 +555,7 @@ glm::vec3 extractTransformScale(const aiMatrix4x4 &transform) {
                   glm::vec3(1.0e-6f));
 }
 
-glm::vec3 readGltfNodeLocalScale(yyjson_val *nodeValue) {
-  if (!yyjson_is_obj(nodeValue)) {
-    return glm::vec3(1.0f);
-  }
-
-  glm::vec3 scale(1.0f);
-  if (tryReadJsonVec3(yyjson_obj_get(nodeValue, "scale"), scale)) {
-    return scale;
-  }
-
-  yyjson_val *matrixValue = yyjson_obj_get(nodeValue, "matrix");
-  if (!yyjson_is_arr(matrixValue) || yyjson_arr_size(matrixValue) < 16u) {
-    return scale;
-  }
-
-  std::array<float, 16> matrix{};
-  for (uint32_t i = 0; i < 16u; ++i) {
-    if (!tryReadJsonFloat(yyjson_arr_get(matrixValue, i), matrix[i])) {
-      return glm::vec3(1.0f);
-    }
-  }
-
-  const glm::vec3 basisX(matrix[0], matrix[1], matrix[2]);
-  const glm::vec3 basisY(matrix[4], matrix[5], matrix[6]);
-  const glm::vec3 basisZ(matrix[8], matrix[9], matrix[10]);
-  return glm::max(
-      glm::vec3(glm::length(basisX), glm::length(basisY), glm::length(basisZ)),
-      glm::vec3(1.0e-6f));
-}
-
-void collectGltfMeshInstanceScalesRecursive(
-    yyjson_val *nodes, yyjson_val *nodeValue, const glm::vec3 &parentScale,
-    std::pmr::vector<GltfMeshInstanceScale> &out) {
-  if (!yyjson_is_obj(nodeValue)) {
-    return;
-  }
-
-  const glm::vec3 localScale = readGltfNodeLocalScale(nodeValue);
-  const glm::vec3 globalScale = parentScale * localScale;
-
-  uint32_t meshIndex = 0;
-  if (tryReadJsonUint32(yyjson_obj_get(nodeValue, "mesh"), meshIndex)) {
-    out.push_back(GltfMeshInstanceScale{
-        .meshIndex = meshIndex,
-        .scale = globalScale,
-    });
-  }
-
-  yyjson_val *childrenValue = yyjson_obj_get(nodeValue, "children");
-  if (!yyjson_is_arr(childrenValue)) {
-    return;
-  }
-
-  yyjson_arr_iter childIter = yyjson_arr_iter_with(childrenValue);
-  yyjson_val *childValue = nullptr;
-  while ((childValue = yyjson_arr_iter_next(&childIter)) != nullptr) {
-    uint32_t childIndex = 0;
-    if (!tryReadJsonUint32(childValue, childIndex)) {
-      continue;
-    }
-    yyjson_val *childNode = yyjson_arr_get(nodes, childIndex);
-    collectGltfMeshInstanceScalesRecursive(nodes, childNode, globalScale, out);
-  }
-}
-
 YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path);
-
-Result<std::pmr::vector<GltfMeshInstanceScale>, std::string>
-loadGltfMeshInstanceScales(std::string_view path,
-                           std::pmr::memory_resource *mem) {
-  if (!isGltfJsonAssetPath(path)) {
-    return Result<std::pmr::vector<GltfMeshInstanceScale>, std::string>::
-        makeResult(std::pmr::vector<GltfMeshInstanceScale>(mem));
-  }
-
-  auto docResult = loadGltfJsonDocument(std::filesystem::path(path));
-  if (docResult.hasError()) {
-    return Result<std::pmr::vector<GltfMeshInstanceScale>,
-                  std::string>::makeError(docResult.error());
-  }
-
-  yyjson_doc *doc = docResult.value().get();
-  yyjson_val *root = yyjson_doc_get_root(doc);
-  if (!yyjson_is_obj(root)) {
-    return Result<std::pmr::vector<GltfMeshInstanceScale>,
-                  std::string>::makeError("glTF root is not an object");
-  }
-
-  yyjson_val *nodes = yyjson_obj_get(root, "nodes");
-  yyjson_val *scenes = yyjson_obj_get(root, "scenes");
-  if (!yyjson_is_arr(nodes) || !yyjson_is_arr(scenes)) {
-    return Result<std::pmr::vector<GltfMeshInstanceScale>, std::string>::
-        makeResult(std::pmr::vector<GltfMeshInstanceScale>(mem));
-  }
-
-  uint32_t sceneIndex = 0u;
-  (void)tryReadJsonUint32(yyjson_obj_get(root, "scene"), sceneIndex);
-  yyjson_val *sceneValue = yyjson_arr_get(scenes, sceneIndex);
-  if (!yyjson_is_obj(sceneValue)) {
-    sceneValue = yyjson_arr_get(scenes, 0u);
-  }
-  if (!yyjson_is_obj(sceneValue)) {
-    return Result<std::pmr::vector<GltfMeshInstanceScale>, std::string>::
-        makeResult(std::pmr::vector<GltfMeshInstanceScale>(mem));
-  }
-
-  std::pmr::vector<GltfMeshInstanceScale> out(mem);
-  yyjson_val *sceneNodes = yyjson_obj_get(sceneValue, "nodes");
-  if (!yyjson_is_arr(sceneNodes)) {
-    return Result<std::pmr::vector<GltfMeshInstanceScale>,
-                  std::string>::makeResult(std::move(out));
-  }
-
-  out.reserve(yyjson_arr_size(sceneNodes));
-  yyjson_arr_iter nodeIter = yyjson_arr_iter_with(sceneNodes);
-  yyjson_val *nodeIndexValue = nullptr;
-  while ((nodeIndexValue = yyjson_arr_iter_next(&nodeIter)) != nullptr) {
-    uint32_t nodeIndex = 0;
-    if (!tryReadJsonUint32(nodeIndexValue, nodeIndex)) {
-      continue;
-    }
-    yyjson_val *nodeValue = yyjson_arr_get(nodes, nodeIndex);
-    collectGltfMeshInstanceScalesRecursive(nodes, nodeValue, glm::vec3(1.0f),
-                                           out);
-  }
-
-  return Result<std::pmr::vector<GltfMeshInstanceScale>,
-                std::string>::makeResult(std::move(out));
-}
-
-glm::vec3
-resolveAuthoredScale(const AssimpMeshInstance &instance,
-                     std::span<const GltfMeshInstanceScale> gltfInstanceScales,
-                     size_t instanceOrdinal) {
-  glm::vec3 authoredScale = extractTransformScale(instance.transform);
-  if (instanceOrdinal < gltfInstanceScales.size()) {
-    const GltfMeshInstanceScale &gltfScale =
-        gltfInstanceScales[instanceOrdinal];
-    if (gltfScale.meshIndex == instance.meshIndex) {
-      return gltfScale.scale;
-    }
-  }
-  return authoredScale;
-}
 
 void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
                                       yyjson_val *root,
@@ -862,99 +647,7 @@ void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
 }
 
 YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path) {
-  const auto parseJsonDocument = [](std::string jsonText) -> YyJsonDocResult {
-    yyjson_read_err parseError{};
-    yyjson_doc *rawDoc = yyjson_read_opts(jsonText.data(), jsonText.size(), 0,
-                                          nullptr, &parseError);
-    if (rawDoc == nullptr) {
-      return YyJsonDocResult::makeError("yyjson parse failed at offset " +
-                                        std::to_string(parseError.pos));
-    }
-    return YyJsonDocResult::makeResult(YyJsonDocPtr(rawDoc, &yyjson_doc_free));
-  };
-  const auto readU32 = [](std::span<const uint8_t> bytes, size_t offset,
-                          uint32_t &out) -> bool {
-    if (offset + sizeof(uint32_t) > bytes.size()) {
-      return false;
-    }
-    out = static_cast<uint32_t>(bytes[offset]) |
-          (static_cast<uint32_t>(bytes[offset + 1u]) << 8u) |
-          (static_cast<uint32_t>(bytes[offset + 2u]) << 16u) |
-          (static_cast<uint32_t>(bytes[offset + 3u]) << 24u);
-    return true;
-  };
-
-  std::ifstream file(path, std::ios::binary);
-  if (!file.is_open()) {
-    return YyJsonDocResult::makeError(
-        "Failed to open glTF material overlay source");
-  }
-
-  if (hasExtension(path, ".gltf")) {
-    std::ostringstream jsonStream;
-    jsonStream << file.rdbuf();
-    return parseJsonDocument(jsonStream.str());
-  }
-
-  if (!hasExtension(path, ".glb")) {
-    return YyJsonDocResult::makeError(
-        "Unsupported glTF material overlay file extension");
-  }
-
-  file.seekg(0, std::ios::end);
-  const std::streamoff fileSize = file.tellg();
-  if (fileSize < 0) {
-    return YyJsonDocResult::makeError("Failed to determine .glb file size");
-  }
-  file.seekg(0, std::ios::beg);
-
-  std::vector<uint8_t> bytes(static_cast<size_t>(fileSize));
-  if (!bytes.empty() &&
-      !file.read(reinterpret_cast<char *>(bytes.data()), fileSize)) {
-    return YyJsonDocResult::makeError("Failed to read .glb file");
-  }
-  if (bytes.size() < 20u) {
-    return YyJsonDocResult::makeError(".glb file is too small");
-  }
-
-  uint32_t magic = 0u;
-  uint32_t version = 0u;
-  uint32_t declaredLength = 0u;
-  if (!readU32(bytes, 0u, magic) || !readU32(bytes, 4u, version) ||
-      !readU32(bytes, 8u, declaredLength)) {
-    return YyJsonDocResult::makeError("Failed to read .glb header");
-  }
-  if (magic != kGlbMagic) {
-    return YyJsonDocResult::makeError(".glb magic mismatch");
-  }
-  if (version != kGlbVersion2) {
-    return YyJsonDocResult::makeError(".glb version is not 2");
-  }
-  if (declaredLength != bytes.size()) {
-    return YyJsonDocResult::makeError(".glb declared length mismatch");
-  }
-
-  size_t chunkOffset = 12u;
-  while (chunkOffset + 8u <= bytes.size()) {
-    uint32_t chunkLength = 0u;
-    uint32_t chunkType = 0u;
-    if (!readU32(bytes, chunkOffset, chunkLength) ||
-        !readU32(bytes, chunkOffset + 4u, chunkType)) {
-      return YyJsonDocResult::makeError("Failed to read .glb chunk header");
-    }
-    chunkOffset += 8u;
-    if (chunkLength > bytes.size() - chunkOffset) {
-      return YyJsonDocResult::makeError(".glb chunk exceeds file bounds");
-    }
-    if (chunkType == kGlbChunkTypeJson) {
-      return parseJsonDocument(std::string(
-          reinterpret_cast<const char *>(bytes.data() + chunkOffset),
-          chunkLength));
-    }
-    chunkOffset += chunkLength;
-  }
-
-  return YyJsonDocResult::makeError(".glb JSON chunk is missing");
+  return detail::loadGltfJsonDocument(path, "glTF material overlay source");
 }
 
 Result<bool, std::string>
@@ -1295,62 +988,64 @@ glm::vec3 normalizeTransformedDirection(const aiVector3D &direction) {
   return value * glm::inversesqrt(length2);
 }
 
-void collectMeshInstancesRecursive(const aiScene &scene, const aiNode &node,
-                                   const aiMatrix4x4 &parentTransform,
-                                   std::pmr::vector<AssimpMeshInstance> &out) {
-  const aiMatrix4x4 globalTransform = parentTransform * node.mTransformation;
-
-  for (unsigned int meshSlot = 0; meshSlot < node.mNumMeshes; ++meshSlot) {
-    const unsigned int meshIndex = node.mMeshes[meshSlot];
-    if (meshIndex >= scene.mNumMeshes) {
-      continue;
-    }
-    const aiMesh *mesh = scene.mMeshes[meshIndex];
-    if (!mesh) {
-      continue;
-    }
-    out.push_back(AssimpMeshInstance{
-        .mesh = mesh,
-        .meshIndex = meshIndex,
-        .transform = globalTransform,
-    });
-  }
-
-  for (unsigned int childIndex = 0; childIndex < node.mNumChildren;
-       ++childIndex) {
-    const aiNode *child = node.mChildren[childIndex];
-    if (!child) {
-      continue;
-    }
-    collectMeshInstancesRecursive(scene, *child, globalTransform, out);
-  }
+aiMatrix4x4 glmMat4ToAiMatrix4x4(const glm::mat4 &matrix) {
+  aiMatrix4x4 out;
+  out.a1 = matrix[0][0];
+  out.a2 = matrix[1][0];
+  out.a3 = matrix[2][0];
+  out.a4 = matrix[3][0];
+  out.b1 = matrix[0][1];
+  out.b2 = matrix[1][1];
+  out.b3 = matrix[2][1];
+  out.b4 = matrix[3][1];
+  out.c1 = matrix[0][2];
+  out.c2 = matrix[1][2];
+  out.c3 = matrix[2][2];
+  out.c4 = matrix[3][2];
+  out.d1 = matrix[0][3];
+  out.d2 = matrix[1][3];
+  out.d3 = matrix[2][3];
+  out.d4 = matrix[3][3];
+  return out;
 }
 
-std::pmr::vector<AssimpMeshInstance>
-collectMeshInstances(const aiScene &scene, std::pmr::memory_resource *mem) {
-  std::pmr::vector<AssimpMeshInstance> instances(mem);
-  if (scene.mRootNode != nullptr) {
-    collectMeshInstancesRecursive(scene, *scene.mRootNode, aiMatrix4x4(),
-                                  instances);
+glm::mat4 computeImportedSceneWorldMatrix(uint32_t nodeIndex,
+                                          const ImportedScene &scene,
+                                          std::span<glm::mat4> cache,
+                                          std::span<uint8_t> state) {
+  if (nodeIndex >= scene.nodes.size()) {
+    return glm::mat4(1.0f);
+  }
+  if (state[nodeIndex] == 2u) {
+    return cache[nodeIndex];
+  }
+  if (state[nodeIndex] == 1u) {
+    return glm::mat4(1.0f);
   }
 
-  if (!instances.empty()) {
-    return instances;
+  state[nodeIndex] = 1u;
+  glm::mat4 world = scene.nodes[nodeIndex].localFromParent;
+  if (scene.nodes[nodeIndex].parentIndex != kInvalidScenePrefabIndex) {
+    world = computeImportedSceneWorldMatrix(scene.nodes[nodeIndex].parentIndex,
+                                            scene, cache, state) *
+            world;
   }
+  cache[nodeIndex] = world;
+  state[nodeIndex] = 2u;
+  return world;
+}
 
-  instances.reserve(scene.mNumMeshes);
-  for (unsigned int meshIndex = 0; meshIndex < scene.mNumMeshes; ++meshIndex) {
-    const aiMesh *mesh = scene.mMeshes[meshIndex];
-    if (!mesh) {
-      continue;
+[[nodiscard]] uint32_t
+findMeshAssetIndexBySourceSceneMeshIndex(const ImportedScene &scene,
+                                         uint32_t sourceSceneMeshIndex) {
+  for (uint32_t assetIndex = 0u; assetIndex < scene.meshAssets.size();
+       ++assetIndex) {
+    if (scene.meshAssets[assetIndex].sourceSceneMeshIndex ==
+        sourceSceneMeshIndex) {
+      return assetIndex;
     }
-    instances.push_back(AssimpMeshInstance{
-        .mesh = mesh,
-        .meshIndex = meshIndex,
-        .transform = aiMatrix4x4(),
-    });
   }
-  return instances;
+  return kInvalidScenePrefabIndex;
 }
 
 void extractMeshGeometry(const aiMesh &mesh, const aiMatrix4x4 &transform,
@@ -1517,7 +1212,7 @@ void optimizeVertexFetchForAllLods(
 void appendSubmeshToMeshData(
     MeshData &data, const aiMesh &mesh, std::span<const Vertex> vertices,
     const BoundingBox &bounds, const glm::vec3 &authoredScale,
-    uint32_t lodCount,
+    uint32_t sourceMaterialIndex, uint32_t lodCount,
     std::span<const std::pmr::vector<uint32_t>> lodIndexBuffers,
     const std::array<float, Submesh::kMaxLodCount> &lodErrors,
     uint32_t meshIndex) {
@@ -1525,7 +1220,7 @@ void appendSubmeshToMeshData(
   data.vertices.insert(data.vertices.end(), vertices.begin(), vertices.end());
 
   Submesh submesh{};
-  submesh.materialIndex = mesh.mMaterialIndex;
+  submesh.materialIndex = sourceMaterialIndex;
   submesh.bounds = bounds;
   submesh.authoredScale = authoredScale;
   submesh.lodCount = lodCount;
@@ -1647,8 +1342,179 @@ buildSceneMeshData(const aiMesh &mesh, uint32_t sceneMeshIndex,
   data.indices.reserve(totalIndexCount);
   const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
   appendSubmeshToMeshData(data, mesh, meshVertices, submeshBounds,
-                          glm::vec3(1.0f), generatedLodCount, lodIndexBuffers,
-                          lodErrors, sceneMeshIndex);
+                          glm::vec3(1.0f), mesh.mMaterialIndex,
+                          generatedLodCount, lodIndexBuffers, lodErrors,
+                          sceneMeshIndex);
+  return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
+}
+
+[[nodiscard]] nuri::Result<MeshData, std::string>
+buildFlattenedSceneDataFromImportedScene(std::string_view path,
+                                         const ImportedScene &importedScene,
+                                         const MeshImportOptions &options,
+                                         std::pmr::memory_resource *mem) {
+  Assimp::Importer importer;
+  auto sceneResult = loadSceneMeshImportScene(importer, path, options);
+  if (sceneResult.hasError()) {
+    return nuri::Result<MeshData, std::string>::makeError(sceneResult.error());
+  }
+  const aiScene *scene = sceneResult.value();
+
+  MeshData data(mem);
+  data.name.assign(importedScene.sourceSceneName.data(),
+                   importedScene.sourceSceneName.size());
+  if (data.name.empty()) {
+    const std::string fallbackName = importedSceneName(*scene, path);
+    data.name.assign(fallbackName.data(), fallbackName.size());
+  }
+
+  const uint32_t requestedLodCount = clampLodCount(options);
+  ScratchArena scratch(mem);
+  std::vector<glm::mat4> worldCache(importedScene.nodes.size(),
+                                    glm::mat4(1.0f));
+  std::vector<uint8_t> worldState(importedScene.nodes.size(), 0u);
+
+  size_t totalVertices = 0;
+  size_t totalIndices = 0;
+  const auto reserveForMesh = [&](uint32_t sourceSceneMeshIndex) {
+    auto meshResult = resolveSceneMesh(*scene, sourceSceneMeshIndex,
+                                       "MeshImporter::loadFromFile");
+    if (meshResult.hasError()) {
+      return;
+    }
+    const aiMesh &mesh = *meshResult.value();
+    totalVertices += mesh.mNumVertices;
+    const size_t baseIndexCount = meshIndexCount(mesh);
+    totalIndices += baseIndexCount;
+    if (options.generateLods && requestedLodCount > 1) {
+      for (uint32_t lodIndex = 1; lodIndex < requestedLodCount; ++lodIndex) {
+        totalIndices += targetLodIndexCount(options, lodIndex, baseIndexCount);
+      }
+    }
+  };
+  if (!importedScene.renderables.empty()) {
+    for (const ImportedSceneRenderable &renderable :
+         importedScene.renderables) {
+      if (renderable.meshAssetIndex >= importedScene.meshAssets.size()) {
+        continue;
+      }
+      reserveForMesh(importedScene.meshAssets[renderable.meshAssetIndex]
+                         .sourceSceneMeshIndex);
+    }
+    data.submeshes.reserve(importedScene.renderables.size());
+  } else {
+    for (const ImportedSceneMeshAsset &meshAsset : importedScene.meshAssets) {
+      reserveForMesh(meshAsset.sourceSceneMeshIndex);
+    }
+    data.submeshes.reserve(importedScene.meshAssets.size());
+  }
+  data.vertices.reserve(totalVertices);
+  data.indices.reserve(totalIndices);
+
+  size_t insufficientGeometryMeshCount = 0;
+  std::array<uint32_t, 8> insufficientGeometryMeshSamples{};
+  size_t insufficientGeometrySampleCount = 0;
+
+  const auto appendRenderable = [&](uint32_t sourceSceneMeshIndex,
+                                    const aiMatrix4x4 &transform,
+                                    const glm::vec3 &authoredScale,
+                                    uint32_t sourceMaterialIndex) -> void {
+    auto meshResult = resolveSceneMesh(*scene, sourceSceneMeshIndex,
+                                       "MeshImporter::loadFromFile");
+    if (meshResult.hasError()) {
+      return;
+    }
+    const aiMesh &mesh = *meshResult.value();
+
+    ScopedScratch scopedScratch(scratch);
+    std::pmr::vector<Vertex> meshVertices(scopedScratch.resource());
+    std::pmr::vector<uint32_t> lod0Indices(scopedScratch.resource());
+    std::array<std::pmr::vector<uint32_t>, Submesh::kMaxLodCount>
+        lodIndexBuffers = makeLodIndexBuffers(scopedScratch.resource());
+    std::array<float, Submesh::kMaxLodCount> lodErrors{};
+
+    extractMeshGeometry(mesh, transform, meshVertices, lod0Indices);
+    if (meshVertices.empty() || lod0Indices.size() < kTriangleIndexCount) {
+      ++insufficientGeometryMeshCount;
+      if (insufficientGeometrySampleCount <
+          insufficientGeometryMeshSamples.size()) {
+        insufficientGeometryMeshSamples[insufficientGeometrySampleCount++] =
+            sourceSceneMeshIndex;
+      }
+      return;
+    }
+
+    if (options.optimize) {
+      NURI_PROFILER_ZONE("MeshImporter.meshopt_base_optimize",
+                         NURI_PROFILER_COLOR_CREATE);
+      remapMeshVertices(meshVertices, lod0Indices);
+      optimizeIndexOrder(lod0Indices, meshVertices);
+      NURI_PROFILER_ZONE_END();
+    }
+
+    lodIndexBuffers[0] = std::move(lod0Indices);
+    const uint32_t generatedLodCount = buildLodIndexBuffers(
+        options, requestedLodCount, sourceSceneMeshIndex, meshVertices,
+        options.optimize, lodIndexBuffers, lodErrors);
+
+    if (options.optimize) {
+      optimizeVertexFetchForAllLods(meshVertices, generatedLodCount,
+                                    lodIndexBuffers);
+    }
+
+    const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
+    appendSubmeshToMeshData(data, mesh, meshVertices, submeshBounds,
+                            authoredScale, sourceMaterialIndex,
+                            generatedLodCount, lodIndexBuffers, lodErrors,
+                            sourceSceneMeshIndex);
+  };
+
+  if (!importedScene.renderables.empty()) {
+    for (const ImportedSceneRenderable &renderable :
+         importedScene.renderables) {
+      if (renderable.meshAssetIndex >= importedScene.meshAssets.size() ||
+          renderable.materialAssetIndex >=
+              importedScene.materialAssets.size()) {
+        continue;
+      }
+      const ImportedSceneMeshAsset &meshAsset =
+          importedScene.meshAssets[renderable.meshAssetIndex];
+      const ImportedSceneMaterialAsset &materialAsset =
+          importedScene.materialAssets[renderable.materialAssetIndex];
+      const glm::mat4 worldTransform = computeImportedSceneWorldMatrix(
+          renderable.nodeIndex, importedScene, worldCache, worldState);
+      const aiMatrix4x4 aiTransform = glmMat4ToAiMatrix4x4(worldTransform);
+      const glm::vec3 authoredScale = extractTransformScale(aiTransform);
+      appendRenderable(meshAsset.sourceSceneMeshIndex, aiTransform,
+                       authoredScale, materialAsset.sourceMaterialIndex);
+    }
+  } else {
+    for (const ImportedSceneMeshAsset &meshAsset : importedScene.meshAssets) {
+      auto meshResult = resolveSceneMesh(*scene, meshAsset.sourceSceneMeshIndex,
+                                         "MeshImporter::loadFromFile");
+      if (meshResult.hasError()) {
+        continue;
+      }
+      appendRenderable(meshAsset.sourceSceneMeshIndex, aiMatrix4x4(),
+                       glm::vec3(1.0f), meshResult.value()->mMaterialIndex);
+    }
+  }
+
+  if (insufficientGeometryMeshCount > 0) {
+    std::ostringstream sampleStream;
+    for (size_t sampleIndex = 0; sampleIndex < insufficientGeometrySampleCount;
+         ++sampleIndex) {
+      if (sampleIndex > 0) {
+        sampleStream << ", ";
+      }
+      sampleStream << insufficientGeometryMeshSamples[sampleIndex];
+    }
+    NURI_LOG_WARNING(
+        "MeshImporter::loadFromFile: skipped %zu mesh(es) with insufficient "
+        "triangle geometry (sample indices: %s)",
+        insufficientGeometryMeshCount, sampleStream.str().c_str());
+  }
+
   return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
 }
 
@@ -1715,166 +1581,24 @@ MeshImporter::loadFromFile(std::string_view path,
   if (!mem) {
     mem = std::pmr::get_default_resource();
   }
-
-  Assimp::Importer importer;
-  const std::string pathStr(path);
-  const unsigned int flags = buildAssimpFlags(options, true);
-
-  NURI_LOG_DEBUG(
-      "MeshImporter::loadFromFile: Importing mesh '%s' with flags %u",
-      pathStr.c_str(), flags);
-  const aiScene *scene = importer.ReadFile(pathStr, flags);
-  if (!scene || !scene->HasMeshes()) {
-    const std::string error =
-        scene ? "Assimp scene has no meshes" : importer.GetErrorString();
-    NURI_LOG_WARNING(
-        "MeshImporter::loadFromFile: Failed to import mesh '%s': %s",
-        pathStr.c_str(), error.c_str());
-    return nuri::Result<MeshData, std::string>::makeError(error);
-  }
-
-  NURI_LOG_DEBUG(
-      "MeshImporter::loadFromFile: Imported model '%s' with %u meshes",
-      pathStr.c_str(), scene->mNumMeshes);
-  std::pmr::vector<AssimpMeshInstance> meshInstances =
-      collectMeshInstances(*scene, mem);
-  std::pmr::vector<GltfMeshInstanceScale> gltfInstanceScales(mem);
-  auto gltfScaleResult = loadGltfMeshInstanceScales(path, mem);
-  if (gltfScaleResult.hasError()) {
-    NURI_LOG_WARNING("MeshImporter::loadFromFile: Failed to load glTF node "
-                     "scales for '%s': %s",
-                     pathStr.c_str(), gltfScaleResult.error().c_str());
-  } else {
-    gltfInstanceScales = std::move(gltfScaleResult.value());
-  }
-  if (meshInstances.empty()) {
-    NURI_LOG_WARNING("MeshImporter::loadFromFile: Scene '%s' has no mesh "
-                     "instances after node traversal",
-                     pathStr.c_str());
+  const SceneImportOptions sceneOptions{.assetBuildOptions = options};
+  auto importedSceneResult =
+      SceneImporter::loadSceneFromFile(path, sceneOptions, mem);
+  if (importedSceneResult.hasError()) {
     return nuri::Result<MeshData, std::string>::makeError(
-        "Assimp scene has no mesh instances");
+        "MeshImporter::loadFromFile: " + importedSceneResult.error());
   }
-
-  MeshData data(mem);
-  const uint32_t requestedLodCount = clampLodCount(options);
-
-  size_t totalVertices = 0;
-  size_t totalIndices = 0;
-  for (size_t instanceOrdinal = 0; instanceOrdinal < meshInstances.size();
-       ++instanceOrdinal) {
-    const AssimpMeshInstance &instance = meshInstances[instanceOrdinal];
-    const aiMesh *mesh = instance.mesh;
-    if (!mesh) {
-      continue;
-    }
-
-    totalVertices += mesh->mNumVertices;
-    const size_t baseIndexCount = meshIndexCount(*mesh);
-    totalIndices += baseIndexCount;
-    if (options.generateLods && requestedLodCount > 1) {
-      for (uint32_t lodIndex = 1; lodIndex < requestedLodCount; ++lodIndex) {
-        totalIndices += targetLodIndexCount(options, lodIndex, baseIndexCount);
-      }
-    }
-  }
-
-  data.vertices.reserve(totalVertices);
-  data.indices.reserve(totalIndices);
-  data.submeshes.reserve(meshInstances.size());
-
-  if (scene->mName.length > 0) {
-    data.name.assign(scene->mName.C_Str(), scene->mName.length);
-  } else {
-    const std::string stem = std::filesystem::path(pathStr).stem().string();
-    data.name.assign(stem.data(), stem.size());
-  }
-
-  ScratchArena scratch(mem);
-  size_t insufficientGeometryMeshCount = 0;
-  std::array<uint32_t, 8> insufficientGeometryMeshSamples{};
-  size_t insufficientGeometrySampleCount = 0;
-
-  NURI_LOG_DEBUG("MeshImporter::loadFromFile: Mesh optimization processing");
-  for (size_t instanceOrdinal = 0; instanceOrdinal < meshInstances.size();
-       ++instanceOrdinal) {
-    const AssimpMeshInstance &instance = meshInstances[instanceOrdinal];
-    const aiMesh *mesh = instance.mesh;
-    if (!mesh) {
-      continue;
-    }
-
-    ScopedScratch scopedScratch(scratch);
-    std::pmr::vector<Vertex> meshVertices(scopedScratch.resource());
-    std::pmr::vector<uint32_t> lod0Indices(scopedScratch.resource());
-    std::array<std::pmr::vector<uint32_t>, Submesh::kMaxLodCount>
-        lodIndexBuffers = makeLodIndexBuffers(scopedScratch.resource());
-    std::array<float, Submesh::kMaxLodCount> lodErrors{};
-
-    extractMeshGeometry(*mesh, instance.transform, meshVertices, lod0Indices);
-
-    if (meshVertices.empty() || lod0Indices.size() < kTriangleIndexCount) {
-      ++insufficientGeometryMeshCount;
-      if (insufficientGeometrySampleCount <
-          insufficientGeometryMeshSamples.size()) {
-        insufficientGeometryMeshSamples[insufficientGeometrySampleCount++] =
-            instance.meshIndex;
-      }
-      continue;
-    }
-
-    if (options.optimize) {
-      NURI_PROFILER_ZONE("MeshImporter.meshopt_base_optimize",
-                         NURI_PROFILER_COLOR_CREATE);
-      remapMeshVertices(meshVertices, lod0Indices);
-      optimizeIndexOrder(lod0Indices, meshVertices);
-      NURI_PROFILER_ZONE_END();
-    }
-
-    lodIndexBuffers[0] = std::move(lod0Indices);
-    const uint32_t generatedLodCount = buildLodIndexBuffers(
-        options, requestedLodCount, instance.meshIndex, meshVertices,
-        options.optimize, lodIndexBuffers, lodErrors);
-
-    if (options.optimize) {
-      optimizeVertexFetchForAllLods(meshVertices, generatedLodCount,
-                                    lodIndexBuffers);
-    }
-
-    const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
-    const glm::vec3 authoredScale =
-        resolveAuthoredScale(instance, gltfInstanceScales, instanceOrdinal);
-    appendSubmeshToMeshData(data, *mesh, meshVertices, submeshBounds,
-                            authoredScale, generatedLodCount, lodIndexBuffers,
-                            lodErrors, instance.meshIndex);
-  }
-  NURI_LOG_DEBUG(
-      "MeshImporter::loadFromFile: Mesh optimization processing complete");
-
-  if (insufficientGeometryMeshCount > 0) {
-    std::ostringstream sampleStream;
-    for (size_t sampleIndex = 0; sampleIndex < insufficientGeometrySampleCount;
-         ++sampleIndex) {
-      if (sampleIndex > 0) {
-        sampleStream << ", ";
-      }
-      sampleStream << insufficientGeometryMeshSamples[sampleIndex];
-    }
-    NURI_LOG_WARNING(
-        "MeshImporter::loadFromFile: skipped %zu mesh(es) with insufficient "
-        "triangle geometry (sample indices: %s)",
-        insufficientGeometryMeshCount, sampleStream.str().c_str());
-  }
-
-  return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
+  return buildFlattenedSceneDataFromImportedScene(
+      path, importedSceneResult.value(), options, mem);
 }
 
-nuri::Result<MeshData, std::string> MeshImporter::loadSceneMeshFromFile(
+nuri::Result<MeshData, std::string> detail::loadSceneMeshFromSourceIndex(
     std::string_view path, uint32_t sceneMeshIndex,
     const MeshImportOptions &options, std::pmr::memory_resource *mem) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (path.empty()) {
     return nuri::Result<MeshData, std::string>::makeError(
-        "MeshImporter::loadSceneMeshFromFile: path is empty");
+        "detail::loadSceneMeshFromSourceIndex: path is empty");
   }
   if (!mem) {
     mem = std::pmr::get_default_resource();
@@ -1899,19 +1623,19 @@ nuri::Result<MeshData, std::string> MeshImporter::loadSceneMeshFromFile(
                                            sceneName, options, scratch, mem);
   if (meshDataResult.hasError()) {
     return nuri::Result<MeshData, std::string>::makeError(
-        "MeshImporter::loadSceneMeshFromFile: " + meshDataResult.error());
+        "detail::loadSceneMeshFromSourceIndex: " + meshDataResult.error());
   }
   return meshDataResult;
 }
 
 nuri::Result<std::pmr::vector<MeshData>, std::string>
-MeshImporter::loadSceneMeshesFromFile(
+detail::loadSceneMeshesFromSourceIndices(
     std::string_view path, std::span<const uint32_t> sceneMeshIndices,
     const MeshImportOptions &options, std::pmr::memory_resource *mem) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (path.empty()) {
     return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
-        "MeshImporter::loadSceneMeshesFromFile: path is empty");
+        "detail::loadSceneMeshesFromSourceIndices: path is empty");
   }
   if (!mem) {
     mem = std::pmr::get_default_resource();
@@ -1947,7 +1671,7 @@ MeshImporter::loadSceneMeshesFromFile(
         *meshResult.value(), sceneMeshIndex, sceneName, options, scratch, mem);
     if (meshDataResult.hasError()) {
       return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
-          "MeshImporter::loadSceneMeshesFromFile: mesh index " +
+          "detail::loadSceneMeshesFromSourceIndices: mesh index " +
           std::to_string(sceneMeshIndex) + ": " + meshDataResult.error());
     }
     meshData.push_back(std::move(meshDataResult.value()));
@@ -1958,11 +1682,11 @@ MeshImporter::loadSceneMeshesFromFile(
 }
 
 nuri::Result<ImportedMaterialSet, std::string>
-MeshImporter::loadMaterialInfoFromFile(std::string_view path) {
+detail::loadMaterialInfoFromSourceFile(std::string_view path) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (path.empty()) {
     return nuri::Result<ImportedMaterialSet, std::string>::makeError(
-        "MeshImporter::loadMaterialInfoFromFile: path is empty");
+        "detail::loadMaterialInfoFromSourceFile: path is empty");
   }
 
   Assimp::Importer importer;
@@ -2019,6 +1743,103 @@ MeshImporter::loadMaterialInfoFromFile(std::string_view path) {
                  set.materials.size(), pathStr.c_str());
   return nuri::Result<ImportedMaterialSet, std::string>::makeResult(
       std::move(set));
+}
+
+nuri::Result<MeshData, std::string> MeshImporter::loadSceneMeshFromFile(
+    std::string_view path, uint32_t sceneMeshIndex,
+    const MeshImportOptions &options, std::pmr::memory_resource *mem) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!mem) {
+    mem = std::pmr::get_default_resource();
+  }
+
+  const SceneImportOptions sceneOptions{.assetBuildOptions = options};
+  auto importedSceneResult =
+      SceneImporter::loadSceneFromFile(path, sceneOptions, mem);
+  if (importedSceneResult.hasError()) {
+    return detail::loadSceneMeshFromSourceIndex(path, sceneMeshIndex, options,
+                                                mem);
+  }
+
+  const ImportedScene &importedScene = importedSceneResult.value();
+  const uint32_t assetIndex =
+      findMeshAssetIndexBySourceSceneMeshIndex(importedScene, sceneMeshIndex);
+  if (assetIndex == kInvalidScenePrefabIndex) {
+    return detail::loadSceneMeshFromSourceIndex(path, sceneMeshIndex, options,
+                                                mem);
+  }
+
+  auto assetsResult = SceneImporter::buildSceneAssets(importedScene, mem);
+  if (assetsResult.hasError()) {
+    return nuri::Result<MeshData, std::string>::makeError(
+        "MeshImporter::loadSceneMeshFromFile: " + assetsResult.error());
+  }
+  ImportedSceneAssets assets = std::move(assetsResult.value());
+  if (assetIndex >= assets.meshes.size()) {
+    return nuri::Result<MeshData, std::string>::makeError(
+        "MeshImporter::loadSceneMeshFromFile: mesh asset index is unresolved");
+  }
+  return nuri::Result<MeshData, std::string>::makeResult(
+      std::move(assets.meshes[assetIndex]));
+}
+
+nuri::Result<std::pmr::vector<MeshData>, std::string>
+MeshImporter::loadSceneMeshesFromFile(
+    std::string_view path, std::span<const uint32_t> sceneMeshIndices,
+    const MeshImportOptions &options, std::pmr::memory_resource *mem) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!mem) {
+    mem = std::pmr::get_default_resource();
+  }
+  if (sceneMeshIndices.empty()) {
+    return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeResult(
+        std::pmr::vector<MeshData>(mem));
+  }
+
+  const SceneImportOptions sceneOptions{.assetBuildOptions = options};
+  auto importedSceneResult =
+      SceneImporter::loadSceneFromFile(path, sceneOptions, mem);
+  if (importedSceneResult.hasError()) {
+    return detail::loadSceneMeshesFromSourceIndices(path, sceneMeshIndices,
+                                                    options, mem);
+  }
+
+  const ImportedScene &importedScene = importedSceneResult.value();
+  std::pmr::vector<uint32_t> assetIndices(mem);
+  assetIndices.reserve(sceneMeshIndices.size());
+  for (const uint32_t sceneMeshIndex : sceneMeshIndices) {
+    const uint32_t match =
+        findMeshAssetIndexBySourceSceneMeshIndex(importedScene, sceneMeshIndex);
+    if (match == kInvalidScenePrefabIndex) {
+      return detail::loadSceneMeshesFromSourceIndices(path, sceneMeshIndices,
+                                                      options, mem);
+    }
+    assetIndices.push_back(match);
+  }
+
+  auto assetsResult = SceneImporter::buildSceneAssets(importedScene, mem);
+  if (assetsResult.hasError()) {
+    return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
+        "MeshImporter::loadSceneMeshesFromFile: " + assetsResult.error());
+  }
+  ImportedSceneAssets assets = std::move(assetsResult.value());
+  std::pmr::vector<MeshData> meshData(mem);
+  meshData.reserve(assetIndices.size());
+  for (const uint32_t assetIndex : assetIndices) {
+    if (assetIndex >= assets.meshes.size()) {
+      return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
+          "MeshImporter::loadSceneMeshesFromFile: mesh asset index is "
+          "unresolved");
+    }
+    meshData.push_back(std::move(assets.meshes[assetIndex]));
+  }
+  return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeResult(
+      std::move(meshData));
+}
+
+nuri::Result<ImportedMaterialSet, std::string>
+MeshImporter::loadMaterialInfoFromFile(std::string_view path) {
+  return detail::loadMaterialInfoFromSourceFile(path);
 }
 
 } // namespace nuri
