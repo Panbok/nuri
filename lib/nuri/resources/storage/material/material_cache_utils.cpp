@@ -8,7 +8,7 @@
 namespace nuri {
 namespace {
 
-constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
 
 void fnv1aAddBytes(uint64_t &hash, std::span<const std::byte> bytes) {
@@ -20,16 +20,20 @@ void fnv1aAddBytes(uint64_t &hash, std::span<const std::byte> bytes) {
 
 std::string hexU64(uint64_t value) { return std::format("{:016x}", value); }
 
+[[nodiscard]] uint64_t hashScenePathNormalized(std::string_view normalizedPath) {
+  uint64_t hash = kFnvOffsetBasis;
+  fnv1aAddBytes(
+      hash, {reinterpret_cast<const std::byte *>(normalizedPath.data()),
+             normalizedPath.size()});
+  return hash;
+}
+
 } // namespace
 
 uint64_t hashScenePath(const std::filesystem::path &sourcePath) {
   const std::filesystem::path normalized = normalizeMeshSourcePath(sourcePath);
   const std::string normalizedString = normalized.generic_string();
-  uint64_t hash = kFnvOffsetBasis;
-  fnv1aAddBytes(hash,
-                {reinterpret_cast<const std::byte *>(normalizedString.data()),
-                 normalizedString.size()});
-  return hash;
+  return hashScenePathNormalized(normalizedString);
 }
 
 Result<SceneMaterialCacheKey, std::string>
@@ -42,7 +46,7 @@ buildSceneMaterialCacheKey(const std::filesystem::path &sourcePath) {
     return Result<SceneMaterialCacheKey, std::string>::makeError(
         "buildSceneMaterialCacheKey: normalized source path is empty");
   }
-  key.sourcePathHash = hashScenePath(key.normalizedSourcePath);
+  key.sourcePathHash = hashScenePathNormalized(normalizedString);
   std::filesystem::path cacheDir =
       key.normalizedSourcePath.parent_path() / ".nuri_scene_cache";
   std::string stem = key.normalizedSourcePath.stem().string();

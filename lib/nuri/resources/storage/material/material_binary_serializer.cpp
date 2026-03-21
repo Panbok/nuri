@@ -29,6 +29,10 @@ materialBinarySerialize(const MaterialBinarySerializeInput &input) {
   header.sourcePathHash = input.sourcePathHash;
   header.sourceSizeBytes = input.sourceSizeBytes;
   header.sourceMtimeNs = input.sourceMtimeNs;
+  if (input.materials.size() > std::numeric_limits<uint32_t>::max()) {
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        "materialBinarySerialize: material count exceeds uint32_t range");
+  }
   header.materialCount = static_cast<uint32_t>(input.materials.size());
 
   writer.writeBytes(
@@ -93,7 +97,19 @@ materialBinaryDeserialize(std::span<const std::byte> fileBytes,
 
   material_binary_codec::Reader reader(fileBytes.subspan(sizeof(header)));
   SceneMaterialCacheData data{};
-  data.materials.reserve(header.materialCount);
+  constexpr size_t kMinSerializedMaterialRecordBytes =
+      1u + 4u + 4u + 16u + 12u + 4u + 4u + 4u + 12u + 4u + 12u + 4u + 4u +
+      4u + 4u + 4u + 4u + 4u + 12u + 4u + 4u + 4u + 4u + 4u + 1u + 1u +
+      (kMaterialTextureSlotCount * (4u + 1u + 4u + 4u + 4u + 4u + 4u + 4u +
+                                    4u + 4u + 4u + 4u + 1u + 8u));
+  const size_t remainingBytes = fileBytes.size() - sizeof(header);
+  const size_t safeMaxMaterialCount =
+      remainingBytes / kMinSerializedMaterialRecordBytes;
+  if (header.materialCount > safeMaxMaterialCount) {
+    return makeDeserializeError<SceneMaterialCacheData>(
+        "materialBinaryDeserialize: material count exceeds remaining file size");
+  }
+  data.materials.reserve(static_cast<size_t>(header.materialCount));
   for (uint32_t i = 0; i < header.materialCount; ++i) {
     auto material =
         material_binary_schema_codec::readSceneMaterialRecord(reader);

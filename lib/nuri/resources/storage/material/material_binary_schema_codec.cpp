@@ -23,6 +23,20 @@ constexpr std::array<SlotPtr, kMaterialTextureSlotCount> kMaterialSlotPtrs{{
     &MaterialData::transmission,
     &MaterialData::thickness,
 }};
+static_assert(kMaterialSlotPtrs.size() == kMaterialTextureSlotCount,
+              "kMaterialSlotPtrs must match kMaterialTextureSlotCount");
+
+constexpr uint8_t kSceneMaterialRecordFormatVersion = 1u;
+
+[[nodiscard]] constexpr bool
+isValidMaterialTextureSourceKind(uint32_t value) noexcept {
+  return value <=
+         static_cast<uint32_t>(MaterialTextureSourceKind::EmbeddedSceneTexture);
+}
+
+[[nodiscard]] constexpr bool isValidMaterialAlphaMode(uint32_t value) noexcept {
+  return value <= static_cast<uint32_t>(MaterialAlphaMode::Blend);
+}
 
 template <typename T>
 [[nodiscard]] Result<T, MaterialBinaryDeserializeError>
@@ -108,6 +122,11 @@ readTextureSlot(material_binary_codec::Reader &reader) {
         "materialBinaryDeserialize: failed to read texture slot");
   }
   slot.path = std::move(path.value());
+  if (!isValidMaterialTextureSourceKind(sourceKind.value())) {
+    return makeDeserializeError<MaterialTextureSlotData>(
+        std::format("materialBinaryDeserialize: invalid texture source kind {}",
+                    sourceKind.value()));
+  }
   slot.sourceKind = static_cast<MaterialTextureSourceKind>(sourceKind.value());
   slot.embeddedIndex = embeddedIndex.value();
   slot.uvSet = uvSet.value();
@@ -125,6 +144,7 @@ readTextureSlot(material_binary_codec::Reader &reader) {
 void writeSceneMaterialRecord(material_binary_codec::Writer &writer,
                               const SceneMaterialRecord &record) {
   const MaterialData &material = record.sourceMaterial;
+  writer.writeU8(kSceneMaterialRecordFormatVersion);
   writer.writeU32(record.sourceMaterialIndex);
   writer.writeString(material.name);
   writeVec4(writer, material.baseColorFactor);
@@ -162,6 +182,7 @@ void writeSceneMaterialRecord(material_binary_codec::Writer &writer,
 Result<SceneMaterialRecord, MaterialBinaryDeserializeError>
 readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   SceneMaterialRecord record{};
+  auto formatVersion = reader.readU8();
   auto sourceMaterialIndex = reader.readU32();
   auto name = reader.readString();
   auto baseColorFactor = readVec4(reader);
@@ -187,7 +208,7 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   auto alphaCutoff = reader.readF32();
   auto doubleSided = reader.readU8();
   auto alphaMode = reader.readU8();
-  if (sourceMaterialIndex.hasError() || name.hasError() ||
+  if (formatVersion.hasError() || sourceMaterialIndex.hasError() || name.hasError() ||
       baseColorFactor.hasError() || emissiveFactor.hasError() ||
       emissiveStrength.hasError() || metallicFactor.hasError() ||
       roughnessFactor.hasError() || specularColorFactor.hasError() ||
@@ -202,6 +223,10 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
       alphaMode.hasError()) {
     return makeDeserializeError<SceneMaterialRecord>(
         "materialBinaryDeserialize: failed to read material record");
+  }
+  if (formatVersion.value() != kSceneMaterialRecordFormatVersion) {
+    return makeDeserializeError<SceneMaterialRecord>(
+        "materialBinaryDeserialize: unsupported format version");
   }
 
   MaterialData material{};
@@ -229,7 +254,11 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   material.occlusionStrength = occlusionStrength.value();
   material.alphaCutoff = alphaCutoff.value();
   material.doubleSided = doubleSided.value() != 0u;
-  material.alphaMode = static_cast<MaterialAlphaMode>(alphaMode.value());
+  if (isValidMaterialAlphaMode(alphaMode.value())) {
+    material.alphaMode = static_cast<MaterialAlphaMode>(alphaMode.value());
+  } else {
+    material.alphaMode = MaterialAlphaMode::Opaque;
+  }
 
   for (size_t i = 0; i < kMaterialSlotPtrs.size(); ++i) {
     auto slot = readTextureSlot(reader);
