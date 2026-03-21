@@ -54,36 +54,46 @@ struct NURI_API ScenePrefabNode {
   template <typename T>
   ScenePrefabNode(const ScenePrefabNode &other,
                   const std::pmr::polymorphic_allocator<T> &alloc)
-      : parentIndex(other.parentIndex),
-        localFromParent(other.localFromParent), name(other.name, alloc.resource()) {}
+      : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
+        name(other.name, alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(ScenePrefabNode &&other,
                   const std::pmr::polymorphic_allocator<T> &alloc)
-      : parentIndex(other.parentIndex),
-        localFromParent(other.localFromParent),
+      : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
         name(std::move(other.name), alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(std::allocator_arg_t,
                   const std::pmr::polymorphic_allocator<T> &alloc,
                   const ScenePrefabNode &other)
-      : parentIndex(other.parentIndex),
-        localFromParent(other.localFromParent), name(other.name, alloc.resource()) {}
+      : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
+        name(other.name, alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(std::allocator_arg_t,
                   const std::pmr::polymorphic_allocator<T> &alloc,
                   ScenePrefabNode &&other)
-      : parentIndex(other.parentIndex),
-        localFromParent(other.localFromParent),
+      : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
         name(std::move(other.name), alloc.resource()) {}
 };
 
 struct NURI_API ScenePrefabRenderable {
   uint32_t nodeIndex = kInvalidScenePrefabIndex;
+  // These indices address ScenePrefab::meshAssets/materialAssets rather than
+  // raw source-scene ordinals.
   uint32_t meshIndex = kInvalidScenePrefabIndex;
   uint32_t materialIndex = kInvalidScenePrefabIndex;
+};
+
+struct NURI_API ScenePrefabMeshAssetRef {
+  uint32_t sourceSceneMeshIndex = kInvalidScenePrefabIndex;
+  std::string sourceName{};
+};
+
+struct NURI_API ScenePrefabMaterialAssetRef {
+  uint32_t sourceMaterialIndex = kInvalidScenePrefabIndex;
+  std::string sourceName{};
 };
 
 struct NURI_API ScenePrefabLight {
@@ -94,17 +104,18 @@ struct NURI_API ScenePrefabLight {
 struct NURI_API ScenePrefab {
   explicit ScenePrefab(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : nodes(memory), renderables(memory), lights(memory), sourcePath(memory),
+      : nodes(memory), renderables(memory), meshAssets(memory),
+        materialAssets(memory), lights(memory), sourcePath(memory),
         sourceSceneName(memory) {}
 
   std::pmr::vector<ScenePrefabNode> nodes;
   std::pmr::vector<ScenePrefabRenderable> renderables;
+  std::pmr::vector<ScenePrefabMeshAssetRef> meshAssets;
+  std::pmr::vector<ScenePrefabMaterialAssetRef> materialAssets;
   std::pmr::vector<ScenePrefabLight> lights;
   std::pmr::string sourcePath;
   std::pmr::string sourceSceneName;
   MeshImportOptions importOptions{};
-  uint32_t meshCount = 0;
-  uint32_t materialCount = 0;
 };
 
 struct NURI_API ScenePrefabAssets {
@@ -131,7 +142,7 @@ struct NURI_API SceneInstantiationMap {
 namespace std {
 
 template <typename T>
-struct uses_allocator<nuri::ScenePrefabNode,
-                      std::pmr::polymorphic_allocator<T>> : true_type {};
+struct uses_allocator<nuri::ScenePrefabNode, std::pmr::polymorphic_allocator<T>>
+    : true_type {};
 
 } // namespace std
