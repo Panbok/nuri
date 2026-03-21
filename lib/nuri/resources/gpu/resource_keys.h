@@ -19,8 +19,9 @@ namespace nuri {
 enum class TextureRequestKind : uint8_t {
   Texture2D = 0,
   Ktx2Texture2D = 1,
-  Ktx2Cubemap = 2,
-  EquirectHdrCubemap = 3,
+  PortableKtx2Texture2D = 2,
+  Ktx2Cubemap = 3,
+  EquirectHdrCubemap = 4,
 };
 
 struct TextureKey {
@@ -47,9 +48,11 @@ struct TextureKeyHash {
 struct ModelKey {
   std::string canonicalPath{};
   uint64_t importOptionsHash = 0;
+  uint32_t sceneMeshIndex = std::numeric_limits<uint32_t>::max();
 
   bool operator==(const ModelKey &rhs) const noexcept {
     return importOptionsHash == rhs.importOptionsHash &&
+           sceneMeshIndex == rhs.sceneMeshIndex &&
            canonicalPath == rhs.canonicalPath;
   }
 };
@@ -58,7 +61,9 @@ struct ModelKeyHash {
   size_t operator()(const ModelKey &key) const noexcept {
     const size_t h1 = std::hash<std::string>{}(key.canonicalPath);
     const size_t h2 = std::hash<uint64_t>{}(key.importOptionsHash);
-    return h1 ^ (h2 + 0x9e3779b9u + (h1 << 6u) + (h1 >> 2u));
+    const size_t h3 = std::hash<uint32_t>{}(key.sceneMeshIndex);
+    return h1 ^ (h2 + 0x9e3779b9u + (h1 << 6u) + (h1 >> 2u)) ^
+           (h3 + 0x9e3779b9u + (h2 << 6u) + (h2 >> 2u));
   }
 };
 

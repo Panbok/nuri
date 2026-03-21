@@ -5,10 +5,15 @@
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/resources/mesh_importer.h"
+#include "nuri/resources/storage/material/material_binary_serializer.h"
+#include "nuri/resources/storage/material/material_cache_utils.h"
+#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
 
 namespace nuri {
 
 namespace {
+
+constexpr bool kEnablePortableSceneTextureRuntime = true;
 
 struct MaterialTextureResolveSpec {
   const char *slotName = nullptr;
@@ -38,7 +43,8 @@ constexpr std::array<MaterialTextureResolveSpec, kMaterialTextureSlotCount>
          &MaterialTextureHandles::emissive},
         {"clearcoat", &MaterialRequest::TextureRefs::clearcoat,
          &MaterialTextureHandles::clearcoat},
-        {"clearcoatRoughness", &MaterialRequest::TextureRefs::clearcoatRoughness,
+        {"clearcoatRoughness",
+         &MaterialRequest::TextureRefs::clearcoatRoughness,
          &MaterialTextureHandles::clearcoatRoughness},
         {"clearcoatNormal", &MaterialRequest::TextureRefs::clearcoatNormal,
          &MaterialTextureHandles::clearcoatNormal},
@@ -93,51 +99,292 @@ constexpr std::array<ImportedTextureAcquireSpec, kMaterialTextureSlotCount>
          &MaterialRequest::TextureRefs::thickness},
     }};
 
-template <typename SlotT, typename RefT>
+[[nodiscard]] ModelKey makeSceneMeshModelKey(std::string_view canonicalPath,
+                                             uint64_t optionsHash,
+                                             uint32_t sceneMeshIndex) {
+  return ModelKey{.canonicalPath = std::string(canonicalPath),
+                  .importOptionsHash = optionsHash,
+                  .sceneMeshIndex = sceneMeshIndex};
+}
+
+[[nodiscard]] std::string
+makeScenePrefabMeshDebugName(uint32_t sceneMeshIndex) {
+  return "scene_prefab_mesh_" + std::to_string(sceneMeshIndex);
+}
+
+template <typename SlotT, typename SlotMetaT, typename RefT>
 [[nodiscard]] bool isSlotLiveForRef(const std::pmr::vector<SlotT> &slots,
-                                    RefT ref) {
+                                    const SlotMetaT &slotMeta, RefT ref) {
   if (!isValid(ref)) {
     return false;
   }
   const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= slots.size()) {
-    return false;
-  }
-  const SlotT &slot = slots[parts.index];
-  return slot.live && slot.generation == parts.generation;
+  return parts.index < slots.size() &&
+         slotMeta.isValid(parts.index, parts.generation);
 }
 
-template <typename SlotT, typename RefT>
-[[nodiscard]] SlotT *tryGetSlotImpl(std::pmr::vector<SlotT> &slots, RefT ref) {
+template <typename SlotT, typename SlotMetaT, typename RefT>
+[[nodiscard]] SlotT *tryGetSlotImpl(std::pmr::vector<SlotT> &slots,
+                                    const SlotMetaT &slotMeta, RefT ref) {
   if (!isValid(ref)) {
     return nullptr;
   }
   const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= slots.size()) {
+  if (parts.index >= slots.size() ||
+      !slotMeta.isValid(parts.index, parts.generation)) {
     return nullptr;
   }
-  SlotT &slot = slots[parts.index];
-  if (!slot.live || slot.generation != parts.generation) {
-    return nullptr;
-  }
-  return &slot;
+  return &slots[parts.index];
 }
 
-template <typename SlotT, typename RefT>
+template <typename SlotT, typename SlotMetaT, typename RefT>
 [[nodiscard]] const SlotT *tryGetSlotImpl(const std::pmr::vector<SlotT> &slots,
-                                          RefT ref) {
+                                          const SlotMetaT &slotMeta, RefT ref) {
   if (!isValid(ref)) {
     return nullptr;
   }
   const ResourceHandleParts parts = unpackResourceHandle(ref.value);
-  if (parts.index >= slots.size()) {
+  if (parts.index >= slots.size() ||
+      !slotMeta.isValid(parts.index, parts.generation)) {
     return nullptr;
   }
-  const SlotT &slot = slots[parts.index];
-  if (!slot.live || slot.generation != parts.generation) {
-    return nullptr;
+  return &slots[parts.index];
+}
+
+[[nodiscard]] Result<SlotReservation, std::string>
+makeResourceSlotOverflowError(std::string_view context) {
+  return Result<SlotReservation, std::string>::makeError(
+      std::string(context) + ": slot pool exhausted");
+}
+
+template <typename Pool>
+[[nodiscard]] bool slotPoolExhausted(const Pool &pool,
+                                     uint32_t maxIndex) noexcept {
+  const uint32_t slotCount = pool.slotCount();
+  return slotCount > maxIndex + 1u ||
+         (slotCount == maxIndex + 1u && pool.liveCount() == slotCount);
+}
+
+[[nodiscard]] std::optional<SceneMaterialCacheData>
+tryLoadSceneMaterialCache(std::string_view sourcePath) {
+  auto cacheKeyResult = buildSceneMaterialCacheKey(
+      std::filesystem::path(std::string(sourcePath)));
+  if (cacheKeyResult.hasError()) {
+    NURI_LOG_WARNING("tryLoadSceneMaterialCache: failed to build cache key "
+                     "for '%.*s': %s",
+                     static_cast<int>(sourcePath.size()), sourcePath.data(),
+                     cacheKeyResult.error().c_str());
+    return std::nullopt;
   }
-  return &slot;
+
+  const SceneMaterialCacheKey &cacheKey = cacheKeyResult.value();
+  std::error_code ec;
+  if (!std::filesystem::exists(cacheKey.cachePath, ec) || ec ||
+      !std::filesystem::is_regular_file(cacheKey.cachePath, ec) || ec) {
+    return std::nullopt;
+  }
+
+  auto readResult = readBinaryFile(cacheKey.cachePath);
+  if (readResult.hasError()) {
+    NURI_LOG_WARNING("tryLoadSceneMaterialCache: failed to read cache '%s': %s",
+                     cacheKey.cachePath.string().c_str(),
+                     readResult.error().c_str());
+    return std::nullopt;
+  }
+
+  const SceneSourceFingerprint sourceFingerprint =
+      querySceneSourceFingerprint(cacheKey.normalizedSourcePath);
+  MaterialBinaryDeserializeContext context{};
+  context.expectedSourcePathHash = cacheKey.sourcePathHash;
+  context.validateSourceFingerprint = true;
+  context.sourceExists = sourceFingerprint.exists;
+  context.sourceSizeBytes = sourceFingerprint.sizeBytes;
+  context.sourceMtimeNs = sourceFingerprint.mtimeNs;
+
+  auto deserializeResult =
+      materialBinaryDeserialize(readResult.value(), context);
+  if (deserializeResult.hasError()) {
+    const MaterialBinaryDeserializeError &error = deserializeResult.error();
+    if (error.isStale()) {
+      NURI_LOG_DEBUG("tryLoadSceneMaterialCache: stale cache '%s': %s",
+                     cacheKey.cachePath.string().c_str(),
+                     error.message.c_str());
+    } else {
+      NURI_LOG_WARNING(
+          "tryLoadSceneMaterialCache: failed to deserialize cache '%s': %s",
+          cacheKey.cachePath.string().c_str(), error.message.c_str());
+    }
+    return std::nullopt;
+  }
+
+  return deserializeResult.value();
+}
+
+[[nodiscard]] Result<TextureRef, std::string> acquireExternalImportedTexture(
+    ResourceManager &resources, const ImportedMaterialTexture &slotData,
+    bool srgb, TextureRequestKind kind, std::string_view debugName,
+    bool generateMipmaps) {
+  if (slotData.sourceKind != MaterialTextureSourceKind::ExternalFile ||
+      slotData.path.empty()) {
+    return Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
+  }
+
+  TextureRequest textureRequest{};
+  textureRequest.path = slotData.path;
+  textureRequest.loadOptions =
+      TextureLoadOptions{.srgb = srgb, .generateMipmaps = generateMipmaps};
+  textureRequest.kind = kind;
+  textureRequest.debugName = std::string(debugName);
+  return resources.acquireTexture(textureRequest);
+}
+
+void releaseMaterialTextureRefs(ResourceManager &resources,
+                                const MaterialRequest::TextureRefs &refs) {
+  forEachMaterialTextureRef(refs, [&resources](TextureRef textureRef) {
+    if (isValid(textureRef)) {
+      resources.release(textureRef);
+    }
+  });
+}
+
+[[nodiscard]] std::string
+makeImportedTextureDebugName(std::string_view debugNamePrefix,
+                             std::string_view debugSuffix,
+                             uint32_t sourceMaterialIndex) {
+  return std::string(debugNamePrefix) + std::string(debugSuffix) +
+         std::to_string(sourceMaterialIndex);
+}
+
+[[nodiscard]] std::string
+makeImportedMaterialDebugName(std::string_view debugNamePrefix,
+                              const ImportedMaterialInfo &imported,
+                              uint32_t sourceMaterialIndex) {
+  if (imported.name.empty()) {
+    return std::string(debugNamePrefix) + "_material_" +
+           std::to_string(sourceMaterialIndex);
+  }
+  return std::string(debugNamePrefix) + "_" + imported.name;
+}
+
+[[nodiscard]] std::string
+makeImportedMaterialSourceIdentity(std::string_view canonicalModelPath,
+                                   uint32_t sourceMaterialIndex) {
+  return std::string(canonicalModelPath) + "#" +
+         std::to_string(sourceMaterialIndex);
+}
+
+[[nodiscard]] MaterialRequest::TextureRefs acquireRawImportedTextureRefs(
+    ResourceManager &resources, const ImportedMaterialInfo &imported,
+    std::string_view logContext, std::string_view debugNamePrefix,
+    uint32_t sourceMaterialIndex) {
+  MaterialRequest::TextureRefs textureRefs{};
+  for (const ImportedTextureAcquireSpec &spec : kImportedTextureAcquireSpecs) {
+    auto textureResult = acquireExternalImportedTexture(
+        resources, imported.*(spec.slot), spec.srgb,
+        TextureRequestKind::Texture2D,
+        makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
+                                     sourceMaterialIndex),
+        true);
+    if (textureResult.hasError()) {
+      NURI_LOG_WARNING("%.*s: %s load failed for material %u: %s",
+                       static_cast<int>(logContext.size()), logContext.data(),
+                       spec.logName, sourceMaterialIndex,
+                       textureResult.error().c_str());
+      continue;
+    }
+    textureRefs.*(spec.outRef) = textureResult.value();
+  }
+  return textureRefs;
+}
+
+struct CachedTextureRefsAcquireResult {
+  MaterialRequest::TextureRefs refs{};
+  bool cacheUsable = true;
+};
+
+[[nodiscard]] CachedTextureRefsAcquireResult acquireCachedImportedTextureRefs(
+    ResourceManager &resources, const ImportedMaterialInfo &imported,
+    const SceneMaterialRecord &cached, std::string_view logContext,
+    std::string_view debugNamePrefix) {
+  CachedTextureRefsAcquireResult result{};
+  for (size_t slotIndex = 0; slotIndex < kImportedTextureAcquireSpecs.size();
+       ++slotIndex) {
+    const ImportedTextureAcquireSpec &spec =
+        kImportedTextureAcquireSpecs[slotIndex];
+    const SceneMaterialTextureCacheRecord &cacheRecord =
+        cached.textureCache[slotIndex];
+    const ImportedMaterialTexture &sourceSlot = imported.*(spec.slot);
+    const bool slotExpected =
+        !cacheRecord.portablePath.empty() ||
+        sourceSlot.sourceKind != MaterialTextureSourceKind::None;
+    auto textureResult =
+        Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
+
+    std::error_code ec;
+    if (kEnablePortableSceneTextureRuntime &&
+        !cacheRecord.portablePath.empty() &&
+        std::filesystem::exists(cacheRecord.portablePath, ec) && !ec) {
+      textureResult = acquireExternalImportedTexture(
+          resources,
+          ImportedMaterialTexture{
+              .path = cacheRecord.portablePath,
+              .sourceKind = MaterialTextureSourceKind::ExternalFile,
+          },
+          cacheRecord.srgb, TextureRequestKind::PortableKtx2Texture2D,
+          makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
+                                       cached.sourceMaterialIndex),
+          false);
+      if (textureResult.hasError()) {
+        NURI_LOG_WARNING("%.*s: portable %s load failed for material %u: %s",
+                         static_cast<int>(logContext.size()), logContext.data(),
+                         spec.logName, cached.sourceMaterialIndex,
+                         textureResult.error().c_str());
+      }
+    }
+
+    if (textureResult.hasError() || !isValid(textureResult.value())) {
+      textureResult = acquireExternalImportedTexture(
+          resources, sourceSlot, spec.srgb, TextureRequestKind::Texture2D,
+          makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
+                                       cached.sourceMaterialIndex),
+          true);
+      if (textureResult.hasError()) {
+        NURI_LOG_WARNING("%.*s: raw %s load failed for material %u: %s",
+                         static_cast<int>(logContext.size()), logContext.data(),
+                         spec.logName, cached.sourceMaterialIndex,
+                         textureResult.error().c_str());
+        continue;
+      }
+    }
+
+    if (slotExpected && !isValid(textureResult.value())) {
+      result.cacheUsable = false;
+      NURI_LOG_WARNING(
+          "%.*s: cache miss left required %s unresolved for material %u; "
+          "falling back to raw import path",
+          static_cast<int>(logContext.size()), logContext.data(), spec.logName,
+          cached.sourceMaterialIndex);
+      break;
+    }
+    result.refs.*(spec.outRef) = textureResult.value();
+  }
+  return result;
+}
+
+[[nodiscard]] Result<MaterialRef, std::string> acquireImportedMaterialInstance(
+    ResourceManager &resources, const ImportedMaterialInfo &imported,
+    const MaterialRequest::TextureRefs &textureRefs,
+    std::string_view canonicalModelPath, std::string_view debugNamePrefix,
+    uint32_t sourceMaterialIndex) {
+  const MaterialTextureHandles emptyHandles{};
+  return resources.acquireMaterial(MaterialRequest{
+      .desc = Material::descFromImported(imported, emptyHandles),
+      .textureRefs = textureRefs,
+      .debugName = makeImportedMaterialDebugName(debugNamePrefix, imported,
+                                                 sourceMaterialIndex),
+      .sourceIdentity = makeImportedMaterialSourceIdentity(canonicalModelPath,
+                                                           sourceMaterialIndex),
+  });
 }
 
 } // namespace
@@ -154,25 +401,25 @@ ResourceManager::ResourceManager(GPUDevice &gpu,
     : gpu_(gpu),
       memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
       textureSlots_(memory_), materialSlots_(memory_), modelSlots_(memory_),
-      freeTextureSlots_(memory_), freeMaterialSlots_(memory_),
-      freeModelSlots_(memory_), materialGpuTable_(memory_), textureCache_(),
+      textureSlotsMeta_(memory_), materialSlotsMeta_(memory_),
+      modelSlotsMeta_(memory_), materialGpuTable_(memory_), textureCache_(),
       materialCache_(), modelCache_() {}
 
 ResourceManager::~ResourceManager() {
   // Dependency order:
   // model mappings reference materials, materials reference textures.
   for (uint32_t i = 0; i < modelSlots_.size(); ++i) {
-    if (modelSlots_[i].live) {
+    if (modelSlotsMeta_.isLive(i)) {
       destroyModelSlot(i);
     }
   }
   for (uint32_t i = 0; i < materialSlots_.size(); ++i) {
-    if (materialSlots_[i].live) {
+    if (materialSlotsMeta_.isLive(i)) {
       destroyMaterialSlot(i);
     }
   }
   for (uint32_t i = 0; i < textureSlots_.size(); ++i) {
-    if (textureSlots_[i].live) {
+    if (textureSlotsMeta_.isLive(i)) {
       destroyTextureSlot(i);
     }
   }
@@ -184,78 +431,83 @@ uint64_t ResourceManager::retireLagFrames() const {
 }
 
 TextureRef ResourceManager::makeTextureRefForSlot(uint32_t index) const {
-  return makeTextureRef(index, textureSlots_[index].generation);
+  return makeTextureRef(index, textureSlotsMeta_.generation(index));
 }
 
 MaterialRef ResourceManager::makeMaterialRefForSlot(uint32_t index) const {
-  return makeMaterialRef(index, materialSlots_[index].generation);
+  return makeMaterialRef(index, materialSlotsMeta_.generation(index));
 }
 
 ModelRef ResourceManager::makeModelRefForSlot(uint32_t index) const {
-  return makeModelRef(index, modelSlots_[index].generation);
+  return makeModelRef(index, modelSlotsMeta_.generation(index));
 }
 
 ResourceManager::TextureSlot *ResourceManager::tryGetSlot(TextureRef ref) {
-  return tryGetSlotImpl(textureSlots_, ref);
+  return tryGetSlotImpl(textureSlots_, textureSlotsMeta_, ref);
 }
 
 ResourceManager::MaterialSlot *ResourceManager::tryGetSlot(MaterialRef ref) {
-  return tryGetSlotImpl(materialSlots_, ref);
+  return tryGetSlotImpl(materialSlots_, materialSlotsMeta_, ref);
 }
 
 ResourceManager::ModelSlot *ResourceManager::tryGetSlot(ModelRef ref) {
-  return tryGetSlotImpl(modelSlots_, ref);
+  return tryGetSlotImpl(modelSlots_, modelSlotsMeta_, ref);
 }
 
 const ResourceManager::TextureSlot *
 ResourceManager::tryGetSlot(TextureRef ref) const {
-  return tryGetSlotImpl(textureSlots_, ref);
+  return tryGetSlotImpl(textureSlots_, textureSlotsMeta_, ref);
 }
 
 const ResourceManager::MaterialSlot *
 ResourceManager::tryGetSlot(MaterialRef ref) const {
-  return tryGetSlotImpl(materialSlots_, ref);
+  return tryGetSlotImpl(materialSlots_, materialSlotsMeta_, ref);
 }
 
 const ResourceManager::ModelSlot *
 ResourceManager::tryGetSlot(ModelRef ref) const {
-  return tryGetSlotImpl(modelSlots_, ref);
+  return tryGetSlotImpl(modelSlots_, modelSlotsMeta_, ref);
 }
 
-uint32_t ResourceManager::allocateTextureSlot() {
-  if (!freeTextureSlots_.empty()) {
-    const uint32_t index = freeTextureSlots_.back();
-    freeTextureSlots_.pop_back();
-    return index;
+Result<SlotReservation, std::string> ResourceManager::allocateTextureSlot() {
+  if (slotPoolExhausted(textureSlotsMeta_, kResourceHandleIndexMask)) {
+    return makeResourceSlotOverflowError(
+        "ResourceManager::allocateTextureSlot");
   }
-  textureSlots_.emplace_back(memory_);
-  return static_cast<uint32_t>(textureSlots_.size() - 1u);
+  const SlotReservation slot = textureSlotsMeta_.acquire();
+  if (slot.appended) {
+    textureSlots_.emplace_back(memory_);
+  }
+  return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
-uint32_t ResourceManager::allocateMaterialSlot() {
-  if (!freeMaterialSlots_.empty()) {
-    const uint32_t index = freeMaterialSlots_.back();
-    freeMaterialSlots_.pop_back();
-    return index;
+Result<SlotReservation, std::string> ResourceManager::allocateMaterialSlot() {
+  if (slotPoolExhausted(materialSlotsMeta_, kResourceHandleIndexMask)) {
+    return makeResourceSlotOverflowError(
+        "ResourceManager::allocateMaterialSlot");
   }
-  materialSlots_.emplace_back(memory_);
-  materialGpuTable_.push_back(MaterialGpuData{});
-  return static_cast<uint32_t>(materialSlots_.size() - 1u);
+  const SlotReservation slot = materialSlotsMeta_.acquire();
+  if (slot.appended) {
+    materialSlots_.emplace_back(memory_);
+    materialGpuTable_.push_back(MaterialGpuData{});
+  }
+  return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
-uint32_t ResourceManager::allocateModelSlot() {
-  if (!freeModelSlots_.empty()) {
-    const uint32_t index = freeModelSlots_.back();
-    freeModelSlots_.pop_back();
-    return index;
+Result<SlotReservation, std::string> ResourceManager::allocateModelSlot() {
+  if (slotPoolExhausted(modelSlotsMeta_, kResourceHandleIndexMask)) {
+    return makeResourceSlotOverflowError("ResourceManager::allocateModelSlot");
   }
-  modelSlots_.emplace_back(memory_);
-  return static_cast<uint32_t>(modelSlots_.size() - 1u);
+  const SlotReservation slot = modelSlotsMeta_.acquire();
+  if (slot.appended) {
+    modelSlots_.emplace_back(memory_);
+  }
+  return Result<SlotReservation, std::string>::makeResult(slot);
 }
 
 void ResourceManager::destroyTextureSlot(uint32_t index) {
   TextureSlot &slot = textureSlots_[index];
-  if (!slot.live) {
+  if (!textureSlotsMeta_.isLive(index)) {
     return;
   }
 
@@ -270,26 +522,24 @@ void ResourceManager::destroyTextureSlot(uint32_t index) {
   };
   textureCache_.erase(key);
 
-  slot.live = false;
   slot.refCount = 0;
   slot.retireAfterFrame = kRetireFrameUnset;
-  slot.generation = nextResourceGeneration(slot.generation);
   slot.record = TextureRecord(memory_);
-  freeTextureSlots_.push_back(index);
+  textureSlotsMeta_.release(index);
 }
 
 void ResourceManager::destroyMaterialSlot(uint32_t index) {
   MaterialSlot &slot = materialSlots_[index];
-  if (!slot.live) {
+  if (!materialSlotsMeta_.isLive(index)) {
     return;
   }
 
   forEachMaterialTextureRef(slot.record.textureRefs,
                             [this](TextureRef textureRef) {
-    if (isValid(textureRef)) {
-      release(textureRef);
-    }
-  });
+                              if (isValid(textureRef)) {
+                                release(textureRef);
+                              }
+                            });
 
   const MaterialKey key{
       .descHash = slot.record.descHash,
@@ -297,21 +547,19 @@ void ResourceManager::destroyMaterialSlot(uint32_t index) {
   };
   materialCache_.erase(key);
 
-  slot.live = false;
   slot.refCount = 0;
   slot.retireAfterFrame = kRetireFrameUnset;
-  slot.generation = nextResourceGeneration(slot.generation);
   slot.record = MaterialRecord(memory_);
   if (index < materialGpuTable_.size()) {
     materialGpuTable_[index] = MaterialGpuData{};
   }
   ++materialTableVersion_;
-  freeMaterialSlots_.push_back(index);
+  materialSlotsMeta_.release(index);
 }
 
 void ResourceManager::destroyModelSlot(uint32_t index) {
   ModelSlot &slot = modelSlots_[index];
-  if (!slot.live) {
+  if (!modelSlotsMeta_.isLive(index)) {
     return;
   }
 
@@ -324,15 +572,14 @@ void ResourceManager::destroyModelSlot(uint32_t index) {
   const ModelKey key{
       .canonicalPath = std::string(slot.record.canonicalPath),
       .importOptionsHash = slot.record.importOptionsHash,
+      .sceneMeshIndex = slot.record.sceneMeshIndex,
   };
   modelCache_.erase(key);
 
-  slot.live = false;
   slot.refCount = 0;
   slot.retireAfterFrame = kRetireFrameUnset;
-  slot.generation = nextResourceGeneration(slot.generation);
   slot.record = ModelRecord(memory_);
-  freeModelSlots_.push_back(index);
+  modelSlotsMeta_.release(index);
 }
 
 Result<TextureRef, std::string>
@@ -374,6 +621,10 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
     textureResult =
         Texture::loadTextureKtx2(gpu_, canonicalPath, request.debugName);
     break;
+  case TextureRequestKind::PortableKtx2Texture2D:
+    textureResult = Texture::loadPortableTextureKtx2(
+        gpu_, canonicalPath, request.loadOptions, request.debugName);
+    break;
   case TextureRequestKind::Ktx2Cubemap:
     textureResult =
         Texture::loadCubemapKtx2(gpu_, canonicalPath, request.debugName);
@@ -394,10 +645,13 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
         "ResourceManager::acquireTexture: loaded texture is invalid");
   }
 
-  const uint32_t slotIndex = allocateTextureSlot();
+  auto slotResult = allocateTextureSlot();
+  if (slotResult.hasError()) {
+    return Result<TextureRef, std::string>::makeError(slotResult.error());
+  }
+  const uint32_t slotIndex = slotResult.value().index;
   TextureSlot &slot = textureSlots_[slotIndex];
   const TextureRef ref = makeTextureRefForSlot(slotIndex);
-  slot.live = true;
   slot.refCount = 1;
   slot.retireAfterFrame = kRetireFrameUnset;
 
@@ -424,6 +678,49 @@ ResourceManager::acquireTexture(const TextureRequest &request) {
   return Result<TextureRef, std::string>::makeResult(ref);
 }
 
+ModelRef ResourceManager::tryAcquireCachedModel(const ModelKey &key) {
+  if (auto it = modelCache_.find(key); it != modelCache_.end()) {
+    if (ModelSlot *cached = tryGetSlot(it->second)) {
+      ++cached->refCount;
+      cached->retireAfterFrame = kRetireFrameUnset;
+      return it->second;
+    }
+    modelCache_.erase(it);
+  }
+  return kInvalidModelRef;
+}
+
+Result<ModelRef, std::string> ResourceManager::storeAcquiredModel(
+    const ModelKey &key, std::string_view canonicalPath, uint64_t optionsHash,
+    const ModelRequest &request, std::unique_ptr<Model> model) {
+  if (!model) {
+    return Result<ModelRef, std::string>::makeError(
+        "ResourceManager::storeAcquiredModel: model creation returned null");
+  }
+
+  auto slotResult = allocateModelSlot();
+  if (slotResult.hasError()) {
+    return Result<ModelRef, std::string>::makeError(slotResult.error());
+  }
+  const uint32_t slotIndex = slotResult.value().index;
+  ModelSlot &slot = modelSlots_[slotIndex];
+  const ModelRef ref = makeModelRefForSlot(slotIndex);
+  slot.refCount = 1;
+  slot.retireAfterFrame = kRetireFrameUnset;
+
+  slot.record = ModelRecord(memory_);
+  slot.record.ref = ref;
+  slot.record.model = std::move(model);
+  slot.record.canonicalPath.assign(canonicalPath.data(), canonicalPath.size());
+  slot.record.importOptionsHash = optionsHash;
+  slot.record.sceneMeshIndex = request.sceneMeshIndex;
+  slot.record.sourceMaterialToRuntime.assign(
+      slot.record.model->sourceMaterialCount(), kInvalidMaterialRef);
+
+  modelCache_.emplace(key, ref);
+  return Result<ModelRef, std::string>::makeResult(ref);
+}
+
 Result<ModelRef, std::string>
 ResourceManager::acquireModel(const ModelRequest &request) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
@@ -435,48 +732,37 @@ ResourceManager::acquireModel(const ModelRequest &request) {
   const std::string canonicalPath = canonicalizeResourcePath(request.path);
   const uint64_t optionsHash = hashModelImportOptions(request.importOptions);
   ModelKey key{.canonicalPath = canonicalPath,
-               .importOptionsHash = optionsHash};
+               .importOptionsHash = optionsHash,
+               .sceneMeshIndex = request.sceneMeshIndex};
 
-  if (auto it = modelCache_.find(key); it != modelCache_.end()) {
-    if (ModelSlot *cached = tryGetSlot(it->second)) {
-      ++cached->refCount;
-      cached->retireAfterFrame = kRetireFrameUnset;
-      ++telemetry_.modelAcquireHits;
-      return Result<ModelRef, std::string>::makeResult(it->second);
-    }
-    modelCache_.erase(it);
+  if (const ModelRef cachedRef = tryAcquireCachedModel(key);
+      isValid(cachedRef)) {
+    ++telemetry_.modelAcquireHits;
+    return Result<ModelRef, std::string>::makeResult(cachedRef);
   }
   ++telemetry_.modelAcquireMisses;
 
-  auto modelResult = Model::createFromFile(
-      gpu_, canonicalPath, request.importOptions, memory_, request.debugName);
+  Result<std::unique_ptr<Model>, std::string> modelResult =
+      Result<std::unique_ptr<Model>, std::string>::makeError(
+          "ResourceManager::acquireModel: uninitialized result");
+  if (request.sceneMeshIndex == std::numeric_limits<uint32_t>::max()) {
+    modelResult = Model::createFromFile(
+        gpu_, canonicalPath, request.importOptions, memory_, request.debugName);
+  } else {
+    auto meshDataResult = MeshImporter::loadSceneMeshFromFile(
+        canonicalPath, request.sceneMeshIndex, request.importOptions, memory_);
+    if (meshDataResult.hasError()) {
+      return Result<ModelRef, std::string>::makeError(meshDataResult.error());
+    }
+    modelResult =
+        Model::create(gpu_, meshDataResult.value(), request.debugName);
+  }
   if (modelResult.hasError()) {
     return Result<ModelRef, std::string>::makeError(modelResult.error());
   }
 
-  std::unique_ptr<Model> model = std::move(modelResult.value());
-  if (!model) {
-    return Result<ModelRef, std::string>::makeError(
-        "ResourceManager::acquireModel: model creation returned null");
-  }
-
-  const uint32_t slotIndex = allocateModelSlot();
-  ModelSlot &slot = modelSlots_[slotIndex];
-  const ModelRef ref = makeModelRefForSlot(slotIndex);
-  slot.live = true;
-  slot.refCount = 1;
-  slot.retireAfterFrame = kRetireFrameUnset;
-
-  slot.record = ModelRecord(memory_);
-  slot.record.ref = ref;
-  slot.record.model = std::move(model);
-  slot.record.canonicalPath = canonicalPath;
-  slot.record.importOptionsHash = optionsHash;
-  slot.record.sourceMaterialToRuntime.assign(
-      slot.record.model->sourceMaterialCount(), kInvalidMaterialRef);
-
-  modelCache_.emplace(std::move(key), ref);
-  return Result<ModelRef, std::string>::makeResult(ref);
+  return storeAcquiredModel(key, canonicalPath, optionsHash, request,
+                            std::move(modelResult.value()));
 }
 
 Result<MaterialRef, std::string>
@@ -500,12 +786,11 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   };
 
   for (const MaterialTextureResolveSpec &spec : kMaterialTextureResolveSpecs) {
-    auto resolveResult = resolveTextureSlot(request.textureRefs.*(spec.ref),
-                                            resolvedDesc.textures.*(spec.handle),
-                                            spec.slotName);
+    auto resolveResult =
+        resolveTextureSlot(request.textureRefs.*(spec.ref),
+                           resolvedDesc.textures.*(spec.handle), spec.slotName);
     if (resolveResult.hasError()) {
-      return Result<MaterialRef, std::string>::makeError(
-          resolveResult.error());
+      return Result<MaterialRef, std::string>::makeError(resolveResult.error());
     }
   }
 
@@ -532,10 +817,13 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   }
 
   const Material &material = *materialResult.value();
-  const uint32_t slotIndex = allocateMaterialSlot();
+  auto slotResult = allocateMaterialSlot();
+  if (slotResult.hasError()) {
+    return Result<MaterialRef, std::string>::makeError(slotResult.error());
+  }
+  const uint32_t slotIndex = slotResult.value().index;
   MaterialSlot &slot = materialSlots_[slotIndex];
   const MaterialRef ref = makeMaterialRefForSlot(slotIndex);
-  slot.live = true;
   slot.refCount = 1;
   slot.retireAfterFrame = kRetireFrameUnset;
 
@@ -550,10 +838,10 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
 
   forEachMaterialTextureRef(slot.record.textureRefs,
                             [this](TextureRef textureRef) {
-    if (isValid(textureRef)) {
-      retain(textureRef);
-    }
-  });
+                              if (isValid(textureRef)) {
+                                retain(textureRef);
+                              }
+                            });
 
   if (slotIndex >= materialGpuTable_.size()) {
     materialGpuTable_.resize(slotIndex + 1u);
@@ -585,6 +873,94 @@ ResourceManager::acquireMaterialsFromModel(
         "ResourceManager::acquireMaterialsFromModel: invalid model handle");
   }
 
+  ImportedMaterialBatch batch{};
+  const std::string canonicalModelPath =
+      canonicalizeResourcePath(request.modelPath);
+
+  if (auto cachedMaterials = tryLoadSceneMaterialCache(request.modelPath);
+      cachedMaterials.has_value()) {
+    std::optional<ImportedMaterialSet> importedMaterialSet{};
+    if (auto materialInfoResult =
+            MeshImporter::loadMaterialInfoFromFile(request.modelPath);
+        !materialInfoResult.hasError()) {
+      importedMaterialSet = std::move(materialInfoResult.value());
+    }
+
+    struct PendingCachedMaterial {
+      uint32_t sourceMaterialIndex = 0u;
+      MaterialRef material = kInvalidMaterialRef;
+    };
+
+    std::vector<PendingCachedMaterial> pendingMaterials{};
+    pendingMaterials.reserve(cachedMaterials->materials.size());
+    bool cacheUsable = true;
+
+    for (const SceneMaterialRecord &cached : cachedMaterials->materials) {
+      const ImportedMaterialInfo *imported = &cached.sourceMaterial;
+      if (importedMaterialSet.has_value() &&
+          cached.sourceMaterialIndex < importedMaterialSet->materials.size()) {
+        imported = &importedMaterialSet->materials[cached.sourceMaterialIndex];
+      }
+
+      const CachedTextureRefsAcquireResult textureRefsResult =
+          acquireCachedImportedTextureRefs(
+              *this, *imported, cached,
+              "ResourceManager::acquireMaterialsFromModel",
+              request.debugNamePrefix);
+
+      if (!textureRefsResult.cacheUsable) {
+        cacheUsable = false;
+        releaseMaterialTextureRefs(*this, textureRefsResult.refs);
+        break;
+      }
+
+      const uint32_t sourceMaterialIndex = cached.sourceMaterialIndex;
+      auto acquireMaterialResult = acquireImportedMaterialInstance(
+          *this, *imported, textureRefsResult.refs, canonicalModelPath,
+          request.debugNamePrefix, sourceMaterialIndex);
+      releaseMaterialTextureRefs(*this, textureRefsResult.refs);
+      if (acquireMaterialResult.hasError()) {
+        NURI_LOG_WARNING("ResourceManager::acquireMaterialsFromModel: cached "
+                         "material acquire failed for source material %u: %s",
+                         sourceMaterialIndex,
+                         acquireMaterialResult.error().c_str());
+        cacheUsable = false;
+        break;
+      }
+
+      pendingMaterials.push_back(PendingCachedMaterial{
+          .sourceMaterialIndex = sourceMaterialIndex,
+          .material = acquireMaterialResult.value(),
+      });
+    }
+
+    if (!cacheUsable) {
+      for (const PendingCachedMaterial &pending : pendingMaterials) {
+        if (isValid(pending.material)) {
+          release(pending.material);
+        }
+      }
+    } else if (!pendingMaterials.empty()) {
+      for (const PendingCachedMaterial &pending : pendingMaterials) {
+        const bool mappedToModel = setModelMaterialForSource(
+            request.model, pending.sourceMaterialIndex, pending.material);
+        if (!mappedToModel) {
+          NURI_LOG_DEBUG(
+              "ResourceManager::acquireMaterialsFromModel: source material %u "
+              "not mapped to model",
+              pending.sourceMaterialIndex);
+        }
+        if (!isValid(batch.firstMaterial)) {
+          batch.firstMaterial = pending.material;
+          retain(pending.material);
+        }
+        ++batch.createdMaterialCount;
+        release(pending.material);
+      }
+      return Result<ImportedMaterialBatch, std::string>::makeResult(batch);
+    }
+  }
+
   auto materialInfoResult =
       MeshImporter::loadMaterialInfoFromFile(request.modelPath);
   if (materialInfoResult.hasError()) {
@@ -595,75 +971,20 @@ ResourceManager::acquireMaterialsFromModel(
   }
 
   const ImportedMaterialSet &materialSet = materialInfoResult.value();
-  ImportedMaterialBatch batch{};
-  const std::string canonicalModelPath =
-      canonicalizeResourcePath(request.modelPath);
-
-  const auto acquireTextureRef =
-      [this](const ImportedMaterialTexture &slotData, bool srgb,
-             std::string_view debugName) -> Result<TextureRef, std::string> {
-    if (slotData.path.empty() || slotData.isEmbedded) {
-      return Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
-    }
-
-    TextureRequest textureRequest{};
-    textureRequest.path = slotData.path;
-    textureRequest.loadOptions =
-        TextureLoadOptions{.srgb = srgb, .generateMipmaps = true};
-    textureRequest.kind = TextureRequestKind::Texture2D;
-    textureRequest.debugName = std::string(debugName);
-
-    auto textureRefResult = acquireTexture(textureRequest);
-    if (textureRefResult.hasError()) {
-      return Result<TextureRef, std::string>::makeError(
-          textureRefResult.error());
-    }
-    return Result<TextureRef, std::string>::makeResult(
-        textureRefResult.value());
-  };
-
   for (uint32_t sourceMaterialIndex = 0;
        sourceMaterialIndex < materialSet.materials.size();
        ++sourceMaterialIndex) {
     const ImportedMaterialInfo &imported =
         materialSet.materials[sourceMaterialIndex];
 
-    MaterialRequest::TextureRefs textureRefs{};
-    for (const ImportedTextureAcquireSpec &spec : kImportedTextureAcquireSpecs) {
-      auto textureResult = acquireTextureRef(
-          imported.*(spec.slot), spec.srgb,
-          request.debugNamePrefix + spec.debugSuffix +
-              std::to_string(sourceMaterialIndex));
-      if (textureResult.hasError()) {
-        NURI_LOG_WARNING(
-            "ResourceManager::acquireMaterialsFromModel: %s load failed for "
-            "material %u: %s",
-            spec.logName, sourceMaterialIndex, textureResult.error().c_str());
-        continue;
-      }
-      textureRefs.*(spec.outRef) = textureResult.value();
-    }
-
-    const MaterialTextureHandles emptyHandles{};
-    const MaterialDesc desc = materialDescFromImported(imported, emptyHandles);
-    const std::string sourceIdentity =
-        canonicalModelPath + "#" + std::to_string(sourceMaterialIndex);
-    const std::string debugName =
-        imported.name.empty() ? request.debugNamePrefix + "_material_" +
-                                    std::to_string(sourceMaterialIndex)
-                              : request.debugNamePrefix + "_" + imported.name;
-
-    auto acquireMaterialResult = acquireMaterial(MaterialRequest{
-        .desc = desc,
-        .textureRefs = textureRefs,
-        .debugName = debugName,
-        .sourceIdentity = sourceIdentity,
-    });
-    forEachMaterialTextureRef(textureRefs, [this](TextureRef textureRef) {
-      if (isValid(textureRef)) {
-        release(textureRef);
-      }
-    });
+    const MaterialRequest::TextureRefs textureRefs =
+        acquireRawImportedTextureRefs(
+            *this, imported, "ResourceManager::acquireMaterialsFromModel",
+            request.debugNamePrefix, sourceMaterialIndex);
+    auto acquireMaterialResult = acquireImportedMaterialInstance(
+        *this, imported, textureRefs, canonicalModelPath,
+        request.debugNamePrefix, sourceMaterialIndex);
+    releaseMaterialTextureRefs(*this, textureRefs);
     if (acquireMaterialResult.hasError()) {
       NURI_LOG_WARNING(
           "ResourceManager::acquireMaterialsFromModel: material acquire failed "
@@ -691,6 +1012,284 @@ ResourceManager::acquireMaterialsFromModel(
   }
 
   return Result<ImportedMaterialBatch, std::string>::makeResult(batch);
+}
+
+Result<ScenePrefabAssets, std::string>
+ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (prefab.sourcePath.empty()) {
+    return Result<ScenePrefabAssets, std::string>::makeError(
+        "ResourceManager::acquireScenePrefabAssets: prefab source path is "
+        "empty");
+  }
+
+  ScenePrefabAssets assets(memory_);
+  assets.models.resize(prefab.meshAssets.size(), kInvalidModelRef);
+  assets.materials.resize(prefab.materialAssets.size(), kInvalidMaterialRef);
+  const std::string canonicalModelPath =
+      canonicalizeResourcePath(prefab.sourcePath);
+  HashMap<uint32_t, uint32_t> sourceMaterialToAssetIndex{};
+  for (uint32_t assetIndex = 0u; assetIndex < prefab.materialAssets.size();
+       ++assetIndex) {
+    sourceMaterialToAssetIndex.emplace(
+        prefab.materialAssets[assetIndex].sourceMaterialIndex, assetIndex);
+  }
+
+  bool loadedFromCache = false;
+  if (auto cachedMaterials = tryLoadSceneMaterialCache(prefab.sourcePath);
+      cachedMaterials.has_value()) {
+    std::optional<ImportedMaterialSet> importedMaterialSet{};
+    if (auto materialInfoResult =
+            MeshImporter::loadMaterialInfoFromFile(prefab.sourcePath);
+        !materialInfoResult.hasError()) {
+      importedMaterialSet = std::move(materialInfoResult.value());
+    }
+
+    std::vector<MaterialRef> pendingMaterials(assets.materials.size(),
+                                              kInvalidMaterialRef);
+    bool cacheUsable = true;
+
+    for (const SceneMaterialRecord &cached : cachedMaterials->materials) {
+      auto assetIt =
+          sourceMaterialToAssetIndex.find(cached.sourceMaterialIndex);
+      if (assetIt == sourceMaterialToAssetIndex.end()) {
+        continue;
+      }
+      const ImportedMaterialInfo *imported = &cached.sourceMaterial;
+      if (importedMaterialSet.has_value() &&
+          cached.sourceMaterialIndex < importedMaterialSet->materials.size()) {
+        imported = &importedMaterialSet->materials[cached.sourceMaterialIndex];
+      }
+      const CachedTextureRefsAcquireResult textureRefsResult =
+          acquireCachedImportedTextureRefs(
+              *this, *imported, cached,
+              "ResourceManager::acquireScenePrefabAssets", "scene_prefab");
+
+      if (!textureRefsResult.cacheUsable) {
+        cacheUsable = false;
+        releaseMaterialTextureRefs(*this, textureRefsResult.refs);
+        break;
+      }
+
+      auto acquireMaterialResult = acquireImportedMaterialInstance(
+          *this, *imported, textureRefsResult.refs, canonicalModelPath,
+          "scene_prefab", cached.sourceMaterialIndex);
+      releaseMaterialTextureRefs(*this, textureRefsResult.refs);
+      if (acquireMaterialResult.hasError()) {
+        cacheUsable = false;
+        NURI_LOG_WARNING(
+            "ResourceManager::acquireScenePrefabAssets: failed to create "
+            "cached material %u: %s",
+            cached.sourceMaterialIndex, acquireMaterialResult.error().c_str());
+        break;
+      }
+      pendingMaterials[assetIt->second] = acquireMaterialResult.value();
+    }
+
+    if (!cacheUsable) {
+      for (const MaterialRef materialRef : pendingMaterials) {
+        if (isValid(materialRef)) {
+          release(materialRef);
+        }
+      }
+    } else {
+      for (size_t materialIndex = 0; materialIndex < pendingMaterials.size();
+           ++materialIndex) {
+        if (!isValid(pendingMaterials[materialIndex])) {
+          continue;
+        }
+        assets.materials[materialIndex] = pendingMaterials[materialIndex];
+      }
+      loadedFromCache = std::ranges::all_of(
+          assets.materials, [](MaterialRef ref) { return isValid(ref); });
+    }
+  }
+
+  if (!loadedFromCache) {
+    auto materialInfoResult =
+        MeshImporter::loadMaterialInfoFromFile(prefab.sourcePath);
+    if (materialInfoResult.hasError()) {
+      return Result<ScenePrefabAssets, std::string>::makeError(
+          "ResourceManager::acquireScenePrefabAssets: failed to parse material "
+          "metadata: " +
+          materialInfoResult.error());
+    }
+    const ImportedMaterialSet &materialSet = materialInfoResult.value();
+    for (uint32_t assetIndex = 0u; assetIndex < prefab.materialAssets.size();
+         ++assetIndex) {
+      const uint32_t sourceMaterialIndex =
+          prefab.materialAssets[assetIndex].sourceMaterialIndex;
+      if (sourceMaterialIndex >= materialSet.materials.size()) {
+        continue;
+      }
+      const ImportedMaterialInfo &imported =
+          materialSet.materials[sourceMaterialIndex];
+
+      const MaterialRequest::TextureRefs textureRefs =
+          acquireRawImportedTextureRefs(
+              *this, imported, "ResourceManager::acquireScenePrefabAssets",
+              "scene_prefab", sourceMaterialIndex);
+      auto acquireMaterialResult = acquireImportedMaterialInstance(
+          *this, imported, textureRefs, canonicalModelPath, "scene_prefab",
+          sourceMaterialIndex);
+      releaseMaterialTextureRefs(*this, textureRefs);
+      if (acquireMaterialResult.hasError()) {
+        return Result<ScenePrefabAssets, std::string>::makeError(
+            "ResourceManager::acquireScenePrefabAssets: failed to create "
+            "material " +
+            std::to_string(sourceMaterialIndex) + ": " +
+            acquireMaterialResult.error());
+      }
+      assets.materials[assetIndex] = acquireMaterialResult.value();
+    }
+  }
+
+  MaterialRef fallbackMaterial = kInvalidMaterialRef;
+  for (const MaterialRef material : assets.materials) {
+    if (isValid(material)) {
+      fallbackMaterial = material;
+      break;
+    }
+  }
+  if (!isValid(fallbackMaterial) && !prefab.renderables.empty()) {
+    auto fallbackMaterialResult = acquireMaterial(MaterialRequest{
+        .desc = MaterialDesc{},
+        .textureRefs = {},
+        .debugName = "scene_prefab_default_material",
+        .sourceIdentity = canonicalModelPath + "#default",
+    });
+    if (fallbackMaterialResult.hasError()) {
+      return Result<ScenePrefabAssets, std::string>::makeError(
+          fallbackMaterialResult.error());
+    }
+    fallbackMaterial = fallbackMaterialResult.value();
+    if (assets.materials.empty()) {
+      assets.materials.resize(1u, kInvalidMaterialRef);
+    }
+    assets.materials[0] = fallbackMaterial;
+  }
+
+  const uint64_t optionsHash = hashModelImportOptions(prefab.importOptions);
+  std::pmr::vector<uint32_t> pendingMeshIndices(memory_);
+  pendingMeshIndices.reserve(prefab.renderables.size());
+  const auto configurePrefabModelMaterials =
+      [this, &assets, &prefab, fallbackMaterial](ModelRef modelRef) {
+        if (isValid(fallbackMaterial)) {
+          setModelMaterialForAllSources(modelRef, fallbackMaterial);
+        }
+        for (uint32_t assetIndex = 0u; assetIndex < assets.materials.size();
+             ++assetIndex) {
+          if (isValid(assets.materials[assetIndex]) &&
+              assetIndex < prefab.materialAssets.size()) {
+            (void)setModelMaterialForSource(
+                modelRef, prefab.materialAssets[assetIndex].sourceMaterialIndex,
+                assets.materials[assetIndex]);
+          }
+        }
+      };
+
+  for (const ScenePrefabRenderable &prefabRenderable : prefab.renderables) {
+    if (prefabRenderable.meshIndex >= assets.models.size() ||
+        isValid(assets.models[prefabRenderable.meshIndex])) {
+      continue;
+    }
+
+    const uint32_t sourceSceneMeshIndex =
+        prefab.meshAssets[prefabRenderable.meshIndex].sourceSceneMeshIndex;
+    const ModelKey key = makeSceneMeshModelKey(canonicalModelPath, optionsHash,
+                                               sourceSceneMeshIndex);
+    if (const ModelRef cachedRef = tryAcquireCachedModel(key);
+        isValid(cachedRef)) {
+      ++telemetry_.modelAcquireHits;
+      assets.models[prefabRenderable.meshIndex] = cachedRef;
+      continue;
+    }
+
+    ++telemetry_.modelAcquireMisses;
+    pendingMeshIndices.push_back(prefabRenderable.meshIndex);
+  }
+
+  if (!pendingMeshIndices.empty()) {
+    std::pmr::vector<uint32_t> sourceSceneMeshIndices(memory_);
+    sourceSceneMeshIndices.reserve(pendingMeshIndices.size());
+    for (const uint32_t meshAssetIndex : pendingMeshIndices) {
+      sourceSceneMeshIndices.push_back(
+          prefab.meshAssets[meshAssetIndex].sourceSceneMeshIndex);
+    }
+    auto sceneMeshesResult = MeshImporter::loadSceneMeshesFromFile(
+        prefab.sourcePath,
+        std::span<const uint32_t>(sourceSceneMeshIndices.data(),
+                                  sourceSceneMeshIndices.size()),
+        prefab.importOptions, memory_);
+    if (sceneMeshesResult.hasError()) {
+      return Result<ScenePrefabAssets, std::string>::makeError(
+          "ResourceManager::acquireScenePrefabAssets: failed to batch load "
+          "scene meshes: " +
+          sceneMeshesResult.error());
+    }
+
+    std::pmr::vector<MeshData> sceneMeshes =
+        std::move(sceneMeshesResult.value());
+    if (sceneMeshes.size() != pendingMeshIndices.size()) {
+      return Result<ScenePrefabAssets, std::string>::makeError(
+          "ResourceManager::acquireScenePrefabAssets: batched scene mesh "
+          "count mismatch");
+    }
+
+    for (size_t meshOrdinal = 0; meshOrdinal < pendingMeshIndices.size();
+         ++meshOrdinal) {
+      const uint32_t meshIndex = pendingMeshIndices[meshOrdinal];
+      const uint32_t sourceSceneMeshIndex =
+          prefab.meshAssets[meshIndex].sourceSceneMeshIndex;
+      ModelRequest request{
+          .path = std::string(prefab.sourcePath),
+          .importOptions = prefab.importOptions,
+          .debugName = makeScenePrefabMeshDebugName(sourceSceneMeshIndex),
+          .sceneMeshIndex = sourceSceneMeshIndex,
+      };
+      auto modelResult =
+          Model::create(gpu_, sceneMeshes[meshOrdinal], request.debugName);
+      if (modelResult.hasError()) {
+        return Result<ScenePrefabAssets, std::string>::makeError(
+            "ResourceManager::acquireScenePrefabAssets: failed to create "
+            "scene mesh " +
+            std::to_string(meshIndex) + ": " + modelResult.error());
+      }
+
+      const ModelKey key = makeSceneMeshModelKey(
+          canonicalModelPath, optionsHash, sourceSceneMeshIndex);
+      auto storeModelResult =
+          storeAcquiredModel(key, canonicalModelPath, optionsHash, request,
+                             std::move(modelResult.value()));
+      if (storeModelResult.hasError()) {
+        return Result<ScenePrefabAssets, std::string>::makeError(
+            "ResourceManager::acquireScenePrefabAssets: failed to register "
+            "scene mesh " +
+            std::to_string(meshIndex) + ": " + storeModelResult.error());
+      }
+      assets.models[meshIndex] = storeModelResult.value();
+    }
+  }
+
+  std::pmr::vector<uint8_t> configuredMeshes(memory_);
+  configuredMeshes.resize(assets.models.size(), 0u);
+  for (const ScenePrefabRenderable &prefabRenderable : prefab.renderables) {
+    if (prefabRenderable.meshIndex >= assets.models.size() ||
+        configuredMeshes[prefabRenderable.meshIndex] != 0u) {
+      continue;
+    }
+
+    const ModelRef modelRef = assets.models[prefabRenderable.meshIndex];
+    if (!isValid(modelRef)) {
+      return Result<ScenePrefabAssets, std::string>::makeError(
+          "ResourceManager::acquireScenePrefabAssets: scene mesh " +
+          std::to_string(prefabRenderable.meshIndex) + " was not resolved");
+    }
+    configuredMeshes[prefabRenderable.meshIndex] = 1u;
+    configurePrefabModelMaterials(modelRef);
+  }
+
+  return Result<ScenePrefabAssets, std::string>::makeResult(std::move(assets));
 }
 
 void ResourceManager::retain(TextureRef ref) {
@@ -802,15 +1401,15 @@ void ResourceManager::release(MaterialRef ref) {
 }
 
 bool ResourceManager::owns(TextureRef ref) const noexcept {
-  return isSlotLiveForRef(textureSlots_, ref);
+  return isSlotLiveForRef(textureSlots_, textureSlotsMeta_, ref);
 }
 
 bool ResourceManager::owns(ModelRef ref) const noexcept {
-  return isSlotLiveForRef(modelSlots_, ref);
+  return isSlotLiveForRef(modelSlots_, modelSlotsMeta_, ref);
 }
 
 bool ResourceManager::owns(MaterialRef ref) const noexcept {
-  return isSlotLiveForRef(materialSlots_, ref);
+  return isSlotLiveForRef(materialSlots_, materialSlotsMeta_, ref);
 }
 
 const TextureRecord *ResourceManager::tryGet(TextureRef ref) const {
@@ -860,7 +1459,7 @@ void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
   // models -> materials -> textures.
   for (uint32_t i = 0; i < modelSlots_.size(); ++i) {
     const ModelSlot &slot = modelSlots_[i];
-    if (!slot.live || slot.refCount != 0u ||
+    if (!modelSlotsMeta_.isLive(i) || slot.refCount != 0u ||
         slot.retireAfterFrame == kRetireFrameUnset ||
         completedFrameIndex < slot.retireAfterFrame) {
       continue;
@@ -870,7 +1469,7 @@ void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
 
   for (uint32_t i = 0; i < materialSlots_.size(); ++i) {
     const MaterialSlot &slot = materialSlots_[i];
-    if (!slot.live || slot.refCount != 0u ||
+    if (!materialSlotsMeta_.isLive(i) || slot.refCount != 0u ||
         slot.retireAfterFrame == kRetireFrameUnset ||
         completedFrameIndex < slot.retireAfterFrame) {
       continue;
@@ -880,7 +1479,7 @@ void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
 
   for (uint32_t i = 0; i < textureSlots_.size(); ++i) {
     const TextureSlot &slot = textureSlots_[i];
-    if (!slot.live || slot.refCount != 0u ||
+    if (!textureSlotsMeta_.isLive(i) || slot.refCount != 0u ||
         slot.retireAfterFrame == kRetireFrameUnset ||
         completedFrameIndex < slot.retireAfterFrame) {
       continue;
@@ -891,8 +1490,9 @@ void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
 
 PoolStats ResourceManager::stats() const {
   PoolStats s{};
-  for (const TextureSlot &slot : textureSlots_) {
-    if (slot.live) {
+  for (uint32_t i = 0; i < textureSlots_.size(); ++i) {
+    const TextureSlot &slot = textureSlots_[i];
+    if (textureSlotsMeta_.isLive(i)) {
       if (slot.refCount > 0u) {
         ++s.liveTextures;
       } else {
@@ -900,8 +1500,9 @@ PoolStats ResourceManager::stats() const {
       }
     }
   }
-  for (const MaterialSlot &slot : materialSlots_) {
-    if (slot.live) {
+  for (uint32_t i = 0; i < materialSlots_.size(); ++i) {
+    const MaterialSlot &slot = materialSlots_[i];
+    if (materialSlotsMeta_.isLive(i)) {
       if (slot.refCount > 0u) {
         ++s.liveMaterials;
       } else {
@@ -909,8 +1510,9 @@ PoolStats ResourceManager::stats() const {
       }
     }
   }
-  for (const ModelSlot &slot : modelSlots_) {
-    if (slot.live) {
+  for (uint32_t i = 0; i < modelSlots_.size(); ++i) {
+    const ModelSlot &slot = modelSlots_[i];
+    if (modelSlotsMeta_.isLive(i)) {
       if (slot.refCount > 0u) {
         ++s.liveModels;
       } else {
@@ -940,7 +1542,7 @@ PoolStats ResourceManager::stats() const {
 }
 
 uint32_t ResourceManager::materialTableIndex(MaterialRef ref) const {
-  if (!isSlotLiveForRef(materialSlots_, ref)) {
+  if (!isSlotLiveForRef(materialSlots_, materialSlotsMeta_, ref)) {
     return 0u;
   }
   return indexOf(ref);

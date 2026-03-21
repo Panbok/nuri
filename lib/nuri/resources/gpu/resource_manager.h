@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/core/containers/hash_map.h"
+#include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
@@ -9,6 +10,7 @@
 #include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/resources/gpu/resource_keys.h"
 #include "nuri/resources/gpu/texture.h"
+#include "nuri/scene/scene_prefab.h"
 
 #include <cstdint>
 #include <limits>
@@ -31,6 +33,7 @@ struct NURI_API ModelRequest {
   std::string path{};
   MeshImportOptions importOptions{};
   std::string debugName{};
+  uint32_t sceneMeshIndex = std::numeric_limits<uint32_t>::max();
 };
 
 struct NURI_API MaterialRequest {
@@ -141,6 +144,7 @@ struct NURI_API ModelRecord {
   std::unique_ptr<Model> model{};
   std::pmr::string canonicalPath;
   uint64_t importOptionsHash = 0;
+  uint32_t sceneMeshIndex = std::numeric_limits<uint32_t>::max();
   std::pmr::vector<MaterialRef> sourceMaterialToRuntime;
 
   explicit ModelRecord(
@@ -209,6 +213,8 @@ public:
   acquireMaterial(const MaterialRequest &request);
   [[nodiscard]] Result<ImportedMaterialBatch, std::string>
   acquireMaterialsFromModel(const ImportedMaterialRequest &request);
+  [[nodiscard]] Result<ScenePrefabAssets, std::string>
+  acquireScenePrefabAssets(const ScenePrefab &prefab);
 
   void retain(TextureRef ref);
   void release(TextureRef ref);
@@ -250,8 +256,6 @@ private:
       std::numeric_limits<uint64_t>::max();
 
   struct TextureSlot {
-    uint32_t generation = 1;
-    bool live = false;
     uint32_t refCount = 0;
     uint64_t retireAfterFrame = kRetireFrameUnset;
     TextureRecord record;
@@ -262,8 +266,6 @@ private:
   };
 
   struct MaterialSlot {
-    uint32_t generation = 1;
-    bool live = false;
     uint32_t refCount = 0;
     uint64_t retireAfterFrame = kRetireFrameUnset;
     MaterialRecord record;
@@ -274,8 +276,6 @@ private:
   };
 
   struct ModelSlot {
-    uint32_t generation = 1;
-    bool live = false;
     uint32_t refCount = 0;
     uint64_t retireAfterFrame = kRetireFrameUnset;
     ModelRecord record;
@@ -297,13 +297,19 @@ private:
   [[nodiscard]] const MaterialSlot *tryGetSlot(MaterialRef ref) const;
   [[nodiscard]] const ModelSlot *tryGetSlot(ModelRef ref) const;
 
-  [[nodiscard]] uint32_t allocateTextureSlot();
-  [[nodiscard]] uint32_t allocateMaterialSlot();
-  [[nodiscard]] uint32_t allocateModelSlot();
+  [[nodiscard]] Result<SlotReservation, std::string> allocateTextureSlot();
+  [[nodiscard]] Result<SlotReservation, std::string> allocateMaterialSlot();
+  [[nodiscard]] Result<SlotReservation, std::string> allocateModelSlot();
 
   void destroyTextureSlot(uint32_t index);
   void destroyMaterialSlot(uint32_t index);
   void destroyModelSlot(uint32_t index);
+
+  [[nodiscard]] ModelRef tryAcquireCachedModel(const ModelKey &key);
+  [[nodiscard]] Result<ModelRef, std::string>
+  storeAcquiredModel(const ModelKey &key, std::string_view canonicalPath,
+                     uint64_t optionsHash, const ModelRequest &request,
+                     std::unique_ptr<Model> model);
 
   [[nodiscard]] static MaterialDesc
   materialDescFromImported(const ImportedMaterialInfo &imported,
@@ -317,9 +323,12 @@ private:
   std::pmr::vector<MaterialSlot> materialSlots_;
   std::pmr::vector<ModelSlot> modelSlots_;
 
-  std::pmr::vector<uint32_t> freeTextureSlots_;
-  std::pmr::vector<uint32_t> freeMaterialSlots_;
-  std::pmr::vector<uint32_t> freeModelSlots_;
+  SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
+      textureSlotsMeta_;
+  SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
+      materialSlotsMeta_;
+  SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
+      modelSlotsMeta_;
 
   std::pmr::vector<MaterialGpuData> materialGpuTable_;
   uint64_t materialTableVersion_ = 0;
