@@ -34,8 +34,14 @@ constexpr glm::vec3 kDefaultAttenuationColor(1.0f);
 using YyJsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
 using YyJsonDocResult = Result<YyJsonDocPtr, std::string>;
 
-std::string normalizeExternalTexturePath(const std::filesystem::path &modelPath,
-                                         std::string_view rawPath) {
+struct ResolvedExternalTexturePath {
+  std::string path{};
+  bool usedDdsCompanion = false;
+};
+
+[[nodiscard]] ResolvedExternalTexturePath
+resolveExternalTexturePath(const std::filesystem::path &modelPath,
+                           std::string_view rawPath) {
   if (rawPath.empty()) {
     return {};
   }
@@ -43,7 +49,52 @@ std::string normalizeExternalTexturePath(const std::filesystem::path &modelPath,
   if (!texturePath.is_absolute()) {
     texturePath = modelPath.parent_path() / texturePath;
   }
-  return texturePath.lexically_normal().string();
+  texturePath = texturePath.lexically_normal();
+
+  // Prefer supported precompressed companions when present so we can skip
+  // image decode + recompression on assets that already ship with KTX.
+  const std::filesystem::path ddsPath =
+      texturePath.parent_path() / (texturePath.stem().string() + ".dds");
+  if (ddsPath != texturePath && std::filesystem::exists(ddsPath)) {
+    return ResolvedExternalTexturePath{
+        .path = ddsPath.string(),
+        .usedDdsCompanion =
+            !detail::hasExtensionCaseInsensitive(texturePath, ".dds"),
+    };
+  }
+
+  const std::filesystem::path ktx2Path =
+      texturePath.parent_path() / (texturePath.stem().string() + ".ktx2");
+  if (ktx2Path != texturePath && std::filesystem::exists(ktx2Path)) {
+    return ResolvedExternalTexturePath{
+        .path = ktx2Path.string(),
+        .usedDdsCompanion = false,
+    };
+  }
+
+  const std::filesystem::path ktxPath =
+      texturePath.parent_path() / (texturePath.stem().string() + ".ktx");
+  if (ktxPath != texturePath && std::filesystem::exists(ktxPath)) {
+    return ResolvedExternalTexturePath{
+        .path = ktxPath.string(),
+        .usedDdsCompanion = false,
+    };
+  }
+
+  return ResolvedExternalTexturePath{
+      .path = texturePath.string(),
+      .usedDdsCompanion = false,
+  };
+}
+
+void applyVerticalImageFlipToTextureTransform(
+    MaterialTextureTransformData &transform) {
+  // Auto-substituted DDS companions in NiagaraBistro are authored with the
+  // opposite vertical image origin to the original glTF PNG references.
+  // Compose a post-transform V flip into the existing affine UV transform.
+  transform.offset.y = 1.0f - transform.offset.y;
+  transform.scale.y = -transform.scale.y;
+  transform.rotationRadians = -transform.rotationRadians;
 }
 
 ImportedMaterialTexture
@@ -77,7 +128,12 @@ readMaterialTextureSlot(const aiMaterial &material, aiTextureType textureType,
     }
   } else {
     out.sourceKind = MaterialTextureSourceKind::ExternalFile;
-    out.path = normalizeExternalTexturePath(modelPath, rawPath);
+    const ResolvedExternalTexturePath resolved =
+        resolveExternalTexturePath(modelPath, rawPath);
+    out.path = resolved.path;
+    if (resolved.usedDdsCompanion) {
+      applyVerticalImageFlipToTextureTransform(out.transform);
+    }
   }
   return out;
 }
@@ -269,7 +325,9 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
 
   ImportedMaterialTexture texture{};
   texture.sourceKind = MaterialTextureSourceKind::ExternalFile;
-  texture.path = normalizeExternalTexturePath(path, uri);
+  const ResolvedExternalTexturePath resolvedPath =
+      resolveExternalTexturePath(path, uri);
+  texture.path = resolvedPath.path;
   if (uint32_t uvSet = 0; tryReadJsonUint32(texCoordValue, uvSet)) {
     texture.uvSet = uvSet;
   }
@@ -294,6 +352,9 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
         texture.uvSet = transformedUvSet;
       }
     }
+  }
+  if (resolvedPath.usedDdsCompanion) {
+    applyVerticalImageFlipToTextureTransform(texture.transform);
   }
   if (scale != nullptr) {
     (void)tryReadJsonFloat(scaleValue, *scale);
@@ -499,6 +560,35 @@ void overlaySpecularExtension(ImportedMaterialInfo &material, yyjson_val *root,
                      yyjson_obj_get(specularExt, "specularColorTexture"));
 }
 
+void overlaySpecularGlossinessExtension(ImportedMaterialInfo &material,
+                                        yyjson_val *root,
+                                        const std::filesystem::path &modelPath,
+                                        yyjson_val *specGlossExt) {
+  if (!yyjson_is_obj(specGlossExt)) {
+    return;
+  }
+
+  (void)tryReadJsonVec4(yyjson_obj_get(specGlossExt, "diffuseFactor"),
+                        material.baseColorFactor);
+  material.baseColorFactor = glm::clamp(material.baseColorFactor, 0.0f, 1.0f);
+
+  (void)tryReadJsonVec3(yyjson_obj_get(specGlossExt, "specularFactor"),
+                        material.specularColorFactor);
+  material.specularColorFactor = glm::max(material.specularColorFactor, 0.0f);
+  material.specularFactor = 1.0f;
+  material.metallicFactor = 0.0f;
+
+  float glossinessFactor = 1.0f;
+  (void)tryReadJsonFloat(yyjson_obj_get(specGlossExt, "glossinessFactor"),
+                         glossinessFactor);
+  material.roughnessFactor = std::clamp(1.0f - glossinessFactor, 0.0f, 1.0f);
+
+  overlayTextureSlot(material.baseColor, root, modelPath,
+                     yyjson_obj_get(specGlossExt, "diffuseTexture"));
+  overlayTextureSlot(material.specularColor, root, modelPath,
+                     yyjson_obj_get(specGlossExt, "specularGlossinessTexture"));
+}
+
 void overlayTransmissionExtension(ImportedMaterialInfo &material,
                                   yyjson_val *root,
                                   const std::filesystem::path &modelPath,
@@ -628,6 +718,9 @@ void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
 
   overlayEmissiveStrengthExtension(
       material, yyjson_obj_get(extensions, "KHR_materials_emissive_strength"));
+  overlaySpecularGlossinessExtension(
+      material, root, modelPath,
+      yyjson_obj_get(extensions, "KHR_materials_pbrSpecularGlossiness"));
   overlayClearcoatExtension(
       material, root, modelPath,
       yyjson_obj_get(extensions, "KHR_materials_clearcoat"));
@@ -1262,13 +1355,17 @@ void appendSubmeshToMeshData(
 }
 
 unsigned int buildAssimpFlags(const MeshImportOptions &options,
-                              bool preTransformVertices);
+                              bool preTransformVertices,
+                              bool preserveSceneIndices = false);
 
 [[nodiscard]] nuri::Result<const aiScene *, std::string>
 loadSceneMeshImportScene(Assimp::Importer &importer, std::string_view path,
                          const nuri::MeshImportOptions &options) {
   const std::string pathStr(path);
-  const unsigned int flags = buildAssimpFlags(options, false);
+  // Scene-mesh indices come from the structural import path, so this second
+  // import must not reorder/merge meshes or remap materials underneath those
+  // indices.
+  const unsigned int flags = buildAssimpFlags(options, false, true);
   const aiScene *scene = importer.ReadFile(pathStr, flags);
   if (!scene || !scene->HasMeshes()) {
     const std::string error =
@@ -1519,7 +1616,8 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
 }
 
 unsigned int buildAssimpFlags(const MeshImportOptions &options,
-                              bool preTransformVertices) {
+                              bool preTransformVertices,
+                              bool preserveSceneIndices) {
   unsigned int flags = aiProcess_SortByPType | aiProcess_FindDegenerates |
                        aiProcess_FindInvalidData;
   if (preTransformVertices) {
@@ -1552,7 +1650,7 @@ unsigned int buildAssimpFlags(const MeshImportOptions &options,
     flags |= aiProcess_GenUVCoords;
   }
 
-  if (options.removeRedundantMaterials) {
+  if (options.removeRedundantMaterials && !preserveSceneIndices) {
     flags |= aiProcess_RemoveRedundantMaterials;
   }
 
@@ -1560,7 +1658,7 @@ unsigned int buildAssimpFlags(const MeshImportOptions &options,
     flags |= aiProcess_LimitBoneWeights;
   }
 
-  if (options.optimize) {
+  if (options.optimize && !preserveSceneIndices) {
     flags |= aiProcess_OptimizeMeshes;
   }
 

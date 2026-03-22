@@ -28,6 +28,7 @@ struct ParsedNode {
   glm::mat4 localMatrix{1.0f};
   std::vector<uint32_t> children{};
   std::optional<uint32_t> lightIndex{};
+  std::optional<uint32_t> meshIndex{};
 };
 
 [[nodiscard]] glm::mat4 aiMatrix4x4ToMat4(const aiMatrix4x4 &matrix) {
@@ -61,6 +62,127 @@ struct ParsedNode {
 
 [[nodiscard]] std::string makeFallbackMaterialName(uint32_t materialIndex) {
   return "material_" + std::to_string(materialIndex);
+}
+
+[[nodiscard]] bool hasRenderableTriangleGeometry(const aiMesh &mesh);
+
+[[nodiscard]] ImportedSceneMeshAsset
+makeImportedMeshAsset(const aiScene &scene, uint32_t sourceSceneMeshIndex,
+                      std::string_view sourceNameOverride = {}) {
+  ImportedSceneMeshAsset meshAsset{};
+  meshAsset.sourceSceneMeshIndex = sourceSceneMeshIndex;
+  if (!sourceNameOverride.empty()) {
+    meshAsset.sourceName.assign(sourceNameOverride);
+    return meshAsset;
+  }
+  if (sourceSceneMeshIndex < scene.mNumMeshes &&
+      scene.mMeshes[sourceSceneMeshIndex] != nullptr &&
+      scene.mMeshes[sourceSceneMeshIndex]->mName.length > 0u) {
+    meshAsset.sourceName.assign(
+        scene.mMeshes[sourceSceneMeshIndex]->mName.C_Str(),
+        scene.mMeshes[sourceSceneMeshIndex]->mName.length);
+    return meshAsset;
+  }
+  meshAsset.sourceName = makeFallbackMeshName(sourceSceneMeshIndex);
+  return meshAsset;
+}
+
+[[nodiscard]] ImportedSceneMaterialAsset
+makeImportedMaterialAsset(const aiScene &scene, uint32_t sourceMaterialIndex,
+                          std::string_view sourceNameOverride = {}) {
+  ImportedSceneMaterialAsset materialAsset{};
+  materialAsset.sourceMaterialIndex = sourceMaterialIndex;
+  if (!sourceNameOverride.empty()) {
+    materialAsset.sourceName.assign(sourceNameOverride);
+    return materialAsset;
+  }
+  if (sourceMaterialIndex < scene.mNumMaterials &&
+      scene.mMaterials[sourceMaterialIndex] != nullptr) {
+    aiString materialName;
+    if (scene.mMaterials[sourceMaterialIndex]->Get(
+            AI_MATKEY_NAME, materialName) == aiReturn_SUCCESS &&
+        materialName.length > 0u) {
+      materialAsset.sourceName.assign(materialName.C_Str(),
+                                      materialName.length);
+    }
+  }
+  if (materialAsset.sourceName.empty()) {
+    materialAsset.sourceName = makeFallbackMaterialName(sourceMaterialIndex);
+  }
+  return materialAsset;
+}
+
+[[nodiscard]] uint32_t
+ensureImportedMeshAsset(ImportedScene &imported, const aiScene &scene,
+                        HashMap<uint32_t, uint32_t> &meshOrdinalToAsset,
+                        uint32_t sourceSceneMeshIndex,
+                        std::string_view sourceNameOverride = {}) {
+  if (auto it = meshOrdinalToAsset.find(sourceSceneMeshIndex);
+      it != meshOrdinalToAsset.end()) {
+    return it->second;
+  }
+
+  const uint32_t meshAssetIndex =
+      static_cast<uint32_t>(imported.meshAssets.size());
+  imported.meshAssets.push_back(
+      makeImportedMeshAsset(scene, sourceSceneMeshIndex, sourceNameOverride));
+  meshOrdinalToAsset.emplace(sourceSceneMeshIndex, meshAssetIndex);
+  return meshAssetIndex;
+}
+
+[[nodiscard]] uint32_t
+ensureImportedMaterialAsset(ImportedScene &imported, const aiScene &scene,
+                            HashMap<uint32_t, uint32_t> &materialOrdinalToAsset,
+                            uint32_t sourceMaterialIndex,
+                            std::string_view sourceNameOverride = {}) {
+  if (auto it = materialOrdinalToAsset.find(sourceMaterialIndex);
+      it != materialOrdinalToAsset.end()) {
+    return it->second;
+  }
+
+  const uint32_t materialAssetIndex =
+      static_cast<uint32_t>(imported.materialAssets.size());
+  imported.materialAssets.push_back(makeImportedMaterialAsset(
+      scene, sourceMaterialIndex, sourceNameOverride));
+  materialOrdinalToAsset.emplace(sourceMaterialIndex, materialAssetIndex);
+  return materialAssetIndex;
+}
+
+void appendRemainingSceneAssets(
+    ImportedScene &imported, const aiScene &scene,
+    HashMap<uint32_t, uint32_t> &meshOrdinalToAsset,
+    HashMap<uint32_t, uint32_t> &materialOrdinalToAsset) {
+  for (uint32_t sourceSceneMeshIndex = 0u;
+       sourceSceneMeshIndex < scene.mNumMeshes; ++sourceSceneMeshIndex) {
+    if (scene.mMeshes[sourceSceneMeshIndex] == nullptr ||
+        !hasRenderableTriangleGeometry(*scene.mMeshes[sourceSceneMeshIndex]) ||
+        meshOrdinalToAsset.contains(sourceSceneMeshIndex)) {
+      continue;
+    }
+    (void)ensureImportedMeshAsset(imported, scene, meshOrdinalToAsset,
+                                  sourceSceneMeshIndex);
+  }
+
+  for (uint32_t sourceMaterialIndex = 0u;
+       sourceMaterialIndex < scene.mNumMaterials; ++sourceMaterialIndex) {
+    (void)ensureImportedMaterialAsset(imported, scene, materialOrdinalToAsset,
+                                      sourceMaterialIndex);
+  }
+}
+
+[[nodiscard]] bool hasRenderableTriangleGeometry(const aiMesh &mesh) {
+  if (mesh.mNumVertices == 0u || mesh.mNumFaces == 0u) {
+    return false;
+  }
+  if ((mesh.mPrimitiveTypes & aiPrimitiveType_TRIANGLE) == 0u) {
+    return false;
+  }
+  for (uint32_t faceIndex = 0u; faceIndex < mesh.mNumFaces; ++faceIndex) {
+    if (mesh.mFaces[faceIndex].mNumIndices >= 3u) {
+      return true;
+    }
+  }
+  return false;
 }
 
 [[nodiscard]] Result<LightType, std::string>
@@ -168,6 +290,21 @@ parseLightType(std::string_view typeName) {
   return std::string(parentPath) + "/" + component;
 }
 
+[[nodiscard]] std::string stripLeadingPathComponent(std::string_view path) {
+  const size_t slash = path.find('/');
+  if (slash == std::string_view::npos || slash + 1u >= path.size()) {
+    return {};
+  }
+  return std::string(path.substr(slash + 1u));
+}
+
+[[nodiscard]] uint32_t resolveImportedNodeIndex(
+    const ParsedNode &parsedNode, uint32_t parsedNodeIndex,
+    std::span<const std::string> parsedPaths,
+    const HashMap<std::string, uint32_t> &importedPathToNode,
+    const HashMap<std::string, std::vector<uint32_t>> &importedNameToNodes,
+    std::span<const ImportedSceneNode> importedNodes);
+
 Result<std::vector<ParsedLightDef>, std::string>
 parseLightDefinitions(yyjson_val *root) {
   yyjson_val *extensionsValue = yyjson_obj_get(root, "extensions");
@@ -269,6 +406,12 @@ Result<std::vector<ParsedNode>, std::string> parseNodes(yyjson_val *root) {
     }
     parsed.localMatrix = parseNodeLocalMatrix(nodeValue);
 
+    uint32_t meshIndex = 0u;
+    if (detail::tryReadJsonUint32(yyjson_obj_get(nodeValue, "mesh"),
+                                  meshIndex)) {
+      parsed.meshIndex = meshIndex;
+    }
+
     yyjson_val *childrenValue = yyjson_obj_get(nodeValue, "children");
     if (yyjson_is_arr(childrenValue)) {
       parsed.children.reserve(yyjson_arr_size(childrenValue));
@@ -302,6 +445,399 @@ Result<std::vector<ParsedNode>, std::string> parseNodes(yyjson_val *root) {
 
   return Result<std::vector<ParsedNode>, std::string>::makeResult(
       std::move(nodes));
+}
+
+Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
+    ImportedScene &imported, const aiScene &scene,
+    std::span<const ParsedNode> parsedNodes,
+    std::span<const uint32_t> parsedRoots,
+    std::span<const std::string> parsedPaths,
+    const HashMap<std::string, uint32_t> &importedPathToNode,
+    const HashMap<std::string, std::vector<uint32_t>> &importedNameToNodes,
+    std::span<const ParsedLightDef> parsedLights) {
+  if (parsedNodes.empty()) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  std::vector<uint32_t> parentIndices(parsedNodes.size(),
+                                      kInvalidScenePrefabIndex);
+  for (uint32_t nodeIndex = 0u; nodeIndex < parsedNodes.size(); ++nodeIndex) {
+    for (const uint32_t childIndex : parsedNodes[nodeIndex].children) {
+      if (childIndex >= parsedNodes.size()) {
+        return Result<bool, std::string>::makeError(
+            "glTF node child index is out of range");
+      }
+      if (parentIndices[childIndex] != kInvalidScenePrefabIndex) {
+        return Result<bool, std::string>::makeError(
+            "glTF node has multiple parents");
+      }
+      parentIndices[childIndex] = nodeIndex;
+    }
+  }
+
+  for (const uint32_t rootIndex : parsedRoots) {
+    if (rootIndex >= parsedNodes.size()) {
+      return Result<bool, std::string>::makeError(
+          "glTF scene root node index is out of range");
+    }
+    parentIndices[rootIndex] = kInvalidScenePrefabIndex;
+  }
+
+  std::vector<uint32_t> remappedNodeIndices(parsedNodes.size(),
+                                            kInvalidScenePrefabIndex);
+  std::vector<uint32_t> orderedParsedNodeIndices;
+  orderedParsedNodeIndices.reserve(parsedNodes.size());
+
+  std::vector<uint8_t> appendActive(parsedNodes.size(), 0u);
+  std::function<void(uint32_t)> appendNodeRecursive = [&](uint32_t nodeIndex) {
+    if (nodeIndex >= parsedNodes.size() ||
+        remappedNodeIndices[nodeIndex] != kInvalidScenePrefabIndex) {
+      return;
+    }
+    if (appendActive[nodeIndex] != 0u) {
+      return;
+    }
+    appendActive[nodeIndex] = 1u;
+    const uint32_t parentIndex = parentIndices[nodeIndex];
+    if (parentIndex != kInvalidScenePrefabIndex) {
+      appendNodeRecursive(parentIndex);
+    }
+    remappedNodeIndices[nodeIndex] =
+        static_cast<uint32_t>(orderedParsedNodeIndices.size());
+    orderedParsedNodeIndices.push_back(nodeIndex);
+    for (const uint32_t childIndex : parsedNodes[nodeIndex].children) {
+      appendNodeRecursive(childIndex);
+    }
+    appendActive[nodeIndex] = 0u;
+  };
+  for (const uint32_t rootIndex : parsedRoots) {
+    appendNodeRecursive(rootIndex);
+  }
+
+  std::pmr::vector<ImportedSceneNode> structuralNodes =
+      std::move(imported.nodes);
+  std::pmr::vector<ImportedSceneRenderable> structuralRenderables =
+      std::move(imported.renderables);
+  std::pmr::vector<ImportedSceneMeshAsset> structuralMeshAssets =
+      std::move(imported.meshAssets);
+  std::pmr::vector<ImportedSceneMaterialAsset> structuralMaterialAssets =
+      std::move(imported.materialAssets);
+  std::pmr::vector<uint32_t> structuralRootNodes =
+      std::move(imported.rootNodes);
+
+  imported.nodes.clear();
+  imported.renderables.clear();
+  imported.meshAssets.clear();
+  imported.materialAssets.clear();
+  imported.lights.clear();
+  imported.rootNodes.clear();
+  imported.nodes.reserve(parsedNodes.size());
+  imported.rootNodes.reserve(parsedRoots.size());
+
+  std::vector<std::vector<uint32_t>> structuralChildren(structuralNodes.size());
+  for (uint32_t nodeIndex = 0u; nodeIndex < structuralNodes.size();
+       ++nodeIndex) {
+    const uint32_t parentIndex = structuralNodes[nodeIndex].parentIndex;
+    if (parentIndex == kInvalidScenePrefabIndex ||
+        parentIndex >= structuralChildren.size()) {
+      continue;
+    }
+    structuralChildren[parentIndex].push_back(nodeIndex);
+  }
+
+  std::vector<std::vector<uint32_t>> structuralRenderableIndicesByNode(
+      structuralNodes.size());
+  for (uint32_t renderableIndex = 0u;
+       renderableIndex < structuralRenderables.size(); ++renderableIndex) {
+    const ImportedSceneRenderable &renderable =
+        structuralRenderables[renderableIndex];
+    if (renderable.nodeIndex >= structuralRenderableIndicesByNode.size()) {
+      continue;
+    }
+    structuralRenderableIndicesByNode[renderable.nodeIndex].push_back(
+        renderableIndex);
+  }
+
+  std::vector<uint32_t> structuralRootCandidates;
+  structuralRootCandidates.reserve(structuralRootNodes.size());
+  for (const uint32_t rootIndex : structuralRootNodes) {
+    if (rootIndex >= structuralNodes.size()) {
+      continue;
+    }
+    const ImportedSceneNode &rootNode = structuralNodes[rootIndex];
+    if (rootNode.parentIndex == kInvalidScenePrefabIndex &&
+        rootNode.name.empty() && !structuralChildren[rootIndex].empty()) {
+      structuralRootCandidates.insert(structuralRootCandidates.end(),
+                                      structuralChildren[rootIndex].begin(),
+                                      structuralChildren[rootIndex].end());
+      continue;
+    }
+    structuralRootCandidates.push_back(rootIndex);
+  }
+  if (structuralRootCandidates.empty()) {
+    structuralRootCandidates.insert(structuralRootCandidates.end(),
+                                    structuralRootNodes.begin(),
+                                    structuralRootNodes.end());
+  }
+
+  std::vector<uint8_t> usedStructuralNodes(structuralNodes.size(), 0u);
+  std::vector<uint32_t> structuralNodeByParsedNode(parsedNodes.size(),
+                                                   kInvalidScenePrefabIndex);
+
+  const auto chooseCandidateFromSet =
+      [&](const ParsedNode &parsedNode,
+          std::span<const uint32_t> candidates) -> uint32_t {
+    std::vector<uint32_t> filtered;
+    filtered.reserve(candidates.size());
+    for (const uint32_t candidateIndex : candidates) {
+      if (candidateIndex >= structuralNodes.size() ||
+          usedStructuralNodes[candidateIndex] != 0u) {
+        continue;
+      }
+      filtered.push_back(candidateIndex);
+    }
+    if (filtered.empty()) {
+      return kInvalidScenePrefabIndex;
+    }
+
+    const auto chooseBest =
+        [&](std::span<const uint32_t> localCandidates) -> uint32_t {
+      uint32_t matrixMatch = kInvalidScenePrefabIndex;
+      uint32_t presenceMatch = kInvalidScenePrefabIndex;
+      for (const uint32_t candidateIndex : localCandidates) {
+        const ImportedSceneNode &candidate = structuralNodes[candidateIndex];
+        if (matrixNearlyEqual(candidate.localFromParent,
+                              parsedNode.localMatrix)) {
+          if (matrixMatch != kInvalidScenePrefabIndex) {
+            matrixMatch = kInvalidScenePrefabIndex;
+            break;
+          }
+          matrixMatch = candidateIndex;
+        }
+      }
+      if (matrixMatch != kInvalidScenePrefabIndex) {
+        return matrixMatch;
+      }
+
+      const bool parsedHasRenderable = parsedNode.meshIndex.has_value();
+      for (const uint32_t candidateIndex : localCandidates) {
+        const bool structuralHasRenderable =
+            candidateIndex < structuralRenderableIndicesByNode.size() &&
+            !structuralRenderableIndicesByNode[candidateIndex].empty();
+        if (structuralHasRenderable != parsedHasRenderable) {
+          continue;
+        }
+        if (presenceMatch != kInvalidScenePrefabIndex) {
+          return kInvalidScenePrefabIndex;
+        }
+        presenceMatch = candidateIndex;
+      }
+      if (presenceMatch != kInvalidScenePrefabIndex) {
+        return presenceMatch;
+      }
+      return localCandidates.size() == 1u ? localCandidates.front()
+                                          : kInvalidScenePrefabIndex;
+    };
+
+    if (!parsedNode.name.empty()) {
+      std::vector<uint32_t> namedCandidates;
+      namedCandidates.reserve(filtered.size());
+      for (const uint32_t candidateIndex : filtered) {
+        if (structuralNodes[candidateIndex].name == parsedNode.name) {
+          namedCandidates.push_back(candidateIndex);
+        }
+      }
+      if (!namedCandidates.empty()) {
+        return chooseBest(namedCandidates);
+      }
+      return kInvalidScenePrefabIndex;
+    }
+
+    std::vector<uint32_t> unnamedCandidates;
+    unnamedCandidates.reserve(filtered.size());
+    for (const uint32_t candidateIndex : filtered) {
+      if (structuralNodes[candidateIndex].name.empty()) {
+        unnamedCandidates.push_back(candidateIndex);
+      }
+    }
+    if (!unnamedCandidates.empty()) {
+      return chooseBest(unnamedCandidates);
+    }
+    return chooseBest(filtered);
+  };
+
+  std::function<void(uint32_t, uint32_t)> mapParsedSubtree =
+      [&](uint32_t parsedNodeIndex, uint32_t structuralParentIndex) {
+        if (parsedNodeIndex >= parsedNodes.size()) {
+          return;
+        }
+
+        const ParsedNode &parsedNode = parsedNodes[parsedNodeIndex];
+        const std::vector<uint32_t> &candidateSet =
+            structuralParentIndex == kInvalidScenePrefabIndex
+                ? structuralRootCandidates
+                : structuralChildren[structuralParentIndex];
+
+        uint32_t matchedStructuralNode =
+            chooseCandidateFromSet(parsedNode, candidateSet);
+        if (matchedStructuralNode == kInvalidScenePrefabIndex) {
+          const uint32_t globalMatch = resolveImportedNodeIndex(
+              parsedNode, parsedNodeIndex, parsedPaths, importedPathToNode,
+              importedNameToNodes, structuralNodes);
+          if (globalMatch != kInvalidScenePrefabIndex &&
+              globalMatch < usedStructuralNodes.size() &&
+              usedStructuralNodes[globalMatch] == 0u) {
+            matchedStructuralNode = globalMatch;
+          }
+        }
+
+        uint32_t nextStructuralParent = structuralParentIndex;
+        if (matchedStructuralNode != kInvalidScenePrefabIndex) {
+          structuralNodeByParsedNode[parsedNodeIndex] = matchedStructuralNode;
+          usedStructuralNodes[matchedStructuralNode] = 1u;
+          nextStructuralParent = matchedStructuralNode;
+        }
+
+        for (const uint32_t childIndex : parsedNode.children) {
+          mapParsedSubtree(childIndex, nextStructuralParent);
+        }
+      };
+  for (const uint32_t rootIndex : parsedRoots) {
+    mapParsedSubtree(rootIndex, kInvalidScenePrefabIndex);
+  }
+
+  HashMap<uint32_t, uint32_t> meshOrdinalToAsset{};
+  HashMap<uint32_t, uint32_t> materialOrdinalToAsset{};
+
+  for (const uint32_t parsedNodeIndex : orderedParsedNodeIndices) {
+    ImportedSceneNode importedNode{};
+    const uint32_t parsedParentIndex = parentIndices[parsedNodeIndex];
+    importedNode.parentIndex = parsedParentIndex == kInvalidScenePrefabIndex
+                                   ? kInvalidScenePrefabIndex
+                                   : remappedNodeIndices[parsedParentIndex];
+    importedNode.localFromParent = parsedNodes[parsedNodeIndex].localMatrix;
+    importedNode.name = parsedNodes[parsedNodeIndex].name;
+    imported.nodes.push_back(std::move(importedNode));
+  }
+  for (const uint32_t rootIndex : parsedRoots) {
+    imported.rootNodes.push_back(remappedNodeIndices[rootIndex]);
+  }
+
+  size_t copiedStructuralRenderableCount = 0u;
+  size_t fallbackRenderableCount = 0u;
+  size_t unmatchedParsedMeshNodeCount = 0u;
+  for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
+       ++parsedNodeIndex) {
+    if (remappedNodeIndices[parsedNodeIndex] == kInvalidScenePrefabIndex) {
+      continue;
+    }
+    const ParsedNode &parsedNode = parsedNodes[parsedNodeIndex];
+    bool copiedStructuralRenderables = false;
+    const uint32_t structuralNodeIndex =
+        structuralNodeByParsedNode[parsedNodeIndex];
+    if (structuralNodeIndex != kInvalidScenePrefabIndex &&
+        structuralNodeIndex < structuralRenderableIndicesByNode.size()) {
+      for (const uint32_t renderableIndex :
+           structuralRenderableIndicesByNode[structuralNodeIndex]) {
+        if (renderableIndex >= structuralRenderables.size()) {
+          continue;
+        }
+        const ImportedSceneRenderable &structuralRenderable =
+            structuralRenderables[renderableIndex];
+        if (structuralRenderable.meshAssetIndex >=
+                structuralMeshAssets.size() ||
+            structuralRenderable.materialAssetIndex >=
+                structuralMaterialAssets.size()) {
+          continue;
+        }
+
+        const ImportedSceneMeshAsset &structuralMeshAsset =
+            structuralMeshAssets[structuralRenderable.meshAssetIndex];
+        const ImportedSceneMaterialAsset &structuralMaterialAsset =
+            structuralMaterialAssets[structuralRenderable.materialAssetIndex];
+        imported.renderables.push_back(ImportedSceneRenderable{
+            .nodeIndex = remappedNodeIndices[parsedNodeIndex],
+            .meshAssetIndex = ensureImportedMeshAsset(
+                imported, scene, meshOrdinalToAsset,
+                structuralMeshAsset.sourceSceneMeshIndex,
+                structuralMeshAsset.sourceName),
+            .materialAssetIndex = ensureImportedMaterialAsset(
+                imported, scene, materialOrdinalToAsset,
+                structuralMaterialAsset.sourceMaterialIndex,
+                structuralMaterialAsset.sourceName),
+        });
+        copiedStructuralRenderables = true;
+        ++copiedStructuralRenderableCount;
+      }
+    }
+    if (copiedStructuralRenderables || !parsedNode.meshIndex.has_value()) {
+      continue;
+    }
+
+    const uint32_t sourceSceneMeshIndex = *parsedNode.meshIndex;
+    if (sourceSceneMeshIndex >= scene.mNumMeshes ||
+        scene.mMeshes[sourceSceneMeshIndex] == nullptr) {
+      ++unmatchedParsedMeshNodeCount;
+      continue;
+    }
+    const aiMesh &mesh = *scene.mMeshes[sourceSceneMeshIndex];
+    if (!hasRenderableTriangleGeometry(mesh)) {
+      ++unmatchedParsedMeshNodeCount;
+      continue;
+    }
+
+    imported.renderables.push_back(ImportedSceneRenderable{
+        .nodeIndex = remappedNodeIndices[parsedNodeIndex],
+        .meshAssetIndex = ensureImportedMeshAsset(
+            imported, scene, meshOrdinalToAsset, sourceSceneMeshIndex),
+        .materialAssetIndex = ensureImportedMaterialAsset(
+            imported, scene, materialOrdinalToAsset, mesh.mMaterialIndex),
+    });
+    ++fallbackRenderableCount;
+  }
+
+  appendRemainingSceneAssets(imported, scene, meshOrdinalToAsset,
+                             materialOrdinalToAsset);
+
+  NURI_LOG_DEBUG(
+      "SceneImporter::loadSceneFromFile: glTF rebuild matched %zu/%zu parsed "
+      "nodes to structural nodes; copied %zu structural renderable(s), "
+      "fell back to %zu raw mesh binding(s), skipped %zu parsed mesh node(s)",
+      std::ranges::count_if(
+          structuralNodeByParsedNode,
+          [](uint32_t index) { return index != kInvalidScenePrefabIndex; }),
+      parsedNodes.size(), copiedStructuralRenderableCount,
+      fallbackRenderableCount, unmatchedParsedMeshNodeCount);
+
+  for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
+       ++parsedNodeIndex) {
+    const uint32_t importedNodeIndex = remappedNodeIndices[parsedNodeIndex];
+    if (importedNodeIndex == kInvalidScenePrefabIndex) {
+      continue;
+    }
+    const ParsedNode &parsedNode = parsedNodes[parsedNodeIndex];
+    if (!parsedNode.lightIndex.has_value()) {
+      continue;
+    }
+    if (*parsedNode.lightIndex >= parsedLights.size()) {
+      return Result<bool, std::string>::makeError(
+          "glTF punctual light index is out of range");
+    }
+
+    ImportedSceneLight light{};
+    light.nodeIndex = importedNodeIndex;
+    light.light = parsedLights[*parsedNode.lightIndex].desc;
+    light.sourceName = !parsedNode.name.empty()
+                           ? parsedNode.name
+                           : parsedLights[*parsedNode.lightIndex].name;
+    if (light.light.name.empty()) {
+      light.light.name = light.sourceName;
+    }
+    light.sourceNodeIndex = static_cast<int32_t>(parsedNodeIndex);
+    imported.lights.push_back(std::move(light));
+  }
+
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<std::vector<uint32_t>, std::string>
@@ -404,7 +940,7 @@ void buildParsedNodePathsRecursive(uint32_t nodeIndex,
   active[nodeIndex] = 0u;
 }
 
-[[nodiscard]] uint32_t resolveImportedLightNodeIndex(
+[[nodiscard]] uint32_t resolveImportedNodeIndex(
     const ParsedNode &parsedNode, uint32_t parsedNodeIndex,
     std::span<const std::string> parsedPaths,
     const HashMap<std::string, uint32_t> &importedPathToNode,
@@ -480,6 +1016,9 @@ SceneImporter::loadSceneFromFile(std::string_view path,
 
   const std::string sceneName = importedSceneName(*scene, path);
   imported.sourceSceneName.assign(sceneName.data(), sceneName.size());
+  const bool hasSyntheticRootWrapper = scene->mRootNode->mParent == nullptr &&
+                                       scene->mRootNode->mNumMeshes == 0u &&
+                                       scene->mRootNode->mName.length == 0u;
 
   HashMap<uint32_t, uint32_t> meshOrdinalToAsset{};
   HashMap<uint32_t, uint32_t> materialOrdinalToAsset{};
@@ -507,6 +1046,12 @@ SceneImporter::loadSceneFromFile(std::string_view path,
     const std::string pathKey =
         makeNodePath(parentPath, importedNode.name, siblingOrdinal);
     importedPathToNode.emplace(pathKey, importedNodeIndex);
+    if (hasSyntheticRootWrapper && importedNodeIndex != 0u) {
+      const std::string strippedPath = stripLeadingPathComponent(pathKey);
+      if (!strippedPath.empty() && !importedPathToNode.contains(strippedPath)) {
+        importedPathToNode.emplace(strippedPath, importedNodeIndex);
+      }
+    }
     if (!importedNode.name.empty()) {
       importedNameToNodes[importedNode.name].push_back(importedNodeIndex);
     }
@@ -519,58 +1064,18 @@ SceneImporter::loadSceneFromFile(std::string_view path,
           scene->mMeshes[sourceSceneMeshIndex] == nullptr) {
         continue;
       }
-
-      uint32_t meshAssetIndex = kInvalidScenePrefabIndex;
-      if (auto it = meshOrdinalToAsset.find(sourceSceneMeshIndex);
-          it != meshOrdinalToAsset.end()) {
-        meshAssetIndex = it->second;
-      } else {
-        meshAssetIndex = static_cast<uint32_t>(imported.meshAssets.size());
-        const aiMesh *mesh = scene->mMeshes[sourceSceneMeshIndex];
-        ImportedSceneMeshAsset meshAsset{};
-        meshAsset.sourceSceneMeshIndex = sourceSceneMeshIndex;
-        if (mesh->mName.length > 0u) {
-          meshAsset.sourceName.assign(mesh->mName.C_Str(), mesh->mName.length);
-        } else {
-          meshAsset.sourceName = makeFallbackMeshName(sourceSceneMeshIndex);
-        }
-        imported.meshAssets.push_back(std::move(meshAsset));
-        meshOrdinalToAsset.emplace(sourceSceneMeshIndex, meshAssetIndex);
-      }
-
       const aiMesh *mesh = scene->mMeshes[sourceSceneMeshIndex];
-      const uint32_t sourceMaterialIndex = mesh->mMaterialIndex;
-      uint32_t materialAssetIndex = kInvalidScenePrefabIndex;
-      if (auto it = materialOrdinalToAsset.find(sourceMaterialIndex);
-          it != materialOrdinalToAsset.end()) {
-        materialAssetIndex = it->second;
-      } else {
-        materialAssetIndex =
-            static_cast<uint32_t>(imported.materialAssets.size());
-        ImportedSceneMaterialAsset materialAsset{};
-        materialAsset.sourceMaterialIndex = sourceMaterialIndex;
-        if (sourceMaterialIndex < scene->mNumMaterials &&
-            scene->mMaterials[sourceMaterialIndex] != nullptr) {
-          aiString materialName;
-          if (scene->mMaterials[sourceMaterialIndex]->Get(
-                  AI_MATKEY_NAME, materialName) == aiReturn_SUCCESS &&
-              materialName.length > 0u) {
-            materialAsset.sourceName.assign(materialName.C_Str(),
-                                            materialName.length);
-          }
-        }
-        if (materialAsset.sourceName.empty()) {
-          materialAsset.sourceName =
-              makeFallbackMaterialName(sourceMaterialIndex);
-        }
-        imported.materialAssets.push_back(std::move(materialAsset));
-        materialOrdinalToAsset.emplace(sourceMaterialIndex, materialAssetIndex);
+      if (!hasRenderableTriangleGeometry(*mesh)) {
+        continue;
       }
 
+      const uint32_t sourceMaterialIndex = mesh->mMaterialIndex;
       imported.renderables.push_back(ImportedSceneRenderable{
           .nodeIndex = importedNodeIndex,
-          .meshAssetIndex = meshAssetIndex,
-          .materialAssetIndex = materialAssetIndex,
+          .meshAssetIndex = ensureImportedMeshAsset(
+              imported, *scene, meshOrdinalToAsset, sourceSceneMeshIndex),
+          .materialAssetIndex = ensureImportedMaterialAsset(
+              imported, *scene, materialOrdinalToAsset, sourceMaterialIndex),
       });
     }
 
@@ -586,51 +1091,8 @@ SceneImporter::loadSceneFromFile(std::string_view path,
     imported.rootNodes.push_back(0u);
   }
 
-  for (uint32_t sourceSceneMeshIndex = 0u;
-       sourceSceneMeshIndex < scene->mNumMeshes; ++sourceSceneMeshIndex) {
-    if (scene->mMeshes[sourceSceneMeshIndex] == nullptr ||
-        meshOrdinalToAsset.contains(sourceSceneMeshIndex)) {
-      continue;
-    }
-    ImportedSceneMeshAsset meshAsset{};
-    meshAsset.sourceSceneMeshIndex = sourceSceneMeshIndex;
-    if (scene->mMeshes[sourceSceneMeshIndex]->mName.length > 0u) {
-      meshAsset.sourceName.assign(
-          scene->mMeshes[sourceSceneMeshIndex]->mName.C_Str(),
-          scene->mMeshes[sourceSceneMeshIndex]->mName.length);
-    } else {
-      meshAsset.sourceName = makeFallbackMeshName(sourceSceneMeshIndex);
-    }
-    meshOrdinalToAsset.emplace(
-        sourceSceneMeshIndex,
-        static_cast<uint32_t>(imported.meshAssets.size()));
-    imported.meshAssets.push_back(std::move(meshAsset));
-  }
-
-  for (uint32_t sourceMaterialIndex = 0u;
-       sourceMaterialIndex < scene->mNumMaterials; ++sourceMaterialIndex) {
-    if (materialOrdinalToAsset.contains(sourceMaterialIndex)) {
-      continue;
-    }
-    ImportedSceneMaterialAsset materialAsset{};
-    materialAsset.sourceMaterialIndex = sourceMaterialIndex;
-    if (scene->mMaterials[sourceMaterialIndex] != nullptr) {
-      aiString materialName;
-      if (scene->mMaterials[sourceMaterialIndex]->Get(
-              AI_MATKEY_NAME, materialName) == aiReturn_SUCCESS &&
-          materialName.length > 0u) {
-        materialAsset.sourceName.assign(materialName.C_Str(),
-                                        materialName.length);
-      }
-    }
-    if (materialAsset.sourceName.empty()) {
-      materialAsset.sourceName = makeFallbackMaterialName(sourceMaterialIndex);
-    }
-    materialOrdinalToAsset.emplace(
-        sourceMaterialIndex,
-        static_cast<uint32_t>(imported.materialAssets.size()));
-    imported.materialAssets.push_back(std::move(materialAsset));
-  }
+  appendRemainingSceneAssets(imported, *scene, meshOrdinalToAsset,
+                             materialOrdinalToAsset);
 
   if (!detail::isGltfJsonAssetPath(path)) {
     return Result<ImportedScene, std::string>::makeResult(std::move(imported));
@@ -676,6 +1138,31 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                                   static_cast<uint32_t>(rootOrdinal));
   }
 
+  if (auto rebuildResult = rebuildImportedSceneFromParsedGltf(
+          imported, *scene, parsedNodes, parsedRoots, parsedPaths,
+          importedPathToNode, importedNameToNodes, lightsResult.value());
+      rebuildResult.hasError()) {
+    return Result<ImportedScene, std::string>::makeError(rebuildResult.error());
+  } else if (rebuildResult.value()) {
+    return Result<ImportedScene, std::string>::makeResult(std::move(imported));
+  }
+
+  std::vector<uint8_t> importedNodeMatched(imported.nodes.size(), 0u);
+  for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
+       ++parsedNodeIndex) {
+    const uint32_t importedNodeIndex = resolveImportedNodeIndex(
+        parsedNodes[parsedNodeIndex], parsedNodeIndex, parsedPaths,
+        importedPathToNode, importedNameToNodes, imported.nodes);
+    if (importedNodeIndex == kInvalidScenePrefabIndex ||
+        importedNodeIndex >= imported.nodes.size() ||
+        importedNodeMatched[importedNodeIndex] != 0u) {
+      continue;
+    }
+    imported.nodes[importedNodeIndex].localFromParent =
+        parsedNodes[parsedNodeIndex].localMatrix;
+    importedNodeMatched[importedNodeIndex] = 1u;
+  }
+
   const std::vector<ParsedLightDef> parsedLights =
       std::move(lightsResult.value());
   for (uint32_t parsedNodeIndex = 0; parsedNodeIndex < parsedNodes.size();
@@ -689,7 +1176,7 @@ SceneImporter::loadSceneFromFile(std::string_view path,
           "glTF punctual light index is out of range");
     }
 
-    const uint32_t importedNodeIndex = resolveImportedLightNodeIndex(
+    const uint32_t importedNodeIndex = resolveImportedNodeIndex(
         parsedNode, parsedNodeIndex, parsedPaths, importedPathToNode,
         importedNameToNodes, imported.nodes);
     if (importedNodeIndex == kInvalidScenePrefabIndex) {
