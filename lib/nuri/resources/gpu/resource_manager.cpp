@@ -15,6 +15,35 @@ namespace {
 
 constexpr bool kEnablePortableSceneTextureRuntime = true;
 
+[[nodiscard]] bool hasTextureExtension(std::string_view path,
+                                       std::string_view extension) {
+  if (path.size() < extension.size()) {
+    return false;
+  }
+  const size_t start = path.size() - extension.size();
+  for (size_t i = 0; i < extension.size(); ++i) {
+    const char lhs = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(path[start + i])));
+    const char rhs = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(extension[i])));
+    if (lhs != rhs) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] TextureRequestKind
+resolveTextureRequestKindForPath(std::string_view path,
+                                 TextureRequestKind fallback) {
+  if (fallback == TextureRequestKind::Texture2D &&
+      (hasTextureExtension(path, ".ktx2") ||
+       hasTextureExtension(path, ".ktx"))) {
+    return TextureRequestKind::Ktx2Texture2D;
+  }
+  return fallback;
+}
+
 struct MaterialTextureResolveSpec {
   const char *slotName = nullptr;
   TextureRef MaterialRequest::TextureRefs::*ref = nullptr;
@@ -233,7 +262,7 @@ tryLoadSceneMaterialCache(std::string_view sourcePath) {
   textureRequest.path = slotData.path;
   textureRequest.loadOptions =
       TextureLoadOptions{.srgb = srgb, .generateMipmaps = generateMipmaps};
-  textureRequest.kind = kind;
+  textureRequest.kind = resolveTextureRequestKindForPath(slotData.path, kind);
   textureRequest.debugName = std::string(debugName);
   return resources.acquireTexture(textureRequest);
 }
@@ -1035,14 +1064,29 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
         prefab.materialAssets[assetIndex].sourceMaterialIndex, assetIndex);
   }
 
+  std::optional<ImportedMaterialSet> importedMaterialSet{};
+  const auto ensureImportedMaterialSet =
+      [&]() -> Result<const ImportedMaterialSet *, std::string> {
+    if (!importedMaterialSet.has_value()) {
+      auto materialInfoResult =
+          MeshImporter::loadMaterialInfoFromFile(prefab.sourcePath);
+      if (materialInfoResult.hasError()) {
+        return Result<const ImportedMaterialSet *, std::string>::makeError(
+            materialInfoResult.error());
+      }
+      importedMaterialSet = std::move(materialInfoResult.value());
+    }
+    return Result<const ImportedMaterialSet *, std::string>::makeResult(
+        &importedMaterialSet.value());
+  };
+
   bool loadedFromCache = false;
   if (auto cachedMaterials = tryLoadSceneMaterialCache(prefab.sourcePath);
       cachedMaterials.has_value()) {
-    std::optional<ImportedMaterialSet> importedMaterialSet{};
-    if (auto materialInfoResult =
-            MeshImporter::loadMaterialInfoFromFile(prefab.sourcePath);
-        !materialInfoResult.hasError()) {
-      importedMaterialSet = std::move(materialInfoResult.value());
+    const ImportedMaterialSet *importedMaterialSetPtr = nullptr;
+    if (auto importedResult = ensureImportedMaterialSet();
+        !importedResult.hasError()) {
+      importedMaterialSetPtr = importedResult.value();
     }
 
     std::vector<MaterialRef> pendingMaterials(assets.materials.size(),
@@ -1056,9 +1100,11 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
         continue;
       }
       const ImportedMaterialInfo *imported = &cached.sourceMaterial;
-      if (importedMaterialSet.has_value() &&
-          cached.sourceMaterialIndex < importedMaterialSet->materials.size()) {
-        imported = &importedMaterialSet->materials[cached.sourceMaterialIndex];
+      if (importedMaterialSetPtr != nullptr &&
+          cached.sourceMaterialIndex <
+              importedMaterialSetPtr->materials.size()) {
+        imported =
+            &importedMaterialSetPtr->materials[cached.sourceMaterialIndex];
       }
       const CachedTextureRefsAcquireResult textureRefsResult =
           acquireCachedImportedTextureRefs(
@@ -1106,15 +1152,14 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
   }
 
   if (!loadedFromCache) {
-    auto materialInfoResult =
-        MeshImporter::loadMaterialInfoFromFile(prefab.sourcePath);
+    auto materialInfoResult = ensureImportedMaterialSet();
     if (materialInfoResult.hasError()) {
       return Result<ScenePrefabAssets, std::string>::makeError(
           "ResourceManager::acquireScenePrefabAssets: failed to parse material "
           "metadata: " +
           materialInfoResult.error());
     }
-    const ImportedMaterialSet &materialSet = materialInfoResult.value();
+    const ImportedMaterialSet &materialSet = *materialInfoResult.value();
     for (uint32_t assetIndex = 0u; assetIndex < prefab.materialAssets.size();
          ++assetIndex) {
       const uint32_t sourceMaterialIndex =
@@ -1210,9 +1255,22 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
   }
 
   if (!pendingMeshIndices.empty()) {
-    std::pmr::vector<uint32_t> sourceSceneMeshIndices(memory_);
-    sourceSceneMeshIndices.reserve(pendingMeshIndices.size());
+    std::pmr::vector<uint8_t> pendingMeshSeen(memory_);
+    pendingMeshSeen.resize(assets.models.size(), 0u);
+    std::pmr::vector<uint32_t> uniquePendingMeshIndices(memory_);
+    uniquePendingMeshIndices.reserve(pendingMeshIndices.size());
     for (const uint32_t meshAssetIndex : pendingMeshIndices) {
+      if (meshAssetIndex >= pendingMeshSeen.size() ||
+          pendingMeshSeen[meshAssetIndex] != 0u) {
+        continue;
+      }
+      pendingMeshSeen[meshAssetIndex] = 1u;
+      uniquePendingMeshIndices.push_back(meshAssetIndex);
+    }
+
+    std::pmr::vector<uint32_t> sourceSceneMeshIndices(memory_);
+    sourceSceneMeshIndices.reserve(uniquePendingMeshIndices.size());
+    for (const uint32_t meshAssetIndex : uniquePendingMeshIndices) {
       sourceSceneMeshIndices.push_back(
           prefab.meshAssets[meshAssetIndex].sourceSceneMeshIndex);
     }
@@ -1230,15 +1288,15 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
 
     std::pmr::vector<MeshData> sceneMeshes =
         std::move(sceneMeshesResult.value());
-    if (sceneMeshes.size() != pendingMeshIndices.size()) {
+    if (sceneMeshes.size() != uniquePendingMeshIndices.size()) {
       return Result<ScenePrefabAssets, std::string>::makeError(
           "ResourceManager::acquireScenePrefabAssets: batched scene mesh "
           "count mismatch");
     }
 
-    for (size_t meshOrdinal = 0; meshOrdinal < pendingMeshIndices.size();
+    for (size_t meshOrdinal = 0; meshOrdinal < uniquePendingMeshIndices.size();
          ++meshOrdinal) {
-      const uint32_t meshIndex = pendingMeshIndices[meshOrdinal];
+      const uint32_t meshIndex = uniquePendingMeshIndices[meshOrdinal];
       const uint32_t sourceSceneMeshIndex =
           prefab.meshAssets[meshIndex].sourceSceneMeshIndex;
       ModelRequest request{

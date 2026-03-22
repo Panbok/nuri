@@ -34,13 +34,17 @@ public:
               std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
-  loadCubemapFromEquirectangularHDR(GPUDevice &gpu,
-                                    std::string_view filePath,
+  loadCubemapFromEquirectangularHDR(GPUDevice &gpu, std::string_view filePath,
                                     std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadTextureKtx2(GPUDevice &gpu, std::string_view filePath,
                   std::string_view debugName = {});
+
+  [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
+  loadPortableTextureKtx2(GPUDevice &gpu, std::string_view filePath,
+                          const TextureLoadOptions &options = {},
+                          std::string_view debugName = {});
 
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadCubemapKtx2(GPUDevice &gpu, std::string_view filePath,
