@@ -35,18 +35,26 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/gpu/model.cpp
   nuri/resources/gpu/resource_manager.cpp
   nuri/resources/gpu/texture.cpp
+  nuri/resources/detail/gltf_json_utils.cpp
   nuri/resources/gltf_scene_importer.cpp
   nuri/resources/mesh_importer_assimp.cpp
+  nuri/resources/scene_importer.cpp
   nuri/resources/stb_image.cpp
   nuri/resources/storage/font/nfont_binary_codec.cpp
+  nuri/resources/storage/material/material_binary_codec.cpp
+  nuri/resources/storage/material/material_binary_schema_codec.cpp
+  nuri/resources/storage/material/material_binary_serializer.cpp
+  nuri/resources/storage/material/material_cache_utils.cpp
   nuri/resources/storage/mesh/mesh_binary_codec.cpp
   nuri/resources/storage/mesh/mesh_binary_serializer.cpp
   nuri/resources/storage/mesh/mesh_cache_utils.cpp
   nuri/resources/storage/mesh/mesh_cache_writer.cpp
+  nuri/resources/storage/texture/texture_cache_utils.cpp
   nuri/scene/camera.cpp
   nuri/scene/camera_controller.cpp
   nuri/scene/camera_system.cpp
   nuri/scene/render_scene.cpp
+  nuri/scene/scene_graph.cpp
   nuri/text/detail/font_manager.cpp
   nuri/text/detail/text_layouter.cpp
   nuri/text/detail/text_layer_2d.cpp

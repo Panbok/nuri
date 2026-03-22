@@ -17,6 +17,53 @@ makeDeserializeError(std::string message, bool stale = false) {
                                      .stale = stale});
 }
 
+constexpr size_t kSerializedU8Bytes = sizeof(uint8_t);
+constexpr size_t kSerializedU32Bytes = sizeof(uint32_t);
+constexpr size_t kSerializedU64Bytes = sizeof(uint64_t);
+constexpr size_t kSerializedF32Bytes = sizeof(float);
+constexpr size_t kSerializedEmptyStringBytes = kSerializedU32Bytes;
+constexpr size_t kSerializedVec3Bytes = 3u * kSerializedF32Bytes;
+constexpr size_t kSerializedVec4Bytes = 4u * kSerializedF32Bytes;
+
+[[nodiscard]] constexpr size_t minSerializedTextureSlotBytes() noexcept {
+  constexpr size_t kSerializedTextureTransformBytes =
+      (2u * kSerializedF32Bytes) + (2u * kSerializedF32Bytes) +
+      kSerializedF32Bytes;
+  return kSerializedEmptyStringBytes + // `slot.path`
+         kSerializedU8Bytes +          // `slot.sourceKind`
+         (3u *
+          kSerializedU32Bytes) + // `embeddedIndex`, `uvSet`, `samplerIndex`
+         kSerializedF32Bytes +   // `slot.scale`
+         kSerializedTextureTransformBytes; // `offset.xy`, `scale.xy`,
+                                           // `rotation`
+}
+
+[[nodiscard]] constexpr size_t minSerializedTextureCacheEntryBytes() noexcept {
+  return kSerializedEmptyStringBytes + // `portablePath`
+         kSerializedU8Bytes +          // `srgb`
+         kSerializedU64Bytes;          // `sourceIdentityHash`
+}
+
+[[nodiscard]] constexpr size_t
+minSerializedSceneMaterialRecordBytes() noexcept {
+  constexpr size_t kMaterialVec3FieldCount = 4u;
+  constexpr size_t kMaterialScalarFloatFieldCount = 17u;
+  return kSerializedU8Bytes +          // format version
+         kSerializedU32Bytes +         // source material index
+         kSerializedEmptyStringBytes + // material name
+         kSerializedU8Bytes +          // workflow
+         kSerializedVec4Bytes +        // baseColorFactor
+         (kMaterialVec3FieldCount * kSerializedVec3Bytes) + // vec3 factors
+         (kMaterialScalarFloatFieldCount *
+          kSerializedF32Bytes) + // scalar factors
+         kSerializedU8Bytes +    // doubleSided
+         kSerializedU8Bytes +    // alphaMode
+         (kMaterialTextureSlotCount * (minSerializedTextureSlotBytes() +
+                                       minSerializedTextureCacheEntryBytes()));
+}
+
+static_assert(minSerializedSceneMaterialRecordBytes() == 900u);
+
 } // namespace
 
 Result<std::vector<std::byte>, std::string>
@@ -97,17 +144,13 @@ materialBinaryDeserialize(std::span<const std::byte> fileBytes,
 
   material_binary_codec::Reader reader(fileBytes.subspan(sizeof(header)));
   SceneMaterialCacheData data{};
-  constexpr size_t kMinSerializedMaterialRecordBytes =
-      1u + 4u + 4u + 16u + 12u + 4u + 4u + 4u + 12u + 4u + 12u + 4u + 4u +
-      4u + 4u + 4u + 4u + 4u + 12u + 4u + 4u + 4u + 4u + 4u + 1u + 1u +
-      (kMaterialTextureSlotCount * (4u + 1u + 4u + 4u + 4u + 4u + 4u + 4u +
-                                    4u + 4u + 4u + 4u + 1u + 8u));
   const size_t remainingBytes = fileBytes.size() - sizeof(header);
   const size_t safeMaxMaterialCount =
-      remainingBytes / kMinSerializedMaterialRecordBytes;
+      remainingBytes / minSerializedSceneMaterialRecordBytes();
   if (header.materialCount > safeMaxMaterialCount) {
     return makeDeserializeError<SceneMaterialCacheData>(
-        "materialBinaryDeserialize: material count exceeds remaining file size");
+        "materialBinaryDeserialize: material count exceeds remaining file "
+        "size");
   }
   data.materials.reserve(static_cast<size_t>(header.materialCount));
   for (uint32_t i = 0; i < header.materialCount; ++i) {

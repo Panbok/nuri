@@ -18,6 +18,11 @@ enum class MaterialAlphaMode : uint8_t {
   Blend = 2,
 };
 
+enum class MaterialWorkflow : uint8_t {
+  MetallicRoughness = 0,
+  SpecularGlossiness = 1,
+};
+
 enum class MaterialTextureSourceKind : uint8_t {
   None = 0,
   ExternalFile = 1,
@@ -50,6 +55,7 @@ struct MaterialTextureSlotData {
 
 struct MaterialData {
   std::string name{};
+  MaterialWorkflow workflow = MaterialWorkflow::MetallicRoughness;
   glm::vec4 baseColorFactor{1.0f};
   glm::vec3 emissiveFactor{0.0f};
   float emissiveStrength = 1.0f;
@@ -57,6 +63,7 @@ struct MaterialData {
   float roughnessFactor = 1.0f;
   glm::vec3 specularColorFactor{1.0f};
   float specularFactor = 1.0f;
+  float glossinessFactor = 1.0f;
   glm::vec3 sheenColorFactor{0.0f};
   float sheenWeight = 0.0f;
   float sheenRoughnessFactor = 0.0f;
@@ -73,6 +80,8 @@ struct MaterialData {
   float alphaCutoff = 0.5f;
   bool doubleSided = false;
   MaterialAlphaMode alphaMode = MaterialAlphaMode::Opaque;
+  // `baseColor` carries `baseColorTexture` for metallic-roughness and
+  // `diffuseTexture` for spec-gloss.
   MaterialTextureSlotData baseColor{};
   MaterialTextureSlotData metallicRoughness{};
   MaterialTextureSlotData normal{};
@@ -81,7 +90,12 @@ struct MaterialData {
   MaterialTextureSlotData clearcoat{};
   MaterialTextureSlotData clearcoatRoughness{};
   MaterialTextureSlotData clearcoatNormal{};
+  // `specular` is reserved for `KHR_materials_specular::specularTexture` and
+  // is not used by the spec-gloss workflow.
   MaterialTextureSlotData specular{};
+  // `specularColor` carries `specularColorTexture` for
+  // `KHR_materials_specular`, and the combined RGBA
+  // `specularGlossinessTexture` for spec-gloss.
   MaterialTextureSlotData specularColor{};
   MaterialTextureSlotData sheenColor{};
   MaterialTextureSlotData sheenRoughness{};

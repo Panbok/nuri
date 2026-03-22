@@ -26,7 +26,7 @@ constexpr std::array<SlotPtr, kMaterialTextureSlotCount> kMaterialSlotPtrs{{
 static_assert(kMaterialSlotPtrs.size() == kMaterialTextureSlotCount,
               "kMaterialSlotPtrs must match kMaterialTextureSlotCount");
 
-constexpr uint8_t kSceneMaterialRecordFormatVersion = 1u;
+constexpr uint8_t kSceneMaterialRecordFormatVersion = 2u;
 
 [[nodiscard]] constexpr bool
 isValidMaterialTextureSourceKind(uint32_t value) noexcept {
@@ -36,6 +36,10 @@ isValidMaterialTextureSourceKind(uint32_t value) noexcept {
 
 [[nodiscard]] constexpr bool isValidMaterialAlphaMode(uint32_t value) noexcept {
   return value <= static_cast<uint32_t>(MaterialAlphaMode::Blend);
+}
+
+[[nodiscard]] constexpr bool isValidMaterialWorkflow(uint32_t value) noexcept {
+  return value <= static_cast<uint32_t>(MaterialWorkflow::SpecularGlossiness);
 }
 
 template <typename T>
@@ -147,6 +151,7 @@ void writeSceneMaterialRecord(material_binary_codec::Writer &writer,
   writer.writeU8(kSceneMaterialRecordFormatVersion);
   writer.writeU32(record.sourceMaterialIndex);
   writer.writeString(material.name);
+  writer.writeU8(static_cast<uint8_t>(material.workflow));
   writeVec4(writer, material.baseColorFactor);
   writeVec3(writer, material.emissiveFactor);
   writer.writeF32(material.emissiveStrength);
@@ -154,6 +159,7 @@ void writeSceneMaterialRecord(material_binary_codec::Writer &writer,
   writer.writeF32(material.roughnessFactor);
   writeVec3(writer, material.specularColorFactor);
   writer.writeF32(material.specularFactor);
+  writer.writeF32(material.glossinessFactor);
   writeVec3(writer, material.sheenColorFactor);
   writer.writeF32(material.sheenWeight);
   writer.writeF32(material.sheenRoughnessFactor);
@@ -185,6 +191,7 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   auto formatVersion = reader.readU8();
   auto sourceMaterialIndex = reader.readU32();
   auto name = reader.readString();
+  auto workflow = reader.readU8();
   auto baseColorFactor = readVec4(reader);
   auto emissiveFactor = readVec3(reader);
   auto emissiveStrength = reader.readF32();
@@ -192,6 +199,7 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   auto roughnessFactor = reader.readF32();
   auto specularColorFactor = readVec3(reader);
   auto specularFactor = reader.readF32();
+  auto glossinessFactor = reader.readF32();
   auto sheenColorFactor = readVec3(reader);
   auto sheenWeight = reader.readF32();
   auto sheenRoughnessFactor = reader.readF32();
@@ -208,11 +216,12 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   auto alphaCutoff = reader.readF32();
   auto doubleSided = reader.readU8();
   auto alphaMode = reader.readU8();
-  if (formatVersion.hasError() || sourceMaterialIndex.hasError() || name.hasError() ||
-      baseColorFactor.hasError() || emissiveFactor.hasError() ||
-      emissiveStrength.hasError() || metallicFactor.hasError() ||
-      roughnessFactor.hasError() || specularColorFactor.hasError() ||
-      specularFactor.hasError() || sheenColorFactor.hasError() ||
+  if (formatVersion.hasError() || sourceMaterialIndex.hasError() ||
+      name.hasError() || workflow.hasError() || baseColorFactor.hasError() ||
+      emissiveFactor.hasError() || emissiveStrength.hasError() ||
+      metallicFactor.hasError() || roughnessFactor.hasError() ||
+      specularColorFactor.hasError() || specularFactor.hasError() ||
+      glossinessFactor.hasError() || sheenColorFactor.hasError() ||
       sheenWeight.hasError() || sheenRoughnessFactor.hasError() ||
       clearcoatFactor.hasError() || clearcoatRoughnessFactor.hasError() ||
       clearcoatNormalScale.hasError() || transmissionFactor.hasError() ||
@@ -232,6 +241,12 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   MaterialData material{};
   record.sourceMaterialIndex = sourceMaterialIndex.value();
   material.name = std::move(name.value());
+  if (!isValidMaterialWorkflow(workflow.value())) {
+    return makeDeserializeError<SceneMaterialRecord>(
+        std::format("materialBinaryDeserialize: invalid material workflow {}",
+                    workflow.value()));
+  }
+  material.workflow = static_cast<MaterialWorkflow>(workflow.value());
   material.baseColorFactor = baseColorFactor.value();
   material.emissiveFactor = emissiveFactor.value();
   material.emissiveStrength = emissiveStrength.value();
@@ -239,6 +254,7 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   material.roughnessFactor = roughnessFactor.value();
   material.specularColorFactor = specularColorFactor.value();
   material.specularFactor = specularFactor.value();
+  material.glossinessFactor = glossinessFactor.value();
   material.sheenColorFactor = sheenColorFactor.value();
   material.sheenWeight = sheenWeight.value();
   material.sheenRoughnessFactor = sheenRoughnessFactor.value();

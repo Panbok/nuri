@@ -106,6 +106,7 @@ struct MaterialTextureTransforms {
 };
 
 struct MaterialDesc {
+  MaterialWorkflow workflow = MaterialWorkflow::MetallicRoughness;
   glm::vec4 baseColorFactor{1.0f};
   glm::vec3 emissiveFactor{0.0f};
   float emissiveStrength = 1.0f;
@@ -113,6 +114,7 @@ struct MaterialDesc {
   float roughnessFactor = 1.0f;
   glm::vec3 specularColorFactor{1.0f, 1.0f, 1.0f};
   float specularFactor = 1.0f;
+  float glossinessFactor = 1.0f;
   glm::vec3 sheenColorFactor{0.0f, 0.0f, 0.0f};
   float sheenWeight = 0.0f;
   float sheenRoughnessFactor = 0.0f;
@@ -204,10 +206,12 @@ struct alignas(16) MaterialGpuData {
       glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
       glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
   };
-  glm::uvec4 materialFlags{static_cast<uint32_t>(MaterialAlphaMode::Opaque), 0u,
-                           kMaterialFeatureMetallicRoughness,
-                           0u}; // Kept as a full std430 slot: (alphaMode,
-                                // doubleSided, featureMask, reserved)
+  glm::uvec4 materialFlags{
+      static_cast<uint32_t>(MaterialAlphaMode::Opaque), 0u,
+      kMaterialFeatureMetallicRoughness,
+      static_cast<uint32_t>(MaterialWorkflow::MetallicRoughness)};
+  // Kept as a full std430 slot: (alphaMode, doubleSided, featureMask,
+  // workflow)
 };
 inline constexpr size_t kMaterialGpuDataStd430Size = 49u * sizeof(glm::vec4);
 static_assert(sizeof(MaterialGpuData) == kMaterialGpuDataStd430Size,

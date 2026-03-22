@@ -134,6 +134,7 @@ hashModelImportOptions(const MeshImportOptions &options) {
     mix(static_cast<uint64_t>(std::bit_cast<uint32_t>(value)));
   };
 
+  mix(static_cast<uint64_t>(desc.workflow));
   mixFloat(desc.baseColorFactor.x);
   mixFloat(desc.baseColorFactor.y);
   mixFloat(desc.baseColorFactor.z);
@@ -150,6 +151,7 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mixFloat(desc.specularColorFactor.y);
   mixFloat(desc.specularColorFactor.z);
   mixFloat(desc.specularFactor);
+  mixFloat(desc.glossinessFactor);
   mixFloat(desc.sheenColorFactor.x);
   mixFloat(desc.sheenColorFactor.y);
   mixFloat(desc.sheenColorFactor.z);

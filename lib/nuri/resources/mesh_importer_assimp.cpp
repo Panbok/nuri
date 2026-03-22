@@ -364,6 +364,7 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
 }
 
 void resetGltfOverlayState(ImportedMaterialInfo &material) {
+  material.workflow = MaterialWorkflow::MetallicRoughness;
   material.emissiveStrength = 1.0f;
   material.clearcoatFactor = 0.0f;
   material.clearcoatRoughnessFactor = 0.0f;
@@ -372,6 +373,7 @@ void resetGltfOverlayState(ImportedMaterialInfo &material) {
   material.clearcoatRoughness = ImportedMaterialTexture{};
   material.clearcoatNormal = ImportedMaterialTexture{};
   material.specularFactor = 1.0f;
+  material.glossinessFactor = 1.0f;
   material.specularColorFactor = glm::vec3(1.0f);
   material.specular = ImportedMaterialTexture{};
   material.specularColor = ImportedMaterialTexture{};
@@ -543,6 +545,16 @@ void overlaySheenExtension(ImportedMaterialInfo &material, yyjson_val *root,
 void overlaySpecularExtension(ImportedMaterialInfo &material, yyjson_val *root,
                               const std::filesystem::path &modelPath,
                               yyjson_val *specularExt) {
+  if (material.workflow == MaterialWorkflow::SpecularGlossiness) {
+    if (yyjson_is_obj(specularExt)) {
+      NURI_LOG_WARNING(
+          "MeshImporter::overlaySpecularExtension: material '%s' combines "
+          "KHR_materials_pbrSpecularGlossiness with KHR_materials_specular; "
+          "ignoring the specular extension",
+          material.name.empty() ? "<unnamed>" : material.name.c_str());
+    }
+    return;
+  }
   if (!yyjson_is_obj(specularExt)) {
     return;
   }
@@ -569,6 +581,7 @@ void overlaySpecularGlossinessExtension(ImportedMaterialInfo &material,
     return;
   }
 
+  material.workflow = MaterialWorkflow::SpecularGlossiness;
   (void)tryReadJsonVec4(yyjson_obj_get(specGlossExt, "diffuseFactor"),
                         material.baseColorFactor);
   material.baseColorFactor = glm::clamp(material.baseColorFactor, 0.0f, 1.0f);
@@ -576,13 +589,14 @@ void overlaySpecularGlossinessExtension(ImportedMaterialInfo &material,
   (void)tryReadJsonVec3(yyjson_obj_get(specGlossExt, "specularFactor"),
                         material.specularColorFactor);
   material.specularColorFactor = glm::max(material.specularColorFactor, 0.0f);
-  material.specularFactor = 1.0f;
   material.metallicFactor = 0.0f;
+  material.roughnessFactor = 1.0f;
+  material.metallicRoughness = ImportedMaterialTexture{};
+  material.specular = ImportedMaterialTexture{};
 
-  float glossinessFactor = 1.0f;
   (void)tryReadJsonFloat(yyjson_obj_get(specGlossExt, "glossinessFactor"),
-                         glossinessFactor);
-  material.roughnessFactor = std::clamp(1.0f - glossinessFactor, 0.0f, 1.0f);
+                         material.glossinessFactor);
+  material.glossinessFactor = std::clamp(material.glossinessFactor, 0.0f, 1.0f);
 
   overlayTextureSlot(material.baseColor, root, modelPath,
                      yyjson_obj_get(specGlossExt, "diffuseTexture"));
@@ -658,9 +672,17 @@ void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
 
   assignMaterialNameFromGltf(material, materialValue);
 
+  material.workflow = MaterialWorkflow::MetallicRoughness;
   yyjson_val *pbrMetallicRoughness =
       yyjson_obj_get(materialValue, "pbrMetallicRoughness");
-  if (yyjson_is_obj(pbrMetallicRoughness)) {
+  yyjson_val *extensions = yyjson_obj_get(materialValue, "extensions");
+  yyjson_val *specGlossExt =
+      yyjson_is_obj(extensions)
+          ? yyjson_obj_get(extensions, "KHR_materials_pbrSpecularGlossiness")
+          : nullptr;
+  const bool hasSpecGloss = yyjson_is_obj(specGlossExt);
+
+  if (!hasSpecGloss && yyjson_is_obj(pbrMetallicRoughness)) {
     (void)tryReadJsonVec4(
         yyjson_obj_get(pbrMetallicRoughness, "baseColorFactor"),
         material.baseColorFactor);
@@ -711,7 +733,6 @@ void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
         std::clamp(material.occlusionStrength, 0.0f, 1.0f);
   }
 
-  yyjson_val *extensions = yyjson_obj_get(materialValue, "extensions");
   if (!yyjson_is_obj(extensions)) {
     finalizeImportedMaterialState(material);
     return;
@@ -719,9 +740,9 @@ void overlayMaterialInfoFromGltfValue(ImportedMaterialInfo &material,
 
   overlayEmissiveStrengthExtension(
       material, yyjson_obj_get(extensions, "KHR_materials_emissive_strength"));
-  overlaySpecularGlossinessExtension(
-      material, root, modelPath,
-      yyjson_obj_get(extensions, "KHR_materials_pbrSpecularGlossiness"));
+  if (hasSpecGloss) {
+    overlaySpecularGlossinessExtension(material, root, modelPath, specGlossExt);
+  }
   overlayClearcoatExtension(
       material, root, modelPath,
       yyjson_obj_get(extensions, "KHR_materials_clearcoat"));
@@ -746,7 +767,8 @@ YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path) {
 
 Result<bool, std::string>
 overlayMaterialInfoFromGltf(std::string_view path, ImportedMaterialSet &set) {
-  const std::filesystem::path modelPath(path);
+  const std::string pathString(path);
+  const std::filesystem::path modelPath(pathString);
   auto docResult = loadGltfJsonDocument(modelPath);
   if (docResult.hasError()) {
     return Result<bool, std::string>::makeError(docResult.error());
@@ -773,7 +795,7 @@ overlayMaterialInfoFromGltf(std::string_view path, ImportedMaterialSet &set) {
     NURI_LOG_WARNING(
         "MeshImporter::loadMaterialInfoFromFile: Assimp reported %zu extra "
         "material(s) for '%s'; keeping unmatched Assimp materials intact",
-        set.materials.size() - materialCount, std::string(path).c_str());
+        set.materials.size() - materialCount, pathString.c_str());
   }
 
   std::vector<bool> matchedExisting(set.materials.size(), false);
@@ -1820,14 +1842,14 @@ detail::loadMaterialInfoFromSourceFile(std::string_view path) {
     const aiMaterial *material = scene->mMaterials[materialIndex];
     if (!material) {
       ImportedMaterialInfo fallback{};
-      fallback.name = "material_" + std::to_string(materialIndex);
+      fallback.name = makeFallbackMaterialName(materialIndex);
       set.materials.push_back(std::move(fallback));
       continue;
     }
 
     ImportedMaterialInfo parsed = parseMaterial(*material, modelPath);
     if (parsed.name.empty()) {
-      parsed.name = "material_" + std::to_string(materialIndex);
+      parsed.name = makeFallbackMaterialName(materialIndex);
     }
     set.materials.push_back(std::move(parsed));
   }

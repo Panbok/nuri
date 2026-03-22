@@ -70,6 +70,9 @@ constexpr std::array<ImportedTextureMapping, kMaterialTextureSlotCount>
 }
 
 [[nodiscard]] bool hasSpecularData(const MaterialDesc &desc) {
+  if (desc.workflow == MaterialWorkflow::SpecularGlossiness) {
+    return false;
+  }
   return desc.specularFactor != 1.0f || desc.specularColorFactor.x != 1.0f ||
          desc.specularColorFactor.y != 1.0f ||
          desc.specularColorFactor.z != 1.0f ||
@@ -146,7 +149,9 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
   const float roughness = std::clamp(desc.roughnessFactor, 0.0f, 1.0f);
   const float occlusion = std::clamp(desc.occlusionStrength, 0.0f, 1.0f);
   const float alphaCutoff = std::clamp(desc.alphaCutoff, 0.0f, 1.0f);
-  const float specular = std::clamp(desc.specularFactor, 0.0f, 1.0f);
+  const float specular = desc.workflow == MaterialWorkflow::SpecularGlossiness
+                             ? std::clamp(desc.glossinessFactor, 0.0f, 1.0f)
+                             : std::clamp(desc.specularFactor, 0.0f, 1.0f);
   const glm::vec3 specularColor = glm::max(desc.specularColorFactor, 0.0f);
   const float sheenWeight = std::clamp(desc.sheenWeight, 0.0f, 1.0f);
   const float sheenRoughness =
@@ -308,9 +313,9 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
         glm::vec4(std::cos(transform.rotationRadians),
                   std::sin(transform.rotationRadians), 0.0f, 0.0f);
   }
-  gpuData.materialFlags =
-      glm::uvec4(static_cast<uint32_t>(desc.alphaMode),
-                 desc.doubleSided ? 1u : 0u, featureMask, 0u);
+  gpuData.materialFlags = glm::uvec4(static_cast<uint32_t>(desc.alphaMode),
+                                     desc.doubleSided ? 1u : 0u, featureMask,
+                                     static_cast<uint32_t>(desc.workflow));
   return Result<MaterialGpuData, std::string>::makeResult(gpuData);
 }
 
@@ -334,6 +339,7 @@ MaterialDesc
 Material::descFromImported(const MaterialData &materialData,
                            const MaterialTextureHandles &textures) {
   MaterialDesc desc{};
+  desc.workflow = materialData.workflow;
   desc.baseColorFactor = materialData.baseColorFactor;
   desc.emissiveFactor = materialData.emissiveFactor;
   desc.emissiveStrength = materialData.emissiveStrength;
@@ -341,6 +347,7 @@ Material::descFromImported(const MaterialData &materialData,
   desc.roughnessFactor = materialData.roughnessFactor;
   desc.specularColorFactor = materialData.specularColorFactor;
   desc.specularFactor = materialData.specularFactor;
+  desc.glossinessFactor = materialData.glossinessFactor;
   desc.sheenColorFactor = materialData.sheenColorFactor;
   desc.sheenWeight = materialData.sheenWeight;
   desc.sheenRoughnessFactor = materialData.sheenRoughnessFactor;
@@ -366,7 +373,13 @@ Material::descFromImported(const MaterialData &materialData,
 void Material::finalizeDesc(MaterialDesc &desc) {
   desc.ior = sanitizeMaterialDescIor(desc.ior);
   desc.emissiveStrength = std::max(desc.emissiveStrength, 0.0f);
-  desc.featureMask = kMaterialFeatureMetallicRoughness;
+  desc.glossinessFactor = std::clamp(desc.glossinessFactor, 0.0f, 1.0f);
+  desc.featureMask = 0u;
+  if (desc.workflow == MaterialWorkflow::MetallicRoughness) {
+    desc.featureMask |= kMaterialFeatureMetallicRoughness;
+  } else {
+    desc.metallicFactor = 0.0f;
+  }
   if (hasSpecularData(desc)) {
     desc.featureMask |= kMaterialFeatureSpecular;
   }
