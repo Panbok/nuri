@@ -63,6 +63,7 @@ constexpr uint32_t kDdsFourCcDx10 = 0x30315844u;
 constexpr uint32_t kDxgiFormatBc7Unorm = 98u;
 constexpr uint32_t kDxgiFormatBc7Srgb = 99u;
 
+#pragma pack(push, 1)
 struct DdsPixelFormatHeader {
   uint32_t size = 0;
   uint32_t flags = 0;
@@ -98,6 +99,13 @@ struct DdsHeaderDx10 {
   uint32_t arraySize = 0;
   uint32_t miscFlags2 = 0;
 };
+#pragma pack(pop)
+
+static_assert(sizeof(DdsPixelFormatHeader) == 32u,
+              "DDS pixel format header must match the DDS spec");
+static_assert(sizeof(DdsHeader) == 124u, "DDS header must match the DDS spec");
+static_assert(sizeof(DdsHeaderDx10) == 20u,
+              "DDS DX10 header must match the DDS spec");
 
 [[nodiscard]] bool hasExtension(std::string_view path,
                                 std::string_view extension) {
@@ -429,6 +437,22 @@ loadDdsPayload(std::string_view filePath, std::string_view debugName) {
     return Result<KtxLoadPayload, std::string>::makeError(
         "Texture::loadDdsPayload: DDS payload is empty");
   }
+  const uint32_t numMipLevels = std::max(1u, header.mipMapCount);
+  uint64_t expectedPayloadSize = 0u;
+  for (uint32_t level = 0u; level < numMipLevels; ++level) {
+    const uint32_t mipW = std::max(1u, header.width >> level);
+    const uint32_t mipH = std::max(1u, header.height >> level);
+    const uint32_t blocksX = (mipW + 3u) / 4u;
+    const uint32_t blocksY = (mipH + 3u) / 4u;
+    expectedPayloadSize +=
+        static_cast<uint64_t>(blocksX) * static_cast<uint64_t>(blocksY) * 16u;
+  }
+  if (static_cast<uint64_t>(bytes.size() - payloadOffset) <
+      expectedPayloadSize) {
+    return Result<KtxLoadPayload, std::string>::makeError(
+        "Texture::loadDdsPayload: truncated or insufficient DDS payload for "
+        "BC7 format");
+  }
 
   KtxLoadPayload payload{};
   payload.desc.type = TextureType::Texture2D;
@@ -439,7 +463,7 @@ loadDdsPayload(std::string_view filePath, std::string_view debugName) {
   payload.desc.storage = Storage::Device;
   payload.desc.numLayers = 1u;
   payload.desc.numSamples = 1u;
-  payload.desc.numMipLevels = std::max(1u, header.mipMapCount);
+  payload.desc.numMipLevels = numMipLevels;
   payload.desc.dataNumMipLevels = payload.desc.numMipLevels;
   payload.desc.generateMipmaps = false;
   payload.debugName =
@@ -874,21 +898,18 @@ Texture::loadPortableTextureKtx2(GPUDevice &gpu, std::string_view filePath,
     return Result<std::unique_ptr<Texture>, std::string>::makeError(
         transcodeFmtResult.error());
   }
-  if (ktxTexture2_NeedsTranscoding(portableTexture2)) {
-    const ktx_transcode_flags flags =
-        (targetFormat == Format::ETC2_RGB8_UNORM ||
-         targetFormat == Format::ETC2_RGB8_SRGB)
-            ? KTX_TF_HIGH_QUALITY
-            : 0u;
-    const KTX_error_code transcodeError = ktxTexture2_TranscodeBasis(
-        portableTexture2, transcodeFmtResult.value(), flags);
-    if (transcodeError != KTX_SUCCESS) {
-      return Result<std::unique_ptr<Texture>, std::string>::makeError(
-          "Texture::loadPortableTextureKtx2: failed to transcode Basis "
-          "payload '" +
-          std::string(filePath) + "' (error " +
-          std::to_string(static_cast<int>(transcodeError)) + ")");
-    }
+  const ktx_transcode_flags flags = (targetFormat == Format::ETC2_RGB8_UNORM ||
+                                     targetFormat == Format::ETC2_RGB8_SRGB)
+                                        ? KTX_TF_HIGH_QUALITY
+                                        : 0u;
+  const KTX_error_code transcodeError = ktxTexture2_TranscodeBasis(
+      portableTexture2, transcodeFmtResult.value(), flags);
+  if (transcodeError != KTX_SUCCESS) {
+    return Result<std::unique_ptr<Texture>, std::string>::makeError(
+        "Texture::loadPortableTextureKtx2: failed to transcode Basis payload "
+        "'" +
+        std::string(filePath) + "' (error " +
+        std::to_string(static_cast<int>(transcodeError)) + ")");
   }
 
   auto nativeTextureResult =
@@ -923,8 +944,13 @@ Texture::loadPortableTextureKtx2(GPUDevice &gpu, std::string_view filePath,
     }
   }
 
+  const std::string payloadSourcePath =
+      (persistNativeCache && !nativeCachePath.empty())
+          ? nativeCachePath.string()
+          : (debugName.empty() ? std::string(filePath)
+                               : std::string(debugName));
   auto payloadResult = makeKtxPayloadFromTexture(
-      *ktxTexture(nativeTextureResult.value().get()), nativeCachePath.string(),
+      *ktxTexture(nativeTextureResult.value().get()), payloadSourcePath,
       debugName, TextureType::Texture2D);
   if (payloadResult.hasError()) {
     return Result<std::unique_ptr<Texture>, std::string>::makeError(

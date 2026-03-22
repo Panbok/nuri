@@ -217,7 +217,6 @@ parseLightType(std::string_view typeName) {
 
 [[nodiscard]] LightDesc sanitizeImportedLightDesc(const LightDesc &desc) {
   LightDesc sanitized = desc;
-  sanitized.rotation = sanitizeRotation(desc.rotation);
   sanitized.color = glm::max(desc.color, glm::vec3(0.0f));
   sanitized.intensity = sanitizeNonNegative(desc.intensity, 1.0f);
   sanitized.range = sanitizeNonNegative(desc.range, 0.0f);
@@ -243,6 +242,43 @@ parseLightType(std::string_view typeName) {
   sanitized.position = glm::vec3(0.0f);
   sanitized.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
   return sanitized;
+}
+
+template <typename ResolveImportedNodeIndexFn>
+[[nodiscard]] Result<bool, std::string> attachParsedLightsToImportedNodes(
+    ImportedScene &imported, std::span<const ParsedNode> parsedNodes,
+    std::span<const ParsedLightDef> parsedLights,
+    ResolveImportedNodeIndexFn &&resolveImportedNodeIndexFn) {
+  for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
+       ++parsedNodeIndex) {
+    const ParsedNode &parsedNode = parsedNodes[parsedNodeIndex];
+    if (!parsedNode.lightIndex.has_value()) {
+      continue;
+    }
+    if (*parsedNode.lightIndex >= parsedLights.size()) {
+      return Result<bool, std::string>::makeError(
+          "glTF punctual light index is out of range");
+    }
+
+    const uint32_t importedNodeIndex =
+        resolveImportedNodeIndexFn(parsedNode, parsedNodeIndex);
+    if (importedNodeIndex == kInvalidScenePrefabIndex) {
+      continue;
+    }
+
+    ImportedSceneLight light{};
+    light.nodeIndex = importedNodeIndex;
+    light.light = parsedLights[*parsedNode.lightIndex].desc;
+    light.sourceName = !parsedNode.name.empty()
+                           ? parsedNode.name
+                           : parsedLights[*parsedNode.lightIndex].name;
+    if (light.light.name.empty()) {
+      light.light.name = light.sourceName;
+    }
+    light.sourceNodeIndex = parsedNodeIndex;
+    imported.lights.push_back(std::move(light));
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 [[nodiscard]] glm::mat4 parseNodeLocalMatrix(yyjson_val *nodeValue) {
@@ -488,30 +524,42 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
   std::vector<uint32_t> orderedParsedNodeIndices;
   orderedParsedNodeIndices.reserve(parsedNodes.size());
 
-  std::vector<uint8_t> appendActive(parsedNodes.size(), 0u);
-  std::function<void(uint32_t)> appendNodeRecursive = [&](uint32_t nodeIndex) {
-    if (nodeIndex >= parsedNodes.size() ||
-        remappedNodeIndices[nodeIndex] != kInvalidScenePrefabIndex) {
-      return;
-    }
-    if (appendActive[nodeIndex] != 0u) {
-      return;
-    }
-    appendActive[nodeIndex] = 1u;
-    const uint32_t parentIndex = parentIndices[nodeIndex];
-    if (parentIndex != kInvalidScenePrefabIndex) {
-      appendNodeRecursive(parentIndex);
-    }
-    remappedNodeIndices[nodeIndex] =
-        static_cast<uint32_t>(orderedParsedNodeIndices.size());
-    orderedParsedNodeIndices.push_back(nodeIndex);
-    for (const uint32_t childIndex : parsedNodes[nodeIndex].children) {
-      appendNodeRecursive(childIndex);
-    }
-    appendActive[nodeIndex] = 0u;
+  struct AppendFrame {
+    uint32_t nodeIndex = kInvalidScenePrefabIndex;
+    bool processChildren = false;
   };
+  std::vector<uint8_t> appendActive(parsedNodes.size(), 0u);
   for (const uint32_t rootIndex : parsedRoots) {
-    appendNodeRecursive(rootIndex);
+    std::vector<AppendFrame> stack;
+    stack.push_back({rootIndex, false});
+    while (!stack.empty()) {
+      const AppendFrame frame = stack.back();
+      stack.pop_back();
+      if (frame.nodeIndex >= parsedNodes.size()) {
+        continue;
+      }
+      if (frame.processChildren) {
+        remappedNodeIndices[frame.nodeIndex] =
+            static_cast<uint32_t>(orderedParsedNodeIndices.size());
+        orderedParsedNodeIndices.push_back(frame.nodeIndex);
+        appendActive[frame.nodeIndex] = 0u;
+        const auto &children = parsedNodes[frame.nodeIndex].children;
+        for (auto it = children.rbegin(); it != children.rend(); ++it) {
+          stack.push_back({*it, false});
+        }
+        continue;
+      }
+      if (remappedNodeIndices[frame.nodeIndex] != kInvalidScenePrefabIndex ||
+          appendActive[frame.nodeIndex] != 0u) {
+        continue;
+      }
+      appendActive[frame.nodeIndex] = 1u;
+      stack.push_back({frame.nodeIndex, true});
+      const uint32_t parentIndex = parentIndices[frame.nodeIndex];
+      if (parentIndex != kInvalidScenePrefabIndex) {
+        stack.push_back({parentIndex, false});
+      }
+    }
   }
 
   std::pmr::vector<ImportedSceneNode> structuralNodes =
@@ -643,7 +691,8 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
       std::vector<uint32_t> namedCandidates;
       namedCandidates.reserve(filtered.size());
       for (const uint32_t candidateIndex : filtered) {
-        if (structuralNodes[candidateIndex].name == parsedNode.name) {
+        if (std::string_view(structuralNodes[candidateIndex].name) ==
+            std::string_view(parsedNode.name)) {
           namedCandidates.push_back(candidateIndex);
         }
       }
@@ -666,44 +715,52 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
     return chooseBest(filtered);
   };
 
-  std::function<void(uint32_t, uint32_t)> mapParsedSubtree =
-      [&](uint32_t parsedNodeIndex, uint32_t structuralParentIndex) {
-        if (parsedNodeIndex >= parsedNodes.size()) {
-          return;
-        }
-
-        const ParsedNode &parsedNode = parsedNodes[parsedNodeIndex];
-        const std::vector<uint32_t> &candidateSet =
-            structuralParentIndex == kInvalidScenePrefabIndex
-                ? structuralRootCandidates
-                : structuralChildren[structuralParentIndex];
-
-        uint32_t matchedStructuralNode =
-            chooseCandidateFromSet(parsedNode, candidateSet);
-        if (matchedStructuralNode == kInvalidScenePrefabIndex) {
-          const uint32_t globalMatch = resolveImportedNodeIndex(
-              parsedNode, parsedNodeIndex, parsedPaths, importedPathToNode,
-              importedNameToNodes, structuralNodes);
-          if (globalMatch != kInvalidScenePrefabIndex &&
-              globalMatch < usedStructuralNodes.size() &&
-              usedStructuralNodes[globalMatch] == 0u) {
-            matchedStructuralNode = globalMatch;
-          }
-        }
-
-        uint32_t nextStructuralParent = structuralParentIndex;
-        if (matchedStructuralNode != kInvalidScenePrefabIndex) {
-          structuralNodeByParsedNode[parsedNodeIndex] = matchedStructuralNode;
-          usedStructuralNodes[matchedStructuralNode] = 1u;
-          nextStructuralParent = matchedStructuralNode;
-        }
-
-        for (const uint32_t childIndex : parsedNode.children) {
-          mapParsedSubtree(childIndex, nextStructuralParent);
-        }
-      };
+  struct SubtreeFrame {
+    uint32_t parsedNodeIndex = kInvalidScenePrefabIndex;
+    uint32_t structuralParentIndex = kInvalidScenePrefabIndex;
+  };
   for (const uint32_t rootIndex : parsedRoots) {
-    mapParsedSubtree(rootIndex, kInvalidScenePrefabIndex);
+    std::vector<SubtreeFrame> stack;
+    stack.push_back({rootIndex, kInvalidScenePrefabIndex});
+    while (!stack.empty()) {
+      const SubtreeFrame frame = stack.back();
+      stack.pop_back();
+      if (frame.parsedNodeIndex >= parsedNodes.size()) {
+        continue;
+      }
+
+      const ParsedNode &parsedNode = parsedNodes[frame.parsedNodeIndex];
+      const std::vector<uint32_t> &candidateSet =
+          frame.structuralParentIndex == kInvalidScenePrefabIndex
+              ? structuralRootCandidates
+              : structuralChildren[frame.structuralParentIndex];
+
+      uint32_t matchedStructuralNode =
+          chooseCandidateFromSet(parsedNode, candidateSet);
+      if (matchedStructuralNode == kInvalidScenePrefabIndex) {
+        const uint32_t globalMatch = resolveImportedNodeIndex(
+            parsedNode, frame.parsedNodeIndex, parsedPaths, importedPathToNode,
+            importedNameToNodes, structuralNodes);
+        if (globalMatch != kInvalidScenePrefabIndex &&
+            globalMatch < usedStructuralNodes.size() &&
+            usedStructuralNodes[globalMatch] == 0u) {
+          matchedStructuralNode = globalMatch;
+        }
+      }
+
+      uint32_t nextStructuralParent = frame.structuralParentIndex;
+      if (matchedStructuralNode != kInvalidScenePrefabIndex) {
+        structuralNodeByParsedNode[frame.parsedNodeIndex] =
+            matchedStructuralNode;
+        usedStructuralNodes[matchedStructuralNode] = 1u;
+        nextStructuralParent = matchedStructuralNode;
+      }
+
+      for (auto it = parsedNode.children.rbegin();
+           it != parsedNode.children.rend(); ++it) {
+        stack.push_back({*it, nextStructuralParent});
+      }
+    }
   }
 
   HashMap<uint32_t, uint32_t> meshOrdinalToAsset{};
@@ -809,32 +866,16 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
       parsedNodes.size(), copiedStructuralRenderableCount,
       fallbackRenderableCount, unmatchedParsedMeshNodeCount);
 
-  for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
-       ++parsedNodeIndex) {
-    const uint32_t importedNodeIndex = remappedNodeIndices[parsedNodeIndex];
-    if (importedNodeIndex == kInvalidScenePrefabIndex) {
-      continue;
-    }
-    const ParsedNode &parsedNode = parsedNodes[parsedNodeIndex];
-    if (!parsedNode.lightIndex.has_value()) {
-      continue;
-    }
-    if (*parsedNode.lightIndex >= parsedLights.size()) {
-      return Result<bool, std::string>::makeError(
-          "glTF punctual light index is out of range");
-    }
-
-    ImportedSceneLight light{};
-    light.nodeIndex = importedNodeIndex;
-    light.light = parsedLights[*parsedNode.lightIndex].desc;
-    light.sourceName = !parsedNode.name.empty()
-                           ? parsedNode.name
-                           : parsedLights[*parsedNode.lightIndex].name;
-    if (light.light.name.empty()) {
-      light.light.name = light.sourceName;
-    }
-    light.sourceNodeIndex = static_cast<int32_t>(parsedNodeIndex);
-    imported.lights.push_back(std::move(light));
+  auto attachStructuralLightsResult = attachParsedLightsToImportedNodes(
+      imported, parsedNodes, parsedLights,
+      [&](const ParsedNode &, uint32_t parsedNodeIndex) {
+        return parsedNodeIndex < remappedNodeIndices.size()
+                   ? remappedNodeIndices[parsedNodeIndex]
+                   : kInvalidScenePrefabIndex;
+      });
+  if (attachStructuralLightsResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        attachStructuralLightsResult.error());
   }
 
   return Result<bool, std::string>::makeResult(true);
@@ -911,6 +952,10 @@ resolveSceneRootNodes(yyjson_val *root, size_t nodeCount) {
     }
   }
   if (roots.empty()) {
+    NURI_LOG_WARNING(
+        "SceneImporter::resolveSceneRootNodes: glTF root fallback: no "
+        "unreferenced nodes; treating all %zu nodes as roots",
+        nodeCount);
     for (uint32_t nodeIndex = 0u; nodeIndex < nodeCount; ++nodeIndex) {
       roots.push_back(nodeIndex);
     }
@@ -1053,7 +1098,8 @@ SceneImporter::loadSceneFromFile(std::string_view path,
       }
     }
     if (!importedNode.name.empty()) {
-      importedNameToNodes[importedNode.name].push_back(importedNodeIndex);
+      importedNameToNodes[std::string(importedNode.name)].push_back(
+          importedNodeIndex);
     }
 
     imported.nodes.push_back(std::move(importedNode));
@@ -1165,40 +1211,24 @@ SceneImporter::loadSceneFromFile(std::string_view path,
 
   const std::vector<ParsedLightDef> parsedLights =
       std::move(lightsResult.value());
-  for (uint32_t parsedNodeIndex = 0; parsedNodeIndex < parsedNodes.size();
-       ++parsedNodeIndex) {
-    const ParsedNode &parsedNode = parsedNodes[parsedNodeIndex];
-    if (!parsedNode.lightIndex.has_value()) {
-      continue;
-    }
-    if (*parsedNode.lightIndex >= parsedLights.size()) {
-      return Result<ImportedScene, std::string>::makeError(
-          "glTF punctual light index is out of range");
-    }
-
-    const uint32_t importedNodeIndex = resolveImportedNodeIndex(
-        parsedNode, parsedNodeIndex, parsedPaths, importedPathToNode,
-        importedNameToNodes, imported.nodes);
-    if (importedNodeIndex == kInvalidScenePrefabIndex) {
-      NURI_LOG_WARNING(
-          "SceneImporter::loadSceneFromFile: skipping glTF light attachment "
-          "for parsed node %u ('%s') because no unique structural node match "
-          "was found",
-          parsedNodeIndex, parsedNode.name.c_str());
-      continue;
-    }
-
-    ImportedSceneLight light{};
-    light.nodeIndex = importedNodeIndex;
-    light.light = parsedLights[*parsedNode.lightIndex].desc;
-    light.sourceName = !parsedNode.name.empty()
-                           ? parsedNode.name
-                           : parsedLights[*parsedNode.lightIndex].name;
-    if (light.light.name.empty()) {
-      light.light.name = light.sourceName;
-    }
-    light.sourceNodeIndex = static_cast<int32_t>(parsedNodeIndex);
-    imported.lights.push_back(std::move(light));
+  auto attachImportedLightsResult = attachParsedLightsToImportedNodes(
+      imported, parsedNodes, parsedLights,
+      [&](const ParsedNode &parsedNode, uint32_t parsedNodeIndex) {
+        const uint32_t importedNodeIndex = resolveImportedNodeIndex(
+            parsedNode, parsedNodeIndex, parsedPaths, importedPathToNode,
+            importedNameToNodes, imported.nodes);
+        if (importedNodeIndex == kInvalidScenePrefabIndex) {
+          NURI_LOG_WARNING(
+              "SceneImporter::loadSceneFromFile: skipping glTF light "
+              "attachment for parsed node %u ('%s') because no unique "
+              "structural node match was found",
+              parsedNodeIndex, parsedNode.name.c_str());
+        }
+        return importedNodeIndex;
+      });
+  if (attachImportedLightsResult.hasError()) {
+    return Result<ImportedScene, std::string>::makeError(
+        attachImportedLightsResult.error());
   }
 
   return Result<ImportedScene, std::string>::makeResult(std::move(imported));
@@ -1230,7 +1260,7 @@ SceneImporter::buildScenePrefab(const ImportedScene &scene,
   for (const ImportedSceneMeshAsset &meshAsset : scene.meshAssets) {
     prefab.meshAssets.push_back(ScenePrefabMeshAssetRef{
         .sourceSceneMeshIndex = meshAsset.sourceSceneMeshIndex,
-        .sourceName = meshAsset.sourceName,
+        .sourceName = std::string(meshAsset.sourceName),
     });
   }
 
@@ -1238,7 +1268,7 @@ SceneImporter::buildScenePrefab(const ImportedScene &scene,
   for (const ImportedSceneMaterialAsset &materialAsset : scene.materialAssets) {
     prefab.materialAssets.push_back(ScenePrefabMaterialAssetRef{
         .sourceMaterialIndex = materialAsset.sourceMaterialIndex,
-        .sourceName = materialAsset.sourceName,
+        .sourceName = std::string(materialAsset.sourceName),
     });
   }
 
@@ -1259,7 +1289,7 @@ SceneImporter::buildScenePrefab(const ImportedScene &scene,
     prefabLight.light.position = glm::vec3(0.0f);
     prefabLight.light.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     if (prefabLight.light.name.empty()) {
-      prefabLight.light.name = sceneLight.sourceName;
+      prefabLight.light.name = std::string(sceneLight.sourceName);
     }
     prefab.lights.push_back(std::move(prefabLight));
   }
@@ -1311,7 +1341,7 @@ SceneImporter::buildSceneAssets(const ImportedScene &scene,
           allMaterials.materials[materialAsset.sourceMaterialIndex]);
     } else {
       MaterialData fallback{};
-      fallback.name = materialAsset.sourceName;
+      fallback.name = std::string(materialAsset.sourceName);
       assets.materials.materials.push_back(std::move(fallback));
     }
   }

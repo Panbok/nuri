@@ -4,7 +4,6 @@
 
 #include <filesystem>
 #include <memory>
-#include <span>
 #include <string>
 #include <string_view>
 
@@ -26,13 +25,13 @@ hasExtensionCaseInsensitive(const std::filesystem::path &path,
 [[nodiscard]] std::string_view readJsonStringView(yyjson_val *object,
                                                   const char *key);
 
-bool tryReadJsonFloat(yyjson_val *value, float &out);
-bool tryReadJsonUint32(yyjson_val *value, uint32_t &out);
-bool tryReadJsonVec2(yyjson_val *value, glm::vec2 &out);
-bool tryReadJsonVec3(yyjson_val *value, glm::vec3 &out);
-bool tryReadJsonVec4(yyjson_val *value, glm::vec4 &out);
-bool tryReadJsonMat4(yyjson_val *value, glm::mat4 &out);
-bool tryReadJsonBool(yyjson_val *value, bool &out);
+[[nodiscard]] bool tryReadJsonFloat(yyjson_val *value, float &out);
+[[nodiscard]] bool tryReadJsonUint32(yyjson_val *value, uint32_t &out);
+[[nodiscard]] bool tryReadJsonVec2(yyjson_val *value, glm::vec2 &out);
+[[nodiscard]] bool tryReadJsonVec3(yyjson_val *value, glm::vec3 &out);
+[[nodiscard]] bool tryReadJsonVec4(yyjson_val *value, glm::vec4 &out);
+[[nodiscard]] bool tryReadJsonMat4(yyjson_val *value, glm::mat4 &out);
+[[nodiscard]] bool tryReadJsonBool(yyjson_val *value, bool &out);
 
 [[nodiscard]] YyJsonDocResult
 loadGltfJsonDocument(const std::filesystem::path &path,

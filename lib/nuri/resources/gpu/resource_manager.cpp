@@ -1055,6 +1055,20 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
   ScenePrefabAssets assets(memory_);
   assets.models.resize(prefab.meshAssets.size(), kInvalidModelRef);
   assets.materials.resize(prefab.materialAssets.size(), kInvalidMaterialRef);
+  const auto cleanupAndError =
+      [&](std::string err) -> Result<ScenePrefabAssets, std::string> {
+    for (const MaterialRef materialRef : assets.materials) {
+      if (isValid(materialRef)) {
+        release(materialRef);
+      }
+    }
+    for (const ModelRef modelRef : assets.models) {
+      if (isValid(modelRef)) {
+        release(modelRef);
+      }
+    }
+    return Result<ScenePrefabAssets, std::string>::makeError(std::move(err));
+  };
   const std::string canonicalModelPath =
       canonicalizeResourcePath(prefab.sourcePath);
   HashMap<uint32_t, uint32_t> sourceMaterialToAssetIndex{};
@@ -1154,7 +1168,7 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
   if (!loadedFromCache) {
     auto materialInfoResult = ensureImportedMaterialSet();
     if (materialInfoResult.hasError()) {
-      return Result<ScenePrefabAssets, std::string>::makeError(
+      return cleanupAndError(
           "ResourceManager::acquireScenePrefabAssets: failed to parse material "
           "metadata: " +
           materialInfoResult.error());
@@ -1162,6 +1176,9 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
     const ImportedMaterialSet &materialSet = *materialInfoResult.value();
     for (uint32_t assetIndex = 0u; assetIndex < prefab.materialAssets.size();
          ++assetIndex) {
+      if (isValid(assets.materials[assetIndex])) {
+        continue;
+      }
       const uint32_t sourceMaterialIndex =
           prefab.materialAssets[assetIndex].sourceMaterialIndex;
       if (sourceMaterialIndex >= materialSet.materials.size()) {
@@ -1179,7 +1196,7 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
           sourceMaterialIndex);
       releaseMaterialTextureRefs(*this, textureRefs);
       if (acquireMaterialResult.hasError()) {
-        return Result<ScenePrefabAssets, std::string>::makeError(
+        return cleanupAndError(
             "ResourceManager::acquireScenePrefabAssets: failed to create "
             "material " +
             std::to_string(sourceMaterialIndex) + ": " +
@@ -1204,8 +1221,7 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
         .sourceIdentity = canonicalModelPath + "#default",
     });
     if (fallbackMaterialResult.hasError()) {
-      return Result<ScenePrefabAssets, std::string>::makeError(
-          fallbackMaterialResult.error());
+      return cleanupAndError(fallbackMaterialResult.error());
     }
     fallbackMaterial = fallbackMaterialResult.value();
     if (assets.materials.empty()) {
@@ -1280,7 +1296,7 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
                                   sourceSceneMeshIndices.size()),
         prefab.importOptions, memory_);
     if (sceneMeshesResult.hasError()) {
-      return Result<ScenePrefabAssets, std::string>::makeError(
+      return cleanupAndError(
           "ResourceManager::acquireScenePrefabAssets: failed to batch load "
           "scene meshes: " +
           sceneMeshesResult.error());
@@ -1289,7 +1305,7 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
     std::pmr::vector<MeshData> sceneMeshes =
         std::move(sceneMeshesResult.value());
     if (sceneMeshes.size() != uniquePendingMeshIndices.size()) {
-      return Result<ScenePrefabAssets, std::string>::makeError(
+      return cleanupAndError(
           "ResourceManager::acquireScenePrefabAssets: batched scene mesh "
           "count mismatch");
     }
@@ -1308,7 +1324,7 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
       auto modelResult =
           Model::create(gpu_, sceneMeshes[meshOrdinal], request.debugName);
       if (modelResult.hasError()) {
-        return Result<ScenePrefabAssets, std::string>::makeError(
+        return cleanupAndError(
             "ResourceManager::acquireScenePrefabAssets: failed to create "
             "scene mesh " +
             std::to_string(meshIndex) + ": " + modelResult.error());
@@ -1320,7 +1336,7 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
           storeAcquiredModel(key, canonicalModelPath, optionsHash, request,
                              std::move(modelResult.value()));
       if (storeModelResult.hasError()) {
-        return Result<ScenePrefabAssets, std::string>::makeError(
+        return cleanupAndError(
             "ResourceManager::acquireScenePrefabAssets: failed to register "
             "scene mesh " +
             std::to_string(meshIndex) + ": " + storeModelResult.error());
@@ -1339,7 +1355,7 @@ ResourceManager::acquireScenePrefabAssets(const ScenePrefab &prefab) {
 
     const ModelRef modelRef = assets.models[prefabRenderable.meshIndex];
     if (!isValid(modelRef)) {
-      return Result<ScenePrefabAssets, std::string>::makeError(
+      return cleanupAndError(
           "ResourceManager::acquireScenePrefabAssets: scene mesh " +
           std::to_string(prefabRenderable.meshIndex) + " was not resolved");
     }

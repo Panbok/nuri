@@ -7,6 +7,7 @@
 #include "nuri/scene/light.h"
 #include "nuri/scene/scene_prefab.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory_resource>
 #include <string>
@@ -22,9 +23,24 @@ struct NURI_API SceneImportOptions {
 };
 
 struct NURI_API ImportedSceneNode {
+  using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+  explicit ImportedSceneNode(const allocator_type &alloc = {})
+      : name(alloc.resource()) {}
+  ImportedSceneNode(const ImportedSceneNode &other,
+                    const allocator_type &alloc = {})
+      : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
+        name(other.name, alloc.resource()) {}
+  ImportedSceneNode(ImportedSceneNode &&other,
+                    const allocator_type &alloc = {}) noexcept
+      : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
+        name(std::move(other.name), alloc.resource()) {}
+  ImportedSceneNode &operator=(const ImportedSceneNode &) = default;
+  ImportedSceneNode &operator=(ImportedSceneNode &&) noexcept = default;
+
   uint32_t parentIndex = kInvalidScenePrefabIndex;
   glm::mat4 localFromParent{1.0f};
-  std::string name{};
+  std::pmr::string name;
 };
 
 struct NURI_API ImportedSceneRenderable {
@@ -34,20 +50,70 @@ struct NURI_API ImportedSceneRenderable {
 };
 
 struct NURI_API ImportedSceneMeshAsset {
+  using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+  explicit ImportedSceneMeshAsset(const allocator_type &alloc = {})
+      : sourceName(alloc.resource()) {}
+  ImportedSceneMeshAsset(const ImportedSceneMeshAsset &other,
+                         const allocator_type &alloc = {})
+      : sourceSceneMeshIndex(other.sourceSceneMeshIndex),
+        sourceName(other.sourceName, alloc.resource()) {}
+  ImportedSceneMeshAsset(ImportedSceneMeshAsset &&other,
+                         const allocator_type &alloc = {}) noexcept
+      : sourceSceneMeshIndex(other.sourceSceneMeshIndex),
+        sourceName(std::move(other.sourceName), alloc.resource()) {}
+  ImportedSceneMeshAsset &operator=(const ImportedSceneMeshAsset &) = default;
+  ImportedSceneMeshAsset &
+  operator=(ImportedSceneMeshAsset &&) noexcept = default;
+
   uint32_t sourceSceneMeshIndex = kInvalidScenePrefabIndex;
-  std::string sourceName{};
+  std::pmr::string sourceName;
 };
 
 struct NURI_API ImportedSceneMaterialAsset {
+  using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+  explicit ImportedSceneMaterialAsset(const allocator_type &alloc = {})
+      : sourceName(alloc.resource()) {}
+  ImportedSceneMaterialAsset(const ImportedSceneMaterialAsset &other,
+                             const allocator_type &alloc = {})
+      : sourceMaterialIndex(other.sourceMaterialIndex),
+        sourceName(other.sourceName, alloc.resource()) {}
+  ImportedSceneMaterialAsset(ImportedSceneMaterialAsset &&other,
+                             const allocator_type &alloc = {}) noexcept
+      : sourceMaterialIndex(other.sourceMaterialIndex),
+        sourceName(std::move(other.sourceName), alloc.resource()) {}
+  ImportedSceneMaterialAsset &
+  operator=(const ImportedSceneMaterialAsset &) = default;
+  ImportedSceneMaterialAsset &
+  operator=(ImportedSceneMaterialAsset &&) noexcept = default;
+
   uint32_t sourceMaterialIndex = kInvalidScenePrefabIndex;
-  std::string sourceName{};
+  std::pmr::string sourceName;
 };
 
 struct NURI_API ImportedSceneLight {
+  using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+  explicit ImportedSceneLight(const allocator_type &alloc = {})
+      : sourceName(alloc.resource()) {}
+  ImportedSceneLight(const ImportedSceneLight &other,
+                     const allocator_type &alloc = {})
+      : nodeIndex(other.nodeIndex), light(other.light),
+        sourceName(other.sourceName, alloc.resource()),
+        sourceNodeIndex(other.sourceNodeIndex) {}
+  ImportedSceneLight(ImportedSceneLight &&other,
+                     const allocator_type &alloc = {}) noexcept
+      : nodeIndex(other.nodeIndex), light(std::move(other.light)),
+        sourceName(std::move(other.sourceName), alloc.resource()),
+        sourceNodeIndex(other.sourceNodeIndex) {}
+  ImportedSceneLight &operator=(const ImportedSceneLight &) = default;
+  ImportedSceneLight &operator=(ImportedSceneLight &&) noexcept = default;
+
   uint32_t nodeIndex = kInvalidScenePrefabIndex;
   LightDesc light{};
-  std::string sourceName{};
-  int32_t sourceNodeIndex = -1;
+  std::pmr::string sourceName;
+  uint32_t sourceNodeIndex = kInvalidScenePrefabIndex;
 };
 
 struct NURI_API ImportedScene {

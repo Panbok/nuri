@@ -41,6 +41,11 @@ public:
   loadTextureKtx2(GPUDevice &gpu, std::string_view filePath,
                   std::string_view debugName = {});
 
+  // `loadPortableTextureKtx2` accepts portable KTX2 payloads such as
+  // UASTC/ETC1S with universal supercompression and runtime transcoding
+  // controlled by `TextureLoadOptions`; prefer it over `loadTextureKtx2` for
+  // device-portable assets, and use `loadTextureKtx2` for native KTX2 data
+  // whose sRGB and mipmap behavior is already fixed by the file contents.
   [[nodiscard]] static Result<std::unique_ptr<Texture>, std::string>
   loadPortableTextureKtx2(GPUDevice &gpu, std::string_view filePath,
                           const TextureLoadOptions &options = {},

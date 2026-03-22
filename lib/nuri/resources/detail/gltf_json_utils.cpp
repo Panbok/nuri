@@ -2,9 +2,6 @@
 
 #include "nuri/resources/detail/gltf_json_utils.h"
 
-#include <cctype>
-#include <limits>
-
 namespace nuri::detail {
 namespace {
 
@@ -19,9 +16,13 @@ constexpr uint32_t kGlbChunkTypeJson = 0x4E4F534Au;
                                     nullptr, &parseError),
                    &yyjson_doc_free);
   if (doc == nullptr) {
-    return YyJsonDocResult::makeError(
-        "Failed to parse glTF JSON near byte " +
-        std::to_string(static_cast<size_t>(parseError.pos)));
+    std::string error = "Failed to parse glTF JSON near byte " +
+                        std::to_string(static_cast<size_t>(parseError.pos));
+    if (parseError.msg != nullptr && parseError.msg[0] != '\0') {
+      error += ": ";
+      error += parseError.msg;
+    }
+    return YyJsonDocResult::makeError(std::move(error));
   }
   return YyJsonDocResult::makeResult(std::move(doc));
 }

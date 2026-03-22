@@ -30,9 +30,17 @@ struct MaterialTextureTransformData {
   float rotationRadians = 0.0f;
 };
 
+// `sourceKind` controls which source-identifying field is relevant: `path` is
+// used for `ExternalFile`, `embeddedIndex` is used for
+// `EmbeddedSceneTexture`, and `kInvalidEmbeddedSceneTextureIndex` is the
+// sentinel when there is no embedded texture. `uvSet`, `samplerIndex`,
+// `scale`, and `transform` apply regardless of source kind.
 struct MaterialTextureSlotData {
+  // Normalized file path for external textures.
   std::string path{};
+  // Selects whether `path` or `embeddedIndex` identifies the source texture.
   MaterialTextureSourceKind sourceKind = MaterialTextureSourceKind::None;
+  // Embedded scene texture index, or `kInvalidEmbeddedSceneTextureIndex`.
   uint32_t embeddedIndex = kInvalidEmbeddedSceneTextureIndex;
   uint32_t uvSet = 0;
   uint32_t samplerIndex = 0;

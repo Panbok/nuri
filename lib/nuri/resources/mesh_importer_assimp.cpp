@@ -123,7 +123,8 @@ readMaterialTextureSlot(const aiMaterial &material, aiTextureType textureType,
     const auto parsedIndex =
         std::from_chars(indexView.data(), indexView.data() + indexView.size(),
                         out.embeddedIndex);
-    if (parsedIndex.ec != std::errc()) {
+    if (parsedIndex.ec != std::errc() ||
+        parsedIndex.ptr != indexView.data() + indexView.size()) {
       out.embeddedIndex = kInvalidEmbeddedSceneTextureIndex;
     }
   } else {
@@ -1113,6 +1114,10 @@ glm::mat4 computeImportedSceneWorldMatrix(uint32_t nodeIndex,
     return cache[nodeIndex];
   }
   if (state[nodeIndex] == 1u) {
+    NURI_LOG_WARNING(
+        "MeshImporter::computeImportedSceneWorldMatrix: detected node cycle at "
+        "%u ('%s')",
+        nodeIndex, scene.nodes[nodeIndex].name.c_str());
     return glm::mat4(1.0f);
   }
 
@@ -1467,9 +1472,10 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
 
   const uint32_t requestedLodCount = clampLodCount(options);
   ScratchArena scratch(mem);
-  std::vector<glm::mat4> worldCache(importedScene.nodes.size(),
-                                    glm::mat4(1.0f));
-  std::vector<uint8_t> worldState(importedScene.nodes.size(), 0u);
+  std::pmr::vector<glm::mat4> worldCache(mem);
+  worldCache.resize(importedScene.nodes.size(), glm::mat4(1.0f));
+  std::pmr::vector<uint8_t> worldState(mem);
+  worldState.resize(importedScene.nodes.size(), 0u);
 
   size_t totalVertices = 0;
   size_t totalIndices = 0;
@@ -1923,11 +1929,18 @@ MeshImporter::loadSceneMeshesFromFile(
   ImportedSceneAssets assets = std::move(assetsResult.value());
   std::pmr::vector<MeshData> meshData(mem);
   meshData.reserve(assetIndices.size());
+  std::unordered_set<uint32_t> seenAssetIndices{};
+  seenAssetIndices.reserve(assetIndices.size());
   for (const uint32_t assetIndex : assetIndices) {
     if (assetIndex >= assets.meshes.size()) {
       return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
           "MeshImporter::loadSceneMeshesFromFile: mesh asset index is "
           "unresolved");
+    }
+    if (!seenAssetIndices.insert(assetIndex).second) {
+      return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
+          "MeshImporter::loadSceneMeshesFromFile: duplicate mesh asset index " +
+          std::to_string(assetIndex));
     }
     meshData.push_back(std::move(assets.meshes[assetIndex]));
   }

@@ -3,8 +3,10 @@
 #include "nuri/core/result.h"
 #include "nuri/resources/mesh_importer.h"
 
+#include <cstdint>
 #include <memory_resource>
 #include <span>
+#include <string>
 #include <string_view>
 
 namespace nuri::detail {

@@ -55,11 +55,12 @@ public:
 
   // Extracts material factors and texture slots from source files via Assimp.
   // Texture paths are resolved to normalized absolute paths when external.
-  // Embedded scene textures use the identifier carried by
-  // `ImportedMaterialTexture` (`MaterialTextureSlotData`): the
-  // `sourceKind`/`embeddedIndex` fields form a `sourceKind:embeddedIndex`
-  // pair, for example `EmbeddedSceneTexture:3`. See `ImportedMaterialTexture`
-  // for the field definitions and expected consumer-side population.
+  // `ImportedMaterialTexture` (`MaterialTextureSlotData`) exposes
+  // `sourceKind` and `embeddedIndex` as separate fields, and consumers should
+  // read those fields directly. Any `sourceKind:embeddedIndex` string such as
+  // `EmbeddedSceneTexture:3` is only a human-readable debug identifier. The
+  // importer populates `sourceKind` and `embeddedIndex` during import,
+  // including embedded textures, and consumers are not expected to set them.
   [[nodiscard]] static nuri::Result<ImportedMaterialSet, std::string>
   loadMaterialInfoFromFile(std::string_view path);
 };

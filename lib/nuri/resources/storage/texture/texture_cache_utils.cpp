@@ -9,6 +9,8 @@ namespace {
 
 constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
+constexpr size_t kBasisSuffixLen = sizeof("_basis") - 1u;
+constexpr size_t kUastcSuffixLen = sizeof("_uastc") - 1u;
 
 void fnv1aAddBytes(uint64_t &hash, std::span<const std::byte> bytes) {
   for (const std::byte value : bytes) {
@@ -85,9 +87,9 @@ buildNativeTextureCachePath(const std::filesystem::path &portableTexturePath,
   const std::filesystem::path sceneCacheDir = parent.parent_path();
   std::string stem = portableTexturePath.stem().string();
   if (stem.ends_with("_basis")) {
-    stem.resize(stem.size() - std::string("_basis").size());
+    stem.resize(stem.size() - kBasisSuffixLen);
   } else if (stem.ends_with("_uastc")) {
-    stem.resize(stem.size() - std::string("_uastc").size());
+    stem.resize(stem.size() - kUastcSuffixLen);
   }
   return sceneCacheDir / "native_textures" /
          std::format("{}_{}_v1.ktx2", stem,

@@ -20,6 +20,11 @@ glm::mat4 computeWorldMatrix(uint32_t nodeIndex, const ImportedScene &scene,
     return cache[nodeIndex];
   }
   if (state[nodeIndex] == 1u) {
+    const ImportedSceneNode &node = scene.nodes[nodeIndex];
+    NURI_LOG_WARNING(
+        "GltfSceneImporter::computeWorldMatrix: detected node cycle at %u "
+        "('%s')",
+        nodeIndex, node.name.c_str());
     return glm::mat4(1.0f);
   }
 

@@ -16,7 +16,7 @@ namespace nuri {
 struct NURI_API ImportedLightInfo {
   LightDesc desc{};
   std::string sourceName{};
-  int32_t sourceNodeIndex = -1;
+  uint32_t sourceNodeIndex = kInvalidScenePrefabIndex;
 };
 
 using ImportedLightSet = std::vector<ImportedLightInfo>;
