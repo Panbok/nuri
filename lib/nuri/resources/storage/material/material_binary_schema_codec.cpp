@@ -270,11 +270,12 @@ readSceneMaterialRecord(material_binary_codec::Reader &reader) {
   material.occlusionStrength = occlusionStrength.value();
   material.alphaCutoff = alphaCutoff.value();
   material.doubleSided = doubleSided.value() != 0u;
-  if (isValidMaterialAlphaMode(alphaMode.value())) {
-    material.alphaMode = static_cast<MaterialAlphaMode>(alphaMode.value());
-  } else {
-    material.alphaMode = MaterialAlphaMode::Opaque;
+  if (!isValidMaterialAlphaMode(alphaMode.value())) {
+    return makeDeserializeError<SceneMaterialRecord>(
+        std::format("materialBinaryDeserialize: invalid material alpha mode {}",
+                    alphaMode.value()));
   }
+  material.alphaMode = static_cast<MaterialAlphaMode>(alphaMode.value());
 
   for (size_t i = 0; i < kMaterialSlotPtrs.size(); ++i) {
     auto slot = readTextureSlot(reader);

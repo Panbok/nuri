@@ -174,6 +174,9 @@ Result<MaterialGpuData, std::string> buildGpuData(GPUDevice &gpu,
       glm::vec4(desc.emissiveFactor, emissiveStrength);
   gpuData.metallicRoughnessOcclusionAlphaCutoff =
       glm::vec4(metallic, roughness, occlusion, alphaCutoff);
+  // Pack glossiness for `MaterialWorkflow::SpecularGlossiness`
+  // (`desc.glossinessFactor`) or specular intensity otherwise
+  // (`desc.specularFactor`) into `specularColorFactorSpecular.w`.
   gpuData.specularColorFactorSpecular = glm::vec4(specularColor, specular);
   gpuData.sheenColorFactorWeight =
       glm::vec4(desc.sheenColorFactor, sheenWeight);
