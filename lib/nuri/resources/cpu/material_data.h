@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -8,10 +9,19 @@
 
 namespace nuri {
 
+constexpr uint32_t kInvalidEmbeddedSceneTextureIndex =
+    std::numeric_limits<uint32_t>::max();
+
 enum class MaterialAlphaMode : uint8_t {
   Opaque = 0,
   Mask = 1,
   Blend = 2,
+};
+
+enum class MaterialTextureSourceKind : uint8_t {
+  None = 0,
+  ExternalFile = 1,
+  EmbeddedSceneTexture = 2,
 };
 
 struct MaterialTextureTransformData {
@@ -22,10 +32,11 @@ struct MaterialTextureTransformData {
 
 struct MaterialTextureSlotData {
   std::string path{};
+  MaterialTextureSourceKind sourceKind = MaterialTextureSourceKind::None;
+  uint32_t embeddedIndex = kInvalidEmbeddedSceneTextureIndex;
   uint32_t uvSet = 0;
   uint32_t samplerIndex = 0;
   float scale = 1.0f;
-  bool isEmbedded = false;
   MaterialTextureTransformData transform{};
 };
 
