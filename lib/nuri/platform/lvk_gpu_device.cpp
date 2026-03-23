@@ -2,6 +2,7 @@
 
 #include "nuri/platform/lvk_gpu_device.h"
 
+#include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
@@ -36,6 +37,14 @@ lvk::Format toLvkFormat(Format format) {
     return lvk::Format_RGBA_F16;
   case Format::RGBA32_FLOAT:
     return lvk::Format_RGBA_F32;
+  case Format::BC7_RGBA_UNORM:
+    return lvk::Format_BC7_RGBA;
+  case Format::BC7_RGBA_SRGB:
+    return lvk::Format_BC7_SRGBA;
+  case Format::ETC2_RGB8_UNORM:
+    return lvk::Format_ETC2_RGB8;
+  case Format::ETC2_RGB8_SRGB:
+    return lvk::Format_ETC2_SRGB8;
   case Format::D32_FLOAT:
     return lvk::Format_Z_F32;
   case Format::Count:
@@ -58,6 +67,14 @@ Format fromLvkFormat(lvk::Format format) {
     return Format::RGBA16_FLOAT;
   case lvk::Format_RGBA_F32:
     return Format::RGBA32_FLOAT;
+  case lvk::Format_BC7_RGBA:
+    return Format::BC7_RGBA_UNORM;
+  case lvk::Format_BC7_SRGBA:
+    return Format::BC7_RGBA_SRGB;
+  case lvk::Format_ETC2_RGB8:
+    return Format::ETC2_RGB8_UNORM;
+  case lvk::Format_ETC2_SRGB8:
+    return Format::ETC2_RGB8_SRGB;
   case lvk::Format_Z_F32:
     return Format::D32_FLOAT;
   default:
@@ -452,8 +469,6 @@ graphicsBarrierStages(GraphicsBarrierState state, bool isDepthTexture) {
 
 template <typename LvkHandle> struct ResourceSlot {
   lvk::Holder<LvkHandle> resource;
-  uint32_t generation = 0;
-  bool live = false;
   std::string debugName;
   Format format = Format::RGBA8_UNORM; // For textures
 };
@@ -469,24 +484,19 @@ public:
 
   ReservedSlot reserve(std::string debugName,
                        Format format = Format::RGBA8_UNORM) {
-    uint32_t index;
-    if (!freeList_.empty()) {
-      index = freeList_.back();
-      freeList_.pop_back();
-    } else {
-      index = static_cast<uint32_t>(slots_.size());
+    const SlotReservation reservation = slotsMeta_.acquire();
+    if (reservation.appended) {
       slots_.emplace_back();
     }
 
-    auto &slot = slots_[index];
+    auto &slot = slots_[reservation.index];
     slot.resource.reset();
-    slot.generation++;
-    slot.live = true;
     slot.debugName = std::move(debugName);
     slot.format = format;
 
     const char *cstr = slot.debugName.empty() ? "" : slot.debugName.c_str();
-    return ReservedSlot{NuriHandle{index, slot.generation}, cstr};
+    return ReservedSlot{NuriHandle{reservation.index, reservation.generation},
+                        cstr};
   }
 
   bool setResource(NuriHandle h, lvk::Holder<LvkHandle> &&resource) {
@@ -498,23 +508,17 @@ public:
 
   NuriHandle allocate(lvk::Holder<LvkHandle> &&resource, std::string debugName,
                       Format format = Format::RGBA8_UNORM) {
-    uint32_t index;
-    if (!freeList_.empty()) {
-      index = freeList_.back();
-      freeList_.pop_back();
-    } else {
-      index = static_cast<uint32_t>(slots_.size());
+    const SlotReservation reservation = slotsMeta_.acquire();
+    if (reservation.appended) {
       slots_.emplace_back();
     }
 
-    auto &slot = slots_[index];
+    auto &slot = slots_[reservation.index];
     slot.resource = std::move(resource);
-    slot.generation++;
-    slot.live = true;
     slot.debugName = std::move(debugName);
     slot.format = format;
 
-    return NuriHandle{index, slot.generation};
+    return NuriHandle{reservation.index, reservation.generation};
   }
 
   bool replace(NuriHandle h, lvk::Holder<LvkHandle> &&resource,
@@ -534,14 +538,12 @@ public:
       return;
     auto &slot = slots_[h.index];
     slot.resource.reset();
-    slot.live = false;
     slot.debugName.clear();
-    freeList_.push_back(h.index);
+    slotsMeta_.release(h.index);
   }
 
   bool isValid(NuriHandle h) const {
-    return h.index < slots_.size() &&
-           slots_[h.index].generation == h.generation && slots_[h.index].live;
+    return h.index < slots_.size() && slotsMeta_.isValid(h.index, h.generation);
   }
 
   LvkHandle getLvkHandle(NuriHandle h) const {
@@ -559,7 +561,7 @@ public:
 private:
   // Stable element addresses (LVK stores debugName pointers for pipelines).
   std::deque<ResourceSlot<LvkHandle>> slots_;
-  std::vector<uint32_t> freeList_;
+  SlotPool<UnmaskedNonZeroGenerationPolicy> slotsMeta_;
 };
 
 struct FramebufferTexture {
@@ -582,6 +584,7 @@ struct RecordedGraphicsCommandBuffer {
 struct LvkGPUDevice::Impl {
   Window *window = nullptr;
   std::unique_ptr<lvk::IContext> context;
+  TextureCompressionCaps compressionCaps{};
   lvk::Holder<lvk::SamplerHandle> cubemapSampler{};
   uint32_t cubemapSamplerBindlessIndex = 0u;
 
@@ -650,6 +653,20 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
                      width, height);
     return nullptr;
   }
+
+#if NURI_LVK_HAS_VULKAN_COMMAND_BUFFER
+  if (auto *vkContext =
+          dynamic_cast<lvk::VulkanContext *>(device->impl_->context.get());
+      vkContext != nullptr) {
+    VkPhysicalDeviceFeatures deviceFeatures{};
+    vkGetPhysicalDeviceFeatures(vkContext->getVkPhysicalDevice(),
+                                &deviceFeatures);
+    device->impl_->compressionCaps.bc7 =
+        deviceFeatures.textureCompressionBC == VK_TRUE;
+    device->impl_->compressionCaps.etc2 =
+        deviceFeatures.textureCompressionETC2 == VK_TRUE;
+  }
+#endif
 
   {
     lvk::SamplerStateDesc cubemapSamplerDesc{};
@@ -1457,6 +1474,10 @@ bool LvkGPUDevice::isValid(ComputePipelineHandle h) const {
 
 Format LvkGPUDevice::getTextureFormat(TextureHandle h) const {
   return impl_->textures.getFormat(h);
+}
+
+TextureCompressionCaps LvkGPUDevice::getTextureCompressionCaps() const {
+  return impl_->compressionCaps;
 }
 
 uint32_t LvkGPUDevice::getTextureBindlessIndex(TextureHandle h) const {
@@ -2479,6 +2500,11 @@ LvkGPUDevice::readTexture(TextureHandle texture,
     break;
   case Format::RGBA32_FLOAT:
     bytesPerPixel = 16;
+    break;
+  case Format::BC7_RGBA_UNORM:
+  case Format::BC7_RGBA_SRGB:
+  case Format::ETC2_RGB8_UNORM:
+  case Format::ETC2_RGB8_SRGB:
     break;
   case Format::D32_FLOAT:
     bytesPerPixel = sizeof(float);

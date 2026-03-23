@@ -22,6 +22,11 @@ struct TextureReadbackRegion {
   uint32_t layer = 0;
 };
 
+struct TextureCompressionCaps {
+  bool bc7 = false;
+  bool etc2 = false;
+};
+
 class NURI_API GPUDevice {
 public:
   static std::unique_ptr<GPUDevice>
@@ -75,6 +80,7 @@ public:
   virtual bool isValid(RenderPipelineHandle h) const = 0;
   virtual bool isValid(ComputePipelineHandle h) const = 0;
   virtual Format getTextureFormat(TextureHandle h) const = 0;
+  virtual TextureCompressionCaps getTextureCompressionCaps() const = 0;
   // Bindless index used by LVK shaders (kTextures2D[]).
   virtual uint32_t getTextureBindlessIndex(TextureHandle h) const = 0;
   // Bindless index for the default general-purpose sampler.
