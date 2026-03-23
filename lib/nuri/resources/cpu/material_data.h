@@ -63,6 +63,7 @@ struct MaterialData {
   float roughnessFactor = 1.0f;
   glm::vec3 specularColorFactor{1.0f};
   float specularFactor = 1.0f;
+  // Spec-gloss glossiness factor; not used by metallic-roughness.
   float glossinessFactor = 1.0f;
   glm::vec3 sheenColorFactor{0.0f};
   float sheenWeight = 0.0f;

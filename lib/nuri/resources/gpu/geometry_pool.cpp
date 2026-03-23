@@ -22,7 +22,7 @@ GeometryPool::GeometryPool(GPUDevice &gpu, GeometryPoolConfig config,
                            std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(config), memory_(ensureMemory(memory)),
       vertexChunks_(memory_), indexChunks_(memory_), allocations_(memory_),
-      freeAllocationIndices_(memory_), retiredVertexChunks_(memory_),
+      allocationSlots_(memory_), retiredVertexChunks_(memory_),
       retiredIndexChunks_(memory_) {}
 
 GeometryPool::~GeometryPool() {
@@ -216,7 +216,7 @@ void GeometryPool::reclaimRetiredAllocations() {
     entry.indexCount = 0;
     entry.retireFrame = 0;
     entry.debugName.clear();
-    freeAllocationIndices_.emplace_back(index);
+    allocationSlots_.release(index);
   }
 }
 
@@ -492,7 +492,7 @@ bool GeometryPool::isHandleLive(GeometryAllocationHandle handle) const {
     return false;
   }
   const AllocationEntry &entry = allocations_[handle.index];
-  return entry.generation == handle.generation &&
+  return allocationSlots_.isValid(handle.index, handle.generation) &&
          entry.state == AllocationEntry::State::Live;
 }
 
@@ -564,20 +564,13 @@ GeometryPool::allocate(std::span<const std::byte> vertexBytes,
         uploadIndices.error());
   }
 
-  uint32_t allocationIndex = 0;
-  if (!freeAllocationIndices_.empty()) {
-    allocationIndex = freeAllocationIndices_.back();
-    freeAllocationIndices_.pop_back();
-  } else {
+  const SlotReservation slot = allocationSlots_.acquire();
+  const uint32_t allocationIndex = slot.index;
+  if (slot.appended) {
     allocations_.emplace_back(memory_);
-    allocationIndex = static_cast<uint32_t>(allocations_.size() - 1);
   }
 
   AllocationEntry &entry = allocations_[allocationIndex];
-  entry.generation += 1;
-  if (entry.generation == 0) {
-    entry.generation = 1;
-  }
   entry.state = AllocationEntry::State::Live;
   entry.vertex = vertexAllocation;
   entry.index = indexAllocation;
@@ -590,7 +583,7 @@ GeometryPool::allocate(std::span<const std::byte> vertexBytes,
   return Result<GeometryAllocationHandle, std::string>::makeResult(
       GeometryAllocationHandle{
           .index = allocationIndex,
-          .generation = entry.generation,
+          .generation = slot.generation,
       });
 }
 

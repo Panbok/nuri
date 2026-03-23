@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/gpu_types.h"
@@ -73,7 +74,6 @@ private:
   struct AllocationEntry {
     enum class State : uint8_t { Dead, Live, PendingFree };
 
-    uint32_t generation = 0;
     State state = State::Dead;
     SubAllocation vertex{};
     SubAllocation index{};
@@ -148,7 +148,7 @@ private:
   std::pmr::vector<Chunk> vertexChunks_;
   std::pmr::vector<Chunk> indexChunks_;
   std::pmr::vector<AllocationEntry> allocations_;
-  std::pmr::vector<uint32_t> freeAllocationIndices_;
+  SlotPool<UnmaskedNonZeroGenerationPolicy> allocationSlots_;
   std::pmr::deque<RetiredChunk> retiredVertexChunks_;
   std::pmr::deque<RetiredChunk> retiredIndexChunks_;
   uint64_t mutationVersion_ = 1;

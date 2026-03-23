@@ -3,6 +3,7 @@
 #include "nuri/text/font_manager.h"
 
 #include "nuri/core/containers/hash_map.h"
+#include "nuri/core/containers/slot_pool.h"
 #include "nuri/core/log.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/resources/storage/font/nfont_binary_codec.h"
@@ -15,11 +16,6 @@ template <typename T, typename... Args>
   std::ostringstream oss;
   (oss << ... << std::forward<Args>(args));
   return Result<T, std::string>::makeError(oss.str());
-}
-
-[[nodiscard]] uint32_t bumpTextHandleGeneration(uint32_t generation) {
-  const uint32_t next = (generation + 1u) & kTextHandleGenerationMask;
-  return next == 0u ? 1u : next;
 }
 
 [[nodiscard]] Result<std::vector<std::byte>, std::string>
@@ -74,17 +70,25 @@ readBinaryFile(const std::filesystem::path &path) {
   return levels;
 }
 
+template <typename Pool>
+[[nodiscard]] bool slotPoolExhausted(const Pool &pool,
+                                     uint32_t maxIndex) noexcept {
+  const uint32_t slotCount = pool.slotCount();
+  return slotCount > maxIndex + 1u ||
+         (slotCount == maxIndex + 1u && pool.liveCount() == slotCount);
+}
+
 class FontManagerImpl final : public FontManager {
 public:
   explicit FontManagerImpl(const CreateDesc &desc)
       : FontManager(), gpu_(desc.gpu), memory_(desc.memory),
         fontRecords_(&memory_), atlasPageRecords_(&memory_),
-        fontFreeList_(&memory_), atlasPageFreeList_(&memory_),
+        fontSlots_(&memory_), atlasPageSlots_(&memory_),
         retiredTextures_(&memory_) {
     fontRecords_.reserve(desc.initialFontCapacity);
     atlasPageRecords_.reserve(desc.initialAtlasPageCapacity);
-    fontFreeList_.reserve(desc.initialFontCapacity);
-    atlasPageFreeList_.reserve(desc.initialAtlasPageCapacity);
+    fontSlots_.reserve(desc.initialFontCapacity);
+    atlasPageSlots_.reserve(desc.initialAtlasPageCapacity);
     retiredTextures_.reserve(desc.initialAtlasPageCapacity);
     gcSafetyLag_ = std::max<uint64_t>(1u, gpu_.getSwapchainImageCount());
   }
@@ -135,10 +139,10 @@ public:
                                    indexResult.error());
     }
 
-    const uint32_t index = indexResult.value();
+    const SlotReservation slot = indexResult.value();
+    const uint32_t index = slot.index;
     FontRecord &record = fontRecords_[index];
 
-    record.live = true;
     record.metrics = decoded.metrics;
     record.pxRange = decoded.pxRange;
     record.glyphs.assign(decoded.glyphs.begin(), decoded.glyphs.end());
@@ -180,9 +184,8 @@ public:
     }
 
     record.fallback.clear();
-    ++liveFonts_;
     const FontHandle handle{
-        .value = packTextHandleValue(index, record.generation),
+        .value = packTextHandleValue(index, slot.generation),
     };
 
     NURI_LOG_INFO(
@@ -200,9 +203,6 @@ public:
 
     const uint32_t index = textHandleIndex(font.value);
     releaseFontRecord(index);
-    if (liveFonts_ > 0) {
-      --liveFonts_;
-    }
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -269,7 +269,8 @@ public:
     return record->atlasPages[localPageIndex];
   }
 
-  GlyphLookupResult resolveGlyph(FontHandle font, GlyphId glyph) const override {
+  GlyphLookupResult resolveGlyph(FontHandle font,
+                                 GlyphId glyph) const override {
     const FontRecord *record = resolveFont(font);
     if (record == nullptr) {
       return {};
@@ -385,16 +386,14 @@ public:
 
   PoolStats poolStats() const override {
     return PoolStats{
-        .liveFonts = liveFonts_,
-        .liveAtlasPages = liveAtlasPages_,
+        .liveFonts = fontSlots_.liveCount(),
+        .liveAtlasPages = atlasPageSlots_.liveCount(),
         .liveShaperFaces = 0,
     };
   }
 
 private:
   struct FontRecord {
-    bool live = false;
-    uint32_t generation = 0;
     FontMetrics metrics{};
     float pxRange = 4.0f;
     std::pmr::vector<GlyphMetrics> glyphs;
@@ -412,8 +411,6 @@ private:
   };
 
   struct AtlasPageRecord {
-    bool live = false;
-    uint32_t generation = 0;
     TextureHandle texture{};
     uint32_t bindlessIndex = 0;
     uint32_t width = 0;
@@ -429,40 +426,27 @@ private:
     uint64_t retireAfterValue = 0;
   };
 
-  [[nodiscard]] Result<uint32_t, std::string> allocateFontSlot() {
-    uint32_t index = 0;
-    if (!fontFreeList_.empty()) {
-      index = fontFreeList_.back();
-      fontFreeList_.pop_back();
-    } else {
-      if (fontRecords_.size() > kTextHandleIndexMask) {
-        return makeError<uint32_t>("FontManager: font pool exhausted");
-      }
-      index = static_cast<uint32_t>(fontRecords_.size());
+  [[nodiscard]] Result<SlotReservation, std::string> allocateFontSlot() {
+    if (slotPoolExhausted(fontSlots_, kTextHandleIndexMask)) {
+      return makeError<SlotReservation>("FontManager: font pool exhausted");
+    }
+    const SlotReservation slot = fontSlots_.acquire();
+    if (slot.appended) {
       fontRecords_.emplace_back(&memory_);
     }
-
-    FontRecord &record = fontRecords_[index];
-    record.generation = bumpTextHandleGeneration(record.generation);
-    return Result<uint32_t, std::string>::makeResult(index);
+    return Result<SlotReservation, std::string>::makeResult(slot);
   }
 
-  [[nodiscard]] Result<uint32_t, std::string> allocateAtlasPageSlot() {
-    uint32_t index = 0;
-    if (!atlasPageFreeList_.empty()) {
-      index = atlasPageFreeList_.back();
-      atlasPageFreeList_.pop_back();
-    } else {
-      if (atlasPageRecords_.size() > kTextHandleIndexMask) {
-        return makeError<uint32_t>("FontManager: atlas page pool exhausted");
-      }
-      index = static_cast<uint32_t>(atlasPageRecords_.size());
+  [[nodiscard]] Result<SlotReservation, std::string> allocateAtlasPageSlot() {
+    if (slotPoolExhausted(atlasPageSlots_, kTextHandleIndexMask)) {
+      return makeError<SlotReservation>(
+          "FontManager: atlas page pool exhausted");
+    }
+    const SlotReservation slot = atlasPageSlots_.acquire();
+    if (slot.appended) {
       atlasPageRecords_.emplace_back(&memory_);
     }
-
-    AtlasPageRecord &record = atlasPageRecords_[index];
-    record.generation = bumpTextHandleGeneration(record.generation);
-    return Result<uint32_t, std::string>::makeResult(index);
+    return Result<SlotReservation, std::string>::makeResult(slot);
   }
 
   [[nodiscard]] Result<AtlasPageHandle, std::string>
@@ -522,18 +506,16 @@ private:
                                         indexResult.error());
     }
 
-    const uint32_t index = indexResult.value();
+    const SlotReservation slot = indexResult.value();
+    const uint32_t index = slot.index;
     AtlasPageRecord &record = atlasPageRecords_[index];
-    record.live = true;
     record.texture = textureHandle;
     record.bindlessIndex = gpu_.getTextureBindlessIndex(textureHandle);
     record.width = page.width;
     record.height = page.height;
     record.debugName = debugName;
-    ++liveAtlasPages_;
-
     return Result<AtlasPageHandle, std::string>::makeResult(AtlasPageHandle{
-        .value = packTextHandleValue(index, record.generation),
+        .value = packTextHandleValue(index, slot.generation),
     });
   }
 
@@ -549,7 +531,7 @@ private:
     }
 
     FontRecord &record = fontRecords_[index];
-    if (!record.live) {
+    if (!fontSlots_.isLive(index)) {
       return;
     }
 
@@ -563,8 +545,7 @@ private:
     record.fallback.clear();
     record.debugName.clear();
     record.sourcePath.clear();
-    record.live = false;
-    fontFreeList_.push_back(index);
+    fontSlots_.release(index);
   }
 
   void releaseAtlasPageRecord(AtlasPageHandle page) {
@@ -575,7 +556,7 @@ private:
     }
 
     AtlasPageRecord &record = atlasPageRecords_[index];
-    if (!record.live || record.generation != generation) {
+    if (!atlasPageSlots_.isValid(index, generation)) {
       return;
     }
 
@@ -585,11 +566,7 @@ private:
     record.width = 0;
     record.height = 0;
     record.debugName.clear();
-    record.live = false;
-    atlasPageFreeList_.push_back(index);
-    if (liveAtlasPages_ > 0) {
-      --liveAtlasPages_;
-    }
+    atlasPageSlots_.release(index);
   }
 
   void retireTexture(TextureHandle texture) {
@@ -606,11 +583,10 @@ private:
 
   void destroyAll() {
     for (size_t fontIndex = 0; fontIndex < fontRecords_.size(); ++fontIndex) {
-      if (fontRecords_[fontIndex].live) {
+      if (fontSlots_.isLive(static_cast<uint32_t>(fontIndex))) {
         releaseFontRecord(static_cast<uint32_t>(fontIndex));
       }
     }
-    liveFonts_ = 0;
     collectGarbage(std::numeric_limits<uint64_t>::max());
   }
 
@@ -625,11 +601,10 @@ private:
       return nullptr;
     }
 
-    FontRecord &record = fontRecords_[index];
-    if (!record.live || record.generation != generation) {
+    if (!fontSlots_.isValid(index, generation)) {
       return nullptr;
     }
-    return &record;
+    return &fontRecords_[index];
   }
 
   [[nodiscard]] const FontRecord *resolveFont(FontHandle font) const {
@@ -643,11 +618,10 @@ private:
       return nullptr;
     }
 
-    const FontRecord &record = fontRecords_[index];
-    if (!record.live || record.generation != generation) {
+    if (!fontSlots_.isValid(index, generation)) {
       return nullptr;
     }
-    return &record;
+    return &fontRecords_[index];
   }
 
   [[nodiscard]] const AtlasPageRecord *
@@ -662,11 +636,10 @@ private:
       return nullptr;
     }
 
-    const AtlasPageRecord &record = atlasPageRecords_[index];
-    if (!record.live || record.generation != generation) {
+    if (!atlasPageSlots_.isValid(index, generation)) {
       return nullptr;
     }
-    return &record;
+    return &atlasPageRecords_[index];
   }
 
   [[nodiscard]] std::string
@@ -692,13 +665,12 @@ private:
   std::pmr::memory_resource &memory_;
   std::pmr::vector<FontRecord> fontRecords_;
   std::pmr::vector<AtlasPageRecord> atlasPageRecords_;
-  std::pmr::vector<uint32_t> fontFreeList_;
-  std::pmr::vector<uint32_t> atlasPageFreeList_;
+  SlotPool<MaskedNonZeroGenerationPolicy<kTextHandleGenerationMask>> fontSlots_;
+  SlotPool<MaskedNonZeroGenerationPolicy<kTextHandleGenerationMask>>
+      atlasPageSlots_;
   std::pmr::vector<RetiredTextureRecord> retiredTextures_;
   uint64_t lastCollectedTimelineValue_ = 0;
   uint64_t gcSafetyLag_ = 1;
-  uint32_t liveFonts_ = 0;
-  uint32_t liveAtlasPages_ = 0;
 };
 
 } // namespace
