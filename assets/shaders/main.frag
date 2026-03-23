@@ -93,6 +93,7 @@ void main() {
       GET_TEXTURE_INDEX(material, kMaterialTextureSlotSheenRoughness);
   const uint alphaMode = material.materialFlags.x;
   const uint featureMask = material.materialFlags.z;
+  const uint workflow = material.materialFlags.w;
 
   const uint baseColorSampler =
       GET_SAMPLER_INDEX(material, kMaterialTextureSlotBaseColor);
@@ -161,19 +162,20 @@ void main() {
                                  metallicRoughnessSampler, uvMetallicRoughness);
   }
 
-  float metallic = saturate(material.metallicRoughnessOcclusionAlphaCutoff.x *
-                            mrSample.b);
-  float roughness = clamp(material.metallicRoughnessOcclusionAlphaCutoff.y *
-                              mrSample.g,
-                          kBrdfMinRoughness, 1.0);
+  float metallic = 0.0;
+  float roughness = kBrdfMinRoughness;
+  vec3 f0 = vec3(0.0);
+  vec3 f90 = vec3(0.0);
+  vec3 diffuseColor = vec3(0.0);
+  const float ior = material.transmissionThicknessIorPadding.z;
+  decodeMaterialBaseWorkflow(
+      material, workflow, baseColor, mrSample, uvSpecular, specularTexId,
+      specularSampler, uvSpecularColor, specularColorTexId,
+      specularColorSampler, ior, metallic, roughness, f0, f90, diffuseColor);
 
-  float occlusion = 1.0;
-  if (occlusionTexId != kInvalidTextureBindlessIndex) {
-    occlusion =
-        textureBindless2D(occlusionTexId, occlusionSampler, uvOcclusion).r;
-  } else if (metallicRoughnessTexId != kInvalidTextureBindlessIndex) {
-    occlusion = mrSample.r;
-  }
+  float occlusion = sampleMaterialOcclusion(
+      material, workflow, mrSample, metallicRoughnessTexId, uvOcclusion,
+      occlusionTexId, occlusionSampler);
   float ao = mix(1.0, occlusion,
                  saturate(material.metallicRoughnessOcclusionAlphaCutoff.z));
 
@@ -255,23 +257,11 @@ void main() {
   }
   emissive *= materialEmissiveStrength(material);
 
-  float ior = material.transmissionThicknessIorPadding.z;
   bool iorCompatMode = isIorCompatMode(ior);
   vec3 v = normalize(pc.frameData.cameraPos.xyz - vtx.worldPos);
   float ndotv = max(dot(nBase, v), 0.001);
   float clearcoatNdotV = max(dot(nClearcoat, v), 0.001);
 
-  float specularWeight = sampleMaterialSpecularWeight(
-      material, uvSpecular, specularTexId, specularSampler);
-  vec3 specularColor = sampleMaterialSpecularColor(
-      material, uvSpecularColor, specularColorTexId, specularColorSampler);
-  vec3 dielectricF0 = vec3(0.0);
-  vec3 dielectricF90 = vec3(0.0);
-  computeDielectricSpecularTerms(ior, specularColor, specularWeight,
-                                 dielectricF0, dielectricF90);
-  vec3 f0 = mix(dielectricF0, baseColor.rgb, metallic);
-  vec3 f90 = mix(dielectricF90, vec3(1.0), metallic);
-  vec3 diffuseColor = mix(baseColor.rgb, vec3(0.0), metallic);
   float alphaRoughness = roughness * roughness;
   float sheenWeight =
       ((featureMask & kMaterialFeatureSheen) != 0u)

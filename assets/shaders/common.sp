@@ -13,6 +13,8 @@ const uint kMaterialFeatureClearcoat = 1u << 2u;
 const uint kMaterialFeatureTransmission = 1u << 3u;
 const uint kMaterialFeatureVolume = 1u << 4u;
 const uint kMaterialFeatureSpecular = 1u << 5u;
+const uint kMaterialWorkflowMetallicRoughness = 0u;
+const uint kMaterialWorkflowSpecularGlossiness = 1u;
 const uint kMaterialTextureSlotBaseColor = 0u;
 const uint kMaterialTextureSlotMetallicRoughness = 1u;
 const uint kMaterialTextureSlotNormal = 2u;
@@ -92,7 +94,7 @@ struct MaterialGpuData {
   uvec4 textureSamplerIndices3;
   vec4 textureTransformOffsetScale[kMaterialTextureSlotCount];
   vec4 textureTransformRotation[kMaterialTextureSlotCount];
-  uvec4 materialFlags; // Full std430 slot: x=alphaMode, y=doubleSided, z=featureMask, w=reserved
+  uvec4 materialFlags; // Full std430 slot: x=alphaMode, y=doubleSided, z=featureMask, w=workflow
 };
 
 uint getPackedMaterialSlotValue(uvec4 packed0, uvec4 packed1, uvec4 packed2,
