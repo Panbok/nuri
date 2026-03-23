@@ -23,12 +23,14 @@ template <uint32_t Mask> struct MaskedNonZeroGenerationPolicy {
 
 struct UnmaskedNonZeroGenerationPolicy {
   [[nodiscard]] static constexpr uint32_t next(uint32_t current) noexcept {
-    ++current;
-    return current == 0u ? 1u : current;
+    const uint32_t nextGeneration = current + 1u;
+    return nextGeneration == 0u ? 1u : nextGeneration;
   }
 };
 
 template <typename GenerationPolicy = UnmaskedNonZeroGenerationPolicy>
+// SlotPool is not thread-safe. Concurrent acquire()/release() calls must be
+// externally synchronized; the intended default usage is single-threaded.
 class SlotPool {
 public:
   explicit SlotPool(
@@ -78,9 +80,9 @@ public:
     NURI_ASSERT(index < generations_.size(),
                 "SlotPool::release: index out of range");
     NURI_ASSERT(live_[index] != 0u, "SlotPool::release: slot is not live");
+    NURI_ASSERT(liveCount_ > 0u, "SlotPool::release: live count underflow");
     live_[index] = 0u;
     freeSlots_.push_back(index);
-    NURI_ASSERT(liveCount_ > 0u, "SlotPool::release: live count underflow");
     --liveCount_;
   }
 

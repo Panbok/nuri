@@ -665,6 +665,8 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
         deviceFeatures.textureCompressionBC == VK_TRUE;
     device->impl_->compressionCaps.etc2 =
         deviceFeatures.textureCompressionETC2 == VK_TRUE;
+    device->impl_->compressionCaps.astc =
+        deviceFeatures.textureCompressionASTC_LDR == VK_TRUE;
   }
 #endif
 
@@ -2505,6 +2507,8 @@ LvkGPUDevice::readTexture(TextureHandle texture,
   case Format::BC7_RGBA_SRGB:
   case Format::ETC2_RGB8_UNORM:
   case Format::ETC2_RGB8_SRGB:
+    // Block-compressed formats need block-aligned regions and specialized
+    // readback size calculations, so generic readTexture() rejects them here.
     break;
   case Format::D32_FLOAT:
     bytesPerPixel = sizeof(float);

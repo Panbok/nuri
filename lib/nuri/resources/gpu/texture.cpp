@@ -495,6 +495,11 @@ selectPortableRuntimeFormat(const GPUDevice &gpu, bool srgb,
   if (caps.etc2 && componentCount <= 3u) {
     return Format::ETC2_RGB8_SRGB;
   }
+  if (caps.astc) {
+    // ASTC support is reported separately, but the backend Format enum does not
+    // expose an ASTC target yet, so portable runtime transcoding still falls
+    // back to uncompressed RGBA until ASTC formats are added end-to-end.
+  }
   return Format::RGBA8_SRGB;
 }
 

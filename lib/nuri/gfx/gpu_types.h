@@ -83,11 +83,11 @@ enum class Format : uint8_t {
   RGBA8_UINT,
   RGBA16_FLOAT,
   RGBA32_FLOAT,
+  D32_FLOAT,
   BC7_RGBA_UNORM,
   BC7_RGBA_SRGB,
   ETC2_RGB8_UNORM,
   ETC2_RGB8_SRGB,
-  D32_FLOAT,
   Count
 };
 

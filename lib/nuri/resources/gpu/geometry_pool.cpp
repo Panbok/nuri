@@ -567,7 +567,22 @@ GeometryPool::allocate(std::span<const std::byte> vertexBytes,
   const SlotReservation slot = allocationSlots_.acquire();
   const uint32_t allocationIndex = slot.index;
   if (slot.appended) {
+    NURI_ASSERT(
+        allocationIndex == allocations_.size(),
+        "GeometryPool::allocate: allocationSlots_.acquire() returned "
+        "SlotReservation{index=%u, appended=%d} but allocations_.size()=%zu "
+        "before allocations_.emplace_back(memory_); expected appended slot "
+        "index to equal allocations_.size()",
+        allocationIndex, slot.appended ? 1 : 0, allocations_.size());
     allocations_.emplace_back(memory_);
+  } else {
+    NURI_ASSERT(
+        allocationIndex < allocations_.size(),
+        "GeometryPool::allocate: allocationSlots_.acquire() returned "
+        "SlotReservation{index=%u, appended=%d} but allocations_.size()=%zu "
+        "before AllocationEntry access; expected reused slot index to be "
+        "within allocations_",
+        allocationIndex, slot.appended ? 1 : 0, allocations_.size());
   }
 
   AllocationEntry &entry = allocations_[allocationIndex];

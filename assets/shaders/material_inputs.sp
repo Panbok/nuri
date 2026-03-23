@@ -19,8 +19,7 @@ vec3 sampleMaterialSpecularColor(MaterialGpuData material, vec2 uvSpecularColor,
 vec4 sampleMaterialSpecularGlossiness(MaterialGpuData material,
                                       vec2 uvSpecularGlossiness, uint texId,
                                       uint samplerIndex) {
-  vec4 specGloss = vec4(material.specularColorFactorSpecular.rgb,
-                        material.specularColorFactorSpecular.w);
+  vec4 specGloss = material.specularColorFactorSpecular;
   if (texId != kInvalidTextureBindlessIndex) {
     specGloss *=
         textureBindless2D(texId, samplerIndex, uvSpecularGlossiness);

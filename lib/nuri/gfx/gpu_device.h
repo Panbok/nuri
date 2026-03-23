@@ -25,6 +25,7 @@ struct TextureReadbackRegion {
 struct TextureCompressionCaps {
   bool bc7 = false;
   bool etc2 = false;
+  bool astc = false;
 };
 
 class NURI_API GPUDevice {

@@ -13,6 +13,8 @@ const uint kMaterialFeatureClearcoat = 1u << 2u;
 const uint kMaterialFeatureTransmission = 1u << 3u;
 const uint kMaterialFeatureVolume = 1u << 4u;
 const uint kMaterialFeatureSpecular = 1u << 5u;
+// Material workflows are mutually exclusive modes; choose one workflow value.
+// kMaterialFeature* values are orthogonal bitflags that can be combined.
 const uint kMaterialWorkflowMetallicRoughness = 0u;
 const uint kMaterialWorkflowSpecularGlossiness = 1u;
 const uint kMaterialTextureSlotBaseColor = 0u;
@@ -121,6 +123,10 @@ float materialEmissiveStrength(MaterialGpuData material) {
 
 float materialNormalScale(MaterialGpuData material) {
   return material.transmissionThicknessIorPadding.w;
+}
+
+uint materialWorkflow(MaterialGpuData material) {
+  return material.materialFlags.w;
 }
 
 #define GET_TEXTURE_INDEX(material, slot)                                      \

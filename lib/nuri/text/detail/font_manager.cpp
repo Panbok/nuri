@@ -74,8 +74,10 @@ template <typename Pool>
 [[nodiscard]] bool slotPoolExhausted(const Pool &pool,
                                      uint32_t maxIndex) noexcept {
   const uint32_t slotCount = pool.slotCount();
-  return slotCount > maxIndex + 1u ||
-         (slotCount == maxIndex + 1u && pool.liveCount() == slotCount);
+  const uint32_t threshold =
+      maxIndex == UINT32_MAX ? UINT32_MAX : maxIndex + 1u;
+  return slotCount > threshold ||
+         (slotCount == threshold && pool.liveCount() == slotCount);
 }
 
 class FontManagerImpl final : public FontManager {
