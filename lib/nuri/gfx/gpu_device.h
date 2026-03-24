@@ -58,6 +58,8 @@ public:
   virtual Result<TextureHandle, std::string>
   createFramebufferTexture(const TextureDesc &desc,
                            std::string_view debugName = {}) = 0;
+  virtual Result<SamplerHandle, std::string>
+  createSampler(const SamplerDesc &desc, std::string_view debugName = {}) = 0;
   virtual Result<TextureHandle, std::string> createDepthBuffer() = 0;
   virtual Result<ShaderHandle, std::string>
   createShaderModule(const ShaderDesc &desc) = 0;
@@ -72,11 +74,13 @@ public:
   virtual void destroyComputePipeline(ComputePipelineHandle pipeline) = 0;
   virtual void destroyBuffer(BufferHandle buffer) = 0;
   virtual void destroyTexture(TextureHandle texture) = 0;
+  virtual void destroySampler(SamplerHandle sampler) = 0;
   virtual void destroyShaderModule(ShaderHandle shader) = 0;
 
   // Resource queries
   virtual bool isValid(BufferHandle h) const = 0;
   virtual bool isValid(TextureHandle h) const = 0;
+  virtual bool isValid(SamplerHandle h) const = 0;
   virtual bool isValid(ShaderHandle h) const = 0;
   virtual bool isValid(RenderPipelineHandle h) const = 0;
   virtual bool isValid(ComputePipelineHandle h) const = 0;
@@ -84,6 +88,11 @@ public:
   virtual TextureCompressionCaps getTextureCompressionCaps() const = 0;
   // Bindless index used by LVK shaders (kTextures2D[]).
   virtual uint32_t getTextureBindlessIndex(TextureHandle h) const = 0;
+  virtual uint32_t getSamplerBindlessIndex(SamplerHandle h) const = 0;
+  virtual uint8_t getMaxSamplerAnisotropy() const = 0;
+  virtual uint32_t
+  getLinearRepeatSamplerBindlessIndex(bool useMipmaps,
+                                      uint8_t maxAnisotropy = 1u) const = 0;
   // Bindless index for the default general-purpose sampler.
   virtual uint32_t getDefaultSamplerBindlessIndex() const = 0;
   // Bindless index for cubemap/IBL sampling (clamp-to-edge).

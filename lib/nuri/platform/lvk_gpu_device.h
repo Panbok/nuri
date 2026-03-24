@@ -38,6 +38,9 @@ public:
   Result<TextureHandle, std::string>
   createFramebufferTexture(const TextureDesc &desc,
                            std::string_view debugName = {}) override;
+  Result<SamplerHandle, std::string>
+  createSampler(const SamplerDesc &desc,
+                std::string_view debugName = {}) override;
   Result<TextureHandle, std::string> createDepthBuffer() override;
   Result<ShaderHandle, std::string>
   createShaderModule(const ShaderDesc &desc) override;
@@ -53,17 +56,23 @@ public:
   void destroyComputePipeline(ComputePipelineHandle pipeline) override;
   void destroyBuffer(BufferHandle buffer) override;
   void destroyTexture(TextureHandle texture) override;
+  void destroySampler(SamplerHandle sampler) override;
   void destroyShaderModule(ShaderHandle shader) override;
 
   // Resource queries
   bool isValid(BufferHandle h) const override;
   bool isValid(TextureHandle h) const override;
+  bool isValid(SamplerHandle h) const override;
   bool isValid(ShaderHandle h) const override;
   bool isValid(RenderPipelineHandle h) const override;
   bool isValid(ComputePipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
   TextureCompressionCaps getTextureCompressionCaps() const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
+  uint32_t getSamplerBindlessIndex(SamplerHandle h) const override;
+  uint8_t getMaxSamplerAnisotropy() const override;
+  uint32_t getLinearRepeatSamplerBindlessIndex(
+      bool useMipmaps, uint8_t maxAnisotropy = 1u) const override;
   uint32_t getDefaultSamplerBindlessIndex() const override;
   uint32_t getCubemapSamplerBindlessIndex() const override;
   uint64_t getBufferDeviceAddress(BufferHandle h,

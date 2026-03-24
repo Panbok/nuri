@@ -18,6 +18,11 @@ struct TextureHandle {
   uint32_t generation = 0;
 };
 
+struct SamplerHandle {
+  uint32_t index = 0;
+  uint32_t generation = 0;
+};
+
 struct ShaderHandle {
   uint32_t index = 0;
   uint32_t generation = 0;
@@ -55,6 +60,7 @@ struct GeometryAllocationHandle {
 
 constexpr bool isValid(BufferHandle h) { return h.generation != 0; }
 constexpr bool isValid(TextureHandle h) { return h.generation != 0; }
+constexpr bool isValid(SamplerHandle h) { return h.generation != 0; }
 constexpr bool isValid(ShaderHandle h) { return h.generation != 0; }
 constexpr bool isValid(RenderPipelineHandle h) { return h.generation != 0; }
 constexpr bool isValid(ComputePipelineHandle h) { return h.generation != 0; }
@@ -67,6 +73,7 @@ constexpr bool isValid(GeometryAllocationHandle h) { return h.generation != 0; }
 
 static_assert(std::is_trivially_destructible_v<BufferHandle>);
 static_assert(std::is_trivially_destructible_v<TextureHandle>);
+static_assert(std::is_trivially_destructible_v<SamplerHandle>);
 static_assert(std::is_trivially_destructible_v<ShaderHandle>);
 static_assert(std::is_trivially_destructible_v<RenderPipelineHandle>);
 static_assert(std::is_trivially_destructible_v<ComputePipelineHandle>);
@@ -131,6 +138,12 @@ enum class TextureUsage : uint8_t {
 enum class Storage : uint8_t { Device, HostVisible, Memoryless, Count };
 
 enum class TextureType : uint8_t { Texture2D, Texture3D, TextureCube, Count };
+
+enum class SamplerFilter : uint8_t { Nearest, Linear, Count };
+
+enum class SamplerMipMode : uint8_t { Disabled, Nearest, Linear, Count };
+
+enum class SamplerWrapMode : uint8_t { Repeat, MirrorRepeat, Clamp, Count };
 
 enum class IndexFormat : uint8_t { U16, U32, Count };
 
@@ -261,7 +274,9 @@ struct GeometryPoolConfig {
   size_t indexChunkSizeBytes = 32u * 1024u * 1024u;
   uint64_t compactionIntervalFrames = 300;
   float compactionFragmentationThreshold = 0.3f;
-  bool enableCompaction = true;
+  // Interactive rendering should not pay synchronous repack/copy stalls
+  // unless a caller explicitly opts into compaction.
+  bool enableCompaction = false;
 };
 
 struct GPUDeviceCreateDesc {

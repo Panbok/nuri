@@ -131,6 +131,46 @@ lvk::TextureType toLvkTextureType(TextureType type) {
   return lvk::TextureType_2D;
 }
 
+lvk::SamplerFilter toLvkSamplerFilter(SamplerFilter filter) {
+  switch (filter) {
+  case SamplerFilter::Nearest:
+    return lvk::SamplerFilter_Nearest;
+  case SamplerFilter::Linear:
+    return lvk::SamplerFilter_Linear;
+  case SamplerFilter::Count:
+    break;
+  }
+  return lvk::SamplerFilter_Linear;
+}
+
+lvk::SamplerMip toLvkSamplerMipMode(SamplerMipMode mode) {
+  switch (mode) {
+  case SamplerMipMode::Disabled:
+    return lvk::SamplerMip_Disabled;
+  case SamplerMipMode::Nearest:
+    return lvk::SamplerMip_Nearest;
+  case SamplerMipMode::Linear:
+    return lvk::SamplerMip_Linear;
+  case SamplerMipMode::Count:
+    break;
+  }
+  return lvk::SamplerMip_Disabled;
+}
+
+lvk::SamplerWrap toLvkSamplerWrapMode(SamplerWrapMode mode) {
+  switch (mode) {
+  case SamplerWrapMode::Repeat:
+    return lvk::SamplerWrap_Repeat;
+  case SamplerWrapMode::MirrorRepeat:
+    return lvk::SamplerWrap_MirrorRepeat;
+  case SamplerWrapMode::Clamp:
+    return lvk::SamplerWrap_Clamp;
+  case SamplerWrapMode::Count:
+    break;
+  }
+  return lvk::SamplerWrap_Repeat;
+}
+
 lvk::TextureUsageBits toLvkTextureUsage(TextureUsage usage) {
   switch (usage) {
   case TextureUsage::Sampled:
@@ -441,6 +481,22 @@ makeDependencyCountExceededError(std::string_view context) {
   return makeDependencyError(context, "dependency buffer count exceeds limit");
 }
 
+constexpr std::array<uint8_t, 4> kSupportedAnisotropyLevels = {2u, 4u, 8u, 16u};
+
+[[nodiscard]] SamplerHandle
+findBestAnisotropicSampler(std::span<const SamplerHandle> samplers,
+                           uint8_t requestedAnisotropy) {
+  for (size_t i = samplers.size(); i-- > 0u;) {
+    if (requestedAnisotropy < kSupportedAnisotropyLevels[i]) {
+      continue;
+    }
+    if (isValid(samplers[i])) {
+      return samplers[i];
+    }
+  }
+  return {};
+}
+
 [[nodiscard]] VkPipelineStageFlags2
 graphicsBarrierStages(GraphicsBarrierState state, bool isDepthTexture) {
   switch (state) {
@@ -585,8 +641,12 @@ struct LvkGPUDevice::Impl {
   Window *window = nullptr;
   std::unique_ptr<lvk::IContext> context;
   TextureCompressionCaps compressionCaps{};
-  lvk::Holder<lvk::SamplerHandle> cubemapSampler{};
-  uint32_t cubemapSamplerBindlessIndex = 0u;
+  ResourceTable<SamplerHandle, lvk::SamplerHandle> samplers;
+  SamplerHandle cubemapSampler{};
+  SamplerHandle bilinearSampler{};
+  SamplerHandle trilinearSampler{};
+  std::array<SamplerHandle, 4> anisotropicSamplers{};
+  uint8_t maxSamplerAnisotropy = 1u;
 
   ResourceTable<BufferHandle, lvk::BufferHandle> buffers;
   ResourceTable<TextureHandle, lvk::TextureHandle> textures;
@@ -667,33 +727,82 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
         deviceFeatures.textureCompressionETC2 == VK_TRUE;
     device->impl_->compressionCaps.astc =
         deviceFeatures.textureCompressionASTC_LDR == VK_TRUE;
+    const VkPhysicalDeviceProperties properties =
+        vkContext->getVkPhysicalDeviceProperties();
+    if (deviceFeatures.samplerAnisotropy == VK_TRUE &&
+        properties.limits.maxSamplerAnisotropy > 1.0f) {
+      device->impl_->maxSamplerAnisotropy = static_cast<uint8_t>(std::clamp(
+          static_cast<uint32_t>(
+              std::floor(properties.limits.maxSamplerAnisotropy)),
+          1u, static_cast<uint32_t>(std::numeric_limits<uint8_t>::max())));
+    }
   }
 #endif
 
   {
-    lvk::SamplerStateDesc cubemapSamplerDesc{};
-    cubemapSamplerDesc.minFilter = lvk::SamplerFilter_Linear;
-    cubemapSamplerDesc.magFilter = lvk::SamplerFilter_Linear;
-    cubemapSamplerDesc.mipMap = lvk::SamplerMip_Linear;
-    cubemapSamplerDesc.wrapU = lvk::SamplerWrap_Clamp;
-    cubemapSamplerDesc.wrapV = lvk::SamplerWrap_Clamp;
-    cubemapSamplerDesc.wrapW = lvk::SamplerWrap_Clamp;
-    cubemapSamplerDesc.debugName = "nuri_cubemap_sampler";
+    const auto createBuiltinSampler =
+        [&device](const SamplerDesc &desc,
+                  std::string_view debugName) -> SamplerHandle {
+      auto samplerResult = device->createSampler(desc, debugName);
+      if (samplerResult.hasError()) {
+        NURI_LOG_WARNING(
+            "LvkGPUDevice::create: Failed to create sampler '%.*s': %s",
+            static_cast<int>(debugName.size()), debugName.data(),
+            samplerResult.error().c_str());
+        return {};
+      }
+      return samplerResult.value();
+    };
 
-    lvk::Result samplerResult;
-    device->impl_->cubemapSampler = device->impl_->context->createSampler(
-        cubemapSamplerDesc, &samplerResult);
-    if (!samplerResult.isOk() || !device->impl_->cubemapSampler.valid()) {
-      NURI_LOG_WARNING("LvkGPUDevice::create: Failed to create cubemap "
-                       "sampler, falling back to sampler index 0: %s",
-                       samplerResult.message ? samplerResult.message
-                                             : "unknown error");
-      device->impl_->cubemapSamplerBindlessIndex = 0u;
-      device->impl_->cubemapSampler.reset();
-    } else {
-      device->impl_->cubemapSamplerBindlessIndex =
-          device->impl_->cubemapSampler.index();
+    device->impl_->bilinearSampler = createBuiltinSampler(
+        SamplerDesc{
+            .minFilter = SamplerFilter::Linear,
+            .magFilter = SamplerFilter::Linear,
+            .mipMode = SamplerMipMode::Disabled,
+            .wrapU = SamplerWrapMode::Repeat,
+            .wrapV = SamplerWrapMode::Repeat,
+            .wrapW = SamplerWrapMode::Repeat,
+        },
+        "nuri_sampler_bilinear");
+    device->impl_->trilinearSampler = createBuiltinSampler(
+        SamplerDesc{
+            .minFilter = SamplerFilter::Linear,
+            .magFilter = SamplerFilter::Linear,
+            .mipMode = SamplerMipMode::Linear,
+            .wrapU = SamplerWrapMode::Repeat,
+            .wrapV = SamplerWrapMode::Repeat,
+            .wrapW = SamplerWrapMode::Repeat,
+        },
+        "nuri_sampler_trilinear");
+
+    for (size_t i = 0; i < kSupportedAnisotropyLevels.size(); ++i) {
+      const uint8_t requested = kSupportedAnisotropyLevels[i];
+      if (device->impl_->maxSamplerAnisotropy < requested) {
+        continue;
+      }
+      device->impl_->anisotropicSamplers[i] = createBuiltinSampler(
+          SamplerDesc{
+              .minFilter = SamplerFilter::Linear,
+              .magFilter = SamplerFilter::Linear,
+              .mipMode = SamplerMipMode::Linear,
+              .wrapU = SamplerWrapMode::Repeat,
+              .wrapV = SamplerWrapMode::Repeat,
+              .wrapW = SamplerWrapMode::Repeat,
+              .maxAnisotropy = requested,
+          },
+          std::format("nuri_sampler_aniso_{}x", requested));
     }
+
+    device->impl_->cubemapSampler = createBuiltinSampler(
+        SamplerDesc{
+            .minFilter = SamplerFilter::Linear,
+            .magFilter = SamplerFilter::Linear,
+            .mipMode = SamplerMipMode::Linear,
+            .wrapU = SamplerWrapMode::Clamp,
+            .wrapV = SamplerWrapMode::Clamp,
+            .wrapW = SamplerWrapMode::Clamp,
+        },
+        "nuri_cubemap_sampler");
   }
 
   device->impl_->geometryPool =
@@ -1041,6 +1150,53 @@ LvkGPUDevice::createFramebufferTexture(const TextureDesc &desc,
   impl_->framebufferTextures.push_back(std::move(entry));
 
   return result;
+}
+
+Result<SamplerHandle, std::string>
+LvkGPUDevice::createSampler(const SamplerDesc &desc,
+                            std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  std::string debugNameStorage(debugName);
+  const char *debugNameCStr =
+      debugNameStorage.empty() ? "" : debugNameStorage.c_str();
+
+  lvk::SamplerStateDesc samplerDesc{};
+  samplerDesc.minFilter = toLvkSamplerFilter(desc.minFilter);
+  samplerDesc.magFilter = toLvkSamplerFilter(desc.magFilter);
+  samplerDesc.mipMap = toLvkSamplerMipMode(desc.mipMode);
+  samplerDesc.wrapU = toLvkSamplerWrapMode(desc.wrapU);
+  samplerDesc.wrapV = toLvkSamplerWrapMode(desc.wrapV);
+  samplerDesc.wrapW = toLvkSamplerWrapMode(desc.wrapW);
+  samplerDesc.mipLodMin = desc.mipLodMin;
+  samplerDesc.mipLodMax = std::max(desc.mipLodMax, desc.mipLodMin);
+  samplerDesc.maxAnisotropic =
+      std::min(desc.maxAnisotropy, impl_->maxSamplerAnisotropy);
+  if (samplerDesc.maxAnisotropic < 1u) {
+    samplerDesc.maxAnisotropic = 1u;
+  }
+  samplerDesc.debugName = debugNameCStr;
+
+  lvk::Result result;
+  lvk::Holder<lvk::SamplerHandle> handle =
+      impl_->context->createSampler(samplerDesc, &result);
+  if (!result.isOk() || !handle.valid()) {
+    if (debugNameCStr[0] != '\0') {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createSampler: Failed to create sampler '%s': %s",
+          debugNameCStr, result.message ? result.message : "unknown error");
+    } else {
+      NURI_LOG_WARNING(
+          "LvkGPUDevice::createSampler: Failed to create sampler: %s",
+          result.message ? result.message : "unknown error");
+    }
+    return Result<SamplerHandle, std::string>::makeError(
+        result.message != nullptr ? std::string(result.message)
+                                  : std::string("Failed to create sampler"));
+  }
+
+  SamplerHandle nuriHandle =
+      impl_->samplers.allocate(std::move(handle), std::move(debugNameStorage));
+  return Result<SamplerHandle, std::string>::makeResult(nuriHandle);
 }
 
 Result<TextureHandle, std::string> LvkGPUDevice::createDepthBuffer() {
@@ -1447,6 +1603,13 @@ void LvkGPUDevice::destroyTexture(TextureHandle texture) {
   impl_->textures.deallocate(texture);
 }
 
+void LvkGPUDevice::destroySampler(SamplerHandle sampler) {
+  if (!impl_) {
+    return;
+  }
+  impl_->samplers.deallocate(sampler);
+}
+
 void LvkGPUDevice::destroyShaderModule(ShaderHandle shader) {
   if (!impl_) {
     return;
@@ -1460,6 +1623,10 @@ bool LvkGPUDevice::isValid(BufferHandle h) const {
 
 bool LvkGPUDevice::isValid(TextureHandle h) const {
   return impl_->textures.isValid(h);
+}
+
+bool LvkGPUDevice::isValid(SamplerHandle h) const {
+  return impl_->samplers.isValid(h);
 }
 
 bool LvkGPUDevice::isValid(ShaderHandle h) const {
@@ -1489,10 +1656,40 @@ uint32_t LvkGPUDevice::getTextureBindlessIndex(TextureHandle h) const {
   return impl_->textures.getLvkHandle(h).index();
 }
 
+uint32_t LvkGPUDevice::getSamplerBindlessIndex(SamplerHandle h) const {
+  if (!impl_->samplers.isValid(h)) {
+    return 0u;
+  }
+  return impl_->samplers.getLvkHandle(h).index();
+}
+
+uint8_t LvkGPUDevice::getMaxSamplerAnisotropy() const {
+  return impl_->maxSamplerAnisotropy;
+}
+
+uint32_t
+LvkGPUDevice::getLinearRepeatSamplerBindlessIndex(bool useMipmaps,
+                                                  uint8_t maxAnisotropy) const {
+  if (!useMipmaps) {
+    return getSamplerBindlessIndex(impl_->bilinearSampler);
+  }
+  if (maxAnisotropy <= 1u || impl_->maxSamplerAnisotropy <= 1u) {
+    return getSamplerBindlessIndex(impl_->trilinearSampler);
+  }
+
+  const uint8_t clamped = std::min(maxAnisotropy, impl_->maxSamplerAnisotropy);
+  if (const SamplerHandle handle =
+          findBestAnisotropicSampler(impl_->anisotropicSamplers, clamped);
+      isValid(handle)) {
+    return getSamplerBindlessIndex(handle);
+  }
+  return getSamplerBindlessIndex(impl_->trilinearSampler);
+}
+
 uint32_t LvkGPUDevice::getDefaultSamplerBindlessIndex() const { return 0u; }
 
 uint32_t LvkGPUDevice::getCubemapSamplerBindlessIndex() const {
-  return impl_->cubemapSamplerBindlessIndex;
+  return getSamplerBindlessIndex(impl_->cubemapSampler);
 }
 
 uint64_t LvkGPUDevice::getBufferDeviceAddress(BufferHandle h,
@@ -2170,8 +2367,11 @@ LvkGPUDevice::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
     }
 
     impl_->context->discard(*impl_->activeGraphicsContexts[i].commandBuffer);
-    impl_->activeGraphicsContexts.erase(impl_->activeGraphicsContexts.begin() +
-                                        i);
+    if (i + 1u != impl_->activeGraphicsContexts.size()) {
+      impl_->activeGraphicsContexts[i] =
+          std::move(impl_->activeGraphicsContexts.back());
+    }
+    impl_->activeGraphicsContexts.pop_back();
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -2192,8 +2392,11 @@ Result<bool, std::string> LvkGPUDevice::discardRecordedGraphicsCommandBuffer(
 
     impl_->context->discard(
         *impl_->recordedGraphicsCommandBuffers[i].commandBuffer);
-    impl_->recordedGraphicsCommandBuffers.erase(
-        impl_->recordedGraphicsCommandBuffers.begin() + i);
+    if (i + 1u != impl_->recordedGraphicsCommandBuffers.size()) {
+      impl_->recordedGraphicsCommandBuffers[i] =
+          std::move(impl_->recordedGraphicsCommandBuffers.back());
+    }
+    impl_->recordedGraphicsCommandBuffers.pop_back();
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -2237,36 +2440,44 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
         "texture");
   }
 
-  for (const RecordedCommandBufferHandle requestedHandle : commandBuffers) {
-    size_t foundIndex = impl_->recordedGraphicsCommandBuffers.size();
-    for (size_t j = 0u; j < impl_->recordedGraphicsCommandBuffers.size(); ++j) {
-      if (areSameHandle(impl_->recordedGraphicsCommandBuffers[j].handle,
-                        requestedHandle)) {
-        foundIndex = j;
-        break;
-      }
-    }
+  const auto foldRecordedHandleKey =
+      [](RecordedCommandBufferHandle handle) -> uint64_t {
+    return (static_cast<uint64_t>(handle.index) << 32u) | handle.generation;
+  };
 
-    if (foundIndex == impl_->recordedGraphicsCommandBuffers.size()) {
+  std::unordered_map<uint64_t, size_t> recordedIndexByHandle{};
+  recordedIndexByHandle.reserve(impl_->recordedGraphicsCommandBuffers.size());
+  for (size_t i = 0u; i < impl_->recordedGraphicsCommandBuffers.size(); ++i) {
+    recordedIndexByHandle.emplace(
+        foldRecordedHandleKey(impl_->recordedGraphicsCommandBuffers[i].handle),
+        i);
+  }
+
+  std::vector<size_t> matchedRecordedIndices(
+      commandBuffers.size(), impl_->recordedGraphicsCommandBuffers.size());
+  for (size_t i = 0u; i < commandBuffers.size(); ++i) {
+    const auto found =
+        recordedIndexByHandle.find(foldRecordedHandleKey(commandBuffers[i]));
+    if (found == recordedIndexByHandle.end()) {
       return Result<SubmissionHandle, std::string>::makeError(
           "LvkGPUDevice::submitRecordedGraphicsFrame: unknown recorded "
           "command buffer");
     }
+    matchedRecordedIndices[i] = found->second;
   }
 
   lvk::SubmitHandle lastSubmitHandle{};
+  std::vector<uint8_t> consumedRecordedFlags(
+      impl_->recordedGraphicsCommandBuffers.size(), 0u);
   for (uint32_t i = 0u; i < commandBuffers.size(); ++i) {
-    lvk::ICommandBuffer *commandBuffer = nullptr;
-    size_t foundIndex = impl_->recordedGraphicsCommandBuffers.size();
-    for (size_t j = 0u; j < impl_->recordedGraphicsCommandBuffers.size(); ++j) {
-      if (areSameHandle(impl_->recordedGraphicsCommandBuffers[j].handle,
-                        commandBuffers[i])) {
-        commandBuffer = impl_->recordedGraphicsCommandBuffers[j].commandBuffer;
-        foundIndex = j;
-        break;
-      }
+    const size_t matchedIndex = matchedRecordedIndices[i];
+    if (matchedIndex >= impl_->recordedGraphicsCommandBuffers.size()) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "LvkGPUDevice::submitRecordedGraphicsFrame: unknown recorded "
+          "command buffer");
     }
-
+    lvk::ICommandBuffer *commandBuffer =
+        impl_->recordedGraphicsCommandBuffers[matchedIndex].commandBuffer;
     if (commandBuffer == nullptr) {
       return Result<SubmissionHandle, std::string>::makeError(
           "LvkGPUDevice::submitRecordedGraphicsFrame: unknown recorded "
@@ -2276,9 +2487,22 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
     lastSubmitHandle = impl_->context->submit(
         *commandBuffer,
         presentFlags[i] != 0u ? swapchainTexture : lvk::TextureHandle{});
-    impl_->recordedGraphicsCommandBuffers.erase(
-        impl_->recordedGraphicsCommandBuffers.begin() + foundIndex);
+    consumedRecordedFlags[matchedIndex] = 1u;
   }
+
+  size_t writeIndex = 0u;
+  for (size_t readIndex = 0u;
+       readIndex < impl_->recordedGraphicsCommandBuffers.size(); ++readIndex) {
+    if (consumedRecordedFlags[readIndex] != 0u) {
+      continue;
+    }
+    if (writeIndex != readIndex) {
+      impl_->recordedGraphicsCommandBuffers[writeIndex] =
+          std::move(impl_->recordedGraphicsCommandBuffers[readIndex]);
+    }
+    ++writeIndex;
+  }
+  impl_->recordedGraphicsCommandBuffers.resize(writeIndex);
 
   if (wantsPresent) {
     impl_->currentFrameSwapchainTexture = {};

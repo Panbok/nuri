@@ -25,6 +25,18 @@ struct TextureDesc {
   bool generateMipmaps = false;
 };
 
+struct SamplerDesc {
+  SamplerFilter minFilter = SamplerFilter::Linear;
+  SamplerFilter magFilter = SamplerFilter::Linear;
+  SamplerMipMode mipMode = SamplerMipMode::Disabled;
+  SamplerWrapMode wrapU = SamplerWrapMode::Repeat;
+  SamplerWrapMode wrapV = SamplerWrapMode::Repeat;
+  SamplerWrapMode wrapW = SamplerWrapMode::Repeat;
+  uint8_t mipLodMin = 0;
+  uint8_t mipLodMax = 15;
+  uint8_t maxAnisotropy = 1;
+};
+
 struct ShaderDesc {
   std::string_view moduleName{};
   std::string_view source{}; // GLSL source code
