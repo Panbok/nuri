@@ -164,7 +164,43 @@ nuri_add_gtest_suite(
 )
 
 nuri_add_gtest_suite(
+  nuri_render_scene_graph_tests
+  src/render_scene_graph_tests.cpp
+  "render_scene_graph::"
+)
+
+nuri_add_gtest_suite(
+  nuri_slot_pool_tests
+  src/slot_pool_tests.cpp
+  "slot_pool::"
+)
+
+nuri_add_gtest_suite(
+  nuri_renderable_material_resolution_tests
+  src/renderable_material_resolution_tests.cpp
+  "renderable_material_resolution::"
+)
+
+nuri_add_gtest_suite(
   nuri_gltf_light_import_tests
   src/gltf_light_import_tests.cpp
   "gltf_light_import::"
+)
+
+nuri_add_gtest_suite(
+  nuri_gltf_scene_prefab_import_tests
+  src/gltf_scene_prefab_import_tests.cpp
+  "gltf_scene_prefab_import::"
+)
+
+nuri_add_gtest_suite(
+  nuri_material_binary_cache_tests
+  src/material_binary_cache_tests.cpp
+  "material_binary_cache::"
+)
+
+nuri_add_gtest_suite(
+  nuri_texture_cache_utils_tests
+  src/texture_cache_utils_tests.cpp
+  "texture_cache_utils::"
 )

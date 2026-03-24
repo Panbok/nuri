@@ -186,6 +186,12 @@ FakeGPUDeviceBase::createTexture(const TextureDesc &, std::string_view) {
   return createTextureImpl();
 }
 
+Result<SamplerHandle, std::string>
+FakeGPUDeviceBase::createSampler(const SamplerDesc &, std::string_view) {
+  SamplerHandle handle{.index = nextSamplerIndex_++, .generation = 1u};
+  return Result<SamplerHandle, std::string>::makeResult(handle);
+}
+
 Result<BufferHandle, std::string> FakeGPUDeviceBase::createBufferImpl() {
   BufferHandle handle{.index = nextBufferIndex_++, .generation = 1u};
   ++createdBufferCount;
@@ -286,6 +292,10 @@ bool FakeGPUDeviceBase::isValid(TextureHandle h) const {
   return nuri::isValid(h);
 }
 
+bool FakeGPUDeviceBase::isValid(SamplerHandle h) const {
+  return nuri::isValid(h);
+}
+
 bool FakeGPUDeviceBase::isValid(ShaderHandle h) const {
   return nuri::isValid(h);
 }
@@ -302,7 +312,30 @@ Format FakeGPUDeviceBase::getTextureFormat(TextureHandle) const {
   return Format::RGBA8_UNORM;
 }
 
+TextureCompressionCaps FakeGPUDeviceBase::getTextureCompressionCaps() const {
+  return {};
+}
+
 uint32_t FakeGPUDeviceBase::getTextureBindlessIndex(TextureHandle) const {
+  return 0u;
+}
+
+void FakeGPUDeviceBase::destroySampler(SamplerHandle) {}
+
+uint32_t FakeGPUDeviceBase::getSamplerBindlessIndex(SamplerHandle h) const {
+  return h.index;
+}
+
+uint8_t FakeGPUDeviceBase::getMaxSamplerAnisotropy() const { return 16u; }
+
+uint32_t FakeGPUDeviceBase::getLinearRepeatSamplerBindlessIndex(
+    bool useMipmaps, uint8_t maxAnisotropy) const {
+  if (!useMipmaps) {
+    return 1u;
+  }
+  if (maxAnisotropy > 1u) {
+    return 2u;
+  }
   return 0u;
 }
 

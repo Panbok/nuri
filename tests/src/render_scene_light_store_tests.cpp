@@ -6,25 +6,34 @@
 
 namespace {
 
+[[nodiscard]] glm::mat4 makeNodeTransform(const glm::vec3 &position,
+                                          const glm::quat &rotation) {
+  return glm::translate(glm::mat4(1.0f), position) * glm::mat4_cast(rotation);
+}
+
 TEST(RenderSceneLightStoreTests,
-     DirectionalLightProducesPackedDirectionalEntry) {
+     DirectionalLightProducesPackedDirectionalEntryAfterCommit) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
 
   nuri::LightDesc light{};
   light.type = nuri::LightType::Directional;
   light.name = "Sun";
   light.color = glm::vec3(0.75f, 0.5f, 0.25f);
   light.intensity = 3.5f;
-
-  auto addResult = scene.addLight(light);
+  auto addResult = graph.addLight(graph.rootNode(), light);
   ASSERT_FALSE(addResult.hasError()) << addResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  EXPECT_TRUE(commitResult.value());
   EXPECT_EQ(scene.lightTopologyVersion(), 1u);
   EXPECT_EQ(scene.lightTransformVersion(), 1u);
   EXPECT_EQ(scene.packedDirectionalLights().size(), 1u);
   EXPECT_TRUE(scene.packedLocalLights().empty());
 
   nuri::LightDesc stored{};
-  ASSERT_TRUE(scene.getLightDesc(addResult.value(), stored));
+  ASSERT_TRUE(graph.getLightDesc(addResult.value(), stored));
   EXPECT_EQ(stored.type, nuri::LightType::Directional);
   EXPECT_EQ(stored.name, "Sun");
   EXPECT_EQ(stored.range, 0.0f);
@@ -42,44 +51,59 @@ TEST(RenderSceneLightStoreTests,
 TEST(RenderSceneLightStoreTests,
      DisabledLocalLightStaysOutOfPackedTableUntilEnabled) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
 
   nuri::LightDesc light{};
   light.type = nuri::LightType::Point;
   light.enabled = false;
   light.range = 12.0f;
 
-  auto addResult = scene.addLight(light);
+  auto addResult = graph.addLight(graph.rootNode(), light);
   ASSERT_FALSE(addResult.hasError()) << addResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
   EXPECT_TRUE(scene.packedLocalLights().empty());
   EXPECT_EQ(scene.lightTopologyVersion(), 1u);
   EXPECT_EQ(scene.lightTransformVersion(), 1u);
 
   light.enabled = true;
-  ASSERT_TRUE(scene.updateLight(addResult.value(), light));
+  ASSERT_TRUE(graph.updateLight(addResult.value(), light));
+  commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
   EXPECT_EQ(scene.packedLocalLights().size(), 1u);
   EXPECT_EQ(scene.lightTopologyVersion(), 2u);
   EXPECT_EQ(scene.lightTransformVersion(), 2u);
 
   light.enabled = false;
-  ASSERT_TRUE(scene.updateLight(addResult.value(), light));
+  ASSERT_TRUE(graph.updateLight(addResult.value(), light));
+  commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
   EXPECT_TRUE(scene.packedLocalLights().empty());
   EXPECT_EQ(scene.lightTopologyVersion(), 3u);
   EXPECT_EQ(scene.lightTransformVersion(), 3u);
 }
 
 TEST(RenderSceneLightStoreTests,
-     SetLightTransformUpdatesPackedDirectionalDataWithoutTopologyChange) {
+     MovingLightNodeUpdatesPackedDirectionalDataWithoutTopologyChange) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
+
+  auto nodeResult = graph.createNode(graph.rootNode(), "Sun");
+  ASSERT_FALSE(nodeResult.hasError()) << nodeResult.error();
 
   nuri::LightDesc light{};
   light.type = nuri::LightType::Directional;
-  auto addResult = scene.addLight(light);
+  auto addResult = graph.addLight(nodeResult.value(), light);
   ASSERT_FALSE(addResult.hasError()) << addResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
 
   const glm::quat rotation =
       glm::angleAxis(glm::pi<float>(), glm::vec3(0.0f, 1.0f, 0.0f));
-  ASSERT_TRUE(
-      scene.setLightTransform(addResult.value(), glm::vec3(2.0f), rotation));
+  ASSERT_TRUE(graph.setNodeLocalTransform(
+      nodeResult.value(), makeNodeTransform(glm::vec3(2.0f), rotation)));
+  commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
 
   EXPECT_EQ(scene.lightTopologyVersion(), 1u);
   EXPECT_EQ(scene.lightTransformVersion(), 2u);
@@ -91,18 +115,19 @@ TEST(RenderSceneLightStoreTests,
 TEST(RenderSceneLightStoreTests,
      RemovedLightInvalidatesHandleAndReusesSlotGeneration) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
 
   nuri::LightDesc light{};
   light.type = nuri::LightType::Point;
 
-  auto firstResult = scene.addLight(light);
+  auto firstResult = graph.addLight(graph.rootNode(), light);
   ASSERT_FALSE(firstResult.hasError()) << firstResult.error();
   const nuri::LightId first = firstResult.value();
 
-  ASSERT_TRUE(scene.removeLight(first));
-  EXPECT_FALSE(scene.getLightDesc(first, light));
+  ASSERT_TRUE(graph.removeLight(first));
+  EXPECT_FALSE(graph.getLightDesc(first, light));
 
-  auto secondResult = scene.addLight(light);
+  auto secondResult = graph.addLight(graph.rootNode(), light);
   ASSERT_FALSE(secondResult.hasError()) << secondResult.error();
   const nuri::LightId second = secondResult.value();
 
@@ -112,17 +137,27 @@ TEST(RenderSceneLightStoreTests,
 
 TEST(RenderSceneLightStoreTests, SpotLightPackingStoresTypeAnglesAndRange) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
 
   nuri::LightDesc light{};
   light.type = nuri::LightType::Spot;
-  light.position = glm::vec3(1.0f, 2.0f, 3.0f);
+  light.position = glm::vec3(0.0f);
   light.range = 5.0f;
   light.intensity = 7.0f;
   light.innerConeAngleRadians = glm::radians(10.0f);
   light.outerConeAngleRadians = glm::radians(20.0f);
 
-  auto addResult = scene.addLight(light);
+  auto nodeResult =
+      graph.createNode(graph.rootNode(), "Spot",
+                       makeNodeTransform(glm::vec3(1.0f, 2.0f, 3.0f),
+                                         glm::quat(1.0f, 0.0f, 0.0f, 0.0f)));
+  ASSERT_FALSE(nodeResult.hasError()) << nodeResult.error();
+
+  auto addResult = graph.addLight(nodeResult.value(), light);
   ASSERT_FALSE(addResult.hasError()) << addResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+
   ASSERT_EQ(scene.packedLocalLights().size(), 1u);
   const nuri::LocalLightGpuData gpu = scene.packedLocalLights()[0];
   EXPECT_NEAR(gpu.positionRange.x, 1.0f, 1.0e-5f);
@@ -137,34 +172,55 @@ TEST(RenderSceneLightStoreTests, SpotLightPackingStoresTypeAnglesAndRange) {
   EXPECT_NEAR(gpu.directionOuterCos.w, std::cos(glm::radians(20.0f)), 1.0e-5f);
 }
 
+TEST(RenderSceneLightStoreTests, PointLightPackingStoresEnabledBit) {
+  const nuri::LocalLightGpuData disabled = nuri::packPointLight(
+      glm::vec3(1.0f, 2.0f, 3.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec3(0.5f, 0.25f, 0.125f), 4.0f, 6.0f, false);
+  EXPECT_EQ(disabled.innerCosTypeEnabledReserved.z, 0u);
+
+  const nuri::LocalLightGpuData enabled = nuri::packPointLight(
+      glm::vec3(1.0f, 2.0f, 3.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+      glm::vec3(0.5f, 0.25f, 0.125f), 4.0f, 6.0f, true);
+  EXPECT_EQ(enabled.innerCosTypeEnabledReserved.z, 1u);
+}
+
 TEST(RenderSceneLightStoreTests, LocalLightCapIsEnforced) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
 
   nuri::LightDesc light{};
   light.type = nuri::LightType::Point;
   for (uint32_t i = 0; i < 64u; ++i) {
-    auto addResult = scene.addLight(light);
+    auto addResult = graph.addLight(graph.rootNode(), light);
     ASSERT_FALSE(addResult.hasError()) << addResult.error();
   }
 
-  auto overflowResult = scene.addLight(light);
+  auto overflowResult = graph.addLight(graph.rootNode(), light);
   EXPECT_TRUE(overflowResult.hasError());
 }
 
 TEST(RenderSceneLightStoreTests,
      NameOnlyUpdateLeavesVersionsAndPackedGpuDataUnchanged) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
 
   nuri::LightDesc light{};
   light.type = nuri::LightType::Point;
   light.name = "Point A";
-  light.position = glm::vec3(1.0f, 2.0f, 3.0f);
   light.color = glm::vec3(0.4f, 0.5f, 0.6f);
   light.intensity = 4.0f;
   light.range = 8.0f;
 
-  auto addResult = scene.addLight(light);
+  auto nodeResult =
+      graph.createNode(graph.rootNode(), "PointNode",
+                       makeNodeTransform(glm::vec3(1.0f, 2.0f, 3.0f),
+                                         glm::quat(1.0f, 0.0f, 0.0f, 0.0f)));
+  ASSERT_FALSE(nodeResult.hasError()) << nodeResult.error();
+
+  auto addResult = graph.addLight(nodeResult.value(), light);
   ASSERT_FALSE(addResult.hasError()) << addResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
   ASSERT_EQ(scene.packedLocalLights().size(), 1u);
 
   const uint64_t topologyVersionBefore = scene.lightTopologyVersion();
@@ -172,7 +228,9 @@ TEST(RenderSceneLightStoreTests,
   const nuri::LocalLightGpuData gpuBefore = scene.packedLocalLights()[0];
 
   light.name = "Point B";
-  ASSERT_TRUE(scene.updateLight(addResult.value(), light));
+  ASSERT_TRUE(graph.updateLight(addResult.value(), light));
+  commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
 
   EXPECT_EQ(scene.lightTopologyVersion(), topologyVersionBefore);
   EXPECT_EQ(scene.lightTransformVersion(), transformVersionBefore);
@@ -180,13 +238,14 @@ TEST(RenderSceneLightStoreTests,
                            sizeof(gpuBefore)));
 
   nuri::LightDesc stored{};
-  ASSERT_TRUE(scene.getLightDesc(addResult.value(), stored));
+  ASSERT_TRUE(graph.getLightDesc(addResult.value(), stored));
   EXPECT_EQ(stored.name, "Point B");
 }
 
 TEST(RenderSceneLightStoreTests,
      ForEachLightEnumeratesLiveLightsWhilePackedIdsTrackEnabledSubset) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
 
   nuri::LightDesc directional{};
   directional.type = nuri::LightType::Directional;
@@ -201,12 +260,14 @@ TEST(RenderSceneLightStoreTests,
   spot.type = nuri::LightType::Spot;
   spot.name = "Spot";
 
-  auto directionalResult = scene.addLight(directional);
-  auto pointResult = scene.addLight(point);
-  auto spotResult = scene.addLight(spot);
+  auto directionalResult = graph.addLight(graph.rootNode(), directional);
+  auto pointResult = graph.addLight(graph.rootNode(), point);
+  auto spotResult = graph.addLight(graph.rootNode(), spot);
   ASSERT_FALSE(directionalResult.hasError()) << directionalResult.error();
   ASSERT_FALSE(pointResult.hasError()) << pointResult.error();
   ASSERT_FALSE(spotResult.hasError()) << spotResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
 
   std::vector<nuri::LightId> enumeratedLights;
   scene.forEachLightId(
@@ -227,6 +288,7 @@ TEST(RenderSceneLightStoreTests,
 TEST(RenderSceneLightStoreTests,
      ClearLightsInvalidatesHandlesAndClearsPackedTables) {
   nuri::RenderScene scene;
+  nuri::SceneGraph &graph = scene.graph();
 
   nuri::LightDesc directional{};
   directional.type = nuri::LightType::Directional;
@@ -234,17 +296,21 @@ TEST(RenderSceneLightStoreTests,
   nuri::LightDesc point{};
   point.type = nuri::LightType::Point;
 
-  auto directionalResult = scene.addLight(directional);
-  auto pointResult = scene.addLight(point);
+  auto directionalResult = graph.addLight(graph.rootNode(), directional);
+  auto pointResult = graph.addLight(graph.rootNode(), point);
   ASSERT_FALSE(directionalResult.hasError()) << directionalResult.error();
   ASSERT_FALSE(pointResult.hasError()) << pointResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
 
-  scene.clearLights();
+  graph.clearLights();
+  commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
 
   EXPECT_TRUE(scene.packedDirectionalLights().empty());
   EXPECT_TRUE(scene.packedLocalLights().empty());
-  EXPECT_FALSE(scene.getLightDesc(directionalResult.value(), directional));
-  EXPECT_FALSE(scene.getLightDesc(pointResult.value(), point));
+  EXPECT_FALSE(graph.getLightDesc(directionalResult.value(), directional));
+  EXPECT_FALSE(graph.getLightDesc(pointResult.value(), point));
 
   std::vector<nuri::LightId> enumeratedLights;
   scene.forEachLightId(

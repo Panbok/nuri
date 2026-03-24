@@ -1,5 +1,7 @@
 #include "tests_pch.h"
 
+#include "nuri/resources/gpu/material.h"
+#include "nuri/resources/gpu/resource_keys.h"
 #include "nuri/resources/mesh_importer.h"
 
 #include <chrono>
@@ -10,6 +12,7 @@
 namespace {
 constexpr std::string_view kIorTestMaterialName = "Ior Test";
 constexpr std::string_view kSpecularTestMaterialName = "Specular Test";
+constexpr std::string_view kSpecGlossTestMaterialName = "SpecGloss Test";
 constexpr std::string_view kEmissiveStrengthTestMaterialName =
     "Emissive Strength Test";
 constexpr std::string_view kIorTestBufferFileName = "scene.bin";
@@ -25,7 +28,7 @@ struct ScopedTempDir {
             std::chrono::steady_clock::now().time_since_epoch().count()) ^
         static_cast<uint64_t>(
             std::hash<std::thread::id>{}(std::this_thread::get_id()));
-    path = std::filesystem::temp_directory_path() /
+    path = std::filesystem::current_path() / ".tmp_tests" /
            (std::string(prefix) + "_" + std::to_string(uniqueId));
     std::filesystem::create_directories(path);
   }
@@ -291,6 +294,144 @@ makeMinimalEmissiveStrengthTestJson(const std::array<float, 3> &emissiveFactor,
   return json.str();
 }
 
+std::string makeMinimalSpecGlossTestJson(bool includeTextures,
+                                         bool includeSpecularExtension,
+                                         bool externalBuffer) {
+  std::ostringstream json;
+  json << "{\n"
+       << "  \"asset\": {\"version\": \"2.0\"},\n"
+       << "  \"extensionsUsed\": [\"KHR_materials_pbrSpecularGlossiness\"";
+  if (includeTextures) {
+    json << ", \"KHR_texture_transform\"";
+  }
+  if (includeSpecularExtension) {
+    json << ", \"KHR_materials_specular\"";
+  }
+  json << "],\n"
+       << "  \"scene\": 0,\n"
+       << "  \"scenes\": [{\"nodes\": [0]}],\n"
+       << "  \"nodes\": [{\"mesh\": 0}],\n"
+       << "  \"materials\": [{\n"
+       << "    \"name\": \"" << kSpecGlossTestMaterialName << "\",\n"
+       << "    \"pbrMetallicRoughness\": {\n"
+       << "      \"baseColorFactor\": [0.1, 0.2, 0.3, 0.4],\n"
+       << "      \"metallicFactor\": 0.9,\n"
+       << "      \"roughnessFactor\": 0.25";
+  if (includeTextures) {
+    json << ",\n"
+         << "      \"metallicRoughnessTexture\": {\"index\": 2}\n";
+  } else {
+    json << "\n";
+  }
+  json << "    },\n"
+       << "    \"extensions\": {\n"
+       << "      \"KHR_materials_pbrSpecularGlossiness\": {\n"
+       << "        \"diffuseFactor\": [0.9, 0.8, 0.7, 0.6],\n"
+       << "        \"specularFactor\": [1.5, 0.5, 0.25],\n"
+       << "        \"glossinessFactor\": 0.35";
+  if (includeTextures) {
+    json << ",\n"
+         << "        \"diffuseTexture\": {\n"
+         << "          \"index\": 0,\n"
+         << "          \"texCoord\": 1,\n"
+         << "          \"extensions\": {\n"
+         << "            \"KHR_texture_transform\": {\n"
+         << "              \"offset\": [0.125, 0.25],\n"
+         << "              \"scale\": [1.5, 2.5],\n"
+         << "              \"rotation\": 0.5,\n"
+         << "              \"texCoord\": 0\n"
+         << "            }\n"
+         << "          }\n"
+         << "        },\n"
+         << "        \"specularGlossinessTexture\": {\n"
+         << "          \"index\": 1,\n"
+         << "          \"texCoord\": 0,\n"
+         << "          \"extensions\": {\n"
+         << "            \"KHR_texture_transform\": {\n"
+         << "              \"offset\": [-0.5, 0.75],\n"
+         << "              \"scale\": [4.0, 5.0],\n"
+         << "              \"rotation\": 0.125,\n"
+         << "              \"texCoord\": 1\n"
+         << "            }\n"
+         << "          }\n"
+         << "        }\n";
+  } else {
+    json << "\n";
+  }
+  json << "      }";
+  if (includeSpecularExtension) {
+    json << ",\n"
+         << "      \"KHR_materials_specular\": {\n"
+         << "        \"specularFactor\": 0.1,\n"
+         << "        \"specularColorFactor\": [0.2, 0.3, 0.4],\n"
+         << "        \"specularTexture\": {\"index\": 0},\n"
+         << "        \"specularColorTexture\": {\"index\": 1}\n"
+         << "      }\n";
+  } else {
+    json << "\n";
+  }
+  json << "    }\n"
+       << "  }],\n";
+
+  if (includeTextures) {
+    json << "  \"samplers\": [\n"
+         << "    {\"magFilter\": 9729, \"minFilter\": 9987, \"wrapS\": 10497, "
+            "\"wrapT\": 10497},\n"
+         << "    {\"magFilter\": 9728, \"minFilter\": 9984, \"wrapS\": 33648, "
+            "\"wrapT\": 33071},\n"
+         << "    {\"magFilter\": 9729, \"minFilter\": 9729, \"wrapS\": 10497, "
+            "\"wrapT\": 10497}\n"
+         << "  ],\n"
+         << "  \"images\": [\n"
+         << "    {\"uri\": \"textures/specgloss_diffuse.png\"},\n"
+         << "    {\"uri\": \"textures/specgloss_rgba.png\"},\n"
+         << "    {\"uri\": \"textures/mr.png\"}\n"
+         << "  ],\n"
+         << "  \"textures\": [\n"
+         << "    {\"sampler\": 1, \"source\": 0},\n"
+         << "    {\"sampler\": 0, \"source\": 1},\n"
+         << "    {\"sampler\": 2, \"source\": 2}\n"
+         << "  ],\n";
+  }
+
+  json << "  \"meshes\": [{\"primitives\": [{\n"
+       << "    \"attributes\": {\"POSITION\": 0},\n"
+       << "    \"indices\": 1,\n"
+       << "    \"material\": 0\n"
+       << "  }]}],\n"
+       << "  \"accessors\": [\n"
+       << "    {\n"
+       << "      \"bufferView\": 0,\n"
+       << "      \"componentType\": 5126,\n"
+       << "      \"count\": 3,\n"
+       << "      \"type\": \"VEC3\",\n"
+       << "      \"max\": [1, 1, 0],\n"
+       << "      \"min\": [0, 0, 0]\n"
+       << "    },\n"
+       << "    {\n"
+       << "      \"bufferView\": 1,\n"
+       << "      \"componentType\": 5123,\n"
+       << "      \"count\": 3,\n"
+       << "      \"type\": \"SCALAR\",\n"
+       << "      \"max\": [2],\n"
+       << "      \"min\": [0]\n"
+       << "    }\n"
+       << "  ],\n"
+       << "  \"bufferViews\": [\n"
+       << "    {\"buffer\": 0, \"byteOffset\": 0, \"byteLength\": 36, "
+          "\"target\": 34962},\n"
+       << "    {\"buffer\": 0, \"byteOffset\": 36, \"byteLength\": 6, "
+          "\"target\": 34963}\n"
+       << "  ],\n"
+       << "  \"buffers\": [{\"byteLength\": 42";
+  if (externalBuffer) {
+    json << ", \"uri\": \"" << kIorTestBufferFileName << "\"";
+  }
+  json << "}]\n"
+       << "}\n";
+  return json.str();
+}
+
 void writeTextFile(const std::filesystem::path &path, std::string_view text) {
   std::ofstream file(path, std::ios::binary);
   ASSERT_TRUE(file.is_open()) << path.string();
@@ -396,6 +537,16 @@ writeMinimalEmissiveStrengthTestGlb(const ScopedTempDir &dir,
   return writeMinimalGlb(dir, "emissive_strength_test.glb", jsonText);
 }
 
+std::filesystem::path
+writeMinimalSpecGlossTestGltf(const ScopedTempDir &dir, bool includeTextures,
+                              bool includeSpecularExtension) {
+  const std::filesystem::path gltfPath = dir.path / "specgloss_test.gltf";
+  writeTextFile(gltfPath, makeMinimalSpecGlossTestJson(
+                              includeTextures, includeSpecularExtension, true));
+  writeBinaryFile(dir.path / kIorTestBufferFileName, minimalTriangleBuffer());
+  return gltfPath;
+}
+
 std::string modelPath(std::string_view relativePath) {
   const std::filesystem::path root(PROJECT_SOURCE_DIR);
   return (root / "assets" / "models" / std::filesystem::path(relativePath))
@@ -411,6 +562,22 @@ findMaterialByName(const nuri::ImportedMaterialSet &set,
                      return material.name == name;
                    });
   return (it == set.materials.end()) ? nullptr : &(*it);
+}
+
+const nuri::ImportedMaterialInfo *
+loadSyntheticSpecGlossMaterial(const ScopedTempDir &dir, bool includeTextures,
+                               bool includeSpecularExtension,
+                               nuri::ImportedMaterialSet &outSet) {
+  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
+      writeMinimalSpecGlossTestGltf(dir, includeTextures,
+                                    includeSpecularExtension)
+          .string());
+  EXPECT_FALSE(result.hasError()) << result.error();
+  if (result.hasError()) {
+    return nullptr;
+  }
+  outSet = std::move(result.value());
+  return findMaterialByName(outSet, kSpecGlossTestMaterialName);
 }
 
 TEST(MaterialImportTests, ClearcoatWickerOverlayImportsClearcoatData) {
@@ -751,6 +918,10 @@ TEST(MaterialImportTests, SyntheticGltfImportsSpecularTexturesAndTransforms) {
             expectedSpecularPath);
   EXPECT_EQ(std::filesystem::path(material->specularColor.path),
             expectedSpecularColorPath);
+  EXPECT_EQ(material->specular.sourceKind,
+            nuri::MaterialTextureSourceKind::ExternalFile);
+  EXPECT_EQ(material->specularColor.sourceKind,
+            nuri::MaterialTextureSourceKind::ExternalFile);
   EXPECT_EQ(material->specular.uvSet, 0u);
   EXPECT_EQ(material->specular.samplerIndex, 1u);
   EXPECT_FLOAT_EQ(material->specular.transform.offset.x, 0.25f);
@@ -768,6 +939,98 @@ TEST(MaterialImportTests, SyntheticGltfImportsSpecularTexturesAndTransforms) {
   EXPECT_FLOAT_EQ(material->specularColor.transform.scale.y, 5.0f);
   EXPECT_NEAR(material->specularColor.transform.rotationRadians, 0.25f,
               1.0e-6f);
+}
+
+TEST(MaterialImportTests, SyntheticGltfPreservesSpecGlossFactors) {
+  const ScopedTempDir dir("nuri_specgloss_factor");
+  nuri::ImportedMaterialSet set{};
+  const nuri::ImportedMaterialInfo *material =
+      loadSyntheticSpecGlossMaterial(dir, false, false, set);
+  ASSERT_NE(material, nullptr);
+  EXPECT_EQ(material->workflow, nuri::MaterialWorkflow::SpecularGlossiness);
+  EXPECT_FLOAT_EQ(material->baseColorFactor.x, 0.9f);
+  EXPECT_FLOAT_EQ(material->baseColorFactor.w, 0.6f);
+  EXPECT_FLOAT_EQ(material->specularColorFactor.x, 1.5f);
+  EXPECT_FLOAT_EQ(material->specularColorFactor.y, 0.5f);
+  EXPECT_FLOAT_EQ(material->specularColorFactor.z, 0.25f);
+  EXPECT_FLOAT_EQ(material->glossinessFactor, 0.35f);
+  EXPECT_FLOAT_EQ(material->metallicFactor, 0.0f);
+  EXPECT_FLOAT_EQ(material->roughnessFactor, 1.0f);
+  EXPECT_TRUE(material->metallicRoughness.path.empty());
+  EXPECT_TRUE(material->specular.path.empty());
+}
+
+TEST(MaterialImportTests, SyntheticGltfImportsSpecGlossTexturesAndTransforms) {
+  const ScopedTempDir dir("nuri_specgloss_textures");
+  nuri::ImportedMaterialSet set{};
+  const nuri::ImportedMaterialInfo *material =
+      loadSyntheticSpecGlossMaterial(dir, true, false, set);
+  ASSERT_NE(material, nullptr);
+  EXPECT_EQ(material->workflow, nuri::MaterialWorkflow::SpecularGlossiness);
+  EXPECT_EQ(std::filesystem::path(material->baseColor.path).filename(),
+            std::filesystem::path("specgloss_diffuse.png"));
+  EXPECT_EQ(std::filesystem::path(material->specularColor.path).filename(),
+            std::filesystem::path("specgloss_rgba.png"));
+  EXPECT_EQ(material->baseColor.uvSet, 0u);
+  EXPECT_EQ(material->baseColor.samplerIndex, 1u);
+  EXPECT_FLOAT_EQ(material->baseColor.transform.offset.x, 0.125f);
+  EXPECT_FLOAT_EQ(material->baseColor.transform.scale.y, 2.5f);
+  EXPECT_EQ(material->specularColor.uvSet, 1u);
+  EXPECT_EQ(material->specularColor.samplerIndex, 0u);
+  EXPECT_FLOAT_EQ(material->specularColor.transform.offset.x, -0.5f);
+  EXPECT_FLOAT_EQ(material->specularColor.transform.scale.y, 5.0f);
+  EXPECT_NEAR(material->specularColor.transform.rotationRadians, 0.125f,
+              1.0e-6f);
+}
+
+TEST(MaterialImportTests, MaterialDescFromImportedResolvesRuntimeSamplerState) {
+  nuri::MaterialData material{};
+  material.baseColor.samplerIndex = 5u;
+  material.normal.samplerIndex = 3u;
+  material.specularColor.samplerIndex = 7u;
+
+  const nuri::MaterialDesc desc = nuri::Material::descFromImported(material);
+  EXPECT_EQ(desc.samplers.baseColor, 0u);
+  EXPECT_EQ(desc.samplers.normal, 0u);
+  EXPECT_EQ(desc.samplers.specularColor, 0u);
+}
+
+TEST(MaterialImportTests, SyntheticGltfSpecGlossWinsOverSpecularExtension) {
+  const ScopedTempDir dir("nuri_specgloss_precedence");
+  nuri::ImportedMaterialSet set{};
+  const nuri::ImportedMaterialInfo *material =
+      loadSyntheticSpecGlossMaterial(dir, true, true, set);
+  ASSERT_NE(material, nullptr);
+  EXPECT_EQ(material->workflow, nuri::MaterialWorkflow::SpecularGlossiness);
+  EXPECT_FLOAT_EQ(material->specularColorFactor.x, 1.5f);
+  EXPECT_FLOAT_EQ(material->glossinessFactor, 0.35f);
+  EXPECT_TRUE(material->specular.path.empty());
+  EXPECT_EQ(std::filesystem::path(material->specularColor.path).filename(),
+            std::filesystem::path("specgloss_rgba.png"));
+}
+
+TEST(MaterialImportTests,
+     MaterialDescPreservesSpecGlossWorkflowAndAffectsHash) {
+  nuri::MaterialData imported{};
+  imported.workflow = nuri::MaterialWorkflow::SpecularGlossiness;
+  imported.baseColorFactor = glm::vec4(0.9f, 0.8f, 0.7f, 0.6f);
+  imported.specularColorFactor = glm::vec3(1.4f, 0.5f, 0.25f);
+  imported.glossinessFactor = 0.35f;
+
+  const nuri::MaterialDesc desc = nuri::Material::descFromImported(imported);
+  EXPECT_EQ(desc.workflow, nuri::MaterialWorkflow::SpecularGlossiness);
+  EXPECT_FLOAT_EQ(desc.glossinessFactor, 0.35f);
+
+  nuri::MaterialDesc differentWorkflow = desc;
+  differentWorkflow.workflow = nuri::MaterialWorkflow::MetallicRoughness;
+  differentWorkflow.specularFactor = 1.0f;
+  const uint64_t specGlossHash = nuri::hashMaterialDesc(desc);
+  const uint64_t metallicHash = nuri::hashMaterialDesc(differentWorkflow);
+  EXPECT_NE(specGlossHash, metallicHash);
+
+  nuri::MaterialDesc differentGlossiness = desc;
+  differentGlossiness.glossinessFactor = 0.65f;
+  EXPECT_NE(specGlossHash, nuri::hashMaterialDesc(differentGlossiness));
 }
 
 TEST(MaterialImportTests, SpecularSilkPoufImportsSpecularAndSheenData) {

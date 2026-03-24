@@ -85,11 +85,20 @@ public:
 
   bool isValid(BufferHandle h) const override;
   bool isValid(TextureHandle h) const override;
+  bool isValid(SamplerHandle h) const override;
   bool isValid(ShaderHandle h) const override;
   bool isValid(RenderPipelineHandle h) const override;
   bool isValid(ComputePipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
+  TextureCompressionCaps getTextureCompressionCaps() const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
+  Result<SamplerHandle, std::string>
+  createSampler(const SamplerDesc &desc, std::string_view debugName) override;
+  void destroySampler(SamplerHandle sampler) override;
+  uint32_t getSamplerBindlessIndex(SamplerHandle h) const override;
+  uint8_t getMaxSamplerAnisotropy() const override;
+  uint32_t getLinearRepeatSamplerBindlessIndex(
+      bool useMipmaps, uint8_t maxAnisotropy = 1u) const override;
   uint32_t getDefaultSamplerBindlessIndex() const override;
   uint32_t getCubemapSamplerBindlessIndex() const override;
   uint64_t getBufferDeviceAddress(BufferHandle h, size_t offset) const override;
@@ -195,6 +204,7 @@ private:
 
   uint32_t nextBufferIndex_ = 1u;
   uint32_t nextTextureIndex_ = 1u;
+  uint32_t nextSamplerIndex_ = 1u;
   uint32_t nextRecordingContextIndex_ = 1u;
   uint32_t nextRecordedCommandBufferIndex_ = 1u;
   uint32_t nextSubmissionIndex_ = 1u;
