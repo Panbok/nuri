@@ -229,6 +229,8 @@ TEST(RenderSceneGraphTests, ChildTraversalEnumeratesLiveChildren) {
   std::vector<nuri::NodeId> children;
   nuri::NodeId child = nuri::kInvalidNodeId;
   ASSERT_TRUE(graph.getNodeFirstChild(parentResult.value(), child));
+  // getNodeFirstChild/getNodeNextSibling walk the current child list in LIFO
+  // insertion order, so the newest child appears first.
   while (nuri::isValid(child)) {
     children.push_back(child);
     nuri::NodeId next = nuri::kInvalidNodeId;
@@ -256,6 +258,8 @@ TEST(RenderSceneGraphTests, ForEachRenderableOnNodeReturnsAttachedRenderables) {
   ASSERT_FALSE(renderableB.hasError()) << renderableB.error();
 
   std::vector<nuri::RenderableId> renderables;
+  // forEachRenderableOnNode preserves attachment order, unlike the child-node
+  // traversal above which is intentionally LIFO.
   graph.forEachRenderableOnNode(nodeResult.value(), [&](nuri::RenderableId id) {
     renderables.push_back(id);
   });

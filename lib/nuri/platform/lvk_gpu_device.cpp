@@ -741,20 +741,22 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
 
   {
     const auto createBuiltinSampler =
-        [&device](const SamplerDesc &desc,
-                  std::string_view debugName) -> SamplerHandle {
+        [&device](
+            const SamplerDesc &desc,
+            std::string_view debugName) -> Result<SamplerHandle, std::string> {
       auto samplerResult = device->createSampler(desc, debugName);
       if (samplerResult.hasError()) {
-        NURI_LOG_WARNING(
+        NURI_LOG_ERROR(
             "LvkGPUDevice::create: Failed to create sampler '%.*s': %s",
             static_cast<int>(debugName.size()), debugName.data(),
             samplerResult.error().c_str());
-        return {};
+        return Result<SamplerHandle, std::string>::makeError(
+            samplerResult.error());
       }
-      return samplerResult.value();
+      return samplerResult;
     };
 
-    device->impl_->bilinearSampler = createBuiltinSampler(
+    auto bilinearSampler = createBuiltinSampler(
         SamplerDesc{
             .minFilter = SamplerFilter::Linear,
             .magFilter = SamplerFilter::Linear,
@@ -764,7 +766,12 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
             .wrapW = SamplerWrapMode::Repeat,
         },
         "nuri_sampler_bilinear");
-    device->impl_->trilinearSampler = createBuiltinSampler(
+    if (bilinearSampler.hasError()) {
+      return nullptr;
+    }
+    device->impl_->bilinearSampler = bilinearSampler.value();
+
+    auto trilinearSampler = createBuiltinSampler(
         SamplerDesc{
             .minFilter = SamplerFilter::Linear,
             .magFilter = SamplerFilter::Linear,
@@ -774,13 +781,17 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
             .wrapW = SamplerWrapMode::Repeat,
         },
         "nuri_sampler_trilinear");
+    if (trilinearSampler.hasError()) {
+      return nullptr;
+    }
+    device->impl_->trilinearSampler = trilinearSampler.value();
 
     for (size_t i = 0; i < kSupportedAnisotropyLevels.size(); ++i) {
       const uint8_t requested = kSupportedAnisotropyLevels[i];
       if (device->impl_->maxSamplerAnisotropy < requested) {
         continue;
       }
-      device->impl_->anisotropicSamplers[i] = createBuiltinSampler(
+      auto anisotropicSampler = createBuiltinSampler(
           SamplerDesc{
               .minFilter = SamplerFilter::Linear,
               .magFilter = SamplerFilter::Linear,
@@ -791,9 +802,13 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
               .maxAnisotropy = requested,
           },
           std::format("nuri_sampler_aniso_{}x", requested));
+      if (anisotropicSampler.hasError()) {
+        return nullptr;
+      }
+      device->impl_->anisotropicSamplers[i] = anisotropicSampler.value();
     }
 
-    device->impl_->cubemapSampler = createBuiltinSampler(
+    auto cubemapSampler = createBuiltinSampler(
         SamplerDesc{
             .minFilter = SamplerFilter::Linear,
             .magFilter = SamplerFilter::Linear,
@@ -803,6 +818,10 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
             .wrapW = SamplerWrapMode::Clamp,
         },
         "nuri_cubemap_sampler");
+    if (cubemapSampler.hasError()) {
+      return nullptr;
+    }
+    device->impl_->cubemapSampler = cubemapSampler.value();
   }
 
   device->impl_->geometryPool =

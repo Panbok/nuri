@@ -14,6 +14,7 @@ enum class LogLevel : uint8_t {
   Debug,
   Info,
   Warning,
+  Error,
   Fatal,
 };
 
@@ -86,6 +87,12 @@ NURI_API LogReadResult readLogEntriesSince(std::uint64_t afterSequence,
 #define NURI_LOG_WARNING(fmt, ...)                                             \
   do {                                                                         \
     nuri::logMessagef(nuri::LogLevel::Warning,                                 \
+                      fmt __VA_OPT__(,) __VA_ARGS__);                          \
+  } while (false)
+
+#define NURI_LOG_ERROR(fmt, ...)                                               \
+  do {                                                                         \
+    nuri::logMessagef(nuri::LogLevel::Error,                                   \
                       fmt __VA_OPT__(,) __VA_ARGS__);                          \
   } while (false)
 

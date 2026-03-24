@@ -25,4 +25,26 @@ TEST(RenderableMaterialResolutionTests,
             renderable.material.value);
 }
 
+TEST(RenderableMaterialResolutionTests,
+     ReturnsInvalidMaterialWhenSourceMaterialMapIsEmpty) {
+  nuri::Renderable renderable{};
+  nuri::ModelRecord modelRecord;
+
+  const nuri::MaterialRef resolved =
+      nuri::resolveRenderableMaterial(renderable, modelRecord, 0u);
+  EXPECT_EQ(resolved.value, nuri::kInvalidMaterialRef.value);
+}
+
+TEST(RenderableMaterialResolutionTests,
+     ReturnsInvalidMaterialWhenSourceMaterialIndexIsOutOfBounds) {
+  nuri::Renderable renderable{};
+  nuri::ModelRecord modelRecord;
+  modelRecord.sourceMaterialToRuntime.push_back(nuri::makeMaterialRef(20u, 1u));
+  modelRecord.sourceMaterialToRuntime.push_back(nuri::makeMaterialRef(21u, 1u));
+
+  const nuri::MaterialRef resolved =
+      nuri::resolveRenderableMaterial(renderable, modelRecord, 2u);
+  EXPECT_EQ(resolved.value, nuri::kInvalidMaterialRef.value);
+}
+
 } // namespace

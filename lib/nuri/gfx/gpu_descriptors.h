@@ -32,8 +32,8 @@ struct SamplerDesc {
   SamplerWrapMode wrapU = SamplerWrapMode::Repeat;
   SamplerWrapMode wrapV = SamplerWrapMode::Repeat;
   SamplerWrapMode wrapW = SamplerWrapMode::Repeat;
-  uint8_t mipLodMin = 0;
-  uint8_t mipLodMax = 15;
+  float mipLodMin = 0.0f;
+  float mipLodMax = 15.0f;
   uint8_t maxAnisotropy = 1;
 };
 

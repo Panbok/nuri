@@ -26,6 +26,11 @@ struct ScopedTempDir {
     std::filesystem::remove_all(path, ec);
   }
 
+  ScopedTempDir(const ScopedTempDir &) = delete;
+  ScopedTempDir &operator=(const ScopedTempDir &) = delete;
+  ScopedTempDir(ScopedTempDir &&) = delete;
+  ScopedTempDir &operator=(ScopedTempDir &&) = delete;
+
   std::filesystem::path path;
 };
 
@@ -384,6 +389,8 @@ TEST(GltfScenePrefabImport, BatchLoadsSceneMeshesFromSingleImportPass) {
   EXPECT_EQ(batchMesh0.vertices.size(), singleMesh0.value().vertices.size());
   EXPECT_EQ(batchMesh0.indices.size(), singleMesh0.value().indices.size());
   ASSERT_EQ(batchMesh0.submeshes.size(), singleMesh0.value().submeshes.size());
+  ASSERT_GE(batchMesh0.vertices.size(), 3u);
+  ASSERT_GE(singleMesh0.value().vertices.size(), 3u);
   EXPECT_EQ(batchMesh0.submeshes[0].materialIndex,
             singleMesh0.value().submeshes[0].materialIndex);
   expectVec3Near(batchMesh0.vertices[0].position,
@@ -394,6 +401,8 @@ TEST(GltfScenePrefabImport, BatchLoadsSceneMeshesFromSingleImportPass) {
   EXPECT_EQ(batchMesh1.vertices.size(), singleMesh1.value().vertices.size());
   EXPECT_EQ(batchMesh1.indices.size(), singleMesh1.value().indices.size());
   ASSERT_EQ(batchMesh1.submeshes.size(), singleMesh1.value().submeshes.size());
+  ASSERT_GE(batchMesh1.vertices.size(), 3u);
+  ASSERT_GE(singleMesh1.value().vertices.size(), 3u);
   EXPECT_EQ(batchMesh1.submeshes[0].materialIndex,
             singleMesh1.value().submeshes[0].materialIndex);
   expectVec3Near(batchMesh1.vertices[0].position,

@@ -2,8 +2,6 @@
 
 #include "nuri/resources/storage/material/material_binary_serializer.h"
 
-#include <chrono>
-
 namespace {
 
 nuri::SceneMaterialRecord makeSceneMaterialRecord() {
@@ -134,9 +132,10 @@ TEST(MaterialBinaryCacheTests, RoundTripPreservesMaterialFields) {
 
   EXPECT_EQ(output.sourceMaterial.normal.sourceKind,
             nuri::MaterialTextureSourceKind::EmbeddedSceneTexture);
-  EXPECT_EQ(output.sourceMaterial.normal.embeddedIndex, 5u);
+  EXPECT_EQ(output.sourceMaterial.normal.embeddedIndex,
+            inputRecord.sourceMaterial.normal.embeddedIndex);
   EXPECT_FLOAT_EQ(output.sourceMaterial.normal.transform.rotationRadians,
-                  0.25f);
+                  inputRecord.sourceMaterial.normal.transform.rotationRadians);
   EXPECT_EQ(output.sourceMaterial.specularColor.path,
             inputRecord.sourceMaterial.specularColor.path);
   EXPECT_EQ(output.sourceMaterial.specularColor.uvSet,
@@ -149,7 +148,9 @@ TEST(MaterialBinaryCacheTests, RoundTripPreservesMaterialFields) {
             inputRecord.textureCache[0].sourceIdentityHash);
   EXPECT_EQ(output.textureCache[2].portablePath,
             inputRecord.textureCache[2].portablePath);
-  EXPECT_FALSE(output.textureCache[2].srgb);
+  EXPECT_EQ(output.textureCache[2].srgb, inputRecord.textureCache[2].srgb);
+  EXPECT_EQ(output.textureCache[2].sourceIdentityHash,
+            inputRecord.textureCache[2].sourceIdentityHash);
 }
 
 TEST(MaterialBinaryCacheTests, DetectsStaleSceneFingerprint) {

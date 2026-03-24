@@ -18,6 +18,8 @@ minilog::eLogLevel toMinilogLevel(LogLevel level) {
     return minilog::Log;
   case LogLevel::Warning:
     return minilog::Warning;
+  case LogLevel::Error:
+    return minilog::Warning;
   case LogLevel::Fatal:
     return minilog::FatalError;
   }
@@ -70,8 +72,8 @@ std::unique_ptr<MinilogLog> MinilogLog::create(const LogConfig &config) {
 }
 
 void MinilogLog::write(LogLevel level, std::string_view message) {
-  const size_t maxLen =
-      std::min(message.size(), static_cast<size_t>(std::numeric_limits<int>::max()));
+  const size_t maxLen = std::min(
+      message.size(), static_cast<size_t>(std::numeric_limits<int>::max()));
   const int length = static_cast<int>(maxLen);
   minilog::log(toMinilogLevel(level), "%.*s", length, message.data());
 }

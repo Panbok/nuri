@@ -17,11 +17,43 @@ struct ScopedTempDir {
             std::hash<std::thread::id>{}(std::this_thread::get_id()));
     path = std::filesystem::temp_directory_path() /
            (std::string(prefix) + "_" + std::to_string(uniqueId));
-    std::filesystem::create_directories(path);
+    std::error_code ec;
+    const bool created = std::filesystem::create_directories(path, ec);
+    if (ec) {
+      throw std::filesystem::filesystem_error(
+          "ScopedTempDir create_directories", path, ec);
+    }
+    if (!created && !std::filesystem::is_directory(path)) {
+      throw std::filesystem::filesystem_error(
+          "ScopedTempDir path is not a directory", path,
+          std::make_error_code(std::errc::file_exists));
+    }
+  }
+
+  ScopedTempDir(const ScopedTempDir &) = delete;
+  ScopedTempDir &operator=(const ScopedTempDir &) = delete;
+  ScopedTempDir(ScopedTempDir &&other) noexcept : path(std::move(other.path)) {
+    other.path.clear();
+  }
+  ScopedTempDir &operator=(ScopedTempDir &&other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+
+    std::error_code ec;
+    if (!path.empty()) {
+      std::filesystem::remove_all(path, ec);
+    }
+    path = std::move(other.path);
+    other.path.clear();
+    return *this;
   }
 
   ~ScopedTempDir() {
     std::error_code ec;
+    if (path.empty()) {
+      return;
+    }
     std::filesystem::remove_all(path, ec);
   }
 
@@ -114,11 +146,16 @@ TEST(TextureCacheUtilsTests, UpToDateCheckTracksWriteTimes) {
   const std::filesystem::path cachePath = dir.path / "cache.ktx2";
 
   writeTextFile(sourcePath, "source");
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   writeTextFile(cachePath, "cache");
+  const auto baseTime = std::filesystem::file_time_type::clock::now();
+  const auto sourceOlderTime = baseTime - std::chrono::seconds(4);
+  const auto cacheNewerTime = baseTime - std::chrono::seconds(1);
+  std::filesystem::last_write_time(sourcePath, sourceOlderTime);
+  std::filesystem::last_write_time(cachePath, cacheNewerTime);
   EXPECT_TRUE(nuri::isTextureCacheUpToDate(cachePath, sourcePath));
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   writeTextFile(sourcePath, "source-newer");
+  const auto sourceNewerTime = baseTime + std::chrono::seconds(4);
+  std::filesystem::last_write_time(sourcePath, sourceNewerTime);
   EXPECT_FALSE(nuri::isTextureCacheUpToDate(cachePath, sourcePath));
 }

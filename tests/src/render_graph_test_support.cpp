@@ -189,6 +189,7 @@ FakeGPUDeviceBase::createTexture(const TextureDesc &, std::string_view) {
 Result<SamplerHandle, std::string>
 FakeGPUDeviceBase::createSampler(const SamplerDesc &, std::string_view) {
   SamplerHandle handle{.index = nextSamplerIndex_++, .generation = 1u};
+  ++createdSamplerCount;
   return Result<SamplerHandle, std::string>::makeResult(handle);
 }
 
@@ -320,7 +321,11 @@ uint32_t FakeGPUDeviceBase::getTextureBindlessIndex(TextureHandle) const {
   return 0u;
 }
 
-void FakeGPUDeviceBase::destroySampler(SamplerHandle) {}
+void FakeGPUDeviceBase::destroySampler(SamplerHandle sampler) {
+  if (nuri::isValid(sampler)) {
+    ++destroyedSamplerCount;
+  }
+}
 
 uint32_t FakeGPUDeviceBase::getSamplerBindlessIndex(SamplerHandle h) const {
   return h.index;

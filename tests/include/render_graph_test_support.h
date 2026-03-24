@@ -153,8 +153,10 @@ public:
   uint32_t swapchainImageCount = 2u;
   uint32_t createdBufferCount = 0u;
   uint32_t createdTextureCount = 0u;
+  uint32_t createdSamplerCount = 0u;
   uint32_t destroyedBufferCount = 0u;
   uint32_t destroyedTextureCount = 0u;
+  uint32_t destroyedSamplerCount = 0u;
   uint32_t submitCount = 0u;
   uint32_t waitIdleCallCount = 0u;
   uint32_t discardedRecordingContextCount = 0u;
