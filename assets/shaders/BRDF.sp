@@ -1,6 +1,4 @@
-const float kBrdfPi = 3.14159265359;
 const float kBrdfMinRoughness = 0.04;
-const float kBrdfEpsilon = 1.0e-5;
 
 #include "sheen.sp"
 
@@ -9,6 +7,14 @@ float max3(vec3 v) { return max(max(v.x, v.y), v.z); }
 float pow5(float x) {
   float x2 = x * x;
   return x2 * x2 * x;
+}
+
+// IEC 61966-2-1 sRGB piecewise OETF. Use instead of pow(x, 1/2.2).
+vec3 linearToSrgb(vec3 c) {
+  const bvec3 useLinear = lessThanEqual(c, vec3(0.0031308));
+  const vec3 linear = c * 12.92;
+  const vec3 nonlinear = 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+  return mix(nonlinear, linear, useLinear);
 }
 
 bool isIorCompatMode(float ior) { return ior == 0.0; }
@@ -39,29 +45,11 @@ vec3 fresnelSchlick(float cosTheta, vec3 f0, vec3 f90) {
   return f0 + (f90 - f0) * pow5(1.0 - saturate(cosTheta));
 }
 
-float distributionGGX(float ndoth, float roughness) {
-  float alpha = roughness * roughness;
-  float alpha2 = alpha * alpha;
-  float denom = ndoth * ndoth * (alpha2 - 1.0) + 1.0;
-  return alpha2 / max(kBrdfPi * denom * denom, kBrdfEpsilon);
-}
-
-float geometrySchlickGGX(float ndotx, float roughness) {
-  float r = roughness + 1.0;
-  float k = (r * r) * 0.125;
-  return ndotx / max(ndotx * (1.0 - k) + k, kBrdfEpsilon);
-}
-
-float geometrySmith(float ndotv, float ndotl, float roughness) {
-  return geometrySchlickGGX(ndotv, roughness) *
-         geometrySchlickGGX(ndotl, roughness);
-}
-
 // Khronos-compatible direct-light terms for metallic-roughness.
 vec3 diffuseBurley(vec3 diffuseColor, float ndotl, float ndotv, float ldoth,
                    float alphaRoughness) {
   float f90 = 2.0 * ldoth * ldoth * alphaRoughness - 0.5;
-  return (diffuseColor / kBrdfPi) *
+  return (diffuseColor / kPi) *
          (1.0 + f90 * pow5(1.0 - ndotl)) *
          (1.0 + f90 * pow5(1.0 - ndotv));
 }
@@ -81,10 +69,11 @@ float geometryOcclusion(float ndotl, float ndotv, float alphaRoughness) {
   return attenuationL * attenuationV;
 }
 
-float microfacetDistribution(float ndoth, float alphaRoughness) {
-  float roughnessSq = alphaRoughness * alphaRoughness;
-  float f = (ndoth * roughnessSq - ndoth) * ndoth + 1.0;
-  return roughnessSq / max(kBrdfPi * f * f, kBrdfEpsilon);
+// GGX NDF. alphaRoughness = perceptualRoughness² (alpha-space throughout).
+float distributionGGX(float ndoth, float alphaRoughness) {
+  float alpha2 = alphaRoughness * alphaRoughness;
+  float f = (ndoth * alpha2 - ndoth) * ndoth + 1.0;
+  return alpha2 / max(kPi * f * f, kEpsilon);
 }
 
 mat3 cotangentFrame(vec3 normal, vec3 worldPos, vec2 uv) {
@@ -101,7 +90,7 @@ mat3 cotangentFrame(vec3 normal, vec3 worldPos, vec2 uv) {
   float tangentLen2 = dot(tangent, tangent);
   float bitangentLen2 = dot(bitangent, bitangent);
   float maxLen2 = max(tangentLen2, bitangentLen2);
-  if (maxLen2 < kBrdfEpsilon) {
+  if (maxLen2 < kEpsilon) {
     return mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), normal);
   }
 
@@ -120,7 +109,7 @@ vec3 applyNormalMap(vec3 baseNormal, vec4 worldTangent, vec3 worldPos, vec2 uv,
                     vec3 tangentNormal) {
   vec3 tangent = worldTangent.xyz;
   const float tangentLen2 = dot(tangent, tangent);
-  if (tangentLen2 < kBrdfEpsilon) {
+  if (tangentLen2 < kEpsilon) {
     return applyNormalMap(baseNormal, worldPos, uv, tangentNormal);
   }
   tangent = normalize(tangent);

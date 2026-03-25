@@ -16,9 +16,12 @@ void main() {
   const vec2 uv0 = decodePackedUv(packed);
   const vec2 uv1 = decodePackedUv1(packed);
 
-  const mat4 model = pc.instanceMatrices.matrices[globalInstanceId];
+  const InstanceData inst = pc.instanceMatrices.instances[globalInstanceId];
+  const mat4 model = inst.modelMatrix;
   const vec3 worldPos = (model * vec4(pos, 1.0)).xyz;
-  const mat3 normalMatrix = transpose(inverse(mat3(model)));
+  const mat3 normalMatrix = mat3(inst.normalMatCol0.xyz,
+                                 inst.normalMatCol1.xyz,
+                                 inst.normalMatCol2.xyz);
   const vec3 worldNormal = normalize(normalMatrix * normal);
 
   outUv0 = uv0;

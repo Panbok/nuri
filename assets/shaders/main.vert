@@ -11,14 +11,17 @@ void main() {
   const vec2 uv0 = decodePackedUv(packed);
   const vec2 uv1 = decodePackedUv1(packed);
 
-  const mat4 model = pc.instanceMatrices.matrices[globalInstanceId];
+  const InstanceData inst = pc.instanceMatrices.instances[globalInstanceId];
+  const mat4 model = inst.modelMatrix;
   const mat4 view = pc.frameData.view;
   const mat4 proj = pc.frameData.proj;
 
   const vec4 worldPos4 = model * vec4(pos, 1.0);
   gl_Position = proj * view * worldPos4;
 
-  const mat3 normalMatrix = transpose(inverse(mat3(model)));
+  const mat3 normalMatrix = mat3(inst.normalMatCol0.xyz,
+                                 inst.normalMatCol1.xyz,
+                                 inst.normalMatCol2.xyz);
   vtx.uv0 = uv0;
   vtx.uv1 = uv1;
   vtx.worldNormal = normalize(normalMatrix * normal);

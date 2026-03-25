@@ -182,6 +182,7 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint brdfLutTexId;
   uint flags;
   uint cubemapSamplerId;
+  uint materialSamplerId;
   uint sceneColorTexId;
   uint sceneColorSamplerId;
   uint sceneColorHalfResTexId;
@@ -209,8 +210,18 @@ layout(std430, buffer_reference) readonly buffer InstanceRemapBuffer {
   uint ids[];
 };
 
+// Per-instance data: model matrix followed by the three columns of the
+// normal matrix (transpose-inverse of the upper-left 3×3), each padded to
+// vec4 for std430 alignment.  Total stride: 112 bytes per instance.
+struct InstanceData {
+  mat4 modelMatrix;
+  vec4 normalMatCol0; // xyz = col 0 of normal matrix, w = padding
+  vec4 normalMatCol1; // xyz = col 1 of normal matrix, w = padding
+  vec4 normalMatCol2; // xyz = col 2 of normal matrix, w = padding
+};
+
 layout(std430, buffer_reference) buffer InstanceMatricesBuffer {
-  mat4 matrices[];
+  InstanceData instances[];
 };
 
 layout(push_constant) uniform PushConstants {
@@ -335,6 +346,11 @@ vec3 decodePackedNormal(PackedVertex vertex) {
   return normalize(vec3(normalXY, normalZ.x));
 }
 
+// Tangent data is encoded in word6/word7 of PackedVertex but is intentionally
+// not used by the current shading pipeline.  Screen-space derivative-based TBN
+// (cotangentFrame) is preferred because it avoids dependence on imported
+// tangent sign conventions.  This decode function is retained for format
+// documentation purposes.
 vec4 decodePackedTangent(PackedVertex vertex) {
   const vec2 tangentXY = unpackSnorm2x16Custom(vertex.word6);
   const vec2 tangentZW = unpackSnorm2x16Custom(vertex.word7);
@@ -353,7 +369,7 @@ struct PerVertex {
   vec2 uv0;
   vec2 uv1;
   vec3 worldNormal;
-  vec4 worldTangent;
+  vec4 worldTangent; // always (0,0,0,1); derivative TBN used instead (see cotangentFrame)
   vec3 worldPos;
   vec3 patchBarycentric;
   vec3 triBarycentric;

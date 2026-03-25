@@ -1,8 +1,7 @@
-const float kSheenPi = 3.14159265359;
-const float kSheenEpsilon = 1.0e-6;
+#include "math_constants.sp"
 
 float sheenAlpha(float sheenRoughness) {
-  sheenRoughness = max(sheenRoughness, kSheenEpsilon);
+  sheenRoughness = max(sheenRoughness, kEpsilon);
   return sheenRoughness * sheenRoughness;
 }
 
@@ -11,7 +10,7 @@ float DCharlie(float sheenRoughness, float ndoth) {
   float invR = 1.0 / alphaG;
   float cos2h = ndoth * ndoth;
   float sin2h = max(1.0 - cos2h, 0.0);
-  return (2.0 + invR) * pow(sin2h, invR * 0.5) / (2.0 * kSheenPi);
+  return (2.0 + invR) * pow(sin2h, invR * 0.5) / (2.0 * kPi);
 }
 
 float lambdaSheenNumericHelper(float x, float alphaG) {
@@ -36,8 +35,8 @@ float lambdaSheen(float cosTheta, float alphaG) {
 
 float VSheen(float ndotl, float ndotv, float sheenRoughness) {
   float alphaG = sheenAlpha(sheenRoughness);
-  ndotv = max(ndotv, kSheenEpsilon);
-  ndotl = max(ndotl, kSheenEpsilon);
+  ndotv = max(ndotv, kEpsilon);
+  ndotl = max(ndotl, kEpsilon);
   return clamp(1.0 / ((1.0 + lambdaSheen(ndotv, alphaG) +
                        lambdaSheen(ndotl, alphaG)) *
                       (4.0 * ndotv * ndotl)),
@@ -45,7 +44,7 @@ float VSheen(float ndotl, float ndotv, float sheenRoughness) {
 }
 
 float albedoSheenScalingFactor(float ndotv, float sheenRoughness) {
-  ndotv = clamp(ndotv, kSheenEpsilon, 1.0);
+  ndotv = clamp(ndotv, kEpsilon, 1.0);
   float c = 1.0 - ndotv;
   float c3 = c * c * c;
   return 0.65584461 * c3 +

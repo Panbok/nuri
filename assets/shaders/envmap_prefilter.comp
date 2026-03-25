@@ -43,8 +43,6 @@ const uint kDistributionLambertian = 0u;
 const uint kDistributionGGX = 1u;
 const uint kDistributionCharlie = 2u;
 
-const float PI = 3.14159265358979323846;
-const float TWO_PI = 6.28318530717958647692;
 
 #include "sheen.sp"
 
@@ -90,7 +88,7 @@ float D_GGX(float ndoth, float roughness) {
   float a = ndoth * r;
   float denom = 1.0 - ndoth * ndoth + a * a + 1e-6;
   float k = r / denom;
-  return k * k * (1.0 / PI);
+  return k * k * (1.0 / kPi);
 }
 
 MicrofacetDistributionSample sampleGGX(vec2 xi, float roughness) {
@@ -99,7 +97,7 @@ MicrofacetDistributionSample sampleGGX(vec2 xi, float roughness) {
   ggx.cosTheta = clamp(
       sqrt((1.0 - xi.y) / (1.0 + (alpha * alpha - 1.0) * xi.y)), 0.0, 1.0);
   ggx.sinTheta = sqrt(max(0.0, 1.0 - ggx.cosTheta * ggx.cosTheta));
-  ggx.phi = TWO_PI * xi.x;
+  ggx.phi = kTwoPi * xi.x;
   ggx.pdf = D_GGX(ggx.cosTheta, alpha) * 0.25;
   return ggx;
 }
@@ -109,8 +107,10 @@ MicrofacetDistributionSample sampleCharlie(vec2 xi, float roughness) {
   float alpha = roughness * roughness;
   charlie.sinTheta = pow(xi.y, alpha / (2.0 * alpha + 1.0));
   charlie.cosTheta = sqrt(max(0.0, 1.0 - charlie.sinTheta * charlie.sinTheta));
-  charlie.phi = TWO_PI * xi.x;
-  charlie.pdf = DCharlie(alpha, charlie.cosTheta) * 0.25;
+  charlie.phi = kTwoPi * xi.x;
+  // DCharlie expects linear roughness and squares it internally; pass roughness
+  // not alpha to avoid double-squaring the exponent.
+  charlie.pdf = DCharlie(roughness, charlie.cosTheta) * 0.25;
   return charlie;
 }
 
@@ -118,8 +118,8 @@ MicrofacetDistributionSample sampleLambertian(vec2 xi) {
   MicrofacetDistributionSample lambertian;
   lambertian.cosTheta = sqrt(max(0.0, 1.0 - xi.y));
   lambertian.sinTheta = sqrt(max(0.0, xi.y));
-  lambertian.phi = TWO_PI * xi.x;
-  lambertian.pdf = lambertian.cosTheta / PI;
+  lambertian.phi = kTwoPi * xi.x;
+  lambertian.pdf = lambertian.cosTheta / kPi;
   return lambertian;
 }
 

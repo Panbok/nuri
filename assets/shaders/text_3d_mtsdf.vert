@@ -1,9 +1,15 @@
 #version 460
 
 #extension GL_EXT_buffer_reference : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
+layout(set = 0, binding = 1) uniform sampler kSamplers[];
 
 layout(location = 0) out vec2 outUv;
 layout(location = 1) out vec4 outColor;
+layout(location = 2) out vec2 outUnitRange;
 
 struct GlyphInstance {
   vec4 rectMinMax;
@@ -77,4 +83,9 @@ void main() {
   gl_Position = pc.viewProjection * vec4(worldPos, 1.0);
   outUv = uv;
   outColor = unpackColor(glyph.color);
+  // Compute pxRange / atlasSize once per vertex so the fragment shader avoids
+  // a per-fragment textureSize query.
+  vec2 atlasSize = vec2(textureSize(
+      nonuniformEXT(sampler2D(kTextures2D[pc.atlasBindless], kSamplers[0])), 0));
+  outUnitRange = vec2(max(pc.pxRange, 0.001)) / max(atlasSize, vec2(1.0));
 }

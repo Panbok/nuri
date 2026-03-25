@@ -9,6 +9,7 @@ layout(set = 0, binding = 1) uniform sampler kSamplers[];
 
 layout(location = 0) in vec2 inUv;
 layout(location = 1) in vec4 inColor;
+layout(location = 2) in vec2 inUnitRange;
 layout(location = 0) out vec4 outFragColor;
 
 struct GlyphInstance {
@@ -53,18 +54,15 @@ vec4 sampleAtlas(vec2 uv) {
 
 float median3(vec3 v) { return max(min(v.x, v.y), min(max(v.x, v.y), v.z)); }
 
-float screenPxRange(vec2 uv) {
-  vec2 atlasSize = vec2(textureSize(
-      nonuniformEXT(sampler2D(kTextures2D[pc.atlasBindless], kSamplers[0])),
-      0));
-  vec2 unitRange = vec2(max(pc.pxRange, 0.001)) / max(atlasSize, vec2(1.0));
+// unitRange = pxRange / atlasSize is precomputed in the vertex shader.
+float screenPxRange(vec2 uv, vec2 unitRange) {
   vec2 screenTexSize = vec2(1.0) / max(fwidth(uv), vec2(1.0e-6));
   return max(0.5 * dot(unitRange, screenTexSize), 1.0);
 }
 
 void main() {
   vec4 atlas = sampleAtlas(inUv);
-  float pxRange = screenPxRange(inUv);
+  float pxRange = screenPxRange(inUv, inUnitRange);
   float sdMsdf = median3(atlas.rgb) - 0.5;
   float sdSdf = atlas.a - 0.5;
   // Use SDF fallback for very small projected text to reduce color-channel

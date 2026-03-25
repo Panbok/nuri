@@ -46,5 +46,12 @@ void main() {
   mat4 baseMatrix = pc.instanceBaseMatrices.matrices[idx];
   mat4 model = rotate(translate(mat4(1.0), centerPhase.xyz),
                       pc.timeSeconds + centerPhase.w, vec3(1.0, 1.0, 1.0));
-  pc.instanceMatrices.matrices[idx] = model * baseMatrix;
+  mat4 result = model * baseMatrix;
+  pc.instanceMatrices.instances[idx].modelMatrix = result;
+  // Precompute normal matrix once per instance so vertex shaders avoid
+  // per-vertex inverse().
+  mat3 nm = transpose(inverse(mat3(result)));
+  pc.instanceMatrices.instances[idx].normalMatCol0 = vec4(nm[0], 0.0);
+  pc.instanceMatrices.instances[idx].normalMatCol1 = vec4(nm[1], 0.0);
+  pc.instanceMatrices.instances[idx].normalMatCol2 = vec4(nm[2], 0.0);
 }
