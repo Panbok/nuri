@@ -54,7 +54,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 216,
+  static_assert(sizeof(FrameData) == 224,
                 "TransparentLayer::FrameData must match shader layout");
 
   struct PushConstants {

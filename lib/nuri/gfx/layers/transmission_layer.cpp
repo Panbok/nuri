@@ -4,6 +4,7 @@
 
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
+#include "nuri/gfx/layers/renderable_material_resolution.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
@@ -70,6 +71,19 @@ void appendUniqueBuffer(std::pmr::vector<BufferHandle> &handles,
     return;
   }
   handles.push_back(handle);
+}
+
+[[nodiscard]] bool isSameTextureRef(TextureRef lhs, TextureRef rhs) {
+  return lhs == rhs;
+}
+
+[[nodiscard]] bool isSameEnvironmentHandles(const EnvironmentHandles &lhs,
+                                            const EnvironmentHandles &rhs) {
+  return isSameTextureRef(lhs.cubemap, rhs.cubemap) &&
+         isSameTextureRef(lhs.irradiance, rhs.irradiance) &&
+         isSameTextureRef(lhs.prefilteredGgx, rhs.prefilteredGgx) &&
+         isSameTextureRef(lhs.prefilteredCharlie, rhs.prefilteredCharlie) &&
+         isSameTextureRef(lhs.brdfLut, rhs.brdfLut);
 }
 
 [[nodiscard]] std::optional<SubmeshLod>
@@ -185,10 +199,13 @@ TransmissionLayer::TransmissionLayer(GPUDevice &gpu,
       instanceMatrices_(memory_), instanceRemap_(memory_),
       instanceDataRingUploadVersions_(memory_), materialGpuDataCache_(memory_),
       materialTextureAccessHandles_(memory_),
-      environmentTextureAccessHandles_(memory_), meshPushConstants_(memory_),
+      environmentTextureAccessHandles_(memory_),
+      staticPassTextureReads_(memory_), meshPushConstants_(memory_),
       passDrawItems_(memory_), passTextureReads_(memory_),
-      passDependencyBuffers_(memory_), copyPushConstantsRing_(memory_),
-      sceneColorTextures_(memory_), sceneColorMipTextures_(memory_) {
+      passDependencyBuffers_(memory_),
+      passDependencyBufferAccessModes_(memory_),
+      copyPushConstantsRing_(memory_), sceneColorTextures_(memory_),
+      sceneColorMipTextures_(memory_) {
   const std::filesystem::path basePath = config_.meshFragment.parent_path();
   transmissionFragmentPath_ = basePath / "transmission.frag";
   fullscreenCopyVertexPath_ = basePath / "fullscreen_copy.vert";
@@ -327,7 +344,8 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   const bool needsGeometryRebuild =
       geometryDirty && !meshDrawTemplates_.empty();
   if (topologyDirty || materialDirty || needsGeometryRebuild) {
-    Result<bool, std::string> rebuildResult = [&]() -> Result<bool, std::string> {
+    Result<bool, std::string> rebuildResult =
+        [&]() -> Result<bool, std::string> {
       std::optional<Result<bool, std::string>> result;
       NURI_PROFILER_ZONE("TransmissionLayer.cache_rebuild",
                          NURI_PROFILER_COLOR_CMD_DRAW);
@@ -345,10 +363,14 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     cachedGeometryMutationVersion_ = geometryMutationVersion;
   }
 
-  {
+  const EnvironmentHandles &environment = frame.scene->environment();
+  const bool environmentDirty =
+      !isSameEnvironmentHandles(cachedEnvironmentHandles_, environment);
+  if (environmentDirty || environmentTextureAccessHandles_.empty()) {
     NURI_PROFILER_ZONE("TransmissionLayer.env_texture_collect",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     collectEnvironmentTextureReads(*frame.scene, *frame.resources);
+    cachedEnvironmentHandles_ = environment;
     NURI_PROFILER_ZONE_END();
   }
   if (materialDirty || materialTextureAccessHandles_.empty()) {
@@ -364,13 +386,26 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
       return cacheResult;
     }
   }
+  if (environmentDirty || materialDirty || staticPassTextureReads_.empty()) {
+    staticPassTextureReads_.clear();
+    staticPassTextureReads_.reserve(environmentTextureAccessHandles_.size() +
+                                    materialTextureAccessHandles_.size());
+    for (const TextureHandle handle : environmentTextureAccessHandles_) {
+      appendUniqueTexture(staticPassTextureReads_, handle);
+    }
+    for (const TextureHandle handle : materialTextureAccessHandles_) {
+      appendUniqueTexture(staticPassTextureReads_, handle);
+    }
+  }
 
   const ForwardSceneGpuData *sceneGpu =
-      frame.channels.tryGet<ForwardSceneGpuData>(kFrameChannelForwardSceneGpuData);
+      frame.channels.tryGet<ForwardSceneGpuData>(
+          kFrameChannelForwardSceneGpuData);
   if (sceneGpu == nullptr || !nuri::isValid(sceneGpu->buffer) ||
       sceneGpu->frameDataAddress == 0u) {
     return Result<bool, std::string>::makeError(
-        "TransmissionLayer::buildRenderGraph: forward scene GPU data is unavailable");
+        "TransmissionLayer::buildRenderGraph: forward scene GPU data is "
+        "unavailable");
   }
 
   const std::span<const Renderable> renderables = frame.scene->renderables();
@@ -427,7 +462,8 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   const uint32_t sceneColorTexId =
       hasSceneColorInput ? gpu_.getTextureBindlessIndex(*sceneColorTexture)
                          : kInvalidTextureBindlessIndex;
-  const uint32_t sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+  const uint32_t sceneColorSamplerId =
+      gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
 
   const Format depthFormat = nuri::isValid(depthTexture)
                                  ? gpu_.getTextureFormat(depthTexture)
@@ -576,12 +612,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
                        instanceMatricesRing_[frameSlot].buffer->handle());
     appendUniqueBuffer(passDependencyBuffers_,
                        instanceRemapRing_[frameSlot].buffer->handle());
-    for (const TextureHandle handle : environmentTextureAccessHandles_) {
-      appendUniqueTexture(passTextureReads_, handle);
-    }
-    for (const TextureHandle handle : materialTextureAccessHandles_) {
-      appendUniqueTexture(passTextureReads_, handle);
-    }
+    passTextureReads_ = staticPassTextureReads_;
     NURI_PROFILER_ZONE_END();
   }
 
@@ -651,23 +682,16 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     }
     downsamplePassDesc.colorTexture = destinationImportResult.value();
     downsamplePassDesc.draws = std::span<const DrawItem>(&downsampleDraw, 1u);
+    const std::array<TextureHandle, 1> downsampleDependencies = {
+        previousSceneColorLevel};
+    downsamplePassDesc.dependencyTextures = std::span<const TextureHandle>(
+        downsampleDependencies.data(), downsampleDependencies.size());
     downsamplePassDesc.debugLabel = kTransmissionDownsamplePassLabel;
     downsamplePassDesc.debugColor = kTransmissionDownsampleDebugColor;
 
     auto addDownsampleResult = graph.addGraphicsPass(downsamplePassDesc);
     if (addDownsampleResult.hasError()) {
       return Result<bool, std::string>::makeError(addDownsampleResult.error());
-    }
-
-    auto sourceImportResult = graph.importTexture(
-        previousSceneColorLevel, "transmission_scene_color_downsample_read");
-    if (sourceImportResult.hasError()) {
-      return Result<bool, std::string>::makeError(sourceImportResult.error());
-    }
-    auto sourceReadResult = graph.addTextureRead(addDownsampleResult.value(),
-                                                 sourceImportResult.value());
-    if (sourceReadResult.hasError()) {
-      return Result<bool, std::string>::makeError(sourceReadResult.error());
     }
 
     previousSceneColorLevel = destinationTexture;
@@ -684,25 +708,15 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
                           .storeOp = StoreOp::Store,
                           .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
     copyPassDesc.draws = std::span<const DrawItem>(&copyDraw, 1u);
+    const std::array<TextureHandle, 1> copyDependencies = {*sceneColorTexture};
+    copyPassDesc.dependencyTextures = std::span<const TextureHandle>(
+        copyDependencies.data(), copyDependencies.size());
     copyPassDesc.debugLabel = kTransmissionCopyPassLabel;
     copyPassDesc.debugColor = kTransmissionCopyDebugColor;
 
     auto addCopyResult = graph.addGraphicsPass(copyPassDesc);
     if (addCopyResult.hasError()) {
       return Result<bool, std::string>::makeError(addCopyResult.error());
-    }
-
-    auto copyTextureImportResult = graph.importTexture(
-        *sceneColorTexture, "transmission_scene_color_copy");
-    if (copyTextureImportResult.hasError()) {
-      return Result<bool, std::string>::makeError(
-          copyTextureImportResult.error());
-    }
-    auto copyTextureReadResult = graph.addTextureRead(
-        addCopyResult.value(), copyTextureImportResult.value());
-    if (copyTextureReadResult.hasError()) {
-      return Result<bool, std::string>::makeError(
-          copyTextureReadResult.error());
     }
     NURI_PROFILER_ZONE_END();
   }
@@ -740,27 +754,22 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   }
   passDesc.draws =
       std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size());
+  passDependencyBufferAccessModes_.resize(passDependencyBuffers_.size(),
+                                          RenderGraphAccessMode::Read);
   passDesc.dependencyBuffers = std::span<const BufferHandle>(
       passDependencyBuffers_.data(), passDependencyBuffers_.size());
+  passDesc.dependencyBufferAccessModes = std::span<const RenderGraphAccessMode>(
+      passDependencyBufferAccessModes_.data(),
+      passDependencyBufferAccessModes_.size());
+  passDesc.dependencyTextures = std::span<const TextureHandle>(
+      passTextureReads_.data(), passTextureReads_.size());
   passDesc.debugLabel = kTransmissionPassLabel;
   passDesc.debugColor = kTransmissionPassDebugColor;
+  passDesc.borrowPayload = true;
 
   auto addResult = graph.addGraphicsPass(passDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
-  }
-
-  for (const TextureHandle handle : passTextureReads_) {
-    auto importResult =
-        graph.importTexture(handle, "transmission_texture_read");
-    if (importResult.hasError()) {
-      return Result<bool, std::string>::makeError(importResult.error());
-    }
-    auto readResult =
-        graph.addTextureRead(addResult.value(), importResult.value());
-    if (readResult.hasError()) {
-      return Result<bool, std::string>::makeError(readResult.error());
-    }
   }
   NURI_PROFILER_ZONE_END();
 
@@ -1114,10 +1123,8 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
     const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
     for (size_t submeshIndex = 0; submeshIndex < submeshes.size();
          ++submeshIndex) {
-      const MaterialRef modelMaterial =
-          modelRecord->materialForSubmesh(static_cast<uint32_t>(submeshIndex));
-      const MaterialRef resolvedMaterial =
-          nuri::isValid(modelMaterial) ? modelMaterial : renderable.material;
+      const MaterialRef resolvedMaterial = resolveRenderableMaterial(
+          renderable, *modelRecord, static_cast<uint32_t>(submeshIndex));
       const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
       if (materialRecord == nullptr ||
           !isTransmissionMaterial(*materialRecord)) {
@@ -1163,7 +1170,8 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
   cachedMaterialVersion_ = resources.materialSnapshot().version;
   cachedTransmissionContentScene_ = &scene;
   cachedTransmissionContentTopologyVersion_ = scene.topologyVersion();
-  cachedTransmissionContentMaterialVersion_ = resources.materialSnapshot().version;
+  cachedTransmissionContentMaterialVersion_ =
+      resources.materialSnapshot().version;
   cachedTransmissionContentValid_ = true;
   cachedTransmissionContent_ = hasTransmissionContent;
   cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
@@ -1186,11 +1194,8 @@ Result<bool, std::string> TransmissionLayer::rebuildMaterialTextureAccessCache(
     if (entry.submeshIndex >= submeshes.size()) {
       continue;
     }
-    const MaterialRef modelMaterial =
-        modelRecord->materialForSubmesh(entry.submeshIndex);
-    const MaterialRef resolvedMaterial = nuri::isValid(modelMaterial)
-                                             ? modelMaterial
-                                             : entry.renderable->material;
+    const MaterialRef resolvedMaterial = resolveRenderableMaterial(
+        *entry.renderable, *modelRecord, entry.submeshIndex);
     const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
     if (materialRecord == nullptr) {
       continue;
@@ -1230,6 +1235,7 @@ void TransmissionLayer::resetCachedState() {
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedEnvironmentHandles_ = {};
   cachedTransmissionContentScene_ = nullptr;
   cachedTransmissionContentTopologyVersion_ =
       std::numeric_limits<uint64_t>::max();
@@ -1246,6 +1252,8 @@ void TransmissionLayer::resetCachedState() {
   materialGpuDataCache_.clear();
   materialTextureAccessHandles_.clear();
   environmentTextureAccessHandles_.clear();
+  staticPassTextureReads_.clear();
+  passDependencyBufferAccessModes_.clear();
 }
 
 void TransmissionLayer::resetFrameBuildState() {
@@ -1253,6 +1261,7 @@ void TransmissionLayer::resetFrameBuildState() {
   passDrawItems_.clear();
   passTextureReads_.clear();
   passDependencyBuffers_.clear();
+  passDependencyBufferAccessModes_.clear();
   copyPushConstantsRing_.clear();
 }
 
@@ -1336,9 +1345,9 @@ bool TransmissionLayer::hasTransmissionContent(
       cachedTransmissionContentMaterialVersion_ == materialSnapshot.version) {
     return cachedTransmissionContent_;
   }
-  auto rebuildResult = rebuildSceneCache(
-      *frame.scene, *frame.resources,
-      static_cast<uint32_t>(materialSnapshot.gpuData.size()));
+  auto rebuildResult =
+      rebuildSceneCache(*frame.scene, *frame.resources,
+                        static_cast<uint32_t>(materialSnapshot.gpuData.size()));
   if (rebuildResult.hasError()) {
     NURI_LOG_WARNING("TransmissionLayer::hasTransmissionContent: %s",
                      rebuildResult.error().c_str());
@@ -1347,7 +1356,8 @@ bool TransmissionLayer::hasTransmissionContent(
   return cachedTransmissionContentValid_ &&
          cachedTransmissionContentScene_ == frame.scene &&
          cachedTransmissionContentTopologyVersion_ == topologyVersion &&
-         cachedTransmissionContentMaterialVersion_ == materialSnapshot.version &&
+         cachedTransmissionContentMaterialVersion_ ==
+             materialSnapshot.version &&
          cachedTransmissionContent_;
 }
 

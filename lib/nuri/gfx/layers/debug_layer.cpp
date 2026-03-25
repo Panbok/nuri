@@ -402,7 +402,7 @@ DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
   if (frame.settings != nullptr && frame.settings->debug.lightIcons) {
     frame.scene->forEachLightId([&](LightId lightId) {
       LightDesc light{};
-      if (!frame.scene->getLightDesc(lightId, light)) {
+      if (!frame.scene->graph().getCachedLightWorldDesc(lightId, light)) {
         return;
       }
 

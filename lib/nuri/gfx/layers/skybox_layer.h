@@ -63,6 +63,7 @@ private:
     uint32_t brdfLutTexId = 0;
     uint32_t flags = 0;
     uint32_t cubemapSamplerId = 0;
+    uint32_t materialSamplerId = 0;
     uint32_t sceneColorTexId = 0;
     uint32_t sceneColorSamplerId = 0;
     uint32_t sceneColorHalfResTexId = 0;
@@ -72,7 +73,7 @@ private:
     uint32_t directionalLightCount = 0;
     uint32_t localLightCount = 0;
   };
-  static_assert(sizeof(FrameData) == 216,
+  static_assert(sizeof(FrameData) == 224,
                 "SkyboxLayer::FrameData must match shader FrameDataBuffer "
                 "layout");
 

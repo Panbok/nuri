@@ -5,6 +5,7 @@
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
@@ -55,7 +56,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 216,
+  static_assert(sizeof(FrameData) == 224,
                 "OpaqueLayer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
@@ -147,6 +148,21 @@ private:
     size_t requiredBytes = 0;
   };
 
+  struct StaticBatchCache {
+    bool valid = false;
+    bool enableMeshLod = false;
+    int32_t forcedMeshLod = -1;
+    uint64_t generation = 1;
+    uint64_t remapSignature = std::numeric_limits<uint64_t>::max();
+    uint64_t indirectDrawSignature = std::numeric_limits<uint64_t>::max();
+    std::pmr::vector<DrawItem> draws;
+    std::pmr::vector<PushConstants> pushConstantsTemplates;
+    std::pmr::vector<uint32_t> remap;
+
+    explicit StaticBatchCache(std::pmr::memory_resource *memory)
+        : draws(memory), pushConstantsTemplates(memory), remap(memory) {}
+  };
+
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> recreateDepthTexture();
   Result<bool, std::string> recreatePickTexture();
@@ -213,6 +229,7 @@ private:
       const std::array<float, 3> &sortedLodThresholds,
       const std::array<size_t, Submesh::kMaxLodCount> &bucketCounts,
       size_t remapCount, size_t instanceCount, uint64_t frameIndex);
+  void invalidateStaticBatchCache();
   void invalidateSingleInstanceBatchCache();
   void invalidateIndirectPackCache();
   void resetPickState();
@@ -308,16 +325,19 @@ private:
   std::pmr::vector<SingleInstanceBatchCache> singleInstanceBatchCaches_;
   uint64_t singleInstanceTemplateRevision_ = 1;
   IndirectPackCache indirectPackCache_{};
+  StaticBatchCache staticBatchCache_;
 
   std::pmr::vector<RenderableTemplate> renderableTemplates_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<size_t> indirectSourceDrawIndices_;
+  std::pmr::vector<uint64_t> instanceMatricesUploadVersions_;
   std::pmr::vector<uint64_t> indirectUploadSignatures_;
   std::pmr::vector<uint64_t> remapUploadSignatures_;
   std::pmr::vector<uint32_t> templateBatchIndices_;
   std::pmr::vector<size_t> batchWriteOffsets_;
   std::pmr::vector<glm::vec4> instanceCentersPhase_;
   std::pmr::vector<glm::mat4> instanceBaseMatrices_;
+  std::pmr::vector<glm::mat4> instanceMatricesCpuCache_;
   std::pmr::vector<glm::vec4> instanceLodCentersInvRadiusSq_;
   std::pmr::vector<MaterialGpuData> materialGpuDataCache_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
@@ -334,17 +354,16 @@ private:
   std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<ComputeDispatchItem> preDispatches_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
   std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
+  std::pmr::vector<TextureHandle> passDependencyTextures_;
   std::pmr::vector<PreparedGraphPass> preparedGraphPasses_;
-  std::pmr::vector<RenderGraphPassId> shadingPassIds_;
-  std::pmr::vector<RenderGraphPassId> workPassIds_;
-  std::pmr::vector<RenderGraphPassId> preDispatchPassIds_;
-  std::pmr::vector<RenderGraphPassId> indirectPassIds_;
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};
   uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();
   bool cachedRemapSignatureValid_ = false;
+  uint64_t boundStaticBatchGeneration_ = 0;
   uint64_t statsLogFrameCounter_ = 0;
   std::optional<OpaquePickRequest> pendingPickRequest_{};
 

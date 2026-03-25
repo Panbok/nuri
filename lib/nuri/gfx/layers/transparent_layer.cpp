@@ -5,6 +5,7 @@
 #include "nuri/core/layer_stack.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
+#include "nuri/gfx/layers/renderable_material_resolution.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
@@ -796,10 +797,8 @@ TransparentLayer::rebuildSceneCache(const RenderScene &scene,
     const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
     for (size_t submeshIndex = 0; submeshIndex < submeshes.size();
          ++submeshIndex) {
-      const MaterialRef modelMaterial =
-          modelRecord->materialForSubmesh(static_cast<uint32_t>(submeshIndex));
-      const MaterialRef resolvedMaterial =
-          nuri::isValid(modelMaterial) ? modelMaterial : renderable.material;
+      const MaterialRef resolvedMaterial = resolveRenderableMaterial(
+          renderable, *modelRecord, static_cast<uint32_t>(submeshIndex));
       const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
       if (materialRecord == nullptr ||
           materialRecord->desc.alphaMode != MaterialAlphaMode::Blend) {
@@ -863,11 +862,8 @@ Result<bool, std::string> TransparentLayer::rebuildMaterialTextureAccessCache(
     if (entry.submeshIndex >= submeshes.size()) {
       continue;
     }
-    const MaterialRef modelMaterial =
-        modelRecord->materialForSubmesh(entry.submeshIndex);
-    const MaterialRef resolvedMaterial = nuri::isValid(modelMaterial)
-                                             ? modelMaterial
-                                             : entry.renderable->material;
+    const MaterialRef resolvedMaterial = resolveRenderableMaterial(
+        *entry.renderable, *modelRecord, entry.submeshIndex);
     const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
     if (materialRecord == nullptr) {
       continue;

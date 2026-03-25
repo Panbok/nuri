@@ -55,7 +55,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 216,
+  static_assert(sizeof(FrameData) == 224,
                 "TransmissionLayer::FrameData must match shader layout");
 
   struct MeshPushConstants {
@@ -175,6 +175,7 @@ private:
       std::numeric_limits<uint64_t>::max();
   bool cachedTransmissionContentValid_ = false;
   bool cachedTransmissionContent_ = false;
+  EnvironmentHandles cachedEnvironmentHandles_{};
 
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<glm::mat4> instanceMatrices_;
@@ -183,10 +184,12 @@ private:
   std::pmr::vector<MaterialGpuData> materialGpuDataCache_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
   std::pmr::vector<TextureHandle> environmentTextureAccessHandles_;
+  std::pmr::vector<TextureHandle> staticPassTextureReads_;
   std::pmr::vector<MeshPushConstants> meshPushConstants_;
   std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
   std::pmr::vector<CopyPushConstants> copyPushConstantsRing_;
   std::filesystem::path transmissionFragmentPath_{};
   std::filesystem::path fullscreenCopyVertexPath_{};

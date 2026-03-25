@@ -153,10 +153,11 @@ SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
       transmissionStageEnabledPtr != nullptr && *transmissionStageEnabledPtr;
   if (transmissionStageEnabled) {
     if (const TextureHandle *sceneColorTexture =
-            frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
+            frame.channels.tryGet<TextureHandle>(
+                kFrameChannelSceneColorTexture);
         sceneColorTexture != nullptr && nuri::isValid(*sceneColorTexture)) {
       sceneColorTexId = gpu_.getTextureBindlessIndex(*sceneColorTexture);
-      sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+      sceneColorSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
       if (sceneColorTexId != kInvalidTextureBindlessIndex) {
         frameFlags |= HasSceneColor;
       }
@@ -175,6 +176,7 @@ SkyboxLayer::prepareSkyboxDraw(RenderFrameContext &frame) {
       .brdfLutTexId = 0,
       .flags = frameFlags,
       .cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex(),
+      .materialSamplerId = 0u,
       .sceneColorTexId = sceneColorTexId,
       .sceneColorSamplerId = sceneColorSamplerId,
       .sceneColorHalfResTexId = 0,
