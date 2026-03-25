@@ -40,8 +40,9 @@ namespace {
   const uint32_t hardwareCount =
       std::max(1u, static_cast<uint32_t>(std::thread::hardware_concurrency()));
   RenderGraphRuntimeConfig config{};
-  config.workerCount =
-      std::clamp(envWorkerCount == 0u ? hardwareCount : envWorkerCount, 1u, 8u);
+  const uint32_t defaultWorkerCount = std::min(hardwareCount, 4u);
+  config.workerCount = std::clamp(
+      envWorkerCount == 0u ? defaultWorkerCount : envWorkerCount, 1u, 8u);
   config.parallelCompile =
       !parseEnvBool("NURI_RENDER_GRAPH_DISABLE_PARALLEL_COMPILE", false);
   config.parallelGraphicsRecording =
@@ -74,6 +75,10 @@ RenderGraphRuntime::RenderGraphRuntime(RenderGraphRuntimeConfig config,
 }
 
 RenderGraphRuntime::~RenderGraphRuntime() {
+  {
+    std::lock_guard lock(mutex_);
+    clearScheduledWorkLocked();
+  }
   for (uint32_t workerIndex = 1u; workerIndex < workers_.size();
        ++workerIndex) {
     if (workers_[workerIndex]->thread.joinable()) {
@@ -81,6 +86,13 @@ RenderGraphRuntime::~RenderGraphRuntime() {
     }
   }
   cvWork_.notify_all();
+}
+
+void RenderGraphRuntime::clearScheduledWorkLocked() {
+  activeRangeCount_ = 0u;
+  pendingWorkers_ = 0u;
+  currentTask_ = {};
+  currentRanges_.clear();
 }
 
 std::vector<RenderGraphContiguousRange>
@@ -112,16 +124,23 @@ void RenderGraphRuntime::runRangesImpl(
   if (ranges.empty()) {
     return;
   }
-  if (config_.workerCount <= 1u || ranges.size() <= 1u) {
+  if (config_.workerCount <= 1u || ranges.size() <= 1u || ranges.size() < 3u) {
     for (uint32_t i = 0u; i < ranges.size(); ++i) {
       task(i, ranges[i]);
     }
     return;
   }
 
+  std::lock_guard runLock(runMutex_);
   const uint32_t totalRangeCount = static_cast<uint32_t>(ranges.size());
   const uint32_t scheduledRangeCount =
       std::min(totalRangeCount, config_.workerCount);
+  if (scheduledRangeCount < 3u) {
+    for (uint32_t i = 0u; i < ranges.size(); ++i) {
+      task(i, ranges[i]);
+    }
+    return;
+  }
   {
     NURI_PROFILER_ZONE("RenderGraphRuntime.run_ranges.schedule",
                        NURI_PROFILER_COLOR_CMD_COPY);
@@ -146,9 +165,7 @@ void RenderGraphRuntime::runRangesImpl(
                        NURI_PROFILER_COLOR_CMD_COPY);
     std::unique_lock lock(mutex_);
     cvDone_.wait(lock, [this] { return pendingWorkers_ == 0u; });
-    currentTask_ = {};
-    currentRanges_.clear();
-    completedGeneration_ = generation_;
+    clearScheduledWorkLocked();
     NURI_PROFILER_ZONE_END();
   }
 }
@@ -172,7 +189,10 @@ void RenderGraphRuntime::workerLoop(uint32_t workerIndex,
       }
 
       observedGeneration = generation_;
-      if (workerIndex < activeRangeCount_) {
+      const uint32_t scheduledRangeCount = std::min(
+          activeRangeCount_, static_cast<uint32_t>(currentRanges_.size()));
+      if (workerIndex < scheduledRangeCount &&
+          static_cast<bool>(currentTask_)) {
         task = currentTask_;
         range = currentRanges_[workerIndex];
         shouldRun = static_cast<bool>(task);

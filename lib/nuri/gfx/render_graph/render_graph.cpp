@@ -85,11 +85,11 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
 
 constexpr size_t kMaxReusableTransientTextures = 32u;
 constexpr size_t kMaxReusableTransientBuffers = 64u;
-constexpr uint32_t kMinValidationItemsPerWorker = 64u;
-constexpr uint32_t kMinHazardGroupsPerWorker = 32u;
-constexpr uint32_t kMinPayloadPassesPerWorker = 8u;
-constexpr uint32_t kMinLifetimeItemsPerWorker = 64u;
-constexpr uint32_t kMinRecordingPassesPerWorker = 4u;
+constexpr uint32_t kMinValidationItemsPerWorker = 256u;
+constexpr uint32_t kMinHazardGroupsPerWorker = 128u;
+constexpr uint32_t kMinPayloadPassesPerWorker = 24u;
+constexpr uint32_t kMinLifetimeItemsPerWorker = 256u;
+constexpr uint32_t kMinRecordingPassesPerWorker = 12u;
 
 [[nodiscard]] std::vector<RenderGraphContiguousRange>
 makeAdaptiveRanges(uint32_t itemCount, uint32_t maxRangeCount,
@@ -604,6 +604,21 @@ Result<bool, std::string> RenderGraphBuilder::applyImplicitPassRoots(
 
 Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     RenderGraphPassId pass, const RenderGraphGraphicsPassDesc &desc) {
+  if (!desc.dependencyBufferAccessModes.empty() &&
+      desc.dependencyBufferAccessModes.size() !=
+          desc.dependencyBuffers.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindImplicitPassResources: dependency buffer "
+        "access mode count does not match dependency buffer count");
+  }
+  if (!desc.dependencyTextureAccessModes.empty() &&
+      desc.dependencyTextureAccessModes.size() !=
+          desc.dependencyTextures.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindImplicitPassResources: dependency texture "
+        "access mode count does not match dependency texture count");
+  }
+
   if (nuri::isValid(desc.colorTexture)) {
     auto bindResult = bindPassColorTexture(pass, desc.colorTexture);
     if (bindResult.hasError()) {
@@ -625,6 +640,16 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     if (!nuri::isValid(dependency)) {
       continue;
     }
+    const RenderGraphAccessMode accessMode =
+        desc.dependencyBufferAccessModes.empty()
+            ? (RenderGraphAccessMode::Read | RenderGraphAccessMode::Write)
+            : desc.dependencyBufferAccessModes[i];
+    if (!hasAccessFlag(accessMode, RenderGraphAccessMode::Read) &&
+        !hasAccessFlag(accessMode, RenderGraphAccessMode::Write)) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::bindImplicitPassResources: dependency buffer "
+          "access mode must contain read or write");
+    }
 
     auto importResult = importBuffer(dependency, dependencyDebugName);
     if (importResult.hasError()) {
@@ -632,10 +657,38 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     }
 
     auto bindResult = bindPassDependencyBuffer(
-        pass, static_cast<uint32_t>(i), importResult.value(),
-        RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
+        pass, static_cast<uint32_t>(i), importResult.value(), accessMode);
     if (bindResult.hasError()) {
       return bindResult;
+    }
+  }
+
+  const std::string dependencyTextureDebugName =
+      makePassResourceDebugName(desc.debugLabel, "dependency_texture");
+  for (size_t i = 0; i < desc.dependencyTextures.size(); ++i) {
+    const TextureHandle dependency = desc.dependencyTextures[i];
+    if (!nuri::isValid(dependency)) {
+      continue;
+    }
+    const RenderGraphAccessMode accessMode =
+        desc.dependencyTextureAccessModes.empty()
+            ? RenderGraphAccessMode::Read
+            : desc.dependencyTextureAccessModes[i];
+    if (!hasAccessFlag(accessMode, RenderGraphAccessMode::Read) &&
+        !hasAccessFlag(accessMode, RenderGraphAccessMode::Write)) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::bindImplicitPassResources: dependency texture "
+          "access mode must contain read or write");
+    }
+
+    auto importResult = importTexture(dependency, dependencyTextureDebugName);
+    if (importResult.hasError()) {
+      return Result<bool, std::string>::makeError(importResult.error());
+    }
+    auto accessResult =
+        addTextureAccess(pass, importResult.value(), accessMode);
+    if (accessResult.hasError()) {
+      return accessResult;
     }
   }
 
@@ -717,8 +770,27 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
   pass.useViewport = desc.useViewport;
   pass.viewport = desc.viewport;
   pass.debugColor = desc.debugColor;
+  if (desc.borrowPayload) {
+    pass.preDispatches = desc.preDispatches;
+    pass.dependencyBuffers = desc.dependencyBuffers;
+    pass.draws = desc.draws;
+    pass.debugLabel = desc.debugLabel;
+  } else {
+    OwnedPassPayload ownedPayload = clonePassPayload(desc);
+    ownedPassPayloads_.push_back(std::move(ownedPayload));
+    OwnedPassPayload &storedPayload = ownedPassPayloads_.back();
+    pass.preDispatches = std::span<const ComputeDispatchItem>(
+        storedPayload.preDispatches.data(), storedPayload.preDispatches.size());
+    pass.dependencyBuffers =
+        std::span<const BufferHandle>(storedPayload.dependencyBuffers.data(),
+                                      storedPayload.dependencyBuffers.size());
+    pass.draws = std::span<const DrawItem>(storedPayload.draws.data(),
+                                           storedPayload.draws.size());
+    pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
+                                       storedPayload.debugLabel.size());
+  }
 
-  auto addResult = addPassRecord(pass, clonePassPayload(desc), desc.debugLabel);
+  auto addResult = addPassRecord(pass, desc.debugLabel);
   if (addResult.hasError()) {
     return Result<RenderGraphPassId, std::string>::makeError(addResult.error());
   }
@@ -740,9 +812,7 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
 }
 
 Result<RenderGraphPassId, std::string>
-RenderGraphBuilder::addPassRecord(RenderPass pass,
-                                  OwnedPassPayload ownedPayload,
-                                  std::string_view debugName) {
+RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
   const uint32_t passIndex = static_cast<uint32_t>(passes_.size());
   if (passIndex == UINT32_MAX) {
     return Result<RenderGraphPassId, std::string>::makeError(
@@ -757,7 +827,7 @@ RenderGraphBuilder::addPassRecord(RenderPass pass,
       static_cast<uint32_t>(drawVertexBindingResourceIndices_.size());
   const RenderGraphPassId passId{.value = passIndex};
 
-  const size_t dependencyCount = ownedPayload.dependencyBuffers.size();
+  const size_t dependencyCount = pass.dependencyBuffers.size();
   if (dependencyCount > UINT32_MAX) {
     return Result<RenderGraphPassId, std::string>::makeError(
         "RenderGraphBuilder::addPassRecord: dependency buffer count "
@@ -769,13 +839,13 @@ RenderGraphBuilder::addPassRecord(RenderPass pass,
         "exceeds kMaxDependencyBuffers");
   }
 
-  const size_t preDispatchCount = ownedPayload.preDispatches.size();
+  const size_t preDispatchCount = pass.preDispatches.size();
   if (preDispatchCount > UINT32_MAX) {
     return Result<RenderGraphPassId, std::string>::makeError(
         "RenderGraphBuilder::addPassRecord: pre-dispatch count exceeds "
         "uint32_t");
   }
-  for (const ComputeDispatchItem &dispatch : ownedPayload.preDispatches) {
+  for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
     if (dispatch.dependencyBuffers.size() > UINT32_MAX) {
       return Result<RenderGraphPassId, std::string>::makeError(
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
@@ -788,23 +858,11 @@ RenderGraphBuilder::addPassRecord(RenderPass pass,
     }
   }
 
-  const size_t drawCount = ownedPayload.draws.size();
+  const size_t drawCount = pass.draws.size();
   if (drawCount > UINT32_MAX) {
     return Result<RenderGraphPassId, std::string>::makeError(
         "RenderGraphBuilder::addPassRecord: draw count exceeds uint32_t");
   }
-
-  ownedPassPayloads_.push_back(std::move(ownedPayload));
-  OwnedPassPayload &storedPayload = ownedPassPayloads_.back();
-  pass.preDispatches = std::span<const ComputeDispatchItem>(
-      storedPayload.preDispatches.data(), storedPayload.preDispatches.size());
-  pass.dependencyBuffers =
-      std::span<const BufferHandle>(storedPayload.dependencyBuffers.data(),
-                                    storedPayload.dependencyBuffers.size());
-  pass.draws = std::span<const DrawItem>(storedPayload.draws.data(),
-                                         storedPayload.draws.size());
-  pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
-                                     storedPayload.debugLabel.size());
 
   passes_.push_back(pass);
   std::pmr::string resolvedName(memory_);
@@ -824,7 +882,7 @@ RenderGraphBuilder::addPassRecord(RenderPass pass,
   passPreDispatchBindingOffsets_.push_back(preDispatchBindingOffset);
   passPreDispatchBindingCounts_.push_back(
       static_cast<uint32_t>(preDispatchCount));
-  for (const ComputeDispatchItem &dispatch : storedPayload.preDispatches) {
+  for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
     const uint32_t dispatchDependencyOffset = static_cast<uint32_t>(
         preDispatchDependencyBindingResourceIndices_.size());
     preDispatchDependencyBindingOffsets_.push_back(dispatchDependencyOffset);
@@ -2337,8 +2395,12 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     plan.preDispatchDependencyOffset =
         static_cast<uint32_t>(totalPreDispatchDependencySlots);
     totalPreDispatchDependencySlots += plan.preDispatchDependencyCount;
-    plan.drawOutputOffset = static_cast<uint32_t>(totalDrawItems);
-    totalDrawItems += plan.drawCount;
+    if (plan.unresolvedDrawCount != 0u) {
+      plan.drawOutputOffset = static_cast<uint32_t>(totalDrawItems);
+      totalDrawItems += plan.drawCount;
+    } else {
+      plan.drawOutputOffset = 0u;
+    }
     plan.unresolvedTextureOffset =
         static_cast<uint32_t>(totalUnresolvedTextureBindings);
     totalUnresolvedTextureBindings += plan.unresolvedTextureCount;
@@ -2516,62 +2578,67 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         resolvedPass.preDispatches = {};
       }
 
-      compiled.drawRangesByPass[orderedPassIndex] = {
-          .offset = plan.drawOutputOffset, .count = plan.drawCount};
-      uint32_t unresolvedDrawWriteOffset = plan.unresolvedDrawOffset;
-      for (uint32_t drawIndex = 0; drawIndex < plan.drawCount; ++drawIndex) {
-        const DrawItem &sourceDraw = sourcePass.draws[drawIndex];
-        DrawItem resolvedDraw = sourceDraw;
-        const uint32_t globalDrawIndex = plan.drawBindingOffset + drawIndex;
-
-        const auto resolveDrawBinding =
-            [&](uint32_t resourceIndex,
-                RenderGraphCompileResult::DrawBufferBindingTarget target,
-                BufferHandle &slotHandle) {
-              if (resourceIndex == UINT32_MAX) {
-                slotHandle = {};
-                return;
-              }
-              const BufferResource &resource = buffers_[resourceIndex];
-              if (resource.imported) {
-                slotHandle = resource.importedHandle;
-                return;
-              }
-              slotHandle = {};
-              compiled
-                  .unresolvedDrawBufferBindings[unresolvedDrawWriteOffset++] = {
-                  .orderedPassIndex = orderedPassIndex,
-                  .drawIndex = drawIndex,
-                  .target = target,
-                  .bufferResourceIndex = resourceIndex};
-            };
-
-        resolveDrawBinding(
-            drawVertexBindingResourceIndices_[globalDrawIndex],
-            RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
-            resolvedDraw.vertexBuffer);
-        resolveDrawBinding(
-            drawIndexBindingResourceIndices_[globalDrawIndex],
-            RenderGraphCompileResult::DrawBufferBindingTarget::Index,
-            resolvedDraw.indexBuffer);
-        resolveDrawBinding(
-            drawIndirectBindingResourceIndices_[globalDrawIndex],
-            RenderGraphCompileResult::DrawBufferBindingTarget::Indirect,
-            resolvedDraw.indirectBuffer);
-        resolveDrawBinding(
-            drawIndirectCountBindingResourceIndices_[globalDrawIndex],
-            RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount,
-            resolvedDraw.indirectCountBuffer);
-
-        compiled.ownedDrawItems[plan.drawOutputOffset + drawIndex] =
-            resolvedDraw;
-      }
-      if (plan.drawCount > 0u) {
-        resolvedPass.draws = std::span<const DrawItem>(
-            compiled.ownedDrawItems.data() + plan.drawOutputOffset,
-            plan.drawCount);
+      if (plan.drawCount > 0u && plan.unresolvedDrawCount == 0u) {
+        compiled.drawRangesByPass[orderedPassIndex] = {};
+        resolvedPass.draws = sourcePass.draws;
       } else {
-        resolvedPass.draws = {};
+        compiled.drawRangesByPass[orderedPassIndex] = {
+            .offset = plan.drawOutputOffset, .count = plan.drawCount};
+        uint32_t unresolvedDrawWriteOffset = plan.unresolvedDrawOffset;
+        for (uint32_t drawIndex = 0; drawIndex < plan.drawCount; ++drawIndex) {
+          const DrawItem &sourceDraw = sourcePass.draws[drawIndex];
+          DrawItem resolvedDraw = sourceDraw;
+          const uint32_t globalDrawIndex = plan.drawBindingOffset + drawIndex;
+
+          const auto resolveDrawBinding =
+              [&](uint32_t resourceIndex,
+                  RenderGraphCompileResult::DrawBufferBindingTarget target,
+                  BufferHandle &slotHandle) {
+                if (resourceIndex == UINT32_MAX) {
+                  slotHandle = {};
+                  return;
+                }
+                const BufferResource &resource = buffers_[resourceIndex];
+                if (resource.imported) {
+                  slotHandle = resource.importedHandle;
+                  return;
+                }
+                slotHandle = {};
+                compiled
+                    .unresolvedDrawBufferBindings[unresolvedDrawWriteOffset++] =
+                    {.orderedPassIndex = orderedPassIndex,
+                     .drawIndex = drawIndex,
+                     .target = target,
+                     .bufferResourceIndex = resourceIndex};
+              };
+
+          resolveDrawBinding(
+              drawVertexBindingResourceIndices_[globalDrawIndex],
+              RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
+              resolvedDraw.vertexBuffer);
+          resolveDrawBinding(
+              drawIndexBindingResourceIndices_[globalDrawIndex],
+              RenderGraphCompileResult::DrawBufferBindingTarget::Index,
+              resolvedDraw.indexBuffer);
+          resolveDrawBinding(
+              drawIndirectBindingResourceIndices_[globalDrawIndex],
+              RenderGraphCompileResult::DrawBufferBindingTarget::Indirect,
+              resolvedDraw.indirectBuffer);
+          resolveDrawBinding(
+              drawIndirectCountBindingResourceIndices_[globalDrawIndex],
+              RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount,
+              resolvedDraw.indirectCountBuffer);
+
+          compiled.ownedDrawItems[plan.drawOutputOffset + drawIndex] =
+              resolvedDraw;
+        }
+        if (plan.drawCount > 0u) {
+          resolvedPass.draws = std::span<const DrawItem>(
+              compiled.ownedDrawItems.data() + plan.drawOutputOffset,
+              plan.drawCount);
+        } else {
+          resolvedPass.draws = {};
+        }
       }
       if (passIndex < compiled.passDebugNames.size()) {
         const std::pmr::string &compiledName =
@@ -3740,6 +3807,7 @@ RenderGraphBuilder::compile(RenderGraphRuntime &runtime) const {
         validateResult.error());
   }
   if (passes_.empty()) {
+    compiled.metadataValidated = true;
     return Result<RenderGraphCompileResult, std::string>::makeResult(
         std::move(compiled));
   }
@@ -3787,6 +3855,7 @@ RenderGraphBuilder::compile(RenderGraphRuntime &runtime) const {
     return Result<RenderGraphCompileResult, std::string>::makeError(
         metadataValidationResult.error());
   }
+  compiled.metadataValidated = true;
 
   return Result<RenderGraphCompileResult, std::string>::makeResult(
       std::move(compiled));
@@ -3892,7 +3961,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
     NURI_PROFILER_ZONE_END();
   }
 
-  {
+  if (!compiled.metadataValidated) {
     NURI_PROFILER_ZONE("RenderGraph.execute.validate_compiled_metadata",
                        NURI_PROFILER_COLOR_BARRIER);
     if (compiled.orderedPasses.size() != compiled.orderedPassIndices.size()) {
@@ -4167,10 +4236,18 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
   {
     NURI_PROFILER_ZONE("RenderGraph.execute.build_executable_payload",
                        NURI_PROFILER_COLOR_CMD_COPY);
+    const bool needsMutableDependencyBuffers =
+        !compiled.unresolvedDependencyBufferBindings.empty();
+    const bool needsMutableDrawItems =
+        !compiled.unresolvedDrawBufferBindings.empty();
     executablePasses = compiled.orderedPasses;
-    executableDependencyBuffers = compiled.resolvedDependencyBuffers;
+    if (needsMutableDependencyBuffers) {
+      executableDependencyBuffers = compiled.resolvedDependencyBuffers;
+    }
     executablePreDispatches = compiled.ownedPreDispatches;
-    executableDrawItems = compiled.ownedDrawItems;
+    if (needsMutableDrawItems) {
+      executableDrawItems = compiled.ownedDrawItems;
+    }
     executablePreDispatchDependencyBuffers =
         compiled.resolvedPreDispatchDependencyBuffers;
 
@@ -4217,8 +4294,12 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
             "exceeds "
             "kMaxDependencyBuffers");
       }
-      if (range.offset > executableDependencyBuffers.size() ||
-          range.count > executableDependencyBuffers.size() - range.offset) {
+      const size_t dependencyBufferCount =
+          needsMutableDependencyBuffers
+              ? executableDependencyBuffers.size()
+              : compiled.resolvedDependencyBuffers.size();
+      if (range.offset > dependencyBufferCount ||
+          range.count > dependencyBufferCount - range.offset) {
         destroyMaterializedResources();
         return fail(
             RenderGraphExecutionFailureStage::BuildExecutablePayload,
@@ -4231,9 +4312,11 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
         continue;
       }
 
-      executablePasses[orderedPassIndex].dependencyBuffers =
-          std::span<const BufferHandle>(
-              executableDependencyBuffers.data() + range.offset, range.count);
+      if (needsMutableDependencyBuffers) {
+        executablePasses[orderedPassIndex].dependencyBuffers =
+            std::span<const BufferHandle>(
+                executableDependencyBuffers.data() + range.offset, range.count);
+      }
 
       const auto &preDispatchRange =
           compiled.preDispatchRangesByPass[orderedPassIndex];
@@ -4280,23 +4363,24 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
             dispatch.dependencyBuffers = {};
           }
         }
-      } else {
+      } else if (preDispatchRange.count == 0u) {
         executablePasses[orderedPassIndex].preDispatches = {};
       }
 
       const auto &drawRange = compiled.drawRangesByPass[orderedPassIndex];
-      if (drawRange.offset > executableDrawItems.size() ||
-          drawRange.count > executableDrawItems.size() - drawRange.offset) {
+      const size_t drawCount = needsMutableDrawItems
+                                   ? executableDrawItems.size()
+                                   : compiled.ownedDrawItems.size();
+      if (drawRange.offset > drawCount ||
+          drawRange.count > drawCount - drawRange.offset) {
         destroyMaterializedResources();
         return fail(
             RenderGraphExecutionFailureStage::BuildExecutablePayload,
             "RenderGraphExecutor::execute: pass draw range is out of bounds");
       }
-      if (drawRange.count > 0u) {
+      if (drawRange.count > 0u && needsMutableDrawItems) {
         executablePasses[orderedPassIndex].draws = std::span<const DrawItem>(
             executableDrawItems.data() + drawRange.offset, drawRange.count);
-      } else {
-        executablePasses[orderedPassIndex].draws = {};
       }
     }
     NURI_PROFILER_ZONE_END();

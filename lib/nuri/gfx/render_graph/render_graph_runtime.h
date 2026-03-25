@@ -84,17 +84,18 @@ private:
       std::span<const RenderGraphContiguousRange> ranges,
       const std::function<void(uint32_t, RenderGraphContiguousRange)> &task);
   void workerLoop(uint32_t workerIndex, std::stop_token stopToken);
+  void clearScheduledWorkLocked();
 
   std::pmr::memory_resource *memory_ = nullptr;
   RenderGraphRuntimeConfig config_{};
   std::vector<std::unique_ptr<WorkerState>> workers_{};
+  std::mutex runMutex_{};
   std::mutex mutex_{};
   std::condition_variable cvWork_{};
   std::condition_variable cvDone_{};
   std::vector<RenderGraphContiguousRange> currentRanges_{};
   std::function<void(uint32_t, RenderGraphContiguousRange)> currentTask_{};
   uint64_t generation_ = 0u;
-  uint64_t completedGeneration_ = 0u;
   uint32_t activeRangeCount_ = 0u;
   uint32_t pendingWorkers_ = 0u;
 };

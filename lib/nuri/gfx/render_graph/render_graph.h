@@ -69,11 +69,15 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   Viewport viewport{};
   std::span<const ComputeDispatchItem> preDispatches{};
   std::span<const BufferHandle> dependencyBuffers{};
+  std::span<const RenderGraphAccessMode> dependencyBufferAccessModes{};
+  std::span<const TextureHandle> dependencyTextures{};
+  std::span<const RenderGraphAccessMode> dependencyTextureAccessModes{};
   std::span<const DrawItem> draws{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
   bool markColorAsFrameOutput = false;
   bool markImplicitOutputSideEffect = true;
+  bool borrowPayload = false;
 };
 
 struct NURI_API RecordedGraphicsPassMeta {
@@ -260,6 +264,7 @@ struct NURI_API RenderGraphCompileResult {
   uint32_t rootPassCount = 0;
   uint32_t transientTexturePhysicalCount = 0;
   uint32_t transientBufferPhysicalCount = 0;
+  bool metadataValidated = false;
   bool usedParallelCompile = false;
   bool usedParallelValidation = false;
   bool usedParallelPayloadResolution = false;
@@ -510,8 +515,7 @@ private:
   applyImplicitPassRoots(RenderGraphPassId pass,
                          const RenderGraphGraphicsPassDesc &desc);
   [[nodiscard]] Result<RenderGraphPassId, std::string>
-  addPassRecord(RenderPass pass, OwnedPassPayload ownedPayload,
-                std::string_view debugName);
+  addPassRecord(RenderPass pass, std::string_view debugName);
   [[nodiscard]] Result<bool, std::string>
   compileStageC0ValidateInputs(RenderGraphRuntime &runtime,
                                RenderGraphCompileResult &compiled,
