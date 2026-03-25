@@ -12,7 +12,7 @@
 
 namespace nuri {
 
-constexpr uint32_t kSceneTextureBakeSettingsVersion = 12u;
+constexpr uint32_t kSceneTextureBakeSettingsVersion = 13u;
 
 [[nodiscard]] NURI_API uint64_t
 hashSceneTextureSourceIdentity(std::string_view sceneCanonicalPath,

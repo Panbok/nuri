@@ -16,6 +16,12 @@
 
 namespace nuri {
 
+[[nodiscard]] inline std::string
+pathToUtf8String(const std::filesystem::path &path) {
+  const std::u8string utf8 = path.u8string();
+  return std::string(reinterpret_cast<const char *>(utf8.data()), utf8.size());
+}
+
 enum class TextureRequestKind : uint8_t {
   Texture2D = 0,
   Ktx2Texture2D = 1,
@@ -98,7 +104,7 @@ canonicalizeResourcePath(std::string_view inputPath) {
     canonical = rawPath.lexically_normal();
   }
 
-  std::string path = canonical.string();
+  std::string path = pathToUtf8String(canonical);
 #if defined(_WIN32)
   std::transform(path.begin(), path.end(), path.begin(), [](unsigned char ch) {
     return static_cast<char>(std::tolower(ch));

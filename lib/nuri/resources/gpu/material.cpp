@@ -118,7 +118,9 @@ void copyImportedTextureMetadata(MaterialDesc &desc,
   for (const ImportedTextureMapping &mapping : kImportedTextureMappings) {
     const MaterialTextureSlotData &slot = materialData.*(mapping.slot);
     desc.uvSets.*(mapping.uvSet) = slot.uvSet;
-    desc.samplers.*(mapping.sampler) = slot.samplerIndex;
+    // Runtime sampling is resolved from engine-managed global filter state.
+    // Imported sampler indices are preserved in MaterialData only.
+    desc.samplers.*(mapping.sampler) = 0u;
     desc.transforms.slots[mapping.slotIndex] = slot.transform;
   }
 }
