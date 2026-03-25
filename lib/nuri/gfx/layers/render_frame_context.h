@@ -29,6 +29,37 @@ enum class OpaqueDebugVisualization : uint8_t {
   TessPatchEdgesHeatmap = 3,
 };
 
+enum class TextureFilterMode : uint8_t {
+  Bilinear = 0,
+  Trilinear = 1,
+  Anisotropic = 2,
+};
+
+[[nodiscard]] constexpr uint8_t
+sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
+  switch (anisotropy) {
+  case 2u:
+  case 4u:
+  case 8u:
+  case 16u:
+    return anisotropy;
+  default:
+    return 8u;
+  }
+}
+
+[[nodiscard]] constexpr TextureFilterMode
+sanitizeTextureFilterMode(TextureFilterMode mode) noexcept {
+  switch (mode) {
+  case TextureFilterMode::Bilinear:
+  case TextureFilterMode::Trilinear:
+  case TextureFilterMode::Anisotropic:
+    return mode;
+  default:
+    return TextureFilterMode::Trilinear;
+  }
+}
+
 struct RenderSettings {
   struct SkyboxSettings {
     bool enabled = true;
@@ -69,12 +100,35 @@ struct RenderSettings {
     bool enabled = true;
   };
 
+  struct TextureFilteringSettings {
+    TextureFilterMode mode = TextureFilterMode::Trilinear;
+    uint8_t anisotropy = 8u;
+  };
+
   SkyboxSettings skybox{};
   OpaqueSettings opaque{};
   TransmissionSettings transmission{};
   TransparentSettings transparent{};
   DebugSettings debug{};
+  TextureFilteringSettings textureFiltering{};
 };
+
+inline void sanitizeTextureFilteringSettings(
+    RenderSettings::TextureFilteringSettings &settings) {
+  settings.mode = sanitizeTextureFilterMode(settings.mode);
+  settings.anisotropy = sanitizeTextureFilterAnisotropy(settings.anisotropy);
+}
+
+[[nodiscard]] inline TextureFilterMode effectiveTextureFilterMode(
+    const RenderSettings::TextureFilteringSettings &settings,
+    uint8_t maxSamplerAnisotropy) {
+  const TextureFilterMode mode = sanitizeTextureFilterMode(settings.mode);
+  if (mode != TextureFilterMode::Anisotropic) {
+    return mode;
+  }
+  return maxSamplerAnisotropy > 1u ? TextureFilterMode::Anisotropic
+                                   : TextureFilterMode::Trilinear;
+}
 
 struct CameraFrameState {
   glm::mat4 view{1.0f};
@@ -95,6 +149,7 @@ struct ForwardSceneFrameData {
   uint32_t brdfLutTexId = 0;
   uint32_t flags = 0;
   uint32_t cubemapSamplerId = 0;
+  uint32_t materialSamplerId = 0;
   uint32_t sceneColorTexId = 0;
   uint32_t sceneColorSamplerId = 0;
   uint32_t sceneColorHalfResTexId = 0;
@@ -114,7 +169,7 @@ struct ForwardSceneFrameData {
     return !(*this == other);
   }
 };
-static_assert(sizeof(ForwardSceneFrameData) == 216,
+static_assert(sizeof(ForwardSceneFrameData) == 224,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
 
 // GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.

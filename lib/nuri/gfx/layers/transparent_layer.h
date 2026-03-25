@@ -4,6 +4,7 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/layers/instance_data.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/gpu/material.h"
@@ -167,7 +168,7 @@ private:
       std::numeric_limits<uint64_t>::max();
 
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
-  std::pmr::vector<glm::mat4> instanceMatrices_;
+  std::pmr::vector<InstanceData> instanceMatrices_;
   std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
   std::pmr::vector<MaterialGpuData> materialGpuDataCache_;

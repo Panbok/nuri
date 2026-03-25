@@ -429,7 +429,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     instanceMatrices_.reserve(renderables.size());
     instanceRemap_.reserve(renderables.size());
     for (uint32_t i = 0; i < static_cast<uint32_t>(renderables.size()); ++i) {
-      instanceMatrices_.push_back(renderables[i].modelMatrix);
+      instanceMatrices_.push_back(makeInstanceData(renderables[i].modelMatrix));
       instanceRemap_.push_back(i);
     }
     cachedTransformVersion_ = frame.scene->transformVersion();
@@ -448,7 +448,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
       return materialBufferResult;
     }
     auto matricesBufferResult = ensureInstanceMatricesRingCapacity(std::max(
-        instanceMatrices_.size() * sizeof(glm::mat4), sizeof(glm::mat4)));
+        instanceMatrices_.size() * sizeof(InstanceData), sizeof(InstanceData)));
     if (matricesBufferResult.hasError()) {
       return matricesBufferResult;
     }
@@ -506,7 +506,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     if (needsInstanceDataUpload && !instanceMatrices_.empty()) {
       const std::span<const std::byte> matrixBytes{
           reinterpret_cast<const std::byte *>(instanceMatrices_.data()),
-          instanceMatrices_.size() * sizeof(glm::mat4)};
+          instanceMatrices_.size() * sizeof(InstanceData)};
       auto updateResult = gpu_.updateBuffer(
           instanceMatricesRing_[frameSlot].buffer->handle(), matrixBytes, 0);
       if (updateResult.hasError()) {

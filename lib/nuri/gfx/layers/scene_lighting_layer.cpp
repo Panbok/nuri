@@ -41,6 +41,27 @@ makeSceneDataBufferLayout(size_t frameDataBytes, size_t directionalLightBytes,
   };
 }
 
+[[nodiscard]] const RenderSettings::TextureFilteringSettings &
+textureFilteringSettingsOrDefault(const RenderFrameContext &frame) {
+  static const RenderSettings kDefaultSettings{};
+  return frame.settings ? frame.settings->textureFiltering
+                        : kDefaultSettings.textureFiltering;
+}
+
+[[nodiscard]] uint32_t resolveMaterialSamplerId(
+    GPUDevice &gpu, const RenderSettings::TextureFilteringSettings &settings) {
+  switch (sanitizeTextureFilterMode(settings.mode)) {
+  case TextureFilterMode::Bilinear:
+    return gpu.getLinearRepeatSamplerBindlessIndex(false, 1u);
+  case TextureFilterMode::Anisotropic:
+    return gpu.getLinearRepeatSamplerBindlessIndex(
+        true, sanitizeTextureFilterAnisotropy(settings.anisotropy));
+  case TextureFilterMode::Trilinear:
+  default:
+    return gpu.getLinearRepeatSamplerBindlessIndex(true, 1u);
+  }
+}
+
 } // namespace
 
 SceneLightingLayer::SceneLightingLayer(GPUDevice &gpu) : gpu_(gpu) {}
@@ -84,6 +105,8 @@ SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
   uint32_t brdfLutTexId = kInvalidTextureBindlessIndex;
   uint32_t flags = 0u;
   const uint32_t cubemapSamplerId = gpu_.getCubemapSamplerBindlessIndex();
+  const uint32_t materialSamplerId =
+      resolveMaterialSamplerId(gpu_, textureFilteringSettingsOrDefault(frame));
   const EnvironmentHandles environment = frame.scene->environment();
 
   if (const TextureRecord *cubemap =
@@ -129,7 +152,7 @@ SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
           frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
       sceneColorTexture != nullptr && nuri::isValid(*sceneColorTexture)) {
     sceneColorTexId = gpu_.getTextureBindlessIndex(*sceneColorTexture);
-    sceneColorSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+    sceneColorSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
     if (sceneColorTexId != kInvalidTextureBindlessIndex) {
       flags |= kForwardSceneHasSceneColor;
     }
@@ -185,6 +208,7 @@ SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
       .brdfLutTexId = brdfLutTexId,
       .flags = flags,
       .cubemapSamplerId = cubemapSamplerId,
+      .materialSamplerId = materialSamplerId,
       .sceneColorTexId = sceneColorTexId,
       .sceneColorSamplerId = sceneColorSamplerId,
       .sceneColorHalfResTexId = sceneColorHalfResTexId,

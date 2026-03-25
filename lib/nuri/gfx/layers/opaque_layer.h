@@ -4,6 +4,7 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/layers/instance_data.h"
 #include "nuri/gfx/pipeline.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/shader.h"
@@ -337,7 +338,7 @@ private:
   std::pmr::vector<size_t> batchWriteOffsets_;
   std::pmr::vector<glm::vec4> instanceCentersPhase_;
   std::pmr::vector<glm::mat4> instanceBaseMatrices_;
-  std::pmr::vector<glm::mat4> instanceMatricesCpuCache_;
+  std::pmr::vector<InstanceData> instanceMatricesCpuCache_;
   std::pmr::vector<glm::vec4> instanceLodCentersInvRadiusSq_;
   std::pmr::vector<MaterialGpuData> materialGpuDataCache_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;

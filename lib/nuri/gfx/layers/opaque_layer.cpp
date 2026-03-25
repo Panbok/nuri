@@ -604,7 +604,8 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
       glm::mat4 baseMatrix = renderable->modelMatrix;
       baseMatrix[3] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
       instanceBaseMatrices_.push_back(baseMatrix);
-      instanceMatricesCpuCache_.push_back(renderable->modelMatrix);
+      instanceMatricesCpuCache_.push_back(
+          makeInstanceData(renderable->modelMatrix));
 
       const BoundingBox &bounds = model->bounds();
       const glm::vec3 localCenter = bounds.getCenter();
@@ -646,7 +647,7 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
     return baseMatricesResult;
   }
   auto matricesResult = ensureInstanceMatricesRingCapacity(
-      std::max(instanceCount * sizeof(glm::mat4), sizeof(glm::mat4)));
+      std::max(instanceCount * sizeof(InstanceData), sizeof(InstanceData)));
   if (matricesResult.hasError()) {
     return matricesResult;
   }
@@ -1863,7 +1864,8 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
         for (size_t i = 0; i < instanceCount; ++i) {
           const glm::vec3 center = glm::vec3(instanceCentersPhase_[i]);
           const glm::mat4 translation = glm::translate(glm::mat4(1.0f), center);
-          instanceMatricesCpuCache_[i] = translation * instanceBaseMatrices_[i];
+          instanceMatricesCpuCache_[i] =
+              makeInstanceData(translation * instanceBaseMatrices_[i]);
         }
       } else if (instanceMatricesCpuCache_.size() != instanceCount) {
         return Result<bool, std::string>::makeError(
@@ -1873,7 +1875,7 @@ OpaqueLayer::buildOpaquePasses(RenderFrameContext &frame,
 
       const std::span<const std::byte> matricesBytes{
           reinterpret_cast<const std::byte *>(instanceMatricesCpuCache_.data()),
-          instanceMatricesCpuCache_.size() * sizeof(glm::mat4)};
+          instanceMatricesCpuCache_.size() * sizeof(InstanceData)};
       auto updateResult = gpu_.updateBuffer(
           instanceMatricesRing_[frameSlot].buffer->handle(), matricesBytes, 0);
       if (updateResult.hasError()) {
