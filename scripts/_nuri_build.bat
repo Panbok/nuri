@@ -4,9 +4,36 @@ for %%i in ("%~f0") do set "SCRIPT_DIR=%%~dpi"
 
 set "MODE=%~1"
 set "PROFILE=%~2"
+set "TRACY_MODE=%~3"
 
 if "%MODE%"=="" goto usage
 if "%PROFILE%"=="" goto usage
+
+set "NURI_WITH_TRACY=OFF"
+set "NURI_WITH_TRACY_GPU=OFF"
+set "NURI_WITH_TRACY_GPU_DRAW_ZONES=OFF"
+
+if /I "%MODE%"=="debug" (
+  set "NURI_WITH_TRACY=ON"
+  set "NURI_WITH_TRACY_GPU=ON"
+  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=ON"
+)
+
+if /I "%TRACY_MODE%"=="cpu" (
+  set "NURI_WITH_TRACY=ON"
+  set "NURI_WITH_TRACY_GPU=OFF"
+  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=OFF"
+) else if /I "%TRACY_MODE%"=="cpu-gpu" (
+  set "NURI_WITH_TRACY=ON"
+  set "NURI_WITH_TRACY_GPU=ON"
+  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=ON"
+) else if /I "%TRACY_MODE%"=="off" (
+  set "NURI_WITH_TRACY=OFF"
+  set "NURI_WITH_TRACY_GPU=OFF"
+  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=OFF"
+) else if not "%TRACY_MODE%"=="" (
+  goto usage
+)
 
 set "BUILD_APP=OFF"
 set "BUILD_EDITOR=OFF"
@@ -60,7 +87,6 @@ cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G Ninja ^
   -DCMAKE_C_COMPILER=clang ^
   -DCMAKE_CXX_COMPILER=clang++ ^
   -DCMAKE_TOOLCHAIN_FILE="%TOOLCHAIN%" ^
-  -DCMAKE_CXX_FLAGS="-DLVK_WITH_TRACY_GPU_DRAW_ZONES=1" ^
   -DVCPKG_APPLOCAL_DEPS=OFF ^
   %MANIFEST_FEATURES_ARG% ^
   -DVCPKG_BUILD_TYPE=release ^
@@ -68,7 +94,9 @@ cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G Ninja ^
   -DNURI_BUILD_EDITOR="%BUILD_EDITOR%" ^
   -DNURI_BUILD_TESTS="%BUILD_TESTS%" ^
   -DNURI_BUILD_SHARED=ON ^
-  -DNURI_WITH_TRACY=ON
+  -DNURI_WITH_TRACY="%NURI_WITH_TRACY%" ^
+  -DNURI_WITH_TRACY_GPU="%NURI_WITH_TRACY_GPU%" ^
+  -DNURI_WITH_TRACY_GPU_DRAW_ZONES="%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
 if errorlevel 1 exit /b 1
 goto build_target
 
@@ -117,5 +145,5 @@ set "BUILD_DIR=%~1\build_%~3"
 exit /b 0
 
 :usage
-echo Usage: %~nx0 ^<debug^|release^> ^<lib^|app^|editor^|tests^>
+echo Usage: %~nx0 ^<debug^|release^> ^<lib^|app^|editor^|tests^> [cpu^|cpu-gpu^|off]
 exit /b 1

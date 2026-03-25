@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests>"
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off]"
   exit 1
 fi
 
 mode="$1"
 profile="$2"
+tracy_mode="${3:-}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
@@ -59,7 +60,40 @@ case "${profile}" in
     append_manifest_feature tests
     ;;
   *)
-    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests>"
+    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off]"
+    exit 1
+    ;;
+esac
+
+nuri_with_tracy="OFF"
+nuri_with_tracy_gpu="OFF"
+nuri_with_tracy_gpu_draw_zones="OFF"
+if [[ "${mode}" == "debug" ]]; then
+  nuri_with_tracy="ON"
+  nuri_with_tracy_gpu="ON"
+  nuri_with_tracy_gpu_draw_zones="ON"
+fi
+
+case "${tracy_mode}" in
+  "")
+    ;;
+  cpu)
+    nuri_with_tracy="ON"
+    nuri_with_tracy_gpu="OFF"
+    nuri_with_tracy_gpu_draw_zones="OFF"
+    ;;
+  cpu-gpu)
+    nuri_with_tracy="ON"
+    nuri_with_tracy_gpu="ON"
+    nuri_with_tracy_gpu_draw_zones="ON"
+    ;;
+  off)
+    nuri_with_tracy="OFF"
+    nuri_with_tracy_gpu="OFF"
+    nuri_with_tracy_gpu_draw_zones="OFF"
+    ;;
+  *)
+    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off]"
     exit 1
     ;;
 esac
@@ -109,6 +143,9 @@ case "${mode}" in
     configure_args+=(
       -DCMAKE_BUILD_TYPE=Debug
       -DNURI_BUILD_SHARED=ON
+      -DNURI_WITH_TRACY="${nuri_with_tracy}"
+      -DNURI_WITH_TRACY_GPU="${nuri_with_tracy_gpu}"
+      -DNURI_WITH_TRACY_GPU_DRAW_ZONES="${nuri_with_tracy_gpu_draw_zones}"
     )
     ;;
   release)
@@ -116,10 +153,13 @@ case "${mode}" in
       -DCMAKE_BUILD_TYPE=Release
       -DVCPKG_BUILD_TYPE=release
       -DNURI_BUILD_SHARED=OFF
+      -DNURI_WITH_TRACY="${nuri_with_tracy}"
+      -DNURI_WITH_TRACY_GPU="${nuri_with_tracy_gpu}"
+      -DNURI_WITH_TRACY_GPU_DRAW_ZONES="${nuri_with_tracy_gpu_draw_zones}"
     )
     ;;
   *)
-    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests>"
+    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off]"
     exit 1
     ;;
 esac

@@ -24,14 +24,25 @@ for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
 call :set_build_dir "%REPO_ROOT%" "%MODE%" tests
 
 set "CTEST_ARGS="
+set "HAS_JOBS_ARG=0"
 :collect_ctest_args
 if "%~1"=="" goto run_ctest
+if /I "%~1"=="-j" set "HAS_JOBS_ARG=1"
+if /I "%~1"=="--parallel" set "HAS_JOBS_ARG=1"
 set "CTEST_ARGS=%CTEST_ARGS% %1"
 shift
 goto collect_ctest_args
 
 :run_ctest
-ctest --test-dir "%BUILD_DIR%" --output-on-failure%CTEST_ARGS%
+set "CTEST_PARALLEL_ARGS="
+if "%HAS_JOBS_ARG%"=="0" (
+  if defined NUMBER_OF_PROCESSORS (
+    set "CTEST_PARALLEL_ARGS= -j %NUMBER_OF_PROCESSORS%"
+  ) else (
+    set "CTEST_PARALLEL_ARGS= -j 4"
+  )
+)
+ctest --test-dir "%BUILD_DIR%" --output-on-failure%CTEST_PARALLEL_ARGS%%CTEST_ARGS%
 exit /b %errorlevel%
 
 :set_build_dir
