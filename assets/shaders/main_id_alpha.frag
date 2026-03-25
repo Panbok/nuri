@@ -9,8 +9,7 @@ void main() {
   const MaterialGpuData material = pc.materialBuffer.materials[pc.materialIndex];
   const uint baseColorTexId =
       GET_TEXTURE_INDEX(material, kMaterialTextureSlotBaseColor);
-  const uint baseColorSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotBaseColor);
+  const uint baseColorSampler = pc.frameData.materialSamplerId;
 
   const vec2 baseColorUv =
       transformedUv(material, vtx, kMaterialTextureSlotBaseColor);

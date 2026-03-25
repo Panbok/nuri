@@ -252,34 +252,21 @@ void main() {
   const uint featureMask = material.materialFlags.z;
   const uint workflow = material.materialFlags.w;
 
-  const uint baseColorSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotBaseColor);
-  const uint metallicRoughnessSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotMetallicRoughness);
-  const uint normalSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotNormal);
-  const uint occlusionSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotOcclusion);
-  const uint emissiveSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotEmissive);
-  const uint clearcoatSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotClearcoat);
-  const uint clearcoatRoughnessSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotClearcoatRoughness);
-  const uint clearcoatNormalSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotClearcoatNormal);
-  const uint specularSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotSpecular);
-  const uint specularColorSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotSpecularColor);
-  const uint sheenColorSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotSheenColor);
-  const uint sheenRoughnessSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotSheenRoughness);
-  const uint transmissionSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotTransmission);
-  const uint thicknessSampler =
-      GET_SAMPLER_INDEX(material, kMaterialTextureSlotThickness);
+  const uint materialSampler = pc.frameData.materialSamplerId;
+  const uint baseColorSampler = materialSampler;
+  const uint metallicRoughnessSampler = materialSampler;
+  const uint normalSampler = materialSampler;
+  const uint occlusionSampler = materialSampler;
+  const uint emissiveSampler = materialSampler;
+  const uint clearcoatSampler = materialSampler;
+  const uint clearcoatRoughnessSampler = materialSampler;
+  const uint clearcoatNormalSampler = materialSampler;
+  const uint specularSampler = materialSampler;
+  const uint specularColorSampler = materialSampler;
+  const uint sheenColorSampler = materialSampler;
+  const uint sheenRoughnessSampler = materialSampler;
+  const uint transmissionSampler = materialSampler;
+  const uint thicknessSampler = materialSampler;
 
   const vec2 uvBaseColor =
       transformedUv(material, vtx, kMaterialTextureSlotBaseColor);
