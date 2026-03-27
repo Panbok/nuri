@@ -1,4 +1,4 @@
-#include "nuri/gfx/layers/debug_layer.h"
+#include "nuri/gfx/renderers/debug_renderer.h"
 
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/debug_draw_3d.h"
@@ -25,16 +25,6 @@ const glm::vec4 kSelectedLightIconColor(1.0f, 0.28f, 0.16f, 1.0f);
 
 [[nodiscard]] bool isSameTextureHandle(TextureHandle a, TextureHandle b) {
   return a.index == b.index && a.generation == b.generation;
-}
-
-[[nodiscard]] TextureHandle
-resolvePublishedTexture(const FrameChannelRegistry &channels,
-                        std::string_view key) {
-  if (const TextureHandle *published = channels.tryGet<TextureHandle>(key);
-      published != nullptr && nuri::isValid(*published)) {
-    return *published;
-  }
-  return {};
 }
 
 [[nodiscard]] glm::vec3 safeNormalize(const glm::vec3 &value,
@@ -120,29 +110,35 @@ void drawSpotLightIcon(DebugDraw3D &debugDraw, const glm::vec3 &position,
 
 } // namespace
 
-DebugLayer::DebugLayer(GPUDevice &gpu, DebugLayerConfig config,
-                       std::pmr::memory_resource *memory)
+DebugRenderer::DebugRenderer(GPUDevice &gpu, DebugRendererConfig config,
+                             std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
       memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
       debugDraw3D_(std::make_unique<DebugDraw3D>(gpu, memory_)),
       transparentSortableDraws_(memory_), transparentFixedDraws_(memory_),
       transparentDependencyBuffers_(memory_) {}
 
-DebugLayer::~DebugLayer() { onDetach(); }
+DebugRenderer::~DebugRenderer() { onDetach(); }
 
-void DebugLayer::onDetach() {
+void DebugRenderer::onDetach() {
   debugDraw3D_.reset();
   resetGridState();
+  preparedSceneDepthTexture_ = {};
+  preparedFrameColorTexture_ = {};
+  preparedSceneDepthGraphTexture_ = {};
+  preparedHasPriorColorPass_ = false;
+  preparedGridPass_ = false;
+  preparedSceneOverlayPass_ = false;
   transparentSortableDraws_.clear();
   transparentFixedDraws_.clear();
   transparentDependencyBuffers_.clear();
 }
 
-Result<bool, std::string> DebugLayer::ensureGridInitialized() {
+Result<bool, std::string> DebugRenderer::ensureGridInitialized() {
   return createGridShaders();
 }
 
-Result<bool, std::string> DebugLayer::createGridShaders() {
+Result<bool, std::string> DebugRenderer::createGridShaders() {
   if (gridShader_ && nuri::isValid(gridVertexShader_) &&
       nuri::isValid(gridFragmentShader_)) {
     return Result<bool, std::string>::makeResult(true);
@@ -150,14 +146,15 @@ Result<bool, std::string> DebugLayer::createGridShaders() {
 
   if (config_.vertex.empty() || config_.fragment.empty()) {
     return Result<bool, std::string>::makeError(
-        "DebugLayer::createGridShaders: vertex or fragment shader path is "
+        "DebugRenderer::createGridShaders: vertex or fragment shader path is "
         "empty");
   }
 
   gridShader_ = Shader::create("debug_grid", gpu_);
   if (!gridShader_) {
     return Result<bool, std::string>::makeError(
-        "DebugLayer::createGridShaders: failed to create grid shader wrapper");
+        "DebugRenderer::createGridShaders: failed to create grid shader "
+        "wrapper");
   }
 
   const std::string vertexShaderPath = config_.vertex.string();
@@ -184,8 +181,8 @@ Result<bool, std::string> DebugLayer::createGridShaders() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> DebugLayer::ensureGridPipeline(Format colorFormat,
-                                                         Format depthFormat) {
+Result<bool, std::string>
+DebugRenderer::ensureGridPipeline(Format colorFormat, Format depthFormat) {
   auto shaderResult = ensureGridInitialized();
   if (shaderResult.hasError()) {
     return shaderResult;
@@ -203,7 +200,7 @@ Result<bool, std::string> DebugLayer::ensureGridPipeline(Format colorFormat,
   gridPipeline_ = Pipeline::create(gpu_);
   if (!gridPipeline_) {
     return Result<bool, std::string>::makeError(
-        "DebugLayer::ensureGridPipeline: failed to create grid pipeline "
+        "DebugRenderer::ensureGridPipeline: failed to create grid pipeline "
         "wrapper");
   }
 
@@ -232,8 +229,8 @@ Result<bool, std::string> DebugLayer::ensureGridPipeline(Format colorFormat,
 }
 
 Result<bool, std::string>
-DebugLayer::prepareGridDraw(const RenderFrameContext &frame,
-                            TextureHandle depthTexture) {
+DebugRenderer::prepareGridDraw(const RenderFrameContext &frame,
+                               TextureHandle depthTexture) {
   const bool hasDepth = nuri::isValid(depthTexture);
   const Format depthFormat =
       hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
@@ -267,7 +264,7 @@ DebugLayer::prepareGridDraw(const RenderFrameContext &frame,
   return Result<bool, std::string>::makeResult(true);
 }
 
-void DebugLayer::resetGridState() {
+void DebugRenderer::resetGridState() {
   gridPipeline_.reset();
   gridShader_.reset();
 
@@ -281,7 +278,7 @@ void DebugLayer::resetGridState() {
   gridDrawItem_ = DrawItem{};
 }
 
-Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
+Result<bool, std::string> DebugRenderer::appendModelBoundsGraphPass(
     const RenderFrameContext &frame, RenderGraphBuilder &graph,
     TextureHandle sceneDepthTexture,
     RenderGraphTextureId sceneDepthGraphTexture) {
@@ -314,8 +311,7 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
   }
 
   DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
-  TextureHandle colorTexture =
-      resolvePublishedTexture(frame.channels, kFrameChannelFrameColorTexture);
+  TextureHandle colorTexture = resolveFrameColorTexture(frame);
   if (!nuri::isValid(colorTexture)) {
     colorTexture = pass.colorTextureHandle;
   }
@@ -352,7 +348,7 @@ Result<bool, std::string> DebugLayer::appendModelBoundsGraphPass(
   return Result<bool, std::string>::makeResult(true);
 }
 
-bool DebugLayer::hasDebugWork(const RenderFrameContext &frame) const {
+bool DebugRenderer::hasDebugWork(const RenderFrameContext &frame) const {
   if (frame.settings == nullptr) {
     return false;
   }
@@ -361,9 +357,9 @@ bool DebugLayer::hasDebugWork(const RenderFrameContext &frame) const {
 }
 
 Result<bool, std::string>
-DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
-                                 TextureHandle depthTexture,
-                                 float &outSortDepth) {
+DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
+                                    TextureHandle depthTexture,
+                                    float &outSortDepth) {
   outSortDepth = 0.0f;
   if (!debugDraw3D_ || !frame.scene || !nuri::isValid(depthTexture)) {
     return Result<bool, std::string>::makeResult(false);
@@ -372,10 +368,7 @@ DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
   debugDraw3D_->clear();
   debugDraw3D_->setMatrix(frame.camera.proj * frame.camera.view);
 
-  const LightId *selectedLightIdPtr =
-      frame.channels.tryGet<LightId>(kFrameChannelSelectedLightId);
-  const LightId selectedLightId =
-      selectedLightIdPtr != nullptr ? *selectedLightIdPtr : kInvalidLightId;
+  const LightId selectedLightId = resolveSelectedLightId(frame);
   bool hasLines = false;
   const glm::mat4 view = frame.camera.view;
 
@@ -440,13 +433,15 @@ DebugLayer::buildSceneDebugLines(const RenderFrameContext &frame,
 }
 
 Result<bool, std::string>
-DebugLayer::buildRenderGraph(RenderFrameContext &frame,
-                             RenderGraphBuilder &graph) {
-  NURI_PROFILER_FUNCTION();
+DebugRenderer::prepareDebugPasses(RenderFrameContext &frame) {
+  preparedSceneDepthTexture_ = {};
+  preparedFrameColorTexture_ = {};
+  preparedSceneDepthGraphTexture_ = {};
+  preparedHasPriorColorPass_ = false;
+  preparedGridPass_ = false;
+  preparedSceneOverlayPass_ = false;
 
-  if (const bool *transparentStageEnabled =
-          frame.channels.tryGet<bool>(kFrameChannelTransparentStageEnabled);
-      transparentStageEnabled != nullptr && *transparentStageEnabled) {
+  if (frame.sharedResources.transparentStageEnabled) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -455,67 +450,18 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
   }
 
   const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
-  RenderGraphTextureId sceneDepthGraphTexture{};
-  if (const RenderGraphTextureId *publishedSceneDepth =
-          frame.channels.tryGet<RenderGraphTextureId>(
-              kFrameChannelSceneDepthGraphTexture);
-      publishedSceneDepth != nullptr) {
-    sceneDepthGraphTexture = *publishedSceneDepth;
-  }
-  TextureHandle frameColorTexture =
-      resolvePublishedTexture(frame.channels, kFrameChannelFrameColorTexture);
+  preparedSceneDepthGraphTexture_ = resolveSceneDepthGraphTexture(frame);
+  TextureHandle frameColorTexture = resolveFrameColorTexture(frame);
+  preparedSceneDepthTexture_ = sceneDepthTexture;
+  preparedFrameColorTexture_ = frameColorTexture;
+  preparedHasPriorColorPass_ = nuri::isValid(frameColorTexture);
 
   if (frame.settings->debug.grid) {
-    const bool hasPriorColorPass =
-        nuri::isValid(frameColorTexture) || graph.passCount() > 0;
-    const bool hasDepth = nuri::isValid(sceneDepthTexture);
     auto gridResult = prepareGridDraw(frame, sceneDepthTexture);
     if (gridResult.hasError()) {
       return gridResult;
     }
-
-    RenderGraphTextureId depthTextureId{};
-    if (hasDepth) {
-      if (nuri::isValid(sceneDepthGraphTexture)) {
-        depthTextureId = sceneDepthGraphTexture;
-      } else {
-        auto importResult =
-            graph.importTexture(sceneDepthTexture, "debug_depth_texture");
-        if (importResult.hasError()) {
-          return Result<bool, std::string>::makeError(importResult.error());
-        }
-        depthTextureId = importResult.value();
-      }
-    }
-
-    RenderGraphGraphicsPassDesc gridPass{};
-    gridPass.color = {.loadOp =
-                          hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
-                      .storeOp = StoreOp::Store,
-                      .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
-    if (nuri::isValid(frameColorTexture)) {
-      auto colorImportResult =
-          graph.importTexture(frameColorTexture, "debug_grid_color_texture");
-      if (colorImportResult.hasError()) {
-        return Result<bool, std::string>::makeError(colorImportResult.error());
-      }
-      gridPass.colorTexture = colorImportResult.value();
-    }
-    if (hasDepth) {
-      gridPass.depth = {.loadOp = LoadOp::Load,
-                        .storeOp = StoreOp::Store,
-                        .clearDepth = 1.0f,
-                        .clearStencil = 0};
-      gridPass.depthTexture = depthTextureId;
-    }
-    gridPass.draws = std::span<const DrawItem>(&gridDrawItem_, 1u);
-    gridPass.debugLabel = kGridPassLabel;
-    gridPass.debugColor = kGridPassDebugColor;
-
-    auto addResult = graph.addGraphicsPass(gridPass);
-    if (addResult.hasError()) {
-      return Result<bool, std::string>::makeError(addResult.error());
-    }
+    preparedGridPass_ = true;
   }
 
   float debugSortDepth = 0.0f;
@@ -524,56 +470,125 @@ DebugLayer::buildRenderGraph(RenderFrameContext &frame,
   if (buildLinesResult.hasError()) {
     return buildLinesResult;
   }
-  if (buildLinesResult.value()) {
-    auto linePassResult =
-        debugDraw3D_->buildGraphPass(frame.frameIndex, sceneDepthTexture);
-    if (linePassResult.hasError()) {
-      return Result<bool, std::string>::makeError(linePassResult.error());
-    }
-
-    DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
-    TextureHandle colorTexture =
-        resolvePublishedTexture(frame.channels, kFrameChannelFrameColorTexture);
-    if (!nuri::isValid(colorTexture)) {
-      colorTexture = pass.colorTextureHandle;
-    }
-    if (nuri::isValid(colorTexture)) {
-      auto colorImportResult =
-          graph.importTexture(colorTexture, "debug_pass_color_texture");
-      if (colorImportResult.hasError()) {
-        return Result<bool, std::string>::makeError(colorImportResult.error());
-      }
-      pass.desc.colorTexture = colorImportResult.value();
-    }
-    if (nuri::isValid(pass.depthTextureHandle)) {
-      const bool useDepthOverride =
-          nuri::isValid(sceneDepthTexture) &&
-          nuri::isValid(sceneDepthGraphTexture) &&
-          isSameTextureHandle(pass.depthTextureHandle, sceneDepthTexture);
-      if (useDepthOverride) {
-        pass.desc.depthTexture = sceneDepthGraphTexture;
-      } else {
-        auto depthImportResult = graph.importTexture(
-            pass.depthTextureHandle, "debug_pass_depth_texture");
-        if (depthImportResult.hasError()) {
-          return Result<bool, std::string>::makeError(
-              depthImportResult.error());
-        }
-        pass.desc.depthTexture = depthImportResult.value();
-      }
-    }
-    pass.desc.debugColor = kLightIconPassDebugColor;
-
-    auto addResult = graph.addGraphicsPass(pass.desc);
-    if (addResult.hasError()) {
-      return Result<bool, std::string>::makeError(addResult.error());
-    }
-  }
+  preparedSceneOverlayPass_ = buildLinesResult.value();
 
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> DebugLayer::buildTransparentStageContribution(
+bool DebugRenderer::hasPreparedDebugGridPass() const noexcept {
+  return preparedGridPass_;
+}
+
+bool DebugRenderer::hasPreparedDebugSceneOverlayPass() const noexcept {
+  return preparedSceneOverlayPass_;
+}
+
+Result<bool, std::string>
+DebugRenderer::appendDebugGridPass(RenderFrameContext &frame,
+                                   RenderGraphBuilder &graph) {
+  if (!preparedGridPass_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const bool hasDepth = nuri::isValid(preparedSceneDepthTexture_);
+  RenderGraphTextureId depthTextureId{};
+  if (hasDepth) {
+    if (nuri::isValid(preparedSceneDepthGraphTexture_)) {
+      depthTextureId = preparedSceneDepthGraphTexture_;
+    } else {
+      auto importResult = graph.importTexture(preparedSceneDepthTexture_,
+                                              "debug_depth_texture");
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      depthTextureId = importResult.value();
+    }
+  }
+
+  RenderGraphGraphicsPassDesc gridPass{};
+  gridPass.color = {.loadOp = preparedHasPriorColorPass_ ? LoadOp::Load
+                                                         : LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+  if (nuri::isValid(preparedFrameColorTexture_)) {
+    auto colorImportResult = graph.importTexture(preparedFrameColorTexture_,
+                                                 "debug_grid_color_texture");
+    if (colorImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(colorImportResult.error());
+    }
+    gridPass.colorTexture = colorImportResult.value();
+  }
+  if (hasDepth) {
+    gridPass.depth = {.loadOp = LoadOp::Load,
+                      .storeOp = StoreOp::Store,
+                      .clearDepth = 1.0f,
+                      .clearStencil = 0};
+    gridPass.depthTexture = depthTextureId;
+  }
+  gridPass.draws = std::span<const DrawItem>(&gridDrawItem_, 1u);
+  gridPass.debugLabel = kGridPassLabel;
+  gridPass.debugColor = kGridPassDebugColor;
+
+  auto addResult = graph.addGraphicsPass(gridPass);
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+DebugRenderer::appendDebugSceneOverlayPass(RenderFrameContext &frame,
+                                           RenderGraphBuilder &graph) {
+  if (!preparedSceneOverlayPass_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  auto linePassResult = debugDraw3D_->buildGraphPass(
+      frame.frameIndex, preparedSceneDepthTexture_);
+  if (linePassResult.hasError()) {
+    return Result<bool, std::string>::makeError(linePassResult.error());
+  }
+
+  DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
+  TextureHandle colorTexture = preparedFrameColorTexture_;
+  if (!nuri::isValid(colorTexture)) {
+    colorTexture = pass.colorTextureHandle;
+  }
+  if (nuri::isValid(colorTexture)) {
+    auto colorImportResult =
+        graph.importTexture(colorTexture, "debug_pass_color_texture");
+    if (colorImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(colorImportResult.error());
+    }
+    pass.desc.colorTexture = colorImportResult.value();
+  }
+  if (nuri::isValid(pass.depthTextureHandle)) {
+    const bool useDepthOverride =
+        nuri::isValid(preparedSceneDepthTexture_) &&
+        nuri::isValid(preparedSceneDepthGraphTexture_) &&
+        isSameTextureHandle(pass.depthTextureHandle,
+                            preparedSceneDepthTexture_);
+    if (useDepthOverride) {
+      pass.desc.depthTexture = preparedSceneDepthGraphTexture_;
+    } else {
+      auto depthImportResult = graph.importTexture(pass.depthTextureHandle,
+                                                   "debug_pass_depth_texture");
+      if (depthImportResult.hasError()) {
+        return Result<bool, std::string>::makeError(depthImportResult.error());
+      }
+      pass.desc.depthTexture = depthImportResult.value();
+    }
+  }
+  pass.desc.debugColor = kLightIconPassDebugColor;
+
+  auto addResult = graph.addGraphicsPass(pass.desc);
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
     RenderFrameContext &frame, TransparentStageContribution &out) {
   NURI_PROFILER_FUNCTION();
   out = {};

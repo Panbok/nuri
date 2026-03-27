@@ -2,9 +2,9 @@
 
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
-#include "nuri/gfx/layers/render_frame_context.h"
+#include "nuri/gfx/frame/render_frame_context.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
 
-#include "nuri/core/layer_stack.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/render_graph/render_graph_telemetry.h"
@@ -33,7 +33,7 @@ public:
   }
 
   Result<bool, std::string> render();
-  Result<bool, std::string> render(LayerStack &layers,
+  Result<bool, std::string> render(RenderPipeline &pipeline,
                                    RenderFrameContext &frameContext);
 
   void onResize(uint32_t width, uint32_t height);

@@ -14,7 +14,7 @@ resolveRenderableMaterial(const Renderable &renderable,
   }
 
   MaterialRef modelMaterial = modelRecord.materialForSubmesh(submeshIndex);
-  if (!isValid(modelMaterial) && modelRecord.model == nullptr) {
+  if (!isValid(modelMaterial)) {
     modelMaterial = modelRecord.materialForSource(submeshIndex);
   }
   if (isValid(modelMaterial)) {

@@ -4,46 +4,46 @@
 #include <memory_resource>
 #include <utility>
 
-#include "nuri/core/layer.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/frame/render_frame_context.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 
 #include <glm/glm.hpp>
 
 namespace nuri {
 
-using DebugLayerConfig = RuntimeDebugShaderConfig;
+using DebugRendererConfig = RuntimeDebugShaderConfig;
 
 class DebugDraw3D;
 class GPUDevice;
 class Pipeline;
 class Shader;
 
-class NURI_API DebugLayer final : public Layer {
+class NURI_API DebugRenderer {
 public:
-  explicit DebugLayer(
-      GPUDevice &gpu, DebugLayerConfig config,
+  explicit DebugRenderer(
+      GPUDevice &gpu, DebugRendererConfig config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  ~DebugLayer() override;
+  ~DebugRenderer();
 
-  DebugLayer(const DebugLayer &) = delete;
-  DebugLayer &operator=(const DebugLayer &) = delete;
-  DebugLayer(DebugLayer &&) = delete;
-  DebugLayer &operator=(DebugLayer &&) = delete;
+  DebugRenderer(const DebugRenderer &) = delete;
+  DebugRenderer &operator=(const DebugRenderer &) = delete;
+  DebugRenderer(DebugRenderer &&) = delete;
+  DebugRenderer &operator=(DebugRenderer &&) = delete;
 
-  static std::unique_ptr<DebugLayer>
-  create(GPUDevice &gpu, DebugLayerConfig config,
-         std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
-    return std::make_unique<DebugLayer>(gpu, std::move(config), memory);
-  }
-
-  void onDetach() override;
+  void onDetach();
+  Result<bool, std::string> prepareDebugPasses(RenderFrameContext &frame);
+  [[nodiscard]] bool hasPreparedDebugGridPass() const noexcept;
+  [[nodiscard]] bool hasPreparedDebugSceneOverlayPass() const noexcept;
+  Result<bool, std::string> appendDebugGridPass(RenderFrameContext &frame,
+                                                RenderGraphBuilder &graph);
   Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame,
-                   RenderGraphBuilder &graph) override;
+  appendDebugSceneOverlayPass(RenderFrameContext &frame,
+                              RenderGraphBuilder &graph);
   Result<bool, std::string>
   buildTransparentStageContribution(RenderFrameContext &frame,
-                                    TransparentStageContribution &out) override;
+                                    TransparentStageContribution &out);
 
 private:
   struct GridPushConstants {
@@ -65,12 +65,12 @@ private:
                              RenderGraphTextureId sceneDepthGraphTexture);
   [[nodiscard]] bool hasDebugWork(const RenderFrameContext &frame) const;
   [[nodiscard]] Result<bool, std::string>
-  buildSceneDebugLines(const RenderFrameContext &frame, TextureHandle depthTexture,
-                       float &outSortDepth);
+  buildSceneDebugLines(const RenderFrameContext &frame,
+                       TextureHandle depthTexture, float &outSortDepth);
   void resetGridState();
 
   GPUDevice &gpu_;
-  DebugLayerConfig config_{};
+  DebugRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<DebugDraw3D> debugDraw3D_;
   std::unique_ptr<Shader> gridShader_;
@@ -82,6 +82,13 @@ private:
 
   Format gridPipelineColorFormat_ = Format::Count;
   Format gridPipelineDepthFormat_ = Format::Count;
+
+  TextureHandle preparedSceneDepthTexture_{};
+  TextureHandle preparedFrameColorTexture_{};
+  RenderGraphTextureId preparedSceneDepthGraphTexture_{};
+  bool preparedHasPriorColorPass_ = false;
+  bool preparedGridPass_ = false;
+  bool preparedSceneOverlayPass_ = false;
 
   GridPushConstants gridPushConstants_{};
   DrawItem gridDrawItem_{};

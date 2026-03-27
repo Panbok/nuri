@@ -1,6 +1,6 @@
 #include "nuri/pch.h"
 
-#include "nuri/gfx/layers/scene_lighting_layer.h"
+#include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
 
 #include "nuri/core/profiling.h"
 #include "nuri/resources/gpu/resource_manager.h"
@@ -64,23 +64,21 @@ textureFilteringSettingsOrDefault(const RenderFrameContext &frame) {
 
 } // namespace
 
-SceneLightingLayer::SceneLightingLayer(GPUDevice &gpu) : gpu_(gpu) {}
+SceneLightingProvider::SceneLightingProvider(GPUDevice &gpu) : gpu_(gpu) {}
 
-SceneLightingLayer::~SceneLightingLayer() { onDetach(); }
-
-void SceneLightingLayer::onDetach() { destroyBuffer(); }
+SceneLightingProvider::~SceneLightingProvider() { destroyBuffer(); }
 
 Result<bool, std::string>
-SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
-                                     RenderGraphBuilder &) {
+SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   NURI_PROFILER_FUNCTION();
+  RenderFrameContext &frame = ctx.frame;
   if (frame.scene == nullptr) {
     return Result<bool, std::string>::makeError(
-        "SceneLightingLayer::buildRenderGraph: frame scene is null");
+        "SceneLightingProvider::prepare: frame scene is null");
   }
   if (frame.resources == nullptr) {
     return Result<bool, std::string>::makeError(
-        "SceneLightingLayer::buildRenderGraph: frame resources are null");
+        "SceneLightingProvider::prepare: frame resources are null");
   }
 
   const std::span<const DirectionalLightGpuData> directionalLights =
@@ -148,30 +146,23 @@ SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
   uint32_t sceneColorHalfResTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneColorQuarterResTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneColorSamplerId = 0u;
-  if (const TextureHandle *sceneColorTexture =
-          frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
-      sceneColorTexture != nullptr && nuri::isValid(*sceneColorTexture)) {
-    sceneColorTexId = gpu_.getTextureBindlessIndex(*sceneColorTexture);
+  if (nuri::isValid(ctx.shared.sceneColorTexture)) {
+    sceneColorTexId =
+        gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
     sceneColorSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
     if (sceneColorTexId != kInvalidTextureBindlessIndex) {
       flags |= kForwardSceneHasSceneColor;
     }
   }
-  if (const TextureHandle *sceneColorHalfResTexture =
-          frame.channels.tryGet<TextureHandle>(
-              kFrameChannelSceneColorHalfResTexture);
-      sceneColorHalfResTexture != nullptr &&
-      nuri::isValid(*sceneColorHalfResTexture)) {
+  if ((flags & kForwardSceneHasSceneColor) != 0u &&
+      nuri::isValid(ctx.shared.sceneColorHalfResTexture)) {
     sceneColorHalfResTexId =
-        gpu_.getTextureBindlessIndex(*sceneColorHalfResTexture);
+        gpu_.getTextureBindlessIndex(ctx.shared.sceneColorHalfResTexture);
   }
-  if (const TextureHandle *sceneColorQuarterResTexture =
-          frame.channels.tryGet<TextureHandle>(
-              kFrameChannelSceneColorQuarterResTexture);
-      sceneColorQuarterResTexture != nullptr &&
-      nuri::isValid(*sceneColorQuarterResTexture)) {
+  if ((flags & kForwardSceneHasSceneColor) != 0u &&
+      nuri::isValid(ctx.shared.sceneColorQuarterResTexture)) {
     sceneColorQuarterResTexId =
-        gpu_.getTextureBindlessIndex(*sceneColorQuarterResTexture);
+        gpu_.getTextureBindlessIndex(ctx.shared.sceneColorQuarterResTexture);
   }
   if (gpu_.getSwapchainFormat() != Format::RGBA8_SRGB) {
     flags |= kForwardSceneOutputLinearToSrgb;
@@ -181,8 +172,7 @@ SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
       gpu_.getBufferDeviceAddress(sceneDataBuffer_->handle());
   if (sceneDataBaseAddress == 0u) {
     return Result<bool, std::string>::makeError(
-        "SceneLightingLayer::buildRenderGraph: invalid scene data buffer "
-        "address");
+        "SceneLightingProvider::prepare: invalid scene data buffer address");
   }
   const uint64_t directionalLightBufferAddress =
       directionalLights.empty()
@@ -263,22 +253,20 @@ SceneLightingLayer::buildRenderGraph(RenderFrameContext &frame,
     cachedLightTransformVersion_ = frame.scene->lightTransformVersion();
   }
 
-  frame.channels.publish<ForwardSceneGpuData>(
-      kFrameChannelForwardSceneGpuData,
-      ForwardSceneGpuData{
-          .buffer = sceneDataBuffer_->handle(),
-          .frameDataAddress = sceneDataBaseAddress + layout.frameDataOffset,
-          .directionalLightBufferAddress = directionalLightBufferAddress,
-          .localLightBufferAddress = localLightBufferAddress,
-          .directionalLightCount = directionalLightCount,
-          .localLightCount = localLightCount,
-      });
+  ctx.shared.forwardSceneGpuData = ForwardSceneGpuData{
+      .buffer = sceneDataBuffer_->handle(),
+      .frameDataAddress = sceneDataBaseAddress + layout.frameDataOffset,
+      .directionalLightBufferAddress = directionalLightBufferAddress,
+      .localLightBufferAddress = localLightBufferAddress,
+      .directionalLightCount = directionalLightCount,
+      .localLightCount = localLightCount,
+  };
 
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
-SceneLightingLayer::ensureBufferCapacity(size_t requiredBytes) {
+SceneLightingProvider::ensureBufferCapacity(size_t requiredBytes) {
   const size_t requested =
       std::max(requiredBytes, sizeof(ForwardSceneFrameData));
   if (sceneDataBuffer_ && sceneDataBuffer_->valid() &&
@@ -300,7 +288,7 @@ SceneLightingLayer::ensureBufferCapacity(size_t requiredBytes) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void SceneLightingLayer::destroyBuffer() {
+void SceneLightingProvider::destroyBuffer() {
   if (sceneDataBuffer_ && sceneDataBuffer_->valid()) {
     gpu_.destroyBuffer(sceneDataBuffer_->handle());
   }

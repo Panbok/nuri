@@ -2,7 +2,6 @@
 
 #include "nuri/gfx/renderer.h"
 
-#include "nuri/core/layer_stack.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
@@ -52,9 +51,10 @@ Result<bool, std::string> Renderer::render() {
   return endFrameSequence(frameIndex);
 }
 
-Result<bool, std::string> Renderer::render(LayerStack &layers,
+Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
                                            RenderFrameContext &frameContext) {
   NURI_PROFILER_FUNCTION();
+  resetFrameSharedResources(frameContext);
   Result<bool, std::string> frameResult =
       beginFrameSequence(frameContext.frameIndex);
   if (frameResult.hasError()) {
@@ -62,21 +62,11 @@ Result<bool, std::string> Renderer::render(LayerStack &layers,
   }
 
   renderGraphBeginFrame(frameContext.frameIndex);
-
-  if (!layers.empty()) {
-    Result<bool, std::string> layerResult =
-        Result<bool, std::string>::makeResult(true);
-    {
-      NURI_PROFILER_ZONE("Renderer.layer_graph_build",
-                         NURI_PROFILER_COLOR_CMD_DRAW);
-      layerResult = layers.buildRenderGraph(frameContext, renderGraphBuilder_);
-      NURI_PROFILER_ZONE_END();
-    }
-    if (layerResult.hasError()) {
-      return Result<bool, std::string>::makeError(layerResult.error());
-    }
+  auto pipelineResult =
+      pipeline.buildRenderGraph(frameContext, resources_, renderGraphBuilder_);
+  if (pipelineResult.hasError()) {
+    return Result<bool, std::string>::makeError(pipelineResult.error());
   }
-
   return endFrameSequence(frameContext.frameIndex);
 }
 

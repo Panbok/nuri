@@ -1115,11 +1115,7 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
     return Result<bool, std::string>::makeResult(true);
   }
   const bool hasDepth = ::nuri::isValid(depthTexture);
-  if (const TextureHandle *publishedFrameColor =
-          frame.channels.tryGet<TextureHandle>(kFrameChannelFrameColorTexture);
-      publishedFrameColor != nullptr && ::nuri::isValid(*publishedFrameColor)) {
-    colorTexture = *publishedFrameColor;
-  }
+  colorTexture = resolveFrameColorTexture(frame);
 
   worldDraws_.clear();
   worldPcs_.clear();

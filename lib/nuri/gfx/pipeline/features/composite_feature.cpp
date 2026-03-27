@@ -1,8 +1,7 @@
 #include "nuri/pch.h"
 
-#include "nuri/gfx/layers/composite_layer.h"
+#include "nuri/gfx/pipeline/features/composite_feature.h"
 
-#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/shader.h"
 
@@ -33,41 +32,31 @@ RenderPipelineDesc compositePipelineDesc(Format colorFormat,
 
 } // namespace
 
-CompositeLayer::CompositeLayer(GPUDevice &gpu, CompositeLayerConfig config)
+CompositePass::CompositePass(GPUDevice &gpu, CompositeFeatureConfig config)
     : gpu_(gpu) {
   const std::filesystem::path basePath = config.shaderBasePath.empty()
                                              ? config.meshFragment.parent_path()
                                              : config.shaderBasePath;
-  vertexPath_ = basePath / "present_copy.vert";
+  vertexPath_ = basePath / "fullscreen_copy.vert";
   fragmentPath_ = basePath / "fullscreen_copy.frag";
 }
 
-CompositeLayer::~CompositeLayer() { onDetach(); }
-
-void CompositeLayer::onAttach() {
-  auto initResult = ensureInitialized();
-  if (initResult.hasError()) {
-    NURI_LOG_WARNING("CompositeLayer::onAttach: %s",
-                     initResult.error().c_str());
-  }
-}
-
-void CompositeLayer::onDetach() {
+CompositePass::~CompositePass() {
   destroyBuffers();
   destroyPipelineState();
   destroyShaders();
   shader_.reset();
-  initialized_ = false;
 }
 
-Result<bool, std::string>
-CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
-                                 RenderGraphBuilder &graph) {
-  NURI_PROFILER_FUNCTION();
+bool CompositePass::isEnabled(const FrameBuildContext &ctx) const {
+  return nuri::isValid(ctx.shared.frameColorTexture);
+}
 
-  const TextureHandle *frameColorTexture =
-      frame.channels.tryGet<TextureHandle>(kFrameChannelFrameColorTexture);
-  if (frameColorTexture == nullptr || !nuri::isValid(*frameColorTexture)) {
+Result<bool, std::string> CompositePass::prepare(FrameBuildContext &ctx) {
+  NURI_PROFILER_FUNCTION();
+  hasPreparedDraw_ = false;
+  sourceFrameColor_ = ctx.shared.frameColorTexture;
+  if (!nuri::isValid(sourceFrameColor_)) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -85,11 +74,10 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
   }
 
   const uint32_t sceneColorTexId =
-      gpu_.getTextureBindlessIndex(*frameColorTexture);
+      gpu_.getTextureBindlessIndex(sourceFrameColor_);
   if (sceneColorTexId == kInvalidTextureBindlessIndex) {
     return Result<bool, std::string>::makeError(
-        "CompositeLayer::buildRenderGraph: invalid frame color bindless "
-        "index");
+        "CompositePass::prepare: invalid frame color bindless index");
   }
 
   frameData_ = ForwardSceneFrameData{
@@ -119,7 +107,7 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
     Result<bool, std::string> updateResult =
         [&]() -> Result<bool, std::string> {
       std::optional<Result<bool, std::string>> result;
-      NURI_PROFILER_ZONE("CompositeLayer.frame_data_upload",
+      NURI_PROFILER_ZONE("CompositePass.frame_data_upload",
                          NURI_PROFILER_COLOR_CMD_COPY);
       const std::span<const std::byte> frameBytes{
           reinterpret_cast<const std::byte *>(&frameData_), sizeof(frameData_)};
@@ -138,25 +126,35 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
       gpu_.getBufferDeviceAddress(frameBuffer_->handle());
   if (pushConstants_.frameDataAddress == 0u) {
     return Result<bool, std::string>::makeError(
-        "CompositeLayer::buildRenderGraph: invalid frame data address");
+        "CompositePass::prepare: invalid frame data address");
+  }
+
+  drawItem_ = DrawItem{};
+  drawItem_.pipeline = pipelineHandle_;
+  drawItem_.vertexCount = 3u;
+  drawItem_.instanceCount = 1u;
+  drawItem_.pushConstants = std::span<const std::byte>(
+      reinterpret_cast<const std::byte *>(&pushConstants_),
+      sizeof(pushConstants_));
+  drawItem_.debugLabel = kCompositeDrawLabel;
+  drawItem_.debugColor = kCompositeDrawDebugColor;
+  hasPreparedDraw_ = true;
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> CompositePass::build(FrameBuildContext &ctx) {
+  NURI_PROFILER_FUNCTION();
+  if (!hasPreparedDraw_ || !nuri::isValid(sourceFrameColor_)) {
+    return Result<bool, std::string>::makeResult(true);
   }
 
   Result<bool, std::string> passBuildResult =
       [&]() -> Result<bool, std::string> {
     std::optional<Result<bool, std::string>> result;
-    NURI_PROFILER_ZONE("CompositeLayer.pass_build",
+    NURI_PROFILER_ZONE("CompositePass.pass_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     do {
-      drawItem_ = DrawItem{};
-      drawItem_.pipeline = pipelineHandle_;
-      drawItem_.vertexCount = 3u;
-      drawItem_.instanceCount = 1u;
-      drawItem_.pushConstants = std::span<const std::byte>(
-          reinterpret_cast<const std::byte *>(&pushConstants_),
-          sizeof(pushConstants_));
-      drawItem_.debugLabel = kCompositeDrawLabel;
-      drawItem_.debugColor = kCompositeDrawDebugColor;
-
       RenderGraphGraphicsPassDesc passDesc{};
       passDesc.color = {.loadOp = LoadOp::Clear,
                         .storeOp = StoreOp::Store,
@@ -165,36 +163,36 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
       passDesc.debugLabel = kCompositePassLabel;
       passDesc.debugColor = kCompositePassDebugColor;
 
-      auto addResult = graph.addGraphicsPass(passDesc);
+      auto addResult = ctx.graph.addGraphicsPass(passDesc);
       if (addResult.hasError()) {
         result.emplace(Result<bool, std::string>::makeError(addResult.error()));
         break;
       }
 
-      auto bufferImportResult = graph.importBuffer(
+      auto bufferImportResult = ctx.graph.importBuffer(
           frameBuffer_->handle(), "composite_frame_data_buffer");
       if (bufferImportResult.hasError()) {
         result.emplace(
             Result<bool, std::string>::makeError(bufferImportResult.error()));
         break;
       }
-      auto bufferReadResult =
-          graph.addBufferRead(addResult.value(), bufferImportResult.value());
+      auto bufferReadResult = ctx.graph.addBufferRead(
+          addResult.value(), bufferImportResult.value());
       if (bufferReadResult.hasError()) {
         result.emplace(
             Result<bool, std::string>::makeError(bufferReadResult.error()));
         break;
       }
 
-      auto textureImportResult =
-          graph.importTexture(*frameColorTexture, "composite_frame_color_read");
+      auto textureImportResult = ctx.graph.importTexture(
+          sourceFrameColor_, "composite_frame_color_read");
       if (textureImportResult.hasError()) {
         result.emplace(
             Result<bool, std::string>::makeError(textureImportResult.error()));
         break;
       }
-      auto readResult =
-          graph.addTextureRead(addResult.value(), textureImportResult.value());
+      auto readResult = ctx.graph.addTextureRead(addResult.value(),
+                                                 textureImportResult.value());
       if (readResult.hasError()) {
         result.emplace(
             Result<bool, std::string>::makeError(readResult.error()));
@@ -207,14 +205,10 @@ CompositeLayer::buildRenderGraph(RenderFrameContext &frame,
     return std::move(*result);
   }();
 
-  if (passBuildResult.hasError()) {
-    return passBuildResult;
-  }
-
-  return Result<bool, std::string>::makeResult(true);
+  return passBuildResult;
 }
 
-Result<bool, std::string> CompositeLayer::ensureInitialized() {
+Result<bool, std::string> CompositePass::ensureInitialized() {
   if (initialized_) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -232,12 +226,12 @@ Result<bool, std::string> CompositeLayer::ensureInitialized() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> CompositeLayer::createShaders() {
+Result<bool, std::string> CompositePass::createShaders() {
   destroyShaders();
   shader_ = Shader::create("frame_composite", gpu_);
   if (!shader_) {
     return Result<bool, std::string>::makeError(
-        "CompositeLayer::createShaders: failed to create shader wrapper");
+        "CompositePass::createShaders: failed to create shader wrapper");
   }
 
   auto vertexResult =
@@ -256,14 +250,14 @@ Result<bool, std::string> CompositeLayer::createShaders() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> CompositeLayer::ensurePipeline() {
+Result<bool, std::string> CompositePass::ensurePipeline() {
   const Format colorFormat = gpu_.getSwapchainFormat();
   if (nuri::isValid(pipelineHandle_) && pipelineColorFormat_ == colorFormat) {
     return Result<bool, std::string>::makeResult(true);
   }
   if (!nuri::isValid(vertexShader_) || !nuri::isValid(fragmentShader_)) {
     return Result<bool, std::string>::makeError(
-        "CompositeLayer::ensurePipeline: vertex or fragment shader handle is "
+        "CompositePass::ensurePipeline: vertex or fragment shader handle is "
         "invalid");
   }
 
@@ -281,7 +275,7 @@ Result<bool, std::string> CompositeLayer::ensurePipeline() {
 }
 
 Result<bool, std::string>
-CompositeLayer::ensureFrameBufferCapacity(size_t requiredBytes) {
+CompositePass::ensureFrameBufferCapacity(size_t requiredBytes) {
   const size_t requested =
       std::max(requiredBytes, sizeof(ForwardSceneFrameData));
   if (frameBuffer_ && frameBuffer_->valid() &&
@@ -306,7 +300,7 @@ CompositeLayer::ensureFrameBufferCapacity(size_t requiredBytes) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-void CompositeLayer::destroyPipelineState() {
+void CompositePass::destroyPipelineState() {
   if (nuri::isValid(pipelineHandle_)) {
     gpu_.destroyRenderPipeline(pipelineHandle_);
   }
@@ -314,7 +308,7 @@ void CompositeLayer::destroyPipelineState() {
   pipelineColorFormat_ = Format::Count;
 }
 
-void CompositeLayer::destroyShaders() {
+void CompositePass::destroyShaders() {
   if (nuri::isValid(vertexShader_)) {
     gpu_.destroyShaderModule(vertexShader_);
   }
@@ -325,7 +319,7 @@ void CompositeLayer::destroyShaders() {
   fragmentShader_ = {};
 }
 
-void CompositeLayer::destroyBuffers() {
+void CompositePass::destroyBuffers() {
   if (frameBuffer_ && frameBuffer_->valid()) {
     gpu_.destroyBuffer(frameBuffer_->handle());
   }
@@ -336,6 +330,15 @@ void CompositeLayer::destroyBuffers() {
   uploadedFrameData_ = {};
   pushConstants_ = {};
   drawItem_ = {};
+  sourceFrameColor_ = {};
+}
+
+CompositeFeature::CompositeFeature(GPUDevice &gpu,
+                                   CompositeFeatureConfig config)
+    : pass_(gpu, std::move(config)) {}
+
+std::span<RenderFeaturePass *const> CompositeFeature::passes() noexcept {
+  return passes_;
 }
 
 } // namespace nuri

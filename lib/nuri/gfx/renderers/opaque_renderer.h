@@ -1,12 +1,12 @@
 #pragma once
 
-#include "nuri/core/layer.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/layers/instance_data.h"
 #include "nuri/gfx/pipeline.h"
 #include "nuri/gfx/render_graph/render_graph.h"
+#include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
@@ -27,38 +27,36 @@
 
 namespace nuri {
 
-using OpaqueLayerConfig = RuntimeOpaqueShaderConfig;
+using OpaqueRendererConfig = RuntimeOpaqueShaderConfig;
 class ResourceManager;
 
-class NURI_API OpaqueLayer final : public Layer {
+class NURI_API OpaqueRenderer {
 public:
-  explicit OpaqueLayer(
-      GPUDevice &gpu, OpaqueLayerConfig config,
+  explicit OpaqueRenderer(
+      GPUDevice &gpu, OpaqueRendererConfig config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  ~OpaqueLayer() override;
+  ~OpaqueRenderer();
 
-  OpaqueLayer(const OpaqueLayer &) = delete;
-  OpaqueLayer &operator=(const OpaqueLayer &) = delete;
-  OpaqueLayer(OpaqueLayer &&) = delete;
-  OpaqueLayer &operator=(OpaqueLayer &&) = delete;
+  OpaqueRenderer(const OpaqueRenderer &) = delete;
+  OpaqueRenderer &operator=(const OpaqueRenderer &) = delete;
+  OpaqueRenderer(OpaqueRenderer &&) = delete;
+  OpaqueRenderer &operator=(OpaqueRenderer &&) = delete;
 
-  static std::unique_ptr<OpaqueLayer>
-  create(GPUDevice &gpu, OpaqueLayerConfig config,
-         std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
-    return std::make_unique<OpaqueLayer>(gpu, std::move(config), memory);
-  }
-
-  void onAttach() override;
-  void onDetach() override;
-  void onResize(int32_t width, int32_t height) override;
-  Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame,
-                   RenderGraphBuilder &graph) override;
+  void onAttach();
+  void onDetach();
+  void onResize(int32_t width, int32_t height);
+  Result<bool, std::string> prepareOpaqueGraphPasses(RenderFrameContext &frame);
+  [[nodiscard]] bool hasPreparedOpaqueMainPasses() const noexcept;
+  [[nodiscard]] bool hasPreparedOpaquePickPasses() const noexcept;
+  Result<bool, std::string> appendOpaqueMainPasses(RenderFrameContext &frame,
+                                                   RenderGraphBuilder &graph);
+  Result<bool, std::string> appendOpaquePickPasses(RenderFrameContext &frame,
+                                                   RenderGraphBuilder &graph);
 
 private:
   using FrameData = ForwardSceneFrameData;
   static_assert(sizeof(FrameData) == 224,
-                "OpaqueLayer::FrameData must match shader FrameDataBuffer "
+                "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
   struct PushConstants {
@@ -78,8 +76,9 @@ private:
     float tessMaxFactor = 6.0f;
     uint32_t debugVisualizationMode = 0;
   };
-  static_assert(sizeof(PushConstants) <= 128,
-                "OpaqueLayer::PushConstants exceeds Vulkan minimum guarantee");
+  static_assert(
+      sizeof(PushConstants) <= 128,
+      "OpaqueRenderer::PushConstants exceeds Vulkan minimum guarantee");
 
   struct RenderableTemplate {
     const Renderable *renderable = nullptr;
@@ -133,14 +132,52 @@ private:
   };
 
   struct PreparedGraphPass {
+    struct DependencyBufferBinding {
+      uint32_t dependencyIndex = UINT32_MAX;
+      BufferHandle buffer{};
+      RenderGraphAccessMode mode =
+          RenderGraphAccessMode::Read | RenderGraphAccessMode::Write;
+    };
+
+    struct DependencyTextureBinding {
+      TextureHandle texture{};
+      RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
+    };
+
+    struct PreDispatchDependencyBinding {
+      uint32_t preDispatchIndex = UINT32_MAX;
+      uint32_t dependencyIndex = UINT32_MAX;
+      BufferHandle buffer{};
+      RenderGraphAccessMode mode =
+          RenderGraphAccessMode::Read | RenderGraphAccessMode::Write;
+    };
+
+    struct DrawBufferBinding {
+      uint32_t drawIndex = UINT32_MAX;
+      RenderGraphDrawBufferBindingTarget target =
+          RenderGraphDrawBufferBindingTarget::Vertex;
+      BufferHandle buffer{};
+      RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
+    };
+
     RenderGraphGraphicsPassDesc desc{};
     TextureHandle colorTextureHandle{};
     TextureHandle depthTextureHandle{};
+    std::pmr::vector<DependencyBufferBinding> dependencyBufferBindings;
+    std::pmr::vector<DependencyTextureBinding> dependencyTextureBindings;
+    std::pmr::vector<PreDispatchDependencyBinding>
+        preDispatchDependencyBindings;
+    std::pmr::vector<DrawBufferBinding> drawBufferBindings;
     bool hasDraws = false;
     bool hasPreDispatch = false;
     bool hasIndirectDraws = false;
     bool isMainPass = false;
     bool isPickPass = false;
+
+    explicit PreparedGraphPass(
+        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : dependencyBufferBindings(memory), dependencyTextureBindings(memory),
+          preDispatchDependencyBindings(memory), drawBufferBindings(memory) {}
   };
 
   struct IndirectPackCache {
@@ -213,6 +250,13 @@ private:
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
+  Result<bool, std::string>
+  appendPreparedGraphPass(RenderFrameContext &frame, RenderGraphBuilder &graph,
+                          const PreparedGraphPass &pass, uint32_t safeWidth,
+                          uint32_t safeHeight);
+  void cachePreparedGraphPassMetadata(PreparedGraphPass &pass) const;
+  [[nodiscard]] bool
+  shouldPublishSceneDepthGraphTexture(const RenderFrameContext &frame) const;
   [[nodiscard]] RenderPipelineHandle selectMeshPipeline(bool doubleSided,
                                                         bool tessellated) const;
   [[nodiscard]] RenderPipelineHandle
@@ -241,7 +285,7 @@ private:
   void destroyBuffers();
 
   GPUDevice &gpu_;
-  OpaqueLayerConfig config_{};
+  OpaqueRendererConfig config_{};
   std::unique_ptr<Shader> meshShader_;
   std::unique_ptr<Shader> meshTessShader_;
   std::unique_ptr<Shader> meshDebugOverlayShader_;

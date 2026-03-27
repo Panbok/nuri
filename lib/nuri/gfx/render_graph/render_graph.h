@@ -80,6 +80,65 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   bool borrowPayload = false;
 };
 
+enum class RenderGraphDrawBufferBindingTarget : uint8_t {
+  Vertex = 0,
+  Index = 1,
+  Indirect = 2,
+  IndirectCount = 3,
+};
+
+struct NURI_API RenderGraphPreparedDependencyBufferBinding {
+  uint32_t dependencyIndex = UINT32_MAX;
+  RenderGraphBufferId buffer{};
+  RenderGraphAccessMode mode =
+      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write;
+};
+
+struct NURI_API RenderGraphPreparedDependencyTextureBinding {
+  RenderGraphTextureId texture{};
+  RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
+};
+
+struct NURI_API RenderGraphPreparedPreDispatchDependencyBinding {
+  uint32_t preDispatchIndex = UINT32_MAX;
+  uint32_t dependencyIndex = UINT32_MAX;
+  RenderGraphBufferId buffer{};
+  RenderGraphAccessMode mode =
+      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write;
+};
+
+struct NURI_API RenderGraphPreparedDrawBufferBinding {
+  uint32_t drawIndex = UINT32_MAX;
+  RenderGraphDrawBufferBindingTarget target =
+      RenderGraphDrawBufferBindingTarget::Vertex;
+  RenderGraphBufferId buffer{};
+  RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
+};
+
+struct NURI_API RenderGraphPreparedGraphicsPassDesc {
+  AttachmentColor color{};
+  RenderGraphTextureId colorTexture{};
+  AttachmentDepth depth{};
+  RenderGraphTextureId depthTexture{};
+  bool useViewport = false;
+  Viewport viewport{};
+  std::span<const ComputeDispatchItem> preDispatches{};
+  std::span<const BufferHandle> dependencyBuffers{};
+  std::span<const DrawItem> draws{};
+  std::span<const RenderGraphPreparedDependencyBufferBinding>
+      dependencyBufferBindings{};
+  std::span<const RenderGraphPreparedDependencyTextureBinding>
+      dependencyTextureBindings{};
+  std::span<const RenderGraphPreparedPreDispatchDependencyBinding>
+      preDispatchDependencyBindings{};
+  std::span<const RenderGraphPreparedDrawBufferBinding> drawBufferBindings{};
+  std::string_view debugLabel{};
+  uint32_t debugColor = 0xffffffffu;
+  bool markColorAsFrameOutput = false;
+  bool markImplicitOutputSideEffect = true;
+  bool borrowPayload = false;
+};
+
 struct NURI_API RecordedGraphicsPassMeta {
   uint32_t orderedPassIndex = UINT32_MAX;
   uint32_t declaredPassIndex = UINT32_MAX;
@@ -375,6 +434,8 @@ public:
   addBufferWrite(RenderGraphPassId pass, RenderGraphBufferId buffer);
   [[nodiscard]] Result<RenderGraphPassId, std::string>
   addGraphicsPass(const RenderGraphGraphicsPassDesc &desc);
+  [[nodiscard]] Result<RenderGraphPassId, std::string>
+  addPreparedGraphicsPass(const RenderGraphPreparedGraphicsPassDesc &desc);
   [[nodiscard]] Result<bool, std::string>
   bindPassColorTexture(RenderGraphPassId pass, RenderGraphTextureId texture);
   [[nodiscard]] Result<bool, std::string>
@@ -514,6 +575,9 @@ private:
   [[nodiscard]] Result<bool, std::string>
   applyImplicitPassRoots(RenderGraphPassId pass,
                          const RenderGraphGraphicsPassDesc &desc);
+  [[nodiscard]] Result<bool, std::string> applyGraphicsPassRoots(
+      RenderGraphPassId pass, RenderGraphTextureId colorTexture,
+      bool markColorAsFrameOutput, bool markImplicitOutputSideEffect);
   [[nodiscard]] Result<RenderGraphPassId, std::string>
   addPassRecord(RenderPass pass, std::string_view debugName);
   [[nodiscard]] Result<bool, std::string>

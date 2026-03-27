@@ -1,11 +1,30 @@
+#include "nuri/pch.h"
+
 #include "nuri/core/application.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/pipeline/features/composite_feature.h"
+#include "nuri/gfx/pipeline/features/debug_feature.h"
+#include "nuri/gfx/pipeline/features/opaque_feature.h"
+#include "nuri/gfx/pipeline/features/skybox_feature.h"
+#include "nuri/gfx/pipeline/features/transmission_feature.h"
+#include "nuri/gfx/pipeline/features/transparent_feature.h"
+#include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
 #include "nuri/gfx/renderer.h"
 
 namespace nuri {
+
+ApplicationConfig makeApplicationConfig(const RuntimeConfig &config) {
+  return ApplicationConfig{
+      .title = config.window.title,
+      .width = config.window.width,
+      .height = config.window.height,
+      .windowMode = config.window.mode,
+      .shaderConfig = config.shaders,
+  };
+}
 
 Application::LogLifetimeGuard::LogLifetimeGuard(const LogConfig &config) {
   Log::initialize(config);
@@ -31,9 +50,8 @@ LogConfig Application::makeDefaultLogConfig() {
 Application::Application(const ApplicationConfig &config)
     : logLifetimeGuard_(makeDefaultLogConfig()), appConfig_(config),
       width_(appConfig_.width), height_(appConfig_.height),
-      windowMode_(appConfig_.windowMode),
-      layerStack_(&layerMemory_),
-      eventManager_(eventMemory_), input_(eventManager_) {
+      windowMode_(appConfig_.windowMode), eventManager_(eventMemory_),
+      input_(eventManager_) {
   inputDispatchSubscription_ = eventManager_.subscribe<InputEvent>(
       EventChannel::Input, &Application::dispatchInputEvent, this);
 
@@ -56,6 +74,12 @@ Application::Application(const ApplicationConfig &config)
   NURI_ASSERT(gpu_ != nullptr, "Failed to create GPU device");
   renderer_ = Renderer::create(*gpu_, rendererMemory_);
   NURI_ASSERT(renderer_ != nullptr, "Failed to create renderer");
+  renderPipeline_ = std::make_unique<RenderPipeline>(&rendererMemory_);
+  NURI_ASSERT(renderPipeline_ != nullptr, "Failed to create render pipeline");
+  auto pipelineResult = registerConfiguredDefaultRenderPipeline();
+  NURI_ASSERT(!pipelineResult.hasError(),
+              "Failed to register default render pipeline: %s",
+              pipelineResult.error().c_str());
 }
 
 Application::Application(const std::string &title, std::int32_t width,
@@ -65,11 +89,12 @@ Application::Application(const std::string &title, std::int32_t width,
           .width = width,
           .height = height,
           .windowMode = windowMode,
+          .shaderConfig = std::nullopt,
       }) {}
 
 Application::~Application() {
   (void)eventManager_.unsubscribe(inputDispatchSubscription_);
-  layerStack_.clear();
+  renderPipeline_.reset();
   renderer_.reset();
   gpu_.reset();
   window_.reset();
@@ -125,7 +150,6 @@ void Application::run() {
       height_ = newHeight;
       onResize(width_, height_);
       renderer_->onResize(width_, height_);
-      layerStack_.onResize(width_, height_);
       NURI_PROFILER_ZONE_END();
     }
 
@@ -137,12 +161,6 @@ void Application::run() {
       onUpdate(deltaTime);
       NURI_PROFILER_ZONE_END();
     }
-    {
-      NURI_PROFILER_ZONE("LayerStack::onUpdate", NURI_PROFILER_COLOR_SUBMIT);
-      layerStack_.onUpdate(deltaTime);
-      NURI_PROFILER_ZONE_END();
-    }
-
     {
       NURI_PROFILER_ZONE("onDraw", NURI_PROFILER_COLOR_CMD_DRAW);
       onDraw();
@@ -170,9 +188,15 @@ Renderer &Application::getRenderer() { return *renderer_; }
 
 const Renderer &Application::getRenderer() const { return *renderer_; }
 
-LayerStack &Application::getLayerStack() { return layerStack_; }
+RenderPipeline &Application::getRenderPipeline() {
+  NURI_ASSERT(renderPipeline_ != nullptr, "Render pipeline is null");
+  return *renderPipeline_;
+}
 
-const LayerStack &Application::getLayerStack() const { return layerStack_; }
+const RenderPipeline &Application::getRenderPipeline() const {
+  NURI_ASSERT(renderPipeline_ != nullptr, "Render pipeline is null");
+  return *renderPipeline_;
+}
 
 EventManager &Application::getEventManager() { return eventManager_; }
 
@@ -194,10 +218,15 @@ bool Application::dispatchInputEvent(const InputEvent &event, void *user) {
 }
 
 bool Application::handleInputEvent(const InputEvent &event) {
-  if (layerStack_.onInput(event)) {
-    return true;
-  }
   return onInput(event);
+}
+
+Result<bool, std::string>
+Application::registerConfiguredDefaultRenderPipeline() {
+  if (renderPipeline_ == nullptr || !appConfig_.shaderConfig.has_value()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  return registerDefaultRenderPipeline(*appConfig_.shaderConfig);
 }
 
 bool Application::onInput(const InputEvent &event) {
@@ -210,6 +239,31 @@ bool Application::onInput(const InputEvent &event) {
     return true;
   }
   return false;
+}
+
+Result<bool, std::string> Application::registerDefaultRenderPipeline(
+    const RuntimeShaderConfig &shaderConfig) {
+  if (renderPipeline_ == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "Application::registerDefaultRenderPipeline: render pipeline is null");
+  }
+
+  renderPipeline_->addProvider(
+      std::make_unique<SceneLightingProvider>(getGPU()));
+  renderPipeline_->addFeature(
+      std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
+  renderPipeline_->addFeature(std::make_unique<OpaqueFeature>(
+      getGPU(), shaderConfig.opaque, layerMemoryResource()));
+  renderPipeline_->addFeature(std::make_unique<TransmissionFeature>(
+      getGPU(), shaderConfig.opaque, layerMemoryResource()));
+  renderPipeline_->addFeature(std::make_unique<TransparentFeature>(
+      getGPU(), shaderConfig.opaque, layerMemoryResource()));
+  renderPipeline_->addFeature(std::make_unique<DebugFeature>(
+      getGPU(), shaderConfig.debugGrid, layerMemoryResource()));
+  renderPipeline_->addFeature(
+      std::make_unique<CompositeFeature>(getGPU(), shaderConfig.opaque));
+
+  return Result<bool, std::string>::makeResult(true);
 }
 
 } // namespace nuri

@@ -1,16 +1,17 @@
 #pragma once
 
-#include "nuri/core/layer.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/layers/instance_data.h"
-#include "nuri/gfx/layers/render_frame_context.h"
+#include "nuri/gfx/render_graph/render_graph.h"
+#include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/scene/render_scene.h"
+
 
 #include <cstdint>
 #include <filesystem>
@@ -24,42 +25,40 @@
 
 namespace nuri {
 
-using TransmissionLayerConfig = RuntimeOpaqueShaderConfig;
+using TransparentRendererConfig = RuntimeOpaqueShaderConfig;
 
 class ResourceManager;
 class Shader;
 
-class NURI_API TransmissionLayer final : public Layer {
+class NURI_API TransparentRenderer {
 public:
-  explicit TransmissionLayer(
-      GPUDevice &gpu, TransmissionLayerConfig config,
+  explicit TransparentRenderer(
+      GPUDevice &gpu, TransparentRendererConfig config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
-  ~TransmissionLayer() override;
+  ~TransparentRenderer();
 
-  TransmissionLayer(const TransmissionLayer &) = delete;
-  TransmissionLayer &operator=(const TransmissionLayer &) = delete;
-  TransmissionLayer(TransmissionLayer &&) = delete;
-  TransmissionLayer &operator=(TransmissionLayer &&) = delete;
+  TransparentRenderer(const TransparentRenderer &) = delete;
+  TransparentRenderer &operator=(const TransparentRenderer &) = delete;
+  TransparentRenderer(TransparentRenderer &&) = delete;
+  TransparentRenderer &operator=(TransparentRenderer &&) = delete;
 
-  static std::unique_ptr<TransmissionLayer>
-  create(GPUDevice &gpu, TransmissionLayerConfig config,
-         std::pmr::memory_resource *memory = std::pmr::get_default_resource()) {
-    return std::make_unique<TransmissionLayer>(gpu, std::move(config), memory);
-  }
-
-  void onAttach() override;
-  void onDetach() override;
-  void publishFrameData(RenderFrameContext &frame) override;
+  void onAttach();
+  void onDetach();
+  void publishFrameData(RenderFrameContext &frame);
+  Result<bool, std::string> prepareTransparentPasses(RenderFrameContext &frame);
   Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame,
-                   RenderGraphBuilder &graph) override;
+  appendTransparentMainPass(RenderFrameContext &frame,
+                            RenderGraphBuilder &graph);
+  Result<bool, std::string>
+  appendTransparentPickPass(RenderFrameContext &frame,
+                            RenderGraphBuilder &graph);
 
 private:
   using FrameData = ForwardSceneFrameData;
   static_assert(sizeof(FrameData) == 224,
-                "TransmissionLayer::FrameData must match shader layout");
+                "TransparentRenderer::FrameData must match shader layout");
 
-  struct MeshPushConstants {
+  struct PushConstants {
     uint64_t frameDataAddress = 0;
     uint64_t vertexBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
@@ -73,24 +72,15 @@ private:
     float tessNearDistance = 1.0f;
     float tessFarDistance = 8.0f;
     float tessMinFactor = 1.0f;
-    float tessMaxFactor = 1.0f;
+    float tessMaxFactor = 6.0f;
     uint32_t debugVisualizationMode = 0;
   };
-  static_assert(
-      sizeof(MeshPushConstants) <= 128,
-      "TransmissionLayer::MeshPushConstants exceeds Vulkan guarantee");
-
-  struct CopyPushConstants {
-    uint32_t sourceTexId = 0;
-    uint32_t sourceSamplerId = 0;
-    uint32_t flags = 0;
-    uint32_t reserved0 = 0;
-  };
-  static_assert(
-      sizeof(CopyPushConstants) <= 128,
-      "TransmissionLayer::CopyPushConstants exceeds Vulkan guarantee");
+  static_assert(sizeof(PushConstants) <= 128,
+                "TransparentRenderer::PushConstants exceeds Vulkan guarantee");
 
   struct MeshDrawTemplate {
+    // These pointers reference scene-owned topology and remain valid only
+    // while RenderScene::topologyVersion() is unchanged.
     const Renderable *renderable = nullptr;
     const Submesh *submesh = nullptr;
     uint32_t submeshIndex = 0;
@@ -117,16 +107,19 @@ private:
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
-  Result<bool, std::string> ensureSceneColorTexture();
-  [[nodiscard]] TextureHandle
-  currentSceneColorTexture(uint64_t frameIndex) const;
-  [[nodiscard]] TextureHandle currentSceneColorTextureMip(uint64_t frameIndex,
-                                                          uint32_t level) const;
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
                                               uint32_t materialCount);
   Result<bool, std::string>
   rebuildMaterialTextureAccessCache(const ResourceManager &resources);
+  Result<bool, std::string> collectContributorDraws(RenderFrameContext &frame);
+  Result<bool, std::string> appendTransparentPass(
+      RenderGraphBuilder &graph, TextureHandle colorTexture,
+      TextureHandle depthTexture, RenderGraphTextureId sceneDepthGraphTexture,
+      std::span<const TransparentStageSortableDraw> sortableDraws,
+      std::span<const DrawItem> fixedDraws,
+      std::span<const TextureHandle> textureReads,
+      std::span<const BufferHandle> dependencyBuffers);
   void collectEnvironmentTextureReads(const RenderScene &scene,
                                       const ResourceManager &resources);
   void resetCachedState();
@@ -134,30 +127,31 @@ private:
   void destroyPipelineState();
   void destroyShaders();
   void destroyBuffers();
-  [[nodiscard]] bool hasTransmissionContent(const RenderFrameContext &frame);
+  static void
+  sortTransparentDraws(std::span<TransparentStageSortableDraw> draws);
   [[nodiscard]] RenderPipelineHandle selectMeshPipeline(bool doubleSided) const;
+  [[nodiscard]] RenderPipelineHandle selectPickPipeline(bool doubleSided) const;
 
   GPUDevice &gpu_;
-  TransmissionLayerConfig config_{};
+  TransparentRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> meshShader_;
-  std::unique_ptr<Shader> copyShader_;
+  std::unique_ptr<Shader> meshPickShader_;
   std::unique_ptr<Buffer> materialBuffer_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshFragmentShader_{};
-  ShaderHandle copyVertexShader_{};
-  ShaderHandle copyFragmentShader_{};
+  ShaderHandle meshPickFragmentShader_{};
   RenderPipelineHandle meshPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle copyPipelineHandle_{};
+  RenderPipelineHandle meshPickPipelineHandle_{};
+  RenderPipelineHandle meshPickDoubleSidedPipelineHandle_{};
 
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
-  Format copyPipelineColorFormat_ = Format::Count;
-  Format copyPipelineDepthFormat_ = Format::Count;
+  Format pickPipelineDepthFormat_ = Format::Count;
 
   size_t materialBufferCapacityBytes_ = 0;
   bool initialized_ = false;
@@ -169,14 +163,6 @@ private:
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
-  const RenderScene *cachedTransmissionContentScene_ = nullptr;
-  uint64_t cachedTransmissionContentTopologyVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  uint64_t cachedTransmissionContentMaterialVersion_ =
-      std::numeric_limits<uint64_t>::max();
-  bool cachedTransmissionContentValid_ = false;
-  bool cachedTransmissionContent_ = false;
-  EnvironmentHandles cachedEnvironmentHandles_{};
 
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<InstanceData> instanceMatrices_;
@@ -185,21 +171,19 @@ private:
   std::pmr::vector<MaterialGpuData> materialGpuDataCache_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
   std::pmr::vector<TextureHandle> environmentTextureAccessHandles_;
-  std::pmr::vector<TextureHandle> staticPassTextureReads_;
-  std::pmr::vector<MeshPushConstants> meshPushConstants_;
+  std::pmr::vector<TransparentStageSortableDraw> contributorSortableDraws_;
+  std::pmr::vector<DrawItem> contributorFixedDraws_;
+  std::pmr::vector<TextureHandle> contributorTextureReads_;
+  std::pmr::vector<PushConstants> drawPushConstants_;
+  std::pmr::vector<PushConstants> pickPushConstants_;
+  std::pmr::vector<TransparentStageSortableDraw> meshSortableDraws_;
+  std::pmr::vector<TransparentStageSortableDraw> sortableDraws_;
+  std::pmr::vector<DrawItem> fixedDraws_;
   std::pmr::vector<DrawItem> passDrawItems_;
+  std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
-  std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
-  std::pmr::vector<CopyPushConstants> copyPushConstantsRing_;
-  std::filesystem::path transmissionFragmentPath_{};
-  std::filesystem::path fullscreenCopyVertexPath_{};
-  std::filesystem::path sceneCopyFragmentPath_{};
-  std::pmr::vector<TextureHandle> sceneColorTextures_;
-  std::pmr::vector<TextureHandle> sceneColorMipTextures_;
-  Format sceneColorTextureFormat_ = Format::Count;
-  uint32_t sceneColorTextureWidth_ = 0;
-  uint32_t sceneColorTextureHeight_ = 0;
+  std::filesystem::path alphaPickFragmentPath_{};
 };
 
 } // namespace nuri

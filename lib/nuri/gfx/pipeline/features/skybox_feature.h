@@ -1,53 +1,46 @@
 #pragma once
 
-#include "nuri/core/layer.h"
+#include "nuri/core/result.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline.h"
+#include "nuri/gfx/pipeline/render_feature.h"
+#include "nuri/gfx/pipeline/render_feature_pass.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/buffer.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <utility>
+#include <span>
 
 #include <glm/glm.hpp>
 
 namespace nuri {
 
-using SkyboxLayerConfig = RuntimeSkyboxShaderConfig;
+using SkyboxFeatureConfig = RuntimeSkyboxShaderConfig;
 
-class NURI_API SkyboxLayer final : public Layer {
+class NURI_API SkyboxPass final : public RenderFeaturePass {
 public:
-  explicit SkyboxLayer(GPUDevice &gpu, SkyboxLayerConfig config);
-  ~SkyboxLayer() override;
+  explicit SkyboxPass(GPUDevice &gpu, SkyboxFeatureConfig config);
+  ~SkyboxPass() override;
 
-  SkyboxLayer(const SkyboxLayer &) = delete;
-  SkyboxLayer &operator=(const SkyboxLayer &) = delete;
-  SkyboxLayer(SkyboxLayer &&) = delete;
-  SkyboxLayer &operator=(SkyboxLayer &&) = delete;
+  SkyboxPass(const SkyboxPass &) = delete;
+  SkyboxPass &operator=(const SkyboxPass &) = delete;
+  SkyboxPass(SkyboxPass &&) = delete;
+  SkyboxPass &operator=(SkyboxPass &&) = delete;
 
-  static std::unique_ptr<SkyboxLayer> create(GPUDevice &gpu,
-                                             SkyboxLayerConfig config) {
-    return std::make_unique<SkyboxLayer>(gpu, std::move(config));
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "SkyboxPass";
   }
-
-  void onAttach() override;
-  void onDetach() override;
-  void onResize(int32_t width, int32_t height) override;
-  Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame,
-                   RenderGraphBuilder &graph) override;
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string> build(FrameBuildContext &ctx) override;
 
 private:
   enum FrameDataFlags : uint32_t {
-    HasIblDiffuse = 1u << 0u,
-    HasIblSpecular = 1u << 1u,
-    HasIblSheen = 1u << 2u,
-    HasBrdfLut = 1u << 3u,
-    OutputLinearToSrgb = 1u << 4u,
     HasSceneColor = 1u << 5u,
   };
 
@@ -74,7 +67,7 @@ private:
     uint32_t localLightCount = 0;
   };
   static_assert(sizeof(FrameData) == 224,
-                "SkyboxLayer::FrameData must match shader FrameDataBuffer "
+                "SkyboxPass::FrameData must match shader FrameDataBuffer "
                 "layout");
 
   struct PushConstants {
@@ -95,16 +88,17 @@ private:
     uint32_t debugVisualizationMode = 0;
   };
   static_assert(sizeof(PushConstants) <= 128,
-                "SkyboxLayer::PushConstants exceeds Vulkan guarantee");
+                "SkyboxPass::PushConstants exceeds Vulkan guarantee");
+
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> ensureFrameBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipeline();
-  Result<bool, std::string> prepareSkyboxDraw(RenderFrameContext &frame);
+  Result<bool, std::string> prepareSkyboxDraw(FrameBuildContext &ctx);
   void destroyFrameBuffer();
 
   GPUDevice &gpu_;
-  SkyboxLayerConfig config_{};
+  SkyboxFeatureConfig config_{};
   std::unique_ptr<Shader> skyboxShader_;
   std::unique_ptr<Pipeline> skyboxPipeline_;
   std::unique_ptr<Buffer> frameBuffer_;
@@ -119,6 +113,27 @@ private:
   FrameData frameData_{};
   PushConstants pushConstants_{};
   DrawItem drawItem_{};
+  bool hasPreparedDraw_ = false;
+};
+
+class NURI_API SkyboxFeature final : public RenderFeature {
+public:
+  explicit SkyboxFeature(GPUDevice &gpu, SkyboxFeatureConfig config);
+  ~SkyboxFeature() override = default;
+
+  SkyboxFeature(const SkyboxFeature &) = delete;
+  SkyboxFeature &operator=(const SkyboxFeature &) = delete;
+  SkyboxFeature(SkyboxFeature &&) = delete;
+  SkyboxFeature &operator=(SkyboxFeature &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "SkyboxFeature";
+  }
+  [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
+
+private:
+  SkyboxPass pass_;
+  std::array<RenderFeaturePass *, 1> passes_{&pass_};
 };
 
 } // namespace nuri

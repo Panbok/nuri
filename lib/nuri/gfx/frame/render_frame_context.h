@@ -3,24 +3,22 @@
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
+#include "nuri/gfx/render_graph/render_graph.h"
+#include "nuri/scene/light.h"
 
-#include <any>
 #include <cstdint>
 #include <cstring>
 #include <memory_resource>
 #include <optional>
-#include <string>
-#include <string_view>
-#include <typeindex>
 #include <vector>
 
 #include <glm/glm.hpp>
 
 namespace nuri {
 
-class LayerStack;
 class RenderScene;
 class ResourceManager;
+struct RenderFrameContext;
 
 enum class OpaqueDebugVisualization : uint8_t {
   None = 0,
@@ -224,54 +222,20 @@ struct OpaquePickResult {
   uint32_t renderableIndex = 0;
 };
 
-class FrameChannelRegistry {
-public:
-  explicit FrameChannelRegistry(
-      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
-        entries_(memory_) {}
-
-  void clear() { entries_.clear(); }
-
-  template <typename T> void publish(std::string_view key, T value) {
-    for (Entry &entry : entries_) {
-      if (entry.key == key) {
-        entry.type = std::type_index(typeid(T));
-        entry.value = std::any(std::move(value));
-        return;
-      }
-    }
-
-    Entry entry(memory_);
-    entry.key.assign(key.data(), key.size());
-    entry.type = std::type_index(typeid(T));
-    entry.value = std::any(std::move(value));
-    entries_.push_back(std::move(entry));
-  }
-
-  template <typename T>
-  [[nodiscard]] const T *tryGet(std::string_view key) const {
-    for (const Entry &entry : entries_) {
-      if (entry.key != key || entry.type != std::type_index(typeid(T))) {
-        continue;
-      }
-      return std::any_cast<T>(&entry.value);
-    }
-    return nullptr;
-  }
-
-private:
-  struct Entry {
-    explicit Entry(std::pmr::memory_resource *memory)
-        : key(memory != nullptr ? memory : std::pmr::get_default_resource()) {}
-
-    std::pmr::string key;
-    std::type_index type = std::type_index(typeid(void));
-    std::any value{};
-  };
-
-  std::pmr::memory_resource *memory_ = nullptr;
-  std::pmr::vector<Entry> entries_;
+struct FrameSharedResources {
+  std::optional<ForwardSceneGpuData> forwardSceneGpuData{};
+  TextureHandle sceneDepthTexture{};
+  RenderGraphTextureId sceneDepthGraphTexture{};
+  TextureHandle sceneColorTexture{};
+  TextureHandle sceneColorHalfResTexture{};
+  TextureHandle sceneColorQuarterResTexture{};
+  RenderGraphTextureId sceneColorGraphTexture{};
+  TextureHandle frameColorTexture{};
+  RenderGraphTextureId opaquePickGraphTexture{};
+  RenderGraphTextureId opaquePickDepthGraphTexture{};
+  std::optional<LightId> selectedLightId{};
+  bool transmissionStageEnabled = false;
+  bool transparentStageEnabled = false;
 };
 
 struct TransparentStageSortableDraw {
@@ -291,28 +255,42 @@ struct TransparentStageContribution {
   std::span<const TextureHandle> textureReads{};
 };
 
-constexpr std::string_view kFrameChannelSceneDepthTexture = "SceneDepthTexture";
-constexpr std::string_view kFrameChannelSceneDepthGraphTexture =
-    "SceneDepthGraphTexture";
-constexpr std::string_view kFrameChannelSceneColorTexture = "SceneColorTexture";
-constexpr std::string_view kFrameChannelSceneColorHalfResTexture =
-    "SceneColorHalfResTexture";
-constexpr std::string_view kFrameChannelSceneColorQuarterResTexture =
-    "SceneColorQuarterResTexture";
-constexpr std::string_view kFrameChannelSceneColorGraphTexture =
-    "SceneColorGraphTexture";
-constexpr std::string_view kFrameChannelFrameColorTexture = "FrameColorTexture";
-constexpr std::string_view kFrameChannelTransmissionStageEnabled =
-    "TransmissionStageEnabled";
-constexpr std::string_view kFrameChannelTransparentStageEnabled =
-    "TransparentStageEnabled";
-constexpr std::string_view kFrameChannelOpaquePickGraphTexture =
-    "OpaquePickGraphTexture";
-constexpr std::string_view kFrameChannelOpaquePickDepthGraphTexture =
-    "OpaquePickDepthGraphTexture";
-constexpr std::string_view kFrameChannelSelectedLightId = "SelectedLightId";
-constexpr std::string_view kFrameChannelForwardSceneGpuData =
-    "ForwardSceneGpuData";
+using TransparentContributionCollectFn =
+    Result<bool, std::string> (*)(void *user, RenderFrameContext &frame,
+                                  TransparentStageContribution &out);
+
+struct TransparentContributionCollector {
+  void *user = nullptr;
+  TransparentContributionCollectFn collect = nullptr;
+};
+
+class TransparentContributionRegistry {
+public:
+  explicit TransparentContributionRegistry(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : collectors_(memory != nullptr ? memory : std::pmr::get_default_resource()) {
+  }
+
+  void clear() { collectors_.clear(); }
+
+  void publish(TransparentContributionCollector collector) {
+    if (collector.user == nullptr || collector.collect == nullptr) {
+      return;
+    }
+    collectors_.push_back(collector);
+  }
+
+  [[nodiscard]] std::span<const TransparentContributionCollector>
+  collectors() const noexcept {
+    return std::span<const TransparentContributionCollector>(
+        collectors_.data(), collectors_.size());
+  }
+
+  [[nodiscard]] bool empty() const noexcept { return collectors_.empty(); }
+
+private:
+  std::pmr::vector<TransparentContributionCollector> collectors_;
+};
 
 struct RenderFrameContext {
   const RenderScene *scene = nullptr;
@@ -322,22 +300,97 @@ struct RenderFrameContext {
   // Frame-scoped one-shot opaque pick request/result channel.
   std::optional<OpaquePickRequest> opaquePickRequest{};
   std::optional<OpaquePickResult> opaquePickResult{};
-  FrameChannelRegistry channels{};
-  const LayerStack *layerStack = nullptr;
+  FrameSharedResources sharedResources{};
+  TransparentContributionRegistry transparentContributors{};
   TextureHandle sharedDepthTexture{};
   const ResourceManager *resources = nullptr;
   double timeSeconds = 0.0;
   uint64_t frameIndex = 0;
 };
 
+[[nodiscard]] inline const RenderSettings &
+renderSettingsOrDefault(const RenderFrameContext &frame) {
+  static const RenderSettings kDefaultSettings{};
+  return frame.settings ? *frame.settings : kDefaultSettings;
+}
+
+[[nodiscard]] inline bool
+expectsCurrentFrameSceneColor(const RenderFrameContext &frame) {
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  return frame.sharedResources.transmissionStageEnabled &&
+         (settings.skybox.enabled || settings.opaque.enabled);
+}
+
+inline void resetFrameSharedResources(RenderFrameContext &frame) {
+  frame.sharedResources = {};
+  frame.transparentContributors.clear();
+}
+
 [[nodiscard]] inline TextureHandle
 resolveFrameDepthTexture(const RenderFrameContext &frame) {
-  if (const TextureHandle *depth =
-          frame.channels.tryGet<TextureHandle>(kFrameChannelSceneDepthTexture);
-      depth != nullptr && nuri::isValid(*depth)) {
-    return *depth;
+  if (nuri::isValid(frame.sharedResources.sceneDepthTexture)) {
+    return frame.sharedResources.sceneDepthTexture;
   }
   return frame.sharedDepthTexture;
+}
+
+[[nodiscard]] inline TextureHandle
+resolveFrameColorTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.frameColorTexture)) {
+    return frame.sharedResources.frameColorTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline TextureHandle
+resolveSceneColorTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.sceneColorTexture)) {
+    return frame.sharedResources.sceneColorTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline TextureHandle
+resolveSceneColorHalfResTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.sceneColorHalfResTexture)) {
+    return frame.sharedResources.sceneColorHalfResTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline TextureHandle
+resolveSceneColorQuarterResTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.sceneColorQuarterResTexture)) {
+    return frame.sharedResources.sceneColorQuarterResTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline bool
+resolveTransmissionStageEnabled(const RenderFrameContext &frame) {
+  return frame.sharedResources.transmissionStageEnabled;
+}
+
+[[nodiscard]] inline bool
+resolveTransparentStageEnabled(const RenderFrameContext &frame) {
+  return frame.sharedResources.transparentStageEnabled;
+}
+
+[[nodiscard]] inline RenderGraphTextureId
+resolveSceneDepthGraphTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.sceneDepthGraphTexture)) {
+    return frame.sharedResources.sceneDepthGraphTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline LightId
+resolveSelectedLightId(const RenderFrameContext &frame) {
+  if (frame.sharedResources.selectedLightId.has_value() &&
+      isValid(*frame.sharedResources.selectedLightId)) {
+    return *frame.sharedResources.selectedLightId;
+  }
+  return kInvalidLightId;
 }
 
 } // namespace nuri

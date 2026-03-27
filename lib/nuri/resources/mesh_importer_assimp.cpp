@@ -1878,35 +1878,8 @@ nuri::Result<MeshData, std::string> MeshImporter::loadSceneMeshFromFile(
   if (!mem) {
     mem = std::pmr::get_default_resource();
   }
-
-  const SceneImportOptions sceneOptions{.assetBuildOptions = options};
-  auto importedSceneResult =
-      SceneImporter::loadSceneFromFile(path, sceneOptions, mem);
-  if (importedSceneResult.hasError()) {
-    return detail::loadSceneMeshFromSourceIndex(path, sceneMeshIndex, options,
-                                                mem);
-  }
-
-  const ImportedScene &importedScene = importedSceneResult.value();
-  const uint32_t assetIndex =
-      findMeshAssetIndexBySourceSceneMeshIndex(importedScene, sceneMeshIndex);
-  if (assetIndex == kInvalidScenePrefabIndex) {
-    return detail::loadSceneMeshFromSourceIndex(path, sceneMeshIndex, options,
-                                                mem);
-  }
-
-  auto assetsResult = SceneImporter::buildSceneAssets(importedScene, mem);
-  if (assetsResult.hasError()) {
-    return nuri::Result<MeshData, std::string>::makeError(
-        "MeshImporter::loadSceneMeshFromFile: " + assetsResult.error());
-  }
-  ImportedSceneAssets assets = std::move(assetsResult.value());
-  if (assetIndex >= assets.meshes.size()) {
-    return nuri::Result<MeshData, std::string>::makeError(
-        "MeshImporter::loadSceneMeshFromFile: mesh asset index is unresolved");
-  }
-  return nuri::Result<MeshData, std::string>::makeResult(
-      std::move(assets.meshes[assetIndex]));
+  return detail::loadSceneMeshFromSourceIndex(path, sceneMeshIndex, options,
+                                              mem);
 }
 
 nuri::Result<std::pmr::vector<MeshData>, std::string>
@@ -1921,53 +1894,8 @@ MeshImporter::loadSceneMeshesFromFile(
     return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeResult(
         std::pmr::vector<MeshData>(mem));
   }
-
-  const SceneImportOptions sceneOptions{.assetBuildOptions = options};
-  auto importedSceneResult =
-      SceneImporter::loadSceneFromFile(path, sceneOptions, mem);
-  if (importedSceneResult.hasError()) {
-    return detail::loadSceneMeshesFromSourceIndices(path, sceneMeshIndices,
-                                                    options, mem);
-  }
-
-  const ImportedScene &importedScene = importedSceneResult.value();
-  std::pmr::vector<uint32_t> assetIndices(mem);
-  assetIndices.reserve(sceneMeshIndices.size());
-  for (const uint32_t sceneMeshIndex : sceneMeshIndices) {
-    const uint32_t match =
-        findMeshAssetIndexBySourceSceneMeshIndex(importedScene, sceneMeshIndex);
-    if (match == kInvalidScenePrefabIndex) {
-      return detail::loadSceneMeshesFromSourceIndices(path, sceneMeshIndices,
-                                                      options, mem);
-    }
-    assetIndices.push_back(match);
-  }
-
-  auto assetsResult = SceneImporter::buildSceneAssets(importedScene, mem);
-  if (assetsResult.hasError()) {
-    return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
-        "MeshImporter::loadSceneMeshesFromFile: " + assetsResult.error());
-  }
-  ImportedSceneAssets assets = std::move(assetsResult.value());
-  std::pmr::vector<MeshData> meshData(mem);
-  meshData.reserve(assetIndices.size());
-  std::unordered_set<uint32_t> seenAssetIndices{};
-  seenAssetIndices.reserve(assetIndices.size());
-  for (const uint32_t assetIndex : assetIndices) {
-    if (assetIndex >= assets.meshes.size()) {
-      return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
-          "MeshImporter::loadSceneMeshesFromFile: mesh asset index is "
-          "unresolved");
-    }
-    if (!seenAssetIndices.insert(assetIndex).second) {
-      return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeError(
-          "MeshImporter::loadSceneMeshesFromFile: duplicate mesh asset index " +
-          std::to_string(assetIndex));
-    }
-    meshData.push_back(std::move(assets.meshes[assetIndex]));
-  }
-  return nuri::Result<std::pmr::vector<MeshData>, std::string>::makeResult(
-      std::move(meshData));
+  return detail::loadSceneMeshesFromSourceIndices(path, sceneMeshIndices,
+                                                  options, mem);
 }
 
 nuri::Result<ImportedMaterialSet, std::string>

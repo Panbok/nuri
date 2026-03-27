@@ -11,17 +11,22 @@ set(NURI_RENDERER_SOURCES
   nuri/core/application.cpp
   nuri/core/event_manager.cpp
   nuri/core/input_system.cpp
-  nuri/core/layer_stack.cpp
   nuri/core/log.cpp
   nuri/core/runtime_config.cpp
   nuri/gfx/debug_draw_3d.cpp
-  nuri/gfx/layers/composite_layer.cpp
-  nuri/gfx/layers/debug_layer.cpp
-  nuri/gfx/layers/opaque_layer.cpp
-  nuri/gfx/layers/scene_lighting_layer.cpp
-  nuri/gfx/layers/skybox_layer.cpp
-  nuri/gfx/layers/transmission_layer.cpp
-  nuri/gfx/layers/transparent_layer.cpp
+  nuri/gfx/renderers/debug_renderer.cpp
+  nuri/gfx/renderers/opaque_renderer.cpp
+  nuri/gfx/pipeline/features/composite_feature.cpp
+  nuri/gfx/pipeline/features/debug_feature.cpp
+  nuri/gfx/pipeline/features/opaque_feature.cpp
+  nuri/gfx/pipeline/features/skybox_feature.cpp
+  nuri/gfx/pipeline/features/text_feature.cpp
+  nuri/gfx/pipeline/features/transmission_feature.cpp
+  nuri/gfx/pipeline/features/transparent_feature.cpp
+  nuri/gfx/pipeline/render_pipeline.cpp
+  nuri/gfx/pipeline/providers/scene_lighting_provider.cpp
+  nuri/gfx/renderers/transmission_renderer.cpp
+  nuri/gfx/renderers/transparent_renderer.cpp
   nuri/gfx/render_graph/render_graph.cpp
   nuri/gfx/render_graph/render_graph_runtime.cpp
   nuri/gfx/render_graph/render_graph_telemetry.cpp
@@ -57,8 +62,6 @@ set(NURI_RENDERER_SOURCES
   nuri/scene/scene_graph.cpp
   nuri/text/detail/font_manager.cpp
   nuri/text/detail/text_layouter.cpp
-  nuri/text/detail/text_layer_2d.cpp
-  nuri/text/detail/text_layer_3d.cpp
   nuri/text/detail/text_renderer.cpp
   nuri/text/detail/text_shaper.cpp
   nuri/text/detail/text_system.cpp
@@ -145,13 +148,17 @@ if(NURI_WITH_TRACY)
   target_link_libraries(nuri_renderer PUBLIC ${NURI_TRACY_CLIENT_TARGET})
 endif()
 
+if(NURI_WITH_TRACY_GPU AND NOT NURI_WITH_TRACY)
+  message(FATAL_ERROR "NURI_WITH_TRACY_GPU=ON requires NURI_WITH_TRACY=ON")
+endif()
+
 set(LVK_DEPLOY_DEPS OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_GLFW ON CACHE BOOL "" FORCE)
 set(LVK_USE_VCPKG_GLFW ON CACHE BOOL "" FORCE)
 set(LVK_WITH_IMGUI OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_SAMPLES OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_TRACY ${NURI_WITH_TRACY} CACHE BOOL "" FORCE)
-set(LVK_WITH_TRACY_GPU ${NURI_WITH_TRACY} CACHE BOOL "" FORCE)
+set(LVK_WITH_TRACY_GPU ${NURI_WITH_TRACY_GPU} CACHE BOOL "" FORCE)
 set(LVK_WITH_IMPLOT OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_OPENXR OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_SLANG OFF CACHE BOOL "" FORCE)
@@ -165,10 +172,10 @@ endif()
 add_subdirectory("${LVK_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/lightweightvk-build")
 
 if(NURI_WITH_TRACY_GPU_DRAW_ZONES)
-  if(NURI_WITH_TRACY AND TARGET LVKVulkan)
+  if(NURI_WITH_TRACY_GPU AND TARGET LVKVulkan)
     target_compile_definitions(LVKVulkan PUBLIC "LVK_WITH_TRACY_GPU_DRAW_ZONES=1")
   else()
-    message(WARNING "NURI_WITH_TRACY_GPU_DRAW_ZONES=ON requires NURI_WITH_TRACY=ON and target LVKVulkan; per-draw Tracy GPU zones remain disabled.")
+    message(WARNING "NURI_WITH_TRACY_GPU_DRAW_ZONES=ON requires NURI_WITH_TRACY_GPU=ON and target LVKVulkan; per-draw Tracy GPU zones remain disabled.")
   endif()
 endif()
 

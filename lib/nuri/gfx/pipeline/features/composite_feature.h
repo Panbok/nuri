@@ -1,44 +1,43 @@
 #pragma once
 
-#include "nuri/core/layer.h"
+#include "nuri/core/result.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/layers/render_frame_context.h"
+#include "nuri/gfx/pipeline/render_feature.h"
+#include "nuri/gfx/pipeline/render_feature_pass.h"
 #include "nuri/resources/gpu/buffer.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
-#include <utility>
+#include <span>
 
 namespace nuri {
 
-using CompositeLayerConfig = RuntimeOpaqueShaderConfig;
+using CompositeFeatureConfig = RuntimeOpaqueShaderConfig;
 
 class Shader;
 
-class NURI_API CompositeLayer final : public Layer {
+class NURI_API CompositePass final : public RenderFeaturePass {
 public:
-  explicit CompositeLayer(GPUDevice &gpu, CompositeLayerConfig config);
-  ~CompositeLayer() override;
+  explicit CompositePass(GPUDevice &gpu, CompositeFeatureConfig config);
+  ~CompositePass() override;
 
-  CompositeLayer(const CompositeLayer &) = delete;
-  CompositeLayer &operator=(const CompositeLayer &) = delete;
-  CompositeLayer(CompositeLayer &&) = delete;
-  CompositeLayer &operator=(CompositeLayer &&) = delete;
+  CompositePass(const CompositePass &) = delete;
+  CompositePass &operator=(const CompositePass &) = delete;
+  CompositePass(CompositePass &&) = delete;
+  CompositePass &operator=(CompositePass &&) = delete;
 
-  static std::unique_ptr<CompositeLayer> create(GPUDevice &gpu,
-                                                CompositeLayerConfig config) {
-    return std::make_unique<CompositeLayer>(gpu, std::move(config));
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "CompositePass";
   }
-
-  void onAttach() override;
-  void onDetach() override;
-  Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame,
-                   RenderGraphBuilder &graph) override;
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string> build(FrameBuildContext &ctx) override;
 
 private:
   struct PushConstants {
@@ -59,7 +58,7 @@ private:
     uint32_t debugVisualizationMode = 0;
   };
   static_assert(sizeof(PushConstants) <= 128,
-                "CompositeLayer::PushConstants exceeds Vulkan guarantee");
+                "CompositePass::PushConstants exceeds Vulkan guarantee");
 
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
@@ -81,13 +80,35 @@ private:
   size_t frameBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool frameDataUploadValid_ = false;
+  bool hasPreparedDraw_ = false;
 
   ForwardSceneFrameData frameData_{};
   ForwardSceneFrameData uploadedFrameData_{};
   PushConstants pushConstants_{};
   DrawItem drawItem_{};
+  TextureHandle sourceFrameColor_{};
   std::filesystem::path vertexPath_{};
   std::filesystem::path fragmentPath_{};
+};
+
+class NURI_API CompositeFeature final : public RenderFeature {
+public:
+  explicit CompositeFeature(GPUDevice &gpu, CompositeFeatureConfig config);
+  ~CompositeFeature() override = default;
+
+  CompositeFeature(const CompositeFeature &) = delete;
+  CompositeFeature &operator=(const CompositeFeature &) = delete;
+  CompositeFeature(CompositeFeature &&) = delete;
+  CompositeFeature &operator=(CompositeFeature &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "CompositeFeature";
+  }
+  [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
+
+private:
+  CompositePass pass_;
+  std::array<RenderFeaturePass *, 1> passes_{&pass_};
 };
 
 } // namespace nuri

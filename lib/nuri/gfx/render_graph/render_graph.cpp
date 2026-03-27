@@ -66,6 +66,21 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
   return (static_cast<uint64_t>(passIndex) << 32u) | resourceIndex;
 }
 
+[[nodiscard]] RenderGraphCompileResult::DrawBufferBindingTarget
+toPreparedDrawBindingTarget(RenderGraphDrawBufferBindingTarget target) {
+  switch (target) {
+  case RenderGraphDrawBufferBindingTarget::Vertex:
+    return RenderGraphCompileResult::DrawBufferBindingTarget::Vertex;
+  case RenderGraphDrawBufferBindingTarget::Index:
+    return RenderGraphCompileResult::DrawBufferBindingTarget::Index;
+  case RenderGraphDrawBufferBindingTarget::Indirect:
+    return RenderGraphCompileResult::DrawBufferBindingTarget::Indirect;
+  case RenderGraphDrawBufferBindingTarget::IndirectCount:
+    return RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount;
+  }
+  return RenderGraphCompileResult::DrawBufferBindingTarget::Vertex;
+}
+
 [[nodiscard]] bool isTextureDescAliasCompatible(const TextureDesc &a,
                                                 const TextureDesc &b) {
   return a.type == b.type && a.format == b.format &&
@@ -583,23 +598,31 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
   return ownedPayload;
 }
 
-Result<bool, std::string> RenderGraphBuilder::applyImplicitPassRoots(
-    RenderGraphPassId pass, const RenderGraphGraphicsPassDesc &desc) {
-  if (nuri::isValid(desc.colorTexture)) {
-    if (desc.markColorAsFrameOutput) {
-      return markTextureAsFrameOutput(desc.colorTexture);
+Result<bool, std::string> RenderGraphBuilder::applyGraphicsPassRoots(
+    RenderGraphPassId pass, RenderGraphTextureId colorTexture,
+    bool markColorAsFrameOutput, bool markImplicitOutputSideEffect) {
+  if (nuri::isValid(colorTexture)) {
+    if (markColorAsFrameOutput) {
+      return markTextureAsFrameOutput(colorTexture);
     }
-    if (desc.markImplicitOutputSideEffect &&
-        textures_[desc.colorTexture.value].imported) {
+    if (markImplicitOutputSideEffect &&
+        textures_[colorTexture.value].imported) {
       return markPassSideEffect(pass);
     }
     return Result<bool, std::string>::makeResult(true);
   }
 
-  if (!desc.markImplicitOutputSideEffect) {
+  if (!markImplicitOutputSideEffect) {
     return Result<bool, std::string>::makeResult(true);
   }
   return markPassSideEffect(pass);
+}
+
+Result<bool, std::string> RenderGraphBuilder::applyImplicitPassRoots(
+    RenderGraphPassId pass, const RenderGraphGraphicsPassDesc &desc) {
+  return applyGraphicsPassRoots(pass, desc.colorTexture,
+                                desc.markColorAsFrameOutput,
+                                desc.markImplicitOutputSideEffect);
 }
 
 Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
@@ -803,6 +826,127 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
   }
 
   auto rootResult = applyImplicitPassRoots(passId, desc);
+  if (rootResult.hasError()) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        rootResult.error());
+  }
+
+  return Result<RenderGraphPassId, std::string>::makeResult(passId);
+}
+
+Result<RenderGraphPassId, std::string>
+RenderGraphBuilder::addPreparedGraphicsPass(
+    const RenderGraphPreparedGraphicsPassDesc &desc) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  RenderPass pass{};
+  pass.color = desc.color;
+  pass.depth = desc.depth;
+  pass.useViewport = desc.useViewport;
+  pass.viewport = desc.viewport;
+  pass.debugColor = desc.debugColor;
+  if (desc.borrowPayload) {
+    pass.preDispatches = desc.preDispatches;
+    pass.dependencyBuffers = desc.dependencyBuffers;
+    pass.draws = desc.draws;
+    pass.debugLabel = desc.debugLabel;
+  } else {
+    RenderGraphGraphicsPassDesc clonedDesc{};
+    clonedDesc.color = desc.color;
+    clonedDesc.colorTexture = desc.colorTexture;
+    clonedDesc.depth = desc.depth;
+    clonedDesc.depthTexture = desc.depthTexture;
+    clonedDesc.useViewport = desc.useViewport;
+    clonedDesc.viewport = desc.viewport;
+    clonedDesc.preDispatches = desc.preDispatches;
+    clonedDesc.dependencyBuffers = desc.dependencyBuffers;
+    clonedDesc.draws = desc.draws;
+    clonedDesc.debugLabel = desc.debugLabel;
+    clonedDesc.debugColor = desc.debugColor;
+    clonedDesc.markColorAsFrameOutput = desc.markColorAsFrameOutput;
+    clonedDesc.markImplicitOutputSideEffect = desc.markImplicitOutputSideEffect;
+    OwnedPassPayload ownedPayload = clonePassPayload(clonedDesc);
+    ownedPassPayloads_.push_back(std::move(ownedPayload));
+    OwnedPassPayload &storedPayload = ownedPassPayloads_.back();
+    pass.preDispatches = std::span<const ComputeDispatchItem>(
+        storedPayload.preDispatches.data(), storedPayload.preDispatches.size());
+    pass.dependencyBuffers =
+        std::span<const BufferHandle>(storedPayload.dependencyBuffers.data(),
+                                      storedPayload.dependencyBuffers.size());
+    pass.draws = std::span<const DrawItem>(storedPayload.draws.data(),
+                                           storedPayload.draws.size());
+    pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
+                                       storedPayload.debugLabel.size());
+  }
+
+  auto addResult = addPassRecord(pass, desc.debugLabel);
+  if (addResult.hasError()) {
+    return Result<RenderGraphPassId, std::string>::makeError(addResult.error());
+  }
+  const RenderGraphPassId passId = addResult.value();
+
+  {
+    NURI_PROFILER_ZONE("RenderGraph.resolve_prepared_pass_bindings",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    if (nuri::isValid(desc.colorTexture)) {
+      auto bindResult = bindPassColorTexture(passId, desc.colorTexture);
+      if (bindResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            bindResult.error());
+      }
+    }
+
+    if (nuri::isValid(desc.depthTexture)) {
+      auto bindResult = bindPassDepthTexture(passId, desc.depthTexture);
+      if (bindResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            bindResult.error());
+      }
+    }
+
+    for (const auto &binding : desc.dependencyBufferBindings) {
+      auto bindResult = bindPassDependencyBuffer(
+          passId, binding.dependencyIndex, binding.buffer, binding.mode);
+      if (bindResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            bindResult.error());
+      }
+    }
+
+    for (const auto &binding : desc.dependencyTextureBindings) {
+      auto accessResult =
+          addTextureAccess(passId, binding.texture, binding.mode);
+      if (accessResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            accessResult.error());
+      }
+    }
+
+    for (const auto &binding : desc.preDispatchDependencyBindings) {
+      auto bindResult = bindPreDispatchDependencyBuffer(
+          passId, binding.preDispatchIndex, binding.dependencyIndex,
+          binding.buffer, binding.mode);
+      if (bindResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            bindResult.error());
+      }
+    }
+
+    for (const auto &binding : desc.drawBufferBindings) {
+      auto bindResult =
+          bindDrawBuffer(passId, binding.drawIndex,
+                         toPreparedDrawBindingTarget(binding.target),
+                         binding.buffer, binding.mode);
+      if (bindResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            bindResult.error());
+      }
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+
+  auto rootResult = applyGraphicsPassRoots(passId, desc.colorTexture,
+                                           desc.markColorAsFrameOutput,
+                                           desc.markImplicitOutputSideEffect);
   if (rootResult.hasError()) {
     return Result<RenderGraphPassId, std::string>::makeError(
         rootResult.error());

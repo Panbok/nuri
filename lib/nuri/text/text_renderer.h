@@ -1,8 +1,9 @@
 #pragma once
 
-#include "nuri/core/layer.h"
 #include "nuri/core/result.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_render_types.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/text/text_layouter.h"
 
 #include <filesystem>

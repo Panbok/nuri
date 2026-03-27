@@ -1,10 +1,10 @@
 #include "nuri/pch.h"
 
-#include "nuri/gfx/layers/transmission_layer.h"
+#include "nuri/gfx/renderers/transmission_renderer.h"
 
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
-#include "nuri/gfx/layers/renderable_material_resolution.h"
+#include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
@@ -39,8 +39,7 @@ settingsOrDefault(const RenderFrameContext &frame) {
 }
 
 [[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
-  return material.desc.alphaMode != MaterialAlphaMode::Blend &&
-         (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
+  return (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
 }
 
 void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
@@ -184,15 +183,16 @@ void destroyTextures(GPUDevice &gpu,
 }
 
 [[nodiscard]] size_t ringSlot(uint64_t frameIndex, size_t slotCount) {
-  NURI_ASSERT(slotCount > 0u, "TransmissionLayer ring slot count must be > 0");
+  NURI_ASSERT(slotCount > 0u,
+              "TransmissionRenderer ring slot count must be > 0");
   return static_cast<size_t>(frameIndex % slotCount);
 }
 
 } // namespace
 
-TransmissionLayer::TransmissionLayer(GPUDevice &gpu,
-                                     TransmissionLayerConfig config,
-                                     std::pmr::memory_resource *memory)
+TransmissionRenderer::TransmissionRenderer(GPUDevice &gpu,
+                                           TransmissionRendererConfig config,
+                                           std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
       memory_(resolveMemoryResource(memory)), instanceMatricesRing_(memory_),
       instanceRemapRing_(memory_), meshDrawTemplates_(memory_),
@@ -212,17 +212,17 @@ TransmissionLayer::TransmissionLayer(GPUDevice &gpu,
   sceneCopyFragmentPath_ = basePath / "scene_copy.frag";
 }
 
-TransmissionLayer::~TransmissionLayer() { onDetach(); }
+TransmissionRenderer::~TransmissionRenderer() { onDetach(); }
 
-void TransmissionLayer::onAttach() {
+void TransmissionRenderer::onAttach() {
   auto initResult = ensureInitialized();
   if (initResult.hasError()) {
-    NURI_LOG_WARNING("TransmissionLayer::onAttach: %s",
+    NURI_LOG_WARNING("TransmissionRenderer::onAttach: %s",
                      initResult.error().c_str());
   }
 }
 
-void TransmissionLayer::onDetach() {
+void TransmissionRenderer::onDetach() {
   destroyBuffers();
   destroyPipelineState();
   destroyShaders();
@@ -231,6 +231,7 @@ void TransmissionLayer::onDetach() {
   resetFrameBuildState();
   resetCachedState();
   destroyTextures(gpu_, sceneColorTextures_);
+  destroyTextures(gpu_, frameColorTextures_);
   destroyTextures(gpu_, sceneColorMipTextures_);
   sceneColorTextureFormat_ = Format::Count;
   sceneColorTextureWidth_ = 0;
@@ -238,7 +239,7 @@ void TransmissionLayer::onDetach() {
   initialized_ = false;
 }
 
-void TransmissionLayer::publishFrameData(RenderFrameContext &frame) {
+void TransmissionRenderer::publishFrameData(RenderFrameContext &frame) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.transmission.enabled || !hasTransmissionContent(frame)) {
@@ -246,39 +247,56 @@ void TransmissionLayer::publishFrameData(RenderFrameContext &frame) {
   }
   auto sceneColorResult = ensureSceneColorTexture();
   if (sceneColorResult.hasError()) {
-    NURI_LOG_WARNING("TransmissionLayer::publishFrameData: %s",
+    NURI_LOG_WARNING("TransmissionRenderer::publishFrameData: %s",
                      sceneColorResult.error().c_str());
+    return;
+  }
+  auto frameColorResult = ensureFrameColorTexture();
+  if (frameColorResult.hasError()) {
+    NURI_LOG_WARNING("TransmissionRenderer::publishFrameData: %s",
+                     frameColorResult.error().c_str());
     return;
   }
   const TextureHandle sceneColorTexture =
       currentSceneColorTexture(frame.frameIndex);
   if (!nuri::isValid(sceneColorTexture)) {
-    NURI_LOG_WARNING("TransmissionLayer::publishFrameData: scene color ring "
+    NURI_LOG_WARNING("TransmissionRenderer::publishFrameData: scene color ring "
                      "slot is unavailable");
     return;
   }
-  frame.channels.publish<bool>(kFrameChannelTransmissionStageEnabled, true);
-  frame.channels.publish<TextureHandle>(kFrameChannelSceneColorTexture,
-                                        sceneColorTexture);
+  const TextureHandle frameColorTexture =
+      currentFrameColorTexture(frame.frameIndex);
+  if (!nuri::isValid(frameColorTexture)) {
+    NURI_LOG_WARNING("TransmissionRenderer::publishFrameData: frame color ring "
+                     "slot is unavailable");
+    return;
+  }
+  frame.sharedResources.transmissionStageEnabled = true;
+  frame.sharedResources.sceneColorTexture = sceneColorTexture;
+  frame.sharedResources.frameColorTexture = frameColorTexture;
   const TextureHandle sceneColorHalfResTexture =
       currentSceneColorTextureMip(frame.frameIndex, 1u);
   if (nuri::isValid(sceneColorHalfResTexture)) {
-    frame.channels.publish<TextureHandle>(kFrameChannelSceneColorHalfResTexture,
-                                          sceneColorHalfResTexture);
+    frame.sharedResources.sceneColorHalfResTexture = sceneColorHalfResTexture;
   }
   const TextureHandle sceneColorQuarterResTexture =
       currentSceneColorTextureMip(frame.frameIndex, 2u);
   if (nuri::isValid(sceneColorQuarterResTexture)) {
-    frame.channels.publish<TextureHandle>(
-        kFrameChannelSceneColorQuarterResTexture, sceneColorQuarterResTexture);
+    frame.sharedResources.sceneColorQuarterResTexture =
+        sceneColorQuarterResTexture;
   }
 }
 
 Result<bool, std::string>
-TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
-                                    RenderGraphBuilder &graph) {
-  NURI_PROFILER_FUNCTION();
+TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   resetFrameBuildState();
+  preparedSceneColorTexture_ = {};
+  preparedFrameColorTexture_ = {};
+  preparedDepthTexture_ = {};
+  preparedSceneDepthGraphTexture_ = {};
+  preparedHasSceneColorInput_ = false;
+  preparedCopySceneColorToSwapchain_ = false;
+  preparedSceneColorSamplerId_ = 0;
 
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.transmission.enabled) {
@@ -286,16 +304,14 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   }
   if (!frame.scene) {
     return Result<bool, std::string>::makeError(
-        "TransmissionLayer::buildRenderGraph: frame scene is null");
+        "TransmissionRenderer::buildRenderGraph: frame scene is null");
   }
   if (!frame.resources) {
     return Result<bool, std::string>::makeError(
-        "TransmissionLayer::buildRenderGraph: frame resources are null");
+        "TransmissionRenderer::buildRenderGraph: frame resources are null");
   }
 
-  const bool *transmissionStageEnabled =
-      frame.channels.tryGet<bool>(kFrameChannelTransmissionStageEnabled);
-  if (transmissionStageEnabled == nullptr || !*transmissionStageEnabled) {
+  if (!frame.sharedResources.transmissionStageEnabled) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -307,25 +323,30 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   if (sceneColorResult.hasError()) {
     return sceneColorResult;
   }
+  auto frameColorResult = ensureFrameColorTexture();
+  if (frameColorResult.hasError()) {
+    return frameColorResult;
+  }
 
-  const TextureHandle *sceneColorTexture =
-      frame.channels.tryGet<TextureHandle>(kFrameChannelSceneColorTexture);
-  if (sceneColorTexture == nullptr || !nuri::isValid(*sceneColorTexture)) {
+  if (!nuri::isValid(frame.sharedResources.sceneColorTexture)) {
     return Result<bool, std::string>::makeError(
-        "TransmissionLayer::buildRenderGraph: scene color texture is "
+        "TransmissionRenderer::prepareTransmissionPasses: scene color texture "
+        "is "
         "unavailable");
   }
-  const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
-  RenderGraphTextureId sceneDepthGraphTexture{};
-  if (const RenderGraphTextureId *published =
-          frame.channels.tryGet<RenderGraphTextureId>(
-              kFrameChannelSceneDepthGraphTexture);
-      published != nullptr) {
-    sceneDepthGraphTexture = *published;
+  if (!nuri::isValid(frame.sharedResources.frameColorTexture)) {
+    return Result<bool, std::string>::makeError(
+        "TransmissionRenderer::prepareTransmissionPasses: frame color texture "
+        "is "
+        "unavailable");
   }
-  const bool hasSceneColorInput =
-      frame.channels.tryGet<RenderGraphTextureId>(
-          kFrameChannelSceneColorGraphTexture) != nullptr;
+  const TextureHandle sceneColorTexture =
+      frame.sharedResources.sceneColorTexture;
+  const TextureHandle frameColorTexture =
+      frame.sharedResources.frameColorTexture;
+  const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
+  const RenderGraphTextureId sceneDepthGraphTexture =
+      resolveSceneDepthGraphTexture(frame);
 
   const MaterialTableSnapshot materialSnapshot =
       frame.resources->materialSnapshot();
@@ -347,7 +368,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     Result<bool, std::string> rebuildResult =
         [&]() -> Result<bool, std::string> {
       std::optional<Result<bool, std::string>> result;
-      NURI_PROFILER_ZONE("TransmissionLayer.cache_rebuild",
+      NURI_PROFILER_ZONE("TransmissionRenderer.cache_rebuild",
                          NURI_PROFILER_COLOR_CMD_DRAW);
       result.emplace(rebuildSceneCache(
           *frame.scene, *frame.resources,
@@ -367,7 +388,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   const bool environmentDirty =
       !isSameEnvironmentHandles(cachedEnvironmentHandles_, environment);
   if (environmentDirty || environmentTextureAccessHandles_.empty()) {
-    NURI_PROFILER_ZONE("TransmissionLayer.env_texture_collect",
+    NURI_PROFILER_ZONE("TransmissionRenderer.env_texture_collect",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     collectEnvironmentTextureReads(*frame.scene, *frame.resources);
     cachedEnvironmentHandles_ = environment;
@@ -376,7 +397,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   if (materialDirty || materialTextureAccessHandles_.empty()) {
     Result<bool, std::string> cacheResult = [&]() -> Result<bool, std::string> {
       std::optional<Result<bool, std::string>> result;
-      NURI_PROFILER_ZONE("TransmissionLayer.material_texture_cache",
+      NURI_PROFILER_ZONE("TransmissionRenderer.material_texture_cache",
                          NURI_PROFILER_COLOR_CMD_DRAW);
       result.emplace(rebuildMaterialTextureAccessCache(*frame.resources));
       NURI_PROFILER_ZONE_END();
@@ -398,15 +419,16 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     }
   }
 
-  const ForwardSceneGpuData *sceneGpu =
-      frame.channels.tryGet<ForwardSceneGpuData>(
-          kFrameChannelForwardSceneGpuData);
-  if (sceneGpu == nullptr || !nuri::isValid(sceneGpu->buffer) ||
-      sceneGpu->frameDataAddress == 0u) {
+  if (!frame.sharedResources.forwardSceneGpuData.has_value() ||
+      !nuri::isValid(frame.sharedResources.forwardSceneGpuData->buffer) ||
+      frame.sharedResources.forwardSceneGpuData->frameDataAddress == 0u) {
     return Result<bool, std::string>::makeError(
-        "TransmissionLayer::buildRenderGraph: forward scene GPU data is "
+        "TransmissionRenderer::prepareTransmissionPasses: forward scene GPU "
+        "data is "
         "unavailable");
   }
+  const ForwardSceneGpuData *sceneGpu =
+      &*frame.sharedResources.forwardSceneGpuData;
 
   const std::span<const Renderable> renderables = frame.scene->renderables();
   if (!meshDrawTemplates_.empty()) {
@@ -460,8 +482,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   }
 
   const uint32_t sceneColorTexId =
-      hasSceneColorInput ? gpu_.getTextureBindlessIndex(*sceneColorTexture)
-                         : kInvalidTextureBindlessIndex;
+      gpu_.getTextureBindlessIndex(sceneColorTexture);
   const uint32_t sceneColorSamplerId =
       gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
 
@@ -480,7 +501,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   copyPushConstantsRing_.clear();
 
   if (!meshDrawTemplates_.empty()) {
-    NURI_PROFILER_ZONE("TransmissionLayer.material_instance_uploads",
+    NURI_PROFILER_ZONE("TransmissionRenderer.material_instance_uploads",
                        NURI_PROFILER_COLOR_CMD_COPY);
     if (materialDirty || materialGpuDataCache_.empty()) {
       materialGpuDataCache_.clear();
@@ -528,7 +549,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     }
     NURI_PROFILER_ZONE_END();
 
-    NURI_PROFILER_ZONE("TransmissionLayer.mesh_draw_build",
+    NURI_PROFILER_ZONE("TransmissionRenderer.mesh_draw_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     const uint64_t frameDataAddress = sceneGpu->frameDataAddress;
     const uint64_t materialBufferAddress =
@@ -546,7 +567,8 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
          directionalLightBufferAddress == 0u) ||
         (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
       return Result<bool, std::string>::makeError(
-          "TransmissionLayer::buildRenderGraph: invalid GPU buffer address");
+          "TransmissionRenderer::prepareTransmissionPasses: invalid GPU buffer "
+          "address");
     }
 
     meshPushConstants_.reserve(meshDrawTemplates_.size());
@@ -616,12 +638,78 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     NURI_PROFILER_ZONE_END();
   }
 
-  const bool copySceneColorToSwapchain =
-      hasSceneColorInput && sceneColorTexId != kInvalidTextureBindlessIndex;
-  const size_t expectedCopyDrawCount =
-      static_cast<size_t>(kTransmissionSceneColorLevelCount - 1u) +
-      (copySceneColorToSwapchain ? 1u : 0u);
-  copyPushConstantsRing_.reserve(expectedCopyDrawCount);
+  if (sceneColorTexId != kInvalidTextureBindlessIndex) {
+    appendUniqueTexture(passTextureReads_, sceneColorTexture);
+    for (uint32_t level = 1u; level < kTransmissionSceneColorLevelCount;
+         ++level) {
+      appendUniqueTexture(passTextureReads_,
+                          currentSceneColorTextureMip(frame.frameIndex, level));
+    }
+  }
+
+  preparedSceneColorTexture_ = sceneColorTexture;
+  preparedFrameColorTexture_ = frameColorTexture;
+  preparedDepthTexture_ = depthTexture;
+  preparedSceneDepthGraphTexture_ = sceneDepthGraphTexture;
+  preparedSceneColorSamplerId_ = sceneColorSamplerId;
+
+  if (!meshDrawTemplates_.empty() && passDrawItems_.empty()) {
+    NURI_LOG_WARNING("TransmissionRenderer::prepareTransmissionPasses: "
+                     "transmission cache has "
+                     "%zu template draw(s) but produced no pass draw(s)",
+                     meshDrawTemplates_.size());
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+bool TransmissionRenderer::hasPreparedTransmissionDownsamplePasses()
+    const noexcept {
+  return nuri::isValid(preparedSceneColorTexture_);
+}
+
+bool TransmissionRenderer::hasPreparedTransmissionCopyPass() const noexcept {
+  return nuri::isValid(preparedSceneColorTexture_);
+}
+
+bool TransmissionRenderer::hasPreparedTransmissionMainPass() const noexcept {
+  return !passDrawItems_.empty();
+}
+
+Result<bool, std::string>
+TransmissionRenderer::appendTransmissionDownsamplePasses(
+    RenderFrameContext &frame, RenderGraphBuilder &graph) {
+  if (!hasPreparedTransmissionDownsamplePasses()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const bool hasCurrentFrameSceneColor =
+      nuri::isValid(frame.sharedResources.sceneColorGraphTexture);
+  if (!hasCurrentFrameSceneColor) {
+    RenderGraphGraphicsPassDesc fallbackPassDesc{};
+    fallbackPassDesc.color = {.loadOp = LoadOp::Clear,
+                              .storeOp = StoreOp::Store,
+                              .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+    auto fallbackImportResult = graph.importTexture(
+        preparedSceneColorTexture_, "transmission_scene_color_fallback");
+    if (fallbackImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(fallbackImportResult.error());
+    }
+    fallbackPassDesc.colorTexture = fallbackImportResult.value();
+    fallbackPassDesc.debugLabel = kTransmissionDownsamplePassLabel;
+    fallbackPassDesc.debugColor = kTransmissionDownsampleDebugColor;
+
+    auto addFallbackResult = graph.addGraphicsPass(fallbackPassDesc);
+    if (addFallbackResult.hasError()) {
+      return Result<bool, std::string>::makeError(addFallbackResult.error());
+    }
+  }
+  preparedHasSceneColorInput_ = true;
+
+  const size_t downsamplePassCount =
+      static_cast<size_t>(kTransmissionSceneColorLevelCount - 1u);
+  copyPushConstantsRing_.reserve(copyPushConstantsRing_.size() +
+                                 downsamplePassCount);
+
   auto buildCopyDraw = [this](uint32_t sourceTexId, uint32_t sourceSamplerId,
                               uint32_t flags) -> DrawItem {
     copyPushConstantsRing_.push_back(CopyPushConstants{
@@ -647,29 +735,32 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     return draw;
   };
 
-  TextureHandle previousSceneColorLevel = *sceneColorTexture;
+  TextureHandle previousSceneColorLevel = preparedSceneColorTexture_;
   for (uint32_t level = 1u; level < kTransmissionSceneColorLevelCount;
        ++level) {
-    NURI_PROFILER_ZONE("TransmissionLayer.downsample_pass_build",
+    NURI_PROFILER_ZONE("TransmissionRenderer.downsample_pass_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     const TextureHandle destinationTexture =
         currentSceneColorTextureMip(frame.frameIndex, level);
     if (!nuri::isValid(destinationTexture)) {
       return Result<bool, std::string>::makeError(
-          "TransmissionLayer::buildRenderGraph: scene color downsample "
-          "texture is unavailable");
+          "TransmissionRenderer::appendTransmissionDownsamplePasses: scene "
+          "color "
+          "downsample texture is unavailable");
     }
 
     const uint32_t sourceTexId =
         gpu_.getTextureBindlessIndex(previousSceneColorLevel);
     if (sourceTexId == kInvalidTextureBindlessIndex) {
       return Result<bool, std::string>::makeError(
-          "TransmissionLayer::buildRenderGraph: invalid scene color "
-          "downsample source bindless index");
+          "TransmissionRenderer::appendTransmissionDownsamplePasses: invalid "
+          "scene "
+          "color downsample source bindless index");
     }
 
-    DrawItem downsampleDraw = buildCopyDraw(sourceTexId, sceneColorSamplerId,
-                                            kTransmissionCopyFlagDownsample);
+    DrawItem downsampleDraw =
+        buildCopyDraw(sourceTexId, preparedSceneColorSamplerId_,
+                      kTransmissionCopyFlagDownsample);
     RenderGraphGraphicsPassDesc downsamplePassDesc{};
     downsamplePassDesc.color = {.loadOp = LoadOp::Clear,
                                 .storeOp = StoreOp::Store,
@@ -698,54 +789,115 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
     NURI_PROFILER_ZONE_END();
   }
 
-  if (copySceneColorToSwapchain) {
-    NURI_PROFILER_ZONE("TransmissionLayer.copy_pass_build",
-                       NURI_PROFILER_COLOR_CMD_DRAW);
-    DrawItem copyDraw = buildCopyDraw(sceneColorTexId, sceneColorSamplerId, 0u);
+  return Result<bool, std::string>::makeResult(true);
+}
 
-    RenderGraphGraphicsPassDesc copyPassDesc{};
-    copyPassDesc.color = {.loadOp = LoadOp::Clear,
-                          .storeOp = StoreOp::Store,
-                          .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-    copyPassDesc.draws = std::span<const DrawItem>(&copyDraw, 1u);
-    const std::array<TextureHandle, 1> copyDependencies = {*sceneColorTexture};
-    copyPassDesc.dependencyTextures = std::span<const TextureHandle>(
-        copyDependencies.data(), copyDependencies.size());
-    copyPassDesc.debugLabel = kTransmissionCopyPassLabel;
-    copyPassDesc.debugColor = kTransmissionCopyDebugColor;
-
-    auto addCopyResult = graph.addGraphicsPass(copyPassDesc);
-    if (addCopyResult.hasError()) {
-      return Result<bool, std::string>::makeError(addCopyResult.error());
-    }
-    NURI_PROFILER_ZONE_END();
+Result<bool, std::string>
+TransmissionRenderer::appendTransmissionCopyPass(RenderFrameContext &frame,
+                                                 RenderGraphBuilder &graph) {
+  if (!hasPreparedTransmissionCopyPass()) {
+    return Result<bool, std::string>::makeResult(true);
   }
-  if (hasSceneColorInput && sceneColorTexId != kInvalidTextureBindlessIndex) {
-    appendUniqueTexture(passTextureReads_, *sceneColorTexture);
-    for (uint32_t level = 1u; level < kTransmissionSceneColorLevelCount;
-         ++level) {
-      appendUniqueTexture(passTextureReads_,
-                          currentSceneColorTextureMip(frame.frameIndex, level));
-    }
+
+  if (!nuri::isValid(preparedSceneColorTexture_) ||
+      !nuri::isValid(preparedFrameColorTexture_) ||
+      !preparedHasSceneColorInput_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  copyPushConstantsRing_.reserve(copyPushConstantsRing_.size() + 1u);
+  copyPushConstantsRing_.push_back(CopyPushConstants{
+      .sourceTexId = gpu_.getTextureBindlessIndex(preparedSceneColorTexture_),
+      .sourceSamplerId = preparedSceneColorSamplerId_,
+      .flags = 0u,
+      .reserved0 = 0u,
+  });
+  const CopyPushConstants &pc = copyPushConstantsRing_.back();
+  if (pc.sourceTexId == kInvalidTextureBindlessIndex) {
+    return Result<bool, std::string>::makeError(
+        "TransmissionRenderer::appendTransmissionCopyPass: invalid scene color "
+        "copy source bindless index");
+  }
+
+  NURI_PROFILER_ZONE("TransmissionRenderer.copy_pass_build",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
+  DrawItem copyDraw{};
+  copyDraw.pipeline = copyPipelineHandle_;
+  copyDraw.vertexCount = 3u;
+  copyDraw.instanceCount = 1u;
+  copyDraw.pushConstants = std::span<const std::byte>(
+      reinterpret_cast<const std::byte *>(&pc), sizeof(CopyPushConstants));
+  copyDraw.debugLabel = kTransmissionCopyLabel;
+  copyDraw.debugColor = kTransmissionCopyDebugColor;
+
+  RenderGraphGraphicsPassDesc copyPassDesc{};
+  copyPassDesc.color = {.loadOp = LoadOp::Clear,
+                        .storeOp = StoreOp::Store,
+                        .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+  auto colorImportResult = graph.importTexture(preparedFrameColorTexture_,
+                                               "transmission_frame_color");
+  if (colorImportResult.hasError()) {
+    return Result<bool, std::string>::makeError(colorImportResult.error());
+  }
+  copyPassDesc.colorTexture = colorImportResult.value();
+  copyPassDesc.draws = std::span<const DrawItem>(&copyDraw, 1u);
+  const std::array<TextureHandle, 1> copyDependencies = {
+      preparedSceneColorTexture_};
+  copyPassDesc.dependencyTextures = std::span<const TextureHandle>(
+      copyDependencies.data(), copyDependencies.size());
+  copyPassDesc.debugLabel = kTransmissionCopyPassLabel;
+  copyPassDesc.debugColor = kTransmissionCopyDebugColor;
+
+  auto addCopyResult = graph.addGraphicsPass(copyPassDesc);
+  if (addCopyResult.hasError()) {
+    return Result<bool, std::string>::makeError(addCopyResult.error());
+  }
+  NURI_PROFILER_ZONE_END();
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
+                                                 RenderGraphBuilder &graph) {
+  if (!hasPreparedTransmissionMainPass()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  const bool hasSceneColorInput =
+      nuri::isValid(preparedSceneColorTexture_) && preparedHasSceneColorInput_;
+  const bool copySceneColorToSwapchain = hasSceneColorInput;
+  if (!nuri::isValid(preparedFrameColorTexture_)) {
+    return Result<bool, std::string>::makeError(
+        "TransmissionRenderer::appendTransmissionMainPass: frame color target "
+        "is "
+        "unavailable at build time");
   }
 
   RenderGraphGraphicsPassDesc passDesc{};
-  NURI_PROFILER_ZONE("TransmissionLayer.main_pass_build",
+  NURI_PROFILER_ZONE("TransmissionRenderer.main_pass_build",
                      NURI_PROFILER_COLOR_CMD_DRAW);
   passDesc.color = {.loadOp = copySceneColorToSwapchain ? LoadOp::Load
                                                         : LoadOp::Clear,
                     .storeOp = StoreOp::Store,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  if (nuri::isValid(depthTexture) || nuri::isValid(sceneDepthGraphTexture)) {
+                    .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
+  auto colorImportResult = graph.importTexture(preparedFrameColorTexture_,
+                                               "transmission_frame_color");
+  if (colorImportResult.hasError()) {
+    return Result<bool, std::string>::makeError(colorImportResult.error());
+  }
+  passDesc.colorTexture = colorImportResult.value();
+  if (nuri::isValid(preparedDepthTexture_) ||
+      nuri::isValid(preparedSceneDepthGraphTexture_)) {
     passDesc.depth = {.loadOp = LoadOp::Load,
                       .storeOp = StoreOp::Store,
                       .clearDepth = 1.0f,
                       .clearStencil = 0u};
-    if (nuri::isValid(sceneDepthGraphTexture)) {
-      passDesc.depthTexture = sceneDepthGraphTexture;
+    if (nuri::isValid(preparedSceneDepthGraphTexture_)) {
+      passDesc.depthTexture = preparedSceneDepthGraphTexture_;
     } else {
-      auto depthImportResult =
-          graph.importTexture(depthTexture, "transmission_scene_depth");
+      auto depthImportResult = graph.importTexture(preparedDepthTexture_,
+                                                   "transmission_scene_depth");
       if (depthImportResult.hasError()) {
         return Result<bool, std::string>::makeError(depthImportResult.error());
       }
@@ -776,7 +928,7 @@ TransmissionLayer::buildRenderGraph(RenderFrameContext &frame,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> TransmissionLayer::ensureInitialized() {
+Result<bool, std::string> TransmissionRenderer::ensureInitialized() {
   if (initialized_) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -788,13 +940,14 @@ Result<bool, std::string> TransmissionLayer::ensureInitialized() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> TransmissionLayer::createShaders() {
+Result<bool, std::string> TransmissionRenderer::createShaders() {
   destroyShaders();
   meshShader_ = Shader::create("transmission_main", gpu_);
   copyShader_ = Shader::create("transmission_copy", gpu_);
   if (!meshShader_ || !copyShader_) {
     return Result<bool, std::string>::makeError(
-        "TransmissionLayer::createShaders: failed to create shader wrappers");
+        "TransmissionRenderer::createShaders: failed to create shader "
+        "wrappers");
   }
 
   auto meshVertexResult = meshShader_->compileFromFile(
@@ -826,7 +979,7 @@ Result<bool, std::string> TransmissionLayer::createShaders() {
 }
 
 Result<bool, std::string>
-TransmissionLayer::ensurePipelines(Format colorFormat, Format depthFormat) {
+TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
   const bool meshPipelinesValid =
       nuri::isValid(meshPipelineHandle_) &&
       nuri::isValid(meshDoubleSidedPipelineHandle_) &&
@@ -878,7 +1031,7 @@ TransmissionLayer::ensurePipelines(Format colorFormat, Format depthFormat) {
 }
 
 Result<bool, std::string>
-TransmissionLayer::ensureMaterialBufferCapacity(size_t requiredBytes) {
+TransmissionRenderer::ensureMaterialBufferCapacity(size_t requiredBytes) {
   const size_t requested = std::max(requiredBytes, sizeof(MaterialGpuData));
   if (materialBuffer_ && materialBuffer_->valid() &&
       materialBufferCapacityBytes_ >= requested) {
@@ -902,7 +1055,7 @@ TransmissionLayer::ensureMaterialBufferCapacity(size_t requiredBytes) {
 }
 
 Result<bool, std::string>
-TransmissionLayer::ensureRingBufferCount(uint32_t requiredCount) {
+TransmissionRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   const uint32_t count = std::max(requiredCount, 1u);
   while (instanceMatricesRing_.size() < count) {
     instanceMatricesRing_.push_back(DynamicBufferSlot{});
@@ -916,7 +1069,7 @@ TransmissionLayer::ensureRingBufferCount(uint32_t requiredCount) {
 }
 
 Result<bool, std::string>
-TransmissionLayer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
+TransmissionRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
   for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceMatricesRing_[i];
     if (slot.buffer && slot.buffer->valid() &&
@@ -943,7 +1096,7 @@ TransmissionLayer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
 }
 
 Result<bool, std::string>
-TransmissionLayer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
+TransmissionRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
   for (size_t i = 0; i < instanceRemapRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceRemapRing_[i];
     if (slot.buffer && slot.buffer->valid() &&
@@ -969,7 +1122,7 @@ TransmissionLayer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> TransmissionLayer::ensureSceneColorTexture() {
+Result<bool, std::string> TransmissionRenderer::ensureSceneColorTexture() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
@@ -1049,8 +1202,58 @@ Result<bool, std::string> TransmissionLayer::ensureSceneColorTexture() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string> TransmissionRenderer::ensureFrameColorTexture() {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+  const uint32_t safeWidth =
+      static_cast<uint32_t>(std::max(framebufferWidth, 1));
+  const uint32_t safeHeight =
+      static_cast<uint32_t>(std::max(framebufferHeight, 1));
+  const Format targetFormat = gpu_.getSwapchainFormat();
+  const uint32_t textureCount = std::max(1u, gpu_.getSwapchainImageCount());
+
+  const bool matchesExisting = frameColorTextures_.size() == textureCount &&
+                               sceneColorTextureFormat_ == targetFormat &&
+                               sceneColorTextureWidth_ == safeWidth &&
+                               sceneColorTextureHeight_ == safeHeight;
+  if (matchesExisting && allTexturesValid(frameColorTextures_)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  destroyTextures(gpu_, frameColorTextures_);
+  frameColorTextures_.resize(textureCount);
+
+  const TextureDesc frameColorDesc{
+      .type = TextureType::Texture2D,
+      .format = targetFormat,
+      .dimensions = {safeWidth, safeHeight, 1},
+      .usage = TextureUsage::AttachmentSampled,
+      .storage = Storage::Device,
+      .numLayers = 1,
+      .numSamples = 1,
+      .numMipLevels = 1,
+      .data = {},
+      .dataNumMipLevels = 1,
+      .generateMipmaps = false,
+  };
+  for (uint32_t i = 0; i < textureCount; ++i) {
+    const std::string debugName =
+        "transmission_frame_color_" + std::to_string(i);
+    auto textureResult =
+        gpu_.createFramebufferTexture(frameColorDesc, debugName);
+    if (textureResult.hasError()) {
+      return Result<bool, std::string>::makeError(textureResult.error());
+    }
+    frameColorTextures_[i] = textureResult.value();
+  }
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
 TextureHandle
-TransmissionLayer::currentSceneColorTexture(uint64_t frameIndex) const {
+TransmissionRenderer::currentSceneColorTexture(uint64_t frameIndex) const {
   if (sceneColorTextures_.empty()) {
     return {};
   }
@@ -1059,8 +1262,17 @@ TransmissionLayer::currentSceneColorTexture(uint64_t frameIndex) const {
 }
 
 TextureHandle
-TransmissionLayer::currentSceneColorTextureMip(uint64_t frameIndex,
-                                               uint32_t level) const {
+TransmissionRenderer::currentFrameColorTexture(uint64_t frameIndex) const {
+  if (frameColorTextures_.empty()) {
+    return {};
+  }
+  const size_t slot = ringSlot(frameIndex, frameColorTextures_.size());
+  return frameColorTextures_[slot];
+}
+
+TextureHandle
+TransmissionRenderer::currentSceneColorTextureMip(uint64_t frameIndex,
+                                                  uint32_t level) const {
   if (level == 0u) {
     return currentSceneColorTexture(frameIndex);
   }
@@ -1081,9 +1293,9 @@ TransmissionLayer::currentSceneColorTextureMip(uint64_t frameIndex,
 }
 
 Result<bool, std::string>
-TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
-                                     const ResourceManager &resources,
-                                     uint32_t materialCount) {
+TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
+                                        const ResourceManager &resources,
+                                        uint32_t materialCount) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   meshDrawTemplates_.clear();
 
@@ -1091,7 +1303,7 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
   if (renderables.size() >
       static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
     return Result<bool, std::string>::makeError(
-        "TransmissionLayer::rebuildSceneCache: renderables count exceeds "
+        "TransmissionRenderer::rebuildSceneCache: renderables count exceeds "
         "UINT32_MAX");
   }
 
@@ -1104,19 +1316,20 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
     const ModelRecord *modelRecord = resources.tryGet(renderable.model);
     if (!modelRecord || !modelRecord->model) {
       return Result<bool, std::string>::makeError(
-          "TransmissionLayer::rebuildSceneCache: failed to resolve model");
+          "TransmissionRenderer::rebuildSceneCache: failed to resolve model");
     }
 
     GeometryAllocationView geometry{};
     if (!gpu_.resolveGeometry(modelRecord->model->geometryHandle(), geometry)) {
       return Result<bool, std::string>::makeError(
-          "TransmissionLayer::rebuildSceneCache: failed to resolve geometry");
+          "TransmissionRenderer::rebuildSceneCache: failed to resolve "
+          "geometry");
     }
     const uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
         geometry.vertexBuffer, geometry.vertexByteOffset);
     if (vertexBufferAddress == 0u) {
       return Result<bool, std::string>::makeError(
-          "TransmissionLayer::rebuildSceneCache: invalid vertex buffer "
+          "TransmissionRenderer::rebuildSceneCache: invalid vertex buffer "
           "address");
     }
 
@@ -1155,7 +1368,7 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
   if (invalidMaterialFallbackCount > 0u) {
     if (!loggedMaterialFallbackWarning_) {
       NURI_LOG_WARNING(
-          "TransmissionLayer::rebuildSceneCache: %zu submesh draw(s) used "
+          "TransmissionRenderer::rebuildSceneCache: %zu submesh draw(s) used "
           "fallback material index 0 due to missing/out-of-range material "
           "mapping",
           invalidMaterialFallbackCount);
@@ -1178,7 +1391,8 @@ TransmissionLayer::rebuildSceneCache(const RenderScene &scene,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> TransmissionLayer::rebuildMaterialTextureAccessCache(
+Result<bool, std::string>
+TransmissionRenderer::rebuildMaterialTextureAccessCache(
     const ResourceManager &resources) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   materialTextureAccessHandles_.clear();
@@ -1212,7 +1426,7 @@ Result<bool, std::string> TransmissionLayer::rebuildMaterialTextureAccessCache(
   return Result<bool, std::string>::makeResult(true);
 }
 
-void TransmissionLayer::collectEnvironmentTextureReads(
+void TransmissionRenderer::collectEnvironmentTextureReads(
     const RenderScene &scene, const ResourceManager &resources) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   environmentTextureAccessHandles_.clear();
@@ -1229,7 +1443,7 @@ void TransmissionLayer::collectEnvironmentTextureReads(
   }
 }
 
-void TransmissionLayer::resetCachedState() {
+void TransmissionRenderer::resetCachedState() {
   cachedScene_ = nullptr;
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
@@ -1256,16 +1470,23 @@ void TransmissionLayer::resetCachedState() {
   passDependencyBufferAccessModes_.clear();
 }
 
-void TransmissionLayer::resetFrameBuildState() {
+void TransmissionRenderer::resetFrameBuildState() {
   meshPushConstants_.clear();
   passDrawItems_.clear();
   passTextureReads_.clear();
   passDependencyBuffers_.clear();
   passDependencyBufferAccessModes_.clear();
   copyPushConstantsRing_.clear();
+  preparedSceneColorTexture_ = {};
+  preparedFrameColorTexture_ = {};
+  preparedDepthTexture_ = {};
+  preparedSceneDepthGraphTexture_ = {};
+  preparedHasSceneColorInput_ = false;
+  preparedCopySceneColorToSwapchain_ = false;
+  preparedSceneColorSamplerId_ = 0u;
 }
 
-void TransmissionLayer::destroyPipelineState() {
+void TransmissionRenderer::destroyPipelineState() {
   if (nuri::isValid(copyPipelineHandle_)) {
     gpu_.destroyRenderPipeline(copyPipelineHandle_);
   }
@@ -1284,7 +1505,7 @@ void TransmissionLayer::destroyPipelineState() {
   copyPipelineDepthFormat_ = Format::Count;
 }
 
-void TransmissionLayer::destroyShaders() {
+void TransmissionRenderer::destroyShaders() {
   if (nuri::isValid(meshVertexShader_)) {
     gpu_.destroyShaderModule(meshVertexShader_);
   }
@@ -1303,7 +1524,7 @@ void TransmissionLayer::destroyShaders() {
   copyFragmentShader_ = {};
 }
 
-void TransmissionLayer::destroyBuffers() {
+void TransmissionRenderer::destroyBuffers() {
   if (materialBuffer_ && materialBuffer_->valid()) {
     gpu_.destroyBuffer(materialBuffer_->handle());
   }
@@ -1329,7 +1550,7 @@ void TransmissionLayer::destroyBuffers() {
   instanceDataRingUploadVersions_.clear();
 }
 
-bool TransmissionLayer::hasTransmissionContent(
+bool TransmissionRenderer::hasTransmissionContent(
     const RenderFrameContext &frame) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   if (frame.scene == nullptr || frame.resources == nullptr) {
@@ -1349,7 +1570,7 @@ bool TransmissionLayer::hasTransmissionContent(
       rebuildSceneCache(*frame.scene, *frame.resources,
                         static_cast<uint32_t>(materialSnapshot.gpuData.size()));
   if (rebuildResult.hasError()) {
-    NURI_LOG_WARNING("TransmissionLayer::hasTransmissionContent: %s",
+    NURI_LOG_WARNING("TransmissionRenderer::hasTransmissionContent: %s",
                      rebuildResult.error().c_str());
     return false;
   }
@@ -1362,7 +1583,14 @@ bool TransmissionLayer::hasTransmissionContent(
 }
 
 RenderPipelineHandle
-TransmissionLayer::selectMeshPipeline(bool doubleSided) const {
+TransmissionRenderer::selectMeshPipeline(bool doubleSided) const {
+  // Transmission correctness is more important than backface-culling wins.
+  // Imported scene-mesh paths can preserve source winding differently from the
+  // standalone model path, and closed transmissive assets disappearing is much
+  // worse than extra overdraw.
+  if (nuri::isValid(meshDoubleSidedPipelineHandle_)) {
+    return meshDoubleSidedPipelineHandle_;
+  }
   if (doubleSided && nuri::isValid(meshDoubleSidedPipelineHandle_)) {
     return meshDoubleSidedPipelineHandle_;
   }

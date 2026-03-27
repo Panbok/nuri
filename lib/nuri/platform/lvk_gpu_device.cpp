@@ -659,6 +659,7 @@ struct LvkGPUDevice::Impl {
   mutable std::mutex contextImmediateMutex;
   std::mutex graphicsContextMutex;
   std::vector<ActiveGraphicsRecordingContext> activeGraphicsContexts;
+  std::vector<uint8_t> activeGraphicsContextOccupied;
   std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
   lvk::TextureHandle currentFrameSwapchainTexture{};
   std::vector<uint32_t> recordingContextGenerations;
@@ -667,6 +668,40 @@ struct LvkGPUDevice::Impl {
   uint32_t nextRecordedCommandBufferIndex = 1u;
   std::unique_ptr<GeometryPool> geometryPool;
 };
+
+namespace {
+
+[[nodiscard]] ActiveGraphicsRecordingContext *
+findActiveGraphicsContextSlot(auto &impl, RecordingContextHandle handle) {
+  if (handle.index >= impl.activeGraphicsContexts.size() ||
+      handle.index >= impl.activeGraphicsContextOccupied.size() ||
+      impl.activeGraphicsContextOccupied[handle.index] == 0u) {
+    return nullptr;
+  }
+  ActiveGraphicsRecordingContext &entry =
+      impl.activeGraphicsContexts[handle.index];
+  if (!areSameHandle(entry.handle, handle)) {
+    return nullptr;
+  }
+  return &entry;
+}
+
+[[nodiscard]] const ActiveGraphicsRecordingContext *
+findActiveGraphicsContextSlot(const auto &impl, RecordingContextHandle handle) {
+  if (handle.index >= impl.activeGraphicsContexts.size() ||
+      handle.index >= impl.activeGraphicsContextOccupied.size() ||
+      impl.activeGraphicsContextOccupied[handle.index] == 0u) {
+    return nullptr;
+  }
+  const ActiveGraphicsRecordingContext &entry =
+      impl.activeGraphicsContexts[handle.index];
+  if (!areSameHandle(entry.handle, handle)) {
+    return nullptr;
+  }
+  return &entry;
+}
+
+} // namespace
 
 LvkGPUDevice::LvkGPUDevice() : impl_(std::make_unique<Impl>()) {}
 
@@ -2185,11 +2220,19 @@ LvkGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
       .index = index,
       .generation =
           nextHandleGeneration(impl_->recordingContextGenerations, index)};
-  impl_->activeGraphicsContexts.push_back(ActiveGraphicsRecordingContext{
+  if (impl_->activeGraphicsContexts.size() <= index) {
+    impl_->activeGraphicsContexts.resize(static_cast<size_t>(index) + 1u);
+  }
+  if (impl_->activeGraphicsContextOccupied.size() <= index) {
+    impl_->activeGraphicsContextOccupied.resize(static_cast<size_t>(index) + 1u,
+                                                0u);
+  }
+  impl_->activeGraphicsContexts[index] = ActiveGraphicsRecordingContext{
       .handle = handle,
       .commandBuffer = &commandBuffer,
       .workerIndex = workerIndex,
-  });
+  };
+  impl_->activeGraphicsContextOccupied[index] = 1u;
   return Result<RecordingContextHandle, std::string>::makeResult(handle);
 }
 
@@ -2203,12 +2246,10 @@ Result<bool, std::string> LvkGPUDevice::recordGraphicsBarriers(
   lvk::ICommandBuffer *rawCommandBuffer = nullptr;
   {
     std::lock_guard lock(impl_->graphicsContextMutex);
-    for (const auto &entry : impl_->activeGraphicsContexts) {
-      if (!areSameHandle(entry.handle, ctx)) {
-        continue;
-      }
-      rawCommandBuffer = entry.commandBuffer;
-      break;
+    if (const ActiveGraphicsRecordingContext *entry =
+            findActiveGraphicsContextSlot(*impl_, ctx);
+        entry != nullptr) {
+      rawCommandBuffer = entry->commandBuffer;
     }
   }
   if (rawCommandBuffer == nullptr) {
@@ -2325,11 +2366,10 @@ LvkGPUDevice::recordGraphicsPass(RecordingContextHandle ctx,
   lvk::ICommandBuffer *commandBuffer = nullptr;
   {
     std::lock_guard lock(impl_->graphicsContextMutex);
-    for (const auto &entry : impl_->activeGraphicsContexts) {
-      if (areSameHandle(entry.handle, ctx)) {
-        commandBuffer = entry.commandBuffer;
-        break;
-      }
+    if (const ActiveGraphicsRecordingContext *entry =
+            findActiveGraphicsContextSlot(*impl_, ctx);
+        entry != nullptr) {
+      commandBuffer = entry->commandBuffer;
     }
   }
   if (commandBuffer != nullptr) {
@@ -2343,60 +2383,52 @@ LvkGPUDevice::recordGraphicsPass(RecordingContextHandle ctx,
 Result<RecordedCommandBufferHandle, std::string>
 LvkGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
   std::lock_guard lock(impl_->graphicsContextMutex);
-  for (size_t i = 0u; i < impl_->activeGraphicsContexts.size(); ++i) {
-    if (!areSameHandle(impl_->activeGraphicsContexts[i].handle, ctx)) {
-      continue;
-    }
-
-    auto indexResult = allocateMonotonicHandleIndex(
-        impl_->nextRecordedCommandBufferIndex,
-        "LvkGPUDevice::finishGraphicsRecordingContext");
-    if (indexResult.hasError()) {
-      return Result<RecordedCommandBufferHandle, std::string>::makeError(
-          indexResult.error());
-    }
-
-    const uint32_t index = indexResult.value();
-    const RecordedCommandBufferHandle handle{
-        .index = index,
-        .generation = nextHandleGeneration(
-            impl_->recordedCommandBufferGenerations, index)};
-    impl_->recordedGraphicsCommandBuffers.push_back(
-        RecordedGraphicsCommandBuffer{
-            .handle = handle,
-            .commandBuffer = impl_->activeGraphicsContexts[i].commandBuffer,
-        });
-    impl_->activeGraphicsContexts.erase(impl_->activeGraphicsContexts.begin() +
-                                        i);
-    return Result<RecordedCommandBufferHandle, std::string>::makeResult(handle);
+  ActiveGraphicsRecordingContext *activeContext =
+      findActiveGraphicsContextSlot(*impl_, ctx);
+  if (activeContext == nullptr) {
+    return Result<RecordedCommandBufferHandle, std::string>::makeError(
+        "LvkGPUDevice::finishGraphicsRecordingContext: unknown recording "
+        "context");
   }
 
-  return Result<RecordedCommandBufferHandle, std::string>::makeError(
-      "LvkGPUDevice::finishGraphicsRecordingContext: unknown recording "
-      "context");
+  auto indexResult = allocateMonotonicHandleIndex(
+      impl_->nextRecordedCommandBufferIndex,
+      "LvkGPUDevice::finishGraphicsRecordingContext");
+  if (indexResult.hasError()) {
+    return Result<RecordedCommandBufferHandle, std::string>::makeError(
+        indexResult.error());
+  }
+
+  const uint32_t index = indexResult.value();
+  const RecordedCommandBufferHandle handle{
+      .index = index,
+      .generation =
+          nextHandleGeneration(impl_->recordedCommandBufferGenerations, index)};
+  impl_->recordedGraphicsCommandBuffers.push_back(RecordedGraphicsCommandBuffer{
+      .handle = handle,
+      .commandBuffer = activeContext->commandBuffer,
+  });
+  impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
+  impl_->activeGraphicsContextOccupied[ctx.index] = 0u;
+  return Result<RecordedCommandBufferHandle, std::string>::makeResult(handle);
 }
 
 Result<bool, std::string>
 LvkGPUDevice::discardGraphicsRecordingContext(RecordingContextHandle ctx) {
   std::scoped_lock lock(impl_->contextImmediateMutex,
                         impl_->graphicsContextMutex);
-  for (size_t i = 0u; i < impl_->activeGraphicsContexts.size(); ++i) {
-    if (!areSameHandle(impl_->activeGraphicsContexts[i].handle, ctx)) {
-      continue;
-    }
-
-    impl_->context->discard(*impl_->activeGraphicsContexts[i].commandBuffer);
-    if (i + 1u != impl_->activeGraphicsContexts.size()) {
-      impl_->activeGraphicsContexts[i] =
-          std::move(impl_->activeGraphicsContexts.back());
-    }
-    impl_->activeGraphicsContexts.pop_back();
-    return Result<bool, std::string>::makeResult(true);
+  ActiveGraphicsRecordingContext *activeContext =
+      findActiveGraphicsContextSlot(*impl_, ctx);
+  if (activeContext == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "LvkGPUDevice::discardGraphicsRecordingContext: unknown recording "
+        "context");
   }
 
-  return Result<bool, std::string>::makeError(
-      "LvkGPUDevice::discardGraphicsRecordingContext: unknown recording "
-      "context");
+  impl_->context->discard(*activeContext->commandBuffer);
+  impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
+  impl_->activeGraphicsContextOccupied[ctx.index] = 0u;
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> LvkGPUDevice::discardRecordedGraphicsCommandBuffer(
