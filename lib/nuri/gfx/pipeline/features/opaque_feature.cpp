@@ -28,7 +28,8 @@ OpaqueFeature::OpaqueFeature(GPUDevice &gpu, OpaqueRendererConfig config,
                              std::pmr::memory_resource *memory)
     : renderer_(
           std::make_unique<OpaqueRenderer>(gpu, std::move(config), memory)),
-      mainPass_(*renderer_), pickPass_(*renderer_) {
+      mainPass_(*renderer_), pickPass_(*renderer_),
+      passes_{&mainPass_, &pickPass_} {
   renderer_->onAttach();
 }
 

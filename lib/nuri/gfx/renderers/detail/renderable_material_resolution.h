@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 

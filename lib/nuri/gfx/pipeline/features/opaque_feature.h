@@ -70,10 +70,12 @@ public:
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:
+  // Keep renderer_/pass members in this order. passes_ stores pointers to the
+  // pass members and is initialized from them in the constructor.
   std::unique_ptr<OpaqueRenderer> renderer_;
   OpaqueMainPass mainPass_;
   OpaquePickPass pickPass_;
-  std::array<RenderFeaturePass *, 2> passes_{&mainPass_, &pickPass_};
+  std::array<RenderFeaturePass *, 2> passes_{};
 };
 
 } // namespace nuri

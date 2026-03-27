@@ -123,6 +123,11 @@ struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   bool useViewport = false;
   Viewport viewport{};
   std::span<const ComputeDispatchItem> preDispatches{};
+  // Use dependencyBuffers when the caller already has resolved BufferHandle
+  // objects. Use dependencyBufferBindings when the pass refers to graph-owned
+  // buffers by RenderGraphBufferId/dependency index and resolution happens
+  // during graph compilation; both fields are optional and do not need to be
+  // populated together.
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const DrawItem> draws{};
   std::span<const RenderGraphPreparedDependencyBufferBinding>

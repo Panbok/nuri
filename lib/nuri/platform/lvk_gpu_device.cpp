@@ -671,30 +671,21 @@ struct LvkGPUDevice::Impl {
 
 namespace {
 
-[[nodiscard]] ActiveGraphicsRecordingContext *
-findActiveGraphicsContextSlot(auto &impl, RecordingContextHandle handle) {
-  if (handle.index >= impl.activeGraphicsContexts.size() ||
-      handle.index >= impl.activeGraphicsContextOccupied.size() ||
-      impl.activeGraphicsContextOccupied[handle.index] == 0u) {
-    return nullptr;
-  }
-  ActiveGraphicsRecordingContext &entry =
-      impl.activeGraphicsContexts[handle.index];
-  if (!areSameHandle(entry.handle, handle)) {
-    return nullptr;
-  }
-  return &entry;
-}
+template <typename Impl>
+using ActiveGraphicsContextSlotPtr =
+    std::conditional_t<std::is_const_v<std::remove_reference_t<Impl>>,
+                       const ActiveGraphicsRecordingContext *,
+                       ActiveGraphicsRecordingContext *>;
 
-[[nodiscard]] const ActiveGraphicsRecordingContext *
-findActiveGraphicsContextSlot(const auto &impl, RecordingContextHandle handle) {
+template <typename Impl>
+[[nodiscard]] ActiveGraphicsContextSlotPtr<Impl>
+findActiveGraphicsContextSlot(Impl &impl, RecordingContextHandle handle) {
   if (handle.index >= impl.activeGraphicsContexts.size() ||
       handle.index >= impl.activeGraphicsContextOccupied.size() ||
       impl.activeGraphicsContextOccupied[handle.index] == 0u) {
     return nullptr;
   }
-  const ActiveGraphicsRecordingContext &entry =
-      impl.activeGraphicsContexts[handle.index];
+  auto &entry = impl.activeGraphicsContexts[handle.index];
   if (!areSameHandle(entry.handle, handle)) {
     return nullptr;
   }

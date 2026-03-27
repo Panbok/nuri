@@ -190,22 +190,21 @@ void destroyTextures(GPUDevice &gpu,
 
 } // namespace
 
-TransmissionRenderer::TransmissionRenderer(GPUDevice &gpu,
-                                           TransmissionRendererConfig config,
-                                           std::pmr::memory_resource *memory)
-    : gpu_(gpu), config_(std::move(config)),
-      memory_(resolveMemoryResource(memory)), instanceMatricesRing_(memory_),
-      instanceRemapRing_(memory_), meshDrawTemplates_(memory_),
-      instanceMatrices_(memory_), instanceRemap_(memory_),
-      instanceDataRingUploadVersions_(memory_), materialGpuDataCache_(memory_),
-      materialTextureAccessHandles_(memory_),
+TransmissionRenderer::TransmissionRenderer(
+    GPUDevice &gpu, const TransmissionRendererConfig &config,
+    std::pmr::memory_resource *memory)
+    : gpu_(gpu), config_(config), memory_(resolveMemoryResource(memory)),
+      instanceMatricesRing_(memory_), instanceRemapRing_(memory_),
+      meshDrawTemplates_(memory_), instanceMatrices_(memory_),
+      instanceRemap_(memory_), instanceDataRingUploadVersions_(memory_),
+      materialGpuDataCache_(memory_), materialTextureAccessHandles_(memory_),
       environmentTextureAccessHandles_(memory_),
       staticPassTextureReads_(memory_), meshPushConstants_(memory_),
       passDrawItems_(memory_), passTextureReads_(memory_),
       passDependencyBuffers_(memory_),
       passDependencyBufferAccessModes_(memory_),
       copyPushConstantsRing_(memory_), sceneColorTextures_(memory_),
-      sceneColorMipTextures_(memory_) {
+      frameColorTextures_(memory_), sceneColorMipTextures_(memory_) {
   const std::filesystem::path basePath = config_.meshFragment.parent_path();
   transmissionFragmentPath_ = basePath / "transmission.frag";
   fullscreenCopyVertexPath_ = basePath / "fullscreen_copy.vert";
@@ -1214,11 +1213,12 @@ Result<bool, std::string> TransmissionRenderer::ensureFrameColorTexture() {
   const Format targetFormat = gpu_.getSwapchainFormat();
   const uint32_t textureCount = std::max(1u, gpu_.getSwapchainImageCount());
 
+  (void)targetFormat;
+  (void)safeWidth;
+  (void)safeHeight;
   const bool matchesExisting = frameColorTextures_.size() == textureCount &&
-                               sceneColorTextureFormat_ == targetFormat &&
-                               sceneColorTextureWidth_ == safeWidth &&
-                               sceneColorTextureHeight_ == safeHeight;
-  if (matchesExisting && allTexturesValid(frameColorTextures_)) {
+                               allTexturesValid(frameColorTextures_);
+  if (matchesExisting) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -1591,9 +1591,7 @@ TransmissionRenderer::selectMeshPipeline(bool doubleSided) const {
   if (nuri::isValid(meshDoubleSidedPipelineHandle_)) {
     return meshDoubleSidedPipelineHandle_;
   }
-  if (doubleSided && nuri::isValid(meshDoubleSidedPipelineHandle_)) {
-    return meshDoubleSidedPipelineHandle_;
-  }
+  (void)doubleSided;
   return meshPipelineHandle_;
 }
 

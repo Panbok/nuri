@@ -132,6 +132,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     prefilteredCharlieTexId = prefilteredCharlie->bindlessIndex;
     flags |= kForwardSceneHasIblSheen;
   } else if ((flags & kForwardSceneHasIblSpecular) != 0u) {
+    // Reuse the GGX prefilter as a sheen approximation when Charlie is
+    // missing; keep kForwardSceneHasIblSheen set so downstream shading knows a
+    // fallback sheen source is available.
     prefilteredCharlieTexId = prefilteredGgxTexId;
     flags |= kForwardSceneHasIblSheen;
   }

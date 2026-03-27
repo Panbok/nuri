@@ -30,8 +30,8 @@ public:
 
   RenderPipeline(const RenderPipeline &) = delete;
   RenderPipeline &operator=(const RenderPipeline &) = delete;
-  RenderPipeline(RenderPipeline &&) noexcept = default;
-  RenderPipeline &operator=(RenderPipeline &&) noexcept = default;
+  RenderPipeline(RenderPipeline &&) = default;
+  RenderPipeline &operator=(RenderPipeline &&) = default;
 
   FrameDataProvider *addProvider(std::unique_ptr<FrameDataProvider> provider);
   RenderFeature *addFeature(std::unique_ptr<RenderFeature> feature);
@@ -41,12 +41,12 @@ public:
                    RenderGraphBuilder &graph);
 
   [[nodiscard]] bool empty() const noexcept {
-    return providers_.empty() && features_.empty();
+    return providers_.empty() && features_.empty() && passes_.empty();
   }
   [[nodiscard]] size_t passCount() const noexcept { return passes_.size(); }
   [[nodiscard]] std::optional<RenderPipelinePassInfo>
   passInfo(size_t index) const noexcept;
-  [[nodiscard]] bool isPassEnabled(size_t index) const noexcept;
+  [[nodiscard]] std::optional<bool> isPassEnabled(size_t index) const noexcept;
   bool setPassEnabled(size_t index, bool enabled) noexcept;
 
 private:

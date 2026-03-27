@@ -4,9 +4,17 @@
 
 namespace nuri {
 
-bool TransparentMainPass::isEnabled(const FrameBuildContext &ctx) const {
+namespace {
+
+[[nodiscard]] bool isTransparentEnabled(const FrameBuildContext &ctx) {
   return ctx.frame.settings == nullptr ||
          ctx.frame.settings->transparent.enabled;
+}
+
+} // namespace
+
+bool TransparentMainPass::isEnabled(const FrameBuildContext &ctx) const {
+  return isTransparentEnabled(ctx);
 }
 
 Result<bool, std::string> TransparentMainPass::build(FrameBuildContext &ctx) {
@@ -14,8 +22,7 @@ Result<bool, std::string> TransparentMainPass::build(FrameBuildContext &ctx) {
 }
 
 bool TransparentPickPass::isEnabled(const FrameBuildContext &ctx) const {
-  return ctx.frame.settings == nullptr ||
-         ctx.frame.settings->transparent.enabled;
+  return isTransparentEnabled(ctx);
 }
 
 Result<bool, std::string> TransparentPickPass::build(FrameBuildContext &ctx) {
@@ -39,11 +46,19 @@ TransparentFeature::~TransparentFeature() {
 
 Result<bool, std::string>
 TransparentFeature::publishFrameData(FrameBuildContext &ctx) {
+  if (!renderer_) {
+    return Result<bool, std::string>::makeError(
+        "TransparentFeature::publishFrameData: renderer is null");
+  }
   renderer_->publishFrameData(ctx.frame);
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> TransparentFeature::prepare(FrameBuildContext &ctx) {
+  if (!renderer_) {
+    return Result<bool, std::string>::makeError(
+        "TransparentFeature::prepare: renderer is null");
+  }
   return renderer_->prepareTransparentPasses(ctx.frame);
 }
 

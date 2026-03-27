@@ -1,12 +1,12 @@
 #pragma once
 
+#include <array>
+#include <span>
+
 #include "nuri/defines.h"
 #include "nuri/gfx/pipeline/render_feature.h"
 #include "nuri/gfx/pipeline/render_feature_pass.h"
 #include "nuri/text/text_system.h"
-
-#include <array>
-#include <span>
 
 namespace nuri {
 
@@ -19,8 +19,10 @@ public:
     return "Text3DPass";
   }
   [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
-  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+  [[nodiscard]] Result<bool, std::string>
+  prepare(FrameBuildContext &ctx) override;
+  [[nodiscard]] Result<bool, std::string>
+  build(FrameBuildContext &ctx) override;
   [[nodiscard]] TextSystem &textSystem() noexcept { return text_; }
 
 private:
@@ -40,8 +42,10 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override {
     return "Text3DFeature";
   }
-  Result<bool, std::string> publishFrameData(FrameBuildContext &ctx) override;
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  [[nodiscard]] Result<bool, std::string>
+  publishFrameData(FrameBuildContext &ctx) override;
+  [[nodiscard]] Result<bool, std::string>
+  prepare(FrameBuildContext &ctx) override;
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:
@@ -58,8 +62,10 @@ public:
     return "Text2DPass";
   }
   [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
-  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+  [[nodiscard]] Result<bool, std::string>
+  prepare(FrameBuildContext &ctx) override;
+  [[nodiscard]] Result<bool, std::string>
+  build(FrameBuildContext &ctx) override;
   [[nodiscard]] TextSystem &textSystem() noexcept { return text_; }
 
 private:
@@ -79,7 +85,8 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override {
     return "Text2DFeature";
   }
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  [[nodiscard]] Result<bool, std::string>
+  prepare(FrameBuildContext &ctx) override;
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:

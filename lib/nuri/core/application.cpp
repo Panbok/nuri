@@ -75,7 +75,6 @@ Application::Application(const ApplicationConfig &config)
   renderer_ = Renderer::create(*gpu_, rendererMemory_);
   NURI_ASSERT(renderer_ != nullptr, "Failed to create renderer");
   renderPipeline_ = std::make_unique<RenderPipeline>(&rendererMemory_);
-  NURI_ASSERT(renderPipeline_ != nullptr, "Failed to create render pipeline");
   auto pipelineResult = registerConfiguredDefaultRenderPipeline();
   NURI_ASSERT(!pipelineResult.hasError(),
               "Failed to register default render pipeline: %s",
@@ -253,13 +252,13 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
   renderPipeline_->addFeature(
       std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
   renderPipeline_->addFeature(std::make_unique<OpaqueFeature>(
-      getGPU(), shaderConfig.opaque, layerMemoryResource()));
+      getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(std::make_unique<TransmissionFeature>(
-      getGPU(), shaderConfig.opaque, layerMemoryResource()));
+      getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(std::make_unique<TransparentFeature>(
-      getGPU(), shaderConfig.opaque, layerMemoryResource()));
+      getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(std::make_unique<DebugFeature>(
-      getGPU(), shaderConfig.debugGrid, layerMemoryResource()));
+      getGPU(), shaderConfig.debugGrid, pipelineMemoryResource()));
   renderPipeline_->addFeature(
       std::make_unique<CompositeFeature>(getGPU(), shaderConfig.opaque));
 

@@ -4,8 +4,10 @@
 
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_descriptors.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/utils/utils.h"
 

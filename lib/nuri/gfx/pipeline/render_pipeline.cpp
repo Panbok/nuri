@@ -47,8 +47,11 @@ RenderPipeline::passInfo(size_t index) const noexcept {
   };
 }
 
-bool RenderPipeline::isPassEnabled(size_t index) const noexcept {
-  return index < passes_.size() && passes_[index].enabled;
+std::optional<bool> RenderPipeline::isPassEnabled(size_t index) const noexcept {
+  if (index >= passes_.size()) {
+    return std::nullopt;
+  }
+  return passes_[index].enabled;
 }
 
 bool RenderPipeline::setPassEnabled(size_t index, bool enabled) noexcept {
@@ -112,7 +115,7 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
     }
   }
 
-  for (RegisteredPass &entry : passes_) {
+  for (const RegisteredPass &entry : passes_) {
     if (entry.feature == nullptr || entry.pass == nullptr || !entry.enabled) {
       continue;
     }

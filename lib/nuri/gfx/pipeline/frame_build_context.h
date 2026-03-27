@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+#include <string_view>
+
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 

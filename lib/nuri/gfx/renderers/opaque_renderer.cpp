@@ -269,10 +269,10 @@ struct BatchKey {
 
 struct BatchKeyHash {
   size_t operator()(const BatchKey &key) const noexcept {
-    size_t h = kFnvOffsetBasis64;
-    const auto mix = [&h](uint64_t v) {
-      h ^= static_cast<size_t>(v);
-      h *= 1099511628211ull;
+    uint64_t h64 = kFnvOffsetBasis64;
+    const auto mix = [&h64](uint64_t v) {
+      h64 ^= v;
+      h64 *= kFnvPrime64;
     };
     mix((static_cast<uint64_t>(key.pipeline.generation) << 32u) |
         key.pipeline.index);
@@ -282,7 +282,7 @@ struct BatchKeyHash {
     mix((static_cast<uint64_t>(key.indexCount) << 32u) | key.firstIndex);
     mix(key.vertexBufferAddress);
     mix(static_cast<uint64_t>(key.materialIndex));
-    return h;
+    return static_cast<size_t>(h64);
   }
 };
 
@@ -315,10 +315,10 @@ struct IndirectGroupKey {
 
 struct IndirectGroupKeyHash {
   size_t operator()(const IndirectGroupKey &key) const noexcept {
-    size_t h = kFnvOffsetBasis64;
-    const auto mix = [&h](uint64_t v) {
-      h ^= static_cast<size_t>(v);
-      h *= 1099511628211ull;
+    uint64_t h64 = kFnvOffsetBasis64;
+    const auto mix = [&h64](uint64_t v) {
+      h64 ^= v;
+      h64 *= kFnvPrime64;
     };
     mix((static_cast<uint64_t>(key.pipeline.generation) << 32u) |
         key.pipeline.index);
@@ -328,7 +328,7 @@ struct IndirectGroupKeyHash {
     mix(static_cast<uint64_t>(key.indexFormat));
     mix(key.vertexBufferAddress);
     mix(static_cast<uint64_t>(key.materialIndex));
-    return h;
+    return static_cast<size_t>(h64);
   }
 };
 
@@ -385,7 +385,8 @@ OpaqueRenderer::~OpaqueRenderer() { onDetach(); }
 void OpaqueRenderer::onAttach() {
   auto initResult = ensureInitialized();
   if (initResult.hasError()) {
-    NURI_LOG_WARNING("OpaqueRenderer::onAttach: %s", initResult.error().c_str());
+    NURI_LOG_WARNING("OpaqueRenderer::onAttach: %s",
+                     initResult.error().c_str());
   }
 }
 
@@ -461,7 +462,7 @@ void OpaqueRenderer::onDetach() {
   initialized_ = false;
 }
 
-void OpaqueRenderer::onResize(int32_t, int32_t) {
+void OpaqueRenderer::onResize(uint32_t, uint32_t) {
   destroyDepthTexture();
   destroyPickTexture();
   resetPickState();
@@ -469,7 +470,7 @@ void OpaqueRenderer::onResize(int32_t, int32_t) {
 
 Result<bool, std::string>
 OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
-                               std::pmr::vector<PreparedGraphPass> &out) {
+                                  std::pmr::vector<PreparedGraphPass> &out) {
   NURI_PROFILER_FUNCTION();
   frame.metrics.opaque = {};
   frame.opaquePickResult.reset();
@@ -636,7 +637,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         "OpaqueRenderer::buildOpaquePasses: forward scene GPU data is "
         "unavailable");
   }
-  const ForwardSceneGpuData *sceneGpu = &*frame.sharedResources.forwardSceneGpuData;
+  const ForwardSceneGpuData *sceneGpu =
+      &*frame.sharedResources.forwardSceneGpuData;
   auto centersResult = ensureCentersPhaseBufferCapacity(
       std::max(instanceCount * sizeof(glm::vec4), sizeof(glm::vec4)));
   if (centersResult.hasError()) {
@@ -1006,7 +1008,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     const size_t batchCount = staticBatchCache_.draws.size();
     if (batchCount != staticBatchCache_.pushConstantsTemplates.size()) {
       return Result<bool, std::string>::makeError(
-          "OpaqueRenderer::buildOpaquePasses: static batch cache size mismatch");
+          "OpaqueRenderer::buildOpaquePasses: static batch cache size "
+          "mismatch");
     }
 
     remapCount = staticBatchCache_.remap.size();
@@ -1272,7 +1275,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         singleInstanceCacheIndex(requestedLod, tessPipelineEnabled);
     if (cacheIndex >= singleInstanceBatchCaches_.size()) {
       return Result<bool, std::string>::makeError(
-          "OpaqueRenderer::buildOpaquePasses: single-instance cache index out of "
+          "OpaqueRenderer::buildOpaquePasses: single-instance cache index out "
+          "of "
           "range");
     }
     const SingleInstanceBatchCache &activeCache =
@@ -1320,7 +1324,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     batchLookup.reserve(batchReserve);
     templateBatchIndices_.clear();
     templateBatchIndices_.resize(meshDrawTemplates_.size(), kInvalidBatchIndex);
-    NURI_PROFILER_ZONE("OpaqueRenderer.batch_build", NURI_PROFILER_COLOR_CMD_DRAW);
+    NURI_PROFILER_ZONE("OpaqueRenderer.batch_build",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
     for (size_t templateIndex = 0; templateIndex < meshDrawTemplates_.size();
          ++templateIndex) {
       MeshDrawTemplate &templateEntry = meshDrawTemplates_[templateIndex];
@@ -1925,7 +1930,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       auto depResult = appendUniqueDependency(
           passDependencyBuffers_, passDependencyBufferAccessModes_,
           instanceRemapRing_[frameSlot].buffer->handle(),
-          RenderGraphAccessMode::Read, "OpaqueRenderer::buildOpaquePasses(pass)");
+          RenderGraphAccessMode::Read,
+          "OpaqueRenderer::buildOpaquePasses(pass)");
       if (depResult.hasError()) {
         return depResult;
       }
@@ -1935,7 +1941,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       auto depResult = appendUniqueDependency(
           passDependencyBuffers_, passDependencyBufferAccessModes_,
           indirectCommandRing_[frameSlot].buffer->handle(),
-          RenderGraphAccessMode::Read, "OpaqueRenderer::buildOpaquePasses(pass)");
+          RenderGraphAccessMode::Read,
+          "OpaqueRenderer::buildOpaquePasses(pass)");
       if (depResult.hasError()) {
         return depResult;
       }
@@ -1945,7 +1952,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       auto passDepResult = appendUniqueDependency(
           passDependencyBuffers_, passDependencyBufferAccessModes_,
           instanceMatricesRing_[frameSlot].buffer->handle(),
-          RenderGraphAccessMode::Read, "OpaqueRenderer::buildOpaquePasses(pass)");
+          RenderGraphAccessMode::Read,
+          "OpaqueRenderer::buildOpaquePasses(pass)");
       if (passDepResult.hasError()) {
         return passDepResult;
       }
@@ -2099,9 +2107,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       if (gsOverlayResult.hasError()) {
         if (!loggedGsOverlayUnsupported_) {
           loggedGsOverlayUnsupported_ = true;
-          NURI_LOG_WARNING("OpaqueRenderer::buildOpaquePasses: failed to create "
-                           "GS overlay pipeline: %s",
-                           gsOverlayResult.error().c_str());
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::buildOpaquePasses: failed to create "
+              "GS overlay pipeline: %s",
+              gsOverlayResult.error().c_str());
         }
       } else {
         gsOverlayAvailable = gsOverlayResult.value();
@@ -2111,9 +2120,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       if (gsTessOverlayResult.hasError()) {
         if (!loggedGsTessOverlayUnsupported_) {
           loggedGsTessOverlayUnsupported_ = true;
-          NURI_LOG_WARNING("OpaqueRenderer::buildOpaquePasses: failed to create "
-                           "GS tess overlay pipeline: %s",
-                           gsTessOverlayResult.error().c_str());
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::buildOpaquePasses: failed to create "
+              "GS tess overlay pipeline: %s",
+              gsTessOverlayResult.error().c_str());
         }
       } else {
         gsTessOverlayAvailable = gsTessOverlayResult.value();
@@ -2251,7 +2261,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   bool pickPassSubmitted = false;
   if (pendingPickRequest_.has_value() && nuri::isValid(pickIdTexture_) &&
       nuri::isValid(meshPickPipelineHandle_)) {
-    NURI_PROFILER_ZONE("OpaqueRenderer.pick_pass", NURI_PROFILER_COLOR_CMD_DRAW);
+    NURI_PROFILER_ZONE("OpaqueRenderer.pick_pass",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
     pickDrawItems_.clear();
     pickDrawItems_.reserve(baseDrawItems.size());
 
@@ -2407,19 +2418,17 @@ bool OpaqueRenderer::shouldPublishSceneDepthGraphTexture(
   return false;
 }
 
-void OpaqueRenderer::cachePreparedGraphPassMetadata(PreparedGraphPass &) const {}
+void OpaqueRenderer::cachePreparedGraphPassMetadata(PreparedGraphPass &) const {
+}
 
-Result<bool, std::string>
-OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
-                                      RenderGraphBuilder &graph,
-                                      const PreparedGraphPass &pass,
-                                      uint32_t safeWidth,
-                                      uint32_t safeHeight) {
+Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
+    RenderFrameContext &frame, RenderGraphBuilder &graph,
+    const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight) {
   RenderGraphGraphicsPassDesc passDesc = pass.desc;
 
   if (nuri::isValid(pass.colorTextureHandle)) {
-    auto colorImportResult =
-        graph.importTexture(pass.colorTextureHandle, "opaque_pass_color_texture");
+    auto colorImportResult = graph.importTexture(pass.colorTextureHandle,
+                                                 "opaque_pass_color_texture");
     if (colorImportResult.hasError()) {
       return Result<bool, std::string>::makeError(colorImportResult.error());
     }
@@ -2427,8 +2436,8 @@ OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
   }
 
   if (nuri::isValid(pass.depthTextureHandle)) {
-    auto depthImportResult =
-        graph.importTexture(pass.depthTextureHandle, "opaque_pass_depth_texture");
+    auto depthImportResult = graph.importTexture(pass.depthTextureHandle,
+                                                 "opaque_pass_depth_texture");
     if (depthImportResult.hasError()) {
       return Result<bool, std::string>::makeError(depthImportResult.error());
     }
@@ -2486,7 +2495,7 @@ OpaqueRenderer::appendPreparedGraphPass(RenderFrameContext &frame,
 
 Result<bool, std::string>
 OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
-                                    RenderGraphBuilder &graph) {
+                                       RenderGraphBuilder &graph) {
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
   gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
@@ -2514,7 +2523,7 @@ OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
 
 Result<bool, std::string>
 OpaqueRenderer::appendOpaquePickPasses(RenderFrameContext &frame,
-                                    RenderGraphBuilder &graph) {
+                                       RenderGraphBuilder &graph) {
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
   gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
@@ -2540,9 +2549,8 @@ OpaqueRenderer::appendOpaquePickPasses(RenderFrameContext &frame,
   return Result<bool, std::string>::makeResult(true);
 }
 
-uint32_t
-OpaqueRenderer::resolveSingleInstanceRequestedLod(const RenderSettings &settings,
-                                               uint32_t forcedLod) const {
+uint32_t OpaqueRenderer::resolveSingleInstanceRequestedLod(
+    const RenderSettings &settings, uint32_t forcedLod) const {
   if (!settings.opaque.enableMeshLod) {
     return 0;
   }
@@ -2571,8 +2579,9 @@ bool OpaqueRenderer::shouldEnableSingleInstanceTessPipeline(
   return distanceSq <= tessFarDistanceSq;
 }
 
-size_t OpaqueRenderer::singleInstanceCacheIndex(uint32_t requestedLod,
-                                             bool tessPipelineEnabled) const {
+size_t
+OpaqueRenderer::singleInstanceCacheIndex(uint32_t requestedLod,
+                                         bool tessPipelineEnabled) const {
   const uint32_t clampedLod =
       std::min(requestedLod, Submesh::kMaxLodCount - 1u);
   return static_cast<size_t>(clampedLod) * 2u + (tessPipelineEnabled ? 1u : 0u);
@@ -2673,8 +2682,8 @@ Result<bool, std::string> OpaqueRenderer::ensureSingleInstanceBatchCache(
 
 Result<bool, std::string>
 OpaqueRenderer::buildIndirectDraws(uint32_t frameSlot, size_t remapCount,
-                                uint64_t drawSignature,
-                                bool drawSignatureValid) {
+                                   uint64_t drawSignature,
+                                   bool drawSignatureValid) {
   const bool canUseIndirectPath =
       !drawItems_.empty() && drawItems_.size() <= kMaxDrawItemsForIndirectPath;
   if (!canUseIndirectPath) {
@@ -2684,7 +2693,8 @@ OpaqueRenderer::buildIndirectDraws(uint32_t frameSlot, size_t remapCount,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  NURI_PROFILER_ZONE("OpaqueRenderer.indirect_pack", NURI_PROFILER_COLOR_CMD_DRAW);
+  NURI_PROFILER_ZONE("OpaqueRenderer.indirect_pack",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
   if (drawItems_.size() != drawPushConstants_.size()) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::buildIndirectDraws: draw and push constant count "
@@ -2769,7 +2779,7 @@ bool OpaqueRenderer::canReuseIndirectPack(uint64_t drawSignature) const {
 
 Result<bool, std::string>
 OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
-                                 uint64_t drawSignature) {
+                                    uint64_t drawSignature) {
   ScratchArena scratch;
   ScopedScratch scopedScratch(scratch);
 
@@ -2791,7 +2801,8 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
     const DrawItem &draw = drawItems_[i];
     if (draw.indexCount == 0) {
       return Result<bool, std::string>::makeError(
-          "OpaqueRenderer::buildIndirectDraws: non-indexed opaque draws are not "
+          "OpaqueRenderer::buildIndirectDraws: non-indexed opaque draws are "
+          "not "
           "supported in indirect mode");
     }
     if (draw.instanceCount == 0) {
@@ -2822,8 +2833,8 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
       group.sourceDrawIndex = i;
       group.commands.reserve(4);
       const size_t groupIndex = indirectGroups.size() - 1;
-      indirectLookup.emplace(key, groupIndex);
-      it = indirectLookup.find(key);
+      auto insertResult = indirectLookup.emplace(key, groupIndex);
+      it = insertResult.first;
     }
 
     DrawIndexedIndirectCommand command{};
@@ -2915,7 +2926,8 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
         indirectDraw.indirectStride = sizeof(DrawIndexedIndirectCommand);
         if (group.sourceDrawIndex >= drawPushConstants_.size()) {
           return Result<bool, std::string>::makeError(
-              "OpaqueRenderer::buildIndirectDraws: indirect source index is out "
+              "OpaqueRenderer::buildIndirectDraws: indirect source index is "
+              "out "
               "of range");
         }
         indirectDraw.pushConstants = std::span<const std::byte>(
@@ -2947,7 +2959,7 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
 
 Result<bool, std::string>
 OpaqueRenderer::refreshCachedIndirectPack(uint32_t frameSlot,
-                                       uint64_t drawSignature) {
+                                          uint64_t drawSignature) {
   if (indirectSourceDrawIndices_.size() != indirectDrawItems_.size()) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::buildIndirectDraws: cached indirect source mapping is "
@@ -3387,8 +3399,8 @@ OpaqueRenderer::ensureIndirectCommandRingCapacity(size_t requiredBytes) {
 
 Result<bool, std::string>
 OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
-                               const ResourceManager &resources,
-                               uint32_t materialCount) {
+                                  const ResourceManager &resources,
+                                  uint32_t materialCount) {
   renderableTemplates_.clear();
   meshDrawTemplates_.clear();
 
@@ -3396,7 +3408,8 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
   if (renderables.size() >
       static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
     return Result<bool, std::string>::makeError(
-        "OpaqueRenderer::rebuildSceneCache: renderables count exceeds UINT32_MAX");
+        "OpaqueRenderer::rebuildSceneCache: renderables count exceeds "
+        "UINT32_MAX");
   }
   renderableTemplates_.reserve(renderables.size());
 
@@ -3405,7 +3418,8 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
     const ModelRecord *modelRecord = resources.tryGet(renderable.model);
     if (!modelRecord || !modelRecord->model) {
       return Result<bool, std::string>::makeError(
-          "OpaqueRenderer::rebuildSceneCache: renderable model handle is invalid");
+          "OpaqueRenderer::rebuildSceneCache: renderable model handle is "
+          "invalid");
     }
     totalMeshDraws += modelRecord->model->submeshes().size();
   }
@@ -3483,7 +3497,8 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
   if (invalidMaterialFallbackCount > 0u) {
     if (!loggedMaterialFallbackWarning_) {
       NURI_LOG_WARNING(
-          "OpaqueRenderer::rebuildSceneCache: %zu submesh draw(s) used fallback "
+          "OpaqueRenderer::rebuildSceneCache: %zu submesh draw(s) used "
+          "fallback "
           "material index 0 due to missing/out-of-range material mapping",
           invalidMaterialFallbackCount);
       loggedMaterialFallbackWarning_ = true;
@@ -3658,9 +3673,10 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       meshTessVertexShader_ = {};
       meshTessControlShader_ = {};
       meshTessEvalShader_ = {};
-      NURI_LOG_WARNING("OpaqueRenderer::createShaders: Tessellation shader path "
-                       "'%s' failed, fallback to non-tessellation path: %s",
-                       shaderPath.c_str(), compileResult.error().c_str());
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: Tessellation shader path "
+          "'%s' failed, fallback to non-tessellation path: %s",
+          shaderPath.c_str(), compileResult.error().c_str());
       break;
     }
     *spec.outHandle = compileResult.value();
@@ -3697,9 +3713,10 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       gsTessOverlayPipelineUnsupported_ = true;
       meshDebugOverlayGeometryShader_ = {};
       meshDebugOverlayFragmentShader_ = {};
-      NURI_LOG_WARNING("OpaqueRenderer::createShaders: Debug overlay shader path "
-                       "'%s' failed, fallback to line pipelines: %s",
-                       shaderPath.c_str(), compileResult.error().c_str());
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: Debug overlay shader path "
+          "'%s' failed, fallback to line pipelines: %s",
+          shaderPath.c_str(), compileResult.error().c_str());
       break;
     }
     *spec.outHandle = compileResult.value();
@@ -3899,8 +3916,8 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-RenderPipelineHandle OpaqueRenderer::selectMeshPipeline(bool doubleSided,
-                                                     bool tessellated) const {
+RenderPipelineHandle
+OpaqueRenderer::selectMeshPipeline(bool doubleSided, bool tessellated) const {
   if (tessellated) {
     if (doubleSided && nuri::isValid(meshDoubleSidedTessPipelineHandle_)) {
       return meshDoubleSidedTessPipelineHandle_;
@@ -4309,4 +4326,3 @@ void OpaqueRenderer::destroyBuffers() {
 }
 
 } // namespace nuri
-

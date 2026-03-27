@@ -8,6 +8,7 @@
 #include "nuri/gfx/renderers/debug_renderer.h"
 
 #include <array>
+#include <memory>
 #include <memory_resource>
 #include <span>
 

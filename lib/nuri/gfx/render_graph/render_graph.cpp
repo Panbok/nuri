@@ -77,6 +77,10 @@ toPreparedDrawBindingTarget(RenderGraphDrawBufferBindingTarget target) {
     return RenderGraphCompileResult::DrawBufferBindingTarget::Indirect;
   case RenderGraphDrawBufferBindingTarget::IndirectCount:
     return RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount;
+  default:
+    NURI_ASSERT(false,
+                "Unhandled RenderGraphDrawBufferBindingTarget value");
+    break;
   }
   return RenderGraphCompileResult::DrawBufferBindingTarget::Vertex;
 }

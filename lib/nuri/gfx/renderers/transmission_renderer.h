@@ -1,5 +1,15 @@
 #pragma once
 
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <memory>
+#include <memory_resource>
+#include <utility>
+#include <vector>
+
+#include <glm/glm.hpp>
+
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/frame/render_frame_context.h"
@@ -12,16 +22,6 @@
 #include "nuri/resources/gpu/model.h"
 #include "nuri/scene/render_scene.h"
 
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <memory>
-#include <memory_resource>
-#include <utility>
-#include <vector>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 
 using TransmissionRendererConfig = RuntimeOpaqueShaderConfig;
@@ -32,7 +32,7 @@ class Shader;
 class NURI_API TransmissionRenderer {
 public:
   explicit TransmissionRenderer(
-      GPUDevice &gpu, TransmissionRendererConfig config,
+      GPUDevice &gpu, const TransmissionRendererConfig &config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~TransmissionRenderer();
 

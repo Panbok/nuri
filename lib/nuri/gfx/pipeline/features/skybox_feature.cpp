@@ -14,8 +14,8 @@ constexpr uint32_t kSkyboxVertexCount = 36;
 
 } // namespace
 
-SkyboxPass::SkyboxPass(GPUDevice &gpu, SkyboxFeatureConfig config)
-    : gpu_(gpu), config_(std::move(config)) {}
+SkyboxPass::SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config)
+    : gpu_(gpu), config_(config) {}
 
 SkyboxPass::~SkyboxPass() {
   destroyFrameBuffer();

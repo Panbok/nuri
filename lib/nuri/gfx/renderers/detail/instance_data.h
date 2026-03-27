@@ -1,5 +1,7 @@
 #pragma once
 
+#include "nuri/defines.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -17,8 +19,17 @@ struct InstanceData {
 static_assert(sizeof(InstanceData) == 112,
               "InstanceData size must match shader InstanceData layout");
 
+// `model` is expected to have an invertible upper-left 3x3. Singular
+// transforms fall back to identity normal columns to avoid propagating NaN/Inf
+// into InstanceData.normalMatCol0/1/2.
 inline InstanceData makeInstanceData(const glm::mat4 &model) {
-  const glm::mat3 nm = glm::transpose(glm::inverse(glm::mat3(model)));
+  glm::mat3 nm(1.0f);
+  const float det = glm::determinant(glm::mat3(model));
+  if (glm::abs(det) > 1.0e-8f) {
+    nm = glm::transpose(glm::inverse(glm::mat3(model)));
+  } else {
+    NURI_ASSERT(false, "makeInstanceData requires an invertible model matrix");
+  }
   return InstanceData{
       .modelMatrix = model,
       .normalMatCol0 = glm::vec4(nm[0], 0.0f),

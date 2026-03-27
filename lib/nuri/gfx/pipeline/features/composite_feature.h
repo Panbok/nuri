@@ -40,7 +40,7 @@ public:
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
 
 private:
-  struct PushConstants {
+  struct alignas(8) PushConstants {
     uint64_t frameDataAddress = 0;
     uint64_t vertexBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
@@ -56,6 +56,7 @@ private:
     float tessMinFactor = 1.0f;
     float tessMaxFactor = 1.0f;
     uint32_t debugVisualizationMode = 0;
+    uint32_t reserved0 = 0;
   };
   static_assert(sizeof(PushConstants) <= 128,
                 "CompositePass::PushConstants exceeds Vulkan guarantee");

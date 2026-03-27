@@ -24,7 +24,7 @@ using SkyboxFeatureConfig = RuntimeSkyboxShaderConfig;
 
 class NURI_API SkyboxPass final : public RenderFeaturePass {
 public:
-  explicit SkyboxPass(GPUDevice &gpu, SkyboxFeatureConfig config);
+  explicit SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config);
   ~SkyboxPass() override;
 
   SkyboxPass(const SkyboxPass &) = delete;

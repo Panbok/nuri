@@ -3,9 +3,9 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/renderers/transmission_renderer.h"
 #include "nuri/gfx/pipeline/render_feature.h"
 #include "nuri/gfx/pipeline/render_feature_pass.h"
+#include "nuri/gfx/renderers/transmission_renderer.h"
 
 #include <array>
 #include <memory_resource>
@@ -93,6 +93,8 @@ public:
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:
+  // Keep renderer_ first: pass members and passes_ depend on it during
+  // construction.
   std::unique_ptr<TransmissionRenderer> renderer_;
   TransmissionDownsamplePass downsamplePass_;
   TransmissionCopyPass copyPass_;

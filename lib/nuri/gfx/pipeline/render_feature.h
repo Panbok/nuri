@@ -14,13 +14,23 @@ namespace nuri {
 class NURI_API RenderFeature {
 public:
   virtual ~RenderFeature() = default;
+  RenderFeature(const RenderFeature &) = delete;
+  RenderFeature &operator=(const RenderFeature &) = delete;
+  RenderFeature(RenderFeature &&) = delete;
+  RenderFeature &operator=(RenderFeature &&) = delete;
 
+protected:
+  RenderFeature() = default;
+
+public:
   virtual std::string_view name() const noexcept = 0;
-  virtual Result<bool, std::string> publishFrameData(FrameBuildContext &ctx) {
+  [[nodiscard]] virtual Result<bool, std::string>
+  publishFrameData(FrameBuildContext &ctx) {
     (void)ctx;
     return Result<bool, std::string>::makeResult(true);
   }
-  virtual Result<bool, std::string> prepare(FrameBuildContext &ctx) {
+  [[nodiscard]] virtual Result<bool, std::string>
+  prepare(FrameBuildContext &ctx) {
     (void)ctx;
     return Result<bool, std::string>::makeResult(true);
   }

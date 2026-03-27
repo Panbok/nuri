@@ -16,6 +16,9 @@
 
 namespace nuri {
 
+// Controls how final scene composition is handled. `PipelineOnly` means the
+// render pipeline owns composition end-to-end today; extend this enum if the
+// application later adds CPU-composed or hybrid composition modes.
 enum class RenderCompositionMode : uint8_t {
   PipelineOnly = 0,
 };
@@ -82,8 +85,8 @@ public:
   const InputSystem &getInput() const;
 
 protected:
-  [[nodiscard]] std::pmr::memory_resource *layerMemoryResource() noexcept {
-    return &layerMemory_;
+  [[nodiscard]] std::pmr::memory_resource *pipelineMemoryResource() noexcept {
+    return &pipelineMemory_;
   }
 
 private:
@@ -100,6 +103,8 @@ private:
   bool handleInputEvent(const InputEvent &event);
   [[nodiscard]] Result<bool, std::string>
   registerConfiguredDefaultRenderPipeline();
+  // On success, `true` means the default pipeline was registered in this call.
+  // `false` is reserved for a future "already registered / skipped" path.
   [[nodiscard]] Result<bool, std::string>
   registerDefaultRenderPipeline(const RuntimeShaderConfig &shaderConfig);
 
@@ -113,7 +118,7 @@ private:
   std::pmr::unsynchronized_pool_resource rendererMemory_;
   std::unique_ptr<Renderer> renderer_;
   std::unique_ptr<RenderPipeline> renderPipeline_;
-  std::pmr::unsynchronized_pool_resource layerMemory_;
+  std::pmr::unsynchronized_pool_resource pipelineMemory_;
   std::pmr::unsynchronized_pool_resource eventMemory_;
   EventManager eventManager_;
   InputSystem input_;

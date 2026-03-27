@@ -44,7 +44,7 @@ public:
 
   void onAttach();
   void onDetach();
-  void onResize(int32_t width, int32_t height);
+  void onResize(uint32_t width, uint32_t height);
   Result<bool, std::string> prepareOpaqueGraphPasses(RenderFrameContext &frame);
   [[nodiscard]] bool hasPreparedOpaqueMainPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaquePickPasses() const noexcept;
@@ -80,11 +80,16 @@ private:
       sizeof(PushConstants) <= 128,
       "OpaqueRenderer::PushConstants exceeds Vulkan minimum guarantee");
 
+  // These templates hold non-owning borrowed pointers. Callers must ensure the
+  // referenced scene/model data outlives the cached template usage.
   struct RenderableTemplate {
     const Renderable *renderable = nullptr;
     const Model *model = nullptr;
   };
 
+  // These templates hold non-owning borrowed pointers. Callers must ensure the
+  // referenced renderable/model/submesh data outlives the cached template
+  // usage.
   struct MeshDrawTemplate {
     const Renderable *renderable = nullptr;
     const Submesh *submesh = nullptr;

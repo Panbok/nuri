@@ -2,8 +2,10 @@
 
 #include <memory>
 #include <memory_resource>
-#include <utility>
+#include <string>
+#include <vector>
 
+#include "nuri/core/result.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/frame/render_frame_context.h"

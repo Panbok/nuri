@@ -1,5 +1,15 @@
 #pragma once
 
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <memory>
+#include <memory_resource>
+#include <utility>
+#include <vector>
+
+#include <glm/glm.hpp>
+
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/frame/render_frame_context.h"
@@ -12,19 +22,10 @@
 #include "nuri/resources/gpu/model.h"
 #include "nuri/scene/render_scene.h"
 
-
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <memory>
-#include <memory_resource>
-#include <utility>
-#include <vector>
-
-#include <glm/glm.hpp>
-
 namespace nuri {
 
+// Transparent rendering reuses RuntimeOpaqueShaderConfig because the shader
+// path/layout inputs match the opaque pipeline configuration today.
 using TransparentRendererConfig = RuntimeOpaqueShaderConfig;
 
 class ResourceManager;
@@ -151,6 +152,8 @@ private:
 
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
+  // The pick pass writes a fixed object-ID color target, so only the depth
+  // format needs to be cached here.
   Format pickPipelineDepthFormat_ = Format::Count;
 
   size_t materialBufferCapacityBytes_ = 0;
