@@ -432,8 +432,8 @@ ResourceManager::ResourceManager(GPUDevice &gpu,
       textureSlots_(memory_), materialSlots_(memory_), modelSlots_(memory_),
       textureSlotsMeta_(memory_), materialSlotsMeta_(memory_),
       modelSlotsMeta_(memory_), materialGpuTable_(memory_), textureCache_(),
-      materialCache_(), modelCache_(), pendingRetireModels_(memory_),
-      pendingRetireMaterials_(memory_), pendingRetireTextures_(memory_) {}
+      materialCache_(), modelCache_(), pendingRetireTextures_(memory_),
+      pendingRetireMaterials_(memory_), pendingRetireModels_(memory_) {}
 
 ResourceManager::~ResourceManager() {
   // Dependency order:
