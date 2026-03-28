@@ -31,6 +31,21 @@ struct NURI_API RenderGraphBufferId {
   uint32_t value = UINT32_MAX;
 };
 
+struct NURI_API PersistentBufferId {
+  uint32_t value = UINT32_MAX;
+};
+
+struct NURI_API PersistentTextureId {
+  uint32_t value = UINT32_MAX;
+};
+
+[[nodiscard]] constexpr bool isValid(PersistentBufferId id) {
+  return id.value != UINT32_MAX;
+}
+[[nodiscard]] constexpr bool isValid(PersistentTextureId id) {
+  return id.value != UINT32_MAX;
+}
+
 [[nodiscard]] constexpr bool isValid(RenderGraphPassId id) {
   return id.value != UINT32_MAX;
 }
@@ -357,6 +372,11 @@ struct NURI_API RenderGraphCompileResult {
       transientBufferPhysicalAllocations;
   std::pmr::vector<PassTextureBinding> unresolvedTextureBindings;
   std::pmr::vector<BufferHandle> resolvedDependencyBuffers;
+  // Parallel to resolvedDependencyBuffers: the buffer resource index for each
+  // slot.  UINT32_MAX means no tracking (null slot).  Used by
+  // refreshHandlesInCompileResult to patch stale handles for imported per-frame
+  // buffers (e.g. ring buffer slots) on compile-cache hits.
+  std::pmr::vector<uint32_t> resolvedDependencyBufferResourceIndices;
   std::pmr::vector<PassDependencyBufferRange> dependencyBufferRangesByPass;
   std::pmr::vector<UnresolvedDependencyBufferBinding>
       unresolvedDependencyBufferBindings;
@@ -365,6 +385,8 @@ struct NURI_API RenderGraphCompileResult {
   std::pmr::vector<PassDispatchRange> preDispatchRangesByPass;
   std::pmr::vector<PassDrawRange> drawRangesByPass;
   std::pmr::vector<BufferHandle> resolvedPreDispatchDependencyBuffers;
+  // Parallel to resolvedPreDispatchDependencyBuffers: resource index per slot.
+  std::pmr::vector<uint32_t> resolvedPreDispatchDependencyBufferResourceIndices;
   std::pmr::vector<DispatchDependencyBufferRange> preDispatchDependencyRanges;
   std::pmr::vector<UnresolvedPreDispatchDependencyBufferBinding>
       unresolvedPreDispatchDependencyBufferBindings;
@@ -390,6 +412,7 @@ struct NURI_API RenderGraphCompileResult {
         transientBufferPhysicalAllocations(ensureMemory(memory)),
         unresolvedTextureBindings(ensureMemory(memory)),
         resolvedDependencyBuffers(ensureMemory(memory)),
+        resolvedDependencyBufferResourceIndices(ensureMemory(memory)),
         dependencyBufferRangesByPass(ensureMemory(memory)),
         unresolvedDependencyBufferBindings(ensureMemory(memory)),
         ownedPreDispatches(ensureMemory(memory)),
@@ -397,6 +420,8 @@ struct NURI_API RenderGraphCompileResult {
         preDispatchRangesByPass(ensureMemory(memory)),
         drawRangesByPass(ensureMemory(memory)),
         resolvedPreDispatchDependencyBuffers(ensureMemory(memory)),
+        resolvedPreDispatchDependencyBufferResourceIndices(
+            ensureMemory(memory)),
         preDispatchDependencyRanges(ensureMemory(memory)),
         unresolvedPreDispatchDependencyBufferBindings(ensureMemory(memory)),
         unresolvedDrawBufferBindings(ensureMemory(memory)) {}
@@ -472,6 +497,73 @@ public:
   [[nodiscard]] Result<RenderGraphCompileResult, std::string>
   compile(RenderGraphRuntime &runtime) const;
   [[nodiscard]] size_t passCount() const noexcept { return passes_.size(); }
+
+  // Compile-result caching support.
+  //
+  // GraphFingerprint is a compact signature over the graph's structural state
+  // (topology, access patterns, transient descriptors).  Two graphs with the
+  // same fingerprint will produce structurally identical
+  // RenderGraphCompileResult values — only the imported texture/buffer handles
+  // will differ.
+  //
+  // Callers can use this to detect stable frames and avoid re-running the full
+  // C0–C7 compile pipeline.  On a fingerprint match, call
+  // refreshHandlesInCompileResult() to update imported handles in a previously
+  // compiled result, then pass it directly to the executor.
+  struct NURI_API GraphFingerprint {
+    size_t passCount = 0;
+    size_t totalTextureCount = 0;
+    size_t totalBufferCount = 0;
+    size_t edgeCount = 0;
+    size_t passAccessCount = 0;
+    size_t frameOutputCount = 0;
+    size_t sideEffectMarkCount = 0;
+    bool allPassesBorrowPayload = true;
+    // Monotonically incremented by updatePersistentBuffer/Texture whenever a
+    // registered persistent handle is replaced.  A handle replacement changes
+    // the import order on the next frame (the new handle gets a fresh index),
+    // so the compile result must be discarded.
+    uint64_t persistentHandlesVersion = 0;
+
+    [[nodiscard]] bool operator==(const GraphFingerprint &o) const noexcept {
+      return passCount == o.passCount &&
+             totalTextureCount == o.totalTextureCount &&
+             totalBufferCount == o.totalBufferCount &&
+             edgeCount == o.edgeCount && passAccessCount == o.passAccessCount &&
+             frameOutputCount == o.frameOutputCount &&
+             sideEffectMarkCount == o.sideEffectMarkCount &&
+             allPassesBorrowPayload == o.allPassesBorrowPayload &&
+             persistentHandlesVersion == o.persistentHandlesVersion;
+    }
+  };
+
+  [[nodiscard]] GraphFingerprint computeGraphFingerprint() const noexcept;
+
+  // Updates textureHandlesByResource and bufferHandlesByResource in a cached
+  // compile result to reflect the imported handles recorded in the current
+  // frame's builder state.  All other structural data (topology, barriers,
+  // transient lifetimes) is left unchanged.
+  void refreshHandlesInCompileResult(RenderGraphCompileResult &result) const;
+
+  // Persistent import API: buffers/textures registered here are automatically
+  // pre-imported at the start of every subsequent beginFrame(), so that
+  // importBuffer()/importTexture() calls for the same handles during the BUILD
+  // phase are cache hits rather than misses.  Use this for truly static GPU
+  // resources (e.g. long-lived uniform buffers) to eliminate per-frame PMR
+  // allocations for their resource records.
+  //
+  // The returned PersistentBufferId / PersistentTextureId is valid for the
+  // lifetime of this builder and must be passed to updatePersistentBuffer /
+  // unregisterPersistentBuffer when the underlying GPU handle is recreated or
+  // destroyed.
+  [[nodiscard]] PersistentBufferId
+  registerPersistentBuffer(BufferHandle handle, std::string_view debugName);
+  [[nodiscard]] PersistentTextureId
+  registerPersistentTexture(TextureHandle handle, std::string_view debugName);
+  void updatePersistentBuffer(PersistentBufferId id, BufferHandle newHandle);
+  void updatePersistentTexture(PersistentTextureId id, TextureHandle newHandle);
+  void unregisterPersistentBuffer(PersistentBufferId id);
+  void unregisterPersistentTexture(PersistentTextureId id);
 
 private:
   struct DependencyEdge {
@@ -647,6 +739,28 @@ private:
   PmrHashMap<uint32_t, uint32_t> sideEffectMarkIndicesByPass_;
   std::pmr::vector<SideEffectPassMark> sideEffectPassMarks_;
   bool suppressInferredSideEffectsWhenExplicitOutputs_ = false;
+  // Tracks whether every recorded pass this frame used borrowPayload = true.
+  bool allPassesBorrowPayload_ = true;
+
+  // Cross-frame persistent import tables.  These are NOT cleared by
+  // beginFrame().  Use std::vector (not pmr) so entries survive PMR arena
+  // resets.  Resources are imported at their natural BUILD-phase order;
+  // beginFrame() does NOT pre-import them so that the import order is stable
+  // between the compile frame and subsequent cache-hit frames.
+  struct PersistentBufferEntry {
+    BufferHandle handle{};
+    std::string debugName;
+  };
+  struct PersistentTextureEntry {
+    TextureHandle handle{};
+    std::string debugName;
+  };
+  std::vector<PersistentBufferEntry> persistentBuffers_;
+  std::vector<PersistentTextureEntry> persistentTextures_;
+  // Monotonically incremented whenever a registered persistent handle is
+  // replaced via updatePersistentBuffer/Texture.  Included in the fingerprint
+  // so that handle replacements always trigger a full recompile.
+  uint64_t persistentHandlesVersion_ = 0;
 };
 
 class NURI_API RenderGraphExecutor {
@@ -690,8 +804,17 @@ private:
 
   std::pmr::memory_resource *memory_ = nullptr;
   std::pmr::vector<PendingFrameResources> pendingFrames_;
-  std::pmr::vector<ReusableTextureResource> reusableTextures_;
-  std::pmr::vector<ReusableBufferResource> reusableBuffers_;
+  // Transient resource pools keyed by a hash of the descriptor fields checked
+  // by isTextureDescAliasCompatible / isBufferDescAliasCompatible.  Each
+  // bucket holds resources whose desc produces the same hash; since the hash
+  // covers every compatibility field, all entries in a bucket are mutually
+  // compatible and a lookup only ever needs to scan a single bucket (O(1)).
+  PmrHashMap<uint64_t, std::pmr::vector<ReusableTextureResource>>
+      reusableTexturesByHash_;
+  PmrHashMap<uint64_t, std::pmr::vector<ReusableBufferResource>>
+      reusableBuffersByHash_;
+  size_t reusableTexturePoolSize_ = 0;
+  size_t reusableBufferPoolSize_ = 0;
 };
 
 } // namespace nuri

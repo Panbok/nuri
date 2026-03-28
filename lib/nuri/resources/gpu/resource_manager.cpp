@@ -432,7 +432,8 @@ ResourceManager::ResourceManager(GPUDevice &gpu,
       textureSlots_(memory_), materialSlots_(memory_), modelSlots_(memory_),
       textureSlotsMeta_(memory_), materialSlotsMeta_(memory_),
       modelSlotsMeta_(memory_), materialGpuTable_(memory_), textureCache_(),
-      materialCache_(), modelCache_() {}
+      materialCache_(), modelCache_(), pendingRetireModels_(memory_),
+      pendingRetireMaterials_(memory_), pendingRetireTextures_(memory_) {}
 
 ResourceManager::~ResourceManager() {
   // Dependency order:
@@ -1399,6 +1400,7 @@ void ResourceManager::release(TextureRef ref) {
   --slot->refCount;
   if (slot->refCount == 0u) {
     slot->retireAfterFrame = currentFrameIndex_ + retireLagFrames();
+    pendingRetireTextures_.push_back(ref);
   }
 }
 
@@ -1435,6 +1437,7 @@ void ResourceManager::release(ModelRef ref) {
   --slot->refCount;
   if (slot->refCount == 0u) {
     slot->retireAfterFrame = currentFrameIndex_ + retireLagFrames();
+    pendingRetireModels_.push_back(ref);
   }
 }
 
@@ -1471,6 +1474,7 @@ void ResourceManager::release(MaterialRef ref) {
   --slot->refCount;
   if (slot->refCount == 0u) {
     slot->retireAfterFrame = currentFrameIndex_ + retireLagFrames();
+    pendingRetireMaterials_.push_back(ref);
   }
 }
 
@@ -1531,34 +1535,73 @@ void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
 
   // Keep destruction order consistent with dependencies:
   // models -> materials -> textures.
-  for (uint32_t i = 0; i < modelSlots_.size(); ++i) {
-    const ModelSlot &slot = modelSlots_[i];
-    if (!modelSlotsMeta_.isLive(i) || slot.refCount != 0u ||
-        slot.retireAfterFrame == kRetireFrameUnset ||
-        completedFrameIndex < slot.retireAfterFrame) {
-      continue;
+  // Only entries in the pending-retire lists are checked; stale refs (slot
+  // destroyed or reused) and revived refs (retain called after release) are
+  // detected via tryGetSlot and removed from the list without destroying.
+  // destroyModelSlot / destroyMaterialSlot may push additional entries to
+  // the material / texture lists, which will be processed in the same call.
+
+  {
+    size_t i = 0;
+    while (i < pendingRetireModels_.size()) {
+      const ModelRef ref = pendingRetireModels_[i];
+      const ModelSlot *slot = tryGetSlot(ref);
+      if (slot == nullptr || slot->refCount != 0u ||
+          slot->retireAfterFrame == kRetireFrameUnset) {
+        pendingRetireModels_[i] = pendingRetireModels_.back();
+        pendingRetireModels_.pop_back();
+        continue;
+      }
+      if (completedFrameIndex < slot->retireAfterFrame) {
+        ++i;
+        continue;
+      }
+      destroyModelSlot(indexOf(ref));
+      pendingRetireModels_[i] = pendingRetireModels_.back();
+      pendingRetireModels_.pop_back();
     }
-    destroyModelSlot(i);
   }
 
-  for (uint32_t i = 0; i < materialSlots_.size(); ++i) {
-    const MaterialSlot &slot = materialSlots_[i];
-    if (!materialSlotsMeta_.isLive(i) || slot.refCount != 0u ||
-        slot.retireAfterFrame == kRetireFrameUnset ||
-        completedFrameIndex < slot.retireAfterFrame) {
-      continue;
+  {
+    size_t i = 0;
+    while (i < pendingRetireMaterials_.size()) {
+      const MaterialRef ref = pendingRetireMaterials_[i];
+      const MaterialSlot *slot = tryGetSlot(ref);
+      if (slot == nullptr || slot->refCount != 0u ||
+          slot->retireAfterFrame == kRetireFrameUnset) {
+        pendingRetireMaterials_[i] = pendingRetireMaterials_.back();
+        pendingRetireMaterials_.pop_back();
+        continue;
+      }
+      if (completedFrameIndex < slot->retireAfterFrame) {
+        ++i;
+        continue;
+      }
+      destroyMaterialSlot(indexOf(ref));
+      pendingRetireMaterials_[i] = pendingRetireMaterials_.back();
+      pendingRetireMaterials_.pop_back();
     }
-    destroyMaterialSlot(i);
   }
 
-  for (uint32_t i = 0; i < textureSlots_.size(); ++i) {
-    const TextureSlot &slot = textureSlots_[i];
-    if (!textureSlotsMeta_.isLive(i) || slot.refCount != 0u ||
-        slot.retireAfterFrame == kRetireFrameUnset ||
-        completedFrameIndex < slot.retireAfterFrame) {
-      continue;
+  {
+    size_t i = 0;
+    while (i < pendingRetireTextures_.size()) {
+      const TextureRef ref = pendingRetireTextures_[i];
+      const TextureSlot *slot = tryGetSlot(ref);
+      if (slot == nullptr || slot->refCount != 0u ||
+          slot->retireAfterFrame == kRetireFrameUnset) {
+        pendingRetireTextures_[i] = pendingRetireTextures_.back();
+        pendingRetireTextures_.pop_back();
+        continue;
+      }
+      if (completedFrameIndex < slot->retireAfterFrame) {
+        ++i;
+        continue;
+      }
+      destroyTextureSlot(indexOf(ref));
+      pendingRetireTextures_[i] = pendingRetireTextures_.back();
+      pendingRetireTextures_.pop_back();
     }
-    destroyTextureSlot(i);
   }
 }
 

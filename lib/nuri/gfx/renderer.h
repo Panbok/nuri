@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <memory_resource>
+#include <optional>
 #include <string>
 
 namespace nuri {
@@ -54,7 +55,9 @@ private:
   beginFrameSequence(uint64_t frameIndex);
   void renderGraphBeginFrame(uint64_t frameIndex);
   [[nodiscard]] Result<bool, std::string> endFrameSequence(uint64_t frameIndex);
-  [[nodiscard]] Result<bool, std::string> compileAndExecuteRenderGraph();
+  [[nodiscard]] Result<bool, std::string>
+  compileAndExecuteRenderGraph(uint64_t frameIndex);
+  void invalidateCompileCache();
 
   GPUDevice &gpu_;
   ResourceManager resources_;
@@ -64,6 +67,9 @@ private:
   RenderGraphTelemetryService renderGraphTelemetry_;
   bool suppressInferredSideEffects_ = false;
   uint64_t standaloneFrameIndex_ = 0;
+
+  std::optional<RenderGraphCompileResult> cachedCompileResult_;
+  RenderGraphBuilder::GraphFingerprint cachedFingerprint_{};
 };
 
 } // namespace nuri

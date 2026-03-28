@@ -78,8 +78,7 @@ toPreparedDrawBindingTarget(RenderGraphDrawBufferBindingTarget target) {
   case RenderGraphDrawBufferBindingTarget::IndirectCount:
     return RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount;
   default:
-    NURI_ASSERT(false,
-                "Unhandled RenderGraphDrawBufferBindingTarget value");
+    NURI_ASSERT(false, "Unhandled RenderGraphDrawBufferBindingTarget value");
     break;
   }
   return RenderGraphCompileResult::DrawBufferBindingTarget::Vertex;
@@ -100,6 +99,39 @@ toPreparedDrawBindingTarget(RenderGraphDrawBufferBindingTarget target) {
 [[nodiscard]] bool isBufferDescAliasCompatible(const BufferDesc &a,
                                                const BufferDesc &b) {
   return a.usage == b.usage && a.storage == b.storage && a.size == b.size;
+}
+
+[[nodiscard]] uint64_t hashTextureDescForPool(const TextureDesc &d) noexcept {
+  uint64_t h = 0xcbf29ce484222325ull;
+  const auto mix = [&h](uint64_t v) noexcept {
+    h ^= v;
+    h *= 0x100000001b3ull;
+  };
+  mix(static_cast<uint64_t>(d.type));
+  mix(static_cast<uint64_t>(d.format));
+  mix(static_cast<uint64_t>(d.dimensions.width));
+  mix(static_cast<uint64_t>(d.dimensions.height));
+  mix(static_cast<uint64_t>(d.dimensions.depth));
+  mix(static_cast<uint64_t>(d.usage));
+  mix(static_cast<uint64_t>(d.storage));
+  mix(static_cast<uint64_t>(d.numLayers));
+  mix(static_cast<uint64_t>(d.numSamples));
+  mix(static_cast<uint64_t>(d.numMipLevels));
+  mix(static_cast<uint64_t>(d.dataNumMipLevels));
+  mix(static_cast<uint64_t>(d.generateMipmaps ? 1u : 0u));
+  return h;
+}
+
+[[nodiscard]] uint64_t hashBufferDescForPool(const BufferDesc &d) noexcept {
+  uint64_t h = 0xcbf29ce484222325ull;
+  const auto mix = [&h](uint64_t v) noexcept {
+    h ^= v;
+    h *= 0x100000001b3ull;
+  };
+  mix(static_cast<uint64_t>(d.usage));
+  mix(static_cast<uint64_t>(d.storage));
+  mix(d.size);
+  return h;
 }
 
 constexpr size_t kMaxReusableTransientTextures = 32u;
@@ -268,6 +300,168 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   frameOutputTextureIndices_.clear();
   sideEffectMarkIndicesByPass_.clear();
   sideEffectPassMarks_.clear();
+  allPassesBorrowPayload_ = true;
+}
+
+PersistentBufferId
+RenderGraphBuilder::registerPersistentBuffer(BufferHandle handle,
+                                             std::string_view debugName) {
+  const PersistentBufferId id{
+      .value = static_cast<uint32_t>(persistentBuffers_.size())};
+  persistentBuffers_.push_back({handle, std::string(debugName)});
+  if (nuri::isValid(handle)) {
+    (void)importBuffer(handle, debugName);
+  }
+  return id;
+}
+
+PersistentTextureId
+RenderGraphBuilder::registerPersistentTexture(TextureHandle handle,
+                                              std::string_view debugName) {
+  const PersistentTextureId id{
+      .value = static_cast<uint32_t>(persistentTextures_.size())};
+  persistentTextures_.push_back({handle, std::string(debugName)});
+  if (nuri::isValid(handle)) {
+    (void)importTexture(handle, debugName);
+  }
+  return id;
+}
+
+void RenderGraphBuilder::updatePersistentBuffer(PersistentBufferId id,
+                                                BufferHandle newHandle) {
+  if (id.value >= persistentBuffers_.size()) {
+    return;
+  }
+  persistentBuffers_[id.value].handle = newHandle;
+  ++persistentHandlesVersion_;
+  if (nuri::isValid(newHandle)) {
+    (void)importBuffer(newHandle, persistentBuffers_[id.value].debugName);
+  }
+}
+
+void RenderGraphBuilder::updatePersistentTexture(PersistentTextureId id,
+                                                 TextureHandle newHandle) {
+  if (id.value >= persistentTextures_.size()) {
+    return;
+  }
+  persistentTextures_[id.value].handle = newHandle;
+  ++persistentHandlesVersion_;
+  if (nuri::isValid(newHandle)) {
+    (void)importTexture(newHandle, persistentTextures_[id.value].debugName);
+  }
+}
+
+void RenderGraphBuilder::unregisterPersistentBuffer(PersistentBufferId id) {
+  if (id.value >= persistentBuffers_.size()) {
+    return;
+  }
+  persistentBuffers_[id.value].handle = BufferHandle{};
+}
+
+void RenderGraphBuilder::unregisterPersistentTexture(PersistentTextureId id) {
+  if (id.value >= persistentTextures_.size()) {
+    return;
+  }
+  persistentTextures_[id.value].handle = TextureHandle{};
+}
+
+RenderGraphBuilder::GraphFingerprint
+RenderGraphBuilder::computeGraphFingerprint() const noexcept {
+  return GraphFingerprint{
+      .passCount = passes_.size(),
+      .totalTextureCount = textures_.size(),
+      .totalBufferCount = buffers_.size(),
+      .edgeCount = dependencies_.size(),
+      .passAccessCount = passResourceAccesses_.size(),
+      .frameOutputCount = frameOutputTextureIndices_.size(),
+      .sideEffectMarkCount = sideEffectPassMarks_.size(),
+      .allPassesBorrowPayload = allPassesBorrowPayload_,
+      .persistentHandlesVersion = persistentHandlesVersion_,
+  };
+}
+
+void RenderGraphBuilder::refreshHandlesInCompileResult(
+    RenderGraphCompileResult &result) const {
+  // Refresh imported texture handles: resource index → current handle.
+  for (size_t i = 0;
+       i < textures_.size() && i < result.textureHandlesByResource.size();
+       ++i) {
+    if (textures_[i].imported) {
+      result.textureHandlesByResource[i] = textures_[i].importedHandle;
+    }
+  }
+
+  for (size_t i = 0;
+       i < buffers_.size() && i < result.bufferHandlesByResource.size(); ++i) {
+    if (buffers_[i].imported) {
+      result.bufferHandlesByResource[i] = buffers_[i].importedHandle;
+    }
+  }
+
+  for (size_t i = 0;
+       i < result.resolvedDependencyBufferResourceIndices.size() &&
+       i < result.resolvedDependencyBuffers.size();
+       ++i) {
+    const uint32_t resourceIndex =
+        result.resolvedDependencyBufferResourceIndices[i];
+    if (resourceIndex == UINT32_MAX || resourceIndex >= buffers_.size()) {
+      continue;
+    }
+    if (buffers_[resourceIndex].imported) {
+      result.resolvedDependencyBuffers[i] =
+          buffers_[resourceIndex].importedHandle;
+    }
+  }
+  // Same refresh for pre-dispatch dependency buffers.
+  for (size_t i = 0;
+       i < result.resolvedPreDispatchDependencyBufferResourceIndices.size() &&
+       i < result.resolvedPreDispatchDependencyBuffers.size();
+       ++i) {
+    const uint32_t resourceIndex =
+        result.resolvedPreDispatchDependencyBufferResourceIndices[i];
+    if (resourceIndex == UINT32_MAX || resourceIndex >= buffers_.size()) {
+      continue;
+    }
+    if (buffers_[resourceIndex].imported) {
+      result.resolvedPreDispatchDependencyBuffers[i] =
+          buffers_[resourceIndex].importedHandle;
+    }
+  }
+
+  const size_t passCount =
+      std::min({result.orderedPasses.size(), result.drawRangesByPass.size(),
+                result.orderedPassIndices.size()});
+  for (size_t i = 0; i < passCount; ++i) {
+    const uint32_t passIndex = result.orderedPassIndices[i];
+    if (passIndex < passColorTextureBindings_.size()) {
+      const uint32_t colorIdx = passColorTextureBindings_[passIndex];
+      if (colorIdx != UINT32_MAX && colorIdx < textures_.size() &&
+          textures_[colorIdx].imported) {
+        result.orderedPasses[i].colorTexture =
+            textures_[colorIdx].importedHandle;
+      }
+    }
+    if (passIndex < passDepthTextureBindings_.size()) {
+      const uint32_t depthIdx = passDepthTextureBindings_[passIndex];
+      if (depthIdx != UINT32_MAX && depthIdx < textures_.size() &&
+          textures_[depthIdx].imported) {
+        result.orderedPasses[i].depthTexture =
+            textures_[depthIdx].importedHandle;
+      }
+    }
+  }
+
+  for (size_t i = 0; i < passCount; ++i) {
+    if (result.drawRangesByPass[i].count != 0 ||
+        result.orderedPasses[i].draws.empty()) {
+      continue;
+    }
+    const uint32_t passIndex = result.orderedPassIndices[i];
+    if (passIndex >= passes_.size()) {
+      continue;
+    }
+    result.orderedPasses[i].draws = passes_[passIndex].draws;
+  }
 }
 
 Result<RenderGraphTextureId, std::string>
@@ -791,6 +985,9 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
 
 Result<RenderGraphPassId, std::string>
 RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
+  if (!desc.borrowPayload) {
+    allPassesBorrowPayload_ = false;
+  }
   RenderPass pass{};
   pass.color = desc.color;
   pass.depth = desc.depth;
@@ -842,6 +1039,9 @@ Result<RenderGraphPassId, std::string>
 RenderGraphBuilder::addPreparedGraphicsPass(
     const RenderGraphPreparedGraphicsPassDesc &desc) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  if (!desc.borrowPayload) {
+    allPassesBorrowPayload_ = false;
+  }
   RenderPass pass{};
   pass.color = desc.color;
   pass.depth = desc.depth;
@@ -2565,11 +2765,15 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   }
 
   compiled.resolvedDependencyBuffers.resize(totalDependencyBufferSlots);
+  compiled.resolvedDependencyBufferResourceIndices.assign(
+      totalDependencyBufferSlots, UINT32_MAX);
   compiled.dependencyBufferRangesByPass.resize(work.order.size());
   compiled.ownedPreDispatches.resize(totalPreDispatchItems);
   compiled.preDispatchRangesByPass.resize(work.order.size());
   compiled.resolvedPreDispatchDependencyBuffers.resize(
       totalPreDispatchDependencySlots);
+  compiled.resolvedPreDispatchDependencyBufferResourceIndices.assign(
+      totalPreDispatchDependencySlots, UINT32_MAX);
   compiled.preDispatchDependencyRanges.resize(totalPreDispatchItems);
   compiled.ownedDrawItems.resize(totalDrawItems);
   compiled.drawRangesByPass.resize(work.order.size());
@@ -2640,6 +2844,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         const BufferResource &resource = buffers_[resourceIndex];
         if (resource.imported) {
           resolvedHandle = resource.importedHandle;
+          compiled.resolvedDependencyBufferResourceIndices
+              [plan.resolvedDependencyOffset + depIndex] = resourceIndex;
         } else {
           resolvedHandle = {};
           compiled.unresolvedDependencyBufferBindings
@@ -2695,6 +2901,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           const BufferResource &resource = buffers_[resourceIndex];
           if (resource.imported) {
             resolvedHandle = resource.importedHandle;
+            compiled.resolvedPreDispatchDependencyBufferResourceIndices
+                [nextPreDispatchDependencyOffset + depIndex] = resourceIndex;
           } else {
             resolvedHandle = {};
             compiled.unresolvedPreDispatchDependencyBufferBindings
@@ -4011,8 +4219,8 @@ RenderGraphBuilder::compile(RenderGraphRuntime &runtime) const {
 
 RenderGraphExecutor::RenderGraphExecutor(std::pmr::memory_resource *memory)
     : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
-      pendingFrames_(memory_), reusableTextures_(memory_),
-      reusableBuffers_(memory_) {}
+      pendingFrames_(memory_), reusableTexturesByHash_(memory_),
+      reusableBuffersByHash_(memory_) {}
 
 void RenderGraphExecutor::collectRetiredResources(GPUDevice &gpu) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_DESTROY);
@@ -4035,12 +4243,21 @@ void RenderGraphExecutor::collectRetiredResources(GPUDevice &gpu) {
       const BufferHandle buffer = pending.buffers[bufferIndex];
       if (nuri::isValid(buffer)) {
         if (hasBufferDescs &&
-            reusableBuffers_.size() < kMaxReusableTransientBuffers) {
+            reusableBufferPoolSize_ < kMaxReusableTransientBuffers) {
           ReusableBufferResource entry{};
           entry.handle = buffer;
           entry.desc = pending.bufferDescs[bufferIndex];
           entry.desc.data = {};
-          reusableBuffers_.push_back(entry);
+          const uint64_t key = hashBufferDescForPool(entry.desc);
+          auto it = reusableBuffersByHash_.find(key);
+          if (it == reusableBuffersByHash_.end()) {
+            auto [inserted, _] = reusableBuffersByHash_.emplace(
+                key, std::pmr::vector<ReusableBufferResource>(memory_));
+            inserted->second.push_back(entry);
+          } else {
+            it->second.push_back(entry);
+          }
+          ++reusableBufferPoolSize_;
         } else {
           gpu.destroyBuffer(buffer);
         }
@@ -4053,12 +4270,21 @@ void RenderGraphExecutor::collectRetiredResources(GPUDevice &gpu) {
       const TextureHandle texture = pending.textures[textureIndex];
       if (nuri::isValid(texture)) {
         if (hasTextureDescs &&
-            reusableTextures_.size() < kMaxReusableTransientTextures) {
+            reusableTexturePoolSize_ < kMaxReusableTransientTextures) {
           ReusableTextureResource entry{};
           entry.handle = texture;
           entry.desc = pending.textureDescs[textureIndex];
           entry.desc.data = {};
-          reusableTextures_.push_back(entry);
+          const uint64_t key = hashTextureDescForPool(entry.desc);
+          auto it = reusableTexturesByHash_.find(key);
+          if (it == reusableTexturesByHash_.end()) {
+            auto [inserted, _] = reusableTexturesByHash_.emplace(
+                key, std::pmr::vector<ReusableTextureResource>(memory_));
+            inserted->second.push_back(entry);
+          } else {
+            it->second.push_back(entry);
+          }
+          ++reusableTexturePoolSize_;
         } else {
           gpu.destroyTexture(texture);
         }
@@ -4279,23 +4505,32 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       transientTextureDescs[allocation.allocationIndex] = desc;
 
       TextureHandle transientTexture{};
-      for (size_t poolIndex = 0u; poolIndex < reusableTextures_.size();) {
-        const ReusableTextureResource &candidate = reusableTextures_[poolIndex];
-        if (!nuri::isValid(candidate.handle) ||
-            !gpu.isValid(candidate.handle)) {
-          reusableTextures_[poolIndex] = reusableTextures_.back();
-          reusableTextures_.pop_back();
-          continue;
+      {
+        const uint64_t poolKey = hashTextureDescForPool(desc);
+        auto poolIt = reusableTexturesByHash_.find(poolKey);
+        if (poolIt != reusableTexturesByHash_.end()) {
+          auto &bucket = poolIt->second;
+          size_t poolIndex = 0u;
+          while (poolIndex < bucket.size()) {
+            const ReusableTextureResource &candidate = bucket[poolIndex];
+            if (!nuri::isValid(candidate.handle) ||
+                !gpu.isValid(candidate.handle)) {
+              bucket[poolIndex] = bucket.back();
+              bucket.pop_back();
+              --reusableTexturePoolSize_;
+              continue;
+            }
+            // All entries in the bucket are alias-compatible by construction.
+            transientTexture = candidate.handle;
+            bucket[poolIndex] = bucket.back();
+            bucket.pop_back();
+            --reusableTexturePoolSize_;
+            break;
+          }
+          if (bucket.empty()) {
+            reusableTexturesByHash_.erase(poolIt);
+          }
         }
-        if (!isTextureDescAliasCompatible(candidate.desc, desc)) {
-          ++poolIndex;
-          continue;
-        }
-
-        transientTexture = candidate.handle;
-        reusableTextures_[poolIndex] = reusableTextures_.back();
-        reusableTextures_.pop_back();
-        break;
       }
 
       if (!nuri::isValid(transientTexture)) {
@@ -4337,23 +4572,32 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       transientBufferDescs[allocation.allocationIndex] = desc;
 
       BufferHandle transientBuffer{};
-      for (size_t poolIndex = 0u; poolIndex < reusableBuffers_.size();) {
-        const ReusableBufferResource &candidate = reusableBuffers_[poolIndex];
-        if (!nuri::isValid(candidate.handle) ||
-            !gpu.isValid(candidate.handle)) {
-          reusableBuffers_[poolIndex] = reusableBuffers_.back();
-          reusableBuffers_.pop_back();
-          continue;
+      {
+        const uint64_t poolKey = hashBufferDescForPool(desc);
+        auto poolIt = reusableBuffersByHash_.find(poolKey);
+        if (poolIt != reusableBuffersByHash_.end()) {
+          auto &bucket = poolIt->second;
+          size_t poolIndex = 0u;
+          while (poolIndex < bucket.size()) {
+            const ReusableBufferResource &candidate = bucket[poolIndex];
+            if (!nuri::isValid(candidate.handle) ||
+                !gpu.isValid(candidate.handle)) {
+              bucket[poolIndex] = bucket.back();
+              bucket.pop_back();
+              --reusableBufferPoolSize_;
+              continue;
+            }
+            // All entries in the bucket are alias-compatible by construction.
+            transientBuffer = candidate.handle;
+            bucket[poolIndex] = bucket.back();
+            bucket.pop_back();
+            --reusableBufferPoolSize_;
+            break;
+          }
+          if (bucket.empty()) {
+            reusableBuffersByHash_.erase(poolIt);
+          }
         }
-        if (!isBufferDescAliasCompatible(candidate.desc, desc)) {
-          ++poolIndex;
-          continue;
-        }
-
-        transientBuffer = candidate.handle;
-        reusableBuffers_[poolIndex] = reusableBuffers_.back();
-        reusableBuffers_.pop_back();
-        break;
       }
 
       if (!nuri::isValid(transientBuffer)) {

@@ -413,6 +413,15 @@ private:
   DrawItem baseMeshWireframeDraw_{};
   uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();
   bool cachedRemapSignatureValid_ = false;
+  glm::vec3 cachedMeshLodThresholdsInput_{std::numeric_limits<float>::max()};
+  std::array<float, 3> cachedSortedLodThresholds_{0.0f, 0.0f, 0.0f};
+
+  PersistentBufferId persistentMaterialBuffer_{};
+  PersistentBufferId persistentCentersPhaseBuffer_{};
+  PersistentBufferId persistentBaseMatricesBuffer_{};
+  BufferHandle registeredMaterialBufferHandle_{};
+  BufferHandle registeredCentersPhaseBufferHandle_{};
+  BufferHandle registeredBaseMatricesBufferHandle_{};
   uint64_t boundStaticBatchGeneration_ = 0;
   uint64_t statsLogFrameCounter_ = 0;
   std::optional<OpaquePickRequest> pendingPickRequest_{};

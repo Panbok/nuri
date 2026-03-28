@@ -7,6 +7,7 @@
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
 #include "nuri/resources/gpu/geometry_pool.h"
+#include "nuri/resources/gpu/material.h"
 
 #include <lvk/LVK.h>
 #if __has_include(<lvk/vulkan/VulkanClasses.h>)
@@ -1696,7 +1697,11 @@ TextureCompressionCaps LvkGPUDevice::getTextureCompressionCaps() const {
 
 uint32_t LvkGPUDevice::getTextureBindlessIndex(TextureHandle h) const {
   if (!impl_->textures.isValid(h)) {
-    return 0;
+    // Must not return 0: that is a valid bindless heap slot.  Shaders compare
+    // against kInvalidTextureBindlessIndex (UINT32_MAX); returning 0 made
+    // invalid handles look "valid" and sample the wrong texture (often black
+    // in large scenes where slot 0 is not the intended resource).
+    return kInvalidTextureBindlessIndex;
   }
   return impl_->textures.getLvkHandle(h).index();
 }

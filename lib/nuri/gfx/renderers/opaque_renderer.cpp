@@ -803,12 +803,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.firstInstance = firstInstance;
         batches.push_back(entry);
       };
-  std::array<float, 3> sortedLodThresholds = {
-      settings.opaque.meshLodDistanceThresholds.x,
-      settings.opaque.meshLodDistanceThresholds.y,
-      settings.opaque.meshLodDistanceThresholds.z,
-  };
-  std::sort(sortedLodThresholds.begin(), sortedLodThresholds.end());
+  if (settings.opaque.meshLodDistanceThresholds !=
+      cachedMeshLodThresholdsInput_) {
+    cachedMeshLodThresholdsInput_ = settings.opaque.meshLodDistanceThresholds;
+    cachedSortedLodThresholds_ = {
+        settings.opaque.meshLodDistanceThresholds.x,
+        settings.opaque.meshLodDistanceThresholds.y,
+        settings.opaque.meshLodDistanceThresholds.z,
+    };
+    std::sort(cachedSortedLodThresholds_.begin(),
+              cachedSortedLodThresholds_.end());
+  }
+  const std::array<float, 3> &sortedLodThresholds = cachedSortedLodThresholds_;
   const glm::vec3 cameraPosition = glm::vec3(frame.camera.cameraPos);
   const bool useAutoLod =
       settings.opaque.enableMeshLod && settings.opaque.forcedMeshLod < 0;
@@ -2503,6 +2509,56 @@ OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
       static_cast<uint32_t>(std::max(framebufferWidth, 1));
   const uint32_t safeHeight =
       static_cast<uint32_t>(std::max(framebufferHeight, 1));
+
+  {
+    const BufferHandle matHandle = (materialBuffer_ && materialBuffer_->valid())
+                                       ? materialBuffer_->handle()
+                                       : BufferHandle{};
+    if (!isValid(persistentMaterialBuffer_)) {
+      persistentMaterialBuffer_ =
+          graph.registerPersistentBuffer(matHandle, "opaque_material_buffer");
+      registeredMaterialBufferHandle_ = matHandle;
+    } else if (matHandle.index != registeredMaterialBufferHandle_.index ||
+               matHandle.generation !=
+                   registeredMaterialBufferHandle_.generation) {
+      graph.updatePersistentBuffer(persistentMaterialBuffer_, matHandle);
+      registeredMaterialBufferHandle_ = matHandle;
+    }
+
+    const BufferHandle centersHandle =
+        (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid())
+            ? instanceCentersPhaseBuffer_->handle()
+            : BufferHandle{};
+    if (!isValid(persistentCentersPhaseBuffer_)) {
+      persistentCentersPhaseBuffer_ = graph.registerPersistentBuffer(
+          centersHandle, "opaque_instance_centers_phase_buffer");
+      registeredCentersPhaseBufferHandle_ = centersHandle;
+    } else if (centersHandle.index !=
+                   registeredCentersPhaseBufferHandle_.index ||
+               centersHandle.generation !=
+                   registeredCentersPhaseBufferHandle_.generation) {
+      graph.updatePersistentBuffer(persistentCentersPhaseBuffer_,
+                                   centersHandle);
+      registeredCentersPhaseBufferHandle_ = centersHandle;
+    }
+
+    const BufferHandle baseMatHandle =
+        (instanceBaseMatricesBuffer_ && instanceBaseMatricesBuffer_->valid())
+            ? instanceBaseMatricesBuffer_->handle()
+            : BufferHandle{};
+    if (!isValid(persistentBaseMatricesBuffer_)) {
+      persistentBaseMatricesBuffer_ = graph.registerPersistentBuffer(
+          baseMatHandle, "opaque_instance_base_matrices_buffer");
+      registeredBaseMatricesBufferHandle_ = baseMatHandle;
+    } else if (baseMatHandle.index !=
+                   registeredBaseMatricesBufferHandle_.index ||
+               baseMatHandle.generation !=
+                   registeredBaseMatricesBufferHandle_.generation) {
+      graph.updatePersistentBuffer(persistentBaseMatricesBuffer_,
+                                   baseMatHandle);
+      registeredBaseMatricesBufferHandle_ = baseMatHandle;
+    }
+  }
 
   NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_main_passes",
                      NURI_PROFILER_COLOR_CMD_DRAW);
