@@ -817,6 +817,108 @@ TEST(RenderGraphCompileBehaviorTest, AddGraphicsPassNativeDeclarationPath) {
   }
 }
 
+TEST(RenderGraphCompileBehaviorTest, AddPreparedGraphicsPassNativePath) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(223u);
+
+  auto colorResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
+      "prepared_graphics_color");
+  auto depthResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::D32_FLOAT, 32u, 32u),
+      "prepared_graphics_depth");
+  if (!(!colorResult.hasError() && !depthResult.hasError())) {
+    ADD_FAILURE() << "createTransientTexture should succeed for prepared "
+                     "graphics pass";
+    return;
+  }
+
+  const BufferHandle dependencyBuffer{.index = 906u, .generation = 1u};
+  const BufferHandle drawBuffer{.index = 907u, .generation = 1u};
+  auto dependencyImportResult =
+      builder.importBuffer(dependencyBuffer, "prepared_dependency");
+  auto drawImportResult = builder.importBuffer(drawBuffer, "prepared_draw");
+  if (!(!dependencyImportResult.hasError() && !drawImportResult.hasError())) {
+    ADD_FAILURE() << "importBuffer should succeed for prepared graphics pass";
+    return;
+  }
+
+  std::array<BufferHandle, 1u> dependencies = {dependencyBuffer};
+  DrawItem draw{};
+  draw.vertexBuffer = drawBuffer;
+  std::array<DrawItem, 1u> draws = {draw};
+  std::array<RenderGraphPreparedDependencyBufferBinding, 1u>
+      dependencyBindings = {{
+          {.dependencyIndex = 0u,
+           .buffer = dependencyImportResult.value(),
+           .mode = RenderGraphAccessMode::Read |
+                   RenderGraphAccessMode::Write},
+      }};
+  std::array<RenderGraphPreparedDrawBufferBinding, 1u> drawBindings = {{
+      {.drawIndex = 0u,
+       .target = RenderGraphDrawBufferBindingTarget::Vertex,
+       .buffer = drawImportResult.value(),
+       .mode = RenderGraphAccessMode::Read},
+  }};
+
+  RenderGraphPreparedGraphicsPassDesc passDesc{};
+  passDesc.color = {.loadOp = LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+  passDesc.colorTexture = colorResult.value();
+  passDesc.depth = {.loadOp = LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearDepth = 1.0f,
+                    .clearStencil = 0};
+  passDesc.depthTexture = depthResult.value();
+  passDesc.dependencyBuffers =
+      std::span<const BufferHandle>(dependencies.data(), dependencies.size());
+  passDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
+  passDesc.dependencyBufferBindings = std::span<const RenderGraphPreparedDependencyBufferBinding>(
+      dependencyBindings.data(), dependencyBindings.size());
+  passDesc.drawBufferBindings =
+      std::span<const RenderGraphPreparedDrawBufferBinding>(
+          drawBindings.data(), drawBindings.size());
+  passDesc.debugLabel = "prepared_graphics_pass";
+
+  auto addResult = builder.addPreparedGraphicsPass(passDesc);
+  if (!(!addResult.hasError())) {
+    ADD_FAILURE() << "addPreparedGraphicsPass should succeed";
+    return;
+  }
+
+  auto compileResult = compileBuilder(builder);
+  if (!(!compileResult.hasError())) {
+    ADD_FAILURE() << "compile should succeed for prepared graphics path";
+    if (compileResult.hasError()) {
+      std::cerr << compileResult.error() << "\n";
+    }
+    return;
+  }
+
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  if (!(compiled.orderedPasses.size() == 1u)) {
+    ADD_FAILURE() << "prepared graphics path should schedule one pass";
+    return;
+  }
+  if (!(compiled.unresolvedTextureBindings.size() == 2u)) {
+    ADD_FAILURE() << "prepared graphics path should emit unresolved color+depth "
+                     "transient bindings";
+    return;
+  }
+  if (!(compiled.dependencyBufferRangesByPass.size() == 1u &&
+        compiled.dependencyBufferRangesByPass[0u].count == 1u)) {
+    ADD_FAILURE() << "prepared graphics path should preserve dependency "
+                     "buffer slots";
+    return;
+  }
+  if (!(compiled.drawRangesByPass.size() == 1u &&
+        compiled.drawRangesByPass[0u].count == 1u)) {
+    ADD_FAILURE() << "prepared graphics path should preserve draw ranges";
+    return;
+  }
+}
+
 TEST(RenderGraphCompileBehaviorTest, DeadPassCullingFromFrameOutputRoots) {
   RenderGraphBuilder builder;
   builder.beginFrame(202u);
