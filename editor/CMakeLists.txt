@@ -9,12 +9,14 @@ set(NURI_EDITOR_SOURCES
   src/bakery/bakery_system.cpp
   src/bakery/brdf_lut_baker.cpp
   src/bakery/envmap_prefilter_baker.cpp
+  src/bakery/scene_asset_baker.cpp
   src/gfx/imgui_gpu_renderer.cpp
   src/main.cpp
   src/platform/imgui_glfw_platform.cpp
   src/resources/storage/font/nfont_compiler.cpp
   src/ui/camera_controller_widget.cpp
-  src/ui/editor_layer.cpp
+  src/ui/editor_feature.cpp
+  src/ui/editor_overlay_controller.cpp
   src/ui/imgui_editor.cpp
   src/ui/imgui_gizmo_controller.cpp
   src/ui/linear_graph.cpp
