@@ -145,11 +145,13 @@ Renderer::compileAndExecuteRenderGraph(uint64_t frameIndex) {
 
   const auto executeResult =
       [&]() -> Result<RenderGraphExecutionMetadata, std::string> {
+    std::optional<Result<RenderGraphExecutionMetadata, std::string>> result;
     NURI_PROFILER_ZONE("Renderer.render_graph_execute",
                        NURI_PROFILER_COLOR_SUBMIT);
-    return renderGraphExecutor_.execute(renderGraphRuntime_, gpu_,
-                                        *cachedCompileResult_);
+    result.emplace(renderGraphExecutor_.execute(renderGraphRuntime_, gpu_,
+                                                *cachedCompileResult_));
     NURI_PROFILER_ZONE_END();
+    return std::move(*result);
   }();
   if (executeResult.hasError()) {
     cachedCompileResult_.reset();

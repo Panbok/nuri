@@ -159,6 +159,22 @@ bool isSameTextureHandle(TextureHandle a, TextureHandle b) {
   return a.index == b.index && a.generation == b.generation;
 }
 
+void registerOrUpdatePersistentBuffer(RenderGraphBuilder &graph,
+                                      PersistentBufferId &persistentId,
+                                      BufferHandle &registeredHandle,
+                                      BufferHandle currentHandle,
+                                      std::string_view name) {
+  if (!isValid(persistentId)) {
+    persistentId = graph.registerPersistentBuffer(currentHandle, name);
+    registeredHandle = currentHandle;
+    return;
+  }
+  if (!isSameBufferHandle(registeredHandle, currentHandle)) {
+    graph.updatePersistentBuffer(persistentId, currentHandle);
+    registeredHandle = currentHandle;
+  }
+}
+
 Result<bool, std::string>
 appendUniqueDependency(std::pmr::vector<BufferHandle> &dependencies,
                        std::pmr::vector<RenderGraphAccessMode> &accessModes,
@@ -2514,50 +2530,27 @@ OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
     const BufferHandle matHandle = (materialBuffer_ && materialBuffer_->valid())
                                        ? materialBuffer_->handle()
                                        : BufferHandle{};
-    if (!isValid(persistentMaterialBuffer_)) {
-      persistentMaterialBuffer_ =
-          graph.registerPersistentBuffer(matHandle, "opaque_material_buffer");
-      registeredMaterialBufferHandle_ = matHandle;
-    } else if (matHandle.index != registeredMaterialBufferHandle_.index ||
-               matHandle.generation !=
-                   registeredMaterialBufferHandle_.generation) {
-      graph.updatePersistentBuffer(persistentMaterialBuffer_, matHandle);
-      registeredMaterialBufferHandle_ = matHandle;
-    }
+    registerOrUpdatePersistentBuffer(graph, persistentMaterialBuffer_,
+                                     registeredMaterialBufferHandle_, matHandle,
+                                     "opaque_material_buffer");
 
     const BufferHandle centersHandle =
         (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid())
             ? instanceCentersPhaseBuffer_->handle()
             : BufferHandle{};
-    if (!isValid(persistentCentersPhaseBuffer_)) {
-      persistentCentersPhaseBuffer_ = graph.registerPersistentBuffer(
-          centersHandle, "opaque_instance_centers_phase_buffer");
-      registeredCentersPhaseBufferHandle_ = centersHandle;
-    } else if (centersHandle.index !=
-                   registeredCentersPhaseBufferHandle_.index ||
-               centersHandle.generation !=
-                   registeredCentersPhaseBufferHandle_.generation) {
-      graph.updatePersistentBuffer(persistentCentersPhaseBuffer_,
-                                   centersHandle);
-      registeredCentersPhaseBufferHandle_ = centersHandle;
-    }
+    registerOrUpdatePersistentBuffer(graph, persistentCentersPhaseBuffer_,
+                                     registeredCentersPhaseBufferHandle_,
+                                     centersHandle,
+                                     "opaque_instance_centers_phase_buffer");
 
     const BufferHandle baseMatHandle =
         (instanceBaseMatricesBuffer_ && instanceBaseMatricesBuffer_->valid())
             ? instanceBaseMatricesBuffer_->handle()
             : BufferHandle{};
-    if (!isValid(persistentBaseMatricesBuffer_)) {
-      persistentBaseMatricesBuffer_ = graph.registerPersistentBuffer(
-          baseMatHandle, "opaque_instance_base_matrices_buffer");
-      registeredBaseMatricesBufferHandle_ = baseMatHandle;
-    } else if (baseMatHandle.index !=
-                   registeredBaseMatricesBufferHandle_.index ||
-               baseMatHandle.generation !=
-                   registeredBaseMatricesBufferHandle_.generation) {
-      graph.updatePersistentBuffer(persistentBaseMatricesBuffer_,
-                                   baseMatHandle);
-      registeredBaseMatricesBufferHandle_ = baseMatHandle;
-    }
+    registerOrUpdatePersistentBuffer(graph, persistentBaseMatricesBuffer_,
+                                     registeredBaseMatricesBufferHandle_,
+                                     baseMatHandle,
+                                     "opaque_instance_base_matrices_buffer");
   }
 
   NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_main_passes",

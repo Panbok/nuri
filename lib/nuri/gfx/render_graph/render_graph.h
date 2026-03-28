@@ -519,6 +519,9 @@ public:
     size_t frameOutputCount = 0;
     size_t sideEffectMarkCount = 0;
     bool allPassesBorrowPayload = true;
+    // Combined hash over transient texture/buffer descriptors recorded by
+    // createTransientTexture()/createTransientBuffer() for this frame.
+    uint64_t transientResourceDescriptorsHash = 0;
     // Monotonically incremented by updatePersistentBuffer/Texture whenever a
     // registered persistent handle is replaced.  A handle replacement changes
     // the import order on the next frame (the new handle gets a fresh index),
@@ -533,6 +536,8 @@ public:
              frameOutputCount == o.frameOutputCount &&
              sideEffectMarkCount == o.sideEffectMarkCount &&
              allPassesBorrowPayload == o.allPassesBorrowPayload &&
+             transientResourceDescriptorsHash ==
+                 o.transientResourceDescriptorsHash &&
              persistentHandlesVersion == o.persistentHandlesVersion;
     }
   };
@@ -545,12 +550,13 @@ public:
   // transient lifetimes) is left unchanged.
   void refreshHandlesInCompileResult(RenderGraphCompileResult &result) const;
 
-  // Persistent import API: buffers/textures registered here are automatically
-  // pre-imported at the start of every subsequent beginFrame(), so that
-  // importBuffer()/importTexture() calls for the same handles during the BUILD
-  // phase are cache hits rather than misses.  Use this for truly static GPU
-  // resources (e.g. long-lived uniform buffers) to eliminate per-frame PMR
-  // allocations for their resource records.
+  // Persistent import API: PersistentBufferId / PersistentTextureId registers
+  // a handle for cross-frame tracking, but beginFrame() does not automatically
+  // pre-import persistent resources. Call importBuffer()/importTexture() in
+  // the desired BUILD-phase order each frame; use updatePersistentBuffer() /
+  // updatePersistentTexture() when the underlying GPU handle changes and
+  // unregisterPersistentBuffer() / unregisterPersistentTexture() when the
+  // resource is destroyed.
   //
   // The returned PersistentBufferId / PersistentTextureId is valid for the
   // lifetime of this builder and must be passed to updatePersistentBuffer /
@@ -742,25 +748,33 @@ private:
   // Tracks whether every recorded pass this frame used borrowPayload = true.
   bool allPassesBorrowPayload_ = true;
 
-  // Cross-frame persistent import tables.  These are NOT cleared by
-  // beginFrame().  Use std::vector (not pmr) so entries survive PMR arena
-  // resets.  Resources are imported at their natural BUILD-phase order;
-  // beginFrame() does NOT pre-import them so that the import order is stable
-  // between the compile frame and subsequent cache-hit frames.
+  // Cross-frame persistent import tables. These are NOT cleared by
+  // beginFrame(). Use std::vector (not pmr) so entries survive PMR arena
+  // resets. beginFrame() does not pre-import them; callers choose the
+  // importBuffer()/importTexture() order explicitly during BUILD and must pair
+  // registerPersistentBuffer()/registerPersistentTexture() with
+  // updatePersistentBuffer()/updatePersistentTexture() and
+  // unregisterPersistentBuffer()/unregisterPersistentTexture() as handles
+  // change across frames.
   struct PersistentBufferEntry {
+    bool occupied = false;
     BufferHandle handle{};
     std::string debugName;
   };
   struct PersistentTextureEntry {
+    bool occupied = false;
     TextureHandle handle{};
     std::string debugName;
   };
   std::vector<PersistentBufferEntry> persistentBuffers_;
   std::vector<PersistentTextureEntry> persistentTextures_;
-  // Monotonically incremented whenever a registered persistent handle is
-  // replaced via updatePersistentBuffer/Texture.  Included in the fingerprint
-  // so that handle replacements always trigger a full recompile.
+  std::vector<uint32_t> persistentBufferFreeIndices_;
+  std::vector<uint32_t> persistentTextureFreeIndices_;
+  // Monotonically incremented whenever a persistent handle is registered,
+  // replaced, or unregistered. Included in the fingerprint so that persistent
+  // import-table changes always trigger a full recompile.
   uint64_t persistentHandlesVersion_ = 0;
+  uint64_t transientResourceDescriptorsHash_ = 0xcbf29ce484222325ull;
 };
 
 class NURI_API RenderGraphExecutor {

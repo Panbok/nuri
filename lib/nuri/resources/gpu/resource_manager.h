@@ -337,9 +337,9 @@ private:
   HashMap<MaterialKey, MaterialRef, MaterialKeyHash> materialCache_;
   HashMap<ModelKey, ModelRef, ModelKeyHash> modelCache_;
 
-  std::pmr::vector<ModelRef> pendingRetireModels_;
-  std::pmr::vector<MaterialRef> pendingRetireMaterials_;
   std::pmr::vector<TextureRef> pendingRetireTextures_;
+  std::pmr::vector<MaterialRef> pendingRetireMaterials_;
+  std::pmr::vector<ModelRef> pendingRetireModels_;
   struct Telemetry {
     uint64_t textureAcquireHits = 0;
     uint64_t textureAcquireMisses = 0;

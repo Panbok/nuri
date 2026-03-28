@@ -134,6 +134,23 @@ toPreparedDrawBindingTarget(RenderGraphDrawBufferBindingTarget target) {
   return h;
 }
 
+void mixFingerprintValue(uint64_t &hash, uint64_t value) noexcept {
+  hash ^= value;
+  hash *= 0x100000001b3ull;
+}
+
+void appendTransientTextureDescriptorFingerprint(uint64_t &hash,
+                                                 const TextureDesc &desc) {
+  mixFingerprintValue(hash, 0x746578ull);
+  mixFingerprintValue(hash, hashTextureDescForPool(desc));
+}
+
+void appendTransientBufferDescriptorFingerprint(uint64_t &hash,
+                                                const BufferDesc &desc) {
+  mixFingerprintValue(hash, 0x627566ull);
+  mixFingerprintValue(hash, hashBufferDescForPool(desc));
+}
+
 constexpr size_t kMaxReusableTransientTextures = 32u;
 constexpr size_t kMaxReusableTransientBuffers = 64u;
 constexpr uint32_t kMinValidationItemsPerWorker = 256u;
@@ -301,14 +318,27 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   sideEffectMarkIndicesByPass_.clear();
   sideEffectPassMarks_.clear();
   allPassesBorrowPayload_ = true;
+  transientResourceDescriptorsHash_ = 0xcbf29ce484222325ull;
 }
 
 PersistentBufferId
 RenderGraphBuilder::registerPersistentBuffer(BufferHandle handle,
                                              std::string_view debugName) {
-  const PersistentBufferId id{
-      .value = static_cast<uint32_t>(persistentBuffers_.size())};
-  persistentBuffers_.push_back({handle, std::string(debugName)});
+  PersistentBufferId id{};
+  if (!persistentBufferFreeIndices_.empty()) {
+    id.value = persistentBufferFreeIndices_.back();
+    persistentBufferFreeIndices_.pop_back();
+    auto &entry = persistentBuffers_[id.value];
+    entry.occupied = true;
+    entry.handle = handle;
+    entry.debugName.assign(debugName.data(), debugName.size());
+  } else {
+    id.value = static_cast<uint32_t>(persistentBuffers_.size());
+    persistentBuffers_.push_back({.occupied = true,
+                                  .handle = handle,
+                                  .debugName = std::string(debugName)});
+  }
+  ++persistentHandlesVersion_;
   if (nuri::isValid(handle)) {
     (void)importBuffer(handle, debugName);
   }
@@ -318,9 +348,21 @@ RenderGraphBuilder::registerPersistentBuffer(BufferHandle handle,
 PersistentTextureId
 RenderGraphBuilder::registerPersistentTexture(TextureHandle handle,
                                               std::string_view debugName) {
-  const PersistentTextureId id{
-      .value = static_cast<uint32_t>(persistentTextures_.size())};
-  persistentTextures_.push_back({handle, std::string(debugName)});
+  PersistentTextureId id{};
+  if (!persistentTextureFreeIndices_.empty()) {
+    id.value = persistentTextureFreeIndices_.back();
+    persistentTextureFreeIndices_.pop_back();
+    auto &entry = persistentTextures_[id.value];
+    entry.occupied = true;
+    entry.handle = handle;
+    entry.debugName.assign(debugName.data(), debugName.size());
+  } else {
+    id.value = static_cast<uint32_t>(persistentTextures_.size());
+    persistentTextures_.push_back({.occupied = true,
+                                   .handle = handle,
+                                   .debugName = std::string(debugName)});
+  }
+  ++persistentHandlesVersion_;
   if (nuri::isValid(handle)) {
     (void)importTexture(handle, debugName);
   }
@@ -329,7 +371,8 @@ RenderGraphBuilder::registerPersistentTexture(TextureHandle handle,
 
 void RenderGraphBuilder::updatePersistentBuffer(PersistentBufferId id,
                                                 BufferHandle newHandle) {
-  if (id.value >= persistentBuffers_.size()) {
+  if (id.value >= persistentBuffers_.size() ||
+      !persistentBuffers_[id.value].occupied) {
     return;
   }
   persistentBuffers_[id.value].handle = newHandle;
@@ -341,7 +384,8 @@ void RenderGraphBuilder::updatePersistentBuffer(PersistentBufferId id,
 
 void RenderGraphBuilder::updatePersistentTexture(PersistentTextureId id,
                                                  TextureHandle newHandle) {
-  if (id.value >= persistentTextures_.size()) {
+  if (id.value >= persistentTextures_.size() ||
+      !persistentTextures_[id.value].occupied) {
     return;
   }
   persistentTextures_[id.value].handle = newHandle;
@@ -355,14 +399,30 @@ void RenderGraphBuilder::unregisterPersistentBuffer(PersistentBufferId id) {
   if (id.value >= persistentBuffers_.size()) {
     return;
   }
-  persistentBuffers_[id.value].handle = BufferHandle{};
+  auto &entry = persistentBuffers_[id.value];
+  if (!entry.occupied) {
+    return;
+  }
+  entry.occupied = false;
+  entry.handle = BufferHandle{};
+  entry.debugName.clear();
+  persistentBufferFreeIndices_.push_back(id.value);
+  ++persistentHandlesVersion_;
 }
 
 void RenderGraphBuilder::unregisterPersistentTexture(PersistentTextureId id) {
   if (id.value >= persistentTextures_.size()) {
     return;
   }
-  persistentTextures_[id.value].handle = TextureHandle{};
+  auto &entry = persistentTextures_[id.value];
+  if (!entry.occupied) {
+    return;
+  }
+  entry.occupied = false;
+  entry.handle = TextureHandle{};
+  entry.debugName.clear();
+  persistentTextureFreeIndices_.push_back(id.value);
+  ++persistentHandlesVersion_;
 }
 
 RenderGraphBuilder::GraphFingerprint
@@ -376,6 +436,7 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .frameOutputCount = frameOutputTextureIndices_.size(),
       .sideEffectMarkCount = sideEffectPassMarks_.size(),
       .allPassesBorrowPayload = allPassesBorrowPayload_,
+      .transientResourceDescriptorsHash = transientResourceDescriptorsHash_,
       .persistentHandlesVersion = persistentHandlesVersion_,
   };
 }
@@ -554,6 +615,8 @@ RenderGraphBuilder::createTransientTexture(const TextureDesc &desc,
   const std::string_view name =
       resolveResourceDebugName(debugName, "transient_texture");
   resource.debugName.assign(name.data(), name.size());
+  appendTransientTextureDescriptorFingerprint(transientResourceDescriptorsHash_,
+                                              resource.transientDesc);
   textures_.push_back(std::move(resource));
 
   return Result<RenderGraphTextureId, std::string>::makeResult(
@@ -582,6 +645,8 @@ RenderGraphBuilder::createTransientBuffer(const BufferDesc &desc,
   const std::string_view name =
       resolveResourceDebugName(debugName, "transient_buffer");
   resource.debugName.assign(name.data(), name.size());
+  appendTransientBufferDescriptorFingerprint(transientResourceDescriptorsHash_,
+                                             resource.transientDesc);
   buffers_.push_back(std::move(resource));
 
   return Result<RenderGraphBufferId, std::string>::makeResult(
@@ -4520,7 +4585,10 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
               --reusableTexturePoolSize_;
               continue;
             }
-            // All entries in the bucket are alias-compatible by construction.
+            if (!isTextureDescAliasCompatible(desc, candidate.desc)) {
+              ++poolIndex;
+              continue;
+            }
             transientTexture = candidate.handle;
             bucket[poolIndex] = bucket.back();
             bucket.pop_back();
@@ -4587,7 +4655,10 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
               --reusableBufferPoolSize_;
               continue;
             }
-            // All entries in the bucket are alias-compatible by construction.
+            if (!isBufferDescAliasCompatible(desc, candidate.desc)) {
+              ++poolIndex;
+              continue;
+            }
             transientBuffer = candidate.handle;
             bucket[poolIndex] = bucket.back();
             bucket.pop_back();
