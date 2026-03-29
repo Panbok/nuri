@@ -113,6 +113,14 @@ target_include_directories(nuri_renderer
 
 target_compile_features(nuri_renderer PUBLIC cxx_std_20)
 
+if(NURI_WITH_LOGGING)
+  target_compile_definitions(nuri_renderer PUBLIC NURI_LOGGING=1)
+endif()
+
+if(NURI_WITH_ASSERTS)
+  target_compile_definitions(nuri_renderer PUBLIC NURI_ASSERTS=1)
+endif()
+
 find_package(glm CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)

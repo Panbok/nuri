@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
-  echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off]"
+if [[ $# -lt 2 || $# -gt 4 ]]; then
+  echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off] [devchecks]"
   exit 1
 fi
 
 mode="$1"
 profile="$2"
-tracy_mode="${3:-}"
+tracy_mode=""
+devchecks="OFF"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
@@ -24,54 +25,82 @@ fi
 
 append_manifest_feature() {
   local feature="$1"
-  case ",${manifest_features}," in
-    *,"${feature}",*)
+  case ";${manifest_features};" in
+    *";${feature};"*)
       ;;
-    ",,")
+    ";;")
       manifest_features="${feature}"
       ;;
     *)
-      manifest_features="${manifest_features},${feature}"
+      manifest_features="${manifest_features};${feature}"
       ;;
   esac
 }
 
-build_app="OFF"
-build_editor="OFF"
-build_tests="OFF"
+build_app="ON"
+build_editor="ON"
+build_tests="ON"
 build_target=""
 manifest_features="${VCPKG_MANIFEST_FEATURES:-}"
+
+append_manifest_feature editor
+append_manifest_feature tests
 
 case "${profile}" in
   lib)
     build_target="nuri_renderer"
     ;;
   app)
-    build_app="ON"
     build_target="nuri"
     ;;
   editor)
-    build_editor="ON"
     build_target="nuri_editor"
-    append_manifest_feature editor
     ;;
   tests)
-    build_tests="ON"
-    append_manifest_feature tests
     ;;
   *)
-    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off]"
+    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off] [devchecks]"
     exit 1
     ;;
 esac
 
+nuri_with_asan="OFF"
+nuri_with_logging="OFF"
+nuri_with_asserts="OFF"
 nuri_with_tracy="OFF"
 nuri_with_tracy_gpu="OFF"
 nuri_with_tracy_gpu_draw_zones="OFF"
 if [[ "${mode}" == "debug" ]]; then
+  nuri_with_asan="ON"
+  nuri_with_logging="ON"
+  nuri_with_asserts="ON"
   nuri_with_tracy="ON"
   nuri_with_tracy_gpu="ON"
   nuri_with_tracy_gpu_draw_zones="ON"
+fi
+
+for arg in "${@:3}"; do
+  case "${arg}" in
+    cpu|cpu-gpu|off)
+      if [[ -n "${tracy_mode}" ]]; then
+        echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off] [devchecks]"
+        exit 1
+      fi
+      tracy_mode="${arg}"
+      ;;
+    devchecks)
+      devchecks="ON"
+      ;;
+    *)
+      echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off] [devchecks]"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "${mode}" == "release" && "${devchecks}" == "ON" ]]; then
+  nuri_with_logging="ON"
+  nuri_with_asserts="ON"
 fi
 
 case "${tracy_mode}" in
@@ -92,31 +121,9 @@ case "${tracy_mode}" in
     nuri_with_tracy_gpu="OFF"
     nuri_with_tracy_gpu_draw_zones="OFF"
     ;;
-  *)
-    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off]"
-    exit 1
-    ;;
 esac
 
-resolve_build_dir() {
-  local repo_root="$1"
-  local mode="$2"
-  local profile="$3"
-
-  if [[ "${mode}" == "release" ]]; then
-    printf '%s\n' "${repo_root}/build_release/${profile}"
-    return
-  fi
-
-  if [[ "${profile}" == "app" ]]; then
-    printf '%s\n' "${repo_root}/build"
-    return
-  fi
-
-  printf '%s\n' "${repo_root}/build_${profile}"
-}
-
-build_dir="$(resolve_build_dir "${repo_root}" "${mode}" "${profile}")"
+build_dir="${repo_root}/build/${mode}"
 
 manifest_feature_args=()
 if [[ -n "${manifest_features}" ]]; then
@@ -135,6 +142,9 @@ configure_args=(
   -DNURI_BUILD_APP="${build_app}"
   -DNURI_BUILD_EDITOR="${build_editor}"
   -DNURI_BUILD_TESTS="${build_tests}"
+  -DNURI_WITH_ASAN="${nuri_with_asan}"
+  -DNURI_WITH_LOGGING="${nuri_with_logging}"
+  -DNURI_WITH_ASSERTS="${nuri_with_asserts}"
   "${manifest_feature_args[@]}"
 )
 
@@ -159,7 +169,7 @@ case "${mode}" in
     )
     ;;
   *)
-    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off]"
+    echo "Usage: $(basename "$0") <debug|release> <lib|app|editor|tests> [cpu|cpu-gpu|off] [devchecks]"
     exit 1
     ;;
 esac

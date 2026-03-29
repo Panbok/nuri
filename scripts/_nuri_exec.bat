@@ -10,7 +10,7 @@ shift
 shift
 
 for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
-call :set_build_dir "%REPO_ROOT%" "%MODE%" "%PROFILE%"
+set "BUILD_DIR=%REPO_ROOT%\build\%MODE%"
 set "APP="
 set "VCPKG_BIN="
 
@@ -40,18 +40,6 @@ if defined CLANG_BIN set "PATH=%CLANG_BIN%;%PATH%"
 
 "%APP%" %*
 exit /b %errorlevel%
-
-:set_build_dir
-if /I "%~2"=="release" (
-  set "BUILD_DIR=%~1\build_release\%~3"
-  exit /b 0
-)
-if /I "%~3"=="app" (
-  set "BUILD_DIR=%~1\build"
-  exit /b 0
-)
-set "BUILD_DIR=%~1\build_%~3"
-exit /b 0
 
 :usage
 echo Usage: %~nx0 ^<debug^|release^> ^<app^|editor^> [args...]

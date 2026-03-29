@@ -23,11 +23,7 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-if [[ "${mode}" == "release" ]]; then
-  build_dir="${REPO_ROOT}/build_release/tests"
-else
-  build_dir="${REPO_ROOT}/build_tests"
-fi
+build_dir="${REPO_ROOT}/build/${mode}"
 "${SCRIPT_DIR}/_nuri_build.sh" "${mode}" tests
 
 has_jobs_arg=0

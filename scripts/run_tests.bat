@@ -21,7 +21,7 @@ call "%SCRIPT_DIR%_nuri_build.bat" "%MODE%" tests
 if errorlevel 1 exit /b 1
 
 for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
-call :set_build_dir "%REPO_ROOT%" "%MODE%" tests
+set "BUILD_DIR=%REPO_ROOT%\build\%MODE%"
 
 set "CTEST_ARGS="
 set "HAS_JOBS_ARG=0"
@@ -44,15 +44,3 @@ if "%HAS_JOBS_ARG%"=="0" (
 )
 ctest --test-dir "%BUILD_DIR%" --output-on-failure%CTEST_PARALLEL_ARGS%%CTEST_ARGS%
 exit /b %errorlevel%
-
-:set_build_dir
-if /I "%~2"=="release" (
-  set "BUILD_DIR=%~1\build_release\%~3"
-  exit /b 0
-)
-if /I "%~3"=="app" (
-  set "BUILD_DIR=%~1\build"
-  exit /b 0
-)
-set "BUILD_DIR=%~1\build_%~3"
-exit /b 0
