@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 for %%i in ("%~f0") do set "SCRIPT_DIR=%%~dpi"
 
 set "MODE=%~1"
@@ -155,82 +155,8 @@ set "EXPECTED_LINKER=link.exe"
 
 for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
 set "BUILD_DIR=%REPO_ROOT%\build\%MODE%"
-set "CACHE_FILE=%BUILD_DIR%\CMakeCache.txt"
-if exist "%CACHE_FILE%" (
-  set "CACHED_GENERATOR="
-  for /f "tokens=2 delims==" %%i in ('findstr /B /C:"CMAKE_GENERATOR:INTERNAL=" "%CACHE_FILE%"') do (
-    set "CACHED_GENERATOR=%%i"
-  )
-  if defined CACHED_GENERATOR if /I not "%CACHED_GENERATOR%"=="%GENERATOR%" (
-    echo Resetting "%BUILD_DIR%" because the configured generator changed.
-    cmake -E rm -rf "%BUILD_DIR%"
-    if exist "%BUILD_DIR%" (
-      echo Failed to reset "%BUILD_DIR%".
-      exit /b 1
-    )
-    set "CACHE_FILE=%BUILD_DIR%\CMakeCache.txt"
-  )
-)
-if exist "%CACHE_FILE%" (
-  set "CACHED_COMPILER="
-  for /f "tokens=2 delims==" %%i in ('findstr /B /C:"CMAKE_CXX_COMPILER:FILEPATH=" "%CACHE_FILE%"') do (
-    set "CACHED_COMPILER=%%i"
-  )
-  if not defined CACHED_COMPILER (
-    for /f "tokens=2 delims==" %%i in ('findstr /B /C:"CMAKE_CXX_COMPILER:STRING=" "%CACHE_FILE%"') do (
-      set "CACHED_COMPILER=%%i"
-    )
-  )
-  if not defined CACHED_COMPILER (
-    echo Resetting "%BUILD_DIR%" because the configured compiler is incomplete.
-    cmake -E rm -rf "%BUILD_DIR%"
-    if exist "%BUILD_DIR%" (
-      echo Failed to reset "%BUILD_DIR%".
-      exit /b 1
-    )
-    set "CACHE_FILE=%BUILD_DIR%\CMakeCache.txt"
-  ) else (
-    echo %CACHED_COMPILER% | findstr /I /C:"\%EXPECTED_CXX_COMPILER%" >nul
-    if errorlevel 1 (
-      echo Resetting "%BUILD_DIR%" because the configured compiler changed.
-      cmake -E rm -rf "%BUILD_DIR%"
-      if exist "%BUILD_DIR%" (
-        echo Failed to reset "%BUILD_DIR%".
-        exit /b 1
-      )
-      set "CACHE_FILE=%BUILD_DIR%\CMakeCache.txt"
-    )
-  )
-)
-if exist "%CACHE_FILE%" (
-  set "CACHED_LINKER="
-  for /f "tokens=2 delims==" %%i in ('findstr /B /C:"CMAKE_LINKER:FILEPATH=" "%CACHE_FILE%"') do (
-    set "CACHED_LINKER=%%i"
-  )
-  if not defined CACHED_LINKER (
-    for /f "tokens=2 delims==" %%i in ('findstr /B /C:"CMAKE_LINKER:STRING=" "%CACHE_FILE%"') do (
-      set "CACHED_LINKER=%%i"
-    )
-  )
-  if not defined CACHED_LINKER (
-    echo Resetting "%BUILD_DIR%" because the configured linker is incomplete.
-    cmake -E rm -rf "%BUILD_DIR%"
-    if exist "%BUILD_DIR%" (
-      echo Failed to reset "%BUILD_DIR%".
-      exit /b 1
-    )
-  ) else (
-    echo %CACHED_LINKER% | findstr /I /C:"\%EXPECTED_LINKER%" >nul
-    if errorlevel 1 (
-      echo Resetting "%BUILD_DIR%" because the configured linker changed.
-      cmake -E rm -rf "%BUILD_DIR%"
-      if exist "%BUILD_DIR%" (
-        echo Failed to reset "%BUILD_DIR%".
-        exit /b 1
-      )
-    )
-  )
-)
+set "CONFIG_STAMP_FILE=%BUILD_DIR%\.nuri_config.txt"
+set "DESIRED_CONFIG=mode=%MODE% profile=%PROFILE% tracy=%TRACY_MODE% devchecks=%DEVCHECKS% cc=%C_COMPILER_ARG% cxx=%CXX_COMPILER_ARG% linker=%LINKER_ARG% asan=%NURI_WITH_ASAN% logging=%NURI_WITH_LOGGING% asserts=%NURI_WITH_ASSERTS% tracy_cpu=%NURI_WITH_TRACY% tracy_gpu=%NURI_WITH_TRACY_GPU% tracy_gpu_draw=%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
 set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 set "MAKE_PROGRAM_ARG=-DCMAKE_MAKE_PROGRAM=%NINJA_EXE%"
 set "VCPKG_EXECUTABLE_ARG=-DVCPKG_EXECUTABLE=%VCPKG_ROOT%\vcpkg.exe"
@@ -240,6 +166,13 @@ if not "%MANIFEST_FEATURES%"=="" set "MANIFEST_FEATURES_ARG=-DVCPKG_MANIFEST_FEA
 call "%SCRIPT_DIR%bootstrap_lightweightvk.bat"
 if errorlevel 1 exit /b 1
 
+set "SHOULD_CONFIGURE=1"
+if exist "%BUILD_DIR%\CMakeCache.txt" if exist "%CONFIG_STAMP_FILE%" (
+  set /p "EXISTING_CONFIG=" < "%CONFIG_STAMP_FILE%"
+  if "!EXISTING_CONFIG!"=="%DESIRED_CONFIG%" set "SHOULD_CONFIGURE=0"
+)
+
+if "%SHOULD_CONFIGURE%"=="0" goto build_target
 if /I "%MODE%"=="debug" goto configure_debug
 if /I "%MODE%"=="release" goto configure_release
 goto usage
@@ -267,7 +200,7 @@ cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G "%GENERATOR%" ^
   -DNURI_WITH_TRACY_GPU="%NURI_WITH_TRACY_GPU%" ^
   -DNURI_WITH_TRACY_GPU_DRAW_ZONES="%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
 if errorlevel 1 exit /b 1
-goto build_target
+goto write_config_stamp
 
 :configure_release
 cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G "%GENERATOR%" ^
@@ -292,6 +225,11 @@ cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G "%GENERATOR%" ^
   -DNURI_WITH_TRACY_GPU="%NURI_WITH_TRACY_GPU%" ^
   -DNURI_WITH_TRACY_GPU_DRAW_ZONES="%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
 if errorlevel 1 exit /b 1
+goto write_config_stamp
+
+:write_config_stamp
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+> "%CONFIG_STAMP_FILE%" echo(%DESIRED_CONFIG%
 
 :build_target
 if "%BUILD_TARGET%"=="" (
