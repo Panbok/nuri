@@ -32,7 +32,8 @@ struct LoggerState {
       return current;
     }
 
-    std::unique_ptr<Log> createdUnique = hasConfig ? Log::create(config) : Log::create();
+    std::unique_ptr<Log> createdUnique =
+        hasConfig ? Log::create(config) : Log::create();
     std::shared_ptr<Log> created = std::move(createdUnique);
     instance.store(created, std::memory_order_release);
     return created;

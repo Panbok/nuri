@@ -513,6 +513,14 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
   }
 
   for (size_t i = 0; i < passCount; ++i) {
+    if (result.preDispatchRangesByPass[i].count == 0 &&
+        !result.orderedPasses[i].preDispatches.empty()) {
+      const uint32_t passIndex = result.orderedPassIndices[i];
+      if (passIndex < passes_.size()) {
+        result.orderedPasses[i].preDispatches =
+            passes_[passIndex].preDispatches;
+      }
+    }
     if (result.drawRangesByPass[i].count != 0 ||
         result.orderedPasses[i].draws.empty()) {
       continue;

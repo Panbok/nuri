@@ -72,7 +72,8 @@ template <typename T>
 
   const size_t offset = out.size();
   out.resize(static_cast<size_t>(newSize));
-  std::memcpy(out.data() + offset, values.data(), static_cast<size_t>(byteCount));
+  std::memcpy(out.data() + offset, values.data(),
+              static_cast<size_t>(byteCount));
   return true;
 }
 
@@ -105,7 +106,8 @@ template <typename T>
   }
   out.resize(count);
   if (totalBytes > 0) {
-    std::memcpy(out.data(), bytes.data() + offset, static_cast<size_t>(totalBytes));
+    std::memcpy(out.data(), bytes.data() + offset,
+                static_cast<size_t>(totalBytes));
   }
   return true;
 }
@@ -127,8 +129,9 @@ struct SerializedSection {
   std::vector<std::byte> payload;
 };
 
-[[nodiscard]] bool validateSectionBounds(const NFontBinarySectionTocEntry &entry,
-                                         size_t fileSize) {
+[[nodiscard]] bool
+validateSectionBounds(const NFontBinarySectionTocEntry &entry,
+                      size_t fileSize) {
   uint64_t end = 0;
   if (!checkedAddToU64(entry.offset, entry.sizeBytes, end)) {
     return false;
@@ -165,14 +168,17 @@ findSection(std::span<const NFontBinarySectionTocEntry> toc, uint32_t fourcc) {
 Result<std::vector<std::byte>, std::string>
 nfontBinarySerialize(const NFontBinaryData &input) {
   if (!isLittleEndianHost()) {
-    return makeSerializeError("nfontBinarySerialize: unsupported host endianness");
+    return makeSerializeError(
+        "nfontBinarySerialize: unsupported host endianness");
   }
 
   if (input.glyphs.size() > std::numeric_limits<uint32_t>::max()) {
-    return makeSerializeError("nfontBinarySerialize: glyph count exceeds uint32");
+    return makeSerializeError(
+        "nfontBinarySerialize: glyph count exceeds uint32");
   }
   if (input.cmap.size() > std::numeric_limits<uint32_t>::max()) {
-    return makeSerializeError("nfontBinarySerialize: cmap count exceeds uint32");
+    return makeSerializeError(
+        "nfontBinarySerialize: cmap count exceeds uint32");
   }
   if (input.atlasPages.size() > std::numeric_limits<uint32_t>::max()) {
     return makeSerializeError(
@@ -197,8 +203,8 @@ nfontBinarySerialize(const NFontBinaryData &input) {
           "nfontBinarySerialize: atlas page pixel count overflow");
     }
     if ((static_cast<uint64_t>(page.imageBytes.size()) % pixelCount) != 0u) {
-      return makeSerializeError(
-          "nfontBinarySerialize: atlas image size is not divisible by pixel count");
+      return makeSerializeError("nfontBinarySerialize: atlas image size is not "
+                                "divisible by pixel count");
     }
     const uint64_t bytesPerPixel =
         static_cast<uint64_t>(page.imageBytes.size()) / pixelCount;
@@ -235,7 +241,8 @@ nfontBinarySerialize(const NFontBinaryData &input) {
   cmapSection.fourcc = kNFontBinarySectionCmap;
   cmapSection.count = static_cast<uint32_t>(input.cmap.size());
   cmapSection.stride = sizeof(NFontBinaryCmapRecord);
-  cmapSection.payload.reserve(input.cmap.size() * sizeof(NFontBinaryCmapRecord));
+  cmapSection.payload.reserve(input.cmap.size() *
+                              sizeof(NFontBinaryCmapRecord));
   for (const NFontBinaryCmapEntry &entry : input.cmap) {
     NFontBinaryCmapRecord record{};
     record.codepoint = entry.codepoint;
@@ -247,7 +254,8 @@ nfontBinarySerialize(const NFontBinaryData &input) {
   glyphSection.fourcc = kNFontBinarySectionGlyp;
   glyphSection.count = static_cast<uint32_t>(input.glyphs.size());
   glyphSection.stride = sizeof(NFontBinaryGlyphRecord);
-  glyphSection.payload.reserve(input.glyphs.size() * sizeof(NFontBinaryGlyphRecord));
+  glyphSection.payload.reserve(input.glyphs.size() *
+                               sizeof(NFontBinaryGlyphRecord));
   for (const GlyphMetrics &glyph : input.glyphs) {
     NFontBinaryGlyphRecord record{};
     record.glyphId = glyph.glyphId;
@@ -306,8 +314,9 @@ nfontBinarySerialize(const NFontBinaryData &input) {
   imageSection.count = static_cast<uint32_t>(imageSection.payload.size());
 
   std::array<SerializedSection, 6> sections = {
-      std::move(headSection), std::move(metricsSection), std::move(cmapSection),
-      std::move(glyphSection), std::move(atlasSection), std::move(imageSection)};
+      std::move(headSection),  std::move(metricsSection),
+      std::move(cmapSection),  std::move(glyphSection),
+      std::move(atlasSection), std::move(imageSection)};
 
   NFontBinaryHeader header{};
   header.magic = kNFontBinaryMagic;
@@ -342,19 +351,22 @@ nfontBinarySerialize(const NFontBinaryData &input) {
     toc[i] = entry;
 
     if (!checkedAddToU64(cursor, entry.sizeBytes, cursor)) {
-      return makeSerializeError("nfontBinarySerialize: section layout overflow");
+      return makeSerializeError(
+          "nfontBinarySerialize: section layout overflow");
     }
   }
 
   header.fileSize = cursor;
-  if (header.fileSize > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+  if (header.fileSize >
+      static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
     return makeSerializeError(
         "nfontBinarySerialize: output exceeds addressable size");
   }
 
   std::vector<std::byte> out(static_cast<size_t>(header.fileSize));
   std::memcpy(out.data(), &header, sizeof(header));
-  std::memcpy(out.data() + header.tocOffset, toc.data(), static_cast<size_t>(tocBytes));
+  std::memcpy(out.data() + header.tocOffset, toc.data(),
+              static_cast<size_t>(tocBytes));
   for (size_t i = 0; i < sections.size(); ++i) {
     if (!sections[i].payload.empty()) {
       std::memcpy(out.data() + toc[i].offset, sections[i].payload.data(),
@@ -362,7 +374,8 @@ nfontBinarySerialize(const NFontBinaryData &input) {
     }
   }
 
-  return Result<std::vector<std::byte>, std::string>::makeResult(std::move(out));
+  return Result<std::vector<std::byte>, std::string>::makeResult(
+      std::move(out));
 }
 
 Result<NFontBinaryData, std::string>
@@ -377,7 +390,8 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
 
   NFontBinaryHeader header{};
   if (!readPod(fileBytes, 0, header)) {
-    return makeDeserializeError("nfontBinaryDeserialize: failed to read header");
+    return makeDeserializeError(
+        "nfontBinaryDeserialize: failed to read header");
   }
 
   if (header.magic != kNFontBinaryMagic) {
@@ -388,7 +402,8 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
         "nfontBinaryDeserialize: unsupported major version");
   }
   if ((header.flags & kNFontBinaryHeaderFlagLittleEndian) == 0) {
-    return makeDeserializeError("nfontBinaryDeserialize: unsupported endianness");
+    return makeDeserializeError(
+        "nfontBinaryDeserialize: unsupported endianness");
   }
   if (header.headerSize != sizeof(NFontBinaryHeader) ||
       header.tocEntrySize != sizeof(NFontBinarySectionTocEntry)) {
@@ -402,7 +417,8 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
     return makeDeserializeError("nfontBinaryDeserialize: TOC is empty");
   }
   if (header.tocCount > 1024u) {
-    return makeDeserializeError("nfontBinaryDeserialize: TOC count is unreasonable");
+    return makeDeserializeError(
+        "nfontBinaryDeserialize: TOC count is unreasonable");
   }
 
   uint64_t tocBytes = 0;
@@ -445,7 +461,8 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
         "nfontBinaryDeserialize: missing or duplicate required sections");
   }
 
-  if (headEntry->count != 1 || headEntry->stride != sizeof(NFontBinaryHeadRecord) ||
+  if (headEntry->count != 1 ||
+      headEntry->stride != sizeof(NFontBinaryHeadRecord) ||
       !sectionSizeMatchesCountStride(*headEntry)) {
     return makeDeserializeError(
         "nfontBinaryDeserialize: invalid HEAD section metadata");
@@ -471,8 +488,7 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
     return makeDeserializeError(
         "nfontBinaryDeserialize: invalid ATLS section metadata");
   }
-  if (imagEntry->stride != 1 ||
-      !sectionSizeMatchesCountStride(*imagEntry)) {
+  if (imagEntry->stride != 1 || !sectionSizeMatchesCountStride(*imagEntry)) {
     return makeDeserializeError(
         "nfontBinaryDeserialize: invalid IMAG section metadata");
   }
@@ -486,7 +502,8 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
     return makeDeserializeError("nfontBinaryDeserialize: failed reading METR");
   }
 
-  if (head.glyphCount != glypEntry->count || head.cmapCount != cmapEntry->count ||
+  if (head.glyphCount != glypEntry->count ||
+      head.cmapCount != cmapEntry->count ||
       head.atlasPageCount != atlsEntry->count) {
     return makeDeserializeError(
         "nfontBinaryDeserialize: HEAD counts do not match table counts");
@@ -497,22 +514,26 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
   }
 
   std::vector<NFontBinaryCmapRecord> cmapRecords;
-  if (!readPodArray(fileBytes, cmapEntry->offset, cmapEntry->count, cmapRecords)) {
+  if (!readPodArray(fileBytes, cmapEntry->offset, cmapEntry->count,
+                    cmapRecords)) {
     return makeDeserializeError("nfontBinaryDeserialize: failed reading CMAP");
   }
 
   std::vector<NFontBinaryGlyphRecord> glyphRecords;
-  if (!readPodArray(fileBytes, glypEntry->offset, glypEntry->count, glyphRecords)) {
+  if (!readPodArray(fileBytes, glypEntry->offset, glypEntry->count,
+                    glyphRecords)) {
     return makeDeserializeError("nfontBinaryDeserialize: failed reading GLYP");
   }
 
   std::vector<NFontBinaryAtlasPageRecord> atlasRecords;
-  if (!readPodArray(fileBytes, atlsEntry->offset, atlsEntry->count, atlasRecords)) {
+  if (!readPodArray(fileBytes, atlsEntry->offset, atlsEntry->count,
+                    atlasRecords)) {
     return makeDeserializeError("nfontBinaryDeserialize: failed reading ATLS");
   }
 
   const std::span<const std::byte> imagePayload(
-      fileBytes.data() + imagEntry->offset, static_cast<size_t>(imagEntry->sizeBytes));
+      fileBytes.data() + imagEntry->offset,
+      static_cast<size_t>(imagEntry->sizeBytes));
 
   NFontBinaryData out{};
   out.pxRange = head.pxRange;
@@ -538,7 +559,6 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
     }
     out.glyphs.push_back(GlyphMetrics{
         .glyphId = record.glyphId,
-        .localPageIndex = record.localPageIndex,
         .advance = record.advance,
         .bearingX = record.bearingX,
         .bearingY = record.bearingY,
@@ -550,6 +570,7 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
         .uvMinY = record.uvMinY,
         .uvMaxX = record.uvMaxX,
         .uvMaxY = record.uvMaxY,
+        .localPageIndex = record.localPageIndex,
     });
   }
 
@@ -579,8 +600,8 @@ nfontBinaryDeserialize(std::span<const std::byte> fileBytes) {
           "nfontBinaryDeserialize: atlas page pixel count overflow");
     }
     if ((static_cast<uint64_t>(record.imageSize) % pixelCount) != 0u) {
-      return makeDeserializeError(
-          "nfontBinaryDeserialize: atlas image size is not divisible by pixel count");
+      return makeDeserializeError("nfontBinaryDeserialize: atlas image size is "
+                                  "not divisible by pixel count");
     }
     const uint64_t bytesPerPixel =
         static_cast<uint64_t>(record.imageSize) / pixelCount;
