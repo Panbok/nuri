@@ -76,11 +76,15 @@ public:
   [[nodiscard]] bool getRenderableNode(RenderableId id, NodeId &out) const;
   [[nodiscard]] bool setRenderableMorphWeights(RenderableId id,
                                                std::span<const float> weights);
+  // Returned spans reference internal storage and are invalidated by
+  // renderable topology changes; copy the data if a stable lifetime is needed.
   [[nodiscard]] std::span<const float>
   getRenderableMorphWeights(RenderableId id) const;
   [[nodiscard]] bool
   setRenderableSkinPalette(RenderableId id,
                            std::span<const glm::mat4> matrices);
+  // Returned spans reference internal storage and are invalidated by
+  // renderable topology changes; copy the data if a stable lifetime is needed.
   [[nodiscard]] std::span<const glm::mat4>
   getRenderableSkinPalette(RenderableId id) const;
 

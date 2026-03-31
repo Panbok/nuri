@@ -1311,7 +1311,11 @@ void extractMorphTargets(const aiMesh &mesh, const aiMatrix4x4 &transform,
     }
     outMorphTargets.emplace_back(outMorphTargets.get_allocator().resource());
     MorphTarget &target = outMorphTargets.back();
-    target.name = "morph_" + std::to_string(animMeshIndex);
+    if (animMesh->mName.length > 0u) {
+      target.name.assign(animMesh->mName.C_Str(), animMesh->mName.length);
+    } else {
+      target.name = "morph_" + std::to_string(animMeshIndex);
+    }
     target.positionDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
     if (animMesh->HasNormals()) {
       target.normalDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
@@ -1448,6 +1452,12 @@ void optimizeVertexFetchForAllLods(
         }
       }
       skinInfluences->swap(remappedSkinInfluences);
+    } else if (skinInfluences != nullptr) {
+      NURI_LOG_WARNING(
+          "MeshImporter::optimizeVertexFetchForAllLods: skipping skin "
+          "influence remap because influence count (%zu) does not match "
+          "vertex remap size (%zu)",
+          skinInfluences->size(), vertexFetchRemap.size());
     }
 
     for (MorphTarget &morphTarget : morphTargets) {
@@ -1687,7 +1697,8 @@ buildSceneMeshData(const aiMesh &mesh, uint32_t sceneMeshIndex,
 buildFlattenedSceneDataFromImportedScene(std::string_view path,
                                          const ImportedScene &importedScene,
                                          const MeshImportOptions &options,
-                                         std::pmr::memory_resource *mem) {
+                                         std::pmr::memory_resource *mem,
+                                         bool includeAnimationData = true) {
   Assimp::Importer importer;
   auto sceneResult = loadSceneMeshImportScene(importer, path, options);
   if (sceneResult.hasError()) {
@@ -1773,8 +1784,10 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
     std::array<float, Submesh::kMaxLodCount> lodErrors{};
 
     extractMeshGeometry(mesh, transform, meshVertices, lod0Indices);
-    extractSkinInfluences(mesh, meshSkinInfluences);
-    extractMorphTargets(mesh, transform, meshVertices, meshMorphTargets);
+    if (includeAnimationData) {
+      extractSkinInfluences(mesh, meshSkinInfluences);
+      extractMorphTargets(mesh, transform, meshVertices, meshMorphTargets);
+    }
     if (meshVertices.empty() || lod0Indices.size() < kTriangleIndexCount) {
       ++insufficientGeometryMeshCount;
       if (insufficientGeometrySampleCount <
@@ -1800,9 +1813,11 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
 
     if (options.optimize) {
       optimizeVertexFetchForAllLods(
-          meshVertices, generatedLodCount, lodIndexBuffers, &meshSkinInfluences,
-          std::span<MorphTarget>(meshMorphTargets.data(),
-                                 meshMorphTargets.size()));
+          meshVertices, generatedLodCount, lodIndexBuffers,
+          includeAnimationData ? &meshSkinInfluences : nullptr,
+          includeAnimationData ? std::span<MorphTarget>(meshMorphTargets.data(),
+                                                        meshMorphTargets.size())
+                               : std::span<MorphTarget>());
     }
 
     const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
@@ -1933,18 +1948,12 @@ MeshImporter::loadFromFile(std::string_view path,
         "MeshImporter::loadFromFile: " + importedSceneResult.error());
   }
   auto flattenedResult = buildFlattenedSceneDataFromImportedScene(
-      path, importedSceneResult.value(), options, mem);
+      path, importedSceneResult.value(), options, mem, false);
   if (flattenedResult.hasError()) {
     return flattenedResult;
   }
-  MeshData data = std::move(flattenedResult.value());
-  data.skinInfluences.clear();
-  data.morphTargets.clear();
-  for (Submesh &submesh : data.submeshes) {
-    submesh.morphTargetFirst = 0u;
-    submesh.morphTargetCount = 0u;
-  }
-  return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
+  return nuri::Result<MeshData, std::string>::makeResult(
+      std::move(flattenedResult.value()));
 }
 
 nuri::Result<MeshData, std::string> detail::loadSceneMeshFromSourceIndex(

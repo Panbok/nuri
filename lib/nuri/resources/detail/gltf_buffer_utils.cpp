@@ -11,6 +11,13 @@ namespace {
 constexpr uint32_t kGlbMagic = 0x46546C67u;
 constexpr uint32_t kGlbChunkTypeBin = 0x004E4942u;
 
+template <typename T> [[nodiscard]] T loadUnaligned(const std::byte *ptr) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  T value{};
+  std::memcpy(&value, ptr, sizeof(T));
+  return value;
+}
+
 [[nodiscard]] bool readU32(std::span<const std::byte> bytes, size_t offset,
                            uint32_t &out) {
   if (offset + sizeof(uint32_t) > bytes.size()) {
@@ -54,10 +61,29 @@ constexpr uint32_t kGlbChunkTypeBin = 0x004E4942u;
   if (type == "VEC4") {
     return 4u;
   }
+  if (type == "MAT2") {
+    return 4u;
+  }
+  if (type == "MAT3") {
+    return 9u;
+  }
   if (type == "MAT4") {
     return 16u;
   }
   return 0u;
+}
+
+[[nodiscard]] bool
+isPathWithinDirectory(const std::filesystem::path &path,
+                      const std::filesystem::path &directory) {
+  auto pathIt = path.begin();
+  auto directoryIt = directory.begin();
+  for (; directoryIt != directory.end(); ++directoryIt, ++pathIt) {
+    if (pathIt == path.end() || *pathIt != *directoryIt) {
+      return false;
+    }
+  }
+  return true;
 }
 
 struct AccessorResolvedView {
@@ -239,37 +265,37 @@ resolveAccessor(yyjson_val *root,
                                              const std::byte *ptr) {
   switch (componentType) {
   case 5126:
-    return *reinterpret_cast<const float *>(ptr);
+    return loadUnaligned<float>(ptr);
   case 5120: {
-    const int8_t value = *reinterpret_cast<const int8_t *>(ptr);
+    const int8_t value = std::bit_cast<int8_t>(*ptr);
     if (!normalized) {
       return static_cast<float>(value);
     }
     return std::max(static_cast<float>(value) / 127.0f, -1.0f);
   }
   case 5121: {
-    const uint8_t value = *reinterpret_cast<const uint8_t *>(ptr);
+    const uint8_t value = std::to_integer<uint8_t>(*ptr);
     if (!normalized) {
       return static_cast<float>(value);
     }
     return static_cast<float>(value) / 255.0f;
   }
   case 5122: {
-    const int16_t value = *reinterpret_cast<const int16_t *>(ptr);
+    const int16_t value = loadUnaligned<int16_t>(ptr);
     if (!normalized) {
       return static_cast<float>(value);
     }
     return std::max(static_cast<float>(value) / 32767.0f, -1.0f);
   }
   case 5123: {
-    const uint16_t value = *reinterpret_cast<const uint16_t *>(ptr);
+    const uint16_t value = loadUnaligned<uint16_t>(ptr);
     if (!normalized) {
       return static_cast<float>(value);
     }
     return static_cast<float>(value) / 65535.0f;
   }
   case 5125:
-    return static_cast<float>(*reinterpret_cast<const uint32_t *>(ptr));
+    return static_cast<float>(loadUnaligned<uint32_t>(ptr));
   default:
     return 0.0f;
   }
@@ -279,9 +305,9 @@ resolveAccessor(yyjson_val *root,
                                          const std::byte *ptr) {
   switch (componentType) {
   case 5121:
-    return *reinterpret_cast<const uint8_t *>(ptr);
+    return std::to_integer<uint8_t>(*ptr);
   case 5123:
-    return *reinterpret_cast<const uint16_t *>(ptr);
+    return loadUnaligned<uint16_t>(ptr);
   default:
     return 0u;
   }
@@ -344,7 +370,27 @@ loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
             std::pmr::vector<std::pmr::vector<std::byte>>,
             std::string>::makeError("glTF data URI buffers are not supported");
       }
-      const auto fileResult = readBinaryFile(directory / std::string(uri));
+      std::filesystem::path resolvedUriPath;
+      try {
+        const std::filesystem::path canonicalDirectory =
+            std::filesystem::weakly_canonical(
+                directory.empty() ? std::filesystem::path(".") : directory);
+        const std::filesystem::path candidatePath =
+            canonicalDirectory / std::filesystem::path(std::string(uri));
+        resolvedUriPath = std::filesystem::weakly_canonical(candidatePath);
+        if (!isPathWithinDirectory(resolvedUriPath, canonicalDirectory)) {
+          return Result<std::pmr::vector<std::pmr::vector<std::byte>>,
+                        std::string>::
+              makeError(
+                  "glTF buffer URI resolves outside the source directory");
+        }
+      } catch (const std::filesystem::filesystem_error &e) {
+        return Result<std::pmr::vector<std::pmr::vector<std::byte>>,
+                      std::string>::
+            makeError(std::string("glTF buffer URI canonicalization failed: ") +
+                      e.what());
+      }
+      const auto fileResult = readBinaryFile(resolvedUriPath);
       if (fileResult.hasError()) {
         return Result<std::pmr::vector<std::pmr::vector<std::byte>>,
                       std::string>::makeError(fileResult.error());
@@ -376,6 +422,10 @@ describeGltfAccessor(yyjson_val *root, uint32_t accessorIndex) {
         "glTF accessor index is out of range");
   }
   yyjson_val *accessorValue = yyjson_arr_get(accessorsValue, accessorIndex);
+  if (!yyjson_is_obj(accessorValue)) {
+    return Result<GltfAccessorInfo, std::string>::makeError(
+        "glTF accessor entry is not an object");
+  }
   uint32_t count = 0u;
   uint32_t componentType = 0u;
   if (!tryReadJsonUint32(yyjson_obj_get(accessorValue, "count"), count) ||

@@ -13,6 +13,19 @@
 #include "nuri/resources/storage/mesh/mesh_cache_writer.h"
 
 namespace nuri {
+
+struct ModelAnimationPackedData {
+  std::vector<std::byte> skinInfluenceBytes;
+  uint32_t skinInfluenceCount = 0;
+  uint32_t skinInfluenceStrideBytes = 0;
+  std::vector<std::byte> morphMetaBytes;
+  uint32_t morphMetaCount = 0;
+  uint32_t morphMetaStrideBytes = 0;
+  std::vector<std::byte> morphDeltaBytes;
+  uint32_t morphDeltaCount = 0;
+  uint32_t morphDeltaStrideBytes = 0;
+};
+
 namespace {
 
 struct PackedVertexWords {
@@ -41,18 +54,6 @@ struct PackedMorphDeltaGpu {
   glm::vec4 tangentDelta{0.0f};
 };
 static_assert(sizeof(PackedMorphDeltaGpu) == 48);
-
-struct ModelAnimationPackedData {
-  std::vector<std::byte> skinInfluenceBytes;
-  uint32_t skinInfluenceCount = 0;
-  uint32_t skinInfluenceStrideBytes = 0;
-  std::vector<std::byte> morphMetaBytes;
-  uint32_t morphMetaCount = 0;
-  uint32_t morphMetaStrideBytes = 0;
-  std::vector<std::byte> morphDeltaBytes;
-  uint32_t morphDeltaCount = 0;
-  uint32_t morphDeltaStrideBytes = 0;
-};
 
 struct ModelAnimationGpuBuffers {
   Model::ModelAnimationGpuView view{};
@@ -531,20 +532,24 @@ void maybeQueueMeshCacheWrite(
   input.vertexStrideBytes = kMeshBinaryPackedVertexStrideBytes;
   input.indices = indices;
   input.submeshes = submeshes;
-  input.skinInfluenceBytes =
+  input.skinInfluences = {
       std::span<const std::byte>(animationData.skinInfluenceBytes.data(),
-                                 animationData.skinInfluenceBytes.size());
-  input.skinInfluenceCount = animationData.skinInfluenceCount;
-  input.skinInfluenceStrideBytes = animationData.skinInfluenceStrideBytes;
-  input.morphMetaBytes = std::span<const std::byte>(
-      animationData.morphMetaBytes.data(), animationData.morphMetaBytes.size());
-  input.morphMetaCount = animationData.morphMetaCount;
-  input.morphMetaStrideBytes = animationData.morphMetaStrideBytes;
-  input.morphDeltaBytes =
+                                 animationData.skinInfluenceBytes.size()),
+      animationData.skinInfluenceCount,
+      animationData.skinInfluenceStrideBytes,
+  };
+  input.morphMeta = {
+      std::span<const std::byte>(animationData.morphMetaBytes.data(),
+                                 animationData.morphMetaBytes.size()),
+      animationData.morphMetaCount,
+      animationData.morphMetaStrideBytes,
+  };
+  input.morphDeltas = {
       std::span<const std::byte>(animationData.morphDeltaBytes.data(),
-                                 animationData.morphDeltaBytes.size());
-  input.morphDeltaCount = animationData.morphDeltaCount;
-  input.morphDeltaStrideBytes = animationData.morphDeltaStrideBytes;
+                                 animationData.morphDeltaBytes.size()),
+      animationData.morphDeltaCount,
+      animationData.morphDeltaStrideBytes,
+  };
 
   auto serializeResult = meshBinarySerialize(input);
   if (serializeResult.hasError()) {
@@ -785,13 +790,14 @@ Model::create(GPUDevice &gpu, const MeshData &data,
   return createFromPackedVertices(
       gpu, data,
       std::span<const std::byte>(packedBytes.data(), packedBytes.size()),
-      debugName);
+      nullptr, debugName);
 }
 
-Result<std::unique_ptr<Model>, std::string>
-Model::createFromPackedVertices(GPUDevice &gpu, const MeshData &data,
-                                std::span<const std::byte> packedVertexBytes,
-                                std::string_view debugName) {
+Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
+    GPUDevice &gpu, const MeshData &data,
+    std::span<const std::byte> packedVertexBytes,
+    const ModelAnimationPackedData *animationPackedData,
+    std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   std::pmr::memory_resource *const storageMemory =
       std::pmr::get_default_resource();
@@ -832,14 +838,21 @@ Model::createFromPackedVertices(GPUDevice &gpu, const MeshData &data,
         geometryResult.error());
   }
 
-  auto animationPackResult = packAnimationData(data);
-  if (animationPackResult.hasError()) {
-    gpu.releaseGeometry(geometryResult.value());
-    return Result<std::unique_ptr<Model>, std::string>::makeError(
-        animationPackResult.error());
+  Result<ModelAnimationPackedData, std::string> animationPackResult =
+      Result<ModelAnimationPackedData, std::string>::makeResult(
+          ModelAnimationPackedData{});
+  const ModelAnimationPackedData *resolvedAnimationData = animationPackedData;
+  if (resolvedAnimationData == nullptr) {
+    animationPackResult = packAnimationData(data);
+    if (animationPackResult.hasError()) {
+      gpu.releaseGeometry(geometryResult.value());
+      return Result<std::unique_ptr<Model>, std::string>::makeError(
+          animationPackResult.error());
+    }
+    resolvedAnimationData = &animationPackResult.value();
   }
   auto animationBuffersResult =
-      createAnimationGpuBuffers(gpu, animationPackResult.value(), debugName);
+      createAnimationGpuBuffers(gpu, *resolvedAnimationData, debugName);
   if (animationBuffersResult.hasError()) {
     gpu.releaseGeometry(geometryResult.value());
     return Result<std::unique_ptr<Model>, std::string>::makeError(
@@ -990,7 +1003,7 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
                                gpu, meshData,
                                std::span<const std::byte>(packedBytes.data(),
                                                           packedBytes.size()),
-                               debugName)
+                               &animationPacked, debugName)
                          : create(gpu, meshData, debugName);
   if (modelResult.hasError()) {
     const std::string pathStr{path};
@@ -1140,21 +1153,24 @@ Result<bool, std::string> Model::warmFileCache(std::string_view path,
                                             meshData.indices.size());
   input.submeshes = std::span<const Submesh>(meshData.submeshes.data(),
                                              meshData.submeshes.size());
-  input.skinInfluenceBytes =
+  input.skinInfluences = {
       std::span<const std::byte>(animationPacked.skinInfluenceBytes.data(),
-                                 animationPacked.skinInfluenceBytes.size());
-  input.skinInfluenceCount = animationPacked.skinInfluenceCount;
-  input.skinInfluenceStrideBytes = animationPacked.skinInfluenceStrideBytes;
-  input.morphMetaBytes =
+                                 animationPacked.skinInfluenceBytes.size()),
+      animationPacked.skinInfluenceCount,
+      animationPacked.skinInfluenceStrideBytes,
+  };
+  input.morphMeta = {
       std::span<const std::byte>(animationPacked.morphMetaBytes.data(),
-                                 animationPacked.morphMetaBytes.size());
-  input.morphMetaCount = animationPacked.morphMetaCount;
-  input.morphMetaStrideBytes = animationPacked.morphMetaStrideBytes;
-  input.morphDeltaBytes =
+                                 animationPacked.morphMetaBytes.size()),
+      animationPacked.morphMetaCount,
+      animationPacked.morphMetaStrideBytes,
+  };
+  input.morphDeltas = {
       std::span<const std::byte>(animationPacked.morphDeltaBytes.data(),
-                                 animationPacked.morphDeltaBytes.size());
-  input.morphDeltaCount = animationPacked.morphDeltaCount;
-  input.morphDeltaStrideBytes = animationPacked.morphDeltaStrideBytes;
+                                 animationPacked.morphDeltaBytes.size()),
+      animationPacked.morphDeltaCount,
+      animationPacked.morphDeltaStrideBytes,
+  };
 
   auto serializeResult = meshBinarySerialize(input);
   if (serializeResult.hasError()) {

@@ -288,6 +288,20 @@ buildVertexBufferSection(std::span<const std::byte> packedVertexBytes,
 }
 
 [[nodiscard]] Result<SerializedSection, std::string>
+buildOptionalVertexBufferSection(
+    uint32_t fourcc, const BufferLayout<std::span<const std::byte>> &layout,
+    std::string_view sectionName) {
+  auto encodedResult =
+      meshBinaryEncodeVertexBuffer(layout.bytes, layout.strideBytes);
+  if (encodedResult.hasError()) {
+    return makeSerializerError<SerializedSection>(encodedResult.error());
+  }
+  return buildCompressedBufferSection(fourcc, encodedResult.value(),
+                                      layout.count, layout.strideBytes,
+                                      sectionName);
+}
+
+[[nodiscard]] Result<SerializedSection, std::string>
 buildIndexBufferSection(std::span<const uint32_t> indices,
                         uint32_t vertexCount) {
   auto encodedResult = meshBinaryEncodeIndexBuffer(indices, vertexCount);
@@ -587,64 +601,43 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
         "bytes");
   }
 
-  if (!input.skinInfluenceBytes.empty()) {
-    if (input.skinInfluenceStrideBytes == 0u ||
-        (input.skinInfluenceBytes.size() % input.skinInfluenceStrideBytes) !=
-            0u) {
-      return makeSerializerError<std::vector<std::byte>>(
-          "meshBinarySerialize: invalid skin influence byte layout");
+  const auto validateOptionalLayout =
+      [](const BufferLayout<std::span<const std::byte>> &layout,
+         std::string_view name) -> Result<bool, std::string> {
+    if (!layout.validate()) {
+      return Result<bool, std::string>::makeError(
+          "meshBinarySerialize: invalid " + std::string(name) + " byte layout");
     }
-    if ((input.skinInfluenceBytes.size() / input.skinInfluenceStrideBytes) !=
-        input.skinInfluenceCount) {
-      return makeSerializerError<std::vector<std::byte>>(
-          "meshBinarySerialize: skin influence count mismatch");
-    }
-  } else if (input.skinInfluenceCount != 0u ||
-             input.skinInfluenceStrideBytes != 0u) {
+    return Result<bool, std::string>::makeResult(true);
+  };
+
+  auto skinLayoutResult =
+      validateOptionalLayout(input.skinInfluences, "skin influence");
+  if (skinLayoutResult.hasError()) {
     return makeSerializerError<std::vector<std::byte>>(
-        "meshBinarySerialize: skin influence metadata must be zero when "
-        "payload is empty");
+        skinLayoutResult.error());
   }
-  if (!input.morphMetaBytes.empty()) {
-    if (input.morphMetaStrideBytes == 0u ||
-        (input.morphMetaBytes.size() % input.morphMetaStrideBytes) != 0u) {
-      return makeSerializerError<std::vector<std::byte>>(
-          "meshBinarySerialize: invalid morph meta byte layout");
-    }
-    if ((input.morphMetaBytes.size() / input.morphMetaStrideBytes) !=
-        input.morphMetaCount) {
-      return makeSerializerError<std::vector<std::byte>>(
-          "meshBinarySerialize: morph meta count mismatch");
-    }
-  } else if (input.morphMetaCount != 0u || input.morphMetaStrideBytes != 0u) {
+  auto morphMetaLayoutResult =
+      validateOptionalLayout(input.morphMeta, "morph meta");
+  if (morphMetaLayoutResult.hasError()) {
     return makeSerializerError<std::vector<std::byte>>(
-        "meshBinarySerialize: morph meta metadata must be zero when payload is "
-        "empty");
+        morphMetaLayoutResult.error());
   }
-  if (!input.morphDeltaBytes.empty()) {
-    if (input.morphDeltaStrideBytes == 0u ||
-        (input.morphDeltaBytes.size() % input.morphDeltaStrideBytes) != 0u) {
-      return makeSerializerError<std::vector<std::byte>>(
-          "meshBinarySerialize: invalid morph delta byte layout");
-    }
-    if ((input.morphDeltaBytes.size() / input.morphDeltaStrideBytes) !=
-        input.morphDeltaCount) {
-      return makeSerializerError<std::vector<std::byte>>(
-          "meshBinarySerialize: morph delta count mismatch");
-    }
-  } else if (input.morphDeltaCount != 0u || input.morphDeltaStrideBytes != 0u) {
+  auto morphDeltaLayoutResult =
+      validateOptionalLayout(input.morphDeltas, "morph delta");
+  if (morphDeltaLayoutResult.hasError()) {
     return makeSerializerError<std::vector<std::byte>>(
-        "meshBinarySerialize: morph delta metadata must be zero when payload "
-        "is empty");
+        morphDeltaLayoutResult.error());
   }
-  if (input.morphMetaBytes.empty() != input.morphDeltaBytes.empty()) {
+
+  if (input.morphMeta.bytes.empty() != input.morphDeltas.bytes.empty()) {
     return makeSerializerError<std::vector<std::byte>>(
         "meshBinarySerialize: morph meta and morph delta payload must be "
         "present together");
   }
-  if (!input.morphMetaBytes.empty() &&
-      (input.morphMetaCount != 1u ||
-       input.morphMetaStrideBytes != sizeof(MeshBinaryMorphMetaRecord))) {
+  if (!input.morphMeta.bytes.empty() &&
+      (input.morphMeta.count != 1u ||
+       input.morphMeta.strideBytes != sizeof(MeshBinaryMorphMetaRecord))) {
     return makeSerializerError<std::vector<std::byte>>(
         "meshBinarySerialize: invalid morph meta payload");
   }
@@ -679,29 +672,25 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
   }
   sections.push_back(std::move(ibufResult.value()));
 
-  if (!input.skinInfluenceBytes.empty()) {
-    auto vinfResult = buildCompressedBufferSection(
-        kMeshBinarySectionVinf, input.skinInfluenceBytes,
-        input.skinInfluenceCount, input.skinInfluenceStrideBytes,
-        "skin influence");
+  if (!input.skinInfluences.bytes.empty()) {
+    auto vinfResult = buildOptionalVertexBufferSection(
+        kMeshBinarySectionVinf, input.skinInfluences, "skin influence");
     if (vinfResult.hasError()) {
       return makeSerializerError<std::vector<std::byte>>(vinfResult.error());
     }
     sections.push_back(std::move(vinfResult.value()));
   }
-  if (!input.morphMetaBytes.empty()) {
-    auto mmtaResult = buildCompressedBufferSection(
-        kMeshBinarySectionMmta, input.morphMetaBytes, input.morphMetaCount,
-        input.morphMetaStrideBytes, "morph meta");
+  if (!input.morphMeta.bytes.empty()) {
+    auto mmtaResult = buildOptionalVertexBufferSection(
+        kMeshBinarySectionMmta, input.morphMeta, "morph meta");
     if (mmtaResult.hasError()) {
       return makeSerializerError<std::vector<std::byte>>(mmtaResult.error());
     }
     sections.push_back(std::move(mmtaResult.value()));
   }
-  if (!input.morphDeltaBytes.empty()) {
-    auto mdelResult = buildCompressedBufferSection(
-        kMeshBinarySectionMdel, input.morphDeltaBytes, input.morphDeltaCount,
-        input.morphDeltaStrideBytes, "morph delta");
+  if (!input.morphDeltas.bytes.empty()) {
+    auto mdelResult = buildOptionalVertexBufferSection(
+        kMeshBinarySectionMdel, input.morphDeltas, "morph delta");
     if (mdelResult.hasError()) {
       return makeSerializerError<std::vector<std::byte>>(mdelResult.error());
     }
@@ -904,12 +893,9 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
     return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
         vlayLayoutResult.error());
   }
-  auto smesLayoutResult = validateVariableSectionLayout(
-      smesEntry, smesEntry.stride,
-      "meshBinaryDeserialize: invalid SMES stride");
-  if (smesLayoutResult.hasError()) {
-    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
-        smesLayoutResult.error());
+  if (!sectionSizeMatchesCountStride(smesEntry)) {
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
+        "meshBinaryDeserialize: invalid SMES layout");
   }
   if (smesEntry.stride != sizeof(MeshBinarySubmeshRecord) &&
       smesEntry.stride != sizeof(MeshBinarySubmeshRecordV1) &&
@@ -1100,9 +1086,13 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
       return makeDeserializeError<MeshBinaryDecodedMesh>(
           "meshBinaryDeserialize: missing morph delta payload");
     }
-    const uint64_t expectedMorphDeltaCount =
-        static_cast<uint64_t>(morphMetaRecord.morphTargetCount) *
-        morphMetaRecord.vertexCount;
+    uint64_t expectedMorphDeltaCount = 0u;
+    if (!checkedMulToU64(morphMetaRecord.morphTargetCount,
+                         morphMetaRecord.vertexCount,
+                         expectedMorphDeltaCount)) {
+      return makeDeserializeError<MeshBinaryDecodedMesh>(
+          "meshBinaryDeserialize: morph delta count overflow");
+    }
     if (expectedMorphDeltaCount != mdelMeta->elementCount) {
       return makeDeserializeError<MeshBinaryDecodedMesh>(
           "meshBinaryDeserialize: morph delta count mismatch");

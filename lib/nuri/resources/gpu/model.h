@@ -21,6 +21,7 @@
 namespace nuri {
 
 class Model;
+struct ModelAnimationPackedData;
 
 // Handle for asynchronous model loading. Uses std::shared_future for warmup so
 // that the destructor does not block (std::future's destructor would wait for
@@ -141,6 +142,7 @@ private:
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
   createFromPackedVertices(GPUDevice &gpu, const MeshData &data,
                            std::span<const std::byte> packedVertexBytes,
+                           const ModelAnimationPackedData *animationPackedData,
                            std::string_view debugName);
 
   // CPU-only path that ensures an up-to-date mesh cache file exists.

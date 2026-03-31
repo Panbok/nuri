@@ -35,11 +35,11 @@ constexpr uint32_t kMeshBinarySectionVbuf =
 constexpr uint32_t kMeshBinarySectionIbuf =
     makeMeshBinaryFourCC('I', 'B', 'U', 'F');
 constexpr uint32_t kMeshBinarySectionVinf =
-    makeMeshBinaryFourCC('V', 'I', 'N', 'F');
+    makeMeshBinaryFourCC('V', 'I', 'N', 'F'); // Vertex Info
 constexpr uint32_t kMeshBinarySectionMmta =
-    makeMeshBinaryFourCC('M', 'M', 'T', 'A');
+    makeMeshBinaryFourCC('M', 'M', 'T', 'A'); // Morph Metadata
 constexpr uint32_t kMeshBinarySectionMdel =
-    makeMeshBinaryFourCC('M', 'D', 'E', 'L');
+    makeMeshBinaryFourCC('M', 'D', 'E', 'L'); // Morph Deltas
 
 constexpr uint32_t kMeshBinaryLayoutIdPacked32 = 0u;
 constexpr uint32_t kMeshBinaryPackedVertexStrideBytes = 36u;

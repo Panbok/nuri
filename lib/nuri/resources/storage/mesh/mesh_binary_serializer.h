@@ -12,6 +12,24 @@
 
 namespace nuri {
 
+template <typename BytesView> struct BufferLayout {
+  BytesView bytes{};
+  uint32_t count = 0;
+  uint32_t strideBytes = 0;
+
+  [[nodiscard]] bool validate() const noexcept {
+    if (bytes.empty()) {
+      return count == 0u && strideBytes == 0u;
+    }
+    if (strideBytes == 0u) {
+      return false;
+    }
+    const uint64_t expectedByteCount =
+        static_cast<uint64_t>(count) * static_cast<uint64_t>(strideBytes);
+    return expectedByteCount == static_cast<uint64_t>(bytes.size());
+  }
+};
+
 struct MeshBinarySerializeInput {
   uint64_t sourcePathHash = 0;
   uint64_t importOptionsHash = 0;
@@ -23,15 +41,9 @@ struct MeshBinarySerializeInput {
   uint32_t vertexStrideBytes = 0;
   std::span<const uint32_t> indices{};
   std::span<const Submesh> submeshes{};
-  std::span<const std::byte> skinInfluenceBytes{};
-  uint32_t skinInfluenceCount = 0;
-  uint32_t skinInfluenceStrideBytes = 0;
-  std::span<const std::byte> morphMetaBytes{};
-  uint32_t morphMetaCount = 0;
-  uint32_t morphMetaStrideBytes = 0;
-  std::span<const std::byte> morphDeltaBytes{};
-  uint32_t morphDeltaCount = 0;
-  uint32_t morphDeltaStrideBytes = 0;
+  BufferLayout<std::span<const std::byte>> skinInfluences{};
+  BufferLayout<std::span<const std::byte>> morphMeta{};
+  BufferLayout<std::span<const std::byte>> morphDeltas{};
 };
 
 struct MeshBinaryDeserializeContext {

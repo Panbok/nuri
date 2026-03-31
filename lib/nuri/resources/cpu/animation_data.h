@@ -24,10 +24,47 @@ enum class AnimationInterpolation : uint8_t {
 };
 
 struct AnimationSamplerData {
+  using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
   std::pmr::vector<float> keyTimes;
   std::pmr::vector<float> values;
   AnimationInterpolation interpolation = AnimationInterpolation::Linear;
   uint32_t valueArity = 0;
+
+  template <typename Alloc>
+    requires std::is_constructible_v<allocator_type, const Alloc &>
+  [[nodiscard]] static std::pmr::memory_resource *
+  resourceFromAlloc(const Alloc &alloc) {
+    return allocator_type(alloc).resource();
+  }
+
+  template <typename Alloc>
+    requires std::is_constructible_v<allocator_type, const Alloc &>
+  AnimationSamplerData(std::allocator_arg_t, const Alloc &alloc)
+      : AnimationSamplerData(resourceFromAlloc(alloc)) {}
+
+  template <typename Alloc>
+    requires std::is_constructible_v<allocator_type, const Alloc &>
+  AnimationSamplerData(std::allocator_arg_t, const Alloc &alloc,
+                       std::pmr::memory_resource *memory)
+      : AnimationSamplerData(memory != nullptr ? memory
+                                               : resourceFromAlloc(alloc)) {}
+
+  template <typename Alloc>
+    requires std::is_constructible_v<allocator_type, const Alloc &>
+  AnimationSamplerData(std::allocator_arg_t, const Alloc &alloc,
+                       const AnimationSamplerData &other)
+      : keyTimes(other.keyTimes, resourceFromAlloc(alloc)),
+        values(other.values, resourceFromAlloc(alloc)),
+        interpolation(other.interpolation), valueArity(other.valueArity) {}
+
+  template <typename Alloc>
+    requires std::is_constructible_v<allocator_type, const Alloc &>
+  AnimationSamplerData(std::allocator_arg_t, const Alloc &alloc,
+                       AnimationSamplerData &&other)
+      : keyTimes(std::move(other.keyTimes), resourceFromAlloc(alloc)),
+        values(std::move(other.values), resourceFromAlloc(alloc)),
+        interpolation(other.interpolation), valueArity(other.valueArity) {}
 
   explicit AnimationSamplerData(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())

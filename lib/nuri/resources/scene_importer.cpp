@@ -419,6 +419,37 @@ template <typename ResolveImportedNodeIndexFn>
     const HashMap<std::string, std::vector<uint32_t>> &importedNameToNodes,
     std::span<const ImportedSceneNode> importedNodes);
 
+void remapSkinAndAnimationNodeIndices(
+    std::span<SkinData> skins, std::span<AnimationClipData> animations,
+    std::span<const uint32_t> parsedToImportedNodeIndex) {
+  for (SkinData &skin : skins) {
+    if (skin.skeletonRootNodeIndex < parsedToImportedNodeIndex.size()) {
+      skin.skeletonRootNodeIndex =
+          parsedToImportedNodeIndex[skin.skeletonRootNodeIndex];
+    } else {
+      skin.skeletonRootNodeIndex = kInvalidScenePrefabIndex;
+    }
+    for (uint32_t &jointNodeIndex : skin.jointNodeIndices) {
+      if (jointNodeIndex < parsedToImportedNodeIndex.size()) {
+        jointNodeIndex = parsedToImportedNodeIndex[jointNodeIndex];
+      } else {
+        jointNodeIndex = kInvalidScenePrefabIndex;
+      }
+    }
+  }
+
+  for (AnimationClipData &clip : animations) {
+    for (AnimationChannelData &channel : clip.channels) {
+      if (channel.targetNodeIndex < parsedToImportedNodeIndex.size()) {
+        channel.targetNodeIndex =
+            parsedToImportedNodeIndex[channel.targetNodeIndex];
+      } else {
+        channel.targetNodeIndex = kInvalidScenePrefabIndex;
+      }
+    }
+  }
+}
+
 Result<std::vector<ParsedLightDef>, std::string>
 parseLightDefinitions(yyjson_val *root) {
   yyjson_val *extensionsValue = yyjson_obj_get(root, "extensions");
@@ -1649,32 +1680,13 @@ SceneImporter::loadSceneFromFile(std::string_view path,
       rebuildResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(rebuildResult.error());
   } else if (rebuildResult.value()) {
-    for (SkinData &skin : imported.skins) {
-      if (skin.skeletonRootNodeIndex < parsedToImportedNodeIndex.size()) {
-        skin.skeletonRootNodeIndex =
-            parsedToImportedNodeIndex[skin.skeletonRootNodeIndex];
-      }
-      for (uint32_t &jointNodeIndex : skin.jointNodeIndices) {
-        if (jointNodeIndex < parsedToImportedNodeIndex.size()) {
-          jointNodeIndex = parsedToImportedNodeIndex[jointNodeIndex];
-        } else {
-          jointNodeIndex = kInvalidScenePrefabIndex;
-        }
-      }
-    }
-    for (AnimationClipData &clip : imported.animations) {
-      for (AnimationChannelData &channel : clip.channels) {
-        if (channel.targetNodeIndex < parsedToImportedNodeIndex.size()) {
-          channel.targetNodeIndex =
-              parsedToImportedNodeIndex[channel.targetNodeIndex];
-        } else {
-          channel.targetNodeIndex = kInvalidScenePrefabIndex;
-        }
-      }
-    }
+    remapSkinAndAnimationNodeIndices(imported.skins, imported.animations,
+                                     parsedToImportedNodeIndex);
     return Result<ImportedScene, std::string>::makeResult(std::move(imported));
   }
 
+  parsedToImportedNodeIndex.assign(parsedNodes.size(),
+                                   kInvalidScenePrefabIndex);
   std::vector<uint8_t> importedNodeMatched(imported.nodes.size(), 0u);
   for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
        ++parsedNodeIndex) {
@@ -1692,27 +1704,31 @@ SceneImporter::loadSceneFromFile(std::string_view path,
         parsedNodes[parsedNodeIndex].morphWeights.begin(),
         parsedNodes[parsedNodeIndex].morphWeights.end());
     importedNodeMatched[importedNodeIndex] = 1u;
-    if (parsedNodeIndex >= parsedToImportedNodeIndex.size()) {
-      parsedToImportedNodeIndex.resize(parsedNodes.size(),
-                                       kInvalidScenePrefabIndex);
-    }
     parsedToImportedNodeIndex[parsedNodeIndex] = importedNodeIndex;
+  }
+
+  std::vector<std::vector<uint32_t>> renderableIndicesByNode(
+      imported.nodes.size());
+  for (uint32_t renderableIndex = 0u;
+       renderableIndex < imported.renderables.size(); ++renderableIndex) {
+    const uint32_t nodeIndex = imported.renderables[renderableIndex].nodeIndex;
+    if (nodeIndex < renderableIndicesByNode.size()) {
+      renderableIndicesByNode[nodeIndex].push_back(renderableIndex);
+    }
   }
 
   for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
        ++parsedNodeIndex) {
     const uint32_t importedNodeIndex =
-        parsedNodeIndex < parsedToImportedNodeIndex.size()
-            ? parsedToImportedNodeIndex[parsedNodeIndex]
-            : kInvalidScenePrefabIndex;
+        parsedToImportedNodeIndex[parsedNodeIndex];
     if (importedNodeIndex == kInvalidScenePrefabIndex) {
       continue;
     }
     if (parsedNodes[parsedNodeIndex].skinIndex.has_value()) {
-      for (ImportedSceneRenderable &renderable : imported.renderables) {
-        if (renderable.nodeIndex == importedNodeIndex) {
-          renderable.skinIndex = parsedNodes[parsedNodeIndex].skinIndex.value();
-        }
+      for (const uint32_t renderableIndex :
+           renderableIndicesByNode[importedNodeIndex]) {
+        imported.renderables[renderableIndex].skinIndex =
+            parsedNodes[parsedNodeIndex].skinIndex.value();
       }
     }
   }
@@ -1739,29 +1755,8 @@ SceneImporter::loadSceneFromFile(std::string_view path,
         attachImportedLightsResult.error());
   }
 
-  for (SkinData &skin : imported.skins) {
-    if (skin.skeletonRootNodeIndex < parsedToImportedNodeIndex.size()) {
-      skin.skeletonRootNodeIndex =
-          parsedToImportedNodeIndex[skin.skeletonRootNodeIndex];
-    }
-    for (uint32_t &jointNodeIndex : skin.jointNodeIndices) {
-      if (jointNodeIndex < parsedToImportedNodeIndex.size()) {
-        jointNodeIndex = parsedToImportedNodeIndex[jointNodeIndex];
-      } else {
-        jointNodeIndex = kInvalidScenePrefabIndex;
-      }
-    }
-  }
-  for (AnimationClipData &clip : imported.animations) {
-    for (AnimationChannelData &channel : clip.channels) {
-      if (channel.targetNodeIndex < parsedToImportedNodeIndex.size()) {
-        channel.targetNodeIndex =
-            parsedToImportedNodeIndex[channel.targetNodeIndex];
-      } else {
-        channel.targetNodeIndex = kInvalidScenePrefabIndex;
-      }
-    }
-  }
+  remapSkinAndAnimationNodeIndices(imported.skins, imported.animations,
+                                   parsedToImportedNodeIndex);
 
   return Result<ImportedScene, std::string>::makeResult(std::move(imported));
 }

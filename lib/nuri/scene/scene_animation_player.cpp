@@ -312,9 +312,6 @@ void SceneAnimationPlayer::update(SceneGraph &graph, float deltaSeconds) {
     if (clip->durationSeconds > 0.0f) {
       if (mode_ == AnimationPlaybackMode::Loop) {
         timeSeconds_ = std::fmod(timeSeconds_, clip->durationSeconds);
-        if (timeSeconds_ < 0.0f) {
-          timeSeconds_ += clip->durationSeconds;
-        }
       } else if (timeSeconds_ >= clip->durationSeconds) {
         timeSeconds_ = clip->durationSeconds;
         playing_ = false;
