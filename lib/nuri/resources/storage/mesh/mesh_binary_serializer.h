@@ -23,6 +23,15 @@ struct MeshBinarySerializeInput {
   uint32_t vertexStrideBytes = 0;
   std::span<const uint32_t> indices{};
   std::span<const Submesh> submeshes{};
+  std::span<const std::byte> skinInfluenceBytes{};
+  uint32_t skinInfluenceCount = 0;
+  uint32_t skinInfluenceStrideBytes = 0;
+  std::span<const std::byte> morphMetaBytes{};
+  uint32_t morphMetaCount = 0;
+  uint32_t morphMetaStrideBytes = 0;
+  std::span<const std::byte> morphDeltaBytes{};
+  uint32_t morphDeltaCount = 0;
+  uint32_t morphDeltaStrideBytes = 0;
 };
 
 struct MeshBinaryDeserializeContext {
@@ -41,6 +50,15 @@ struct MeshBinaryDecodedMesh {
   std::vector<uint32_t> indices;
   std::vector<Submesh> submeshes;
   BoundingBox bounds{glm::vec3(0.0f), glm::vec3(0.0f)};
+  std::vector<std::byte> skinInfluenceBytes;
+  uint32_t skinInfluenceCount = 0;
+  uint32_t skinInfluenceStrideBytes = 0;
+  std::vector<std::byte> morphMetaBytes;
+  uint32_t morphMetaCount = 0;
+  uint32_t morphMetaStrideBytes = 0;
+  std::vector<std::byte> morphDeltaBytes;
+  uint32_t morphDeltaCount = 0;
+  uint32_t morphDeltaStrideBytes = 0;
 };
 
 enum class MeshBinaryDeserializeErrorCode : uint8_t {

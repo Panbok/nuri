@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/defines.h"
+#include "nuri/resources/cpu/animation_data.h"
 #include "nuri/resources/gpu/resource_handles.h"
 #include "nuri/resources/mesh_importer.h"
 #include "nuri/scene/light.h"
@@ -26,56 +27,63 @@ struct NURI_API ScenePrefabNode {
   uint32_t parentIndex = kInvalidScenePrefabIndex;
   glm::mat4 localFromParent{1.0f};
   std::pmr::string name;
+  std::pmr::vector<float> morphWeights;
 
   explicit ScenePrefabNode(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : name(memory) {}
+      : name(memory), morphWeights(memory) {}
 
   template <typename T>
   ScenePrefabNode(std::pmr::memory_resource *memory,
                   const std::pmr::polymorphic_allocator<T> &alloc)
-      : name(memory != nullptr ? memory : alloc.resource()) {}
+      : name(memory != nullptr ? memory : alloc.resource()),
+        morphWeights(memory != nullptr ? memory : alloc.resource()) {}
 
   template <typename T>
   explicit ScenePrefabNode(const std::pmr::polymorphic_allocator<T> &alloc)
-      : name(alloc.resource()) {}
+      : name(alloc.resource()), morphWeights(alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(std::allocator_arg_t,
                   const std::pmr::polymorphic_allocator<T> &alloc,
                   std::pmr::memory_resource *memory)
-      : name(memory != nullptr ? memory : alloc.resource()) {}
+      : name(memory != nullptr ? memory : alloc.resource()),
+        morphWeights(memory != nullptr ? memory : alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(std::allocator_arg_t,
                   const std::pmr::polymorphic_allocator<T> &alloc)
-      : name(alloc.resource()) {}
+      : name(alloc.resource()), morphWeights(alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(const ScenePrefabNode &other,
                   const std::pmr::polymorphic_allocator<T> &alloc)
       : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
-        name(other.name, alloc.resource()) {}
+        name(other.name, alloc.resource()),
+        morphWeights(other.morphWeights, alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(ScenePrefabNode &&other,
                   const std::pmr::polymorphic_allocator<T> &alloc)
       : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
-        name(std::move(other.name), alloc.resource()) {}
+        name(std::move(other.name), alloc.resource()),
+        morphWeights(std::move(other.morphWeights), alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(std::allocator_arg_t,
                   const std::pmr::polymorphic_allocator<T> &alloc,
                   const ScenePrefabNode &other)
       : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
-        name(other.name, alloc.resource()) {}
+        name(other.name, alloc.resource()),
+        morphWeights(other.morphWeights, alloc.resource()) {}
 
   template <typename T>
   ScenePrefabNode(std::allocator_arg_t,
                   const std::pmr::polymorphic_allocator<T> &alloc,
                   ScenePrefabNode &&other)
       : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
-        name(std::move(other.name), alloc.resource()) {}
+        name(std::move(other.name), alloc.resource()),
+        morphWeights(std::move(other.morphWeights), alloc.resource()) {}
 };
 
 struct NURI_API ScenePrefabRenderable {
@@ -84,6 +92,7 @@ struct NURI_API ScenePrefabRenderable {
   // raw source-scene ordinals.
   uint32_t meshIndex = kInvalidScenePrefabIndex;
   uint32_t materialIndex = kInvalidScenePrefabIndex;
+  uint32_t skinIndex = kInvalidScenePrefabIndex;
 };
 
 struct NURI_API ScenePrefabMeshAssetRef {
@@ -105,14 +114,16 @@ struct NURI_API ScenePrefab {
   explicit ScenePrefab(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : nodes(memory), renderables(memory), meshAssets(memory),
-        materialAssets(memory), lights(memory), sourcePath(memory),
-        sourceSceneName(memory) {}
+        materialAssets(memory), lights(memory), skins(memory),
+        animations(memory), sourcePath(memory), sourceSceneName(memory) {}
 
   std::pmr::vector<ScenePrefabNode> nodes;
   std::pmr::vector<ScenePrefabRenderable> renderables;
   std::pmr::vector<ScenePrefabMeshAssetRef> meshAssets;
   std::pmr::vector<ScenePrefabMaterialAssetRef> materialAssets;
   std::pmr::vector<ScenePrefabLight> lights;
+  std::pmr::vector<SkinData> skins;
+  std::pmr::vector<AnimationClipData> animations;
   std::pmr::string sourcePath;
   std::pmr::string sourceSceneName;
   MeshImportOptions importOptions{};

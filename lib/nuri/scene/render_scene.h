@@ -24,6 +24,8 @@ struct NURI_API Renderable {
   ModelRef model = kInvalidModelRef;
   MaterialRef material = kInvalidMaterialRef;
   MaterialRef materialOverride = kInvalidMaterialRef;
+  std::span<const float> morphWeights{};
+  std::span<const glm::mat4> skinPalette{};
   glm::mat4 modelMatrix{1.0f};
 };
 
@@ -119,6 +121,8 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   SceneGraph sceneGraph_;
   std::pmr::vector<Renderable> renderables_;
+  std::pmr::vector<std::pmr::vector<float>> renderableMorphWeights_;
+  std::pmr::vector<std::pmr::vector<glm::mat4>> renderableSkinPalettes_;
   std::pmr::vector<DirectionalLightGpuData> packedDirectionalLights_;
   std::pmr::vector<LocalLightGpuData> packedLocalLights_;
   std::pmr::vector<LightId> packedDirectionalLightIds_;

@@ -29,6 +29,53 @@ struct PackedVertexWords {
 
 static_assert(sizeof(PackedVertexWords) == 36);
 
+struct PackedSkinInfluenceGpu {
+  glm::u32vec4 joints{0u};
+  glm::vec4 weights{0.0f};
+};
+static_assert(sizeof(PackedSkinInfluenceGpu) == 32);
+
+struct PackedMorphDeltaGpu {
+  glm::vec4 positionDelta{0.0f};
+  glm::vec4 normalDelta{0.0f};
+  glm::vec4 tangentDelta{0.0f};
+};
+static_assert(sizeof(PackedMorphDeltaGpu) == 48);
+
+struct ModelAnimationPackedData {
+  std::vector<std::byte> skinInfluenceBytes;
+  uint32_t skinInfluenceCount = 0;
+  uint32_t skinInfluenceStrideBytes = 0;
+  std::vector<std::byte> morphMetaBytes;
+  uint32_t morphMetaCount = 0;
+  uint32_t morphMetaStrideBytes = 0;
+  std::vector<std::byte> morphDeltaBytes;
+  uint32_t morphDeltaCount = 0;
+  uint32_t morphDeltaStrideBytes = 0;
+};
+
+struct ModelAnimationGpuBuffers {
+  Model::ModelAnimationGpuView view{};
+  std::unique_ptr<Buffer> skinInfluenceBuffer;
+  std::unique_ptr<Buffer> morphMetaBuffer;
+  std::unique_ptr<Buffer> morphDeltaBuffer;
+};
+
+void destroyBuffer(GPUDevice &gpu, std::unique_ptr<Buffer> &buffer) {
+  if (buffer && buffer->valid()) {
+    gpu.destroyBuffer(buffer->handle());
+  }
+  buffer.reset();
+}
+
+void releaseAnimationGpuBuffers(GPUDevice &gpu,
+                                ModelAnimationGpuBuffers &buffers) {
+  destroyBuffer(gpu, buffers.skinInfluenceBuffer);
+  destroyBuffer(gpu, buffers.morphMetaBuffer);
+  destroyBuffer(gpu, buffers.morphDeltaBuffer);
+  buffers.view = {};
+}
+
 uint16_t packSnorm16(float value) {
   const float clamped = std::clamp(value, -1.0f, 1.0f);
   const int32_t quantized =
@@ -76,6 +123,254 @@ void packVertices(std::span<const Vertex> vertices, PackedVector &packed) {
   for (size_t i = 0; i < vertices.size(); ++i) {
     packed[i] = packVertex(vertices[i]);
   }
+}
+
+template <typename T>
+std::vector<std::byte> packPodVectorToBytes(const std::vector<T> &values) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  std::vector<std::byte> bytes(values.size() * sizeof(T));
+  if (!bytes.empty()) {
+    std::memcpy(bytes.data(), values.data(), bytes.size());
+  }
+  return bytes;
+}
+
+Result<bool, std::string>
+validatePackedAnimationSection(std::span<const std::byte> bytes, uint32_t count,
+                               uint32_t strideBytes,
+                               std::string_view sectionName) {
+  if (bytes.empty()) {
+    if (count != 0u || strideBytes != 0u) {
+      return Result<bool, std::string>::makeError(
+          std::string("Model::create: ") + std::string(sectionName) +
+          " metadata must be zero when payload is empty");
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (strideBytes == 0u || (bytes.size() % strideBytes) != 0u) {
+    return Result<bool, std::string>::makeError(
+        std::string("Model::create: invalid ") + std::string(sectionName) +
+        " byte layout");
+  }
+  if ((bytes.size() / strideBytes) != count) {
+    return Result<bool, std::string>::makeError(std::string("Model::create: ") +
+                                                std::string(sectionName) +
+                                                " count mismatch");
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<ModelAnimationPackedData, std::string>
+packAnimationData(const MeshData &data) {
+  ModelAnimationPackedData packed{};
+  if (!data.skinInfluences.empty()) {
+    if (data.skinInfluences.size() != data.vertices.size()) {
+      return Result<ModelAnimationPackedData, std::string>::makeError(
+          "Model::create: skin influence count must match vertex count");
+    }
+    std::vector<PackedSkinInfluenceGpu> influences;
+    influences.resize(data.skinInfluences.size());
+    for (size_t i = 0; i < data.skinInfluences.size(); ++i) {
+      influences[i].joints = glm::u32vec4(data.skinInfluences[i].joints);
+      influences[i].weights = data.skinInfluences[i].weights;
+    }
+    packed.skinInfluenceBytes = packPodVectorToBytes(influences);
+    packed.skinInfluenceCount = static_cast<uint32_t>(influences.size());
+    packed.skinInfluenceStrideBytes = sizeof(PackedSkinInfluenceGpu);
+  }
+
+  if (!data.morphTargets.empty()) {
+    if (data.vertices.empty()) {
+      return Result<ModelAnimationPackedData, std::string>::makeError(
+          "Model::create: morph targets require a non-empty vertex buffer");
+    }
+
+    std::vector<PackedMorphDeltaGpu> morphDeltas;
+    morphDeltas.resize(data.morphTargets.size() * data.vertices.size());
+    for (const Submesh &submesh : data.submeshes) {
+      if (submesh.vertexCount == 0u || submesh.morphTargetCount == 0u) {
+        continue;
+      }
+      const uint64_t vertexEnd =
+          static_cast<uint64_t>(submesh.vertexOffset) + submesh.vertexCount;
+      const uint64_t morphEnd =
+          static_cast<uint64_t>(submesh.morphTargetFirst) +
+          submesh.morphTargetCount;
+      if (vertexEnd > data.vertices.size() ||
+          morphEnd > data.morphTargets.size()) {
+        return Result<ModelAnimationPackedData, std::string>::makeError(
+            "Model::create: morph target range exceeds mesh bounds");
+      }
+      for (uint32_t localMorphIndex = 0;
+           localMorphIndex < submesh.morphTargetCount; ++localMorphIndex) {
+        const uint32_t morphIndex = submesh.morphTargetFirst + localMorphIndex;
+        const MorphTarget &target = data.morphTargets[morphIndex];
+        if (!target.positionDeltas.empty() &&
+            target.positionDeltas.size() != submesh.vertexCount) {
+          return Result<ModelAnimationPackedData, std::string>::makeError(
+              "Model::create: morph position delta count mismatch");
+        }
+        if (!target.normalDeltas.empty() &&
+            target.normalDeltas.size() != submesh.vertexCount) {
+          return Result<ModelAnimationPackedData, std::string>::makeError(
+              "Model::create: morph normal delta count mismatch");
+        }
+        if (!target.tangentDeltas.empty() &&
+            target.tangentDeltas.size() != submesh.vertexCount) {
+          return Result<ModelAnimationPackedData, std::string>::makeError(
+              "Model::create: morph tangent delta count mismatch");
+        }
+
+        for (uint32_t localVertexIndex = 0;
+             localVertexIndex < submesh.vertexCount; ++localVertexIndex) {
+          const size_t deltaIndex =
+              static_cast<size_t>(morphIndex) * data.vertices.size() +
+              (submesh.vertexOffset + localVertexIndex);
+          PackedMorphDeltaGpu &delta = morphDeltas[deltaIndex];
+          if (!target.positionDeltas.empty()) {
+            delta.positionDelta =
+                glm::vec4(target.positionDeltas[localVertexIndex], 0.0f);
+          }
+          if (!target.normalDeltas.empty()) {
+            delta.normalDelta =
+                glm::vec4(target.normalDeltas[localVertexIndex], 0.0f);
+          }
+          if (!target.tangentDeltas.empty()) {
+            delta.tangentDelta =
+                glm::vec4(target.tangentDeltas[localVertexIndex], 0.0f);
+          }
+        }
+      }
+    }
+
+    const MeshBinaryMorphMetaRecord meta{
+        .morphTargetCount = static_cast<uint32_t>(data.morphTargets.size()),
+        .vertexCount = static_cast<uint32_t>(data.vertices.size()),
+    };
+    packed.morphMetaBytes.resize(sizeof(meta));
+    std::memcpy(packed.morphMetaBytes.data(), &meta, sizeof(meta));
+    packed.morphMetaCount = 1u;
+    packed.morphMetaStrideBytes = sizeof(MeshBinaryMorphMetaRecord);
+    packed.morphDeltaBytes = packPodVectorToBytes(morphDeltas);
+    packed.morphDeltaCount = static_cast<uint32_t>(morphDeltas.size());
+    packed.morphDeltaStrideBytes = sizeof(PackedMorphDeltaGpu);
+  }
+
+  return Result<ModelAnimationPackedData, std::string>::makeResult(
+      std::move(packed));
+}
+
+Result<std::unique_ptr<Buffer>, std::string>
+createStorageBuffer(GPUDevice &gpu, std::span<const std::byte> bytes,
+                    std::string_view debugName) {
+  if (bytes.empty()) {
+    return Result<std::unique_ptr<Buffer>, std::string>::makeResult(nullptr);
+  }
+  BufferDesc desc{
+      .usage = BufferUsage::Storage,
+      .storage = Storage::Device,
+      .size = bytes.size(),
+      .data = bytes,
+  };
+  return Buffer::create(gpu, desc, debugName);
+}
+
+Result<ModelAnimationGpuBuffers, std::string>
+createAnimationGpuBuffers(GPUDevice &gpu,
+                          const ModelAnimationPackedData &packedData,
+                          std::string_view debugName) {
+  ModelAnimationGpuBuffers buffers{};
+  auto validateSkinResult = validatePackedAnimationSection(
+      std::span<const std::byte>(packedData.skinInfluenceBytes.data(),
+                                 packedData.skinInfluenceBytes.size()),
+      packedData.skinInfluenceCount, packedData.skinInfluenceStrideBytes,
+      "skin influence");
+  if (validateSkinResult.hasError()) {
+    return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+        validateSkinResult.error());
+  }
+  auto validateMorphMetaResult = validatePackedAnimationSection(
+      std::span<const std::byte>(packedData.morphMetaBytes.data(),
+                                 packedData.morphMetaBytes.size()),
+      packedData.morphMetaCount, packedData.morphMetaStrideBytes, "morph meta");
+  if (validateMorphMetaResult.hasError()) {
+    return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+        validateMorphMetaResult.error());
+  }
+  auto validateMorphDeltaResult = validatePackedAnimationSection(
+      std::span<const std::byte>(packedData.morphDeltaBytes.data(),
+                                 packedData.morphDeltaBytes.size()),
+      packedData.morphDeltaCount, packedData.morphDeltaStrideBytes,
+      "morph delta");
+  if (validateMorphDeltaResult.hasError()) {
+    return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+        validateMorphDeltaResult.error());
+  }
+
+  const bool hasMorphMetaBytes = !packedData.morphMetaBytes.empty();
+  const bool hasMorphDeltaBytes = !packedData.morphDeltaBytes.empty();
+  if (hasMorphMetaBytes != hasMorphDeltaBytes) {
+    return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+        "Model::create: morph meta and morph delta payload must be present "
+        "together");
+  }
+  MeshBinaryMorphMetaRecord morphMeta{};
+  if (hasMorphMetaBytes) {
+    if (packedData.morphMetaCount != 1u ||
+        packedData.morphMetaStrideBytes != sizeof(MeshBinaryMorphMetaRecord) ||
+        packedData.morphMetaBytes.size() != sizeof(MeshBinaryMorphMetaRecord)) {
+      return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+          "Model::create: invalid morph meta payload");
+    }
+    std::memcpy(&morphMeta, packedData.morphMetaBytes.data(),
+                sizeof(morphMeta));
+  }
+  if (!packedData.skinInfluenceBytes.empty()) {
+    auto bufferResult = createStorageBuffer(
+        gpu,
+        std::span<const std::byte>(packedData.skinInfluenceBytes.data(),
+                                   packedData.skinInfluenceBytes.size()),
+        std::string(debugName) + "_skin_influences");
+    if (bufferResult.hasError()) {
+      return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+          bufferResult.error());
+    }
+    buffers.skinInfluenceBuffer = std::move(bufferResult.value());
+    buffers.view.skinInfluenceBuffer = buffers.skinInfluenceBuffer->handle();
+    buffers.view.skinInfluenceCount = packedData.skinInfluenceCount;
+  }
+  if (!packedData.morphMetaBytes.empty()) {
+    auto metaResult = createStorageBuffer(
+        gpu,
+        std::span<const std::byte>(packedData.morphMetaBytes.data(),
+                                   packedData.morphMetaBytes.size()),
+        std::string(debugName) + "_morph_meta");
+    if (metaResult.hasError()) {
+      releaseAnimationGpuBuffers(gpu, buffers);
+      return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+          metaResult.error());
+    }
+    buffers.morphMetaBuffer = std::move(metaResult.value());
+    buffers.view.morphMetaBuffer = buffers.morphMetaBuffer->handle();
+  }
+  if (!packedData.morphDeltaBytes.empty()) {
+    auto deltaResult = createStorageBuffer(
+        gpu,
+        std::span<const std::byte>(packedData.morphDeltaBytes.data(),
+                                   packedData.morphDeltaBytes.size()),
+        std::string(debugName) + "_morph_deltas");
+    if (deltaResult.hasError()) {
+      releaseAnimationGpuBuffers(gpu, buffers);
+      return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+          deltaResult.error());
+    }
+    buffers.morphDeltaBuffer = std::move(deltaResult.value());
+    buffers.view.morphDeltaBuffer = buffers.morphDeltaBuffer->handle();
+    buffers.view.morphTargetCount = morphMeta.morphTargetCount;
+    buffers.view.morphVertexCount = morphMeta.vertexCount;
+  }
+  return Result<ModelAnimationGpuBuffers, std::string>::makeResult(
+      std::move(buffers));
 }
 
 BoundingBox computeModelBounds(std::span<const Vertex> vertices) {
@@ -213,13 +508,11 @@ bool isMeshCacheReadEnabled() {
   return true;
 }
 
-void maybeQueueMeshCacheWrite(const MeshCacheKey &cacheKey,
-                              const MeshImportOptions &options,
-                              std::span<const std::byte> packedVertexBytes,
-                              uint32_t vertexCount,
-                              std::span<const uint32_t> indices,
-                              std::span<const Submesh> submeshes,
-                              const BoundingBox &bounds) {
+void maybeQueueMeshCacheWrite(
+    const MeshCacheKey &cacheKey, const MeshImportOptions &options,
+    std::span<const std::byte> packedVertexBytes, uint32_t vertexCount,
+    std::span<const uint32_t> indices, std::span<const Submesh> submeshes,
+    const BoundingBox &bounds, const ModelAnimationPackedData &animationData) {
   if (packedVertexBytes.empty() || indices.empty()) {
     return;
   }
@@ -238,6 +531,20 @@ void maybeQueueMeshCacheWrite(const MeshCacheKey &cacheKey,
   input.vertexStrideBytes = kMeshBinaryPackedVertexStrideBytes;
   input.indices = indices;
   input.submeshes = submeshes;
+  input.skinInfluenceBytes =
+      std::span<const std::byte>(animationData.skinInfluenceBytes.data(),
+                                 animationData.skinInfluenceBytes.size());
+  input.skinInfluenceCount = animationData.skinInfluenceCount;
+  input.skinInfluenceStrideBytes = animationData.skinInfluenceStrideBytes;
+  input.morphMetaBytes = std::span<const std::byte>(
+      animationData.morphMetaBytes.data(), animationData.morphMetaBytes.size());
+  input.morphMetaCount = animationData.morphMetaCount;
+  input.morphMetaStrideBytes = animationData.morphMetaStrideBytes;
+  input.morphDeltaBytes =
+      std::span<const std::byte>(animationData.morphDeltaBytes.data(),
+                                 animationData.morphDeltaBytes.size());
+  input.morphDeltaCount = animationData.morphDeltaCount;
+  input.morphDeltaStrideBytes = animationData.morphDeltaStrideBytes;
 
   auto serializeResult = meshBinarySerialize(input);
   if (serializeResult.hasError()) {
@@ -429,9 +736,14 @@ ModelAsyncLoad::finalize(GPUDevice &gpu, std::pmr::memory_resource *mem,
 }
 
 Model::~Model() {
-  if (gpu_ != nullptr && nuri::isValid(geometry_)) {
-    gpu_->releaseGeometry(geometry_);
-    geometry_ = {};
+  if (gpu_ != nullptr) {
+    destroyBuffer(*gpu_, skinInfluenceBuffer_);
+    destroyBuffer(*gpu_, morphMetaBuffer_);
+    destroyBuffer(*gpu_, morphDeltaBuffer_);
+    if (nuri::isValid(geometry_)) {
+      gpu_->releaseGeometry(geometry_);
+      geometry_ = {};
+    }
   }
 }
 
@@ -483,6 +795,12 @@ Model::createFromPackedVertices(GPUDevice &gpu, const MeshData &data,
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   std::pmr::memory_resource *const storageMemory =
       std::pmr::get_default_resource();
+  auto sourceMaterialCountResult = computeSourceMaterialCount(
+      std::span<const Submesh>(data.submeshes.data(), data.submeshes.size()));
+  if (sourceMaterialCountResult.hasError()) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        sourceMaterialCountResult.error());
+  }
   const size_t expectedPackedByteCount =
       data.vertices.size() * sizeof(PackedVertexWords);
   if (packedVertexBytes.size() != expectedPackedByteCount) {
@@ -514,14 +832,24 @@ Model::createFromPackedVertices(GPUDevice &gpu, const MeshData &data,
         geometryResult.error());
   }
 
+  auto animationPackResult = packAnimationData(data);
+  if (animationPackResult.hasError()) {
+    gpu.releaseGeometry(geometryResult.value());
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        animationPackResult.error());
+  }
+  auto animationBuffersResult =
+      createAnimationGpuBuffers(gpu, animationPackResult.value(), debugName);
+  if (animationBuffersResult.hasError()) {
+    gpu.releaseGeometry(geometryResult.value());
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        animationBuffersResult.error());
+  }
+  ModelAnimationGpuBuffers animationBuffers =
+      std::move(animationBuffersResult.value());
+
   std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
   ownedSubmeshes.assign(data.submeshes.begin(), data.submeshes.end());
-  auto sourceMaterialCountResult = computeSourceMaterialCount(
-      std::span<const Submesh>(ownedSubmeshes.data(), ownedSubmeshes.size()));
-  if (sourceMaterialCountResult.hasError()) {
-    return Result<std::unique_ptr<Model>, std::string>::makeError(
-        sourceMaterialCountResult.error());
-  }
   std::pmr::vector<uint32_t> sourceMaterialToRuntime(
       sourceMaterialCountResult.value(), Model::kInvalidMaterialIndex,
       storageMemory);
@@ -530,6 +858,10 @@ Model::createFromPackedVertices(GPUDevice &gpu, const MeshData &data,
           new Model(gpu, geometryResult.value(), std::move(ownedSubmeshes),
                     static_cast<uint32_t>(data.vertices.size()),
                     static_cast<uint32_t>(data.indices.size()), bounds,
+                    animationBuffers.view,
+                    std::move(animationBuffers.skinInfluenceBuffer),
+                    std::move(animationBuffers.morphMetaBuffer),
+                    std::move(animationBuffers.morphDeltaBuffer),
                     std::move(sourceMaterialToRuntime))));
 }
 
@@ -562,6 +894,13 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
             cacheKey.cachePath.string().c_str(), expectedPackedByteCount,
             cachedMesh->packedVertexBytes.size());
       } else {
+        auto sourceMaterialCountResult =
+            computeSourceMaterialCount(std::span<const Submesh>(
+                cachedMesh->submeshes.data(), cachedMesh->submeshes.size()));
+        if (sourceMaterialCountResult.hasError()) {
+          return Result<std::unique_ptr<Model>, std::string>::makeError(
+              sourceMaterialCountResult.error());
+        }
         const std::span<const std::byte> vertexBytes{
             cachedMesh->packedVertexBytes.data(),
             cachedMesh->packedVertexBytes.size()};
@@ -572,25 +911,44 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
             vertexBytes, cachedMesh->vertexCount, indexBytes,
             static_cast<uint32_t>(cachedMesh->indices.size()), debugName);
         if (!geometryResult.hasError()) {
+          ModelAnimationPackedData animationPacked{};
+          animationPacked.skinInfluenceBytes = cachedMesh->skinInfluenceBytes;
+          animationPacked.skinInfluenceCount = cachedMesh->skinInfluenceCount;
+          animationPacked.skinInfluenceStrideBytes =
+              cachedMesh->skinInfluenceStrideBytes;
+          animationPacked.morphMetaBytes = cachedMesh->morphMetaBytes;
+          animationPacked.morphMetaCount = cachedMesh->morphMetaCount;
+          animationPacked.morphMetaStrideBytes =
+              cachedMesh->morphMetaStrideBytes;
+          animationPacked.morphDeltaBytes = cachedMesh->morphDeltaBytes;
+          animationPacked.morphDeltaCount = cachedMesh->morphDeltaCount;
+          animationPacked.morphDeltaStrideBytes =
+              cachedMesh->morphDeltaStrideBytes;
+          auto animationBuffersResult =
+              createAnimationGpuBuffers(gpu, animationPacked, debugName);
+          if (animationBuffersResult.hasError()) {
+            gpu.releaseGeometry(geometryResult.value());
+            return Result<std::unique_ptr<Model>, std::string>::makeError(
+                animationBuffersResult.error());
+          }
+          ModelAnimationGpuBuffers animationBuffers =
+              std::move(animationBuffersResult.value());
           std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
           ownedSubmeshes.assign(cachedMesh->submeshes.begin(),
                                 cachedMesh->submeshes.end());
-          auto sourceMaterialCountResult =
-              computeSourceMaterialCount(std::span<const Submesh>(
-                  ownedSubmeshes.data(), ownedSubmeshes.size()));
-          if (sourceMaterialCountResult.hasError()) {
-            return Result<std::unique_ptr<Model>, std::string>::makeError(
-                sourceMaterialCountResult.error());
-          }
           std::pmr::vector<uint32_t> sourceMaterialToRuntime(
               sourceMaterialCountResult.value(), Model::kInvalidMaterialIndex,
               storageMemory);
           return Result<std::unique_ptr<Model>, std::string>::makeResult(
-              std::unique_ptr<Model>(new Model(
-                  gpu, geometryResult.value(), std::move(ownedSubmeshes),
-                  cachedMesh->vertexCount,
-                  static_cast<uint32_t>(cachedMesh->indices.size()),
-                  cachedMesh->bounds, std::move(sourceMaterialToRuntime))));
+              std::unique_ptr<Model>(
+                  new Model(gpu, geometryResult.value(),
+                            std::move(ownedSubmeshes), cachedMesh->vertexCount,
+                            static_cast<uint32_t>(cachedMesh->indices.size()),
+                            cachedMesh->bounds, animationBuffers.view,
+                            std::move(animationBuffers.skinInfluenceBuffer),
+                            std::move(animationBuffers.morphMetaBuffer),
+                            std::move(animationBuffers.morphDeltaBuffer),
+                            std::move(sourceMaterialToRuntime))));
         }
         NURI_LOG_WARNING(
             "Model::createFromFile: Failed to create model from cache '%s': "
@@ -616,8 +974,15 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
   const MeshData &meshData = meshDataResult.value();
   const bool canWriteMeshCache = !cacheKeyResult.hasError();
   std::vector<std::byte> packedBytes;
+  ModelAnimationPackedData animationPacked{};
   if (canWriteMeshCache) {
     packedBytes = packVerticesToByteBuffer(meshData.vertices);
+    auto animationPackResult = packAnimationData(meshData);
+    if (animationPackResult.hasError()) {
+      return Result<std::unique_ptr<Model>, std::string>::makeError(
+          animationPackResult.error());
+    }
+    animationPacked = std::move(animationPackResult.value());
   }
 
   auto modelResult = canWriteMeshCache
@@ -644,7 +1009,7 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
                                   meshData.indices.size()),
         std::span<const Submesh>(meshData.submeshes.data(),
                                  meshData.submeshes.size()),
-        modelResult.value()->bounds());
+        modelResult.value()->bounds(), animationPacked);
   }
 
   NURI_LOG_DEBUG("Model::createFromFile: Created model from file '%.*s'",
@@ -750,6 +1115,14 @@ Result<bool, std::string> Model::warmFileCache(std::string_view path,
     return Result<bool, std::string>::makeError(
         "Model::warmFileCache: Packed vertex buffer is empty");
   }
+  auto animationPackResult = packAnimationData(meshData);
+  if (animationPackResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        "Model::warmFileCache: Failed to pack animation payload: " +
+        animationPackResult.error());
+  }
+  const ModelAnimationPackedData animationPacked =
+      std::move(animationPackResult.value());
 
   const MeshSourceFingerprint fingerprint =
       queryMeshSourceFingerprint(cacheKey.normalizedSourcePath);
@@ -767,6 +1140,21 @@ Result<bool, std::string> Model::warmFileCache(std::string_view path,
                                             meshData.indices.size());
   input.submeshes = std::span<const Submesh>(meshData.submeshes.data(),
                                              meshData.submeshes.size());
+  input.skinInfluenceBytes =
+      std::span<const std::byte>(animationPacked.skinInfluenceBytes.data(),
+                                 animationPacked.skinInfluenceBytes.size());
+  input.skinInfluenceCount = animationPacked.skinInfluenceCount;
+  input.skinInfluenceStrideBytes = animationPacked.skinInfluenceStrideBytes;
+  input.morphMetaBytes =
+      std::span<const std::byte>(animationPacked.morphMetaBytes.data(),
+                                 animationPacked.morphMetaBytes.size());
+  input.morphMetaCount = animationPacked.morphMetaCount;
+  input.morphMetaStrideBytes = animationPacked.morphMetaStrideBytes;
+  input.morphDeltaBytes =
+      std::span<const std::byte>(animationPacked.morphDeltaBytes.data(),
+                                 animationPacked.morphDeltaBytes.size());
+  input.morphDeltaCount = animationPacked.morphDeltaCount;
+  input.morphDeltaStrideBytes = animationPacked.morphDeltaStrideBytes;
 
   auto serializeResult = meshBinarySerialize(input);
   if (serializeResult.hasError()) {

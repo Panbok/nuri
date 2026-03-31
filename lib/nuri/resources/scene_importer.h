@@ -2,6 +2,7 @@
 
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
+#include "nuri/resources/cpu/animation_data.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/mesh_importer.h"
 #include "nuri/scene/light.h"
@@ -26,27 +27,31 @@ struct NURI_API ImportedSceneNode {
   using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
 
   explicit ImportedSceneNode(const allocator_type &alloc = {})
-      : name(alloc.resource()) {}
+      : name(alloc.resource()), morphWeights(alloc.resource()) {}
   ImportedSceneNode(const ImportedSceneNode &other,
                     const allocator_type &alloc = {})
       : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
-        name(other.name, alloc.resource()) {}
+        name(other.name, alloc.resource()),
+        morphWeights(other.morphWeights, alloc.resource()) {}
   ImportedSceneNode(ImportedSceneNode &&other,
                     const allocator_type &alloc = {}) noexcept
       : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
-        name(std::move(other.name), alloc.resource()) {}
+        name(std::move(other.name), alloc.resource()),
+        morphWeights(std::move(other.morphWeights), alloc.resource()) {}
   ImportedSceneNode &operator=(const ImportedSceneNode &) = default;
   ImportedSceneNode &operator=(ImportedSceneNode &&) noexcept = default;
 
   uint32_t parentIndex = kInvalidScenePrefabIndex;
   glm::mat4 localFromParent{1.0f};
   std::pmr::string name;
+  std::pmr::vector<float> morphWeights;
 };
 
 struct NURI_API ImportedSceneRenderable {
   uint32_t nodeIndex = kInvalidScenePrefabIndex;
   uint32_t meshAssetIndex = kInvalidScenePrefabIndex;
   uint32_t materialAssetIndex = kInvalidScenePrefabIndex;
+  uint32_t skinIndex = kInvalidScenePrefabIndex;
 };
 
 struct NURI_API ImportedSceneMeshAsset {
@@ -120,14 +125,17 @@ struct NURI_API ImportedScene {
   explicit ImportedScene(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : nodes(memory), renderables(memory), meshAssets(memory),
-        materialAssets(memory), lights(memory), rootNodes(memory),
-        sourcePath(memory), sourceSceneName(memory) {}
+        materialAssets(memory), lights(memory), skins(memory),
+        animations(memory), rootNodes(memory), sourcePath(memory),
+        sourceSceneName(memory) {}
 
   std::pmr::vector<ImportedSceneNode> nodes;
   std::pmr::vector<ImportedSceneRenderable> renderables;
   std::pmr::vector<ImportedSceneMeshAsset> meshAssets;
   std::pmr::vector<ImportedSceneMaterialAsset> materialAssets;
   std::pmr::vector<ImportedSceneLight> lights;
+  std::pmr::vector<SkinData> skins;
+  std::pmr::vector<AnimationClipData> animations;
   std::pmr::vector<uint32_t> rootNodes;
   std::pmr::string sourcePath;
   std::pmr::string sourceSceneName;

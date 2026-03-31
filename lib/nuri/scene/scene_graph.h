@@ -74,6 +74,15 @@ public:
                                                    MaterialRef material);
   [[nodiscard]] bool clearRenderableMaterialOverride(RenderableId id);
   [[nodiscard]] bool getRenderableNode(RenderableId id, NodeId &out) const;
+  [[nodiscard]] bool setRenderableMorphWeights(RenderableId id,
+                                               std::span<const float> weights);
+  [[nodiscard]] std::span<const float>
+  getRenderableMorphWeights(RenderableId id) const;
+  [[nodiscard]] bool
+  setRenderableSkinPalette(RenderableId id,
+                           std::span<const glm::mat4> matrices);
+  [[nodiscard]] std::span<const glm::mat4>
+  getRenderableSkinPalette(RenderableId id) const;
 
   template <typename Fn>
   void forEachRenderableOnNode(NodeId node, Fn &&fn) const {
@@ -81,9 +90,11 @@ public:
       return;
     }
     const uint32_t nodeIndex = indexOf(node);
-    for (uint32_t index = nodes_.renderableHead[nodeIndex]; index != kInvalidIndex;
+    for (uint32_t index = nodes_.renderableHead[nodeIndex];
+         index != kInvalidIndex;
          index = renderableComponents_.nextOnNode[index]) {
-      fn(makeRenderableId(index, renderableComponents_.slots.generation(index)));
+      fn(makeRenderableId(index,
+                          renderableComponents_.slots.generation(index)));
     }
   }
 
@@ -157,7 +168,8 @@ private:
           dirtyRootQueued(memory), names(memory), renderableHead(memory),
           renderableTail(memory), directionalLightHead(memory),
           directionalLightTail(memory), pointLightHead(memory),
-          pointLightTail(memory), spotLightHead(memory), spotLightTail(memory) {}
+          pointLightTail(memory), spotLightHead(memory), spotLightTail(memory) {
+    }
 
     SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
         slots;
@@ -185,8 +197,8 @@ private:
     explicit RenderableStore(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
         : slots(memory), node(memory), models(memory), materials(memory),
-          materialOverrides(memory), flatRenderableIndex(memory),
-          nextOnNode(memory), prevOnNode(memory) {}
+          materialOverrides(memory), morphWeights(memory), skinPalette(memory),
+          flatRenderableIndex(memory), nextOnNode(memory), prevOnNode(memory) {}
 
     SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
         slots;
@@ -194,6 +206,8 @@ private:
     std::pmr::vector<ModelRef> models;
     std::pmr::vector<MaterialRef> materials;
     std::pmr::vector<MaterialRef> materialOverrides;
+    std::pmr::vector<std::pmr::vector<float>> morphWeights;
+    std::pmr::vector<std::pmr::vector<glm::mat4>> skinPalette;
     std::pmr::vector<uint32_t> flatRenderableIndex;
     std::pmr::vector<uint32_t> nextOnNode;
     std::pmr::vector<uint32_t> prevOnNode;

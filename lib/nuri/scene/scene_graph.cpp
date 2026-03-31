@@ -76,8 +76,7 @@ void detachComponentFromNode(Store &store, std::pmr::vector<uint32_t> &head,
 
 template <typename Store>
 void recycleLightSlot(Store &store, std::pmr::vector<uint32_t> &head,
-                      std::pmr::vector<uint32_t> &tail,
-                      uint32_t lightIndex) {
+                      std::pmr::vector<uint32_t> &tail, uint32_t lightIndex) {
   detachComponentFromNode(store, head, tail, lightIndex);
   store.packedIndices[lightIndex] = kInvalidSceneGraphIndex;
   store.names[lightIndex].clear();
@@ -173,6 +172,8 @@ Result<SlotReservation, std::string> SceneGraph::allocateRenderableSlot() {
     renderableComponents_.models.push_back(kInvalidModelRef);
     renderableComponents_.materials.push_back(kInvalidMaterialRef);
     renderableComponents_.materialOverrides.push_back(kInvalidMaterialRef);
+    renderableComponents_.morphWeights.emplace_back();
+    renderableComponents_.skinPalette.emplace_back();
     renderableComponents_.flatRenderableIndex.push_back(kInvalidIndex);
     renderableComponents_.nextOnNode.push_back(kInvalidIndex);
     renderableComponents_.prevOnNode.push_back(kInvalidIndex);
@@ -182,8 +183,7 @@ Result<SlotReservation, std::string> SceneGraph::allocateRenderableSlot() {
 
 Result<SlotReservation, std::string>
 SceneGraph::allocateDirectionalLightSlot() {
-  if (slotPoolExhausted(directionalLights_.slots,
-                        kResourceHandleIndexMask)) {
+  if (slotPoolExhausted(directionalLights_.slots, kResourceHandleIndexMask)) {
     return makePackedSlotOverflowError(
         "SceneGraph::allocateDirectionalLightSlot");
   }
@@ -350,6 +350,8 @@ void SceneGraph::recycleRenderableSlot(uint32_t index) noexcept {
   renderableComponents_.models[index] = kInvalidModelRef;
   renderableComponents_.materials[index] = kInvalidMaterialRef;
   renderableComponents_.materialOverrides[index] = kInvalidMaterialRef;
+  renderableComponents_.morphWeights[index].clear();
+  renderableComponents_.skinPalette[index].clear();
   renderableComponents_.flatRenderableIndex[index] = kInvalidIndex;
   renderableComponents_.nextOnNode[index] = kInvalidIndex;
   renderableComponents_.prevOnNode[index] = kInvalidIndex;
@@ -536,7 +538,8 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
   while (!nodeStack.empty()) {
     const uint32_t nodeIndex = nodeStack.back();
     nodeStack.pop_back();
-    if (nodeIndex >= nodes_.slots.slotCount() || !nodes_.slots.isLive(nodeIndex)) {
+    if (nodeIndex >= nodes_.slots.slotCount() ||
+        !nodes_.slots.isLive(nodeIndex)) {
       continue;
     }
     nodesToDestroy.push_back(nodeIndex);
@@ -859,6 +862,61 @@ bool SceneGraph::getRenderableMaterialOverride(RenderableId id,
   return true;
 }
 
+bool SceneGraph::setRenderableMorphWeights(RenderableId id,
+                                           std::span<const float> weights) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!renderableSlotValid(id)) {
+    return false;
+  }
+  auto &storage = renderableComponents_.morphWeights[indexOf(id)];
+  if (storage.size() == weights.size() &&
+      std::equal(storage.begin(), storage.end(), weights.begin(),
+                 weights.end())) {
+    return true;
+  }
+  storage.assign(weights.begin(), weights.end());
+  renderableTopologyDirty_ = true;
+  return true;
+}
+
+std::span<const float>
+SceneGraph::getRenderableMorphWeights(RenderableId id) const {
+  if (!renderableSlotValid(id)) {
+    return {};
+  }
+  const auto &storage = renderableComponents_.morphWeights[indexOf(id)];
+  return std::span<const float>(storage.data(), storage.size());
+}
+
+bool SceneGraph::setRenderableSkinPalette(RenderableId id,
+                                          std::span<const glm::mat4> matrices) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (!renderableSlotValid(id)) {
+    return false;
+  }
+  auto &storage = renderableComponents_.skinPalette[indexOf(id)];
+  if (storage.size() == matrices.size() &&
+      std::equal(storage.begin(), storage.end(), matrices.begin(),
+                 matrices.end(),
+                 [](const glm::mat4 &lhs, const glm::mat4 &rhs) {
+                   return mat4ExactEqual(lhs, rhs);
+                 })) {
+    return true;
+  }
+  storage.assign(matrices.begin(), matrices.end());
+  renderableTopologyDirty_ = true;
+  return true;
+}
+
+std::span<const glm::mat4>
+SceneGraph::getRenderableSkinPalette(RenderableId id) const {
+  if (!renderableSlotValid(id)) {
+    return {};
+  }
+  const auto &storage = renderableComponents_.skinPalette[indexOf(id)];
+  return std::span<const glm::mat4>(storage.data(), storage.size());
+}
+
 bool SceneGraph::setRenderableMaterialOverride(RenderableId id,
                                                MaterialRef material) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
@@ -1025,8 +1083,8 @@ bool SceneGraph::removeLight(LightId id) {
     if (!pointSlotValid(id)) {
       return false;
     }
-    removeFromStore(pointLights_, nodes_.pointLightHead,
-                    nodes_.pointLightTail, id);
+    removeFromStore(pointLights_, nodes_.pointLightHead, nodes_.pointLightTail,
+                    id);
     return true;
   case LightType::Spot:
     if (!spotSlotValid(id)) {
@@ -1357,6 +1415,14 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
     if (renderableResult.hasError()) {
       return rollbackAndReturnError(renderableResult.error());
     }
+    const ScenePrefabNode &prefabNode =
+        prefab.nodes[prefabRenderable.nodeIndex];
+    if (!prefabNode.morphWeights.empty()) {
+      (void)setRenderableMorphWeights(
+          renderableResult.value(),
+          std::span<const float>(prefabNode.morphWeights.data(),
+                                 prefabNode.morphWeights.size()));
+    }
     localMap.renderables.push_back(renderableResult.value());
   }
 
@@ -1395,10 +1461,10 @@ void SceneGraph::clearLights() {
   directionalLights_ = DirectionalLightStore(memory_);
   pointLights_ = PointLightStore(memory_);
   spotLights_ = SpotLightStore(memory_);
-  std::fill(nodes_.directionalLightHead.begin(), nodes_.directionalLightHead.end(),
-            kInvalidIndex);
-  std::fill(nodes_.directionalLightTail.begin(), nodes_.directionalLightTail.end(),
-            kInvalidIndex);
+  std::fill(nodes_.directionalLightHead.begin(),
+            nodes_.directionalLightHead.end(), kInvalidIndex);
+  std::fill(nodes_.directionalLightTail.begin(),
+            nodes_.directionalLightTail.end(), kInvalidIndex);
   std::fill(nodes_.pointLightHead.begin(), nodes_.pointLightHead.end(),
             kInvalidIndex);
   std::fill(nodes_.pointLightTail.begin(), nodes_.pointLightTail.end(),

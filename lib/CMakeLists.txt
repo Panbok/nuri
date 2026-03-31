@@ -40,6 +40,7 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/gpu/model.cpp
   nuri/resources/gpu/resource_manager.cpp
   nuri/resources/gpu/texture.cpp
+  nuri/resources/detail/gltf_buffer_utils.cpp
   nuri/resources/detail/gltf_json_utils.cpp
   nuri/resources/gltf_scene_importer.cpp
   nuri/resources/mesh_importer_assimp.cpp
@@ -59,6 +60,7 @@ set(NURI_RENDERER_SOURCES
   nuri/scene/camera_controller.cpp
   nuri/scene/camera_system.cpp
   nuri/scene/render_scene.cpp
+  nuri/scene/scene_animation_player.cpp
   nuri/scene/scene_graph.cpp
   nuri/text/detail/font_manager.cpp
   nuri/text/detail/text_layouter.cpp

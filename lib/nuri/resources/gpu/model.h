@@ -15,6 +15,7 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/math/types.h"
 #include "nuri/resources/cpu/mesh_data.h"
+#include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/mesh_importer.h"
 
 namespace nuri {
@@ -74,6 +75,15 @@ public:
   static constexpr uint32_t kInvalidMaterialIndex =
       std::numeric_limits<uint32_t>::max();
 
+  struct ModelAnimationGpuView {
+    BufferHandle skinInfluenceBuffer{};
+    BufferHandle morphMetaBuffer{};
+    BufferHandle morphDeltaBuffer{};
+    uint32_t skinInfluenceCount = 0;
+    uint32_t morphTargetCount = 0;
+    uint32_t morphVertexCount = 0;
+  };
+
   ~Model();
 
   Model(const Model &) = delete;
@@ -109,6 +119,13 @@ public:
   [[nodiscard]] uint32_t vertexCount() const noexcept { return vertexCount_; }
   [[nodiscard]] uint32_t indexCount() const noexcept { return indexCount_; }
   [[nodiscard]] const BoundingBox &bounds() const noexcept { return bounds_; }
+  [[nodiscard]] const ModelAnimationGpuView &animationGpuView() const noexcept {
+    return animationGpuView_;
+  }
+  [[nodiscard]] bool hasAnimationData() const noexcept {
+    return nuri::isValid(animationGpuView_.skinInfluenceBuffer) ||
+           nuri::isValid(animationGpuView_.morphDeltaBuffer);
+  }
   [[nodiscard]] uint32_t sourceMaterialCount() const noexcept {
     return static_cast<uint32_t>(sourceMaterialToRuntime_.size());
   }
@@ -136,9 +153,17 @@ private:
   Model(GPUDevice &gpu, GeometryAllocationHandle geometry,
         std::pmr::vector<Submesh> submeshes, uint32_t vertexCount,
         uint32_t indexCount, BoundingBox bounds,
+        ModelAnimationGpuView animationGpuView,
+        std::unique_ptr<Buffer> skinInfluenceBuffer,
+        std::unique_ptr<Buffer> morphMetaBuffer,
+        std::unique_ptr<Buffer> morphDeltaBuffer,
         std::pmr::vector<uint32_t> sourceMaterialToRuntime)
       : gpu_(&gpu), geometry_(geometry), submeshes_(std::move(submeshes)),
         vertexCount_(vertexCount), indexCount_(indexCount), bounds_(bounds),
+        animationGpuView_(animationGpuView),
+        skinInfluenceBuffer_(std::move(skinInfluenceBuffer)),
+        morphMetaBuffer_(std::move(morphMetaBuffer)),
+        morphDeltaBuffer_(std::move(morphDeltaBuffer)),
         sourceMaterialToRuntime_(std::move(sourceMaterialToRuntime)) {}
 
   GPUDevice *gpu_ = nullptr;
@@ -147,6 +172,10 @@ private:
   uint32_t vertexCount_ = 0;
   uint32_t indexCount_ = 0;
   BoundingBox bounds_{};
+  ModelAnimationGpuView animationGpuView_{};
+  std::unique_ptr<Buffer> skinInfluenceBuffer_;
+  std::unique_ptr<Buffer> morphMetaBuffer_;
+  std::unique_ptr<Buffer> morphDeltaBuffer_;
   std::pmr::vector<uint32_t> sourceMaterialToRuntime_;
 };
 

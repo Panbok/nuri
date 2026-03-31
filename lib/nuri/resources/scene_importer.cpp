@@ -6,6 +6,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/math/light.h"
+#include "nuri/resources/detail/gltf_buffer_utils.h"
 #include "nuri/resources/detail/gltf_json_utils.h"
 #include "nuri/resources/detail/scene_asset_build_backend.h"
 #include "nuri/resources/gpu/resource_keys.h"
@@ -27,9 +28,29 @@ struct ParsedNode {
   std::string name{};
   glm::mat4 localMatrix{1.0f};
   std::vector<uint32_t> children{};
+  std::vector<float> morphWeights{};
   std::optional<uint32_t> lightIndex{};
   std::optional<uint32_t> meshIndex{};
+  std::optional<uint32_t> skinIndex{};
 };
+
+struct ParsedAnimationSamplerSource {
+  uint32_t inputAccessor = std::numeric_limits<uint32_t>::max();
+  uint32_t outputAccessor = std::numeric_limits<uint32_t>::max();
+  AnimationInterpolation interpolation = AnimationInterpolation::Linear;
+};
+
+[[nodiscard]] Result<uint32_t, std::string>
+resolveGltfMeshMorphTargetCount(yyjson_val *root, uint32_t meshIndex);
+[[nodiscard]] Result<std::pmr::vector<SkinData>, std::string>
+parseSkinDefinitions(yyjson_val *root,
+                     std::span<const std::pmr::vector<std::byte>> buffers,
+                     std::pmr::memory_resource *memory);
+[[nodiscard]] Result<std::pmr::vector<AnimationClipData>, std::string>
+parseAnimationDefinitions(yyjson_val *root,
+                          std::span<const ParsedNode> parsedNodes,
+                          std::span<const std::pmr::vector<std::byte>> buffers,
+                          std::pmr::memory_resource *memory);
 
 [[nodiscard]] glm::mat4 aiMatrix4x4ToMat4(const aiMatrix4x4 &matrix) {
   glm::mat4 out(1.0f);
@@ -244,6 +265,63 @@ parseLightType(std::string_view typeName) {
   return sanitized;
 }
 
+[[nodiscard]] Result<uint32_t, std::string>
+resolveGltfMeshMorphTargetCount(yyjson_val *root, uint32_t meshIndex) {
+  yyjson_val *meshesValue = yyjson_obj_get(root, "meshes");
+  if (!yyjson_is_arr(meshesValue) ||
+      meshIndex >= yyjson_arr_size(meshesValue)) {
+    return Result<uint32_t, std::string>::makeError(
+        "glTF mesh index is out of range");
+  }
+  yyjson_val *meshValue = yyjson_arr_get(meshesValue, meshIndex);
+  yyjson_val *primitivesValue = yyjson_obj_get(meshValue, "primitives");
+  if (!yyjson_is_arr(primitivesValue)) {
+    return Result<uint32_t, std::string>::makeResult(0u);
+  }
+
+  uint32_t morphTargetCount = 0u;
+  bool initialized = false;
+  yyjson_arr_iter primitivesIter = yyjson_arr_iter_with(primitivesValue);
+  yyjson_val *primitiveValue = nullptr;
+  while ((primitiveValue = yyjson_arr_iter_next(&primitivesIter)) != nullptr) {
+    yyjson_val *targetsValue = yyjson_obj_get(primitiveValue, "targets");
+    const uint32_t primitiveTargetCount =
+        yyjson_is_arr(targetsValue)
+            ? static_cast<uint32_t>(yyjson_arr_size(targetsValue))
+            : 0u;
+    if (!initialized) {
+      morphTargetCount = primitiveTargetCount;
+      initialized = true;
+      continue;
+    }
+    if (primitiveTargetCount != morphTargetCount) {
+      return Result<uint32_t, std::string>::makeError(
+          "glTF mesh primitives attached to the same node have inconsistent "
+          "morph target counts");
+    }
+  }
+  return Result<uint32_t, std::string>::makeResult(morphTargetCount);
+}
+
+[[nodiscard]] std::vector<float> readJsonFloatArray(yyjson_val *value) {
+  std::vector<float> out;
+  if (!yyjson_is_arr(value)) {
+    return out;
+  }
+  out.reserve(yyjson_arr_size(value));
+  yyjson_arr_iter iter = yyjson_arr_iter_with(value);
+  yyjson_val *element = nullptr;
+  while ((element = yyjson_arr_iter_next(&iter)) != nullptr) {
+    float component = 0.0f;
+    if (!detail::tryReadJsonFloat(element, component)) {
+      out.clear();
+      return out;
+    }
+    out.push_back(component);
+  }
+  return out;
+}
+
 template <typename ResolveImportedNodeIndexFn>
 [[nodiscard]] Result<bool, std::string> attachParsedLightsToImportedNodes(
     ImportedScene &imported, std::span<const ParsedNode> parsedNodes,
@@ -445,7 +523,44 @@ Result<std::vector<ParsedNode>, std::string> parseNodes(yyjson_val *root) {
     uint32_t meshIndex = 0u;
     if (detail::tryReadJsonUint32(yyjson_obj_get(nodeValue, "mesh"),
                                   meshIndex)) {
+      auto morphCountResult = resolveGltfMeshMorphTargetCount(root, meshIndex);
+      if (morphCountResult.hasError()) {
+        return Result<std::vector<ParsedNode>, std::string>::makeError(
+            morphCountResult.error());
+      }
       parsed.meshIndex = meshIndex;
+      parsed.morphWeights =
+          readJsonFloatArray(yyjson_obj_get(nodeValue, "weights"));
+      if (parsed.morphWeights.empty()) {
+        yyjson_val *meshesValue = yyjson_obj_get(root, "meshes");
+        if (yyjson_is_arr(meshesValue) &&
+            meshIndex < yyjson_arr_size(meshesValue)) {
+          parsed.morphWeights = readJsonFloatArray(yyjson_obj_get(
+              yyjson_arr_get(meshesValue, meshIndex), "weights"));
+        }
+      }
+      if (parsed.morphWeights.empty() && morphCountResult.value() > 0u) {
+        parsed.morphWeights.resize(morphCountResult.value(), 0.0f);
+      }
+      if (!parsed.morphWeights.empty() &&
+          parsed.morphWeights.size() != morphCountResult.value()) {
+        return Result<std::vector<ParsedNode>, std::string>::makeError(
+            "glTF node morph weight count does not match mesh morph target "
+            "count");
+      }
+    } else {
+      parsed.morphWeights =
+          readJsonFloatArray(yyjson_obj_get(nodeValue, "weights"));
+      if (!parsed.morphWeights.empty()) {
+        return Result<std::vector<ParsedNode>, std::string>::makeError(
+            "glTF node weights require a mesh");
+      }
+    }
+
+    uint32_t skinIndex = 0u;
+    if (detail::tryReadJsonUint32(yyjson_obj_get(nodeValue, "skin"),
+                                  skinIndex)) {
+      parsed.skinIndex = skinIndex;
     }
 
     yyjson_val *childrenValue = yyjson_obj_get(nodeValue, "children");
@@ -483,6 +598,303 @@ Result<std::vector<ParsedNode>, std::string> parseNodes(yyjson_val *root) {
       std::move(nodes));
 }
 
+[[nodiscard]] Result<std::pmr::vector<SkinData>, std::string>
+parseSkinDefinitions(yyjson_val *root,
+                     std::span<const std::pmr::vector<std::byte>> buffers,
+                     std::pmr::memory_resource *memory) {
+  std::pmr::vector<SkinData> skins(memory);
+  yyjson_val *skinsValue = yyjson_obj_get(root, "skins");
+  if (!yyjson_is_arr(skinsValue)) {
+    return Result<std::pmr::vector<SkinData>, std::string>::makeResult(
+        std::move(skins));
+  }
+
+  skins.reserve(yyjson_arr_size(skinsValue));
+  yyjson_arr_iter iter = yyjson_arr_iter_with(skinsValue);
+  yyjson_val *skinValue = nullptr;
+  while ((skinValue = yyjson_arr_iter_next(&iter)) != nullptr) {
+    if (!yyjson_is_obj(skinValue)) {
+      return Result<std::pmr::vector<SkinData>, std::string>::makeError(
+          "glTF skin entry is invalid");
+    }
+    skins.emplace_back(memory);
+    SkinData &skin = skins.back();
+    const std::string_view name = detail::readJsonStringView(skinValue, "name");
+    skin.name.assign(name.data(), name.size());
+
+    (void)detail::tryReadJsonUint32(yyjson_obj_get(skinValue, "skeleton"),
+                                    skin.skeletonRootNodeIndex);
+
+    yyjson_val *jointsValue = yyjson_obj_get(skinValue, "joints");
+    if (!yyjson_is_arr(jointsValue) || yyjson_arr_size(jointsValue) == 0u) {
+      return Result<std::pmr::vector<SkinData>, std::string>::makeError(
+          "glTF skin joints array is invalid");
+    }
+    skin.jointNodeIndices.reserve(yyjson_arr_size(jointsValue));
+    yyjson_arr_iter jointsIter = yyjson_arr_iter_with(jointsValue);
+    yyjson_val *jointValue = nullptr;
+    while ((jointValue = yyjson_arr_iter_next(&jointsIter)) != nullptr) {
+      uint32_t jointIndex = 0u;
+      if (!detail::tryReadJsonUint32(jointValue, jointIndex)) {
+        return Result<std::pmr::vector<SkinData>, std::string>::makeError(
+            "glTF skin joint index is invalid");
+      }
+      skin.jointNodeIndices.push_back(jointIndex);
+    }
+
+    uint32_t ibmAccessor = std::numeric_limits<uint32_t>::max();
+    if (detail::tryReadJsonUint32(
+            yyjson_obj_get(skinValue, "inverseBindMatrices"), ibmAccessor)) {
+      auto matricesResult = detail::readGltfAccessorAsMat4Array(
+          root, buffers, ibmAccessor, memory);
+      if (matricesResult.hasError()) {
+        return Result<std::pmr::vector<SkinData>, std::string>::makeError(
+            matricesResult.error());
+      }
+      skin.inverseBindMatrices = std::move(matricesResult.value());
+    } else {
+      skin.inverseBindMatrices.resize(skin.jointNodeIndices.size(),
+                                      glm::mat4(1.0f));
+    }
+
+    if (skin.inverseBindMatrices.size() != skin.jointNodeIndices.size()) {
+      return Result<std::pmr::vector<SkinData>, std::string>::makeError(
+          "glTF skin inverse bind matrix count does not match joint count");
+    }
+  }
+
+  return Result<std::pmr::vector<SkinData>, std::string>::makeResult(
+      std::move(skins));
+}
+
+[[nodiscard]] Result<AnimationTargetPath, std::string>
+parseAnimationTargetPath(std::string_view path) {
+  if (path == "translation") {
+    return Result<AnimationTargetPath, std::string>::makeResult(
+        AnimationTargetPath::Translation);
+  }
+  if (path == "rotation") {
+    return Result<AnimationTargetPath, std::string>::makeResult(
+        AnimationTargetPath::Rotation);
+  }
+  if (path == "scale") {
+    return Result<AnimationTargetPath, std::string>::makeResult(
+        AnimationTargetPath::Scale);
+  }
+  if (path == "weights") {
+    return Result<AnimationTargetPath, std::string>::makeResult(
+        AnimationTargetPath::Weights);
+  }
+  return Result<AnimationTargetPath, std::string>::makeError(
+      "glTF animation target path is unsupported");
+}
+
+[[nodiscard]] AnimationInterpolation
+parseAnimationInterpolation(std::string_view interpolation) {
+  if (interpolation == "STEP") {
+    return AnimationInterpolation::Step;
+  }
+  if (interpolation == "CUBICSPLINE") {
+    return AnimationInterpolation::CubicSpline;
+  }
+  return AnimationInterpolation::Linear;
+}
+
+[[nodiscard]] Result<std::pmr::vector<AnimationClipData>, std::string>
+parseAnimationDefinitions(yyjson_val *root,
+                          std::span<const ParsedNode> parsedNodes,
+                          std::span<const std::pmr::vector<std::byte>> buffers,
+                          std::pmr::memory_resource *memory) {
+  std::pmr::vector<AnimationClipData> clips(memory);
+  yyjson_val *animationsValue = yyjson_obj_get(root, "animations");
+  if (!yyjson_is_arr(animationsValue)) {
+    return Result<std::pmr::vector<AnimationClipData>, std::string>::makeResult(
+        std::move(clips));
+  }
+
+  clips.reserve(yyjson_arr_size(animationsValue));
+  yyjson_arr_iter animationsIter = yyjson_arr_iter_with(animationsValue);
+  yyjson_val *animationValue = nullptr;
+  while ((animationValue = yyjson_arr_iter_next(&animationsIter)) != nullptr) {
+    if (!yyjson_is_obj(animationValue)) {
+      return Result<std::pmr::vector<AnimationClipData>,
+                    std::string>::makeError("glTF animation entry is invalid");
+    }
+
+    std::pmr::vector<ParsedAnimationSamplerSource> samplerSources(memory);
+    yyjson_val *samplersValue = yyjson_obj_get(animationValue, "samplers");
+    if (!yyjson_is_arr(samplersValue)) {
+      return Result<std::pmr::vector<AnimationClipData>, std::string>::
+          makeError("glTF animation samplers array is invalid");
+    }
+    samplerSources.reserve(yyjson_arr_size(samplersValue));
+    yyjson_arr_iter samplersIter = yyjson_arr_iter_with(samplersValue);
+    yyjson_val *samplerValue = nullptr;
+    while ((samplerValue = yyjson_arr_iter_next(&samplersIter)) != nullptr) {
+      ParsedAnimationSamplerSource source{};
+      if (!detail::tryReadJsonUint32(yyjson_obj_get(samplerValue, "input"),
+                                     source.inputAccessor) ||
+          !detail::tryReadJsonUint32(yyjson_obj_get(samplerValue, "output"),
+                                     source.outputAccessor)) {
+        return Result<std::pmr::vector<AnimationClipData>, std::string>::
+            makeError("glTF animation sampler accessors are invalid");
+      }
+      source.interpolation = parseAnimationInterpolation(
+          detail::readJsonStringView(samplerValue, "interpolation"));
+      samplerSources.push_back(source);
+    }
+
+    clips.emplace_back(memory);
+    AnimationClipData &clip = clips.back();
+    const std::string_view clipName =
+        detail::readJsonStringView(animationValue, "name");
+    clip.name.assign(clipName.data(), clipName.size());
+    clip.samplers.reserve(samplerSources.size());
+    for (size_t samplerIndex = 0; samplerIndex < samplerSources.size();
+         ++samplerIndex) {
+      clip.samplers.emplace_back(memory);
+    }
+
+    yyjson_val *channelsValue = yyjson_obj_get(animationValue, "channels");
+    if (!yyjson_is_arr(channelsValue)) {
+      return Result<std::pmr::vector<AnimationClipData>, std::string>::
+          makeError("glTF animation channels array is invalid");
+    }
+    clip.channels.reserve(yyjson_arr_size(channelsValue));
+    yyjson_arr_iter channelsIter = yyjson_arr_iter_with(channelsValue);
+    yyjson_val *channelValue = nullptr;
+    while ((channelValue = yyjson_arr_iter_next(&channelsIter)) != nullptr) {
+      if (!yyjson_is_obj(channelValue)) {
+        return Result<std::pmr::vector<AnimationClipData>, std::string>::
+            makeError("glTF animation channel entry is invalid");
+      }
+      AnimationChannelData channel{};
+      if (!detail::tryReadJsonUint32(yyjson_obj_get(channelValue, "sampler"),
+                                     channel.samplerIndex) ||
+          channel.samplerIndex >= samplerSources.size()) {
+        return Result<std::pmr::vector<AnimationClipData>, std::string>::
+            makeError("glTF animation channel sampler index is invalid");
+      }
+      yyjson_val *targetValue = yyjson_obj_get(channelValue, "target");
+      if (!yyjson_is_obj(targetValue) ||
+          !detail::tryReadJsonUint32(yyjson_obj_get(targetValue, "node"),
+                                     channel.targetNodeIndex) ||
+          channel.targetNodeIndex >= parsedNodes.size()) {
+        return Result<std::pmr::vector<AnimationClipData>, std::string>::
+            makeError("glTF animation channel target node is invalid");
+      }
+      auto pathResult = parseAnimationTargetPath(
+          detail::readJsonStringView(targetValue, "path"));
+      if (pathResult.hasError()) {
+        return Result<std::pmr::vector<AnimationClipData>,
+                      std::string>::makeError(pathResult.error());
+      }
+      channel.path = pathResult.value();
+      clip.channels.push_back(channel);
+    }
+
+    for (const AnimationChannelData &channel : clip.channels) {
+      const ParsedAnimationSamplerSource &source =
+          samplerSources[channel.samplerIndex];
+      auto inputInfoResult =
+          detail::describeGltfAccessor(root, source.inputAccessor);
+      if (inputInfoResult.hasError()) {
+        return Result<std::pmr::vector<AnimationClipData>,
+                      std::string>::makeError(inputInfoResult.error());
+      }
+      auto outputInfoResult =
+          detail::describeGltfAccessor(root, source.outputAccessor);
+      if (outputInfoResult.hasError()) {
+        return Result<std::pmr::vector<AnimationClipData>,
+                      std::string>::makeError(outputInfoResult.error());
+      }
+      const detail::GltfAccessorInfo inputInfo = inputInfoResult.value();
+      const detail::GltfAccessorInfo outputInfo = outputInfoResult.value();
+      if (inputInfo.componentType != 5126u || inputInfo.componentCount != 1u) {
+        return Result<std::pmr::vector<AnimationClipData>, std::string>::
+            makeError("glTF animation input accessor must be float scalar");
+      }
+
+      uint32_t valueArity = 0u;
+      if (channel.path == AnimationTargetPath::Translation ||
+          channel.path == AnimationTargetPath::Scale) {
+        if (outputInfo.componentType != 5126u ||
+            outputInfo.componentCount != 3u) {
+          return Result<std::pmr::vector<AnimationClipData>, std::string>::
+              makeError(
+                  "glTF translation/scale output accessor must be float VEC3");
+        }
+        valueArity = 3u;
+      } else if (channel.path == AnimationTargetPath::Rotation) {
+        if (outputInfo.componentType != 5126u ||
+            outputInfo.componentCount != 4u) {
+          return Result<std::pmr::vector<AnimationClipData>, std::string>::
+              makeError("glTF rotation output accessor must be float VEC4");
+        }
+        valueArity = 4u;
+      } else {
+        const uint32_t splineFactor =
+            source.interpolation == AnimationInterpolation::CubicSpline ? 3u
+                                                                        : 1u;
+        const uint64_t totalOutputScalars =
+            static_cast<uint64_t>(outputInfo.count) * outputInfo.componentCount;
+        const uint64_t totalInputFrames =
+            static_cast<uint64_t>(inputInfo.count) * splineFactor;
+        if (totalInputFrames == 0u ||
+            (totalOutputScalars % totalInputFrames) != 0u) {
+          return Result<std::pmr::vector<AnimationClipData>, std::string>::
+              makeError("glTF morph weight output accessor shape is invalid");
+        }
+        valueArity =
+            static_cast<uint32_t>(totalOutputScalars / totalInputFrames);
+        const ParsedNode &targetNode = parsedNodes[channel.targetNodeIndex];
+        if (targetNode.morphWeights.empty()) {
+          return Result<std::pmr::vector<AnimationClipData>, std::string>::
+              makeError(
+                  "glTF weight animation targets a node without morph weights");
+        }
+        if (valueArity != targetNode.morphWeights.size()) {
+          return Result<std::pmr::vector<AnimationClipData>, std::string>::
+              makeError("glTF weight animation output arity does not match "
+                        "node morph target count");
+        }
+      }
+
+      AnimationSamplerData &sampler = clip.samplers[channel.samplerIndex];
+      if (sampler.valueArity != 0u && sampler.valueArity != valueArity) {
+        return Result<std::pmr::vector<AnimationClipData>, std::string>::
+            makeError("glTF animation sampler is reused with incompatible "
+                      "target arity");
+      }
+      if (sampler.valueArity == 0u) {
+        sampler.valueArity = valueArity;
+        sampler.interpolation = source.interpolation;
+        auto keyTimesResult = detail::readGltfAccessorAsFloatArray(
+            root, buffers, source.inputAccessor, memory);
+        if (keyTimesResult.hasError()) {
+          return Result<std::pmr::vector<AnimationClipData>,
+                        std::string>::makeError(keyTimesResult.error());
+        }
+        sampler.keyTimes = std::move(keyTimesResult.value());
+        auto valuesResult = detail::readGltfAccessorAsFloatArray(
+            root, buffers, source.outputAccessor, memory);
+        if (valuesResult.hasError()) {
+          return Result<std::pmr::vector<AnimationClipData>,
+                        std::string>::makeError(valuesResult.error());
+        }
+        sampler.values = std::move(valuesResult.value());
+        if (!sampler.keyTimes.empty()) {
+          clip.durationSeconds =
+              std::max(clip.durationSeconds, sampler.keyTimes.back());
+        }
+      }
+    }
+  }
+
+  return Result<std::pmr::vector<AnimationClipData>, std::string>::makeResult(
+      std::move(clips));
+}
+
 Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
     ImportedScene &imported, const aiScene &scene,
     std::span<const ParsedNode> parsedNodes,
@@ -490,7 +902,8 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
     std::span<const std::string> parsedPaths,
     const HashMap<std::string, uint32_t> &importedPathToNode,
     const HashMap<std::string, std::vector<uint32_t>> &importedNameToNodes,
-    std::span<const ParsedLightDef> parsedLights) {
+    std::span<const ParsedLightDef> parsedLights,
+    std::vector<uint32_t> *outParsedToImportedNodeIndices) {
   if (parsedNodes.empty()) {
     return Result<bool, std::string>::makeResult(false);
   }
@@ -774,6 +1187,9 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
                                    : remappedNodeIndices[parsedParentIndex];
     importedNode.localFromParent = parsedNodes[parsedNodeIndex].localMatrix;
     importedNode.name = parsedNodes[parsedNodeIndex].name;
+    importedNode.morphWeights.assign(
+        parsedNodes[parsedNodeIndex].morphWeights.begin(),
+        parsedNodes[parsedNodeIndex].morphWeights.end());
     imported.nodes.push_back(std::move(importedNode));
   }
   for (const uint32_t rootIndex : parsedRoots) {
@@ -822,6 +1238,8 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
                 imported, scene, materialOrdinalToAsset,
                 structuralMaterialAsset.sourceMaterialIndex,
                 structuralMaterialAsset.sourceName),
+            .skinIndex =
+                parsedNode.skinIndex.value_or(kInvalidScenePrefabIndex),
         });
         copiedStructuralRenderables = true;
         ++copiedStructuralRenderableCount;
@@ -849,6 +1267,7 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
             imported, scene, meshOrdinalToAsset, sourceSceneMeshIndex),
         .materialAssetIndex = ensureImportedMaterialAsset(
             imported, scene, materialOrdinalToAsset, mesh.mMaterialIndex),
+        .skinIndex = parsedNode.skinIndex.value_or(kInvalidScenePrefabIndex),
     });
     ++fallbackRenderableCount;
   }
@@ -876,6 +1295,18 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
   if (attachStructuralLightsResult.hasError()) {
     return Result<bool, std::string>::makeError(
         attachStructuralLightsResult.error());
+  }
+
+  if (outParsedToImportedNodeIndices != nullptr) {
+    outParsedToImportedNodeIndices->assign(parsedNodes.size(),
+                                           kInvalidScenePrefabIndex);
+    for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
+         ++parsedNodeIndex) {
+      if (parsedNodeIndex < remappedNodeIndices.size()) {
+        (*outParsedToImportedNodeIndices)[parsedNodeIndex] =
+            remappedNodeIndices[parsedNodeIndex];
+      }
+    }
   }
 
   return Result<bool, std::string>::makeResult(true);
@@ -1155,6 +1586,12 @@ SceneImporter::loadSceneFromFile(std::string_view path,
         "glTF root is not a JSON object");
   }
 
+  auto buffersResult = detail::loadGltfBuffers(
+      std::filesystem::path(std::string(path)), root, memory);
+  if (buffersResult.hasError()) {
+    return Result<ImportedScene, std::string>::makeError(buffersResult.error());
+  }
+
   auto lightsResult = parseLightDefinitions(root);
   if (lightsResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(lightsResult.error());
@@ -1166,7 +1603,26 @@ SceneImporter::loadSceneFromFile(std::string_view path,
         parsedNodesResult.error());
   }
   std::vector<ParsedNode> parsedNodes = std::move(parsedNodesResult.value());
-  if (lightsResult.value().empty() || parsedNodes.empty()) {
+  auto skinsResult = parseSkinDefinitions(
+      root,
+      std::span<const std::pmr::vector<std::byte>>(
+          buffersResult.value().data(), buffersResult.value().size()),
+      memory);
+  if (skinsResult.hasError()) {
+    return Result<ImportedScene, std::string>::makeError(skinsResult.error());
+  }
+  imported.skins = std::move(skinsResult.value());
+  auto animationsResult = parseAnimationDefinitions(
+      root, parsedNodes,
+      std::span<const std::pmr::vector<std::byte>>(
+          buffersResult.value().data(), buffersResult.value().size()),
+      memory);
+  if (animationsResult.hasError()) {
+    return Result<ImportedScene, std::string>::makeError(
+        animationsResult.error());
+  }
+  imported.animations = std::move(animationsResult.value());
+  if (parsedNodes.empty()) {
     return Result<ImportedScene, std::string>::makeResult(std::move(imported));
   }
 
@@ -1184,12 +1640,38 @@ SceneImporter::loadSceneFromFile(std::string_view path,
                                   static_cast<uint32_t>(rootOrdinal));
   }
 
+  std::vector<uint32_t> parsedToImportedNodeIndex;
+
   if (auto rebuildResult = rebuildImportedSceneFromParsedGltf(
           imported, *scene, parsedNodes, parsedRoots, parsedPaths,
-          importedPathToNode, importedNameToNodes, lightsResult.value());
+          importedPathToNode, importedNameToNodes, lightsResult.value(),
+          &parsedToImportedNodeIndex);
       rebuildResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(rebuildResult.error());
   } else if (rebuildResult.value()) {
+    for (SkinData &skin : imported.skins) {
+      if (skin.skeletonRootNodeIndex < parsedToImportedNodeIndex.size()) {
+        skin.skeletonRootNodeIndex =
+            parsedToImportedNodeIndex[skin.skeletonRootNodeIndex];
+      }
+      for (uint32_t &jointNodeIndex : skin.jointNodeIndices) {
+        if (jointNodeIndex < parsedToImportedNodeIndex.size()) {
+          jointNodeIndex = parsedToImportedNodeIndex[jointNodeIndex];
+        } else {
+          jointNodeIndex = kInvalidScenePrefabIndex;
+        }
+      }
+    }
+    for (AnimationClipData &clip : imported.animations) {
+      for (AnimationChannelData &channel : clip.channels) {
+        if (channel.targetNodeIndex < parsedToImportedNodeIndex.size()) {
+          channel.targetNodeIndex =
+              parsedToImportedNodeIndex[channel.targetNodeIndex];
+        } else {
+          channel.targetNodeIndex = kInvalidScenePrefabIndex;
+        }
+      }
+    }
     return Result<ImportedScene, std::string>::makeResult(std::move(imported));
   }
 
@@ -1206,7 +1688,33 @@ SceneImporter::loadSceneFromFile(std::string_view path,
     }
     imported.nodes[importedNodeIndex].localFromParent =
         parsedNodes[parsedNodeIndex].localMatrix;
+    imported.nodes[importedNodeIndex].morphWeights.assign(
+        parsedNodes[parsedNodeIndex].morphWeights.begin(),
+        parsedNodes[parsedNodeIndex].morphWeights.end());
     importedNodeMatched[importedNodeIndex] = 1u;
+    if (parsedNodeIndex >= parsedToImportedNodeIndex.size()) {
+      parsedToImportedNodeIndex.resize(parsedNodes.size(),
+                                       kInvalidScenePrefabIndex);
+    }
+    parsedToImportedNodeIndex[parsedNodeIndex] = importedNodeIndex;
+  }
+
+  for (uint32_t parsedNodeIndex = 0u; parsedNodeIndex < parsedNodes.size();
+       ++parsedNodeIndex) {
+    const uint32_t importedNodeIndex =
+        parsedNodeIndex < parsedToImportedNodeIndex.size()
+            ? parsedToImportedNodeIndex[parsedNodeIndex]
+            : kInvalidScenePrefabIndex;
+    if (importedNodeIndex == kInvalidScenePrefabIndex) {
+      continue;
+    }
+    if (parsedNodes[parsedNodeIndex].skinIndex.has_value()) {
+      for (ImportedSceneRenderable &renderable : imported.renderables) {
+        if (renderable.nodeIndex == importedNodeIndex) {
+          renderable.skinIndex = parsedNodes[parsedNodeIndex].skinIndex.value();
+        }
+      }
+    }
   }
 
   const std::vector<ParsedLightDef> parsedLights =
@@ -1229,6 +1737,30 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   if (attachImportedLightsResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(
         attachImportedLightsResult.error());
+  }
+
+  for (SkinData &skin : imported.skins) {
+    if (skin.skeletonRootNodeIndex < parsedToImportedNodeIndex.size()) {
+      skin.skeletonRootNodeIndex =
+          parsedToImportedNodeIndex[skin.skeletonRootNodeIndex];
+    }
+    for (uint32_t &jointNodeIndex : skin.jointNodeIndices) {
+      if (jointNodeIndex < parsedToImportedNodeIndex.size()) {
+        jointNodeIndex = parsedToImportedNodeIndex[jointNodeIndex];
+      } else {
+        jointNodeIndex = kInvalidScenePrefabIndex;
+      }
+    }
+  }
+  for (AnimationClipData &clip : imported.animations) {
+    for (AnimationChannelData &channel : clip.channels) {
+      if (channel.targetNodeIndex < parsedToImportedNodeIndex.size()) {
+        channel.targetNodeIndex =
+            parsedToImportedNodeIndex[channel.targetNodeIndex];
+      } else {
+        channel.targetNodeIndex = kInvalidScenePrefabIndex;
+      }
+    }
   }
 
   return Result<ImportedScene, std::string>::makeResult(std::move(imported));
@@ -1254,6 +1786,8 @@ SceneImporter::buildScenePrefab(const ImportedScene &scene,
     prefabNode.parentIndex = sceneNode.parentIndex;
     prefabNode.localFromParent = sceneNode.localFromParent;
     prefabNode.name.assign(sceneNode.name.data(), sceneNode.name.size());
+    prefabNode.morphWeights.assign(sceneNode.morphWeights.begin(),
+                                   sceneNode.morphWeights.end());
   }
 
   prefab.meshAssets.reserve(scene.meshAssets.size());
@@ -1278,6 +1812,7 @@ SceneImporter::buildScenePrefab(const ImportedScene &scene,
         .nodeIndex = renderable.nodeIndex,
         .meshIndex = renderable.meshAssetIndex,
         .materialIndex = renderable.materialAssetIndex,
+        .skinIndex = renderable.skinIndex,
     });
   }
 
@@ -1292,6 +1827,37 @@ SceneImporter::buildScenePrefab(const ImportedScene &scene,
       prefabLight.light.name = std::string(sceneLight.sourceName);
     }
     prefab.lights.push_back(std::move(prefabLight));
+  }
+
+  prefab.skins.reserve(scene.skins.size());
+  for (const SkinData &skin : scene.skins) {
+    prefab.skins.emplace_back(memory);
+    SkinData &prefabSkin = prefab.skins.back();
+    prefabSkin.name.assign(skin.name.data(), skin.name.size());
+    prefabSkin.skeletonRootNodeIndex = skin.skeletonRootNodeIndex;
+    prefabSkin.jointNodeIndices.assign(skin.jointNodeIndices.begin(),
+                                       skin.jointNodeIndices.end());
+    prefabSkin.inverseBindMatrices.assign(skin.inverseBindMatrices.begin(),
+                                          skin.inverseBindMatrices.end());
+  }
+
+  prefab.animations.reserve(scene.animations.size());
+  for (const AnimationClipData &clip : scene.animations) {
+    prefab.animations.emplace_back(memory);
+    AnimationClipData &prefabClip = prefab.animations.back();
+    prefabClip.name.assign(clip.name.data(), clip.name.size());
+    prefabClip.durationSeconds = clip.durationSeconds;
+    prefabClip.samplers.reserve(clip.samplers.size());
+    for (const AnimationSamplerData &sampler : clip.samplers) {
+      prefabClip.samplers.emplace_back(memory);
+      AnimationSamplerData &prefabSampler = prefabClip.samplers.back();
+      prefabSampler.interpolation = sampler.interpolation;
+      prefabSampler.valueArity = sampler.valueArity;
+      prefabSampler.keyTimes.assign(sampler.keyTimes.begin(),
+                                    sampler.keyTimes.end());
+      prefabSampler.values.assign(sampler.values.begin(), sampler.values.end());
+    }
+    prefabClip.channels.assign(clip.channels.begin(), clip.channels.end());
   }
 
   return Result<ScenePrefab, std::string>::makeResult(std::move(prefab));

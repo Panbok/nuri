@@ -44,6 +44,7 @@ void forEachEnvironmentTextureRef(const EnvironmentHandles &handles, Fn &&fn) {
 RenderScene::RenderScene(std::pmr::memory_resource *memory)
     : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
       sceneGraph_(memory_), renderables_(memory_),
+      renderableMorphWeights_(memory_), renderableSkinPalettes_(memory_),
       packedDirectionalLights_(memory_), packedLocalLights_(memory_),
       packedDirectionalLightIds_(memory_), packedLocalLightIds_(memory_) {}
 
@@ -124,6 +125,8 @@ void RenderScene::sanitizeGraphRenderableRefs() {
 
 void RenderScene::rebuildFlatRenderables() {
   renderables_.clear();
+  renderableMorphWeights_.clear();
+  renderableSkinPalettes_.clear();
   auto &components = sceneGraph_.renderableComponents_;
   const auto &nodes = sceneGraph_.nodes_;
 
@@ -135,6 +138,8 @@ void RenderScene::rebuildFlatRenderables() {
   }
 
   renderables_.reserve(liveCount);
+  renderableMorphWeights_.reserve(liveCount);
+  renderableSkinPalettes_.reserve(liveCount);
   for (uint32_t index = 0; index < components.slots.slotCount(); ++index) {
     if (!components.slots.isLive(index)) {
       continue;
@@ -144,6 +149,13 @@ void RenderScene::rebuildFlatRenderables() {
         nodeIndex < nodes.worldFromRoot.size() && nodes.slots.isLive(nodeIndex)
             ? nodes.worldFromRoot[nodeIndex]
             : glm::mat4(1.0f);
+    renderableMorphWeights_.emplace_back();
+    renderableMorphWeights_.back().assign(
+        components.morphWeights[index].begin(),
+        components.morphWeights[index].end());
+    renderableSkinPalettes_.emplace_back();
+    renderableSkinPalettes_.back().assign(components.skinPalette[index].begin(),
+                                          components.skinPalette[index].end());
     components.flatRenderableIndex[index] =
         static_cast<uint32_t>(renderables_.size());
     renderables_.push_back(Renderable{
@@ -154,6 +166,12 @@ void RenderScene::rebuildFlatRenderables() {
         .model = components.models[index],
         .material = components.materials[index],
         .materialOverride = components.materialOverrides[index],
+        .morphWeights =
+            std::span<const float>(renderableMorphWeights_.back().data(),
+                                   renderableMorphWeights_.back().size()),
+        .skinPalette =
+            std::span<const glm::mat4>(renderableSkinPalettes_.back().data(),
+                                       renderableSkinPalettes_.back().size()),
         .modelMatrix = world,
     });
   }
@@ -291,6 +309,18 @@ Result<bool, std::string> RenderScene::commit() {
       renderables_[flatIndex].modelMatrix = nodes.worldFromRoot[nodeIndex];
       renderables_[flatIndex].node =
           makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex));
+      renderableMorphWeights_[flatIndex].assign(
+          components.morphWeights[index].begin(),
+          components.morphWeights[index].end());
+      renderables_[flatIndex].morphWeights =
+          std::span<const float>(renderableMorphWeights_[flatIndex].data(),
+                                 renderableMorphWeights_[flatIndex].size());
+      renderableSkinPalettes_[flatIndex].assign(
+          components.skinPalette[index].begin(),
+          components.skinPalette[index].end());
+      renderables_[flatIndex].skinPalette =
+          std::span<const glm::mat4>(renderableSkinPalettes_[flatIndex].data(),
+                                     renderableSkinPalettes_[flatIndex].size());
       updatedAny = true;
     }
     if (updatedAny) {

@@ -1228,6 +1228,123 @@ void extractMeshGeometry(const aiMesh &mesh, const aiMatrix4x4 &transform,
   }
 }
 
+void extractSkinInfluences(
+    const aiMesh &mesh, std::pmr::vector<VertexSkinInfluence> &outInfluences) {
+  outInfluences.clear();
+  if (!mesh.HasBones() || mesh.mNumVertices == 0u) {
+    return;
+  }
+
+  outInfluences.resize(mesh.mNumVertices);
+  struct InfluenceSlot {
+    uint16_t joint = 0u;
+    float weight = 0.0f;
+  };
+  std::vector<std::array<InfluenceSlot, 4>> accumulated(mesh.mNumVertices);
+  std::vector<uint32_t> counts(mesh.mNumVertices, 0u);
+
+  for (uint32_t boneIndex = 0u; boneIndex < mesh.mNumBones; ++boneIndex) {
+    const aiBone *bone = mesh.mBones[boneIndex];
+    if (bone == nullptr) {
+      continue;
+    }
+    const uint16_t jointIndex = static_cast<uint16_t>(
+        std::min<uint32_t>(boneIndex, std::numeric_limits<uint16_t>::max()));
+    for (uint32_t weightIndex = 0u; weightIndex < bone->mNumWeights;
+         ++weightIndex) {
+      const aiVertexWeight &weight = bone->mWeights[weightIndex];
+      if (weight.mVertexId >= mesh.mNumVertices || weight.mWeight <= 0.0f) {
+        continue;
+      }
+      auto &slots = accumulated[weight.mVertexId];
+      uint32_t &count = counts[weight.mVertexId];
+      if (count < slots.size()) {
+        slots[count++] =
+            InfluenceSlot{.joint = jointIndex, .weight = weight.mWeight};
+        continue;
+      }
+      uint32_t minSlot = 0u;
+      for (uint32_t i = 1u; i < slots.size(); ++i) {
+        if (slots[i].weight < slots[minSlot].weight) {
+          minSlot = i;
+        }
+      }
+      if (weight.mWeight > slots[minSlot].weight) {
+        slots[minSlot] =
+            InfluenceSlot{.joint = jointIndex, .weight = weight.mWeight};
+      }
+    }
+  }
+
+  for (uint32_t vertexIndex = 0u; vertexIndex < mesh.mNumVertices;
+       ++vertexIndex) {
+    auto &dst = outInfluences[vertexIndex];
+    const auto &slots = accumulated[vertexIndex];
+    float totalWeight = 0.0f;
+    for (const InfluenceSlot &slot : slots) {
+      totalWeight += slot.weight;
+    }
+    const float weightScale = totalWeight > 0.0f ? (1.0f / totalWeight) : 0.0f;
+    for (uint32_t i = 0u; i < slots.size(); ++i) {
+      dst.joints[i] = slots[i].joint;
+      dst.weights[i] = slots[i].weight * weightScale;
+    }
+  }
+}
+
+void extractMorphTargets(const aiMesh &mesh, const aiMatrix4x4 &transform,
+                         std::span<const Vertex> baseVertices,
+                         std::pmr::vector<MorphTarget> &outMorphTargets) {
+  outMorphTargets.clear();
+  if (mesh.mNumAnimMeshes == 0u || baseVertices.empty()) {
+    return;
+  }
+
+  aiMatrix3x3 normalTransform(transform);
+  normalTransform.Inverse().Transpose();
+  outMorphTargets.reserve(mesh.mNumAnimMeshes);
+  for (uint32_t animMeshIndex = 0u; animMeshIndex < mesh.mNumAnimMeshes;
+       ++animMeshIndex) {
+    const aiAnimMesh *animMesh = mesh.mAnimMeshes[animMeshIndex];
+    if (animMesh == nullptr) {
+      continue;
+    }
+    outMorphTargets.emplace_back(outMorphTargets.get_allocator().resource());
+    MorphTarget &target = outMorphTargets.back();
+    target.name = "morph_" + std::to_string(animMeshIndex);
+    target.positionDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
+    if (animMesh->HasNormals()) {
+      target.normalDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
+    }
+    if (animMesh->HasTangentsAndBitangents()) {
+      target.tangentDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
+    }
+
+    const uint32_t vertexCount =
+        std::min<uint32_t>(mesh.mNumVertices, animMesh->mNumVertices);
+    for (uint32_t vertexIndex = 0u; vertexIndex < vertexCount; ++vertexIndex) {
+      const aiVector3D transformedPosition =
+          transform * animMesh->mVertices[vertexIndex];
+      target.positionDeltas[vertexIndex] =
+          glm::vec3(transformedPosition.x, transformedPosition.y,
+                    transformedPosition.z) -
+          baseVertices[vertexIndex].position;
+      if (!target.normalDeltas.empty()) {
+        const glm::vec3 transformedNormal = normalizeTransformedDirection(
+            normalTransform * animMesh->mNormals[vertexIndex]);
+        target.normalDeltas[vertexIndex] =
+            transformedNormal - baseVertices[vertexIndex].normal;
+      }
+      if (!target.tangentDeltas.empty()) {
+        const glm::vec3 transformedTangent = normalizeTransformedDirection(
+            normalTransform * animMesh->mTangents[vertexIndex]);
+        target.tangentDeltas[vertexIndex] =
+            transformedTangent - glm::vec3(baseVertices[vertexIndex].tangent);
+      }
+    }
+  }
+}
+
 std::array<std::pmr::vector<uint32_t>, Submesh::kMaxLodCount>
 makeLodIndexBuffers(std::pmr::memory_resource *mem) {
   static_assert(Submesh::kMaxLodCount == 4,
@@ -1295,7 +1412,9 @@ buildLodIndexBuffers(const MeshImportOptions &options,
 
 void optimizeVertexFetchForAllLods(
     std::pmr::vector<Vertex> &vertices, uint32_t lodCount,
-    std::span<std::pmr::vector<uint32_t>> lodIndexBuffers) {
+    std::span<std::pmr::vector<uint32_t>> lodIndexBuffers,
+    std::pmr::vector<VertexSkinInfluence> *skinInfluences = nullptr,
+    std::span<MorphTarget> morphTargets = {}) {
   if (vertices.empty() || lodCount == 0 || lodIndexBuffers.empty() ||
       lodIndexBuffers[0].empty()) {
     return;
@@ -1317,6 +1436,62 @@ void optimizeVertexFetchForAllLods(
                               vertexFetchRemap.data());
     vertices.swap(remappedVertices);
 
+    if (skinInfluences != nullptr &&
+        skinInfluences->size() == vertexFetchRemap.size()) {
+      std::pmr::vector<VertexSkinInfluence> remappedSkinInfluences(mem);
+      remappedSkinInfluences.resize(optimizedVertexCount);
+      for (size_t oldIndex = 0; oldIndex < vertexFetchRemap.size();
+           ++oldIndex) {
+        const unsigned int newIndex = vertexFetchRemap[oldIndex];
+        if (newIndex < remappedSkinInfluences.size()) {
+          remappedSkinInfluences[newIndex] = (*skinInfluences)[oldIndex];
+        }
+      }
+      skinInfluences->swap(remappedSkinInfluences);
+    }
+
+    for (MorphTarget &morphTarget : morphTargets) {
+      if (!morphTarget.positionDeltas.empty()) {
+        std::pmr::vector<glm::vec3> remapped(mem);
+        remapped.resize(optimizedVertexCount, glm::vec3(0.0f));
+        for (size_t oldIndex = 0; oldIndex < vertexFetchRemap.size();
+             ++oldIndex) {
+          const unsigned int newIndex = vertexFetchRemap[oldIndex];
+          if (newIndex < remapped.size() &&
+              oldIndex < morphTarget.positionDeltas.size()) {
+            remapped[newIndex] = morphTarget.positionDeltas[oldIndex];
+          }
+        }
+        morphTarget.positionDeltas.swap(remapped);
+      }
+      if (!morphTarget.normalDeltas.empty()) {
+        std::pmr::vector<glm::vec3> remapped(mem);
+        remapped.resize(optimizedVertexCount, glm::vec3(0.0f));
+        for (size_t oldIndex = 0; oldIndex < vertexFetchRemap.size();
+             ++oldIndex) {
+          const unsigned int newIndex = vertexFetchRemap[oldIndex];
+          if (newIndex < remapped.size() &&
+              oldIndex < morphTarget.normalDeltas.size()) {
+            remapped[newIndex] = morphTarget.normalDeltas[oldIndex];
+          }
+        }
+        morphTarget.normalDeltas.swap(remapped);
+      }
+      if (!morphTarget.tangentDeltas.empty()) {
+        std::pmr::vector<glm::vec3> remapped(mem);
+        remapped.resize(optimizedVertexCount, glm::vec3(0.0f));
+        for (size_t oldIndex = 0; oldIndex < vertexFetchRemap.size();
+             ++oldIndex) {
+          const unsigned int newIndex = vertexFetchRemap[oldIndex];
+          if (newIndex < remapped.size() &&
+              oldIndex < morphTarget.tangentDeltas.size()) {
+            remapped[newIndex] = morphTarget.tangentDeltas[oldIndex];
+          }
+        }
+        morphTarget.tangentDeltas.swap(remapped);
+      }
+    }
+
     for (uint32_t lodIndex = 0; lodIndex < lodCount; ++lodIndex) {
       std::pmr::vector<uint32_t> remappedIndices(mem);
       remappedIndices.resize(lodIndexBuffers[lodIndex].size());
@@ -1331,16 +1506,33 @@ void optimizeVertexFetchForAllLods(
 
 void appendSubmeshToMeshData(
     MeshData &data, const aiMesh &mesh, std::span<const Vertex> vertices,
-    const BoundingBox &bounds, const glm::vec3 &authoredScale,
-    uint32_t sourceMaterialIndex, uint32_t lodCount,
+    std::span<const VertexSkinInfluence> skinInfluences,
+    std::span<const MorphTarget> morphTargets, const BoundingBox &bounds,
+    const glm::vec3 &authoredScale, uint32_t sourceMaterialIndex,
+    uint32_t lodCount,
     std::span<const std::pmr::vector<uint32_t>> lodIndexBuffers,
     const std::array<float, Submesh::kMaxLodCount> &lodErrors,
     uint32_t meshIndex) {
   const uint32_t vertexBase = static_cast<uint32_t>(data.vertices.size());
   data.vertices.insert(data.vertices.end(), vertices.begin(), vertices.end());
+  if (!data.skinInfluences.empty() || !skinInfluences.empty()) {
+    if (data.skinInfluences.size() < vertexBase) {
+      data.skinInfluences.resize(vertexBase);
+    }
+    if (!skinInfluences.empty()) {
+      data.skinInfluences.insert(data.skinInfluences.end(),
+                                 skinInfluences.begin(), skinInfluences.end());
+    } else {
+      data.skinInfluences.resize(vertexBase + vertices.size());
+    }
+  }
 
   Submesh submesh{};
+  submesh.vertexOffset = vertexBase;
+  submesh.vertexCount = static_cast<uint32_t>(vertices.size());
   submesh.materialIndex = sourceMaterialIndex;
+  submesh.morphTargetFirst = static_cast<uint32_t>(data.morphTargets.size());
+  submesh.morphTargetCount = static_cast<uint32_t>(morphTargets.size());
   submesh.bounds = bounds;
   submesh.authoredScale = authoredScale;
   submesh.lodCount = lodCount;
@@ -1370,6 +1562,18 @@ void appendSubmeshToMeshData(
     return;
   }
 
+  for (const MorphTarget &morphTarget : morphTargets) {
+    data.morphTargets.emplace_back(
+        data.morphTargets.get_allocator().resource());
+    MorphTarget &dst = data.morphTargets.back();
+    dst.name.assign(morphTarget.name.data(), morphTarget.name.size());
+    dst.positionDeltas.assign(morphTarget.positionDeltas.begin(),
+                              morphTarget.positionDeltas.end());
+    dst.normalDeltas.assign(morphTarget.normalDeltas.begin(),
+                            morphTarget.normalDeltas.end());
+    dst.tangentDeltas.assign(morphTarget.tangentDeltas.begin(),
+                             morphTarget.tangentDeltas.end());
+  }
   data.submeshes.push_back(submesh);
 }
 
@@ -1430,12 +1634,17 @@ buildSceneMeshData(const aiMesh &mesh, uint32_t sceneMeshIndex,
   const uint32_t requestedLodCount = clampLodCount(options);
   ScopedScratch scopedScratch(scratch);
   std::pmr::vector<Vertex> meshVertices(scopedScratch.resource());
+  std::pmr::vector<VertexSkinInfluence> meshSkinInfluences(
+      scopedScratch.resource());
+  std::pmr::vector<MorphTarget> meshMorphTargets(scopedScratch.resource());
   std::pmr::vector<uint32_t> lod0Indices(scopedScratch.resource());
   std::array<std::pmr::vector<uint32_t>, Submesh::kMaxLodCount>
       lodIndexBuffers = makeLodIndexBuffers(scopedScratch.resource());
   std::array<float, Submesh::kMaxLodCount> lodErrors{};
 
   extractMeshGeometry(mesh, aiMatrix4x4(), meshVertices, lod0Indices);
+  extractSkinInfluences(mesh, meshSkinInfluences);
+  extractMorphTargets(mesh, aiMatrix4x4(), meshVertices, meshMorphTargets);
   if (meshVertices.empty() || lod0Indices.size() < kTriangleIndexCount) {
     return nuri::Result<MeshData, std::string>::makeError(
         "mesh has insufficient geometry");
@@ -1454,8 +1663,10 @@ buildSceneMeshData(const aiMesh &mesh, uint32_t sceneMeshIndex,
       options, requestedLodCount, sceneMeshIndex, meshVertices,
       options.optimize, lodIndexBuffers, lodErrors);
   if (options.optimize) {
-    optimizeVertexFetchForAllLods(meshVertices, generatedLodCount,
-                                  lodIndexBuffers);
+    optimizeVertexFetchForAllLods(
+        meshVertices, generatedLodCount, lodIndexBuffers, &meshSkinInfluences,
+        std::span<MorphTarget>(meshMorphTargets.data(),
+                               meshMorphTargets.size()));
   }
 
   data.vertices.reserve(meshVertices.size());
@@ -1465,10 +1676,10 @@ buildSceneMeshData(const aiMesh &mesh, uint32_t sceneMeshIndex,
   }
   data.indices.reserve(totalIndexCount);
   const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
-  appendSubmeshToMeshData(data, mesh, meshVertices, submeshBounds,
-                          glm::vec3(1.0f), mesh.mMaterialIndex,
-                          generatedLodCount, lodIndexBuffers, lodErrors,
-                          sceneMeshIndex);
+  appendSubmeshToMeshData(data, mesh, meshVertices, meshSkinInfluences,
+                          meshMorphTargets, submeshBounds, glm::vec3(1.0f),
+                          mesh.mMaterialIndex, generatedLodCount,
+                          lodIndexBuffers, lodErrors, sceneMeshIndex);
   return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
 }
 
@@ -1553,12 +1764,17 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
 
     ScopedScratch scopedScratch(scratch);
     std::pmr::vector<Vertex> meshVertices(scopedScratch.resource());
+    std::pmr::vector<VertexSkinInfluence> meshSkinInfluences(
+        scopedScratch.resource());
+    std::pmr::vector<MorphTarget> meshMorphTargets(scopedScratch.resource());
     std::pmr::vector<uint32_t> lod0Indices(scopedScratch.resource());
     std::array<std::pmr::vector<uint32_t>, Submesh::kMaxLodCount>
         lodIndexBuffers = makeLodIndexBuffers(scopedScratch.resource());
     std::array<float, Submesh::kMaxLodCount> lodErrors{};
 
     extractMeshGeometry(mesh, transform, meshVertices, lod0Indices);
+    extractSkinInfluences(mesh, meshSkinInfluences);
+    extractMorphTargets(mesh, transform, meshVertices, meshMorphTargets);
     if (meshVertices.empty() || lod0Indices.size() < kTriangleIndexCount) {
       ++insufficientGeometryMeshCount;
       if (insufficientGeometrySampleCount <
@@ -1583,15 +1799,17 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
         options.optimize, lodIndexBuffers, lodErrors);
 
     if (options.optimize) {
-      optimizeVertexFetchForAllLods(meshVertices, generatedLodCount,
-                                    lodIndexBuffers);
+      optimizeVertexFetchForAllLods(
+          meshVertices, generatedLodCount, lodIndexBuffers, &meshSkinInfluences,
+          std::span<MorphTarget>(meshMorphTargets.data(),
+                                 meshMorphTargets.size()));
     }
 
     const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
-    appendSubmeshToMeshData(data, mesh, meshVertices, submeshBounds,
-                            authoredScale, sourceMaterialIndex,
-                            generatedLodCount, lodIndexBuffers, lodErrors,
-                            sourceSceneMeshIndex);
+    appendSubmeshToMeshData(data, mesh, meshVertices, meshSkinInfluences,
+                            meshMorphTargets, submeshBounds, authoredScale,
+                            sourceMaterialIndex, generatedLodCount,
+                            lodIndexBuffers, lodErrors, sourceSceneMeshIndex);
   };
 
   if (!importedScene.renderables.empty()) {
@@ -1714,8 +1932,19 @@ MeshImporter::loadFromFile(std::string_view path,
     return nuri::Result<MeshData, std::string>::makeError(
         "MeshImporter::loadFromFile: " + importedSceneResult.error());
   }
-  return buildFlattenedSceneDataFromImportedScene(
+  auto flattenedResult = buildFlattenedSceneDataFromImportedScene(
       path, importedSceneResult.value(), options, mem);
+  if (flattenedResult.hasError()) {
+    return flattenedResult;
+  }
+  MeshData data = std::move(flattenedResult.value());
+  data.skinInfluences.clear();
+  data.morphTargets.clear();
+  for (Submesh &submesh : data.submeshes) {
+    submesh.morphTargetFirst = 0u;
+    submesh.morphTargetCount = 0u;
+  }
+  return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
 }
 
 nuri::Result<MeshData, std::string> detail::loadSceneMeshFromSourceIndex(
