@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-#include "nuri/core/layer.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 
 #include <algorithm>
 #include <array>
@@ -272,7 +272,7 @@ TEST(RenderGraphCompileBehaviorTest,
       addTestGraphicsPass(builder, makeTestPass("c3_pass1"), "c3_pass1");
   ASSERT_FALSE(pass1Result.hasError());
   ASSERT_FALSE(builder.markPassSideEffect(pass1Result.value()).hasError());
-  constexpr uint32_t kExtraParallelPayloadPassCount = 14u;
+  constexpr uint32_t kExtraParallelPayloadPassCount = 48u;
   for (uint32_t i = 0u; i < kExtraParallelPayloadPassCount; ++i) {
     const std::string passName = "c3_extra_pass_" + std::to_string(i);
     auto extraPassResult =
@@ -811,8 +811,9 @@ TEST(RenderGraphCompileBehaviorTest, AddGraphicsPassNativeDeclarationPath) {
     return;
   }
   if (!(compiled.drawRangesByPass.size() == 1u &&
-        compiled.drawRangesByPass[0u].count == 1u)) {
-    ADD_FAILURE() << "native declaration path should preserve draw ranges";
+        compiled.drawRangesByPass[0u].count == 0u &&
+        compiled.orderedPasses[0u].draws.size() == 1u)) {
+    ADD_FAILURE() << "native declaration path should preserve borrowed draws";
     return;
   }
 }
@@ -851,8 +852,7 @@ TEST(RenderGraphCompileBehaviorTest, AddPreparedGraphicsPassNativePath) {
       dependencyBindings = {{
           {.dependencyIndex = 0u,
            .buffer = dependencyImportResult.value(),
-           .mode = RenderGraphAccessMode::Read |
-                   RenderGraphAccessMode::Write},
+           .mode = RenderGraphAccessMode::Read | RenderGraphAccessMode::Write},
       }};
   std::array<RenderGraphPreparedDrawBufferBinding, 1u> drawBindings = {{
       {.drawIndex = 0u,
@@ -874,8 +874,9 @@ TEST(RenderGraphCompileBehaviorTest, AddPreparedGraphicsPassNativePath) {
   passDesc.dependencyBuffers =
       std::span<const BufferHandle>(dependencies.data(), dependencies.size());
   passDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
-  passDesc.dependencyBufferBindings = std::span<const RenderGraphPreparedDependencyBufferBinding>(
-      dependencyBindings.data(), dependencyBindings.size());
+  passDesc.dependencyBufferBindings =
+      std::span<const RenderGraphPreparedDependencyBufferBinding>(
+          dependencyBindings.data(), dependencyBindings.size());
   passDesc.drawBufferBindings =
       std::span<const RenderGraphPreparedDrawBufferBinding>(
           drawBindings.data(), drawBindings.size());
@@ -902,8 +903,9 @@ TEST(RenderGraphCompileBehaviorTest, AddPreparedGraphicsPassNativePath) {
     return;
   }
   if (!(compiled.unresolvedTextureBindings.size() == 2u)) {
-    ADD_FAILURE() << "prepared graphics path should emit unresolved color+depth "
-                     "transient bindings";
+    ADD_FAILURE()
+        << "prepared graphics path should emit unresolved color+depth "
+           "transient bindings";
     return;
   }
   if (!(compiled.dependencyBufferRangesByPass.size() == 1u &&
@@ -913,8 +915,9 @@ TEST(RenderGraphCompileBehaviorTest, AddPreparedGraphicsPassNativePath) {
     return;
   }
   if (!(compiled.drawRangesByPass.size() == 1u &&
-        compiled.drawRangesByPass[0u].count == 1u)) {
-    ADD_FAILURE() << "prepared graphics path should preserve draw ranges";
+        compiled.drawRangesByPass[0u].count == 0u &&
+        compiled.orderedPasses[0u].draws.size() == 1u)) {
+    ADD_FAILURE() << "prepared graphics path should preserve borrowed draws";
     return;
   }
 }
@@ -1266,13 +1269,13 @@ TEST(RenderGraphCompileBehaviorTest, DefaultPolicyCullsUnmarkedPasses) {
   }
 }
 
-class TestImplicitOutputLegacyLayer final : public Layer {
+class TestImplicitOutputLegacyLayer final {
 public:
   explicit TestImplicitOutputLegacyLayer(TextureHandle explicitColorOut)
       : explicitColorOut_(explicitColorOut) {}
 
-  Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &, RenderGraphBuilder &graph) override {
+  Result<bool, std::string> buildRenderGraph(RenderFrameContext &,
+                                             RenderGraphBuilder &graph) {
     RenderGraphGraphicsPassDesc implicitDesc{};
     implicitDesc.debugLabel = "legacy_bridge_implicit";
     auto implicitResult = graph.addGraphicsPass(implicitDesc);
@@ -1300,22 +1303,16 @@ private:
   TextureHandle explicitColorOut_{};
 };
 
-class TestDepthOverrideLegacyLayer final : public Layer {
+class TestDepthOverrideLegacyLayer final {
 public:
   explicit TestDepthOverrideLegacyLayer(TextureHandle depthTexture)
       : depthTexture_(depthTexture) {}
 
-  Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame,
-                   RenderGraphBuilder &graph) override {
+  Result<bool, std::string> buildRenderGraph(RenderFrameContext &frame,
+                                             RenderGraphBuilder &graph) {
     const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
-    RenderGraphTextureId sceneDepthGraphTexture{};
-    if (const RenderGraphTextureId *publishedSceneDepth =
-            frame.channels.tryGet<RenderGraphTextureId>(
-                kFrameChannelSceneDepthGraphTexture);
-        publishedSceneDepth != nullptr) {
-      sceneDepthGraphTexture = *publishedSceneDepth;
-    }
+    const RenderGraphTextureId sceneDepthGraphTexture =
+        resolveSceneDepthGraphTexture(frame);
 
     RenderGraphGraphicsPassDesc desc{};
     desc.debugLabel = "legacy_bridge_depth_override";
@@ -1430,10 +1427,8 @@ TEST(RenderGraphCompileBehaviorTest,
   const TextureHandle sceneDepthTexture{.index = 101u, .generation = 1u};
   TestDepthOverrideLegacyLayer layer(sceneDepthTexture);
   RenderFrameContext frame{};
-  frame.channels.publish<TextureHandle>(kFrameChannelSceneDepthTexture,
-                                        sceneDepthTexture);
-  frame.channels.publish<RenderGraphTextureId>(
-      kFrameChannelSceneDepthGraphTexture, sceneDepthResult.value());
+  frame.sharedResources.sceneDepthTexture = sceneDepthTexture;
+  frame.sharedResources.sceneDepthGraphTexture = sceneDepthResult.value();
 
   auto buildResult = layer.buildRenderGraph(frame, builder);
   if (!(!buildResult.hasError())) {

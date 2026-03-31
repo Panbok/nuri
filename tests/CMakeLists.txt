@@ -6,6 +6,18 @@ set(NURI_TEST_PCH_HEADER
 )
 
 get_filename_component(NURI_CXX_COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+get_filename_component(NURI_CXX_COMPILER_ROOT "${NURI_CXX_COMPILER_BIN_DIR}" DIRECTORY)
+
+set(_nuri_clang_runtime_dirs)
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  string(REGEX MATCH "^[0-9]+" _nuri_clang_version_major
+    "${CMAKE_CXX_COMPILER_VERSION}"
+  )
+  list(APPEND _nuri_clang_runtime_dirs
+    "${NURI_CXX_COMPILER_ROOT}/lib/clang/${_nuri_clang_version_major}/lib/windows"
+    "${NURI_CXX_COMPILER_ROOT}/lib/clang/${CMAKE_CXX_COMPILER_VERSION}/lib/windows"
+  )
+endif()
 
 if(DEFINED VCPKG_TARGET_TRIPLET AND NOT "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
   set(_nuri_vcpkg_bin_dirs
@@ -22,6 +34,7 @@ endif()
 
 set(_nuri_test_path
   "${CMAKE_BINARY_DIR}/lib"
+  ${_nuri_clang_runtime_dirs}
   ${_nuri_vcpkg_bin_dirs}
   "${NURI_CXX_COMPILER_BIN_DIR}"
   "$ENV{PATH}"
@@ -203,4 +216,10 @@ nuri_add_gtest_suite(
   nuri_texture_cache_utils_tests
   src/texture_cache_utils_tests.cpp
   "texture_cache_utils::"
+)
+
+nuri_add_gtest_suite(
+  nuri_scene_animation_tests
+  src/scene_animation_tests.cpp
+  "scene_animation::"
 )

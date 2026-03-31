@@ -616,7 +616,7 @@ TEST_F(RenderGraphExecutorTest,
 
 TEST_F(RenderGraphExecutorTest,
        ExecutorParallelRecordFailureDiscardsAllContextsAndSubmitsNothing) {
-  auto compileResult = buildIndependentParallelCompiledFrame(126u, 8u);
+  auto compileResult = buildIndependentParallelCompiledFrame(126u, 24u);
   ASSERT_FALSE(compileResult.hasError());
 
   FakeExecutorGPUDevice gpu;
@@ -646,7 +646,7 @@ TEST_F(RenderGraphExecutorTest,
 
 TEST_F(RenderGraphExecutorTest,
        ExecutorParallelFinishFailureDiscardsRecordedBuffersAndSubmitsNothing) {
-  auto compileResult = buildIndependentParallelCompiledFrame(127u, 8u);
+  auto compileResult = buildIndependentParallelCompiledFrame(127u, 24u);
   ASSERT_FALSE(compileResult.hasError());
 
   FakeExecutorGPUDevice gpu;
@@ -722,6 +722,7 @@ TEST_F(RenderGraphExecutorTest,
     return;
   }
   invalid.orderedPassIndices.pop_back();
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -757,6 +758,7 @@ TEST_F(RenderGraphExecutorTest,
 
   RenderGraphCompileResult invalid = compileResult.value();
   invalid.culledPassCount += 1u;
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -798,6 +800,7 @@ TEST_F(RenderGraphExecutorTest,
     return;
   }
   invalid.passDebugNames.pop_back();
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -832,6 +835,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsRootPassCountOverDeclared) {
 
   RenderGraphCompileResult invalid = compileResult.value();
   invalid.rootPassCount = invalid.declaredPassCount + 1u;
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -871,6 +875,7 @@ TEST_F(RenderGraphExecutorTest,
     return;
   }
   invalid.edges[0u].after = invalid.declaredPassCount;
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -909,6 +914,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDependencyEdgeSelfCycle) {
     return;
   }
   invalid.edges[0u].after = invalid.edges[0u].before;
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -949,6 +955,7 @@ TEST_F(RenderGraphExecutorTest,
     return;
   }
   invalid.edges[0u].after = 2u;
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -987,6 +994,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedDependencyEdge) {
     return;
   }
   invalid.edges.push_back(invalid.edges[0u]);
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -1025,6 +1033,7 @@ TEST_F(RenderGraphExecutorTest,
   }
   invalid.edges[0u].before = invalid.orderedPassIndices[1u];
   invalid.edges[0u].after = invalid.orderedPassIndices[0u];
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -1154,6 +1163,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsOrderedPassIndexOutOfRange) {
     return;
   }
   invalid.orderedPassIndices[0u] = invalid.declaredPassCount;
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -1195,6 +1205,7 @@ TEST_F(RenderGraphExecutorTest, ExecutorRejectsDuplicatedOrderedPassIndex) {
   invalid.orderedPasses.push_back(invalid.orderedPasses[0u]);
   invalid.orderedPassIndices.push_back(invalid.orderedPassIndices[0u]);
   invalid.passDebugNames.push_back("exec_pass_dup");
+  invalid.metadataValidated = false;
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;

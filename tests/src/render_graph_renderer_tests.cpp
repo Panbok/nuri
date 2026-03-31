@@ -4,8 +4,9 @@
 
 #include <gtest/gtest.h>
 
-#include "nuri/core/layer.h"
-#include "nuri/core/layer_stack.h"
+#include "nuri/gfx/pipeline/render_feature.h"
+#include "nuri/gfx/pipeline/render_feature_pass.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/renderer.h"
 
 #include <array>
@@ -28,51 +29,118 @@ std::filesystem::path makeTempRendererPath(std::string_view stem) {
          ("nuri_" + std::string(stem) + "_" + std::to_string(tick));
 }
 
-class ExplicitFrameOutputLayer final : public Layer {
+class SinglePassFeaturePass final : public RenderFeaturePass {
 public:
-  explicit ExplicitFrameOutputLayer(TextureHandle outputTexture)
-      : outputTexture(outputTexture) {}
+  struct Config {
+    std::string_view passName{};
+    TextureHandle outputTexture{};
+    bool useExplicitFrameOutput = false;
+    uint32_t debugColor = 0xffffffffu;
+  };
 
-  Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &, RenderGraphBuilder &graph) override {
-    RenderPass pass{};
-    pass.colorTexture = outputTexture;
-    pass.debugLabel = "Layer Explicit Output Pass";
+  explicit SinglePassFeaturePass(Config config) : config_(config) {}
 
-    auto addResult = addTestGraphicsPass(graph, pass, pass.debugLabel);
+  std::string_view name() const noexcept override { return config_.passName; }
+  bool isEnabled(const FrameBuildContext &) const override { return true; }
+
+  Result<bool, std::string> prepare(FrameBuildContext &) override {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  Result<bool, std::string> build(FrameBuildContext &ctx) override {
+    if (config_.useExplicitFrameOutput) {
+      auto importResult =
+          ctx.graph.importTexture(config_.outputTexture, "layer_output_tex");
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+
+      RenderGraphGraphicsPassDesc desc{};
+      desc.colorTexture = importResult.value();
+      desc.debugLabel = config_.passName;
+      desc.debugColor = config_.debugColor;
+      desc.markColorAsFrameOutput = true;
+      auto addResult = ctx.graph.addGraphicsPass(desc);
+      if (addResult.hasError()) {
+        return Result<bool, std::string>::makeError(addResult.error());
+      }
+      return Result<bool, std::string>::makeResult(true);
+    }
+
+    RenderGraphGraphicsPassDesc desc{};
+    desc.debugLabel = config_.passName;
+    desc.debugColor = config_.debugColor;
+    auto addResult = ctx.graph.addGraphicsPass(desc);
     if (addResult.hasError()) {
       return Result<bool, std::string>::makeError(addResult.error());
     }
-
-    auto importResult = graph.importTexture(outputTexture, "layer_output_tex");
-    if (importResult.hasError()) {
-      return Result<bool, std::string>::makeError(importResult.error());
-    }
-    auto outputResult = graph.markTextureAsFrameOutput(importResult.value());
-    if (outputResult.hasError()) {
-      return Result<bool, std::string>::makeError(outputResult.error());
-    }
-
     return Result<bool, std::string>::makeResult(true);
   }
 
 private:
-  TextureHandle outputTexture{};
+  Config config_{};
 };
 
-class BaseImplicitOutputLayer final : public Layer {
+class SinglePassFeature final : public RenderFeature {
 public:
-  Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &, RenderGraphBuilder &graph) override {
-    RenderGraphGraphicsPassDesc desc{};
-    desc.debugLabel = "Base Implicit Output Pass";
-    desc.debugColor = 0xff778899u;
-    auto addResult = graph.addGraphicsPass(desc);
-    if (addResult.hasError()) {
-      return Result<bool, std::string>::makeError(addResult.error());
-    }
-    return Result<bool, std::string>::makeResult(true);
+  explicit SinglePassFeature(SinglePassFeaturePass::Config config)
+      : pass_(config), passes_{&pass_} {}
+
+  std::string_view name() const noexcept override {
+    return "SinglePassFeature";
   }
+
+  std::span<RenderFeaturePass *const> passes() noexcept override {
+    return std::span<RenderFeaturePass *const>(passes_.data(), passes_.size());
+  }
+
+private:
+  SinglePassFeaturePass pass_;
+  std::array<RenderFeaturePass *, 1> passes_{};
+};
+
+class BaseImplicitOutputFeature final : public RenderFeature {
+public:
+  BaseImplicitOutputFeature()
+      : pass_({.passName = "Base Implicit Output Pass",
+               .outputTexture = {},
+               .useExplicitFrameOutput = false,
+               .debugColor = 0xff778899u}),
+        passes_{&pass_} {}
+
+  std::string_view name() const noexcept override {
+    return "BaseImplicitOutputFeature";
+  }
+
+  std::span<RenderFeaturePass *const> passes() noexcept override {
+    return std::span<RenderFeaturePass *const>(passes_.data(), passes_.size());
+  }
+
+private:
+  SinglePassFeaturePass pass_;
+  std::array<RenderFeaturePass *, 1> passes_{};
+};
+
+class ExplicitFrameOutputFeature final : public RenderFeature {
+public:
+  explicit ExplicitFrameOutputFeature(TextureHandle outputTexture)
+      : pass_({.passName = "Layer Explicit Output Pass",
+               .outputTexture = outputTexture,
+               .useExplicitFrameOutput = true,
+               .debugColor = 0xffffffffu}),
+        passes_{&pass_} {}
+
+  std::string_view name() const noexcept override {
+    return "ExplicitFrameOutputFeature";
+  }
+
+  std::span<RenderFeaturePass *const> passes() noexcept override {
+    return std::span<RenderFeaturePass *const>(passes_.data(), passes_.size());
+  }
+
+private:
+  SinglePassFeaturePass pass_;
+  std::array<RenderFeaturePass *, 1> passes_{};
 };
 
 TEST(RenderGraphRendererTest,
@@ -84,20 +152,21 @@ TEST(RenderGraphRendererTest,
                                              scratchBytes.size());
   FakeRendererGPUDevice gpu;
   Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
 
-  LayerStack layers(&memory);
-  auto *baseLayer =
-      layers.pushLayer(std::make_unique<BaseImplicitOutputLayer>());
-  ASSERT_NE(baseLayer, nullptr) << "pushLayer for base pass should succeed";
+  auto *baseFeature =
+      pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>());
+  ASSERT_NE(baseFeature, nullptr) << "addFeature for base pass should succeed";
   const TextureHandle explicitOutputTexture{.index = 501u, .generation = 1u};
-  auto *layer = layers.pushLayer(
-      std::make_unique<ExplicitFrameOutputLayer>(explicitOutputTexture));
-  ASSERT_NE(layer, nullptr) << "pushLayer should succeed";
+  auto *feature = pipeline.addFeature(
+      std::make_unique<ExplicitFrameOutputFeature>(explicitOutputTexture));
+  ASSERT_NE(feature, nullptr) << "addFeature should succeed";
 
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 1u;
+  frameContext.resources = &renderer.resources();
 
-  auto renderResult = renderer.render(layers, frameContext);
+  auto renderResult = renderer.render(pipeline, frameContext);
   if (renderResult.hasError() || !renderResult.value()) {
     ADD_FAILURE() << "renderer render should succeed";
     if (renderResult.hasError()) {
@@ -127,16 +196,17 @@ TEST(RenderGraphRendererTest, RendererCapturesTelemetryWithoutAutomaticDump) {
                                              scratchBytes.size());
   FakeRendererGPUDevice gpu;
   Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
 
-  LayerStack layers(&memory);
-  auto *baseLayer =
-      layers.pushLayer(std::make_unique<BaseImplicitOutputLayer>());
-  ASSERT_NE(baseLayer, nullptr);
+  auto *baseFeature =
+      pipeline.addFeature(std::make_unique<BaseImplicitOutputFeature>());
+  ASSERT_NE(baseFeature, nullptr);
 
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 7u;
+  frameContext.resources = &renderer.resources();
 
-  auto renderResult = renderer.render(layers, frameContext);
+  auto renderResult = renderer.render(pipeline, frameContext);
   ASSERT_FALSE(renderResult.hasError());
   ASSERT_TRUE(renderResult.value());
 

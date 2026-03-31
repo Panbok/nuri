@@ -156,7 +156,9 @@ set "EXPECTED_LINKER=link.exe"
 for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
 set "BUILD_DIR=%REPO_ROOT%\build\%MODE%"
 set "CONFIG_STAMP_FILE=%BUILD_DIR%\.nuri_config.txt"
+set "TOOLCHAIN_STAMP_FILE=%BUILD_DIR%\.nuri_toolchain.txt"
 set "DESIRED_CONFIG=mode=%MODE% profile=%PROFILE% tracy=%TRACY_MODE% devchecks=%DEVCHECKS% cc=%C_COMPILER_ARG% cxx=%CXX_COMPILER_ARG% linker=%LINKER_ARG% asan=%NURI_WITH_ASAN% logging=%NURI_WITH_LOGGING% asserts=%NURI_WITH_ASSERTS% tracy_cpu=%NURI_WITH_TRACY% tracy_gpu=%NURI_WITH_TRACY_GPU% tracy_gpu_draw=%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
+set "TOOLCHAIN_SIGNATURE=vs=%VisualStudioVersion% vc=%VCToolsVersion% sdk=%WindowsSDKVersion% cxx=%EXPECTED_CXX_COMPILER% linker=%EXPECTED_LINKER%"
 set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 set "MAKE_PROGRAM_ARG=-DCMAKE_MAKE_PROGRAM=%NINJA_EXE%"
 set "VCPKG_EXECUTABLE_ARG=-DVCPKG_EXECUTABLE=%VCPKG_ROOT%\vcpkg.exe"
@@ -167,12 +169,29 @@ call "%SCRIPT_DIR%bootstrap_lightweightvk.bat"
 if errorlevel 1 exit /b 1
 
 set "SHOULD_CONFIGURE=1"
+set "SHOULD_CLEAN=0"
 if exist "%BUILD_DIR%\CMakeCache.txt" if exist "%CONFIG_STAMP_FILE%" (
   set /p "EXISTING_CONFIG=" < "%CONFIG_STAMP_FILE%"
   if "!EXISTING_CONFIG!"=="%DESIRED_CONFIG%" set "SHOULD_CONFIGURE=0"
 )
+if exist "%BUILD_DIR%\CMakeCache.txt" (
+  if not exist "%TOOLCHAIN_STAMP_FILE%" (
+    set "SHOULD_CLEAN=1"
+    set "SHOULD_CONFIGURE=1"
+  ) else (
+    set /p "EXISTING_TOOLCHAIN=" < "%TOOLCHAIN_STAMP_FILE%"
+    if /I not "!EXISTING_TOOLCHAIN!"=="%TOOLCHAIN_SIGNATURE%" (
+      set "SHOULD_CLEAN=1"
+      set "SHOULD_CONFIGURE=1"
+    )
+  )
+)
 
 if "%SHOULD_CONFIGURE%"=="0" goto build_target
+if "%SHOULD_CLEAN%"=="1" if exist "%BUILD_DIR%" (
+  echo Toolchain changed; removing stale build tree "%BUILD_DIR%".
+  rmdir /s /q "%BUILD_DIR%"
+)
 if /I "%MODE%"=="debug" goto configure_debug
 if /I "%MODE%"=="release" goto configure_release
 goto usage
@@ -230,6 +249,7 @@ goto write_config_stamp
 :write_config_stamp
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 > "%CONFIG_STAMP_FILE%" echo(%DESIRED_CONFIG%
+> "%TOOLCHAIN_STAMP_FILE%" echo(%TOOLCHAIN_SIGNATURE%
 
 :build_target
 if "%BUILD_TARGET%"=="" (
