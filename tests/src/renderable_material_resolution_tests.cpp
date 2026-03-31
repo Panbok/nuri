@@ -1,6 +1,6 @@
 #include "tests_pch.h"
 
-#include "nuri/gfx/layers/renderable_material_resolution.h"
+#include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
 
 namespace {
 
