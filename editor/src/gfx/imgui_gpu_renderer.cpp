@@ -78,17 +78,17 @@ void main() {
 }
 )";
 
-inline ImTextureID toImTextureID(uint32_t id) {
-  if constexpr (std::is_pointer_v<ImTextureID>) {
-    return reinterpret_cast<ImTextureID>(static_cast<uintptr_t>(id));
+template <typename T = ImTextureID> inline T toImTextureID(uint32_t id) {
+  if constexpr (std::is_pointer_v<T>) {
+    return static_cast<T>(reinterpret_cast<void *>(static_cast<uintptr_t>(id)));
   } else {
-    return static_cast<ImTextureID>(static_cast<uintptr_t>(id));
+    return static_cast<T>(static_cast<uintptr_t>(id));
   }
 }
 
-inline uint32_t fromImTextureID(ImTextureID id) {
+template <typename T = ImTextureID> inline uint32_t fromImTextureID(T id) {
   uintptr_t raw = 0;
-  if constexpr (std::is_pointer_v<ImTextureID>) {
+  if constexpr (std::is_pointer_v<T>) {
     raw = reinterpret_cast<uintptr_t>(id);
   } else {
     raw = static_cast<uintptr_t>(id);

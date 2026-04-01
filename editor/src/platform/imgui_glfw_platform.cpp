@@ -2,53 +2,30 @@
 
 #include <GLFW/glfw3.h>
 #include <imgui_impl_glfw.h>
+#include <mutex>
+#include <unordered_map>
 
 namespace nuri {
 
 namespace {
 
-int toGlfwKey(Key key) {
-  if (key == Key::Unknown) {
-    return GLFW_KEY_UNKNOWN;
-  }
-  return static_cast<int>(key);
+std::mutex g_platformMapMutex;
+std::unordered_map<GLFWwindow *, ImGuiGlfwPlatform *> g_platformMap;
+
+ImGuiGlfwPlatform *findPlatform(GLFWwindow *window) {
+  std::scoped_lock lock(g_platformMapMutex);
+  const auto it = g_platformMap.find(window);
+  return it != g_platformMap.end() ? it->second : nullptr;
 }
 
-int toGlfwKeyAction(KeyAction action) {
-  switch (action) {
-  case KeyAction::Press:
-    return GLFW_PRESS;
-  case KeyAction::Release:
-    return GLFW_RELEASE;
-  case KeyAction::Repeat:
-    return GLFW_REPEAT;
-  default:
-    return GLFW_RELEASE;
+void registerPlatform(GLFWwindow *window, ImGuiGlfwPlatform *platform) {
+  std::scoped_lock lock(g_platformMapMutex);
+  if (platform == nullptr) {
+    g_platformMap.erase(window);
+    return;
   }
-
-  return GLFW_RELEASE;
+  g_platformMap[window] = platform;
 }
-
-int toGlfwMouseButton(MouseButton button) {
-  if (button == MouseButton::Unknown) {
-    return -1;
-  }
-  return static_cast<int>(button);
-}
-
-int toGlfwMouseAction(MouseAction action) {
-  switch (action) {
-  case MouseAction::Press:
-    return GLFW_PRESS;
-  case MouseAction::Release:
-    return GLFW_RELEASE;
-  default:
-    return GLFW_RELEASE;
-  }
-  return GLFW_RELEASE;
-}
-
-int toGlfwMods(KeyMod mods) { return static_cast<int>(mods); }
 
 } // namespace
 
@@ -59,45 +36,38 @@ ImGuiGlfwPlatform::create(Window &window, EventManager &events) {
 }
 
 ImGuiGlfwPlatform::ImGuiGlfwPlatform(Window &window, EventManager &events)
-    : window_(window), events_(events) {
+    : window_(window) {
+  (void)events;
   glfwWindow_ = static_cast<GLFWwindow *>(window_.nativeHandle());
   ImGui_ImplGlfw_InitForVulkan(glfwWindow_, /*install_callbacks=*/false);
-
-  keySub_ = events_.subscribe<RawKeyEvent>(
-      EventChannel::RawInput,
-      &onRaw<RawKeyEvent, &ImGuiGlfwPlatform::handleRawKey>, this);
-  charSub_ = events_.subscribe<RawCharEvent>(
-      EventChannel::RawInput,
-      &onRaw<RawCharEvent, &ImGuiGlfwPlatform::handleRawChar>, this);
-  mouseButtonSub_ = events_.subscribe<RawMouseButtonEvent>(
-      EventChannel::RawInput,
-      &onRaw<RawMouseButtonEvent, &ImGuiGlfwPlatform::handleRawMouseButton>,
-      this);
-  mouseMoveSub_ = events_.subscribe<RawMouseMoveEvent>(
-      EventChannel::RawInput,
-      &onRaw<RawMouseMoveEvent, &ImGuiGlfwPlatform::handleRawMouseMove>, this);
-  mouseScrollSub_ = events_.subscribe<RawMouseScrollEvent>(
-      EventChannel::RawInput,
-      &onRaw<RawMouseScrollEvent, &ImGuiGlfwPlatform::handleRawMouseScroll>,
-      this);
-  focusSub_ = events_.subscribe<RawFocusEvent>(
-      EventChannel::RawInput,
-      &onRaw<RawFocusEvent, &ImGuiGlfwPlatform::handleRawFocus>, this);
-  cursorEnterSub_ = events_.subscribe<RawCursorEnterEvent>(
-      EventChannel::RawInput,
-      &onRaw<RawCursorEnterEvent, &ImGuiGlfwPlatform::handleRawCursorEnter>,
-      this);
+  registerPlatform(glfwWindow_, this);
+  prevKeyCallback_ =
+      glfwSetKeyCallback(glfwWindow_, &ImGuiGlfwPlatform::onGlfwKey);
+  prevCharCallback_ =
+      glfwSetCharCallback(glfwWindow_, &ImGuiGlfwPlatform::onGlfwChar);
+  prevMouseButtonCallback_ = glfwSetMouseButtonCallback(
+      glfwWindow_, &ImGuiGlfwPlatform::onGlfwMouseButton);
+  prevCursorPosCallback_ = glfwSetCursorPosCallback(
+      glfwWindow_, &ImGuiGlfwPlatform::onGlfwCursorPos);
+  prevScrollCallback_ =
+      glfwSetScrollCallback(glfwWindow_, &ImGuiGlfwPlatform::onGlfwScroll);
+  prevFocusCallback_ =
+      glfwSetWindowFocusCallback(glfwWindow_, &ImGuiGlfwPlatform::onGlfwFocus);
+  prevCursorEnterCallback_ = glfwSetCursorEnterCallback(
+      glfwWindow_, &ImGuiGlfwPlatform::onGlfwCursorEnter);
 }
 
 ImGuiGlfwPlatform::~ImGuiGlfwPlatform() {
-  (void)events_.unsubscribe(keySub_);
-  (void)events_.unsubscribe(charSub_);
-  (void)events_.unsubscribe(mouseButtonSub_);
-  (void)events_.unsubscribe(mouseMoveSub_);
-  (void)events_.unsubscribe(mouseScrollSub_);
-  (void)events_.unsubscribe(focusSub_);
-  (void)events_.unsubscribe(cursorEnterSub_);
-
+  if (glfwWindow_ != nullptr) {
+    glfwSetKeyCallback(glfwWindow_, prevKeyCallback_);
+    glfwSetCharCallback(glfwWindow_, prevCharCallback_);
+    glfwSetMouseButtonCallback(glfwWindow_, prevMouseButtonCallback_);
+    glfwSetCursorPosCallback(glfwWindow_, prevCursorPosCallback_);
+    glfwSetScrollCallback(glfwWindow_, prevScrollCallback_);
+    glfwSetWindowFocusCallback(glfwWindow_, prevFocusCallback_);
+    glfwSetCursorEnterCallback(glfwWindow_, prevCursorEnterCallback_);
+    registerPlatform(glfwWindow_, nullptr);
+  }
   ImGui_ImplGlfw_Shutdown();
   glfwWindow_ = nullptr;
 }
@@ -118,70 +88,135 @@ void ImGuiGlfwPlatform::newFrame() {
   ImGui_ImplGlfw_NewFrame();
 }
 
-bool ImGuiGlfwPlatform::handleRawKey(const RawKeyEvent &event) {
-  if (!glfwWindow_) {
-    return false;
+void ImGuiGlfwPlatform::onGlfwKey(GLFWwindow *window, int key, int scancode,
+                                  int action, int mods) {
+  if (ImGuiGlfwPlatform *platform = findPlatform(window); platform != nullptr) {
+    platform->invokePrevKeyCallback(key, scancode, action, mods);
+    platform->handleGlfwKey(key, scancode, action, mods);
   }
-  ImGui_ImplGlfw_KeyCallback(glfwWindow_, toGlfwKey(event.key), event.scancode,
-                             toGlfwKeyAction(event.action),
-                             toGlfwMods(event.mods));
-  return false;
 }
 
-bool ImGuiGlfwPlatform::handleRawChar(const RawCharEvent &event) {
-  if (!glfwWindow_) {
-    return false;
+void ImGuiGlfwPlatform::onGlfwChar(GLFWwindow *window, unsigned int codepoint) {
+  if (ImGuiGlfwPlatform *platform = findPlatform(window); platform != nullptr) {
+    platform->invokePrevCharCallback(codepoint);
+    platform->handleGlfwChar(codepoint);
   }
-  ImGui_ImplGlfw_CharCallback(glfwWindow_, event.codepoint);
-  return false;
 }
 
-bool ImGuiGlfwPlatform::handleRawMouseButton(const RawMouseButtonEvent &event) {
-  if (!glfwWindow_) {
-    return false;
+void ImGuiGlfwPlatform::onGlfwMouseButton(GLFWwindow *window, int button,
+                                          int action, int mods) {
+  if (ImGuiGlfwPlatform *platform = findPlatform(window); platform != nullptr) {
+    platform->invokePrevMouseButtonCallback(button, action, mods);
+    platform->handleGlfwMouseButton(button, action, mods);
   }
-  const int button = toGlfwMouseButton(event.button);
-  if (button < 0) {
-    return false;
-  }
-  mouseButtons_[static_cast<size_t>(button)] =
-      event.action == MouseAction::Press;
-  ImGui_ImplGlfw_MouseButtonCallback(glfwWindow_, button,
-                                     toGlfwMouseAction(event.action),
-                                     toGlfwMods(event.mods));
-  return false;
 }
 
-bool ImGuiGlfwPlatform::handleRawMouseMove(const RawMouseMoveEvent &event) {
-  if (!glfwWindow_) {
-    return false;
+void ImGuiGlfwPlatform::onGlfwCursorPos(GLFWwindow *window, double x,
+                                        double y) {
+  if (ImGuiGlfwPlatform *platform = findPlatform(window); platform != nullptr) {
+    platform->invokePrevCursorPosCallback(x, y);
+    platform->handleGlfwMouseMove(x, y);
   }
-  ImGui_ImplGlfw_CursorPosCallback(glfwWindow_, event.x, event.y);
-  return false;
 }
 
-bool ImGuiGlfwPlatform::handleRawMouseScroll(const RawMouseScrollEvent &event) {
-  if (!glfwWindow_) {
-    return false;
+void ImGuiGlfwPlatform::onGlfwScroll(GLFWwindow *window, double xOffset,
+                                     double yOffset) {
+  if (ImGuiGlfwPlatform *platform = findPlatform(window); platform != nullptr) {
+    platform->invokePrevScrollCallback(xOffset, yOffset);
+    platform->handleGlfwMouseScroll(xOffset, yOffset);
   }
-  ImGui_ImplGlfw_ScrollCallback(glfwWindow_, event.xOffset, event.yOffset);
-  return false;
 }
 
-bool ImGuiGlfwPlatform::handleRawFocus(const RawFocusEvent &event) {
-  if (!glfwWindow_) {
-    return false;
+void ImGuiGlfwPlatform::onGlfwFocus(GLFWwindow *window, int focused) {
+  if (ImGuiGlfwPlatform *platform = findPlatform(window); platform != nullptr) {
+    platform->invokePrevFocusCallback(focused);
+    platform->handleGlfwFocus(focused);
   }
-  ImGui_ImplGlfw_WindowFocusCallback(glfwWindow_, event.focused ? 1 : 0);
-  return false;
 }
 
-bool ImGuiGlfwPlatform::handleRawCursorEnter(const RawCursorEnterEvent &event) {
-  if (!glfwWindow_) {
-    return false;
+void ImGuiGlfwPlatform::onGlfwCursorEnter(GLFWwindow *window, int entered) {
+  if (ImGuiGlfwPlatform *platform = findPlatform(window); platform != nullptr) {
+    platform->invokePrevCursorEnterCallback(entered);
+    platform->handleGlfwCursorEnter(entered);
   }
-  ImGui_ImplGlfw_CursorEnterCallback(glfwWindow_, event.entered ? 1 : 0);
-  return false;
+}
+
+void ImGuiGlfwPlatform::handleGlfwKey(int key, int scancode, int action,
+                                      int mods) {
+  ImGui_ImplGlfw_KeyCallback(glfwWindow_, key, scancode, action, mods);
+}
+
+void ImGuiGlfwPlatform::handleGlfwChar(unsigned int codepoint) {
+  ImGui_ImplGlfw_CharCallback(glfwWindow_, codepoint);
+}
+
+void ImGuiGlfwPlatform::handleGlfwMouseButton(int button, int action,
+                                              int mods) {
+  if (button >= 0 && button < static_cast<int>(mouseButtons_.size())) {
+    mouseButtons_[static_cast<size_t>(button)] = action == GLFW_PRESS;
+  }
+  ImGui_ImplGlfw_MouseButtonCallback(glfwWindow_, button, action, mods);
+}
+
+void ImGuiGlfwPlatform::handleGlfwMouseMove(double x, double y) {
+  ImGui_ImplGlfw_CursorPosCallback(glfwWindow_, x, y);
+}
+
+void ImGuiGlfwPlatform::handleGlfwMouseScroll(double xOffset, double yOffset) {
+  ImGui_ImplGlfw_ScrollCallback(glfwWindow_, xOffset, yOffset);
+}
+
+void ImGuiGlfwPlatform::handleGlfwFocus(int focused) {
+  ImGui_ImplGlfw_WindowFocusCallback(glfwWindow_, focused);
+}
+
+void ImGuiGlfwPlatform::handleGlfwCursorEnter(int entered) {
+  ImGui_ImplGlfw_CursorEnterCallback(glfwWindow_, entered);
+}
+
+void ImGuiGlfwPlatform::invokePrevKeyCallback(int key, int scancode, int action,
+                                              int mods) const {
+  if (prevKeyCallback_ != nullptr) {
+    prevKeyCallback_(glfwWindow_, key, scancode, action, mods);
+  }
+}
+
+void ImGuiGlfwPlatform::invokePrevCharCallback(unsigned int codepoint) const {
+  if (prevCharCallback_ != nullptr) {
+    prevCharCallback_(glfwWindow_, codepoint);
+  }
+}
+
+void ImGuiGlfwPlatform::invokePrevMouseButtonCallback(int button, int action,
+                                                      int mods) const {
+  if (prevMouseButtonCallback_ != nullptr) {
+    prevMouseButtonCallback_(glfwWindow_, button, action, mods);
+  }
+}
+
+void ImGuiGlfwPlatform::invokePrevCursorPosCallback(double x, double y) const {
+  if (prevCursorPosCallback_ != nullptr) {
+    prevCursorPosCallback_(glfwWindow_, x, y);
+  }
+}
+
+void ImGuiGlfwPlatform::invokePrevScrollCallback(double xOffset,
+                                                 double yOffset) const {
+  if (prevScrollCallback_ != nullptr) {
+    prevScrollCallback_(glfwWindow_, xOffset, yOffset);
+  }
+}
+
+void ImGuiGlfwPlatform::invokePrevFocusCallback(int focused) const {
+  if (prevFocusCallback_ != nullptr) {
+    prevFocusCallback_(glfwWindow_, focused);
+  }
+}
+
+void ImGuiGlfwPlatform::invokePrevCursorEnterCallback(int entered) const {
+  if (prevCursorEnterCallback_ != nullptr) {
+    prevCursorEnterCallback_(glfwWindow_, entered);
+  }
 }
 
 } // namespace nuri

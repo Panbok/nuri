@@ -21,6 +21,7 @@ public:
   bool onInput(const InputEvent &event) override;
   void onFrame(RenderFrameContext &frame) override;
   void drawUi(const GizmoUiDrawConfig &config) override;
+  void invalidatePendingPicks() override;
   void reset() override;
 
 private:

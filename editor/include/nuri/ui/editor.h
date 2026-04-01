@@ -3,7 +3,7 @@
 #include "nuri/core/input_events.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
-#include "nuri/gfx/layers/render_frame_context.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 
 #include <string>

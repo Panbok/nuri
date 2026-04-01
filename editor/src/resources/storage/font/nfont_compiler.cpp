@@ -283,7 +283,6 @@ compileNFontFromFontFile(const NFontCompileConfig &config) {
 
     nfontData.glyphs.emplace_back(GlyphMetrics{
         .glyphId = static_cast<GlyphId>(glyph.getIndex()),
-        .localPageIndex = 0,
         .advance = static_cast<float>(glyph.getAdvance()),
         .bearingX = static_cast<float>(planeL),
         .bearingY = static_cast<float>(planeT),
@@ -295,6 +294,7 @@ compileNFontFromFontFile(const NFontCompileConfig &config) {
         .uvMinY = std::clamp(uvMinY, 0.0f, 1.0f),
         .uvMaxX = std::clamp(uvMaxX, 0.0f, 1.0f),
         .uvMaxY = std::clamp(uvMaxY, 0.0f, 1.0f),
+        .localPageIndex = 0,
     });
 
     const uint32_t codepoint = glyph.getCodepoint();

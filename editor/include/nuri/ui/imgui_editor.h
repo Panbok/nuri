@@ -7,8 +7,8 @@
 
 #include "nuri/core/event_manager.h"
 #include "nuri/core/window.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/layers/render_frame_context.h"
 #include "nuri/scene/camera.h"
 #include "nuri/ui/editor.h"
 #include "nuri/ui/editor_services.h"
@@ -34,6 +34,7 @@ public:
   void setScenePresetUi(std::span<const char *const> presetNames,
                         int selectedIndex,
                         std::string_view hotkeyHint = "Toggle Editor: F6");
+  void resetSceneUiState();
   [[nodiscard]] std::optional<int> takeScenePresetSelectionRequest();
   [[nodiscard]] bool *gizmoControlsWindowOpenState();
   [[nodiscard]] bool *lightsWindowOpenState();

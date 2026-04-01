@@ -4,6 +4,8 @@
 #include "nuri/scene/scene_graph.h"
 #include "nuri/scene/scene_prefab.h"
 
+#include <cstdint>
+#include <limits>
 #include <memory_resource>
 #include <vector>
 
@@ -19,6 +21,8 @@ enum class AnimationPlaybackMode : uint8_t {
 
 class NURI_API SceneAnimationPlayer final {
 public:
+  // prefab and instantiationMap must outlive the player; this type keeps
+  // non-owning pointers to both inputs.
   SceneAnimationPlayer(
       const ScenePrefab &prefab, const SceneInstantiationMap &instantiationMap,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
@@ -49,6 +53,7 @@ private:
   [[nodiscard]] const AnimationClipData *activeClip() const noexcept;
   void applyClip(SceneGraph &graph) const;
 
+  // Non-owning; constructor inputs must outlive this instance.
   const ScenePrefab *prefab_ = nullptr;
   const SceneInstantiationMap *instantiationMap_ = nullptr;
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();

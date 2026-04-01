@@ -4,10 +4,16 @@
 #include <filesystem>
 #include <string>
 #include <variant>
+#include <vector>
+
 
 namespace nuri::bakery {
 
-enum class BakeJobKind : uint8_t { BrdfLut, EnvmapPrefilter };
+enum class BakeJobKind : uint8_t {
+  BrdfLut,
+  EnvmapPrefilter,
+  ScenePortableAssets
+};
 
 enum class BakeJobState : uint8_t {
   Queued,
@@ -37,8 +43,16 @@ struct EnvmapPrefilterBakeRequest {
   bool forceRebuild = false;
 };
 
-using BakeRequest =
-    std::variant<BrdfLutBakeRequest, EnvmapPrefilterBakeRequest>;
+enum class ScenePortableTextureTarget : uint8_t { BC7, ETC2, RGBA8 };
+
+struct ScenePortableAssetsBakeRequest {
+  std::filesystem::path scenePath;
+  std::vector<ScenePortableTextureTarget> prebuildNativeTargets{};
+  bool forceRebuild = false;
+};
+
+using BakeRequest = std::variant<BrdfLutBakeRequest, EnvmapPrefilterBakeRequest,
+                                 ScenePortableAssetsBakeRequest>;
 
 struct BakeJobSnapshot {
   BakeJobId id{};

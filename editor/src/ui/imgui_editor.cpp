@@ -9,14 +9,21 @@
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/imgui_gpu_renderer.h"
+#include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/render_graph/render_graph_telemetry.h"
 #include "nuri/platform/imgui_glfw_platform.h"
+#include "nuri/resources/gpu/model.h"
+#include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/storage/font/nfont_compiler.h"
+#include "nuri/scene/render_scene.h"
 #include "nuri/text/text_system.h"
 #include "nuri/ui/camera_controller_widget.h"
 #include "nuri/ui/file_dialog_widget.h"
 #include "nuri/ui/linear_graph.h"
 #include "nuri/utils/fsp_counter.h"
+#include "scene_light_editor.h"
+
+#include <ImGuizmo.h>
 
 namespace nuri {
 
@@ -24,13 +31,14 @@ namespace {
 
 constexpr size_t kMaxLogLines = 2000;
 constexpr float kLogFilterWidth = 200.0f;
-constexpr float kLayerListWidth = 140.0f;
+constexpr float kPassListWidth = 140.0f;
 constexpr double kMetricGraphUpdateIntervalSeconds = 0.04;
 constexpr double kLogUpdateIntervalSeconds = 0.10;
 constexpr float kMetricGraphWindowWidth = 300.0f;
 constexpr float kMetricGraphWindowHeight = 280.0f;
 constexpr double kMetricSampleMinDeltaSeconds = 1.0e-6;
 constexpr std::size_t kMetricGraphSampleCount = 240;
+constexpr std::size_t kHierarchyBatchSize = 30;
 constexpr uint32_t kUiMaxTessInstances = 65536u;
 constexpr const char *kDockspaceWindowName = "NuriDockspace";
 constexpr const char *kDockspaceRootId = "NuriDockspace##Root";
@@ -40,42 +48,98 @@ constexpr const char *kRenderGraphTelemetryWindowName =
 constexpr const char *kFontCompilerWindowName = "Font Compiler";
 constexpr const char *kBakeryWindowName = "Bakery";
 constexpr const char *kLightsWindowName = "Lights";
-constexpr const char *kLayersWindowName = "Layers";
+constexpr const char *kRenderPassesWindowName = "Render Passes";
+constexpr const char *kHierarchyWindowName = "Hierarchy";
+constexpr const char *kInspectorWindowName = "Inspector";
+constexpr const char *kTextureFilteringWindowName = "Texture Filtering";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
 constexpr const char *kCameraHelpWindowName = "Camera Help";
-constexpr const char *kScenePresetWindowName = "Scene Preset";
 constexpr const char *kGizmoControlsWindowName = "Gizmo Controls";
 constexpr const char *kTelemetryWindowName = "Telemetry";
+constexpr std::array<uint8_t, 4> kTextureFilterAnisotropyLevels = {2u, 4u, 8u,
+                                                                   16u};
+constexpr std::array<const char *, 4> kTextureFilterAnisotropyLabels = {
+    "2x", "4x", "8x", "16x"};
+constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
+    "Bilinear", "Trilinear", "Anisotropic"};
 
-enum class LayerSelection : uint8_t {
+enum class PassInspectorKind : uint8_t {
   Skybox,
   Opaque,
   Transmission,
   Transparent,
   Composite,
   Debug,
+  Generic,
 };
 
-const std::array<LayerSelection, 6> kRenderLayers = {
-    LayerSelection::Skybox,       LayerSelection::Opaque,
-    LayerSelection::Transmission, LayerSelection::Transparent,
-    LayerSelection::Composite,    LayerSelection::Debug,
-};
+PassInspectorKind classifyPassInspector(std::string_view featureName,
+                                        std::string_view passName) {
+  if (featureName == "SkyboxFeature" || passName == "SkyboxPass") {
+    return PassInspectorKind::Skybox;
+  }
+  if (featureName == "OpaqueFeature" || passName == "OpaqueMainPass" ||
+      passName == "OpaquePickPass") {
+    return PassInspectorKind::Opaque;
+  }
+  if (featureName == "TransmissionFeature" ||
+      passName == "TransmissionDownsamplePass" ||
+      passName == "TransmissionCopyPass" ||
+      passName == "TransmissionMainPass") {
+    return PassInspectorKind::Transmission;
+  }
+  if (featureName == "TransparentFeature" ||
+      passName == "TransparentMainPass" || passName == "TransparentPickPass") {
+    return PassInspectorKind::Transparent;
+  }
+  if (featureName == "CompositeFeature" || passName == "CompositePass") {
+    return PassInspectorKind::Composite;
+  }
+  if (featureName == "DebugFeature" || passName == "DebugGridPass" ||
+      passName == "DebugSceneOverlayPass") {
+    return PassInspectorKind::Debug;
+  }
+  return PassInspectorKind::Generic;
+}
 
-const char *layerDisplayName(LayerSelection layer) {
-  switch (layer) {
-  case LayerSelection::Skybox:
-    return "Skybox";
-  case LayerSelection::Opaque:
-    return "Opaque";
-  case LayerSelection::Transmission:
-    return "Transmission";
-  case LayerSelection::Transparent:
-    return "Transparent";
-  case LayerSelection::Composite:
-    return "Composite";
-  case LayerSelection::Debug:
-    return "Debug";
+const char *formatDisplayName(Format format) {
+  switch (format) {
+  case Format::R32_UINT:
+    return "R32_UINT";
+  case Format::RGBA8_UNORM:
+    return "RGBA8_UNORM";
+  case Format::RGBA8_SRGB:
+    return "RGBA8_SRGB";
+  case Format::RGBA8_UINT:
+    return "RGBA8_UINT";
+  case Format::RGBA16_FLOAT:
+    return "RGBA16_FLOAT";
+  case Format::RGBA32_FLOAT:
+    return "RGBA32_FLOAT";
+  case Format::BC7_RGBA_UNORM:
+    return "BC7_RGBA_UNORM";
+  case Format::BC7_RGBA_SRGB:
+    return "BC7_RGBA_SRGB";
+  case Format::ETC2_RGB8_UNORM:
+    return "ETC2_RGB8_UNORM";
+  case Format::ETC2_RGB8_SRGB:
+    return "ETC2_RGB8_SRGB";
+  case Format::D32_FLOAT:
+    return "D32_FLOAT";
+  case Format::Count:
+    return "Invalid";
+  }
+  return "Unknown";
+}
+
+const char *textureFilterModeDisplayName(TextureFilterMode mode) {
+  switch (sanitizeTextureFilterMode(mode)) {
+  case TextureFilterMode::Bilinear:
+    return "Bilinear";
+  case TextureFilterMode::Trilinear:
+    return "Trilinear";
+  case TextureFilterMode::Anisotropic:
+    return "Anisotropic";
   }
   return "Unknown";
 }
@@ -86,6 +150,8 @@ const char *bakeJobKindName(bakery::BakeJobKind kind) {
     return "BRDF LUT";
   case bakery::BakeJobKind::EnvmapPrefilter:
     return "Envmap Prefilter";
+  case bakery::BakeJobKind::ScenePortableAssets:
+    return "Scene Portable Assets";
   }
   return "Unknown";
 }
@@ -124,7 +190,7 @@ struct LogLevelMeta {
 constexpr LogLevelMeta kLogLevels[] = {
     {LogLevel::Trace, "[Trace]"}, {LogLevel::Debug, "[Debug]"},
     {LogLevel::Info, "[Info]"},   {LogLevel::Warning, "[Warn]"},
-    {LogLevel::Fatal, "[Fatal]"},
+    {LogLevel::Error, "[Error]"}, {LogLevel::Fatal, "[Fatal]"},
 };
 
 float sanitizeSample(float value) {
@@ -156,6 +222,8 @@ struct LogFilterState {
       return showInfo;
     case LogLevel::Warning:
       return showWarning;
+    case LogLevel::Error:
+      return true;
     case LogLevel::Fatal:
       return showFatal;
     }
@@ -212,7 +280,11 @@ struct FontCompilerUiState {
 
 struct BakeryUiState {
   std::array<char, 512> envHdrPath = {};
+  std::array<char, 512> scenePath = {};
   bool forceRebuild = false;
+  bool prebuildBc7 = false;
+  bool prebuildEtc2 = false;
+  bool prebuildRgba8 = false;
   std::string status{};
   std::string error{};
   FileDialogWidget fileDialog{};
@@ -283,6 +355,222 @@ struct ScenePresetUiState {
                                static_cast<int>(nameViews.size()) - 1);
   }
 };
+
+struct RenderableInspectorState {
+  RenderableId renderableId = kInvalidRenderableId;
+  MaterialRef ownedOverride = kInvalidMaterialRef;
+  int baselineSlotIndex = 0;
+  int selectedTextureIndex = 0;
+};
+
+struct HierarchyNodeStats {
+  uint32_t renderableCount = 0u;
+  uint32_t lightCount = 0u;
+};
+
+struct HierarchyNodeTopology {
+  std::string labelName{};
+  std::vector<NodeId> children{};
+};
+
+enum class HierarchyRowKind : uint8_t {
+  SceneRoot,
+  Node,
+  Batch,
+};
+
+struct HierarchyVisibleRow {
+  HierarchyRowKind kind = HierarchyRowKind::Node;
+  int depth = 0;
+  NodeId node = kInvalidNodeId;
+  size_t beginIndex = 0u;
+  size_t endIndex = 0u;
+};
+
+[[nodiscard]] constexpr size_t hierarchyNodeSlot(NodeId node) {
+  return static_cast<size_t>(indexOf(node));
+}
+
+struct MaterialSourceEntry {
+  MaterialRef ref = kInvalidMaterialRef;
+  std::string label{};
+};
+
+struct MaterialTextureEntry {
+  const char *label = "";
+  TextureRef ref = kInvalidTextureRef;
+};
+
+template <typename T = ImTextureID>
+inline T toImTextureId(uint32_t bindlessIndex) {
+  if constexpr (std::is_pointer_v<T>) {
+    return static_cast<T>(
+        reinterpret_cast<void *>(static_cast<uintptr_t>(bindlessIndex)));
+  } else {
+    return static_cast<T>(static_cast<uintptr_t>(bindlessIndex));
+  }
+}
+
+[[nodiscard]] std::string nodeDisplayName(const SceneGraph &graph,
+                                          NodeId node) {
+  std::string_view name{};
+  if (graph.getNodeName(node, name) && !name.empty()) {
+    return std::string(name);
+  }
+  return "Node #" + std::to_string(indexOf(node));
+}
+
+[[nodiscard]] bool selectionNodeStillValid(const SceneGraph &graph,
+                                           const SceneEditorSelectionState &s) {
+  if (!isValid(s.node)) {
+    return false;
+  }
+  glm::mat4 dummy(1.0f);
+  return graph.getNodeLocalTransform(s.node, dummy);
+}
+
+[[nodiscard]] std::optional<uint32_t>
+findRenderableIndexById(const RenderScene &scene, RenderableId id) {
+  if (!isValid(id)) {
+    return std::nullopt;
+  }
+  const std::span<const Renderable> renderables = scene.renderables();
+  for (uint32_t index = 0; index < renderables.size(); ++index) {
+    if (renderables[index].id == id) {
+      return index;
+    }
+  }
+  return std::nullopt;
+}
+
+void applyNodeSelection(const RenderScene &scene, NodeId node,
+                        SceneEditorSelectionState &selection) {
+  const RenderableId previousRenderable = selection.renderableId;
+  selection.clear();
+  if (!isValid(node)) {
+    return;
+  }
+
+  selection.node = node;
+  RenderableId firstRenderable = kInvalidRenderableId;
+  RenderableId matchedRenderable = kInvalidRenderableId;
+  scene.graph().forEachRenderableOnNode(node, [&](RenderableId renderableId) {
+    if (!isValid(firstRenderable)) {
+      firstRenderable = renderableId;
+    }
+    if (renderableId == previousRenderable) {
+      matchedRenderable = renderableId;
+    }
+  });
+  if (!isValid(matchedRenderable)) {
+    matchedRenderable = firstRenderable;
+  }
+  if (isValid(matchedRenderable)) {
+    const auto renderableIndex =
+        findRenderableIndexById(scene, matchedRenderable);
+    if (renderableIndex.has_value()) {
+      selection.kind = SceneSelectionKind::NodeRenderable;
+      selection.renderableId = matchedRenderable;
+      selection.renderableIndex = *renderableIndex;
+      return;
+    }
+  }
+
+  LightId firstLight = kInvalidLightId;
+  scene.graph().forEachLightOnNode(node, [&](LightId lightId) {
+    if (!isValid(firstLight)) {
+      firstLight = lightId;
+    }
+  });
+  if (isValid(firstLight)) {
+    selection.kind = SceneSelectionKind::Light;
+    selection.lightId = firstLight;
+  }
+}
+
+[[nodiscard]] std::vector<NodeId> collectChildNodes(const SceneGraph &graph,
+                                                    NodeId node) {
+  std::vector<NodeId> out;
+  NodeId child = kInvalidNodeId;
+  if (!graph.getNodeFirstChild(node, child)) {
+    return out;
+  }
+  while (isValid(child)) {
+    out.push_back(child);
+    NodeId next = kInvalidNodeId;
+    if (!graph.getNodeNextSibling(child, next)) {
+      break;
+    }
+    child = next;
+  }
+  std::reverse(out.begin(), out.end());
+  return out;
+}
+
+[[nodiscard]] std::vector<MaterialSourceEntry>
+buildMaterialSourceEntries(const Renderable &renderable,
+                           const ResourceManager *resources) {
+  std::vector<MaterialSourceEntry> entries;
+  if (resources == nullptr) {
+    entries.push_back(
+        MaterialSourceEntry{.ref = renderable.material, .label = "Fallback"});
+    return entries;
+  }
+
+  const ModelRecord *modelRecord = resources->tryGet(renderable.model);
+  if (modelRecord == nullptr || modelRecord->model == nullptr ||
+      modelRecord->model->sourceMaterialCount() == 0u) {
+    entries.push_back(
+        MaterialSourceEntry{.ref = renderable.material, .label = "Fallback"});
+    return entries;
+  }
+
+  entries.reserve(modelRecord->model->sourceMaterialCount());
+  for (uint32_t sourceIndex = 0;
+       sourceIndex < modelRecord->model->sourceMaterialCount(); ++sourceIndex) {
+    const MaterialRef mapped = modelRecord->materialForSource(sourceIndex);
+    const MaterialRef resolved = isValid(mapped) ? mapped : renderable.material;
+    MaterialSourceEntry entry{};
+    entry.ref = resolved;
+    entry.label = "Source Slot " + std::to_string(sourceIndex);
+    if (const MaterialRecord *record = resources->tryGet(resolved);
+        record != nullptr && !record->debugName.empty()) {
+      entry.label += " - " + std::string(record->debugName);
+    }
+    entries.push_back(std::move(entry));
+  }
+
+  if (entries.empty()) {
+    entries.push_back(
+        MaterialSourceEntry{.ref = renderable.material, .label = "Fallback"});
+  }
+  return entries;
+}
+
+[[nodiscard]] std::vector<MaterialTextureEntry>
+buildMaterialTextureEntries(const MaterialRecord &record) {
+  struct Spec {
+    const char *label;
+    TextureRef MaterialRequest::TextureRefs::*member;
+  };
+  constexpr Spec kSpecs[] = {
+      {"Base Color", &MaterialRequest::TextureRefs::baseColor},
+      {"Metallic Roughness", &MaterialRequest::TextureRefs::metallicRoughness},
+      {"Normal", &MaterialRequest::TextureRefs::normal},
+      {"Emissive", &MaterialRequest::TextureRefs::emissive},
+      {"Occlusion", &MaterialRequest::TextureRefs::occlusion},
+  };
+
+  std::vector<MaterialTextureEntry> entries;
+  for (const Spec &spec : kSpecs) {
+    const TextureRef ref = record.textureRefs.*(spec.member);
+    if (!isValid(ref)) {
+      continue;
+    }
+    entries.push_back(MaterialTextureEntry{.label = spec.label, .ref = ref});
+  }
+  return entries;
+}
 
 constexpr std::array<int, 5> kAtlasResolutionSteps = {1024, 2048, 3072, 4096,
                                                       8192};
@@ -569,17 +857,107 @@ void drawLogMessages(const LogModel &model, LogFilterState &filterState,
   ImGui::EndChild();
 }
 
-void drawInspectorHeader(LayerSelection layer) {
-  ImGui::TextUnformatted(layerDisplayName(layer));
+void drawInspectorHeader(std::string_view label) {
+  ImGui::TextUnformatted(label.data(), label.data() + label.size());
   ImGui::Separator();
 }
 
+bool passKindUsesFeatureToggle(PassInspectorKind kind) {
+  switch (kind) {
+  case PassInspectorKind::Skybox:
+  case PassInspectorKind::Opaque:
+  case PassInspectorKind::Transmission:
+  case PassInspectorKind::Transparent:
+  case PassInspectorKind::Debug:
+    return true;
+  case PassInspectorKind::Composite:
+  case PassInspectorKind::Generic:
+    return false;
+  }
+  return false;
+}
+
+bool *renderSettingToggleForPassKind(RenderSettings &renderSettings,
+                                     PassInspectorKind kind) {
+  switch (kind) {
+  case PassInspectorKind::Skybox:
+    return &renderSettings.skybox.enabled;
+  case PassInspectorKind::Opaque:
+    return &renderSettings.opaque.enabled;
+  case PassInspectorKind::Transmission:
+    return &renderSettings.transmission.enabled;
+  case PassInspectorKind::Transparent:
+    return &renderSettings.transparent.enabled;
+  case PassInspectorKind::Debug:
+    return &renderSettings.debug.enabled;
+  case PassInspectorKind::Composite:
+  case PassInspectorKind::Generic:
+    return nullptr;
+  }
+  return nullptr;
+}
+
+bool isPassInFamily(const RenderPipelinePassInfo &candidate,
+                    const RenderPipelinePassInfo &selected,
+                    PassInspectorKind selectedKind) {
+  if (!selected.featureName.empty() &&
+      candidate.featureName == selected.featureName) {
+    return true;
+  }
+  return classifyPassInspector(candidate.featureName, candidate.passName) ==
+         selectedKind;
+}
+
+bool isPassFamilyEnabled(RenderPipeline *renderPipeline,
+                         const RenderPipelinePassInfo &selected,
+                         PassInspectorKind kind) {
+  if (renderPipeline == nullptr) {
+    return false;
+  }
+  bool sawFamilyPass = false;
+  for (size_t passIndex = 0; passIndex < renderPipeline->passCount();
+       ++passIndex) {
+    const auto candidate = renderPipeline->passInfo(passIndex);
+    if (!candidate.has_value() || !isPassInFamily(*candidate, selected, kind)) {
+      continue;
+    }
+    sawFamilyPass = true;
+    if (!candidate->enabled) {
+      return false;
+    }
+  }
+  return sawFamilyPass;
+}
+
+void setPassFamilyEnabled(RenderPipeline *renderPipeline,
+                          const RenderPipelinePassInfo &selected,
+                          PassInspectorKind kind, bool enabled) {
+  if (renderPipeline == nullptr) {
+    return;
+  }
+  for (size_t passIndex = 0; passIndex < renderPipeline->passCount();
+       ++passIndex) {
+    const auto candidate = renderPipeline->passInfo(passIndex);
+    if (!candidate.has_value() || !isPassInFamily(*candidate, selected, kind)) {
+      continue;
+    }
+    renderPipeline->setPassEnabled(candidate->index, enabled);
+  }
+}
+
+void syncFeatureToggleToRenderSettings(RenderSettings &renderSettings,
+                                       PassInspectorKind kind, bool enabled) {
+  if (bool *const toggle = renderSettingToggleForPassKind(renderSettings, kind);
+      toggle != nullptr) {
+    *toggle = enabled;
+  }
+}
+
 void drawSkyboxSettings(RenderSettings::SkyboxSettings &skybox) {
-  ImGui::Checkbox("Enabled##SkyboxLayer", &skybox.enabled);
+  ImGui::Text("Skybox background: %s", skybox.enabled ? "enabled" : "disabled");
 }
 
 void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
-  ImGui::Checkbox("Enabled##OpaqueLayer", &opaque.enabled);
   constexpr const char *kDebugModes[] = {
       "None",
       "Wire Overlay",
@@ -589,7 +967,7 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
   int debugMode = static_cast<int>(opaque.debugVisualization);
   debugMode =
       std::clamp(debugMode, 0, static_cast<int>(IM_ARRAYSIZE(kDebugModes)) - 1);
-  if (ImGui::Combo("Debug Visualization##OpaqueLayer", &debugMode, kDebugModes,
+  if (ImGui::Combo("Debug Visualization##OpaquePass", &debugMode, kDebugModes,
                    IM_ARRAYSIZE(kDebugModes))) {
     opaque.debugVisualization =
         static_cast<OpaqueDebugVisualization>(debugMode);
@@ -602,19 +980,19 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
 
   ImGui::Separator();
   ImGui::TextUnformatted("Mesh LOD");
-  ImGui::Checkbox("Enable Indirect Draws##OpaqueLayer",
+  ImGui::Checkbox("Enable Indirect Draws##OpaquePass",
                   &opaque.enableIndirectDraw);
-  ImGui::Checkbox("Enable Instanced Draws##OpaqueLayer",
+  ImGui::Checkbox("Enable Instanced Draws##OpaquePass",
                   &opaque.enableInstancedDraw);
-  ImGui::Checkbox("Enable Mesh LOD##OpaqueLayer", &opaque.enableMeshLod);
-  ImGui::SliderInt("Forced LOD##OpaqueLayer", &opaque.forcedMeshLod, -1, 3);
+  ImGui::Checkbox("Enable Mesh LOD##OpaquePass", &opaque.enableMeshLod);
+  ImGui::SliderInt("Forced LOD##OpaquePass", &opaque.forcedMeshLod, -1, 3);
 
   float lodThresholds[3] = {
       opaque.meshLodDistanceThresholds.x,
       opaque.meshLodDistanceThresholds.y,
       opaque.meshLodDistanceThresholds.z,
   };
-  if (ImGui::SliderFloat3("LOD Distance##OpaqueLayer", lodThresholds, 0.5f,
+  if (ImGui::SliderFloat3("LOD Distance##OpaquePass", lodThresholds, 0.5f,
                           128.0f, "%.1f")) {
     std::sort(std::begin(lodThresholds), std::end(lodThresholds));
     opaque.meshLodDistanceThresholds =
@@ -623,19 +1001,19 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
 
   ImGui::Separator();
   ImGui::TextUnformatted("Tessellation");
-  ImGui::Checkbox("Enable Tessellation##OpaqueLayer",
+  ImGui::Checkbox("Enable Tessellation##OpaquePass",
                   &opaque.enableTessellation);
-  ImGui::SliderFloat("Tess Near##OpaqueLayer", &opaque.tessNearDistance, 0.0f,
+  ImGui::SliderFloat("Tess Near##OpaquePass", &opaque.tessNearDistance, 0.0f,
                      256.0f, "%.2f");
-  ImGui::SliderFloat("Tess Far##OpaqueLayer", &opaque.tessFarDistance, 0.0f,
+  ImGui::SliderFloat("Tess Far##OpaquePass", &opaque.tessFarDistance, 0.0f,
                      512.0f, "%.2f");
-  ImGui::SliderFloat("Tess Min##OpaqueLayer", &opaque.tessMinFactor, 1.0f,
-                     64.0f, "%.2f");
-  ImGui::SliderFloat("Tess Max##OpaqueLayer", &opaque.tessMaxFactor, 1.0f,
-                     64.0f, "%.2f");
+  ImGui::SliderFloat("Tess Min##OpaquePass", &opaque.tessMinFactor, 1.0f, 64.0f,
+                     "%.2f");
+  ImGui::SliderFloat("Tess Max##OpaquePass", &opaque.tessMaxFactor, 1.0f, 64.0f,
+                     "%.2f");
   int tessMaxInstances = static_cast<int>(
       std::min<uint32_t>(opaque.tessMaxInstances, kUiMaxTessInstances));
-  if (ImGui::SliderInt("Tess Max Inst##OpaqueLayer", &tessMaxInstances, 0,
+  if (ImGui::SliderInt("Tess Max Inst##OpaquePass", &tessMaxInstances, 0,
                        4096)) {
     opaque.tessMaxInstances =
         static_cast<uint32_t>(std::max(tessMaxInstances, 0));
@@ -651,74 +1029,219 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
 }
 
 void drawDebugSettings(RenderSettings::DebugSettings &debug) {
-  ImGui::Checkbox("Enabled##DebugLayer", &debug.enabled);
-  ImGui::Checkbox("Model Bounds##DebugLayer", &debug.modelBounds);
-  ImGui::Checkbox("Grid##DebugLayer", &debug.grid);
-  ImGui::Checkbox("Light Icons##DebugLayer", &debug.lightIcons);
+  ImGui::Checkbox("Model Bounds##DebugPasses", &debug.modelBounds);
+  ImGui::Checkbox("Grid##DebugPasses", &debug.grid);
+  ImGui::Checkbox("Light Icons##DebugPasses", &debug.lightIcons);
 }
 
 void drawTransparentSettings(RenderSettings::TransparentSettings &transparent) {
-  ImGui::Checkbox("Enabled##TransparentLayer", &transparent.enabled);
+  ImGui::Text("Transparent blending: %s",
+              transparent.enabled ? "enabled" : "disabled");
 }
 
 void drawTransmissionSettings(
     RenderSettings::TransmissionSettings &transmission) {
-  ImGui::Checkbox("Enabled##TransmissionLayer", &transmission.enabled);
+  ImGui::Text("Transmission shading: %s",
+              transmission.enabled ? "enabled" : "disabled");
 }
 
 void drawCompositeSettings() {
-  ImGui::TextUnformatted("Composite pass is always active when frame color");
-  ImGui::TextUnformatted("is routed through the layered renderer.");
+  ImGui::TextUnformatted("Composite runs only when an offscreen frame color");
+  ImGui::TextUnformatted("target is produced and needs presentation.");
 }
 
-void drawLayerList(LayerSelection &selectedLayer) {
-  ImGui::TextUnformatted("Layers");
+void drawTextureFilteringWindow(bool &open, RenderSettings &renderSettings,
+                                const GPUDevice &gpu) {
+  if (!ImGui::Begin(kTextureFilteringWindowName, &open)) {
+    ImGui::End();
+    return;
+  }
+
+  auto &settings = renderSettings.textureFiltering;
+  sanitizeTextureFilteringSettings(settings);
+
+  int modeIndex = static_cast<int>(settings.mode);
+  modeIndex = std::clamp(modeIndex, 0,
+                         static_cast<int>(kTextureFilterModeLabels.size()) - 1);
+  if (ImGui::Combo("Mode", &modeIndex, kTextureFilterModeLabels.data(),
+                   static_cast<int>(kTextureFilterModeLabels.size()))) {
+    settings.mode = static_cast<TextureFilterMode>(modeIndex);
+  }
+
+  int anisotropyIndex = 2;
+  for (int i = 0; i < static_cast<int>(kTextureFilterAnisotropyLevels.size());
+       ++i) {
+    if (settings.anisotropy ==
+        kTextureFilterAnisotropyLevels[static_cast<size_t>(i)]) {
+      anisotropyIndex = i;
+      break;
+    }
+  }
+  if (ImGui::Combo("Anisotropy", &anisotropyIndex,
+                   kTextureFilterAnisotropyLabels.data(),
+                   static_cast<int>(kTextureFilterAnisotropyLabels.size()))) {
+    settings.anisotropy =
+        kTextureFilterAnisotropyLevels[static_cast<size_t>(std::clamp(
+            anisotropyIndex, 0,
+            static_cast<int>(kTextureFilterAnisotropyLevels.size()) - 1))];
+  }
+
   ImGui::Separator();
-  for (const LayerSelection layer : kRenderLayers) {
-    const bool isSelected = selectedLayer == layer;
-    if (ImGui::Selectable(layerDisplayName(layer), isSelected)) {
-      selectedLayer = layer;
+  ImGui::TextUnformatted("Bilinear disables mip blending.");
+  ImGui::TextUnformatted("Trilinear blends between mip levels.");
+  ImGui::TextUnformatted(
+      "Anisotropic improves oblique-angle texture sampling.");
+  ImGui::Separator();
+
+  const uint8_t maxAnisotropy = gpu.getMaxSamplerAnisotropy();
+  const TextureFilterMode effectiveMode =
+      effectiveTextureFilterMode(settings, maxAnisotropy);
+  ImGui::Text("Requested: %s", textureFilterModeDisplayName(settings.mode));
+  ImGui::Text("Effective: %s", textureFilterModeDisplayName(effectiveMode));
+  ImGui::Text("Requested Anisotropy: %ux", settings.anisotropy);
+  ImGui::Text("Max Backend Anisotropy: %ux", maxAnisotropy);
+  if (settings.mode == TextureFilterMode::Anisotropic && maxAnisotropy <= 1u) {
+    ImGui::TextUnformatted(
+        "Backend fallback: anisotropy unavailable, using trilinear.");
+  }
+
+  ImGui::End();
+}
+
+std::string makePassListLabel(const RenderPipelinePassInfo &passInfo) {
+  std::string label;
+  label.reserve(passInfo.passName.size() + passInfo.featureName.size() + 4u);
+  label.append(passInfo.passName.begin(), passInfo.passName.end());
+  if (!passInfo.featureName.empty()) {
+    label.append("##");
+    label.append(passInfo.featureName.begin(), passInfo.featureName.end());
+    label.push_back('_');
+    label.append(std::to_string(passInfo.index));
+  }
+  return label;
+}
+
+void drawPassList(RenderSettings &renderSettings,
+                  RenderPipeline *renderPipeline, size_t &selectedPassIndex) {
+  ImGui::TextUnformatted("Passes");
+  ImGui::Separator();
+  if (renderPipeline == nullptr || renderPipeline->passCount() == 0u) {
+    ImGui::TextDisabled("No pipeline passes registered.");
+    return;
+  }
+
+  if (selectedPassIndex >= renderPipeline->passCount()) {
+    selectedPassIndex = 0u;
+  }
+
+  for (size_t passIndex = 0; passIndex < renderPipeline->passCount();
+       ++passIndex) {
+    const std::optional<RenderPipelinePassInfo> passInfo =
+        renderPipeline->passInfo(passIndex);
+    if (!passInfo.has_value()) {
+      continue;
+    }
+    const PassInspectorKind kind =
+        classifyPassInspector(passInfo->featureName, passInfo->passName);
+    bool enabled = passKindUsesFeatureToggle(kind)
+                       ? isPassFamilyEnabled(renderPipeline, *passInfo, kind)
+                       : passInfo->enabled;
+    if (ImGui::Checkbox(
+            ("##PassEnabled" + std::to_string(passInfo->index)).c_str(),
+            &enabled)) {
+      if (passKindUsesFeatureToggle(kind)) {
+        setPassFamilyEnabled(renderPipeline, *passInfo, kind, enabled);
+        syncFeatureToggleToRenderSettings(renderSettings, kind, enabled);
+      } else {
+        renderPipeline->setPassEnabled(passInfo->index, enabled);
+      }
+    }
+    ImGui::SameLine();
+    const std::string label = makePassListLabel(*passInfo);
+    const bool isSelected = selectedPassIndex == passInfo->index;
+    if (ImGui::Selectable(label.c_str(), isSelected)) {
+      selectedPassIndex = passInfo->index;
     }
   }
 }
 
-void drawLayerInspector(RenderSettings &renderSettings,
-                        LayerSelection &selectedLayer) {
-  ImGui::BeginChild("LayerPanel", ImVec2(0.0f, 0.0f), false,
+void drawPassInspector(RenderSettings &renderSettings,
+                       RenderPipeline *renderPipeline,
+                       size_t &selectedPassIndex) {
+  ImGui::BeginChild("PassPanel", ImVec2(0.0f, 0.0f), false,
                     ImGuiWindowFlags_NoScrollbar);
 
-  if (ImGui::BeginTable("LayerInspectorTable", 2,
+  if (ImGui::BeginTable("PassInspectorTable", 2,
                         ImGuiTableFlags_BordersInnerV |
                             ImGuiTableFlags_SizingStretchProp)) {
-    ImGui::TableSetupColumn("LayerList", ImGuiTableColumnFlags_WidthFixed,
-                            kLayerListWidth);
-    ImGui::TableSetupColumn("LayerSettings", ImGuiTableColumnFlags_WidthStretch,
+    ImGui::TableSetupColumn("PassList", ImGuiTableColumnFlags_WidthFixed,
+                            kPassListWidth);
+    ImGui::TableSetupColumn("PassSettings", ImGuiTableColumnFlags_WidthStretch,
                             0.0f);
 
     ImGui::TableNextColumn();
-    drawLayerList(selectedLayer);
+    drawPassList(renderSettings, renderPipeline, selectedPassIndex);
 
     ImGui::TableNextColumn();
-    drawInspectorHeader(selectedLayer);
-    switch (selectedLayer) {
-    case LayerSelection::Skybox:
-      drawSkyboxSettings(renderSettings.skybox);
-      break;
-    case LayerSelection::Opaque:
-      drawOpaqueSettings(renderSettings.opaque);
-      break;
-    case LayerSelection::Transmission:
-      drawTransmissionSettings(renderSettings.transmission);
-      break;
-    case LayerSelection::Transparent:
-      drawTransparentSettings(renderSettings.transparent);
-      break;
-    case LayerSelection::Composite:
-      drawCompositeSettings();
-      break;
-    case LayerSelection::Debug:
-      drawDebugSettings(renderSettings.debug);
-      break;
+    if (renderPipeline == nullptr || renderPipeline->passCount() == 0u) {
+      drawInspectorHeader("No Pass Selected");
+      ImGui::TextUnformatted("RenderPipeline is unavailable.");
+    } else {
+      selectedPassIndex =
+          std::min(selectedPassIndex, renderPipeline->passCount() - 1u);
+      const std::optional<RenderPipelinePassInfo> passInfo =
+          renderPipeline->passInfo(selectedPassIndex);
+      if (!passInfo.has_value()) {
+        drawInspectorHeader("No Pass Selected");
+        ImGui::TextUnformatted("Selected pass entry is unavailable.");
+      } else {
+        std::string title(passInfo->passName);
+        if (!passInfo->featureName.empty()) {
+          title.append(" (");
+          title.append(passInfo->featureName);
+          title.push_back(')');
+        }
+        drawInspectorHeader(title);
+        const PassInspectorKind kind =
+            classifyPassInspector(passInfo->featureName, passInfo->passName);
+        bool enabled =
+            passKindUsesFeatureToggle(kind)
+                ? isPassFamilyEnabled(renderPipeline, *passInfo, kind)
+                : passInfo->enabled;
+        if (ImGui::Checkbox("Enabled", &enabled)) {
+          if (passKindUsesFeatureToggle(kind)) {
+            setPassFamilyEnabled(renderPipeline, *passInfo, kind, enabled);
+            syncFeatureToggleToRenderSettings(renderSettings, kind, enabled);
+          } else {
+            renderPipeline->setPassEnabled(passInfo->index, enabled);
+          }
+        }
+        ImGui::Separator();
+
+        switch (kind) {
+        case PassInspectorKind::Skybox:
+          drawSkyboxSettings(renderSettings.skybox);
+          break;
+        case PassInspectorKind::Opaque:
+          drawOpaqueSettings(renderSettings.opaque);
+          break;
+        case PassInspectorKind::Transmission:
+          drawTransmissionSettings(renderSettings.transmission);
+          break;
+        case PassInspectorKind::Transparent:
+          drawTransparentSettings(renderSettings.transparent);
+          break;
+        case PassInspectorKind::Composite:
+          drawCompositeSettings();
+          break;
+        case PassInspectorKind::Debug:
+          drawDebugSettings(renderSettings.debug);
+          break;
+        case PassInspectorKind::Generic:
+          ImGui::TextUnformatted("This pass has no dedicated inspector yet.");
+          break;
+        }
+      }
     }
 
     ImGui::EndTable();
@@ -734,13 +1257,14 @@ void drawLogWindow(LogModel &model, LogFilterState &filterState,
   drawLogMessages(model, filterState, scratchResource);
 }
 
-void drawLayersWindow(bool &open, RenderSettings &renderSettings,
-                      LayerSelection &selectedLayer) {
-  if (!ImGui::Begin(kLayersWindowName, &open)) {
+void drawRenderPassesWindow(bool &open, RenderSettings &renderSettings,
+                            RenderPipeline *renderPipeline,
+                            size_t &selectedPassIndex) {
+  if (!ImGui::Begin(kRenderPassesWindowName, &open)) {
     ImGui::End();
     return;
   }
-  drawLayerInspector(renderSettings, selectedLayer);
+  drawPassInspector(renderSettings, renderPipeline, selectedPassIndex);
   ImGui::End();
 }
 
@@ -1057,6 +1581,68 @@ void drawBakeryWindow(bool &open, BakeryUiState &state,
     } else {
       std::ostringstream oss;
       oss << "Queued Env Prefilter job #" << enqueueResult.value().value;
+      state.status = oss.str();
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::InputText("Scene Path", state.scenePath.data(),
+                   state.scenePath.size());
+  ImGui::SameLine();
+  if (ImGui::Button("Browse...##SceneBake")) {
+    static constexpr std::array<FileDialogFilter, 3> kSceneFilters = {
+        FileDialogFilter{"Scene Files (*.gltf;*.glb)", "*.gltf;*.glb"},
+        FileDialogFilter{"glTF (*.gltf)", "*.gltf"},
+        FileDialogFilter{"GLB (*.glb)", "*.glb"},
+    };
+    OpenFileRequest request{};
+    request.title = "Select Scene for Portable Asset Bake";
+    request.filters = kSceneFilters;
+    request.defaultExtension = "gltf";
+    request.ownerWindowHandle = ownerWindowHandle;
+    if (const auto selectedPath = state.fileDialog.openFile(request)) {
+      setPathText(state.scenePath, selectedPath->generic_string());
+    }
+  }
+
+  ImGui::Checkbox("Prebuild BC7", &state.prebuildBc7);
+  ImGui::SameLine();
+  ImGui::Checkbox("Prebuild ETC2", &state.prebuildEtc2);
+  ImGui::SameLine();
+  ImGui::Checkbox("Prebuild RGBA8", &state.prebuildRgba8);
+  ImGui::TextUnformatted(
+      "Scene Portable Assets writes mipmapped KTX2 for PNG/KTX sources.");
+  ImGui::TextUnformatted(
+      "External DDS textures stay authored and are not rebaked here.");
+
+  if (ImGui::Button("Queue Scene Portable Assets")) {
+    state.status.clear();
+    state.error.clear();
+
+    std::vector<bakery::ScenePortableTextureTarget> prebuildTargets{};
+    if (state.prebuildBc7) {
+      prebuildTargets.push_back(bakery::ScenePortableTextureTarget::BC7);
+    }
+    if (state.prebuildEtc2) {
+      prebuildTargets.push_back(bakery::ScenePortableTextureTarget::ETC2);
+    }
+    if (state.prebuildRgba8) {
+      prebuildTargets.push_back(bakery::ScenePortableTextureTarget::RGBA8);
+    }
+
+    auto enqueueResult = bakery->enqueue(
+        bakery::BakeRequest{bakery::ScenePortableAssetsBakeRequest{
+            .scenePath =
+                std::filesystem::path(std::string(state.scenePath.data())),
+            .prebuildNativeTargets = std::move(prebuildTargets),
+            .forceRebuild = state.forceRebuild,
+        }});
+    if (enqueueResult.hasError()) {
+      state.error = enqueueResult.error();
+    } else {
+      std::ostringstream oss;
+      oss << "Queued Scene Portable Assets job #"
+          << enqueueResult.value().value;
       state.status = oss.str();
     }
   }
@@ -1518,7 +2104,7 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
           ImGui::TableNextColumn();
           ImGui::Text("%u", physical.representativeResourceIndex);
           ImGui::TableNextColumn();
-          ImGui::Text("%u", static_cast<uint32_t>(physical.desc.format));
+          ImGui::TextUnformatted(formatDisplayName(physical.desc.format));
           ImGui::TableNextColumn();
           ImGui::Text("%ux%ux%u layers=%u samples=%u mips=%u",
                       physical.desc.dimensions.width,
@@ -1707,27 +2293,6 @@ void drawRenderGraphTelemetryWindow(RenderGraphTelemetryUiState &state,
       });
 }
 
-void drawScenePresetWindow(bool &open, ScenePresetUiState &state) {
-  if (!ImGui::Begin(kScenePresetWindowName, &open)) {
-    ImGui::End();
-    return;
-  }
-  if (state.nameViews.empty()) {
-    ImGui::TextUnformatted("No scene presets available.");
-    ImGui::End();
-    return;
-  }
-
-  int selectedIndex = state.selectedIndex;
-  if (drawScenePresetContents(state.nameViews, selectedIndex,
-                              state.hotkeyHint) &&
-      selectedIndex != state.selectedIndex) {
-    state.selectedIndex = selectedIndex;
-    state.pendingSelectionRequest = selectedIndex;
-  }
-  ImGui::End();
-}
-
 void setDockspaceWindowPlacement(const ImGuiViewport *viewport) {
   if (!viewport) {
     return;
@@ -1753,13 +2318,18 @@ void setLogWindowPlacementWithoutDock(const ImGuiViewport *viewport) {
 void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                     LinearGraph &frametimeGraph,
                     const RenderFrameMetrics &frameMetrics,
-                    const TelemetryOverlayUiState &telemetryState) {
+                    const TelemetryOverlayUiState &telemetryState,
+                    float overlayRightBoundaryX) {
   if (!telemetryState.overlayEnabled) {
     return;
   }
   if (const ImGuiViewport *viewport = ImGui::GetMainViewport()) {
-    ImGui::SetNextWindowPos({viewport->WorkPos.x + viewport->WorkSize.x - 15.0f,
-                             viewport->WorkPos.y + 15.0f},
+    const float viewportRight = viewport->WorkPos.x + viewport->WorkSize.x;
+    const float rightBoundary =
+        overlayRightBoundaryX > 0.0f
+            ? std::min(overlayRightBoundaryX, viewportRight) - 15.0f
+            : viewportRight - 15.0f;
+    ImGui::SetNextWindowPos({rightBoundary, viewport->WorkPos.y + 15.0f},
                             ImGuiCond_Always, {1.0f, 0.0f});
   }
   ImGui::SetNextWindowBgAlpha(0.30f);
@@ -1852,6 +2422,8 @@ ImGuiWindowFlags dockspaceWindowFlags() {
 #ifdef IMGUI_HAS_DOCK
 struct DockLayoutState {
   ImGuiID logDockId = 0;
+  ImGuiID hierarchyDockId = 0;
+  ImGuiID inspectorDockId = 0;
   bool built = false;
 
   void ensureLayout(ImGuiID dockspaceId, const ImGuiViewport *viewport) {
@@ -1870,9 +2442,17 @@ struct DockLayoutState {
     ImGuiID dockMain = dockspaceId;
     ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down,
                                                      0.25f, nullptr, &dockMain);
+    ImGuiID dockLeft = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left,
+                                                   0.22f, nullptr, &dockMain);
+    ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right,
+                                                    0.28f, nullptr, &dockMain);
 
     logDockId = dockBottom;
+    hierarchyDockId = dockLeft;
+    inspectorDockId = dockRight;
     ImGui::DockBuilderDockWindow(kLogWindowName, logDockId);
+    ImGui::DockBuilderDockWindow(kHierarchyWindowName, hierarchyDockId);
+    ImGui::DockBuilderDockWindow(kInspectorWindowName, inspectorDockId);
     ImGui::DockBuilderFinish(dockspaceId);
     built = true;
   }
@@ -1889,9 +2469,940 @@ struct MaybeDockLayoutState {};
 
 struct ImGuiEditor::Impl {
   Impl(Window &windowIn, GPUDevice &gpuIn, const EditorServices &services)
-      : window(windowIn), gpu(gpuIn), textSystem(services.textSystem),
-        cameraSystem(services.cameraSystem), bakery(services.bakery),
+      : window(windowIn), gpu(gpuIn), scene(services.scene),
+        resources(services.resources), renderPipeline(services.renderPipeline),
+        selectionState(services.selectionState != nullptr
+                           ? services.selectionState
+                           : &localSelectionState),
+        textSystem(services.textSystem), cameraSystem(services.cameraSystem),
+        bakery(services.bakery),
         renderGraphTelemetry(services.renderGraphTelemetry) {}
+
+  ~Impl() { resetSceneUiState(); }
+
+  RenderableInspectorState *findRenderableInspectorState(RenderableId id) {
+    for (RenderableInspectorState &state : renderableInspectorStates) {
+      if (state.renderableId == id) {
+        return &state;
+      }
+    }
+    return nullptr;
+  }
+
+  RenderableInspectorState &ensureRenderableInspectorState(RenderableId id) {
+    if (RenderableInspectorState *state = findRenderableInspectorState(id);
+        state != nullptr) {
+      return *state;
+    }
+    renderableInspectorStates.push_back(RenderableInspectorState{});
+    RenderableInspectorState &state = renderableInspectorStates.back();
+    state.renderableId = id;
+    state.selectedTextureIndex = 0;
+    return state;
+  }
+
+  void releaseOwnedOverride(RenderableInspectorState &state) {
+    if (resources != nullptr && isValid(state.ownedOverride)) {
+      resources->release(state.ownedOverride);
+    }
+    state.ownedOverride = kInvalidMaterialRef;
+  }
+
+  void clearRenderableOverride(RenderableInspectorState &state) {
+    if (scene != nullptr) {
+      (void)scene->graph().clearRenderableMaterialOverride(state.renderableId);
+    }
+    releaseOwnedOverride(state);
+  }
+
+  void resetSceneUiState() {
+    for (RenderableInspectorState &state : renderableInspectorStates) {
+      releaseOwnedOverride(state);
+    }
+    renderableInspectorStates.clear();
+    invalidateLightEditorDraft(lightEditorDraft);
+    lastObservedSelectionNode = kInvalidNodeId;
+    pendingRevealSelection = false;
+    suppressRevealForNextSelectionChange = false;
+    hierarchyTopologyCacheValid = false;
+    hierarchyStatsCacheValid = false;
+    cachedSelectedPathLeaf = kInvalidNodeId;
+    cachedLightCount = 0u;
+    cachedRenderableCount = 0u;
+    hierarchyNodeTopology.clear();
+    hierarchyNodeStats.clear();
+    selectedPathNodeFlags.clear();
+    selectedPathChildIndices.clear();
+    hierarchyVisibleRows.clear();
+    hierarchyNodeOpenFlags.clear();
+    hierarchyOpenBatchKeys.clear();
+    hierarchySelectedRowIndex = -1;
+    hierarchySceneRootOpen = true;
+    if (selectionState != nullptr) {
+      selectionState->clear();
+    }
+  }
+
+  void validateSelectionState() {
+    if (scene == nullptr || selectionState == nullptr) {
+      return;
+    }
+    if (!isValid(selectionState->node)) {
+      selectionState->clear();
+      return;
+    }
+    if (!selectionNodeStillValid(scene->graph(), *selectionState)) {
+      selectionState->clear();
+      return;
+    }
+    if (selectionState->kind == SceneSelectionKind::NodeRenderable) {
+      const Renderable *renderable =
+          scene->renderable(selectionState->renderableIndex);
+      if (renderable == nullptr ||
+          renderable->id != selectionState->renderableId ||
+          renderable->node != selectionState->node) {
+        selectionState->kind = SceneSelectionKind::None;
+        selectionState->renderableId = kInvalidRenderableId;
+        selectionState->renderableIndex = 0u;
+      }
+    } else if (selectionState->kind == SceneSelectionKind::Light) {
+      LightDesc light{};
+      NodeId lightNode = kInvalidNodeId;
+      if (!scene->graph().getLightDesc(selectionState->lightId, light) ||
+          !scene->graph().getLightNode(selectionState->lightId, lightNode) ||
+          lightNode != selectionState->node) {
+        selectionState->kind = SceneSelectionKind::None;
+        selectionState->lightId = kInvalidLightId;
+      }
+    }
+  }
+
+  void syncSelectionWindows() {
+    if (selectionState == nullptr) {
+      lastObservedSelectionNode = kInvalidNodeId;
+      pendingRevealSelection = false;
+      suppressRevealForNextSelectionChange = false;
+      return;
+    }
+
+    if (selectionState->node != lastObservedSelectionNode) {
+      if (isValid(selectionState->node)) {
+        showHierarchyWindow = true;
+        showInspectorWindow = true;
+        pendingRevealSelection = !suppressRevealForNextSelectionChange;
+      }
+      suppressRevealForNextSelectionChange = false;
+      lastObservedSelectionNode = selectionState->node;
+    }
+  }
+
+  void rebuildHierarchyFrameCache() {
+    if (scene == nullptr) {
+      hierarchyTopologyCacheValid = false;
+      hierarchyStatsCacheValid = false;
+      cachedSelectedPathLeaf = kInvalidNodeId;
+      hierarchyNodeTopology.clear();
+      hierarchyNodeStats.clear();
+      selectedPathNodeFlags.clear();
+      selectedPathChildIndices.clear();
+      hierarchyVisibleRows.clear();
+      hierarchyNodeOpenFlags.clear();
+      hierarchyOpenBatchKeys.clear();
+      hierarchySelectedRowIndex = -1;
+      return;
+    }
+
+    uint32_t currentLightCount = 0u;
+    uint32_t maxLightNodeValue = 0u;
+    scene->graph().forEachLightId([&](LightId lightId) {
+      NodeId node = kInvalidNodeId;
+      if (scene->graph().getLightNode(lightId, node) && isValid(node)) {
+        ++currentLightCount;
+        maxLightNodeValue =
+            std::max(maxLightNodeValue, static_cast<uint32_t>(indexOf(node)));
+      }
+    });
+
+    const uint32_t currentRenderableCount =
+        static_cast<uint32_t>(scene->renderables().size());
+    if (hierarchyStatsCacheValid &&
+        (currentRenderableCount != cachedRenderableCount ||
+         currentLightCount != cachedLightCount)) {
+      hierarchyTopologyCacheValid = false;
+    }
+    if (!hierarchyTopologyCacheValid) {
+      NURI_PROFILER_ZONE("ImGuiEditor::HierarchyWindow::BuildTopologyCache",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      hierarchyNodeTopology.clear();
+      std::vector<NodeId> stack;
+      stack.push_back(scene->graph().rootNode());
+      while (!stack.empty()) {
+        const NodeId node = stack.back();
+        stack.pop_back();
+        if (!isValid(node)) {
+          continue;
+        }
+
+        const size_t nodeSlot = hierarchyNodeSlot(node);
+        if (nodeSlot >= hierarchyNodeTopology.size()) {
+          hierarchyNodeTopology.resize(nodeSlot + 1u);
+        }
+        HierarchyNodeTopology &entry = hierarchyNodeTopology[nodeSlot];
+        entry.labelName = nodeDisplayName(scene->graph(), node);
+        entry.children = collectChildNodes(scene->graph(), node);
+        for (auto it = entry.children.rbegin(); it != entry.children.rend();
+             ++it) {
+          stack.push_back(*it);
+        }
+      }
+      hierarchyTopologyCacheValid = true;
+      if (hierarchyNodeOpenFlags.size() < hierarchyNodeTopology.size()) {
+        hierarchyNodeOpenFlags.resize(hierarchyNodeTopology.size(), 0u);
+      }
+      NURI_PROFILER_ZONE_END();
+    }
+    if (!hierarchyStatsCacheValid ||
+        currentRenderableCount != cachedRenderableCount ||
+        currentLightCount != cachedLightCount) {
+      NURI_PROFILER_ZONE("ImGuiEditor::HierarchyWindow::BuildNodeStats",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      uint32_t maxNodeIndex = maxLightNodeValue;
+      for (const Renderable &renderable : scene->renderables()) {
+        if (!isValid(renderable.node)) {
+          continue;
+        }
+        maxNodeIndex = std::max(
+            maxNodeIndex, static_cast<uint32_t>(indexOf(renderable.node)));
+      }
+
+      hierarchyNodeStats.assign(static_cast<size_t>(maxNodeIndex) + 1u,
+                                HierarchyNodeStats{});
+      for (const Renderable &renderable : scene->renderables()) {
+        if (!isValid(renderable.node)) {
+          continue;
+        }
+        ++hierarchyNodeStats[hierarchyNodeSlot(renderable.node)]
+              .renderableCount;
+      }
+      scene->graph().forEachLightId([&](LightId lightId) {
+        NodeId node = kInvalidNodeId;
+        if (scene->graph().getLightNode(lightId, node) && isValid(node)) {
+          ++hierarchyNodeStats[hierarchyNodeSlot(node)].lightCount;
+        }
+      });
+
+      cachedRenderableCount = currentRenderableCount;
+      cachedLightCount = currentLightCount;
+      hierarchyStatsCacheValid = true;
+      NURI_PROFILER_ZONE_END();
+    }
+
+    const NodeId selectedLeaf =
+        selectionState != nullptr ? selectionState->node : kInvalidNodeId;
+    if (selectedLeaf != cachedSelectedPathLeaf) {
+      NURI_PROFILER_ZONE("ImGuiEditor::HierarchyWindow::BuildSelectedPath",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      selectedPathNodeFlags.assign(hierarchyNodeStats.size(), 0u);
+      selectedPathChildIndices.assign(hierarchyNodeStats.size(), -1);
+      if (isValid(selectedLeaf)) {
+        NodeId current = selectedLeaf;
+        while (isValid(current)) {
+          const size_t currentSlot = hierarchyNodeSlot(current);
+          if (currentSlot >= selectedPathNodeFlags.size()) {
+            selectedPathNodeFlags.resize(currentSlot + 1u, 0u);
+            selectedPathChildIndices.resize(currentSlot + 1u, -1);
+          }
+          selectedPathNodeFlags[currentSlot] = 1u;
+          NodeId parent = kInvalidNodeId;
+          if (!scene->graph().getNodeParent(current, parent)) {
+            break;
+          }
+          if (isValid(parent)) {
+            const size_t parentSlot = hierarchyNodeSlot(parent);
+            if (parentSlot >= selectedPathChildIndices.size()) {
+              selectedPathChildIndices.resize(parentSlot + 1u, -1);
+            }
+            const std::vector<NodeId> &siblings =
+                hierarchyTopology(parent).children;
+            const auto it =
+                std::find(siblings.begin(), siblings.end(), current);
+            if (it != siblings.end()) {
+              selectedPathChildIndices[parentSlot] =
+                  static_cast<int32_t>(std::distance(siblings.begin(), it));
+            }
+          }
+          current = parent;
+        }
+      }
+      cachedSelectedPathLeaf = selectedLeaf;
+      NURI_PROFILER_ZONE_END();
+    }
+  }
+
+  [[nodiscard]] const HierarchyNodeStats &hierarchyStats(NodeId node) const {
+    static const HierarchyNodeStats kEmptyStats{};
+    const size_t nodeSlot = hierarchyNodeSlot(node);
+    return isValid(node) && nodeSlot < hierarchyNodeStats.size()
+               ? hierarchyNodeStats[nodeSlot]
+               : kEmptyStats;
+  }
+
+  [[nodiscard]] const HierarchyNodeTopology &
+  hierarchyTopology(NodeId node) const {
+    static const HierarchyNodeTopology kEmptyTopology{};
+    const size_t nodeSlot = hierarchyNodeSlot(node);
+    return isValid(node) && nodeSlot < hierarchyNodeTopology.size()
+               ? hierarchyNodeTopology[nodeSlot]
+               : kEmptyTopology;
+  }
+
+  [[nodiscard]] int32_t selectedChildIndexForParent(NodeId node) const {
+    const size_t nodeSlot = hierarchyNodeSlot(node);
+    return isValid(node) && nodeSlot < selectedPathChildIndices.size()
+               ? selectedPathChildIndices[nodeSlot]
+               : -1;
+  }
+
+  [[nodiscard]] bool nodeIsOnSelectedPath(NodeId node) const {
+    const size_t nodeSlot = hierarchyNodeSlot(node);
+    return isValid(node) && nodeSlot < selectedPathNodeFlags.size() &&
+           selectedPathNodeFlags[nodeSlot] != 0u;
+  }
+
+  [[nodiscard]] bool childRangeContainsSelectedChild(NodeId parentNode,
+                                                     size_t beginIndex,
+                                                     size_t endIndex) const {
+    const int32_t selectedChildIndex = selectedChildIndexForParent(parentNode);
+    return selectedChildIndex >= 0 &&
+           beginIndex <= static_cast<size_t>(selectedChildIndex) &&
+           static_cast<size_t>(selectedChildIndex) < endIndex;
+  }
+
+  [[nodiscard]] static size_t hierarchyBatchSpan(size_t count) {
+    size_t span = kHierarchyBatchSize;
+    while (((count + span - 1u) / span) > kHierarchyBatchSize) {
+      span *= kHierarchyBatchSize;
+    }
+    return span;
+  }
+
+  [[nodiscard]] static uint64_t
+  hierarchyBatchKey(NodeId parentNode, size_t beginIndex, size_t endIndex) {
+    uint64_t key = static_cast<uint64_t>(parentNode.value);
+    key ^= 0x9e3779b97f4a7c15ull + (key << 6u) + (key >> 2u) +
+           static_cast<uint64_t>(beginIndex);
+    key ^= 0x9e3779b97f4a7c15ull + (key << 6u) + (key >> 2u) +
+           static_cast<uint64_t>(endIndex);
+    return key;
+  }
+
+  void drawNodeTransformEditor(NodeId node) {
+    if (scene == nullptr || !isValid(node)) {
+      ImGui::TextUnformatted("No node selected.");
+      return;
+    }
+
+    SceneGraph &graph = scene->graph();
+    (void)graph.syncWorldTransforms();
+    glm::mat4 localMatrix(1.0f);
+    glm::mat4 worldMatrix(1.0f);
+    if (!graph.getNodeLocalTransform(node, localMatrix)) {
+      ImGui::TextUnformatted("Selected node is no longer valid.");
+      return;
+    }
+    (void)graph.getCachedNodeWorldTransform(node, worldMatrix);
+
+    float translation[3]{};
+    float rotation[3]{};
+    float scale[3]{};
+    ImGuizmo::DecomposeMatrixToComponents(glm::value_ptr(localMatrix),
+                                          translation, rotation, scale);
+    bool changed = false;
+    changed |= ImGui::InputFloat3("Translation", translation, "%.3f");
+    changed |= ImGui::InputFloat3("Rotation", rotation, "%.3f");
+    changed |= ImGui::InputFloat3("Scale", scale, "%.3f");
+    if (changed) {
+      glm::mat4 recomposed(1.0f);
+      ImGuizmo::RecomposeMatrixFromComponents(translation, rotation, scale,
+                                              glm::value_ptr(recomposed));
+      (void)graph.setNodeLocalTransform(node, recomposed);
+      localMatrix = recomposed;
+      (void)graph.syncWorldTransforms();
+      (void)graph.getCachedNodeWorldTransform(node, worldMatrix);
+    }
+
+    const glm::vec3 worldPosition = glm::vec3(worldMatrix[3]);
+    ImGui::SeparatorText("World");
+    ImGui::Text("Position: %.3f %.3f %.3f", worldPosition.x, worldPosition.y,
+                worldPosition.z);
+    ImGui::Text("Node Handle: %u", indexOf(node));
+  }
+
+  bool applyMaterialOverride(RenderableInspectorState &state,
+                             const MaterialRecord &sourceRecord,
+                             const MaterialDesc &desc,
+                             const MaterialRequest::TextureRefs &textureRefs) {
+    if (resources == nullptr || scene == nullptr) {
+      return false;
+    }
+
+    auto acquireResult = resources->acquireMaterial(MaterialRequest{
+        .desc = desc,
+        .textureRefs = textureRefs,
+        .debugName = !sourceRecord.debugName.empty()
+                         ? std::string(sourceRecord.debugName) + " (Override)"
+                         : std::string("Editor Override"),
+        .sourceIdentity = "editor_override/renderable_" +
+                          std::to_string(state.renderableId.value),
+    });
+    if (acquireResult.hasError()) {
+      NURI_LOG_WARNING("ImGuiEditor: failed to acquire override material: %s",
+                       acquireResult.error().c_str());
+      return false;
+    }
+
+    const MaterialRef newRef = acquireResult.value();
+    if (!scene->graph().setRenderableMaterialOverride(state.renderableId,
+                                                      newRef)) {
+      resources->release(newRef);
+      NURI_LOG_WARNING("ImGuiEditor: failed to attach override material to "
+                       "renderable %u",
+                       state.renderableId.value);
+      return false;
+    }
+
+    releaseOwnedOverride(state);
+    state.ownedOverride = newRef;
+    return true;
+  }
+
+  void drawMaterialViewer(const MaterialRecord &record,
+                          RenderableInspectorState &state, bool editable) {
+    MaterialDesc editedDesc = record.desc;
+    const MaterialRequest::TextureRefs textureRefs = record.textureRefs;
+
+    if (!editable) {
+      ImGui::BeginDisabled();
+    }
+
+    bool changed = false;
+    changed |= ImGui::ColorEdit4("Base Color",
+                                 glm::value_ptr(editedDesc.baseColorFactor));
+    changed |= ImGui::ColorEdit3("Emissive",
+                                 glm::value_ptr(editedDesc.emissiveFactor));
+    changed |= ImGui::SliderFloat(
+        "Emissive Strength", &editedDesc.emissiveStrength, 0.0f, 32.0f, "%.3f");
+    changed |= ImGui::SliderFloat("Metallic", &editedDesc.metallicFactor, 0.0f,
+                                  1.0f, "%.3f");
+    changed |= ImGui::SliderFloat("Roughness", &editedDesc.roughnessFactor,
+                                  0.0f, 1.0f, "%.3f");
+    constexpr const char *kAlphaModes[] = {"Opaque", "Mask", "Blend"};
+    int alphaMode = static_cast<int>(editedDesc.alphaMode);
+    if (ImGui::Combo("Alpha Mode", &alphaMode, kAlphaModes,
+                     IM_ARRAYSIZE(kAlphaModes))) {
+      editedDesc.alphaMode = static_cast<MaterialAlphaMode>(std::clamp(
+          alphaMode, 0, static_cast<int>(IM_ARRAYSIZE(kAlphaModes)) - 1));
+      changed = true;
+    }
+    changed |= ImGui::SliderFloat("Alpha Cutoff", &editedDesc.alphaCutoff, 0.0f,
+                                  1.0f, "%.3f");
+    changed |= ImGui::Checkbox("Double Sided", &editedDesc.doubleSided);
+
+    if (!editable) {
+      ImGui::EndDisabled();
+    }
+
+    if (editable && changed) {
+      applyMaterialOverride(state, record, editedDesc, textureRefs);
+    }
+
+    ImGui::SeparatorText("Textures");
+    const std::vector<MaterialTextureEntry> textures =
+        buildMaterialTextureEntries(record);
+    if (textures.empty()) {
+      ImGui::TextUnformatted("No previewable textures.");
+      return;
+    }
+    state.selectedTextureIndex = std::clamp(
+        state.selectedTextureIndex, 0, static_cast<int>(textures.size()) - 1);
+    if (ImGui::BeginListBox("Slots")) {
+      for (int index = 0; index < static_cast<int>(textures.size()); ++index) {
+        const bool selected = state.selectedTextureIndex == index;
+        if (ImGui::Selectable(textures[index].label, selected)) {
+          state.selectedTextureIndex = index;
+        }
+        if (selected) {
+          ImGui::SetItemDefaultFocus();
+        }
+      }
+      ImGui::EndListBox();
+    }
+
+    const MaterialTextureEntry &textureEntry =
+        textures[static_cast<size_t>(state.selectedTextureIndex)];
+    const TextureRecord *textureRecord =
+        resources != nullptr ? resources->tryGet(textureEntry.ref) : nullptr;
+    if (textureRecord == nullptr) {
+      ImGui::TextUnformatted("Selected texture is unavailable.");
+      return;
+    }
+    ImGui::Text("Preview: %s", textureEntry.label);
+    if (textureRecord->bindlessIndex != kInvalidTextureBindlessIndex) {
+      ImGui::Image(toImTextureId(textureRecord->bindlessIndex),
+                   ImVec2(192.0f, 192.0f));
+    }
+    if (!textureRecord->debugName.empty()) {
+      ImGui::Text("Debug: %s", textureRecord->debugName.c_str());
+    }
+    if (!textureRecord->canonicalPath.empty()) {
+      ImGui::TextWrapped("Path: %s", textureRecord->canonicalPath.c_str());
+    }
+    ImGui::Text("Size: %ux%u", textureRecord->dimensions.width,
+                textureRecord->dimensions.height);
+    ImGui::Text("Format: %s", formatDisplayName(textureRecord->format));
+    ImGui::Text("Mip Levels: %u", textureRecord->numMipLevels);
+  }
+
+  void drawRenderableInspector(const Renderable &renderable) {
+    if (resources == nullptr) {
+      ImGui::TextUnformatted("Resource manager unavailable.");
+      return;
+    }
+    RenderableInspectorState &state =
+        ensureRenderableInspectorState(renderable.id);
+    std::vector<MaterialSourceEntry> sourceEntries =
+        buildMaterialSourceEntries(renderable, resources);
+    state.baselineSlotIndex = std::clamp(
+        state.baselineSlotIndex, 0, static_cast<int>(sourceEntries.size()) - 1);
+
+    const bool hasOverride = isValid(renderable.materialOverride);
+    const MaterialRef displayedMaterial =
+        hasOverride
+            ? renderable.materialOverride
+            : sourceEntries[static_cast<size_t>(state.baselineSlotIndex)].ref;
+    const MaterialRecord *displayedRecord =
+        resources->tryGet(displayedMaterial);
+
+    ImGui::SeparatorText("Renderable");
+    ImGui::Text("Renderable Index: %u", selectionState->renderableIndex);
+    ImGui::Text("Renderable Handle: %u", renderable.id.value);
+
+    if (const ModelRecord *modelRecord = resources->tryGet(renderable.model);
+        modelRecord != nullptr) {
+      if (!modelRecord->canonicalPath.empty()) {
+        ImGui::TextWrapped("Model: %s", modelRecord->canonicalPath.c_str());
+      }
+    }
+
+    ImGui::SeparatorText("Material");
+    if (!hasOverride && sourceEntries.size() > 1u) {
+      std::vector<const char *> labels;
+      labels.reserve(sourceEntries.size());
+      for (const MaterialSourceEntry &entry : sourceEntries) {
+        labels.push_back(entry.label.c_str());
+      }
+      ImGui::Combo("Baseline Slot", &state.baselineSlotIndex, labels.data(),
+                   static_cast<int>(labels.size()));
+      for (const MaterialSourceEntry &entry : sourceEntries) {
+        ImGui::BulletText("%s", entry.label.c_str());
+      }
+      ImGui::TextUnformatted(
+          "Uniform override will replace all source-material slots.");
+    }
+
+    bool overrideEnabled = hasOverride;
+    if (ImGui::Checkbox("Uniform Material Override", &overrideEnabled)) {
+      if (overrideEnabled) {
+        const MaterialRecord *sourceRecord = displayedRecord;
+        if (sourceRecord != nullptr) {
+          (void)applyMaterialOverride(state, *sourceRecord, sourceRecord->desc,
+                                      sourceRecord->textureRefs);
+        }
+      } else {
+        clearRenderableOverride(state);
+      }
+    }
+
+    if (displayedRecord == nullptr) {
+      ImGui::TextUnformatted("Material record unavailable.");
+      return;
+    }
+    if (!displayedRecord->debugName.empty()) {
+      ImGui::Text("Debug Name: %s", displayedRecord->debugName.c_str());
+    }
+    drawMaterialViewer(*displayedRecord, state, overrideEnabled);
+  }
+
+  void drawLightInspector(LightId lightId) {
+    if (scene == nullptr) {
+      return;
+    }
+    LightDesc light{};
+    if (!scene->graph().getLightDesc(lightId, light)) {
+      ImGui::TextUnformatted("Selected light is no longer valid.");
+      return;
+    }
+    ImGui::SeparatorText("Light");
+    ImGui::Text("Type: %s", lightTypeName(light.type));
+    ImGui::Text("Light Slot: %u", indexOf(lightId));
+    drawLightEditor(scene->graph(), lightId, light, lightEditorDraft);
+  }
+
+  void drawInspectorWindow() {
+    if (!ImGui::Begin(kInspectorWindowName, &showInspectorWindow)) {
+      inspectorWindowVisible = true;
+      inspectorWindowMinX = ImGui::GetWindowPos().x;
+      ImGui::End();
+      return;
+    }
+    inspectorWindowVisible = true;
+    inspectorWindowMinX = ImGui::GetWindowPos().x;
+    if (scene == nullptr || selectionState == nullptr ||
+        !isValid(selectionState->node)) {
+      ImGui::TextUnformatted("No scene selection.");
+      ImGui::End();
+      return;
+    }
+
+    ImGui::TextUnformatted(
+        nodeDisplayName(scene->graph(), selectionState->node).c_str());
+    ImGui::Separator();
+    drawNodeTransformEditor(selectionState->node);
+
+    if (selectionState->kind == SceneSelectionKind::NodeRenderable) {
+      if (const Renderable *renderable =
+              scene->renderable(selectionState->renderableIndex);
+          renderable != nullptr &&
+          renderable->id == selectionState->renderableId) {
+        drawRenderableInspector(*renderable);
+      }
+    } else if (selectionState->kind == SceneSelectionKind::Light) {
+      drawLightInspector(selectionState->lightId);
+    } else {
+      uint32_t renderableCount = 0u;
+      scene->graph().forEachRenderableOnNode(
+          selectionState->node, [&](RenderableId) { ++renderableCount; });
+      uint32_t lightCount = 0u;
+      scene->graph().forEachLightOnNode(selectionState->node,
+                                        [&](LightId) { ++lightCount; });
+      ImGui::SeparatorText("Components");
+      ImGui::Text("Renderables: %u", renderableCount);
+      ImGui::Text("Lights: %u", lightCount);
+    }
+
+    ImGui::End();
+  }
+
+  void drawScenesSection() {
+    ImGui::SeparatorText("Scenes");
+    if (scenePresetState.nameViews.empty()) {
+      ImGui::TextUnformatted("No scene presets available.");
+      return;
+    }
+
+    int selectedIndex = scenePresetState.selectedIndex;
+    if (ImGui::Combo("Scene", &selectedIndex, scenePresetState.nameViews.data(),
+                     static_cast<int>(scenePresetState.nameViews.size())) &&
+        selectedIndex != scenePresetState.selectedIndex) {
+      scenePresetState.selectedIndex = selectedIndex;
+      scenePresetState.pendingSelectionRequest = selectedIndex;
+    }
+    if (!scenePresetState.hotkeyHint.empty()) {
+      ImGui::TextUnformatted(scenePresetState.hotkeyHint.c_str());
+    }
+  }
+
+  [[nodiscard]] bool isHierarchyNodeOpen(NodeId node) const {
+    const size_t nodeSlot = hierarchyNodeSlot(node);
+    return isValid(node) && nodeSlot < hierarchyNodeOpenFlags.size() &&
+           hierarchyNodeOpenFlags[nodeSlot] != 0u;
+  }
+
+  void setHierarchyNodeOpen(NodeId node, bool open) {
+    if (!isValid(node)) {
+      return;
+    }
+    const size_t nodeSlot = hierarchyNodeSlot(node);
+    if (nodeSlot >= hierarchyNodeOpenFlags.size()) {
+      hierarchyNodeOpenFlags.resize(nodeSlot + 1u, 0u);
+    }
+    hierarchyNodeOpenFlags[nodeSlot] = open ? 1u : 0u;
+  }
+
+  [[nodiscard]] bool isHierarchyBatchOpen(NodeId parentNode, size_t beginIndex,
+                                          size_t endIndex) const {
+    return hierarchyOpenBatchKeys.contains(
+        hierarchyBatchKey(parentNode, beginIndex, endIndex));
+  }
+
+  void setHierarchyBatchOpen(NodeId parentNode, size_t beginIndex,
+                             size_t endIndex, bool open) {
+    const uint64_t key = hierarchyBatchKey(parentNode, beginIndex, endIndex);
+    if (open) {
+      hierarchyOpenBatchKeys.insert(key);
+    } else {
+      hierarchyOpenBatchKeys.erase(key);
+    }
+  }
+
+  void revealHierarchyBatchPath(NodeId parentNode, size_t childIndex) {
+    const std::vector<NodeId> &children =
+        hierarchyTopology(parentNode).children;
+    if (childIndex >= children.size()) {
+      return;
+    }
+
+    size_t beginIndex = 0u;
+    size_t endIndex = children.size();
+    while (endIndex - beginIndex > kHierarchyBatchSize) {
+      const size_t childSpan = hierarchyBatchSpan(endIndex - beginIndex);
+      const size_t relativeIndex = childIndex - beginIndex;
+      const size_t subBegin =
+          beginIndex + (relativeIndex / childSpan) * childSpan;
+      const size_t subEnd = std::min(subBegin + childSpan, endIndex);
+      setHierarchyBatchOpen(parentNode, subBegin, subEnd, true);
+      beginIndex = subBegin;
+      endIndex = subEnd;
+    }
+  }
+
+  void applyPendingHierarchyReveal() {
+    if (!pendingRevealSelection || selectionState == nullptr ||
+        !isValid(selectionState->node)) {
+      return;
+    }
+
+    hierarchySceneRootOpen = true;
+    NodeId current = selectionState->node;
+    while (isValid(current)) {
+      if (!hierarchyTopology(current).children.empty()) {
+        setHierarchyNodeOpen(current, true);
+      }
+      NodeId parent = kInvalidNodeId;
+      if (!scene->graph().getNodeParent(current, parent)) {
+        break;
+      }
+      if (isValid(parent)) {
+        const int32_t childIndex = selectedChildIndexForParent(parent);
+        if (childIndex >= 0) {
+          revealHierarchyBatchPath(parent, static_cast<size_t>(childIndex));
+          setHierarchyNodeOpen(parent, true);
+        }
+      }
+      current = parent;
+    }
+  }
+
+  void appendHierarchyVisibleRowsForChildren(
+      NodeId parentNode, const std::vector<NodeId> &children, int depth,
+      size_t beginIndex, size_t endIndex) {
+    const size_t clampedEnd = std::min(endIndex, children.size());
+    if (beginIndex >= clampedEnd) {
+      return;
+    }
+
+    const size_t rangeCount = clampedEnd - beginIndex;
+    if (rangeCount <= kHierarchyBatchSize) {
+      for (size_t index = beginIndex; index < clampedEnd; ++index) {
+        const NodeId child = children[index];
+        hierarchyVisibleRows.push_back(HierarchyVisibleRow{
+            .kind = HierarchyRowKind::Node,
+            .depth = depth,
+            .node = child,
+        });
+        if (selectionState != nullptr && selectionState->node == child) {
+          hierarchySelectedRowIndex =
+              static_cast<int>(hierarchyVisibleRows.size()) - 1;
+        }
+        if (isHierarchyNodeOpen(child)) {
+          const HierarchyNodeTopology &childTopology = hierarchyTopology(child);
+          appendHierarchyVisibleRowsForChildren(child, childTopology.children,
+                                                depth + 1u, 0u,
+                                                childTopology.children.size());
+        }
+      }
+      return;
+    }
+
+    const size_t childSpan = hierarchyBatchSpan(rangeCount);
+    for (size_t index = beginIndex; index < clampedEnd; index += childSpan) {
+      const size_t subEnd = std::min(index + childSpan, clampedEnd);
+      hierarchyVisibleRows.push_back(HierarchyVisibleRow{
+          .kind = HierarchyRowKind::Batch,
+          .depth = depth,
+          .node = parentNode,
+          .beginIndex = index,
+          .endIndex = subEnd,
+      });
+      if (isHierarchyBatchOpen(parentNode, index, subEnd)) {
+        appendHierarchyVisibleRowsForChildren(parentNode, children, depth + 1u,
+                                              index, subEnd);
+      }
+    }
+  }
+
+  void rebuildHierarchyVisibleRows() {
+    hierarchyVisibleRows.clear();
+    hierarchySelectedRowIndex = -1;
+    if (scene == nullptr) {
+      return;
+    }
+
+    hierarchyVisibleRows.push_back(
+        HierarchyVisibleRow{.kind = HierarchyRowKind::SceneRoot, .depth = 0});
+    if (!hierarchySceneRootOpen) {
+      return;
+    }
+
+    const std::vector<NodeId> &children =
+        hierarchyTopology(scene->graph().rootNode()).children;
+    appendHierarchyVisibleRowsForChildren(scene->graph().rootNode(), children,
+                                          1, 0u, children.size());
+  }
+
+  void drawHierarchyRow(const HierarchyVisibleRow &row,
+                        std::string_view sceneLabel) {
+    if (scene == nullptr || selectionState == nullptr) {
+      return;
+    }
+
+    const float indentWidth =
+        static_cast<float>(row.depth) * ImGui::GetTreeNodeToLabelSpacing();
+    if (indentWidth > 0.0f) {
+      ImGui::Indent(indentWidth);
+    }
+
+    if (row.kind == HierarchyRowKind::SceneRoot) {
+      ImGui::SetNextItemOpen(hierarchySceneRootOpen, ImGuiCond_Always);
+      const bool open =
+          ImGui::TreeNodeEx("active_scene_root",
+                            ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                ImGuiTreeNodeFlags_SpanAvailWidth |
+                                ImGuiTreeNodeFlags_OpenOnArrow |
+                                ImGuiTreeNodeFlags_OpenOnDoubleClick,
+                            "%s", std::string(sceneLabel).c_str());
+      hierarchySceneRootOpen = open;
+    } else if (row.kind == HierarchyRowKind::Batch) {
+      const bool isOpen =
+          isHierarchyBatchOpen(row.node, row.beginIndex, row.endIndex);
+      const bool containsSelected = childRangeContainsSelectedChild(
+          row.node, row.beginIndex, row.endIndex);
+      ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                 ImGuiTreeNodeFlags_SpanAvailWidth |
+                                 ImGuiTreeNodeFlags_OpenOnArrow |
+                                 ImGuiTreeNodeFlags_OpenOnDoubleClick;
+      if (containsSelected) {
+        flags |= ImGuiTreeNodeFlags_DefaultOpen;
+      }
+      const std::string label = "More " + std::to_string(row.beginIndex + 1u) +
+                                "-" + std::to_string(row.endIndex) + " (" +
+                                std::to_string(row.endIndex - row.beginIndex) +
+                                ")";
+      ImGui::PushID(static_cast<int>(row.node.value));
+      ImGui::PushID(static_cast<int>(row.beginIndex));
+      ImGui::PushID(static_cast<int>(row.endIndex));
+      ImGui::SetNextItemOpen(isOpen, ImGuiCond_Always);
+      const bool open = ImGui::TreeNodeEx("batch", flags, "%s", label.c_str());
+      if (open != isOpen) {
+        setHierarchyBatchOpen(row.node, row.beginIndex, row.endIndex, open);
+      }
+      ImGui::PopID();
+      ImGui::PopID();
+      ImGui::PopID();
+    } else {
+      const HierarchyNodeTopology &topology = hierarchyTopology(row.node);
+      const HierarchyNodeStats &stats = hierarchyStats(row.node);
+      const bool hasChildren = !topology.children.empty();
+      const bool isOpen = hasChildren && isHierarchyNodeOpen(row.node);
+      ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                 ImGuiTreeNodeFlags_SpanAvailWidth |
+                                 ImGuiTreeNodeFlags_OpenOnArrow |
+                                 ImGuiTreeNodeFlags_OpenOnDoubleClick;
+      if (!hasChildren) {
+        flags |= ImGuiTreeNodeFlags_Leaf;
+      }
+      if (selectionState->node == row.node) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+      }
+      std::string label = topology.labelName +
+                          "  R:" + std::to_string(stats.renderableCount) +
+                          "  L:" + std::to_string(stats.lightCount);
+      ImGui::SetNextItemOpen(isOpen, ImGuiCond_Always);
+      ImGui::PushID(static_cast<int>(row.node.value));
+      const bool open = ImGui::TreeNodeEx("node", flags, "%s", label.c_str());
+      if (hasChildren && open != isOpen) {
+        setHierarchyNodeOpen(row.node, open);
+      }
+      if (ImGui::IsItemClicked()) {
+        suppressRevealForNextSelectionChange = true;
+        applyNodeSelection(*scene, row.node, *selectionState);
+      }
+      ImGui::PopID();
+    }
+
+    if (indentWidth > 0.0f) {
+      ImGui::Unindent(indentWidth);
+    }
+  }
+
+  void drawHierarchyWindow() {
+    if (!ImGui::Begin(kHierarchyWindowName, &showHierarchyWindow)) {
+      ImGui::End();
+      return;
+    }
+    if (scene == nullptr) {
+      ImGui::TextUnformatted("No scene available.");
+      ImGui::End();
+      return;
+    }
+
+    NURI_PROFILER_ZONE("ImGuiEditor::HierarchyWindow::ScenesSection",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    drawScenesSection();
+    ImGui::SeparatorText("Hierarchy");
+    NURI_PROFILER_ZONE_END();
+
+    rebuildHierarchyFrameCache();
+    applyPendingHierarchyReveal();
+    rebuildHierarchyVisibleRows();
+
+    NURI_PROFILER_ZONE("ImGuiEditor::HierarchyWindow::DrawTree",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    if (hierarchyVisibleRows.size() <= 1u) {
+      ImGui::TextUnformatted("Scene graph is empty.");
+    } else {
+      const bool hasSceneName =
+          !scenePresetState.names.empty() &&
+          scenePresetState.selectedIndex >= 0 &&
+          scenePresetState.selectedIndex <
+              static_cast<int>(scenePresetState.names.size());
+      const std::string sceneLabel =
+          hasSceneName ? scenePresetState.names[scenePresetState.selectedIndex]
+                       : std::string("Active Scene");
+      if (pendingRevealSelection && hierarchySelectedRowIndex >= 0) {
+        const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+        const float visibleHeight =
+            std::max(ImGui::GetContentRegionAvail().y, lineHeight * 3.0f);
+        const float targetY = std::max(
+            0.0f, static_cast<float>(hierarchySelectedRowIndex) * lineHeight -
+                      visibleHeight * 0.35f);
+        ImGui::SetScrollY(targetY);
+        pendingRevealSelection = false;
+      }
+      ImGuiListClipper clipper;
+      clipper.Begin(static_cast<int>(hierarchyVisibleRows.size()),
+                    ImGui::GetTextLineHeightWithSpacing());
+      while (clipper.Step()) {
+        for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd;
+             ++rowIndex) {
+          drawHierarchyRow(hierarchyVisibleRows[static_cast<size_t>(rowIndex)],
+                           sceneLabel);
+        }
+      }
+    }
+    NURI_PROFILER_ZONE_END();
+    ImGui::End();
+  }
 
   void drawMainMenuBar() {
     if (!ImGui::BeginMainMenuBar()) {
@@ -1901,9 +3412,31 @@ struct ImGuiEditor::Impl {
     if (ImGui::BeginMenu("Menu")) {
       ImGui::MenuItem("Bakery", nullptr, &showBakeryWindow);
       ImGui::MenuItem("Font Compiler", nullptr, &showFontCompilerWindow);
-      ImGui::MenuItem("Layers", nullptr, &showLayersWindow);
+      ImGui::MenuItem("Hierarchy", nullptr, &showHierarchyWindow);
+      ImGui::MenuItem("Inspector", nullptr, &showInspectorWindow);
+      ImGui::MenuItem("Render Passes", nullptr, &showRenderPassesWindow);
       ImGui::MenuItem("Lights", nullptr, &showLightsWindow);
-      ImGui::MenuItem("Scene Preset", nullptr, &showScenePresetWindow);
+      if (ImGui::BeginMenu("Texture Filtering")) {
+        auto &settings = renderSettings.textureFiltering;
+        sanitizeTextureFilteringSettings(settings);
+        const bool bilinear = settings.mode == TextureFilterMode::Bilinear;
+        const bool trilinear = settings.mode == TextureFilterMode::Trilinear;
+        const bool anisotropic =
+            settings.mode == TextureFilterMode::Anisotropic;
+        if (ImGui::MenuItem("Bilinear", nullptr, bilinear)) {
+          settings.mode = TextureFilterMode::Bilinear;
+        }
+        if (ImGui::MenuItem("Trilinear", nullptr, trilinear)) {
+          settings.mode = TextureFilterMode::Trilinear;
+        }
+        if (ImGui::MenuItem("Anisotropic", nullptr, anisotropic)) {
+          settings.mode = TextureFilterMode::Anisotropic;
+        }
+        ImGui::Separator();
+        ImGui::MenuItem("Settings Window", nullptr,
+                        &showTextureFilteringWindow);
+        ImGui::EndMenu();
+      }
       ImGui::EndMenu();
     }
 
@@ -1946,6 +3479,8 @@ struct ImGuiEditor::Impl {
     NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
     platform->newFrame();
     ImGui::NewFrame();
+    inspectorWindowVisible = false;
+    inspectorWindowMinX = 0.0f;
     drawMainMenuBar();
     drawDockspaceRoot();
   }
@@ -1971,6 +3506,8 @@ struct ImGuiEditor::Impl {
       logUpdateAccumulatorSeconds =
           std::fmod(logUpdateAccumulatorSeconds, kLogUpdateIntervalSeconds);
     }
+    validateSelectionState();
+    syncSelectionWindows();
     NURI_PROFILER_ZONE_END();
 
 #ifdef IMGUI_HAS_DOCK
@@ -1984,36 +3521,80 @@ struct ImGuiEditor::Impl {
     setLogWindowPlacementWithoutDock(viewport);
 #endif
 
+    ScopedScratch scopedScratch(scratchArena);
+    if (showHierarchyWindow) {
+#ifdef IMGUI_HAS_DOCK
+      if (dockLayoutState.hierarchyDockId != 0) {
+        ImGui::SetNextWindowDockID(dockLayoutState.hierarchyDockId,
+                                   ImGuiCond_Once);
+      }
+#endif
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawHierarchyWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawHierarchyWindow();
+      NURI_PROFILER_ZONE_END();
+    }
+    if (showInspectorWindow) {
+#ifdef IMGUI_HAS_DOCK
+      if (dockLayoutState.inspectorDockId != 0) {
+        ImGui::SetNextWindowDockID(dockLayoutState.inspectorDockId,
+                                   ImGuiCond_Once);
+      }
+#endif
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawInspectorWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawInspectorWindow();
+      NURI_PROFILER_ZONE_END();
+    }
+
     NURI_PROFILER_ZONE("ImGuiEditor::DrawLogWindow",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    ScopedScratch scopedScratch(scratchArena);
     ImGui::Begin(kLogWindowName);
     drawLogWindow(logModel, logFilterState, scopedScratch.resource());
     ImGui::End();
 
     if (showRenderGraphTelemetryWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawRenderGraphTelemetryWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
       if (ImGui::Begin(kRenderGraphTelemetryWindowName,
                        &showRenderGraphTelemetryWindow)) {
         drawRenderGraphTelemetryWindow(telemetryState, renderGraphTelemetry,
                                        window.nativeHandle());
       }
       ImGui::End();
+      NURI_PROFILER_ZONE_END();
     }
     if (showFontCompilerWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawFontCompilerWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
       drawFontCompilerWindow(showFontCompilerWindow, fontCompilerState,
                              textSystem, window.nativeHandle());
+      NURI_PROFILER_ZONE_END();
     }
     if (showBakeryWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawBakeryWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
       drawBakeryWindow(showBakeryWindow, bakeryState, bakery,
                        scopedScratch.resource(), window.nativeHandle());
+      NURI_PROFILER_ZONE_END();
     }
-    if (showLayersWindow) {
-      drawLayersWindow(showLayersWindow, renderSettings, selectedLayer);
+    if (showRenderPassesWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawRenderPassesWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawRenderPassesWindow(showRenderPassesWindow, renderSettings,
+                             renderPipeline, selectedPassIndex);
+      NURI_PROFILER_ZONE_END();
     }
-    if (showScenePresetWindow) {
-      drawScenePresetWindow(showScenePresetWindow, scenePresetState);
+    if (showTextureFilteringWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawTextureFilteringWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawTextureFilteringWindow(showTextureFilteringWindow, renderSettings,
+                                 gpu);
+      NURI_PROFILER_ZONE_END();
     }
     if (showCameraControllerWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawCameraControllerWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
       if (cameraSystem != nullptr &&
           ImGui::Begin(kCameraControllerWindowName,
                        &showCameraControllerWindow)) {
@@ -2024,14 +3605,20 @@ struct ImGuiEditor::Impl {
       } else {
         ImGui::End();
       }
+      NURI_PROFILER_ZONE_END();
     }
     if (showCameraHelpWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawCameraHelpWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
       if (ImGui::Begin(kCameraHelpWindowName, &showCameraHelpWindow)) {
         drawCameraHelpContents();
       }
       ImGui::End();
+      NURI_PROFILER_ZONE_END();
     }
     if (showTelemetrySettingsWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawTelemetrySettingsWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
       if (ImGui::Begin(kTelemetryWindowName, &showTelemetrySettingsWindow)) {
         ImGui::Checkbox("Show Overlay", &telemetryOverlayState.overlayEnabled);
         ImGui::Separator();
@@ -2054,13 +3641,23 @@ struct ImGuiEditor::Impl {
                         &telemetryOverlayState.showImGuiMetricsWindow);
       }
       ImGui::End();
+      NURI_PROFILER_ZONE_END();
     }
     NURI_PROFILER_ZONE_END();
 
     NURI_PROFILER_ZONE("ImGuiEditor::DrawFpsOverlay",
                        NURI_PROFILER_COLOR_CMD_DRAW);
+    float overlayRightBoundaryX = 0.0f;
+    if (inspectorWindowVisible) {
+      if (const ImGuiViewport *viewport = ImGui::GetMainViewport();
+          viewport != nullptr &&
+          inspectorWindowMinX >
+              viewport->WorkPos.x + viewport->WorkSize.x * 0.5f) {
+        overlayRightBoundaryX = inspectorWindowMinX;
+      }
+    }
     drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, frameMetrics,
-                   telemetryOverlayState);
+                   telemetryOverlayState, overlayRightBoundaryX);
     NURI_PROFILER_ZONE_END();
 
     NURI_PROFILER_ZONE("ImGuiEditor::FinalizeImGuiFrame",
@@ -2118,19 +3715,23 @@ struct ImGuiEditor::Impl {
   double logUpdateAccumulatorSeconds = kLogUpdateIntervalSeconds;
   bool showBakeryWindow = false;
   bool showFontCompilerWindow = false;
-  bool showLayersWindow = false;
+  bool showHierarchyWindow = true;
+  bool showInspectorWindow = true;
+  bool showRenderPassesWindow = false;
   bool showLightsWindow = false;
-  bool showScenePresetWindow = false;
+  bool showTextureFilteringWindow = false;
   bool showRenderGraphTelemetryWindow = false;
   bool showGizmoControlsWindow = false;
   bool showTelemetrySettingsWindow = false;
   bool showCameraControllerWindow = false;
   bool showCameraHelpWindow = false;
+  bool inspectorWindowVisible = false;
   RenderSettings renderSettings{};
   RenderFrameMetrics frameMetrics{};
-  LayerSelection selectedLayer = LayerSelection::Opaque;
+  size_t selectedPassIndex = 0u;
   double frameDeltaSeconds = 0.0;
   uint64_t frameIndex = 0;
+  float inspectorWindowMinX = 0.0f;
   LogModel logModel;
   LogFilterState logFilterState;
   RenderGraphTelemetryUiState telemetryState;
@@ -2141,6 +3742,30 @@ struct ImGuiEditor::Impl {
   CameraControllerWidgetState cameraControllerState{};
   MaybeDockLayoutState dockLayoutState;
   ScratchArena scratchArena;
+  std::vector<RenderableInspectorState> renderableInspectorStates{};
+  LightEditorDraft lightEditorDraft{};
+  SceneEditorSelectionState localSelectionState{};
+  NodeId lastObservedSelectionNode = kInvalidNodeId;
+  bool pendingRevealSelection = false;
+  bool suppressRevealForNextSelectionChange = false;
+  bool hierarchyStatsCacheValid = false;
+  bool hierarchyTopologyCacheValid = false;
+  uint32_t cachedRenderableCount = 0u;
+  uint32_t cachedLightCount = 0u;
+  NodeId cachedSelectedPathLeaf = kInvalidNodeId;
+  std::vector<HierarchyNodeTopology> hierarchyNodeTopology{};
+  std::vector<HierarchyNodeStats> hierarchyNodeStats{};
+  std::vector<uint8_t> selectedPathNodeFlags{};
+  std::vector<int32_t> selectedPathChildIndices{};
+  std::vector<HierarchyVisibleRow> hierarchyVisibleRows{};
+  std::vector<uint8_t> hierarchyNodeOpenFlags{};
+  std::unordered_set<uint64_t> hierarchyOpenBatchKeys{};
+  int hierarchySelectedRowIndex = -1;
+  bool hierarchySceneRootOpen = true;
+  RenderScene *scene = nullptr;
+  ResourceManager *resources = nullptr;
+  RenderPipeline *renderPipeline = nullptr;
+  SceneEditorSelectionState *selectionState = nullptr;
   TextSystem *textSystem = nullptr;
   CameraSystem *cameraSystem = nullptr;
   bakery::BakerySystem *bakery = nullptr;
@@ -2184,6 +3809,9 @@ ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu, EventManager &events,
 }
 
 ImGuiEditor::~ImGuiEditor() {
+  if (impl_) {
+    impl_->resetSceneUiState();
+  }
   impl_->renderer.reset();
   impl_->platform.reset();
   if (ImPlot::GetCurrentContext() != nullptr) {
@@ -2222,6 +3850,7 @@ void ImGuiEditor::setRenderSettings(const RenderSettings &settings) {
     return;
   }
   impl_->renderSettings = settings;
+  sanitizeTextureFilteringSettings(impl_->renderSettings.textureFiltering);
 }
 
 void ImGuiEditor::syncCameraControllerWidgetStateFromCamera(
@@ -2240,6 +3869,13 @@ void ImGuiEditor::setScenePresetUi(std::span<const char *const> presetNames,
     return;
   }
   impl_->scenePresetState.set(presetNames, selectedIndex, hotkeyHint);
+}
+
+void ImGuiEditor::resetSceneUiState() {
+  if (!impl_) {
+    return;
+  }
+  impl_->resetSceneUiState();
 }
 
 std::optional<int> ImGuiEditor::takeScenePresetSelectionRequest() {
@@ -2269,7 +3905,12 @@ bool ImGuiEditor::isLightsWindowOpen() const {
 }
 
 RenderSettings ImGuiEditor::renderSettings() const {
-  return impl_ ? impl_->renderSettings : RenderSettings{};
+  if (!impl_) {
+    return RenderSettings{};
+  }
+  RenderSettings settings = impl_->renderSettings;
+  sanitizeTextureFilteringSettings(settings.textureFiltering);
+  return settings;
 }
 
 bool ImGuiEditor::wantsCaptureKeyboard() const {

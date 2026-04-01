@@ -1,28 +1,33 @@
 #include "nuri/editor_pch.h"
 
-#include "nuri/ui/editor_layer.h"
+#include "nuri/ui/editor_overlay_controller.h"
 
 #include "nuri/core/log.h"
 #include "nuri/ui/imgui_editor.h"
 #include "nuri/ui/imgui_gizmo_controller.h"
 
 namespace nuri {
-std::unique_ptr<EditorLayer>
-EditorLayer::create(Window &window, GPUDevice &gpu, EventManager &events,
-                    UiCallback callback, const EditorServices &services) {
-  NURI_LOG_DEBUG("EditorLayer::create: Creating editor layer");
-  return std::unique_ptr<EditorLayer>(
-      new EditorLayer(window, gpu, events, std::move(callback), services));
+std::unique_ptr<EditorOverlayController>
+EditorOverlayController::create(Window &window, GPUDevice &gpu,
+                                EventManager &events, UiCallback callback,
+                                const EditorServices &services) {
+  NURI_LOG_DEBUG(
+      "EditorOverlayController::create: Creating editor overlay controller");
+  return std::unique_ptr<EditorOverlayController>(new EditorOverlayController(
+      window, gpu, events, std::move(callback), services));
 }
 
-EditorLayer::EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
-                         UiCallback callback, const EditorServices &services)
+EditorOverlayController::EditorOverlayController(Window &window, GPUDevice &gpu,
+                                                 EventManager &events,
+                                                 UiCallback callback,
+                                                 const EditorServices &services)
     : editor_(ImGuiEditor::create(window, gpu, events, services)),
       callback_(std::move(callback)) {
   if (services.hasAllDependencies()) {
     gizmoController_ = createImGuizmoController(services);
     if (!gizmoController_) {
-      NURI_LOG_WARNING("EditorLayer: failed to create gizmo controller");
+      NURI_LOG_WARNING(
+          "EditorOverlayController: failed to create gizmo controller");
     }
     return;
   }
@@ -31,41 +36,49 @@ EditorLayer::EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
                                   services.cameraSystem != nullptr ||
                                   services.gpu != nullptr;
   if (hasAnyGizmoService) {
-    NURI_LOG_WARNING("EditorLayer: incomplete EditorServices for gizmo "
-                     "(scene=%d cameraSystem=%d gpu=%d); gizmo disabled",
-                     services.scene != nullptr,
-                     services.cameraSystem != nullptr, services.gpu != nullptr);
+    NURI_LOG_WARNING(
+        "EditorOverlayController: incomplete EditorServices for gizmo "
+        "(scene=%d cameraSystem=%d gpu=%d); gizmo disabled",
+        services.scene != nullptr, services.cameraSystem != nullptr,
+        services.gpu != nullptr);
   }
 }
 
-EditorLayer::~EditorLayer() = default;
+EditorOverlayController::~EditorOverlayController() = default;
 
-void EditorLayer::resetControllers() {
+void EditorOverlayController::resetControllers() {
   if (gizmoController_) {
     gizmoController_->reset();
   }
 }
 
-void EditorLayer::syncCameraControllerWidgetStateFromCamera(
+void EditorOverlayController::resetSceneUiState() {
+  resetControllers();
+  if (editor_) {
+    editor_->resetSceneUiState();
+  }
+}
+
+void EditorOverlayController::syncCameraControllerWidgetStateFromCamera(
     const Camera &camera) {
   if (editor_) {
     editor_->syncCameraControllerWidgetStateFromCamera(camera);
   }
 }
 
-void EditorLayer::setScenePresetUi(std::span<const char *const> presetNames,
-                                   int selectedIndex,
-                                   std::string_view hotkeyHint) {
+void EditorOverlayController::setScenePresetUi(
+    std::span<const char *const> presetNames, int selectedIndex,
+    std::string_view hotkeyHint) {
   if (editor_) {
     editor_->setScenePresetUi(presetNames, selectedIndex, hotkeyHint);
   }
 }
 
-std::optional<int> EditorLayer::takeScenePresetSelectionRequest() {
+std::optional<int> EditorOverlayController::takeScenePresetSelectionRequest() {
   return editor_ ? editor_->takeScenePresetSelectionRequest() : std::nullopt;
 }
 
-bool EditorLayer::onInput(const InputEvent &event) {
+bool EditorOverlayController::onInput(const InputEvent &event) {
   if (!editor_) {
     return false;
   }
@@ -86,6 +99,9 @@ bool EditorLayer::onInput(const InputEvent &event) {
   case InputEventType::MouseScroll:
   case InputEventType::CursorEnter:
     if (editor_->wantsCaptureMouse()) {
+      if (gizmoController_) {
+        gizmoController_->invalidatePendingPicks();
+      }
       return true;
     }
     if (gizmoController_ && gizmoController_->onInput(event)) {
@@ -95,27 +111,31 @@ bool EditorLayer::onInput(const InputEvent &event) {
   case InputEventType::Focus:
     return false;
   default:
-    NURI_LOG_WARNING("EditorLayer::onInput: Unknown input event type: %d",
-                     static_cast<int>(event.type));
+    NURI_LOG_WARNING(
+        "EditorOverlayController::onInput: Unknown input event type: %d",
+        static_cast<int>(event.type));
     break;
   }
   return false;
 }
 
-void EditorLayer::onUpdate(double deltaTime) { frameDeltaSeconds_ = deltaTime; }
+void EditorOverlayController::onUpdate(double deltaTime) {
+  frameDeltaSeconds_ = deltaTime;
+}
 
-void EditorLayer::prepareFrameContext(RenderFrameContext &frame) {
+void EditorOverlayController::prepareOverlayFrameContext(
+    RenderFrameContext &frame) {
   if (gizmoController_) {
     gizmoController_->onFrame(frame);
   }
 }
 
 Result<bool, std::string>
-EditorLayer::buildRenderGraph(RenderFrameContext &frame,
-                              RenderGraphBuilder &graph) {
+EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
+                                          RenderGraphBuilder &graph) {
   if (!editor_) {
     return Result<bool, std::string>::makeError(
-        "EditorLayer has no ImGui editor");
+        "EditorOverlayController has no ImGui editor");
   }
 
   if (frame.settings) {
@@ -166,5 +186,4 @@ EditorLayer::buildRenderGraph(RenderFrameContext &frame,
 
   return Result<bool, std::string>::makeResult(true);
 }
-
 } // namespace nuri

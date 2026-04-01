@@ -6,20 +6,12 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/scene/camera_system.h"
 #include "nuri/scene/render_scene.h"
+#include "scene_light_editor.h"
 
 #include <ImGuizmo.h>
-#include <array>
-#include <cerrno>
-#include <cstdlib>
 
 namespace nuri {
 namespace {
-
-enum class SelectionKind : uint8_t {
-  None = 0,
-  Renderable = 1,
-  Light = 2,
-};
 
 struct Ray {
   glm::vec3 origin{0.0f};
@@ -133,97 +125,25 @@ struct Ray {
          glm::mat4_cast(light.rotation);
 }
 
-[[nodiscard]] glm::quat extractRotation(const glm::mat4 &transform) {
-  glm::mat3 rotationMatrix(transform);
-  rotationMatrix[0] =
-      safeNormalize(rotationMatrix[0], glm::vec3(1.0f, 0.0f, 0.0f));
-  rotationMatrix[1] =
-      safeNormalize(rotationMatrix[1], glm::vec3(0.0f, 1.0f, 0.0f));
-  rotationMatrix[2] =
-      safeNormalize(rotationMatrix[2], glm::vec3(0.0f, 0.0f, 1.0f));
-  return glm::normalize(glm::quat_cast(rotationMatrix));
-}
-
-[[nodiscard]] const char *lightTypeName(LightType type) {
-  switch (type) {
-  case LightType::Directional:
-    return "Directional";
-  case LightType::Point:
-    return "Point";
-  case LightType::Spot:
-    return "Spot";
-  }
-  return "Unknown";
-}
-
-void writeFloatBuffer(std::span<char> buffer, float value, const char *format) {
-  if (buffer.empty()) {
-    return;
-  }
-  std::snprintf(buffer.data(), buffer.size(), format, value);
-  buffer.back() = '\0';
-}
-
-[[nodiscard]] bool tryParseFloatBuffer(const char *buffer, float &outValue) {
-  if (buffer == nullptr || buffer[0] == '\0') {
+[[nodiscard]] bool setNodeWorldTransform(RenderScene &scene, NodeId node,
+                                         const glm::mat4 &worldTransform) {
+  SceneGraph &graph = scene.graph();
+  (void)graph.syncWorldTransforms();
+  NodeId parent = kInvalidNodeId;
+  if (!graph.getNodeParent(node, parent)) {
     return false;
   }
 
-  char *end = nullptr;
-  errno = 0;
-  const float parsed = std::strtof(buffer, &end);
-  if (end == buffer || errno == ERANGE) {
-    return false;
-  }
-
-  while (*end != '\0' && std::isspace(static_cast<unsigned char>(*end)) != 0) {
-    ++end;
-  }
-  if (*end != '\0' || !std::isfinite(parsed)) {
-    return false;
-  }
-
-  outValue = parsed;
-  return true;
-}
-
-[[nodiscard]] bool drawFloatTextStepper(std::string_view label,
-                                        std::span<char> buffer, float &value,
-                                        float step, float minValue,
-                                        float maxValue, const char *format) {
-  bool changed = false;
-
-  ImGui::PushID(label.data());
-  if (ImGui::Button("-")) {
-    value = std::clamp(value - step, minValue, maxValue);
-    writeFloatBuffer(buffer, value, format);
-    changed = true;
-  }
-  ImGui::SameLine();
-  ImGui::SetNextItemWidth(150.0f);
-  const bool edited = ImGui::InputText("##value", buffer.data(), buffer.size(),
-                                       ImGuiInputTextFlags_CharsScientific);
-  if (edited) {
-    float parsedValue = value;
-    if (tryParseFloatBuffer(buffer.data(), parsedValue)) {
-      value = std::clamp(parsedValue, minValue, maxValue);
-      changed = true;
+  glm::mat4 localTransform = worldTransform;
+  if (isValid(parent)) {
+    glm::mat4 parentWorld(1.0f);
+    if (!graph.getCachedNodeWorldTransform(parent, parentWorld)) {
+      return false;
     }
+    localTransform = glm::inverse(parentWorld) * worldTransform;
   }
-  if (ImGui::IsItemDeactivatedAfterEdit()) {
-    writeFloatBuffer(buffer, value, format);
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("+")) {
-    value = std::clamp(value + step, minValue, maxValue);
-    writeFloatBuffer(buffer, value, format);
-    changed = true;
-  }
-  ImGui::SameLine();
-  ImGui::TextUnformatted(label.data());
-  ImGui::PopID();
 
-  return changed;
+  return graph.setNodeLocalTransform(node, localTransform);
 }
 
 [[nodiscard]] bool imguiOwnsMouseInput() {
@@ -243,19 +163,11 @@ void writeFloatBuffer(std::span<char> buffer, float value, const char *format) {
 } // namespace
 
 struct ImGuizmoController::Impl {
-  struct LightEditorDraft {
-    LightId id = kInvalidLightId;
-    LightDesc light{};
-    std::array<char, 128> nameBuffer{};
-    std::array<char, 32> intensityBuffer{};
-    std::array<char, 32> rangeBuffer{};
-    std::array<char, 32> innerConeDegreesBuffer{};
-    std::array<char, 32> outerConeDegreesBuffer{};
-  };
-
   explicit Impl(const EditorServices &services)
       : scene(*services.scene), cameraSystem(*services.cameraSystem),
-        gpu(*services.gpu) {
+        gpu(*services.gpu), selectionState(services.selectionState != nullptr
+                                               ? services.selectionState
+                                               : &localSelectionState) {
     NURI_ASSERT(services.hasAllDependencies(),
                 "ImGuizmoController requires valid editor services");
   }
@@ -287,10 +199,12 @@ struct ImGuizmoController::Impl {
       frame->opaquePickRequest = pendingPickRequest;
       pendingPickRequest.reset();
     }
-    frame->channels.publish<LightId>(kFrameChannelSelectedLightId,
-                                     selectionKind == SelectionKind::Light
-                                         ? selectedLightId
-                                         : kInvalidLightId);
+    if (selectionState->kind == SceneSelectionKind::Light &&
+        isValid(selectionState->lightId)) {
+      frame->sharedResources.selectedLightId = selectionState->lightId;
+    } else {
+      frame->sharedResources.selectedLightId.reset();
+    }
   }
 
   void drawUi(const GizmoUiDrawConfig &config) {
@@ -300,20 +214,30 @@ struct ImGuizmoController::Impl {
     }
     updateSelectionFromPickResults();
 
+    SceneGraph &graph = scene.graph();
+    (void)graph.syncWorldTransforms();
     const Renderable *selectedRenderable = nullptr;
-    if (selectionKind == SelectionKind::Renderable &&
-        selectedOpaqueIndex.has_value()) {
-      selectedRenderable = scene.renderable(*selectedOpaqueIndex);
+    if (selectionState->kind == SceneSelectionKind::NodeRenderable) {
+      selectedRenderable = scene.renderable(selectionState->renderableIndex);
       if (selectedRenderable == nullptr) {
-        clearSelectionState();
+        demoteToNodeSelection();
+      } else if (selectedRenderable->id != selectionState->renderableId) {
+        demoteToNodeSelection();
+        selectedRenderable = nullptr;
       }
     }
     LightDesc selectedLight{};
+    LightDesc selectedLightWorld{};
+    NodeId selectedLightNode = kInvalidNodeId;
     const bool hasSelectedLight =
-        selectionKind == SelectionKind::Light &&
-        scene.getLightDesc(selectedLightId, selectedLight);
-    if (selectionKind == SelectionKind::Light && !hasSelectedLight) {
-      clearSelectionState();
+        selectionState->kind == SceneSelectionKind::Light &&
+        graph.getLightDesc(selectionState->lightId, selectedLight) &&
+        graph.getCachedLightWorldDesc(selectionState->lightId,
+                                      selectedLightWorld) &&
+        graph.getLightNode(selectionState->lightId, selectedLightNode);
+    if (selectionState->kind == SceneSelectionKind::Light &&
+        !hasSelectedLight) {
+      demoteToNodeSelection();
     }
 
     const bool wantsLightsWindow =
@@ -321,14 +245,15 @@ struct ImGuizmoController::Impl {
     if (wantsLightsWindow) {
       if (ImGui::Begin(config.lightsWindowTitle.data(),
                        config.showLightsWindow)) {
-        if (selectionKind == SelectionKind::Light && hasSelectedLight) {
+        if (selectionState->kind == SceneSelectionKind::Light &&
+            hasSelectedLight) {
           ImGui::Text("Light: %s", lightTypeName(selectedLight.type));
-          ImGui::Text("Light Slot: %u", indexOf(selectedLightId));
+          ImGui::Text("Light Slot: %u", indexOf(selectionState->lightId));
         } else {
           ImGui::TextUnformatted("No light selected");
         }
 
-        if (selectionKind == SelectionKind::Light &&
+        if (selectionState->kind == SceneSelectionKind::Light &&
             ImGui::Button("Clear Light Selection")) {
           clearSelectionState();
           selectedRenderable = nullptr;
@@ -348,9 +273,10 @@ struct ImGuizmoController::Impl {
           spawnLight(LightType::Spot);
         }
 
-        if (selectionKind == SelectionKind::Light && hasSelectedLight) {
+        if (selectionState->kind == SceneSelectionKind::Light &&
+            hasSelectedLight) {
           if (ImGui::Button("Delete Selected Light")) {
-            (void)scene.removeLight(selectedLightId);
+            (void)graph.removeLight(selectionState->lightId);
             clearSelectionState();
           } else {
             drawSelectedLightEditor(selectedLight);
@@ -365,18 +291,20 @@ struct ImGuizmoController::Impl {
     if (wantsControlsWindow) {
       if (ImGui::Begin(config.controlsWindowTitle.data(),
                        config.showControlsWindow)) {
-        if (selectionKind == SelectionKind::Renderable &&
-            selectedOpaqueIndex.has_value()) {
-          ImGui::Text("Renderable Index: %u", *selectedOpaqueIndex);
-        } else if (selectionKind == SelectionKind::Light && hasSelectedLight) {
+        if (selectionState->kind == SceneSelectionKind::NodeRenderable &&
+            selectedRenderable != nullptr) {
+          ImGui::Text("Renderable Index: %u", selectionState->renderableIndex);
+        } else if (selectionState->kind == SceneSelectionKind::Light &&
+                   hasSelectedLight) {
           ImGui::Text("Light: %s", lightTypeName(selectedLight.type));
-          ImGui::Text("Light Slot: %u", indexOf(selectedLightId));
+          ImGui::Text("Light Slot: %u", indexOf(selectionState->lightId));
+        } else if (isValid(selectionState->node)) {
+          ImGui::Text("Node: %u", indexOf(selectionState->node));
         } else {
           ImGui::TextUnformatted("No selection");
         }
 
-        if (selectionKind != SelectionKind::None &&
-            ImGui::Button("Clear Selection")) {
+        if (isValid(selectionState->node) && ImGui::Button("Clear Selection")) {
           clearSelectionState();
           selectedRenderable = nullptr;
         }
@@ -384,7 +312,8 @@ struct ImGuizmoController::Impl {
         ImGui::Separator();
         ImGui::TextUnformatted("Gizmo");
 
-        const bool scaleAllowed = selectionKind != SelectionKind::Light;
+        const bool scaleAllowed =
+            selectionState->kind != SceneSelectionKind::Light;
         if (ImGui::RadioButton("Translate",
                                gizmoOperation == ImGuizmo::TRANSLATE)) {
           gizmoOperation = ImGuizmo::TRANSLATE;
@@ -448,21 +377,34 @@ struct ImGuizmoController::Impl {
 
     glm::mat4 modelMatrix(1.0f);
     ImGuizmo::OPERATION effectiveOperation = gizmoOperation;
-    if (selectionKind == SelectionKind::Renderable) {
-      if (!selectedOpaqueIndex.has_value() || selectedRenderable == nullptr) {
+    NodeId selectedNode = selectionState->node;
+    if (selectionState->kind == SceneSelectionKind::NodeRenderable) {
+      if (selectedRenderable == nullptr) {
+        demoteToNodeSelection();
+        selectedNode = selectionState->node;
+      } else {
+        selectedNode = selectedRenderable->node;
+      }
+    } else if (selectionState->kind == SceneSelectionKind::Light &&
+               hasSelectedLight) {
+      selectedNode = selectedLightNode;
+    }
+
+    if (selectionState->kind == SceneSelectionKind::Light && hasSelectedLight) {
+      if (!graph.getCachedNodeWorldTransform(selectedLightNode, modelMatrix)) {
         clearSelectionState();
         return;
       }
-      modelMatrix = selectedRenderable->modelMatrix;
-    } else if (selectionKind == SelectionKind::Light && hasSelectedLight) {
-      modelMatrix = lightTransformMatrix(selectedLight);
-      if (selectedLight.type == LightType::Directional) {
+      if (selectedLightWorld.type == LightType::Directional) {
         effectiveOperation = ImGuizmo::ROTATE;
-      } else if (selectedLight.type == LightType::Point) {
+      } else if (selectedLightWorld.type == LightType::Point) {
         effectiveOperation = ImGuizmo::TRANSLATE;
       } else if (effectiveOperation == ImGuizmo::SCALE) {
         effectiveOperation = ImGuizmo::TRANSLATE;
       }
+    } else if (isValid(selectedNode) &&
+               graph.getCachedNodeWorldTransform(selectedNode, modelMatrix)) {
+      // Node-only and renderable selections both manipulate the node transform.
     } else {
       gizmoHoverOrUsing = false;
       return;
@@ -487,32 +429,25 @@ struct ImGuizmoController::Impl {
       return;
     }
 
-    if (selectionKind == SelectionKind::Renderable) {
-      if (!scene.setRenderableTransform(*selectedOpaqueIndex, modelMatrix)) {
+    if (selectionState->kind == SceneSelectionKind::Light && hasSelectedLight) {
+      if (!setNodeWorldTransform(scene, selectedLightNode, modelMatrix)) {
         clearSelectionState();
       }
       return;
     }
 
-    if (selectionKind == SelectionKind::Light && hasSelectedLight) {
-      glm::vec3 position = glm::vec3(modelMatrix[3]);
-      glm::quat rotation = selectedLight.rotation;
-      if (effectiveOperation != ImGuizmo::TRANSLATE) {
-        rotation = extractRotation(modelMatrix);
-      }
-      if (effectiveOperation == ImGuizmo::TRANSLATE &&
-          selectedLight.type == LightType::Directional) {
-        rotation = selectedLight.rotation;
-      }
-      if (!scene.setLightTransform(selectedLightId, position, rotation)) {
-        clearSelectionState();
-      }
+    if (!setNodeWorldTransform(scene, selectedNode, modelMatrix)) {
+      clearSelectionState();
     }
   }
 
   void reset() {
+    invalidatePendingPicks();
     clearSelectionState();
     frame = nullptr;
+  }
+
+  void invalidatePendingPicks() {
     pendingPickRequest.reset();
     pickRequestFloorId = nextPickRequestId;
   }
@@ -551,7 +486,7 @@ private:
     LightId closestLight = kInvalidLightId;
     frame->scene->forEachLightId([&](LightId lightId) {
       LightDesc light{};
-      if (!frame->scene->getLightDesc(lightId, light)) {
+      if (!frame->scene->graph().getCachedLightWorldDesc(lightId, light)) {
         return;
       }
       float hitT = 0.0f;
@@ -568,9 +503,16 @@ private:
       return false;
     }
 
-    selectionKind = SelectionKind::Light;
-    selectedLightId = closestLight;
-    selectedOpaqueIndex.reset();
+    NodeId lightNode = kInvalidNodeId;
+    if (!scene.graph().getLightNode(closestLight, lightNode)) {
+      return false;
+    }
+    selectionState->kind = SceneSelectionKind::Light;
+    selectionState->node = lightNode;
+    selectionState->renderableId = kInvalidRenderableId;
+    selectionState->renderableIndex = 0u;
+    selectionState->lightId = closestLight;
+    invalidateLightEditorDraft(lightEditorDraft);
     return true;
   }
 
@@ -588,14 +530,17 @@ private:
       return;
     }
 
-    if (scene.renderable(pickResult.renderableIndex) == nullptr) {
+    const Renderable *renderable = scene.renderable(pickResult.renderableIndex);
+    if (renderable == nullptr || !isValid(renderable->node)) {
       clearSelectionState();
       return;
     }
-    selectionKind = SelectionKind::Renderable;
-    selectedOpaqueIndex = pickResult.renderableIndex;
-    selectedLightId = kInvalidLightId;
-    invalidateLightEditorDraft();
+    selectionState->kind = SceneSelectionKind::NodeRenderable;
+    selectionState->node = renderable->node;
+    selectionState->renderableId = renderable->id;
+    selectionState->renderableIndex = pickResult.renderableIndex;
+    selectionState->lightId = kInvalidLightId;
+    invalidateLightEditorDraft(lightEditorDraft);
   }
 
   [[nodiscard]] bool isGizmoConsumingMouseInput() const {
@@ -609,6 +554,7 @@ private:
   }
 
   void spawnLight(LightType type) {
+    SceneGraph &graph = scene.graph();
     LightDesc desc{};
     desc.type = type;
     desc.name = std::string(lightTypeName(type)) + " Light";
@@ -635,127 +581,59 @@ private:
       break;
     }
 
-    auto addResult = scene.addLight(desc);
+    auto nodeResult = graph.createNode(graph.rootNode(), desc.name,
+                                       lightTransformMatrix(desc));
+    if (nodeResult.hasError()) {
+      NURI_LOG_WARNING("ImGuizmoController::spawnLight: failed to create %s "
+                       "light node: %s",
+                       lightTypeName(type), nodeResult.error().c_str());
+      return;
+    }
+    desc.position = glm::vec3(0.0f);
+    desc.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    auto addResult = graph.addLight(nodeResult.value(), desc);
     if (addResult.hasError()) {
       NURI_LOG_WARNING("ImGuizmoController::spawnLight: failed to spawn %s "
                        "light: %s",
                        lightTypeName(type), addResult.error().c_str());
       return;
     }
-    selectionKind = SelectionKind::Light;
-    selectedLightId = addResult.value();
-    selectedOpaqueIndex.reset();
+    selectionState->kind = SceneSelectionKind::Light;
+    selectionState->node = nodeResult.value();
+    selectionState->renderableId = kInvalidRenderableId;
+    selectionState->renderableIndex = 0u;
+    selectionState->lightId = addResult.value();
+    invalidateLightEditorDraft(lightEditorDraft);
     NURI_LOG_INFO("ImGuizmoController::spawnLight: spawned %s light (slot=%u)",
-                  lightTypeName(type), indexOf(selectedLightId));
+                  lightTypeName(type), indexOf(selectionState->lightId));
   }
 
   void drawSelectedLightEditor(const LightDesc &selectedLight) {
-    syncLightEditorDraft(selectedLight);
-    ImGui::PushID(static_cast<int>(selectedLightId.value));
-
-    LightDesc &edited = lightEditorDraft.light;
-    bool changed = false;
-
-    if (ImGui::InputText("Light Name", lightEditorDraft.nameBuffer.data(),
-                         lightEditorDraft.nameBuffer.size())) {
-      edited.name = lightEditorDraft.nameBuffer.data();
-      changed = true;
-    }
-    if (ImGui::ColorEdit3("Light Color", glm::value_ptr(edited.color))) {
-      changed = true;
-    }
-    if (ImGui::Checkbox("Light Enabled", &edited.enabled)) {
-      changed = true;
-    }
-
-    ImGui::SeparatorText("Radiometry");
-    if (drawFloatTextStepper("Intensity", lightEditorDraft.intensityBuffer,
-                             edited.intensity, 0.1f, 0.0f,
-                             std::numeric_limits<float>::max(), "%.3f")) {
-      changed = true;
-    }
-
-    if (edited.type != LightType::Directional &&
-        drawFloatTextStepper("Range", lightEditorDraft.rangeBuffer,
-                             edited.range, 0.1f, 0.0f,
-                             std::numeric_limits<float>::max(), "%.3f")) {
-      changed = true;
-    }
-    if (edited.type == LightType::Spot) {
-      ImGui::SeparatorText("Spot Cone");
-      float innerConeDegrees = glm::degrees(edited.innerConeAngleRadians);
-      float outerConeDegrees = glm::degrees(edited.outerConeAngleRadians);
-      if (drawFloatTextStepper("Inner Cone Degrees",
-                               lightEditorDraft.innerConeDegreesBuffer,
-                               innerConeDegrees, 0.5f, 0.0f, 89.0f, "%.2f")) {
-        edited.innerConeAngleRadians = glm::radians(innerConeDegrees);
-        changed = true;
-      }
-      if (drawFloatTextStepper("Outer Cone Degrees",
-                               lightEditorDraft.outerConeDegreesBuffer,
-                               outerConeDegrees, 0.5f, 0.0f, 89.0f, "%.2f")) {
-        edited.outerConeAngleRadians = glm::radians(outerConeDegrees);
-        changed = true;
-      }
-      edited.innerConeAngleRadians =
-          std::min(edited.innerConeAngleRadians, edited.outerConeAngleRadians);
-    }
-
-    if (changed && !scene.updateLight(selectedLightId, edited)) {
-      NURI_LOG_WARNING("ImGuizmoController::drawSelectedLightEditor: failed to "
-                       "update %s light (slot=%u)",
-                       lightTypeName(selectedLight.type),
-                       indexOf(selectedLightId));
-    }
-
-    ImGui::PopID();
+    drawLightEditor(scene.graph(), selectionState->lightId, selectedLight,
+                    lightEditorDraft);
   }
 
   void clearSelectionState() {
-    selectionKind = SelectionKind::None;
-    selectedOpaqueIndex.reset();
-    selectedLightId = kInvalidLightId;
-    invalidateLightEditorDraft();
+    selectionState->clear();
+    invalidateLightEditorDraft(lightEditorDraft);
     gizmoHoverOrUsing = false;
   }
 
-  void invalidateLightEditorDraft() {
-    lightEditorDraft.id = kInvalidLightId;
-    lightEditorDraft.light = LightDesc{};
-    lightEditorDraft.nameBuffer.fill('\0');
-    lightEditorDraft.intensityBuffer.fill('\0');
-    lightEditorDraft.rangeBuffer.fill('\0');
-    lightEditorDraft.innerConeDegreesBuffer.fill('\0');
-    lightEditorDraft.outerConeDegreesBuffer.fill('\0');
-  }
-
-  void syncLightEditorDraft(const LightDesc &selectedLight) {
-    if (lightEditorDraft.id == selectedLightId) {
-      return;
-    }
-
-    lightEditorDraft.id = selectedLightId;
-    lightEditorDraft.light = selectedLight;
-    std::snprintf(lightEditorDraft.nameBuffer.data(),
-                  lightEditorDraft.nameBuffer.size(), "%s",
-                  selectedLight.name.c_str());
-    writeFloatBuffer(lightEditorDraft.intensityBuffer, selectedLight.intensity,
-                     "%.3f");
-    writeFloatBuffer(lightEditorDraft.rangeBuffer, selectedLight.range, "%.3f");
-    writeFloatBuffer(lightEditorDraft.innerConeDegreesBuffer,
-                     glm::degrees(selectedLight.innerConeAngleRadians), "%.2f");
-    writeFloatBuffer(lightEditorDraft.outerConeDegreesBuffer,
-                     glm::degrees(selectedLight.outerConeAngleRadians), "%.2f");
+  void demoteToNodeSelection() {
+    selectionState->kind = SceneSelectionKind::None;
+    selectionState->renderableId = kInvalidRenderableId;
+    selectionState->renderableIndex = 0u;
+    selectionState->lightId = kInvalidLightId;
+    invalidateLightEditorDraft(lightEditorDraft);
   }
 
   RenderScene &scene;
   CameraSystem &cameraSystem;
   GPUDevice &gpu;
+  SceneEditorSelectionState localSelectionState{};
+  SceneEditorSelectionState *selectionState = nullptr;
   RenderFrameContext *frame = nullptr;
   std::optional<OpaquePickRequest> pendingPickRequest{};
-  SelectionKind selectionKind = SelectionKind::None;
-  std::optional<uint32_t> selectedOpaqueIndex{};
-  LightId selectedLightId = kInvalidLightId;
   uint64_t nextPickRequestId = 1;
   uint64_t pickRequestFloorId = 1;
   ImGuizmo::OPERATION gizmoOperation = ImGuizmo::TRANSLATE;
@@ -782,6 +660,10 @@ void ImGuizmoController::onFrame(RenderFrameContext &frame) {
 
 void ImGuizmoController::drawUi(const GizmoUiDrawConfig &config) {
   impl_->drawUi(config);
+}
+
+void ImGuizmoController::invalidatePendingPicks() {
+  impl_->invalidatePendingPicks();
 }
 
 void ImGuizmoController::reset() { impl_->reset(); }

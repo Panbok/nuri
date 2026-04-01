@@ -4,9 +4,12 @@
 
 #include "nuri/bakery/brdf_lut_baker.h"
 #include "nuri/bakery/envmap_prefilter_baker.h"
+#include "nuri/bakery/scene_asset_baker.h"
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_device.h"
+
+#include <format>
 
 namespace nuri::bakery {
 namespace {
@@ -47,6 +50,8 @@ maxWriteCompletionsPerTick(BakeryExecutionProfile profile) {
     return "BRDF LUT";
   case BakeJobKind::EnvmapPrefilter:
     return "Envmap Prefilter";
+  case BakeJobKind::ScenePortableAssets:
+    return "Scene Portable Assets";
   }
   return "Unknown";
 }
@@ -82,6 +87,13 @@ struct BakerySystem::Impl {
     std::optional<detail::EnvWritePayload> payload{};
   };
 
+  struct SceneJobData {
+    detail::ScenePortableBakePlan plan{};
+    std::shared_future<Result<detail::ScenePortableBakeStats, std::string>>
+        bakeFuture{};
+    bool bakeInFlight = false;
+  };
+
   struct JobRecord {
     BakeJobId id{};
     BakeRequest request{};
@@ -92,7 +104,7 @@ struct BakerySystem::Impl {
     uint32_t totalSteps = 0;
     std::string summary{};
     std::string error{};
-    std::variant<std::monostate, BrdfJobData, EnvJobData> data{};
+    std::variant<std::monostate, BrdfJobData, EnvJobData, SceneJobData> data{};
   };
 
   struct BrdfWriteTask {
@@ -154,9 +166,13 @@ struct BakerySystem::Impl {
     const BakeJobId id{.value = nextJobId++};
     JobRecord job{};
     job.id = id;
-    job.kind = std::holds_alternative<BrdfLutBakeRequest>(request)
-                   ? BakeJobKind::BrdfLut
-                   : BakeJobKind::EnvmapPrefilter;
+    if (std::holds_alternative<BrdfLutBakeRequest>(request)) {
+      job.kind = BakeJobKind::BrdfLut;
+    } else if (std::holds_alternative<EnvmapPrefilterBakeRequest>(request)) {
+      job.kind = BakeJobKind::EnvmapPrefilter;
+    } else {
+      job.kind = BakeJobKind::ScenePortableAssets;
+    }
     job.request = std::move(request);
     job.state = BakeJobState::Queued;
     job.summary = "Queued";
@@ -422,21 +438,53 @@ struct BakerySystem::Impl {
         return;
       }
 
-      const auto *request =
-          std::get_if<EnvmapPrefilterBakeRequest>(&job.request);
-      if (request == nullptr) {
-        setFailed(job, "BakerySystem: envmap request payload mismatch");
+      if (job.kind == BakeJobKind::EnvmapPrefilter) {
+        const auto *request =
+            std::get_if<EnvmapPrefilterBakeRequest>(&job.request);
+        if (request == nullptr) {
+          setFailed(job, "BakerySystem: envmap request payload mismatch");
+          return;
+        }
+
+        auto planResult = detail::planEnvmapPrefilterBake(
+            config, request->environmentHdrPath, request->forceRebuild);
+        if (planResult.hasError()) {
+          setFailed(job, planResult.error());
+          return;
+        }
+
+        detail::EnvBakePlan plan = std::move(planResult.value());
+        if (!plan.shouldBake) {
+          job.state = BakeJobState::Skipped;
+          job.summary = "Up-to-date";
+          job.error.clear();
+          return;
+        }
+
+        EnvJobData data{};
+        data.plan = std::move(plan);
+        job.data = std::move(data);
+        job.totalSteps = 0u;
+        job.completedSteps = 0u;
+        job.summary = "Cache check complete";
+        job.state = BakeJobState::GpuSetup;
         return;
       }
 
-      auto planResult = detail::planEnvmapPrefilterBake(
-          config, request->environmentHdrPath, request->forceRebuild);
+      const auto *request =
+          std::get_if<ScenePortableAssetsBakeRequest>(&job.request);
+      if (request == nullptr) {
+        setFailed(job, "BakerySystem: scene asset request payload mismatch");
+        return;
+      }
+
+      auto planResult = detail::planScenePortableAssetsBake(*request);
       if (planResult.hasError()) {
         setFailed(job, planResult.error());
         return;
       }
 
-      detail::EnvBakePlan plan = std::move(planResult.value());
+      detail::ScenePortableBakePlan plan = std::move(planResult.value());
       if (!plan.shouldBake) {
         job.state = BakeJobState::Skipped;
         job.summary = "Up-to-date";
@@ -444,10 +492,10 @@ struct BakerySystem::Impl {
         return;
       }
 
-      EnvJobData data{};
+      SceneJobData data{};
       data.plan = std::move(plan);
       job.data = std::move(data);
-      job.totalSteps = 0u;
+      job.totalSteps = 1u;
       job.completedSteps = 0u;
       job.summary = "Cache check complete";
       job.state = BakeJobState::GpuSetup;
@@ -476,35 +524,55 @@ struct BakerySystem::Impl {
         return;
       }
 
-      auto *data = std::get_if<EnvJobData>(&job.data);
-      if (data == nullptr) {
-        setFailed(job, "BakerySystem: missing envmap job data");
-        return;
-      }
-      if (data->gpu.bakeTileSize == 0u) {
-        data->gpu.bakeTileSize = bakeTileSizeForProfile(profile);
-      }
-      auto setupResult =
-          detail::advanceEnvmapPrefilterSetup(*gpu, data->plan, data->gpu);
-      if (setupResult.hasError()) {
-        setFailed(job, setupResult.error());
-        return;
-      }
-      job.summary = setupResult.value().summary;
-      if (setupResult.value().status == detail::EnvSetupStatus::InProgress) {
-        return;
-      }
-      if (setupResult.value().status == detail::EnvSetupStatus::Skipped) {
-        job.state = BakeJobState::Skipped;
+      if (job.kind == BakeJobKind::EnvmapPrefilter) {
+        auto *data = std::get_if<EnvJobData>(&job.data);
+        if (data == nullptr) {
+          setFailed(job, "BakerySystem: missing envmap job data");
+          return;
+        }
+        if (data->gpu.bakeTileSize == 0u) {
+          data->gpu.bakeTileSize = bakeTileSizeForProfile(profile);
+        }
+        auto setupResult =
+            detail::advanceEnvmapPrefilterSetup(*gpu, data->plan, data->gpu);
+        if (setupResult.hasError()) {
+          setFailed(job, setupResult.error());
+          return;
+        }
         job.summary = setupResult.value().summary;
-        job.error.clear();
+        if (setupResult.value().status == detail::EnvSetupStatus::InProgress) {
+          return;
+        }
+        if (setupResult.value().status == detail::EnvSetupStatus::Skipped) {
+          job.state = BakeJobState::Skipped;
+          job.summary = setupResult.value().summary;
+          job.error.clear();
+          return;
+        }
+
+        job.totalSteps = data->gpu.totalSteps;
+        job.completedSteps = 0u;
+        job.state = BakeJobState::GpuStep;
+        job.summary = setupResult.value().summary;
         return;
       }
 
-      job.totalSteps = data->gpu.totalSteps;
-      job.completedSteps = 0u;
+      auto *data = std::get_if<SceneJobData>(&job.data);
+      if (data == nullptr) {
+        setFailed(job, "BakerySystem: missing scene asset job data");
+        return;
+      }
+      if (!data->bakeInFlight) {
+        data->bakeFuture =
+            std::async(std::launch::async, [plan = data->plan]() {
+              return detail::bakeScenePortableAssetsToDisk(plan);
+            }).share();
+        data->bakeInFlight = true;
+        job.summary = "Portable asset bake started";
+        return;
+      }
       job.state = BakeJobState::GpuStep;
-      job.summary = setupResult.value().summary;
+      job.summary = "Portable asset bake running";
     };
     run();
     NURI_PROFILER_ZONE_END();
@@ -533,34 +601,77 @@ struct BakerySystem::Impl {
         return;
       }
 
-      auto *data = std::get_if<EnvJobData>(&job.data);
-      if (data == nullptr) {
-        setFailed(job, "BakerySystem: missing envmap job data");
-        return;
-      }
-
-      auto stepResult = detail::runEnvmapPrefilterBakeOneStep(*gpu, data->gpu);
-      if (stepResult.hasError()) {
-        setFailed(job, stepResult.error());
-        return;
-      }
-
-      job.completedSteps = stepResult.value().completedSteps;
-      job.totalSteps = stepResult.value().totalSteps;
-      if (!stepResult.value().finished) {
-        job.summary = "GPU bake in progress";
-        if (job.cancelRequested) {
-          detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
-          job.state = BakeJobState::Canceled;
-          job.summary = "Canceled";
+      if (job.kind == BakeJobKind::EnvmapPrefilter) {
+        auto *data = std::get_if<EnvJobData>(&job.data);
+        if (data == nullptr) {
+          setFailed(job, "BakerySystem: missing envmap job data");
+          return;
         }
+
+        auto stepResult =
+            detail::runEnvmapPrefilterBakeOneStep(*gpu, data->gpu);
+        if (stepResult.hasError()) {
+          setFailed(job, stepResult.error());
+          return;
+        }
+
+        job.completedSteps = stepResult.value().completedSteps;
+        job.totalSteps = stepResult.value().totalSteps;
+        if (!stepResult.value().finished) {
+          job.summary = "GPU bake in progress";
+          if (job.cancelRequested) {
+            detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
+            job.state = BakeJobState::Canceled;
+            job.summary = "Canceled";
+          }
+          return;
+        }
+
+        data->payload = detail::collectEnvWritePayload(data->gpu);
+        detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
+        job.state = BakeJobState::WriteQueued;
+        job.summary = "GPU bake complete";
         return;
       }
 
-      data->payload = detail::collectEnvWritePayload(data->gpu);
-      detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
-      job.state = BakeJobState::WriteQueued;
-      job.summary = "GPU bake complete";
+      auto *data = std::get_if<SceneJobData>(&job.data);
+      if (data == nullptr || !data->bakeInFlight) {
+        setFailed(job, "BakerySystem: missing scene asset future");
+        return;
+      }
+      if (data->bakeFuture.wait_for(std::chrono::seconds(0)) !=
+          std::future_status::ready) {
+        job.summary = "Portable asset bake running";
+        return;
+      }
+      auto bakeResult = data->bakeFuture.get();
+      data->bakeInFlight = false;
+      if (bakeResult.hasError()) {
+        setFailed(job, bakeResult.error());
+        return;
+      }
+      job.completedSteps = job.totalSteps;
+      if (!bakeResult.value().wroteAnyFiles) {
+        job.state = BakeJobState::Skipped;
+        job.summary = "Up-to-date";
+        job.error.clear();
+        return;
+      }
+      job.state = BakeJobState::Succeeded;
+      job.summary = std::format(
+          "Portable=%u (%llu B), native=%u (%llu B), material cache=%s",
+          bakeResult.value().portableTexturesWritten,
+          static_cast<unsigned long long>(
+              bakeResult.value().portableBytesWritten),
+          bakeResult.value().nativeTexturesWritten,
+          static_cast<unsigned long long>(
+              bakeResult.value().nativeBytesWritten),
+          bakeResult.value().wroteMaterialCache ? "yes" : "no");
+      job.error.clear();
+      const std::string_view kindName = jobKindName(job.kind);
+      NURI_LOG_INFO("BakerySystem: job #%llu (%.*s) succeeded",
+                    static_cast<unsigned long long>(job.id.value),
+                    static_cast<int>(kindName.size()), kindName.data());
     };
     run();
     NURI_PROFILER_ZONE_END();
@@ -586,7 +697,7 @@ struct BakerySystem::Impl {
           .outputPath = data->plan.outputPath,
           .bytes = std::move(data->outputBytes),
       };
-    } else {
+    } else if (job.kind == BakeJobKind::EnvmapPrefilter) {
       auto *data = std::get_if<EnvJobData>(&job.data);
       if (data == nullptr || !data->payload.has_value()) {
         setFailed(job, "BakerySystem: missing envmap write payload");
@@ -627,8 +738,16 @@ struct BakerySystem::Impl {
       return;
     }
 
-    if (auto *data = std::get_if<EnvJobData>(&job.data); data != nullptr) {
-      detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
+    if (job.kind == BakeJobKind::EnvmapPrefilter) {
+      if (auto *data = std::get_if<EnvJobData>(&job.data); data != nullptr) {
+        detail::cleanupEnvmapPrefilterBake(*gpu, data->gpu);
+      }
+      return;
+    }
+
+    if (auto *data = std::get_if<SceneJobData>(&job.data); data != nullptr) {
+      data->bakeFuture = {};
+      data->bakeInFlight = false;
     }
   }
 

@@ -1,10 +1,13 @@
 #pragma once
 
 #include "nuri/core/event_manager.h"
-#include "nuri/core/layer.h"
+#include "nuri/core/input_events.h"
+#include "nuri/core/result.h"
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
+#include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/scene/camera.h"
 #include "nuri/ui/editor.h"
 #include "nuri/ui/editor_services.h"
@@ -20,7 +23,7 @@ namespace nuri {
 class ImGuiEditor;
 class GizmoController;
 
-class EditorLayer final : public Layer {
+class EditorOverlayController final {
 public:
   struct UiCallback {
     std::function<void()> callback;
@@ -29,35 +32,35 @@ public:
     explicit UiCallback(std::function<void()> cb) : callback(std::move(cb)) {}
   };
 
-  static std::unique_ptr<EditorLayer>
+  static std::unique_ptr<EditorOverlayController>
   create(Window &window, GPUDevice &gpu, EventManager &events,
          UiCallback callback = UiCallback{},
          const EditorServices &services = {});
-  ~EditorLayer() override;
+  ~EditorOverlayController();
 
-  EditorLayer(const EditorLayer &) = delete;
-  EditorLayer &operator=(const EditorLayer &) = delete;
-  EditorLayer(EditorLayer &&) = delete;
-  EditorLayer &operator=(EditorLayer &&) = delete;
+  EditorOverlayController(const EditorOverlayController &) = delete;
+  EditorOverlayController &operator=(const EditorOverlayController &) = delete;
+  EditorOverlayController(EditorOverlayController &&) = delete;
+  EditorOverlayController &operator=(EditorOverlayController &&) = delete;
 
   void setUiCallback(UiCallback callback) { callback_ = std::move(callback); }
   void resetControllers();
+  void resetSceneUiState();
   void syncCameraControllerWidgetStateFromCamera(const Camera &camera);
   void setScenePresetUi(std::span<const char *const> presetNames,
                         int selectedIndex,
                         std::string_view hotkeyHint = "Toggle Editor: F6");
   [[nodiscard]] std::optional<int> takeScenePresetSelectionRequest();
 
-  bool onInput(const InputEvent &event) override;
-  void onUpdate(double deltaTime) override;
-  void prepareFrameContext(RenderFrameContext &frame) override;
-  Result<bool, std::string>
-  buildRenderGraph(RenderFrameContext &frame,
-                   RenderGraphBuilder &graph) override;
+  bool onInput(const InputEvent &event);
+  void onUpdate(double deltaTime);
+  void prepareOverlayFrameContext(RenderFrameContext &frame);
+  Result<bool, std::string> buildOverlayPass(RenderFrameContext &frame,
+                                             RenderGraphBuilder &graph);
 
 private:
-  EditorLayer(Window &window, GPUDevice &gpu, EventManager &events,
-              UiCallback callback, const EditorServices &services);
+  EditorOverlayController(Window &window, GPUDevice &gpu, EventManager &events,
+                          UiCallback callback, const EditorServices &services);
 
   std::unique_ptr<ImGuiEditor> editor_;
   UiCallback callback_{};

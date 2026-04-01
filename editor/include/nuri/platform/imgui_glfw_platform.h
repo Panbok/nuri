@@ -26,34 +26,40 @@ public:
 
 private:
   ImGuiGlfwPlatform(Window &window, EventManager &events);
-
-  template <typename T, bool (ImGuiGlfwPlatform::*Fn)(const T &)>
-  static bool onRaw(const T &event, void *user) {
-    if (!user) {
-      return false;
-    }
-    return (static_cast<ImGuiGlfwPlatform *>(user)->*Fn)(event);
-  }
-
-  bool handleRawKey(const RawKeyEvent &event);
-  bool handleRawChar(const RawCharEvent &event);
-  bool handleRawMouseButton(const RawMouseButtonEvent &event);
-  bool handleRawMouseMove(const RawMouseMoveEvent &event);
-  bool handleRawMouseScroll(const RawMouseScrollEvent &event);
-  bool handleRawFocus(const RawFocusEvent &event);
-  bool handleRawCursorEnter(const RawCursorEnterEvent &event);
+  static void onGlfwKey(GLFWwindow *window, int key, int scancode, int action,
+                        int mods);
+  static void onGlfwChar(GLFWwindow *window, unsigned int codepoint);
+  static void onGlfwMouseButton(GLFWwindow *window, int button, int action,
+                                int mods);
+  static void onGlfwCursorPos(GLFWwindow *window, double x, double y);
+  static void onGlfwScroll(GLFWwindow *window, double xOffset, double yOffset);
+  static void onGlfwFocus(GLFWwindow *window, int focused);
+  static void onGlfwCursorEnter(GLFWwindow *window, int entered);
+  void handleGlfwKey(int key, int scancode, int action, int mods);
+  void handleGlfwChar(unsigned int codepoint);
+  void handleGlfwMouseButton(int button, int action, int mods);
+  void handleGlfwMouseMove(double x, double y);
+  void handleGlfwMouseScroll(double xOffset, double yOffset);
+  void handleGlfwFocus(int focused);
+  void handleGlfwCursorEnter(int entered);
+  void invokePrevKeyCallback(int key, int scancode, int action, int mods) const;
+  void invokePrevCharCallback(unsigned int codepoint) const;
+  void invokePrevMouseButtonCallback(int button, int action, int mods) const;
+  void invokePrevCursorPosCallback(double x, double y) const;
+  void invokePrevScrollCallback(double xOffset, double yOffset) const;
+  void invokePrevFocusCallback(int focused) const;
+  void invokePrevCursorEnterCallback(int entered) const;
 
   Window &window_;
-  EventManager &events_;
   GLFWwindow *glfwWindow_ = nullptr;
-  SubscriptionToken keySub_{};
-  SubscriptionToken charSub_{};
-  SubscriptionToken mouseButtonSub_{};
-  SubscriptionToken mouseMoveSub_{};
-  SubscriptionToken mouseScrollSub_{};
-  SubscriptionToken focusSub_{};
-  SubscriptionToken cursorEnterSub_{};
   std::array<bool, 5> mouseButtons_{};
+  GLFWkeyfun prevKeyCallback_ = nullptr;
+  GLFWcharfun prevCharCallback_ = nullptr;
+  GLFWmousebuttonfun prevMouseButtonCallback_ = nullptr;
+  GLFWcursorposfun prevCursorPosCallback_ = nullptr;
+  GLFWscrollfun prevScrollCallback_ = nullptr;
+  GLFWwindowfocusfun prevFocusCallback_ = nullptr;
+  GLFWcursorenterfun prevCursorEnterCallback_ = nullptr;
 };
 
 } // namespace nuri
