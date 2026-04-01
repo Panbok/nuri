@@ -76,14 +76,38 @@ template <typename T> [[nodiscard]] T loadUnaligned(const std::byte *ptr) {
 [[nodiscard]] bool
 isPathWithinDirectory(const std::filesystem::path &path,
                       const std::filesystem::path &directory) {
-  auto pathIt = path.begin();
-  auto directoryIt = directory.begin();
-  for (; directoryIt != directory.end(); ++directoryIt, ++pathIt) {
-    if (pathIt == path.end() || *pathIt != *directoryIt) {
-      return false;
-    }
+  std::error_code ec;
+  const std::filesystem::path canonicalPath =
+      std::filesystem::weakly_canonical(path, ec);
+  if (ec) {
+    return false;
   }
-  return true;
+  ec.clear();
+  const std::filesystem::path canonicalDirectory =
+      std::filesystem::weakly_canonical(directory, ec);
+  if (ec) {
+    return false;
+  }
+
+  auto normalizeForCompare = [](const std::filesystem::path &value) {
+    std::string normalized = value.generic_string();
+#if defined(_WIN32)
+    std::transform(
+        normalized.begin(), normalized.end(), normalized.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+#endif
+    return normalized;
+  };
+
+  std::string pathString = normalizeForCompare(canonicalPath);
+  std::string directoryString = normalizeForCompare(canonicalDirectory);
+  if (pathString == directoryString) {
+    return true;
+  }
+  if (!directoryString.empty() && directoryString.back() != '/') {
+    directoryString.push_back('/');
+  }
+  return pathString.starts_with(directoryString);
 }
 
 struct AccessorResolvedView {
@@ -96,13 +120,7 @@ struct AccessorResolvedView {
 };
 
 [[nodiscard]] Result<std::vector<std::byte>, std::string>
-loadGlbBinaryChunk(const std::filesystem::path &path) {
-  auto fileBytesResult = readBinaryFile(path);
-  if (fileBytesResult.hasError()) {
-    return Result<std::vector<std::byte>, std::string>::makeError(
-        fileBytesResult.error());
-  }
-  const std::vector<std::byte> &fileBytes = fileBytesResult.value();
+loadGlbBinaryChunk(std::span<const std::byte> fileBytes) {
   if (fileBytes.size() < 20u) {
     return Result<std::vector<std::byte>, std::string>::makeError(
         "glTF GLB file is too small");
@@ -317,6 +335,7 @@ resolveAccessor(yyjson_val *root,
 
 Result<std::pmr::vector<std::pmr::vector<std::byte>>, std::string>
 loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
+                std::span<const std::byte> sourceBytes,
                 std::pmr::memory_resource *memory) {
   if (memory == nullptr) {
     memory = std::pmr::get_default_resource();
@@ -331,7 +350,7 @@ loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
   std::vector<std::byte> glbBinaryChunk;
   const bool isGlb = hasExtensionCaseInsensitive(path, ".glb");
   if (isGlb) {
-    auto glbChunkResult = loadGlbBinaryChunk(path);
+    auto glbChunkResult = loadGlbBinaryChunk(sourceBytes);
     if (glbChunkResult.hasError()) {
       return Result<std::pmr::vector<std::pmr::vector<std::byte>>,
                     std::string>::makeError(glbChunkResult.error());
@@ -372,13 +391,12 @@ loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
       }
       std::filesystem::path resolvedUriPath;
       try {
-        const std::filesystem::path canonicalDirectory =
-            std::filesystem::weakly_canonical(
-                directory.empty() ? std::filesystem::path(".") : directory);
+        const std::filesystem::path baseDirectory =
+            directory.empty() ? std::filesystem::path(".") : directory;
         const std::filesystem::path candidatePath =
-            canonicalDirectory / std::filesystem::path(std::string(uri));
+            baseDirectory / std::filesystem::path(std::string(uri));
         resolvedUriPath = std::filesystem::weakly_canonical(candidatePath);
-        if (!isPathWithinDirectory(resolvedUriPath, canonicalDirectory)) {
+        if (!isPathWithinDirectory(resolvedUriPath, baseDirectory)) {
           return Result<std::pmr::vector<std::pmr::vector<std::byte>>,
                         std::string>::
               makeError(
@@ -497,7 +515,8 @@ Result<std::pmr::vector<uint16_t>, std::string> readGltfAccessorAsU16Array(
         resolvedResult.error());
   }
   const AccessorResolvedView resolved = resolvedResult.value();
-  if (resolved.componentType != 5121u && resolved.componentType != 5123u) {
+  if (resolved.componentType != 5121u && resolved.componentType != 5123u &&
+      resolved.componentType != 5125u) {
     return Result<std::pmr::vector<uint16_t>, std::string>::makeError(
         "glTF accessor component type is not compatible with uint16 output");
   }
@@ -511,11 +530,22 @@ Result<std::pmr::vector<uint16_t>, std::string> readGltfAccessorAsU16Array(
         static_cast<ptrdiff_t>(elementIndex * resolved.elementStride);
     for (uint32_t componentIndex = 0; componentIndex < resolved.componentCount;
          ++componentIndex) {
-      values[static_cast<size_t>(elementIndex) * resolved.componentCount +
-             componentIndex] =
-          u16ComponentValue(resolved.componentType,
-                            elementPtr + static_cast<ptrdiff_t>(componentIndex *
-                                                                componentSize));
+      const std::byte *componentPtr =
+          elementPtr + static_cast<ptrdiff_t>(componentIndex * componentSize);
+      const size_t valueIndex =
+          static_cast<size_t>(elementIndex) * resolved.componentCount +
+          componentIndex;
+      if (resolved.componentType == 5125u) {
+        const uint32_t component = loadUnaligned<uint32_t>(componentPtr);
+        if (component > std::numeric_limits<uint16_t>::max()) {
+          return Result<std::pmr::vector<uint16_t>, std::string>::makeError(
+              "glTF accessor UNSIGNED_INT index exceeds uint16 range");
+        }
+        values[valueIndex] = static_cast<uint16_t>(component);
+      } else {
+        values[valueIndex] =
+            u16ComponentValue(resolved.componentType, componentPtr);
+      }
     }
   }
   return Result<std::pmr::vector<uint16_t>, std::string>::makeResult(
@@ -545,7 +575,7 @@ Result<std::pmr::vector<glm::mat4>, std::string> readGltfAccessorAsMat4Array(
   matrices.resize(info.count);
   const std::pmr::vector<float> &values = valuesResult.value();
   for (uint32_t matrixIndex = 0; matrixIndex < info.count; ++matrixIndex) {
-    glm::mat4 matrix(1.0f);
+    glm::mat4 matrix;
     const size_t base = static_cast<size_t>(matrixIndex) * 16u;
     for (uint32_t column = 0; column < 4u; ++column) {
       for (uint32_t row = 0; row < 4u; ++row) {

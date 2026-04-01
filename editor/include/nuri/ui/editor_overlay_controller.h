@@ -1,6 +1,5 @@
 #pragma once
 
-#include "nuri/core/event_manager.h"
 #include "nuri/core/input_events.h"
 #include "nuri/core/result.h"
 #include "nuri/core/window.h"
@@ -25,16 +24,8 @@ class GizmoController;
 
 class EditorOverlayController final {
 public:
-  struct UiCallback {
-    std::function<void()> callback;
-
-    UiCallback() : callback{} {}
-    explicit UiCallback(std::function<void()> cb) : callback(std::move(cb)) {}
-  };
-
   static std::unique_ptr<EditorOverlayController>
-  create(Window &window, GPUDevice &gpu, EventManager &events,
-         UiCallback callback = UiCallback{},
+  create(Window &window, GPUDevice &gpu, std::function<void()> callback = {},
          const EditorServices &services = {});
   ~EditorOverlayController();
 
@@ -43,7 +34,9 @@ public:
   EditorOverlayController(EditorOverlayController &&) = delete;
   EditorOverlayController &operator=(EditorOverlayController &&) = delete;
 
-  void setUiCallback(UiCallback callback) { callback_ = std::move(callback); }
+  void setUiCallback(std::function<void()> callback) {
+    callback_ = std::move(callback);
+  }
   void resetControllers();
   void resetSceneUiState();
   void syncCameraControllerWidgetStateFromCamera(const Camera &camera);
@@ -55,15 +48,16 @@ public:
   bool onInput(const InputEvent &event);
   void onUpdate(double deltaTime);
   void prepareOverlayFrameContext(RenderFrameContext &frame);
-  Result<bool, std::string> buildOverlayPass(RenderFrameContext &frame,
+  Result<void, std::string> buildOverlayPass(RenderFrameContext &frame,
                                              RenderGraphBuilder &graph);
 
 private:
-  EditorOverlayController(Window &window, GPUDevice &gpu, EventManager &events,
-                          UiCallback callback, const EditorServices &services);
+  EditorOverlayController(Window &window, GPUDevice &gpu,
+                          std::function<void()> callback,
+                          const EditorServices &services);
 
   std::unique_ptr<ImGuiEditor> editor_;
-  UiCallback callback_{};
+  std::function<void()> callback_{};
   std::shared_ptr<GizmoController> gizmoController_{};
   double frameDeltaSeconds_ = 0.0;
 };

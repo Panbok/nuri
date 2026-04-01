@@ -609,16 +609,46 @@ writeKtxTextureAtomic(ktxTexture *texture, const std::filesystem::path &path) {
 
   std::filesystem::rename(tempPath, path, ec);
   if (ec) {
+    const std::error_code renameError = ec;
     ec.clear();
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(tempPath, path, ec);
-    if (ec) {
+    const bool pathExists = std::filesystem::exists(path, ec);
+    if (ec || !pathExists) {
+      ec.clear();
       std::filesystem::remove(tempPath, ec);
       return Result<uint64_t, std::string>::makeError(
           "Scene asset baker: failed to rename temp KTX file to '" +
+          path.string() + "' (error " + std::to_string(renameError.value()) +
+          ")");
+    }
+
+    const std::filesystem::path pathBackup =
+        path.string() + tempSuffix + ".bak";
+    std::filesystem::rename(path, pathBackup, ec);
+    if (ec) {
+      ec.clear();
+      std::filesystem::remove(tempPath, ec);
+      return Result<uint64_t, std::string>::makeError(
+          "Scene asset baker: failed to move existing KTX file out of the way "
+          "for '" +
           path.string() + "'");
     }
+
+    ec.clear();
+    std::filesystem::rename(tempPath, path, ec);
+    if (ec) {
+      const std::error_code secondRenameError = ec;
+      ec.clear();
+      (void)std::filesystem::rename(pathBackup, path, ec);
+      ec.clear();
+      std::filesystem::remove(tempPath, ec);
+      return Result<uint64_t, std::string>::makeError(
+          "Scene asset baker: failed to rename temp KTX file to '" +
+          path.string() + "' (error " +
+          std::to_string(secondRenameError.value()) + ")");
+    }
+
+    ec.clear();
+    std::filesystem::remove(pathBackup, ec);
   }
 
   const uint64_t sizeBytes = std::filesystem::file_size(path, ec);
@@ -702,7 +732,14 @@ buildNativeTexture(ktxTexture2 &portableTexture,
          ++layer) {
       for (uint32_t face = 0u; face < std::max(1u, copyPtr->numFaces); ++face) {
         ktx_size_t srcOffset = 0u;
-        ktxTexture_GetImageOffset(srcBase, level, layer, face, &srcOffset);
+        const KTX_error_code offsetError =
+            ktxTexture_GetImageOffset(srcBase, level, layer, face, &srcOffset);
+        if (offsetError != KTX_SUCCESS) {
+          return Result<KtxTexture2Ptr, std::string>::makeError(
+              "Scene asset baker: failed to resolve native texture payload "
+              "offset (error " +
+              std::to_string(static_cast<int>(offsetError)) + ")");
+        }
         const KTX_error_code setError = ktxTexture_SetImageFromMemory(
             dstBase, level, layer, face, srcData + srcOffset, imageSize);
         if (setError != KTX_SUCCESS) {

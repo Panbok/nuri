@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory_resource>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -22,6 +23,7 @@ struct GltfAccessorInfo {
 
 [[nodiscard]] Result<std::pmr::vector<std::pmr::vector<std::byte>>, std::string>
 loadGltfBuffers(const std::filesystem::path &path, yyjson_val *root,
+                std::span<const std::byte> sourceBytes,
                 std::pmr::memory_resource *memory);
 
 [[nodiscard]] Result<GltfAccessorInfo, std::string>

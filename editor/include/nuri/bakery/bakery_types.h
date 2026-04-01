@@ -6,7 +6,6 @@
 #include <variant>
 #include <vector>
 
-
 namespace nuri::bakery {
 
 enum class BakeJobKind : uint8_t {
@@ -47,6 +46,7 @@ enum class ScenePortableTextureTarget : uint8_t { BC7, ETC2, RGBA8 };
 
 struct ScenePortableAssetsBakeRequest {
   std::filesystem::path scenePath;
+  // Empty means "prebuild no native targets"; only listed targets are baked.
   std::vector<ScenePortableTextureTarget> prebuildNativeTargets{};
   bool forceRebuild = false;
 };

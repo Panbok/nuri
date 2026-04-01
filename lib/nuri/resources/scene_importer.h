@@ -33,8 +33,7 @@ struct NURI_API ImportedSceneNode {
       : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
         name(other.name, alloc.resource()),
         morphWeights(other.morphWeights, alloc.resource()) {}
-  ImportedSceneNode(ImportedSceneNode &&other,
-                    const allocator_type &alloc = {}) noexcept
+  ImportedSceneNode(ImportedSceneNode &&other, const allocator_type &alloc = {})
       : parentIndex(other.parentIndex), localFromParent(other.localFromParent),
         name(std::move(other.name), alloc.resource()),
         morphWeights(std::move(other.morphWeights), alloc.resource()) {}

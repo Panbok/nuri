@@ -9,19 +9,18 @@
 namespace nuri {
 std::unique_ptr<EditorOverlayController>
 EditorOverlayController::create(Window &window, GPUDevice &gpu,
-                                EventManager &events, UiCallback callback,
+                                std::function<void()> callback,
                                 const EditorServices &services) {
   NURI_LOG_DEBUG(
       "EditorOverlayController::create: Creating editor overlay controller");
-  return std::unique_ptr<EditorOverlayController>(new EditorOverlayController(
-      window, gpu, events, std::move(callback), services));
+  return std::unique_ptr<EditorOverlayController>(
+      new EditorOverlayController(window, gpu, std::move(callback), services));
 }
 
 EditorOverlayController::EditorOverlayController(Window &window, GPUDevice &gpu,
-                                                 EventManager &events,
-                                                 UiCallback callback,
+                                                 std::function<void()> callback,
                                                  const EditorServices &services)
-    : editor_(ImGuiEditor::create(window, gpu, events, services)),
+    : editor_(ImGuiEditor::create(window, gpu, services)),
       callback_(std::move(callback)) {
   if (services.hasAllDependencies()) {
     gizmoController_ = createImGuizmoController(services);
@@ -114,7 +113,6 @@ bool EditorOverlayController::onInput(const InputEvent &event) {
     NURI_LOG_WARNING(
         "EditorOverlayController::onInput: Unknown input event type: %d",
         static_cast<int>(event.type));
-    break;
   }
   return false;
 }
@@ -130,11 +128,11 @@ void EditorOverlayController::prepareOverlayFrameContext(
   }
 }
 
-Result<bool, std::string>
+Result<void, std::string>
 EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
                                           RenderGraphBuilder &graph) {
   if (!editor_) {
-    return Result<bool, std::string>::makeError(
+    return Result<void, std::string>::makeError(
         "EditorOverlayController has no ImGui editor");
   }
 
@@ -146,8 +144,8 @@ EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
 
   editor_->beginFrame();
   try {
-    if (callback_.callback) {
-      callback_.callback();
+    if (callback_) {
+      callback_();
     }
     if (gizmoController_) {
       gizmoController_->drawUi({
@@ -160,19 +158,19 @@ EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
   } catch (const std::exception &e) {
     editor_->setFrameDeltaSeconds(frameDeltaSeconds_);
     (void)editor_->endFrame();
-    return Result<bool, std::string>::makeError(
+    return Result<void, std::string>::makeError(
         std::string("Editor callback threw: ") + e.what());
   } catch (...) {
     editor_->setFrameDeltaSeconds(frameDeltaSeconds_);
     (void)editor_->endFrame();
-    return Result<bool, std::string>::makeError(
+    return Result<void, std::string>::makeError(
         "Editor callback threw unknown exception");
   }
 
   editor_->setFrameDeltaSeconds(frameDeltaSeconds_);
   auto passResult = editor_->endFrame();
   if (passResult.hasError()) {
-    return Result<bool, std::string>::makeError(passResult.error());
+    return Result<void, std::string>::makeError(passResult.error());
   }
 
   if (frame.settings) {
@@ -181,9 +179,9 @@ EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
 
   auto addResult = graph.addGraphicsPass(passResult.value());
   if (addResult.hasError()) {
-    return Result<bool, std::string>::makeError(addResult.error());
+    return Result<void, std::string>::makeError(addResult.error());
   }
 
-  return Result<bool, std::string>::makeResult(true);
+  return Result<void, std::string>::makeResult();
 }
 } // namespace nuri

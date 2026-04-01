@@ -10,6 +10,7 @@
 #include "nuri/resources/detail/gltf_json_utils.h"
 #include "nuri/resources/detail/scene_asset_build_backend.h"
 #include "nuri/resources/gpu/resource_keys.h"
+#include "nuri/resources/storage/mesh/mesh_cache_utils.h"
 
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
@@ -1606,8 +1607,18 @@ SceneImporter::loadSceneFromFile(std::string_view path,
     return Result<ImportedScene, std::string>::makeResult(std::move(imported));
   }
 
+  const std::filesystem::path scenePath{std::string(path)};
+  auto fileBytesResult = readBinaryFile(scenePath);
+  if (fileBytesResult.hasError()) {
+    return Result<ImportedScene, std::string>::makeError(
+        fileBytesResult.error());
+  }
+
   auto docResult = detail::loadGltfJsonDocument(
-      std::filesystem::path(std::string(path)), "glTF scene source");
+      scenePath,
+      std::span<const std::byte>(fileBytesResult.value().data(),
+                                 fileBytesResult.value().size()),
+      "glTF scene source");
   if (docResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(docResult.error());
   }
@@ -1618,7 +1629,10 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   }
 
   auto buffersResult = detail::loadGltfBuffers(
-      std::filesystem::path(std::string(path)), root, memory);
+      scenePath, root,
+      std::span<const std::byte>(fileBytesResult.value().data(),
+                                 fileBytesResult.value().size()),
+      memory);
   if (buffersResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(buffersResult.error());
   }
@@ -1634,20 +1648,13 @@ SceneImporter::loadSceneFromFile(std::string_view path,
         parsedNodesResult.error());
   }
   std::vector<ParsedNode> parsedNodes = std::move(parsedNodesResult.value());
-  auto skinsResult = parseSkinDefinitions(
-      root,
-      std::span<const std::pmr::vector<std::byte>>(
-          buffersResult.value().data(), buffersResult.value().size()),
-      memory);
+  auto skinsResult = parseSkinDefinitions(root, buffersResult.value(), memory);
   if (skinsResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(skinsResult.error());
   }
   imported.skins = std::move(skinsResult.value());
   auto animationsResult = parseAnimationDefinitions(
-      root, parsedNodes,
-      std::span<const std::pmr::vector<std::byte>>(
-          buffersResult.value().data(), buffersResult.value().size()),
-      memory);
+      root, parsedNodes, buffersResult.value(), memory);
   if (animationsResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(
         animationsResult.error());

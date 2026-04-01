@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <limits>
 #include <memory_resource>
+#include <optional>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -58,6 +60,8 @@ public:
   [[nodiscard]] Result<bool, std::string> commit();
 
   [[nodiscard]] const Renderable *renderable(uint32_t index) const;
+  [[nodiscard]] std::optional<uint32_t>
+  findRenderableIndex(RenderableId id) const;
   [[nodiscard]] std::span<const Renderable> renderables() const {
     return renderables_;
   }
@@ -121,6 +125,7 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   SceneGraph sceneGraph_;
   std::pmr::vector<Renderable> renderables_;
+  std::pmr::unordered_map<RenderableId, uint32_t> renderableIndexById_;
   std::pmr::vector<std::pmr::vector<float>> renderableMorphWeights_;
   std::pmr::vector<std::pmr::vector<glm::mat4>> renderableSkinPalettes_;
   std::pmr::vector<DirectionalLightGpuData> packedDirectionalLights_;

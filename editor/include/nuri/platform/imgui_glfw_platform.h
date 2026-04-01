@@ -1,6 +1,5 @@
 #pragma once
 
-#include "nuri/core/event_manager.h"
 #include "nuri/core/input_events.h"
 #include "nuri/core/window.h"
 #include "nuri/defines.h"
@@ -13,8 +12,7 @@ namespace nuri {
 
 class ImGuiGlfwPlatform final {
 public:
-  static std::unique_ptr<ImGuiGlfwPlatform> create(Window &window,
-                                                   EventManager &events);
+  static std::unique_ptr<ImGuiGlfwPlatform> create(Window &window);
   ~ImGuiGlfwPlatform();
 
   ImGuiGlfwPlatform(const ImGuiGlfwPlatform &) = delete;
@@ -25,7 +23,7 @@ public:
   void newFrame();
 
 private:
-  ImGuiGlfwPlatform(Window &window, EventManager &events);
+  ImGuiGlfwPlatform(Window &window);
   static void onGlfwKey(GLFWwindow *window, int key, int scancode, int action,
                         int mods);
   static void onGlfwChar(GLFWwindow *window, unsigned int codepoint);

@@ -431,16 +431,7 @@ inline T toImTextureId(uint32_t bindlessIndex) {
 
 [[nodiscard]] std::optional<uint32_t>
 findRenderableIndexById(const RenderScene &scene, RenderableId id) {
-  if (!isValid(id)) {
-    return std::nullopt;
-  }
-  const std::span<const Renderable> renderables = scene.renderables();
-  for (uint32_t index = 0; index < renderables.size(); ++index) {
-    if (renderables[index].id == id) {
-      return index;
-    }
-  }
-  return std::nullopt;
+  return scene.findRenderableIndex(id);
 }
 
 void applyNodeSelection(const RenderScene &scene, NodeId node,
@@ -485,7 +476,9 @@ void applyNodeSelection(const RenderScene &scene, NodeId node,
   if (isValid(firstLight)) {
     selection.kind = SceneSelectionKind::Light;
     selection.lightId = firstLight;
+    return;
   }
+  selection.kind = SceneSelectionKind::Node;
 }
 
 [[nodiscard]] std::vector<NodeId> collectChildNodes(const SceneGraph &graph,
@@ -540,10 +533,6 @@ buildMaterialSourceEntries(const Renderable &renderable,
     entries.push_back(std::move(entry));
   }
 
-  if (entries.empty()) {
-    entries.push_back(
-        MaterialSourceEntry{.ref = renderable.material, .label = "Fallback"});
-  }
   return entries;
 }
 
@@ -2561,7 +2550,7 @@ struct ImGuiEditor::Impl {
       if (renderable == nullptr ||
           renderable->id != selectionState->renderableId ||
           renderable->node != selectionState->node) {
-        selectionState->kind = SceneSelectionKind::None;
+        selectionState->kind = SceneSelectionKind::Node;
         selectionState->renderableId = kInvalidRenderableId;
         selectionState->renderableIndex = 0u;
       }
@@ -2571,7 +2560,7 @@ struct ImGuiEditor::Impl {
       if (!scene->graph().getLightDesc(selectionState->lightId, light) ||
           !scene->graph().getLightNode(selectionState->lightId, lightNode) ||
           lightNode != selectionState->node) {
-        selectionState->kind = SceneSelectionKind::None;
+        selectionState->kind = SceneSelectionKind::Node;
         selectionState->lightId = kInvalidLightId;
       }
     }
@@ -3773,13 +3762,12 @@ struct ImGuiEditor::Impl {
 };
 
 std::unique_ptr<ImGuiEditor>
-ImGuiEditor::create(Window &window, GPUDevice &gpu, EventManager &events,
+ImGuiEditor::create(Window &window, GPUDevice &gpu,
                     const EditorServices &services) {
-  return std::unique_ptr<ImGuiEditor>(
-      new ImGuiEditor(window, gpu, events, services));
+  return std::unique_ptr<ImGuiEditor>(new ImGuiEditor(window, gpu, services));
 }
 
-ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu, EventManager &events,
+ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu,
                          const EditorServices &services)
     : impl_(std::make_unique<Impl>(window, gpu, services)) {
   IMGUI_CHECKVERSION();
@@ -3804,14 +3792,12 @@ ImGuiEditor::ImGuiEditor(Window &window, GPUDevice &gpu, EventManager &events,
 #endif
   io.IniFilename = nullptr;
 
-  impl_->platform = ImGuiGlfwPlatform::create(impl_->window, events);
+  impl_->platform = ImGuiGlfwPlatform::create(impl_->window);
   impl_->renderer = ImGuiGpuRenderer::create(impl_->gpu);
 }
 
 ImGuiEditor::~ImGuiEditor() {
-  if (impl_) {
-    impl_->resetSceneUiState();
-  }
+  impl_->resetSceneUiState();
   impl_->renderer.reset();
   impl_->platform.reset();
   if (ImPlot::GetCurrentContext() != nullptr) {

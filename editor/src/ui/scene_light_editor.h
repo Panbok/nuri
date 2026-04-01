@@ -76,7 +76,7 @@ inline void writeFloatBuffer(std::span<char> buffer, float value,
                                                const char *format) {
   bool changed = false;
 
-  ImGui::PushID(label.data());
+  ImGui::PushID(label.data(), label.data() + label.size());
   if (ImGui::Button("-")) {
     value = std::clamp(value - step, minValue, maxValue);
     writeFloatBuffer(buffer, value, format);
@@ -103,7 +103,7 @@ inline void writeFloatBuffer(std::span<char> buffer, float value,
     changed = true;
   }
   ImGui::SameLine();
-  ImGui::TextUnformatted(label.data());
+  ImGui::TextUnformatted(label.data(), label.data() + label.size());
   ImGui::PopID();
 
   return changed;
@@ -187,6 +187,8 @@ inline void drawLightEditor(SceneGraph &graph, LightId selectedLightId,
     }
     edited.innerConeAngleRadians =
         std::min(edited.innerConeAngleRadians, edited.outerConeAngleRadians);
+    writeFloatBuffer(draft.innerConeDegreesBuffer,
+                     glm::degrees(edited.innerConeAngleRadians), "%.2f");
   }
 
   if (changed && !graph.updateLight(selectedLightId, edited)) {

@@ -1240,8 +1240,11 @@ void extractSkinInfluences(
     uint16_t joint = 0u;
     float weight = 0.0f;
   };
-  std::vector<std::array<InfluenceSlot, 4>> accumulated(mesh.mNumVertices);
-  std::vector<uint32_t> counts(mesh.mNumVertices, 0u);
+  std::pmr::memory_resource *mem = outInfluences.get_allocator().resource();
+  std::pmr::vector<std::array<InfluenceSlot, 4>> accumulated(mem);
+  accumulated.resize(mesh.mNumVertices);
+  std::pmr::vector<uint32_t> counts(mem);
+  counts.resize(mesh.mNumVertices, 0u);
 
   for (uint32_t boneIndex = 0u; boneIndex < mesh.mNumBones; ++boneIndex) {
     const aiBone *bone = mesh.mBones[boneIndex];
@@ -1333,13 +1336,14 @@ void extractMorphTargets(const aiMesh &mesh, const aiMatrix4x4 &transform,
           glm::vec3(transformedPosition.x, transformedPosition.y,
                     transformedPosition.z) -
           baseVertices[vertexIndex].position;
-      if (!target.normalDeltas.empty()) {
+      if (!target.normalDeltas.empty() && animMesh->HasNormals()) {
         const glm::vec3 transformedNormal = normalizeTransformedDirection(
             normalTransform * animMesh->mNormals[vertexIndex]);
         target.normalDeltas[vertexIndex] =
             transformedNormal - baseVertices[vertexIndex].normal;
       }
-      if (!target.tangentDeltas.empty()) {
+      if (!target.tangentDeltas.empty() &&
+          animMesh->HasTangentsAndBitangents()) {
         const glm::vec3 transformedTangent = normalizeTransformedDirection(
             normalTransform * animMesh->mTangents[vertexIndex]);
         target.tangentDeltas[vertexIndex] =
@@ -1460,46 +1464,26 @@ void optimizeVertexFetchForAllLods(
           skinInfluences->size(), vertexFetchRemap.size());
     }
 
+    const auto remapDeltas = [&](std::pmr::vector<glm::vec3> &deltas) {
+      if (deltas.empty()) {
+        return;
+      }
+      std::pmr::vector<glm::vec3> remapped(mem);
+      remapped.resize(optimizedVertexCount, glm::vec3(0.0f));
+      for (size_t oldIndex = 0; oldIndex < vertexFetchRemap.size();
+           ++oldIndex) {
+        const unsigned int newIndex = vertexFetchRemap[oldIndex];
+        if (newIndex < remapped.size() && oldIndex < deltas.size()) {
+          remapped[newIndex] = deltas[oldIndex];
+        }
+      }
+      deltas.swap(remapped);
+    };
+
     for (MorphTarget &morphTarget : morphTargets) {
-      if (!morphTarget.positionDeltas.empty()) {
-        std::pmr::vector<glm::vec3> remapped(mem);
-        remapped.resize(optimizedVertexCount, glm::vec3(0.0f));
-        for (size_t oldIndex = 0; oldIndex < vertexFetchRemap.size();
-             ++oldIndex) {
-          const unsigned int newIndex = vertexFetchRemap[oldIndex];
-          if (newIndex < remapped.size() &&
-              oldIndex < morphTarget.positionDeltas.size()) {
-            remapped[newIndex] = morphTarget.positionDeltas[oldIndex];
-          }
-        }
-        morphTarget.positionDeltas.swap(remapped);
-      }
-      if (!morphTarget.normalDeltas.empty()) {
-        std::pmr::vector<glm::vec3> remapped(mem);
-        remapped.resize(optimizedVertexCount, glm::vec3(0.0f));
-        for (size_t oldIndex = 0; oldIndex < vertexFetchRemap.size();
-             ++oldIndex) {
-          const unsigned int newIndex = vertexFetchRemap[oldIndex];
-          if (newIndex < remapped.size() &&
-              oldIndex < morphTarget.normalDeltas.size()) {
-            remapped[newIndex] = morphTarget.normalDeltas[oldIndex];
-          }
-        }
-        morphTarget.normalDeltas.swap(remapped);
-      }
-      if (!morphTarget.tangentDeltas.empty()) {
-        std::pmr::vector<glm::vec3> remapped(mem);
-        remapped.resize(optimizedVertexCount, glm::vec3(0.0f));
-        for (size_t oldIndex = 0; oldIndex < vertexFetchRemap.size();
-             ++oldIndex) {
-          const unsigned int newIndex = vertexFetchRemap[oldIndex];
-          if (newIndex < remapped.size() &&
-              oldIndex < morphTarget.tangentDeltas.size()) {
-            remapped[newIndex] = morphTarget.tangentDeltas[oldIndex];
-          }
-        }
-        morphTarget.tangentDeltas.swap(remapped);
-      }
+      remapDeltas(morphTarget.positionDeltas);
+      remapDeltas(morphTarget.normalDeltas);
+      remapDeltas(morphTarget.tangentDeltas);
     }
 
     for (uint32_t lodIndex = 0; lodIndex < lodCount; ++lodIndex) {

@@ -45,6 +45,8 @@ struct AnimationSamplerData {
 
   template <typename Alloc>
     requires std::is_constructible_v<allocator_type, const Alloc &>
+  // `memory` overrides the allocator-derived resource when non-null; otherwise
+  // the sampler falls back to `resourceFromAlloc(alloc)`.
   AnimationSamplerData(std::allocator_arg_t, const Alloc &alloc,
                        std::pmr::memory_resource *memory)
       : AnimationSamplerData(memory != nullptr ? memory

@@ -16,6 +16,11 @@ public:
       : controller_(controller) {}
   ~EditorOverlayPass() override = default;
 
+  EditorOverlayPass(const EditorOverlayPass &) = delete;
+  EditorOverlayPass &operator=(const EditorOverlayPass &) = delete;
+  EditorOverlayPass(EditorOverlayPass &&) = delete;
+  EditorOverlayPass &operator=(EditorOverlayPass &&) = delete;
+
   void setController(EditorOverlayController *controller) noexcept {
     controller_ = controller;
   }
@@ -54,6 +59,7 @@ public:
 
 private:
   EditorOverlayPass pass_;
+  // `passes_` stores `&pass_`, so `pass_` must be declared first.
   std::array<RenderFeaturePass *, 1> passes_{&pass_};
 };
 

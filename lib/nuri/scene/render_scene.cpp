@@ -44,9 +44,10 @@ void forEachEnvironmentTextureRef(const EnvironmentHandles &handles, Fn &&fn) {
 RenderScene::RenderScene(std::pmr::memory_resource *memory)
     : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
       sceneGraph_(memory_), renderables_(memory_),
-      renderableMorphWeights_(memory_), renderableSkinPalettes_(memory_),
-      packedDirectionalLights_(memory_), packedLocalLights_(memory_),
-      packedDirectionalLightIds_(memory_), packedLocalLightIds_(memory_) {}
+      renderableIndexById_(memory_), renderableMorphWeights_(memory_),
+      renderableSkinPalettes_(memory_), packedDirectionalLights_(memory_),
+      packedLocalLights_(memory_), packedDirectionalLightIds_(memory_),
+      packedLocalLightIds_(memory_) {}
 
 RenderScene::~RenderScene() {
   for (const Renderable &renderable : renderables_) {
@@ -61,6 +62,23 @@ const Renderable *RenderScene::renderable(uint32_t index) const {
     return nullptr;
   }
   return &renderables_[index];
+}
+
+std::optional<uint32_t>
+RenderScene::findRenderableIndex(RenderableId id) const {
+  if (!isValid(id)) {
+    return std::nullopt;
+  }
+  if (const auto it = renderableIndexById_.find(id);
+      it != renderableIndexById_.end()) {
+    return it->second;
+  }
+  for (uint32_t index = 0; index < renderables_.size(); ++index) {
+    if (renderables_[index].id == id) {
+      return index;
+    }
+  }
+  return std::nullopt;
 }
 
 void RenderScene::retainRenderableRefs(ModelRef model, MaterialRef material,
@@ -125,6 +143,7 @@ void RenderScene::sanitizeGraphRenderableRefs() {
 
 void RenderScene::rebuildFlatRenderables() {
   renderables_.clear();
+  renderableIndexById_.clear();
   renderableMorphWeights_.clear();
   renderableSkinPalettes_.clear();
   auto &components = sceneGraph_.renderableComponents_;
@@ -138,6 +157,7 @@ void RenderScene::rebuildFlatRenderables() {
   }
 
   renderables_.reserve(liveCount);
+  renderableIndexById_.reserve(liveCount);
   renderableMorphWeights_.reserve(liveCount);
   renderableSkinPalettes_.reserve(liveCount);
   for (uint32_t index = 0; index < components.slots.slotCount(); ++index) {
@@ -158,7 +178,7 @@ void RenderScene::rebuildFlatRenderables() {
                                           components.skinPalette[index].end());
     components.flatRenderableIndex[index] =
         static_cast<uint32_t>(renderables_.size());
-    renderables_.push_back(Renderable{
+    const Renderable renderable{
         .id = makeRenderableId(index, components.slots.generation(index)),
         .node = nodeIndex < nodes.slots.slotCount()
                     ? makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex))
@@ -173,7 +193,10 @@ void RenderScene::rebuildFlatRenderables() {
             std::span<const glm::mat4>(renderableSkinPalettes_.back().data(),
                                        renderableSkinPalettes_.back().size()),
         .modelMatrix = world,
-    });
+    };
+    renderableIndexById_.emplace(renderable.id,
+                                 static_cast<uint32_t>(renderables_.size()));
+    renderables_.push_back(renderable);
   }
 }
 
@@ -302,6 +325,8 @@ Result<bool, std::string> RenderScene::commit() {
       const uint32_t flatIndex = components.flatRenderableIndex[index];
       const uint32_t nodeIndex = components.node[index];
       if (flatIndex == kInvalidIndex || flatIndex >= renderables_.size() ||
+          flatIndex >= renderableMorphWeights_.size() ||
+          flatIndex >= renderableSkinPalettes_.size() ||
           nodeIndex >= nodes.worldFromRoot.size() ||
           !nodes.slots.isLive(nodeIndex)) {
         continue;

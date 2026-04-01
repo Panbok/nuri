@@ -191,4 +191,135 @@ private:
   Storage storage_;
   bool hasValue_;
 };
+
+template <typename E> class Result<void, E> {
+public:
+  Result(ValueTag) : hasValue_(true) {}
+
+  Result(ErrorTag, const E &error) : hasValue_(false) {
+    new (&storage_.error) E(error);
+  }
+
+  Result(ErrorTag, E &&error) : hasValue_(false) {
+    new (&storage_.error) E(std::move(error));
+  }
+
+  Result(const Result &other) : hasValue_(other.hasValue_) {
+    if (!hasValue_) {
+      new (&storage_.error) E(other.storage_.error);
+    }
+  }
+
+  Result(Result &&other) noexcept(std::is_nothrow_move_constructible_v<E>)
+      : hasValue_(other.hasValue_) {
+    if (!hasValue_) {
+      new (&storage_.error) E(std::move(other.storage_.error));
+    }
+  }
+
+  Result &operator=(const Result &other) {
+    if (this != &other) {
+      Result tmp(other);
+      swap(tmp);
+    }
+    return *this;
+  }
+
+  Result &
+  operator=(Result &&other) noexcept(std::is_nothrow_move_constructible_v<E>) {
+    if (this != &other) {
+      destroy();
+      hasValue_ = other.hasValue_;
+      if (!hasValue_) {
+        new (&storage_.error) E(std::move(other.storage_.error));
+      }
+    }
+    return *this;
+  }
+
+  ~Result() { destroy(); }
+
+  [[nodiscard]] bool hasValue() const noexcept { return hasValue_; }
+  [[nodiscard]] bool hasError() const noexcept { return !hasValue_; }
+  [[nodiscard]] explicit operator bool() const noexcept { return hasValue_; }
+
+  void value() const {
+    if (!hasValue_) {
+      throw std::runtime_error("Result does not contain a value");
+    }
+  }
+
+  [[nodiscard]] E &error() & {
+    if (hasValue_) {
+      throw std::runtime_error("Result does not contain an error");
+    }
+    return storage_.error;
+  }
+
+  [[nodiscard]] const E &error() const & {
+    if (hasValue_) {
+      throw std::runtime_error("Result does not contain an error");
+    }
+    return storage_.error;
+  }
+
+  [[nodiscard]] E &&error() && {
+    if (hasValue_) {
+      throw std::runtime_error("Result does not contain an error");
+    }
+    return std::move(storage_.error);
+  }
+
+  [[nodiscard]] static inline Result<void, E> makeResult() {
+    return Result<void, E>(ValueTag{});
+  }
+
+  [[nodiscard]] static inline Result<void, E> makeError(const E &error) {
+    return Result<void, E>(ErrorTag{}, error);
+  }
+
+  [[nodiscard]] static inline Result<void, E> makeError(E &&error) {
+    return Result<void, E>(ErrorTag{}, std::forward<E>(error));
+  }
+
+  void swap(Result &rhs) noexcept {
+    if (hasValue_ == rhs.hasValue_) {
+      if (!hasValue_) {
+        E tmpError(std::move(storage_.error));
+        storage_.error.~E();
+        new (&storage_.error) E(std::move(rhs.storage_.error));
+        rhs.storage_.error.~E();
+        new (&rhs.storage_.error) E(std::move(tmpError));
+      }
+      return;
+    }
+
+    if (hasValue_) {
+      new (&storage_.error) E(std::move(rhs.storage_.error));
+      rhs.storage_.error.~E();
+    } else {
+      E tmpError(std::move(storage_.error));
+      storage_.error.~E();
+      new (&rhs.storage_.error) E(std::move(tmpError));
+    }
+    std::swap(hasValue_, rhs.hasValue_);
+  }
+
+private:
+  void destroy() {
+    if (!hasValue_) {
+      storage_.error.~E();
+    }
+  }
+
+  union Storage {
+    E error;
+
+    Storage() {}
+    ~Storage() {}
+  };
+
+  Storage storage_;
+  bool hasValue_;
+};
 } // namespace nuri

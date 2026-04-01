@@ -593,6 +593,7 @@ private:
     desc.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     auto addResult = graph.addLight(nodeResult.value(), desc);
     if (addResult.hasError()) {
+      (void)graph.destroyNodeSubtree(nodeResult.value());
       NURI_LOG_WARNING("ImGuizmoController::spawnLight: failed to spawn %s "
                        "light: %s",
                        lightTypeName(type), addResult.error().c_str());
@@ -620,7 +621,7 @@ private:
   }
 
   void demoteToNodeSelection() {
-    selectionState->kind = SceneSelectionKind::None;
+    selectionState->kind = SceneSelectionKind::Node;
     selectionState->renderableId = kInvalidRenderableId;
     selectionState->renderableIndex = 0u;
     selectionState->lightId = kInvalidLightId;

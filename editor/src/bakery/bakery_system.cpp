@@ -170,8 +170,12 @@ struct BakerySystem::Impl {
       job.kind = BakeJobKind::BrdfLut;
     } else if (std::holds_alternative<EnvmapPrefilterBakeRequest>(request)) {
       job.kind = BakeJobKind::EnvmapPrefilter;
-    } else {
+    } else if (std::holds_alternative<ScenePortableAssetsBakeRequest>(
+                   request)) {
       job.kind = BakeJobKind::ScenePortableAssets;
+    } else {
+      return Result<BakeJobId, std::string>::makeError(
+          "BakerySystem: unknown bake request variant");
     }
     job.request = std::move(request);
     job.state = BakeJobState::Queued;
@@ -564,7 +568,8 @@ struct BakerySystem::Impl {
       }
       if (!data->bakeInFlight) {
         data->bakeFuture =
-            std::async(std::launch::async, [plan = data->plan]() {
+            std::async(std::launch::async, [plan = std::move(
+                                                data->plan)]() mutable {
               return detail::bakeScenePortableAssetsToDisk(plan);
             }).share();
         data->bakeInFlight = true;

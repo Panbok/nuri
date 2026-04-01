@@ -22,10 +22,16 @@ class BakerySystem;
 
 enum class SceneSelectionKind : uint8_t {
   None = 0,
-  NodeRenderable = 1,
-  Light = 2,
+  Node = 1,
+  NodeRenderable = 2,
+  Light = 3,
 };
 
+// `kind` selects which payload members are meaningful:
+// - `None`: no selection payload is valid.
+// - `Node`: only `node` is valid.
+// - `NodeRenderable`: `node`, `renderableId`, and `renderableIndex` are valid.
+// - `Light`: `node` and `lightId` are valid.
 struct SceneEditorSelectionState {
   SceneSelectionKind kind = SceneSelectionKind::None;
   NodeId node = kInvalidNodeId;
@@ -33,7 +39,7 @@ struct SceneEditorSelectionState {
   uint32_t renderableIndex = 0u;
   LightId lightId = kInvalidLightId;
 
-  void clear() noexcept {
+  constexpr void clear() noexcept {
     kind = SceneSelectionKind::None;
     node = kInvalidNodeId;
     renderableId = kInvalidRenderableId;

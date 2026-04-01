@@ -27,6 +27,77 @@ constexpr uint32_t kGlbChunkTypeJson = 0x4E4F534Au;
   return YyJsonDocResult::makeResult(std::move(doc));
 }
 
+[[nodiscard]] bool readU32(std::span<const uint8_t> bytes, size_t offset,
+                           uint32_t &out) {
+  if (offset + sizeof(uint32_t) > bytes.size()) {
+    return false;
+  }
+  out = static_cast<uint32_t>(bytes[offset]) |
+        (static_cast<uint32_t>(bytes[offset + 1u]) << 8u) |
+        (static_cast<uint32_t>(bytes[offset + 2u]) << 16u) |
+        (static_cast<uint32_t>(bytes[offset + 3u]) << 24u);
+  return true;
+}
+
+[[nodiscard]] YyJsonDocResult
+loadGltfJsonDocumentFromBytes(const std::filesystem::path &path,
+                              std::span<const std::byte> fileBytes,
+                              std::string_view sourceLabel) {
+  if (hasExtensionCaseInsensitive(path, ".gltf")) {
+    return parseJsonDocument(std::string_view(
+        reinterpret_cast<const char *>(fileBytes.data()), fileBytes.size()));
+  }
+
+  if (!hasExtensionCaseInsensitive(path, ".glb")) {
+    return YyJsonDocResult::makeError("Unsupported glTF file extension");
+  }
+  if (fileBytes.size() < 20u) {
+    return YyJsonDocResult::makeError(".glb file is too small");
+  }
+
+  const std::span<const uint8_t> bytes(
+      reinterpret_cast<const uint8_t *>(fileBytes.data()), fileBytes.size());
+  uint32_t magic = 0u;
+  uint32_t version = 0u;
+  uint32_t declaredLength = 0u;
+  if (!readU32(bytes, 0u, magic) || !readU32(bytes, 4u, version) ||
+      !readU32(bytes, 8u, declaredLength)) {
+    return YyJsonDocResult::makeError("Failed to read .glb header");
+  }
+  if (magic != kGlbMagic) {
+    return YyJsonDocResult::makeError(".glb magic mismatch");
+  }
+  if (version != kGlbVersion2) {
+    return YyJsonDocResult::makeError(".glb version is not 2");
+  }
+  if (declaredLength != bytes.size()) {
+    return YyJsonDocResult::makeError(".glb declared length mismatch");
+  }
+
+  size_t chunkOffset = 12u;
+  while (chunkOffset + 8u <= bytes.size()) {
+    uint32_t chunkLength = 0u;
+    uint32_t chunkType = 0u;
+    if (!readU32(bytes, chunkOffset, chunkLength) ||
+        !readU32(bytes, chunkOffset + 4u, chunkType)) {
+      return YyJsonDocResult::makeError("Failed to read .glb chunk header");
+    }
+    chunkOffset += 8u;
+    if (chunkLength > bytes.size() - chunkOffset) {
+      return YyJsonDocResult::makeError(".glb chunk exceeds file bounds");
+    }
+    if (chunkType == kGlbChunkTypeJson) {
+      return parseJsonDocument(std::string_view(
+          reinterpret_cast<const char *>(bytes.data() + chunkOffset),
+          chunkLength));
+    }
+    chunkOffset += chunkLength;
+  }
+
+  (void)sourceLabel;
+  return YyJsonDocResult::makeError(".glb JSON chunk is missing");
+}
+
 } // namespace
 
 bool hasExtensionCaseInsensitive(const std::filesystem::path &path,
@@ -197,18 +268,6 @@ bool tryReadJsonBool(yyjson_val *value, bool &out) {
 
 YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path,
                                      std::string_view sourceLabel) {
-  const auto readU32 = [](std::span<const uint8_t> bytes, size_t offset,
-                          uint32_t &out) -> bool {
-    if (offset + sizeof(uint32_t) > bytes.size()) {
-      return false;
-    }
-    out = static_cast<uint32_t>(bytes[offset]) |
-          (static_cast<uint32_t>(bytes[offset + 1u]) << 8u) |
-          (static_cast<uint32_t>(bytes[offset + 2u]) << 16u) |
-          (static_cast<uint32_t>(bytes[offset + 3u]) << 24u);
-    return true;
-  };
-
   std::ifstream file(path, std::ios::binary);
   if (!file.is_open()) {
     return YyJsonDocResult::makeError("Failed to open " +
@@ -246,48 +305,21 @@ YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path,
       !file.read(reinterpret_cast<char *>(bytes.data()), fileSize)) {
     return YyJsonDocResult::makeError("Failed to read .glb file");
   }
-  if (bytes.size() < 20u) {
-    return YyJsonDocResult::makeError(".glb file is too small");
-  }
+  return loadGltfJsonDocumentFromBytes(
+      path,
+      std::span<const std::byte>(
+          reinterpret_cast<const std::byte *>(bytes.data()), bytes.size()),
+      sourceLabel);
+}
 
-  uint32_t magic = 0u;
-  uint32_t version = 0u;
-  uint32_t declaredLength = 0u;
-  if (!readU32(bytes, 0u, magic) || !readU32(bytes, 4u, version) ||
-      !readU32(bytes, 8u, declaredLength)) {
-    return YyJsonDocResult::makeError("Failed to read .glb header");
+YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path,
+                                     std::span<const std::byte> fileBytes,
+                                     std::string_view sourceLabel) {
+  if (fileBytes.empty()) {
+    return YyJsonDocResult::makeError("Failed to read " +
+                                      std::string(sourceLabel));
   }
-  if (magic != kGlbMagic) {
-    return YyJsonDocResult::makeError(".glb magic mismatch");
-  }
-  if (version != kGlbVersion2) {
-    return YyJsonDocResult::makeError(".glb version is not 2");
-  }
-  if (declaredLength != bytes.size()) {
-    return YyJsonDocResult::makeError(".glb declared length mismatch");
-  }
-
-  size_t chunkOffset = 12u;
-  while (chunkOffset + 8u <= bytes.size()) {
-    uint32_t chunkLength = 0u;
-    uint32_t chunkType = 0u;
-    if (!readU32(bytes, chunkOffset, chunkLength) ||
-        !readU32(bytes, chunkOffset + 4u, chunkType)) {
-      return YyJsonDocResult::makeError("Failed to read .glb chunk header");
-    }
-    chunkOffset += 8u;
-    if (chunkLength > bytes.size() - chunkOffset) {
-      return YyJsonDocResult::makeError(".glb chunk exceeds file bounds");
-    }
-    if (chunkType == kGlbChunkTypeJson) {
-      return parseJsonDocument(std::string_view(
-          reinterpret_cast<const char *>(bytes.data() + chunkOffset),
-          chunkLength));
-    }
-    chunkOffset += chunkLength;
-  }
-
-  return YyJsonDocResult::makeError(".glb JSON chunk is missing");
+  return loadGltfJsonDocumentFromBytes(path, fileBytes, sourceLabel);
 }
 
 } // namespace nuri::detail

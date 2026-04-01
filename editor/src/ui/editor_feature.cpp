@@ -21,7 +21,11 @@ Result<bool, std::string> EditorOverlayPass::build(FrameBuildContext &ctx) {
   if (controller_ == nullptr) {
     return Result<bool, std::string>::makeResult(true);
   }
-  return controller_->buildOverlayPass(ctx.frame, ctx.graph);
+  auto buildResult = controller_->buildOverlayPass(ctx.frame, ctx.graph);
+  if (buildResult.hasError()) {
+    return Result<bool, std::string>::makeError(buildResult.error());
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>

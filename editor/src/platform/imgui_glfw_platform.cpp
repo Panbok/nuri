@@ -29,15 +29,11 @@ void registerPlatform(GLFWwindow *window, ImGuiGlfwPlatform *platform) {
 
 } // namespace
 
-std::unique_ptr<ImGuiGlfwPlatform>
-ImGuiGlfwPlatform::create(Window &window, EventManager &events) {
-  return std::unique_ptr<ImGuiGlfwPlatform>(
-      new ImGuiGlfwPlatform(window, events));
+std::unique_ptr<ImGuiGlfwPlatform> ImGuiGlfwPlatform::create(Window &window) {
+  return std::unique_ptr<ImGuiGlfwPlatform>(new ImGuiGlfwPlatform(window));
 }
 
-ImGuiGlfwPlatform::ImGuiGlfwPlatform(Window &window, EventManager &events)
-    : window_(window) {
-  (void)events;
+ImGuiGlfwPlatform::ImGuiGlfwPlatform(Window &window) : window_(window) {
   glfwWindow_ = static_cast<GLFWwindow *>(window_.nativeHandle());
   ImGui_ImplGlfw_InitForVulkan(glfwWindow_, /*install_callbacks=*/false);
   registerPlatform(glfwWindow_, this);
@@ -75,6 +71,9 @@ ImGuiGlfwPlatform::~ImGuiGlfwPlatform() {
 void ImGuiGlfwPlatform::newFrame() {
   if (glfwWindow_ && ImGui::GetCurrentContext() != nullptr) {
     ImGuiIO &io = ImGui::GetIO();
+    // This polling is deliberate: callbacks remain the primary source of
+    // mouse input, but sampling the GLFW state here keeps `mouseButtons_`
+    // synchronized when events are missed before ImGui_ImplGlfw_NewFrame().
     for (int button = 0; button < static_cast<int>(mouseButtons_.size());
          ++button) {
       const bool down = glfwGetMouseButton(glfwWindow_, button) == GLFW_PRESS;

@@ -13,12 +13,15 @@
 namespace nuri {
 
 template <typename BytesView> struct BufferLayout {
-  BytesView bytes{};
+  BytesView data{};
   uint32_t count = 0;
   uint32_t strideBytes = 0;
 
+  [[nodiscard]] bool empty() const noexcept { return data.empty(); }
+  [[nodiscard]] size_t size() const noexcept { return data.size(); }
+
   [[nodiscard]] bool validate() const noexcept {
-    if (bytes.empty()) {
+    if (data.empty()) {
       return count == 0u && strideBytes == 0u;
     }
     if (strideBytes == 0u) {
@@ -26,7 +29,7 @@ template <typename BytesView> struct BufferLayout {
     }
     const uint64_t expectedByteCount =
         static_cast<uint64_t>(count) * static_cast<uint64_t>(strideBytes);
-    return expectedByteCount == static_cast<uint64_t>(bytes.size());
+    return expectedByteCount == static_cast<uint64_t>(data.size());
   }
 };
 
@@ -36,9 +39,7 @@ struct MeshBinarySerializeInput {
   uint64_t sourceSizeBytes = 0;
   int64_t sourceMtimeNs = 0;
   BoundingBox bounds{glm::vec3(0.0f), glm::vec3(0.0f)};
-  std::span<const std::byte> packedVertexBytes{};
-  uint32_t vertexCount = 0;
-  uint32_t vertexStrideBytes = 0;
+  BufferLayout<std::span<const std::byte>> vertices{};
   std::span<const uint32_t> indices{};
   std::span<const Submesh> submeshes{};
   BufferLayout<std::span<const std::byte>> skinInfluences{};
@@ -56,21 +57,13 @@ struct MeshBinaryDeserializeContext {
 };
 
 struct MeshBinaryDecodedMesh {
-  std::vector<std::byte> packedVertexBytes;
-  uint32_t vertexCount = 0;
-  uint32_t vertexStrideBytes = 0;
+  BufferLayout<std::vector<std::byte>> vertices{};
   std::vector<uint32_t> indices;
   std::vector<Submesh> submeshes;
   BoundingBox bounds{glm::vec3(0.0f), glm::vec3(0.0f)};
-  std::vector<std::byte> skinInfluenceBytes;
-  uint32_t skinInfluenceCount = 0;
-  uint32_t skinInfluenceStrideBytes = 0;
-  std::vector<std::byte> morphMetaBytes;
-  uint32_t morphMetaCount = 0;
-  uint32_t morphMetaStrideBytes = 0;
-  std::vector<std::byte> morphDeltaBytes;
-  uint32_t morphDeltaCount = 0;
-  uint32_t morphDeltaStrideBytes = 0;
+  BufferLayout<std::vector<std::byte>> skinInfluences{};
+  BufferLayout<std::vector<std::byte>> morphMeta{};
+  BufferLayout<std::vector<std::byte>> morphDeltas{};
 };
 
 enum class MeshBinaryDeserializeErrorCode : uint8_t {

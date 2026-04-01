@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -35,6 +36,10 @@ hasExtensionCaseInsensitive(const std::filesystem::path &path,
 
 [[nodiscard]] YyJsonDocResult
 loadGltfJsonDocument(const std::filesystem::path &path,
+                     std::string_view sourceLabel);
+[[nodiscard]] YyJsonDocResult
+loadGltfJsonDocument(const std::filesystem::path &path,
+                     std::span<const std::byte> fileBytes,
                      std::string_view sourceLabel);
 
 } // namespace nuri::detail
