@@ -15,6 +15,8 @@
 - Avoid exceptions when possible; use `lib/nuri/result.h` for error handling.
 
 ## Performance style
+- DO NOT BE overly aggressive with guard clauses and if checks, ONLY perform validations where it is necessary, avoid excessive error checking and overly defensive programming patterns
+- Prefer `NURI_ASSERT` for short circuiting errors
 - Prefer contiguous layouts in hot paths (`std::vector`, SoA when useful) to maximize cache locality.
 - Use polymorphism deliberately: avoid virtual dispatch in tight loops unless profiling shows negligible impact.
 - Avoid blocking mutexes on frame-critical threads; use lock-free/wait-free approaches only when needed and proven correct.

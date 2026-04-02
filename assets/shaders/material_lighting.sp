@@ -5,6 +5,16 @@
 const uint kAlphaModeOpaque = 0u;
 const uint kAlphaModeMask   = 1u;
 
+float applySpecularAARoughnessBias(float roughness, vec3 shadingNormal) {
+  vec3 dndx = dFdx(shadingNormal);
+  vec3 dndy = dFdy(shadingNormal);
+  float normalVariance =
+      clamp(0.5 * (dot(dndx, dndx) + dot(dndy, dndy)), 0.0, 1.0);
+  float alpha = max(roughness * roughness, kBrdfMinRoughness);
+  alpha = clamp(alpha + 0.35 * normalVariance, kBrdfMinRoughness, 1.0);
+  return clamp(sqrt(alpha), kBrdfMinRoughness, 1.0);
+}
+
 // Fully evaluated material state at a fragment.
 struct ShadedMaterial {
   vec4  baseColor;
@@ -145,6 +155,7 @@ ShadedMaterial evaluateMaterial(MaterialGpuData material, PerVertex vtx) {
     // Derivative-based TBN avoids reliance on imported tangent sign conventions.
     sm.nBase = applyNormalMap(sm.nBase, vtx.worldPos, uvNormal, n);
   }
+  sm.roughness = applySpecularAARoughnessBias(sm.roughness, sm.nBase);
 
   // Clearcoat normal with normal map + roughness bias -----------------
   sm.nClearcoat = sm.nGeom;
@@ -163,6 +174,8 @@ ShadedMaterial evaluateMaterial(MaterialGpuData material, PerVertex vtx) {
     float blend = clamp(sqrt(sm.clearcoatRoughness), kBrdfMinRoughness, 1.0);
     sm.nClearcoat = normalize(mix(sm.nClearcoat, perturbed, blend));
   }
+  sm.clearcoatRoughness =
+      applySpecularAARoughnessBias(sm.clearcoatRoughness, sm.nClearcoat);
 
   // Emissive ----------------------------------------------------------
   sm.emissive = material.emissiveFactorStrength.xyz;
