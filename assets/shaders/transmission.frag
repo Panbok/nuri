@@ -19,14 +19,6 @@ float applyIorToRoughness(float roughness, float ior) {
   return roughness * clamp(ior * 2.0 - 2.0, 0.0, 1.0);
 }
 
-vec3 getAuthoredScale() {
-  // Transmission uses the shared mesh push-constant layout from common.sp, so
-  // the tessellation distance/factor slots carry imported local-space authored
-  // scale for this pass instead of tessellation settings.
-  return max(vec3(pc.tessNearDistance, pc.tessFarDistance, pc.tessMinFactor),
-             vec3(1.0e-6));
-}
-
 vec3 getVolumeTransmissionRay(vec3 n, vec3 v, float thickness, float ior,
                               mat4 modelMatrix) {
   vec3 refractionVector = refract(-v, n, 1.0 / max(ior, 1.0));
@@ -35,8 +27,7 @@ vec3 getVolumeTransmissionRay(vec3 n, vec3 v, float thickness, float ior,
   }
   vec3 modelScale = vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz),
                          length(modelMatrix[2].xyz));
-  return normalize(refractionVector) * thickness * modelScale *
-         getAuthoredScale();
+  return normalize(refractionVector) * thickness * modelScale;
 }
 
 vec3 applyVolumeAttenuation(vec3 radiance, float transmissionDistance,
@@ -121,7 +112,11 @@ vec3 getIndirectTransmission(vec3 n, vec3 v, float roughness, vec3 baseColor,
   vec3 specularColor = vec3(0.0);
   if ((pc.frameData.flags & kFrameDataFlagHasBrdfLut) != 0u &&
       pc.frameData.brdfLutTexId != kInvalidTextureBindlessIndex) {
-    vec2 brdfUv = clamp(vec2(ndotv, 1.0 - roughness * roughness),
+    // The transmission BRDF term follows the glTF reference path and samples
+    // the LUT in perceptual-roughness space. Using the engine's generic
+    // environment-space remap here can collapse smooth transmissive surfaces
+    // toward zero contribution.
+    vec2 brdfUv = clamp(vec2(ndotv, roughness),
                         vec2(0.0), vec2(1.0));
     vec2 brdf =
         textureBindless2D(pc.frameData.brdfLutTexId, 0u, brdfUv).rg;
@@ -202,7 +197,14 @@ void main() {
   float attenuationDistance =
       max(material.attenuationColorDistance.w, 0.0);
 
-  const bool hasTransmission = transmissionFactor > 0.0 && !sm.iorCompatMode;
+  // glTF: packed ior==0 means KHR_materials_ior was omitted (compat mode for
+  // base-layer F0).  For transmission we still follow the extension default
+  // IOR of 1.5.  If we gated transmission on !iorCompatMode, materials with
+  // omitted IOR would keep transmissionFactor mixing (below) but never
+  // accumulate indirectTransmission/directTransmission → diffuse terms go to
+  // zero and glass reads black.
+  const float transmissionIor = sm.iorCompatMode ? 1.5 : sm.ior;
+  const bool hasTransmission = transmissionFactor > 0.0;
   mat4 modelMatrix = mat4(1.0);
   if (hasTransmission) {
     modelMatrix = pc.instanceMatrices.instances[inInstanceId].modelMatrix;
@@ -213,7 +215,7 @@ void main() {
   float transmissionRayLength = 0.0;
   if (hasTransmission) {
     transmissionRay       =
-        getVolumeTransmissionRay(sm.nBase, sm.v, thickness, sm.ior,
+        getVolumeTransmissionRay(sm.nBase, sm.v, thickness, transmissionIor,
                                  modelMatrix);
     transmissionRayLength = length(transmissionRay);
   }
@@ -243,7 +245,7 @@ void main() {
               : 1.0;
       vec3 tc = lr *
           getDirectTransmission(sm.nBase, sm.v, l, sm.alphaRoughness,
-                                sm.f0, sm.f90, sm.diffuseColor, sm.ior);
+                                sm.f0, sm.f90, sm.diffuseColor, transmissionIor);
       if ((featureMask & kMaterialFeatureVolume) != 0u) {
         tc = applyVolumeAttenuation(tc, transmissionRayLength,
                                     attenuationColor, attenuationDistance);
@@ -285,7 +287,7 @@ void main() {
       vec3 tc = lr *
           getDirectTransmission(sm.nBase, sm.v, transmissionPtl,
                                 sm.alphaRoughness, sm.f0, sm.f90,
-                                sm.diffuseColor, sm.ior);
+                                sm.diffuseColor, transmissionIor);
       if ((featureMask & kMaterialFeatureVolume) != 0u) {
         tc = applyVolumeAttenuation(tc, transmissionRayLength,
                                     attenuationColor, attenuationDistance);
@@ -303,7 +305,7 @@ void main() {
       pc.frameData.sceneColorTexId != kInvalidTextureBindlessIndex) {
     indirectTransmission = getIndirectTransmission(
         sm.nBase, sm.v, sm.roughness, sm.diffuseColor, sm.f0, sm.f90,
-        vtx.worldPos, modelMatrix, sm.ior, thickness, attenuationColor,
+        vtx.worldPos, modelMatrix, transmissionIor, thickness, attenuationColor,
         attenuationDistance);
   }
 
