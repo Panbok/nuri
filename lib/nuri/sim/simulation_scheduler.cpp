@@ -2,12 +2,14 @@
 
 #include "nuri/sim/simulation_scheduler.h"
 
+#include "nuri/core/log.h"
 #include "nuri/scene_runtime/scene_runtime_host.h"
 #include "nuri/sim/backends/simulation_backend.h"
 #include "nuri/sim/simulation_execution_context.h"
 #include "nuri/sim/simulation_registry.h"
 
 #include <algorithm>
+#include <cmath>
 #include <ranges>
 
 namespace nuri {
@@ -40,7 +42,26 @@ void SimulationScheduler::reset() noexcept { clock_.reset(); }
 
 void SimulationScheduler::setConfig(
     const SimulationSchedulerConfig &config) noexcept {
-  config_ = config;
+  SimulationSchedulerConfig sanitized = config;
+  const SimulationSchedulerConfig defaults{};
+  if (!std::isfinite(sanitized.fixedDeltaSeconds) ||
+      sanitized.fixedDeltaSeconds <= 0.0) {
+    NURI_LOG_WARNING("SimulationScheduler::setConfig: fixedDeltaSeconds must "
+                     "be finite and > 0");
+    sanitized.fixedDeltaSeconds = defaults.fixedDeltaSeconds;
+  }
+  if (sanitized.maxStepsPerFrame == 0u) {
+    NURI_LOG_WARNING(
+        "SimulationScheduler::setConfig: maxStepsPerFrame must be >= 1");
+    sanitized.maxStepsPerFrame = defaults.maxStepsPerFrame;
+  }
+  if (!std::isfinite(sanitized.maxAccumulatedSeconds) ||
+      sanitized.maxAccumulatedSeconds < 0.0) {
+    NURI_LOG_WARNING("SimulationScheduler::setConfig: maxAccumulatedSeconds "
+                     "must be finite and >= 0");
+    sanitized.maxAccumulatedSeconds = defaults.maxAccumulatedSeconds;
+  }
+  config_ = sanitized;
 }
 
 SimulationTickResult
@@ -138,7 +159,8 @@ SimulationScheduler::tick(SceneRuntimeHost &host,
           (void)host.registry().notePhaseExecution(
               handle, SimulationPhase::Project, input.frameIndex);
         }
-        if (record->faulted) {
+        record = host.registry().tryGet(handle);
+        if (record == nullptr || record->faulted) {
           break;
         }
 

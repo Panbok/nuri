@@ -6,6 +6,7 @@
 #include "nuri/sim/simulation_stats.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 
@@ -15,7 +16,11 @@ class SceneRuntimeHost;
 
 class NURI_API SimulationController {
 public:
-  SimulationController() = default;
+  SimulationController() = delete;
+  SimulationController(const SimulationController &) = delete;
+  SimulationController &operator=(const SimulationController &) = delete;
+  SimulationController(SimulationController &&) = delete;
+  SimulationController &operator=(SimulationController &&) = delete;
 
   [[nodiscard]] Result<SimulationHandle, std::string>
   createSimulation(const SimulationDesc &desc);

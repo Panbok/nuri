@@ -30,6 +30,7 @@ Result<SimulationDesc, std::string> makeAnimationPoseSimulationDesc(
   desc.allowGpuExecution = true;
   desc.startPaused = !createInfo.params.playing;
   desc.enabled = true;
+  desc.initialParams = asBytes(createInfo.params);
   return Result<SimulationDesc, std::string>::makeResult(std::move(desc));
 }
 

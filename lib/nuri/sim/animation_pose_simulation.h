@@ -26,17 +26,19 @@ struct NURI_API AnimationPoseSimulationParams {
   AnimationPosePlaybackMode playbackMode = AnimationPosePlaybackMode::Loop;
   bool playing = true;
   uint8_t reserved0 = 0u;
-  uint16_t reserved1 = 0u;
+  // Keep every serialized byte explicit so asBytes(params) is deterministic.
+  uint8_t reserved1[5] = {0u, 0u, 0u, 0u, 0u};
 };
 static_assert(std::is_trivially_copyable_v<AnimationPoseSimulationParams>);
+static_assert(sizeof(AnimationPoseSimulationParams) == 16u);
 
+// Borrowed pointers used only during in-process creation. These addresses are
+// intentionally not serialized into SimulationDesc::initialParams.
 struct NURI_API AnimationPoseSimulationCreatePayload {
   const ScenePrefab *prefab = nullptr;
   const SceneInstantiationMap *instantiationMap = nullptr;
   AnimationPoseSimulationParams params{};
 };
-static_assert(
-    std::is_trivially_copyable_v<AnimationPoseSimulationCreatePayload>);
 
 struct NURI_API AnimationPoseSimulationCreateInfo {
   const ScenePrefab *prefab = nullptr;
@@ -56,11 +58,4 @@ asBytes(const AnimationPoseSimulationParams &params) noexcept {
   return std::as_bytes(
       std::span<const AnimationPoseSimulationParams>(&params, size_t{1u}));
 }
-
-[[nodiscard]] constexpr std::span<const std::byte>
-asBytes(const AnimationPoseSimulationCreatePayload &payload) noexcept {
-  return std::as_bytes(std::span<const AnimationPoseSimulationCreatePayload>(
-      &payload, size_t{1u}));
-}
-
 } // namespace nuri

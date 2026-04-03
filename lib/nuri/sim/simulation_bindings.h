@@ -39,10 +39,27 @@ operator|=(SimulationBindingFlags &lhs, SimulationBindingFlags rhs) noexcept {
   return lhs;
 }
 
+[[nodiscard]] constexpr SimulationBindingFlags
+operator&(SimulationBindingFlags lhs, SimulationBindingFlags rhs) noexcept {
+  return static_cast<SimulationBindingFlags>(static_cast<uint32_t>(lhs) &
+                                             static_cast<uint32_t>(rhs));
+}
+
+constexpr SimulationBindingFlags &
+operator&=(SimulationBindingFlags &lhs, SimulationBindingFlags rhs) noexcept {
+  lhs = lhs & rhs;
+  return lhs;
+}
+
+[[nodiscard]] constexpr SimulationBindingFlags
+operator~(SimulationBindingFlags v) noexcept {
+  return static_cast<SimulationBindingFlags>(~static_cast<uint32_t>(v));
+}
+
 [[nodiscard]] constexpr bool
 hasSimulationBindingFlag(SimulationBindingFlags flags,
                          SimulationBindingFlags flag) noexcept {
-  return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(flag)) != 0u;
+  return static_cast<uint32_t>(flags & flag) != 0u;
 }
 
 struct NURI_API SimulationBindingTarget {

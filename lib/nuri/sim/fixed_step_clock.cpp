@@ -32,6 +32,9 @@ FixedStepClock::advance(double frameDeltaSeconds, double fixedDeltaSeconds,
     ++result.stepCount;
     result.consumedSeconds += fixedDeltaSeconds;
   }
+  if (accumulatorSeconds_ < 0.0) {
+    accumulatorSeconds_ = 0.0;
+  }
 
   if (allowFrameDropping && accumulatorSeconds_ >= fixedDeltaSeconds &&
       result.stepCount == maxSteps) {

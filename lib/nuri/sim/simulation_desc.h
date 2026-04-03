@@ -24,7 +24,9 @@ struct NURI_API SimulationDesc {
       SimulationBackendPreference::Auto;
   float timeScale = 1.0f;
   uint32_t priority = 0u;
+  // Must be >= 1.
   uint32_t substepCount = 1u;
+  // Must be >= 1.
   uint32_t solverIterationCount = 1u;
   bool enabled = true;
   bool startPaused = false;

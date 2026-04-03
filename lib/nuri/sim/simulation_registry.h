@@ -10,15 +10,17 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
+#include <functional>
 #include <memory_resource>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace nuri {
 
+// Not thread-safe: callers must synchronize all access externally.
 class NURI_API SimulationRegistry {
 public:
   struct Record {
@@ -66,8 +68,18 @@ public:
       if (!slots_.isLive(index)) {
         continue;
       }
-      fn(makeSimulationHandle(index, slots_.generation(index)),
-         records_[index]);
+      if constexpr (std::is_same_v<
+                        std::invoke_result_t<Fn &, SimulationHandle, Record &>,
+                        bool>) {
+        if (!std::invoke(fn,
+                         makeSimulationHandle(index, slots_.generation(index)),
+                         records_[index])) {
+          break;
+        }
+      } else {
+        std::invoke(fn, makeSimulationHandle(index, slots_.generation(index)),
+                    records_[index]);
+      }
     }
   }
 
@@ -76,8 +88,18 @@ public:
       if (!slots_.isLive(index)) {
         continue;
       }
-      fn(makeSimulationHandle(index, slots_.generation(index)),
-         records_[index]);
+      if constexpr (std::is_same_v<std::invoke_result_t<Fn &, SimulationHandle,
+                                                        const Record &>,
+                                   bool>) {
+        if (!std::invoke(fn,
+                         makeSimulationHandle(index, slots_.generation(index)),
+                         records_[index])) {
+          break;
+        }
+      } else {
+        std::invoke(fn, makeSimulationHandle(index, slots_.generation(index)),
+                    records_[index]);
+      }
     }
   }
 
@@ -105,7 +127,7 @@ public:
                                         uint64_t frameIndex);
 
 private:
-  [[nodiscard]] static Result<bool, std::string>
+  [[nodiscard]] static Result<void, std::string>
   validateCreateDesc(const SimulationDesc &desc);
   [[nodiscard]] bool slotValid(SimulationHandle handle) const noexcept;
 

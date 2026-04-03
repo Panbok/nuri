@@ -64,22 +64,22 @@ void SimulationRegistry::clear() {
   nextCreationOrder_ = 1u;
 }
 
-Result<bool, std::string>
+Result<void, std::string>
 SimulationRegistry::validateCreateDesc(const SimulationDesc &desc) {
   if (desc.timeScale < 0.0f || !std::isfinite(desc.timeScale)) {
-    return Result<bool, std::string>::makeError(
+    return Result<void, std::string>::makeError(
         "SimulationRegistry::create: timeScale must be finite and >= 0");
   }
   if (desc.substepCount == 0u) {
-    return Result<bool, std::string>::makeError(
+    return Result<void, std::string>::makeError(
         "SimulationRegistry::create: substepCount must be greater than zero");
   }
   if (desc.solverIterationCount == 0u) {
-    return Result<bool, std::string>::makeError(
+    return Result<void, std::string>::makeError(
         "SimulationRegistry::create: solverIterationCount must be greater than "
         "zero");
   }
-  return Result<bool, std::string>::makeResult(true);
+  return Result<void, std::string>::makeResult();
 }
 
 Result<SimulationHandle, std::string>
@@ -206,6 +206,9 @@ bool SimulationRegistry::requestSingleStep(SimulationHandle handle) {
   Record *record = tryGet(handle);
   if (record == nullptr || !record->enabled || record->faulted) {
     return false;
+  }
+  if (record->singleStepRequested) {
+    return true;
   }
   record->singleStepRequested = true;
   noteControlMutation(*record);

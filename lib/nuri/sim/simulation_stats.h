@@ -12,6 +12,9 @@
 namespace nuri {
 
 struct NURI_API SimulationStats {
+  // Copy construction keeps the default std::pmr copy behavior for
+  // lastFaultReason. Construct the destination with an explicit memory_resource
+  // before assignment if allocator locality matters.
   explicit SimulationStats(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : lastFaultReason(memory) {}
@@ -28,6 +31,8 @@ struct NURI_API SimulationStats {
   bool paused = false;
   bool faulted = false;
   bool gpuEligible = false;
+  // Uses the destination string allocator on assignment; copy construction uses
+  // the default std::pmr allocator semantics.
   std::pmr::string lastFaultReason;
 };
 

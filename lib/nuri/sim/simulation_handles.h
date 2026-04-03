@@ -34,8 +34,16 @@ generationOf(SimulationHandle handle) noexcept {
   return unpackResourceHandle(handle.value).generation;
 }
 
+// Uses the same packed layout as packResourceHandle(): index must be
+// <= kResourceHandleIndexMask and generation must be in
+// [1, kResourceHandleGenerationMask], otherwise kInvalidSimulationHandle is
+// returned.
 [[nodiscard]] constexpr SimulationHandle
 makeSimulationHandle(uint32_t index, uint32_t generation) noexcept {
+  if (index > kResourceHandleIndexMask || generation == 0u ||
+      generation > kResourceHandleGenerationMask) {
+    return kInvalidSimulationHandle;
+  }
   return SimulationHandle{packResourceHandle(index, generation)};
 }
 

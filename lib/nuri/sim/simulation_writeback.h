@@ -2,8 +2,6 @@
 
 #include "nuri/defines.h"
 #include "nuri/scene/scene_handles.h"
-
-#include <array>
 #include <cstdint>
 #include <memory_resource>
 #include <vector>
@@ -32,12 +30,19 @@ struct NURI_API ScenePropertyWrite {
   uint64_t versionStamp = 0u;
 };
 
+// Non-copyable because std::pmr::vector copy construction would not preserve
+// the source allocator for the writeback buffers.
 class NURI_API SimulationWritebackState {
 public:
   explicit SimulationWritebackState(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : nodeLocalTransforms_(memory), renderableDeformations_(memory),
         sceneProperties_(memory) {}
+  SimulationWritebackState(const SimulationWritebackState &) = delete;
+  SimulationWritebackState &
+  operator=(const SimulationWritebackState &) = delete;
+  SimulationWritebackState(SimulationWritebackState &&) = default;
+  SimulationWritebackState &operator=(SimulationWritebackState &&) = default;
 
   void clear() {
     nodeLocalTransforms_.clear();
@@ -68,7 +73,8 @@ public:
     return renderableDeformations_;
   }
 
-  [[nodiscard]] std::pmr::vector<ScenePropertyWrite> &sceneProperties() noexcept {
+  [[nodiscard]] std::pmr::vector<ScenePropertyWrite> &
+  sceneProperties() noexcept {
     return sceneProperties_;
   }
   [[nodiscard]] const std::pmr::vector<ScenePropertyWrite> &
