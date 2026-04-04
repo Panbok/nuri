@@ -35,7 +35,6 @@ SimulationTickResult SceneRuntimeHost::tick(const SimulationTickInput &input) {
   }
 
   gpuContext_.beginFrame(input.frameIndex);
-  writebacks_.clear();
   SimulationTickResult result = scheduler_.tick(*this, input);
   lastTickResult_ = result;
   flushWritebacks();
@@ -89,9 +88,12 @@ SceneRuntimeHost::createAnimationPoseSimulation(
       .instantiationMap = createInfo.instantiationMap,
       .params = createInfo.params,
   };
-  auto result = controller_.createSimulation(desc);
-  pendingAnimationPoseCreatePayload_.reset();
-  return result;
+  struct PendingPayloadResetGuard {
+    std::optional<AnimationPoseSimulationCreatePayload> &payload;
+
+    ~PendingPayloadResetGuard() { payload.reset(); }
+  } guard{pendingAnimationPoseCreatePayload_};
+  return controller_.createSimulation(desc);
 }
 
 bool SceneRuntimeHost::destroyAnimationPoseSimulation(
@@ -160,11 +162,15 @@ bool SceneRuntimeHost::destroySimulationInternal(SimulationHandle handle) {
   if (record == nullptr) {
     return false;
   }
-  if (!backendFor(*record).destroyInstance(*this, handle)) {
-    return false;
-  }
+  ISimulationBackend &backend = backendFor(*record);
   if (!registry_.destroy(handle)) {
     return false;
+  }
+  if (!backend.destroyInstance(*this, handle)) {
+    NURI_LOG_WARNING(
+        "SceneRuntimeHost::destroySimulationInternal: backend cleanup failed "
+        "after registry removal for simulation #%u",
+        handle.value);
   }
   noteSimulationMutation();
   return true;
@@ -299,9 +305,10 @@ bool SceneRuntimeHost::validateBindingTarget(
   case SimulationBindingTargetType::PrefabRoot:
     target.runtimeBindingIndex = bindings_.runtimeNodeIndex(target.prefabRoot);
     return target.runtimeBindingIndex != kInvalidSimulationBindingIndex;
+  default:
+    target.runtimeBindingIndex = kInvalidSimulationBindingIndex;
+    return false;
   }
-  target.runtimeBindingIndex = kInvalidSimulationBindingIndex;
-  return false;
 }
 
 bool SceneRuntimeHost::validateBindingDesc(

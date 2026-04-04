@@ -3,6 +3,7 @@
 #include "nuri/scene_runtime/scene_runtime_bindings.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace nuri {
 namespace {
@@ -10,23 +11,36 @@ namespace {
 void collectNodeSubtree(const SceneGraph &graph, NodeId node,
                         std::pmr::vector<NodeId> &outNodes,
                         std::pmr::vector<RenderableId> &outRenderables) {
-  outNodes.push_back(node);
-  graph.forEachRenderableOnNode(node, [&](RenderableId renderable) {
-    outRenderables.push_back(renderable);
-  });
+  std::pmr::vector<NodeId> stack(outNodes.get_allocator().resource());
+  std::pmr::vector<NodeId> children(outNodes.get_allocator().resource());
+  stack.push_back(node);
 
-  NodeId child = kInvalidNodeId;
-  if (!graph.getNodeFirstChild(node, child)) {
-    return;
-  }
-  for (NodeId current = child; isValid(current);) {
-    collectNodeSubtree(graph, current, outNodes, outRenderables);
+  while (!stack.empty()) {
+    const NodeId currentNode = stack.back();
+    stack.pop_back();
 
-    NodeId sibling = kInvalidNodeId;
-    if (!graph.getNodeNextSibling(current, sibling)) {
-      break;
+    outNodes.push_back(currentNode);
+    graph.forEachRenderableOnNode(currentNode, [&](RenderableId renderable) {
+      outRenderables.push_back(renderable);
+    });
+
+    NodeId child = kInvalidNodeId;
+    if (!graph.getNodeFirstChild(currentNode, child)) {
+      continue;
     }
-    current = sibling;
+    children.clear();
+    for (NodeId currentChild = child; isValid(currentChild);) {
+      children.push_back(currentChild);
+
+      NodeId sibling = kInvalidNodeId;
+      if (!graph.getNodeNextSibling(currentChild, sibling)) {
+        break;
+      }
+      currentChild = sibling;
+    }
+    for (size_t index = children.size(); index > 0; --index) {
+      stack.push_back(children[index - 1]);
+    }
   }
 }
 
@@ -70,14 +84,9 @@ bool SceneRuntimeBindings::rebuild(const RenderScene *scene) {
   }
 
   const bool changed =
-      !spansEqual<NodeId>(std::span<const NodeId>(nodes_.data(), nodes_.size()),
-                          std::span<const NodeId>(discoveredNodes.data(),
-                                                  discoveredNodes.size())) ||
+      !spansEqual<NodeId>(nodes(), std::span<const NodeId>(discoveredNodes)) ||
       !spansEqual<RenderableId>(
-          std::span<const RenderableId>(renderables_.data(),
-                                        renderables_.size()),
-          std::span<const RenderableId>(discoveredRenderables.data(),
-                                        discoveredRenderables.size()));
+          renderables(), std::span<const RenderableId>(discoveredRenderables));
   if (!changed) {
     return false;
   }
@@ -88,11 +97,20 @@ bool SceneRuntimeBindings::rebuild(const RenderScene *scene) {
   renderableIndexById_.clear();
   nodeIndexById_.reserve(nodes_.size());
   renderableIndexById_.reserve(renderables_.size());
-  for (uint32_t index = 0; index < nodes_.size(); ++index) {
-    nodeIndexById_.insert_or_assign(nodes_[index], index);
+  NURI_ASSERT(nodes_.size() <=
+                  std::numeric_limits<RuntimeNodeBindingIndex>::max(),
+              "SceneRuntimeBindings::rebuild: node binding table too large");
+  NURI_ASSERT(renderables_.size() <=
+                  std::numeric_limits<RuntimeRenderableBindingIndex>::max(),
+              "SceneRuntimeBindings::rebuild: renderable binding table too "
+              "large");
+  for (size_t index = 0; index < nodes_.size(); ++index) {
+    nodeIndexById_.insert_or_assign(
+        nodes_[index], static_cast<RuntimeNodeBindingIndex>(index));
   }
-  for (uint32_t index = 0; index < renderables_.size(); ++index) {
-    renderableIndexById_.insert_or_assign(renderables_[index], index);
+  for (size_t index = 0; index < renderables_.size(); ++index) {
+    renderableIndexById_.insert_or_assign(
+        renderables_[index], static_cast<RuntimeRenderableBindingIndex>(index));
   }
   ++version_;
   return true;

@@ -346,6 +346,7 @@ void SceneAnimationPlayer::applyClip(SceneGraph &graph) const {
       if (!sampleSampler(sampler, timeSeconds_, sample)) {
         continue;
       }
+      // Translation and scale need xyz samples; weights accepts any arity.
       if (sampler.valueArity >= 3u) {
         if (channel.path == AnimationTargetPath::Translation) {
           nodeState.translation = glm::vec3(sample[0], sample[1], sample[2]);

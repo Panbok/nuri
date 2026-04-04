@@ -10,9 +10,6 @@
 namespace nuri {
 namespace {
 
-constexpr uint32_t kInvalidRenderableFlatIndex =
-    std::numeric_limits<uint32_t>::max();
-
 template <typename Ref>
 [[nodiscard]] bool resourceAlive(ResourceManager *resources, Ref ref) {
   return resources != nullptr && isValid(ref) && resources->owns(ref) &&
@@ -350,6 +347,7 @@ Result<bool, std::string> RenderScene::commit() {
 
   if (!sceneGraph_.renderableTopologyDirty_ &&
       sceneGraph_.renderableDeformationsDirty_) {
+    bool updatedAny = false;
     for (uint32_t index = 0;
          index < sceneGraph_.renderableComponents_.slots.slotCount(); ++index) {
       if (!sceneGraph_.renderableComponents_.slots.isLive(index)) {
@@ -357,8 +355,7 @@ Result<bool, std::string> RenderScene::commit() {
       }
       const uint32_t flatIndex =
           sceneGraph_.renderableComponents_.flatRenderableIndex[index];
-      if (flatIndex == kInvalidRenderableFlatIndex ||
-          flatIndex >= renderables_.size() ||
+      if (flatIndex == kInvalidIndex || flatIndex >= renderables_.size() ||
           flatIndex >= renderableMorphWeights_.size() ||
           flatIndex >= renderableSkinPalettes_.size()) {
         continue;
@@ -377,10 +374,13 @@ Result<bool, std::string> RenderScene::commit() {
       renderables_[flatIndex].skinPalette =
           std::span<const glm::mat4>(renderableSkinPalettes_[flatIndex].data(),
                                      renderableSkinPalettes_[flatIndex].size());
+      updatedAny = true;
     }
-    ++deformationVersion_;
-    sceneGraph_.renderableDeformationsDirty_ = false;
-    changed = true;
+    if (updatedAny) {
+      ++deformationVersion_;
+      sceneGraph_.renderableDeformationsDirty_ = false;
+      changed = true;
+    }
   }
 
   if (sceneGraph_.lightTopologyDirty_) {
