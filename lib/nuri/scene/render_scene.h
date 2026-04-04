@@ -76,6 +76,9 @@ public:
   [[nodiscard]] uint64_t transformVersion() const noexcept {
     return transformVersion_;
   }
+  [[nodiscard]] uint64_t deformationVersion() const noexcept {
+    return deformationVersion_;
+  }
   [[nodiscard]] std::span<const DirectionalLightGpuData>
   packedDirectionalLights() const noexcept {
     return packedDirectionalLights_;
@@ -99,6 +102,9 @@ public:
   }
 
   void bindResources(ResourceManager *resources);
+  [[nodiscard]] const ResourceManager *resources() const noexcept {
+    return resources_;
+  }
 
   void setEnvironment(EnvironmentHandles handles);
   [[nodiscard]] const EnvironmentHandles &environment() const noexcept {
@@ -136,6 +142,7 @@ private:
   EnvironmentHandles environment_{};
   uint64_t topologyVersion_ = 0u;
   uint64_t transformVersion_ = 0u;
+  uint64_t deformationVersion_ = 0u;
   uint64_t lightTopologyVersion_ = 0u;
   uint64_t lightTransformVersion_ = 0u;
 };

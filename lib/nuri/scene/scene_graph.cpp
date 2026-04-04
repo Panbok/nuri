@@ -103,6 +103,7 @@ void SceneGraph::clear() {
   spotLights_ = SpotLightStore(memory_);
   renderableTopologyDirty_ = true;
   renderableTransformsDirty_ = false;
+  renderableDeformationsDirty_ = false;
   lightTopologyDirty_ = true;
   lightDataDirty_ = false;
 
@@ -875,7 +876,7 @@ bool SceneGraph::setRenderableMorphWeights(RenderableId id,
     return true;
   }
   storage.assign(weights.begin(), weights.end());
-  renderableTopologyDirty_ = true;
+  renderableDeformationsDirty_ = true;
   return true;
 }
 
@@ -904,7 +905,7 @@ bool SceneGraph::setRenderableSkinPalette(RenderableId id,
     return true;
   }
   storage.assign(matrices.begin(), matrices.end());
-  renderableTopologyDirty_ = true;
+  renderableDeformationsDirty_ = true;
   return true;
 }
 

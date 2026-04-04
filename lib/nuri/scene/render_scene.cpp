@@ -10,6 +10,9 @@
 namespace nuri {
 namespace {
 
+constexpr uint32_t kInvalidRenderableFlatIndex =
+    std::numeric_limits<uint32_t>::max();
+
 template <typename Ref>
 [[nodiscard]] bool resourceAlive(ResourceManager *resources, Ref ref) {
   return resources != nullptr && isValid(ref) && resources->owns(ref) &&
@@ -311,8 +314,10 @@ Result<bool, std::string> RenderScene::commit() {
     }
     ++topologyVersion_;
     ++transformVersion_;
+    ++deformationVersion_;
     sceneGraph_.renderableTopologyDirty_ = false;
     sceneGraph_.renderableTransformsDirty_ = false;
+    sceneGraph_.renderableDeformationsDirty_ = false;
     changed = true;
   } else if (sceneGraph_.renderableTransformsDirty_) {
     bool updatedAny = false;
@@ -334,18 +339,6 @@ Result<bool, std::string> RenderScene::commit() {
       renderables_[flatIndex].modelMatrix = nodes.worldFromRoot[nodeIndex];
       renderables_[flatIndex].node =
           makeNodeId(nodeIndex, nodes.slots.generation(nodeIndex));
-      renderableMorphWeights_[flatIndex].assign(
-          components.morphWeights[index].begin(),
-          components.morphWeights[index].end());
-      renderables_[flatIndex].morphWeights =
-          std::span<const float>(renderableMorphWeights_[flatIndex].data(),
-                                 renderableMorphWeights_[flatIndex].size());
-      renderableSkinPalettes_[flatIndex].assign(
-          components.skinPalette[index].begin(),
-          components.skinPalette[index].end());
-      renderables_[flatIndex].skinPalette =
-          std::span<const glm::mat4>(renderableSkinPalettes_[flatIndex].data(),
-                                     renderableSkinPalettes_[flatIndex].size());
       updatedAny = true;
     }
     if (updatedAny) {
@@ -353,6 +346,41 @@ Result<bool, std::string> RenderScene::commit() {
       changed = true;
     }
     sceneGraph_.renderableTransformsDirty_ = false;
+  }
+
+  if (!sceneGraph_.renderableTopologyDirty_ &&
+      sceneGraph_.renderableDeformationsDirty_) {
+    for (uint32_t index = 0;
+         index < sceneGraph_.renderableComponents_.slots.slotCount(); ++index) {
+      if (!sceneGraph_.renderableComponents_.slots.isLive(index)) {
+        continue;
+      }
+      const uint32_t flatIndex =
+          sceneGraph_.renderableComponents_.flatRenderableIndex[index];
+      if (flatIndex == kInvalidRenderableFlatIndex ||
+          flatIndex >= renderables_.size() ||
+          flatIndex >= renderableMorphWeights_.size() ||
+          flatIndex >= renderableSkinPalettes_.size()) {
+        continue;
+      }
+
+      renderableMorphWeights_[flatIndex].assign(
+          sceneGraph_.renderableComponents_.morphWeights[index].begin(),
+          sceneGraph_.renderableComponents_.morphWeights[index].end());
+      renderables_[flatIndex].morphWeights =
+          std::span<const float>(renderableMorphWeights_[flatIndex].data(),
+                                 renderableMorphWeights_[flatIndex].size());
+
+      renderableSkinPalettes_[flatIndex].assign(
+          sceneGraph_.renderableComponents_.skinPalette[index].begin(),
+          sceneGraph_.renderableComponents_.skinPalette[index].end());
+      renderables_[flatIndex].skinPalette =
+          std::span<const glm::mat4>(renderableSkinPalettes_[flatIndex].data(),
+                                     renderableSkinPalettes_[flatIndex].size());
+    }
+    ++deformationVersion_;
+    sceneGraph_.renderableDeformationsDirty_ = false;
+    changed = true;
   }
 
   if (sceneGraph_.lightTopologyDirty_) {

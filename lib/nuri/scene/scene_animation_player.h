@@ -26,6 +26,10 @@ public:
   SceneAnimationPlayer(
       const ScenePrefab &prefab, const SceneInstantiationMap &instantiationMap,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
+  SceneAnimationPlayer(const SceneAnimationPlayer &) = delete;
+  SceneAnimationPlayer &operator=(const SceneAnimationPlayer &) = delete;
+  SceneAnimationPlayer(SceneAnimationPlayer &&) = delete;
+  SceneAnimationPlayer &operator=(SceneAnimationPlayer &&) = delete;
 
   [[nodiscard]] Result<bool, std::string>
   play(uint32_t clipIndex,

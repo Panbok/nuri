@@ -66,19 +66,124 @@ void decomposeTransform(const glm::mat4 &matrix, glm::vec3 &translation,
   return SampleWindow{.leftIndex = leftIndex, .rightIndex = rightIndex, .t = t};
 }
 
-void readLinearValue(std::span<const float> values, uint32_t keyIndex,
-                     uint32_t valueArity, std::span<float> out) {
+[[nodiscard]] bool readLinearValue(std::span<const float> values,
+                                   uint32_t keyIndex, uint32_t valueArity,
+                                   std::span<float> out) {
   const size_t base = static_cast<size_t>(keyIndex) * valueArity;
+  if (base + valueArity > values.size() || valueArity > out.size()) {
+    std::fill(out.begin(), out.end(), 0.0f);
+    return false;
+  }
   for (uint32_t i = 0; i < valueArity; ++i) {
     out[i] = values[base + i];
   }
+  return true;
 }
 
-void sampleSampler(const AnimationSamplerData &sampler, float timeSeconds,
-                   std::span<float> out) {
+[[nodiscard]] bool readQuaternionValue(const AnimationSamplerData &sampler,
+                                       uint32_t keyIndex,
+                                       glm::quat &outRotation) {
+  if (sampler.valueArity < 4u) {
+    outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    return false;
+  }
+  const std::span<const float> values(sampler.values.data(),
+                                      sampler.values.size());
+  size_t base = static_cast<size_t>(keyIndex) * sampler.valueArity;
+  if (sampler.interpolation == AnimationInterpolation::CubicSpline) {
+    base = static_cast<size_t>(keyIndex) * sampler.valueArity * 3u +
+           sampler.valueArity;
+  }
+  if (base + 4u > values.size()) {
+    outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    return false;
+  }
+  outRotation = glm::normalize(glm::quat(values[base + 3u], values[base + 0u],
+                                         values[base + 1u], values[base + 2u]));
+  return true;
+}
+
+[[nodiscard]] bool sampleRotationSampler(const AnimationSamplerData &sampler,
+                                         float timeSeconds,
+                                         glm::quat &outRotation) {
+  if (sampler.keyTimes.empty() || sampler.valueArity < 4u) {
+    outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    return false;
+  }
+
+  const std::span<const float> keyTimes(sampler.keyTimes.data(),
+                                        sampler.keyTimes.size());
+  const SampleWindow window = findSampleWindow(keyTimes, timeSeconds);
+  if (window.leftIndex == window.rightIndex ||
+      sampler.interpolation == AnimationInterpolation::Step ||
+      sampler.interpolation == AnimationInterpolation::CubicSpline) {
+    return readQuaternionValue(sampler, window.leftIndex, outRotation);
+  }
+
+  glm::quat left(1.0f, 0.0f, 0.0f, 0.0f);
+  glm::quat right(1.0f, 0.0f, 0.0f, 0.0f);
+  if (!readQuaternionValue(sampler, window.leftIndex, left) ||
+      !readQuaternionValue(sampler, window.rightIndex, right)) {
+    outRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    return false;
+  }
+
+  float cosTheta = glm::dot(left, right);
+  if (cosTheta < 0.0f) {
+    right = -right;
+    cosTheta = -cosTheta;
+  }
+  cosTheta = std::clamp(cosTheta, -1.0f, 1.0f);
+  if (cosTheta > 0.9995f) {
+    outRotation = glm::normalize(left + window.t * (right - left));
+    return true;
+  }
+
+  const float angle = std::acos(cosTheta);
+  const float sinAngle = std::sin(angle);
+  if (sinAngle <= 1.0e-5f) {
+    outRotation = left;
+    return true;
+  }
+
+  const float leftWeight = std::sin((1.0f - window.t) * angle) / sinAngle;
+  const float rightWeight = std::sin(window.t * angle) / sinAngle;
+  outRotation = glm::normalize(left * leftWeight + right * rightWeight);
+  return true;
+}
+
+[[nodiscard]] float clampPlaybackTime(const AnimationClipData *clip,
+                                      float timeSeconds) noexcept {
+  const float maxTime = clip != nullptr && clip->durationSeconds > 0.0f
+                            ? clip->durationSeconds
+                            : 0.0f;
+  return std::clamp(timeSeconds, 0.0f, maxTime);
+}
+
+void advancePlaybackTime(float &timeSeconds, bool &playing,
+                         AnimationPlaybackMode mode, float deltaSeconds,
+                         const AnimationClipData &clip) noexcept {
+  timeSeconds = std::max(0.0f, timeSeconds + deltaSeconds);
+  if (clip.durationSeconds <= 0.0f) {
+    timeSeconds = 0.0f;
+    playing = false;
+    return;
+  }
+  if (mode == AnimationPlaybackMode::Loop) {
+    timeSeconds = std::fmod(timeSeconds, clip.durationSeconds);
+    return;
+  }
+  if (timeSeconds >= clip.durationSeconds) {
+    timeSeconds = clip.durationSeconds;
+    playing = false;
+  }
+}
+
+[[nodiscard]] bool sampleSampler(const AnimationSamplerData &sampler,
+                                 float timeSeconds, std::span<float> out) {
   if (sampler.keyTimes.empty() || sampler.valueArity == 0u) {
     std::fill(out.begin(), out.end(), 0.0f);
-    return;
+    return true;
   }
   const std::span<const float> keyTimes(sampler.keyTimes.data(),
                                         sampler.keyTimes.size());
@@ -90,34 +195,50 @@ void sampleSampler(const AnimationSamplerData &sampler, float timeSeconds,
       const size_t base =
           static_cast<size_t>(window.leftIndex) * sampler.valueArity * 3u +
           sampler.valueArity;
+      if (base + sampler.valueArity > values.size() ||
+          sampler.valueArity > out.size()) {
+        std::fill(out.begin(), out.end(), 0.0f);
+        return false;
+      }
       for (uint32_t i = 0; i < sampler.valueArity; ++i) {
         out[i] = values[base + i];
       }
     } else {
-      readLinearValue(values, window.leftIndex, sampler.valueArity, out);
+      return readLinearValue(values, window.leftIndex, sampler.valueArity, out);
     }
-    return;
+    return true;
   }
 
   if (sampler.interpolation == AnimationInterpolation::Step) {
-    readLinearValue(values, window.leftIndex, sampler.valueArity, out);
-    return;
+    return readLinearValue(values, window.leftIndex, sampler.valueArity, out);
   }
   if (sampler.interpolation == AnimationInterpolation::Linear) {
     const size_t leftBase =
         static_cast<size_t>(window.leftIndex) * sampler.valueArity;
     const size_t rightBase =
         static_cast<size_t>(window.rightIndex) * sampler.valueArity;
+    if (leftBase + sampler.valueArity > values.size() ||
+        rightBase + sampler.valueArity > values.size() ||
+        sampler.valueArity > out.size()) {
+      std::fill(out.begin(), out.end(), 0.0f);
+      return false;
+    }
     for (uint32_t i = 0; i < sampler.valueArity; ++i) {
       out[i] = glm::mix(values[leftBase + i], values[rightBase + i], window.t);
     }
-    return;
+    return true;
   }
 
   const size_t leftBase =
       static_cast<size_t>(window.leftIndex) * sampler.valueArity * 3u;
   const size_t rightBase =
       static_cast<size_t>(window.rightIndex) * sampler.valueArity * 3u;
+  if (leftBase + sampler.valueArity * 3u > values.size() ||
+      rightBase + sampler.valueArity * 3u > values.size() ||
+      sampler.valueArity > out.size()) {
+    std::fill(out.begin(), out.end(), 0.0f);
+    return false;
+  }
   const float deltaTime =
       sampler.keyTimes[window.rightIndex] - sampler.keyTimes[window.leftIndex];
   const float t = glm::clamp(window.t, 0.0f, 1.0f);
@@ -135,6 +256,7 @@ void sampleSampler(const AnimationSamplerData &sampler, float timeSeconds,
     out[i] = h00 * value0 + h10 * deltaTime * outTangent0 + h01 * value1 +
              h11 * deltaTime * inTangent1;
   }
+  return true;
 }
 
 } // namespace
@@ -181,7 +303,7 @@ SceneAnimationPlayer::play(uint32_t clipIndex, AnimationPlaybackMode mode) {
 void SceneAnimationPlayer::stop() { playing_ = false; }
 
 void SceneAnimationPlayer::seek(float timeSeconds) {
-  timeSeconds_ = std::max(timeSeconds, 0.0f);
+  timeSeconds_ = clampPlaybackTime(activeClip(), timeSeconds);
 }
 
 void SceneAnimationPlayer::applyClip(SceneGraph &graph) const {
@@ -216,27 +338,36 @@ void SceneAnimationPlayer::applyClip(SceneGraph &graph) const {
     }
     const AnimationSamplerData &sampler = clip->samplers[channel.samplerIndex];
     NodeState &nodeState = sampledNodeStates_[channel.targetNodeIndex];
-    std::span<float> sample(sampleBuffer.data(), sampler.valueArity);
-    sampleSampler(sampler, timeSeconds_, sample);
     switch (channel.path) {
     case AnimationTargetPath::Translation:
+    case AnimationTargetPath::Scale:
+    case AnimationTargetPath::Weights: {
+      std::span<float> sample(sampleBuffer.data(), sampler.valueArity);
+      if (!sampleSampler(sampler, timeSeconds_, sample)) {
+        continue;
+      }
       if (sampler.valueArity >= 3u) {
-        nodeState.translation = glm::vec3(sample[0], sample[1], sample[2]);
+        if (channel.path == AnimationTargetPath::Translation) {
+          nodeState.translation = glm::vec3(sample[0], sample[1], sample[2]);
+          break;
+        }
+        if (channel.path == AnimationTargetPath::Scale) {
+          nodeState.scale = glm::vec3(sample[0], sample[1], sample[2]);
+          break;
+        }
+      }
+      if (channel.path == AnimationTargetPath::Weights) {
+        nodeState.morphWeights.assign(sample.begin(), sample.end());
       }
       break;
+    }
     case AnimationTargetPath::Rotation:
       if (sampler.valueArity >= 4u) {
-        nodeState.rotation = glm::normalize(
-            glm::quat(sample[3], sample[0], sample[1], sample[2]));
+        glm::quat sampledRotation(1.0f, 0.0f, 0.0f, 0.0f);
+        if (sampleRotationSampler(sampler, timeSeconds_, sampledRotation)) {
+          nodeState.rotation = sampledRotation;
+        }
       }
-      break;
-    case AnimationTargetPath::Scale:
-      if (sampler.valueArity >= 3u) {
-        nodeState.scale = glm::vec3(sample[0], sample[1], sample[2]);
-      }
-      break;
-    case AnimationTargetPath::Weights:
-      nodeState.morphWeights.assign(sample.begin(), sample.end());
       break;
     }
   }
@@ -308,15 +439,7 @@ void SceneAnimationPlayer::update(SceneGraph &graph, float deltaSeconds) {
     return;
   }
   if (playing_) {
-    timeSeconds_ = std::max(0.0f, timeSeconds_ + deltaSeconds);
-    if (clip->durationSeconds > 0.0f) {
-      if (mode_ == AnimationPlaybackMode::Loop) {
-        timeSeconds_ = std::fmod(timeSeconds_, clip->durationSeconds);
-      } else if (timeSeconds_ >= clip->durationSeconds) {
-        timeSeconds_ = clip->durationSeconds;
-        playing_ = false;
-      }
-    }
+    advancePlaybackTime(timeSeconds_, playing_, mode_, deltaSeconds, *clip);
   }
   applyClip(graph);
 }

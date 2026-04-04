@@ -323,6 +323,7 @@ private:
   NodeId rootNode_ = kInvalidNodeId;
   bool renderableTopologyDirty_ = false;
   bool renderableTransformsDirty_ = false;
+  bool renderableDeformationsDirty_ = false;
   bool lightTopologyDirty_ = false;
   bool lightDataDirty_ = false;
 };
