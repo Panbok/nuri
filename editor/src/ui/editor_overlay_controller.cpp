@@ -65,16 +65,18 @@ void EditorOverlayController::syncCameraControllerWidgetStateFromCamera(
   }
 }
 
-void EditorOverlayController::setScenePresetUi(
-    std::span<const char *const> presetNames, int selectedIndex,
+void EditorOverlayController::setSceneSelectionUi(
+    std::span<const EditorSceneSelectionOption> scenes,
+    std::string_view selectedSceneId, uint64_t version,
     std::string_view hotkeyHint) {
   if (editor_) {
-    editor_->setScenePresetUi(presetNames, selectedIndex, hotkeyHint);
+    editor_->setSceneSelectionUi(scenes, selectedSceneId, version, hotkeyHint);
   }
 }
 
-std::optional<int> EditorOverlayController::takeScenePresetSelectionRequest() {
-  return editor_ ? editor_->takeScenePresetSelectionRequest() : std::nullopt;
+std::optional<std::string>
+EditorOverlayController::takeSceneSelectionRequest() {
+  return editor_ ? editor_->takeSceneSelectionRequest() : std::nullopt;
 }
 
 bool EditorOverlayController::onInput(const InputEvent &event) {

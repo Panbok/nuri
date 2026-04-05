@@ -322,24 +322,33 @@ struct TelemetryOverlayUiState {
   bool showImGuiMetricsWindow = false;
 };
 
-struct ScenePresetUiState {
+struct SceneSelectionUiState {
+  std::vector<std::string> ids{};
   std::vector<std::string> names{};
   std::vector<const char *> nameViews{};
   std::string hotkeyHint = "Toggle Editor: F6";
   int selectedIndex = 0;
-  std::optional<int> pendingSelectionRequest{};
+  std::optional<std::string> pendingSelectionRequest{};
+  uint64_t version = 0;
 
-  void set(std::span<const char *const> presetNames, int currentSelectedIndex,
+  void set(std::span<const EditorSceneSelectionOption> scenes,
+           std::string_view selectedSceneId, uint64_t newVersion,
            std::string_view hotkeyHintIn) {
-    names.clear();
-    names.reserve(presetNames.size());
-    for (const char *name : presetNames) {
-      names.emplace_back(name != nullptr ? name : "");
-    }
-    nameViews.clear();
-    nameViews.reserve(names.size());
-    for (const std::string &name : names) {
-      nameViews.push_back(name.c_str());
+    if (version != newVersion) {
+      version = newVersion;
+      ids.clear();
+      names.clear();
+      ids.reserve(scenes.size());
+      names.reserve(scenes.size());
+      for (const EditorSceneSelectionOption &scene : scenes) {
+        ids.emplace_back(scene.id);
+        names.emplace_back(scene.label);
+      }
+      nameViews.clear();
+      nameViews.reserve(names.size());
+      for (const std::string &name : names) {
+        nameViews.push_back(name.c_str());
+      }
     }
     if (hotkeyHintIn.empty()) {
       hotkeyHint = "Toggle Editor: F6";
@@ -351,8 +360,9 @@ struct ScenePresetUiState {
       pendingSelectionRequest.reset();
       return;
     }
-    selectedIndex = std::clamp(currentSelectedIndex, 0,
-                               static_cast<int>(nameViews.size()) - 1);
+    auto it = std::find(ids.begin(), ids.end(), selectedSceneId);
+    selectedIndex =
+        it == ids.end() ? 0 : static_cast<int>(std::distance(ids.begin(), it));
   }
 };
 
@@ -3084,20 +3094,22 @@ struct ImGuiEditor::Impl {
 
   void drawScenesSection() {
     ImGui::SeparatorText("Scenes");
-    if (scenePresetState.nameViews.empty()) {
-      ImGui::TextUnformatted("No scene presets available.");
+    if (sceneSelectionState.nameViews.empty()) {
+      ImGui::TextUnformatted("No scenes available.");
       return;
     }
 
-    int selectedIndex = scenePresetState.selectedIndex;
-    if (ImGui::Combo("Scene", &selectedIndex, scenePresetState.nameViews.data(),
-                     static_cast<int>(scenePresetState.nameViews.size())) &&
-        selectedIndex != scenePresetState.selectedIndex) {
-      scenePresetState.selectedIndex = selectedIndex;
-      scenePresetState.pendingSelectionRequest = selectedIndex;
+    int selectedIndex = sceneSelectionState.selectedIndex;
+    if (ImGui::Combo("Scene", &selectedIndex,
+                     sceneSelectionState.nameViews.data(),
+                     static_cast<int>(sceneSelectionState.nameViews.size())) &&
+        selectedIndex != sceneSelectionState.selectedIndex) {
+      sceneSelectionState.selectedIndex = selectedIndex;
+      sceneSelectionState.pendingSelectionRequest =
+          sceneSelectionState.ids[static_cast<size_t>(selectedIndex)];
     }
-    if (!scenePresetState.hotkeyHint.empty()) {
-      ImGui::TextUnformatted(scenePresetState.hotkeyHint.c_str());
+    if (!sceneSelectionState.hotkeyHint.empty()) {
+      ImGui::TextUnformatted(sceneSelectionState.hotkeyHint.c_str());
     }
   }
 
@@ -3361,13 +3373,14 @@ struct ImGuiEditor::Impl {
       ImGui::TextUnformatted("Scene graph is empty.");
     } else {
       const bool hasSceneName =
-          !scenePresetState.names.empty() &&
-          scenePresetState.selectedIndex >= 0 &&
-          scenePresetState.selectedIndex <
-              static_cast<int>(scenePresetState.names.size());
+          !sceneSelectionState.names.empty() &&
+          sceneSelectionState.selectedIndex >= 0 &&
+          sceneSelectionState.selectedIndex <
+              static_cast<int>(sceneSelectionState.names.size());
       const std::string sceneLabel =
-          hasSceneName ? scenePresetState.names[scenePresetState.selectedIndex]
-                       : std::string("Active Scene");
+          hasSceneName
+              ? sceneSelectionState.names[sceneSelectionState.selectedIndex]
+              : std::string("Active Scene");
       if (pendingRevealSelection && hierarchySelectedRowIndex >= 0) {
         const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
         const float visibleHeight =
@@ -3727,7 +3740,7 @@ struct ImGuiEditor::Impl {
   TelemetryOverlayUiState telemetryOverlayState;
   FontCompilerUiState fontCompilerState;
   BakeryUiState bakeryState;
-  ScenePresetUiState scenePresetState;
+  SceneSelectionUiState sceneSelectionState;
   CameraControllerWidgetState cameraControllerState{};
   MaybeDockLayoutState dockLayoutState;
   ScratchArena scratchArena;
@@ -3848,13 +3861,14 @@ void ImGuiEditor::syncCameraControllerWidgetStateFromCamera(
                                                   impl_->cameraControllerState);
 }
 
-void ImGuiEditor::setScenePresetUi(std::span<const char *const> presetNames,
-                                   int selectedIndex,
-                                   std::string_view hotkeyHint) {
+void ImGuiEditor::setSceneSelectionUi(
+    std::span<const EditorSceneSelectionOption> scenes,
+    std::string_view selectedSceneId, uint64_t version,
+    std::string_view hotkeyHint) {
   if (!impl_) {
     return;
   }
-  impl_->scenePresetState.set(presetNames, selectedIndex, hotkeyHint);
+  impl_->sceneSelectionState.set(scenes, selectedSceneId, version, hotkeyHint);
 }
 
 void ImGuiEditor::resetSceneUiState() {
@@ -3864,13 +3878,14 @@ void ImGuiEditor::resetSceneUiState() {
   impl_->resetSceneUiState();
 }
 
-std::optional<int> ImGuiEditor::takeScenePresetSelectionRequest() {
-  if (!impl_ || !impl_->scenePresetState.pendingSelectionRequest.has_value()) {
+std::optional<std::string> ImGuiEditor::takeSceneSelectionRequest() {
+  if (!impl_ ||
+      !impl_->sceneSelectionState.pendingSelectionRequest.has_value()) {
     return std::nullopt;
   }
-  const std::optional<int> result =
-      impl_->scenePresetState.pendingSelectionRequest;
-  impl_->scenePresetState.pendingSelectionRequest.reset();
+  const std::optional<std::string> result =
+      impl_->sceneSelectionState.pendingSelectionRequest;
+  impl_->sceneSelectionState.pendingSelectionRequest.reset();
   return result;
 }
 

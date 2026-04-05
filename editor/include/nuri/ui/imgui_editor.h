@@ -29,11 +29,11 @@ public:
   void setFrameMetrics(const RenderFrameMetrics &metrics);
   void setRenderSettings(const RenderSettings &settings);
   void syncCameraControllerWidgetStateFromCamera(const Camera &camera);
-  void setScenePresetUi(std::span<const char *const> presetNames,
-                        int selectedIndex,
-                        std::string_view hotkeyHint = "Toggle Editor: F6");
+  void setSceneSelectionUi(std::span<const EditorSceneSelectionOption> scenes,
+                           std::string_view selectedSceneId, uint64_t version,
+                           std::string_view hotkeyHint = "Toggle Editor: F6");
   void resetSceneUiState();
-  [[nodiscard]] std::optional<int> takeScenePresetSelectionRequest();
+  [[nodiscard]] std::optional<std::string> takeSceneSelectionRequest();
   [[nodiscard]] bool *gizmoControlsWindowOpenState();
   [[nodiscard]] bool *lightsWindowOpenState();
   [[nodiscard]] bool isGizmoControlsWindowOpen() const;

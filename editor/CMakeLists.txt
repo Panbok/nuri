@@ -10,6 +10,12 @@ set(NURI_EDITOR_SOURCES
   src/bakery/brdf_lut_baker.cpp
   src/bakery/envmap_prefilter_baker.cpp
   src/bakery/scene_asset_baker.cpp
+  src/app/built_in_scenes.cpp
+  src/app/editor_application.cpp
+  src/app/editor_runtime.cpp
+  src/app/editor_scene_assets.cpp
+  src/app/editor_scene_catalog.cpp
+  src/app/editor_scene_factories.cpp
   src/gfx/imgui_gpu_renderer.cpp
   src/main.cpp
   src/platform/imgui_glfw_platform.cpp

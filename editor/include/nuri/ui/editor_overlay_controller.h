@@ -40,10 +40,10 @@ public:
   void resetControllers();
   void resetSceneUiState();
   void syncCameraControllerWidgetStateFromCamera(const Camera &camera);
-  void setScenePresetUi(std::span<const char *const> presetNames,
-                        int selectedIndex,
-                        std::string_view hotkeyHint = "Toggle Editor: F6");
-  [[nodiscard]] std::optional<int> takeScenePresetSelectionRequest();
+  void setSceneSelectionUi(std::span<const EditorSceneSelectionOption> scenes,
+                           std::string_view selectedSceneId, uint64_t version,
+                           std::string_view hotkeyHint = "Toggle Editor: F6");
+  [[nodiscard]] std::optional<std::string> takeSceneSelectionRequest();
 
   bool onInput(const InputEvent &event);
   void onUpdate(double deltaTime);

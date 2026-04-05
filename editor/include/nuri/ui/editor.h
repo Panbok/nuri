@@ -18,6 +18,11 @@ struct GizmoUiDrawConfig {
   std::string_view lightsWindowTitle = "Lights";
 };
 
+struct EditorSceneSelectionOption {
+  std::string_view id{};
+  std::string_view label{};
+};
+
 class GizmoController {
 public:
   GizmoController(const GizmoController &) = delete;

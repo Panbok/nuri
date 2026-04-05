@@ -28,8 +28,4 @@ void drawCameraControllerContents(CameraSystem &cameraSystem,
 
 void drawCameraHelpContents();
 
-bool drawScenePresetContents(std::span<const char *const> presetNames,
-                             int &selectedIndex,
-                             std::string_view hotkeyHint = "Hotkey: F6");
-
 } // namespace nuri

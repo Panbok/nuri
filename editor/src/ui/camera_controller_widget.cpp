@@ -104,20 +104,4 @@ void drawCameraControllerContents(CameraSystem &cameraSystem,
 
 void drawCameraHelpContents() { drawCameraControlScheme(); }
 
-bool drawScenePresetContents(std::span<const char *const> presetNames,
-                             int &selectedIndex, std::string_view hotkeyHint) {
-  if (presetNames.empty()) {
-    return false;
-  }
-
-  selectedIndex =
-      std::clamp(selectedIndex, 0, static_cast<int>(presetNames.size()) - 1);
-  const bool changed =
-      ImGui::Combo("Preset", &selectedIndex, presetNames.data(),
-                   static_cast<int>(presetNames.size()));
-  ImGui::TextUnformatted(hotkeyHint.data(),
-                         hotkeyHint.data() + hotkeyHint.size());
-  return changed;
-}
-
 } // namespace nuri
