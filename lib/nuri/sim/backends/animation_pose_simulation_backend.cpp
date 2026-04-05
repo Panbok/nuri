@@ -14,6 +14,9 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>
 
+#include <optional>
+#include <vector>
+
 namespace nuri {
 namespace {
 
@@ -394,11 +397,21 @@ Result<bool, std::string> buildBaseData(AnimationPoseInstance &instance) {
     });
 
     uint32_t depth = 0u;
-    for (uint32_t current = node.parentIndex;
-         current != kInvalidScenePrefabIndex &&
-         current < instance.prefab.nodes.size();
-         current = instance.prefab.nodes[current].parentIndex) {
+    uint32_t current = node.parentIndex;
+    size_t traversed = 0u;
+    while (current != kInvalidScenePrefabIndex &&
+           current < instance.prefab.nodes.size()) {
+      if (traversed >= instance.prefab.nodes.size()) {
+        NURI_LOG_ERROR(
+            "AnimationPoseSimulationBackend: detected a parent cycle while "
+            "computing depth for node %u",
+            nodeIndex);
+        depth = kInvalidIndex;
+        break;
+      }
       ++depth;
+      ++traversed;
+      current = instance.prefab.nodes[current].parentIndex;
     }
     depths[nodeIndex] = depth;
   }
@@ -665,6 +678,11 @@ Result<bool, std::string> appendAnimatedRenderableBinding(
   }
 
   if (animated.hasSkin) {
+    if (skin->jointNodeIndices.size() != skin->inverseBindMatrices.size()) {
+      return Result<bool, std::string>::makeError(
+          "AnimationPoseSimulationBackend: skin jointNodeIndices and "
+          "inverseBindMatrices counts do not match");
+    }
     auto finalOutputResult = services.createStorageVertexBuffer(
         requiredBytes, "animation_pose_skin_output");
     if (finalOutputResult.hasError()) {
@@ -765,7 +783,6 @@ ensureRenderableBindings(SceneRuntimeHost &host, AnimationGpuServices &services,
     return Result<bool, std::string>::makeError(
         "AnimationPoseSimulationBackend: render scene resources are null");
   }
-  (void)resources;
   destroyBindingBuffers(services.gpu(), instance);
   instance.renderableBindings.clear();
   instance.animatedRenderables.clear();
@@ -840,6 +857,10 @@ AnimationPoseSimulationBackend::AnimationPoseSimulationBackend(
       impl_(std::make_unique<Impl>(memory_)) {}
 
 AnimationPoseSimulationBackend::~AnimationPoseSimulationBackend() = default;
+AnimationPoseSimulationBackend::AnimationPoseSimulationBackend(
+    AnimationPoseSimulationBackend &&) noexcept = default;
+AnimationPoseSimulationBackend &AnimationPoseSimulationBackend::operator=(
+    AnimationPoseSimulationBackend &&) noexcept = default;
 
 Result<bool, std::string>
 AnimationPoseSimulationBackend::createInstance(SceneRuntimeHost &host,
@@ -852,7 +873,7 @@ AnimationPoseSimulationBackend::createInstance(SceneRuntimeHost &host,
   }
   auto initResult = services_->ensureInitialized();
   if (initResult.hasError()) {
-    return initResult;
+    return Result<bool, std::string>::makeError(initResult.error());
   }
 
   AnimationPoseSimulationParams params{};
@@ -899,14 +920,15 @@ AnimationPoseSimulationBackend::createInstance(SceneRuntimeHost &host,
   return Result<bool, std::string>::makeResult(true);
 }
 
-bool AnimationPoseSimulationBackend::destroyInstance(SceneRuntimeHost &,
-                                                     SimulationHandle handle) {
+Result<bool, std::string>
+AnimationPoseSimulationBackend::destroyInstance(SceneRuntimeHost &,
+                                                SimulationHandle handle) {
   if (impl_ == nullptr) {
-    return false;
+    return Result<bool, std::string>::makeResult(false);
   }
   auto it = impl_->instances.find(handle);
   if (it == impl_->instances.end()) {
-    return false;
+    return Result<bool, std::string>::makeResult(false);
   }
   if (services_ != nullptr) {
     destroyInstanceBuffers(services_->gpu(), it->second);
@@ -920,7 +942,7 @@ bool AnimationPoseSimulationBackend::destroyInstance(SceneRuntimeHost &,
     impl_->sceneFrame.version = 0u;
     impl_->sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
   }
-  return true;
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> AnimationPoseSimulationBackend::updateParams(
@@ -934,6 +956,10 @@ Result<bool, std::string> AnimationPoseSimulationBackend::updateParams(
   if (it == impl_->instances.end()) {
     return Result<bool, std::string>::makeError(
         "AnimationPoseSimulationBackend: instance handle is invalid");
+  }
+  if (services_ == nullptr) {
+    return Result<bool, std::string>::makeError(
+        "AnimationPoseSimulationBackend: services_ is null");
   }
   AnimationPoseSimulationParams decoded{};
   if (!readParams(params, decoded)) {
@@ -961,7 +987,7 @@ Result<bool, std::string> AnimationPoseSimulationBackend::executePhase(
 
   auto initResult = services_->ensureInitialized();
   if (initResult.hasError()) {
-    return initResult;
+    return Result<bool, std::string>::makeError(initResult.error());
   }
 
   auto it = impl_->instances.find(handle);
@@ -1028,7 +1054,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
 
   auto initResult = services_->ensureInitialized();
   if (initResult.hasError()) {
-    return initResult;
+    return Result<bool, std::string>::makeError(initResult.error());
   }
 
   SceneFrameState &sceneFrame = impl_->sceneFrame;

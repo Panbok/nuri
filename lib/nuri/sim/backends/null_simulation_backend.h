@@ -13,8 +13,8 @@ public:
   [[nodiscard]] Result<bool, std::string>
   createInstance(SceneRuntimeHost &host, SimulationHandle handle,
                  const SimulationDesc &desc) override;
-  [[nodiscard]] bool destroyInstance(SceneRuntimeHost &host,
-                                     SimulationHandle handle) override;
+  [[nodiscard]] Result<bool, std::string>
+  destroyInstance(SceneRuntimeHost &host, SimulationHandle handle) override;
   [[nodiscard]] Result<bool, std::string>
   updateParams(SceneRuntimeHost &host, SimulationHandle handle,
                std::span<const std::byte> params) override;

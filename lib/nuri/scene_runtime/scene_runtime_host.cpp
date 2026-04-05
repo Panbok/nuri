@@ -169,7 +169,13 @@ bool SceneRuntimeHost::destroySimulationInternal(SimulationHandle handle) {
   if (!registry_.destroy(handle)) {
     return false;
   }
-  if (!backend.destroyInstance(*this, handle)) {
+  auto destroyResult = backend.destroyInstance(*this, handle);
+  if (destroyResult.hasError()) {
+    NURI_LOG_WARNING(
+        "SceneRuntimeHost::destroySimulationInternal: backend cleanup failed "
+        "after registry removal for simulation #%u: %s",
+        handle.value, destroyResult.error().c_str());
+  } else if (!destroyResult.value()) {
     NURI_LOG_WARNING(
         "SceneRuntimeHost::destroySimulationInternal: backend cleanup failed "
         "after registry removal for simulation #%u",
@@ -368,6 +374,9 @@ void SceneRuntimeHost::noteSimulationMutation() noexcept {
 void SceneRuntimeHost::noteBindingMutation() noexcept { ++bindingVersion_; }
 
 void SceneRuntimeHost::refreshSceneBindingsIfNeeded() {
+  NURI_ASSERT(scene_ != nullptr,
+              "SceneRuntimeHost::refreshSceneBindingsIfNeeded: scene_ must be "
+              "initialized before calling refreshSceneBindingsIfNeeded");
   const uint64_t currentTopologyVersion = scene_->topologyVersion();
   const uint64_t currentTransformVersion = scene_->transformVersion();
   if (currentTopologyVersion == topologyVersion_) {

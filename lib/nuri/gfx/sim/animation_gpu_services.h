@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/log.h"
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
@@ -26,27 +27,33 @@ public:
   AnimationGpuServices(AnimationGpuServices &&) = delete;
   AnimationGpuServices &operator=(AnimationGpuServices &&) = delete;
 
-  [[nodiscard]] Result<bool, std::string> ensureInitialized();
+  [[nodiscard]] Result<void, std::string> ensureInitialized();
   [[nodiscard]] GPUDevice &gpu() noexcept { return gpu_; }
   [[nodiscard]] const std::filesystem::path &shaderRoot() const noexcept {
     return shaderRoot_;
   }
   [[nodiscard]] ComputePipelineHandle samplePipeline() const noexcept {
+    assertPipelineHandle(samplePipelineHandle_, "samplePipeline");
     return samplePipelineHandle_;
   }
   [[nodiscard]] ComputePipelineHandle worldPipeline() const noexcept {
+    assertPipelineHandle(worldPipelineHandle_, "worldPipeline");
     return worldPipelineHandle_;
   }
   [[nodiscard]] ComputePipelineHandle scatterPipeline() const noexcept {
+    assertPipelineHandle(scatterPipelineHandle_, "scatterPipeline");
     return scatterPipelineHandle_;
   }
   [[nodiscard]] ComputePipelineHandle morphPipeline() const noexcept {
+    assertPipelineHandle(morphPipelineHandle_, "morphPipeline");
     return morphPipelineHandle_;
   }
   [[nodiscard]] ComputePipelineHandle skinPalettePipeline() const noexcept {
+    assertPipelineHandle(skinPalettePipelineHandle_, "skinPalettePipeline");
     return skinPalettePipelineHandle_;
   }
   [[nodiscard]] ComputePipelineHandle skinPipeline() const noexcept {
+    assertPipelineHandle(skinPipelineHandle_, "skinPipeline");
     return skinPipelineHandle_;
   }
 
@@ -56,6 +63,17 @@ public:
   createStorageVertexBuffer(size_t sizeBytes, std::string_view debugName);
 
 private:
+  void assertPipelineHandle(ComputePipelineHandle handle,
+                            std::string_view accessorName) const noexcept {
+    NURI_ASSERT(initialized_,
+                "AnimationGpuServices::%.*s: ensureInitialized() must succeed "
+                "before accessing pipelines",
+                static_cast<int>(accessorName.size()), accessorName.data());
+    NURI_ASSERT(nuri::isValid(handle),
+                "AnimationGpuServices::%.*s: pipeline handle is invalid",
+                static_cast<int>(accessorName.size()), accessorName.data());
+  }
+
   [[nodiscard]] Result<bool, std::string> createShaders();
   [[nodiscard]] Result<bool, std::string> createPipelines();
   void destroyPipelines() noexcept;

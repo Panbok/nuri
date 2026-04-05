@@ -12,9 +12,9 @@ NullSimulationBackend::createInstance(SceneRuntimeHost &, SimulationHandle,
   return Result<bool, std::string>::makeResult(true);
 }
 
-bool NullSimulationBackend::destroyInstance(SceneRuntimeHost &,
-                                            SimulationHandle) {
-  return true;
+Result<bool, std::string>
+NullSimulationBackend::destroyInstance(SceneRuntimeHost &, SimulationHandle) {
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>

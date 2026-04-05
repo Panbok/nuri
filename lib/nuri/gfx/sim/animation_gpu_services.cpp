@@ -15,7 +15,7 @@ constexpr std::string_view kSkinPaletteShaderName =
 constexpr std::string_view kSkinShaderName = "animation_pose_skin.comp";
 
 Result<bool, std::string>
-createComputePipeline(GPUDevice &gpu, Pipeline &pipeline, ShaderHandle shader,
+createComputePipeline(Pipeline &pipeline, ShaderHandle shader,
                       std::string_view debugName,
                       ComputePipelineHandle &outHandle) {
   auto result = pipeline.createComputePipeline(
@@ -40,21 +40,21 @@ AnimationGpuServices::~AnimationGpuServices() {
   destroyShaders();
 }
 
-Result<bool, std::string> AnimationGpuServices::ensureInitialized() {
+Result<void, std::string> AnimationGpuServices::ensureInitialized() {
   if (initialized_) {
-    return Result<bool, std::string>::makeResult(true);
+    return Result<void, std::string>::makeResult();
   }
   auto shaderResult = createShaders();
   if (shaderResult.hasError()) {
-    return shaderResult;
+    return Result<void, std::string>::makeError(shaderResult.error());
   }
   auto pipelineResult = createPipelines();
   if (pipelineResult.hasError()) {
     destroyShaders();
-    return pipelineResult;
+    return Result<void, std::string>::makeError(pipelineResult.error());
   }
   initialized_ = true;
-  return Result<bool, std::string>::makeResult(true);
+  return Result<void, std::string>::makeResult();
 }
 
 Result<bool, std::string> AnimationGpuServices::createShaders() {
@@ -100,36 +100,36 @@ Result<bool, std::string> AnimationGpuServices::createPipelines() {
   }
 
   auto sampleResult =
-      createComputePipeline(gpu_, *samplePipeline_, sampleShaderHandle_,
+      createComputePipeline(*samplePipeline_, sampleShaderHandle_,
                             "animation_pose_sample", samplePipelineHandle_);
   if (sampleResult.hasError()) {
     return sampleResult;
   }
   auto worldResult =
-      createComputePipeline(gpu_, *worldPipeline_, worldShaderHandle_,
+      createComputePipeline(*worldPipeline_, worldShaderHandle_,
                             "animation_pose_world", worldPipelineHandle_);
   if (worldResult.hasError()) {
     return worldResult;
   }
   auto scatterResult =
-      createComputePipeline(gpu_, *scatterPipeline_, scatterShaderHandle_,
+      createComputePipeline(*scatterPipeline_, scatterShaderHandle_,
                             "animation_pose_scatter", scatterPipelineHandle_);
   if (scatterResult.hasError()) {
     return scatterResult;
   }
   auto morphResult =
-      createComputePipeline(gpu_, *morphPipeline_, morphShaderHandle_,
+      createComputePipeline(*morphPipeline_, morphShaderHandle_,
                             "animation_pose_morph", morphPipelineHandle_);
   if (morphResult.hasError()) {
     return morphResult;
   }
   auto skinPaletteResult = createComputePipeline(
-      gpu_, *skinPalettePipeline_, skinPaletteShaderHandle_,
+      *skinPalettePipeline_, skinPaletteShaderHandle_,
       "animation_pose_skin_palette", skinPalettePipelineHandle_);
   if (skinPaletteResult.hasError()) {
     return skinPaletteResult;
   }
-  return createComputePipeline(gpu_, *skinPipeline_, skinShaderHandle_,
+  return createComputePipeline(*skinPipeline_, skinShaderHandle_,
                                "animation_pose_skin", skinPipelineHandle_);
 }
 

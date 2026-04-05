@@ -36,7 +36,7 @@ void SimulationGpuContext::beginFrame(uint64_t frameIndex) noexcept {
 }
 
 void SimulationGpuContext::publishFrameResources(
-    const SimulationFrameGpuResources &resources) {
+    const SimulationFrameGpuResources &resources) noexcept {
   if (frameResourcesEqual(frameResources_, resources)) {
     return;
   }

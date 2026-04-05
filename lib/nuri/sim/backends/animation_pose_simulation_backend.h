@@ -6,8 +6,6 @@
 #include "nuri/sim/backends/simulation_backend.h"
 
 #include <memory_resource>
-#include <optional>
-#include <vector>
 
 namespace nuri {
 
@@ -19,6 +17,13 @@ public:
   explicit AnimationPoseSimulationBackend(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~AnimationPoseSimulationBackend() override;
+  AnimationPoseSimulationBackend(const AnimationPoseSimulationBackend &) =
+      delete;
+  AnimationPoseSimulationBackend &
+  operator=(const AnimationPoseSimulationBackend &) = delete;
+  AnimationPoseSimulationBackend(AnimationPoseSimulationBackend &&) noexcept;
+  AnimationPoseSimulationBackend &
+  operator=(AnimationPoseSimulationBackend &&) noexcept;
 
   [[nodiscard]] SimulationKind kind() const noexcept override {
     return SimulationKind::AnimationPose;
@@ -27,8 +32,8 @@ public:
   [[nodiscard]] Result<bool, std::string>
   createInstance(SceneRuntimeHost &host, SimulationHandle handle,
                  const SimulationDesc &desc) override;
-  [[nodiscard]] bool destroyInstance(SceneRuntimeHost &host,
-                                     SimulationHandle handle) override;
+  [[nodiscard]] Result<bool, std::string>
+  destroyInstance(SceneRuntimeHost &host, SimulationHandle handle) override;
   [[nodiscard]] Result<bool, std::string>
   updateParams(SceneRuntimeHost &host, SimulationHandle handle,
                std::span<const std::byte> params) override;
@@ -48,7 +53,7 @@ public:
 
 private:
   struct Impl;
-  std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
+  std::pmr::memory_resource *memory_;
   AnimationGpuServices *services_ = nullptr;
   std::unique_ptr<Impl> impl_;
 };

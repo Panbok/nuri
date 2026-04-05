@@ -18,9 +18,19 @@ AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
     return prepareResult;
   }
   const AnimationSceneFrameData *frameData = runtime_.animationSceneFrameData();
-  if (frameData == nullptr ||
-      !nuri::isValid(frameData->instanceMatricesBuffer) ||
-      frameData->instanceMatricesAddress == 0u) {
+  if (frameData == nullptr) {
+    NURI_LOG_DEBUG("AnimationSceneFrameProvider::prepare: early exit because "
+                   "frameData == nullptr");
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!nuri::isValid(frameData->instanceMatricesBuffer)) {
+    NURI_LOG_DEBUG("AnimationSceneFrameProvider::prepare: early exit because "
+                   "instanceMatricesBuffer is invalid");
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (frameData->instanceMatricesAddress == 0u) {
+    NURI_LOG_DEBUG("AnimationSceneFrameProvider::prepare: early exit because "
+                   "instanceMatricesAddress == 0u");
     return Result<bool, std::string>::makeResult(true);
   }
   if (!frameData->preDispatches.empty()) {

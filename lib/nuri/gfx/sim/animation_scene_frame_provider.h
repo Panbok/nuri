@@ -15,6 +15,12 @@ class NURI_API AnimationSceneFrameProvider final : public FrameDataProvider {
 public:
   explicit AnimationSceneFrameProvider(SceneRuntimeHost &runtime)
       : runtime_(runtime) {}
+  AnimationSceneFrameProvider(const AnimationSceneFrameProvider &) = delete;
+  AnimationSceneFrameProvider &
+  operator=(const AnimationSceneFrameProvider &) = delete;
+  AnimationSceneFrameProvider(AnimationSceneFrameProvider &&) = delete;
+  AnimationSceneFrameProvider &
+  operator=(AnimationSceneFrameProvider &&) = delete;
 
   [[nodiscard]] std::string_view name() const noexcept override {
     return "AnimationSceneFrameProvider";
