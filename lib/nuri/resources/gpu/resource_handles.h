@@ -10,6 +10,8 @@ inline constexpr uint32_t kResourceHandleIndexBits = 20u;
 inline constexpr uint32_t kResourceHandleGenerationBits = 12u;
 static_assert(kResourceHandleIndexBits + kResourceHandleGenerationBits == 32u,
               "Resource handle bits must sum to 32");
+static_assert(kResourceHandleGenerationBits > 0u,
+              "Resource handles reserve packed value 0 for invalid handles");
 inline constexpr uint32_t kResourceHandleIndexMask =
     (1u << kResourceHandleIndexBits) - 1u;
 inline constexpr uint32_t kResourceHandleGenerationMask =
@@ -45,6 +47,8 @@ struct NURI_API ResourceHandleParts {
 
 [[nodiscard]] constexpr uint32_t packResourceHandle(uint32_t index,
                                                     uint32_t generation) {
+  // Packed value 0 is reserved for invalid handles, so valid generations are
+  // biased away from zero and out-of-range inputs fail closed to 0.
   if (index > kResourceHandleIndexMask || generation == 0u ||
       generation > kResourceHandleGenerationMask) {
     return 0u;
