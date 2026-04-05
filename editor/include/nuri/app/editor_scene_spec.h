@@ -17,7 +17,6 @@
 #include <memory_resource>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -95,13 +94,20 @@ struct SimpleModelSceneAssets {
 };
 
 struct AnimatedPrefabSceneState {
+  NodeId rootNode = kInvalidNodeId;
+  SceneInstantiationMap instantiationMap;
+  SimulationHandle simulation = kInvalidSimulationHandle;
+
   explicit AnimatedPrefabSceneState(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : instantiationMap(memory) {}
 
-  NodeId rootNode = kInvalidNodeId;
-  SceneInstantiationMap instantiationMap;
-  SimulationHandle simulation = kInvalidSimulationHandle;
+  AnimatedPrefabSceneState(const AnimatedPrefabSceneState &) = delete;
+  AnimatedPrefabSceneState &
+  operator=(const AnimatedPrefabSceneState &) = delete;
+  AnimatedPrefabSceneState(AnimatedPrefabSceneState &&) noexcept = default;
+  AnimatedPrefabSceneState &
+  operator=(AnimatedPrefabSceneState &&) noexcept = default;
 };
 
 struct StreamingSceneState {

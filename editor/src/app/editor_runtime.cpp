@@ -117,6 +117,9 @@ void loadSharedEnvironment(EditorRuntime &runtime) {
       config.roots.textures / (environmentStem + "_prefilter_ggx.ktx2"),
       config.roots.textures / (environmentStem + "_prefilter_ggx.ktx"),
   };
+  // prefilteredCharlieCandidates intentionally includes legacy
+  // "_prefilter_charile" filenames under environmentStem in
+  // config.roots.textures.
   const std::array<std::filesystem::path, 4> prefilteredCharlieCandidates = {
       config.roots.textures / (environmentStem + "_prefilter_charlie.ktx2"),
       config.roots.textures / (environmentStem + "_prefilter_charlie.ktx"),
@@ -259,7 +262,7 @@ void EditorRuntime::update(double deltaTime) {
   (void)sceneRuntime_.tick({
       .frameDeltaSeconds = std::max(0.0, deltaTime),
       .absoluteTimeSeconds = timeSeconds(),
-      .frameIndex = simulationFrameIndex_++,
+      .frameIndex = advanceSimulationFrameIndex(),
   });
   cameraSystem_.update(deltaTime, app_.getInput());
   if (bakerySystem_) {
@@ -341,13 +344,12 @@ void EditorRuntime::syncSceneSelectionUi(const EditorSceneCatalog &catalog) {
     sceneSelectionLabels_.reserve(entries.size());
     sceneSelectionOptions_.reserve(entries.size());
     for (const EditorSceneEntry &entry : entries) {
-      sceneSelectionIds_.push_back(entry.info.id);
-      sceneSelectionLabels_.push_back(entry.info.label);
-    }
-    for (size_t i = 0; i < sceneSelectionIds_.size(); ++i) {
+      const std::string &newId = sceneSelectionIds_.emplace_back(entry.info.id);
+      const std::string &newLabel =
+          sceneSelectionLabels_.emplace_back(entry.info.label);
       sceneSelectionOptions_.push_back(EditorSceneSelectionOption{
-          .id = sceneSelectionIds_[i],
-          .label = sceneSelectionLabels_[i],
+          .id = newId,
+          .label = newLabel,
       });
     }
     sceneSelectionVersion_ = catalog.version();

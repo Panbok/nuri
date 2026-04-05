@@ -12,6 +12,8 @@
 namespace nuri {
 
 struct GizmoUiDrawConfig {
+  // Non-owning views; referenced titles must outlive this config and the draw
+  // call that consumes it.
   bool *showControlsWindow = nullptr;
   std::string_view controlsWindowTitle = "Gizmo Controls";
   bool *showLightsWindow = nullptr;
@@ -19,6 +21,8 @@ struct GizmoUiDrawConfig {
 };
 
 struct EditorSceneSelectionOption {
+  // Non-owning views; referenced strings must outlive the option and any scene
+  // selection UI update that consumes it.
   std::string_view id{};
   std::string_view label{};
 };

@@ -1,7 +1,5 @@
 #pragma once
 
-#include "nuri/core/result.h"
-
 namespace nuri {
 
 class EditorRuntime;

@@ -17,7 +17,7 @@ class EditorRuntime;
 
 class EditorSceneCatalog {
 public:
-  Result<void, std::string> append(EditorSceneSpec spec);
+  [[nodiscard]] Result<void, std::string> append(EditorSceneSpec spec);
   [[nodiscard]] const EditorSceneSpec *find(std::string_view id) const;
   [[nodiscard]] std::span<const EditorSceneEntry> entries() const noexcept;
   [[nodiscard]] bool requestActivate(std::string_view id);

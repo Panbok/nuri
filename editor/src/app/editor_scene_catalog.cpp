@@ -6,7 +6,8 @@
 
 namespace nuri {
 
-Result<void, std::string> EditorSceneCatalog::append(EditorSceneSpec spec) {
+[[nodiscard]] Result<void, std::string>
+EditorSceneCatalog::append(EditorSceneSpec spec) {
   if (spec.info.id.empty()) {
     return Result<void, std::string>::makeError(
         "EditorSceneCatalog::append: scene id must not be empty");
@@ -75,6 +76,7 @@ EditorSceneCatalog::applyPendingActivation(EditorRuntime &runtime) {
     targetEntry.prepared = true;
   }
 
+  const std::optional<size_t> previousActiveIndex = activeIndex_;
   if (activeIndex_.has_value()) {
     EditorSceneEntry &activeEntry = entries_[*activeIndex_];
     EditorSceneSpec &activeSpec = specs_[*activeIndex_];
@@ -91,6 +93,16 @@ EditorSceneCatalog::applyPendingActivation(EditorRuntime &runtime) {
     auto activateResult = targetSpec.activate(activateContext);
     if (activateResult.hasError()) {
       activeIndex_.reset();
+      if (previousActiveIndex.has_value()) {
+        EditorSceneEntry &previousEntry = entries_[*previousActiveIndex];
+        EditorSceneSpec &previousSpec = specs_[*previousActiveIndex];
+        runtime.resetSceneState();
+        if (previousSpec.activate &&
+            !previousSpec.activate(activateContext).hasError()) {
+          activeIndex_ = *previousActiveIndex;
+          previousEntry.active = true;
+        }
+      }
       return Result<bool, std::string>::makeError(activateResult.error());
     }
   }
@@ -140,6 +152,7 @@ void EditorSceneCatalog::shutdown(EditorRuntime &runtime) {
     EditorSceneDeactivateContext deactivateContext{.runtime = runtime};
     activeSpec.deactivate(deactivateContext);
   }
+  runtime.resetSceneState();
   activeEntry.active = false;
   activeIndex_.reset();
 }

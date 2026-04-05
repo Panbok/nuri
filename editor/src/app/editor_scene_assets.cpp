@@ -40,7 +40,6 @@ ImportedPrefabSceneResources &ImportedPrefabSceneResources::operator=(
   fallbackLights = std::move(other.fallbackLights);
   ready = std::exchange(other.ready, false);
   portableBakeQueued = std::exchange(other.portableBakeQueued, false);
-  other.sourcePath.clear();
   return *this;
 }
 
@@ -86,7 +85,6 @@ SimpleModelSceneAssets::operator=(SimpleModelSceneAssets &&other) noexcept {
   fallbackLights = std::move(other.fallbackLights);
   ready = std::exchange(other.ready, false);
   portableBakeQueued = std::exchange(other.portableBakeQueued, false);
-  other.sourcePath.clear();
   return *this;
 }
 
@@ -126,7 +124,6 @@ StreamingSceneState::operator=(StreamingSceneState &&other) noexcept {
   loadStartTimeSeconds = std::exchange(other.loadStartTimeSeconds, 0.0);
   lastProgressLogTimeSeconds =
       std::exchange(other.lastProgressLogTimeSeconds, 0.0);
-  other.sourcePath.clear();
   other.baseModel = glm::mat4(1.0f);
   return *this;
 }
@@ -219,6 +216,12 @@ Result<void, std::string> prepareSimpleImportedModelSceneAssets(
   out.material = acquireImportedMaterialOrFallback(
       runtime.resources(), sceneName, modelPath.string(), out.model,
       importedMaterialPrefix, fallbackMaterialDebugName);
+  if (!isValid(out.material)) {
+    return Result<void, std::string>::makeError(
+        std::string("prepareSimpleImportedModelSceneAssets: failed to acquire "
+                    "material for '") +
+        std::string(sceneName) + "'");
+  }
   if (loadImportedLights) {
     loadImportedLightsForScene(sceneName, modelPath.string(),
                                out.fallbackLights);
@@ -227,7 +230,7 @@ Result<void, std::string> prepareSimpleImportedModelSceneAssets(
   return Result<void, std::string>::makeResult();
 }
 
-MaterialRef acquireImportedMaterialOrFallback(
+[[nodiscard]] MaterialRef acquireImportedMaterialOrFallback(
     ResourceManager &resources, std::string_view sceneName,
     std::string_view modelPath, ModelRef modelRef,
     std::string_view debugNamePrefix, std::string_view fallbackDebugName) {
@@ -256,6 +259,13 @@ MaterialRef acquireImportedMaterialOrFallback(
               "Failed to acquire %s fallback material: %s",
               std::string(sceneName).c_str(),
               fallbackMaterialResult.error().c_str());
+  if (fallbackMaterialResult.hasError()) {
+    NURI_LOG_ERROR("prepareSimpleImportedModelSceneAssets: failed to acquire "
+                   "fallback material for '%s': %s",
+                   std::string(sceneName).c_str(),
+                   fallbackMaterialResult.error().c_str());
+    return kInvalidMaterialRef;
+  }
   const MaterialRef fallbackMaterial = fallbackMaterialResult.value();
   resources.setModelMaterialForAllSources(modelRef, fallbackMaterial);
   return fallbackMaterial;

@@ -3879,14 +3879,10 @@ void ImGuiEditor::resetSceneUiState() {
 }
 
 std::optional<std::string> ImGuiEditor::takeSceneSelectionRequest() {
-  if (!impl_ ||
-      !impl_->sceneSelectionState.pendingSelectionRequest.has_value()) {
-    return std::nullopt;
-  }
-  const std::optional<std::string> result =
-      impl_->sceneSelectionState.pendingSelectionRequest;
-  impl_->sceneSelectionState.pendingSelectionRequest.reset();
-  return result;
+  return impl_
+             ? std::exchange(impl_->sceneSelectionState.pendingSelectionRequest,
+                             std::nullopt)
+             : std::nullopt;
 }
 
 bool *ImGuiEditor::gizmoControlsWindowOpenState() {

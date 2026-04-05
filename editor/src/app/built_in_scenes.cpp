@@ -169,9 +169,13 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
             -> Result<void, std::string> {
           ctx.runtime.configureStaticModelOpaqueSettings(
               glm::vec3(8.0f, 16.0f, 32.0f));
-          (void)ctx.runtime.addRequiredRenderable(
+          const RenderableId duckRenderable = ctx.runtime.addRequiredRenderable(
               duckAssets->model, duckAssets->material, glm::mat4(1.0f),
               "Failed to add duck renderable");
+          if (!isValid(duckRenderable)) {
+            return Result<void, std::string>::makeError(
+                "Failed to add duck renderable");
+          }
           Camera *camera = ctx.runtime.mainCamera();
           NURI_ASSERT(camera != nullptr, "Failed to get main camera");
           camera->setLookAt(glm::vec3(0.0f, 1.0f, -1.5f),
@@ -274,11 +278,6 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
           .importOptions = flipUvImport,
           .instanceName = "DamagedHelmet",
           .lodThresholds = glm::vec3(8.0f, 16.0f, 32.0f),
-          .configureRender =
-              [](EditorRuntime &runtime) {
-                runtime.configureStaticModelOpaqueSettings(
-                    glm::vec3(8.0f, 16.0f, 32.0f));
-              },
           .configureCamera =
               [](EditorRuntime &runtime, const ImportedPrefabSceneResources &,
                  const BoundingBox &bounds) {

@@ -120,6 +120,11 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
                     "Scene model record lookup failed"),
                 cameraState);
           }
+        } else {
+          NURI_LOG_WARNING(
+              "%s: camera framing skipped - no valid renderable in "
+              "prefab",
+              desc.info.label.c_str());
         }
 
         ctx.runtime.finalizeSceneLighting(assets->fallbackLights,
@@ -205,6 +210,8 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
         if (!state->sourcePath.empty()) {
           return Result<void, std::string>::makeResult();
         }
+        // StreamingSceneState::release observes ResourceManager through this
+        // pointer, and EditorRuntime outlives the shared scene state.
         state->resources = &ctx.runtime.resources();
         state->sourcePath = desc.sourcePath;
         auto materialResult = ctx.runtime.resources().acquireMaterial(
@@ -220,11 +227,14 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
         if (prefabResult.hasError()) {
           return prefabResult;
         }
-        queueScenePortableBakeIfNeeded(ctx.runtime, *state);
+        queueScenePortableBakeIfNeeded(ctx.runtime, state->prefab);
         return Result<void, std::string>::makeResult();
       },
       .activate = [desc, state](EditorSceneActivateContext &ctx)
           -> Result<void, std::string> {
+        if (state->loadFailed) {
+          return Result<void, std::string>::makeError(state->loadError);
+        }
         if (desc.configureRender) {
           desc.configureRender(ctx.runtime);
         }
@@ -257,7 +267,15 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
               return;
             }
             auto warmupResult = state->asyncLoad->resolveWarmup();
-            (void)warmupResult;
+            if (warmupResult.hasError()) {
+              NURI_LOG_ERROR("%s: async model warmup failed: %s",
+                             desc.info.label.c_str(),
+                             warmupResult.error().c_str());
+              state->loadFailed = true;
+              state->loadError = warmupResult.error();
+              state->asyncLoad.reset();
+              return;
+            }
 
             auto modelResult =
                 ctx.runtime.resources().acquireModel(ModelRequest{
@@ -275,17 +293,24 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
             ctx.runtime.resources().setModelMaterialForAllSources(
                 state->model, state->material);
 
+            const std::string sceneInstanceName =
+                desc.instanceName.empty() ? desc.info.label : desc.instanceName;
+            const std::string modelError =
+                "Model for " + sceneInstanceName + " is not loaded";
+            const std::string recordError =
+                sceneInstanceName + " model record lookup failed";
             const Model &model = ctx.runtime.requireLoadedModel(
-                state->model, "Niagara Bistro model is not loaded",
-                "Niagara Bistro model record lookup failed");
+                state->model, modelError.c_str(), recordError.c_str());
             const float scale = computeNiagaraBistroScale(model.bounds());
             state->baseModel = glm::scale(glm::mat4(1.0f), glm::vec3(scale));
             state->renderableId = ctx.runtime.instantiateImportedPrefabScene(
-                desc.instanceName, state->prefab, state->baseModel);
+                sceneInstanceName, state->prefab, state->baseModel);
             if (!isValid(state->renderableId)) {
+              const std::string addRenderableError =
+                  "Failed to add renderable for " + sceneInstanceName;
               state->renderableId = ctx.runtime.addRequiredRenderable(
                   state->model, state->material, state->baseModel,
-                  "Failed to add Niagara Bistro renderable");
+                  addRenderableError.c_str());
             }
             if (desc.configureCamera) {
               desc.configureCamera(ctx.runtime, *state);

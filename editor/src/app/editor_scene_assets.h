@@ -1,5 +1,10 @@
 #pragma once
 
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "nuri/app/editor_runtime.h"
 
 namespace nuri {

@@ -48,7 +48,13 @@ void EditorApplication::onDraw() {
   runtime_.draw();
   if (const auto requestedScene = runtime_.takeSceneSelectionRequest();
       requestedScene.has_value()) {
-    (void)scenes_.requestActivate(*requestedScene);
+    if (!scenes_.requestActivate(*requestedScene)) {
+      NURI_LOG_ERROR("EditorApplication::onDraw: invalid scene selection "
+                     "request '%s'",
+                     requestedScene->c_str());
+      NURI_ASSERT(false, "Failed to request scene activation for '%s'",
+                  requestedScene->c_str());
+    }
   }
 }
 
@@ -57,7 +63,7 @@ void EditorApplication::onResize(std::int32_t width, std::int32_t height) {
 }
 
 bool EditorApplication::onInput(const InputEvent &event) {
-  return runtime_.onInput(event) ? true : Application::onInput(event);
+  return runtime_.onInput(event) || Application::onInput(event);
 }
 
 void EditorApplication::onShutdown() {

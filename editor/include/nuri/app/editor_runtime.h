@@ -13,8 +13,14 @@
 #include "nuri/ui/editor_overlay_controller.h"
 #include "nuri/ui/editor_services.h"
 
+#include <cstdint>
 #include <limits>
+#include <memory>
+#include <memory_resource>
+#include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace nuri {
@@ -72,7 +78,7 @@ public:
   }
   [[nodiscard]] Camera *mainCamera();
   [[nodiscard]] const Camera *mainCamera() const;
-  [[nodiscard]] uint64_t nextSimulationFrameIndex() noexcept {
+  [[nodiscard]] uint64_t advanceSimulationFrameIndex() noexcept {
     return simulationFrameIndex_++;
   }
   [[nodiscard]] double timeSeconds() const;
@@ -157,6 +163,8 @@ private:
 
   Application &app_;
   const RuntimeConfig config_;
+  // EditorRuntime keeps cameraMemory_, sceneMemory_, and pipelineMemory_ as
+  // unsynchronized_pool_resource instances; they are main-thread-only.
   std::pmr::unsynchronized_pool_resource cameraMemory_;
   std::pmr::unsynchronized_pool_resource sceneMemory_;
   std::pmr::unsynchronized_pool_resource pipelineMemory_;
@@ -173,6 +181,7 @@ private:
   std::vector<EditorSceneSelectionOption> sceneSelectionOptions_{};
   uint64_t sceneSelectionVersion_ = std::numeric_limits<uint64_t>::max();
   std::unique_ptr<EditorOverlayController> editorOverlay_{};
+  // Non-owning observer; the render pipeline owns the EditorOverlayFeature.
   EditorOverlayFeature *editorRenderFeature_ = nullptr;
   CameraHandle mainCameraHandle_{};
   RenderSettings renderSettings_{};

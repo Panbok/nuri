@@ -10,6 +10,10 @@ class EditorApplication final : public Application {
 public:
   explicit EditorApplication(RuntimeConfig config);
   ~EditorApplication() override = default;
+  EditorApplication(const EditorApplication &) = delete;
+  EditorApplication &operator=(const EditorApplication &) = delete;
+  EditorApplication(EditorApplication &&) = delete;
+  EditorApplication &operator=(EditorApplication &&) = delete;
 
   void onInit() override;
   void onUpdate(double deltaTime) override;
