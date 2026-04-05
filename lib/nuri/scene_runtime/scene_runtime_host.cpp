@@ -2,6 +2,7 @@
 
 #include "nuri/scene_runtime/scene_runtime_host.h"
 
+#include "nuri/core/profiling.h"
 #include "nuri/sim/backends/animation_pose_simulation_backend.h"
 #include "nuri/sim/backends/simulation_backend.h"
 
@@ -24,14 +25,16 @@ SceneRuntimeHost::SceneRuntimeHost(std::pmr::memory_resource *memory)
 SceneRuntimeHost::~SceneRuntimeHost() = default;
 
 SimulationTickResult SceneRuntimeHost::tick(const SimulationTickInput &input) {
-  if (scene_ != nullptr) {
-    topologyVersion_ = scene_->topologyVersion();
-    transformVersion_ = scene_->transformVersion();
-    const bool bindingsChanged = bindings_.rebuild(scene_);
-    if (bindingsChanged) {
-      noteBindingMutation();
-      validateAllSimulationBindings();
-    }
+  NURI_PROFILER_FUNCTION();
+  if (scene_ == nullptr) {
+    lastTickResult_ = {};
+    return lastTickResult_;
+  }
+
+  refreshSceneBindingsIfNeeded();
+  if (registry_.liveCount() == 0u) {
+    lastTickResult_ = {};
+    return lastTickResult_;
   }
 
   gpuContext_.beginFrame(input.frameIndex);
@@ -363,6 +366,22 @@ void SceneRuntimeHost::noteSimulationMutation() noexcept {
 }
 
 void SceneRuntimeHost::noteBindingMutation() noexcept { ++bindingVersion_; }
+
+void SceneRuntimeHost::refreshSceneBindingsIfNeeded() {
+  const uint64_t currentTopologyVersion = scene_->topologyVersion();
+  const uint64_t currentTransformVersion = scene_->transformVersion();
+  if (currentTopologyVersion == topologyVersion_) {
+    transformVersion_ = currentTransformVersion;
+    return;
+  }
+
+  topologyVersion_ = currentTopologyVersion;
+  transformVersion_ = currentTransformVersion;
+  if (bindings_.rebuild(scene_)) {
+    noteBindingMutation();
+    validateAllSimulationBindings();
+  }
+}
 
 void SceneRuntimeHost::flushWritebacks() {
   if (writebacks_.empty()) {

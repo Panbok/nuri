@@ -122,6 +122,7 @@ private:
   void faultSimulation(SimulationHandle handle, std::string_view reason);
   void noteSimulationMutation() noexcept;
   void noteBindingMutation() noexcept;
+  void refreshSceneBindingsIfNeeded();
   void flushWritebacks();
 
   [[nodiscard]] SimulationRegistry &registry() noexcept { return registry_; }
