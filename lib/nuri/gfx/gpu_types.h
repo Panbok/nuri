@@ -272,11 +272,10 @@ struct GeometryAllocationView {
 struct GeometryPoolConfig {
   size_t vertexChunkSizeBytes = 64u * 1024u * 1024u;
   size_t indexChunkSizeBytes = 32u * 1024u * 1024u;
-  uint64_t compactionIntervalFrames = 300;
+  uint64_t compactionCooldownFrames = 300;
   float compactionFragmentationThreshold = 0.3f;
-  // Interactive rendering should not pay synchronous repack/copy stalls
-  // unless a caller explicitly opts into compaction.
-  bool enableCompaction = false;
+  size_t compactionMinSavingsBytes = 16u * 1024u * 1024u;
+  size_t compactionCopyBudgetBytesPerFrame = 32u * 1024u * 1024u;
 };
 
 struct GPUDeviceCreateDesc {

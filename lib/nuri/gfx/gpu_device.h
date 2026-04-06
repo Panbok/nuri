@@ -135,8 +135,9 @@ public:
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
                    std::string_view debugName = {}) = 0;
   virtual void releaseGeometry(GeometryAllocationHandle h) = 0;
-  virtual Result<bool, std::string>
-  copyBufferRegions(std::span<const BufferCopyRegion> regions) = 0;
+  virtual Result<SubmissionHandle, std::string>
+  submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,
+                               std::string_view debugName = {}) = 0;
 
   // Data updates
   virtual Result<bool, std::string>

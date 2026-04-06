@@ -2844,11 +2844,12 @@ LvkGPUDevice::readTexture(TextureHandle texture,
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
+Result<SubmissionHandle, std::string>
+LvkGPUDevice::submitBackgroundBufferCopies(
+    std::span<const BufferCopyRegion> regions, std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   if (regions.empty()) {
-    return Result<bool, std::string>::makeResult(true);
+    return Result<SubmissionHandle, std::string>::makeResult({});
   }
 
   // Validate all regions before acquiring a command buffer so we never
@@ -2860,8 +2861,9 @@ LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
     }
     if (!impl_->buffers.isValid(region.srcBuffer) ||
         !impl_->buffers.isValid(region.dstBuffer)) {
-      return Result<bool, std::string>::makeError(
-          "copyBufferRegions: invalid source or destination buffer");
+      return Result<SubmissionHandle, std::string>::makeError(
+          "submitBackgroundBufferCopies: invalid source or destination "
+          "buffer");
     }
 
     const lvk::BufferHandle src = impl_->buffers.getLvkHandle(region.srcBuffer);
@@ -2872,23 +2874,26 @@ LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
         static_cast<size_t>(lvk::getBufferSize(impl_->context.get(), dst));
     if (region.srcOffset > srcSize ||
         region.size > srcSize - region.srcOffset) {
-      return Result<bool, std::string>::makeError(
-          "copyBufferRegions: source copy range is out of bounds");
+      return Result<SubmissionHandle, std::string>::makeError(
+          "submitBackgroundBufferCopies: source copy range is out of bounds");
     }
     if (region.dstOffset > dstSize ||
         region.size > dstSize - region.dstOffset) {
-      return Result<bool, std::string>::makeError(
-          "copyBufferRegions: destination copy range is out of bounds");
+      return Result<SubmissionHandle, std::string>::makeError(
+          "submitBackgroundBufferCopies: destination copy range is out of "
+          "bounds");
     }
     ++copyCount;
   }
 
   if (copyCount == 0) {
-    return Result<bool, std::string>::makeResult(true);
+    return Result<SubmissionHandle, std::string>::makeResult({});
   }
 
   std::lock_guard immediateLock(impl_->contextImmediateMutex);
   lvk::ICommandBuffer &commandBuffer = impl_->context->acquireCommandBuffer();
+  const bool debugLabelPushed =
+      pushDebugLabel(commandBuffer, debugName, NURI_PROFILER_COLOR_CMD_COPY);
   for (const BufferCopyRegion &region : regions) {
     if (region.size == 0) {
       continue;
@@ -2898,12 +2903,13 @@ LvkGPUDevice::copyBufferRegions(std::span<const BufferCopyRegion> regions) {
     commandBuffer.cmdCopyBuffer(src, dst, region.srcOffset, region.dstOffset,
                                 region.size);
   }
+  if (debugLabelPushed) {
+    commandBuffer.cmdPopDebugGroupLabel();
+  }
 
-  // TODO: move this to an async pre-pass copy path once frame graph support
-  // exists.
   const lvk::SubmitHandle submitHandle = impl_->context->submit(commandBuffer);
-  impl_->context->wait(submitHandle);
-  return Result<bool, std::string>::makeResult(true);
+  return Result<SubmissionHandle, std::string>::makeResult(
+      toNuriSubmissionHandle(submitHandle));
 }
 
 void LvkGPUDevice::waitIdle() {

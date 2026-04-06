@@ -110,8 +110,9 @@ public:
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
                    std::string_view debugName = {}) override;
   void releaseGeometry(GeometryAllocationHandle h) override;
-  Result<bool, std::string>
-  copyBufferRegions(std::span<const BufferCopyRegion> regions) override;
+  Result<SubmissionHandle, std::string>
+  submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,
+                               std::string_view debugName = {}) override;
 
   // Data updates
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
