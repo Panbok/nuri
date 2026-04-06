@@ -1,5 +1,5 @@
-#include "common.sp"
 #include "BRDF.sp"
+#include "common.sp"
 #include "material_inputs.sp"
 #include "material_lighting.sp"
 
@@ -8,7 +8,8 @@ layout(location = 0) in PerVertex vtx;
 layout(location = 0) out vec4 out_FragColor;
 
 void main() {
-  const MaterialGpuData material = pc.materialBuffer.materials[pc.materialIndex];
+  const MaterialGpuData material =
+      pc.materialBuffer.materials[pc.materialIndex];
   const uint alphaMode = material.materialFlags.x;
 
   ShadedMaterial sm = evaluateMaterial(material, vtx);
@@ -19,19 +20,18 @@ void main() {
   }
 
   // Direct lighting ---------------------------------------------------
-  vec3 directDiffuse           = vec3(0.0);
-  vec3 directSpecular          = vec3(0.0);
-  vec3 directSheen             = vec3(0.0);
+  vec3 directDiffuse = vec3(0.0);
+  vec3 directSpecular = vec3(0.0);
+  vec3 directSheen = vec3(0.0);
   vec3 clearcoatDirectLighting = vec3(0.0);
 
   for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
     DirectionalLightGpuData light =
         pc.frameData.directionalLightBuffer.lights[i];
     vec3 l = normalize(-directionalLightDirection(light));
-    vec3 lr =
-        directionalLightColor(light) * directionalLightIlluminance(light);
-    accumulateSurfaceLightContribution(lr, l, sm,
-        directDiffuse, directSpecular, directSheen, clearcoatDirectLighting);
+    vec3 lr = directionalLightColor(light) * directionalLightIlluminance(light);
+    accumulateSurfaceLightContribution(lr, l, sm, directDiffuse, directSpecular,
+                                       directSheen, clearcoatDirectLighting);
   }
 
   for (uint i = 0u; i < pc.frameData.localLightCount; ++i) {
@@ -41,7 +41,7 @@ void main() {
     if (dsq <= kEpsilon) {
       continue;
     }
-    vec3  l   = ptl * inversesqrt(dsq);
+    vec3 l = ptl * inversesqrt(dsq);
     float att = punctualRangeAttenuation(dsq, localLightRange(light));
     if (localLightType(light) == kLocalLightTypeSpot) {
       att *= spotAngularAttenuation(localLightDirection(light), ptl,
@@ -51,10 +51,9 @@ void main() {
     if (att <= 0.0) {
       continue;
     }
-    vec3 lr =
-        localLightColor(light) * localLightIntensity(light) * att;
-    accumulateSurfaceLightContribution(lr, l, sm,
-        directDiffuse, directSpecular, directSheen, clearcoatDirectLighting);
+    vec3 lr = localLightColor(light) * localLightIntensity(light) * att;
+    accumulateSurfaceLightContribution(lr, l, sm, directDiffuse, directSpecular,
+                                       directSheen, clearcoatDirectLighting);
   }
 
   // IBL ---------------------------------------------------------------
@@ -71,8 +70,7 @@ void main() {
 
   // Composition -------------------------------------------------------
   vec3 directLighting =
-      sm.clearcoatAttenuation *
-          (directSheen + directDiffuse + directSpecular) +
+      sm.clearcoatAttenuation * (directSheen + directDiffuse + directSpecular) +
       clearcoatDirectLighting;
   vec3 color =
       directLighting + indirectLighting + sm.clearcoatAttenuation * sm.emissive;

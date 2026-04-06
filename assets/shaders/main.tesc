@@ -47,9 +47,12 @@ void main() {
   const vec3 p2 = inWorldPos[2];
   const vec3 cameraPos = pc.frameData.cameraPos.xyz;
 
-  const float outer0 = distanceToTessFactor(length(cameraPos - 0.5 * (p1 + p2)));
-  const float outer1 = distanceToTessFactor(length(cameraPos - 0.5 * (p2 + p0)));
-  const float outer2 = distanceToTessFactor(length(cameraPos - 0.5 * (p0 + p1)));
+  const float outer0 =
+      distanceToTessFactor(length(cameraPos - 0.5 * (p1 + p2)));
+  const float outer1 =
+      distanceToTessFactor(length(cameraPos - 0.5 * (p2 + p0)));
+  const float outer2 =
+      distanceToTessFactor(length(cameraPos - 0.5 * (p0 + p1)));
   gl_TessLevelOuter[0] = outer0;
   gl_TessLevelOuter[1] = outer1;
   gl_TessLevelOuter[2] = outer2;
