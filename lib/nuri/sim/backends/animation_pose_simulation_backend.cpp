@@ -594,6 +594,19 @@ Result<bool, std::string> appendAnimatedRenderableBinding(
 
   const ScenePrefabRenderable &prefabRenderable =
       instance.prefab.renderables[prefabRenderableIndex];
+  const auto duplicateBindingIt = std::find_if(
+      instance.renderableBindings.begin(), instance.renderableBindings.end(),
+      [runtimeRenderableIndex](
+          const AnimationRenderableBindingGpu &existingBinding) {
+        return existingBinding.runtimeRenderableIndex ==
+               *runtimeRenderableIndex;
+      });
+  if (duplicateBindingIt != instance.renderableBindings.end()) {
+    return Result<bool, std::string>::makeError(
+        "AnimationPoseSimulationBackend: duplicate runtime renderable index "
+        "in scatter bindings");
+  }
+
   AnimationRenderableBindingGpu binding{};
   binding.runtimeRenderableIndex = *runtimeRenderableIndex;
   binding.nodeIndex = prefabRenderable.nodeIndex;

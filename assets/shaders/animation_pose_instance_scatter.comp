@@ -35,6 +35,45 @@ layout(push_constant) uniform PushConstants {
 }
 pc;
 
+const float kOrthonormalEpsilon = 1.0e-4;
+const float kDeterminantEpsilon = 1.0e-8;
+
+mat3 computeNormalMatrix(mat4 model) {
+  const mat3 model3 = mat3(model);
+  const vec3 col0 = model3[0];
+  const vec3 col1 = model3[1];
+  const vec3 col2 = model3[2];
+  const float len0Sq = dot(col0, col0);
+  const float len1Sq = dot(col1, col1);
+  const float len2Sq = dot(col2, col2);
+  const float maxLenSq = max(max(len0Sq, len1Sq), len2Sq);
+  const float orthoTolerance = max(1.0, maxLenSq) * kOrthonormalEpsilon;
+
+  const bool orthogonal = abs(dot(col0, col1)) <= orthoTolerance &&
+                          abs(dot(col0, col2)) <= orthoTolerance &&
+                          abs(dot(col1, col2)) <= orthoTolerance;
+  const bool orthonormal = orthogonal &&
+                           abs(len0Sq - 1.0) <= kOrthonormalEpsilon &&
+                           abs(len1Sq - 1.0) <= kOrthonormalEpsilon &&
+                           abs(len2Sq - 1.0) <= kOrthonormalEpsilon;
+  if (orthonormal) {
+    return model3;
+  }
+
+  const bool uniformScale = orthogonal &&
+                            abs(len0Sq - len1Sq) <= orthoTolerance &&
+                            abs(len0Sq - len2Sq) <= orthoTolerance;
+  if (uniformScale && len0Sq > kDeterminantEpsilon) {
+    return model3 / len0Sq;
+  }
+
+  const float det = determinant(model3);
+  if (abs(det) <= kDeterminantEpsilon) {
+    return mat3(1.0);
+  }
+  return transpose(inverse(model3));
+}
+
 void main() {
   uint index = gl_GlobalInvocationID.x;
   if (index >= pc.bindingCount) {
@@ -42,13 +81,11 @@ void main() {
   }
   AnimationRenderableBinding binding = pc.renderableBindings.values[index];
   mat4 model = pc.worldMatrices.values[binding.nodeIndex];
-  mat3 normalMatrix = transpose(inverse(mat3(model)));
-  pc.instanceMatrices.instances[binding.runtimeRenderableIndex].modelMatrix =
-      model;
-  pc.instanceMatrices.instances[binding.runtimeRenderableIndex].normalMatCol0 =
-      vec4(normalMatrix[0], 0.0);
-  pc.instanceMatrices.instances[binding.runtimeRenderableIndex].normalMatCol1 =
-      vec4(normalMatrix[1], 0.0);
-  pc.instanceMatrices.instances[binding.runtimeRenderableIndex].normalMatCol2 =
-      vec4(normalMatrix[2], 0.0);
+  mat3 normalMatrix = computeNormalMatrix(model);
+  InstanceData localInstance;
+  localInstance.modelMatrix = model;
+  localInstance.normalMatCol0 = vec4(normalMatrix[0], 0.0);
+  localInstance.normalMatCol1 = vec4(normalMatrix[1], 0.0);
+  localInstance.normalMatCol2 = vec4(normalMatrix[2], 0.0);
+  pc.instanceMatrices.instances[binding.runtimeRenderableIndex] = localInstance;
 }

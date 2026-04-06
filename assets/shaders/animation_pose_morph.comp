@@ -36,6 +36,8 @@ layout(push_constant) uniform PushConstants {
 }
 pc;
 
+const float kDegenerateEpsilon = 1.0e-6;
+
 void main() {
   uint vertexIndex = gl_GlobalInvocationID.x;
   if (vertexIndex >= pc.vertexCount) {
@@ -52,7 +54,7 @@ void main() {
   uint activeMorphCount = min(pc.morphTargetCount, pc.weightCount);
   for (uint morphIndex = 0u; morphIndex < activeMorphCount; ++morphIndex) {
     float weight = pc.weights.values[pc.weightOffset + morphIndex];
-    if (abs(weight) <= 1.0e-6) {
+    if (abs(weight) <= kDegenerateEpsilon) {
       continue;
     }
     uint deltaIndex = morphIndex * pc.vertexCount + vertexIndex;
@@ -62,12 +64,12 @@ void main() {
     tangent.xyz += delta.tangentDelta.xyz * weight;
   }
 
-  if (length(normal) > 1.0e-6) {
+  if (length(normal) > kDegenerateEpsilon) {
     normal = normalize(normal);
   } else {
     normal = vec3(0.0, 1.0, 0.0);
   }
-  if (length(tangent.xyz) > 1.0e-6) {
+  if (length(tangent.xyz) > kDegenerateEpsilon) {
     tangent.xyz = normalize(tangent.xyz);
   } else {
     tangent.xyz = vec3(1.0, 0.0, 0.0);

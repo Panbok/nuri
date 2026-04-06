@@ -24,17 +24,24 @@ layout(push_constant) uniform PushConstants {
 }
 pc;
 
+shared mat4 sharedRenderableInverse;
+
 void main() {
+  if (gl_LocalInvocationIndex == 0u) {
+    sharedRenderableInverse =
+        inverse(pc.worldMatrices.values[pc.renderableNodeIndex]);
+  }
+  barrier();
+
   uint jointIndex = gl_GlobalInvocationID.x;
   if (jointIndex >= pc.jointCount) {
     return;
   }
 
-  mat4 renderableWorld = pc.worldMatrices.values[pc.renderableNodeIndex];
-  mat4 renderableInverse = inverse(renderableWorld);
   uint jointNodeIndex = pc.jointNodeIndices.values[jointIndex];
   mat4 jointWorld = pc.worldMatrices.values[jointNodeIndex];
   mat4 inverseBind = pc.inverseBindMatrices.values[jointIndex];
 
-  pc.palette.values[jointIndex] = renderableInverse * jointWorld * inverseBind;
+  pc.palette.values[jointIndex] =
+      sharedRenderableInverse * jointWorld * inverseBind;
 }

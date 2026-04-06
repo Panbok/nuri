@@ -70,18 +70,24 @@ SampleWindow findSampleWindow(AnimationChannel channel) {
     uint lastIndex = channel.keyCount - 1u;
     return SampleWindow(lastIndex, lastIndex, 0.0);
   }
-  for (uint i = 1u; i < channel.keyCount; ++i) {
-    float rightTime = pc.keyTimes.values[channel.keyOffset + i];
-    if (pc.sampleTimeSeconds <= rightTime) {
-      float leftTime = pc.keyTimes.values[channel.keyOffset + i - 1u];
-      float duration = rightTime - leftTime;
-      float t =
-          duration > 0.0 ? (pc.sampleTimeSeconds - leftTime) / duration : 0.0;
-      return SampleWindow(i - 1u, i, clamp(t, 0.0, 1.0));
+
+  uint leftIndex = 0u;
+  uint rightIndex = channel.keyCount - 1u;
+  while (leftIndex + 1u < rightIndex) {
+    uint mid = leftIndex + ((rightIndex - leftIndex) >> 1u);
+    float midTime = pc.keyTimes.values[channel.keyOffset + mid];
+    if (pc.sampleTimeSeconds <= midTime) {
+      rightIndex = mid;
+    } else {
+      leftIndex = mid;
     }
   }
-  uint lastIndex = channel.keyCount - 1u;
-  return SampleWindow(lastIndex, lastIndex, 0.0);
+
+  float leftTime = pc.keyTimes.values[channel.keyOffset + leftIndex];
+  float rightTime = pc.keyTimes.values[channel.keyOffset + rightIndex];
+  float duration = rightTime - leftTime;
+  float t = duration > 0.0 ? (pc.sampleTimeSeconds - leftTime) / duration : 0.0;
+  return SampleWindow(leftIndex, rightIndex, clamp(t, 0.0, 1.0));
 }
 
 float sampleComponent(AnimationChannel channel, SampleWindow window,

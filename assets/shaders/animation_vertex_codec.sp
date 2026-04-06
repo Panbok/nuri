@@ -26,35 +26,39 @@ vec2 decodePackedUv1(PackedVertex vertex) { return unpackHalf2x16(vertex.word8);
 
 vec3 decodePackedNormal(PackedVertex vertex) {
   const vec2 normalXY = unpackSnorm2x16Custom(vertex.word4);
-  const vec2 normalZ = unpackSnorm2x16Custom(vertex.word5);
-  return normalize(vec3(normalXY, normalZ.x));
+  const vec2 normalZHandedness = unpackSnorm2x16Custom(vertex.word5);
+  return normalize(vec3(normalXY, normalZHandedness.x));
 }
 
 vec4 decodePackedTangent(PackedVertex vertex) {
   const vec2 tangentXY = unpackSnorm2x16Custom(vertex.word6);
-  const vec2 tangentZW = unpackSnorm2x16Custom(vertex.word7);
-  vec3 tangent = vec3(tangentXY, tangentZW.x);
+  const vec2 tangentZ = unpackSnorm2x16Custom(vertex.word7);
+  const vec2 normalZHandedness = unpackSnorm2x16Custom(vertex.word5);
+  vec3 tangent = vec3(tangentXY, tangentZ.x);
   const float tangentLen = length(tangent);
   if (tangentLen > 1.0e-6) {
     tangent /= tangentLen;
   } else {
     tangent = vec3(1.0, 0.0, 0.0);
   }
-  const float handedness = tangentZW.y >= 0.0 ? 1.0 : -1.0;
+  const float handedness = normalZHandedness.y >= 0.0 ? 1.0 : -1.0;
   return vec4(tangent, handedness);
 }
 
+// normal and tangent.xyz are expected to be unit length and within [-1, 1];
+// tangent.w is expected to carry only handedness sign.
 PackedVertex encodePackedVertex(vec3 position, vec3 normal, vec4 tangent,
                                 vec2 uv0, vec2 uv1) {
   PackedVertex packed;
+  const float tangentHandedness = tangent.w >= 0.0 ? 1.0 : -1.0;
   packed.word0 = floatBitsToUint(position.x);
   packed.word1 = floatBitsToUint(position.y);
   packed.word2 = floatBitsToUint(position.z);
   packed.word3 = packHalf2x16(uv0);
   packed.word4 = packSnorm2x16(vec2(normal.x, normal.y));
-  packed.word5 = packSnorm2x16(vec2(normal.z, 0.0));
+  packed.word5 = packSnorm2x16(vec2(normal.z, tangentHandedness));
   packed.word6 = packSnorm2x16(vec2(tangent.x, tangent.y));
-  packed.word7 = packSnorm2x16(vec2(tangent.z, tangent.w));
+  packed.word7 = packSnorm2x16(vec2(tangent.z, 0.0));
   packed.word8 = packHalf2x16(uv1);
   return packed;
 }

@@ -98,15 +98,16 @@ PackedVertexWords packVertex(const Vertex &vertex) {
   if (glm::dot(tangentXYZ, tangentXYZ) > 0.0f) {
     tangent = glm::vec4(glm::normalize(tangentXYZ), tangent.w);
   }
+  const float tangentHandedness = tangent.w >= 0.0f ? 1.0f : -1.0f;
 
   packed.word0 = std::bit_cast<uint32_t>(vertex.position.x);
   packed.word1 = std::bit_cast<uint32_t>(vertex.position.y);
   packed.word2 = std::bit_cast<uint32_t>(vertex.position.z);
   packed.word3 = glm::packHalf2x16(vertex.uv);
   packed.word4 = packSnorm2x16Custom(glm::vec2(normal.x, normal.y));
-  packed.word5 = packSnorm2x16Custom(glm::vec2(normal.z, 0.0f));
+  packed.word5 = packSnorm2x16Custom(glm::vec2(normal.z, tangentHandedness));
   packed.word6 = packSnorm2x16Custom(glm::vec2(tangent.x, tangent.y));
-  packed.word7 = packSnorm2x16Custom(glm::vec2(tangent.z, tangent.w));
+  packed.word7 = packSnorm2x16Custom(glm::vec2(tangent.z, 0.0f));
   packed.word8 = glm::packHalf2x16(vertex.uv1);
 
   return packed;

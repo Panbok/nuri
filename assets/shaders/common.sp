@@ -37,8 +37,8 @@ struct PackedVertex {
   // CPU packs each vertex into 9 x 32-bit words:
   // 0..2 = position.xyz as raw float bits
   // 3    = uv0 as half2
-  // 4..5 = normal packed as snorm16 pairs (xy, then z + pad)
-  // 6..7 = tangent packed as snorm16 pairs (xy, then zw)
+  // 4..5 = normal packed as snorm16 pairs (xy, then z + tangent handedness)
+  // 6..7 = tangent packed as snorm16 pairs (xy, then z + pad)
   // 8    = uv1 as half2
   // Decode uses uintBitsToFloat/unpackHalf2x16/custom snorm16 unpack.
   uint word0;
@@ -342,26 +342,27 @@ float spotAngularAttenuation(vec3 lightDirection, vec3 pointToLight,
 
 vec3 decodePackedNormal(PackedVertex vertex) {
   const vec2 normalXY = unpackSnorm2x16Custom(vertex.word4);
-  const vec2 normalZ = unpackSnorm2x16Custom(vertex.word5);
-  return normalize(vec3(normalXY, normalZ.x));
+  const vec2 normalZHandedness = unpackSnorm2x16Custom(vertex.word5);
+  return normalize(vec3(normalXY, normalZHandedness.x));
 }
 
-// Tangent data is encoded in word6/word7 of PackedVertex but is intentionally
-// not used by the current shading pipeline.  Screen-space derivative-based TBN
-// (cotangentFrame) is preferred because it avoids dependence on imported
-// tangent sign conventions.  This decode function is retained for format
-// documentation purposes.
+// Tangent xyz is encoded in word6/word7.x and handedness shares word5.y.
+// Tangents are intentionally not used by the current shading pipeline.
+// Screen-space derivative-based TBN (cotangentFrame) is preferred because it
+// avoids dependence on imported tangent sign conventions. This decode function
+// is retained for format documentation purposes.
 vec4 decodePackedTangent(PackedVertex vertex) {
   const vec2 tangentXY = unpackSnorm2x16Custom(vertex.word6);
-  const vec2 tangentZW = unpackSnorm2x16Custom(vertex.word7);
-  vec3 tangent = vec3(tangentXY, tangentZW.x);
+  const vec2 tangentZ = unpackSnorm2x16Custom(vertex.word7);
+  const vec2 normalZHandedness = unpackSnorm2x16Custom(vertex.word5);
+  vec3 tangent = vec3(tangentXY, tangentZ.x);
   const float tangentLen = length(tangent);
   if (tangentLen > 1.0e-6) {
     tangent /= tangentLen;
   } else {
     tangent = vec3(1.0, 0.0, 0.0);
   }
-  float handedness = tangentZW.y >= 0.0 ? 1.0 : -1.0;
+  float handedness = normalZHandedness.y >= 0.0 ? 1.0 : -1.0;
   return vec4(tangent, handedness);
 }
 

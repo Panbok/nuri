@@ -948,7 +948,7 @@ Result<bool, std::string> GeometryPool::beginFrame(uint64_t frameIndex) {
   reclaimRetiredChunks(indexChunks_, indexChunkSlots_);
   NURI_PROFILER_ZONE_END();
 
-  if (!compactionJob_.active() && shouldStartCompaction()) {
+  if (shouldStartCompaction()) {
     auto startResult = startCompactionPlanning();
     if (startResult.hasError()) {
       return startResult;
