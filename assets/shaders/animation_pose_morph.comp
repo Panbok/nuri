@@ -1,0 +1,78 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "animation_vertex_codec.sp"
+
+layout(std430, buffer_reference) readonly buffer PackedVertexBuffer {
+  PackedVertex vertices[];
+};
+
+struct PackedMorphDeltaGpu {
+  vec4 positionDelta;
+  vec4 normalDelta;
+  vec4 tangentDelta;
+};
+
+layout(std430, buffer_reference) readonly buffer MorphDeltaBuffer {
+  PackedMorphDeltaGpu values[];
+};
+
+layout(std430, buffer_reference) readonly buffer FloatBuffer {
+  float values[];
+};
+
+layout(std430, buffer_reference) buffer PackedVertexBufferRw {
+  PackedVertex vertices[];
+};
+
+layout(push_constant) uniform PushConstants {
+  PackedVertexBuffer sourceVertices;
+  PackedVertexBufferRw outputVertices;
+  MorphDeltaBuffer morphDeltas;
+  FloatBuffer weights;
+  uint weightOffset;
+  uint weightCount;
+  uint morphTargetCount;
+  uint vertexCount;
+}
+pc;
+
+void main() {
+  uint vertexIndex = gl_GlobalInvocationID.x;
+  if (vertexIndex >= pc.vertexCount) {
+    return;
+  }
+
+  PackedVertex source = pc.sourceVertices.vertices[vertexIndex];
+  vec3 position = decodePackedPosition(source);
+  vec3 normal = decodePackedNormal(source);
+  vec4 tangent = decodePackedTangent(source);
+  vec2 uv0 = decodePackedUv(source);
+  vec2 uv1 = decodePackedUv1(source);
+
+  uint activeMorphCount = min(pc.morphTargetCount, pc.weightCount);
+  for (uint morphIndex = 0u; morphIndex < activeMorphCount; ++morphIndex) {
+    float weight = pc.weights.values[pc.weightOffset + morphIndex];
+    if (abs(weight) <= 1.0e-6) {
+      continue;
+    }
+    uint deltaIndex = morphIndex * pc.vertexCount + vertexIndex;
+    PackedMorphDeltaGpu delta = pc.morphDeltas.values[deltaIndex];
+    position += delta.positionDelta.xyz * weight;
+    normal += delta.normalDelta.xyz * weight;
+    tangent.xyz += delta.tangentDelta.xyz * weight;
+  }
+
+  if (length(normal) > 1.0e-6) {
+    normal = normalize(normal);
+  } else {
+    normal = vec3(0.0, 1.0, 0.0);
+  }
+  if (length(tangent.xyz) > 1.0e-6) {
+    tangent.xyz = normalize(tangent.xyz);
+  } else {
+    tangent.xyz = vec3(1.0, 0.0, 0.0);
+  }
+  tangent.w = tangent.w >= 0.0 ? 1.0 : -1.0;
+  pc.outputVertices.vertices[vertexIndex] =
+      encodePackedVertex(position, normal, tangent, uv0, uv1);
+}

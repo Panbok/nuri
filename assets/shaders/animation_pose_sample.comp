@@ -1,0 +1,215 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const uint kAnimationTargetTranslation = 0u;
+const uint kAnimationTargetRotation = 1u;
+const uint kAnimationTargetScale = 2u;
+const uint kAnimationTargetWeights = 3u;
+const uint kAnimationInterpolationStep = 0u;
+const uint kAnimationInterpolationLinear = 1u;
+const uint kAnimationInterpolationCubic = 2u;
+
+struct AnimationNodeState {
+  vec4 translation;
+  vec4 rotation;
+  vec4 scale;
+};
+
+struct AnimationChannel {
+  uint keyOffset;
+  uint valueOffset;
+  uint keyCount;
+  uint valueArity;
+  uint targetNodeIndex;
+  uint path;
+  uint interpolation;
+  uint targetWeightOffset;
+};
+
+layout(std430, buffer_reference) readonly buffer AnimationChannelBuffer {
+  AnimationChannel values[];
+};
+
+layout(std430, buffer_reference) readonly buffer FloatBuffer {
+  float values[];
+};
+
+layout(std430, buffer_reference) buffer AnimationNodeStateBuffer {
+  AnimationNodeState values[];
+};
+
+layout(std430, buffer_reference) buffer AnimationWeightBuffer {
+  float values[];
+};
+
+layout(push_constant) uniform PushConstants {
+  AnimationChannelBuffer channels;
+  FloatBuffer keyTimes;
+  FloatBuffer curveValues;
+  AnimationNodeStateBuffer nodeStates;
+  AnimationWeightBuffer sampledWeights;
+  float sampleTimeSeconds;
+  uint channelCount;
+  uint reserved;
+}
+pc;
+
+struct SampleWindow {
+  uint leftIndex;
+  uint rightIndex;
+  float t;
+};
+
+SampleWindow findSampleWindow(AnimationChannel channel) {
+  if (channel.keyCount == 0u ||
+      pc.sampleTimeSeconds <= pc.keyTimes.values[channel.keyOffset]) {
+    return SampleWindow(0u, 0u, 0.0);
+  }
+  if (channel.keyCount == 1u ||
+      pc.sampleTimeSeconds >=
+          pc.keyTimes.values[channel.keyOffset + channel.keyCount - 1u]) {
+    uint lastIndex = channel.keyCount - 1u;
+    return SampleWindow(lastIndex, lastIndex, 0.0);
+  }
+  for (uint i = 1u; i < channel.keyCount; ++i) {
+    float rightTime = pc.keyTimes.values[channel.keyOffset + i];
+    if (pc.sampleTimeSeconds <= rightTime) {
+      float leftTime = pc.keyTimes.values[channel.keyOffset + i - 1u];
+      float duration = rightTime - leftTime;
+      float t =
+          duration > 0.0 ? (pc.sampleTimeSeconds - leftTime) / duration : 0.0;
+      return SampleWindow(i - 1u, i, clamp(t, 0.0, 1.0));
+    }
+  }
+  uint lastIndex = channel.keyCount - 1u;
+  return SampleWindow(lastIndex, lastIndex, 0.0);
+}
+
+float sampleComponent(AnimationChannel channel, SampleWindow window,
+                      uint component) {
+  if (window.leftIndex == window.rightIndex) {
+    if (channel.interpolation == kAnimationInterpolationCubic) {
+      uint base = channel.valueOffset +
+                  window.leftIndex * channel.valueArity * 3u +
+                  channel.valueArity + component;
+      return pc.curveValues.values[base];
+    }
+    return pc.curveValues
+        .values[channel.valueOffset + window.leftIndex * channel.valueArity +
+                component];
+  }
+
+  if (channel.interpolation == kAnimationInterpolationStep) {
+    return pc.curveValues
+        .values[channel.valueOffset + window.leftIndex * channel.valueArity +
+                component];
+  }
+  if (channel.interpolation == kAnimationInterpolationLinear) {
+    uint leftBase =
+        channel.valueOffset + window.leftIndex * channel.valueArity + component;
+    uint rightBase = channel.valueOffset +
+                     window.rightIndex * channel.valueArity + component;
+    return mix(pc.curveValues.values[leftBase],
+               pc.curveValues.values[rightBase], window.t);
+  }
+
+  uint leftBase =
+      channel.valueOffset + window.leftIndex * channel.valueArity * 3u;
+  uint rightBase =
+      channel.valueOffset + window.rightIndex * channel.valueArity * 3u;
+  float leftTime = pc.keyTimes.values[channel.keyOffset + window.leftIndex];
+  float rightTime = pc.keyTimes.values[channel.keyOffset + window.rightIndex];
+  float deltaTime = rightTime - leftTime;
+  float t = window.t;
+  float t2 = t * t;
+  float t3 = t2 * t;
+  float h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+  float h10 = t3 - 2.0 * t2 + t;
+  float h01 = -2.0 * t3 + 3.0 * t2;
+  float h11 = t3 - t2;
+  float value0 =
+      pc.curveValues.values[leftBase + channel.valueArity + component];
+  float outTangent0 =
+      pc.curveValues.values[leftBase + channel.valueArity * 2u + component];
+  float value1 =
+      pc.curveValues.values[rightBase + channel.valueArity + component];
+  float inTangent1 = pc.curveValues.values[rightBase + component];
+  return h00 * value0 + h10 * deltaTime * outTangent0 + h01 * value1 +
+         h11 * deltaTime * inTangent1;
+}
+
+vec4 readQuaternionValue(AnimationChannel channel, uint keyIndex) {
+  uint base = channel.valueOffset + keyIndex * channel.valueArity;
+  if (channel.interpolation == kAnimationInterpolationCubic) {
+    base = channel.valueOffset + keyIndex * channel.valueArity * 3u +
+           channel.valueArity;
+  }
+  vec4 value =
+      vec4(pc.curveValues.values[base + 0u], pc.curveValues.values[base + 1u],
+           pc.curveValues.values[base + 2u], pc.curveValues.values[base + 3u]);
+  return normalize(value);
+}
+
+vec4 sampleRotation(AnimationChannel channel, SampleWindow window) {
+  if (window.leftIndex == window.rightIndex ||
+      channel.interpolation == kAnimationInterpolationStep ||
+      channel.interpolation == kAnimationInterpolationCubic) {
+    return readQuaternionValue(channel, window.leftIndex);
+  }
+
+  vec4 leftQuat = readQuaternionValue(channel, window.leftIndex);
+  vec4 rightQuat = readQuaternionValue(channel, window.rightIndex);
+  float cosTheta = dot(leftQuat, rightQuat);
+  if (cosTheta < 0.0) {
+    rightQuat = -rightQuat;
+    cosTheta = -cosTheta;
+  }
+  cosTheta = clamp(cosTheta, -1.0, 1.0);
+  if (cosTheta > 0.9995) {
+    return normalize(mix(leftQuat, rightQuat, window.t));
+  }
+
+  float angle = acos(cosTheta);
+  float sinAngle = sin(angle);
+  if (sinAngle <= 1.0e-5) {
+    return leftQuat;
+  }
+
+  float leftWeight = sin((1.0 - window.t) * angle) / sinAngle;
+  float rightWeight = sin(window.t * angle) / sinAngle;
+  return normalize(leftQuat * leftWeight + rightQuat * rightWeight);
+}
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  if (index >= pc.channelCount) {
+    return;
+  }
+
+  AnimationChannel channel = pc.channels.values[index];
+  if (channel.keyCount == 0u || channel.valueArity == 0u) {
+    return;
+  }
+
+  SampleWindow window = findSampleWindow(channel);
+  if (channel.path == kAnimationTargetTranslation && channel.valueArity >= 3u) {
+    pc.nodeStates.values[channel.targetNodeIndex].translation =
+        vec4(sampleComponent(channel, window, 0u),
+             sampleComponent(channel, window, 1u),
+             sampleComponent(channel, window, 2u), 0.0);
+  } else if (channel.path == kAnimationTargetRotation &&
+             channel.valueArity >= 4u) {
+    pc.nodeStates.values[channel.targetNodeIndex].rotation =
+        sampleRotation(channel, window);
+  } else if (channel.path == kAnimationTargetScale &&
+             channel.valueArity >= 3u) {
+    pc.nodeStates.values[channel.targetNodeIndex].scale =
+        vec4(sampleComponent(channel, window, 0u),
+             sampleComponent(channel, window, 1u),
+             sampleComponent(channel, window, 2u), 0.0);
+  } else if (channel.path == kAnimationTargetWeights) {
+    for (uint component = 0u; component < channel.valueArity; ++component) {
+      pc.sampledWeights.values[channel.targetWeightOffset + component] =
+          sampleComponent(channel, window, component);
+    }
+  }
+}

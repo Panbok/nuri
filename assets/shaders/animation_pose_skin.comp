@@ -1,0 +1,88 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "animation_vertex_codec.sp"
+
+struct PackedSkinInfluenceGpu {
+  uvec4 joints;
+  vec4 weights;
+};
+
+layout(std430, buffer_reference) readonly buffer PackedVertexBuffer {
+  PackedVertex vertices[];
+};
+
+layout(std430, buffer_reference) readonly buffer SkinInfluenceBuffer {
+  PackedSkinInfluenceGpu values[];
+};
+
+layout(std430, buffer_reference) readonly buffer PaletteBuffer {
+  mat4 values[];
+};
+
+layout(std430, buffer_reference) buffer PackedVertexBufferRw {
+  PackedVertex vertices[];
+};
+
+layout(push_constant) uniform PushConstants {
+  PackedVertexBuffer sourceVertices;
+  PackedVertexBufferRw outputVertices;
+  SkinInfluenceBuffer skinInfluences;
+  PaletteBuffer palette;
+  uint vertexCount;
+}
+pc;
+
+void main() {
+  uint vertexIndex = gl_GlobalInvocationID.x;
+  if (vertexIndex >= pc.vertexCount) {
+    return;
+  }
+
+  PackedVertex source = pc.sourceVertices.vertices[vertexIndex];
+  PackedSkinInfluenceGpu influence = pc.skinInfluences.values[vertexIndex];
+
+  vec3 position = decodePackedPosition(source);
+  vec3 normal = decodePackedNormal(source);
+  vec4 tangent = decodePackedTangent(source);
+  vec2 uv0 = decodePackedUv(source);
+  vec2 uv1 = decodePackedUv1(source);
+
+  vec4 skinnedPosition = vec4(0.0);
+  vec3 skinnedNormal = vec3(0.0);
+  vec3 skinnedTangent = vec3(0.0);
+  float totalWeight = 0.0;
+
+  for (uint influenceIndex = 0u; influenceIndex < 4u; ++influenceIndex) {
+    float weight = influence.weights[influenceIndex];
+    if (abs(weight) <= 1.0e-6) {
+      continue;
+    }
+    mat4 skinMatrix = pc.palette.values[influence.joints[influenceIndex]];
+    skinnedPosition += (skinMatrix * vec4(position, 1.0)) * weight;
+    mat3 skinNormalMatrix = mat3(skinMatrix);
+    skinnedNormal += (skinNormalMatrix * normal) * weight;
+    skinnedTangent += (skinNormalMatrix * tangent.xyz) * weight;
+    totalWeight += weight;
+  }
+
+  if (totalWeight <= 1.0e-6) {
+    skinnedPosition = vec4(position, 1.0);
+    skinnedNormal = normal;
+    skinnedTangent = tangent.xyz;
+  }
+
+  if (length(skinnedNormal) > 1.0e-6) {
+    skinnedNormal = normalize(skinnedNormal);
+  } else {
+    skinnedNormal = vec3(0.0, 1.0, 0.0);
+  }
+  if (length(skinnedTangent) > 1.0e-6) {
+    skinnedTangent = normalize(skinnedTangent);
+  } else {
+    skinnedTangent = vec3(1.0, 0.0, 0.0);
+  }
+
+  tangent = vec4(skinnedTangent, tangent.w >= 0.0 ? 1.0 : -1.0);
+  pc.outputVertices.vertices[vertexIndex] =
+      encodePackedVertex(skinnedPosition.xyz, skinnedNormal, tangent, uv0, uv1);
+}

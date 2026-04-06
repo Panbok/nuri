@@ -1,0 +1,40 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, buffer_reference) readonly buffer MatrixBuffer {
+  mat4 values[];
+};
+
+layout(std430, buffer_reference) readonly buffer IndexBuffer { uint values[]; };
+
+layout(std430, buffer_reference) readonly buffer InverseBindBuffer {
+  mat4 values[];
+};
+
+layout(std430, buffer_reference) buffer PaletteBuffer { mat4 values[]; };
+
+layout(push_constant) uniform PushConstants {
+  MatrixBuffer worldMatrices;
+  IndexBuffer jointNodeIndices;
+  InverseBindBuffer inverseBindMatrices;
+  PaletteBuffer palette;
+  uint renderableNodeIndex;
+  uint jointCount;
+  uint reserved0;
+  uint reserved1;
+}
+pc;
+
+void main() {
+  uint jointIndex = gl_GlobalInvocationID.x;
+  if (jointIndex >= pc.jointCount) {
+    return;
+  }
+
+  mat4 renderableWorld = pc.worldMatrices.values[pc.renderableNodeIndex];
+  mat4 renderableInverse = inverse(renderableWorld);
+  uint jointNodeIndex = pc.jointNodeIndices.values[jointIndex];
+  mat4 jointWorld = pc.worldMatrices.values[jointNodeIndex];
+  mat4 inverseBind = pc.inverseBindMatrices.values[jointIndex];
+
+  pc.palette.values[jointIndex] = renderableInverse * jointWorld * inverseBind;
+}

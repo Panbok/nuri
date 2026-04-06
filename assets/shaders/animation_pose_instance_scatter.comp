@@ -1,0 +1,54 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct InstanceData {
+  mat4 modelMatrix;
+  vec4 normalMatCol0;
+  vec4 normalMatCol1;
+  vec4 normalMatCol2;
+};
+
+struct AnimationRenderableBinding {
+  uint runtimeRenderableIndex;
+  uint nodeIndex;
+  uint reserved0;
+  uint reserved1;
+};
+
+layout(std430,
+       buffer_reference) readonly buffer AnimationRenderableBindingBuffer {
+  AnimationRenderableBinding values[];
+};
+
+layout(std430, buffer_reference) readonly buffer MatrixBuffer {
+  mat4 values[];
+};
+
+layout(std430, buffer_reference) buffer InstanceMatricesBuffer {
+  InstanceData instances[];
+};
+
+layout(push_constant) uniform PushConstants {
+  AnimationRenderableBindingBuffer renderableBindings;
+  MatrixBuffer worldMatrices;
+  InstanceMatricesBuffer instanceMatrices;
+  uint bindingCount;
+}
+pc;
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  if (index >= pc.bindingCount) {
+    return;
+  }
+  AnimationRenderableBinding binding = pc.renderableBindings.values[index];
+  mat4 model = pc.worldMatrices.values[binding.nodeIndex];
+  mat3 normalMatrix = transpose(inverse(mat3(model)));
+  pc.instanceMatrices.instances[binding.runtimeRenderableIndex].modelMatrix =
+      model;
+  pc.instanceMatrices.instances[binding.runtimeRenderableIndex].normalMatCol0 =
+      vec4(normalMatrix[0], 0.0);
+  pc.instanceMatrices.instances[binding.runtimeRenderableIndex].normalMatCol1 =
+      vec4(normalMatrix[1], 0.0);
+  pc.instanceMatrices.instances[binding.runtimeRenderableIndex].normalMatCol2 =
+      vec4(normalMatrix[2], 0.0);
+}

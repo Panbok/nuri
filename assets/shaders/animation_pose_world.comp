@@ -1,0 +1,85 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct AnimationNodeState {
+  vec4 translation;
+  vec4 rotation;
+  vec4 scale;
+};
+
+struct AnimationNodeMeta {
+  uint parentIndex;
+  uint weightOffset;
+  uint weightCount;
+  uint reserved;
+};
+
+layout(std430, buffer_reference) readonly buffer AnimationNodeStateBuffer {
+  AnimationNodeState values[];
+};
+
+layout(std430, buffer_reference) readonly buffer AnimationNodeMetaBuffer {
+  AnimationNodeMeta values[];
+};
+
+layout(std430, buffer_reference) readonly buffer IndexBuffer { uint values[]; };
+
+layout(std430, buffer_reference) buffer MatrixBuffer { mat4 values[]; };
+
+layout(push_constant) uniform PushConstants {
+  AnimationNodeStateBuffer nodeStates;
+  AnimationNodeMetaBuffer nodeMeta;
+  IndexBuffer depthOrderedNodes;
+  MatrixBuffer worldMatrices;
+  mat4 rootTransform;
+  uint nodeStart;
+  uint nodeCount;
+}
+pc;
+
+mat4 quatToMat4(vec4 q) {
+  float x = q.x;
+  float y = q.y;
+  float z = q.z;
+  float w = q.w;
+  float xx = x * x;
+  float yy = y * y;
+  float zz = z * z;
+  float xy = x * y;
+  float xz = x * z;
+  float yz = y * z;
+  float wx = w * x;
+  float wy = w * y;
+  float wz = w * z;
+  return mat4(
+      vec4(1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy), 0.0),
+      vec4(2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx), 0.0),
+      vec4(2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy), 0.0),
+      vec4(0.0, 0.0, 0.0, 1.0));
+}
+
+mat4 composeTransform(AnimationNodeState state) {
+  mat4 translation = mat4(1.0);
+  translation[3] = vec4(state.translation.xyz, 1.0);
+  mat4 rotation = quatToMat4(normalize(state.rotation));
+  mat4 scale = mat4(1.0);
+  scale[0][0] = state.scale.x;
+  scale[1][1] = state.scale.y;
+  scale[2][2] = state.scale.z;
+  return translation * rotation * scale;
+}
+
+void main() {
+  uint localIndex = gl_GlobalInvocationID.x;
+  if (localIndex >= pc.nodeCount) {
+    return;
+  }
+  uint nodeIndex = pc.depthOrderedNodes.values[pc.nodeStart + localIndex];
+  mat4 localMatrix = composeTransform(pc.nodeStates.values[nodeIndex]);
+  uint parentIndex = pc.nodeMeta.values[nodeIndex].parentIndex;
+  if (parentIndex == 0xFFFFFFFFu) {
+    pc.worldMatrices.values[nodeIndex] = pc.rootTransform * localMatrix;
+  } else {
+    pc.worldMatrices.values[nodeIndex] =
+        pc.worldMatrices.values[parentIndex] * localMatrix;
+  }
+}
