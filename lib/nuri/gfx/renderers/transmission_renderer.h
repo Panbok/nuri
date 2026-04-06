@@ -101,6 +101,9 @@ private:
     uint32_t submeshIndex = 0;
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
+    BufferHandle baseVertexBuffer{};
+    BufferHandle vertexBuffer{};
+    uint64_t baseVertexBufferAddress = 0;
     uint64_t vertexBufferAddress = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     uint32_t instanceIndex = 0;

@@ -38,6 +38,20 @@ settingsOrDefault(const RenderFrameContext &frame) {
   return frame.settings ? *frame.settings : kDefaultSettings;
 }
 
+const AnimationSceneFrameData *
+resolveAnimationSceneFrameData(const RenderFrameContext &frame) {
+  if (!frame.sharedResources.animationSceneGpuData.has_value()) {
+    return nullptr;
+  }
+  const AnimationSceneFrameData &data =
+      *frame.sharedResources.animationSceneGpuData;
+  if (!nuri::isValid(data.instanceMatricesBuffer) ||
+      data.instanceMatricesAddress == 0u) {
+    return nullptr;
+  }
+  return &data;
+}
+
 [[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
   return (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
 }
@@ -428,6 +442,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   }
   const ForwardSceneGpuData *sceneGpu =
       &*frame.sharedResources.forwardSceneGpuData;
+  const AnimationSceneFrameData *animationSceneData =
+      resolveAnimationSceneFrameData(frame);
 
   const std::span<const Renderable> renderables = frame.scene->renderables();
   if (!meshDrawTemplates_.empty()) {
@@ -468,10 +484,13 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     if (materialBufferResult.hasError()) {
       return materialBufferResult;
     }
-    auto matricesBufferResult = ensureInstanceMatricesRingCapacity(std::max(
-        instanceMatrices_.size() * sizeof(InstanceData), sizeof(InstanceData)));
-    if (matricesBufferResult.hasError()) {
-      return matricesBufferResult;
+    if (animationSceneData == nullptr) {
+      auto matricesBufferResult = ensureInstanceMatricesRingCapacity(
+          std::max(instanceMatrices_.size() * sizeof(InstanceData),
+                   sizeof(InstanceData)));
+      if (matricesBufferResult.hasError()) {
+        return matricesBufferResult;
+      }
     }
     auto remapBufferResult = ensureInstanceRemapRingCapacity(
         std::max(instanceRemap_.size() * sizeof(uint32_t), sizeof(uint32_t)));
@@ -522,6 +541,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     }
 
     const bool needsInstanceDataUpload =
+        animationSceneData == nullptr &&
         instanceDataRingUploadVersions_[frameSlot] != cachedTransformVersion_;
     if (needsInstanceDataUpload && !instanceMatrices_.empty()) {
       const std::span<const std::byte> matrixBytes{
@@ -556,8 +576,14 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     const uint64_t directionalLightBufferAddress =
         sceneGpu->directionalLightBufferAddress;
     const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
-    const uint64_t instanceMatricesAddress = gpu_.getBufferDeviceAddress(
-        instanceMatricesRing_[frameSlot].buffer->handle());
+    const BufferHandle instanceMatricesBufferHandle =
+        animationSceneData != nullptr
+            ? animationSceneData->instanceMatricesBuffer
+            : instanceMatricesRing_[frameSlot].buffer->handle();
+    const uint64_t instanceMatricesAddress =
+        animationSceneData != nullptr
+            ? animationSceneData->instanceMatricesAddress
+            : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
     const uint64_t instanceRemapAddress = gpu_.getBufferDeviceAddress(
         instanceRemapRing_[frameSlot].buffer->handle());
     if (frameDataAddress == 0u || materialBufferAddress == 0u ||
@@ -585,9 +611,28 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
         continue;
       }
 
+      BufferHandle vertexBuffer = entry.vertexBuffer;
+      uint64_t vertexBufferAddress = entry.vertexBufferAddress;
+      if (animationSceneData != nullptr &&
+          entry.instanceIndex <
+              animationSceneData->geometryOverridesByRenderable.size()) {
+        const AnimatedRenderableGeometryOverride &geometryOverride =
+            animationSceneData
+                ->geometryOverridesByRenderable[entry.instanceIndex];
+        if (geometryOverride.enabled &&
+            nuri::isValid(geometryOverride.vertexBuffer)) {
+          const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
+              geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
+          if (overrideVertexAddress != 0u) {
+            vertexBuffer = geometryOverride.vertexBuffer;
+            vertexBufferAddress = overrideVertexAddress;
+          }
+        }
+      }
+
       meshPushConstants_.push_back(MeshPushConstants{
           .frameDataAddress = frameDataAddress,
-          .vertexBufferAddress = entry.vertexBufferAddress,
+          .vertexBufferAddress = vertexBufferAddress,
           .instanceMatricesAddress = instanceMatricesAddress,
           .instanceRemapAddress = instanceRemapAddress,
           .materialBufferAddress = materialBufferAddress,
@@ -608,6 +653,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
 
       DrawItem draw{};
       draw.pipeline = selectMeshPipeline(entry.doubleSided);
+      draw.vertexBuffer = vertexBuffer;
       draw.indexBuffer = entry.indexBuffer;
       draw.indexBufferOffset = entry.indexBufferOffset;
       draw.indexFormat = IndexFormat::U32;
@@ -629,8 +675,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
 
     appendUniqueBuffer(passDependencyBuffers_, sceneGpu->buffer);
     appendUniqueBuffer(passDependencyBuffers_, materialBuffer_->handle());
-    appendUniqueBuffer(passDependencyBuffers_,
-                       instanceMatricesRing_[frameSlot].buffer->handle());
+    appendUniqueBuffer(passDependencyBuffers_, instanceMatricesBufferHandle);
     appendUniqueBuffer(passDependencyBuffers_,
                        instanceRemapRing_[frameSlot].buffer->handle());
     passTextureReads_ = staticPassTextureReads_;
@@ -1357,6 +1402,9 @@ TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
           .submeshIndex = static_cast<uint32_t>(submeshIndex),
           .indexBuffer = geometry.indexBuffer,
           .indexBufferOffset = geometry.indexByteOffset,
+          .baseVertexBuffer = geometry.vertexBuffer,
+          .vertexBuffer = {},
+          .baseVertexBufferAddress = vertexBufferAddress,
           .vertexBufferAddress = vertexBufferAddress,
           .materialIndex = materialIndex,
           .instanceIndex = renderableIndex,

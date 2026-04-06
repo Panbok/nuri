@@ -67,6 +67,20 @@ const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
   return frame.settings ? *frame.settings : kDefaultSettings;
 }
 
+const AnimationSceneFrameData *
+resolveAnimationSceneFrameData(const RenderFrameContext &frame) {
+  if (!frame.sharedResources.animationSceneGpuData.has_value()) {
+    return nullptr;
+  }
+  const AnimationSceneFrameData &data =
+      *frame.sharedResources.animationSceneGpuData;
+  if (!nuri::isValid(data.instanceMatricesBuffer) ||
+      data.instanceMatricesAddress == 0u) {
+    return nullptr;
+  }
+  return &data;
+}
+
 [[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
   return material.desc.alphaMode != MaterialAlphaMode::Blend &&
          (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
@@ -466,6 +480,8 @@ void OpaqueRenderer::onDetach() {
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedAnimationSceneActive_ = false;
   instanceStaticBuffersDirty_ = true;
   uniformSingleSubmeshPath_ = false;
   invalidateAutoLodCache();
@@ -594,6 +610,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
   const uint32_t frameSlot =
       static_cast<uint32_t>(frame.frameIndex % swapchainImageCount);
+  const AnimationSceneFrameData *animationSceneData =
+      resolveAnimationSceneFrameData(frame);
 
   if (topologyDirty || transformDirty) {
     instanceCentersPhase_.clear();
@@ -644,6 +662,56 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     std::fill(instanceMatricesUploadVersions_.begin(),
               instanceMatricesUploadVersions_.end(),
               std::numeric_limits<uint64_t>::max());
+  }
+
+  const bool animationSceneStateDirty =
+      topologyDirty ||
+      cachedAnimationSceneActive_ != (animationSceneData != nullptr) ||
+      (animationSceneData != nullptr &&
+       cachedAnimationSceneVersion_ != animationSceneData->version);
+  if (animationSceneStateDirty) {
+    bool vertexAddressChanged = false;
+    bool hasAnimatedGeometry = false;
+    for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+      uint64_t resolvedVertexBufferAddress =
+          templateEntry.baseVertexBufferAddress != 0u
+              ? templateEntry.baseVertexBufferAddress
+              : templateEntry.vertexBufferAddress;
+      BufferHandle resolvedVertexBuffer{};
+      if (animationSceneData != nullptr &&
+          templateEntry.instanceIndex <
+              animationSceneData->geometryOverridesByRenderable.size()) {
+        const AnimatedRenderableGeometryOverride &geometryOverride =
+            animationSceneData
+                ->geometryOverridesByRenderable[templateEntry.instanceIndex];
+        if (geometryOverride.enabled &&
+            nuri::isValid(geometryOverride.vertexBuffer)) {
+          const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
+              geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
+          if (overrideVertexAddress != 0u) {
+            resolvedVertexBuffer = geometryOverride.vertexBuffer;
+            resolvedVertexBufferAddress = overrideVertexAddress;
+            hasAnimatedGeometry = true;
+          }
+        }
+      }
+      vertexAddressChanged |=
+          templateEntry.vertexBufferAddress != resolvedVertexBufferAddress;
+      templateEntry.vertexBuffer = resolvedVertexBuffer;
+      templateEntry.vertexBufferAddress = resolvedVertexBufferAddress;
+    }
+    if (vertexAddressChanged) {
+      invalidateSingleInstanceBatchCache();
+      invalidateStaticBatchCache();
+      invalidateIndirectPackCache();
+    }
+    if (hasAnimatedGeometry) {
+      uniformSingleSubmeshPath_ = false;
+    }
+    cachedAnimationSceneActive_ = animationSceneData != nullptr;
+    cachedAnimationSceneVersion_ = animationSceneData != nullptr
+                                       ? animationSceneData->version
+                                       : std::numeric_limits<uint64_t>::max();
   }
 
   if (!frame.sharedResources.forwardSceneGpuData.has_value() ||
@@ -739,8 +807,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const uint64_t directionalLightBufferAddress =
       sceneGpu->directionalLightBufferAddress;
   const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
-  const uint64_t instanceMatricesAddress = gpu_.getBufferDeviceAddress(
-      instanceMatricesRing_[frameSlot].buffer->handle());
+  const BufferHandle instanceMatricesBufferHandle =
+      animationSceneData != nullptr
+          ? animationSceneData->instanceMatricesBuffer
+          : instanceMatricesRing_[frameSlot].buffer->handle();
+  const uint64_t instanceMatricesAddress =
+      animationSceneData != nullptr
+          ? animationSceneData->instanceMatricesAddress
+          : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
   if (frameDataAddress == 0 || instanceCentersPhaseAddress == 0 ||
       instanceBaseMatricesAddress == 0 || materialBufferAddress == 0 ||
       instanceMatricesAddress == 0 ||
@@ -783,6 +857,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
   struct BatchEntry {
     DrawItem draw{};
+    BufferHandle vertexBuffer{};
     uint64_t vertexBufferAddress = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     size_t instanceCount = 0;
@@ -800,8 +875,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       [&baseDraw,
        &batches](RenderPipelineHandle pipeline, BufferHandle indexBuffer,
                  uint64_t indexBufferOffset, const SubmeshLod &lodRange,
-                 uint64_t vertexBufferAddress, uint32_t materialIndex,
-                 size_t count, size_t firstInstance) {
+                 BufferHandle vertexBuffer, uint64_t vertexBufferAddress,
+                 uint32_t materialIndex, size_t count, size_t firstInstance) {
         if (count == 0) {
           return;
         }
@@ -813,6 +888,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.draw.indexCount = lodRange.indexCount;
         entry.draw.firstIndex = lodRange.indexOffset;
         entry.draw.vertexOffset = 0;
+        entry.vertexBuffer = vertexBuffer;
         entry.vertexBufferAddress = vertexBufferAddress;
         entry.materialIndex = materialIndex;
         entry.instanceCount = count;
@@ -1217,20 +1293,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       const SubmeshLod &lod0Range = submesh.lods[0];
       autoLodBucketStarts[0] = firstInstance;
       autoLodBucketWrites[0] = firstInstance;
-      appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
-                  templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                  lod0Range, templateEntry.vertexBufferAddress,
-                  templateEntry.materialIndex, autoLodBucketCounts[0],
-                  firstInstance);
+      appendBatch(
+          selectMeshPipeline(templateEntry.doubleSided, false),
+          templateEntry.indexBuffer, templateEntry.indexBufferOffset, lod0Range,
+          templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
+          templateEntry.materialIndex, autoLodBucketCounts[0], firstInstance);
       firstInstance += autoLodBucketCounts[0];
 
       autoLodTessBucketStart = firstInstance;
       autoLodTessBucketWrite = firstInstance;
-      appendBatch(selectMeshPipeline(templateEntry.doubleSided, true),
-                  templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                  lod0Range, templateEntry.vertexBufferAddress,
-                  templateEntry.materialIndex, autoLodTessBucketCount,
-                  firstInstance);
+      appendBatch(
+          selectMeshPipeline(templateEntry.doubleSided, true),
+          templateEntry.indexBuffer, templateEntry.indexBufferOffset, lod0Range,
+          templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
+          templateEntry.materialIndex, autoLodTessBucketCount, firstInstance);
       if (autoLodTessBucketCount > 0) {
         usedUniformAutoLodTessSplit = true;
       }
@@ -1247,7 +1323,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
         appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
                     templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                    lodRange, templateEntry.vertexBufferAddress,
+                    lodRange, templateEntry.vertexBuffer,
+                    templateEntry.vertexBufferAddress,
                     templateEntry.materialIndex, count, firstInstance);
         firstInstance += count;
       }
@@ -1263,7 +1340,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
         appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
                     templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                    lodRange, templateEntry.vertexBufferAddress,
+                    lodRange, templateEntry.vertexBuffer,
+                    templateEntry.vertexBufferAddress,
                     templateEntry.materialIndex, count, firstInstance);
         firstInstance += count;
       }
@@ -1330,7 +1408,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
       appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
                   templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                  lodRange, templateEntry.vertexBufferAddress,
+                  lodRange, templateEntry.vertexBuffer,
+                  templateEntry.vertexBufferAddress,
                   templateEntry.materialIndex, instanceCount, 0);
       remapCount = instanceCount;
       templateBatchIndices_.clear();
@@ -1413,6 +1492,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.draw.indexCount = lodRange.indexCount;
         entry.draw.firstIndex = lodRange.indexOffset;
         entry.draw.vertexOffset = 0;
+        entry.vertexBuffer = templateEntry.vertexBuffer;
         entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
         entry.materialIndex = templateEntry.materialIndex;
         batches.push_back(std::move(entry));
@@ -1597,6 +1677,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         constants.debugVisualizationMode = debugVisualizationMode;
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
+        draw.vertexBuffer = batch.vertexBuffer;
         draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
         draw.firstInstance = 0;
         draw.pushConstants = std::span<const std::byte>(
@@ -1656,6 +1737,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         constants.debugVisualizationMode = debugVisualizationMode;
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
+        draw.vertexBuffer = batch.vertexBuffer;
         draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
         draw.firstInstance = static_cast<uint32_t>(batch.firstInstance);
         draw.pushConstants = std::span<const std::byte>(
@@ -1877,8 +1959,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       .debugVisualizationMode = debugVisualizationMode,
   };
 
-  const bool useComputePass = settings.opaque.enableInstanceCompute;
-  if (!useComputePass && instanceCount > 0) {
+  const bool useComputePass =
+      settings.opaque.enableInstanceCompute && animationSceneData == nullptr;
+  if (!useComputePass && animationSceneData == nullptr && instanceCount > 0) {
     const bool animateInstances = settings.opaque.enableInstanceAnimation;
     const bool needsInstanceMatricesUpload =
         animateInstances ||
@@ -1927,6 +2010,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     passDependencyBufferAccessModes_.clear();
     passDependencyTextures_.clear();
 
+    if (animationSceneData != nullptr &&
+        !animationSceneData->preDispatches.empty()) {
+      preDispatches_.insert(preDispatches_.end(),
+                            animationSceneData->preDispatches.begin(),
+                            animationSceneData->preDispatches.end());
+    }
+
     const bool hasIndirectDraws = !indirectDrawItems_.empty();
     if (!hasIndirectDraws && nuri::isValid(sceneGpu->buffer)) {
       auto depResult = appendUniqueDependency(
@@ -1973,8 +2063,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     if (instanceCount > 0) {
       auto passDepResult = appendUniqueDependency(
           passDependencyBuffers_, passDependencyBufferAccessModes_,
-          instanceMatricesRing_[frameSlot].buffer->handle(),
-          RenderGraphAccessMode::Read,
+          instanceMatricesBufferHandle, RenderGraphAccessMode::Read,
           "OpaqueRenderer::buildOpaquePasses(pass)");
       if (passDepResult.hasError()) {
         return passDepResult;
@@ -2706,6 +2795,7 @@ Result<bool, std::string> OpaqueRenderer::ensureSingleInstanceBatchCache(
       entry.draw.indexCount = lodRange.indexCount;
       entry.draw.firstIndex = lodRange.indexOffset;
       entry.draw.vertexOffset = 0;
+      entry.vertexBuffer = templateEntry.vertexBuffer;
       entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
       entry.materialIndex = templateEntry.materialIndex;
       cache.batches.push_back(entry);
@@ -3536,6 +3626,9 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
           .geometryHandle = model->geometryHandle(),
           .indexBuffer = geometry.indexBuffer,
           .indexBufferOffset = geometry.indexByteOffset,
+          .baseVertexBuffer = geometry.vertexBuffer,
+          .vertexBuffer = {},
+          .baseVertexBufferAddress = vertexBufferAddress,
           .vertexBufferAddress = vertexBufferAddress,
           .materialIndex = finalMaterialIndex,
           .doubleSided = doubleSided,

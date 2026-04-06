@@ -98,6 +98,9 @@ private:
     GeometryAllocationHandle geometryHandle{};
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
+    BufferHandle baseVertexBuffer{};
+    BufferHandle vertexBuffer{};
+    uint64_t baseVertexBufferAddress = 0;
     uint64_t vertexBufferAddress = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     bool doubleSided = false;
@@ -115,6 +118,7 @@ private:
 
   struct SingleInstanceBatchEntry {
     DrawItem draw{};
+    BufferHandle vertexBuffer{};
     uint64_t vertexBufferAddress = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     size_t instanceCount = 0;
@@ -356,6 +360,8 @@ private:
   uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
+  uint64_t cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
+  bool cachedAnimationSceneActive_ = false;
   bool instanceStaticBuffersDirty_ = true;
   bool uniformSingleSubmeshPath_ = false;
 

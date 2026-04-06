@@ -4,6 +4,7 @@
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
 #include "nuri/gfx/render_graph/render_graph.h"
+#include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/scene/light.h"
 
 #include <cstdint>
@@ -224,6 +225,7 @@ struct OpaquePickResult {
 
 struct FrameSharedResources {
   std::optional<ForwardSceneGpuData> forwardSceneGpuData{};
+  std::optional<AnimationSceneFrameData> animationSceneGpuData{};
   TextureHandle sceneDepthTexture{};
   RenderGraphTextureId sceneDepthGraphTexture{};
   TextureHandle sceneColorTexture{};
@@ -255,9 +257,8 @@ struct TransparentStageContribution {
   std::span<const TextureHandle> textureReads{};
 };
 
-using TransparentContributionCollectFn =
-    Result<bool, std::string> (*)(void *user, RenderFrameContext &frame,
-                                  TransparentStageContribution &out);
+using TransparentContributionCollectFn = Result<bool, std::string> (*)(
+    void *user, RenderFrameContext &frame, TransparentStageContribution &out);
 
 struct TransparentContributionCollector {
   void *user = nullptr;
@@ -268,8 +269,8 @@ class TransparentContributionRegistry {
 public:
   explicit TransparentContributionRegistry(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : collectors_(memory != nullptr ? memory : std::pmr::get_default_resource()) {
-  }
+      : collectors_(memory != nullptr ? memory
+                                      : std::pmr::get_default_resource()) {}
 
   void clear() { collectors_.clear(); }
 

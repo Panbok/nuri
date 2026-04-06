@@ -527,6 +527,9 @@ public:
     // the import order on the next frame (the new handle gets a fresh index),
     // so the compile result must be discarded.
     uint64_t persistentHandlesVersion = 0;
+    // Optional caller-provided salt for frame-variant payloads that are not
+    // represented by structural graph state alone.
+    uint64_t dynamicPayloadVersion = 0;
 
     [[nodiscard]] bool operator==(const GraphFingerprint &o) const noexcept {
       return passCount == o.passCount &&
@@ -538,11 +541,13 @@ public:
              allPassesBorrowPayload == o.allPassesBorrowPayload &&
              transientResourceDescriptorsHash ==
                  o.transientResourceDescriptorsHash &&
-             persistentHandlesVersion == o.persistentHandlesVersion;
+             persistentHandlesVersion == o.persistentHandlesVersion &&
+             dynamicPayloadVersion == o.dynamicPayloadVersion;
     }
   };
 
   [[nodiscard]] GraphFingerprint computeGraphFingerprint() const noexcept;
+  void mixDynamicPayloadVersion(uint64_t version) noexcept;
 
   // Updates textureHandlesByResource and bufferHandlesByResource in a cached
   // compile result to reflect the imported handles recorded in the current
@@ -775,6 +780,7 @@ private:
   // import-table changes always trigger a full recompile.
   uint64_t persistentHandlesVersion_ = 0;
   uint64_t transientResourceDescriptorsHash_ = 0xcbf29ce484222325ull;
+  uint64_t dynamicPayloadVersion_ = 0u;
 };
 
 class NURI_API RenderGraphExecutor {

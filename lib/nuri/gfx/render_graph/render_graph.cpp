@@ -61,6 +61,13 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
   return (static_cast<uint64_t>(before) << 32u) | after;
 }
 
+[[nodiscard]] uint64_t mixFingerprintSeed(uint64_t seed,
+                                          uint64_t value) noexcept {
+  constexpr uint64_t kMix = 0x9e3779b97f4a7c15ull;
+  seed ^= value + kMix + (seed << 6u) + (seed >> 2u);
+  return seed;
+}
+
 [[nodiscard]] uint64_t foldPassResourceKey(uint32_t passIndex,
                                            uint32_t resourceIndex) {
   return (static_cast<uint64_t>(passIndex) << 32u) | resourceIndex;
@@ -319,6 +326,7 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   sideEffectPassMarks_.clear();
   allPassesBorrowPayload_ = true;
   transientResourceDescriptorsHash_ = 0xcbf29ce484222325ull;
+  dynamicPayloadVersion_ = 0u;
 }
 
 PersistentBufferId
@@ -438,7 +446,12 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .allPassesBorrowPayload = allPassesBorrowPayload_,
       .transientResourceDescriptorsHash = transientResourceDescriptorsHash_,
       .persistentHandlesVersion = persistentHandlesVersion_,
+      .dynamicPayloadVersion = dynamicPayloadVersion_,
   };
+}
+
+void RenderGraphBuilder::mixDynamicPayloadVersion(uint64_t version) noexcept {
+  dynamicPayloadVersion_ = mixFingerprintSeed(dynamicPayloadVersion_, version);
 }
 
 void RenderGraphBuilder::refreshHandlesInCompileResult(
