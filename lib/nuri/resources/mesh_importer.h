@@ -19,7 +19,6 @@ struct MeshImportOptions {
 
   bool triangulate = true;
   bool genNormals = true;
-  bool genTangents = true;
   bool flipUVs = false;
   bool joinIdenticalVertices = true;
   bool genUVCoords = true;

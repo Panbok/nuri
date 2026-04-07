@@ -1175,8 +1175,6 @@ void extractMeshGeometry(const aiMesh &mesh, const aiMatrix4x4 &transform,
   outVertices.reserve(mesh.mNumVertices);
   aiMatrix3x3 normalTransform(transform);
   normalTransform.Inverse().Transpose();
-  const float tangentHandednessScale =
-      normalTransform.Determinant() < 0.0f ? -1.0f : 1.0f;
 
   for (unsigned int vertexIndex = 0; vertexIndex < mesh.mNumVertices;
        ++vertexIndex) {
@@ -1198,18 +1196,6 @@ void extractMeshGeometry(const aiMesh &mesh, const aiMatrix4x4 &transform,
     if (mesh.HasTextureCoords(1)) {
       const aiVector3D &uv1 = mesh.mTextureCoords[1][vertexIndex];
       vertex.uv1 = {uv1.x, uv1.y};
-    }
-
-    if (mesh.HasTangentsAndBitangents()) {
-      const aiVector3D &tangent = mesh.mTangents[vertexIndex];
-      const aiVector3D &bitangent = mesh.mBitangents[vertexIndex];
-      const glm::vec3 n = vertex.normal;
-      const glm::vec3 t =
-          normalizeTransformedDirection(normalTransform * tangent);
-      const glm::vec3 b =
-          normalizeTransformedDirection(normalTransform * bitangent);
-      const float sign = (glm::dot(glm::cross(n, t), b) < 0.0f) ? -1.0f : 1.0f;
-      vertex.tangent = {t.x, t.y, t.z, sign * tangentHandednessScale};
     }
 
     outVertices.push_back(vertex);
@@ -1323,9 +1309,6 @@ void extractMorphTargets(const aiMesh &mesh, const aiMatrix4x4 &transform,
     if (animMesh->HasNormals()) {
       target.normalDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
     }
-    if (animMesh->HasTangentsAndBitangents()) {
-      target.tangentDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
-    }
 
     const uint32_t vertexCount =
         std::min<uint32_t>(mesh.mNumVertices, animMesh->mNumVertices);
@@ -1341,13 +1324,6 @@ void extractMorphTargets(const aiMesh &mesh, const aiMatrix4x4 &transform,
             normalTransform * animMesh->mNormals[vertexIndex]);
         target.normalDeltas[vertexIndex] =
             transformedNormal - baseVertices[vertexIndex].normal;
-      }
-      if (!target.tangentDeltas.empty() &&
-          animMesh->HasTangentsAndBitangents()) {
-        const glm::vec3 transformedTangent = normalizeTransformedDirection(
-            normalTransform * animMesh->mTangents[vertexIndex]);
-        target.tangentDeltas[vertexIndex] =
-            transformedTangent - glm::vec3(baseVertices[vertexIndex].tangent);
       }
     }
   }
@@ -1483,7 +1459,6 @@ void optimizeVertexFetchForAllLods(
     for (MorphTarget &morphTarget : morphTargets) {
       remapDeltas(morphTarget.positionDeltas);
       remapDeltas(morphTarget.normalDeltas);
-      remapDeltas(morphTarget.tangentDeltas);
     }
 
     for (uint32_t lodIndex = 0; lodIndex < lodCount; ++lodIndex) {
@@ -1565,8 +1540,6 @@ void appendSubmeshToMeshData(
                               morphTarget.positionDeltas.end());
     dst.normalDeltas.assign(morphTarget.normalDeltas.begin(),
                             morphTarget.normalDeltas.end());
-    dst.tangentDeltas.assign(morphTarget.tangentDeltas.begin(),
-                             morphTarget.tangentDeltas.end());
   }
   data.submeshes.push_back(submesh);
 }
@@ -1881,10 +1854,6 @@ unsigned int buildAssimpFlags(const MeshImportOptions &options,
 
   if (options.genNormals) {
     flags |= aiProcess_GenSmoothNormals;
-  }
-
-  if (options.genTangents) {
-    flags |= aiProcess_CalcTangentSpace;
   }
 
   if (options.flipUVs) {
