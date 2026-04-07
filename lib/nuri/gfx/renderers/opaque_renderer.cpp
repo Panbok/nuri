@@ -836,7 +836,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       materialGpu->sheenBufferAddress == 0u ||
       materialGpu->transmissionBufferAddress == 0u ||
       materialGpu->specularBufferAddress == 0u ||
-      instanceMatricesAddress == 0 ||
       (sceneGpu->directionalLightCount > 0u &&
        directionalLightBufferAddress == 0u) ||
       (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {

@@ -211,6 +211,10 @@ ModelPackedVertexData packVerticesForModel(const MeshData &data) {
     }
     const size_t start = submesh.vertexOffset;
     const size_t count = submesh.vertexCount;
+    if (start > data.vertices.size() || count > data.vertices.size() - start) {
+      decodeRecords[submeshIndex] = StaticVertexDecodeGpuData{};
+      continue;
+    }
     decodeRecords[submeshIndex] = computeStaticDecodeRecord(
         std::span<const Vertex>(data.vertices.data() + start, count));
     for (size_t vertexIndex = 0; vertexIndex < count; ++vertexIndex) {

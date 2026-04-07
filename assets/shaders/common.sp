@@ -400,8 +400,69 @@ struct MaterialData {
   bool hasSpecular;
 };
 
+PackedMaterialTransformGpuData defaultMaterialTransformData() {
+  return PackedMaterialTransformGpuData(0u, 0u, 0u);
+}
+
+MaterialClearcoatGpuData defaultMaterialClearcoatData() {
+  MaterialClearcoatGpuData data;
+  data.clearcoatFactors = vec4(0.0, 0.0, 1.0, 0.0);
+  data.textureIndices = uvec4(kInvalidTextureBindlessIndex,
+                              kInvalidTextureBindlessIndex,
+                              kInvalidTextureBindlessIndex, 0u);
+  data.transforms[0] = defaultMaterialTransformData();
+  data.transforms[1] = defaultMaterialTransformData();
+  data.transforms[2] = defaultMaterialTransformData();
+  data.uvSetBits = 0u;
+  data.reserved0 = 0u;
+  data.reserved1 = 0u;
+  return data;
+}
+
+MaterialSheenGpuData defaultMaterialSheenData() {
+  MaterialSheenGpuData data;
+  data.sheenColorFactorWeight = vec4(0.0);
+  data.sheenRoughnessReserved = vec4(0.0);
+  data.textureIndices =
+      uvec4(kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex, 0u, 0u);
+  data.transforms[0] = defaultMaterialTransformData();
+  data.transforms[1] = defaultMaterialTransformData();
+  data.uvSetBits = 0u;
+  data.reserved0 = 0u;
+  return data;
+}
+
+MaterialTransmissionGpuData defaultMaterialTransmissionData() {
+  MaterialTransmissionGpuData data;
+  data.transmissionThicknessDistance = vec4(0.0);
+  data.attenuationColorReserved = vec4(1.0, 1.0, 1.0, 0.0);
+  data.textureIndices =
+      uvec4(kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex, 0u, 0u);
+  data.transforms[0] = defaultMaterialTransformData();
+  data.transforms[1] = defaultMaterialTransformData();
+  data.uvSetBits = 0u;
+  data.reserved0 = 0u;
+  return data;
+}
+
+MaterialSpecularGpuData defaultMaterialSpecularData() {
+  MaterialSpecularGpuData data;
+  data.specularColorFactorSpecular = vec4(1.0);
+  data.textureIndices =
+      uvec4(kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex, 0u, 0u);
+  data.transforms[0] = defaultMaterialTransformData();
+  data.transforms[1] = defaultMaterialTransformData();
+  data.uvSetBits = 0u;
+  data.reserved0 = 0u;
+  return data;
+}
+
 MaterialData loadMaterialData(uint materialIndex) {
   MaterialData material;
+  material.clearcoat = defaultMaterialClearcoatData();
+  material.sheen = defaultMaterialSheenData();
+  material.transmission = defaultMaterialTransmissionData();
+  material.specular = defaultMaterialSpecularData();
   material.header = pc.frameData.materialHeaderBuffer.materials[materialIndex];
   material.hasClearcoat =
       material.header.clearcoatExtensionIndex != kInvalidMaterialExtensionIndex;
@@ -474,22 +535,49 @@ uint getMaterialTextureIndex(MaterialData material, uint slot) {
   case kMaterialTextureSlotEmissive:
     return material.header.emissiveTextureIndex;
   case kMaterialTextureSlotClearcoat:
+    if (!material.hasClearcoat) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.clearcoat.textureIndices.x;
   case kMaterialTextureSlotClearcoatRoughness:
+    if (!material.hasClearcoat) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.clearcoat.textureIndices.y;
   case kMaterialTextureSlotClearcoatNormal:
+    if (!material.hasClearcoat) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.clearcoat.textureIndices.z;
   case kMaterialTextureSlotSpecular:
+    if (!material.hasSpecular) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.specular.textureIndices.x;
   case kMaterialTextureSlotSpecularColor:
+    if (!material.hasSpecular) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.specular.textureIndices.y;
   case kMaterialTextureSlotSheenColor:
+    if (!material.hasSheen) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.sheen.textureIndices.x;
   case kMaterialTextureSlotSheenRoughness:
+    if (!material.hasSheen) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.sheen.textureIndices.y;
   case kMaterialTextureSlotTransmission:
+    if (!material.hasTransmission) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.transmission.textureIndices.x;
   case kMaterialTextureSlotThickness:
+    if (!material.hasTransmission) {
+      return kInvalidTextureBindlessIndex;
+    }
     return material.transmission.textureIndices.y;
   default:
     return kInvalidTextureBindlessIndex;
@@ -509,22 +597,49 @@ uint getMaterialUvSet(MaterialData material, uint slot) {
   case kMaterialTextureSlotEmissive:
     return getPackedUvBit(material.header.uvSetBits, 4u);
   case kMaterialTextureSlotClearcoat:
+    if (!material.hasClearcoat) {
+      return 0u;
+    }
     return getPackedUvBit(material.clearcoat.uvSetBits, 0u);
   case kMaterialTextureSlotClearcoatRoughness:
+    if (!material.hasClearcoat) {
+      return 0u;
+    }
     return getPackedUvBit(material.clearcoat.uvSetBits, 1u);
   case kMaterialTextureSlotClearcoatNormal:
+    if (!material.hasClearcoat) {
+      return 0u;
+    }
     return getPackedUvBit(material.clearcoat.uvSetBits, 2u);
   case kMaterialTextureSlotSpecular:
+    if (!material.hasSpecular) {
+      return 0u;
+    }
     return getPackedUvBit(material.specular.uvSetBits, 0u);
   case kMaterialTextureSlotSpecularColor:
+    if (!material.hasSpecular) {
+      return 0u;
+    }
     return getPackedUvBit(material.specular.uvSetBits, 1u);
   case kMaterialTextureSlotSheenColor:
+    if (!material.hasSheen) {
+      return 0u;
+    }
     return getPackedUvBit(material.sheen.uvSetBits, 0u);
   case kMaterialTextureSlotSheenRoughness:
+    if (!material.hasSheen) {
+      return 0u;
+    }
     return getPackedUvBit(material.sheen.uvSetBits, 1u);
   case kMaterialTextureSlotTransmission:
+    if (!material.hasTransmission) {
+      return 0u;
+    }
     return getPackedUvBit(material.transmission.uvSetBits, 0u);
   case kMaterialTextureSlotThickness:
+    if (!material.hasTransmission) {
+      return 0u;
+    }
     return getPackedUvBit(material.transmission.uvSetBits, 1u);
   default:
     return 0u;
@@ -545,22 +660,49 @@ PackedMaterialTransformGpuData getMaterialTransform(MaterialData material,
   case kMaterialTextureSlotEmissive:
     return material.header.commonTransforms[4];
   case kMaterialTextureSlotClearcoat:
+    if (!material.hasClearcoat) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.clearcoat.transforms[0];
   case kMaterialTextureSlotClearcoatRoughness:
+    if (!material.hasClearcoat) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.clearcoat.transforms[1];
   case kMaterialTextureSlotClearcoatNormal:
+    if (!material.hasClearcoat) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.clearcoat.transforms[2];
   case kMaterialTextureSlotSpecular:
+    if (!material.hasSpecular) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.specular.transforms[0];
   case kMaterialTextureSlotSpecularColor:
+    if (!material.hasSpecular) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.specular.transforms[1];
   case kMaterialTextureSlotSheenColor:
+    if (!material.hasSheen) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.sheen.transforms[0];
   case kMaterialTextureSlotSheenRoughness:
+    if (!material.hasSheen) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.sheen.transforms[1];
   case kMaterialTextureSlotTransmission:
+    if (!material.hasTransmission) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.transmission.transforms[0];
   case kMaterialTextureSlotThickness:
+    if (!material.hasTransmission) {
+      return PackedMaterialTransformGpuData(0u, 0u, 0u);
+    }
     return material.transmission.transforms[1];
   default:
     return PackedMaterialTransformGpuData(0u, 0u, 0u);

@@ -1,3 +1,7 @@
+float materialAlphaCutoff(MaterialData material) {
+  return material.header.metallicRoughnessOcclusionAlphaCutoff.w;
+}
+
 float sampleMaterialSpecularWeight(MaterialData material, vec2 uvSpecular,
                                    uint texId, uint samplerIndex) {
   float specularWeight = material.specular.specularColorFactorSpecular.w;

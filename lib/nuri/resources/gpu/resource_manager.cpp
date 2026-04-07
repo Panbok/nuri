@@ -446,10 +446,15 @@ ResourceManager::~ResourceManager() {
       destroyModelSlot(i);
     }
   }
+  bool materialTablesDirty = false;
   for (uint32_t i = 0; i < materialSlots_.size(); ++i) {
     if (materialSlotsMeta_.isLive(i)) {
-      destroyMaterialSlot(i);
+      destroyMaterialSlot(i, true);
+      materialTablesDirty = true;
     }
+  }
+  if (materialTablesDirty) {
+    rebuildPackedMaterialTables();
   }
   for (uint32_t i = 0; i < textureSlots_.size(); ++i) {
     if (textureSlotsMeta_.isLive(i)) {
@@ -561,7 +566,7 @@ void ResourceManager::destroyTextureSlot(uint32_t index) {
   textureSlotsMeta_.release(index);
 }
 
-void ResourceManager::destroyMaterialSlot(uint32_t index) {
+void ResourceManager::destroyMaterialSlot(uint32_t index, bool skipRebuild) {
   MaterialSlot &slot = materialSlots_[index];
   if (!materialSlotsMeta_.isLive(index)) {
     return;
@@ -586,9 +591,11 @@ void ResourceManager::destroyMaterialSlot(uint32_t index) {
   if (index < materialHeaderTable_.size()) {
     materialHeaderTable_[index] = MaterialHeaderGpuData{};
   }
-  rebuildPackedMaterialTables();
-  ++materialTableVersion_;
   materialSlotsMeta_.release(index);
+  if (!skipRebuild) {
+    rebuildPackedMaterialTables();
+  }
+  ++materialTableVersion_;
 }
 
 void ResourceManager::destroyModelSlot(uint32_t index) {
@@ -649,7 +656,7 @@ void ResourceManager::rebuildPackedMaterialTables() {
           static_cast<uint32_t>(materialSheenTable_.size());
       materialSheenTable_.push_back(packed.sheen);
     }
-    if (packed.hasTransmission) {
+    if (packed.hasTransmissionOrVolume) {
       header.transmissionExtensionIndex =
           static_cast<uint32_t>(materialTransmissionTable_.size());
       materialTransmissionTable_.push_back(packed.transmission);
@@ -929,7 +936,6 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   if (slotIndex >= materialHeaderTable_.size()) {
     materialHeaderTable_.resize(slotIndex + 1u);
   }
-  materialHeaderTable_[slotIndex] = slot.record.packedGpuData.header;
   rebuildPackedMaterialTables();
   ++materialTableVersion_;
 
@@ -1617,6 +1623,7 @@ void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
   }
 
   {
+    bool materialTablesDirty = false;
     size_t i = 0;
     while (i < pendingRetireMaterials_.size()) {
       const MaterialRef ref = pendingRetireMaterials_[i];
@@ -1631,9 +1638,13 @@ void ResourceManager::collectGarbage(uint64_t completedFrameIndex) {
         ++i;
         continue;
       }
-      destroyMaterialSlot(indexOf(ref));
+      destroyMaterialSlot(indexOf(ref), true);
+      materialTablesDirty = true;
       pendingRetireMaterials_[i] = pendingRetireMaterials_.back();
       pendingRetireMaterials_.pop_back();
+    }
+    if (materialTablesDirty) {
+      rebuildPackedMaterialTables();
     }
   }
 

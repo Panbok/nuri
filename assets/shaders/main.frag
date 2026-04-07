@@ -13,8 +13,7 @@ void main() {
 
   ShadedMaterial sm = evaluateMaterial(material, vtx);
 
-  const float alphaCutoff =
-      material.header.metallicRoughnessOcclusionAlphaCutoff.w;
+  const float alphaCutoff = materialAlphaCutoff(material);
   if (alphaMode == kAlphaModeMask && sm.baseColor.a < alphaCutoff) {
     discard;
   }

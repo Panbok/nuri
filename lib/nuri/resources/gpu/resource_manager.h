@@ -161,6 +161,11 @@ struct NURI_API ModelRecord {
   [[nodiscard]] MaterialRef materialForSubmesh(uint32_t submeshIndex) const;
 };
 
+// headers is indexed by material table slot; clearcoat, sheen, transmission,
+// and specular are compact extension tables keyed by indices stored in headers,
+// so those spans are not required to have equal lengths. Empty/missing
+// extension components use kInvalidMaterialExtensionIndex in headers. version
+// identifies the snapshot contents and changes when any table changes.
 struct NURI_API MaterialTableSnapshot {
   std::span<const MaterialHeaderGpuData> headers{};
   std::span<const MaterialClearcoatGpuData> clearcoat{};
@@ -315,7 +320,7 @@ private:
   [[nodiscard]] Result<SlotReservation, std::string> allocateModelSlot();
 
   void destroyTextureSlot(uint32_t index);
-  void destroyMaterialSlot(uint32_t index);
+  void destroyMaterialSlot(uint32_t index, bool skipRebuild = false);
   void destroyModelSlot(uint32_t index);
   void rebuildPackedMaterialTables();
 

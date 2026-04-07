@@ -25,5 +25,5 @@ void main() {
   }
 
   outObjectId =
-      (inInstanceId >= 0xFFFFFFFFu) ? 0xFFFFFFFFu : (inInstanceId + 1u);
+      (inInstanceId == 0xFFFFFFFFu) ? 0xFFFFFFFFu : (inInstanceId + 1u);
 }

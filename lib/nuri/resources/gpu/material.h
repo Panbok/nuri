@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #include <glm/glm.hpp>
 
@@ -208,9 +209,11 @@ struct MaterialPackedGpuData {
   MaterialSpecularGpuData specular{};
   bool hasClearcoat = false;
   bool hasSheen = false;
-  bool hasTransmission = false;
+  bool hasTransmissionOrVolume = false;
   bool hasSpecular = false;
 };
+static_assert(std::is_trivially_copyable_v<MaterialPackedGpuData>,
+              "MaterialPackedGpuData must remain trivially copyable");
 
 struct MaterialPackedTablesEntry {
   MaterialHeaderGpuData header{};

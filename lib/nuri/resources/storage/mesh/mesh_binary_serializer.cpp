@@ -660,8 +660,12 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
         staticDecodeLayoutResult.error());
   }
   if (input.vertexLayoutId == kMeshBinaryLayoutIdStaticQuantized20) {
-    if (!input.staticVertexDecode.empty() &&
-        input.staticVertexDecode.count != input.submeshes.size()) {
+    if (input.staticVertexDecode.empty()) {
+      return makeSerializerError<std::vector<std::byte>>(
+          "meshBinarySerialize: static vertex decode is required for static "
+          "layout");
+    }
+    if (input.staticVertexDecode.count != input.submeshes.size()) {
       return makeSerializerError<std::vector<std::byte>>(
           "meshBinarySerialize: static vertex decode count must match "
           "submeshes");
@@ -1181,6 +1185,12 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   }
   std::pmr::vector<MeshBinarySubmeshRecord> submeshRecords =
       std::move(submeshRecordsResult.value());
+  if (layoutRecord.layoutId == kMeshBinaryLayoutIdStaticQuantized20 &&
+      vdecMeta->elementCount != submeshRecords.size()) {
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
+        "meshBinaryDeserialize: VDEC elementCount does not match submesh "
+        "count");
+  }
   std::pmr::vector<MeshBinaryLodRecord> lodRecords(scopedScratch.resource());
   if (!readPodArray(fileBytes, lodsEntry.offset, lodsEntry.count, lodRecords)) {
     return makeDeserializeError<MeshBinaryDecodedMesh>(

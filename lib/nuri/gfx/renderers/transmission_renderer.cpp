@@ -522,10 +522,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   if (!meshDrawTemplates_.empty()) {
     NURI_PROFILER_ZONE("TransmissionRenderer.material_instance_uploads",
                        NURI_PROFILER_COLOR_CMD_COPY);
-    if (materialDirty) {
-      cachedMaterialVersion_ = materialSnapshot.version;
-    }
-
     const bool needsInstanceDataUpload =
         animationSceneData == nullptr &&
         instanceDataRingUploadVersions_[frameSlot] != cachedTransformVersion_;

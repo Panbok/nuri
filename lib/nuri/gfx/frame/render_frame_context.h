@@ -191,6 +191,11 @@ struct ForwardSceneGpuData {
   uint32_t localLightCount = 0;
 };
 
+// Keep this one-to-one with ForwardSceneFrameData's material buffer address
+// fields: headerBufferAddress, clearcoatBufferAddress, sheenBufferAddress,
+// transmissionBufferAddress, and specularBufferAddress. Reordering, renaming,
+// or layout changes here must be mirrored there; update version with structural
+// changes so consumers do not desynchronize cached table data.
 struct MaterialTableGpuData {
   BufferHandle headerBuffer{};
   BufferHandle clearcoatBuffer{};

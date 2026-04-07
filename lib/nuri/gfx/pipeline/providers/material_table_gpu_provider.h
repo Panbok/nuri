@@ -31,23 +31,26 @@ public:
   prepare(FrameBuildContext &ctx) override;
 
 private:
-  Result<bool, std::string>
-  ensureBufferCapacity(std::unique_ptr<Buffer> &buffer, size_t &capacityBytes,
-                       size_t requiredBytes, std::string_view debugName);
+  struct ManagedBuffer {
+    std::unique_ptr<Buffer> buffer{};
+    size_t capacityBytes = 0u;
+  };
+
+  static constexpr uint64_t kNoVersionUploaded =
+      std::numeric_limits<uint64_t>::max();
+
+  Result<bool, std::string> ensureBufferCapacity(ManagedBuffer &managedBuffer,
+                                                 size_t requiredBytes,
+                                                 std::string_view debugName);
   void destroyBuffers();
 
   GPUDevice &gpu_;
-  std::unique_ptr<Buffer> headerBuffer_;
-  std::unique_ptr<Buffer> clearcoatBuffer_;
-  std::unique_ptr<Buffer> sheenBuffer_;
-  std::unique_ptr<Buffer> transmissionBuffer_;
-  std::unique_ptr<Buffer> specularBuffer_;
-  size_t headerCapacityBytes_ = 0u;
-  size_t clearcoatCapacityBytes_ = 0u;
-  size_t sheenCapacityBytes_ = 0u;
-  size_t transmissionCapacityBytes_ = 0u;
-  size_t specularCapacityBytes_ = 0u;
-  uint64_t uploadedVersion_ = std::numeric_limits<uint64_t>::max();
+  ManagedBuffer headerBuffer_;
+  ManagedBuffer clearcoatBuffer_;
+  ManagedBuffer sheenBuffer_;
+  ManagedBuffer transmissionBuffer_;
+  ManagedBuffer specularBuffer_;
+  uint64_t uploadedVersion_ = kNoVersionUploaded;
 };
 
 } // namespace nuri

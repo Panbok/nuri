@@ -11,6 +11,7 @@ namespace {
 constexpr uint32_t kMaterialFlagsAlphaModeMask = 0x3u;
 constexpr uint32_t kMaterialFlagsDoubleSidedBit = 1u << 2u;
 constexpr uint32_t kMaterialFlagsWorkflowShift = 8u;
+constexpr uint32_t kMaterialFlagsWorkflowMask = 0xFFu;
 constexpr uint32_t kMaterialFlagsFeatureShift = 16u;
 
 struct ImportedTextureMapping {
@@ -145,8 +146,9 @@ uint32_t packMaterialFlags(const MaterialDesc &desc) {
   if (desc.doubleSided) {
     flags |= kMaterialFlagsDoubleSidedBit;
   }
-  flags |=
-      (static_cast<uint32_t>(desc.workflow) << kMaterialFlagsWorkflowShift);
+  const uint32_t workflowBits =
+      static_cast<uint32_t>(desc.workflow) & kMaterialFlagsWorkflowMask;
+  flags |= workflowBits << kMaterialFlagsWorkflowShift;
   flags |= (desc.featureMask << kMaterialFlagsFeatureShift);
   return flags;
 }
@@ -338,7 +340,7 @@ buildPackedGpuData(GPUDevice &gpu, const MaterialDesc &desc) {
 
   if ((desc.featureMask &
        (kMaterialFeatureTransmission | kMaterialFeatureVolume)) != 0u) {
-    gpuData.hasTransmission = true;
+    gpuData.hasTransmissionOrVolume = true;
     gpuData.transmission.transmissionThicknessDistance =
         glm::vec4(transmission, thickness, attenuationDistance, 0.0f);
     gpuData.transmission.attenuationColorReserved =

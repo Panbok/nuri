@@ -32,9 +32,10 @@ vec3 decodeOctNormal(vec2 encoded) {
 vec2 encodeOctNormal(vec3 normal) {
   const float lenSq = dot(normal, normal);
   if (lenSq <= 1.0e-10) {
-    return vec2(0.0);
+    normal = vec3(0.0, 1.0, 0.0);
+  } else {
+    normal *= inversesqrt(lenSq);
   }
-  normal = normalize(normal);
   normal /= abs(normal.x) + abs(normal.y) + abs(normal.z);
   vec2 encoded = normal.xy;
   if (normal.z < 0.0) {
@@ -57,9 +58,7 @@ vec3 decodePackedNormal(PackedVertex vertex) {
 
 PackedVertex encodePackedVertex(vec3 position, vec3 normal, vec2 uv0, vec2 uv1) {
   PackedVertex packed;
-  vec3 safeNormal = dot(normal, normal) > 1.0e-10 ? normalize(normal)
-                                                  : vec3(0.0, 1.0, 0.0);
-  vec2 oct = encodeOctNormal(safeNormal);
+  vec2 oct = encodeOctNormal(normal);
   packed.word0 = floatBitsToUint(position.x);
   packed.word1 = floatBitsToUint(position.y);
   packed.word2 = floatBitsToUint(position.z);
