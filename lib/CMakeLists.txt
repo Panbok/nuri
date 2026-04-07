@@ -24,12 +24,16 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/pipeline/features/transmission_feature.cpp
   nuri/gfx/pipeline/features/transparent_feature.cpp
   nuri/gfx/pipeline/render_pipeline.cpp
+  nuri/gfx/pipeline/providers/material_table_gpu_provider.cpp
   nuri/gfx/pipeline/providers/scene_lighting_provider.cpp
   nuri/gfx/renderers/transmission_renderer.cpp
   nuri/gfx/renderers/transparent_renderer.cpp
   nuri/gfx/render_graph/render_graph.cpp
   nuri/gfx/render_graph/render_graph_runtime.cpp
   nuri/gfx/render_graph/render_graph_telemetry.cpp
+  nuri/gfx/sim/animation_gpu_services.cpp
+  nuri/gfx/sim/animation_scene_frame_provider.cpp
+  nuri/gfx/sim/simulation_gpu_context.cpp
   nuri/gfx/renderer.cpp
   nuri/gfx/shader.cpp
   nuri/platform/glfw_window.cpp
@@ -56,12 +60,21 @@ set(NURI_RENDERER_SOURCES
   nuri/resources/storage/mesh/mesh_cache_utils.cpp
   nuri/resources/storage/mesh/mesh_cache_writer.cpp
   nuri/resources/storage/texture/texture_cache_utils.cpp
+  nuri/scene_runtime/scene_runtime_bindings.cpp
+  nuri/scene_runtime/scene_runtime_host.cpp
   nuri/scene/camera.cpp
   nuri/scene/camera_controller.cpp
   nuri/scene/camera_system.cpp
   nuri/scene/render_scene.cpp
   nuri/scene/scene_animation_player.cpp
   nuri/scene/scene_graph.cpp
+  nuri/sim/fixed_step_clock.cpp
+  nuri/sim/animation_pose_simulation.cpp
+  nuri/sim/backends/animation_pose_simulation_backend.cpp
+  nuri/sim/backends/null_simulation_backend.cpp
+  nuri/sim/simulation_controller.cpp
+  nuri/sim/simulation_registry.cpp
+  nuri/sim/simulation_scheduler.cpp
   nuri/text/detail/font_manager.cpp
   nuri/text/detail/text_layouter.cpp
   nuri/text/detail/text_renderer.cpp
