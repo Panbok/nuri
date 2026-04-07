@@ -160,21 +160,39 @@ struct MeshBinaryRequiredSections {
   const MeshBinarySectionTocEntry *ibuf = nullptr;
 };
 
+[[nodiscard]] uint32_t vertexStrideForLayoutId(uint32_t layoutId) {
+  switch (layoutId) {
+  case kMeshBinaryLayoutIdStaticQuantized20:
+    return kMeshBinaryStaticVertexStrideBytes;
+  case kMeshBinaryLayoutIdAnimatedFloat24:
+    return kMeshBinaryAnimatedVertexStrideBytes;
+  default:
+    return 0u;
+  }
+}
+
 [[nodiscard]] Result<SerializedSection, std::string>
-buildVertexLayoutSection() {
+buildVertexLayoutSection(const MeshBinarySerializeInput &input) {
   SerializedSection section{};
   section.fourcc = kMeshBinarySectionVlay;
   section.flags = 0;
   section.count = 1;
   section.stride = sizeof(MeshBinaryVertexLayoutRecord);
   MeshBinaryVertexLayoutRecord record{};
+  record.layoutId = input.vertexLayoutId;
+  record.strideBytes = vertexStrideForLayoutId(input.vertexLayoutId);
+  if (record.strideBytes == 0u) {
+    return makeSerializerError<SerializedSection>(
+        "meshBinarySerialize: unsupported vertex layout id");
+  }
   appendPod(section.payload, record);
   return Result<SerializedSection, std::string>::makeResult(std::move(section));
 }
 
 [[nodiscard]] Result<std::pair<SerializedSection, SerializedSection>,
                      std::string>
-buildSubmeshAndLodSections(std::span<const Submesh> submeshes) {
+buildSubmeshAndLodSections(std::span<const Submesh> submeshes,
+                           uint32_t vertexLayoutId) {
   SerializedSection submeshSection{};
   submeshSection.fourcc = kMeshBinarySectionSmes;
   submeshSection.flags = 0;
@@ -204,7 +222,7 @@ buildSubmeshAndLodSections(std::span<const Submesh> submeshes) {
     submeshRecord.materialIndex = submesh.materialIndex;
     submeshRecord.lodFirst = lodCount;
     submeshRecord.lodCount = submesh.lodCount;
-    submeshRecord.layoutId = kMeshBinaryLayoutIdPacked32;
+    submeshRecord.layoutId = vertexLayoutId;
     submeshRecord.morphTargetFirst = submesh.morphTargetFirst;
     submeshRecord.morphTargetCount = submesh.morphTargetCount;
     submeshRecord.boundsMin[0] = submesh.bounds.min_.x;
@@ -599,6 +617,13 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
         "meshBinarySerialize: vertex count mismatch between metadata and "
         "bytes");
   }
+  const uint32_t expectedVertexStride =
+      vertexStrideForLayoutId(input.vertexLayoutId);
+  if (expectedVertexStride == 0u ||
+      input.vertices.strideBytes != expectedVertexStride) {
+    return makeSerializerError<std::vector<std::byte>>(
+        "meshBinarySerialize: vertex stride does not match layout id");
+  }
 
   const auto validateOptionalLayout =
       [](const BufferLayout<std::span<const std::byte>> &layout,
@@ -628,6 +653,24 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
     return makeSerializerError<std::vector<std::byte>>(
         morphDeltaLayoutResult.error());
   }
+  auto staticDecodeLayoutResult =
+      validateOptionalLayout(input.staticVertexDecode, "static vertex decode");
+  if (staticDecodeLayoutResult.hasError()) {
+    return makeSerializerError<std::vector<std::byte>>(
+        staticDecodeLayoutResult.error());
+  }
+  if (input.vertexLayoutId == kMeshBinaryLayoutIdStaticQuantized20) {
+    if (!input.staticVertexDecode.empty() &&
+        input.staticVertexDecode.count != input.submeshes.size()) {
+      return makeSerializerError<std::vector<std::byte>>(
+          "meshBinarySerialize: static vertex decode count must match "
+          "submeshes");
+    }
+  } else if (!input.staticVertexDecode.empty()) {
+    return makeSerializerError<std::vector<std::byte>>(
+        "meshBinarySerialize: static vertex decode is only valid for static "
+        "layout");
+  }
 
   if (input.morphMeta.empty() != input.morphDeltas.empty()) {
     return makeSerializerError<std::vector<std::byte>>(
@@ -644,13 +687,14 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
   std::pmr::vector<SerializedSection> sections(scopedScratch.resource());
   sections.reserve(8);
 
-  auto vlayResult = buildVertexLayoutSection();
+  auto vlayResult = buildVertexLayoutSection(input);
   if (vlayResult.hasError()) {
     return makeSerializerError<std::vector<std::byte>>(vlayResult.error());
   }
   sections.push_back(std::move(vlayResult.value()));
 
-  auto smesLodsResult = buildSubmeshAndLodSections(input.submeshes);
+  auto smesLodsResult =
+      buildSubmeshAndLodSections(input.submeshes, input.vertexLayoutId);
   if (smesLodsResult.hasError()) {
     return makeSerializerError<std::vector<std::byte>>(smesLodsResult.error());
   }
@@ -678,6 +722,16 @@ meshBinarySerialize(const MeshBinarySerializeInput &input) {
       return makeSerializerError<std::vector<std::byte>>(vinfResult.error());
     }
     sections.push_back(std::move(vinfResult.value()));
+  }
+  if (!input.staticVertexDecode.empty()) {
+    auto vdecResult = buildOptionalVertexBufferSection(kMeshBinarySectionVdec,
+                                                       input.staticVertexDecode,
+                                                       "static vertex decode");
+    if (vdecResult.hasError()) {
+      return Result<std::vector<std::byte>, std::string>::makeError(
+          vdecResult.error());
+    }
+    sections.push_back(std::move(vdecResult.value()));
   }
   if (!input.morphMeta.empty()) {
     auto mmtaResult = buildOptionalVertexBufferSection(
@@ -915,8 +969,10 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
     return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: failed to read VLAY record");
   }
-  if (layoutRecord.layoutId != kMeshBinaryLayoutIdPacked32 ||
-      layoutRecord.strideBytes != kMeshBinaryPackedVertexStrideBytes) {
+  const uint32_t expectedVertexStride =
+      vertexStrideForLayoutId(layoutRecord.layoutId);
+  if (expectedVertexStride == 0u ||
+      layoutRecord.strideBytes != expectedVertexStride) {
     return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: unsupported vertex layout");
   }
@@ -956,6 +1012,11 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
     return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
         vinfEntryResult.error());
   }
+  auto vdecEntryResult = findOptionalSection(kMeshBinarySectionVdec, "VDEC");
+  if (vdecEntryResult.hasError()) {
+    return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
+        vdecEntryResult.error());
+  }
   auto mmtaEntryResult = findOptionalSection(kMeshBinarySectionMmta, "MMTA");
   if (mmtaEntryResult.hasError()) {
     return Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>::makeError(
@@ -967,6 +1028,7 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
         mdelEntryResult.error());
   }
   const MeshBinarySectionTocEntry *vinfEntry = vinfEntryResult.value();
+  const MeshBinarySectionTocEntry *vdecEntry = vdecEntryResult.value();
   const MeshBinarySectionTocEntry *mmtaEntry = mmtaEntryResult.value();
   const MeshBinarySectionTocEntry *mdelEntry = mdelEntryResult.value();
   if ((mmtaEntry == nullptr) != (mdelEntry == nullptr)) {
@@ -997,9 +1059,11 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
         decodedIndicesResult.error());
   }
   std::optional<MeshBinaryBufferSectionHeader> vinfMeta;
+  std::optional<MeshBinaryBufferSectionHeader> vdecMeta;
   std::optional<MeshBinaryBufferSectionHeader> mmtaMeta;
   std::optional<MeshBinaryBufferSectionHeader> mdelMeta;
   std::vector<std::byte> decodedSkinInfluences;
+  std::vector<std::byte> decodedStaticVertexDecode;
   std::vector<std::byte> decodedMorphMeta;
   std::vector<std::byte> decodedMorphDeltas;
   auto decodeOptionalBufferSection =
@@ -1042,6 +1106,15 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
     vinfMeta = result.value().first;
     decodedSkinInfluences = std::move(result.value().second);
   }
+  if (vdecEntry != nullptr) {
+    auto result = decodeOptionalBufferSection(vdecEntry, "VDEC");
+    if (result.hasError()) {
+      return Result<MeshBinaryDecodedMesh,
+                    MeshBinaryDeserializeError>::makeError(result.error());
+    }
+    vdecMeta = result.value().first;
+    decodedStaticVertexDecode = std::move(result.value().second);
+  }
   if (mmtaEntry != nullptr) {
     auto result = decodeOptionalBufferSection(mmtaEntry, "MMTA");
     if (result.hasError()) {
@@ -1063,6 +1136,15 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   if (vinfMeta.has_value() && vinfMeta->elementCount != vbufMeta.elementCount) {
     return makeDeserializeError<MeshBinaryDecodedMesh>(
         "meshBinaryDeserialize: skin influence count must match vertex count");
+  }
+  if (layoutRecord.layoutId == kMeshBinaryLayoutIdStaticQuantized20) {
+    if (!vdecMeta.has_value()) {
+      return makeDeserializeError<MeshBinaryDecodedMesh>(
+          "meshBinaryDeserialize: static layout requires VDEC section");
+    }
+  } else if (vdecMeta.has_value()) {
+    return makeDeserializeError<MeshBinaryDecodedMesh>(
+        "meshBinaryDeserialize: VDEC section is only valid for static layout");
   }
   if (mmtaMeta.has_value()) {
     if (mmtaMeta->elementCount != 1u ||
@@ -1106,6 +1188,7 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   }
 
   MeshBinaryDecodedMesh decoded{};
+  decoded.vertexLayoutId = layoutRecord.layoutId;
   decoded.vertices.data = std::move(decodedVerticesResult.value());
   decoded.vertices.count = vbufMeta.elementCount;
   decoded.vertices.strideBytes = vbufMeta.elementStrideBytes;
@@ -1118,6 +1201,11 @@ meshBinaryDeserialize(std::span<const std::byte> fileBytes,
   if (vinfMeta.has_value()) {
     decoded.skinInfluences.count = vinfMeta->elementCount;
     decoded.skinInfluences.strideBytes = vinfMeta->elementStrideBytes;
+  }
+  decoded.staticVertexDecode.data = std::move(decodedStaticVertexDecode);
+  if (vdecMeta.has_value()) {
+    decoded.staticVertexDecode.count = vdecMeta->elementCount;
+    decoded.staticVertexDecode.strideBytes = vdecMeta->elementStrideBytes;
   }
   decoded.morphMeta.data = std::move(decodedMorphMeta);
   if (mmtaMeta.has_value()) {

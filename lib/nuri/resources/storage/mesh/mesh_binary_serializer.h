@@ -39,7 +39,9 @@ struct MeshBinarySerializeInput {
   uint64_t sourceSizeBytes = 0;
   int64_t sourceMtimeNs = 0;
   BoundingBox bounds{glm::vec3(0.0f), glm::vec3(0.0f)};
+  uint32_t vertexLayoutId = 0u;
   BufferLayout<std::span<const std::byte>> vertices{};
+  BufferLayout<std::span<const std::byte>> staticVertexDecode{};
   std::span<const uint32_t> indices{};
   std::span<const Submesh> submeshes{};
   BufferLayout<std::span<const std::byte>> skinInfluences{};
@@ -57,7 +59,9 @@ struct MeshBinaryDeserializeContext {
 };
 
 struct MeshBinaryDecodedMesh {
+  uint32_t vertexLayoutId = 0u;
   BufferLayout<std::vector<std::byte>> vertices{};
+  BufferLayout<std::vector<std::byte>> staticVertexDecode{};
   std::vector<uint32_t> indices;
   std::vector<Submesh> submeshes;
   BoundingBox bounds{glm::vec3(0.0f), glm::vec3(0.0f)};

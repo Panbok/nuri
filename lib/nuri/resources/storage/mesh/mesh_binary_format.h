@@ -6,8 +6,8 @@
 
 namespace nuri {
 
-constexpr uint16_t kMeshBinaryFormatMajorVersion = 1;
-constexpr uint16_t kMeshBinaryFormatMinorVersion = 2;
+constexpr uint16_t kMeshBinaryFormatMajorVersion = 2;
+constexpr uint16_t kMeshBinaryFormatMinorVersion = 0;
 
 constexpr std::array<char, 8> kMeshBinaryMagic = {'N', 'U', 'R', 'I',
                                                   'M', 'S', 'H', '\0'};
@@ -36,20 +36,23 @@ constexpr uint32_t kMeshBinarySectionIbuf =
     makeMeshBinaryFourCC('I', 'B', 'U', 'F');
 constexpr uint32_t kMeshBinarySectionVinf =
     makeMeshBinaryFourCC('V', 'I', 'N', 'F'); // Vertex Info
+constexpr uint32_t kMeshBinarySectionVdec =
+    makeMeshBinaryFourCC('V', 'D', 'E', 'C'); // Static Vertex Decode
 constexpr uint32_t kMeshBinarySectionMmta =
     makeMeshBinaryFourCC('M', 'M', 'T', 'A'); // Morph Metadata
 constexpr uint32_t kMeshBinarySectionMdel =
     makeMeshBinaryFourCC('M', 'D', 'E', 'L'); // Morph Deltas
 
-constexpr uint32_t kMeshBinaryLayoutIdPacked32 = 0u;
-constexpr uint32_t kMeshBinaryPackedVertexStrideBytes = 36u;
+constexpr uint32_t kMeshBinaryLayoutIdStaticQuantized20 = 0u;
+constexpr uint32_t kMeshBinaryLayoutIdAnimatedFloat24 = 1u;
+constexpr uint32_t kMeshBinaryStaticVertexStrideBytes = 20u;
+constexpr uint32_t kMeshBinaryAnimatedVertexStrideBytes = 24u;
 
 // Attribute bitmask for the packed v1 shader layout.
 constexpr uint32_t kMeshBinaryPackedAttributePosition = 1u << 0u;
 constexpr uint32_t kMeshBinaryPackedAttributeUv = 1u << 1u;
 constexpr uint32_t kMeshBinaryPackedAttributeUv1 = 1u << 2u;
 constexpr uint32_t kMeshBinaryPackedAttributeNormal = 1u << 3u;
-constexpr uint32_t kMeshBinaryPackedAttributeTangent = 1u << 4u;
 
 #pragma pack(push, 1)
 struct MeshBinaryHeader {
@@ -83,12 +86,11 @@ struct MeshBinarySectionTocEntry {
 };
 
 struct MeshBinaryVertexLayoutRecord {
-  uint32_t layoutId = kMeshBinaryLayoutIdPacked32;
-  uint32_t strideBytes = kMeshBinaryPackedVertexStrideBytes;
+  uint32_t layoutId = kMeshBinaryLayoutIdStaticQuantized20;
+  uint32_t strideBytes = kMeshBinaryStaticVertexStrideBytes;
   uint32_t attributeMask =
       kMeshBinaryPackedAttributePosition | kMeshBinaryPackedAttributeUv |
-      kMeshBinaryPackedAttributeUv1 | kMeshBinaryPackedAttributeNormal |
-      kMeshBinaryPackedAttributeTangent;
+      kMeshBinaryPackedAttributeUv1 | kMeshBinaryPackedAttributeNormal;
   uint32_t reserved = 0;
 };
 
@@ -98,7 +100,7 @@ struct MeshBinarySubmeshRecord {
   uint32_t materialIndex = 0;
   uint32_t lodFirst = 0;
   uint32_t lodCount = 0;
-  uint32_t layoutId = kMeshBinaryLayoutIdPacked32;
+  uint32_t layoutId = kMeshBinaryLayoutIdStaticQuantized20;
   uint32_t morphTargetFirst = 0;
   uint32_t morphTargetCount = 0;
   float boundsMin[3] = {0.0f, 0.0f, 0.0f};
@@ -111,7 +113,7 @@ struct MeshBinarySubmeshRecordV0 {
   uint32_t materialIndex = 0;
   uint32_t lodFirst = 0;
   uint32_t lodCount = 0;
-  uint32_t layoutId = kMeshBinaryLayoutIdPacked32;
+  uint32_t layoutId = kMeshBinaryLayoutIdStaticQuantized20;
   float boundsMin[3] = {0.0f, 0.0f, 0.0f};
   float boundsMax[3] = {0.0f, 0.0f, 0.0f};
   uint32_t reserved[2] = {0, 0};
@@ -121,7 +123,7 @@ struct MeshBinarySubmeshRecordV1 {
   uint32_t materialIndex = 0;
   uint32_t lodFirst = 0;
   uint32_t lodCount = 0;
-  uint32_t layoutId = kMeshBinaryLayoutIdPacked32;
+  uint32_t layoutId = kMeshBinaryLayoutIdStaticQuantized20;
   float boundsMin[3] = {0.0f, 0.0f, 0.0f};
   float boundsMax[3] = {0.0f, 0.0f, 0.0f};
   float authoredScale[3] = {1.0f, 1.0f, 1.0f};

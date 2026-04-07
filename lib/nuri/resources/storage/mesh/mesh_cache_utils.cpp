@@ -9,7 +9,7 @@ namespace {
 
 constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
-constexpr uint32_t kMeshCacheContentVersion = 8u;
+constexpr uint32_t kMeshCacheContentVersion = 9u;
 
 void fnv1aAddByte(uint64_t &hash, uint8_t byte) {
   hash ^= byte;
@@ -58,7 +58,6 @@ uint64_t hashMeshImportOptions(const MeshImportOptions &options) {
 
   addBool(options.triangulate);
   addBool(options.genNormals);
-  addBool(options.genTangents);
   addBool(options.flipUVs);
   addBool(options.joinIdenticalVertices);
   addBool(options.genUVCoords);
