@@ -6,15 +6,15 @@ layout(location = 10) flat in uint inInstanceId;
 layout(location = 0) out uint outObjectId;
 
 void main() {
-  const MaterialGpuData material = pc.materialBuffer.materials[pc.materialIndex];
+  const MaterialData material = loadMaterialData(pc.materialIndex);
   const uint baseColorTexId =
-      GET_TEXTURE_INDEX(material, kMaterialTextureSlotBaseColor);
+      getMaterialTextureIndex(material, kMaterialTextureSlotBaseColor);
   const uint baseColorSampler = pc.frameData.materialSamplerId;
 
   const vec2 baseColorUv =
       transformedUv(material, vtx, kMaterialTextureSlotBaseColor);
 
-  vec4 baseColor = material.baseColorFactor;
+  vec4 baseColor = material.header.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {
     baseColor *=
         textureBindless2D(baseColorTexId, baseColorSampler, baseColorUv);
@@ -24,5 +24,6 @@ void main() {
     discard;
   }
 
-  outObjectId = (inInstanceId >= 0xFFFFFFFFu) ? 0xFFFFFFFFu : (inInstanceId + 1u);
+  outObjectId =
+      (inInstanceId >= 0xFFFFFFFFu) ? 0xFFFFFFFFu : (inInstanceId + 1u);
 }

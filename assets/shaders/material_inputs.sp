@@ -1,35 +1,34 @@
-float sampleMaterialSpecularWeight(MaterialGpuData material, vec2 uvSpecular,
+float sampleMaterialSpecularWeight(MaterialData material, vec2 uvSpecular,
                                    uint texId, uint samplerIndex) {
-  float specularWeight = material.specularColorFactorSpecular.w;
+  float specularWeight = material.specular.specularColorFactorSpecular.w;
   if (texId != kInvalidTextureBindlessIndex) {
     specularWeight *= textureBindless2D(texId, samplerIndex, uvSpecular).a;
   }
   return clamp(specularWeight, 0.0, 1.0);
 }
 
-vec3 sampleMaterialSpecularColor(MaterialGpuData material, vec2 uvSpecularColor,
+vec3 sampleMaterialSpecularColor(MaterialData material, vec2 uvSpecularColor,
                                  uint texId, uint samplerIndex) {
-  vec3 specularColor = material.specularColorFactorSpecular.rgb;
+  vec3 specularColor = material.specular.specularColorFactorSpecular.rgb;
   if (texId != kInvalidTextureBindlessIndex) {
     specularColor *= textureBindless2D(texId, samplerIndex, uvSpecularColor).rgb;
   }
   return max(specularColor, vec3(0.0));
 }
 
-vec4 sampleMaterialSpecularGlossiness(MaterialGpuData material,
+vec4 sampleMaterialSpecularGlossiness(MaterialData material,
                                       vec2 uvSpecularGlossiness, uint texId,
                                       uint samplerIndex) {
-  vec4 specGloss = material.specularColorFactorSpecular;
+  vec4 specGloss = material.specular.specularColorFactorSpecular;
   if (texId != kInvalidTextureBindlessIndex) {
-    specGloss *=
-        textureBindless2D(texId, samplerIndex, uvSpecularGlossiness);
+    specGloss *= textureBindless2D(texId, samplerIndex, uvSpecularGlossiness);
   }
   specGloss.rgb = max(specGloss.rgb, vec3(0.0));
   specGloss.a = clamp(specGloss.a, 0.0, 1.0);
   return specGloss;
 }
 
-void decodeMaterialBaseWorkflow(MaterialGpuData material, uint workflow,
+void decodeMaterialBaseWorkflow(MaterialData material, uint workflow,
                                 vec4 baseColor, vec4 mrSample,
                                 vec2 uvSpecular, uint specularTexId,
                                 uint specularSampler, vec2 uvSpecularColor,
@@ -54,9 +53,9 @@ void decodeMaterialBaseWorkflow(MaterialGpuData material, uint workflow,
     return;
   }
 
-  metallic = saturate(material.metallicRoughnessOcclusionAlphaCutoff.x *
+  metallic = saturate(material.header.metallicRoughnessOcclusionAlphaCutoff.x *
                       mrSample.b);
-  roughness = clamp(material.metallicRoughnessOcclusionAlphaCutoff.y *
+  roughness = clamp(material.header.metallicRoughnessOcclusionAlphaCutoff.y *
                         mrSample.g,
                     kBrdfMinRoughness, 1.0);
 
@@ -73,7 +72,7 @@ void decodeMaterialBaseWorkflow(MaterialGpuData material, uint workflow,
   diffuseColor = mix(baseColor.rgb, vec3(0.0), metallic);
 }
 
-float sampleMaterialOcclusion(MaterialGpuData material, uint workflow,
+float sampleMaterialOcclusion(MaterialData material, uint workflow,
                               vec4 mrSample, uint metallicRoughnessTexId,
                               vec2 uvOcclusion, uint occlusionTexId,
                               uint occlusionSampler) {

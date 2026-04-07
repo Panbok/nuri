@@ -3,7 +3,6 @@
 #include "material_inputs.sp"
 #include "material_lighting.sp"
 
-
 layout(location = 0) in PerVertex vtx;
 layout(location = 10) flat in uint inInstanceId;
 
@@ -154,14 +153,14 @@ vec3 getDirectTransmission(vec3 n, vec3 v, vec3 pointToLight,
 // ---------------------------------------------------------------------------
 
 void main() {
-  const MaterialGpuData material =
-      pc.materialBuffer.materials[pc.materialIndex];
-  const uint alphaMode = material.materialFlags.x;
-  const uint featureMask = material.materialFlags.z;
+  const MaterialData material = loadMaterialData(pc.materialIndex);
+  const uint alphaMode = materialAlphaMode(material);
+  const uint featureMask = materialFeatureMask(material);
 
   ShadedMaterial sm = evaluateMaterial(material, vtx);
 
-  const float alphaCutoff = material.metallicRoughnessOcclusionAlphaCutoff.w;
+  const float alphaCutoff =
+      material.header.metallicRoughnessOcclusionAlphaCutoff.w;
   if (alphaMode == kAlphaModeMask && sm.baseColor.a < alphaCutoff) {
     discard;
   }
@@ -169,30 +168,33 @@ void main() {
   // Transmission-specific material fields ----------------------------
   const uint matSampler = pc.frameData.materialSamplerId;
   const uint transmissionTexId =
-      GET_TEXTURE_INDEX(material, kMaterialTextureSlotTransmission);
+      getMaterialTextureIndex(material, kMaterialTextureSlotTransmission);
   const uint thicknessTexId =
-      GET_TEXTURE_INDEX(material, kMaterialTextureSlotThickness);
+      getMaterialTextureIndex(material, kMaterialTextureSlotThickness);
   const vec2 uvTransmission =
       transformedUv(material, vtx, kMaterialTextureSlotTransmission);
   const vec2 uvThickness =
       transformedUv(material, vtx, kMaterialTextureSlotThickness);
 
-  float transmissionFactor = material.transmissionThicknessIorPadding.x;
+  float transmissionFactor =
+      material.transmission.transmissionThicknessDistance.x;
   if (transmissionTexId != kInvalidTextureBindlessIndex) {
     transmissionFactor *=
         textureBindless2D(transmissionTexId, matSampler, uvTransmission).r;
   }
   transmissionFactor = saturate(transmissionFactor);
 
-  float thickness = max(material.transmissionThicknessIorPadding.y, 0.0);
+  float thickness =
+      max(material.transmission.transmissionThicknessDistance.y, 0.0);
   if (thicknessTexId != kInvalidTextureBindlessIndex) {
     thickness *= textureBindless2D(thicknessTexId, matSampler, uvThickness).g;
   }
   thickness = max(thickness, 0.0);
 
-  vec3 attenuationColor =
-      clamp(material.attenuationColorDistance.rgb, vec3(0.0), vec3(1.0));
-  float attenuationDistance = max(material.attenuationColorDistance.w, 0.0);
+  vec3 attenuationColor = clamp(
+      material.transmission.attenuationColorReserved.rgb, vec3(0.0), vec3(1.0));
+  float attenuationDistance =
+      max(material.transmission.transmissionThicknessDistance.z, 0.0);
 
   // glTF: packed ior==0 means KHR_materials_ior was omitted (compat mode for
   // base-layer F0).  For transmission we still follow the extension default

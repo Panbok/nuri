@@ -6,10 +6,9 @@ layout(location = 0) in vec2 inUv0[];
 layout(location = 1) in vec2 inUv1[];
 layout(location = 2) in vec3 inWorldNormal[];
 layout(location = 3) in vec3 inWorldPos[];
-layout(location = 4) in vec4 inWorldTangent[];
-layout(location = 5) flat in uint inInstanceId[];
-layout(location = 6) patch in vec3 inPatchOuterFactors;
-layout(location = 7) patch in float inPatchInnerFactor;
+layout(location = 4) flat in uint inInstanceId[];
+layout(location = 5) patch in vec3 inPatchOuterFactors;
+layout(location = 6) patch in float inPatchInnerFactor;
 
 layout(location = 0) out PerVertex vtx;
 layout(location = 10) flat out uint outInstanceId;
@@ -36,7 +35,6 @@ void main() {
   vtx.uv0 = uv0;
   vtx.uv1 = uv1;
   vtx.worldNormal = linearNormal;
-  vtx.worldTangent = vec4(0.0, 0.0, 0.0, 1.0);
   vtx.worldPos = linearPos;
   vtx.patchBarycentric = bary;
   vtx.triBarycentric = vec3(0.0);

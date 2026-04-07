@@ -8,13 +8,13 @@ layout(location = 0) in PerVertex vtx;
 layout(location = 0) out vec4 out_FragColor;
 
 void main() {
-  const MaterialGpuData material =
-      pc.materialBuffer.materials[pc.materialIndex];
-  const uint alphaMode = material.materialFlags.x;
+  const MaterialData material = loadMaterialData(pc.materialIndex);
+  const uint alphaMode = materialAlphaMode(material);
 
   ShadedMaterial sm = evaluateMaterial(material, vtx);
 
-  const float alphaCutoff = material.metallicRoughnessOcclusionAlphaCutoff.w;
+  const float alphaCutoff =
+      material.header.metallicRoughnessOcclusionAlphaCutoff.w;
   if (alphaMode == kAlphaModeMask && sm.baseColor.a < alphaCutoff) {
     discard;
   }

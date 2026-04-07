@@ -1,22 +1,25 @@
 #extension GL_EXT_buffer_reference : require
 
 const uint kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
+const uint kInvalidMaterialExtensionIndex = 0xFFFFFFFFu;
+
 const uint kFrameDataFlagHasIblDiffuse = 1u << 0u;
 const uint kFrameDataFlagHasIblSpecular = 1u << 1u;
 const uint kFrameDataFlagHasIblSheen = 1u << 2u;
 const uint kFrameDataFlagHasBrdfLut = 1u << 3u;
 const uint kFrameDataFlagOutputLinearToSrgb = 1u << 4u;
 const uint kFrameDataFlagHasSceneColor = 1u << 5u;
+
 const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
 const uint kMaterialFeatureSheen = 1u << 1u;
 const uint kMaterialFeatureClearcoat = 1u << 2u;
 const uint kMaterialFeatureTransmission = 1u << 3u;
 const uint kMaterialFeatureVolume = 1u << 4u;
 const uint kMaterialFeatureSpecular = 1u << 5u;
-// Material workflows are mutually exclusive modes; choose one workflow value.
-// kMaterialFeature* values are orthogonal bitflags that can be combined.
+
 const uint kMaterialWorkflowMetallicRoughness = 0u;
 const uint kMaterialWorkflowSpecularGlossiness = 1u;
+
 const uint kMaterialTextureSlotBaseColor = 0u;
 const uint kMaterialTextureSlotMetallicRoughness = 1u;
 const uint kMaterialTextureSlotNormal = 2u;
@@ -33,27 +36,16 @@ const uint kMaterialTextureSlotTransmission = 12u;
 const uint kMaterialTextureSlotThickness = 13u;
 const uint kMaterialTextureSlotCount = 14u;
 
-struct PackedVertex {
-  // CPU packs each vertex into 9 x 32-bit words:
-  // 0..2 = position.xyz as raw float bits
-  // 3    = uv0 as half2
-  // 4..5 = normal packed as snorm16 pairs (xy, then z + tangent handedness)
-  // 6..7 = tangent packed as snorm16 pairs (xy, then z + pad)
-  // 8    = uv1 as half2
-  // Decode uses uintBitsToFloat/unpackHalf2x16/custom snorm16 unpack.
-  uint word0;
-  uint word1;
-  uint word2;
-  uint word3;
-  uint word4;
-  uint word5;
-  uint word6;
-  uint word7;
-  uint word8;
-};
+const uint kPackedVertexFormatStaticQuantized20 = 0u;
+const uint kPackedVertexFormatAnimatedFloat24 = 1u;
 
-layout(std430, buffer_reference) readonly buffer PackedVertexBuffer {
-  PackedVertex vertices[];
+const uint kMaterialFlagsAlphaModeMask = 0x3u;
+const uint kMaterialFlagsDoubleSidedBit = 1u << 2u;
+const uint kMaterialFlagsWorkflowShift = 8u;
+const uint kMaterialFlagsFeatureShift = 16u;
+
+layout(std430, buffer_reference) readonly buffer PackedVertexWordBuffer {
+  uint words[];
 };
 
 layout(std430, buffer_reference) readonly buffer InstanceCentersPhaseBuffer {
@@ -64,90 +56,84 @@ layout(std430, buffer_reference) readonly buffer InstanceBaseMatricesBuffer {
   mat4 matrices[];
 };
 
-struct MaterialGpuData {
-  vec4 baseColorFactor;
-  vec4 emissiveFactorStrength; // (emissiveFactor.rgb, emissiveStrength)
-  vec4 metallicRoughnessOcclusionAlphaCutoff;
-  vec4 specularColorFactorSpecular;
-  vec4 sheenColorFactorWeight;
-  vec4 sheenRoughnessClearcoatFactors; // (sheenRoughness, clearcoatFactor, clearcoatRoughness, clearcoatNormalScale)
-  vec4 transmissionThicknessIorPadding; // (transmissionFactor, thicknessFactor, ior, normalScale)
-  vec4 attenuationColorDistance; // (attenuationColor.rgb, attenuationDistance)
-  // Packed texture slot mapping shared by textureIndices*, textureUvSets*,
-  // and textureSamplerIndices*:
-  // 0=baseColor -> *0.x, 1=metallicRoughness -> *0.y,
-  // 2=normal -> *0.z, 3=occlusion -> *0.w,
-  // 4=emissive -> *1.x, 5=clearcoat -> *1.y,
-  // 6=clearcoatRoughness -> *1.z, 7=clearcoatNormal -> *1.w,
-  // 8=specular -> *2.x, 9=specularColor -> *2.y,
-  // 10=sheenColor -> *2.z, 11=sheenRoughness -> *2.w,
-  // 12=transmission -> *3.x, 13=thickness -> *3.y.
-  uvec4 textureIndices0;
-  uvec4 textureIndices1;
-  uvec4 textureIndices2;
-  uvec4 textureIndices3;
-  uvec4 textureUvSets0;
-  uvec4 textureUvSets1;
-  uvec4 textureUvSets2;
-  uvec4 textureUvSets3;
-  uvec4 textureSamplerIndices0;
-  uvec4 textureSamplerIndices1;
-  uvec4 textureSamplerIndices2;
-  uvec4 textureSamplerIndices3;
-  vec4 textureTransformOffsetScale[kMaterialTextureSlotCount];
-  vec4 textureTransformRotation[kMaterialTextureSlotCount];
-  uvec4 materialFlags; // Full std430 slot: x=alphaMode, y=doubleSided, z=featureMask, w=workflow
+struct PackedMaterialTransformGpuData {
+  uint offsetXY;
+  uint scaleXY;
+  uint rotCS;
 };
 
-uint getPackedMaterialSlotValue(uvec4 packed0, uvec4 packed1, uvec4 packed2,
-                                uvec4 packed3, uint slot,
-                                uint defaultValue) {
-  if (slot < 4u) {
-    return packed0[int(slot)];
-  }
-  if (slot < 8u) {
-    return packed1[int(slot - 4u)];
-  }
-  if (slot < 12u) {
-    return packed2[int(slot - 8u)];
-  }
-  if (slot < kMaterialTextureSlotCount) {
-    return packed3[int(slot - 12u)];
-  }
-  return defaultValue;
-}
+struct MaterialHeaderGpuData {
+  vec4 baseColorFactor;
+  vec4 emissiveFactorStrength;
+  vec4 metallicRoughnessOcclusionAlphaCutoff;
+  vec4 normalScaleIorReserved;
+  uvec4 commonTextureIndices;
+  uint emissiveTextureIndex;
+  uint uvSetBits;
+  uint materialFlags;
+  uint clearcoatExtensionIndex;
+  uint sheenExtensionIndex;
+  uint transmissionExtensionIndex;
+  uint specularExtensionIndex;
+  uint reserved0;
+  uint reserved1;
+  uint reserved2;
+  PackedMaterialTransformGpuData commonTransforms[5];
+};
 
-float materialEmissiveStrength(MaterialGpuData material) {
-  return material.emissiveFactorStrength.w;
-}
+struct MaterialClearcoatGpuData {
+  vec4 clearcoatFactors;
+  uvec4 textureIndices;
+  PackedMaterialTransformGpuData transforms[3];
+  uint uvSetBits;
+  uint reserved0;
+  uint reserved1;
+};
 
-float materialNormalScale(MaterialGpuData material) {
-  return material.transmissionThicknessIorPadding.w;
-}
+struct MaterialSheenGpuData {
+  vec4 sheenColorFactorWeight;
+  vec4 sheenRoughnessReserved;
+  uvec4 textureIndices;
+  PackedMaterialTransformGpuData transforms[2];
+  uint uvSetBits;
+  uint reserved0;
+};
 
-uint materialWorkflow(MaterialGpuData material) {
-  return material.materialFlags.w;
-}
+struct MaterialTransmissionGpuData {
+  vec4 transmissionThicknessDistance;
+  vec4 attenuationColorReserved;
+  uvec4 textureIndices;
+  PackedMaterialTransformGpuData transforms[2];
+  uint uvSetBits;
+  uint reserved0;
+};
 
-#define GET_TEXTURE_INDEX(material, slot)                                      \
-  getPackedMaterialSlotValue((material).textureIndices0,                       \
-                             (material).textureIndices1,                       \
-                             (material).textureIndices2,                       \
-                             (material).textureIndices3, (slot),               \
-                             kInvalidTextureBindlessIndex)
-#define GET_UV_SET(material, slot)                                             \
-  getPackedMaterialSlotValue((material).textureUvSets0,                        \
-                             (material).textureUvSets1,                        \
-                             (material).textureUvSets2,                        \
-                             (material).textureUvSets3, (slot), 0u)
-#define GET_SAMPLER_INDEX(material, slot)                                      \
-  getPackedMaterialSlotValue((material).textureSamplerIndices0,                \
-                             (material).textureSamplerIndices1,                \
-                             (material).textureSamplerIndices2,                \
-                             (material).textureSamplerIndices3, (slot), 0u)
+struct MaterialSpecularGpuData {
+  vec4 specularColorFactorSpecular;
+  uvec4 textureIndices;
+  PackedMaterialTransformGpuData transforms[2];
+  uint uvSetBits;
+  uint reserved0;
+};
 
-layout(std430, buffer_reference) readonly buffer MaterialBuffer {
-  MaterialGpuData materials[];
+layout(std430, buffer_reference) readonly buffer MaterialHeaderBuffer {
+  MaterialHeaderGpuData materials[];
+};
+
+layout(std430, buffer_reference) readonly buffer MaterialClearcoatBuffer {
+  MaterialClearcoatGpuData materials[];
+};
+
+layout(std430, buffer_reference) readonly buffer MaterialSheenBuffer {
+  MaterialSheenGpuData materials[];
+};
+
+layout(std430, buffer_reference) readonly buffer MaterialTransmissionBuffer {
+  MaterialTransmissionGpuData materials[];
+};
+
+layout(std430, buffer_reference) readonly buffer MaterialSpecularBuffer {
+  MaterialSpecularGpuData materials[];
 };
 
 struct DirectionalLightGpuData {
@@ -189,6 +175,11 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint sceneColorQuarterResTexId;
   DirectionalLightBuffer directionalLightBuffer;
   LocalLightBuffer localLightBuffer;
+  MaterialHeaderBuffer materialHeaderBuffer;
+  MaterialClearcoatBuffer materialClearcoatBuffer;
+  MaterialSheenBuffer materialSheenBuffer;
+  MaterialTransmissionBuffer materialTransmissionBuffer;
+  MaterialSpecularBuffer materialSpecularBuffer;
   uint directionalLightCount;
   uint localLightCount;
 };
@@ -210,30 +201,38 @@ layout(std430, buffer_reference) readonly buffer InstanceRemapBuffer {
   uint ids[];
 };
 
-// Per-instance data: model matrix followed by the three columns of the
-// normal matrix (transpose-inverse of the upper-left 3×3), each padded to
-// vec4 for std430 alignment.  Total stride: 112 bytes per instance.
 struct InstanceData {
   mat4 modelMatrix;
-  vec4 normalMatCol0; // xyz = col 0 of normal matrix, w = padding
-  vec4 normalMatCol1; // xyz = col 1 of normal matrix, w = padding
-  vec4 normalMatCol2; // xyz = col 2 of normal matrix, w = padding
+  vec4 normalMatCol0;
+  vec4 normalMatCol1;
+  vec4 normalMatCol2;
 };
 
 layout(std430, buffer_reference) buffer InstanceMatricesBuffer {
   InstanceData instances[];
 };
 
+struct StaticVertexDecodeGpuData {
+  vec4 offset;
+  vec4 scale;
+};
+
+layout(std430, buffer_reference) readonly buffer StaticVertexDecodeBuffer {
+  StaticVertexDecodeGpuData values[];
+};
+
 layout(push_constant) uniform PushConstants {
   FrameDataBuffer frameData;
-  PackedVertexBuffer vertexBuffer;
+  PackedVertexWordBuffer vertexBuffer;
+  StaticVertexDecodeBuffer vertexDecodeBuffer;
   InstanceMatricesBuffer instanceMatrices;
   InstanceRemapBuffer instanceRemap;
-  MaterialBuffer materialBuffer;
   InstanceCentersPhaseBuffer instanceCentersPhase;
   InstanceBaseMatricesBuffer instanceBaseMatrices;
   uint instanceCount;
   uint materialIndex;
+  uint vertexDecodeIndex;
+  uint packedVertexFormat;
   float timeSeconds;
   float tessNearDistance;
   float tessFarDistance;
@@ -255,24 +254,86 @@ vec2 unpackSnorm2x16Custom(uint packed) {
   return clamp(vec2(float(x), float(y)) / 32767.0, vec2(-1.0), vec2(1.0));
 }
 
-vec3 decodePackedPosition(PackedVertex vertex) {
-  return vec3(uintBitsToFloat(vertex.word0), uintBitsToFloat(vertex.word1),
-              uintBitsToFloat(vertex.word2));
+vec2 signNotZero(vec2 value) {
+  return vec2(value.x >= 0.0 ? 1.0 : -1.0, value.y >= 0.0 ? 1.0 : -1.0);
 }
 
-vec2 decodePackedUv(PackedVertex vertex) { return unpackHalf2x16(vertex.word3); }
-vec2 decodePackedUv1(PackedVertex vertex) { return unpackHalf2x16(vertex.word8); }
+vec3 decodeOctNormal(vec2 encoded) {
+  vec3 normal = vec3(encoded.xy, 1.0 - abs(encoded.x) - abs(encoded.y));
+  if (normal.z < 0.0) {
+    normal.xy = (vec2(1.0) - abs(normal.yx)) * signNotZero(normal.xy);
+  }
+  const float lenSq = dot(normal, normal);
+  if (lenSq <= 1.0e-10) {
+    return vec3(0.0, 1.0, 0.0);
+  }
+  return normalize(normal);
+}
 
-vec2 applyTextureTransform(vec2 uv, vec4 offsetScale, vec4 rotationCs) {
-  vec2 scaled = uv * offsetScale.zw;
-  vec2 rotated =
-      vec2(rotationCs.x * scaled.x - rotationCs.y * scaled.y,
-           rotationCs.y * scaled.x + rotationCs.x * scaled.y);
-  return offsetScale.xy + rotated;
+uint packedVertexStrideWords(uint packedVertexFormat) {
+  return packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ? 6u : 5u;
+}
+
+uint packedVertexWord(uint vertexIndex, uint wordIndex) {
+  return pc.vertexBuffer
+      .words[vertexIndex * packedVertexStrideWords(pc.packedVertexFormat) +
+             wordIndex];
+}
+
+vec3 decodePackedPosition(uint vertexIndex) {
+  if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24) {
+    return vec3(uintBitsToFloat(packedVertexWord(vertexIndex, 0u)),
+                uintBitsToFloat(packedVertexWord(vertexIndex, 1u)),
+                uintBitsToFloat(packedVertexWord(vertexIndex, 2u)));
+  }
+
+  StaticVertexDecodeGpuData decode =
+      pc.vertexDecodeBuffer.values[pc.vertexDecodeIndex];
+  const vec2 xy = unpackUnorm2x16(packedVertexWord(vertexIndex, 0u));
+  const vec2 zPad = unpackUnorm2x16(packedVertexWord(vertexIndex, 1u));
+  const vec3 normalized = vec3(xy, zPad.x);
+  return decode.offset.xyz + decode.scale.xyz * normalized;
+}
+
+vec3 decodePackedNormal(uint vertexIndex) {
+  const uint normalWord =
+      packedVertexWord(vertexIndex,
+                       pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24
+                           ? 3u
+                           : 2u);
+  return decodeOctNormal(unpackSnorm2x16Custom(normalWord));
+}
+
+vec2 decodePackedUv(uint vertexIndex) {
+  return unpackHalf2x16(
+      packedVertexWord(vertexIndex,
+                       pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24
+                           ? 4u
+                           : 3u));
+}
+
+vec2 decodePackedUv1(uint vertexIndex) {
+  return unpackHalf2x16(
+      packedVertexWord(vertexIndex,
+                       pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24
+                           ? 5u
+                           : 4u));
+}
+
+uint getPackedUvBit(uint uvBits, uint bitIndex) { return (uvBits >> bitIndex) & 1u; }
+
+vec2 applyTextureTransform(vec2 uv, PackedMaterialTransformGpuData transform) {
+  vec2 offset = unpackHalf2x16(transform.offsetXY);
+  vec2 scale = unpackHalf2x16(transform.scaleXY);
+  vec2 rotationCs = unpackSnorm2x16Custom(transform.rotCS);
+  vec2 scaled = uv * scale;
+  vec2 rotated = vec2(rotationCs.x * scaled.x - rotationCs.y * scaled.y,
+                      rotationCs.y * scaled.x + rotationCs.x * scaled.y);
+  return offset + rotated;
 }
 
 vec2 selectUv(vec2 uv0, vec2 uv1, uint uvSet) {
-  return (uvSet == 1u) ? uv1 : uv0;
+  return uvSet == 1u ? uv1 : uv0;
 }
 
 vec3 directionalLightDirection(DirectionalLightGpuData light) {
@@ -288,31 +349,19 @@ vec3 directionalLightColor(DirectionalLightGpuData light) {
 }
 
 vec3 localLightPosition(LocalLightGpuData light) { return light.positionRange.xyz; }
-
 float localLightRange(LocalLightGpuData light) { return light.positionRange.w; }
-
 vec3 localLightDirection(LocalLightGpuData light) {
   return light.directionOuterCos.xyz;
 }
-
-float localLightOuterCos(LocalLightGpuData light) {
-  return light.directionOuterCos.w;
-}
-
+float localLightOuterCos(LocalLightGpuData light) { return light.directionOuterCos.w; }
 vec3 localLightColor(LocalLightGpuData light) { return light.colorIntensity.rgb; }
-
-float localLightIntensity(LocalLightGpuData light) {
-  return light.colorIntensity.w;
-}
-
+float localLightIntensity(LocalLightGpuData light) { return light.colorIntensity.w; }
 float localLightInnerCos(LocalLightGpuData light) {
   return uintBitsToFloat(light.innerCosTypeEnabledReserved.x);
 }
-
 uint localLightType(LocalLightGpuData light) {
   return light.innerCosTypeEnabledReserved.y;
 }
-
 bool localLightEnabled(LocalLightGpuData light) {
   return light.innerCosTypeEnabledReserved.z != 0u;
 }
@@ -330,7 +379,6 @@ float punctualRangeAttenuation(float distanceSq, float range) {
 
 float spotAngularAttenuation(vec3 lightDirection, vec3 pointToLight,
                              float innerCos, float outerCos) {
-  // Expects normalized lightDirection from LocalLightGpuData upload.
   float cosTheta = dot(lightDirection, normalize(-pointToLight));
   if (cosTheta <= outerCos) {
     return 0.0;
@@ -340,37 +388,189 @@ float spotAngularAttenuation(vec3 lightDirection, vec3 pointToLight,
   return weight * weight;
 }
 
-vec3 decodePackedNormal(PackedVertex vertex) {
-  const vec2 normalXY = unpackSnorm2x16Custom(vertex.word4);
-  const vec2 normalZHandedness = unpackSnorm2x16Custom(vertex.word5);
-  return normalize(vec3(normalXY, normalZHandedness.x));
+struct MaterialData {
+  MaterialHeaderGpuData header;
+  MaterialClearcoatGpuData clearcoat;
+  MaterialSheenGpuData sheen;
+  MaterialTransmissionGpuData transmission;
+  MaterialSpecularGpuData specular;
+  bool hasClearcoat;
+  bool hasSheen;
+  bool hasTransmission;
+  bool hasSpecular;
+};
+
+MaterialData loadMaterialData(uint materialIndex) {
+  MaterialData material;
+  material.header = pc.frameData.materialHeaderBuffer.materials[materialIndex];
+  material.hasClearcoat =
+      material.header.clearcoatExtensionIndex != kInvalidMaterialExtensionIndex;
+  material.hasSheen =
+      material.header.sheenExtensionIndex != kInvalidMaterialExtensionIndex;
+  material.hasTransmission =
+      material.header.transmissionExtensionIndex !=
+      kInvalidMaterialExtensionIndex;
+  material.hasSpecular =
+      material.header.specularExtensionIndex != kInvalidMaterialExtensionIndex;
+
+  if (material.hasClearcoat) {
+    material.clearcoat = pc.frameData.materialClearcoatBuffer.materials
+        [material.header.clearcoatExtensionIndex];
+  }
+  if (material.hasSheen) {
+    material.sheen =
+        pc.frameData.materialSheenBuffer.materials[material.header
+                                                       .sheenExtensionIndex];
+  }
+  if (material.hasTransmission) {
+    material.transmission = pc.frameData.materialTransmissionBuffer.materials
+        [material.header.transmissionExtensionIndex];
+  }
+  if (material.hasSpecular) {
+    material.specular = pc.frameData.materialSpecularBuffer.materials
+        [material.header.specularExtensionIndex];
+  }
+  return material;
 }
 
-// Tangent xyz is encoded in word6/word7.x and handedness shares word5.y.
-// Tangents are intentionally not used by the current shading pipeline.
-// Screen-space derivative-based TBN (cotangentFrame) is preferred because it
-// avoids dependence on imported tangent sign conventions. This decode function
-// is retained for format documentation purposes.
-vec4 decodePackedTangent(PackedVertex vertex) {
-  const vec2 tangentXY = unpackSnorm2x16Custom(vertex.word6);
-  const vec2 tangentZ = unpackSnorm2x16Custom(vertex.word7);
-  const vec2 normalZHandedness = unpackSnorm2x16Custom(vertex.word5);
-  vec3 tangent = vec3(tangentXY, tangentZ.x);
-  const float tangentLen = length(tangent);
-  if (tangentLen > 1.0e-6) {
-    tangent /= tangentLen;
-  } else {
-    tangent = vec3(1.0, 0.0, 0.0);
+uint materialAlphaMode(MaterialData material) {
+  return material.header.materialFlags & kMaterialFlagsAlphaModeMask;
+}
+
+bool materialDoubleSided(MaterialData material) {
+  return (material.header.materialFlags & kMaterialFlagsDoubleSidedBit) != 0u;
+}
+
+uint materialWorkflow(MaterialData material) {
+  return (material.header.materialFlags >> kMaterialFlagsWorkflowShift) & 0xFFu;
+}
+
+uint materialFeatureMask(MaterialData material) {
+  return material.header.materialFlags >> kMaterialFlagsFeatureShift;
+}
+
+float materialEmissiveStrength(MaterialData material) {
+  return material.header.emissiveFactorStrength.w;
+}
+
+float materialNormalScale(MaterialData material) {
+  return material.header.normalScaleIorReserved.x;
+}
+
+float materialIor(MaterialData material) {
+  return material.header.normalScaleIorReserved.y;
+}
+
+uint getMaterialTextureIndex(MaterialData material, uint slot) {
+  switch (slot) {
+  case kMaterialTextureSlotBaseColor:
+    return material.header.commonTextureIndices.x;
+  case kMaterialTextureSlotMetallicRoughness:
+    return material.header.commonTextureIndices.y;
+  case kMaterialTextureSlotNormal:
+    return material.header.commonTextureIndices.z;
+  case kMaterialTextureSlotOcclusion:
+    return material.header.commonTextureIndices.w;
+  case kMaterialTextureSlotEmissive:
+    return material.header.emissiveTextureIndex;
+  case kMaterialTextureSlotClearcoat:
+    return material.clearcoat.textureIndices.x;
+  case kMaterialTextureSlotClearcoatRoughness:
+    return material.clearcoat.textureIndices.y;
+  case kMaterialTextureSlotClearcoatNormal:
+    return material.clearcoat.textureIndices.z;
+  case kMaterialTextureSlotSpecular:
+    return material.specular.textureIndices.x;
+  case kMaterialTextureSlotSpecularColor:
+    return material.specular.textureIndices.y;
+  case kMaterialTextureSlotSheenColor:
+    return material.sheen.textureIndices.x;
+  case kMaterialTextureSlotSheenRoughness:
+    return material.sheen.textureIndices.y;
+  case kMaterialTextureSlotTransmission:
+    return material.transmission.textureIndices.x;
+  case kMaterialTextureSlotThickness:
+    return material.transmission.textureIndices.y;
+  default:
+    return kInvalidTextureBindlessIndex;
   }
-  float handedness = normalZHandedness.y >= 0.0 ? 1.0 : -1.0;
-  return vec4(tangent, handedness);
+}
+
+uint getMaterialUvSet(MaterialData material, uint slot) {
+  switch (slot) {
+  case kMaterialTextureSlotBaseColor:
+    return getPackedUvBit(material.header.uvSetBits, 0u);
+  case kMaterialTextureSlotMetallicRoughness:
+    return getPackedUvBit(material.header.uvSetBits, 1u);
+  case kMaterialTextureSlotNormal:
+    return getPackedUvBit(material.header.uvSetBits, 2u);
+  case kMaterialTextureSlotOcclusion:
+    return getPackedUvBit(material.header.uvSetBits, 3u);
+  case kMaterialTextureSlotEmissive:
+    return getPackedUvBit(material.header.uvSetBits, 4u);
+  case kMaterialTextureSlotClearcoat:
+    return getPackedUvBit(material.clearcoat.uvSetBits, 0u);
+  case kMaterialTextureSlotClearcoatRoughness:
+    return getPackedUvBit(material.clearcoat.uvSetBits, 1u);
+  case kMaterialTextureSlotClearcoatNormal:
+    return getPackedUvBit(material.clearcoat.uvSetBits, 2u);
+  case kMaterialTextureSlotSpecular:
+    return getPackedUvBit(material.specular.uvSetBits, 0u);
+  case kMaterialTextureSlotSpecularColor:
+    return getPackedUvBit(material.specular.uvSetBits, 1u);
+  case kMaterialTextureSlotSheenColor:
+    return getPackedUvBit(material.sheen.uvSetBits, 0u);
+  case kMaterialTextureSlotSheenRoughness:
+    return getPackedUvBit(material.sheen.uvSetBits, 1u);
+  case kMaterialTextureSlotTransmission:
+    return getPackedUvBit(material.transmission.uvSetBits, 0u);
+  case kMaterialTextureSlotThickness:
+    return getPackedUvBit(material.transmission.uvSetBits, 1u);
+  default:
+    return 0u;
+  }
+}
+
+PackedMaterialTransformGpuData getMaterialTransform(MaterialData material,
+                                                    uint slot) {
+  switch (slot) {
+  case kMaterialTextureSlotBaseColor:
+    return material.header.commonTransforms[0];
+  case kMaterialTextureSlotMetallicRoughness:
+    return material.header.commonTransforms[1];
+  case kMaterialTextureSlotNormal:
+    return material.header.commonTransforms[2];
+  case kMaterialTextureSlotOcclusion:
+    return material.header.commonTransforms[3];
+  case kMaterialTextureSlotEmissive:
+    return material.header.commonTransforms[4];
+  case kMaterialTextureSlotClearcoat:
+    return material.clearcoat.transforms[0];
+  case kMaterialTextureSlotClearcoatRoughness:
+    return material.clearcoat.transforms[1];
+  case kMaterialTextureSlotClearcoatNormal:
+    return material.clearcoat.transforms[2];
+  case kMaterialTextureSlotSpecular:
+    return material.specular.transforms[0];
+  case kMaterialTextureSlotSpecularColor:
+    return material.specular.transforms[1];
+  case kMaterialTextureSlotSheenColor:
+    return material.sheen.transforms[0];
+  case kMaterialTextureSlotSheenRoughness:
+    return material.sheen.transforms[1];
+  case kMaterialTextureSlotTransmission:
+    return material.transmission.transforms[0];
+  case kMaterialTextureSlotThickness:
+    return material.transmission.transforms[1];
+  default:
+    return PackedMaterialTransformGpuData(0u, 0u, 0u);
+  }
 }
 
 struct PerVertex {
   vec2 uv0;
   vec2 uv1;
   vec3 worldNormal;
-  vec4 worldTangent; // always (0,0,0,1); derivative TBN used instead (see cotangentFrame)
   vec3 worldPos;
   vec3 patchBarycentric;
   vec3 triBarycentric;
@@ -379,9 +579,8 @@ struct PerVertex {
   float tessellatedFlag;
 };
 
-vec2 transformedUv(MaterialGpuData material, PerVertex vertex, uint slot) {
-  return applyTextureTransform(selectUv(vertex.uv0, vertex.uv1,
-                                        GET_UV_SET(material, slot)),
-                               material.textureTransformOffsetScale[slot],
-                               material.textureTransformRotation[slot]);
+vec2 transformedUv(MaterialData material, PerVertex vertex, uint slot) {
+  return applyTextureTransform(
+      selectUv(vertex.uv0, vertex.uv1, getMaterialUvSet(material, slot)),
+      getMaterialTransform(material, slot));
 }
