@@ -23,6 +23,16 @@ namespace nuri {
 class Model;
 struct ModelAnimationPackedData;
 
+enum class PackedVertexFormat : uint8_t {
+  StaticQuantized20 = 0,
+  AnimatedFloat24 = 1,
+};
+
+struct StaticVertexDecodeGpuData {
+  glm::vec4 offset{0.0f, 0.0f, 0.0f, 0.0f};
+  glm::vec4 scale{1.0f, 1.0f, 1.0f, 0.0f};
+};
+
 // Handle for asynchronous model loading. Uses std::shared_future for warmup so
 // that the destructor does not block (std::future's destructor would wait for
 // the async task); the shared state is released when the last reference goes
@@ -123,6 +133,16 @@ public:
   [[nodiscard]] const ModelAnimationGpuView &animationGpuView() const noexcept {
     return animationGpuView_;
   }
+  [[nodiscard]] PackedVertexFormat drawVertexFormat() const noexcept {
+    return drawVertexFormat_;
+  }
+  [[nodiscard]] BufferHandle vertexDecodeBuffer() const noexcept {
+    return vertexDecodeBuffer_ != nullptr ? vertexDecodeBuffer_->handle()
+                                          : BufferHandle{};
+  }
+  [[nodiscard]] uint64_t vertexDecodeBufferAddress() const noexcept {
+    return vertexDecodeBufferAddress_;
+  }
   [[nodiscard]] bool hasAnimationData() const noexcept {
     return nuri::isValid(animationGpuView_.skinInfluenceBuffer) ||
            nuri::isValid(animationGpuView_.morphDeltaBuffer);
@@ -142,6 +162,9 @@ private:
   [[nodiscard]] static Result<std::unique_ptr<Model>, std::string>
   createFromPackedVertices(GPUDevice &gpu, const MeshData &data,
                            std::span<const std::byte> packedVertexBytes,
+                           PackedVertexFormat packedVertexFormat,
+                           std::span<const std::byte> staticDecodeBytes,
+                           uint32_t staticDecodeCount,
                            const ModelAnimationPackedData *animationPackedData,
                            std::string_view debugName);
 
@@ -155,14 +178,20 @@ private:
   Model(GPUDevice &gpu, GeometryAllocationHandle geometry,
         std::pmr::vector<Submesh> submeshes, uint32_t vertexCount,
         uint32_t indexCount, BoundingBox bounds,
+        PackedVertexFormat drawVertexFormat,
         ModelAnimationGpuView animationGpuView,
+        uint64_t vertexDecodeBufferAddress,
+        std::unique_ptr<Buffer> vertexDecodeBuffer,
         std::unique_ptr<Buffer> skinInfluenceBuffer,
         std::unique_ptr<Buffer> morphMetaBuffer,
         std::unique_ptr<Buffer> morphDeltaBuffer,
         std::pmr::vector<uint32_t> sourceMaterialToRuntime)
       : gpu_(&gpu), geometry_(geometry), submeshes_(std::move(submeshes)),
         vertexCount_(vertexCount), indexCount_(indexCount), bounds_(bounds),
+        drawVertexFormat_(drawVertexFormat),
         animationGpuView_(animationGpuView),
+        vertexDecodeBufferAddress_(vertexDecodeBufferAddress),
+        vertexDecodeBuffer_(std::move(vertexDecodeBuffer)),
         skinInfluenceBuffer_(std::move(skinInfluenceBuffer)),
         morphMetaBuffer_(std::move(morphMetaBuffer)),
         morphDeltaBuffer_(std::move(morphDeltaBuffer)),
@@ -174,7 +203,10 @@ private:
   uint32_t vertexCount_ = 0;
   uint32_t indexCount_ = 0;
   BoundingBox bounds_{};
+  PackedVertexFormat drawVertexFormat_ = PackedVertexFormat::StaticQuantized20;
   ModelAnimationGpuView animationGpuView_{};
+  uint64_t vertexDecodeBufferAddress_ = 0u;
+  std::unique_ptr<Buffer> vertexDecodeBuffer_;
   std::unique_ptr<Buffer> skinInfluenceBuffer_;
   std::unique_ptr<Buffer> morphMetaBuffer_;
   std::unique_ptr<Buffer> morphDeltaBuffer_;

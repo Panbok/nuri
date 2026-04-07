@@ -431,9 +431,12 @@ ResourceManager::ResourceManager(GPUDevice &gpu,
       memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
       textureSlots_(memory_), materialSlots_(memory_), modelSlots_(memory_),
       textureSlotsMeta_(memory_), materialSlotsMeta_(memory_),
-      modelSlotsMeta_(memory_), materialGpuTable_(memory_), textureCache_(),
-      materialCache_(), modelCache_(), pendingRetireTextures_(memory_),
-      pendingRetireMaterials_(memory_), pendingRetireModels_(memory_) {}
+      modelSlotsMeta_(memory_), materialHeaderTable_(memory_),
+      materialClearcoatTable_(memory_), materialSheenTable_(memory_),
+      materialTransmissionTable_(memory_), materialSpecularTable_(memory_),
+      textureCache_(), materialCache_(), modelCache_(),
+      pendingRetireTextures_(memory_), pendingRetireMaterials_(memory_),
+      pendingRetireModels_(memory_) {}
 
 ResourceManager::~ResourceManager() {
   // Dependency order:
@@ -519,7 +522,7 @@ Result<SlotReservation, std::string> ResourceManager::allocateMaterialSlot() {
   const SlotReservation slot = materialSlotsMeta_.acquire();
   if (slot.appended) {
     materialSlots_.emplace_back(memory_);
-    materialGpuTable_.push_back(MaterialGpuData{});
+    materialHeaderTable_.push_back(MaterialHeaderGpuData{});
   }
   return Result<SlotReservation, std::string>::makeResult(slot);
 }
@@ -580,9 +583,10 @@ void ResourceManager::destroyMaterialSlot(uint32_t index) {
   slot.refCount = 0;
   slot.retireAfterFrame = kRetireFrameUnset;
   slot.record = MaterialRecord(memory_);
-  if (index < materialGpuTable_.size()) {
-    materialGpuTable_[index] = MaterialGpuData{};
+  if (index < materialHeaderTable_.size()) {
+    materialHeaderTable_[index] = MaterialHeaderGpuData{};
   }
+  rebuildPackedMaterialTables();
   ++materialTableVersion_;
   materialSlotsMeta_.release(index);
 }
@@ -610,6 +614,55 @@ void ResourceManager::destroyModelSlot(uint32_t index) {
   slot.retireAfterFrame = kRetireFrameUnset;
   slot.record = ModelRecord(memory_);
   modelSlotsMeta_.release(index);
+}
+
+void ResourceManager::rebuildPackedMaterialTables() {
+  materialClearcoatTable_.clear();
+  materialSheenTable_.clear();
+  materialTransmissionTable_.clear();
+  materialSpecularTable_.clear();
+
+  if (materialHeaderTable_.size() < materialSlots_.size()) {
+    materialHeaderTable_.resize(materialSlots_.size());
+  }
+
+  for (uint32_t index = 0; index < materialSlots_.size(); ++index) {
+    if (!materialSlotsMeta_.isLive(index)) {
+      materialHeaderTable_[index] = MaterialHeaderGpuData{};
+      continue;
+    }
+
+    MaterialPackedGpuData &packed = materialSlots_[index].record.packedGpuData;
+    MaterialHeaderGpuData header = packed.header;
+    header.clearcoatExtensionIndex = kInvalidMaterialExtensionIndex;
+    header.sheenExtensionIndex = kInvalidMaterialExtensionIndex;
+    header.transmissionExtensionIndex = kInvalidMaterialExtensionIndex;
+    header.specularExtensionIndex = kInvalidMaterialExtensionIndex;
+
+    if (packed.hasClearcoat) {
+      header.clearcoatExtensionIndex =
+          static_cast<uint32_t>(materialClearcoatTable_.size());
+      materialClearcoatTable_.push_back(packed.clearcoat);
+    }
+    if (packed.hasSheen) {
+      header.sheenExtensionIndex =
+          static_cast<uint32_t>(materialSheenTable_.size());
+      materialSheenTable_.push_back(packed.sheen);
+    }
+    if (packed.hasTransmission) {
+      header.transmissionExtensionIndex =
+          static_cast<uint32_t>(materialTransmissionTable_.size());
+      materialTransmissionTable_.push_back(packed.transmission);
+    }
+    if (packed.hasSpecular) {
+      header.specularExtensionIndex =
+          static_cast<uint32_t>(materialSpecularTable_.size());
+      materialSpecularTable_.push_back(packed.specular);
+    }
+
+    packed.header = header;
+    materialHeaderTable_[index] = header;
+  }
 }
 
 Result<TextureRef, std::string>
@@ -861,7 +914,7 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
   slot.record.ref = ref;
   slot.record.desc = material.desc();
   slot.record.textureRefs = request.textureRefs;
-  slot.record.gpuData = material.gpuData();
+  slot.record.packedGpuData = material.packedGpuData();
   slot.record.descHash = descHash;
   slot.record.debugName = request.debugName;
   slot.record.sourceIdentity = request.sourceIdentity;
@@ -873,10 +926,11 @@ ResourceManager::acquireMaterial(const MaterialRequest &request) {
                               }
                             });
 
-  if (slotIndex >= materialGpuTable_.size()) {
-    materialGpuTable_.resize(slotIndex + 1u);
+  if (slotIndex >= materialHeaderTable_.size()) {
+    materialHeaderTable_.resize(slotIndex + 1u);
   }
-  materialGpuTable_[slotIndex] = slot.record.gpuData;
+  materialHeaderTable_[slotIndex] = slot.record.packedGpuData.header;
+  rebuildPackedMaterialTables();
   ++materialTableVersion_;
 
   materialCache_.emplace(std::move(key), ref);

@@ -129,7 +129,7 @@ struct NURI_API MaterialRecord {
   MaterialRef ref = kInvalidMaterialRef;
   MaterialDesc desc{};
   MaterialRequest::TextureRefs textureRefs{};
-  MaterialGpuData gpuData{};
+  MaterialPackedGpuData packedGpuData{};
   uint64_t descHash = 0;
   std::pmr::string debugName;
   std::pmr::string sourceIdentity;
@@ -162,7 +162,11 @@ struct NURI_API ModelRecord {
 };
 
 struct NURI_API MaterialTableSnapshot {
-  std::span<const MaterialGpuData> gpuData{};
+  std::span<const MaterialHeaderGpuData> headers{};
+  std::span<const MaterialClearcoatGpuData> clearcoat{};
+  std::span<const MaterialSheenGpuData> sheen{};
+  std::span<const MaterialTransmissionGpuData> transmission{};
+  std::span<const MaterialSpecularGpuData> specular{};
   uint64_t version = 0;
 };
 
@@ -233,8 +237,17 @@ public:
 
   [[nodiscard]] MaterialTableSnapshot materialSnapshot() const noexcept {
     return MaterialTableSnapshot{
-        .gpuData = std::span<const MaterialGpuData>(materialGpuTable_.data(),
-                                                    materialGpuTable_.size()),
+        .headers = std::span<const MaterialHeaderGpuData>(
+            materialHeaderTable_.data(), materialHeaderTable_.size()),
+        .clearcoat = std::span<const MaterialClearcoatGpuData>(
+            materialClearcoatTable_.data(), materialClearcoatTable_.size()),
+        .sheen = std::span<const MaterialSheenGpuData>(
+            materialSheenTable_.data(), materialSheenTable_.size()),
+        .transmission = std::span<const MaterialTransmissionGpuData>(
+            materialTransmissionTable_.data(),
+            materialTransmissionTable_.size()),
+        .specular = std::span<const MaterialSpecularGpuData>(
+            materialSpecularTable_.data(), materialSpecularTable_.size()),
         .version = materialTableVersion_,
     };
   }
@@ -304,6 +317,7 @@ private:
   void destroyTextureSlot(uint32_t index);
   void destroyMaterialSlot(uint32_t index);
   void destroyModelSlot(uint32_t index);
+  void rebuildPackedMaterialTables();
 
   [[nodiscard]] ModelRef tryAcquireCachedModel(const ModelKey &key);
   [[nodiscard]] Result<ModelRef, std::string>
@@ -330,7 +344,11 @@ private:
   SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
       modelSlotsMeta_;
 
-  std::pmr::vector<MaterialGpuData> materialGpuTable_;
+  std::pmr::vector<MaterialHeaderGpuData> materialHeaderTable_;
+  std::pmr::vector<MaterialClearcoatGpuData> materialClearcoatTable_;
+  std::pmr::vector<MaterialSheenGpuData> materialSheenTable_;
+  std::pmr::vector<MaterialTransmissionGpuData> materialTransmissionTable_;
+  std::pmr::vector<MaterialSpecularGpuData> materialSpecularTable_;
   uint64_t materialTableVersion_ = 0;
 
   HashMap<TextureKey, TextureRef, TextureKeyHash> textureCache_;

@@ -22,19 +22,32 @@ struct ModelAnimationPackedData {
 
 namespace {
 
-struct PackedVertexWords {
+struct PackedStaticVertexWords {
+  uint32_t word0 = 0;
+  uint32_t word1 = 0;
+  uint32_t word2 = 0;
+  uint32_t word3 = 0;
+  uint32_t word4 = 0;
+};
+
+static_assert(sizeof(PackedStaticVertexWords) == 20);
+
+struct PackedAnimatedVertexWords {
   uint32_t word0 = 0;
   uint32_t word1 = 0;
   uint32_t word2 = 0;
   uint32_t word3 = 0;
   uint32_t word4 = 0;
   uint32_t word5 = 0;
-  uint32_t word6 = 0;
-  uint32_t word7 = 0;
-  uint32_t word8 = 0;
 };
 
-static_assert(sizeof(PackedVertexWords) == 36);
+static_assert(sizeof(PackedAnimatedVertexWords) == 24);
+
+struct ModelPackedVertexData {
+  PackedVertexFormat format = PackedVertexFormat::StaticQuantized20;
+  std::vector<std::byte> vertexBytes;
+  BufferLayout<std::vector<std::byte>> staticDecode{};
+};
 
 struct PackedSkinInfluenceGpu {
   glm::u32vec4 joints{0u};
@@ -45,12 +58,13 @@ static_assert(sizeof(PackedSkinInfluenceGpu) == 32);
 struct PackedMorphDeltaGpu {
   glm::vec4 positionDelta{0.0f};
   glm::vec4 normalDelta{0.0f};
-  glm::vec4 tangentDelta{0.0f};
 };
-static_assert(sizeof(PackedMorphDeltaGpu) == 48);
+static_assert(sizeof(PackedMorphDeltaGpu) == 32);
 
 struct ModelAnimationGpuBuffers {
   Model::ModelAnimationGpuView view{};
+  std::unique_ptr<Buffer> vertexDecodeBuffer;
+  uint64_t vertexDecodeBufferAddress = 0u;
   std::unique_ptr<Buffer> skinInfluenceBuffer;
   std::unique_ptr<Buffer> morphMetaBuffer;
   std::unique_ptr<Buffer> morphDeltaBuffer;
@@ -65,10 +79,12 @@ void destroyBuffer(GPUDevice &gpu, std::unique_ptr<Buffer> &buffer) {
 
 void releaseAnimationGpuBuffers(GPUDevice &gpu,
                                 ModelAnimationGpuBuffers &buffers) {
+  destroyBuffer(gpu, buffers.vertexDecodeBuffer);
   destroyBuffer(gpu, buffers.skinInfluenceBuffer);
   destroyBuffer(gpu, buffers.morphMetaBuffer);
   destroyBuffer(gpu, buffers.morphDeltaBuffer);
   buffers.view = {};
+  buffers.vertexDecodeBufferAddress = 0u;
 }
 
 uint16_t packSnorm16(float value) {
@@ -85,40 +101,77 @@ uint32_t packSnorm2x16Custom(const glm::vec2 &value) {
   return x | (y << 16u);
 }
 
-PackedVertexWords packVertex(const Vertex &vertex) {
-  PackedVertexWords packed{};
+glm::vec2 encodeOctNormal(glm::vec3 normal) {
+  if (glm::dot(normal, normal) <= 0.0f) {
+    return glm::vec2(0.0f, 0.0f);
+  }
+  normal = glm::normalize(normal);
+  normal /= (std::abs(normal.x) + std::abs(normal.y) + std::abs(normal.z));
+  glm::vec2 encoded = glm::vec2(normal.x, normal.y);
+  if (normal.z < 0.0f) {
+    const glm::vec2 signBits = glm::vec2(encoded.x >= 0.0f ? 1.0f : -1.0f,
+                                         encoded.y >= 0.0f ? 1.0f : -1.0f);
+    encoded = (glm::vec2(1.0f) - glm::abs(glm::vec2(encoded.y, encoded.x))) *
+              signBits;
+  }
+  return glm::clamp(encoded, glm::vec2(-1.0f), glm::vec2(1.0f));
+}
 
-  glm::vec3 normal = vertex.normal;
+glm::vec3 sanitizeNormal(glm::vec3 normal) {
   if (glm::dot(normal, normal) > 0.0f) {
-    normal = glm::normalize(normal);
+    return glm::normalize(normal);
   }
+  return glm::vec3(0.0f, 1.0f, 0.0f);
+}
 
-  glm::vec4 tangent = vertex.tangent;
-  const glm::vec3 tangentXYZ = glm::vec3(tangent);
-  if (glm::dot(tangentXYZ, tangentXYZ) > 0.0f) {
-    tangent = glm::vec4(glm::normalize(tangentXYZ), tangent.w);
-  }
-  const float tangentHandedness = tangent.w >= 0.0f ? 1.0f : -1.0f;
-
+PackedAnimatedVertexWords packAnimatedVertex(const Vertex &vertex) {
+  PackedAnimatedVertexWords packed{};
+  const glm::vec3 normal = sanitizeNormal(vertex.normal);
+  const glm::vec2 oct = encodeOctNormal(normal);
   packed.word0 = std::bit_cast<uint32_t>(vertex.position.x);
   packed.word1 = std::bit_cast<uint32_t>(vertex.position.y);
   packed.word2 = std::bit_cast<uint32_t>(vertex.position.z);
-  packed.word3 = glm::packHalf2x16(vertex.uv);
-  packed.word4 = packSnorm2x16Custom(glm::vec2(normal.x, normal.y));
-  packed.word5 = packSnorm2x16Custom(glm::vec2(normal.z, tangentHandedness));
-  packed.word6 = packSnorm2x16Custom(glm::vec2(tangent.x, tangent.y));
-  packed.word7 = packSnorm2x16Custom(glm::vec2(tangent.z, 0.0f));
-  packed.word8 = glm::packHalf2x16(vertex.uv1);
-
+  packed.word3 = packSnorm2x16Custom(oct);
+  packed.word4 = glm::packHalf2x16(vertex.uv);
+  packed.word5 = glm::packHalf2x16(vertex.uv1);
   return packed;
 }
 
-template <typename PackedVector>
-void packVertices(std::span<const Vertex> vertices, PackedVector &packed) {
-  packed.resize(vertices.size());
-  for (size_t i = 0; i < vertices.size(); ++i) {
-    packed[i] = packVertex(vertices[i]);
+PackedStaticVertexWords
+packStaticVertex(const Vertex &vertex,
+                 const StaticVertexDecodeGpuData &decode) {
+  PackedStaticVertexWords packed{};
+  const glm::vec3 scale = glm::max(glm::vec3(decode.scale), glm::vec3(1.0e-6f));
+  const glm::vec3 normalizedPosition =
+      glm::clamp((vertex.position - glm::vec3(decode.offset)) / scale,
+                 glm::vec3(0.0f), glm::vec3(1.0f));
+  const glm::vec3 normal = sanitizeNormal(vertex.normal);
+  const glm::vec2 oct = encodeOctNormal(normal);
+
+  packed.word0 =
+      glm::packUnorm2x16(glm::vec2(normalizedPosition.x, normalizedPosition.y));
+  packed.word1 = glm::packUnorm2x16(glm::vec2(normalizedPosition.z, 0.0f));
+  packed.word2 = packSnorm2x16Custom(oct);
+  packed.word3 = glm::packHalf2x16(vertex.uv);
+  packed.word4 = glm::packHalf2x16(vertex.uv1);
+  return packed;
+}
+
+StaticVertexDecodeGpuData
+computeStaticDecodeRecord(std::span<const Vertex> vertices) {
+  StaticVertexDecodeGpuData decode{};
+  if (vertices.empty()) {
+    return decode;
   }
+  glm::vec3 minPos = vertices.front().position;
+  glm::vec3 maxPos = vertices.front().position;
+  for (size_t i = 1; i < vertices.size(); ++i) {
+    minPos = glm::min(minPos, vertices[i].position);
+    maxPos = glm::max(maxPos, vertices[i].position);
+  }
+  decode.offset = glm::vec4(minPos, 0.0f);
+  decode.scale = glm::vec4(glm::max(maxPos - minPos, glm::vec3(1.0e-6f)), 0.0f);
+  return decode;
 }
 
 template <typename T>
@@ -129,6 +182,47 @@ std::vector<std::byte> packPodVectorToBytes(const std::vector<T> &values) {
     std::memcpy(bytes.data(), values.data(), bytes.size());
   }
   return bytes;
+}
+
+ModelPackedVertexData packVerticesForModel(const MeshData &data) {
+  ModelPackedVertexData packed{};
+  const bool animatedFormat =
+      !data.skinInfluences.empty() || !data.morphTargets.empty();
+  packed.format = animatedFormat ? PackedVertexFormat::AnimatedFloat24
+                                 : PackedVertexFormat::StaticQuantized20;
+
+  if (packed.format == PackedVertexFormat::AnimatedFloat24) {
+    std::vector<PackedAnimatedVertexWords> vertices(data.vertices.size());
+    for (size_t i = 0; i < data.vertices.size(); ++i) {
+      vertices[i] = packAnimatedVertex(data.vertices[i]);
+    }
+    packed.vertexBytes = packPodVectorToBytes(vertices);
+    return packed;
+  }
+
+  std::vector<PackedStaticVertexWords> vertices(data.vertices.size());
+  std::vector<StaticVertexDecodeGpuData> decodeRecords(data.submeshes.size());
+  for (size_t submeshIndex = 0; submeshIndex < data.submeshes.size();
+       ++submeshIndex) {
+    const Submesh &submesh = data.submeshes[submeshIndex];
+    if (submesh.vertexCount == 0u) {
+      decodeRecords[submeshIndex] = StaticVertexDecodeGpuData{};
+      continue;
+    }
+    const size_t start = submesh.vertexOffset;
+    const size_t count = submesh.vertexCount;
+    decodeRecords[submeshIndex] = computeStaticDecodeRecord(
+        std::span<const Vertex>(data.vertices.data() + start, count));
+    for (size_t vertexIndex = 0; vertexIndex < count; ++vertexIndex) {
+      vertices[start + vertexIndex] = packStaticVertex(
+          data.vertices[start + vertexIndex], decodeRecords[submeshIndex]);
+    }
+  }
+  packed.vertexBytes = packPodVectorToBytes(vertices);
+  packed.staticDecode.data = packPodVectorToBytes(decodeRecords);
+  packed.staticDecode.count = static_cast<uint32_t>(decodeRecords.size());
+  packed.staticDecode.strideBytes = sizeof(StaticVertexDecodeGpuData);
+  return packed;
 }
 
 Result<bool, std::string>
@@ -222,11 +316,6 @@ packAnimationData(const MeshData &data) {
           return Result<ModelAnimationPackedData, std::string>::makeError(
               "Model::create: morph normal delta count mismatch");
         }
-        if (!target.tangentDeltas.empty() &&
-            target.tangentDeltas.size() != submesh.vertexCount) {
-          return Result<ModelAnimationPackedData, std::string>::makeError(
-              "Model::create: morph tangent delta count mismatch");
-        }
 
         for (uint32_t localVertexIndex = 0;
              localVertexIndex < submesh.vertexCount; ++localVertexIndex) {
@@ -241,10 +330,6 @@ packAnimationData(const MeshData &data) {
           if (!target.normalDeltas.empty()) {
             delta.normalDelta =
                 glm::vec4(target.normalDeltas[localVertexIndex], 0.0f);
-          }
-          if (!target.tangentDeltas.empty()) {
-            delta.tangentDelta =
-                glm::vec4(target.tangentDeltas[localVertexIndex], 0.0f);
           }
         }
       }
@@ -289,6 +374,32 @@ createStorageBuffer(GPUDevice &gpu, std::span<const std::byte> bytes,
       .data = bytes,
   };
   return Buffer::create(gpu, desc, debugName);
+}
+
+Result<std::unique_ptr<Buffer>, std::string> createStaticVertexDecodeBuffer(
+    GPUDevice &gpu, std::span<const std::byte> staticDecodeBytes,
+    std::string_view debugName, uint64_t &outBufferAddress) {
+  outBufferAddress = 0u;
+  if (staticDecodeBytes.empty()) {
+    return Result<std::unique_ptr<Buffer>, std::string>::makeResult(nullptr);
+  }
+
+  auto bufferResult = createStorageBuffer(
+      gpu, staticDecodeBytes, std::string(debugName) + "_vertex_decode");
+  if (bufferResult.hasError()) {
+    return Result<std::unique_ptr<Buffer>, std::string>::makeError(
+        bufferResult.error());
+  }
+
+  std::unique_ptr<Buffer> buffer = std::move(bufferResult.value());
+  outBufferAddress = gpu.getBufferDeviceAddress(buffer->handle());
+  if (outBufferAddress == 0u) {
+    return Result<std::unique_ptr<Buffer>, std::string>::makeError(
+        "invalid vertex decode buffer address");
+  }
+
+  return Result<std::unique_ptr<Buffer>, std::string>::makeResult(
+      std::move(buffer));
 }
 
 Result<ModelAnimationGpuBuffers, std::string>
@@ -425,20 +536,6 @@ computeSourceMaterialCount(std::span<const Submesh> submeshes) {
       static_cast<uint32_t>(maxSourceMaterial + 1u));
 }
 
-std::vector<std::byte>
-packVerticesToByteBuffer(std::span<const Vertex> vertices) {
-  ScratchArena scratch;
-  ScopedScratch scopedScratch(scratch);
-  std::pmr::vector<PackedVertexWords> packed(scopedScratch.resource());
-  packVertices(vertices, packed);
-
-  std::vector<std::byte> packedBytes(packed.size() * sizeof(PackedVertexWords));
-  if (!packedBytes.empty()) {
-    std::memcpy(packedBytes.data(), packed.data(), packedBytes.size());
-  }
-  return packedBytes;
-}
-
 Result<bool, std::string>
 validateMeshTopology(std::span<const uint32_t> indices, uint32_t vertexCount,
                      std::span<const Submesh> submeshes,
@@ -525,12 +622,42 @@ bool isMeshCacheReadEnabled() {
   return true;
 }
 
+uint32_t meshBinaryLayoutIdForVertexFormat(PackedVertexFormat format) {
+  switch (format) {
+  case PackedVertexFormat::StaticQuantized20:
+    return kMeshBinaryLayoutIdStaticQuantized20;
+  case PackedVertexFormat::AnimatedFloat24:
+    return kMeshBinaryLayoutIdAnimatedFloat24;
+  }
+  return kMeshBinaryLayoutIdStaticQuantized20;
+}
+
+uint32_t packedVertexStrideBytes(PackedVertexFormat format) {
+  switch (format) {
+  case PackedVertexFormat::StaticQuantized20:
+    return sizeof(PackedStaticVertexWords);
+  case PackedVertexFormat::AnimatedFloat24:
+    return sizeof(PackedAnimatedVertexWords);
+  }
+  return sizeof(PackedStaticVertexWords);
+}
+
+PackedVertexFormat packedVertexFormatFromLayoutId(uint32_t layoutId) {
+  switch (layoutId) {
+  case kMeshBinaryLayoutIdAnimatedFloat24:
+    return PackedVertexFormat::AnimatedFloat24;
+  case kMeshBinaryLayoutIdStaticQuantized20:
+  default:
+    return PackedVertexFormat::StaticQuantized20;
+  }
+}
+
 void maybeQueueMeshCacheWrite(
     const MeshCacheKey &cacheKey, const MeshImportOptions &options,
-    std::span<const std::byte> packedVertexBytes, uint32_t vertexCount,
+    const ModelPackedVertexData &packedVertexData, uint32_t vertexCount,
     std::span<const uint32_t> indices, std::span<const Submesh> submeshes,
     const BoundingBox &bounds, const ModelAnimationPackedData &animationData) {
-  if (packedVertexBytes.empty() || indices.empty()) {
+  if (packedVertexData.vertexBytes.empty() || indices.empty()) {
     return;
   }
 
@@ -543,8 +670,18 @@ void maybeQueueMeshCacheWrite(
   input.sourceSizeBytes = fingerprint.exists ? fingerprint.sizeBytes : 0u;
   input.sourceMtimeNs = fingerprint.exists ? fingerprint.mtimeNs : 0;
   input.bounds = bounds;
-  input.vertices = {packedVertexBytes, vertexCount,
-                    kMeshBinaryPackedVertexStrideBytes};
+  input.vertexLayoutId =
+      meshBinaryLayoutIdForVertexFormat(packedVertexData.format);
+  input.vertices = {
+      std::span<const std::byte>(packedVertexData.vertexBytes.data(),
+                                 packedVertexData.vertexBytes.size()),
+      vertexCount, packedVertexStrideBytes(packedVertexData.format)};
+  input.staticVertexDecode = {
+      std::span<const std::byte>(packedVertexData.staticDecode.data.data(),
+                                 packedVertexData.staticDecode.data.size()),
+      packedVertexData.staticDecode.count,
+      packedVertexData.staticDecode.strideBytes,
+  };
   input.indices = indices;
   input.submeshes = submeshes;
   input.skinInfluences = {
@@ -757,6 +894,7 @@ ModelAsyncLoad::finalize(GPUDevice &gpu, std::pmr::memory_resource *mem,
 
 Model::~Model() {
   if (gpu_ != nullptr) {
+    destroyBuffer(*gpu_, vertexDecodeBuffer_);
     destroyBuffer(*gpu_, skinInfluenceBuffer_);
     destroyBuffer(*gpu_, morphMetaBuffer_);
     destroyBuffer(*gpu_, morphDeltaBuffer_);
@@ -800,17 +938,22 @@ void Model::setMaterialIndexForAllSources(uint32_t materialIndex) noexcept {
 Result<std::unique_ptr<Model>, std::string>
 Model::create(GPUDevice &gpu, const MeshData &data,
               std::string_view debugName) {
-  const std::vector<std::byte> packedBytes =
-      packVerticesToByteBuffer(data.vertices);
+  const ModelPackedVertexData packedVertices = packVerticesForModel(data);
   return createFromPackedVertices(
       gpu, data,
-      std::span<const std::byte>(packedBytes.data(), packedBytes.size()),
-      nullptr, debugName);
+      std::span<const std::byte>(packedVertices.vertexBytes.data(),
+                                 packedVertices.vertexBytes.size()),
+      packedVertices.format,
+      std::span<const std::byte>(packedVertices.staticDecode.data.data(),
+                                 packedVertices.staticDecode.data.size()),
+      packedVertices.staticDecode.count, nullptr, debugName);
 }
 
 Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
     GPUDevice &gpu, const MeshData &data,
     std::span<const std::byte> packedVertexBytes,
+    PackedVertexFormat packedVertexFormat,
+    std::span<const std::byte> staticDecodeBytes, uint32_t staticDecodeCount,
     const ModelAnimationPackedData *animationPackedData,
     std::string_view debugName) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
@@ -823,10 +966,23 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
         sourceMaterialCountResult.error());
   }
   const size_t expectedPackedByteCount =
-      data.vertices.size() * sizeof(PackedVertexWords);
+      data.vertices.size() * packedVertexStrideBytes(packedVertexFormat);
   if (packedVertexBytes.size() != expectedPackedByteCount) {
     return Result<std::unique_ptr<Model>, std::string>::makeError(
         "Model::createFromPackedVertices: packed vertex byte count mismatch");
+  }
+  if (packedVertexFormat == PackedVertexFormat::StaticQuantized20) {
+    const size_t expectedDecodeBytes = static_cast<size_t>(staticDecodeCount) *
+                                       sizeof(StaticVertexDecodeGpuData);
+    if (staticDecodeCount != data.submeshes.size() ||
+        staticDecodeBytes.size() != expectedDecodeBytes) {
+      return Result<std::unique_ptr<Model>, std::string>::makeError(
+          "Model::createFromPackedVertices: static vertex decode mismatch");
+    }
+  } else if (!staticDecodeBytes.empty() || staticDecodeCount != 0u) {
+    return Result<std::unique_ptr<Model>, std::string>::makeError(
+        "Model::createFromPackedVertices: animated vertex data must not carry "
+        "static decode metadata");
   }
   auto topologyValidation = validateMeshTopology(
       std::span<const uint32_t>(data.indices.data(), data.indices.size()),
@@ -875,6 +1031,18 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
   }
   ModelAnimationGpuBuffers animationBuffers =
       std::move(animationBuffersResult.value());
+  if (!staticDecodeBytes.empty()) {
+    auto decodeBufferResult = createStaticVertexDecodeBuffer(
+        gpu, staticDecodeBytes, debugName,
+        animationBuffers.vertexDecodeBufferAddress);
+    if (decodeBufferResult.hasError()) {
+      releaseAnimationGpuBuffers(gpu, animationBuffers);
+      gpu.releaseGeometry(geometryResult.value());
+      return Result<std::unique_ptr<Model>, std::string>::makeError(
+          "Model::createFromPackedVertices: " + decodeBufferResult.error());
+    }
+    animationBuffers.vertexDecodeBuffer = std::move(decodeBufferResult.value());
+  }
 
   std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
   ownedSubmeshes.assign(data.submeshes.begin(), data.submeshes.end());
@@ -886,7 +1054,9 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
           new Model(gpu, geometryResult.value(), std::move(ownedSubmeshes),
                     static_cast<uint32_t>(data.vertices.size()),
                     static_cast<uint32_t>(data.indices.size()), bounds,
-                    animationBuffers.view,
+                    packedVertexFormat, animationBuffers.view,
+                    animationBuffers.vertexDecodeBufferAddress,
+                    std::move(animationBuffers.vertexDecodeBuffer),
                     std::move(animationBuffers.skinInfluenceBuffer),
                     std::move(animationBuffers.morphMetaBuffer),
                     std::move(animationBuffers.morphDeltaBuffer),
@@ -912,9 +1082,11 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
     const MeshCacheKey &cacheKey = cacheKeyResult.value();
     if (auto cachedMesh = tryLoadMeshCache(path, cacheKey, options);
         cachedMesh.has_value()) {
+      const PackedVertexFormat cachedFormat =
+          packedVertexFormatFromLayoutId(cachedMesh->vertexLayoutId);
       const size_t expectedPackedByteCount =
           static_cast<size_t>(cachedMesh->vertices.count) *
-          sizeof(PackedVertexWords);
+          packedVertexStrideBytes(cachedFormat);
       if (cachedMesh->vertices.data.size() != expectedPackedByteCount) {
         NURI_LOG_WARNING(
             "Model::createFromFile: Cache vertex byte count mismatch for '%s' "
@@ -949,6 +1121,22 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
           }
           ModelAnimationGpuBuffers animationBuffers =
               std::move(animationBuffersResult.value());
+          if (!cachedMesh->staticVertexDecode.empty()) {
+            auto decodeBufferResult = createStaticVertexDecodeBuffer(
+                gpu,
+                std::span<const std::byte>(
+                    cachedMesh->staticVertexDecode.data.data(),
+                    cachedMesh->staticVertexDecode.data.size()),
+                debugName, animationBuffers.vertexDecodeBufferAddress);
+            if (decodeBufferResult.hasError()) {
+              releaseAnimationGpuBuffers(gpu, animationBuffers);
+              gpu.releaseGeometry(geometryResult.value());
+              return Result<std::unique_ptr<Model>, std::string>::makeError(
+                  "Model::createFromFile: " + decodeBufferResult.error());
+            }
+            animationBuffers.vertexDecodeBuffer =
+                std::move(decodeBufferResult.value());
+          }
           std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
           ownedSubmeshes.assign(cachedMesh->submeshes.begin(),
                                 cachedMesh->submeshes.end());
@@ -960,7 +1148,9 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
                   gpu, geometryResult.value(), std::move(ownedSubmeshes),
                   cachedMesh->vertices.count,
                   static_cast<uint32_t>(cachedMesh->indices.size()),
-                  cachedMesh->bounds, animationBuffers.view,
+                  cachedMesh->bounds, cachedFormat, animationBuffers.view,
+                  animationBuffers.vertexDecodeBufferAddress,
+                  std::move(animationBuffers.vertexDecodeBuffer),
                   std::move(animationBuffers.skinInfluenceBuffer),
                   std::move(animationBuffers.morphMetaBuffer),
                   std::move(animationBuffers.morphDeltaBuffer),
@@ -989,10 +1179,10 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
 
   const MeshData &meshData = meshDataResult.value();
   const bool canWriteMeshCache = !cacheKeyResult.hasError();
-  std::vector<std::byte> packedBytes;
+  ModelPackedVertexData packedVertices{};
   ModelAnimationPackedData animationPacked{};
   if (canWriteMeshCache) {
-    packedBytes = packVerticesToByteBuffer(meshData.vertices);
+    packedVertices = packVerticesForModel(meshData);
     auto animationPackResult = packAnimationData(meshData);
     if (animationPackResult.hasError()) {
       return Result<std::unique_ptr<Model>, std::string>::makeError(
@@ -1001,13 +1191,18 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
     animationPacked = std::move(animationPackResult.value());
   }
 
-  auto modelResult = canWriteMeshCache
-                         ? createFromPackedVertices(
-                               gpu, meshData,
-                               std::span<const std::byte>(packedBytes.data(),
-                                                          packedBytes.size()),
-                               &animationPacked, debugName)
-                         : create(gpu, meshData, debugName);
+  auto modelResult =
+      canWriteMeshCache
+          ? createFromPackedVertices(
+                gpu, meshData,
+                std::span<const std::byte>(packedVertices.vertexBytes.data(),
+                                           packedVertices.vertexBytes.size()),
+                packedVertices.format,
+                std::span<const std::byte>(
+                    packedVertices.staticDecode.data.data(),
+                    packedVertices.staticDecode.data.size()),
+                packedVertices.staticDecode.count, &animationPacked, debugName)
+          : create(gpu, meshData, debugName);
   if (modelResult.hasError()) {
     const std::string pathStr{path};
     NURI_LOG_WARNING(
@@ -1019,7 +1214,7 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
 
   if (canWriteMeshCache) {
     maybeQueueMeshCacheWrite(
-        cacheKeyResult.value(), options, packedBytes,
+        cacheKeyResult.value(), options, packedVertices,
         static_cast<uint32_t>(meshData.vertices.size()),
         std::span<const uint32_t>(meshData.indices.data(),
                                   meshData.indices.size()),
@@ -1125,9 +1320,8 @@ Result<bool, std::string> Model::warmFileCache(std::string_view path,
     return Result<bool, std::string>::makeError(topologyValidation.error());
   }
 
-  const std::vector<std::byte> packedBytes =
-      packVerticesToByteBuffer(meshData.vertices);
-  if (packedBytes.empty()) {
+  const ModelPackedVertexData packedVertices = packVerticesForModel(meshData);
+  if (packedVertices.vertexBytes.empty()) {
     return Result<bool, std::string>::makeError(
         "Model::warmFileCache: Packed vertex buffer is empty");
   }
@@ -1148,10 +1342,19 @@ Result<bool, std::string> Model::warmFileCache(std::string_view path,
   input.sourceSizeBytes = fingerprint.exists ? fingerprint.sizeBytes : 0u;
   input.sourceMtimeNs = fingerprint.exists ? fingerprint.mtimeNs : 0;
   input.bounds = computeModelBounds(meshData.vertices);
+  input.vertexLayoutId =
+      meshBinaryLayoutIdForVertexFormat(packedVertices.format);
   input.vertices = {
-      std::span<const std::byte>(packedBytes.data(), packedBytes.size()),
+      std::span<const std::byte>(packedVertices.vertexBytes.data(),
+                                 packedVertices.vertexBytes.size()),
       static_cast<uint32_t>(meshData.vertices.size()),
-      kMeshBinaryPackedVertexStrideBytes,
+      packedVertexStrideBytes(packedVertices.format),
+  };
+  input.staticVertexDecode = {
+      std::span<const std::byte>(packedVertices.staticDecode.data.data(),
+                                 packedVertices.staticDecode.data.size()),
+      packedVertices.staticDecode.count,
+      packedVertices.staticDecode.strideBytes,
   };
   input.indices = std::span<const uint32_t>(meshData.indices.data(),
                                             meshData.indices.size());

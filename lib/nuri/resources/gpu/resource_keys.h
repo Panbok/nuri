@@ -225,21 +225,6 @@ hashModelImportOptions(const MeshImportOptions &options) {
   mix(desc.uvSets.transmission);
   mix(desc.uvSets.thickness);
 
-  mix(desc.samplers.baseColor);
-  mix(desc.samplers.metallicRoughness);
-  mix(desc.samplers.normal);
-  mix(desc.samplers.occlusion);
-  mix(desc.samplers.emissive);
-  mix(desc.samplers.clearcoat);
-  mix(desc.samplers.clearcoatRoughness);
-  mix(desc.samplers.clearcoatNormal);
-  mix(desc.samplers.specular);
-  mix(desc.samplers.specularColor);
-  mix(desc.samplers.sheenColor);
-  mix(desc.samplers.sheenRoughness);
-  mix(desc.samplers.transmission);
-  mix(desc.samplers.thickness);
-
   for (uint32_t slotIndex = 0; slotIndex < kMaterialTextureSlotCount;
        ++slotIndex) {
     const MaterialTextureTransformData &transform =
