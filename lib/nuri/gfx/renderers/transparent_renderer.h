@@ -56,19 +56,21 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 224,
+  static_assert(sizeof(FrameData) == 264,
                 "TransparentRenderer::FrameData must match shader layout");
 
   struct PushConstants {
     uint64_t frameDataAddress = 0;
     uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
-    uint64_t materialBufferAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
     uint32_t instanceCount = 0;
     uint32_t materialIndex = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
     float timeSeconds = 0.0f;
     float tessNearDistance = 1.0f;
     float tessFarDistance = 8.0f;
@@ -87,10 +89,11 @@ private:
     uint32_t submeshIndex = 0;
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
-    BufferHandle baseVertexBuffer{};
     BufferHandle vertexBuffer{};
-    uint64_t baseVertexBufferAddress = 0;
     uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     uint32_t instanceIndex = 0;
     bool doubleSided = false;
@@ -105,7 +108,6 @@ private:
   Result<bool, std::string> createShaders();
   Result<bool, std::string> ensurePipelines(Format colorFormat,
                                             Format depthFormat);
-  Result<bool, std::string> ensureMaterialBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
@@ -141,7 +143,6 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> meshShader_;
   std::unique_ptr<Shader> meshPickShader_;
-  std::unique_ptr<Buffer> materialBuffer_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
 
@@ -159,7 +160,6 @@ private:
   // format needs to be cached here.
   Format pickPipelineDepthFormat_ = Format::Count;
 
-  size_t materialBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;
 
@@ -174,7 +174,6 @@ private:
   std::pmr::vector<InstanceData> instanceMatrices_;
   std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
-  std::pmr::vector<MaterialGpuData> materialGpuDataCache_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
   std::pmr::vector<TextureHandle> environmentTextureAccessHandles_;
   std::pmr::vector<TransparentStageSortableDraw> contributorSortableDraws_;

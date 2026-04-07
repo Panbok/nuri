@@ -8,10 +8,10 @@
 
 namespace nuri {
 
-// Public render-graph contract: a submit item may depend on up to 4 buffers.
+// Public render-graph contract: a submit item may depend on up to 12 buffers.
 // Backends can impose stricter limits, but higher-level layers should respect
 // this cap to avoid backend-specific failures.
-constexpr size_t kMaxDependencyBuffers = 4;
+constexpr size_t kMaxDependencyBuffers = 12;
 
 struct Viewport {
   float x = 0.0f;

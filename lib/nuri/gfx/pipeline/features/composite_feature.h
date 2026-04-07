@@ -43,20 +43,21 @@ private:
   struct alignas(8) PushConstants {
     uint64_t frameDataAddress = 0;
     uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
-    uint64_t materialBufferAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
     uint32_t instanceCount = 0;
     uint32_t materialIndex = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
     float timeSeconds = 0.0f;
     float tessNearDistance = 1.0f;
     float tessFarDistance = 8.0f;
     float tessMinFactor = 1.0f;
     float tessMaxFactor = 1.0f;
     uint32_t debugVisualizationMode = 0;
-    uint32_t reserved0 = 0;
   };
   static_assert(sizeof(PushConstants) <= 128,
                 "CompositePass::PushConstants exceeds Vulkan guarantee");

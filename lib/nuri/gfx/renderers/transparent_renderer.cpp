@@ -167,7 +167,7 @@ TransparentRenderer::TransparentRenderer(GPUDevice &gpu,
       memory_(resolveMemoryResource(memory)), instanceMatricesRing_(memory_),
       instanceRemapRing_(memory_), meshDrawTemplates_(memory_),
       instanceMatrices_(memory_), instanceRemap_(memory_),
-      instanceDataRingUploadVersions_(memory_), materialGpuDataCache_(memory_),
+      instanceDataRingUploadVersions_(memory_),
       materialTextureAccessHandles_(memory_),
       environmentTextureAccessHandles_(memory_),
       contributorSortableDraws_(memory_), contributorFixedDraws_(memory_),
@@ -254,7 +254,7 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   if (topologyDirty || materialDirty || needsGeometryRebuild) {
     auto rebuildResult = rebuildSceneCache(
         *frame.scene, *frame.resources,
-        static_cast<uint32_t>(materialSnapshot.gpuData.size()));
+        static_cast<uint32_t>(materialSnapshot.headers.size()));
     if (rebuildResult.hasError()) {
       return rebuildResult;
     }
@@ -322,17 +322,17 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
         "is "
         "unavailable");
   }
+  if (!frame.sharedResources.materialTableGpuData.has_value()) {
+    return Result<bool, std::string>::makeError(
+        "TransparentRenderer::prepareTransparentPasses: material table GPU "
+        "data is unavailable");
+  }
   const ForwardSceneGpuData *sceneGpu =
       &*frame.sharedResources.forwardSceneGpuData;
+  const MaterialTableGpuData *materialGpu =
+      &*frame.sharedResources.materialTableGpuData;
   const AnimationSceneFrameData *animationSceneData =
       resolveAnimationSceneFrameData(frame);
-
-  auto materialBufferResult = ensureMaterialBufferCapacity(
-      std::max<size_t>(materialSnapshot.gpuData.size(), 1u) *
-      sizeof(MaterialGpuData));
-  if (materialBufferResult.hasError()) {
-    return materialBufferResult;
-  }
   if (animationSceneData == nullptr) {
     auto matricesBufferResult = ensureInstanceMatricesRingCapacity(std::max(
         instanceMatrices_.size() * sizeof(InstanceData), sizeof(InstanceData)));
@@ -353,23 +353,7 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
       return cacheResult;
     }
   }
-
-  if (materialDirty || materialGpuDataCache_.empty()) {
-    materialGpuDataCache_.clear();
-    materialGpuDataCache_.insert(materialGpuDataCache_.end(),
-                                 materialSnapshot.gpuData.begin(),
-                                 materialSnapshot.gpuData.end());
-    if (materialGpuDataCache_.empty()) {
-      materialGpuDataCache_.push_back(MaterialGpuData{});
-    }
-    const std::span<const std::byte> materialBytes{
-        reinterpret_cast<const std::byte *>(materialGpuDataCache_.data()),
-        materialGpuDataCache_.size() * sizeof(MaterialGpuData)};
-    auto updateResult =
-        gpu_.updateBuffer(materialBuffer_->handle(), materialBytes, 0);
-    if (updateResult.hasError()) {
-      return updateResult;
-    }
+  if (materialDirty) {
     cachedMaterialVersion_ = materialSnapshot.version;
   }
 
@@ -401,8 +385,6 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   }
 
   const uint64_t frameDataAddress = sceneGpu->frameDataAddress;
-  const uint64_t materialBufferAddress =
-      gpu_.getBufferDeviceAddress(materialBuffer_->handle());
   const uint64_t directionalLightBufferAddress =
       sceneGpu->directionalLightBufferAddress;
   const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
@@ -416,8 +398,12 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
           : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
   const uint64_t instanceRemapAddress = gpu_.getBufferDeviceAddress(
       instanceRemapRing_[frameSlot].buffer->handle());
-  if (materialBufferAddress == 0u || instanceMatricesAddress == 0u ||
-      instanceRemapAddress == 0u ||
+  if (materialGpu->headerBufferAddress == 0u ||
+      materialGpu->clearcoatBufferAddress == 0u ||
+      materialGpu->sheenBufferAddress == 0u ||
+      materialGpu->transmissionBufferAddress == 0u ||
+      materialGpu->specularBufferAddress == 0u ||
+      instanceMatricesAddress == 0u || instanceRemapAddress == 0u ||
       (sceneGpu->directionalLightCount > 0u &&
        directionalLightBufferAddress == 0u) ||
       (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
@@ -465,6 +451,9 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
                   glm::vec4(entry.submesh->bounds.getCenter(), 1.0f));
     BufferHandle vertexBuffer = entry.vertexBuffer;
     uint64_t vertexBufferAddress = entry.vertexBufferAddress;
+    uint64_t vertexDecodeBufferAddress = entry.vertexDecodeBufferAddress;
+    uint32_t vertexDecodeIndex = entry.vertexDecodeIndex;
+    uint32_t packedVertexFormat = entry.packedVertexFormat;
     if (animationSceneData != nullptr &&
         entry.instanceIndex <
             animationSceneData->geometryOverridesByRenderable.size()) {
@@ -478,6 +467,10 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
         if (overrideVertexAddress != 0u) {
           vertexBuffer = geometryOverride.vertexBuffer;
           vertexBufferAddress = overrideVertexAddress;
+          vertexDecodeBufferAddress = 0u;
+          vertexDecodeIndex = 0u;
+          packedVertexFormat =
+              static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat24);
         }
       }
     }
@@ -488,13 +481,15 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
     drawPushConstants_.push_back(PushConstants{
         .frameDataAddress = frameDataAddress,
         .vertexBufferAddress = vertexBufferAddress,
+        .vertexDecodeBufferAddress = vertexDecodeBufferAddress,
         .instanceMatricesAddress = instanceMatricesAddress,
         .instanceRemapAddress = instanceRemapAddress,
-        .materialBufferAddress = materialBufferAddress,
         .instanceCentersPhaseAddress = 0u,
         .instanceBaseMatricesAddress = 0u,
         .instanceCount = renderableCount,
         .materialIndex = entry.materialIndex,
+        .vertexDecodeIndex = vertexDecodeIndex,
+        .packedVertexFormat = packedVertexFormat,
         .timeSeconds = static_cast<float>(frame.timeSeconds),
         .tessNearDistance = 1.0f,
         .tessFarDistance = 8.0f,
@@ -573,7 +568,11 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
 
   passDependencyBuffers_.clear();
   appendUniqueBuffer(passDependencyBuffers_, sceneGpu->buffer);
-  appendUniqueBuffer(passDependencyBuffers_, materialBuffer_->handle());
+  appendUniqueBuffer(passDependencyBuffers_, materialGpu->headerBuffer);
+  appendUniqueBuffer(passDependencyBuffers_, materialGpu->clearcoatBuffer);
+  appendUniqueBuffer(passDependencyBuffers_, materialGpu->sheenBuffer);
+  appendUniqueBuffer(passDependencyBuffers_, materialGpu->transmissionBuffer);
+  appendUniqueBuffer(passDependencyBuffers_, materialGpu->specularBuffer);
   appendUniqueBuffer(passDependencyBuffers_, instanceMatricesBufferHandle);
   appendUniqueBuffer(passDependencyBuffers_,
                      instanceRemapRing_[frameSlot].buffer->handle());
@@ -709,30 +708,6 @@ TransparentRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
 }
 
 Result<bool, std::string>
-TransparentRenderer::ensureMaterialBufferCapacity(size_t requiredBytes) {
-  const size_t requested = std::max(requiredBytes, sizeof(MaterialGpuData));
-  if (materialBuffer_ && materialBuffer_->valid() &&
-      materialBufferCapacityBytes_ >= requested) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  if (materialBuffer_ && materialBuffer_->valid()) {
-    gpu_.destroyBuffer(materialBuffer_->handle());
-  }
-  materialBuffer_.reset();
-  auto bufferResult = Buffer::create(gpu_,
-                                     BufferDesc{.usage = BufferUsage::Storage,
-                                                .storage = Storage::Device,
-                                                .size = requested},
-                                     "transparent_material_data");
-  if (bufferResult.hasError()) {
-    return Result<bool, std::string>::makeError(bufferResult.error());
-  }
-  materialBuffer_ = std::move(bufferResult.value());
-  materialBufferCapacityBytes_ = requested;
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string>
 TransparentRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   const uint32_t count = std::max(requiredCount, 1u);
   while (instanceMatricesRing_.size() < count) {
@@ -864,10 +839,13 @@ TransparentRenderer::rebuildSceneCache(const RenderScene &scene,
           .submeshIndex = static_cast<uint32_t>(submeshIndex),
           .indexBuffer = geometry.indexBuffer,
           .indexBufferOffset = geometry.indexByteOffset,
-          .baseVertexBuffer = geometry.vertexBuffer,
           .vertexBuffer = {},
-          .baseVertexBufferAddress = vertexBufferAddress,
           .vertexBufferAddress = vertexBufferAddress,
+          .vertexDecodeBufferAddress =
+              modelRecord->model->vertexDecodeBufferAddress(),
+          .vertexDecodeIndex = static_cast<uint32_t>(submeshIndex),
+          .packedVertexFormat =
+              static_cast<uint32_t>(modelRecord->model->drawVertexFormat()),
           .materialIndex = materialIndex,
           .instanceIndex = renderableIndex,
           .doubleSided = materialRecord->desc.doubleSided,
@@ -1143,7 +1121,6 @@ void TransparentRenderer::resetCachedState() {
   instanceMatrices_.clear();
   instanceRemap_.clear();
   instanceDataRingUploadVersions_.clear();
-  materialGpuDataCache_.clear();
   materialTextureAccessHandles_.clear();
   environmentTextureAccessHandles_.clear();
 }
@@ -1201,12 +1178,6 @@ void TransparentRenderer::destroyShaders() {
 }
 
 void TransparentRenderer::destroyBuffers() {
-  if (materialBuffer_ && materialBuffer_->valid()) {
-    gpu_.destroyBuffer(materialBuffer_->handle());
-  }
-  materialBuffer_.reset();
-  materialBufferCapacityBytes_ = 0;
-
   for (DynamicBufferSlot &slot : instanceMatricesRing_) {
     if (slot.buffer && slot.buffer->valid()) {
       gpu_.destroyBuffer(slot.buffer->handle());

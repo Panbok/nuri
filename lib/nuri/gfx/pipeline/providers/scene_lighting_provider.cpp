@@ -80,6 +80,11 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(
         "SceneLightingProvider::prepare: frame resources are null");
   }
+  if (!ctx.shared.materialTableGpuData.has_value()) {
+    return Result<bool, std::string>::makeError(
+        "SceneLightingProvider::prepare: material table GPU data is "
+        "unavailable");
+  }
 
   const std::span<const DirectionalLightGpuData> directionalLights =
       frame.scene->packedDirectionalLights();
@@ -208,6 +213,16 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .sceneColorQuarterResTexId = sceneColorQuarterResTexId,
       .directionalLightBufferAddress = directionalLightBufferAddress,
       .localLightBufferAddress = localLightBufferAddress,
+      .materialHeaderBufferAddress =
+          ctx.shared.materialTableGpuData->headerBufferAddress,
+      .materialClearcoatBufferAddress =
+          ctx.shared.materialTableGpuData->clearcoatBufferAddress,
+      .materialSheenBufferAddress =
+          ctx.shared.materialTableGpuData->sheenBufferAddress,
+      .materialTransmissionBufferAddress =
+          ctx.shared.materialTableGpuData->transmissionBufferAddress,
+      .materialSpecularBufferAddress =
+          ctx.shared.materialTableGpuData->specularBufferAddress,
       .directionalLightCount = directionalLightCount,
       .localLightCount = localLightCount,
   };

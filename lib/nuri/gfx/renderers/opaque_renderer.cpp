@@ -285,6 +285,9 @@ struct BatchKey {
   uint32_t indexCount = 0;
   uint32_t firstIndex = 0;
   uint64_t vertexBufferAddress = 0;
+  uint64_t vertexDecodeBufferAddress = 0;
+  uint32_t vertexDecodeIndex = 0;
+  uint32_t packedVertexFormat = 0;
   uint32_t materialIndex = kInvalidMaterialIndex;
 
   bool operator==(const BatchKey &other) const {
@@ -293,6 +296,9 @@ struct BatchKey {
            indexBufferOffset == other.indexBufferOffset &&
            indexCount == other.indexCount && firstIndex == other.firstIndex &&
            vertexBufferAddress == other.vertexBufferAddress &&
+           vertexDecodeBufferAddress == other.vertexDecodeBufferAddress &&
+           vertexDecodeIndex == other.vertexDecodeIndex &&
+           packedVertexFormat == other.packedVertexFormat &&
            materialIndex == other.materialIndex;
   }
 };
@@ -311,6 +317,9 @@ struct BatchKeyHash {
     mix(key.indexBufferOffset);
     mix((static_cast<uint64_t>(key.indexCount) << 32u) | key.firstIndex);
     mix(key.vertexBufferAddress);
+    mix(key.vertexDecodeBufferAddress);
+    mix((static_cast<uint64_t>(key.vertexDecodeIndex) << 32u) |
+        key.packedVertexFormat);
     mix(static_cast<uint64_t>(key.materialIndex));
     return static_cast<size_t>(h64);
   }
@@ -331,6 +340,9 @@ struct IndirectGroupKey {
   uint64_t indexBufferOffset = 0;
   IndexFormat indexFormat = IndexFormat::U32;
   uint64_t vertexBufferAddress = 0;
+  uint64_t vertexDecodeBufferAddress = 0;
+  uint32_t vertexDecodeIndex = 0;
+  uint32_t packedVertexFormat = 0;
   uint32_t materialIndex = kInvalidMaterialIndex;
 
   bool operator==(const IndirectGroupKey &other) const {
@@ -339,6 +351,9 @@ struct IndirectGroupKey {
            indexBufferOffset == other.indexBufferOffset &&
            indexFormat == other.indexFormat &&
            vertexBufferAddress == other.vertexBufferAddress &&
+           vertexDecodeBufferAddress == other.vertexDecodeBufferAddress &&
+           vertexDecodeIndex == other.vertexDecodeIndex &&
+           packedVertexFormat == other.packedVertexFormat &&
            materialIndex == other.materialIndex;
   }
 };
@@ -357,6 +372,9 @@ struct IndirectGroupKeyHash {
     mix(key.indexBufferOffset);
     mix(static_cast<uint64_t>(key.indexFormat));
     mix(key.vertexBufferAddress);
+    mix(key.vertexDecodeBufferAddress);
+    mix((static_cast<uint64_t>(key.vertexDecodeIndex) << 32u) |
+        key.packedVertexFormat);
     mix(static_cast<uint64_t>(key.materialIndex));
     return static_cast<size_t>(h64);
   }
@@ -384,7 +402,6 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       instanceBaseMatrices_(resolveMemoryResource(memory)),
       instanceMatricesCpuCache_(resolveMemoryResource(memory)),
       instanceLodCentersInvRadiusSq_(resolveMemoryResource(memory)),
-      materialGpuDataCache_(resolveMemoryResource(memory)),
       materialTextureAccessHandles_(resolveMemoryResource(memory)),
       instanceAutoLodLevels_(resolveMemoryResource(memory)),
       instanceTessSelection_(resolveMemoryResource(memory)),
@@ -458,7 +475,6 @@ void OpaqueRenderer::onDetach() {
   instanceMatricesCpuCache_.clear();
   instanceMatricesUploadVersions_.clear();
   instanceLodCentersInvRadiusSq_.clear();
-  materialGpuDataCache_.clear();
   materialTextureAccessHandles_.clear();
   instanceAutoLodLevels_.clear();
   instanceTessSelection_.clear();
@@ -586,7 +602,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (topologyDirty || materialDirty) {
     auto cacheResult = rebuildSceneCache(
         *frame.scene, *frame.resources,
-        static_cast<uint32_t>(materialSnapshot.gpuData.size()));
+        static_cast<uint32_t>(materialSnapshot.headers.size()));
     if (cacheResult.hasError()) {
       return cacheResult;
     }
@@ -673,6 +689,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     bool vertexAddressChanged = false;
     bool hasAnimatedGeometry = false;
     for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+      uint64_t resolvedVertexDecodeBufferAddress =
+          templateEntry.baseVertexDecodeBufferAddress;
+      uint32_t resolvedVertexDecodeIndex = templateEntry.submeshIndex;
+      uint32_t resolvedPackedVertexFormat =
+          templateEntry.basePackedVertexFormat;
       uint64_t resolvedVertexBufferAddress =
           templateEntry.baseVertexBufferAddress != 0u
               ? templateEntry.baseVertexBufferAddress
@@ -691,14 +712,26 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           if (overrideVertexAddress != 0u) {
             resolvedVertexBuffer = geometryOverride.vertexBuffer;
             resolvedVertexBufferAddress = overrideVertexAddress;
+            resolvedVertexDecodeBufferAddress = 0u;
+            resolvedVertexDecodeIndex = 0u;
+            resolvedPackedVertexFormat =
+                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat24);
             hasAnimatedGeometry = true;
           }
         }
       }
       vertexAddressChanged |=
-          templateEntry.vertexBufferAddress != resolvedVertexBufferAddress;
+          templateEntry.vertexBufferAddress != resolvedVertexBufferAddress ||
+          templateEntry.vertexDecodeBufferAddress !=
+              resolvedVertexDecodeBufferAddress ||
+          templateEntry.vertexDecodeIndex != resolvedVertexDecodeIndex ||
+          templateEntry.packedVertexFormat != resolvedPackedVertexFormat;
       templateEntry.vertexBuffer = resolvedVertexBuffer;
       templateEntry.vertexBufferAddress = resolvedVertexBufferAddress;
+      templateEntry.vertexDecodeBufferAddress =
+          resolvedVertexDecodeBufferAddress;
+      templateEntry.vertexDecodeIndex = resolvedVertexDecodeIndex;
+      templateEntry.packedVertexFormat = resolvedPackedVertexFormat;
     }
     if (vertexAddressChanged) {
       invalidateSingleInstanceBatchCache();
@@ -721,8 +754,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         "OpaqueRenderer::buildOpaquePasses: forward scene GPU data is "
         "unavailable");
   }
+  if (!frame.sharedResources.materialTableGpuData.has_value()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::buildOpaquePasses: material table GPU data is "
+        "unavailable");
+  }
   const ForwardSceneGpuData *sceneGpu =
       &*frame.sharedResources.forwardSceneGpuData;
+  const MaterialTableGpuData *materialGpu =
+      &*frame.sharedResources.materialTableGpuData;
   auto centersResult = ensureCentersPhaseBufferCapacity(
       std::max(instanceCount * sizeof(glm::vec4), sizeof(glm::vec4)));
   if (centersResult.hasError()) {
@@ -737,13 +777,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       std::max(instanceCount * sizeof(InstanceData), sizeof(InstanceData)));
   if (matricesResult.hasError()) {
     return matricesResult;
-  }
-  const size_t sceneMaterialCount =
-      std::max<size_t>(materialSnapshot.gpuData.size(), 1u);
-  auto materialBufferResult = ensureMaterialBufferCapacity(
-      sceneMaterialCount * sizeof(MaterialGpuData));
-  if (materialBufferResult.hasError()) {
-    return materialBufferResult;
   }
   if (instanceStaticBuffersDirty_) {
     if (!instanceCentersPhase_.empty()) {
@@ -769,24 +802,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     instanceStaticBuffersDirty_ = false;
   }
 
-  if (materialDirty || materialGpuDataCache_.empty()) {
-    materialGpuDataCache_.clear();
-    materialGpuDataCache_.reserve(materialSnapshot.gpuData.size());
-    materialGpuDataCache_.insert(materialGpuDataCache_.end(),
-                                 materialSnapshot.gpuData.begin(),
-                                 materialSnapshot.gpuData.end());
-    if (materialGpuDataCache_.empty()) {
-      materialGpuDataCache_.push_back(MaterialGpuData{});
-    }
-
-    const std::span<const std::byte> materialBytes{
-        reinterpret_cast<const std::byte *>(materialGpuDataCache_.data()),
-        materialGpuDataCache_.size() * sizeof(MaterialGpuData)};
-    auto updateResult =
-        gpu_.updateBuffer(materialBuffer_->handle(), materialBytes, 0);
-    if (updateResult.hasError()) {
-      return updateResult;
-    }
+  if (materialDirty) {
     cachedMaterialVersion_ = materialSnapshot.version;
   }
   if (materialDirty || materialTextureAccessHandles_.empty()) {
@@ -802,8 +818,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       gpu_.getBufferDeviceAddress(instanceCentersPhaseBuffer_->handle());
   const uint64_t instanceBaseMatricesAddress =
       gpu_.getBufferDeviceAddress(instanceBaseMatricesBuffer_->handle());
-  const uint64_t materialBufferAddress =
-      gpu_.getBufferDeviceAddress(materialBuffer_->handle());
   const uint64_t directionalLightBufferAddress =
       sceneGpu->directionalLightBufferAddress;
   const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
@@ -816,7 +830,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? animationSceneData->instanceMatricesAddress
           : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
   if (frameDataAddress == 0 || instanceCentersPhaseAddress == 0 ||
-      instanceBaseMatricesAddress == 0 || materialBufferAddress == 0 ||
+      instanceBaseMatricesAddress == 0 || instanceMatricesAddress == 0 ||
+      materialGpu->headerBufferAddress == 0u ||
+      materialGpu->clearcoatBufferAddress == 0u ||
+      materialGpu->sheenBufferAddress == 0u ||
+      materialGpu->transmissionBufferAddress == 0u ||
+      materialGpu->specularBufferAddress == 0u ||
       instanceMatricesAddress == 0 ||
       (sceneGpu->directionalLightCount > 0u &&
        directionalLightBufferAddress == 0u) ||
@@ -859,6 +878,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     DrawItem draw{};
     BufferHandle vertexBuffer{};
     uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     size_t instanceCount = 0;
     size_t firstInstance = 0;
@@ -876,7 +898,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
        &batches](RenderPipelineHandle pipeline, BufferHandle indexBuffer,
                  uint64_t indexBufferOffset, const SubmeshLod &lodRange,
                  BufferHandle vertexBuffer, uint64_t vertexBufferAddress,
-                 uint32_t materialIndex, size_t count, size_t firstInstance) {
+                 uint64_t vertexDecodeBufferAddress, uint32_t vertexDecodeIndex,
+                 uint32_t packedVertexFormat, uint32_t materialIndex,
+                 size_t count, size_t firstInstance) {
         if (count == 0) {
           return;
         }
@@ -890,6 +914,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.draw.vertexOffset = 0;
         entry.vertexBuffer = vertexBuffer;
         entry.vertexBufferAddress = vertexBufferAddress;
+        entry.vertexDecodeBufferAddress = vertexDecodeBufferAddress;
+        entry.vertexDecodeIndex = vertexDecodeIndex;
+        entry.packedVertexFormat = packedVertexFormat;
         entry.materialIndex = materialIndex;
         entry.instanceCount = count;
         entry.firstInstance = firstInstance;
@@ -977,9 +1004,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           "OpaqueRenderer::buildOpaquePasses: refreshed vertex address is "
           "invalid");
     }
+    const uint64_t previousBaseVertexAddress =
+        templateEntry.baseVertexBufferAddress;
+    const bool wasUsingBaseVertexAddress =
+        templateEntry.vertexBufferAddress == previousBaseVertexAddress;
     templateEntry.indexBuffer = geometry.indexBuffer;
     templateEntry.indexBufferOffset = geometry.indexByteOffset;
-    templateEntry.vertexBufferAddress = refreshedVertexAddress;
+    templateEntry.baseVertexBuffer = geometry.vertexBuffer;
+    templateEntry.baseVertexBufferAddress = refreshedVertexAddress;
+    if (wasUsingBaseVertexAddress) {
+      templateEntry.vertexBufferAddress = refreshedVertexAddress;
+    }
     return Result<bool, std::string>::makeResult(true);
   };
   const bool shouldRefreshTemplateGeometry =
@@ -1015,6 +1050,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             MeshDrawTemplate &templateEntry = meshDrawTemplates_[i];
             templateEntry.indexBuffer = firstTemplate.indexBuffer;
             templateEntry.indexBufferOffset = firstTemplate.indexBufferOffset;
+            templateEntry.baseVertexBuffer = firstTemplate.baseVertexBuffer;
+            templateEntry.baseVertexBufferAddress =
+                firstTemplate.baseVertexBufferAddress;
             templateEntry.vertexBufferAddress =
                 firstTemplate.vertexBufferAddress;
           }
@@ -1040,6 +1078,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           if (sameAsCached) {
             templateEntry.indexBuffer = cachedIndexBuffer;
             templateEntry.indexBufferOffset = cachedIndexBufferOffset;
+            templateEntry.baseVertexBufferAddress = cachedVertexBufferAddress;
             templateEntry.vertexBufferAddress = cachedVertexBufferAddress;
           } else {
             auto refreshResult = refreshTemplateGeometry(templateEntry);
@@ -1050,7 +1089,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             cachedHandle = templateEntry.geometryHandle;
             cachedIndexBuffer = templateEntry.indexBuffer;
             cachedIndexBufferOffset = templateEntry.indexBufferOffset;
-            cachedVertexBufferAddress = templateEntry.vertexBufferAddress;
+            cachedVertexBufferAddress = templateEntry.baseVertexBufferAddress;
             hasCachedGeometry = true;
           }
 
@@ -1139,7 +1178,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       PushConstants &constants = drawPushConstants_[batchIndex];
       constants.frameDataAddress = frameDataAddress;
       constants.instanceMatricesAddress = instanceMatricesAddress;
-      constants.materialBufferAddress = materialBufferAddress;
       constants.instanceCentersPhaseAddress = instanceCentersPhaseAddress;
       constants.instanceBaseMatricesAddress = instanceBaseMatricesAddress;
       constants.tessNearDistance = tessNearDistance;
@@ -1297,6 +1335,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           selectMeshPipeline(templateEntry.doubleSided, false),
           templateEntry.indexBuffer, templateEntry.indexBufferOffset, lod0Range,
           templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
+          templateEntry.vertexDecodeBufferAddress,
+          templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
           templateEntry.materialIndex, autoLodBucketCounts[0], firstInstance);
       firstInstance += autoLodBucketCounts[0];
 
@@ -1306,6 +1346,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           selectMeshPipeline(templateEntry.doubleSided, true),
           templateEntry.indexBuffer, templateEntry.indexBufferOffset, lod0Range,
           templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
+          templateEntry.vertexDecodeBufferAddress,
+          templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
           templateEntry.materialIndex, autoLodTessBucketCount, firstInstance);
       if (autoLodTessBucketCount > 0) {
         usedUniformAutoLodTessSplit = true;
@@ -1325,6 +1367,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                     templateEntry.indexBuffer, templateEntry.indexBufferOffset,
                     lodRange, templateEntry.vertexBuffer,
                     templateEntry.vertexBufferAddress,
+                    templateEntry.vertexDecodeBufferAddress,
+                    templateEntry.vertexDecodeIndex,
+                    templateEntry.packedVertexFormat,
                     templateEntry.materialIndex, count, firstInstance);
         firstInstance += count;
       }
@@ -1342,6 +1387,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                     templateEntry.indexBuffer, templateEntry.indexBufferOffset,
                     lodRange, templateEntry.vertexBuffer,
                     templateEntry.vertexBufferAddress,
+                    templateEntry.vertexDecodeBufferAddress,
+                    templateEntry.vertexDecodeIndex,
+                    templateEntry.packedVertexFormat,
                     templateEntry.materialIndex, count, firstInstance);
         firstInstance += count;
       }
@@ -1406,11 +1454,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         resolveAvailableLod(*templateEntry.submesh, requestedLod);
     if (lodIndex) {
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
-      appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
-                  templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                  lodRange, templateEntry.vertexBuffer,
-                  templateEntry.vertexBufferAddress,
-                  templateEntry.materialIndex, instanceCount, 0);
+      appendBatch(
+          selectMeshPipeline(templateEntry.doubleSided, false),
+          templateEntry.indexBuffer, templateEntry.indexBufferOffset, lodRange,
+          templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
+          templateEntry.vertexDecodeBufferAddress,
+          templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
+          templateEntry.materialIndex, instanceCount, 0);
       remapCount = instanceCount;
       templateBatchIndices_.clear();
       templateBatchIndices_.resize(meshDrawTemplates_.size(), 0u);
@@ -1479,6 +1529,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           .indexCount = lodRange.indexCount,
           .firstIndex = lodRange.indexOffset,
           .vertexBufferAddress = templateEntry.vertexBufferAddress,
+          .vertexDecodeBufferAddress = templateEntry.vertexDecodeBufferAddress,
+          .vertexDecodeIndex = templateEntry.vertexDecodeIndex,
+          .packedVertexFormat = templateEntry.packedVertexFormat,
           .materialIndex = templateEntry.materialIndex,
       };
 
@@ -1494,6 +1547,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.draw.vertexOffset = 0;
         entry.vertexBuffer = templateEntry.vertexBuffer;
         entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
+        entry.vertexDecodeBufferAddress =
+            templateEntry.vertexDecodeBufferAddress;
+        entry.vertexDecodeIndex = templateEntry.vertexDecodeIndex;
+        entry.packedVertexFormat = templateEntry.packedVertexFormat;
         entry.materialIndex = templateEntry.materialIndex;
         batches.push_back(std::move(entry));
         const size_t insertedIndex = batches.size() - 1;
@@ -1660,13 +1717,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         PushConstants &constants = drawPushConstants_[batchIndex];
         constants.frameDataAddress = frameDataAddress;
         constants.vertexBufferAddress = batch.vertexBufferAddress;
+        constants.vertexDecodeBufferAddress = batch.vertexDecodeBufferAddress;
         constants.instanceMatricesAddress = instanceMatricesAddress;
         constants.instanceRemapAddress = 0;
-        constants.materialBufferAddress = materialBufferAddress;
         constants.instanceCentersPhaseAddress = instanceCentersPhaseAddress;
         constants.instanceBaseMatricesAddress = instanceBaseMatricesAddress;
         constants.instanceCount = static_cast<uint32_t>(instanceCount);
         constants.materialIndex = batch.materialIndex;
+        constants.vertexDecodeIndex = batch.vertexDecodeIndex;
+        constants.packedVertexFormat = batch.packedVertexFormat;
         constants.timeSeconds = settings.opaque.enableInstanceAnimation
                                     ? static_cast<float>(frame.timeSeconds)
                                     : 0.0f;
@@ -1720,13 +1779,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         PushConstants &constants = drawPushConstants_[batchIndex];
         constants.frameDataAddress = frameDataAddress;
         constants.vertexBufferAddress = batch.vertexBufferAddress;
+        constants.vertexDecodeBufferAddress = batch.vertexDecodeBufferAddress;
         constants.instanceMatricesAddress = instanceMatricesAddress;
         constants.instanceRemapAddress = 0;
-        constants.materialBufferAddress = materialBufferAddress;
         constants.instanceCentersPhaseAddress = instanceCentersPhaseAddress;
         constants.instanceBaseMatricesAddress = instanceBaseMatricesAddress;
         constants.instanceCount = static_cast<uint32_t>(instanceCount);
         constants.materialIndex = batch.materialIndex;
+        constants.vertexDecodeIndex = batch.vertexDecodeIndex;
+        constants.packedVertexFormat = batch.packedVertexFormat;
         constants.timeSeconds = settings.opaque.enableInstanceAnimation
                                     ? static_cast<float>(frame.timeSeconds)
                                     : 0.0f;
@@ -1791,7 +1852,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         staticBatchCache_.draws[i].pushConstants = {};
         staticBatchCache_.pushConstantsTemplates[i].frameDataAddress = 0;
         staticBatchCache_.pushConstantsTemplates[i].instanceMatricesAddress = 0;
-        staticBatchCache_.pushConstantsTemplates[i].materialBufferAddress = 0;
         staticBatchCache_.pushConstantsTemplates[i]
             .instanceCentersPhaseAddress = 0;
         staticBatchCache_.pushConstantsTemplates[i]
@@ -1942,13 +2002,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   computePushConstants_ = PushConstants{
       .frameDataAddress = frameDataAddress,
       .vertexBufferAddress = 0,
+      .vertexDecodeBufferAddress = 0u,
       .instanceMatricesAddress = instanceMatricesAddress,
       .instanceRemapAddress = instanceRemapAddress,
-      .materialBufferAddress = materialBufferAddress,
       .instanceCentersPhaseAddress = instanceCentersPhaseAddress,
       .instanceBaseMatricesAddress = instanceBaseMatricesAddress,
       .instanceCount = static_cast<uint32_t>(instanceCount),
       .materialIndex = 0u,
+      .vertexDecodeIndex = 0u,
+      .packedVertexFormat = 0u,
       .timeSeconds = settings.opaque.enableInstanceAnimation
                          ? static_cast<float>(frame.timeSeconds)
                          : 0.0f,
@@ -2027,10 +2089,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         return depResult;
       }
     }
-    if (materialBuffer_ && materialBuffer_->valid()) {
+    for (const BufferHandle materialHandle :
+         {materialGpu->headerBuffer, materialGpu->clearcoatBuffer,
+          materialGpu->sheenBuffer, materialGpu->transmissionBuffer,
+          materialGpu->specularBuffer}) {
       auto depResult = appendUniqueDependency(
           passDependencyBuffers_, passDependencyBufferAccessModes_,
-          materialBuffer_->handle(), RenderGraphAccessMode::Read,
+          materialHandle, RenderGraphAccessMode::Read,
           "OpaqueRenderer::buildOpaquePasses(pass)");
       if (depResult.hasError()) {
         return depResult;
@@ -2616,13 +2681,6 @@ OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
       static_cast<uint32_t>(std::max(framebufferHeight, 1));
 
   {
-    const BufferHandle matHandle = (materialBuffer_ && materialBuffer_->valid())
-                                       ? materialBuffer_->handle()
-                                       : BufferHandle{};
-    registerOrUpdatePersistentBuffer(graph, persistentMaterialBuffer_,
-                                     registeredMaterialBufferHandle_, matHandle,
-                                     "opaque_material_buffer");
-
     const BufferHandle centersHandle =
         (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid())
             ? instanceCentersPhaseBuffer_->handle()
@@ -2782,6 +2840,9 @@ Result<bool, std::string> OpaqueRenderer::ensureSingleInstanceBatchCache(
         .indexCount = lodRange.indexCount,
         .firstIndex = lodRange.indexOffset,
         .vertexBufferAddress = templateEntry.vertexBufferAddress,
+        .vertexDecodeBufferAddress = templateEntry.vertexDecodeBufferAddress,
+        .vertexDecodeIndex = templateEntry.vertexDecodeIndex,
+        .packedVertexFormat = templateEntry.packedVertexFormat,
         .materialIndex = templateEntry.materialIndex,
     };
 
@@ -2797,6 +2858,9 @@ Result<bool, std::string> OpaqueRenderer::ensureSingleInstanceBatchCache(
       entry.draw.vertexOffset = 0;
       entry.vertexBuffer = templateEntry.vertexBuffer;
       entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
+      entry.vertexDecodeBufferAddress = templateEntry.vertexDecodeBufferAddress;
+      entry.vertexDecodeIndex = templateEntry.vertexDecodeIndex;
+      entry.packedVertexFormat = templateEntry.packedVertexFormat;
       entry.materialIndex = templateEntry.materialIndex;
       cache.batches.push_back(entry);
       const size_t insertedIndex = cache.batches.size() - 1;
@@ -2961,6 +3025,9 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
         .indexBufferOffset = draw.indexBufferOffset,
         .indexFormat = draw.indexFormat,
         .vertexBufferAddress = constants.vertexBufferAddress,
+        .vertexDecodeBufferAddress = constants.vertexDecodeBufferAddress,
+        .vertexDecodeIndex = constants.vertexDecodeIndex,
+        .packedVertexFormat = constants.packedVertexFormat,
         .materialIndex = constants.materialIndex,
     };
 
@@ -3222,10 +3289,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
   if (baseMatricesResult.hasError()) {
     return baseMatricesResult;
   }
-  auto materialResult = ensureMaterialBufferCapacity(sizeof(MaterialGpuData));
-  if (materialResult.hasError()) {
-    return materialResult;
-  }
 
   initialized_ = true;
   return Result<bool, std::string>::makeResult(true);
@@ -3330,35 +3393,6 @@ OpaqueRenderer::ensureInstanceBaseMatricesBufferCapacity(size_t requiredBytes) {
   }
   instanceBaseMatricesBuffer_ = std::move(createResult.value());
   instanceBaseMatricesBufferCapacityBytes_ = requested;
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string>
-OpaqueRenderer::ensureMaterialBufferCapacity(size_t requiredBytes) {
-  const size_t requested = std::max(requiredBytes, sizeof(MaterialGpuData));
-  if (materialBuffer_ && materialBuffer_->valid() &&
-      materialBufferCapacityBytes_ >= requested) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-  if (materialBuffer_ && materialBuffer_->valid()) {
-    gpu_.waitIdle();
-    gpu_.destroyBuffer(materialBuffer_->handle());
-    materialBuffer_.reset();
-    materialBufferCapacityBytes_ = 0;
-  }
-
-  const BufferDesc desc{
-      .usage = BufferUsage::Storage,
-      .storage = Storage::Device,
-      .size = requested,
-  };
-  auto createResult = Buffer::create(gpu_, desc, "opaque_material_buffer");
-  if (createResult.hasError()) {
-    return Result<bool, std::string>::makeError(createResult.error());
-  }
-  materialBuffer_ = std::move(createResult.value());
-  materialBufferCapacityBytes_ = requested;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -3629,7 +3663,14 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
           .baseVertexBuffer = geometry.vertexBuffer,
           .vertexBuffer = {},
           .baseVertexBufferAddress = vertexBufferAddress,
+          .baseVertexDecodeBufferAddress = model->vertexDecodeBufferAddress(),
           .vertexBufferAddress = vertexBufferAddress,
+          .vertexDecodeBufferAddress = model->vertexDecodeBufferAddress(),
+          .basePackedVertexFormat =
+              static_cast<uint32_t>(model->drawVertexFormat()),
+          .vertexDecodeIndex = static_cast<uint32_t>(submeshIndex),
+          .packedVertexFormat =
+              static_cast<uint32_t>(model->drawVertexFormat()),
           .materialIndex = finalMaterialIndex,
           .doubleSided = doubleSided,
       });
@@ -4430,12 +4471,6 @@ void OpaqueRenderer::destroyBuffers() {
   }
   instanceBaseMatricesBuffer_.reset();
   instanceBaseMatricesBufferCapacityBytes_ = 0;
-
-  if (materialBuffer_ && materialBuffer_->valid()) {
-    gpu_.destroyBuffer(materialBuffer_->handle());
-  }
-  materialBuffer_.reset();
-  materialBufferCapacityBytes_ = 0;
 
   for (DynamicBufferSlot &slot : instanceMatricesRing_) {
     if (slot.buffer && slot.buffer->valid()) {

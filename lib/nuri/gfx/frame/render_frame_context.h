@@ -155,6 +155,11 @@ struct ForwardSceneFrameData {
   uint32_t sceneColorQuarterResTexId = 0;
   uint64_t directionalLightBufferAddress = 0;
   uint64_t localLightBufferAddress = 0;
+  uint64_t materialHeaderBufferAddress = 0;
+  uint64_t materialClearcoatBufferAddress = 0;
+  uint64_t materialSheenBufferAddress = 0;
+  uint64_t materialTransmissionBufferAddress = 0;
+  uint64_t materialSpecularBufferAddress = 0;
   uint32_t directionalLightCount = 0;
   uint32_t localLightCount = 0;
 
@@ -168,7 +173,7 @@ struct ForwardSceneFrameData {
     return !(*this == other);
   }
 };
-static_assert(sizeof(ForwardSceneFrameData) == 224,
+static_assert(sizeof(ForwardSceneFrameData) == 264,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
 
 // GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.
@@ -184,6 +189,20 @@ struct ForwardSceneGpuData {
   uint64_t localLightBufferAddress = 0;
   uint32_t directionalLightCount = 0;
   uint32_t localLightCount = 0;
+};
+
+struct MaterialTableGpuData {
+  BufferHandle headerBuffer{};
+  BufferHandle clearcoatBuffer{};
+  BufferHandle sheenBuffer{};
+  BufferHandle transmissionBuffer{};
+  BufferHandle specularBuffer{};
+  uint64_t headerBufferAddress = 0;
+  uint64_t clearcoatBufferAddress = 0;
+  uint64_t sheenBufferAddress = 0;
+  uint64_t transmissionBufferAddress = 0;
+  uint64_t specularBufferAddress = 0;
+  uint64_t version = 0;
 };
 
 struct OpaqueFrameMetrics {
@@ -225,6 +244,7 @@ struct OpaquePickResult {
 
 struct FrameSharedResources {
   std::optional<ForwardSceneGpuData> forwardSceneGpuData{};
+  std::optional<MaterialTableGpuData> materialTableGpuData{};
   std::optional<AnimationSceneFrameData> animationSceneGpuData{};
   TextureHandle sceneDepthTexture{};
   RenderGraphTextureId sceneDepthGraphTexture{};

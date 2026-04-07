@@ -55,20 +55,22 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 224,
+  static_assert(sizeof(FrameData) == 264,
                 "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
   struct PushConstants {
     uint64_t frameDataAddress = 0;
     uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
-    uint64_t materialBufferAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
     uint32_t instanceCount = 0;
     uint32_t materialIndex = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
     float timeSeconds = 0.0f;
     float tessNearDistance = 1.0f;
     float tessFarDistance = 8.0f;
@@ -101,7 +103,12 @@ private:
     BufferHandle baseVertexBuffer{};
     BufferHandle vertexBuffer{};
     uint64_t baseVertexBufferAddress = 0;
+    uint64_t baseVertexDecodeBufferAddress = 0;
     uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint32_t basePackedVertexFormat = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     bool doubleSided = false;
   };
@@ -120,6 +127,9 @@ private:
     DrawItem draw{};
     BufferHandle vertexBuffer{};
     uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     size_t instanceCount = 0;
   };
@@ -217,7 +227,6 @@ private:
   ensureCentersPhaseBufferCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceBaseMatricesBufferCapacity(size_t requiredBytes);
-  Result<bool, std::string> ensureMaterialBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
@@ -304,7 +313,6 @@ private:
   std::unique_ptr<Pipeline> computePipeline_;
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
-  std::unique_ptr<Buffer> materialBuffer_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
@@ -336,7 +344,6 @@ private:
 
   size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
   size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
-  size_t materialBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool tessellationUnsupported_ = false;
   bool wireframePipelineInitialized_ = false;
@@ -395,7 +402,6 @@ private:
   std::pmr::vector<glm::mat4> instanceBaseMatrices_;
   std::pmr::vector<InstanceData> instanceMatricesCpuCache_;
   std::pmr::vector<glm::vec4> instanceLodCentersInvRadiusSq_;
-  std::pmr::vector<MaterialGpuData> materialGpuDataCache_;
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
   std::pmr::vector<uint32_t> instanceAutoLodLevels_;
   std::pmr::vector<uint8_t> instanceTessSelection_;
@@ -422,10 +428,8 @@ private:
   glm::vec3 cachedMeshLodThresholdsInput_{std::numeric_limits<float>::max()};
   std::array<float, 3> cachedSortedLodThresholds_{0.0f, 0.0f, 0.0f};
 
-  PersistentBufferId persistentMaterialBuffer_{};
   PersistentBufferId persistentCentersPhaseBuffer_{};
   PersistentBufferId persistentBaseMatricesBuffer_{};
-  BufferHandle registeredMaterialBufferHandle_{};
   BufferHandle registeredCentersPhaseBufferHandle_{};
   BufferHandle registeredBaseMatricesBufferHandle_{};
   uint64_t boundStaticBatchGeneration_ = 0;

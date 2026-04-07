@@ -267,6 +267,11 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
       .sceneColorQuarterResTexId = 0,
       .directionalLightBufferAddress = 0u,
       .localLightBufferAddress = 0u,
+      .materialHeaderBufferAddress = 0u,
+      .materialClearcoatBufferAddress = 0u,
+      .materialSheenBufferAddress = 0u,
+      .materialTransmissionBufferAddress = 0u,
+      .materialSpecularBufferAddress = 0u,
       .directionalLightCount = 0u,
       .localLightCount = 0u,
   };
