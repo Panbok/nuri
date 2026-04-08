@@ -632,7 +632,6 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.sceneDepthPyramidLevelCount =
       sceneDepthPyramidLevelCount_;
   frame.sharedResources.sceneDepthPyramidTextures = sceneDepthPyramidTextures_;
-  frame.sharedResources.sceneDepthSamplerId = sceneDepthSamplerId();
 }
 
 Result<bool, std::string>

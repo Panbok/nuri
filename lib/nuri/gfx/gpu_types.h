@@ -85,8 +85,6 @@ static_assert(std::is_trivially_destructible_v<GeometryAllocationHandle>);
 // GPU enums (LVK-free)
 enum class Format : uint8_t {
   R32_UINT,
-  R32_FLOAT,
-  RG32_FLOAT,
   RGBA8_UNORM,
   RGBA8_SRGB,
   RGBA8_UINT,
@@ -97,6 +95,8 @@ enum class Format : uint8_t {
   BC7_RGBA_SRGB,
   ETC2_RGB8_UNORM,
   ETC2_RGB8_SRGB,
+  R32_FLOAT,
+  RG32_FLOAT,
   Count
 };
 

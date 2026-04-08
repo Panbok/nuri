@@ -1335,9 +1335,15 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
   }
   if (desc.colorAttachmentCount > desc.colorFormats.size()) {
     NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: color attachment "
-                     "count exceeds supported color format slots");
+                     "count exceeds provided color formats");
     return Result<RenderPipelineHandle, std::string>::makeError(
-        "Color attachment count exceeds supported color format slots");
+        "Color attachment count exceeds provided color formats");
+  }
+  if (desc.colorAttachmentCount > lvk::LVK_MAX_COLOR_ATTACHMENTS) {
+    NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: color attachment "
+                     "count exceeds LVK color attachment slots");
+    return Result<RenderPipelineHandle, std::string>::makeError(
+        "Color attachment count exceeds LVK color attachment slots");
   }
   if (!isValid(desc.fragmentShader)) {
     NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Invalid fragment "
@@ -1471,9 +1477,9 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       .patchControlPoints = desc.patchControlPoints,
       .debugName = reserved.debugNameCStr,
   };
-  if (desc.colorAttachmentCount > 0u) {
-    pipelineDesc.color[0] = {
-        .format = toLvkFormat(desc.colorFormats[0]),
+  for (uint32_t i = 0u; i < desc.colorAttachmentCount; ++i) {
+    pipelineDesc.color[i] = {
+        .format = toLvkFormat(desc.colorFormats[i]),
         .blendEnabled = desc.blendEnabled,
         .srcRGBBlendFactor = desc.blendEnabled ? lvk::BlendFactor_SrcAlpha
                                                : lvk::BlendFactor_One,

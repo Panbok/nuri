@@ -477,7 +477,6 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
               ->geometryOverridesByRenderable[entry.instanceIndex];
       if (geometryOverride.enabled &&
           nuri::isValid(geometryOverride.vertexBuffer) &&
-          entry.submesh != nullptr &&
           animationOverrideCoversSubmesh(geometryOverride, *entry.submesh)) {
         const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
             geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);

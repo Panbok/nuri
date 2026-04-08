@@ -36,6 +36,12 @@ enum class TextureFilterMode : uint8_t {
 };
 
 static constexpr uint32_t kMaxSceneDepthPyramidLevels = 16u;
+static constexpr uint32_t kSceneDepthPyramidTexIdPackWidth = 4u;
+static constexpr uint32_t kSceneDepthPyramidArraySize =
+    (kMaxSceneDepthPyramidLevels + kSceneDepthPyramidTexIdPackWidth - 1u) /
+    kSceneDepthPyramidTexIdPackWidth;
+static_assert(kSceneDepthPyramidArraySize * kSceneDepthPyramidTexIdPackWidth >=
+              kMaxSceneDepthPyramidLevels);
 
 [[nodiscard]] constexpr uint8_t
 sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
@@ -165,7 +171,7 @@ struct ForwardSceneFrameData {
   uint32_t sceneDepthTexId = 0;
   uint32_t sceneDepthSamplerId = 0;
   uint32_t sceneDepthPyramidLevelCount = 0;
-  std::array<glm::uvec4, 4> sceneDepthPyramidTexIds{};
+  std::array<glm::uvec4, kSceneDepthPyramidArraySize> sceneDepthPyramidTexIds{};
   uint64_t directionalLightBufferAddress = 0;
   uint64_t localLightBufferAddress = 0;
   uint64_t materialHeaderBufferAddress = 0;

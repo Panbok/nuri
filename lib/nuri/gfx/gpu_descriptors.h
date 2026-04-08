@@ -2,6 +2,8 @@
 
 #include "nuri/gfx/gpu_types.h"
 
+#include <vector>
+
 namespace nuri {
 
 struct BufferDesc {
@@ -50,7 +52,7 @@ struct RenderPipelineDesc {
   ShaderHandle tessEvalShader{};
   ShaderHandle geometryShader{};
   ShaderHandle fragmentShader{};
-  std::array<Format, 1> colorFormats{Format::RGBA8_UNORM};
+  std::vector<Format> colorFormats{Format::RGBA8_UNORM};
   uint32_t colorAttachmentCount = 1;
   Format depthFormat = Format::Count;
   CullMode cullMode = CullMode::Back;

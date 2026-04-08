@@ -49,6 +49,9 @@ struct NURI_API AnimationSceneFrameData {
   // reject stale animation data across scene switches.
   const RenderScene *scene = nullptr;
   uint64_t sceneTopologyVersion = 0u;
+  // renderableCount stays size_t because it mirrors container sizes; per-buffer
+  // geometry bounds such as AnimatedRenderableGeometryOverride::vertexCount are
+  // uint32_t to match GPU draw/count fields.
   size_t renderableCount = 0u;
   // Monotonic version for the published frame data payload.
   uint64_t version = 0u;

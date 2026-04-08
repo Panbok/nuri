@@ -164,7 +164,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   uint32_t sceneDepthTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneDepthSamplerId = ctx.shared.sceneDepthSamplerId;
   uint32_t sceneDepthPyramidLevelCount = 0u;
-  std::array<glm::uvec4, 4> sceneDepthPyramidTexIds{};
+  std::array<glm::uvec4, kSceneDepthPyramidArraySize> sceneDepthPyramidTexIds{};
   if (nuri::isValid(ctx.shared.sceneColorTexture)) {
     sceneColorTexId =
         gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
@@ -203,7 +203,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       if (texId == kInvalidTextureBindlessIndex) {
         break;
       }
-      sceneDepthPyramidTexIds[level >> 2u][level & 3u] = texId;
+      const uint32_t packIndex = level / kSceneDepthPyramidTexIdPackWidth;
+      const uint32_t componentIndex = level % kSceneDepthPyramidTexIdPackWidth;
+      sceneDepthPyramidTexIds[packIndex][componentIndex] = texId;
       sceneDepthPyramidLevelCount = level + 1u;
     }
     if (sceneDepthPyramidLevelCount > 0u) {
