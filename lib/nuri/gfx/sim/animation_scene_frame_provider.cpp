@@ -8,6 +8,8 @@ namespace nuri {
 
 Result<bool, std::string>
 AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
+  ctx.frame.sharedResources.animationSceneGpuData.reset();
+
   auto prepareResult =
       runtime_.prepareAnimationSceneFrame(ctx.frame.frameIndex);
   if (prepareResult.hasError()) {

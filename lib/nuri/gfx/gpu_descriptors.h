@@ -51,6 +51,7 @@ struct RenderPipelineDesc {
   ShaderHandle geometryShader{};
   ShaderHandle fragmentShader{};
   std::array<Format, 1> colorFormats{Format::RGBA8_UNORM};
+  uint32_t colorAttachmentCount = 1;
   Format depthFormat = Format::Count;
   CullMode cullMode = CullMode::Back;
   PolygonMode polygonMode = PolygonMode::Fill;

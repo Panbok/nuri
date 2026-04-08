@@ -225,6 +225,7 @@ struct DrawItem {
 struct RenderPass {
   AttachmentColor color;
   TextureHandle colorTexture{};
+  bool hasColorAttachment = true;
   AttachmentDepth depth;
   TextureHandle depthTexture{};
   bool useViewport = false;
@@ -232,6 +233,7 @@ struct RenderPass {
   std::span<const ComputeDispatchItem> preDispatches{};
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const DrawItem> draws{};
+  bool drawBuffersPreResolved = false;
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
 };

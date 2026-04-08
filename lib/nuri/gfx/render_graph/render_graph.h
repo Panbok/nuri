@@ -78,6 +78,7 @@ operator|(RenderGraphAccessMode lhs, RenderGraphAccessMode rhs) {
 struct NURI_API RenderGraphGraphicsPassDesc {
   AttachmentColor color{};
   RenderGraphTextureId colorTexture{};
+  bool hasColorAttachment = true;
   AttachmentDepth depth{};
   RenderGraphTextureId depthTexture{};
   bool useViewport = false;
@@ -88,6 +89,10 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   std::span<const TextureHandle> dependencyTextures{};
   std::span<const RenderGraphAccessMode> dependencyTextureAccessModes{};
   std::span<const DrawItem> draws{};
+  bool drawBuffersPreResolved = false;
+  // Explicit extra draw-buffer dependencies; draw items are not scanned when
+  // drawBuffersPreResolved is true.
+  std::span<const BufferHandle> preResolvedDrawBuffers{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
   bool markColorAsFrameOutput = false;
@@ -133,6 +138,7 @@ struct NURI_API RenderGraphPreparedDrawBufferBinding {
 struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   AttachmentColor color{};
   RenderGraphTextureId colorTexture{};
+  bool hasColorAttachment = true;
   AttachmentDepth depth{};
   RenderGraphTextureId depthTexture{};
   bool useViewport = false;
@@ -152,6 +158,10 @@ struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   std::span<const RenderGraphPreparedPreDispatchDependencyBinding>
       preDispatchDependencyBindings{};
   std::span<const RenderGraphPreparedDrawBufferBinding> drawBufferBindings{};
+  bool drawBuffersPreResolved = false;
+  // Explicit extra draw-buffer dependencies; drawBufferBindings must be empty
+  // when drawBuffersPreResolved is true.
+  std::span<const BufferHandle> preResolvedDrawBuffers{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
   bool markColorAsFrameOutput = false;
@@ -680,6 +690,10 @@ private:
   [[nodiscard]] Result<bool, std::string>
   bindImplicitPassResources(RenderGraphPassId pass,
                             const RenderGraphGraphicsPassDesc &desc);
+  [[nodiscard]] Result<bool, std::string>
+  addPreResolvedDrawBufferAccesses(RenderGraphPassId pass,
+                                   std::span<const BufferHandle> buffers,
+                                   std::string_view debugLabel);
   [[nodiscard]] Result<bool, std::string>
   applyImplicitPassRoots(RenderGraphPassId pass,
                          const RenderGraphGraphicsPassDesc &desc);

@@ -231,7 +231,8 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
 
   const TextureRecord *cubemap =
       ctx.resources.tryGet(frame.scene->environment().cubemap);
-  if (cubemap == nullptr || !nuri::isValid(cubemap->texture)) {
+  if (cubemap == nullptr || !nuri::isValid(cubemap->texture) ||
+      cubemap->bindlessIndex == kInvalidTextureBindlessIndex) {
     return Result<bool, std::string>::makeResult(true);
   }
 

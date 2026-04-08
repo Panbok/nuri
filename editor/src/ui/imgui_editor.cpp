@@ -106,6 +106,10 @@ const char *formatDisplayName(Format format) {
   switch (format) {
   case Format::R32_UINT:
     return "R32_UINT";
+  case Format::R32_FLOAT:
+    return "R32_FLOAT";
+  case Format::RG32_FLOAT:
+    return "RG32_FLOAT";
   case Format::RGBA8_UNORM:
     return "RGBA8_UNORM";
   case Format::RGBA8_SRGB:
@@ -976,6 +980,13 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
     ImGui::TextUnformatted(
         "Patch mode auto-enables tessellation for visualization.");
   }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Depth");
+  ImGui::Checkbox("Enable Depth Pre-pass##OpaquePass",
+                  &opaque.enableDepthPrepass);
+  ImGui::Checkbox("Enable Depth Pyramid##OpaquePass",
+                  &opaque.enableDepthPyramid);
 
   ImGui::Separator();
   ImGui::TextUnformatted("Mesh LOD");

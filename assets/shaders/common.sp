@@ -9,6 +9,8 @@ const uint kFrameDataFlagHasIblSheen = 1u << 2u;
 const uint kFrameDataFlagHasBrdfLut = 1u << 3u;
 const uint kFrameDataFlagOutputLinearToSrgb = 1u << 4u;
 const uint kFrameDataFlagHasSceneColor = 1u << 5u;
+const uint kFrameDataFlagHasSceneDepth = 1u << 6u;
+const uint kFrameDataFlagHasSceneDepthPyramid = 1u << 7u;
 
 const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
 const uint kMaterialFeatureSheen = 1u << 1u;
@@ -173,6 +175,10 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint sceneColorSamplerId;
   uint sceneColorHalfResTexId;
   uint sceneColorQuarterResTexId;
+  uint sceneDepthTexId;
+  uint sceneDepthSamplerId;
+  uint sceneDepthPyramidLevelCount;
+  uvec4 sceneDepthPyramidTexIds[4];
   DirectionalLightBuffer directionalLightBuffer;
   LocalLightBuffer localLightBuffer;
   MaterialHeaderBuffer materialHeaderBuffer;
@@ -195,6 +201,13 @@ uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {
     return frameData.sceneColorQuarterResTexId;
   }
   return kInvalidTextureBindlessIndex;
+}
+
+uint getSceneDepthPyramidTexId(FrameDataBuffer frameData, uint level) {
+  if (level >= frameData.sceneDepthPyramidLevelCount || level >= 16u) {
+    return kInvalidTextureBindlessIndex;
+  }
+  return frameData.sceneDepthPyramidTexIds[level >> 2u][level & 3u];
 }
 
 layout(std430, buffer_reference) readonly buffer InstanceRemapBuffer {

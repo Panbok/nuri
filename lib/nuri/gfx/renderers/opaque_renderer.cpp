@@ -78,7 +78,22 @@ resolveAnimationSceneFrameData(const RenderFrameContext &frame) {
       data.instanceMatricesAddress == 0u) {
     return nullptr;
   }
+  if (frame.scene == nullptr || data.scene != frame.scene ||
+      data.sceneTopologyVersion != frame.scene->topologyVersion() ||
+      data.renderableCount != frame.scene->renderables().size() ||
+      data.geometryOverridesByRenderable.size() != data.renderableCount) {
+    return nullptr;
+  }
   return &data;
+}
+
+bool animationOverrideCoversSubmesh(
+    const AnimatedRenderableGeometryOverride &geometryOverride,
+    const Submesh &submesh) noexcept {
+  const uint64_t requiredVertexCount =
+      static_cast<uint64_t>(submesh.vertexOffset) + submesh.vertexCount;
+  return static_cast<uint64_t>(geometryOverride.vertexCount) >=
+         requiredVertexCount;
 }
 
 [[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
@@ -108,6 +123,29 @@ meshPipelineDesc(Format swapchainFormat, Format depthFormat,
       .topology = topology,
       .patchControlPoints = patchControlPoints,
       .blendEnabled = blendEnabled,
+  };
+}
+
+RenderPipelineDesc
+depthPipelineDesc(Format depthFormat, ShaderHandle vertexShader,
+                  ShaderHandle tessControlShader, ShaderHandle tessEvalShader,
+                  ShaderHandle fragmentShader, CullMode cullMode,
+                  Topology topology = Topology::Triangle,
+                  uint32_t patchControlPoints = 0) {
+  return RenderPipelineDesc{
+      .vertexInput = {},
+      .vertexShader = vertexShader,
+      .tessControlShader = tessControlShader,
+      .tessEvalShader = tessEvalShader,
+      .fragmentShader = fragmentShader,
+      .colorFormats = {Format::RGBA8_UNORM},
+      .colorAttachmentCount = 0u,
+      .depthFormat = depthFormat,
+      .cullMode = cullMode,
+      .polygonMode = PolygonMode::Fill,
+      .topology = topology,
+      .patchControlPoints = patchControlPoints,
+      .blendEnabled = false,
   };
 }
 
@@ -409,11 +447,17 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       instanceRemap_(resolveMemoryResource(memory)),
       drawPushConstants_(resolveMemoryResource(memory)),
       drawItems_(resolveMemoryResource(memory)),
+      drawAlphaMasked_(resolveMemoryResource(memory)),
       indirectDrawItems_(resolveMemoryResource(memory)),
+      indirectAlphaMasked_(resolveMemoryResource(memory)),
       indirectCommandUploadBytes_(resolveMemoryResource(memory)),
       overlayDrawItems_(resolveMemoryResource(memory)),
       pickDrawItems_(resolveMemoryResource(memory)),
       passDrawItems_(resolveMemoryResource(memory)),
+      depthPrepassDrawItems_(resolveMemoryResource(memory)),
+      depthPyramidPushConstants_(resolveMemoryResource(memory)),
+      depthPyramidDrawItems_(resolveMemoryResource(memory)),
+      depthPyramidDependencyTextures_(resolveMemoryResource(memory)),
       preDispatches_(resolveMemoryResource(memory)),
       passDependencyBuffers_(resolveMemoryResource(memory)),
       passDependencyBufferAccessModes_(resolveMemoryResource(memory)),
@@ -446,6 +490,11 @@ void OpaqueRenderer::onDetach() {
   destroyBuffers();
   destroyDepthTexture();
   destroyPickTexture();
+  destroyDepthPyramidTextures();
+  if (nuri::isValid(sceneDepthSampler_)) {
+    gpu_.destroySampler(sceneDepthSampler_);
+    sceneDepthSampler_ = {};
+  }
   resetOverlayPipelineState();
   destroyMeshPipelineState();
   meshPipeline_.reset();
@@ -454,6 +503,9 @@ void OpaqueRenderer::onDetach() {
   meshTessShader_.reset();
   meshDebugOverlayShader_.reset();
   meshPickShader_.reset();
+  depthShader_.reset();
+  depthAlphaShader_.reset();
+  depthPyramidShader_.reset();
   computeShader_.reset();
   meshVertexShader_ = {};
   meshTessVertexShader_ = {};
@@ -463,6 +515,10 @@ void OpaqueRenderer::onDetach() {
   meshDebugOverlayGeometryShader_ = {};
   meshDebugOverlayFragmentShader_ = {};
   meshPickFragmentShader_ = {};
+  depthFragmentShader_ = {};
+  depthAlphaFragmentShader_ = {};
+  depthPyramidVertexShader_ = {};
+  depthPyramidFragmentShader_ = {};
   computeShaderHandle_ = {};
   computePipelineHandle_ = {};
   tessellationUnsupported_ = false;
@@ -482,11 +538,17 @@ void OpaqueRenderer::onDetach() {
   instanceRemap_.clear();
   drawPushConstants_.clear();
   drawItems_.clear();
+  drawAlphaMasked_.clear();
   indirectUploadSignatures_.clear();
   indirectDrawItems_.clear();
+  indirectAlphaMasked_.clear();
   indirectCommandUploadBytes_.clear();
   overlayDrawItems_.clear();
   passDrawItems_.clear();
+  depthPrepassDrawItems_.clear();
+  depthPyramidPushConstants_.clear();
+  depthPyramidDrawItems_.clear();
+  depthPyramidDependencyTextures_.clear();
   preDispatches_.clear();
   passDependencyBuffers_.clear();
   dispatchDependencyBuffers_.clear();
@@ -513,7 +575,64 @@ void OpaqueRenderer::onDetach() {
 void OpaqueRenderer::onResize(uint32_t, uint32_t) {
   destroyDepthTexture();
   destroyPickTexture();
+  destroyDepthPyramidTextures();
   resetPickState();
+}
+
+void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
+  frame.sharedResources.sceneDepthTexture = {};
+  frame.sharedDepthTexture = {};
+  frame.sharedResources.sceneDepthSamplerId =
+      gpu_.getDefaultSamplerBindlessIndex();
+  frame.sharedResources.sceneDepthPyramidLevelCount = 0u;
+  frame.sharedResources.sceneDepthPyramidTextures = {};
+
+  const RenderSettings &settings = settingsOrDefault(frame);
+  if (!settings.opaque.enabled) {
+    return;
+  }
+  if (!initialized_) {
+    auto initResult = ensureInitialized();
+    if (initResult.hasError()) {
+      return;
+    }
+  }
+  if (!nuri::isValid(depthTexture_)) {
+    auto depthResult = recreateDepthTexture();
+    if (depthResult.hasError()) {
+      return;
+    }
+  }
+  frame.sharedResources.sceneDepthTexture = depthTexture_;
+  frame.sharedDepthTexture = depthTexture_;
+  const auto sceneDepthSamplerId = [this]() {
+    return nuri::isValid(sceneDepthSampler_)
+               ? gpu_.getSamplerBindlessIndex(sceneDepthSampler_)
+               : gpu_.getDefaultSamplerBindlessIndex();
+  };
+  frame.sharedResources.sceneDepthSamplerId = sceneDepthSamplerId();
+
+  if (!settings.opaque.enableDepthPyramid) {
+    return;
+  }
+  if (!nuri::isValid(depthPyramidPipelineHandle_) ||
+      gpu_.getTextureBindlessIndex(depthTexture_) ==
+          kInvalidTextureBindlessIndex) {
+    return;
+  }
+  auto pyramidResult = ensureDepthPyramidTextures();
+  if (pyramidResult.hasError()) {
+    if (!loggedDepthPyramidUnsupported_) {
+      loggedDepthPyramidUnsupported_ = true;
+      NURI_LOG_WARNING("OpaqueRenderer::publishFrameData: %s",
+                       pyramidResult.error().c_str());
+    }
+    return;
+  }
+  frame.sharedResources.sceneDepthPyramidLevelCount =
+      sceneDepthPyramidLevelCount_;
+  frame.sharedResources.sceneDepthPyramidTextures = sceneDepthPyramidTextures_;
+  frame.sharedResources.sceneDepthSamplerId = sceneDepthSamplerId();
 }
 
 Result<bool, std::string>
@@ -706,7 +825,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             animationSceneData
                 ->geometryOverridesByRenderable[templateEntry.instanceIndex];
         if (geometryOverride.enabled &&
-            nuri::isValid(geometryOverride.vertexBuffer)) {
+            nuri::isValid(geometryOverride.vertexBuffer) &&
+            templateEntry.submesh != nullptr &&
+            animationOverrideCoversSubmesh(geometryOverride,
+                                           *templateEntry.submesh)) {
           const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
               geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
           if (overrideVertexAddress != 0u) {
@@ -883,6 +1005,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     uint32_t materialIndex = kInvalidMaterialIndex;
     size_t instanceCount = 0;
     size_t firstInstance = 0;
+    bool alphaMasked = false;
   };
   constexpr uint32_t kInvalidBatchIndex = std::numeric_limits<uint32_t>::max();
 
@@ -899,7 +1022,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                  BufferHandle vertexBuffer, uint64_t vertexBufferAddress,
                  uint64_t vertexDecodeBufferAddress, uint32_t vertexDecodeIndex,
                  uint32_t packedVertexFormat, uint32_t materialIndex,
-                 size_t count, size_t firstInstance) {
+                 bool alphaMasked, size_t count, size_t firstInstance) {
         if (count == 0) {
           return;
         }
@@ -917,6 +1040,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.vertexDecodeIndex = vertexDecodeIndex;
         entry.packedVertexFormat = packedVertexFormat;
         entry.materialIndex = materialIndex;
+        entry.alphaMasked = alphaMasked;
         entry.instanceCount = count;
         entry.firstInstance = firstInstance;
         batches.push_back(entry);
@@ -1150,6 +1274,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
     remapCount = staticBatchCache_.remap.size();
     drawPushConstants_.resize(batchCount);
+    drawAlphaMasked_ = staticBatchCache_.alphaMasked;
+    if (drawAlphaMasked_.size() != batchCount) {
+      drawAlphaMasked_.assign(batchCount, 0u);
+    }
     const bool needsStaticBatchRebind =
         boundStaticBatchGeneration_ != staticBatchCache_.generation ||
         drawItems_.size() != batchCount;
@@ -1336,7 +1464,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
           templateEntry.vertexDecodeBufferAddress,
           templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
-          templateEntry.materialIndex, autoLodBucketCounts[0], firstInstance);
+          templateEntry.materialIndex, templateEntry.alphaMasked,
+          autoLodBucketCounts[0], firstInstance);
       firstInstance += autoLodBucketCounts[0];
 
       autoLodTessBucketStart = firstInstance;
@@ -1347,7 +1476,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
           templateEntry.vertexDecodeBufferAddress,
           templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
-          templateEntry.materialIndex, autoLodTessBucketCount, firstInstance);
+          templateEntry.materialIndex, templateEntry.alphaMasked,
+          autoLodTessBucketCount, firstInstance);
       if (autoLodTessBucketCount > 0) {
         usedUniformAutoLodTessSplit = true;
       }
@@ -1369,7 +1499,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                     templateEntry.vertexDecodeBufferAddress,
                     templateEntry.vertexDecodeIndex,
                     templateEntry.packedVertexFormat,
-                    templateEntry.materialIndex, count, firstInstance);
+                    templateEntry.materialIndex, templateEntry.alphaMasked,
+                    count, firstInstance);
         firstInstance += count;
       }
     } else {
@@ -1389,7 +1520,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                     templateEntry.vertexDecodeBufferAddress,
                     templateEntry.vertexDecodeIndex,
                     templateEntry.packedVertexFormat,
-                    templateEntry.materialIndex, count, firstInstance);
+                    templateEntry.materialIndex, templateEntry.alphaMasked,
+                    count, firstInstance);
         firstInstance += count;
       }
     }
@@ -1453,13 +1585,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         resolveAvailableLod(*templateEntry.submesh, requestedLod);
     if (lodIndex) {
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
-      appendBatch(
-          selectMeshPipeline(templateEntry.doubleSided, false),
-          templateEntry.indexBuffer, templateEntry.indexBufferOffset, lodRange,
-          templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
-          templateEntry.vertexDecodeBufferAddress,
-          templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
-          templateEntry.materialIndex, instanceCount, 0);
+      appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
+                  templateEntry.indexBuffer, templateEntry.indexBufferOffset,
+                  lodRange, templateEntry.vertexBuffer,
+                  templateEntry.vertexBufferAddress,
+                  templateEntry.vertexDecodeBufferAddress,
+                  templateEntry.vertexDecodeIndex,
+                  templateEntry.packedVertexFormat, templateEntry.materialIndex,
+                  templateEntry.alphaMasked, instanceCount, 0);
       remapCount = instanceCount;
       templateBatchIndices_.clear();
       templateBatchIndices_.resize(meshDrawTemplates_.size(), 0u);
@@ -1551,6 +1684,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.vertexDecodeIndex = templateEntry.vertexDecodeIndex;
         entry.packedVertexFormat = templateEntry.packedVertexFormat;
         entry.materialIndex = templateEntry.materialIndex;
+        entry.alphaMasked = templateEntry.alphaMasked;
         batches.push_back(std::move(entry));
         const size_t insertedIndex = batches.size() - 1;
         auto [insertedIt, _] = batchLookup.emplace(key, insertedIndex);
@@ -1584,6 +1718,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                   : batches.size();
     drawItems_.resize(batchCount);
     drawPushConstants_.resize(batchCount);
+    drawAlphaMasked_.resize(batchCount, 0u);
 
     const bool singleRenderableInstance = instanceCount == 1;
     const bool needsBatchWriteOffsets =
@@ -1733,6 +1868,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         constants.tessMinFactor = tessMinFactor;
         constants.tessMaxFactor = tessMaxFactor;
         constants.debugVisualizationMode = debugVisualizationMode;
+        drawAlphaMasked_[batchIndex] = batch.alphaMasked ? 1u : 0u;
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
         draw.vertexBuffer = batch.vertexBuffer;
@@ -1795,6 +1931,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         constants.tessMinFactor = tessMinFactor;
         constants.tessMaxFactor = tessMaxFactor;
         constants.debugVisualizationMode = debugVisualizationMode;
+        drawAlphaMasked_[batchIndex] = batch.alphaMasked ? 1u : 0u;
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
         draw.vertexBuffer = batch.vertexBuffer;
@@ -1847,6 +1984,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                                     : kInvalidDrawSignature;
       staticBatchCache_.draws = drawItems_;
       staticBatchCache_.pushConstantsTemplates = drawPushConstants_;
+      staticBatchCache_.alphaMasked = drawAlphaMasked_;
       for (size_t i = 0; i < drawPushConstants_.size(); ++i) {
         staticBatchCache_.draws[i].pushConstants = {};
         staticBatchCache_.pushConstantsTemplates[i].frameDataAddress = 0;
@@ -1886,8 +2024,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           drawPushConstants_.get_allocator().resource());
       std::pmr::vector<DrawItem> expandedDrawItems(
           drawItems_.get_allocator().resource());
+      std::pmr::vector<uint8_t> expandedAlphaMasked(
+          drawAlphaMasked_.get_allocator().resource());
       expandedPushConstants.reserve(expandedDrawCount);
       expandedDrawItems.reserve(expandedDrawCount);
+      expandedAlphaMasked.reserve(expandedDrawCount);
 
       for (size_t i = 0; i < drawItems_.size(); ++i) {
         const DrawItem &sourceDraw = drawItems_[i];
@@ -1916,11 +2057,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                              &expandedPushConstants.back()),
                                          sizeof(PushConstants));
           expandedDrawItems.push_back(expandedDraw);
+          expandedAlphaMasked.push_back(
+              i < drawAlphaMasked_.size() ? drawAlphaMasked_[i] : 0u);
         }
       }
 
       drawPushConstants_ = std::move(expandedPushConstants);
       drawItems_ = std::move(expandedDrawItems);
+      drawAlphaMasked_ = std::move(expandedAlphaMasked);
       for (size_t i = 0; i < drawItems_.size(); ++i) {
         drawItems_[i].pushConstants = std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&drawPushConstants_[i]),
@@ -1995,6 +2139,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   } else {
     invalidateIndirectPackCache();
     indirectDrawItems_.clear();
+    indirectAlphaMasked_.clear();
     indirectCommandUploadBytes_.clear();
   }
 
@@ -2100,6 +2245,24 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         return depResult;
       }
     }
+
+    if (animationSceneData != nullptr) {
+      for (const AnimatedRenderableGeometryOverride &geometryOverride :
+           animationSceneData->geometryOverridesByRenderable) {
+        if (!geometryOverride.enabled ||
+            !nuri::isValid(geometryOverride.vertexBuffer)) {
+          continue;
+        }
+        auto depResult = appendUniqueDependency(
+            passDependencyBuffers_, passDependencyBufferAccessModes_,
+            geometryOverride.vertexBuffer, RenderGraphAccessMode::Read,
+            "OpaqueRenderer::buildOpaquePasses(animated geometry pass)");
+        if (depResult.hasError()) {
+          return depResult;
+        }
+      }
+    }
+
     if (frameSlot < instanceRemapRing_.size() &&
         instanceRemapRing_[frameSlot].buffer &&
         instanceRemapRing_[frameSlot].buffer->valid()) {
@@ -2199,13 +2362,66 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? std::span<const DrawItem>(indirectDrawItems_.data(),
                                       indirectDrawItems_.size())
           : std::span<const DrawItem>(drawItems_.data(), drawItems_.size());
+  const std::span<const uint8_t> baseAlphaMasked =
+      hasIndirectBaseDraws
+          ? std::span<const uint8_t>(indirectAlphaMasked_.data(),
+                                     indirectAlphaMasked_.size())
+          : std::span<const uint8_t>(drawAlphaMasked_.data(),
+                                     drawAlphaMasked_.size());
 
   size_t debugOverlayDraws = 0;
   size_t debugOverlayFallbackDraws = 0;
   size_t debugPatchHeatmapDraws = 0;
   overlayDrawItems_.clear();
   passDrawItems_.clear();
-  std::span<const DrawItem> finalPassDrawItems = baseDrawItems;
+  depthPrepassDrawItems_.clear();
+  bool depthPrepassEnabled = settings.opaque.enableDepthPrepass &&
+                             !wireframeOnlyRequested && !baseDrawItems.empty();
+  if (depthPrepassEnabled && baseAlphaMasked.size() != baseDrawItems.size()) {
+    depthPrepassEnabled = false;
+  }
+  if (depthPrepassEnabled) {
+    depthPrepassDrawItems_.reserve(baseDrawItems.size());
+    passDrawItems_.reserve(baseDrawItems.size());
+    for (size_t i = 0; i < baseDrawItems.size(); ++i) {
+      const DrawItem &source = baseDrawItems[i];
+      const bool alphaMasked = baseAlphaMasked[i] != 0u;
+      const RenderPipelineHandle depthPipeline =
+          selectDepthPipeline(source.pipeline, alphaMasked);
+      if (!nuri::isValid(depthPipeline)) {
+        depthPrepassEnabled = false;
+        depthPrepassDrawItems_.clear();
+        passDrawItems_.clear();
+        if (!loggedDepthPrepassUnsupported_) {
+          loggedDepthPrepassUnsupported_ = true;
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::buildOpaquePasses: depth pre-pass pipeline is "
+              "unavailable, using single opaque pass");
+        }
+        break;
+      }
+
+      DrawItem depthDraw = source;
+      depthDraw.pipeline = depthPipeline;
+      depthDraw.useDepthState = true;
+      depthDraw.depthState = {.compareOp = CompareOp::Less,
+                              .isDepthWriteEnabled = true};
+      depthDraw.debugLabel =
+          alphaMasked ? "OpaqueMeshDepthAlpha" : "OpaqueMeshDepth";
+      depthPrepassDrawItems_.push_back(depthDraw);
+
+      DrawItem shadeDraw = source;
+      shadeDraw.useDepthState = true;
+      shadeDraw.depthState = {.compareOp = CompareOp::Equal,
+                              .isDepthWriteEnabled = false};
+      passDrawItems_.push_back(shadeDraw);
+    }
+  }
+  std::span<const DrawItem> shadedBaseDrawItems =
+      depthPrepassEnabled ? std::span<const DrawItem>(passDrawItems_.data(),
+                                                      passDrawItems_.size())
+                          : baseDrawItems;
+  std::span<const DrawItem> finalPassDrawItems = shadedBaseDrawItems;
   if (wireframeOnlyRequested && !baseDrawItems.empty()) {
     bool lineOverlayAvailable = false;
     bool lineTessOverlayAvailable = false;
@@ -2385,9 +2601,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
 
     if (!overlayDrawItems_.empty()) {
-      passDrawItems_.reserve(baseDrawItems.size() + overlayDrawItems_.size());
-      passDrawItems_.insert(passDrawItems_.end(), baseDrawItems.begin(),
-                            baseDrawItems.end());
+      const size_t baseOffset = passDrawItems_.size();
+      passDrawItems_.reserve(baseOffset + shadedBaseDrawItems.size() +
+                             overlayDrawItems_.size());
+      if (passDrawItems_.empty()) {
+        passDrawItems_.insert(passDrawItems_.end(), shadedBaseDrawItems.begin(),
+                              shadedBaseDrawItems.end());
+      }
       passDrawItems_.insert(passDrawItems_.end(), overlayDrawItems_.begin(),
                             overlayDrawItems_.end());
       finalPassDrawItems = std::span<const DrawItem>(passDrawItems_.data(),
@@ -2416,6 +2636,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       saturateToU32(debugPatchHeatmapDraws);
   frame.metrics.opaque.computeDispatches = saturateToU32(preDispatches_.size());
   frame.metrics.opaque.computeDispatchX = computeDispatchX;
+  frame.metrics.opaque.depthPrepassDraws =
+      saturateToU32(depthPrepassDrawItems_.size());
+  frame.metrics.opaque.depthPrepassIndirectDraws =
+      depthPrepassEnabled && hasIndirectBaseDraws
+          ? saturateToU32(depthPrepassDrawItems_.size())
+          : 0u;
+  frame.metrics.opaque.depthPyramidLevels = 0u;
+  frame.metrics.opaque.depthPrepassEnabled = depthPrepassEnabled ? 1u : 0u;
 
   ++statsLogFrameCounter_;
   const bool shouldLogStats = (statsLogFrameCounter_ & 511ull) == 0ull;
@@ -2480,6 +2708,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             passDependencyBufferAccessModes_.size());
     pickPass.desc.draws =
         std::span<const DrawItem>(pickDrawItems_.data(), pickDrawItems_.size());
+    pickPass.desc.drawBuffersPreResolved = true;
     pickPass.desc.debugLabel = kOpaquePickPassLabel;
     pickPass.desc.debugColor = kOpaquePassDebugColor;
     pickPass.desc.borrowPayload = true;
@@ -2495,6 +2724,40 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     NURI_PROFILER_ZONE_END();
   }
 
+  if (depthPrepassEnabled) {
+    PreparedGraphPass &depthPass =
+        out.emplace_back(drawItems_.get_allocator().resource());
+    depthPass.desc.hasColorAttachment = false;
+    depthPass.desc.depth = {.loadOp = LoadOp::Clear,
+                            .storeOp = StoreOp::Store,
+                            .clearDepth = kClearDepthOne,
+                            .clearStencil = 0};
+    depthPass.depthTextureHandle = depthTexture_;
+    if (!pickPassSubmitted) {
+      depthPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
+          preDispatches_.data(), preDispatches_.size());
+    }
+    depthPass.desc.dependencyBuffers = std::span<const BufferHandle>(
+        passDependencyBuffers_.data(), passDependencyBuffers_.size());
+    depthPass.desc.dependencyBufferAccessModes =
+        std::span<const RenderGraphAccessMode>(
+            passDependencyBufferAccessModes_.data(),
+            passDependencyBufferAccessModes_.size());
+    depthPass.desc.dependencyTextures = std::span<const TextureHandle>(
+        passDependencyTextures_.data(), passDependencyTextures_.size());
+    depthPass.desc.draws = std::span<const DrawItem>(
+        depthPrepassDrawItems_.data(), depthPrepassDrawItems_.size());
+    depthPass.desc.drawBuffersPreResolved = true;
+    depthPass.desc.debugLabel = "Opaque Depth Pre-Pass";
+    depthPass.desc.debugColor = kOpaquePassDebugColor;
+    depthPass.desc.borrowPayload = true;
+    depthPass.desc.markImplicitOutputSideEffect = true;
+    depthPass.hasDraws = !depthPrepassDrawItems_.empty();
+    depthPass.hasPreDispatch = !pickPassSubmitted && !preDispatches_.empty();
+    depthPass.hasIndirectDraws = hasIndirectBaseDraws;
+    depthPass.isDepthPrepass = true;
+  }
+
   const bool shouldLoadColor = settings.skybox.enabled;
   PreparedGraphPass &pass =
       out.emplace_back(drawItems_.get_allocator().resource());
@@ -2502,12 +2765,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                      .storeOp = StoreOp::Store,
                      .clearColor = {kClearColorWhite, kClearColorWhite,
                                     kClearColorWhite, kClearColorWhite}};
-  pass.desc.depth = {.loadOp = LoadOp::Clear,
+  pass.desc.depth = {.loadOp =
+                         depthPrepassEnabled ? LoadOp::Load : LoadOp::Clear,
                      .storeOp = StoreOp::Store,
                      .clearDepth = kClearDepthOne,
                      .clearStencil = 0};
   pass.depthTextureHandle = depthTexture_;
-  if (!pickPassSubmitted) {
+  if (!pickPassSubmitted && !depthPrepassEnabled) {
     pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
   }
@@ -2520,11 +2784,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   pass.desc.dependencyTextures = std::span<const TextureHandle>(
       passDependencyTextures_.data(), passDependencyTextures_.size());
   pass.desc.draws = finalPassDrawItems;
+  pass.desc.drawBuffersPreResolved = true;
   pass.desc.debugLabel = kOpaqueMainPassLabel;
   pass.desc.debugColor = kOpaquePassDebugColor;
   pass.desc.borrowPayload = true;
   pass.hasDraws = !finalPassDrawItems.empty();
-  pass.hasPreDispatch = !pickPassSubmitted && !preDispatches_.empty();
+  pass.hasPreDispatch =
+      !pickPassSubmitted && !depthPrepassEnabled && !preDispatches_.empty();
   pass.hasIndirectDraws = hasIndirectBaseDraws;
   pass.isMainPass = true;
   const bool transmissionStageEnabled =
@@ -2536,6 +2802,68 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           "scene color texture is unavailable");
     }
     pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
+  }
+
+  if (settings.opaque.enableDepthPyramid && nuri::isValid(depthTexture_) &&
+      nuri::isValid(depthPyramidPipelineHandle_) &&
+      sceneDepthPyramidLevelCount_ > 0u && !baseDrawItems.empty()) {
+    depthPyramidPushConstants_.clear();
+    depthPyramidDrawItems_.clear();
+    depthPyramidDependencyTextures_.clear();
+    depthPyramidPushConstants_.reserve(sceneDepthPyramidLevelCount_);
+    depthPyramidDrawItems_.reserve(sceneDepthPyramidLevelCount_);
+    depthPyramidDependencyTextures_.reserve(sceneDepthPyramidLevelCount_);
+    const uint32_t samplerId =
+        nuri::isValid(sceneDepthSampler_)
+            ? gpu_.getSamplerBindlessIndex(sceneDepthSampler_)
+            : gpu_.getDefaultSamplerBindlessIndex();
+    for (uint32_t level = 0u; level < sceneDepthPyramidLevelCount_; ++level) {
+      const TextureHandle sourceTexture =
+          level == 0u ? depthTexture_ : sceneDepthPyramidTextures_[level - 1u];
+      const TextureHandle destinationTexture =
+          sceneDepthPyramidTextures_[level];
+      if (!nuri::isValid(sourceTexture) || !nuri::isValid(destinationTexture)) {
+        break;
+      }
+      const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(sourceTexture);
+      if (sourceTexId == kInvalidTextureBindlessIndex) {
+        break;
+      }
+      depthPyramidDependencyTextures_.push_back(sourceTexture);
+
+      depthPyramidPushConstants_.push_back(
+          glm::uvec4(sourceTexId, samplerId, level == 0u ? 1u : 0u, 0u));
+      DrawItem draw{};
+      draw.pipeline = depthPyramidPipelineHandle_;
+      draw.vertexCount = 3u;
+      draw.pushConstants =
+          std::span<const std::byte>(reinterpret_cast<const std::byte *>(
+                                         &depthPyramidPushConstants_.back()),
+                                     sizeof(glm::uvec4));
+      draw.debugLabel = "OpaqueDepthMinMaxPyramid";
+      draw.debugColor = kOpaquePassDebugColor;
+      depthPyramidDrawItems_.push_back(draw);
+
+      PreparedGraphPass &pyramidPass =
+          out.emplace_back(drawItems_.get_allocator().resource());
+      pyramidPass.desc.color = {.loadOp = LoadOp::Clear,
+                                .storeOp = StoreOp::Store,
+                                .clearColor = {1.0f, 0.0f, 0.0f, 0.0f}};
+      pyramidPass.colorTextureHandle = destinationTexture;
+      pyramidPass.desc.dependencyTextures = std::span<const TextureHandle>(
+          &depthPyramidDependencyTextures_.back(), 1u);
+      pyramidPass.desc.draws =
+          std::span<const DrawItem>(&depthPyramidDrawItems_.back(), 1u);
+      pyramidPass.desc.drawBuffersPreResolved = true;
+      pyramidPass.desc.debugLabel = "Opaque Depth MinMax Pyramid";
+      pyramidPass.desc.debugColor = kOpaquePassDebugColor;
+      pyramidPass.desc.borrowPayload = true;
+      pyramidPass.hasDraws = true;
+      pyramidPass.isDepthPyramidPass = true;
+      pyramidPass.depthPyramidLevel = level;
+    }
+    frame.metrics.opaque.depthPyramidLevels =
+        saturateToU32(depthPyramidDrawItems_.size());
   }
 
   frame.sharedDepthTexture = depthTexture_;
@@ -2582,6 +2910,9 @@ bool OpaqueRenderer::hasPreparedOpaquePickPasses() const noexcept {
 bool OpaqueRenderer::shouldPublishSceneDepthGraphTexture(
     const RenderFrameContext &frame) const {
   const RenderSettings &settings = settingsOrDefault(frame);
+  if (settings.opaque.enableDepthPyramid) {
+    return true;
+  }
   if (settings.transmission.enabled || settings.transparent.enabled) {
     return true;
   }
@@ -2656,13 +2987,21 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     frame.sharedResources.opaquePickDepthGraphTexture = pickDepthResult.value();
   }
 
-  if (pass.isMainPass && nuri::isValid(pass.depthTextureHandle) &&
+  if ((pass.isDepthPrepass || pass.isMainPass) &&
+      nuri::isValid(pass.depthTextureHandle) &&
       shouldPublishSceneDepthGraphTexture(frame)) {
     frame.sharedResources.sceneDepthGraphTexture = passDesc.depthTexture;
   }
 
   if (pass.isMainPass && nuri::isValid(pass.colorTextureHandle)) {
     frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
+  }
+  if (pass.isDepthPyramidPass &&
+      pass.depthPyramidLevel < kMaxSceneDepthPyramidLevels &&
+      nuri::isValid(passDesc.colorTexture)) {
+    frame.sharedResources
+        .sceneDepthPyramidGraphTextures[pass.depthPyramidLevel] =
+        passDesc.colorTexture;
   }
 
   return Result<bool, std::string>::makeResult(true);
@@ -2702,7 +3041,7 @@ OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
   NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_main_passes",
                      NURI_PROFILER_COLOR_CMD_DRAW);
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
-    if (!pass.isMainPass) {
+    if (!pass.isDepthPrepass && !pass.isMainPass && !pass.isDepthPyramidPass) {
       continue;
     }
     auto appendResult =
@@ -2861,6 +3200,7 @@ Result<bool, std::string> OpaqueRenderer::ensureSingleInstanceBatchCache(
       entry.vertexDecodeIndex = templateEntry.vertexDecodeIndex;
       entry.packedVertexFormat = templateEntry.packedVertexFormat;
       entry.materialIndex = templateEntry.materialIndex;
+      entry.alphaMasked = templateEntry.alphaMasked;
       cache.batches.push_back(entry);
       const size_t insertedIndex = cache.batches.size() - 1;
       auto [insertedIt, _] = singleBatchLookup.emplace(key, insertedIndex);
@@ -3083,6 +3423,7 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
   }
 
   indirectDrawItems_.clear();
+  indirectAlphaMasked_.clear();
   indirectCommandUploadBytes_.clear();
   indirectSourceDrawIndices_.clear();
 
@@ -3141,6 +3482,10 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
             sizeof(PushConstants));
         indirectDrawItems_.push_back(indirectDraw);
         indirectSourceDrawIndices_.push_back(group.sourceDrawIndex);
+        indirectAlphaMasked_.push_back(
+            group.sourceDrawIndex < drawAlphaMasked_.size()
+                ? drawAlphaMasked_[group.sourceDrawIndex]
+                : 0u);
 
         commandCursor += drawCount;
       }
@@ -3170,6 +3515,7 @@ OpaqueRenderer::refreshCachedIndirectPack(uint32_t frameSlot,
         "OpaqueRenderer::buildIndirectDraws: cached indirect source mapping is "
         "invalid");
   }
+  indirectAlphaMasked_.resize(indirectDrawItems_.size(), 0u);
   const BufferHandle indirectBufferHandle =
       indirectCommandRing_[frameSlot].buffer->handle();
   for (size_t i = 0; i < indirectSourceDrawIndices_.size(); ++i) {
@@ -3183,6 +3529,9 @@ OpaqueRenderer::refreshCachedIndirectPack(uint32_t frameSlot,
     indirectDrawItems_[i].pushConstants = std::span<const std::byte>(
         reinterpret_cast<const std::byte *>(&drawPushConstants_[sourceIndex]),
         sizeof(PushConstants));
+    indirectAlphaMasked_[i] = sourceIndex < drawAlphaMasked_.size()
+                                  ? drawAlphaMasked_[sourceIndex]
+                                  : 0u;
   }
 
   if (indirectUploadSignatures_[frameSlot] != drawSignature) {
@@ -3215,6 +3564,9 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshTessShader_.reset();
     meshDebugOverlayShader_.reset();
     meshPickShader_.reset();
+    depthShader_.reset();
+    depthAlphaShader_.reset();
+    depthPyramidShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
     meshTessVertexShader_ = {};
@@ -3224,6 +3576,10 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
     meshPickFragmentShader_ = {};
+    depthFragmentShader_ = {};
+    depthAlphaFragmentShader_ = {};
+    depthPyramidVertexShader_ = {};
+    depthPyramidFragmentShader_ = {};
     computeShaderHandle_ = {};
     resetMeshPipelineState();
     tessellationUnsupported_ = false;
@@ -3236,6 +3592,9 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshTessShader_.reset();
     meshDebugOverlayShader_.reset();
     meshPickShader_.reset();
+    depthShader_.reset();
+    depthAlphaShader_.reset();
+    depthPyramidShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
     meshTessVertexShader_ = {};
@@ -3245,6 +3604,10 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
     meshPickFragmentShader_ = {};
+    depthFragmentShader_ = {};
+    depthAlphaFragmentShader_ = {};
+    depthPyramidVertexShader_ = {};
+    depthPyramidFragmentShader_ = {};
     computeShaderHandle_ = {};
     resetMeshPipelineState();
     tessellationUnsupported_ = false;
@@ -3262,6 +3625,9 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshTessShader_.reset();
     meshDebugOverlayShader_.reset();
     meshPickShader_.reset();
+    depthShader_.reset();
+    depthAlphaShader_.reset();
+    depthPyramidShader_.reset();
     computeShader_.reset();
     meshVertexShader_ = {};
     meshTessVertexShader_ = {};
@@ -3271,6 +3637,10 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
     meshPickFragmentShader_ = {};
+    depthFragmentShader_ = {};
+    depthAlphaFragmentShader_ = {};
+    depthPyramidVertexShader_ = {};
+    depthPyramidFragmentShader_ = {};
     computeShaderHandle_ = {};
     computePipelineHandle_ = {};
     tessellationUnsupported_ = false;
@@ -3304,6 +3674,86 @@ Result<bool, std::string> OpaqueRenderer::recreateDepthTexture() {
     return Result<bool, std::string>::makeError(depthResult.error());
   }
   depthTexture_ = depthResult.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueRenderer::ensureDepthPyramidTextures() {
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+  const uint32_t safeWidth =
+      static_cast<uint32_t>(std::max(framebufferWidth, 1));
+  const uint32_t safeHeight =
+      static_cast<uint32_t>(std::max(framebufferHeight, 1));
+
+  uint32_t levelCount = 1u;
+  uint32_t maxDim = std::max(safeWidth, safeHeight);
+  while (maxDim > 1u && levelCount < kMaxSceneDepthPyramidLevels) {
+    maxDim = (maxDim + 1u) >> 1u;
+    ++levelCount;
+  }
+
+  if (!nuri::isValid(sceneDepthSampler_)) {
+    auto samplerResult =
+        gpu_.createSampler(SamplerDesc{.minFilter = SamplerFilter::Nearest,
+                                       .magFilter = SamplerFilter::Nearest,
+                                       .mipMode = SamplerMipMode::Disabled,
+                                       .wrapU = SamplerWrapMode::Clamp,
+                                       .wrapV = SamplerWrapMode::Clamp,
+                                       .wrapW = SamplerWrapMode::Clamp},
+                           "scene_depth_nearest_clamp");
+    if (samplerResult.hasError()) {
+      return Result<bool, std::string>::makeError(samplerResult.error());
+    }
+    sceneDepthSampler_ = samplerResult.value();
+  }
+
+  const bool recreate = sceneDepthPyramidLevelCount_ != levelCount ||
+                        sceneDepthPyramidWidth_ != safeWidth ||
+                        sceneDepthPyramidHeight_ != safeHeight;
+  if (!recreate) {
+    bool allValid = true;
+    for (uint32_t i = 0; i < levelCount; ++i) {
+      allValid = allValid && nuri::isValid(sceneDepthPyramidTextures_[i]) &&
+                 gpu_.isValid(sceneDepthPyramidTextures_[i]);
+    }
+    if (allValid) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+  }
+
+  destroyDepthPyramidTextures();
+
+  uint32_t width = safeWidth;
+  uint32_t height = safeHeight;
+  for (uint32_t level = 0u; level < levelCount; ++level) {
+    const TextureDesc desc{
+        .type = TextureType::Texture2D,
+        .format = Format::RG32_FLOAT,
+        .dimensions = {width, height, 1u},
+        .usage = TextureUsage::AttachmentSampled,
+        .storage = Storage::Device,
+        .numLayers = 1u,
+        .numSamples = 1u,
+        .numMipLevels = 1u,
+        .data = {},
+        .dataNumMipLevels = 1u,
+        .generateMipmaps = false,
+    };
+    auto textureResult = gpu_.createTexture(desc, "opaque_scene_depth_minmax_" +
+                                                      std::to_string(level));
+    if (textureResult.hasError()) {
+      destroyDepthPyramidTextures();
+      return Result<bool, std::string>::makeError(textureResult.error());
+    }
+    sceneDepthPyramidTextures_[level] = textureResult.value();
+    width = std::max(1u, (width + 1u) >> 1u);
+    height = std::max(1u, (height + 1u) >> 1u);
+  }
+
+  sceneDepthPyramidLevelCount_ = levelCount;
+  sceneDepthPyramidWidth_ = safeWidth;
+  sceneDepthPyramidHeight_ = safeHeight;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -3639,6 +4089,9 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
       const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
       const bool doubleSided =
           materialRecord != nullptr && materialRecord->desc.doubleSided;
+      const bool alphaMasked =
+          materialRecord != nullptr &&
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Mask;
       if (materialRecord != nullptr &&
           (materialRecord->desc.alphaMode == MaterialAlphaMode::Blend ||
            isTransmissionMaterial(*materialRecord))) {
@@ -3672,6 +4125,7 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
               static_cast<uint32_t>(model->drawVertexFormat()),
           .materialIndex = finalMaterialIndex,
           .doubleSided = doubleSided,
+          .alphaMasked = alphaMasked,
       });
     }
   }
@@ -3772,8 +4226,12 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshTessShader_ = Shader::create("main_tess", gpu_);
   meshDebugOverlayShader_ = Shader::create("mesh_debug_overlay", gpu_);
   meshPickShader_ = Shader::create("main_id", gpu_);
+  depthShader_ = Shader::create("opaque_depth", gpu_);
+  depthAlphaShader_ = Shader::create("opaque_depth_alpha", gpu_);
+  depthPyramidShader_ = Shader::create("depth_minmax_pyramid", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
-  if (!meshShader_ || !meshTessShader_ || !meshPickShader_ || !computeShader_) {
+  if (!meshShader_ || !meshTessShader_ || !meshPickShader_ || !computeShader_ ||
+      !depthShader_ || !depthAlphaShader_ || !depthPyramidShader_) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::createShaders: failed to create shader objects");
   }
@@ -3786,6 +4244,10 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshDebugOverlayGeometryShader_ = {};
   meshDebugOverlayFragmentShader_ = {};
   meshPickFragmentShader_ = {};
+  depthFragmentShader_ = {};
+  depthAlphaFragmentShader_ = {};
+  depthPyramidVertexShader_ = {};
+  depthPyramidFragmentShader_ = {};
   computeShaderHandle_ = {};
   tessellationUnsupported_ = false;
   gsOverlayPipelineUnsupported_ = false;
@@ -3827,6 +4289,58 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       return Result<bool, std::string>::makeError(compileResult.error());
     }
     meshPickFragmentShader_ = compileResult.value();
+  }
+
+  {
+    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    const std::filesystem::path depthPath = shaderDir / "opaque_depth.frag";
+    auto depthCompileResult = depthShader_->compileFromFile(
+        depthPath.string(), ShaderStage::Fragment);
+    if (depthCompileResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: depth pre-pass shader failed, "
+          "depth pre-pass will be disabled: %s",
+          depthCompileResult.error().c_str());
+      depthFragmentShader_ = {};
+    } else {
+      depthFragmentShader_ = depthCompileResult.value();
+    }
+
+    const std::filesystem::path depthAlphaPath =
+        shaderDir / "opaque_depth_alpha.frag";
+    auto compileResult = depthAlphaShader_->compileFromFile(
+        depthAlphaPath.string(), ShaderStage::Fragment);
+    if (compileResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: masked depth pre-pass shader "
+          "failed, depth pre-pass will be disabled: %s",
+          compileResult.error().c_str());
+      depthAlphaFragmentShader_ = {};
+    } else {
+      depthAlphaFragmentShader_ = compileResult.value();
+    }
+
+    const std::filesystem::path fullscreenVertexPath =
+        shaderDir / "fullscreen_copy.vert";
+    auto vertexResult = depthPyramidShader_->compileFromFile(
+        fullscreenVertexPath.string(), ShaderStage::Vertex);
+    auto fragmentResult = depthPyramidShader_->compileFromFile(
+        (shaderDir / "depth_minmax_pyramid.frag").string(),
+        ShaderStage::Fragment);
+    if (vertexResult.hasError() || fragmentResult.hasError()) {
+      const std::string error = vertexResult.hasError()
+                                    ? vertexResult.error()
+                                    : fragmentResult.error();
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: depth pyramid shaders failed, depth "
+          "pyramid will be disabled: %s",
+          error.c_str());
+      depthPyramidVertexShader_ = {};
+      depthPyramidFragmentShader_ = {};
+    } else {
+      depthPyramidVertexShader_ = vertexResult.value();
+      depthPyramidFragmentShader_ = fragmentResult.value();
+    }
   }
 
   const std::array<ShaderSpec, 3> tessShaderSpecs = {
@@ -3943,6 +4457,47 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     meshDoubleSidedFillPipelineHandle_ = doubleSidedMeshResult.value();
   }
 
+  const auto createDepthPipeline =
+      [this](const RenderPipelineDesc &desc, std::string_view debugName,
+             RenderPipelineHandle &outHandle) -> bool {
+    auto result = gpu_.createRenderPipeline(desc, debugName);
+    if (result.hasError()) {
+      if (!loggedDepthPrepassUnsupported_) {
+        loggedDepthPrepassUnsupported_ = true;
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createPipelines: depth pre-pass pipeline '%.*s' "
+            "failed, depth pre-pass disabled: %s",
+            static_cast<int>(debugName.size()), debugName.data(),
+            result.error().c_str());
+      }
+      outHandle = {};
+      return false;
+    }
+    outHandle = result.value();
+    return true;
+  };
+  if (nuri::isValid(depthFragmentShader_)) {
+    createDepthPipeline(depthPipelineDesc(depthFormat, meshVertexShader_, {},
+                                          {}, depthFragmentShader_,
+                                          CullMode::Back),
+                        "opaque_mesh_depth", meshDepthPipelineHandle_);
+    createDepthPipeline(
+        depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
+                          depthFragmentShader_, CullMode::None),
+        "opaque_mesh_depth_double_sided", meshDepthDoubleSidedPipelineHandle_);
+  }
+  if (nuri::isValid(depthAlphaFragmentShader_)) {
+    createDepthPipeline(
+        depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
+                          depthAlphaFragmentShader_, CullMode::Back),
+        "opaque_mesh_depth_alpha", meshDepthAlphaPipelineHandle_);
+    createDepthPipeline(depthPipelineDesc(depthFormat, meshVertexShader_, {},
+                                          {}, depthAlphaFragmentShader_,
+                                          CullMode::None),
+                        "opaque_mesh_depth_alpha_double_sided",
+                        meshDepthAlphaDoubleSidedPipelineHandle_);
+  }
+
   const bool canCreateTessPipeline =
       !tessellationUnsupported_ && nuri::isValid(meshTessVertexShader_) &&
       nuri::isValid(meshTessControlShader_) &&
@@ -3983,6 +4538,38 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                          doubleSidedTessResult.error().c_str());
       } else {
         meshDoubleSidedTessPipelineHandle_ = doubleSidedTessResult.value();
+      }
+    }
+    if (!tessellationUnsupported_) {
+      if (nuri::isValid(depthFragmentShader_)) {
+        createDepthPipeline(
+            depthPipelineDesc(depthFormat, meshTessVertexShader_,
+                              meshTessControlShader_, meshTessEvalShader_,
+                              depthFragmentShader_, CullMode::Back,
+                              Topology::Patch, kTessellationPatchControlPoints),
+            "opaque_mesh_depth_tess", meshDepthTessPipelineHandle_);
+        createDepthPipeline(
+            depthPipelineDesc(depthFormat, meshTessVertexShader_,
+                              meshTessControlShader_, meshTessEvalShader_,
+                              depthFragmentShader_, CullMode::None,
+                              Topology::Patch, kTessellationPatchControlPoints),
+            "opaque_mesh_depth_tess_double_sided",
+            meshDepthDoubleSidedTessPipelineHandle_);
+      }
+      if (nuri::isValid(depthAlphaFragmentShader_)) {
+        createDepthPipeline(
+            depthPipelineDesc(depthFormat, meshTessVertexShader_,
+                              meshTessControlShader_, meshTessEvalShader_,
+                              depthAlphaFragmentShader_, CullMode::Back,
+                              Topology::Patch, kTessellationPatchControlPoints),
+            "opaque_mesh_depth_alpha_tess", meshDepthAlphaTessPipelineHandle_);
+        createDepthPipeline(
+            depthPipelineDesc(depthFormat, meshTessVertexShader_,
+                              meshTessControlShader_, meshTessEvalShader_,
+                              depthAlphaFragmentShader_, CullMode::None,
+                              Topology::Patch, kTessellationPatchControlPoints),
+            "opaque_mesh_depth_alpha_tess_double_sided",
+            meshDepthAlphaDoubleSidedTessPipelineHandle_);
       }
     }
   } else {
@@ -4092,6 +4679,37 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
   }
   computePipelineHandle_ = computePipeline_->getComputePipeline();
 
+  if (nuri::isValid(depthPyramidVertexShader_) &&
+      nuri::isValid(depthPyramidFragmentShader_)) {
+    RenderPipelineDesc pyramidDesc{
+        .vertexInput = {},
+        .vertexShader = depthPyramidVertexShader_,
+        .fragmentShader = depthPyramidFragmentShader_,
+        .colorFormats = {Format::RG32_FLOAT},
+        .colorAttachmentCount = 1u,
+        .depthFormat = Format::Count,
+        .cullMode = CullMode::None,
+        .polygonMode = PolygonMode::Fill,
+        .topology = Topology::Triangle,
+        .patchControlPoints = 0u,
+        .blendEnabled = false,
+    };
+    auto pyramidResult =
+        gpu_.createRenderPipeline(pyramidDesc, "opaque_depth_minmax_pyramid");
+    if (pyramidResult.hasError()) {
+      if (!loggedDepthPyramidUnsupported_) {
+        loggedDepthPyramidUnsupported_ = true;
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createPipelines: depth pyramid pipeline failed, "
+            "depth pyramid disabled: %s",
+            pyramidResult.error().c_str());
+      }
+      depthPyramidPipelineHandle_ = {};
+    } else {
+      depthPyramidPipelineHandle_ = pyramidResult.value();
+    }
+  }
+
   baseMeshFillDraw_ = makeBaseMeshDraw(meshFillPipelineHandle_, "OpaqueMesh");
   resetOverlayPipelineState();
 
@@ -4110,6 +4728,27 @@ OpaqueRenderer::selectMeshPipeline(bool doubleSided, bool tessellated) const {
     return meshDoubleSidedFillPipelineHandle_;
   }
   return meshFillPipelineHandle_;
+}
+
+RenderPipelineHandle
+OpaqueRenderer::selectDepthPipeline(RenderPipelineHandle sourcePipeline,
+                                    bool alphaMasked) const {
+  const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
+  const bool tessellated = isTessPipeline(sourcePipeline);
+  if (alphaMasked) {
+    if (tessellated) {
+      return doubleSided ? meshDepthAlphaDoubleSidedTessPipelineHandle_
+                         : meshDepthAlphaTessPipelineHandle_;
+    }
+    return doubleSided ? meshDepthAlphaDoubleSidedPipelineHandle_
+                       : meshDepthAlphaPipelineHandle_;
+  }
+  if (tessellated) {
+    return doubleSided ? meshDepthDoubleSidedTessPipelineHandle_
+                       : meshDepthTessPipelineHandle_;
+  }
+  return doubleSided ? meshDepthDoubleSidedPipelineHandle_
+                     : meshDepthPipelineHandle_;
 }
 
 RenderPipelineHandle
@@ -4368,6 +5007,7 @@ void OpaqueRenderer::invalidateStaticBatchCache() {
   staticBatchCache_.indirectDrawSignature = kInvalidDrawSignature;
   staticBatchCache_.draws.clear();
   staticBatchCache_.pushConstantsTemplates.clear();
+  staticBatchCache_.alphaMasked.clear();
   staticBatchCache_.remap.clear();
   boundStaticBatchGeneration_ = 0;
 }
@@ -4396,12 +5036,22 @@ void OpaqueRenderer::invalidateIndirectPackCache() {
   indirectPackCache_.drawSignature = kInvalidDrawSignature;
   indirectPackCache_.requiredBytes = 0;
   indirectSourceDrawIndices_.clear();
+  indirectAlphaMasked_.clear();
   for (uint64_t &slotSignature : indirectUploadSignatures_) {
     slotSignature = kInvalidDrawSignature;
   }
 }
 
 void OpaqueRenderer::destroyMeshPipelineState() {
+  destroyPipelineHandle(gpu_, depthPyramidPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDepthAlphaDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDepthAlphaTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDepthAlphaDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDepthAlphaPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDepthDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDepthTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDepthDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshDepthPipelineHandle_);
   destroyPipelineHandle(gpu_, meshPickDoubleSidedTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshPickTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshPickDoubleSidedPipelineHandle_);
@@ -4421,6 +5071,15 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshPickDoubleSidedPipelineHandle_ = {};
   meshPickTessPipelineHandle_ = {};
   meshPickDoubleSidedTessPipelineHandle_ = {};
+  meshDepthPipelineHandle_ = {};
+  meshDepthDoubleSidedPipelineHandle_ = {};
+  meshDepthTessPipelineHandle_ = {};
+  meshDepthDoubleSidedTessPipelineHandle_ = {};
+  meshDepthAlphaPipelineHandle_ = {};
+  meshDepthAlphaDoubleSidedPipelineHandle_ = {};
+  meshDepthAlphaTessPipelineHandle_ = {};
+  meshDepthAlphaDoubleSidedTessPipelineHandle_ = {};
+  depthPyramidPipelineHandle_ = {};
   baseMeshFillDraw_ = {};
 }
 
@@ -4449,6 +5108,18 @@ void OpaqueRenderer::destroyDepthTexture() {
     gpu_.destroyTexture(depthTexture_);
     depthTexture_ = TextureHandle{};
   }
+}
+
+void OpaqueRenderer::destroyDepthPyramidTextures() {
+  for (TextureHandle &texture : sceneDepthPyramidTextures_) {
+    if (nuri::isValid(texture)) {
+      gpu_.destroyTexture(texture);
+      texture = {};
+    }
+  }
+  sceneDepthPyramidLevelCount_ = 0;
+  sceneDepthPyramidWidth_ = 0;
+  sceneDepthPyramidHeight_ = 0;
 }
 
 void OpaqueRenderer::destroyPickTexture() {

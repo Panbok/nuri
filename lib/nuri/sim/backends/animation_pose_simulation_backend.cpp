@@ -315,6 +315,9 @@ struct SceneFrameState {
   std::pmr::vector<std::array<BufferHandle, 4>> skinDependencies;
   uint64_t version = 0u;
   uint64_t preparedFrameIndex = std::numeric_limits<uint64_t>::max();
+  const RenderScene *scene = nullptr;
+  uint64_t sceneTopologyVersion = 0u;
+  size_t renderableCount = 0u;
   mutable AnimationSceneFrameData publishedData{};
 
   void resetTransientDispatchState() noexcept {
@@ -954,6 +957,9 @@ AnimationPoseSimulationBackend::destroyInstance(SceneRuntimeHost &,
     impl_->sceneFrame.publishedData = {};
     impl_->sceneFrame.version = 0u;
     impl_->sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
+    impl_->sceneFrame.scene = nullptr;
+    impl_->sceneFrame.sceneTopologyVersion = 0u;
+    impl_->sceneFrame.renderableCount = 0u;
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1078,6 +1084,9 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
     sceneFrame.publishedData = {};
     sceneFrame.version = 0u;
     sceneFrame.preparedFrameIndex = frameIndex;
+    sceneFrame.scene = nullptr;
+    sceneFrame.sceneTopologyVersion = 0u;
+    sceneFrame.renderableCount = 0u;
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -1086,6 +1095,9 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   if (frameResult.hasError()) {
     return frameResult;
   }
+  sceneFrame.scene = &scene;
+  sceneFrame.sceneTopologyVersion = scene.topologyVersion();
+  sceneFrame.renderableCount = scene.renderables().size();
 
   size_t sampleDispatchCount = 0u;
   size_t worldDispatchCount = 0u;
@@ -1444,6 +1456,9 @@ AnimationPoseSimulationBackend::currentSceneFrameData() const noexcept {
       std::span<const AnimatedRenderableGeometryOverride>(
           impl_->sceneFrame.geometryOverrides.data(),
           impl_->sceneFrame.geometryOverrides.size());
+  frameData.scene = impl_->sceneFrame.scene;
+  frameData.sceneTopologyVersion = impl_->sceneFrame.sceneTopologyVersion;
+  frameData.renderableCount = impl_->sceneFrame.renderableCount;
   frameData.version = impl_->sceneFrame.version;
   return frameData.instanceMatricesAddress != 0u ? &frameData : nullptr;
 }

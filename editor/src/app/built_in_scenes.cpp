@@ -200,6 +200,7 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
             .activate = [duckAssets](EditorSceneActivateContext &ctx)
                 -> Result<void, std::string> {
               ctx.runtime.renderSettings().opaque.enableInstanceCompute = true;
+              ctx.runtime.renderSettings().opaque.enableDepthPrepass = false;
               ctx.runtime.renderSettings().opaque.enableMeshLod = true;
               ctx.runtime.renderSettings().opaque.forcedMeshLod = -1;
               ctx.runtime.renderSettings().opaque.meshLodDistanceThresholds =

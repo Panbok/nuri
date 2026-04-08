@@ -17,6 +17,8 @@ enum ForwardSceneFlags : uint8_t {
   kForwardSceneHasBrdfLut = 1u << 3u,
   kForwardSceneOutputLinearToSrgb = 1u << 4u,
   kForwardSceneHasSceneColor = 1u << 5u,
+  kForwardSceneHasSceneDepth = 1u << 6u,
+  kForwardSceneHasSceneDepthPyramid = 1u << 7u,
 };
 
 struct SceneDataBufferLayout {
@@ -114,26 +116,30 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
 
   if (const TextureRecord *cubemap =
           frame.resources->tryGet(environment.cubemap);
-      cubemap != nullptr && nuri::isValid(cubemap->texture)) {
+      cubemap != nullptr && nuri::isValid(cubemap->texture) &&
+      cubemap->bindlessIndex != kInvalidTextureBindlessIndex) {
     cubemapTexId = cubemap->bindlessIndex;
     hasCubemap = 1u;
   }
   if (const TextureRecord *irradiance =
           frame.resources->tryGet(environment.irradiance);
-      irradiance != nullptr && nuri::isValid(irradiance->texture)) {
+      irradiance != nullptr && nuri::isValid(irradiance->texture) &&
+      irradiance->bindlessIndex != kInvalidTextureBindlessIndex) {
     irradianceTexId = irradiance->bindlessIndex;
     flags |= kForwardSceneHasIblDiffuse;
   }
   if (const TextureRecord *prefilteredGgx =
           frame.resources->tryGet(environment.prefilteredGgx);
-      prefilteredGgx != nullptr && nuri::isValid(prefilteredGgx->texture)) {
+      prefilteredGgx != nullptr && nuri::isValid(prefilteredGgx->texture) &&
+      prefilteredGgx->bindlessIndex != kInvalidTextureBindlessIndex) {
     prefilteredGgxTexId = prefilteredGgx->bindlessIndex;
     flags |= kForwardSceneHasIblSpecular;
   }
   if (const TextureRecord *prefilteredCharlie =
           frame.resources->tryGet(environment.prefilteredCharlie);
       prefilteredCharlie != nullptr &&
-      nuri::isValid(prefilteredCharlie->texture)) {
+      nuri::isValid(prefilteredCharlie->texture) &&
+      prefilteredCharlie->bindlessIndex != kInvalidTextureBindlessIndex) {
     prefilteredCharlieTexId = prefilteredCharlie->bindlessIndex;
     flags |= kForwardSceneHasIblSheen;
   } else if ((flags & kForwardSceneHasIblSpecular) != 0u) {
@@ -145,7 +151,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   }
   if (const TextureRecord *brdfLut =
           frame.resources->tryGet(environment.brdfLut);
-      brdfLut != nullptr && nuri::isValid(brdfLut->texture)) {
+      brdfLut != nullptr && nuri::isValid(brdfLut->texture) &&
+      brdfLut->bindlessIndex != kInvalidTextureBindlessIndex) {
     brdfLutTexId = brdfLut->bindlessIndex;
     flags |= kForwardSceneHasBrdfLut;
   }
@@ -154,6 +161,10 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   uint32_t sceneColorHalfResTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneColorQuarterResTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneColorSamplerId = 0u;
+  uint32_t sceneDepthTexId = kInvalidTextureBindlessIndex;
+  uint32_t sceneDepthSamplerId = ctx.shared.sceneDepthSamplerId;
+  uint32_t sceneDepthPyramidLevelCount = 0u;
+  std::array<glm::uvec4, 4> sceneDepthPyramidTexIds{};
   if (nuri::isValid(ctx.shared.sceneColorTexture)) {
     sceneColorTexId =
         gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
@@ -171,6 +182,33 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       nuri::isValid(ctx.shared.sceneColorQuarterResTexture)) {
     sceneColorQuarterResTexId =
         gpu_.getTextureBindlessIndex(ctx.shared.sceneColorQuarterResTexture);
+  }
+  if (nuri::isValid(ctx.shared.sceneDepthTexture)) {
+    sceneDepthTexId =
+        gpu_.getTextureBindlessIndex(ctx.shared.sceneDepthTexture);
+    if (sceneDepthTexId != kInvalidTextureBindlessIndex) {
+      flags |= kForwardSceneHasSceneDepth;
+    }
+  }
+  if ((flags & kForwardSceneHasSceneDepth) != 0u &&
+      ctx.shared.sceneDepthPyramidLevelCount > 0u) {
+    const uint32_t candidateLevelCount = std::min<uint32_t>(
+        ctx.shared.sceneDepthPyramidLevelCount, kMaxSceneDepthPyramidLevels);
+    for (uint32_t level = 0u; level < candidateLevelCount; ++level) {
+      const TextureHandle texture = ctx.shared.sceneDepthPyramidTextures[level];
+      if (!nuri::isValid(texture)) {
+        break;
+      }
+      const uint32_t texId = gpu_.getTextureBindlessIndex(texture);
+      if (texId == kInvalidTextureBindlessIndex) {
+        break;
+      }
+      sceneDepthPyramidTexIds[level >> 2u][level & 3u] = texId;
+      sceneDepthPyramidLevelCount = level + 1u;
+    }
+    if (sceneDepthPyramidLevelCount > 0u) {
+      flags |= kForwardSceneHasSceneDepthPyramid;
+    }
   }
   if (gpu_.getSwapchainFormat() != Format::RGBA8_SRGB) {
     flags |= kForwardSceneOutputLinearToSrgb;
@@ -211,6 +249,10 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .sceneColorSamplerId = sceneColorSamplerId,
       .sceneColorHalfResTexId = sceneColorHalfResTexId,
       .sceneColorQuarterResTexId = sceneColorQuarterResTexId,
+      .sceneDepthTexId = sceneDepthTexId,
+      .sceneDepthSamplerId = sceneDepthSamplerId,
+      .sceneDepthPyramidLevelCount = sceneDepthPyramidLevelCount,
+      .sceneDepthPyramidTexIds = sceneDepthPyramidTexIds,
       .directionalLightBufferAddress = directionalLightBufferAddress,
       .localLightBufferAddress = localLightBufferAddress,
       .materialHeaderBufferAddress =

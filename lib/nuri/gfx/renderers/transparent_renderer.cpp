@@ -101,7 +101,22 @@ resolveAnimationSceneFrameData(const RenderFrameContext &frame) {
       data.instanceMatricesAddress == 0u) {
     return nullptr;
   }
+  if (frame.scene == nullptr || data.scene != frame.scene ||
+      data.sceneTopologyVersion != frame.scene->topologyVersion() ||
+      data.renderableCount != frame.scene->renderables().size() ||
+      data.geometryOverridesByRenderable.size() != data.renderableCount) {
+    return nullptr;
+  }
   return &data;
+}
+
+bool animationOverrideCoversSubmesh(
+    const AnimatedRenderableGeometryOverride &geometryOverride,
+    const Submesh &submesh) noexcept {
+  const uint64_t requiredVertexCount =
+      static_cast<uint64_t>(submesh.vertexOffset) + submesh.vertexCount;
+  return static_cast<uint64_t>(geometryOverride.vertexCount) >=
+         requiredVertexCount;
 }
 
 [[nodiscard]] std::optional<SubmeshLod>
@@ -461,7 +476,9 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
           animationSceneData
               ->geometryOverridesByRenderable[entry.instanceIndex];
       if (geometryOverride.enabled &&
-          nuri::isValid(geometryOverride.vertexBuffer)) {
+          nuri::isValid(geometryOverride.vertexBuffer) &&
+          entry.submesh != nullptr &&
+          animationOverrideCoversSubmesh(geometryOverride, *entry.submesh)) {
         const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
             geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
         if (overrideVertexAddress != 0u) {

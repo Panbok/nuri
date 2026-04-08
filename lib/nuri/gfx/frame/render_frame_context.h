@@ -7,6 +7,7 @@
 #include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/scene/light.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <memory_resource>
@@ -33,6 +34,8 @@ enum class TextureFilterMode : uint8_t {
   Trilinear = 1,
   Anisotropic = 2,
 };
+
+static constexpr uint32_t kMaxSceneDepthPyramidLevels = 16u;
 
 [[nodiscard]] constexpr uint8_t
 sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
@@ -66,6 +69,12 @@ struct RenderSettings {
 
   struct OpaqueSettings {
     bool enabled = true;
+    // Depth pre-pass is workload dependent. Keep it opt-in because high
+    // instance-count scenes can become vertex-bound and regress badly.
+    bool enableDepthPrepass = false;
+    // The pyramid is useful for later sampling consumers, but it adds one
+    // graph graphics pass per depth level; keep it opt-in until consumed.
+    bool enableDepthPyramid = false;
     OpaqueDebugVisualization debugVisualization =
         OpaqueDebugVisualization::None;
     bool enableInstanceCompute = true;
@@ -153,6 +162,10 @@ struct ForwardSceneFrameData {
   uint32_t sceneColorSamplerId = 0;
   uint32_t sceneColorHalfResTexId = 0;
   uint32_t sceneColorQuarterResTexId = 0;
+  uint32_t sceneDepthTexId = 0;
+  uint32_t sceneDepthSamplerId = 0;
+  uint32_t sceneDepthPyramidLevelCount = 0;
+  std::array<glm::uvec4, 4> sceneDepthPyramidTexIds{};
   uint64_t directionalLightBufferAddress = 0;
   uint64_t localLightBufferAddress = 0;
   uint64_t materialHeaderBufferAddress = 0;
@@ -173,7 +186,7 @@ struct ForwardSceneFrameData {
     return !(*this == other);
   }
 };
-static_assert(sizeof(ForwardSceneFrameData) == 264,
+static_assert(sizeof(ForwardSceneFrameData) == 336,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
 
 // GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.
@@ -223,6 +236,10 @@ struct OpaqueFrameMetrics {
   uint32_t debugPatchHeatmapDraws = 0;
   uint32_t computeDispatches = 0;
   uint32_t computeDispatchX = 0;
+  uint32_t depthPrepassDraws = 0;
+  uint32_t depthPrepassIndirectDraws = 0;
+  uint32_t depthPyramidLevels = 0;
+  uint32_t depthPrepassEnabled = 0;
 };
 
 struct RenderFrameMetrics {
@@ -253,6 +270,12 @@ struct FrameSharedResources {
   std::optional<AnimationSceneFrameData> animationSceneGpuData{};
   TextureHandle sceneDepthTexture{};
   RenderGraphTextureId sceneDepthGraphTexture{};
+  std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
+      sceneDepthPyramidTextures{};
+  std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>
+      sceneDepthPyramidGraphTextures{};
+  uint32_t sceneDepthPyramidLevelCount = 0;
+  uint32_t sceneDepthSamplerId = 0;
   TextureHandle sceneColorTexture{};
   TextureHandle sceneColorHalfResTexture{};
   TextureHandle sceneColorQuarterResTexture{};

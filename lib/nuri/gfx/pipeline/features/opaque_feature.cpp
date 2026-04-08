@@ -29,7 +29,7 @@ OpaqueFeature::OpaqueFeature(GPUDevice &gpu, OpaqueRendererConfig config,
     : renderer_(
           std::make_unique<OpaqueRenderer>(gpu, std::move(config), memory)),
       mainPass_(*renderer_), pickPass_(*renderer_),
-      passes_{&mainPass_, &pickPass_} {
+      passes_{&pickPass_, &mainPass_} {
   renderer_->onAttach();
 }
 
@@ -41,6 +41,12 @@ OpaqueFeature::~OpaqueFeature() {
 
 Result<bool, std::string> OpaqueFeature::prepare(FrameBuildContext &ctx) {
   return renderer_->prepareOpaqueGraphPasses(ctx.frame);
+}
+
+Result<bool, std::string>
+OpaqueFeature::publishFrameData(FrameBuildContext &ctx) {
+  renderer_->publishFrameData(ctx.frame);
+  return Result<bool, std::string>::makeResult(true);
 }
 
 std::span<RenderFeaturePass *const> OpaqueFeature::passes() noexcept {

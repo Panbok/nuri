@@ -28,6 +28,10 @@ lvk::Format toLvkFormat(Format format) {
   switch (format) {
   case Format::R32_UINT:
     return lvk::Format_R_UI32;
+  case Format::R32_FLOAT:
+    return lvk::Format_R_F32;
+  case Format::RG32_FLOAT:
+    return lvk::Format_RG_F32;
   case Format::RGBA8_UNORM:
     return lvk::Format_RGBA_UN8;
   case Format::RGBA8_SRGB:
@@ -58,6 +62,10 @@ Format fromLvkFormat(lvk::Format format) {
   switch (format) {
   case lvk::Format_R_UI32:
     return Format::R32_UINT;
+  case lvk::Format_R_F32:
+    return Format::R32_FLOAT;
+  case lvk::Format_RG_F32:
+    return Format::RG32_FLOAT;
   case lvk::Format_RGBA_UN8:
     return Format::RGBA8_UNORM;
   case lvk::Format_RGBA_SRGB8:
@@ -1251,7 +1259,7 @@ Result<TextureHandle, std::string> LvkGPUDevice::createDepthBuffer() {
       .type = TextureType::Texture2D,
       .format = Format::D32_FLOAT,
       .dimensions = {1, 1, 1},
-      .usage = TextureUsage::Attachment,
+      .usage = TextureUsage::AttachmentSampled,
   };
   return createFramebufferTexture(desc, "Depth buffer");
 }
@@ -1324,6 +1332,12 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
                      "shader handle for render pipeline");
     return Result<RenderPipelineHandle, std::string>::makeError(
         "Invalid vertex shader handle");
+  }
+  if (desc.colorAttachmentCount > desc.colorFormats.size()) {
+    NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: color attachment "
+                     "count exceeds supported color format slots");
+    return Result<RenderPipelineHandle, std::string>::makeError(
+        "Color attachment count exceeds supported color format slots");
   }
   if (!isValid(desc.fragmentShader)) {
     NURI_LOG_WARNING("LvkGPUDevice::createRenderPipeline: Invalid fragment "
@@ -1451,24 +1465,26 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       .smGeom = impl_->shaders.getLvkHandle(desc.geometryShader),
       .smFrag = impl_->shaders.getLvkHandle(desc.fragmentShader),
       .specInfo = specInfo,
-      .color = {{.format = toLvkFormat(desc.colorFormats[0]),
-                 .blendEnabled = desc.blendEnabled,
-                 .srcRGBBlendFactor = desc.blendEnabled
-                                          ? lvk::BlendFactor_SrcAlpha
-                                          : lvk::BlendFactor_One,
-                 .srcAlphaBlendFactor = lvk::BlendFactor_One,
-                 .dstRGBBlendFactor = desc.blendEnabled
-                                          ? lvk::BlendFactor_OneMinusSrcAlpha
-                                          : lvk::BlendFactor_Zero,
-                 .dstAlphaBlendFactor = desc.blendEnabled
-                                            ? lvk::BlendFactor_OneMinusSrcAlpha
-                                            : lvk::BlendFactor_Zero}},
       .depthFormat = toLvkFormat(desc.depthFormat),
       .cullMode = toLvkCullMode(desc.cullMode),
       .polygonMode = toLvkPolygonMode(desc.polygonMode),
       .patchControlPoints = desc.patchControlPoints,
       .debugName = reserved.debugNameCStr,
   };
+  if (desc.colorAttachmentCount > 0u) {
+    pipelineDesc.color[0] = {
+        .format = toLvkFormat(desc.colorFormats[0]),
+        .blendEnabled = desc.blendEnabled,
+        .srcRGBBlendFactor = desc.blendEnabled ? lvk::BlendFactor_SrcAlpha
+                                               : lvk::BlendFactor_One,
+        .srcAlphaBlendFactor = lvk::BlendFactor_One,
+        .dstRGBBlendFactor = desc.blendEnabled
+                                 ? lvk::BlendFactor_OneMinusSrcAlpha
+                                 : lvk::BlendFactor_Zero,
+        .dstAlphaBlendFactor = desc.blendEnabled
+                                   ? lvk::BlendFactor_OneMinusSrcAlpha
+                                   : lvk::BlendFactor_Zero};
+  }
 
   lvk::Result res;
   lvk::Holder<lvk::RenderPipelineHandle> handle =
@@ -1840,36 +1856,48 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
     };
 
     lvk::RenderPass renderPass{};
-    renderPass.color[0] = {
-        .loadOp = toLvkLoadOp(pass.color.loadOp),
-        .storeOp = toLvkStoreOp(pass.color.storeOp),
-        .clearColor = {pass.color.clearColor.r, pass.color.clearColor.g,
-                       pass.color.clearColor.b, pass.color.clearColor.a},
-    };
-
+    lvk::Framebuffer framebuffer{};
     lvk::TextureHandle colorTexture{};
-    if (nuri::isValid(pass.colorTexture)) {
-      if (!impl_->textures.isValid(pass.colorTexture)) {
-        return returnPassError(
-            "LvkGPUDevice::recordGraphicsPass: invalid pass color texture "
-            "handle");
+    lvk::TextureHandle depthTexture{};
+    lvk::TextureHandle viewportTexture{};
+    if (pass.hasColorAttachment) {
+      renderPass.color[0] = {
+          .loadOp = toLvkLoadOp(pass.color.loadOp),
+          .storeOp = toLvkStoreOp(pass.color.storeOp),
+          .clearColor = {pass.color.clearColor.r, pass.color.clearColor.g,
+                         pass.color.clearColor.b, pass.color.clearColor.a},
+      };
+
+      if (nuri::isValid(pass.colorTexture)) {
+        if (!impl_->textures.isValid(pass.colorTexture)) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid pass color texture "
+              "handle");
+        }
+        colorTexture = impl_->textures.getLvkHandle(pass.colorTexture);
+        if (!colorTexture.valid()) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid LVK pass color "
+              "texture handle");
+        }
+      } else {
+        colorTexture = swapchainTexture;
+        if (!colorTexture.valid()) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid swapchain texture");
+        }
       }
-      colorTexture = impl_->textures.getLvkHandle(pass.colorTexture);
-      if (!colorTexture.valid()) {
-        return returnPassError(
-            "LvkGPUDevice::recordGraphicsPass: invalid LVK pass color texture "
-            "handle");
-      }
+
+      framebuffer.color[0] = {.texture = colorTexture};
+      viewportTexture = colorTexture;
     } else {
-      colorTexture = swapchainTexture;
-      if (!colorTexture.valid()) {
+      renderPass.color[0].loadOp = lvk::LoadOp_Invalid;
+      if (nuri::isValid(pass.colorTexture)) {
         return returnPassError(
-            "LvkGPUDevice::recordGraphicsPass: invalid swapchain texture");
+            "LvkGPUDevice::recordGraphicsPass: no-color pass has color "
+            "texture");
       }
     }
-
-    lvk::Framebuffer framebuffer{};
-    framebuffer.color[0] = {.texture = colorTexture};
 
     if (nuri::isValid(pass.depthTexture)) {
       if (!impl_->textures.isValid(pass.depthTexture)) {
@@ -1877,8 +1905,7 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
             "LvkGPUDevice::recordGraphicsPass: invalid pass depth texture "
             "handle");
       }
-      const lvk::TextureHandle depthTexture =
-          impl_->textures.getLvkHandle(pass.depthTexture);
+      depthTexture = impl_->textures.getLvkHandle(pass.depthTexture);
       if (!depthTexture.valid()) {
         return returnPassError(
             "LvkGPUDevice::recordGraphicsPass: invalid LVK pass depth texture "
@@ -1891,6 +1918,9 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
           .clearStencil = pass.depth.clearStencil,
       };
       framebuffer.depthStencil = {.texture = depthTexture};
+      if (!viewportTexture.valid()) {
+        viewportTexture = depthTexture;
+      }
     } else {
       renderPass.depth.loadOp = lvk::LoadOp_Invalid;
     }
@@ -1971,7 +2001,13 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
     if (pass.useViewport) {
       vp = pass.viewport;
     } else {
-      const lvk::Dimensions dim = impl_->context->getDimensions(colorTexture);
+      if (!viewportTexture.valid()) {
+        return returnPassError(
+            "LvkGPUDevice::recordGraphicsPass: pass has no framebuffer "
+            "attachment for viewport inference");
+      }
+      const lvk::Dimensions dim =
+          impl_->context->getDimensions(viewportTexture);
       vp = {
           .x = 0.0f,
           .y = 0.0f,
@@ -2762,6 +2798,12 @@ LvkGPUDevice::readTexture(TextureHandle texture,
   switch (format) {
   case Format::R32_UINT:
     bytesPerPixel = sizeof(uint32_t);
+    break;
+  case Format::R32_FLOAT:
+    bytesPerPixel = sizeof(float);
+    break;
+  case Format::RG32_FLOAT:
+    bytesPerPixel = sizeof(float) * 2u;
     break;
   case Format::RGBA8_UNORM:
   case Format::RGBA8_SRGB:

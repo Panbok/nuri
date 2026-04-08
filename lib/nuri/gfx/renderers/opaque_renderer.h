@@ -45,6 +45,7 @@ public:
   void onAttach();
   void onDetach();
   void onResize(uint32_t width, uint32_t height);
+  void publishFrameData(RenderFrameContext &frame);
   Result<bool, std::string> prepareOpaqueGraphPasses(RenderFrameContext &frame);
   [[nodiscard]] bool hasPreparedOpaqueMainPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaquePickPasses() const noexcept;
@@ -55,7 +56,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 264,
+  static_assert(sizeof(FrameData) == 336,
                 "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
@@ -111,6 +112,7 @@ private:
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     bool doubleSided = false;
+    bool alphaMasked = false;
   };
 
   struct TessCandidate {
@@ -132,6 +134,7 @@ private:
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
     size_t instanceCount = 0;
+    bool alphaMasked = false;
   };
 
   struct SingleInstanceBatchCache {
@@ -192,6 +195,9 @@ private:
     bool hasIndirectDraws = false;
     bool isMainPass = false;
     bool isPickPass = false;
+    bool isDepthPrepass = false;
+    bool isDepthPyramidPass = false;
+    uint32_t depthPyramidLevel = UINT32_MAX;
 
     explicit PreparedGraphPass(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
@@ -214,10 +220,12 @@ private:
     uint64_t indirectDrawSignature = std::numeric_limits<uint64_t>::max();
     std::pmr::vector<DrawItem> draws;
     std::pmr::vector<PushConstants> pushConstantsTemplates;
+    std::pmr::vector<uint8_t> alphaMasked;
     std::pmr::vector<uint32_t> remap;
 
     explicit StaticBatchCache(std::pmr::memory_resource *memory)
-        : draws(memory), pushConstantsTemplates(memory), remap(memory) {}
+        : draws(memory), pushConstantsTemplates(memory), alphaMasked(memory),
+          remap(memory) {}
   };
 
   Result<bool, std::string> ensureInitialized();
@@ -268,6 +276,7 @@ private:
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
+  Result<bool, std::string> ensureDepthPyramidTextures();
   Result<bool, std::string>
   appendPreparedGraphPass(RenderFrameContext &frame, RenderGraphBuilder &graph,
                           const PreparedGraphPass &pass, uint32_t safeWidth,
@@ -277,6 +286,9 @@ private:
   shouldPublishSceneDepthGraphTexture(const RenderFrameContext &frame) const;
   [[nodiscard]] RenderPipelineHandle selectMeshPipeline(bool doubleSided,
                                                         bool tessellated) const;
+  [[nodiscard]] RenderPipelineHandle
+  selectDepthPipeline(RenderPipelineHandle sourcePipeline,
+                      bool alphaMasked) const;
   [[nodiscard]] RenderPipelineHandle
   selectPickPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] bool isDoubleSidedPipeline(RenderPipelineHandle handle) const;
@@ -299,6 +311,7 @@ private:
   void destroyMeshPipelineState();
   void resetMeshPipelineState();
   void destroyDepthTexture();
+  void destroyDepthPyramidTextures();
   void destroyPickTexture();
   void destroyBuffers();
 
@@ -308,6 +321,9 @@ private:
   std::unique_ptr<Shader> meshTessShader_;
   std::unique_ptr<Shader> meshDebugOverlayShader_;
   std::unique_ptr<Shader> meshPickShader_;
+  std::unique_ptr<Shader> depthShader_;
+  std::unique_ptr<Shader> depthAlphaShader_;
+  std::unique_ptr<Shader> depthPyramidShader_;
   std::unique_ptr<Shader> computeShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
   std::unique_ptr<Pipeline> computePipeline_;
@@ -318,6 +334,12 @@ private:
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
   TextureHandle depthTexture_{};
   TextureHandle pickIdTexture_{};
+  std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
+      sceneDepthPyramidTextures_{};
+  uint32_t sceneDepthPyramidLevelCount_ = 0;
+  uint32_t sceneDepthPyramidWidth_ = 0;
+  uint32_t sceneDepthPyramidHeight_ = 0;
+  SamplerHandle sceneDepthSampler_{};
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshTessVertexShader_{};
@@ -327,6 +349,10 @@ private:
   ShaderHandle meshDebugOverlayGeometryShader_{};
   ShaderHandle meshDebugOverlayFragmentShader_{};
   ShaderHandle meshPickFragmentShader_{};
+  ShaderHandle depthFragmentShader_{};
+  ShaderHandle depthAlphaFragmentShader_{};
+  ShaderHandle depthPyramidVertexShader_{};
+  ShaderHandle depthPyramidFragmentShader_{};
   ShaderHandle computeShaderHandle_{};
   RenderPipelineHandle meshFillPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedFillPipelineHandle_{};
@@ -340,6 +366,15 @@ private:
   RenderPipelineHandle meshPickDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshPickTessPipelineHandle_{};
   RenderPipelineHandle meshPickDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle meshDepthPipelineHandle_{};
+  RenderPipelineHandle meshDepthDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshDepthTessPipelineHandle_{};
+  RenderPipelineHandle meshDepthDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle meshDepthAlphaPipelineHandle_{};
+  RenderPipelineHandle meshDepthAlphaDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshDepthAlphaTessPipelineHandle_{};
+  RenderPipelineHandle meshDepthAlphaDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle depthPyramidPipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
 
   size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
@@ -358,6 +393,8 @@ private:
   bool loggedTessWireframeFallbackUnsupported_ = false;
   bool loggedGsOverlayUnsupported_ = false;
   bool loggedGsTessOverlayUnsupported_ = false;
+  bool loggedDepthPrepassUnsupported_ = false;
+  bool loggedDepthPyramidUnsupported_ = false;
   bool loggedMaterialFallbackWarning_ = false;
   bool loggedBlendMaterialUnsupportedWarning_ = false;
 
@@ -409,11 +446,17 @@ private:
   std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
+  std::pmr::vector<uint8_t> drawAlphaMasked_;
   std::pmr::vector<DrawItem> indirectDrawItems_;
+  std::pmr::vector<uint8_t> indirectAlphaMasked_;
   std::pmr::vector<std::byte> indirectCommandUploadBytes_;
   std::pmr::vector<DrawItem> overlayDrawItems_;
   std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<DrawItem> passDrawItems_;
+  std::pmr::vector<DrawItem> depthPrepassDrawItems_;
+  std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
+  std::pmr::vector<DrawItem> depthPyramidDrawItems_;
+  std::pmr::vector<TextureHandle> depthPyramidDependencyTextures_;
   std::pmr::vector<ComputeDispatchItem> preDispatches_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;

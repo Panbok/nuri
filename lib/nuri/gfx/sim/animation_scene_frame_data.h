@@ -3,10 +3,13 @@
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_render_types.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
 namespace nuri {
+
+class RenderScene;
 
 // Optional per-renderable animated geometry override produced for a frame.
 // When enabled, the renderer uses vertexBuffer instead of the model's default
@@ -42,6 +45,11 @@ struct NURI_API AnimationSceneFrameData {
   // resources.
   std::span<const AnimatedRenderableGeometryOverride>
       geometryOverridesByRenderable{};
+  // Scene identity this frame data was prepared for. Renderers use this to
+  // reject stale animation data across scene switches.
+  const RenderScene *scene = nullptr;
+  uint64_t sceneTopologyVersion = 0u;
+  size_t renderableCount = 0u;
   // Monotonic version for the published frame data payload.
   uint64_t version = 0u;
 };

@@ -66,6 +66,7 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override {
     return "OpaqueFeature";
   }
+  Result<bool, std::string> publishFrameData(FrameBuildContext &ctx) override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 

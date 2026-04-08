@@ -61,7 +61,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 264,
+  static_assert(sizeof(FrameData) == 336,
                 "TransmissionRenderer::FrameData must match shader layout");
 
   struct MeshPushConstants {

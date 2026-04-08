@@ -807,6 +807,30 @@ RenderGraphBuilder::addBufferWrite(RenderGraphPassId pass,
   return addBufferAccess(pass, buffer, RenderGraphAccessMode::Write);
 }
 
+Result<bool, std::string> RenderGraphBuilder::addPreResolvedDrawBufferAccesses(
+    RenderGraphPassId pass, std::span<const BufferHandle> buffers,
+    std::string_view debugLabel) {
+  const std::string drawDebugName =
+      makePassResourceDebugName(debugLabel, "draw_buffer");
+
+  for (const BufferHandle buffer : buffers) {
+    if (!nuri::isValid(buffer)) {
+      continue;
+    }
+    auto importResult = importBuffer(buffer, drawDebugName);
+    if (importResult.hasError()) {
+      return Result<bool, std::string>::makeError(importResult.error());
+    }
+    auto accessResult = addBufferAccess(pass, importResult.value(),
+                                        RenderGraphAccessMode::Read);
+    if (accessResult.hasError()) {
+      return accessResult;
+    }
+  }
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
 RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     const RenderGraphGraphicsPassDesc &desc) const {
   OwnedPassPayload ownedPayload(memory_);
@@ -904,6 +928,14 @@ Result<bool, std::string> RenderGraphBuilder::applyGraphicsPassRoots(
 
 Result<bool, std::string> RenderGraphBuilder::applyImplicitPassRoots(
     RenderGraphPassId pass, const RenderGraphGraphicsPassDesc &desc) {
+  if (!desc.hasColorAttachment) {
+    if (nuri::isValid(desc.colorTexture)) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::applyImplicitPassRoots: no-color pass has a "
+          "color texture");
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
   return applyGraphicsPassRoots(pass, desc.colorTexture,
                                 desc.markColorAsFrameOutput,
                                 desc.markImplicitOutputSideEffect);
@@ -927,6 +959,11 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
   }
 
   if (nuri::isValid(desc.colorTexture)) {
+    if (!desc.hasColorAttachment) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::bindImplicitPassResources: no-color pass has a "
+          "color texture");
+    }
     auto bindResult = bindPassColorTexture(pass, desc.colorTexture);
     if (bindResult.hasError()) {
       return bindResult;
@@ -1029,39 +1066,48 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     }
   }
 
-  const std::string drawDebugName =
-      makePassResourceDebugName(desc.debugLabel, "draw_buffer");
-  for (size_t drawIndex = 0; drawIndex < desc.draws.size(); ++drawIndex) {
-    const DrawItem &draw = desc.draws[drawIndex];
-    const std::array<
-        std::pair<BufferHandle,
-                  RenderGraphCompileResult::DrawBufferBindingTarget>,
-        4>
-        bindings = {{
-            {draw.vertexBuffer,
-             RenderGraphCompileResult::DrawBufferBindingTarget::Vertex},
-            {draw.indexBuffer,
-             RenderGraphCompileResult::DrawBufferBindingTarget::Index},
-            {draw.indirectBuffer,
-             RenderGraphCompileResult::DrawBufferBindingTarget::Indirect},
-            {draw.indirectCountBuffer,
-             RenderGraphCompileResult::DrawBufferBindingTarget::IndirectCount},
-        }};
-    for (const auto &[buffer, target] : bindings) {
-      if (!nuri::isValid(buffer)) {
-        continue;
-      }
+  if (desc.drawBuffersPreResolved) {
+    auto accessResult = addPreResolvedDrawBufferAccesses(
+        pass, desc.preResolvedDrawBuffers, desc.debugLabel);
+    if (accessResult.hasError()) {
+      return accessResult;
+    }
+  } else {
+    const std::string drawDebugName =
+        makePassResourceDebugName(desc.debugLabel, "draw_buffer");
+    for (size_t drawIndex = 0; drawIndex < desc.draws.size(); ++drawIndex) {
+      const DrawItem &draw = desc.draws[drawIndex];
+      const std::array<
+          std::pair<BufferHandle,
+                    RenderGraphCompileResult::DrawBufferBindingTarget>,
+          4>
+          bindings = {{
+              {draw.vertexBuffer,
+               RenderGraphCompileResult::DrawBufferBindingTarget::Vertex},
+              {draw.indexBuffer,
+               RenderGraphCompileResult::DrawBufferBindingTarget::Index},
+              {draw.indirectBuffer,
+               RenderGraphCompileResult::DrawBufferBindingTarget::Indirect},
+              {draw.indirectCountBuffer,
+               RenderGraphCompileResult::DrawBufferBindingTarget::
+                   IndirectCount},
+          }};
+      for (const auto &[buffer, target] : bindings) {
+        if (!nuri::isValid(buffer)) {
+          continue;
+        }
 
-      auto importResult = importBuffer(buffer, drawDebugName);
-      if (importResult.hasError()) {
-        return Result<bool, std::string>::makeError(importResult.error());
-      }
+        auto importResult = importBuffer(buffer, drawDebugName);
+        if (importResult.hasError()) {
+          return Result<bool, std::string>::makeError(importResult.error());
+        }
 
-      auto bindResult =
-          bindDrawBuffer(pass, static_cast<uint32_t>(drawIndex), target,
-                         importResult.value(), RenderGraphAccessMode::Read);
-      if (bindResult.hasError()) {
-        return bindResult;
+        auto bindResult =
+            bindDrawBuffer(pass, static_cast<uint32_t>(drawIndex), target,
+                           importResult.value(), RenderGraphAccessMode::Read);
+        if (bindResult.hasError()) {
+          return bindResult;
+        }
       }
     }
   }
@@ -1076,10 +1122,12 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
   }
   RenderPass pass{};
   pass.color = desc.color;
+  pass.hasColorAttachment = desc.hasColorAttachment;
   pass.depth = desc.depth;
   pass.useViewport = desc.useViewport;
   pass.viewport = desc.viewport;
   pass.debugColor = desc.debugColor;
+  pass.drawBuffersPreResolved = desc.drawBuffersPreResolved;
   if (desc.borrowPayload) {
     pass.preDispatches = desc.preDispatches;
     pass.dependencyBuffers = desc.dependencyBuffers;
@@ -1130,10 +1178,12 @@ RenderGraphBuilder::addPreparedGraphicsPass(
   }
   RenderPass pass{};
   pass.color = desc.color;
+  pass.hasColorAttachment = desc.hasColorAttachment;
   pass.depth = desc.depth;
   pass.useViewport = desc.useViewport;
   pass.viewport = desc.viewport;
   pass.debugColor = desc.debugColor;
+  pass.drawBuffersPreResolved = desc.drawBuffersPreResolved;
   if (desc.borrowPayload) {
     pass.preDispatches = desc.preDispatches;
     pass.dependencyBuffers = desc.dependencyBuffers;
@@ -1143,6 +1193,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     RenderGraphGraphicsPassDesc clonedDesc{};
     clonedDesc.color = desc.color;
     clonedDesc.colorTexture = desc.colorTexture;
+    clonedDesc.hasColorAttachment = desc.hasColorAttachment;
     clonedDesc.depth = desc.depth;
     clonedDesc.depthTexture = desc.depthTexture;
     clonedDesc.useViewport = desc.useViewport;
@@ -1150,6 +1201,8 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     clonedDesc.preDispatches = desc.preDispatches;
     clonedDesc.dependencyBuffers = desc.dependencyBuffers;
     clonedDesc.draws = desc.draws;
+    clonedDesc.drawBuffersPreResolved = desc.drawBuffersPreResolved;
+    clonedDesc.preResolvedDrawBuffers = desc.preResolvedDrawBuffers;
     clonedDesc.debugLabel = desc.debugLabel;
     clonedDesc.debugColor = desc.debugColor;
     clonedDesc.markColorAsFrameOutput = desc.markColorAsFrameOutput;
@@ -1178,6 +1231,11 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     NURI_PROFILER_ZONE("RenderGraph.resolve_prepared_pass_bindings",
                        NURI_PROFILER_COLOR_CMD_COPY);
     if (nuri::isValid(desc.colorTexture)) {
+      if (!desc.hasColorAttachment) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            "RenderGraphBuilder::addPreparedGraphicsPass: no-color pass has a "
+            "color texture");
+      }
       auto bindResult = bindPassColorTexture(passId, desc.colorTexture);
       if (bindResult.hasError()) {
         return Result<RenderGraphPassId, std::string>::makeError(
@@ -1221,22 +1279,44 @@ RenderGraphBuilder::addPreparedGraphicsPass(
       }
     }
 
-    for (const auto &binding : desc.drawBufferBindings) {
-      auto bindResult =
-          bindDrawBuffer(passId, binding.drawIndex,
-                         toPreparedDrawBindingTarget(binding.target),
-                         binding.buffer, binding.mode);
-      if (bindResult.hasError()) {
+    if (desc.drawBuffersPreResolved) {
+      if (!desc.drawBufferBindings.empty()) {
         return Result<RenderGraphPassId, std::string>::makeError(
-            bindResult.error());
+            "RenderGraphBuilder::addPreparedGraphicsPass: pre-resolved draw "
+            "buffers cannot also use explicit draw buffer bindings");
+      }
+      auto accessResult = addPreResolvedDrawBufferAccesses(
+          passId, desc.preResolvedDrawBuffers, desc.debugLabel);
+      if (accessResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            accessResult.error());
+      }
+    } else {
+      for (const auto &binding : desc.drawBufferBindings) {
+        auto bindResult =
+            bindDrawBuffer(passId, binding.drawIndex,
+                           toPreparedDrawBindingTarget(binding.target),
+                           binding.buffer, binding.mode);
+        if (bindResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              bindResult.error());
+        }
       }
     }
     NURI_PROFILER_ZONE_END();
   }
 
-  auto rootResult = applyGraphicsPassRoots(passId, desc.colorTexture,
-                                           desc.markColorAsFrameOutput,
-                                           desc.markImplicitOutputSideEffect);
+  Result<bool, std::string> rootResult =
+      Result<bool, std::string>::makeResult(true);
+  if (desc.hasColorAttachment) {
+    rootResult = applyGraphicsPassRoots(passId, desc.colorTexture,
+                                        desc.markColorAsFrameOutput,
+                                        desc.markImplicitOutputSideEffect);
+  } else if (nuri::isValid(desc.colorTexture)) {
+    rootResult = Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::addPreparedGraphicsPass: no-color pass has a "
+        "color texture");
+  }
   if (rootResult.hasError()) {
     return Result<RenderGraphPassId, std::string>::makeError(
         rootResult.error());
@@ -1328,8 +1408,10 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
   }
 
   passDrawBindingOffsets_.push_back(drawBindingOffset);
-  passDrawBindingCounts_.push_back(static_cast<uint32_t>(drawCount));
-  for (size_t i = 0; i < drawCount; ++i) {
+  const uint32_t drawBindingCount =
+      pass.drawBuffersPreResolved ? 0u : static_cast<uint32_t>(drawCount);
+  passDrawBindingCounts_.push_back(drawBindingCount);
+  for (uint32_t i = 0; i < drawBindingCount; ++i) {
     drawVertexBindingResourceIndices_.push_back(UINT32_MAX);
     drawIndexBindingResourceIndices_.push_back(UINT32_MAX);
     drawIndirectBindingResourceIndices_.push_back(UINT32_MAX);
@@ -1348,6 +1430,11 @@ RenderGraphBuilder::bindPassColorTexture(RenderGraphPassId pass,
   if (!isValidPassIndex(pass.value) || !isValidTextureIndex(texture.value)) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::bindPassColorTexture: id is out of range");
+  }
+  if (!passes_[pass.value].hasColorAttachment) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassColorTexture: no-color pass cannot bind "
+        "a color texture");
   }
   if (pass.value >= passColorTextureBindings_.size()) {
     return Result<bool, std::string>::makeError(
@@ -2551,9 +2638,11 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         plan.preDispatchDependencyCount += depCount;
       }
 
-      const uint32_t drawCount = passDrawBindingCounts_[passIndex];
+      const uint32_t drawCount = static_cast<uint32_t>(sourcePass.draws.size());
+      const uint32_t drawBindingCount = passDrawBindingCounts_[passIndex];
       const uint32_t drawOffset = passDrawBindingOffsets_[passIndex];
-      if (sourcePass.draws.size() != drawCount) {
+      if (!sourcePass.drawBuffersPreResolved &&
+          sourcePass.draws.size() != drawBindingCount) {
         resolveErrors[workerIndex] = IndexedResolveError{
             .hasError = true,
             .orderedPassIndex = orderedPassIndex,
@@ -2563,10 +2652,13 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         return;
       }
       if (drawOffset > drawVertexBindingResourceIndices_.size() ||
-          drawCount > drawVertexBindingResourceIndices_.size() - drawOffset ||
-          drawCount > drawIndexBindingResourceIndices_.size() - drawOffset ||
-          drawCount > drawIndirectBindingResourceIndices_.size() - drawOffset ||
-          drawCount >
+          drawBindingCount >
+              drawVertexBindingResourceIndices_.size() - drawOffset ||
+          drawBindingCount >
+              drawIndexBindingResourceIndices_.size() - drawOffset ||
+          drawBindingCount >
+              drawIndirectBindingResourceIndices_.size() - drawOffset ||
+          drawBindingCount >
               drawIndirectCountBindingResourceIndices_.size() - drawOffset) {
         resolveErrors[workerIndex] = IndexedResolveError{
             .hasError = true,
@@ -2700,72 +2792,75 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           }
         }
       }
-      for (uint32_t drawIndex = 0; drawIndex < drawCount; ++drawIndex) {
-        const DrawItem &draw = sourcePass.draws[drawIndex];
-        const uint32_t globalDrawIndex = drawOffset + drawIndex;
-        const auto validateDrawBinding =
-            [&](BufferHandle sourceHandle, uint32_t resourceIndex,
-                std::string_view missingBindingMessage,
-                std::string_view invalidBindingMessage) {
-              if (nuri::isValid(sourceHandle) && resourceIndex == UINT32_MAX) {
-                resolveErrors[workerIndex] = IndexedResolveError{
-                    .hasError = true,
-                    .orderedPassIndex = orderedPassIndex,
-                    .message = std::string(missingBindingMessage),
-                };
-                return false;
-              }
-              if (resourceIndex == UINT32_MAX) {
+      if (!sourcePass.drawBuffersPreResolved) {
+        for (uint32_t drawIndex = 0; drawIndex < drawCount; ++drawIndex) {
+          const DrawItem &draw = sourcePass.draws[drawIndex];
+          const uint32_t globalDrawIndex = drawOffset + drawIndex;
+          const auto validateDrawBinding =
+              [&](BufferHandle sourceHandle, uint32_t resourceIndex,
+                  std::string_view missingBindingMessage,
+                  std::string_view invalidBindingMessage) {
+                if (nuri::isValid(sourceHandle) &&
+                    resourceIndex == UINT32_MAX) {
+                  resolveErrors[workerIndex] = IndexedResolveError{
+                      .hasError = true,
+                      .orderedPassIndex = orderedPassIndex,
+                      .message = std::string(missingBindingMessage),
+                  };
+                  return false;
+                }
+                if (resourceIndex == UINT32_MAX) {
+                  return true;
+                }
+                if (!isValidBufferIndex(resourceIndex)) {
+                  resolveErrors[workerIndex] = IndexedResolveError{
+                      .hasError = true,
+                      .orderedPassIndex = orderedPassIndex,
+                      .message = std::string(invalidBindingMessage),
+                  };
+                  return false;
+                }
+                if (!buffers_[resourceIndex].imported) {
+                  ++plan.unresolvedDrawCount;
+                }
                 return true;
-              }
-              if (!isValidBufferIndex(resourceIndex)) {
-                resolveErrors[workerIndex] = IndexedResolveError{
-                    .hasError = true,
-                    .orderedPassIndex = orderedPassIndex,
-                    .message = std::string(invalidBindingMessage),
-                };
-                return false;
-              }
-              if (!buffers_[resourceIndex].imported) {
-                ++plan.unresolvedDrawCount;
-              }
-              return true;
-            };
-        if (!validateDrawBinding(
-                draw.vertexBuffer,
-                drawVertexBindingResourceIndices_[globalDrawIndex],
-                "RenderGraphBuilder::compile: pass requires explicit draw "
-                "vertex buffer binding",
-                "RenderGraphBuilder::compile: draw buffer binding "
-                "references out-of-range resource")) {
-          return;
-        }
-        if (!validateDrawBinding(
-                draw.indexBuffer,
-                drawIndexBindingResourceIndices_[globalDrawIndex],
-                "RenderGraphBuilder::compile: pass requires explicit draw "
-                "index buffer binding",
-                "RenderGraphBuilder::compile: draw buffer binding "
-                "references out-of-range resource")) {
-          return;
-        }
-        if (!validateDrawBinding(
-                draw.indirectBuffer,
-                drawIndirectBindingResourceIndices_[globalDrawIndex],
-                "RenderGraphBuilder::compile: pass requires explicit draw "
-                "indirect buffer binding",
-                "RenderGraphBuilder::compile: draw buffer binding "
-                "references out-of-range resource")) {
-          return;
-        }
-        if (!validateDrawBinding(
-                draw.indirectCountBuffer,
-                drawIndirectCountBindingResourceIndices_[globalDrawIndex],
-                "RenderGraphBuilder::compile: pass requires explicit draw "
-                "indirect-count buffer binding",
-                "RenderGraphBuilder::compile: draw buffer binding "
-                "references out-of-range resource")) {
-          return;
+              };
+          if (!validateDrawBinding(
+                  draw.vertexBuffer,
+                  drawVertexBindingResourceIndices_[globalDrawIndex],
+                  "RenderGraphBuilder::compile: pass requires explicit draw "
+                  "vertex buffer binding",
+                  "RenderGraphBuilder::compile: draw buffer binding "
+                  "references out-of-range resource")) {
+            return;
+          }
+          if (!validateDrawBinding(
+                  draw.indexBuffer,
+                  drawIndexBindingResourceIndices_[globalDrawIndex],
+                  "RenderGraphBuilder::compile: pass requires explicit draw "
+                  "index buffer binding",
+                  "RenderGraphBuilder::compile: draw buffer binding "
+                  "references out-of-range resource")) {
+            return;
+          }
+          if (!validateDrawBinding(
+                  draw.indirectBuffer,
+                  drawIndirectBindingResourceIndices_[globalDrawIndex],
+                  "RenderGraphBuilder::compile: pass requires explicit draw "
+                  "indirect buffer binding",
+                  "RenderGraphBuilder::compile: draw buffer binding "
+                  "references out-of-range resource")) {
+            return;
+          }
+          if (!validateDrawBinding(
+                  draw.indirectCountBuffer,
+                  drawIndirectCountBindingResourceIndices_[globalDrawIndex],
+                  "RenderGraphBuilder::compile: pass requires explicit draw "
+                  "indirect-count buffer binding",
+                  "RenderGraphBuilder::compile: draw buffer binding "
+                  "references out-of-range resource")) {
+            return;
+          }
         }
       }
       plan.drawCount = drawCount;
