@@ -9,6 +9,7 @@ layout(std430, buffer_reference) readonly buffer PackedVertexBuffer {
 struct PackedMorphDeltaGpu {
   vec4 positionDelta;
   vec4 normalDelta;
+  vec4 tangentDelta;
 };
 
 layout(std430, buffer_reference) readonly buffer MorphDeltaBuffer {
@@ -46,6 +47,7 @@ void main() {
   PackedVertex source = pc.sourceVertices.vertices[vertexIndex];
   vec3 position = decodePackedPosition(source);
   vec3 normal = decodePackedNormal(source);
+  vec4 tangent = decodePackedTangent(source);
   vec2 uv0 = decodePackedUv(source);
   vec2 uv1 = decodePackedUv1(source);
 
@@ -59,6 +61,7 @@ void main() {
     PackedMorphDeltaGpu delta = pc.morphDeltas.values[deltaIndex];
     position += delta.positionDelta.xyz * weight;
     normal += delta.normalDelta.xyz * weight;
+    tangent.xyz += delta.tangentDelta.xyz * weight;
   }
 
   if (length(normal) > kDegenerateEpsilon) {
@@ -66,6 +69,7 @@ void main() {
   } else {
     normal = vec3(0.0, 1.0, 0.0);
   }
+  tangent.xyz = orthogonalizePackedTangent(tangent.xyz, normal);
   pc.outputVertices.vertices[vertexIndex] =
-      encodePackedVertex(position, normal, uv0, uv1);
+      encodePackedVertex(position, normal, tangent, uv0, uv1);
 }

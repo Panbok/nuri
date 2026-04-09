@@ -22,7 +22,7 @@ namespace {
 
 constexpr uint32_t kInvalidIndex = std::numeric_limits<uint32_t>::max();
 constexpr uint32_t kComputeWorkgroupSize = 64u;
-constexpr size_t kPackedVertexStrideBytes = 24u;
+constexpr size_t kPackedVertexStrideBytes = 32u;
 constexpr float kLoopWrapEpsilonSeconds = 1.0e-5f;
 
 struct AnimationNodeStateGpu {

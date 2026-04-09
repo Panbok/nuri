@@ -166,6 +166,8 @@ struct MeshBinaryRequiredSections {
     return kMeshBinaryStaticVertexStrideBytes;
   case kMeshBinaryLayoutIdAnimatedFloat24:
     return kMeshBinaryAnimatedVertexStrideBytes;
+  case kMeshBinaryLayoutIdAnimatedFloat32:
+    return kMeshBinaryAnimatedFloat32VertexStrideBytes;
   default:
     return 0u;
   }
@@ -181,6 +183,9 @@ buildVertexLayoutSection(const MeshBinarySerializeInput &input) {
   MeshBinaryVertexLayoutRecord record{};
   record.layoutId = input.vertexLayoutId;
   record.strideBytes = vertexStrideForLayoutId(input.vertexLayoutId);
+  if (input.vertexLayoutId == kMeshBinaryLayoutIdAnimatedFloat32) {
+    record.attributeMask |= kMeshBinaryPackedAttributeTangent;
+  }
   if (record.strideBytes == 0u) {
     return makeSerializerError<SerializedSection>(
         "meshBinarySerialize: unsupported vertex layout id");

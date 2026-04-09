@@ -45,6 +45,7 @@ const uint kMaterialTextureSlotCount = 14u;
 
 const uint kPackedVertexFormatStaticQuantized20 = 0u;
 const uint kPackedVertexFormatAnimatedFloat24 = 1u;
+const uint kPackedVertexFormatAnimatedFloat32 = 2u;
 
 const uint kMaterialFlagsAlphaModeMask = 0x3u;
 const uint kMaterialFlagsDoubleSidedBit = 1u << 2u;
@@ -292,6 +293,9 @@ vec3 decodeOctNormal(vec2 encoded) {
 }
 
 uint packedVertexStrideWords(uint packedVertexFormat) {
+  if (packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
+    return 8u;
+  }
   return packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ? 6u : 5u;
 }
 
@@ -302,7 +306,8 @@ uint packedVertexWord(uint vertexIndex, uint wordIndex) {
 }
 
 vec3 decodePackedPosition(uint vertexIndex) {
-  if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24) {
+  if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
+      pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
     return vec3(uintBitsToFloat(packedVertexWord(vertexIndex, 0u)),
                 uintBitsToFloat(packedVertexWord(vertexIndex, 1u)),
                 uintBitsToFloat(packedVertexWord(vertexIndex, 2u)));
@@ -317,15 +322,31 @@ vec3 decodePackedPosition(uint vertexIndex) {
 }
 
 vec3 decodePackedNormal(uint vertexIndex) {
-  const uint normalWord =
-      packedVertexWord(vertexIndex,
-                       pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24
-                           ? 3u
-                           : 2u);
+  const bool animatedFormat =
+      pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
+      pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32;
+  const uint normalWord = packedVertexWord(vertexIndex,
+                                           animatedFormat ? 3u : 2u);
   return decodeOctNormal(unpackSnorm2x16Custom(normalWord));
 }
 
+vec4 decodePackedTangent(uint vertexIndex) {
+  if (pc.packedVertexFormat != kPackedVertexFormatAnimatedFloat32) {
+    return vec4(0.0, 0.0, 0.0, 1.0);
+  }
+  const uint handednessWord = packedVertexWord(vertexIndex, 5u);
+  if (handednessWord == 0u) {
+    return vec4(0.0, 0.0, 0.0, 1.0);
+  }
+  return vec4(decodeOctNormal(unpackSnorm2x16Custom(
+                  packedVertexWord(vertexIndex, 4u))),
+              uintBitsToFloat(handednessWord));
+}
+
 vec2 decodePackedUv(uint vertexIndex) {
+  if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
+    return unpackHalf2x16(packedVertexWord(vertexIndex, 6u));
+  }
   return unpackHalf2x16(
       packedVertexWord(vertexIndex,
                        pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24
@@ -334,6 +355,9 @@ vec2 decodePackedUv(uint vertexIndex) {
 }
 
 vec2 decodePackedUv1(uint vertexIndex) {
+  if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
+    return unpackHalf2x16(packedVertexWord(vertexIndex, 7u));
+  }
   return unpackHalf2x16(
       packedVertexWord(vertexIndex,
                        pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24
@@ -734,6 +758,7 @@ struct PerVertex {
   vec2 uv0;
   vec2 uv1;
   vec3 worldNormal;
+  vec4 worldTangent;
   vec3 worldPos;
   vec3 patchBarycentric;
   vec3 triBarycentric;

@@ -166,7 +166,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
     } else {
       n = vec3(0.0, 0.0, 1.0);
     }
-    sm.nBase = applyNormalMap(sm.nBase, vtx.worldPos, uvNormal, n);
+    sm.nBase = applyNormalMap(sm.nBase, vtx.worldTangent, vtx.worldPos,
+                              uvNormal, n);
   }
   sm.roughness = applySpecularAARoughnessBias(sm.roughness, sm.nBase);
 
@@ -182,7 +183,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
       n = vec3(0.0, 0.0, 1.0);
     }
     vec3 perturbed =
-        applyNormalMap(sm.nClearcoat, vtx.worldPos, uvClearcoatNormal, n);
+        applyNormalMap(sm.nClearcoat, vtx.worldTangent, vtx.worldPos,
+                       uvClearcoatNormal, n);
     float blend = clamp(sqrt(sm.clearcoatRoughness), kBrdfMinRoughness, 1.0);
     sm.nClearcoat = normalize(mix(sm.nClearcoat, perturbed, blend));
   }

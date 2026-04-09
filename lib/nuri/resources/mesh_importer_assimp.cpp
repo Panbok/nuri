@@ -31,6 +31,7 @@ constexpr float kDefaultTextureScale = 1.0f;
 constexpr float kDefaultAttenuationDistance = 0.0f;
 constexpr float kDefaultIor = 1.5f;
 constexpr glm::vec3 kDefaultAttenuationColor(1.0f);
+constexpr float kDirectionEpsilon = 1.0e-10f;
 using YyJsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
 using YyJsonDocResult = Result<YyJsonDocPtr, std::string>;
 
@@ -1098,10 +1099,48 @@ void remapMeshVertices(std::pmr::vector<Vertex> &vertices,
 glm::vec3 normalizeTransformedDirection(const aiVector3D &direction) {
   const glm::vec3 value(direction.x, direction.y, direction.z);
   const float length2 = glm::dot(value, value);
-  if (length2 <= std::numeric_limits<float>::epsilon()) {
+  if (length2 <= kDirectionEpsilon) {
     return glm::vec3(0.0f);
   }
   return value * glm::inversesqrt(length2);
+}
+
+glm::vec3 orthogonalizeTangent(glm::vec3 tangent, glm::vec3 normal) {
+  const float normalLen2 = glm::dot(normal, normal);
+  if (normalLen2 > kDirectionEpsilon) {
+    normal *= glm::inversesqrt(normalLen2);
+    tangent -= normal * glm::dot(tangent, normal);
+  }
+  const float tangentLen2 = glm::dot(tangent, tangent);
+  if (tangentLen2 <= kDirectionEpsilon) {
+    return glm::vec3(0.0f);
+  }
+  return tangent * glm::inversesqrt(tangentLen2);
+}
+
+glm::vec4 transformTangent(const aiMatrix3x3 &directionTransform,
+                           const aiVector3D &tangent,
+                           const aiVector3D &bitangent,
+                           glm::vec3 transformedNormal) {
+  const float normalLen2 = glm::dot(transformedNormal, transformedNormal);
+  if (normalLen2 > kDirectionEpsilon) {
+    transformedNormal *= glm::inversesqrt(normalLen2);
+  }
+  const glm::vec3 transformedTangent = orthogonalizeTangent(
+      normalizeTransformedDirection(directionTransform * tangent),
+      transformedNormal);
+  if (glm::dot(transformedTangent, transformedTangent) <= kDirectionEpsilon) {
+    return glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+  }
+
+  const glm::vec3 transformedBitangent =
+      normalizeTransformedDirection(directionTransform * bitangent);
+  const float handedness =
+      glm::dot(glm::cross(transformedNormal, transformedTangent),
+               transformedBitangent) < 0.0f
+          ? -1.0f
+          : 1.0f;
+  return glm::vec4(transformedTangent, handedness);
 }
 
 aiMatrix4x4 glmMat4ToAiMatrix4x4(const glm::mat4 &matrix) {
@@ -1175,6 +1214,7 @@ void extractMeshGeometry(const aiMesh &mesh, const aiMatrix4x4 &transform,
   outVertices.reserve(mesh.mNumVertices);
   aiMatrix3x3 normalTransform(transform);
   normalTransform.Inverse().Transpose();
+  const aiMatrix3x3 directionTransform(transform);
 
   for (unsigned int vertexIndex = 0; vertexIndex < mesh.mNumVertices;
        ++vertexIndex) {
@@ -1187,6 +1227,12 @@ void extractMeshGeometry(const aiMesh &mesh, const aiMatrix4x4 &transform,
     if (mesh.HasNormals()) {
       const aiVector3D &normal = mesh.mNormals[vertexIndex];
       vertex.normal = normalizeTransformedDirection(normalTransform * normal);
+    }
+
+    if (mesh.HasTangentsAndBitangents()) {
+      vertex.tangent =
+          transformTangent(directionTransform, mesh.mTangents[vertexIndex],
+                           mesh.mBitangents[vertexIndex], vertex.normal);
     }
 
     if (mesh.HasTextureCoords(0)) {
@@ -1291,6 +1337,7 @@ void extractMorphTargets(const aiMesh &mesh, const aiMatrix4x4 &transform,
 
   aiMatrix3x3 normalTransform(transform);
   normalTransform.Inverse().Transpose();
+  const aiMatrix3x3 directionTransform(transform);
   outMorphTargets.reserve(mesh.mNumAnimMeshes);
   for (uint32_t animMeshIndex = 0u; animMeshIndex < mesh.mNumAnimMeshes;
        ++animMeshIndex) {
@@ -1309,6 +1356,9 @@ void extractMorphTargets(const aiMesh &mesh, const aiMatrix4x4 &transform,
     if (animMesh->HasNormals()) {
       target.normalDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
     }
+    if (animMesh->HasTangentsAndBitangents()) {
+      target.tangentDeltas.resize(baseVertices.size(), glm::vec3(0.0f));
+    }
 
     const uint32_t vertexCount =
         std::min<uint32_t>(mesh.mNumVertices, animMesh->mNumVertices);
@@ -1324,6 +1374,20 @@ void extractMorphTargets(const aiMesh &mesh, const aiMatrix4x4 &transform,
             normalTransform * animMesh->mNormals[vertexIndex]);
         target.normalDeltas[vertexIndex] =
             transformedNormal - baseVertices[vertexIndex].normal;
+      }
+      if (!target.tangentDeltas.empty() &&
+          animMesh->HasTangentsAndBitangents()) {
+        const glm::vec3 targetNormal =
+            animMesh->HasNormals()
+                ? normalizeTransformedDirection(normalTransform *
+                                                animMesh->mNormals[vertexIndex])
+                : baseVertices[vertexIndex].normal;
+        const glm::vec4 transformedTangent = transformTangent(
+            directionTransform, animMesh->mTangents[vertexIndex],
+            animMesh->mBitangents[vertexIndex], targetNormal);
+        target.tangentDeltas[vertexIndex] =
+            glm::vec3(transformedTangent) -
+            glm::vec3(baseVertices[vertexIndex].tangent);
       }
     }
   }
@@ -1459,6 +1523,7 @@ void optimizeVertexFetchForAllLods(
     for (MorphTarget &morphTarget : morphTargets) {
       remapDeltas(morphTarget.positionDeltas);
       remapDeltas(morphTarget.normalDeltas);
+      remapDeltas(morphTarget.tangentDeltas);
     }
 
     for (uint32_t lodIndex = 0; lodIndex < lodCount; ++lodIndex) {
@@ -1540,6 +1605,8 @@ void appendSubmeshToMeshData(
                               morphTarget.positionDeltas.end());
     dst.normalDeltas.assign(morphTarget.normalDeltas.begin(),
                             morphTarget.normalDeltas.end());
+    dst.tangentDeltas.assign(morphTarget.tangentDeltas.begin(),
+                             morphTarget.tangentDeltas.end());
   }
   data.submeshes.push_back(submesh);
 }
@@ -1854,6 +1921,10 @@ unsigned int buildAssimpFlags(const MeshImportOptions &options,
 
   if (options.genNormals) {
     flags |= aiProcess_GenSmoothNormals;
+  }
+
+  if (options.calcTangents) {
+    flags |= aiProcess_CalcTangentSpace;
   }
 
   if (options.flipUVs) {

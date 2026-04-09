@@ -5,7 +5,11 @@ struct PackedVertex {
   uint word3;
   uint word4;
   uint word5;
+  uint word6;
+  uint word7;
 };
+
+const float kPackedVertexDegenerateEpsilon = 1.0e-6;
 
 vec2 unpackSnorm2x16Custom(uint packed) {
   const int x = int(packed << 16u) >> 16;
@@ -29,6 +33,17 @@ vec3 decodeOctNormal(vec2 encoded) {
   return normalize(normal);
 }
 
+vec3 normalizePackedDirectionOrZero(vec3 value) {
+  const float lenSq = dot(value, value);
+  return lenSq > kPackedVertexDegenerateEpsilon ? value * inversesqrt(lenSq)
+                                                : vec3(0.0);
+}
+
+vec3 orthogonalizePackedTangent(vec3 tangent, vec3 normal) {
+  tangent -= normal * dot(tangent, normal);
+  return normalizePackedDirectionOrZero(tangent);
+}
+
 vec2 encodeOctNormal(vec3 normal) {
   const float lenSq = dot(normal, normal);
   if (lenSq <= 1.0e-10) {
@@ -49,21 +64,37 @@ vec3 decodePackedPosition(PackedVertex vertex) {
               uintBitsToFloat(vertex.word2));
 }
 
-vec2 decodePackedUv(PackedVertex vertex) { return unpackHalf2x16(vertex.word4); }
-vec2 decodePackedUv1(PackedVertex vertex) { return unpackHalf2x16(vertex.word5); }
+vec2 decodePackedUv(PackedVertex vertex) { return unpackHalf2x16(vertex.word6); }
+vec2 decodePackedUv1(PackedVertex vertex) { return unpackHalf2x16(vertex.word7); }
 
 vec3 decodePackedNormal(PackedVertex vertex) {
   return decodeOctNormal(unpackSnorm2x16Custom(vertex.word3));
 }
 
-PackedVertex encodePackedVertex(vec3 position, vec3 normal, vec2 uv0, vec2 uv1) {
+vec4 decodePackedTangent(PackedVertex vertex) {
+  if (vertex.word5 == 0u) {
+    return vec4(0.0, 0.0, 0.0, 1.0);
+  }
+  return vec4(decodeOctNormal(unpackSnorm2x16Custom(vertex.word4)),
+              uintBitsToFloat(vertex.word5));
+}
+
+PackedVertex encodePackedVertex(vec3 position, vec3 normal, vec4 tangent,
+                                vec2 uv0, vec2 uv1) {
   PackedVertex packed;
   vec2 oct = encodeOctNormal(normal);
   packed.word0 = floatBitsToUint(position.x);
   packed.word1 = floatBitsToUint(position.y);
   packed.word2 = floatBitsToUint(position.z);
   packed.word3 = packSnorm2x16(oct);
-  packed.word4 = packHalf2x16(uv0);
-  packed.word5 = packHalf2x16(uv1);
+  if (dot(tangent.xyz, tangent.xyz) > 1.0e-10) {
+    packed.word4 = packSnorm2x16(encodeOctNormal(tangent.xyz));
+    packed.word5 = floatBitsToUint(tangent.w >= 0.0 ? 1.0 : -1.0);
+  } else {
+    packed.word4 = 0u;
+    packed.word5 = 0u;
+  }
+  packed.word6 = packHalf2x16(uv0);
+  packed.word7 = packHalf2x16(uv1);
   return packed;
 }

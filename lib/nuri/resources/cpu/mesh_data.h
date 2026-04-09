@@ -9,6 +9,7 @@ namespace nuri {
 struct Vertex {
   glm::vec3 position{};
   glm::vec3 normal{};
+  glm::vec4 tangent{0.0f, 0.0f, 0.0f, 1.0f};
   glm::vec2 uv{};
   glm::vec2 uv1{};
 };
@@ -22,10 +23,11 @@ struct MorphTarget {
   std::pmr::string name;
   std::pmr::vector<glm::vec3> positionDeltas;
   std::pmr::vector<glm::vec3> normalDeltas;
+  std::pmr::vector<glm::vec3> tangentDeltas;
 
   explicit MorphTarget(
       std::pmr::memory_resource *mem = std::pmr::get_default_resource())
-      : name(mem), positionDeltas(mem), normalDeltas(mem) {}
+      : name(mem), positionDeltas(mem), normalDeltas(mem), tangentDeltas(mem) {}
 };
 
 struct SubmeshLod {

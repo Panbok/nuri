@@ -632,7 +632,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
             vertexDecodeBufferAddress = 0u;
             vertexDecodeIndex = 0u;
             packedVertexFormat =
-                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat24);
+                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32);
           }
         }
       }

@@ -26,6 +26,7 @@ struct ModelAnimationPackedData;
 enum class PackedVertexFormat : uint8_t {
   StaticQuantized20 = 0,
   AnimatedFloat24 = 1,
+  AnimatedFloat32 = 2,
 };
 
 struct StaticVertexDecodeGpuData {

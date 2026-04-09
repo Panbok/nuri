@@ -7,7 +7,7 @@
 namespace nuri {
 
 constexpr uint16_t kMeshBinaryFormatMajorVersion = 2;
-constexpr uint16_t kMeshBinaryFormatMinorVersion = 0;
+constexpr uint16_t kMeshBinaryFormatMinorVersion = 1;
 
 constexpr std::array<char, 8> kMeshBinaryMagic = {'N', 'U', 'R', 'I',
                                                   'M', 'S', 'H', '\0'};
@@ -45,14 +45,17 @@ constexpr uint32_t kMeshBinarySectionMdel =
 
 constexpr uint32_t kMeshBinaryLayoutIdStaticQuantized20 = 0u;
 constexpr uint32_t kMeshBinaryLayoutIdAnimatedFloat24 = 1u;
+constexpr uint32_t kMeshBinaryLayoutIdAnimatedFloat32 = 2u;
 constexpr uint32_t kMeshBinaryStaticVertexStrideBytes = 20u;
 constexpr uint32_t kMeshBinaryAnimatedVertexStrideBytes = 24u;
+constexpr uint32_t kMeshBinaryAnimatedFloat32VertexStrideBytes = 32u;
 
 // Attribute bitmask for the packed v1 shader layout.
 constexpr uint32_t kMeshBinaryPackedAttributePosition = 1u << 0u;
 constexpr uint32_t kMeshBinaryPackedAttributeUv = 1u << 1u;
 constexpr uint32_t kMeshBinaryPackedAttributeUv1 = 1u << 2u;
 constexpr uint32_t kMeshBinaryPackedAttributeNormal = 1u << 3u;
+constexpr uint32_t kMeshBinaryPackedAttributeTangent = 1u << 4u;
 
 #pragma pack(push, 1)
 struct MeshBinaryHeader {

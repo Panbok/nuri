@@ -836,7 +836,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             resolvedVertexDecodeBufferAddress = 0u;
             resolvedVertexDecodeIndex = 0u;
             resolvedPackedVertexFormat =
-                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat24);
+                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32);
             hasAnimatedGeometry = true;
           }
         }

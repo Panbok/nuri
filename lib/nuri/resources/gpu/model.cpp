@@ -39,9 +39,11 @@ struct PackedAnimatedVertexWords {
   uint32_t word3 = 0;
   uint32_t word4 = 0;
   uint32_t word5 = 0;
+  uint32_t word6 = 0;
+  uint32_t word7 = 0;
 };
 
-static_assert(sizeof(PackedAnimatedVertexWords) == 24);
+static_assert(sizeof(PackedAnimatedVertexWords) == 32);
 
 struct ModelPackedVertexData {
   PackedVertexFormat format = PackedVertexFormat::StaticQuantized20;
@@ -58,8 +60,11 @@ static_assert(sizeof(PackedSkinInfluenceGpu) == 32);
 struct PackedMorphDeltaGpu {
   glm::vec4 positionDelta{0.0f};
   glm::vec4 normalDelta{0.0f};
+  glm::vec4 tangentDelta{0.0f};
 };
-static_assert(sizeof(PackedMorphDeltaGpu) == 32);
+static_assert(sizeof(PackedMorphDeltaGpu) == 48);
+
+constexpr float kDirectionEpsilon = 1.0e-10f;
 
 struct ModelAnimationGpuBuffers {
   Model::ModelAnimationGpuView view{};
@@ -118,22 +123,41 @@ glm::vec2 encodeOctNormal(glm::vec3 normal) {
 }
 
 glm::vec3 sanitizeNormal(glm::vec3 normal) {
-  if (glm::dot(normal, normal) > 0.0f) {
+  if (glm::dot(normal, normal) > kDirectionEpsilon) {
     return glm::normalize(normal);
   }
   return glm::vec3(0.0f, 1.0f, 0.0f);
 }
 
+glm::vec4 sanitizeTangent(glm::vec4 tangent, glm::vec3 normal) {
+  glm::vec3 tangentXyz(tangent);
+  tangentXyz -= normal * glm::dot(tangentXyz, normal);
+  if (glm::dot(tangentXyz, tangentXyz) > kDirectionEpsilon) {
+    tangentXyz = glm::normalize(tangentXyz);
+  } else {
+    tangentXyz = glm::vec3(0.0f);
+  }
+  const float handedness = tangent.w < 0.0f ? -1.0f : 1.0f;
+  return glm::vec4(tangentXyz, handedness);
+}
+
 PackedAnimatedVertexWords packAnimatedVertex(const Vertex &vertex) {
   PackedAnimatedVertexWords packed{};
   const glm::vec3 normal = sanitizeNormal(vertex.normal);
-  const glm::vec2 oct = encodeOctNormal(normal);
+  const glm::vec4 tangent = sanitizeTangent(vertex.tangent, normal);
+  const glm::vec2 normalOct = encodeOctNormal(normal);
   packed.word0 = std::bit_cast<uint32_t>(vertex.position.x);
   packed.word1 = std::bit_cast<uint32_t>(vertex.position.y);
   packed.word2 = std::bit_cast<uint32_t>(vertex.position.z);
-  packed.word3 = packSnorm2x16Custom(oct);
-  packed.word4 = glm::packHalf2x16(vertex.uv);
-  packed.word5 = glm::packHalf2x16(vertex.uv1);
+  packed.word3 = packSnorm2x16Custom(normalOct);
+  const glm::vec3 tangentXyz(tangent);
+  if (glm::dot(tangentXyz, tangentXyz) > kDirectionEpsilon) {
+    const glm::vec2 tangentOct = encodeOctNormal(tangentXyz);
+    packed.word4 = packSnorm2x16Custom(tangentOct);
+    packed.word5 = std::bit_cast<uint32_t>(tangent.w);
+  }
+  packed.word6 = glm::packHalf2x16(vertex.uv);
+  packed.word7 = glm::packHalf2x16(vertex.uv1);
   return packed;
 }
 
@@ -188,10 +212,10 @@ ModelPackedVertexData packVerticesForModel(const MeshData &data) {
   ModelPackedVertexData packed{};
   const bool animatedFormat =
       !data.skinInfluences.empty() || !data.morphTargets.empty();
-  packed.format = animatedFormat ? PackedVertexFormat::AnimatedFloat24
+  packed.format = animatedFormat ? PackedVertexFormat::AnimatedFloat32
                                  : PackedVertexFormat::StaticQuantized20;
 
-  if (packed.format == PackedVertexFormat::AnimatedFloat24) {
+  if (packed.format == PackedVertexFormat::AnimatedFloat32) {
     std::vector<PackedAnimatedVertexWords> vertices(data.vertices.size());
     for (size_t i = 0; i < data.vertices.size(); ++i) {
       vertices[i] = packAnimatedVertex(data.vertices[i]);
@@ -279,16 +303,26 @@ packAnimationData(const MeshData &data) {
           "Model::create: morph targets require a non-empty vertex buffer");
     }
 
+    uint32_t logicalMorphTargetCount = 0u;
+    for (const Submesh &submesh : data.submeshes) {
+      logicalMorphTargetCount =
+          std::max(logicalMorphTargetCount, submesh.morphTargetCount);
+    }
+    if (logicalMorphTargetCount == 0u) {
+      return Result<ModelAnimationPackedData, std::string>::makeError(
+          "Model::create: morph target payload has no submesh references");
+    }
+
     std::vector<PackedMorphDeltaGpu> morphDeltas;
     const uint64_t morphDeltaCount =
-        static_cast<uint64_t>(data.morphTargets.size()) *
+        static_cast<uint64_t>(logicalMorphTargetCount) *
         static_cast<uint64_t>(data.vertices.size());
     if (morphDeltaCount >
         static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
       return Result<ModelAnimationPackedData, std::string>::makeError(
           "Model::create: morphDeltas allocation for PackedMorphDeltaGpu "
           "overflowed (morphTargets=" +
-          std::to_string(data.morphTargets.size()) +
+          std::to_string(logicalMorphTargetCount) +
           ", vertices=" + std::to_string(data.vertices.size()) + ")");
     }
     morphDeltas.resize(static_cast<size_t>(morphDeltaCount));
@@ -320,11 +354,16 @@ packAnimationData(const MeshData &data) {
           return Result<ModelAnimationPackedData, std::string>::makeError(
               "Model::create: morph normal delta count mismatch");
         }
+        if (!target.tangentDeltas.empty() &&
+            target.tangentDeltas.size() != submesh.vertexCount) {
+          return Result<ModelAnimationPackedData, std::string>::makeError(
+              "Model::create: morph tangent delta count mismatch");
+        }
 
         for (uint32_t localVertexIndex = 0;
              localVertexIndex < submesh.vertexCount; ++localVertexIndex) {
           const size_t deltaIndex =
-              static_cast<size_t>(morphIndex) * data.vertices.size() +
+              static_cast<size_t>(localMorphIndex) * data.vertices.size() +
               (submesh.vertexOffset + localVertexIndex);
           PackedMorphDeltaGpu &delta = morphDeltas[deltaIndex];
           if (!target.positionDeltas.empty()) {
@@ -335,12 +374,16 @@ packAnimationData(const MeshData &data) {
             delta.normalDelta =
                 glm::vec4(target.normalDeltas[localVertexIndex], 0.0f);
           }
+          if (!target.tangentDeltas.empty()) {
+            delta.tangentDelta =
+                glm::vec4(target.tangentDeltas[localVertexIndex], 0.0f);
+          }
         }
       }
     }
 
     const MeshBinaryMorphMetaRecord meta{
-        .morphTargetCount = static_cast<uint32_t>(data.morphTargets.size()),
+        .morphTargetCount = logicalMorphTargetCount,
         .vertexCount = static_cast<uint32_t>(data.vertices.size()),
     };
     packed.morphMeta.data.resize(sizeof(meta));
@@ -458,6 +501,11 @@ createAnimationGpuBuffers(GPUDevice &gpu,
                 sizeof(morphMeta));
   }
   if (!packedData.skinInfluences.empty()) {
+    if (packedData.skinInfluences.strideBytes !=
+        sizeof(PackedSkinInfluenceGpu)) {
+      return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+          "Model::create: invalid skin influence stride");
+    }
     auto bufferResult = createStorageBuffer(
         gpu,
         std::span<const std::byte>(packedData.skinInfluences.data.data(),
@@ -486,6 +534,10 @@ createAnimationGpuBuffers(GPUDevice &gpu,
     buffers.view.morphMetaBuffer = buffers.morphMetaBuffer->handle();
   }
   if (!packedData.morphDeltas.empty()) {
+    if (packedData.morphDeltas.strideBytes != sizeof(PackedMorphDeltaGpu)) {
+      return Result<ModelAnimationGpuBuffers, std::string>::makeError(
+          "Model::create: invalid morph delta stride");
+    }
     auto deltaResult = createStorageBuffer(
         gpu,
         std::span<const std::byte>(packedData.morphDeltas.data.data(),
@@ -632,6 +684,8 @@ uint32_t meshBinaryLayoutIdForVertexFormat(PackedVertexFormat format) {
     return kMeshBinaryLayoutIdStaticQuantized20;
   case PackedVertexFormat::AnimatedFloat24:
     return kMeshBinaryLayoutIdAnimatedFloat24;
+  case PackedVertexFormat::AnimatedFloat32:
+    return kMeshBinaryLayoutIdAnimatedFloat32;
   }
   return kMeshBinaryLayoutIdStaticQuantized20;
 }
@@ -641,6 +695,7 @@ uint32_t packedVertexStrideBytes(PackedVertexFormat format) {
   case PackedVertexFormat::StaticQuantized20:
     return sizeof(PackedStaticVertexWords);
   case PackedVertexFormat::AnimatedFloat24:
+  case PackedVertexFormat::AnimatedFloat32:
     return sizeof(PackedAnimatedVertexWords);
   }
   return sizeof(PackedStaticVertexWords);
@@ -648,6 +703,8 @@ uint32_t packedVertexStrideBytes(PackedVertexFormat format) {
 
 PackedVertexFormat packedVertexFormatFromLayoutId(uint32_t layoutId) {
   switch (layoutId) {
+  case kMeshBinaryLayoutIdAnimatedFloat32:
+    return PackedVertexFormat::AnimatedFloat32;
   case kMeshBinaryLayoutIdAnimatedFloat24:
     return PackedVertexFormat::AnimatedFloat24;
   case kMeshBinaryLayoutIdStaticQuantized20:

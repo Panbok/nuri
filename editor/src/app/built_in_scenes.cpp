@@ -1,3 +1,4 @@
+#include "nuri/app/editor_scene_spec.h"
 #include "nuri/editor_pch.h"
 
 #include "editor_scene_assets.h"
@@ -37,6 +38,8 @@ constexpr std::string_view kOrreyModelRelativePath = "Orrey/scene.gltf";
 constexpr std::string_view kFoxModelRelativePath = "Fox/Fox.gltf";
 constexpr std::string_view kMedievalFantasyBookModelRelativePath =
     "MedievalFantasyBook/scene.gltf";
+constexpr std::string_view kAnimatedMorphCubeModelRelativePath =
+    "AnimatedMorphCube/AnimatedMorphCube.gltf";
 constexpr uint32_t kDuckGridSide = 32;
 constexpr uint32_t kDuckInstanceCount =
     kDuckGridSide * kDuckGridSide * kDuckGridSide;
@@ -200,6 +203,9 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
             .activate = [duckAssets](EditorSceneActivateContext &ctx)
                 -> Result<void, std::string> {
               ctx.runtime.renderSettings().opaque.enableInstanceCompute = true;
+              // Instance compute culling plus animation and mesh LOD keep this
+              // 32K-instance scene vertex-bound; depth prepass overhead wins
+              // over its occlusion benefit here.
               ctx.runtime.renderSettings().opaque.enableDepthPrepass = false;
               ctx.runtime.renderSettings().opaque.enableMeshLod = true;
               ctx.runtime.renderSettings().opaque.forcedMeshLod = -1;
@@ -576,6 +582,36 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
       .preferredClipNames = {},
       .simulationDebugName = "MedievalFantasyBookAnimation",
   }));
+  if (result.hasError()) {
+    return result;
+  }
+
+  result = catalog.append(makeAnimatedPrefabScene(
+      {.prefab = {
+           .info = {.id = "animated_morph_cube",
+                    .label = "Animated Morph Cube"},
+           .sourcePath = modelPath(config, kAnimatedMorphCubeModelRelativePath),
+           .importOptions = flipUvImport,
+           .instanceName = "AnimatedMorphCube",
+           .lodThresholds = glm::vec3(10.0f, 20.0f, 40.0f),
+           .configureRender =
+               [](EditorRuntime &runtime) {
+                 configureStaticOpaqueScene(
+                     runtime, glm::vec3(10.0f, 20.0f, 40.0f), true);
+                 runtime.renderSettings().transparent.enabled = true;
+                 runtime.renderSettings().transmission.enabled = true;
+               },
+           .configureCamera =
+               [](EditorRuntime &runtime, const ImportedPrefabSceneResources &,
+                  const BoundingBox &bounds) {
+                 (void)runtime.frameSceneCamera(
+                     bounds, glm::mat4(1.0f), 2.3f, 2.0f,
+                     glm::vec4(0.48f, 0.18f, 1.0f, 0.2f),
+                     glm::vec2(0.06f, 0.0f));
+               },
+       },
+       .preferredClipNames = {},
+       .simulationDebugName = "AnimatedMorphCubeAnimation"}));
   if (result.hasError()) {
     return result;
   }
