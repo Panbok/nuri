@@ -331,12 +331,19 @@ vec3 decodePackedNormal(uint vertexIndex) {
 }
 
 vec4 decodePackedTangent(uint vertexIndex) {
+  const vec3 normal = decodePackedNormal(vertexIndex);
+  const vec3 tangentHelper =
+      abs(normal.x) < 0.999 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+  const vec4 fallbackTangent =
+      vec4(normalize(cross(tangentHelper, normal)), 1.0);
   if (pc.packedVertexFormat != kPackedVertexFormatAnimatedFloat32) {
-    return vec4(0.0, 0.0, 0.0, 1.0);
+    return fallbackTangent;
   }
   const uint handednessWord = packedVertexWord(vertexIndex, 5u);
+  // word5 stores +/-1.0f handedness; 0u is the "no tangent encoded"
+  // sentinel, so return an orthogonal fallback to keep TBN construction valid.
   if (handednessWord == 0u) {
-    return vec4(0.0, 0.0, 0.0, 1.0);
+    return fallbackTangent;
   }
   return vec4(decodeOctNormal(unpackSnorm2x16Custom(
                   packedVertexWord(vertexIndex, 4u))),

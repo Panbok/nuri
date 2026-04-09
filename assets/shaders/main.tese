@@ -34,10 +34,13 @@ void main() {
                          inWorldTangent[2].xyz * bary.z;
   weightedTangent -= linearNormal * dot(weightedTangent, linearNormal);
   const float tangentLenSq = dot(weightedTangent, weightedTangent);
+  const vec3 tangentHelper =
+      abs(linearNormal.x) < 0.999 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
   const vec4 linearTangent =
       tangentLenSq > eps ? vec4(weightedTangent * inversesqrt(tangentLenSq),
                                 inWorldTangent[0].w)
-                         : vec4(0.0, 0.0, 0.0, 1.0);
+                         : vec4(normalize(cross(tangentHelper, linearNormal)),
+                                inWorldTangent[0].w);
 
   const vec2 uv0 = inUv0[0] * bary.x + inUv0[1] * bary.y + inUv0[2] * bary.z;
   const vec2 uv1 = inUv1[0] * bary.x + inUv1[1] * bary.y + inUv1[2] * bary.z;

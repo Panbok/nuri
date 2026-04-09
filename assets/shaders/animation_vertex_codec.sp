@@ -75,8 +75,10 @@ vec4 decodePackedTangent(PackedVertex vertex) {
   if (vertex.word5 == 0u) {
     return vec4(0.0, 0.0, 0.0, 1.0);
   }
-  return vec4(decodeOctNormal(unpackSnorm2x16Custom(vertex.word4)),
-              uintBitsToFloat(vertex.word5));
+  const vec3 normal = decodePackedNormal(vertex);
+  vec3 tangent = decodeOctNormal(unpackSnorm2x16Custom(vertex.word4));
+  tangent = orthogonalizePackedTangent(tangent, normal);
+  return vec4(tangent, uintBitsToFloat(vertex.word5));
 }
 
 PackedVertex encodePackedVertex(vec3 position, vec3 normal, vec4 tangent,
@@ -87,7 +89,7 @@ PackedVertex encodePackedVertex(vec3 position, vec3 normal, vec4 tangent,
   packed.word1 = floatBitsToUint(position.y);
   packed.word2 = floatBitsToUint(position.z);
   packed.word3 = packSnorm2x16(oct);
-  if (dot(tangent.xyz, tangent.xyz) > 1.0e-10) {
+  if (dot(tangent.xyz, tangent.xyz) > kPackedVertexDegenerateEpsilon) {
     packed.word4 = packSnorm2x16(encodeOctNormal(tangent.xyz));
     packed.word5 = floatBitsToUint(tangent.w >= 0.0 ? 1.0 : -1.0);
   } else {

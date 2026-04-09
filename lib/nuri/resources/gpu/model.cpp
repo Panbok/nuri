@@ -695,6 +695,7 @@ uint32_t packedVertexStrideBytes(PackedVertexFormat format) {
   case PackedVertexFormat::StaticQuantized20:
     return sizeof(PackedStaticVertexWords);
   case PackedVertexFormat::AnimatedFloat24:
+    return kMeshBinaryAnimatedVertexStrideBytes;
   case PackedVertexFormat::AnimatedFloat32:
     return sizeof(PackedAnimatedVertexWords);
   }
