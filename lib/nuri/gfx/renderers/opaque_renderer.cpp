@@ -2856,7 +2856,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       pyramidPass.desc.drawBuffersPreResolved = true;
       pyramidPass.desc.debugLabel = "Opaque Depth MinMax Pyramid";
       pyramidPass.desc.debugColor = kOpaquePassDebugColor;
-      pyramidPass.desc.borrowPayload = true;
+      pyramidPass.hasPreDispatch =
+          false; // No pre-dispatches for pyramid passes.
+      pyramidPass.desc.borrowPayload = !pyramidPass.hasPreDispatch;
       pyramidPass.hasDraws = true;
       pyramidPass.isDepthPyramidPass = true;
       pyramidPass.depthPyramidLevel = level;

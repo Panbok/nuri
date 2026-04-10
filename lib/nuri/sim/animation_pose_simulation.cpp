@@ -2,6 +2,8 @@
 
 #include "nuri/sim/animation_pose_simulation.h"
 
+#include <type_traits>
+
 namespace nuri {
 namespace {
 
@@ -22,6 +24,9 @@ decodeAnimationPoseSimulationParams(std::span<const std::byte> bytes) {
   }
 
   AnimationPoseSimulationParams params{};
+  static_assert(std::is_trivially_copyable_v<AnimationPoseSimulationParams>,
+                "AnimationPoseSimulationParams must be trivially copyable for "
+                "memcpy deserialization");
   std::memcpy(&params, bytes.data(), sizeof(params));
   return Result<AnimationPoseSimulationParams, std::string>::makeResult(params);
 }
@@ -35,21 +40,26 @@ void sanitizeAnimationPoseSimulationParams(
   }
 }
 
-Result<bool, std::string> validateAnimationPoseSimulationParams(
+Result<void, std::string> validateAnimationPoseSimulationParams(
     const ScenePrefab &prefab, const AnimationPoseSimulationParams &params) {
+  AnimationPoseSimulationParams sanitized = params;
+  // validateAnimationPoseSimulationParams sanitizes params.blendWeight via
+  // sanitizeAnimationPoseSimulationParams so AnimationPoseBlendMode::Lerp
+  // checks do not depend on caller order.
+  sanitizeAnimationPoseSimulationParams(sanitized);
   if (!clipStateValid(prefab, params.primary)) {
-    return Result<bool, std::string>::makeError(
+    return Result<void, std::string>::makeError(
         "validateAnimationPoseSimulationParams: primary clip index is out of "
         "range");
   }
-  if (params.blendMode == AnimationPoseBlendMode::Lerp &&
-      params.blendWeight > kAnimationPoseBlendWeightEpsilon &&
-      !clipStateValid(prefab, params.secondary)) {
-    return Result<bool, std::string>::makeError(
+  if (sanitized.blendMode == AnimationPoseBlendMode::Lerp &&
+      sanitized.blendWeight > kAnimationPoseBlendWeightEpsilon &&
+      !clipStateValid(prefab, sanitized.secondary)) {
+    return Result<void, std::string>::makeError(
         "validateAnimationPoseSimulationParams: secondary clip index is out "
         "of range");
   }
-  return Result<bool, std::string>::makeResult(true);
+  return Result<void, std::string>::makeResult();
 }
 
 Result<SimulationDesc, std::string> makeAnimationPoseSimulationDesc(

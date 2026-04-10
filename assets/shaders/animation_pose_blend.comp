@@ -1,0 +1,86 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct AnimationNodeState {
+  vec4 translation;
+  vec4 rotation;
+  vec4 scale;
+};
+
+layout(std430, buffer_reference) readonly buffer AnimationNodeStateBuffer {
+  AnimationNodeState values[];
+};
+
+layout(std430, buffer_reference) readonly buffer FloatBuffer {
+  float values[];
+};
+
+layout(std430, buffer_reference) buffer AnimationNodeStateBufferRw {
+  AnimationNodeState values[];
+};
+
+layout(std430, buffer_reference) buffer FloatBufferRw { float values[]; };
+
+layout(push_constant) uniform PushConstants {
+  AnimationNodeStateBuffer sourceNodeStatesA;
+  AnimationNodeStateBuffer sourceNodeStatesB;
+  AnimationNodeStateBufferRw outputNodeStates;
+  FloatBuffer sourceWeightsA;
+  FloatBuffer sourceWeightsB;
+  FloatBufferRw outputWeights;
+  float blendWeight;
+  uint nodeCount;
+  uint weightCount;
+  uint reserved;
+}
+pc;
+
+vec4 blendRotation(vec4 lhs, vec4 rhs, float t) {
+  vec4 leftQuat = normalize(lhs);
+  vec4 rightQuat = normalize(rhs);
+  float cosTheta = dot(leftQuat, rightQuat);
+  if (cosTheta < 0.0) {
+    rightQuat = -rightQuat;
+    cosTheta = -cosTheta;
+  }
+  cosTheta = clamp(cosTheta, -1.0, 1.0);
+  if (cosTheta > 0.9995) {
+    return normalize(mix(leftQuat, rightQuat, t));
+  }
+
+  float angle = acos(cosTheta);
+  float sinAngle = sin(angle);
+  if (sinAngle <= 1.0e-5) {
+    return leftQuat;
+  }
+
+  float leftWeight = sin((1.0 - t) * angle) / sinAngle;
+  float rightWeight = sin(t * angle) / sinAngle;
+  return normalize(leftQuat * leftWeight + rightQuat * rightWeight);
+}
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  float t = clamp(pc.blendWeight, 0.0, 1.0);
+
+  if (index < pc.nodeCount) {
+    AnimationNodeState stateA = pc.sourceNodeStatesA.values[index];
+    if (t <= 1.0e-6) {
+      pc.outputNodeStates.values[index] = stateA;
+    } else {
+      AnimationNodeState stateB = pc.sourceNodeStatesB.values[index];
+      pc.outputNodeStates.values[index].translation =
+          mix(stateA.translation, stateB.translation, t);
+      pc.outputNodeStates.values[index].rotation =
+          blendRotation(stateA.rotation, stateB.rotation, t);
+      pc.outputNodeStates.values[index].scale =
+          mix(stateA.scale, stateB.scale, t);
+    }
+  }
+
+  if (index < pc.weightCount) {
+    float weightA = pc.sourceWeightsA.values[index];
+    pc.outputWeights.values[index] =
+        t <= 1.0e-6 ? weightA
+                    : mix(weightA, pc.sourceWeightsB.values[index], t);
+  }
+}

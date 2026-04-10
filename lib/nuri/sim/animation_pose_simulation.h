@@ -76,7 +76,7 @@ decodeAnimationPoseSimulationParams(std::span<const std::byte> bytes);
 NURI_API void sanitizeAnimationPoseSimulationParams(
     AnimationPoseSimulationParams &params) noexcept;
 
-[[nodiscard]] NURI_API Result<bool, std::string>
+[[nodiscard]] NURI_API Result<void, std::string>
 validateAnimationPoseSimulationParams(
     const ScenePrefab &prefab, const AnimationPoseSimulationParams &params);
 

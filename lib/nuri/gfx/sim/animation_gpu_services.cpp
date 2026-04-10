@@ -151,13 +151,13 @@ void AnimationGpuServices::destroyPipelines() noexcept {
   worldPipeline_.reset();
   blendPipeline_.reset();
   samplePipeline_.reset();
-  samplePipelineHandle_ = {};
-  blendPipelineHandle_ = {};
-  worldPipelineHandle_ = {};
-  scatterPipelineHandle_ = {};
-  morphPipelineHandle_ = {};
-  skinPalettePipelineHandle_ = {};
   skinPipelineHandle_ = {};
+  skinPalettePipelineHandle_ = {};
+  morphPipelineHandle_ = {};
+  scatterPipelineHandle_ = {};
+  worldPipelineHandle_ = {};
+  blendPipelineHandle_ = {};
+  samplePipelineHandle_ = {};
   initialized_ = false;
 }
 
