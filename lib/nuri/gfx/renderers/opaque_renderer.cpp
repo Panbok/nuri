@@ -2710,9 +2710,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     pickPass.desc.drawBuffersPreResolved = true;
     pickPass.desc.debugLabel = kOpaquePickPassLabel;
     pickPass.desc.debugColor = kOpaquePassDebugColor;
-    pickPass.desc.borrowPayload = true;
     pickPass.hasDraws = !pickDrawItems_.empty();
     pickPass.hasPreDispatch = !preDispatches_.empty();
+    pickPass.desc.borrowPayload = !pickPass.hasPreDispatch;
     pickPass.hasIndirectDraws = false;
     pickPass.isPickPass = true;
 
@@ -2749,10 +2749,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     depthPass.desc.drawBuffersPreResolved = true;
     depthPass.desc.debugLabel = "Opaque Depth Pre-Pass";
     depthPass.desc.debugColor = kOpaquePassDebugColor;
-    depthPass.desc.borrowPayload = true;
     depthPass.desc.markImplicitOutputSideEffect = true;
     depthPass.hasDraws = !depthPrepassDrawItems_.empty();
     depthPass.hasPreDispatch = !pickPassSubmitted && !preDispatches_.empty();
+    depthPass.desc.borrowPayload = !depthPass.hasPreDispatch;
     depthPass.hasIndirectDraws = hasIndirectBaseDraws;
     depthPass.isDepthPrepass = true;
   }
@@ -2786,10 +2786,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   pass.desc.drawBuffersPreResolved = true;
   pass.desc.debugLabel = kOpaqueMainPassLabel;
   pass.desc.debugColor = kOpaquePassDebugColor;
-  pass.desc.borrowPayload = true;
   pass.hasDraws = !finalPassDrawItems.empty();
   pass.hasPreDispatch =
       !pickPassSubmitted && !depthPrepassEnabled && !preDispatches_.empty();
+  pass.desc.borrowPayload = !pass.hasPreDispatch;
   pass.hasIndirectDraws = hasIndirectBaseDraws;
   pass.isMainPass = true;
   const bool transmissionStageEnabled =

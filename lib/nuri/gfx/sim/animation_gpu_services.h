@@ -36,6 +36,10 @@ public:
     assertPipelineHandle(samplePipelineHandle_, "samplePipeline");
     return samplePipelineHandle_;
   }
+  [[nodiscard]] ComputePipelineHandle blendPipeline() const noexcept {
+    assertPipelineHandle(blendPipelineHandle_, "blendPipeline");
+    return blendPipelineHandle_;
+  }
   [[nodiscard]] ComputePipelineHandle worldPipeline() const noexcept {
     assertPipelineHandle(worldPipelineHandle_, "worldPipeline");
     return worldPipelineHandle_;
@@ -84,18 +88,21 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> shader_;
   std::unique_ptr<Pipeline> samplePipeline_;
+  std::unique_ptr<Pipeline> blendPipeline_;
   std::unique_ptr<Pipeline> worldPipeline_;
   std::unique_ptr<Pipeline> scatterPipeline_;
   std::unique_ptr<Pipeline> morphPipeline_;
   std::unique_ptr<Pipeline> skinPalettePipeline_;
   std::unique_ptr<Pipeline> skinPipeline_;
   ShaderHandle sampleShaderHandle_{};
+  ShaderHandle blendShaderHandle_{};
   ShaderHandle worldShaderHandle_{};
   ShaderHandle scatterShaderHandle_{};
   ShaderHandle morphShaderHandle_{};
   ShaderHandle skinPaletteShaderHandle_{};
   ShaderHandle skinShaderHandle_{};
   ComputePipelineHandle samplePipelineHandle_{};
+  ComputePipelineHandle blendPipelineHandle_{};
   ComputePipelineHandle worldPipelineHandle_{};
   ComputePipelineHandle scatterPipelineHandle_{};
   ComputePipelineHandle morphPipelineHandle_{};

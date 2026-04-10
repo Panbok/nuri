@@ -89,6 +89,7 @@ SceneRuntimeHost::createAnimationPoseSimulation(
   pendingAnimationPoseCreatePayload_ = AnimationPoseSimulationCreatePayload{
       .prefab = createInfo.prefab,
       .instantiationMap = createInfo.instantiationMap,
+      .controlledPrefabNodeIndices = createInfo.controlledPrefabNodeIndices,
       .params = createInfo.params,
   };
   struct PendingPayloadResetGuard {

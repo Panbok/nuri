@@ -24,6 +24,18 @@ constexpr uint32_t kInvalidIndex = std::numeric_limits<uint32_t>::max();
 constexpr uint32_t kComputeWorkgroupSize = 64u;
 constexpr size_t kPackedVertexStrideBytes = 32u;
 constexpr float kLoopWrapEpsilonSeconds = 1.0e-5f;
+constexpr float kBlendWeightEpsilon = 1.0e-5f;
+constexpr size_t kClipSlotCount = 2u;
+constexpr size_t kPrimaryClipSlot = 0u;
+constexpr size_t kSecondaryClipSlot = 1u;
+
+struct ClipBufferLabels {
+  std::string_view keyTimes;
+  std::string_view values;
+  std::string_view channels;
+  std::string_view sampledNodes;
+  std::string_view sampledWeights;
+};
 
 struct AnimationNodeStateGpu {
   glm::vec4 translation{0.0f, 0.0f, 0.0f, 0.0f};
@@ -71,6 +83,20 @@ struct SamplePushConstants {
   uint32_t reserved = 0u;
 };
 static_assert(sizeof(SamplePushConstants) <= 128);
+
+struct BlendPushConstants {
+  uint64_t sourceNodeStatesAddressA = 0u;
+  uint64_t sourceNodeStatesAddressB = 0u;
+  uint64_t outputNodeStatesAddress = 0u;
+  uint64_t sourceWeightsAddressA = 0u;
+  uint64_t sourceWeightsAddressB = 0u;
+  uint64_t outputWeightsAddress = 0u;
+  float blendWeight = 0.0f;
+  uint32_t nodeCount = 0u;
+  uint32_t weightCount = 0u;
+  uint32_t reserved = 0u;
+};
+static_assert(sizeof(BlendPushConstants) <= 128);
 
 struct WorldPushConstants {
   uint64_t nodeStatesAddress = 0u;
@@ -203,13 +229,61 @@ float wrapLoopTime(float timeSeconds, float durationSeconds) {
   return wrapped;
 }
 
-bool readParams(std::span<const std::byte> bytes,
-                AnimationPoseSimulationParams &out) {
-  if (bytes.size() != sizeof(AnimationPoseSimulationParams)) {
-    return false;
+[[nodiscard]] bool clipStateValid(const ScenePrefab &prefab,
+                                  const AnimationPoseClipState &clip) {
+  return clip.clipIndex < prefab.animations.size();
+}
+
+[[nodiscard]] bool blendEnabled(const ScenePrefab &prefab,
+                                const AnimationPoseSimulationParams &params) {
+  return params.blendMode == AnimationPoseBlendMode::Lerp &&
+         params.blendWeight > kBlendWeightEpsilon &&
+         clipStateValid(prefab, params.primary) &&
+         clipStateValid(prefab, params.secondary);
+}
+
+[[nodiscard]] ClipBufferLabels clipBufferLabels(size_t clipSlot) {
+  switch (clipSlot) {
+  case kPrimaryClipSlot:
+    return ClipBufferLabels{
+        .keyTimes = "animation_pose_primary_key_times",
+        .values = "animation_pose_primary_values",
+        .channels = "animation_pose_primary_channels",
+        .sampledNodes = "animation_pose_primary_sampled_nodes",
+        .sampledWeights = "animation_pose_primary_sampled_weights",
+    };
+  case kSecondaryClipSlot:
+    return ClipBufferLabels{
+        .keyTimes = "animation_pose_secondary_key_times",
+        .values = "animation_pose_secondary_values",
+        .channels = "animation_pose_secondary_channels",
+        .sampledNodes = "animation_pose_secondary_sampled_nodes",
+        .sampledWeights = "animation_pose_secondary_sampled_weights",
+    };
+  default:
+    NURI_ASSERT(false,
+                "AnimationPoseSimulationBackend: clip slot %zu is invalid",
+                clipSlot);
+    return {};
   }
-  std::memcpy(&out, bytes.data(), sizeof(out));
-  return true;
+}
+
+void advanceClipTime(AnimationPoseClipState &clipState,
+                     const AnimationClipData &clip,
+                     float deltaSeconds) noexcept {
+  if (!clipState.playing || clip.durationSeconds <= 0.0f) {
+    return;
+  }
+  clipState.timeSeconds = std::max(0.0f, clipState.timeSeconds + deltaSeconds);
+  if (clipState.playbackMode == AnimationPosePlaybackMode::Loop) {
+    clipState.timeSeconds =
+        wrapLoopTime(clipState.timeSeconds, clip.durationSeconds);
+    return;
+  }
+  if (clipState.timeSeconds >= clip.durationSeconds) {
+    clipState.timeSeconds = clip.durationSeconds;
+    clipState.playing = false;
+  }
 }
 
 void destroyOwnedBuffer(GPUDevice &gpu, std::unique_ptr<Buffer> &buffer) {
@@ -240,15 +314,40 @@ struct AnimatedRenderableState {
   std::unique_ptr<Buffer> finalOutputVertexBuffer;
 };
 
+struct AnimationClipGpuData {
+  explicit AnimationClipGpuData(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : keyTimes(memory), values(memory), channels(memory) {}
+
+  uint32_t clipIndex = kInvalidIndex;
+  std::pmr::vector<float> keyTimes;
+  std::pmr::vector<float> values;
+  std::pmr::vector<AnimationChannelGpu> channels;
+  std::unique_ptr<Buffer> keyTimesBuffer;
+  std::unique_ptr<Buffer> valuesBuffer;
+  std::unique_ptr<Buffer> channelsBuffer;
+  std::unique_ptr<Buffer> sampledNodeStatesBuffer;
+  std::unique_ptr<Buffer> sampledWeightsBuffer;
+};
+
+void destroyClipBuffers(GPUDevice &gpu, AnimationClipGpuData &clip) {
+  destroyOwnedBuffer(gpu, clip.keyTimesBuffer);
+  destroyOwnedBuffer(gpu, clip.valuesBuffer);
+  destroyOwnedBuffer(gpu, clip.channelsBuffer);
+  destroyOwnedBuffer(gpu, clip.sampledNodeStatesBuffer);
+  destroyOwnedBuffer(gpu, clip.sampledWeightsBuffer);
+}
+
 struct AnimationPoseInstance {
   explicit AnimationPoseInstance(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : prefab(memory), instantiationMap(memory), baseNodeStates(memory),
         baseWeights(memory), nodeMeta(memory), depthOrderedNodes(memory),
-        depthBucketStarts(memory), depthBucketCounts(memory), keyTimes(memory),
-        values(memory), channels(memory), renderableBindings(memory),
+        depthBucketStarts(memory), depthBucketCounts(memory),
+        controlledNodeMask(memory), renderableBindings(memory),
         animatedRenderables(memory), flattenedJointNodeIndices(memory),
-        flattenedInverseBindMatrices(memory) {}
+        flattenedInverseBindMatrices(memory),
+        clips{AnimationClipGpuData(memory), AnimationClipGpuData(memory)} {}
 
   ScenePrefab prefab;
   SceneInstantiationMap instantiationMap;
@@ -263,22 +362,18 @@ struct AnimationPoseInstance {
   std::pmr::vector<uint32_t> depthOrderedNodes;
   std::pmr::vector<uint32_t> depthBucketStarts;
   std::pmr::vector<uint32_t> depthBucketCounts;
-  std::pmr::vector<float> keyTimes;
-  std::pmr::vector<float> values;
-  std::pmr::vector<AnimationChannelGpu> channels;
+  std::pmr::vector<uint8_t> controlledNodeMask;
   std::pmr::vector<AnimationRenderableBindingGpu> renderableBindings;
   std::pmr::vector<AnimatedRenderableState> animatedRenderables;
   std::pmr::vector<uint32_t> flattenedJointNodeIndices;
   std::pmr::vector<glm::mat4> flattenedInverseBindMatrices;
+  std::array<AnimationClipGpuData, kClipSlotCount> clips;
 
   std::unique_ptr<Buffer> nodeMetaBuffer;
   std::unique_ptr<Buffer> depthOrderedNodesBuffer;
-  std::unique_ptr<Buffer> keyTimesBuffer;
-  std::unique_ptr<Buffer> valuesBuffer;
-  std::unique_ptr<Buffer> channelsBuffer;
   std::unique_ptr<Buffer> renderableBindingsBuffer;
-  std::unique_ptr<Buffer> sampledNodeStatesBuffer;
-  std::unique_ptr<Buffer> sampledWeightsBuffer;
+  std::unique_ptr<Buffer> blendedNodeStatesBuffer;
+  std::unique_ptr<Buffer> blendedWeightsBuffer;
   std::unique_ptr<Buffer> worldMatricesBuffer;
   std::unique_ptr<Buffer> jointNodeIndicesBuffer;
   std::unique_ptr<Buffer> inverseBindMatricesBuffer;
@@ -290,6 +385,7 @@ struct SceneFrameState {
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : baseInstances(memory), geometryOverrides(memory), preDispatches(memory),
         samplePushConstants(memory), sampleDependencies(memory),
+        blendPushConstants(memory), blendDependencies(memory),
         worldPushConstants(memory), worldDependencies(memory),
         scatterPushConstants(memory), scatterDependencies(memory),
         morphPushConstants(memory), morphDependencies(memory),
@@ -303,6 +399,8 @@ struct SceneFrameState {
   std::pmr::vector<ComputeDispatchItem> preDispatches;
   std::pmr::vector<SamplePushConstants> samplePushConstants;
   std::pmr::vector<std::array<BufferHandle, 4>> sampleDependencies;
+  std::pmr::vector<BlendPushConstants> blendPushConstants;
+  std::pmr::vector<std::array<BufferHandle, 6>> blendDependencies;
   std::pmr::vector<WorldPushConstants> worldPushConstants;
   std::pmr::vector<std::array<BufferHandle, 4>> worldDependencies;
   std::pmr::vector<ScatterPushConstants> scatterPushConstants;
@@ -324,6 +422,8 @@ struct SceneFrameState {
     preDispatches.clear();
     samplePushConstants.clear();
     sampleDependencies.clear();
+    blendPushConstants.clear();
+    blendDependencies.clear();
     worldPushConstants.clear();
     worldDependencies.clear();
     scatterPushConstants.clear();
@@ -337,6 +437,16 @@ struct SceneFrameState {
   }
 };
 
+void invalidatePreparedSceneFrame(SceneFrameState &sceneFrame) noexcept {
+  sceneFrame.resetTransientDispatchState();
+  sceneFrame.geometryOverrides.clear();
+  sceneFrame.publishedData = {};
+  sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
+  sceneFrame.scene = nullptr;
+  sceneFrame.sceneTopologyVersion = 0u;
+  sceneFrame.renderableCount = 0u;
+}
+
 void destroyAnimatedRenderableBuffers(
     GPUDevice &gpu,
     std::pmr::vector<AnimatedRenderableState> &animatedRenderables) {
@@ -349,12 +459,12 @@ void destroyAnimatedRenderableBuffers(
 void destroyInstanceBuffers(GPUDevice &gpu, AnimationPoseInstance &instance) {
   destroyOwnedBuffer(gpu, instance.nodeMetaBuffer);
   destroyOwnedBuffer(gpu, instance.depthOrderedNodesBuffer);
-  destroyOwnedBuffer(gpu, instance.keyTimesBuffer);
-  destroyOwnedBuffer(gpu, instance.valuesBuffer);
-  destroyOwnedBuffer(gpu, instance.channelsBuffer);
   destroyOwnedBuffer(gpu, instance.renderableBindingsBuffer);
-  destroyOwnedBuffer(gpu, instance.sampledNodeStatesBuffer);
-  destroyOwnedBuffer(gpu, instance.sampledWeightsBuffer);
+  for (AnimationClipGpuData &clip : instance.clips) {
+    destroyClipBuffers(gpu, clip);
+  }
+  destroyOwnedBuffer(gpu, instance.blendedNodeStatesBuffer);
+  destroyOwnedBuffer(gpu, instance.blendedWeightsBuffer);
   destroyOwnedBuffer(gpu, instance.worldMatricesBuffer);
   destroyOwnedBuffer(gpu, instance.jointNodeIndicesBuffer);
   destroyOwnedBuffer(gpu, instance.inverseBindMatricesBuffer);
@@ -372,6 +482,28 @@ void destroyBindingBuffers(GPUDevice &gpu, AnimationPoseInstance &instance) {
 
 void destroySceneFrameBuffers(GPUDevice &gpu, SceneFrameState &sceneFrame) {
   destroyOwnedBuffer(gpu, sceneFrame.instanceMatricesBuffer);
+}
+
+[[nodiscard]] bool controlsPrefabNode(const AnimationPoseInstance &instance,
+                                      uint32_t nodeIndex) {
+  return nodeIndex < instance.controlledNodeMask.size() &&
+         instance.controlledNodeMask[nodeIndex] != 0u;
+}
+
+[[nodiscard]] bool
+renderableControlledByInstance(const AnimationPoseInstance &instance,
+                               const ScenePrefabRenderable &prefabRenderable) {
+  if (controlsPrefabNode(instance, prefabRenderable.nodeIndex)) {
+    return true;
+  }
+  if (prefabRenderable.skinIndex >= instance.prefab.skins.size()) {
+    return false;
+  }
+  const SkinData &skin = instance.prefab.skins[prefabRenderable.skinIndex];
+  return std::any_of(skin.jointNodeIndices.begin(), skin.jointNodeIndices.end(),
+                     [&instance](uint32_t jointNodeIndex) {
+                       return controlsPrefabNode(instance, jointNodeIndex);
+                     });
 }
 
 Result<bool, std::string> buildBaseData(AnimationPoseInstance &instance) {
@@ -443,31 +575,36 @@ Result<bool, std::string> buildBaseData(AnimationPoseInstance &instance) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> buildClipData(AnimationPoseInstance &instance) {
+Result<bool, std::string> buildClipData(AnimationPoseInstance &instance,
+                                        size_t clipSlot, uint32_t clipIndex) {
   if (instance.prefab.animations.empty()) {
     return Result<bool, std::string>::makeError(
         "AnimationPoseSimulationBackend: prefab has no animations");
   }
-  if (instance.params.clipIndex >= instance.prefab.animations.size()) {
+  if (clipSlot >= instance.clips.size() ||
+      clipIndex >= instance.prefab.animations.size()) {
     return Result<bool, std::string>::makeError(
-        "AnimationPoseSimulationBackend: clip index is out of range");
+        "AnimationPoseSimulationBackend: clip selection is out of range");
   }
 
-  const AnimationClipData &clip =
-      instance.prefab.animations[instance.params.clipIndex];
-  instance.keyTimes.clear();
-  instance.values.clear();
-  instance.channels.clear();
-  instance.channels.reserve(clip.channels.size());
+  AnimationClipGpuData &clipData = instance.clips[clipSlot];
+  clipData.clipIndex = clipIndex;
+  clipData.keyTimes.clear();
+  clipData.values.clear();
+  clipData.channels.clear();
+
+  const AnimationClipData &clip = instance.prefab.animations[clipIndex];
+  clipData.channels.reserve(clip.channels.size());
   for (const AnimationChannelData &channel : clip.channels) {
     if (channel.samplerIndex >= clip.samplers.size() ||
-        channel.targetNodeIndex >= instance.nodeMeta.size()) {
+        channel.targetNodeIndex >= instance.nodeMeta.size() ||
+        !controlsPrefabNode(instance, channel.targetNodeIndex)) {
       continue;
     }
     const AnimationSamplerData &sampler = clip.samplers[channel.samplerIndex];
-    instance.channels.push_back(AnimationChannelGpu{
-        .keyOffset = static_cast<uint32_t>(instance.keyTimes.size()),
-        .valueOffset = static_cast<uint32_t>(instance.values.size()),
+    clipData.channels.push_back(AnimationChannelGpu{
+        .keyOffset = static_cast<uint32_t>(clipData.keyTimes.size()),
+        .valueOffset = static_cast<uint32_t>(clipData.values.size()),
         .keyCount = static_cast<uint32_t>(sampler.keyTimes.size()),
         .valueArity = sampler.valueArity,
         .targetNodeIndex = channel.targetNodeIndex,
@@ -476,12 +613,67 @@ Result<bool, std::string> buildClipData(AnimationPoseInstance &instance) {
         .targetWeightOffset =
             instance.nodeMeta[channel.targetNodeIndex].weightOffset,
     });
-    instance.keyTimes.insert(instance.keyTimes.end(), sampler.keyTimes.begin(),
+    clipData.keyTimes.insert(clipData.keyTimes.end(), sampler.keyTimes.begin(),
                              sampler.keyTimes.end());
-    instance.values.insert(instance.values.end(), sampler.values.begin(),
+    clipData.values.insert(clipData.values.end(), sampler.values.begin(),
                            sampler.values.end());
   }
   return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> createClipBuffers(
+    AnimationGpuServices &services, const AnimationPoseInstance &instance,
+    AnimationClipGpuData &clipData, const ClipBufferLabels &labels) {
+  auto &gpu = services.gpu();
+  destroyClipBuffers(gpu, clipData);
+
+  auto keyTimesResult = services.createStorageBuffer(
+      clipData.keyTimes.size() * sizeof(float), labels.keyTimes);
+  if (keyTimesResult.hasError()) {
+    return Result<bool, std::string>::makeError(keyTimesResult.error());
+  }
+  clipData.keyTimesBuffer = std::move(keyTimesResult.value());
+
+  auto valuesResult = services.createStorageBuffer(
+      clipData.values.size() * sizeof(float), labels.values);
+  if (valuesResult.hasError()) {
+    return Result<bool, std::string>::makeError(valuesResult.error());
+  }
+  clipData.valuesBuffer = std::move(valuesResult.value());
+
+  auto channelResult = services.createStorageBuffer(
+      clipData.channels.size() * sizeof(AnimationChannelGpu), labels.channels);
+  if (channelResult.hasError()) {
+    return Result<bool, std::string>::makeError(channelResult.error());
+  }
+  clipData.channelsBuffer = std::move(channelResult.value());
+
+  auto nodeStatesResult = services.createStorageBuffer(
+      instance.baseNodeStates.size() * sizeof(AnimationNodeStateGpu),
+      labels.sampledNodes);
+  if (nodeStatesResult.hasError()) {
+    return Result<bool, std::string>::makeError(nodeStatesResult.error());
+  }
+  clipData.sampledNodeStatesBuffer = std::move(nodeStatesResult.value());
+
+  auto sampledWeightsResult = services.createStorageBuffer(
+      instance.baseWeights.size() * sizeof(float), labels.sampledWeights);
+  if (sampledWeightsResult.hasError()) {
+    return Result<bool, std::string>::makeError(sampledWeightsResult.error());
+  }
+  clipData.sampledWeightsBuffer = std::move(sampledWeightsResult.value());
+
+  auto uploadKeyTimes =
+      uploadVector(gpu, *clipData.keyTimesBuffer, clipData.keyTimes);
+  if (uploadKeyTimes.hasError()) {
+    return uploadKeyTimes;
+  }
+  auto uploadValues =
+      uploadVector(gpu, *clipData.valuesBuffer, clipData.values);
+  if (uploadValues.hasError()) {
+    return uploadValues;
+  }
+  return uploadVector(gpu, *clipData.channelsBuffer, clipData.channels);
 }
 
 Result<bool, std::string> createStaticBuffers(AnimationGpuServices &services,
@@ -489,12 +681,13 @@ Result<bool, std::string> createStaticBuffers(AnimationGpuServices &services,
   auto &gpu = services.gpu();
   destroyOwnedBuffer(gpu, instance.nodeMetaBuffer);
   destroyOwnedBuffer(gpu, instance.depthOrderedNodesBuffer);
-  destroyOwnedBuffer(gpu, instance.keyTimesBuffer);
-  destroyOwnedBuffer(gpu, instance.valuesBuffer);
-  destroyOwnedBuffer(gpu, instance.channelsBuffer);
-  destroyOwnedBuffer(gpu, instance.sampledNodeStatesBuffer);
-  destroyOwnedBuffer(gpu, instance.sampledWeightsBuffer);
+  destroyOwnedBuffer(gpu, instance.blendedNodeStatesBuffer);
+  destroyOwnedBuffer(gpu, instance.blendedWeightsBuffer);
   destroyOwnedBuffer(gpu, instance.worldMatricesBuffer);
+  for (AnimationClipGpuData &clip : instance.clips) {
+    destroyClipBuffers(gpu, clip);
+  }
+
   auto nodeMetaResult = services.createStorageBuffer(
       instance.nodeMeta.size() * sizeof(AnimationNodeMetaGpu),
       "animation_pose_node_meta");
@@ -502,6 +695,7 @@ Result<bool, std::string> createStaticBuffers(AnimationGpuServices &services,
     return Result<bool, std::string>::makeError(nodeMetaResult.error());
   }
   instance.nodeMetaBuffer = std::move(nodeMetaResult.value());
+
   auto depthNodesResult = services.createStorageBuffer(
       instance.depthOrderedNodes.size() * sizeof(uint32_t),
       "animation_pose_depth_nodes");
@@ -509,39 +703,23 @@ Result<bool, std::string> createStaticBuffers(AnimationGpuServices &services,
     return Result<bool, std::string>::makeError(depthNodesResult.error());
   }
   instance.depthOrderedNodesBuffer = std::move(depthNodesResult.value());
-  auto keyTimesResult = services.createStorageBuffer(
-      instance.keyTimes.size() * sizeof(float), "animation_pose_key_times");
-  if (keyTimesResult.hasError()) {
-    return Result<bool, std::string>::makeError(keyTimesResult.error());
-  }
-  instance.keyTimesBuffer = std::move(keyTimesResult.value());
-  auto valuesResult = services.createStorageBuffer(
-      instance.values.size() * sizeof(float), "animation_pose_values");
-  if (valuesResult.hasError()) {
-    return Result<bool, std::string>::makeError(valuesResult.error());
-  }
-  instance.valuesBuffer = std::move(valuesResult.value());
-  auto channelResult = services.createStorageBuffer(
-      instance.channels.size() * sizeof(AnimationChannelGpu),
-      "animation_pose_channels");
-  if (channelResult.hasError()) {
-    return Result<bool, std::string>::makeError(channelResult.error());
-  }
-  instance.channelsBuffer = std::move(channelResult.value());
-  auto nodeStatesResult = services.createStorageBuffer(
+
+  auto blendedNodesResult = services.createStorageBuffer(
       instance.baseNodeStates.size() * sizeof(AnimationNodeStateGpu),
-      "animation_pose_sampled_nodes");
-  if (nodeStatesResult.hasError()) {
-    return Result<bool, std::string>::makeError(nodeStatesResult.error());
+      "animation_pose_blended_nodes");
+  if (blendedNodesResult.hasError()) {
+    return Result<bool, std::string>::makeError(blendedNodesResult.error());
   }
-  instance.sampledNodeStatesBuffer = std::move(nodeStatesResult.value());
-  auto sampledWeightsResult =
+  instance.blendedNodeStatesBuffer = std::move(blendedNodesResult.value());
+
+  auto blendedWeightsResult =
       services.createStorageBuffer(instance.baseWeights.size() * sizeof(float),
-                                   "animation_pose_sampled_weights");
-  if (sampledWeightsResult.hasError()) {
-    return Result<bool, std::string>::makeError(sampledWeightsResult.error());
+                                   "animation_pose_blended_weights");
+  if (blendedWeightsResult.hasError()) {
+    return Result<bool, std::string>::makeError(blendedWeightsResult.error());
   }
-  instance.sampledWeightsBuffer = std::move(sampledWeightsResult.value());
+  instance.blendedWeightsBuffer = std::move(blendedWeightsResult.value());
+
   auto worldResult = services.createStorageBuffer(
       instance.baseNodeStates.size() * sizeof(glm::mat4),
       "animation_pose_world_matrices");
@@ -560,17 +738,35 @@ Result<bool, std::string> createStaticBuffers(AnimationGpuServices &services,
   if (uploadDepthNodes.hasError()) {
     return uploadDepthNodes;
   }
-  auto uploadKeyTimes =
-      uploadVector(gpu, *instance.keyTimesBuffer, instance.keyTimes);
-  if (uploadKeyTimes.hasError()) {
-    return uploadKeyTimes;
+
+  auto createClipSlot =
+      [&](size_t clipSlot,
+          const AnimationPoseClipState &state) -> Result<bool, std::string> {
+    AnimationClipGpuData &clipData = instance.clips[clipSlot];
+    clipData.clipIndex = kInvalidIndex;
+    clipData.keyTimes.clear();
+    clipData.values.clear();
+    clipData.channels.clear();
+    if (!clipStateValid(instance.prefab, state)) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+    auto buildResult = buildClipData(instance, clipSlot, state.clipIndex);
+    if (buildResult.hasError()) {
+      return buildResult;
+    }
+    return createClipBuffers(services, instance, clipData,
+                             clipBufferLabels(clipSlot));
+  };
+
+  auto primaryResult =
+      createClipSlot(kPrimaryClipSlot, instance.params.primary);
+  if (primaryResult.hasError()) {
+    return primaryResult;
   }
-  auto uploadValues =
-      uploadVector(gpu, *instance.valuesBuffer, instance.values);
-  if (uploadValues.hasError()) {
-    return uploadValues;
+  if (!blendEnabled(instance.prefab, instance.params)) {
+    return Result<bool, std::string>::makeResult(true);
   }
-  return uploadVector(gpu, *instance.channelsBuffer, instance.channels);
+  return createClipSlot(kSecondaryClipSlot, instance.params.secondary);
 }
 
 Result<bool, std::string> appendAnimatedRenderableBinding(
@@ -597,6 +793,10 @@ Result<bool, std::string> appendAnimatedRenderableBinding(
 
   const ScenePrefabRenderable &prefabRenderable =
       instance.prefab.renderables[prefabRenderableIndex];
+  if (!renderableControlledByInstance(instance, prefabRenderable)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
   const auto duplicateBindingIt = std::find_if(
       instance.renderableBindings.begin(), instance.renderableBindings.end(),
       [runtimeRenderableIndex](
@@ -865,6 +1065,7 @@ struct AnimationPoseSimulationBackend::Impl {
 
   PmrHashMap<SimulationHandle, AnimationPoseInstance> instances;
   SceneFrameState sceneFrame;
+  uint64_t sceneFrameVersionCounter = 0u;
 };
 
 AnimationPoseSimulationBackend::AnimationPoseSimulationBackend(
@@ -892,11 +1093,12 @@ AnimationPoseSimulationBackend::createInstance(SceneRuntimeHost &host,
     return Result<bool, std::string>::makeError(initResult.error());
   }
 
-  AnimationPoseSimulationParams params{};
-  if (!readParams(desc.initialParams, params)) {
-    return Result<bool, std::string>::makeError(
-        "AnimationPoseSimulationBackend: invalid params payload");
+  auto paramsResult = decodeAnimationPoseSimulationParams(desc.initialParams);
+  if (paramsResult.hasError()) {
+    return Result<bool, std::string>::makeError(paramsResult.error());
   }
+  AnimationPoseSimulationParams params = paramsResult.value();
+  sanitizeAnimationPoseSimulationParams(params);
   if (!host.pendingAnimationPoseCreatePayload_.has_value()) {
     return Result<bool, std::string>::makeError(
         "AnimationPoseSimulationBackend: missing transient create payload; use "
@@ -915,13 +1117,25 @@ AnimationPoseSimulationBackend::createInstance(SceneRuntimeHost &host,
   instance.instantiationMap = *payload.instantiationMap;
   instance.rootNode = desc.binding.primaryTarget.prefabRoot;
   instance.params = params;
+  instance.controlledNodeMask.assign(instance.prefab.nodes.size(), uint8_t{0u});
+  if (payload.controlledPrefabNodeIndices.empty()) {
+    std::fill(instance.controlledNodeMask.begin(),
+              instance.controlledNodeMask.end(), uint8_t{1u});
+  } else {
+    for (const uint32_t nodeIndex : payload.controlledPrefabNodeIndices) {
+      if (nodeIndex < instance.controlledNodeMask.size()) {
+        instance.controlledNodeMask[nodeIndex] = 1u;
+      }
+    }
+  }
+  auto validateResult =
+      validateAnimationPoseSimulationParams(instance.prefab, params);
+  if (validateResult.hasError()) {
+    return validateResult;
+  }
   auto baseResult = buildBaseData(instance);
   if (baseResult.hasError()) {
     return baseResult;
-  }
-  auto clipResult = buildClipData(instance);
-  if (clipResult.hasError()) {
-    return clipResult;
   }
   auto staticBufferResult = createStaticBuffers(*services_, instance);
   if (staticBufferResult.hasError()) {
@@ -933,6 +1147,7 @@ AnimationPoseSimulationBackend::createInstance(SceneRuntimeHost &host,
   }
 
   impl_->instances.insert_or_assign(handle, std::move(instance));
+  invalidatePreparedSceneFrame(impl_->sceneFrame);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -960,6 +1175,8 @@ AnimationPoseSimulationBackend::destroyInstance(SceneRuntimeHost &,
     impl_->sceneFrame.scene = nullptr;
     impl_->sceneFrame.sceneTopologyVersion = 0u;
     impl_->sceneFrame.renderableCount = 0u;
+  } else {
+    invalidatePreparedSceneFrame(impl_->sceneFrame);
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -980,17 +1197,34 @@ Result<bool, std::string> AnimationPoseSimulationBackend::updateParams(
     return Result<bool, std::string>::makeError(
         "AnimationPoseSimulationBackend: services_ is null");
   }
-  AnimationPoseSimulationParams decoded{};
-  if (!readParams(params, decoded)) {
-    return Result<bool, std::string>::makeError(
-        "AnimationPoseSimulationBackend: invalid params payload");
+  auto decodedResult = decodeAnimationPoseSimulationParams(params);
+  if (decodedResult.hasError()) {
+    return Result<bool, std::string>::makeError(decodedResult.error());
   }
+  AnimationPoseSimulationParams decoded = decodedResult.value();
+  sanitizeAnimationPoseSimulationParams(decoded);
+  auto validateResult =
+      validateAnimationPoseSimulationParams(it->second.prefab, decoded);
+  if (validateResult.hasError()) {
+    return validateResult;
+  }
+  const bool primaryClipChanged =
+      decoded.primary.clipIndex != it->second.params.primary.clipIndex;
+  const bool wasBlendEnabled =
+      blendEnabled(it->second.prefab, it->second.params);
+  const bool isBlendEnabledNow = blendEnabled(it->second.prefab, decoded);
+  const bool secondaryClipChanged =
+      decoded.secondary.clipIndex != it->second.params.secondary.clipIndex;
   it->second.params = decoded;
-  auto clipResult = buildClipData(it->second);
-  if (clipResult.hasError()) {
-    return clipResult;
+  if (primaryClipChanged || wasBlendEnabled != isBlendEnabledNow ||
+      (isBlendEnabledNow && secondaryClipChanged)) {
+    auto recreateResult = createStaticBuffers(*services_, it->second);
+    if (recreateResult.hasError()) {
+      return recreateResult;
+    }
   }
-  return createStaticBuffers(*services_, it->second);
+  invalidatePreparedSceneFrame(impl_->sceneFrame);
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> AnimationPoseSimulationBackend::executePhase(
@@ -1015,19 +1249,17 @@ Result<bool, std::string> AnimationPoseSimulationBackend::executePhase(
         "AnimationPoseSimulationBackend: instance handle is invalid");
   }
   AnimationPoseInstance &instance = it->second;
-  const AnimationClipData &clip =
-      instance.prefab.animations[instance.params.clipIndex];
-  if (instance.params.playing && clip.durationSeconds > 0.0f) {
-    instance.params.timeSeconds =
-        std::max(0.0f, instance.params.timeSeconds +
-                           static_cast<float>(context.effectiveDeltaSeconds));
-    if (instance.params.playbackMode == AnimationPosePlaybackMode::Loop) {
-      instance.params.timeSeconds =
-          wrapLoopTime(instance.params.timeSeconds, clip.durationSeconds);
-    } else if (instance.params.timeSeconds >= clip.durationSeconds) {
-      instance.params.timeSeconds = clip.durationSeconds;
-      instance.params.playing = false;
-    }
+  if (clipStateValid(instance.prefab, instance.params.primary)) {
+    advanceClipTime(
+        instance.params.primary,
+        instance.prefab.animations[instance.params.primary.clipIndex],
+        static_cast<float>(context.effectiveDeltaSeconds));
+  }
+  if (clipStateValid(instance.prefab, instance.params.secondary)) {
+    advanceClipTime(
+        instance.params.secondary,
+        instance.prefab.animations[instance.params.secondary.clipIndex],
+        static_cast<float>(context.effectiveDeltaSeconds));
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1035,27 +1267,35 @@ Result<bool, std::string> AnimationPoseSimulationBackend::executePhase(
 namespace {
 
 bool isPlaybackRunning(const SimulationRegistry::Record &record,
-                       const AnimationPoseInstance &instance) noexcept {
+                       const AnimationPoseClipState &clipState) noexcept {
   return record.enabled && !record.faulted &&
-         record.state == SimulationState::Running && instance.params.playing;
+         record.state == SimulationState::Running && clipState.playing;
 }
 
 float computeRenderSampleTime(const SceneRuntimeHost &host,
                               const SimulationRegistry::Record &record,
-                              const AnimationPoseInstance &instance,
+                              const AnimationPoseClipState &clipState,
                               const AnimationClipData &clip) noexcept {
-  float sampleTime = instance.params.timeSeconds;
-  if (!isPlaybackRunning(record, instance) || clip.durationSeconds <= 0.0f) {
+  float sampleTime = clipState.timeSeconds;
+  if (!isPlaybackRunning(record, clipState) || clip.durationSeconds <= 0.0f) {
     return sampleTime;
   }
   const double accumulatorSeconds =
       std::max(0.0, host.remainingAccumulatorSeconds());
   sampleTime +=
       static_cast<float>(accumulatorSeconds * std::max(record.timeScale, 0.0f));
-  if (instance.params.playbackMode == AnimationPosePlaybackMode::Loop) {
+  if (clipState.playbackMode == AnimationPosePlaybackMode::Loop) {
     return wrapLoopTime(sampleTime, clip.durationSeconds);
   }
   return std::min(sampleTime, clip.durationSeconds);
+}
+
+float computeNormalizedPhase(float sampleTime,
+                             const AnimationClipData &clip) noexcept {
+  if (!(clip.durationSeconds > 0.0f)) {
+    return 0.0f;
+  }
+  return glm::clamp(sampleTime / clip.durationSeconds, 0.0f, 1.0f);
 }
 
 } // namespace
@@ -1100,6 +1340,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   sceneFrame.renderableCount = scene.renderables().size();
 
   size_t sampleDispatchCount = 0u;
+  size_t blendDispatchCount = 0u;
   size_t worldDispatchCount = 0u;
   size_t scatterDispatchCount = 0u;
   size_t morphDispatchCount = 0u;
@@ -1115,8 +1356,17 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         return bindingResult;
       }
     }
-    if (!instance.channels.empty()) {
+    const AnimationClipGpuData &primaryClip = instance.clips[kPrimaryClipSlot];
+    if (!primaryClip.channels.empty()) {
       ++sampleDispatchCount;
+    }
+    if (blendEnabled(instance.prefab, instance.params)) {
+      const AnimationClipGpuData &secondaryClip =
+          instance.clips[kSecondaryClipSlot];
+      if (!secondaryClip.channels.empty()) {
+        ++sampleDispatchCount;
+      }
+      ++blendDispatchCount;
     }
     worldDispatchCount += instance.depthBucketStarts.size();
     if (!instance.renderableBindings.empty()) {
@@ -1131,10 +1381,13 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   }
 
   sceneFrame.preDispatches.reserve(
-      sampleDispatchCount + worldDispatchCount + scatterDispatchCount +
-      morphDispatchCount + skinPaletteDispatchCount + skinDispatchCount);
+      sampleDispatchCount + blendDispatchCount + worldDispatchCount +
+      scatterDispatchCount + morphDispatchCount + skinPaletteDispatchCount +
+      skinDispatchCount);
   sceneFrame.samplePushConstants.reserve(sampleDispatchCount);
   sceneFrame.sampleDependencies.reserve(sampleDispatchCount);
+  sceneFrame.blendPushConstants.reserve(blendDispatchCount);
+  sceneFrame.blendDependencies.reserve(blendDispatchCount);
   sceneFrame.worldPushConstants.reserve(worldDispatchCount);
   sceneFrame.worldDependencies.reserve(worldDispatchCount);
   sceneFrame.scatterPushConstants.reserve(scatterDispatchCount);
@@ -1159,57 +1412,108 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
     if (record == nullptr || record->faulted) {
       continue;
     }
-    const AnimationClipData &clip =
-        instance.prefab.animations[instance.params.clipIndex];
-    const float sampleTimeSeconds =
-        computeRenderSampleTime(host, *record, instance, clip);
+    const AnimationClipGpuData &primaryClipGpu =
+        instance.clips[kPrimaryClipSlot];
+    NURI_ASSERT(primaryClipGpu.sampledNodeStatesBuffer != nullptr &&
+                    primaryClipGpu.sampledWeightsBuffer != nullptr,
+                "AnimationPoseSimulationBackend: primary clip buffers are "
+                "missing");
+    const AnimationClipData &primaryClip =
+        instance.prefab.animations[instance.params.primary.clipIndex];
+    const float primarySampleTime = computeRenderSampleTime(
+        host, *record, instance.params.primary, primaryClip);
+    const bool instanceBlendEnabled =
+        blendEnabled(instance.prefab, instance.params);
 
-    auto uploadNodeStates =
-        uploadVector(services_->gpu(), *instance.sampledNodeStatesBuffer,
+    auto uploadPrimaryNodeStates =
+        uploadVector(services_->gpu(), *primaryClipGpu.sampledNodeStatesBuffer,
                      instance.baseNodeStates);
-    if (uploadNodeStates.hasError()) {
-      return uploadNodeStates;
+    if (uploadPrimaryNodeStates.hasError()) {
+      return uploadPrimaryNodeStates;
     }
-    auto uploadWeights = uploadVector(
-        services_->gpu(), *instance.sampledWeightsBuffer, instance.baseWeights);
-    if (uploadWeights.hasError()) {
-      return uploadWeights;
+    auto uploadPrimaryWeights =
+        uploadVector(services_->gpu(), *primaryClipGpu.sampledWeightsBuffer,
+                     instance.baseWeights);
+    if (uploadPrimaryWeights.hasError()) {
+      return uploadPrimaryWeights;
+    }
+
+    const AnimationClipGpuData *secondaryClipGpu = nullptr;
+    const AnimationClipData *secondaryClip = nullptr;
+    float secondarySampleTime = 0.0f;
+    if (instanceBlendEnabled) {
+      secondaryClipGpu = &instance.clips[kSecondaryClipSlot];
+      NURI_ASSERT(secondaryClipGpu->sampledNodeStatesBuffer != nullptr &&
+                      secondaryClipGpu->sampledWeightsBuffer != nullptr,
+                  "AnimationPoseSimulationBackend: secondary clip buffers are "
+                  "missing");
+      secondaryClip =
+          &instance.prefab.animations[instance.params.secondary.clipIndex];
+      secondarySampleTime = computeRenderSampleTime(
+          host, *record, instance.params.secondary, *secondaryClip);
+      if (instance.params.blendSyncMode ==
+          AnimationPoseBlendSyncMode::NormalizedTime) {
+        secondarySampleTime =
+            computeNormalizedPhase(primarySampleTime, primaryClip) *
+            std::max(secondaryClip->durationSeconds, 0.0f);
+      }
+
+      auto uploadSecondaryNodeStates = uploadVector(
+          services_->gpu(), *secondaryClipGpu->sampledNodeStatesBuffer,
+          instance.baseNodeStates);
+      if (uploadSecondaryNodeStates.hasError()) {
+        return uploadSecondaryNodeStates;
+      }
+      auto uploadSecondaryWeights = uploadVector(
+          services_->gpu(), *secondaryClipGpu->sampledWeightsBuffer,
+          instance.baseWeights);
+      if (uploadSecondaryWeights.hasError()) {
+        return uploadSecondaryWeights;
+      }
     }
 
     glm::mat4 rootTransform(1.0f);
     (void)scene.graph().getCachedNodeWorldTransform(instance.rootNode,
                                                     rootTransform);
-    const uint64_t nodeStatesAddress = services_->gpu().getBufferDeviceAddress(
-        instance.sampledNodeStatesBuffer->handle());
-    const uint64_t sampledWeightsAddress =
+    const uint64_t primaryNodeStatesAddress =
         services_->gpu().getBufferDeviceAddress(
-            instance.sampledWeightsBuffer->handle());
+            primaryClipGpu.sampledNodeStatesBuffer->handle());
+    const uint64_t primaryWeightsAddress =
+        services_->gpu().getBufferDeviceAddress(
+            primaryClipGpu.sampledWeightsBuffer->handle());
     const uint64_t worldMatricesAddress =
         services_->gpu().getBufferDeviceAddress(
             instance.worldMatricesBuffer->handle());
-    if (nodeStatesAddress == 0u || sampledWeightsAddress == 0u ||
+    if (primaryNodeStatesAddress == 0u || primaryWeightsAddress == 0u ||
         worldMatricesAddress == 0u) {
       return Result<bool, std::string>::makeError(
           "AnimationPoseSimulationBackend: invalid dynamic buffer address");
     }
 
-    if (!instance.channels.empty()) {
+    auto appendSampleDispatch =
+        [&](const AnimationClipGpuData &clipGpu,
+            float sampleTimeSeconds) -> Result<bool, std::string> {
+      if (clipGpu.channels.empty()) {
+        return Result<bool, std::string>::makeResult(true);
+      }
       sceneFrame.samplePushConstants.push_back(SamplePushConstants{
           .channelsAddress = services_->gpu().getBufferDeviceAddress(
-              instance.channelsBuffer->handle()),
+              clipGpu.channelsBuffer->handle()),
           .keyTimesAddress = services_->gpu().getBufferDeviceAddress(
-              instance.keyTimesBuffer->handle()),
+              clipGpu.keyTimesBuffer->handle()),
           .valuesAddress = services_->gpu().getBufferDeviceAddress(
-              instance.valuesBuffer->handle()),
-          .nodeStatesAddress = nodeStatesAddress,
-          .sampledWeightsAddress = sampledWeightsAddress,
+              clipGpu.valuesBuffer->handle()),
+          .nodeStatesAddress = services_->gpu().getBufferDeviceAddress(
+              clipGpu.sampledNodeStatesBuffer->handle()),
+          .sampledWeightsAddress = services_->gpu().getBufferDeviceAddress(
+              clipGpu.sampledWeightsBuffer->handle()),
           .sampleTimeSeconds = sampleTimeSeconds,
-          .channelCount = static_cast<uint32_t>(instance.channels.size()),
+          .channelCount = static_cast<uint32_t>(clipGpu.channels.size()),
       });
       sceneFrame.sampleDependencies.push_back(
-          {instance.channelsBuffer->handle(), instance.keyTimesBuffer->handle(),
-           instance.sampledNodeStatesBuffer->handle(),
-           instance.sampledWeightsBuffer->handle()});
+          {clipGpu.channelsBuffer->handle(), clipGpu.keyTimesBuffer->handle(),
+           clipGpu.sampledNodeStatesBuffer->handle(),
+           clipGpu.sampledWeightsBuffer->handle()});
       appendComputeDispatch(
           sceneFrame.preDispatches, services_->samplePipeline(),
           dispatchCount(sceneFrame.samplePushConstants.back().channelCount),
@@ -1217,6 +1521,80 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           sceneFrame.sampleDependencies.back(),
           sceneFrame.sampleDependencies.back().size(), "AnimationPose Sample",
           0xff5599ffu);
+      return Result<bool, std::string>::makeResult(true);
+    };
+
+    auto primarySampleResult =
+        appendSampleDispatch(primaryClipGpu, primarySampleTime);
+    if (primarySampleResult.hasError()) {
+      return primarySampleResult;
+    }
+
+    uint64_t nodeStatesAddress = primaryNodeStatesAddress;
+    uint64_t sampledWeightsAddress = primaryWeightsAddress;
+    BufferHandle nodeStatesBuffer =
+        primaryClipGpu.sampledNodeStatesBuffer->handle();
+    BufferHandle sampledWeightsBuffer =
+        primaryClipGpu.sampledWeightsBuffer->handle();
+
+    if (instanceBlendEnabled && secondaryClipGpu != nullptr &&
+        secondaryClip != nullptr) {
+      auto secondarySampleResult =
+          appendSampleDispatch(*secondaryClipGpu, secondarySampleTime);
+      if (secondarySampleResult.hasError()) {
+        return secondarySampleResult;
+      }
+
+      const uint64_t secondaryNodeStatesAddress =
+          services_->gpu().getBufferDeviceAddress(
+              secondaryClipGpu->sampledNodeStatesBuffer->handle());
+      const uint64_t secondaryWeightsAddress =
+          services_->gpu().getBufferDeviceAddress(
+              secondaryClipGpu->sampledWeightsBuffer->handle());
+      const uint64_t blendedNodeStatesAddress =
+          services_->gpu().getBufferDeviceAddress(
+              instance.blendedNodeStatesBuffer->handle());
+      const uint64_t blendedWeightsAddress =
+          services_->gpu().getBufferDeviceAddress(
+              instance.blendedWeightsBuffer->handle());
+      if (secondaryNodeStatesAddress == 0u || secondaryWeightsAddress == 0u ||
+          blendedNodeStatesAddress == 0u || blendedWeightsAddress == 0u) {
+        return Result<bool, std::string>::makeError(
+            "AnimationPoseSimulationBackend: invalid blend buffer address");
+      }
+
+      sceneFrame.blendPushConstants.push_back(BlendPushConstants{
+          .sourceNodeStatesAddressA = primaryNodeStatesAddress,
+          .sourceNodeStatesAddressB = secondaryNodeStatesAddress,
+          .outputNodeStatesAddress = blendedNodeStatesAddress,
+          .sourceWeightsAddressA = primaryWeightsAddress,
+          .sourceWeightsAddressB = secondaryWeightsAddress,
+          .outputWeightsAddress = blendedWeightsAddress,
+          .blendWeight = instance.params.blendWeight,
+          .nodeCount = static_cast<uint32_t>(instance.baseNodeStates.size()),
+          .weightCount = static_cast<uint32_t>(instance.baseWeights.size()),
+      });
+      sceneFrame.blendDependencies.push_back(
+          {primaryClipGpu.sampledNodeStatesBuffer->handle(),
+           secondaryClipGpu->sampledNodeStatesBuffer->handle(),
+           instance.blendedNodeStatesBuffer->handle(),
+           primaryClipGpu.sampledWeightsBuffer->handle(),
+           secondaryClipGpu->sampledWeightsBuffer->handle(),
+           instance.blendedWeightsBuffer->handle()});
+      appendComputeDispatch(
+          sceneFrame.preDispatches, services_->blendPipeline(),
+          dispatchCount(
+              std::max(sceneFrame.blendPushConstants.back().nodeCount,
+                       sceneFrame.blendPushConstants.back().weightCount)),
+          sceneFrame.blendPushConstants.back(),
+          sceneFrame.blendDependencies.back(),
+          sceneFrame.blendDependencies.back().size(), "AnimationPose Blend",
+          0xff6688ffu);
+
+      nodeStatesAddress = blendedNodeStatesAddress;
+      sampledWeightsAddress = blendedWeightsAddress;
+      nodeStatesBuffer = instance.blendedNodeStatesBuffer->handle();
+      sampledWeightsBuffer = instance.blendedWeightsBuffer->handle();
     }
 
     for (size_t depthBucketIndex = 0;
@@ -1238,8 +1616,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           .nodeCount = nodeCount,
       });
       sceneFrame.worldDependencies.push_back(
-          {instance.sampledNodeStatesBuffer->handle(),
-           instance.nodeMetaBuffer->handle(),
+          {nodeStatesBuffer, instance.nodeMetaBuffer->handle(),
            instance.depthOrderedNodesBuffer->handle(),
            instance.worldMatricesBuffer->handle()});
       appendComputeDispatch(
@@ -1339,7 +1716,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           });
           sceneFrame.morphDependencies.push_back(
               {animated.sourceVertexBuffer, animated.morphDeltaBuffer,
-               instance.sampledWeightsBuffer->handle(),
+               sampledWeightsBuffer,
                animated.morphOutputVertexBuffer->handle()});
           appendComputeDispatch(sceneFrame.preDispatches,
                                 services_->morphPipeline(),
@@ -1417,7 +1794,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
     }
   }
 
-  ++sceneFrame.version;
+  sceneFrame.version = ++impl_->sceneFrameVersionCounter;
   sceneFrame.preparedFrameIndex = frameIndex;
   return Result<bool, std::string>::makeResult(true);
 }
