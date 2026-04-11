@@ -68,6 +68,27 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
   return seed;
 }
 
+[[nodiscard]] uint64_t computePassPayloadLayoutHash(
+    const std::pmr::vector<RenderPass> &passes) noexcept {
+  uint64_t hash = 0xcbf29ce484222325ull;
+  const auto mix = [&hash](uint64_t value) noexcept {
+    hash ^= value;
+    hash *= 0x100000001b3ull;
+  };
+  for (const RenderPass &pass : passes) {
+    mix(pass.hasColorAttachment ? 1u : 0u);
+    mix(pass.useViewport ? 1u : 0u);
+    mix(pass.drawBuffersPreResolved ? 1u : 0u);
+    mix(static_cast<uint64_t>(pass.dependencyBuffers.size()));
+    mix(static_cast<uint64_t>(pass.preDispatches.size()));
+    mix(static_cast<uint64_t>(pass.draws.size()));
+    for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
+      mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
+    }
+  }
+  return hash;
+}
+
 [[nodiscard]] uint64_t foldPassResourceKey(uint32_t passIndex,
                                            uint32_t resourceIndex) {
   return (static_cast<uint64_t>(passIndex) << 32u) | resourceIndex;
@@ -444,6 +465,7 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .frameOutputCount = frameOutputTextureIndices_.size(),
       .sideEffectMarkCount = sideEffectPassMarks_.size(),
       .allPassesBorrowPayload = allPassesBorrowPayload_,
+      .payloadLayoutHash = computePassPayloadLayoutHash(passes_),
       .transientResourceDescriptorsHash = transientResourceDescriptorsHash_,
       .persistentHandlesVersion = persistentHandlesVersion_,
       .dynamicPayloadVersion = dynamicPayloadVersion_,
@@ -504,6 +526,8 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
 
   const size_t passCount =
       std::min({result.orderedPasses.size(), result.drawRangesByPass.size(),
+                result.preDispatchRangesByPass.size(),
+                result.dependencyBufferRangesByPass.size(),
                 result.orderedPassIndices.size()});
   for (size_t i = 0; i < passCount; ++i) {
     const uint32_t passIndex = result.orderedPassIndices[i];
@@ -526,23 +550,95 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
   }
 
   for (size_t i = 0; i < passCount; ++i) {
-    if (result.preDispatchRangesByPass[i].count == 0 &&
-        !result.orderedPasses[i].preDispatches.empty()) {
-      const uint32_t passIndex = result.orderedPassIndices[i];
-      if (passIndex < passes_.size()) {
-        result.orderedPasses[i].preDispatches =
-            passes_[passIndex].preDispatches;
-      }
-    }
-    if (result.drawRangesByPass[i].count != 0 ||
-        result.orderedPasses[i].draws.empty()) {
-      continue;
-    }
     const uint32_t passIndex = result.orderedPassIndices[i];
     if (passIndex >= passes_.size()) {
       continue;
     }
-    result.orderedPasses[i].draws = passes_[passIndex].draws;
+    const RenderPass &sourcePass = passes_[passIndex];
+
+    const auto dependencyRange = result.dependencyBufferRangesByPass[i];
+    if (dependencyRange.count > 0u &&
+        dependencyRange.offset <= result.resolvedDependencyBuffers.size() &&
+        dependencyRange.count <=
+            result.resolvedDependencyBuffers.size() - dependencyRange.offset) {
+      result.orderedPasses[i].dependencyBuffers = std::span<const BufferHandle>(
+          result.resolvedDependencyBuffers.data() + dependencyRange.offset,
+          dependencyRange.count);
+    } else {
+      result.orderedPasses[i].dependencyBuffers = {};
+    }
+
+    const auto preDispatchRange = result.preDispatchRangesByPass[i];
+    if (preDispatchRange.count > 0u) {
+      NURI_ASSERT(sourcePass.preDispatches.size() == preDispatchRange.count,
+                  "RenderGraphBuilder::refreshHandlesInCompileResult: "
+                  "cached pre-dispatch range does not match source pass");
+      if (sourcePass.preDispatches.size() == preDispatchRange.count &&
+          preDispatchRange.offset <= result.ownedPreDispatches.size() &&
+          preDispatchRange.count <=
+              result.ownedPreDispatches.size() - preDispatchRange.offset) {
+        for (uint32_t dispatchIndex = 0; dispatchIndex < preDispatchRange.count;
+             ++dispatchIndex) {
+          const uint32_t globalDispatchIndex =
+              preDispatchRange.offset + dispatchIndex;
+          NURI_ASSERT(globalDispatchIndex <
+                          result.preDispatchDependencyRanges.size(),
+                      "RenderGraphBuilder::refreshHandlesInCompileResult: "
+                      "cached pre-dispatch dependency range is out of bounds");
+          if (globalDispatchIndex >=
+              result.preDispatchDependencyRanges.size()) {
+            break;
+          }
+          ComputeDispatchItem refreshedDispatch =
+              sourcePass.preDispatches[dispatchIndex];
+          const auto depRange =
+              result.preDispatchDependencyRanges[globalDispatchIndex];
+          if (depRange.count > 0u &&
+              depRange.offset <=
+                  result.resolvedPreDispatchDependencyBuffers.size() &&
+              depRange.count <=
+                  result.resolvedPreDispatchDependencyBuffers.size() -
+                      depRange.offset) {
+            refreshedDispatch.dependencyBuffers = std::span<const BufferHandle>(
+                result.resolvedPreDispatchDependencyBuffers.data() +
+                    depRange.offset,
+                depRange.count);
+          } else {
+            refreshedDispatch.dependencyBuffers = {};
+          }
+          result.ownedPreDispatches[globalDispatchIndex] = refreshedDispatch;
+        }
+        result.orderedPasses[i].preDispatches =
+            std::span<const ComputeDispatchItem>(
+                result.ownedPreDispatches.data() + preDispatchRange.offset,
+                preDispatchRange.count);
+      } else {
+        result.orderedPasses[i].preDispatches = {};
+      }
+    } else {
+      result.orderedPasses[i].preDispatches = sourcePass.preDispatches;
+    }
+
+    const auto drawRange = result.drawRangesByPass[i];
+    if (drawRange.count > 0u) {
+      NURI_ASSERT(sourcePass.draws.size() == drawRange.count,
+                  "RenderGraphBuilder::refreshHandlesInCompileResult: "
+                  "cached draw range does not match source pass");
+      if (sourcePass.draws.size() == drawRange.count &&
+          drawRange.offset <= result.ownedDrawItems.size() &&
+          drawRange.count <= result.ownedDrawItems.size() - drawRange.offset) {
+        for (uint32_t drawIndex = 0; drawIndex < drawRange.count; ++drawIndex) {
+          result.ownedDrawItems[drawRange.offset + drawIndex] =
+              sourcePass.draws[drawIndex];
+        }
+        result.orderedPasses[i].draws = std::span<const DrawItem>(
+            result.ownedDrawItems.data() + drawRange.offset, drawRange.count);
+      } else {
+        result.orderedPasses[i].draws = {};
+      }
+    } else {
+      result.orderedPasses[i].draws = sourcePass.draws;
+    }
   }
 }
 

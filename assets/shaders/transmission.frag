@@ -325,9 +325,6 @@ void main() {
   vec3 color =
       directLighting + indirectLighting + sm.clearcoatAttenuation * sm.emissive;
   color = max(color, vec3(0.0));
-  if ((pc.frameData.flags & kFrameDataFlagOutputLinearToSrgb) != 0u) {
-    color = linearToSrgb(color);
-  }
 
   float outAlpha = (alphaMode == kAlphaModeOpaque) ? 1.0 : sm.baseColor.a;
   out_FragColor = vec4(color, outAlpha);

@@ -42,6 +42,12 @@ static constexpr uint32_t kSceneDepthPyramidArraySize =
     kSceneDepthPyramidTexIdPackWidth;
 static_assert(kSceneDepthPyramidArraySize * kSceneDepthPyramidTexIdPackWidth >=
               kMaxSceneDepthPyramidLevels);
+static constexpr uint32_t kFrameCompositionSceneColorMipCount = 3u;
+static constexpr Format kFrameCompositionSceneColorFormat =
+    Format::RGBA16_FLOAT;
+static constexpr Format kFrameCompositionFrameColorFormat =
+    Format::RGBA16_FLOAT;
+static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
 
 [[nodiscard]] constexpr uint8_t
 sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
@@ -270,10 +276,51 @@ struct OpaquePickResult {
   uint32_t renderableIndex = 0;
 };
 
+enum class FrameTextureRequirementFlags : uint32_t {
+  None = 0u,
+  SceneColor = 1u << 0u,
+  FrameColor = 1u << 1u,
+  SceneDepth = 1u << 2u,
+  SceneColorMipChain = 1u << 3u,
+  HistoryColor = 1u << 4u,
+  MotionVectors = 1u << 5u,
+  Normals = 1u << 6u,
+  Exposure = 1u << 7u,
+};
+
+[[nodiscard]] constexpr FrameTextureRequirementFlags
+operator|(FrameTextureRequirementFlags lhs, FrameTextureRequirementFlags rhs) {
+  return static_cast<FrameTextureRequirementFlags>(static_cast<uint32_t>(lhs) |
+                                                   static_cast<uint32_t>(rhs));
+}
+
+constexpr FrameTextureRequirementFlags &
+operator|=(FrameTextureRequirementFlags &lhs,
+           FrameTextureRequirementFlags rhs) {
+  lhs = lhs | rhs;
+  return lhs;
+}
+
+[[nodiscard]] constexpr bool
+hasFrameTextureRequirementFlag(FrameTextureRequirementFlags flags,
+                               FrameTextureRequirementFlags flag) {
+  return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(flag)) != 0u;
+}
+
+static constexpr FrameTextureRequirementFlags
+    kBaselineFrameTextureRequirements =
+        FrameTextureRequirementFlags::SceneColor |
+        FrameTextureRequirementFlags::FrameColor |
+        FrameTextureRequirementFlags::SceneDepth |
+        FrameTextureRequirementFlags::SceneColorMipChain |
+        FrameTextureRequirementFlags::HistoryColor;
+
 struct FrameSharedResources {
   std::optional<ForwardSceneGpuData> forwardSceneGpuData{};
   std::optional<MaterialTableGpuData> materialTableGpuData{};
   std::optional<AnimationSceneFrameData> animationSceneGpuData{};
+  FrameTextureRequirementFlags textureRequirements =
+      kBaselineFrameTextureRequirements;
   TextureHandle sceneDepthTexture{};
   RenderGraphTextureId sceneDepthGraphTexture{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
@@ -287,10 +334,12 @@ struct FrameSharedResources {
   TextureHandle sceneColorQuarterResTexture{};
   RenderGraphTextureId sceneColorGraphTexture{};
   TextureHandle frameColorTexture{};
+  RenderGraphTextureId frameColorGraphTexture{};
+  TextureHandle historyColorReadTexture{};
+  TextureHandle historyColorWriteTexture{};
   RenderGraphTextureId opaquePickGraphTexture{};
   RenderGraphTextureId opaquePickDepthGraphTexture{};
   std::optional<LightId> selectedLightId{};
-  bool transmissionStageEnabled = false;
   bool transparentStageEnabled = false;
 };
 
@@ -371,9 +420,7 @@ renderSettingsOrDefault(const RenderFrameContext &frame) {
 
 [[nodiscard]] inline bool
 expectsCurrentFrameSceneColor(const RenderFrameContext &frame) {
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
-  return frame.sharedResources.transmissionStageEnabled &&
-         (settings.skybox.enabled || settings.opaque.enabled);
+  return nuri::isValid(frame.sharedResources.sceneColorTexture);
 }
 
 inline void resetFrameSharedResources(RenderFrameContext &frame) {
@@ -406,6 +453,27 @@ resolveSceneColorTexture(const RenderFrameContext &frame) {
 }
 
 [[nodiscard]] inline TextureHandle
+resolveSceneColorMipTexture(const RenderFrameContext &frame,
+                            uint32_t mipLevel) {
+  switch (mipLevel) {
+  case 0u:
+    return nuri::isValid(frame.sharedResources.sceneColorTexture)
+               ? frame.sharedResources.sceneColorTexture
+               : TextureHandle{};
+  case 1u:
+    return nuri::isValid(frame.sharedResources.sceneColorHalfResTexture)
+               ? frame.sharedResources.sceneColorHalfResTexture
+               : TextureHandle{};
+  case 2u:
+    return nuri::isValid(frame.sharedResources.sceneColorQuarterResTexture)
+               ? frame.sharedResources.sceneColorQuarterResTexture
+               : TextureHandle{};
+  default:
+    return {};
+  }
+}
+
+[[nodiscard]] inline TextureHandle
 resolveSceneColorHalfResTexture(const RenderFrameContext &frame) {
   if (nuri::isValid(frame.sharedResources.sceneColorHalfResTexture)) {
     return frame.sharedResources.sceneColorHalfResTexture;
@@ -422,13 +490,24 @@ resolveSceneColorQuarterResTexture(const RenderFrameContext &frame) {
 }
 
 [[nodiscard]] inline bool
-resolveTransmissionStageEnabled(const RenderFrameContext &frame) {
-  return frame.sharedResources.transmissionStageEnabled;
-}
-
-[[nodiscard]] inline bool
 resolveTransparentStageEnabled(const RenderFrameContext &frame) {
   return frame.sharedResources.transparentStageEnabled;
+}
+
+[[nodiscard]] inline TextureHandle
+resolveHistoryColorReadTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.historyColorReadTexture)) {
+    return frame.sharedResources.historyColorReadTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline TextureHandle
+resolveHistoryColorWriteTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.historyColorWriteTexture)) {
+    return frame.sharedResources.historyColorWriteTexture;
+  }
+  return {};
 }
 
 [[nodiscard]] inline RenderGraphTextureId

@@ -63,12 +63,24 @@ bool RenderPipeline::setPassEnabled(size_t index, bool enabled) noexcept {
 }
 
 void RenderPipeline::registerFeaturePasses(RenderFeature &feature) {
+  size_t insertIndex = passes_.size();
+  if (!feature.isTerminalFeature()) {
+    while (insertIndex > 0u) {
+      const RegisteredPass &entry = passes_[insertIndex - 1u];
+      if (entry.feature == nullptr || !entry.feature->isTerminalFeature()) {
+        break;
+      }
+      --insertIndex;
+    }
+  }
   for (RenderFeaturePass *const pass : feature.passes()) {
     if (pass == nullptr) {
       continue;
     }
-    passes_.push_back(
+    passes_.insert(
+        passes_.begin() + static_cast<std::ptrdiff_t>(insertIndex),
         RegisteredPass{.feature = &feature, .pass = pass, .enabled = true});
+    ++insertIndex;
   }
 }
 

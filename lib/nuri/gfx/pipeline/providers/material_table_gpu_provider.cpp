@@ -54,6 +54,7 @@ MaterialTableGpuProvider::ensureBufferCapacity(ManagedBuffer &managedBuffer,
   const size_t newCapacity =
       grownBufferCapacity(managedBuffer.capacityBytes, requiredBytes);
   if (managedBuffer.buffer && managedBuffer.buffer->valid()) {
+    gpu_.waitIdle();
     gpu_.destroyBuffer(managedBuffer.buffer->handle());
   }
   managedBuffer.buffer.reset();

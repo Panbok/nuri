@@ -15,7 +15,6 @@ enum ForwardSceneFlags : uint8_t {
   kForwardSceneHasIblSpecular = 1u << 1u,
   kForwardSceneHasIblSheen = 1u << 2u,
   kForwardSceneHasBrdfLut = 1u << 3u,
-  kForwardSceneOutputLinearToSrgb = 1u << 4u,
   kForwardSceneHasSceneColor = 1u << 5u,
   kForwardSceneHasSceneDepth = 1u << 6u,
   kForwardSceneHasSceneDepthPyramid = 1u << 7u,
@@ -68,7 +67,7 @@ textureFilteringSettingsOrDefault(const RenderFrameContext &frame) {
 
 SceneLightingProvider::SceneLightingProvider(GPUDevice &gpu) : gpu_(gpu) {}
 
-SceneLightingProvider::~SceneLightingProvider() { destroyBuffer(); }
+SceneLightingProvider::~SceneLightingProvider() { destroyBuffers(); }
 
 Result<bool, std::string>
 SceneLightingProvider::prepare(FrameBuildContext &ctx) {
@@ -97,9 +96,15 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       directionalLights.size() * sizeof(DirectionalLightGpuData),
       localLights.size() * sizeof(LocalLightGpuData));
 
-  auto bufferResult = ensureBufferCapacity(layout.totalBytes);
+  auto bufferResult = ensureBufferRingCapacity(
+      layout.totalBytes, std::max(1u, gpu_.getSwapchainImageCount()));
   if (bufferResult.hasError()) {
     return bufferResult;
+  }
+  Buffer *const sceneDataBuffer = currentBuffer(frame.frameIndex);
+  if (sceneDataBuffer == nullptr || !sceneDataBuffer->valid()) {
+    return Result<bool, std::string>::makeError(
+        "SceneLightingProvider::prepare: scene data buffer is unavailable");
   }
 
   uint32_t cubemapTexId = kInvalidTextureBindlessIndex;
@@ -212,12 +217,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       flags |= kForwardSceneHasSceneDepthPyramid;
     }
   }
-  if (gpu_.getSwapchainFormat() != Format::RGBA8_SRGB) {
-    flags |= kForwardSceneOutputLinearToSrgb;
-  }
-
   const uint64_t sceneDataBaseAddress =
-      gpu_.getBufferDeviceAddress(sceneDataBuffer_->handle());
+      gpu_.getBufferDeviceAddress(sceneDataBuffer->handle());
   if (sceneDataBaseAddress == 0u) {
     return Result<bool, std::string>::makeError(
         "SceneLightingProvider::prepare: invalid scene data buffer address");
@@ -233,6 +234,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       directionalLights.size(), std::numeric_limits<uint32_t>::max()));
   const uint32_t localLightCount = static_cast<uint32_t>(std::min<size_t>(
       localLights.size(), std::numeric_limits<uint32_t>::max()));
+  const size_t slotIndex =
+      static_cast<size_t>(frame.frameIndex % sceneDataBuffers_.size());
+  SlotUploadState &slotState = slotUploadStates_[slotIndex];
 
   const ForwardSceneFrameData frameData{
       .view = frame.camera.view,
@@ -271,52 +275,55 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .localLightCount = localLightCount,
   };
 
-  const bool frameDataDirty =
-      !frameDataUploadValid_ || uploadedFrameData_ != frameData;
-  if (frameDataDirty) {
+  if (!slotState.hasFrameData || slotState.frameData != frameData) {
     const std::span<const std::byte> frameDataBytes{
         reinterpret_cast<const std::byte *>(&frameData), sizeof(frameData)};
     auto updateResult = gpu_.updateBuffer(
-        sceneDataBuffer_->handle(), frameDataBytes, layout.frameDataOffset);
+        sceneDataBuffer->handle(), frameDataBytes, layout.frameDataOffset);
     if (updateResult.hasError()) {
       return updateResult;
     }
-    uploadedFrameData_ = frameData;
-    frameDataUploadValid_ = true;
   }
 
-  const bool lightDirty =
-      cachedLightTopologyVersion_ != frame.scene->lightTopologyVersion() ||
-      cachedLightTransformVersion_ != frame.scene->lightTransformVersion();
-  if (lightDirty) {
-    if (!directionalLights.empty()) {
-      const std::span<const std::byte> directionalLightBytes{
-          reinterpret_cast<const std::byte *>(directionalLights.data()),
-          directionalLights.size() * sizeof(DirectionalLightGpuData)};
-      auto updateResult =
-          gpu_.updateBuffer(sceneDataBuffer_->handle(), directionalLightBytes,
-                            layout.directionalLightsOffset);
-      if (updateResult.hasError()) {
-        return updateResult;
-      }
+  const bool lightDataDirty =
+      slotState.scene != frame.scene ||
+      slotState.lightTopologyVersion != frame.scene->lightTopologyVersion() ||
+      slotState.lightTransformVersion != frame.scene->lightTransformVersion() ||
+      slotState.directionalLightCount != directionalLightCount ||
+      slotState.localLightCount != localLightCount;
+
+  if (lightDataDirty && !directionalLights.empty()) {
+    const std::span<const std::byte> directionalLightBytes{
+        reinterpret_cast<const std::byte *>(directionalLights.data()),
+        directionalLights.size() * sizeof(DirectionalLightGpuData)};
+    auto lightUpdateResult =
+        gpu_.updateBuffer(sceneDataBuffer->handle(), directionalLightBytes,
+                          layout.directionalLightsOffset);
+    if (lightUpdateResult.hasError()) {
+      return lightUpdateResult;
     }
-    if (!localLights.empty()) {
-      const std::span<const std::byte> localLightBytes{
-          reinterpret_cast<const std::byte *>(localLights.data()),
-          localLights.size() * sizeof(LocalLightGpuData)};
-      auto updateResult =
-          gpu_.updateBuffer(sceneDataBuffer_->handle(), localLightBytes,
-                            layout.localLightsOffset);
-      if (updateResult.hasError()) {
-        return updateResult;
-      }
-    }
-    cachedLightTopologyVersion_ = frame.scene->lightTopologyVersion();
-    cachedLightTransformVersion_ = frame.scene->lightTransformVersion();
   }
+  if (lightDataDirty && !localLights.empty()) {
+    const std::span<const std::byte> localLightBytes{
+        reinterpret_cast<const std::byte *>(localLights.data()),
+        localLights.size() * sizeof(LocalLightGpuData)};
+    auto lightUpdateResult = gpu_.updateBuffer(
+        sceneDataBuffer->handle(), localLightBytes, layout.localLightsOffset);
+    if (lightUpdateResult.hasError()) {
+      return lightUpdateResult;
+    }
+  }
+
+  slotState.scene = frame.scene;
+  slotState.lightTopologyVersion = frame.scene->lightTopologyVersion();
+  slotState.lightTransformVersion = frame.scene->lightTransformVersion();
+  slotState.directionalLightCount = directionalLightCount;
+  slotState.localLightCount = localLightCount;
+  slotState.hasFrameData = true;
+  slotState.frameData = frameData;
 
   ctx.shared.forwardSceneGpuData = ForwardSceneGpuData{
-      .buffer = sceneDataBuffer_->handle(),
+      .buffer = sceneDataBuffer->handle(),
       .frameDataAddress = sceneDataBaseAddress + layout.frameDataOffset,
       .directionalLightBufferAddress = directionalLightBufferAddress,
       .localLightBufferAddress = localLightBufferAddress,
@@ -328,37 +335,69 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
 }
 
 Result<bool, std::string>
-SceneLightingProvider::ensureBufferCapacity(size_t requiredBytes) {
+SceneLightingProvider::ensureBufferRingCapacity(size_t requiredBytes,
+                                                uint32_t requiredCount) {
   const size_t requested =
       std::max(requiredBytes, sizeof(ForwardSceneFrameData));
-  if (sceneDataBuffer_ && sceneDataBuffer_->valid() &&
-      sceneDataBufferCapacityBytes_ >= requested) {
+  const uint32_t safeCount = std::max(requiredCount, 1u);
+  const bool countsMatch = sceneDataBuffers_.size() == safeCount;
+  bool allValid = countsMatch;
+  if (countsMatch) {
+    for (const std::unique_ptr<Buffer> &buffer : sceneDataBuffers_) {
+      if (buffer == nullptr || !buffer->valid()) {
+        allValid = false;
+        break;
+      }
+    }
+  }
+  if (allValid && sceneDataBufferCapacityBytes_ >= requested) {
+    if (slotUploadStates_.size() != safeCount) {
+      slotUploadStates_.assign(safeCount, SlotUploadState{});
+    }
     return Result<bool, std::string>::makeResult(true);
   }
-  destroyBuffer();
-  auto bufferResult = Buffer::create(gpu_,
-                                     BufferDesc{.usage = BufferUsage::Storage,
-                                                .storage = Storage::Device,
-                                                .size = requested},
-                                     "forward_scene_data");
-  if (bufferResult.hasError()) {
-    return Result<bool, std::string>::makeError(bufferResult.error());
+  if (!sceneDataBuffers_.empty()) {
+    gpu_.waitIdle();
   }
-  sceneDataBuffer_ = std::move(bufferResult.value());
+  destroyBuffers();
+  sceneDataBuffers_.reserve(safeCount);
+  slotUploadStates_.assign(safeCount, SlotUploadState{});
+  for (uint32_t i = 0u; i < safeCount; ++i) {
+    auto bufferResult = Buffer::create(gpu_,
+                                       BufferDesc{.usage = BufferUsage::Storage,
+                                                  .storage = Storage::Device,
+                                                  .size = requested},
+                                       "forward_scene_data");
+    if (bufferResult.hasError()) {
+      destroyBuffers();
+      return Result<bool, std::string>::makeError(bufferResult.error());
+    }
+    sceneDataBuffers_.push_back(std::move(bufferResult.value()));
+  }
   sceneDataBufferCapacityBytes_ = requested;
-  frameDataUploadValid_ = false;
   return Result<bool, std::string>::makeResult(true);
 }
 
-void SceneLightingProvider::destroyBuffer() {
-  if (sceneDataBuffer_ && sceneDataBuffer_->valid()) {
-    gpu_.destroyBuffer(sceneDataBuffer_->handle());
+void SceneLightingProvider::destroyBuffers() {
+  for (std::unique_ptr<Buffer> &buffer : sceneDataBuffers_) {
+    if (buffer && buffer->valid()) {
+      gpu_.destroyBuffer(buffer->handle());
+    }
+    buffer.reset();
   }
-  sceneDataBuffer_.reset();
+  sceneDataBuffers_.clear();
+  slotUploadStates_.clear();
   sceneDataBufferCapacityBytes_ = 0;
-  frameDataUploadValid_ = false;
-  cachedLightTopologyVersion_ = std::numeric_limits<uint64_t>::max();
-  cachedLightTransformVersion_ = std::numeric_limits<uint64_t>::max();
+}
+
+Buffer *
+SceneLightingProvider::currentBuffer(uint64_t frameIndex) const noexcept {
+  if (sceneDataBuffers_.empty()) {
+    return nullptr;
+  }
+  const size_t slot =
+      static_cast<size_t>(frameIndex % sceneDataBuffers_.size());
+  return sceneDataBuffers_[slot].get();
 }
 
 } // namespace nuri

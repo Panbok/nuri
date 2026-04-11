@@ -34,6 +34,9 @@ public:
     (void)ctx;
     return Result<bool, std::string>::makeResult(true);
   }
+  [[nodiscard]] virtual bool isTerminalFeature() const noexcept {
+    return false;
+  }
   [[nodiscard]] virtual std::span<RenderFeaturePass *const>
   passes() noexcept = 0;
 };

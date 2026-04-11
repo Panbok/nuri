@@ -44,17 +44,9 @@ public:
   void onAttach();
   void onDetach();
   void publishFrameData(RenderFrameContext &frame);
-  [[nodiscard]] bool hasPreparedTransmissionDownsamplePasses() const noexcept;
-  [[nodiscard]] bool hasPreparedTransmissionCopyPass() const noexcept;
   [[nodiscard]] bool hasPreparedTransmissionMainPass() const noexcept;
   Result<bool, std::string>
   prepareTransmissionPasses(RenderFrameContext &frame);
-  Result<bool, std::string>
-  appendTransmissionDownsamplePasses(RenderFrameContext &frame,
-                                     RenderGraphBuilder &graph);
-  Result<bool, std::string>
-  appendTransmissionCopyPass(RenderFrameContext &frame,
-                             RenderGraphBuilder &graph);
   Result<bool, std::string>
   appendTransmissionMainPass(RenderFrameContext &frame,
                              RenderGraphBuilder &graph);
@@ -87,16 +79,6 @@ private:
       sizeof(MeshPushConstants) <= 128,
       "TransmissionRenderer::MeshPushConstants exceeds Vulkan guarantee");
 
-  struct CopyPushConstants {
-    uint32_t sourceTexId = 0;
-    uint32_t sourceSamplerId = 0;
-    uint32_t flags = 0;
-    uint32_t reserved0 = 0;
-  };
-  static_assert(
-      sizeof(CopyPushConstants) <= 128,
-      "TransmissionRenderer::CopyPushConstants exceeds Vulkan guarantee");
-
   struct MeshDrawTemplate {
     const Renderable *renderable = nullptr;
     const Submesh *submesh = nullptr;
@@ -127,14 +109,6 @@ private:
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
-  Result<bool, std::string> ensureSceneColorTexture();
-  Result<bool, std::string> ensureFrameColorTexture();
-  [[nodiscard]] TextureHandle
-  currentSceneColorTexture(uint64_t frameIndex) const;
-  [[nodiscard]] TextureHandle
-  currentFrameColorTexture(uint64_t frameIndex) const;
-  [[nodiscard]] TextureHandle currentSceneColorTextureMip(uint64_t frameIndex,
-                                                          uint32_t level) const;
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
                                               uint32_t materialCount);
@@ -154,22 +128,16 @@ private:
   TransmissionRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> meshShader_;
-  std::unique_ptr<Shader> copyShader_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshFragmentShader_{};
-  ShaderHandle copyVertexShader_{};
-  ShaderHandle copyFragmentShader_{};
   RenderPipelineHandle meshPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle copyPipelineHandle_{};
 
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
-  Format copyPipelineColorFormat_ = Format::Count;
-  Format copyPipelineDepthFormat_ = Format::Count;
 
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;
@@ -201,23 +169,11 @@ private:
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
-  std::pmr::vector<CopyPushConstants> copyPushConstantsRing_;
   std::filesystem::path transmissionFragmentPath_{};
-  std::filesystem::path fullscreenCopyVertexPath_{};
-  std::filesystem::path sceneCopyFragmentPath_{};
-  std::pmr::vector<TextureHandle> sceneColorTextures_;
-  std::pmr::vector<TextureHandle> frameColorTextures_;
-  std::pmr::vector<TextureHandle> sceneColorMipTextures_;
-  Format sceneColorTextureFormat_ = Format::Count;
-  uint32_t sceneColorTextureWidth_ = 0;
-  uint32_t sceneColorTextureHeight_ = 0;
   TextureHandle preparedSceneColorTexture_{};
   TextureHandle preparedFrameColorTexture_{};
   TextureHandle preparedDepthTexture_{};
   RenderGraphTextureId preparedSceneDepthGraphTexture_{};
-  bool preparedHasSceneColorInput_ = false;
-  bool preparedCopySceneColorToSwapchain_ = false;
-  uint32_t preparedSceneColorSamplerId_ = 0;
 };
 
 } // namespace nuri

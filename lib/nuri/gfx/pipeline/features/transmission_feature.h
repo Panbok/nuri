@@ -13,46 +13,6 @@
 
 namespace nuri {
 
-class NURI_API TransmissionDownsamplePass final : public RenderFeaturePass {
-public:
-  explicit TransmissionDownsamplePass(TransmissionRenderer &renderer)
-      : renderer_(renderer) {}
-  ~TransmissionDownsamplePass() override = default;
-
-  [[nodiscard]] std::string_view name() const noexcept override {
-    return "TransmissionDownsamplePass";
-  }
-  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override {
-    (void)ctx;
-    return Result<bool, std::string>::makeResult(true);
-  }
-  Result<bool, std::string> build(FrameBuildContext &ctx) override;
-
-private:
-  TransmissionRenderer &renderer_;
-};
-
-class NURI_API TransmissionCopyPass final : public RenderFeaturePass {
-public:
-  explicit TransmissionCopyPass(TransmissionRenderer &renderer)
-      : renderer_(renderer) {}
-  ~TransmissionCopyPass() override = default;
-
-  [[nodiscard]] std::string_view name() const noexcept override {
-    return "TransmissionCopyPass";
-  }
-  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
-  Result<bool, std::string> prepare(FrameBuildContext &ctx) override {
-    (void)ctx;
-    return Result<bool, std::string>::makeResult(true);
-  }
-  Result<bool, std::string> build(FrameBuildContext &ctx) override;
-
-private:
-  TransmissionRenderer &renderer_;
-};
-
 class NURI_API TransmissionMainPass final : public RenderFeaturePass {
 public:
   explicit TransmissionMainPass(TransmissionRenderer &renderer)
@@ -88,19 +48,13 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override {
     return "TransmissionFeature";
   }
-  Result<bool, std::string> publishFrameData(FrameBuildContext &ctx) override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:
-  // Keep renderer_ first: pass members and passes_ depend on it during
-  // construction.
   std::unique_ptr<TransmissionRenderer> renderer_;
-  TransmissionDownsamplePass downsamplePass_;
-  TransmissionCopyPass copyPass_;
   TransmissionMainPass mainPass_;
-  std::array<RenderFeaturePass *, 3> passes_{&downsamplePass_, &copyPass_,
-                                             &mainPass_};
+  std::array<RenderFeaturePass *, 1> passes_{&mainPass_};
 };
 
 } // namespace nuri

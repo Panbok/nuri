@@ -11,6 +11,7 @@
 #include "nuri/gfx/pipeline/features/skybox_feature.h"
 #include "nuri/gfx/pipeline/features/transmission_feature.h"
 #include "nuri/gfx/pipeline/features/transparent_feature.h"
+#include "nuri/gfx/pipeline/providers/frame_composition_provider.h"
 #include "nuri/gfx/pipeline/providers/material_table_gpu_provider.h"
 #include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
 #include "nuri/gfx/renderer.h"
@@ -250,12 +251,16 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
 
   renderPipeline_->addProvider(
       std::make_unique<MaterialTableGpuProvider>(getGPU()));
+  renderPipeline_->addProvider(std::make_unique<FrameCompositionProvider>(
+      getGPU(), pipelineMemoryResource()));
   renderPipeline_->addProvider(
       std::make_unique<SceneLightingProvider>(getGPU()));
   renderPipeline_->addFeature(
       std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
   renderPipeline_->addFeature(std::make_unique<OpaqueFeature>(
       getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
+  renderPipeline_->addFeature(
+      std::make_unique<FrameCompositionFeature>(getGPU(), shaderConfig.opaque));
   renderPipeline_->addFeature(std::make_unique<TransmissionFeature>(
       getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(std::make_unique<TransparentFeature>(
@@ -263,7 +268,7 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
   renderPipeline_->addFeature(std::make_unique<DebugFeature>(
       getGPU(), shaderConfig.debugGrid, pipelineMemoryResource()));
   renderPipeline_->addFeature(
-      std::make_unique<CompositeFeature>(getGPU(), shaderConfig.opaque));
+      std::make_unique<FramePresentFeature>(getGPU(), shaderConfig.opaque));
 
   return Result<bool, std::string>::makeResult(true);
 }

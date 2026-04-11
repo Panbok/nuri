@@ -573,15 +573,12 @@ void OpaqueRenderer::onDetach() {
 }
 
 void OpaqueRenderer::onResize(uint32_t, uint32_t) {
-  destroyDepthTexture();
   destroyPickTexture();
   destroyDepthPyramidTextures();
   resetPickState();
 }
 
 void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
-  frame.sharedResources.sceneDepthTexture = {};
-  frame.sharedDepthTexture = {};
   frame.sharedResources.sceneDepthSamplerId =
       gpu_.getDefaultSamplerBindlessIndex();
   frame.sharedResources.sceneDepthPyramidLevelCount = 0u;
@@ -591,20 +588,10 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
   if (!settings.opaque.enabled) {
     return;
   }
-  if (!initialized_) {
-    auto initResult = ensureInitialized();
-    if (initResult.hasError()) {
-      return;
-    }
+  const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
+  if (!nuri::isValid(sceneDepthTexture)) {
+    return;
   }
-  if (!nuri::isValid(depthTexture_)) {
-    auto depthResult = recreateDepthTexture();
-    if (depthResult.hasError()) {
-      return;
-    }
-  }
-  frame.sharedResources.sceneDepthTexture = depthTexture_;
-  frame.sharedDepthTexture = depthTexture_;
   const auto sceneDepthSamplerId = [this]() {
     return nuri::isValid(sceneDepthSampler_)
                ? gpu_.getSamplerBindlessIndex(sceneDepthSampler_)
@@ -616,7 +603,7 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
     return;
   }
   if (!nuri::isValid(depthPyramidPipelineHandle_) ||
-      gpu_.getTextureBindlessIndex(depthTexture_) ==
+      gpu_.getTextureBindlessIndex(sceneDepthTexture) ==
           kInvalidTextureBindlessIndex) {
     return;
   }
@@ -665,11 +652,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (initResult.hasError()) {
     return Result<bool, std::string>::makeError(initResult.error());
   }
-  if (!nuri::isValid(depthTexture_)) {
-    auto depthResult = recreateDepthTexture();
-    if (depthResult.hasError()) {
-      return depthResult;
-    }
+  const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
+  if (!nuri::isValid(sceneDepthTexture)) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::buildOpaquePasses: scene depth texture is "
+        "unavailable");
   }
   const bool needsPickResources =
       pendingPickRequest_.has_value() || inFlightPickReadback_.has_value();
@@ -2696,7 +2683,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                            .storeOp = StoreOp::Store,
                            .clearDepth = kClearDepthOne,
                            .clearStencil = 0};
-    pickPass.depthTextureHandle = depthTexture_;
+    pickPass.depthTextureHandle = sceneDepthTexture;
     pickPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
     pickPass.desc.dependencyBuffers = std::span<const BufferHandle>(
@@ -2731,7 +2718,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                             .storeOp = StoreOp::Store,
                             .clearDepth = kClearDepthOne,
                             .clearStencil = 0};
-    depthPass.depthTextureHandle = depthTexture_;
+    depthPass.depthTextureHandle = sceneDepthTexture;
     if (!pickPassSubmitted) {
       depthPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
           preDispatches_.data(), preDispatches_.size());
@@ -2769,7 +2756,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                      .storeOp = StoreOp::Store,
                      .clearDepth = kClearDepthOne,
                      .clearStencil = 0};
-  pass.depthTextureHandle = depthTexture_;
+  pass.depthTextureHandle = sceneDepthTexture;
   if (!pickPassSubmitted && !depthPrepassEnabled) {
     pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
@@ -2792,18 +2779,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   pass.desc.borrowPayload = !pass.hasPreDispatch;
   pass.hasIndirectDraws = hasIndirectBaseDraws;
   pass.isMainPass = true;
-  const bool transmissionStageEnabled =
-      frame.sharedResources.transmissionStageEnabled;
-  if (transmissionStageEnabled) {
-    if (!nuri::isValid(frame.sharedResources.sceneColorTexture)) {
-      return Result<bool, std::string>::makeError(
-          "OpaqueRenderer::buildOpaquePasses: transmission stage enabled but "
-          "scene color texture is unavailable");
-    }
-    pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
+  if (!nuri::isValid(frame.sharedResources.sceneColorTexture)) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::buildOpaquePasses: scene color texture is "
+        "unavailable");
   }
+  pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
 
-  if (settings.opaque.enableDepthPyramid && nuri::isValid(depthTexture_) &&
+  if (settings.opaque.enableDepthPyramid && nuri::isValid(sceneDepthTexture) &&
       nuri::isValid(depthPyramidPipelineHandle_) &&
       sceneDepthPyramidLevelCount_ > 0u && !baseDrawItems.empty()) {
     depthPyramidPushConstants_.clear();
@@ -2818,7 +2801,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             : gpu_.getDefaultSamplerBindlessIndex();
     for (uint32_t level = 0u; level < sceneDepthPyramidLevelCount_; ++level) {
       const TextureHandle sourceTexture =
-          level == 0u ? depthTexture_ : sceneDepthPyramidTextures_[level - 1u];
+          level == 0u ? sceneDepthTexture
+                      : sceneDepthPyramidTextures_[level - 1u];
       const TextureHandle destinationTexture =
           sceneDepthPyramidTextures_[level];
       if (!nuri::isValid(sourceTexture) || !nuri::isValid(destinationTexture)) {
@@ -2866,9 +2850,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     frame.metrics.opaque.depthPyramidLevels =
         saturateToU32(depthPyramidDrawItems_.size());
   }
-
-  frame.sharedDepthTexture = depthTexture_;
-  frame.sharedResources.sceneDepthTexture = depthTexture_;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -3559,34 +3540,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     return shaderResult;
   }
 
-  auto depthResult = recreateDepthTexture();
-  if (depthResult.hasError()) {
-    meshShader_.reset();
-    meshTessShader_.reset();
-    meshDebugOverlayShader_.reset();
-    meshPickShader_.reset();
-    depthShader_.reset();
-    depthAlphaShader_.reset();
-    depthPyramidShader_.reset();
-    computeShader_.reset();
-    meshVertexShader_ = {};
-    meshTessVertexShader_ = {};
-    meshTessControlShader_ = {};
-    meshTessEvalShader_ = {};
-    meshFragmentShader_ = {};
-    meshDebugOverlayGeometryShader_ = {};
-    meshDebugOverlayFragmentShader_ = {};
-    meshPickFragmentShader_ = {};
-    depthFragmentShader_ = {};
-    depthAlphaFragmentShader_ = {};
-    depthPyramidVertexShader_ = {};
-    depthPyramidFragmentShader_ = {};
-    computeShaderHandle_ = {};
-    resetMeshPipelineState();
-    tessellationUnsupported_ = false;
-    return depthResult;
-  }
-
   auto pickTextureResult = recreatePickTexture();
   if (pickTextureResult.hasError()) {
     meshShader_.reset();
@@ -3612,7 +3565,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     computeShaderHandle_ = {};
     resetMeshPipelineState();
     tessellationUnsupported_ = false;
-    destroyDepthTexture();
     return pickTextureResult;
   }
 
@@ -4431,12 +4383,10 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
   }
 
   resetMeshPipelineState();
-  const Format depthFormat = nuri::isValid(depthTexture_)
-                                 ? gpu_.getTextureFormat(depthTexture_)
-                                 : Format::D32_FLOAT;
+  const Format depthFormat = kFrameCompositionDepthFormat;
   const RenderPipelineDesc meshDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {}, {},
-      meshFragmentShader_, PolygonMode::Fill);
+      kFrameCompositionSceneColorFormat, depthFormat, meshVertexShader_, {}, {},
+      {}, meshFragmentShader_, PolygonMode::Fill);
   auto meshResult =
       meshPipeline_->createRenderPipeline(meshDesc, "opaque_mesh");
   if (meshResult.hasError()) {
@@ -4446,9 +4396,9 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
 
   {
     const RenderPipelineDesc doubleSidedMeshDesc = meshPipelineDesc(
-        gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {}, {},
-        meshFragmentShader_, PolygonMode::Fill, Topology::Triangle, 0, false,
-        CullMode::None);
+        kFrameCompositionSceneColorFormat, depthFormat, meshVertexShader_, {},
+        {}, {}, meshFragmentShader_, PolygonMode::Fill, Topology::Triangle, 0,
+        false, CullMode::None);
     auto doubleSidedMeshResult = gpu_.createRenderPipeline(
         doubleSidedMeshDesc, "opaque_mesh_double_sided");
     if (doubleSidedMeshResult.hasError()) {
@@ -4505,7 +4455,7 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
       nuri::isValid(meshTessEvalShader_) && nuri::isValid(meshFragmentShader_);
   if (canCreateTessPipeline) {
     const RenderPipelineDesc tessDesc = meshPipelineDesc(
-        gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
+        kFrameCompositionSceneColorFormat, depthFormat, meshTessVertexShader_,
         meshTessControlShader_, meshTessEvalShader_, {}, meshFragmentShader_,
         PolygonMode::Fill, Topology::Patch, kTessellationPatchControlPoints);
     auto tessResult = gpu_.createRenderPipeline(tessDesc, "opaque_mesh_tess");
@@ -4520,7 +4470,7 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     }
     if (!tessellationUnsupported_) {
       const RenderPipelineDesc doubleSidedTessDesc = meshPipelineDesc(
-          gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
+          kFrameCompositionSceneColorFormat, depthFormat, meshTessVertexShader_,
           meshTessControlShader_, meshTessEvalShader_, {}, meshFragmentShader_,
           PolygonMode::Fill, Topology::Patch, kTessellationPatchControlPoints,
           false, CullMode::None);
@@ -4793,12 +4743,10 @@ Result<bool, std::string> OpaqueRenderer::ensureWireframePipeline() {
         "OpaqueRenderer::ensureWireframePipeline: fill pipeline is invalid");
   }
 
-  const Format depthFormat = nuri::isValid(depthTexture_)
-                                 ? gpu_.getTextureFormat(depthTexture_)
-                                 : Format::D32_FLOAT;
+  const Format depthFormat = kFrameCompositionDepthFormat;
   const RenderPipelineDesc wireframeDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {}, {},
-      meshFragmentShader_, PolygonMode::Line, Topology::Triangle, 0, true);
+      kFrameCompositionSceneColorFormat, depthFormat, meshVertexShader_, {}, {},
+      {}, meshFragmentShader_, PolygonMode::Line, Topology::Triangle, 0, true);
 
   auto pipelineResult =
       gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_wireframe");
@@ -4834,11 +4782,9 @@ Result<bool, std::string> OpaqueRenderer::ensureTessWireframePipeline() {
     return Result<bool, std::string>::makeResult(false);
   }
 
-  const Format depthFormat = nuri::isValid(depthTexture_)
-                                 ? gpu_.getTextureFormat(depthTexture_)
-                                 : Format::D32_FLOAT;
+  const Format depthFormat = kFrameCompositionDepthFormat;
   const RenderPipelineDesc wireframeDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshTessVertexShader_,
+      kFrameCompositionSceneColorFormat, depthFormat, meshTessVertexShader_,
       meshTessControlShader_, meshTessEvalShader_, {}, meshFragmentShader_,
       PolygonMode::Line, Topology::Patch, kTessellationPatchControlPoints,
       true);
@@ -4880,11 +4826,9 @@ Result<bool, std::string> OpaqueRenderer::ensureGsOverlayPipeline() {
     return Result<bool, std::string>::makeResult(false);
   }
 
-  const Format depthFormat = nuri::isValid(depthTexture_)
-                                 ? gpu_.getTextureFormat(depthTexture_)
-                                 : Format::D32_FLOAT;
+  const Format depthFormat = kFrameCompositionDepthFormat;
   const RenderPipelineDesc overlayDesc = meshPipelineDesc(
-      gpu_.getSwapchainFormat(), depthFormat, meshVertexShader_, {}, {},
+      kFrameCompositionSceneColorFormat, depthFormat, meshVertexShader_, {}, {},
       meshDebugOverlayGeometryShader_, meshDebugOverlayFragmentShader_,
       PolygonMode::Fill, Topology::Triangle, 0, true);
 
@@ -4928,11 +4872,9 @@ Result<bool, std::string> OpaqueRenderer::ensureGsTessOverlayPipeline() {
     return Result<bool, std::string>::makeResult(false);
   }
 
-  const Format depthFormat = nuri::isValid(depthTexture_)
-                                 ? gpu_.getTextureFormat(depthTexture_)
-                                 : Format::D32_FLOAT;
+  const Format depthFormat = kFrameCompositionDepthFormat;
   const RenderPipelineDesc overlayDesc =
-      meshPipelineDesc(gpu_.getSwapchainFormat(), depthFormat,
+      meshPipelineDesc(kFrameCompositionSceneColorFormat, depthFormat,
                        meshTessVertexShader_, meshTessControlShader_,
                        meshTessEvalShader_, meshDebugOverlayGeometryShader_,
                        meshDebugOverlayFragmentShader_, PolygonMode::Fill,

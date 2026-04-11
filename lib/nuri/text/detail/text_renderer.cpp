@@ -1073,8 +1073,11 @@ TextRenderer::prepareWorldRenderState(RenderFrameContext &frame,
   outDepth = resolveFrameDepthTexture(frame);
   outDepthFormat = ::nuri::isValid(outDepth) ? gpu_.getTextureFormat(outDepth)
                                              : Format::Count;
-  auto pipeline =
-      ensureWorldPipeline(gpu_.getSwapchainFormat(), outDepthFormat);
+  const TextureHandle colorTexture = resolveFrameColorTexture(frame);
+  const Format colorFormat = ::nuri::isValid(colorTexture)
+                                 ? gpu_.getTextureFormat(colorTexture)
+                                 : gpu_.getSwapchainFormat();
+  auto pipeline = ensureWorldPipeline(colorFormat, outDepthFormat);
   if (pipeline.hasError()) {
     return pipeline;
   }

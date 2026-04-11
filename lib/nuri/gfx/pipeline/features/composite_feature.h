@@ -7,10 +7,9 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/render_feature.h"
 #include "nuri/gfx/pipeline/render_feature_pass.h"
-#include "nuri/resources/gpu/buffer.h"
+#include "nuri/gfx/shader.h"
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -18,99 +17,177 @@
 
 namespace nuri {
 
-using CompositeFeatureConfig = RuntimeOpaqueShaderConfig;
+using FrameCompositionFeatureConfig = RuntimeOpaqueShaderConfig;
 
-class Shader;
+struct NURI_API FullscreenPassResources {
+  std::unique_ptr<Shader> shader{};
+  ShaderHandle vertexShader{};
+  ShaderHandle fragmentShader{};
+  RenderPipelineHandle pipelineHandle{};
+  Format pipelineColorFormat = Format::Count;
+  bool initialized = false;
+  std::filesystem::path vertexPath{};
+  std::filesystem::path fragmentPath{};
+};
 
-class NURI_API CompositePass final : public RenderFeaturePass {
+class NURI_API SceneColorDownsamplePass final : public RenderFeaturePass {
 public:
-  explicit CompositePass(GPUDevice &gpu, CompositeFeatureConfig config);
-  ~CompositePass() override;
+  explicit SceneColorDownsamplePass(GPUDevice &gpu,
+                                    FrameCompositionFeatureConfig config);
+  ~SceneColorDownsamplePass() override;
 
-  CompositePass(const CompositePass &) = delete;
-  CompositePass &operator=(const CompositePass &) = delete;
-  CompositePass(CompositePass &&) = delete;
-  CompositePass &operator=(CompositePass &&) = delete;
+  SceneColorDownsamplePass(const SceneColorDownsamplePass &) = delete;
+  SceneColorDownsamplePass &
+  operator=(const SceneColorDownsamplePass &) = delete;
+  SceneColorDownsamplePass(SceneColorDownsamplePass &&) = delete;
+  SceneColorDownsamplePass &operator=(SceneColorDownsamplePass &&) = delete;
 
   [[nodiscard]] std::string_view name() const noexcept override {
-    return "CompositePass";
+    return "SceneColorDownsamplePass";
   }
   [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
 
 private:
-  struct alignas(8) PushConstants {
-    uint64_t frameDataAddress = 0;
-    uint64_t vertexBufferAddress = 0;
-    uint64_t vertexDecodeBufferAddress = 0;
-    uint64_t instanceMatricesAddress = 0;
-    uint64_t instanceRemapAddress = 0;
-    uint64_t instanceCentersPhaseAddress = 0;
-    uint64_t instanceBaseMatricesAddress = 0;
-    uint32_t instanceCount = 0;
-    uint32_t materialIndex = 0;
-    uint32_t vertexDecodeIndex = 0;
-    uint32_t packedVertexFormat = 0;
-    float timeSeconds = 0.0f;
-    float tessNearDistance = 1.0f;
-    float tessFarDistance = 8.0f;
-    float tessMinFactor = 1.0f;
-    float tessMaxFactor = 1.0f;
-    uint32_t debugVisualizationMode = 0;
+  struct CopyPushConstants {
+    uint32_t sourceTexId = 0u;
+    uint32_t sourceSamplerId = 0u;
+    uint32_t flags = 0u;
+    uint32_t reserved0 = 0u;
   };
-  static_assert(sizeof(PushConstants) <= 128,
-                "CompositePass::PushConstants exceeds Vulkan guarantee");
+  static_assert(sizeof(CopyPushConstants) <= 128);
 
   Result<bool, std::string> ensureInitialized();
-  Result<bool, std::string> createShaders();
   Result<bool, std::string> ensurePipeline();
-  Result<bool, std::string> ensureFrameBufferCapacity(size_t requiredBytes);
-  void destroyPipelineState();
+  Result<bool, std::string> createShaders();
+  void destroyPipeline();
   void destroyShaders();
-  void destroyBuffers();
 
   GPUDevice &gpu_;
-  std::unique_ptr<Shader> shader_;
-  std::unique_ptr<Buffer> frameBuffer_;
-
-  ShaderHandle vertexShader_{};
-  ShaderHandle fragmentShader_{};
-  RenderPipelineHandle pipelineHandle_{};
-  Format pipelineColorFormat_ = Format::Count;
-
-  size_t frameBufferCapacityBytes_ = 0;
-  bool initialized_ = false;
-  bool frameDataUploadValid_ = false;
-  bool hasPreparedDraw_ = false;
-
-  ForwardSceneFrameData frameData_{};
-  ForwardSceneFrameData uploadedFrameData_{};
-  PushConstants pushConstants_{};
-  DrawItem drawItem_{};
-  TextureHandle sourceFrameColor_{};
-  std::filesystem::path vertexPath_{};
-  std::filesystem::path fragmentPath_{};
+  FullscreenPassResources resources_{};
 };
 
-class NURI_API CompositeFeature final : public RenderFeature {
+class NURI_API SceneResolvePass final : public RenderFeaturePass {
 public:
-  explicit CompositeFeature(GPUDevice &gpu, CompositeFeatureConfig config);
-  ~CompositeFeature() override = default;
+  explicit SceneResolvePass(GPUDevice &gpu,
+                            FrameCompositionFeatureConfig config);
+  ~SceneResolvePass() override;
 
-  CompositeFeature(const CompositeFeature &) = delete;
-  CompositeFeature &operator=(const CompositeFeature &) = delete;
-  CompositeFeature(CompositeFeature &&) = delete;
-  CompositeFeature &operator=(CompositeFeature &&) = delete;
+  SceneResolvePass(const SceneResolvePass &) = delete;
+  SceneResolvePass &operator=(const SceneResolvePass &) = delete;
+  SceneResolvePass(SceneResolvePass &&) = delete;
+  SceneResolvePass &operator=(SceneResolvePass &&) = delete;
 
   [[nodiscard]] std::string_view name() const noexcept override {
-    return "CompositeFeature";
+    return "SceneResolvePass";
+  }
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+
+private:
+  struct CopyPushConstants {
+    uint32_t sourceTexId = 0u;
+    uint32_t sourceSamplerId = 0u;
+    uint32_t flags = 0u;
+    uint32_t reserved0 = 0u;
+  };
+  static_assert(sizeof(CopyPushConstants) <= 128);
+
+  Result<bool, std::string> ensureInitialized();
+  Result<bool, std::string> ensurePipeline();
+  Result<bool, std::string> createShaders();
+  void destroyPipeline();
+  void destroyShaders();
+
+  GPUDevice &gpu_;
+  FullscreenPassResources resources_{};
+};
+
+class NURI_API PresentToneMapPass final : public RenderFeaturePass {
+public:
+  explicit PresentToneMapPass(GPUDevice &gpu,
+                              FrameCompositionFeatureConfig config);
+  ~PresentToneMapPass() override;
+
+  PresentToneMapPass(const PresentToneMapPass &) = delete;
+  PresentToneMapPass &operator=(const PresentToneMapPass &) = delete;
+  PresentToneMapPass(PresentToneMapPass &&) = delete;
+  PresentToneMapPass &operator=(PresentToneMapPass &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "PresentToneMapPass";
+  }
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+
+private:
+  struct PushConstants {
+    uint32_t sourceTexId = 0u;
+    uint32_t sourceSamplerId = 0u;
+    float exposure = 1.0f;
+    uint32_t reserved0 = 0u;
+  };
+  static_assert(sizeof(PushConstants) <= 128);
+
+  Result<bool, std::string> ensureInitialized();
+  Result<bool, std::string> ensurePipeline();
+  Result<bool, std::string> createShaders();
+  void destroyPipeline();
+  void destroyShaders();
+
+  GPUDevice &gpu_;
+  FullscreenPassResources resources_{};
+};
+
+class NURI_API FrameCompositionFeature final : public RenderFeature {
+public:
+  explicit FrameCompositionFeature(GPUDevice &gpu,
+                                   FrameCompositionFeatureConfig config);
+  ~FrameCompositionFeature() override = default;
+
+  FrameCompositionFeature(const FrameCompositionFeature &) = delete;
+  FrameCompositionFeature &operator=(const FrameCompositionFeature &) = delete;
+  FrameCompositionFeature(FrameCompositionFeature &&) = delete;
+  FrameCompositionFeature &operator=(FrameCompositionFeature &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "FrameCompositionFeature";
   }
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:
-  CompositePass pass_;
-  std::array<RenderFeaturePass *, 1> passes_{&pass_};
+  SceneColorDownsamplePass downsamplePass_;
+  SceneResolvePass resolvePass_;
+  std::array<RenderFeaturePass *, 2> passes_{&downsamplePass_, &resolvePass_};
 };
+
+class NURI_API FramePresentFeature final : public RenderFeature {
+public:
+  explicit FramePresentFeature(GPUDevice &gpu,
+                               FrameCompositionFeatureConfig config);
+  ~FramePresentFeature() override = default;
+
+  FramePresentFeature(const FramePresentFeature &) = delete;
+  FramePresentFeature &operator=(const FramePresentFeature &) = delete;
+  FramePresentFeature(FramePresentFeature &&) = delete;
+  FramePresentFeature &operator=(FramePresentFeature &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "FramePresentFeature";
+  }
+  [[nodiscard]] bool isTerminalFeature() const noexcept override {
+    return true;
+  }
+  [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
+
+private:
+  PresentToneMapPass presentPass_;
+  std::array<RenderFeaturePass *, 1> passes_{&presentPass_};
+};
+
+using CompositeFeature = FramePresentFeature;
 
 } // namespace nuri

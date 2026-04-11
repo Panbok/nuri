@@ -11,8 +11,11 @@
 
 #include <limits>
 #include <memory>
+#include <vector>
 
 namespace nuri {
+
+class RenderScene;
 
 class NURI_API SceneLightingProvider final : public FrameDataProvider {
 public:
@@ -30,16 +33,25 @@ public:
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
 
 private:
-  Result<bool, std::string> ensureBufferCapacity(size_t requiredBytes);
-  void destroyBuffer();
+  struct SlotUploadState {
+    const RenderScene *scene = nullptr;
+    uint64_t lightTopologyVersion = std::numeric_limits<uint64_t>::max();
+    uint64_t lightTransformVersion = std::numeric_limits<uint64_t>::max();
+    uint32_t directionalLightCount = std::numeric_limits<uint32_t>::max();
+    uint32_t localLightCount = std::numeric_limits<uint32_t>::max();
+    bool hasFrameData = false;
+    ForwardSceneFrameData frameData{};
+  };
+
+  Result<bool, std::string> ensureBufferRingCapacity(size_t requiredBytes,
+                                                     uint32_t requiredCount);
+  void destroyBuffers();
+  [[nodiscard]] Buffer *currentBuffer(uint64_t frameIndex) const noexcept;
 
   GPUDevice &gpu_;
-  std::unique_ptr<Buffer> sceneDataBuffer_;
+  std::vector<std::unique_ptr<Buffer>> sceneDataBuffers_;
+  std::vector<SlotUploadState> slotUploadStates_;
   size_t sceneDataBufferCapacityBytes_ = 0;
-  ForwardSceneFrameData uploadedFrameData_{};
-  bool frameDataUploadValid_ = false;
-  uint64_t cachedLightTopologyVersion_ = std::numeric_limits<uint64_t>::max();
-  uint64_t cachedLightTransformVersion_ = std::numeric_limits<uint64_t>::max();
 };
 
 } // namespace nuri

@@ -43,12 +43,7 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
 
-  if (ctx.shared.transmissionStageEnabled) {
-    if (!nuri::isValid(ctx.shared.sceneColorTexture)) {
-      return Result<bool, std::string>::makeError(
-          "SkyboxPass::build: transmission stage enabled but scene color "
-          "texture is unavailable");
-    }
+  if (nuri::isValid(ctx.shared.sceneColorTexture)) {
     auto sceneColorImport = ctx.graph.importTexture(
         ctx.shared.sceneColorTexture, "skybox_scene_color");
     if (sceneColorImport.hasError()) {
@@ -195,7 +190,7 @@ Result<bool, std::string> SkyboxPass::createPipeline() {
       .vertexInput = {},
       .vertexShader = skyboxVertexShader_,
       .fragmentShader = skyboxFragmentShader_,
-      .colorFormats = {gpu_.getSwapchainFormat()},
+      .colorFormats = {kFrameCompositionSceneColorFormat},
       .depthFormat = Format::Count,
       .cullMode = CullMode::None,
       .polygonMode = PolygonMode::Fill,
@@ -239,8 +234,7 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
   uint32_t frameFlags = 0u;
   uint32_t sceneColorTexId = 0u;
   uint32_t sceneColorSamplerId = 0u;
-  if (ctx.shared.transmissionStageEnabled &&
-      nuri::isValid(ctx.shared.sceneColorTexture)) {
+  if (nuri::isValid(ctx.shared.sceneColorTexture)) {
     sceneColorTexId =
         gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
     sceneColorSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);

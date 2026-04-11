@@ -13,19 +13,8 @@ namespace {
 
 constexpr uint32_t kTransmissionPassDebugColor = 0x33ffaaeeu;
 constexpr uint32_t kTransmissionMeshDebugColor = 0x33ffaaeeu;
-constexpr uint32_t kTransmissionCopyDebugColor = 0x3388ffffu;
-constexpr uint32_t kTransmissionDownsampleDebugColor = 0x3388ffaau;
 constexpr std::string_view kTransmissionPassLabel = "Transmission Pass";
-constexpr std::string_view kTransmissionCopyPassLabel =
-    "Transmission Copy Pass";
-constexpr std::string_view kTransmissionDownsamplePassLabel =
-    "Transmission Downsample Pass";
 constexpr std::string_view kTransmissionMeshLabel = "TransmissionMesh";
-constexpr std::string_view kTransmissionCopyLabel = "TransmissionCopy";
-constexpr std::string_view kTransmissionDownsampleLabel =
-    "TransmissionDownsample";
-constexpr uint32_t kTransmissionSceneColorLevelCount = 3u;
-constexpr uint32_t kTransmissionCopyFlagDownsample = 1u << 0u;
 
 [[nodiscard]] std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
@@ -165,56 +154,9 @@ RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
   };
 }
 
-RenderPipelineDesc copyPipelineDesc(Format colorFormat, Format depthFormat,
-                                    ShaderHandle vertexShader,
-                                    ShaderHandle fragmentShader) {
-  return RenderPipelineDesc{
-      .vertexInput = {},
-      .vertexShader = vertexShader,
-      .fragmentShader = fragmentShader,
-      .colorFormats = {colorFormat},
-      .depthFormat = depthFormat,
-      .cullMode = CullMode::None,
-      .polygonMode = PolygonMode::Fill,
-      .topology = Topology::Triangle,
-      .blendEnabled = false,
-  };
-}
-
 uint32_t saturateToU32(size_t value) {
   return static_cast<uint32_t>(
       std::min(value, size_t(std::numeric_limits<uint32_t>::max())));
-}
-
-uint32_t levelDimensions(uint32_t base, uint32_t level) {
-  return std::max(1u, base >> std::min(level, 31u));
-}
-
-[[nodiscard]] bool allTexturesValid(std::span<const TextureHandle> textures) {
-  for (const TextureHandle texture : textures) {
-    if (!nuri::isValid(texture)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-void destroyTextures(GPUDevice &gpu,
-                     std::pmr::vector<TextureHandle> &textures) {
-  for (TextureHandle &texture : textures) {
-    if (!nuri::isValid(texture)) {
-      continue;
-    }
-    gpu.destroyTexture(texture);
-    texture = {};
-  }
-  textures.clear();
-}
-
-[[nodiscard]] size_t ringSlot(uint64_t frameIndex, size_t slotCount) {
-  NURI_ASSERT(slotCount > 0u,
-              "TransmissionRenderer ring slot count must be > 0");
-  return static_cast<size_t>(frameIndex % slotCount);
 }
 
 } // namespace
@@ -231,13 +173,9 @@ TransmissionRenderer::TransmissionRenderer(
       staticPassTextureReads_(memory_), meshPushConstants_(memory_),
       passDrawItems_(memory_), passTextureReads_(memory_),
       passDependencyBuffers_(memory_),
-      passDependencyBufferAccessModes_(memory_),
-      copyPushConstantsRing_(memory_), sceneColorTextures_(memory_),
-      frameColorTextures_(memory_), sceneColorMipTextures_(memory_) {
+      passDependencyBufferAccessModes_(memory_) {
   const std::filesystem::path basePath = config_.meshFragment.parent_path();
   transmissionFragmentPath_ = basePath / "transmission.frag";
-  fullscreenCopyVertexPath_ = basePath / "fullscreen_copy.vert";
-  sceneCopyFragmentPath_ = basePath / "scene_copy.frag";
 }
 
 TransmissionRenderer::~TransmissionRenderer() { onDetach(); }
@@ -255,64 +193,13 @@ void TransmissionRenderer::onDetach() {
   destroyPipelineState();
   destroyShaders();
   meshShader_.reset();
-  copyShader_.reset();
   resetFrameBuildState();
   resetCachedState();
-  destroyTextures(gpu_, sceneColorTextures_);
-  destroyTextures(gpu_, frameColorTextures_);
-  destroyTextures(gpu_, sceneColorMipTextures_);
-  sceneColorTextureFormat_ = Format::Count;
-  sceneColorTextureWidth_ = 0;
-  sceneColorTextureHeight_ = 0;
   initialized_ = false;
 }
 
 void TransmissionRenderer::publishFrameData(RenderFrameContext &frame) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
-  const RenderSettings &settings = settingsOrDefault(frame);
-  if (!settings.transmission.enabled || !hasTransmissionContent(frame)) {
-    return;
-  }
-  auto sceneColorResult = ensureSceneColorTexture();
-  if (sceneColorResult.hasError()) {
-    NURI_LOG_WARNING("TransmissionRenderer::publishFrameData: %s",
-                     sceneColorResult.error().c_str());
-    return;
-  }
-  auto frameColorResult = ensureFrameColorTexture();
-  if (frameColorResult.hasError()) {
-    NURI_LOG_WARNING("TransmissionRenderer::publishFrameData: %s",
-                     frameColorResult.error().c_str());
-    return;
-  }
-  const TextureHandle sceneColorTexture =
-      currentSceneColorTexture(frame.frameIndex);
-  if (!nuri::isValid(sceneColorTexture)) {
-    NURI_LOG_WARNING("TransmissionRenderer::publishFrameData: scene color ring "
-                     "slot is unavailable");
-    return;
-  }
-  const TextureHandle frameColorTexture =
-      currentFrameColorTexture(frame.frameIndex);
-  if (!nuri::isValid(frameColorTexture)) {
-    NURI_LOG_WARNING("TransmissionRenderer::publishFrameData: frame color ring "
-                     "slot is unavailable");
-    return;
-  }
-  frame.sharedResources.transmissionStageEnabled = true;
-  frame.sharedResources.sceneColorTexture = sceneColorTexture;
-  frame.sharedResources.frameColorTexture = frameColorTexture;
-  const TextureHandle sceneColorHalfResTexture =
-      currentSceneColorTextureMip(frame.frameIndex, 1u);
-  if (nuri::isValid(sceneColorHalfResTexture)) {
-    frame.sharedResources.sceneColorHalfResTexture = sceneColorHalfResTexture;
-  }
-  const TextureHandle sceneColorQuarterResTexture =
-      currentSceneColorTextureMip(frame.frameIndex, 2u);
-  if (nuri::isValid(sceneColorQuarterResTexture)) {
-    frame.sharedResources.sceneColorQuarterResTexture =
-        sceneColorQuarterResTexture;
-  }
+  (void)frame;
 }
 
 Result<bool, std::string>
@@ -322,9 +209,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   preparedFrameColorTexture_ = {};
   preparedDepthTexture_ = {};
   preparedSceneDepthGraphTexture_ = {};
-  preparedHasSceneColorInput_ = false;
-  preparedCopySceneColorToSwapchain_ = false;
-  preparedSceneColorSamplerId_ = 0;
 
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.transmission.enabled) {
@@ -339,21 +223,9 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
         "TransmissionRenderer::buildRenderGraph: frame resources are null");
   }
 
-  if (!frame.sharedResources.transmissionStageEnabled) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
   auto initResult = ensureInitialized();
   if (initResult.hasError()) {
     return initResult;
-  }
-  auto sceneColorResult = ensureSceneColorTexture();
-  if (sceneColorResult.hasError()) {
-    return sceneColorResult;
-  }
-  auto frameColorResult = ensureFrameColorTexture();
-  if (frameColorResult.hasError()) {
-    return frameColorResult;
   }
 
   if (!nuri::isValid(frame.sharedResources.sceneColorTexture)) {
@@ -515,15 +387,11 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     }
   }
 
-  const uint32_t sceneColorTexId =
-      gpu_.getTextureBindlessIndex(sceneColorTexture);
-  const uint32_t sceneColorSamplerId =
-      gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
-
   const Format depthFormat = nuri::isValid(depthTexture)
                                  ? gpu_.getTextureFormat(depthTexture)
                                  : Format::Count;
-  auto pipelineResult = ensurePipelines(gpu_.getSwapchainFormat(), depthFormat);
+  auto pipelineResult =
+      ensurePipelines(gpu_.getTextureFormat(frameColorTexture), depthFormat);
   if (pipelineResult.hasError()) {
     return pipelineResult;
   }
@@ -532,7 +400,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   passTextureReads_.clear();
   passDependencyBuffers_.clear();
   meshPushConstants_.clear();
-  copyPushConstantsRing_.clear();
 
   if (!meshDrawTemplates_.empty()) {
     NURI_PROFILER_ZONE("TransmissionRenderer.material_instance_uploads",
@@ -695,20 +562,16 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     NURI_PROFILER_ZONE_END();
   }
 
-  if (sceneColorTexId != kInvalidTextureBindlessIndex) {
-    appendUniqueTexture(passTextureReads_, sceneColorTexture);
-    for (uint32_t level = 1u; level < kTransmissionSceneColorLevelCount;
-         ++level) {
-      appendUniqueTexture(passTextureReads_,
-                          currentSceneColorTextureMip(frame.frameIndex, level));
-    }
-  }
+  appendUniqueTexture(passTextureReads_, sceneColorTexture);
+  appendUniqueTexture(passTextureReads_,
+                      frame.sharedResources.sceneColorHalfResTexture);
+  appendUniqueTexture(passTextureReads_,
+                      frame.sharedResources.sceneColorQuarterResTexture);
 
   preparedSceneColorTexture_ = sceneColorTexture;
   preparedFrameColorTexture_ = frameColorTexture;
   preparedDepthTexture_ = depthTexture;
   preparedSceneDepthGraphTexture_ = sceneDepthGraphTexture;
-  preparedSceneColorSamplerId_ = sceneColorSamplerId;
 
   if (!meshDrawTemplates_.empty() && passDrawItems_.empty()) {
     NURI_LOG_WARNING("TransmissionRenderer::prepareTransmissionPasses: "
@@ -719,199 +582,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-bool TransmissionRenderer::hasPreparedTransmissionDownsamplePasses()
-    const noexcept {
-  return nuri::isValid(preparedSceneColorTexture_);
-}
-
-bool TransmissionRenderer::hasPreparedTransmissionCopyPass() const noexcept {
-  return nuri::isValid(preparedSceneColorTexture_);
-}
-
 bool TransmissionRenderer::hasPreparedTransmissionMainPass() const noexcept {
   return !passDrawItems_.empty();
-}
-
-Result<bool, std::string>
-TransmissionRenderer::appendTransmissionDownsamplePasses(
-    RenderFrameContext &frame, RenderGraphBuilder &graph) {
-  if (!hasPreparedTransmissionDownsamplePasses()) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-  const bool hasCurrentFrameSceneColor =
-      nuri::isValid(frame.sharedResources.sceneColorGraphTexture);
-  if (!hasCurrentFrameSceneColor) {
-    RenderGraphGraphicsPassDesc fallbackPassDesc{};
-    fallbackPassDesc.color = {.loadOp = LoadOp::Clear,
-                              .storeOp = StoreOp::Store,
-                              .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
-    auto fallbackImportResult = graph.importTexture(
-        preparedSceneColorTexture_, "transmission_scene_color_fallback");
-    if (fallbackImportResult.hasError()) {
-      return Result<bool, std::string>::makeError(fallbackImportResult.error());
-    }
-    fallbackPassDesc.colorTexture = fallbackImportResult.value();
-    fallbackPassDesc.debugLabel = kTransmissionDownsamplePassLabel;
-    fallbackPassDesc.debugColor = kTransmissionDownsampleDebugColor;
-
-    auto addFallbackResult = graph.addGraphicsPass(fallbackPassDesc);
-    if (addFallbackResult.hasError()) {
-      return Result<bool, std::string>::makeError(addFallbackResult.error());
-    }
-  }
-  preparedHasSceneColorInput_ = true;
-
-  const size_t downsamplePassCount =
-      static_cast<size_t>(kTransmissionSceneColorLevelCount - 1u);
-  copyPushConstantsRing_.reserve(copyPushConstantsRing_.size() +
-                                 downsamplePassCount);
-
-  auto buildCopyDraw = [this](uint32_t sourceTexId, uint32_t sourceSamplerId,
-                              uint32_t flags) -> DrawItem {
-    copyPushConstantsRing_.push_back(CopyPushConstants{
-        .sourceTexId = sourceTexId,
-        .sourceSamplerId = sourceSamplerId,
-        .flags = flags,
-        .reserved0 = 0u,
-    });
-    const CopyPushConstants &pc = copyPushConstantsRing_.back();
-
-    DrawItem draw{};
-    draw.pipeline = copyPipelineHandle_;
-    draw.vertexCount = 3u;
-    draw.instanceCount = 1u;
-    draw.pushConstants = std::span<const std::byte>(
-        reinterpret_cast<const std::byte *>(&pc), sizeof(CopyPushConstants));
-    draw.debugLabel = (flags & kTransmissionCopyFlagDownsample) != 0u
-                          ? kTransmissionDownsampleLabel
-                          : kTransmissionCopyLabel;
-    draw.debugColor = (flags & kTransmissionCopyFlagDownsample) != 0u
-                          ? kTransmissionDownsampleDebugColor
-                          : kTransmissionCopyDebugColor;
-    return draw;
-  };
-
-  TextureHandle previousSceneColorLevel = preparedSceneColorTexture_;
-  for (uint32_t level = 1u; level < kTransmissionSceneColorLevelCount;
-       ++level) {
-    NURI_PROFILER_ZONE("TransmissionRenderer.downsample_pass_build",
-                       NURI_PROFILER_COLOR_CMD_DRAW);
-    const TextureHandle destinationTexture =
-        currentSceneColorTextureMip(frame.frameIndex, level);
-    if (!nuri::isValid(destinationTexture)) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::appendTransmissionDownsamplePasses: scene "
-          "color "
-          "downsample texture is unavailable");
-    }
-
-    const uint32_t sourceTexId =
-        gpu_.getTextureBindlessIndex(previousSceneColorLevel);
-    if (sourceTexId == kInvalidTextureBindlessIndex) {
-      return Result<bool, std::string>::makeError(
-          "TransmissionRenderer::appendTransmissionDownsamplePasses: invalid "
-          "scene "
-          "color downsample source bindless index");
-    }
-
-    DrawItem downsampleDraw =
-        buildCopyDraw(sourceTexId, preparedSceneColorSamplerId_,
-                      kTransmissionCopyFlagDownsample);
-    RenderGraphGraphicsPassDesc downsamplePassDesc{};
-    downsamplePassDesc.color = {.loadOp = LoadOp::Clear,
-                                .storeOp = StoreOp::Store,
-                                .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-    auto destinationImportResult =
-        graph.importTexture(destinationTexture, "transmission_scene_color_mip");
-    if (destinationImportResult.hasError()) {
-      return Result<bool, std::string>::makeError(
-          destinationImportResult.error());
-    }
-    downsamplePassDesc.colorTexture = destinationImportResult.value();
-    downsamplePassDesc.draws = std::span<const DrawItem>(&downsampleDraw, 1u);
-    const std::array<TextureHandle, 1> downsampleDependencies = {
-        previousSceneColorLevel};
-    downsamplePassDesc.dependencyTextures = std::span<const TextureHandle>(
-        downsampleDependencies.data(), downsampleDependencies.size());
-    downsamplePassDesc.debugLabel = kTransmissionDownsamplePassLabel;
-    downsamplePassDesc.debugColor = kTransmissionDownsampleDebugColor;
-
-    auto addDownsampleResult = graph.addGraphicsPass(downsamplePassDesc);
-    if (addDownsampleResult.hasError()) {
-      return Result<bool, std::string>::makeError(addDownsampleResult.error());
-    }
-
-    previousSceneColorLevel = destinationTexture;
-    NURI_PROFILER_ZONE_END();
-  }
-
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string>
-TransmissionRenderer::appendTransmissionCopyPass(RenderFrameContext &frame,
-                                                 RenderGraphBuilder &graph) {
-  if (!hasPreparedTransmissionCopyPass()) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-  if (!nuri::isValid(preparedSceneColorTexture_) ||
-      !nuri::isValid(preparedFrameColorTexture_) ||
-      !preparedHasSceneColorInput_) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-  copyPushConstantsRing_.reserve(copyPushConstantsRing_.size() + 1u);
-  copyPushConstantsRing_.push_back(CopyPushConstants{
-      .sourceTexId = gpu_.getTextureBindlessIndex(preparedSceneColorTexture_),
-      .sourceSamplerId = preparedSceneColorSamplerId_,
-      .flags = 0u,
-      .reserved0 = 0u,
-  });
-  const CopyPushConstants &pc = copyPushConstantsRing_.back();
-  if (pc.sourceTexId == kInvalidTextureBindlessIndex) {
-    return Result<bool, std::string>::makeError(
-        "TransmissionRenderer::appendTransmissionCopyPass: invalid scene color "
-        "copy source bindless index");
-  }
-
-  NURI_PROFILER_ZONE("TransmissionRenderer.copy_pass_build",
-                     NURI_PROFILER_COLOR_CMD_DRAW);
-  DrawItem copyDraw{};
-  copyDraw.pipeline = copyPipelineHandle_;
-  copyDraw.vertexCount = 3u;
-  copyDraw.instanceCount = 1u;
-  copyDraw.pushConstants = std::span<const std::byte>(
-      reinterpret_cast<const std::byte *>(&pc), sizeof(CopyPushConstants));
-  copyDraw.debugLabel = kTransmissionCopyLabel;
-  copyDraw.debugColor = kTransmissionCopyDebugColor;
-
-  RenderGraphGraphicsPassDesc copyPassDesc{};
-  copyPassDesc.color = {.loadOp = LoadOp::Clear,
-                        .storeOp = StoreOp::Store,
-                        .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
-  auto colorImportResult = graph.importTexture(preparedFrameColorTexture_,
-                                               "transmission_frame_color");
-  if (colorImportResult.hasError()) {
-    return Result<bool, std::string>::makeError(colorImportResult.error());
-  }
-  copyPassDesc.colorTexture = colorImportResult.value();
-  copyPassDesc.draws = std::span<const DrawItem>(&copyDraw, 1u);
-  const std::array<TextureHandle, 1> copyDependencies = {
-      preparedSceneColorTexture_};
-  copyPassDesc.dependencyTextures = std::span<const TextureHandle>(
-      copyDependencies.data(), copyDependencies.size());
-  copyPassDesc.debugLabel = kTransmissionCopyPassLabel;
-  copyPassDesc.debugColor = kTransmissionCopyDebugColor;
-
-  auto addCopyResult = graph.addGraphicsPass(copyPassDesc);
-  if (addCopyResult.hasError()) {
-    return Result<bool, std::string>::makeError(addCopyResult.error());
-  }
-  NURI_PROFILER_ZONE_END();
-
-  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
@@ -921,9 +593,6 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  const bool hasSceneColorInput =
-      nuri::isValid(preparedSceneColorTexture_) && preparedHasSceneColorInput_;
-  const bool copySceneColorToSwapchain = hasSceneColorInput;
   if (!nuri::isValid(preparedFrameColorTexture_)) {
     return Result<bool, std::string>::makeError(
         "TransmissionRenderer::appendTransmissionMainPass: frame color target "
@@ -934,8 +603,7 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
   RenderGraphGraphicsPassDesc passDesc{};
   NURI_PROFILER_ZONE("TransmissionRenderer.main_pass_build",
                      NURI_PROFILER_COLOR_CMD_DRAW);
-  passDesc.color = {.loadOp = copySceneColorToSwapchain ? LoadOp::Load
-                                                        : LoadOp::Clear,
+  passDesc.color = {.loadOp = LoadOp::Load,
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
   auto colorImportResult = graph.importTexture(preparedFrameColorTexture_,
@@ -1000,8 +668,7 @@ Result<bool, std::string> TransmissionRenderer::ensureInitialized() {
 Result<bool, std::string> TransmissionRenderer::createShaders() {
   destroyShaders();
   meshShader_ = Shader::create("transmission_main", gpu_);
-  copyShader_ = Shader::create("transmission_copy", gpu_);
-  if (!meshShader_ || !copyShader_) {
+  if (!meshShader_) {
     return Result<bool, std::string>::makeError(
         "TransmissionRenderer::createShaders: failed to create shader "
         "wrappers");
@@ -1017,21 +684,8 @@ Result<bool, std::string> TransmissionRenderer::createShaders() {
   if (meshFragmentResult.hasError()) {
     return Result<bool, std::string>::makeError(meshFragmentResult.error());
   }
-  auto copyVertexResult = copyShader_->compileFromFile(
-      fullscreenCopyVertexPath_.string(), ShaderStage::Vertex);
-  if (copyVertexResult.hasError()) {
-    return Result<bool, std::string>::makeError(copyVertexResult.error());
-  }
-  auto copyFragmentResult = copyShader_->compileFromFile(
-      sceneCopyFragmentPath_.string(), ShaderStage::Fragment);
-  if (copyFragmentResult.hasError()) {
-    return Result<bool, std::string>::makeError(copyFragmentResult.error());
-  }
-
   meshVertexShader_ = meshVertexResult.value();
   meshFragmentShader_ = meshFragmentResult.value();
-  copyVertexShader_ = copyVertexResult.value();
-  copyFragmentShader_ = copyFragmentResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1042,10 +696,7 @@ TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
       nuri::isValid(meshDoubleSidedPipelineHandle_) &&
       meshPipelineColorFormat_ == colorFormat &&
       meshPipelineDepthFormat_ == depthFormat;
-  const bool copyPipelineValid = nuri::isValid(copyPipelineHandle_) &&
-                                 copyPipelineColorFormat_ == colorFormat &&
-                                 copyPipelineDepthFormat_ == Format::Count;
-  if (meshPipelinesValid && copyPipelineValid) {
+  if (meshPipelinesValid) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -1070,20 +721,8 @@ TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
   }
   meshDoubleSidedPipelineHandle_ = meshDoubleResult.value();
 
-  auto copyResult = gpu_.createRenderPipeline(
-      copyPipelineDesc(colorFormat, Format::Count, copyVertexShader_,
-                       copyFragmentShader_),
-      "transmission_copy");
-  if (copyResult.hasError()) {
-    destroyPipelineState();
-    return Result<bool, std::string>::makeError(copyResult.error());
-  }
-  copyPipelineHandle_ = copyResult.value();
-
   meshPipelineColorFormat_ = colorFormat;
   meshPipelineDepthFormat_ = depthFormat;
-  copyPipelineColorFormat_ = colorFormat;
-  copyPipelineDepthFormat_ = Format::Count;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1153,177 +792,6 @@ TransmissionRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
     instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
   }
   return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> TransmissionRenderer::ensureSceneColorTexture() {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  int32_t framebufferWidth = 0;
-  int32_t framebufferHeight = 0;
-  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
-  const uint32_t safeWidth =
-      static_cast<uint32_t>(std::max(framebufferWidth, 1));
-  const uint32_t safeHeight =
-      static_cast<uint32_t>(std::max(framebufferHeight, 1));
-  const Format targetFormat = gpu_.getSwapchainFormat();
-  const uint32_t textureCount = std::max(1u, gpu_.getSwapchainImageCount());
-
-  const bool matchesExisting =
-      sceneColorTextures_.size() == textureCount &&
-      sceneColorMipTextures_.size() ==
-          textureCount * (kTransmissionSceneColorLevelCount - 1u) &&
-      sceneColorTextureFormat_ == targetFormat &&
-      sceneColorTextureWidth_ == safeWidth &&
-      sceneColorTextureHeight_ == safeHeight;
-  if (matchesExisting) {
-    if (allTexturesValid(sceneColorTextures_) &&
-        allTexturesValid(sceneColorMipTextures_)) {
-      return Result<bool, std::string>::makeResult(true);
-    }
-  }
-
-  destroyTextures(gpu_, sceneColorTextures_);
-  sceneColorTextures_.resize(textureCount);
-  destroyTextures(gpu_, sceneColorMipTextures_);
-  sceneColorMipTextures_.resize(textureCount *
-                                (kTransmissionSceneColorLevelCount - 1u));
-
-  const TextureDesc sceneColorDesc{
-      .type = TextureType::Texture2D,
-      .format = targetFormat,
-      .dimensions = {safeWidth, safeHeight, 1},
-      .usage = TextureUsage::AttachmentSampled,
-      .storage = Storage::Device,
-      .numLayers = 1,
-      .numSamples = 1,
-      .numMipLevels = 1,
-      .data = {},
-      .dataNumMipLevels = 1,
-      .generateMipmaps = false,
-  };
-  for (uint32_t i = 0; i < textureCount; ++i) {
-    const std::string debugName =
-        "transmission_scene_color_" + std::to_string(i);
-    auto textureResult =
-        gpu_.createFramebufferTexture(sceneColorDesc, debugName);
-    if (textureResult.hasError()) {
-      return Result<bool, std::string>::makeError(textureResult.error());
-    }
-    sceneColorTextures_[i] = textureResult.value();
-  }
-
-  for (uint32_t level = 1u; level < kTransmissionSceneColorLevelCount;
-       ++level) {
-    TextureDesc mipDesc = sceneColorDesc;
-    mipDesc.dimensions.width = levelDimensions(safeWidth, level);
-    mipDesc.dimensions.height = levelDimensions(safeHeight, level);
-    for (uint32_t i = 0; i < textureCount; ++i) {
-      const std::string debugName = "transmission_scene_color_mip_" +
-                                    std::to_string(level) + "_" +
-                                    std::to_string(i);
-      auto textureResult = gpu_.createTexture(mipDesc, debugName);
-      if (textureResult.hasError()) {
-        return Result<bool, std::string>::makeError(textureResult.error());
-      }
-      sceneColorMipTextures_[(level - 1u) * textureCount + i] =
-          textureResult.value();
-    }
-  }
-
-  sceneColorTextureFormat_ = targetFormat;
-  sceneColorTextureWidth_ = safeWidth;
-  sceneColorTextureHeight_ = safeHeight;
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> TransmissionRenderer::ensureFrameColorTexture() {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  int32_t framebufferWidth = 0;
-  int32_t framebufferHeight = 0;
-  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
-  const uint32_t safeWidth =
-      static_cast<uint32_t>(std::max(framebufferWidth, 1));
-  const uint32_t safeHeight =
-      static_cast<uint32_t>(std::max(framebufferHeight, 1));
-  const Format targetFormat = gpu_.getSwapchainFormat();
-  const uint32_t textureCount = std::max(1u, gpu_.getSwapchainImageCount());
-
-  (void)targetFormat;
-  (void)safeWidth;
-  (void)safeHeight;
-  const bool matchesExisting = frameColorTextures_.size() == textureCount &&
-                               allTexturesValid(frameColorTextures_);
-  if (matchesExisting) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-  destroyTextures(gpu_, frameColorTextures_);
-  frameColorTextures_.resize(textureCount);
-
-  const TextureDesc frameColorDesc{
-      .type = TextureType::Texture2D,
-      .format = targetFormat,
-      .dimensions = {safeWidth, safeHeight, 1},
-      .usage = TextureUsage::AttachmentSampled,
-      .storage = Storage::Device,
-      .numLayers = 1,
-      .numSamples = 1,
-      .numMipLevels = 1,
-      .data = {},
-      .dataNumMipLevels = 1,
-      .generateMipmaps = false,
-  };
-  for (uint32_t i = 0; i < textureCount; ++i) {
-    const std::string debugName =
-        "transmission_frame_color_" + std::to_string(i);
-    auto textureResult =
-        gpu_.createFramebufferTexture(frameColorDesc, debugName);
-    if (textureResult.hasError()) {
-      return Result<bool, std::string>::makeError(textureResult.error());
-    }
-    frameColorTextures_[i] = textureResult.value();
-  }
-
-  return Result<bool, std::string>::makeResult(true);
-}
-
-TextureHandle
-TransmissionRenderer::currentSceneColorTexture(uint64_t frameIndex) const {
-  if (sceneColorTextures_.empty()) {
-    return {};
-  }
-  const size_t slot = ringSlot(frameIndex, sceneColorTextures_.size());
-  return sceneColorTextures_[slot];
-}
-
-TextureHandle
-TransmissionRenderer::currentFrameColorTexture(uint64_t frameIndex) const {
-  if (frameColorTextures_.empty()) {
-    return {};
-  }
-  const size_t slot = ringSlot(frameIndex, frameColorTextures_.size());
-  return frameColorTextures_[slot];
-}
-
-TextureHandle
-TransmissionRenderer::currentSceneColorTextureMip(uint64_t frameIndex,
-                                                  uint32_t level) const {
-  if (level == 0u) {
-    return currentSceneColorTexture(frameIndex);
-  }
-  if (level >= kTransmissionSceneColorLevelCount ||
-      sceneColorMipTextures_.empty()) {
-    return {};
-  }
-  const size_t textureCount = sceneColorTextures_.size();
-  if (textureCount == 0u) {
-    return {};
-  }
-  const size_t slot = ringSlot(frameIndex, textureCount);
-  const size_t index = static_cast<size_t>(level - 1u) * textureCount + slot;
-  if (index >= sceneColorMipTextures_.size()) {
-    return {};
-  }
-  return sceneColorMipTextures_[index];
 }
 
 Result<bool, std::string>
@@ -1515,20 +983,13 @@ void TransmissionRenderer::resetFrameBuildState() {
   passTextureReads_.clear();
   passDependencyBuffers_.clear();
   passDependencyBufferAccessModes_.clear();
-  copyPushConstantsRing_.clear();
   preparedSceneColorTexture_ = {};
   preparedFrameColorTexture_ = {};
   preparedDepthTexture_ = {};
   preparedSceneDepthGraphTexture_ = {};
-  preparedHasSceneColorInput_ = false;
-  preparedCopySceneColorToSwapchain_ = false;
-  preparedSceneColorSamplerId_ = 0u;
 }
 
 void TransmissionRenderer::destroyPipelineState() {
-  if (nuri::isValid(copyPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(copyPipelineHandle_);
-  }
   if (nuri::isValid(meshDoubleSidedPipelineHandle_)) {
     gpu_.destroyRenderPipeline(meshDoubleSidedPipelineHandle_);
   }
@@ -1537,11 +998,8 @@ void TransmissionRenderer::destroyPipelineState() {
   }
   meshPipelineHandle_ = {};
   meshDoubleSidedPipelineHandle_ = {};
-  copyPipelineHandle_ = {};
   meshPipelineColorFormat_ = Format::Count;
   meshPipelineDepthFormat_ = Format::Count;
-  copyPipelineColorFormat_ = Format::Count;
-  copyPipelineDepthFormat_ = Format::Count;
 }
 
 void TransmissionRenderer::destroyShaders() {
@@ -1551,16 +1009,8 @@ void TransmissionRenderer::destroyShaders() {
   if (nuri::isValid(meshFragmentShader_)) {
     gpu_.destroyShaderModule(meshFragmentShader_);
   }
-  if (nuri::isValid(copyVertexShader_)) {
-    gpu_.destroyShaderModule(copyVertexShader_);
-  }
-  if (nuri::isValid(copyFragmentShader_)) {
-    gpu_.destroyShaderModule(copyFragmentShader_);
-  }
   meshVertexShader_ = {};
   meshFragmentShader_ = {};
-  copyVertexShader_ = {};
-  copyFragmentShader_ = {};
 }
 
 void TransmissionRenderer::destroyBuffers() {

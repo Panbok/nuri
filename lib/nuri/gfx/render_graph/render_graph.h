@@ -529,6 +529,9 @@ public:
     size_t frameOutputCount = 0;
     size_t sideEffectMarkCount = 0;
     bool allPassesBorrowPayload = true;
+    // Combined hash over pass payload layout metadata that affects compile
+    // result shape, such as dependency/pre-dispatch/draw counts.
+    uint64_t payloadLayoutHash = 0;
     // Combined hash over transient texture/buffer descriptors recorded by
     // createTransientTexture()/createTransientBuffer() for this frame.
     uint64_t transientResourceDescriptorsHash = 0;
@@ -549,6 +552,7 @@ public:
              frameOutputCount == o.frameOutputCount &&
              sideEffectMarkCount == o.sideEffectMarkCount &&
              allPassesBorrowPayload == o.allPassesBorrowPayload &&
+             payloadLayoutHash == o.payloadLayoutHash &&
              transientResourceDescriptorsHash ==
                  o.transientResourceDescriptorsHash &&
              persistentHandlesVersion == o.persistentHandlesVersion &&
