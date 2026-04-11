@@ -10,6 +10,8 @@
 namespace nuri {
 namespace {
 
+std::atomic<uint64_t> gNextRenderSceneId{1u};
+
 template <typename Ref>
 [[nodiscard]] bool resourceAlive(ResourceManager *resources, Ref ref) {
   return resources != nullptr && isValid(ref) && resources->owns(ref) &&
@@ -47,7 +49,10 @@ RenderScene::RenderScene(std::pmr::memory_resource *memory)
       renderableIndexById_(memory_), renderableMorphWeights_(memory_),
       renderableSkinPalettes_(memory_), packedDirectionalLights_(memory_),
       packedLocalLights_(memory_), packedDirectionalLightIds_(memory_),
-      packedLocalLightIds_(memory_) {}
+      packedLocalLightIds_(memory_),
+      id_(gNextRenderSceneId.fetch_add(1u, std::memory_order_relaxed)),
+      topologyVersion_(0u), transformVersion_(0u), deformationVersion_(0u),
+      lightTopologyVersion_(0u), lightTransformVersion_(0u) {}
 
 RenderScene::~RenderScene() {
   for (const Renderable &renderable : renderables_) {

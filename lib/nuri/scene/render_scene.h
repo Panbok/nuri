@@ -73,6 +73,7 @@ public:
   [[nodiscard]] uint64_t topologyVersion() const noexcept {
     return topologyVersion_;
   }
+  [[nodiscard]] uint64_t id() const noexcept { return id_; }
   [[nodiscard]] uint64_t transformVersion() const noexcept {
     return transformVersion_;
   }
@@ -140,6 +141,7 @@ private:
   std::pmr::vector<LightId> packedLocalLightIds_;
   ResourceManager *resources_ = nullptr;
   EnvironmentHandles environment_{};
+  uint64_t id_ = 0u;
   uint64_t topologyVersion_ = 0u;
   uint64_t transformVersion_ = 0u;
   uint64_t deformationVersion_ = 0u;

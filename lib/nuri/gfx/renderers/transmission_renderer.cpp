@@ -528,7 +528,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       const MeshPushConstants &pc = meshPushConstants_.back();
 
       DrawItem draw{};
-      draw.pipeline = selectMeshPipeline(entry.doubleSided);
+      draw.pipeline = selectMeshPipeline();
       draw.vertexBuffer = vertexBuffer;
       draw.indexBuffer = entry.indexBuffer;
       draw.indexBufferOffset = entry.indexBufferOffset;
@@ -1065,8 +1065,7 @@ bool TransmissionRenderer::hasTransmissionContent(
          cachedTransmissionContent_;
 }
 
-RenderPipelineHandle
-TransmissionRenderer::selectMeshPipeline(bool doubleSided) const {
+RenderPipelineHandle TransmissionRenderer::selectMeshPipeline() const {
   // Transmission correctness is more important than backface-culling wins.
   // Imported scene-mesh paths can preserve source winding differently from the
   // standalone model path, and closed transmissive assets disappearing is much
@@ -1074,7 +1073,6 @@ TransmissionRenderer::selectMeshPipeline(bool doubleSided) const {
   if (nuri::isValid(meshDoubleSidedPipelineHandle_)) {
     return meshDoubleSidedPipelineHandle_;
   }
-  (void)doubleSided;
   return meshPipelineHandle_;
 }
 

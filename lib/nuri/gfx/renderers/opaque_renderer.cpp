@@ -488,7 +488,6 @@ void OpaqueRenderer::resetPickState() {
 
 void OpaqueRenderer::onDetach() {
   destroyBuffers();
-  destroyDepthTexture();
   destroyPickTexture();
   destroyDepthPyramidTextures();
   if (nuri::isValid(sceneDepthSampler_)) {
@@ -3597,7 +3596,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     computeShaderHandle_ = {};
     computePipelineHandle_ = {};
     tessellationUnsupported_ = false;
-    destroyDepthTexture();
     destroyPickTexture();
     return pipelineResult;
   }
@@ -3613,20 +3611,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
   }
 
   initialized_ = true;
-  return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> OpaqueRenderer::recreateDepthTexture() {
-  if (nuri::isValid(depthTexture_)) {
-    gpu_.destroyTexture(depthTexture_);
-    depthTexture_ = TextureHandle{};
-  }
-
-  auto depthResult = gpu_.createDepthBuffer();
-  if (depthResult.hasError()) {
-    return Result<bool, std::string>::makeError(depthResult.error());
-  }
-  depthTexture_ = depthResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -5044,13 +5028,6 @@ void OpaqueRenderer::updateFastAutoLodCache(
   autoLodCache_.instanceCount = instanceCount;
   autoLodCache_.submesh = submesh;
   autoLodCache_.frameIndex = frameIndex;
-}
-
-void OpaqueRenderer::destroyDepthTexture() {
-  if (nuri::isValid(depthTexture_)) {
-    gpu_.destroyTexture(depthTexture_);
-    depthTexture_ = TextureHandle{};
-  }
 }
 
 void OpaqueRenderer::destroyDepthPyramidTextures() {

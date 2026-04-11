@@ -259,6 +259,8 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
       std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
   renderPipeline_->addFeature(std::make_unique<OpaqueFeature>(
       getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
+  // FrameCompositionFeature reuses the opaque shader root for fullscreen copy
+  // shaders because RuntimeShaderConfig does not define a dedicated variant.
   renderPipeline_->addFeature(
       std::make_unique<FrameCompositionFeature>(getGPU(), shaderConfig.opaque));
   renderPipeline_->addFeature(std::make_unique<TransmissionFeature>(
@@ -267,6 +269,8 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
       getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(std::make_unique<DebugFeature>(
       getGPU(), shaderConfig.debugGrid, pipelineMemoryResource()));
+  // FramePresentFeature also resolves its fullscreen shaders from
+  // shaderConfig.opaque for the same reason.
   renderPipeline_->addFeature(
       std::make_unique<FramePresentFeature>(getGPU(), shaderConfig.opaque));
 

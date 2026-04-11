@@ -122,7 +122,7 @@ private:
   void destroyShaders();
   void destroyBuffers();
   [[nodiscard]] bool hasTransmissionContent(const RenderFrameContext &frame);
-  [[nodiscard]] RenderPipelineHandle selectMeshPipeline(bool doubleSided) const;
+  [[nodiscard]] RenderPipelineHandle selectMeshPipeline() const;
 
   GPUDevice &gpu_;
   TransmissionRendererConfig config_{};

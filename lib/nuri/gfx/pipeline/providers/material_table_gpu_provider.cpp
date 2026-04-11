@@ -54,7 +54,6 @@ MaterialTableGpuProvider::ensureBufferCapacity(ManagedBuffer &managedBuffer,
   const size_t newCapacity =
       grownBufferCapacity(managedBuffer.capacityBytes, requiredBytes);
   if (managedBuffer.buffer && managedBuffer.buffer->valid()) {
-    gpu_.waitIdle();
     gpu_.destroyBuffer(managedBuffer.buffer->handle());
   }
   managedBuffer.buffer.reset();
@@ -81,6 +80,21 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
 
   const MaterialTableSnapshot snapshot =
       ctx.frame.resources->materialSnapshot();
+  const auto bufferNeedsResize = [](const ManagedBuffer &managedBuffer,
+                                    size_t requiredBytes) {
+    return managedBuffer.buffer && managedBuffer.buffer->valid() &&
+           managedBuffer.capacityBytes < requiredBytes;
+  };
+  if (bufferNeedsResize(headerBuffer_, requiredTableBytes(snapshot.headers)) ||
+      bufferNeedsResize(clearcoatBuffer_,
+                        requiredTableBytes(snapshot.clearcoat)) ||
+      bufferNeedsResize(sheenBuffer_, requiredTableBytes(snapshot.sheen)) ||
+      bufferNeedsResize(transmissionBuffer_,
+                        requiredTableBytes(snapshot.transmission)) ||
+      bufferNeedsResize(specularBuffer_,
+                        requiredTableBytes(snapshot.specular))) {
+    gpu_.waitIdle();
+  }
   auto ensureHeaderResult =
       ensureBufferCapacity(headerBuffer_, requiredTableBytes(snapshot.headers),
                            "material_header_table");

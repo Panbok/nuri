@@ -237,6 +237,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   const size_t slotIndex =
       static_cast<size_t>(frame.frameIndex % sceneDataBuffers_.size());
   SlotUploadState &slotState = slotUploadStates_[slotIndex];
+  const uint64_t sceneId = frame.scene->id();
 
   const ForwardSceneFrameData frameData{
       .view = frame.camera.view,
@@ -286,7 +287,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   }
 
   const bool lightDataDirty =
-      slotState.scene != frame.scene ||
+      slotState.scene != frame.scene || slotState.sceneId != sceneId ||
       slotState.lightTopologyVersion != frame.scene->lightTopologyVersion() ||
       slotState.lightTransformVersion != frame.scene->lightTransformVersion() ||
       slotState.directionalLightCount != directionalLightCount ||
@@ -315,6 +316,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   }
 
   slotState.scene = frame.scene;
+  slotState.sceneId = sceneId;
   slotState.lightTopologyVersion = frame.scene->lightTopologyVersion();
   slotState.lightTransformVersion = frame.scene->lightTransformVersion();
   slotState.directionalLightCount = directionalLightCount;

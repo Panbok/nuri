@@ -6,7 +6,9 @@
 #include "nuri/gfx/pipeline/frame_data_provider.h"
 
 #include <array>
+#include <cstdint>
 #include <memory_resource>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -44,6 +46,7 @@ private:
   recreateMipTextureRing(TextureRing &textures, uint32_t mipLevel,
                          std::string_view debugNameBase);
   Result<bool, std::string> recreateHistoryTextures();
+  void invalidateAllocationState() noexcept;
   void destroyTextures(TextureRing &textures);
   void destroyHistoryTextures();
   [[nodiscard]] TextureHandle

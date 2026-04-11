@@ -58,6 +58,7 @@ struct NURI_API RuntimeTextMtsdfShaderConfig {
 struct NURI_API RuntimeShaderConfig {
   RuntimeDebugShaderConfig debugGrid;
   RuntimeSkyboxShaderConfig skybox;
+  // Fullscreen frame-composition/present passes reuse this shader family.
   RuntimeOpaqueShaderConfig opaque;
   RuntimeTextMtsdfShaderConfig textMtsdf;
 };

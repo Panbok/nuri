@@ -35,6 +35,7 @@ public:
 private:
   struct SlotUploadState {
     const RenderScene *scene = nullptr;
+    uint64_t sceneId = 0u;
     uint64_t lightTopologyVersion = std::numeric_limits<uint64_t>::max();
     uint64_t lightTransformVersion = std::numeric_limits<uint64_t>::max();
     uint32_t directionalLightCount = std::numeric_limits<uint32_t>::max();

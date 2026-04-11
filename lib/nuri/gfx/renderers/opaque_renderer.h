@@ -229,7 +229,6 @@ private:
   };
 
   Result<bool, std::string> ensureInitialized();
-  Result<bool, std::string> recreateDepthTexture();
   Result<bool, std::string> recreatePickTexture();
   Result<bool, std::string>
   ensureCentersPhaseBufferCapacity(size_t requiredBytes);
@@ -310,7 +309,6 @@ private:
   void resetPickState();
   void destroyMeshPipelineState();
   void resetMeshPipelineState();
-  void destroyDepthTexture();
   void destroyDepthPyramidTextures();
   void destroyPickTexture();
   void destroyBuffers();
@@ -332,7 +330,6 @@ private:
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
-  TextureHandle depthTexture_{};
   TextureHandle pickIdTexture_{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures_{};

@@ -30,11 +30,40 @@ struct NURI_API FullscreenPassResources {
   std::filesystem::path fragmentPath{};
 };
 
-class NURI_API SceneColorDownsamplePass final : public RenderFeaturePass {
+struct NURI_API CopyPushConstants {
+  uint32_t sourceTexId = 0u;
+  uint32_t sourceSamplerId = 0u;
+  uint32_t flags = 0u;
+  uint32_t reserved0 = 0u;
+};
+static_assert(sizeof(CopyPushConstants) <= 128);
+
+class NURI_API FullscreenRenderPass : public RenderFeaturePass {
+public:
+  ~FullscreenRenderPass() override;
+
+protected:
+  explicit FullscreenRenderPass(GPUDevice &gpu);
+
+  Result<bool, std::string> ensureInitialized(std::string_view shaderName,
+                                              std::string_view errorContext);
+  Result<bool, std::string> ensurePipeline(Format colorFormat,
+                                           std::string_view debugName,
+                                           std::string_view errorContext);
+  Result<bool, std::string> createShaders(std::string_view shaderName,
+                                          std::string_view errorContext);
+  void destroyPipeline();
+  void destroyShaders();
+
+  GPUDevice &gpu_;
+  FullscreenPassResources resources_{};
+};
+
+class NURI_API SceneColorDownsamplePass final : public FullscreenRenderPass {
 public:
   explicit SceneColorDownsamplePass(GPUDevice &gpu,
                                     FrameCompositionFeatureConfig config);
-  ~SceneColorDownsamplePass() override;
+  ~SceneColorDownsamplePass() override = default;
 
   SceneColorDownsamplePass(const SceneColorDownsamplePass &) = delete;
   SceneColorDownsamplePass &
@@ -48,31 +77,13 @@ public:
   [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
-
-private:
-  struct CopyPushConstants {
-    uint32_t sourceTexId = 0u;
-    uint32_t sourceSamplerId = 0u;
-    uint32_t flags = 0u;
-    uint32_t reserved0 = 0u;
-  };
-  static_assert(sizeof(CopyPushConstants) <= 128);
-
-  Result<bool, std::string> ensureInitialized();
-  Result<bool, std::string> ensurePipeline();
-  Result<bool, std::string> createShaders();
-  void destroyPipeline();
-  void destroyShaders();
-
-  GPUDevice &gpu_;
-  FullscreenPassResources resources_{};
 };
 
-class NURI_API SceneResolvePass final : public RenderFeaturePass {
+class NURI_API SceneResolvePass final : public FullscreenRenderPass {
 public:
   explicit SceneResolvePass(GPUDevice &gpu,
                             FrameCompositionFeatureConfig config);
-  ~SceneResolvePass() override;
+  ~SceneResolvePass() override = default;
 
   SceneResolvePass(const SceneResolvePass &) = delete;
   SceneResolvePass &operator=(const SceneResolvePass &) = delete;
@@ -85,31 +96,13 @@ public:
   [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
-
-private:
-  struct CopyPushConstants {
-    uint32_t sourceTexId = 0u;
-    uint32_t sourceSamplerId = 0u;
-    uint32_t flags = 0u;
-    uint32_t reserved0 = 0u;
-  };
-  static_assert(sizeof(CopyPushConstants) <= 128);
-
-  Result<bool, std::string> ensureInitialized();
-  Result<bool, std::string> ensurePipeline();
-  Result<bool, std::string> createShaders();
-  void destroyPipeline();
-  void destroyShaders();
-
-  GPUDevice &gpu_;
-  FullscreenPassResources resources_{};
 };
 
-class NURI_API PresentToneMapPass final : public RenderFeaturePass {
+class NURI_API PresentToneMapPass final : public FullscreenRenderPass {
 public:
   explicit PresentToneMapPass(GPUDevice &gpu,
                               FrameCompositionFeatureConfig config);
-  ~PresentToneMapPass() override;
+  ~PresentToneMapPass() override = default;
 
   PresentToneMapPass(const PresentToneMapPass &) = delete;
   PresentToneMapPass &operator=(const PresentToneMapPass &) = delete;
@@ -131,15 +124,6 @@ private:
     uint32_t reserved0 = 0u;
   };
   static_assert(sizeof(PushConstants) <= 128);
-
-  Result<bool, std::string> ensureInitialized();
-  Result<bool, std::string> ensurePipeline();
-  Result<bool, std::string> createShaders();
-  void destroyPipeline();
-  void destroyShaders();
-
-  GPUDevice &gpu_;
-  FullscreenPassResources resources_{};
 };
 
 class NURI_API FrameCompositionFeature final : public RenderFeature {

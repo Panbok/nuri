@@ -12,7 +12,7 @@ constexpr uint32_t kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
 constexpr uint32_t kDownsamplePassDebugColor = 0xff33aa88u;
 constexpr uint32_t kResolvePassDebugColor = 0xff33cc88u;
 constexpr uint32_t kPresentPassDebugColor = 0xff55cc88u;
-constexpr uint32_t kDrawDebugColor = 0xff55cc88u;
+constexpr uint32_t kDrawDebugColor = 0xff2299ddu;
 
 RenderPipelineDesc fullscreenPipelineDesc(Format colorFormat,
                                           ShaderHandle vertexShader,
@@ -94,25 +94,28 @@ Result<bool, std::string>
 createFullscreenPassShaders(GPUDevice &gpu, FullscreenPassResources &resources,
                             std::string_view shaderName,
                             std::string_view errorContext) {
-  if (resources.shader) {
-    destroyFullscreenShaders(gpu, resources);
-  }
-  resources.shader = Shader::create(shaderName, gpu);
-  if (!resources.shader) {
+  std::unique_ptr<Shader> shader = Shader::create(shaderName, gpu);
+  if (!shader) {
     return Result<bool, std::string>::makeError(std::string(errorContext) +
                                                 ": failed to create shader");
   }
-  auto vertexResult = resources.shader->compileFromFile(
-      resources.vertexPath.string(), ShaderStage::Vertex);
+  auto vertexResult = shader->compileFromFile(resources.vertexPath.string(),
+                                              ShaderStage::Vertex);
   if (vertexResult.hasError()) {
     return Result<bool, std::string>::makeError(vertexResult.error());
   }
-  auto fragmentResult = resources.shader->compileFromFile(
-      resources.fragmentPath.string(), ShaderStage::Fragment);
+  const ShaderHandle vertexShader = vertexResult.value();
+  auto fragmentResult = shader->compileFromFile(resources.fragmentPath.string(),
+                                                ShaderStage::Fragment);
   if (fragmentResult.hasError()) {
+    if (nuri::isValid(vertexShader)) {
+      gpu.destroyShaderModule(vertexShader);
+    }
     return Result<bool, std::string>::makeError(fragmentResult.error());
   }
-  resources.vertexShader = vertexResult.value();
+  destroyFullscreenShaders(gpu, resources);
+  resources.shader = std::move(shader);
+  resources.vertexShader = vertexShader;
   resources.fragmentShader = fragmentResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
@@ -185,16 +188,48 @@ Result<bool, std::string> addFullscreenTexturePass(
 
 } // namespace
 
+FullscreenRenderPass::FullscreenRenderPass(GPUDevice &gpu) : gpu_(gpu) {}
+
+FullscreenRenderPass::~FullscreenRenderPass() {
+  destroyFullscreenPassResources(gpu_, resources_);
+}
+
+Result<bool, std::string>
+FullscreenRenderPass::ensureInitialized(std::string_view shaderName,
+                                        std::string_view errorContext) {
+  return ensureFullscreenPassInitialized(gpu_, resources_, shaderName,
+                                         errorContext);
+}
+
+Result<bool, std::string>
+FullscreenRenderPass::ensurePipeline(Format colorFormat,
+                                     std::string_view debugName,
+                                     std::string_view errorContext) {
+  return ensureFullscreenPassPipeline(gpu_, resources_, colorFormat, debugName,
+                                      errorContext);
+}
+
+Result<bool, std::string>
+FullscreenRenderPass::createShaders(std::string_view shaderName,
+                                    std::string_view errorContext) {
+  return createFullscreenPassShaders(gpu_, resources_, shaderName,
+                                     errorContext);
+}
+
+void FullscreenRenderPass::destroyPipeline() {
+  destroyFullscreenPipeline(gpu_, resources_);
+}
+
+void FullscreenRenderPass::destroyShaders() {
+  destroyFullscreenShaders(gpu_, resources_);
+}
+
 SceneColorDownsamplePass::SceneColorDownsamplePass(
     GPUDevice &gpu, FrameCompositionFeatureConfig config)
-    : gpu_(gpu) {
+    : FullscreenRenderPass(gpu) {
   const std::filesystem::path basePath = resolveShaderBasePath(config);
   resources_.vertexPath = basePath / "fullscreen_copy.vert";
   resources_.fragmentPath = basePath / "scene_copy.frag";
-}
-
-SceneColorDownsamplePass::~SceneColorDownsamplePass() {
-  destroyFullscreenPassResources(gpu_, resources_);
 }
 
 bool SceneColorDownsamplePass::isEnabled(const FrameBuildContext &ctx) const {
@@ -208,11 +243,14 @@ SceneColorDownsamplePass::prepare(FrameBuildContext &ctx) {
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(true);
   }
-  auto initResult = ensureInitialized();
+  auto initResult = ensureInitialized(
+      "scene_color_downsample", "SceneColorDownsamplePass::createShaders");
   if (initResult.hasError()) {
     return initResult;
   }
-  return ensurePipeline();
+  return ensurePipeline(kFrameCompositionSceneColorFormat,
+                        "scene_color_downsample",
+                        "SceneColorDownsamplePass::ensurePipeline");
 }
 
 Result<bool, std::string>
@@ -269,41 +307,12 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> SceneColorDownsamplePass::ensureInitialized() {
-  return ensureFullscreenPassInitialized(
-      gpu_, resources_, "scene_color_downsample",
-      "SceneColorDownsamplePass::createShaders");
-}
-
-Result<bool, std::string> SceneColorDownsamplePass::ensurePipeline() {
-  return ensureFullscreenPassPipeline(
-      gpu_, resources_, kFrameCompositionSceneColorFormat,
-      "scene_color_downsample", "SceneColorDownsamplePass::ensurePipeline");
-}
-
-Result<bool, std::string> SceneColorDownsamplePass::createShaders() {
-  return createFullscreenPassShaders(gpu_, resources_, "scene_color_downsample",
-                                     "SceneColorDownsamplePass::createShaders");
-}
-
-void SceneColorDownsamplePass::destroyPipeline() {
-  destroyFullscreenPipeline(gpu_, resources_);
-}
-
-void SceneColorDownsamplePass::destroyShaders() {
-  destroyFullscreenShaders(gpu_, resources_);
-}
-
 SceneResolvePass::SceneResolvePass(GPUDevice &gpu,
                                    FrameCompositionFeatureConfig config)
-    : gpu_(gpu) {
+    : FullscreenRenderPass(gpu) {
   const std::filesystem::path basePath = resolveShaderBasePath(config);
   resources_.vertexPath = basePath / "fullscreen_copy.vert";
   resources_.fragmentPath = basePath / "scene_copy.frag";
-}
-
-SceneResolvePass::~SceneResolvePass() {
-  destroyFullscreenPassResources(gpu_, resources_);
 }
 
 bool SceneResolvePass::isEnabled(const FrameBuildContext &ctx) const {
@@ -315,11 +324,13 @@ Result<bool, std::string> SceneResolvePass::prepare(FrameBuildContext &ctx) {
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(true);
   }
-  auto initResult = ensureInitialized();
+  auto initResult =
+      ensureInitialized("scene_resolve", "SceneResolvePass::createShaders");
   if (initResult.hasError()) {
     return initResult;
   }
-  return ensurePipeline();
+  return ensurePipeline(kFrameCompositionFrameColorFormat, "scene_resolve",
+                        "SceneResolvePass::ensurePipeline");
 }
 
 Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
@@ -365,40 +376,12 @@ Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> SceneResolvePass::ensureInitialized() {
-  return ensureFullscreenPassInitialized(gpu_, resources_, "scene_resolve",
-                                         "SceneResolvePass::createShaders");
-}
-
-Result<bool, std::string> SceneResolvePass::ensurePipeline() {
-  return ensureFullscreenPassPipeline(
-      gpu_, resources_, kFrameCompositionFrameColorFormat, "scene_resolve",
-      "SceneResolvePass::ensurePipeline");
-}
-
-Result<bool, std::string> SceneResolvePass::createShaders() {
-  return createFullscreenPassShaders(gpu_, resources_, "scene_resolve",
-                                     "SceneResolvePass::createShaders");
-}
-
-void SceneResolvePass::destroyPipeline() {
-  destroyFullscreenPipeline(gpu_, resources_);
-}
-
-void SceneResolvePass::destroyShaders() {
-  destroyFullscreenShaders(gpu_, resources_);
-}
-
 PresentToneMapPass::PresentToneMapPass(GPUDevice &gpu,
                                        FrameCompositionFeatureConfig config)
-    : gpu_(gpu) {
+    : FullscreenRenderPass(gpu) {
   const std::filesystem::path basePath = resolveShaderBasePath(config);
   resources_.vertexPath = basePath / "fullscreen_copy.vert";
   resources_.fragmentPath = basePath / "tonemap_present.frag";
-}
-
-PresentToneMapPass::~PresentToneMapPass() {
-  destroyFullscreenPassResources(gpu_, resources_);
 }
 
 bool PresentToneMapPass::isEnabled(const FrameBuildContext &ctx) const {
@@ -409,11 +392,13 @@ Result<bool, std::string> PresentToneMapPass::prepare(FrameBuildContext &ctx) {
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(true);
   }
-  auto initResult = ensureInitialized();
+  auto initResult =
+      ensureInitialized("present_tonemap", "PresentToneMapPass::createShaders");
   if (initResult.hasError()) {
     return initResult;
   }
-  return ensurePipeline();
+  return ensurePipeline(gpu_.getSwapchainFormat(), "present_tonemap",
+                        "PresentToneMapPass::ensurePipeline");
 }
 
 Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
@@ -466,30 +451,6 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
   }
 
   return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> PresentToneMapPass::ensureInitialized() {
-  return ensureFullscreenPassInitialized(gpu_, resources_, "present_tonemap",
-                                         "PresentToneMapPass::createShaders");
-}
-
-Result<bool, std::string> PresentToneMapPass::ensurePipeline() {
-  return ensureFullscreenPassPipeline(
-      gpu_, resources_, gpu_.getSwapchainFormat(), "present_tonemap",
-      "PresentToneMapPass::ensurePipeline");
-}
-
-Result<bool, std::string> PresentToneMapPass::createShaders() {
-  return createFullscreenPassShaders(gpu_, resources_, "present_tonemap",
-                                     "PresentToneMapPass::createShaders");
-}
-
-void PresentToneMapPass::destroyPipeline() {
-  destroyFullscreenPipeline(gpu_, resources_);
-}
-
-void PresentToneMapPass::destroyShaders() {
-  destroyFullscreenShaders(gpu_, resources_);
 }
 
 FrameCompositionFeature::FrameCompositionFeature(

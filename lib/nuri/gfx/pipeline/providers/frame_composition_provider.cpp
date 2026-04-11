@@ -125,6 +125,7 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
     auto recreateResult = recreateMipTextureRing(sceneColorMipTextures_[0], 0u,
                                                  "frame_scene_color");
     if (recreateResult.hasError()) {
+      invalidateAllocationState();
       return recreateResult;
     }
   } else {
@@ -137,6 +138,7 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
         frameColorTextures_, kFrameCompositionFrameColorFormat,
         TextureUsage::AttachmentSampled, "frame_output_color");
     if (recreateResult.hasError()) {
+      invalidateAllocationState();
       return recreateResult;
     }
   } else {
@@ -149,6 +151,7 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
         sceneDepthTextures_, kFrameCompositionDepthFormat,
         TextureUsage::AttachmentSampled, "frame_scene_depth");
     if (recreateResult.hasError()) {
+      invalidateAllocationState();
       return recreateResult;
     }
   } else {
@@ -162,6 +165,7 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
       auto recreateResult = recreateMipTextureRing(
           sceneColorMipTextures_[i], spec.mipLevel, spec.debugNameBase);
       if (recreateResult.hasError()) {
+        invalidateAllocationState();
         return recreateResult;
       }
     }
@@ -175,6 +179,7 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
           requirements, FrameTextureRequirementFlags::HistoryColor)) {
     auto historyResult = recreateHistoryTextures();
     if (historyResult.hasError()) {
+      invalidateAllocationState();
       return historyResult;
     }
   } else {
@@ -182,6 +187,13 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
   }
 
   return Result<bool, std::string>::makeResult(true);
+}
+
+void FrameCompositionProvider::invalidateAllocationState() noexcept {
+  framebufferWidth_ = 0u;
+  framebufferHeight_ = 0u;
+  textureRingCount_ = 0u;
+  allocatedRequirements_ = FrameTextureRequirementFlags::None;
 }
 
 Result<bool, std::string> FrameCompositionProvider::recreateFullResTextureRing(

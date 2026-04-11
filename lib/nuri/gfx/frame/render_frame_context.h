@@ -294,6 +294,12 @@ operator|(FrameTextureRequirementFlags lhs, FrameTextureRequirementFlags rhs) {
                                                    static_cast<uint32_t>(rhs));
 }
 
+[[nodiscard]] constexpr FrameTextureRequirementFlags
+operator&(FrameTextureRequirementFlags lhs, FrameTextureRequirementFlags rhs) {
+  return static_cast<FrameTextureRequirementFlags>(static_cast<uint32_t>(lhs) &
+                                                   static_cast<uint32_t>(rhs));
+}
+
 constexpr FrameTextureRequirementFlags &
 operator|=(FrameTextureRequirementFlags &lhs,
            FrameTextureRequirementFlags rhs) {
@@ -301,10 +307,17 @@ operator|=(FrameTextureRequirementFlags &lhs,
   return lhs;
 }
 
+constexpr FrameTextureRequirementFlags &
+operator&=(FrameTextureRequirementFlags &lhs,
+           FrameTextureRequirementFlags rhs) {
+  lhs = lhs & rhs;
+  return lhs;
+}
+
 [[nodiscard]] constexpr bool
 hasFrameTextureRequirementFlag(FrameTextureRequirementFlags flags,
                                FrameTextureRequirementFlags flag) {
-  return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(flag)) != 0u;
+  return static_cast<uint32_t>(flags & flag) != 0u;
 }
 
 static constexpr FrameTextureRequirementFlags
