@@ -1,9 +1,7 @@
 #pragma once
 
-#if defined(NURI_PROFILING)
-#include <cstring>
-#include "tracy/Tracy.hpp"
-// predefined RGB colors for "heavy" point-of-interest operations
+// Keep profiler color constants available even when Tracy is disabled so
+// instrumentation-adjacent code can still pass stable debug colors.
 #define NURI_PROFILER_COLOR_WAIT 0xff0000
 #define NURI_PROFILER_COLOR_SUBMIT 0x0000ff
 #define NURI_PROFILER_COLOR_PRESENT 0x00ff00
@@ -14,7 +12,10 @@
 #define NURI_PROFILER_COLOR_CMD_COPY 0x8b0a50
 #define NURI_PROFILER_COLOR_CMD_RTX 0x8b0000
 #define NURI_PROFILER_COLOR_CMD_DISPATCH 0x8b0000
-//
+
+#if defined(NURI_PROFILING)
+#include "tracy/Tracy.hpp"
+#include <cstring>
 #define NURI_PROFILER_FUNCTION() ZoneScoped
 #define NURI_PROFILER_FUNCTION_COLOR(color) ZoneScopedC(color)
 #define NURI_PROFILER_ZONE(name, color)                                        \

@@ -2,17 +2,37 @@
 
 #include "nuri/gfx/pipeline/features/composite_feature.h"
 
+#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 
 namespace nuri {
 namespace {
 
 constexpr uint32_t kSceneCopyFlagDownsample = 1u << 0u;
+constexpr uint32_t kPresentFlagManualSrgbEncode = 1u << 0u;
+constexpr uint32_t kPresentFlagPrimaryUseAgx = 1u << 1u;
+constexpr uint32_t kPresentFlagCompareEnabled = 1u << 2u;
+constexpr uint32_t kPresentFlagGrayCardDebug = 1u << 3u;
+constexpr uint32_t kPresentFlagAcesLutAvailable = 1u << 4u;
+constexpr uint32_t kPresentFlagAgxLutAvailable = 1u << 5u;
+constexpr uint32_t kPresentFlagPrimaryLegacyFallback = 1u << 6u;
+constexpr uint32_t kPresentFlagCompareLegacyFallback = 1u << 7u;
 constexpr uint32_t kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
 constexpr uint32_t kDownsamplePassDebugColor = 0xff33aa88u;
 constexpr uint32_t kResolvePassDebugColor = 0xff33cc88u;
 constexpr uint32_t kPresentPassDebugColor = 0xff55cc88u;
 constexpr uint32_t kDrawDebugColor = 0xff2299ddu;
+
+struct PresentToneMapState {
+  RenderSettings::ToneMapSettings settings{};
+  bool primaryUseAgx = false;
+  bool compareEnabled = false;
+  bool grayCardDebug = false;
+  bool acesLutAvailable = false;
+  bool agxLutAvailable = false;
+  bool primaryHasLut = false;
+  bool compareHasLut = false;
+};
 
 RenderPipelineDesc fullscreenPipelineDesc(Format colorFormat,
                                           ShaderHandle vertexShader,
@@ -32,8 +52,16 @@ RenderPipelineDesc fullscreenPipelineDesc(Format colorFormat,
 
 std::filesystem::path
 resolveShaderBasePath(const FrameCompositionFeatureConfig &config) {
-  return config.shaderBasePath.empty() ? config.meshFragment.parent_path()
-                                       : config.shaderBasePath;
+  if (!config.shaderBasePath.empty()) {
+    return config.shaderBasePath;
+  }
+  if (!config.fullscreenVertex.empty()) {
+    return config.fullscreenVertex.parent_path();
+  }
+  if (!config.sceneCopyFragment.empty()) {
+    return config.sceneCopyFragment.parent_path();
+  }
+  return config.presentFragment.parent_path();
 }
 
 DrawItem makeFullscreenDraw(RenderPipelineHandle pipeline,
@@ -186,6 +214,63 @@ Result<bool, std::string> addFullscreenTexturePass(
   return Result<bool, std::string>::makeResult(true);
 }
 
+PresentToneMapState
+buildPresentToneMapState(const RenderSettings::ToneMapSettings &settings,
+                         bool acesLutAvailable, bool agxLutAvailable) {
+  PresentToneMapState state{};
+  state.settings = settings;
+  sanitizeToneMapSettings(state.settings);
+  state.primaryUseAgx = state.settings.operator_ == ToneMapper::AgX;
+  state.compareEnabled = state.settings.sideBySideCompare;
+  state.grayCardDebug = state.settings.grayCardDebug;
+  state.acesLutAvailable = acesLutAvailable;
+  state.agxLutAvailable = agxLutAvailable;
+  state.primaryHasLut =
+      state.primaryUseAgx ? state.agxLutAvailable : state.acesLutAvailable;
+  state.compareHasLut =
+      state.primaryUseAgx ? state.acesLutAvailable : state.agxLutAvailable;
+  return state;
+}
+
+uint32_t buildPresentFlags(const PresentToneMapState &state,
+                           bool manualSrgbEncode) {
+  uint32_t flags = manualSrgbEncode ? kPresentFlagManualSrgbEncode : 0u;
+  if (state.primaryUseAgx) {
+    flags |= kPresentFlagPrimaryUseAgx;
+  }
+  if (state.compareEnabled) {
+    flags |= kPresentFlagCompareEnabled;
+  }
+  if (state.grayCardDebug) {
+    flags |= kPresentFlagGrayCardDebug;
+  }
+  if (state.acesLutAvailable) {
+    flags |= kPresentFlagAcesLutAvailable;
+  }
+  if (state.agxLutAvailable) {
+    flags |= kPresentFlagAgxLutAvailable;
+  }
+  if (!state.primaryHasLut) {
+    flags |= kPresentFlagPrimaryLegacyFallback;
+  }
+  if (state.compareEnabled && !state.compareHasLut) {
+    flags |= kPresentFlagCompareLegacyFallback;
+  }
+  return flags;
+}
+
+Result<uint32_t, std::string> resolveLutBindlessIndex(GPUDevice &gpu,
+                                                      TextureHandle texture,
+                                                      std::string_view name) {
+  const uint32_t texId = gpu.getTextureBindlessIndex(texture);
+  if (texId == kInvalidTextureBindlessIndex) {
+    return Result<uint32_t, std::string>::makeError(
+        std::string("PresentToneMapPass::build: invalid ") + std::string(name) +
+        " tone-map LUT bindless index");
+  }
+  return Result<uint32_t, std::string>::makeResult(texId);
+}
+
 } // namespace
 
 FullscreenRenderPass::FullscreenRenderPass(GPUDevice &gpu) : gpu_(gpu) {}
@@ -228,8 +313,12 @@ SceneColorDownsamplePass::SceneColorDownsamplePass(
     GPUDevice &gpu, FrameCompositionFeatureConfig config)
     : FullscreenRenderPass(gpu) {
   const std::filesystem::path basePath = resolveShaderBasePath(config);
-  resources_.vertexPath = basePath / "fullscreen_copy.vert";
-  resources_.fragmentPath = basePath / "scene_copy.frag";
+  resources_.vertexPath = config.fullscreenVertex.empty()
+                              ? basePath / "fullscreen_copy.vert"
+                              : config.fullscreenVertex;
+  resources_.fragmentPath = config.sceneCopyFragment.empty()
+                                ? basePath / "scene_copy.frag"
+                                : config.sceneCopyFragment;
 }
 
 bool SceneColorDownsamplePass::isEnabled(const FrameBuildContext &ctx) const {
@@ -311,8 +400,12 @@ SceneResolvePass::SceneResolvePass(GPUDevice &gpu,
                                    FrameCompositionFeatureConfig config)
     : FullscreenRenderPass(gpu) {
   const std::filesystem::path basePath = resolveShaderBasePath(config);
-  resources_.vertexPath = basePath / "fullscreen_copy.vert";
-  resources_.fragmentPath = basePath / "scene_copy.frag";
+  resources_.vertexPath = config.fullscreenVertex.empty()
+                              ? basePath / "fullscreen_copy.vert"
+                              : config.fullscreenVertex;
+  resources_.fragmentPath = config.sceneCopyFragment.empty()
+                                ? basePath / "scene_copy.frag"
+                                : config.sceneCopyFragment;
 }
 
 bool SceneResolvePass::isEnabled(const FrameBuildContext &ctx) const {
@@ -380,9 +473,17 @@ PresentToneMapPass::PresentToneMapPass(GPUDevice &gpu,
                                        FrameCompositionFeatureConfig config)
     : FullscreenRenderPass(gpu) {
   const std::filesystem::path basePath = resolveShaderBasePath(config);
-  resources_.vertexPath = basePath / "fullscreen_copy.vert";
-  resources_.fragmentPath = basePath / "tonemap_present.frag";
+  resources_.vertexPath = config.fullscreenVertex.empty()
+                              ? basePath / "fullscreen_copy.vert"
+                              : config.fullscreenVertex;
+  resources_.fragmentPath = config.presentFragment.empty()
+                                ? basePath / "tonemap_present.frag"
+                                : config.presentFragment;
+  aces2SdrLut_.path = config.aces2SdrLut;
+  agxLut_.path = config.agxLut;
 }
+
+PresentToneMapPass::~PresentToneMapPass() { destroyToneMapAssets(); }
 
 bool PresentToneMapPass::isEnabled(const FrameBuildContext &ctx) const {
   return nuri::isValid(ctx.shared.frameColorTexture);
@@ -396,6 +497,10 @@ Result<bool, std::string> PresentToneMapPass::prepare(FrameBuildContext &ctx) {
       ensureInitialized("present_tonemap", "PresentToneMapPass::createShaders");
   if (initResult.hasError()) {
     return initResult;
+  }
+  auto assetsResult = ensureToneMapAssetsLoaded();
+  if (assetsResult.hasError()) {
+    return assetsResult;
   }
   return ensurePipeline(gpu_.getSwapchainFormat(), "present_tonemap",
                         "PresentToneMapPass::ensurePipeline");
@@ -413,11 +518,58 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
         "PresentToneMapPass::build: invalid frame color bindless index");
   }
 
+  const bool acesLutAvailable =
+      aces2SdrLut_.texture != nullptr && aces2SdrLut_.texture->valid();
+  const bool agxLutAvailable =
+      agxLut_.texture != nullptr && agxLut_.texture->valid();
+  const PresentToneMapState toneMapState =
+      buildPresentToneMapState(renderSettingsOrDefault(ctx.frame).toneMap,
+                               acesLutAvailable, agxLutAvailable);
+  const Format swapchainFormat = gpu_.getSwapchainFormat();
+  const bool manualSrgbEncode = swapchainFormat != Format::RGBA8_SRGB;
+  const uint32_t flags = buildPresentFlags(toneMapState, manualSrgbEncode);
+
+  uint32_t acesLutTexId = 0u;
+  uint32_t agxLutTexId = 0u;
+  if (acesLutAvailable) {
+    auto texIdResult =
+        resolveLutBindlessIndex(gpu_, aces2SdrLut_.texture->handle(), "ACES");
+    if (texIdResult.hasError()) {
+      return Result<bool, std::string>::makeError(texIdResult.error());
+    }
+    acesLutTexId = texIdResult.value();
+  }
+  if (agxLutAvailable) {
+    auto texIdResult =
+        resolveLutBindlessIndex(gpu_, agxLut_.texture->handle(), "AgX");
+    if (texIdResult.hasError()) {
+      return Result<bool, std::string>::makeError(texIdResult.error());
+    }
+    agxLutTexId = texIdResult.value();
+  }
+  const uint32_t lutSamplerId = gpu_.getSamplerBindlessIndex(lutSampler_);
+  if ((acesLutAvailable || agxLutAvailable) &&
+      lutSamplerId == kInvalidTextureBindlessIndex) {
+    return Result<bool, std::string>::makeError(
+        "PresentToneMapPass::build: invalid tone-map LUT sampler bindless "
+        "index");
+  }
+
   const PushConstants pushConstants{
       .sourceTexId = sourceTexId,
       .sourceSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u),
-      .exposure = 1.0f,
-      .reserved0 = 0u,
+      .acesLutTexId = acesLutTexId,
+      .agxLutTexId = agxLutTexId,
+      .lutSamplerId = lutSamplerId,
+      .flags = flags,
+      .acesExposureScale =
+          std::exp2(toneMapState.settings.exposureEv +
+                    toneMapState.settings.acesExposureOffsetEv),
+      .agxExposureScale = std::exp2(toneMapState.settings.exposureEv +
+                                    toneMapState.settings.agxExposureOffsetEv),
+      .compareSplit = toneMapState.settings.compareSplit,
+      .shaperMinLog2 = kShaperMinLog2,
+      .shaperInvRange = kShaperInvRange,
   };
   const DrawItem draw = makeFullscreenDraw(
       resources_.pipelineHandle,
@@ -431,6 +583,27 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
   if (sourceImportResult.hasError()) {
     return Result<bool, std::string>::makeError(sourceImportResult.error());
   }
+  std::array<RenderGraphTextureId, 2> lutImports{};
+  std::array<TextureHandle, 3> dependencies{source, {}, {}};
+  size_t dependencyCount = 1u;
+  if (acesLutAvailable) {
+    auto lutImportResult = ctx.graph.importTexture(
+        aces2SdrLut_.texture->handle(), "present_aces_lut");
+    if (lutImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(lutImportResult.error());
+    }
+    lutImports[0] = lutImportResult.value();
+    dependencies[dependencyCount++] = aces2SdrLut_.texture->handle();
+  }
+  if (agxLutAvailable) {
+    auto lutImportResult =
+        ctx.graph.importTexture(agxLut_.texture->handle(), "present_agx_lut");
+    if (lutImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(lutImportResult.error());
+    }
+    lutImports[1] = lutImportResult.value();
+    dependencies[dependencyCount++] = agxLut_.texture->handle();
+  }
 
   RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Clear,
@@ -440,6 +613,8 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
   passDesc.debugLabel = "Present ToneMap Pass";
   passDesc.debugColor = kPresentPassDebugColor;
   passDesc.markColorAsFrameOutput = true;
+  passDesc.dependencyTextures =
+      std::span<const TextureHandle>(dependencies.data(), dependencyCount);
   auto addResult = ctx.graph.addGraphicsPass(passDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
@@ -449,8 +624,113 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
   if (readResult.hasError()) {
     return Result<bool, std::string>::makeError(readResult.error());
   }
+  if (acesLutAvailable) {
+    auto lutReadResult =
+        ctx.graph.addTextureRead(addResult.value(), lutImports[0]);
+    if (lutReadResult.hasError()) {
+      return Result<bool, std::string>::makeError(lutReadResult.error());
+    }
+  }
+  if (agxLutAvailable) {
+    auto lutReadResult =
+        ctx.graph.addTextureRead(addResult.value(), lutImports[1]);
+    if (lutReadResult.hasError()) {
+      return Result<bool, std::string>::makeError(lutReadResult.error());
+    }
+  }
 
   return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> PresentToneMapPass::ensureToneMapAssetsLoaded() {
+  auto samplerResult = ensureToneMapSampler();
+  if (samplerResult.hasError()) {
+    return samplerResult;
+  }
+  auto acesResult = ensureToneMapLutLoaded(aces2SdrLut_, "tonemap_aces2_sdr");
+  if (acesResult.hasError()) {
+    return acesResult;
+  }
+  auto agxResult = ensureToneMapLutLoaded(agxLut_, "tonemap_agx_sdr");
+  if (agxResult.hasError()) {
+    return agxResult;
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> PresentToneMapPass::ensureToneMapSampler() {
+  if (nuri::isValid(lutSampler_)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  auto samplerResult = gpu_.createSampler(
+      SamplerDesc{
+          .minFilter = SamplerFilter::Linear,
+          .magFilter = SamplerFilter::Linear,
+          .mipMode = SamplerMipMode::Disabled,
+          .wrapU = SamplerWrapMode::Clamp,
+          .wrapV = SamplerWrapMode::Clamp,
+          .wrapW = SamplerWrapMode::Clamp,
+          .mipLodMin = 0.0f,
+          .mipLodMax = 0.0f,
+          .maxAnisotropy = 1u,
+      },
+      "present_tonemap_lut_sampler");
+  if (samplerResult.hasError()) {
+    return Result<bool, std::string>::makeError(samplerResult.error());
+  }
+  lutSampler_ = samplerResult.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+PresentToneMapPass::ensureToneMapLutLoaded(ToneMapLutResource &resource,
+                                           std::string_view debugName) {
+  if (resource.loadAttempted) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  resource.loadAttempted = true;
+  if (resource.path.empty()) {
+    if (!resource.warned) {
+      NURI_LOG_WARNING(
+          "PresentToneMapPass: tone-map LUT '%s' has no configured path; "
+          "falling back to legacy fit",
+          std::string(debugName).c_str());
+      resource.warned = true;
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  auto textureResult =
+      Texture::loadTextureKtx2(gpu_, resource.path.string(), debugName);
+  if (textureResult.hasError()) {
+    if (!resource.warned) {
+      NURI_LOG_WARNING("PresentToneMapPass: failed to load LUT '%s' from '%s': "
+                       "%s. Falling back to legacy fit.",
+                       std::string(debugName).c_str(),
+                       resource.path.string().c_str(),
+                       textureResult.error().c_str());
+      resource.warned = true;
+    }
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  resource.texture = std::move(textureResult.value());
+  return Result<bool, std::string>::makeResult(true);
+}
+
+void PresentToneMapPass::destroyToneMapAssets() {
+  if (aces2SdrLut_.texture != nullptr && aces2SdrLut_.texture->valid()) {
+    gpu_.destroyTexture(aces2SdrLut_.texture->handle());
+  }
+  if (agxLut_.texture != nullptr && agxLut_.texture->valid()) {
+    gpu_.destroyTexture(agxLut_.texture->handle());
+  }
+  aces2SdrLut_.texture.reset();
+  agxLut_.texture.reset();
+  if (nuri::isValid(lutSampler_)) {
+    gpu_.destroySampler(lutSampler_);
+    lutSampler_ = {};
+  }
 }
 
 FrameCompositionFeature::FrameCompositionFeature(

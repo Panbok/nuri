@@ -55,11 +55,20 @@ struct NURI_API RuntimeTextMtsdfShaderConfig {
   std::filesystem::path worldFragment;
 };
 
+struct NURI_API RuntimeCompositeConfig {
+  std::filesystem::path shaderBasePath;
+  std::filesystem::path fullscreenVertex;
+  std::filesystem::path sceneCopyFragment;
+  std::filesystem::path presentFragment;
+  std::filesystem::path aces2SdrLut;
+  std::filesystem::path agxLut;
+};
+
 struct NURI_API RuntimeShaderConfig {
   RuntimeDebugShaderConfig debugGrid;
   RuntimeSkyboxShaderConfig skybox;
-  // Fullscreen frame-composition/present passes reuse this shader family.
   RuntimeOpaqueShaderConfig opaque;
+  RuntimeCompositeConfig composite;
   RuntimeTextMtsdfShaderConfig textMtsdf;
 };
 

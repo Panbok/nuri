@@ -8,6 +8,7 @@
 #include "nuri/gfx/pipeline/render_feature.h"
 #include "nuri/gfx/pipeline/render_feature_pass.h"
 #include "nuri/gfx/shader.h"
+#include "nuri/resources/gpu/texture.h"
 
 #include <array>
 #include <cstdint>
@@ -17,7 +18,7 @@
 
 namespace nuri {
 
-using FrameCompositionFeatureConfig = RuntimeOpaqueShaderConfig;
+using FrameCompositionFeatureConfig = RuntimeCompositeConfig;
 
 struct NURI_API FullscreenPassResources {
   std::unique_ptr<Shader> shader{};
@@ -102,7 +103,7 @@ class NURI_API PresentToneMapPass final : public FullscreenRenderPass {
 public:
   explicit PresentToneMapPass(GPUDevice &gpu,
                               FrameCompositionFeatureConfig config);
-  ~PresentToneMapPass() override = default;
+  ~PresentToneMapPass() override;
 
   PresentToneMapPass(const PresentToneMapPass &) = delete;
   PresentToneMapPass &operator=(const PresentToneMapPass &) = delete;
@@ -117,13 +118,42 @@ public:
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
 
 private:
+  static constexpr float kShaperMinLog2 = -10.0f;
+  static constexpr float kShaperMaxLog2 = 6.5f;
+  static constexpr float kShaperInvRange =
+      1.0f / (kShaperMaxLog2 - kShaperMinLog2);
+
   struct PushConstants {
     uint32_t sourceTexId = 0u;
     uint32_t sourceSamplerId = 0u;
-    float exposure = 1.0f;
-    uint32_t reserved0 = 0u;
+    uint32_t acesLutTexId = 0u;
+    uint32_t agxLutTexId = 0u;
+    uint32_t lutSamplerId = 0u;
+    uint32_t flags = 0u;
+    float acesExposureScale = 1.0f;
+    float agxExposureScale = 1.0f;
+    float compareSplit = 0.5f;
+    float shaperMinLog2 = kShaperMinLog2;
+    float shaperInvRange = kShaperInvRange;
   };
   static_assert(sizeof(PushConstants) <= 128);
+
+  struct ToneMapLutResource {
+    std::filesystem::path path{};
+    std::unique_ptr<Texture> texture{};
+    bool loadAttempted = false;
+    bool warned = false;
+  };
+
+  Result<bool, std::string> ensureToneMapAssetsLoaded();
+  Result<bool, std::string> ensureToneMapSampler();
+  Result<bool, std::string> ensureToneMapLutLoaded(ToneMapLutResource &resource,
+                                                   std::string_view debugName);
+  void destroyToneMapAssets();
+
+  ToneMapLutResource aces2SdrLut_{};
+  ToneMapLutResource agxLut_{};
+  SamplerHandle lutSampler_{};
 };
 
 class NURI_API FrameCompositionFeature final : public RenderFeature {

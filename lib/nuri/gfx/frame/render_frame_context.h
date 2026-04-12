@@ -7,12 +7,14 @@
 #include "nuri/gfx/sim/animation_scene_frame_data.h"
 #include "nuri/scene/light.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <memory_resource>
 #include <optional>
 #include <vector>
+
 
 #include <glm/glm.hpp>
 
@@ -34,6 +36,18 @@ enum class TextureFilterMode : uint8_t {
   Trilinear = 1,
   Anisotropic = 2,
 };
+
+enum class ToneMapper : uint8_t {
+  ACES2_SDR = 0,
+  AgX = 1,
+};
+
+static constexpr float kDefaultToneMapExposureEv = 0.0f;
+static constexpr float kDefaultAcesExposureOffsetEv = 0.35f;
+static constexpr float kDefaultAgxExposureOffsetEv = -0.35f;
+static constexpr float kDefaultToneMapCompareSplit = 0.5f;
+static constexpr float kMinToneMapCompareSplit = 0.1f;
+static constexpr float kMaxToneMapCompareSplit = 0.9f;
 
 static constexpr uint32_t kMaxSceneDepthPyramidLevels = 16u;
 static constexpr uint32_t kSceneDepthPyramidTexIdPackWidth = 4u;
@@ -71,6 +85,17 @@ sanitizeTextureFilterMode(TextureFilterMode mode) noexcept {
     return mode;
   default:
     return TextureFilterMode::Trilinear;
+  }
+}
+
+[[nodiscard]] constexpr ToneMapper
+sanitizeToneMapper(ToneMapper mapper) noexcept {
+  switch (mapper) {
+  case ToneMapper::ACES2_SDR:
+  case ToneMapper::AgX:
+    return mapper;
+  default:
+    return ToneMapper::ACES2_SDR;
   }
 }
 
@@ -125,18 +150,35 @@ struct RenderSettings {
     uint8_t anisotropy = 8u;
   };
 
+  struct ToneMapSettings {
+    ToneMapper operator_ = ToneMapper::ACES2_SDR;
+    float exposureEv = kDefaultToneMapExposureEv;
+    float acesExposureOffsetEv = kDefaultAcesExposureOffsetEv;
+    float agxExposureOffsetEv = kDefaultAgxExposureOffsetEv;
+    bool grayCardDebug = false;
+    bool sideBySideCompare = false;
+    float compareSplit = kDefaultToneMapCompareSplit;
+  };
+
   SkyboxSettings skybox{};
   OpaqueSettings opaque{};
   TransmissionSettings transmission{};
   TransparentSettings transparent{};
   DebugSettings debug{};
   TextureFilteringSettings textureFiltering{};
+  ToneMapSettings toneMap{};
 };
 
 inline void sanitizeTextureFilteringSettings(
     RenderSettings::TextureFilteringSettings &settings) {
   settings.mode = sanitizeTextureFilterMode(settings.mode);
   settings.anisotropy = sanitizeTextureFilterAnisotropy(settings.anisotropy);
+}
+
+inline void sanitizeToneMapSettings(RenderSettings::ToneMapSettings &settings) {
+  settings.operator_ = sanitizeToneMapper(settings.operator_);
+  settings.compareSplit = std::clamp(
+      settings.compareSplit, kMinToneMapCompareSplit, kMaxToneMapCompareSplit);
 }
 
 [[nodiscard]] inline TextureFilterMode effectiveTextureFilterMode(

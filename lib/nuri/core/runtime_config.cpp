@@ -29,6 +29,15 @@ constexpr std::string_view kDefaultTextMtsdfWorldVertexShader =
     "text_3d_mtsdf.vert";
 constexpr std::string_view kDefaultTextMtsdfWorldFragmentShader =
     "text_3d_mtsdf.frag";
+constexpr std::string_view kDefaultCompositeFullscreenVertexShader =
+    "fullscreen_copy.vert";
+constexpr std::string_view kDefaultCompositeSceneCopyFragmentShader =
+    "scene_copy.frag";
+constexpr std::string_view kDefaultCompositePresentFragmentShader =
+    "tonemap_present.frag";
+constexpr std::string_view kDefaultCompositeAces2SdrLut =
+    "tonemap_aces2_sdr_64.ktx2";
+constexpr std::string_view kDefaultCompositeAgxLut = "tonemap_agx_sdr_64.ktx2";
 constexpr std::string_view kDefaultConfigPath = "app.config.json";
 constexpr const char kAppConfigEnvVarCStr[] = "NURI_APP_CONFIG";
 constexpr std::string_view kAppConfigEnvVar = kAppConfigEnvVarCStr;
@@ -39,17 +48,20 @@ constexpr std::array<std::string_view, 4> kWindowKeys = {"title", "width",
                                                          "height", "mode"};
 constexpr std::array<std::string_view, 5> kRootsKeys = {
     "assets", "shaders", "models", "textures", "fonts"};
-constexpr std::array<std::string_view, 4> kShadersKeys = {
-    "debug_grid", "skybox", "opaque", "text_mtsdf"};
+constexpr std::array<std::string_view, 5> kShadersKeys = {
+    "debug_grid", "skybox", "opaque", "composite", "text_mtsdf"};
 constexpr std::array<std::string_view, 2> kDebugGridShaderKeys = {"vertex",
                                                                   "fragment"};
 constexpr std::array<std::string_view, 2> kSkyboxShaderKeys = {"vertex",
                                                                "fragment"};
 constexpr std::array<std::string_view, 9> kOpaqueShaderKeys = {
-    "mesh_vertex",  "mesh_fragment", "pick_fragment",   "compute_instances",
-    "tess_vertex",  "tess_control",  "tess_eval",       "overlay_geometry",
-    "overlay_fragment",
+    "mesh_vertex",       "mesh_fragment",    "pick_fragment",
+    "compute_instances", "tess_vertex",      "tess_control",
+    "tess_eval",         "overlay_geometry", "overlay_fragment",
 };
+constexpr std::array<std::string_view, 5> kCompositeShaderKeys = {
+    "fullscreen_vertex", "scene_copy_fragment", "present_fragment",
+    "aces2_sdr_lut", "agx_lut"};
 constexpr std::array<std::string_view, 4> kTextMtsdfShaderKeys = {
     "ui_vertex", "ui_fragment", "world_vertex", "world_fragment"};
 
@@ -433,6 +445,11 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (opaqueObjResult.hasError()) {
     return makeError<RuntimeConfig>(opaqueObjResult.error());
   }
+  auto compositeObjResult =
+      optionalObjectField(shadersObj, "composite", "shaders");
+  if (compositeObjResult.hasError()) {
+    return makeError<RuntimeConfig>(compositeObjResult.error());
+  }
   auto textMtsdfObjResult =
       optionalObjectField(shadersObj, "text_mtsdf", "shaders");
   if (textMtsdfObjResult.hasError()) {
@@ -442,6 +459,7 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   yyjson_val *debugGridObj = debugGridObjResult.value();
   yyjson_val *skyboxObj = skyboxObjResult.value();
   yyjson_val *opaqueObj = opaqueObjResult.value();
+  yyjson_val *compositeObj = compositeObjResult.value();
   yyjson_val *textMtsdfObj = textMtsdfObjResult.value();
 
   if (debugGridObj != nullptr) {
@@ -461,6 +479,13 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (opaqueObj != nullptr) {
     auto result =
         validateUnknownKeys(opaqueObj, "shaders.opaque", kOpaqueShaderKeys);
+    if (result.hasError()) {
+      return makeError<RuntimeConfig>(result.error());
+    }
+  }
+  if (compositeObj != nullptr) {
+    auto result = validateUnknownKeys(compositeObj, "shaders.composite",
+                                      kCompositeShaderKeys);
     if (result.hasError()) {
       return makeError<RuntimeConfig>(result.error());
     }
@@ -645,6 +670,47 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (textMtsdfWorldFragmentPath.hasError()) {
     return makeError<RuntimeConfig>(textMtsdfWorldFragmentPath.error());
   }
+  auto compositeFullscreenVertexPath = resolveShaderFileWithDefault(
+      compositeObj, "fullscreen_vertex", "shaders.composite",
+      kDefaultCompositeFullscreenVertexShader, shadersRoot.value());
+  if (compositeFullscreenVertexPath.hasError()) {
+    return makeError<RuntimeConfig>(compositeFullscreenVertexPath.error());
+  }
+  auto compositeSceneCopyFragmentPath = resolveShaderFileWithDefault(
+      compositeObj, "scene_copy_fragment", "shaders.composite",
+      kDefaultCompositeSceneCopyFragmentShader, shadersRoot.value());
+  if (compositeSceneCopyFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(compositeSceneCopyFragmentPath.error());
+  }
+  auto compositePresentFragmentPath = resolveShaderFileWithDefault(
+      compositeObj, "present_fragment", "shaders.composite",
+      kDefaultCompositePresentFragmentShader, shadersRoot.value());
+  if (compositePresentFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(compositePresentFragmentPath.error());
+  }
+  auto compositeAces2SdrLutPath =
+      stringFieldOrDefault(compositeObj, "aces2_sdr_lut", "shaders.composite",
+                           kDefaultCompositeAces2SdrLut);
+  if (compositeAces2SdrLutPath.hasError()) {
+    return makeError<RuntimeConfig>(compositeAces2SdrLutPath.error());
+  }
+  auto compositeAgxLutPath = stringFieldOrDefault(
+      compositeObj, "agx_lut", "shaders.composite", kDefaultCompositeAgxLut);
+  if (compositeAgxLutPath.hasError()) {
+    return makeError<RuntimeConfig>(compositeAgxLutPath.error());
+  }
+  auto aces2SdrLutPath =
+      resolveFile(compositeAces2SdrLutPath.value(), texturesRoot.value(),
+                  "shaders.composite.aces2_sdr_lut");
+  if (aces2SdrLutPath.hasError()) {
+    return makeError<RuntimeConfig>(aces2SdrLutPath.error());
+  }
+  auto agxLutPath =
+      resolveFile(compositeAgxLutPath.value(), texturesRoot.value(),
+                  "shaders.composite.agx_lut");
+  if (agxLutPath.hasError()) {
+    return makeError<RuntimeConfig>(agxLutPath.error());
+  }
 
   RuntimeConfig config{};
   config.sourcePath = normalizedConfigPath;
@@ -684,6 +750,15 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
               .tessEval = tessEvalPath.value(),
               .overlayGeometry = overlayGeometryPath.value(),
               .overlayFragment = overlayFragmentPath.value(),
+          },
+      .composite =
+          RuntimeCompositeConfig{
+              .shaderBasePath = shadersRoot.value(),
+              .fullscreenVertex = compositeFullscreenVertexPath.value(),
+              .sceneCopyFragment = compositeSceneCopyFragmentPath.value(),
+              .presentFragment = compositePresentFragmentPath.value(),
+              .aces2SdrLut = aces2SdrLutPath.value(),
+              .agxLut = agxLutPath.value(),
           },
       .textMtsdf =
           RuntimeTextMtsdfShaderConfig{
