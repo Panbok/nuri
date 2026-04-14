@@ -59,7 +59,7 @@ private:
     Dead,
     ActiveAllocatable,
     FrozenSource,
-    Shadow,
+    Replacement,
     Retired,
   };
 
@@ -123,7 +123,7 @@ private:
     size_t dstIndexSize = 0;
   };
 
-  struct PreparedShadowChunk {
+  struct PreparedReplacementChunk {
     size_t sizeBytes = 0;
     size_t usedBytes = 0;
   };
@@ -140,8 +140,8 @@ private:
 
   struct PreparedCompactionPlan {
     bool worthwhile = false;
-    std::vector<PreparedShadowChunk> vertexChunks;
-    std::vector<PreparedShadowChunk> indexChunks;
+    std::vector<PreparedReplacementChunk> vertexChunks;
+    std::vector<PreparedReplacementChunk> indexChunks;
     std::vector<PreparedCopy> copies;
     std::vector<CompactionMove> moves;
   };
@@ -149,7 +149,7 @@ private:
   enum class CompactionJobState : uint8_t {
     Idle,
     Planning,
-    MaterializingShadow,
+    MaterializingReplacement,
     ReadyToSubmit,
     WaitingForCopy,
     ReadyToCommit,
@@ -159,21 +159,21 @@ private:
     CompactionJobState state = CompactionJobState::Idle;
     std::pmr::vector<ChunkHandle> frozenVertexChunks;
     std::pmr::vector<ChunkHandle> frozenIndexChunks;
-    std::pmr::vector<ChunkHandle> shadowVertexChunks;
-    std::pmr::vector<ChunkHandle> shadowIndexChunks;
+    std::pmr::vector<ChunkHandle> replacementVertexChunks;
+    std::pmr::vector<ChunkHandle> replacementIndexChunks;
     std::shared_future<Result<PreparedCompactionPlan, std::string>>
         planningFuture;
     std::optional<PreparedCompactionPlan> preparedPlan;
-    size_t nextShadowVertexChunkIndex = 0;
-    size_t nextShadowIndexChunkIndex = 0;
+    size_t nextReplacementVertexChunkIndex = 0;
+    size_t nextReplacementIndexChunkIndex = 0;
     size_t nextCopyIndex = 0;
     SubmissionHandle inFlightSubmission{};
 
     explicit CompactionJob(std::pmr::memory_resource *memory)
         : frozenVertexChunks(ensureMemory(memory)),
           frozenIndexChunks(ensureMemory(memory)),
-          shadowVertexChunks(ensureMemory(memory)),
-          shadowIndexChunks(ensureMemory(memory)) {}
+          replacementVertexChunks(ensureMemory(memory)),
+          replacementIndexChunks(ensureMemory(memory)) {}
 
     [[nodiscard]] bool active() const noexcept {
       return state != CompactionJobState::Idle;
@@ -183,12 +183,12 @@ private:
       state = CompactionJobState::Idle;
       frozenVertexChunks.clear();
       frozenIndexChunks.clear();
-      shadowVertexChunks.clear();
-      shadowIndexChunks.clear();
+      replacementVertexChunks.clear();
+      replacementIndexChunks.clear();
       planningFuture = {};
       preparedPlan.reset();
-      nextShadowVertexChunkIndex = 0;
-      nextShadowIndexChunkIndex = 0;
+      nextReplacementVertexChunkIndex = 0;
+      nextReplacementIndexChunkIndex = 0;
       nextCopyIndex = 0;
       inFlightSubmission = {};
     }
@@ -249,7 +249,7 @@ private:
                               const GeometryPoolConfig &config);
   [[nodiscard]] Result<bool, std::string> startCompactionPlanning();
   [[nodiscard]] Result<bool, std::string> pollCompactionPlanning();
-  [[nodiscard]] Result<bool, std::string> materializeShadowChunks();
+  [[nodiscard]] Result<bool, std::string> materializeReplacementChunks();
   [[nodiscard]] Result<bool, std::string> submitNextCopyBatch();
   [[nodiscard]] Result<bool, std::string> pollCompactionJob();
   [[nodiscard]] Result<bool, std::string> commitCompactionJob();

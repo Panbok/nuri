@@ -1,16 +1,20 @@
 #include "BRDF.sp"
 #include "common.sp"
 #include "material_inputs.sp"
+
 #include "material_lighting.sp"
 
 layout(location = 0) in PerVertex vtx;
-layout(location = 10) flat in uint inInstanceId;
 
 layout(location = 0) out vec4 out_FragColor;
 
-// ---------------------------------------------------------------------------
-// Transmission-specific helpers
-// ---------------------------------------------------------------------------
+vec2 currentScreenUv();
+
+vec3 transmissionModelScale() {
+  return max(
+      abs(vec3(pc.tessNearDistance, pc.tessFarDistance, pc.tessMinFactor)),
+      vec3(1.0e-4));
+}
 
 float applyIorToRoughness(float roughness, float ior) {
   if (isIorCompatMode(ior)) {
@@ -20,13 +24,11 @@ float applyIorToRoughness(float roughness, float ior) {
 }
 
 vec3 getVolumeTransmissionRay(vec3 n, vec3 v, float thickness, float ior,
-                              mat4 modelMatrix) {
+                              vec3 modelScale) {
   vec3 refractionVector = refract(-v, n, 1.0 / max(ior, 1.0));
   if (dot(refractionVector, refractionVector) <= kEpsilon) {
     refractionVector = -v;
   }
-  vec3 modelScale = vec3(length(modelMatrix[0].xyz), length(modelMatrix[1].xyz),
-                         length(modelMatrix[2].xyz));
   return refractionVector * thickness * modelScale;
 }
 
@@ -94,11 +96,11 @@ vec2 resolveTransmissionUv(vec3 refractedRayExit) {
 }
 
 vec3 getIndirectTransmission(vec3 n, vec3 v, float roughness, vec3 baseColor,
-                             vec3 f0, vec3 f90, vec3 worldPos, mat4 modelMatrix,
-                             float ior, float thickness, vec3 attenuationColor,
+                             vec3 f0, vec3 f90, vec3 worldPos, float ior,
+                             float thickness, vec3 attenuationColor,
                              float attenuationDistance) {
   vec3 transmissionRay =
-      getVolumeTransmissionRay(n, v, thickness, ior, modelMatrix);
+      getVolumeTransmissionRay(n, v, thickness, ior, transmissionModelScale());
   vec3 refractedRayExit = worldPos + transmissionRay;
 
   vec2 refractionCoords = resolveTransmissionUv(refractedRayExit);
@@ -131,21 +133,151 @@ vec3 getDirectTransmission(vec3 n, vec3 v, vec3 pointToLight,
   // alphaRoughness = roughness² is passed through, scaled by the IOR factor.
   // distributionGGX and geometryOcclusion both consume alpha-space roughness²,
   // matching the convention used in accumulateSurfaceLightContribution.
-  float transmissionRoughness = applyIorToRoughness(alphaRoughness, ior);
+  float transmissionRoughness =
+      max(applyIorToRoughness(alphaRoughness, ior), kBrdfMinRoughness);
 
-  vec3 l = normalize(pointToLight);
-  vec3 lMirror = normalize(l + 2.0 * n * dot(-l, n));
-  vec3 h = normalize(lMirror + v);
+  float pointToLightLenSq = dot(pointToLight, pointToLight);
+  if (pointToLightLenSq <= kEpsilon) {
+    return vec3(0.0);
+  }
+
+  vec3 l = pointToLight * inversesqrt(pointToLightLenSq);
+  vec3 lMirror = reflect(-l, n);
+  float lMirrorLenSq = dot(lMirror, lMirror);
+  if (lMirrorLenSq <= kEpsilon) {
+    return vec3(0.0);
+  }
+  lMirror *= inversesqrt(lMirrorLenSq);
+
+  vec3 halfVector = lMirror + v;
+  float halfLenSq = dot(halfVector, halfVector);
+  if (halfLenSq <= kEpsilon) {
+    return vec3(0.0);
+  }
+  vec3 h = halfVector * inversesqrt(halfLenSq);
 
   float ndoth = clamp(dot(n, h), 0.0, 1.0);
   float ndotlMirror = clamp(dot(n, lMirror), 0.0, 1.0);
   float ndotv = clamp(dot(n, v), 0.0, 1.0);
   float vdoth = clamp(dot(v, h), 0.0, 1.0);
+  if (ndotlMirror <= 0.0 || ndotv <= 0.0) {
+    return vec3(0.0);
+  }
 
   float d = distributionGGX(ndoth, transmissionRoughness);
   vec3 f = specularReflection(vdoth, f0, f90);
   float g = geometryOcclusion(ndotlMirror, ndotv, transmissionRoughness);
   return (vec3(1.0) - f) * baseColor * d * g;
+}
+
+vec3 transmissionSafeSpecular(vec3 n, vec3 v, vec3 l, vec3 f0, vec3 f90,
+                              float roughness) {
+  float ndotl = max(dot(n, l), 0.0);
+  float ndotv = max(dot(n, v), 0.0);
+  if (ndotl <= 0.0 || ndotv <= 0.0) {
+    return vec3(0.0);
+  }
+
+  vec3 reflected = reflect(-l, n);
+  float reflectedLenSq = dot(reflected, reflected);
+  if (reflectedLenSq <= kEpsilon) {
+    return vec3(0.0);
+  }
+  reflected *= inversesqrt(reflectedLenSq);
+
+  float rv = max(dot(reflected, v), 0.0);
+  float exponent = mix(48.0, 4.0, clamp(roughness, 0.0, 1.0));
+  float lobe = pow(rv, exponent);
+  vec3 fresnel = specularReflection(ndotv, f0, f90);
+  return ndotl * fresnel * lobe * ((exponent + 2.0) * 0.125);
+}
+
+vec3 transmissionSafeDirectTransmission(vec3 n, vec3 v, vec3 pointToLight,
+                                        vec3 baseColor, float roughness,
+                                        float ior) {
+  float pointToLightLenSq = dot(pointToLight, pointToLight);
+  if (pointToLightLenSq <= kEpsilon) {
+    return vec3(0.0);
+  }
+
+  vec3 lightDir = pointToLight * inversesqrt(pointToLightLenSq);
+  vec3 refracted = refract(-v, n, 1.0 / max(ior, 1.0));
+  float refractedLenSq = dot(refracted, refracted);
+  if (refractedLenSq <= kEpsilon) {
+    refracted = -v;
+    refractedLenSq = dot(refracted, refracted);
+    if (refractedLenSq <= kEpsilon) {
+      return vec3(0.0);
+    }
+  }
+  refracted *= inversesqrt(refractedLenSq);
+
+  float facing = max(dot(refracted, lightDir), 0.0);
+  float exponent = mix(24.0, 3.0, clamp(roughness, 0.0, 1.0));
+  return baseColor * pow(facing, exponent);
+}
+
+void accumulateTransmissionSurfaceLight(vec3 lightRadiance, vec3 l,
+                                        ShadedMaterial sm,
+                                        inout DirectLightingResult direct) {
+  vec3 viewFresnel =
+      specularReflection(max(dot(sm.nBase, sm.v), 0.0), sm.f0, sm.f90);
+  float diffuseWeight = 1.0 - max3(viewFresnel);
+  direct.directDiffuse += max(dot(sm.nBase, l), 0.0) * lightRadiance *
+                          sm.diffuseColor * diffuseWeight * (1.0 / kPi);
+  direct.directSpecular +=
+      lightRadiance *
+      transmissionSafeSpecular(sm.nBase, sm.v, l, sm.f0, sm.f90, sm.roughness);
+
+  if (sm.hasClearcoat && sm.clearcoat > 0.0) {
+    direct.clearcoatDirectLighting +=
+        lightRadiance * sm.clearcoat *
+        transmissionSafeSpecular(sm.nClearcoat, sm.v, l, sm.clearcoatF0,
+                                 sm.clearcoatReflectance90,
+                                 sm.clearcoatRoughness);
+  }
+}
+
+DirectLightingResult evaluateTransmissionDirectLighting(ShadedMaterial sm,
+                                                        vec3 worldPos) {
+  DirectLightingResult direct;
+  direct.directDiffuse = vec3(0.0);
+  direct.directSpecular = vec3(0.0);
+  direct.directSheen = vec3(0.0);
+  direct.clearcoatDirectLighting = vec3(0.0);
+
+  for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
+    DirectionalLightGpuData light =
+        pc.frameData.directionalLightBuffer.lights[i];
+    vec3 l = normalize(-directionalLightDirection(light));
+    vec3 lightRadiance =
+        directionalLightColor(light) * directionalLightIlluminance(light);
+    accumulateTransmissionSurfaceLight(lightRadiance, l, sm, direct);
+  }
+
+  for (uint i = 0u; i < pc.frameData.localLightCount; ++i) {
+    LocalLightGpuData light = pc.frameData.localLightBuffer.lights[i];
+    vec3 ptl = localLightPosition(light) - worldPos;
+    float dsq = dot(ptl, ptl);
+    if (dsq <= kEpsilon) {
+      continue;
+    }
+    vec3 l = ptl * inversesqrt(dsq);
+    float att = punctualRangeAttenuation(dsq, localLightRange(light));
+    if (localLightType(light) == kLocalLightTypeSpot) {
+      att *= spotAngularAttenuation(localLightDirection(light), ptl,
+                                    localLightInnerCos(light),
+                                    localLightOuterCos(light));
+    }
+    if (att <= 0.0) {
+      continue;
+    }
+    vec3 lightRadiance =
+        localLightColor(light) * localLightIntensity(light) * att;
+    accumulateTransmissionSurfaceLight(lightRadiance, l, sm, direct);
+  }
+
+  return direct;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,26 +286,32 @@ vec3 getDirectTransmission(vec3 n, vec3 v, vec3 pointToLight,
 
 void main() {
   const MaterialData material = loadMaterialData(pc.materialIndex);
+  const MaterialData sampledMaterial = material;
   const uint alphaMode = materialAlphaMode(material);
   const uint featureMask = materialFeatureMask(material);
 
-  ShadedMaterial sm = evaluateMaterial(material, vtx);
+  ShadedMaterial sm = evaluateMaterial(sampledMaterial, vtx);
 
   const float alphaCutoff = materialAlphaCutoff(material);
   if (alphaMode == kAlphaModeMask && sm.baseColor.a < alphaCutoff) {
     discard;
   }
 
+  // Direct lighting ---------------------------------------------------
+  // Keep transmission on the reduced direct-light model.
+  DirectLightingResult direct =
+      evaluateTransmissionDirectLighting(sm, vtx.worldPos);
+
   // Transmission-specific material fields ----------------------------
   const uint matSampler = pc.frameData.materialSamplerId;
-  const uint transmissionTexId =
-      getMaterialTextureIndex(material, kMaterialTextureSlotTransmission);
+  const uint transmissionTexId = getMaterialTextureIndex(
+      sampledMaterial, kMaterialTextureSlotTransmission);
   const uint thicknessTexId =
-      getMaterialTextureIndex(material, kMaterialTextureSlotThickness);
+      getMaterialTextureIndex(sampledMaterial, kMaterialTextureSlotThickness);
   const vec2 uvTransmission =
-      transformedUv(material, vtx, kMaterialTextureSlotTransmission);
+      transformedUv(sampledMaterial, vtx, kMaterialTextureSlotTransmission);
   const vec2 uvThickness =
-      transformedUv(material, vtx, kMaterialTextureSlotThickness);
+      transformedUv(sampledMaterial, vtx, kMaterialTextureSlotThickness);
 
   float transmissionFactor =
       material.transmission.transmissionThicknessDistance.x;
@@ -203,75 +341,57 @@ void main() {
   // zero and glass reads black.
   const float transmissionIor = sm.iorCompatMode ? 1.5 : sm.ior;
   const bool hasTransmission = transmissionFactor > 0.0;
-  mat4 modelMatrix = mat4(1.0);
-  if (hasTransmission) {
-    modelMatrix = pc.instanceMatrices.instances[inInstanceId].modelMatrix;
-  }
 
-  // Transmission ray for direct lights --------------------------------
   vec3 transmissionRay = vec3(0.0);
   float transmissionRayLength = 0.0;
   if (hasTransmission) {
-    transmissionRay = getVolumeTransmissionRay(sm.nBase, sm.v, thickness,
-                                               transmissionIor, modelMatrix);
+    transmissionRay = getVolumeTransmissionRay(
+        sm.nBase, sm.v, thickness, transmissionIor, transmissionModelScale());
     transmissionRayLength = length(transmissionRay);
   }
 
-  // Direct lighting ---------------------------------------------------
-  vec3 directDiffuse = vec3(0.0);
-  vec3 directSpecular = vec3(0.0);
-  vec3 directSheen = vec3(0.0);
-  vec3 clearcoatDirectLighting = vec3(0.0);
   vec3 directTransmission = vec3(0.0);
-
-  for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
-    DirectionalLightGpuData light =
-        pc.frameData.directionalLightBuffer.lights[i];
-    vec3 l = normalize(-directionalLightDirection(light));
-    vec3 lr = directionalLightColor(light) * directionalLightIlluminance(light);
-    accumulateSurfaceLightContribution(lr, l, sm, directDiffuse, directSpecular,
-                                       directSheen, clearcoatDirectLighting);
-
-    if (hasTransmission) {
+  if (hasTransmission) {
+    for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
+      DirectionalLightGpuData light =
+          pc.frameData.directionalLightBuffer.lights[i];
+      vec3 l = normalize(-directionalLightDirection(light));
+      vec3 lr =
+          directionalLightColor(light) * directionalLightIlluminance(light);
       float sheenScale =
           sm.sheenWeight > 0.0
               ? computeSheenAlbedoScalingDirect(sm.sheenColor, sm.ndotv,
                                                 max(dot(sm.nBase, l), 0.0),
                                                 sm.sheenRoughness)
               : 1.0;
-      vec3 tc = lr * getDirectTransmission(sm.nBase, sm.v, l, sm.alphaRoughness,
-                                           sm.f0, sm.f90, sm.diffuseColor,
-                                           transmissionIor);
+      vec3 tc = lr * transmissionSafeDirectTransmission(
+                         sm.nBase, sm.v, l, sm.diffuseColor, sm.roughness,
+                         transmissionIor);
       if ((featureMask & kMaterialFeatureVolume) != 0u) {
         tc = applyVolumeAttenuation(tc, transmissionRayLength, attenuationColor,
                                     attenuationDistance);
       }
       directTransmission += sheenScale * tc;
     }
-  }
 
-  for (uint i = 0u; i < pc.frameData.localLightCount; ++i) {
-    LocalLightGpuData light = pc.frameData.localLightBuffer.lights[i];
-    vec3 ptl = localLightPosition(light) - vtx.worldPos;
-    float dsq = dot(ptl, ptl);
-    if (dsq <= kEpsilon) {
-      continue;
-    }
-    vec3 l = ptl * inversesqrt(dsq);
-    float att = punctualRangeAttenuation(dsq, localLightRange(light));
-    if (localLightType(light) == kLocalLightTypeSpot) {
-      att *= spotAngularAttenuation(localLightDirection(light), ptl,
-                                    localLightInnerCos(light),
-                                    localLightOuterCos(light));
-    }
-    if (att <= 0.0) {
-      continue;
-    }
-    vec3 lr = localLightColor(light) * localLightIntensity(light) * att;
-    accumulateSurfaceLightContribution(lr, l, sm, directDiffuse, directSpecular,
-                                       directSheen, clearcoatDirectLighting);
-
-    if (hasTransmission) {
+    for (uint i = 0u; i < pc.frameData.localLightCount; ++i) {
+      LocalLightGpuData light = pc.frameData.localLightBuffer.lights[i];
+      vec3 ptl = localLightPosition(light) - vtx.worldPos;
+      float dsq = dot(ptl, ptl);
+      if (dsq <= kEpsilon) {
+        continue;
+      }
+      vec3 l = ptl * inversesqrt(dsq);
+      float att = punctualRangeAttenuation(dsq, localLightRange(light));
+      if (localLightType(light) == kLocalLightTypeSpot) {
+        att *= spotAngularAttenuation(localLightDirection(light), ptl,
+                                      localLightInnerCos(light),
+                                      localLightOuterCos(light));
+      }
+      if (att <= 0.0) {
+        continue;
+      }
+      vec3 lr = localLightColor(light) * localLightIntensity(light) * att;
       float sheenScale =
           sm.sheenWeight > 0.0
               ? computeSheenAlbedoScalingDirect(sm.sheenColor, sm.ndotv,
@@ -279,9 +399,9 @@ void main() {
                                                 sm.sheenRoughness)
               : 1.0;
       vec3 transmissionPtl = ptl - transmissionRay;
-      vec3 tc = lr * getDirectTransmission(sm.nBase, sm.v, transmissionPtl,
-                                           sm.alphaRoughness, sm.f0, sm.f90,
-                                           sm.diffuseColor, transmissionIor);
+      vec3 tc = lr * transmissionSafeDirectTransmission(
+                         sm.nBase, sm.v, transmissionPtl, sm.diffuseColor,
+                         sm.roughness, transmissionIor);
       if ((featureMask & kMaterialFeatureVolume) != 0u) {
         tc = applyVolumeAttenuation(tc, transmissionRayLength, attenuationColor,
                                     attenuationDistance);
@@ -299,7 +419,7 @@ void main() {
       pc.frameData.sceneColorTexId != kInvalidTextureBindlessIndex) {
     indirectTransmission = getIndirectTransmission(
         sm.nBase, sm.v, sm.roughness, sm.diffuseColor, sm.f0, sm.f90,
-        vtx.worldPos, modelMatrix, transmissionIor, thickness, attenuationColor,
+        vtx.worldPos, transmissionIor, thickness, attenuationColor,
         attenuationDistance);
   }
 
@@ -307,7 +427,7 @@ void main() {
   vec3 indirectDiffuseTerm =
       mix(ibl.iblDiffuse, indirectTransmission, transmissionFactor);
   vec3 directDiffuseTerm =
-      mix(directDiffuse, directTransmission, transmissionFactor);
+      mix(direct.directDiffuse, directTransmission, transmissionFactor);
 
   // Composition -------------------------------------------------------
   vec3 indirectLighting =
@@ -319,9 +439,10 @@ void main() {
     indirectLighting *= sm.ao;
   }
 
-  vec3 directLighting = sm.clearcoatAttenuation *
-                            (directSheen + directDiffuseTerm + directSpecular) +
-                        clearcoatDirectLighting;
+  vec3 directLighting =
+      sm.clearcoatAttenuation *
+          (direct.directSheen + directDiffuseTerm + direct.directSpecular) +
+      direct.clearcoatDirectLighting;
   vec3 color =
       directLighting + indirectLighting + sm.clearcoatAttenuation * sm.emissive;
   color = max(color, vec3(0.0));

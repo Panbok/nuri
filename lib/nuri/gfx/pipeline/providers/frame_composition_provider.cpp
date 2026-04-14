@@ -90,7 +90,9 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       historyColorTextures_[(ctx.frame.frameIndex + 1u) & 1u];
   ctx.shared.historyColorWriteTexture =
       historyColorTextures_[ctx.frame.frameIndex & 1u];
-  ctx.shared.sceneDepthSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+  if (ctx.shared.sceneDepthSamplerId == 0u) {
+    ctx.shared.sceneDepthSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+  }
   ctx.frame.sharedDepthTexture = ctx.shared.sceneDepthTexture;
 
   return Result<bool, std::string>::makeResult(true);

@@ -68,6 +68,20 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
   return seed;
 }
 
+[[nodiscard]] uint64_t quantizeToNextPow2(uint64_t value) noexcept {
+  if (value <= 1u) {
+    return value;
+  }
+  uint64_t v = value - 1u;
+  v |= v >> 1u;
+  v |= v >> 2u;
+  v |= v >> 4u;
+  v |= v >> 8u;
+  v |= v >> 16u;
+  v |= v >> 32u;
+  return v + 1u;
+}
+
 [[nodiscard]] uint64_t computePassPayloadLayoutHash(
     const std::pmr::vector<RenderPass> &passes) noexcept {
   uint64_t hash = 0xcbf29ce484222325ull;
@@ -81,7 +95,7 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
     mix(pass.drawBuffersPreResolved ? 1u : 0u);
     mix(static_cast<uint64_t>(pass.dependencyBuffers.size()));
     mix(static_cast<uint64_t>(pass.preDispatches.size()));
-    mix(static_cast<uint64_t>(pass.draws.size()));
+    mix(quantizeToNextPow2(static_cast<uint64_t>(pass.draws.size())));
     for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
       mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
     }
@@ -621,18 +635,17 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
 
     const auto drawRange = result.drawRangesByPass[i];
     if (drawRange.count > 0u) {
-      NURI_ASSERT(sourcePass.draws.size() == drawRange.count,
-                  "RenderGraphBuilder::refreshHandlesInCompileResult: "
-                  "cached draw range does not match source pass");
-      if (sourcePass.draws.size() == drawRange.count &&
+      const uint32_t actualDrawCount =
+          static_cast<uint32_t>(sourcePass.draws.size());
+      if (actualDrawCount <= drawRange.count &&
           drawRange.offset <= result.ownedDrawItems.size() &&
           drawRange.count <= result.ownedDrawItems.size() - drawRange.offset) {
-        for (uint32_t drawIndex = 0; drawIndex < drawRange.count; ++drawIndex) {
+        for (uint32_t drawIndex = 0; drawIndex < actualDrawCount; ++drawIndex) {
           result.ownedDrawItems[drawRange.offset + drawIndex] =
               sourcePass.draws[drawIndex];
         }
         result.orderedPasses[i].draws = std::span<const DrawItem>(
-            result.ownedDrawItems.data() + drawRange.offset, drawRange.count);
+            result.ownedDrawItems.data() + drawRange.offset, actualDrawCount);
       } else {
         result.orderedPasses[i].draws = {};
       }
@@ -919,6 +932,22 @@ Result<bool, std::string> RenderGraphBuilder::addPreResolvedDrawBufferAccesses(
     }
     auto accessResult = addBufferAccess(pass, importResult.value(),
                                         RenderGraphAccessMode::Read);
+    if (accessResult.hasError()) {
+      return accessResult;
+    }
+  }
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> RenderGraphBuilder::addPreResolvedDrawBufferAccesses(
+    RenderGraphPassId pass, std::span<const RenderGraphBufferId> buffers) {
+  for (const RenderGraphBufferId buffer : buffers) {
+    if (!isValid(buffer)) {
+      continue;
+    }
+    auto accessResult =
+        addBufferAccess(pass, buffer, RenderGraphAccessMode::Read);
     if (accessResult.hasError()) {
       return accessResult;
     }
@@ -1381,8 +1410,12 @@ RenderGraphBuilder::addPreparedGraphicsPass(
             "RenderGraphBuilder::addPreparedGraphicsPass: pre-resolved draw "
             "buffers cannot also use explicit draw buffer bindings");
       }
-      auto accessResult = addPreResolvedDrawBufferAccesses(
-          passId, desc.preResolvedDrawBuffers, desc.debugLabel);
+      auto accessResult =
+          !desc.preResolvedDrawBufferIds.empty()
+              ? addPreResolvedDrawBufferAccesses(passId,
+                                                 desc.preResolvedDrawBufferIds)
+              : addPreResolvedDrawBufferAccesses(
+                    passId, desc.preResolvedDrawBuffers, desc.debugLabel);
       if (accessResult.hasError()) {
         return Result<RenderGraphPassId, std::string>::makeError(
             accessResult.error());
@@ -3022,7 +3055,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     totalPreDispatchDependencySlots += plan.preDispatchDependencyCount;
     if (plan.unresolvedDrawCount != 0u) {
       plan.drawOutputOffset = static_cast<uint32_t>(totalDrawItems);
-      totalDrawItems += plan.drawCount;
+      const uint64_t quantizedCount =
+          quantizeToNextPow2(static_cast<uint64_t>(plan.drawCount));
+      totalDrawItems += static_cast<size_t>(quantizedCount);
     } else {
       plan.drawOutputOffset = 0u;
     }
@@ -3215,8 +3250,10 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         compiled.drawRangesByPass[orderedPassIndex] = {};
         resolvedPass.draws = sourcePass.draws;
       } else {
+        const uint32_t quantizedDrawCount = static_cast<uint32_t>(
+            quantizeToNextPow2(static_cast<uint64_t>(plan.drawCount)));
         compiled.drawRangesByPass[orderedPassIndex] = {
-            .offset = plan.drawOutputOffset, .count = plan.drawCount};
+            .offset = plan.drawOutputOffset, .count = quantizedDrawCount};
         uint32_t unresolvedDrawWriteOffset = plan.unresolvedDrawOffset;
         for (uint32_t drawIndex = 0; drawIndex < plan.drawCount; ++drawIndex) {
           const DrawItem &sourceDraw = sourcePass.draws[drawIndex];

@@ -222,8 +222,8 @@ private:
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
         : slots(memory), packedIndices(memory), node(memory), names(memory),
           localPositions(memory), localRotations(memory), colors(memory),
-          intensities(memory), enabled(memory), nextOnNode(memory),
-          prevOnNode(memory) {}
+          intensities(memory), angularRadiusDegrees(memory), enabled(memory),
+          nextOnNode(memory), prevOnNode(memory) {}
 
     SlotPool<MaskedNonZeroGenerationPolicy<kResourceHandleGenerationMask>>
         slots;
@@ -234,6 +234,7 @@ private:
     std::pmr::vector<glm::quat> localRotations;
     std::pmr::vector<glm::vec3> colors;
     std::pmr::vector<float> intensities;
+    std::pmr::vector<float> angularRadiusDegrees;
     std::pmr::vector<uint8_t> enabled;
     std::pmr::vector<uint32_t> nextOnNode;
     std::pmr::vector<uint32_t> prevOnNode;

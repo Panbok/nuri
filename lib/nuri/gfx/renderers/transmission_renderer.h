@@ -20,6 +20,7 @@
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/model.h"
+#include "nuri/resources/gpu/texture.h"
 #include "nuri/scene/render_scene.h"
 
 namespace nuri {
@@ -85,7 +86,10 @@ private:
     uint32_t submeshIndex = 0;
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
+    BufferHandle baseVertexBuffer{};
+    uint64_t vertexBufferByteOffset = 0;
     BufferHandle vertexBuffer{};
+    BufferHandle baseVertexDecodeBuffer{};
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint32_t vertexDecodeIndex = 0;
@@ -141,6 +145,8 @@ private:
 
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;
+  uint64_t loggedAddressProbeTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -169,6 +175,11 @@ private:
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
+  std::pmr::vector<BufferHandle> preResolvedTemplateBuffers_;
+  std::pmr::vector<BufferHandle> cachedPreResolvedDrawBuffers_;
+  uint64_t cachedPreResolvedDrawBufferSignature_ =
+      std::numeric_limits<uint64_t>::max();
+  std::filesystem::path transmissionVertexPath_{};
   std::filesystem::path transmissionFragmentPath_{};
   TextureHandle preparedSceneColorTexture_{};
   TextureHandle preparedFrameColorTexture_{};

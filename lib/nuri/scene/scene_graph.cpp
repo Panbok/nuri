@@ -197,6 +197,7 @@ SceneGraph::allocateDirectionalLightSlot() {
     directionalLights_.localRotations.push_back(kIdentityRotation);
     directionalLights_.colors.push_back(glm::vec3(1.0f));
     directionalLights_.intensities.push_back(1.0f);
+    directionalLights_.angularRadiusDegrees.push_back(0.27f);
     directionalLights_.enabled.push_back(0u);
     directionalLights_.nextOnNode.push_back(kInvalidIndex);
     directionalLights_.prevOnNode.push_back(kInvalidIndex);
@@ -990,6 +991,8 @@ Result<LightId, std::string> SceneGraph::addLight(NodeId node,
     directionalLights_.localRotations[index] = sanitized.rotation;
     directionalLights_.colors[index] = sanitized.color;
     directionalLights_.intensities[index] = sanitized.intensity;
+    directionalLights_.angularRadiusDegrees[index] =
+        sanitized.angularRadiusDegrees;
     directionalLights_.enabled[index] = sanitized.enabled ? 1u : 0u;
     lightTopologyDirty_ = true;
     lightDataDirty_ = true;
@@ -1156,6 +1159,7 @@ bool SceneGraph::getCachedLightWorldDesc(LightId id,
   outWorld.range = local.range;
   outWorld.innerConeAngleRadians = local.innerConeAngleRadians;
   outWorld.outerConeAngleRadians = local.outerConeAngleRadians;
+  outWorld.angularRadiusDegrees = local.angularRadiusDegrees;
   outWorld.enabled = local.enabled;
   return true;
 }
@@ -1195,13 +1199,17 @@ bool SceneGraph::updateLight(LightId id, const LightDesc &desc) {
                               sanitized.rotation) ||
         !nuri::vec3ExactEqual(directionalLights_.colors[index],
                               sanitized.color) ||
-        directionalLights_.intensities[index] != sanitized.intensity;
+        directionalLights_.intensities[index] != sanitized.intensity ||
+        directionalLights_.angularRadiusDegrees[index] !=
+            sanitized.angularRadiusDegrees;
     directionalLights_.names[index].assign(sanitized.name.data(),
                                            sanitized.name.size());
     directionalLights_.localPositions[index] = sanitized.position;
     directionalLights_.localRotations[index] = sanitized.rotation;
     directionalLights_.colors[index] = sanitized.color;
     directionalLights_.intensities[index] = sanitized.intensity;
+    directionalLights_.angularRadiusDegrees[index] =
+        sanitized.angularRadiusDegrees;
     directionalLights_.enabled[index] = sanitized.enabled ? 1u : 0u;
     lightTopologyDirty_ |= topologyChanged;
     lightDataDirty_ |= topologyChanged || derivedDataChanged;

@@ -290,7 +290,9 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
         "SkyboxPass::prepareSkyboxDraw: invalid frame buffer address");
   }
 
-  pushConstants_ = PushConstants{.frameDataAddress = baseAddress};
+  pushConstants_ = PushConstants{
+      .frameDataAddress = baseAddress,
+  };
   drawItem_ = DrawItem{};
   drawItem_.pipeline = skyboxPipelineHandle_;
   drawItem_.vertexCount = kSkyboxVertexCount;

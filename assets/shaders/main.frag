@@ -19,41 +19,7 @@ void main() {
   }
 
   // Direct lighting ---------------------------------------------------
-  vec3 directDiffuse = vec3(0.0);
-  vec3 directSpecular = vec3(0.0);
-  vec3 directSheen = vec3(0.0);
-  vec3 clearcoatDirectLighting = vec3(0.0);
-
-  for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
-    DirectionalLightGpuData light =
-        pc.frameData.directionalLightBuffer.lights[i];
-    vec3 l = normalize(-directionalLightDirection(light));
-    vec3 lr = directionalLightColor(light) * directionalLightIlluminance(light);
-    accumulateSurfaceLightContribution(lr, l, sm, directDiffuse, directSpecular,
-                                       directSheen, clearcoatDirectLighting);
-  }
-
-  for (uint i = 0u; i < pc.frameData.localLightCount; ++i) {
-    LocalLightGpuData light = pc.frameData.localLightBuffer.lights[i];
-    vec3 ptl = localLightPosition(light) - vtx.worldPos;
-    float dsq = dot(ptl, ptl);
-    if (dsq <= kEpsilon) {
-      continue;
-    }
-    vec3 l = ptl * inversesqrt(dsq);
-    float att = punctualRangeAttenuation(dsq, localLightRange(light));
-    if (localLightType(light) == kLocalLightTypeSpot) {
-      att *= spotAngularAttenuation(localLightDirection(light), ptl,
-                                    localLightInnerCos(light),
-                                    localLightOuterCos(light));
-    }
-    if (att <= 0.0) {
-      continue;
-    }
-    vec3 lr = localLightColor(light) * localLightIntensity(light) * att;
-    accumulateSurfaceLightContribution(lr, l, sm, directDiffuse, directSpecular,
-                                       directSheen, clearcoatDirectLighting);
-  }
+  DirectLightingResult direct = evaluateDirectLighting(sm, vtx.worldPos);
 
   // IBL ---------------------------------------------------------------
   IblResult ibl = evaluateIbl(sm);
@@ -69,8 +35,9 @@ void main() {
 
   // Composition -------------------------------------------------------
   vec3 directLighting =
-      sm.clearcoatAttenuation * (directSheen + directDiffuse + directSpecular) +
-      clearcoatDirectLighting;
+      sm.clearcoatAttenuation *
+          (direct.directSheen + direct.directDiffuse + direct.directSpecular) +
+      direct.clearcoatDirectLighting;
   vec3 color =
       directLighting + indirectLighting + sm.clearcoatAttenuation * sm.emissive;
   color = max(color, vec3(0.0));

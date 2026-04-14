@@ -8,9 +8,7 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 layout(constant_id = 0) const uint NUM_SAMPLES = 1024u;
 
-layout(std430, buffer_reference) buffer Data {
-  float16_t floats[];
-};
+layout(std430, buffer_reference) buffer Data { float16_t floats[]; };
 
 layout(push_constant) uniform constants {
   uint BRDF_W;
@@ -18,7 +16,6 @@ layout(push_constant) uniform constants {
   Data data;
 }
 pc;
-
 
 #include "sheen.sp"
 
@@ -35,7 +32,7 @@ vec2 hammersley2d(uint i, uint N) {
 }
 
 // based on:
-// http://blog.selfshadow.com/publications/s2013-shading-course/karis/s2013_pbs_epic_slides.pdf.
+// Karis, Real Shading in Unreal Engine 4, SIGGRAPH 2013.
 vec3 importanceSampleGGX(vec2 Xi, float roughness, vec3 normal) {
   float alpha = roughness * roughness;
   float phi = kTwoPi * Xi.x;

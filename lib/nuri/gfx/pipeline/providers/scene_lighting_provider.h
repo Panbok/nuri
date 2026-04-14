@@ -53,6 +53,9 @@ private:
   std::vector<std::unique_ptr<Buffer>> sceneDataBuffers_;
   std::vector<SlotUploadState> slotUploadStates_;
   size_t sceneDataBufferCapacityBytes_ = 0;
+  uint64_t loggedAddressProbeTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t loggedLightStateSignature_ = std::numeric_limits<uint64_t>::max();
 };
 
 } // namespace nuri

@@ -80,6 +80,33 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
 
   const MaterialTableSnapshot snapshot =
       ctx.frame.resources->materialSnapshot();
+  for (size_t i = 0; i < snapshot.headers.size(); ++i) {
+    const MaterialHeaderGpuData &header = snapshot.headers[i];
+    if (header.clearcoatExtensionIndex != kInvalidMaterialExtensionIndex &&
+        header.clearcoatExtensionIndex >= snapshot.clearcoat.size()) {
+      return Result<bool, std::string>::makeError(
+          "MaterialTableGpuProvider::prepare: clearcoat extension index is "
+          "out of range");
+    }
+    if (header.sheenExtensionIndex != kInvalidMaterialExtensionIndex &&
+        header.sheenExtensionIndex >= snapshot.sheen.size()) {
+      return Result<bool, std::string>::makeError(
+          "MaterialTableGpuProvider::prepare: sheen extension index is out of "
+          "range");
+    }
+    if (header.transmissionExtensionIndex != kInvalidMaterialExtensionIndex &&
+        header.transmissionExtensionIndex >= snapshot.transmission.size()) {
+      return Result<bool, std::string>::makeError(
+          "MaterialTableGpuProvider::prepare: transmission extension index is "
+          "out of range");
+    }
+    if (header.specularExtensionIndex != kInvalidMaterialExtensionIndex &&
+        header.specularExtensionIndex >= snapshot.specular.size()) {
+      return Result<bool, std::string>::makeError(
+          "MaterialTableGpuProvider::prepare: specular extension index is out "
+          "of range");
+    }
+  }
   const auto bufferNeedsResize = [](const ManagedBuffer &managedBuffer,
                                     size_t requiredBytes) {
     return managedBuffer.buffer && managedBuffer.buffer->valid() &&

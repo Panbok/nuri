@@ -546,6 +546,51 @@ MaterialData loadMaterialData(uint materialIndex) {
   return material;
 }
 
+MaterialData loadMaterialDataWithoutTransmission(uint materialIndex) {
+  MaterialData material;
+  material.clearcoat = defaultMaterialClearcoatData();
+  material.sheen = defaultMaterialSheenData();
+  material.transmission = defaultMaterialTransmissionData();
+  material.specular = defaultMaterialSpecularData();
+  material.header = pc.frameData.materialHeaderBuffer.materials[materialIndex];
+  material.hasClearcoat =
+      material.header.clearcoatExtensionIndex != kInvalidMaterialExtensionIndex;
+  material.hasSheen =
+      material.header.sheenExtensionIndex != kInvalidMaterialExtensionIndex;
+  material.hasTransmission = false;
+  material.hasSpecular =
+      material.header.specularExtensionIndex != kInvalidMaterialExtensionIndex;
+
+  if (material.hasClearcoat) {
+    material.clearcoat = pc.frameData.materialClearcoatBuffer.materials
+        [material.header.clearcoatExtensionIndex];
+  }
+  if (material.hasSheen) {
+    material.sheen =
+        pc.frameData.materialSheenBuffer.materials[material.header
+                                                       .sheenExtensionIndex];
+  }
+  if (material.hasSpecular) {
+    material.specular = pc.frameData.materialSpecularBuffer.materials
+        [material.header.specularExtensionIndex];
+  }
+  return material;
+}
+
+void disableMaterialTextures(inout MaterialData material) {
+  material.header.commonTextureIndices = uvec4(kInvalidTextureBindlessIndex);
+  material.header.emissiveTextureIndex = kInvalidTextureBindlessIndex;
+  material.clearcoat.textureIndices =
+      uvec4(kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex,
+            kInvalidTextureBindlessIndex, 0u);
+  material.sheen.textureIndices =
+      uvec4(kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex, 0u, 0u);
+  material.transmission.textureIndices =
+      uvec4(kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex, 0u, 0u);
+  material.specular.textureIndices =
+      uvec4(kInvalidTextureBindlessIndex, kInvalidTextureBindlessIndex, 0u, 0u);
+}
+
 uint materialAlphaMode(MaterialData material) {
   return material.header.materialFlags & kMaterialFlagsAlphaModeMask;
 }

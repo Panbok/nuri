@@ -8,6 +8,7 @@
 #include "nuri/resources/storage/material/material_binary_serializer.h"
 #include "nuri/resources/storage/material/material_cache_utils.h"
 #include "nuri/resources/storage/mesh/mesh_cache_utils.h"
+#include "nuri/utils/env_utils.h"
 
 namespace nuri {
 
@@ -640,6 +641,33 @@ void ResourceManager::rebuildPackedMaterialTables() {
     }
 
     MaterialPackedGpuData &packed = materialSlots_[index].record.packedGpuData;
+    const MaterialRequest::TextureRefs &textureRefs =
+        materialSlots_[index].record.textureRefs;
+    const auto textureIndex = [this](TextureRef ref) -> uint32_t {
+      const TextureRecord *record = tryGet(ref);
+      return record != nullptr ? record->bindlessIndex
+                               : kInvalidTextureBindlessIndex;
+    };
+
+    packed.header.commonTextureIndices = glm::uvec4(
+        textureIndex(textureRefs.baseColor),
+        textureIndex(textureRefs.metallicRoughness),
+        textureIndex(textureRefs.normal), textureIndex(textureRefs.occlusion));
+    packed.header.emissiveTextureIndex = textureIndex(textureRefs.emissive);
+    packed.clearcoat.textureIndices =
+        glm::uvec4(textureIndex(textureRefs.clearcoat),
+                   textureIndex(textureRefs.clearcoatRoughness),
+                   textureIndex(textureRefs.clearcoatNormal), 0u);
+    packed.sheen.textureIndices =
+        glm::uvec4(textureIndex(textureRefs.sheenColor),
+                   textureIndex(textureRefs.sheenRoughness), 0u, 0u);
+    packed.transmission.textureIndices =
+        glm::uvec4(textureIndex(textureRefs.transmission),
+                   textureIndex(textureRefs.thickness), 0u, 0u);
+    packed.specular.textureIndices =
+        glm::uvec4(textureIndex(textureRefs.specular),
+                   textureIndex(textureRefs.specularColor), 0u, 0u);
+
     MaterialHeaderGpuData header = packed.header;
     header.clearcoatExtensionIndex = kInvalidMaterialExtensionIndex;
     header.sheenExtensionIndex = kInvalidMaterialExtensionIndex;

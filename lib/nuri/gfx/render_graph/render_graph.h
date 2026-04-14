@@ -162,6 +162,9 @@ struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   // Explicit extra draw-buffer dependencies; drawBufferBindings must be empty
   // when drawBuffersPreResolved is true.
   std::span<const BufferHandle> preResolvedDrawBuffers{};
+  // Resolved extra draw-buffer dependencies for callers that already imported
+  // the shared draw buffer set once for the frame.
+  std::span<const RenderGraphBufferId> preResolvedDrawBufferIds{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
   bool markColorAsFrameOutput = false;
@@ -698,6 +701,8 @@ private:
   addPreResolvedDrawBufferAccesses(RenderGraphPassId pass,
                                    std::span<const BufferHandle> buffers,
                                    std::string_view debugLabel);
+  [[nodiscard]] Result<bool, std::string> addPreResolvedDrawBufferAccesses(
+      RenderGraphPassId pass, std::span<const RenderGraphBufferId> buffers);
   [[nodiscard]] Result<bool, std::string>
   applyImplicitPassRoots(RenderGraphPassId pass,
                          const RenderGraphGraphicsPassDesc &desc);

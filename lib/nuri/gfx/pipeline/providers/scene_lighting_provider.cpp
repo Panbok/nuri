@@ -2,15 +2,17 @@
 
 #include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
 
+#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
+#include "nuri/utils/env_utils.h"
 #include "nuri/utils/utils.h"
 
 namespace nuri {
 namespace {
 
-enum ForwardSceneFlags : uint8_t {
+enum ForwardSceneFlags : uint32_t {
   kForwardSceneHasIblDiffuse = 1u << 0u,
   kForwardSceneHasIblSpecular = 1u << 1u,
   kForwardSceneHasIblSheen = 1u << 2u,
@@ -149,8 +151,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     flags |= kForwardSceneHasIblSheen;
   } else if ((flags & kForwardSceneHasIblSpecular) != 0u) {
     // Reuse the GGX prefilter as a sheen approximation when Charlie is
-    // missing; keep kForwardSceneHasIblSheen set so downstream shading knows a
-    // fallback sheen source is available.
+    // missing; keep kForwardSceneHasIblSheen set so downstream shading knows
+    // a fallback sheen source is available.
     prefilteredCharlieTexId = prefilteredGgxTexId;
     flags |= kForwardSceneHasIblSheen;
   }
@@ -275,6 +277,34 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .directionalLightCount = directionalLightCount,
       .localLightCount = localLightCount,
   };
+
+  if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() ||
+      loggedLightStateSignature_ != frame.scene->lightTransformVersion()) {
+    loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
+    loggedLightStateSignature_ = frame.scene->lightTransformVersion();
+    NURI_LOG_WARNING(
+        "SceneLightingProvider::prepare probe: sceneData=0x%llx "
+        "frameData=0x%llx "
+        "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "
+        "materialClearcoat=0x%llx materialSheen=0x%llx "
+        "materialTransmission=0x%llx materialSpecular=0x%llx flags=0x%08x "
+        "dirCount=%u localCount=%u",
+        static_cast<unsigned long long>(sceneDataBaseAddress),
+        static_cast<unsigned long long>(sceneDataBaseAddress +
+                                        layout.frameDataOffset),
+        static_cast<unsigned long long>(directionalLightBufferAddress),
+        static_cast<unsigned long long>(localLightBufferAddress),
+        static_cast<unsigned long long>(frameData.materialHeaderBufferAddress),
+        static_cast<unsigned long long>(
+            frameData.materialClearcoatBufferAddress),
+        static_cast<unsigned long long>(frameData.materialSheenBufferAddress),
+        static_cast<unsigned long long>(
+            frameData.materialTransmissionBufferAddress),
+        static_cast<unsigned long long>(
+            frameData.materialSpecularBufferAddress),
+        frameData.flags, frameData.directionalLightCount,
+        frameData.localLightCount);
+  }
 
   if (!slotState.hasFrameData || slotState.frameData != frameData) {
     const std::span<const std::byte> frameDataBytes{

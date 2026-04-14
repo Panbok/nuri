@@ -69,6 +69,7 @@ struct NURI_API LightDesc {
   float range = 0.0f;
   float innerConeAngleRadians = 0.0f;
   float outerConeAngleRadians = glm::quarter_pi<float>();
+  float angularRadiusDegrees = 0.27f;
   bool enabled = true;
 };
 
@@ -170,6 +171,9 @@ makeLocalLightDesc(const Store &store, uint32_t index, LightType type) {
   }
   if constexpr (requires { store.outerConeAngles[index]; }) {
     out.outerConeAngleRadians = store.outerConeAngles[index];
+  }
+  if constexpr (requires { store.angularRadiusDegrees[index]; }) {
+    out.angularRadiusDegrees = store.angularRadiusDegrees[index];
   }
   out.enabled = store.enabled[index] != 0u;
   return out;

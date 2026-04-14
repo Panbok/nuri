@@ -2,7 +2,29 @@
 
 #include "nuri/utils/env_utils.h"
 
+#include <cctype>
+
 namespace nuri {
+namespace {
+
+[[nodiscard]] bool envValueEqualsIgnoreCase(std::string_view value,
+                                            std::string_view expected) {
+  if (value.size() != expected.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < value.size(); ++i) {
+    const char lhs = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(value[i])));
+    const char rhs = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(expected[i])));
+    if (lhs != rhs) {
+      return false;
+    }
+  }
+  return true;
+}
+
+} // namespace
 
 std::optional<std::string> readEnvVar(std::string_view variableName) {
 #if defined(_WIN32)
@@ -31,6 +53,19 @@ std::optional<std::string> readEnvVar(std::string_view variableName) {
   }
   return std::string(value);
 #endif
+}
+
+bool readEnvFlag(std::string_view variableName) {
+  const std::optional<std::string> value = readEnvVar(variableName);
+  if (!value.has_value()) {
+    return false;
+  }
+
+  const std::string_view view = *value;
+  return !envValueEqualsIgnoreCase(view, "0") &&
+         !envValueEqualsIgnoreCase(view, "false") &&
+         !envValueEqualsIgnoreCase(view, "off") &&
+         !envValueEqualsIgnoreCase(view, "no");
 }
 
 } // namespace nuri

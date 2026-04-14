@@ -305,6 +305,17 @@ void DebugDraw3D::syncFrameBufferCount(uint32_t swapchainImageCount) {
     return;
   }
 
+  bool hasLiveBuffers = false;
+  for (const FrameBufferState &frame : frameBuffers_) {
+    if (nuri::isValid(frame.buffer)) {
+      hasLiveBuffers = true;
+      break;
+    }
+  }
+  if (hasLiveBuffers) {
+    gpu_.waitIdle();
+  }
+
   for (const FrameBufferState &frame : frameBuffers_) {
     if (nuri::isValid(frame.buffer)) {
       gpu_.destroyBuffer(frame.buffer);
@@ -328,6 +339,7 @@ DebugDraw3D::ensureLineBufferCapacity(uint64_t frameIndex,
   }
 
   if (nuri::isValid(frame.buffer)) {
+    gpu_.waitIdle();
     gpu_.destroyBuffer(frame.buffer);
     frame.buffer = BufferHandle{};
   }
@@ -352,7 +364,7 @@ DebugDraw3D::ensureLineBufferCapacity(uint64_t frameIndex,
 
 Result<DebugDraw3D::PreparedGraphPass, std::string>
 DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
-                            TextureHandle depthTexture) {
+                            TextureHandle depthTexture, Format colorFormat) {
   NURI_PROFILER_FUNCTION();
 
   PreparedGraphPass pass{};
@@ -406,7 +418,9 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
   const Format depthFormat = nuri::isValid(depthTexture)
                                  ? gpu_.getTextureFormat(depthTexture)
                                  : Format::Count;
-  auto pipelineResult = ensurePipeline(gpu_.getSwapchainFormat(), depthFormat);
+  const Format resolvedColorFormat =
+      colorFormat != Format::Count ? colorFormat : gpu_.getSwapchainFormat();
+  auto pipelineResult = ensurePipeline(resolvedColorFormat, depthFormat);
   if (pipelineResult.hasError()) {
     return Result<PreparedGraphPass, std::string>::makeError(
         pipelineResult.error());

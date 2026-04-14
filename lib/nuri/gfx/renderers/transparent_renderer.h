@@ -89,7 +89,10 @@ private:
     uint32_t submeshIndex = 0;
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
+    BufferHandle baseVertexBuffer{};
+    uint64_t vertexBufferByteOffset = 0;
     BufferHandle vertexBuffer{};
+    BufferHandle baseVertexDecodeBuffer{};
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint32_t vertexDecodeIndex = 0;
@@ -162,6 +165,8 @@ private:
 
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;
+  uint64_t loggedAddressProbeTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();

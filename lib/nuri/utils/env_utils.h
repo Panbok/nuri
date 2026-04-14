@@ -11,4 +11,6 @@ namespace nuri {
 [[nodiscard]] NURI_API std::optional<std::string>
 readEnvVar(std::string_view variableName);
 
+[[nodiscard]] NURI_API bool readEnvFlag(std::string_view variableName);
+
 } // namespace nuri

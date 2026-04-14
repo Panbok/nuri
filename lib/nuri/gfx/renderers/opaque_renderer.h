@@ -103,6 +103,8 @@ private:
     uint64_t indexBufferOffset = 0;
     BufferHandle baseVertexBuffer{};
     BufferHandle vertexBuffer{};
+    BufferHandle baseVertexDecodeBuffer{};
+    BufferHandle vertexDecodeBuffer{};
     uint64_t baseVertexBufferAddress = 0;
     uint64_t baseVertexDecodeBufferAddress = 0;
     uint64_t vertexBufferAddress = 0;
@@ -218,6 +220,7 @@ private:
     uint64_t generation = 1;
     uint64_t remapSignature = std::numeric_limits<uint64_t>::max();
     uint64_t indirectDrawSignature = std::numeric_limits<uint64_t>::max();
+    uint64_t drawBufferSignature = std::numeric_limits<uint64_t>::max();
     std::pmr::vector<DrawItem> draws;
     std::pmr::vector<PushConstants> pushConstantsTemplates;
     std::pmr::vector<uint8_t> alphaMasked;
@@ -276,10 +279,10 @@ private:
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
   Result<bool, std::string> ensureDepthPyramidTextures();
-  Result<bool, std::string>
-  appendPreparedGraphPass(RenderFrameContext &frame, RenderGraphBuilder &graph,
-                          const PreparedGraphPass &pass, uint32_t safeWidth,
-                          uint32_t safeHeight);
+  Result<bool, std::string> appendPreparedGraphPass(
+      RenderFrameContext &frame, RenderGraphBuilder &graph,
+      const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight,
+      std::span<const RenderGraphBufferId> preResolvedDrawBufferIds);
   void cachePreparedGraphPassMetadata(PreparedGraphPass &pass) const;
   [[nodiscard]] bool
   shouldPublishSceneDepthGraphTexture(const RenderFrameContext &frame) const;
@@ -292,6 +295,7 @@ private:
   selectPickPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] bool isDoubleSidedPipeline(RenderPipelineHandle handle) const;
   [[nodiscard]] bool isTessPipeline(RenderPipelineHandle handle) const;
+  Result<bool, std::string> ensureSceneDepthSampler();
   Result<bool, std::string> ensureWireframePipeline();
   Result<bool, std::string> ensureTessWireframePipeline();
   Result<bool, std::string> ensureGsOverlayPipeline();
@@ -394,6 +398,8 @@ private:
   bool loggedDepthPyramidUnsupported_ = false;
   bool loggedMaterialFallbackWarning_ = false;
   bool loggedBlendMaterialUnsupportedWarning_ = false;
+  uint64_t loggedMainPassProbeTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -402,6 +408,10 @@ private:
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
   uint64_t cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
+  uint64_t currentDirectDrawBufferSignature_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t currentIndirectDrawBufferSignature_ =
+      std::numeric_limits<uint64_t>::max();
   bool cachedAnimationSceneActive_ = false;
   bool instanceStaticBuffersDirty_ = true;
   bool uniformSingleSubmeshPath_ = false;
@@ -457,12 +467,16 @@ private:
   std::pmr::vector<ComputeDispatchItem> preDispatches_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
+  std::pmr::vector<BufferHandle> preResolvedDecodeBuffers_;
+  std::pmr::vector<BufferHandle> preResolvedDrawBuffers_;
   std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
   std::pmr::vector<TextureHandle> passDependencyTextures_;
   std::pmr::vector<PreparedGraphPass> preparedGraphPasses_;
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};
+  uint64_t cachedPreResolvedBufferSignature_ =
+      std::numeric_limits<uint64_t>::max();
   uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();
   bool cachedRemapSignatureValid_ = false;
   glm::vec3 cachedMeshLodThresholdsInput_{std::numeric_limits<float>::max()};

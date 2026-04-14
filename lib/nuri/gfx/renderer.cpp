@@ -23,6 +23,15 @@ namespace {
   return value == "1" || value == "true" || value == "TRUE";
 }
 
+[[nodiscard]] uint64_t estimateCompletedFrameIndex(const GPUDevice &gpu,
+                                                   uint64_t frameIndex) {
+  const uint64_t lag = std::max<uint64_t>(1u, gpu.getSwapchainImageCount());
+  if (frameIndex <= lag) {
+    return 0u;
+  }
+  return frameIndex - lag;
+}
+
 } // namespace
 
 Renderer::Renderer(GPUDevice &gpu, std::pmr::memory_resource &memory)
@@ -67,7 +76,8 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }
-  return endFrameSequence(frameContext.frameIndex);
+  auto endResult = endFrameSequence(frameContext.frameIndex);
+  return endResult;
 }
 
 Result<bool, std::string> Renderer::beginFrameSequence(uint64_t frameIndex) {
@@ -104,7 +114,7 @@ Result<bool, std::string> Renderer::endFrameSequence(uint64_t frameIndex) {
   }
   {
     NURI_PROFILER_ZONE("Renderer.resource_gc", NURI_PROFILER_COLOR_DESTROY);
-    resources_.collectGarbage(frameIndex);
+    resources_.collectGarbage(estimateCompletedFrameIndex(gpu_, frameIndex));
     NURI_PROFILER_ZONE_END();
   }
   return submitResult;

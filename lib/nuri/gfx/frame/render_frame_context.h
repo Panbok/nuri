@@ -15,7 +15,6 @@
 #include <optional>
 #include <vector>
 
-
 #include <glm/glm.hpp>
 
 namespace nuri {
@@ -242,6 +241,21 @@ struct ForwardSceneFrameData {
 };
 static_assert(sizeof(ForwardSceneFrameData) == 336,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
+static_assert(offsetof(ForwardSceneFrameData, directionalLightBufferAddress) ==
+              272u);
+static_assert(offsetof(ForwardSceneFrameData, localLightBufferAddress) == 280u);
+static_assert(offsetof(ForwardSceneFrameData, materialHeaderBufferAddress) ==
+              288u);
+static_assert(offsetof(ForwardSceneFrameData, materialClearcoatBufferAddress) ==
+              296u);
+static_assert(offsetof(ForwardSceneFrameData, materialSheenBufferAddress) ==
+              304u);
+static_assert(offsetof(ForwardSceneFrameData,
+                       materialTransmissionBufferAddress) == 312u);
+static_assert(offsetof(ForwardSceneFrameData, materialSpecularBufferAddress) ==
+              320u);
+static_assert(offsetof(ForwardSceneFrameData, directionalLightCount) == 328u);
+static_assert(offsetof(ForwardSceneFrameData, localLightCount) == 332u);
 
 // GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.
 // The CPU owns allocation and updates of ForwardSceneFrameData, then derives

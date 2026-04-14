@@ -362,6 +362,16 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
                                     float &outSortDepth) {
   outSortDepth = 0.0f;
   if (!debugDraw3D_ || !frame.scene || !nuri::isValid(depthTexture)) {
+    static uint32_t loggedSceneDebugEarlyOuts = 0u;
+    if (loggedSceneDebugEarlyOuts < 16u) {
+      NURI_LOG_WARNING(
+          "DebugRenderer::buildSceneDebugLines early-out: frame=%llu "
+          "debugDraw=%u scene=%u depthValid=%u",
+          static_cast<unsigned long long>(frame.frameIndex),
+          debugDraw3D_ != nullptr ? 1u : 0u, frame.scene != nullptr ? 1u : 0u,
+          nuri::isValid(depthTexture) ? 1u : 0u);
+      ++loggedSceneDebugEarlyOuts;
+    }
     return Result<bool, std::string>::makeResult(false);
   }
 
@@ -543,8 +553,12 @@ DebugRenderer::appendDebugSceneOverlayPass(RenderFrameContext &frame,
     return Result<bool, std::string>::makeResult(true);
   }
 
+  const Format overlayColorFormat =
+      nuri::isValid(preparedFrameColorTexture_)
+          ? gpu_.getTextureFormat(preparedFrameColorTexture_)
+          : Format::Count;
   auto linePassResult = debugDraw3D_->buildGraphPass(
-      frame.frameIndex, preparedSceneDepthTexture_);
+      frame.frameIndex, preparedSceneDepthTexture_, overlayColorFormat);
   if (linePassResult.hasError()) {
     return Result<bool, std::string>::makeError(linePassResult.error());
   }
@@ -596,11 +610,28 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
   transparentFixedDraws_.clear();
   transparentDependencyBuffers_.clear();
 
+  static uint32_t loggedTransparentDebugBuilds = 0u;
+  if (loggedTransparentDebugBuilds < 16u) {
+    NURI_LOG_WARNING(
+        "DebugRenderer::buildTransparentStageContribution: frame=%llu "
+        "hasDebugWork=%u transparentStageEnabled=%u",
+        static_cast<unsigned long long>(frame.frameIndex),
+        hasDebugWork(frame) ? 1u : 0u,
+        frame.sharedResources.transparentStageEnabled ? 1u : 0u);
+  }
+
   if (!hasDebugWork(frame)) {
     return Result<bool, std::string>::makeResult(true);
   }
 
   const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
+  if (loggedTransparentDebugBuilds < 16u) {
+    NURI_LOG_WARNING(
+        "DebugRenderer::buildTransparentStageContribution depth: frame=%llu "
+        "depthValid=%u",
+        static_cast<unsigned long long>(frame.frameIndex),
+        nuri::isValid(depthTexture) ? 1u : 0u);
+  }
   if (nuri::isValid(depthTexture)) {
     float debugSortDepth = 0.0f;
     auto buildLinesResult =
@@ -608,13 +639,32 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
     if (buildLinesResult.hasError()) {
       return Result<bool, std::string>::makeError(buildLinesResult.error());
     }
+    if (loggedTransparentDebugBuilds < 16u) {
+      NURI_LOG_WARNING(
+          "DebugRenderer::buildTransparentStageContribution lines: frame=%llu "
+          "built=%u sortDepth=%.5f",
+          static_cast<unsigned long long>(frame.frameIndex),
+          buildLinesResult.value() ? 1u : 0u, debugSortDepth);
+    }
     if (buildLinesResult.value()) {
-      auto linePassResult =
-          debugDraw3D_->buildGraphPass(frame.frameIndex, depthTexture);
+      const TextureHandle frameColor = resolveFrameColorTexture(frame);
+      const Format targetColorFormat = nuri::isValid(frameColor)
+                                           ? gpu_.getTextureFormat(frameColor)
+                                           : gpu_.getSwapchainFormat();
+      auto linePassResult = debugDraw3D_->buildGraphPass(
+          frame.frameIndex, depthTexture, targetColorFormat);
       if (linePassResult.hasError()) {
         return Result<bool, std::string>::makeError(linePassResult.error());
       }
       const DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
+      if (loggedTransparentDebugBuilds < 16u) {
+        NURI_LOG_WARNING(
+            "DebugRenderer::buildTransparentStageContribution pass: frame=%llu "
+            "draws=%zu deps=%zu depthHandleValid=%u",
+            static_cast<unsigned long long>(frame.frameIndex),
+            pass.desc.draws.size(), pass.desc.dependencyBuffers.size(),
+            nuri::isValid(pass.depthTextureHandle) ? 1u : 0u);
+      }
       if (!pass.desc.draws.empty()) {
         for (size_t i = 0; i < pass.desc.draws.size(); ++i) {
           transparentSortableDraws_.push_back(TransparentStageSortableDraw{
@@ -648,6 +698,15 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
       std::span<const BufferHandle>(transparentDependencyBuffers_.data(),
                                     transparentDependencyBuffers_.size());
   out.textureReads = {};
+  if (loggedTransparentDebugBuilds < 16u) {
+    NURI_LOG_WARNING(
+        "DebugRenderer::buildTransparentStageContribution out: frame=%llu "
+        "sortable=%zu fixed=%zu deps=%zu",
+        static_cast<unsigned long long>(frame.frameIndex),
+        out.sortableDraws.size(), out.fixedDraws.size(),
+        out.dependencyBuffers.size());
+    ++loggedTransparentDebugBuilds;
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 

@@ -12,6 +12,15 @@ collectDebugTransparentContribution(void *user, RenderFrameContext &frame,
     out = {};
     return Result<bool, std::string>::makeResult(true);
   }
+  static uint32_t loggedCollectorCalls = 0u;
+  if (loggedCollectorCalls < 16u) {
+    NURI_LOG_WARNING(
+        "DebugFeature::collectDebugTransparentContribution: frame=%llu "
+        "transparentStageEnabled=%u",
+        static_cast<unsigned long long>(frame.frameIndex),
+        frame.sharedResources.transparentStageEnabled ? 1u : 0u);
+    ++loggedCollectorCalls;
+  }
   return static_cast<DebugRenderer *>(user)->buildTransparentStageContribution(
       frame, out);
 }

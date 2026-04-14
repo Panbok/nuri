@@ -15,6 +15,8 @@ constexpr uint32_t kTransmissionPassDebugColor = 0x33ffaaeeu;
 constexpr uint32_t kTransmissionMeshDebugColor = 0x33ffaaeeu;
 constexpr std::string_view kTransmissionPassLabel = "Transmission Pass";
 constexpr std::string_view kTransmissionMeshLabel = "TransmissionMesh";
+constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
+constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 
 [[nodiscard]] std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
@@ -56,8 +58,28 @@ bool animationOverrideCoversSubmesh(
          requiredVertexCount;
 }
 
+[[nodiscard]] uint64_t foldHandle(uint32_t index, uint32_t generation) {
+  return (static_cast<uint64_t>(generation) << 32u) | index;
+}
+
+[[nodiscard]] uint64_t hashCombine64(uint64_t hash, uint64_t value) {
+  hash ^= value;
+  hash *= kFnvPrime64;
+  return hash;
+}
+
 [[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
   return (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
+}
+
+[[nodiscard]] glm::vec3 transmissionScaleForDraw(const Renderable &renderable,
+                                                 const Submesh &submesh) {
+  const glm::mat4 &model = renderable.modelMatrix;
+  const glm::vec3 authoredScale = glm::abs(submesh.authoredScale);
+  return glm::vec3(
+      std::max(glm::length(glm::vec3(model[0])) * authoredScale.x, 1.0e-4f),
+      std::max(glm::length(glm::vec3(model[1])) * authoredScale.y, 1.0e-4f),
+      std::max(glm::length(glm::vec3(model[2])) * authoredScale.z, 1.0e-4f));
 }
 
 void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
@@ -88,6 +110,16 @@ void appendUniqueBuffer(std::pmr::vector<BufferHandle> &handles,
     return;
   }
   handles.push_back(handle);
+}
+
+void appendPreResolvedDrawBuffers(std::pmr::vector<BufferHandle> &handles,
+                                  std::span<const DrawItem> draws) {
+  for (const DrawItem &draw : draws) {
+    appendUniqueBuffer(handles, draw.vertexBuffer);
+    appendUniqueBuffer(handles, draw.indexBuffer);
+    appendUniqueBuffer(handles, draw.indirectBuffer);
+    appendUniqueBuffer(handles, draw.indirectCountBuffer);
+  }
 }
 
 [[nodiscard]] bool isSameTextureRef(TextureRef lhs, TextureRef rhs) {
@@ -173,8 +205,11 @@ TransmissionRenderer::TransmissionRenderer(
       staticPassTextureReads_(memory_), meshPushConstants_(memory_),
       passDrawItems_(memory_), passTextureReads_(memory_),
       passDependencyBuffers_(memory_),
-      passDependencyBufferAccessModes_(memory_) {
+      passDependencyBufferAccessModes_(memory_),
+      preResolvedTemplateBuffers_(memory_),
+      cachedPreResolvedDrawBuffers_(memory_) {
   const std::filesystem::path basePath = config_.meshFragment.parent_path();
+  transmissionVertexPath_ = basePath / "transmission.vert";
   transmissionFragmentPath_ = basePath / "transmission.frag";
 }
 
@@ -464,8 +499,14 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
 
     meshPushConstants_.reserve(meshDrawTemplates_.size());
     const uint32_t renderableCount = saturateToU32(renderables.size());
+    if (instanceRemap_.size() < renderables.size()) {
+      return Result<bool, std::string>::makeError(
+          "TransmissionRenderer::prepareTransmissionPasses: instance remap "
+          "buffer is smaller than the renderable set");
+    }
     const bool hasDepthAttachment =
         nuri::isValid(depthTexture) || nuri::isValid(sceneDepthGraphTexture);
+    constexpr uint32_t debugFlags = 0u;
     for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
       if (entry.renderable == nullptr || entry.submesh == nullptr) {
         continue;
@@ -476,12 +517,44 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       if (!lod.has_value()) {
         continue;
       }
+      if (entry.instanceIndex >= renderableCount ||
+          entry.instanceIndex >= instanceRemap_.size()) {
+        return Result<bool, std::string>::makeError(
+            "TransmissionRenderer::prepareTransmissionPasses: draw instance "
+            "index is out of range");
+      }
+      if (entry.materialIndex >= materialSnapshot.headers.size()) {
+        return Result<bool, std::string>::makeError(
+            "TransmissionRenderer::prepareTransmissionPasses: draw material "
+            "index is out of range");
+      }
+      if (!nuri::isValid(entry.indexBuffer)) {
+        return Result<bool, std::string>::makeError(
+            "TransmissionRenderer::prepareTransmissionPasses: draw index "
+            "buffer is invalid");
+      }
 
-      BufferHandle vertexBuffer = entry.vertexBuffer;
-      uint64_t vertexBufferAddress = entry.vertexBufferAddress;
-      uint64_t vertexDecodeBufferAddress = entry.vertexDecodeBufferAddress;
+      BufferHandle vertexBuffer = entry.baseVertexBuffer;
+      uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
+          entry.baseVertexBuffer, entry.vertexBufferByteOffset);
+      uint64_t vertexDecodeBufferAddress =
+          nuri::isValid(entry.baseVertexDecodeBuffer)
+              ? gpu_.getBufferDeviceAddress(entry.baseVertexDecodeBuffer)
+              : 0u;
       uint32_t vertexDecodeIndex = entry.vertexDecodeIndex;
       uint32_t packedVertexFormat = entry.packedVertexFormat;
+      if (vertexBufferAddress == 0u) {
+        return Result<bool, std::string>::makeError(
+            "TransmissionRenderer::prepareTransmissionPasses: invalid live "
+            "vertex buffer address");
+      }
+      if (packedVertexFormat ==
+              static_cast<uint32_t>(PackedVertexFormat::StaticQuantized20) &&
+          vertexDecodeBufferAddress == 0u) {
+        return Result<bool, std::string>::makeError(
+            "TransmissionRenderer::prepareTransmissionPasses: invalid live "
+            "vertex decode buffer address");
+      }
       if (animationSceneData != nullptr &&
           entry.instanceIndex <
               animationSceneData->geometryOverridesByRenderable.size()) {
@@ -504,6 +577,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
         }
       }
 
+      const glm::vec3 transmissionScale = transmissionScaleForDraw(
+          renderables[entry.instanceIndex], *entry.submesh);
       meshPushConstants_.push_back(MeshPushConstants{
           .frameDataAddress = frameDataAddress,
           .vertexBufferAddress = vertexBufferAddress,
@@ -517,13 +592,12 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           .vertexDecodeIndex = vertexDecodeIndex,
           .packedVertexFormat = packedVertexFormat,
           .timeSeconds = static_cast<float>(frame.timeSeconds),
-          // Transmission reuses these unused tessellation slots to pass the
-          // imported local-space authored scale into the fragment shader.
-          .tessNearDistance = entry.submesh->authoredScale.x,
-          .tessFarDistance = entry.submesh->authoredScale.y,
-          .tessMinFactor = entry.submesh->authoredScale.z,
+          // Transmission reuses unused tessellation slots for per-draw scale.
+          .tessNearDistance = transmissionScale.x,
+          .tessFarDistance = transmissionScale.y,
+          .tessMinFactor = transmissionScale.z,
           .tessMaxFactor = 1.0f,
-          .debugVisualizationMode = 0u,
+          .debugVisualizationMode = debugFlags,
       });
       const MeshPushConstants &pc = meshPushConstants_.back();
 
@@ -540,7 +614,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       if (hasDepthAttachment) {
         draw.useDepthState = true;
         draw.depthState = {.compareOp = CompareOp::LessEqual,
-                           .isDepthWriteEnabled = true};
+                           .isDepthWriteEnabled = false};
       }
       draw.pushConstants = std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&pc), sizeof(MeshPushConstants));
@@ -559,6 +633,32 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     appendUniqueBuffer(passDependencyBuffers_,
                        instanceRemapRing_[frameSlot].buffer->handle());
     passTextureReads_ = staticPassTextureReads_;
+    if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() &&
+        !meshPushConstants_.empty()) {
+      loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
+      const MeshPushConstants &probe = meshPushConstants_.front();
+      NURI_LOG_WARNING(
+          "TransmissionRenderer::prepareTransmissionPasses probe: "
+          "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
+          "instanceMatrices=0x%llx instanceRemap=0x%llx "
+          "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "
+          "materialTransmission=0x%llx materialIndex=%u decodeIndex=%u "
+          "debugFlags=0x%08x packedFormat=%u draws=%zu deps=%zu",
+          static_cast<unsigned long long>(probe.frameDataAddress),
+          static_cast<unsigned long long>(probe.vertexBufferAddress),
+          static_cast<unsigned long long>(probe.vertexDecodeBufferAddress),
+          static_cast<unsigned long long>(probe.instanceMatricesAddress),
+          static_cast<unsigned long long>(probe.instanceRemapAddress),
+          static_cast<unsigned long long>(
+              sceneGpu->directionalLightBufferAddress),
+          static_cast<unsigned long long>(sceneGpu->localLightBufferAddress),
+          static_cast<unsigned long long>(materialGpu->headerBufferAddress),
+          static_cast<unsigned long long>(
+              materialGpu->transmissionBufferAddress),
+          probe.materialIndex, probe.vertexDecodeIndex, debugFlags,
+          probe.packedVertexFormat, passDrawItems_.size(),
+          passDependencyBuffers_.size());
+    }
     NURI_PROFILER_ZONE_END();
   }
 
@@ -600,9 +700,66 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
         "unavailable at build time");
   }
 
-  RenderGraphGraphicsPassDesc passDesc{};
   NURI_PROFILER_ZONE("TransmissionRenderer.main_pass_build",
                      NURI_PROFILER_COLOR_CMD_DRAW);
+  uint64_t preResolvedDrawBufferSignature =
+      foldHandle(static_cast<uint32_t>(preResolvedTemplateBuffers_.size()),
+                 static_cast<uint32_t>(passDrawItems_.size()));
+  for (const BufferHandle handle : preResolvedTemplateBuffers_) {
+    preResolvedDrawBufferSignature =
+        hashCombine64(preResolvedDrawBufferSignature,
+                      foldHandle(handle.index, handle.generation));
+  }
+  for (const DrawItem &draw : passDrawItems_) {
+    preResolvedDrawBufferSignature = hashCombine64(
+        preResolvedDrawBufferSignature,
+        foldHandle(draw.vertexBuffer.index, draw.vertexBuffer.generation));
+    preResolvedDrawBufferSignature = hashCombine64(
+        preResolvedDrawBufferSignature,
+        foldHandle(draw.indexBuffer.index, draw.indexBuffer.generation));
+    preResolvedDrawBufferSignature = hashCombine64(
+        preResolvedDrawBufferSignature,
+        foldHandle(draw.indirectBuffer.index, draw.indirectBuffer.generation));
+    preResolvedDrawBufferSignature =
+        hashCombine64(preResolvedDrawBufferSignature,
+                      foldHandle(draw.indirectCountBuffer.index,
+                                 draw.indirectCountBuffer.generation));
+  }
+  if (cachedPreResolvedDrawBufferSignature_ != preResolvedDrawBufferSignature ||
+      cachedPreResolvedDrawBuffers_.empty()) {
+    ScratchArena preResolveScratchArena;
+    ScopedScratch preResolveScratch(preResolveScratchArena);
+    PmrHashSet<uint64_t> seenBuffers(preResolveScratch.resource());
+    seenBuffers.reserve(preResolvedTemplateBuffers_.size() +
+                        passDrawItems_.size() * 4u);
+    cachedPreResolvedDrawBuffers_.clear();
+    const auto appendPreResolvedBuffer = [&](BufferHandle handle) {
+      if (!nuri::isValid(handle)) {
+        return;
+      }
+      const uint64_t handleKey = foldHandle(handle.index, handle.generation);
+      if (!seenBuffers.insert(handleKey).second) {
+        return;
+      }
+      cachedPreResolvedDrawBuffers_.push_back(handle);
+    };
+    cachedPreResolvedDrawBuffers_.reserve(preResolvedTemplateBuffers_.size() +
+                                          passDrawItems_.size() * 4u);
+    for (const BufferHandle handle : preResolvedTemplateBuffers_) {
+      appendPreResolvedBuffer(handle);
+    }
+    for (const DrawItem &draw : passDrawItems_) {
+      appendPreResolvedBuffer(draw.vertexBuffer);
+      appendPreResolvedBuffer(draw.indexBuffer);
+      appendPreResolvedBuffer(draw.indirectBuffer);
+      appendPreResolvedBuffer(draw.indirectCountBuffer);
+    }
+    cachedPreResolvedDrawBufferSignature_ = preResolvedDrawBufferSignature;
+  }
+  passDependencyBufferAccessModes_.resize(passDependencyBuffers_.size(),
+                                          RenderGraphAccessMode::Read);
+
+  RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Load,
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
@@ -631,8 +788,10 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
   }
   passDesc.draws =
       std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size());
-  passDependencyBufferAccessModes_.resize(passDependencyBuffers_.size(),
-                                          RenderGraphAccessMode::Read);
+  passDesc.drawBuffersPreResolved = true;
+  passDesc.preResolvedDrawBuffers =
+      std::span<const BufferHandle>(cachedPreResolvedDrawBuffers_.data(),
+                                    cachedPreResolvedDrawBuffers_.size());
   passDesc.dependencyBuffers = std::span<const BufferHandle>(
       passDependencyBuffers_.data(), passDependencyBuffers_.size());
   passDesc.dependencyBufferAccessModes = std::span<const RenderGraphAccessMode>(
@@ -675,7 +834,7 @@ Result<bool, std::string> TransmissionRenderer::createShaders() {
   }
 
   auto meshVertexResult = meshShader_->compileFromFile(
-      config_.meshVertex.string(), ShaderStage::Vertex);
+      transmissionVertexPath_.string(), ShaderStage::Vertex);
   if (meshVertexResult.hasError()) {
     return Result<bool, std::string>::makeError(meshVertexResult.error());
   }
@@ -742,6 +901,20 @@ TransmissionRenderer::ensureRingBufferCount(uint32_t requiredCount) {
 
 Result<bool, std::string>
 TransmissionRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
+  bool needsResize = false;
+  bool hasLiveBuffers = false;
+  for (const DynamicBufferSlot &slot : instanceMatricesRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      hasLiveBuffers = true;
+      if (slot.capacityBytes < requiredBytes) {
+        needsResize = true;
+        break;
+      }
+    }
+  }
+  if (needsResize && hasLiveBuffers) {
+    gpu_.waitIdle();
+  }
   for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceMatricesRing_[i];
     if (slot.buffer && slot.buffer->valid() &&
@@ -769,6 +942,20 @@ TransmissionRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
 
 Result<bool, std::string>
 TransmissionRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
+  bool needsResize = false;
+  bool hasLiveBuffers = false;
+  for (const DynamicBufferSlot &slot : instanceRemapRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      hasLiveBuffers = true;
+      if (slot.capacityBytes < requiredBytes) {
+        needsResize = true;
+        break;
+      }
+    }
+  }
+  if (needsResize && hasLiveBuffers) {
+    gpu_.waitIdle();
+  }
   for (size_t i = 0; i < instanceRemapRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceRemapRing_[i];
     if (slot.buffer && slot.buffer->valid() &&
@@ -859,7 +1046,10 @@ TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
           .submeshIndex = static_cast<uint32_t>(submeshIndex),
           .indexBuffer = geometry.indexBuffer,
           .indexBufferOffset = geometry.indexByteOffset,
-          .vertexBuffer = {},
+          .baseVertexBuffer = geometry.vertexBuffer,
+          .vertexBufferByteOffset = geometry.vertexByteOffset,
+          .vertexBuffer = geometry.vertexBuffer,
+          .baseVertexDecodeBuffer = modelRecord->model->vertexDecodeBuffer(),
           .vertexBufferAddress = vertexBufferAddress,
           .vertexDecodeBufferAddress =
               modelRecord->model->vertexDecodeBufferAddress(),
@@ -885,6 +1075,17 @@ TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
   } else {
     loggedMaterialFallbackWarning_ = false;
   }
+
+  preResolvedTemplateBuffers_.clear();
+  preResolvedTemplateBuffers_.reserve(meshDrawTemplates_.size() * 3u);
+  for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
+    appendUniqueBuffer(preResolvedTemplateBuffers_, entry.baseVertexBuffer);
+    appendUniqueBuffer(preResolvedTemplateBuffers_,
+                       entry.baseVertexDecodeBuffer);
+    appendUniqueBuffer(preResolvedTemplateBuffers_, entry.indexBuffer);
+  }
+  cachedPreResolvedDrawBuffers_.clear();
+  cachedPreResolvedDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
 
   cachedScene_ = &scene;
   cachedTopologyVersion_ = scene.topologyVersion();
@@ -966,6 +1167,7 @@ void TransmissionRenderer::resetCachedState() {
   cachedTransmissionContentValid_ = false;
   cachedTransmissionContent_ = false;
   loggedMaterialFallbackWarning_ = false;
+  loggedAddressProbeTopologyVersion_ = std::numeric_limits<uint64_t>::max();
 
   meshDrawTemplates_.clear();
   instanceMatrices_.clear();
@@ -975,6 +1177,9 @@ void TransmissionRenderer::resetCachedState() {
   environmentTextureAccessHandles_.clear();
   staticPassTextureReads_.clear();
   passDependencyBufferAccessModes_.clear();
+  preResolvedTemplateBuffers_.clear();
+  cachedPreResolvedDrawBuffers_.clear();
+  cachedPreResolvedDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
 }
 
 void TransmissionRenderer::resetFrameBuildState() {

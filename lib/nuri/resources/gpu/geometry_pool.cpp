@@ -373,12 +373,12 @@ GeometryPool::buildPreparedCompactionPlan(
   };
 
   struct PreparedPoolPlan {
-    std::vector<PreparedShadowChunk> chunks;
+    std::vector<PreparedReplacementChunk> chunks;
     std::vector<PreparedCopy> copies;
 
     [[nodiscard]] size_t totalBytes() const noexcept {
       size_t total = 0u;
-      for (const PreparedShadowChunk &chunk : chunks) {
+      for (const PreparedReplacementChunk &chunk : chunks) {
         total += chunk.sizeBytes;
       }
       return total;
@@ -448,7 +448,7 @@ GeometryPool::buildPreparedCompactionPlan(
       }
 
       const size_t newChunkBytes = std::max(defaultChunkBytes, src.size);
-      plan.chunks.emplace_back(PreparedShadowChunk{
+      plan.chunks.emplace_back(PreparedReplacementChunk{
           .sizeBytes = newChunkBytes,
           .usedBytes = src.size,
       });
@@ -468,15 +468,16 @@ GeometryPool::buildPreparedCompactionPlan(
 
   PreparedPoolPlan vertexPlan = buildPoolPlan(true);
   PreparedPoolPlan indexPlan = buildPoolPlan(false);
-  const size_t shadowBytes = vertexPlan.totalBytes() + indexPlan.totalBytes();
+  const size_t replacementBytes =
+      vertexPlan.totalBytes() + indexPlan.totalBytes();
 
   PreparedCompactionPlan plan{};
-  if (currentBytes == 0u || shadowBytes >= currentBytes) {
+  if (currentBytes == 0u || replacementBytes >= currentBytes) {
     return Result<PreparedCompactionPlan, std::string>::makeResult(
         std::move(plan));
   }
 
-  const size_t savingsBytes = currentBytes - shadowBytes;
+  const size_t savingsBytes = currentBytes - replacementBytes;
   const float savingsRatio =
       static_cast<float>(savingsBytes) / static_cast<float>(currentBytes);
   if (savingsBytes < config.compactionMinSavingsBytes ||
@@ -626,28 +627,28 @@ Result<bool, std::string> GeometryPool::pollCompactionPlanning() {
   }
 
   compactionJob_.preparedPlan.emplace(std::move(planResult.value()));
-  compactionJob_.nextShadowVertexChunkIndex = 0u;
-  compactionJob_.nextShadowIndexChunkIndex = 0u;
+  compactionJob_.nextReplacementVertexChunkIndex = 0u;
+  compactionJob_.nextReplacementIndexChunkIndex = 0u;
   compactionJob_.nextCopyIndex = 0u;
-  compactionJob_.state = CompactionJobState::MaterializingShadow;
+  compactionJob_.state = CompactionJobState::MaterializingReplacement;
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> GeometryPool::materializeShadowChunks() {
+Result<bool, std::string> GeometryPool::materializeReplacementChunks() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  if (compactionJob_.state != CompactionJobState::MaterializingShadow ||
+  if (compactionJob_.state != CompactionJobState::MaterializingReplacement ||
       !compactionJob_.preparedPlan.has_value()) {
     return Result<bool, std::string>::makeResult(true);
   }
 
   const auto materializeOne =
-      [this](const PreparedShadowChunk &planChunk,
+      [this](const PreparedReplacementChunk &planChunk,
              std::pmr::vector<Chunk> &chunks,
              SlotPool<UnmaskedNonZeroGenerationPolicy> &chunkSlots,
              std::pmr::vector<ChunkHandle> &handles, BufferUsage usage,
              std::string_view debugPrefix) -> Result<bool, std::string> {
     auto createResult = createChunk(chunks, chunkSlots, planChunk.sizeBytes,
-                                    usage, debugPrefix, ChunkRole::Shadow);
+                                    usage, debugPrefix, ChunkRole::Replacement);
     if (createResult.hasError()) {
       return Result<bool, std::string>::makeError(createResult.error());
     }
@@ -655,8 +656,8 @@ Result<bool, std::string> GeometryPool::materializeShadowChunks() {
 
     Chunk *chunk = findChunk(chunks, chunkSlots, handles.back());
     NURI_ASSERT(chunk != nullptr,
-                "GeometryPool::materializeShadowChunks: missing shadow "
-                "chunk");
+                "GeometryPool::materializeReplacementChunks: missing "
+                "replacement chunk");
     chunk->freeBlocks.clear();
     if (planChunk.usedBytes < chunk->sizeBytes) {
       chunk->freeBlocks.emplace_back(Block{
@@ -669,32 +670,36 @@ Result<bool, std::string> GeometryPool::materializeShadowChunks() {
   };
 
   const PreparedCompactionPlan &plan = *compactionJob_.preparedPlan;
-  if (compactionJob_.nextShadowVertexChunkIndex < plan.vertexChunks.size()) {
+  if (compactionJob_.nextReplacementVertexChunkIndex <
+      plan.vertexChunks.size()) {
     auto createResult = materializeOne(
-        plan.vertexChunks[compactionJob_.nextShadowVertexChunkIndex],
-        vertexChunks_, vertexChunkSlots_, compactionJob_.shadowVertexChunks,
-        BufferUsage::Storage, "geometry_pool_compact_vb");
+        plan.vertexChunks[compactionJob_.nextReplacementVertexChunkIndex],
+        vertexChunks_, vertexChunkSlots_,
+        compactionJob_.replacementVertexChunks,
+        BufferUsage::Storage | BufferUsage::Vertex, "geometry_pool_compact_vb");
     if (createResult.hasError()) {
       abortCompactionJob();
       return createResult;
     }
-    ++compactionJob_.nextShadowVertexChunkIndex;
+    ++compactionJob_.nextReplacementVertexChunkIndex;
   }
 
-  if (compactionJob_.nextShadowIndexChunkIndex < plan.indexChunks.size()) {
+  if (compactionJob_.nextReplacementIndexChunkIndex < plan.indexChunks.size()) {
     auto createResult = materializeOne(
-        plan.indexChunks[compactionJob_.nextShadowIndexChunkIndex],
-        indexChunks_, indexChunkSlots_, compactionJob_.shadowIndexChunks,
+        plan.indexChunks[compactionJob_.nextReplacementIndexChunkIndex],
+        indexChunks_, indexChunkSlots_, compactionJob_.replacementIndexChunks,
         BufferUsage::Index, "geometry_pool_compact_ib");
     if (createResult.hasError()) {
       abortCompactionJob();
       return createResult;
     }
-    ++compactionJob_.nextShadowIndexChunkIndex;
+    ++compactionJob_.nextReplacementIndexChunkIndex;
   }
 
-  if (compactionJob_.nextShadowVertexChunkIndex >= plan.vertexChunks.size() &&
-      compactionJob_.nextShadowIndexChunkIndex >= plan.indexChunks.size()) {
+  if (compactionJob_.nextReplacementVertexChunkIndex >=
+          plan.vertexChunks.size() &&
+      compactionJob_.nextReplacementIndexChunkIndex >=
+          plan.indexChunks.size()) {
     compactionJob_.state = plan.copies.empty()
                                ? CompactionJobState::ReadyToCommit
                                : CompactionJobState::ReadyToSubmit;
@@ -745,21 +750,21 @@ Result<bool, std::string> GeometryPool::submitNextCopyBatch() {
           "GeometryPool::submitNextCopyBatch: missing source chunk");
     }
 
-    const std::pmr::vector<ChunkHandle> &shadowHandles =
-        copy.isVertex ? compactionJob_.shadowVertexChunks
-                      : compactionJob_.shadowIndexChunks;
-    if (copy.dstChunkIndex >= shadowHandles.size()) {
+    const std::pmr::vector<ChunkHandle> &replacementHandles =
+        copy.isVertex ? compactionJob_.replacementVertexChunks
+                      : compactionJob_.replacementIndexChunks;
+    if (copy.dstChunkIndex >= replacementHandles.size()) {
       abortCompactionJob();
       return Result<bool, std::string>::makeError(
           "GeometryPool::submitNextCopyBatch: destination chunk index is out "
           "of range");
     }
 
-    const Chunk *dstChunk = copy.isVertex
-                                ? findChunk(vertexChunks_, vertexChunkSlots_,
-                                            shadowHandles[copy.dstChunkIndex])
-                                : findChunk(indexChunks_, indexChunkSlots_,
-                                            shadowHandles[copy.dstChunkIndex]);
+    const Chunk *dstChunk =
+        copy.isVertex ? findChunk(vertexChunks_, vertexChunkSlots_,
+                                  replacementHandles[copy.dstChunkIndex])
+                      : findChunk(indexChunks_, indexChunkSlots_,
+                                  replacementHandles[copy.dstChunkIndex]);
     if (dstChunk == nullptr) {
       abortCompactionJob();
       return Result<bool, std::string>::makeError(
@@ -804,8 +809,8 @@ Result<bool, std::string> GeometryPool::pollCompactionJob() {
     return Result<bool, std::string>::makeResult(true);
   case CompactionJobState::Planning:
     return pollCompactionPlanning();
-  case CompactionJobState::MaterializingShadow:
-    return materializeShadowChunks();
+  case CompactionJobState::MaterializingReplacement:
+    return materializeReplacementChunks();
   case CompactionJobState::ReadyToSubmit:
     return submitNextCopyBatch();
   case CompactionJobState::WaitingForCopy: {
@@ -849,22 +854,26 @@ Result<bool, std::string> GeometryPool::commitCompactionJob() {
 
     if (move.dstVertexChunkIndex != UINT32_MAX) {
       NURI_ASSERT(
-          move.dstVertexChunkIndex < compactionJob_.shadowVertexChunks.size(),
+          move.dstVertexChunkIndex <
+              compactionJob_.replacementVertexChunks.size(),
           "GeometryPool::commitCompactionJob: vertex chunk index is out of "
           "range");
       entry.vertex = SubAllocation{
-          .chunk = compactionJob_.shadowVertexChunks[move.dstVertexChunkIndex],
+          .chunk =
+              compactionJob_.replacementVertexChunks[move.dstVertexChunkIndex],
           .offset = move.dstVertexOffset,
           .size = move.dstVertexSize,
       };
     }
     if (move.dstIndexChunkIndex != UINT32_MAX) {
       NURI_ASSERT(
-          move.dstIndexChunkIndex < compactionJob_.shadowIndexChunks.size(),
+          move.dstIndexChunkIndex <
+              compactionJob_.replacementIndexChunks.size(),
           "GeometryPool::commitCompactionJob: index chunk index is out of "
           "range");
       entry.index = SubAllocation{
-          .chunk = compactionJob_.shadowIndexChunks[move.dstIndexChunkIndex],
+          .chunk =
+              compactionJob_.replacementIndexChunks[move.dstIndexChunkIndex],
           .offset = move.dstIndexOffset,
           .size = move.dstIndexSize,
       };
@@ -872,9 +881,9 @@ Result<bool, std::string> GeometryPool::commitCompactionJob() {
   }
 
   promoteChunks(vertexChunks_, vertexChunkSlots_,
-                compactionJob_.shadowVertexChunks);
+                compactionJob_.replacementVertexChunks);
   promoteChunks(indexChunks_, indexChunkSlots_,
-                compactionJob_.shadowIndexChunks);
+                compactionJob_.replacementIndexChunks);
   retireChunks(vertexChunks_, vertexChunkSlots_,
                compactionJob_.frozenVertexChunks, currentFrameIndex_);
   retireChunks(indexChunks_, indexChunkSlots_, compactionJob_.frozenIndexChunks,
@@ -891,9 +900,9 @@ void GeometryPool::abortCompactionJob() {
   restoreFrozenChunks(indexChunks_, indexChunkSlots_,
                       compactionJob_.frozenIndexChunks);
   destroyChunks(vertexChunks_, vertexChunkSlots_,
-                compactionJob_.shadowVertexChunks);
+                compactionJob_.replacementVertexChunks);
   destroyChunks(indexChunks_, indexChunkSlots_,
-                compactionJob_.shadowIndexChunks);
+                compactionJob_.replacementIndexChunks);
   compactionJob_.reset();
 }
 
@@ -979,7 +988,8 @@ GeometryPool::allocate(std::span<const std::byte> vertexBytes,
 
   auto vertexAllocResult = allocateFromPool(
       vertexChunks_, vertexChunkSlots_, vertexBytes.size(), kVertexAlignment,
-      config_.vertexChunkSizeBytes, BufferUsage::Storage, "geometry_pool_vb");
+      config_.vertexChunkSizeBytes, BufferUsage::Storage | BufferUsage::Vertex,
+      "geometry_pool_vb");
   if (vertexAllocResult.hasError()) {
     return Result<GeometryAllocationHandle, std::string>::makeError(
         vertexAllocResult.error());

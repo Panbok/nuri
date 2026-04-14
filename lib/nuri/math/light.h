@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <cmath>
 
-#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/constants.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace nuri {
 
@@ -56,11 +56,14 @@ rotationFromMatrixOrIdentity(const glm::mat4 &matrix) {
     sanitized.range = 0.0f;
     sanitized.innerConeAngleRadians = 0.0f;
     sanitized.outerConeAngleRadians = 0.0f;
+    sanitized.angularRadiusDegrees =
+        sanitizeNonNegative(desc.angularRadiusDegrees, 0.27f);
     break;
   case LightType::Point:
     sanitized.range = sanitizeNonNegative(desc.range, 0.0f);
     sanitized.innerConeAngleRadians = 0.0f;
     sanitized.outerConeAngleRadians = 0.0f;
+    sanitized.angularRadiusDegrees = 0.0f;
     break;
   case LightType::Spot:
     sanitized.range = sanitizeNonNegative(desc.range, 0.0f);
@@ -71,6 +74,7 @@ rotationFromMatrixOrIdentity(const glm::mat4 &matrix) {
     sanitized.innerConeAngleRadians =
         std::clamp(sanitizeNonNegative(desc.innerConeAngleRadians, 0.0f), 0.0f,
                    sanitized.outerConeAngleRadians);
+    sanitized.angularRadiusDegrees = 0.0f;
     break;
   }
 
@@ -78,7 +82,7 @@ rotationFromMatrixOrIdentity(const glm::mat4 &matrix) {
 }
 
 [[nodiscard]] inline LightDesc lightLocalFromWorld(const LightDesc &worldDesc,
-                                                      const glm::mat4 &nodeWorld) {
+                                                   const glm::mat4 &nodeWorld) {
   LightDesc local = worldDesc;
   const glm::mat4 inverseNodeWorld = safeInverseOrIdentity(nodeWorld);
   local.position =

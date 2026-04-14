@@ -1221,6 +1221,7 @@ LvkGPUDevice::createSampler(const SamplerDesc &desc,
   samplerDesc.wrapU = toLvkSamplerWrapMode(desc.wrapU);
   samplerDesc.wrapV = toLvkSamplerWrapMode(desc.wrapV);
   samplerDesc.wrapW = toLvkSamplerWrapMode(desc.wrapW);
+  samplerDesc.depthCompareOp = toLvkCompareOp(desc.depthCompareOp);
   samplerDesc.mipLodMin = desc.mipLodMin;
   samplerDesc.mipLodMax = std::max(desc.mipLodMax, desc.mipLodMin);
   samplerDesc.maxAnisotropic =
@@ -1228,6 +1229,7 @@ LvkGPUDevice::createSampler(const SamplerDesc &desc,
   if (samplerDesc.maxAnisotropic < 1u) {
     samplerDesc.maxAnisotropic = 1u;
   }
+  samplerDesc.depthCompareEnabled = desc.depthCompareEnabled;
   samplerDesc.debugName = debugNameCStr;
 
   lvk::Result result;

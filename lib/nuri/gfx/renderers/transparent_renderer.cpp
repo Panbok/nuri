@@ -62,6 +62,16 @@ void appendUniqueBuffer(std::pmr::vector<BufferHandle> &handles,
   handles.push_back(handle);
 }
 
+void appendPreResolvedDrawBuffers(std::pmr::vector<BufferHandle> &handles,
+                                  std::span<const DrawItem> draws) {
+  for (const DrawItem &draw : draws) {
+    appendUniqueBuffer(handles, draw.vertexBuffer);
+    appendUniqueBuffer(handles, draw.indexBuffer);
+    appendUniqueBuffer(handles, draw.indirectBuffer);
+    appendUniqueBuffer(handles, draw.indirectCountBuffer);
+  }
+}
+
 RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
                                     ShaderHandle vertexShader,
                                     ShaderHandle fragmentShader,
@@ -450,6 +460,11 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   pickPushConstants_.reserve(meshDrawTemplates_.size());
 
   const uint32_t renderableCount = saturateToU32(renderables.size());
+  if (instanceRemap_.size() < renderables.size()) {
+    return Result<bool, std::string>::makeError(
+        "TransparentRenderer::prepareTransparentPasses: instance remap "
+        "buffer is smaller than the renderable set");
+  }
   for (size_t i = 0; i < meshDrawTemplates_.size(); ++i) {
     const MeshDrawTemplate &entry = meshDrawTemplates_[i];
     if (entry.renderable == nullptr || entry.submesh == nullptr) {
@@ -460,15 +475,47 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
     if (!lod.has_value()) {
       continue;
     }
+    if (entry.instanceIndex >= renderableCount ||
+        entry.instanceIndex >= instanceRemap_.size()) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::prepareTransparentPasses: draw instance index "
+          "is out of range");
+    }
+    if (entry.materialIndex >= materialSnapshot.headers.size()) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::prepareTransparentPasses: draw material index "
+          "is out of range");
+    }
+    if (!nuri::isValid(entry.indexBuffer)) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::prepareTransparentPasses: draw index buffer "
+          "is invalid");
+    }
 
     const glm::vec3 worldCenter =
         glm::vec3(entry.renderable->modelMatrix *
                   glm::vec4(entry.submesh->bounds.getCenter(), 1.0f));
-    BufferHandle vertexBuffer = entry.vertexBuffer;
-    uint64_t vertexBufferAddress = entry.vertexBufferAddress;
-    uint64_t vertexDecodeBufferAddress = entry.vertexDecodeBufferAddress;
+    BufferHandle vertexBuffer = entry.baseVertexBuffer;
+    uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
+        entry.baseVertexBuffer, entry.vertexBufferByteOffset);
+    uint64_t vertexDecodeBufferAddress =
+        nuri::isValid(entry.baseVertexDecodeBuffer)
+            ? gpu_.getBufferDeviceAddress(entry.baseVertexDecodeBuffer)
+            : 0u;
     uint32_t vertexDecodeIndex = entry.vertexDecodeIndex;
     uint32_t packedVertexFormat = entry.packedVertexFormat;
+    if (vertexBufferAddress == 0u) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::prepareTransparentPasses: invalid live "
+          "vertex buffer address");
+    }
+    if (packedVertexFormat ==
+            static_cast<uint32_t>(PackedVertexFormat::StaticQuantized20) &&
+        vertexDecodeBufferAddress == 0u) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::prepareTransparentPasses: invalid live "
+          "vertex decode buffer address");
+    }
     if (animationSceneData != nullptr &&
         entry.instanceIndex <
             animationSceneData->geometryOverridesByRenderable.size()) {
@@ -592,6 +639,30 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   appendUniqueBuffer(passDependencyBuffers_, instanceMatricesBufferHandle);
   appendUniqueBuffer(passDependencyBuffers_,
                      instanceRemapRing_[frameSlot].buffer->handle());
+  if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() &&
+      !drawPushConstants_.empty()) {
+    loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
+    const PushConstants &probe = drawPushConstants_.front();
+    NURI_LOG_WARNING(
+        "TransparentRenderer::prepareTransparentPasses probe: "
+        "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
+        "instanceMatrices=0x%llx instanceRemap=0x%llx "
+        "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "
+        "materialTransmission=0x%llx materialIndex=%u decodeIndex=%u "
+        "packedFormat=%u draws=%zu deps=%zu",
+        static_cast<unsigned long long>(probe.frameDataAddress),
+        static_cast<unsigned long long>(probe.vertexBufferAddress),
+        static_cast<unsigned long long>(probe.vertexDecodeBufferAddress),
+        static_cast<unsigned long long>(probe.instanceMatricesAddress),
+        static_cast<unsigned long long>(probe.instanceRemapAddress),
+        static_cast<unsigned long long>(
+            sceneGpu->directionalLightBufferAddress),
+        static_cast<unsigned long long>(sceneGpu->localLightBufferAddress),
+        static_cast<unsigned long long>(materialGpu->headerBufferAddress),
+        static_cast<unsigned long long>(materialGpu->transmissionBufferAddress),
+        probe.materialIndex, probe.vertexDecodeIndex, probe.packedVertexFormat,
+        meshSortableDraws_.size(), passDependencyBuffers_.size());
+  }
 
   frame.metrics.transparent.meshDraws =
       saturateToU32(meshSortableDraws_.size());
@@ -739,6 +810,20 @@ TransparentRenderer::ensureRingBufferCount(uint32_t requiredCount) {
 
 Result<bool, std::string>
 TransparentRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
+  bool needsResize = false;
+  bool hasLiveBuffers = false;
+  for (const DynamicBufferSlot &slot : instanceMatricesRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      hasLiveBuffers = true;
+      if (slot.capacityBytes < requiredBytes) {
+        needsResize = true;
+        break;
+      }
+    }
+  }
+  if (needsResize && hasLiveBuffers) {
+    gpu_.waitIdle();
+  }
   for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceMatricesRing_[i];
     if (slot.buffer && slot.buffer->valid() &&
@@ -766,6 +851,20 @@ TransparentRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
 
 Result<bool, std::string>
 TransparentRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
+  bool needsResize = false;
+  bool hasLiveBuffers = false;
+  for (const DynamicBufferSlot &slot : instanceRemapRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      hasLiveBuffers = true;
+      if (slot.capacityBytes < requiredBytes) {
+        needsResize = true;
+        break;
+      }
+    }
+  }
+  if (needsResize && hasLiveBuffers) {
+    gpu_.waitIdle();
+  }
   for (size_t i = 0; i < instanceRemapRing_.size(); ++i) {
     DynamicBufferSlot &slot = instanceRemapRing_[i];
     if (slot.buffer && slot.buffer->valid() &&
@@ -855,7 +954,10 @@ TransparentRenderer::rebuildSceneCache(const RenderScene &scene,
           .submeshIndex = static_cast<uint32_t>(submeshIndex),
           .indexBuffer = geometry.indexBuffer,
           .indexBufferOffset = geometry.indexByteOffset,
-          .vertexBuffer = {},
+          .baseVertexBuffer = geometry.vertexBuffer,
+          .vertexBufferByteOffset = geometry.vertexByteOffset,
+          .vertexBuffer = geometry.vertexBuffer,
+          .baseVertexDecodeBuffer = modelRecord->model->vertexDecodeBuffer(),
           .vertexBufferAddress = vertexBufferAddress,
           .vertexDecodeBufferAddress =
               modelRecord->model->vertexDecodeBufferAddress(),
@@ -935,6 +1037,14 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
     return Result<bool, std::string>::makeResult(true);
   }
 
+  static uint32_t loggedContributorCollections = 0u;
+  if (loggedContributorCollections < 16u) {
+    NURI_LOG_WARNING("TransparentRenderer::collectContributorDraws: frame=%llu "
+                     "collectorCount=%zu",
+                     static_cast<unsigned long long>(frame.frameIndex),
+                     frame.transparentContributors.collectors().size());
+  }
+
   for (const TransparentContributionCollector &collector :
        frame.transparentContributors.collectors()) {
     if (collector.user == nullptr || collector.collect == nullptr) {
@@ -973,6 +1083,16 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
         saturateToU32(contribution.sortableDraws.size());
     frame.metrics.transparent.contributorFixedDraws +=
         saturateToU32(contribution.fixedDraws.size());
+  }
+
+  if (loggedContributorCollections < 16u) {
+    NURI_LOG_WARNING(
+        "TransparentRenderer::collectContributorDraws result: frame=%llu "
+        "sortable=%zu fixed=%zu textures=%zu",
+        static_cast<unsigned long long>(frame.frameIndex),
+        contributorSortableDraws_.size(), contributorFixedDraws_.size(),
+        contributorTextureReads_.size());
+    ++loggedContributorCollections;
   }
 
   return Result<bool, std::string>::makeResult(true);
@@ -1030,6 +1150,20 @@ Result<bool, std::string> TransparentRenderer::appendTransparentPass(
   }
   passDesc.draws =
       std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size());
+  std::pmr::vector<BufferHandle> preResolvedDrawBuffers(memory_);
+  preResolvedDrawBuffers.reserve(meshDrawTemplates_.size() * 3u +
+                                 passDrawItems_.size() * 2u + 8u);
+  for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
+    appendUniqueBuffer(preResolvedDrawBuffers, entry.baseVertexBuffer);
+    appendUniqueBuffer(preResolvedDrawBuffers, entry.baseVertexDecodeBuffer);
+    appendUniqueBuffer(preResolvedDrawBuffers, entry.indexBuffer);
+  }
+  appendPreResolvedDrawBuffers(
+      preResolvedDrawBuffers,
+      std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size()));
+  passDesc.drawBuffersPreResolved = true;
+  passDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+      preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
   passDesc.dependencyBuffers = dependencyBuffers;
   passDesc.debugLabel = kTransparentPassLabel;
   passDesc.debugColor = kTransparentPassDebugColor;
@@ -1084,6 +1218,20 @@ TransparentRenderer::appendTransparentPickPass(RenderFrameContext &frame,
   pickDesc.depthTexture = resolvedPickDepth;
   pickDesc.draws =
       std::span<const DrawItem>(pickDrawItems_.data(), pickDrawItems_.size());
+  std::pmr::vector<BufferHandle> preResolvedDrawBuffers(memory_);
+  preResolvedDrawBuffers.reserve(meshDrawTemplates_.size() * 3u +
+                                 pickDrawItems_.size() * 2u + 8u);
+  for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
+    appendUniqueBuffer(preResolvedDrawBuffers, entry.baseVertexBuffer);
+    appendUniqueBuffer(preResolvedDrawBuffers, entry.baseVertexDecodeBuffer);
+    appendUniqueBuffer(preResolvedDrawBuffers, entry.indexBuffer);
+  }
+  appendPreResolvedDrawBuffers(
+      preResolvedDrawBuffers,
+      std::span<const DrawItem>(pickDrawItems_.data(), pickDrawItems_.size()));
+  pickDesc.drawBuffersPreResolved = true;
+  pickDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+      preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
   pickDesc.dependencyBuffers = std::span<const BufferHandle>(
       passDependencyBuffers_.data(), passDependencyBuffers_.size());
   pickDesc.debugLabel = kTransparentPickPassLabel;
@@ -1132,6 +1280,7 @@ void TransparentRenderer::resetCachedState() {
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   loggedMaterialFallbackWarning_ = false;
+  loggedAddressProbeTopologyVersion_ = std::numeric_limits<uint64_t>::max();
 
   meshDrawTemplates_.clear();
   instanceMatrices_.clear();

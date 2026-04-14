@@ -292,6 +292,57 @@ struct IblResult {
   bool hasIndirectLighting;
 };
 
+struct DirectLightingResult {
+  vec3 directDiffuse;
+  vec3 directSpecular;
+  vec3 directSheen;
+  vec3 clearcoatDirectLighting;
+};
+
+DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
+  DirectLightingResult r;
+  r.directDiffuse = vec3(0.0);
+  r.directSpecular = vec3(0.0);
+  r.directSheen = vec3(0.0);
+  r.clearcoatDirectLighting = vec3(0.0);
+
+  for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
+    DirectionalLightGpuData light =
+        pc.frameData.directionalLightBuffer.lights[i];
+    vec3 l = normalize(-directionalLightDirection(light));
+    vec3 lr = directionalLightColor(light) * directionalLightIlluminance(light) *
+              1.0;
+    accumulateSurfaceLightContribution(lr, l, sm, r.directDiffuse,
+                                       r.directSpecular, r.directSheen,
+                                       r.clearcoatDirectLighting);
+  }
+
+  for (uint i = 0u; i < pc.frameData.localLightCount; ++i) {
+    LocalLightGpuData light = pc.frameData.localLightBuffer.lights[i];
+    vec3 ptl = localLightPosition(light) - worldPos;
+    float dsq = dot(ptl, ptl);
+    if (dsq <= kEpsilon) {
+      continue;
+    }
+    vec3 l = ptl * inversesqrt(dsq);
+    float att = punctualRangeAttenuation(dsq, localLightRange(light));
+    if (localLightType(light) == kLocalLightTypeSpot) {
+      att *= spotAngularAttenuation(localLightDirection(light), ptl,
+                                    localLightInnerCos(light),
+                                    localLightOuterCos(light));
+    }
+    if (att <= 0.0) {
+      continue;
+    }
+    vec3 lr = localLightColor(light) * localLightIntensity(light) * att;
+    accumulateSurfaceLightContribution(lr, l, sm, r.directDiffuse,
+                                       r.directSpecular, r.directSheen,
+                                       r.clearcoatDirectLighting);
+  }
+
+  return r;
+}
+
 IblResult evaluateIbl(ShadedMaterial sm) {
   IblResult r;
   r.iblDiffuse = vec3(0.0);

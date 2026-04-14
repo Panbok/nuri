@@ -57,6 +57,21 @@ uint64_t foldHandle(uint32_t index, uint32_t generation) {
   return (static_cast<uint64_t>(generation) << 32u) | index;
 }
 
+uint64_t hashBufferHandleSignature(uint64_t signature, BufferHandle handle) {
+  return nuri::isValid(handle)
+             ? hashCombine64(signature,
+                             foldHandle(handle.index, handle.generation))
+             : signature;
+}
+
+uint64_t hashDrawBufferSignature(uint64_t signature, const DrawItem &draw) {
+  signature = hashBufferHandleSignature(signature, draw.vertexBuffer);
+  signature = hashBufferHandleSignature(signature, draw.indexBuffer);
+  signature = hashBufferHandleSignature(signature, draw.indirectBuffer);
+  signature = hashBufferHandleSignature(signature, draw.indirectCountBuffer);
+  return signature;
+}
+
 std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
   return memory != nullptr ? memory : std::pmr::get_default_resource();
@@ -273,6 +288,19 @@ appendUniqueDependency(std::pmr::vector<BufferHandle> &dependencies,
   return Result<bool, std::string>::makeResult(true);
 }
 
+void appendUniqueDrawBuffer(std::pmr::vector<BufferHandle> &dependencies,
+                            BufferHandle handle) {
+  if (!nuri::isValid(handle)) {
+    return;
+  }
+  for (const BufferHandle existing : dependencies) {
+    if (isSameBufferHandle(existing, handle)) {
+      return;
+    }
+  }
+  dependencies.push_back(handle);
+}
+
 void appendUniqueTextureDependency(
     std::pmr::vector<TextureHandle> &dependencies, TextureHandle handle) {
   if (!nuri::isValid(handle)) {
@@ -461,6 +489,8 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       preDispatches_(resolveMemoryResource(memory)),
       passDependencyBuffers_(resolveMemoryResource(memory)),
       passDependencyBufferAccessModes_(resolveMemoryResource(memory)),
+      preResolvedDecodeBuffers_(resolveMemoryResource(memory)),
+      preResolvedDrawBuffers_(resolveMemoryResource(memory)),
       dispatchDependencyBuffers_(resolveMemoryResource(memory)),
       passDependencyTextures_(resolveMemoryResource(memory)),
       preparedGraphPasses_(resolveMemoryResource(memory)) {
@@ -550,8 +580,13 @@ void OpaqueRenderer::onDetach() {
   depthPyramidDependencyTextures_.clear();
   preDispatches_.clear();
   passDependencyBuffers_.clear();
+  preResolvedDecodeBuffers_.clear();
+  preResolvedDrawBuffers_.clear();
   dispatchDependencyBuffers_.clear();
   pickDrawItems_.clear();
+  cachedPreResolvedBufferSignature_ = std::numeric_limits<uint64_t>::max();
+  currentDirectDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
+  currentIndirectDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
   cachedScene_ = nullptr;
   cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
@@ -560,6 +595,7 @@ void OpaqueRenderer::onDetach() {
   cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
   cachedAnimationSceneActive_ = false;
   instanceStaticBuffersDirty_ = true;
+  loggedMainPassProbeTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uniformSingleSubmeshPath_ = false;
   invalidateAutoLodCache();
   invalidateSingleInstanceBatchCache();
@@ -587,37 +623,50 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
   if (!settings.opaque.enabled) {
     return;
   }
-  const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
-  if (!nuri::isValid(sceneDepthTexture)) {
-    return;
-  }
   const auto sceneDepthSamplerId = [this]() {
     return nuri::isValid(sceneDepthSampler_)
                ? gpu_.getSamplerBindlessIndex(sceneDepthSampler_)
                : gpu_.getDefaultSamplerBindlessIndex();
   };
-  frame.sharedResources.sceneDepthSamplerId = sceneDepthSamplerId();
 
-  if (!settings.opaque.enableDepthPyramid) {
-    return;
-  }
-  if (!nuri::isValid(depthPyramidPipelineHandle_) ||
-      gpu_.getTextureBindlessIndex(sceneDepthTexture) ==
-          kInvalidTextureBindlessIndex) {
-    return;
-  }
-  auto pyramidResult = ensureDepthPyramidTextures();
-  if (pyramidResult.hasError()) {
-    if (!loggedDepthPyramidUnsupported_) {
-      loggedDepthPyramidUnsupported_ = true;
+  if (settings.opaque.enableDepthPyramid) {
+    auto initResult = ensureInitialized();
+    if (initResult.hasError()) {
       NURI_LOG_WARNING("OpaqueRenderer::publishFrameData: %s",
-                       pyramidResult.error().c_str());
+                       initResult.error().c_str());
+      return;
     }
-    return;
+    auto samplerResult = ensureSceneDepthSampler();
+    if (samplerResult.hasError()) {
+      NURI_LOG_WARNING("OpaqueRenderer::publishFrameData: %s",
+                       samplerResult.error().c_str());
+      return;
+    }
+    // FrameCompositionProvider publishes the scene-depth texture after feature
+    // publishFrameData(). Preserve the sampler choice now so later stages can
+    // consume the depth texture with the intended sampling mode once the
+    // provider fills in the texture handle.
+    frame.sharedResources.sceneDepthSamplerId = sceneDepthSamplerId();
   }
-  frame.sharedResources.sceneDepthPyramidLevelCount =
-      sceneDepthPyramidLevelCount_;
-  frame.sharedResources.sceneDepthPyramidTextures = sceneDepthPyramidTextures_;
+
+  if (settings.opaque.enableDepthPyramid) {
+    if (!nuri::isValid(depthPyramidPipelineHandle_)) {
+      return;
+    }
+    auto pyramidResult = ensureDepthPyramidTextures();
+    if (pyramidResult.hasError()) {
+      if (!loggedDepthPyramidUnsupported_) {
+        loggedDepthPyramidUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::publishFrameData: %s",
+                         pyramidResult.error().c_str());
+      }
+      return;
+    }
+    frame.sharedResources.sceneDepthPyramidLevelCount =
+        sceneDepthPyramidLevelCount_;
+    frame.sharedResources.sceneDepthPyramidTextures =
+        sceneDepthPyramidTextures_;
+  }
 }
 
 Result<bool, std::string>
@@ -793,6 +842,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     bool vertexAddressChanged = false;
     bool hasAnimatedGeometry = false;
     for (MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+      BufferHandle resolvedVertexDecodeBuffer =
+          templateEntry.baseVertexDecodeBuffer;
       uint64_t resolvedVertexDecodeBufferAddress =
           templateEntry.baseVertexDecodeBufferAddress;
       uint32_t resolvedVertexDecodeIndex = templateEntry.submeshIndex;
@@ -802,7 +853,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           templateEntry.baseVertexBufferAddress != 0u
               ? templateEntry.baseVertexBufferAddress
               : templateEntry.vertexBufferAddress;
-      BufferHandle resolvedVertexBuffer{};
+      BufferHandle resolvedVertexBuffer = templateEntry.baseVertexBuffer;
       if (animationSceneData != nullptr &&
           templateEntry.instanceIndex <
               animationSceneData->geometryOverridesByRenderable.size()) {
@@ -818,6 +869,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
           if (overrideVertexAddress != 0u) {
             resolvedVertexBuffer = geometryOverride.vertexBuffer;
+            resolvedVertexDecodeBuffer = {};
             resolvedVertexBufferAddress = overrideVertexAddress;
             resolvedVertexDecodeBufferAddress = 0u;
             resolvedVertexDecodeIndex = 0u;
@@ -828,12 +880,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         }
       }
       vertexAddressChanged |=
+          !isSameBufferHandle(templateEntry.vertexBuffer,
+                              resolvedVertexBuffer) ||
+          !isSameBufferHandle(templateEntry.vertexDecodeBuffer,
+                              resolvedVertexDecodeBuffer) ||
           templateEntry.vertexBufferAddress != resolvedVertexBufferAddress ||
           templateEntry.vertexDecodeBufferAddress !=
               resolvedVertexDecodeBufferAddress ||
           templateEntry.vertexDecodeIndex != resolvedVertexDecodeIndex ||
           templateEntry.packedVertexFormat != resolvedPackedVertexFormat;
       templateEntry.vertexBuffer = resolvedVertexBuffer;
+      templateEntry.vertexDecodeBuffer = resolvedVertexDecodeBuffer;
       templateEntry.vertexBufferAddress = resolvedVertexBufferAddress;
       templateEntry.vertexDecodeBufferAddress =
           resolvedVertexDecodeBufferAddress;
@@ -852,6 +909,21 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     cachedAnimationSceneVersion_ = animationSceneData != nullptr
                                        ? animationSceneData->version
                                        : std::numeric_limits<uint64_t>::max();
+  }
+
+  if (topologyDirty || animationSceneStateDirty ||
+      preResolvedDecodeBuffers_.empty()) {
+    preResolvedDecodeBuffers_.clear();
+    preResolvedDecodeBuffers_.reserve(meshDrawTemplates_.size());
+    for (const MeshDrawTemplate &templateEntry : meshDrawTemplates_) {
+      if (templateEntry.packedVertexFormat !=
+              static_cast<uint32_t>(PackedVertexFormat::StaticQuantized20) ||
+          !nuri::isValid(templateEntry.vertexDecodeBuffer)) {
+        continue;
+      }
+      appendUniqueDrawBuffer(preResolvedDecodeBuffers_,
+                             templateEntry.vertexDecodeBuffer);
+    }
   }
 
   if (!frame.sharedResources.forwardSceneGpuData.has_value() ||
@@ -913,11 +985,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     cachedMaterialVersion_ = materialSnapshot.version;
   }
   if (materialDirty || materialTextureAccessHandles_.empty()) {
+    NURI_PROFILER_ZONE("OpaqueRenderer.material_access_cache",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
     auto materialAccessCacheResult =
         rebuildMaterialTextureAccessCache(*frame.scene, *frame.resources);
     if (materialAccessCacheResult.hasError()) {
       return materialAccessCacheResult;
     }
+    NURI_PROFILER_ZONE_END();
   }
 
   const uint64_t frameDataAddress = sceneGpu->frameDataAddress;
@@ -1121,6 +1196,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     templateEntry.baseVertexBuffer = geometry.vertexBuffer;
     templateEntry.baseVertexBufferAddress = refreshedVertexAddress;
     if (wasUsingBaseVertexAddress) {
+      templateEntry.vertexBuffer = templateEntry.baseVertexBuffer;
       templateEntry.vertexBufferAddress = refreshedVertexAddress;
     }
     return Result<bool, std::string>::makeResult(true);
@@ -1159,15 +1235,24 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             templateEntry.indexBuffer = firstTemplate.indexBuffer;
             templateEntry.indexBufferOffset = firstTemplate.indexBufferOffset;
             templateEntry.baseVertexBuffer = firstTemplate.baseVertexBuffer;
+            templateEntry.vertexBuffer = firstTemplate.vertexBuffer;
+            templateEntry.baseVertexDecodeBuffer =
+                firstTemplate.baseVertexDecodeBuffer;
+            templateEntry.vertexDecodeBuffer = firstTemplate.vertexDecodeBuffer;
             templateEntry.baseVertexBufferAddress =
                 firstTemplate.baseVertexBufferAddress;
+            templateEntry.baseVertexDecodeBufferAddress =
+                firstTemplate.baseVertexDecodeBufferAddress;
             templateEntry.vertexBufferAddress =
                 firstTemplate.vertexBufferAddress;
+            templateEntry.vertexDecodeBufferAddress =
+                firstTemplate.vertexDecodeBufferAddress;
           }
         }
       } else {
         GeometryAllocationHandle cachedHandle{};
         BufferHandle cachedIndexBuffer{};
+        BufferHandle cachedVertexBuffer{};
         uint64_t cachedIndexBufferOffset = 0;
         uint64_t cachedVertexBufferAddress = 0;
         bool hasCachedGeometry = false;
@@ -1176,6 +1261,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           const BufferHandle previousIndexBuffer = templateEntry.indexBuffer;
           const uint64_t previousIndexBufferOffset =
               templateEntry.indexBufferOffset;
+          const BufferHandle previousVertexBuffer = templateEntry.vertexBuffer;
           const uint64_t previousVertexBufferAddress =
               templateEntry.vertexBufferAddress;
 
@@ -1186,7 +1272,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           if (sameAsCached) {
             templateEntry.indexBuffer = cachedIndexBuffer;
             templateEntry.indexBufferOffset = cachedIndexBufferOffset;
+            templateEntry.baseVertexBuffer = cachedVertexBuffer;
             templateEntry.baseVertexBufferAddress = cachedVertexBufferAddress;
+            templateEntry.vertexBuffer = cachedVertexBuffer;
             templateEntry.vertexBufferAddress = cachedVertexBufferAddress;
           } else {
             auto refreshResult = refreshTemplateGeometry(templateEntry);
@@ -1196,6 +1284,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
             cachedHandle = templateEntry.geometryHandle;
             cachedIndexBuffer = templateEntry.indexBuffer;
+            cachedVertexBuffer = templateEntry.baseVertexBuffer;
             cachedIndexBufferOffset = templateEntry.indexBufferOffset;
             cachedVertexBufferAddress = templateEntry.baseVertexBufferAddress;
             hasCachedGeometry = true;
@@ -1204,6 +1293,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           const bool geometryChanged =
               !isSameBufferHandle(templateEntry.indexBuffer,
                                   previousIndexBuffer) ||
+              !isSameBufferHandle(templateEntry.vertexBuffer,
+                                  previousVertexBuffer) ||
               templateEntry.indexBufferOffset != previousIndexBufferOffset ||
               templateEntry.vertexBufferAddress != previousVertexBufferAddress;
           templateGeometryChanged = templateGeometryChanged || geometryChanged;
@@ -1236,6 +1327,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   bool remapSignatureValid = false;
   uint64_t indirectDrawSignature = kInvalidDrawSignature;
   bool indirectDrawSignatureValid = false;
+  uint64_t directDrawBufferSignature = kInvalidDrawSignature;
+  bool directDrawBufferSignatureValid = false;
+  currentDirectDrawBufferSignature_ = kInvalidDrawSignature;
   const SingleInstanceBatchCache *activeSingleInstanceCache = nullptr;
   const bool canUseStaticBatchCache =
       !settings.opaque.enableInstanceAnimation && !useAutoLod &&
@@ -1285,6 +1379,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       indirectDrawSignature = staticBatchCache_.indirectDrawSignature;
       indirectDrawSignatureValid = true;
     }
+    if (staticBatchCache_.drawBufferSignature != kInvalidDrawSignature) {
+      directDrawBufferSignature = staticBatchCache_.drawBufferSignature;
+      directDrawBufferSignatureValid = true;
+    }
 
     for (size_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
       PushConstants &constants = drawPushConstants_[batchIndex];
@@ -1300,6 +1398,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     cachedRemapSignature_ = remapSignature;
     cachedRemapSignatureValid_ = remapSignatureValid;
+    currentDirectDrawBufferSignature_ = directDrawBufferSignatureValid
+                                            ? directDrawBufferSignature
+                                            : kInvalidDrawSignature;
     reusedStaticBatchCache = true;
     NURI_PROFILER_ZONE_END();
   }
@@ -1758,6 +1859,24 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       remapSignatureValid = true;
     }
 
+    const auto writeRemapEntry =
+        [this,
+         instanceCount](size_t writeOffset,
+                        uint32_t instanceId) -> Result<bool, std::string> {
+      if (writeOffset >= instanceRemap_.size()) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::buildOpaquePasses: instance remap write offset "
+            "is out of range");
+      }
+      if (instanceId >= instanceCount) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::buildOpaquePasses: instance remap source index "
+            "is out of range");
+      }
+      instanceRemap_[writeOffset] = instanceId;
+      return Result<bool, std::string>::makeResult(true);
+    };
+
     if (shouldBuildRemap && usedUniformAutoLodFastPath) {
       for (uint32_t lod = 0; lod < Submesh::kMaxLodCount; ++lod) {
         autoLodBucketWrites[lod] = autoLodBucketStarts[lod];
@@ -1768,13 +1887,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
              ++instanceId) {
           const uint32_t lod = instanceAutoLodLevels_[instanceId];
           if (lod == 0 && instanceTessSelection_[instanceId] != 0u) {
-            instanceRemap_[autoLodTessBucketWrite++] = instanceId;
+            auto writeResult =
+                writeRemapEntry(autoLodTessBucketWrite++, instanceId);
+            if (writeResult.hasError()) {
+              return writeResult;
+            }
             remapSignature = hashCombine64(remapSignature,
                                            static_cast<uint64_t>(instanceId));
             continue;
           }
           const size_t writeOffset = autoLodBucketWrites[lod]++;
-          instanceRemap_[writeOffset] = instanceId;
+          auto writeResult = writeRemapEntry(writeOffset, instanceId);
+          if (writeResult.hasError()) {
+            return writeResult;
+          }
           remapSignature =
               hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
         }
@@ -1783,7 +1909,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
              ++instanceId) {
           const uint32_t lod = instanceAutoLodLevels_[instanceId];
           const size_t writeOffset = autoLodBucketWrites[lod]++;
-          instanceRemap_[writeOffset] = instanceId;
+          auto writeResult = writeRemapEntry(writeOffset, instanceId);
+          if (writeResult.hasError()) {
+            return writeResult;
+          }
           remapSignature =
               hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
         }
@@ -1795,7 +1924,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
     } else if (shouldBuildRemap && usedUniformFastPath) {
       for (uint32_t instanceId = 0; instanceId < instanceCount; ++instanceId) {
-        instanceRemap_[instanceId] = instanceId;
+        auto writeResult = writeRemapEntry(instanceId, instanceId);
+        if (writeResult.hasError()) {
+          return writeResult;
+        }
         remapSignature =
             hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
       }
@@ -1809,7 +1941,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         const size_t writeOffset = batchWriteOffsets_[batchIndex]++;
         const uint32_t instanceId =
             meshDrawTemplates_[templateIndex].instanceIndex;
-        instanceRemap_[writeOffset] = instanceId;
+        auto writeResult = writeRemapEntry(writeOffset, instanceId);
+        if (writeResult.hasError()) {
+          return writeResult;
+        }
         remapSignature =
             hashCombine64(remapSignature, static_cast<uint64_t>(instanceId));
       }
@@ -1826,6 +1961,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       indirectDrawSignature = hashCombine64(kFnvOffsetBasis64, batchCount);
       indirectDrawSignature = hashCombine64(indirectDrawSignature, remapCount);
       indirectDrawSignatureValid = true;
+    }
+    if (batchCount > 0) {
+      directDrawBufferSignature = hashCombine64(kFnvOffsetBasis64, batchCount);
+      directDrawBufferSignature =
+          hashCombine64(directDrawBufferSignature, remapCount);
+      directDrawBufferSignatureValid = true;
     }
     if (useCachedSingleInstanceBatches) {
       for (size_t batchIndex = 0;
@@ -1862,6 +2003,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         draw.pushConstants = std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&constants),
             sizeof(PushConstants));
+        if (directDrawBufferSignatureValid) {
+          directDrawBufferSignature =
+              hashDrawBufferSignature(directDrawBufferSignature, draw);
+        }
 
         if (indirectDrawSignatureValid) {
           indirectDrawSignature = hashCombine64(
@@ -1925,6 +2070,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         draw.pushConstants = std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&constants),
             sizeof(PushConstants));
+        if (directDrawBufferSignatureValid) {
+          directDrawBufferSignature =
+              hashDrawBufferSignature(directDrawBufferSignature, draw);
+        }
 
         if (indirectDrawSignatureValid) {
           indirectDrawSignature = hashCombine64(
@@ -1958,6 +2107,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
     }
     NURI_PROFILER_ZONE_END();
+    currentDirectDrawBufferSignature_ = directDrawBufferSignatureValid
+                                            ? directDrawBufferSignature
+                                            : kInvalidDrawSignature;
 
     if (canUseStaticBatchCache) {
       staticBatchCache_.enableMeshLod = settings.opaque.enableMeshLod;
@@ -1967,6 +2119,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       staticBatchCache_.indirectDrawSignature = indirectDrawSignatureValid
                                                     ? indirectDrawSignature
                                                     : kInvalidDrawSignature;
+      staticBatchCache_.drawBufferSignature = currentDirectDrawBufferSignature_;
       staticBatchCache_.draws = drawItems_;
       staticBatchCache_.pushConstantsTemplates = drawPushConstants_;
       staticBatchCache_.alphaMasked = drawAlphaMasked_;
@@ -2126,6 +2279,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     indirectDrawItems_.clear();
     indirectAlphaMasked_.clear();
     indirectCommandUploadBytes_.clear();
+    currentIndirectDrawBufferSignature_ = kInvalidDrawSignature;
   }
 
   computePushConstants_ = PushConstants{
@@ -2199,6 +2353,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     dispatchDependencyBuffers_.clear();
     passDependencyBuffers_.clear();
     passDependencyBufferAccessModes_.clear();
+    preResolvedDrawBuffers_.clear();
     passDependencyTextures_.clear();
 
     if (animationSceneData != nullptr &&
@@ -2209,7 +2364,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
 
     const bool hasIndirectDraws = !indirectDrawItems_.empty();
-    if (!hasIndirectDraws && nuri::isValid(sceneGpu->buffer)) {
+    if (nuri::isValid(sceneGpu->buffer)) {
       auto depResult = appendUniqueDependency(
           passDependencyBuffers_, passDependencyBufferAccessModes_,
           sceneGpu->buffer, RenderGraphAccessMode::Read,
@@ -2360,14 +2515,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   overlayDrawItems_.clear();
   passDrawItems_.clear();
   depthPrepassDrawItems_.clear();
+
   bool depthPrepassEnabled = settings.opaque.enableDepthPrepass &&
                              !wireframeOnlyRequested && !baseDrawItems.empty();
   if (depthPrepassEnabled && baseAlphaMasked.size() != baseDrawItems.size()) {
     depthPrepassEnabled = false;
   }
   if (depthPrepassEnabled) {
-    depthPrepassDrawItems_.reserve(baseDrawItems.size());
-    passDrawItems_.reserve(baseDrawItems.size());
+    NURI_PROFILER_ZONE("OpaqueRenderer.depth_prepass_build",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    depthPrepassDrawItems_.resize(baseDrawItems.size());
+    passDrawItems_.resize(baseDrawItems.size());
+    size_t populatedDepthDrawCount = 0u;
     for (size_t i = 0; i < baseDrawItems.size(); ++i) {
       const DrawItem &source = baseDrawItems[i];
       const bool alphaMasked = baseAlphaMasked[i] != 0u;
@@ -2393,14 +2552,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                               .isDepthWriteEnabled = true};
       depthDraw.debugLabel =
           alphaMasked ? "OpaqueMeshDepthAlpha" : "OpaqueMeshDepth";
-      depthPrepassDrawItems_.push_back(depthDraw);
+      depthPrepassDrawItems_[populatedDepthDrawCount] = depthDraw;
 
       DrawItem shadeDraw = source;
       shadeDraw.useDepthState = true;
       shadeDraw.depthState = {.compareOp = CompareOp::Equal,
                               .isDepthWriteEnabled = false};
-      passDrawItems_.push_back(shadeDraw);
+      passDrawItems_[populatedDepthDrawCount] = shadeDraw;
+      ++populatedDepthDrawCount;
     }
+    if (depthPrepassEnabled) {
+      depthPrepassDrawItems_.resize(populatedDepthDrawCount);
+      passDrawItems_.resize(populatedDepthDrawCount);
+    }
+    NURI_PROFILER_ZONE_END();
   }
   std::span<const DrawItem> shadedBaseDrawItems =
       depthPrepassEnabled ? std::span<const DrawItem>(passDrawItems_.data(),
@@ -2600,6 +2765,65 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
   }
 
+  if (loggedMainPassProbeTopologyVersion_ != frame.scene->topologyVersion() &&
+      !finalPassDrawItems.empty()) {
+    loggedMainPassProbeTopologyVersion_ = frame.scene->topologyVersion();
+    const DrawItem &probeDraw = finalPassDrawItems.front();
+    NURI_ASSERT(probeDraw.pushConstants.size() == sizeof(PushConstants),
+                "OpaqueRenderer::buildOpaquePasses(main push constants)");
+    const PushConstants *probe =
+        reinterpret_cast<const PushConstants *>(probeDraw.pushConstants.data());
+    const uint64_t directionalLightBufferAddress =
+        frame.sharedResources.forwardSceneGpuData.has_value()
+            ? frame.sharedResources.forwardSceneGpuData
+                  ->directionalLightBufferAddress
+            : 0u;
+    const uint64_t localLightBufferAddress =
+        frame.sharedResources.forwardSceneGpuData.has_value()
+            ? frame.sharedResources.forwardSceneGpuData->localLightBufferAddress
+            : 0u;
+    const uint64_t materialHeaderBufferAddress =
+        frame.sharedResources.materialTableGpuData.has_value()
+            ? frame.sharedResources.materialTableGpuData->headerBufferAddress
+            : 0u;
+    const uint64_t materialTransmissionBufferAddress =
+        frame.sharedResources.materialTableGpuData.has_value()
+            ? frame.sharedResources.materialTableGpuData
+                  ->transmissionBufferAddress
+            : 0u;
+    NURI_LOG_WARNING(
+        "OpaqueRenderer::buildOpaquePasses main probe: "
+        "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
+        "instanceMatrices=0x%llx instanceRemap=0x%llx "
+        "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "
+        "materialTransmission=0x%llx materialIndex=%u decodeIndex=%u "
+        "packedFormat=%u draws=%zu depthPrepass=%u command=%u "
+        "drawVertexHandle=%u:%u drawIndexHandle=%u:%u "
+        "drawIndirectHandle=%u:%u",
+        static_cast<unsigned long long>(
+            probe != nullptr ? probe->frameDataAddress : 0u),
+        static_cast<unsigned long long>(
+            probe != nullptr ? probe->vertexBufferAddress : 0u),
+        static_cast<unsigned long long>(
+            probe != nullptr ? probe->vertexDecodeBufferAddress : 0u),
+        static_cast<unsigned long long>(
+            probe != nullptr ? probe->instanceMatricesAddress : 0u),
+        static_cast<unsigned long long>(
+            probe != nullptr ? probe->instanceRemapAddress : 0u),
+        static_cast<unsigned long long>(directionalLightBufferAddress),
+        static_cast<unsigned long long>(localLightBufferAddress),
+        static_cast<unsigned long long>(materialHeaderBufferAddress),
+        static_cast<unsigned long long>(materialTransmissionBufferAddress),
+        probe != nullptr ? probe->materialIndex : 0u,
+        probe != nullptr ? probe->vertexDecodeIndex : 0u,
+        probe != nullptr ? probe->packedVertexFormat : 0u,
+        finalPassDrawItems.size(), depthPrepassEnabled ? 1u : 0u,
+        static_cast<unsigned>(probeDraw.command), probeDraw.vertexBuffer.index,
+        probeDraw.vertexBuffer.generation, probeDraw.indexBuffer.index,
+        probeDraw.indexBuffer.generation, probeDraw.indirectBuffer.index,
+        probeDraw.indirectBuffer.generation);
+  }
+
   size_t indirectCommandCount = 0;
   for (const DrawItem &indirectDraw : indirectDrawItems_) {
     indirectCommandCount += indirectDraw.indirectDrawCount;
@@ -2694,6 +2918,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     pickPass.desc.draws =
         std::span<const DrawItem>(pickDrawItems_.data(), pickDrawItems_.size());
     pickPass.desc.drawBuffersPreResolved = true;
+    pickPass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+        preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
     pickPass.desc.debugLabel = kOpaquePickPassLabel;
     pickPass.desc.debugColor = kOpaquePassDebugColor;
     pickPass.hasDraws = !pickDrawItems_.empty();
@@ -2733,6 +2959,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     depthPass.desc.draws = std::span<const DrawItem>(
         depthPrepassDrawItems_.data(), depthPrepassDrawItems_.size());
     depthPass.desc.drawBuffersPreResolved = true;
+    depthPass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+        preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
     depthPass.desc.debugLabel = "Opaque Depth Pre-Pass";
     depthPass.desc.debugColor = kOpaquePassDebugColor;
     depthPass.desc.markImplicitOutputSideEffect = true;
@@ -2743,51 +2971,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     depthPass.isDepthPrepass = true;
   }
 
-  const bool shouldLoadColor = settings.skybox.enabled;
-  PreparedGraphPass &pass =
-      out.emplace_back(drawItems_.get_allocator().resource());
-  pass.desc.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
-                     .storeOp = StoreOp::Store,
-                     .clearColor = {kClearColorWhite, kClearColorWhite,
-                                    kClearColorWhite, kClearColorWhite}};
-  pass.desc.depth = {.loadOp =
-                         depthPrepassEnabled ? LoadOp::Load : LoadOp::Clear,
-                     .storeOp = StoreOp::Store,
-                     .clearDepth = kClearDepthOne,
-                     .clearStencil = 0};
-  pass.depthTextureHandle = sceneDepthTexture;
-  if (!pickPassSubmitted && !depthPrepassEnabled) {
-    pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
-        preDispatches_.data(), preDispatches_.size());
-  }
-  pass.desc.dependencyBuffers = std::span<const BufferHandle>(
-      passDependencyBuffers_.data(), passDependencyBuffers_.size());
-  pass.desc.dependencyBufferAccessModes =
-      std::span<const RenderGraphAccessMode>(
-          passDependencyBufferAccessModes_.data(),
-          passDependencyBufferAccessModes_.size());
-  pass.desc.dependencyTextures = std::span<const TextureHandle>(
-      passDependencyTextures_.data(), passDependencyTextures_.size());
-  pass.desc.draws = finalPassDrawItems;
-  pass.desc.drawBuffersPreResolved = true;
-  pass.desc.debugLabel = kOpaqueMainPassLabel;
-  pass.desc.debugColor = kOpaquePassDebugColor;
-  pass.hasDraws = !finalPassDrawItems.empty();
-  pass.hasPreDispatch =
-      !pickPassSubmitted && !depthPrepassEnabled && !preDispatches_.empty();
-  pass.desc.borrowPayload = !pass.hasPreDispatch;
-  pass.hasIndirectDraws = hasIndirectBaseDraws;
-  pass.isMainPass = true;
-  if (!nuri::isValid(frame.sharedResources.sceneColorTexture)) {
-    return Result<bool, std::string>::makeError(
-        "OpaqueRenderer::buildOpaquePasses: scene color texture is "
-        "unavailable");
-  }
-  pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
-
-  if (settings.opaque.enableDepthPyramid && nuri::isValid(sceneDepthTexture) &&
+  const bool depthPyramidEnabled =
+      settings.opaque.enableDepthPyramid && nuri::isValid(sceneDepthTexture) &&
       nuri::isValid(depthPyramidPipelineHandle_) &&
-      sceneDepthPyramidLevelCount_ > 0u && !baseDrawItems.empty()) {
+      sceneDepthPyramidLevelCount_ > 0u && !baseDrawItems.empty();
+  if (depthPyramidEnabled) {
+    NURI_PROFILER_ZONE("OpaqueRenderer.depth_pyramid_build",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
     depthPyramidPushConstants_.clear();
     depthPyramidDrawItems_.clear();
     depthPyramidDependencyTextures_.clear();
@@ -2848,7 +3038,56 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     frame.metrics.opaque.depthPyramidLevels =
         saturateToU32(depthPyramidDrawItems_.size());
+    NURI_PROFILER_ZONE_END();
   }
+
+  const bool shouldLoadColor = settings.skybox.enabled;
+  NURI_PROFILER_ZONE("OpaqueRenderer.main_pass_finalize",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
+  PreparedGraphPass &pass =
+      out.emplace_back(drawItems_.get_allocator().resource());
+  pass.desc.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
+                     .storeOp = StoreOp::Store,
+                     .clearColor = {kClearColorWhite, kClearColorWhite,
+                                    kClearColorWhite, kClearColorWhite}};
+  pass.desc.depth = {.loadOp =
+                         depthPrepassEnabled ? LoadOp::Load : LoadOp::Clear,
+                     .storeOp = StoreOp::Store,
+                     .clearDepth = kClearDepthOne,
+                     .clearStencil = 0};
+  pass.depthTextureHandle = sceneDepthTexture;
+  if (!pickPassSubmitted && !depthPrepassEnabled) {
+    pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
+        preDispatches_.data(), preDispatches_.size());
+  }
+  pass.desc.dependencyBuffers = std::span<const BufferHandle>(
+      passDependencyBuffers_.data(), passDependencyBuffers_.size());
+  pass.desc.dependencyBufferAccessModes =
+      std::span<const RenderGraphAccessMode>(
+          passDependencyBufferAccessModes_.data(),
+          passDependencyBufferAccessModes_.size());
+  pass.desc.dependencyTextures = std::span<const TextureHandle>(
+      passDependencyTextures_.data(), passDependencyTextures_.size());
+  pass.desc.draws = finalPassDrawItems;
+  pass.desc.drawBuffersPreResolved = true;
+  pass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+      preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
+  pass.desc.debugLabel = kOpaqueMainPassLabel;
+  pass.desc.debugColor = kOpaquePassDebugColor;
+  pass.hasDraws = !finalPassDrawItems.empty();
+  pass.hasPreDispatch =
+      !pickPassSubmitted && !depthPrepassEnabled && !preDispatches_.empty();
+  pass.desc.borrowPayload = !pass.hasPreDispatch;
+  pass.hasIndirectDraws = hasIndirectBaseDraws;
+  pass.isMainPass = true;
+  if (!nuri::isValid(frame.sharedResources.sceneColorTexture)) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::buildOpaquePasses: scene color texture is "
+        "unavailable");
+  }
+  pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
+  frame.metrics.opaque.computeDispatches = saturateToU32(preDispatches_.size());
+  NURI_PROFILER_ZONE_END();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2910,8 +3149,24 @@ void OpaqueRenderer::cachePreparedGraphPassMetadata(PreparedGraphPass &) const {
 
 Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     RenderFrameContext &frame, RenderGraphBuilder &graph,
-    const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight) {
-  RenderGraphGraphicsPassDesc passDesc = pass.desc;
+    const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight,
+    std::span<const RenderGraphBufferId> preResolvedDrawBufferIds) {
+  RenderGraphPreparedGraphicsPassDesc passDesc{};
+  passDesc.color = pass.desc.color;
+  passDesc.hasColorAttachment = pass.desc.hasColorAttachment;
+  passDesc.depth = pass.desc.depth;
+  passDesc.useViewport = pass.desc.useViewport;
+  passDesc.viewport = pass.desc.viewport;
+  passDesc.preDispatches = pass.desc.preDispatches;
+  passDesc.dependencyBuffers = pass.desc.dependencyBuffers;
+  passDesc.draws = pass.desc.draws;
+  passDesc.drawBuffersPreResolved = pass.desc.drawBuffersPreResolved;
+  passDesc.debugLabel = pass.desc.debugLabel;
+  passDesc.debugColor = pass.desc.debugColor;
+  passDesc.markColorAsFrameOutput = pass.desc.markColorAsFrameOutput;
+  passDesc.markImplicitOutputSideEffect =
+      pass.desc.markImplicitOutputSideEffect;
+  passDesc.borrowPayload = pass.desc.borrowPayload;
 
   if (nuri::isValid(pass.colorTextureHandle)) {
     auto colorImportResult = graph.importTexture(pass.colorTextureHandle,
@@ -2930,7 +3185,147 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     }
     passDesc.depthTexture = depthImportResult.value();
   }
-  auto addResult = graph.addGraphicsPass(passDesc);
+
+  ScratchArena passBuildScratchArena;
+  ScopedScratch passBuildScratch(passBuildScratchArena);
+
+  std::pmr::vector<RenderGraphPreparedDependencyBufferBinding>
+      dependencyBufferBindings(passBuildScratch.resource());
+  dependencyBufferBindings.reserve(pass.desc.dependencyBuffers.size());
+  for (size_t i = 0; i < pass.desc.dependencyBuffers.size(); ++i) {
+    const BufferHandle dependency = pass.desc.dependencyBuffers[i];
+    if (!nuri::isValid(dependency)) {
+      continue;
+    }
+    const RenderGraphAccessMode accessMode =
+        pass.desc.dependencyBufferAccessModes.empty()
+            ? (RenderGraphAccessMode::Read | RenderGraphAccessMode::Write)
+            : pass.desc.dependencyBufferAccessModes[i];
+    auto importResult =
+        graph.importBuffer(dependency, "opaque_pass_dependency_buffer");
+    if (importResult.hasError()) {
+      return Result<bool, std::string>::makeError(importResult.error());
+    }
+    dependencyBufferBindings.push_back(
+        RenderGraphPreparedDependencyBufferBinding{
+            .dependencyIndex = static_cast<uint32_t>(i),
+            .buffer = importResult.value(),
+            .mode = accessMode,
+        });
+  }
+  passDesc.dependencyBufferBindings =
+      std::span<const RenderGraphPreparedDependencyBufferBinding>(
+          dependencyBufferBindings.data(), dependencyBufferBindings.size());
+
+  std::pmr::vector<RenderGraphPreparedDependencyTextureBinding>
+      dependencyTextureBindings(passBuildScratch.resource());
+  dependencyTextureBindings.reserve(pass.desc.dependencyTextures.size());
+  for (size_t i = 0; i < pass.desc.dependencyTextures.size(); ++i) {
+    const TextureHandle dependency = pass.desc.dependencyTextures[i];
+    if (!nuri::isValid(dependency)) {
+      continue;
+    }
+    const RenderGraphAccessMode accessMode =
+        pass.desc.dependencyTextureAccessModes.empty()
+            ? RenderGraphAccessMode::Read
+            : pass.desc.dependencyTextureAccessModes[i];
+    auto importResult =
+        graph.importTexture(dependency, "opaque_pass_dependency_texture");
+    if (importResult.hasError()) {
+      return Result<bool, std::string>::makeError(importResult.error());
+    }
+    dependencyTextureBindings.push_back(
+        RenderGraphPreparedDependencyTextureBinding{
+            .texture = importResult.value(),
+            .mode = accessMode,
+        });
+  }
+  passDesc.dependencyTextureBindings =
+      std::span<const RenderGraphPreparedDependencyTextureBinding>(
+          dependencyTextureBindings.data(), dependencyTextureBindings.size());
+
+  size_t preDispatchDependencyCount = 0u;
+  for (const ComputeDispatchItem &dispatch : pass.desc.preDispatches) {
+    preDispatchDependencyCount += dispatch.dependencyBuffers.size();
+  }
+  std::pmr::vector<RenderGraphPreparedPreDispatchDependencyBinding>
+      preDispatchDependencyBindings(passBuildScratch.resource());
+  preDispatchDependencyBindings.reserve(preDispatchDependencyCount);
+  for (size_t dispatchIndex = 0; dispatchIndex < pass.desc.preDispatches.size();
+       ++dispatchIndex) {
+    const ComputeDispatchItem &dispatch =
+        pass.desc.preDispatches[dispatchIndex];
+    for (size_t dependencyIndex = 0;
+         dependencyIndex < dispatch.dependencyBuffers.size();
+         ++dependencyIndex) {
+      const BufferHandle dependency =
+          dispatch.dependencyBuffers[dependencyIndex];
+      if (!nuri::isValid(dependency)) {
+        continue;
+      }
+      auto importResult = graph.importBuffer(
+          dependency, "opaque_pass_pre_dispatch_dependency_buffer");
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      preDispatchDependencyBindings.push_back(
+          RenderGraphPreparedPreDispatchDependencyBinding{
+              .preDispatchIndex = static_cast<uint32_t>(dispatchIndex),
+              .dependencyIndex = static_cast<uint32_t>(dependencyIndex),
+              .buffer = importResult.value(),
+              .mode =
+                  RenderGraphAccessMode::Read | RenderGraphAccessMode::Write,
+          });
+    }
+  }
+  passDesc.preDispatchDependencyBindings =
+      std::span<const RenderGraphPreparedPreDispatchDependencyBinding>(
+          preDispatchDependencyBindings.data(),
+          preDispatchDependencyBindings.size());
+
+  std::pmr::vector<RenderGraphPreparedDrawBufferBinding> drawBufferBindings(
+      passBuildScratch.resource());
+  if (pass.desc.drawBuffersPreResolved) {
+    passDesc.preResolvedDrawBufferIds = preResolvedDrawBufferIds;
+    passDesc.preResolvedDrawBuffers = pass.desc.preResolvedDrawBuffers;
+  } else {
+    drawBufferBindings.reserve(pass.desc.draws.size() * 4u);
+    for (size_t drawIndex = 0; drawIndex < pass.desc.draws.size();
+         ++drawIndex) {
+      const DrawItem &draw = pass.desc.draws[drawIndex];
+      const std::array<
+          std::pair<BufferHandle, RenderGraphDrawBufferBindingTarget>, 4>
+          bindings = {{
+              {draw.vertexBuffer, RenderGraphDrawBufferBindingTarget::Vertex},
+              {draw.indexBuffer, RenderGraphDrawBufferBindingTarget::Index},
+              {draw.indirectBuffer,
+               RenderGraphDrawBufferBindingTarget::Indirect},
+              {draw.indirectCountBuffer,
+               RenderGraphDrawBufferBindingTarget::IndirectCount},
+          }};
+      for (const auto &[buffer, target] : bindings) {
+        if (!nuri::isValid(buffer)) {
+          continue;
+        }
+        auto importResult =
+            graph.importBuffer(buffer, "opaque_pass_draw_buffer");
+        if (importResult.hasError()) {
+          return Result<bool, std::string>::makeError(importResult.error());
+        }
+        drawBufferBindings.push_back(RenderGraphPreparedDrawBufferBinding{
+            .drawIndex = static_cast<uint32_t>(drawIndex),
+            .target = target,
+            .buffer = importResult.value(),
+            .mode = RenderGraphAccessMode::Read,
+        });
+      }
+    }
+    passDesc.drawBufferBindings =
+        std::span<const RenderGraphPreparedDrawBufferBinding>(
+            drawBufferBindings.data(), drawBufferBindings.size());
+  }
+
+  auto addResult = graph.addPreparedGraphicsPass(passDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
@@ -3021,12 +3416,25 @@ OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
 
   NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_main_passes",
                      NURI_PROFILER_COLOR_CMD_DRAW);
-  for (const PreparedGraphPass &pass : preparedGraphPasses_) {
-    if (!pass.isDepthPrepass && !pass.isMainPass && !pass.isDepthPyramidPass) {
+  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds(
+      preparedGraphPasses_.get_allocator().resource());
+  preResolvedDrawBufferIds.reserve(preResolvedDrawBuffers_.size());
+  for (const BufferHandle handle : preResolvedDrawBuffers_) {
+    if (!nuri::isValid(handle)) {
       continue;
     }
-    auto appendResult =
-        appendPreparedGraphPass(frame, graph, pass, safeWidth, safeHeight);
+    auto importResult = graph.importBuffer(handle, "opaque_pass_draw_buffer");
+    if (importResult.hasError()) {
+      return Result<bool, std::string>::makeError(importResult.error());
+    }
+    preResolvedDrawBufferIds.push_back(importResult.value());
+  }
+  for (const PreparedGraphPass &pass : preparedGraphPasses_) {
+    if (pass.isPickPass) {
+      continue;
+    }
+    auto appendResult = appendPreparedGraphPass(
+        frame, graph, pass, safeWidth, safeHeight, preResolvedDrawBufferIds);
     if (appendResult.hasError()) {
       return appendResult;
     }
@@ -3049,12 +3457,25 @@ OpaqueRenderer::appendOpaquePickPasses(RenderFrameContext &frame,
 
   NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_pick_passes",
                      NURI_PROFILER_COLOR_CMD_DRAW);
+  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds(
+      preparedGraphPasses_.get_allocator().resource());
+  preResolvedDrawBufferIds.reserve(preResolvedDrawBuffers_.size());
+  for (const BufferHandle handle : preResolvedDrawBuffers_) {
+    if (!nuri::isValid(handle)) {
+      continue;
+    }
+    auto importResult = graph.importBuffer(handle, "opaque_pass_draw_buffer");
+    if (importResult.hasError()) {
+      return Result<bool, std::string>::makeError(importResult.error());
+    }
+    preResolvedDrawBufferIds.push_back(importResult.value());
+  }
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
     if (!pass.isPickPass) {
       continue;
     }
-    auto appendResult =
-        appendPreparedGraphPass(frame, graph, pass, safeWidth, safeHeight);
+    auto appendResult = appendPreparedGraphPass(
+        frame, graph, pass, safeWidth, safeHeight, preResolvedDrawBufferIds);
     if (appendResult.hasError()) {
       return appendResult;
     }
@@ -3213,6 +3634,7 @@ OpaqueRenderer::buildIndirectDraws(uint32_t frameSlot, size_t remapCount,
     invalidateIndirectPackCache();
     indirectDrawItems_.clear();
     indirectCommandUploadBytes_.clear();
+    currentIndirectDrawBufferSignature_ = kInvalidDrawSignature;
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -3415,6 +3837,8 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
 
     const BufferHandle indirectBufferHandle =
         indirectCommandRing_[frameSlot].buffer->handle();
+    uint64_t indirectBufferSignature =
+        hashBufferHandleSignature(kFnvOffsetBasis64, indirectBufferHandle);
 
     for (const IndirectGroup &group : indirectGroups) {
       if (group.commands.empty()) {
@@ -3462,6 +3886,8 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
                 &drawPushConstants_[group.sourceDrawIndex]),
             sizeof(PushConstants));
         indirectDrawItems_.push_back(indirectDraw);
+        indirectBufferSignature =
+            hashDrawBufferSignature(indirectBufferSignature, indirectDraw);
         indirectSourceDrawIndices_.push_back(group.sourceDrawIndex);
         indirectAlphaMasked_.push_back(
             group.sourceDrawIndex < drawAlphaMasked_.size()
@@ -3471,6 +3897,9 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
         commandCursor += drawCount;
       }
     }
+    currentIndirectDrawBufferSignature_ = indirectBufferSignature;
+  } else {
+    currentIndirectDrawBufferSignature_ = kInvalidDrawSignature;
   }
 
   const std::span<const std::byte> uploadBytes{
@@ -3499,6 +3928,8 @@ OpaqueRenderer::refreshCachedIndirectPack(uint32_t frameSlot,
   indirectAlphaMasked_.resize(indirectDrawItems_.size(), 0u);
   const BufferHandle indirectBufferHandle =
       indirectCommandRing_[frameSlot].buffer->handle();
+  uint64_t indirectBufferSignature =
+      hashBufferHandleSignature(kFnvOffsetBasis64, indirectBufferHandle);
   for (size_t i = 0; i < indirectSourceDrawIndices_.size(); ++i) {
     const size_t sourceIndex = indirectSourceDrawIndices_[i];
     if (sourceIndex >= drawPushConstants_.size()) {
@@ -3510,10 +3941,15 @@ OpaqueRenderer::refreshCachedIndirectPack(uint32_t frameSlot,
     indirectDrawItems_[i].pushConstants = std::span<const std::byte>(
         reinterpret_cast<const std::byte *>(&drawPushConstants_[sourceIndex]),
         sizeof(PushConstants));
+    indirectBufferSignature =
+        hashDrawBufferSignature(indirectBufferSignature, indirectDrawItems_[i]);
     indirectAlphaMasked_[i] = sourceIndex < drawAlphaMasked_.size()
                                   ? drawAlphaMasked_[sourceIndex]
                                   : 0u;
   }
+  currentIndirectDrawBufferSignature_ = indirectDrawItems_.empty()
+                                            ? kInvalidDrawSignature
+                                            : indirectBufferSignature;
 
   if (indirectUploadSignatures_[frameSlot] != drawSignature) {
     const std::span<const std::byte> uploadBytes{
@@ -3614,6 +4050,26 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string> OpaqueRenderer::ensureSceneDepthSampler() {
+  if (nuri::isValid(sceneDepthSampler_)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  auto samplerResult =
+      gpu_.createSampler(SamplerDesc{.minFilter = SamplerFilter::Nearest,
+                                     .magFilter = SamplerFilter::Nearest,
+                                     .mipMode = SamplerMipMode::Disabled,
+                                     .wrapU = SamplerWrapMode::Clamp,
+                                     .wrapV = SamplerWrapMode::Clamp,
+                                     .wrapW = SamplerWrapMode::Clamp},
+                         "scene_depth_nearest_clamp");
+  if (samplerResult.hasError()) {
+    return Result<bool, std::string>::makeError(samplerResult.error());
+  }
+  sceneDepthSampler_ = samplerResult.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
 Result<bool, std::string> OpaqueRenderer::ensureDepthPyramidTextures() {
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
@@ -3630,19 +4086,9 @@ Result<bool, std::string> OpaqueRenderer::ensureDepthPyramidTextures() {
     ++levelCount;
   }
 
-  if (!nuri::isValid(sceneDepthSampler_)) {
-    auto samplerResult =
-        gpu_.createSampler(SamplerDesc{.minFilter = SamplerFilter::Nearest,
-                                       .magFilter = SamplerFilter::Nearest,
-                                       .mipMode = SamplerMipMode::Disabled,
-                                       .wrapU = SamplerWrapMode::Clamp,
-                                       .wrapV = SamplerWrapMode::Clamp,
-                                       .wrapW = SamplerWrapMode::Clamp},
-                           "scene_depth_nearest_clamp");
-    if (samplerResult.hasError()) {
-      return Result<bool, std::string>::makeError(samplerResult.error());
-    }
-    sceneDepthSampler_ = samplerResult.value();
+  auto samplerResult = ensureSceneDepthSampler();
+  if (samplerResult.hasError()) {
+    return samplerResult;
   }
 
   const bool recreate = sceneDepthPyramidLevelCount_ != levelCount ||
@@ -4050,7 +4496,9 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
           .indexBuffer = geometry.indexBuffer,
           .indexBufferOffset = geometry.indexByteOffset,
           .baseVertexBuffer = geometry.vertexBuffer,
-          .vertexBuffer = {},
+          .vertexBuffer = geometry.vertexBuffer,
+          .baseVertexDecodeBuffer = model->vertexDecodeBuffer(),
+          .vertexDecodeBuffer = model->vertexDecodeBuffer(),
           .baseVertexBufferAddress = vertexBufferAddress,
           .baseVertexDecodeBufferAddress = model->vertexDecodeBufferAddress(),
           .vertexBufferAddress = vertexBufferAddress,
@@ -4432,7 +4880,6 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                         "opaque_mesh_depth_alpha_double_sided",
                         meshDepthAlphaDoubleSidedPipelineHandle_);
   }
-
   const bool canCreateTessPipeline =
       !tessellationUnsupported_ && nuri::isValid(meshTessVertexShader_) &&
       nuri::isValid(meshTessControlShader_) &&
@@ -4932,6 +5379,7 @@ void OpaqueRenderer::invalidateStaticBatchCache() {
   }
   staticBatchCache_.remapSignature = kInvalidDrawSignature;
   staticBatchCache_.indirectDrawSignature = kInvalidDrawSignature;
+  staticBatchCache_.drawBufferSignature = kInvalidDrawSignature;
   staticBatchCache_.draws.clear();
   staticBatchCache_.pushConstantsTemplates.clear();
   staticBatchCache_.alphaMasked.clear();
@@ -4962,6 +5410,7 @@ void OpaqueRenderer::invalidateIndirectPackCache() {
   indirectPackCache_.valid = false;
   indirectPackCache_.drawSignature = kInvalidDrawSignature;
   indirectPackCache_.requiredBytes = 0;
+  currentIndirectDrawBufferSignature_ = kInvalidDrawSignature;
   indirectSourceDrawIndices_.clear();
   indirectAlphaMasked_.clear();
   for (uint64_t &slotSignature : indirectUploadSignatures_) {

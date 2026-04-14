@@ -146,7 +146,6 @@ struct MtsdfParams {
   float edgeSoftness = 0.125f;
   float outlineWidth = 0.0f;
   float glow = 0.0f;
-  float shadow = 0.0f;
 };
 
 struct Text2DDesc {
