@@ -8,6 +8,7 @@
 #include "nuri/gfx/pipeline/features/composite_feature.h"
 #include "nuri/gfx/pipeline/features/debug_feature.h"
 #include "nuri/gfx/pipeline/features/opaque_feature.h"
+#include "nuri/gfx/pipeline/features/shadow_feature.h"
 #include "nuri/gfx/pipeline/features/skybox_feature.h"
 #include "nuri/gfx/pipeline/features/transmission_feature.h"
 #include "nuri/gfx/pipeline/features/transparent_feature.h"
@@ -255,6 +256,8 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
       getGPU(), pipelineMemoryResource()));
   renderPipeline_->addProvider(
       std::make_unique<SceneLightingProvider>(getGPU()));
+  renderPipeline_->addFeature(
+      std::make_unique<ShadowFeature>(getGPU(), pipelineMemoryResource()));
   renderPipeline_->addFeature(
       std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
   renderPipeline_->addFeature(std::make_unique<OpaqueFeature>(

@@ -56,7 +56,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 336,
+  static_assert(sizeof(FrameData) == 352,
                 "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
 

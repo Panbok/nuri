@@ -5,10 +5,13 @@
 #include "nuri/gfx/gpu_types.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/sim/animation_scene_frame_data.h"
+#include "nuri/scene/camera.h"
 #include "nuri/scene/light.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory_resource>
@@ -41,6 +44,19 @@ enum class ToneMapper : uint8_t {
   AgX = 1,
 };
 
+enum class ShadowFilterMode : uint8_t {
+  Hard = 0,
+  PCF3x3 = 1,
+  PoissonPCF = 2,
+  PCSS = 3,
+};
+
+enum class ShadowSdsmMode : uint8_t {
+  Disabled = 0,
+  PreviousFrameMinMax = 1,
+  Histogram = 2,
+};
+
 static constexpr float kDefaultToneMapExposureEv = 0.0f;
 static constexpr float kDefaultAcesExposureOffsetEv = 0.35f;
 static constexpr float kDefaultAgxExposureOffsetEv = -0.35f;
@@ -61,6 +77,8 @@ static constexpr Format kFrameCompositionSceneColorFormat =
 static constexpr Format kFrameCompositionFrameColorFormat =
     Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
+static constexpr uint32_t kMaxShadowCascades = 4u;
+static constexpr uint32_t kInvalidShadowBindlessIndex = 0xFFFFFFFFu;
 
 [[nodiscard]] constexpr uint8_t
 sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
@@ -136,6 +154,44 @@ struct RenderSettings {
     bool lightIcons = true;
   };
 
+  struct ShadowDebugSettings {
+    bool showCascadeFrusta = false;
+    bool showLightViewBounds = false;
+    bool showTexelGridSnap = false;
+    bool showShadowMapViewport = false;
+    bool showLightPerspectiveViewport = false;
+    uint32_t debugCascadeIndex = 0;
+    bool freezeCascades = false;
+    bool freezeLightView = false;
+    bool visualizeCascadeIndex = false;
+    bool visualizeShadowFactor = false;
+    bool visualizePCSSBlockers = false;
+    bool visualizeSDSMHistogram = false;
+  };
+
+  struct ShadowSettings {
+    bool enabled = false;
+    uint32_t cascadeCount = kMaxShadowCascades;
+    uint32_t shadowMapSize = 2048;
+    float maxDistance = 150.0f;
+    float splitLambda = 0.75f;
+    bool stabilizeCascades = true;
+    float cascadeBlendFraction = 0.08f;
+    float constantBias = 0.0005f;
+    float slopeBias = 1.5f;
+    float normalBias = 0.0f;
+    ShadowFilterMode filterMode = ShadowFilterMode::Hard;
+    uint32_t pcfSampleCount = 9;
+    uint32_t pcssBlockerSampleCount = 16;
+    uint32_t pcssFilterSampleCount = 32;
+    float pcssLightRadiusScale = 1.0f;
+    float pcssSearchRadiusClampTexels = 32.0f;
+    float pcssFilterRadiusClampTexels = 48.0f;
+    ShadowSdsmMode sdsmMode = ShadowSdsmMode::Disabled;
+    float sdsmTemporalBlend = 0.85f;
+    ShadowDebugSettings debug{};
+  };
+
   struct TransparentSettings {
     bool enabled = true;
   };
@@ -164,6 +220,7 @@ struct RenderSettings {
   TransmissionSettings transmission{};
   TransparentSettings transparent{};
   DebugSettings debug{};
+  ShadowSettings shadow{};
   TextureFilteringSettings textureFiltering{};
   ToneMapSettings toneMap{};
 };
@@ -178,6 +235,66 @@ inline void sanitizeToneMapSettings(RenderSettings::ToneMapSettings &settings) {
   settings.operator_ = sanitizeToneMapper(settings.operator_);
   settings.compareSplit = std::clamp(
       settings.compareSplit, kMinToneMapCompareSplit, kMaxToneMapCompareSplit);
+}
+
+[[nodiscard]] constexpr ShadowFilterMode
+sanitizeShadowFilterMode(ShadowFilterMode mode) noexcept {
+  switch (mode) {
+  case ShadowFilterMode::Hard:
+  case ShadowFilterMode::PCF3x3:
+  case ShadowFilterMode::PoissonPCF:
+  case ShadowFilterMode::PCSS:
+    return mode;
+  default:
+    return ShadowFilterMode::Hard;
+  }
+}
+
+[[nodiscard]] constexpr ShadowSdsmMode
+sanitizeShadowSdsmMode(ShadowSdsmMode mode) noexcept {
+  switch (mode) {
+  case ShadowSdsmMode::Disabled:
+  case ShadowSdsmMode::PreviousFrameMinMax:
+  case ShadowSdsmMode::Histogram:
+    return mode;
+  default:
+    return ShadowSdsmMode::Disabled;
+  }
+}
+
+inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
+  settings.cascadeCount =
+      std::clamp(settings.cascadeCount, 1u, kMaxShadowCascades);
+  settings.shadowMapSize = std::max(settings.shadowMapSize, 1u);
+  settings.maxDistance =
+      std::isfinite(settings.maxDistance) && settings.maxDistance > 0.0f
+          ? settings.maxDistance
+          : 150.0f;
+  settings.splitLambda = std::clamp(settings.splitLambda, 0.0f, 1.0f);
+  settings.cascadeBlendFraction =
+      std::clamp(settings.cascadeBlendFraction, 0.0f, 1.0f);
+  settings.filterMode = sanitizeShadowFilterMode(settings.filterMode);
+  settings.sdsmMode = sanitizeShadowSdsmMode(settings.sdsmMode);
+  settings.pcfSampleCount = std::max(settings.pcfSampleCount, 1u);
+  settings.pcssBlockerSampleCount =
+      std::max(settings.pcssBlockerSampleCount, 1u);
+  settings.pcssFilterSampleCount = std::max(settings.pcssFilterSampleCount, 1u);
+  settings.pcssLightRadiusScale =
+      std::isfinite(settings.pcssLightRadiusScale)
+          ? std::max(settings.pcssLightRadiusScale, 0.0f)
+          : 1.0f;
+  settings.pcssSearchRadiusClampTexels =
+      std::isfinite(settings.pcssSearchRadiusClampTexels)
+          ? std::max(settings.pcssSearchRadiusClampTexels, 0.0f)
+          : 32.0f;
+  settings.pcssFilterRadiusClampTexels =
+      std::isfinite(settings.pcssFilterRadiusClampTexels)
+          ? std::max(settings.pcssFilterRadiusClampTexels, 0.0f)
+          : 48.0f;
+  settings.sdsmTemporalBlend =
+      std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
+  settings.debug.debugCascadeIndex =
+      std::min(settings.debug.debugCascadeIndex, settings.cascadeCount - 1u);
 }
 
 [[nodiscard]] inline TextureFilterMode effectiveTextureFilterMode(
@@ -196,6 +313,86 @@ struct CameraFrameState {
   glm::mat4 proj{1.0f};
   glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
   float aspectRatio = 1.0f;
+  ProjectionType projectionType = ProjectionType::Perspective;
+  float nearPlane = 0.1f;
+  float farPlane = 1000.0f;
+  float fovYRadians = glm::radians(60.0f);
+  float orthoHeight = 10.0f;
+};
+
+[[nodiscard]] inline CameraFrameState makeCameraFrameState(const Camera &camera,
+                                                           float aspectRatio) {
+  CameraFrameState state{};
+  state.view = camera.viewMatrix();
+  state.proj = camera.projectionMatrix(aspectRatio);
+  state.cameraPos = glm::vec4(camera.position(), 1.0f);
+  state.aspectRatio = aspectRatio;
+  state.projectionType = camera.projectionType();
+  if (state.projectionType == ProjectionType::Orthographic) {
+    const OrthographicParams &ortho = camera.orthographic();
+    state.nearPlane = ortho.nearPlane;
+    state.farPlane = ortho.farPlane;
+    state.orthoHeight = ortho.height;
+  } else {
+    const PerspectiveParams &perspective = camera.perspective();
+    state.nearPlane = perspective.nearPlane;
+    state.farPlane = perspective.farPlane;
+    state.fovYRadians = perspective.fovYRadians;
+  }
+  return state;
+}
+
+struct alignas(16) ShadowCascadeGpuData {
+  glm::mat4 lightViewProj{1.0f};
+  glm::mat4 lightView{1.0f};
+  glm::vec4 splitDepthTexelSize{0.0f};
+  glm::vec4 uvScaleBias{1.0f, 1.0f, 0.0f, 0.0f};
+  glm::vec4 biasParams{0.0f};
+  glm::uvec4 textureSampler{kInvalidShadowBindlessIndex,
+                            kInvalidShadowBindlessIndex, 0u, 0u};
+};
+static_assert(sizeof(ShadowCascadeGpuData) == 192u,
+              "ShadowCascadeGpuData must match shader layout");
+
+struct alignas(16) ShadowFrameGpuData {
+  glm::uvec4 flagsCascadeCountLightIndex{0u};
+  glm::vec4 fadeParams{0.0f};
+  std::array<ShadowCascadeGpuData, kMaxShadowCascades> cascades{};
+};
+static_assert(sizeof(ShadowFrameGpuData) == 800u,
+              "ShadowFrameGpuData must match shader layout");
+
+struct ShadowFrameGpuDataHandle {
+  BufferHandle buffer{};
+  uint64_t bufferAddress = 0u;
+};
+
+struct ShadowCascadeDebugFrameData {
+  float splitNear = 0.0f;
+  float splitFar = 0.0f;
+  float texelWorldSize = 0.0f;
+  glm::mat4 lightView{1.0f};
+  glm::mat4 lightProj{1.0f};
+  glm::mat4 lightViewProj{1.0f};
+  glm::mat4 inverseLightView{1.0f};
+  glm::mat4 inverseLightProj{1.0f};
+  std::array<glm::vec4, 8> worldFrustumCorners{};
+  glm::vec4 lightSpaceBoundsMin{0.0f};
+  glm::vec4 lightSpaceBoundsMax{0.0f};
+  glm::vec4 unsnappedCenter{0.0f};
+  glm::vec4 snappedCenter{0.0f};
+  TextureHandle texture{};
+  uint32_t textureBindlessId = kInvalidShadowBindlessIndex;
+  uint32_t drawCount = 0u;
+  uint32_t reserved0 = 0u;
+};
+
+struct ShadowDebugFrameData {
+  LightId selectedShadowLightId = kInvalidLightId;
+  uint32_t cascadeCount = 0u;
+  uint32_t rawSamplerId = kInvalidShadowBindlessIndex;
+  uint32_t compareSamplerId = kInvalidShadowBindlessIndex;
+  std::array<ShadowCascadeDebugFrameData, kMaxShadowCascades> cascades{};
 };
 
 struct ForwardSceneFrameData {
@@ -228,6 +425,9 @@ struct ForwardSceneFrameData {
   uint64_t materialSpecularBufferAddress = 0;
   uint32_t directionalLightCount = 0;
   uint32_t localLightCount = 0;
+  uint64_t shadowFrameBufferAddress = 0;
+  uint32_t shadowFlags = 0;
+  uint32_t shadowReserved0 = 0;
 
   [[nodiscard]] bool
   operator==(const ForwardSceneFrameData &other) const noexcept {
@@ -239,7 +439,7 @@ struct ForwardSceneFrameData {
     return !(*this == other);
   }
 };
-static_assert(sizeof(ForwardSceneFrameData) == 336,
+static_assert(sizeof(ForwardSceneFrameData) == 352,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
 static_assert(offsetof(ForwardSceneFrameData, directionalLightBufferAddress) ==
               272u);
@@ -256,6 +456,9 @@ static_assert(offsetof(ForwardSceneFrameData, materialSpecularBufferAddress) ==
               320u);
 static_assert(offsetof(ForwardSceneFrameData, directionalLightCount) == 328u);
 static_assert(offsetof(ForwardSceneFrameData, localLightCount) == 332u);
+static_assert(offsetof(ForwardSceneFrameData, shadowFrameBufferAddress) ==
+              336u);
+static_assert(offsetof(ForwardSceneFrameData, shadowFlags) == 344u);
 
 // GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.
 // The CPU owns allocation and updates of ForwardSceneFrameData, then derives
@@ -268,8 +471,10 @@ struct ForwardSceneGpuData {
   uint64_t frameDataAddress = 0;
   uint64_t directionalLightBufferAddress = 0;
   uint64_t localLightBufferAddress = 0;
+  uint64_t shadowFrameBufferAddress = 0;
   uint32_t directionalLightCount = 0;
   uint32_t localLightCount = 0;
+  uint32_t shadowFlags = 0;
 };
 
 // Keep this one-to-one with ForwardSceneFrameData's material buffer address
@@ -388,6 +593,8 @@ struct FrameSharedResources {
   std::optional<ForwardSceneGpuData> forwardSceneGpuData{};
   std::optional<MaterialTableGpuData> materialTableGpuData{};
   std::optional<AnimationSceneFrameData> animationSceneGpuData{};
+  std::optional<ShadowFrameGpuDataHandle> shadowFrameGpuData{};
+  std::optional<ShadowDebugFrameData> shadowDebugFrameData{};
   FrameTextureRequirementFlags textureRequirements =
       kBaselineFrameTextureRequirements;
   TextureHandle sceneDepthTexture{};
@@ -396,6 +603,13 @@ struct FrameSharedResources {
       sceneDepthPyramidTextures{};
   std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidGraphTextures{};
+  std::array<TextureHandle, kMaxShadowCascades> shadowCascadeTextures{};
+  std::array<RenderGraphTextureId, kMaxShadowCascades>
+      shadowCascadeGraphTextures{};
+  TextureHandle shadowDebugPreviewTexture{};
+  RenderGraphTextureId shadowDebugPreviewGraphTexture{};
+  uint32_t shadowRawSamplerId = kInvalidShadowBindlessIndex;
+  uint32_t shadowCompareSamplerId = kInvalidShadowBindlessIndex;
   uint32_t sceneDepthPyramidLevelCount = 0;
   uint32_t sceneDepthSamplerId = 0;
   TextureHandle sceneColorTexture{};
@@ -409,6 +623,7 @@ struct FrameSharedResources {
   RenderGraphTextureId opaquePickGraphTexture{};
   RenderGraphTextureId opaquePickDepthGraphTexture{};
   std::optional<LightId> selectedLightId{};
+  std::optional<LightId> selectedShadowLightId{};
   bool transparentStageEnabled = false;
 };
 

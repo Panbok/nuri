@@ -239,6 +239,11 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       static_cast<size_t>(frame.frameIndex % sceneDataBuffers_.size());
   SlotUploadState &slotState = slotUploadStates_[slotIndex];
   const uint64_t sceneId = frame.scene->id();
+  const uint64_t shadowFrameBufferAddress =
+      ctx.shared.shadowFrameGpuData.has_value()
+          ? ctx.shared.shadowFrameGpuData->bufferAddress
+          : 0u;
+  const uint32_t shadowFlags = 0u;
 
   const ForwardSceneFrameData frameData{
       .view = frame.camera.view,
@@ -275,6 +280,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
           ctx.shared.materialTableGpuData->specularBufferAddress,
       .directionalLightCount = directionalLightCount,
       .localLightCount = localLightCount,
+      .shadowFrameBufferAddress = shadowFrameBufferAddress,
+      .shadowFlags = shadowFlags,
+      .shadowReserved0 = 0u,
   };
 
   if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() ||
@@ -286,8 +294,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
         "frameData=0x%llx "
         "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "
         "materialClearcoat=0x%llx materialSheen=0x%llx "
-        "materialTransmission=0x%llx materialSpecular=0x%llx flags=0x%08x "
-        "dirCount=%u localCount=%u",
+        "materialTransmission=0x%llx materialSpecular=0x%llx shadow=0x%llx "
+        "flags=0x%08x shadowFlags=0x%08x dirCount=%u localCount=%u",
         static_cast<unsigned long long>(sceneDataBaseAddress),
         static_cast<unsigned long long>(sceneDataBaseAddress +
                                         layout.frameDataOffset),
@@ -301,7 +309,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
             frameData.materialTransmissionBufferAddress),
         static_cast<unsigned long long>(
             frameData.materialSpecularBufferAddress),
-        frameData.flags, frameData.directionalLightCount,
+        static_cast<unsigned long long>(frameData.shadowFrameBufferAddress),
+        frameData.flags, frameData.shadowFlags, frameData.directionalLightCount,
         frameData.localLightCount);
   }
 
@@ -358,8 +367,10 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .frameDataAddress = sceneDataBaseAddress + layout.frameDataOffset,
       .directionalLightBufferAddress = directionalLightBufferAddress,
       .localLightBufferAddress = localLightBufferAddress,
+      .shadowFrameBufferAddress = shadowFrameBufferAddress,
       .directionalLightCount = directionalLightCount,
       .localLightCount = localLightCount,
+      .shadowFlags = shadowFlags,
   };
 
   return Result<bool, std::string>::makeResult(true);

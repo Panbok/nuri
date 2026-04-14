@@ -16,6 +16,7 @@ const uint kSceneDepthPyramidTexIdPackWidth = 4u;
 const uint kSceneDepthPyramidArraySize =
     (kMaxSceneDepthPyramidLevels + kSceneDepthPyramidTexIdPackWidth - 1u) /
     kSceneDepthPyramidTexIdPackWidth;
+const uint kMaxShadowCascades = 4u;
 
 const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
 const uint kMaterialFeatureSheen = 1u << 1u;
@@ -156,12 +157,27 @@ struct LocalLightGpuData {
   uvec4 innerCosTypeEnabledReserved;
 };
 
+struct ShadowCascadeGpuData {
+  mat4 lightViewProj;
+  mat4 lightView;
+  vec4 splitDepthTexelSize;
+  vec4 uvScaleBias;
+  vec4 biasParams;
+  uvec4 textureSampler;
+};
+
 layout(std430, buffer_reference) readonly buffer DirectionalLightBuffer {
   DirectionalLightGpuData lights[];
 };
 
 layout(std430, buffer_reference) readonly buffer LocalLightBuffer {
   LocalLightGpuData lights[];
+};
+
+layout(std430, buffer_reference) readonly buffer ShadowFrameBuffer {
+  uvec4 flagsCascadeCountLightIndex;
+  vec4 fadeParams;
+  ShadowCascadeGpuData cascades[kMaxShadowCascades];
 };
 
 layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
@@ -194,6 +210,9 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   MaterialSpecularBuffer materialSpecularBuffer;
   uint directionalLightCount;
   uint localLightCount;
+  ShadowFrameBuffer shadowFrameBuffer;
+  uint shadowFlags;
+  uint shadowReserved0;
 };
 
 uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {

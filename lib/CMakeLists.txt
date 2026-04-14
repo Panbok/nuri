@@ -16,9 +16,11 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/debug_draw_3d.cpp
   nuri/gfx/renderers/debug_renderer.cpp
   nuri/gfx/renderers/opaque_renderer.cpp
+  nuri/gfx/renderers/shadow_renderer.cpp
   nuri/gfx/pipeline/features/composite_feature.cpp
   nuri/gfx/pipeline/features/debug_feature.cpp
   nuri/gfx/pipeline/features/opaque_feature.cpp
+  nuri/gfx/pipeline/features/shadow_feature.cpp
   nuri/gfx/pipeline/features/skybox_feature.cpp
   nuri/gfx/pipeline/features/text_feature.cpp
   nuri/gfx/pipeline/features/transmission_feature.cpp
