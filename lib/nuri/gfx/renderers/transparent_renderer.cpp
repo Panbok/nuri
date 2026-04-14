@@ -643,7 +643,7 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
       !drawPushConstants_.empty()) {
     loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
     const PushConstants &probe = drawPushConstants_.front();
-    NURI_LOG_WARNING(
+    NURI_LOG_DEBUG(
         "TransparentRenderer::prepareTransparentPasses probe: "
         "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
         "instanceMatrices=0x%llx instanceRemap=0x%llx "
@@ -1037,12 +1037,11 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  static uint32_t loggedContributorCollections = 0u;
-  if (loggedContributorCollections < 16u) {
-    NURI_LOG_WARNING("TransparentRenderer::collectContributorDraws: frame=%llu "
-                     "collectorCount=%zu",
-                     static_cast<unsigned long long>(frame.frameIndex),
-                     frame.transparentContributors.collectors().size());
+  if (loggedContributorCollections_ < 16u) {
+    NURI_LOG_DEBUG("TransparentRenderer::collectContributorDraws: frame=%llu "
+                   "collectorCount=%zu",
+                   static_cast<unsigned long long>(frame.frameIndex),
+                   frame.transparentContributors.collectors().size());
   }
 
   for (const TransparentContributionCollector &collector :
@@ -1085,14 +1084,14 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
         saturateToU32(contribution.fixedDraws.size());
   }
 
-  if (loggedContributorCollections < 16u) {
-    NURI_LOG_WARNING(
+  if (loggedContributorCollections_ < 16u) {
+    NURI_LOG_DEBUG(
         "TransparentRenderer::collectContributorDraws result: frame=%llu "
         "sortable=%zu fixed=%zu textures=%zu",
         static_cast<unsigned long long>(frame.frameIndex),
         contributorSortableDraws_.size(), contributorFixedDraws_.size(),
         contributorTextureReads_.size());
-    ++loggedContributorCollections;
+    ++loggedContributorCollections_;
   }
 
   return Result<bool, std::string>::makeResult(true);
@@ -1280,6 +1279,7 @@ void TransparentRenderer::resetCachedState() {
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   loggedMaterialFallbackWarning_ = false;
+  loggedContributorCollections_ = 0u;
   loggedAddressProbeTopologyVersion_ = std::numeric_limits<uint64_t>::max();
 
   meshDrawTemplates_.clear();

@@ -509,7 +509,7 @@ MaterialSpecularGpuData defaultMaterialSpecularData() {
   return data;
 }
 
-MaterialData loadMaterialData(uint materialIndex) {
+MaterialData loadMaterialDataCore(uint materialIndex, bool includeTransmission) {
   MaterialData material;
   material.clearcoat = defaultMaterialClearcoatData();
   material.sheen = defaultMaterialSheenData();
@@ -521,6 +521,7 @@ MaterialData loadMaterialData(uint materialIndex) {
   material.hasSheen =
       material.header.sheenExtensionIndex != kInvalidMaterialExtensionIndex;
   material.hasTransmission =
+      includeTransmission &&
       material.header.transmissionExtensionIndex !=
       kInvalidMaterialExtensionIndex;
   material.hasSpecular =
@@ -546,35 +547,12 @@ MaterialData loadMaterialData(uint materialIndex) {
   return material;
 }
 
-MaterialData loadMaterialDataWithoutTransmission(uint materialIndex) {
-  MaterialData material;
-  material.clearcoat = defaultMaterialClearcoatData();
-  material.sheen = defaultMaterialSheenData();
-  material.transmission = defaultMaterialTransmissionData();
-  material.specular = defaultMaterialSpecularData();
-  material.header = pc.frameData.materialHeaderBuffer.materials[materialIndex];
-  material.hasClearcoat =
-      material.header.clearcoatExtensionIndex != kInvalidMaterialExtensionIndex;
-  material.hasSheen =
-      material.header.sheenExtensionIndex != kInvalidMaterialExtensionIndex;
-  material.hasTransmission = false;
-  material.hasSpecular =
-      material.header.specularExtensionIndex != kInvalidMaterialExtensionIndex;
+MaterialData loadMaterialData(uint materialIndex) {
+  return loadMaterialDataCore(materialIndex, true);
+}
 
-  if (material.hasClearcoat) {
-    material.clearcoat = pc.frameData.materialClearcoatBuffer.materials
-        [material.header.clearcoatExtensionIndex];
-  }
-  if (material.hasSheen) {
-    material.sheen =
-        pc.frameData.materialSheenBuffer.materials[material.header
-                                                       .sheenExtensionIndex];
-  }
-  if (material.hasSpecular) {
-    material.specular = pc.frameData.materialSpecularBuffer.materials
-        [material.header.specularExtensionIndex];
-  }
-  return material;
+MaterialData loadMaterialDataWithoutTransmission(uint materialIndex) {
+  return loadMaterialDataCore(materialIndex, false);
 }
 
 void disableMaterialTextures(inout MaterialData material) {

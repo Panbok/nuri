@@ -534,9 +534,11 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
             "buffer is invalid");
       }
 
-      BufferHandle vertexBuffer = entry.baseVertexBuffer;
+      BufferHandle vertexBuffer = nuri::isValid(entry.vertexBuffer)
+                                      ? entry.vertexBuffer
+                                      : entry.baseVertexBuffer;
       uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
-          entry.baseVertexBuffer, entry.vertexBufferByteOffset);
+          vertexBuffer, entry.vertexBufferByteOffset);
       uint64_t vertexDecodeBufferAddress =
           nuri::isValid(entry.baseVertexDecodeBuffer)
               ? gpu_.getBufferDeviceAddress(entry.baseVertexDecodeBuffer)
@@ -579,7 +581,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
 
       const glm::vec3 transmissionScale = transmissionScaleForDraw(
           renderables[entry.instanceIndex], *entry.submesh);
-      meshPushConstants_.push_back(MeshPushConstants{
+      MeshPushConstants constants{
           .frameDataAddress = frameDataAddress,
           .vertexBufferAddress = vertexBufferAddress,
           .vertexDecodeBufferAddress = vertexDecodeBufferAddress,
@@ -592,13 +594,11 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           .vertexDecodeIndex = vertexDecodeIndex,
           .packedVertexFormat = packedVertexFormat,
           .timeSeconds = static_cast<float>(frame.timeSeconds),
-          // Transmission reuses unused tessellation slots for per-draw scale.
-          .tessNearDistance = transmissionScale.x,
-          .tessFarDistance = transmissionScale.y,
-          .tessMinFactor = transmissionScale.z,
           .tessMaxFactor = 1.0f,
           .debugVisualizationMode = debugFlags,
-      });
+      };
+      constants.setTransmissionScale(transmissionScale);
+      meshPushConstants_.push_back(constants);
       const MeshPushConstants &pc = meshPushConstants_.back();
 
       DrawItem draw{};
@@ -637,7 +637,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
         !meshPushConstants_.empty()) {
       loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
       const MeshPushConstants &probe = meshPushConstants_.front();
-      NURI_LOG_WARNING(
+      NURI_LOG_DEBUG(
           "TransmissionRenderer::prepareTransmissionPasses probe: "
           "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
           "instanceMatrices=0x%llx instanceRemap=0x%llx "

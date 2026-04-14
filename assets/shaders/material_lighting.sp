@@ -310,8 +310,7 @@ DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
     DirectionalLightGpuData light =
         pc.frameData.directionalLightBuffer.lights[i];
     vec3 l = normalize(-directionalLightDirection(light));
-    vec3 lr = directionalLightColor(light) * directionalLightIlluminance(light) *
-              1.0;
+    vec3 lr = directionalLightColor(light) * directionalLightIlluminance(light);
     accumulateSurfaceLightContribution(lr, l, sm, r.directDiffuse,
                                        r.directSpecular, r.directSheen,
                                        r.clearcoatDirectLighting);

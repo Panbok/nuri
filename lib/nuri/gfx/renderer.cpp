@@ -76,8 +76,7 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }
-  auto endResult = endFrameSequence(frameContext.frameIndex);
-  return endResult;
+  return endFrameSequence(frameContext.frameIndex);
 }
 
 Result<bool, std::string> Renderer::beginFrameSequence(uint64_t frameIndex) {

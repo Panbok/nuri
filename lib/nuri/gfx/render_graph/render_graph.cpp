@@ -2650,6 +2650,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t drawCount = 0u;
     uint32_t drawBindingOffset = 0u;
     uint32_t drawOutputOffset = 0u;
+    uint32_t quantizedDrawCount = 0u;
     uint32_t unresolvedTextureOffset = 0u;
     uint32_t unresolvedTextureCount = 0u;
     uint32_t unresolvedDependencyOffset = 0u;
@@ -3054,12 +3055,36 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         static_cast<uint32_t>(totalPreDispatchDependencySlots);
     totalPreDispatchDependencySlots += plan.preDispatchDependencyCount;
     if (plan.unresolvedDrawCount != 0u) {
+      if (totalDrawItems > UINT32_MAX) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: draw item output offset exceeds "
+            "uint32_t range");
+      }
       plan.drawOutputOffset = static_cast<uint32_t>(totalDrawItems);
       const uint64_t quantizedCount =
           quantizeToNextPow2(static_cast<uint64_t>(plan.drawCount));
+      if (quantizedCount > UINT32_MAX) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: quantized draw count exceeds "
+            "uint32_t range");
+      }
+      if (quantizedCount >
+          static_cast<uint64_t>(std::numeric_limits<size_t>::max() -
+                                totalDrawItems)) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: total draw item count overflow");
+      }
+      if (quantizedCount > static_cast<uint64_t>(UINT32_MAX) -
+                               static_cast<uint64_t>(totalDrawItems)) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: total draw item count exceeds "
+            "uint32_t range");
+      }
+      plan.quantizedDrawCount = static_cast<uint32_t>(quantizedCount);
       totalDrawItems += static_cast<size_t>(quantizedCount);
     } else {
       plan.drawOutputOffset = 0u;
+      plan.quantizedDrawCount = 0u;
     }
     plan.unresolvedTextureOffset =
         static_cast<uint32_t>(totalUnresolvedTextureBindings);
@@ -3250,10 +3275,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         compiled.drawRangesByPass[orderedPassIndex] = {};
         resolvedPass.draws = sourcePass.draws;
       } else {
-        const uint32_t quantizedDrawCount = static_cast<uint32_t>(
-            quantizeToNextPow2(static_cast<uint64_t>(plan.drawCount)));
         compiled.drawRangesByPass[orderedPassIndex] = {
-            .offset = plan.drawOutputOffset, .count = quantizedDrawCount};
+            .offset = plan.drawOutputOffset, .count = plan.quantizedDrawCount};
         uint32_t unresolvedDrawWriteOffset = plan.unresolvedDrawOffset;
         for (uint32_t drawIndex = 0; drawIndex < plan.drawCount; ++drawIndex) {
           const DrawItem &sourceDraw = sourcePass.draws[drawIndex];

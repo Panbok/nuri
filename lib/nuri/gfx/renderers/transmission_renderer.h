@@ -70,11 +70,19 @@ private:
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     float timeSeconds = 0.0f;
+    // Transmission fragment shading aliases these tessellation slots as
+    // per-draw model scale to keep the push-constant layout shader-compatible.
     float tessNearDistance = 1.0f;
     float tessFarDistance = 8.0f;
     float tessMinFactor = 1.0f;
     float tessMaxFactor = 1.0f;
     uint32_t debugVisualizationMode = 0;
+
+    void setTransmissionScale(const glm::vec3 &scale) noexcept {
+      tessNearDistance = scale.x;
+      tessFarDistance = scale.y;
+      tessMinFactor = scale.z;
+    }
   };
   static_assert(
       sizeof(MeshPushConstants) <= 128,
@@ -86,6 +94,10 @@ private:
     uint32_t submeshIndex = 0;
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
+    // base* handles are unresolved source buffers captured from geometry;
+    // vertexBuffer/vertexBufferByteOffset describe the intended binding/view.
+    // GPU virtual addresses are resolved later during pass preparation after
+    // resource binding/animation overrides are known.
     BufferHandle baseVertexBuffer{};
     uint64_t vertexBufferByteOffset = 0;
     BufferHandle vertexBuffer{};

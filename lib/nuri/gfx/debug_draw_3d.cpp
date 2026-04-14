@@ -54,12 +54,18 @@ resolveMemoryResource(std::pmr::memory_resource *memoryResource) {
 DebugDraw3D::DebugDraw3D(GPUDevice &gpu,
                          std::pmr::memory_resource *memoryResource)
     : gpu_(gpu), lines_(resolveMemoryResource(memoryResource)),
-      frameBuffers_(resolveMemoryResource(memoryResource)) {}
+      frameBuffers_(resolveMemoryResource(memoryResource)),
+      pendingBufferDeletes_(resolveMemoryResource(memoryResource)) {}
 
 DebugDraw3D::~DebugDraw3D() {
   for (const FrameBufferState &frame : frameBuffers_) {
     if (nuri::isValid(frame.buffer)) {
       gpu_.destroyBuffer(frame.buffer);
+    }
+  }
+  for (const PendingBufferDelete &pending : pendingBufferDeletes_) {
+    if (nuri::isValid(pending.buffer)) {
+      gpu_.destroyBuffer(pending.buffer);
     }
   }
 
@@ -299,53 +305,73 @@ Result<bool, std::string> DebugDraw3D::ensurePipeline(Format colorFormat,
   return Result<bool, std::string>::makeResult(true);
 }
 
-void DebugDraw3D::syncFrameBufferCount(uint32_t swapchainImageCount) {
+void DebugDraw3D::syncFrameBufferCount(uint32_t swapchainImageCount,
+                                       uint64_t frameIndex) {
   const uint32_t imageCount = std::max(1u, swapchainImageCount);
   if (frameBuffers_.size() == imageCount) {
     return;
   }
 
-  bool hasLiveBuffers = false;
   for (const FrameBufferState &frame : frameBuffers_) {
     if (nuri::isValid(frame.buffer)) {
-      hasLiveBuffers = true;
-      break;
-    }
-  }
-  if (hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
-
-  for (const FrameBufferState &frame : frameBuffers_) {
-    if (nuri::isValid(frame.buffer)) {
-      gpu_.destroyBuffer(frame.buffer);
+      deferBufferDestroy(frame.buffer, frameIndex);
     }
   }
 
   frameBuffers_.assign(imageCount, FrameBufferState{});
 }
 
+void DebugDraw3D::deferBufferDestroy(BufferHandle buffer, uint64_t frameIndex) {
+  if (!nuri::isValid(buffer)) {
+    return;
+  }
+  const uint64_t retireLag =
+      static_cast<uint64_t>(std::max(1u, gpu_.getSwapchainImageCount())) + 1u;
+  pendingBufferDeletes_.push_back(PendingBufferDelete{
+      .buffer = buffer, .retireAfterFrame = frameIndex + retireLag});
+}
+
+void DebugDraw3D::processPendingBufferDeletes(uint64_t completedFrameIndex) {
+  size_t writeIndex = 0;
+  for (size_t readIndex = 0; readIndex < pendingBufferDeletes_.size();
+       ++readIndex) {
+    const PendingBufferDelete pending = pendingBufferDeletes_[readIndex];
+    if (completedFrameIndex >= pending.retireAfterFrame) {
+      if (nuri::isValid(pending.buffer)) {
+        gpu_.destroyBuffer(pending.buffer);
+      }
+      continue;
+    }
+    if (writeIndex != readIndex) {
+      pendingBufferDeletes_[writeIndex] = pending;
+    }
+    ++writeIndex;
+  }
+  pendingBufferDeletes_.resize(writeIndex);
+}
+
 Result<bool, std::string>
-DebugDraw3D::ensureLineBufferCapacity(uint64_t frameIndex,
+DebugDraw3D::ensureLineBufferCapacity(uint64_t frameSlot, uint64_t frameIndex,
                                       size_t requiredSize) {
-  if (frameIndex >= frameBuffers_.size()) {
+  if (frameSlot >= frameBuffers_.size()) {
     return Result<bool, std::string>::makeError(
         "DebugDraw3D: frame index out of range");
   }
 
-  FrameBufferState &frame = frameBuffers_[static_cast<size_t>(frameIndex)];
+  FrameBufferState &frame = frameBuffers_[static_cast<size_t>(frameSlot)];
   if (nuri::isValid(frame.buffer) && frame.capacityBytes >= requiredSize) {
     return Result<bool, std::string>::makeResult(true);
   }
 
+  const size_t previousCapacity = frame.capacityBytes;
   if (nuri::isValid(frame.buffer)) {
-    gpu_.waitIdle();
-    gpu_.destroyBuffer(frame.buffer);
+    deferBufferDestroy(frame.buffer, frameIndex);
     frame.buffer = BufferHandle{};
+    frame.capacityBytes = 0;
   }
 
   const size_t newSize =
-      std::max({requiredSize, frame.capacityBytes * 2, size_t{1}});
+      std::max({requiredSize, previousCapacity * 2, size_t{1}});
   auto bufferResult = gpu_.createBuffer(
       BufferDesc{
           .usage = BufferUsage::Storage | BufferUsage::Vertex,
@@ -391,7 +417,8 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
         "DebugDraw3D: vertex count exceeds uint32_t range");
   }
 
-  syncFrameBufferCount(gpu_.getSwapchainImageCount());
+  syncFrameBufferCount(gpu_.getSwapchainImageCount(), frameIndexValue);
+  processPendingBufferDeletes(frameIndexValue);
 
   const uint64_t imageCount = static_cast<uint64_t>(frameBuffers_.size());
   // Use the renderer's logical frame index here as well to avoid forcing a
@@ -400,7 +427,8 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
   const size_t frameSlot = static_cast<size_t>(frameIndex);
   const size_t requiredBytes = lines_.size() * sizeof(LineData);
 
-  auto lineBufferResult = ensureLineBufferCapacity(frameIndex, requiredBytes);
+  auto lineBufferResult =
+      ensureLineBufferCapacity(frameIndex, frameIndexValue, requiredBytes);
   if (lineBufferResult.hasError()) {
     return Result<PreparedGraphPass, std::string>::makeError(
         lineBufferResult.error());

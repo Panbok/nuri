@@ -77,6 +77,29 @@ resolveMemoryResource(std::pmr::memory_resource *memory) {
   return memory != nullptr ? memory : std::pmr::get_default_resource();
 }
 
+Result<std::pmr::vector<RenderGraphBufferId>, std::string>
+importPreResolvedBuffers(RenderGraphBuilder &graph,
+                         std::span<const BufferHandle> buffers,
+                         std::pmr::memory_resource *memory,
+                         std::string_view debugName) {
+  std::pmr::vector<RenderGraphBufferId> bufferIds(
+      resolveMemoryResource(memory));
+  bufferIds.reserve(buffers.size());
+  for (const BufferHandle handle : buffers) {
+    if (!nuri::isValid(handle)) {
+      continue;
+    }
+    auto importResult = graph.importBuffer(handle, debugName);
+    if (importResult.hasError()) {
+      return Result<std::pmr::vector<RenderGraphBufferId>,
+                    std::string>::makeError(importResult.error());
+    }
+    bufferIds.push_back(importResult.value());
+  }
+  return Result<std::pmr::vector<RenderGraphBufferId>, std::string>::makeResult(
+      std::move(bufferIds));
+}
+
 const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
   static const RenderSettings kDefaultSettings{};
   return frame.settings ? *frame.settings : kDefaultSettings;
@@ -2791,7 +2814,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             ? frame.sharedResources.materialTableGpuData
                   ->transmissionBufferAddress
             : 0u;
-    NURI_LOG_WARNING(
+    NURI_LOG_DEBUG(
         "OpaqueRenderer::buildOpaquePasses main probe: "
         "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
         "instanceMatrices=0x%llx instanceRemap=0x%llx "
@@ -3198,9 +3221,9 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
       continue;
     }
     const RenderGraphAccessMode accessMode =
-        pass.desc.dependencyBufferAccessModes.empty()
-            ? (RenderGraphAccessMode::Read | RenderGraphAccessMode::Write)
-            : pass.desc.dependencyBufferAccessModes[i];
+        i < pass.desc.dependencyBufferAccessModes.size()
+            ? pass.desc.dependencyBufferAccessModes[i]
+            : (RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
     auto importResult =
         graph.importBuffer(dependency, "opaque_pass_dependency_buffer");
     if (importResult.hasError()) {
@@ -3226,9 +3249,9 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
       continue;
     }
     const RenderGraphAccessMode accessMode =
-        pass.desc.dependencyTextureAccessModes.empty()
-            ? RenderGraphAccessMode::Read
-            : pass.desc.dependencyTextureAccessModes[i];
+        i < pass.desc.dependencyTextureAccessModes.size()
+            ? pass.desc.dependencyTextureAccessModes[i]
+            : RenderGraphAccessMode::Read;
     auto importResult =
         graph.importTexture(dependency, "opaque_pass_dependency_texture");
     if (importResult.hasError()) {
@@ -3416,19 +3439,18 @@ OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
 
   NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_main_passes",
                      NURI_PROFILER_COLOR_CMD_DRAW);
-  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds(
-      preparedGraphPasses_.get_allocator().resource());
-  preResolvedDrawBufferIds.reserve(preResolvedDrawBuffers_.size());
-  for (const BufferHandle handle : preResolvedDrawBuffers_) {
-    if (!nuri::isValid(handle)) {
-      continue;
-    }
-    auto importResult = graph.importBuffer(handle, "opaque_pass_draw_buffer");
-    if (importResult.hasError()) {
-      return Result<bool, std::string>::makeError(importResult.error());
-    }
-    preResolvedDrawBufferIds.push_back(importResult.value());
+  auto preResolvedDrawBufferIdsResult = importPreResolvedBuffers(
+      graph,
+      std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
+                                    preResolvedDrawBuffers_.size()),
+      preparedGraphPasses_.get_allocator().resource(),
+      "opaque_pass_draw_buffer");
+  if (preResolvedDrawBufferIdsResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        preResolvedDrawBufferIdsResult.error());
   }
+  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds =
+      std::move(preResolvedDrawBufferIdsResult).value();
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
     if (pass.isPickPass) {
       continue;
@@ -3457,19 +3479,18 @@ OpaqueRenderer::appendOpaquePickPasses(RenderFrameContext &frame,
 
   NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_pick_passes",
                      NURI_PROFILER_COLOR_CMD_DRAW);
-  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds(
-      preparedGraphPasses_.get_allocator().resource());
-  preResolvedDrawBufferIds.reserve(preResolvedDrawBuffers_.size());
-  for (const BufferHandle handle : preResolvedDrawBuffers_) {
-    if (!nuri::isValid(handle)) {
-      continue;
-    }
-    auto importResult = graph.importBuffer(handle, "opaque_pass_draw_buffer");
-    if (importResult.hasError()) {
-      return Result<bool, std::string>::makeError(importResult.error());
-    }
-    preResolvedDrawBufferIds.push_back(importResult.value());
+  auto preResolvedDrawBufferIdsResult = importPreResolvedBuffers(
+      graph,
+      std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
+                                    preResolvedDrawBuffers_.size()),
+      preparedGraphPasses_.get_allocator().resource(),
+      "opaque_pass_draw_buffer");
+  if (preResolvedDrawBufferIdsResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        preResolvedDrawBufferIdsResult.error());
   }
+  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds =
+      std::move(preResolvedDrawBufferIdsResult).value();
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
     if (!pass.isPickPass) {
       continue;

@@ -179,12 +179,6 @@ vec3 transmissionSafeSpecular(vec3 n, vec3 v, vec3 l, vec3 f0, vec3 f90,
   }
 
   vec3 reflected = reflect(-l, n);
-  float reflectedLenSq = dot(reflected, reflected);
-  if (reflectedLenSq <= kEpsilon) {
-    return vec3(0.0);
-  }
-  reflected *= inversesqrt(reflectedLenSq);
-
   float rv = max(dot(reflected, v), 0.0);
   float exponent = mix(48.0, 4.0, clamp(roughness, 0.0, 1.0));
   float lobe = pow(rv, exponent);
@@ -205,12 +199,9 @@ vec3 transmissionSafeDirectTransmission(vec3 n, vec3 v, vec3 pointToLight,
   float refractedLenSq = dot(refracted, refracted);
   if (refractedLenSq <= kEpsilon) {
     refracted = -v;
-    refractedLenSq = dot(refracted, refracted);
-    if (refractedLenSq <= kEpsilon) {
-      return vec3(0.0);
-    }
+  } else {
+    refracted *= inversesqrt(refractedLenSq);
   }
-  refracted *= inversesqrt(refractedLenSq);
 
   float facing = max(dot(refracted, lightDir), 0.0);
   float exponent = mix(24.0, 3.0, clamp(roughness, 0.0, 1.0));
@@ -286,11 +277,10 @@ DirectLightingResult evaluateTransmissionDirectLighting(ShadedMaterial sm,
 
 void main() {
   const MaterialData material = loadMaterialData(pc.materialIndex);
-  const MaterialData sampledMaterial = material;
   const uint alphaMode = materialAlphaMode(material);
   const uint featureMask = materialFeatureMask(material);
 
-  ShadedMaterial sm = evaluateMaterial(sampledMaterial, vtx);
+  ShadedMaterial sm = evaluateMaterial(material, vtx);
 
   const float alphaCutoff = materialAlphaCutoff(material);
   if (alphaMode == kAlphaModeMask && sm.baseColor.a < alphaCutoff) {
@@ -304,14 +294,14 @@ void main() {
 
   // Transmission-specific material fields ----------------------------
   const uint matSampler = pc.frameData.materialSamplerId;
-  const uint transmissionTexId = getMaterialTextureIndex(
-      sampledMaterial, kMaterialTextureSlotTransmission);
+  const uint transmissionTexId =
+      getMaterialTextureIndex(material, kMaterialTextureSlotTransmission);
   const uint thicknessTexId =
-      getMaterialTextureIndex(sampledMaterial, kMaterialTextureSlotThickness);
+      getMaterialTextureIndex(material, kMaterialTextureSlotThickness);
   const vec2 uvTransmission =
-      transformedUv(sampledMaterial, vtx, kMaterialTextureSlotTransmission);
+      transformedUv(material, vtx, kMaterialTextureSlotTransmission);
   const vec2 uvThickness =
-      transformedUv(sampledMaterial, vtx, kMaterialTextureSlotThickness);
+      transformedUv(material, vtx, kMaterialTextureSlotThickness);
 
   float transmissionFactor =
       material.transmission.transmissionThicknessDistance.x;

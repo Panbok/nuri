@@ -634,6 +634,12 @@ void ResourceManager::rebuildPackedMaterialTables() {
     materialHeaderTable_.resize(materialSlots_.size());
   }
 
+  const auto textureIndex = [this](TextureRef ref) -> uint32_t {
+    const TextureRecord *record = tryGet(ref);
+    return record != nullptr ? record->bindlessIndex
+                             : kInvalidTextureBindlessIndex;
+  };
+
   for (uint32_t index = 0; index < materialSlots_.size(); ++index) {
     if (!materialSlotsMeta_.isLive(index)) {
       materialHeaderTable_[index] = MaterialHeaderGpuData{};
@@ -643,11 +649,6 @@ void ResourceManager::rebuildPackedMaterialTables() {
     MaterialPackedGpuData &packed = materialSlots_[index].record.packedGpuData;
     const MaterialRequest::TextureRefs &textureRefs =
         materialSlots_[index].record.textureRefs;
-    const auto textureIndex = [this](TextureRef ref) -> uint32_t {
-      const TextureRecord *record = tryGet(ref);
-      return record != nullptr ? record->bindlessIndex
-                               : kInvalidTextureBindlessIndex;
-    };
 
     packed.header.commonTextureIndices = glm::uvec4(
         textureIndex(textureRefs.baseColor),

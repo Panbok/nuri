@@ -1,5 +1,6 @@
 #include "nuri/gfx/renderers/debug_renderer.h"
 
+#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/debug_draw_3d.h"
 #include "nuri/gfx/gpu_device.h"
@@ -362,15 +363,15 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
                                     float &outSortDepth) {
   outSortDepth = 0.0f;
   if (!debugDraw3D_ || !frame.scene || !nuri::isValid(depthTexture)) {
-    static uint32_t loggedSceneDebugEarlyOuts = 0u;
-    if (loggedSceneDebugEarlyOuts < 16u) {
-      NURI_LOG_WARNING(
+    static std::atomic<uint32_t> loggedSceneDebugEarlyOuts{0u};
+    if (loggedSceneDebugEarlyOuts.fetch_add(1u, std::memory_order_relaxed) <
+        16u) {
+      NURI_LOG_DEBUG(
           "DebugRenderer::buildSceneDebugLines early-out: frame=%llu "
           "debugDraw=%u scene=%u depthValid=%u",
           static_cast<unsigned long long>(frame.frameIndex),
           debugDraw3D_ != nullptr ? 1u : 0u, frame.scene != nullptr ? 1u : 0u,
           nuri::isValid(depthTexture) ? 1u : 0u);
-      ++loggedSceneDebugEarlyOuts;
     }
     return Result<bool, std::string>::makeResult(false);
   }
@@ -610,9 +611,12 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
   transparentFixedDraws_.clear();
   transparentDependencyBuffers_.clear();
 
-  static uint32_t loggedTransparentDebugBuilds = 0u;
-  if (loggedTransparentDebugBuilds < 16u) {
-    NURI_LOG_WARNING(
+  static std::atomic<uint32_t> loggedTransparentDebugBuilds{0u};
+  const bool shouldLogTransparentDebugBuild =
+      loggedTransparentDebugBuilds.fetch_add(1u, std::memory_order_relaxed) <
+      16u;
+  if (shouldLogTransparentDebugBuild) {
+    NURI_LOG_DEBUG(
         "DebugRenderer::buildTransparentStageContribution: frame=%llu "
         "hasDebugWork=%u transparentStageEnabled=%u",
         static_cast<unsigned long long>(frame.frameIndex),
@@ -625,8 +629,8 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
   }
 
   const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
-  if (loggedTransparentDebugBuilds < 16u) {
-    NURI_LOG_WARNING(
+  if (shouldLogTransparentDebugBuild) {
+    NURI_LOG_DEBUG(
         "DebugRenderer::buildTransparentStageContribution depth: frame=%llu "
         "depthValid=%u",
         static_cast<unsigned long long>(frame.frameIndex),
@@ -639,8 +643,8 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
     if (buildLinesResult.hasError()) {
       return Result<bool, std::string>::makeError(buildLinesResult.error());
     }
-    if (loggedTransparentDebugBuilds < 16u) {
-      NURI_LOG_WARNING(
+    if (shouldLogTransparentDebugBuild) {
+      NURI_LOG_DEBUG(
           "DebugRenderer::buildTransparentStageContribution lines: frame=%llu "
           "built=%u sortDepth=%.5f",
           static_cast<unsigned long long>(frame.frameIndex),
@@ -657,8 +661,8 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
         return Result<bool, std::string>::makeError(linePassResult.error());
       }
       const DebugDraw3D::PreparedGraphPass pass = linePassResult.value();
-      if (loggedTransparentDebugBuilds < 16u) {
-        NURI_LOG_WARNING(
+      if (shouldLogTransparentDebugBuild) {
+        NURI_LOG_DEBUG(
             "DebugRenderer::buildTransparentStageContribution pass: frame=%llu "
             "draws=%zu deps=%zu depthHandleValid=%u",
             static_cast<unsigned long long>(frame.frameIndex),
@@ -698,14 +702,13 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
       std::span<const BufferHandle>(transparentDependencyBuffers_.data(),
                                     transparentDependencyBuffers_.size());
   out.textureReads = {};
-  if (loggedTransparentDebugBuilds < 16u) {
-    NURI_LOG_WARNING(
+  if (shouldLogTransparentDebugBuild) {
+    NURI_LOG_DEBUG(
         "DebugRenderer::buildTransparentStageContribution out: frame=%llu "
         "sortable=%zu fixed=%zu deps=%zu",
         static_cast<unsigned long long>(frame.frameIndex),
         out.sortableDraws.size(), out.fixedDraws.size(),
         out.dependencyBuffers.size());
-    ++loggedTransparentDebugBuilds;
   }
   return Result<bool, std::string>::makeResult(true);
 }

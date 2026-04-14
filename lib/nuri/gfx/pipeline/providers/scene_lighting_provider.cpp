@@ -6,7 +6,6 @@
 #include "nuri/core/profiling.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
-#include "nuri/utils/env_utils.h"
 #include "nuri/utils/utils.h"
 
 namespace nuri {
@@ -282,7 +281,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       loggedLightStateSignature_ != frame.scene->lightTransformVersion()) {
     loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
     loggedLightStateSignature_ = frame.scene->lightTransformVersion();
-    NURI_LOG_WARNING(
+    NURI_LOG_DEBUG(
         "SceneLightingProvider::prepare probe: sceneData=0x%llx "
         "frameData=0x%llx "
         "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "

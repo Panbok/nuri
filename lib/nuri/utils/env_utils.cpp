@@ -13,8 +13,8 @@ namespace {
     return false;
   }
   for (size_t i = 0; i < value.size(); ++i) {
-    const char lhs = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(value[i])));
+    const char lhs =
+        static_cast<char>(std::tolower(static_cast<unsigned char>(value[i])));
     const char rhs = static_cast<char>(
         std::tolower(static_cast<unsigned char>(expected[i])));
     if (lhs != rhs) {
@@ -62,10 +62,13 @@ bool readEnvFlag(std::string_view variableName) {
   }
 
   const std::string_view view = *value;
-  return !envValueEqualsIgnoreCase(view, "0") &&
-         !envValueEqualsIgnoreCase(view, "false") &&
-         !envValueEqualsIgnoreCase(view, "off") &&
-         !envValueEqualsIgnoreCase(view, "no");
+  if (envValueEqualsIgnoreCase(view, "1") ||
+      envValueEqualsIgnoreCase(view, "true") ||
+      envValueEqualsIgnoreCase(view, "on") ||
+      envValueEqualsIgnoreCase(view, "yes")) {
+    return true;
+  }
+  return false;
 }
 
 } // namespace nuri

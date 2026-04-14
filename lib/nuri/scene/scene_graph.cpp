@@ -14,6 +14,7 @@ constexpr uint32_t kMaxLocalLightCount = 64u;
 constexpr uint32_t kInvalidSceneGraphIndex =
     std::numeric_limits<uint32_t>::max();
 constexpr glm::quat kIdentityRotation(1.0f, 0.0f, 0.0f, 0.0f);
+constexpr float kDefaultSunAngularRadiusDeg = 0.27f;
 
 [[nodiscard]] Result<SlotReservation, std::string>
 makePackedSlotOverflowError(std::string_view context) {
@@ -197,7 +198,8 @@ SceneGraph::allocateDirectionalLightSlot() {
     directionalLights_.localRotations.push_back(kIdentityRotation);
     directionalLights_.colors.push_back(glm::vec3(1.0f));
     directionalLights_.intensities.push_back(1.0f);
-    directionalLights_.angularRadiusDegrees.push_back(0.27f);
+    directionalLights_.angularRadiusDegrees.push_back(
+        kDefaultSunAngularRadiusDeg);
     directionalLights_.enabled.push_back(0u);
     directionalLights_.nextOnNode.push_back(kInvalidIndex);
     directionalLights_.prevOnNode.push_back(kInvalidIndex);

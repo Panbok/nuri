@@ -89,9 +89,14 @@ private:
     uint32_t submeshIndex = 0;
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
+    // Original geometry buffer; use as the source handle for dependencies and
+    // for resolving sub-range addresses.
     BufferHandle baseVertexBuffer{};
+    // Byte offset into baseVertexBuffer when the draw uses a sliced view.
     uint64_t vertexBufferByteOffset = 0;
+    // Current draw buffer view, possibly replaced by animated geometry.
     BufferHandle vertexBuffer{};
+    // Secondary static decode data used by packed/quantized vertex formats.
     BufferHandle baseVertexDecodeBuffer{};
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
@@ -165,6 +170,7 @@ private:
 
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;
+  uint32_t loggedContributorCollections_ = 0u;
   uint64_t loggedAddressProbeTopologyVersion_ =
       std::numeric_limits<uint64_t>::max();
 

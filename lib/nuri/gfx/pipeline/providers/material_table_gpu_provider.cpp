@@ -86,25 +86,41 @@ MaterialTableGpuProvider::prepare(FrameBuildContext &ctx) {
         header.clearcoatExtensionIndex >= snapshot.clearcoat.size()) {
       return Result<bool, std::string>::makeError(
           "MaterialTableGpuProvider::prepare: clearcoat extension index is "
-          "out of range");
+          "out of range for material " +
+          std::to_string(i) + " (clearcoatExtensionIndex=" +
+          std::to_string(header.clearcoatExtensionIndex) +
+          ", snapshot.clearcoat.size=" +
+          std::to_string(snapshot.clearcoat.size()) + ")");
     }
     if (header.sheenExtensionIndex != kInvalidMaterialExtensionIndex &&
         header.sheenExtensionIndex >= snapshot.sheen.size()) {
       return Result<bool, std::string>::makeError(
           "MaterialTableGpuProvider::prepare: sheen extension index is out of "
-          "range");
+          "range for material " +
+          std::to_string(i) + " (sheenExtensionIndex=" +
+          std::to_string(header.sheenExtensionIndex) +
+          ", snapshot.sheen.size=" + std::to_string(snapshot.sheen.size()) +
+          ")");
     }
     if (header.transmissionExtensionIndex != kInvalidMaterialExtensionIndex &&
         header.transmissionExtensionIndex >= snapshot.transmission.size()) {
       return Result<bool, std::string>::makeError(
           "MaterialTableGpuProvider::prepare: transmission extension index is "
-          "out of range");
+          "out of range for material " +
+          std::to_string(i) + " (transmissionExtensionIndex=" +
+          std::to_string(header.transmissionExtensionIndex) +
+          ", snapshot.transmission.size=" +
+          std::to_string(snapshot.transmission.size()) + ")");
     }
     if (header.specularExtensionIndex != kInvalidMaterialExtensionIndex &&
         header.specularExtensionIndex >= snapshot.specular.size()) {
       return Result<bool, std::string>::makeError(
           "MaterialTableGpuProvider::prepare: specular extension index is out "
-          "of range");
+          "of range for material " +
+          std::to_string(i) + " (specularExtensionIndex=" +
+          std::to_string(header.specularExtensionIndex) +
+          ", snapshot.specular.size=" +
+          std::to_string(snapshot.specular.size()) + ")");
     }
   }
   const auto bufferNeedsResize = [](const ManagedBuffer &managedBuffer,
