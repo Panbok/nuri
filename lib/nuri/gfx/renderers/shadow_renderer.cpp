@@ -10,7 +10,7 @@ namespace nuri {
 namespace {
 
 constexpr uint32_t kShadowPassDebugColor = 0xff5a7dffu;
-constexpr uint32_t kShadowMeshDebugColor = 0xff5a7dffu;
+constexpr uint32_t kShadowMeshDebugColor = 0xff5aff9du;
 constexpr uint32_t kShadowPreviewPassDebugColor = 0xff7d5affu;
 constexpr std::string_view kShadowPassLabel = "ShadowDepthPass";
 constexpr std::string_view kShadowMeshLabel = "ShadowCasterMesh";
@@ -74,6 +74,16 @@ resolveMemoryResource(std::pmr::memory_resource *memory) {
 
 [[nodiscard]] bool isSameBufferHandle(BufferHandle lhs, BufferHandle rhs) {
   return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
+[[nodiscard]] IndexFormat
+resolveGeometryIndexFormat(const GeometryAllocationView &geometry) {
+  if (geometry.indexCount == 0u) {
+    return IndexFormat::U32;
+  }
+  const uint64_t indexStride =
+      geometry.indexByteSize / static_cast<uint64_t>(geometry.indexCount);
+  return indexStride == sizeof(uint16_t) ? IndexFormat::U16 : IndexFormat::U32;
 }
 
 void appendUniqueBuffer(std::pmr::vector<BufferHandle> &handles,
@@ -269,12 +279,12 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
                                std::pmr::memory_resource *memory)
     : ShadowRenderer(gpu, ShadowRendererConfig{}, memory) {}
 
-ShadowRenderer::ShadowRenderer(GPUDevice &gpu, ShadowRendererConfig config,
+ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
+                               const ShadowRendererConfig &config,
                                std::pmr::memory_resource *memory)
-    : gpu_(gpu), config_(std::move(config)),
-      memory_(resolveMemoryResource(memory)), instanceMatricesRing_(memory_),
-      instanceRemapRing_(memory_), shadowFrameRing_(memory_),
-      instanceDataRingUploadVersions_(memory_),
+    : gpu_(gpu), config_(config), memory_(resolveMemoryResource(memory)),
+      instanceMatricesRing_(memory_), instanceRemapRing_(memory_),
+      shadowFrameRing_(memory_), instanceDataRingUploadVersions_(memory_),
       shadowFrameUploadSignatures_(memory_), meshDrawTemplates_(memory_),
       instanceMatrices_(memory_), instanceRemap_(memory_),
       drawPushConstants_(memory_), drawItems_(memory_),
@@ -522,11 +532,16 @@ ShadowRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-ShadowRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
+Result<bool, std::string> ShadowRenderer::ensureRingCapacity(
+    std::pmr::vector<DynamicBufferSlot> &ring, size_t requiredBytes,
+    std::string_view debugName, std::span<uint64_t> uploadVersions) {
+  NURI_ASSERT(uploadVersions.size() >= ring.size(),
+              "ShadowRenderer::ensureRingCapacity: upload version count "
+              "must cover ring slot count");
+
   bool needsResize = false;
   bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : instanceMatricesRing_) {
+  for (const DynamicBufferSlot &slot : ring) {
     if (slot.buffer && slot.buffer->valid()) {
       hasLiveBuffers = true;
       if (slot.capacityBytes < requiredBytes) {
@@ -538,8 +553,8 @@ ShadowRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
   if (needsResize && hasLiveBuffers) {
     gpu_.waitIdle();
   }
-  for (size_t i = 0; i < instanceMatricesRing_.size(); ++i) {
-    DynamicBufferSlot &slot = instanceMatricesRing_[i];
+  for (size_t i = 0; i < ring.size(); ++i) {
+    DynamicBufferSlot &slot = ring[i];
     if (slot.buffer && slot.buffer->valid() &&
         slot.capacityBytes >= requiredBytes) {
       continue;
@@ -552,97 +567,36 @@ ShadowRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
                                        BufferDesc{.usage = BufferUsage::Storage,
                                                   .storage = Storage::Device,
                                                   .size = requiredBytes},
-                                       "shadow_instance_matrices");
+                                       debugName);
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
     slot.buffer = std::move(bufferResult.value());
     slot.capacityBytes = requiredBytes;
-    instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
+    uploadVersions[i] = std::numeric_limits<uint64_t>::max();
   }
   return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+ShadowRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
+  return ensureRingCapacity(instanceMatricesRing_, requiredBytes,
+                            "shadow_instance_matrices",
+                            instanceDataRingUploadVersions_);
 }
 
 Result<bool, std::string>
 ShadowRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
-  bool needsResize = false;
-  bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : instanceRemapRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      hasLiveBuffers = true;
-      if (slot.capacityBytes < requiredBytes) {
-        needsResize = true;
-        break;
-      }
-    }
-  }
-  if (needsResize && hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
-  for (size_t i = 0; i < instanceRemapRing_.size(); ++i) {
-    DynamicBufferSlot &slot = instanceRemapRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requiredBytes) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
-                                                  .size = requiredBytes},
-                                       "shadow_instance_remap");
-    if (bufferResult.hasError()) {
-      return Result<bool, std::string>::makeError(bufferResult.error());
-    }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
-    instanceDataRingUploadVersions_[i] = std::numeric_limits<uint64_t>::max();
-  }
-  return Result<bool, std::string>::makeResult(true);
+  return ensureRingCapacity(instanceRemapRing_, requiredBytes,
+                            "shadow_instance_remap",
+                            instanceDataRingUploadVersions_);
 }
 
 Result<bool, std::string>
 ShadowRenderer::ensureShadowFrameRingCapacity(size_t requiredBytes) {
-  bool needsResize = false;
-  bool hasLiveBuffers = false;
-  for (const DynamicBufferSlot &slot : shadowFrameRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      hasLiveBuffers = true;
-      if (slot.capacityBytes < requiredBytes) {
-        needsResize = true;
-        break;
-      }
-    }
-  }
-  if (needsResize && hasLiveBuffers) {
-    gpu_.waitIdle();
-  }
-  for (size_t i = 0; i < shadowFrameRing_.size(); ++i) {
-    DynamicBufferSlot &slot = shadowFrameRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requiredBytes) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
-                                                  .size = requiredBytes},
-                                       "shadow_frame_gpu_data");
-    if (bufferResult.hasError()) {
-      return Result<bool, std::string>::makeError(bufferResult.error());
-    }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requiredBytes;
-    shadowFrameUploadSignatures_[i] = std::numeric_limits<uint64_t>::max();
-  }
-  return Result<bool, std::string>::makeResult(true);
+  return ensureRingCapacity(shadowFrameRing_, requiredBytes,
+                            "shadow_frame_gpu_data",
+                            shadowFrameUploadSignatures_);
 }
 
 Result<bool, std::string>
@@ -702,6 +656,7 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
           .instanceIndex = renderableIndex,
           .indexBuffer = geometry.indexBuffer,
           .indexBufferOffset = geometry.indexByteOffset,
+          .indexFormat = resolveGeometryIndexFormat(geometry),
           .baseVertexBuffer = geometry.vertexBuffer,
           .vertexBufferByteOffset = geometry.vertexByteOffset,
           .vertexBufferAddress = vertexBufferAddress,
@@ -1024,7 +979,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     draw.vertexBuffer = entry.baseVertexBuffer;
     draw.indexBuffer = entry.indexBuffer;
     draw.indexBufferOffset = entry.indexBufferOffset;
-    draw.indexFormat = IndexFormat::U32;
+    draw.indexFormat = entry.indexFormat;
     draw.indexCount = lod->indexCount;
     draw.instanceCount = 1u;
     draw.firstIndex = lod->indexOffset;

@@ -41,7 +41,7 @@ public:
   explicit ShadowFeature(GPUDevice &gpu, std::pmr::memory_resource *memory =
                                              std::pmr::get_default_resource());
   ShadowFeature(
-      GPUDevice &gpu, ShadowRendererConfig config,
+      GPUDevice &gpu, const ShadowRendererConfig &config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~ShadowFeature() override = default;
 

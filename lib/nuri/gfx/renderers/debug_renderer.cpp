@@ -134,6 +134,8 @@ void accumulateSortDepth(float &sortDepth, const glm::mat4 &view,
 }
 
 [[nodiscard]] glm::vec3 dehomogenize(const glm::vec4 &value) {
+  // dehomogenize intentionally skips division when value.w is near zero to
+  // avoid divide-by-zero and treat it as a direction/point at infinity.
   if (std::abs(value.w) <= 1.0e-6f) {
     return glm::vec3(value);
   }
@@ -300,8 +302,8 @@ bool drawShadowDebugOverlay(DebugDraw3D &debugDraw,
     for (uint32_t i = 0; i < cascadeCount; ++i) {
       drawShadowCascadeFrustum(debugDraw, debugData.cascades[i],
                                kShadowCascadeColors[i], view, sortDepth);
-      hasLines = true;
     }
+    hasLines = true;
   }
 
   const ShadowCascadeDebugFrameData &selected =
@@ -447,8 +449,11 @@ DebugRenderer::prepareGridDraw(const RenderFrameContext &frame,
   const bool hasDepth = nuri::isValid(depthTexture);
   const Format depthFormat =
       hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
-  auto pipelineResult =
-      ensureGridPipeline(gpu_.getSwapchainFormat(), depthFormat);
+  const Format colorFormat =
+      nuri::isValid(preparedFrameColorTexture_)
+          ? gpu_.getTextureFormat(preparedFrameColorTexture_)
+          : gpu_.getSwapchainFormat();
+  auto pipelineResult = ensureGridPipeline(colorFormat, depthFormat);
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }

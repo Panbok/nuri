@@ -33,7 +33,7 @@ public:
   explicit ShadowRenderer(GPUDevice &gpu, std::pmr::memory_resource *memory =
                                               std::pmr::get_default_resource());
   ShadowRenderer(
-      GPUDevice &gpu, ShadowRendererConfig config,
+      GPUDevice &gpu, const ShadowRendererConfig &config,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~ShadowRenderer();
 
@@ -83,6 +83,7 @@ private:
     uint32_t instanceIndex = 0;
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
+    IndexFormat indexFormat = IndexFormat::U32;
     BufferHandle baseVertexBuffer{};
     uint64_t vertexBufferByteOffset = 0;
     uint64_t vertexBufferAddress = 0;
@@ -122,6 +123,10 @@ private:
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureShadowFrameRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
+                     size_t requiredBytes, std::string_view debugName,
+                     std::span<uint64_t> uploadVersions);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
                                               uint32_t materialCount);

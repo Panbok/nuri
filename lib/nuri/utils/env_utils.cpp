@@ -2,6 +2,8 @@
 
 #include "nuri/utils/env_utils.h"
 
+#include "nuri/core/log.h"
+
 #include <cctype>
 
 namespace nuri {
@@ -83,18 +85,21 @@ readEnvBoolOverride(std::string_view variableName) {
   }
 
   const std::string_view view = *value;
-  if (view == "1" || view == "true" || view == "TRUE" || view == "on" ||
-      view == "ON" || view == "yes" || view == "YES") {
+  if (envValueEqualsIgnoreCase(view, "1") ||
+      envValueEqualsIgnoreCase(view, "true") ||
+      envValueEqualsIgnoreCase(view, "on") ||
+      envValueEqualsIgnoreCase(view, "yes")) {
     return true;
   }
-  if (view == "0" || view == "false" || view == "FALSE" || view == "off" ||
-      view == "OFF" || view == "no" || view == "NO") {
+  if (envValueEqualsIgnoreCase(view, "0") ||
+      envValueEqualsIgnoreCase(view, "false") ||
+      envValueEqualsIgnoreCase(view, "off") ||
+      envValueEqualsIgnoreCase(view, "no")) {
     return false;
   }
 
   NURI_LOG_WARNING(
-      "LvkGPUDevice: ignoring unrecognized boolean environment override "
-      "'%.*s=%s'",
+      "Environment override: ignoring unrecognized boolean value '%.*s=%s'",
       static_cast<int>(variableName.size()), variableName.data(),
       value->c_str());
   return std::nullopt;

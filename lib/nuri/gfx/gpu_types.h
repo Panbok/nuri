@@ -90,7 +90,6 @@ enum class Format : uint8_t {
   RGBA8_UINT,
   RGBA16_FLOAT,
   RGBA32_FLOAT,
-  D16_UNORM,
   D32_FLOAT,
   BC7_RGBA_UNORM,
   BC7_RGBA_SRGB,
@@ -98,8 +97,15 @@ enum class Format : uint8_t {
   ETC2_RGB8_SRGB,
   R32_FLOAT,
   RG32_FLOAT,
+  D16_UNORM,
   Count
 };
+
+static_assert(static_cast<uint8_t>(Format::D32_FLOAT) == 6u);
+static_assert(static_cast<uint8_t>(Format::BC7_RGBA_UNORM) == 7u);
+static_assert(static_cast<uint8_t>(Format::R32_FLOAT) == 11u);
+static_assert(static_cast<uint8_t>(Format::RG32_FLOAT) == 12u);
+static_assert(static_cast<uint8_t>(Format::D16_UNORM) == 13u);
 
 enum class BufferUsage : uint8_t {
   None = 0,

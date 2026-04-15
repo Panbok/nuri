@@ -17,10 +17,9 @@ ShadowFeature::ShadowFeature(GPUDevice &gpu, std::pmr::memory_resource *memory)
     : renderer_(std::make_unique<ShadowRenderer>(gpu, memory)),
       depthPass_(*renderer_) {}
 
-ShadowFeature::ShadowFeature(GPUDevice &gpu, ShadowRendererConfig config,
+ShadowFeature::ShadowFeature(GPUDevice &gpu, const ShadowRendererConfig &config,
                              std::pmr::memory_resource *memory)
-    : renderer_(
-          std::make_unique<ShadowRenderer>(gpu, std::move(config), memory)),
+    : renderer_(std::make_unique<ShadowRenderer>(gpu, config, memory)),
       depthPass_(*renderer_) {}
 
 Result<bool, std::string>

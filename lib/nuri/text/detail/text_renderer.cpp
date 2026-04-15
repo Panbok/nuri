@@ -1311,7 +1311,11 @@ TextRenderer::append2DGraphPass(RenderFrameContext &frame,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  auto pipeline = ensureUiPipeline(gpu_.getSwapchainFormat());
+  const TextureHandle colorTexture = resolveFrameColorTexture(frame);
+  const Format colorFormat = ::nuri::isValid(colorTexture)
+                                 ? gpu_.getTextureFormat(colorTexture)
+                                 : gpu_.getSwapchainFormat();
+  auto pipeline = ensureUiPipeline(colorFormat);
   if (pipeline.hasError()) {
     return pipeline;
   }
@@ -1362,9 +1366,19 @@ TextRenderer::append2DGraphPass(RenderFrameContext &frame,
   }
 
   RenderGraphGraphicsPassDesc desc{};
-  desc.color = {.loadOp = hasPriorColorPass ? LoadOp::Load : LoadOp::Clear,
+  desc.color = {.loadOp = (hasPriorColorPass || ::nuri::isValid(colorTexture))
+                              ? LoadOp::Load
+                              : LoadOp::Clear,
                 .storeOp = StoreOp::Store,
                 .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+  if (::nuri::isValid(colorTexture)) {
+    auto colorImportResult =
+        graph.importTexture(colorTexture, "text2d_pass_color_texture");
+    if (colorImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(colorImportResult.error());
+    }
+    desc.colorTexture = colorImportResult.value();
+  }
   desc.useViewport = true;
   desc.viewport = {.x = 0.0f,
                    .y = 0.0f,

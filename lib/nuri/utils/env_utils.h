@@ -1,6 +1,5 @@
 #pragma once
 
-#include "nuri/core/log.h"
 #include "nuri/defines.h"
 
 #include <optional>
@@ -17,9 +16,9 @@ readEnvVar(std::string_view variableName);
 // false values "0", "false", "off", or "no", and unrecognized values.
 [[nodiscard]] NURI_API bool readEnvFlag(std::string_view variableName);
 
-[[nodiscard]] std::optional<bool>
+[[nodiscard]] NURI_API std::optional<bool>
 readEnvBoolOverride(std::string_view variableName);
 
-[[nodiscard]] const char *boolToString(bool value);
+[[nodiscard]] NURI_API const char *boolToString(bool value);
 
 } // namespace nuri
