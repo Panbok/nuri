@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/core/result.h"
+#include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/render_feature.h"
@@ -39,6 +40,9 @@ class NURI_API ShadowFeature final : public RenderFeature {
 public:
   explicit ShadowFeature(GPUDevice &gpu, std::pmr::memory_resource *memory =
                                              std::pmr::get_default_resource());
+  ShadowFeature(
+      GPUDevice &gpu, ShadowRendererConfig config,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
   ~ShadowFeature() override = default;
 
   ShadowFeature(const ShadowFeature &) = delete;

@@ -77,6 +77,7 @@ static constexpr Format kFrameCompositionSceneColorFormat =
 static constexpr Format kFrameCompositionFrameColorFormat =
     Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
+static constexpr Format kDefaultShadowMapDepthFormat = Format::D16_UNORM;
 static constexpr uint32_t kMaxShadowCascades = 4u;
 static constexpr uint32_t kInvalidShadowBindlessIndex = 0xFFFFFFFFu;
 

@@ -8,6 +8,7 @@
 #include "nuri/core/window.h"
 #include "nuri/resources/gpu/geometry_pool.h"
 #include "nuri/resources/gpu/material.h"
+#include "nuri/utils/env_utils.h"
 
 #include <lvk/LVK.h>
 #if __has_include(<lvk/vulkan/VulkanClasses.h>)
@@ -18,9 +19,76 @@
 #endif
 #include <vulkan/VulkanUtils.h>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
 namespace nuri {
 
 namespace {
+
+[[nodiscard]] bool isRenderDocAttached() {
+#if defined(_WIN32)
+  if (GetModuleHandleA("renderdoc.dll") != nullptr ||
+      GetModuleHandleA("renderdoccmd.dll") != nullptr) {
+    return true;
+  }
+#endif
+  return readEnvVar("RENDERDOC_CAPFILE").has_value();
+}
+
+[[nodiscard]] bool resolveValidationEnabled(bool renderDocAttached) {
+  if (const std::optional<bool> override =
+          readEnvBoolOverride("NURI_VK_VALIDATION");
+      override.has_value()) {
+    return *override;
+  }
+#if defined(NURI_DEBUG)
+  return true;
+#else
+  return renderDocAttached;
+#endif
+}
+
+[[nodiscard]] bool resolveVerboseVkDiagnostics(bool renderDocAttached) {
+  if (const std::optional<bool> override =
+          readEnvBoolOverride("NURI_VK_DIAGNOSTICS");
+      override.has_value()) {
+    return *override;
+  }
+  return renderDocAttached;
+}
+
+[[nodiscard]] bool resolveTerminateOnValidationError() {
+  return readEnvFlag("NURI_VK_TERMINATE_ON_VALIDATION_ERROR");
+}
+
+[[nodiscard]] std::string formatVkVersion(uint32_t version) {
+  std::array<char, 32> text{};
+  const int written =
+      std::snprintf(text.data(), text.size(), "%u.%u.%u",
+                    static_cast<unsigned>(VK_API_VERSION_MAJOR(version)),
+                    static_cast<unsigned>(VK_API_VERSION_MINOR(version)),
+                    static_cast<unsigned>(VK_API_VERSION_PATCH(version)));
+  if (written <= 0 || static_cast<size_t>(written) >= text.size()) {
+    return std::to_string(version);
+  }
+  return std::string(text.data(), static_cast<size_t>(written));
+}
+
+[[nodiscard]] std::string
+formatRecordedCommandBufferHandle(RecordedCommandBufferHandle handle) {
+  std::array<char, 48> text{};
+  const int written = std::snprintf(text.data(), text.size(), "%u:%u",
+                                    handle.index, handle.generation);
+  if (written <= 0 || static_cast<size_t>(written) >= text.size()) {
+    return "<invalid>";
+  }
+  return std::string(text.data(), static_cast<size_t>(written));
+}
 
 // Conversion functions from Nuri types to LVK types
 
@@ -50,6 +118,8 @@ lvk::Format toLvkFormat(Format format) {
     return lvk::Format_ETC2_RGB8;
   case Format::ETC2_RGB8_SRGB:
     return lvk::Format_ETC2_SRGB8;
+  case Format::D16_UNORM:
+    return lvk::Format_Z_UN16;
   case Format::D32_FLOAT:
     return lvk::Format_Z_F32;
   case Format::Count:
@@ -84,6 +154,8 @@ Format fromLvkFormat(lvk::Format format) {
     return Format::ETC2_RGB8_UNORM;
   case lvk::Format_ETC2_SRGB8:
     return Format::ETC2_RGB8_SRGB;
+  case lvk::Format_Z_UN16:
+    return Format::D16_UNORM;
   case lvk::Format_Z_F32:
     return Format::D32_FLOAT;
   default:
@@ -649,6 +721,14 @@ struct RecordedGraphicsCommandBuffer {
 struct LvkGPUDevice::Impl {
   Window *window = nullptr;
   std::unique_ptr<lvk::IContext> context;
+  bool renderDocAttached = false;
+  bool validationEnabled = false;
+  bool verboseVkDiagnostics = false;
+  uint64_t currentFrameIndex = 0u;
+  uint64_t submittedFrameCount = 0u;
+  uint32_t preparedSwapchainImageIndex = 0u;
+  uint32_t preparedSwapchainImageCount = 0u;
+  bool hasPreparedSwapchainImage = false;
   TextureCompressionCaps compressionCaps{};
   ResourceTable<SamplerHandle, lvk::SamplerHandle> samplers;
   SamplerHandle cubemapSampler{};
@@ -722,6 +802,11 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
   auto device = std::unique_ptr<LvkGPUDevice>(new LvkGPUDevice());
 
   device->impl_->window = &window;
+  device->impl_->renderDocAttached = isRenderDocAttached();
+  device->impl_->validationEnabled =
+      resolveValidationEnabled(device->impl_->renderDocAttached);
+  device->impl_->verboseVkDiagnostics =
+      resolveVerboseVkDiagnostics(device->impl_->renderDocAttached);
 
   int32_t width = 0;
   int32_t height = 0;
@@ -732,11 +817,20 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
   }
 
   lvk::ContextConfig config{};
-#if defined(NURI_DEBUG)
-  config.enableValidation = true;
-#else
-  config.enableValidation = false;
-#endif
+  config.enableValidation = device->impl_->validationEnabled;
+  config.terminateOnValidationError = resolveTerminateOnValidationError();
+
+  NURI_LOG_INFO("LvkGPUDevice::create: RenderDoc attached=%s validation=%s "
+                "diagnostics=%s terminateOnValidationError=%s",
+                boolToString(device->impl_->renderDocAttached),
+                boolToString(config.enableValidation),
+                boolToString(device->impl_->verboseVkDiagnostics),
+                boolToString(config.terminateOnValidationError));
+  if (device->impl_->renderDocAttached && config.enableValidation) {
+    NURI_LOG_INFO(
+        "LvkGPUDevice::create: RenderDoc suppresses validation output when "
+        "DebugOutputMute is enabled in capture options");
+  }
 
   device->impl_->context = lvk::createVulkanContextWithSwapchain(
       static_cast<lvk::LVKwindow *>(window.nativeHandle()),
@@ -756,14 +850,23 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
     VkPhysicalDeviceFeatures deviceFeatures{};
     vkGetPhysicalDeviceFeatures(vkContext->getVkPhysicalDevice(),
                                 &deviceFeatures);
+    const VkPhysicalDeviceProperties &properties =
+        vkContext->getVkPhysicalDeviceProperties();
+    NURI_LOG_INFO(
+        "LvkGPUDevice::create: Vulkan device='%s' vendor=0x%04x device=0x%04x "
+        "api=%s driver='%s' driverInfo='%s'",
+        properties.deviceName, properties.vendorID, properties.deviceID,
+        formatVkVersion(properties.apiVersion).c_str(),
+        vkContext->vkPhysicalDeviceDriverProperties_.driverName,
+        vkContext->vkPhysicalDeviceDriverProperties_.driverInfo);
+    NURI_LOG_INFO("LvkGPUDevice::create: swapchain images=%u",
+                  device->impl_->context->getNumSwapchainImages());
     device->impl_->compressionCaps.bc7 =
         deviceFeatures.textureCompressionBC == VK_TRUE;
     device->impl_->compressionCaps.etc2 =
         deviceFeatures.textureCompressionETC2 == VK_TRUE;
     device->impl_->compressionCaps.astc =
         deviceFeatures.textureCompressionASTC_LDR == VK_TRUE;
-    const VkPhysicalDeviceProperties properties =
-        vkContext->getVkPhysicalDeviceProperties();
     if (deviceFeatures.samplerAnisotropy == VK_TRUE &&
         properties.limits.maxSamplerAnisotropy > 1.0f) {
       device->impl_->maxSamplerAnisotropy = static_cast<uint8_t>(std::clamp(
@@ -992,7 +1095,12 @@ Result<bool, std::string> LvkGPUDevice::beginFrame(uint64_t frameIndex) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_WAIT);
   {
     std::lock_guard immediateLock(impl_->contextImmediateMutex);
+    impl_->currentFrameIndex = frameIndex;
     impl_->currentFrameSwapchainTexture = {};
+    impl_->hasPreparedSwapchainImage = false;
+  }
+  if (impl_->verboseVkDiagnostics) {
+    NURI_LOG_DEBUG("LvkGPUDevice::beginFrame: frame=%" PRIu64, frameIndex);
   }
   if (!impl_->geometryPool) {
     return Result<bool, std::string>::makeResult(true);
@@ -1024,11 +1132,24 @@ Result<bool, std::string> LvkGPUDevice::prepareFrameOutput() {
   std::lock_guard immediateLock(impl_->contextImmediateMutex);
   if (!impl_->currentFrameSwapchainTexture.valid()) {
     impl_->currentFrameSwapchainTexture = swapchainTexture;
+    impl_->preparedSwapchainImageIndex =
+        impl_->context->getSwapchainCurrentImageIndex();
+    impl_->preparedSwapchainImageCount =
+        impl_->context->getNumSwapchainImages();
+    impl_->hasPreparedSwapchainImage = swapchainTexture.valid();
   }
   if (!impl_->currentFrameSwapchainTexture.valid()) {
     return Result<bool, std::string>::makeError(
         "LvkGPUDevice::prepareFrameOutput: failed to acquire swapchain "
         "texture");
+  }
+  if (impl_->verboseVkDiagnostics) {
+    NURI_LOG_DEBUG(
+        "LvkGPUDevice::prepareFrameOutput: frame=%" PRIu64
+        " swapchainTexture=%u:%u image=%u/%u",
+        impl_->currentFrameIndex, impl_->currentFrameSwapchainTexture.index(),
+        impl_->currentFrameSwapchainTexture.gen(),
+        impl_->preparedSwapchainImageIndex, impl_->preparedSwapchainImageCount);
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -2531,6 +2652,29 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
         "texture");
   }
 
+  if (impl_->verboseVkDiagnostics) {
+    NURI_LOG_DEBUG(
+        "LvkGPUDevice::submitRecordedGraphicsFrame: frame=%" PRIu64
+        " submit=%" PRIu64 " commandBuffers=%zu batches=%zu presents=%s "
+        "swapchainTexture=%u:%u image=%u/%u",
+        impl_->currentFrameIndex, impl_->submittedFrameCount,
+        commandBuffers.size(), batches.size(), boolToString(wantsPresent),
+        swapchainTexture.index(), swapchainTexture.gen(),
+        impl_->preparedSwapchainImageIndex, impl_->preparedSwapchainImageCount);
+    for (size_t i = 0u; i < commandBuffers.size(); ++i) {
+      NURI_LOG_DEBUG(
+          "  submit-cmd[%zu]: handle=%s present=%s", i,
+          formatRecordedCommandBufferHandle(commandBuffers[i]).c_str(),
+          boolToString(presentFlags[i] != 0u));
+    }
+    for (size_t i = 0u; i < batches.size(); ++i) {
+      const SubmitBatchMeta &batch = batches[i];
+      NURI_LOG_DEBUG("  submit-batch[%zu]: offset=%u count=%u presents=%s", i,
+                     batch.commandBufferOffset, batch.commandBufferCount,
+                     boolToString(batch.presentsFrameOutput));
+    }
+  }
+
   const auto foldRecordedHandleKey =
       [](RecordedCommandBufferHandle handle) -> uint64_t {
     return (static_cast<uint64_t>(handle.index) << 32u) | handle.generation;
@@ -2578,6 +2722,14 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
     lastSubmitHandle = impl_->context->submit(
         *commandBuffer,
         presentFlags[i] != 0u ? swapchainTexture : lvk::TextureHandle{});
+    if (impl_->verboseVkDiagnostics) {
+      NURI_LOG_DEBUG(
+          "  submit-result[%u]: frame=%" PRIu64
+          " recorded=%s submitHandle=%u:%u",
+          i, impl_->currentFrameIndex,
+          formatRecordedCommandBufferHandle(commandBuffers[i]).c_str(),
+          lastSubmitHandle.bufferIndex_, lastSubmitHandle.submitId_);
+    }
     consumedRecordedFlags[matchedIndex] = 1u;
   }
 
@@ -2597,7 +2749,9 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
 
   if (wantsPresent) {
     impl_->currentFrameSwapchainTexture = {};
+    impl_->hasPreparedSwapchainImage = false;
   }
+  ++impl_->submittedFrameCount;
 
   return Result<SubmissionHandle, std::string>::makeResult(
       toNuriSubmissionHandle(lastSubmitHandle));
@@ -2830,6 +2984,9 @@ LvkGPUDevice::readTexture(TextureHandle texture,
   case Format::ETC2_RGB8_SRGB:
     // Block-compressed formats need block-aligned regions and specialized
     // readback size calculations, so generic readTexture() rejects them here.
+    break;
+  case Format::D16_UNORM:
+    bytesPerPixel = sizeof(uint16_t);
     break;
   case Format::D32_FLOAT:
     bytesPerPixel = sizeof(float);

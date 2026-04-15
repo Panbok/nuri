@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/log.h"
 #include "nuri/defines.h"
 
 #include <optional>
@@ -15,5 +16,10 @@ readEnvVar(std::string_view variableName);
 // (case-insensitive). It returns false for unset/empty variables, explicit
 // false values "0", "false", "off", or "no", and unrecognized values.
 [[nodiscard]] NURI_API bool readEnvFlag(std::string_view variableName);
+
+[[nodiscard]] std::optional<bool>
+readEnvBoolOverride(std::string_view variableName);
+
+[[nodiscard]] const char *boolToString(bool value);
 
 } // namespace nuri

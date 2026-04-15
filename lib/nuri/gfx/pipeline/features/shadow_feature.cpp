@@ -17,10 +17,15 @@ ShadowFeature::ShadowFeature(GPUDevice &gpu, std::pmr::memory_resource *memory)
     : renderer_(std::make_unique<ShadowRenderer>(gpu, memory)),
       depthPass_(*renderer_) {}
 
+ShadowFeature::ShadowFeature(GPUDevice &gpu, ShadowRendererConfig config,
+                             std::pmr::memory_resource *memory)
+    : renderer_(
+          std::make_unique<ShadowRenderer>(gpu, std::move(config), memory)),
+      depthPass_(*renderer_) {}
+
 Result<bool, std::string>
 ShadowFeature::publishFrameData(FrameBuildContext &ctx) {
-  renderer_->publishFrameData(ctx.frame);
-  return Result<bool, std::string>::makeResult(true);
+  return renderer_->publishFrameData(ctx.frame);
 }
 
 Result<bool, std::string> ShadowFeature::prepare(FrameBuildContext &ctx) {

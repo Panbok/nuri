@@ -23,6 +23,15 @@ const glm::vec4 kDirectionalLightIconColor(1.0f, 0.88f, 0.25f, 1.0f);
 const glm::vec4 kPointLightIconColor(0.35f, 0.82f, 1.0f, 1.0f);
 const glm::vec4 kSpotLightIconColor(1.0f, 0.55f, 0.24f, 1.0f);
 const glm::vec4 kSelectedLightIconColor(1.0f, 0.28f, 0.16f, 1.0f);
+const std::array<glm::vec4, kMaxShadowCascades> kShadowCascadeColors = {
+    glm::vec4(0.15f, 1.0f, 0.3f, 1.0f),
+    glm::vec4(0.0f, 0.85f, 1.0f, 1.0f),
+    glm::vec4(1.0f, 0.9f, 0.1f, 1.0f),
+    glm::vec4(1.0f, 0.25f, 1.0f, 1.0f),
+};
+const glm::vec4 kShadowLightBoundsColor(1.0f, 0.45f, 0.15f, 1.0f);
+const glm::vec4 kShadowLightRayColor(1.0f, 0.92f, 0.35f, 1.0f);
+const glm::vec4 kShadowTexelSnapColor(0.95f, 0.95f, 1.0f, 1.0f);
 
 [[nodiscard]] bool isSameTextureHandle(TextureHandle a, TextureHandle b) {
   return a.index == b.index && a.generation == b.generation;
@@ -107,6 +116,209 @@ void drawSpotLightIcon(DebugDraw3D &debugDraw, const glm::vec3 &position,
   debugDraw.line(p1, p2, color);
   debugDraw.line(p2, p3, color);
   debugDraw.line(p3, p0, color);
+}
+
+[[nodiscard]] bool shadowOverlayEnabled(const RenderFrameContext &frame) {
+  if (frame.settings == nullptr || !frame.settings->shadow.enabled) {
+    return false;
+  }
+  const RenderSettings::ShadowDebugSettings &debug =
+      frame.settings->shadow.debug;
+  return debug.showCascadeFrusta || debug.showLightViewBounds ||
+         debug.showTexelGridSnap;
+}
+
+void accumulateSortDepth(float &sortDepth, const glm::mat4 &view,
+                         const glm::vec3 &position) {
+  sortDepth = std::max(sortDepth, -(view * glm::vec4(position, 1.0f)).z);
+}
+
+[[nodiscard]] glm::vec3 dehomogenize(const glm::vec4 &value) {
+  if (std::abs(value.w) <= 1.0e-6f) {
+    return glm::vec3(value);
+  }
+  return glm::vec3(value) / value.w;
+}
+
+void drawCornerBox(DebugDraw3D &debugDraw,
+                   const std::array<glm::vec3, 8> &corners,
+                   const glm::vec4 &color) {
+  debugDraw.line(corners[0], corners[1], color);
+  debugDraw.line(corners[1], corners[2], color);
+  debugDraw.line(corners[2], corners[3], color);
+  debugDraw.line(corners[3], corners[0], color);
+
+  debugDraw.line(corners[4], corners[5], color);
+  debugDraw.line(corners[5], corners[6], color);
+  debugDraw.line(corners[6], corners[7], color);
+  debugDraw.line(corners[7], corners[4], color);
+
+  debugDraw.line(corners[0], corners[4], color);
+  debugDraw.line(corners[1], corners[5], color);
+  debugDraw.line(corners[2], corners[6], color);
+  debugDraw.line(corners[3], corners[7], color);
+}
+
+void drawShadowCascadeFrustum(DebugDraw3D &debugDraw,
+                              const ShadowCascadeDebugFrameData &cascade,
+                              const glm::vec4 &color, const glm::mat4 &view,
+                              float &sortDepth) {
+  std::array<glm::vec3, 8> corners{};
+  for (size_t i = 0; i < corners.size(); ++i) {
+    corners[i] = dehomogenize(cascade.worldFrustumCorners[i]);
+    accumulateSortDepth(sortDepth, view, corners[i]);
+  }
+  drawCornerBox(debugDraw, corners, color);
+
+  const glm::vec3 nearCenter =
+      (corners[0] + corners[1] + corners[2] + corners[3]) * 0.25f;
+  const glm::vec3 farCenter =
+      (corners[4] + corners[5] + corners[6] + corners[7]) * 0.25f;
+  const glm::vec4 guideColor(color.r, color.g, color.b, 0.65f);
+  debugDraw.line(corners[4], corners[6], guideColor);
+  debugDraw.line(corners[5], corners[7], guideColor);
+  debugDraw.line(nearCenter, farCenter, guideColor);
+  accumulateSortDepth(sortDepth, view, nearCenter);
+  accumulateSortDepth(sortDepth, view, farCenter);
+}
+
+void drawShadowLightBounds(DebugDraw3D &debugDraw,
+                           const ShadowCascadeDebugFrameData &cascade,
+                           const glm::vec4 &color, const glm::mat4 &view,
+                           float &sortDepth) {
+  const glm::vec3 boundsMin = glm::min(glm::vec3(cascade.lightSpaceBoundsMin),
+                                       glm::vec3(cascade.lightSpaceBoundsMax));
+  const glm::vec3 boundsMax = glm::max(glm::vec3(cascade.lightSpaceBoundsMin),
+                                       glm::vec3(cascade.lightSpaceBoundsMax));
+  const std::array<glm::vec3, 8> lightSpaceCorners = {
+      glm::vec3(boundsMin.x, boundsMin.y, boundsMin.z),
+      glm::vec3(boundsMax.x, boundsMin.y, boundsMin.z),
+      glm::vec3(boundsMax.x, boundsMax.y, boundsMin.z),
+      glm::vec3(boundsMin.x, boundsMax.y, boundsMin.z),
+      glm::vec3(boundsMin.x, boundsMin.y, boundsMax.z),
+      glm::vec3(boundsMax.x, boundsMin.y, boundsMax.z),
+      glm::vec3(boundsMax.x, boundsMax.y, boundsMax.z),
+      glm::vec3(boundsMin.x, boundsMax.y, boundsMax.z),
+  };
+  std::array<glm::vec3, 8> worldCorners{};
+  for (size_t i = 0; i < worldCorners.size(); ++i) {
+    worldCorners[i] = glm::vec3(cascade.inverseLightView *
+                                glm::vec4(lightSpaceCorners[i], 1.0f));
+    accumulateSortDepth(sortDepth, view, worldCorners[i]);
+  }
+  drawCornerBox(debugDraw, worldCorners, color);
+}
+
+void drawShadowTexelSnap(DebugDraw3D &debugDraw,
+                         const ShadowCascadeDebugFrameData &cascade,
+                         const glm::vec4 &color, const glm::mat4 &view,
+                         float &sortDepth) {
+  const glm::vec3 center = dehomogenize(cascade.snappedCenter);
+  const float size = std::max(cascade.texelWorldSize * 8.0f, 0.05f);
+  const glm::vec3 right = safeNormalize(glm::vec3(cascade.inverseLightView[0]),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::vec3 up = safeNormalize(glm::vec3(cascade.inverseLightView[1]),
+                                     glm::vec3(0.0f, 1.0f, 0.0f));
+  const glm::vec3 forward = safeNormalize(
+      glm::vec3(cascade.inverseLightView[2]), glm::vec3(0.0f, 0.0f, 1.0f));
+  debugDraw.line(center - right * size, center + right * size, color);
+  debugDraw.line(center - up * size, center + up * size, color);
+  debugDraw.line(center - forward * size, center + forward * size, color);
+
+  const glm::vec3 unsnapped = dehomogenize(cascade.unsnappedCenter);
+  if (glm::length(unsnapped - center) > 1.0e-5f) {
+    debugDraw.line(unsnapped, center, color);
+  }
+  accumulateSortDepth(sortDepth, view, center);
+}
+
+void drawSelectedShadowLightRay(DebugDraw3D &debugDraw,
+                                const RenderFrameContext &frame,
+                                const ShadowCascadeDebugFrameData &cascade,
+                                const glm::mat4 &view, float &sortDepth) {
+  if (frame.scene == nullptr ||
+      !frame.sharedResources.selectedShadowLightId.has_value() ||
+      !isValid(*frame.sharedResources.selectedShadowLightId)) {
+    return;
+  }
+
+  LightDesc light{};
+  if (!frame.scene->graph().getCachedLightWorldDesc(
+          *frame.sharedResources.selectedShadowLightId, light) ||
+      light.type != LightType::Directional) {
+    return;
+  }
+
+  const glm::vec3 center = dehomogenize(cascade.snappedCenter);
+  const glm::vec3 direction =
+      safeNormalize(light.rotation * glm::vec3(0.0f, 0.0f, -1.0f),
+                    glm::vec3(0.0f, -1.0f, 0.0f));
+  const glm::vec3 boundsExtent =
+      glm::abs(glm::vec3(cascade.lightSpaceBoundsMax) -
+               glm::vec3(cascade.lightSpaceBoundsMin));
+  const float extent = std::max(glm::length(boundsExtent), 1.0f);
+  const glm::vec3 start = center - direction * extent;
+  const glm::vec3 end = center + direction * extent;
+  debugDraw.line(start, end, kShadowLightRayColor);
+
+  glm::vec3 right(1.0f, 0.0f, 0.0f);
+  glm::vec3 up(0.0f, 1.0f, 0.0f);
+  buildLightBasis(direction, right, up);
+  const glm::vec3 headBase = end - direction * (extent * 0.08f);
+  debugDraw.line(end, headBase + right * (extent * 0.04f),
+                 kShadowLightRayColor);
+  debugDraw.line(end, headBase - right * (extent * 0.04f),
+                 kShadowLightRayColor);
+  debugDraw.line(end, headBase + up * (extent * 0.04f), kShadowLightRayColor);
+  debugDraw.line(end, headBase - up * (extent * 0.04f), kShadowLightRayColor);
+  accumulateSortDepth(sortDepth, view, center);
+}
+
+bool drawShadowDebugOverlay(DebugDraw3D &debugDraw,
+                            const RenderFrameContext &frame,
+                            const glm::mat4 &view, float &sortDepth) {
+  if (!shadowOverlayEnabled(frame) ||
+      !frame.sharedResources.shadowDebugFrameData.has_value()) {
+    return false;
+  }
+
+  const ShadowDebugFrameData &debugData =
+      *frame.sharedResources.shadowDebugFrameData;
+  if (debugData.cascadeCount == 0u) {
+    return false;
+  }
+
+  const RenderSettings::ShadowDebugSettings &debug =
+      frame.settings->shadow.debug;
+  const uint32_t cascadeCount =
+      std::min(debugData.cascadeCount, kMaxShadowCascades);
+  const uint32_t selectedCascade =
+      std::min(debug.debugCascadeIndex, cascadeCount - 1u);
+  bool hasLines = false;
+
+  if (debug.showCascadeFrusta) {
+    for (uint32_t i = 0; i < cascadeCount; ++i) {
+      drawShadowCascadeFrustum(debugDraw, debugData.cascades[i],
+                               kShadowCascadeColors[i], view, sortDepth);
+      hasLines = true;
+    }
+  }
+
+  const ShadowCascadeDebugFrameData &selected =
+      debugData.cascades[selectedCascade];
+  if (debug.showLightViewBounds) {
+    drawShadowLightBounds(debugDraw, selected, kShadowLightBoundsColor, view,
+                          sortDepth);
+    drawSelectedShadowLightRay(debugDraw, frame, selected, view, sortDepth);
+    hasLines = true;
+  }
+  if (debug.showTexelGridSnap) {
+    drawShadowTexelSnap(debugDraw, selected, kShadowTexelSnapColor, view,
+                        sortDepth);
+    hasLines = true;
+  }
+
+  return hasLines;
 }
 
 } // namespace
@@ -354,7 +566,8 @@ bool DebugRenderer::hasDebugWork(const RenderFrameContext &frame) const {
     return false;
   }
   const RenderSettings::DebugSettings &debug = frame.settings->debug;
-  return debug.enabled || debug.modelBounds || debug.grid || debug.lightIcons;
+  return debug.enabled || debug.modelBounds || debug.grid || debug.lightIcons ||
+         shadowOverlayEnabled(frame);
 }
 
 Result<bool, std::string>
@@ -362,7 +575,7 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
                                     TextureHandle depthTexture,
                                     float &outSortDepth) {
   outSortDepth = 0.0f;
-  if (!debugDraw3D_ || !frame.scene || !nuri::isValid(depthTexture)) {
+  if (!debugDraw3D_ || !nuri::isValid(depthTexture)) {
     static std::atomic<uint32_t> loggedSceneDebugEarlyOuts{0u};
     if (loggedSceneDebugEarlyOuts.fetch_add(1u, std::memory_order_relaxed) <
         16u) {
@@ -383,8 +596,8 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
   bool hasLines = false;
   const glm::mat4 view = frame.camera.view;
 
-  if (frame.settings != nullptr && frame.settings->debug.modelBounds &&
-      frame.resources != nullptr) {
+  if (frame.scene != nullptr && frame.settings != nullptr &&
+      frame.settings->debug.modelBounds && frame.resources != nullptr) {
     const std::span<const Renderable> renderables = frame.scene->renderables();
     for (const Renderable &renderable : renderables) {
       const ModelRecord *modelRecord =
@@ -403,7 +616,8 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
     }
   }
 
-  if (frame.settings != nullptr && frame.settings->debug.lightIcons) {
+  if (frame.scene != nullptr && frame.settings != nullptr &&
+      frame.settings->debug.lightIcons) {
     frame.scene->forEachLightId([&](LightId lightId) {
       LightDesc light{};
       if (!frame.scene->graph().getCachedLightWorldDesc(lightId, light)) {
@@ -438,6 +652,10 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
           std::max(outSortDepth, -(view * glm::vec4(light.position, 1.0f)).z);
       hasLines = true;
     });
+  }
+
+  if (drawShadowDebugOverlay(*debugDraw3D_, frame, view, outSortDepth)) {
+    hasLines = true;
   }
 
   return Result<bool, std::string>::makeResult(hasLines);

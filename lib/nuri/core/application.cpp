@@ -256,8 +256,8 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
       getGPU(), pipelineMemoryResource()));
   renderPipeline_->addProvider(
       std::make_unique<SceneLightingProvider>(getGPU()));
-  renderPipeline_->addFeature(
-      std::make_unique<ShadowFeature>(getGPU(), pipelineMemoryResource()));
+  renderPipeline_->addFeature(std::make_unique<ShadowFeature>(
+      getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(
       std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
   renderPipeline_->addFeature(std::make_unique<OpaqueFeature>(
