@@ -236,6 +236,7 @@ DirectLightingResult evaluateTransmissionDirectLighting(ShadedMaterial sm,
   direct.directSpecular = vec3(0.0);
   direct.directSheen = vec3(0.0);
   direct.clearcoatDirectLighting = vec3(0.0);
+  direct.shadowFactorDebug = 1.0;
 
   for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
     DirectionalLightGpuData light =

@@ -1,6 +1,7 @@
 #extension GL_EXT_buffer_reference : require
 
 const uint kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
+const uint kInvalidSamplerBindlessIndex = 0xFFFFFFFFu;
 const uint kInvalidMaterialExtensionIndex = 0xFFFFFFFFu;
 
 const uint kFrameDataFlagHasIblDiffuse = 1u << 0u;
@@ -17,6 +18,8 @@ const uint kSceneDepthPyramidArraySize =
     (kMaxSceneDepthPyramidLevels + kSceneDepthPyramidTexIdPackWidth - 1u) /
     kSceneDepthPyramidTexIdPackWidth;
 const uint kMaxShadowCascades = 4u;
+const uint kShadowFrameFlagEnabled = 1u << 0u;
+const uint kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
 
 const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
 const uint kMaterialFeatureSheen = 1u << 1u;

@@ -297,7 +297,85 @@ struct DirectLightingResult {
   vec3 directSpecular;
   vec3 directSheen;
   vec3 clearcoatDirectLighting;
+  float shadowFactorDebug;
 };
+
+struct HardShadowInspectResult {
+  float receiverDepth;
+  float receiverCompareDepth;
+  float sampledDepth;
+  float valid;
+};
+
+float hardDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
+                                  vec3 worldPos) {
+  ShadowCascadeGpuData cascade = shadow.cascades[0];
+  const uint shadowTexId = cascade.textureSampler.x;
+  const uint shadowSamplerId = cascade.textureSampler.y;
+  if (shadowTexId == kInvalidTextureBindlessIndex ||
+      shadowSamplerId == kInvalidSamplerBindlessIndex) {
+    return 1.0;
+  }
+
+  vec4 lightClip = cascade.lightViewProj * vec4(worldPos, 1.0);
+  if (abs(lightClip.w) <= kEpsilon) {
+    return 1.0;
+  }
+
+  vec3 ndc = lightClip.xyz / lightClip.w;
+  vec2 shadowUv = ndc.xy * 0.5 + 0.5;
+  shadowUv.y = 1.0 - shadowUv.y;
+  if (any(lessThan(shadowUv, vec2(0.0))) ||
+      any(greaterThan(shadowUv, vec2(1.0))) || ndc.z < 0.0 ||
+      ndc.z > 1.0) {
+    return 1.0;
+  }
+
+  const float constantBias = cascade.biasParams.x;
+  return textureBindless2DShadow(
+      shadowTexId, shadowSamplerId, vec3(shadowUv, ndc.z - constantBias));
+}
+
+HardShadowInspectResult inspectHardDirectionalShadow(
+    readonly ShadowFrameBuffer shadow, vec3 worldPos) {
+  HardShadowInspectResult r;
+  r.receiverDepth = 0.0;
+  r.receiverCompareDepth = 0.0;
+  r.sampledDepth = 0.0;
+  r.valid = 0.0;
+
+  ShadowCascadeGpuData cascade = shadow.cascades[0];
+  const uint shadowTexId = cascade.textureSampler.x;
+  const uint shadowCompareSamplerId = cascade.textureSampler.y;
+  const uint shadowRawSamplerId = cascade.textureSampler.z;
+  if (shadowTexId == kInvalidTextureBindlessIndex ||
+      shadowCompareSamplerId == kInvalidSamplerBindlessIndex ||
+      shadowRawSamplerId == kInvalidSamplerBindlessIndex) {
+    return r;
+  }
+
+  vec4 lightClip = cascade.lightViewProj * vec4(worldPos, 1.0);
+  if (abs(lightClip.w) <= kEpsilon) {
+    return r;
+  }
+
+  vec3 ndc = lightClip.xyz / lightClip.w;
+  vec2 shadowUv = ndc.xy * 0.5 + 0.5;
+  shadowUv.y = 1.0 - shadowUv.y;
+  if (any(lessThan(shadowUv, vec2(0.0))) ||
+      any(greaterThan(shadowUv, vec2(1.0))) || ndc.z < 0.0 ||
+      ndc.z > 1.0) {
+    return r;
+  }
+
+  const float constantBias = cascade.biasParams.x;
+  r.receiverDepth = ndc.z;
+  r.receiverCompareDepth = ndc.z - constantBias;
+  r.sampledDepth =
+      textureBindless2D(shadowTexId, shadowRawSamplerId, shadowUv).r;
+  r.valid = 1.0;
+  return r;
+}
 
 DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
   DirectLightingResult r;
@@ -305,12 +383,26 @@ DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
   r.directSpecular = vec3(0.0);
   r.directSheen = vec3(0.0);
   r.clearcoatDirectLighting = vec3(0.0);
+  r.shadowFactorDebug = 1.0;
 
+  const bool frameShadowEnabled =
+      (pc.frameData.shadowFlags & kShadowFrameFlagEnabled) != 0u;
   for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
     DirectionalLightGpuData light =
         pc.frameData.directionalLightBuffer.lights[i];
     vec3 l = normalize(-directionalLightDirection(light));
-    vec3 lr = directionalLightColor(light) * directionalLightIlluminance(light);
+    float shadowFactor = 1.0;
+    if (frameShadowEnabled) {
+      ShadowFrameBuffer shadow = pc.frameData.shadowFrameBuffer;
+      uvec4 shadowState = shadow.flagsCascadeCountLightIndex;
+      if ((shadowState.x & kShadowFrameFlagEnabled) != 0u &&
+          shadowState.y > 0u && shadowState.z == i) {
+        shadowFactor = hardDirectionalShadowFactor(shadow, worldPos);
+        r.shadowFactorDebug = shadowFactor;
+      }
+    }
+    vec3 lr = directionalLightColor(light) * directionalLightIlluminance(light) *
+              shadowFactor;
     accumulateSurfaceLightContribution(lr, l, sm, r.directDiffuse,
                                        r.directSpecular, r.directSheen,
                                        r.clearcoatDirectLighting);

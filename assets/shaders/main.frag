@@ -20,6 +20,11 @@ void main() {
 
   // Direct lighting ---------------------------------------------------
   DirectLightingResult direct = evaluateDirectLighting(sm, vtx.worldPos);
+  if ((pc.frameData.shadowFlags & kShadowFrameFlagVisualizeShadowFactor) !=
+      0u) {
+    out_FragColor = vec4(vec3(direct.shadowFactorDebug), 1.0);
+    return;
+  }
 
   // IBL ---------------------------------------------------------------
   IblResult ibl = evaluateIbl(sm);
