@@ -884,6 +884,37 @@ ResourceManager::acquireModel(const ModelRequest &request) {
                             std::move(modelResult.value()));
 }
 
+Result<ModelRef, std::string>
+ResourceManager::acquireGeneratedModel(const MeshData &meshData,
+                                       std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+
+  auto modelResult = Model::create(gpu_, meshData, debugName);
+  if (modelResult.hasError()) {
+    return Result<ModelRef, std::string>::makeError(modelResult.error());
+  }
+
+  auto slotResult = allocateModelSlot();
+  if (slotResult.hasError()) {
+    return Result<ModelRef, std::string>::makeError(slotResult.error());
+  }
+
+  const uint32_t slotIndex = slotResult.value().index;
+  ModelSlot &slot = modelSlots_[slotIndex];
+  const ModelRef ref = makeModelRefForSlot(slotIndex);
+  slot.refCount = 1;
+  slot.retireAfterFrame = kRetireFrameUnset;
+
+  slot.record = ModelRecord(memory_);
+  slot.record.ref = ref;
+  slot.record.model = std::move(modelResult.value());
+  slot.record.importOptionsHash = 0u;
+  slot.record.sceneMeshIndex = std::numeric_limits<uint32_t>::max();
+  slot.record.sourceMaterialToRuntime.assign(
+      slot.record.model->sourceMaterialCount(), kInvalidMaterialRef);
+  return Result<ModelRef, std::string>::makeResult(ref);
+}
+
 Result<MaterialRef, std::string>
 ResourceManager::acquireMaterial(const MaterialRequest &request) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);

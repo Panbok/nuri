@@ -293,6 +293,8 @@ private:
                       bool alphaMasked) const;
   [[nodiscard]] RenderPipelineHandle
   selectPickPipeline(RenderPipelineHandle sourcePipeline) const;
+  [[nodiscard]] RenderPipelineHandle
+  selectShadowInspectPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] bool isDoubleSidedPipeline(RenderPipelineHandle handle) const;
   [[nodiscard]] bool isTessPipeline(RenderPipelineHandle handle) const;
   Result<bool, std::string> ensureSceneDepthSampler();
@@ -315,6 +317,8 @@ private:
   void resetMeshPipelineState();
   void destroyDepthPyramidTextures();
   void destroyPickTexture();
+  Result<bool, std::string> recreateShadowInspectTexture();
+  void destroyShadowInspectTexture();
   void destroyBuffers();
 
   GPUDevice &gpu_;
@@ -323,6 +327,7 @@ private:
   std::unique_ptr<Shader> meshTessShader_;
   std::unique_ptr<Shader> meshDebugOverlayShader_;
   std::unique_ptr<Shader> meshPickShader_;
+  std::unique_ptr<Shader> meshShadowInspectShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> depthPyramidShader_;
@@ -335,6 +340,7 @@ private:
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
   TextureHandle pickIdTexture_{};
+  TextureHandle shadowInspectTexture_{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures_{};
   uint32_t sceneDepthPyramidLevelCount_ = 0;
@@ -350,6 +356,7 @@ private:
   ShaderHandle meshDebugOverlayGeometryShader_{};
   ShaderHandle meshDebugOverlayFragmentShader_{};
   ShaderHandle meshPickFragmentShader_{};
+  ShaderHandle meshShadowInspectFragmentShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle depthPyramidVertexShader_{};
@@ -367,6 +374,10 @@ private:
   RenderPipelineHandle meshPickDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshPickTessPipelineHandle_{};
   RenderPipelineHandle meshPickDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle meshShadowInspectPipelineHandle_{};
+  RenderPipelineHandle meshShadowInspectDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshShadowInspectTessPipelineHandle_{};
+  RenderPipelineHandle meshShadowInspectDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle meshDepthPipelineHandle_{};
   RenderPipelineHandle meshDepthDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshDepthTessPipelineHandle_{};
@@ -398,8 +409,6 @@ private:
   bool loggedDepthPyramidUnsupported_ = false;
   bool loggedMaterialFallbackWarning_ = false;
   bool loggedBlendMaterialUnsupportedWarning_ = false;
-  uint64_t loggedMainPassProbeTopologyVersion_ =
-      std::numeric_limits<uint64_t>::max();
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -459,6 +468,7 @@ private:
   std::pmr::vector<std::byte> indirectCommandUploadBytes_;
   std::pmr::vector<DrawItem> overlayDrawItems_;
   std::pmr::vector<DrawItem> pickDrawItems_;
+  std::pmr::vector<DrawItem> shadowInspectDrawItems_;
   std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<DrawItem> depthPrepassDrawItems_;
   std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
@@ -471,6 +481,10 @@ private:
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers_;
   std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
   std::pmr::vector<TextureHandle> passDependencyTextures_;
+  std::pmr::vector<BufferHandle> mainPassDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode> mainPassDependencyBufferAccessModes_;
+  std::pmr::vector<TextureHandle> mainPassDependencyTextures_;
+  std::pmr::vector<RenderGraphAccessMode> mainPassDependencyTextureAccessModes_;
   std::pmr::vector<PreparedGraphPass> preparedGraphPasses_;
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
@@ -487,14 +501,20 @@ private:
   BufferHandle registeredCentersPhaseBufferHandle_{};
   BufferHandle registeredBaseMatricesBufferHandle_{};
   uint64_t boundStaticBatchGeneration_ = 0;
-  uint64_t statsLogFrameCounter_ = 0;
   std::optional<OpaquePickRequest> pendingPickRequest_{};
+  std::optional<ShadowInspectRequest> pendingShadowInspectRequest_{};
 
   struct InFlightPickReadback {
     OpaquePickRequest request{};
     uint64_t submissionFrame = 0;
   };
   std::optional<InFlightPickReadback> inFlightPickReadback_{};
+
+  struct InFlightShadowInspectReadback {
+    ShadowInspectRequest request{};
+    uint64_t submissionFrame = 0;
+  };
+  std::optional<InFlightShadowInspectReadback> inFlightShadowInspectReadback_{};
 };
 
 } // namespace nuri

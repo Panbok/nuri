@@ -92,6 +92,7 @@ private:
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = 0;
     bool doubleSided = false;
+    bool alphaMasked = false;
   };
 
   struct DynamicBufferSlot {
@@ -149,6 +150,7 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> shadowShader_;
   std::unique_ptr<Shader> depthShader_;
+  std::unique_ptr<Shader> depthAlphaShader_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> shadowFrameRing_;
@@ -160,22 +162,28 @@ private:
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
+  std::pmr::vector<TextureHandle> passDependencyTextures_;
+  std::pmr::vector<RenderGraphAccessMode> passDependencyTextureAccessModes_;
   std::pmr::vector<TextureHandle> previewDependencyTextures_;
   std::pmr::vector<RenderGraphAccessMode> previewDependencyTextureAccessModes_;
 
   ShaderHandle shadowVertexShader_{};
   ShaderHandle depthFragmentShader_{};
+  ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle previewVertexShader_{};
   ShaderHandle previewFragmentShader_{};
   RenderPipelineHandle shadowPipelineHandle_{};
   RenderPipelineHandle shadowDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle shadowAlphaPipelineHandle_{};
+  RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};
   TextureHandle shadowDepthTexture_{};
   TextureHandle shadowDebugPreviewTexture_{};
   SamplerHandle rawDepthSampler_{};
+  SamplerHandle compareDepthSampler_{};
   uint32_t shadowMapSize_ = 0u;
   uint32_t preparedShadowDrawCount_ = 0u;
-  uint64_t preparedShadowFrameSignature_ = std::numeric_limits<uint64_t>::max();
   bool initialized_ = false;
   bool hasPreparedShadowDepthPasses_ = false;
   bool hasPreparedShadowPreviewPass_ = false;

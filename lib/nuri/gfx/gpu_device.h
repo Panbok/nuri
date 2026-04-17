@@ -85,6 +85,7 @@ public:
   virtual bool isValid(RenderPipelineHandle h) const = 0;
   virtual bool isValid(ComputePipelineHandle h) const = 0;
   virtual Format getTextureFormat(TextureHandle h) const = 0;
+  virtual TextureDimensions getTextureDimensions(TextureHandle h) const = 0;
   virtual TextureCompressionCaps getTextureCompressionCaps() const = 0;
   // Bindless index used by LVK shaders (kTextures2D[]).
   virtual uint32_t getTextureBindlessIndex(TextureHandle h) const = 0;

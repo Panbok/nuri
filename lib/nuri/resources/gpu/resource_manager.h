@@ -218,6 +218,9 @@ public:
   acquireTexture(const TextureRequest &request);
   [[nodiscard]] Result<ModelRef, std::string>
   acquireModel(const ModelRequest &request);
+  [[nodiscard]] Result<ModelRef, std::string>
+  acquireGeneratedModel(const MeshData &meshData,
+                        std::string_view debugName = {});
   [[nodiscard]] Result<MaterialRef, std::string>
   acquireMaterial(const MaterialRequest &request);
   [[nodiscard]] Result<ImportedMaterialBatch, std::string>

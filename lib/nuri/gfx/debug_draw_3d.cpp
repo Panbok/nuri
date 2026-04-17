@@ -1,5 +1,6 @@
 #include "nuri/gfx/debug_draw_3d.h"
 
+#include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/gpu_descriptors.h"
 

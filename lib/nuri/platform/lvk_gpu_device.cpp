@@ -18,7 +18,6 @@
 #define NURI_LVK_HAS_VULKAN_COMMAND_BUFFER 0
 #endif
 #include <vulkan/VulkanUtils.h>
-
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -88,6 +87,43 @@ formatRecordedCommandBufferHandle(RecordedCommandBufferHandle handle) {
     return "<invalid>";
   }
   return std::string(text.data(), static_cast<size_t>(written));
+}
+
+struct CommonMeshPushConstantsProbe {
+  uint64_t frameDataAddress = 0u;
+  uint64_t vertexBufferAddress = 0u;
+  uint64_t vertexDecodeBufferAddress = 0u;
+  uint64_t instanceMatricesAddress = 0u;
+  uint64_t instanceRemapAddress = 0u;
+  uint64_t instanceCentersPhaseAddress = 0u;
+  uint64_t instanceBaseMatricesAddress = 0u;
+  uint32_t instanceCount = 0u;
+  uint32_t materialIndex = 0u;
+  uint32_t vertexDecodeIndex = 0u;
+  uint32_t packedVertexFormat = 0u;
+  float timeSeconds = 0.0f;
+  float tessNearDistance = 0.0f;
+  float tessFarDistance = 0.0f;
+  float tessMinFactor = 0.0f;
+  float tessMaxFactor = 0.0f;
+  uint32_t debugVisualizationMode = 0u;
+};
+
+constexpr size_t kCommonMeshPushConstantsProbeBytes =
+    offsetof(CommonMeshPushConstantsProbe, debugVisualizationMode) +
+    sizeof(uint32_t);
+constexpr size_t kDebugDraw3DVertexBufferAddressOffset = sizeof(float) * 16u;
+
+[[nodiscard]] const char *drawCommandTypeName(DrawCommandType command) {
+  switch (command) {
+  case DrawCommandType::Direct:
+    return "Direct";
+  case DrawCommandType::IndexedIndirect:
+    return "IndexedIndirect";
+  case DrawCommandType::IndexedIndirectCount:
+    return "IndexedIndirectCount";
+  }
+  return "Unknown";
 }
 
 // Conversion functions from Nuri types to LVK types
@@ -1099,9 +1135,6 @@ Result<bool, std::string> LvkGPUDevice::beginFrame(uint64_t frameIndex) {
     impl_->currentFrameSwapchainTexture = {};
     impl_->hasPreparedSwapchainImage = false;
   }
-  if (impl_->verboseVkDiagnostics) {
-    NURI_LOG_DEBUG("LvkGPUDevice::beginFrame: frame=%" PRIu64, frameIndex);
-  }
   if (!impl_->geometryPool) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -1836,6 +1869,20 @@ Format LvkGPUDevice::getTextureFormat(TextureHandle h) const {
   return impl_->textures.getFormat(h);
 }
 
+TextureDimensions LvkGPUDevice::getTextureDimensions(TextureHandle h) const {
+  if (!impl_ || !impl_->textures.isValid(h)) {
+    return TextureDimensions{};
+  }
+  const lvk::TextureHandle texture = impl_->textures.getLvkHandle(h);
+  if (!texture.valid()) {
+    return TextureDimensions{};
+  }
+  const lvk::Dimensions dimensions = impl_->context->getDimensions(texture);
+  return TextureDimensions{.width = dimensions.width,
+                           .height = dimensions.height,
+                           .depth = dimensions.depth};
+}
+
 TextureCompressionCaps LvkGPUDevice::getTextureCompressionCaps() const {
   return impl_->compressionCaps;
 }
@@ -1965,6 +2012,8 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
   };
   const bool supportsIndexedIndirectCount =
       impl_->context->supportsDrawIndexedIndirectCount();
+  const bool logFrameDiagnostics =
+      impl_->verboseVkDiagnostics || impl_->currentFrameIndex < 8u;
 
   for (const RenderPass &pass : passes) {
     const bool passLabelPushed =

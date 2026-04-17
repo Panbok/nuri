@@ -67,6 +67,7 @@ public:
   bool isValid(RenderPipelineHandle h) const override;
   bool isValid(ComputePipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
+  TextureDimensions getTextureDimensions(TextureHandle h) const override;
   TextureCompressionCaps getTextureCompressionCaps() const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
   uint32_t getSamplerBindlessIndex(SamplerHandle h) const override;

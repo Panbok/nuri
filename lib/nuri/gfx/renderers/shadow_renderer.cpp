@@ -4,7 +4,9 @@
 
 #include "nuri/core/log.h"
 #include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
+#include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/resources/gpu/resource_manager.h"
+
 
 namespace nuri {
 namespace {
@@ -99,23 +101,18 @@ void appendUniqueBuffer(std::pmr::vector<BufferHandle> &handles,
   handles.push_back(handle);
 }
 
-[[nodiscard]] glm::vec3 normalizeSafe(glm::vec3 value, glm::vec3 fallback) {
-  const float length = glm::length(value);
-  if (!std::isfinite(length) || length <= 1.0e-6f) {
-    return fallback;
+void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
+                         TextureHandle handle) {
+  if (!nuri::isValid(handle)) {
+    return;
   }
-  return value / length;
-}
-
-[[nodiscard]] glm::vec3 chooseLightUp(glm::vec3 lightDirection) {
-  const glm::vec3 worldUp = std::abs(lightDirection.y) < 0.99f
-                                ? glm::vec3(0.0f, 1.0f, 0.0f)
-                                : glm::vec3(0.0f, 0.0f, 1.0f);
-  const glm::vec3 right = glm::cross(worldUp, lightDirection);
-  if (glm::dot(right, right) <= 1.0e-8f) {
-    return glm::vec3(1.0f, 0.0f, 0.0f);
+  for (const TextureHandle existing : handles) {
+    if (existing.index == handle.index &&
+        existing.generation == handle.generation) {
+      return;
+    }
   }
-  return worldUp;
+  handles.push_back(handle);
 }
 
 [[nodiscard]] std::optional<SubmeshLod>
@@ -185,89 +182,6 @@ shadowPreviewPipelineDesc(ShaderHandle vertexShader,
   };
 }
 
-[[nodiscard]] glm::vec3 cameraRightFromView(const glm::mat4 &view) {
-  const glm::mat4 invView = glm::inverse(view);
-  return normalizeSafe(glm::vec3(invView[0]), glm::vec3(1.0f, 0.0f, 0.0f));
-}
-
-[[nodiscard]] glm::vec3 cameraUpFromView(const glm::mat4 &view) {
-  const glm::mat4 invView = glm::inverse(view);
-  return normalizeSafe(glm::vec3(invView[1]), glm::vec3(0.0f, 1.0f, 0.0f));
-}
-
-[[nodiscard]] glm::vec3 cameraForwardFromView(const glm::mat4 &view) {
-  const glm::mat4 invView = glm::inverse(view);
-  return normalizeSafe(-glm::vec3(invView[2]), glm::vec3(0.0f, 0.0f, -1.0f));
-}
-
-[[nodiscard]] std::array<glm::vec3, 8>
-computeShadowCameraSliceCorners(const CameraFrameState &camera,
-                                float requestedFar) {
-  const glm::vec3 cameraPos = glm::vec3(camera.cameraPos);
-  const glm::vec3 forward = cameraForwardFromView(camera.view);
-  const glm::vec3 right = cameraRightFromView(camera.view);
-  const glm::vec3 up = cameraUpFromView(camera.view);
-  const float nearPlane = std::max(camera.nearPlane, 0.01f);
-  const float farPlane = std::max(nearPlane + 0.01f, requestedFar);
-  std::array<glm::vec3, 8> corners{};
-
-  if (camera.projectionType == ProjectionType::Orthographic) {
-    const float halfHeight = 0.5f * std::max(camera.orthoHeight, 0.01f);
-    const float halfWidth = halfHeight * std::max(camera.aspectRatio, 0.01f);
-    const glm::vec3 nearCenter = cameraPos + forward * nearPlane;
-    const glm::vec3 farCenter = cameraPos + forward * farPlane;
-    const glm::vec3 dx = right * halfWidth;
-    const glm::vec3 dy = up * halfHeight;
-    corners[0] = nearCenter - dx - dy;
-    corners[1] = nearCenter + dx - dy;
-    corners[2] = nearCenter + dx + dy;
-    corners[3] = nearCenter - dx + dy;
-    corners[4] = farCenter - dx - dy;
-    corners[5] = farCenter + dx - dy;
-    corners[6] = farCenter + dx + dy;
-    corners[7] = farCenter - dx + dy;
-    return corners;
-  }
-
-  const float tanHalfFov = std::tan(std::max(camera.fovYRadians, 0.01f) * 0.5f);
-  const float nearHalfHeight = tanHalfFov * nearPlane;
-  const float nearHalfWidth =
-      nearHalfHeight * std::max(camera.aspectRatio, 0.01f);
-  const float farHalfHeight = tanHalfFov * farPlane;
-  const float farHalfWidth =
-      farHalfHeight * std::max(camera.aspectRatio, 0.01f);
-  const glm::vec3 nearCenter = cameraPos + forward * nearPlane;
-  const glm::vec3 farCenter = cameraPos + forward * farPlane;
-  const glm::vec3 nearDx = right * nearHalfWidth;
-  const glm::vec3 nearDy = up * nearHalfHeight;
-  const glm::vec3 farDx = right * farHalfWidth;
-  const glm::vec3 farDy = up * farHalfHeight;
-
-  corners[0] = nearCenter - nearDx - nearDy;
-  corners[1] = nearCenter + nearDx - nearDy;
-  corners[2] = nearCenter + nearDx + nearDy;
-  corners[3] = nearCenter - nearDx + nearDy;
-  corners[4] = farCenter - farDx - farDy;
-  corners[5] = farCenter + farDx - farDy;
-  corners[6] = farCenter + farDx + farDy;
-  corners[7] = farCenter - farDx + farDy;
-  return corners;
-}
-
-[[nodiscard]] std::array<glm::vec3, 8>
-boundingBoxCorners(const BoundingBox &bounds) {
-  return {
-      glm::vec3(bounds.min_.x, bounds.min_.y, bounds.min_.z),
-      glm::vec3(bounds.max_.x, bounds.min_.y, bounds.min_.z),
-      glm::vec3(bounds.max_.x, bounds.max_.y, bounds.min_.z),
-      glm::vec3(bounds.min_.x, bounds.max_.y, bounds.min_.z),
-      glm::vec3(bounds.min_.x, bounds.min_.y, bounds.max_.z),
-      glm::vec3(bounds.max_.x, bounds.min_.y, bounds.max_.z),
-      glm::vec3(bounds.max_.x, bounds.max_.y, bounds.max_.z),
-      glm::vec3(bounds.min_.x, bounds.max_.y, bounds.max_.z),
-  };
-}
-
 [[nodiscard]] uint32_t saturateToU32(size_t value) {
   return static_cast<uint32_t>(
       std::min(value, size_t(std::numeric_limits<uint32_t>::max())));
@@ -288,7 +202,11 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       shadowFrameUploadSignatures_(memory_), meshDrawTemplates_(memory_),
       instanceMatrices_(memory_), instanceRemap_(memory_),
       drawPushConstants_(memory_), drawItems_(memory_),
-      passDependencyBuffers_(memory_), previewDependencyTextures_(memory_),
+      passDependencyBuffers_(memory_),
+      passDependencyBufferAccessModes_(memory_),
+      passDependencyTextures_(memory_),
+      passDependencyTextureAccessModes_(memory_),
+      previewDependencyTextures_(memory_),
       previewDependencyTextureAccessModes_(memory_) {}
 
 ShadowRenderer::~ShadowRenderer() {
@@ -307,7 +225,8 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
 
   shadowShader_ = Shader::create("shadow_depth", gpu_);
   depthShader_ = Shader::create("shadow_depth_only", gpu_);
-  if (!shadowShader_ || !depthShader_) {
+  depthAlphaShader_ = Shader::create("shadow_depth_alpha", gpu_);
+  if (!shadowShader_ || !depthShader_ || !depthAlphaShader_) {
     return Result<bool, std::string>::makeError(
         "ShadowRenderer::createShaders: failed to create shader wrappers");
   }
@@ -316,6 +235,8 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
       config_.shaderBasePath / "shadow_depth.vert";
   const std::filesystem::path depthFragmentPath =
       config_.shaderBasePath / "opaque_depth.frag";
+  const std::filesystem::path depthAlphaFragmentPath =
+      config_.shaderBasePath / "opaque_depth_alpha.frag";
 
   auto vertexResult = shadowShader_->compileFromFile(shadowVertexPath.string(),
                                                      ShaderStage::Vertex);
@@ -327,9 +248,15 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
   if (fragmentResult.hasError()) {
     return Result<bool, std::string>::makeError(fragmentResult.error());
   }
+  auto alphaFragmentResult = depthAlphaShader_->compileFromFile(
+      depthAlphaFragmentPath.string(), ShaderStage::Fragment);
+  if (alphaFragmentResult.hasError()) {
+    return Result<bool, std::string>::makeError(alphaFragmentResult.error());
+  }
 
   shadowVertexShader_ = vertexResult.value();
   depthFragmentShader_ = fragmentResult.value();
+  depthAlphaFragmentShader_ = alphaFragmentResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -386,6 +313,34 @@ Result<bool, std::string> ShadowRenderer::createPipelines() {
     return Result<bool, std::string>::makeError(doubleSidedResult.error());
   }
   shadowDoubleSidedPipelineHandle_ = doubleSidedResult.value();
+
+  auto alphaResult = gpu_.createRenderPipeline(
+      shadowDepthPipelineDesc(shadowVertexShader_, depthAlphaFragmentShader_,
+                              CullMode::Back),
+      "shadow_depth_alpha");
+  if (alphaResult.hasError()) {
+    gpu_.destroyRenderPipeline(shadowDoubleSidedPipelineHandle_);
+    gpu_.destroyRenderPipeline(shadowPipelineHandle_);
+    shadowDoubleSidedPipelineHandle_ = {};
+    shadowPipelineHandle_ = {};
+    return Result<bool, std::string>::makeError(alphaResult.error());
+  }
+  shadowAlphaPipelineHandle_ = alphaResult.value();
+
+  auto alphaDoubleSidedResult = gpu_.createRenderPipeline(
+      shadowDepthPipelineDesc(shadowVertexShader_, depthAlphaFragmentShader_,
+                              CullMode::None),
+      "shadow_depth_alpha_double_sided");
+  if (alphaDoubleSidedResult.hasError()) {
+    gpu_.destroyRenderPipeline(shadowAlphaPipelineHandle_);
+    gpu_.destroyRenderPipeline(shadowDoubleSidedPipelineHandle_);
+    gpu_.destroyRenderPipeline(shadowPipelineHandle_);
+    shadowAlphaPipelineHandle_ = {};
+    shadowDoubleSidedPipelineHandle_ = {};
+    shadowPipelineHandle_ = {};
+    return Result<bool, std::string>::makeError(alphaDoubleSidedResult.error());
+  }
+  shadowAlphaDoubleSidedPipelineHandle_ = alphaDoubleSidedResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -427,20 +382,72 @@ Result<bool, std::string> ShadowRenderer::ensureInitialized() {
 Result<bool, std::string> ShadowRenderer::ensureShadowResources(
     const RenderSettings::ShadowSettings &settings) {
   const bool previewEnabled = settings.debug.showShadowMapViewport;
+  const TextureDimensions depthDimensions =
+      nuri::isValid(shadowDepthTexture_)
+          ? gpu_.getTextureDimensions(shadowDepthTexture_)
+          : TextureDimensions{};
   const bool depthValid = nuri::isValid(shadowDepthTexture_) &&
-                          shadowMapSize_ == settings.shadowMapSize &&
+                          depthDimensions.width == settings.shadowMapSize &&
+                          depthDimensions.height == settings.shadowMapSize &&
                           gpu_.getTextureFormat(shadowDepthTexture_) ==
                               kDefaultShadowMapDepthFormat &&
-                          nuri::isValid(rawDepthSampler_);
-  const bool previewValid =
-      !previewEnabled || (nuri::isValid(shadowDebugPreviewTexture_) &&
-                          gpu_.getTextureFormat(shadowDebugPreviewTexture_) ==
-                              Format::RGBA8_UNORM);
+                          nuri::isValid(rawDepthSampler_) &&
+                          nuri::isValid(compareDepthSampler_);
+  const bool previewTextureValid =
+      nuri::isValid(shadowDebugPreviewTexture_) &&
+      gpu_.getTextureFormat(shadowDebugPreviewTexture_) == Format::RGBA8_UNORM;
+  const bool previewValid = previewEnabled
+                                ? previewTextureValid
+                                : !nuri::isValid(shadowDebugPreviewTexture_);
   if (depthValid && previewValid) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  destroyShadowResources();
+  if (depthValid) {
+    if (previewEnabled && !previewTextureValid) {
+      gpu_.waitIdle();
+      const TextureHandle oldPreviewTexture = shadowDebugPreviewTexture_;
+      const TextureDesc previewDesc{
+          .type = TextureType::Texture2D,
+          .format = Format::RGBA8_UNORM,
+          .dimensions = {.width = settings.shadowMapSize,
+                         .height = settings.shadowMapSize,
+                         .depth = 1u},
+          .usage = TextureUsage::AttachmentSampled,
+          .storage = Storage::Device,
+          .numLayers = 1u,
+          .numSamples = 1u,
+          .numMipLevels = 1u,
+          .data = {},
+          .dataNumMipLevels = 1u,
+          .generateMipmaps = false,
+      };
+      auto previewResult =
+          gpu_.createTexture(previewDesc, "shadow_depth_preview_phase1");
+      if (previewResult.hasError()) {
+        return Result<bool, std::string>::makeError(previewResult.error());
+      }
+      shadowDebugPreviewTexture_ = previewResult.value();
+      if (nuri::isValid(oldPreviewTexture)) {
+        gpu_.destroyTexture(oldPreviewTexture);
+      }
+      return Result<bool, std::string>::makeResult(true);
+    }
+    if (!previewEnabled && nuri::isValid(shadowDebugPreviewTexture_)) {
+      gpu_.waitIdle();
+      gpu_.destroyTexture(shadowDebugPreviewTexture_);
+      shadowDebugPreviewTexture_ = {};
+      return Result<bool, std::string>::makeResult(true);
+    }
+  }
+
+  const bool hasLiveResources = nuri::isValid(shadowDepthTexture_) ||
+                                nuri::isValid(shadowDebugPreviewTexture_) ||
+                                nuri::isValid(rawDepthSampler_) ||
+                                nuri::isValid(compareDepthSampler_);
+  if (hasLiveResources) {
+    gpu_.waitIdle();
+  }
 
   const TextureDesc shadowDesc{
       .type = TextureType::Texture2D,
@@ -462,6 +469,7 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
   if (textureResult.hasError()) {
     return Result<bool, std::string>::makeError(textureResult.error());
   }
+  const TextureHandle newShadowDepthTexture = textureResult.value();
 
   const SamplerDesc rawSamplerDesc{
       .minFilter = SamplerFilter::Nearest,
@@ -479,12 +487,24 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
   auto samplerResult =
       gpu_.createSampler(rawSamplerDesc, "shadow_raw_depth_sampler");
   if (samplerResult.hasError()) {
-    gpu_.destroyTexture(textureResult.value());
+    gpu_.destroyTexture(newShadowDepthTexture);
     return Result<bool, std::string>::makeError(samplerResult.error());
   }
+  const SamplerHandle newRawDepthSampler = samplerResult.value();
 
-  shadowDepthTexture_ = textureResult.value();
-  rawDepthSampler_ = samplerResult.value();
+  SamplerDesc compareSamplerDesc = rawSamplerDesc;
+  compareSamplerDesc.depthCompareEnabled = true;
+  compareSamplerDesc.depthCompareOp = CompareOp::LessEqual;
+  auto compareSamplerResult =
+      gpu_.createSampler(compareSamplerDesc, "shadow_compare_depth_sampler");
+  if (compareSamplerResult.hasError()) {
+    gpu_.destroySampler(newRawDepthSampler);
+    gpu_.destroyTexture(newShadowDepthTexture);
+    return Result<bool, std::string>::makeError(compareSamplerResult.error());
+  }
+  const SamplerHandle newCompareDepthSampler = compareSamplerResult.value();
+
+  TextureHandle newPreviewTexture{};
   if (previewEnabled) {
     const TextureDesc previewDesc{
         .type = TextureType::Texture2D,
@@ -504,12 +524,38 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
     auto previewResult =
         gpu_.createTexture(previewDesc, "shadow_depth_preview_phase1");
     if (previewResult.hasError()) {
-      destroyShadowResources();
+      gpu_.destroySampler(newCompareDepthSampler);
+      gpu_.destroySampler(newRawDepthSampler);
+      gpu_.destroyTexture(newShadowDepthTexture);
       return Result<bool, std::string>::makeError(previewResult.error());
     }
-    shadowDebugPreviewTexture_ = previewResult.value();
+    newPreviewTexture = previewResult.value();
   }
+
+  const TextureHandle oldShadowDepthTexture = shadowDepthTexture_;
+  const TextureHandle oldPreviewTexture = shadowDebugPreviewTexture_;
+  const SamplerHandle oldRawDepthSampler = rawDepthSampler_;
+  const SamplerHandle oldCompareDepthSampler = compareDepthSampler_;
+
+  shadowDepthTexture_ = newShadowDepthTexture;
+  shadowDebugPreviewTexture_ = newPreviewTexture;
+  rawDepthSampler_ = newRawDepthSampler;
+  compareDepthSampler_ = newCompareDepthSampler;
   shadowMapSize_ = settings.shadowMapSize;
+
+  if (nuri::isValid(oldCompareDepthSampler)) {
+    gpu_.destroySampler(oldCompareDepthSampler);
+  }
+  if (nuri::isValid(oldRawDepthSampler)) {
+    gpu_.destroySampler(oldRawDepthSampler);
+  }
+  if (nuri::isValid(oldPreviewTexture)) {
+    gpu_.destroyTexture(oldPreviewTexture);
+  }
+  if (nuri::isValid(oldShadowDepthTexture)) {
+    gpu_.destroyTexture(oldShadowDepthTexture);
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -605,6 +651,7 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
                                   uint32_t materialCount) {
   (void)materialCount;
   meshDrawTemplates_.clear();
+  passDependencyTextures_.clear();
 
   const std::span<const Renderable> renderables = scene.renderables();
   if (renderables.size() >
@@ -645,8 +692,18 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
           resolveRenderableMaterial(renderable, *modelRecord, submeshIndex);
       const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
       if (materialRecord != nullptr &&
-          materialRecord->desc.alphaMode != MaterialAlphaMode::Opaque) {
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Blend) {
         continue;
+      }
+      const bool alphaMasked =
+          materialRecord != nullptr &&
+          materialRecord->desc.alphaMode == MaterialAlphaMode::Mask;
+      if (alphaMasked) {
+        const TextureRecord *baseColor =
+            resources.tryGet(materialRecord->textureRefs.baseColor);
+        if (baseColor != nullptr) {
+          appendUniqueTexture(passDependencyTextures_, baseColor->texture);
+        }
       }
 
       meshDrawTemplates_.push_back(MeshDrawTemplate{
@@ -671,6 +728,7 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
           .doubleSided = materialRecord != nullptr
                              ? materialRecord->desc.doubleSided
                              : false,
+          .alphaMasked = alphaMasked,
       });
     }
   }
@@ -685,7 +743,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   shadowDebugFrameData_ = {};
   shadowDebugFrameData_.cascadeCount = 1u;
   shadowDebugFrameData_.rawSamplerId = frame.sharedResources.shadowRawSamplerId;
-  shadowDebugFrameData_.compareSamplerId = kInvalidShadowBindlessIndex;
+  shadowDebugFrameData_.compareSamplerId =
+      frame.sharedResources.shadowCompareSamplerId;
   shadowDebugFrameData_.cascades[0].texture = shadowDepthTexture_;
   shadowDebugFrameData_.cascades[0].textureBindlessId =
       gpu_.getTextureBindlessIndex(shadowDepthTexture_);
@@ -720,127 +779,75 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   frame.sharedResources.selectedShadowLightId = selectedLightId;
 
   const DirectionalLightGpuData &light = directionalLights[selectedLightIndex];
-  const glm::vec3 lightDirection = normalizeSafe(
+  const glm::vec3 lightDirection = shadow_detail::normalizeSafe(
       glm::vec3(light.directionIlluminance), glm::vec3(0.0f, -1.0f, 0.0f));
-  float effectiveFar = std::min(settings.maxDistance, frame.camera.farPlane);
-  float largestCasterRadius = 0.0f;
-  float farthestCasterDepth = frame.camera.nearPlane;
-  bool hasCasterDepthRange = false;
+  BoundingBox casterBounds{};
+  bool hasCasterBounds = false;
   for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
     if (entry.renderable == nullptr || entry.submesh == nullptr) {
       continue;
     }
     const BoundingBox worldBounds =
         entry.submesh->bounds.getTransformed(entry.renderable->modelMatrix);
-    largestCasterRadius = std::max(largestCasterRadius,
-                                   0.5f * glm::length(worldBounds.getSize()));
-
-    const std::array<glm::vec3, 8> worldCorners =
-        boundingBoxCorners(worldBounds);
-    float boundsMinDepth = std::numeric_limits<float>::max();
-    float boundsMaxDepth = std::numeric_limits<float>::lowest();
-    for (const glm::vec3 corner : worldCorners) {
-      const glm::vec3 viewSpace =
-          glm::vec3(frame.camera.view * glm::vec4(corner, 1.0f));
-      const float depth = -viewSpace.z;
-      boundsMinDepth = std::min(boundsMinDepth, depth);
-      boundsMaxDepth = std::max(boundsMaxDepth, depth);
-    }
-    if (boundsMaxDepth < frame.camera.nearPlane ||
-        boundsMinDepth > effectiveFar) {
-      continue;
-    }
-    farthestCasterDepth = std::max(farthestCasterDepth, boundsMaxDepth);
-    hasCasterDepthRange = true;
-  }
-  if (hasCasterDepthRange) {
-    const float focusMargin = std::max(largestCasterRadius * 2.0f, 2.0f);
-    effectiveFar = std::clamp(farthestCasterDepth + focusMargin,
-                              frame.camera.nearPlane + 0.01f, effectiveFar);
-  }
-  const std::array<glm::vec3, 8> frustumCorners =
-      computeShadowCameraSliceCorners(frame.camera, effectiveFar);
-
-  glm::vec3 frustumCenter(0.0f);
-  for (const glm::vec3 corner : frustumCorners) {
-    frustumCenter += corner;
-  }
-  frustumCenter /= static_cast<float>(frustumCorners.size());
-
-  float radius = 0.0f;
-  for (const glm::vec3 corner : frustumCorners) {
-    radius = std::max(radius, glm::length(corner - frustumCenter));
-  }
-  radius = std::max(radius, 1.0f);
-
-  const glm::vec3 lightUp = chooseLightUp(lightDirection);
-  const glm::vec3 eye = frustumCenter - lightDirection * (radius * 2.0f);
-  const glm::mat4 lightView = glm::lookAt(eye, frustumCenter, lightUp);
-
-  glm::vec3 lightMin(std::numeric_limits<float>::max());
-  glm::vec3 lightMax(std::numeric_limits<float>::lowest());
-  for (const glm::vec3 corner : frustumCorners) {
-    const glm::vec3 lightSpace = glm::vec3(lightView * glm::vec4(corner, 1.0f));
-    lightMin = glm::min(lightMin, lightSpace);
-    lightMax = glm::max(lightMax, lightSpace);
+    casterBounds.combinePoint(worldBounds.min_);
+    casterBounds.combinePoint(worldBounds.max_);
+    hasCasterBounds = true;
   }
 
-  const float xyPadding = std::max(radius * 0.1f, 1.0f);
-  lightMin.x -= xyPadding;
-  lightMin.y -= xyPadding;
-  lightMax.x += xyPadding;
-  lightMax.y += xyPadding;
+  const shadow_detail::DirectionalShadowFit fit =
+      hasCasterBounds ? shadow_detail::fitDirectionalShadowMapToBounds(
+                            frame.camera, casterBounds.min_, casterBounds.max_,
+                            lightDirection, settings.maxDistance, shadowMapSize,
+                            settings.stabilizeCascades)
+                      : shadow_detail::fitSingleDirectionalShadowMap(
+                            frame.camera, lightDirection, settings.maxDistance,
+                            shadowMapSize, settings.stabilizeCascades);
+  uint32_t shadowFlags = kShadowFrameFlagEnabled;
+  if (settings.debug.visualizeShadowFactor) {
+    shadowFlags |= kShadowFrameFlagVisualizeShadowFactor;
+  }
 
-  const float depthPadding = std::max(radius, 10.0f);
-  const float nearPlane = std::max(0.01f, -lightMax.z - depthPadding);
-  const float farPlane =
-      std::max(nearPlane + 0.01f, -lightMin.z + depthPadding);
-  const glm::mat4 lightProj = glm::ortho(lightMin.x, lightMax.x, lightMin.y,
-                                         lightMax.y, nearPlane, farPlane);
-  const glm::mat4 lightViewProj = lightProj * lightView;
-  const glm::vec3 debugLightBoundsMin(lightMin.x, lightMin.y, -farPlane);
-  const glm::vec3 debugLightBoundsMax(lightMax.x, lightMax.y, -nearPlane);
-  const float texelWorldSize =
-      std::max(lightMax.x - lightMin.x, lightMax.y - lightMin.y) /
-      static_cast<float>(std::max(shadowMapSize, 1u));
-
-  shadowFrameCpuData_.flagsCascadeCountLightIndex =
-      glm::uvec4(0u, 1u, selectedLightIndex, 0u);
+  shadowFrameCpuData_.flagsCascadeCountLightIndex = glm::uvec4(
+      shadowFlags, 1u, selectedLightIndex,
+      static_cast<uint32_t>(sanitizeShadowFilterMode(settings.filterMode)));
   shadowFrameCpuData_.fadeParams =
-      glm::vec4(frame.camera.nearPlane, effectiveFar, 0.0f, 0.0f);
+      glm::vec4(fit.splitNear, fit.splitFar, 0.0f, 0.0f);
   shadowFrameCpuData_.cascades[0] = ShadowCascadeGpuData{
-      .lightViewProj = lightViewProj,
-      .lightView = lightView,
+      .lightViewProj = fit.lightViewProj,
+      .lightView = fit.lightView,
       .splitDepthTexelSize =
-          glm::vec4(frame.camera.nearPlane, effectiveFar, texelWorldSize, 0.0f),
+          glm::vec4(fit.splitNear, fit.splitFar, fit.texelWorldSize, 0.0f),
       .uvScaleBias = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
       .biasParams = glm::vec4(settings.constantBias, settings.slopeBias,
                               settings.normalBias, 0.0f),
       .textureSampler =
           glm::uvec4(gpu_.getTextureBindlessIndex(shadowDepthTexture_),
-                     frame.sharedResources.shadowRawSamplerId, 0u, 0u),
+                     frame.sharedResources.shadowCompareSamplerId,
+                     frame.sharedResources.shadowRawSamplerId, 0u),
   };
 
   shadowDebugFrameData_.selectedShadowLightId = selectedLightId;
-  shadowDebugFrameData_.cascades[0].splitNear = frame.camera.nearPlane;
-  shadowDebugFrameData_.cascades[0].splitFar = effectiveFar;
-  shadowDebugFrameData_.cascades[0].texelWorldSize = texelWorldSize;
-  shadowDebugFrameData_.cascades[0].lightView = lightView;
-  shadowDebugFrameData_.cascades[0].lightProj = lightProj;
-  shadowDebugFrameData_.cascades[0].lightViewProj = lightViewProj;
-  shadowDebugFrameData_.cascades[0].inverseLightView = glm::inverse(lightView);
-  shadowDebugFrameData_.cascades[0].inverseLightProj = glm::inverse(lightProj);
+  shadowDebugFrameData_.cascades[0].splitNear = fit.splitNear;
+  shadowDebugFrameData_.cascades[0].splitFar = fit.splitFar;
+  shadowDebugFrameData_.cascades[0].texelWorldSize = fit.texelWorldSize;
+  shadowDebugFrameData_.cascades[0].lightView = fit.lightView;
+  shadowDebugFrameData_.cascades[0].lightProj = fit.lightProj;
+  shadowDebugFrameData_.cascades[0].lightViewProj = fit.lightViewProj;
+  shadowDebugFrameData_.cascades[0].inverseLightView =
+      glm::inverse(fit.lightView);
+  shadowDebugFrameData_.cascades[0].inverseLightProj =
+      glm::inverse(fit.lightProj);
   shadowDebugFrameData_.cascades[0].lightSpaceBoundsMin =
-      glm::vec4(debugLightBoundsMin, 1.0f);
+      glm::vec4(fit.lightSpaceBoundsMin, 1.0f);
   shadowDebugFrameData_.cascades[0].lightSpaceBoundsMax =
-      glm::vec4(debugLightBoundsMax, 1.0f);
+      glm::vec4(fit.lightSpaceBoundsMax, 1.0f);
   shadowDebugFrameData_.cascades[0].unsnappedCenter =
-      glm::vec4(frustumCenter, 1.0f);
+      glm::vec4(fit.frustumCenter, 1.0f);
   shadowDebugFrameData_.cascades[0].snappedCenter =
-      glm::vec4(frustumCenter, 1.0f);
-  for (size_t i = 0; i < frustumCorners.size(); ++i) {
+      glm::vec4(fit.frustumCenter, 1.0f);
+  for (size_t i = 0; i < fit.frustumCorners.size(); ++i) {
     shadowDebugFrameData_.cascades[0].worldFrustumCorners[i] =
-        glm::vec4(frustumCorners[i], 1.0f);
+        glm::vec4(fit.frustumCorners[i], 1.0f);
   }
 
   frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
@@ -927,6 +934,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       gpu_.getBufferDeviceAddress(instanceMatricesBuffer);
   const uint64_t instanceRemapAddress =
       gpu_.getBufferDeviceAddress(instanceRemapBuffer);
+  if (sceneGpu.shadowFrameBufferAddress == 0u) {
+    return Result<bool, std::string>::makeResult(true);
+  }
   if (sceneGpu.frameDataAddress == 0u || instanceMatricesAddress == 0u ||
       instanceRemapAddress == 0u) {
     return Result<bool, std::string>::makeError(
@@ -972,10 +982,18 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     const PushConstants &pc = drawPushConstants_.back();
 
     DrawItem draw{};
-    draw.pipeline =
-        entry.doubleSided && nuri::isValid(shadowDoubleSidedPipelineHandle_)
-            ? shadowDoubleSidedPipelineHandle_
-            : shadowPipelineHandle_;
+    if (entry.alphaMasked) {
+      draw.pipeline =
+          entry.doubleSided &&
+                  nuri::isValid(shadowAlphaDoubleSidedPipelineHandle_)
+              ? shadowAlphaDoubleSidedPipelineHandle_
+              : shadowAlphaPipelineHandle_;
+    } else {
+      draw.pipeline =
+          entry.doubleSided && nuri::isValid(shadowDoubleSidedPipelineHandle_)
+              ? shadowDoubleSidedPipelineHandle_
+              : shadowPipelineHandle_;
+    }
     draw.vertexBuffer = entry.baseVertexBuffer;
     draw.indexBuffer = entry.indexBuffer;
     draw.indexBufferOffset = entry.indexBufferOffset;
@@ -1006,6 +1024,15 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     appendUniqueBuffer(passDependencyBuffers_,
                        frame.sharedResources.shadowFrameGpuData->buffer);
   }
+  if (frame.sharedResources.materialTableGpuData.has_value()) {
+    appendUniqueBuffer(
+        passDependencyBuffers_,
+        frame.sharedResources.materialTableGpuData->headerBuffer);
+  }
+  passDependencyBufferAccessModes_.assign(passDependencyBuffers_.size(),
+                                          RenderGraphAccessMode::Read);
+  passDependencyTextureAccessModes_.assign(passDependencyTextures_.size(),
+                                           RenderGraphAccessMode::Read);
   preparedShadowDrawCount_ = saturateToU32(drawItems_.size());
   shadowDebugFrameData_.cascades[0].drawCount = preparedShadowDrawCount_;
   frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
@@ -1024,6 +1051,10 @@ void ShadowRenderer::destroyShadowResources() {
   if (nuri::isValid(rawDepthSampler_)) {
     gpu_.destroySampler(rawDepthSampler_);
     rawDepthSampler_ = {};
+  }
+  if (nuri::isValid(compareDepthSampler_)) {
+    gpu_.destroySampler(compareDepthSampler_);
+    compareDepthSampler_ = {};
   }
   shadowMapSize_ = 0u;
 }
@@ -1074,8 +1105,13 @@ void ShadowRenderer::destroyShaders() {
     gpu_.destroyShaderModule(depthFragmentShader_);
     depthFragmentShader_ = {};
   }
+  if (nuri::isValid(depthAlphaFragmentShader_)) {
+    gpu_.destroyShaderModule(depthAlphaFragmentShader_);
+    depthAlphaFragmentShader_ = {};
+  }
   shadowShader_.reset();
   depthShader_.reset();
+  depthAlphaShader_.reset();
   initialized_ = false;
 }
 
@@ -1087,6 +1123,14 @@ void ShadowRenderer::destroyPipelineState() {
   if (nuri::isValid(shadowDoubleSidedPipelineHandle_)) {
     gpu_.destroyRenderPipeline(shadowDoubleSidedPipelineHandle_);
     shadowDoubleSidedPipelineHandle_ = {};
+  }
+  if (nuri::isValid(shadowAlphaDoubleSidedPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(shadowAlphaDoubleSidedPipelineHandle_);
+    shadowAlphaDoubleSidedPipelineHandle_ = {};
+  }
+  if (nuri::isValid(shadowAlphaPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(shadowAlphaPipelineHandle_);
+    shadowAlphaPipelineHandle_ = {};
   }
   if (nuri::isValid(shadowPipelineHandle_)) {
     gpu_.destroyRenderPipeline(shadowPipelineHandle_);
@@ -1101,10 +1145,11 @@ void ShadowRenderer::resetCachedState() {
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
-  preparedShadowFrameSignature_ = std::numeric_limits<uint64_t>::max();
   meshDrawTemplates_.clear();
   instanceMatrices_.clear();
   instanceRemap_.clear();
+  passDependencyTextures_.clear();
+  passDependencyTextureAccessModes_.clear();
 }
 
 void ShadowRenderer::resetFrameBuildState() {
@@ -1114,6 +1159,7 @@ void ShadowRenderer::resetFrameBuildState() {
   drawPushConstants_.clear();
   drawItems_.clear();
   passDependencyBuffers_.clear();
+  passDependencyBufferAccessModes_.clear();
   previewDependencyTextures_.clear();
   previewDependencyTextureAccessModes_.clear();
   previewPushConstants_ = {};
@@ -1134,13 +1180,6 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   RenderSettings::ShadowSettings settings =
       renderSettingsOrDefault(frame).shadow;
   sanitizeShadowSettings(settings);
-  if (!settings.enabled) {
-    destroyShadowResources();
-    destroyBuffers();
-    resetCachedState();
-    resetFrameBuildState();
-    return Result<bool, std::string>::makeResult(true);
-  }
 
   auto ensureTextureResult = ensureShadowResources(settings);
   if (ensureTextureResult.hasError()) {
@@ -1158,6 +1197,8 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   }
 
   const uint32_t rawSamplerId = gpu_.getSamplerBindlessIndex(rawDepthSampler_);
+  const uint32_t compareSamplerId =
+      gpu_.getSamplerBindlessIndex(compareDepthSampler_);
   const uint32_t textureId = gpu_.getTextureBindlessIndex(shadowDepthTexture_);
   const uint32_t frameSlot =
       static_cast<uint32_t>(frame.frameIndex % shadowFrameRing_.size());
@@ -1173,6 +1214,7 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.shadowCascadeTextures[0] = shadowDepthTexture_;
   frame.sharedResources.shadowDebugPreviewTexture = shadowDebugPreviewTexture_;
   frame.sharedResources.shadowRawSamplerId = rawSamplerId;
+  frame.sharedResources.shadowCompareSamplerId = compareSamplerId;
   frame.sharedResources.shadowFrameGpuData = ShadowFrameGpuDataHandle{
       .buffer = shadowFrameBuffer,
       .bufferAddress = shadowFrameAddress,
@@ -1181,10 +1223,28 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   ShadowDebugFrameData debug{};
   debug.cascadeCount = 1u;
   debug.rawSamplerId = rawSamplerId;
-  debug.compareSamplerId = kInvalidShadowBindlessIndex;
+  debug.compareSamplerId = compareSamplerId;
   debug.cascades[0].texture = shadowDepthTexture_;
   debug.cascades[0].textureBindlessId = textureId;
   frame.sharedResources.shadowDebugFrameData = debug;
+
+  if (!settings.enabled) {
+    shadowFrameCpuData_ = {};
+    shadowFrameCpuData_.cascades[0].textureSampler =
+        glm::uvec4(textureId, compareSamplerId, 0u, 0u);
+    const std::span<const std::byte> shadowFrameBytes = std::as_bytes(
+        std::span<const ShadowFrameGpuData>(&shadowFrameCpuData_, 1u));
+    const uint64_t shadowFrameSignature = hashBytes(shadowFrameBytes);
+    if (shadowFrameUploadSignatures_[frameSlot] != shadowFrameSignature) {
+      auto updateResult =
+          gpu_.updateBuffer(shadowFrameBuffer, shadowFrameBytes, 0u);
+      if (updateResult.hasError()) {
+        return updateResult;
+      }
+      shadowFrameUploadSignatures_[frameSlot] = shadowFrameSignature;
+    }
+    resetFrameBuildState();
+  }
 
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1237,6 +1297,8 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
     }
   } else {
     meshDrawTemplates_.clear();
+    passDependencyTextures_.clear();
+    passDependencyTextureAccessModes_.clear();
   }
 
   auto shadowFrameDataResult =
@@ -1258,7 +1320,6 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
     }
     shadowFrameUploadSignatures_[frameSlot] = shadowFrameSignature;
   }
-  preparedShadowFrameSignature_ = shadowFrameSignature;
 
   if (frame.sharedResources.forwardSceneGpuData.has_value()) {
     auto drawResult = buildShadowDraws(
@@ -1269,7 +1330,8 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   }
 
   hasPreparedShadowDepthPasses_ = nuri::isValid(shadowDepthTexture_);
-  if (nuri::isValid(shadowDebugPreviewTexture_)) {
+  if (settings.debug.showShadowMapViewport &&
+      nuri::isValid(shadowDebugPreviewTexture_)) {
     const uint32_t sourceTexId =
         gpu_.getTextureBindlessIndex(shadowDepthTexture_);
     if (sourceTexId == kInvalidShadowBindlessIndex) {
@@ -1324,6 +1386,13 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     return Result<bool, std::string>::makeResult(true);
   }
 
+  const TextureDimensions shadowDepthDimensions =
+      gpu_.getTextureDimensions(shadowDepthTexture_);
+  const float shadowViewportWidth =
+      static_cast<float>(std::max(shadowDepthDimensions.width, 1u));
+  const float shadowViewportHeight =
+      static_cast<float>(std::max(shadowDepthDimensions.height, 1u));
+
   auto depthImportResult =
       graph.importTexture(shadowDepthTexture_, "shadow_depth_map");
   if (depthImportResult.hasError()) {
@@ -1344,16 +1413,21 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
       .useViewport = true,
       .viewport = {.x = 0.0f,
                    .y = 0.0f,
-                   .width = static_cast<float>(shadowMapSize_),
-                   .height = static_cast<float>(shadowMapSize_),
+                   .width = shadowViewportWidth,
+                   .height = shadowViewportHeight,
                    .minDepth = 0.0f,
                    .maxDepth = 1.0f},
       .preDispatches = {},
       .dependencyBuffers = std::span<const BufferHandle>(
           passDependencyBuffers_.data(), passDependencyBuffers_.size()),
-      .dependencyBufferAccessModes = {},
-      .dependencyTextures = {},
-      .dependencyTextureAccessModes = {},
+      .dependencyBufferAccessModes = std::span<const RenderGraphAccessMode>(
+          passDependencyBufferAccessModes_.data(),
+          passDependencyBufferAccessModes_.size()),
+      .dependencyTextures = std::span<const TextureHandle>(
+          passDependencyTextures_.data(), passDependencyTextures_.size()),
+      .dependencyTextureAccessModes = std::span<const RenderGraphAccessMode>(
+          passDependencyTextureAccessModes_.data(),
+          passDependencyTextureAccessModes_.size()),
       .draws = std::span<const DrawItem>(drawItems_.data(), drawItems_.size()),
       .drawBuffersPreResolved = false,
       .preResolvedDrawBuffers = {},
@@ -1376,6 +1450,12 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
 
   if (hasPreparedShadowPreviewPass_ &&
       nuri::isValid(shadowDebugPreviewTexture_)) {
+    const TextureDimensions previewDimensions =
+        gpu_.getTextureDimensions(shadowDebugPreviewTexture_);
+    const float previewViewportWidth =
+        static_cast<float>(std::max(previewDimensions.width, 1u));
+    const float previewViewportHeight =
+        static_cast<float>(std::max(previewDimensions.height, 1u));
     auto previewImportResult =
         graph.importTexture(shadowDebugPreviewTexture_, "shadow_depth_preview");
     if (previewImportResult.hasError()) {
@@ -1395,8 +1475,8 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         .useViewport = true,
         .viewport = {.x = 0.0f,
                      .y = 0.0f,
-                     .width = static_cast<float>(shadowMapSize_),
-                     .height = static_cast<float>(shadowMapSize_),
+                     .width = previewViewportWidth,
+                     .height = previewViewportHeight,
                      .minDepth = 0.0f,
                      .maxDepth = 1.0f},
         .preDispatches = {},

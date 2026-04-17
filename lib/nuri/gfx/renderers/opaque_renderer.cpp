@@ -504,6 +504,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       indirectCommandUploadBytes_(resolveMemoryResource(memory)),
       overlayDrawItems_(resolveMemoryResource(memory)),
       pickDrawItems_(resolveMemoryResource(memory)),
+      shadowInspectDrawItems_(resolveMemoryResource(memory)),
       passDrawItems_(resolveMemoryResource(memory)),
       depthPrepassDrawItems_(resolveMemoryResource(memory)),
       depthPyramidPushConstants_(resolveMemoryResource(memory)),
@@ -516,6 +517,10 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       preResolvedDrawBuffers_(resolveMemoryResource(memory)),
       dispatchDependencyBuffers_(resolveMemoryResource(memory)),
       passDependencyTextures_(resolveMemoryResource(memory)),
+      mainPassDependencyBuffers_(resolveMemoryResource(memory)),
+      mainPassDependencyBufferAccessModes_(resolveMemoryResource(memory)),
+      mainPassDependencyTextures_(resolveMemoryResource(memory)),
+      mainPassDependencyTextureAccessModes_(resolveMemoryResource(memory)),
       preparedGraphPasses_(resolveMemoryResource(memory)) {
   auto *resource = resolveMemoryResource(memory);
   singleInstanceBatchCaches_.reserve(kSingleInstanceCacheVariantCount);
@@ -536,12 +541,15 @@ void OpaqueRenderer::onAttach() {
 
 void OpaqueRenderer::resetPickState() {
   pendingPickRequest_.reset();
+  pendingShadowInspectRequest_.reset();
   inFlightPickReadback_.reset();
+  inFlightShadowInspectReadback_.reset();
 }
 
 void OpaqueRenderer::onDetach() {
   destroyBuffers();
   destroyPickTexture();
+  destroyShadowInspectTexture();
   destroyDepthPyramidTextures();
   if (nuri::isValid(sceneDepthSampler_)) {
     gpu_.destroySampler(sceneDepthSampler_);
@@ -555,6 +563,7 @@ void OpaqueRenderer::onDetach() {
   meshTessShader_.reset();
   meshDebugOverlayShader_.reset();
   meshPickShader_.reset();
+  meshShadowInspectShader_.reset();
   depthShader_.reset();
   depthAlphaShader_.reset();
   depthPyramidShader_.reset();
@@ -567,6 +576,7 @@ void OpaqueRenderer::onDetach() {
   meshDebugOverlayGeometryShader_ = {};
   meshDebugOverlayFragmentShader_ = {};
   meshPickFragmentShader_ = {};
+  meshShadowInspectFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -603,9 +613,15 @@ void OpaqueRenderer::onDetach() {
   depthPyramidDependencyTextures_.clear();
   preDispatches_.clear();
   passDependencyBuffers_.clear();
+  passDependencyBufferAccessModes_.clear();
   preResolvedDecodeBuffers_.clear();
   preResolvedDrawBuffers_.clear();
   dispatchDependencyBuffers_.clear();
+  passDependencyTextures_.clear();
+  mainPassDependencyBuffers_.clear();
+  mainPassDependencyBufferAccessModes_.clear();
+  mainPassDependencyTextures_.clear();
+  mainPassDependencyTextureAccessModes_.clear();
   pickDrawItems_.clear();
   cachedPreResolvedBufferSignature_ = std::numeric_limits<uint64_t>::max();
   currentDirectDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
@@ -618,7 +634,6 @@ void OpaqueRenderer::onDetach() {
   cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
   cachedAnimationSceneActive_ = false;
   instanceStaticBuffersDirty_ = true;
-  loggedMainPassProbeTopologyVersion_ = std::numeric_limits<uint64_t>::max();
   uniformSingleSubmeshPath_ = false;
   invalidateAutoLodCache();
   invalidateSingleInstanceBatchCache();
@@ -632,6 +647,7 @@ void OpaqueRenderer::onDetach() {
 
 void OpaqueRenderer::onResize(uint32_t, uint32_t) {
   destroyPickTexture();
+  destroyShadowInspectTexture();
   destroyDepthPyramidTextures();
   resetPickState();
 }
@@ -702,6 +718,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     pendingPickRequest_ = frame.opaquePickRequest;
     frame.opaquePickRequest.reset();
   }
+  frame.shadowInspectResult.reset();
+  if (frame.shadowInspectRequest.has_value()) {
+    pendingShadowInspectRequest_ = frame.shadowInspectRequest;
+    frame.shadowInspectRequest.reset();
+  }
 
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.opaque.enabled) {
@@ -737,6 +758,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       return pickTextureResult;
     }
   }
+  const bool needsShadowInspectResources =
+      pendingShadowInspectRequest_.has_value() ||
+      inFlightShadowInspectReadback_.has_value();
+  if (needsShadowInspectResources && !nuri::isValid(shadowInspectTexture_)) {
+    auto inspectTextureResult = recreateShadowInspectTexture();
+    if (inspectTextureResult.hasError()) {
+      return inspectTextureResult;
+    }
+  }
   if (inFlightPickReadback_.has_value() &&
       frame.frameIndex > inFlightPickReadback_->submissionFrame) {
     NURI_PROFILER_ZONE("OpaqueRenderer.pick_readback",
@@ -766,6 +796,40 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       frame.opaquePickResult = result;
     }
     inFlightPickReadback_.reset();
+    NURI_PROFILER_ZONE_END();
+  }
+  if (inFlightShadowInspectReadback_.has_value() &&
+      frame.frameIndex > inFlightShadowInspectReadback_->submissionFrame) {
+    NURI_PROFILER_ZONE("OpaqueRenderer.shadow_inspect_readback",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    std::array<std::byte, sizeof(float) * 4u> inspectBytes{};
+    const TextureReadbackRegion readbackRegion{
+        .x = inFlightShadowInspectReadback_->request.x,
+        .y = inFlightShadowInspectReadback_->request.y,
+        .width = 1,
+        .height = 1,
+        .mipLevel = 0,
+        .layer = 0,
+    };
+    auto readResult =
+        gpu_.readTexture(shadowInspectTexture_, readbackRegion, inspectBytes);
+    if (readResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::buildOpaquePasses: shadow inspect readback failed: "
+          "%s",
+          readResult.error().c_str());
+    } else {
+      std::array<float, 4> values{};
+      std::memcpy(values.data(), inspectBytes.data(), sizeof(values));
+      ShadowInspectResult result{};
+      result.requestId = inFlightShadowInspectReadback_->request.requestId;
+      result.valid = values[3] > 0.5f;
+      result.receiverDepth = values[0];
+      result.receiverCompareDepth = values[1];
+      result.sampledDepth = values[2];
+      frame.shadowInspectResult = result;
+    }
+    inFlightShadowInspectReadback_.reset();
     NURI_PROFILER_ZONE_END();
   }
   const bool topologyDirty =
@@ -1043,7 +1107,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       materialGpu->specularBufferAddress == 0u ||
       (sceneGpu->directionalLightCount > 0u &&
        directionalLightBufferAddress == 0u) ||
-      (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
+      (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u) ||
+      ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u &&
+       sceneGpu->shadowFrameBufferAddress == 0u)) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::buildOpaquePasses: invalid GPU buffer address");
   }
@@ -2788,65 +2854,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
   }
 
-  if (loggedMainPassProbeTopologyVersion_ != frame.scene->topologyVersion() &&
-      !finalPassDrawItems.empty()) {
-    loggedMainPassProbeTopologyVersion_ = frame.scene->topologyVersion();
-    const DrawItem &probeDraw = finalPassDrawItems.front();
-    NURI_ASSERT(probeDraw.pushConstants.size() == sizeof(PushConstants),
-                "OpaqueRenderer::buildOpaquePasses(main push constants)");
-    const PushConstants *probe =
-        reinterpret_cast<const PushConstants *>(probeDraw.pushConstants.data());
-    const uint64_t directionalLightBufferAddress =
-        frame.sharedResources.forwardSceneGpuData.has_value()
-            ? frame.sharedResources.forwardSceneGpuData
-                  ->directionalLightBufferAddress
-            : 0u;
-    const uint64_t localLightBufferAddress =
-        frame.sharedResources.forwardSceneGpuData.has_value()
-            ? frame.sharedResources.forwardSceneGpuData->localLightBufferAddress
-            : 0u;
-    const uint64_t materialHeaderBufferAddress =
-        frame.sharedResources.materialTableGpuData.has_value()
-            ? frame.sharedResources.materialTableGpuData->headerBufferAddress
-            : 0u;
-    const uint64_t materialTransmissionBufferAddress =
-        frame.sharedResources.materialTableGpuData.has_value()
-            ? frame.sharedResources.materialTableGpuData
-                  ->transmissionBufferAddress
-            : 0u;
-    NURI_LOG_DEBUG(
-        "OpaqueRenderer::buildOpaquePasses main probe: "
-        "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
-        "instanceMatrices=0x%llx instanceRemap=0x%llx "
-        "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "
-        "materialTransmission=0x%llx materialIndex=%u decodeIndex=%u "
-        "packedFormat=%u draws=%zu depthPrepass=%u command=%u "
-        "drawVertexHandle=%u:%u drawIndexHandle=%u:%u "
-        "drawIndirectHandle=%u:%u",
-        static_cast<unsigned long long>(
-            probe != nullptr ? probe->frameDataAddress : 0u),
-        static_cast<unsigned long long>(
-            probe != nullptr ? probe->vertexBufferAddress : 0u),
-        static_cast<unsigned long long>(
-            probe != nullptr ? probe->vertexDecodeBufferAddress : 0u),
-        static_cast<unsigned long long>(
-            probe != nullptr ? probe->instanceMatricesAddress : 0u),
-        static_cast<unsigned long long>(
-            probe != nullptr ? probe->instanceRemapAddress : 0u),
-        static_cast<unsigned long long>(directionalLightBufferAddress),
-        static_cast<unsigned long long>(localLightBufferAddress),
-        static_cast<unsigned long long>(materialHeaderBufferAddress),
-        static_cast<unsigned long long>(materialTransmissionBufferAddress),
-        probe != nullptr ? probe->materialIndex : 0u,
-        probe != nullptr ? probe->vertexDecodeIndex : 0u,
-        probe != nullptr ? probe->packedVertexFormat : 0u,
-        finalPassDrawItems.size(), depthPrepassEnabled ? 1u : 0u,
-        static_cast<unsigned>(probeDraw.command), probeDraw.vertexBuffer.index,
-        probeDraw.vertexBuffer.generation, probeDraw.indexBuffer.index,
-        probeDraw.indexBuffer.generation, probeDraw.indirectBuffer.index,
-        probeDraw.indirectBuffer.generation);
-  }
-
   size_t indirectCommandCount = 0;
   for (const DrawItem &indirectDraw : indirectDrawItems_) {
     indirectCommandCount += indirectDraw.indirectDrawCount;
@@ -2876,22 +2883,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           : 0u;
   frame.metrics.opaque.depthPyramidLevels = 0u;
   frame.metrics.opaque.depthPrepassEnabled = depthPrepassEnabled ? 1u : 0u;
-
-  ++statsLogFrameCounter_;
-  const bool shouldLogStats = (statsLogFrameCounter_ & 511ull) == 0ull;
-  if (shouldLogStats) {
-    // NURI_LOG_DEBUG("OpaqueRenderer::buildOpaquePasses: totalInstances=%zu "
-    //                "visibleInstances=%zu "
-    //                "instancedDraws=%zu tessellatedDraws=%zu "
-    //                "tessellatedInstances=%zu indirectDrawCalls=%zu "
-    //                "indirectCommands=%zu "
-    //                "overlayDraws=%zu "
-    //                "overlayFallbackDraws=%zu",
-    //                instanceCount, remapCount, drawItems_.size(),
-    //                tessellatedDraws, tessellatedInstances,
-    //                indirectDrawItems_.size(), indirectCommandCount,
-    //                debugOverlayDraws, debugOverlayFallbackDraws);
-  }
 
   bool pickPassSubmitted = false;
   if (pendingPickRequest_.has_value() && nuri::isValid(pickIdTexture_) &&
@@ -3083,14 +3074,43 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
   }
+  mainPassDependencyBuffers_ = passDependencyBuffers_;
+  mainPassDependencyBufferAccessModes_ = passDependencyBufferAccessModes_;
+  mainPassDependencyTextures_ = passDependencyTextures_;
+  mainPassDependencyTextureAccessModes_.assign(
+      mainPassDependencyTextures_.size(), RenderGraphAccessMode::Read);
+  if ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u &&
+      frame.sharedResources.shadowFrameGpuData.has_value()) {
+    auto shadowBufferDepResult = appendUniqueDependency(
+        mainPassDependencyBuffers_, mainPassDependencyBufferAccessModes_,
+        frame.sharedResources.shadowFrameGpuData->buffer,
+        RenderGraphAccessMode::Read,
+        "OpaqueRenderer::buildOpaquePasses(main shadow pass)");
+    if (shadowBufferDepResult.hasError()) {
+      return shadowBufferDepResult;
+    }
+
+    const size_t oldTextureDependencyCount = mainPassDependencyTextures_.size();
+    appendUniqueTextureDependency(
+        mainPassDependencyTextures_,
+        frame.sharedResources.shadowCascadeTextures[0]);
+    if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
+      mainPassDependencyTextureAccessModes_.push_back(
+          RenderGraphAccessMode::Read);
+    }
+  }
   pass.desc.dependencyBuffers = std::span<const BufferHandle>(
-      passDependencyBuffers_.data(), passDependencyBuffers_.size());
+      mainPassDependencyBuffers_.data(), mainPassDependencyBuffers_.size());
   pass.desc.dependencyBufferAccessModes =
       std::span<const RenderGraphAccessMode>(
-          passDependencyBufferAccessModes_.data(),
-          passDependencyBufferAccessModes_.size());
+          mainPassDependencyBufferAccessModes_.data(),
+          mainPassDependencyBufferAccessModes_.size());
   pass.desc.dependencyTextures = std::span<const TextureHandle>(
-      passDependencyTextures_.data(), passDependencyTextures_.size());
+      mainPassDependencyTextures_.data(), mainPassDependencyTextures_.size());
+  pass.desc.dependencyTextureAccessModes =
+      std::span<const RenderGraphAccessMode>(
+          mainPassDependencyTextureAccessModes_.data(),
+          mainPassDependencyTextureAccessModes_.size());
   pass.desc.draws = finalPassDrawItems;
   pass.desc.drawBuffersPreResolved = true;
   pass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
@@ -3109,6 +3129,83 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         "unavailable");
   }
   pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
+
+  if (pendingShadowInspectRequest_.has_value() &&
+      nuri::isValid(shadowInspectTexture_) &&
+      nuri::isValid(meshShadowInspectPipelineHandle_)) {
+    shadowInspectDrawItems_.clear();
+    shadowInspectDrawItems_.reserve(shadedBaseDrawItems.size());
+
+    int32_t framebufferWidth = 0;
+    int32_t framebufferHeight = 0;
+    gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+    const uint32_t safeWidth =
+        static_cast<uint32_t>(std::max(framebufferWidth, 1));
+    const uint32_t safeHeight =
+        static_cast<uint32_t>(std::max(framebufferHeight, 1));
+    pendingShadowInspectRequest_->x =
+        std::min(pendingShadowInspectRequest_->x, safeWidth - 1u);
+    pendingShadowInspectRequest_->y =
+        std::min(pendingShadowInspectRequest_->y, safeHeight - 1u);
+    const RectU32 inspectScissor{.x = pendingShadowInspectRequest_->x,
+                                 .y = pendingShadowInspectRequest_->y,
+                                 .width = 1u,
+                                 .height = 1u};
+
+    for (const DrawItem &sourceItem : shadedBaseDrawItems) {
+      DrawItem inspectItem = sourceItem;
+      inspectItem.pipeline = selectShadowInspectPipeline(sourceItem.pipeline);
+      inspectItem.useDepthState = true;
+      inspectItem.depthState = {.compareOp = CompareOp::LessEqual,
+                                .isDepthWriteEnabled = false};
+      inspectItem.useScissor = true;
+      inspectItem.scissor = inspectScissor;
+      inspectItem.debugLabel = "OpaqueShadowInspect";
+      inspectItem.debugColor = kOpaquePassDebugColor;
+      shadowInspectDrawItems_.push_back(inspectItem);
+    }
+
+    PreparedGraphPass &inspectPass =
+        out.emplace_back(drawItems_.get_allocator().resource());
+    inspectPass.desc.color = {.loadOp = LoadOp::Clear,
+                              .storeOp = StoreOp::Store,
+                              .clearColor = {0.0f, 0.0f, 0.0f, 0.0f}};
+    inspectPass.colorTextureHandle = shadowInspectTexture_;
+    inspectPass.desc.depth = {.loadOp = LoadOp::Load,
+                              .storeOp = StoreOp::Store,
+                              .clearDepth = kClearDepthOne,
+                              .clearStencil = 0};
+    inspectPass.depthTextureHandle = sceneDepthTexture;
+    inspectPass.desc.dependencyBuffers = std::span<const BufferHandle>(
+        mainPassDependencyBuffers_.data(), mainPassDependencyBuffers_.size());
+    inspectPass.desc.dependencyBufferAccessModes =
+        std::span<const RenderGraphAccessMode>(
+            mainPassDependencyBufferAccessModes_.data(),
+            mainPassDependencyBufferAccessModes_.size());
+    inspectPass.desc.dependencyTextures = std::span<const TextureHandle>(
+        mainPassDependencyTextures_.data(), mainPassDependencyTextures_.size());
+    inspectPass.desc.dependencyTextureAccessModes =
+        std::span<const RenderGraphAccessMode>(
+            mainPassDependencyTextureAccessModes_.data(),
+            mainPassDependencyTextureAccessModes_.size());
+    inspectPass.desc.draws = std::span<const DrawItem>(
+        shadowInspectDrawItems_.data(), shadowInspectDrawItems_.size());
+    inspectPass.desc.drawBuffersPreResolved = true;
+    inspectPass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+        preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
+    inspectPass.desc.debugLabel = "Opaque Shadow Inspect Pass";
+    inspectPass.desc.debugColor = kOpaquePassDebugColor;
+    inspectPass.hasDraws = !shadowInspectDrawItems_.empty();
+    inspectPass.hasPreDispatch = false;
+    inspectPass.desc.borrowPayload = true;
+    inspectPass.hasIndirectDraws = false;
+
+    inFlightShadowInspectReadback_ =
+        InFlightShadowInspectReadback{.request = *pendingShadowInspectRequest_,
+                                      .submissionFrame = frame.frameIndex};
+    pendingShadowInspectRequest_.reset();
+  }
+
   frame.metrics.opaque.computeDispatches = saturateToU32(preDispatches_.size());
   NURI_PROFILER_ZONE_END();
   return Result<bool, std::string>::makeResult(true);
@@ -4189,6 +4286,42 @@ Result<bool, std::string> OpaqueRenderer::recreatePickTexture() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string> OpaqueRenderer::recreateShadowInspectTexture() {
+  if (nuri::isValid(shadowInspectTexture_)) {
+    gpu_.destroyTexture(shadowInspectTexture_);
+    shadowInspectTexture_ = TextureHandle{};
+  }
+
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+  const uint32_t safeWidth =
+      static_cast<uint32_t>(std::max(framebufferWidth, 1));
+  const uint32_t safeHeight =
+      static_cast<uint32_t>(std::max(framebufferHeight, 1));
+
+  const TextureDesc inspectDesc{
+      .type = TextureType::Texture2D,
+      .format = Format::RGBA32_FLOAT,
+      .dimensions = {safeWidth, safeHeight, 1u},
+      .usage = TextureUsage::AttachmentSampled,
+      .storage = Storage::Device,
+      .numLayers = 1u,
+      .numSamples = 1u,
+      .numMipLevels = 1u,
+      .data = {},
+      .dataNumMipLevels = 1u,
+      .generateMipmaps = false,
+  };
+  auto inspectResult = gpu_.createFramebufferTexture(
+      inspectDesc, "opaque_shadow_inspect_texture");
+  if (inspectResult.hasError()) {
+    return Result<bool, std::string>::makeError(inspectResult.error());
+  }
+  shadowInspectTexture_ = inspectResult.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
 Result<bool, std::string>
 OpaqueRenderer::ensureCentersPhaseBufferCapacity(size_t requiredBytes) {
   const size_t requested = std::max(requiredBytes, sizeof(glm::vec4));
@@ -4632,12 +4765,14 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshTessShader_ = Shader::create("main_tess", gpu_);
   meshDebugOverlayShader_ = Shader::create("mesh_debug_overlay", gpu_);
   meshPickShader_ = Shader::create("main_id", gpu_);
+  meshShadowInspectShader_ = Shader::create("shadow_inspect", gpu_);
   depthShader_ = Shader::create("opaque_depth", gpu_);
   depthAlphaShader_ = Shader::create("opaque_depth_alpha", gpu_);
   depthPyramidShader_ = Shader::create("depth_minmax_pyramid", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
-  if (!meshShader_ || !meshTessShader_ || !meshPickShader_ || !computeShader_ ||
-      !depthShader_ || !depthAlphaShader_ || !depthPyramidShader_) {
+  if (!meshShader_ || !meshTessShader_ || !meshPickShader_ ||
+      !meshShadowInspectShader_ || !computeShader_ || !depthShader_ ||
+      !depthAlphaShader_ || !depthPyramidShader_) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::createShaders: failed to create shader objects");
   }
@@ -4650,6 +4785,7 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshDebugOverlayGeometryShader_ = {};
   meshDebugOverlayFragmentShader_ = {};
   meshPickFragmentShader_ = {};
+  meshShadowInspectFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -4695,6 +4831,16 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       return Result<bool, std::string>::makeError(compileResult.error());
     }
     meshPickFragmentShader_ = compileResult.value();
+  }
+
+  {
+    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    auto compileResult = meshShadowInspectShader_->compileFromFile(
+        (shaderDir / "shadow_inspect.frag").string(), ShaderStage::Fragment);
+    if (compileResult.hasError()) {
+      return Result<bool, std::string>::makeError(compileResult.error());
+    }
+    meshShadowInspectFragmentShader_ = compileResult.value();
   }
 
   {
@@ -5071,6 +5217,77 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     }
   }
 
+  {
+    const RenderPipelineDesc inspectDesc = meshPipelineDesc(
+        Format::RGBA32_FLOAT, depthFormat, meshVertexShader_, {}, {}, {},
+        meshShadowInspectFragmentShader_, PolygonMode::Fill);
+    auto inspectPipelineResult =
+        gpu_.createRenderPipeline(inspectDesc, "opaque_mesh_shadow_inspect");
+    if (inspectPipelineResult.hasError()) {
+      destroyMeshPipelineState();
+      return Result<bool, std::string>::makeError(
+          inspectPipelineResult.error());
+    }
+    meshShadowInspectPipelineHandle_ = inspectPipelineResult.value();
+  }
+
+  {
+    const RenderPipelineDesc doubleSidedInspectDesc = meshPipelineDesc(
+        Format::RGBA32_FLOAT, depthFormat, meshVertexShader_, {}, {}, {},
+        meshShadowInspectFragmentShader_, PolygonMode::Fill, Topology::Triangle,
+        0, false, CullMode::None);
+    auto doubleSidedInspectResult = gpu_.createRenderPipeline(
+        doubleSidedInspectDesc, "opaque_mesh_shadow_inspect_double_sided");
+    if (doubleSidedInspectResult.hasError()) {
+      destroyMeshPipelineState();
+      return Result<bool, std::string>::makeError(
+          doubleSidedInspectResult.error());
+    }
+    meshShadowInspectDoubleSidedPipelineHandle_ =
+        doubleSidedInspectResult.value();
+  }
+
+  if (canCreateTessPipeline) {
+    const RenderPipelineDesc inspectTessDesc = meshPipelineDesc(
+        Format::RGBA32_FLOAT, depthFormat, meshTessVertexShader_,
+        meshTessControlShader_, meshTessEvalShader_, {},
+        meshShadowInspectFragmentShader_, PolygonMode::Fill, Topology::Patch,
+        kTessellationPatchControlPoints);
+    auto inspectTessResult = gpu_.createRenderPipeline(
+        inspectTessDesc, "opaque_mesh_tess_shadow_inspect");
+    if (inspectTessResult.hasError()) {
+      meshShadowInspectTessPipelineHandle_ = {};
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createPipelines: tessellation shadow inspect "
+          "pipeline failed, falling back to non-tessellation inspect "
+          "pipeline: %s",
+          inspectTessResult.error().c_str());
+    } else {
+      meshShadowInspectTessPipelineHandle_ = inspectTessResult.value();
+    }
+    if (!tessellationUnsupported_) {
+      const RenderPipelineDesc doubleSidedInspectTessDesc = meshPipelineDesc(
+          Format::RGBA32_FLOAT, depthFormat, meshTessVertexShader_,
+          meshTessControlShader_, meshTessEvalShader_, {},
+          meshShadowInspectFragmentShader_, PolygonMode::Fill, Topology::Patch,
+          kTessellationPatchControlPoints, false, CullMode::None);
+      auto doubleSidedInspectTessResult = gpu_.createRenderPipeline(
+          doubleSidedInspectTessDesc,
+          "opaque_mesh_tess_shadow_inspect_double_sided");
+      if (doubleSidedInspectTessResult.hasError()) {
+        meshShadowInspectDoubleSidedTessPipelineHandle_ = {};
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createPipelines: double-sided tessellation "
+            "shadow inspect pipeline failed, falling back to "
+            "non-tessellation inspect pipeline: %s",
+            doubleSidedInspectTessResult.error().c_str());
+      } else {
+        meshShadowInspectDoubleSidedTessPipelineHandle_ =
+            doubleSidedInspectTessResult.value();
+      }
+    }
+  }
+
   const ComputePipelineDesc computeDesc{
       .computeShader = computeShaderHandle_,
   };
@@ -5170,6 +5387,26 @@ OpaqueRenderer::selectPickPipeline(RenderPipelineHandle sourcePipeline) const {
     return meshPickDoubleSidedPipelineHandle_;
   }
   return meshPickPipelineHandle_;
+}
+
+RenderPipelineHandle OpaqueRenderer::selectShadowInspectPipeline(
+    RenderPipelineHandle sourcePipeline) const {
+  const bool tessellated = isTessPipeline(sourcePipeline);
+  const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
+  if (tessellated) {
+    if (doubleSided &&
+        nuri::isValid(meshShadowInspectDoubleSidedTessPipelineHandle_)) {
+      return meshShadowInspectDoubleSidedTessPipelineHandle_;
+    }
+    if (nuri::isValid(meshShadowInspectTessPipelineHandle_)) {
+      return meshShadowInspectTessPipelineHandle_;
+    }
+  }
+  if (doubleSided &&
+      nuri::isValid(meshShadowInspectDoubleSidedPipelineHandle_)) {
+    return meshShadowInspectDoubleSidedPipelineHandle_;
+  }
+  return meshShadowInspectPipelineHandle_;
 }
 
 bool OpaqueRenderer::isDoubleSidedPipeline(RenderPipelineHandle handle) const {
@@ -5453,6 +5690,10 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, meshPickTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshPickDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshPickPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshShadowInspectDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshShadowInspectTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshShadowInspectDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshShadowInspectPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedFillPipelineHandle_);
@@ -5468,6 +5709,10 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshPickDoubleSidedPipelineHandle_ = {};
   meshPickTessPipelineHandle_ = {};
   meshPickDoubleSidedTessPipelineHandle_ = {};
+  meshShadowInspectPipelineHandle_ = {};
+  meshShadowInspectDoubleSidedPipelineHandle_ = {};
+  meshShadowInspectTessPipelineHandle_ = {};
+  meshShadowInspectDoubleSidedTessPipelineHandle_ = {};
   meshDepthPipelineHandle_ = {};
   meshDepthDoubleSidedPipelineHandle_ = {};
   meshDepthTessPipelineHandle_ = {};
@@ -5516,6 +5761,13 @@ void OpaqueRenderer::destroyPickTexture() {
   if (nuri::isValid(pickIdTexture_)) {
     gpu_.destroyTexture(pickIdTexture_);
     pickIdTexture_ = TextureHandle{};
+  }
+}
+
+void OpaqueRenderer::destroyShadowInspectTexture() {
+  if (nuri::isValid(shadowInspectTexture_)) {
+    gpu_.destroyTexture(shadowInspectTexture_);
+    shadowInspectTexture_ = TextureHandle{};
   }
 }
 

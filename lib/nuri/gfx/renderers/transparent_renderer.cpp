@@ -431,7 +431,9 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
       instanceMatricesAddress == 0u || instanceRemapAddress == 0u ||
       (sceneGpu->directionalLightCount > 0u &&
        directionalLightBufferAddress == 0u) ||
-      (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
+      (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u) ||
+      ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u &&
+       sceneGpu->shadowFrameBufferAddress == 0u)) {
     return Result<bool, std::string>::makeError(
         "TransparentRenderer::prepareTransparentPasses: invalid GPU buffer "
         "address");
@@ -639,6 +641,13 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   appendUniqueBuffer(passDependencyBuffers_, instanceMatricesBufferHandle);
   appendUniqueBuffer(passDependencyBuffers_,
                      instanceRemapRing_[frameSlot].buffer->handle());
+  if ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u &&
+      frame.sharedResources.shadowFrameGpuData.has_value()) {
+    appendUniqueBuffer(passDependencyBuffers_,
+                       frame.sharedResources.shadowFrameGpuData->buffer);
+    appendUniqueTexture(passTextureReads_,
+                        frame.sharedResources.shadowCascadeTextures[0]);
+  }
   if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() &&
       !drawPushConstants_.empty()) {
     loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();

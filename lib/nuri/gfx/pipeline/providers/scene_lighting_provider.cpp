@@ -239,11 +239,28 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       static_cast<size_t>(frame.frameIndex % sceneDataBuffers_.size());
   SlotUploadState &slotState = slotUploadStates_[slotIndex];
   const uint64_t sceneId = frame.scene->id();
-  const uint64_t shadowFrameBufferAddress =
+  uint64_t shadowFrameBufferAddress =
       ctx.shared.shadowFrameGpuData.has_value()
           ? ctx.shared.shadowFrameGpuData->bufferAddress
           : 0u;
-  const uint32_t shadowFlags = 0u;
+  if (shadowFrameBufferAddress == 0u) {
+    auto disabledShadowResult = ensureDisabledShadowFrameBuffer();
+    if (disabledShadowResult.hasError()) {
+      return Result<bool, std::string>::makeError(disabledShadowResult.error());
+    }
+    shadowFrameBufferAddress = disabledShadowResult.value();
+  }
+  uint32_t shadowFlags = 0u;
+  RenderSettings::ShadowSettings shadowSettings =
+      renderSettingsOrDefault(frame).shadow;
+  sanitizeShadowSettings(shadowSettings);
+  if (shadowSettings.enabled && shadowFrameBufferAddress != 0u &&
+      directionalLightCount > 0u) {
+    shadowFlags |= kShadowFrameFlagEnabled;
+    if (shadowSettings.debug.visualizeShadowFactor) {
+      shadowFlags |= kShadowFrameFlagVisualizeShadowFactor;
+    }
+  }
 
   const ForwardSceneFrameData frameData{
       .view = frame.camera.view,
@@ -420,6 +437,42 @@ SceneLightingProvider::ensureBufferRingCapacity(size_t requiredBytes,
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<uint64_t, std::string>
+SceneLightingProvider::ensureDisabledShadowFrameBuffer() {
+  if (disabledShadowFrameBuffer_ == nullptr ||
+      !disabledShadowFrameBuffer_->valid()) {
+    auto bufferResult =
+        Buffer::create(gpu_,
+                       BufferDesc{.usage = BufferUsage::Storage,
+                                  .storage = Storage::Device,
+                                  .size = sizeof(ShadowFrameGpuData)},
+                       "forward_scene_disabled_shadow_frame");
+    if (bufferResult.hasError()) {
+      return Result<uint64_t, std::string>::makeError(bufferResult.error());
+    }
+    disabledShadowFrameBuffer_ = std::move(bufferResult.value());
+
+    const ShadowFrameGpuData disabledShadow{};
+    const std::span<const std::byte> bytes{
+        reinterpret_cast<const std::byte *>(&disabledShadow),
+        sizeof(disabledShadow)};
+    auto updateResult =
+        gpu_.updateBuffer(disabledShadowFrameBuffer_->handle(), bytes, 0u);
+    if (updateResult.hasError()) {
+      return Result<uint64_t, std::string>::makeError(updateResult.error());
+    }
+  }
+
+  const uint64_t address =
+      gpu_.getBufferDeviceAddress(disabledShadowFrameBuffer_->handle());
+  if (address == 0u) {
+    return Result<uint64_t, std::string>::makeError(
+        "SceneLightingProvider::prepare: invalid disabled shadow frame buffer "
+        "address");
+  }
+  return Result<uint64_t, std::string>::makeResult(address);
+}
+
 void SceneLightingProvider::destroyBuffers() {
   for (std::unique_ptr<Buffer> &buffer : sceneDataBuffers_) {
     if (buffer && buffer->valid()) {
@@ -429,6 +482,10 @@ void SceneLightingProvider::destroyBuffers() {
   }
   sceneDataBuffers_.clear();
   slotUploadStates_.clear();
+  if (disabledShadowFrameBuffer_ && disabledShadowFrameBuffer_->valid()) {
+    gpu_.destroyBuffer(disabledShadowFrameBuffer_->handle());
+  }
+  disabledShadowFrameBuffer_.reset();
   sceneDataBufferCapacityBytes_ = 0;
 }
 

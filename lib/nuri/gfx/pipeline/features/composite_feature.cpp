@@ -450,6 +450,13 @@ Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
       "Scene Resolve");
+  if (ctx.frame.frameIndex < 4u) {
+    NURI_LOG_DEBUG("SceneResolvePass::build: frame=%" PRIu64
+                   " sourceHandle=%u:%u sourceTexId=%u targetHandle=%u:%u",
+                   ctx.frame.frameIndex, source.index, source.generation,
+                   sourceTexId, ctx.shared.frameColorTexture.index,
+                   ctx.shared.frameColorTexture.generation);
+  }
 
   auto colorImportResult =
       ctx.graph.importTexture(ctx.shared.frameColorTexture, "frame_color");
@@ -577,6 +584,13 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
       "Present ToneMap");
+  if (ctx.frame.frameIndex < 4u) {
+    NURI_LOG_DEBUG(
+        "PresentToneMapPass::build: frame=%" PRIu64
+        " sourceHandle=%u:%u sourceTexId=%u acesLutTexId=%u agxLutTexId=%u",
+        ctx.frame.frameIndex, source.index, source.generation, sourceTexId,
+        acesLutTexId, agxLutTexId);
+  }
 
   auto sourceImportResult =
       ctx.graph.importTexture(source, "present_frame_color");

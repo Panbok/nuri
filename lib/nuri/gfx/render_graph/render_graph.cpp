@@ -569,17 +569,30 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
       continue;
     }
     const RenderPass &sourcePass = passes_[passIndex];
+    RenderPass &refreshedPass = result.orderedPasses[i];
+
+    // Keep cached structural bindings, but refresh the current execution
+    // state from this frame's builder so cache hits do not reuse stale
+    // viewports, clears, or debug metadata.
+    refreshedPass.color = sourcePass.color;
+    refreshedPass.hasColorAttachment = sourcePass.hasColorAttachment;
+    refreshedPass.depth = sourcePass.depth;
+    refreshedPass.useViewport = sourcePass.useViewport;
+    refreshedPass.viewport = sourcePass.viewport;
+    refreshedPass.drawBuffersPreResolved = sourcePass.drawBuffersPreResolved;
+    refreshedPass.debugLabel = sourcePass.debugLabel;
+    refreshedPass.debugColor = sourcePass.debugColor;
 
     const auto dependencyRange = result.dependencyBufferRangesByPass[i];
     if (dependencyRange.count > 0u &&
         dependencyRange.offset <= result.resolvedDependencyBuffers.size() &&
         dependencyRange.count <=
             result.resolvedDependencyBuffers.size() - dependencyRange.offset) {
-      result.orderedPasses[i].dependencyBuffers = std::span<const BufferHandle>(
+      refreshedPass.dependencyBuffers = std::span<const BufferHandle>(
           result.resolvedDependencyBuffers.data() + dependencyRange.offset,
           dependencyRange.count);
     } else {
-      result.orderedPasses[i].dependencyBuffers = {};
+      refreshedPass.dependencyBuffers = {};
     }
 
     const auto preDispatchRange = result.preDispatchRangesByPass[i];
@@ -622,15 +635,14 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
           }
           result.ownedPreDispatches[globalDispatchIndex] = refreshedDispatch;
         }
-        result.orderedPasses[i].preDispatches =
-            std::span<const ComputeDispatchItem>(
-                result.ownedPreDispatches.data() + preDispatchRange.offset,
-                preDispatchRange.count);
+        refreshedPass.preDispatches = std::span<const ComputeDispatchItem>(
+            result.ownedPreDispatches.data() + preDispatchRange.offset,
+            preDispatchRange.count);
       } else {
-        result.orderedPasses[i].preDispatches = {};
+        refreshedPass.preDispatches = {};
       }
     } else {
-      result.orderedPasses[i].preDispatches = sourcePass.preDispatches;
+      refreshedPass.preDispatches = sourcePass.preDispatches;
     }
 
     const auto drawRange = result.drawRangesByPass[i];
@@ -644,13 +656,13 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
           result.ownedDrawItems[drawRange.offset + drawIndex] =
               sourcePass.draws[drawIndex];
         }
-        result.orderedPasses[i].draws = std::span<const DrawItem>(
+        refreshedPass.draws = std::span<const DrawItem>(
             result.ownedDrawItems.data() + drawRange.offset, actualDrawCount);
       } else {
-        result.orderedPasses[i].draws = {};
+        refreshedPass.draws = {};
       }
     } else {
-      result.orderedPasses[i].draws = sourcePass.draws;
+      refreshedPass.draws = sourcePass.draws;
     }
   }
 }

@@ -449,10 +449,13 @@ DebugRenderer::prepareGridDraw(const RenderFrameContext &frame,
   const bool hasDepth = nuri::isValid(depthTexture);
   const Format depthFormat =
       hasDepth ? gpu_.getTextureFormat(depthTexture) : Format::Count;
-  const Format colorFormat =
-      nuri::isValid(preparedFrameColorTexture_)
-          ? gpu_.getTextureFormat(preparedFrameColorTexture_)
-          : gpu_.getSwapchainFormat();
+  TextureHandle colorTexture = preparedFrameColorTexture_;
+  if (!nuri::isValid(colorTexture)) {
+    colorTexture = resolveFrameColorTexture(frame);
+  }
+  const Format colorFormat = nuri::isValid(colorTexture)
+                                 ? gpu_.getTextureFormat(colorTexture)
+                                 : gpu_.getSwapchainFormat();
   auto pipelineResult = ensureGridPipeline(colorFormat, depthFormat);
   if (pipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(pipelineResult.error());

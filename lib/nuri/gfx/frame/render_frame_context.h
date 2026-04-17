@@ -80,6 +80,8 @@ static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
 static constexpr Format kDefaultShadowMapDepthFormat = Format::D16_UNORM;
 static constexpr uint32_t kMaxShadowCascades = 4u;
 static constexpr uint32_t kInvalidShadowBindlessIndex = 0xFFFFFFFFu;
+static constexpr uint32_t kShadowFrameFlagEnabled = 1u << 0u;
+static constexpr uint32_t kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
 
 [[nodiscard]] constexpr uint8_t
 sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
@@ -171,7 +173,7 @@ struct RenderSettings {
   };
 
   struct ShadowSettings {
-    bool enabled = false;
+    bool enabled = true;
     uint32_t cascadeCount = kMaxShadowCascades;
     uint32_t shadowMapSize = 2048;
     float maxDistance = 150.0f;
@@ -538,6 +540,20 @@ struct OpaquePickResult {
   uint32_t renderableIndex = 0;
 };
 
+struct ShadowInspectRequest {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint64_t requestId = 0;
+};
+
+struct ShadowInspectResult {
+  uint64_t requestId = 0;
+  bool valid = false;
+  float receiverDepth = 0.0f;
+  float receiverCompareDepth = 0.0f;
+  float sampledDepth = 0.0f;
+};
+
 enum class FrameTextureRequirementFlags : uint32_t {
   None = 0u,
   SceneColor = 1u << 0u,
@@ -689,6 +705,9 @@ struct RenderFrameContext {
   // Frame-scoped one-shot opaque pick request/result channel.
   std::optional<OpaquePickRequest> opaquePickRequest{};
   std::optional<OpaquePickResult> opaquePickResult{};
+  // Frame-scoped one-shot shadow inspect request/result channel.
+  std::optional<ShadowInspectRequest> shadowInspectRequest{};
+  std::optional<ShadowInspectResult> shadowInspectResult{};
   FrameSharedResources sharedResources{};
   TransparentContributionRegistry transparentContributors{};
   TextureHandle sharedDepthTexture{};
