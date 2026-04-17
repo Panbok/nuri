@@ -28,6 +28,16 @@ namespace nuri {
 using ShadowRendererConfig = RuntimeOpaqueShaderConfig;
 class ResourceManager;
 
+struct BufferDependency {
+  BufferHandle handle{};
+  RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
+};
+
+struct TextureDependency {
+  TextureHandle handle{};
+  RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
+};
+
 class NURI_API ShadowRenderer {
 public:
   explicit ShadowRenderer(GPUDevice &gpu, std::pmr::memory_resource *memory =
@@ -161,12 +171,9 @@ private:
   std::pmr::vector<uint32_t> instanceRemap_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
-  std::pmr::vector<BufferHandle> passDependencyBuffers_;
-  std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
-  std::pmr::vector<TextureHandle> passDependencyTextures_;
-  std::pmr::vector<RenderGraphAccessMode> passDependencyTextureAccessModes_;
-  std::pmr::vector<TextureHandle> previewDependencyTextures_;
-  std::pmr::vector<RenderGraphAccessMode> previewDependencyTextureAccessModes_;
+  std::pmr::vector<BufferDependency> passBufferDependencies_;
+  std::pmr::vector<TextureDependency> passTextureDependencies_;
+  std::pmr::vector<TextureDependency> previewTextureDependencies_;
 
   ShaderHandle shadowVertexShader_{};
   ShaderHandle depthFragmentShader_{};

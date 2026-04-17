@@ -22,6 +22,7 @@ constexpr uint32_t kDownsamplePassDebugColor = 0xff33aa88u;
 constexpr uint32_t kResolvePassDebugColor = 0xff33cc88u;
 constexpr uint32_t kPresentPassDebugColor = 0xff55cc88u;
 constexpr uint32_t kDrawDebugColor = 0xff2299ddu;
+constexpr uint64_t kInitialDebugFrames = 4u;
 
 struct PresentToneMapState {
   RenderSettings::ToneMapSettings settings{};
@@ -450,7 +451,7 @@ Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
       "Scene Resolve");
-  if (ctx.frame.frameIndex < 4u) {
+  if (ctx.frame.frameIndex < kInitialDebugFrames) {
     NURI_LOG_DEBUG("SceneResolvePass::build: frame=%" PRIu64
                    " sourceHandle=%u:%u sourceTexId=%u targetHandle=%u:%u",
                    ctx.frame.frameIndex, source.index, source.generation,
@@ -584,7 +585,7 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
       "Present ToneMap");
-  if (ctx.frame.frameIndex < 4u) {
+  if (ctx.frame.frameIndex < kInitialDebugFrames) {
     NURI_LOG_DEBUG(
         "PresentToneMapPass::build: frame=%" PRIu64
         " sourceHandle=%u:%u sourceTexId=%u acesLutTexId=%u agxLutTexId=%u",

@@ -53,28 +53,32 @@ makeDirectionalLightView(glm::vec3 lightDirection) {
                      chooseLightUp(lightDirection));
 }
 
-[[nodiscard]] inline glm::vec3 cameraRightFromView(const glm::mat4 &view) {
-  const glm::mat4 invView = glm::inverse(view);
-  return normalizeSafe(glm::vec3(invView[0]), glm::vec3(1.0f, 0.0f, 0.0f));
-}
+struct CameraBasis {
+  glm::vec3 right{1.0f, 0.0f, 0.0f};
+  glm::vec3 up{0.0f, 1.0f, 0.0f};
+  glm::vec3 forward{0.0f, 0.0f, -1.0f};
+};
 
-[[nodiscard]] inline glm::vec3 cameraUpFromView(const glm::mat4 &view) {
-  const glm::mat4 invView = glm::inverse(view);
-  return normalizeSafe(glm::vec3(invView[1]), glm::vec3(0.0f, 1.0f, 0.0f));
-}
-
-[[nodiscard]] inline glm::vec3 cameraForwardFromView(const glm::mat4 &view) {
-  const glm::mat4 invView = glm::inverse(view);
-  return normalizeSafe(-glm::vec3(invView[2]), glm::vec3(0.0f, 0.0f, -1.0f));
+[[nodiscard]] inline CameraBasis
+cameraBasisFromInvView(const glm::mat4 &invView) {
+  return CameraBasis{
+      .right =
+          normalizeSafe(glm::vec3(invView[0]), glm::vec3(1.0f, 0.0f, 0.0f)),
+      .up = normalizeSafe(glm::vec3(invView[1]), glm::vec3(0.0f, 1.0f, 0.0f)),
+      .forward =
+          normalizeSafe(-glm::vec3(invView[2]), glm::vec3(0.0f, 0.0f, -1.0f)),
+  };
 }
 
 [[nodiscard]] inline std::array<glm::vec3, 8>
 computeCameraSliceCorners(const CameraFrameState &camera, float splitNear,
                           float splitFar) {
+  const glm::mat4 invView = glm::inverse(camera.view);
+  const CameraBasis basis = cameraBasisFromInvView(invView);
   const glm::vec3 cameraPos = glm::vec3(camera.cameraPos);
-  const glm::vec3 forward = cameraForwardFromView(camera.view);
-  const glm::vec3 right = cameraRightFromView(camera.view);
-  const glm::vec3 up = cameraUpFromView(camera.view);
+  const glm::vec3 forward = basis.forward;
+  const glm::vec3 right = basis.right;
+  const glm::vec3 up = basis.up;
   const float nearPlane = std::max(splitNear, 0.01f);
   const float farPlane = std::max(nearPlane + 0.01f, splitFar);
   std::array<glm::vec3, 8> corners{};
@@ -140,7 +144,10 @@ computeBoundsCorners(glm::vec3 boundsMin, glm::vec3 boundsMax) {
 fitSingleDirectionalShadowMap(const CameraFrameState &camera,
                               glm::vec3 lightDirection, float maxDistance,
                               uint32_t shadowMapSize, bool stabilize = false) {
-  (void)stabilize;
+  if (stabilize) {
+    // TODO: Stabilize the orthographic fit with texel snapping to reduce
+    // shadow swimming during camera motion.
+  }
   DirectionalShadowFit fit{};
   fit.splitNear = std::max(camera.nearPlane, 0.01f);
   const float requestedFar =
@@ -203,7 +210,10 @@ fitDirectionalShadowMapToBounds(const CameraFrameState &camera,
                                 glm::vec3 boundsMin, glm::vec3 boundsMax,
                                 glm::vec3 lightDirection, float maxDistance,
                                 uint32_t shadowMapSize, bool stabilize) {
-  (void)stabilize;
+  if (stabilize) {
+    // TODO: Apply the same texel-snapped stabilization path used for camera
+    // frustum fits once the bounds-based fit is stabilized.
+  }
   DirectionalShadowFit fit{};
   fit.splitNear = std::max(camera.nearPlane, 0.01f);
   fit.splitFar =

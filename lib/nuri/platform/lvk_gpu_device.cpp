@@ -2012,8 +2012,6 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
   };
   const bool supportsIndexedIndirectCount =
       impl_->context->supportsDrawIndexedIndirectCount();
-  const bool logFrameDiagnostics =
-      impl_->verboseVkDiagnostics || impl_->currentFrameIndex < 8u;
 
   for (const RenderPass &pass : passes) {
     const bool passLabelPushed =

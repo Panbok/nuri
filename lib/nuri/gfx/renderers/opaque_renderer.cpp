@@ -4292,19 +4292,11 @@ Result<bool, std::string> OpaqueRenderer::recreateShadowInspectTexture() {
     shadowInspectTexture_ = TextureHandle{};
   }
 
-  int32_t framebufferWidth = 0;
-  int32_t framebufferHeight = 0;
-  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
-  const uint32_t safeWidth =
-      static_cast<uint32_t>(std::max(framebufferWidth, 1));
-  const uint32_t safeHeight =
-      static_cast<uint32_t>(std::max(framebufferHeight, 1));
-
   const TextureDesc inspectDesc{
       .type = TextureType::Texture2D,
       .format = Format::RGBA32_FLOAT,
-      .dimensions = {safeWidth, safeHeight, 1u},
-      .usage = TextureUsage::AttachmentSampled,
+      .dimensions = {1u, 1u, 1u},
+      .usage = TextureUsage::Attachment,
       .storage = Storage::Device,
       .numLayers = 1u,
       .numSamples = 1u,
@@ -4834,9 +4826,12 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   }
 
   {
-    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    const std::filesystem::path shadowInspectPath =
+        config_.shadowInspectFragment.empty()
+            ? config_.meshFragment.parent_path() / "shadow_inspect.frag"
+            : config_.shadowInspectFragment;
     auto compileResult = meshShadowInspectShader_->compileFromFile(
-        (shaderDir / "shadow_inspect.frag").string(), ShaderStage::Fragment);
+        shadowInspectPath.string(), ShaderStage::Fragment);
     if (compileResult.hasError()) {
       return Result<bool, std::string>::makeError(compileResult.error());
     }

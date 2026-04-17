@@ -893,6 +893,12 @@ ResourceManager::acquireGeneratedModel(const MeshData &meshData,
   if (modelResult.hasError()) {
     return Result<ModelRef, std::string>::makeError(modelResult.error());
   }
+  auto model = std::move(modelResult.value());
+  if (!model) {
+    return Result<ModelRef, std::string>::makeError(
+        "ResourceManager::acquireGeneratedModel: model creation returned "
+        "null");
+  }
 
   auto slotResult = allocateModelSlot();
   if (slotResult.hasError()) {
@@ -907,7 +913,7 @@ ResourceManager::acquireGeneratedModel(const MeshData &meshData,
 
   slot.record = ModelRecord(memory_);
   slot.record.ref = ref;
-  slot.record.model = std::move(modelResult.value());
+  slot.record.model = std::move(model);
   slot.record.importOptionsHash = 0u;
   slot.record.sceneMeshIndex = std::numeric_limits<uint32_t>::max();
   slot.record.sourceMaterialToRuntime.assign(

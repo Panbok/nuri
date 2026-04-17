@@ -40,6 +40,7 @@ struct NURI_API RuntimeOpaqueShaderConfig {
   std::filesystem::path meshVertex;
   std::filesystem::path meshFragment;
   std::filesystem::path pickFragment;
+  std::filesystem::path shadowInspectFragment;
   std::filesystem::path computeInstances;
   std::filesystem::path tessVertex;
   std::filesystem::path tessControl;

@@ -8,6 +8,11 @@ layout(location = 0) in PerVertex vtx;
 layout(location = 0) out vec4 out_ShadowInspect;
 
 void main() {
+  if ((pc.frameData.shadowFlags & kShadowFrameFlagEnabled) == 0u) {
+    out_ShadowInspect = vec4(0.0);
+    return;
+  }
+
   const MaterialData material = loadMaterialData(pc.materialIndex);
   const uint alphaMode = materialAlphaMode(material);
 
@@ -15,11 +20,6 @@ void main() {
   const float alphaCutoff = materialAlphaCutoff(material);
   if (alphaMode == kAlphaModeMask && sm.baseColor.a < alphaCutoff) {
     discard;
-  }
-
-  if ((pc.frameData.shadowFlags & kShadowFrameFlagEnabled) == 0u) {
-    out_ShadowInspect = vec4(0.0);
-    return;
   }
 
   const HardShadowInspectResult inspect = inspectHardDirectionalShadow(

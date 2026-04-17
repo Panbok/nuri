@@ -7,7 +7,6 @@
 #include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
-
 namespace nuri {
 namespace {
 
@@ -88,31 +87,53 @@ resolveGeometryIndexFormat(const GeometryAllocationView &geometry) {
   return indexStride == sizeof(uint16_t) ? IndexFormat::U16 : IndexFormat::U32;
 }
 
-void appendUniqueBuffer(std::pmr::vector<BufferHandle> &handles,
-                        BufferHandle handle) {
+void appendUniqueBufferDependency(
+    std::pmr::vector<BufferDependency> &dependencies, BufferHandle handle,
+    RenderGraphAccessMode mode = RenderGraphAccessMode::Read) {
   if (!nuri::isValid(handle)) {
     return;
   }
-  for (const BufferHandle existing : handles) {
-    if (isSameBufferHandle(existing, handle)) {
+  for (const BufferDependency &existing : dependencies) {
+    if (isSameBufferHandle(existing.handle, handle)) {
       return;
     }
   }
-  handles.push_back(handle);
+  dependencies.push_back(BufferDependency{
+      .handle = handle,
+      .mode = mode,
+  });
 }
 
-void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
-                         TextureHandle handle) {
+void appendUniqueTextureDependency(
+    std::pmr::vector<TextureDependency> &dependencies, TextureHandle handle,
+    RenderGraphAccessMode mode = RenderGraphAccessMode::Read) {
   if (!nuri::isValid(handle)) {
     return;
   }
-  for (const TextureHandle existing : handles) {
-    if (existing.index == handle.index &&
-        existing.generation == handle.generation) {
+  for (const TextureDependency &existing : dependencies) {
+    if (existing.handle.index == handle.index &&
+        existing.handle.generation == handle.generation) {
       return;
     }
   }
-  handles.push_back(handle);
+  dependencies.push_back(TextureDependency{
+      .handle = handle,
+      .mode = mode,
+  });
+}
+
+template <typename DependencyT, typename HandleT>
+void splitDependencies(std::span<const DependencyT> dependencies,
+                       std::pmr::vector<HandleT> &handles,
+                       std::pmr::vector<RenderGraphAccessMode> &accessModes) {
+  handles.clear();
+  accessModes.clear();
+  handles.reserve(dependencies.size());
+  accessModes.reserve(dependencies.size());
+  for (const DependencyT &dependency : dependencies) {
+    handles.push_back(dependency.handle);
+    accessModes.push_back(dependency.mode);
+  }
 }
 
 [[nodiscard]] std::optional<SubmeshLod>
@@ -202,12 +223,8 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       shadowFrameUploadSignatures_(memory_), meshDrawTemplates_(memory_),
       instanceMatrices_(memory_), instanceRemap_(memory_),
       drawPushConstants_(memory_), drawItems_(memory_),
-      passDependencyBuffers_(memory_),
-      passDependencyBufferAccessModes_(memory_),
-      passDependencyTextures_(memory_),
-      passDependencyTextureAccessModes_(memory_),
-      previewDependencyTextures_(memory_),
-      previewDependencyTextureAccessModes_(memory_) {}
+      passBufferDependencies_(memory_), passTextureDependencies_(memory_),
+      previewTextureDependencies_(memory_) {}
 
 ShadowRenderer::~ShadowRenderer() {
   destroyShadowResources();
@@ -651,7 +668,7 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
                                   uint32_t materialCount) {
   (void)materialCount;
   meshDrawTemplates_.clear();
-  passDependencyTextures_.clear();
+  passTextureDependencies_.clear();
 
   const std::span<const Renderable> renderables = scene.renderables();
   if (renderables.size() >
@@ -702,7 +719,8 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
         const TextureRecord *baseColor =
             resources.tryGet(materialRecord->textureRefs.baseColor);
         if (baseColor != nullptr) {
-          appendUniqueTexture(passDependencyTextures_, baseColor->texture);
+          appendUniqueTextureDependency(passTextureDependencies_,
+                                        baseColor->texture);
         }
       }
 
@@ -1016,23 +1034,20 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     drawItems_.push_back(draw);
   }
 
-  passDependencyBuffers_.clear();
-  appendUniqueBuffer(passDependencyBuffers_, sceneGpu.buffer);
-  appendUniqueBuffer(passDependencyBuffers_, instanceMatricesBuffer);
-  appendUniqueBuffer(passDependencyBuffers_, instanceRemapBuffer);
+  passBufferDependencies_.clear();
+  appendUniqueBufferDependency(passBufferDependencies_, sceneGpu.buffer);
+  appendUniqueBufferDependency(passBufferDependencies_, instanceMatricesBuffer);
+  appendUniqueBufferDependency(passBufferDependencies_, instanceRemapBuffer);
   if (frame.sharedResources.shadowFrameGpuData.has_value()) {
-    appendUniqueBuffer(passDependencyBuffers_,
-                       frame.sharedResources.shadowFrameGpuData->buffer);
+    appendUniqueBufferDependency(
+        passBufferDependencies_,
+        frame.sharedResources.shadowFrameGpuData->buffer);
   }
   if (frame.sharedResources.materialTableGpuData.has_value()) {
-    appendUniqueBuffer(
-        passDependencyBuffers_,
+    appendUniqueBufferDependency(
+        passBufferDependencies_,
         frame.sharedResources.materialTableGpuData->headerBuffer);
   }
-  passDependencyBufferAccessModes_.assign(passDependencyBuffers_.size(),
-                                          RenderGraphAccessMode::Read);
-  passDependencyTextureAccessModes_.assign(passDependencyTextures_.size(),
-                                           RenderGraphAccessMode::Read);
   preparedShadowDrawCount_ = saturateToU32(drawItems_.size());
   shadowDebugFrameData_.cascades[0].drawCount = preparedShadowDrawCount_;
   frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
@@ -1148,8 +1163,7 @@ void ShadowRenderer::resetCachedState() {
   meshDrawTemplates_.clear();
   instanceMatrices_.clear();
   instanceRemap_.clear();
-  passDependencyTextures_.clear();
-  passDependencyTextureAccessModes_.clear();
+  passTextureDependencies_.clear();
 }
 
 void ShadowRenderer::resetFrameBuildState() {
@@ -1158,10 +1172,8 @@ void ShadowRenderer::resetFrameBuildState() {
   preparedShadowDrawCount_ = 0u;
   drawPushConstants_.clear();
   drawItems_.clear();
-  passDependencyBuffers_.clear();
-  passDependencyBufferAccessModes_.clear();
-  previewDependencyTextures_.clear();
-  previewDependencyTextureAccessModes_.clear();
+  passBufferDependencies_.clear();
+  previewTextureDependencies_.clear();
   previewPushConstants_ = {};
   previewDraw_ = {};
 }
@@ -1297,8 +1309,7 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
     }
   } else {
     meshDrawTemplates_.clear();
-    passDependencyTextures_.clear();
-    passDependencyTextureAccessModes_.clear();
+    passTextureDependencies_.clear();
   }
 
   auto shadowFrameDataResult =
@@ -1366,10 +1377,9 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
         sizeof(PreviewPushConstants));
     previewDraw_.debugLabel = kShadowPreviewDrawLabel;
     previewDraw_.debugColor = kShadowPreviewPassDebugColor;
-    previewDependencyTextures_.clear();
-    previewDependencyTextures_.push_back(shadowDepthTexture_);
-    previewDependencyTextureAccessModes_.clear();
-    previewDependencyTextureAccessModes_.push_back(RenderGraphAccessMode::Read);
+    previewTextureDependencies_.clear();
+    appendUniqueTextureDependency(previewTextureDependencies_,
+                                  shadowDepthTexture_);
     hasPreparedShadowPreviewPass_ = true;
   }
   return Result<bool, std::string>::makeResult(true);
@@ -1401,6 +1411,19 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
   frame.sharedResources.shadowCascadeGraphTextures[0] =
       depthImportResult.value();
 
+  std::pmr::vector<BufferHandle> dependencyBuffers(memory_);
+  std::pmr::vector<RenderGraphAccessMode> dependencyBufferAccessModes(memory_);
+  std::pmr::vector<TextureHandle> dependencyTextures(memory_);
+  std::pmr::vector<RenderGraphAccessMode> dependencyTextureAccessModes(memory_);
+  splitDependencies(
+      std::span<const BufferDependency>(passBufferDependencies_.data(),
+                                        passBufferDependencies_.size()),
+      dependencyBuffers, dependencyBufferAccessModes);
+  splitDependencies(
+      std::span<const TextureDependency>(passTextureDependencies_.data(),
+                                         passTextureDependencies_.size()),
+      dependencyTextures, dependencyTextureAccessModes);
+
   const RenderGraphGraphicsPassDesc desc{
       .color = {},
       .colorTexture = {},
@@ -1419,15 +1442,15 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
                    .maxDepth = 1.0f},
       .preDispatches = {},
       .dependencyBuffers = std::span<const BufferHandle>(
-          passDependencyBuffers_.data(), passDependencyBuffers_.size()),
+          dependencyBuffers.data(), dependencyBuffers.size()),
       .dependencyBufferAccessModes = std::span<const RenderGraphAccessMode>(
-          passDependencyBufferAccessModes_.data(),
-          passDependencyBufferAccessModes_.size()),
+          dependencyBufferAccessModes.data(),
+          dependencyBufferAccessModes.size()),
       .dependencyTextures = std::span<const TextureHandle>(
-          passDependencyTextures_.data(), passDependencyTextures_.size()),
+          dependencyTextures.data(), dependencyTextures.size()),
       .dependencyTextureAccessModes = std::span<const RenderGraphAccessMode>(
-          passDependencyTextureAccessModes_.data(),
-          passDependencyTextureAccessModes_.size()),
+          dependencyTextureAccessModes.data(),
+          dependencyTextureAccessModes.size()),
       .draws = std::span<const DrawItem>(drawItems_.data(), drawItems_.size()),
       .drawBuffersPreResolved = false,
       .preResolvedDrawBuffers = {},
@@ -1464,6 +1487,14 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     frame.sharedResources.shadowDebugPreviewGraphTexture =
         previewImportResult.value();
 
+    std::pmr::vector<TextureHandle> previewDependencyTextures(memory_);
+    std::pmr::vector<RenderGraphAccessMode> previewDependencyTextureAccessModes(
+        memory_);
+    splitDependencies(
+        std::span<const TextureDependency>(previewTextureDependencies_.data(),
+                                           previewTextureDependencies_.size()),
+        previewDependencyTextures, previewDependencyTextureAccessModes);
+
     const RenderGraphGraphicsPassDesc previewDesc{
         .color = {.loadOp = LoadOp::Clear,
                   .storeOp = StoreOp::Store,
@@ -1482,12 +1513,11 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         .preDispatches = {},
         .dependencyBuffers = {},
         .dependencyBufferAccessModes = {},
-        .dependencyTextures =
-            std::span<const TextureHandle>(previewDependencyTextures_.data(),
-                                           previewDependencyTextures_.size()),
+        .dependencyTextures = std::span<const TextureHandle>(
+            previewDependencyTextures.data(), previewDependencyTextures.size()),
         .dependencyTextureAccessModes = std::span<const RenderGraphAccessMode>(
-            previewDependencyTextureAccessModes_.data(),
-            previewDependencyTextureAccessModes_.size()),
+            previewDependencyTextureAccessModes.data(),
+            previewDependencyTextureAccessModes.size()),
         .draws = std::span<const DrawItem>(&previewDraw_, 1u),
         .drawBuffersPreResolved = false,
         .preResolvedDrawBuffers = {},

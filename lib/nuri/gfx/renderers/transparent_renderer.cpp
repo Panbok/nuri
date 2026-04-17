@@ -641,12 +641,23 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   appendUniqueBuffer(passDependencyBuffers_, instanceMatricesBufferHandle);
   appendUniqueBuffer(passDependencyBuffers_,
                      instanceRemapRing_[frameSlot].buffer->handle());
-  if ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u &&
-      frame.sharedResources.shadowFrameGpuData.has_value()) {
-    appendUniqueBuffer(passDependencyBuffers_,
-                       frame.sharedResources.shadowFrameGpuData->buffer);
-    appendUniqueTexture(passTextureReads_,
-                        frame.sharedResources.shadowCascadeTextures[0]);
+  if ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u) {
+    const auto &shadowFrameGpuData = frame.sharedResources.shadowFrameGpuData;
+    const TextureHandle shadowCascadeTexture =
+        frame.sharedResources.shadowCascadeTextures[0];
+    const bool hasShadowResources = shadowFrameGpuData.has_value() &&
+                                    nuri::isValid(shadowFrameGpuData->buffer) &&
+                                    shadowFrameGpuData->bufferAddress != 0u &&
+                                    shadowFrameGpuData->bufferAddress ==
+                                        sceneGpu->shadowFrameBufferAddress &&
+                                    nuri::isValid(shadowCascadeTexture);
+    if (!hasShadowResources) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::prepareTransparentPasses: missing shadow "
+          "resources");
+    }
+    appendUniqueBuffer(passDependencyBuffers_, shadowFrameGpuData->buffer);
+    appendUniqueTexture(passTextureReads_, shadowCascadeTexture);
   }
   if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() &&
       !drawPushConstants_.empty()) {

@@ -459,6 +459,8 @@ SceneLightingProvider::ensureDisabledShadowFrameBuffer() {
     auto updateResult =
         gpu_.updateBuffer(disabledShadowFrameBuffer_->handle(), bytes, 0u);
     if (updateResult.hasError()) {
+      gpu_.destroyBuffer(disabledShadowFrameBuffer_->handle());
+      disabledShadowFrameBuffer_.reset();
       return Result<uint64_t, std::string>::makeError(updateResult.error());
     }
   }
