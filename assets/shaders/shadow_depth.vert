@@ -13,7 +13,8 @@ void main() {
   const InstanceData inst = pc.instanceMatrices.instances[globalInstanceId];
   const mat4 model = inst.modelMatrix;
   const mat4 lightViewProj =
-      pc.frameData.shadowFrameBuffer.cascades[0].lightViewProj;
+      pc.frameData.shadowFrameBuffer.cascades[pc.shadowCascadeIndex]
+          .lightViewProj;
 
   const vec4 worldPos4 = model * vec4(pos, 1.0);
   gl_Position = lightViewProj * worldPos4;

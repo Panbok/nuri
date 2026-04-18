@@ -82,6 +82,7 @@ private:
     float tessMinFactor = 1.0f;
     float tessMaxFactor = 1.0f;
     uint32_t debugVisualizationMode = 0;
+    uint32_t shadowCascadeIndex = 0;
   };
   static_assert(
       sizeof(PushConstants) <= 128,
@@ -112,12 +113,13 @@ private:
   };
 
   struct PreviewPushConstants {
-    uint32_t sourceTexId = kInvalidShadowBindlessIndex;
-    float depthScale = 1.0f;
-    float depthBias = 0.0f;
-    uint32_t flags = 0u;
+    glm::uvec4 sourceTexIds{
+        kInvalidShadowBindlessIndex, kInvalidShadowBindlessIndex,
+        kInvalidShadowBindlessIndex, kInvalidShadowBindlessIndex};
+    glm::uvec4 previewParams{0u, 0u, 0u, 0u};
+    glm::vec4 depthParams{1.0f, 0.0f, 0.0f, 0.0f};
   };
-  static_assert(sizeof(PreviewPushConstants) == 16,
+  static_assert(sizeof(PreviewPushConstants) == 48,
                 "ShadowRenderer::PreviewPushConstants layout changed");
   static_assert(
       sizeof(PreviewPushConstants) <= 128,
@@ -172,8 +174,11 @@ private:
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<InstanceData> instanceMatrices_;
   std::pmr::vector<uint32_t> instanceRemap_;
-  std::pmr::vector<PushConstants> drawPushConstants_;
-  std::pmr::vector<DrawItem> drawItems_;
+  std::array<std::pmr::vector<PushConstants>, kMaxShadowCascades>
+      cascadePushConstants_{};
+  std::array<std::pmr::vector<DrawItem>, kMaxShadowCascades>
+      cascadeDrawItems_{};
+  std::array<uint32_t, kMaxShadowCascades> cascadeDrawCounts_{};
   std::pmr::vector<BufferDependency> passBufferDependencies_;
   std::pmr::vector<TextureDependency> passTextureDependencies_;
   std::pmr::vector<TextureDependency> previewTextureDependencies_;
@@ -188,15 +193,16 @@ private:
   RenderPipelineHandle shadowAlphaPipelineHandle_{};
   RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};
-  TextureHandle shadowDepthTexture_{};
+  std::array<TextureHandle, kMaxShadowCascades> shadowDepthTextures_{};
   TextureHandle shadowDebugPreviewTexture_{};
   SamplerHandle rawDepthSampler_{};
   SamplerHandle compareDepthSampler_{};
   uint32_t shadowMapSize_ = 0u;
-  uint32_t preparedShadowDrawCount_ = 0u;
+  uint32_t activeCascadeCount_ = 0u;
   bool initialized_ = false;
   bool hasPreparedShadowDepthPasses_ = false;
   bool hasPreparedShadowPreviewPass_ = false;
+  bool hasActiveShadowLightForFrame_ = false;
   PreviewPushConstants previewPushConstants_{};
   DrawItem previewDraw_{};
 
@@ -209,7 +215,9 @@ private:
   bool hasFrozenShadowFit_ = false;
   LightId frozenShadowLightId_ = kInvalidLightId;
   uint32_t frozenShadowMapSize_ = 0u;
-  shadow_detail::DirectionalShadowFit frozenShadowFit_{};
+  uint32_t frozenCascadeCount_ = 0u;
+  std::array<shadow_detail::DirectionalShadowFit, kMaxShadowCascades>
+      frozenShadowFits_{};
   ShadowFrameGpuData shadowFrameCpuData_{};
   ShadowDebugFrameData shadowDebugFrameData_{};
 };

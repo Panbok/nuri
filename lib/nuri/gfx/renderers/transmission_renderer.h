@@ -77,6 +77,7 @@ private:
     float tessMinFactor = 1.0f;
     float tessMaxFactor = 1.0f;
     uint32_t debugVisualizationMode = 0;
+    uint32_t shadowCascadeIndex = 0;
 
     void setTransmissionScale(const glm::vec3 &scale) noexcept {
       tessNearDistance = scale.x;

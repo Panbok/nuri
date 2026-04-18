@@ -77,6 +77,7 @@ private:
     float tessMinFactor = 1.0f;
     float tessMaxFactor = 6.0f;
     uint32_t debugVisualizationMode = 0;
+    uint32_t shadowCascadeIndex = 0;
   };
   static_assert(sizeof(PushConstants) <= 128,
                 "TransparentRenderer::PushConstants exceeds Vulkan guarantee");

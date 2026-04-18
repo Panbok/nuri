@@ -823,10 +823,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       std::memcpy(values.data(), inspectBytes.data(), sizeof(values));
       ShadowInspectResult result{};
       result.requestId = inFlightShadowInspectReadback_->request.requestId;
-      result.valid = values[3] > 0.5f;
+      result.valid = values[3] >= 0.0f;
       result.receiverDepth = values[0];
       result.receiverCompareDepth = values[1];
       result.sampledDepth = values[2];
+      if (result.valid) {
+        const float packedCascadeState = values[3];
+        const float cascadeIndex = std::floor(packedCascadeState + 1.0e-5f);
+        result.cascadeIndex =
+            static_cast<uint32_t>(std::max(cascadeIndex, 0.0f));
+        result.cascadeBlendFactor =
+            std::clamp((packedCascadeState - cascadeIndex) * 8.0f, 0.0f, 1.0f);
+      }
       frame.shadowInspectResult = result;
     }
     inFlightShadowInspectReadback_.reset();
@@ -3090,13 +3098,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       return shadowBufferDepResult;
     }
 
-    const size_t oldTextureDependencyCount = mainPassDependencyTextures_.size();
-    appendUniqueTextureDependency(
-        mainPassDependencyTextures_,
-        frame.sharedResources.shadowCascadeTextures[0]);
-    if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
-      mainPassDependencyTextureAccessModes_.push_back(
-          RenderGraphAccessMode::Read);
+    for (uint32_t cascadeIndex = 0u; cascadeIndex < kMaxShadowCascades;
+         ++cascadeIndex) {
+      const TextureHandle texture =
+          frame.sharedResources.shadowCascadeTextures[cascadeIndex];
+      if (!nuri::isValid(texture)) {
+        continue;
+      }
+      const size_t oldTextureDependencyCount =
+          mainPassDependencyTextures_.size();
+      appendUniqueTextureDependency(mainPassDependencyTextures_, texture);
+      if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
+        mainPassDependencyTextureAccessModes_.push_back(
+            RenderGraphAccessMode::Read);
+      }
     }
   }
   pass.desc.dependencyBuffers = std::span<const BufferHandle>(
@@ -3169,7 +3184,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         out.emplace_back(drawItems_.get_allocator().resource());
     inspectPass.desc.color = {.loadOp = LoadOp::Clear,
                               .storeOp = StoreOp::Store,
-                              .clearColor = {0.0f, 0.0f, 0.0f, 0.0f}};
+                              .clearColor = {0.0f, 0.0f, 0.0f, -1.0f}};
     inspectPass.colorTextureHandle = shadowInspectTexture_;
     inspectPass.desc.depth = {.loadOp = LoadOp::Load,
                               .storeOp = StoreOp::Store,

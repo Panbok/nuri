@@ -260,6 +260,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     if (shadowSettings.debug.visualizeShadowFactor) {
       shadowFlags |= kShadowFrameFlagVisualizeShadowFactor;
     }
+    if (shadowSettings.debug.visualizeCascadeIndex) {
+      shadowFlags |= kShadowFrameFlagVisualizeCascadeIndex;
+    }
   }
 
   const ForwardSceneFrameData frameData{

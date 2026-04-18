@@ -51,10 +51,21 @@ enum class ShadowFilterMode : uint8_t {
   PCSS = 3,
 };
 
+enum class ShadowCascadeSplitMode : uint8_t {
+  Uniform = 0,
+  Logarithmic = 1,
+  Practical = 2,
+};
+
 enum class ShadowSdsmMode : uint8_t {
   Disabled = 0,
   PreviousFrameMinMax = 1,
   Histogram = 2,
+};
+
+enum class ShadowPreviewMode : uint8_t {
+  SelectedCascade = 0,
+  TiledAllCascades = 1,
 };
 
 static constexpr float kDefaultToneMapExposureEv = 0.0f;
@@ -83,6 +94,7 @@ static constexpr uint32_t kMaxShadowCascades = 4u;
 static constexpr uint32_t kInvalidShadowBindlessIndex = 0xFFFFFFFFu;
 static constexpr uint32_t kShadowFrameFlagEnabled = 1u << 0u;
 static constexpr uint32_t kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
+static constexpr uint32_t kShadowFrameFlagVisualizeCascadeIndex = 1u << 2u;
 
 [[nodiscard]] constexpr uint8_t
 sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
@@ -171,6 +183,7 @@ struct RenderSettings {
     bool visualizeShadowFactor = false;
     bool visualizePCSSBlockers = false;
     bool visualizeSDSMHistogram = false;
+    ShadowPreviewMode previewMode = ShadowPreviewMode::SelectedCascade;
     float previewDepthMin = 0.0f;
     float previewDepthMax = 1.0f;
     bool previewDepthInvert = false;
@@ -182,6 +195,7 @@ struct RenderSettings {
     uint32_t cascadeCount = kMaxShadowCascades;
     uint32_t shadowMapSize = 2048;
     float maxDistance = 150.0f;
+    ShadowCascadeSplitMode splitMode = ShadowCascadeSplitMode::Practical;
     float splitLambda = 0.75f;
     bool stabilizeCascades = true;
     float cascadeBlendFraction = 0.08f;
@@ -270,6 +284,29 @@ sanitizeShadowSdsmMode(ShadowSdsmMode mode) noexcept {
   }
 }
 
+[[nodiscard]] constexpr ShadowPreviewMode
+sanitizeShadowPreviewMode(ShadowPreviewMode mode) noexcept {
+  switch (mode) {
+  case ShadowPreviewMode::SelectedCascade:
+  case ShadowPreviewMode::TiledAllCascades:
+    return mode;
+  default:
+    return ShadowPreviewMode::SelectedCascade;
+  }
+}
+
+[[nodiscard]] constexpr ShadowCascadeSplitMode
+sanitizeShadowCascadeSplitMode(ShadowCascadeSplitMode mode) noexcept {
+  switch (mode) {
+  case ShadowCascadeSplitMode::Uniform:
+  case ShadowCascadeSplitMode::Logarithmic:
+  case ShadowCascadeSplitMode::Practical:
+    return mode;
+  default:
+    return ShadowCascadeSplitMode::Practical;
+  }
+}
+
 inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   settings.cascadeCount =
       std::clamp(settings.cascadeCount, 1u, kMaxShadowCascades);
@@ -282,7 +319,11 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   settings.cascadeBlendFraction =
       std::clamp(settings.cascadeBlendFraction, 0.0f, 1.0f);
   settings.filterMode = sanitizeShadowFilterMode(settings.filterMode);
+  settings.splitMode = sanitizeShadowCascadeSplitMode(settings.splitMode);
   settings.sdsmMode = sanitizeShadowSdsmMode(settings.sdsmMode);
+  settings.debug.previewMode =
+      sanitizeShadowPreviewMode(settings.debug.previewMode);
+  settings.debug.showLightPerspectiveViewport = false;
   settings.pcfSampleCount =
       std::clamp(settings.pcfSampleCount, 1u, kMaxShadowPcfSamples);
   settings.pcssBlockerSampleCount =
@@ -575,6 +616,8 @@ struct ShadowInspectResult {
   float receiverDepth = 0.0f;
   float receiverCompareDepth = 0.0f;
   float sampledDepth = 0.0f;
+  uint32_t cascadeIndex = 0u;
+  float cascadeBlendFactor = 0.0f;
 };
 
 enum class FrameTextureRequirementFlags : uint32_t {

@@ -7,9 +7,11 @@ layout(location = 0) in PerVertex vtx;
 
 layout(location = 0) out vec4 out_ShadowInspect;
 
+const float kShadowInspectBlendPackScale = 0.125;
+
 void main() {
   if ((pc.frameData.shadowFlags & kShadowFrameFlagEnabled) == 0u) {
-    out_ShadowInspect = vec4(0.0);
+    out_ShadowInspect = vec4(0.0, 0.0, 0.0, -1.0);
     return;
   }
 
@@ -26,7 +28,7 @@ void main() {
   uvec4 shadowState = shadow.flagsCascadeCountLightIndex;
   if (shadowState.y == 0u ||
       shadowState.z >= pc.frameData.directionalLightCount) {
-    out_ShadowInspect = vec4(0.0);
+    out_ShadowInspect = vec4(0.0, 0.0, 0.0, -1.0);
     return;
   }
   DirectionalLightGpuData light =
@@ -34,6 +36,13 @@ void main() {
   vec3 l = normalize(-directionalLightDirection(light));
   const HardShadowInspectResult inspect =
       inspectHardDirectionalShadow(shadow, vtx.worldPos, sm.nBase, l);
+  const DirectionalShadowResult shadowDebug =
+      evaluateDirectionalShadow(shadow, vtx.worldPos, sm.nBase, l);
+  const float packedCascadeState =
+      inspect.valid > 0.5 ? shadowDebug.cascadeIndexDebug +
+                                min(shadowDebug.cascadeBlendDebug, 0.9999) *
+                                    kShadowInspectBlendPackScale
+                          : -1.0;
   out_ShadowInspect = vec4(inspect.receiverDepth, inspect.receiverCompareDepth,
-                           inspect.sampledDepth, inspect.valid);
+                           inspect.sampledDepth, packedCascadeState);
 }

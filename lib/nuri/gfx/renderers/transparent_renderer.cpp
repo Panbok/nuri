@@ -643,21 +643,38 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
                      instanceRemapRing_[frameSlot].buffer->handle());
   if ((sceneGpu->shadowFlags & kShadowFrameFlagEnabled) != 0u) {
     const auto &shadowFrameGpuData = frame.sharedResources.shadowFrameGpuData;
-    const TextureHandle shadowCascadeTexture =
-        frame.sharedResources.shadowCascadeTextures[0];
-    const bool hasShadowResources = shadowFrameGpuData.has_value() &&
-                                    nuri::isValid(shadowFrameGpuData->buffer) &&
-                                    shadowFrameGpuData->bufferAddress != 0u &&
-                                    shadowFrameGpuData->bufferAddress ==
-                                        sceneGpu->shadowFrameBufferAddress &&
-                                    nuri::isValid(shadowCascadeTexture);
+    const bool hasShadowResources =
+        shadowFrameGpuData.has_value() &&
+        nuri::isValid(shadowFrameGpuData->buffer) &&
+        shadowFrameGpuData->bufferAddress != 0u &&
+        shadowFrameGpuData->bufferAddress == sceneGpu->shadowFrameBufferAddress;
+    bool hasShadowTexture = false;
+    for (uint32_t cascadeIndex = 0u; cascadeIndex < kMaxShadowCascades;
+         ++cascadeIndex) {
+      hasShadowTexture =
+          hasShadowTexture ||
+          nuri::isValid(
+              frame.sharedResources.shadowCascadeTextures[cascadeIndex]);
+    }
     if (!hasShadowResources) {
       return Result<bool, std::string>::makeError(
           "TransparentRenderer::prepareTransparentPasses: missing shadow "
           "resources");
     }
+    if (!hasShadowTexture) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::prepareTransparentPasses: missing shadow "
+          "cascade textures");
+    }
     appendUniqueBuffer(passDependencyBuffers_, shadowFrameGpuData->buffer);
-    appendUniqueTexture(passTextureReads_, shadowCascadeTexture);
+    for (uint32_t cascadeIndex = 0u; cascadeIndex < kMaxShadowCascades;
+         ++cascadeIndex) {
+      const TextureHandle texture =
+          frame.sharedResources.shadowCascadeTextures[cascadeIndex];
+      if (nuri::isValid(texture)) {
+        appendUniqueTexture(passTextureReads_, texture);
+      }
+    }
   }
   if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() &&
       !drawPushConstants_.empty()) {

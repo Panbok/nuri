@@ -21,6 +21,7 @@ const uint kMaxShadowCascades = 4u;
 const uint kMaxShadowPcfSamples = 64u;
 const uint kShadowFrameFlagEnabled = 1u << 0u;
 const uint kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
+const uint kShadowFrameFlagVisualizeCascadeIndex = 1u << 2u;
 const uint kShadowFilterModeHard = 0u;
 const uint kShadowFilterModePCF3x3 = 1u;
 const uint kShadowFilterModePoissonPCF = 2u;
@@ -288,6 +289,7 @@ layout(push_constant) uniform PushConstants {
   float tessMinFactor;
   float tessMaxFactor;
   uint debugVisualizationMode;
+  uint shadowCascadeIndex;
 } pc;
 
 const uint kDebugVisualizationNone = 0u;
