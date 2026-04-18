@@ -505,6 +505,164 @@ TEST(RenderGraphCompileBehaviorTest,
 }
 
 TEST(RenderGraphCompileBehaviorTest,
+     GraphFingerprintTracksPreDispatchPayloadLayout) {
+  RenderGraphBuilder builder;
+
+  auto recordFrame = [&](uint64_t frameIndex,
+                         std::span<const ComputeDispatchItem> preDispatches)
+      -> RenderGraphBuilder::GraphFingerprint {
+    builder.beginFrame(frameIndex);
+    auto colorResult = builder.createTransientTexture(
+        makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
+        "payload_layout_color");
+    EXPECT_FALSE(colorResult.hasError());
+    if (colorResult.hasError()) {
+      return {};
+    }
+
+    RenderGraphGraphicsPassDesc passDesc{};
+    passDesc.colorTexture = colorResult.value();
+    passDesc.preDispatches = preDispatches;
+    passDesc.debugLabel = "payload_layout_pass";
+
+    auto passResult = builder.addGraphicsPass(passDesc);
+    EXPECT_FALSE(passResult.hasError());
+    if (passResult.hasError()) {
+      return {};
+    }
+    EXPECT_FALSE(builder.markPassSideEffect(passResult.value()).hasError());
+    return builder.computeGraphFingerprint();
+  };
+
+  const std::array<std::byte, 4u> pushBytesA = {
+      std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04}};
+  const std::array<std::byte, 4u> pushBytesB = {
+      std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}};
+  const std::array<BufferHandle, 1u> dependencyBuffers = {
+      BufferHandle{.index = 61u, .generation = 1u}};
+
+  ComputeDispatchItem dispatchA{};
+  dispatchA.pipeline = ComputePipelineHandle{.index = 77u, .generation = 1u};
+  dispatchA.dispatch = {.x = 1u, .y = 1u, .z = 1u};
+  dispatchA.pushConstants =
+      std::span<const std::byte>(pushBytesA.data(), pushBytesA.size());
+  dispatchA.dependencyBuffers = std::span<const BufferHandle>(
+      dependencyBuffers.data(), dependencyBuffers.size());
+  dispatchA.debugLabel = "payload_layout_dispatch_a";
+
+  ComputeDispatchItem dispatchB = dispatchA;
+  dispatchB.pushConstants =
+      std::span<const std::byte>(pushBytesB.data(), pushBytesB.size());
+  dispatchB.debugLabel = "payload_layout_dispatch_b";
+
+  const std::array<ComputeDispatchItem, 1u> oneDispatch = {dispatchA};
+  const std::array<ComputeDispatchItem, 2u> twoDispatches = {dispatchA,
+                                                             dispatchB};
+
+  const auto fingerprintA =
+      recordFrame(240u, std::span<const ComputeDispatchItem>(
+                            oneDispatch.data(), oneDispatch.size()));
+  const auto fingerprintB =
+      recordFrame(241u, std::span<const ComputeDispatchItem>(
+                            twoDispatches.data(), twoDispatches.size()));
+
+  EXPECT_FALSE(fingerprintA == fingerprintB);
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     RefreshHandlesUpdatesOwnedPreDispatchPayloads) {
+  RenderGraphBuilder builder;
+
+  const auto recordFrame = [&](uint64_t frameIndex,
+                               std::span<const std::byte> pushConstants,
+                               BufferHandle dependencyBuffer,
+                               std::string_view dispatchLabel) {
+    builder.beginFrame(frameIndex);
+    auto colorResult = builder.createTransientTexture(
+        makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
+        "refresh_payload_color");
+    EXPECT_FALSE(colorResult.hasError());
+    if (colorResult.hasError()) {
+      return RenderGraphBuilder::GraphFingerprint{};
+    }
+
+    const std::array<BufferHandle, 1u> dependencyBuffers = {dependencyBuffer};
+    ComputeDispatchItem dispatch{};
+    dispatch.pipeline = ComputePipelineHandle{.index = 78u, .generation = 1u};
+    dispatch.dispatch = {.x = 2u, .y = 1u, .z = 1u};
+    dispatch.pushConstants = pushConstants;
+    dispatch.dependencyBuffers = std::span<const BufferHandle>(
+        dependencyBuffers.data(), dependencyBuffers.size());
+    dispatch.debugLabel = dispatchLabel;
+    const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
+
+    RenderGraphGraphicsPassDesc passDesc{};
+    passDesc.colorTexture = colorResult.value();
+    passDesc.preDispatches = std::span<const ComputeDispatchItem>(
+        preDispatches.data(), preDispatches.size());
+    passDesc.debugLabel = "refresh_payload_pass";
+
+    auto passResult = builder.addGraphicsPass(passDesc);
+    EXPECT_FALSE(passResult.hasError());
+    if (passResult.hasError()) {
+      return RenderGraphBuilder::GraphFingerprint{};
+    }
+    EXPECT_FALSE(builder.markPassSideEffect(passResult.value()).hasError());
+    return builder.computeGraphFingerprint();
+  };
+
+  const std::array<std::byte, 4u> pushBytesA = {
+      std::byte{0x11}, std::byte{0x12}, std::byte{0x13}, std::byte{0x14}};
+  const std::array<std::byte, 4u> pushBytesB = {
+      std::byte{0x21}, std::byte{0x22}, std::byte{0x23}, std::byte{0x24}};
+  const BufferHandle dependencyA{.index = 91u, .generation = 1u};
+  const BufferHandle dependencyB{.index = 92u, .generation = 1u};
+
+  const auto fingerprintA = recordFrame(
+      242u, std::span<const std::byte>(pushBytesA.data(), pushBytesA.size()),
+      dependencyA, "refresh_dispatch_a");
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError());
+  RenderGraphCompileResult compiled = std::move(compileResult.value());
+
+  ASSERT_EQ(compiled.ownedPreDispatches.size(), 1u);
+  EXPECT_EQ(compiled.ownedPreDispatches[0].debugLabel, "refresh_dispatch_a");
+  ASSERT_EQ(compiled.ownedPreDispatches[0].pushConstants.size(),
+            pushBytesA.size());
+  EXPECT_EQ(
+      std::to_integer<uint8_t>(compiled.ownedPreDispatches[0].pushConstants[0]),
+      0x11u);
+  ASSERT_EQ(compiled.ownedPreDispatches[0].dependencyBuffers.size(), 1u);
+  EXPECT_TRUE(sameBuffer(compiled.ownedPreDispatches[0].dependencyBuffers[0],
+                         dependencyA));
+
+  const auto fingerprintB = recordFrame(
+      243u, std::span<const std::byte>(pushBytesB.data(), pushBytesB.size()),
+      dependencyB, "refresh_dispatch_b");
+  EXPECT_TRUE(fingerprintA == fingerprintB);
+
+  builder.refreshHandlesInCompileResult(compiled);
+
+  ASSERT_EQ(compiled.ownedPreDispatches.size(), 1u);
+  EXPECT_EQ(compiled.ownedPreDispatches[0].debugLabel, "refresh_dispatch_b");
+  ASSERT_EQ(compiled.ownedPreDispatches[0].pushConstants.size(),
+            pushBytesB.size());
+  EXPECT_EQ(
+      std::to_integer<uint8_t>(compiled.ownedPreDispatches[0].pushConstants[0]),
+      0x21u);
+  ASSERT_EQ(compiled.ownedPreDispatches[0].dependencyBuffers.size(), 1u);
+  EXPECT_TRUE(sameBuffer(compiled.ownedPreDispatches[0].dependencyBuffers[0],
+                         dependencyB));
+  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
+  ASSERT_EQ(compiled.orderedPasses[0].preDispatches.size(), 1u);
+  EXPECT_EQ(compiled.orderedPasses[0].preDispatches[0].debugLabel,
+            "refresh_dispatch_b");
+  EXPECT_EQ(std::to_integer<uint8_t>(
+                compiled.orderedPasses[0].preDispatches[0].pushConstants[0]),
+            0x21u);
+}
+
+TEST(RenderGraphCompileBehaviorTest,
      ExplicitAndHazardDependencyOverlapDeduplicatesToSingleEdge) {
   RenderGraphBuilder builder;
   builder.beginFrame(217u);
@@ -816,6 +974,75 @@ TEST(RenderGraphCompileBehaviorTest, AddGraphicsPassNativeDeclarationPath) {
     ADD_FAILURE() << "native declaration path should preserve borrowed draws";
     return;
   }
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     GraphicsPassWithPreResolvedDrawBuffersCompiles) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(224u);
+
+  auto colorResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
+      "pre_resolved_color");
+  auto depthResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::D32_FLOAT, 32u, 32u),
+      "pre_resolved_depth");
+  if (!(!colorResult.hasError() && !depthResult.hasError())) {
+    ADD_FAILURE() << "createTransientTexture should succeed";
+    return;
+  }
+
+  const BufferHandle vertexBuffer{.index = 908u, .generation = 1u};
+  const BufferHandle indexBuffer{.index = 909u, .generation = 1u};
+  std::array<BufferHandle, 2u> preResolvedDrawBuffers = {vertexBuffer,
+                                                         indexBuffer};
+  DrawItem draw{};
+  draw.vertexBuffer = vertexBuffer;
+  draw.indexBuffer = indexBuffer;
+  std::array<DrawItem, 1u> draws = {draw};
+
+  RenderGraphGraphicsPassDesc passDesc{};
+  passDesc.color = {.loadOp = LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+  passDesc.colorTexture = colorResult.value();
+  passDesc.depth = {.loadOp = LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearDepth = 1.0f,
+                    .clearStencil = 0};
+  passDesc.depthTexture = depthResult.value();
+  passDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
+  passDesc.drawBuffersPreResolved = true;
+  passDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+      preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
+  passDesc.debugLabel = "pre_resolved_draw_buffers";
+
+  auto addResult = builder.addGraphicsPass(passDesc);
+  if (!(!addResult.hasError())) {
+    ADD_FAILURE() << "addGraphicsPass should accept pre-resolved draw buffers";
+    return;
+  }
+
+  auto compileResult = compileBuilder(builder);
+  if (!(!compileResult.hasError())) {
+    ADD_FAILURE() << "compile should accept pre-resolved draw buffers";
+    if (compileResult.hasError()) {
+      std::cerr << compileResult.error() << "\n";
+    }
+    return;
+  }
+
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  if (!(compiled.orderedPasses.size() == 1u &&
+        compiled.orderedPasses[0u].draws.size() == 1u)) {
+    ADD_FAILURE() << "pre-resolved path should preserve borrowed draws";
+    return;
+  }
+  EXPECT_TRUE(compiled.unresolvedDrawBufferBindings.empty());
+  EXPECT_EQ(compiled.orderedPasses[0u].draws[0u].vertexBuffer.index,
+            vertexBuffer.index);
+  EXPECT_EQ(compiled.orderedPasses[0u].draws[0u].indexBuffer.index,
+            indexBuffer.index);
 }
 
 TEST(RenderGraphCompileBehaviorTest, AddPreparedGraphicsPassNativePath) {
@@ -1914,6 +2141,139 @@ TEST(RenderGraphCompileBehaviorTest, ExplicitAccessOverridesLegacyInference) {
     }
     return;
   }
+}
+
+TEST(RenderGraphCompileBehaviorTest, NoColorGraphicsPassCanWriteDepthOnly) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(206u);
+
+  auto depthResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::D32_FLOAT, 16u, 16u), "no_color_depth");
+  ASSERT_FALSE(depthResult.hasError());
+
+  RenderGraphGraphicsPassDesc desc{};
+  desc.hasColorAttachment = false;
+  desc.depth = {.loadOp = LoadOp::Clear,
+                .storeOp = StoreOp::Store,
+                .clearDepth = 1.0f,
+                .clearStencil = 0u};
+  desc.depthTexture = depthResult.value();
+  desc.debugLabel = "no_color_depth_pass";
+
+  auto passResult = builder.addGraphicsPass(desc);
+  ASSERT_FALSE(passResult.hasError()) << passResult.error();
+  ASSERT_FALSE(builder.markPassSideEffect(passResult.value()).hasError());
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.orderedPassIndices.size(), 1u);
+  EXPECT_EQ(compiled.orderedPassIndices.front(), passResult.value().value);
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     NoColorGraphicsPassCanWriteD16AttachmentSampledDepthOnly) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(209u);
+
+  TextureDesc depthDesc = makeTransientTextureDesc(Format::D16_UNORM, 16u, 16u);
+  depthDesc.usage = TextureUsage::AttachmentSampled;
+  auto depthResult =
+      builder.createTransientTexture(depthDesc, "d16_no_color_depth");
+  ASSERT_FALSE(depthResult.hasError());
+
+  RenderGraphGraphicsPassDesc desc{};
+  desc.hasColorAttachment = false;
+  desc.depth = {.loadOp = LoadOp::Clear,
+                .storeOp = StoreOp::Store,
+                .clearDepth = 1.0f,
+                .clearStencil = 0u};
+  desc.depthTexture = depthResult.value();
+  desc.debugLabel = "d16_no_color_depth_pass";
+
+  auto passResult = builder.addGraphicsPass(desc);
+  ASSERT_FALSE(passResult.hasError()) << passResult.error();
+  ASSERT_FALSE(builder.markPassSideEffect(passResult.value()).hasError());
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
+  EXPECT_FALSE(compiled.orderedPasses.front().hasColorAttachment);
+  EXPECT_EQ(compiled.orderedPasses.front().depth.clearStencil, 0u);
+  ASSERT_EQ(compiled.transientTexturePhysicalAllocations.size(), 1u);
+  const TextureDesc &compiledDepthDesc =
+      compiled.transientTexturePhysicalAllocations.front().desc;
+  EXPECT_EQ(compiledDepthDesc.format, Format::D16_UNORM);
+  EXPECT_EQ(compiledDepthDesc.usage, TextureUsage::AttachmentSampled);
+}
+
+TEST(RenderGraphCompileBehaviorTest, NoColorGraphicsPassRejectsColorTexture) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(207u);
+
+  auto colorResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::RGBA8_UNORM, 16u, 16u),
+      "no_color_rejected_color");
+  ASSERT_FALSE(colorResult.hasError());
+
+  RenderGraphGraphicsPassDesc desc{};
+  desc.hasColorAttachment = false;
+  desc.colorTexture = colorResult.value();
+  desc.debugLabel = "no_color_rejected_pass";
+
+  auto passResult = builder.addGraphicsPass(desc);
+  EXPECT_TRUE(passResult.hasError());
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     SampledReadAfterDepthAttachmentWriteOrdersPasses) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(208u);
+
+  const TextureHandle depthHandle{.index = 501u, .generation = 1u};
+  const TextureHandle colorHandle{.index = 502u, .generation = 1u};
+  auto depthImportResult = builder.importTexture(depthHandle, "sampled_depth");
+  auto colorImportResult = builder.importTexture(colorHandle, "sampled_color");
+  ASSERT_FALSE(depthImportResult.hasError());
+  ASSERT_FALSE(colorImportResult.hasError());
+
+  RenderGraphGraphicsPassDesc depthWriteDesc{};
+  depthWriteDesc.hasColorAttachment = false;
+  depthWriteDesc.depth = {.loadOp = LoadOp::Clear,
+                          .storeOp = StoreOp::Store,
+                          .clearDepth = 1.0f,
+                          .clearStencil = 0u};
+  depthWriteDesc.depthTexture = depthImportResult.value();
+  depthWriteDesc.debugLabel = "sampled_depth_write";
+  auto depthPassResult = builder.addGraphicsPass(depthWriteDesc);
+  ASSERT_FALSE(depthPassResult.hasError()) << depthPassResult.error();
+
+  const std::array<TextureHandle, 1u> dependencyTextures{depthHandle};
+  RenderGraphGraphicsPassDesc readDesc{};
+  readDesc.color = {.loadOp = LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+  readDesc.colorTexture = colorImportResult.value();
+  readDesc.dependencyTextures = std::span<const TextureHandle>(
+      dependencyTextures.data(), dependencyTextures.size());
+  readDesc.debugLabel = "sampled_depth_read";
+  auto readPassResult = builder.addGraphicsPass(readDesc);
+  ASSERT_FALSE(readPassResult.hasError()) << readPassResult.error();
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.orderedPassIndices.size(), 2u);
+  EXPECT_EQ(compiled.orderedPassIndices[0u], depthPassResult.value().value);
+  EXPECT_EQ(compiled.orderedPassIndices[1u], readPassResult.value().value);
+
+  const auto edgeIt = std::find_if(
+      compiled.edges.begin(), compiled.edges.end(), [&](const auto &edge) {
+        return edge.before == depthPassResult.value().value &&
+               edge.after == readPassResult.value().value;
+      });
+  EXPECT_NE(edgeIt, compiled.edges.end());
 }
 
 } // namespace

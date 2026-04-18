@@ -134,6 +134,43 @@ function(nuri_add_gtest_suite target source_file test_prefix)
   )
 endfunction()
 
+function(nuri_add_gtest_suite_with_sources target test_prefix)
+  add_executable(${target}
+    ${ARGN}
+  )
+
+  target_link_libraries(${target}
+    PRIVATE
+      nuri_render_graph_test_support
+      GTest::gtest_main
+  )
+
+  target_include_directories(${target}
+    PRIVATE
+      ${CMAKE_SOURCE_DIR}/editor/include
+  )
+
+  target_precompile_headers(${target} REUSE_FROM nuri_render_graph_test_support)
+
+  set_target_properties(${target} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    TEST_LAUNCHER "${NURI_GTEST_LAUNCHER}"
+  )
+
+  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${_cfg}" _cfg_upper)
+    set_target_properties(${target} PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+    )
+  endforeach()
+
+  gtest_discover_tests(${target}
+    TEST_PREFIX "${test_prefix}"
+    DISCOVERY_MODE PRE_TEST
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  )
+endfunction()
+
 nuri_add_gtest_suite(
   nuri_render_graph_metadata_tests
   src/render_graph_metadata_tests.cpp
@@ -156,6 +193,12 @@ nuri_add_gtest_suite(
   nuri_render_graph_renderer_tests
   src/render_graph_renderer_tests.cpp
   "renderer::"
+)
+
+nuri_add_gtest_suite(
+  nuri_transmission_renderer_tests
+  src/transmission_renderer_tests.cpp
+  "transmission_renderer::"
 )
 
 nuri_add_gtest_suite(
@@ -189,6 +232,12 @@ nuri_add_gtest_suite(
 )
 
 nuri_add_gtest_suite(
+  nuri_geometry_pool_tests
+  src/geometry_pool_tests.cpp
+  "geometry_pool::"
+)
+
+nuri_add_gtest_suite(
   nuri_renderable_material_resolution_tests
   src/renderable_material_resolution_tests.cpp
   "renderable_material_resolution::"
@@ -219,7 +268,26 @@ nuri_add_gtest_suite(
 )
 
 nuri_add_gtest_suite(
+  nuri_animation_pose_simulation_tests
+  src/animation_pose_simulation_tests.cpp
+  "animation_pose::"
+)
+
+nuri_add_gtest_suite_with_sources(
+  nuri_editor_animation_player_service_tests
+  "editor_animation_player::"
+  src/editor_animation_player_service_tests.cpp
+  ${CMAKE_SOURCE_DIR}/editor/src/app/editor_animation_player_service.cpp
+)
+
+nuri_add_gtest_suite(
   nuri_scene_animation_tests
   src/scene_animation_tests.cpp
   "scene_animation::"
+)
+
+nuri_add_gtest_suite(
+  nuri_simulation_runtime_tests
+  src/simulation_runtime_tests.cpp
+  "simulation_runtime::"
 )

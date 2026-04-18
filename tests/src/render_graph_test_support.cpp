@@ -152,21 +152,24 @@ bool FakeGPUDeviceBase::shouldClose() const { return false; }
 
 void FakeGPUDeviceBase::getWindowSize(int32_t &outWidth,
                                       int32_t &outHeight) const {
-  outWidth = 1280;
-  outHeight = 720;
+  outWidth = windowWidth;
+  outHeight = windowHeight;
 }
 
 void FakeGPUDeviceBase::getFramebufferSize(int32_t &outWidth,
                                            int32_t &outHeight) const {
-  outWidth = 1280;
-  outHeight = 720;
+  outWidth = framebufferWidth;
+  outHeight = framebufferHeight;
 }
 
-void FakeGPUDeviceBase::resizeSwapchain(int32_t, int32_t) {}
-
-Format FakeGPUDeviceBase::getSwapchainFormat() const {
-  return Format::RGBA8_UNORM;
+void FakeGPUDeviceBase::resizeSwapchain(int32_t width, int32_t height) {
+  windowWidth = width;
+  windowHeight = height;
+  framebufferWidth = width;
+  framebufferHeight = height;
 }
+
+Format FakeGPUDeviceBase::getSwapchainFormat() const { return swapchainFormat; }
 
 uint32_t FakeGPUDeviceBase::getSwapchainImageIndex() const { return 0u; }
 
@@ -177,61 +180,116 @@ uint32_t FakeGPUDeviceBase::getSwapchainImageCount() const {
 double FakeGPUDeviceBase::getTime() const { return 0.0; }
 
 Result<BufferHandle, std::string>
-FakeGPUDeviceBase::createBuffer(const BufferDesc &, std::string_view) {
-  return createBufferImpl();
+FakeGPUDeviceBase::createBuffer(const BufferDesc &desc, std::string_view) {
+  return createBufferImpl(desc);
 }
 
 Result<TextureHandle, std::string>
-FakeGPUDeviceBase::createTexture(const TextureDesc &, std::string_view) {
-  return createTextureImpl();
+FakeGPUDeviceBase::createTexture(const TextureDesc &desc, std::string_view) {
+  return createTextureImpl(desc);
 }
 
 Result<SamplerHandle, std::string>
-FakeGPUDeviceBase::createSampler(const SamplerDesc &, std::string_view) {
+FakeGPUDeviceBase::createSampler(const SamplerDesc &desc, std::string_view) {
   SamplerHandle handle{.index = nextSamplerIndex_++, .generation = 1u};
   ++createdSamplerCount;
+  createdSamplerDescs.push_back(desc);
   return Result<SamplerHandle, std::string>::makeResult(handle);
 }
 
-Result<BufferHandle, std::string> FakeGPUDeviceBase::createBufferImpl() {
+Result<BufferHandle, std::string>
+FakeGPUDeviceBase::createBufferImpl(const BufferDesc &desc) {
   BufferHandle handle{.index = nextBufferIndex_++, .generation = 1u};
+  if (buffers_.size() < handle.index) {
+    buffers_.resize(handle.index);
+  }
+  BufferState &state = buffers_[handle.index - 1u];
+  state.handle = handle;
+  state.size = desc.size != 0u ? desc.size : desc.data.size();
+  state.bytes.assign(state.size, std::byte{0});
+  if (!desc.data.empty()) {
+    std::copy(desc.data.begin(), desc.data.end(), state.bytes.begin());
+  }
+  state.live = true;
   ++createdBufferCount;
   return Result<BufferHandle, std::string>::makeResult(handle);
 }
 
-Result<TextureHandle, std::string> FakeGPUDeviceBase::createTextureImpl() {
+Result<TextureHandle, std::string>
+FakeGPUDeviceBase::createTextureImpl(const TextureDesc &desc) {
   TextureHandle handle{.index = nextTextureIndex_++, .generation = 1u};
+  if (textures_.size() < handle.index) {
+    textures_.resize(handle.index);
+  }
+  TextureState &state = textures_[handle.index - 1u];
+  state.handle = handle;
+  state.format = desc.format;
+  state.width = desc.dimensions.width;
+  state.height = desc.dimensions.height;
+  state.live = true;
   ++createdTextureCount;
+  TextureDesc storedDesc = desc;
+  storedDesc.data = {};
+  createdTextureDescs.push_back(storedDesc);
   return Result<TextureHandle, std::string>::makeResult(handle);
 }
 
 Result<BufferHandle, std::string>
-FakeExecutorGPUDevice::createBuffer(const BufferDesc &, std::string_view) {
+FakeExecutorGPUDevice::createBuffer(const BufferDesc &desc, std::string_view) {
   ++createBufferCallCount;
   if (failCreateBufferAtCall != 0u &&
       createBufferCallCount == failCreateBufferAtCall) {
     return Result<BufferHandle, std::string>::makeError(
         "fake createBuffer failure");
   }
-  return createBufferImpl();
+  return createBufferImpl(desc);
 }
 
 Result<TextureHandle, std::string>
-FakeExecutorGPUDevice::createTexture(const TextureDesc &, std::string_view) {
+FakeExecutorGPUDevice::createTexture(const TextureDesc &desc,
+                                     std::string_view) {
   ++createTextureCallCount;
   if (failCreateTextureAtCall != 0u &&
       createTextureCallCount == failCreateTextureAtCall) {
     return Result<TextureHandle, std::string>::makeError(
         "fake createTexture failure");
   }
-  return createTextureImpl();
+  return createTextureImpl(desc);
 }
 
 Result<TextureHandle, std::string>
-FakeGPUDeviceBase::createFramebufferTexture(const TextureDesc &,
+FakeGPUDeviceBase::createFramebufferTexture(const TextureDesc &desc,
                                             std::string_view) {
-  return Result<TextureHandle, std::string>::makeError(
-      "not implemented in fake device");
+  TextureDesc resizedDesc = desc;
+  resizedDesc.dimensions = {
+      .width = static_cast<uint32_t>(std::max(framebufferWidth, 1)),
+      .height = static_cast<uint32_t>(std::max(framebufferHeight, 1)),
+      .depth = 1u};
+  if (resizedDesc.type == TextureType::Count) {
+    resizedDesc.type = TextureType::Texture2D;
+  }
+  if (resizedDesc.format == Format::Count) {
+    resizedDesc.format = Format::RGBA8_UNORM;
+  }
+  if (resizedDesc.usage == TextureUsage::Count) {
+    resizedDesc.usage = TextureUsage::AttachmentSampled;
+  }
+  if (resizedDesc.storage == Storage::Count) {
+    resizedDesc.storage = Storage::Device;
+  }
+  if (resizedDesc.numLayers == 0u) {
+    resizedDesc.numLayers = 1u;
+  }
+  if (resizedDesc.numSamples == 0u) {
+    resizedDesc.numSamples = 1u;
+  }
+  if (resizedDesc.numMipLevels == 0u) {
+    resizedDesc.numMipLevels = 1u;
+  }
+  if (resizedDesc.dataNumMipLevels == 0u) {
+    resizedDesc.dataNumMipLevels = 1u;
+  }
+  return createTextureImpl(resizedDesc);
 }
 
 Result<TextureHandle, std::string> FakeGPUDeviceBase::createDepthBuffer() {
@@ -272,13 +330,27 @@ void FakeGPUDeviceBase::destroyTexture(TextureHandle texture) {
 }
 
 void FakeGPUDeviceBase::destroyBufferImpl(BufferHandle buffer) {
-  if (nuri::isValid(buffer)) {
+  if (!nuri::isValid(buffer) || buffer.index == 0u ||
+      buffer.index > buffers_.size()) {
+    return;
+  }
+  BufferState &state = buffers_[buffer.index - 1u];
+  if (state.live && sameHandle(state.handle, buffer)) {
+    state.live = false;
+    state.bytes.clear();
+    state.size = 0u;
     ++destroyedBufferCount;
   }
 }
 
 void FakeGPUDeviceBase::destroyTextureImpl(TextureHandle texture) {
-  if (nuri::isValid(texture)) {
+  if (!nuri::isValid(texture) || texture.index == 0u ||
+      texture.index > textures_.size()) {
+    return;
+  }
+  TextureState &state = textures_[texture.index - 1u];
+  if (state.live && sameHandle(state.handle, texture)) {
+    state.live = false;
     ++destroyedTextureCount;
   }
 }
@@ -286,11 +358,19 @@ void FakeGPUDeviceBase::destroyTextureImpl(TextureHandle texture) {
 void FakeGPUDeviceBase::destroyShaderModule(ShaderHandle) {}
 
 bool FakeGPUDeviceBase::isValid(BufferHandle h) const {
-  return nuri::isValid(h);
+  if (!nuri::isValid(h) || h.index == 0u || h.index > buffers_.size()) {
+    return false;
+  }
+  const BufferState &state = buffers_[h.index - 1u];
+  return state.live && sameHandle(state.handle, h);
 }
 
 bool FakeGPUDeviceBase::isValid(TextureHandle h) const {
-  return nuri::isValid(h);
+  if (!nuri::isValid(h) || h.index == 0u || h.index > textures_.size()) {
+    return false;
+  }
+  const TextureState &state = textures_[h.index - 1u];
+  return state.live && sameHandle(state.handle, h);
 }
 
 bool FakeGPUDeviceBase::isValid(SamplerHandle h) const {
@@ -309,8 +389,24 @@ bool FakeGPUDeviceBase::isValid(ComputePipelineHandle h) const {
   return nuri::isValid(h);
 }
 
-Format FakeGPUDeviceBase::getTextureFormat(TextureHandle) const {
-  return Format::RGBA8_UNORM;
+Format FakeGPUDeviceBase::getTextureFormat(TextureHandle h) const {
+  if (!nuri::isValid(h) || h.index == 0u || h.index > textures_.size()) {
+    return Format::Count;
+  }
+  return textures_[h.index - 1u].format;
+}
+
+TextureDimensions
+FakeGPUDeviceBase::getTextureDimensions(TextureHandle h) const {
+  if (!nuri::isValid(h) || h.index == 0u || h.index > textures_.size()) {
+    return {};
+  }
+  const TextureState &state = textures_[h.index - 1u];
+  return TextureDimensions{
+      .width = state.width,
+      .height = state.height,
+      .depth = 1u,
+  };
 }
 
 TextureCompressionCaps FakeGPUDeviceBase::getTextureCompressionCaps() const {
@@ -318,7 +414,7 @@ TextureCompressionCaps FakeGPUDeviceBase::getTextureCompressionCaps() const {
 }
 
 uint32_t FakeGPUDeviceBase::getTextureBindlessIndex(TextureHandle) const {
-  return 0u;
+  return 1u;
 }
 
 void FakeGPUDeviceBase::destroySampler(SamplerHandle sampler) {
@@ -352,8 +448,13 @@ uint32_t FakeGPUDeviceBase::getCubemapSamplerBindlessIndex() const {
   return 0u;
 }
 
-uint64_t FakeGPUDeviceBase::getBufferDeviceAddress(BufferHandle, size_t) const {
-  return 0ull;
+uint64_t FakeGPUDeviceBase::getBufferDeviceAddress(BufferHandle h,
+                                                   size_t offset) const {
+  if (!isValid(h)) {
+    return 0ull;
+  }
+  return 0x100000000ull + (static_cast<uint64_t>(h.generation) << 24u) +
+         (static_cast<uint64_t>(h.index) << 12u) + offset;
 }
 
 bool FakeGPUDeviceBase::resolveGeometry(GeometryAllocationHandle,
@@ -616,20 +717,93 @@ FakeGPUDeviceBase::allocateGeometry(std::span<const std::byte>, uint32_t,
 
 void FakeGPUDeviceBase::releaseGeometry(GeometryAllocationHandle) {}
 
-Result<bool, std::string>
-FakeGPUDeviceBase::copyBufferRegions(std::span<const BufferCopyRegion>) {
+Result<SubmissionHandle, std::string>
+FakeGPUDeviceBase::submitBackgroundBufferCopies(
+    std::span<const BufferCopyRegion> regions, std::string_view) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  ++backgroundCopySubmitCount;
+  backgroundCopyBatchSizes.push_back(regions.size());
+  if (failBackgroundCopySubmitAtCall != 0u &&
+      backgroundCopySubmitCount == failBackgroundCopySubmitAtCall) {
+    return Result<SubmissionHandle, std::string>::makeError(
+        "fake submitBackgroundBufferCopies failure");
+  }
+
+  size_t copiedBytes = 0u;
+  for (const BufferCopyRegion &region : regions) {
+    if (region.size == 0u) {
+      continue;
+    }
+    if (!isValid(region.srcBuffer) || !isValid(region.dstBuffer)) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "fake submitBackgroundBufferCopies: invalid buffer");
+    }
+    BufferState &src = buffers_[region.srcBuffer.index - 1u];
+    BufferState &dst = buffers_[region.dstBuffer.index - 1u];
+    if (region.srcOffset > src.size ||
+        region.size > src.size - region.srcOffset) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "fake submitBackgroundBufferCopies: source range out of bounds");
+    }
+    if (region.dstOffset > dst.size ||
+        region.size > dst.size - region.dstOffset) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "fake submitBackgroundBufferCopies: destination range out of bounds");
+    }
+    std::copy_n(
+        src.bytes.begin() + static_cast<std::ptrdiff_t>(region.srcOffset),
+        static_cast<std::ptrdiff_t>(region.size),
+        dst.bytes.begin() + static_cast<std::ptrdiff_t>(region.dstOffset));
+    copiedBytes += static_cast<size_t>(region.size);
+  }
+
+  backgroundCopyBatchBytes.push_back(copiedBytes);
+  lastBackgroundCopyHandle =
+      SubmissionHandle{.index = nextSubmissionIndex_++, .generation = 1u};
+  const uint64_t retireLag =
+      static_cast<uint64_t>(std::max(1u, swapchainImageCount)) + 1ull;
+  submissions_.push_back(SubmissionState{
+      .handle = lastBackgroundCopyHandle,
+      .readyFrameIndex = currentFrameIndex_ + retireLag,
+  });
+  return Result<SubmissionHandle, std::string>::makeResult(
+      lastBackgroundCopyHandle);
+}
+
+Result<bool, std::string> FakeGPUDeviceBase::updateBuffer(
+    BufferHandle buffer, std::span<const std::byte> data, size_t offset) {
+  if (!isValid(buffer)) {
+    return Result<bool, std::string>::makeError(
+        "fake updateBuffer: invalid buffer");
+  }
+  ++updateBufferCallCount;
+  BufferState &state = buffers_[buffer.index - 1u];
+  if (offset > state.size || data.size() > state.size - offset) {
+    return Result<bool, std::string>::makeError(
+        "fake updateBuffer: range out of bounds");
+  }
+  std::copy(data.begin(), data.end(),
+            state.bytes.begin() + static_cast<std::ptrdiff_t>(offset));
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
-FakeGPUDeviceBase::updateBuffer(BufferHandle, std::span<const std::byte>,
-                                size_t) {
+FakeGPUDeviceBase::readBuffer(BufferHandle buffer, size_t offset,
+                              std::span<std::byte> outBytes) {
+  if (!isValid(buffer)) {
+    return Result<bool, std::string>::makeError(
+        "fake readBuffer: invalid buffer");
+  }
+  const BufferState &state = buffers_[buffer.index - 1u];
+  if (offset > state.size || outBytes.size() > state.size - offset) {
+    return Result<bool, std::string>::makeError(
+        "fake readBuffer: range out of bounds");
+  }
+  std::copy(state.bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+            state.bytes.begin() +
+                static_cast<std::ptrdiff_t>(offset + outBytes.size()),
+            outBytes.begin());
   return Result<bool, std::string>::makeResult(true);
-}
-
-Result<bool, std::string> FakeGPUDeviceBase::readBuffer(BufferHandle, size_t,
-                                                        std::span<std::byte>) {
-  return Result<bool, std::string>::makeError("not implemented in fake device");
 }
 
 std::byte *FakeGPUDeviceBase::getMappedBufferPtr(BufferHandle) {

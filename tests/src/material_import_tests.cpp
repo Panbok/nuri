@@ -983,16 +983,26 @@ TEST(MaterialImportTests, SyntheticGltfImportsSpecGlossTexturesAndTransforms) {
               1.0e-6f);
 }
 
-TEST(MaterialImportTests, MaterialDescFromImportedResolvesRuntimeSamplerState) {
+TEST(MaterialImportTests, MaterialDescFromImportedIgnoresImportedSamplerState) {
   nuri::MaterialData material{};
   material.baseColor.samplerIndex = 5u;
   material.normal.samplerIndex = 3u;
   material.specularColor.samplerIndex = 7u;
 
+  nuri::MaterialData differentSamplers = material;
+  differentSamplers.baseColor.samplerIndex = 0u;
+  differentSamplers.normal.samplerIndex = 11u;
+  differentSamplers.specularColor.samplerIndex = 1u;
+
   const nuri::MaterialDesc desc = nuri::Material::descFromImported(material);
-  EXPECT_EQ(desc.samplers.baseColor, 0u);
-  EXPECT_EQ(desc.samplers.normal, 0u);
-  EXPECT_EQ(desc.samplers.specularColor, 0u);
+  const nuri::MaterialDesc descWithoutSamplers =
+      nuri::Material::descFromImported(differentSamplers);
+  EXPECT_EQ(nuri::hashMaterialDesc(desc),
+            nuri::hashMaterialDesc(descWithoutSamplers));
+  EXPECT_EQ(desc.uvSets.baseColor, descWithoutSamplers.uvSets.baseColor);
+  EXPECT_EQ(desc.uvSets.normal, descWithoutSamplers.uvSets.normal);
+  EXPECT_EQ(desc.uvSets.specularColor,
+            descWithoutSamplers.uvSets.specularColor);
 }
 
 TEST(MaterialImportTests, SyntheticGltfSpecGlossWinsOverSpecularExtension) {

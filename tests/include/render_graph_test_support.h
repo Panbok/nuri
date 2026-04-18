@@ -90,6 +90,7 @@ public:
   bool isValid(RenderPipelineHandle h) const override;
   bool isValid(ComputePipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
+  TextureDimensions getTextureDimensions(TextureHandle h) const override;
   TextureCompressionCaps getTextureCompressionCaps() const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
   Result<SamplerHandle, std::string>
@@ -133,8 +134,9 @@ public:
                    std::span<const std::byte> indexBytes, uint32_t indexCount,
                    std::string_view debugName) override;
   void releaseGeometry(GeometryAllocationHandle h) override;
-  Result<bool, std::string>
-  copyBufferRegions(std::span<const BufferCopyRegion> regions) override;
+  Result<SubmissionHandle, std::string>
+  submitBackgroundBufferCopies(std::span<const BufferCopyRegion> regions,
+                               std::string_view debugName) override;
 
   Result<bool, std::string> updateBuffer(BufferHandle buffer,
                                          std::span<const std::byte> data,
@@ -158,12 +160,19 @@ public:
   uint32_t destroyedTextureCount = 0u;
   uint32_t destroyedSamplerCount = 0u;
   uint32_t submitCount = 0u;
+  uint32_t backgroundCopySubmitCount = 0u;
   uint32_t waitIdleCallCount = 0u;
+  uint32_t updateBufferCallCount = 0u;
   uint32_t discardedRecordingContextCount = 0u;
   uint32_t discardedRecordedCommandBufferCount = 0u;
   uint32_t finishedRecordingContextCount = 0u;
   uint32_t acquiredRecordingContextCount = 0u;
   uint32_t maxRecordingContexts = 8u;
+  Format swapchainFormat = Format::RGBA8_UNORM;
+  int32_t windowWidth = 1280;
+  int32_t windowHeight = 720;
+  int32_t framebufferWidth = 1280;
+  int32_t framebufferHeight = 720;
   int32_t failAcquireWorkerIndex = -1;
   std::string failRecordPassLabel{};
   uint32_t failFinishAtCall = 0u;
@@ -171,11 +180,24 @@ public:
   std::vector<uint32_t> recordedBarrierBatchCounts{};
   std::vector<RecordedCommandBufferHandle> submittedCommandBuffers{};
   std::vector<SubmitBatchMeta> submittedBatches{};
+  std::vector<size_t> backgroundCopyBatchSizes{};
+  std::vector<size_t> backgroundCopyBatchBytes{};
   SubmissionHandle lastSubmittedFrameHandle{};
+  SubmissionHandle lastBackgroundCopyHandle{};
+  uint32_t failBackgroundCopySubmitAtCall = 0u;
+  std::vector<TextureDesc> createdTextureDescs{};
+  std::vector<SamplerDesc> createdSamplerDescs{};
 
 protected:
-  Result<BufferHandle, std::string> createBufferImpl();
-  Result<TextureHandle, std::string> createTextureImpl();
+  Result<BufferHandle, std::string> createBufferImpl() {
+    return createBufferImpl(BufferDesc{
+        .usage = BufferUsage::Storage,
+        .storage = Storage::Device,
+        .size = 1u,
+    });
+  }
+  Result<BufferHandle, std::string> createBufferImpl(const BufferDesc &desc);
+  Result<TextureHandle, std::string> createTextureImpl(const TextureDesc &desc);
   void destroyBufferImpl(BufferHandle buffer);
   void destroyTextureImpl(TextureHandle texture);
   // Caller must hold recordingStateMutex_ before recordSubmitFrame mutates
@@ -204,6 +226,21 @@ private:
     uint64_t readyFrameIndex = 0u;
   };
 
+  struct BufferState {
+    BufferHandle handle{};
+    size_t size = 0u;
+    std::vector<std::byte> bytes{};
+    bool live = false;
+  };
+
+  struct TextureState {
+    TextureHandle handle{};
+    Format format = Format::RGBA8_UNORM;
+    uint32_t width = 1u;
+    uint32_t height = 1u;
+    bool live = false;
+  };
+
   uint32_t nextBufferIndex_ = 1u;
   uint32_t nextTextureIndex_ = 1u;
   uint32_t nextSamplerIndex_ = 1u;
@@ -212,6 +249,8 @@ private:
   uint32_t nextSubmissionIndex_ = 1u;
   uint32_t finishCallCount_ = 0u;
   uint64_t currentFrameIndex_ = 0u;
+  std::vector<BufferState> buffers_{};
+  std::vector<TextureState> textures_{};
   std::vector<RecordingContextState> activeRecordingContexts_{};
   std::vector<RecordedCommandBufferState> finishedCommandBuffers_{};
   std::vector<SubmissionState> submissions_{};
