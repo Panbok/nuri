@@ -8,15 +8,9 @@ layout(location = 0) in PerVertex vtx;
 layout(location = 0) out vec4 out_FragColor;
 
 vec3 shadowCascadeDebugColor(uint cascadeIndex) {
-  vec3 cascadeColor = vec3(0.0, 1.0, 0.0);
-  if (cascadeIndex == 1u) {
-    cascadeColor = vec3(0.0, 1.0, 1.0);
-  } else if (cascadeIndex == 2u) {
-    cascadeColor = vec3(1.0, 1.0, 0.0);
-  } else if (cascadeIndex == 3u) {
-    cascadeColor = vec3(1.0, 0.0, 1.0);
-  }
-  return cascadeColor;
+  const vec3 colors[4] = vec3[4](vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 1.0),
+                                 vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 1.0));
+  return colors[int(min(cascadeIndex, 3u))];
 }
 
 void main() {

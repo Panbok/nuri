@@ -266,8 +266,8 @@ computeCascadeSplitDepths(const CameraFrameState &camera, float maxDistance,
     accumulateDepth(point);
   }
   if (!std::isfinite(lightMin.z) || !std::isfinite(lightMax.z)) {
-    lightMin.z = -radius;
-    lightMax.z = radius;
+    lightMin.z = lightSpaceCenter.z - radius;
+    lightMax.z = lightSpaceCenter.z + radius;
   }
 
   stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,

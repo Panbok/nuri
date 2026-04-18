@@ -323,6 +323,8 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   settings.sdsmMode = sanitizeShadowSdsmMode(settings.sdsmMode);
   settings.debug.previewMode =
       sanitizeShadowPreviewMode(settings.debug.previewMode);
+  // Light-perspective shadow preview is kept in settings but has no renderer
+  // path yet, so sanitize it off instead of accepting a no-op debug flag.
   settings.debug.showLightPerspectiveViewport = false;
   settings.pcfSampleCount =
       std::clamp(settings.pcfSampleCount, 1u, kMaxShadowPcfSamples);

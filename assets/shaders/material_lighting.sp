@@ -306,6 +306,8 @@ struct HardShadowInspectResult {
   float receiverDepth;
   float receiverCompareDepth;
   float sampledDepth;
+  float cascadeIndexDebug;
+  float cascadeBlendDebug;
   float valid;
 };
 
@@ -379,18 +381,6 @@ float directionalShadowViewDepth(vec3 worldPos) {
   return max(0.0, -(pc.frameData.view * vec4(worldPos, 1.0)).z);
 }
 
-DirectionalShadowSampleContext makeDirectionalShadowSampleContext(
-    readonly ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
-    vec3 lightDir) {
-  const float viewDepth = directionalShadowViewDepth(worldPos);
-  const uint cascadeIndex = selectDirectionalShadowCascade(shadow, viewDepth);
-  DirectionalShadowSampleContext ctx =
-      makeDirectionalShadowSampleContextForCascade(
-          shadow.cascades[cascadeIndex], worldPos, surfaceNormal, lightDir);
-  ctx.cascadeIndex = cascadeIndex;
-  return ctx;
-}
-
 float hardDirectionalShadowFactor(DirectionalShadowSampleContext ctx) {
   const uint shadowTexId = ctx.cascade.textureSampler.x;
   const uint shadowSamplerId = ctx.cascade.textureSampler.y;
@@ -462,36 +452,50 @@ float directionalShadowFactorFromContext(DirectionalShadowSampleContext ctx,
   return hardDirectionalShadowFactor(ctx);
 }
 
-float directionalShadowFactor(readonly ShadowFrameBuffer shadow, vec3 worldPos,
-                              vec3 surfaceNormal, vec3 lightDir) {
+struct DirectionalShadowResult {
+  float factor;
+  float cascadeIndexDebug;
+  float cascadeBlendDebug;
+};
+
+struct DirectionalShadowCascadeState {
+  DirectionalShadowSampleContext ctx;
+  DirectionalShadowSampleContext nextCtx;
+  float cascadeBlend;
+  bool hasBlend;
+};
+
+DirectionalShadowCascadeState makeDirectionalShadowCascadeState(
+    readonly ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
+    vec3 lightDir) {
+  DirectionalShadowCascadeState state;
+
   const float viewDepth = directionalShadowViewDepth(worldPos);
   const uint cascadeCount =
       clamp(shadow.flagsCascadeCountLightIndex.y, 1u, kMaxShadowCascades);
   const uint cascadeIndex = selectDirectionalShadowCascade(shadow, viewDepth);
-  DirectionalShadowSampleContext ctx =
-      makeDirectionalShadowSampleContextForCascade(
-          shadow.cascades[cascadeIndex], worldPos, surfaceNormal, lightDir);
-  ctx.cascadeIndex = cascadeIndex;
+  state.ctx = makeDirectionalShadowSampleContextForCascade(
+      shadow.cascades[cascadeIndex], worldPos, surfaceNormal, lightDir);
+  state.ctx.cascadeIndex = cascadeIndex;
+  state.nextCtx = state.ctx;
+  state.cascadeBlend = 0.0;
+  state.hasBlend = false;
 
-  const uint filterMode = shadow.flagsCascadeCountLightIndex.w;
-  float shadowFactor = directionalShadowFactorFromContext(ctx, filterMode);
   if (cascadeIndex + 1u >= cascadeCount) {
-    return shadowFactor;
+    return state;
   }
 
   const ShadowCascadeGpuData cascade = shadow.cascades[cascadeIndex];
-  const float cascadeSpan = max(cascade.splitDepthTexelSize.y -
-                                    cascade.splitDepthTexelSize.x,
-                                0.0);
-  const float blendWidth =
-      cascadeSpan * saturate(shadow.fadeParams.z);
+  const float cascadeSpan =
+      max(cascade.splitDepthTexelSize.y - cascade.splitDepthTexelSize.x, 0.0);
+  const float blendWidth = cascadeSpan * saturate(shadow.fadeParams.z);
   if (blendWidth <= kEpsilon) {
-    return shadowFactor;
+    return state;
   }
 
   const float blendStart = cascade.splitDepthTexelSize.y - blendWidth;
   if (viewDepth < blendStart || viewDepth > cascade.splitDepthTexelSize.y) {
-    return shadowFactor;
+    return state;
   }
 
   DirectionalShadowSampleContext nextCtx =
@@ -500,20 +504,14 @@ float directionalShadowFactor(readonly ShadowFrameBuffer shadow, vec3 worldPos,
           lightDir);
   nextCtx.cascadeIndex = cascadeIndex + 1u;
   if (!nextCtx.valid) {
-    return shadowFactor;
+    return state;
   }
 
-  const float nextShadowFactor =
-      directionalShadowFactorFromContext(nextCtx, filterMode);
-  const float blendT = saturate((viewDepth - blendStart) / blendWidth);
-  return mix(shadowFactor, nextShadowFactor, blendT);
+  state.nextCtx = nextCtx;
+  state.cascadeBlend = saturate((viewDepth - blendStart) / blendWidth);
+  state.hasBlend = true;
+  return state;
 }
-
-struct DirectionalShadowResult {
-  float factor;
-  float cascadeIndexDebug;
-  float cascadeBlendDebug;
-};
 
 DirectionalShadowResult evaluateDirectionalShadow(
     readonly ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
@@ -523,51 +521,29 @@ DirectionalShadowResult evaluateDirectionalShadow(
   r.cascadeIndexDebug = 0.0;
   r.cascadeBlendDebug = 0.0;
 
-  const float viewDepth = directionalShadowViewDepth(worldPos);
-  const uint cascadeCount =
-      clamp(shadow.flagsCascadeCountLightIndex.y, 1u, kMaxShadowCascades);
-  const uint cascadeIndex = selectDirectionalShadowCascade(shadow, viewDepth);
-  DirectionalShadowSampleContext ctx =
-      makeDirectionalShadowSampleContextForCascade(
-          shadow.cascades[cascadeIndex], worldPos, surfaceNormal, lightDir);
-  ctx.cascadeIndex = cascadeIndex;
+  const DirectionalShadowCascadeState state =
+      makeDirectionalShadowCascadeState(shadow, worldPos, surfaceNormal,
+                                        lightDir);
 
   const uint filterMode = shadow.flagsCascadeCountLightIndex.w;
-  r.factor = directionalShadowFactorFromContext(ctx, filterMode);
-  r.cascadeIndexDebug = float(cascadeIndex);
-  if (cascadeIndex + 1u >= cascadeCount) {
-    return r;
-  }
-
-  const ShadowCascadeGpuData cascade = shadow.cascades[cascadeIndex];
-  const float cascadeSpan = max(cascade.splitDepthTexelSize.y -
-                                    cascade.splitDepthTexelSize.x,
-                                0.0);
-  const float blendWidth =
-      cascadeSpan * saturate(shadow.fadeParams.z);
-  if (blendWidth <= kEpsilon) {
-    return r;
-  }
-
-  const float blendStart = cascade.splitDepthTexelSize.y - blendWidth;
-  if (viewDepth < blendStart || viewDepth > cascade.splitDepthTexelSize.y) {
-    return r;
-  }
-
-  DirectionalShadowSampleContext nextCtx =
-      makeDirectionalShadowSampleContextForCascade(
-          shadow.cascades[cascadeIndex + 1u], worldPos, surfaceNormal,
-          lightDir);
-  nextCtx.cascadeIndex = cascadeIndex + 1u;
-  if (!nextCtx.valid) {
+  r.factor = directionalShadowFactorFromContext(state.ctx, filterMode);
+  r.cascadeIndexDebug = float(state.ctx.cascadeIndex);
+  if (!state.hasBlend) {
     return r;
   }
 
   const float nextShadowFactor =
-      directionalShadowFactorFromContext(nextCtx, filterMode);
-  r.cascadeBlendDebug = saturate((viewDepth - blendStart) / blendWidth);
+      directionalShadowFactorFromContext(state.nextCtx, filterMode);
+  r.cascadeBlendDebug = state.cascadeBlend;
   r.factor = mix(r.factor, nextShadowFactor, r.cascadeBlendDebug);
   return r;
+}
+
+float directionalShadowFactor(readonly ShadowFrameBuffer shadow, vec3 worldPos,
+                              vec3 surfaceNormal, vec3 lightDir) {
+  const DirectionalShadowResult r =
+      evaluateDirectionalShadow(shadow, worldPos, surfaceNormal, lightDir);
+  return r.factor;
 }
 
 HardShadowInspectResult inspectHardDirectionalShadow(
@@ -577,24 +553,29 @@ HardShadowInspectResult inspectHardDirectionalShadow(
   r.receiverDepth = 0.0;
   r.receiverCompareDepth = 0.0;
   r.sampledDepth = 0.0;
+  r.cascadeIndexDebug = 0.0;
+  r.cascadeBlendDebug = 0.0;
   r.valid = 0.0;
 
-  DirectionalShadowSampleContext ctx =
-      makeDirectionalShadowSampleContext(shadow, worldPos, surfaceNormal,
-                                         lightDir);
-  const uint shadowTexId = ctx.cascade.textureSampler.x;
-  const uint shadowCompareSamplerId = ctx.cascade.textureSampler.y;
-  const uint shadowRawSamplerId = ctx.cascade.textureSampler.z;
-  if (!ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
+  const DirectionalShadowCascadeState state =
+      makeDirectionalShadowCascadeState(shadow, worldPos, surfaceNormal,
+                                        lightDir);
+  r.cascadeIndexDebug = float(state.ctx.cascadeIndex);
+  r.cascadeBlendDebug = state.cascadeBlend;
+
+  const uint shadowTexId = state.ctx.cascade.textureSampler.x;
+  const uint shadowCompareSamplerId = state.ctx.cascade.textureSampler.y;
+  const uint shadowRawSamplerId = state.ctx.cascade.textureSampler.z;
+  if (!state.ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
       shadowCompareSamplerId == kInvalidSamplerBindlessIndex ||
       shadowRawSamplerId == kInvalidSamplerBindlessIndex) {
     return r;
   }
 
-  r.receiverDepth = ctx.receiverDepth;
-  r.receiverCompareDepth = ctx.receiverCompareDepth;
+  r.receiverDepth = state.ctx.receiverDepth;
+  r.receiverCompareDepth = state.ctx.receiverCompareDepth;
   r.sampledDepth =
-      textureBindless2D(shadowTexId, shadowRawSamplerId, ctx.shadowUv).r;
+      textureBindless2D(shadowTexId, shadowRawSamplerId, state.ctx.shadowUv).r;
   r.valid = 1.0;
   return r;
 }

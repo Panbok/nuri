@@ -36,13 +36,11 @@ void main() {
   vec3 l = normalize(-directionalLightDirection(light));
   const HardShadowInspectResult inspect =
       inspectHardDirectionalShadow(shadow, vtx.worldPos, sm.nBase, l);
-  const DirectionalShadowResult shadowDebug =
-      evaluateDirectionalShadow(shadow, vtx.worldPos, sm.nBase, l);
   const float packedCascadeState =
-      inspect.valid > 0.5 ? shadowDebug.cascadeIndexDebug +
-                                min(shadowDebug.cascadeBlendDebug, 0.9999) *
-                                    kShadowInspectBlendPackScale
-                          : -1.0;
+      inspect.valid > 0.5
+          ? inspect.cascadeIndexDebug + min(inspect.cascadeBlendDebug, 0.9999) *
+                                            kShadowInspectBlendPackScale
+          : -1.0;
   out_ShadowInspect = vec4(inspect.receiverDepth, inspect.receiverCompareDepth,
                            inspect.sampledDepth, packedCascadeState);
 }
