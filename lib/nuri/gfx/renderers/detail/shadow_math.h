@@ -23,6 +23,10 @@ struct DirectionalShadowFit {
   glm::vec3 lightSpaceBoundsMin{0.0f};
   glm::vec3 lightSpaceBoundsMax{0.0f};
   glm::vec3 frustumCenter{0.0f};
+  glm::vec3 unsnappedCenter{0.0f};
+  glm::vec3 snappedCenter{0.0f};
+  glm::vec2 unsnappedLightSpaceCenter{0.0f};
+  glm::vec2 snappedLightSpaceCenter{0.0f};
   std::array<glm::vec3, 8> frustumCorners{};
 };
 
@@ -140,14 +144,47 @@ computeBoundsCorners(glm::vec3 boundsMin, glm::vec3 boundsMax) {
   };
 }
 
+[[nodiscard]] inline glm::vec3 lightSpaceCenter(glm::vec3 boundsMin,
+                                                glm::vec3 boundsMax) {
+  return (boundsMin + boundsMax) * 0.5f;
+}
+
+inline void stabilizeOrthoBounds(glm::vec3 &lightMin, glm::vec3 &lightMax,
+                                 uint32_t shadowMapSize, bool stabilize,
+                                 DirectionalShadowFit &fit,
+                                 const glm::mat4 &inverseLightView) {
+  const float width = std::max(lightMax.x - lightMin.x, 0.01f);
+  const float height = std::max(lightMax.y - lightMin.y, 0.01f);
+  fit.texelWorldSize =
+      std::max(width, height) / static_cast<float>(std::max(shadowMapSize, 1u));
+
+  const glm::vec3 unsnappedLightCenter = lightSpaceCenter(lightMin, lightMax);
+  fit.unsnappedLightSpaceCenter = glm::vec2(unsnappedLightCenter);
+
+  glm::vec3 snappedLightCenter = unsnappedLightCenter;
+  if (stabilize && fit.texelWorldSize > 0.0f) {
+    const float texelStep = fit.texelWorldSize;
+    snappedLightCenter.x =
+        std::round(unsnappedLightCenter.x / texelStep) * texelStep;
+    snappedLightCenter.y =
+        std::round(unsnappedLightCenter.y / texelStep) * texelStep;
+    lightMin.x = snappedLightCenter.x - width * 0.5f;
+    lightMax.x = snappedLightCenter.x + width * 0.5f;
+    lightMin.y = snappedLightCenter.y - height * 0.5f;
+    lightMax.y = snappedLightCenter.y + height * 0.5f;
+  }
+  fit.snappedLightSpaceCenter = glm::vec2(snappedLightCenter);
+
+  fit.unsnappedCenter =
+      glm::vec3(inverseLightView * glm::vec4(unsnappedLightCenter, 1.0f));
+  fit.snappedCenter =
+      glm::vec3(inverseLightView * glm::vec4(snappedLightCenter, 1.0f));
+}
+
 [[nodiscard]] inline DirectionalShadowFit
 fitSingleDirectionalShadowMap(const CameraFrameState &camera,
                               glm::vec3 lightDirection, float maxDistance,
                               uint32_t shadowMapSize, bool stabilize = false) {
-  if (stabilize) {
-    // TODO: Stabilize the orthographic fit with texel snapping to reduce
-    // shadow swimming during camera motion.
-  }
   DirectionalShadowFit fit{};
   fit.splitNear = std::max(camera.nearPlane, 0.01f);
   const float requestedFar =
@@ -170,6 +207,7 @@ fitSingleDirectionalShadowMap(const CameraFrameState &camera,
 
   lightDirection = normalizeSafe(lightDirection, glm::vec3(0.0f, -1.0f, 0.0f));
   fit.lightView = makeDirectionalLightView(lightDirection);
+  const glm::mat4 inverseLightView = glm::inverse(fit.lightView);
 
   glm::vec3 lightMin(std::numeric_limits<float>::max());
   glm::vec3 lightMax(std::numeric_limits<float>::lowest());
@@ -186,10 +224,8 @@ fitSingleDirectionalShadowMap(const CameraFrameState &camera,
   lightMax.x += xyPadding;
   lightMax.y += xyPadding;
 
-  float width = std::max(lightMax.x - lightMin.x, 0.01f);
-  float height = std::max(lightMax.y - lightMin.y, 0.01f);
-  fit.texelWorldSize =
-      std::max(width, height) / static_cast<float>(std::max(shadowMapSize, 1u));
+  stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
+                       inverseLightView);
   const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
   const float depthPadding = std::max(depth * 0.01f, 0.01f);
   const float nearPlane = -lightMax.z - depthPadding;
@@ -210,10 +246,6 @@ fitDirectionalShadowMapToBounds(const CameraFrameState &camera,
                                 glm::vec3 boundsMin, glm::vec3 boundsMax,
                                 glm::vec3 lightDirection, float maxDistance,
                                 uint32_t shadowMapSize, bool stabilize) {
-  if (stabilize) {
-    // TODO: Apply the same texel-snapped stabilization path used for camera
-    // frustum fits once the bounds-based fit is stabilized.
-  }
   DirectionalShadowFit fit{};
   fit.splitNear = std::max(camera.nearPlane, 0.01f);
   fit.splitFar =
@@ -227,6 +259,7 @@ fitDirectionalShadowMapToBounds(const CameraFrameState &camera,
 
   lightDirection = normalizeSafe(lightDirection, glm::vec3(0.0f, -1.0f, 0.0f));
   fit.lightView = makeDirectionalLightView(lightDirection);
+  const glm::mat4 inverseLightView = glm::inverse(fit.lightView);
 
   glm::vec3 lightMin(std::numeric_limits<float>::max());
   glm::vec3 lightMax(std::numeric_limits<float>::lowest());
@@ -246,10 +279,8 @@ fitDirectionalShadowMapToBounds(const CameraFrameState &camera,
   lightMax.x += xyPadding;
   lightMax.y += xyPadding;
 
-  const float width = std::max(lightMax.x - lightMin.x, 0.01f);
-  const float height = std::max(lightMax.y - lightMin.y, 0.01f);
-  fit.texelWorldSize =
-      std::max(width, height) / static_cast<float>(std::max(shadowMapSize, 1u));
+  stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
+                       inverseLightView);
   const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
   const float depthPadding = std::max(depth * 0.001f, 0.01f);
   const float nearPlane = -lightMax.z - depthPadding;

@@ -18,8 +18,13 @@ const uint kSceneDepthPyramidArraySize =
     (kMaxSceneDepthPyramidLevels + kSceneDepthPyramidTexIdPackWidth - 1u) /
     kSceneDepthPyramidTexIdPackWidth;
 const uint kMaxShadowCascades = 4u;
+const uint kMaxShadowPcfSamples = 64u;
 const uint kShadowFrameFlagEnabled = 1u << 0u;
 const uint kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
+const uint kShadowFilterModeHard = 0u;
+const uint kShadowFilterModePCF3x3 = 1u;
+const uint kShadowFilterModePoissonPCF = 2u;
+const uint kShadowFilterModePCSS = 3u;
 
 const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
 const uint kMaterialFeatureSheen = 1u << 1u;

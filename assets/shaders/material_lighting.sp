@@ -307,19 +307,26 @@ struct HardShadowInspectResult {
   float valid;
 };
 
-float hardDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
-                                  vec3 worldPos) {
-  ShadowCascadeGpuData cascade = shadow.cascades[0];
-  const uint shadowTexId = cascade.textureSampler.x;
-  const uint shadowSamplerId = cascade.textureSampler.y;
-  if (shadowTexId == kInvalidTextureBindlessIndex ||
-      shadowSamplerId == kInvalidSamplerBindlessIndex) {
-    return 1.0;
-  }
+struct DirectionalShadowSampleContext {
+  ShadowCascadeGpuData cascade;
+  vec2 shadowUv;
+  float receiverDepth;
+  float receiverCompareDepth;
+  bool valid;
+};
 
-  vec4 lightClip = cascade.lightViewProj * vec4(worldPos, 1.0);
+DirectionalShadowSampleContext makeDirectionalShadowSampleContext(
+    readonly ShadowFrameBuffer shadow, vec3 worldPos) {
+  DirectionalShadowSampleContext ctx;
+  ctx.cascade = shadow.cascades[0];
+  ctx.shadowUv = vec2(0.0);
+  ctx.receiverDepth = 0.0;
+  ctx.receiverCompareDepth = 0.0;
+  ctx.valid = false;
+
+  vec4 lightClip = ctx.cascade.lightViewProj * vec4(worldPos, 1.0);
   if (abs(lightClip.w) <= kEpsilon) {
-    return 1.0;
+    return ctx;
   }
 
   vec3 ndc = lightClip.xyz / lightClip.w;
@@ -328,12 +335,88 @@ float hardDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
   if (any(lessThan(shadowUv, vec2(0.0))) ||
       any(greaterThan(shadowUv, vec2(1.0))) || ndc.z < 0.0 ||
       ndc.z > 1.0) {
+    return ctx;
+  }
+
+  const float constantBias = ctx.cascade.biasParams.x;
+  ctx.shadowUv = shadowUv;
+  ctx.receiverDepth = ndc.z;
+  ctx.receiverCompareDepth = ndc.z - constantBias;
+  ctx.valid = true;
+  return ctx;
+}
+
+float hardDirectionalShadowFactor(DirectionalShadowSampleContext ctx) {
+  const uint shadowTexId = ctx.cascade.textureSampler.x;
+  const uint shadowSamplerId = ctx.cascade.textureSampler.y;
+  if (!ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
+      shadowSamplerId == kInvalidSamplerBindlessIndex) {
     return 1.0;
   }
 
-  const float constantBias = cascade.biasParams.x;
   return textureBindless2DShadow(
-      shadowTexId, shadowSamplerId, vec3(shadowUv, ndc.z - constantBias));
+      shadowTexId, shadowSamplerId,
+      vec3(ctx.shadowUv, ctx.receiverCompareDepth));
+}
+
+int directionalShadowPcfSampleCount(DirectionalShadowSampleContext ctx) {
+  return int(clamp(ctx.cascade.textureSampler.w, 1u, kMaxShadowPcfSamples));
+}
+
+float sampleDirectionalShadowVisibility(DirectionalShadowSampleContext ctx,
+                                        uint shadowTexId,
+                                        uint shadowRawSamplerId,
+                                        vec2 sampleUv) {
+  float sampleDepth =
+      textureBindless2D(shadowTexId, shadowRawSamplerId, sampleUv).r;
+  return ctx.receiverCompareDepth <= sampleDepth ? 1.0 : 0.0;
+}
+
+float pcfGridDirectionalShadowFactor(DirectionalShadowSampleContext ctx) {
+  const uint shadowTexId = ctx.cascade.textureSampler.x;
+  const uint shadowRawSamplerId = ctx.cascade.textureSampler.z;
+  if (!ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
+      shadowRawSamplerId == kInvalidSamplerBindlessIndex) {
+    return 1.0;
+  }
+
+  ivec2 shadowSize = max(textureBindlessSize2D(shadowTexId), ivec2(1));
+  vec2 texelSize = 1.0 / vec2(shadowSize);
+  int sampleCount = directionalShadowPcfSampleCount(ctx);
+  int gridSide = int(ceil(sqrt(float(sampleCount))));
+  float halfGrid = (float(gridSide) - 1.0) * 0.5;
+
+  float visibility = 0.0;
+  int usedSamples = 0;
+  for (int y = 0; y < 8; ++y) {
+    for (int x = 0; x < 8; ++x) {
+      if (x < gridSide && y < gridSide && usedSamples < sampleCount) {
+        vec2 gridOffset = vec2(float(x), float(y)) - vec2(halfGrid);
+        visibility += sampleDirectionalShadowVisibility(
+            ctx, shadowTexId, shadowRawSamplerId,
+            ctx.shadowUv + gridOffset * texelSize);
+        ++usedSamples;
+      }
+    }
+  }
+  return visibility / float(max(usedSamples, 1));
+}
+
+float poissonPcfDirectionalShadowFactor(DirectionalShadowSampleContext ctx) {
+  return pcfGridDirectionalShadowFactor(ctx);
+}
+
+float directionalShadowFactor(readonly ShadowFrameBuffer shadow, vec3 worldPos) {
+  DirectionalShadowSampleContext ctx =
+      makeDirectionalShadowSampleContext(shadow, worldPos);
+  const uint filterMode = shadow.flagsCascadeCountLightIndex.w;
+  if (filterMode == kShadowFilterModePCF3x3) {
+    return pcfGridDirectionalShadowFactor(ctx);
+  }
+  if (filterMode == kShadowFilterModePoissonPCF) {
+    return poissonPcfDirectionalShadowFactor(ctx);
+  }
+  return hardDirectionalShadowFactor(ctx);
 }
 
 HardShadowInspectResult inspectHardDirectionalShadow(
@@ -344,35 +427,21 @@ HardShadowInspectResult inspectHardDirectionalShadow(
   r.sampledDepth = 0.0;
   r.valid = 0.0;
 
-  ShadowCascadeGpuData cascade = shadow.cascades[0];
-  const uint shadowTexId = cascade.textureSampler.x;
-  const uint shadowCompareSamplerId = cascade.textureSampler.y;
-  const uint shadowRawSamplerId = cascade.textureSampler.z;
-  if (shadowTexId == kInvalidTextureBindlessIndex ||
+  DirectionalShadowSampleContext ctx =
+      makeDirectionalShadowSampleContext(shadow, worldPos);
+  const uint shadowTexId = ctx.cascade.textureSampler.x;
+  const uint shadowCompareSamplerId = ctx.cascade.textureSampler.y;
+  const uint shadowRawSamplerId = ctx.cascade.textureSampler.z;
+  if (!ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
       shadowCompareSamplerId == kInvalidSamplerBindlessIndex ||
       shadowRawSamplerId == kInvalidSamplerBindlessIndex) {
     return r;
   }
 
-  vec4 lightClip = cascade.lightViewProj * vec4(worldPos, 1.0);
-  if (abs(lightClip.w) <= kEpsilon) {
-    return r;
-  }
-
-  vec3 ndc = lightClip.xyz / lightClip.w;
-  vec2 shadowUv = ndc.xy * 0.5 + 0.5;
-  shadowUv.y = 1.0 - shadowUv.y;
-  if (any(lessThan(shadowUv, vec2(0.0))) ||
-      any(greaterThan(shadowUv, vec2(1.0))) || ndc.z < 0.0 ||
-      ndc.z > 1.0) {
-    return r;
-  }
-
-  const float constantBias = cascade.biasParams.x;
-  r.receiverDepth = ndc.z;
-  r.receiverCompareDepth = ndc.z - constantBias;
+  r.receiverDepth = ctx.receiverDepth;
+  r.receiverCompareDepth = ctx.receiverCompareDepth;
   r.sampledDepth =
-      textureBindless2D(shadowTexId, shadowRawSamplerId, shadowUv).r;
+      textureBindless2D(shadowTexId, shadowRawSamplerId, ctx.shadowUv).r;
   r.valid = 1.0;
   return r;
 }
@@ -397,7 +466,7 @@ DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
       uvec4 shadowState = shadow.flagsCascadeCountLightIndex;
       if ((shadowState.x & kShadowFrameFlagEnabled) != 0u &&
           shadowState.y > 0u && shadowState.z == i) {
-        shadowFactor = hardDirectionalShadowFactor(shadow, worldPos);
+        shadowFactor = directionalShadowFactor(shadow, worldPos);
         r.shadowFactorDebug = shadowFactor;
       }
     }

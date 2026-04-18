@@ -128,6 +128,11 @@ void drawSpotLightIcon(DebugDraw3D &debugDraw, const glm::vec3 &position,
          debug.showTexelGridSnap;
 }
 
+[[nodiscard]] bool shadowTexelGridSnapEnabled(const RenderFrameContext &frame) {
+  return frame.settings != nullptr && frame.settings->shadow.enabled &&
+         frame.settings->shadow.debug.showTexelGridSnap;
+}
+
 void accumulateSortDepth(float &sortDepth, const glm::mat4 &view,
                          const glm::vec3 &position) {
   sortDepth = std::max(sortDepth, -(view * glm::vec4(position, 1.0f)).z);
@@ -211,27 +216,116 @@ void drawShadowLightBounds(DebugDraw3D &debugDraw,
   drawCornerBox(debugDraw, worldCorners, color);
 }
 
-void drawShadowTexelSnap(DebugDraw3D &debugDraw,
-                         const ShadowCascadeDebugFrameData &cascade,
-                         const glm::vec4 &color, const glm::mat4 &view,
-                         float &sortDepth) {
+uint32_t drawShadowTexelSnap(DebugDraw3D &debugDraw,
+                             const ShadowCascadeDebugFrameData &cascade,
+                             const glm::vec4 &color, const glm::mat4 &view,
+                             float &sortDepth) {
+  uint32_t lineCount = 0u;
   const glm::vec3 center = dehomogenize(cascade.snappedCenter);
-  const float size = std::max(cascade.texelWorldSize * 8.0f, 0.05f);
-  const glm::vec3 right = safeNormalize(glm::vec3(cascade.inverseLightView[0]),
-                                        glm::vec3(1.0f, 0.0f, 0.0f));
-  const glm::vec3 up = safeNormalize(glm::vec3(cascade.inverseLightView[1]),
-                                     glm::vec3(0.0f, 1.0f, 0.0f));
-  const glm::vec3 forward = safeNormalize(
-      glm::vec3(cascade.inverseLightView[2]), glm::vec3(0.0f, 0.0f, 1.0f));
-  debugDraw.line(center - right * size, center + right * size, color);
-  debugDraw.line(center - up * size, center + up * size, color);
-  debugDraw.line(center - forward * size, center + forward * size, color);
+  const float texelSize = std::max(cascade.texelWorldSize, 0.001f);
+  const glm::vec3 boundsMin = glm::min(glm::vec3(cascade.lightSpaceBoundsMin),
+                                       glm::vec3(cascade.lightSpaceBoundsMax));
+  const glm::vec3 boundsMax = glm::max(glm::vec3(cascade.lightSpaceBoundsMin),
+                                       glm::vec3(cascade.lightSpaceBoundsMax));
+  const float width = std::max(boundsMax.x - boundsMin.x, texelSize);
+  const float height = std::max(boundsMax.y - boundsMin.y, texelSize);
+  const float maxExtent = std::max(width, height);
+  constexpr float kTargetGridLines = 16.0f;
+  const float spacing =
+      texelSize *
+      std::max(1.0f, std::ceil(maxExtent / (texelSize * kTargetGridLines)));
+  const glm::vec3 snappedLight =
+      glm::vec3(cascade.lightView * glm::vec4(center, 1.0f));
+  const float gridZ = boundsMax.z;
+  const glm::vec4 gridColor(color.r, color.g, color.b, 0.55f);
+
+  const auto toWorld = [&](float x, float y, float z) {
+    return glm::vec3(cascade.inverseLightView * glm::vec4(x, y, z, 1.0f));
+  };
+
+  const float firstX =
+      snappedLight.x +
+      std::floor((boundsMin.x - snappedLight.x) / spacing) * spacing;
+  const float firstY =
+      snappedLight.y +
+      std::floor((boundsMin.y - snappedLight.y) / spacing) * spacing;
+  constexpr int kMaxGridLinesPerAxis = 48;
+  for (int i = 0; i < kMaxGridLinesPerAxis; ++i) {
+    const float x = firstX + static_cast<float>(i) * spacing;
+    if (x > boundsMax.x) {
+      break;
+    }
+    if (x >= boundsMin.x) {
+      const glm::vec3 p0 = toWorld(x, boundsMin.y, gridZ);
+      const glm::vec3 p1 = toWorld(x, boundsMax.y, gridZ);
+      debugDraw.line(p0, p1, gridColor);
+      ++lineCount;
+      accumulateSortDepth(sortDepth, view, p0);
+      accumulateSortDepth(sortDepth, view, p1);
+    }
+  }
+  for (int i = 0; i < kMaxGridLinesPerAxis; ++i) {
+    const float y = firstY + static_cast<float>(i) * spacing;
+    if (y > boundsMax.y) {
+      break;
+    }
+    if (y >= boundsMin.y) {
+      const glm::vec3 p0 = toWorld(boundsMin.x, y, gridZ);
+      const glm::vec3 p1 = toWorld(boundsMax.x, y, gridZ);
+      debugDraw.line(p0, p1, gridColor);
+      ++lineCount;
+      accumulateSortDepth(sortDepth, view, p0);
+      accumulateSortDepth(sortDepth, view, p1);
+    }
+  }
+
+  std::array<glm::vec3, 4> faceCorners = {
+      toWorld(boundsMin.x, boundsMin.y, gridZ),
+      toWorld(boundsMax.x, boundsMin.y, gridZ),
+      toWorld(boundsMax.x, boundsMax.y, gridZ),
+      toWorld(boundsMin.x, boundsMax.y, gridZ),
+  };
+  debugDraw.line(faceCorners[0], faceCorners[1], color);
+  debugDraw.line(faceCorners[1], faceCorners[2], color);
+  debugDraw.line(faceCorners[2], faceCorners[3], color);
+  debugDraw.line(faceCorners[3], faceCorners[0], color);
+  lineCount += 4u;
+
+  const glm::mat4 inverseView = glm::inverse(view);
+  const glm::vec3 cameraPos = glm::vec3(inverseView[3]);
+  const glm::vec3 cameraRight =
+      safeNormalize(glm::vec3(inverseView[0]), glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::vec3 cameraUp =
+      safeNormalize(glm::vec3(inverseView[1]), glm::vec3(0.0f, 1.0f, 0.0f));
+  const glm::vec3 cameraForward =
+      safeNormalize(-glm::vec3(inverseView[2]), glm::vec3(0.0f, 0.0f, -1.0f));
+  const glm::vec3 markerCenter = cameraPos + cameraForward * 2.0f;
+  constexpr int kMarkerHalfLines = 3;
+  constexpr float kMarkerSpacing = 0.08f;
+  const float markerExtent =
+      kMarkerSpacing * static_cast<float>(kMarkerHalfLines);
+  const glm::vec4 markerColor(0.1f, 1.0f, 1.0f, 1.0f);
+  for (int i = -kMarkerHalfLines; i <= kMarkerHalfLines; ++i) {
+    const float offset = static_cast<float>(i) * kMarkerSpacing;
+    debugDraw.line(
+        markerCenter + cameraRight * offset - cameraUp * markerExtent,
+        markerCenter + cameraRight * offset + cameraUp * markerExtent,
+        markerColor);
+    debugDraw.line(
+        markerCenter + cameraUp * offset - cameraRight * markerExtent,
+        markerCenter + cameraUp * offset + cameraRight * markerExtent,
+        markerColor);
+    lineCount += 2u;
+  }
 
   const glm::vec3 unsnapped = dehomogenize(cascade.unsnappedCenter);
   if (glm::length(unsnapped - center) > 1.0e-5f) {
     debugDraw.line(unsnapped, center, color);
+    ++lineCount;
   }
   accumulateSortDepth(sortDepth, view, center);
+  accumulateSortDepth(sortDepth, view, markerCenter);
+  return lineCount;
 }
 
 void drawSelectedShadowLightRay(DebugDraw3D &debugDraw,
@@ -315,8 +409,17 @@ bool drawShadowDebugOverlay(DebugDraw3D &debugDraw,
     hasLines = true;
   }
   if (debug.showTexelGridSnap) {
-    drawShadowTexelSnap(debugDraw, selected, kShadowTexelSnapColor, view,
-                        sortDepth);
+    const uint32_t snapLineCount = drawShadowTexelSnap(
+        debugDraw, selected, kShadowTexelSnapColor, view, sortDepth);
+    static std::atomic<uint32_t> loggedTexelSnapOverlays{0u};
+    if (loggedTexelSnapOverlays.fetch_add(1u, std::memory_order_relaxed) <
+        16u) {
+      NURI_LOG_DEBUG(
+          "DebugRenderer::drawShadowDebugOverlay texel grid: requested=%u "
+          "effective=%u cascadeCount=%u lines=%u texelWorldSize=%.6f",
+          debug.debugCascadeIndex, selectedCascade, cascadeCount, snapLineCount,
+          selected.texelWorldSize);
+    }
     hasLines = true;
   }
 
@@ -344,6 +447,7 @@ void DebugRenderer::onDetach() {
   preparedHasPriorColorPass_ = false;
   preparedGridPass_ = false;
   preparedSceneOverlayPass_ = false;
+  preparedSceneOverlayDepthTest_ = true;
   transparentSortableDraws_.clear();
   transparentFixedDraws_.clear();
   transparentDependencyBuffers_.clear();
@@ -708,6 +812,7 @@ DebugRenderer::prepareDebugPasses(RenderFrameContext &frame) {
     return buildLinesResult;
   }
   preparedSceneOverlayPass_ = buildLinesResult.value();
+  preparedSceneOverlayDepthTest_ = !shadowTexelGridSnapEnabled(frame);
 
   return Result<bool, std::string>::makeResult(true);
 }
@@ -785,7 +890,8 @@ DebugRenderer::appendDebugSceneOverlayPass(RenderFrameContext &frame,
           ? gpu_.getTextureFormat(preparedFrameColorTexture_)
           : Format::Count;
   auto linePassResult = debugDraw3D_->buildGraphPass(
-      frame.frameIndex, preparedSceneDepthTexture_, overlayColorFormat);
+      frame.frameIndex, preparedSceneDepthTexture_, overlayColorFormat,
+      preparedSceneOverlayDepthTest_);
   if (linePassResult.hasError()) {
     return Result<bool, std::string>::makeError(linePassResult.error());
   }
@@ -882,7 +988,8 @@ Result<bool, std::string> DebugRenderer::buildTransparentStageContribution(
                                            ? gpu_.getTextureFormat(frameColor)
                                            : gpu_.getSwapchainFormat();
       auto linePassResult = debugDraw3D_->buildGraphPass(
-          frame.frameIndex, depthTexture, targetColorFormat);
+          frame.frameIndex, depthTexture, targetColorFormat,
+          !shadowTexelGridSnapEnabled(frame));
       if (linePassResult.hasError()) {
         return Result<bool, std::string>::makeError(linePassResult.error());
       }

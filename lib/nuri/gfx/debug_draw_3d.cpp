@@ -391,7 +391,8 @@ DebugDraw3D::ensureLineBufferCapacity(uint64_t frameSlot, uint64_t frameIndex,
 
 Result<DebugDraw3D::PreparedGraphPass, std::string>
 DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
-                            TextureHandle depthTexture, Format colorFormat) {
+                            TextureHandle depthTexture, Format colorFormat,
+                            bool enableDepthTest) {
   NURI_PROFILER_FUNCTION();
 
   PreparedGraphPass pass{};
@@ -400,7 +401,7 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
   pass.desc.debugLabel = "DebugDraw3D Pass";
   pass.desc.debugColor = 0xffffcc00u;
 
-  if (nuri::isValid(depthTexture)) {
+  if (enableDepthTest && nuri::isValid(depthTexture)) {
     pass.depthTextureHandle = depthTexture;
     pass.desc.depth.loadOp = LoadOp::Load;
     pass.desc.depth.storeOp = StoreOp::Store;
@@ -444,7 +445,7 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
         updateResult.error());
   }
 
-  const Format depthFormat = nuri::isValid(depthTexture)
+  const Format depthFormat = nuri::isValid(pass.depthTextureHandle)
                                  ? gpu_.getTextureFormat(depthTexture)
                                  : Format::Count;
   const Format resolvedColorFormat =
@@ -475,7 +476,7 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
   drawItem_.debugLabel = "DebugDraw3D Draw";
   drawItem_.debugColor = 0xffffcc00u;
   dependencyBuffer_ = frameBuffers_[frameSlot].buffer;
-  if (nuri::isValid(depthTexture)) {
+  if (nuri::isValid(pass.depthTextureHandle)) {
     drawItem_.useDepthState = true;
     drawItem_.depthState = {
         .compareOp = CompareOp::LessEqual,

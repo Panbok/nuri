@@ -19,6 +19,8 @@ constexpr std::string_view kShadowPreviewPassLabel = "ShadowDepthPreviewPass";
 constexpr std::string_view kShadowPreviewDrawLabel = "ShadowDepthPreview";
 constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
+constexpr uint32_t kShadowPreviewFlagInvert = 1u << 0u;
+constexpr uint32_t kShadowPreviewFlagLog = 1u << 1u;
 constexpr std::string_view kShadowPreviewVS = R"(
 #version 460
 
@@ -44,6 +46,7 @@ layout(push_constant) uniform PreviewPushConstants {
   uint sourceTexId;
   float depthScale;
   float depthBias;
+  uint flags;
 } pc;
 
 float fetchDepth() {
@@ -55,6 +58,12 @@ float fetchDepth() {
 void main() {
   float depth = fetchDepth();
   float preview = clamp(depth * pc.depthScale + pc.depthBias, 0.0, 1.0);
+  if ((pc.flags & 2u) != 0u) {
+    preview = log2(1.0 + preview * 255.0) / 8.0;
+  }
+  if ((pc.flags & 1u) != 0u) {
+    preview = 1.0 - preview;
+  }
   out_FragColor = vec4(vec3(preview), 1.0);
 }
 )";
@@ -768,6 +777,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       gpu_.getTextureBindlessIndex(shadowDepthTexture_);
 
   if (frame.scene == nullptr) {
+    hasFrozenShadowFit_ = false;
+    frozenShadowLightId_ = kInvalidLightId;
+    frozenShadowMapSize_ = 0u;
+    frozenShadowFit_ = {};
     frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
     return Result<bool, std::string>::makeResult(true);
   }
@@ -777,6 +790,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   const std::span<const LightId> directionalLightIds =
       frame.scene->packedDirectionalLightIds();
   if (directionalLights.empty() || directionalLightIds.empty()) {
+    hasFrozenShadowFit_ = false;
+    frozenShadowLightId_ = kInvalidLightId;
+    frozenShadowMapSize_ = 0u;
+    frozenShadowFit_ = {};
     frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
     return Result<bool, std::string>::makeResult(true);
   }
@@ -795,6 +812,12 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     }
   }
   frame.sharedResources.selectedShadowLightId = selectedLightId;
+  if (!settings.debug.freezeLightView) {
+    hasFrozenShadowFit_ = false;
+    frozenShadowLightId_ = kInvalidLightId;
+    frozenShadowMapSize_ = 0u;
+    frozenShadowFit_ = {};
+  }
 
   const DirectionalLightGpuData &light = directionalLights[selectedLightIndex];
   const glm::vec3 lightDirection = shadow_detail::normalizeSafe(
@@ -812,14 +835,29 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     hasCasterBounds = true;
   }
 
-  const shadow_detail::DirectionalShadowFit fit =
-      hasCasterBounds ? shadow_detail::fitDirectionalShadowMapToBounds(
-                            frame.camera, casterBounds.min_, casterBounds.max_,
-                            lightDirection, settings.maxDistance, shadowMapSize,
-                            settings.stabilizeCascades)
-                      : shadow_detail::fitSingleDirectionalShadowMap(
-                            frame.camera, lightDirection, settings.maxDistance,
-                            shadowMapSize, settings.stabilizeCascades);
+  shadow_detail::DirectionalShadowFit fit{};
+  const bool reuseFrozenFit = settings.debug.freezeLightView &&
+                              hasFrozenShadowFit_ &&
+                              frozenShadowLightId_ == selectedLightId &&
+                              frozenShadowMapSize_ == shadowMapSize;
+  if (reuseFrozenFit) {
+    fit = frozenShadowFit_;
+  } else {
+    fit = hasCasterBounds
+              ? shadow_detail::fitDirectionalShadowMapToBounds(
+                    frame.camera, casterBounds.min_, casterBounds.max_,
+                    lightDirection, settings.maxDistance, shadowMapSize,
+                    settings.stabilizeCascades)
+              : shadow_detail::fitSingleDirectionalShadowMap(
+                    frame.camera, lightDirection, settings.maxDistance,
+                    shadowMapSize, settings.stabilizeCascades);
+    if (settings.debug.freezeLightView) {
+      hasFrozenShadowFit_ = true;
+      frozenShadowLightId_ = selectedLightId;
+      frozenShadowMapSize_ = shadowMapSize;
+      frozenShadowFit_ = fit;
+    }
+  }
   uint32_t shadowFlags = kShadowFrameFlagEnabled;
   if (settings.debug.visualizeShadowFactor) {
     shadowFlags |= kShadowFrameFlagVisualizeShadowFactor;
@@ -838,10 +876,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       .uvScaleBias = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
       .biasParams = glm::vec4(settings.constantBias, settings.slopeBias,
                               settings.normalBias, 0.0f),
-      .textureSampler =
-          glm::uvec4(gpu_.getTextureBindlessIndex(shadowDepthTexture_),
-                     frame.sharedResources.shadowCompareSamplerId,
-                     frame.sharedResources.shadowRawSamplerId, 0u),
+      .textureSampler = glm::uvec4(
+          gpu_.getTextureBindlessIndex(shadowDepthTexture_),
+          frame.sharedResources.shadowCompareSamplerId,
+          frame.sharedResources.shadowRawSamplerId, settings.pcfSampleCount),
   };
 
   shadowDebugFrameData_.selectedShadowLightId = selectedLightId;
@@ -860,9 +898,9 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   shadowDebugFrameData_.cascades[0].lightSpaceBoundsMax =
       glm::vec4(fit.lightSpaceBoundsMax, 1.0f);
   shadowDebugFrameData_.cascades[0].unsnappedCenter =
-      glm::vec4(fit.frustumCenter, 1.0f);
+      glm::vec4(fit.unsnappedCenter, 1.0f);
   shadowDebugFrameData_.cascades[0].snappedCenter =
-      glm::vec4(fit.frustumCenter, 1.0f);
+      glm::vec4(fit.snappedCenter, 1.0f);
   for (size_t i = 0; i < fit.frustumCorners.size(); ++i) {
     shadowDebugFrameData_.cascades[0].worldFrustumCorners[i] =
         glm::vec4(fit.frustumCorners[i], 1.0f);
@@ -1241,6 +1279,10 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.shadowDebugFrameData = debug;
 
   if (!settings.enabled) {
+    hasFrozenShadowFit_ = false;
+    frozenShadowLightId_ = kInvalidLightId;
+    frozenShadowMapSize_ = 0u;
+    frozenShadowFit_ = {};
     shadowFrameCpuData_ = {};
     shadowFrameCpuData_.cascades[0].textureSampler =
         glm::uvec4(textureId, compareSamplerId, 0u, 0u);
@@ -1363,11 +1405,21 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
         return previewPipelineResult;
       }
     }
+    const float previewDepthRange = std::max(settings.debug.previewDepthMax -
+                                                 settings.debug.previewDepthMin,
+                                             1.0e-6f);
+    uint32_t previewFlags = 0u;
+    if (settings.debug.previewDepthInvert) {
+      previewFlags |= kShadowPreviewFlagInvert;
+    }
+    if (settings.debug.previewDepthLog) {
+      previewFlags |= kShadowPreviewFlagLog;
+    }
     previewPushConstants_ = PreviewPushConstants{
         .sourceTexId = sourceTexId,
-        .depthScale = 1.0f,
-        .depthBias = 0.0f,
-    };
+        .depthScale = 1.0f / previewDepthRange,
+        .depthBias = -settings.debug.previewDepthMin / previewDepthRange,
+        .flags = previewFlags};
     previewDraw_ = DrawItem{};
     previewDraw_.pipeline = previewPipelineHandle_;
     previewDraw_.vertexCount = 3u;

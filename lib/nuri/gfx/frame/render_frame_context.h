@@ -69,6 +69,7 @@ static constexpr uint32_t kSceneDepthPyramidTexIdPackWidth = 4u;
 static constexpr uint32_t kSceneDepthPyramidArraySize =
     (kMaxSceneDepthPyramidLevels + kSceneDepthPyramidTexIdPackWidth - 1u) /
     kSceneDepthPyramidTexIdPackWidth;
+static constexpr uint32_t kMaxShadowPcfSamples = 64u;
 static_assert(kSceneDepthPyramidArraySize * kSceneDepthPyramidTexIdPackWidth >=
               kMaxSceneDepthPyramidLevels);
 static constexpr uint32_t kFrameCompositionSceneColorMipCount = 3u;
@@ -170,6 +171,10 @@ struct RenderSettings {
     bool visualizeShadowFactor = false;
     bool visualizePCSSBlockers = false;
     bool visualizeSDSMHistogram = false;
+    float previewDepthMin = 0.0f;
+    float previewDepthMax = 1.0f;
+    bool previewDepthInvert = false;
+    bool previewDepthLog = false;
   };
 
   struct ShadowSettings {
@@ -278,7 +283,8 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
       std::clamp(settings.cascadeBlendFraction, 0.0f, 1.0f);
   settings.filterMode = sanitizeShadowFilterMode(settings.filterMode);
   settings.sdsmMode = sanitizeShadowSdsmMode(settings.sdsmMode);
-  settings.pcfSampleCount = std::max(settings.pcfSampleCount, 1u);
+  settings.pcfSampleCount =
+      std::clamp(settings.pcfSampleCount, 1u, kMaxShadowPcfSamples);
   settings.pcssBlockerSampleCount =
       std::max(settings.pcssBlockerSampleCount, 1u);
   settings.pcssFilterSampleCount = std::max(settings.pcssFilterSampleCount, 1u);
@@ -298,6 +304,22 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
       std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
   settings.debug.debugCascadeIndex =
       std::min(settings.debug.debugCascadeIndex, settings.cascadeCount - 1u);
+  if (!std::isfinite(settings.debug.previewDepthMin) ||
+      !std::isfinite(settings.debug.previewDepthMax)) {
+    settings.debug.previewDepthMin = 0.0f;
+    settings.debug.previewDepthMax = 1.0f;
+  }
+  settings.debug.previewDepthMin =
+      std::clamp(settings.debug.previewDepthMin, 0.0f, 1.0f);
+  settings.debug.previewDepthMax =
+      std::clamp(settings.debug.previewDepthMax, 0.0f, 1.0f);
+  if (settings.debug.previewDepthMax <= settings.debug.previewDepthMin) {
+    settings.debug.previewDepthMax =
+        std::min(settings.debug.previewDepthMin + 1.0e-4f, 1.0f);
+    settings.debug.previewDepthMin =
+        std::min(settings.debug.previewDepthMin,
+                 settings.debug.previewDepthMax - 1.0e-4f);
+  }
 }
 
 [[nodiscard]] inline TextureFilterMode effectiveTextureFilterMode(

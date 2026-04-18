@@ -7,6 +7,7 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/renderers/detail/instance_data.h"
+#include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
@@ -114,8 +115,9 @@ private:
     uint32_t sourceTexId = kInvalidShadowBindlessIndex;
     float depthScale = 1.0f;
     float depthBias = 0.0f;
+    uint32_t flags = 0u;
   };
-  static_assert(sizeof(PreviewPushConstants) == 12,
+  static_assert(sizeof(PreviewPushConstants) == 16,
                 "ShadowRenderer::PreviewPushConstants layout changed");
   static_assert(
       sizeof(PreviewPushConstants) <= 128,
@@ -203,6 +205,10 @@ private:
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
+  bool hasFrozenShadowFit_ = false;
+  LightId frozenShadowLightId_ = kInvalidLightId;
+  uint32_t frozenShadowMapSize_ = 0u;
+  shadow_detail::DirectionalShadowFit frozenShadowFit_{};
   ShadowFrameGpuData shadowFrameCpuData_{};
   ShadowDebugFrameData shadowDebugFrameData_{};
 };

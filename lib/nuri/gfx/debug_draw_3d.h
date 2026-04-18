@@ -47,7 +47,8 @@ public:
   void setMatrix(const glm::mat4 &mvp) { mvp_ = mvp; }
   [[nodiscard]] Result<PreparedGraphPass, std::string>
   buildGraphPass(uint64_t frameIndex, TextureHandle depthTexture,
-                 Format colorFormat = Format::Count);
+                 Format colorFormat = Format::Count,
+                 bool enableDepthTest = true);
 
 private:
   struct LineData {
