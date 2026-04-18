@@ -447,7 +447,7 @@ void DebugRenderer::onDetach() {
   preparedHasPriorColorPass_ = false;
   preparedGridPass_ = false;
   preparedSceneOverlayPass_ = false;
-  preparedSceneOverlayDepthTest_ = true;
+  sceneOverlayDepthTestEnabled_ = true;
   transparentSortableDraws_.clear();
   transparentFixedDraws_.clear();
   transparentDependencyBuffers_.clear();
@@ -781,6 +781,7 @@ DebugRenderer::prepareDebugPasses(RenderFrameContext &frame) {
   preparedHasPriorColorPass_ = false;
   preparedGridPass_ = false;
   preparedSceneOverlayPass_ = false;
+  sceneOverlayDepthTestEnabled_ = true;
 
   if (frame.sharedResources.transparentStageEnabled) {
     return Result<bool, std::string>::makeResult(true);
@@ -812,7 +813,7 @@ DebugRenderer::prepareDebugPasses(RenderFrameContext &frame) {
     return buildLinesResult;
   }
   preparedSceneOverlayPass_ = buildLinesResult.value();
-  preparedSceneOverlayDepthTest_ = !shadowTexelGridSnapEnabled(frame);
+  sceneOverlayDepthTestEnabled_ = !shadowTexelGridSnapEnabled(frame);
 
   return Result<bool, std::string>::makeResult(true);
 }
@@ -891,7 +892,7 @@ DebugRenderer::appendDebugSceneOverlayPass(RenderFrameContext &frame,
           : Format::Count;
   auto linePassResult = debugDraw3D_->buildGraphPass(
       frame.frameIndex, preparedSceneDepthTexture_, overlayColorFormat,
-      preparedSceneOverlayDepthTest_);
+      sceneOverlayDepthTestEnabled_);
   if (linePassResult.hasError()) {
     return Result<bool, std::string>::makeError(linePassResult.error());
   }

@@ -42,6 +42,9 @@ constexpr std::string_view kShadowPreviewFS = R"(
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
 layout(location = 0) out vec4 out_FragColor;
 
+const uint FLAG_INVERT = 1u;
+const uint FLAG_LOG_SCALE = 2u;
+
 layout(push_constant) uniform PreviewPushConstants {
   uint sourceTexId;
   float depthScale;
@@ -58,10 +61,10 @@ float fetchDepth() {
 void main() {
   float depth = fetchDepth();
   float preview = clamp(depth * pc.depthScale + pc.depthBias, 0.0, 1.0);
-  if ((pc.flags & 2u) != 0u) {
+  if ((pc.flags & FLAG_LOG_SCALE) != 0u) {
     preview = log2(1.0 + preview * 255.0) / 8.0;
   }
-  if ((pc.flags & 1u) != 0u) {
+  if ((pc.flags & FLAG_INVERT) != 0u) {
     preview = 1.0 - preview;
   }
   out_FragColor = vec4(vec3(preview), 1.0);
@@ -777,10 +780,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       gpu_.getTextureBindlessIndex(shadowDepthTexture_);
 
   if (frame.scene == nullptr) {
-    hasFrozenShadowFit_ = false;
-    frozenShadowLightId_ = kInvalidLightId;
-    frozenShadowMapSize_ = 0u;
-    frozenShadowFit_ = {};
+    resetFrozenShadowFit();
     frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
     return Result<bool, std::string>::makeResult(true);
   }
@@ -790,10 +790,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   const std::span<const LightId> directionalLightIds =
       frame.scene->packedDirectionalLightIds();
   if (directionalLights.empty() || directionalLightIds.empty()) {
-    hasFrozenShadowFit_ = false;
-    frozenShadowLightId_ = kInvalidLightId;
-    frozenShadowMapSize_ = 0u;
-    frozenShadowFit_ = {};
+    resetFrozenShadowFit();
     frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
     return Result<bool, std::string>::makeResult(true);
   }
@@ -813,10 +810,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   }
   frame.sharedResources.selectedShadowLightId = selectedLightId;
   if (!settings.debug.freezeLightView) {
-    hasFrozenShadowFit_ = false;
-    frozenShadowLightId_ = kInvalidLightId;
-    frozenShadowMapSize_ = 0u;
-    frozenShadowFit_ = {};
+    resetFrozenShadowFit();
   }
 
   const DirectionalLightGpuData &light = directionalLights[selectedLightIndex];
@@ -1216,6 +1210,13 @@ void ShadowRenderer::resetFrameBuildState() {
   previewDraw_ = {};
 }
 
+void ShadowRenderer::resetFrozenShadowFit() {
+  hasFrozenShadowFit_ = false;
+  frozenShadowLightId_ = kInvalidLightId;
+  frozenShadowMapSize_ = 0u;
+  frozenShadowFit_ = {};
+}
+
 Result<bool, std::string>
 ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.shadowCascadeTextures = {};
@@ -1279,10 +1280,7 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.shadowDebugFrameData = debug;
 
   if (!settings.enabled) {
-    hasFrozenShadowFit_ = false;
-    frozenShadowLightId_ = kInvalidLightId;
-    frozenShadowMapSize_ = 0u;
-    frozenShadowFit_ = {};
+    resetFrozenShadowFit();
     shadowFrameCpuData_ = {};
     shadowFrameCpuData_.cascades[0].textureSampler =
         glm::uvec4(textureId, compareSamplerId, 0u, 0u);

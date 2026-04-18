@@ -445,9 +445,10 @@ DebugDraw3D::buildGraphPass(uint64_t frameIndexValue,
         updateResult.error());
   }
 
-  const Format depthFormat = nuri::isValid(pass.depthTextureHandle)
-                                 ? gpu_.getTextureFormat(depthTexture)
-                                 : Format::Count;
+  const Format depthFormat =
+      nuri::isValid(pass.depthTextureHandle)
+          ? gpu_.getTextureFormat(pass.depthTextureHandle)
+          : Format::Count;
   const Format resolvedColorFormat =
       colorFormat != Format::Count ? colorFormat : gpu_.getSwapchainFormat();
   auto pipelineResult = ensurePipeline(resolvedColorFormat, depthFormat);

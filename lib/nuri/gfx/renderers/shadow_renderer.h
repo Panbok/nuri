@@ -156,6 +156,7 @@ private:
   void destroyPipelineState();
   void resetCachedState();
   void resetFrameBuildState();
+  void resetFrozenShadowFit();
 
   GPUDevice &gpu_;
   ShadowRendererConfig config_{};

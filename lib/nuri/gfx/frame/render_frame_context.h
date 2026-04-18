@@ -286,8 +286,9 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   settings.pcfSampleCount =
       std::clamp(settings.pcfSampleCount, 1u, kMaxShadowPcfSamples);
   settings.pcssBlockerSampleCount =
-      std::max(settings.pcssBlockerSampleCount, 1u);
-  settings.pcssFilterSampleCount = std::max(settings.pcssFilterSampleCount, 1u);
+      std::clamp(settings.pcssBlockerSampleCount, 1u, kMaxShadowPcfSamples);
+  settings.pcssFilterSampleCount =
+      std::clamp(settings.pcssFilterSampleCount, 1u, kMaxShadowPcfSamples);
   settings.pcssLightRadiusScale =
       std::isfinite(settings.pcssLightRadiusScale)
           ? std::max(settings.pcssLightRadiusScale, 0.0f)

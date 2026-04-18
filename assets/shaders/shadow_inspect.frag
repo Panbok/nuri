@@ -22,8 +22,18 @@ void main() {
     discard;
   }
 
-  const HardShadowInspectResult inspect = inspectHardDirectionalShadow(
-      pc.frameData.shadowFrameBuffer, vtx.worldPos);
+  ShadowFrameBuffer shadow = pc.frameData.shadowFrameBuffer;
+  uvec4 shadowState = shadow.flagsCascadeCountLightIndex;
+  if (shadowState.y == 0u ||
+      shadowState.z >= pc.frameData.directionalLightCount) {
+    out_ShadowInspect = vec4(0.0);
+    return;
+  }
+  DirectionalLightGpuData light =
+      pc.frameData.directionalLightBuffer.lights[shadowState.z];
+  vec3 l = normalize(-directionalLightDirection(light));
+  const HardShadowInspectResult inspect =
+      inspectHardDirectionalShadow(shadow, vtx.worldPos, sm.nBase, l);
   out_ShadowInspect = vec4(inspect.receiverDepth, inspect.receiverCompareDepth,
                            inspect.sampledDepth, inspect.valid);
 }

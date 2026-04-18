@@ -91,7 +91,7 @@ private:
   bool preparedHasPriorColorPass_ = false;
   bool preparedGridPass_ = false;
   bool preparedSceneOverlayPass_ = false;
-  bool preparedSceneOverlayDepthTest_ = true;
+  bool sceneOverlayDepthTestEnabled_ = true;
 
   GridPushConstants gridPushConstants_{};
   DrawItem gridDrawItem_{};
