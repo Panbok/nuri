@@ -1276,13 +1276,13 @@ void drawShadowSettings(
   }
   int blockerSamples = static_cast<int>(shadow.pcssBlockerSampleCount);
   if (ImGui::SliderInt("PCSS Blocker Samples##ShadowPass", &blockerSamples, 1,
-                       128)) {
+                       static_cast<int>(kMaxShadowPcfSamples))) {
     shadow.pcssBlockerSampleCount =
         static_cast<uint32_t>(std::max(blockerSamples, 1));
   }
   int filterSamples = static_cast<int>(shadow.pcssFilterSampleCount);
   if (ImGui::SliderInt("PCSS Filter Samples##ShadowPass", &filterSamples, 1,
-                       128)) {
+                       static_cast<int>(kMaxShadowPcfSamples))) {
     shadow.pcssFilterSampleCount =
         static_cast<uint32_t>(std::max(filterSamples, 1));
   }
@@ -1294,6 +1294,16 @@ void drawShadowSettings(
   ImGui::DragFloat("PCSS Filter Clamp##ShadowPass",
                    &shadow.pcssFilterRadiusClampTexels, 1.0f, 0.0f, 256.0f,
                    "%.1f texels");
+  ImGui::Checkbox("Fixed Poisson Rotation##ShadowPass",
+                  &shadow.debug.fixedPoissonRotation);
+  int poissonSeed = static_cast<int>(
+      std::min(shadow.debug.poissonRotationSeed,
+               static_cast<uint32_t>(std::numeric_limits<int>::max())));
+  if (ImGui::DragInt("Poisson Rotation Seed##ShadowPass", &poissonSeed, 1.0f, 0,
+                     std::numeric_limits<int>::max())) {
+    shadow.debug.poissonRotationSeed =
+        static_cast<uint32_t>(std::max(poissonSeed, 0));
+  }
 
   ImGui::Separator();
   ImGui::TextUnformatted("SDSM");
@@ -1336,8 +1346,27 @@ void drawShadowSettings(
                   &shadow.debug.visualizeCascadeIndex);
   ImGui::Checkbox("Visualize Shadow Factor##ShadowPass",
                   &shadow.debug.visualizeShadowFactor);
-  ImGui::Checkbox("Visualize PCSS Blockers (future)##ShadowPass",
+  ImGui::Checkbox("Visualize PCF Result##ShadowPass",
+                  &shadow.debug.visualizePCFResult);
+  ImGui::Checkbox("Visualize Receiver Depth##ShadowPass",
+                  &shadow.debug.visualizeReceiverDepth);
+  ImGui::Checkbox("Visualize Shadow Map Depth##ShadowPass",
+                  &shadow.debug.visualizeShadowMapDepth);
+  ImGui::Checkbox("Visualize PCSS Blockers##ShadowPass",
                   &shadow.debug.visualizePCSSBlockers);
+  ImGui::Checkbox("Visualize PCSS Average Blocker Depth##ShadowPass",
+                  &shadow.debug.visualizePCSSAverageBlockerDepth);
+  ImGui::Checkbox("Visualize PCSS Filter Radius##ShadowPass",
+                  &shadow.debug.visualizePCSSFilterRadius);
+  const bool pcssDebugVisualization =
+      shadow.debug.visualizePCSSBlockers ||
+      shadow.debug.visualizePCSSAverageBlockerDepth ||
+      shadow.debug.visualizePCSSFilterRadius;
+  if (pcssDebugVisualization && shadow.filterMode != ShadowFilterMode::PCSS) {
+    ImGui::TextUnformatted(
+        "PCSS debug visualization is meaningful when PCSS filtering is "
+        "active.");
+  }
   ImGui::Checkbox("Visualize SDSM Histogram (future)##ShadowPass",
                   &shadow.debug.visualizeSDSMHistogram);
 
@@ -1387,14 +1416,6 @@ void drawShadowSettings(
               shadowCascadeSplitModeDisplayName(shadow.splitMode));
   ImGui::Text("Filter: %s", shadowFilterModeDisplayName(shadow.filterMode));
   ImGui::Text("SDSM: %s", shadowSdsmModeDisplayName(shadow.sdsmMode));
-  if (shadow.filterMode == ShadowFilterMode::PoissonPCF) {
-    ImGui::TextUnformatted(
-        "Poisson PCF currently uses the sample-driven Grid PCF kernel.");
-  } else if (shadow.filterMode == ShadowFilterMode::PCSS) {
-    ImGui::TextUnformatted(
-        "PCSS is not implemented yet; the selected mode currently runs as "
-        "hard shadow.");
-  }
 }
 
 void drawTransparentSettings(RenderSettings::TransparentSettings &transparent) {
@@ -1616,14 +1637,6 @@ void drawShadowsWindow(
   ImGui::Text("Freeze Light View: %s",
               renderSettings.shadow.debug.freezeLightView ? "active"
                                                           : "inactive");
-  if (renderSettings.shadow.filterMode == ShadowFilterMode::PoissonPCF) {
-    ImGui::TextUnformatted(
-        "Effective runtime filter: Grid PCF kernel for Poisson PCF.");
-  } else if (renderSettings.shadow.filterMode == ShadowFilterMode::PCSS) {
-    ImGui::TextUnformatted(
-        "Effective runtime filter: hard shadow (PCSS is not implemented in "
-        "this slice).");
-  }
   ImGui::TextUnformatted("Receiver Debug");
   if (!shadowInspectResult.has_value()) {
     ImGui::TextUnformatted(

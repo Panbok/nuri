@@ -3,6 +3,7 @@
 #include "nuri/defines.h"
 #include "nuri/resources/gpu/resource_handles.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -109,13 +110,14 @@ lightDirectionFromRotationForLocalLights(const glm::quat &rotation) {
 
 [[nodiscard]] inline DirectionalLightGpuData
 packDirectionalLight(const glm::quat &rotation, const glm::vec3 &color,
-                     float intensity) {
+                     float intensity, float angularRadiusDegrees = 0.27f) {
   const glm::vec3 direction =
       lightDirectionFromRotationForLocalLights(rotation);
   return DirectionalLightGpuData{
       .directionIlluminance =
           glm::vec4(direction.x, direction.y, direction.z, intensity),
-      .colorReserved = glm::vec4(color, 0.0f),
+      .colorReserved =
+          glm::vec4(color, glm::radians(std::max(angularRadiusDegrees, 0.0f))),
   };
 }
 

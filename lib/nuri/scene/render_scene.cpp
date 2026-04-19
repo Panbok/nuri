@@ -230,8 +230,9 @@ void RenderScene::rebuildPackedDirectionalLights() {
         transformLightDesc(local, nodes.worldFromRoot[nodeIndex]);
     store.packedIndices[index] =
         static_cast<uint32_t>(packedDirectionalLights_.size());
-    packedDirectionalLights_.push_back(nuri::packDirectionalLight(
-        world.rotation, world.color, world.intensity));
+    packedDirectionalLights_.push_back(
+        nuri::packDirectionalLight(world.rotation, world.color, world.intensity,
+                                   world.angularRadiusDegrees));
     packedDirectionalLightIds_.push_back(makeLightId(
         LightType::Directional, index, store.slots.generation(index)));
   }

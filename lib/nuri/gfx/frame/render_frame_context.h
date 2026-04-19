@@ -95,6 +95,17 @@ static constexpr uint32_t kInvalidShadowBindlessIndex = 0xFFFFFFFFu;
 static constexpr uint32_t kShadowFrameFlagEnabled = 1u << 0u;
 static constexpr uint32_t kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
 static constexpr uint32_t kShadowFrameFlagVisualizeCascadeIndex = 1u << 2u;
+static constexpr uint32_t kShadowFrameFlagVisualizePCSSBlockers = 1u << 3u;
+static constexpr uint32_t kShadowFrameFlagFixedPoissonRotation = 1u << 4u;
+static constexpr uint32_t kShadowFrameFlagVisualizePCFResult = 1u << 5u;
+static constexpr uint32_t kShadowFrameFlagVisualizeReceiverDepth = 1u << 6u;
+static constexpr uint32_t kShadowFrameFlagVisualizeShadowMapDepth = 1u << 7u;
+static constexpr uint32_t kShadowFrameFlagVisualizePCSSAverageBlockerDepth =
+    1u << 8u;
+static constexpr uint32_t kShadowFrameFlagVisualizePCSSFilterRadius = 1u << 9u;
+static constexpr float kDefaultPcssLightRadiusScale = 0.35f;
+static constexpr float kDefaultPcssSearchRadiusClampTexels = 12.0f;
+static constexpr float kDefaultPcssFilterRadiusClampTexels = 18.0f;
 
 [[nodiscard]] constexpr uint8_t
 sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
@@ -181,7 +192,14 @@ struct RenderSettings {
     bool freezeLightView = false;
     bool visualizeCascadeIndex = false;
     bool visualizeShadowFactor = false;
+    bool visualizePCFResult = false;
+    bool visualizeReceiverDepth = false;
+    bool visualizeShadowMapDepth = false;
     bool visualizePCSSBlockers = false;
+    bool visualizePCSSAverageBlockerDepth = false;
+    bool visualizePCSSFilterRadius = false;
+    bool fixedPoissonRotation = false;
+    uint32_t poissonRotationSeed = 0u;
     bool visualizeSDSMHistogram = false;
     bool enableCascadeCasterCulling = true;
     ShadowPreviewMode previewMode = ShadowPreviewMode::SelectedCascade;
@@ -207,9 +225,9 @@ struct RenderSettings {
     uint32_t pcfSampleCount = 9;
     uint32_t pcssBlockerSampleCount = 16;
     uint32_t pcssFilterSampleCount = 32;
-    float pcssLightRadiusScale = 1.0f;
-    float pcssSearchRadiusClampTexels = 32.0f;
-    float pcssFilterRadiusClampTexels = 48.0f;
+    float pcssLightRadiusScale = kDefaultPcssLightRadiusScale;
+    float pcssSearchRadiusClampTexels = kDefaultPcssSearchRadiusClampTexels;
+    float pcssFilterRadiusClampTexels = kDefaultPcssFilterRadiusClampTexels;
     ShadowSdsmMode sdsmMode = ShadowSdsmMode::Disabled;
     float sdsmTemporalBlend = 0.85f;
     ShadowDebugSettings debug{};
@@ -247,6 +265,39 @@ struct RenderSettings {
   TextureFilteringSettings textureFiltering{};
   ToneMapSettings toneMap{};
 };
+
+[[nodiscard]] inline uint32_t
+shadowDebugFrameFlags(const RenderSettings::ShadowDebugSettings &debug) {
+  uint32_t flags = 0u;
+  if (debug.visualizeShadowFactor) {
+    flags |= kShadowFrameFlagVisualizeShadowFactor;
+  }
+  if (debug.visualizeCascadeIndex) {
+    flags |= kShadowFrameFlagVisualizeCascadeIndex;
+  }
+  if (debug.visualizePCFResult) {
+    flags |= kShadowFrameFlagVisualizePCFResult;
+  }
+  if (debug.visualizeReceiverDepth) {
+    flags |= kShadowFrameFlagVisualizeReceiverDepth;
+  }
+  if (debug.visualizeShadowMapDepth) {
+    flags |= kShadowFrameFlagVisualizeShadowMapDepth;
+  }
+  if (debug.visualizePCSSBlockers) {
+    flags |= kShadowFrameFlagVisualizePCSSBlockers;
+  }
+  if (debug.visualizePCSSAverageBlockerDepth) {
+    flags |= kShadowFrameFlagVisualizePCSSAverageBlockerDepth;
+  }
+  if (debug.visualizePCSSFilterRadius) {
+    flags |= kShadowFrameFlagVisualizePCSSFilterRadius;
+  }
+  if (debug.fixedPoissonRotation) {
+    flags |= kShadowFrameFlagFixedPoissonRotation;
+  }
+  return flags;
+}
 
 inline void sanitizeTextureFilteringSettings(
     RenderSettings::TextureFilteringSettings &settings) {
@@ -336,15 +387,15 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   settings.pcssLightRadiusScale =
       std::isfinite(settings.pcssLightRadiusScale)
           ? std::max(settings.pcssLightRadiusScale, 0.0f)
-          : 1.0f;
+          : kDefaultPcssLightRadiusScale;
   settings.pcssSearchRadiusClampTexels =
       std::isfinite(settings.pcssSearchRadiusClampTexels)
           ? std::max(settings.pcssSearchRadiusClampTexels, 0.0f)
-          : 32.0f;
+          : kDefaultPcssSearchRadiusClampTexels;
   settings.pcssFilterRadiusClampTexels =
       std::isfinite(settings.pcssFilterRadiusClampTexels)
           ? std::max(settings.pcssFilterRadiusClampTexels, 0.0f)
-          : 48.0f;
+          : kDefaultPcssFilterRadiusClampTexels;
   settings.sdsmTemporalBlend =
       std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
   settings.debug.debugCascadeIndex =
@@ -418,18 +469,20 @@ struct alignas(16) ShadowCascadeGpuData {
   glm::vec4 splitDepthTexelSize{0.0f};
   glm::vec4 uvScaleBias{1.0f, 1.0f, 0.0f, 0.0f};
   glm::vec4 biasParams{0.0f};
+  glm::vec4 pcssParams{0.0f};
   glm::uvec4 textureSampler{kInvalidShadowBindlessIndex,
                             kInvalidShadowBindlessIndex, 0u, 0u};
 };
-static_assert(sizeof(ShadowCascadeGpuData) == 192u,
+static_assert(sizeof(ShadowCascadeGpuData) == 208u,
               "ShadowCascadeGpuData must match shader layout");
 
 struct alignas(16) ShadowFrameGpuData {
   glm::uvec4 flagsCascadeCountLightIndex{0u};
   glm::vec4 fadeParams{0.0f};
+  glm::uvec4 filterParams{0u};
   std::array<ShadowCascadeGpuData, kMaxShadowCascades> cascades{};
 };
-static_assert(sizeof(ShadowFrameGpuData) == 800u,
+static_assert(sizeof(ShadowFrameGpuData) == 880u,
               "ShadowFrameGpuData must match shader layout");
 
 struct ShadowFrameGpuDataHandle {

@@ -13,6 +13,12 @@ vec3 shadowCascadeDebugColor(uint cascadeIndex) {
   return colors[int(min(cascadeIndex, 3u))];
 }
 
+bool shadowDebugFlag(uint flag) {
+  return (pc.frameData.shadowFlags & flag) != 0u;
+}
+
+vec4 shadowDebugScalar(float value) { return vec4(vec3(saturate(value)), 1.0); }
+
 void main() {
   const MaterialData material = loadMaterialData(pc.materialIndex);
   const uint alphaMode = materialAlphaMode(material);
@@ -41,9 +47,33 @@ void main() {
     out_FragColor = vec4(cascadeColor, 1.0);
     return;
   }
-  if ((pc.frameData.shadowFlags & kShadowFrameFlagVisualizeShadowFactor) !=
-      0u) {
-    out_FragColor = vec4(vec3(direct.shadowFactorDebug), 1.0);
+  if (shadowDebugFlag(kShadowFrameFlagVisualizePCFResult)) {
+    out_FragColor = shadowDebugScalar(direct.shadowPcfFactorDebug);
+    return;
+  }
+  if (shadowDebugFlag(kShadowFrameFlagVisualizeReceiverDepth)) {
+    out_FragColor = shadowDebugScalar(direct.shadowReceiverDepthDebug);
+    return;
+  }
+  if (shadowDebugFlag(kShadowFrameFlagVisualizeShadowMapDepth)) {
+    out_FragColor = shadowDebugScalar(direct.shadowMapDepthDebug);
+    return;
+  }
+  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSBlockers)) {
+    out_FragColor = shadowDebugScalar(direct.shadowPcssBlockerRatioDebug);
+    return;
+  }
+  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSAverageBlockerDepth)) {
+    out_FragColor =
+        shadowDebugScalar(direct.shadowPcssAverageBlockerDepthDebug);
+    return;
+  }
+  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSFilterRadius)) {
+    out_FragColor = shadowDebugScalar(direct.shadowPcssFilterRadiusDebug);
+    return;
+  }
+  if (shadowDebugFlag(kShadowFrameFlagVisualizeShadowFactor)) {
+    out_FragColor = shadowDebugScalar(direct.shadowFactorDebug);
     return;
   }
 

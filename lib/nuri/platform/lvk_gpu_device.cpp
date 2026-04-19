@@ -1177,12 +1177,14 @@ Result<bool, std::string> LvkGPUDevice::prepareFrameOutput() {
         "texture");
   }
   if (impl_->verboseVkDiagnostics) {
-    NURI_LOG_DEBUG(
-        "LvkGPUDevice::prepareFrameOutput: frame=%" PRIu64
-        " swapchainTexture=%u:%u image=%u/%u",
-        impl_->currentFrameIndex, impl_->currentFrameSwapchainTexture.index(),
-        impl_->currentFrameSwapchainTexture.gen(),
-        impl_->preparedSwapchainImageIndex, impl_->preparedSwapchainImageCount);
+    // NURI_LOG_DEBUG(
+    //     "LvkGPUDevice::prepareFrameOutput: frame=%" PRIu64
+    //     " swapchainTexture=%u:%u image=%u/%u",
+    //     impl_->currentFrameIndex,
+    //     impl_->currentFrameSwapchainTexture.index(),
+    //     impl_->currentFrameSwapchainTexture.gen(),
+    //     impl_->preparedSwapchainImageIndex,
+    //     impl_->preparedSwapchainImageCount);
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -2700,26 +2702,28 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
   }
 
   if (impl_->verboseVkDiagnostics) {
-    NURI_LOG_DEBUG(
-        "LvkGPUDevice::submitRecordedGraphicsFrame: frame=%" PRIu64
-        " submit=%" PRIu64 " commandBuffers=%zu batches=%zu presents=%s "
-        "swapchainTexture=%u:%u image=%u/%u",
-        impl_->currentFrameIndex, impl_->submittedFrameCount,
-        commandBuffers.size(), batches.size(), boolToString(wantsPresent),
-        swapchainTexture.index(), swapchainTexture.gen(),
-        impl_->preparedSwapchainImageIndex, impl_->preparedSwapchainImageCount);
-    for (size_t i = 0u; i < commandBuffers.size(); ++i) {
-      NURI_LOG_DEBUG(
-          "  submit-cmd[%zu]: handle=%s present=%s", i,
-          formatRecordedCommandBufferHandle(commandBuffers[i]).c_str(),
-          boolToString(presentFlags[i] != 0u));
-    }
-    for (size_t i = 0u; i < batches.size(); ++i) {
-      const SubmitBatchMeta &batch = batches[i];
-      NURI_LOG_DEBUG("  submit-batch[%zu]: offset=%u count=%u presents=%s", i,
-                     batch.commandBufferOffset, batch.commandBufferCount,
-                     boolToString(batch.presentsFrameOutput));
-    }
+    // NURI_LOG_DEBUG(
+    //     "LvkGPUDevice::submitRecordedGraphicsFrame: frame=%" PRIu64
+    //     " submit=%" PRIu64 " commandBuffers=%zu batches=%zu presents=%s "
+    //     "swapchainTexture=%u:%u image=%u/%u",
+    //     impl_->currentFrameIndex, impl_->submittedFrameCount,
+    //     commandBuffers.size(), batches.size(), boolToString(wantsPresent),
+    //     swapchainTexture.index(), swapchainTexture.gen(),
+    //     impl_->preparedSwapchainImageIndex,
+    //     impl_->preparedSwapchainImageCount);
+    // for (size_t i = 0u; i < commandBuffers.size(); ++i) {
+    //   NURI_LOG_DEBUG(
+    //       "  submit-cmd[%zu]: handle=%s present=%s", i,
+    //       formatRecordedCommandBufferHandle(commandBuffers[i]).c_str(),
+    //       boolToString(presentFlags[i] != 0u));
+    // }
+    // for (size_t i = 0u; i < batches.size(); ++i) {
+    //   const SubmitBatchMeta &batch = batches[i];
+    //   NURI_LOG_DEBUG("  submit-batch[%zu]: offset=%u count=%u presents=%s",
+    //   i,
+    //                  batch.commandBufferOffset, batch.commandBufferCount,
+    //                  boolToString(batch.presentsFrameOutput));
+    // }
   }
 
   const auto foldRecordedHandleKey =
@@ -2770,12 +2774,12 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
         *commandBuffer,
         presentFlags[i] != 0u ? swapchainTexture : lvk::TextureHandle{});
     if (impl_->verboseVkDiagnostics) {
-      NURI_LOG_DEBUG(
-          "  submit-result[%u]: frame=%" PRIu64
-          " recorded=%s submitHandle=%u:%u",
-          i, impl_->currentFrameIndex,
-          formatRecordedCommandBufferHandle(commandBuffers[i]).c_str(),
-          lastSubmitHandle.bufferIndex_, lastSubmitHandle.submitId_);
+      // NURI_LOG_DEBUG(
+      //     "  submit-result[%u]: frame=%" PRIu64
+      //     " recorded=%s submitHandle=%u:%u",
+      //     i, impl_->currentFrameIndex,
+      //     formatRecordedCommandBufferHandle(commandBuffers[i]).c_str(),
+      //     lastSubmitHandle.bufferIndex_, lastSubmitHandle.submitId_);
     }
     consumedRecordedFlags[matchedIndex] = 1u;
   }

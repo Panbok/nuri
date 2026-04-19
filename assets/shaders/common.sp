@@ -22,6 +22,13 @@ const uint kMaxShadowPcfSamples = 64u;
 const uint kShadowFrameFlagEnabled = 1u << 0u;
 const uint kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
 const uint kShadowFrameFlagVisualizeCascadeIndex = 1u << 2u;
+const uint kShadowFrameFlagVisualizePCSSBlockers = 1u << 3u;
+const uint kShadowFrameFlagFixedPoissonRotation = 1u << 4u;
+const uint kShadowFrameFlagVisualizePCFResult = 1u << 5u;
+const uint kShadowFrameFlagVisualizeReceiverDepth = 1u << 6u;
+const uint kShadowFrameFlagVisualizeShadowMapDepth = 1u << 7u;
+const uint kShadowFrameFlagVisualizePCSSAverageBlockerDepth = 1u << 8u;
+const uint kShadowFrameFlagVisualizePCSSFilterRadius = 1u << 9u;
 const uint kShadowFilterModeHard = 0u;
 const uint kShadowFilterModePCF3x3 = 1u;
 const uint kShadowFilterModePoissonPCF = 2u;
@@ -172,6 +179,7 @@ struct ShadowCascadeGpuData {
   vec4 splitDepthTexelSize;
   vec4 uvScaleBias;
   vec4 biasParams;
+  vec4 pcssParams;
   uvec4 textureSampler;
 };
 
@@ -186,6 +194,7 @@ layout(std430, buffer_reference) readonly buffer LocalLightBuffer {
 layout(std430, buffer_reference) readonly buffer ShadowFrameBuffer {
   uvec4 flagsCascadeCountLightIndex;
   vec4 fadeParams;
+  uvec4 filterParams;
   ShadowCascadeGpuData cascades[kMaxShadowCascades];
 };
 
@@ -427,6 +436,10 @@ float directionalLightIlluminance(DirectionalLightGpuData light) {
 
 vec3 directionalLightColor(DirectionalLightGpuData light) {
   return light.colorReserved.rgb;
+}
+
+float directionalLightAngularRadiusRadians(DirectionalLightGpuData light) {
+  return max(light.colorReserved.w, 0.0);
 }
 
 vec3 localLightPosition(LocalLightGpuData light) { return light.positionRange.xyz; }

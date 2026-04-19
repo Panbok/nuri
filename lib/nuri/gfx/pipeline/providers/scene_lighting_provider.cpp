@@ -256,13 +256,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   sanitizeShadowSettings(shadowSettings);
   if (shadowSettings.enabled && shadowFrameBufferAddress != 0u &&
       directionalLightCount > 0u) {
-    shadowFlags |= kShadowFrameFlagEnabled;
-    if (shadowSettings.debug.visualizeShadowFactor) {
-      shadowFlags |= kShadowFrameFlagVisualizeShadowFactor;
-    }
-    if (shadowSettings.debug.visualizeCascadeIndex) {
-      shadowFlags |= kShadowFrameFlagVisualizeCascadeIndex;
-    }
+    shadowFlags =
+        kShadowFrameFlagEnabled | shadowDebugFrameFlags(shadowSettings.debug);
   }
 
   const ForwardSceneFrameData frameData{

@@ -243,9 +243,14 @@ void writeShadowCascadeFit(const shadow_detail::DirectionalShadowFit &fit,
       .uvScaleBias = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
       .biasParams = glm::vec4(settings.constantBias, settings.slopeBias,
                               settings.normalBias, 0.0f),
+      .pcssParams = glm::vec4(
+          std::max(fit.lightSpaceBoundsMax.z - fit.lightSpaceBoundsMin.z,
+                   1.0e-6f),
+          settings.pcssSearchRadiusClampTexels,
+          settings.pcssFilterRadiusClampTexels, 0.0f),
       .textureSampler =
           glm::uvec4(gpu.getTextureBindlessIndex(shadowDepthTexture),
-                     compareSamplerId, rawSamplerId, settings.pcfSampleCount),
+                     compareSamplerId, rawSamplerId, 0u),
   };
 
   ShadowCascadeDebugFrameData &cascadeDebug =
@@ -1126,21 +1131,19 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       frozenCascadeCount_ = cascadeCount;
     }
   }
-  uint32_t shadowFlags = kShadowFrameFlagEnabled;
-  if (settings.debug.visualizeShadowFactor) {
-    shadowFlags |= kShadowFrameFlagVisualizeShadowFactor;
-  }
-  if (settings.debug.visualizeCascadeIndex) {
-    shadowFlags |= kShadowFrameFlagVisualizeCascadeIndex;
-  }
+  const uint32_t shadowFlags =
+      kShadowFrameFlagEnabled | shadowDebugFrameFlags(settings.debug);
 
   shadowFrameCpuData_.flagsCascadeCountLightIndex = glm::uvec4(
       shadowFlags, cascadeCount, selectedLightIndex,
       static_cast<uint32_t>(sanitizeShadowFilterMode(settings.filterMode)));
+  shadowFrameCpuData_.filterParams = glm::uvec4(
+      settings.pcfSampleCount, settings.pcssBlockerSampleCount,
+      settings.pcssFilterSampleCount, settings.debug.poissonRotationSeed);
   shadowFrameCpuData_.fadeParams =
       glm::vec4(shadowDebugFrameData_.cascades[0].splitNear,
                 shadowDebugFrameData_.cascades[cascadeCount - 1u].splitFar,
-                settings.cascadeBlendFraction, 0.0f);
+                settings.cascadeBlendFraction, settings.pcssLightRadiusScale);
 
   shadowDebugFrameData_.selectedShadowLightId = selectedLightId;
 
