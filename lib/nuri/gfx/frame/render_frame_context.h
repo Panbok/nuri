@@ -183,6 +183,7 @@ struct RenderSettings {
     bool visualizeShadowFactor = false;
     bool visualizePCSSBlockers = false;
     bool visualizeSDSMHistogram = false;
+    bool enableCascadeCasterCulling = false;
     ShadowPreviewMode previewMode = ShadowPreviewMode::SelectedCascade;
     float previewDepthMin = 0.0f;
     float previewDepthMax = 1.0f;
@@ -453,7 +454,7 @@ struct ShadowCascadeDebugFrameData {
   TextureHandle texture{};
   uint32_t textureBindlessId = kInvalidShadowBindlessIndex;
   uint32_t drawCount = 0u;
-  uint32_t reserved0 = 0u;
+  uint32_t culledCount = 0u;
 };
 
 struct ShadowDebugFrameData {

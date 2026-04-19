@@ -179,6 +179,7 @@ private:
   std::array<std::pmr::vector<DrawItem>, kMaxShadowCascades>
       cascadeDrawItems_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDrawCounts_{};
+  std::array<uint32_t, kMaxShadowCascades> cascadeCulledCounts_{};
   std::pmr::vector<BufferDependency> passBufferDependencies_;
   std::pmr::vector<TextureDependency> passTextureDependencies_;
   std::pmr::vector<TextureDependency> previewTextureDependencies_;

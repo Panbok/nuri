@@ -339,20 +339,6 @@ shadowPreviewPipelineDesc(ShaderHandle vertexShader,
       std::min(value, size_t(std::numeric_limits<uint32_t>::max())));
 }
 
-[[nodiscard]] std::array<glm::vec3, 8u>
-computeBoundingBoxCorners(const BoundingBox &bounds) {
-  return {
-      glm::vec3(bounds.min_.x, bounds.min_.y, bounds.min_.z),
-      glm::vec3(bounds.max_.x, bounds.min_.y, bounds.min_.z),
-      glm::vec3(bounds.max_.x, bounds.max_.y, bounds.min_.z),
-      glm::vec3(bounds.min_.x, bounds.max_.y, bounds.min_.z),
-      glm::vec3(bounds.min_.x, bounds.min_.y, bounds.max_.z),
-      glm::vec3(bounds.max_.x, bounds.min_.y, bounds.max_.z),
-      glm::vec3(bounds.max_.x, bounds.max_.y, bounds.max_.z),
-      glm::vec3(bounds.min_.x, bounds.max_.y, bounds.max_.z),
-  };
-}
-
 [[nodiscard]] bool isValidShadowDepthTexture(const GPUDevice &gpu,
                                              TextureHandle texture,
                                              uint32_t shadowMapSize) {
@@ -799,6 +785,7 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
       gpu_.destroyTexture(texture);
     }
   }
+  resetFrozenShadowFit();
 
   return Result<bool, std::string>::makeResult(true);
 }
@@ -1031,7 +1018,9 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     }
   }
   frame.sharedResources.selectedShadowLightId = selectedLightId;
-  if (!settings.debug.freezeLightView) {
+  const bool freezeShadowFits =
+      settings.debug.freezeLightView || settings.debug.freezeCascades;
+  if (!freezeShadowFits) {
     resetFrozenShadowFit();
   }
   hasActiveShadowLightForFrame_ = true;
@@ -1068,7 +1057,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     }
     const BoundingBox worldBounds =
         entry.submesh->bounds.getTransformed(entry.renderable->modelMatrix);
-    const auto worldBoundsCorners = computeBoundingBoxCorners(worldBounds);
+    const auto worldBoundsCorners =
+        shadow_detail::computeBoundsCorners(worldBounds.min_, worldBounds.max_);
     casterPoints.insert(casterPoints.end(), worldBoundsCorners.begin(),
                         worldBoundsCorners.end());
     casterBounds.combinePoint(worldBounds.min_);
@@ -1079,8 +1069,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   const uint32_t cascadeCount =
       std::clamp(activeCascadeCount_, 1u, kMaxShadowCascades);
   shadowDebugFrameData_.cascadeCount = cascadeCount;
-  const bool reuseFrozenFit = settings.debug.freezeLightView &&
-                              hasFrozenShadowFit_ &&
+  const bool reuseFrozenFit = freezeShadowFits && hasFrozenShadowFit_ &&
                               frozenShadowLightId_ == selectedLightId &&
                               frozenShadowMapSize_ == shadowMapSize &&
                               frozenCascadeCount_ == cascadeCount;
@@ -1129,7 +1118,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                             shadowDepthTextures_[cascadeIndex], gpu_,
                             shadowFrameCpuData_, shadowDebugFrameData_);
     }
-    if (settings.debug.freezeLightView) {
+    if (freezeShadowFits) {
       hasFrozenShadowFit_ = true;
       frozenShadowLightId_ = selectedLightId;
       frozenShadowMapSize_ = shadowMapSize;
@@ -1265,6 +1254,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   }
 
   const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const bool enableCascadeCasterCulling =
+      settings.shadow.debug.enableCascadeCasterCulling;
   const uint32_t renderableCount = saturateToU32(renderables.size());
   for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
     if (entry.renderable == nullptr || entry.submesh == nullptr) {
@@ -1282,6 +1273,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         entry.vertexDecodeBufferAddress;
     uint32_t resolvedVertexDecodeIndex = entry.vertexDecodeIndex;
     uint32_t resolvedPackedVertexFormat = entry.packedVertexFormat;
+    bool usesAnimatedOverride = false;
     if (animationSceneData != nullptr &&
         entry.instanceIndex <
             animationSceneData->geometryOverridesByRenderable.size()) {
@@ -1291,6 +1283,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       if (geometryOverride.enabled &&
           nuri::isValid(geometryOverride.vertexBuffer) &&
           animationOverrideCoversSubmesh(geometryOverride, *entry.submesh)) {
+        usesAnimatedOverride = true;
         const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
             geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
         if (overrideVertexAddress != 0u) {
@@ -1304,8 +1297,33 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       }
     }
 
+    std::array<glm::vec3, 8> casterWorldCorners{};
+    bool hasCasterCullingBounds = false;
+    if (enableCascadeCasterCulling && !usesAnimatedOverride) {
+      const BoundingBox worldBounds =
+          entry.submesh->bounds.getTransformed(entry.renderable->modelMatrix);
+      casterWorldCorners = shadow_detail::computeBoundsCorners(
+          worldBounds.min_, worldBounds.max_);
+      hasCasterCullingBounds = true;
+    }
+
     for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
          ++cascadeIndex) {
+      if (hasCasterCullingBounds) {
+        const ShadowCascadeDebugFrameData &cascadeDebug =
+            shadowDebugFrameData_.cascades[cascadeIndex];
+        const float cullingPadding =
+            std::max(cascadeDebug.texelWorldSize * 2.0f, 0.01f);
+        if (!shadow_detail::shadowCasterOverlapsLightSpaceBounds(
+                std::span<const glm::vec3, 8>(casterWorldCorners),
+                cascadeDebug.lightView,
+                glm::vec3(cascadeDebug.lightSpaceBoundsMin),
+                glm::vec3(cascadeDebug.lightSpaceBoundsMax), cullingPadding)) {
+          ++cascadeCulledCounts_[cascadeIndex];
+          continue;
+        }
+      }
+
       cascadePushConstants_[cascadeIndex].push_back(PushConstants{
           .frameDataAddress = sceneGpu.frameDataAddress,
           .vertexBufferAddress = resolvedVertexBufferAddress,
@@ -1386,6 +1404,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         saturateToU32(cascadeDrawItems_[cascadeIndex].size());
     shadowDebugFrameData_.cascades[cascadeIndex].drawCount =
         cascadeDrawCounts_[cascadeIndex];
+    shadowDebugFrameData_.cascades[cascadeIndex].culledCount =
+        cascadeCulledCounts_[cascadeIndex];
   }
   frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
   return Result<bool, std::string>::makeResult(true);
@@ -1412,6 +1432,7 @@ void ShadowRenderer::destroyShadowResources() {
   }
   shadowMapSize_ = 0u;
   activeCascadeCount_ = 0u;
+  resetFrozenShadowFit();
 }
 
 void ShadowRenderer::destroyBuffers() {
@@ -1511,6 +1532,7 @@ void ShadowRenderer::resetFrameBuildState() {
   hasPreparedShadowPreviewPass_ = false;
   hasActiveShadowLightForFrame_ = false;
   cascadeDrawCounts_.fill(0u);
+  cascadeCulledCounts_.fill(0u);
   for (uint32_t cascadeIndex = 0u; cascadeIndex < kMaxShadowCascades;
        ++cascadeIndex) {
     cascadePushConstants_[cascadeIndex].clear();

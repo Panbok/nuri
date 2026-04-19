@@ -145,6 +145,34 @@ computeBoundsCorners(glm::vec3 boundsMin, glm::vec3 boundsMax) {
   };
 }
 
+[[nodiscard]] inline bool shadowCasterOverlapsLightSpaceBounds(
+    std::span<const glm::vec3, 8> casterWorldCorners,
+    const glm::mat4 &lightView, glm::vec3 lightSpaceBoundsMin,
+    glm::vec3 lightSpaceBoundsMax, float padding) {
+  glm::vec3 casterLightMin(std::numeric_limits<float>::max());
+  glm::vec3 casterLightMax(std::numeric_limits<float>::lowest());
+  for (const glm::vec3 corner : casterWorldCorners) {
+    const glm::vec3 lightSpace = glm::vec3(lightView * glm::vec4(corner, 1.0f));
+    casterLightMin = glm::min(casterLightMin, lightSpace);
+    casterLightMax = glm::max(casterLightMax, lightSpace);
+  }
+
+  const glm::vec3 boundsMin =
+      glm::min(lightSpaceBoundsMin, lightSpaceBoundsMax);
+  const glm::vec3 boundsMax =
+      glm::max(lightSpaceBoundsMin, lightSpaceBoundsMax);
+  const glm::vec3 conservativePadding(std::max(padding, 0.0f));
+  lightSpaceBoundsMin = boundsMin - conservativePadding;
+  lightSpaceBoundsMax = boundsMax + conservativePadding;
+
+  return casterLightMax.x >= lightSpaceBoundsMin.x &&
+         casterLightMin.x <= lightSpaceBoundsMax.x &&
+         casterLightMax.y >= lightSpaceBoundsMin.y &&
+         casterLightMin.y <= lightSpaceBoundsMax.y &&
+         casterLightMax.z >= lightSpaceBoundsMin.z &&
+         casterLightMin.z <= lightSpaceBoundsMax.z;
+}
+
 [[nodiscard]] inline glm::vec3 lightSpaceCenter(glm::vec3 boundsMin,
                                                 glm::vec3 boundsMax) {
   return (boundsMin + boundsMax) * 0.5f;
