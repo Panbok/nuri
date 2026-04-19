@@ -483,6 +483,9 @@ float pcfGridDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
   return visibility / float(max(usedSamples, 1));
 }
 
+// shadowPoissonDiskSample stores 64 Poisson points and uses `sampleIndex & 63`
+// for wrap-around. If kMaxShadowPcfSamples is increased above 64, samples will
+// repeat unless this table is expanded or the indexing strategy is changed.
 vec2 shadowPoissonDiskSample(int sampleIndex) {
   switch (sampleIndex & 63) {
   case 0:
@@ -861,6 +864,12 @@ DirectionalShadowResult evaluateDirectionalShadow(
       shadow, kShadowFrameFlagVisualizeReceiverDepth);
   const bool needsShadowMapDepthDebug = directionalShadowFrameFlag(
       shadow, kShadowFrameFlagVisualizeShadowMapDepth);
+  const bool needsPcssDebug =
+      directionalShadowFrameFlag(shadow, kShadowFrameFlagVisualizePCSSBlockers) ||
+      directionalShadowFrameFlag(
+          shadow, kShadowFrameFlagVisualizePCSSAverageBlockerDepth) ||
+      directionalShadowFrameFlag(shadow,
+                                 kShadowFrameFlagVisualizePCSSFilterRadius);
   if (needsPcfDebug) {
     r.pcfFactorDebug =
         (filterMode == kShadowFilterModePoissonPCF)
@@ -902,15 +911,17 @@ DirectionalShadowResult evaluateDirectionalShadow(
         mix(r.shadowMapDepthDebug, sampleDirectionalShadowDepth(state.nextCtx),
             r.cascadeBlendDebug);
   }
-  r.pcssBlockerRatioDebug =
-      mix(r.pcssBlockerRatioDebug, nextFilterResult.pcssBlockerRatio,
-          r.cascadeBlendDebug);
-  r.pcssAverageBlockerDepthDebug =
-      mix(r.pcssAverageBlockerDepthDebug,
-          nextFilterResult.pcssAverageBlockerDepth, r.cascadeBlendDebug);
-  r.pcssFilterRadiusDebug =
-      mix(r.pcssFilterRadiusDebug, nextFilterResult.pcssFilterRadiusRatio,
-          r.cascadeBlendDebug);
+  if (needsPcssDebug) {
+    r.pcssBlockerRatioDebug =
+        mix(r.pcssBlockerRatioDebug, nextFilterResult.pcssBlockerRatio,
+            r.cascadeBlendDebug);
+    r.pcssAverageBlockerDepthDebug =
+        mix(r.pcssAverageBlockerDepthDebug,
+            nextFilterResult.pcssAverageBlockerDepth, r.cascadeBlendDebug);
+    r.pcssFilterRadiusDebug =
+        mix(r.pcssFilterRadiusDebug, nextFilterResult.pcssFilterRadiusRatio,
+            r.cascadeBlendDebug);
+  }
   return r;
 }
 

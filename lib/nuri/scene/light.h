@@ -111,13 +111,18 @@ lightDirectionFromRotationForLocalLights(const glm::quat &rotation) {
 [[nodiscard]] inline DirectionalLightGpuData
 packDirectionalLight(const glm::quat &rotation, const glm::vec3 &color,
                      float intensity, float angularRadiusDegrees = 0.27f) {
+  constexpr float kMaxAngularRadiusDegrees = 180.0f;
   const glm::vec3 direction =
       lightDirectionFromRotationForLocalLights(rotation);
+  const float sanitizedAngularRadiusDegrees =
+      std::isfinite(angularRadiusDegrees) ? angularRadiusDegrees : 0.0f;
+  const float clampedAngularRadiusDegrees =
+      std::clamp(sanitizedAngularRadiusDegrees, 0.0f, kMaxAngularRadiusDegrees);
   return DirectionalLightGpuData{
       .directionIlluminance =
           glm::vec4(direction.x, direction.y, direction.z, intensity),
       .colorReserved =
-          glm::vec4(color, glm::radians(std::max(angularRadiusDegrees, 0.0f))),
+          glm::vec4(color, glm::radians(clampedAngularRadiusDegrees)),
   };
 }
 

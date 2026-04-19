@@ -23,7 +23,7 @@ void main() {
   const MaterialData material = loadMaterialData(pc.materialIndex);
   const uint alphaMode = materialAlphaMode(material);
   const bool visualizeCascadeIndex =
-      (pc.frameData.shadowFlags & kShadowFrameFlagVisualizeCascadeIndex) != 0u;
+      shadowDebugFlag(kShadowFrameFlagVisualizeCascadeIndex);
 
   ShadedMaterial sm = evaluateMaterial(material, vtx);
 
