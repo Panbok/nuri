@@ -119,7 +119,7 @@ private:
   SceneEditorSelectionState &selectionState_;
   std::function<double()> currentTimeSeconds_;
   std::function<uint64_t()> nextSimulationFrameIndex_;
-  std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
+  std::pmr::memory_resource *memory_;
   std::pmr::vector<InstanceRecord> records_;
   PmrHashMap<NodeId, size_t> recordIndexByNode_;
   PmrHashMap<RenderableId, size_t> recordIndexByRenderable_;

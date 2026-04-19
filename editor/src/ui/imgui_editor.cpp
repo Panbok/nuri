@@ -1186,6 +1186,9 @@ void drawShadowSettings(
 
   int shadowMapResolution =
       static_cast<int>(shadowMapResolutionIndex(shadow.shadowMapSize));
+  shadowMapResolution =
+      std::clamp(shadowMapResolution, 0,
+                 static_cast<int>(kShadowMapResolutions.size()) - 1);
   if (ImGui::SliderInt("Shadow Map Size##ShadowPass", &shadowMapResolution, 0,
                        static_cast<int>(kShadowMapResolutions.size()) - 1,
                        kShadowMapResolutionLabels[shadowMapResolution])) {
@@ -1572,7 +1575,9 @@ void drawShadowsWindow(
     ImGui::TableSetupColumn("Culled");
     ImGui::TableSetupColumn("Bindless");
     ImGui::TableHeadersRow();
-    for (uint32_t i = 0u; i < shadowDebugFrameData->cascadeCount; ++i) {
+    const uint32_t cascadeTableCount =
+        std::min(shadowDebugFrameData->cascadeCount, kMaxShadowCascades);
+    for (uint32_t i = 0u; i < cascadeTableCount; ++i) {
       const ShadowCascadeDebugFrameData &rowCascade =
           shadowDebugFrameData->cascades[i];
       ImGui::TableNextRow();

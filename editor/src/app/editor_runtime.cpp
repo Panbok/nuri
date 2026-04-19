@@ -101,26 +101,44 @@ void logDebugRenderOverrideOnce(const char *envName, const char *effect,
   }
 }
 
+struct DebugRenderEnvOverrides {
+  bool disableOpaque = false;
+  bool disableTransmission = false;
+  bool disableTransparent = false;
+  bool disableSkybox = false;
+};
+
+[[nodiscard]] const DebugRenderEnvOverrides &debugRenderEnvOverrides() {
+  static const DebugRenderEnvOverrides overrides{
+      .disableOpaque = readEnvFlag("NURI_DEBUG_DISABLE_OPAQUE"),
+      .disableTransmission = readEnvFlag("NURI_DEBUG_DISABLE_TRANSMISSION"),
+      .disableTransparent = readEnvFlag("NURI_DEBUG_DISABLE_TRANSPARENT"),
+      .disableSkybox = readEnvFlag("NURI_DEBUG_DISABLE_SKYBOX"),
+  };
+  return overrides;
+}
+
 void applyDebugRenderEnvOverrides(RenderSettings &settings) {
-  if (readEnvFlag("NURI_DEBUG_DISABLE_OPAQUE")) {
+  const DebugRenderEnvOverrides &overrides = debugRenderEnvOverrides();
+  if (overrides.disableOpaque) {
     settings.opaque.enabled = false;
     static bool logged = false;
     logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_OPAQUE",
                                "opaque pass disabled", logged);
   }
-  if (readEnvFlag("NURI_DEBUG_DISABLE_TRANSMISSION")) {
+  if (overrides.disableTransmission) {
     settings.transmission.enabled = false;
     static bool logged = false;
     logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_TRANSMISSION",
                                "transmission pass disabled", logged);
   }
-  if (readEnvFlag("NURI_DEBUG_DISABLE_TRANSPARENT")) {
+  if (overrides.disableTransparent) {
     settings.transparent.enabled = false;
     static bool logged = false;
     logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_TRANSPARENT",
                                "transparent pass disabled", logged);
   }
-  if (readEnvFlag("NURI_DEBUG_DISABLE_SKYBOX")) {
+  if (overrides.disableSkybox) {
     settings.skybox.enabled = false;
     static bool logged = false;
     logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_SKYBOX",
@@ -137,16 +155,17 @@ void persistFrameRenderSettings(RenderSettings &persistent,
 
   persistent = frameSettings;
 
-  if (readEnvFlag("NURI_DEBUG_DISABLE_OPAQUE")) {
+  const DebugRenderEnvOverrides &overrides = debugRenderEnvOverrides();
+  if (overrides.disableOpaque) {
     persistent.opaque.enabled = opaqueEnabled;
   }
-  if (readEnvFlag("NURI_DEBUG_DISABLE_TRANSMISSION")) {
+  if (overrides.disableTransmission) {
     persistent.transmission.enabled = transmissionEnabled;
   }
-  if (readEnvFlag("NURI_DEBUG_DISABLE_TRANSPARENT")) {
+  if (overrides.disableTransparent) {
     persistent.transparent.enabled = transparentEnabled;
   }
-  if (readEnvFlag("NURI_DEBUG_DISABLE_SKYBOX")) {
+  if (overrides.disableSkybox) {
     persistent.skybox.enabled = skyboxEnabled;
   }
 }

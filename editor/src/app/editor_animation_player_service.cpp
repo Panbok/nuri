@@ -720,7 +720,7 @@ bool EditorAnimationPlayerService::setSelectionBlendWeight(float blendWeight) {
   if (record == nullptr) {
     return false;
   }
-  record->params.blendWeight = glm::clamp(blendWeight, 0.0f, 1.0f);
+  record->params.blendWeight = std::clamp(blendWeight, 0.0f, 1.0f);
   record->params.blendMode =
       record->params.secondary.clipIndex != kInvalidScenePrefabIndex
           ? AnimationPoseBlendMode::Lerp
@@ -924,7 +924,7 @@ float EditorAnimationPlayerService::computeSecondaryTime(
   if (record.params.blendSyncMode == AnimationPoseBlendSyncMode::Independent) {
     return clampToClipDuration(*record.prefab,
                                record.params.secondary.clipIndex,
-                               record.params.primary.timeSeconds);
+                               record.params.secondary.timeSeconds);
   }
 
   const uint32_t primaryClipIndex = record.params.primary.clipIndex;

@@ -190,7 +190,9 @@ private:
   // Non-owning observer; the render pipeline owns the EditorOverlayFeature.
   EditorOverlayFeature *editorRenderFeature_ = nullptr;
   CameraHandle mainCameraHandle_{};
+  // Persistent user-configured render settings exposed through accessors.
   RenderSettings renderSettings_{};
+  // Transient per-frame render settings after frame-local overrides.
   RenderSettings frameRenderSettings_{};
   RenderFrameContext frameContext_{};
   uint64_t frameIndex_ = 0;

@@ -167,6 +167,8 @@ struct AnimatedPrefabSceneFactoryDesc {
   PrefabSceneFactoryDesc prefab{};
   std::vector<std::string> preferredClipNames{};
   std::vector<std::string> secondaryPreferredClipNames{};
+  // Expected range: [0.0f, 1.0f]. Animated prefab scene creation clamps
+  // authored values before creating simulation params.
   float initialBlendWeight = 0.0f;
   AnimationPoseBlendSyncMode blendSyncMode =
       AnimationPoseBlendSyncMode::Independent;
