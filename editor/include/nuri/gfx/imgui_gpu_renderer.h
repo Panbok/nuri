@@ -26,12 +26,12 @@ public:
   ImGuiGpuRenderer &operator=(ImGuiGpuRenderer &&) = delete;
 
   Result<RenderGraphGraphicsPassDesc, std::string>
-  buildGraphicsPassDesc(Format swapchainFormat, uint64_t frameIndex);
+  buildGraphicsPassDesc(Format colorFormat, uint64_t frameIndex);
 
 private:
   explicit ImGuiGpuRenderer(GPUDevice &gpu);
 
-  Result<bool, std::string> ensurePipeline(Format swapchainFormat);
+  Result<bool, std::string> ensurePipeline(Format colorFormat);
   Result<bool, std::string> ensureFontTexture();
   Result<bool, std::string>
   ensureBuffers(uint64_t frameIndex, size_t vertexBytes, size_t indexBytes);

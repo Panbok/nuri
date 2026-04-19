@@ -121,6 +121,9 @@ bool EditorOverlayController::onInput(const InputEvent &event) {
 
 void EditorOverlayController::onUpdate(double deltaTime) {
   frameDeltaSeconds_ = deltaTime;
+  if (editor_) {
+    editor_->applyDeferredUiActions();
+  }
 }
 
 void EditorOverlayController::prepareOverlayFrameContext(
@@ -141,6 +144,10 @@ EditorOverlayController::buildOverlayPass(RenderFrameContext &frame,
   if (frame.settings) {
     editor_->setRenderSettings(*frame.settings);
   }
+  editor_->setShadowDebugResources(
+      frame.sharedResources.shadowDebugFrameData,
+      frame.sharedResources.shadowDebugPreviewTexture);
+  editor_->setShadowInspectResult(frame.shadowInspectResult);
   editor_->setFrameIndex(frame.frameIndex);
   editor_->setFrameMetrics(frame.metrics);
 

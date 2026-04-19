@@ -11,6 +11,7 @@
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/gpu/texture.h"
+#include "nuri/utils/env_utils.h"
 
 #include <ctime>
 
@@ -90,6 +91,64 @@ std::filesystem::path pickDefaultNfontPath(const RuntimeConfig &config) {
     return "00:00:00";
   }
   return std::string(buffer.data());
+}
+
+void logDebugRenderOverrideOnce(const char *envName, const char *effect,
+                                bool &logged) {
+  if (!logged) {
+    logged = true;
+    NURI_LOG_WARNING("EditorRuntime: %s active; %s", envName, effect);
+  }
+}
+
+void applyDebugRenderEnvOverrides(RenderSettings &settings) {
+  if (readEnvFlag("NURI_DEBUG_DISABLE_OPAQUE")) {
+    settings.opaque.enabled = false;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_OPAQUE",
+                               "opaque pass disabled", logged);
+  }
+  if (readEnvFlag("NURI_DEBUG_DISABLE_TRANSMISSION")) {
+    settings.transmission.enabled = false;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_TRANSMISSION",
+                               "transmission pass disabled", logged);
+  }
+  if (readEnvFlag("NURI_DEBUG_DISABLE_TRANSPARENT")) {
+    settings.transparent.enabled = false;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_TRANSPARENT",
+                               "transparent pass disabled", logged);
+  }
+  if (readEnvFlag("NURI_DEBUG_DISABLE_SKYBOX")) {
+    settings.skybox.enabled = false;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_SKYBOX",
+                               "skybox pass disabled", logged);
+  }
+}
+
+void persistFrameRenderSettings(RenderSettings &persistent,
+                                const RenderSettings &frameSettings) {
+  const bool opaqueEnabled = persistent.opaque.enabled;
+  const bool transmissionEnabled = persistent.transmission.enabled;
+  const bool transparentEnabled = persistent.transparent.enabled;
+  const bool skyboxEnabled = persistent.skybox.enabled;
+
+  persistent = frameSettings;
+
+  if (readEnvFlag("NURI_DEBUG_DISABLE_OPAQUE")) {
+    persistent.opaque.enabled = opaqueEnabled;
+  }
+  if (readEnvFlag("NURI_DEBUG_DISABLE_TRANSMISSION")) {
+    persistent.transmission.enabled = transmissionEnabled;
+  }
+  if (readEnvFlag("NURI_DEBUG_DISABLE_TRANSPARENT")) {
+    persistent.transparent.enabled = transparentEnabled;
+  }
+  if (readEnvFlag("NURI_DEBUG_DISABLE_SKYBOX")) {
+    persistent.skybox.enabled = skyboxEnabled;
+  }
 }
 
 void loadSharedEnvironment(EditorRuntime &runtime) {
@@ -229,6 +288,10 @@ void EditorRuntime::initialize() {
   animationGpuServices_ = std::make_unique<AnimationGpuServices>(
       app_.getGPU(), config_.roots.shaders, &pipelineMemory_);
   sceneRuntime_.attachAnimationGpuServices(animationGpuServices_.get());
+  animationPlayerService_ = std::make_unique<EditorAnimationPlayerService>(
+      scene_, sceneRuntime_, sceneEditorSelectionState_,
+      [this]() { return timeSeconds(); },
+      [this]() { return advanceSimulationFrameIndex(); }, &sceneMemory_);
   auto *animationProvider = app_.getRenderPipeline().addProvider(
       std::make_unique<AnimationSceneFrameProvider>(sceneRuntime_));
   NURI_ASSERT(animationProvider != nullptr,
@@ -264,6 +327,9 @@ void EditorRuntime::update(double deltaTime) {
       .absoluteTimeSeconds = timeSeconds(),
       .frameIndex = advanceSimulationFrameIndex(),
   });
+  if (animationPlayerService_ != nullptr) {
+    animationPlayerService_->onUpdate(deltaTime);
+  }
   cameraSystem_.update(deltaTime, app_.getInput());
   if (bakerySystem_) {
     bakerySystem_->tick();
@@ -302,6 +368,9 @@ void EditorRuntime::shutdown() {
   sceneSelectionLabels_.clear();
   sceneSelectionOptions_.clear();
   sceneSelectionVersion_ = std::numeric_limits<uint64_t>::max();
+  if (animationPlayerService_ != nullptr) {
+    animationPlayerService_->clear();
+  }
   sceneRuntime_.reset();
   sceneRuntime_.bindScene(nullptr);
   scene_.graph().clear();
@@ -365,6 +434,9 @@ std::optional<std::string> EditorRuntime::takeSceneSelectionRequest() {
 }
 
 void EditorRuntime::resetSceneState() {
+  if (animationPlayerService_ != nullptr) {
+    animationPlayerService_->clear();
+  }
   scene_.graph().clear();
   if (editorOverlay_ != nullptr) {
     editorOverlay_->resetSceneUiState();
@@ -452,6 +524,11 @@ RenderableId EditorRuntime::instantiateImportedPrefabScene(
 
   if (outRootNode != nullptr) {
     *outRootNode = rootNodeResult.value();
+  }
+  if (animationPlayerService_ != nullptr &&
+      !resourcesIn.prefab.animations.empty()) {
+    animationPlayerService_->registerPrefabInstance(
+        sceneName, resourcesIn.prefab, instantiated, rootNodeResult.value());
   }
   sceneHasAuthoredLights_ = !instantiated.lights.empty();
   for (RenderableId renderableId : instantiated.renderables) {
@@ -610,7 +687,10 @@ FramedSceneCameraState EditorRuntime::configureDragonSampleCamera(
 
 void EditorRuntime::destroyAnimatedPrefabSceneInstance(
     AnimatedPrefabSceneState &instance) {
-  if (isValid(instance.simulation)) {
+  if (animationPlayerService_ != nullptr && isValid(instance.rootNode)) {
+    animationPlayerService_->unregisterPrefabInstance(instance.rootNode);
+    instance.simulation = kInvalidSimulationHandle;
+  } else if (isValid(instance.simulation)) {
     (void)sceneRuntime_.destroyAnimationPoseSimulation(instance.simulation);
     instance.simulation = kInvalidSimulationHandle;
   }
@@ -622,14 +702,21 @@ void EditorRuntime::destroyAnimatedPrefabSceneInstance(
 
 void EditorRuntime::startAnimatedPrefabSceneSimulation(
     std::string_view sceneName, const ImportedPrefabSceneResources &resourcesIn,
-    AnimatedPrefabSceneState &instance, uint32_t clipIndex,
+    AnimatedPrefabSceneState &instance,
+    const AnimationPoseSimulationParams &params,
     std::string_view simulationDebugName) {
   const std::string sceneNameString(sceneName);
   NURI_ASSERT(!resourcesIn.prefab.animations.empty(),
               "%s prefab has no animations", sceneNameString.c_str());
-  NURI_ASSERT(clipIndex < resourcesIn.prefab.animations.size(),
-              "%s clip index %u is out of range", sceneNameString.c_str(),
-              clipIndex);
+  NURI_ASSERT(params.primary.clipIndex < resourcesIn.prefab.animations.size(),
+              "%s primary clip index %u is out of range",
+              sceneNameString.c_str(), params.primary.clipIndex);
+  if (params.blendMode == AnimationPoseBlendMode::Lerp) {
+    NURI_ASSERT(params.secondary.clipIndex <
+                    resourcesIn.prefab.animations.size(),
+                "%s secondary clip index %u is out of range",
+                sceneNameString.c_str(), params.secondary.clipIndex);
+  }
 
   const auto commitResult = scene_.commit();
   NURI_ASSERT(!commitResult.hasError(), "Scene commit failed for %s: %s",
@@ -640,24 +727,28 @@ void EditorRuntime::startAnimatedPrefabSceneSimulation(
       .frameIndex = simulationFrameIndex_++,
   });
 
-  auto simulationResult = sceneRuntime_.createAnimationPoseSimulation(
+  if (animationPlayerService_ != nullptr) {
+    const bool started = animationPlayerService_->startPrefabInstancePlayback(
+        instance.rootNode, params, simulationDebugName);
+    NURI_ASSERT(started,
+                "Failed to create %s animation simulation(s) for prefab "
+                "instance",
+                sceneNameString.c_str());
+    instance.simulation = kInvalidSimulationHandle;
+    return;
+  }
+  auto fallbackResult = sceneRuntime_.createAnimationPoseSimulation(
       AnimationPoseSimulationCreateInfo{
           .prefab = &resourcesIn.prefab,
           .instantiationMap = &instance.instantiationMap,
           .rootNode = instance.rootNode,
           .debugName = simulationDebugName,
-          .params =
-              AnimationPoseSimulationParams{
-                  .clipIndex = clipIndex,
-                  .timeSeconds = 0.0f,
-                  .playbackMode = AnimationPosePlaybackMode::Loop,
-                  .playing = true,
-              },
+          .params = params,
       });
-  NURI_ASSERT(!simulationResult.hasError(),
+  NURI_ASSERT(!fallbackResult.hasError(),
               "Failed to create %s animation simulation: %s",
-              sceneNameString.c_str(), simulationResult.error().c_str());
-  instance.simulation = simulationResult.value();
+              sceneNameString.c_str(), fallbackResult.error().c_str());
+  instance.simulation = fallbackResult.value();
 }
 
 uint32_t EditorRuntime::selectPreferredClipIndex(
@@ -772,6 +863,7 @@ void EditorRuntime::initializeEditorOverlay() {
       .bakery = bakerySystem_.get(),
       .renderGraphTelemetry = &app_.getRenderer().renderGraphTelemetry(),
       .selectionState = &sceneEditorSelectionState_,
+      .animationPlayer = animationPlayerService_.get(),
   };
   editorOverlay_ = EditorOverlayController::create(
       app_.getWindow(), app_.getGPU(), {}, editorServices);
@@ -808,11 +900,10 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
                                       double timeSecondsIn) {
   frameContext_.scene = &scene_;
   frameContext_.resources = &resources();
-  frameContext_.camera.view = camera.viewMatrix();
-  frameContext_.camera.proj = camera.projectionMatrix(app_.getAspectRatio());
-  frameContext_.camera.cameraPos = glm::vec4(camera.position(), 1.0f);
-  frameContext_.camera.aspectRatio = app_.getAspectRatio();
-  frameContext_.settings = &renderSettings_;
+  frameContext_.camera = makeCameraFrameState(camera, app_.getAspectRatio());
+  frameRenderSettings_ = renderSettings_;
+  applyDebugRenderEnvOverrides(frameRenderSettings_);
+  frameContext_.settings = &frameRenderSettings_;
   frameContext_.metrics = {};
   frameContext_.sharedDepthTexture = {};
   frameContext_.timeSeconds = timeSecondsIn;
@@ -824,6 +915,7 @@ void EditorRuntime::submitPipelineFrame() {
       app_.getRenderer().render(app_.getRenderPipeline(), frameContext_);
   NURI_ASSERT(!renderResult.hasError(), "Render failed: %s",
               renderResult.error().c_str());
+  persistFrameRenderSettings(renderSettings_, frameRenderSettings_);
 }
 
 void EditorRuntime::queueTextSamples() {

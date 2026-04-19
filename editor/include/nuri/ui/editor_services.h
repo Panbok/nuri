@@ -16,6 +16,7 @@ class TextSystem;
 class ResourceManager;
 class RenderGraphTelemetryService;
 class RenderPipeline;
+class EditorAnimationPlayerService;
 namespace bakery {
 class BakerySystem;
 }
@@ -58,6 +59,7 @@ struct EditorServices {
   bakery::BakerySystem *bakery = nullptr;
   RenderGraphTelemetryService *renderGraphTelemetry = nullptr;
   SceneEditorSelectionState *selectionState = nullptr;
+  EditorAnimationPlayerService *animationPlayer = nullptr;
 
   [[nodiscard]] bool hasAllDependencies() const {
     // Gizmo controller dependencies.

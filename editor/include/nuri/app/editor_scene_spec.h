@@ -9,6 +9,7 @@
 #include "nuri/resources/mesh_importer.h"
 #include "nuri/resources/scene_importer.h"
 #include "nuri/scene/scene_prefab.h"
+#include "nuri/sim/animation_pose_simulation.h"
 #include "nuri/sim/simulation_handles.h"
 
 #include <filesystem>
@@ -146,6 +147,9 @@ struct PrefabSceneFactoryDesc {
   glm::mat4 baseModel{1.0f};
   glm::vec3 lodThresholds{8.0f, 16.0f, 32.0f};
   bool requirePrefabInstantiation = false;
+  std::function<Result<void, std::string>(EditorRuntime &,
+                                          ImportedPrefabSceneResources &)>
+      prepareAdditionalAssets{};
   std::function<void(EditorRuntime &)> configureRender{};
   std::function<std::optional<BoundingBox>(
       EditorRuntime &, const ImportedPrefabSceneResources &)>
@@ -153,11 +157,19 @@ struct PrefabSceneFactoryDesc {
   std::function<void(EditorRuntime &, const ImportedPrefabSceneResources &,
                      const BoundingBox &)>
       configureCamera{};
+  std::function<Result<void, std::string>(EditorRuntime &,
+                                          const ImportedPrefabSceneResources &,
+                                          const BoundingBox &)>
+      populateScene{};
 };
 
 struct AnimatedPrefabSceneFactoryDesc {
   PrefabSceneFactoryDesc prefab{};
   std::vector<std::string> preferredClipNames{};
+  std::vector<std::string> secondaryPreferredClipNames{};
+  float initialBlendWeight = 0.0f;
+  AnimationPoseBlendSyncMode blendSyncMode =
+      AnimationPoseBlendSyncMode::Independent;
   std::string simulationDebugName{};
 };
 

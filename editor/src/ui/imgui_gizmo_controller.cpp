@@ -197,6 +197,10 @@ struct ImGuizmoController::Impl {
     frame = &frameIn;
     if (pendingPickRequest.has_value()) {
       frame->opaquePickRequest = pendingPickRequest;
+      frame->shadowInspectRequest =
+          ShadowInspectRequest{.x = pendingPickRequest->x,
+                               .y = pendingPickRequest->y,
+                               .requestId = pendingPickRequest->requestId};
       pendingPickRequest.reset();
     }
     if (selectionState->kind == SceneSelectionKind::Light &&

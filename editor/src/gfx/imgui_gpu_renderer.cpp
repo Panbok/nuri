@@ -170,9 +170,8 @@ Result<bool, std::string> ImGuiGpuRenderer::ensureFontTexture() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-ImGuiGpuRenderer::ensurePipeline(Format swapchainFormat) {
-  if (nuri::isValid(pipeline_) && pipelineFormat_ == swapchainFormat) {
+Result<bool, std::string> ImGuiGpuRenderer::ensurePipeline(Format colorFormat) {
+  if (nuri::isValid(pipeline_) && pipelineFormat_ == colorFormat) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -235,7 +234,7 @@ ImGuiGpuRenderer::ensurePipeline(Format swapchainFormat) {
           },
       .vertexShader = vs_,
       .fragmentShader = fs_,
-      .colorFormats = {swapchainFormat},
+      .colorFormats = {colorFormat},
       .depthFormat = Format::Count,
       .cullMode = CullMode::None,
       .polygonMode = PolygonMode::Fill,
@@ -252,7 +251,7 @@ ImGuiGpuRenderer::ensurePipeline(Format swapchainFormat) {
     return Result<bool, std::string>::makeError(pipeResult.error());
   }
   pipeline_ = pipeResult.value();
-  pipelineFormat_ = swapchainFormat;
+  pipelineFormat_ = colorFormat;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -309,7 +308,7 @@ Result<bool, std::string> ImGuiGpuRenderer::ensureBuffers(uint64_t frameIndex,
 }
 
 Result<RenderGraphGraphicsPassDesc, std::string>
-ImGuiGpuRenderer::buildGraphicsPassDesc(Format swapchainFormat,
+ImGuiGpuRenderer::buildGraphicsPassDesc(Format colorFormat,
                                         uint64_t frameIndex) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   ImDrawData *dd = ImGui::GetDrawData();
@@ -328,7 +327,7 @@ ImGuiGpuRenderer::buildGraphicsPassDesc(Format swapchainFormat,
 
   NURI_PROFILER_ZONE("ImGuiGpuRenderer::EnsurePipelineAndFont",
                      NURI_PROFILER_COLOR_CREATE);
-  auto pipelineOk = ensurePipeline(swapchainFormat);
+  auto pipelineOk = ensurePipeline(colorFormat);
   if (pipelineOk.hasError()) {
     return Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
         pipelineOk.error());

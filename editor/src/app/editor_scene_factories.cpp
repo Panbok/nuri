@@ -74,6 +74,13 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
         if (prepareResult.hasError()) {
           return prepareResult;
         }
+        if (desc.prepareAdditionalAssets) {
+          auto additionalAssetsResult =
+              desc.prepareAdditionalAssets(ctx.runtime, *assets);
+          if (additionalAssetsResult.hasError()) {
+            return additionalAssetsResult;
+          }
+        }
         queueScenePortableBakeIfNeeded(ctx.runtime, *assets);
         return Result<void, std::string>::makeResult();
       },
@@ -102,16 +109,17 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
               fallback->first, fallback->second, desc.baseModel,
               "Failed to add scene fallback renderable");
         }
+        std::optional<BoundingBox> sceneBounds;
         const auto fallback = firstResolvedPrefabRenderable(*assets);
         if (fallback.has_value()) {
-          const BoundingBox bounds =
+          sceneBounds =
               chooseBounds(ctx.runtime, *assets, desc, fallback->first);
           FramedSceneCameraState cameraState{};
           if (desc.configureCamera) {
-            desc.configureCamera(ctx.runtime, *assets, bounds);
+            desc.configureCamera(ctx.runtime, *assets, *sceneBounds);
           } else {
             cameraState = ctx.runtime.frameSceneCamera(
-                bounds, desc.baseModel, 2.5f, 2.0f,
+                *sceneBounds, desc.baseModel, 2.5f, 2.0f,
                 glm::vec4(0.42f, 0.20f, 1.0f, 0.2f), glm::vec2(0.06f, 0.0f));
             ctx.runtime.logSingleRenderableSceneStats(
                 desc.info.label,
@@ -125,6 +133,21 @@ EditorSceneSpec makePrefabScene(PrefabSceneFactoryDesc desc) {
               "%s: camera framing skipped - no valid renderable in "
               "prefab",
               desc.info.label.c_str());
+        }
+        if (!sceneBounds.has_value() && desc.populateScene) {
+          sceneBounds =
+              ctx.runtime.computeImportedPrefabBounds(*assets, desc.baseModel);
+        }
+        if (desc.populateScene) {
+          if (!sceneBounds.has_value()) {
+            return Result<void, std::string>::makeError(
+                "Scene bounds are unavailable for prefab scene population");
+          }
+          auto populateResult =
+              desc.populateScene(ctx.runtime, *assets, *sceneBounds);
+          if (populateResult.hasError()) {
+            return populateResult;
+          }
         }
 
         ctx.runtime.finalizeSceneLighting(assets->fallbackLights,
@@ -174,10 +197,33 @@ EditorSceneSpec makeAnimatedPrefabScene(AnimatedPrefabSceneFactoryDesc desc) {
         for (const std::string &name : desc.preferredClipNames) {
           preferredNames.push_back(name);
         }
-        const uint32_t clipIndex = ctx.runtime.selectPreferredClipIndex(
+        const uint32_t primaryClipIndex = ctx.runtime.selectPreferredClipIndex(
             assets->prefab, preferredNames);
+        const bool enableBlend = desc.initialBlendWeight > 0.0f &&
+                                 !desc.secondaryPreferredClipNames.empty();
+        AnimationPoseSimulationParams params{};
+        params.primary.clipIndex = primaryClipIndex;
+        params.primary.timeSeconds = 0.0f;
+        params.primary.playbackMode = AnimationPosePlaybackMode::Loop;
+        params.primary.playing = true;
+        if (enableBlend) {
+          std::vector<std::string_view> secondaryPreferredNames;
+          secondaryPreferredNames.reserve(
+              desc.secondaryPreferredClipNames.size());
+          for (const std::string &name : desc.secondaryPreferredClipNames) {
+            secondaryPreferredNames.push_back(name);
+          }
+          params.secondary.clipIndex = ctx.runtime.selectPreferredClipIndex(
+              assets->prefab, secondaryPreferredNames);
+          params.secondary.timeSeconds = 0.0f;
+          params.secondary.playbackMode = AnimationPosePlaybackMode::Loop;
+          params.secondary.playing = true;
+          params.blendWeight = glm::clamp(desc.initialBlendWeight, 0.0f, 1.0f);
+          params.blendMode = AnimationPoseBlendMode::Lerp;
+          params.blendSyncMode = desc.blendSyncMode;
+        }
         ctx.runtime.startAnimatedPrefabSceneSimulation(
-            desc.prefab.info.label, *assets, *animation, clipIndex,
+            desc.prefab.info.label, *assets, *animation, params,
             desc.simulationDebugName);
 
         if (const auto fallback = firstResolvedPrefabRenderable(*assets);

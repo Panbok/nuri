@@ -1,9 +1,12 @@
 #pragma once
 
 #include "nuri/core/log.h"
+#include "nuri/math/light.h"
 #include "nuri/scene/scene_graph.h"
 
 #include <ImGui.h>
+#include <glm/ext/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #include <array>
@@ -22,6 +25,7 @@ struct LightEditorDraft {
   std::array<char, 32> rangeBuffer{};
   std::array<char, 32> innerConeDegreesBuffer{};
   std::array<char, 32> outerConeDegreesBuffer{};
+  std::array<char, 32> angularRadiusDegreesBuffer{};
 };
 
 [[nodiscard]] inline const char *lightTypeName(LightType type) {
@@ -109,6 +113,48 @@ inline void writeFloatBuffer(std::span<char> buffer, float value,
   return changed;
 }
 
+[[nodiscard]] inline glm::vec3 directionFromLightAngles(float thetaDegrees,
+                                                        float phiDegrees) {
+  const float thetaRadians = glm::radians(std::remainder(
+      std::isfinite(thetaDegrees) ? thetaDegrees : 0.0f, 360.0f));
+  const float phiRadians = glm::radians(
+      std::clamp(std::isfinite(phiDegrees) ? phiDegrees : 0.0f, -89.9f, 89.9f));
+  const float cosPhi = std::cos(phiRadians);
+  return glm::normalize(glm::vec3(std::sin(thetaRadians) * cosPhi,
+                                  -std::sin(phiRadians),
+                                  -std::cos(thetaRadians) * cosPhi));
+}
+
+[[nodiscard]] inline glm::vec2 lightAnglesFromDirection(glm::vec3 direction) {
+  const float length = glm::length(direction);
+  if (!std::isfinite(length) || length <= 1.0e-6f) {
+    return glm::vec2(0.0f);
+  }
+  direction /= length;
+  const float phi =
+      glm::degrees(std::asin(std::clamp(-direction.y, -1.0f, 1.0f)));
+  const float horizontal =
+      std::sqrt(std::max(1.0f - direction.y * direction.y, 0.0f));
+  if (horizontal <= 1.0e-5f) {
+    return glm::vec2(0.0f, phi);
+  }
+  const float theta = glm::degrees(std::atan2(direction.x, -direction.z));
+  return glm::vec2(std::remainder(theta, 360.0f), phi);
+}
+
+[[nodiscard]] inline glm::quat rotationFromLightDirection(glm::vec3 direction) {
+  const float length = glm::length(direction);
+  if (!std::isfinite(length) || length <= 1.0e-6f) {
+    return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+  }
+  direction /= length;
+  const glm::vec3 up = std::abs(direction.y) < 0.99f
+                           ? glm::vec3(0.0f, 1.0f, 0.0f)
+                           : glm::vec3(0.0f, 0.0f, 1.0f);
+  const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), direction, up);
+  return glm::normalize(glm::quat_cast(glm::inverse(view)));
+}
+
 inline void invalidateLightEditorDraft(LightEditorDraft &draft) {
   draft.id = kInvalidLightId;
   draft.light = LightDesc{};
@@ -117,12 +163,27 @@ inline void invalidateLightEditorDraft(LightEditorDraft &draft) {
   draft.rangeBuffer.fill('\0');
   draft.innerConeDegreesBuffer.fill('\0');
   draft.outerConeDegreesBuffer.fill('\0');
+  draft.angularRadiusDegreesBuffer.fill('\0');
 }
 
 inline void syncLightEditorDraft(LightEditorDraft &draft,
                                  LightId selectedLightId,
                                  const LightDesc &selectedLight) {
-  if (draft.id == selectedLightId) {
+  const bool matchesSelectedLight =
+      draft.id == selectedLightId && draft.light.type == selectedLight.type &&
+      draft.light.name == selectedLight.name &&
+      nuri::vec3ExactEqual(draft.light.position, selectedLight.position) &&
+      nuri::quatExactEqual(draft.light.rotation, selectedLight.rotation) &&
+      nuri::vec3ExactEqual(draft.light.color, selectedLight.color) &&
+      draft.light.intensity == selectedLight.intensity &&
+      draft.light.range == selectedLight.range &&
+      draft.light.innerConeAngleRadians ==
+          selectedLight.innerConeAngleRadians &&
+      draft.light.outerConeAngleRadians ==
+          selectedLight.outerConeAngleRadians &&
+      draft.light.angularRadiusDegrees == selectedLight.angularRadiusDegrees &&
+      draft.light.enabled == selectedLight.enabled;
+  if (matchesSelectedLight) {
     return;
   }
 
@@ -136,6 +197,8 @@ inline void syncLightEditorDraft(LightEditorDraft &draft,
                    glm::degrees(selectedLight.innerConeAngleRadians), "%.2f");
   writeFloatBuffer(draft.outerConeDegreesBuffer,
                    glm::degrees(selectedLight.outerConeAngleRadians), "%.2f");
+  writeFloatBuffer(draft.angularRadiusDegreesBuffer,
+                   selectedLight.angularRadiusDegrees, "%.3f");
 }
 
 inline void drawLightEditor(SceneGraph &graph, LightId selectedLightId,
@@ -170,6 +233,25 @@ inline void drawLightEditor(SceneGraph &graph, LightId selectedLightId,
       drawFloatTextStepper("Range", draft.rangeBuffer, edited.range, 0.1f, 0.0f,
                            std::numeric_limits<float>::max(), "%.3f")) {
     changed = true;
+  }
+  if (edited.type == LightType::Directional) {
+    if (drawFloatTextStepper(
+            "Angular Radius (deg)", draft.angularRadiusDegreesBuffer,
+            edited.angularRadiusDegrees, 0.01f, 0.0f, 10.0f, "%.3f")) {
+      changed = true;
+    }
+    ImGui::SeparatorText("Direction");
+    const glm::vec3 direction = lightDirectionFromRotation(edited.rotation);
+    glm::vec2 angles = lightAnglesFromDirection(direction);
+    const bool thetaChanged =
+        ImGui::SliderFloat("Theta", &angles.x, -180.0f, 180.0f, "%.2f");
+    const bool phiChanged =
+        ImGui::SliderFloat("Phi", &angles.y, -85.0f, 85.0f, "%.2f");
+    if (thetaChanged || phiChanged) {
+      edited.rotation = rotationFromLightDirection(
+          directionFromLightAngles(angles.x, angles.y));
+      changed = true;
+    }
   }
   if (edited.type == LightType::Spot) {
     ImGui::SeparatorText("Spot Cone");

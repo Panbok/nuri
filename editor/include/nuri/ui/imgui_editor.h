@@ -29,6 +29,10 @@ public:
   void setFrameIndex(uint64_t frameIndex);
   void setFrameMetrics(const RenderFrameMetrics &metrics);
   void setRenderSettings(const RenderSettings &settings);
+  void setShadowDebugResources(const std::optional<ShadowDebugFrameData> &debug,
+                               TextureHandle previewTexture);
+  void setShadowInspectResult(
+      const std::optional<ShadowInspectResult> &inspectResult);
   void syncCameraControllerWidgetStateFromCamera(const Camera &camera);
   void setSceneSelectionUi(std::span<const EditorSceneSelectionOption> scenes,
                            std::string_view selectedSceneId, uint64_t version,
@@ -42,6 +46,7 @@ public:
   [[nodiscard]] RenderSettings renderSettings() const;
   bool wantsCaptureKeyboard() const;
   bool wantsCaptureMouse() const;
+  void applyDeferredUiActions();
   void beginFrame() override;
   Result<RenderGraphGraphicsPassDesc, std::string> endFrame() override;
 

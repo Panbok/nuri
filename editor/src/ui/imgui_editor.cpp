@@ -2,6 +2,7 @@
 
 #include "nuri/ui/imgui_editor.h"
 
+#include "nuri/app/editor_animation_player_service.h"
 #include "nuri/bakery/bakery_system.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
@@ -22,6 +23,8 @@
 #include "nuri/ui/linear_graph.h"
 #include "nuri/utils/fsp_counter.h"
 #include "scene_light_editor.h"
+
+#include <limits>
 
 #include <ImGuizmo.h>
 
@@ -51,7 +54,9 @@ constexpr const char *kLightsWindowName = "Lights";
 constexpr const char *kRenderPassesWindowName = "Render Passes";
 constexpr const char *kHierarchyWindowName = "Hierarchy";
 constexpr const char *kInspectorWindowName = "Inspector";
+constexpr const char *kAnimationPlayerWindowName = "Animation Player";
 constexpr const char *kTextureFilteringWindowName = "Texture Filtering";
+constexpr const char *kShadowsWindowName = "Shadows";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
 constexpr const char *kCameraHelpWindowName = "Camera Help";
 constexpr const char *kGizmoControlsWindowName = "Gizmo Controls";
@@ -62,9 +67,14 @@ constexpr std::array<const char *, 4> kTextureFilterAnisotropyLabels = {
     "2x", "4x", "8x", "16x"};
 constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
+constexpr std::array<uint32_t, 4> kShadowMapResolutions = {1024u, 2048u, 4096u,
+                                                           8192u};
+constexpr std::array<const char *, 4> kShadowMapResolutionLabels = {"1K", "2K",
+                                                                    "4K", "8K"};
 
 enum class PassInspectorKind : uint8_t {
   Skybox,
+  Shadow,
   Opaque,
   Transmission,
   Transparent,
@@ -78,13 +88,14 @@ PassInspectorKind classifyPassInspector(std::string_view featureName,
   if (featureName == "SkyboxFeature" || passName == "SkyboxPass") {
     return PassInspectorKind::Skybox;
   }
+  if (featureName == "ShadowFeature" || passName == "ShadowDepthPass") {
+    return PassInspectorKind::Shadow;
+  }
   if (featureName == "OpaqueFeature" || passName == "OpaqueMainPass" ||
       passName == "OpaquePickPass") {
     return PassInspectorKind::Opaque;
   }
   if (featureName == "TransmissionFeature" ||
-      passName == "TransmissionDownsamplePass" ||
-      passName == "TransmissionCopyPass" ||
       passName == "TransmissionMainPass") {
     return PassInspectorKind::Transmission;
   }
@@ -92,7 +103,10 @@ PassInspectorKind classifyPassInspector(std::string_view featureName,
       passName == "TransparentMainPass" || passName == "TransparentPickPass") {
     return PassInspectorKind::Transparent;
   }
-  if (featureName == "CompositeFeature" || passName == "CompositePass") {
+  if (featureName == "FrameCompositionFeature" ||
+      featureName == "FramePresentFeature" ||
+      passName == "SceneColorDownsamplePass" ||
+      passName == "SceneResolvePass" || passName == "PresentToneMapPass") {
     return PassInspectorKind::Composite;
   }
   if (featureName == "DebugFeature" || passName == "DebugGridPass" ||
@@ -128,6 +142,8 @@ const char *formatDisplayName(Format format) {
     return "ETC2_RGB8_UNORM";
   case Format::ETC2_RGB8_SRGB:
     return "ETC2_RGB8_SRGB";
+  case Format::D16_UNORM:
+    return "D16_UNORM";
   case Format::D32_FLOAT:
     return "D32_FLOAT";
   case Format::Count:
@@ -144,6 +160,110 @@ const char *textureFilterModeDisplayName(TextureFilterMode mode) {
     return "Trilinear";
   case TextureFilterMode::Anisotropic:
     return "Anisotropic";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] size_t shadowMapResolutionIndex(uint32_t shadowMapSize) {
+  size_t bestIndex = 0u;
+  uint32_t bestDistance = shadowMapSize > kShadowMapResolutions.front()
+                              ? shadowMapSize - kShadowMapResolutions.front()
+                              : kShadowMapResolutions.front() - shadowMapSize;
+  for (size_t i = 1; i < kShadowMapResolutions.size(); ++i) {
+    const uint32_t candidate = kShadowMapResolutions[i];
+    const uint32_t distance = shadowMapSize > candidate
+                                  ? shadowMapSize - candidate
+                                  : candidate - shadowMapSize;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
+}
+
+[[nodiscard]] uint32_t snapShadowMapResolution(uint32_t shadowMapSize) {
+  return kShadowMapResolutions[shadowMapResolutionIndex(shadowMapSize)];
+}
+
+[[nodiscard]] std::optional<float> shadowDebugCascadeTexelWorldSize(
+    const RenderSettings::ShadowSettings &shadow,
+    const std::optional<ShadowDebugFrameData> *shadowDebugFrameData) {
+  if (shadowDebugFrameData == nullptr || !shadowDebugFrameData->has_value() ||
+      (*shadowDebugFrameData)->cascadeCount == 0u) {
+    return std::nullopt;
+  }
+
+  const uint32_t cascadeIndex =
+      std::min(shadow.debug.debugCascadeIndex,
+               (*shadowDebugFrameData)->cascadeCount - 1u);
+  const float texelWorldSize =
+      (*shadowDebugFrameData)->cascades[cascadeIndex].texelWorldSize;
+  if (!std::isfinite(texelWorldSize) || texelWorldSize <= 0.0f) {
+    return std::nullopt;
+  }
+  return texelWorldSize;
+}
+
+[[nodiscard]] float normalBiasWorldUnits(float normalBiasTexels,
+                                         float texelWorldSize) {
+  return normalBiasTexels * texelWorldSize;
+}
+
+const char *toneMapperDisplayName(ToneMapper mapper) {
+  switch (mapper) {
+  case ToneMapper::ACES2_SDR:
+    return "ACES 2 SDR";
+  case ToneMapper::AgX:
+    return "AgX";
+  }
+  return "Unknown";
+}
+
+const char *shadowFilterModeDisplayName(ShadowFilterMode mode) {
+  switch (sanitizeShadowFilterMode(mode)) {
+  case ShadowFilterMode::Hard:
+    return "Hard";
+  case ShadowFilterMode::PCF3x3:
+    return "Grid PCF";
+  case ShadowFilterMode::PoissonPCF:
+    return "Poisson PCF";
+  case ShadowFilterMode::PCSS:
+    return "PCSS";
+  }
+  return "Unknown";
+}
+
+const char *shadowCascadeSplitModeDisplayName(ShadowCascadeSplitMode mode) {
+  switch (sanitizeShadowCascadeSplitMode(mode)) {
+  case ShadowCascadeSplitMode::Uniform:
+    return "Uniform";
+  case ShadowCascadeSplitMode::Logarithmic:
+    return "Logarithmic";
+  case ShadowCascadeSplitMode::Practical:
+    return "Practical";
+  }
+  return "Unknown";
+}
+
+const char *shadowSdsmModeDisplayName(ShadowSdsmMode mode) {
+  switch (sanitizeShadowSdsmMode(mode)) {
+  case ShadowSdsmMode::Disabled:
+    return "Disabled";
+  case ShadowSdsmMode::PreviousFrameMinMax:
+    return "Previous-frame min/max";
+  case ShadowSdsmMode::Histogram:
+    return "Histogram";
+  }
+  return "Unknown";
+}
+
+const char *shadowPreviewModeDisplayName(ShadowPreviewMode mode) {
+  switch (sanitizeShadowPreviewMode(mode)) {
+  case ShadowPreviewMode::SelectedCascade:
+    return "Selected Cascade";
+  case ShadowPreviewMode::TiledAllCascades:
+    return "Tiled All Cascades";
   }
   return "Unknown";
 }
@@ -868,6 +988,7 @@ void drawInspectorHeader(std::string_view label) {
 bool passKindUsesFeatureToggle(PassInspectorKind kind) {
   switch (kind) {
   case PassInspectorKind::Skybox:
+  case PassInspectorKind::Shadow:
   case PassInspectorKind::Opaque:
   case PassInspectorKind::Transmission:
   case PassInspectorKind::Transparent:
@@ -885,6 +1006,8 @@ bool *renderSettingToggleForPassKind(RenderSettings &renderSettings,
   switch (kind) {
   case PassInspectorKind::Skybox:
     return &renderSettings.skybox.enabled;
+  case PassInspectorKind::Shadow:
+    return &renderSettings.shadow.enabled;
   case PassInspectorKind::Opaque:
     return &renderSettings.opaque.enabled;
   case PassInspectorKind::Transmission:
@@ -987,6 +1110,10 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
                   &opaque.enableDepthPrepass);
   ImGui::Checkbox("Enable Depth Pyramid##OpaquePass",
                   &opaque.enableDepthPyramid);
+  ImGui::Text("Effective Depth Pre-pass: %s",
+              opaque.enableDepthPrepass ? "enabled" : "disabled");
+  ImGui::Text("Effective Depth Pyramid: %s",
+              opaque.enableDepthPyramid ? "enabled" : "disabled");
 
   ImGui::Separator();
   ImGui::TextUnformatted("Mesh LOD");
@@ -1044,6 +1171,229 @@ void drawDebugSettings(RenderSettings::DebugSettings &debug) {
   ImGui::Checkbox("Light Icons##DebugPasses", &debug.lightIcons);
 }
 
+void drawShadowSettings(
+    RenderSettings::ShadowSettings &shadow,
+    const std::optional<ShadowDebugFrameData> *shadowDebugFrameData = nullptr) {
+  sanitizeShadowSettings(shadow);
+  shadow.shadowMapSize = snapShadowMapResolution(shadow.shadowMapSize);
+  ImGui::Checkbox("Enable Shadows##ShadowPass", &shadow.enabled);
+
+  int cascadeCount = static_cast<int>(shadow.cascadeCount);
+  if (ImGui::SliderInt("Cascade Count##ShadowPass", &cascadeCount, 1,
+                       static_cast<int>(kMaxShadowCascades))) {
+    shadow.cascadeCount = static_cast<uint32_t>(std::max(cascadeCount, 1));
+  }
+
+  int shadowMapResolution =
+      static_cast<int>(shadowMapResolutionIndex(shadow.shadowMapSize));
+  if (ImGui::SliderInt("Shadow Map Size##ShadowPass", &shadowMapResolution, 0,
+                       static_cast<int>(kShadowMapResolutions.size()) - 1,
+                       kShadowMapResolutionLabels[shadowMapResolution])) {
+    shadowMapResolution =
+        std::clamp(shadowMapResolution, 0,
+                   static_cast<int>(kShadowMapResolutions.size()) - 1);
+    shadow.shadowMapSize =
+        kShadowMapResolutions[static_cast<size_t>(shadowMapResolution)];
+  }
+
+  ImGui::SliderFloat("Max Distance##ShadowPass", &shadow.maxDistance, 1.0f,
+                     1000.0f, "%.1f");
+  constexpr const char *kSplitModeLabels[] = {
+      "Uniform",
+      "Logarithmic",
+      "Practical",
+  };
+  int splitMode =
+      static_cast<int>(sanitizeShadowCascadeSplitMode(shadow.splitMode));
+  if (ImGui::Combo("Split Mode##ShadowPass", &splitMode, kSplitModeLabels,
+                   IM_ARRAYSIZE(kSplitModeLabels))) {
+    shadow.splitMode = static_cast<ShadowCascadeSplitMode>(splitMode);
+  }
+  ImGui::SliderFloat("Split Lambda##ShadowPass", &shadow.splitLambda, 0.0f,
+                     1.0f, "%.2f");
+  if (sanitizeShadowCascadeSplitMode(shadow.splitMode) !=
+      ShadowCascadeSplitMode::Practical) {
+    ImGui::TextUnformatted(
+        "Split lambda is only used by the practical split mode.");
+  }
+  ImGui::Checkbox("Stabilize Texels##ShadowPass", &shadow.stabilizeCascades);
+  ImGui::SliderFloat("Cascade Blend Fraction##ShadowPass",
+                     &shadow.cascadeBlendFraction, 0.0f, 1.0f, "%.2f");
+  if (shadow.cascadeCount == 1u) {
+    ImGui::TextUnformatted("Cascade blending is only visible when more than "
+                           "one cascade is active.");
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Bias");
+  ImGui::DragFloat("Constant Bias##ShadowPass", &shadow.constantBias, 0.0001f,
+                   -0.1f, 0.1f, "%.5f");
+  ImGui::DragFloat("Slope Bias##ShadowPass", &shadow.slopeBias, 0.05f, 0.0f,
+                   16.0f, "%.2f");
+  ImGui::DragFloat("Normal Bias (texels)##ShadowPass", &shadow.normalBias,
+                   0.005f, 0.0f, 8.0f, "%.3f");
+  const std::optional<float> debugCascadeTexelWorldSize =
+      shadowDebugCascadeTexelWorldSize(shadow, shadowDebugFrameData);
+  if (debugCascadeTexelWorldSize.has_value()) {
+    float debugCascadeWorldBias =
+        normalBiasWorldUnits(shadow.normalBias, *debugCascadeTexelWorldSize);
+    const float dragSpeed =
+        std::max(*debugCascadeTexelWorldSize * 0.25f, 1.0e-5f);
+    if (ImGui::DragFloat("Normal Bias (world, debug cascade)##ShadowPass",
+                         &debugCascadeWorldBias, dragSpeed, 0.0f, 1000.0f,
+                         "%.6f")) {
+      shadow.normalBias =
+          std::max(debugCascadeWorldBias / *debugCascadeTexelWorldSize, 0.0f);
+    }
+    ImGui::Text("Debug Cascade Bias Scale: %.6f world units per texel",
+                *debugCascadeTexelWorldSize);
+  } else {
+    ImGui::TextUnformatted(
+        "Normal bias is stored in texels. World-unit conversion appears once "
+        "shadow debug data is available.");
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Filtering");
+  constexpr const char *kFilterLabels[] = {
+      "Hard",
+      "Grid PCF",
+      "Poisson PCF",
+      "PCSS",
+  };
+  int filterMode =
+      static_cast<int>(sanitizeShadowFilterMode(shadow.filterMode));
+  if (ImGui::Combo("Filter Mode##ShadowPass", &filterMode, kFilterLabels,
+                   IM_ARRAYSIZE(kFilterLabels))) {
+    shadow.filterMode = static_cast<ShadowFilterMode>(filterMode);
+  }
+  int pcfSamples = static_cast<int>(shadow.pcfSampleCount);
+  if (ImGui::SliderInt("PCF Samples##ShadowPass", &pcfSamples, 1, 64)) {
+    shadow.pcfSampleCount = static_cast<uint32_t>(std::max(pcfSamples, 1));
+  }
+  int blockerSamples = static_cast<int>(shadow.pcssBlockerSampleCount);
+  if (ImGui::SliderInt("PCSS Blocker Samples##ShadowPass", &blockerSamples, 1,
+                       128)) {
+    shadow.pcssBlockerSampleCount =
+        static_cast<uint32_t>(std::max(blockerSamples, 1));
+  }
+  int filterSamples = static_cast<int>(shadow.pcssFilterSampleCount);
+  if (ImGui::SliderInt("PCSS Filter Samples##ShadowPass", &filterSamples, 1,
+                       128)) {
+    shadow.pcssFilterSampleCount =
+        static_cast<uint32_t>(std::max(filterSamples, 1));
+  }
+  ImGui::DragFloat("PCSS Light Radius Scale##ShadowPass",
+                   &shadow.pcssLightRadiusScale, 0.05f, 0.0f, 32.0f, "%.2f");
+  ImGui::DragFloat("PCSS Search Clamp##ShadowPass",
+                   &shadow.pcssSearchRadiusClampTexels, 1.0f, 0.0f, 256.0f,
+                   "%.1f texels");
+  ImGui::DragFloat("PCSS Filter Clamp##ShadowPass",
+                   &shadow.pcssFilterRadiusClampTexels, 1.0f, 0.0f, 256.0f,
+                   "%.1f texels");
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("SDSM");
+  constexpr const char *kSdsmLabels[] = {
+      "Disabled",
+      "Previous-frame min/max",
+      "Histogram",
+  };
+  int sdsmMode = static_cast<int>(sanitizeShadowSdsmMode(shadow.sdsmMode));
+  if (ImGui::Combo("SDSM Mode##ShadowPass", &sdsmMode, kSdsmLabels,
+                   IM_ARRAYSIZE(kSdsmLabels))) {
+    shadow.sdsmMode = static_cast<ShadowSdsmMode>(sdsmMode);
+  }
+  ImGui::SliderFloat("SDSM Temporal Blend##ShadowPass",
+                     &shadow.sdsmTemporalBlend, 0.0f, 1.0f, "%.2f");
+  ImGui::TextUnformatted("SDSM controls are reserved for Phase 7/8.");
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Debug");
+  ImGui::Checkbox("Cascade Frusta##ShadowPass",
+                  &shadow.debug.showCascadeFrusta);
+  ImGui::Checkbox("Light View Bounds##ShadowPass",
+                  &shadow.debug.showLightViewBounds);
+  ImGui::Checkbox("Texel Grid Snap##ShadowPass",
+                  &shadow.debug.showTexelGridSnap);
+  ImGui::Checkbox("Shadow Map Viewport##ShadowPass",
+                  &shadow.debug.showShadowMapViewport);
+  int debugCascade = static_cast<int>(shadow.debug.debugCascadeIndex);
+  if (ImGui::SliderInt("Debug Cascade##ShadowPass", &debugCascade, 0,
+                       static_cast<int>(kMaxShadowCascades) - 1)) {
+    shadow.debug.debugCascadeIndex =
+        static_cast<uint32_t>(std::max(debugCascade, 0));
+  }
+  ImGui::Checkbox("Freeze Cascades##ShadowPass", &shadow.debug.freezeCascades);
+  ImGui::Checkbox("Freeze Light View##ShadowPass",
+                  &shadow.debug.freezeLightView);
+  ImGui::Checkbox("Cull Casters Per Cascade (debug)##ShadowPass",
+                  &shadow.debug.enableCascadeCasterCulling);
+  ImGui::Checkbox("Visualize Cascade Index##ShadowPass",
+                  &shadow.debug.visualizeCascadeIndex);
+  ImGui::Checkbox("Visualize Shadow Factor##ShadowPass",
+                  &shadow.debug.visualizeShadowFactor);
+  ImGui::Checkbox("Visualize PCSS Blockers (future)##ShadowPass",
+                  &shadow.debug.visualizePCSSBlockers);
+  ImGui::Checkbox("Visualize SDSM Histogram (future)##ShadowPass",
+                  &shadow.debug.visualizeSDSMHistogram);
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Depth Preview");
+  constexpr const char *kPreviewModeLabels[] = {
+      "Selected Cascade",
+      "Tiled All Cascades",
+  };
+  int previewMode =
+      static_cast<int>(sanitizeShadowPreviewMode(shadow.debug.previewMode));
+  if (ImGui::Combo("Preview Mode##ShadowPass", &previewMode, kPreviewModeLabels,
+                   IM_ARRAYSIZE(kPreviewModeLabels))) {
+    shadow.debug.previewMode = static_cast<ShadowPreviewMode>(previewMode);
+  }
+  float previewRange[2] = {
+      shadow.debug.previewDepthMin,
+      shadow.debug.previewDepthMax,
+  };
+  if (ImGui::SliderFloat2("Preview Range##ShadowPass", previewRange, 0.0f, 1.0f,
+                          "%.4f")) {
+    shadow.debug.previewDepthMin = previewRange[0];
+    shadow.debug.previewDepthMax = previewRange[1];
+  }
+  if (ImGui::Button("Full 0-1##ShadowPreviewPreset")) {
+    shadow.debug.previewDepthMin = 0.0f;
+    shadow.debug.previewDepthMax = 1.0f;
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Near 0.90-1##ShadowPreviewPreset")) {
+    shadow.debug.previewDepthMin = 0.90f;
+    shadow.debug.previewDepthMax = 1.0f;
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Tight 0.98-1##ShadowPreviewPreset")) {
+    shadow.debug.previewDepthMin = 0.98f;
+    shadow.debug.previewDepthMax = 1.0f;
+  }
+  ImGui::Checkbox("Invert Preview##ShadowPass",
+                  &shadow.debug.previewDepthInvert);
+  ImGui::SameLine();
+  ImGui::Checkbox("Log Preview##ShadowPass", &shadow.debug.previewDepthLog);
+
+  sanitizeShadowSettings(shadow);
+  ImGui::Separator();
+  ImGui::Text("Split Mode: %s",
+              shadowCascadeSplitModeDisplayName(shadow.splitMode));
+  ImGui::Text("Filter: %s", shadowFilterModeDisplayName(shadow.filterMode));
+  ImGui::Text("SDSM: %s", shadowSdsmModeDisplayName(shadow.sdsmMode));
+  if (shadow.filterMode == ShadowFilterMode::PoissonPCF) {
+    ImGui::TextUnformatted(
+        "Poisson PCF currently uses the sample-driven Grid PCF kernel.");
+  } else if (shadow.filterMode == ShadowFilterMode::PCSS) {
+    ImGui::TextUnformatted(
+        "PCSS is not implemented yet; the selected mode currently runs as "
+        "hard shadow.");
+  }
+}
+
 void drawTransparentSettings(RenderSettings::TransparentSettings &transparent) {
   ImGui::Text("Transparent blending: %s",
               transparent.enabled ? "enabled" : "disabled");
@@ -1055,9 +1405,44 @@ void drawTransmissionSettings(
               transmission.enabled ? "enabled" : "disabled");
 }
 
-void drawCompositeSettings() {
-  ImGui::TextUnformatted("Composite runs only when an offscreen frame color");
-  ImGui::TextUnformatted("target is produced and needs presentation.");
+void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap) {
+  sanitizeToneMapSettings(toneMap);
+  constexpr const char *kToneMapperLabels[] = {"ACES 2 SDR", "AgX"};
+  int toneMapperIndex = static_cast<int>(toneMap.operator_);
+  toneMapperIndex =
+      std::clamp(toneMapperIndex, 0,
+                 static_cast<int>(IM_ARRAYSIZE(kToneMapperLabels)) - 1);
+  if (ImGui::Combo("Tone Mapper##CompositePass", &toneMapperIndex,
+                   kToneMapperLabels, IM_ARRAYSIZE(kToneMapperLabels))) {
+    toneMap.operator_ = static_cast<ToneMapper>(toneMapperIndex);
+  }
+  ImGui::SliderFloat("Exposure (EV)##CompositePass", &toneMap.exposureEv,
+                     -10.0f, 10.0f, "%.2f");
+  ImGui::SliderFloat("ACES Offset (EV)##CompositePass",
+                     &toneMap.acesExposureOffsetEv, -4.0f, 4.0f, "%.2f");
+  ImGui::SliderFloat("AgX Offset (EV)##CompositePass",
+                     &toneMap.agxExposureOffsetEv, -4.0f, 4.0f, "%.2f");
+  ImGui::Text("Effective ACES EV: %.2f",
+              toneMap.exposureEv + toneMap.acesExposureOffsetEv);
+  ImGui::Text("Effective AgX EV: %.2f",
+              toneMap.exposureEv + toneMap.agxExposureOffsetEv);
+  ImGui::Checkbox("Gray Card Debug##CompositePass", &toneMap.grayCardDebug);
+  ImGui::Checkbox("Side-by-Side Compare##CompositePass",
+                  &toneMap.sideBySideCompare);
+  if (toneMap.sideBySideCompare) {
+    ImGui::SliderFloat("Compare Split##CompositePass", &toneMap.compareSplit,
+                       kMinToneMapCompareSplit, kMaxToneMapCompareSplit,
+                       "%.2f");
+    const ToneMapper compareMapper = toneMap.operator_ == ToneMapper::AgX
+                                         ? ToneMapper::ACES2_SDR
+                                         : ToneMapper::AgX;
+    ImGui::Text("Left: %s", toneMapperDisplayName(toneMap.operator_));
+    ImGui::Text("Right: %s", toneMapperDisplayName(compareMapper));
+  }
+  ImGui::Separator();
+  ImGui::TextUnformatted(
+      "Frame composition is always active and presents the HDR frame");
+  ImGui::TextUnformatted("through downsample, resolve, and tone-map passes.");
 }
 
 void drawTextureFilteringWindow(bool &open, RenderSettings &renderSettings,
@@ -1115,6 +1500,181 @@ void drawTextureFilteringWindow(bool &open, RenderSettings &renderSettings,
         "Backend fallback: anisotropy unavailable, using trilinear.");
   }
 
+  ImGui::End();
+}
+
+void drawShadowsWindow(
+    bool &open, RenderSettings &renderSettings, GPUDevice &gpu,
+    const std::optional<ShadowDebugFrameData> &shadowDebugFrameData,
+    const std::optional<ShadowInspectResult> &shadowInspectResult,
+    TextureHandle previewTexture,
+    std::vector<TextureHandle> &dependencyTextures,
+    std::vector<RenderGraphAccessMode> &dependencyTextureAccessModes) {
+  if (!ImGui::Begin(kShadowsWindowName, &open)) {
+    ImGui::End();
+    return;
+  }
+
+  drawShadowSettings(renderSettings.shadow, &shadowDebugFrameData);
+  ImGui::Separator();
+  dependencyTextures.clear();
+  dependencyTextureAccessModes.clear();
+
+  if (!renderSettings.shadow.enabled) {
+    ImGui::TextUnformatted("Shadows are disabled.");
+    ImGui::End();
+    return;
+  }
+
+  if (!shadowDebugFrameData.has_value() ||
+      shadowDebugFrameData->cascadeCount == 0u) {
+    ImGui::TextUnformatted("Shadow debug data is unavailable for this frame.");
+    ImGui::End();
+    return;
+  }
+
+  const uint32_t cascadeIndex =
+      std::min(renderSettings.shadow.debug.debugCascadeIndex,
+               shadowDebugFrameData->cascadeCount - 1u);
+  const ShadowCascadeDebugFrameData &cascade =
+      shadowDebugFrameData->cascades[cascadeIndex];
+  ImGui::Text("Cascade Count: %u", shadowDebugFrameData->cascadeCount);
+  ImGui::Text("Effective Debug Cascade: %u", cascadeIndex);
+  if (renderSettings.shadow.debug.debugCascadeIndex != cascadeIndex) {
+    ImGui::Text("Requested Debug Cascade %u is unavailable this frame.",
+                renderSettings.shadow.debug.debugCascadeIndex);
+  }
+  if (isValid(shadowDebugFrameData->selectedShadowLightId)) {
+    ImGui::Text("Selected Light: %u",
+                shadowDebugFrameData->selectedShadowLightId.value);
+  } else {
+    ImGui::TextUnformatted("Selected Light: none");
+  }
+  ImGui::Text("Split Range: %.3f .. %.3f", cascade.splitNear, cascade.splitFar);
+  ImGui::Text("Texel World Size: %.5f", cascade.texelWorldSize);
+  ImGui::Text("Normal Bias: %.3f texels / %.6f world units",
+              renderSettings.shadow.normalBias,
+              normalBiasWorldUnits(renderSettings.shadow.normalBias,
+                                   cascade.texelWorldSize));
+  ImGui::Text("Draw Count: %u", cascade.drawCount);
+  ImGui::Text("Culled Count: %u", cascade.culledCount);
+  ImGui::Text("Depth Texture Bindless: %u", cascade.textureBindlessId);
+  ImGui::Separator();
+  ImGui::TextUnformatted("Cascade Table");
+  if (ImGui::BeginTable("ShadowCascadeTable", 8,
+                        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+    ImGui::TableSetupColumn("Index");
+    ImGui::TableSetupColumn("Near");
+    ImGui::TableSetupColumn("Far");
+    ImGui::TableSetupColumn("Texel");
+    ImGui::TableSetupColumn("Bias World");
+    ImGui::TableSetupColumn("Draws");
+    ImGui::TableSetupColumn("Culled");
+    ImGui::TableSetupColumn("Bindless");
+    ImGui::TableHeadersRow();
+    for (uint32_t i = 0u; i < shadowDebugFrameData->cascadeCount; ++i) {
+      const ShadowCascadeDebugFrameData &rowCascade =
+          shadowDebugFrameData->cascades[i];
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::Text("%u", i);
+      ImGui::TableSetColumnIndex(1);
+      ImGui::Text("%.3f", rowCascade.splitNear);
+      ImGui::TableSetColumnIndex(2);
+      ImGui::Text("%.3f", rowCascade.splitFar);
+      ImGui::TableSetColumnIndex(3);
+      ImGui::Text("%.5f", rowCascade.texelWorldSize);
+      ImGui::TableSetColumnIndex(4);
+      ImGui::Text("%.6f", normalBiasWorldUnits(renderSettings.shadow.normalBias,
+                                               rowCascade.texelWorldSize));
+      ImGui::TableSetColumnIndex(5);
+      ImGui::Text("%u", rowCascade.drawCount);
+      ImGui::TableSetColumnIndex(6);
+      ImGui::Text("%u", rowCascade.culledCount);
+      ImGui::TableSetColumnIndex(7);
+      ImGui::Text("%u", rowCascade.textureBindlessId);
+    }
+    ImGui::EndTable();
+  }
+  const glm::vec3 unsnappedCenter = glm::vec3(cascade.unsnappedCenter);
+  const glm::vec3 snappedCenter = glm::vec3(cascade.snappedCenter);
+  const glm::vec3 snapDelta = snappedCenter - unsnappedCenter;
+  ImGui::Text("Unsnapped Center: %.3f %.3f %.3f", unsnappedCenter.x,
+              unsnappedCenter.y, unsnappedCenter.z);
+  ImGui::Text("Snapped Center: %.3f %.3f %.3f", snappedCenter.x,
+              snappedCenter.y, snappedCenter.z);
+  ImGui::Text("Snap Delta: %.5f %.5f %.5f", snapDelta.x, snapDelta.y,
+              snapDelta.z);
+  ImGui::Text("Freeze Cascades: %s", renderSettings.shadow.debug.freezeCascades
+                                         ? "active"
+                                         : "inactive");
+  ImGui::Text("Freeze Light View: %s",
+              renderSettings.shadow.debug.freezeLightView ? "active"
+                                                          : "inactive");
+  if (renderSettings.shadow.filterMode == ShadowFilterMode::PoissonPCF) {
+    ImGui::TextUnformatted(
+        "Effective runtime filter: Grid PCF kernel for Poisson PCF.");
+  } else if (renderSettings.shadow.filterMode == ShadowFilterMode::PCSS) {
+    ImGui::TextUnformatted(
+        "Effective runtime filter: hard shadow (PCSS is not implemented in "
+        "this slice).");
+  }
+  ImGui::TextUnformatted("Receiver Debug");
+  if (!shadowInspectResult.has_value()) {
+    ImGui::TextUnformatted(
+        "Click the viewport to inspect the last opaque pixel.");
+  } else if (!shadowInspectResult->valid) {
+    ImGui::TextUnformatted(
+        "Last inspected pixel did not produce a valid shadow sample.");
+  } else {
+    const float depthDelta = shadowInspectResult->receiverCompareDepth -
+                             shadowInspectResult->sampledDepth;
+    ImGui::Text("Active Cascade: %u", shadowInspectResult->cascadeIndex);
+    ImGui::Text("Cascade Blend Factor: %.3f",
+                shadowInspectResult->cascadeBlendFactor);
+    ImGui::Text("Receiver Depth: %.6f", shadowInspectResult->receiverDepth);
+    ImGui::Text("Receiver Compare Depth: %.6f",
+                shadowInspectResult->receiverCompareDepth);
+    ImGui::Text("Sampled Depth: %.6f", shadowInspectResult->sampledDepth);
+    ImGui::Text("Compare Delta: %.6f", depthDelta);
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Preview");
+  if (!nuri::isValid(previewTexture)) {
+    ImGui::TextUnformatted(
+        "Enable 'Shadow Map Viewport' in Shadow debug settings to allocate "
+        "the preview texture.");
+    ImGui::End();
+    return;
+  }
+
+  const uint32_t previewBindlessId =
+      gpu.getTextureBindlessIndex(previewTexture);
+  if (previewBindlessId == kInvalidTextureBindlessIndex) {
+    ImGui::TextUnformatted("Shadow preview texture is unavailable.");
+    ImGui::End();
+    return;
+  }
+
+  dependencyTextures.push_back(previewTexture);
+  dependencyTextureAccessModes.push_back(RenderGraphAccessMode::Read);
+  ImGui::Text("Preview Format: %s",
+              formatDisplayName(gpu.getTextureFormat(previewTexture)));
+  const TextureDimensions previewDimensions =
+      gpu.getTextureDimensions(previewTexture);
+  ImGui::Text("Preview Resolution: %u x %u", previewDimensions.width,
+              previewDimensions.height);
+  ImGui::Text("Preview Mode: %s", shadowPreviewModeDisplayName(
+                                      renderSettings.shadow.debug.previewMode));
+  ImGui::Text("Preview Range: %.4f .. %.4f",
+              renderSettings.shadow.debug.previewDepthMin,
+              renderSettings.shadow.debug.previewDepthMax);
+  ImGui::Text("Preview Transform: %s%s",
+              renderSettings.shadow.debug.previewDepthInvert ? "invert"
+                                                             : "linear",
+              renderSettings.shadow.debug.previewDepthLog ? " + log" : "");
+  ImGui::Image(toImTextureId(previewBindlessId), ImVec2(256.0f, 256.0f));
   ImGui::End();
 }
 
@@ -1232,6 +1792,9 @@ void drawPassInspector(RenderSettings &renderSettings,
         case PassInspectorKind::Skybox:
           drawSkyboxSettings(renderSettings.skybox);
           break;
+        case PassInspectorKind::Shadow:
+          drawShadowSettings(renderSettings.shadow);
+          break;
         case PassInspectorKind::Opaque:
           drawOpaqueSettings(renderSettings.opaque);
           break;
@@ -1242,7 +1805,7 @@ void drawPassInspector(RenderSettings &renderSettings,
           drawTransparentSettings(renderSettings.transparent);
           break;
         case PassInspectorKind::Composite:
-          drawCompositeSettings();
+          drawCompositeSettings(renderSettings.toneMap);
           break;
         case PassInspectorKind::Debug:
           drawDebugSettings(renderSettings.debug);
@@ -2463,6 +3026,7 @@ struct DockLayoutState {
     ImGui::DockBuilderDockWindow(kLogWindowName, logDockId);
     ImGui::DockBuilderDockWindow(kHierarchyWindowName, hierarchyDockId);
     ImGui::DockBuilderDockWindow(kInspectorWindowName, inspectorDockId);
+    ImGui::DockBuilderDockWindow(kAnimationPlayerWindowName, inspectorDockId);
     ImGui::DockBuilderFinish(dockspaceId);
     built = true;
   }
@@ -2478,6 +3042,23 @@ struct MaybeDockLayoutState {};
 } // namespace
 
 struct ImGuiEditor::Impl {
+  enum class DeferredAnimationActionType : uint8_t {
+    Start,
+    Pause,
+    Restart,
+    Seek,
+    SetPrimaryClip,
+    SetSecondaryClip,
+    SetBlendWeight,
+  };
+
+  struct DeferredAnimationAction {
+    DeferredAnimationActionType type = DeferredAnimationActionType::Start;
+    float floatValue = 0.0f;
+    uint32_t clipIndex = 0u;
+    bool enabled = false;
+  };
+
   Impl(Window &windowIn, GPUDevice &gpuIn, const EditorServices &services)
       : window(windowIn), gpu(gpuIn), scene(services.scene),
         resources(services.resources), renderPipeline(services.renderPipeline),
@@ -2486,7 +3067,8 @@ struct ImGuiEditor::Impl {
                            : &localSelectionState),
         textSystem(services.textSystem), cameraSystem(services.cameraSystem),
         bakery(services.bakery),
-        renderGraphTelemetry(services.renderGraphTelemetry) {}
+        renderGraphTelemetry(services.renderGraphTelemetry),
+        animationPlayer(services.animationPlayer) {}
 
   ~Impl() { resetSceneUiState(); }
 
@@ -2548,9 +3130,45 @@ struct ImGuiEditor::Impl {
     hierarchyOpenBatchKeys.clear();
     hierarchySelectedRowIndex = -1;
     hierarchySceneRootOpen = true;
+    deferredAnimationActions.clear();
+    shadowInspectResult.reset();
     if (selectionState != nullptr) {
       selectionState->clear();
     }
+  }
+
+  void applyDeferredUiActions() {
+    if (animationPlayer == nullptr || deferredAnimationActions.empty()) {
+      return;
+    }
+    for (const DeferredAnimationAction &action : deferredAnimationActions) {
+      switch (action.type) {
+      case DeferredAnimationActionType::Start:
+        (void)animationPlayer->startSelectionPlayback();
+        break;
+      case DeferredAnimationActionType::Pause:
+        (void)animationPlayer->pauseSelectionPlayback();
+        break;
+      case DeferredAnimationActionType::Restart:
+        (void)animationPlayer->restartSelectionPlayback();
+        break;
+      case DeferredAnimationActionType::Seek:
+        (void)animationPlayer->seekSelectionPlayback(action.floatValue);
+        break;
+      case DeferredAnimationActionType::SetPrimaryClip:
+        (void)animationPlayer->setSelectionPrimaryClip(action.clipIndex);
+        break;
+      case DeferredAnimationActionType::SetSecondaryClip:
+        (void)animationPlayer->setSelectionSecondaryClip(
+            action.enabled ? std::optional<uint32_t>(action.clipIndex)
+                           : std::nullopt);
+        break;
+      case DeferredAnimationActionType::SetBlendWeight:
+        (void)animationPlayer->setSelectionBlendWeight(action.floatValue);
+        break;
+      }
+    }
+    deferredAnimationActions.clear();
   }
 
   void validateSelectionState() {
@@ -2599,6 +3217,11 @@ struct ImGuiEditor::Impl {
       if (isValid(selectionState->node)) {
         showHierarchyWindow = true;
         showInspectorWindow = true;
+        if (animationPlayer != nullptr &&
+            animationPlayer->hasAnimatedSelection()) {
+          showAnimationPlayerWindow = true;
+          focusAnimationPlayerWindow = true;
+        }
         pendingRevealSelection = !suppressRevealForNextSelectionChange;
       }
       suppressRevealForNextSelectionChange = false;
@@ -3417,6 +4040,150 @@ struct ImGuiEditor::Impl {
     ImGui::End();
   }
 
+  void drawAnimationPlayerWindow() {
+    if (animationPlayer == nullptr) {
+      showAnimationPlayerWindow = false;
+      return;
+    }
+    if (focusAnimationPlayerWindow) {
+      ImGui::SetNextWindowFocus();
+      focusAnimationPlayerWindow = false;
+    }
+    if (!ImGui::Begin(kAnimationPlayerWindowName, &showAnimationPlayerWindow)) {
+      ImGui::End();
+      return;
+    }
+
+    const EditorAnimationPlayerView view = animationPlayer->selectedView();
+    switch (view.availability) {
+    case EditorAnimationPlayerAvailability::NoSelection:
+      ImGui::TextUnformatted("No scene selection.");
+      ImGui::End();
+      return;
+    case EditorAnimationPlayerAvailability::NotAnimated:
+      if (!view.selectionLabel.empty()) {
+        ImGui::Text("Selected: %s", view.selectionLabel.c_str());
+        ImGui::Separator();
+      }
+      ImGui::TextUnformatted("Selected object has no imported animations.");
+      ImGui::End();
+      return;
+    case EditorAnimationPlayerAvailability::Animated:
+      break;
+    }
+
+    ImGui::Text("Object: %s", view.instanceLabel.c_str());
+    if (!view.selectionLabel.empty()) {
+      ImGui::Text("Selected: %s", view.selectionLabel.c_str());
+    }
+    ImGui::Separator();
+
+    if (ImGui::Button("Restart")) {
+      deferredAnimationActions.push_back(DeferredAnimationAction{
+          .type = DeferredAnimationActionType::Restart});
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Start")) {
+      deferredAnimationActions.push_back(
+          DeferredAnimationAction{.type = DeferredAnimationActionType::Start});
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Pause")) {
+      deferredAnimationActions.push_back(
+          DeferredAnimationAction{.type = DeferredAnimationActionType::Pause});
+    }
+    ImGui::SameLine();
+    ImGui::TextUnformatted(view.running ? "Running"
+                                        : (view.paused ? "Paused" : "Stopped"));
+
+    float blendWeight = view.blendWeight;
+    if (!view.hasSecondaryClipSelection()) {
+      ImGui::BeginDisabled();
+    }
+    if (ImGui::SliderFloat("Blend", &blendWeight, 0.0f, 1.0f, "%.2f",
+                           ImGuiSliderFlags_AlwaysClamp)) {
+      deferredAnimationActions.push_back(DeferredAnimationAction{
+          .type = DeferredAnimationActionType::SetBlendWeight,
+          .floatValue = blendWeight,
+      });
+    }
+    if (!view.hasSecondaryClipSelection()) {
+      ImGui::EndDisabled();
+    }
+
+    const float duration = std::max(view.timelineDurationSeconds, 0.0f);
+    float timeline = glm::clamp(view.timelineTimeSeconds, 0.0f, duration);
+    if (duration <= 0.0f) {
+      ImGui::BeginDisabled();
+    }
+    if (ImGui::SliderFloat("Timeline", &timeline, 0.0f, duration, "%.3fs",
+                           ImGuiSliderFlags_AlwaysClamp)) {
+      deferredAnimationActions.push_back(DeferredAnimationAction{
+          .type = DeferredAnimationActionType::Seek,
+          .floatValue = timeline,
+      });
+    }
+    if (duration <= 0.0f) {
+      ImGui::EndDisabled();
+    }
+    ImGui::Text("%.3fs / %.3fs", timeline, duration);
+
+    if (ImGui::BeginTable("AnimationPlayerClips", 4,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerH |
+                              ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("Primary", ImGuiTableColumnFlags_WidthFixed,
+                              64.0f);
+      ImGui::TableSetupColumn("Blend", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+      ImGui::TableSetupColumn("Clip", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Duration", ImGuiTableColumnFlags_WidthFixed,
+                              90.0f);
+      ImGui::TableHeadersRow();
+
+      for (const EditorAnimationClipInfo &clip : view.clips) {
+        const bool isPrimary = clip.clipIndex == view.primaryClipIndex;
+        const bool isSecondary = clip.clipIndex == view.secondaryClipIndex;
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::PushID(static_cast<int>(clip.clipIndex));
+        if (ImGui::RadioButton("##Primary", isPrimary) && !isPrimary) {
+          deferredAnimationActions.push_back(DeferredAnimationAction{
+              .type = DeferredAnimationActionType::SetPrimaryClip,
+              .clipIndex = clip.clipIndex,
+          });
+        }
+
+        ImGui::TableNextColumn();
+        bool enableBlend = isSecondary;
+        if (isPrimary) {
+          ImGui::BeginDisabled();
+        }
+        if (ImGui::Checkbox("##Blend", &enableBlend)) {
+          deferredAnimationActions.push_back(DeferredAnimationAction{
+              .type = DeferredAnimationActionType::SetSecondaryClip,
+              .clipIndex = clip.clipIndex,
+              .enabled = enableBlend,
+          });
+        }
+        if (isPrimary) {
+          ImGui::EndDisabled();
+        }
+
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(clip.name.data(),
+                               clip.name.data() + clip.name.size());
+
+        ImGui::TableNextColumn();
+        ImGui::Text("%.3fs", clip.durationSeconds);
+        ImGui::PopID();
+      }
+      ImGui::EndTable();
+    }
+
+    ImGui::End();
+  }
+
   void drawMainMenuBar() {
     if (!ImGui::BeginMainMenuBar()) {
       return;
@@ -3427,8 +4194,13 @@ struct ImGuiEditor::Impl {
       ImGui::MenuItem("Font Compiler", nullptr, &showFontCompilerWindow);
       ImGui::MenuItem("Hierarchy", nullptr, &showHierarchyWindow);
       ImGui::MenuItem("Inspector", nullptr, &showInspectorWindow);
+      if (animationPlayer != nullptr) {
+        ImGui::MenuItem("Animation Player", nullptr,
+                        &showAnimationPlayerWindow);
+      }
       ImGui::MenuItem("Render Passes", nullptr, &showRenderPassesWindow);
       ImGui::MenuItem("Lights", nullptr, &showLightsWindow);
+      ImGui::MenuItem("Shadows", nullptr, &showShadowsWindow);
       if (ImGui::BeginMenu("Texture Filtering")) {
         auto &settings = renderSettings.textureFiltering;
         sanitizeTextureFilteringSettings(settings);
@@ -3494,6 +4266,8 @@ struct ImGuiEditor::Impl {
     ImGui::NewFrame();
     inspectorWindowVisible = false;
     inspectorWindowMinX = 0.0f;
+    uiDependencyTextures.clear();
+    uiDependencyTextureAccessModes.clear();
     drawMainMenuBar();
     drawDockspaceRoot();
   }
@@ -3559,6 +4333,18 @@ struct ImGuiEditor::Impl {
       drawInspectorWindow();
       NURI_PROFILER_ZONE_END();
     }
+    if (showAnimationPlayerWindow && animationPlayer != nullptr) {
+#ifdef IMGUI_HAS_DOCK
+      if (dockLayoutState.inspectorDockId != 0) {
+        ImGui::SetNextWindowDockID(dockLayoutState.inspectorDockId,
+                                   ImGuiCond_Once);
+      }
+#endif
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawAnimationPlayerWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawAnimationPlayerWindow();
+      NURI_PROFILER_ZONE_END();
+    }
 
     NURI_PROFILER_ZONE("ImGuiEditor::DrawLogWindow",
                        NURI_PROFILER_COLOR_CMD_DRAW);
@@ -3603,6 +4389,15 @@ struct ImGuiEditor::Impl {
                          NURI_PROFILER_COLOR_CMD_DRAW);
       drawTextureFilteringWindow(showTextureFilteringWindow, renderSettings,
                                  gpu);
+      NURI_PROFILER_ZONE_END();
+    }
+    if (showShadowsWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawShadowsWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawShadowsWindow(showShadowsWindow, renderSettings, gpu,
+                        shadowDebugFrameData, shadowInspectResult,
+                        shadowPreviewTexture, uiDependencyTextures,
+                        uiDependencyTextureAccessModes);
       NURI_PROFILER_ZONE_END();
     }
     if (showCameraControllerWindow) {
@@ -3679,7 +4474,7 @@ struct ImGuiEditor::Impl {
     ImGui::Render();
     NURI_PROFILER_ZONE_END();
 
-    const auto passResult = [&]() {
+    auto passResult = [&]() {
       Result<RenderGraphGraphicsPassDesc, std::string> result =
           Result<RenderGraphGraphicsPassDesc, std::string>::makeError(
               std::string{});
@@ -3690,6 +4485,15 @@ struct ImGuiEditor::Impl {
       NURI_PROFILER_ZONE_END();
       return result;
     }();
+    if (passResult.hasValue()) {
+      RenderGraphGraphicsPassDesc &pass = passResult.value();
+      pass.dependencyTextures = std::span<const TextureHandle>(
+          uiDependencyTextures.data(), uiDependencyTextures.size());
+      pass.dependencyTextureAccessModes =
+          std::span<const RenderGraphAccessMode>(
+              uiDependencyTextureAccessModes.data(),
+              uiDependencyTextureAccessModes.size());
+    }
     return passResult;
   }
 
@@ -3730,17 +4534,23 @@ struct ImGuiEditor::Impl {
   bool showFontCompilerWindow = false;
   bool showHierarchyWindow = true;
   bool showInspectorWindow = true;
+  bool showAnimationPlayerWindow = false;
   bool showRenderPassesWindow = false;
   bool showLightsWindow = false;
   bool showTextureFilteringWindow = false;
+  bool showShadowsWindow = false;
   bool showRenderGraphTelemetryWindow = false;
   bool showGizmoControlsWindow = false;
   bool showTelemetrySettingsWindow = false;
   bool showCameraControllerWindow = false;
   bool showCameraHelpWindow = false;
+  bool focusAnimationPlayerWindow = false;
   bool inspectorWindowVisible = false;
   RenderSettings renderSettings{};
   RenderFrameMetrics frameMetrics{};
+  std::optional<ShadowDebugFrameData> shadowDebugFrameData{};
+  std::optional<ShadowInspectResult> shadowInspectResult{};
+  TextureHandle shadowPreviewTexture{};
   size_t selectedPassIndex = 0u;
   double frameDeltaSeconds = 0.0;
   uint64_t frameIndex = 0;
@@ -3773,8 +4583,11 @@ struct ImGuiEditor::Impl {
   std::vector<HierarchyVisibleRow> hierarchyVisibleRows{};
   std::vector<uint8_t> hierarchyNodeOpenFlags{};
   std::unordered_set<uint64_t> hierarchyOpenBatchKeys{};
+  std::vector<TextureHandle> uiDependencyTextures{};
+  std::vector<RenderGraphAccessMode> uiDependencyTextureAccessModes{};
   int hierarchySelectedRowIndex = -1;
   bool hierarchySceneRootOpen = true;
+  std::vector<DeferredAnimationAction> deferredAnimationActions{};
   RenderScene *scene = nullptr;
   ResourceManager *resources = nullptr;
   RenderPipeline *renderPipeline = nullptr;
@@ -3783,6 +4596,7 @@ struct ImGuiEditor::Impl {
   CameraSystem *cameraSystem = nullptr;
   bakery::BakerySystem *bakery = nullptr;
   RenderGraphTelemetryService *renderGraphTelemetry = nullptr;
+  EditorAnimationPlayerService *animationPlayer = nullptr;
 };
 
 std::unique_ptr<ImGuiEditor>
@@ -3861,6 +4675,28 @@ void ImGuiEditor::setRenderSettings(const RenderSettings &settings) {
   }
   impl_->renderSettings = settings;
   sanitizeTextureFilteringSettings(impl_->renderSettings.textureFiltering);
+  sanitizeToneMapSettings(impl_->renderSettings.toneMap);
+  sanitizeShadowSettings(impl_->renderSettings.shadow);
+}
+
+void ImGuiEditor::setShadowDebugResources(
+    const std::optional<ShadowDebugFrameData> &debug,
+    TextureHandle previewTexture) {
+  if (!impl_) {
+    return;
+  }
+  impl_->shadowDebugFrameData = debug;
+  impl_->shadowPreviewTexture = previewTexture;
+}
+
+void ImGuiEditor::setShadowInspectResult(
+    const std::optional<ShadowInspectResult> &inspectResult) {
+  if (!impl_) {
+    return;
+  }
+  if (inspectResult.has_value()) {
+    impl_->shadowInspectResult = inspectResult;
+  }
 }
 
 void ImGuiEditor::syncCameraControllerWidgetStateFromCamera(
@@ -3918,6 +4754,8 @@ RenderSettings ImGuiEditor::renderSettings() const {
   }
   RenderSettings settings = impl_->renderSettings;
   sanitizeTextureFilteringSettings(settings.textureFiltering);
+  sanitizeToneMapSettings(settings.toneMap);
+  sanitizeShadowSettings(settings.shadow);
   return settings;
 }
 
@@ -3935,6 +4773,13 @@ bool ImGuiEditor::wantsCaptureMouse() const {
   }
   const ImGuiIO &io = ImGui::GetIO();
   return io.WantCaptureMouse;
+}
+
+void ImGuiEditor::applyDeferredUiActions() {
+  if (!impl_) {
+    return;
+  }
+  impl_->applyDeferredUiActions();
 }
 
 void ImGuiEditor::beginFrame() { impl_->beginFrame(); }

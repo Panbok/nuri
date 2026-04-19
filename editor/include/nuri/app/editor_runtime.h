@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/app/editor_animation_player_service.h"
 #include "nuri/app/editor_scene_spec.h"
 #include "nuri/bakery/bakery_system.h"
 #include "nuri/core/application.h"
@@ -89,6 +90,9 @@ public:
   [[nodiscard]] SceneEditorSelectionState &selectionState() noexcept {
     return sceneEditorSelectionState_;
   }
+  [[nodiscard]] EditorAnimationPlayerService *animationPlayer() noexcept {
+    return animationPlayerService_.get();
+  }
 
   void syncEditorCameraWidgetState(const Camera &camera);
   void syncSceneSelectionUi(const EditorSceneCatalog &catalog);
@@ -129,7 +133,8 @@ public:
   void destroyAnimatedPrefabSceneInstance(AnimatedPrefabSceneState &instance);
   void startAnimatedPrefabSceneSimulation(
       std::string_view sceneName, const ImportedPrefabSceneResources &resources,
-      AnimatedPrefabSceneState &instance, uint32_t clipIndex,
+      AnimatedPrefabSceneState &instance,
+      const AnimationPoseSimulationParams &params,
       std::string_view simulationDebugName);
   [[nodiscard]] static uint32_t
   selectPreferredClipIndex(const ScenePrefab &prefab,
@@ -173,6 +178,7 @@ private:
   SceneRuntimeHost sceneRuntime_;
   SceneEditorSelectionState sceneEditorSelectionState_{};
   std::unique_ptr<AnimationGpuServices> animationGpuServices_{};
+  std::unique_ptr<EditorAnimationPlayerService> animationPlayerService_{};
   std::unique_ptr<bakery::BakerySystem> bakerySystem_{};
   std::unique_ptr<TextSystem> textSystem_{};
   ScratchArena textScratchArena_{};
@@ -185,6 +191,7 @@ private:
   EditorOverlayFeature *editorRenderFeature_ = nullptr;
   CameraHandle mainCameraHandle_{};
   RenderSettings renderSettings_{};
+  RenderSettings frameRenderSettings_{};
   RenderFrameContext frameContext_{};
   uint64_t frameIndex_ = 0;
   uint64_t simulationFrameIndex_ = 0;
