@@ -183,7 +183,7 @@ struct RenderSettings {
     bool visualizeShadowFactor = false;
     bool visualizePCSSBlockers = false;
     bool visualizeSDSMHistogram = false;
-    bool enableCascadeCasterCulling = false;
+    bool enableCascadeCasterCulling = true;
     ShadowPreviewMode previewMode = ShadowPreviewMode::SelectedCascade;
     float previewDepthMin = 0.0f;
     float previewDepthMax = 1.0f;

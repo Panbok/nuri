@@ -22,6 +22,7 @@ constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr uint32_t kShadowPreviewFlagInvert = 1u << 0u;
 constexpr uint32_t kShadowPreviewFlagLog = 1u << 1u;
 constexpr uint32_t kShadowPreviewFlagTiled = 1u << 2u;
+constexpr float kCullingPaddingTexelMultiplier = 2.0f;
 constexpr std::string_view kShadowPreviewVS = R"(
 #version 460
 
@@ -1312,8 +1313,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       if (hasCasterCullingBounds) {
         const ShadowCascadeDebugFrameData &cascadeDebug =
             shadowDebugFrameData_.cascades[cascadeIndex];
-        const float cullingPadding =
-            std::max(cascadeDebug.texelWorldSize * 2.0f, 0.01f);
+        const float cullingPadding = std::max(
+            cascadeDebug.texelWorldSize * kCullingPaddingTexelMultiplier,
+            0.01f);
         if (!shadow_detail::shadowCasterOverlapsLightSpaceBounds(
                 std::span<const glm::vec3, 8>(casterWorldCorners),
                 cascadeDebug.lightView,

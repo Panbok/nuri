@@ -157,13 +157,15 @@ computeBoundsCorners(glm::vec3 boundsMin, glm::vec3 boundsMax) {
     casterLightMax = glm::max(casterLightMax, lightSpace);
   }
 
-  const glm::vec3 boundsMin =
+  const glm::vec3 normalizedMin =
       glm::min(lightSpaceBoundsMin, lightSpaceBoundsMax);
-  const glm::vec3 boundsMax =
+  const glm::vec3 normalizedMax =
       glm::max(lightSpaceBoundsMin, lightSpaceBoundsMax);
   const glm::vec3 conservativePadding(std::max(padding, 0.0f));
-  lightSpaceBoundsMin = boundsMin - conservativePadding;
-  lightSpaceBoundsMax = boundsMax + conservativePadding;
+  const glm::vec3 paddedMin = normalizedMin - conservativePadding;
+  const glm::vec3 paddedMax = normalizedMax + conservativePadding;
+  lightSpaceBoundsMin = paddedMin;
+  lightSpaceBoundsMax = paddedMax;
 
   return casterLightMax.x >= lightSpaceBoundsMin.x &&
          casterLightMin.x <= lightSpaceBoundsMax.x &&
