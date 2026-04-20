@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/log.h"
 #include "nuri/core/result.h"
 #include "nuri/gfx/gpu_render_types.h"
 #include "nuri/gfx/gpu_types.h"
@@ -210,6 +211,7 @@ struct RenderSettings {
     bool fixedPoissonRotation = false;
     uint32_t poissonRotationSeed = 0u;
     bool visualizeSDSMHistogram = false;
+    LogLevel sdsmDiagnosticLogLevel = LogLevel::Debug;
     bool enableCascadeCasterCulling = true;
     ShadowPreviewMode previewMode = ShadowPreviewMode::SelectedCascade;
     float previewDepthMin = 0.0f;
@@ -407,6 +409,18 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
           : kDefaultPcssFilterRadiusClampTexels;
   settings.sdsmTemporalBlend =
       std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
+  switch (settings.debug.sdsmDiagnosticLogLevel) {
+  case LogLevel::Trace:
+  case LogLevel::Debug:
+  case LogLevel::Info:
+  case LogLevel::Warning:
+  case LogLevel::Error:
+  case LogLevel::Fatal:
+    break;
+  default:
+    settings.debug.sdsmDiagnosticLogLevel = LogLevel::Debug;
+    break;
+  }
   settings.debug.debugCascadeIndex =
       std::min(settings.debug.debugCascadeIndex, settings.cascadeCount - 1u);
   if (!std::isfinite(settings.debug.previewDepthMin) ||

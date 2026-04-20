@@ -280,6 +280,7 @@ private:
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
   Result<bool, std::string> ensureDepthPyramidTextures();
+  [[nodiscard]] bool requiresDepthPyramid(const RenderSettings &settings) const;
   Result<bool, std::string> appendPreparedGraphPass(
       RenderFrameContext &frame, RenderGraphBuilder &graph,
       const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight,

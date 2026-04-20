@@ -664,11 +664,7 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
   if (!settings.opaque.enabled) {
     return;
   }
-  const bool requiresDepthPyramid =
-      settings.opaque.enableDepthPyramid ||
-      (settings.shadow.enabled &&
-       sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
-           ShadowSdsmMode::PreviousFrameMinMax);
+  const bool requiresDepthPyramid = this->requiresDepthPyramid(settings);
   const auto sceneDepthSamplerId = [this]() {
     return nuri::isValid(sceneDepthSampler_)
                ? gpu_.getSamplerBindlessIndex(sceneDepthSampler_)
@@ -3000,11 +2996,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     depthPass.isDepthPrepass = true;
   }
 
-  const bool requiresDepthPyramid =
-      settings.opaque.enableDepthPyramid ||
-      (settings.shadow.enabled &&
-       sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
-           ShadowSdsmMode::PreviousFrameMinMax);
+  const bool requiresDepthPyramid = this->requiresDepthPyramid(settings);
   const bool depthPyramidEnabled =
       requiresDepthPyramid && nuri::isValid(sceneDepthTexture) &&
       nuri::isValid(depthPyramidPipelineHandle_) &&
@@ -3239,6 +3231,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   frame.metrics.opaque.computeDispatches = saturateToU32(preDispatches_.size());
   NURI_PROFILER_ZONE_END();
   return Result<bool, std::string>::makeResult(true);
+}
+
+bool OpaqueRenderer::requiresDepthPyramid(
+    const RenderSettings &settings) const {
+  return settings.opaque.enableDepthPyramid ||
+         (settings.shadow.enabled &&
+          sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
+              ShadowSdsmMode::PreviousFrameMinMax);
 }
 
 Result<bool, std::string>

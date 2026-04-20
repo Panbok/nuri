@@ -121,7 +121,7 @@ resolveMemoryResource(std::pmr::memory_resource *memory) {
 }
 
 [[nodiscard]] std::string_view shadowSdsmModeName(ShadowSdsmMode mode) {
-  switch (sanitizeShadowSdsmMode(mode)) {
+  switch (mode) {
   case ShadowSdsmMode::Disabled:
     return "Disabled";
   case ShadowSdsmMode::PreviousFrameMinMax:
@@ -224,6 +224,12 @@ struct SdsmLogDiagnostics {
   float farReleaseThreshold = std::numeric_limits<float>::quiet_NaN();
 };
 
+struct SdsmHysteresisResult {
+  bool hasHistory = false;
+  float historyFar = 0.0f;
+  float appliedFar = 0.0f;
+};
+
 [[nodiscard]] ShadowSplitRange
 computeFixedShadowSplitRange(const CameraFrameState &camera,
                              float maxDistance) {
@@ -262,26 +268,36 @@ computeSdsmFarUpdateThreshold(float farCascadeTexelWorldSize) {
   return std::max(std::max(farCascadeTexelWorldSize, 0.0f) * 16.0f, 0.5f);
 }
 
-[[nodiscard]] float applySdsmFarHysteresis(
+[[nodiscard]] SdsmHysteresisResult applySdsmFarHysteresis(
     float targetFar, float minimumFarDepth, ShadowSplitRange fixedSplitRange,
-    float farCascadeTexelWorldSize, bool &hasHistory, float &historyFar) {
+    float farCascadeTexelWorldSize, bool hasHistory, float historyFar) {
   const float clampedTarget =
       std::clamp(targetFar, minimumFarDepth, fixedSplitRange.farDepth);
   if (!hasHistory || !std::isfinite(historyFar)) {
-    hasHistory = true;
-    historyFar = clampedTarget;
-    return historyFar;
+    return SdsmHysteresisResult{
+        .hasHistory = true,
+        .historyFar = clampedTarget,
+        .appliedFar = clampedTarget,
+    };
   }
 
   const float updateThreshold =
       computeSdsmFarUpdateThreshold(farCascadeTexelWorldSize);
   if (std::abs(clampedTarget - historyFar) <= updateThreshold) {
-    return historyFar;
+    return SdsmHysteresisResult{
+        .hasHistory = true,
+        .historyFar = historyFar,
+        .appliedFar = historyFar,
+    };
   }
 
   if (clampedTarget >= historyFar) {
     historyFar = clampedTarget;
-    return historyFar;
+    return SdsmHysteresisResult{
+        .hasHistory = true,
+        .historyFar = historyFar,
+        .appliedFar = historyFar,
+    };
   }
 
   const float shrinkDepth =
@@ -291,7 +307,11 @@ computeSdsmFarUpdateThreshold(float farCascadeTexelWorldSize) {
   }
   historyFar =
       std::clamp(historyFar, minimumFarDepth, fixedSplitRange.farDepth);
-  return historyFar;
+  return SdsmHysteresisResult{
+      .hasHistory = true,
+      .historyFar = historyFar,
+      .appliedFar = historyFar,
+  };
 }
 
 [[nodiscard]] CameraFrameState
@@ -1177,10 +1197,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   sdsmLog.sourceLevelCount = frame.sharedResources.sceneDepthPyramidLevelCount;
   sdsmLog.sourceFrameAvailable =
       frame.sharedResources.sceneDepthPyramidSourceFrameIndex.has_value();
-  sdsmLog.historyRangeValid = hasValidSdsmRange_;
-  sdsmLog.historyEffectiveFarValid = hasValidSdsmEffectiveFar_;
-  sdsmLog.historyTexelValid = hasValidSdsmFarCascadeTexelSize_;
-  sdsmLog.adaptiveActiveBefore = sdsmAdaptiveSplitsActive_;
+  sdsmLog.historyRangeValid = sdsmState_.hasValidSdsmRange_;
+  sdsmLog.historyEffectiveFarValid = sdsmState_.hasValidSdsmEffectiveFar_;
+  sdsmLog.historyTexelValid = sdsmState_.hasValidSdsmFarCascadeTexelSize_;
+  sdsmLog.adaptiveActiveBefore = sdsmState_.sdsmAdaptiveSplitsActive_;
   for (uint32_t cascadeIndex = 0u; cascadeIndex < activeCascadeCount_;
        ++cascadeIndex) {
     shadowDebugFrameData_.cascades[cascadeIndex].texture =
@@ -1194,39 +1214,42 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     return Result<bool, std::string>::makeResult(true);
   };
   const auto invalidateSdsmRange = [&]() {
-    hasValidSdsmRange_ = false;
-    hasValidSdsmEffectiveFar_ = false;
-    hasValidSdsmFarCascadeTexelSize_ = false;
-    sdsmAdaptiveSplitsActive_ = false;
-    lastValidSdsmSourceFrameIndex_ = std::numeric_limits<uint64_t>::max();
+    sdsmState_.hasValidSdsmRange_ = false;
+    sdsmState_.hasValidSdsmEffectiveFar_ = false;
+    sdsmState_.hasValidSdsmFarCascadeTexelSize_ = false;
+    sdsmState_.sdsmAdaptiveSplitsActive_ = false;
+    sdsmState_.lastValidSdsmSourceFrameIndex_ =
+        std::numeric_limits<uint64_t>::max();
   };
   const auto canReuseCachedSdsmRange = [&]() {
-    if (!hasValidSdsmRange_ ||
-        lastValidSdsmSourceFrameIndex_ ==
+    if (!sdsmState_.hasValidSdsmRange_ ||
+        sdsmState_.lastValidSdsmSourceFrameIndex_ ==
             std::numeric_limits<uint64_t>::max() ||
-        frame.frameIndex <= lastValidSdsmSourceFrameIndex_) {
+        frame.frameIndex <= sdsmState_.lastValidSdsmSourceFrameIndex_) {
       return false;
     }
-    return (frame.frameIndex - lastValidSdsmSourceFrameIndex_) <=
+    return (frame.frameIndex - sdsmState_.lastValidSdsmSourceFrameIndex_) <=
            kSdsmMaxCachedSourceFrameLag;
   };
   const auto applyCachedSdsmRange = [&]() {
-    NURI_ASSERT(hasValidSdsmRange_,
+    NURI_ASSERT(sdsmState_.hasValidSdsmRange_,
                 "Cached SDSM range requested without valid history");
     const float effectiveNear = fixedSplitRange.nearDepth;
     const float minimumFarDepth = cascadeCount > 1u
                                       ? fixedSplitDepths[cascadeCount - 1u]
                                       : fixedSplitRange.farDepth;
     const float cachedTargetFar =
-        std::clamp(std::max(sdsmSmoothedMaxDepth_, minimumFarDepth),
+        std::clamp(std::max(sdsmState_.sdsmSmoothedMaxDepth_, minimumFarDepth),
                    effectiveNear + 1.0e-4f, fixedSplitRange.farDepth);
     const float cachedEffectiveFar =
-        hasValidSdsmEffectiveFar_
-            ? std::clamp(sdsmEffectiveFarDepth_, minimumFarDepth,
+        sdsmState_.hasValidSdsmEffectiveFar_
+            ? std::clamp(sdsmState_.sdsmEffectiveFarDepth_, minimumFarDepth,
                          fixedSplitRange.farDepth)
             : cachedTargetFar;
-    shadowDebugFrameData_.sdsm.smoothedLinearMin = sdsmSmoothedMinDepth_;
-    shadowDebugFrameData_.sdsm.smoothedLinearMax = sdsmSmoothedMaxDepth_;
+    shadowDebugFrameData_.sdsm.smoothedLinearMin =
+        sdsmState_.sdsmSmoothedMinDepth_;
+    shadowDebugFrameData_.sdsm.smoothedLinearMax =
+        sdsmState_.sdsmSmoothedMaxDepth_;
     return ShadowSplitRange{
         .nearDepth = effectiveNear,
         .farDepth = std::max(effectiveNear + 1.0e-4f, cachedEffectiveFar),
@@ -1421,20 +1444,22 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
               reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
                                              "invalid_raw_linear_depths");
             } else {
-              if (!hasValidSdsmRange_) {
-                sdsmSmoothedMinDepth_ = rawLinearMin;
-                sdsmSmoothedMaxDepth_ = rawLinearMax;
+              if (!sdsmState_.hasValidSdsmRange_) {
+                sdsmState_.sdsmSmoothedMinDepth_ = rawLinearMin;
+                sdsmState_.sdsmSmoothedMaxDepth_ = rawLinearMax;
               } else {
                 const float historyWeight =
                     std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
                 const float sampleWeight = 1.0f - historyWeight;
-                sdsmSmoothedMinDepth_ = rawLinearMin * sampleWeight +
-                                        sdsmSmoothedMinDepth_ * historyWeight;
-                sdsmSmoothedMaxDepth_ = rawLinearMax * sampleWeight +
-                                        sdsmSmoothedMaxDepth_ * historyWeight;
+                sdsmState_.sdsmSmoothedMinDepth_ =
+                    rawLinearMin * sampleWeight +
+                    sdsmState_.sdsmSmoothedMinDepth_ * historyWeight;
+                sdsmState_.sdsmSmoothedMaxDepth_ =
+                    rawLinearMax * sampleWeight +
+                    sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
               }
-              hasValidSdsmRange_ = true;
-              lastValidSdsmSourceFrameIndex_ =
+              sdsmState_.hasValidSdsmRange_ = true;
+              sdsmState_.lastValidSdsmSourceFrameIndex_ =
                   *frame.sharedResources.sceneDepthPyramidSourceFrameIndex;
 
               // Previous-frame min/max is too unstable to advance the near
@@ -1448,9 +1473,9 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
               const float currentVisibleFar =
                   std::clamp(rawLinearMax, effectiveNear + 1.0e-4f,
                              fixedSplitRange.farDepth);
-              const float targetFar =
-                  std::clamp(std::max(sdsmSmoothedMaxDepth_, minimumFarDepth),
-                             effectiveNear + 1.0e-4f, fixedSplitRange.farDepth);
+              const float targetFar = std::clamp(
+                  std::max(sdsmState_.sdsmSmoothedMaxDepth_, minimumFarDepth),
+                  effectiveNear + 1.0e-4f, fixedSplitRange.farDepth);
               sdsmLog.reason = "valid_previous_frame_data";
               sdsmLog.minimumFarDepth = minimumFarDepth;
               sdsmLog.targetFar = targetFar;
@@ -1474,37 +1499,41 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                 sdsmLog.splitReleaseThreshold = splitReleaseThreshold;
                 sdsmLog.farActivateThreshold = farActivateThreshold;
                 sdsmLog.farReleaseThreshold = farReleaseThreshold;
-                if (!sdsmAdaptiveSplitsActive_) {
-                  sdsmAdaptiveSplitsActive_ =
+                if (!sdsmState_.sdsmAdaptiveSplitsActive_) {
+                  sdsmState_.sdsmAdaptiveSplitsActive_ =
                       targetFar < farActivateThreshold &&
                       currentVisibleFar > splitActivateThreshold;
                 } else if (targetFar >= farReleaseThreshold ||
                            currentVisibleFar <= splitReleaseThreshold) {
-                  sdsmAdaptiveSplitsActive_ = false;
+                  sdsmState_.sdsmAdaptiveSplitsActive_ = false;
                 }
               } else {
-                sdsmAdaptiveSplitsActive_ = false;
+                sdsmState_.sdsmAdaptiveSplitsActive_ = false;
               }
               shadowDebugFrameData_.sdsm.status = ShadowSdsmStatus::Active;
               shadowDebugFrameData_.sdsm.fixedFallbackActive = false;
               shadowDebugFrameData_.sdsm.smoothedLinearMin =
-                  sdsmSmoothedMinDepth_;
+                  sdsmState_.sdsmSmoothedMinDepth_;
               shadowDebugFrameData_.sdsm.smoothedLinearMax =
-                  sdsmSmoothedMaxDepth_;
-              if (sdsmAdaptiveSplitsActive_) {
-                const float effectiveFar = applySdsmFarHysteresis(
+                  sdsmState_.sdsmSmoothedMaxDepth_;
+              if (sdsmState_.sdsmAdaptiveSplitsActive_) {
+                const SdsmHysteresisResult hysteresis = applySdsmFarHysteresis(
                     targetFar, minimumFarDepth, fixedSplitRange,
-                    hasValidSdsmFarCascadeTexelSize_
-                        ? sdsmFarCascadeTexelWorldSize_
+                    sdsmState_.hasValidSdsmFarCascadeTexelSize_
+                        ? sdsmState_.sdsmFarCascadeTexelWorldSize_
                         : 0.0f,
-                    hasValidSdsmEffectiveFar_, sdsmEffectiveFarDepth_);
+                    sdsmState_.hasValidSdsmEffectiveFar_,
+                    sdsmState_.sdsmEffectiveFarDepth_);
+                sdsmState_.hasValidSdsmEffectiveFar_ = hysteresis.hasHistory;
+                sdsmState_.sdsmEffectiveFarDepth_ = hysteresis.historyFar;
                 updateEffectiveSplitRange(ShadowSplitRange{
                     .nearDepth = effectiveNear,
-                    .farDepth = std::max(effectiveNear + 1.0e-4f, effectiveFar),
+                    .farDepth = std::max(effectiveNear + 1.0e-4f,
+                                         hysteresis.appliedFar),
                 });
               } else {
-                hasValidSdsmEffectiveFar_ = true;
-                sdsmEffectiveFarDepth_ = fixedSplitRange.farDepth;
+                sdsmState_.hasValidSdsmEffectiveFar_ = true;
+                sdsmState_.sdsmEffectiveFarDepth_ = fixedSplitRange.farDepth;
                 effectiveSplitRange = fixedSplitRange;
                 effectiveSplitDepths = fixedSplitDepths;
               }
@@ -1516,13 +1545,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   }
   shadowDebugFrameData_.sdsm.effectiveRangeNear = effectiveSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeFar = effectiveSplitRange.farDepth;
-  if (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax && cascadeCount > 1u &&
-      hasValidSdsmRange_ && !shadowDebugFrameData_.sdsm.fixedFallbackActive) {
-    if (!sdsmAdaptiveSplitsActive_) {
-      effectiveSplitDepths = fixedSplitDepths;
-    }
-  } else {
-    sdsmAdaptiveSplitsActive_ = false;
+  if (!(sdsmMode == ShadowSdsmMode::PreviousFrameMinMax && cascadeCount > 1u &&
+        sdsmState_.hasValidSdsmRange_ &&
+        !shadowDebugFrameData_.sdsm.fixedFallbackActive)) {
+    sdsmState_.sdsmAdaptiveSplitsActive_ = false;
   }
   shadowDebugFrameData_.sdsm.effectiveSplitDepths = effectiveSplitDepths;
   const bool reuseFrozenFit = freezeShadowFits && hasFrozenShadowFit_ &&
@@ -1581,11 +1607,11 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         shadowDebugFrameData_.cascades[cascadeCount - 1u].texelWorldSize;
     if (std::isfinite(farCascadeTexelWorldSize) &&
         farCascadeTexelWorldSize > 0.0f) {
-      hasValidSdsmFarCascadeTexelSize_ = true;
-      sdsmFarCascadeTexelWorldSize_ = farCascadeTexelWorldSize;
+      sdsmState_.hasValidSdsmFarCascadeTexelSize_ = true;
+      sdsmState_.sdsmFarCascadeTexelWorldSize_ = farCascadeTexelWorldSize;
     } else {
-      hasValidSdsmFarCascadeTexelSize_ = false;
-      sdsmFarCascadeTexelWorldSize_ = 0.0f;
+      sdsmState_.hasValidSdsmFarCascadeTexelSize_ = false;
+      sdsmState_.sdsmFarCascadeTexelWorldSize_ = 0.0f;
     }
   }
   const ShadowSdsmDebugFrameData &sdsm = shadowDebugFrameData_.sdsm;
@@ -1599,8 +1625,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
           : 0u;
   const bool opaqueDepthPyramidEnabled =
       frame.settings != nullptr && frame.settings->opaque.enableDepthPyramid;
-  const auto logSdsmSnapshot = [&](const char *label) {
-    NURI_LOG_WARNING(
+  const LogLevel sdsmDiagnosticLogLevel = settings.debug.sdsmDiagnosticLogLevel;
+  const auto logSdsmSnapshot = [&](LogLevel logLevel, const char *label) {
+    logMessagef(
+        logLevel,
         "ShadowRenderer::updateShadowFrameData: %s frame=%llu mode=%s "
         "status=%s reason=%s fixedFallback=%u reusedCached=%u "
         "opaqueDepthPyramid=%u sourceFrameAvailable=%u sourceFrame=%llu "
@@ -1609,7 +1637,13 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         "rawLinearValid=%u historyBefore=[range=%u effectiveFar=%u texel=%u "
         "adaptive=%u] historyNow=[range=%u effectiveFar=%u texel=%u "
         "adaptive=%u] settings=[maxDistance=%.3f blend=%.3f cascades=%u "
-        "lambda=%.3f] camera=[near=%.3f far=%.3f]",
+        "lambda=%.3f] camera=[near=%.3f far=%.3f] "
+        "values=[rawDevice=(%.6f, %.6f) rawLinear=(%.6f, %.6f) "
+        "smoothed=(%.6f, %.6f) fixed=(%.6f, %.6f) effective=(%.6f, %.6f) "
+        "targetFar=%.6f minFar=%.6f splitThresholds=(%.6f, %.6f) "
+        "farThresholds=(%.6f, %.6f) farHistory=%.6f farTexel=%.6f "
+        "fixedSplits=(%.6f, %.6f, %.6f, %.6f, %.6f) "
+        "effectiveSplits=(%.6f, %.6f, %.6f, %.6f, %.6f)]",
         label, static_cast<unsigned long long>(frame.frameIndex),
         sdsmModeName.data(), sdsmStatusName.data(), sdsmLog.reason.data(),
         sdsm.fixedFallbackActive ? 1u : 0u, sdsmLog.reusedCachedRange ? 1u : 0u,
@@ -1625,69 +1659,67 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         sdsmLog.rawLinearValid ? 1u : 0u, sdsmLog.historyRangeValid ? 1u : 0u,
         sdsmLog.historyEffectiveFarValid ? 1u : 0u,
         sdsmLog.historyTexelValid ? 1u : 0u,
-        sdsmLog.adaptiveActiveBefore ? 1u : 0u, hasValidSdsmRange_ ? 1u : 0u,
-        hasValidSdsmEffectiveFar_ ? 1u : 0u,
-        hasValidSdsmFarCascadeTexelSize_ ? 1u : 0u,
-        sdsmAdaptiveSplitsActive_ ? 1u : 0u, settings.maxDistance,
+        sdsmLog.adaptiveActiveBefore ? 1u : 0u,
+        sdsmState_.hasValidSdsmRange_ ? 1u : 0u,
+        sdsmState_.hasValidSdsmEffectiveFar_ ? 1u : 0u,
+        sdsmState_.hasValidSdsmFarCascadeTexelSize_ ? 1u : 0u,
+        sdsmState_.sdsmAdaptiveSplitsActive_ ? 1u : 0u, settings.maxDistance,
         settings.sdsmTemporalBlend, cascadeCount, settings.splitLambda,
-        frame.camera.nearPlane, frame.camera.farPlane);
-    NURI_LOG_WARNING(
-        "ShadowRenderer::updateShadowFrameData: %s values frame=%llu "
-        "rawDevice=[%.6f, %.6f] rawLinear=[%.6f, %.6f] "
-        "smoothed=[%.6f, %.6f] fixed=[%.6f, %.6f] effective=[%.6f, %.6f] "
-        "targetFar=%.6f minFar=%.6f splitThresholds=[%.6f, %.6f] "
-        "farThresholds=[%.6f, %.6f] farHistory=%.6f farTexel=%.6f "
-        "fixedSplits=[%.6f, %.6f, %.6f, %.6f, %.6f] "
-        "effectiveSplits=[%.6f, %.6f, %.6f, %.6f, %.6f]",
-        label, static_cast<unsigned long long>(frame.frameIndex),
-        sdsm.rawDeviceMin, sdsm.rawDeviceMax, sdsm.rawLinearMin,
-        sdsm.rawLinearMax, sdsm.smoothedLinearMin, sdsm.smoothedLinearMax,
-        sdsm.fixedRangeNear, sdsm.fixedRangeFar, sdsm.effectiveRangeNear,
-        sdsm.effectiveRangeFar, sdsmLog.targetFar, sdsmLog.minimumFarDepth,
+        frame.camera.nearPlane, frame.camera.farPlane, sdsm.rawDeviceMin,
+        sdsm.rawDeviceMax, sdsm.rawLinearMin, sdsm.rawLinearMax,
+        sdsm.smoothedLinearMin, sdsm.smoothedLinearMax, sdsm.fixedRangeNear,
+        sdsm.fixedRangeFar, sdsm.effectiveRangeNear, sdsm.effectiveRangeFar,
+        sdsmLog.targetFar, sdsmLog.minimumFarDepth,
         sdsmLog.splitActivateThreshold, sdsmLog.splitReleaseThreshold,
         sdsmLog.farActivateThreshold, sdsmLog.farReleaseThreshold,
-        sdsmEffectiveFarDepth_, sdsmFarCascadeTexelWorldSize_,
-        sdsm.fixedSplitDepths[0], sdsm.fixedSplitDepths[1],
-        sdsm.fixedSplitDepths[2], sdsm.fixedSplitDepths[3],
-        sdsm.fixedSplitDepths[4], sdsm.effectiveSplitDepths[0],
-        sdsm.effectiveSplitDepths[1], sdsm.effectiveSplitDepths[2],
-        sdsm.effectiveSplitDepths[3], sdsm.effectiveSplitDepths[4]);
+        sdsmState_.sdsmEffectiveFarDepth_,
+        sdsmState_.sdsmFarCascadeTexelWorldSize_, sdsm.fixedSplitDepths[0],
+        sdsm.fixedSplitDepths[1], sdsm.fixedSplitDepths[2],
+        sdsm.fixedSplitDepths[3], sdsm.fixedSplitDepths[4],
+        sdsm.effectiveSplitDepths[0], sdsm.effectiveSplitDepths[1],
+        sdsm.effectiveSplitDepths[2], sdsm.effectiveSplitDepths[3],
+        sdsm.effectiveSplitDepths[4]);
   };
   const bool benignMissingPreviousFrame =
       sdsm.status == ShadowSdsmStatus::Unavailable &&
       sdsmLog.reason == "missing_previous_frame_data" &&
       !sdsmLog.sourceFrameAvailable && !sdsmLog.historyRangeValid &&
-      !hasValidSdsmRange_;
+      !sdsmState_.hasValidSdsmRange_;
   const bool warningStatus = !benignMissingPreviousFrame &&
                              (sdsm.status == ShadowSdsmStatus::Unavailable ||
                               sdsm.status == ShadowSdsmStatus::Stale ||
                               sdsm.status == ShadowSdsmStatus::Invalid);
   if (warningStatus) {
     const bool warningRefreshDue =
-        lastLoggedSdsmWarningFrameIndex_ ==
+        sdsmState_.lastLoggedSdsmWarningFrameIndex_ ==
             std::numeric_limits<uint64_t>::max() ||
-        frame.frameIndex >=
-            lastLoggedSdsmWarningFrameIndex_ + kSdsmDiagnosticRefreshFrames;
+        frame.frameIndex >= sdsmState_.lastLoggedSdsmWarningFrameIndex_ +
+                                kSdsmDiagnosticRefreshFrames;
     const bool warningChanged =
-        sdsm.status != lastLoggedSdsmWarningStatus_ ||
-        sdsm.fixedFallbackActive != lastLoggedSdsmWarningFixedFallbackActive_ ||
-        sdsmLog.reusedCachedRange != lastLoggedSdsmWarningReusedCachedRange_ ||
-        sourceFrameIndex != lastLoggedSdsmWarningSourceFrameIndex_;
+        sdsm.status != sdsmState_.lastLoggedSdsmWarningStatus_ ||
+        sdsm.fixedFallbackActive !=
+            sdsmState_.lastLoggedSdsmWarningFixedFallbackActive_ ||
+        sdsmLog.reusedCachedRange !=
+            sdsmState_.lastLoggedSdsmWarningReusedCachedRange_ ||
+        sourceFrameIndex != sdsmState_.lastLoggedSdsmWarningSourceFrameIndex_;
     if (warningChanged || warningRefreshDue) {
-      logSdsmSnapshot("SDSM source warning");
-      lastLoggedSdsmWarningStatus_ = sdsm.status;
-      lastLoggedSdsmWarningFixedFallbackActive_ = sdsm.fixedFallbackActive;
-      lastLoggedSdsmWarningReusedCachedRange_ = sdsmLog.reusedCachedRange;
-      lastLoggedSdsmWarningSourceFrameIndex_ = sourceFrameIndex;
-      lastLoggedSdsmWarningFrameIndex_ = frame.frameIndex;
+      logSdsmSnapshot(LogLevel::Warning, "SDSM source warning");
+      sdsmState_.lastLoggedSdsmWarningStatus_ = sdsm.status;
+      sdsmState_.lastLoggedSdsmWarningFixedFallbackActive_ =
+          sdsm.fixedFallbackActive;
+      sdsmState_.lastLoggedSdsmWarningReusedCachedRange_ =
+          sdsmLog.reusedCachedRange;
+      sdsmState_.lastLoggedSdsmWarningSourceFrameIndex_ = sourceFrameIndex;
+      sdsmState_.lastLoggedSdsmWarningFrameIndex_ = frame.frameIndex;
     }
   } else {
-    lastLoggedSdsmWarningStatus_ = ShadowSdsmStatus::Disabled;
-    lastLoggedSdsmWarningFixedFallbackActive_ = false;
-    lastLoggedSdsmWarningReusedCachedRange_ = false;
-    lastLoggedSdsmWarningSourceFrameIndex_ =
+    sdsmState_.lastLoggedSdsmWarningStatus_ = ShadowSdsmStatus::Disabled;
+    sdsmState_.lastLoggedSdsmWarningFixedFallbackActive_ = false;
+    sdsmState_.lastLoggedSdsmWarningReusedCachedRange_ = false;
+    sdsmState_.lastLoggedSdsmWarningSourceFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
-    lastLoggedSdsmWarningFrameIndex_ = std::numeric_limits<uint64_t>::max();
+    sdsmState_.lastLoggedSdsmWarningFrameIndex_ =
+        std::numeric_limits<uint64_t>::max();
   }
   const bool contractedRange =
       sdsm.mode == ShadowSdsmMode::PreviousFrameMinMax &&
@@ -1696,37 +1728,40 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
           sdsm.fixedRangeFar;
   if (contractedRange) {
     const bool contractionRefreshDue =
-        lastLoggedSdsmContractedFrameIndex_ ==
+        sdsmState_.lastLoggedSdsmContractedFrameIndex_ ==
             std::numeric_limits<uint64_t>::max() ||
-        frame.frameIndex >=
-            lastLoggedSdsmContractedFrameIndex_ + kSdsmDiagnosticRefreshFrames;
+        frame.frameIndex >= sdsmState_.lastLoggedSdsmContractedFrameIndex_ +
+                                kSdsmDiagnosticRefreshFrames;
     const bool contractionChanged =
-        !lastLoggedSdsmRangeContracted_ ||
-        sdsmAdaptiveSplitsActive_ != lastLoggedSdsmAdaptiveRangeActive_ ||
-        !std::isfinite(lastLoggedSdsmContractedEffectiveFar_) ||
+        !sdsmState_.lastLoggedSdsmRangeContracted_ ||
+        sdsmState_.sdsmAdaptiveSplitsActive_ !=
+            sdsmState_.lastLoggedSdsmAdaptiveRangeActive_ ||
+        !std::isfinite(sdsmState_.lastLoggedSdsmContractedEffectiveFar_) ||
         std::abs(sdsm.effectiveRangeFar -
-                 lastLoggedSdsmContractedEffectiveFar_) >
+                 sdsmState_.lastLoggedSdsmContractedEffectiveFar_) >
             kSdsmDiagnosticRangeDeltaThreshold ||
-        !std::isfinite(lastLoggedSdsmContractedSmoothedMax_) ||
+        !std::isfinite(sdsmState_.lastLoggedSdsmContractedSmoothedMax_) ||
         std::abs(sdsm.smoothedLinearMax -
-                 lastLoggedSdsmContractedSmoothedMax_) >
+                 sdsmState_.lastLoggedSdsmContractedSmoothedMax_) >
             kSdsmDiagnosticRangeDeltaThreshold;
     if (contractionChanged || contractionRefreshDue) {
-      logSdsmSnapshot("SDSM contracted range");
-      lastLoggedSdsmRangeContracted_ = true;
-      lastLoggedSdsmAdaptiveRangeActive_ = sdsmAdaptiveSplitsActive_;
-      lastLoggedSdsmContractedEffectiveFar_ = sdsm.effectiveRangeFar;
-      lastLoggedSdsmContractedSmoothedMax_ = sdsm.smoothedLinearMax;
-      lastLoggedSdsmContractedFrameIndex_ = frame.frameIndex;
+      logSdsmSnapshot(sdsmDiagnosticLogLevel, "SDSM contracted range");
+      sdsmState_.lastLoggedSdsmRangeContracted_ = true;
+      sdsmState_.lastLoggedSdsmAdaptiveRangeActive_ =
+          sdsmState_.sdsmAdaptiveSplitsActive_;
+      sdsmState_.lastLoggedSdsmContractedEffectiveFar_ = sdsm.effectiveRangeFar;
+      sdsmState_.lastLoggedSdsmContractedSmoothedMax_ = sdsm.smoothedLinearMax;
+      sdsmState_.lastLoggedSdsmContractedFrameIndex_ = frame.frameIndex;
     }
   } else {
-    lastLoggedSdsmRangeContracted_ = false;
-    lastLoggedSdsmAdaptiveRangeActive_ = false;
-    lastLoggedSdsmContractedEffectiveFar_ =
+    sdsmState_.lastLoggedSdsmRangeContracted_ = false;
+    sdsmState_.lastLoggedSdsmAdaptiveRangeActive_ = false;
+    sdsmState_.lastLoggedSdsmContractedEffectiveFar_ =
         std::numeric_limits<float>::quiet_NaN();
-    lastLoggedSdsmContractedSmoothedMax_ =
+    sdsmState_.lastLoggedSdsmContractedSmoothedMax_ =
         std::numeric_limits<float>::quiet_NaN();
-    lastLoggedSdsmContractedFrameIndex_ = std::numeric_limits<uint64_t>::max();
+    sdsmState_.lastLoggedSdsmContractedFrameIndex_ =
+        std::numeric_limits<uint64_t>::max();
   }
   const uint32_t shadowFlags =
       kShadowFrameFlagEnabled | shadowDebugFrameFlags(settings.debug);
@@ -2155,29 +2190,7 @@ void ShadowRenderer::resetFrozenShadowFit() {
   frozenShadowFits_ = {};
 }
 
-void ShadowRenderer::resetSdsmState() {
-  hasValidSdsmRange_ = false;
-  hasValidSdsmEffectiveFar_ = false;
-  hasValidSdsmFarCascadeTexelSize_ = false;
-  sdsmAdaptiveSplitsActive_ = false;
-  sdsmSmoothedMinDepth_ = 0.0f;
-  sdsmSmoothedMaxDepth_ = 0.0f;
-  sdsmEffectiveFarDepth_ = 0.0f;
-  sdsmFarCascadeTexelWorldSize_ = 0.0f;
-  lastValidSdsmSourceFrameIndex_ = std::numeric_limits<uint64_t>::max();
-  lastLoggedSdsmWarningStatus_ = ShadowSdsmStatus::Disabled;
-  lastLoggedSdsmWarningFixedFallbackActive_ = false;
-  lastLoggedSdsmWarningReusedCachedRange_ = false;
-  lastLoggedSdsmWarningSourceFrameIndex_ = std::numeric_limits<uint64_t>::max();
-  lastLoggedSdsmWarningFrameIndex_ = std::numeric_limits<uint64_t>::max();
-  lastLoggedSdsmRangeContracted_ = false;
-  lastLoggedSdsmAdaptiveRangeActive_ = false;
-  lastLoggedSdsmContractedEffectiveFar_ =
-      std::numeric_limits<float>::quiet_NaN();
-  lastLoggedSdsmContractedSmoothedMax_ =
-      std::numeric_limits<float>::quiet_NaN();
-  lastLoggedSdsmContractedFrameIndex_ = std::numeric_limits<uint64_t>::max();
-}
+void ShadowRenderer::resetSdsmState() { sdsmState_ = {}; }
 
 Result<bool, std::string>
 ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
