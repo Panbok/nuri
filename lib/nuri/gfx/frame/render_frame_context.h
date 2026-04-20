@@ -63,6 +63,15 @@ enum class ShadowSdsmMode : uint8_t {
   Histogram = 2,
 };
 
+enum class ShadowSdsmStatus : uint8_t {
+  Disabled = 0,
+  Active = 1,
+  Unavailable = 2,
+  Stale = 3,
+  Invalid = 4,
+  FallbackFixed = 5,
+};
+
 enum class ShadowPreviewMode : uint8_t {
   SelectedCascade = 0,
   TiledAllCascades = 1,
@@ -510,11 +519,32 @@ struct ShadowCascadeDebugFrameData {
   uint32_t culledCount = 0u;
 };
 
+struct ShadowSdsmDebugFrameData {
+  ShadowSdsmMode mode = ShadowSdsmMode::Disabled;
+  ShadowSdsmStatus status = ShadowSdsmStatus::Disabled;
+  bool fixedFallbackActive = false;
+  uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint32_t splitCount = 0u;
+  float fixedRangeNear = 0.0f;
+  float fixedRangeFar = 0.0f;
+  float rawDeviceMin = 0.0f;
+  float rawDeviceMax = 0.0f;
+  float rawLinearMin = 0.0f;
+  float rawLinearMax = 0.0f;
+  float smoothedLinearMin = 0.0f;
+  float smoothedLinearMax = 0.0f;
+  float effectiveRangeNear = 0.0f;
+  float effectiveRangeFar = 0.0f;
+  std::array<float, kMaxShadowCascades + 1u> fixedSplitDepths{};
+  std::array<float, kMaxShadowCascades + 1u> effectiveSplitDepths{};
+};
+
 struct ShadowDebugFrameData {
   LightId selectedShadowLightId = kInvalidLightId;
   uint32_t cascadeCount = 0u;
   uint32_t rawSamplerId = kInvalidShadowBindlessIndex;
   uint32_t compareSamplerId = kInvalidShadowBindlessIndex;
+  ShadowSdsmDebugFrameData sdsm{};
   std::array<ShadowCascadeDebugFrameData, kMaxShadowCascades> cascades{};
 };
 
@@ -742,6 +772,7 @@ struct FrameSharedResources {
       sceneDepthPyramidTextures{};
   std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidGraphTextures{};
+  std::optional<uint64_t> sceneDepthPyramidSourceFrameIndex{};
   std::array<TextureHandle, kMaxShadowCascades> shadowCascadeTextures{};
   std::array<RenderGraphTextureId, kMaxShadowCascades>
       shadowCascadeGraphTextures{};

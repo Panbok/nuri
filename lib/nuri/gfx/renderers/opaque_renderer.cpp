@@ -657,18 +657,25 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
       gpu_.getDefaultSamplerBindlessIndex();
   frame.sharedResources.sceneDepthPyramidLevelCount = 0u;
   frame.sharedResources.sceneDepthPyramidTextures = {};
+  frame.sharedResources.sceneDepthPyramidSourceFrameIndex =
+      sceneDepthPyramidSourceFrameIndex_;
 
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.opaque.enabled) {
     return;
   }
+  const bool requiresDepthPyramid =
+      settings.opaque.enableDepthPyramid ||
+      (settings.shadow.enabled &&
+       sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
+           ShadowSdsmMode::PreviousFrameMinMax);
   const auto sceneDepthSamplerId = [this]() {
     return nuri::isValid(sceneDepthSampler_)
                ? gpu_.getSamplerBindlessIndex(sceneDepthSampler_)
                : gpu_.getDefaultSamplerBindlessIndex();
   };
 
-  if (settings.opaque.enableDepthPyramid) {
+  if (requiresDepthPyramid) {
     auto initResult = ensureInitialized();
     if (initResult.hasError()) {
       NURI_LOG_WARNING("OpaqueRenderer::publishFrameData: %s",
@@ -688,7 +695,7 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
     frame.sharedResources.sceneDepthSamplerId = sceneDepthSamplerId();
   }
 
-  if (settings.opaque.enableDepthPyramid) {
+  if (requiresDepthPyramid) {
     if (!nuri::isValid(depthPyramidPipelineHandle_)) {
       return;
     }
@@ -2993,8 +3000,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     depthPass.isDepthPrepass = true;
   }
 
+  const bool requiresDepthPyramid =
+      settings.opaque.enableDepthPyramid ||
+      (settings.shadow.enabled &&
+       sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
+           ShadowSdsmMode::PreviousFrameMinMax);
   const bool depthPyramidEnabled =
-      settings.opaque.enableDepthPyramid && nuri::isValid(sceneDepthTexture) &&
+      requiresDepthPyramid && nuri::isValid(sceneDepthTexture) &&
       nuri::isValid(depthPyramidPipelineHandle_) &&
       sceneDepthPyramidLevelCount_ > 0u && !baseDrawItems.empty();
   if (depthPyramidEnabled) {
@@ -3060,7 +3072,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     frame.metrics.opaque.depthPyramidLevels =
         saturateToU32(depthPyramidDrawItems_.size());
+    sceneDepthPyramidSourceFrameIndex_ = frame.frameIndex;
     NURI_PROFILER_ZONE_END();
+  } else {
+    sceneDepthPyramidSourceFrameIndex_.reset();
   }
 
   const bool shouldLoadColor = settings.skybox.enabled;
@@ -5765,6 +5780,7 @@ void OpaqueRenderer::destroyDepthPyramidTextures() {
   sceneDepthPyramidLevelCount_ = 0;
   sceneDepthPyramidWidth_ = 0;
   sceneDepthPyramidHeight_ = 0;
+  sceneDepthPyramidSourceFrameIndex_.reset();
 }
 
 void OpaqueRenderer::destroyPickTexture() {

@@ -212,17 +212,31 @@ inline void stabilizeOrthoBounds(glm::vec3 &lightMin, glm::vec3 &lightMax,
       glm::vec3(inverseLightView * glm::vec4(snappedLightCenter, 1.0f));
 }
 
+[[nodiscard]] inline float
+linearizeDeviceDepthToViewDepth(float deviceDepth,
+                                const CameraFrameState &camera) {
+  const float clampedDepth = std::clamp(deviceDepth, 0.0f, 1.0f);
+  const float nearPlane = std::max(camera.nearPlane, 0.01f);
+  const float farPlane = std::max(camera.farPlane, nearPlane + 0.01f);
+  if (camera.projectionType == ProjectionType::Orthographic) {
+    return glm::mix(nearPlane, farPlane, clampedDepth);
+  }
+  const float denominator = farPlane - clampedDepth * (farPlane - nearPlane);
+  if (!std::isfinite(denominator) || denominator <= 1.0e-6f) {
+    return farPlane;
+  }
+  return nearPlane * farPlane / denominator;
+}
+
 [[nodiscard]] inline std::array<float, kMaxShadowCascades + 1u>
-computeCascadeSplitDepths(const CameraFrameState &camera, float maxDistance,
-                          uint32_t cascadeCount,
-                          ShadowCascadeSplitMode splitMode, float lambda) {
+computeCascadeSplitDepthsForRange(float nearDepth, float farDepth,
+                                  uint32_t cascadeCount,
+                                  ShadowCascadeSplitMode splitMode,
+                                  float lambda) {
   const uint32_t safeCascadeCount =
       std::clamp(cascadeCount, 1u, kMaxShadowCascades);
-  const float effectiveNear = std::max(camera.nearPlane, 0.01f);
-  const float requestedFar =
-      std::min(std::max(maxDistance, effectiveNear + 0.01f),
-               std::max(camera.farPlane, effectiveNear + 0.01f));
-  const float effectiveFar = std::max(effectiveNear + 0.01f, requestedFar);
+  const float effectiveNear = std::max(nearDepth, 0.01f);
+  const float effectiveFar = std::max(effectiveNear + 0.01f, farDepth);
   const float clampedLambda = std::clamp(lambda, 0.0f, 1.0f);
 
   std::array<float, kMaxShadowCascades + 1u> splits{};
@@ -250,6 +264,19 @@ computeCascadeSplitDepths(const CameraFrameState &camera, float maxDistance,
   }
   splits[safeCascadeCount] = effectiveFar;
   return splits;
+}
+
+[[nodiscard]] inline std::array<float, kMaxShadowCascades + 1u>
+computeCascadeSplitDepths(const CameraFrameState &camera, float maxDistance,
+                          uint32_t cascadeCount,
+                          ShadowCascadeSplitMode splitMode, float lambda) {
+  const float effectiveNear = std::max(camera.nearPlane, 0.01f);
+  const float requestedFar =
+      std::min(std::max(maxDistance, effectiveNear + 0.01f),
+               std::max(camera.farPlane, effectiveNear + 0.01f));
+  const float effectiveFar = std::max(effectiveNear + 0.01f, requestedFar);
+  return computeCascadeSplitDepthsForRange(effectiveNear, effectiveFar,
+                                           cascadeCount, splitMode, lambda);
 }
 
 [[nodiscard]] inline DirectionalShadowFit fitDirectionalShadowCascadeSlice(

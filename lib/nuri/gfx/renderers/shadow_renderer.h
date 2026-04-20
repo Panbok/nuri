@@ -159,6 +159,7 @@ private:
   void resetCachedState();
   void resetFrameBuildState();
   void resetFrozenShadowFit();
+  void resetSdsmState();
 
   GPUDevice &gpu_;
   ShadowRendererConfig config_{};
@@ -217,6 +218,31 @@ private:
   LightId frozenShadowLightId_ = kInvalidLightId;
   uint32_t frozenShadowMapSize_ = 0u;
   uint32_t frozenCascadeCount_ = 0u;
+  bool hasValidSdsmRange_ = false;
+  bool hasValidSdsmEffectiveFar_ = false;
+  bool hasValidSdsmFarCascadeTexelSize_ = false;
+  bool sdsmAdaptiveSplitsActive_ = false;
+  float sdsmSmoothedMinDepth_ = 0.0f;
+  float sdsmSmoothedMaxDepth_ = 0.0f;
+  float sdsmEffectiveFarDepth_ = 0.0f;
+  float sdsmFarCascadeTexelWorldSize_ = 0.0f;
+  uint64_t lastValidSdsmSourceFrameIndex_ =
+      std::numeric_limits<uint64_t>::max();
+  ShadowSdsmStatus lastLoggedSdsmWarningStatus_ = ShadowSdsmStatus::Disabled;
+  bool lastLoggedSdsmWarningFixedFallbackActive_ = false;
+  bool lastLoggedSdsmWarningReusedCachedRange_ = false;
+  uint64_t lastLoggedSdsmWarningSourceFrameIndex_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t lastLoggedSdsmWarningFrameIndex_ =
+      std::numeric_limits<uint64_t>::max();
+  bool lastLoggedSdsmRangeContracted_ = false;
+  bool lastLoggedSdsmAdaptiveRangeActive_ = false;
+  float lastLoggedSdsmContractedEffectiveFar_ =
+      std::numeric_limits<float>::quiet_NaN();
+  float lastLoggedSdsmContractedSmoothedMax_ =
+      std::numeric_limits<float>::quiet_NaN();
+  uint64_t lastLoggedSdsmContractedFrameIndex_ =
+      std::numeric_limits<uint64_t>::max();
   std::array<shadow_detail::DirectionalShadowFit, kMaxShadowCascades>
       frozenShadowFits_{};
   ShadowFrameGpuData shadowFrameCpuData_{};

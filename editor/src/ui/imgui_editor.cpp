@@ -71,6 +71,12 @@ constexpr std::array<uint32_t, 4> kShadowMapResolutions = {1024u, 2048u, 4096u,
                                                            8192u};
 constexpr std::array<const char *, 4> kShadowMapResolutionLabels = {"1K", "2K",
                                                                     "4K", "8K"};
+const std::array<ImVec4, kMaxShadowCascades> kShadowCascadeColorsUi = {
+    ImVec4(0.15f, 1.0f, 0.3f, 1.0f),
+    ImVec4(0.0f, 0.85f, 1.0f, 1.0f),
+    ImVec4(1.0f, 0.9f, 0.1f, 1.0f),
+    ImVec4(1.0f, 0.25f, 1.0f, 1.0f),
+};
 
 enum class PassInspectorKind : uint8_t {
   Skybox,
@@ -256,6 +262,67 @@ const char *shadowSdsmModeDisplayName(ShadowSdsmMode mode) {
     return "Histogram";
   }
   return "Unknown";
+}
+
+const char *shadowSdsmStatusDisplayName(ShadowSdsmStatus status) {
+  switch (status) {
+  case ShadowSdsmStatus::Disabled:
+    return "Disabled";
+  case ShadowSdsmStatus::Active:
+    return "Active";
+  case ShadowSdsmStatus::Unavailable:
+    return "Unavailable";
+  case ShadowSdsmStatus::Stale:
+    return "Stale";
+  case ShadowSdsmStatus::Invalid:
+    return "Invalid";
+  case ShadowSdsmStatus::FallbackFixed:
+    return "Fallback Fixed";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] bool isSdsmWarningStatus(ShadowSdsmStatus status) {
+  return status == ShadowSdsmStatus::Unavailable ||
+         status == ShadowSdsmStatus::Stale ||
+         status == ShadowSdsmStatus::Invalid;
+}
+
+void drawShadowSplitGraph(const ShadowSdsmDebugFrameData &sdsm) {
+  const float graphWidth = ImGui::GetContentRegionAvail().x;
+  const ImVec2 graphSize(std::max(graphWidth, 160.0f), 72.0f);
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  const ImVec2 max(origin.x + graphSize.x, origin.y + graphSize.y);
+  ImDrawList *drawList = ImGui::GetWindowDrawList();
+  const ImU32 borderColor = IM_COL32(110, 110, 110, 255);
+  const ImU32 barColor = IM_COL32(36, 36, 36, 255);
+  const ImU32 fixedColor = IM_COL32(150, 150, 150, 255);
+  drawList->AddRectFilled(origin, max, barColor, 4.0f);
+  drawList->AddRect(origin, max, borderColor, 4.0f);
+
+  const float rangeMin = sdsm.fixedRangeNear;
+  const float rangeMax = std::max(sdsm.fixedRangeFar, rangeMin + 1.0e-4f);
+  const auto normalizedX = [&](float depth) {
+    const float t =
+        std::clamp((depth - rangeMin) / (rangeMax - rangeMin), 0.0f, 1.0f);
+    return origin.x + t * graphSize.x;
+  };
+  const uint32_t splitCount =
+      std::clamp(sdsm.splitCount, 1u, kMaxShadowCascades);
+  for (uint32_t i = 1u; i < splitCount; ++i) {
+    const float fixedX = normalizedX(sdsm.fixedSplitDepths[i]);
+    drawList->AddLine(ImVec2(fixedX, origin.y + 10.0f),
+                      ImVec2(fixedX, max.y - 10.0f), fixedColor, 1.0f);
+  }
+  for (uint32_t i = 1u; i < splitCount; ++i) {
+    const float effectiveX = normalizedX(sdsm.effectiveSplitDepths[i]);
+    drawList->AddLine(ImVec2(effectiveX, origin.y + 4.0f),
+                      ImVec2(effectiveX, max.y - 4.0f),
+                      ImGui::ColorConvertFloat4ToU32(
+                          kShadowCascadeColorsUi[static_cast<size_t>(i - 1u)]),
+                      2.0f);
+  }
+  ImGui::InvisibleButton("ShadowSplitGraph", graphSize);
 }
 
 const char *shadowPreviewModeDisplayName(ShadowPreviewMode mode) {
@@ -1083,7 +1150,8 @@ void drawSkyboxSettings(RenderSettings::SkyboxSettings &skybox) {
   ImGui::Text("Skybox background: %s", skybox.enabled ? "enabled" : "disabled");
 }
 
-void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
+void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque,
+                        const RenderSettings::ShadowSettings &shadow) {
   constexpr const char *kDebugModes[] = {
       "None",
       "Wire Overlay",
@@ -1112,8 +1180,17 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque) {
                   &opaque.enableDepthPyramid);
   ImGui::Text("Effective Depth Pre-pass: %s",
               opaque.enableDepthPrepass ? "enabled" : "disabled");
+  const bool forcedDepthPyramid = shadow.enabled &&
+                                  sanitizeShadowSdsmMode(shadow.sdsmMode) ==
+                                      ShadowSdsmMode::PreviousFrameMinMax &&
+                                  !opaque.enableDepthPyramid;
   ImGui::Text("Effective Depth Pyramid: %s",
-              opaque.enableDepthPyramid ? "enabled" : "disabled");
+              (opaque.enableDepthPyramid || forcedDepthPyramid) ? "enabled"
+                                                                : "disabled");
+  if (forcedDepthPyramid) {
+    ImGui::TextUnformatted(
+        "Depth pyramid is forced on while previous-frame SDSM is active.");
+  }
 
   ImGui::Separator();
   ImGui::TextUnformatted("Mesh LOD");
@@ -1319,7 +1396,11 @@ void drawShadowSettings(
   }
   ImGui::SliderFloat("SDSM Temporal Blend##ShadowPass",
                      &shadow.sdsmTemporalBlend, 0.0f, 1.0f, "%.2f");
-  ImGui::TextUnformatted("SDSM controls are reserved for Phase 7/8.");
+  if (sanitizeShadowSdsmMode(shadow.sdsmMode) == ShadowSdsmMode::Histogram) {
+    ImGui::TextUnformatted(
+        "Histogram SDSM remains Phase 8 only and currently falls back to "
+        "fixed splits.");
+  }
 
   ImGui::Separator();
   ImGui::TextUnformatted("Debug");
@@ -1658,6 +1739,42 @@ void drawShadowsWindow(
   }
 
   ImGui::Separator();
+  const ShadowSdsmDebugFrameData &sdsm = shadowDebugFrameData->sdsm;
+  ImGui::TextUnformatted("SDSM");
+  ImGui::Text("Mode: %s", shadowSdsmModeDisplayName(sdsm.mode));
+  ImGui::Text("Status: %s", shadowSdsmStatusDisplayName(sdsm.status));
+  if (sdsm.sourceFrameIndex != std::numeric_limits<uint64_t>::max()) {
+    ImGui::Text("Source Frame: %llu",
+                static_cast<unsigned long long>(sdsm.sourceFrameIndex));
+  } else {
+    ImGui::TextUnformatted("Source Frame: unavailable");
+  }
+  ImGui::Text("Raw Device Min/Max: %.6f / %.6f", sdsm.rawDeviceMin,
+              sdsm.rawDeviceMax);
+  ImGui::Text("Raw Linear Min/Max: %.6f / %.6f", sdsm.rawLinearMin,
+              sdsm.rawLinearMax);
+  ImGui::Text("Smoothed Min/Max: %.6f / %.6f", sdsm.smoothedLinearMin,
+              sdsm.smoothedLinearMax);
+  ImGui::Text("Fixed Range: %.6f .. %.6f", sdsm.fixedRangeNear,
+              sdsm.fixedRangeFar);
+  ImGui::Text("Effective Range: %.6f .. %.6f", sdsm.effectiveRangeNear,
+              sdsm.effectiveRangeFar);
+  if (isSdsmWarningStatus(sdsm.status)) {
+    ImGui::TextUnformatted(sdsm.fixedFallbackActive
+                               ? "Warning: previous-frame SDSM data was not "
+                                 "usable this frame; fixed splits are active."
+                               : "Warning: previous-frame SDSM data was not "
+                                 "usable this frame; reusing the last valid "
+                                 "SDSM range.");
+  }
+  if (sdsm.mode == ShadowSdsmMode::Histogram) {
+    ImGui::TextUnformatted(
+        "Histogram SDSM is not implemented in the current build and falls "
+        "back to fixed splits.");
+  }
+  drawShadowSplitGraph(sdsm);
+
+  ImGui::Separator();
   ImGui::TextUnformatted("Preview");
   if (!nuri::isValid(previewTexture)) {
     ImGui::TextUnformatted(
@@ -1814,7 +1931,7 @@ void drawPassInspector(RenderSettings &renderSettings,
           drawShadowSettings(renderSettings.shadow);
           break;
         case PassInspectorKind::Opaque:
-          drawOpaqueSettings(renderSettings.opaque);
+          drawOpaqueSettings(renderSettings.opaque, renderSettings.shadow);
           break;
         case PassInspectorKind::Transmission:
           drawTransmissionSettings(renderSettings.transmission);

@@ -347,6 +347,7 @@ private:
   uint32_t sceneDepthPyramidLevelCount_ = 0;
   uint32_t sceneDepthPyramidWidth_ = 0;
   uint32_t sceneDepthPyramidHeight_ = 0;
+  std::optional<uint64_t> sceneDepthPyramidSourceFrameIndex_{};
   SamplerHandle sceneDepthSampler_{};
 
   ShaderHandle meshVertexShader_{};
