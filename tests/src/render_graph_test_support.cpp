@@ -63,6 +63,36 @@ TextureDesc makeTransientTextureDesc(Format format, uint32_t width,
   return desc;
 }
 
+[[nodiscard]] size_t fakeTextureBytesPerPixel(Format format) {
+  switch (format) {
+  case Format::R32_UINT:
+    return sizeof(uint32_t);
+  case Format::R32_FLOAT:
+    return sizeof(float);
+  case Format::RG32_FLOAT:
+    return sizeof(float) * 2u;
+  case Format::RGBA8_UNORM:
+  case Format::RGBA8_SRGB:
+  case Format::RGBA8_UINT:
+    return 4u;
+  case Format::RGBA16_FLOAT:
+    return 8u;
+  case Format::RGBA32_FLOAT:
+    return 16u;
+  case Format::D16_UNORM:
+    return sizeof(uint16_t);
+  case Format::D32_FLOAT:
+    return sizeof(float);
+  case Format::BC7_RGBA_UNORM:
+  case Format::BC7_RGBA_SRGB:
+  case Format::ETC2_RGB8_UNORM:
+  case Format::ETC2_RGB8_SRGB:
+  case Format::Count:
+    break;
+  }
+  return 0u;
+}
+
 RenderPass makeTestPass(std::string_view label, TextureHandle colorTexture) {
   RenderPass pass{};
   pass.debugLabel = label;
@@ -226,6 +256,11 @@ FakeGPUDeviceBase::createTextureImpl(const TextureDesc &desc) {
   state.format = desc.format;
   state.width = desc.dimensions.width;
   state.height = desc.dimensions.height;
+  const size_t bytesPerPixel = fakeTextureBytesPerPixel(desc.format);
+  const size_t texelCount =
+      static_cast<size_t>(std::max(desc.dimensions.width, 1u)) *
+      static_cast<size_t>(std::max(desc.dimensions.height, 1u));
+  state.bytes.assign(texelCount * bytesPerPixel, std::byte{0});
   state.live = true;
   ++createdTextureCount;
   TextureDesc storedDesc = desc;
@@ -813,9 +848,68 @@ std::byte *FakeGPUDeviceBase::getMappedBufferPtr(BufferHandle) {
 void FakeGPUDeviceBase::flushMappedBuffer(BufferHandle, size_t, size_t) {}
 
 Result<bool, std::string>
-FakeGPUDeviceBase::readTexture(TextureHandle, const TextureReadbackRegion &,
-                               std::span<std::byte>) {
-  return Result<bool, std::string>::makeError("not implemented in fake device");
+FakeGPUDeviceBase::seedTextureBytes(TextureHandle texture,
+                                    std::span<const std::byte> bytes) {
+  if (!nuri::isValid(texture) || texture.index == 0u ||
+      texture.index > textures_.size()) {
+    return Result<bool, std::string>::makeError("invalid texture handle");
+  }
+  TextureState &state = textures_[texture.index - 1u];
+  if (!state.live || !sameHandle(state.handle, texture)) {
+    return Result<bool, std::string>::makeError("texture is not live");
+  }
+  if (state.bytes.size() != bytes.size()) {
+    return Result<bool, std::string>::makeError(
+        "seedTextureBytes: size mismatch");
+  }
+  std::copy(bytes.begin(), bytes.end(), state.bytes.begin());
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+FakeGPUDeviceBase::readTexture(TextureHandle texture,
+                               const TextureReadbackRegion &region,
+                               std::span<std::byte> outBytes) {
+  if (!nuri::isValid(texture) || texture.index == 0u ||
+      texture.index > textures_.size()) {
+    return Result<bool, std::string>::makeError("invalid texture handle");
+  }
+  const TextureState &state = textures_[texture.index - 1u];
+  if (!state.live || !sameHandle(state.handle, texture)) {
+    return Result<bool, std::string>::makeError("texture is not live");
+  }
+  if (region.width == 0u || region.height == 0u || region.mipLevel != 0u ||
+      region.layer != 0u) {
+    return Result<bool, std::string>::makeError("unsupported readback region");
+  }
+  const size_t bytesPerPixel = fakeTextureBytesPerPixel(state.format);
+  if (bytesPerPixel == 0u) {
+    return Result<bool, std::string>::makeError("unsupported texture format");
+  }
+  if (region.x >= state.width || region.y >= state.height ||
+      region.width > state.width - region.x ||
+      region.height > state.height - region.y) {
+    return Result<bool, std::string>::makeError(
+        "readback region out of bounds");
+  }
+  const size_t expectedSize = static_cast<size_t>(region.width) *
+                              static_cast<size_t>(region.height) *
+                              bytesPerPixel;
+  if (outBytes.size() < expectedSize) {
+    return Result<bool, std::string>::makeError("readback buffer too small");
+  }
+  const size_t rowBytes = static_cast<size_t>(region.width) * bytesPerPixel;
+  for (uint32_t row = 0u; row < region.height; ++row) {
+    const size_t srcOffset = (static_cast<size_t>(region.y + row) *
+                                  static_cast<size_t>(state.width) +
+                              static_cast<size_t>(region.x)) *
+                             bytesPerPixel;
+    const size_t dstOffset = static_cast<size_t>(row) * rowBytes;
+    std::copy_n(state.bytes.begin() + static_cast<std::ptrdiff_t>(srcOffset),
+                rowBytes,
+                outBytes.begin() + static_cast<std::ptrdiff_t>(dstOffset));
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 void FakeGPUDeviceBase::waitIdle() {

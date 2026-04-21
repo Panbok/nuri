@@ -21,6 +21,7 @@ TEST(RenderSceneLightStoreTests,
   light.name = "Sun";
   light.color = glm::vec3(0.75f, 0.5f, 0.25f);
   light.intensity = 3.5f;
+  light.angularRadiusDegrees = 1.25f;
   auto addResult = graph.addLight(graph.rootNode(), light);
   ASSERT_FALSE(addResult.hasError()) << addResult.error();
 
@@ -46,6 +47,7 @@ TEST(RenderSceneLightStoreTests,
   EXPECT_NEAR(gpu.colorReserved.x, 0.75f, 1.0e-5f);
   EXPECT_NEAR(gpu.colorReserved.y, 0.5f, 1.0e-5f);
   EXPECT_NEAR(gpu.colorReserved.z, 0.25f, 1.0e-5f);
+  EXPECT_NEAR(gpu.colorReserved.w, glm::radians(1.25f), 1.0e-5f);
 }
 
 TEST(RenderSceneLightStoreTests,

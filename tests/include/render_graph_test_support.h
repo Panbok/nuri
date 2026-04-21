@@ -149,6 +149,8 @@ public:
   Result<bool, std::string> readTexture(TextureHandle texture,
                                         const TextureReadbackRegion &region,
                                         std::span<std::byte> outBytes) override;
+  Result<bool, std::string> seedTextureBytes(TextureHandle texture,
+                                             std::span<const std::byte> bytes);
 
   void waitIdle() override;
 
@@ -238,6 +240,7 @@ private:
     Format format = Format::RGBA8_UNORM;
     uint32_t width = 1u;
     uint32_t height = 1u;
+    std::vector<std::byte> bytes{};
     bool live = false;
   };
 
