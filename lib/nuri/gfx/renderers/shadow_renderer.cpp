@@ -23,11 +23,9 @@ constexpr uint32_t kShadowPreviewFlagInvert = 1u << 0u;
 constexpr uint32_t kShadowPreviewFlagLog = 1u << 1u;
 constexpr uint32_t kShadowPreviewFlagTiled = 1u << 2u;
 constexpr float kCullingPaddingTexelMultiplier = 2.0f;
-constexpr float kSdsmFixedFarCoverageHoldRatio = 0.35f;
-constexpr float kSdsmFixedFarReleaseRatio = 0.85f;
+constexpr uint32_t kSdsmHistogramSourceMaxTexelCount = 4096u;
 constexpr uint64_t kSdsmDiagnosticRefreshFrames = 120u;
-constexpr float kSdsmDiagnosticRangeDeltaThreshold = 1.0f;
-constexpr float kSdsmContractionDepthThreshold = 0.5f;
+constexpr float kSdsmHistogramClearDepthEpsilon = 1.0e-4f;
 constexpr std::string_view kShadowPreviewVS = R"(
 #version 460
 
@@ -213,22 +211,194 @@ struct SdsmLogDiagnostics {
   bool rawDepthsValid = false;
   bool rawLinearValid = false;
   bool historyRangeValid = false;
-  bool historyEffectiveFarValid = false;
   bool historyTexelValid = false;
-  bool adaptiveActiveBefore = false;
-  float minimumFarDepth = std::numeric_limits<float>::quiet_NaN();
-  float targetFar = std::numeric_limits<float>::quiet_NaN();
-  float splitActivateThreshold = std::numeric_limits<float>::quiet_NaN();
-  float splitReleaseThreshold = std::numeric_limits<float>::quiet_NaN();
-  float farActivateThreshold = std::numeric_limits<float>::quiet_NaN();
-  float farReleaseThreshold = std::numeric_limits<float>::quiet_NaN();
 };
 
-struct SdsmHysteresisResult {
-  bool hasHistory = false;
-  float historyFar = 0.0f;
-  float appliedFar = 0.0f;
+struct SdsmHistogramAnalysis {
+  bool valid = false;
+  bool clearOnlySource = false;
+  uint32_t sourceLevel = 0u;
+  glm::uvec2 sourceDimensions{0u};
+  uint32_t validTileCount = 0u;
+  float totalWeight = 0.0f;
+  float rawDeviceMin = 0.0f;
+  float rawDeviceMax = 0.0f;
+  float rawLinearMin = 0.0f;
+  float rawLinearMax = 0.0f;
+  float trimmedNear = 0.0f;
+  float trimmedFar = 0.0f;
+  std::array<float, kMaxShadowCascades + 1u> rawSplitDepths{};
+  std::array<float, kMaxShadowSdsmHistogramBucketCount> bucketWeights{};
 };
+
+[[nodiscard]] SdsmHistogramAnalysis buildSdsmHistogramAnalysis(
+    const CameraFrameState &camera, ShadowSplitRange fixedSplitRange,
+    uint32_t cascadeCount, uint32_t bucketCount, float trimLowPercent,
+    float trimHighPercent, uint32_t sourceLevel, glm::uvec2 sourceDimensions,
+    std::span<const float> minMaxPairs) {
+  SdsmHistogramAnalysis analysis{};
+  analysis.sourceLevel = sourceLevel;
+  analysis.sourceDimensions = sourceDimensions;
+
+  const uint32_t safeBucketCount = std::clamp(
+      bucketCount, kMinShadowSdsmHistogramBucketCount,
+      kMaxShadowSdsmHistogramBucketCount);
+  if (minMaxPairs.size() < 2u || (minMaxPairs.size() % 2u) != 0u) {
+    return analysis;
+  }
+
+  analysis.rawDeviceMin = 1.0f;
+  analysis.rawDeviceMax = 0.0f;
+  analysis.rawLinearMin = fixedSplitRange.farDepth;
+  analysis.rawLinearMax = fixedSplitRange.nearDepth;
+  bool hasNonClearLinearMax = false;
+  float maxNonClearLinearMax = fixedSplitRange.nearDepth;
+  uint32_t rawValidTileCount = 0u;
+  uint32_t clearOnlyTileCount = 0u;
+  bool malformedTile = false;
+  const auto isClearDepthSample = [](float rawDeviceDepth) {
+    return rawDeviceDepth >= (1.0f - kSdsmHistogramClearDepthEpsilon);
+  };
+
+  for (size_t i = 0u; i + 1u < minMaxPairs.size(); i += 2u) {
+    const float rawDeviceMin = minMaxPairs[i];
+    const float rawDeviceMax = minMaxPairs[i + 1u];
+    const bool rawDepthsValid =
+        std::isfinite(rawDeviceMin) && std::isfinite(rawDeviceMax) &&
+        rawDeviceMin >= -1.0e-4f && rawDeviceMax <= (1.0f + 1.0e-4f) &&
+        rawDeviceMax >= rawDeviceMin;
+    if (!rawDepthsValid) {
+      malformedTile = true;
+      continue;
+    }
+
+    const float rawLinearMin =
+        shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMin, camera);
+    const float rawLinearMax =
+        shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMax, camera);
+    if (!std::isfinite(rawLinearMin) || !std::isfinite(rawLinearMax) ||
+        rawLinearMax < rawLinearMin) {
+      malformedTile = true;
+      continue;
+    }
+
+    ++rawValidTileCount;
+    const bool clearOnlyTile =
+        isClearDepthSample(rawDeviceMin) && isClearDepthSample(rawDeviceMax);
+    if (clearOnlyTile) {
+      ++clearOnlyTileCount;
+      continue;
+    }
+
+    analysis.rawDeviceMin = std::min(analysis.rawDeviceMin, rawDeviceMin);
+    analysis.rawDeviceMax = std::max(analysis.rawDeviceMax, rawDeviceMax);
+    analysis.rawLinearMin = std::min(analysis.rawLinearMin, rawLinearMin);
+    analysis.rawLinearMax = std::max(analysis.rawLinearMax, rawLinearMax);
+    if (!isClearDepthSample(rawDeviceMax)) {
+      maxNonClearLinearMax = std::max(maxNonClearLinearMax, rawLinearMax);
+      hasNonClearLinearMax = true;
+    }
+  }
+
+  for (size_t i = 0u; i + 1u < minMaxPairs.size(); i += 2u) {
+    const float rawDeviceMin = minMaxPairs[i];
+    const float rawDeviceMax = minMaxPairs[i + 1u];
+    const bool rawDepthsValid =
+        std::isfinite(rawDeviceMin) && std::isfinite(rawDeviceMax) &&
+        rawDeviceMin >= -1.0e-4f && rawDeviceMax <= (1.0f + 1.0e-4f) &&
+        rawDeviceMax >= rawDeviceMin;
+    if (!rawDepthsValid) {
+      continue;
+    }
+
+    const float rawLinearMin =
+        shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMin, camera);
+    const float rawLinearMax =
+        shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMax, camera);
+    if (!std::isfinite(rawLinearMin) || !std::isfinite(rawLinearMax) ||
+        rawLinearMax < rawLinearMin) {
+      continue;
+    }
+
+    const bool clearOnlyTile =
+        isClearDepthSample(rawDeviceMin) && isClearDepthSample(rawDeviceMax);
+    if (clearOnlyTile) {
+      continue;
+    }
+
+    float histogramLinearMax = rawLinearMax;
+    if (isClearDepthSample(rawDeviceMax)) {
+      // A tile that touches clear depth does not prove geometry extends all
+      // the way to the camera far plane. Cap it to the deepest non-clear
+      // sample seen in this mip so histogram trimming does not jump on sky
+      // contamination.
+      histogramLinearMax =
+          hasNonClearLinearMax ? std::max(rawLinearMin, maxNonClearLinearMax)
+                               : rawLinearMin;
+    }
+
+    shadow_detail::accumulateSdsmHistogramInterval(
+        std::span<float>(analysis.bucketWeights.data(), safeBucketCount),
+        fixedSplitRange.nearDepth, fixedSplitRange.farDepth, rawLinearMin,
+        histogramLinearMax, 1.0f);
+    ++analysis.validTileCount;
+    analysis.totalWeight += 1.0f;
+  }
+
+  if (analysis.validTileCount == 0u || analysis.totalWeight <= 1.0e-6f) {
+    const bool clearOnlySource =
+        !malformedTile && rawValidTileCount > 0u &&
+        clearOnlyTileCount == rawValidTileCount;
+    if (clearOnlySource) {
+      const float clearLinearDepth =
+          shadow_detail::linearizeDeviceDepthToViewDepth(1.0f, camera);
+      if (std::isfinite(clearLinearDepth)) {
+        analysis.valid = true;
+        analysis.clearOnlySource = true;
+        analysis.validTileCount = clearOnlyTileCount;
+        analysis.rawDeviceMin = 1.0f;
+        analysis.rawDeviceMax = 1.0f;
+        analysis.rawLinearMin = clearLinearDepth;
+        analysis.rawLinearMax = clearLinearDepth;
+        analysis.trimmedNear = fixedSplitRange.farDepth;
+        analysis.trimmedFar = fixedSplitRange.farDepth;
+        analysis.rawSplitDepths.fill(fixedSplitRange.farDepth);
+        analysis.rawSplitDepths[0] = fixedSplitRange.nearDepth;
+      }
+    }
+    return analysis;
+  }
+
+  const float lowPercentile =
+      std::clamp(trimLowPercent / 100.0f, 0.0f, 0.95f);
+  const float highPercentile =
+      std::clamp(1.0f - trimHighPercent / 100.0f, lowPercentile + 1.0e-3f, 1.0f);
+  analysis.trimmedNear = shadow_detail::sdsmHistogramPercentileDepth(
+      std::span<const float>(analysis.bucketWeights.data(), safeBucketCount),
+      fixedSplitRange.nearDepth, fixedSplitRange.farDepth, lowPercentile);
+  analysis.trimmedFar = shadow_detail::sdsmHistogramPercentileDepth(
+      std::span<const float>(analysis.bucketWeights.data(), safeBucketCount),
+      fixedSplitRange.nearDepth, fixedSplitRange.farDepth, highPercentile);
+
+  analysis.rawSplitDepths.fill(fixedSplitRange.farDepth);
+  analysis.rawSplitDepths[0] = fixedSplitRange.nearDepth;
+  for (uint32_t i = 1u; i < std::clamp(cascadeCount, 1u, kMaxShadowCascades);
+       ++i) {
+    const float t = static_cast<float>(i) / static_cast<float>(cascadeCount);
+    const float percentile = glm::mix(lowPercentile, highPercentile, t);
+    analysis.rawSplitDepths[i] = shadow_detail::sdsmHistogramPercentileDepth(
+        std::span<const float>(analysis.bucketWeights.data(), safeBucketCount),
+        fixedSplitRange.nearDepth, fixedSplitRange.farDepth, percentile);
+  }
+  analysis.rawSplitDepths[cascadeCount] = analysis.trimmedFar;
+  shadow_detail::enforceMonotonicShadowSplitDepths(
+      analysis.rawSplitDepths, cascadeCount, fixedSplitRange.nearDepth,
+      std::max(analysis.trimmedFar, fixedSplitRange.nearDepth + 1.0e-4f));
+  analysis.valid = std::isfinite(analysis.trimmedNear) &&
+                   std::isfinite(analysis.trimmedFar) &&
+                   analysis.trimmedFar >= analysis.trimmedNear;
+  return analysis;
+}
 
 [[nodiscard]] ShadowSplitRange
 computeFixedShadowSplitRange(const CameraFrameState &camera,
@@ -244,74 +414,8 @@ computeFixedShadowSplitRange(const CameraFrameState &camera,
 }
 
 [[nodiscard]] float
-computeSdsmFarHysteresisDepth(ShadowSplitRange fixedSplitRange,
-                              float minimumFarDepth) {
-  const float farCascadeSpan =
-      std::max(fixedSplitRange.farDepth - minimumFarDepth, 0.0f);
-  return std::max(farCascadeSpan * 0.05f, 1.0f);
-}
-
-[[nodiscard]] float
-computeSdsmFixedFarActivationDepth(ShadowSplitRange fixedSplitRange,
-                                   float minimumFarDepth) {
-  const float farCascadeSpan =
-      std::max(fixedSplitRange.farDepth - minimumFarDepth, 0.0f);
-  // Previous-frame min/max is noisy enough that shrinking the total shadow
-  // distance while content still lives in the outer third of the fixed far
-  // cascade causes visible coverage loss. Hold the fixed far plane until the
-  // visible range moves materially deeper into that last cascade.
-  return std::max(farCascadeSpan * kSdsmFixedFarCoverageHoldRatio, 8.0f);
-}
-
-[[nodiscard]] float
 computeSdsmFarUpdateThreshold(float farCascadeTexelWorldSize) {
   return std::max(std::max(farCascadeTexelWorldSize, 0.0f) * 16.0f, 0.5f);
-}
-
-[[nodiscard]] SdsmHysteresisResult applySdsmFarHysteresis(
-    float targetFar, float minimumFarDepth, ShadowSplitRange fixedSplitRange,
-    float farCascadeTexelWorldSize, bool hasHistory, float historyFar) {
-  const float clampedTarget =
-      std::clamp(targetFar, minimumFarDepth, fixedSplitRange.farDepth);
-  if (!hasHistory || !std::isfinite(historyFar)) {
-    return SdsmHysteresisResult{
-        .hasHistory = true,
-        .historyFar = clampedTarget,
-        .appliedFar = clampedTarget,
-    };
-  }
-
-  const float updateThreshold =
-      computeSdsmFarUpdateThreshold(farCascadeTexelWorldSize);
-  if (std::abs(clampedTarget - historyFar) <= updateThreshold) {
-    return SdsmHysteresisResult{
-        .hasHistory = true,
-        .historyFar = historyFar,
-        .appliedFar = historyFar,
-    };
-  }
-
-  if (clampedTarget >= historyFar) {
-    historyFar = clampedTarget;
-    return SdsmHysteresisResult{
-        .hasHistory = true,
-        .historyFar = historyFar,
-        .appliedFar = historyFar,
-    };
-  }
-
-  const float shrinkDepth =
-      computeSdsmFarHysteresisDepth(fixedSplitRange, minimumFarDepth);
-  if (clampedTarget < historyFar - shrinkDepth) {
-    historyFar = std::max(clampedTarget, historyFar - shrinkDepth);
-  }
-  historyFar =
-      std::clamp(historyFar, minimumFarDepth, fixedSplitRange.farDepth);
-  return SdsmHysteresisResult{
-      .hasHistory = true,
-      .historyFar = historyFar,
-      .appliedFar = historyFar,
-  };
 }
 
 [[nodiscard]] CameraFrameState
@@ -1169,6 +1273,13 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       shadow_detail::computeCascadeSplitDepthsForRange(
           fixedSplitRange.nearDepth, fixedSplitRange.farDepth, cascadeCount,
           settings.splitMode, settings.splitLambda);
+  const float minimumFarDepth =
+      cascadeCount > 1u ? fixedSplitDepths[cascadeCount - 1u]
+                        : fixedSplitRange.farDepth;
+  std::array<float, kMaxShadowCascades + 1u> minMaxSplitDepths =
+      fixedSplitDepths;
+  std::array<float, kMaxShadowCascades + 1u> histogramSplitDepths =
+      fixedSplitDepths;
   shadowDebugFrameData_.rawSamplerId = frame.sharedResources.shadowRawSamplerId;
   shadowDebugFrameData_.compareSamplerId =
       frame.sharedResources.shadowCompareSamplerId;
@@ -1179,14 +1290,24 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   shadowDebugFrameData_.sdsm.sourceFrameIndex =
       frame.sharedResources.sceneDepthPyramidSourceFrameIndex.value_or(
           std::numeric_limits<uint64_t>::max());
+  shadowDebugFrameData_.sdsm.histogramBucketCount =
+      settings.sdsmHistogramBucketCount;
+  shadowDebugFrameData_.sdsm.histogramTrimLowPercent =
+      settings.sdsmHistogramTrimLowPercent;
+  shadowDebugFrameData_.sdsm.histogramTrimHighPercent =
+      settings.sdsmHistogramTrimHighPercent;
   shadowDebugFrameData_.sdsm.splitCount = cascadeCount;
   shadowDebugFrameData_.sdsm.fixedRangeNear = fixedSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.fixedRangeFar = fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.smoothedLinearMin = fixedSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.smoothedLinearMax = fixedSplitRange.farDepth;
+  shadowDebugFrameData_.sdsm.histogramTrimmedRangeNear = fixedSplitRange.nearDepth;
+  shadowDebugFrameData_.sdsm.histogramTrimmedRangeFar = fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeNear = fixedSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeFar = fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.fixedSplitDepths = fixedSplitDepths;
+  shadowDebugFrameData_.sdsm.minMaxSplitDepths = fixedSplitDepths;
+  shadowDebugFrameData_.sdsm.histogramSplitDepths = fixedSplitDepths;
   shadowDebugFrameData_.sdsm.effectiveSplitDepths = fixedSplitDepths;
   shadowDebugFrameData_.sdsm.fixedFallbackActive =
       sdsmMode == ShadowSdsmMode::Histogram;
@@ -1198,9 +1319,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   sdsmLog.sourceFrameAvailable =
       frame.sharedResources.sceneDepthPyramidSourceFrameIndex.has_value();
   sdsmLog.historyRangeValid = sdsmState_.hasValidSdsmRange_;
-  sdsmLog.historyEffectiveFarValid = sdsmState_.hasValidSdsmEffectiveFar_;
   sdsmLog.historyTexelValid = sdsmState_.hasValidSdsmFarCascadeTexelSize_;
-  sdsmLog.adaptiveActiveBefore = sdsmState_.sdsmAdaptiveSplitsActive_;
   for (uint32_t cascadeIndex = 0u; cascadeIndex < activeCascadeCount_;
        ++cascadeIndex) {
     shadowDebugFrameData_.cascades[cascadeIndex].texture =
@@ -1215,9 +1334,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   };
   const auto invalidateSdsmRange = [&]() {
     sdsmState_.hasValidSdsmRange_ = false;
-    sdsmState_.hasValidSdsmEffectiveFar_ = false;
     sdsmState_.hasValidSdsmFarCascadeTexelSize_ = false;
-    sdsmState_.sdsmAdaptiveSplitsActive_ = false;
+    sdsmState_.hasValidSdsmHistogramSplits_ = false;
+    sdsmState_.sdsmHistogramCascadeCount_ = 0u;
+    sdsmState_.sdsmSmoothedHistogramSplitDepths_ = {};
     sdsmState_.lastValidSdsmSourceFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
   };
@@ -1234,26 +1354,11 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   const auto applyCachedSdsmRange = [&]() {
     NURI_ASSERT(sdsmState_.hasValidSdsmRange_,
                 "Cached SDSM range requested without valid history");
-    const float effectiveNear = fixedSplitRange.nearDepth;
-    const float minimumFarDepth = cascadeCount > 1u
-                                      ? fixedSplitDepths[cascadeCount - 1u]
-                                      : fixedSplitRange.farDepth;
-    const float cachedTargetFar =
-        std::clamp(std::max(sdsmState_.sdsmSmoothedMaxDepth_, minimumFarDepth),
-                   effectiveNear + 1.0e-4f, fixedSplitRange.farDepth);
-    const float cachedEffectiveFar =
-        sdsmState_.hasValidSdsmEffectiveFar_
-            ? std::clamp(sdsmState_.sdsmEffectiveFarDepth_, minimumFarDepth,
-                         fixedSplitRange.farDepth)
-            : cachedTargetFar;
     shadowDebugFrameData_.sdsm.smoothedLinearMin =
         sdsmState_.sdsmSmoothedMinDepth_;
     shadowDebugFrameData_.sdsm.smoothedLinearMax =
         sdsmState_.sdsmSmoothedMaxDepth_;
-    return ShadowSplitRange{
-        .nearDepth = effectiveNear,
-        .farDepth = std::max(effectiveNear + 1.0e-4f, cachedEffectiveFar),
-    };
+    return fixedSplitRange;
   };
   ShadowSplitRange effectiveSplitRange = fixedSplitRange;
   std::array<float, kMaxShadowCascades + 1u> effectiveSplitDepths =
@@ -1264,13 +1369,76 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         effectiveSplitRange.nearDepth, effectiveSplitRange.farDepth,
         cascadeCount, settings.splitMode, settings.splitLambda);
   };
+  const auto updateHistogramEffectiveSplitDepths =
+      [&](const std::array<float, kMaxShadowCascades + 1u> &rawSplitDepths,
+          bool allowSmoothing) {
+        if (!allowSmoothing || !sdsmState_.hasValidSdsmHistogramSplits_ ||
+            sdsmState_.sdsmHistogramCascadeCount_ != cascadeCount) {
+          sdsmState_.sdsmSmoothedHistogramSplitDepths_ = rawSplitDepths;
+        } else {
+          const float historyWeight =
+              std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
+          const float sampleWeight = 1.0f - historyWeight;
+          for (uint32_t i = 1u; i < cascadeCount; ++i) {
+            sdsmState_.sdsmSmoothedHistogramSplitDepths_[i] =
+                rawSplitDepths[i] * sampleWeight +
+                sdsmState_.sdsmSmoothedHistogramSplitDepths_[i] * historyWeight;
+          }
+        }
+        sdsmState_.sdsmSmoothedHistogramSplitDepths_[0] = rawSplitDepths[0];
+        sdsmState_.sdsmSmoothedHistogramSplitDepths_[cascadeCount] =
+            rawSplitDepths[cascadeCount];
+        shadow_detail::enforceMonotonicShadowSplitDepths(
+            sdsmState_.sdsmSmoothedHistogramSplitDepths_, cascadeCount,
+            rawSplitDepths[0],
+            std::max(rawSplitDepths[cascadeCount], rawSplitDepths[0] + 1.0e-4f));
+        sdsmState_.hasValidSdsmHistogramSplits_ = true;
+        sdsmState_.sdsmHistogramCascadeCount_ = cascadeCount;
+      };
+  const auto buildHistogramSplitDepthsForRange =
+      [&](const std::array<float, kMaxShadowCascades + 1u> &histogramDepths,
+          ShadowSplitRange range) {
+        std::array<float, kMaxShadowCascades + 1u> mappedSplitDepths =
+            histogramDepths;
+        const float mappedNear = std::max(range.nearDepth, 0.01f);
+        const float mappedFar = std::max(mappedNear + 1.0e-4f, range.farDepth);
+        mappedSplitDepths[0] = mappedNear;
+        if (cascadeCount == 1u) {
+          mappedSplitDepths[1] = mappedFar;
+          return mappedSplitDepths;
+        }
+
+        const float histogramFar = std::max(
+            histogramDepths[cascadeCount], histogramDepths[0] + 1.0e-4f);
+        const float histogramSpan =
+            std::max(histogramFar - histogramDepths[0], 1.0e-4f);
+        const float mappedSpan = mappedFar - mappedNear;
+        for (uint32_t i = 1u; i < cascadeCount; ++i) {
+          const float normalized =
+              std::clamp((histogramDepths[i] - histogramDepths[0]) /
+                             histogramSpan,
+                         0.0f, 1.0f);
+          mappedSplitDepths[i] = mappedNear + normalized * mappedSpan;
+        }
+        shadow_detail::enforceMonotonicShadowSplitDepths(
+            mappedSplitDepths, cascadeCount, mappedNear, mappedFar);
+        return mappedSplitDepths;
+      };
   const auto reuseCachedSdsmRangeOrFallback = [&](ShadowSdsmStatus status,
                                                   std::string_view reason) {
     shadowDebugFrameData_.sdsm.status = status;
     sdsmLog.reason = reason;
     if (canReuseCachedSdsmRange()) {
       sdsmLog.reusedCachedRange = true;
-      updateEffectiveSplitRange(applyCachedSdsmRange());
+      shadowDebugFrameData_.sdsm.fixedFallbackActive = false;
+      const ShadowSplitRange cachedRange = applyCachedSdsmRange();
+      effectiveSplitRange = cachedRange;
+      if (sdsmMode == ShadowSdsmMode::Histogram &&
+          sdsmState_.hasValidSdsmHistogramSplits_ &&
+          sdsmState_.sdsmHistogramCascadeCount_ == cascadeCount) {
+        histogramSplitDepths = sdsmState_.sdsmSmoothedHistogramSplitDepths_;
+      }
+      updateEffectiveSplitRange(cachedRange);
       return;
     }
     invalidateSdsmRange();
@@ -1359,13 +1527,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   if (sdsmMode == ShadowSdsmMode::Disabled) {
     sdsmLog.reason = "sdsm_disabled";
     invalidateSdsmRange();
-  } else if (sdsmMode == ShadowSdsmMode::Histogram) {
-    sdsmLog.reason = "histogram_fallback";
-    invalidateSdsmRange();
-    shadowDebugFrameData_.sdsm.status = ShadowSdsmStatus::FallbackFixed;
-    shadowDebugFrameData_.sdsm.fixedFallbackActive = true;
   } else {
-    TextureHandle sdsmTexture{};
     bool hasValidSdsmSource =
         frame.sharedResources.sceneDepthPyramidSourceFrameIndex.has_value() &&
         frame.frameIndex > 0u &&
@@ -1384,158 +1546,228 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                                          ? "stale_source_frame"
                                          : "missing_previous_frame_data");
     } else {
-      sdsmTexture =
-          frame.sharedResources.sceneDepthPyramidTextures
-              [frame.sharedResources.sceneDepthPyramidLevelCount - 1u];
-      sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
-      if (!nuri::isValid(sdsmTexture)) {
-        reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
-                                       "invalid_source_texture");
-      } else {
-        std::array<std::byte, sizeof(float) * 2u> sdsmBytes{};
-        const TextureReadbackRegion readbackRegion{
-            .x = 0u,
-            .y = 0u,
-            .width = 1u,
-            .height = 1u,
-            .mipLevel = 0u,
-            .layer = 0u,
-        };
-        auto readResult =
-            gpu_.readTexture(sdsmTexture, readbackRegion, sdsmBytes);
-        if (readResult.hasError()) {
-          sdsmLog.readbackError = true;
-          reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                         "source_readback_error");
-        } else {
-          std::array<float, 2u> rawDeviceDepths{};
-          std::memcpy(rawDeviceDepths.data(), sdsmBytes.data(),
-                      sizeof(rawDeviceDepths));
-          const float rawDeviceMin = rawDeviceDepths[0];
-          const float rawDeviceMax = rawDeviceDepths[1];
-          shadowDebugFrameData_.sdsm.rawDeviceMin = rawDeviceMin;
-          shadowDebugFrameData_.sdsm.rawDeviceMax = rawDeviceMax;
+      const float effectiveNear = fixedSplitRange.nearDepth;
+      const auto activateStableSdsmCoverage = [&]() {
+        sdsmLog.reason = "valid_previous_frame_data";
+        shadowDebugFrameData_.sdsm.status = ShadowSdsmStatus::Active;
+        shadowDebugFrameData_.sdsm.fixedFallbackActive = false;
+        shadowDebugFrameData_.sdsm.smoothedLinearMin =
+            sdsmState_.sdsmSmoothedMinDepth_;
+        shadowDebugFrameData_.sdsm.smoothedLinearMax =
+            sdsmState_.sdsmSmoothedMaxDepth_;
+        // Keep full shadow coverage stable. SDSM still tracks visible depth
+        // distribution for debug and, in histogram mode, can redistribute
+        // internal split placement, but it no longer contracts the overall
+        // shadow distance and then snaps back as camera zoom/dolly changes.
+        effectiveSplitRange = fixedSplitRange;
+      };
 
-          const bool rawDepthsValid =
-              std::isfinite(rawDeviceMin) && std::isfinite(rawDeviceMax) &&
-              rawDeviceMin >= -1.0e-4f && rawDeviceMax <= (1.0f + 1.0e-4f) &&
-              rawDeviceMax >= rawDeviceMin;
-          sdsmLog.rawDepthsValid = rawDepthsValid;
-          if (!rawDepthsValid) {
+      if (sdsmMode == ShadowSdsmMode::Histogram) {
+        std::array<glm::uvec2, kMaxSceneDepthPyramidLevels> levelDimensions{};
+        for (uint32_t level = 0u;
+             level < frame.sharedResources.sceneDepthPyramidLevelCount; ++level) {
+          const TextureHandle texture =
+              frame.sharedResources.sceneDepthPyramidTextures[level];
+          if (!nuri::isValid(texture)) {
+            levelDimensions[level] = glm::uvec2(1u);
+            continue;
+          }
+          const TextureDimensions dimensions = gpu_.getTextureDimensions(texture);
+          levelDimensions[level] =
+              glm::uvec2(std::max(dimensions.width, 1u),
+                         std::max(dimensions.height, 1u));
+        }
+        const shadow_detail::ShadowSdsmHistogramSourceSelection sourceSelection =
+            shadow_detail::selectSdsmHistogramSourceLevel(
+                std::span<const glm::uvec2>(
+                    levelDimensions.data(),
+                    frame.sharedResources.sceneDepthPyramidLevelCount),
+                frame.sharedResources.sceneDepthPyramidLevelCount,
+                kSdsmHistogramSourceMaxTexelCount);
+        shadowDebugFrameData_.sdsm.histogramSourceLevel = sourceSelection.level;
+        shadowDebugFrameData_.sdsm.histogramSourceDimensions =
+            sourceSelection.dimensions;
+        TextureHandle sdsmTexture =
+            frame.sharedResources.sceneDepthPyramidTextures[sourceSelection.level];
+        sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
+        if (!nuri::isValid(sdsmTexture)) {
+          reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
+                                         "invalid_source_texture");
+        } else {
+          const uint32_t width = std::max(sourceSelection.dimensions.x, 1u);
+          const uint32_t height = std::max(sourceSelection.dimensions.y, 1u);
+          std::pmr::vector<std::byte> sdsmBytes(memory_);
+          sdsmBytes.resize(static_cast<size_t>(width) * height *
+                           sizeof(float) * 2u);
+          const TextureReadbackRegion readbackRegion{
+              .x = 0u,
+              .y = 0u,
+              .width = width,
+              .height = height,
+              .mipLevel = 0u,
+              .layer = 0u,
+          };
+          auto readResult =
+              gpu_.readTexture(sdsmTexture, readbackRegion, sdsmBytes);
+          if (readResult.hasError()) {
+            sdsmLog.readbackError = true;
             reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                           "invalid_raw_device_depths");
+                                           "source_readback_error");
           } else {
-            const float rawLinearMin =
-                shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMin,
-                                                               frame.camera);
-            const float rawLinearMax =
-                shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMax,
-                                                               frame.camera);
-            shadowDebugFrameData_.sdsm.rawLinearMin = rawLinearMin;
-            shadowDebugFrameData_.sdsm.rawLinearMax = rawLinearMax;
-            // The top mip can legitimately collapse to a single visible depth.
-            // Treat finite, ordered min/max pairs as usable instead of forcing
-            // a fixed-split fallback on near-equal ranges.
-            const bool rawLinearValid = std::isfinite(rawLinearMin) &&
-                                        std::isfinite(rawLinearMax) &&
-                                        rawLinearMax >= rawLinearMin;
-            sdsmLog.rawLinearValid = rawLinearValid;
-            if (!rawLinearValid) {
+            const float *sdsmValues =
+                reinterpret_cast<const float *>(sdsmBytes.data());
+            const std::span<const float> minMaxPairs(
+                sdsmValues, sdsmBytes.size() / sizeof(float));
+            const SdsmHistogramAnalysis analysis = buildSdsmHistogramAnalysis(
+                frame.camera, fixedSplitRange, cascadeCount,
+                settings.sdsmHistogramBucketCount,
+                settings.sdsmHistogramTrimLowPercent,
+                settings.sdsmHistogramTrimHighPercent, sourceSelection.level,
+                sourceSelection.dimensions, minMaxPairs);
+            shadowDebugFrameData_.sdsm.histogramValidTileCount =
+                analysis.validTileCount;
+            shadowDebugFrameData_.sdsm.histogramTotalWeight =
+                analysis.totalWeight;
+            shadowDebugFrameData_.sdsm.histogramTrimmedRangeNear =
+                analysis.trimmedNear;
+            shadowDebugFrameData_.sdsm.histogramTrimmedRangeFar =
+                analysis.trimmedFar;
+            shadowDebugFrameData_.sdsm.histogramBucketWeights =
+                analysis.bucketWeights;
+            shadowDebugFrameData_.sdsm.rawDeviceMin = analysis.rawDeviceMin;
+            shadowDebugFrameData_.sdsm.rawDeviceMax = analysis.rawDeviceMax;
+            shadowDebugFrameData_.sdsm.rawLinearMin = analysis.rawLinearMin;
+            shadowDebugFrameData_.sdsm.rawLinearMax = analysis.rawLinearMax;
+            sdsmLog.rawDepthsValid = analysis.validTileCount > 0u;
+            sdsmLog.rawLinearValid = analysis.valid;
+            if (!analysis.valid) {
               reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                             "invalid_raw_linear_depths");
+                                             "invalid_histogram_source_data");
             } else {
+              const float sdsmSampleNear =
+                  analysis.clearOnlySource ? analysis.rawLinearMin
+                                           : analysis.trimmedNear;
+              const float sdsmSampleFar =
+                  analysis.clearOnlySource ? analysis.rawLinearMax
+                                           : analysis.trimmedFar;
+              const float historyWeight =
+                  std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
+              const float sampleWeight = 1.0f - historyWeight;
               if (!sdsmState_.hasValidSdsmRange_) {
-                sdsmState_.sdsmSmoothedMinDepth_ = rawLinearMin;
-                sdsmState_.sdsmSmoothedMaxDepth_ = rawLinearMax;
+                sdsmState_.sdsmSmoothedMinDepth_ = sdsmSampleNear;
+                sdsmState_.sdsmSmoothedMaxDepth_ = sdsmSampleFar;
               } else {
-                const float historyWeight =
-                    std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
-                const float sampleWeight = 1.0f - historyWeight;
                 sdsmState_.sdsmSmoothedMinDepth_ =
-                    rawLinearMin * sampleWeight +
+                    sdsmSampleNear * sampleWeight +
                     sdsmState_.sdsmSmoothedMinDepth_ * historyWeight;
                 sdsmState_.sdsmSmoothedMaxDepth_ =
-                    rawLinearMax * sampleWeight +
-                    sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
+                    sdsmSampleFar * sampleWeight +
+              sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
               }
               sdsmState_.hasValidSdsmRange_ = true;
               sdsmState_.lastValidSdsmSourceFrameIndex_ =
                   *frame.sharedResources.sceneDepthPyramidSourceFrameIndex;
 
-              // Previous-frame min/max is too unstable to advance the near
-              // boundary or collapse the far coverage into a tiny camera-local
-              // window. Keep foreground coverage anchored to the fixed range
-              // and preserve at least the fixed far-cascade floor.
-              const float effectiveNear = fixedSplitRange.nearDepth;
-              const float minimumFarDepth =
-                  cascadeCount > 1u ? fixedSplitDepths[cascadeCount - 1u]
-                                    : fixedSplitRange.farDepth;
-              const float currentVisibleFar =
-                  std::clamp(rawLinearMax, effectiveNear + 1.0e-4f,
-                             fixedSplitRange.farDepth);
-              const float targetFar = std::clamp(
-                  std::max(sdsmState_.sdsmSmoothedMaxDepth_, minimumFarDepth),
-                  effectiveNear + 1.0e-4f, fixedSplitRange.farDepth);
-              sdsmLog.reason = "valid_previous_frame_data";
-              sdsmLog.minimumFarDepth = minimumFarDepth;
-              sdsmLog.targetFar = targetFar;
-              if (cascadeCount > 1u) {
-                const float splitActivationDepth =
-                    computeSdsmFarHysteresisDepth(fixedSplitRange,
-                                                  minimumFarDepth);
-                const float splitActivateThreshold =
-                    minimumFarDepth + splitActivationDepth;
-                const float splitReleaseThreshold =
-                    minimumFarDepth + splitActivationDepth * 0.5f;
-                const float farActivationDepth =
-                    computeSdsmFixedFarActivationDepth(fixedSplitRange,
-                                                       minimumFarDepth);
-                const float farActivateThreshold =
-                    fixedSplitRange.farDepth - farActivationDepth;
-                const float farReleaseThreshold =
-                    fixedSplitRange.farDepth -
-                    farActivationDepth * kSdsmFixedFarReleaseRatio;
-                sdsmLog.splitActivateThreshold = splitActivateThreshold;
-                sdsmLog.splitReleaseThreshold = splitReleaseThreshold;
-                sdsmLog.farActivateThreshold = farActivateThreshold;
-                sdsmLog.farReleaseThreshold = farReleaseThreshold;
-                if (!sdsmState_.sdsmAdaptiveSplitsActive_) {
-                  sdsmState_.sdsmAdaptiveSplitsActive_ =
-                      targetFar < farActivateThreshold &&
-                      currentVisibleFar > splitActivateThreshold;
-                } else if (targetFar >= farReleaseThreshold ||
-                           currentVisibleFar <= splitReleaseThreshold) {
-                  sdsmState_.sdsmAdaptiveSplitsActive_ = false;
+              const float comparisonFar =
+                  analysis.clearOnlySource
+                      ? fixedSplitRange.farDepth
+                      : std::clamp(std::max(analysis.trimmedFar, minimumFarDepth),
+                                   effectiveNear + 1.0e-4f,
+                                   fixedSplitRange.farDepth);
+              minMaxSplitDepths = shadow_detail::computeCascadeSplitDepthsForRange(
+                  effectiveNear, comparisonFar, cascadeCount, settings.splitMode,
+                  settings.splitLambda);
+              histogramSplitDepths = analysis.clearOnlySource
+                                         ? fixedSplitDepths
+                                         : analysis.rawSplitDepths;
+              activateStableSdsmCoverage();
+              updateHistogramEffectiveSplitDepths(histogramSplitDepths,
+                                                 !analysis.clearOnlySource &&
+                                                     sdsmState_.hasValidSdsmHistogramSplits_);
+              histogramSplitDepths =
+                  sdsmState_.sdsmSmoothedHistogramSplitDepths_;
+              updateEffectiveSplitRange(effectiveSplitRange);
+            }
+          }
+        }
+      } else {
+        const TextureHandle sdsmTexture =
+            frame.sharedResources.sceneDepthPyramidTextures
+                [frame.sharedResources.sceneDepthPyramidLevelCount - 1u];
+        sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
+        if (!nuri::isValid(sdsmTexture)) {
+          reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
+                                         "invalid_source_texture");
+        } else {
+          std::array<std::byte, sizeof(float) * 2u> sdsmBytes{};
+          const TextureReadbackRegion readbackRegion{
+              .x = 0u,
+              .y = 0u,
+              .width = 1u,
+              .height = 1u,
+              .mipLevel = 0u,
+              .layer = 0u,
+          };
+          auto readResult =
+              gpu_.readTexture(sdsmTexture, readbackRegion, sdsmBytes);
+          if (readResult.hasError()) {
+            sdsmLog.readbackError = true;
+            reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
+                                           "source_readback_error");
+          } else {
+            std::array<float, 2u> rawDeviceDepths{};
+            std::memcpy(rawDeviceDepths.data(), sdsmBytes.data(),
+                        sizeof(rawDeviceDepths));
+            const float rawDeviceMin = rawDeviceDepths[0];
+            const float rawDeviceMax = rawDeviceDepths[1];
+            shadowDebugFrameData_.sdsm.rawDeviceMin = rawDeviceMin;
+            shadowDebugFrameData_.sdsm.rawDeviceMax = rawDeviceMax;
+
+            const bool rawDepthsValid =
+                std::isfinite(rawDeviceMin) && std::isfinite(rawDeviceMax) &&
+                rawDeviceMin >= -1.0e-4f && rawDeviceMax <= (1.0f + 1.0e-4f) &&
+                rawDeviceMax >= rawDeviceMin;
+            sdsmLog.rawDepthsValid = rawDepthsValid;
+            if (!rawDepthsValid) {
+              reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
+                                             "invalid_raw_device_depths");
+            } else {
+              const float rawLinearMin =
+                  shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMin,
+                                                                 frame.camera);
+              const float rawLinearMax =
+                  shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMax,
+                                                                 frame.camera);
+              shadowDebugFrameData_.sdsm.rawLinearMin = rawLinearMin;
+              shadowDebugFrameData_.sdsm.rawLinearMax = rawLinearMax;
+              const bool rawLinearValid = std::isfinite(rawLinearMin) &&
+                                          std::isfinite(rawLinearMax) &&
+                                          rawLinearMax >= rawLinearMin;
+              sdsmLog.rawLinearValid = rawLinearValid;
+              if (!rawLinearValid) {
+                reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
+                                               "invalid_raw_linear_depths");
+              } else {
+                if (!sdsmState_.hasValidSdsmRange_) {
+                  sdsmState_.sdsmSmoothedMinDepth_ = rawLinearMin;
+                  sdsmState_.sdsmSmoothedMaxDepth_ = rawLinearMax;
+                } else {
+                  const float historyWeight =
+                      std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
+                  const float sampleWeight = 1.0f - historyWeight;
+                  sdsmState_.sdsmSmoothedMinDepth_ =
+                      rawLinearMin * sampleWeight +
+                      sdsmState_.sdsmSmoothedMinDepth_ * historyWeight;
+                  sdsmState_.sdsmSmoothedMaxDepth_ =
+                      rawLinearMax * sampleWeight +
+                      sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
                 }
-              } else {
-                sdsmState_.sdsmAdaptiveSplitsActive_ = false;
-              }
-              shadowDebugFrameData_.sdsm.status = ShadowSdsmStatus::Active;
-              shadowDebugFrameData_.sdsm.fixedFallbackActive = false;
-              shadowDebugFrameData_.sdsm.smoothedLinearMin =
-                  sdsmState_.sdsmSmoothedMinDepth_;
-              shadowDebugFrameData_.sdsm.smoothedLinearMax =
-                  sdsmState_.sdsmSmoothedMaxDepth_;
-              if (sdsmState_.sdsmAdaptiveSplitsActive_) {
-                const SdsmHysteresisResult hysteresis = applySdsmFarHysteresis(
-                    targetFar, minimumFarDepth, fixedSplitRange,
-                    sdsmState_.hasValidSdsmFarCascadeTexelSize_
-                        ? sdsmState_.sdsmFarCascadeTexelWorldSize_
-                        : 0.0f,
-                    sdsmState_.hasValidSdsmEffectiveFar_,
-                    sdsmState_.sdsmEffectiveFarDepth_);
-                sdsmState_.hasValidSdsmEffectiveFar_ = hysteresis.hasHistory;
-                sdsmState_.sdsmEffectiveFarDepth_ = hysteresis.historyFar;
-                updateEffectiveSplitRange(ShadowSplitRange{
-                    .nearDepth = effectiveNear,
-                    .farDepth = std::max(effectiveNear + 1.0e-4f,
-                                         hysteresis.appliedFar),
-                });
-              } else {
-                sdsmState_.hasValidSdsmEffectiveFar_ = true;
-                sdsmState_.sdsmEffectiveFarDepth_ = fixedSplitRange.farDepth;
-                effectiveSplitRange = fixedSplitRange;
-                effectiveSplitDepths = fixedSplitDepths;
+                sdsmState_.hasValidSdsmRange_ = true;
+                sdsmState_.lastValidSdsmSourceFrameIndex_ =
+                    *frame.sharedResources.sceneDepthPyramidSourceFrameIndex;
+                activateStableSdsmCoverage();
+                updateEffectiveSplitRange(effectiveSplitRange);
+                minMaxSplitDepths = effectiveSplitDepths;
               }
             }
           }
@@ -1545,11 +1777,31 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   }
   shadowDebugFrameData_.sdsm.effectiveRangeNear = effectiveSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeFar = effectiveSplitRange.farDepth;
-  if (!(sdsmMode == ShadowSdsmMode::PreviousFrameMinMax && cascadeCount > 1u &&
-        sdsmState_.hasValidSdsmRange_ &&
-        !shadowDebugFrameData_.sdsm.fixedFallbackActive)) {
-    sdsmState_.sdsmAdaptiveSplitsActive_ = false;
+  const bool hasHistogramEffectiveSplitSource =
+      sdsmMode == ShadowSdsmMode::Histogram &&
+      !shadowDebugFrameData_.sdsm.fixedFallbackActive &&
+      sdsmState_.hasValidSdsmHistogramSplits_ &&
+      sdsmState_.sdsmHistogramCascadeCount_ == cascadeCount;
+  if (hasHistogramEffectiveSplitSource) {
+    const float histogramDistributionActivationDepth =
+        computeSdsmFarUpdateThreshold(
+            sdsmState_.hasValidSdsmFarCascadeTexelSize_
+                ? sdsmState_.sdsmFarCascadeTexelWorldSize_
+                : 0.0f);
+    const float histogramDistributionFar = std::max(
+        histogramSplitDepths[cascadeCount], histogramSplitDepths[0] + 1.0e-4f);
+    // When histogram coverage no longer extends meaningfully into the far
+    // cascade, keep the fixed split layout stable. This avoids churn from
+    // redistributing internal splits based on near-only histogram content.
+    if (histogramDistributionFar >
+        minimumFarDepth + histogramDistributionActivationDepth) {
+      effectiveSplitDepths =
+          buildHistogramSplitDepthsForRange(histogramSplitDepths,
+                                            effectiveSplitRange);
+    }
   }
+  shadowDebugFrameData_.sdsm.minMaxSplitDepths = minMaxSplitDepths;
+  shadowDebugFrameData_.sdsm.histogramSplitDepths = histogramSplitDepths;
   shadowDebugFrameData_.sdsm.effectiveSplitDepths = effectiveSplitDepths;
   const bool reuseFrozenFit = freezeShadowFits && hasFrozenShadowFit_ &&
                               frozenShadowLightId_ == selectedLightId &&
@@ -1600,7 +1852,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       frozenCascadeCount_ = cascadeCount;
     }
   }
-  if (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax &&
+  if ((sdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
+       sdsmMode == ShadowSdsmMode::Histogram) &&
       shadowDebugFrameData_.sdsm.status == ShadowSdsmStatus::Active &&
       cascadeCount > 0u) {
     const float farCascadeTexelWorldSize =
@@ -1625,7 +1878,6 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
           : 0u;
   const bool opaqueDepthPyramidEnabled =
       frame.settings != nullptr && frame.settings->opaque.enableDepthPyramid;
-  const LogLevel sdsmDiagnosticLogLevel = settings.debug.sdsmDiagnosticLogLevel;
   const auto logSdsmSnapshot = [&](LogLevel logLevel, const char *label) {
     logMessagef(
         logLevel,
@@ -1634,14 +1886,13 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         "opaqueDepthPyramid=%u sourceFrameAvailable=%u sourceFrame=%llu "
         "sourceLag=%llu sourceLevels=%u hasValidSource=%u "
         "sourceTextureValid=%u readbackError=%u rawDepthsValid=%u "
-        "rawLinearValid=%u historyBefore=[range=%u effectiveFar=%u texel=%u "
-        "adaptive=%u] historyNow=[range=%u effectiveFar=%u texel=%u "
-        "adaptive=%u] settings=[maxDistance=%.3f blend=%.3f cascades=%u "
+        "rawLinearValid=%u historyBefore=[range=%u texel=%u] "
+        "historyNow=[range=%u texel=%u] settings=[maxDistance=%.3f "
+        "blend=%.3f cascades=%u "
         "lambda=%.3f] camera=[near=%.3f far=%.3f] "
         "values=[rawDevice=(%.6f, %.6f) rawLinear=(%.6f, %.6f) "
         "smoothed=(%.6f, %.6f) fixed=(%.6f, %.6f) effective=(%.6f, %.6f) "
-        "targetFar=%.6f minFar=%.6f splitThresholds=(%.6f, %.6f) "
-        "farThresholds=(%.6f, %.6f) farHistory=%.6f farTexel=%.6f "
+        "minFar=%.6f farTexel=%.6f "
         "fixedSplits=(%.6f, %.6f, %.6f, %.6f, %.6f) "
         "effectiveSplits=(%.6f, %.6f, %.6f, %.6f, %.6f)]",
         label, static_cast<unsigned long long>(frame.frameIndex),
@@ -1657,22 +1908,15 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         sdsmLog.hasValidSource ? 1u : 0u, sdsmLog.sourceTextureValid ? 1u : 0u,
         sdsmLog.readbackError ? 1u : 0u, sdsmLog.rawDepthsValid ? 1u : 0u,
         sdsmLog.rawLinearValid ? 1u : 0u, sdsmLog.historyRangeValid ? 1u : 0u,
-        sdsmLog.historyEffectiveFarValid ? 1u : 0u,
         sdsmLog.historyTexelValid ? 1u : 0u,
-        sdsmLog.adaptiveActiveBefore ? 1u : 0u,
         sdsmState_.hasValidSdsmRange_ ? 1u : 0u,
-        sdsmState_.hasValidSdsmEffectiveFar_ ? 1u : 0u,
         sdsmState_.hasValidSdsmFarCascadeTexelSize_ ? 1u : 0u,
-        sdsmState_.sdsmAdaptiveSplitsActive_ ? 1u : 0u, settings.maxDistance,
-        settings.sdsmTemporalBlend, cascadeCount, settings.splitLambda,
-        frame.camera.nearPlane, frame.camera.farPlane, sdsm.rawDeviceMin,
-        sdsm.rawDeviceMax, sdsm.rawLinearMin, sdsm.rawLinearMax,
-        sdsm.smoothedLinearMin, sdsm.smoothedLinearMax, sdsm.fixedRangeNear,
-        sdsm.fixedRangeFar, sdsm.effectiveRangeNear, sdsm.effectiveRangeFar,
-        sdsmLog.targetFar, sdsmLog.minimumFarDepth,
-        sdsmLog.splitActivateThreshold, sdsmLog.splitReleaseThreshold,
-        sdsmLog.farActivateThreshold, sdsmLog.farReleaseThreshold,
-        sdsmState_.sdsmEffectiveFarDepth_,
+        settings.maxDistance, settings.sdsmTemporalBlend, cascadeCount,
+        settings.splitLambda, frame.camera.nearPlane, frame.camera.farPlane,
+        sdsm.rawDeviceMin, sdsm.rawDeviceMax, sdsm.rawLinearMin,
+        sdsm.rawLinearMax, sdsm.smoothedLinearMin, sdsm.smoothedLinearMax,
+        sdsm.fixedRangeNear, sdsm.fixedRangeFar, sdsm.effectiveRangeNear,
+        sdsm.effectiveRangeFar, minimumFarDepth,
         sdsmState_.sdsmFarCascadeTexelWorldSize_, sdsm.fixedSplitDepths[0],
         sdsm.fixedSplitDepths[1], sdsm.fixedSplitDepths[2],
         sdsm.fixedSplitDepths[3], sdsm.fixedSplitDepths[4],
@@ -1719,48 +1963,6 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     sdsmState_.lastLoggedSdsmWarningSourceFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
     sdsmState_.lastLoggedSdsmWarningFrameIndex_ =
-        std::numeric_limits<uint64_t>::max();
-  }
-  const bool contractedRange =
-      sdsm.mode == ShadowSdsmMode::PreviousFrameMinMax &&
-      sdsm.status == ShadowSdsmStatus::Active &&
-      sdsm.effectiveRangeFar + kSdsmContractionDepthThreshold <
-          sdsm.fixedRangeFar;
-  if (contractedRange) {
-    const bool contractionRefreshDue =
-        sdsmState_.lastLoggedSdsmContractedFrameIndex_ ==
-            std::numeric_limits<uint64_t>::max() ||
-        frame.frameIndex >= sdsmState_.lastLoggedSdsmContractedFrameIndex_ +
-                                kSdsmDiagnosticRefreshFrames;
-    const bool contractionChanged =
-        !sdsmState_.lastLoggedSdsmRangeContracted_ ||
-        sdsmState_.sdsmAdaptiveSplitsActive_ !=
-            sdsmState_.lastLoggedSdsmAdaptiveRangeActive_ ||
-        !std::isfinite(sdsmState_.lastLoggedSdsmContractedEffectiveFar_) ||
-        std::abs(sdsm.effectiveRangeFar -
-                 sdsmState_.lastLoggedSdsmContractedEffectiveFar_) >
-            kSdsmDiagnosticRangeDeltaThreshold ||
-        !std::isfinite(sdsmState_.lastLoggedSdsmContractedSmoothedMax_) ||
-        std::abs(sdsm.smoothedLinearMax -
-                 sdsmState_.lastLoggedSdsmContractedSmoothedMax_) >
-            kSdsmDiagnosticRangeDeltaThreshold;
-    if (contractionChanged || contractionRefreshDue) {
-      logSdsmSnapshot(sdsmDiagnosticLogLevel, "SDSM contracted range");
-      sdsmState_.lastLoggedSdsmRangeContracted_ = true;
-      sdsmState_.lastLoggedSdsmAdaptiveRangeActive_ =
-          sdsmState_.sdsmAdaptiveSplitsActive_;
-      sdsmState_.lastLoggedSdsmContractedEffectiveFar_ = sdsm.effectiveRangeFar;
-      sdsmState_.lastLoggedSdsmContractedSmoothedMax_ = sdsm.smoothedLinearMax;
-      sdsmState_.lastLoggedSdsmContractedFrameIndex_ = frame.frameIndex;
-    }
-  } else {
-    sdsmState_.lastLoggedSdsmRangeContracted_ = false;
-    sdsmState_.lastLoggedSdsmAdaptiveRangeActive_ = false;
-    sdsmState_.lastLoggedSdsmContractedEffectiveFar_ =
-        std::numeric_limits<float>::quiet_NaN();
-    sdsmState_.lastLoggedSdsmContractedSmoothedMax_ =
-        std::numeric_limits<float>::quiet_NaN();
-    sdsmState_.lastLoggedSdsmContractedFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
   }
   const uint32_t shadowFlags =

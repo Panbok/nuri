@@ -1496,8 +1496,8 @@ void optimizeVertexFetchForAllLods(
         }
       }
       skinInfluences->swap(remappedSkinInfluences);
-    } else if (skinInfluences != nullptr) {
-      NURI_LOG_WARNING(
+    } else if (skinInfluences != nullptr && !skinInfluences->empty()) {
+      NURI_LOG_DEBUG(
           "MeshImporter::optimizeVertexFetchForAllLods: skipping skin "
           "influence remap because influence count (%zu) does not match "
           "vertex remap size (%zu)",

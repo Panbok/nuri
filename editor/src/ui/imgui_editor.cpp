@@ -297,6 +297,8 @@ void drawShadowSplitGraph(const ShadowSdsmDebugFrameData &sdsm) {
   const ImU32 borderColor = IM_COL32(110, 110, 110, 255);
   const ImU32 barColor = IM_COL32(36, 36, 36, 255);
   const ImU32 fixedColor = IM_COL32(150, 150, 150, 255);
+  const ImU32 minMaxColor = IM_COL32(90, 170, 255, 255);
+  const ImU32 histogramColor = IM_COL32(255, 170, 70, 255);
   drawList->AddRectFilled(origin, max, barColor, 4.0f);
   drawList->AddRect(origin, max, borderColor, 4.0f);
 
@@ -315,6 +317,16 @@ void drawShadowSplitGraph(const ShadowSdsmDebugFrameData &sdsm) {
                       ImVec2(fixedX, max.y - 10.0f), fixedColor, 1.0f);
   }
   for (uint32_t i = 1u; i < splitCount; ++i) {
+    const float minMaxX = normalizedX(sdsm.minMaxSplitDepths[i]);
+    drawList->AddLine(ImVec2(minMaxX, origin.y + 16.0f),
+                      ImVec2(minMaxX, max.y - 16.0f), minMaxColor, 1.0f);
+  }
+  for (uint32_t i = 1u; i < splitCount; ++i) {
+    const float histogramX = normalizedX(sdsm.histogramSplitDepths[i]);
+    drawList->AddLine(ImVec2(histogramX, origin.y + 22.0f),
+                      ImVec2(histogramX, max.y - 22.0f), histogramColor, 1.0f);
+  }
+  for (uint32_t i = 1u; i < splitCount; ++i) {
     const float effectiveX = normalizedX(sdsm.effectiveSplitDepths[i]);
     drawList->AddLine(ImVec2(effectiveX, origin.y + 4.0f),
                       ImVec2(effectiveX, max.y - 4.0f),
@@ -323,6 +335,42 @@ void drawShadowSplitGraph(const ShadowSdsmDebugFrameData &sdsm) {
                       2.0f);
   }
   ImGui::InvisibleButton("ShadowSplitGraph", graphSize);
+  ImGui::TextUnformatted(
+      "Split graph: gray=fixed, blue=min/max, amber=histogram raw, "
+      "cascade colors=effective.");
+}
+
+void drawSdsmHistogramGraph(const ShadowSdsmDebugFrameData &sdsm) {
+  const uint32_t bucketCount = std::clamp(sdsm.histogramBucketCount, 1u,
+                                          kMaxShadowSdsmHistogramBucketCount);
+  if (bucketCount == 0u) {
+    return;
+  }
+  const float graphWidth = ImGui::GetContentRegionAvail().x;
+  const ImVec2 graphSize(std::max(graphWidth, 160.0f), 96.0f);
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  const ImVec2 max(origin.x + graphSize.x, origin.y + graphSize.y);
+  ImDrawList *drawList = ImGui::GetWindowDrawList();
+  drawList->AddRectFilled(origin, max, IM_COL32(28, 28, 28, 255), 4.0f);
+  drawList->AddRect(origin, max, IM_COL32(110, 110, 110, 255), 4.0f);
+
+  float maxWeight = 0.0f;
+  for (uint32_t i = 0u; i < bucketCount; ++i) {
+    maxWeight = std::max(maxWeight, sdsm.histogramBucketWeights[i]);
+  }
+  maxWeight = std::max(maxWeight, 1.0e-6f);
+  const float bucketWidth = graphSize.x / static_cast<float>(bucketCount);
+  for (uint32_t i = 0u; i < bucketCount; ++i) {
+    const float normalized =
+        std::clamp(sdsm.histogramBucketWeights[i] / maxWeight, 0.0f, 1.0f);
+    const float x0 = origin.x + bucketWidth * static_cast<float>(i);
+    const float x1 = origin.x + bucketWidth * static_cast<float>(i + 1u);
+    const float y1 = max.y - 4.0f;
+    const float y0 = y1 - normalized * (graphSize.y - 8.0f);
+    drawList->AddRectFilled(ImVec2(x0, y0), ImVec2(std::max(x0 + 1.0f, x1), y1),
+                            IM_COL32(235, 160, 60, 255));
+  }
+  ImGui::InvisibleButton("ShadowHistogramGraph", graphSize);
 }
 
 const char *shadowPreviewModeDisplayName(ShadowPreviewMode mode) {
@@ -1180,10 +1228,13 @@ void drawOpaqueSettings(RenderSettings::OpaqueSettings &opaque,
                   &opaque.enableDepthPyramid);
   ImGui::Text("Effective Depth Pre-pass: %s",
               opaque.enableDepthPrepass ? "enabled" : "disabled");
-  const bool forcedDepthPyramid = shadow.enabled &&
-                                  sanitizeShadowSdsmMode(shadow.sdsmMode) ==
-                                      ShadowSdsmMode::PreviousFrameMinMax &&
-                                  !opaque.enableDepthPyramid;
+  const ShadowSdsmMode sanitizedSdsmMode =
+      sanitizeShadowSdsmMode(shadow.sdsmMode);
+  const bool forcedDepthPyramid =
+      shadow.enabled &&
+      (sanitizedSdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
+       sanitizedSdsmMode == ShadowSdsmMode::Histogram) &&
+      !opaque.enableDepthPyramid;
   ImGui::Text("Effective Depth Pyramid: %s",
               (opaque.enableDepthPyramid || forcedDepthPyramid) ? "enabled"
                                                                 : "disabled");
@@ -1397,9 +1448,20 @@ void drawShadowSettings(
   ImGui::SliderFloat("SDSM Temporal Blend##ShadowPass",
                      &shadow.sdsmTemporalBlend, 0.0f, 1.0f, "%.2f");
   if (sanitizeShadowSdsmMode(shadow.sdsmMode) == ShadowSdsmMode::Histogram) {
-    ImGui::TextUnformatted(
-        "Histogram SDSM remains Phase 8 only and currently falls back to "
-        "fixed splits.");
+    int bucketCount = static_cast<int>(shadow.sdsmHistogramBucketCount);
+    if (ImGui::SliderInt(
+            "Histogram Buckets##ShadowPass", &bucketCount,
+            static_cast<int>(kMinShadowSdsmHistogramBucketCount),
+            static_cast<int>(kMaxShadowSdsmHistogramBucketCount))) {
+      shadow.sdsmHistogramBucketCount =
+          static_cast<uint32_t>(std::max(bucketCount, 1));
+    }
+    ImGui::SliderFloat("Histogram Trim Low##ShadowPass",
+                       &shadow.sdsmHistogramTrimLowPercent, 0.0f, 20.0f,
+                       "%.2f%%");
+    ImGui::SliderFloat("Histogram Trim High##ShadowPass",
+                       &shadow.sdsmHistogramTrimHighPercent, 0.0f, 20.0f,
+                       "%.2f%%");
   }
 
   ImGui::Separator();
@@ -1448,7 +1510,7 @@ void drawShadowSettings(
         "PCSS debug visualization is meaningful when PCSS filtering is "
         "active.");
   }
-  ImGui::Checkbox("Visualize SDSM Histogram (future)##ShadowPass",
+  ImGui::Checkbox("Visualize SDSM Histogram##ShadowPass",
                   &shadow.debug.visualizeSDSMHistogram);
 
   ImGui::Separator();
@@ -1757,8 +1819,18 @@ void drawShadowsWindow(
               sdsm.smoothedLinearMax);
   ImGui::Text("Fixed Range: %.6f .. %.6f", sdsm.fixedRangeNear,
               sdsm.fixedRangeFar);
+  ImGui::Text("Histogram Trimmed Range: %.6f .. %.6f",
+              sdsm.histogramTrimmedRangeNear, sdsm.histogramTrimmedRangeFar);
   ImGui::Text("Effective Range: %.6f .. %.6f", sdsm.effectiveRangeNear,
               sdsm.effectiveRangeFar);
+  ImGui::Text("Histogram Source: level %u, %u x %u", sdsm.histogramSourceLevel,
+              sdsm.histogramSourceDimensions.x,
+              sdsm.histogramSourceDimensions.y);
+  ImGui::Text("Histogram Buckets / Tiles: %u / %u", sdsm.histogramBucketCount,
+              sdsm.histogramValidTileCount);
+  ImGui::Text("Histogram Weight: %.2f", sdsm.histogramTotalWeight);
+  ImGui::Text("Histogram Trim: low %.2f%%, high %.2f%%",
+              sdsm.histogramTrimLowPercent, sdsm.histogramTrimHighPercent);
   if (isSdsmWarningStatus(sdsm.status)) {
     ImGui::TextUnformatted(sdsm.fixedFallbackActive
                                ? "Warning: previous-frame SDSM data was not "
@@ -1767,12 +1839,11 @@ void drawShadowsWindow(
                                  "usable this frame; reusing the last valid "
                                  "SDSM range.");
   }
-  if (sdsm.mode == ShadowSdsmMode::Histogram) {
-    ImGui::TextUnformatted(
-        "Histogram SDSM is not implemented in the current build and falls "
-        "back to fixed splits.");
-  }
   drawShadowSplitGraph(sdsm);
+  if (renderSettings.shadow.debug.visualizeSDSMHistogram &&
+      sdsm.histogramBucketCount > 0u) {
+    drawSdsmHistogramGraph(sdsm);
+  }
 
   ImGui::Separator();
   ImGui::TextUnformatted("Preview");

@@ -3237,8 +3237,10 @@ bool OpaqueRenderer::requiresDepthPyramid(
     const RenderSettings &settings) const {
   return settings.opaque.enableDepthPyramid ||
          (settings.shadow.enabled &&
-          sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
-              ShadowSdsmMode::PreviousFrameMinMax);
+          (sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
+               ShadowSdsmMode::PreviousFrameMinMax ||
+           sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
+               ShadowSdsmMode::Histogram));
 }
 
 Result<bool, std::string>

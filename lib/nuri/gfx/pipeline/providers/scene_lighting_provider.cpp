@@ -304,7 +304,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       loggedLightStateSignature_ != frame.scene->lightTransformVersion()) {
     loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
     loggedLightStateSignature_ = frame.scene->lightTransformVersion();
-    NURI_LOG_DEBUG(
+    NURI_LOG_TRACE(
         "SceneLightingProvider::prepare probe: sceneData=0x%llx "
         "frameData=0x%llx "
         "dirLights=0x%llx localLights=0x%llx materialHeader=0x%llx "

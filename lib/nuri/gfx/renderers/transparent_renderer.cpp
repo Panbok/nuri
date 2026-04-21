@@ -680,7 +680,7 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
       !drawPushConstants_.empty()) {
     loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
     const PushConstants &probe = drawPushConstants_.front();
-    NURI_LOG_DEBUG(
+    NURI_LOG_TRACE(
         "TransparentRenderer::prepareTransparentPasses probe: "
         "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
         "instanceMatrices=0x%llx instanceRemap=0x%llx "

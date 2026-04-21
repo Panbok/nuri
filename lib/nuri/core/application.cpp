@@ -44,8 +44,8 @@ LogConfig Application::makeDefaultLogConfig() {
                   "logs/{}_nuri.log",
                   std::chrono::system_clock::now().time_since_epoch().count()))
               .string(),
-      .logLevel = LogLevel::Debug,
-      .consoleLevel = LogLevel::Debug,
+      .logLevel = LogLevel::Info,
+      .consoleLevel = LogLevel::Info,
       .threadNames = false,
   };
 }

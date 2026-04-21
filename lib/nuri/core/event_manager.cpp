@@ -46,7 +46,7 @@ bool EventManager::unsubscribe(const SubscriptionToken &token) {
     return false;
   }
 
-  NURI_LOG_DEBUG("EventManager::unsubscribe: Unsubscribing from type ID %u",
+  NURI_LOG_TRACE("EventManager::unsubscribe: Unsubscribing from type ID %u",
                  token.typeId);
 
   return slot.list->unsubscribe(token.handlerId);

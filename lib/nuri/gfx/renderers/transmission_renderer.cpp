@@ -637,7 +637,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
         !meshPushConstants_.empty()) {
       loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
       const MeshPushConstants &probe = meshPushConstants_.front();
-      NURI_LOG_DEBUG(
+      NURI_LOG_TRACE(
           "TransmissionRenderer::prepareTransmissionPasses probe: "
           "frameData=0x%llx vertex=0x%llx vertexDecode=0x%llx "
           "instanceMatrices=0x%llx instanceRemap=0x%llx "

@@ -101,6 +101,9 @@ static constexpr Format kFrameCompositionFrameColorFormat =
 static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
 static constexpr Format kDefaultShadowMapDepthFormat = Format::D16_UNORM;
 static constexpr uint32_t kMaxShadowCascades = 4u;
+static constexpr uint32_t kDefaultShadowSdsmHistogramBucketCount = 64u;
+static constexpr uint32_t kMinShadowSdsmHistogramBucketCount = 8u;
+static constexpr uint32_t kMaxShadowSdsmHistogramBucketCount = 128u;
 static constexpr uint32_t kInvalidShadowBindlessIndex = 0xFFFFFFFFu;
 static constexpr uint32_t kShadowFrameFlagEnabled = 1u << 0u;
 static constexpr uint32_t kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
@@ -211,7 +214,7 @@ struct RenderSettings {
     bool fixedPoissonRotation = false;
     uint32_t poissonRotationSeed = 0u;
     bool visualizeSDSMHistogram = false;
-    LogLevel sdsmDiagnosticLogLevel = LogLevel::Debug;
+    LogLevel sdsmDiagnosticLogLevel = LogLevel::Trace;
     bool enableCascadeCasterCulling = true;
     ShadowPreviewMode previewMode = ShadowPreviewMode::SelectedCascade;
     float previewDepthMin = 0.0f;
@@ -241,6 +244,9 @@ struct RenderSettings {
     float pcssFilterRadiusClampTexels = kDefaultPcssFilterRadiusClampTexels;
     ShadowSdsmMode sdsmMode = ShadowSdsmMode::Disabled;
     float sdsmTemporalBlend = 0.85f;
+    uint32_t sdsmHistogramBucketCount = kDefaultShadowSdsmHistogramBucketCount;
+    float sdsmHistogramTrimLowPercent = 0.5f;
+    float sdsmHistogramTrimHighPercent = 1.0f;
     ShadowDebugSettings debug{};
   };
 
@@ -409,6 +415,17 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
           : kDefaultPcssFilterRadiusClampTexels;
   settings.sdsmTemporalBlend =
       std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
+  settings.sdsmHistogramBucketCount = std::clamp(
+      settings.sdsmHistogramBucketCount, kMinShadowSdsmHistogramBucketCount,
+      kMaxShadowSdsmHistogramBucketCount);
+  settings.sdsmHistogramTrimLowPercent =
+      std::isfinite(settings.sdsmHistogramTrimLowPercent)
+          ? std::clamp(settings.sdsmHistogramTrimLowPercent, 0.0f, 20.0f)
+          : 0.5f;
+  settings.sdsmHistogramTrimHighPercent =
+      std::isfinite(settings.sdsmHistogramTrimHighPercent)
+          ? std::clamp(settings.sdsmHistogramTrimHighPercent, 0.0f, 20.0f)
+          : 1.0f;
   switch (settings.debug.sdsmDiagnosticLogLevel) {
   case LogLevel::Trace:
   case LogLevel::Debug:
@@ -418,7 +435,7 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   case LogLevel::Fatal:
     break;
   default:
-    settings.debug.sdsmDiagnosticLogLevel = LogLevel::Debug;
+    settings.debug.sdsmDiagnosticLogLevel = LogLevel::Trace;
     break;
   }
   settings.debug.debugCascadeIndex =
@@ -538,6 +555,10 @@ struct ShadowSdsmDebugFrameData {
   ShadowSdsmStatus status = ShadowSdsmStatus::Disabled;
   bool fixedFallbackActive = false;
   uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint32_t histogramSourceLevel = 0u;
+  glm::uvec2 histogramSourceDimensions{0u};
+  uint32_t histogramBucketCount = 0u;
+  uint32_t histogramValidTileCount = 0u;
   uint32_t splitCount = 0u;
   float fixedRangeNear = 0.0f;
   float fixedRangeFar = 0.0f;
@@ -547,10 +568,19 @@ struct ShadowSdsmDebugFrameData {
   float rawLinearMax = 0.0f;
   float smoothedLinearMin = 0.0f;
   float smoothedLinearMax = 0.0f;
+  float histogramTotalWeight = 0.0f;
+  float histogramTrimLowPercent = 0.0f;
+  float histogramTrimHighPercent = 0.0f;
+  float histogramTrimmedRangeNear = 0.0f;
+  float histogramTrimmedRangeFar = 0.0f;
   float effectiveRangeNear = 0.0f;
   float effectiveRangeFar = 0.0f;
   std::array<float, kMaxShadowCascades + 1u> fixedSplitDepths{};
+  std::array<float, kMaxShadowCascades + 1u> minMaxSplitDepths{};
+  std::array<float, kMaxShadowCascades + 1u> histogramSplitDepths{};
   std::array<float, kMaxShadowCascades + 1u> effectiveSplitDepths{};
+  std::array<float, kMaxShadowSdsmHistogramBucketCount>
+      histogramBucketWeights{};
 };
 
 struct ShadowDebugFrameData {

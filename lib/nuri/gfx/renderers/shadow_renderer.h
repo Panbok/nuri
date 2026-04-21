@@ -127,13 +127,14 @@ private:
 
   struct SdsmState {
     bool hasValidSdsmRange_ = false;
-    bool hasValidSdsmEffectiveFar_ = false;
     bool hasValidSdsmFarCascadeTexelSize_ = false;
-    bool sdsmAdaptiveSplitsActive_ = false;
+    bool hasValidSdsmHistogramSplits_ = false;
     float sdsmSmoothedMinDepth_ = 0.0f;
     float sdsmSmoothedMaxDepth_ = 0.0f;
-    float sdsmEffectiveFarDepth_ = 0.0f;
     float sdsmFarCascadeTexelWorldSize_ = 0.0f;
+    uint32_t sdsmHistogramCascadeCount_ = 0u;
+    std::array<float, kMaxShadowCascades + 1u>
+        sdsmSmoothedHistogramSplitDepths_{};
     uint64_t lastValidSdsmSourceFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
     ShadowSdsmStatus lastLoggedSdsmWarningStatus_ = ShadowSdsmStatus::Disabled;
@@ -142,14 +143,6 @@ private:
     uint64_t lastLoggedSdsmWarningSourceFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
     uint64_t lastLoggedSdsmWarningFrameIndex_ =
-        std::numeric_limits<uint64_t>::max();
-    bool lastLoggedSdsmRangeContracted_ = false;
-    bool lastLoggedSdsmAdaptiveRangeActive_ = false;
-    float lastLoggedSdsmContractedEffectiveFar_ =
-        std::numeric_limits<float>::quiet_NaN();
-    float lastLoggedSdsmContractedSmoothedMax_ =
-        std::numeric_limits<float>::quiet_NaN();
-    uint64_t lastLoggedSdsmContractedFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
   };
 
