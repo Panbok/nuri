@@ -16,6 +16,7 @@
 #include "nuri/scene/render_scene.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -205,6 +206,7 @@ private:
   std::pmr::vector<BufferDependency> passBufferDependencies_;
   std::pmr::vector<TextureDependency> passTextureDependencies_;
   std::pmr::vector<TextureDependency> previewTextureDependencies_;
+  std::pmr::vector<std::byte> sdsmReadbackBuffer_;
 
   ShaderHandle shadowVertexShader_{};
   ShaderHandle depthFragmentShader_{};

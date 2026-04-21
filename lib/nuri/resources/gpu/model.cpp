@@ -643,7 +643,7 @@ validateMeshTopology(std::span<const uint32_t> indices, uint32_t vertexCount,
     }
   }
 
-  NURI_LOG_TRACE("%s: mesh validated (vertices=%u indices=%zu submeshes=%zu "
+  NURI_LOG_DEBUG("%s: mesh validated (vertices=%u indices=%zu submeshes=%zu "
                  "maxIndex=%u)",
                  contextString.c_str(), vertexCount, indices.size(),
                  submeshes.size(), maxIndex);

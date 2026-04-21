@@ -373,11 +373,12 @@ sdsmHistogramPercentileDepth(std::span<const float> histogramBuckets,
                              float rangeNear, float rangeFar,
                              float percentile) {
   if (histogramBuckets.empty() || !std::isfinite(rangeNear) ||
-      !std::isfinite(rangeFar)) {
+      !std::isfinite(rangeFar) || !std::isfinite(percentile)) {
     return rangeNear;
   }
   const float clampedNear = std::max(rangeNear, 0.0f);
   const float clampedFar = std::max(clampedNear + 1.0e-4f, rangeFar);
+  const float clampedPercentile = std::clamp(percentile, 0.0f, 1.0f);
   const float bucketWidth =
       (clampedFar - clampedNear) / static_cast<float>(histogramBuckets.size());
   float totalWeight = 0.0f;
@@ -389,7 +390,7 @@ sdsmHistogramPercentileDepth(std::span<const float> histogramBuckets,
   if (totalWeight <= 1.0e-6f) {
     return clampedNear;
   }
-  const float targetWeight = std::clamp(percentile, 0.0f, 1.0f) * totalWeight;
+  const float targetWeight = clampedPercentile * totalWeight;
   float accumulatedWeight = 0.0f;
   for (size_t bucketIndex = 0u; bucketIndex < histogramBuckets.size();
        ++bucketIndex) {

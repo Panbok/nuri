@@ -231,6 +231,16 @@ struct SdsmHistogramAnalysis {
   std::array<float, kMaxShadowSdsmHistogramBucketCount> bucketWeights{};
 };
 
+struct CachedSdsmHistogramTile {
+  float rawDeviceMin = 0.0f;
+  float rawDeviceMax = 0.0f;
+  float rawLinearMin = 0.0f;
+  float rawLinearMax = 0.0f;
+  bool valid = false;
+  bool clearOnly = false;
+  bool clearMax = false;
+};
+
 [[nodiscard]] SdsmHistogramAnalysis buildSdsmHistogramAnalysis(
     const CameraFrameState &camera, ShadowSplitRange fixedSplitRange,
     uint32_t cascadeCount, uint32_t bucketCount, float trimLowPercent,
@@ -240,9 +250,9 @@ struct SdsmHistogramAnalysis {
   analysis.sourceLevel = sourceLevel;
   analysis.sourceDimensions = sourceDimensions;
 
-  const uint32_t safeBucketCount = std::clamp(
-      bucketCount, kMinShadowSdsmHistogramBucketCount,
-      kMaxShadowSdsmHistogramBucketCount);
+  const uint32_t safeBucketCount =
+      std::clamp(bucketCount, kMinShadowSdsmHistogramBucketCount,
+                 kMaxShadowSdsmHistogramBucketCount);
   if (minMaxPairs.size() < 2u || (minMaxPairs.size() % 2u) != 0u) {
     return analysis;
   }
@@ -256,99 +266,90 @@ struct SdsmHistogramAnalysis {
   uint32_t rawValidTileCount = 0u;
   uint32_t clearOnlyTileCount = 0u;
   bool malformedTile = false;
+  std::vector<CachedSdsmHistogramTile> cachedTiles(minMaxPairs.size() / 2u);
   const auto isClearDepthSample = [](float rawDeviceDepth) {
     return rawDeviceDepth >= (1.0f - kSdsmHistogramClearDepthEpsilon);
   };
 
-  for (size_t i = 0u; i + 1u < minMaxPairs.size(); i += 2u) {
-    const float rawDeviceMin = minMaxPairs[i];
-    const float rawDeviceMax = minMaxPairs[i + 1u];
+  for (size_t tileIndex = 0u; tileIndex < cachedTiles.size(); ++tileIndex) {
+    CachedSdsmHistogramTile &cachedTile = cachedTiles[tileIndex];
+    cachedTile.rawDeviceMin = minMaxPairs[tileIndex * 2u];
+    cachedTile.rawDeviceMax = minMaxPairs[tileIndex * 2u + 1u];
     const bool rawDepthsValid =
-        std::isfinite(rawDeviceMin) && std::isfinite(rawDeviceMax) &&
-        rawDeviceMin >= -1.0e-4f && rawDeviceMax <= (1.0f + 1.0e-4f) &&
-        rawDeviceMax >= rawDeviceMin;
+        std::isfinite(cachedTile.rawDeviceMin) &&
+        std::isfinite(cachedTile.rawDeviceMax) &&
+        cachedTile.rawDeviceMin >= -1.0e-4f &&
+        cachedTile.rawDeviceMax <= (1.0f + 1.0e-4f) &&
+        cachedTile.rawDeviceMax >= cachedTile.rawDeviceMin;
     if (!rawDepthsValid) {
       malformedTile = true;
       continue;
     }
 
-    const float rawLinearMin =
-        shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMin, camera);
-    const float rawLinearMax =
-        shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMax, camera);
-    if (!std::isfinite(rawLinearMin) || !std::isfinite(rawLinearMax) ||
-        rawLinearMax < rawLinearMin) {
+    cachedTile.rawLinearMin = shadow_detail::linearizeDeviceDepthToViewDepth(
+        cachedTile.rawDeviceMin, camera);
+    cachedTile.rawLinearMax = shadow_detail::linearizeDeviceDepthToViewDepth(
+        cachedTile.rawDeviceMax, camera);
+    if (!std::isfinite(cachedTile.rawLinearMin) ||
+        !std::isfinite(cachedTile.rawLinearMax) ||
+        cachedTile.rawLinearMax < cachedTile.rawLinearMin) {
       malformedTile = true;
       continue;
     }
 
+    const bool clearMin = isClearDepthSample(cachedTile.rawDeviceMin);
+    cachedTile.clearMax = isClearDepthSample(cachedTile.rawDeviceMax);
+    cachedTile.clearOnly = clearMin && cachedTile.clearMax;
+    cachedTile.valid = true;
     ++rawValidTileCount;
-    const bool clearOnlyTile =
-        isClearDepthSample(rawDeviceMin) && isClearDepthSample(rawDeviceMax);
-    if (clearOnlyTile) {
+    if (cachedTile.clearOnly) {
       ++clearOnlyTileCount;
       continue;
     }
 
-    analysis.rawDeviceMin = std::min(analysis.rawDeviceMin, rawDeviceMin);
-    analysis.rawDeviceMax = std::max(analysis.rawDeviceMax, rawDeviceMax);
-    analysis.rawLinearMin = std::min(analysis.rawLinearMin, rawLinearMin);
-    analysis.rawLinearMax = std::max(analysis.rawLinearMax, rawLinearMax);
-    if (!isClearDepthSample(rawDeviceMax)) {
-      maxNonClearLinearMax = std::max(maxNonClearLinearMax, rawLinearMax);
+    analysis.rawDeviceMin =
+        std::min(analysis.rawDeviceMin, cachedTile.rawDeviceMin);
+    analysis.rawDeviceMax =
+        std::max(analysis.rawDeviceMax, cachedTile.rawDeviceMax);
+    analysis.rawLinearMin =
+        std::min(analysis.rawLinearMin, cachedTile.rawLinearMin);
+    analysis.rawLinearMax =
+        std::max(analysis.rawLinearMax, cachedTile.rawLinearMax);
+    if (!cachedTile.clearMax) {
+      maxNonClearLinearMax =
+          std::max(maxNonClearLinearMax, cachedTile.rawLinearMax);
       hasNonClearLinearMax = true;
     }
   }
 
-  for (size_t i = 0u; i + 1u < minMaxPairs.size(); i += 2u) {
-    const float rawDeviceMin = minMaxPairs[i];
-    const float rawDeviceMax = minMaxPairs[i + 1u];
-    const bool rawDepthsValid =
-        std::isfinite(rawDeviceMin) && std::isfinite(rawDeviceMax) &&
-        rawDeviceMin >= -1.0e-4f && rawDeviceMax <= (1.0f + 1.0e-4f) &&
-        rawDeviceMax >= rawDeviceMin;
-    if (!rawDepthsValid) {
+  for (const CachedSdsmHistogramTile &cachedTile : cachedTiles) {
+    if (!cachedTile.valid || cachedTile.clearOnly) {
       continue;
     }
 
-    const float rawLinearMin =
-        shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMin, camera);
-    const float rawLinearMax =
-        shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMax, camera);
-    if (!std::isfinite(rawLinearMin) || !std::isfinite(rawLinearMax) ||
-        rawLinearMax < rawLinearMin) {
-      continue;
-    }
-
-    const bool clearOnlyTile =
-        isClearDepthSample(rawDeviceMin) && isClearDepthSample(rawDeviceMax);
-    if (clearOnlyTile) {
-      continue;
-    }
-
-    float histogramLinearMax = rawLinearMax;
-    if (isClearDepthSample(rawDeviceMax)) {
+    float histogramLinearMax = cachedTile.rawLinearMax;
+    if (cachedTile.clearMax) {
       // A tile that touches clear depth does not prove geometry extends all
       // the way to the camera far plane. Cap it to the deepest non-clear
       // sample seen in this mip so histogram trimming does not jump on sky
       // contamination.
       histogramLinearMax =
-          hasNonClearLinearMax ? std::max(rawLinearMin, maxNonClearLinearMax)
-                               : rawLinearMin;
+          hasNonClearLinearMax
+              ? std::max(cachedTile.rawLinearMin, maxNonClearLinearMax)
+              : cachedTile.rawLinearMin;
     }
 
     shadow_detail::accumulateSdsmHistogramInterval(
         std::span<float>(analysis.bucketWeights.data(), safeBucketCount),
-        fixedSplitRange.nearDepth, fixedSplitRange.farDepth, rawLinearMin,
-        histogramLinearMax, 1.0f);
+        fixedSplitRange.nearDepth, fixedSplitRange.farDepth,
+        cachedTile.rawLinearMin, histogramLinearMax, 1.0f);
     ++analysis.validTileCount;
     analysis.totalWeight += 1.0f;
   }
 
   if (analysis.validTileCount == 0u || analysis.totalWeight <= 1.0e-6f) {
-    const bool clearOnlySource =
-        !malformedTile && rawValidTileCount > 0u &&
-        clearOnlyTileCount == rawValidTileCount;
+    const bool clearOnlySource = !malformedTile && rawValidTileCount > 0u &&
+                                 clearOnlyTileCount == rawValidTileCount;
     if (clearOnlySource) {
       const float clearLinearDepth =
           shadow_detail::linearizeDeviceDepthToViewDepth(1.0f, camera);
@@ -369,10 +370,9 @@ struct SdsmHistogramAnalysis {
     return analysis;
   }
 
-  const float lowPercentile =
-      std::clamp(trimLowPercent / 100.0f, 0.0f, 0.95f);
-  const float highPercentile =
-      std::clamp(1.0f - trimHighPercent / 100.0f, lowPercentile + 1.0e-3f, 1.0f);
+  const float lowPercentile = std::clamp(trimLowPercent / 100.0f, 0.0f, 0.95f);
+  const float highPercentile = std::clamp(1.0f - trimHighPercent / 100.0f,
+                                          lowPercentile + 1.0e-3f, 1.0f);
   analysis.trimmedNear = shadow_detail::sdsmHistogramPercentileDepth(
       std::span<const float>(analysis.bucketWeights.data(), safeBucketCount),
       fixedSplitRange.nearDepth, fixedSplitRange.farDepth, lowPercentile);
@@ -687,7 +687,10 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       shadowFrameUploadSignatures_(memory_), meshDrawTemplates_(memory_),
       instanceMatrices_(memory_), instanceRemap_(memory_),
       passBufferDependencies_(memory_), passTextureDependencies_(memory_),
-      previewTextureDependencies_(memory_) {
+      previewTextureDependencies_(memory_), sdsmReadbackBuffer_(memory_) {
+  sdsmReadbackBuffer_.resize(
+      static_cast<size_t>(kSdsmHistogramSourceMaxTexelCount) * sizeof(float) *
+      2u);
   for (uint32_t cascadeIndex = 0u; cascadeIndex < kMaxShadowCascades;
        ++cascadeIndex) {
     cascadePushConstants_[cascadeIndex] =
@@ -1273,9 +1276,9 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       shadow_detail::computeCascadeSplitDepthsForRange(
           fixedSplitRange.nearDepth, fixedSplitRange.farDepth, cascadeCount,
           settings.splitMode, settings.splitLambda);
-  const float minimumFarDepth =
-      cascadeCount > 1u ? fixedSplitDepths[cascadeCount - 1u]
-                        : fixedSplitRange.farDepth;
+  const float minimumFarDepth = cascadeCount > 1u
+                                    ? fixedSplitDepths[cascadeCount - 1u]
+                                    : fixedSplitRange.farDepth;
   std::array<float, kMaxShadowCascades + 1u> minMaxSplitDepths =
       fixedSplitDepths;
   std::array<float, kMaxShadowCascades + 1u> histogramSplitDepths =
@@ -1301,8 +1304,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   shadowDebugFrameData_.sdsm.fixedRangeFar = fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.smoothedLinearMin = fixedSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.smoothedLinearMax = fixedSplitRange.farDepth;
-  shadowDebugFrameData_.sdsm.histogramTrimmedRangeNear = fixedSplitRange.nearDepth;
-  shadowDebugFrameData_.sdsm.histogramTrimmedRangeFar = fixedSplitRange.farDepth;
+  shadowDebugFrameData_.sdsm.histogramTrimmedRangeNear =
+      fixedSplitRange.nearDepth;
+  shadowDebugFrameData_.sdsm.histogramTrimmedRangeFar =
+      fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeNear = fixedSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeFar = fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.fixedSplitDepths = fixedSplitDepths;
@@ -1391,7 +1396,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         shadow_detail::enforceMonotonicShadowSplitDepths(
             sdsmState_.sdsmSmoothedHistogramSplitDepths_, cascadeCount,
             rawSplitDepths[0],
-            std::max(rawSplitDepths[cascadeCount], rawSplitDepths[0] + 1.0e-4f));
+            std::max(rawSplitDepths[cascadeCount],
+                     rawSplitDepths[0] + 1.0e-4f));
         sdsmState_.hasValidSdsmHistogramSplits_ = true;
         sdsmState_.sdsmHistogramCascadeCount_ = cascadeCount;
       };
@@ -1408,16 +1414,15 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
           return mappedSplitDepths;
         }
 
-        const float histogramFar = std::max(
-            histogramDepths[cascadeCount], histogramDepths[0] + 1.0e-4f);
+        const float histogramFar = std::max(histogramDepths[cascadeCount],
+                                            histogramDepths[0] + 1.0e-4f);
         const float histogramSpan =
             std::max(histogramFar - histogramDepths[0], 1.0e-4f);
         const float mappedSpan = mappedFar - mappedNear;
         for (uint32_t i = 1u; i < cascadeCount; ++i) {
-          const float normalized =
-              std::clamp((histogramDepths[i] - histogramDepths[0]) /
-                             histogramSpan,
-                         0.0f, 1.0f);
+          const float normalized = std::clamp(
+              (histogramDepths[i] - histogramDepths[0]) / histogramSpan, 0.0f,
+              1.0f);
           mappedSplitDepths[i] = mappedNear + normalized * mappedSpan;
         }
         shadow_detail::enforceMonotonicShadowSplitDepths(
@@ -1565,20 +1570,21 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       if (sdsmMode == ShadowSdsmMode::Histogram) {
         std::array<glm::uvec2, kMaxSceneDepthPyramidLevels> levelDimensions{};
         for (uint32_t level = 0u;
-             level < frame.sharedResources.sceneDepthPyramidLevelCount; ++level) {
+             level < frame.sharedResources.sceneDepthPyramidLevelCount;
+             ++level) {
           const TextureHandle texture =
               frame.sharedResources.sceneDepthPyramidTextures[level];
           if (!nuri::isValid(texture)) {
             levelDimensions[level] = glm::uvec2(1u);
             continue;
           }
-          const TextureDimensions dimensions = gpu_.getTextureDimensions(texture);
-          levelDimensions[level] =
-              glm::uvec2(std::max(dimensions.width, 1u),
-                         std::max(dimensions.height, 1u));
+          const TextureDimensions dimensions =
+              gpu_.getTextureDimensions(texture);
+          levelDimensions[level] = glm::uvec2(std::max(dimensions.width, 1u),
+                                              std::max(dimensions.height, 1u));
         }
-        const shadow_detail::ShadowSdsmHistogramSourceSelection sourceSelection =
-            shadow_detail::selectSdsmHistogramSourceLevel(
+        const shadow_detail::ShadowSdsmHistogramSourceSelection
+            sourceSelection = shadow_detail::selectSdsmHistogramSourceLevel(
                 std::span<const glm::uvec2>(
                     levelDimensions.data(),
                     frame.sharedResources.sceneDepthPyramidLevelCount),
@@ -1588,7 +1594,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         shadowDebugFrameData_.sdsm.histogramSourceDimensions =
             sourceSelection.dimensions;
         TextureHandle sdsmTexture =
-            frame.sharedResources.sceneDepthPyramidTextures[sourceSelection.level];
+            frame.sharedResources
+                .sceneDepthPyramidTextures[sourceSelection.level];
         sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
         if (!nuri::isValid(sdsmTexture)) {
           reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
@@ -1596,9 +1603,16 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         } else {
           const uint32_t width = std::max(sourceSelection.dimensions.x, 1u);
           const uint32_t height = std::max(sourceSelection.dimensions.y, 1u);
-          std::pmr::vector<std::byte> sdsmBytes(memory_);
-          sdsmBytes.resize(static_cast<size_t>(width) * height *
-                           sizeof(float) * 2u);
+          const size_t requiredBytes =
+              static_cast<size_t>(width) * height * sizeof(float) * 2u;
+          if (sdsmReadbackBuffer_.capacity() < requiredBytes) {
+            sdsmReadbackBuffer_.reserve(requiredBytes);
+          }
+          if (sdsmReadbackBuffer_.size() < requiredBytes) {
+            sdsmReadbackBuffer_.resize(requiredBytes);
+          }
+          std::span<std::byte> sdsmBytes(sdsmReadbackBuffer_.data(),
+                                         requiredBytes);
           const TextureReadbackRegion readbackRegion{
               .x = 0u,
               .y = 0u,
@@ -1644,12 +1658,12 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
               reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
                                              "invalid_histogram_source_data");
             } else {
-              const float sdsmSampleNear =
-                  analysis.clearOnlySource ? analysis.rawLinearMin
-                                           : analysis.trimmedNear;
-              const float sdsmSampleFar =
-                  analysis.clearOnlySource ? analysis.rawLinearMax
-                                           : analysis.trimmedFar;
+              const float sdsmSampleNear = analysis.clearOnlySource
+                                               ? analysis.rawLinearMin
+                                               : analysis.trimmedNear;
+              const float sdsmSampleFar = analysis.clearOnlySource
+                                              ? analysis.rawLinearMax
+                                              : analysis.trimmedFar;
               const float historyWeight =
                   std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
               const float sampleWeight = 1.0f - historyWeight;
@@ -1662,7 +1676,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                     sdsmState_.sdsmSmoothedMinDepth_ * historyWeight;
                 sdsmState_.sdsmSmoothedMaxDepth_ =
                     sdsmSampleFar * sampleWeight +
-              sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
+                    sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
               }
               sdsmState_.hasValidSdsmRange_ = true;
               sdsmState_.lastValidSdsmSourceFrameIndex_ =
@@ -1671,19 +1685,21 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
               const float comparisonFar =
                   analysis.clearOnlySource
                       ? fixedSplitRange.farDepth
-                      : std::clamp(std::max(analysis.trimmedFar, minimumFarDepth),
-                                   effectiveNear + 1.0e-4f,
-                                   fixedSplitRange.farDepth);
-              minMaxSplitDepths = shadow_detail::computeCascadeSplitDepthsForRange(
-                  effectiveNear, comparisonFar, cascadeCount, settings.splitMode,
-                  settings.splitLambda);
+                      : std::clamp(
+                            std::max(analysis.trimmedFar, minimumFarDepth),
+                            effectiveNear + 1.0e-4f, fixedSplitRange.farDepth);
+              minMaxSplitDepths =
+                  shadow_detail::computeCascadeSplitDepthsForRange(
+                      effectiveNear, comparisonFar, cascadeCount,
+                      settings.splitMode, settings.splitLambda);
               histogramSplitDepths = analysis.clearOnlySource
                                          ? fixedSplitDepths
                                          : analysis.rawSplitDepths;
               activateStableSdsmCoverage();
-              updateHistogramEffectiveSplitDepths(histogramSplitDepths,
-                                                 !analysis.clearOnlySource &&
-                                                     sdsmState_.hasValidSdsmHistogramSplits_);
+              updateHistogramEffectiveSplitDepths(
+                  histogramSplitDepths,
+                  !analysis.clearOnlySource &&
+                      sdsmState_.hasValidSdsmHistogramSplits_);
               histogramSplitDepths =
                   sdsmState_.sdsmSmoothedHistogramSplitDepths_;
               updateEffectiveSplitRange(effectiveSplitRange);
@@ -1795,9 +1811,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     // redistributing internal splits based on near-only histogram content.
     if (histogramDistributionFar >
         minimumFarDepth + histogramDistributionActivationDepth) {
-      effectiveSplitDepths =
-          buildHistogramSplitDepthsForRange(histogramSplitDepths,
-                                            effectiveSplitRange);
+      effectiveSplitDepths = buildHistogramSplitDepthsForRange(
+          histogramSplitDepths, effectiveSplitRange);
     }
   }
   shadowDebugFrameData_.sdsm.minMaxSplitDepths = minMaxSplitDepths;

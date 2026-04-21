@@ -3235,12 +3235,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
 bool OpaqueRenderer::requiresDepthPyramid(
     const RenderSettings &settings) const {
+  const ShadowSdsmMode sanitizedSdsm =
+      sanitizeShadowSdsmMode(settings.shadow.sdsmMode);
   return settings.opaque.enableDepthPyramid ||
          (settings.shadow.enabled &&
-          (sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
-               ShadowSdsmMode::PreviousFrameMinMax ||
-           sanitizeShadowSdsmMode(settings.shadow.sdsmMode) ==
-               ShadowSdsmMode::Histogram));
+          (sanitizedSdsm == ShadowSdsmMode::PreviousFrameMinMax ||
+           sanitizedSdsm == ShadowSdsmMode::Histogram));
 }
 
 Result<bool, std::string>

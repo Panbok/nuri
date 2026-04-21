@@ -343,9 +343,6 @@ void drawShadowSplitGraph(const ShadowSdsmDebugFrameData &sdsm) {
 void drawSdsmHistogramGraph(const ShadowSdsmDebugFrameData &sdsm) {
   const uint32_t bucketCount = std::clamp(sdsm.histogramBucketCount, 1u,
                                           kMaxShadowSdsmHistogramBucketCount);
-  if (bucketCount == 0u) {
-    return;
-  }
   const float graphWidth = ImGui::GetContentRegionAvail().x;
   const ImVec2 graphSize(std::max(graphWidth, 160.0f), 96.0f);
   const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -1453,8 +1450,8 @@ void drawShadowSettings(
             "Histogram Buckets##ShadowPass", &bucketCount,
             static_cast<int>(kMinShadowSdsmHistogramBucketCount),
             static_cast<int>(kMaxShadowSdsmHistogramBucketCount))) {
-      shadow.sdsmHistogramBucketCount =
-          static_cast<uint32_t>(std::max(bucketCount, 1));
+      shadow.sdsmHistogramBucketCount = static_cast<uint32_t>(std::max(
+          bucketCount, static_cast<int>(kMinShadowSdsmHistogramBucketCount)));
     }
     ImGui::SliderFloat("Histogram Trim Low##ShadowPass",
                        &shadow.sdsmHistogramTrimLowPercent, 0.0f, 20.0f,
