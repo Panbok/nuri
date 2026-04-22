@@ -105,6 +105,7 @@ public:
   uint64_t getBufferDeviceAddress(BufferHandle h, size_t offset) const override;
   bool resolveGeometry(GeometryAllocationHandle h,
                        GeometryAllocationView &out) const override;
+  GpuTimingReport getLatestCompletedGpuTimingReport() const override;
 
   Result<bool, std::string> beginFrame(uint64_t frameIndex) override;
   Result<bool, std::string> prepareFrameOutput() override;
@@ -189,6 +190,7 @@ public:
   uint32_t failBackgroundCopySubmitAtCall = 0u;
   std::vector<TextureDesc> createdTextureDescs{};
   std::vector<SamplerDesc> createdSamplerDescs{};
+  GpuTimingReport latestCompletedGpuTimingReport{};
 
 protected:
   Result<BufferHandle, std::string> createBufferImpl() {

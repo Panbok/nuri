@@ -663,6 +663,150 @@ TEST(RenderGraphCompileBehaviorTest,
 }
 
 TEST(RenderGraphCompileBehaviorTest,
+     ComputeOnlyPassCompilesWithTextureReadAndPreDispatchBufferWrite) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(244u);
+
+  auto sourceTextureResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+      "compute_only_source");
+  auto resultBufferResult = builder.createTransientBuffer(
+      makeTransientBufferDesc(32u), "compute_only_result");
+  ASSERT_FALSE(sourceTextureResult.hasError());
+  ASSERT_FALSE(resultBufferResult.hasError());
+
+  const std::array<BufferHandle, 1u> dispatchDependencies = {BufferHandle{}};
+  ComputeDispatchItem dispatch{};
+  dispatch.pipeline = ComputePipelineHandle{.index = 88u, .generation = 1u};
+  dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
+  dispatch.dependencyBuffers = std::span<const BufferHandle>(
+      dispatchDependencies.data(), dispatchDependencies.size());
+  dispatch.debugLabel = "compute_only_dispatch";
+  const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
+
+  RenderGraphGraphicsPassDesc passDesc{};
+  passDesc.executionMode = RenderPassExecutionMode::ComputeOnly;
+  passDesc.hasColorAttachment = false;
+  passDesc.preDispatches = std::span<const ComputeDispatchItem>(
+      preDispatches.data(), preDispatches.size());
+  passDesc.debugLabel = "compute_only_pass";
+  passDesc.markImplicitOutputSideEffect = true;
+
+  auto passResult = builder.addGraphicsPass(passDesc);
+  ASSERT_FALSE(passResult.hasError()) << passResult.error();
+  ASSERT_FALSE(
+      builder.addTextureRead(passResult.value(), sourceTextureResult.value())
+          .hasError());
+  ASSERT_FALSE(builder
+                   .bindPreDispatchDependencyBuffer(
+                       passResult.value(), 0u, 0u, resultBufferResult.value(),
+                       RenderGraphAccessMode::Write)
+                   .hasError());
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  ASSERT_EQ(compileResult.value().orderedPasses.size(), 1u);
+  EXPECT_EQ(compileResult.value().orderedPasses[0].executionMode,
+            RenderPassExecutionMode::ComputeOnly);
+  ASSERT_EQ(compileResult.value().orderedPasses[0].preDispatches.size(), 1u);
+  ASSERT_EQ(compileResult.value()
+                .orderedPasses[0]
+                .preDispatches[0]
+                .dependencyBuffers.size(),
+            1u);
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     ComputeOnlyPassRejectsAttachmentsDrawsAndEmptyDispatches) {
+  {
+    RenderGraphBuilder builder;
+    builder.beginFrame(245u);
+    auto colorResult = builder.createTransientTexture(
+        makeTransientTextureDesc(Format::RGBA8_UNORM, 16u, 16u),
+        "compute_only_invalid_color");
+    ASSERT_FALSE(colorResult.hasError());
+
+    RenderGraphGraphicsPassDesc passDesc{};
+    passDesc.executionMode = RenderPassExecutionMode::ComputeOnly;
+    passDesc.colorTexture = colorResult.value();
+    passDesc.debugLabel = "compute_only_invalid_color";
+    auto passResult = builder.addGraphicsPass(passDesc);
+    ASSERT_TRUE(passResult.hasError());
+    EXPECT_NE(passResult.error().find("color"), std::string::npos);
+  }
+
+  {
+    RenderGraphBuilder builder;
+    builder.beginFrame(246u);
+    DrawItem draw{};
+    const std::array<DrawItem, 1u> draws = {draw};
+    ComputeDispatchItem dispatch{};
+    dispatch.pipeline = ComputePipelineHandle{.index = 89u, .generation = 1u};
+    dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
+    const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
+
+    RenderGraphGraphicsPassDesc passDesc{};
+    passDesc.executionMode = RenderPassExecutionMode::ComputeOnly;
+    passDesc.hasColorAttachment = false;
+    passDesc.preDispatches = std::span<const ComputeDispatchItem>(
+        preDispatches.data(), preDispatches.size());
+    passDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
+    passDesc.debugLabel = "compute_only_invalid_draws";
+    auto passResult = builder.addGraphicsPass(passDesc);
+    ASSERT_TRUE(passResult.hasError());
+    EXPECT_NE(passResult.error().find("draws"), std::string::npos);
+  }
+
+  {
+    RenderGraphBuilder builder;
+    builder.beginFrame(247u);
+    RenderGraphGraphicsPassDesc passDesc{};
+    passDesc.executionMode = RenderPassExecutionMode::ComputeOnly;
+    passDesc.hasColorAttachment = false;
+    passDesc.debugLabel = "compute_only_empty";
+    auto passResult = builder.addGraphicsPass(passDesc);
+    ASSERT_TRUE(passResult.hasError());
+    EXPECT_NE(passResult.error().find("dispatch"), std::string::npos);
+  }
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     ComputeOnlyExecutionModeChangesGraphFingerprint) {
+  const auto recordFingerprint = [](uint64_t frameIndex,
+                                    RenderPassExecutionMode executionMode) {
+    RenderGraphBuilder builder;
+    builder.beginFrame(frameIndex);
+
+    ComputeDispatchItem dispatch{};
+    dispatch.pipeline = ComputePipelineHandle{.index = 90u, .generation = 1u};
+    dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
+    const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
+
+    RenderGraphGraphicsPassDesc passDesc{};
+    passDesc.executionMode = executionMode;
+    passDesc.hasColorAttachment = false;
+    passDesc.preDispatches = std::span<const ComputeDispatchItem>(
+        preDispatches.data(), preDispatches.size());
+    passDesc.debugLabel = "compute_only_fingerprint";
+    passDesc.markImplicitOutputSideEffect = true;
+
+    auto passResult = builder.addGraphicsPass(passDesc);
+    EXPECT_FALSE(passResult.hasError());
+    if (passResult.hasError()) {
+      return RenderGraphBuilder::GraphFingerprint{};
+    }
+    return builder.computeGraphFingerprint();
+  };
+
+  const auto graphicsFingerprint =
+      recordFingerprint(248u, RenderPassExecutionMode::Graphics);
+  const auto computeFingerprint =
+      recordFingerprint(249u, RenderPassExecutionMode::ComputeOnly);
+
+  EXPECT_FALSE(graphicsFingerprint == computeFingerprint);
+}
+
+TEST(RenderGraphCompileBehaviorTest,
      ExplicitAndHazardDependencyOverlapDeduplicatesToSingleEdge) {
   RenderGraphBuilder builder;
   builder.beginFrame(217u);

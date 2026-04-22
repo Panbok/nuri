@@ -104,6 +104,7 @@ Result<RenderGraphPassId, std::string>
 addTestGraphicsPass(RenderGraphBuilder &builder, const RenderPass &pass,
                     std::string_view debugName, bool autoBindPassResources) {
   RenderGraphGraphicsPassDesc desc{};
+  desc.executionMode = pass.executionMode;
   desc.color = pass.color;
   desc.depth = pass.depth;
   desc.useViewport = pass.useViewport;
@@ -111,6 +112,7 @@ addTestGraphicsPass(RenderGraphBuilder &builder, const RenderPass &pass,
   desc.preDispatches = pass.preDispatches;
   desc.dependencyBuffers = pass.dependencyBuffers;
   desc.draws = pass.draws;
+  desc.gpuTimingScope = pass.gpuTimingScope;
   desc.debugLabel = !debugName.empty() ? debugName : pass.debugLabel;
   desc.debugColor = pass.debugColor;
   desc.markColorAsFrameOutput = false;
@@ -495,6 +497,10 @@ uint64_t FakeGPUDeviceBase::getBufferDeviceAddress(BufferHandle h,
 bool FakeGPUDeviceBase::resolveGeometry(GeometryAllocationHandle,
                                         GeometryAllocationView &) const {
   return false;
+}
+
+GpuTimingReport FakeGPUDeviceBase::getLatestCompletedGpuTimingReport() const {
+  return latestCompletedGpuTimingReport;
 }
 
 Result<bool, std::string> FakeGPUDeviceBase::beginFrame(uint64_t frameIndex) {

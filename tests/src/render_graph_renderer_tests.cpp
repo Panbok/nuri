@@ -91,6 +91,12 @@ RuntimeOpaqueShaderConfig makeOpaqueConfig(const std::filesystem::path &root) {
   };
 }
 
+RuntimeOpaqueShaderConfig makeShadowConfig(const std::filesystem::path &root) {
+  return RuntimeOpaqueShaderConfig{
+      .shaderBasePath = root / "assets" / "shaders",
+  };
+}
+
 CameraFrameState makeSdsmPerspectiveCamera(float farPlane = 100.0f) {
   return CameraFrameState{
       .view =
@@ -385,6 +391,16 @@ private:
   std::vector<Allocation> allocations_{};
 };
 
+class FakeNoComputeFullscreenGpuDevice final : public FakeFullscreenGpuDevice {
+public:
+  Result<ComputePipelineHandle, std::string>
+  createComputePipeline(const ComputePipelineDesc &,
+                        std::string_view) override {
+    return Result<ComputePipelineHandle, std::string>::makeError(
+        "compute pipelines unavailable");
+  }
+};
+
 struct PresentPushConstantsProbe {
   uint32_t sourceTexId = 0u;
   uint32_t sourceSamplerId = 0u;
@@ -668,7 +684,10 @@ TEST(RenderGraphRendererTest, RenderSettingsDefaultToShadowsEnabled) {
   EXPECT_FLOAT_EQ(settings.shadow.pcssFilterRadiusClampTexels,
                   kDefaultPcssFilterRadiusClampTexels);
   EXPECT_EQ(settings.shadow.sdsmMode, ShadowSdsmMode::Disabled);
-  EXPECT_EQ(settings.shadow.debug.sdsmDiagnosticLogLevel, LogLevel::Trace);
+  EXPECT_FALSE(settings.shadow.debug.logDiagnostics);
+  EXPECT_EQ(settings.shadow.debug.diagnosticLogLevel, LogLevel::Trace);
+  EXPECT_EQ(settings.shadow.debug.diagnosticLogIntervalFrames, 1u);
+  EXPECT_FALSE(settings.shadow.debug.diagnosticLogOnlyOnChange);
 }
 
 TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
@@ -688,6 +707,8 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
   settings.pcssFilterRadiusClampTexels =
       std::numeric_limits<float>::quiet_NaN();
   settings.debug.showLightPerspectiveViewport = true;
+  settings.debug.diagnosticLogLevel = static_cast<LogLevel>(99u);
+  settings.debug.diagnosticLogIntervalFrames = 0u;
   settings.debug.debugCascadeIndex = 99u;
   settings.debug.previewDepthMin = -1.0f;
   settings.debug.previewDepthMax = 2.0f;
@@ -709,7 +730,8 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
   EXPECT_FLOAT_EQ(settings.pcssFilterRadiusClampTexels,
                   kDefaultPcssFilterRadiusClampTexels);
   EXPECT_FALSE(settings.debug.showLightPerspectiveViewport);
-  EXPECT_EQ(settings.debug.sdsmDiagnosticLogLevel, LogLevel::Trace);
+  EXPECT_EQ(settings.debug.diagnosticLogLevel, LogLevel::Trace);
+  EXPECT_EQ(settings.debug.diagnosticLogIntervalFrames, 1u);
   EXPECT_EQ(settings.debug.debugCascadeIndex, 0u);
   EXPECT_FLOAT_EQ(settings.debug.previewDepthMin, 0.0f);
   EXPECT_FLOAT_EQ(settings.debug.previewDepthMax, 1.0f);
@@ -732,6 +754,112 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
 
 TEST(RenderGraphRendererTest, LvkD16DepthFormatMapsToVulkanD16Unorm) {
   EXPECT_EQ(lvk::formatToVkFormat(lvk::Format_Z_UN16), VK_FORMAT_D16_UNORM);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureLogsDiagnosticsAtConfiguredInterval) {
+  std::array<std::byte, 128 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.debug.logDiagnostics = true;
+  settings.shadow.debug.diagnosticLogLevel = LogLevel::Debug;
+  settings.shadow.debug.diagnosticLogIntervalFrames = 2u;
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  const uint64_t baselineSequence = currentLogSequence();
+  for (uint64_t frameIndex = 0u; frameIndex < 3u; ++frameIndex) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera = camera;
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+    ASSERT_TRUE(buildResult.value());
+  }
+
+  EXPECT_EQ(
+      countLogEntriesSince(baselineSequence, "Shadow diagnostics summary"), 2u);
+  EXPECT_EQ(
+      countLogEntriesSince(baselineSequence, "Shadow diagnostics cascade"), 8u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureLogsLightFitChangeComponentsWhenCameraMoves) {
+  std::array<std::byte, 128 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.debug.logDiagnostics = true;
+  settings.shadow.debug.diagnosticLogLevel = LogLevel::Debug;
+  settings.shadow.debug.diagnosticLogIntervalFrames = 1u;
+
+  const CameraFrameState cameraA = makeSdsmPerspectiveCamera(30.0f);
+  CameraFrameState cameraB = cameraA;
+  cameraB.view =
+      glm::lookAt(glm::vec3(0.4f, 2.0f, 6.0f), glm::vec3(0.4f, 0.5f, 0.0f),
+                  glm::vec3(0.0f, 1.0f, 0.0f));
+  cameraB.cameraPos = glm::vec4(0.4f, 2.0f, 6.0f, 1.0f);
+
+  const uint64_t baselineSequence = currentLogSequence();
+  for (uint64_t frameIndex = 0u; frameIndex < 2u; ++frameIndex) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera = frameIndex == 0u ? cameraA : cameraB;
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+    ASSERT_TRUE(buildResult.value());
+  }
+
+  EXPECT_GE(
+      countLogEntriesSince(baselineSequence, "Shadow diagnostics light change"),
+      1u);
 }
 
 TEST(RenderGraphRendererTest,
@@ -901,6 +1029,14 @@ TEST(RenderGraphRendererTest,
               movedFit.snappedLightSpaceCenter.x, 1.0e-6f);
   EXPECT_NEAR(baseFit.snappedLightSpaceCenter.y,
               movedFit.snappedLightSpaceCenter.y, 1.0e-6f);
+  EXPECT_NEAR(baseFit.texelWorldSize, movedFit.texelWorldSize, 1.0e-6f);
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      EXPECT_NEAR(baseFit.lightProj[c][r], movedFit.lightProj[c][r], 1.0e-6f);
+      EXPECT_NEAR(baseFit.lightViewProj[c][r], movedFit.lightViewProj[c][r],
+                  1.0e-6f);
+    }
+  }
 }
 
 TEST(RenderGraphRendererTest,
@@ -938,6 +1074,197 @@ TEST(RenderGraphRendererTest,
   EXPECT_GT(std::abs(movedFit.snappedLightSpaceCenter.x -
                      baseFit.snappedLightSpaceCenter.x),
             baseFit.texelWorldSize * 0.5f);
+}
+
+TEST(RenderGraphRendererTest,
+     DirectionalShadowFitHysteresisKeepsPreviousCenterWithinDeadband) {
+  constexpr uint32_t kShadowMapSize = 1024u;
+  const CameraFrameState camera = makeSdsmPerspectiveCamera(100.0f);
+  const glm::vec3 eye(0.0f, 2.0f, 6.0f);
+  const glm::vec3 target(0.0f, 0.5f, 0.0f);
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  const glm::vec3 lightDirection =
+      glm::normalize(glm::vec3(-0.35f, -1.0f, -0.2f));
+  const shadow_detail::DirectionalShadowFit baseFit =
+      shadow_detail::fitSingleDirectionalShadowMap(camera, lightDirection,
+                                                   50.0f, kShadowMapSize, true);
+
+  const glm::vec3 hysteresisMotion =
+      glm::vec3(glm::inverse(baseFit.lightView) *
+                glm::vec4(baseFit.texelWorldSize * 0.75f, 0.0f, 0.0f, 0.0f));
+  CameraFrameState movedCamera = camera;
+  movedCamera.view =
+      glm::lookAt(eye + hysteresisMotion, target + hysteresisMotion, up);
+  movedCamera.cameraPos = glm::vec4(eye + hysteresisMotion, 1.0f);
+
+  shadow_detail::DirectionalShadowFit movedFit =
+      shadow_detail::fitSingleDirectionalShadowMap(movedCamera, lightDirection,
+                                                   50.0f, kShadowMapSize, true);
+  EXPECT_GT(std::abs(movedFit.snappedLightSpaceCenter.x -
+                     baseFit.snappedLightSpaceCenter.x),
+            baseFit.texelWorldSize * 0.5f);
+
+  shadow_detail::applyDirectionalShadowFitHysteresis(movedFit, baseFit,
+                                                     kShadowMapSize);
+
+  EXPECT_NEAR(movedFit.snappedLightSpaceCenter.x,
+              baseFit.snappedLightSpaceCenter.x, 1.0e-6f);
+  EXPECT_NEAR(movedFit.snappedLightSpaceCenter.y,
+              baseFit.snappedLightSpaceCenter.y, 1.0e-6f);
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      EXPECT_NEAR(movedFit.lightProj[c][r], baseFit.lightProj[c][r], 1.0e-6f);
+      EXPECT_NEAR(movedFit.lightViewProj[c][r], baseFit.lightViewProj[c][r],
+                  1.0e-6f);
+    }
+  }
+}
+
+TEST(RenderGraphRendererTest,
+     DirectionalShadowFitHysteresisReleasesPreviousCenterPastDeadband) {
+  constexpr uint32_t kShadowMapSize = 1024u;
+  const CameraFrameState camera = makeSdsmPerspectiveCamera(100.0f);
+  const glm::vec3 eye(0.0f, 2.0f, 6.0f);
+  const glm::vec3 target(0.0f, 0.5f, 0.0f);
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  const glm::vec3 lightDirection =
+      glm::normalize(glm::vec3(-0.35f, -1.0f, -0.2f));
+  const shadow_detail::DirectionalShadowFit baseFit =
+      shadow_detail::fitSingleDirectionalShadowMap(camera, lightDirection,
+                                                   50.0f, kShadowMapSize, true);
+
+  const glm::vec3 releaseMotion =
+      glm::vec3(glm::inverse(baseFit.lightView) *
+                glm::vec4(baseFit.texelWorldSize * 1.25f, 0.0f, 0.0f, 0.0f));
+  CameraFrameState movedCamera = camera;
+  movedCamera.view =
+      glm::lookAt(eye + releaseMotion, target + releaseMotion, up);
+  movedCamera.cameraPos = glm::vec4(eye + releaseMotion, 1.0f);
+
+  shadow_detail::DirectionalShadowFit movedFit =
+      shadow_detail::fitSingleDirectionalShadowMap(movedCamera, lightDirection,
+                                                   50.0f, kShadowMapSize, true);
+  shadow_detail::applyDirectionalShadowFitHysteresis(movedFit, baseFit,
+                                                     kShadowMapSize);
+
+  EXPECT_GT(std::abs(movedFit.snappedLightSpaceCenter.x -
+                     baseFit.snappedLightSpaceCenter.x),
+            baseFit.texelWorldSize * 0.5f);
+}
+
+TEST(RenderGraphRendererTest,
+     DirectionalShadowFitHysteresisKeepsPreviousExtentWithinDeadband) {
+  constexpr uint32_t kShadowMapSize = 1024u;
+  const CameraFrameState camera = makeSdsmPerspectiveCamera(100.0f);
+  const glm::vec3 lightDirection =
+      glm::normalize(glm::vec3(-0.35f, -1.0f, -0.2f));
+  const shadow_detail::DirectionalShadowFit baseFit =
+      shadow_detail::fitSingleDirectionalShadowMap(camera, lightDirection,
+                                                   50.0f, kShadowMapSize, true);
+  const glm::vec2 baseExtent = shadow_detail::orthoExtentFromShadowFit(baseFit);
+
+  shadow_detail::DirectionalShadowFit shrunkFit = baseFit;
+  const float shrinkAmount = baseFit.texelWorldSize * 1.5f;
+  shrunkFit.lightSpaceBoundsMin.x += shrinkAmount * 0.5f;
+  shrunkFit.lightSpaceBoundsMax.x -= shrinkAmount * 0.5f;
+  shrunkFit.lightSpaceBoundsMin.y += shrinkAmount * 0.5f;
+  shrunkFit.lightSpaceBoundsMax.y -= shrinkAmount * 0.5f;
+  const glm::vec2 shrunkExtent =
+      shadow_detail::orthoExtentFromShadowFit(shrunkFit);
+  shrunkFit.texelWorldSize = std::max(shrunkExtent.x, shrunkExtent.y) /
+                             static_cast<float>(kShadowMapSize);
+
+  shadow_detail::applyDirectionalShadowFitHysteresis(shrunkFit, baseFit,
+                                                     kShadowMapSize);
+
+  const glm::vec2 stabilizedExtent =
+      shadow_detail::orthoExtentFromShadowFit(shrunkFit);
+  EXPECT_NEAR(stabilizedExtent.x, baseExtent.x, 1.0e-6f);
+  EXPECT_NEAR(stabilizedExtent.y, baseExtent.y, 1.0e-6f);
+  EXPECT_NEAR(shrunkFit.texelWorldSize, baseFit.texelWorldSize, 1.0e-6f);
+}
+
+TEST(RenderGraphRendererTest,
+     DirectionalShadowFitHysteresisShrinksExtentAfterDeadband) {
+  constexpr uint32_t kShadowMapSize = 1024u;
+  const CameraFrameState camera = makeSdsmPerspectiveCamera(100.0f);
+  const glm::vec3 lightDirection =
+      glm::normalize(glm::vec3(-0.35f, -1.0f, -0.2f));
+  const shadow_detail::DirectionalShadowFit baseFit =
+      shadow_detail::fitSingleDirectionalShadowMap(camera, lightDirection,
+                                                   50.0f, kShadowMapSize, true);
+
+  shadow_detail::DirectionalShadowFit shrunkFit = baseFit;
+  const float shrinkAmount = baseFit.texelWorldSize * 3.0f;
+  shrunkFit.lightSpaceBoundsMin.x += shrinkAmount * 0.5f;
+  shrunkFit.lightSpaceBoundsMax.x -= shrinkAmount * 0.5f;
+  shrunkFit.lightSpaceBoundsMin.y += shrinkAmount * 0.5f;
+  shrunkFit.lightSpaceBoundsMax.y -= shrinkAmount * 0.5f;
+  const glm::vec2 expectedExtent =
+      shadow_detail::orthoExtentFromShadowFit(shrunkFit);
+  shrunkFit.texelWorldSize = std::max(expectedExtent.x, expectedExtent.y) /
+                             static_cast<float>(kShadowMapSize);
+
+  shadow_detail::applyDirectionalShadowFitHysteresis(shrunkFit, baseFit,
+                                                     kShadowMapSize);
+
+  const glm::vec2 stabilizedExtent =
+      shadow_detail::orthoExtentFromShadowFit(shrunkFit);
+  EXPECT_NEAR(stabilizedExtent.x, expectedExtent.x, 1.0e-6f);
+  EXPECT_NEAR(stabilizedExtent.y, expectedExtent.y, 1.0e-6f);
+}
+
+TEST(RenderGraphRendererTest,
+     DirectionalShadowFitHysteresisKeepsPreviousDepthWithinDeadband) {
+  constexpr uint32_t kShadowMapSize = 1024u;
+  const CameraFrameState camera = makeSdsmPerspectiveCamera(100.0f);
+  const glm::vec3 lightDirection =
+      glm::normalize(glm::vec3(-0.35f, -1.0f, -0.2f));
+  const shadow_detail::DirectionalShadowFit baseFit =
+      shadow_detail::fitSingleDirectionalShadowMap(camera, lightDirection,
+                                                   50.0f, kShadowMapSize, true);
+
+  shadow_detail::DirectionalShadowFit shrunkFit = baseFit;
+  const float shrinkAmount = baseFit.texelWorldSize * 1.5f;
+  shrunkFit.lightSpaceBoundsMin.z += shrinkAmount;
+  shrunkFit.lightSpaceBoundsMax.z -= shrinkAmount;
+
+  shadow_detail::applyDirectionalShadowFitHysteresis(shrunkFit, baseFit,
+                                                     kShadowMapSize);
+
+  EXPECT_EQ(shrunkFit.lightSpaceBoundsMin.z, baseFit.lightSpaceBoundsMin.z);
+  EXPECT_EQ(shrunkFit.lightSpaceBoundsMax.z, baseFit.lightSpaceBoundsMax.z);
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      EXPECT_NEAR(shrunkFit.lightProj[c][r], baseFit.lightProj[c][r], 1.0e-6f);
+      EXPECT_NEAR(shrunkFit.lightViewProj[c][r], baseFit.lightViewProj[c][r],
+                  1.0e-6f);
+    }
+  }
+}
+
+TEST(RenderGraphRendererTest,
+     DirectionalShadowFitHysteresisShrinksDepthAfterDeadband) {
+  constexpr uint32_t kShadowMapSize = 1024u;
+  const CameraFrameState camera = makeSdsmPerspectiveCamera(100.0f);
+  const glm::vec3 lightDirection =
+      glm::normalize(glm::vec3(-0.35f, -1.0f, -0.2f));
+  const shadow_detail::DirectionalShadowFit baseFit =
+      shadow_detail::fitSingleDirectionalShadowMap(camera, lightDirection,
+                                                   50.0f, kShadowMapSize, true);
+
+  shadow_detail::DirectionalShadowFit shrunkFit = baseFit;
+  const float shrinkAmount = baseFit.texelWorldSize * 3.0f;
+  shrunkFit.lightSpaceBoundsMin.z += shrinkAmount;
+  shrunkFit.lightSpaceBoundsMax.z -= shrinkAmount;
+  const float expectedMinZ = shrunkFit.lightSpaceBoundsMin.z;
+  const float expectedMaxZ = shrunkFit.lightSpaceBoundsMax.z;
+
+  shadow_detail::applyDirectionalShadowFitHysteresis(shrunkFit, baseFit,
+                                                     kShadowMapSize);
+
+  EXPECT_EQ(shrunkFit.lightSpaceBoundsMin.z, expectedMinZ);
+  EXPECT_EQ(shrunkFit.lightSpaceBoundsMax.z, expectedMaxZ);
 }
 
 TEST(RenderGraphRendererTest,
@@ -1420,6 +1747,65 @@ TEST(RenderGraphRendererTest, ShadowFeatureBuildsNoGraphPassesWhenDisabled) {
   EXPECT_TRUE(frameContext.sharedResources.shadowFrameGpuData.has_value());
   EXPECT_EQ(frameContext.sharedResources.shadowRawSamplerId, 1u);
   EXPECT_EQ(frameContext.sharedResources.shadowCompareSamplerId, 2u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeaturePublishesLatestCompletedGpuTimingMetric) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeRendererGPUDevice gpu;
+  gpu.latestCompletedGpuTimingReport = GpuTimingReport{
+      .sourceFrameIndex = 7u,
+      .shadowDepthSourceFrameIndex = 7u,
+      .shadowSdsmSourceFrameIndex = 6u,
+      .shadowTimeMs = 1.75f,
+      .shadowDepthTimeMs = 1.75f,
+      .shadowSdsmTimeMs = 0.11f,
+      .availableScopeMask = kGpuTimingScopeShadowBit |
+                            kGpuTimingScopeShadowDepthBit |
+                            kGpuTimingScopeShadowSdsmBit,
+  };
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  auto *shadow =
+      pipeline.addFeature(std::make_unique<ShadowFeature>(gpu, &memory));
+  ASSERT_NE(shadow, nullptr);
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 8u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = CameraFrameState{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  EXPECT_EQ(frameContext.metrics.shadow.gpuTimingAvailable, 1u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.shadow.gpuTimeMs, 1.75f);
+  EXPECT_EQ(frameContext.metrics.shadow.depthGpuTimingAvailable, 1u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.shadow.depthGpuTimeMs, 1.75f);
+  EXPECT_EQ(frameContext.metrics.shadow.depthGpuTimingSourceFrameIndex, 7u);
+  EXPECT_EQ(frameContext.metrics.shadow.sdsmGpuTimingAvailable, 1u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.shadow.sdsmGpuTimeMs, 0.11f);
+  EXPECT_EQ(frameContext.metrics.shadow.sdsmGpuTimingSourceFrameIndex, 6u);
+  EXPECT_EQ(frameContext.metrics.shadow.gpuTimingSourceFrameIndex, 7u);
 }
 
 TEST(RenderGraphRendererTest,
@@ -2051,6 +2437,1126 @@ TEST(RenderGraphRendererTest,
     }
   }
   EXPECT_TRUE(createdMinMaxTexture);
+}
+
+TEST(RenderGraphRendererTest,
+     OpaqueFeatureClearsPublishedDepthPyramidSourceAfterPyramidRecreation) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("sdsm_depth_pyramid_recreate_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "sdsm_depth_pyramid_recreate_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  auto materialResult = renderer.resources().acquireMaterial(MaterialRequest{
+      .debugName = "sdsm_depth_pyramid_recreate_material",
+  });
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 4.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+
+  const auto buildFrame = [&](uint64_t frameIndex) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view =
+        glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
+                    glm::vec3(0.0f, 1.0f, 0.0f));
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+    frameContext.camera.cameraPos = glm::vec4(0.0f, 1.5f, 4.0f, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 30.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
+    EXPECT_TRUE(buildResult.value());
+    return frameContext;
+  };
+
+  const RenderFrameContext firstFrame = buildFrame(1u);
+  ASSERT_GT(firstFrame.sharedResources.sceneDepthPyramidLevelCount, 0u);
+  EXPECT_FALSE(
+      firstFrame.sharedResources.sceneDepthPyramidSourceFrameIndex.has_value());
+
+  for (uint32_t level = 0u;
+       level < firstFrame.sharedResources.sceneDepthPyramidLevelCount;
+       ++level) {
+    const TextureHandle texture =
+        firstFrame.sharedResources.sceneDepthPyramidTextures[level];
+    ASSERT_TRUE(nuri::isValid(texture));
+    gpu.destroyTexture(texture);
+  }
+
+  const RenderFrameContext secondFrame = buildFrame(2u);
+  EXPECT_GT(secondFrame.sharedResources.sceneDepthPyramidLevelCount, 0u);
+  EXPECT_FALSE(secondFrame.sharedResources.sceneDepthPyramidSourceFrameIndex
+                   .has_value());
+}
+
+TEST(RenderGraphRendererTest,
+     OpaqueFeatureAppendsShadowSdsmReducePassForGpuMinMaxAndPublishesMetrics) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("sdsm_gpu_reduce_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "sdsm_gpu_reduce_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  auto materialResult = renderer.resources().acquireMaterial(MaterialRequest{
+      .debugName = "sdsm_gpu_reduce_material",
+  });
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  addDirectionalLightToScene(scene);
+
+  RenderSettings settings{};
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+  settings.shadow.enabled = true;
+  settings.shadow.filterMode = ShadowFilterMode::PCSS;
+  settings.shadow.pcssBlockerSampleCount = 19u;
+  settings.shadow.pcssFilterSampleCount = 41u;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera.view =
+      glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
+                  glm::vec3(0.0f, 1.0f, 0.0f));
+  frameContext.camera.proj =
+      glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+  frameContext.camera.cameraPos = glm::vec4(0.0f, 1.5f, 4.0f, 1.0f);
+  frameContext.camera.aspectRatio = 1.0f;
+  frameContext.camera.projectionType = ProjectionType::Perspective;
+  frameContext.camera.nearPlane = 0.1f;
+  frameContext.camera.farPlane = 30.0f;
+  frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  EXPECT_TRUE(
+      frameContext.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+  EXPECT_TRUE(
+      nuri::isValid(frameContext.sharedResources.shadowSdsmGpuReducePipeline));
+  EXPECT_EQ(frameContext.metrics.shadow.sdsmComputePassCount, 1u);
+  EXPECT_GT(frameContext.metrics.shadow.cascadeTextureBytes, 0u);
+  EXPECT_GT(frameContext.metrics.shadow.totalDraws, 0u);
+  EXPECT_EQ(frameContext.metrics.shadow.shadowMapSize,
+            settings.shadow.shadowMapSize);
+  EXPECT_EQ(frameContext.metrics.shadow.filterSampleBudget, 60u);
+  EXPECT_EQ(frameContext.metrics.shadow.pcssBlockerSampleBudget, 19u);
+  EXPECT_EQ(frameContext.metrics.shadow.pcssFilterSampleBudget, 41u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderPass *reducePass = nullptr;
+  for (const RenderPass &pass : compileResult.value().orderedPasses) {
+    if (pass.debugLabel == "Shadow SDSM Reduce") {
+      reducePass = &pass;
+      break;
+    }
+  }
+  ASSERT_NE(reducePass, nullptr);
+  EXPECT_EQ(reducePass->executionMode, RenderPassExecutionMode::ComputeOnly);
+  EXPECT_TRUE(reducePass->draws.empty());
+  ASSERT_EQ(reducePass->preDispatches.size(), 1u);
+  EXPECT_EQ(reducePass->preDispatches[0].debugLabel, "Shadow SDSM Reduce");
+  ASSERT_EQ(reducePass->preDispatches[0].dependencyBuffers.size(), 1u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureHistogramModeAlwaysUsesCpuReductionBackend) {
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(gpu, &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                        "sdsm_histogram_force_cpu");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::Histogram;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = CameraFrameState{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 0u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+  EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                .requestedReductionBackend,
+            ShadowSdsmReductionBackend::Gpu);
+  EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                .activeReductionBackend,
+            ShadowSdsmReductionBackend::Cpu);
+  EXPECT_FALSE(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                   .reductionFallbackActive);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureAutoFallsBackToCpuWhenGpuReductionIsUnavailable) {
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeNoComputeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(gpu, &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                        "sdsm_auto_cpu_fallback");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = CameraFrameState{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 0u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+  EXPECT_FALSE(
+      frameContext.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+  EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                .requestedReductionBackend,
+            ShadowSdsmReductionBackend::Auto);
+  EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                .activeReductionBackend,
+            ShadowSdsmReductionBackend::Cpu);
+  EXPECT_FALSE(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                   .reductionFallbackActive);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmConsumesPreviousFrameBufferAndMatchesCpuPath) {
+  struct GpuSdsmMinMaxResult {
+    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
+    uint32_t sourceFrameIndex = 0u;
+    uint32_t valid = 0u;
+  };
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  const auto buildSdsm =
+      [&](ShadowSdsmReductionBackend backend) -> ShadowSdsmDebugFrameData {
+    std::array<std::byte, 64 * 1024> scratchBytes{};
+    std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                               scratchBytes.size());
+    FakeFullscreenGpuDevice gpu;
+    Renderer renderer(gpu, memory);
+    RenderPipeline pipeline(&memory);
+    pipeline.addFeature(std::make_unique<ShadowFeature>(
+        gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+        &memory));
+
+    RenderScene scene(&memory);
+    scene.bindResources(&renderer.resources());
+    addDirectionalLightToScene(scene);
+
+    auto pyramidTextureResult =
+        gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                          "sdsm_compare_texture");
+    EXPECT_FALSE(pyramidTextureResult.hasError())
+        << pyramidTextureResult.error();
+    if (pyramidTextureResult.hasError()) {
+      return ShadowSdsmDebugFrameData{};
+    }
+
+    if (backend == ShadowSdsmReductionBackend::Cpu) {
+      const std::array<float, 2u> deviceDepths{0.2f, 0.5f};
+      auto seedResult =
+          gpu.seedTextureBytes(pyramidTextureResult.value(),
+                               std::as_bytes(std::span<const float>(
+                                   deviceDepths.data(), deviceDepths.size())));
+      EXPECT_FALSE(seedResult.hasError()) << seedResult.error();
+    } else {
+      RenderSettings publishSettings{};
+      publishSettings.shadow.enabled = true;
+      publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+      publishSettings.shadow.sdsmReductionBackend = backend;
+
+      RenderFrameContext publishFrame{};
+      publishFrame.frameIndex = 0u;
+      publishFrame.scene = &scene;
+      publishFrame.resources = &renderer.resources();
+      publishFrame.settings = &publishSettings;
+      publishFrame.camera = camera;
+
+      RenderGraphBuilder publishGraph(&memory);
+      publishGraph.beginFrame(publishFrame.frameIndex);
+      auto publishResult = pipeline.buildRenderGraph(
+          publishFrame, renderer.resources(), publishGraph);
+      EXPECT_FALSE(publishResult.hasError()) << publishResult.error();
+      EXPECT_TRUE(publishResult.value());
+      EXPECT_TRUE(
+          publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+      if (!publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value()) {
+        return ShadowSdsmDebugFrameData{};
+      }
+
+      const GpuSdsmMinMaxResult gpuResult{
+          .rawDeviceMinMax = glm::vec2(0.2f, 0.5f),
+          .sourceFrameIndex = 0u,
+          .valid = 1u,
+      };
+      auto writeResult = gpu.updateBuffer(
+          publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
+          std::as_bytes(std::span<const GpuSdsmMinMaxResult>(&gpuResult, 1u)),
+          0u);
+      EXPECT_FALSE(writeResult.hasError()) << writeResult.error();
+    }
+
+    RenderSettings settings{};
+    settings.shadow.enabled = true;
+    settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+    settings.shadow.sdsmReductionBackend = backend;
+    settings.shadow.sdsmTemporalBlend = 0.0f;
+
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = 1u;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera = camera;
+    frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+        pyramidTextureResult.value();
+    frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+    frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 0u;
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
+    EXPECT_TRUE(buildResult.value());
+    EXPECT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+    if (!frameContext.sharedResources.shadowDebugFrameData.has_value()) {
+      return ShadowSdsmDebugFrameData{};
+    }
+    return frameContext.sharedResources.shadowDebugFrameData->sdsm;
+  };
+
+  const ShadowSdsmDebugFrameData gpuSdsm =
+      buildSdsm(ShadowSdsmReductionBackend::Gpu);
+  const ShadowSdsmDebugFrameData cpuSdsm =
+      buildSdsm(ShadowSdsmReductionBackend::Cpu);
+
+  ASSERT_EQ(gpuSdsm.status, ShadowSdsmStatus::Active);
+  ASSERT_EQ(cpuSdsm.status, ShadowSdsmStatus::Active);
+  EXPECT_EQ(gpuSdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
+  EXPECT_EQ(cpuSdsm.activeReductionBackend, ShadowSdsmReductionBackend::Cpu);
+  EXPECT_NEAR(gpuSdsm.rawLinearMin, cpuSdsm.rawLinearMin, 1.0e-5f);
+  EXPECT_NEAR(gpuSdsm.rawLinearMax, cpuSdsm.rawLinearMax, 1.0e-5f);
+  EXPECT_NEAR(gpuSdsm.effectiveRangeNear, cpuSdsm.effectiveRangeNear, 1.0e-5f);
+  EXPECT_NEAR(gpuSdsm.effectiveRangeFar, cpuSdsm.effectiveRangeFar, 1.0e-5f);
+  EXPECT_EQ(gpuSdsm.effectiveSplitDepths, cpuSdsm.effectiveSplitDepths);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmUsesNewestCompletedRingResultWhenLatestSlotIsInvalid) {
+  struct GpuSdsmMinMaxResult {
+    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
+    uint32_t sourceFrameIndex = 0u;
+    uint32_t valid = 0u;
+  };
+
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                        "sdsm_delayed_gpu_result");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  RenderSettings publishSettings{};
+  publishSettings.shadow.enabled = true;
+  publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  for (uint64_t publishFrameIndex = 0u; publishFrameIndex < 2u;
+       ++publishFrameIndex) {
+    RenderFrameContext publishFrame{};
+    publishFrame.frameIndex = publishFrameIndex;
+    publishFrame.scene = &scene;
+    publishFrame.resources = &renderer.resources();
+    publishFrame.settings = &publishSettings;
+    publishFrame.camera = camera;
+
+    RenderGraphBuilder publishGraph(&memory);
+    publishGraph.beginFrame(publishFrame.frameIndex);
+    auto publishResult = pipeline.buildRenderGraph(
+        publishFrame, renderer.resources(), publishGraph);
+    ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+    ASSERT_TRUE(publishResult.value());
+    ASSERT_TRUE(
+        publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+
+    if (publishFrameIndex == 0u) {
+      const GpuSdsmMinMaxResult gpuResult{
+          .rawDeviceMinMax = glm::vec2(0.2f, 0.5f),
+          .sourceFrameIndex = 0u,
+          .valid = 1u,
+      };
+      auto writeResult = gpu.updateBuffer(
+          publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
+          std::as_bytes(std::span<const GpuSdsmMinMaxResult>(&gpuResult, 1u)),
+          0u);
+      ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
+    }
+  }
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.sdsmTemporalBlend = 0.0f;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 2u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 1u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+
+  const ShadowSdsmDebugFrameData &sdsm =
+      frameContext.sharedResources.shadowDebugFrameData->sdsm;
+  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Active);
+  EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
+  EXPECT_FALSE(sdsm.fixedFallbackActive);
+  EXPECT_FALSE(sdsm.reductionFallbackActive);
+  EXPECT_EQ(sdsm.sourceFrameIndex, 0u);
+  EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
+  EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.5f);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmMarksMissingCompletedResultAsStale) {
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                        "sdsm_missing_gpu_result");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  RenderSettings publishSettings{};
+  publishSettings.shadow.enabled = true;
+  publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  RenderFrameContext publishFrame{};
+  publishFrame.frameIndex = 0u;
+  publishFrame.scene = &scene;
+  publishFrame.resources = &renderer.resources();
+  publishFrame.settings = &publishSettings;
+  publishFrame.camera = camera;
+
+  RenderGraphBuilder publishGraph(&memory);
+  publishGraph.beginFrame(publishFrame.frameIndex);
+  auto publishResult = pipeline.buildRenderGraph(
+      publishFrame, renderer.resources(), publishGraph);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  ASSERT_TRUE(publishResult.value());
+  ASSERT_TRUE(
+      publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.sdsmTemporalBlend = 0.0f;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 0u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+
+  const ShadowSdsmDebugFrameData &sdsm =
+      frameContext.sharedResources.shadowDebugFrameData->sdsm;
+  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Stale);
+  EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
+  EXPECT_TRUE(sdsm.fixedFallbackActive);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmSuppressesWarmupWarningForFirstMiss) {
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult = gpu.createTexture(
+      makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u), "sdsm_warmup_miss");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  RenderSettings publishSettings{};
+  publishSettings.shadow.enabled = true;
+  publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  RenderFrameContext publishFrame{};
+  publishFrame.frameIndex = 0u;
+  publishFrame.scene = &scene;
+  publishFrame.resources = &renderer.resources();
+  publishFrame.settings = &publishSettings;
+  publishFrame.camera = camera;
+
+  RenderGraphBuilder publishGraph(&memory);
+  publishGraph.beginFrame(publishFrame.frameIndex);
+  auto publishResult = pipeline.buildRenderGraph(
+      publishFrame, renderer.resources(), publishGraph);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  ASSERT_TRUE(publishResult.value());
+
+  const uint64_t baselineSequence = currentLogSequence();
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.sdsmTemporalBlend = 0.0f;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 0u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+
+  const ShadowSdsmDebugFrameData &sdsm =
+      frameContext.sharedResources.shadowDebugFrameData->sdsm;
+  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Stale);
+  EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
+  EXPECT_TRUE(sdsm.fixedFallbackActive);
+  EXPECT_FALSE(sdsm.reductionFallbackActive);
+  EXPECT_EQ(countLogEntriesSince(baselineSequence, "GPU SDSM ring diagnostics"),
+            0u);
+  EXPECT_EQ(countLogEntriesSince(baselineSequence, "SDSM source warning"), 0u);
+  EXPECT_EQ(countLogEntriesSince(
+                baselineSequence,
+                "requested GPU SDSM reduction fell back to CPU path"),
+            0u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmLogsPersistentMissAfterWarmupGrace) {
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                        "sdsm_persistent_miss");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  RenderSettings publishSettings{};
+  publishSettings.shadow.enabled = true;
+  publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  RenderFrameContext publishFrame{};
+  publishFrame.frameIndex = 0u;
+  publishFrame.scene = &scene;
+  publishFrame.resources = &renderer.resources();
+  publishFrame.settings = &publishSettings;
+  publishFrame.camera = camera;
+
+  RenderGraphBuilder publishGraph(&memory);
+  publishGraph.beginFrame(publishFrame.frameIndex);
+  auto publishResult = pipeline.buildRenderGraph(
+      publishFrame, renderer.resources(), publishGraph);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  ASSERT_TRUE(publishResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.sdsmTemporalBlend = 0.0f;
+
+  const uint64_t baselineSequence = currentLogSequence();
+  for (uint64_t frameIndex = 1u; frameIndex <= 2u; ++frameIndex) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera = camera;
+    frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+        pyramidTextureResult.value();
+    frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+    frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex =
+        frameIndex - 1u;
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+    ASSERT_TRUE(buildResult.value());
+  }
+
+  EXPECT_EQ(countLogEntriesSince(baselineSequence, "GPU SDSM ring diagnostics"),
+            0u);
+  EXPECT_EQ(countLogEntriesSince(baselineSequence, "SDSM source warning"), 0u);
+  EXPECT_EQ(countLogEntriesSince(
+                baselineSequence,
+                "requested GPU SDSM reduction fell back to CPU path"),
+            0u);
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 3u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 2u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_EQ(countLogEntriesSince(baselineSequence, "GPU SDSM ring diagnostics"),
+            1u);
+  EXPECT_EQ(countLogEntriesSince(baselineSequence, "SDSM source warning"), 1u);
+  EXPECT_EQ(countLogEntriesSince(
+                baselineSequence,
+                "requested GPU SDSM reduction fell back to CPU path"),
+            1u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmUsesDeepResultRingBeyondSwapchainDepth) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  gpu.swapchainImageCount = 1u;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  std::vector<BufferHandle> publishedTargets;
+  publishedTargets.reserve(16u);
+  for (uint64_t frameIndex = 0u; frameIndex < 16u; ++frameIndex) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera = camera;
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+    ASSERT_TRUE(buildResult.value());
+    ASSERT_TRUE(
+        frameContext.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+
+    const BufferHandle targetBuffer =
+        frameContext.sharedResources.shadowSdsmGpuReduceTarget->buffer;
+    ASSERT_TRUE(nuri::isValid(targetBuffer));
+    for (const BufferHandle publishedBuffer : publishedTargets) {
+      EXPECT_FALSE(sameBuffer(targetBuffer, publishedBuffer));
+    }
+    publishedTargets.push_back(targetBuffer);
+  }
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmReadsPublishedResultBeyondSwapchainDepth) {
+  struct GpuSdsmMinMaxResult {
+    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
+    uint32_t sourceFrameIndex = 0u;
+    uint32_t valid = 0u;
+  };
+
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  gpu.swapchainImageCount = 1u;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                        "sdsm_deep_ring_pyramid");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  RenderSettings publishSettings{};
+  publishSettings.shadow.enabled = true;
+  publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  for (uint64_t publishFrameIndex = 0u; publishFrameIndex <= 10u;
+       ++publishFrameIndex) {
+    RenderFrameContext publishFrame{};
+    publishFrame.frameIndex = publishFrameIndex;
+    publishFrame.scene = &scene;
+    publishFrame.resources = &renderer.resources();
+    publishFrame.settings = &publishSettings;
+    publishFrame.camera = camera;
+
+    RenderGraphBuilder publishGraph(&memory);
+    publishGraph.beginFrame(publishFrame.frameIndex);
+    auto publishResult = pipeline.buildRenderGraph(
+        publishFrame, renderer.resources(), publishGraph);
+    ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+    ASSERT_TRUE(publishResult.value());
+    ASSERT_TRUE(
+        publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+
+    if (publishFrameIndex == 10u) {
+      const GpuSdsmMinMaxResult gpuResult{
+          .rawDeviceMinMax = glm::vec2(0.2f, 0.5f),
+          .sourceFrameIndex = 10u,
+          .valid = 1u,
+      };
+      auto writeResult = gpu.updateBuffer(
+          publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
+          std::as_bytes(std::span<const GpuSdsmMinMaxResult>(&gpuResult, 1u)),
+          0u);
+      ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
+    }
+  }
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.sdsmTemporalBlend = 0.0f;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 11u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 10u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+
+  const ShadowSdsmDebugFrameData &sdsm =
+      frameContext.sharedResources.shadowDebugFrameData->sdsm;
+  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Active);
+  EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
+  EXPECT_FALSE(sdsm.fixedFallbackActive);
+  EXPECT_FALSE(sdsm.reductionFallbackActive);
+  EXPECT_EQ(sdsm.sourceFrameIndex, 10u);
+  EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
+  EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.5f);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmIgnoresRingResultWithMismatchedSourceFrameIndex) {
+  struct GpuSdsmMinMaxResult {
+    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
+    uint32_t sourceFrameIndex = 0u;
+    uint32_t valid = 0u;
+  };
+
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                        "sdsm_mismatched_gpu_result");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
+  };
+
+  RenderSettings publishSettings{};
+  publishSettings.shadow.enabled = true;
+  publishSettings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+
+  for (uint64_t publishFrameIndex = 0u; publishFrameIndex < 2u;
+       ++publishFrameIndex) {
+    RenderFrameContext publishFrame{};
+    publishFrame.frameIndex = publishFrameIndex;
+    publishFrame.scene = &scene;
+    publishFrame.resources = &renderer.resources();
+    publishFrame.settings = &publishSettings;
+    publishFrame.camera = camera;
+
+    RenderGraphBuilder publishGraph(&memory);
+    publishGraph.beginFrame(publishFrame.frameIndex);
+    auto publishResult = pipeline.buildRenderGraph(
+        publishFrame, renderer.resources(), publishGraph);
+    ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+    ASSERT_TRUE(publishResult.value());
+    ASSERT_TRUE(
+        publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+
+    const GpuSdsmMinMaxResult gpuResult{
+        .rawDeviceMinMax = publishFrameIndex == 0u ? glm::vec2(0.2f, 0.5f)
+                                                   : glm::vec2(0.8f, 0.9f),
+        .sourceFrameIndex = 0u,
+        .valid = 1u,
+    };
+    auto writeResult = gpu.updateBuffer(
+        publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
+        std::as_bytes(std::span<const GpuSdsmMinMaxResult>(&gpuResult, 1u)),
+        0u);
+    ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
+  }
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.sdsmTemporalBlend = 0.0f;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 2u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 1u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+
+  const ShadowSdsmDebugFrameData &sdsm =
+      frameContext.sharedResources.shadowDebugFrameData->sdsm;
+  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Active);
+  EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
+  EXPECT_FALSE(sdsm.fixedFallbackActive);
+  EXPECT_FALSE(sdsm.reductionFallbackActive);
+  EXPECT_EQ(sdsm.sourceFrameIndex, 0u);
+  EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
+  EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.5f);
 }
 
 TEST(RenderGraphRendererTest,
@@ -4723,7 +6229,7 @@ TEST(RenderGraphRendererTest,
   settings.shadow.sdsmTemporalBlend = 0.85f;
   settings.shadow.sdsmHistogramTrimLowPercent = 0.0f;
   settings.shadow.sdsmHistogramTrimHighPercent = 0.0f;
-  settings.shadow.debug.sdsmDiagnosticLogLevel = LogLevel::Debug;
+  settings.shadow.debug.diagnosticLogLevel = LogLevel::Debug;
 
   const CameraFrameState camera = makeSdsmPerspectiveCamera(150.0f);
   std::vector<float> farDepths(4u * 4u * 2u, 0.0f);
@@ -5115,6 +6621,792 @@ TEST(RenderGraphRendererTest,
     }
   }
   EXPECT_EQ(shadowPassCount, 4u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureReusesStaticShadowCasterCacheAcrossFrames) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("shadow_static_cache_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "shadow_static_cache_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "shadow_static_cache_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto staticRenderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(staticRenderableResult.hasError())
+      << staticRenderableResult.error();
+
+  auto dynamicNodeResult = scene.graph().createNode(
+      scene.graph().rootNode(), "DynamicShadowCaster",
+      glm::translate(glm::mat4(1.0f), glm::vec3(1.5f, 0.0f, 0.0f)));
+  ASSERT_FALSE(dynamicNodeResult.hasError()) << dynamicNodeResult.error();
+  auto dynamicRenderableResult = scene.graph().addRenderable(
+      dynamicNodeResult.value(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(dynamicRenderableResult.hasError())
+      << dynamicRenderableResult.error();
+
+  const float morphWeight = 1.0f;
+  EXPECT_TRUE(scene.graph().setRenderableMorphWeights(
+      dynamicRenderableResult.value(),
+      std::span<const float>(&morphWeight, 1u)));
+
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 6.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 512u;
+  settings.shadow.maxDistance = 25.0f;
+  settings.shadow.debug.enableCascadeCasterCulling = true;
+
+  const auto buildFrame = [&](uint64_t frameIndex) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view =
+        glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
+                    glm::vec3(0.0f, 1.0f, 0.0f));
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+    frameContext.camera.cameraPos = glm::vec4(0.0f, 1.5f, 4.0f, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 30.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
+    EXPECT_TRUE(buildResult.value());
+    return frameContext;
+  };
+
+  const RenderFrameContext firstFrame = buildFrame(40u);
+  EXPECT_EQ(firstFrame.metrics.shadow.staticCasterEntries, 1u);
+  EXPECT_EQ(firstFrame.metrics.shadow.dynamicCasterEntries, 1u);
+  EXPECT_EQ(firstFrame.metrics.shadow.staticCacheReused, 0u);
+  EXPECT_EQ(firstFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
+  EXPECT_GT(firstFrame.metrics.shadow.totalDraws, 0u);
+
+  const RenderFrameContext secondFrame = buildFrame(41u);
+  EXPECT_EQ(secondFrame.metrics.shadow.staticCasterEntries, 1u);
+  EXPECT_EQ(secondFrame.metrics.shadow.dynamicCasterEntries, 1u);
+  EXPECT_EQ(secondFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(secondFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
+  EXPECT_GT(secondFrame.metrics.shadow.totalDraws, 0u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureReusesStaticOnlyShadowCascadesAcrossFrames) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("shadow_static_only_cascade_reuse_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "shadow_static_only_cache_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "shadow_static_only_cache_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 6.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 512u;
+  settings.shadow.maxDistance = 25.0f;
+  settings.shadow.debug.enableCascadeCasterCulling = true;
+
+  const auto buildFrame = [&](uint64_t frameIndex)
+      -> std::pair<RenderFrameContext, RenderGraphCompileResult> {
+    RenderFrameContext frameContext{};
+    RenderGraphCompileResult compiled(&memory);
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view =
+        glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
+                    glm::vec3(0.0f, 1.0f, 0.0f));
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+    frameContext.camera.cameraPos = glm::vec4(0.0f, 1.5f, 4.0f, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 30.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    if (buildResult.hasError()) {
+      ADD_FAILURE() << buildResult.error();
+      return {frameContext, std::move(compiled)};
+    }
+    if (!buildResult.value()) {
+      ADD_FAILURE() << "shadow static-only reuse frame build returned false";
+      return {frameContext, std::move(compiled)};
+    }
+
+    RenderGraphRuntime runtime;
+    auto compileResult = graph.compile(runtime);
+    if (compileResult.hasError()) {
+      ADD_FAILURE() << compileResult.error();
+      return {frameContext, std::move(compiled)};
+    }
+    return std::pair<RenderFrameContext, RenderGraphCompileResult>(
+        std::move(frameContext), std::move(compileResult.value()));
+  };
+
+  const auto [firstFrame, firstCompiled] = buildFrame(60u);
+  EXPECT_EQ(firstFrame.metrics.shadow.staticCacheReused, 0u);
+  EXPECT_EQ(firstFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_EQ(firstFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
+  EXPECT_EQ(
+      firstFrame.metrics.shadow.staticOnlyReuseMissStaticCacheRebuiltCount, 4u);
+  EXPECT_EQ(
+      firstFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount, 0u);
+  EXPECT_GT(firstFrame.metrics.shadow.totalDraws, 0u);
+  EXPECT_GT(firstFrame.metrics.shadow.totalIndexCountEstimate, 0u);
+  uint32_t firstShadowPassCount = 0u;
+  for (const RenderPass &pass : firstCompiled.orderedPasses) {
+    if (!std::string_view(pass.debugLabel)
+             .starts_with("ShadowDepthPass.Cascade")) {
+      continue;
+    }
+    ++firstShadowPassCount;
+    EXPECT_EQ(pass.depth.loadOp, LoadOp::Clear);
+    EXPECT_FALSE(pass.draws.empty());
+  }
+  EXPECT_EQ(firstShadowPassCount, 4u);
+
+  const auto [secondFrame, secondCompiled] = buildFrame(61u);
+  EXPECT_EQ(secondFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(secondFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_EQ(secondFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_EQ(
+      secondFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount,
+      0u);
+  EXPECT_EQ(secondFrame.metrics.shadow.totalDraws, 0u);
+  EXPECT_EQ(secondFrame.metrics.shadow.totalIndexCountEstimate, 0u);
+  uint32_t secondShadowPassCount = 0u;
+  for (const RenderPass &pass : secondCompiled.orderedPasses) {
+    if (!std::string_view(pass.debugLabel)
+             .starts_with("ShadowDepthPass.Cascade")) {
+      continue;
+    }
+    ++secondShadowPassCount;
+    EXPECT_EQ(pass.depth.loadOp, LoadOp::Load);
+    EXPECT_TRUE(pass.preDispatches.empty());
+    EXPECT_TRUE(pass.draws.empty());
+  }
+  EXPECT_EQ(secondShadowPassCount, 4u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureReusesStaticOnlyShadowCascadesForSubTexelCameraMotion) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("shadow_static_only_reuse_subtexel_motion_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "shadow_static_only_reuse_subtexel_motion_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "shadow_static_only_reuse_subtexel_motion_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 6.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 512u;
+  settings.shadow.maxDistance = 25.0f;
+  settings.shadow.debug.enableCascadeCasterCulling = false;
+
+  const glm::vec3 baseEye(0.0f, 1.5f, 4.0f);
+  const glm::vec3 baseTarget(0.0f, 0.5f, 0.0f);
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  const auto buildFrame = [&](uint64_t frameIndex, const glm::vec3 &eye,
+                              const glm::vec3 &target) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view = glm::lookAt(eye, target, up);
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+    frameContext.camera.cameraPos = glm::vec4(eye, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 30.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
+    EXPECT_TRUE(buildResult.value());
+    return frameContext;
+  };
+
+  const RenderFrameContext firstFrame = buildFrame(70u, baseEye, baseTarget);
+  ASSERT_TRUE(firstFrame.sharedResources.shadowDebugFrameData.has_value());
+  const ShadowCascadeDebugFrameData &baseCascade =
+      firstFrame.sharedResources.shadowDebugFrameData->cascades[0];
+  ASSERT_GT(baseCascade.texelWorldSize, 0.0f);
+
+  const glm::vec3 subTexelMotion = glm::vec3(
+      glm::inverse(baseCascade.lightView) *
+      glm::vec4(baseCascade.texelWorldSize * 0.75f, 0.0f, 0.0f, 0.0f));
+  const RenderFrameContext movedFrame =
+      buildFrame(71u, baseEye + subTexelMotion, baseTarget + subTexelMotion);
+
+  EXPECT_EQ(movedFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(movedFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_EQ(movedFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_EQ(
+      movedFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount, 0u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureReportsStaticOnlyReuseRasterMismatchForMovedStaticCamera) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("shadow_static_only_reuse_moved_camera_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "shadow_static_only_reuse_moved_camera_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "shadow_static_only_reuse_moved_camera_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 6.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 512u;
+  settings.shadow.maxDistance = 25.0f;
+  settings.shadow.debug.enableCascadeCasterCulling = false;
+
+  const auto buildFrame = [&](uint64_t frameIndex, const glm::vec3 &cameraPos) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view = glm::lookAt(
+        cameraPos, glm::vec3(0.0f, 0.5f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+    frameContext.camera.cameraPos = glm::vec4(cameraPos, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 30.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
+    EXPECT_TRUE(buildResult.value());
+    return frameContext;
+  };
+
+  const RenderFrameContext firstFrame =
+      buildFrame(70u, glm::vec3(0.0f, 1.5f, 4.0f));
+  EXPECT_EQ(firstFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_EQ(firstFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
+  EXPECT_EQ(
+      firstFrame.metrics.shadow.staticOnlyReuseMissStaticCacheRebuiltCount, 4u);
+
+  const RenderFrameContext movedFrame =
+      buildFrame(71u, glm::vec3(0.4f, 1.5f, 4.0f));
+  EXPECT_EQ(movedFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(movedFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_EQ(movedFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
+  EXPECT_EQ(
+      movedFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount, 4u);
+  ASSERT_TRUE(movedFrame.sharedResources.shadowDebugFrameData.has_value());
+  const ShadowCascadeDebugFrameData &cascade =
+      movedFrame.sharedResources.shadowDebugFrameData->cascades[0];
+  EXPECT_EQ(
+      cascade.staticOnlyReuseStatus,
+      ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::RasterStateChanged);
+  EXPECT_TRUE(cascade.staticOnlyReuseCandidate);
+  EXPECT_TRUE(cascade.staticOnlyReusePreviousValid);
+  EXPECT_TRUE(cascade.staticOnlyReuseLightViewProjChanged);
+  EXPECT_FALSE(cascade.staticOnlyReuseBiasChanged);
+  EXPECT_FALSE(cascade.staticOnlyReuseCasterSignatureChanged);
+  EXPECT_NE(cascade.currentStaticOnlyRasterSignature,
+            cascade.previousStaticOnlyRasterSignature);
+  EXPECT_NE(cascade.currentStaticOnlyLightViewProjSignature,
+            cascade.previousStaticOnlyLightViewProjSignature);
+  EXPECT_EQ(cascade.currentStaticOnlyCasterSignature,
+            cascade.previousStaticOnlyCasterSignature);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureInvalidatesStaticOnlyCascadeReuseWhenShadowsDisable) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("shadow_static_only_disable_invalidate_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "shadow_static_only_disable_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "shadow_static_only_disable_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 6.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 512u;
+  settings.shadow.maxDistance = 25.0f;
+  settings.shadow.debug.enableCascadeCasterCulling = true;
+
+  const auto buildFrame = [&](uint64_t frameIndex)
+      -> std::pair<RenderFrameContext, RenderGraphCompileResult> {
+    RenderFrameContext frameContext{};
+    RenderGraphCompileResult compiled(&memory);
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view =
+        glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
+                    glm::vec3(0.0f, 1.0f, 0.0f));
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+    frameContext.camera.cameraPos = glm::vec4(0.0f, 1.5f, 4.0f, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 30.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    if (buildResult.hasError()) {
+      ADD_FAILURE() << buildResult.error();
+      return {frameContext, std::move(compiled)};
+    }
+    if (!buildResult.value()) {
+      ADD_FAILURE()
+          << "shadow static-only disable invalidation frame build returned "
+             "false";
+      return {frameContext, std::move(compiled)};
+    }
+
+    RenderGraphRuntime runtime;
+    auto compileResult = graph.compile(runtime);
+    if (compileResult.hasError()) {
+      ADD_FAILURE() << compileResult.error();
+      return {frameContext, std::move(compiled)};
+    }
+    return std::pair<RenderFrameContext, RenderGraphCompileResult>(
+        std::move(frameContext), std::move(compileResult.value()));
+  };
+
+  const auto [firstFrame, firstCompiled] = buildFrame(80u);
+  EXPECT_EQ(firstFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
+  EXPECT_FALSE(firstCompiled.orderedPasses.empty());
+
+  settings.shadow.enabled = false;
+  const auto [disabledFrame, disabledCompiled] = buildFrame(81u);
+  EXPECT_EQ(disabledFrame.metrics.shadow.cascadeCount, 0u);
+  uint32_t disabledShadowPassCount = 0u;
+  for (const RenderPass &pass : disabledCompiled.orderedPasses) {
+    if (std::string_view(pass.debugLabel)
+            .starts_with("ShadowDepthPass.Cascade")) {
+      ++disabledShadowPassCount;
+    }
+  }
+  EXPECT_EQ(disabledShadowPassCount, 0u);
+
+  settings.shadow.enabled = true;
+  const auto [reenabledFrame, reenabledCompiled] = buildFrame(82u);
+  EXPECT_EQ(reenabledFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
+  EXPECT_GT(reenabledFrame.metrics.shadow.totalDraws, 0u);
+  uint32_t reenabledShadowPassCount = 0u;
+  for (const RenderPass &pass : reenabledCompiled.orderedPasses) {
+    if (!std::string_view(pass.debugLabel)
+             .starts_with("ShadowDepthPass.Cascade")) {
+      continue;
+    }
+    ++reenabledShadowPassCount;
+    EXPECT_EQ(pass.depth.loadOp, LoadOp::Clear);
+    EXPECT_FALSE(pass.draws.empty());
+  }
+  EXPECT_EQ(reenabledShadowPassCount, 4u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureStaticOnlyCascadeReuseIgnoresSamplingOnlyShadowParams) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("shadow_static_only_sampling_param_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "shadow_static_only_sampling_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "shadow_static_only_sampling_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 6.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 512u;
+  settings.shadow.maxDistance = 25.0f;
+  settings.shadow.debug.enableCascadeCasterCulling = true;
+  settings.shadow.filterMode = ShadowFilterMode::Hard;
+  settings.shadow.pcssLightRadiusScale = 0.05f;
+
+  const auto buildFrame = [&](uint64_t frameIndex)
+      -> std::pair<RenderFrameContext, RenderGraphCompileResult> {
+    RenderFrameContext frameContext{};
+    RenderGraphCompileResult compiled(&memory);
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view =
+        glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
+                    glm::vec3(0.0f, 1.0f, 0.0f));
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+    frameContext.camera.cameraPos = glm::vec4(0.0f, 1.5f, 4.0f, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 30.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    if (buildResult.hasError()) {
+      ADD_FAILURE() << buildResult.error();
+      return {frameContext, std::move(compiled)};
+    }
+    if (!buildResult.value()) {
+      ADD_FAILURE()
+          << "shadow static-only sampling-param frame build returned false";
+      return {frameContext, std::move(compiled)};
+    }
+
+    RenderGraphRuntime runtime;
+    auto compileResult = graph.compile(runtime);
+    if (compileResult.hasError()) {
+      ADD_FAILURE() << compileResult.error();
+      return {frameContext, std::move(compiled)};
+    }
+    return std::pair<RenderFrameContext, RenderGraphCompileResult>(
+        std::move(frameContext), std::move(compileResult.value()));
+  };
+
+  const auto [firstFrame, firstCompiled] = buildFrame(100u);
+  EXPECT_EQ(firstFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
+  uint32_t firstShadowPassCount = 0u;
+  for (const RenderPass &pass : firstCompiled.orderedPasses) {
+    if (!std::string_view(pass.debugLabel)
+             .starts_with("ShadowDepthPass.Cascade")) {
+      continue;
+    }
+    ++firstShadowPassCount;
+    EXPECT_EQ(pass.depth.loadOp, LoadOp::Clear);
+    EXPECT_FALSE(pass.draws.empty());
+  }
+  EXPECT_EQ(firstShadowPassCount, 4u);
+
+  settings.shadow.pcssLightRadiusScale = 2.0f;
+  const auto [secondFrame, secondCompiled] = buildFrame(101u);
+  EXPECT_EQ(secondFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(secondFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_EQ(secondFrame.metrics.shadow.totalDraws, 0u);
+  uint32_t secondShadowPassCount = 0u;
+  for (const RenderPass &pass : secondCompiled.orderedPasses) {
+    if (!std::string_view(pass.debugLabel)
+             .starts_with("ShadowDepthPass.Cascade")) {
+      continue;
+    }
+    ++secondShadowPassCount;
+    EXPECT_EQ(pass.depth.loadOp, LoadOp::Load);
+    EXPECT_TRUE(pass.draws.empty());
+  }
+  EXPECT_EQ(secondShadowPassCount, 4u);
 }
 
 TEST(RenderGraphRendererTest,

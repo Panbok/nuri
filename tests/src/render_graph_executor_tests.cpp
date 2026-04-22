@@ -159,6 +159,64 @@ buildEmptyCompiledFrame(uint64_t frameIndex) {
 }
 
 Result<RenderGraphCompileResult, std::string>
+buildComputeOnlyCompiledFrame(uint64_t frameIndex) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(frameIndex);
+
+  auto sourceTextureResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+      "exec_compute_only_source");
+  auto resultBufferResult = builder.createTransientBuffer(
+      makeTransientBufferDesc(32u), "exec_compute_only_result");
+  if (sourceTextureResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        sourceTextureResult.error());
+  }
+  if (resultBufferResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        resultBufferResult.error());
+  }
+
+  const std::array<BufferHandle, 1u> dispatchDependencies = {BufferHandle{}};
+  ComputeDispatchItem dispatch{};
+  dispatch.pipeline = ComputePipelineHandle{.index = 91u, .generation = 1u};
+  dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
+  dispatch.dependencyBuffers = std::span<const BufferHandle>(
+      dispatchDependencies.data(), dispatchDependencies.size());
+  dispatch.debugLabel = "exec_compute_dispatch";
+  const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
+
+  RenderGraphGraphicsPassDesc passDesc{};
+  passDesc.executionMode = RenderPassExecutionMode::ComputeOnly;
+  passDesc.hasColorAttachment = false;
+  passDesc.preDispatches = std::span<const ComputeDispatchItem>(
+      preDispatches.data(), preDispatches.size());
+  passDesc.debugLabel = "exec_compute_only_pass";
+  passDesc.markImplicitOutputSideEffect = true;
+
+  auto passResult = builder.addGraphicsPass(passDesc);
+  if (passResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        passResult.error());
+  }
+  auto bindResult =
+      builder.addTextureRead(passResult.value(), sourceTextureResult.value());
+  if (bindResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        bindResult.error());
+  }
+  bindResult = builder.bindPreDispatchDependencyBuffer(
+      passResult.value(), 0u, 0u, resultBufferResult.value(),
+      RenderGraphAccessMode::Write);
+  if (bindResult.hasError()) {
+    return Result<RenderGraphCompileResult, std::string>::makeError(
+        bindResult.error());
+  }
+
+  return compileBuilder(builder);
+}
+
+Result<RenderGraphCompileResult, std::string>
 buildTwoPassCompiledFrameWithDependency(uint64_t frameIndex) {
   RenderGraphBuilder builder;
   builder.beginFrame(frameIndex);
@@ -392,6 +450,34 @@ TEST_F(RenderGraphExecutorTest,
       << "retired transient textures should be reused without re-creation";
   EXPECT_EQ(gpu.createdBufferCount, createdBufferCountBeforeReuse)
       << "retired transient buffers should be reused without re-creation";
+}
+
+TEST_F(RenderGraphExecutorTest,
+       ComputeOnlyPassExecutesAndPreservesDispatchDependencies) {
+  auto compileResult = buildComputeOnlyCompiledFrame(304u);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
+  EXPECT_EQ(compiled.orderedPasses[0].executionMode,
+            RenderPassExecutionMode::ComputeOnly);
+  ASSERT_EQ(compiled.orderedPasses[0].preDispatches.size(), 1u);
+  ASSERT_EQ(compiled.orderedPasses[0].preDispatches[0].dependencyBuffers.size(),
+            1u);
+
+  FakeExecutorGPUDevice gpu;
+  RenderGraphExecutor executor;
+  auto executeResult = executeCompiled(executor, gpu, compiled);
+  ASSERT_FALSE(executeResult.hasError()) << executeResult.error();
+  ASSERT_TRUE(executeResult.value());
+
+  ASSERT_EQ(gpu.recordedPasses.size(), 1u);
+  EXPECT_EQ(gpu.recordedPasses[0].executionMode,
+            RenderPassExecutionMode::ComputeOnly);
+  EXPECT_FALSE(gpu.recordedPasses[0].hasColorAttachment);
+  EXPECT_TRUE(gpu.recordedPasses[0].draws.empty());
+  ASSERT_EQ(gpu.recordedPasses[0].preDispatches.size(), 1u);
+  ASSERT_EQ(gpu.recordedPasses[0].preDispatches[0].dependencyBuffers.size(),
+            1u);
 }
 
 TEST_F(RenderGraphExecutorTest,
