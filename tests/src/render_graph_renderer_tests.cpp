@@ -6930,7 +6930,8 @@ TEST(RenderGraphRendererTest,
   ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
 
   MaterialRequest materialRequest{};
-  materialRequest.debugName = "shadow_static_only_reuse_subtexel_motion_material";
+  materialRequest.debugName =
+      "shadow_static_only_reuse_subtexel_motion_material";
   auto materialResult = renderer.resources().acquireMaterial(materialRequest);
   ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
 
@@ -7003,6 +7004,166 @@ TEST(RenderGraphRendererTest,
   EXPECT_EQ(movedFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
   EXPECT_EQ(
       movedFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount, 0u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureReusesStaticOnlyShadowCascadesForGuardBandedCameraMotion) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir = makeTempRendererPath(
+      "shadow_static_only_reuse_guard_banded_motion_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "shadow_static_only_reuse_guard_banded_motion_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName =
+      "shadow_static_only_reuse_guard_banded_motion_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 6.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 8192u;
+  settings.shadow.maxDistance = 150.0f;
+  settings.shadow.debug.enableCascadeCasterCulling = false;
+
+  const glm::vec3 baseEye(0.0f, 1.5f, 4.0f);
+  const glm::vec3 baseTarget(0.0f, 0.5f, 0.0f);
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  const auto buildFrame = [&](uint64_t frameIndex, const glm::vec3 &eye,
+                              const glm::vec3 &target) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view = glm::lookAt(eye, target, up);
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+    frameContext.camera.cameraPos = glm::vec4(eye, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 30.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
+    EXPECT_TRUE(buildResult.value());
+    return frameContext;
+  };
+
+  const RenderFrameContext firstFrame = buildFrame(70u, baseEye, baseTarget);
+  ASSERT_TRUE(firstFrame.sharedResources.shadowDebugFrameData.has_value());
+  const ShadowCascadeDebugFrameData &baseCascade =
+      firstFrame.sharedResources.shadowDebugFrameData->cascades[0];
+  ASSERT_GT(baseCascade.texelWorldSize, 0.0f);
+
+  const glm::vec3 guardBandedMotion = glm::vec3(
+      glm::inverse(baseCascade.lightView) *
+      glm::vec4(baseCascade.texelWorldSize * 2000.0f, 0.0f, 0.0f, 0.0f));
+  const RenderFrameContext movedFrame = buildFrame(
+      71u, baseEye + guardBandedMotion, baseTarget + guardBandedMotion);
+
+  EXPECT_EQ(movedFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(movedFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_EQ(movedFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_EQ(
+      movedFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount, 0u);
+  EXPECT_EQ(movedFrame.metrics.shadow.totalDraws, 0u);
+  EXPECT_EQ(movedFrame.metrics.shadow.totalIndexCountEstimate, 0u);
+  ASSERT_TRUE(movedFrame.sharedResources.shadowDebugFrameData.has_value());
+  const ShadowCascadeDebugFrameData &movedCascade =
+      movedFrame.sharedResources.shadowDebugFrameData->cascades[0];
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      EXPECT_NEAR(movedCascade.lightViewProj[c][r],
+                  baseCascade.lightViewProj[c][r], 1.0e-6f);
+    }
+  }
+
+  const glm::vec3 fastStep = glm::vec3(
+      glm::inverse(baseCascade.lightView) *
+      glm::vec4(baseCascade.texelWorldSize * 2600.0f, 0.0f, 0.0f, 0.0f));
+  const RenderFrameContext fastFrame =
+      buildFrame(72u, baseEye + guardBandedMotion + fastStep,
+                 baseTarget + guardBandedMotion + fastStep);
+  EXPECT_EQ(fastFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(fastFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_LT(fastFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  ASSERT_TRUE(fastFrame.sharedResources.shadowDebugFrameData.has_value());
+  const ShadowCascadeDebugFrameData &fastCascade =
+      fastFrame.sharedResources.shadowDebugFrameData->cascades[0];
+  EXPECT_LE(fastCascade.texelWorldSize, baseCascade.texelWorldSize * 1.35f);
+
+  const RenderFrameContext fastNextFrame =
+      buildFrame(73u, baseEye + guardBandedMotion + fastStep * 2.0f,
+                 baseTarget + guardBandedMotion + fastStep * 2.0f);
+  EXPECT_EQ(fastNextFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(fastNextFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_EQ(fastNextFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_EQ(
+      fastNextFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount,
+      0u);
+  EXPECT_EQ(fastNextFrame.metrics.shadow.totalDraws, 0u);
+  EXPECT_EQ(fastNextFrame.metrics.shadow.totalIndexCountEstimate, 0u);
+  ASSERT_TRUE(fastNextFrame.sharedResources.shadowDebugFrameData.has_value());
+  const ShadowCascadeDebugFrameData &fastNextCascade =
+      fastNextFrame.sharedResources.shadowDebugFrameData->cascades[0];
+  EXPECT_NEAR(fastNextCascade.texelWorldSize, fastCascade.texelWorldSize,
+              1.0e-6f);
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      EXPECT_NEAR(fastNextCascade.lightViewProj[c][r],
+                  fastCascade.lightViewProj[c][r], 1.0e-6f);
+    }
+  }
 }
 
 TEST(RenderGraphRendererTest,
@@ -7102,7 +7263,7 @@ TEST(RenderGraphRendererTest,
       firstFrame.metrics.shadow.staticOnlyReuseMissStaticCacheRebuiltCount, 4u);
 
   const RenderFrameContext movedFrame =
-      buildFrame(71u, glm::vec3(0.4f, 1.5f, 4.0f));
+      buildFrame(71u, glm::vec3(48.0f, 1.5f, 4.0f));
   EXPECT_EQ(movedFrame.metrics.shadow.staticCacheReused, 1u);
   EXPECT_EQ(movedFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
   EXPECT_EQ(movedFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
