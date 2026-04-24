@@ -574,6 +574,13 @@ toNuriSubmissionHandle(lvk::SubmitHandle handle) {
 }
 
 constexpr bool kEnablePerDrawDebugLabels = false;
+constexpr uint32_t kMaxGraphicsRecordingContexts = 8u;
+constexpr uint32_t kGpuTimingIntervalsPerContext = 16u;
+constexpr uint32_t kGpuTimingQueriesPerContext =
+    kGpuTimingIntervalsPerContext * 2u;
+constexpr uint32_t kGpuTimingQueryPoolSize =
+    kMaxGraphicsRecordingContexts * kGpuTimingQueriesPerContext;
+constexpr uint32_t kInvalidTimingQueryIndex = UINT32_MAX;
 
 [[nodiscard]] Result<bool, std::string>
 makeDependencyError(std::string_view context, std::string_view detail) {
@@ -743,15 +750,44 @@ struct FramebufferTexture {
   std::string debugName;
 };
 
+struct TimingQueryPoolSlot {
+  lvk::Holder<lvk::QueryPoolHandle> handle{};
+};
+
+struct PendingTimingQueryRange {
+  GpuTimingScope scope = GpuTimingScope::None;
+  uint32_t firstQuery = 0u;
+  uint32_t intervalCount = 0u;
+};
+
+struct CurrentFrameTimingCapture {
+  TimingQueryPoolSlot pool{};
+  uint64_t frameIndex = 0u;
+};
+
+struct PendingGpuTimingSubmission {
+  SubmissionHandle submission{};
+  uint64_t frameIndex = 0u;
+  TimingQueryPoolSlot pool{};
+  std::vector<PendingTimingQueryRange> timingRanges{};
+};
+
 struct ActiveGraphicsRecordingContext {
   RecordingContextHandle handle{};
   lvk::ICommandBuffer *commandBuffer = nullptr;
   uint32_t workerIndex = 0u;
+  uint32_t timingQueryBase = 0u;
+  uint32_t timingQueryCursor = 0u;
+  std::vector<PendingTimingQueryRange> timingRanges{};
+  bool hadShadowSdsmPass = false;
+  bool timingQuerySliceReset = false;
 };
 
 struct RecordedGraphicsCommandBuffer {
   RecordedCommandBufferHandle handle{};
   lvk::ICommandBuffer *commandBuffer = nullptr;
+  std::vector<PendingTimingQueryRange> timingRanges{};
+  bool hadShadowSdsmPass = false;
 };
 
 struct LvkGPUDevice::Impl {
@@ -792,6 +828,27 @@ struct LvkGPUDevice::Impl {
   uint32_t nextRecordingContextIndex = 1u;
   uint32_t nextRecordedCommandBufferIndex = 1u;
   std::unique_ptr<GeometryPool> geometryPool;
+  std::vector<TimingQueryPoolSlot> availableTimingQueryPools;
+  std::optional<CurrentFrameTimingCapture> currentFrameTimingCapture;
+  std::vector<PendingGpuTimingSubmission> pendingGpuTimingSubmissions;
+  GpuTimingReport latestCompletedGpuTimingReport{};
+  double gpuTimingTimestampPeriodToMs = 0.0;
+  bool gpuTimingQueriesEnabled = false;
+  bool loggedGpuTimingQueryWarning = false;
+  bool loggedShadowSdsmTimingRecordDiagnostic = false;
+  bool loggedShadowSdsmTimingSubmissionDiagnostic = false;
+  bool loggedShadowSdsmTimingCollectionDiagnostic = false;
+  bool loggedShadowSdsmTimingSubmissionWarning = false;
+  bool loggedShadowSdsmTimingCollectionWarning = false;
+};
+
+struct PassTimingReservation {
+  GpuTimingScope scope = GpuTimingScope::None;
+  lvk::QueryPoolHandle pool{};
+  uint32_t resetFirstQuery = kInvalidTimingQueryIndex;
+  uint32_t resetQueryCount = 0u;
+  uint32_t beginQuery = kInvalidTimingQueryIndex;
+  uint32_t endQuery = kInvalidTimingQueryIndex;
 };
 
 namespace {
@@ -815,6 +872,191 @@ findActiveGraphicsContextSlot(Impl &impl, RecordingContextHandle handle) {
     return nullptr;
   }
   return &entry;
+}
+
+[[nodiscard]] bool
+hasTimingReservation(const PassTimingReservation &reservation) noexcept {
+  return reservation.pool.valid() &&
+         reservation.beginQuery != kInvalidTimingQueryIndex &&
+         reservation.endQuery != kInvalidTimingQueryIndex;
+}
+
+void recycleTimingQueryPool(LvkGPUDevice::Impl &impl,
+                            TimingQueryPoolSlot &&pool) {
+  if (pool.handle.valid()) {
+    impl.availableTimingQueryPools.push_back(std::move(pool));
+  }
+}
+
+[[nodiscard]] Result<TimingQueryPoolSlot, std::string>
+acquireTimingQueryPool(LvkGPUDevice::Impl &impl) {
+  if (!impl.availableTimingQueryPools.empty()) {
+    TimingQueryPoolSlot pool = std::move(impl.availableTimingQueryPools.back());
+    impl.availableTimingQueryPools.pop_back();
+    return Result<TimingQueryPoolSlot, std::string>::makeResult(
+        std::move(pool));
+  }
+  if (!impl.context) {
+    return Result<TimingQueryPoolSlot, std::string>::makeError(
+        "LvkGPUDevice::acquireTimingQueryPool: context is null");
+  }
+
+  lvk::Result result;
+  lvk::Holder<lvk::QueryPoolHandle> handle = impl.context->createQueryPool(
+      kGpuTimingQueryPoolSize, "nuri_gpu_timing_queries", &result);
+  if (!result.isOk() || !handle.valid()) {
+    return Result<TimingQueryPoolSlot, std::string>::makeError(
+        result.message != nullptr ? std::string(result.message)
+                                  : std::string("failed to create query pool"));
+  }
+
+  return Result<TimingQueryPoolSlot, std::string>::makeResult(
+      TimingQueryPoolSlot{.handle = std::move(handle)});
+}
+
+PassTimingReservation
+reservePassTimingReservationLocked(LvkGPUDevice::Impl &impl,
+                                   ActiveGraphicsRecordingContext &context,
+                                   const RenderPass &pass) {
+  if (!impl.gpuTimingQueriesEnabled ||
+      pass.gpuTimingScope == GpuTimingScope::None ||
+      !impl.currentFrameTimingCapture.has_value() ||
+      !impl.currentFrameTimingCapture->pool.handle.valid()) {
+    return {};
+  }
+  if (context.timingQueryCursor + 2u > kGpuTimingQueriesPerContext) {
+    if (!impl.loggedGpuTimingQueryWarning) {
+      impl.loggedGpuTimingQueryWarning = true;
+      NURI_LOG_WARNING("LvkGPUDevice: shadow GPU timing query capacity "
+                       "exhausted for a recording context; dropping timing "
+                       "for later shadow passes in that context");
+    }
+    return {};
+  }
+
+  PassTimingReservation reservation{};
+  reservation.scope = pass.gpuTimingScope;
+  reservation.pool = impl.currentFrameTimingCapture->pool.handle;
+  if (!context.timingQuerySliceReset) {
+    reservation.resetFirstQuery = context.timingQueryBase;
+    reservation.resetQueryCount = kGpuTimingQueriesPerContext;
+    context.timingQuerySliceReset = true;
+  }
+  reservation.beginQuery = context.timingQueryBase + context.timingQueryCursor;
+  reservation.endQuery = reservation.beginQuery + 1u;
+  context.timingQueryCursor += 2u;
+  return reservation;
+}
+
+void collectCompletedGpuTimingSubmissions(LvkGPUDevice::Impl &impl) {
+  if (!impl.context || impl.pendingGpuTimingSubmissions.empty()) {
+    return;
+  }
+
+  size_t writeIndex = 0u;
+  for (size_t readIndex = 0u;
+       readIndex < impl.pendingGpuTimingSubmissions.size(); ++readIndex) {
+    PendingGpuTimingSubmission &pending =
+        impl.pendingGpuTimingSubmissions[readIndex];
+    if (!impl.context->isReady(toLvkSubmitHandle(pending.submission))) {
+      if (writeIndex != readIndex) {
+        impl.pendingGpuTimingSubmissions[writeIndex] = std::move(pending);
+      }
+      ++writeIndex;
+      continue;
+    }
+
+    GpuTimingReport completedReport{};
+    completedReport.sourceFrameIndex = pending.frameIndex;
+    bool hadShadowSdsmRange = false;
+    double shadowTimeMs = 0.0;
+    double shadowDepthTimeMs = 0.0;
+    double shadowSdsmTimeMs = 0.0;
+    bool shadowTimingAvailable = false;
+    bool shadowDepthTimingAvailable = false;
+    bool shadowSdsmTimingAvailable = false;
+    for (const PendingTimingQueryRange &range : pending.timingRanges) {
+      hadShadowSdsmRange =
+          hadShadowSdsmRange || range.scope == GpuTimingScope::ShadowSdsm;
+      if (range.intervalCount == 0u || !pending.pool.handle.valid()) {
+        continue;
+      }
+      std::vector<uint64_t> queryData(range.intervalCount * 2u, 0u);
+      const bool queryResultOk = impl.context->getQueryPoolResults(
+          pending.pool.handle, range.firstQuery, range.intervalCount * 2u,
+          queryData.size() * sizeof(uint64_t), queryData.data(),
+          sizeof(uint64_t));
+      if (!queryResultOk) {
+        continue;
+      }
+      for (uint32_t intervalIndex = 0u; intervalIndex < range.intervalCount;
+           ++intervalIndex) {
+        const uint64_t beginTicks = queryData[intervalIndex * 2u];
+        const uint64_t endTicks = queryData[intervalIndex * 2u + 1u];
+        if (endTicks < beginTicks) {
+          continue;
+        }
+        const double intervalTimeMs =
+            static_cast<double>(endTicks - beginTicks) *
+            impl.gpuTimingTimestampPeriodToMs;
+        shadowTimeMs += intervalTimeMs;
+        switch (range.scope) {
+        case GpuTimingScope::Shadow:
+          shadowTimingAvailable = true;
+          break;
+        case GpuTimingScope::ShadowDepth:
+          shadowDepthTimeMs += intervalTimeMs;
+          shadowTimingAvailable = true;
+          shadowDepthTimingAvailable = true;
+          break;
+        case GpuTimingScope::ShadowSdsm:
+          shadowSdsmTimeMs += intervalTimeMs;
+          shadowTimingAvailable = true;
+          shadowSdsmTimingAvailable = true;
+          break;
+        case GpuTimingScope::None:
+          break;
+        }
+      }
+    }
+
+    if (shadowTimingAvailable) {
+      completedReport.shadowTimeMs = static_cast<float>(shadowTimeMs);
+      completedReport.availableScopeMask |= kGpuTimingScopeShadowBit;
+      completedReport.sourceFrameIndex = pending.frameIndex;
+    }
+    if (shadowDepthTimingAvailable) {
+      completedReport.shadowDepthTimeMs = static_cast<float>(shadowDepthTimeMs);
+      completedReport.shadowDepthSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |= kGpuTimingScopeShadowDepthBit;
+    }
+    if (shadowSdsmTimingAvailable) {
+      completedReport.shadowSdsmTimeMs = static_cast<float>(shadowSdsmTimeMs);
+      completedReport.shadowSdsmSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |= kGpuTimingScopeShadowSdsmBit;
+      if (!impl.loggedShadowSdsmTimingCollectionDiagnostic) {
+        impl.loggedShadowSdsmTimingCollectionDiagnostic = true;
+        NURI_LOG_INFO(
+            "LvkGPUDevice: collected shadow SDSM timing result frame=%llu "
+            "timeMs=%.3f",
+            static_cast<unsigned long long>(pending.frameIndex),
+            static_cast<float>(shadowSdsmTimeMs));
+      }
+    }
+    if (hadShadowSdsmRange && !shadowSdsmTimingAvailable &&
+        !impl.loggedShadowSdsmTimingCollectionWarning) {
+      impl.loggedShadowSdsmTimingCollectionWarning = true;
+      NURI_LOG_WARNING(
+          "LvkGPUDevice: shadow SDSM timing range completed without a "
+          "collectable SDSM timing result (frame %llu)",
+          static_cast<unsigned long long>(pending.frameIndex));
+    }
+    mergeGpuTimingReportScopes(impl.latestCompletedGpuTimingReport,
+                               completedReport);
+    recycleTimingQueryPool(impl, std::move(pending.pool));
+  }
+
+  impl.pendingGpuTimingSubmissions.resize(writeIndex);
 }
 
 } // namespace
@@ -903,6 +1145,10 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
         deviceFeatures.textureCompressionETC2 == VK_TRUE;
     device->impl_->compressionCaps.astc =
         deviceFeatures.textureCompressionASTC_LDR == VK_TRUE;
+    device->impl_->gpuTimingTimestampPeriodToMs =
+        device->impl_->context->getTimestampPeriodToMs();
+    device->impl_->gpuTimingQueriesEnabled =
+        device->impl_->gpuTimingTimestampPeriodToMs > 0.0;
     if (deviceFeatures.samplerAnisotropy == VK_TRUE &&
         properties.limits.maxSamplerAnisotropy > 1.0f) {
       device->impl_->maxSamplerAnisotropy = static_cast<uint8_t>(std::clamp(
@@ -912,6 +1158,13 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
     }
   }
 #endif
+
+  if (device->impl_->context) {
+    device->impl_->gpuTimingTimestampPeriodToMs =
+        device->impl_->context->getTimestampPeriodToMs();
+    device->impl_->gpuTimingQueriesEnabled =
+        device->impl_->gpuTimingTimestampPeriodToMs > 0.0;
+  }
 
   {
     const auto createBuiltinSampler =
@@ -1134,6 +1387,30 @@ Result<bool, std::string> LvkGPUDevice::beginFrame(uint64_t frameIndex) {
     impl_->currentFrameIndex = frameIndex;
     impl_->currentFrameSwapchainTexture = {};
     impl_->hasPreparedSwapchainImage = false;
+    if (impl_->currentFrameTimingCapture.has_value()) {
+      recycleTimingQueryPool(*impl_,
+                             std::move(impl_->currentFrameTimingCapture->pool));
+      impl_->currentFrameTimingCapture.reset();
+    }
+    collectCompletedGpuTimingSubmissions(*impl_);
+    if (impl_->gpuTimingQueriesEnabled) {
+      auto timingPoolResult = acquireTimingQueryPool(*impl_);
+      if (timingPoolResult.hasError()) {
+        if (!impl_->loggedGpuTimingQueryWarning) {
+          impl_->loggedGpuTimingQueryWarning = true;
+          NURI_LOG_WARNING("LvkGPUDevice::beginFrame: disabling GPU timing "
+                           "queries: %s",
+                           timingPoolResult.error().c_str());
+        }
+        impl_->gpuTimingQueriesEnabled = false;
+      } else {
+        TimingQueryPoolSlot timingPool = std::move(timingPoolResult.value());
+        impl_->currentFrameTimingCapture.emplace(CurrentFrameTimingCapture{
+            .pool = std::move(timingPool),
+            .frameIndex = frameIndex,
+        });
+      }
+    }
   }
   if (!impl_->geometryPool) {
     return Result<bool, std::string>::makeResult(true);
@@ -1948,6 +2225,14 @@ uint64_t LvkGPUDevice::geometryMutationVersion() const {
   return impl_->geometryPool ? impl_->geometryPool->mutationVersion() : 0;
 }
 
+GpuTimingReport LvkGPUDevice::getLatestCompletedGpuTimingReport() const {
+  if (!impl_) {
+    return {};
+  }
+  std::lock_guard immediateLock(impl_->contextImmediateMutex);
+  return impl_->latestCompletedGpuTimingReport;
+}
+
 Result<GeometryAllocationHandle, std::string> LvkGPUDevice::allocateGeometry(
     std::span<const std::byte> vertexBytes, uint32_t vertexCount,
     std::span<const std::byte> indexBytes, uint32_t indexCount,
@@ -1966,9 +2251,9 @@ void LvkGPUDevice::releaseGeometry(GeometryAllocationHandle h) {
   }
 }
 
-Result<bool, std::string>
-LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
-                                 std::span<const RenderPass> passes) {
+Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
+    lvk::ICommandBuffer &commandBuffer, std::span<const RenderPass> passes,
+    std::span<const PassTimingReservation> passTimings) {
   static_assert(kMaxDependencyBuffers <=
                 lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES);
   if (passes.empty()) {
@@ -1984,13 +2269,15 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
   }
   const auto fillDependencies =
       [this](std::span<const BufferHandle> dependencyBuffers,
+             std::span<const TextureHandle> dependencyTextures,
              lvk::Dependencies &deps,
              std::string_view context) -> Result<bool, std::string> {
-    if (dependencyBuffers.size() > kMaxDependencyBuffers) {
+    if (dependencyBuffers.size() > kMaxDependencyBuffers ||
+        dependencyTextures.size() > kMaxDependencyBuffers) {
       return makeDependencyCountExceededError(context);
     }
 
-    size_t dstIndex = 0;
+    size_t bufferDstIndex = 0;
     for (const BufferHandle bufferHandle : dependencyBuffers) {
       if (!nuri::isValid(bufferHandle)) {
         continue;
@@ -1998,14 +2285,31 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
       if (!impl_->buffers.isValid(bufferHandle)) {
         return makeDependencyError(context, "dependency buffer is invalid");
       }
-      deps.buffers[dstIndex++] = impl_->buffers.getLvkHandle(bufferHandle);
+      deps.buffers[bufferDstIndex++] =
+          impl_->buffers.getLvkHandle(bufferHandle);
+    }
+
+    size_t textureDstIndex = 0;
+    for (const TextureHandle textureHandle : dependencyTextures) {
+      if (!nuri::isValid(textureHandle)) {
+        continue;
+      }
+      if (!impl_->textures.isValid(textureHandle)) {
+        return makeDependencyError(context, "dependency texture is invalid");
+      }
+      deps.textures[textureDstIndex++] =
+          impl_->textures.getLvkHandle(textureHandle);
     }
     return Result<bool, std::string>::makeResult(true);
   };
   const bool supportsIndexedIndirectCount =
       impl_->context->supportsDrawIndexedIndirectCount();
 
-  for (const RenderPass &pass : passes) {
+  for (size_t passIndex = 0u; passIndex < passes.size(); ++passIndex) {
+    const RenderPass &pass = passes[passIndex];
+    const PassTimingReservation timingReservation =
+        passIndex < passTimings.size() ? passTimings[passIndex]
+                                       : PassTimingReservation{};
     const bool passLabelPushed =
         pushDebugLabel(commandBuffer, pass.debugLabel, pass.debugColor);
     const auto returnPassError =
@@ -2028,7 +2332,18 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
     lvk::TextureHandle colorTexture{};
     lvk::TextureHandle depthTexture{};
     lvk::TextureHandle viewportTexture{};
-    if (pass.hasColorAttachment) {
+    const bool computeOnly =
+        pass.executionMode == RenderPassExecutionMode::ComputeOnly;
+    if (computeOnly) {
+      if (pass.hasColorAttachment || nuri::isValid(pass.colorTexture) ||
+          nuri::isValid(pass.depthTexture) || !pass.draws.empty()) {
+        return returnPassError(
+            "LvkGPUDevice::recordGraphicsPass: invalid compute-only pass "
+            "attachments or draws");
+      }
+      renderPass.color[0].loadOp = lvk::LoadOp_Invalid;
+      renderPass.depth.loadOp = lvk::LoadOp_Invalid;
+    } else if (pass.hasColorAttachment) {
       renderPass.color[0] = {
           .loadOp = toLvkLoadOp(pass.color.loadOp),
           .storeOp = toLvkStoreOp(pass.color.storeOp),
@@ -2067,7 +2382,7 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
       }
     }
 
-    if (nuri::isValid(pass.depthTexture)) {
+    if (!computeOnly && nuri::isValid(pass.depthTexture)) {
       if (!impl_->textures.isValid(pass.depthTexture)) {
         return returnPassError(
             "LvkGPUDevice::recordGraphicsPass: invalid pass depth texture "
@@ -2089,8 +2404,18 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
       if (!viewportTexture.valid()) {
         viewportTexture = depthTexture;
       }
-    } else {
+    } else if (!computeOnly) {
       renderPass.depth.loadOp = lvk::LoadOp_Invalid;
+    }
+
+    if (hasTimingReservation(timingReservation)) {
+      if (timingReservation.resetQueryCount > 0u) {
+        commandBuffer.cmdResetQueryPool(timingReservation.pool,
+                                        timingReservation.resetFirstQuery,
+                                        timingReservation.resetQueryCount);
+      }
+      commandBuffer.cmdWriteTimestamp(timingReservation.pool,
+                                      timingReservation.beginQuery);
     }
 
     {
@@ -2109,7 +2434,8 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
 
         lvk::Dependencies dispatchDependencies{};
         auto dispatchDepsResult = fillDependencies(
-            dispatch.dependencyBuffers, dispatchDependencies,
+            dispatch.dependencyBuffers, dispatch.dependencyTextures,
+            dispatchDependencies,
             "LvkGPUDevice::recordGraphicsPass compute dispatch");
         if (dispatchDepsResult.hasError()) {
           return returnPassErrorResult(dispatchDepsResult);
@@ -2142,9 +2468,20 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
       NURI_PROFILER_ZONE_END();
     }
 
+    if (computeOnly) {
+      if (hasTimingReservation(timingReservation)) {
+        commandBuffer.cmdWriteTimestamp(timingReservation.pool,
+                                        timingReservation.endQuery);
+      }
+      if (passLabelPushed) {
+        commandBuffer.cmdPopDebugGroupLabel();
+      }
+      continue;
+    }
+
     lvk::Dependencies renderDependencies{};
     auto renderDepsResult =
-        fillDependencies(pass.dependencyBuffers, renderDependencies,
+        fillDependencies(pass.dependencyBuffers, {}, renderDependencies,
                          "LvkGPUDevice::recordGraphicsPass render pass");
     if (renderDepsResult.hasError()) {
       return returnPassErrorResult(renderDepsResult);
@@ -2384,6 +2721,11 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
 
     commandBuffer.cmdEndRendering();
 
+    if (hasTimingReservation(timingReservation)) {
+      commandBuffer.cmdWriteTimestamp(timingReservation.pool,
+                                      timingReservation.endQuery);
+    }
+
     if (passLabelPushed) {
       commandBuffer.cmdPopDebugGroupLabel();
     }
@@ -2395,7 +2737,7 @@ LvkGPUDevice::recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
 bool LvkGPUDevice::supportsParallelGraphicsRecording() const { return true; }
 
 uint32_t LvkGPUDevice::maxParallelGraphicsRecordingContexts() const {
-  return 8u;
+  return kMaxGraphicsRecordingContexts;
 }
 
 Result<RecordingContextHandle, std::string>
@@ -2431,6 +2773,11 @@ LvkGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
       .handle = handle,
       .commandBuffer = &commandBuffer,
       .workerIndex = workerIndex,
+      .timingQueryBase = workerIndex * kGpuTimingQueriesPerContext,
+      .timingQueryCursor = 0u,
+      .timingRanges = {},
+      .hadShadowSdsmPass = false,
+      .timingQuerySliceReset = false,
   };
   impl_->activeGraphicsContextOccupied[index] = 1u;
   return Result<RecordingContextHandle, std::string>::makeResult(handle);
@@ -2564,17 +2911,58 @@ Result<bool, std::string>
 LvkGPUDevice::recordGraphicsPass(RecordingContextHandle ctx,
                                  const RenderPass &pass) {
   lvk::ICommandBuffer *commandBuffer = nullptr;
+  PassTimingReservation timingReservation{};
   {
     std::lock_guard lock(impl_->graphicsContextMutex);
-    if (const ActiveGraphicsRecordingContext *entry =
+    if (ActiveGraphicsRecordingContext *entry =
             findActiveGraphicsContextSlot(*impl_, ctx);
         entry != nullptr) {
       commandBuffer = entry->commandBuffer;
+      timingReservation =
+          reservePassTimingReservationLocked(*impl_, *entry, pass);
     }
   }
   if (commandBuffer != nullptr) {
-    return recordRenderPasses(*commandBuffer,
-                              std::span<const RenderPass>(&pass, 1u));
+    const std::array<PassTimingReservation, 1u> timingReservations{
+        timingReservation};
+    auto result = recordRenderPasses(
+        *commandBuffer, std::span<const RenderPass>(&pass, 1u),
+        std::span<const PassTimingReservation>(timingReservations.data(),
+                                               timingReservations.size()));
+    if (!result.hasError() && result.value()) {
+      if (pass.gpuTimingScope == GpuTimingScope::ShadowSdsm &&
+          !impl_->loggedShadowSdsmTimingRecordDiagnostic) {
+        impl_->loggedShadowSdsmTimingRecordDiagnostic = true;
+        if (hasTimingReservation(timingReservation)) {
+          NURI_LOG_INFO(
+              "LvkGPUDevice: recorded shadow SDSM pass with timing "
+              "reservation frame=%llu beginQuery=%u endQuery=%u",
+              static_cast<unsigned long long>(impl_->currentFrameIndex),
+              timingReservation.beginQuery, timingReservation.endQuery);
+        } else {
+          NURI_LOG_WARNING(
+              "LvkGPUDevice: recorded shadow SDSM pass without a timing "
+              "reservation (frame %llu)",
+              static_cast<unsigned long long>(impl_->currentFrameIndex));
+        }
+      }
+      std::lock_guard lock(impl_->graphicsContextMutex);
+      if (ActiveGraphicsRecordingContext *entry =
+              findActiveGraphicsContextSlot(*impl_, ctx);
+          entry != nullptr) {
+        entry->hadShadowSdsmPass =
+            entry->hadShadowSdsmPass ||
+            pass.gpuTimingScope == GpuTimingScope::ShadowSdsm;
+        if (timingReservation.scope != GpuTimingScope::None) {
+          entry->timingRanges.push_back(PendingTimingQueryRange{
+              .scope = timingReservation.scope,
+              .firstQuery = timingReservation.beginQuery,
+              .intervalCount = 1u,
+          });
+        }
+      }
+    }
+    return result;
   }
   return Result<bool, std::string>::makeError(
       "LvkGPUDevice::recordGraphicsPass: unknown recording context");
@@ -2607,6 +2995,8 @@ LvkGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
   impl_->recordedGraphicsCommandBuffers.push_back(RecordedGraphicsCommandBuffer{
       .handle = handle,
       .commandBuffer = activeContext->commandBuffer,
+      .timingRanges = std::move(activeContext->timingRanges),
+      .hadShadowSdsmPass = activeContext->hadShadowSdsmPass,
   });
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
   impl_->activeGraphicsContextOccupied[ctx.index] = 0u;
@@ -2661,6 +3051,13 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
     std::span<const SubmitBatchMeta> batches) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_SUBMIT);
   if (commandBuffers.empty()) {
+    std::scoped_lock emptyLock(impl_->contextImmediateMutex,
+                               impl_->graphicsContextMutex);
+    if (impl_->currentFrameTimingCapture.has_value()) {
+      recycleTimingQueryPool(*impl_,
+                             std::move(impl_->currentFrameTimingCapture->pool));
+      impl_->currentFrameTimingCapture.reset();
+    }
     return Result<SubmissionHandle, std::string>::makeResult({});
   }
 
@@ -2717,6 +3114,61 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
     matchedRecordedIndices[i] = found->second;
   }
 
+  std::vector<PendingTimingQueryRange> timingRanges{};
+  bool hadShadowSdsmPass = false;
+  if (impl_->currentFrameTimingCapture.has_value()) {
+    size_t timingRangeCount = 0u;
+    for (const size_t matchedIndex : matchedRecordedIndices) {
+      if (matchedIndex >= impl_->recordedGraphicsCommandBuffers.size()) {
+        continue;
+      }
+      const RecordedGraphicsCommandBuffer &recorded =
+          impl_->recordedGraphicsCommandBuffers[matchedIndex];
+      hadShadowSdsmPass = hadShadowSdsmPass || recorded.hadShadowSdsmPass;
+      timingRangeCount += recorded.timingRanges.size();
+    }
+    timingRanges.reserve(timingRangeCount);
+    for (const size_t matchedIndex : matchedRecordedIndices) {
+      if (matchedIndex >= impl_->recordedGraphicsCommandBuffers.size()) {
+        continue;
+      }
+      const RecordedGraphicsCommandBuffer &recorded =
+          impl_->recordedGraphicsCommandBuffers[matchedIndex];
+      if (recorded.timingRanges.empty()) {
+        continue;
+      }
+      timingRanges.insert(timingRanges.end(), recorded.timingRanges.begin(),
+                          recorded.timingRanges.end());
+    }
+  }
+  if (hadShadowSdsmPass && !impl_->loggedShadowSdsmTimingSubmissionWarning) {
+    bool hasShadowSdsmRange = false;
+    for (const PendingTimingQueryRange &range : timingRanges) {
+      hasShadowSdsmRange =
+          hasShadowSdsmRange || range.scope == GpuTimingScope::ShadowSdsm;
+    }
+    if (!impl_->loggedShadowSdsmTimingSubmissionDiagnostic) {
+      impl_->loggedShadowSdsmTimingSubmissionDiagnostic = true;
+      NURI_LOG_INFO("LvkGPUDevice: submitting shadow SDSM pass frame=%llu "
+                    "timingRanges=%zu hasShadowSdsmRange=%u",
+                    static_cast<unsigned long long>(
+                        impl_->currentFrameTimingCapture.has_value()
+                            ? impl_->currentFrameTimingCapture->frameIndex
+                            : impl_->currentFrameIndex),
+                    timingRanges.size(), hasShadowSdsmRange ? 1u : 0u);
+    }
+    if (!hasShadowSdsmRange) {
+      impl_->loggedShadowSdsmTimingSubmissionWarning = true;
+      NURI_LOG_WARNING(
+          "LvkGPUDevice: shadow SDSM pass was submitted without a matching "
+          "SDSM timing range (frame %llu)",
+          static_cast<unsigned long long>(
+              impl_->currentFrameTimingCapture.has_value()
+                  ? impl_->currentFrameTimingCapture->frameIndex
+                  : impl_->currentFrameIndex));
+    }
+  }
+
   lvk::SubmitHandle lastSubmitHandle{};
   std::vector<uint8_t> consumedRecordedFlags(
       impl_->recordedGraphicsCommandBuffers.size(), 0u);
@@ -2758,6 +3210,20 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
   if (wantsPresent) {
     impl_->currentFrameSwapchainTexture = {};
     impl_->hasPreparedSwapchainImage = false;
+  }
+  if (impl_->currentFrameTimingCapture.has_value()) {
+    if (!lastSubmitHandle.empty() && !timingRanges.empty()) {
+      PendingGpuTimingSubmission pending{};
+      pending.submission = toNuriSubmissionHandle(lastSubmitHandle);
+      pending.frameIndex = impl_->currentFrameTimingCapture->frameIndex;
+      pending.pool = std::move(impl_->currentFrameTimingCapture->pool);
+      pending.timingRanges = std::move(timingRanges);
+      impl_->pendingGpuTimingSubmissions.push_back(std::move(pending));
+    } else {
+      recycleTimingQueryPool(*impl_,
+                             std::move(impl_->currentFrameTimingCapture->pool));
+    }
+    impl_->currentFrameTimingCapture.reset();
   }
   ++impl_->submittedFrameCount;
 
@@ -3132,6 +3598,8 @@ void LvkGPUDevice::waitIdle() {
   if (impl_->context) {
     // Empty SubmitHandle results in vkDeviceWaitIdle
     impl_->context->wait(lvk::SubmitHandle{});
+    std::lock_guard immediateLock(impl_->contextImmediateMutex);
+    collectCompletedGpuTimingSubmissions(*impl_);
   }
 }
 

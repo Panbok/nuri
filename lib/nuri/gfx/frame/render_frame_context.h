@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory_resource>
 #include <optional>
 #include <vector>
@@ -62,6 +63,12 @@ enum class ShadowSdsmMode : uint8_t {
   Disabled = 0,
   PreviousFrameMinMax = 1,
   Histogram = 2,
+};
+
+enum class ShadowSdsmReductionBackend : uint8_t {
+  Auto = 0,
+  Cpu = 1,
+  Gpu = 2,
 };
 
 enum class ShadowSdsmStatus : uint8_t {
@@ -214,7 +221,10 @@ struct RenderSettings {
     bool fixedPoissonRotation = false;
     uint32_t poissonRotationSeed = 0u;
     bool visualizeSDSMHistogram = false;
-    LogLevel sdsmDiagnosticLogLevel = LogLevel::Trace;
+    bool logDiagnostics = false;
+    LogLevel diagnosticLogLevel = LogLevel::Trace;
+    uint32_t diagnosticLogIntervalFrames = 1u;
+    bool diagnosticLogOnlyOnChange = false;
     bool enableCascadeCasterCulling = true;
     ShadowPreviewMode previewMode = ShadowPreviewMode::SelectedCascade;
     float previewDepthMin = 0.0f;
@@ -243,6 +253,8 @@ struct RenderSettings {
     float pcssSearchRadiusClampTexels = kDefaultPcssSearchRadiusClampTexels;
     float pcssFilterRadiusClampTexels = kDefaultPcssFilterRadiusClampTexels;
     ShadowSdsmMode sdsmMode = ShadowSdsmMode::Disabled;
+    ShadowSdsmReductionBackend sdsmReductionBackend =
+        ShadowSdsmReductionBackend::Auto;
     float sdsmTemporalBlend = 0.85f;
     uint32_t sdsmHistogramBucketCount = kDefaultShadowSdsmHistogramBucketCount;
     float sdsmHistogramTrimLowPercent = 0.5f;
@@ -353,6 +365,19 @@ sanitizeShadowSdsmMode(ShadowSdsmMode mode) noexcept {
   }
 }
 
+[[nodiscard]] constexpr ShadowSdsmReductionBackend
+sanitizeShadowSdsmReductionBackend(
+    ShadowSdsmReductionBackend backend) noexcept {
+  switch (backend) {
+  case ShadowSdsmReductionBackend::Auto:
+  case ShadowSdsmReductionBackend::Cpu:
+  case ShadowSdsmReductionBackend::Gpu:
+    return backend;
+  default:
+    return ShadowSdsmReductionBackend::Auto;
+  }
+}
+
 [[nodiscard]] constexpr ShadowPreviewMode
 sanitizeShadowPreviewMode(ShadowPreviewMode mode) noexcept {
   switch (mode) {
@@ -390,6 +415,8 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   settings.filterMode = sanitizeShadowFilterMode(settings.filterMode);
   settings.splitMode = sanitizeShadowCascadeSplitMode(settings.splitMode);
   settings.sdsmMode = sanitizeShadowSdsmMode(settings.sdsmMode);
+  settings.sdsmReductionBackend =
+      sanitizeShadowSdsmReductionBackend(settings.sdsmReductionBackend);
   settings.debug.previewMode =
       sanitizeShadowPreviewMode(settings.debug.previewMode);
   // Light-perspective shadow preview is kept in settings but has no renderer
@@ -426,7 +453,7 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
       std::isfinite(settings.sdsmHistogramTrimHighPercent)
           ? std::clamp(settings.sdsmHistogramTrimHighPercent, 0.0f, 20.0f)
           : 1.0f;
-  switch (settings.debug.sdsmDiagnosticLogLevel) {
+  switch (settings.debug.diagnosticLogLevel) {
   case LogLevel::Trace:
   case LogLevel::Debug:
   case LogLevel::Info:
@@ -435,9 +462,11 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   case LogLevel::Fatal:
     break;
   default:
-    settings.debug.sdsmDiagnosticLogLevel = LogLevel::Trace;
+    settings.debug.diagnosticLogLevel = LogLevel::Trace;
     break;
   }
+  settings.debug.diagnosticLogIntervalFrames =
+      std::max(settings.debug.diagnosticLogIntervalFrames, 1u);
   settings.debug.debugCascadeIndex =
       std::min(settings.debug.debugCascadeIndex, settings.cascadeCount - 1u);
   if (!std::isfinite(settings.debug.previewDepthMin) ||
@@ -456,6 +485,23 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
         std::min(settings.debug.previewDepthMin,
                  settings.debug.previewDepthMax - 1.0e-4f);
   }
+}
+
+[[nodiscard]] constexpr uint32_t
+shadowFilterSampleBudget(ShadowFilterMode filterMode, uint32_t pcfSampleCount,
+                         uint32_t pcssBlockerSampleCount,
+                         uint32_t pcssFilterSampleCount) noexcept {
+  switch (sanitizeShadowFilterMode(filterMode)) {
+  case ShadowFilterMode::Hard:
+    return 1u;
+  case ShadowFilterMode::PCF3x3:
+  case ShadowFilterMode::PoissonPCF:
+    return std::clamp(pcfSampleCount, 1u, kMaxShadowPcfSamples);
+  case ShadowFilterMode::PCSS:
+    return std::clamp(pcssBlockerSampleCount, 1u, kMaxShadowPcfSamples) +
+           std::clamp(pcssFilterSampleCount, 1u, kMaxShadowPcfSamples);
+  }
+  return 1u;
 }
 
 [[nodiscard]] inline TextureFilterMode effectiveTextureFilterMode(
@@ -530,6 +576,11 @@ struct ShadowFrameGpuDataHandle {
   uint64_t bufferAddress = 0u;
 };
 
+struct ShadowSdsmGpuReduceTargetHandle {
+  BufferHandle buffer{};
+  uint64_t bufferAddress = 0u;
+};
+
 struct ShadowCascadeDebugFrameData {
   float splitNear = 0.0f;
   float splitFar = 0.0f;
@@ -548,17 +599,53 @@ struct ShadowCascadeDebugFrameData {
   uint32_t textureBindlessId = kInvalidShadowBindlessIndex;
   uint32_t drawCount = 0u;
   uint32_t culledCount = 0u;
+  uint32_t staticDrawCount = 0u;
+  uint32_t dynamicDrawCount = 0u;
+  enum class StaticOnlyReuseStatus : uint8_t {
+    None = 0u,
+    Reused,
+    StaticCacheRebuilt,
+    HasDynamicCasters,
+    NoPreviousStaticOnlyPass,
+    RasterStateChanged,
+    AdaptiveRefresh,
+  };
+  StaticOnlyReuseStatus staticOnlyReuseStatus = StaticOnlyReuseStatus::None;
+  bool staticOnlyReuseCandidate = false;
+  bool staticOnlyReusePreviousValid = false;
+  bool staticOnlyReuseLightViewProjChanged = false;
+  bool staticOnlyReuseBiasChanged = false;
+  bool staticOnlyReuseCasterSignatureChanged = false;
+  bool staticOnlyReuseAdaptiveRefresh = false;
+  uint64_t currentStaticOnlyRasterSignature = 0u;
+  uint64_t previousStaticOnlyRasterSignature = 0u;
+  uint64_t currentStaticOnlyLightViewProjSignature = 0u;
+  uint64_t previousStaticOnlyLightViewProjSignature = 0u;
+  uint64_t currentStaticOnlyBiasSignature = 0u;
+  uint64_t previousStaticOnlyBiasSignature = 0u;
+  uint64_t currentStaticOnlyCasterSignature = 0u;
+  uint64_t previousStaticOnlyCasterSignature = 0u;
 };
 
 struct ShadowSdsmDebugFrameData {
   ShadowSdsmMode mode = ShadowSdsmMode::Disabled;
+  ShadowSdsmReductionBackend requestedReductionBackend =
+      ShadowSdsmReductionBackend::Auto;
+  ShadowSdsmReductionBackend activeReductionBackend =
+      ShadowSdsmReductionBackend::Cpu;
   ShadowSdsmStatus status = ShadowSdsmStatus::Disabled;
+  bool reductionFallbackActive = false;
   bool fixedFallbackActive = false;
   uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint32_t histogramSourceLevel = 0u;
   glm::uvec2 histogramSourceDimensions{0u};
   uint32_t histogramBucketCount = 0u;
   uint32_t histogramValidTileCount = 0u;
+  uint32_t gpuResultRingSlotCount = 0u;
+  uint32_t gpuResultSelectedSlot = std::numeric_limits<uint32_t>::max();
+  bool gpuReductionResultAvailable = false;
+  bool gpuSplitPayloadValid = false;
+  uint64_t gpuResultSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint32_t splitCount = 0u;
   float fixedRangeNear = 0.0f;
   float fixedRangeFar = 0.0f;
@@ -712,8 +799,51 @@ struct OpaqueFrameMetrics {
   uint32_t depthPrepassEnabled = 0;
 };
 
+struct ShadowFrameMetrics {
+  uint32_t cascadeCount = 0;
+  uint32_t shadowMapSize = 0;
+  uint32_t totalDraws = 0;
+  uint32_t totalCulledDraws = 0;
+  uint32_t totalIndexCountEstimate = 0;
+  uint32_t staticCasterEntries = 0;
+  uint32_t dynamicCasterEntries = 0;
+  uint32_t staticCacheReused = 0;
+  uint32_t staticOnlyCandidateCount = 0;
+  uint32_t reusedStaticOnlyCascadeCount = 0;
+  uint32_t staticOnlyReuseMissStaticCacheRebuiltCount = 0;
+  uint32_t staticOnlyReuseMissDynamicCasterCount = 0;
+  uint32_t staticOnlyReuseMissNoPreviousCount = 0;
+  uint32_t staticOnlyReuseMissRasterStateChangedCount = 0;
+  uint32_t staticOnlyReuseMissAdaptiveRefreshCount = 0;
+  uint64_t cascadeTextureBytes = 0;
+  uint32_t filterSampleBudget = 0;
+  uint32_t pcssBlockerSampleBudget = 0;
+  uint32_t pcssFilterSampleBudget = 0;
+  uint32_t pcssMaxSamplesPerReceiver = 0;
+  uint32_t pcssMaxSamplesPerBlendedReceiver = 0;
+  uint32_t sdsmComputePassCount = 0;
+  uint32_t sdsmReadbackBytes = 0;
+  uint32_t sdsmReductionSourceSamples = 0;
+  uint32_t sdsmHistogramSourceSamples = 0;
+  ShadowSdsmReductionBackend sdsmActiveReductionBackend =
+      ShadowSdsmReductionBackend::Cpu;
+  float gpuTimeMs = 0.0f;
+  float depthGpuTimeMs = 0.0f;
+  float sdsmGpuTimeMs = 0.0f;
+  float sdsmCpuReductionTimeMs = 0.0f;
+  float sdsmCpuHistogramTimeMs = 0.0f;
+  uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t depthGpuTimingSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t sdsmGpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint32_t gpuTimingAvailable = 0;
+  uint32_t depthGpuTimingAvailable = 0;
+  uint32_t sdsmGpuTimingAvailable = 0;
+};
+
 struct RenderFrameMetrics {
   OpaqueFrameMetrics opaque{};
+  ShadowFrameMetrics shadow{};
   struct TransparentFrameMetrics {
     uint32_t meshDraws = 0;
     uint32_t contributorSortableDraws = 0;
@@ -807,6 +937,8 @@ struct FrameSharedResources {
   std::optional<MaterialTableGpuData> materialTableGpuData{};
   std::optional<AnimationSceneFrameData> animationSceneGpuData{};
   std::optional<ShadowFrameGpuDataHandle> shadowFrameGpuData{};
+  std::optional<ShadowSdsmGpuReduceTargetHandle> shadowSdsmGpuReduceTarget{};
+  ComputePipelineHandle shadowSdsmGpuReducePipeline{};
   std::optional<ShadowDebugFrameData> shadowDebugFrameData{};
   FrameTextureRequirementFlags textureRequirements =
       kBaselineFrameTextureRequirements;

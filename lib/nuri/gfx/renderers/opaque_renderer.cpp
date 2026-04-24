@@ -8,6 +8,7 @@
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
+#include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 
@@ -46,7 +47,6 @@ constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr uint64_t kInvalidDrawSignature = std::numeric_limits<uint64_t>::max();
 constexpr std::string_view kOpaquePickPassLabel = "Opaque Pick Pass";
 constexpr std::string_view kOpaqueMainPassLabel = "Opaque Pass";
-
 uint64_t hashCombine64(uint64_t hash, uint64_t value) {
   hash ^= value;
   hash *= kFnvPrime64;
@@ -510,6 +510,10 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       depthPyramidPushConstants_(resolveMemoryResource(memory)),
       depthPyramidDrawItems_(resolveMemoryResource(memory)),
       depthPyramidDependencyTextures_(resolveMemoryResource(memory)),
+      shadowSdsmReducePushConstants_(resolveMemoryResource(memory)),
+      shadowSdsmReduceDispatches_(resolveMemoryResource(memory)),
+      shadowSdsmReduceDependencyBuffers_(resolveMemoryResource(memory)),
+      shadowSdsmReduceDependencyTextures_(resolveMemoryResource(memory)),
       preDispatches_(resolveMemoryResource(memory)),
       passDependencyBuffers_(resolveMemoryResource(memory)),
       passDependencyBufferAccessModes_(resolveMemoryResource(memory)),
@@ -657,8 +661,7 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
       gpu_.getDefaultSamplerBindlessIndex();
   frame.sharedResources.sceneDepthPyramidLevelCount = 0u;
   frame.sharedResources.sceneDepthPyramidTextures = {};
-  frame.sharedResources.sceneDepthPyramidSourceFrameIndex =
-      sceneDepthPyramidSourceFrameIndex_;
+  frame.sharedResources.sceneDepthPyramidSourceFrameIndex.reset();
 
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.opaque.enabled) {
@@ -708,6 +711,20 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
         sceneDepthPyramidLevelCount_;
     frame.sharedResources.sceneDepthPyramidTextures =
         sceneDepthPyramidTextures_;
+    bool hasValidPublishedPyramidSource =
+        sceneDepthPyramidSourceFrameIndex_.has_value() &&
+        sceneDepthPyramidLevelCount_ > 0u;
+    for (uint32_t level = 0u;
+         hasValidPublishedPyramidSource && level < sceneDepthPyramidLevelCount_;
+         ++level) {
+      hasValidPublishedPyramidSource =
+          nuri::isValid(sceneDepthPyramidTextures_[level]) &&
+          gpu_.isValid(sceneDepthPyramidTextures_[level]);
+    }
+    if (hasValidPublishedPyramidSource) {
+      frame.sharedResources.sceneDepthPyramidSourceFrameIndex =
+          sceneDepthPyramidSourceFrameIndex_;
+    }
   }
 }
 
@@ -3001,6 +3018,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       requiresDepthPyramid && nuri::isValid(sceneDepthTexture) &&
       nuri::isValid(depthPyramidPipelineHandle_) &&
       sceneDepthPyramidLevelCount_ > 0u && !baseDrawItems.empty();
+  frame.metrics.shadow.sdsmComputePassCount = 0u;
   if (depthPyramidEnabled) {
     NURI_PROFILER_ZONE("OpaqueRenderer.depth_pyramid_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
@@ -3065,6 +3083,163 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     frame.metrics.opaque.depthPyramidLevels =
         saturateToU32(depthPyramidDrawItems_.size());
     sceneDepthPyramidSourceFrameIndex_ = frame.frameIndex;
+    const ShadowSdsmMode sdsmMode =
+        sanitizeShadowSdsmMode(settings.shadow.sdsmMode);
+    if (settings.shadow.enabled &&
+        (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
+         sdsmMode == ShadowSdsmMode::Histogram) &&
+        frame.sharedResources.shadowSdsmGpuReduceTarget.has_value() &&
+        nuri::isValid(frame.sharedResources.shadowSdsmGpuReducePipeline)) {
+      uint32_t reduceSourceLevel = sceneDepthPyramidLevelCount_ - 1u;
+      glm::uvec2 histogramSourceDimensions{1u};
+      if (sdsmMode == ShadowSdsmMode::Histogram) {
+        std::array<glm::uvec2, kMaxSceneDepthPyramidLevels> levelDimensions{};
+        for (uint32_t level = 0u; level < sceneDepthPyramidLevelCount_;
+             ++level) {
+          const TextureDimensions dimensions =
+              gpu_.getTextureDimensions(sceneDepthPyramidTextures_[level]);
+          levelDimensions[level] = glm::uvec2(std::max(dimensions.width, 1u),
+                                              std::max(dimensions.height, 1u));
+        }
+        const shadow_detail::ShadowSdsmHistogramSourceSelection selection =
+            shadow_detail::selectSdsmHistogramSourceLevel(
+                std::span<const glm::uvec2>(levelDimensions.data(),
+                                            sceneDepthPyramidLevelCount_),
+                sceneDepthPyramidLevelCount_, 4096u);
+        reduceSourceLevel = selection.level;
+        histogramSourceDimensions = selection.dimensions;
+      }
+      const TextureHandle reduceSourceTexture =
+          sceneDepthPyramidTextures_[reduceSourceLevel];
+      const uint32_t reduceSourceTexId =
+          gpu_.getTextureBindlessIndex(reduceSourceTexture);
+      if (nuri::isValid(reduceSourceTexture) &&
+          reduceSourceTexId != kInvalidTextureBindlessIndex) {
+        shadowSdsmReducePushConstants_.clear();
+        shadowSdsmHistogramReducePushConstants_.clear();
+        shadowSdsmReduceDispatches_.clear();
+        shadowSdsmReduceDependencyBuffers_.clear();
+        shadowSdsmReduceDependencyTextures_.clear();
+        shadowSdsmReducePushConstants_.reserve(1u);
+        shadowSdsmHistogramReducePushConstants_.reserve(1u);
+        shadowSdsmReduceDispatches_.reserve(1u);
+        shadowSdsmReduceDependencyBuffers_.reserve(1u);
+        shadowSdsmReduceDependencyTextures_.reserve(1u);
+
+        std::span<const std::byte> reducePushConstants;
+        if (sdsmMode == ShadowSdsmMode::Histogram) {
+          const float fixedNear = std::max(frame.camera.nearPlane, 0.01f);
+          const float fixedFar = std::max(
+              fixedNear + 0.01f,
+              std::min(std::max(settings.shadow.maxDistance, fixedNear + 0.01f),
+                       std::max(frame.camera.farPlane, fixedNear + 0.01f)));
+          shadowSdsmHistogramReducePushConstants_.push_back(
+              ShadowSdsmHistogramReducePushConstants{
+                  .resultBufferAddress =
+                      frame.sharedResources.shadowSdsmGpuReduceTarget
+                          ->bufferAddress,
+                  .sourceParams = glm::uvec4(
+                      reduceSourceTexId,
+                      static_cast<uint32_t>(frame.frameIndex),
+                      histogramSourceDimensions.x, histogramSourceDimensions.y),
+                  .histogramParams = glm::uvec4(
+                      std::clamp(settings.shadow.sdsmHistogramBucketCount,
+                                 kMinShadowSdsmHistogramBucketCount,
+                                 kMaxShadowSdsmHistogramBucketCount),
+                      std::clamp(settings.shadow.cascadeCount, 1u,
+                                 kMaxShadowCascades),
+                      frame.camera.projectionType ==
+                              ProjectionType::Orthographic
+                          ? 1u
+                          : 0u,
+                      0u),
+                  .cameraParams =
+                      glm::vec4(frame.camera.nearPlane, frame.camera.farPlane,
+                                fixedNear, fixedFar),
+                  .trimParams =
+                      glm::vec4(settings.shadow.sdsmHistogramTrimLowPercent,
+                                settings.shadow.sdsmHistogramTrimHighPercent,
+                                1.0e-4f, 0.0f),
+              });
+          reducePushConstants = std::span<const std::byte>(
+              reinterpret_cast<const std::byte *>(
+                  &shadowSdsmHistogramReducePushConstants_.back()),
+              sizeof(ShadowSdsmHistogramReducePushConstants));
+        } else {
+          shadowSdsmReducePushConstants_.push_back(
+              ShadowSdsmReducePushConstants{
+                  .resultBufferAddress =
+                      frame.sharedResources.shadowSdsmGpuReduceTarget
+                          ->bufferAddress,
+                  .sourceTexId = reduceSourceTexId,
+                  .sourceFrameIndex = static_cast<uint32_t>(frame.frameIndex),
+              });
+          reducePushConstants = std::span<const std::byte>(
+              reinterpret_cast<const std::byte *>(
+                  &shadowSdsmReducePushConstants_.back()),
+              sizeof(ShadowSdsmReducePushConstants));
+        }
+        shadowSdsmReduceDependencyBuffers_.push_back(
+            frame.sharedResources.shadowSdsmGpuReduceTarget->buffer);
+        shadowSdsmReduceDependencyTextures_.push_back(reduceSourceTexture);
+
+        ComputeDispatchItem dispatch{};
+        dispatch.pipeline = frame.sharedResources.shadowSdsmGpuReducePipeline;
+        dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
+        dispatch.pushConstants = reducePushConstants;
+        dispatch.dependencyBuffers = std::span<const BufferHandle>(
+            shadowSdsmReduceDependencyBuffers_.data(),
+            shadowSdsmReduceDependencyBuffers_.size());
+        dispatch.dependencyTextures = std::span<const TextureHandle>(
+            shadowSdsmReduceDependencyTextures_.data(),
+            shadowSdsmReduceDependencyTextures_.size());
+        dispatch.debugLabel = sdsmMode == ShadowSdsmMode::Histogram
+                                  ? "Shadow SDSM Histogram Reduce"
+                                  : "Shadow SDSM Reduce";
+        dispatch.debugColor = kComputeDispatchColor;
+        shadowSdsmReduceDispatches_.push_back(dispatch);
+
+        PreparedGraphPass &reducePass =
+            out.emplace_back(drawItems_.get_allocator().resource());
+        reducePass.desc.executionMode = RenderPassExecutionMode::ComputeOnly;
+        reducePass.desc.hasColorAttachment = false;
+        reducePass.desc.preDispatches = std::span<const ComputeDispatchItem>(
+            shadowSdsmReduceDispatches_.data(),
+            shadowSdsmReduceDispatches_.size());
+        reducePass.desc.dependencyTextures = std::span<const TextureHandle>(
+            shadowSdsmReduceDependencyTextures_.data(),
+            shadowSdsmReduceDependencyTextures_.size());
+        reducePass.desc.gpuTimingScope = GpuTimingScope::ShadowSdsm;
+        reducePass.desc.debugLabel = dispatch.debugLabel;
+        reducePass.desc.debugColor = kComputeDispatchColor;
+        reducePass.desc.markImplicitOutputSideEffect = true;
+        reducePass.desc.borrowPayload = false;
+        reducePass.hasPreDispatch = true;
+        reducePass.hasDraws = false;
+        frame.metrics.shadow.sdsmComputePassCount = 1u;
+      } else if (!loggedShadowSdsmReduceSkipWarning_) {
+        loggedShadowSdsmReduceSkipWarning_ = true;
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::buildOpaquePasses: skipping Shadow SDSM Reduce "
+            "frame=%llu sourceTextureValid=%u sourceTexId=%u levelCount=%u",
+            static_cast<unsigned long long>(frame.frameIndex),
+            nuri::isValid(reduceSourceTexture) ? 1u : 0u, reduceSourceTexId,
+            sceneDepthPyramidLevelCount_);
+      }
+    } else if (settings.shadow.enabled &&
+               (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
+                sdsmMode == ShadowSdsmMode::Histogram) &&
+               !loggedShadowSdsmReduceSkipWarning_) {
+      loggedShadowSdsmReduceSkipWarning_ = true;
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::buildOpaquePasses: Shadow SDSM Reduce unavailable "
+          "frame=%llu hasReduceTarget=%u hasReducePipeline=%u",
+          static_cast<unsigned long long>(frame.frameIndex),
+          frame.sharedResources.shadowSdsmGpuReduceTarget.has_value() ? 1u : 0u,
+          nuri::isValid(frame.sharedResources.shadowSdsmGpuReducePipeline)
+              ? 1u
+              : 0u);
+    }
     NURI_PROFILER_ZONE_END();
   } else {
     sceneDepthPyramidSourceFrameIndex_.reset();
@@ -3304,6 +3479,7 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight,
     std::span<const RenderGraphBufferId> preResolvedDrawBufferIds) {
   RenderGraphPreparedGraphicsPassDesc passDesc{};
+  passDesc.executionMode = pass.desc.executionMode;
   passDesc.color = pass.desc.color;
   passDesc.hasColorAttachment = pass.desc.hasColorAttachment;
   passDesc.depth = pass.desc.depth;
@@ -3313,6 +3489,7 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
   passDesc.dependencyBuffers = pass.desc.dependencyBuffers;
   passDesc.draws = pass.desc.draws;
   passDesc.drawBuffersPreResolved = pass.desc.drawBuffersPreResolved;
+  passDesc.gpuTimingScope = pass.desc.gpuTimingScope;
   passDesc.debugLabel = pass.desc.debugLabel;
   passDesc.debugColor = pass.desc.debugColor;
   passDesc.markColorAsFrameOutput = pass.desc.markColorAsFrameOutput;

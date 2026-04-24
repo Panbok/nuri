@@ -282,6 +282,41 @@ const char *shadowSdsmStatusDisplayName(ShadowSdsmStatus status) {
   return "Unknown";
 }
 
+const char *shadowStaticOnlyReuseStatusDisplayName(
+    ShadowCascadeDebugFrameData::StaticOnlyReuseStatus status) {
+  switch (status) {
+  case ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::None:
+    return "None";
+  case ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::Reused:
+    return "Reused";
+  case ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::StaticCacheRebuilt:
+    return "Static cache rebuilt";
+  case ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::HasDynamicCasters:
+    return "Dynamic casters present";
+  case ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::
+      NoPreviousStaticOnlyPass:
+    return "No previous static-only pass";
+  case ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::RasterStateChanged:
+    return "Raster state changed";
+  case ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::AdaptiveRefresh:
+    return "Adaptive refresh";
+  }
+  return "Unknown";
+}
+
+const char *
+shadowSdsmReductionBackendDisplayName(ShadowSdsmReductionBackend backend) {
+  switch (sanitizeShadowSdsmReductionBackend(backend)) {
+  case ShadowSdsmReductionBackend::Auto:
+    return "Auto";
+  case ShadowSdsmReductionBackend::Cpu:
+    return "CPU";
+  case ShadowSdsmReductionBackend::Gpu:
+    return "GPU";
+  }
+  return "Unknown";
+}
+
 [[nodiscard]] bool isSdsmWarningStatus(ShadowSdsmStatus status) {
   return status == ShadowSdsmStatus::Unavailable ||
          status == ShadowSdsmStatus::Stale ||
@@ -1023,6 +1058,21 @@ std::string_view logTagFor(LogLevel level) {
   return "[Info]";
 }
 
+int logLevelComboIndex(LogLevel level) {
+  for (int i = 0; i < static_cast<int>(std::size(kLogLevels)); ++i) {
+    if (kLogLevels[static_cast<size_t>(i)].level == level) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+void setLogLevelFromCombo(LogLevel &level, int comboIndex) {
+  const int safeIndex =
+      std::clamp(comboIndex, 0, static_cast<int>(std::size(kLogLevels)) - 1);
+  level = kLogLevels[static_cast<size_t>(safeIndex)].level;
+}
+
 void drawInlineCheckbox(const char *label, bool &value) {
   ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
   ImGui::Checkbox(label, &value);
@@ -1442,9 +1492,23 @@ void drawShadowSettings(
                    IM_ARRAYSIZE(kSdsmLabels))) {
     shadow.sdsmMode = static_cast<ShadowSdsmMode>(sdsmMode);
   }
+  constexpr const char *kSdsmBackendLabels[] = {
+      "Auto",
+      "CPU",
+      "GPU",
+  };
+  int sdsmBackend = static_cast<int>(
+      sanitizeShadowSdsmReductionBackend(shadow.sdsmReductionBackend));
+  if (ImGui::Combo("SDSM Backend##ShadowPass", &sdsmBackend, kSdsmBackendLabels,
+                   IM_ARRAYSIZE(kSdsmBackendLabels))) {
+    shadow.sdsmReductionBackend =
+        static_cast<ShadowSdsmReductionBackend>(sdsmBackend);
+  }
   ImGui::SliderFloat("SDSM Temporal Blend##ShadowPass",
                      &shadow.sdsmTemporalBlend, 0.0f, 1.0f, "%.2f");
-  if (sanitizeShadowSdsmMode(shadow.sdsmMode) == ShadowSdsmMode::Histogram) {
+  const bool histogramSdsm =
+      sanitizeShadowSdsmMode(shadow.sdsmMode) == ShadowSdsmMode::Histogram;
+  if (histogramSdsm) {
     int bucketCount = static_cast<int>(shadow.sdsmHistogramBucketCount);
     if (ImGui::SliderInt(
             "Histogram Buckets##ShadowPass", &bucketCount,
@@ -1509,6 +1573,36 @@ void drawShadowSettings(
   }
   ImGui::Checkbox("Visualize SDSM Histogram##ShadowPass",
                   &shadow.debug.visualizeSDSMHistogram);
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Diagnostic Logs");
+  ImGui::Checkbox("Log Shadow Diagnostics##ShadowPass",
+                  &shadow.debug.logDiagnostics);
+  int diagnosticLogLevel = logLevelComboIndex(shadow.debug.diagnosticLogLevel);
+  if (ImGui::Combo(
+          "Log Level##ShadowPass", &diagnosticLogLevel,
+          [](void *, int idx, const char **outText) {
+            if (idx < 0 || idx >= static_cast<int>(std::size(kLogLevels))) {
+              return false;
+            }
+            *outText = kLogLevels[static_cast<size_t>(idx)].tag.data();
+            return true;
+          },
+          nullptr, static_cast<int>(std::size(kLogLevels)))) {
+    setLogLevelFromCombo(shadow.debug.diagnosticLogLevel, diagnosticLogLevel);
+  }
+  int diagnosticLogInterval = static_cast<int>(std::min<uint32_t>(
+      shadow.debug.diagnosticLogIntervalFrames,
+      static_cast<uint32_t>(std::numeric_limits<int>::max())));
+  if (ImGui::SliderInt("Log Interval (frames)##ShadowPass",
+                       &diagnosticLogInterval, 1, 240)) {
+    shadow.debug.diagnosticLogIntervalFrames =
+        static_cast<uint32_t>(std::max(diagnosticLogInterval, 1));
+  }
+  ImGui::Checkbox("Log Only On Change##ShadowPass",
+                  &shadow.debug.diagnosticLogOnlyOnChange);
+  ImGui::TextUnformatted(
+      "Logs emit one frame summary plus one line per active cascade.");
 
   ImGui::Separator();
   ImGui::TextUnformatted("Depth Preview");
@@ -1670,6 +1764,7 @@ void drawTextureFilteringWindow(bool &open, RenderSettings &renderSettings,
 void drawShadowsWindow(
     bool &open, RenderSettings &renderSettings, GPUDevice &gpu,
     const std::optional<ShadowDebugFrameData> &shadowDebugFrameData,
+    const RenderFrameMetrics &frameMetrics,
     const std::optional<ShadowInspectResult> &shadowInspectResult,
     TextureHandle previewTexture,
     std::vector<TextureHandle> &dependencyTextures,
@@ -1722,7 +1817,36 @@ void drawShadowsWindow(
                                    cascade.texelWorldSize));
   ImGui::Text("Draw Count: %u", cascade.drawCount);
   ImGui::Text("Culled Count: %u", cascade.culledCount);
+  ImGui::Text("Static / Dynamic Draws: %u / %u", cascade.staticDrawCount,
+              cascade.dynamicDrawCount);
   ImGui::Text("Depth Texture Bindless: %u", cascade.textureBindlessId);
+  ImGui::Separator();
+  ImGui::TextUnformatted("Static-Only Reuse");
+  ImGui::Text("Status: %s", shadowStaticOnlyReuseStatusDisplayName(
+                                cascade.staticOnlyReuseStatus));
+  ImGui::Text("Candidate / Previous Valid: %s / %s",
+              cascade.staticOnlyReuseCandidate ? "yes" : "no",
+              cascade.staticOnlyReusePreviousValid ? "yes" : "no");
+  ImGui::Text("Signature Changes: light=%s bias=%s casters=%s adaptive=%s",
+              cascade.staticOnlyReuseLightViewProjChanged ? "yes" : "no",
+              cascade.staticOnlyReuseBiasChanged ? "yes" : "no",
+              cascade.staticOnlyReuseCasterSignatureChanged ? "yes" : "no",
+              cascade.staticOnlyReuseAdaptiveRefresh ? "yes" : "no");
+  ImGui::Text(
+      "Raster Signature: 0x%016llX / 0x%016llX",
+      static_cast<unsigned long long>(cascade.currentStaticOnlyRasterSignature),
+      static_cast<unsigned long long>(
+          cascade.previousStaticOnlyRasterSignature));
+  ImGui::Text("Light Signature: 0x%016llX / 0x%016llX",
+              static_cast<unsigned long long>(
+                  cascade.currentStaticOnlyLightViewProjSignature),
+              static_cast<unsigned long long>(
+                  cascade.previousStaticOnlyLightViewProjSignature));
+  ImGui::Text(
+      "Caster Signature: 0x%016llX / 0x%016llX",
+      static_cast<unsigned long long>(cascade.currentStaticOnlyCasterSignature),
+      static_cast<unsigned long long>(
+          cascade.previousStaticOnlyCasterSignature));
   ImGui::Separator();
   ImGui::TextUnformatted("Cascade Table");
   if (ImGui::BeginTable("ShadowCascadeTable", 8,
@@ -1801,6 +1925,37 @@ void drawShadowsWindow(
   const ShadowSdsmDebugFrameData &sdsm = shadowDebugFrameData->sdsm;
   ImGui::TextUnformatted("SDSM");
   ImGui::Text("Mode: %s", shadowSdsmModeDisplayName(sdsm.mode));
+  ImGui::Text("Requested Backend: %s", shadowSdsmReductionBackendDisplayName(
+                                           sdsm.requestedReductionBackend));
+  ImGui::Text("Active Backend: %s", shadowSdsmReductionBackendDisplayName(
+                                        sdsm.activeReductionBackend));
+  if (sdsm.activeReductionBackend == ShadowSdsmReductionBackend::Gpu ||
+      sdsm.gpuResultRingSlotCount > 0u) {
+    ImGui::Text("GPU Result: %s",
+                sdsm.gpuReductionResultAvailable ? "available" : "unavailable");
+    ImGui::Text("GPU Split Payload: %s",
+                sdsm.gpuSplitPayloadValid ? "valid" : "not used");
+    if (sdsm.gpuResultSelectedSlot != std::numeric_limits<uint32_t>::max()) {
+      ImGui::Text("GPU Ring: slot %u of %u", sdsm.gpuResultSelectedSlot,
+                  sdsm.gpuResultRingSlotCount);
+    } else {
+      ImGui::Text("GPU Ring: no completed slot of %u",
+                  sdsm.gpuResultRingSlotCount);
+    }
+    if (sdsm.gpuResultSourceFrameIndex !=
+        std::numeric_limits<uint64_t>::max()) {
+      ImGui::Text(
+          "GPU Result Frame: %llu",
+          static_cast<unsigned long long>(sdsm.gpuResultSourceFrameIndex));
+    }
+  }
+  if (sdsm.mode == ShadowSdsmMode::Histogram) {
+    ImGui::TextUnformatted(
+        "Histogram GPU reduction writes histogram diagnostics; split "
+        "smoothing remains CPU-side.");
+  }
+  ImGui::Text("Reduction Fallback: %s",
+              sdsm.reductionFallbackActive ? "active" : "inactive");
   ImGui::Text("Status: %s", shadowSdsmStatusDisplayName(sdsm.status));
   if (sdsm.sourceFrameIndex != std::numeric_limits<uint64_t>::max()) {
     ImGui::Text("Source Frame: %llu",
@@ -1840,6 +1995,94 @@ void drawShadowsWindow(
   if (renderSettings.shadow.debug.visualizeSDSMHistogram &&
       sdsm.histogramBucketCount > 0u) {
     drawSdsmHistogramGraph(sdsm);
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Performance");
+  ImGui::Text("Cascades / Map Size: %u / %u", frameMetrics.shadow.cascadeCount,
+              frameMetrics.shadow.shadowMapSize);
+  ImGui::Text("Draws / Culled: %u / %u", frameMetrics.shadow.totalDraws,
+              frameMetrics.shadow.totalCulledDraws);
+  ImGui::Text("Index Count Estimate: %u",
+              frameMetrics.shadow.totalIndexCountEstimate);
+  ImGui::Text(
+      "Cascade Texture Bytes: %llu",
+      static_cast<unsigned long long>(frameMetrics.shadow.cascadeTextureBytes));
+  ImGui::Text("Static / Dynamic Casters: %u / %u",
+              frameMetrics.shadow.staticCasterEntries,
+              frameMetrics.shadow.dynamicCasterEntries);
+  ImGui::Text("Static Cache Reused: %s",
+              frameMetrics.shadow.staticCacheReused != 0u ? "yes" : "no");
+  ImGui::Text("Static-Only Candidates: %u",
+              frameMetrics.shadow.staticOnlyCandidateCount);
+  ImGui::Text("Reused Static Cascades: %u",
+              frameMetrics.shadow.reusedStaticOnlyCascadeCount);
+  ImGui::Text(
+      "Reuse Misses [cache/dynamic/prev/raster/adapt]: %u / %u / %u / %u / %u",
+      frameMetrics.shadow.staticOnlyReuseMissStaticCacheRebuiltCount,
+      frameMetrics.shadow.staticOnlyReuseMissDynamicCasterCount,
+      frameMetrics.shadow.staticOnlyReuseMissNoPreviousCount,
+      frameMetrics.shadow.staticOnlyReuseMissRasterStateChangedCount,
+      frameMetrics.shadow.staticOnlyReuseMissAdaptiveRefreshCount);
+  ImGui::Text("Filter Sample Budget: %u",
+              frameMetrics.shadow.filterSampleBudget);
+  if (frameMetrics.shadow.pcssBlockerSampleBudget > 0u ||
+      frameMetrics.shadow.pcssFilterSampleBudget > 0u) {
+    ImGui::Text("PCSS Blocker / Filter Budget: %u / %u",
+                frameMetrics.shadow.pcssBlockerSampleBudget,
+                frameMetrics.shadow.pcssFilterSampleBudget);
+    ImGui::Text("PCSS Max Samples: %u per receiver, %u in blend band",
+                frameMetrics.shadow.pcssMaxSamplesPerReceiver,
+                frameMetrics.shadow.pcssMaxSamplesPerBlendedReceiver);
+  }
+  ImGui::Text("SDSM Compute Passes: %u",
+              frameMetrics.shadow.sdsmComputePassCount);
+  ImGui::Text("SDSM Readback Bytes: %u", frameMetrics.shadow.sdsmReadbackBytes);
+  ImGui::Text("SDSM Source Samples: %u reduction, %u histogram",
+              frameMetrics.shadow.sdsmReductionSourceSamples,
+              frameMetrics.shadow.sdsmHistogramSourceSamples);
+  ImGui::Text("SDSM CPU Cost: %.3f ms reduction, %.3f ms histogram",
+              frameMetrics.shadow.sdsmCpuReductionTimeMs,
+              frameMetrics.shadow.sdsmCpuHistogramTimeMs);
+  if (frameMetrics.shadow.depthGpuTimingAvailable != 0u) {
+    if (frameMetrics.shadow.depthGpuTimingSourceFrameIndex !=
+        std::numeric_limits<uint64_t>::max()) {
+      ImGui::Text("Shadow Depth GPU Time: %.3f ms (frame %llu)",
+                  frameMetrics.shadow.depthGpuTimeMs,
+                  static_cast<unsigned long long>(
+                      frameMetrics.shadow.depthGpuTimingSourceFrameIndex));
+    } else {
+      ImGui::Text("Shadow Depth GPU Time: %.3f ms",
+                  frameMetrics.shadow.depthGpuTimeMs);
+    }
+  } else {
+    ImGui::TextUnformatted("Shadow Depth GPU Time: unavailable");
+  }
+  if (frameMetrics.shadow.sdsmGpuTimingAvailable != 0u) {
+    if (frameMetrics.shadow.sdsmGpuTimingSourceFrameIndex !=
+        std::numeric_limits<uint64_t>::max()) {
+      ImGui::Text("SDSM GPU Time: %.3f ms (frame %llu)",
+                  frameMetrics.shadow.sdsmGpuTimeMs,
+                  static_cast<unsigned long long>(
+                      frameMetrics.shadow.sdsmGpuTimingSourceFrameIndex));
+    } else {
+      ImGui::Text("SDSM GPU Time: %.3f ms", frameMetrics.shadow.sdsmGpuTimeMs);
+    }
+  } else {
+    ImGui::TextUnformatted("SDSM GPU Time: unavailable");
+  }
+  if (frameMetrics.shadow.gpuTimingAvailable != 0u) {
+    if (frameMetrics.shadow.gpuTimingSourceFrameIndex !=
+        std::numeric_limits<uint64_t>::max()) {
+      ImGui::Text("GPU Time: %.3f ms (frame %llu)",
+                  frameMetrics.shadow.gpuTimeMs,
+                  static_cast<unsigned long long>(
+                      frameMetrics.shadow.gpuTimingSourceFrameIndex));
+    } else {
+      ImGui::Text("GPU Time: %.3f ms", frameMetrics.shadow.gpuTimeMs);
+    }
+  } else {
+    ImGui::TextUnformatted("GPU Time: unavailable");
   }
 
   ImGui::Separator();
@@ -4598,7 +4841,7 @@ struct ImGuiEditor::Impl {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawShadowsWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
       drawShadowsWindow(showShadowsWindow, renderSettings, gpu,
-                        shadowDebugFrameData, shadowInspectResult,
+                        shadowDebugFrameData, frameMetrics, shadowInspectResult,
                         shadowPreviewTexture, uiDependencyTextures,
                         uiDependencyTextureAccessModes);
       NURI_PROFILER_ZONE_END();

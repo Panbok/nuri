@@ -96,6 +96,12 @@ SceneGraph::SceneGraph(std::pmr::memory_resource *memory)
 
 void SceneGraph::clear() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const bool hadSceneState = isValid(rootNode_) ||
+                             nodes_.slots.slotCount() != 0u ||
+                             renderableComponents_.slots.slotCount() != 0u ||
+                             directionalLights_.slots.slotCount() != 0u ||
+                             pointLights_.slots.slotCount() != 0u ||
+                             spotLights_.slots.slotCount() != 0u;
   dirtyRoots_.clear();
   nodes_ = NodeStore(memory_);
   renderableComponents_ = RenderableStore(memory_);
@@ -133,6 +139,10 @@ void SceneGraph::clear() {
   nodes_.spotLightHead[rootIndex] = kInvalidIndex;
   nodes_.spotLightTail[rootIndex] = kInvalidIndex;
   rootNode_ = makeNodeId(rootIndex, root.generation);
+  if (hadSceneState) {
+    noteTopologyMutation();
+    noteTransformMutation();
+  }
 }
 
 Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {
@@ -342,6 +352,10 @@ bool SceneGraph::isDescendantOf(uint32_t candidateIndex,
   return false;
 }
 
+void SceneGraph::noteTopologyMutation() noexcept { ++topologyVersion_; }
+
+void SceneGraph::noteTransformMutation() noexcept { ++transformVersion_; }
+
 void SceneGraph::markTransformDependentsDirty() noexcept {
   renderableTransformsDirty_ = true;
   lightDataDirty_ = true;
@@ -524,6 +538,8 @@ SceneGraph::createNode(NodeId parent, std::string_view name,
   attachNode(index, indexOf(parent));
   markSubtreeDirty(index);
   markTransformDependentsDirty();
+  noteTopologyMutation();
+  noteTransformMutation();
   return Result<NodeId, std::string>::makeResult(
       makeNodeId(index, slot.generation));
 }
@@ -595,6 +611,8 @@ bool SceneGraph::destroyNodeSubtree(NodeId node) {
     nodes_.slots.release(nodeIndex);
   }
   markTransformDependentsDirty();
+  noteTopologyMutation();
+  noteTransformMutation();
   return true;
 }
 
@@ -633,6 +651,8 @@ bool SceneGraph::setNodeParent(NodeId node, NodeId newParent,
   }
   markSubtreeDirty(nodeIndex);
   markTransformDependentsDirty();
+  noteTopologyMutation();
+  noteTransformMutation();
   return true;
 }
 
@@ -650,6 +670,7 @@ bool SceneGraph::setNodeLocalTransform(NodeId node,
   nodes_.localFromParent[nodeIndex] = localFromParent;
   markSubtreeDirty(nodeIndex);
   markTransformDependentsDirty();
+  noteTransformMutation();
   return true;
 }
 
@@ -760,6 +781,7 @@ SceneGraph::addRenderable(NodeId node, ModelRef model, MaterialRef material) {
   renderableComponents_.flatRenderableIndex[index] = kInvalidIndex;
   renderableTopologyDirty_ = true;
   markTransformDependentsDirty();
+  noteTopologyMutation();
   return Result<RenderableId, std::string>::makeResult(
       makeRenderableId(index, slot.generation));
 }
@@ -809,6 +831,7 @@ bool SceneGraph::removeRenderable(RenderableId id) {
   const uint32_t index = indexOf(id);
   recycleRenderableSlot(index);
   renderableTopologyDirty_ = true;
+  noteTopologyMutation();
   return true;
 }
 
@@ -1458,6 +1481,7 @@ SceneGraph::instantiatePrefab(const ScenePrefab &prefab, NodeId parent,
 
 void SceneGraph::clearRenderables() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  const bool hadRenderables = renderableComponents_.slots.liveCount() != 0u;
   renderableComponents_ = RenderableStore(memory_);
   std::fill(nodes_.renderableHead.begin(), nodes_.renderableHead.end(),
             kInvalidIndex);
@@ -1465,6 +1489,9 @@ void SceneGraph::clearRenderables() {
             kInvalidIndex);
   renderableTopologyDirty_ = true;
   renderableTransformsDirty_ = false;
+  if (hadRenderables) {
+    noteTopologyMutation();
+  }
 }
 
 void SceneGraph::clearLights() {

@@ -7,8 +7,12 @@ class ICommandBuffer;
 }
 
 namespace nuri {
+struct PassTimingReservation;
+
 class LvkGPUDevice final : public GPUDevice {
 public:
+  struct Impl;
+
   static std::unique_ptr<LvkGPUDevice>
   create(Window &window, const GPUDeviceCreateDesc &desc = {});
   ~LvkGPUDevice() override;
@@ -81,6 +85,7 @@ public:
   bool resolveGeometry(GeometryAllocationHandle h,
                        GeometryAllocationView &out) const override;
   uint64_t geometryMutationVersion() const override;
+  GpuTimingReport getLatestCompletedGpuTimingReport() const override;
 
   // Rendering
   Result<bool, std::string> beginFrame(uint64_t frameIndex) override;
@@ -135,8 +140,8 @@ private:
   LvkGPUDevice();
   [[nodiscard]] Result<bool, std::string>
   recordRenderPasses(lvk::ICommandBuffer &commandBuffer,
-                     std::span<const RenderPass> passes);
-  struct Impl;
+                     std::span<const RenderPass> passes,
+                     std::span<const PassTimingReservation> passTimings);
   std::unique_ptr<Impl> impl_;
 };
 

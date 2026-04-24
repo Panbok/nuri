@@ -90,17 +90,71 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
     hash *= 0x100000001b3ull;
   };
   for (const RenderPass &pass : passes) {
+    mix(static_cast<uint64_t>(pass.executionMode));
     mix(pass.hasColorAttachment ? 1u : 0u);
     mix(pass.useViewport ? 1u : 0u);
     mix(pass.drawBuffersPreResolved ? 1u : 0u);
+    mix(static_cast<uint64_t>(pass.gpuTimingScope));
     mix(static_cast<uint64_t>(pass.dependencyBuffers.size()));
     mix(static_cast<uint64_t>(pass.preDispatches.size()));
     mix(quantizeToNextPow2(static_cast<uint64_t>(pass.draws.size())));
     for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
       mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
+      mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
     }
   }
   return hash;
+}
+
+[[nodiscard]] bool
+isComputeOnlyExecutionMode(RenderPassExecutionMode mode) noexcept {
+  return mode == RenderPassExecutionMode::ComputeOnly;
+}
+
+[[nodiscard]] Result<bool, std::string>
+validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
+                          std::string_view caller) {
+  if (!isComputeOnlyExecutionMode(desc.executionMode)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  if (desc.hasColorAttachment) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "have a color attachment");
+  }
+  if (nuri::isValid(desc.colorTexture)) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "bind a color texture");
+  }
+  if (nuri::isValid(desc.depthTexture)) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "bind a depth texture");
+  }
+  if (!desc.draws.empty()) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "contain draws");
+  }
+  if (desc.drawBuffersPreResolved) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "use pre-resolved draw "
+                                                "buffers");
+  }
+  if (desc.markColorAsFrameOutput) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "mark frame output");
+  }
+  if (desc.preDispatches.empty()) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass requires "
+                                                "at least one dispatch");
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 [[nodiscard]] uint64_t foldPassResourceKey(uint32_t passIndex,
@@ -575,6 +629,7 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
     // state from this frame's builder so cache hits do not reuse stale
     // viewports, clears, or debug metadata.
     refreshedPass.color = sourcePass.color;
+    refreshedPass.executionMode = sourcePass.executionMode;
     refreshedPass.hasColorAttachment = sourcePass.hasColorAttachment;
     refreshedPass.depth = sourcePass.depth;
     refreshedPass.useViewport = sourcePass.useViewport;
@@ -979,6 +1034,7 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
   ownedPayload.preDispatchDebugLabels.reserve(desc.preDispatches.size());
   ownedPayload.preDispatchPushConstants.reserve(desc.preDispatches.size());
   ownedPayload.preDispatchDependencyBuffers.reserve(desc.preDispatches.size());
+  ownedPayload.preDispatchDependencyTextures.reserve(desc.preDispatches.size());
   ownedPayload.preDispatches.reserve(desc.preDispatches.size());
   for (const ComputeDispatchItem &sourceDispatch : desc.preDispatches) {
     ownedPayload.preDispatchDebugLabels.push_back(std::pmr::string(memory_));
@@ -997,6 +1053,13 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     auto &dependencyBuffers = ownedPayload.preDispatchDependencyBuffers.back();
     dependencyBuffers.assign(sourceDispatch.dependencyBuffers.begin(),
                              sourceDispatch.dependencyBuffers.end());
+
+    ownedPayload.preDispatchDependencyTextures.push_back(
+        std::pmr::vector<TextureHandle>(memory_));
+    auto &dependencyTextures =
+        ownedPayload.preDispatchDependencyTextures.back();
+    dependencyTextures.assign(sourceDispatch.dependencyTextures.begin(),
+                              sourceDispatch.dependencyTextures.end());
   }
   ownedPayload.preDispatches.resize(desc.preDispatches.size());
   for (size_t i = 0; i < desc.preDispatches.size(); ++i) {
@@ -1009,6 +1072,9 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
     dispatch.dependencyBuffers = std::span<const BufferHandle>(
         ownedPayload.preDispatchDependencyBuffers[i].data(),
         ownedPayload.preDispatchDependencyBuffers[i].size());
+    dispatch.dependencyTextures = std::span<const TextureHandle>(
+        ownedPayload.preDispatchDependencyTextures[i].data(),
+        ownedPayload.preDispatchDependencyTextures[i].size());
     dispatch.debugLabel =
         std::string_view(ownedPayload.preDispatchDebugLabels[i].data(),
                          ownedPayload.preDispatchDebugLabels[i].size());
@@ -1065,6 +1131,11 @@ Result<bool, std::string> RenderGraphBuilder::applyGraphicsPassRoots(
 
 Result<bool, std::string> RenderGraphBuilder::applyImplicitPassRoots(
     RenderGraphPassId pass, const RenderGraphGraphicsPassDesc &desc) {
+  if (isComputeOnlyExecutionMode(desc.executionMode)) {
+    return desc.markImplicitOutputSideEffect
+               ? markPassSideEffect(pass)
+               : Result<bool, std::string>::makeResult(true);
+  }
   if (!desc.hasColorAttachment) {
     if (nuri::isValid(desc.colorTexture)) {
       return Result<bool, std::string>::makeError(
@@ -1080,6 +1151,11 @@ Result<bool, std::string> RenderGraphBuilder::applyImplicitPassRoots(
 
 Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     RenderGraphPassId pass, const RenderGraphGraphicsPassDesc &desc) {
+  auto executionModeResult = validatePassExecutionMode(
+      desc, "RenderGraphBuilder::bindImplicitPassResources");
+  if (executionModeResult.hasError()) {
+    return executionModeResult;
+  }
   if (!desc.dependencyBufferAccessModes.empty() &&
       desc.dependencyBufferAccessModes.size() !=
           desc.dependencyBuffers.size()) {
@@ -1254,15 +1330,23 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
 
 Result<RenderGraphPassId, std::string>
 RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
+  auto executionModeResult =
+      validatePassExecutionMode(desc, "RenderGraphBuilder::addGraphicsPass");
+  if (executionModeResult.hasError()) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        executionModeResult.error());
+  }
   if (!desc.borrowPayload) {
     allPassesBorrowPayload_ = false;
   }
   RenderPass pass{};
+  pass.executionMode = desc.executionMode;
   pass.color = desc.color;
   pass.hasColorAttachment = desc.hasColorAttachment;
   pass.depth = desc.depth;
   pass.useViewport = desc.useViewport;
   pass.viewport = desc.viewport;
+  pass.gpuTimingScope = desc.gpuTimingScope;
   pass.debugColor = desc.debugColor;
   pass.drawBuffersPreResolved = desc.drawBuffersPreResolved;
   if (desc.borrowPayload) {
@@ -1310,15 +1394,41 @@ Result<RenderGraphPassId, std::string>
 RenderGraphBuilder::addPreparedGraphicsPass(
     const RenderGraphPreparedGraphicsPassDesc &desc) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
+  RenderGraphGraphicsPassDesc validationDesc{};
+  validationDesc.executionMode = desc.executionMode;
+  validationDesc.colorTexture = desc.colorTexture;
+  validationDesc.hasColorAttachment = desc.hasColorAttachment;
+  validationDesc.depthTexture = desc.depthTexture;
+  validationDesc.preDispatches = desc.preDispatches;
+  validationDesc.draws = desc.draws;
+  validationDesc.drawBuffersPreResolved = desc.drawBuffersPreResolved;
+  validationDesc.gpuTimingScope = desc.gpuTimingScope;
+  validationDesc.markColorAsFrameOutput = desc.markColorAsFrameOutput;
+  auto executionModeResult = validatePassExecutionMode(
+      validationDesc, "RenderGraphBuilder::addPreparedGraphicsPass");
+  if (executionModeResult.hasError()) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        executionModeResult.error());
+  }
+  if (isComputeOnlyExecutionMode(desc.executionMode) &&
+      (!desc.drawBufferBindings.empty() ||
+       !desc.preResolvedDrawBufferIds.empty() ||
+       !desc.preResolvedDrawBuffers.empty())) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        "RenderGraphBuilder::addPreparedGraphicsPass: compute-only pass "
+        "cannot bind draw buffers");
+  }
   if (!desc.borrowPayload) {
     allPassesBorrowPayload_ = false;
   }
   RenderPass pass{};
+  pass.executionMode = desc.executionMode;
   pass.color = desc.color;
   pass.hasColorAttachment = desc.hasColorAttachment;
   pass.depth = desc.depth;
   pass.useViewport = desc.useViewport;
   pass.viewport = desc.viewport;
+  pass.gpuTimingScope = desc.gpuTimingScope;
   pass.debugColor = desc.debugColor;
   pass.drawBuffersPreResolved = desc.drawBuffersPreResolved;
   if (desc.borrowPayload) {
@@ -1328,6 +1438,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     pass.debugLabel = desc.debugLabel;
   } else {
     RenderGraphGraphicsPassDesc clonedDesc{};
+    clonedDesc.executionMode = desc.executionMode;
     clonedDesc.color = desc.color;
     clonedDesc.colorTexture = desc.colorTexture;
     clonedDesc.hasColorAttachment = desc.hasColorAttachment;
@@ -1340,6 +1451,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     clonedDesc.draws = desc.draws;
     clonedDesc.drawBuffersPreResolved = desc.drawBuffersPreResolved;
     clonedDesc.preResolvedDrawBuffers = desc.preResolvedDrawBuffers;
+    clonedDesc.gpuTimingScope = desc.gpuTimingScope;
     clonedDesc.debugLabel = desc.debugLabel;
     clonedDesc.debugColor = desc.debugColor;
     clonedDesc.markColorAsFrameOutput = desc.markColorAsFrameOutput;
@@ -1449,7 +1561,11 @@ RenderGraphBuilder::addPreparedGraphicsPass(
 
   Result<bool, std::string> rootResult =
       Result<bool, std::string>::makeResult(true);
-  if (desc.hasColorAttachment) {
+  if (isComputeOnlyExecutionMode(desc.executionMode)) {
+    rootResult = desc.markImplicitOutputSideEffect
+                     ? markPassSideEffect(passId)
+                     : Result<bool, std::string>::makeResult(true);
+  } else if (desc.hasColorAttachment) {
     rootResult = applyGraphicsPassRoots(passId, desc.colorTexture,
                                         desc.markColorAsFrameOutput,
                                         desc.markImplicitOutputSideEffect);
@@ -1493,7 +1609,6 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
         "RenderGraphBuilder::addPassRecord: dependency buffer count "
         "exceeds kMaxDependencyBuffers");
   }
-
   const size_t preDispatchCount = pass.preDispatches.size();
   if (preDispatchCount > UINT32_MAX) {
     return Result<RenderGraphPassId, std::string>::makeError(
@@ -1510,6 +1625,16 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
       return Result<RenderGraphPassId, std::string>::makeError(
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
           "buffer count exceeds kMaxDependencyBuffers");
+    }
+    if (dispatch.dependencyTextures.size() > UINT32_MAX) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
+          "texture count exceeds uint32_t");
+    }
+    if (dispatch.dependencyTextures.size() > kMaxDependencyBuffers) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
+          "texture count exceeds kMaxDependencyBuffers");
     }
   }
 

@@ -185,14 +185,300 @@ computeBoundsCorners(glm::vec3 boundsMin, glm::vec3 boundsMax) {
   return (boundsMin + boundsMax) * 0.5f;
 }
 
+constexpr float kShadowStabilizationQuantizationToleranceSteps = 1.0e-2f;
+constexpr float kShadowStabilizationCenterHysteresisTexels = 1.0f;
+constexpr float kShadowStabilizationExtentShrinkHysteresisTexels = 2.0f;
+constexpr float kShadowStabilizationDepthShrinkHysteresisTexels = 2.0f;
+constexpr float kShadowStabilizationCompatibilityEpsilon = 1.0e-5f;
+
+[[nodiscard]] inline float quantizeShadowExtentUp(float value, float step) {
+  if (!std::isfinite(value) || !std::isfinite(step) || step <= 0.0f) {
+    return value;
+  }
+  const float stepCount = value / step;
+  const float quantizedStepCount =
+      std::max(1.0f, std::ceil(stepCount -
+                               kShadowStabilizationQuantizationToleranceSteps));
+  return quantizedStepCount * step;
+}
+
+[[nodiscard]] inline float quantizeShadowBoundDown(float value, float step) {
+  if (!std::isfinite(value) || !std::isfinite(step) || step <= 0.0f) {
+    return value;
+  }
+  return std::floor(value / step +
+                    kShadowStabilizationQuantizationToleranceSteps) *
+         step;
+}
+
+[[nodiscard]] inline float quantizeShadowBoundUp(float value, float step) {
+  if (!std::isfinite(value) || !std::isfinite(step) || step <= 0.0f) {
+    return value;
+  }
+  return std::ceil(value / step -
+                   kShadowStabilizationQuantizationToleranceSteps) *
+         step;
+}
+
+[[nodiscard]] inline float quantizeShadowPaddingUp(float value, float step) {
+  if (!std::isfinite(value) || !std::isfinite(step) || step <= 0.0f ||
+      value <= 0.0f) {
+    return 0.0f;
+  }
+  return std::max(
+      0.0f,
+      std::ceil(value / step - kShadowStabilizationQuantizationToleranceSteps) *
+          step);
+}
+
+[[nodiscard]] inline float snapShadowCoordinate(float value, float step) {
+  if (!std::isfinite(value) || !std::isfinite(step) || step <= 0.0f) {
+    return value;
+  }
+  return std::round(value / step) * step;
+}
+
+[[nodiscard]] inline glm::vec2
+orthoExtentFromShadowFit(const DirectionalShadowFit &fit) {
+  return glm::vec2(
+      std::max(fit.lightSpaceBoundsMax.x - fit.lightSpaceBoundsMin.x, 0.0f),
+      std::max(fit.lightSpaceBoundsMax.y - fit.lightSpaceBoundsMin.y, 0.0f));
+}
+
+[[nodiscard]] inline bool nearlyEqualShadowValue(float lhs, float rhs,
+                                                 float epsilon) {
+  return std::abs(lhs - rhs) <= epsilon;
+}
+
+[[nodiscard]] inline bool nearlyEqualShadowMat4(const glm::mat4 &lhs,
+                                                const glm::mat4 &rhs,
+                                                float epsilon) {
+  for (int column = 0; column < 4; ++column) {
+    for (int row = 0; row < 4; ++row) {
+      if (!nearlyEqualShadowValue(lhs[column][row], rhs[column][row],
+                                  epsilon)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] inline bool canReuseDirectionalShadowFitAnchor(
+    const DirectionalShadowFit &fit, const DirectionalShadowFit &anchorFit,
+    float epsilon = kShadowStabilizationCompatibilityEpsilon) {
+  return std::isfinite(fit.texelWorldSize) && fit.texelWorldSize > 0.0f &&
+         std::isfinite(anchorFit.texelWorldSize) &&
+         anchorFit.texelWorldSize > 0.0f &&
+         nearlyEqualShadowMat4(fit.lightView, anchorFit.lightView, epsilon);
+}
+
+[[nodiscard]] inline float keepAnchorShadowExtentWithinDeadband(
+    float currentValue, float anchorValue, float thresholdWorld,
+    float epsilon = kShadowStabilizationCompatibilityEpsilon) {
+  if (currentValue <= anchorValue + epsilon &&
+      (anchorValue - currentValue) <= thresholdWorld + epsilon) {
+    return anchorValue;
+  }
+  return currentValue;
+}
+
+struct ShadowDepthRange {
+  float min = 0.0f;
+  float max = 0.0f;
+};
+
+[[nodiscard]] inline ShadowDepthRange keepAnchorShadowDepthWithinDeadband(
+    ShadowDepthRange currentRange, ShadowDepthRange anchorRange,
+    float thresholdWorld,
+    float epsilon = kShadowStabilizationCompatibilityEpsilon) {
+  ShadowDepthRange finalRange = currentRange;
+  if (currentRange.min >= anchorRange.min - epsilon &&
+      (currentRange.min - anchorRange.min) <= thresholdWorld + epsilon) {
+    finalRange.min = anchorRange.min;
+  }
+  if (currentRange.max <= anchorRange.max + epsilon &&
+      (anchorRange.max - currentRange.max) <= thresholdWorld + epsilon) {
+    finalRange.max = anchorRange.max;
+  }
+  return finalRange;
+}
+
+inline void rebuildDirectionalShadowFitOrthoProjection(
+    DirectionalShadowFit &fit, glm::vec2 snappedLightSpaceCenter,
+    glm::vec2 orthoExtent, uint32_t shadowMapSize) {
+  const float width = std::max(orthoExtent.x, 0.01f);
+  const float height = std::max(orthoExtent.y, 0.01f);
+  const float texelWorldSize =
+      std::max(width, height) / static_cast<float>(std::max(shadowMapSize, 1u));
+  if (!std::isfinite(texelWorldSize) || texelWorldSize <= 0.0f) {
+    return;
+  }
+
+  const float halfWidth = width * 0.5f;
+  const float halfHeight = height * 0.5f;
+  const float nearPlane = -fit.lightSpaceBoundsMax.z;
+  float farPlane = -fit.lightSpaceBoundsMin.z;
+  if (farPlane <= nearPlane + 0.01f) {
+    farPlane = nearPlane + 0.01f;
+  }
+
+  fit.texelWorldSize = texelWorldSize;
+  fit.snappedLightSpaceCenter = snappedLightSpaceCenter;
+  fit.lightProj = glm::orthoRH_ZO(snappedLightSpaceCenter.x - halfWidth,
+                                  snappedLightSpaceCenter.x + halfWidth,
+                                  snappedLightSpaceCenter.y - halfHeight,
+                                  snappedLightSpaceCenter.y + halfHeight,
+                                  nearPlane, farPlane);
+  fit.lightViewProj = fit.lightProj * fit.lightView;
+  fit.lightSpaceBoundsMin.x = snappedLightSpaceCenter.x - halfWidth;
+  fit.lightSpaceBoundsMin.y = snappedLightSpaceCenter.y - halfHeight;
+  fit.lightSpaceBoundsMin.z = -farPlane;
+  fit.lightSpaceBoundsMax.x = snappedLightSpaceCenter.x + halfWidth;
+  fit.lightSpaceBoundsMax.y = snappedLightSpaceCenter.y + halfHeight;
+  fit.lightSpaceBoundsMax.z = -nearPlane;
+
+  const glm::mat4 inverseLightView = glm::inverse(fit.lightView);
+  const float snappedLightSpaceDepth =
+      0.5f * (fit.lightSpaceBoundsMin.z + fit.lightSpaceBoundsMax.z);
+  fit.snappedCenter =
+      glm::vec3(inverseLightView * glm::vec4(snappedLightSpaceCenter.x,
+                                             snappedLightSpaceCenter.y,
+                                             snappedLightSpaceDepth, 1.0f));
+}
+
+[[nodiscard]] inline bool directionalShadowFitContains(
+    const DirectionalShadowFit &containerFit,
+    const DirectionalShadowFit &containedFit,
+    float epsilon = kShadowStabilizationCompatibilityEpsilon) {
+  return canReuseDirectionalShadowFitAnchor(containerFit, containedFit,
+                                            epsilon) &&
+         containerFit.lightSpaceBoundsMin.x <=
+             containedFit.lightSpaceBoundsMin.x + epsilon &&
+         containerFit.lightSpaceBoundsMin.y <=
+             containedFit.lightSpaceBoundsMin.y + epsilon &&
+         containerFit.lightSpaceBoundsMin.z <=
+             containedFit.lightSpaceBoundsMin.z + epsilon &&
+         containerFit.lightSpaceBoundsMax.x >=
+             containedFit.lightSpaceBoundsMax.x - epsilon &&
+         containerFit.lightSpaceBoundsMax.y >=
+             containedFit.lightSpaceBoundsMax.y - epsilon &&
+         containerFit.lightSpaceBoundsMax.z >=
+             containedFit.lightSpaceBoundsMax.z - epsilon;
+}
+
+inline void expandDirectionalShadowFitBounds(DirectionalShadowFit &fit,
+                                             uint32_t shadowMapSize,
+                                             float orthoPaddingWorld,
+                                             float depthPaddingWorld) {
+  if (!std::isfinite(fit.texelWorldSize) || fit.texelWorldSize <= 0.0f) {
+    return;
+  }
+
+  const float orthoPadding =
+      quantizeShadowPaddingUp(orthoPaddingWorld, fit.texelWorldSize);
+  const float depthPadding =
+      quantizeShadowPaddingUp(depthPaddingWorld, fit.texelWorldSize);
+  if (orthoPadding <= 0.0f && depthPadding <= 0.0f) {
+    return;
+  }
+
+  const glm::vec2 currentExtent = orthoExtentFromShadowFit(fit);
+  const glm::vec2 paddedExtent(
+      std::max(currentExtent.x + orthoPadding * 2.0f, currentExtent.x),
+      std::max(currentExtent.y + orthoPadding * 2.0f, currentExtent.y));
+  fit.lightSpaceBoundsMin.z -= depthPadding;
+  fit.lightSpaceBoundsMax.z += depthPadding;
+  rebuildDirectionalShadowFitOrthoProjection(fit, fit.snappedLightSpaceCenter,
+                                             paddedExtent, shadowMapSize);
+}
+
+inline void applyDirectionalShadowFitHysteresis(
+    DirectionalShadowFit &fit, const DirectionalShadowFit &anchorFit,
+    uint32_t shadowMapSize,
+    float centerThresholdTexels = kShadowStabilizationCenterHysteresisTexels,
+    float extentShrinkThresholdTexels =
+        kShadowStabilizationExtentShrinkHysteresisTexels,
+    float depthShrinkThresholdTexels =
+        kShadowStabilizationDepthShrinkHysteresisTexels) {
+  if (!canReuseDirectionalShadowFitAnchor(fit, anchorFit)) {
+    return;
+  }
+
+  const glm::vec2 currentExtent = orthoExtentFromShadowFit(fit);
+  const glm::vec2 anchorExtent = orthoExtentFromShadowFit(anchorFit);
+  const float extentThresholdWorld =
+      std::max(extentShrinkThresholdTexels, 0.0f) * anchorFit.texelWorldSize;
+  glm::vec2 finalExtent(
+      keepAnchorShadowExtentWithinDeadband(currentExtent.x, anchorExtent.x,
+                                           extentThresholdWorld),
+      keepAnchorShadowExtentWithinDeadband(currentExtent.y, anchorExtent.y,
+                                           extentThresholdWorld));
+
+  const float finalTexelWorldSize =
+      std::max(finalExtent.x, finalExtent.y) /
+      static_cast<float>(std::max(shadowMapSize, 1u));
+  if (!std::isfinite(finalTexelWorldSize) || finalTexelWorldSize <= 0.0f) {
+    return;
+  }
+
+  glm::vec2 finalSnappedLightSpaceCenter(
+      snapShadowCoordinate(fit.unsnappedLightSpaceCenter.x,
+                           finalTexelWorldSize),
+      snapShadowCoordinate(fit.unsnappedLightSpaceCenter.y,
+                           finalTexelWorldSize));
+  const float centerThresholdWorld =
+      std::max(centerThresholdTexels, 0.0f) * finalTexelWorldSize;
+  if (std::abs(fit.unsnappedLightSpaceCenter.x -
+               anchorFit.snappedLightSpaceCenter.x) <= centerThresholdWorld) {
+    finalSnappedLightSpaceCenter.x = anchorFit.snappedLightSpaceCenter.x;
+  }
+  if (std::abs(fit.unsnappedLightSpaceCenter.y -
+               anchorFit.snappedLightSpaceCenter.y) <= centerThresholdWorld) {
+    finalSnappedLightSpaceCenter.y = anchorFit.snappedLightSpaceCenter.y;
+  }
+
+  const float depthThresholdWorld =
+      std::max(depthShrinkThresholdTexels, 0.0f) * anchorFit.texelWorldSize;
+  const ShadowDepthRange currentDepthRange{fit.lightSpaceBoundsMin.z,
+                                           fit.lightSpaceBoundsMax.z};
+  const ShadowDepthRange anchorDepthRange{anchorFit.lightSpaceBoundsMin.z,
+                                          anchorFit.lightSpaceBoundsMax.z};
+  const ShadowDepthRange finalDepthRange = keepAnchorShadowDepthWithinDeadband(
+      currentDepthRange, anchorDepthRange, depthThresholdWorld);
+
+  const bool extentChanged =
+      finalExtent.x != currentExtent.x || finalExtent.y != currentExtent.y;
+  const bool centerChanged =
+      finalSnappedLightSpaceCenter.x != fit.snappedLightSpaceCenter.x ||
+      finalSnappedLightSpaceCenter.y != fit.snappedLightSpaceCenter.y;
+  const bool depthChanged = finalDepthRange.min != currentDepthRange.min ||
+                            finalDepthRange.max != currentDepthRange.max;
+  if (!extentChanged && !centerChanged && !depthChanged) {
+    fit.texelWorldSize = finalTexelWorldSize;
+    return;
+  }
+
+  fit.lightSpaceBoundsMin.z = finalDepthRange.min;
+  fit.lightSpaceBoundsMax.z = finalDepthRange.max;
+  rebuildDirectionalShadowFitOrthoProjection(fit, finalSnappedLightSpaceCenter,
+                                             finalExtent, shadowMapSize);
+}
+
 inline void stabilizeOrthoBounds(glm::vec3 &lightMin, glm::vec3 &lightMax,
                                  uint32_t shadowMapSize, bool stabilize,
                                  DirectionalShadowFit &fit,
                                  const glm::mat4 &inverseLightView) {
-  const float width = std::max(lightMax.x - lightMin.x, 0.01f);
-  const float height = std::max(lightMax.y - lightMin.y, 0.01f);
+  float width = std::max(lightMax.x - lightMin.x, 0.01f);
+  float height = std::max(lightMax.y - lightMin.y, 0.01f);
   fit.texelWorldSize =
       std::max(width, height) / static_cast<float>(std::max(shadowMapSize, 1u));
+  if (stabilize && fit.texelWorldSize > 0.0f) {
+    width = quantizeShadowExtentUp(width, fit.texelWorldSize);
+    height = quantizeShadowExtentUp(height, fit.texelWorldSize);
+    fit.texelWorldSize = std::max(width, height) /
+                         static_cast<float>(std::max(shadowMapSize, 1u));
+  }
 
   const glm::vec3 unsnappedLightCenter = lightSpaceCenter(lightMin, lightMax);
   fit.unsnappedLightSpaceCenter = glm::vec2(unsnappedLightCenter);
@@ -201,15 +487,16 @@ inline void stabilizeOrthoBounds(glm::vec3 &lightMin, glm::vec3 &lightMax,
   if (stabilize && fit.texelWorldSize > 0.0f) {
     const float texelStep = fit.texelWorldSize;
     snappedLightCenter.x =
-        std::round(unsnappedLightCenter.x / texelStep) * texelStep;
+        snapShadowCoordinate(unsnappedLightCenter.x, texelStep);
     snappedLightCenter.y =
-        std::round(unsnappedLightCenter.y / texelStep) * texelStep;
-    lightMin.x = snappedLightCenter.x - width * 0.5f;
-    lightMax.x = snappedLightCenter.x + width * 0.5f;
-    lightMin.y = snappedLightCenter.y - height * 0.5f;
-    lightMax.y = snappedLightCenter.y + height * 0.5f;
+        snapShadowCoordinate(unsnappedLightCenter.y, texelStep);
   }
   fit.snappedLightSpaceCenter = glm::vec2(snappedLightCenter);
+
+  lightMin.x = snappedLightCenter.x - width * 0.5f;
+  lightMax.x = snappedLightCenter.x + width * 0.5f;
+  lightMin.y = snappedLightCenter.y - height * 0.5f;
+  lightMax.y = snappedLightCenter.y + height * 0.5f;
 
   fit.unsnappedCenter =
       glm::vec3(inverseLightView * glm::vec4(unsnappedLightCenter, 1.0f));
@@ -484,6 +771,10 @@ inline void enforceMonotonicShadowSplitDepths(
 
   stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
                        inverseLightView);
+  if (stabilize && fit.texelWorldSize > 0.0f) {
+    lightMin.z = quantizeShadowBoundDown(lightMin.z, fit.texelWorldSize);
+    lightMax.z = quantizeShadowBoundUp(lightMax.z, fit.texelWorldSize);
+  }
   const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
   const float depthPadding = std::max(depth * 0.01f, 0.01f);
   const float nearPlane = -lightMax.z - depthPadding;
@@ -544,6 +835,10 @@ fitSingleDirectionalShadowMap(const CameraFrameState &camera,
 
   stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
                        inverseLightView);
+  if (stabilize && fit.texelWorldSize > 0.0f) {
+    lightMin.z = quantizeShadowBoundDown(lightMin.z, fit.texelWorldSize);
+    lightMax.z = quantizeShadowBoundUp(lightMax.z, fit.texelWorldSize);
+  }
   const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
   const float depthPadding = std::max(depth * 0.01f, 0.01f);
   const float nearPlane = -lightMax.z - depthPadding;
@@ -599,6 +894,10 @@ fitDirectionalShadowMapToBounds(const CameraFrameState &camera,
 
   stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
                        inverseLightView);
+  if (stabilize && fit.texelWorldSize > 0.0f) {
+    lightMin.z = quantizeShadowBoundDown(lightMin.z, fit.texelWorldSize);
+    lightMax.z = quantizeShadowBoundUp(lightMax.z, fit.texelWorldSize);
+  }
   const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
   const float depthPadding = std::max(depth * 0.001f, 0.01f);
   const float nearPlane = -lightMax.z - depthPadding;

@@ -106,6 +106,27 @@ private:
     uint32_t materialIndex = 0;
     bool doubleSided = false;
     bool alphaMasked = false;
+    bool dynamicCaster = false;
+  };
+
+  struct StaticShadowCasterCacheEntry {
+    uint32_t templateIndex = 0;
+    uint32_t instanceIndex = 0;
+    BufferHandle indexBuffer{};
+    uint64_t indexBufferOffset = 0;
+    IndexFormat indexFormat = IndexFormat::U32;
+    BufferHandle vertexBuffer{};
+    uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
+    uint32_t materialIndex = 0;
+    uint32_t indexCount = 0;
+    uint32_t firstIndex = 0;
+    bool doubleSided = false;
+    bool alphaMasked = false;
+    bool hasCasterCullingBounds = false;
+    std::array<glm::vec3, 8> casterWorldCorners{};
   };
 
   struct DynamicBufferSlot {
@@ -126,10 +147,60 @@ private:
       sizeof(PreviewPushConstants) <= 128,
       "ShadowRenderer::PreviewPushConstants exceeds Vulkan minimum guarantee");
 
+  struct alignas(16) SdsmReducePushConstants {
+    uint64_t resultBufferAddress = 0;
+    uint32_t sourceTexId = kInvalidShadowBindlessIndex;
+    uint32_t sourceFrameIndex = 0;
+  };
+  static_assert(sizeof(SdsmReducePushConstants) == 16u,
+                "ShadowRenderer::SdsmReducePushConstants layout changed");
+  static_assert(sizeof(SdsmReducePushConstants) <= 128,
+                "ShadowRenderer::SdsmReducePushConstants exceeds Vulkan "
+                "minimum guarantee");
+
+  struct alignas(16) SdsmGpuMinMaxResult {
+    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
+    uint32_t sourceFrameIndex = 0u;
+    uint32_t valid = 0u;
+  };
+  static_assert(sizeof(SdsmGpuMinMaxResult) == 16u,
+                "ShadowRenderer::SdsmGpuMinMaxResult layout changed");
+
+  struct alignas(16) SdsmGpuHistogramResult {
+    glm::vec4 rawDeviceMinMaxLinearMinMax{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec4 histogramRangeWeightClear{0.0f};
+    glm::uvec4 metadata{0u};
+    glm::vec4 splitDepths0{0.0f};
+    glm::vec4 splitDepths1{0.0f};
+    std::array<float, kMaxShadowSdsmHistogramBucketCount> bucketWeights{};
+  };
+  static_assert(sizeof(SdsmGpuHistogramResult) == 592u,
+                "ShadowRenderer::SdsmGpuHistogramResult layout changed");
+
+  struct StaticOnlyCascadeReuseState {
+    shadow_detail::DirectionalShadowFit renderedFit{};
+    shadow_detail::DirectionalShadowFit rawFit{};
+    uint64_t rasterSignature = 0u;
+    uint64_t lightViewProjSignature = 0u;
+    uint64_t biasSignature = 0u;
+    uint64_t casterSignature = 0u;
+    uint32_t staticDrawCount = 0u;
+    uint32_t dynamicDrawCount = 0u;
+  };
+
+  struct CascadeStabilizationHistory {
+    bool valid = false;
+    LightId lightId = kInvalidLightId;
+    uint32_t shadowMapSize = 0u;
+    uint32_t cascadeCount = 0u;
+    std::array<shadow_detail::DirectionalShadowFit, kMaxShadowCascades> fits{};
+  };
+
   struct SdsmState {
     bool hasValidSdsmRange_ = false;
     bool hasValidSdsmFarCascadeTexelSize_ = false;
     bool hasValidSdsmHistogramSplits_ = false;
+    uint32_t gpuReductionConsecutiveMissingResultFrames_ = 0u;
     float sdsmSmoothedMinDepth_ = 0.0f;
     float sdsmSmoothedMaxDepth_ = 0.0f;
     float sdsmFarCascadeTexelWorldSize_ = 0.0f;
@@ -145,13 +216,39 @@ private:
         std::numeric_limits<uint64_t>::max();
     uint64_t lastLoggedSdsmWarningFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
+    bool loggedGpuReductionFallbackWarning_ = false;
+    bool loggedGpuReductionUnavailableWarning_ = false;
+    bool loggedGpuResultRingDiagnosticWarning_ = false;
+  };
+
+  struct DiagnosticLogState {
+    struct CascadeLightState {
+      bool valid = false;
+      glm::mat4 lightView{1.0f};
+      glm::mat4 lightViewProj{1.0f};
+      glm::vec4 lightSpaceBoundsMin{0.0f};
+      glm::vec4 lightSpaceBoundsMax{0.0f};
+      glm::vec4 unsnappedCenter{0.0f};
+      glm::vec4 snappedCenter{0.0f};
+    };
+
+    bool hasLastSignature = false;
+    uint64_t lastSignature = 0u;
+    uint64_t lastLoggedFrameIndex = std::numeric_limits<uint64_t>::max();
+    std::array<CascadeLightState, kMaxShadowCascades> cascadeLightStates{};
   };
 
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPreviewShaders();
+  Result<bool, std::string> createSdsmReduceShaders();
+  Result<bool, std::string> createSdsmHistogramReduceShaders();
   Result<bool, std::string> createPipelines();
   Result<bool, std::string> createPreviewPipeline();
+  Result<bool, std::string> createSdsmReducePipeline();
+  Result<bool, std::string> createSdsmHistogramReducePipeline();
+  Result<bool, std::string> ensureSdsmReduceResources();
+  Result<bool, std::string> ensureSdsmHistogramReduceResources();
   Result<bool, std::string>
   ensureShadowResources(const RenderSettings::ShadowSettings &settings);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
@@ -161,6 +258,10 @@ private:
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureShadowFrameRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
+  ensureSdsmReduceResultRingCount(uint32_t requiredCount);
+  Result<bool, std::string>
+  ensureSdsmReduceResultRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
   ensureRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
                      size_t requiredBytes, std::string_view debugName,
                      std::span<uint64_t> uploadVersions);
@@ -168,12 +269,18 @@ private:
                                               const ResourceManager &resources,
                                               uint32_t materialCount);
   Result<bool, std::string>
+  rebuildStaticShadowCasterCache(const RenderScene &scene,
+                                 const RenderSettings &settings);
+  Result<bool, std::string>
   updateShadowFrameData(RenderFrameContext &frame,
                         const RenderSettings::ShadowSettings &settings,
                         uint32_t shadowMapSize);
   Result<bool, std::string>
   buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                    const ForwardSceneGpuData &sceneGpu);
+  [[nodiscard]] uint64_t shadowPipelineSignature() const noexcept;
+  void invalidateStaticShadowCasterCache() noexcept;
+  void invalidateReusableStaticOnlyCascadeCache() noexcept;
   void destroyShadowResources();
   void destroyBuffers();
   void destroyShaders();
@@ -181,6 +288,7 @@ private:
   void resetCachedState();
   void resetFrameBuildState();
   void resetFrozenShadowFit();
+  void resetCascadeStabilizationHistory();
   void resetSdsmState();
 
   GPUDevice &gpu_;
@@ -189,12 +297,19 @@ private:
   std::unique_ptr<Shader> shadowShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
+  std::unique_ptr<Shader> sdsmReduceShader_;
+  std::unique_ptr<Shader> sdsmHistogramReduceShader_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> shadowFrameRing_;
+  std::pmr::vector<DynamicBufferSlot> sdsmReduceResultRing_;
   std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
   std::pmr::vector<uint64_t> shadowFrameUploadSignatures_;
+  std::pmr::vector<uint64_t> sdsmReduceResultRingPublishedFrames_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
+  std::pmr::vector<uint32_t> staticShadowTemplateIndices_;
+  std::pmr::vector<uint32_t> dynamicShadowTemplateIndices_;
+  std::pmr::vector<StaticShadowCasterCacheEntry> staticShadowCasterCache_;
   std::pmr::vector<InstanceData> instanceMatrices_;
   std::pmr::vector<uint32_t> instanceRemap_;
   std::array<std::pmr::vector<PushConstants>, kMaxShadowCascades>
@@ -203,6 +318,16 @@ private:
       cascadeDrawItems_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDrawCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeCulledCounts_{};
+  std::array<uint32_t, kMaxShadowCascades> cascadeDynamicDrawCounts_{};
+  std::array<uint32_t, kMaxShadowCascades> cascadeIndexCountEstimates_{};
+  std::array<uint64_t, kMaxShadowCascades>
+      staticOnlyCascadeContentSignatures_{};
+  std::array<uint64_t, kMaxShadowCascades>
+      reusableStaticOnlyCascadeContentSignatures_{};
+  std::array<StaticOnlyCascadeReuseState, kMaxShadowCascades>
+      reusableStaticOnlyCascadeStates_{};
+  std::array<bool, kMaxShadowCascades> reuseStaticOnlyCascadePass_{};
+  std::array<bool, kMaxShadowCascades> reusableStaticOnlyCascadeValid_{};
   std::pmr::vector<BufferDependency> passBufferDependencies_;
   std::pmr::vector<TextureDependency> passTextureDependencies_;
   std::pmr::vector<TextureDependency> previewTextureDependencies_;
@@ -211,12 +336,16 @@ private:
   ShaderHandle shadowVertexShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
+  ShaderHandle sdsmReduceComputeShader_{};
+  ShaderHandle sdsmHistogramReduceComputeShader_{};
   ShaderHandle previewVertexShader_{};
   ShaderHandle previewFragmentShader_{};
   RenderPipelineHandle shadowPipelineHandle_{};
   RenderPipelineHandle shadowDoubleSidedPipelineHandle_{};
   RenderPipelineHandle shadowAlphaPipelineHandle_{};
   RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
+  ComputePipelineHandle sdsmReducePipelineHandle_{};
+  ComputePipelineHandle sdsmHistogramReducePipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};
   std::array<TextureHandle, kMaxShadowCascades> shadowDepthTextures_{};
   TextureHandle shadowDebugPreviewTexture_{};
@@ -237,13 +366,23 @@ private:
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
+  uint64_t staticShadowCasterCacheTransformVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t staticShadowCasterCachePipelineSignature_ = 0u;
+  int32_t staticShadowCasterCacheForcedMeshLod_ =
+      std::numeric_limits<int32_t>::min();
   bool hasFrozenShadowFit_ = false;
+  bool staticShadowCasterCacheValid_ = false;
   LightId frozenShadowLightId_ = kInvalidLightId;
   uint32_t frozenShadowMapSize_ = 0u;
   uint32_t frozenCascadeCount_ = 0u;
+  CascadeStabilizationHistory cascadeStabilizationHistory_{};
   SdsmState sdsmState_{};
+  DiagnosticLogState diagnosticLogState_{};
   std::array<shadow_detail::DirectionalShadowFit, kMaxShadowCascades>
       frozenShadowFits_{};
+  std::array<shadow_detail::DirectionalShadowFit, kMaxShadowCascades>
+      currentRawShadowFits_{};
   ShadowFrameGpuData shadowFrameCpuData_{};
   ShadowDebugFrameData shadowDebugFrameData_{};
 };

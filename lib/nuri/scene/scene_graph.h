@@ -37,6 +37,12 @@ public:
   SceneGraph &operator=(SceneGraph &&) = delete;
 
   [[nodiscard]] NodeId rootNode() const noexcept { return rootNode_; }
+  [[nodiscard]] uint64_t topologyVersion() const noexcept {
+    return topologyVersion_;
+  }
+  [[nodiscard]] uint64_t transformVersion() const noexcept {
+    return transformVersion_;
+  }
   void clear();
   [[nodiscard]] Result<NodeId, std::string>
   createNode(NodeId parent, std::string_view name = {},
@@ -308,6 +314,8 @@ private:
   void updateSubtreeDepth(uint32_t rootIndex);
   [[nodiscard]] bool isDescendantOf(uint32_t candidateIndex,
                                     uint32_t ancestorIndex) const;
+  void noteTopologyMutation() noexcept;
+  void noteTransformMutation() noexcept;
   void markTransformDependentsDirty() noexcept;
   void recycleRenderableSlot(uint32_t index) noexcept;
   [[nodiscard]] uint32_t localLightCount() const noexcept;
@@ -322,6 +330,8 @@ private:
   PointLightStore pointLights_;
   SpotLightStore spotLights_;
   NodeId rootNode_ = kInvalidNodeId;
+  uint64_t topologyVersion_ = 0u;
+  uint64_t transformVersion_ = 0u;
   bool renderableTopologyDirty_ = false;
   bool renderableTransformsDirty_ = false;
   bool renderableDeformationsDirty_ = false;

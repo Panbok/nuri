@@ -104,6 +104,9 @@ public:
   virtual bool resolveGeometry(GeometryAllocationHandle h,
                                GeometryAllocationView &out) const = 0;
   virtual uint64_t geometryMutationVersion() const { return 0; }
+  virtual GpuTimingReport getLatestCompletedGpuTimingReport() const {
+    return {};
+  }
 
   // Rendering
   virtual bool supportsParallelGraphicsRecording() const { return false; }

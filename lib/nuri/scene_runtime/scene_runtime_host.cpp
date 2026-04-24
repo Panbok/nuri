@@ -51,8 +51,10 @@ void SceneRuntimeHost::bindScene(RenderScene *scene) {
   const bool hadBindings = hasBindingTableData(bindings_);
   scene_ = scene;
   bindings_.clear();
-  topologyVersion_ = scene_ != nullptr ? scene_->topologyVersion() : 0u;
-  transformVersion_ = scene_ != nullptr ? scene_->transformVersion() : 0u;
+  topologyVersion_ =
+      scene_ != nullptr ? scene_->graph().topologyVersion() : 0u;
+  transformVersion_ =
+      scene_ != nullptr ? scene_->graph().transformVersion() : 0u;
   const bool bindingsChanged =
       hadBindings || (scene_ != nullptr && bindings_.rebuild(scene_));
   if (bindingsChanged) {
@@ -124,8 +126,10 @@ void SceneRuntimeHost::reset() {
   simulationVersion_ = 0u;
   bindingVersion_ = 0u;
   deformationVersion_ = 0u;
-  topologyVersion_ = scene_ != nullptr ? scene_->topologyVersion() : 0u;
-  transformVersion_ = scene_ != nullptr ? scene_->transformVersion() : 0u;
+  topologyVersion_ =
+      scene_ != nullptr ? scene_->graph().topologyVersion() : 0u;
+  transformVersion_ =
+      scene_ != nullptr ? scene_->graph().transformVersion() : 0u;
   simulationControlVersion_ = 0u;
   lastTickResult_ = {};
 }
@@ -378,8 +382,8 @@ void SceneRuntimeHost::refreshSceneBindingsIfNeeded() {
   NURI_ASSERT(scene_ != nullptr,
               "SceneRuntimeHost::refreshSceneBindingsIfNeeded: scene_ must be "
               "initialized before calling refreshSceneBindingsIfNeeded");
-  const uint64_t currentTopologyVersion = scene_->topologyVersion();
-  const uint64_t currentTransformVersion = scene_->transformVersion();
+  const uint64_t currentTopologyVersion = scene_->graph().topologyVersion();
+  const uint64_t currentTransformVersion = scene_->graph().transformVersion();
   if (currentTopologyVersion == topologyVersion_) {
     transformVersion_ = currentTransformVersion;
     return;

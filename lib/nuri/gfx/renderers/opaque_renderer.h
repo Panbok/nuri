@@ -84,6 +84,26 @@ private:
       sizeof(PushConstants) <= 128,
       "OpaqueRenderer::PushConstants exceeds Vulkan minimum guarantee");
 
+  struct alignas(16) ShadowSdsmReducePushConstants {
+    uint64_t resultBufferAddress = 0u;
+    uint32_t sourceTexId = kInvalidShadowBindlessIndex;
+    uint32_t sourceFrameIndex = 0u;
+  };
+  static_assert(sizeof(ShadowSdsmReducePushConstants) == 16u,
+                "OpaqueRenderer::ShadowSdsmReducePushConstants layout "
+                "changed");
+
+  struct alignas(16) ShadowSdsmHistogramReducePushConstants {
+    uint64_t resultBufferAddress = 0u;
+    glm::uvec4 sourceParams{0u};
+    glm::uvec4 histogramParams{0u};
+    glm::vec4 cameraParams{0.0f};
+    glm::vec4 trimParams{0.0f};
+  };
+  static_assert(sizeof(ShadowSdsmHistogramReducePushConstants) == 80u,
+                "OpaqueRenderer::ShadowSdsmHistogramReducePushConstants "
+                "layout changed");
+
   // These templates hold non-owning borrowed pointers. Callers must ensure the
   // referenced scene/model data outlives the cached template usage.
   struct RenderableTemplate {
@@ -412,6 +432,7 @@ private:
   bool loggedDepthPyramidUnsupported_ = false;
   bool loggedMaterialFallbackWarning_ = false;
   bool loggedBlendMaterialUnsupportedWarning_ = false;
+  bool loggedShadowSdsmReduceSkipWarning_ = false;
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -477,6 +498,13 @@ private:
   std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
   std::pmr::vector<DrawItem> depthPyramidDrawItems_;
   std::pmr::vector<TextureHandle> depthPyramidDependencyTextures_;
+  std::pmr::vector<ShadowSdsmReducePushConstants>
+      shadowSdsmReducePushConstants_;
+  std::pmr::vector<ShadowSdsmHistogramReducePushConstants>
+      shadowSdsmHistogramReducePushConstants_;
+  std::pmr::vector<ComputeDispatchItem> shadowSdsmReduceDispatches_;
+  std::pmr::vector<BufferHandle> shadowSdsmReduceDependencyBuffers_;
+  std::pmr::vector<TextureHandle> shadowSdsmReduceDependencyTextures_;
   std::pmr::vector<ComputeDispatchItem> preDispatches_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;

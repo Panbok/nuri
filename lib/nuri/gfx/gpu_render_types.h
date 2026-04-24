@@ -3,6 +3,7 @@
 #include "nuri/gfx/gpu_types.h"
 
 #include <cstddef>
+#include <limits>
 #include <span>
 #include <string_view>
 
@@ -60,9 +61,65 @@ struct ComputeDispatchItem {
   DispatchSize dispatch{};
   std::span<const std::byte> pushConstants{};
   std::span<const BufferHandle> dependencyBuffers{};
+  std::span<const TextureHandle> dependencyTextures{};
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
 };
+
+enum class GpuTimingScope : uint8_t {
+  None = 0,
+  Shadow = 1,
+  ShadowDepth = 2,
+  ShadowSdsm = 3,
+};
+
+constexpr uint32_t kGpuTimingScopeShadowBit = 1u << 0u;
+constexpr uint32_t kGpuTimingScopeShadowDepthBit = 1u << 1u;
+constexpr uint32_t kGpuTimingScopeShadowSdsmBit = 1u << 2u;
+
+struct GpuTimingReport {
+  uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t shadowDepthSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t shadowSdsmSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  float shadowTimeMs = 0.0f;
+  float shadowDepthTimeMs = 0.0f;
+  float shadowSdsmTimeMs = 0.0f;
+  uint32_t availableScopeMask = 0u;
+};
+
+[[nodiscard]] constexpr bool hasGpuTimingScope(const GpuTimingReport &report,
+                                               GpuTimingScope scope) noexcept {
+  switch (scope) {
+  case GpuTimingScope::Shadow:
+    return (report.availableScopeMask & kGpuTimingScopeShadowBit) != 0u;
+  case GpuTimingScope::ShadowDepth:
+    return (report.availableScopeMask & kGpuTimingScopeShadowDepthBit) != 0u;
+  case GpuTimingScope::ShadowSdsm:
+    return (report.availableScopeMask & kGpuTimingScopeShadowSdsmBit) != 0u;
+  case GpuTimingScope::None:
+  default:
+    return false;
+  }
+}
+
+inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
+                                       const GpuTimingReport &src) {
+  if (hasGpuTimingScope(src, GpuTimingScope::Shadow)) {
+    dst.shadowTimeMs = src.shadowTimeMs;
+    dst.sourceFrameIndex = src.sourceFrameIndex;
+    dst.availableScopeMask |= kGpuTimingScopeShadowBit;
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::ShadowDepth)) {
+    dst.shadowDepthTimeMs = src.shadowDepthTimeMs;
+    dst.shadowDepthSourceFrameIndex = src.shadowDepthSourceFrameIndex;
+    dst.availableScopeMask |= kGpuTimingScopeShadowDepthBit;
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::ShadowSdsm)) {
+    dst.shadowSdsmTimeMs = src.shadowSdsmTimeMs;
+    dst.shadowSdsmSourceFrameIndex = src.shadowSdsmSourceFrameIndex;
+    dst.availableScopeMask |= kGpuTimingScopeShadowSdsmBit;
+  }
+}
 
 enum class GraphicsBarrierResourceKind : uint8_t {
   Texture = 0,
@@ -222,7 +279,13 @@ struct DrawItem {
   uint32_t debugColor = 0xffffffffu;
 };
 
+enum class RenderPassExecutionMode : uint8_t {
+  Graphics = 0,
+  ComputeOnly = 1,
+};
+
 struct RenderPass {
+  RenderPassExecutionMode executionMode = RenderPassExecutionMode::Graphics;
   AttachmentColor color;
   TextureHandle colorTexture{};
   bool hasColorAttachment = true;
@@ -234,6 +297,7 @@ struct RenderPass {
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const DrawItem> draws{};
   bool drawBuffersPreResolved = false;
+  GpuTimingScope gpuTimingScope = GpuTimingScope::None;
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
 };

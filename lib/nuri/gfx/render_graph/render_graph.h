@@ -76,6 +76,7 @@ operator|(RenderGraphAccessMode lhs, RenderGraphAccessMode rhs) {
 }
 
 struct NURI_API RenderGraphGraphicsPassDesc {
+  RenderPassExecutionMode executionMode = RenderPassExecutionMode::Graphics;
   AttachmentColor color{};
   RenderGraphTextureId colorTexture{};
   bool hasColorAttachment = true;
@@ -93,6 +94,7 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   // Explicit extra draw-buffer dependencies; draw items are not scanned when
   // drawBuffersPreResolved is true.
   std::span<const BufferHandle> preResolvedDrawBuffers{};
+  GpuTimingScope gpuTimingScope = GpuTimingScope::None;
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
   bool markColorAsFrameOutput = false;
@@ -136,6 +138,7 @@ struct NURI_API RenderGraphPreparedDrawBufferBinding {
 };
 
 struct NURI_API RenderGraphPreparedGraphicsPassDesc {
+  RenderPassExecutionMode executionMode = RenderPassExecutionMode::Graphics;
   AttachmentColor color{};
   RenderGraphTextureId colorTexture{};
   bool hasColorAttachment = true;
@@ -165,6 +168,7 @@ struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   // Resolved extra draw-buffer dependencies for callers that already imported
   // the shared draw buffer set once for the frame.
   std::span<const RenderGraphBufferId> preResolvedDrawBufferIds{};
+  GpuTimingScope gpuTimingScope = GpuTimingScope::None;
   std::string_view debugLabel{};
   uint32_t debugColor = 0xffffffffu;
   bool markColorAsFrameOutput = false;
@@ -646,6 +650,8 @@ private:
     std::pmr::vector<std::pmr::vector<std::byte>> preDispatchPushConstants;
     std::pmr::vector<std::pmr::vector<BufferHandle>>
         preDispatchDependencyBuffers;
+    std::pmr::vector<std::pmr::vector<TextureHandle>>
+        preDispatchDependencyTextures;
     std::pmr::vector<BufferHandle> dependencyBuffers;
     std::pmr::vector<DrawItem> draws;
     std::pmr::vector<std::pmr::string> drawDebugLabels;
@@ -655,7 +661,8 @@ private:
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
         : debugLabel(memory), preDispatches(memory),
           preDispatchDebugLabels(memory), preDispatchPushConstants(memory),
-          preDispatchDependencyBuffers(memory), dependencyBuffers(memory),
+          preDispatchDependencyBuffers(memory),
+          preDispatchDependencyTextures(memory), dependencyBuffers(memory),
           draws(memory), drawDebugLabels(memory), drawPushConstants(memory) {}
   };
 
