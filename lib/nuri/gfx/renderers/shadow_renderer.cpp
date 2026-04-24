@@ -7,8 +7,6 @@
 #include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
-#include <chrono>
-
 namespace nuri {
 namespace {
 
@@ -270,16 +268,15 @@ projectionTypeName(ProjectionType projectionType) {
 
 template <typename T>
 [[nodiscard]] bool rawBytesEqual(const T &lhs, const T &rhs) {
+  static_assert(std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+                "rawBytesEqual is only for plain layout values; use operator== "
+                "or element-wise comparison for other types.");
   return std::memcmp(&lhs, &rhs, sizeof(T)) == 0;
 }
 
-[[nodiscard]] uint64_t buildShadowDiagnosticSignature(
-    const RenderFrameContext &frame,
-    const RenderSettings::ShadowSettings &settings,
-    const ShadowDebugFrameData &debugFrameData,
-    const ShadowFrameMetrics &metrics, bool hasActiveShadowLightForFrame,
-    bool hasPreparedShadowDepthPasses, bool hasPreparedShadowPreviewPass) {
-  uint64_t hash = kFnvOffsetBasis64;
+[[nodiscard]] uint64_t
+hashShadowSettings(uint64_t hash,
+                   const RenderSettings::ShadowSettings &settings) {
   hash = hashCombineValue(hash, settings.enabled);
   hash = hashCombineValue(hash, settings.cascadeCount);
   hash = hashCombineValue(hash, settings.shadowMapSize);
@@ -308,6 +305,11 @@ template <typename T>
   hash = hashCombineValue(hash, settings.debug.freezeLightView);
   hash = hashCombineValue(hash, settings.debug.enableCascadeCasterCulling);
   hash = hashCombineValue(hash, settings.debug.debugCascadeIndex);
+  return hash;
+}
+
+[[nodiscard]] uint64_t hashCameraState(uint64_t hash,
+                                       const RenderFrameContext &frame) {
   hash = hashCombineValue(hash, frame.camera.projectionType);
   hash = hashCombineValue(hash, frame.camera.nearPlane);
   hash = hashCombineValue(hash, frame.camera.farPlane);
@@ -318,9 +320,12 @@ template <typename T>
       hash, std::as_bytes(std::span<const glm::mat4>(&frame.camera.view, 1u)));
   hash = hashCombineBytes(
       hash, std::as_bytes(std::span<const glm::mat4>(&frame.camera.proj, 1u)));
-  hash = hashCombineValue(hash, hasActiveShadowLightForFrame);
-  hash = hashCombineValue(hash, hasPreparedShadowDepthPasses);
-  hash = hashCombineValue(hash, hasPreparedShadowPreviewPass);
+  return hash;
+}
+
+[[nodiscard]] uint64_t
+hashShadowDebugSelection(uint64_t hash,
+                         const ShadowDebugFrameData &debugFrameData) {
   hash = hashCombineValue(hash, isValid(debugFrameData.selectedShadowLightId));
   hash = hashCombineValue(hash, isValid(debugFrameData.selectedShadowLightId)
                                     ? debugFrameData.selectedShadowLightId.value
@@ -328,8 +333,11 @@ template <typename T>
   hash = hashCombineValue(hash, debugFrameData.cascadeCount);
   hash = hashCombineValue(hash, debugFrameData.rawSamplerId);
   hash = hashCombineValue(hash, debugFrameData.compareSamplerId);
+  return hash;
+}
 
-  const ShadowSdsmDebugFrameData &sdsm = debugFrameData.sdsm;
+[[nodiscard]] uint64_t hashSdsmState(uint64_t hash,
+                                     const ShadowSdsmDebugFrameData &sdsm) {
   hash = hashCombineValue(hash, sdsm.mode);
   hash = hashCombineValue(hash, sdsm.requestedReductionBackend);
   hash = hashCombineValue(hash, sdsm.activeReductionBackend);
@@ -382,51 +390,53 @@ template <typename T>
         hash, std::as_bytes(std::span<const float>(
                   sdsm.histogramBucketWeights.data(), histogramWeightCount)));
   }
+  return hash;
+}
 
-  const uint32_t cascadeCount =
-      std::min(debugFrameData.cascadeCount, kMaxShadowCascades);
-  for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
-       ++cascadeIndex) {
-    const ShadowCascadeDebugFrameData &cascade =
-        debugFrameData.cascades[cascadeIndex];
-    hash = hashCombineValue(hash, cascade.splitNear);
-    hash = hashCombineValue(hash, cascade.splitFar);
-    hash = hashCombineValue(hash, cascade.texelWorldSize);
-    hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::mat4>(
-                                      &cascade.lightViewProj, 1u)));
-    hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::vec4>(
-                                      &cascade.lightSpaceBoundsMin, 1u)));
-    hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::vec4>(
-                                      &cascade.lightSpaceBoundsMax, 1u)));
-    hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::vec4>(
-                                      &cascade.unsnappedCenter, 1u)));
-    hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::vec4>(
-                                      &cascade.snappedCenter, 1u)));
-    hash = hashCombineValue(hash, cascade.textureBindlessId);
-    hash = hashCombineValue(hash, cascade.drawCount);
-    hash = hashCombineValue(hash, cascade.culledCount);
-    hash = hashCombineValue(hash, cascade.staticDrawCount);
-    hash = hashCombineValue(hash, cascade.dynamicDrawCount);
-    hash = hashCombineValue(hash, cascade.staticOnlyReuseStatus);
-    hash = hashCombineValue(hash, cascade.staticOnlyReuseCandidate);
-    hash = hashCombineValue(hash, cascade.staticOnlyReusePreviousValid);
-    hash = hashCombineValue(hash, cascade.staticOnlyReuseLightViewProjChanged);
-    hash = hashCombineValue(hash, cascade.staticOnlyReuseBiasChanged);
-    hash =
-        hashCombineValue(hash, cascade.staticOnlyReuseCasterSignatureChanged);
-    hash = hashCombineValue(hash, cascade.staticOnlyReuseAdaptiveRefresh);
-    hash = hashCombineValue(hash, cascade.currentStaticOnlyRasterSignature);
-    hash = hashCombineValue(hash, cascade.previousStaticOnlyRasterSignature);
-    hash =
-        hashCombineValue(hash, cascade.currentStaticOnlyLightViewProjSignature);
-    hash = hashCombineValue(hash,
-                            cascade.previousStaticOnlyLightViewProjSignature);
-    hash = hashCombineValue(hash, cascade.currentStaticOnlyBiasSignature);
-    hash = hashCombineValue(hash, cascade.previousStaticOnlyBiasSignature);
-    hash = hashCombineValue(hash, cascade.currentStaticOnlyCasterSignature);
-    hash = hashCombineValue(hash, cascade.previousStaticOnlyCasterSignature);
-  }
+[[nodiscard]] uint64_t
+hashCascadeState(uint64_t hash, const ShadowCascadeDebugFrameData &cascade,
+                 uint32_t cascadeIndex) {
+  (void)cascadeIndex;
+  hash = hashCombineValue(hash, cascade.splitNear);
+  hash = hashCombineValue(hash, cascade.splitFar);
+  hash = hashCombineValue(hash, cascade.texelWorldSize);
+  hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::mat4>(
+                                    &cascade.lightViewProj, 1u)));
+  hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::vec4>(
+                                    &cascade.lightSpaceBoundsMin, 1u)));
+  hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::vec4>(
+                                    &cascade.lightSpaceBoundsMax, 1u)));
+  hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::vec4>(
+                                    &cascade.unsnappedCenter, 1u)));
+  hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::vec4>(
+                                    &cascade.snappedCenter, 1u)));
+  hash = hashCombineValue(hash, cascade.textureBindlessId);
+  hash = hashCombineValue(hash, cascade.drawCount);
+  hash = hashCombineValue(hash, cascade.culledCount);
+  hash = hashCombineValue(hash, cascade.staticDrawCount);
+  hash = hashCombineValue(hash, cascade.dynamicDrawCount);
+  hash = hashCombineValue(hash, cascade.staticOnlyReuseStatus);
+  hash = hashCombineValue(hash, cascade.staticOnlyReuseCandidate);
+  hash = hashCombineValue(hash, cascade.staticOnlyReusePreviousValid);
+  hash = hashCombineValue(hash, cascade.staticOnlyReuseLightViewProjChanged);
+  hash = hashCombineValue(hash, cascade.staticOnlyReuseBiasChanged);
+  hash = hashCombineValue(hash, cascade.staticOnlyReuseCasterSignatureChanged);
+  hash = hashCombineValue(hash, cascade.staticOnlyReuseAdaptiveRefresh);
+  hash = hashCombineValue(hash, cascade.currentStaticOnlyRasterSignature);
+  hash = hashCombineValue(hash, cascade.previousStaticOnlyRasterSignature);
+  hash =
+      hashCombineValue(hash, cascade.currentStaticOnlyLightViewProjSignature);
+  hash =
+      hashCombineValue(hash, cascade.previousStaticOnlyLightViewProjSignature);
+  hash = hashCombineValue(hash, cascade.currentStaticOnlyBiasSignature);
+  hash = hashCombineValue(hash, cascade.previousStaticOnlyBiasSignature);
+  hash = hashCombineValue(hash, cascade.currentStaticOnlyCasterSignature);
+  hash = hashCombineValue(hash, cascade.previousStaticOnlyCasterSignature);
+  return hash;
+}
 
+[[nodiscard]] uint64_t hashShadowMetrics(uint64_t hash,
+                                         const ShadowFrameMetrics &metrics) {
   hash = hashCombineValue(hash, metrics.cascadeCount);
   hash = hashCombineValue(hash, metrics.shadowMapSize);
   hash = hashCombineValue(hash, metrics.totalDraws);
@@ -468,6 +478,32 @@ template <typename T>
   hash = hashCombineValue(hash, metrics.depthGpuTimingAvailable);
   hash = hashCombineValue(hash, metrics.sdsmGpuTimingAvailable);
   return hash;
+}
+
+[[nodiscard]] uint64_t buildShadowDiagnosticSignature(
+    const RenderFrameContext &frame,
+    const RenderSettings::ShadowSettings &settings,
+    const ShadowDebugFrameData &debugFrameData,
+    const ShadowFrameMetrics &metrics, bool hasActiveShadowLightForFrame,
+    bool hasPreparedShadowDepthPasses, bool hasPreparedShadowPreviewPass) {
+  uint64_t hash = kFnvOffsetBasis64;
+  hash = hashShadowSettings(hash, settings);
+  hash = hashCameraState(hash, frame);
+  hash = hashCombineValue(hash, hasActiveShadowLightForFrame);
+  hash = hashCombineValue(hash, hasPreparedShadowDepthPasses);
+  hash = hashCombineValue(hash, hasPreparedShadowPreviewPass);
+  hash = hashShadowDebugSelection(hash, debugFrameData);
+  hash = hashSdsmState(hash, debugFrameData.sdsm);
+
+  const uint32_t cascadeCount =
+      std::min(debugFrameData.cascadeCount, kMaxShadowCascades);
+  for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+       ++cascadeIndex) {
+    hash = hashCascadeState(hash, debugFrameData.cascades[cascadeIndex],
+                            cascadeIndex);
+  }
+
+  return hashShadowMetrics(hash, metrics);
 }
 
 [[nodiscard]] IndexFormat
@@ -567,7 +603,7 @@ struct CachedSdsmHistogramTile {
     const CameraFrameState &camera, ShadowSplitRange fixedSplitRange,
     uint32_t cascadeCount, uint32_t bucketCount, float trimLowPercent,
     float trimHighPercent, uint32_t sourceLevel, glm::uvec2 sourceDimensions,
-    std::span<const float> minMaxPairs) {
+    std::span<const float> minMaxPairs, std::pmr::memory_resource *memory) {
   SdsmHistogramAnalysis analysis{};
   analysis.sourceLevel = sourceLevel;
   analysis.sourceDimensions = sourceDimensions;
@@ -588,7 +624,8 @@ struct CachedSdsmHistogramTile {
   uint32_t rawValidTileCount = 0u;
   uint32_t clearOnlyTileCount = 0u;
   bool malformedTile = false;
-  std::vector<CachedSdsmHistogramTile> cachedTiles(minMaxPairs.size() / 2u);
+  std::pmr::vector<CachedSdsmHistogramTile> cachedTiles(
+      minMaxPairs.size() / 2u, resolveMemoryResource(memory));
   const auto isClearDepthSample = [](float rawDeviceDepth) {
     return rawDeviceDepth >= (1.0f - kSdsmHistogramClearDepthEpsilon);
   };
@@ -1112,12 +1149,8 @@ void applyStaticOnlyGuardBand(
   const glm::mat4 inverseLightView = glm::inverse(fit.lightView);
   shadow_detail::stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, true,
                                       fit, inverseLightView);
-  if (fit.texelWorldSize > 0.0f) {
-    lightMin.z =
-        shadow_detail::quantizeShadowBoundDown(lightMin.z, fit.texelWorldSize);
-    lightMax.z =
-        shadow_detail::quantizeShadowBoundUp(lightMax.z, fit.texelWorldSize);
-  }
+  shadow_detail::quantizeShadowZBounds(lightMin, lightMax, fit.texelWorldSize,
+                                       true);
 
   const float nearPlane = -lightMax.z;
   float farPlane = -lightMin.z;
@@ -2827,7 +2860,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                 settings.sdsmHistogramBucketCount,
                 settings.sdsmHistogramTrimLowPercent,
                 settings.sdsmHistogramTrimHighPercent, sourceSelection.level,
-                sourceSelection.dimensions, minMaxPairs);
+                sourceSelection.dimensions, minMaxPairs, memory_);
             shadowDebugFrameData_.sdsm.histogramValidTileCount =
                 analysis.validTileCount;
             shadowDebugFrameData_.sdsm.histogramTotalWeight =
@@ -4721,7 +4754,7 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
     if (hasGpuTimingScope(timingReport, GpuTimingScope::Shadow)) {
       frame.metrics.shadow.gpuTimeMs = timingReport.shadowTimeMs;
       frame.metrics.shadow.gpuTimingSourceFrameIndex =
-          timingReport.sourceFrameIndex;
+          timingReport.shadowSourceFrameIndex;
       frame.metrics.shadow.gpuTimingAvailable = 1u;
     }
     if (hasGpuTimingScope(timingReport, GpuTimingScope::ShadowDepth)) {

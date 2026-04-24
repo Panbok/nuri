@@ -109,6 +109,8 @@ private:
     bool dynamicCaster = false;
   };
 
+  // Duplicates hot draw fields from MeshDrawTemplate intentionally so static
+  // shadow cache traversal can stay compact and avoid template indirection.
   struct StaticShadowCasterCacheEntry {
     uint32_t templateIndex = 0;
     uint32_t instanceIndex = 0;

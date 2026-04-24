@@ -4,12 +4,14 @@
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_samplerless_texture_functions : require
 
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
 
 const uint MAX_BUCKETS = 128u;
 const uint MAX_CASCADES = 4u;
+const uint LOCAL_INVOCATION_COUNT = 64u;
+const uint HISTOGRAM_WEIGHT_SCALE = 4096u;
 
 layout(std430, buffer_reference) buffer ShadowSdsmHistogramResultBuffer {
   vec4 rawDeviceMinMaxLinearMinMax;
@@ -49,6 +51,22 @@ bool isClearDepth(float rawDeviceDepth) {
   return rawDeviceDepth >= (1.0 - pc.trimParams.z);
 }
 
+shared uint sharedBucketWeights[MAX_BUCKETS];
+shared float sharedRawDeviceMin[LOCAL_INVOCATION_COUNT];
+shared float sharedRawDeviceMax[LOCAL_INVOCATION_COUNT];
+shared float sharedRawLinearMin[LOCAL_INVOCATION_COUNT];
+shared float sharedRawLinearMax[LOCAL_INVOCATION_COUNT];
+shared float sharedMaxObservedLinear[LOCAL_INVOCATION_COUNT];
+shared uint sharedValidTiles[LOCAL_INVOCATION_COUNT];
+shared uint sharedAnyNonClear[LOCAL_INVOCATION_COUNT];
+
+uint scaledHistogramWeight(float weight) {
+  if (!isFiniteFloat(weight) || weight <= 0.0) {
+    return 0u;
+  }
+  return max(uint(round(weight * float(HISTOGRAM_WEIGHT_SCALE))), 1u);
+}
+
 void addHistogramInterval(float rangeNear, float rangeFar, float intervalMin,
                           float intervalMax) {
   uint bucketCount = clamp(pc.histogramParams.x, 1u, MAX_BUCKETS);
@@ -58,7 +76,7 @@ void addHistogramInterval(float rangeNear, float rangeFar, float intervalMin,
   float maxDepth = clamp(max(intervalMin, intervalMax), nearDepth, farDepth);
   float span = farDepth - nearDepth;
   if (span <= 1.0e-6) {
-    pc.resultBuffer.bucketWeights[0] += 1.0;
+    atomicAdd(sharedBucketWeights[0], HISTOGRAM_WEIGHT_SCALE);
     return;
   }
 
@@ -66,7 +84,7 @@ void addHistogramInterval(float rangeNear, float rangeFar, float intervalMin,
     float normalized = clamp((minDepth - nearDepth) / span, 0.0, 0.99999994);
     uint bucketIndex =
         min(uint(normalized * float(bucketCount)), bucketCount - 1u);
-    pc.resultBuffer.bucketWeights[bucketIndex] += 1.0;
+    atomicAdd(sharedBucketWeights[bucketIndex], HISTOGRAM_WEIGHT_SCALE);
     return;
   }
 
@@ -83,7 +101,8 @@ void addHistogramInterval(float rangeNear, float rangeFar, float intervalMin,
     float overlap =
         max(min(maxDepth, bucketEnd) - max(minDepth, bucketStart), 0.0);
     if (overlap > 0.0) {
-      pc.resultBuffer.bucketWeights[bucketIndex] += overlap / intervalSpan;
+      atomicAdd(sharedBucketWeights[bucketIndex],
+                scaledHistogramWeight(overlap / intervalSpan));
     }
   }
 }
@@ -95,7 +114,7 @@ float percentileDepth(float rangeNear, float rangeFar, float percentile) {
   float bucketWidth = (farDepth - nearDepth) / float(bucketCount);
   float totalWeight = 0.0;
   for (uint i = 0u; i < bucketCount; ++i) {
-    totalWeight += max(pc.resultBuffer.bucketWeights[i], 0.0);
+    totalWeight += float(sharedBucketWeights[i]);
   }
   if (totalWeight <= 1.0e-6) {
     return nearDepth;
@@ -103,7 +122,7 @@ float percentileDepth(float rangeNear, float rangeFar, float percentile) {
   float targetWeight = clamp(percentile, 0.0, 1.0) * totalWeight;
   float accumulatedWeight = 0.0;
   for (uint i = 0u; i < bucketCount; ++i) {
-    float bucketWeight = max(pc.resultBuffer.bucketWeights[i], 0.0);
+    float bucketWeight = float(sharedBucketWeights[i]);
     if (accumulatedWeight + bucketWeight >= targetWeight) {
       float localWeight =
           bucketWeight > 1.0e-6
@@ -121,15 +140,19 @@ float percentileDepth(float rangeNear, float rangeFar, float percentile) {
 void main() {
   uint bucketCount = clamp(pc.histogramParams.x, 1u, MAX_BUCKETS);
   uint cascadeCount = clamp(pc.histogramParams.y, 1u, MAX_CASCADES);
-  for (uint i = 0u; i < MAX_BUCKETS; ++i) {
-    pc.resultBuffer.bucketWeights[i] = 0.0;
+  uint localIndex = gl_LocalInvocationIndex;
+  if (localIndex == 0u) {
+    pc.resultBuffer.rawDeviceMinMaxLinearMinMax = vec4(1.0, 0.0, 0.0, 0.0);
+    pc.resultBuffer.histogramRangeWeightClear =
+        vec4(pc.cameraParams.z, pc.cameraParams.w, 0.0, 0.0);
+    pc.resultBuffer.metadata = uvec4(pc.sourceParams.y, 0u, 0u, bucketCount);
+    pc.resultBuffer.splitDepths0 = vec4(pc.cameraParams.z);
+    pc.resultBuffer.splitDepths1 = vec4(pc.cameraParams.w);
   }
-  pc.resultBuffer.rawDeviceMinMaxLinearMinMax = vec4(1.0, 0.0, 0.0, 0.0);
-  pc.resultBuffer.histogramRangeWeightClear =
-      vec4(pc.cameraParams.z, pc.cameraParams.w, 0.0, 0.0);
-  pc.resultBuffer.metadata = uvec4(pc.sourceParams.y, 0u, 0u, bucketCount);
-  pc.resultBuffer.splitDepths0 = vec4(pc.cameraParams.z);
-  pc.resultBuffer.splitDepths1 = vec4(pc.cameraParams.w);
+  for (uint i = localIndex; i < MAX_BUCKETS; i += LOCAL_INVOCATION_COUNT) {
+    sharedBucketWeights[i] = 0u;
+  }
+  barrier();
 
   uint width = max(pc.sourceParams.z, 1u);
   uint height = max(pc.sourceParams.w, 1u);
@@ -143,8 +166,8 @@ void main() {
   uint validTiles = 0u;
   bool anyNonClear = false;
 
-  for (uint y = 0u; y < height; ++y) {
-    for (uint x = 0u; x < width; ++x) {
+  for (uint y = gl_LocalInvocationID.y; y < height; y += gl_WorkGroupSize.y) {
+    for (uint x = gl_LocalInvocationID.x; x < width; x += gl_WorkGroupSize.x) {
       vec2 rawPair = texelFetch(kTextures2D[nonuniformEXT(pc.sourceParams.x)],
                                 ivec2(int(x), int(y)), 0)
                          .xy;
@@ -176,9 +199,54 @@ void main() {
     }
   }
 
+  sharedRawDeviceMin[localIndex] = rawDeviceMin;
+  sharedRawDeviceMax[localIndex] = rawDeviceMax;
+  sharedRawLinearMin[localIndex] = rawLinearMin;
+  sharedRawLinearMax[localIndex] = rawLinearMax;
+  sharedMaxObservedLinear[localIndex] = maxObservedLinear;
+  sharedValidTiles[localIndex] = validTiles;
+  sharedAnyNonClear[localIndex] = anyNonClear ? 1u : 0u;
+  barrier();
+
+  for (uint stride = LOCAL_INVOCATION_COUNT / 2u; stride > 0u; stride >>= 1u) {
+    if (localIndex < stride) {
+      uint other = localIndex + stride;
+      sharedRawDeviceMin[localIndex] =
+          min(sharedRawDeviceMin[localIndex], sharedRawDeviceMin[other]);
+      sharedRawDeviceMax[localIndex] =
+          max(sharedRawDeviceMax[localIndex], sharedRawDeviceMax[other]);
+      sharedRawLinearMin[localIndex] =
+          min(sharedRawLinearMin[localIndex], sharedRawLinearMin[other]);
+      sharedRawLinearMax[localIndex] =
+          max(sharedRawLinearMax[localIndex], sharedRawLinearMax[other]);
+      sharedMaxObservedLinear[localIndex] = max(
+          sharedMaxObservedLinear[localIndex], sharedMaxObservedLinear[other]);
+      sharedValidTiles[localIndex] += sharedValidTiles[other];
+      sharedAnyNonClear[localIndex] |= sharedAnyNonClear[other];
+    }
+    barrier();
+  }
+
+  if (localIndex != 0u) {
+    return;
+  }
+
+  rawDeviceMin = sharedRawDeviceMin[0];
+  rawDeviceMax = sharedRawDeviceMax[0];
+  rawLinearMin = sharedRawLinearMin[0];
+  rawLinearMax = sharedRawLinearMax[0];
+  maxObservedLinear = sharedMaxObservedLinear[0];
+  validTiles = sharedValidTiles[0];
+  anyNonClear = sharedAnyNonClear[0] != 0u;
+
   float totalWeight = 0.0;
   for (uint i = 0u; i < bucketCount; ++i) {
-    totalWeight += max(pc.resultBuffer.bucketWeights[i], 0.0);
+    pc.resultBuffer.bucketWeights[i] =
+        float(sharedBucketWeights[i]) / float(HISTOGRAM_WEIGHT_SCALE);
+    totalWeight += pc.resultBuffer.bucketWeights[i];
+  }
+  for (uint i = bucketCount; i < MAX_BUCKETS; ++i) {
+    pc.resultBuffer.bucketWeights[i] = 0.0;
   }
   bool valid = validTiles > 0u && isFiniteFloat(rawLinearMin) &&
                isFiniteFloat(rawLinearMax) && rawLinearMax >= rawLinearMin;
@@ -205,7 +273,7 @@ void main() {
       uvec4(pc.sourceParams.y, 1u, validTiles, bucketCount);
 
   float splits[5];
-  for (uint i = 0u; i <= MAX_CASCADES; ++i) {
+  for (uint i = 0u; i <= cascadeCount; ++i) {
     float percentile = float(i) / float(cascadeCount);
     splits[i] = clearOnly ? mix(fixedNear, fixedFar, percentile)
                           : percentileDepth(fixedNear, fixedFar, percentile);
@@ -213,6 +281,9 @@ void main() {
   splits[0] = clearOnly ? fixedNear : trimmedNear;
   splits[cascadeCount] =
       clearOnly ? fixedFar : max(trimmedFar, splits[0] + 1.0e-4);
+  for (uint i = cascadeCount + 1u; i <= MAX_CASCADES; ++i) {
+    splits[i] = splits[cascadeCount];
+  }
   pc.resultBuffer.splitDepths0 =
       vec4(splits[0], splits[1], splits[2], splits[3]);
   pc.resultBuffer.splitDepths1 = vec4(splits[4], maxObservedLinear, 0.0, 0.0);

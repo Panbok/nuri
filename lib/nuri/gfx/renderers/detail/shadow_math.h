@@ -231,6 +231,14 @@ constexpr float kShadowStabilizationCompatibilityEpsilon = 1.0e-5f;
           step);
 }
 
+inline void quantizeShadowZBounds(glm::vec3 &lightMin, glm::vec3 &lightMax,
+                                  float texelWorldSize, bool stabilize) {
+  if (stabilize && texelWorldSize > 0.0f) {
+    lightMin.z = quantizeShadowBoundDown(lightMin.z, texelWorldSize);
+    lightMax.z = quantizeShadowBoundUp(lightMax.z, texelWorldSize);
+  }
+}
+
 [[nodiscard]] inline float snapShadowCoordinate(float value, float step) {
   if (!std::isfinite(value) || !std::isfinite(step) || step <= 0.0f) {
     return value;
@@ -771,10 +779,7 @@ inline void enforceMonotonicShadowSplitDepths(
 
   stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
                        inverseLightView);
-  if (stabilize && fit.texelWorldSize > 0.0f) {
-    lightMin.z = quantizeShadowBoundDown(lightMin.z, fit.texelWorldSize);
-    lightMax.z = quantizeShadowBoundUp(lightMax.z, fit.texelWorldSize);
-  }
+  quantizeShadowZBounds(lightMin, lightMax, fit.texelWorldSize, stabilize);
   const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
   const float depthPadding = std::max(depth * 0.01f, 0.01f);
   const float nearPlane = -lightMax.z - depthPadding;
@@ -835,10 +840,7 @@ fitSingleDirectionalShadowMap(const CameraFrameState &camera,
 
   stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
                        inverseLightView);
-  if (stabilize && fit.texelWorldSize > 0.0f) {
-    lightMin.z = quantizeShadowBoundDown(lightMin.z, fit.texelWorldSize);
-    lightMax.z = quantizeShadowBoundUp(lightMax.z, fit.texelWorldSize);
-  }
+  quantizeShadowZBounds(lightMin, lightMax, fit.texelWorldSize, stabilize);
   const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
   const float depthPadding = std::max(depth * 0.01f, 0.01f);
   const float nearPlane = -lightMax.z - depthPadding;
@@ -894,10 +896,7 @@ fitDirectionalShadowMapToBounds(const CameraFrameState &camera,
 
   stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
                        inverseLightView);
-  if (stabilize && fit.texelWorldSize > 0.0f) {
-    lightMin.z = quantizeShadowBoundDown(lightMin.z, fit.texelWorldSize);
-    lightMax.z = quantizeShadowBoundUp(lightMax.z, fit.texelWorldSize);
-  }
+  quantizeShadowZBounds(lightMin, lightMax, fit.texelWorldSize, stabilize);
   const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
   const float depthPadding = std::max(depth * 0.001f, 0.01f);
   const float nearPlane = -lightMax.z - depthPadding;

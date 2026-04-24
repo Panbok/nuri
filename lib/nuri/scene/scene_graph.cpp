@@ -96,12 +96,6 @@ SceneGraph::SceneGraph(std::pmr::memory_resource *memory)
 
 void SceneGraph::clear() {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
-  const bool hadSceneState = isValid(rootNode_) ||
-                             nodes_.slots.slotCount() != 0u ||
-                             renderableComponents_.slots.slotCount() != 0u ||
-                             directionalLights_.slots.slotCount() != 0u ||
-                             pointLights_.slots.slotCount() != 0u ||
-                             spotLights_.slots.slotCount() != 0u;
   dirtyRoots_.clear();
   nodes_ = NodeStore(memory_);
   renderableComponents_ = RenderableStore(memory_);
@@ -113,6 +107,8 @@ void SceneGraph::clear() {
   renderableDeformationsDirty_ = false;
   lightTopologyDirty_ = true;
   lightDataDirty_ = false;
+  topologyVersion_ = 0u;
+  transformVersion_ = 0u;
 
   const auto rootResult = allocateNodeSlot();
   NURI_ASSERT(!rootResult.hasError(),
@@ -139,10 +135,6 @@ void SceneGraph::clear() {
   nodes_.spotLightHead[rootIndex] = kInvalidIndex;
   nodes_.spotLightTail[rootIndex] = kInvalidIndex;
   rootNode_ = makeNodeId(rootIndex, root.generation);
-  if (hadSceneState) {
-    noteTopologyMutation();
-    noteTransformMutation();
-  }
 }
 
 Result<SlotReservation, std::string> SceneGraph::allocateNodeSlot() {

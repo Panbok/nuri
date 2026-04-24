@@ -11,8 +11,6 @@ struct PassTimingReservation;
 
 class LvkGPUDevice final : public GPUDevice {
 public:
-  struct Impl;
-
   static std::unique_ptr<LvkGPUDevice>
   create(Window &window, const GPUDeviceCreateDesc &desc = {});
   ~LvkGPUDevice() override;
@@ -137,6 +135,8 @@ public:
   void waitIdle() override;
 
 private:
+  struct Impl;
+
   LvkGPUDevice();
   [[nodiscard]] Result<bool, std::string>
   recordRenderPasses(lvk::ICommandBuffer &commandBuffer,

@@ -487,7 +487,7 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   }
 }
 
-[[nodiscard]] constexpr uint32_t
+[[nodiscard]] inline uint32_t
 shadowFilterSampleBudget(ShadowFilterMode filterMode, uint32_t pcfSampleCount,
                          uint32_t pcssBlockerSampleCount,
                          uint32_t pcssFilterSampleCount) noexcept {
@@ -500,8 +500,16 @@ shadowFilterSampleBudget(ShadowFilterMode filterMode, uint32_t pcfSampleCount,
   case ShadowFilterMode::PCSS:
     return std::clamp(pcssBlockerSampleCount, 1u, kMaxShadowPcfSamples) +
            std::clamp(pcssFilterSampleCount, 1u, kMaxShadowPcfSamples);
+  default:
+    // sanitizeShadowFilterMode normalizes all values; this is only defensive.
+#if defined(_MSC_VER)
+    __assume(false);
+#elif defined(__GNUC__) || defined(__clang__)
+    __builtin_unreachable();
+#else
+    return 1u;
+#endif
   }
-  return 1u;
 }
 
 [[nodiscard]] inline TextureFilterMode effectiveTextureFilterMode(

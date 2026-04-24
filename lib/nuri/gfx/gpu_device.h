@@ -104,6 +104,9 @@ public:
   virtual bool resolveGeometry(GeometryAllocationHandle h,
                                GeometryAllocationView &out) const = 0;
   virtual uint64_t geometryMutationVersion() const { return 0; }
+  // Returns timing data after the GPU/command queue has captured and finalized
+  // the submitted ranges, making the report safe to read. A report may become
+  // available one or more frames after submission, depending on queue progress.
   virtual GpuTimingReport getLatestCompletedGpuTimingReport() const {
     return {};
   }

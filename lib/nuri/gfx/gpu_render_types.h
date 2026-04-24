@@ -9,10 +9,12 @@
 
 namespace nuri {
 
-// Public render-graph contract: a submit item may depend on up to 12 buffers.
+// Public render-graph contract: a submit item may depend on up to 12 resources
+// of each dependency kind.
 // Backends can impose stricter limits, but higher-level layers should respect
 // this cap to avoid backend-specific failures.
-constexpr size_t kMaxDependencyBuffers = 12;
+constexpr size_t kMaxDependencyResources = 12;
+constexpr size_t kMaxDependencyBuffers = kMaxDependencyResources;
 
 struct Viewport {
   float x = 0.0f;
@@ -73,12 +75,22 @@ enum class GpuTimingScope : uint8_t {
   ShadowSdsm = 3,
 };
 
-constexpr uint32_t kGpuTimingScopeShadowBit = 1u << 0u;
-constexpr uint32_t kGpuTimingScopeShadowDepthBit = 1u << 1u;
-constexpr uint32_t kGpuTimingScopeShadowSdsmBit = 1u << 2u;
+[[nodiscard]] constexpr uint32_t
+gpuTimingScopeToBit(GpuTimingScope scope) noexcept {
+  return scope == GpuTimingScope::None
+             ? 0u
+             : (1u << (static_cast<uint8_t>(scope) - 1u));
+}
+
+constexpr uint32_t kGpuTimingScopeShadowBit =
+    gpuTimingScopeToBit(GpuTimingScope::Shadow);
+constexpr uint32_t kGpuTimingScopeShadowDepthBit =
+    gpuTimingScopeToBit(GpuTimingScope::ShadowDepth);
+constexpr uint32_t kGpuTimingScopeShadowSdsmBit =
+    gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
 
 struct GpuTimingReport {
-  uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t shadowDepthSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t shadowSdsmSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
@@ -89,35 +101,25 @@ struct GpuTimingReport {
 
 [[nodiscard]] constexpr bool hasGpuTimingScope(const GpuTimingReport &report,
                                                GpuTimingScope scope) noexcept {
-  switch (scope) {
-  case GpuTimingScope::Shadow:
-    return (report.availableScopeMask & kGpuTimingScopeShadowBit) != 0u;
-  case GpuTimingScope::ShadowDepth:
-    return (report.availableScopeMask & kGpuTimingScopeShadowDepthBit) != 0u;
-  case GpuTimingScope::ShadowSdsm:
-    return (report.availableScopeMask & kGpuTimingScopeShadowSdsmBit) != 0u;
-  case GpuTimingScope::None:
-  default:
-    return false;
-  }
+  return (report.availableScopeMask & gpuTimingScopeToBit(scope)) != 0u;
 }
 
 inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
                                        const GpuTimingReport &src) {
   if (hasGpuTimingScope(src, GpuTimingScope::Shadow)) {
     dst.shadowTimeMs = src.shadowTimeMs;
-    dst.sourceFrameIndex = src.sourceFrameIndex;
-    dst.availableScopeMask |= kGpuTimingScopeShadowBit;
+    dst.shadowSourceFrameIndex = src.shadowSourceFrameIndex;
+    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::Shadow);
   }
   if (hasGpuTimingScope(src, GpuTimingScope::ShadowDepth)) {
     dst.shadowDepthTimeMs = src.shadowDepthTimeMs;
     dst.shadowDepthSourceFrameIndex = src.shadowDepthSourceFrameIndex;
-    dst.availableScopeMask |= kGpuTimingScopeShadowDepthBit;
+    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::ShadowDepth);
   }
   if (hasGpuTimingScope(src, GpuTimingScope::ShadowSdsm)) {
     dst.shadowSdsmTimeMs = src.shadowSdsmTimeMs;
     dst.shadowSdsmSourceFrameIndex = src.shadowSdsmSourceFrameIndex;
-    dst.availableScopeMask |= kGpuTimingScopeShadowSdsmBit;
+    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
   }
 }
 

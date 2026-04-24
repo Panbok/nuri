@@ -281,10 +281,10 @@ appendUniqueDependency(std::pmr::vector<BufferHandle> &dependencies,
       return Result<bool, std::string>::makeResult(true);
     }
   }
-  if (dependencies.size() >= kMaxDependencyBuffers) {
+  if (dependencies.size() >= kMaxDependencyResources) {
     return Result<bool, std::string>::makeError(
         std::string(context) + ": dependency buffer count exceeds " +
-        std::to_string(kMaxDependencyBuffers));
+        std::to_string(kMaxDependencyResources));
   }
   dependencies.push_back(handle);
   accessModes.push_back(accessMode);
@@ -302,10 +302,10 @@ appendUniqueDependency(std::pmr::vector<BufferHandle> &dependencies,
       return Result<bool, std::string>::makeResult(true);
     }
   }
-  if (dependencies.size() >= kMaxDependencyBuffers) {
+  if (dependencies.size() >= kMaxDependencyResources) {
     return Result<bool, std::string>::makeError(
         std::string(context) + ": dependency buffer count exceeds " +
-        std::to_string(kMaxDependencyBuffers));
+        std::to_string(kMaxDependencyResources));
   }
   dependencies.push_back(handle);
   return Result<bool, std::string>::makeResult(true);
@@ -511,6 +511,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       depthPyramidDrawItems_(resolveMemoryResource(memory)),
       depthPyramidDependencyTextures_(resolveMemoryResource(memory)),
       shadowSdsmReducePushConstants_(resolveMemoryResource(memory)),
+      shadowSdsmHistogramReducePushConstants_(resolveMemoryResource(memory)),
       shadowSdsmReduceDispatches_(resolveMemoryResource(memory)),
       shadowSdsmReduceDependencyBuffers_(resolveMemoryResource(memory)),
       shadowSdsmReduceDependencyTextures_(resolveMemoryResource(memory)),
@@ -3082,20 +3083,28 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
     frame.metrics.opaque.depthPyramidLevels =
         saturateToU32(depthPyramidDrawItems_.size());
-    sceneDepthPyramidSourceFrameIndex_ = frame.frameIndex;
+    const uint32_t builtPyramidLevelCount =
+        saturateToU32(depthPyramidDrawItems_.size());
+    const bool pyramidBuildComplete =
+        builtPyramidLevelCount == sceneDepthPyramidLevelCount_;
+    if (pyramidBuildComplete) {
+      sceneDepthPyramidSourceFrameIndex_ = frame.frameIndex;
+    } else {
+      sceneDepthPyramidSourceFrameIndex_.reset();
+    }
     const ShadowSdsmMode sdsmMode =
         sanitizeShadowSdsmMode(settings.shadow.sdsmMode);
     if (settings.shadow.enabled &&
         (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
          sdsmMode == ShadowSdsmMode::Histogram) &&
+        builtPyramidLevelCount > 0u &&
         frame.sharedResources.shadowSdsmGpuReduceTarget.has_value() &&
         nuri::isValid(frame.sharedResources.shadowSdsmGpuReducePipeline)) {
-      uint32_t reduceSourceLevel = sceneDepthPyramidLevelCount_ - 1u;
+      uint32_t reduceSourceLevel = builtPyramidLevelCount - 1u;
       glm::uvec2 histogramSourceDimensions{1u};
       if (sdsmMode == ShadowSdsmMode::Histogram) {
         std::array<glm::uvec2, kMaxSceneDepthPyramidLevels> levelDimensions{};
-        for (uint32_t level = 0u; level < sceneDepthPyramidLevelCount_;
-             ++level) {
+        for (uint32_t level = 0u; level < builtPyramidLevelCount; ++level) {
           const TextureDimensions dimensions =
               gpu_.getTextureDimensions(sceneDepthPyramidTextures_[level]);
           levelDimensions[level] = glm::uvec2(std::max(dimensions.width, 1u),
@@ -3104,8 +3113,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         const shadow_detail::ShadowSdsmHistogramSourceSelection selection =
             shadow_detail::selectSdsmHistogramSourceLevel(
                 std::span<const glm::uvec2>(levelDimensions.data(),
-                                            sceneDepthPyramidLevelCount_),
-                sceneDepthPyramidLevelCount_, 4096u);
+                                            builtPyramidLevelCount),
+                builtPyramidLevelCount, 4096u);
         reduceSourceLevel = selection.level;
         histogramSourceDimensions = selection.dimensions;
       }

@@ -5,8 +5,6 @@
 #include "nuri/core/containers/hash_set.h"
 #include "nuri/core/profiling.h"
 
-#include <queue>
-
 namespace nuri {
 namespace {
 
@@ -1604,10 +1602,10 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
         "RenderGraphBuilder::addPassRecord: dependency buffer count "
         "exceeds uint32_t");
   }
-  if (dependencyCount > kMaxDependencyBuffers) {
+  if (dependencyCount > kMaxDependencyResources) {
     return Result<RenderGraphPassId, std::string>::makeError(
         "RenderGraphBuilder::addPassRecord: dependency buffer count "
-        "exceeds kMaxDependencyBuffers");
+        "exceeds kMaxDependencyResources");
   }
   const size_t preDispatchCount = pass.preDispatches.size();
   if (preDispatchCount > UINT32_MAX) {
@@ -1621,20 +1619,20 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
           "buffer count exceeds uint32_t");
     }
-    if (dispatch.dependencyBuffers.size() > kMaxDependencyBuffers) {
+    if (dispatch.dependencyBuffers.size() > kMaxDependencyResources) {
       return Result<RenderGraphPassId, std::string>::makeError(
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
-          "buffer count exceeds kMaxDependencyBuffers");
+          "buffer count exceeds kMaxDependencyResources");
     }
     if (dispatch.dependencyTextures.size() > UINT32_MAX) {
       return Result<RenderGraphPassId, std::string>::makeError(
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
           "texture count exceeds uint32_t");
     }
-    if (dispatch.dependencyTextures.size() > kMaxDependencyBuffers) {
+    if (dispatch.dependencyTextures.size() > kMaxDependencyResources) {
       return Result<RenderGraphPassId, std::string>::makeError(
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
-          "texture count exceeds kMaxDependencyBuffers");
+          "texture count exceeds kMaxDependencyResources");
     }
   }
 
@@ -1772,10 +1770,10 @@ Result<bool, std::string> RenderGraphBuilder::bindPassDependencyBuffer(
   }
 
   const uint32_t count = passDependencyBufferBindingCounts_[pass.value];
-  if (dependencyIndex >= kMaxDependencyBuffers) {
+  if (dependencyIndex >= kMaxDependencyResources) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::bindPassDependencyBuffer: dependency index "
-        "exceeds kMaxDependencyBuffers");
+        "exceeds kMaxDependencyResources");
   }
   if (dependencyIndex >= count) {
     return Result<bool, std::string>::makeError(
@@ -1844,10 +1842,10 @@ Result<bool, std::string> RenderGraphBuilder::bindPreDispatchDependencyBuffer(
       preDispatchDependencyBindingOffsets_[globalDispatchIndex];
   const uint32_t dependencyCount =
       preDispatchDependencyBindingCounts_[globalDispatchIndex];
-  if (dependencyIndex >= kMaxDependencyBuffers) {
+  if (dependencyIndex >= kMaxDependencyResources) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::bindPreDispatchDependencyBuffer: dependency "
-        "index exceeds kMaxDependencyBuffers");
+        "index exceeds kMaxDependencyResources");
   }
   if (dependencyIndex >= dependencyCount) {
     return Result<bool, std::string>::makeError(
@@ -2813,12 +2811,12 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       plan.depthTextureIndex = passDepthTextureBindings_[passIndex];
       const uint32_t dependencyCount =
           passDependencyBufferBindingCounts_[passIndex];
-      if (dependencyCount > kMaxDependencyBuffers) {
+      if (dependencyCount > kMaxDependencyResources) {
         resolveErrors[workerIndex] = IndexedResolveError{
             .hasError = true,
             .orderedPassIndex = orderedPassIndex,
             .message = "RenderGraphBuilder::compile: pass dependency buffer "
-                       "count exceeds kMaxDependencyBuffers",
+                       "count exceeds kMaxDependencyResources",
         };
         return;
       }
@@ -2882,12 +2880,12 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
             preDispatchDependencyBindingOffsets_[preDispatchOffset + i];
         const uint32_t depCount =
             preDispatchDependencyBindingCounts_[preDispatchOffset + i];
-        if (depCount > kMaxDependencyBuffers) {
+        if (depCount > kMaxDependencyResources) {
           resolveErrors[workerIndex] = IndexedResolveError{
               .hasError = true,
               .orderedPassIndex = orderedPassIndex,
               .message = "RenderGraphBuilder::compile: pre-dispatch dependency "
-                         "buffer count exceeds kMaxDependencyBuffers",
+                         "buffer count exceeds kMaxDependencyResources",
           };
           return;
         }
@@ -4435,10 +4433,10 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
          passExecIndex < compiled.orderedPasses.size(); ++passExecIndex) {
       const auto &depRange =
           compiled.dependencyBufferRangesByPass[passExecIndex];
-      if (depRange.count > kMaxDependencyBuffers) {
+      if (depRange.count > kMaxDependencyResources) {
         return Result<bool, std::string>::makeError(
             "RenderGraphBuilder::compile: dependency buffer range exceeds "
-            "kMaxDependencyBuffers");
+            "kMaxDependencyResources");
       }
       if (depRange.offset > compiled.resolvedDependencyBuffers.size() ||
           depRange.count >
@@ -4565,10 +4563,10 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
       }
       const auto &depRange =
           compiled.preDispatchDependencyRanges[globalDispatchIndex];
-      if (depRange.count > kMaxDependencyBuffers) {
+      if (depRange.count > kMaxDependencyResources) {
         return Result<bool, std::string>::makeError(
             "RenderGraphBuilder::compile: pre-dispatch dependency range "
-            "exceeds kMaxDependencyBuffers");
+            "exceeds kMaxDependencyResources");
       }
       if (binding.dependencyBufferIndex >= depRange.count) {
         return Result<bool, std::string>::makeError(
@@ -5158,13 +5156,13 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
          orderedPassIndex < executablePasses.size(); ++orderedPassIndex) {
       const auto &range =
           compiled.dependencyBufferRangesByPass[orderedPassIndex];
-      if (range.count > kMaxDependencyBuffers) {
+      if (range.count > kMaxDependencyResources) {
         destroyMaterializedResources();
         return fail(
             RenderGraphExecutionFailureStage::BuildExecutablePayload,
             "RenderGraphExecutor::execute: pass dependency buffer range "
             "exceeds "
-            "kMaxDependencyBuffers");
+            "kMaxDependencyResources");
       }
       const size_t dependencyBufferCount =
           needsMutableDependencyBuffers
@@ -5211,12 +5209,12 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
               executablePreDispatches[preDispatchRange.offset + i];
           const auto &depRange =
               compiled.preDispatchDependencyRanges[preDispatchRange.offset + i];
-          if (depRange.count > kMaxDependencyBuffers) {
+          if (depRange.count > kMaxDependencyResources) {
             destroyMaterializedResources();
             return fail(
                 RenderGraphExecutionFailureStage::BuildExecutablePayload,
                 "RenderGraphExecutor::execute: pre-dispatch dependency range "
-                "exceeds kMaxDependencyBuffers");
+                "exceeds kMaxDependencyResources");
           }
           if (depRange.offset > executablePreDispatchDependencyBuffers.size() ||
               depRange.count > executablePreDispatchDependencyBuffers.size() -

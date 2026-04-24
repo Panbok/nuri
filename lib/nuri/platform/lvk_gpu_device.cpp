@@ -596,13 +596,14 @@ makeDependencyError(std::string_view context, std::string_view detail) {
 makeDependencyCountExceededError(std::string_view context) {
   std::array<char, 96> detail{};
   const int written = std::snprintf(
-      detail.data(), detail.size(), "dependency buffer count exceeds %u",
-      static_cast<unsigned>(kMaxDependencyBuffers));
+      detail.data(), detail.size(), "dependency resource count exceeds %u",
+      static_cast<unsigned>(kMaxDependencyResources));
   if (written > 0 && static_cast<size_t>(written) < detail.size()) {
     return makeDependencyError(
         context, std::string_view(detail.data(), static_cast<size_t>(written)));
   }
-  return makeDependencyError(context, "dependency buffer count exceeds limit");
+  return makeDependencyError(context,
+                             "dependency resource count exceeds limit");
 }
 
 constexpr std::array<uint8_t, 4> kSupportedAnisotropyLevels = {2u, 4u, 8u, 16u};
@@ -881,15 +882,16 @@ hasTimingReservation(const PassTimingReservation &reservation) noexcept {
          reservation.endQuery != kInvalidTimingQueryIndex;
 }
 
-void recycleTimingQueryPool(LvkGPUDevice::Impl &impl,
-                            TimingQueryPoolSlot &&pool) {
+template <typename Impl>
+void recycleTimingQueryPool(Impl &impl, TimingQueryPoolSlot &&pool) {
   if (pool.handle.valid()) {
     impl.availableTimingQueryPools.push_back(std::move(pool));
   }
 }
 
+template <typename Impl>
 [[nodiscard]] Result<TimingQueryPoolSlot, std::string>
-acquireTimingQueryPool(LvkGPUDevice::Impl &impl) {
+acquireTimingQueryPool(Impl &impl) {
   if (!impl.availableTimingQueryPools.empty()) {
     TimingQueryPoolSlot pool = std::move(impl.availableTimingQueryPools.back());
     impl.availableTimingQueryPools.pop_back();
@@ -914,8 +916,9 @@ acquireTimingQueryPool(LvkGPUDevice::Impl &impl) {
       TimingQueryPoolSlot{.handle = std::move(handle)});
 }
 
+template <typename Impl>
 PassTimingReservation
-reservePassTimingReservationLocked(LvkGPUDevice::Impl &impl,
+reservePassTimingReservationLocked(Impl &impl,
                                    ActiveGraphicsRecordingContext &context,
                                    const RenderPass &pass) {
   if (!impl.gpuTimingQueriesEnabled ||
@@ -948,7 +951,7 @@ reservePassTimingReservationLocked(LvkGPUDevice::Impl &impl,
   return reservation;
 }
 
-void collectCompletedGpuTimingSubmissions(LvkGPUDevice::Impl &impl) {
+template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
   if (!impl.context || impl.pendingGpuTimingSubmissions.empty()) {
     return;
   }
@@ -967,7 +970,7 @@ void collectCompletedGpuTimingSubmissions(LvkGPUDevice::Impl &impl) {
     }
 
     GpuTimingReport completedReport{};
-    completedReport.sourceFrameIndex = pending.frameIndex;
+    completedReport.shadowSourceFrameIndex = pending.frameIndex;
     bool hadShadowSdsmRange = false;
     double shadowTimeMs = 0.0;
     double shadowDepthTimeMs = 0.0;
@@ -975,13 +978,14 @@ void collectCompletedGpuTimingSubmissions(LvkGPUDevice::Impl &impl) {
     bool shadowTimingAvailable = false;
     bool shadowDepthTimingAvailable = false;
     bool shadowSdsmTimingAvailable = false;
+    std::vector<uint64_t> queryData;
     for (const PendingTimingQueryRange &range : pending.timingRanges) {
       hadShadowSdsmRange =
           hadShadowSdsmRange || range.scope == GpuTimingScope::ShadowSdsm;
       if (range.intervalCount == 0u || !pending.pool.handle.valid()) {
         continue;
       }
-      std::vector<uint64_t> queryData(range.intervalCount * 2u, 0u);
+      queryData.assign(range.intervalCount * 2u, 0u);
       const bool queryResultOk = impl.context->getQueryPoolResults(
           pending.pool.handle, range.firstQuery, range.intervalCount * 2u,
           queryData.size() * sizeof(uint64_t), queryData.data(),
@@ -1022,18 +1026,21 @@ void collectCompletedGpuTimingSubmissions(LvkGPUDevice::Impl &impl) {
 
     if (shadowTimingAvailable) {
       completedReport.shadowTimeMs = static_cast<float>(shadowTimeMs);
-      completedReport.availableScopeMask |= kGpuTimingScopeShadowBit;
-      completedReport.sourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::Shadow);
+      completedReport.shadowSourceFrameIndex = pending.frameIndex;
     }
     if (shadowDepthTimingAvailable) {
       completedReport.shadowDepthTimeMs = static_cast<float>(shadowDepthTimeMs);
       completedReport.shadowDepthSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |= kGpuTimingScopeShadowDepthBit;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::ShadowDepth);
     }
     if (shadowSdsmTimingAvailable) {
       completedReport.shadowSdsmTimeMs = static_cast<float>(shadowSdsmTimeMs);
       completedReport.shadowSdsmSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |= kGpuTimingScopeShadowSdsmBit;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
       if (!impl.loggedShadowSdsmTimingCollectionDiagnostic) {
         impl.loggedShadowSdsmTimingCollectionDiagnostic = true;
         NURI_LOG_INFO(
@@ -1145,10 +1152,6 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
         deviceFeatures.textureCompressionETC2 == VK_TRUE;
     device->impl_->compressionCaps.astc =
         deviceFeatures.textureCompressionASTC_LDR == VK_TRUE;
-    device->impl_->gpuTimingTimestampPeriodToMs =
-        device->impl_->context->getTimestampPeriodToMs();
-    device->impl_->gpuTimingQueriesEnabled =
-        device->impl_->gpuTimingTimestampPeriodToMs > 0.0;
     if (deviceFeatures.samplerAnisotropy == VK_TRUE &&
         properties.limits.maxSamplerAnisotropy > 1.0f) {
       device->impl_->maxSamplerAnisotropy = static_cast<uint8_t>(std::clamp(
@@ -2254,7 +2257,7 @@ void LvkGPUDevice::releaseGeometry(GeometryAllocationHandle h) {
 Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
     lvk::ICommandBuffer &commandBuffer, std::span<const RenderPass> passes,
     std::span<const PassTimingReservation> passTimings) {
-  static_assert(kMaxDependencyBuffers <=
+  static_assert(kMaxDependencyResources <=
                 lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES);
   if (passes.empty()) {
     return Result<bool, std::string>::makeResult(true);
@@ -2272,8 +2275,8 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
              std::span<const TextureHandle> dependencyTextures,
              lvk::Dependencies &deps,
              std::string_view context) -> Result<bool, std::string> {
-    if (dependencyBuffers.size() > kMaxDependencyBuffers ||
-        dependencyTextures.size() > kMaxDependencyBuffers) {
+    if (dependencyBuffers.size() > kMaxDependencyResources ||
+        dependencyTextures.size() > kMaxDependencyResources) {
       return makeDependencyCountExceededError(context);
     }
 
@@ -3245,7 +3248,7 @@ bool LvkGPUDevice::isSubmissionComplete(SubmissionHandle handle) const {
 Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
     std::span<const ComputeDispatchItem> dispatches) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DISPATCH);
-  static_assert(kMaxDependencyBuffers <=
+  static_assert(kMaxDependencyResources <=
                 lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES);
   if (dispatches.empty()) {
     return Result<bool, std::string>::makeResult(true);
@@ -3257,7 +3260,7 @@ Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
       [this](std::span<const BufferHandle> dependencyBuffers,
              lvk::Dependencies &deps,
              std::string_view context) -> Result<bool, std::string> {
-    if (dependencyBuffers.size() > kMaxDependencyBuffers) {
+    if (dependencyBuffers.size() > kMaxDependencyResources) {
       return makeDependencyCountExceededError(context);
     }
 
