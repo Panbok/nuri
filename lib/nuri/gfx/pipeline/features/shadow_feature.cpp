@@ -2,6 +2,8 @@
 
 #include "nuri/gfx/pipeline/features/shadow_feature.h"
 
+#include "nuri/core/profiling.h"
+
 namespace nuri {
 
 bool ShadowDepthPass::isEnabled(const FrameBuildContext &ctx) const {
@@ -10,6 +12,7 @@ bool ShadowDepthPass::isEnabled(const FrameBuildContext &ctx) const {
 }
 
 Result<bool, std::string> ShadowDepthPass::build(FrameBuildContext &ctx) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   return renderer_.appendShadowDepthPasses(ctx.frame, ctx.graph);
 }
 
@@ -24,10 +27,12 @@ ShadowFeature::ShadowFeature(GPUDevice &gpu, const ShadowRendererConfig &config,
 
 Result<bool, std::string>
 ShadowFeature::publishFrameData(FrameBuildContext &ctx) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   return renderer_->publishFrameData(ctx.frame);
 }
 
 Result<bool, std::string> ShadowFeature::prepare(FrameBuildContext &ctx) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   return renderer_->prepareShadowGraphPasses(ctx.frame);
 }
 

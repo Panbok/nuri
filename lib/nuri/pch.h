@@ -26,6 +26,7 @@
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <queue>
 #include <span>
 #include <sstream>
 #include <stdexcept>

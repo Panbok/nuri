@@ -796,6 +796,78 @@ inline void enforceMonotonicShadowSplitDepths(
 }
 
 [[nodiscard]] inline DirectionalShadowFit
+fitDirectionalShadowCascadeSliceWithCasterDepthBounds(
+    const CameraFrameState &camera, float splitNear, float splitFar,
+    const glm::mat4 &lightView, uint32_t shadowMapSize,
+    bool hasCasterLightDepthBounds, glm::vec2 casterLightDepthBounds,
+    bool stabilize = false) {
+  DirectionalShadowFit fit{};
+  fit.splitNear = std::max(splitNear, 0.01f);
+  fit.splitFar = std::max(fit.splitNear + 0.01f, splitFar);
+  fit.frustumCorners =
+      computeCameraSliceCorners(camera, fit.splitNear, fit.splitFar);
+
+  for (const glm::vec3 corner : fit.frustumCorners) {
+    fit.frustumCenter += corner;
+  }
+  fit.frustumCenter /= static_cast<float>(fit.frustumCorners.size());
+
+  float radius = 0.0f;
+  for (const glm::vec3 corner : fit.frustumCorners) {
+    radius = std::max(radius, glm::length(corner - fit.frustumCenter));
+  }
+  radius = std::max(radius, 1.0f);
+
+  fit.lightView = lightView;
+  const glm::mat4 inverseLightView = glm::inverse(fit.lightView);
+  const glm::vec3 lightSpaceCenter =
+      glm::vec3(fit.lightView * glm::vec4(fit.frustumCenter, 1.0f));
+
+  glm::vec3 lightMin(lightSpaceCenter.x - radius, lightSpaceCenter.y - radius,
+                     std::numeric_limits<float>::max());
+  glm::vec3 lightMax(lightSpaceCenter.x + radius, lightSpaceCenter.y + radius,
+                     std::numeric_limits<float>::lowest());
+
+  const auto accumulateDepth = [&](glm::vec3 point) {
+    const float z = glm::vec3(fit.lightView * glm::vec4(point, 1.0f)).z;
+    lightMin.z = std::min(lightMin.z, z);
+    lightMax.z = std::max(lightMax.z, z);
+  };
+  for (const glm::vec3 corner : fit.frustumCorners) {
+    accumulateDepth(corner);
+  }
+  if (hasCasterLightDepthBounds) {
+    const float casterMin =
+        std::min(casterLightDepthBounds.x, casterLightDepthBounds.y);
+    const float casterMax =
+        std::max(casterLightDepthBounds.x, casterLightDepthBounds.y);
+    lightMin.z = std::min(lightMin.z, casterMin);
+    lightMax.z = std::max(lightMax.z, casterMax);
+  }
+  if (!std::isfinite(lightMin.z) || !std::isfinite(lightMax.z)) {
+    lightMin.z = lightSpaceCenter.z - radius;
+    lightMax.z = lightSpaceCenter.z + radius;
+  }
+
+  stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, stabilize, fit,
+                       inverseLightView);
+  quantizeShadowZBounds(lightMin, lightMax, fit.texelWorldSize, stabilize);
+  const float depth = std::max(lightMax.z - lightMin.z, 0.01f);
+  const float depthPadding = std::max(depth * 0.01f, 0.01f);
+  const float nearPlane = -lightMax.z - depthPadding;
+  float farPlane = -lightMin.z + depthPadding;
+  if (farPlane <= nearPlane + 0.01f) {
+    farPlane = nearPlane + 0.01f;
+  }
+  fit.lightProj = glm::orthoRH_ZO(lightMin.x, lightMax.x, lightMin.y,
+                                  lightMax.y, nearPlane, farPlane);
+  fit.lightViewProj = fit.lightProj * fit.lightView;
+  fit.lightSpaceBoundsMin = glm::vec3(lightMin.x, lightMin.y, -farPlane);
+  fit.lightSpaceBoundsMax = glm::vec3(lightMax.x, lightMax.y, -nearPlane);
+  return fit;
+}
+
+[[nodiscard]] inline DirectionalShadowFit
 fitSingleDirectionalShadowMap(const CameraFrameState &camera,
                               glm::vec3 lightDirection, float maxDistance,
                               uint32_t shadowMapSize, bool stabilize = false) {

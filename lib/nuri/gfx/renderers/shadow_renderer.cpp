@@ -2,7 +2,9 @@
 
 #include "nuri/gfx/renderers/shadow_renderer.h"
 
+#include "nuri/core/containers/hash_map.h"
 #include "nuri/core/log.h"
+#include "nuri/core/profiling.h"
 #include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/resources/gpu/resource_manager.h"
@@ -17,21 +19,33 @@ constexpr std::string_view kShadowPassLabel = "ShadowDepthPass";
 constexpr std::string_view kShadowMeshLabel = "ShadowCasterMesh";
 constexpr std::string_view kShadowPreviewPassLabel = "ShadowDepthPreviewPass";
 constexpr std::string_view kShadowPreviewDrawLabel = "ShadowDepthPreview";
+constexpr std::string_view kShadowPassDependencyBufferLabel =
+    "ShadowDepthPass.dependency_buffer";
+constexpr std::string_view kShadowPassDependencyTextureLabel =
+    "ShadowDepthPass.dependency_texture";
+constexpr std::string_view kShadowPassDrawBufferLabel =
+    "ShadowDepthPass.draw_buffer";
 constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr uint32_t kShadowPreviewFlagInvert = 1u << 0u;
 constexpr uint32_t kShadowPreviewFlagLog = 1u << 1u;
 constexpr uint32_t kShadowPreviewFlagTiled = 1u << 2u;
 constexpr float kCullingPaddingTexelMultiplier = 2.0f;
-constexpr float kStaticOnlyGuardBandShadowMapFraction = 5.0f / 8.0f;
-constexpr float kStaticOnlyGuardBandMaxTexels = 5120.0f;
-constexpr float kStaticOnlyGuardBandMinTexels = 16.0f;
-constexpr float kStaticOnlyDepthGuardBandShadowMapFraction = 7.0f / 16.0f;
-constexpr float kStaticOnlyDepthGuardBandMaxTexels = 3584.0f;
-constexpr float kStaticOnlyDepthGuardBandMinTexels = 8.0f;
+constexpr uint32_t kStaticCasterLightGridResolution = 64u;
+constexpr uint32_t kStaticCasterLightGridDepthResolution = 16u;
+constexpr uint32_t kStaticCasterLightGridMaxCellsPerCaster = 128u;
+constexpr size_t kStaticCasterLightGridSortedCandidateLimit = 1024u;
+constexpr uint32_t kStaticBatchOverlapEmitMinInstances = 4u;
+constexpr float kStaticOnlyGuardBandShadowMapFraction = 1.0f / 32.0f;
+constexpr float kStaticOnlyGuardBandMaxTexels = 512.0f;
+constexpr float kStaticOnlyGuardBandMinTexels = 8.0f;
+constexpr float kStaticOnlyDepthGuardBandShadowMapFraction = 1.0f / 64.0f;
+constexpr float kStaticOnlyDepthGuardBandMaxTexels = 256.0f;
+constexpr float kStaticOnlyDepthGuardBandMinTexels = 4.0f;
 constexpr float kStaticOnlyAdaptiveGuardBandMotionMultiplier = 2.25f;
-constexpr float kStaticOnlyAdaptiveGuardBandMaxShadowMapFraction = 2.0f;
-constexpr float kStaticOnlyAdaptiveDepthGuardBandMaxShadowMapFraction = 2.0f;
+constexpr float kStaticOnlyAdaptiveGuardBandMaxShadowMapFraction = 1.0f / 8.0f;
+constexpr float kStaticOnlyAdaptiveDepthGuardBandMaxShadowMapFraction =
+    1.0f / 16.0f;
 constexpr float kStaticOnlyPredictiveCenterMotionMultiplier = 1.0f;
 constexpr float kStaticOnlyPredictiveExtentGrowthFraction = 1.0f / 3.0f;
 constexpr float kStaticOnlyPredictiveTrailingGuardFraction = 3.0f / 8.0f;
@@ -41,6 +55,38 @@ constexpr uint64_t kSdsmDiagnosticRefreshFrames = 120u;
 constexpr float kSdsmHistogramClearDepthEpsilon = 1.0e-4f;
 constexpr uint32_t kMinSdsmReduceResultRingCount = 16u;
 constexpr uint32_t kSdsmGpuWarmupGraceMissFrames = 2u;
+
+[[nodiscard]] constexpr std::string_view
+shadowCascadePassLabel(uint32_t cascadeIndex) {
+  switch (cascadeIndex) {
+  case 0u:
+    return "ShadowDepthPass.Cascade0";
+  case 1u:
+    return "ShadowDepthPass.Cascade1";
+  case 2u:
+    return "ShadowDepthPass.Cascade2";
+  case 3u:
+    return "ShadowDepthPass.Cascade3";
+  default:
+    return kShadowPassLabel;
+  }
+}
+
+[[nodiscard]] constexpr std::string_view
+shadowCascadeTextureImportName(uint32_t cascadeIndex) {
+  switch (cascadeIndex) {
+  case 0u:
+    return "shadow_depth_map_cascade0";
+  case 1u:
+    return "shadow_depth_map_cascade1";
+  case 2u:
+    return "shadow_depth_map_cascade2";
+  case 3u:
+    return "shadow_depth_map_cascade3";
+  default:
+    return "shadow_depth_map_cascade";
+  }
+}
 
 [[nodiscard]] float
 elapsedMilliseconds(std::chrono::steady_clock::time_point begin,
@@ -163,6 +209,130 @@ template <typename T>
   return lhs.index == rhs.index && lhs.generation == rhs.generation;
 }
 
+[[nodiscard]] bool isSamePipelineHandle(RenderPipelineHandle lhs,
+                                        RenderPipelineHandle rhs) {
+  return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
+struct ShadowBatchKey {
+  uint32_t cascadeIndex = 0u;
+  bool dynamicCaster = false;
+  RenderPipelineHandle pipeline{};
+  BufferHandle vertexBuffer{};
+  BufferHandle indexBuffer{};
+  uint64_t indexBufferOffset = 0u;
+  IndexFormat indexFormat = IndexFormat::U32;
+  uint32_t indexCount = 0u;
+  uint32_t firstIndex = 0u;
+  uint64_t vertexBufferAddress = 0u;
+  uint64_t vertexDecodeBufferAddress = 0u;
+  uint32_t vertexDecodeIndex = 0u;
+  uint32_t packedVertexFormat = 0u;
+  uint32_t materialIndex = 0u;
+
+  bool operator==(const ShadowBatchKey &other) const noexcept {
+    return cascadeIndex == other.cascadeIndex &&
+           dynamicCaster == other.dynamicCaster &&
+           isSamePipelineHandle(pipeline, other.pipeline) &&
+           isSameBufferHandle(vertexBuffer, other.vertexBuffer) &&
+           isSameBufferHandle(indexBuffer, other.indexBuffer) &&
+           indexBufferOffset == other.indexBufferOffset &&
+           indexFormat == other.indexFormat && indexCount == other.indexCount &&
+           firstIndex == other.firstIndex &&
+           vertexBufferAddress == other.vertexBufferAddress &&
+           vertexDecodeBufferAddress == other.vertexDecodeBufferAddress &&
+           vertexDecodeIndex == other.vertexDecodeIndex &&
+           packedVertexFormat == other.packedVertexFormat &&
+           materialIndex == other.materialIndex;
+  }
+};
+
+struct ShadowBatchKeyHash {
+  size_t operator()(const ShadowBatchKey &key) const noexcept {
+    uint64_t hash = kFnvOffsetBasis64;
+    hash = hashCombine64(hash, key.cascadeIndex);
+    hash = hashCombine64(hash, key.dynamicCaster ? 1ull : 0ull);
+    hash = hashCombine64(
+        hash, foldHandle(key.pipeline.index, key.pipeline.generation));
+    hash = hashCombine64(
+        hash, foldHandle(key.vertexBuffer.index, key.vertexBuffer.generation));
+    hash = hashCombine64(
+        hash, foldHandle(key.indexBuffer.index, key.indexBuffer.generation));
+    hash = hashCombine64(hash, key.indexBufferOffset);
+    hash = hashCombine64(hash, static_cast<uint64_t>(key.indexFormat));
+    hash = hashCombine64(hash, (static_cast<uint64_t>(key.indexCount) << 32u) |
+                                   key.firstIndex);
+    hash = hashCombine64(hash, key.vertexBufferAddress);
+    hash = hashCombine64(hash, key.vertexDecodeBufferAddress);
+    hash = hashCombine64(hash,
+                         (static_cast<uint64_t>(key.vertexDecodeIndex) << 32u) |
+                             key.packedVertexFormat);
+    hash = hashCombine64(hash, key.materialIndex);
+    return static_cast<size_t>(hash);
+  }
+};
+
+struct ShadowBatchEntry {
+  ShadowBatchKey key{};
+  uint32_t firstInstance = 0u;
+  uint32_t inlineInstanceIndex = 0u;
+  uint32_t instanceCount = 0u;
+  const uint32_t *externalInstanceIndices = nullptr;
+  uint32_t externalInstanceCount = 0u;
+  std::pmr::vector<uint32_t> instanceIndices;
+
+  explicit ShadowBatchEntry(std::pmr::memory_resource *memory)
+      : instanceIndices(resolveMemoryResource(memory)) {}
+
+  void materializeInstances(uint32_t reserveHint = 0u) {
+    if (!instanceIndices.empty()) {
+      return;
+    }
+
+    instanceIndices.reserve(
+        std::max<size_t>(reserveHint, std::max(instanceCount, 2u)));
+    if (externalInstanceCount != 0u) {
+      instanceIndices.insert(instanceIndices.end(), externalInstanceIndices,
+                             externalInstanceIndices + externalInstanceCount);
+      externalInstanceIndices = nullptr;
+      externalInstanceCount = 0u;
+    } else if (instanceCount != 0u) {
+      instanceIndices.push_back(inlineInstanceIndex);
+    }
+  }
+
+  void appendInstance(uint32_t instanceIndex, uint32_t reserveHint = 0u) {
+    if (instanceCount == 0u) {
+      inlineInstanceIndex = instanceIndex;
+      instanceCount = 1u;
+      return;
+    }
+
+    materializeInstances(std::max(reserveHint, instanceCount + 1u));
+    instanceIndices.push_back(instanceIndex);
+    ++instanceCount;
+  }
+
+  void appendInstances(std::span<const uint32_t> indices) {
+    const uint32_t addedCount = static_cast<uint32_t>(
+        std::min<size_t>(indices.size(), std::numeric_limits<uint32_t>::max()));
+    if (addedCount == 0u) {
+      return;
+    }
+    if (instanceCount == 0u) {
+      externalInstanceIndices = indices.data();
+      externalInstanceCount = addedCount;
+      instanceCount = addedCount;
+      return;
+    }
+
+    materializeInstances(instanceCount + addedCount);
+    instanceIndices.insert(instanceIndices.end(), indices.begin(),
+                           indices.end());
+    instanceCount += addedCount;
+  }
+};
+
 [[nodiscard]] std::string_view shadowSdsmModeName(ShadowSdsmMode mode) {
   switch (mode) {
   case ShadowSdsmMode::Disabled:
@@ -278,9 +448,11 @@ template <typename T>
 hashShadowSettings(uint64_t hash,
                    const RenderSettings::ShadowSettings &settings) {
   hash = hashCombineValue(hash, settings.enabled);
+  hash = hashCombineValue(hash, settings.qualityPreset);
   hash = hashCombineValue(hash, settings.cascadeCount);
   hash = hashCombineValue(hash, settings.shadowMapSize);
   hash = hashCombineValue(hash, settings.maxDistance);
+  hash = hashCombineValue(hash, settings.maxDistanceFadeFraction);
   hash = hashCombineValue(hash, settings.splitMode);
   hash = hashCombineValue(hash, settings.splitLambda);
   hash = hashCombineValue(hash, settings.stabilizeCascades);
@@ -456,6 +628,10 @@ hashCascadeState(uint64_t hash, const ShadowCascadeDebugFrameData &cascade,
   hash =
       hashCombineValue(hash, metrics.staticOnlyReuseMissAdaptiveRefreshCount);
   hash = hashCombineValue(hash, metrics.cascadeTextureBytes);
+  hash = hashCombineValue(hash, metrics.minCascadeTexelWorldSize);
+  hash = hashCombineValue(hash, metrics.averageCascadeTexelWorldSize);
+  hash = hashCombineValue(hash, metrics.maxCascadeTexelWorldSize);
+  hash = hashCombineValue(hash, metrics.farCascadeTexelWorldSize);
   hash = hashCombineValue(hash, metrics.filterSampleBudget);
   hash = hashCombineValue(hash, metrics.pcssBlockerSampleBudget);
   hash = hashCombineValue(hash, metrics.pcssFilterSampleBudget);
@@ -533,6 +709,19 @@ void appendUniqueBufferDependency(
       .handle = handle,
       .mode = mode,
   });
+}
+
+void appendUniqueBufferHandle(std::pmr::vector<BufferHandle> &buffers,
+                              BufferHandle handle) {
+  if (!nuri::isValid(handle)) {
+    return;
+  }
+  for (const BufferHandle existing : buffers) {
+    if (isSameBufferHandle(existing, handle)) {
+      return;
+    }
+  }
+  buffers.push_back(handle);
 }
 
 void appendUniqueTextureDependency(
@@ -1174,16 +1363,48 @@ void applyStaticOnlyGuardBand(
       fit.lightSpaceBoundsMax, cullingPadding);
 }
 
+[[nodiscard]] bool lightSpaceBoundsOverlap(glm::vec3 casterMin,
+                                           glm::vec3 casterMax,
+                                           glm::vec3 cascadeMin,
+                                           glm::vec3 cascadeMax,
+                                           float padding) {
+  const glm::vec3 normalizedCasterMin = glm::min(casterMin, casterMax);
+  const glm::vec3 normalizedCasterMax = glm::max(casterMin, casterMax);
+  casterMin = normalizedCasterMin;
+  casterMax = normalizedCasterMax;
+  const glm::vec3 normalizedCascadeMin = glm::min(cascadeMin, cascadeMax);
+  const glm::vec3 normalizedCascadeMax = glm::max(cascadeMin, cascadeMax);
+  cascadeMin = normalizedCascadeMin - glm::vec3(padding);
+  cascadeMax = normalizedCascadeMax + glm::vec3(padding);
+  return casterMax.x >= cascadeMin.x && casterMin.x <= cascadeMax.x &&
+         casterMax.y >= cascadeMin.y && casterMin.y <= cascadeMax.y &&
+         casterMax.z >= cascadeMin.z && casterMin.z <= cascadeMax.z;
+}
+
+[[nodiscard]] bool normalizedLightSpaceBoundsOverlap(
+    const glm::vec3 &casterMin, const glm::vec3 &casterMax,
+    const glm::vec3 &cascadeMin, const glm::vec3 &cascadeMax) {
+  return casterMax.x >= cascadeMin.x && casterMin.x <= cascadeMax.x &&
+         casterMax.y >= cascadeMin.y && casterMin.y <= cascadeMax.y &&
+         casterMax.z >= cascadeMin.z && casterMin.z <= cascadeMax.z;
+}
+
 [[nodiscard]] bool staticOnlyRenderedFitContainsCurrent(
     const shadow_detail::DirectionalShadowFit &renderedFit,
     const shadow_detail::DirectionalShadowFit &currentFit) {
-  return shadow_detail::directionalShadowFitContains(renderedFit, currentFit) &&
-         shadow_detail::nearlyEqualShadowValue(
-             renderedFit.splitNear, currentFit.splitNear,
-             shadow_detail::kShadowStabilizationCompatibilityEpsilon) &&
-         shadow_detail::nearlyEqualShadowValue(
-             renderedFit.splitFar, currentFit.splitFar,
-             shadow_detail::kShadowStabilizationCompatibilityEpsilon);
+  return shadow_detail::directionalShadowFitContains(renderedFit, currentFit);
+}
+
+[[nodiscard]] shadow_detail::DirectionalShadowFit
+makeStaticOnlyReuseFitForCurrentFrame(
+    const shadow_detail::DirectionalShadowFit &cachedRenderedFit,
+    const shadow_detail::DirectionalShadowFit &currentRawFit) {
+  shadow_detail::DirectionalShadowFit fit = cachedRenderedFit;
+  fit.splitNear = currentRawFit.splitNear;
+  fit.splitFar = currentRawFit.splitFar;
+  fit.frustumCenter = currentRawFit.frustumCenter;
+  fit.frustumCorners = currentRawFit.frustumCorners;
+  return fit;
 }
 
 void writeShadowCascadeFit(const shadow_detail::DirectionalShadowFit &fit,
@@ -1468,12 +1689,28 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       instanceMatricesRing_(memory_), instanceRemapRing_(memory_),
       shadowFrameRing_(memory_), sdsmReduceResultRing_(memory_),
       instanceDataRingUploadVersions_(memory_),
+      instanceRemapUploadSignatures_(memory_),
       shadowFrameUploadSignatures_(memory_),
       sdsmReduceResultRingPublishedFrames_(memory_),
       meshDrawTemplates_(memory_), staticShadowTemplateIndices_(memory_),
       dynamicShadowTemplateIndices_(memory_), staticShadowCasterCache_(memory_),
+      staticShadowBatchTemplates_(memory_),
+      staticShadowBatchInstanceIndices_(memory_),
+      staticShadowCasterDrawBuffers_(memory_),
+      staticShadowCasterFitPoints_(memory_),
+      staticShadowCasterLightSpaceBounds_(memory_),
+      staticShadowBatchLightSpaceBounds_(memory_),
+      staticShadowCasterLightGridCells_(memory_),
+      staticShadowCasterLightGridEntries_(memory_),
+      staticShadowCasterLargeLightGridEntries_(memory_),
+      staticShadowCasterLightGridQueryMarks_(memory_),
+      staticShadowCasterLightGridQueryEntries_(memory_),
       instanceMatrices_(memory_), instanceRemap_(memory_),
-      passBufferDependencies_(memory_), passTextureDependencies_(memory_),
+      passBufferDependencies_(memory_), passDependencyBuffers_(memory_),
+      passDependencyBufferAccessModes_(memory_),
+      passDependencyBufferBindings_(memory_),
+      passDependencyTextureBindings_(memory_), preResolvedDrawBuffers_(memory_),
+      preResolvedDrawBufferIds_(memory_), passTextureDependencies_(memory_),
       previewTextureDependencies_(memory_), sdsmReadbackBuffer_(memory_) {
   sdsmReadbackBuffer_.resize(
       static_cast<size_t>(kSdsmHistogramSourceMaxTexelCount) * sizeof(float) *
@@ -2014,6 +2251,8 @@ ShadowRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   }
   instanceDataRingUploadVersions_.resize(safeCount,
                                          std::numeric_limits<uint64_t>::max());
+  instanceRemapUploadSignatures_.resize(safeCount,
+                                        std::numeric_limits<uint64_t>::max());
   shadowFrameUploadSignatures_.resize(safeCount,
                                       std::numeric_limits<uint64_t>::max());
   return Result<bool, std::string>::makeResult(true);
@@ -2076,7 +2315,7 @@ Result<bool, std::string>
 ShadowRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
   return ensureRingCapacity(instanceRemapRing_, requiredBytes,
                             "shadow_instance_remap",
-                            instanceDataRingUploadVersions_);
+                            instanceRemapUploadSignatures_);
 }
 
 Result<bool, std::string>
@@ -2156,6 +2395,7 @@ Result<bool, std::string>
 ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
                                   const ResourceManager &resources,
                                   uint32_t materialCount) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   (void)materialCount;
   meshDrawTemplates_.clear();
   staticShadowTemplateIndices_.clear();
@@ -2260,7 +2500,33 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
 Result<bool, std::string>
 ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
                                                const RenderSettings &settings) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   staticShadowCasterCache_.clear();
+  staticShadowBatchTemplates_.clear();
+  staticShadowBatchInstanceIndices_.clear();
+  staticShadowCasterDrawBuffers_.clear();
+  staticShadowCasterFitPoints_.clear();
+  staticShadowCasterLightSpaceBounds_.clear();
+  staticShadowBatchLightSpaceBounds_.clear();
+  staticShadowCasterLightGridCells_.clear();
+  staticShadowCasterLightGridEntries_.clear();
+  staticShadowCasterLargeLightGridEntries_.clear();
+  staticShadowCasterLightGridQueryMarks_.clear();
+  staticShadowCasterLightGridQueryEntries_.clear();
+  staticShadowCasterLightGridQueryMarker_ = 1u;
+  staticShadowCasterLightGrid_ = {};
+  staticShadowCasterBoundsMin_ = glm::vec3(std::numeric_limits<float>::max());
+  staticShadowCasterBoundsMax_ =
+      glm::vec3(std::numeric_limits<float>::lowest());
+  staticShadowCasterLightSpaceBoundsMin_ =
+      glm::vec3(std::numeric_limits<float>::max());
+  staticShadowCasterLightSpaceBoundsMax_ =
+      glm::vec3(std::numeric_limits<float>::lowest());
+  staticShadowCasterCacheContentSignature_ = kFnvOffsetBasis64;
+  staticShadowCasterCacheIndexCountEstimate_ = 0u;
+  hasStaticShadowCasterBounds_ = false;
+  hasStaticShadowCasterLightDepthBounds_ = false;
+  hasStaticShadowCasterLightSpaceBounds_ = false;
   if (staticShadowTemplateIndices_.empty()) {
     staticShadowCasterCacheValid_ = true;
     return Result<bool, std::string>::makeResult(true);
@@ -2270,6 +2536,51 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
   const bool enableCascadeCasterCulling =
       settings.shadow.debug.enableCascadeCasterCulling;
   staticShadowCasterCache_.reserve(staticShadowTemplateIndices_.size());
+  staticShadowBatchTemplates_.reserve(staticShadowTemplateIndices_.size());
+  staticShadowCasterDrawBuffers_.reserve(staticShadowTemplateIndices_.size() *
+                                         2u);
+  staticShadowCasterFitPoints_.reserve(staticShadowTemplateIndices_.size() *
+                                       8u);
+  const auto selectShadowPipeline =
+      [&](bool doubleSided, bool alphaMasked) -> RenderPipelineHandle {
+    if (alphaMasked) {
+      return doubleSided && nuri::isValid(shadowAlphaDoubleSidedPipelineHandle_)
+                 ? shadowAlphaDoubleSidedPipelineHandle_
+                 : shadowAlphaPipelineHandle_;
+    }
+    return doubleSided && nuri::isValid(shadowDoubleSidedPipelineHandle_)
+               ? shadowDoubleSidedPipelineHandle_
+               : shadowPipelineHandle_;
+  };
+  const auto sameStaticBatch = [](const StaticShadowBatchTemplate &lhs,
+                                  const StaticShadowBatchTemplate &rhs) {
+    return isSamePipelineHandle(lhs.pipeline, rhs.pipeline) &&
+           isSameBufferHandle(lhs.vertexBuffer, rhs.vertexBuffer) &&
+           isSameBufferHandle(lhs.indexBuffer, rhs.indexBuffer) &&
+           lhs.indexBufferOffset == rhs.indexBufferOffset &&
+           lhs.indexFormat == rhs.indexFormat &&
+           lhs.indexCount == rhs.indexCount &&
+           lhs.firstIndex == rhs.firstIndex &&
+           lhs.vertexBufferAddress == rhs.vertexBufferAddress &&
+           lhs.vertexDecodeBufferAddress == rhs.vertexDecodeBufferAddress &&
+           lhs.vertexDecodeIndex == rhs.vertexDecodeIndex &&
+           lhs.packedVertexFormat == rhs.packedVertexFormat &&
+           lhs.materialIndex == rhs.materialIndex;
+  };
+  const auto resolveStaticBatchIndex =
+      [&](const StaticShadowBatchTemplate &candidate) {
+        for (uint32_t batchIndex = 0u;
+             batchIndex < staticShadowBatchTemplates_.size(); ++batchIndex) {
+          if (sameStaticBatch(staticShadowBatchTemplates_[batchIndex],
+                              candidate)) {
+            return batchIndex;
+          }
+        }
+        const uint32_t batchIndex =
+            static_cast<uint32_t>(staticShadowBatchTemplates_.size());
+        staticShadowBatchTemplates_.push_back(candidate);
+        return batchIndex;
+      };
   for (const uint32_t templateIndex : staticShadowTemplateIndices_) {
     if (templateIndex >= meshDrawTemplates_.size()) {
       return Result<bool, std::string>::makeError(
@@ -2308,14 +2619,74 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
         .hasCasterCullingBounds = false,
         .casterWorldCorners = {},
     };
-    if (enableCascadeCasterCulling) {
-      const BoundingBox worldBounds = entry.submesh->bounds.getTransformed(
-          renderables[entry.instanceIndex].modelMatrix);
-      cachedEntry.casterWorldCorners = shadow_detail::computeBoundsCorners(
-          worldBounds.min_, worldBounds.max_);
-      cachedEntry.hasCasterCullingBounds = true;
-    }
+    cachedEntry.rasterSignature =
+        hashStaticShadowCasterRasterSignature(kFnvOffsetBasis64, cachedEntry);
+    const StaticShadowBatchTemplate batchTemplate{
+        .pipeline = selectShadowPipeline(entry.doubleSided, entry.alphaMasked),
+        .vertexBuffer = cachedEntry.vertexBuffer,
+        .indexBuffer = cachedEntry.indexBuffer,
+        .indexBufferOffset = cachedEntry.indexBufferOffset,
+        .indexFormat = cachedEntry.indexFormat,
+        .indexCount = cachedEntry.indexCount,
+        .firstIndex = cachedEntry.firstIndex,
+        .vertexBufferAddress = cachedEntry.vertexBufferAddress,
+        .vertexDecodeBufferAddress = cachedEntry.vertexDecodeBufferAddress,
+        .vertexDecodeIndex = cachedEntry.vertexDecodeIndex,
+        .packedVertexFormat = cachedEntry.packedVertexFormat,
+        .materialIndex = cachedEntry.materialIndex,
+        .firstInstanceIndex = 0u,
+        .instanceCount = 0u,
+        .rasterSignature = kFnvOffsetBasis64,
+        .indexCountEstimate = 0u,
+    };
+    cachedEntry.batchIndex = resolveStaticBatchIndex(batchTemplate);
+    StaticShadowBatchTemplate &resolvedBatch =
+        staticShadowBatchTemplates_[cachedEntry.batchIndex];
+    ++resolvedBatch.instanceCount;
+    resolvedBatch.rasterSignature = hashCombine64(resolvedBatch.rasterSignature,
+                                                  cachedEntry.rasterSignature);
+    resolvedBatch.indexCountEstimate += cachedEntry.indexCount;
+    const BoundingBox worldBounds = entry.submesh->bounds.getTransformed(
+        renderables[entry.instanceIndex].modelMatrix);
+    cachedEntry.casterWorldCorners =
+        shadow_detail::computeBoundsCorners(worldBounds.min_, worldBounds.max_);
+    cachedEntry.hasCasterCullingBounds = enableCascadeCasterCulling;
+    staticShadowCasterFitPoints_.insert(staticShadowCasterFitPoints_.end(),
+                                        cachedEntry.casterWorldCorners.begin(),
+                                        cachedEntry.casterWorldCorners.end());
+    staticShadowCasterBoundsMin_ =
+        glm::min(staticShadowCasterBoundsMin_, worldBounds.min_);
+    staticShadowCasterBoundsMax_ =
+        glm::max(staticShadowCasterBoundsMax_, worldBounds.max_);
+    hasStaticShadowCasterBounds_ = true;
     staticShadowCasterCache_.push_back(cachedEntry);
+    staticShadowCasterCacheContentSignature_ = hashCombine64(
+        staticShadowCasterCacheContentSignature_, cachedEntry.rasterSignature);
+    staticShadowCasterCacheIndexCountEstimate_ += cachedEntry.indexCount;
+    appendUniqueBufferHandle(staticShadowCasterDrawBuffers_,
+                             cachedEntry.vertexBuffer);
+    appendUniqueBufferHandle(staticShadowCasterDrawBuffers_,
+                             cachedEntry.indexBuffer);
+  }
+
+  staticShadowBatchInstanceIndices_.resize(staticShadowCasterCache_.size());
+  uint32_t nextBatchInstanceIndex = 0u;
+  for (StaticShadowBatchTemplate &batch : staticShadowBatchTemplates_) {
+    batch.firstInstanceIndex = nextBatchInstanceIndex;
+    nextBatchInstanceIndex += batch.instanceCount;
+  }
+  std::pmr::vector<uint32_t> staticBatchWriteOffsets(memory_);
+  staticBatchWriteOffsets.reserve(staticShadowBatchTemplates_.size());
+  for (const StaticShadowBatchTemplate &batch : staticShadowBatchTemplates_) {
+    staticBatchWriteOffsets.push_back(batch.firstInstanceIndex);
+  }
+  for (const StaticShadowCasterCacheEntry &entry : staticShadowCasterCache_) {
+    NURI_ASSERT(entry.batchIndex < staticBatchWriteOffsets.size(),
+                "Static shadow caster references an invalid batch");
+    const uint32_t writeIndex = staticBatchWriteOffsets[entry.batchIndex]++;
+    NURI_ASSERT(writeIndex < staticShadowBatchInstanceIndices_.size(),
+                "Static shadow batch write offset is out of bounds");
+    staticShadowBatchInstanceIndices_[writeIndex] = entry.instanceIndex;
   }
 
   staticShadowCasterCacheValid_ = true;
@@ -2324,7 +2695,8 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
 
 Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     RenderFrameContext &frame, const RenderSettings::ShadowSettings &settings,
-    uint32_t shadowMapSize) {
+    uint32_t shadowMapSize, int32_t forcedMeshLod) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   shadowFrameCpuData_ = {};
   shadowDebugFrameData_ = {};
   currentRawShadowFits_ = {};
@@ -2643,14 +3015,75 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       glm::vec3(light.directionIlluminance), glm::vec3(0.0f, -1.0f, 0.0f));
   const AnimationSceneFrameData *animationSceneData =
       resolveAnimationSceneFrameData(frame);
-  std::pmr::vector<glm::vec3> casterPoints(memory_);
-  casterPoints.reserve(meshDrawTemplates_.size() * 8u);
+  const bool staticCasterCacheMatchesFrame =
+      frame.scene != nullptr &&
+      staticShadowCasterCacheTransformVersion_ ==
+          frame.scene->transformVersion() &&
+      staticShadowCasterCacheForcedMeshLod_ == forcedMeshLod;
+  const bool canUseStaticCasterFitCache = animationSceneData == nullptr &&
+                                          staticShadowCasterCacheValid_ &&
+                                          staticCasterCacheMatchesFrame;
+  const bool needCasterLightDepthBounds = cascadeCount > 1u;
+  const glm::mat4 casterLightView =
+      needCasterLightDepthBounds
+          ? shadow_detail::makeDirectionalLightView(lightDirection)
+          : glm::mat4(1.0f);
+  glm::vec2 casterLightDepthBounds(std::numeric_limits<float>::max(),
+                                   std::numeric_limits<float>::lowest());
+  bool hasCasterLightDepthBounds = false;
+  const auto combineCasterLightDepthBounds = [&](glm::vec2 bounds) {
+    if (bounds.x > bounds.y) {
+      return;
+    }
+    const float casterMin = std::min(bounds.x, bounds.y);
+    const float casterMax = std::max(bounds.x, bounds.y);
+    if (!std::isfinite(casterMin) || !std::isfinite(casterMax)) {
+      return;
+    }
+    casterLightDepthBounds.x = std::min(casterLightDepthBounds.x, casterMin);
+    casterLightDepthBounds.y = std::max(casterLightDepthBounds.y, casterMax);
+    hasCasterLightDepthBounds = true;
+  };
+  const auto computeCasterLightDepthBounds =
+      [&](std::span<const glm::vec3> points) {
+        glm::vec2 bounds(std::numeric_limits<float>::max(),
+                         std::numeric_limits<float>::lowest());
+        bool hasBounds = false;
+        for (const glm::vec3 point : points) {
+          const float z = glm::vec3(casterLightView * glm::vec4(point, 1.0f)).z;
+          if (!std::isfinite(z)) {
+            continue;
+          }
+          bounds.x = std::min(bounds.x, z);
+          bounds.y = std::max(bounds.y, z);
+          hasBounds = true;
+        }
+        return hasBounds ? bounds
+                         : glm::vec2(std::numeric_limits<float>::max(),
+                                     std::numeric_limits<float>::lowest());
+      };
+  const auto ensureStaticCasterLightDepthBounds = [&]() {
+    if (!needCasterLightDepthBounds || staticShadowCasterFitPoints_.empty()) {
+      hasStaticShadowCasterLightDepthBounds_ = false;
+      return;
+    }
+    if (hasStaticShadowCasterLightDepthBounds_ &&
+        rawBytesEqual(staticShadowCasterLightDepthDirection_, lightDirection)) {
+      return;
+    }
+    const glm::vec2 bounds = computeCasterLightDepthBounds(
+        std::span<const glm::vec3>(staticShadowCasterFitPoints_.data(),
+                                   staticShadowCasterFitPoints_.size()));
+    staticShadowCasterLightDepthDirection_ = lightDirection;
+    staticShadowCasterLightDepthBounds_ = bounds;
+    hasStaticShadowCasterLightDepthBounds_ = bounds.x <= bounds.y;
+  };
   BoundingBox casterBounds{};
   bool hasCasterBounds = false;
   bool hasAnimatedGeometryOverrides = false;
-  for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
+  const auto appendCasterFitBounds = [&](const MeshDrawTemplate &entry) {
     if (entry.renderable == nullptr || entry.submesh == nullptr) {
-      continue;
+      return;
     }
     bool usesAnimatedOverride = false;
     if (animationSceneData != nullptr &&
@@ -2666,17 +3099,51 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     }
     if (usesAnimatedOverride) {
       hasAnimatedGeometryOverrides = true;
-      continue;
+      return;
     }
     const BoundingBox worldBounds =
         entry.submesh->bounds.getTransformed(entry.renderable->modelMatrix);
-    const auto worldBoundsCorners =
-        shadow_detail::computeBoundsCorners(worldBounds.min_, worldBounds.max_);
-    casterPoints.insert(casterPoints.end(), worldBoundsCorners.begin(),
-                        worldBoundsCorners.end());
+    if (needCasterLightDepthBounds) {
+      const auto worldBoundsCorners = shadow_detail::computeBoundsCorners(
+          worldBounds.min_, worldBounds.max_);
+      combineCasterLightDepthBounds(computeCasterLightDepthBounds(
+          std::span<const glm::vec3, 8>(worldBoundsCorners)));
+    }
     casterBounds.combinePoint(worldBounds.min_);
     casterBounds.combinePoint(worldBounds.max_);
     hasCasterBounds = true;
+  };
+  {
+    NURI_PROFILER_ZONE("ShadowRenderer.update.static_caster_bounds",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    if (canUseStaticCasterFitCache && hasStaticShadowCasterBounds_) {
+      casterBounds.combinePoint(staticShadowCasterBoundsMin_);
+      casterBounds.combinePoint(staticShadowCasterBoundsMax_);
+      hasCasterBounds = true;
+      if (needCasterLightDepthBounds) {
+        ensureStaticCasterLightDepthBounds();
+        if (hasStaticShadowCasterLightDepthBounds_) {
+          combineCasterLightDepthBounds(staticShadowCasterLightDepthBounds_);
+        }
+      }
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+  {
+    NURI_PROFILER_ZONE("ShadowRenderer.update.dynamic_caster_bounds",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    if (canUseStaticCasterFitCache) {
+      for (const uint32_t templateIndex : dynamicShadowTemplateIndices_) {
+        if (templateIndex < meshDrawTemplates_.size()) {
+          appendCasterFitBounds(meshDrawTemplates_[templateIndex]);
+        }
+      }
+    } else {
+      for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
+        appendCasterFitBounds(entry);
+      }
+    }
+    NURI_PROFILER_ZONE_END();
   }
   shadowDebugFrameData_.cascadeCount = cascadeCount;
   if (sdsmMode == ShadowSdsmMode::Disabled) {
@@ -2782,6 +3249,44 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
             updateEffectiveSplitRange(effectiveSplitRange);
             minMaxSplitDepths = effectiveSplitDepths;
           };
+      const auto consumeCpuMinMaxSource = [&]() -> bool {
+        const TextureHandle sdsmTexture =
+            frame.sharedResources.sceneDepthPyramidTextures
+                [frame.sharedResources.sceneDepthPyramidLevelCount - 1u];
+        sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
+        if (!nuri::isValid(sdsmTexture)) {
+          reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
+                                         "invalid_source_texture");
+          return false;
+        }
+
+        std::array<std::byte, sizeof(float) * 2u> sdsmBytes{};
+        const TextureReadbackRegion readbackRegion{
+            .x = 0u,
+            .y = 0u,
+            .width = 1u,
+            .height = 1u,
+            .mipLevel = 0u,
+            .layer = 0u,
+        };
+        auto readResult =
+            gpu_.readTexture(sdsmTexture, readbackRegion, sdsmBytes);
+        if (readResult.hasError()) {
+          sdsmLog.readbackError = true;
+          reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
+                                         "source_readback_error");
+          return false;
+        }
+
+        sdsmLog.readbackError = false;
+        std::array<float, 2u> rawDeviceDepths{};
+        std::memcpy(rawDeviceDepths.data(), sdsmBytes.data(),
+                    sizeof(rawDeviceDepths));
+        consumeRawDeviceMinMax(rawDeviceDepths[0], rawDeviceDepths[1],
+                               "invalid_raw_device_depths",
+                               "invalid_raw_linear_depths");
+        return shadowDebugFrameData_.sdsm.status == ShadowSdsmStatus::Active;
+      };
 
       if (sdsmMode == ShadowSdsmMode::Histogram) {
         std::array<glm::uvec2, kMaxSceneDepthPyramidLevels> levelDimensions{};
@@ -3224,10 +3729,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
             if (!suppressGpuWarmupWarning) {
               activateReductionFallback(fallbackReason);
             }
-            reuseCachedSdsmRangeOrFallback(anyReadbackError
-                                               ? ShadowSdsmStatus::Invalid
-                                               : ShadowSdsmStatus::Stale,
-                                           fallbackReason);
+            (void)consumeCpuMinMaxSource();
           } else {
             sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
             sdsmState_.loggedGpuReductionFallbackWarning_ = false;
@@ -3248,38 +3750,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         } else {
           const auto reductionStart = std::chrono::steady_clock::now();
           sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
-          const TextureHandle sdsmTexture =
-              frame.sharedResources.sceneDepthPyramidTextures
-                  [frame.sharedResources.sceneDepthPyramidLevelCount - 1u];
-          sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
-          if (!nuri::isValid(sdsmTexture)) {
-            reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
-                                           "invalid_source_texture");
-          } else {
-            std::array<std::byte, sizeof(float) * 2u> sdsmBytes{};
-            const TextureReadbackRegion readbackRegion{
-                .x = 0u,
-                .y = 0u,
-                .width = 1u,
-                .height = 1u,
-                .mipLevel = 0u,
-                .layer = 0u,
-            };
-            auto readResult =
-                gpu_.readTexture(sdsmTexture, readbackRegion, sdsmBytes);
-            if (readResult.hasError()) {
-              sdsmLog.readbackError = true;
-              reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                             "source_readback_error");
-            } else {
-              std::array<float, 2u> rawDeviceDepths{};
-              std::memcpy(rawDeviceDepths.data(), sdsmBytes.data(),
-                          sizeof(rawDeviceDepths));
-              consumeRawDeviceMinMax(rawDeviceDepths[0], rawDeviceDepths[1],
-                                     "invalid_raw_device_depths",
-                                     "invalid_raw_linear_depths");
-            }
-          }
+          (void)consumeCpuMinMaxSource();
           frame.metrics.shadow.sdsmReductionSourceSamples = 1u;
           frame.metrics.shadow.sdsmCpuReductionTimeMs = elapsedMilliseconds(
               reductionStart, std::chrono::steady_clock::now());
@@ -3318,63 +3789,67 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                               frozenShadowLightId_ == selectedLightId &&
                               frozenShadowMapSize_ == shadowMapSize &&
                               frozenCascadeCount_ == cascadeCount;
-  if (reuseFrozenFit) {
-    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
-         ++cascadeIndex) {
-      const shadow_detail::DirectionalShadowFit &fit =
-          frozenShadowFits_[cascadeIndex];
-      currentRawShadowFits_[cascadeIndex] = fit;
-      writeShadowCascadeFit(fit, cascadeIndex, settings,
-                            frame.sharedResources.shadowCompareSamplerId,
-                            frame.sharedResources.shadowRawSamplerId,
-                            shadowDepthTextures_[cascadeIndex], gpu_,
-                            shadowFrameCpuData_, shadowDebugFrameData_);
-      if (settings.stabilizeCascades) {
-        cascadeStabilizationHistory_.fits[cascadeIndex] = fit;
+  {
+    NURI_PROFILER_ZONE("ShadowRenderer.update.fit_cascades",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    if (reuseFrozenFit) {
+      for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+           ++cascadeIndex) {
+        const shadow_detail::DirectionalShadowFit &fit =
+            frozenShadowFits_[cascadeIndex];
+        currentRawShadowFits_[cascadeIndex] = fit;
+        writeShadowCascadeFit(fit, cascadeIndex, settings,
+                              frame.sharedResources.shadowCompareSamplerId,
+                              frame.sharedResources.shadowRawSamplerId,
+                              shadowDepthTextures_[cascadeIndex], gpu_,
+                              shadowFrameCpuData_, shadowDebugFrameData_);
+        if (settings.stabilizeCascades) {
+          cascadeStabilizationHistory_.fits[cascadeIndex] = fit;
+        }
+      }
+    } else {
+      for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+           ++cascadeIndex) {
+        shadow_detail::DirectionalShadowFit fit{};
+        if (cascadeCount == 1u) {
+          fit = fitSingleShadowMapForRange(
+              frame.camera, effectiveSplitRange, lightDirection, shadowMapSize,
+              settings.stabilizeCascades, hasCasterBounds,
+              hasAnimatedGeometryOverrides, casterBounds.min_,
+              casterBounds.max_);
+        } else {
+          fit = shadow_detail::
+              fitDirectionalShadowCascadeSliceWithCasterDepthBounds(
+                  frame.camera, effectiveSplitDepths[cascadeIndex],
+                  effectiveSplitDepths[cascadeIndex + 1u], casterLightView,
+                  shadowMapSize,
+                  !hasAnimatedGeometryOverrides && hasCasterLightDepthBounds,
+                  casterLightDepthBounds, settings.stabilizeCascades);
+        }
+        if (canReuseCascadeStabilizationHistory) {
+          shadow_detail::applyDirectionalShadowFitHysteresis(
+              fit, cascadeStabilizationHistory_.fits[cascadeIndex],
+              shadowMapSize);
+        }
+        frozenShadowFits_[cascadeIndex] = fit;
+        currentRawShadowFits_[cascadeIndex] = fit;
+        writeShadowCascadeFit(fit, cascadeIndex, settings,
+                              frame.sharedResources.shadowCompareSamplerId,
+                              frame.sharedResources.shadowRawSamplerId,
+                              shadowDepthTextures_[cascadeIndex], gpu_,
+                              shadowFrameCpuData_, shadowDebugFrameData_);
+        if (settings.stabilizeCascades) {
+          cascadeStabilizationHistory_.fits[cascadeIndex] = fit;
+        }
+      }
+      if (freezeShadowFits) {
+        hasFrozenShadowFit_ = true;
+        frozenShadowLightId_ = selectedLightId;
+        frozenShadowMapSize_ = shadowMapSize;
+        frozenCascadeCount_ = cascadeCount;
       }
     }
-  } else {
-    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
-         ++cascadeIndex) {
-      shadow_detail::DirectionalShadowFit fit{};
-      if (cascadeCount == 1u) {
-        fit = fitSingleShadowMapForRange(
-            frame.camera, effectiveSplitRange, lightDirection, shadowMapSize,
-            settings.stabilizeCascades, hasCasterBounds,
-            hasAnimatedGeometryOverrides, casterBounds.min_, casterBounds.max_);
-      } else {
-        fit = shadow_detail::fitDirectionalShadowCascadeSlice(
-            frame.camera, effectiveSplitDepths[cascadeIndex],
-            effectiveSplitDepths[cascadeIndex + 1u], lightDirection,
-            shadowMapSize,
-            hasAnimatedGeometryOverrides
-                ? std::span<const glm::vec3>()
-                : std::span<const glm::vec3>(casterPoints.data(),
-                                             casterPoints.size()),
-            settings.stabilizeCascades);
-      }
-      if (canReuseCascadeStabilizationHistory) {
-        shadow_detail::applyDirectionalShadowFitHysteresis(
-            fit, cascadeStabilizationHistory_.fits[cascadeIndex],
-            shadowMapSize);
-      }
-      frozenShadowFits_[cascadeIndex] = fit;
-      currentRawShadowFits_[cascadeIndex] = fit;
-      writeShadowCascadeFit(fit, cascadeIndex, settings,
-                            frame.sharedResources.shadowCompareSamplerId,
-                            frame.sharedResources.shadowRawSamplerId,
-                            shadowDepthTextures_[cascadeIndex], gpu_,
-                            shadowFrameCpuData_, shadowDebugFrameData_);
-      if (settings.stabilizeCascades) {
-        cascadeStabilizationHistory_.fits[cascadeIndex] = fit;
-      }
-    }
-    if (freezeShadowFits) {
-      hasFrozenShadowFit_ = true;
-      frozenShadowLightId_ = selectedLightId;
-      frozenShadowMapSize_ = shadowMapSize;
-      frozenCascadeCount_ = cascadeCount;
-    }
+    NURI_PROFILER_ZONE_END();
   }
   if (settings.stabilizeCascades) {
     cascadeStabilizationHistory_.valid = true;
@@ -3512,12 +3987,56 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   shadowFrameCpuData_.filterParams = glm::uvec4(
       settings.pcfSampleCount, settings.pcssBlockerSampleCount,
       settings.pcssFilterSampleCount, settings.debug.poissonRotationSeed);
+  const float fadeEnd =
+      shadowDebugFrameData_.cascades[cascadeCount - 1u].splitFar;
+  const float fadeNear = shadowDebugFrameData_.cascades[0].splitNear;
+  const float fadeWidth =
+      std::max(fadeEnd - fadeNear, 0.0f) * settings.maxDistanceFadeFraction;
+  const float fadeStart = std::max(fadeNear, fadeEnd - fadeWidth);
   shadowFrameCpuData_.fadeParams =
-      glm::vec4(shadowDebugFrameData_.cascades[0].splitNear,
-                shadowDebugFrameData_.cascades[cascadeCount - 1u].splitFar,
-                settings.cascadeBlendFraction, settings.pcssLightRadiusScale);
+      glm::vec4(fadeStart, fadeEnd, settings.cascadeBlendFraction,
+                settings.pcssLightRadiusScale);
+  shadowDebugFrameData_.maxDistanceFadeStart = fadeStart;
+  shadowDebugFrameData_.maxDistanceFadeEnd = fadeEnd;
 
   shadowDebugFrameData_.selectedShadowLightId = selectedLightId;
+  float minCascadeTexelWorldSize = std::numeric_limits<float>::max();
+  float maxCascadeTexelWorldSize = 0.0f;
+  float totalCascadeTexelWorldSize = 0.0f;
+  uint32_t validCascadeTexelWorldSizeCount = 0u;
+  for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+       ++cascadeIndex) {
+    const float texelWorldSize =
+        shadowDebugFrameData_.cascades[cascadeIndex].texelWorldSize;
+    if (!std::isfinite(texelWorldSize) || texelWorldSize <= 0.0f) {
+      continue;
+    }
+    minCascadeTexelWorldSize =
+        std::min(minCascadeTexelWorldSize, texelWorldSize);
+    maxCascadeTexelWorldSize =
+        std::max(maxCascadeTexelWorldSize, texelWorldSize);
+    totalCascadeTexelWorldSize += texelWorldSize;
+    ++validCascadeTexelWorldSizeCount;
+  }
+  if (validCascadeTexelWorldSizeCount == 0u) {
+    minCascadeTexelWorldSize = 0.0f;
+  }
+  frame.metrics.shadow.cascadeCount = cascadeCount;
+  frame.metrics.shadow.shadowMapSize = shadowMapSize;
+  frame.metrics.shadow.cascadeTextureBytes =
+      static_cast<uint64_t>(cascadeCount) * shadowMapSize * shadowMapSize *
+      2ull;
+  frame.metrics.shadow.minCascadeTexelWorldSize = minCascadeTexelWorldSize;
+  frame.metrics.shadow.maxCascadeTexelWorldSize = maxCascadeTexelWorldSize;
+  frame.metrics.shadow.averageCascadeTexelWorldSize =
+      validCascadeTexelWorldSizeCount > 0u
+          ? totalCascadeTexelWorldSize /
+                static_cast<float>(validCascadeTexelWorldSizeCount)
+          : 0.0f;
+  frame.metrics.shadow.farCascadeTexelWorldSize =
+      cascadeCount > 0u
+          ? shadowDebugFrameData_.cascades[cascadeCount - 1u].texelWorldSize
+          : 0.0f;
 
   frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
   return Result<bool, std::string>::makeResult(true);
@@ -3526,6 +4045,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
 Result<bool, std::string>
 ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                                  const ForwardSceneGpuData &sceneGpu) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   RenderSettings::ShadowSettings shadowSettings = settings.shadow;
   sanitizeShadowSettings(shadowSettings);
@@ -3857,12 +4377,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   if (cachedTransformVersion_ != transformVersion ||
       instanceMatrices_.size() != renderables.size()) {
     instanceMatrices_.clear();
-    instanceRemap_.clear();
     instanceMatrices_.reserve(renderables.size());
-    instanceRemap_.reserve(renderables.size());
     for (uint32_t i = 0u; i < static_cast<uint32_t>(renderables.size()); ++i) {
       instanceMatrices_.push_back(makeInstanceData(renderables[i].modelMatrix));
-      instanceRemap_.push_back(i);
     }
     cachedTransformVersion_ = transformVersion;
     std::fill(instanceDataRingUploadVersions_.begin(),
@@ -3870,7 +4387,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
               std::numeric_limits<uint64_t>::max());
   }
 
-  if (instanceMatrices_.empty() || instanceRemap_.empty()) {
+  if (instanceMatrices_.empty()) {
     emitShadowDiagnostics();
     return Result<bool, std::string>::makeResult(true);
   }
@@ -3880,12 +4397,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   if (matricesResult.hasError()) {
     return matricesResult;
   }
-  auto remapResult = ensureInstanceRemapRingCapacity(
-      std::max(instanceRemap_.size() * sizeof(uint32_t), sizeof(uint32_t)));
-  if (remapResult.hasError()) {
-    return remapResult;
-  }
-
   const bool needsInstanceUpload =
       instanceDataRingUploadVersions_[frameSlot] != cachedTransformVersion_;
   if (needsInstanceUpload) {
@@ -3897,15 +4408,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     if (updateMatricesResult.hasError()) {
       return updateMatricesResult;
     }
-
-    const std::span<const std::byte> remapBytes{
-        reinterpret_cast<const std::byte *>(instanceRemap_.data()),
-        instanceRemap_.size() * sizeof(uint32_t)};
-    auto updateRemapResult = gpu_.updateBuffer(
-        instanceRemapRing_[frameSlot].buffer->handle(), remapBytes, 0u);
-    if (updateRemapResult.hasError()) {
-      return updateRemapResult;
-    }
     instanceDataRingUploadVersions_[frameSlot] = cachedTransformVersion_;
   }
 
@@ -3913,20 +4415,15 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       animationSceneData != nullptr
           ? animationSceneData->instanceMatricesBuffer
           : instanceMatricesRing_[frameSlot].buffer->handle();
-  const BufferHandle instanceRemapBuffer =
-      instanceRemapRing_[frameSlot].buffer->handle();
   const uint64_t instanceMatricesAddress =
       animationSceneData != nullptr
           ? animationSceneData->instanceMatricesAddress
           : gpu_.getBufferDeviceAddress(instanceMatricesBuffer);
-  const uint64_t instanceRemapAddress =
-      gpu_.getBufferDeviceAddress(instanceRemapBuffer);
   if (sceneGpu.shadowFrameBufferAddress == 0u) {
     emitShadowDiagnostics();
     return Result<bool, std::string>::makeResult(true);
   }
-  if (sceneGpu.frameDataAddress == 0u || instanceMatricesAddress == 0u ||
-      instanceRemapAddress == 0u) {
+  if (sceneGpu.frameDataAddress == 0u || instanceMatricesAddress == 0u) {
     emitShadowDiagnostics();
     return Result<bool, std::string>::makeError(
         "ShadowRenderer::buildShadowDraws: invalid GPU buffer address");
@@ -3968,13 +4465,22 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
 
   std::pmr::vector<uint32_t> frameDynamicTemplateIndices(memory_);
   frameDynamicTemplateIndices.reserve(dynamicShadowTemplateIndices_.size() +
-                                      staticShadowTemplateIndices_.size());
+                                      (animationSceneData != nullptr
+                                           ? staticShadowTemplateIndices_.size()
+                                           : 0u));
+  preResolvedDrawBuffers_.reserve(staticShadowCasterDrawBuffers_.size() +
+                                  frameDynamicTemplateIndices.capacity() * 2u);
+  preResolvedDrawBuffers_.insert(preResolvedDrawBuffers_.end(),
+                                 staticShadowCasterDrawBuffers_.begin(),
+                                 staticShadowCasterDrawBuffers_.end());
   frameDynamicTemplateIndices.insert(frameDynamicTemplateIndices.end(),
                                      dynamicShadowTemplateIndices_.begin(),
                                      dynamicShadowTemplateIndices_.end());
-  std::pmr::vector<uint8_t> staticTemplatesUsingDynamicPath(
-      meshDrawTemplates_.size(), uint8_t{0}, memory_);
+  std::pmr::vector<uint8_t> staticTemplatesUsingDynamicPath(memory_);
+  uint32_t overriddenStaticTemplateCount = 0u;
   if (animationSceneData != nullptr) {
+    staticTemplatesUsingDynamicPath.resize(meshDrawTemplates_.size(),
+                                           uint8_t{0});
     for (const uint32_t templateIndex : staticShadowTemplateIndices_) {
       if (templateIndex >= meshDrawTemplates_.size()) {
         continue;
@@ -3994,11 +4500,57 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         continue;
       }
       staticTemplatesUsingDynamicPath[templateIndex] = 1u;
+      ++overriddenStaticTemplateCount;
       frameDynamicTemplateIndices.push_back(templateIndex);
     }
   }
 
+  const size_t maxShadowInstanceRemapCount =
+      std::max<size_t>(1u, static_cast<size_t>(cascadeCount) *
+                               (staticShadowCasterCache_.size() +
+                                frameDynamicTemplateIndices.size()));
+  auto remapResult = ensureInstanceRemapRingCapacity(std::max(
+      maxShadowInstanceRemapCount * sizeof(uint32_t), sizeof(uint32_t)));
+  if (remapResult.hasError()) {
+    return remapResult;
+  }
+  const BufferHandle instanceRemapBuffer =
+      instanceRemapRing_[frameSlot].buffer->handle();
+  const uint64_t instanceRemapAddress =
+      gpu_.getBufferDeviceAddress(instanceRemapBuffer);
+  if (instanceRemapAddress == 0u) {
+    emitShadowDiagnostics();
+    return Result<bool, std::string>::makeError(
+        "ShadowRenderer::buildShadowDraws: invalid instance remap buffer "
+        "address");
+  }
+
+  instanceRemap_.clear();
+  instanceRemap_.reserve(maxShadowInstanceRemapCount);
+  const size_t staticBatchEntryCount =
+      static_cast<size_t>(cascadeCount) * staticShadowBatchTemplates_.size();
+  const size_t dynamicBatchEstimate =
+      static_cast<size_t>(cascadeCount) * frameDynamicTemplateIndices.size();
+  PmrHashMap<ShadowBatchKey, uint32_t, ShadowBatchKeyHash> shadowBatchLookup(
+      memory_);
+  shadowBatchLookup.reserve(dynamicBatchEstimate + 1u);
+  std::pmr::vector<ShadowBatchEntry> shadowBatchEntries(memory_);
+  shadowBatchEntries.reserve(staticBatchEntryCount + dynamicBatchEstimate);
+  std::array<uint32_t, kMaxShadowCascades> cascadeStaticCasterCounts{};
+  std::array<uint32_t, kMaxShadowCascades> cascadeDynamicCasterCounts{};
+
   const uint32_t renderableCount = saturateToU32(renderables.size());
+  const auto selectShadowPipeline =
+      [&](bool doubleSided, bool alphaMasked) -> RenderPipelineHandle {
+    if (alphaMasked) {
+      return doubleSided && nuri::isValid(shadowAlphaDoubleSidedPipelineHandle_)
+                 ? shadowAlphaDoubleSidedPipelineHandle_
+                 : shadowAlphaPipelineHandle_;
+    }
+    return doubleSided && nuri::isValid(shadowDoubleSidedPipelineHandle_)
+               ? shadowDoubleSidedPipelineHandle_
+               : shadowPipelineHandle_;
+  };
   const auto appendShadowDraw =
       [&](uint32_t cascadeIndex, BufferHandle vertexBuffer,
           BufferHandle indexBuffer, uint64_t indexBufferOffset,
@@ -4006,67 +4558,68 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           uint32_t firstInstance, uint64_t vertexBufferAddress,
           uint64_t vertexDecodeBufferAddress, uint32_t vertexDecodeIndex,
           uint32_t packedVertexFormat, uint32_t materialIndex, bool doubleSided,
-          bool alphaMasked) {
-        cascadePushConstants_[cascadeIndex].push_back(PushConstants{
-            .frameDataAddress = sceneGpu.frameDataAddress,
+          bool alphaMasked, bool dynamicCaster,
+          bool buffersAlreadyPreResolved) {
+        if (!buffersAlreadyPreResolved) {
+          appendUniqueBufferHandle(preResolvedDrawBuffers_, vertexBuffer);
+          appendUniqueBufferHandle(preResolvedDrawBuffers_, indexBuffer);
+        }
+
+        const ShadowBatchKey key{
+            .cascadeIndex = cascadeIndex,
+            .dynamicCaster = dynamicCaster,
+            .pipeline = selectShadowPipeline(doubleSided, alphaMasked),
+            .vertexBuffer = vertexBuffer,
+            .indexBuffer = indexBuffer,
+            .indexBufferOffset = indexBufferOffset,
+            .indexFormat = indexFormat,
+            .indexCount = indexCount,
+            .firstIndex = firstIndex,
             .vertexBufferAddress = vertexBufferAddress,
             .vertexDecodeBufferAddress = vertexDecodeBufferAddress,
-            .instanceMatricesAddress = instanceMatricesAddress,
-            .instanceRemapAddress = instanceRemapAddress,
-            .instanceCentersPhaseAddress = 0u,
-            .instanceBaseMatricesAddress = 0u,
-            .instanceCount = renderableCount,
-            .materialIndex = materialIndex,
             .vertexDecodeIndex = vertexDecodeIndex,
             .packedVertexFormat = packedVertexFormat,
-            .timeSeconds = static_cast<float>(frame.timeSeconds),
-            .tessNearDistance = 1.0f,
-            .tessFarDistance = 8.0f,
-            .tessMinFactor = 1.0f,
-            .tessMaxFactor = 1.0f,
-            .debugVisualizationMode = 0u,
-            .shadowCascadeIndex = cascadeIndex,
-        });
-        const PushConstants &pc = cascadePushConstants_[cascadeIndex].back();
-
-        DrawItem draw{};
-        if (alphaMasked) {
-          draw.pipeline =
-              doubleSided &&
-                      nuri::isValid(shadowAlphaDoubleSidedPipelineHandle_)
-                  ? shadowAlphaDoubleSidedPipelineHandle_
-                  : shadowAlphaPipelineHandle_;
-        } else {
-          draw.pipeline =
-              doubleSided && nuri::isValid(shadowDoubleSidedPipelineHandle_)
-                  ? shadowDoubleSidedPipelineHandle_
-                  : shadowPipelineHandle_;
+            .materialIndex = materialIndex,
+        };
+        auto it = shadowBatchLookup.find(key);
+        if (it == shadowBatchLookup.end()) {
+          const uint32_t batchIndex =
+              static_cast<uint32_t>(shadowBatchEntries.size());
+          shadowBatchEntries.emplace_back(memory_);
+          shadowBatchEntries.back().key = key;
+          auto [insertedIt, _] = shadowBatchLookup.emplace(key, batchIndex);
+          it = insertedIt;
         }
-        draw.vertexBuffer = vertexBuffer;
-        draw.indexBuffer = indexBuffer;
-        draw.indexBufferOffset = indexBufferOffset;
-        draw.indexFormat = indexFormat;
-        draw.indexCount = indexCount;
-        draw.instanceCount = 1u;
-        draw.firstIndex = firstIndex;
-        draw.firstInstance = firstInstance;
-        draw.useDepthState = true;
-        draw.depthState = {.compareOp = CompareOp::Less,
-                           .isDepthWriteEnabled = true};
-        draw.depthBiasEnable = true;
-        draw.depthBiasConstant = settings.shadow.constantBias;
-        draw.depthBiasSlope = settings.shadow.slopeBias;
-        draw.depthBiasClamp = 0.0f;
-        draw.pushConstants = std::span<const std::byte>(
-            reinterpret_cast<const std::byte *>(&pc), sizeof(PushConstants));
-        draw.debugLabel = kShadowMeshLabel;
-        draw.debugColor = kShadowMeshDebugColor;
-        cascadeDrawItems_[cascadeIndex].push_back(draw);
+        ShadowBatchEntry &batch = shadowBatchEntries[it->second];
+        batch.appendInstance(firstInstance);
+        if (dynamicCaster) {
+          ++cascadeDynamicCasterCounts[cascadeIndex];
+        } else {
+          ++cascadeStaticCasterCounts[cascadeIndex];
+        }
       };
-  uint32_t overriddenStaticTemplateCount = 0u;
-  for (const uint8_t usesDynamicPath : staticTemplatesUsingDynamicPath) {
-    overriddenStaticTemplateCount += usesDynamicPath != 0u ? 1u : 0u;
-  }
+
+  const auto makeStaticShadowBatchKey =
+      [](const StaticShadowBatchTemplate &batchTemplate,
+         uint32_t cascadeIndex) {
+        return ShadowBatchKey{
+            .cascadeIndex = cascadeIndex,
+            .dynamicCaster = false,
+            .pipeline = batchTemplate.pipeline,
+            .vertexBuffer = batchTemplate.vertexBuffer,
+            .indexBuffer = batchTemplate.indexBuffer,
+            .indexBufferOffset = batchTemplate.indexBufferOffset,
+            .indexFormat = batchTemplate.indexFormat,
+            .indexCount = batchTemplate.indexCount,
+            .firstIndex = batchTemplate.firstIndex,
+            .vertexBufferAddress = batchTemplate.vertexBufferAddress,
+            .vertexDecodeBufferAddress =
+                batchTemplate.vertexDecodeBufferAddress,
+            .vertexDecodeIndex = batchTemplate.vertexDecodeIndex,
+            .packedVertexFormat = batchTemplate.packedVertexFormat,
+            .materialIndex = batchTemplate.materialIndex,
+        };
+      };
 
   std::array<shadow_detail::DirectionalShadowFit, kMaxShadowCascades>
       guardedStaticOnlyFits = currentRawShadowFits_;
@@ -4085,206 +4638,940 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   }
 
   std::array<uint8_t, kMaxShadowCascades> cascadeHasGuardedDynamicDraw{};
-  for (const uint32_t templateIndex : frameDynamicTemplateIndices) {
-    if (templateIndex >= meshDrawTemplates_.size()) {
-      continue;
-    }
-    const MeshDrawTemplate &entry = meshDrawTemplates_[templateIndex];
-    if (entry.renderable == nullptr || entry.submesh == nullptr) {
-      continue;
-    }
-    const std::optional<SubmeshLod> lod =
-        resolveShadowLod(*entry.submesh, settings);
-    if (!lod.has_value()) {
-      continue;
-    }
-
-    bool usesAnimatedOverride = false;
-    if (animationSceneData != nullptr &&
-        entry.instanceIndex <
-            animationSceneData->geometryOverridesByRenderable.size()) {
-      const AnimatedRenderableGeometryOverride &geometryOverride =
-          animationSceneData
-              ->geometryOverridesByRenderable[entry.instanceIndex];
-      usesAnimatedOverride =
-          geometryOverride.enabled &&
-          nuri::isValid(geometryOverride.vertexBuffer) &&
-          animationOverrideCoversSubmesh(geometryOverride, *entry.submesh);
-    }
-
-    std::array<glm::vec3, 8> casterWorldCorners{};
-    bool hasCasterCullingBounds = false;
-    if (enableCascadeCasterCulling && !usesAnimatedOverride) {
-      const BoundingBox worldBounds =
-          entry.submesh->bounds.getTransformed(entry.renderable->modelMatrix);
-      casterWorldCorners = shadow_detail::computeBoundsCorners(
-          worldBounds.min_, worldBounds.max_);
-      hasCasterCullingBounds = true;
-    }
-
-    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
-         ++cascadeIndex) {
-      if (hasCasterCullingBounds &&
-          !shadowCasterOverlapsDirectionalShadowFit(
-              std::span<const glm::vec3, 8>(casterWorldCorners),
-              guardedStaticOnlyFits[cascadeIndex])) {
+  {
+    NURI_PROFILER_ZONE("ShadowRenderer.dynamic_guard_scan",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    for (const uint32_t templateIndex : frameDynamicTemplateIndices) {
+      if (templateIndex >= meshDrawTemplates_.size()) {
         continue;
       }
-      cascadeHasGuardedDynamicDraw[cascadeIndex] = 1u;
+      const MeshDrawTemplate &entry = meshDrawTemplates_[templateIndex];
+      if (entry.renderable == nullptr || entry.submesh == nullptr) {
+        continue;
+      }
+      const std::optional<SubmeshLod> lod =
+          resolveShadowLod(*entry.submesh, settings);
+      if (!lod.has_value()) {
+        continue;
+      }
+
+      bool usesAnimatedOverride = false;
+      if (animationSceneData != nullptr &&
+          entry.instanceIndex <
+              animationSceneData->geometryOverridesByRenderable.size()) {
+        const AnimatedRenderableGeometryOverride &geometryOverride =
+            animationSceneData
+                ->geometryOverridesByRenderable[entry.instanceIndex];
+        usesAnimatedOverride =
+            geometryOverride.enabled &&
+            nuri::isValid(geometryOverride.vertexBuffer) &&
+            animationOverrideCoversSubmesh(geometryOverride, *entry.submesh);
+      }
+
+      std::array<glm::vec3, 8> casterWorldCorners{};
+      bool hasCasterCullingBounds = false;
+      if (enableCascadeCasterCulling && !usesAnimatedOverride) {
+        const BoundingBox worldBounds =
+            entry.submesh->bounds.getTransformed(entry.renderable->modelMatrix);
+        casterWorldCorners = shadow_detail::computeBoundsCorners(
+            worldBounds.min_, worldBounds.max_);
+        hasCasterCullingBounds = true;
+      }
+
+      for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+           ++cascadeIndex) {
+        if (hasCasterCullingBounds &&
+            !shadowCasterOverlapsDirectionalShadowFit(
+                std::span<const glm::vec3, 8>(casterWorldCorners),
+                guardedStaticOnlyFits[cascadeIndex])) {
+          continue;
+        }
+        cascadeHasGuardedDynamicDraw[cascadeIndex] = 1u;
+      }
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+
+  {
+    NURI_PROFILER_ZONE("ShadowRenderer.write_cascade_fits",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+         ++cascadeIndex) {
+      const bool useGuardedStaticOnlyFit =
+          cascadeHasGuardedDynamicDraw[cascadeIndex] == 0u;
+      const shadow_detail::DirectionalShadowFit &renderedFit =
+          useGuardedStaticOnlyFit ? guardedStaticOnlyFits[cascadeIndex]
+                                  : currentRawShadowFits_[cascadeIndex];
+      writeShadowCascadeFit(renderedFit, cascadeIndex, settings.shadow,
+                            frame.sharedResources.shadowCompareSamplerId,
+                            frame.sharedResources.shadowRawSamplerId,
+                            shadowDepthTextures_[cascadeIndex], gpu_,
+                            shadowFrameCpuData_, shadowDebugFrameData_);
+
+      StaticOnlyCascadeReuseState &state =
+          currentStaticOnlyCascadeStates[cascadeIndex];
+      state.renderedFit = renderedFit;
+      state.rawFit = currentRawShadowFits_[cascadeIndex];
+      state.lightViewProjSignature =
+          makeStaticOnlyCascadeLightViewProjSignature(
+              shadowFrameCpuData_.cascades[cascadeIndex]);
+      state.biasSignature = makeStaticOnlyCascadeBiasSignature(
+          settings.shadow.constantBias, settings.shadow.slopeBias);
+      state.casterSignature = kFnvOffsetBasis64;
+      state.rasterSignature = makeStaticOnlyCascadeRasterSignatureSeed(
+          shadowFrameCpuData_.cascades[cascadeIndex],
+          settings.shadow.constantBias, settings.shadow.slopeBias);
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+
+  std::array<uint8_t, kMaxShadowCascades> skipStaticCasterBuildForCascade{};
+  const bool canUseFastStaticOnlyReusePath =
+      staticCacheReused && overriddenStaticTemplateCount == 0u;
+  if (canUseFastStaticOnlyReusePath) {
+    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+         ++cascadeIndex) {
+      StaticOnlyCascadeReuseState &currentState =
+          currentStaticOnlyCascadeStates[cascadeIndex];
+      const StaticOnlyCascadeReuseState &previousState =
+          reusableStaticOnlyCascadeStates_[cascadeIndex];
+      const bool staticOnlyCandidate =
+          cascadeHasGuardedDynamicDraw[cascadeIndex] == 0u;
+      const bool previousValid = reusableStaticOnlyCascadeValid_[cascadeIndex];
+      const bool biasChanged = previousValid && previousState.biasSignature !=
+                                                    currentState.biasSignature;
+      const bool cachedRenderedFitContainsCurrent =
+          previousValid &&
+          staticOnlyRenderedFitContainsCurrent(
+              previousState.renderedFit, currentRawShadowFits_[cascadeIndex]);
+      const bool needsAdaptiveRefresh =
+          cachedRenderedFitContainsCurrent &&
+          staticOnlyNeedsAdaptiveRefresh(previousState.renderedFit,
+                                         currentRawShadowFits_[cascadeIndex],
+                                         previousState.rawFit, previousValid,
+                                         settings.shadow.shadowMapSize);
+      if (!staticOnlyCandidate || !previousValid || biasChanged ||
+          !cachedRenderedFitContainsCurrent || needsAdaptiveRefresh) {
+        continue;
+      }
+
+      skipStaticCasterBuildForCascade[cascadeIndex] = 1u;
+      currentState.casterSignature = previousState.casterSignature;
+      currentState.rasterSignature = previousState.rasterSignature;
+      currentState.staticDrawCount = previousState.staticDrawCount;
+      currentState.dynamicDrawCount = 0u;
     }
   }
 
+  if (enableCascadeCasterCulling && !staticShadowCasterCache_.empty()) {
+    const glm::mat4 staticCasterLightView =
+        shadowDebugFrameData_.cascades[0].lightView;
+    if (!hasStaticShadowCasterLightSpaceBounds_ ||
+        staticShadowCasterLightSpaceBounds_.size() !=
+            staticShadowCasterCache_.size() ||
+        staticShadowBatchLightSpaceBounds_.size() !=
+            staticShadowBatchTemplates_.size() ||
+        !rawBytesEqual(staticShadowCasterLightSpaceBoundsView_,
+                       staticCasterLightView)) {
+      NURI_PROFILER_ZONE("ShadowRenderer.static_caster_light_bounds",
+                         NURI_PROFILER_COLOR_CMD_COPY);
+      staticShadowCasterLightSpaceBounds_.resize(
+          staticShadowCasterCache_.size());
+      staticShadowBatchLightSpaceBounds_.resize(
+          staticShadowBatchTemplates_.size());
+      for (StaticShadowCasterLightSpaceBounds &bounds :
+           staticShadowBatchLightSpaceBounds_) {
+        bounds.min = glm::vec3(std::numeric_limits<float>::max());
+        bounds.max = glm::vec3(std::numeric_limits<float>::lowest());
+      }
+      glm::vec3 staticLightBoundsMin(std::numeric_limits<float>::max());
+      glm::vec3 staticLightBoundsMax(std::numeric_limits<float>::lowest());
+      for (size_t entryIndex = 0u; entryIndex < staticShadowCasterCache_.size();
+           ++entryIndex) {
+        const StaticShadowCasterCacheEntry &entry =
+            staticShadowCasterCache_[entryIndex];
+        glm::vec3 lightMin(std::numeric_limits<float>::max());
+        glm::vec3 lightMax(std::numeric_limits<float>::lowest());
+        for (const glm::vec3 corner : entry.casterWorldCorners) {
+          const glm::vec3 lightCorner =
+              glm::vec3(staticCasterLightView * glm::vec4(corner, 1.0f));
+          lightMin = glm::min(lightMin, lightCorner);
+          lightMax = glm::max(lightMax, lightCorner);
+        }
+        staticShadowCasterLightSpaceBounds_[entryIndex] = {
+            .min = lightMin,
+            .max = lightMax,
+        };
+        if (entry.batchIndex < staticShadowBatchLightSpaceBounds_.size()) {
+          StaticShadowCasterLightSpaceBounds &batchBounds =
+              staticShadowBatchLightSpaceBounds_[entry.batchIndex];
+          batchBounds.min = glm::min(batchBounds.min, lightMin);
+          batchBounds.max = glm::max(batchBounds.max, lightMax);
+        }
+        staticLightBoundsMin =
+            glm::min(staticLightBoundsMin, glm::min(lightMin, lightMax));
+        staticLightBoundsMax =
+            glm::max(staticLightBoundsMax, glm::max(lightMin, lightMax));
+      }
+      staticShadowCasterLightSpaceBoundsView_ = staticCasterLightView;
+      staticShadowCasterLightSpaceBoundsMin_ = staticLightBoundsMin;
+      staticShadowCasterLightSpaceBoundsMax_ = staticLightBoundsMax;
+      hasStaticShadowCasterLightSpaceBounds_ = true;
+      staticShadowCasterLightGridCells_.clear();
+      staticShadowCasterLightGridEntries_.clear();
+      staticShadowCasterLargeLightGridEntries_.clear();
+      staticShadowCasterLightGrid_ = {};
+      NURI_PROFILER_ZONE_END();
+    }
+    if (!staticShadowCasterLightGrid_.valid &&
+        hasStaticShadowCasterLightSpaceBounds_) {
+      NURI_PROFILER_ZONE("ShadowRenderer.static_caster_light_grid",
+                         NURI_PROFILER_COLOR_CMD_COPY);
+      glm::vec3 gridMin = staticShadowCasterLightSpaceBoundsMin_;
+      glm::vec3 gridMax = staticShadowCasterLightSpaceBoundsMax_;
+
+      const glm::vec3 gridExtent =
+          glm::max(gridMax - gridMin, glm::vec3(0.01f));
+      gridMax = gridMin + gridExtent;
+      const glm::uvec3 gridDimensions(kStaticCasterLightGridResolution,
+                                      kStaticCasterLightGridResolution,
+                                      kStaticCasterLightGridDepthResolution);
+      const uint32_t gridCellCount =
+          gridDimensions.x * gridDimensions.y * gridDimensions.z;
+      std::pmr::vector<uint32_t> cellCounts(memory_);
+      cellCounts.resize(gridCellCount, 0u);
+      staticShadowCasterLargeLightGridEntries_.clear();
+
+      const glm::vec3 invCellSize = glm::vec3(gridDimensions) / gridExtent;
+      struct StaticCasterLightGridRange {
+        uint32_t minX = 0u;
+        uint32_t minY = 0u;
+        uint32_t minZ = 0u;
+        uint32_t maxX = 0u;
+        uint32_t maxY = 0u;
+        uint32_t maxZ = 0u;
+      };
+      const auto gridCellIndex = [&](uint32_t x, uint32_t y, uint32_t z) {
+        return (z * gridDimensions.y + y) * gridDimensions.x + x;
+      };
+      const auto gridCellRange =
+          [&](const StaticShadowCasterLightSpaceBounds &bounds) {
+            const glm::vec3 boundsMin = glm::min(bounds.min, bounds.max);
+            const glm::vec3 boundsMax = glm::max(bounds.min, bounds.max);
+            const glm::ivec3 minCell = glm::clamp(
+                glm::ivec3(glm::floor((boundsMin - gridMin) * invCellSize)),
+                glm::ivec3(0), glm::ivec3(gridDimensions) - glm::ivec3(1));
+            const glm::ivec3 maxCell = glm::clamp(
+                glm::ivec3(glm::floor((boundsMax - gridMin) * invCellSize)),
+                glm::ivec3(0), glm::ivec3(gridDimensions) - glm::ivec3(1));
+            return StaticCasterLightGridRange{
+                .minX = static_cast<uint32_t>(std::min(minCell.x, maxCell.x)),
+                .minY = static_cast<uint32_t>(std::min(minCell.y, maxCell.y)),
+                .minZ = static_cast<uint32_t>(std::min(minCell.z, maxCell.z)),
+                .maxX = static_cast<uint32_t>(std::max(minCell.x, maxCell.x)),
+                .maxY = static_cast<uint32_t>(std::max(minCell.y, maxCell.y)),
+                .maxZ = static_cast<uint32_t>(std::max(minCell.z, maxCell.z)),
+            };
+          };
+
+      for (uint32_t entryIndex = 0u;
+           entryIndex < staticShadowCasterLightSpaceBounds_.size();
+           ++entryIndex) {
+        const StaticCasterLightGridRange range =
+            gridCellRange(staticShadowCasterLightSpaceBounds_[entryIndex]);
+        const uint32_t coveredCells = (range.maxX - range.minX + 1u) *
+                                      (range.maxY - range.minY + 1u) *
+                                      (range.maxZ - range.minZ + 1u);
+        if (coveredCells > kStaticCasterLightGridMaxCellsPerCaster) {
+          staticShadowCasterLargeLightGridEntries_.push_back(entryIndex);
+          continue;
+        }
+        for (uint32_t z = range.minZ; z <= range.maxZ; ++z) {
+          for (uint32_t y = range.minY; y <= range.maxY; ++y) {
+            for (uint32_t x = range.minX; x <= range.maxX; ++x) {
+              ++cellCounts[gridCellIndex(x, y, z)];
+            }
+          }
+        }
+      }
+
+      staticShadowCasterLightGridCells_.resize(gridCellCount);
+      uint32_t runningEntryCount = 0u;
+      for (uint32_t cellIndex = 0u; cellIndex < gridCellCount; ++cellIndex) {
+        staticShadowCasterLightGridCells_[cellIndex] = {
+            .firstEntry = runningEntryCount,
+            .entryCount = cellCounts[cellIndex],
+        };
+        runningEntryCount += cellCounts[cellIndex];
+      }
+
+      staticShadowCasterLightGridEntries_.resize(runningEntryCount);
+      std::pmr::vector<uint32_t> cellWriteOffsets(memory_);
+      cellWriteOffsets.resize(gridCellCount, 0u);
+      for (uint32_t cellIndex = 0u; cellIndex < gridCellCount; ++cellIndex) {
+        cellWriteOffsets[cellIndex] =
+            staticShadowCasterLightGridCells_[cellIndex].firstEntry;
+      }
+      for (uint32_t entryIndex = 0u;
+           entryIndex < staticShadowCasterLightSpaceBounds_.size();
+           ++entryIndex) {
+        const StaticCasterLightGridRange range =
+            gridCellRange(staticShadowCasterLightSpaceBounds_[entryIndex]);
+        const uint32_t coveredCells = (range.maxX - range.minX + 1u) *
+                                      (range.maxY - range.minY + 1u) *
+                                      (range.maxZ - range.minZ + 1u);
+        if (coveredCells > kStaticCasterLightGridMaxCellsPerCaster) {
+          continue;
+        }
+        for (uint32_t z = range.minZ; z <= range.maxZ; ++z) {
+          for (uint32_t y = range.minY; y <= range.maxY; ++y) {
+            for (uint32_t x = range.minX; x <= range.maxX; ++x) {
+              const uint32_t cellIndex = gridCellIndex(x, y, z);
+              const uint32_t writeOffset = cellWriteOffsets[cellIndex]++;
+              staticShadowCasterLightGridEntries_[writeOffset] = entryIndex;
+            }
+          }
+        }
+      }
+
+      staticShadowCasterLightGrid_ = {
+          .min = gridMin,
+          .max = gridMax,
+          .invCellSize = invCellSize,
+          .dimensions = gridDimensions,
+          .valid = true,
+      };
+      NURI_PROFILER_ZONE_END();
+    }
+  }
+
+  std::pmr::vector<uint32_t> staticBatchEntryIndices(memory_);
+  staticBatchEntryIndices.resize(staticBatchEntryCount,
+                                 std::numeric_limits<uint32_t>::max());
+  std::pmr::vector<uint8_t> fullyEmittedStaticBatchEntries(memory_);
+  fullyEmittedStaticBatchEntries.resize(staticBatchEntryCount, uint8_t{0});
+  const auto staticBatchEntrySlot = [&](uint32_t cascadeIndex,
+                                        uint32_t staticBatchIndex) {
+    return static_cast<size_t>(cascadeIndex) *
+               staticShadowBatchTemplates_.size() +
+           staticBatchIndex;
+  };
+  const auto resolveStaticBatchEntry =
+      [&](uint32_t cascadeIndex,
+          uint32_t staticBatchIndex) -> ShadowBatchEntry & {
+    const size_t slotIndex =
+        staticBatchEntrySlot(cascadeIndex, staticBatchIndex);
+    uint32_t &entryIndex = staticBatchEntryIndices[slotIndex];
+    if (entryIndex == std::numeric_limits<uint32_t>::max()) {
+      entryIndex = static_cast<uint32_t>(shadowBatchEntries.size());
+      shadowBatchEntries.emplace_back(memory_);
+      ShadowBatchEntry &batch = shadowBatchEntries.back();
+      const StaticShadowBatchTemplate &batchTemplate =
+          staticShadowBatchTemplates_[staticBatchIndex];
+      batch.key = makeStaticShadowBatchKey(batchTemplate, cascadeIndex);
+    }
+    return shadowBatchEntries[entryIndex];
+  };
+
+  std::array<glm::vec3, kMaxShadowCascades> cascadeLightBoundsMin{};
+  std::array<glm::vec3, kMaxShadowCascades> cascadeLightBoundsMax{};
+  std::array<uint8_t, kMaxShadowCascades> cascadeUsesCachedLightBounds{};
   for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
        ++cascadeIndex) {
-    const bool useGuardedStaticOnlyFit =
-        cascadeHasGuardedDynamicDraw[cascadeIndex] == 0u;
-    const shadow_detail::DirectionalShadowFit &renderedFit =
-        useGuardedStaticOnlyFit ? guardedStaticOnlyFits[cascadeIndex]
-                                : currentRawShadowFits_[cascadeIndex];
-    writeShadowCascadeFit(renderedFit, cascadeIndex, settings.shadow,
-                          frame.sharedResources.shadowCompareSamplerId,
-                          frame.sharedResources.shadowRawSamplerId,
-                          shadowDepthTextures_[cascadeIndex], gpu_,
-                          shadowFrameCpuData_, shadowDebugFrameData_);
+    const ShadowCascadeDebugFrameData &cascadeDebug =
+        shadowDebugFrameData_.cascades[cascadeIndex];
+    const float cullingPadding = std::max(
+        cascadeDebug.texelWorldSize * kCullingPaddingTexelMultiplier, 0.01f);
+    const glm::vec3 rawBoundsMin(cascadeDebug.lightSpaceBoundsMin);
+    const glm::vec3 rawBoundsMax(cascadeDebug.lightSpaceBoundsMax);
+    cascadeLightBoundsMin[cascadeIndex] =
+        glm::min(rawBoundsMin, rawBoundsMax) - glm::vec3(cullingPadding);
+    cascadeLightBoundsMax[cascadeIndex] =
+        glm::max(rawBoundsMin, rawBoundsMax) + glm::vec3(cullingPadding);
+    cascadeUsesCachedLightBounds[cascadeIndex] =
+        hasStaticShadowCasterLightSpaceBounds_ &&
+                rawBytesEqual(staticShadowCasterLightSpaceBoundsView_,
+                              cascadeDebug.lightView)
+            ? 1u
+            : 0u;
+  }
 
-    StaticOnlyCascadeReuseState &state =
+  const uint32_t staticCandidateCasterCount = saturateToU32(
+      staticShadowCasterCache_.size() -
+      std::min(staticShadowCasterCache_.size(),
+               static_cast<size_t>(overriddenStaticTemplateCount)));
+  if (staticShadowCasterLightGrid_.valid) {
+    if (staticShadowCasterLightGridQueryMarks_.size() !=
+        staticShadowCasterCache_.size()) {
+      staticShadowCasterLightGridQueryMarks_.assign(
+          staticShadowCasterCache_.size(), 0u);
+      staticShadowCasterLightGridQueryMarker_ = 1u;
+    }
+    staticShadowCasterLightGridQueryEntries_.reserve(
+        std::min(staticShadowCasterCache_.size(),
+                 kStaticCasterLightGridSortedCandidateLimit));
+  }
+
+  const auto nextStaticCasterQueryMarker = [&]() {
+    ++staticShadowCasterLightGridQueryMarker_;
+    if (staticShadowCasterLightGridQueryMarker_ == 0u) {
+      std::fill(staticShadowCasterLightGridQueryMarks_.begin(),
+                staticShadowCasterLightGridQueryMarks_.end(), 0u);
+      staticShadowCasterLightGridQueryMarker_ = 1u;
+    }
+    return staticShadowCasterLightGridQueryMarker_;
+  };
+  const auto staticEntryUsesDynamicPath =
+      [&](const StaticShadowCasterCacheEntry &entry) {
+        return entry.templateIndex < staticTemplatesUsingDynamicPath.size() &&
+               staticTemplatesUsingDynamicPath[entry.templateIndex] != 0u;
+      };
+  const auto staticBatchWasFullyEmitted = [&](uint32_t staticBatchIndex,
+                                              uint32_t cascadeIndex) {
+    if (staticBatchIndex >= staticShadowBatchTemplates_.size()) {
+      return false;
+    }
+    const size_t slotIndex =
+        staticBatchEntrySlot(cascadeIndex, staticBatchIndex);
+    NURI_ASSERT(slotIndex < fullyEmittedStaticBatchEntries.size(),
+                "Static shadow batch emitted slot is out of bounds");
+    return fullyEmittedStaticBatchEntries[slotIndex] != 0u;
+  };
+  const auto staticCasterDepthOverlapsCascade = [&](uint32_t entryIndex,
+                                                    uint32_t cascadeIndex) {
+    const StaticShadowCasterLightSpaceBounds &bounds =
+        staticShadowCasterLightSpaceBounds_[entryIndex];
+    return bounds.max.z >= cascadeLightBoundsMin[cascadeIndex].z &&
+           bounds.min.z <= cascadeLightBoundsMax[cascadeIndex].z;
+  };
+  const auto emitStaticCasterUnchecked = [&](uint32_t entryIndex,
+                                             uint32_t cascadeIndex) {
+    const StaticShadowCasterCacheEntry &entry =
+        staticShadowCasterCache_[entryIndex];
+    if (entry.batchIndex >= staticShadowBatchTemplates_.size()) {
+      return false;
+    }
+
+    ShadowBatchEntry &batch =
+        resolveStaticBatchEntry(cascadeIndex, entry.batchIndex);
+    batch.appendInstance(
+        entry.instanceIndex,
+        staticShadowBatchTemplates_[entry.batchIndex].instanceCount);
+    ++cascadeStaticCasterCounts[cascadeIndex];
+    StaticOnlyCascadeReuseState &cascadeState =
         currentStaticOnlyCascadeStates[cascadeIndex];
-    state.renderedFit = renderedFit;
-    state.rawFit = currentRawShadowFits_[cascadeIndex];
-    state.lightViewProjSignature = makeStaticOnlyCascadeLightViewProjSignature(
-        shadowFrameCpuData_.cascades[cascadeIndex]);
-    state.biasSignature = makeStaticOnlyCascadeBiasSignature(
-        settings.shadow.constantBias, settings.shadow.slopeBias);
-    state.casterSignature = kFnvOffsetBasis64;
-    state.rasterSignature = makeStaticOnlyCascadeRasterSignatureSeed(
-        shadowFrameCpuData_.cascades[cascadeIndex],
-        settings.shadow.constantBias, settings.shadow.slopeBias);
-  }
-
-  for (const StaticShadowCasterCacheEntry &entry : staticShadowCasterCache_) {
-    if (entry.templateIndex < staticTemplatesUsingDynamicPath.size() &&
-        staticTemplatesUsingDynamicPath[entry.templateIndex] != 0u) {
-      continue;
+    cascadeState.casterSignature =
+        hashCombine64(cascadeState.casterSignature, entry.rasterSignature);
+    cascadeState.rasterSignature =
+        hashCombine64(cascadeState.rasterSignature, entry.rasterSignature);
+    cascadeIndexCountEstimates_[cascadeIndex] += entry.indexCount;
+    return true;
+  };
+  const auto emitStaticBatch = [&](uint32_t batchIndex, uint32_t cascadeIndex) {
+    const StaticShadowBatchTemplate &batchTemplate =
+        staticShadowBatchTemplates_[batchIndex];
+    if (batchTemplate.instanceCount == 0u) {
+      return;
     }
-    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
-         ++cascadeIndex) {
+    const size_t firstInstanceIndex = batchTemplate.firstInstanceIndex;
+    const size_t endInstanceIndex =
+        firstInstanceIndex + batchTemplate.instanceCount;
+    NURI_ASSERT(endInstanceIndex <= staticShadowBatchInstanceIndices_.size(),
+                "Static shadow batch instance range is out of bounds");
+    if (endInstanceIndex > staticShadowBatchInstanceIndices_.size()) {
+      return;
+    }
+
+    ShadowBatchEntry &batch = resolveStaticBatchEntry(cascadeIndex, batchIndex);
+    batch.appendInstances(std::span<const uint32_t>(
+        staticShadowBatchInstanceIndices_.data() + firstInstanceIndex,
+        batchTemplate.instanceCount));
+  };
+  const auto emitStaticBatchWithState = [&](uint32_t batchIndex,
+                                            uint32_t cascadeIndex) {
+    const StaticShadowBatchTemplate &batchTemplate =
+        staticShadowBatchTemplates_[batchIndex];
+    if (batchTemplate.instanceCount == 0u) {
+      return;
+    }
+    emitStaticBatch(batchIndex, cascadeIndex);
+    cascadeStaticCasterCounts[cascadeIndex] += batchTemplate.instanceCount;
+    StaticOnlyCascadeReuseState &cascadeState =
+        currentStaticOnlyCascadeStates[cascadeIndex];
+    cascadeState.casterSignature = hashCombine64(cascadeState.casterSignature,
+                                                 batchTemplate.rasterSignature);
+    cascadeState.rasterSignature = hashCombine64(cascadeState.rasterSignature,
+                                                 batchTemplate.rasterSignature);
+    cascadeIndexCountEstimates_[cascadeIndex] +=
+        batchTemplate.indexCountEstimate;
+  };
+  const auto emitAllStaticCastersForCascade = [&](uint32_t cascadeIndex) {
+    for (uint32_t batchIndex = 0u;
+         batchIndex < staticShadowBatchTemplates_.size(); ++batchIndex) {
+      emitStaticBatch(batchIndex, cascadeIndex);
+    }
+
+    cascadeStaticCasterCounts[cascadeIndex] += staticCandidateCasterCount;
+    StaticOnlyCascadeReuseState &cascadeState =
+        currentStaticOnlyCascadeStates[cascadeIndex];
+    cascadeState.casterSignature = staticShadowCasterCacheContentSignature_;
+    cascadeState.rasterSignature = hashCombine64(
+        cascadeState.rasterSignature, staticShadowCasterCacheContentSignature_);
+    cascadeIndexCountEstimates_[cascadeIndex] +=
+        staticShadowCasterCacheIndexCountEstimate_;
+  };
+  const auto cascadeContainsAllStaticCasters = [&](uint32_t cascadeIndex) {
+    if (staticShadowCasterCache_.empty()) {
+      return true;
+    }
+    if (!enableCascadeCasterCulling) {
+      return true;
+    }
+    if (cascadeUsesCachedLightBounds[cascadeIndex] == 0u ||
+        !hasStaticShadowCasterLightSpaceBounds_) {
+      return false;
+    }
+
+    const glm::vec3 &cascadeMin = cascadeLightBoundsMin[cascadeIndex];
+    const glm::vec3 &cascadeMax = cascadeLightBoundsMax[cascadeIndex];
+    return staticShadowCasterLightSpaceBoundsMin_.x >= cascadeMin.x &&
+           staticShadowCasterLightSpaceBoundsMin_.y >= cascadeMin.y &&
+           staticShadowCasterLightSpaceBoundsMin_.z >= cascadeMin.z &&
+           staticShadowCasterLightSpaceBoundsMax_.x <= cascadeMax.x &&
+           staticShadowCasterLightSpaceBoundsMax_.y <= cascadeMax.y &&
+           staticShadowCasterLightSpaceBoundsMax_.z <= cascadeMax.z;
+  };
+  const auto emitOverlappingStaticBatchesForCascade =
+      [&](uint32_t cascadeIndex) {
+        if (overriddenStaticTemplateCount != 0u ||
+            cascadeUsesCachedLightBounds[cascadeIndex] == 0u ||
+            staticShadowBatchLightSpaceBounds_.size() !=
+                staticShadowBatchTemplates_.size()) {
+          return;
+        }
+
+        const glm::vec3 &cascadeMin = cascadeLightBoundsMin[cascadeIndex];
+        const glm::vec3 &cascadeMax = cascadeLightBoundsMax[cascadeIndex];
+        // Conservative CPU fast path: this may overdraw a batch, but it keeps
+        // per-caster precision for small batches and never drops casters.
+        for (uint32_t batchIndex = 0u;
+             batchIndex < staticShadowBatchTemplates_.size(); ++batchIndex) {
+          const StaticShadowBatchTemplate &batchTemplate =
+              staticShadowBatchTemplates_[batchIndex];
+          if (batchTemplate.instanceCount <
+              kStaticBatchOverlapEmitMinInstances) {
+            continue;
+          }
+          const StaticShadowCasterLightSpaceBounds &batchBounds =
+              staticShadowBatchLightSpaceBounds_[batchIndex];
+          if (!normalizedLightSpaceBoundsOverlap(
+                  batchBounds.min, batchBounds.max, cascadeMin, cascadeMax)) {
+            continue;
+          }
+
+          const size_t slotIndex =
+              staticBatchEntrySlot(cascadeIndex, batchIndex);
+          NURI_ASSERT(slotIndex < fullyEmittedStaticBatchEntries.size(),
+                      "Static shadow batch emitted slot is out of bounds");
+          fullyEmittedStaticBatchEntries[slotIndex] = 1u;
+          emitStaticBatchWithState(batchIndex, cascadeIndex);
+        }
+      };
+  const auto emitGridCandidateIfVisible = [&](uint32_t entryIndex,
+                                              uint32_t cascadeIndex) {
+    const StaticShadowCasterCacheEntry &entry =
+        staticShadowCasterCache_[entryIndex];
+    if (staticEntryUsesDynamicPath(entry) ||
+        staticBatchWasFullyEmitted(entry.batchIndex, cascadeIndex)) {
+      return false;
+    }
+    if (entry.hasCasterCullingBounds) {
+      const bool overlapsCascade = normalizedLightSpaceBoundsOverlap(
+          staticShadowCasterLightSpaceBounds_[entryIndex].min,
+          staticShadowCasterLightSpaceBounds_[entryIndex].max,
+          cascadeLightBoundsMin[cascadeIndex],
+          cascadeLightBoundsMax[cascadeIndex]);
+      if (!overlapsCascade) {
+        return false;
+      }
+    }
+    return emitStaticCasterUnchecked(entryIndex, cascadeIndex);
+  };
+  const auto queryStaticCasterLightGrid = [&](uint32_t cascadeIndex,
+                                              uint32_t queryMarker,
+                                              bool &emitMarkedByCacheOrder) {
+    emitMarkedByCacheOrder = false;
+    staticShadowCasterLightGridQueryEntries_.clear();
+    if (!staticShadowCasterLightGrid_.valid ||
+        cascadeUsesCachedLightBounds[cascadeIndex] == 0u) {
+      return false;
+    }
+
+    const StaticShadowCasterLightGrid &grid = staticShadowCasterLightGrid_;
+    const glm::vec3 &queryMin = cascadeLightBoundsMin[cascadeIndex];
+    const glm::vec3 &queryMax = cascadeLightBoundsMax[cascadeIndex];
+    if (queryMax.x < grid.min.x || queryMin.x > grid.max.x ||
+        queryMax.y < grid.min.y || queryMin.y > grid.max.y ||
+        queryMax.z < grid.min.z || queryMin.z > grid.max.z) {
+      return true;
+    }
+
+    const glm::ivec3 minCell = glm::clamp(
+        glm::ivec3(glm::floor((queryMin - grid.min) * grid.invCellSize)),
+        glm::ivec3(0), glm::ivec3(grid.dimensions) - glm::ivec3(1));
+    const glm::ivec3 maxCell = glm::clamp(
+        glm::ivec3(glm::floor((queryMax - grid.min) * grid.invCellSize)),
+        glm::ivec3(0), glm::ivec3(grid.dimensions) - glm::ivec3(1));
+    const uint32_t minX = static_cast<uint32_t>(std::min(minCell.x, maxCell.x));
+    const uint32_t minY = static_cast<uint32_t>(std::min(minCell.y, maxCell.y));
+    const uint32_t minZ = static_cast<uint32_t>(std::min(minCell.z, maxCell.z));
+    const uint32_t maxX = static_cast<uint32_t>(std::max(minCell.x, maxCell.x));
+    const uint32_t maxY = static_cast<uint32_t>(std::max(minCell.y, maxCell.y));
+    const uint32_t maxZ = static_cast<uint32_t>(std::max(minCell.z, maxCell.z));
+    const uint32_t queryCellCount =
+        (maxX - minX + 1u) * (maxY - minY + 1u) * (maxZ - minZ + 1u);
+    const uint32_t gridCellCount =
+        grid.dimensions.x * grid.dimensions.y * grid.dimensions.z;
+    if (queryCellCount > gridCellCount / 2u) {
+      return false;
+    }
+
+    const auto appendCandidate = [&](uint32_t entryIndex) {
+      const StaticShadowCasterCacheEntry &entry =
+          staticShadowCasterCache_[entryIndex];
+      if (staticEntryUsesDynamicPath(entry) ||
+          staticBatchWasFullyEmitted(entry.batchIndex, cascadeIndex) ||
+          !staticCasterDepthOverlapsCascade(entryIndex, cascadeIndex)) {
+        return;
+      }
+      uint32_t &mark = staticShadowCasterLightGridQueryMarks_[entryIndex];
+      if (mark == queryMarker) {
+        return;
+      }
+      mark = queryMarker;
+      staticShadowCasterLightGridQueryEntries_.push_back(entryIndex);
+    };
+    for (const uint32_t entryIndex : staticShadowCasterLargeLightGridEntries_) {
+      appendCandidate(entryIndex);
+    }
+    for (uint32_t z = minZ; z <= maxZ; ++z) {
+      for (uint32_t y = minY; y <= maxY; ++y) {
+        for (uint32_t x = minX; x <= maxX; ++x) {
+          const uint32_t cellIndex =
+              (z * grid.dimensions.y + y) * grid.dimensions.x + x;
+          const StaticShadowCasterLightGridCell &cell =
+              staticShadowCasterLightGridCells_[cellIndex];
+          const uint32_t endEntry = cell.firstEntry + cell.entryCount;
+          for (uint32_t i = cell.firstEntry; i < endEntry; ++i) {
+            appendCandidate(staticShadowCasterLightGridEntries_[i]);
+          }
+        }
+      }
+    }
+    if (staticShadowCasterLightGridQueryEntries_.size() >
+        kStaticCasterLightGridSortedCandidateLimit) {
+      emitMarkedByCacheOrder = true;
+    } else {
+      std::sort(staticShadowCasterLightGridQueryEntries_.begin(),
+                staticShadowCasterLightGridQueryEntries_.end());
+    }
+    return true;
+  };
+  const auto scanStaticCastersForCascade = [&](uint32_t cascadeIndex) {
+    for (uint32_t entryIndex = 0u; entryIndex < staticShadowCasterCache_.size();
+         ++entryIndex) {
+      const StaticShadowCasterCacheEntry &entry =
+          staticShadowCasterCache_[entryIndex];
+      if (staticEntryUsesDynamicPath(entry) ||
+          staticBatchWasFullyEmitted(entry.batchIndex, cascadeIndex)) {
+        continue;
+      }
       if (entry.hasCasterCullingBounds) {
-        const ShadowCascadeDebugFrameData &cascadeDebug =
-            shadowDebugFrameData_.cascades[cascadeIndex];
-        const float cullingPadding = std::max(
-            cascadeDebug.texelWorldSize * kCullingPaddingTexelMultiplier,
-            0.01f);
-        if (!shadow_detail::shadowCasterOverlapsLightSpaceBounds(
-                std::span<const glm::vec3, 8>(entry.casterWorldCorners),
-                cascadeDebug.lightView,
-                glm::vec3(cascadeDebug.lightSpaceBoundsMin),
-                glm::vec3(cascadeDebug.lightSpaceBoundsMax), cullingPadding)) {
+        const bool overlapsCascade =
+            cascadeUsesCachedLightBounds[cascadeIndex] != 0u &&
+                    entryIndex < staticShadowCasterLightSpaceBounds_.size()
+                ? normalizedLightSpaceBoundsOverlap(
+                      staticShadowCasterLightSpaceBounds_[entryIndex].min,
+                      staticShadowCasterLightSpaceBounds_[entryIndex].max,
+                      cascadeLightBoundsMin[cascadeIndex],
+                      cascadeLightBoundsMax[cascadeIndex])
+                : shadow_detail::shadowCasterOverlapsLightSpaceBounds(
+                      std::span<const glm::vec3, 8>(entry.casterWorldCorners),
+                      shadowDebugFrameData_.cascades[cascadeIndex].lightView,
+                      cascadeLightBoundsMin[cascadeIndex],
+                      cascadeLightBoundsMax[cascadeIndex], 0.0f);
+        if (!overlapsCascade) {
           ++cascadeCulledCounts_[cascadeIndex];
           continue;
         }
       }
+      (void)emitStaticCasterUnchecked(entryIndex, cascadeIndex);
+    }
+  };
 
-      appendShadowDraw(cascadeIndex, entry.vertexBuffer, entry.indexBuffer,
-                       entry.indexBufferOffset, entry.indexFormat,
-                       entry.indexCount, entry.firstIndex, entry.instanceIndex,
-                       entry.vertexBufferAddress,
-                       entry.vertexDecodeBufferAddress, entry.vertexDecodeIndex,
-                       entry.packedVertexFormat, entry.materialIndex,
-                       entry.doubleSided, entry.alphaMasked);
-      currentStaticOnlyCascadeStates[cascadeIndex].casterSignature =
-          hashStaticShadowCasterRasterSignature(
-              currentStaticOnlyCascadeStates[cascadeIndex].casterSignature,
-              entry);
-      currentStaticOnlyCascadeStates[cascadeIndex].rasterSignature =
-          hashStaticShadowCasterRasterSignature(
-              currentStaticOnlyCascadeStates[cascadeIndex].rasterSignature,
-              entry);
-      cascadeIndexCountEstimates_[cascadeIndex] += entry.indexCount;
-    }
-  }
-
-  for (const uint32_t templateIndex : frameDynamicTemplateIndices) {
-    if (templateIndex >= meshDrawTemplates_.size()) {
-      continue;
-    }
-    const MeshDrawTemplate &entry = meshDrawTemplates_[templateIndex];
-    if (entry.renderable == nullptr || entry.submesh == nullptr) {
-      continue;
-    }
-    const std::optional<SubmeshLod> lod =
-        resolveShadowLod(*entry.submesh, settings);
-    if (!lod.has_value()) {
-      continue;
-    }
-
-    BufferHandle resolvedVertexBuffer = entry.baseVertexBuffer;
-    uint64_t resolvedVertexBufferAddress = entry.vertexBufferAddress;
-    uint64_t resolvedVertexDecodeBufferAddress =
-        entry.vertexDecodeBufferAddress;
-    uint32_t resolvedVertexDecodeIndex = entry.vertexDecodeIndex;
-    uint32_t resolvedPackedVertexFormat = entry.packedVertexFormat;
-    bool usesAnimatedOverride = false;
-    if (animationSceneData != nullptr &&
-        entry.instanceIndex <
-            animationSceneData->geometryOverridesByRenderable.size()) {
-      const AnimatedRenderableGeometryOverride &geometryOverride =
-          animationSceneData
-              ->geometryOverridesByRenderable[entry.instanceIndex];
-      if (geometryOverride.enabled &&
-          nuri::isValid(geometryOverride.vertexBuffer) &&
-          animationOverrideCoversSubmesh(geometryOverride, *entry.submesh)) {
-        usesAnimatedOverride = true;
-        const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
-            geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
-        if (overrideVertexAddress != 0u) {
-          resolvedVertexBuffer = geometryOverride.vertexBuffer;
-          resolvedVertexBufferAddress = overrideVertexAddress;
-          resolvedVertexDecodeBufferAddress = 0u;
-          resolvedVertexDecodeIndex = 0u;
-          resolvedPackedVertexFormat =
-              static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32);
-        }
-      }
-    }
-
-    std::array<glm::vec3, 8> casterWorldCorners{};
-    bool hasCasterCullingBounds = false;
-    if (enableCascadeCasterCulling && !usesAnimatedOverride) {
-      const BoundingBox worldBounds =
-          entry.submesh->bounds.getTransformed(entry.renderable->modelMatrix);
-      casterWorldCorners = shadow_detail::computeBoundsCorners(
-          worldBounds.min_, worldBounds.max_);
-      hasCasterCullingBounds = true;
-    }
-
+  {
+    NURI_PROFILER_ZONE("ShadowRenderer.static_caster_emit",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
     for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
          ++cascadeIndex) {
-      if (hasCasterCullingBounds) {
-        const ShadowCascadeDebugFrameData &cascadeDebug =
-            shadowDebugFrameData_.cascades[cascadeIndex];
-        const float cullingPadding = std::max(
-            cascadeDebug.texelWorldSize * kCullingPaddingTexelMultiplier,
-            0.01f);
-        if (!shadow_detail::shadowCasterOverlapsLightSpaceBounds(
-                std::span<const glm::vec3, 8>(casterWorldCorners),
-                cascadeDebug.lightView,
-                glm::vec3(cascadeDebug.lightSpaceBoundsMin),
-                glm::vec3(cascadeDebug.lightSpaceBoundsMax), cullingPadding)) {
-          ++cascadeCulledCounts_[cascadeIndex];
-          continue;
+      if (skipStaticCasterBuildForCascade[cascadeIndex] != 0u) {
+        continue;
+      }
+
+      if (overriddenStaticTemplateCount == 0u &&
+          cascadeContainsAllStaticCasters(cascadeIndex)) {
+        emitAllStaticCastersForCascade(cascadeIndex);
+        continue;
+      }
+
+      const uint32_t staticDrawCountBefore =
+          cascadeStaticCasterCounts[cascadeIndex];
+      emitOverlappingStaticBatchesForCascade(cascadeIndex);
+
+      bool emitMarkedByCacheOrder = false;
+      const uint32_t queryMarker = nextStaticCasterQueryMarker();
+      if (!enableCascadeCasterCulling ||
+          !queryStaticCasterLightGrid(cascadeIndex, queryMarker,
+                                      emitMarkedByCacheOrder)) {
+        scanStaticCastersForCascade(cascadeIndex);
+        continue;
+      }
+
+      if (emitMarkedByCacheOrder) {
+        for (uint32_t entryIndex = 0u;
+             entryIndex < staticShadowCasterCache_.size(); ++entryIndex) {
+          if (staticShadowCasterLightGridQueryMarks_[entryIndex] !=
+              queryMarker) {
+            continue;
+          }
+          (void)emitGridCandidateIfVisible(entryIndex, cascadeIndex);
+        }
+      } else {
+        for (const uint32_t entryIndex :
+             staticShadowCasterLightGridQueryEntries_) {
+          (void)emitGridCandidateIfVisible(entryIndex, cascadeIndex);
+        }
+      }
+      const uint32_t emittedStaticDrawCount =
+          cascadeStaticCasterCounts[cascadeIndex] - staticDrawCountBefore;
+      if (staticCandidateCasterCount > emittedStaticDrawCount) {
+        cascadeCulledCounts_[cascadeIndex] +=
+            staticCandidateCasterCount - emittedStaticDrawCount;
+      }
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+
+  {
+    NURI_PROFILER_ZONE("ShadowRenderer.dynamic_caster_emit",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    for (const uint32_t templateIndex : frameDynamicTemplateIndices) {
+      if (templateIndex >= meshDrawTemplates_.size()) {
+        continue;
+      }
+      const MeshDrawTemplate &entry = meshDrawTemplates_[templateIndex];
+      if (entry.renderable == nullptr || entry.submesh == nullptr) {
+        continue;
+      }
+      const std::optional<SubmeshLod> lod =
+          resolveShadowLod(*entry.submesh, settings);
+      if (!lod.has_value()) {
+        continue;
+      }
+
+      BufferHandle resolvedVertexBuffer = entry.baseVertexBuffer;
+      uint64_t resolvedVertexBufferAddress = entry.vertexBufferAddress;
+      uint64_t resolvedVertexDecodeBufferAddress =
+          entry.vertexDecodeBufferAddress;
+      uint32_t resolvedVertexDecodeIndex = entry.vertexDecodeIndex;
+      uint32_t resolvedPackedVertexFormat = entry.packedVertexFormat;
+      bool usesAnimatedOverride = false;
+      if (animationSceneData != nullptr &&
+          entry.instanceIndex <
+              animationSceneData->geometryOverridesByRenderable.size()) {
+        const AnimatedRenderableGeometryOverride &geometryOverride =
+            animationSceneData
+                ->geometryOverridesByRenderable[entry.instanceIndex];
+        if (geometryOverride.enabled &&
+            nuri::isValid(geometryOverride.vertexBuffer) &&
+            animationOverrideCoversSubmesh(geometryOverride, *entry.submesh)) {
+          usesAnimatedOverride = true;
+          const uint64_t overrideVertexAddress = gpu_.getBufferDeviceAddress(
+              geometryOverride.vertexBuffer, geometryOverride.vertexByteOffset);
+          if (overrideVertexAddress != 0u) {
+            resolvedVertexBuffer = geometryOverride.vertexBuffer;
+            resolvedVertexBufferAddress = overrideVertexAddress;
+            resolvedVertexDecodeBufferAddress = 0u;
+            resolvedVertexDecodeIndex = 0u;
+            resolvedPackedVertexFormat =
+                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32);
+          }
         }
       }
 
-      appendShadowDraw(
-          cascadeIndex, resolvedVertexBuffer, entry.indexBuffer,
-          entry.indexBufferOffset, entry.indexFormat, lod->indexCount,
-          lod->indexOffset, entry.instanceIndex, resolvedVertexBufferAddress,
-          resolvedVertexDecodeBufferAddress, resolvedVertexDecodeIndex,
-          resolvedPackedVertexFormat, entry.materialIndex, entry.doubleSided,
-          entry.alphaMasked);
-      ++cascadeDynamicDrawCounts_[cascadeIndex];
-      cascadeIndexCountEstimates_[cascadeIndex] += lod->indexCount;
+      std::array<glm::vec3, 8> casterWorldCorners{};
+      bool hasCasterCullingBounds = false;
+      if (enableCascadeCasterCulling && !usesAnimatedOverride) {
+        const BoundingBox worldBounds =
+            entry.submesh->bounds.getTransformed(entry.renderable->modelMatrix);
+        casterWorldCorners = shadow_detail::computeBoundsCorners(
+            worldBounds.min_, worldBounds.max_);
+        hasCasterCullingBounds = true;
+      }
+
+      for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+           ++cascadeIndex) {
+        if (skipStaticCasterBuildForCascade[cascadeIndex] != 0u) {
+          continue;
+        }
+        if (hasCasterCullingBounds) {
+          const ShadowCascadeDebugFrameData &cascadeDebug =
+              shadowDebugFrameData_.cascades[cascadeIndex];
+          const float cullingPadding = std::max(
+              cascadeDebug.texelWorldSize * kCullingPaddingTexelMultiplier,
+              0.01f);
+          if (!shadow_detail::shadowCasterOverlapsLightSpaceBounds(
+                  std::span<const glm::vec3, 8>(casterWorldCorners),
+                  cascadeDebug.lightView,
+                  glm::vec3(cascadeDebug.lightSpaceBoundsMin),
+                  glm::vec3(cascadeDebug.lightSpaceBoundsMax),
+                  cullingPadding)) {
+            ++cascadeCulledCounts_[cascadeIndex];
+            continue;
+          }
+        }
+
+        appendShadowDraw(
+            cascadeIndex, resolvedVertexBuffer, entry.indexBuffer,
+            entry.indexBufferOffset, entry.indexFormat, lod->indexCount,
+            lod->indexOffset, entry.instanceIndex, resolvedVertexBufferAddress,
+            resolvedVertexDecodeBufferAddress, resolvedVertexDecodeIndex,
+            resolvedPackedVertexFormat, entry.materialIndex, entry.doubleSided,
+            entry.alphaMasked, true, false);
+        cascadeIndexCountEstimates_[cascadeIndex] += lod->indexCount;
+      }
     }
+    NURI_PROFILER_ZONE_END();
+  }
+
+  {
+    NURI_PROFILER_ZONE("ShadowRenderer.batch_emit",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    std::array<uint32_t, kMaxShadowCascades> cascadeBatchCounts{};
+    size_t emittedInstanceRemapCount = 0u;
+    for (const ShadowBatchEntry &batch : shadowBatchEntries) {
+      if (batch.instanceCount == 0u) {
+        continue;
+      }
+      emittedInstanceRemapCount += batch.instanceCount;
+      if (batch.key.cascadeIndex < cascadeBatchCounts.size()) {
+        ++cascadeBatchCounts[batch.key.cascadeIndex];
+      }
+    }
+    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+         ++cascadeIndex) {
+      cascadePushConstants_[cascadeIndex].reserve(
+          cascadeBatchCounts[cascadeIndex]);
+      cascadeDrawItems_[cascadeIndex].reserve(cascadeBatchCounts[cascadeIndex]);
+    }
+    instanceRemap_.resize(emittedInstanceRemapCount);
+    uint32_t *remapWrite = instanceRemap_.data();
+
+    for (ShadowBatchEntry &batch : shadowBatchEntries) {
+      if (batch.instanceCount == 0u) {
+        continue;
+      }
+      const ShadowBatchKey &key = batch.key;
+      batch.firstInstance = saturateToU32(
+          static_cast<size_t>(remapWrite - instanceRemap_.data()));
+      if (batch.externalInstanceCount != 0u) {
+        NURI_ASSERT(batch.externalInstanceCount == batch.instanceCount,
+                    "External shadow batch remap count is inconsistent");
+        std::copy_n(batch.externalInstanceIndices, batch.externalInstanceCount,
+                    remapWrite);
+        remapWrite += batch.externalInstanceCount;
+      } else if (batch.instanceIndices.empty()) {
+        NURI_ASSERT(batch.instanceCount == 1u,
+                    "Inline shadow batch stores exactly one instance");
+        *remapWrite++ = batch.inlineInstanceIndex;
+      } else {
+        NURI_ASSERT(batch.instanceIndices.size() == batch.instanceCount,
+                    "Materialized shadow batch remap count is inconsistent");
+        std::copy_n(batch.instanceIndices.data(), batch.instanceCount,
+                    remapWrite);
+        remapWrite += batch.instanceCount;
+      }
+
+      PushConstants &pc =
+          cascadePushConstants_[key.cascadeIndex].emplace_back();
+      pc = PushConstants{
+          .frameDataAddress = sceneGpu.frameDataAddress,
+          .vertexBufferAddress = key.vertexBufferAddress,
+          .vertexDecodeBufferAddress = key.vertexDecodeBufferAddress,
+          .instanceMatricesAddress = instanceMatricesAddress,
+          .instanceRemapAddress = instanceRemapAddress,
+          .instanceCentersPhaseAddress = 0u,
+          .instanceBaseMatricesAddress = 0u,
+          .instanceCount = renderableCount,
+          .materialIndex = key.materialIndex,
+          .vertexDecodeIndex = key.vertexDecodeIndex,
+          .packedVertexFormat = key.packedVertexFormat,
+          .timeSeconds = static_cast<float>(frame.timeSeconds),
+          .tessNearDistance = 1.0f,
+          .tessFarDistance = 8.0f,
+          .tessMinFactor = 1.0f,
+          .tessMaxFactor = 1.0f,
+          .debugVisualizationMode = 0u,
+          .shadowCascadeIndex = key.cascadeIndex,
+      };
+
+      DrawItem &draw = cascadeDrawItems_[key.cascadeIndex].emplace_back();
+      draw = DrawItem{};
+      draw.pipeline = key.pipeline;
+      draw.vertexBuffer = key.vertexBuffer;
+      draw.indexBuffer = key.indexBuffer;
+      draw.indexBufferOffset = key.indexBufferOffset;
+      draw.indexFormat = key.indexFormat;
+      draw.indexCount = key.indexCount;
+      draw.instanceCount = batch.instanceCount;
+      draw.firstIndex = key.firstIndex;
+      draw.firstInstance = batch.firstInstance;
+      draw.useDepthState = true;
+      draw.depthState = {.compareOp = CompareOp::Less,
+                         .isDepthWriteEnabled = true};
+      draw.depthBiasEnable = true;
+      draw.depthBiasConstant = settings.shadow.constantBias;
+      draw.depthBiasSlope = settings.shadow.slopeBias;
+      draw.depthBiasClamp = 0.0f;
+      draw.pushConstants = std::span<const std::byte>(
+          reinterpret_cast<const std::byte *>(&pc), sizeof(PushConstants));
+      draw.debugLabel = kShadowMeshLabel;
+      draw.debugColor = kShadowMeshDebugColor;
+    }
+    if (!instanceRemap_.empty()) {
+      NURI_ASSERT(
+          remapWrite == instanceRemap_.data() + instanceRemap_.size(),
+          "Shadow instance remap write cursor did not consume the target span");
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+
+  if (!instanceRemap_.empty()) {
+    const std::span<const std::byte> remapBytes{
+        reinterpret_cast<const std::byte *>(instanceRemap_.data()),
+        instanceRemap_.size() * sizeof(uint32_t)};
+    const uint64_t remapSignature = hashBytes(remapBytes);
+    if (instanceRemapUploadSignatures_[frameSlot] != remapSignature) {
+      auto updateRemapResult =
+          gpu_.updateBuffer(instanceRemapBuffer, remapBytes, 0u);
+      if (updateRemapResult.hasError()) {
+        return updateRemapResult;
+      }
+      instanceRemapUploadSignatures_[frameSlot] = remapSignature;
+    }
+  } else if (frameSlot < instanceRemapUploadSignatures_.size()) {
+    instanceRemapUploadSignatures_[frameSlot] =
+        std::numeric_limits<uint64_t>::max();
   }
 
   passBufferDependencies_.clear();
@@ -4305,13 +5592,10 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   }
   for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
        ++cascadeIndex) {
-    cascadeDrawCounts_[cascadeIndex] =
-        saturateToU32(cascadeDrawItems_[cascadeIndex].size());
-    const uint32_t dynamicDrawCount = cascadeDynamicDrawCounts_[cascadeIndex];
-    const uint32_t staticDrawCount =
-        cascadeDrawCounts_[cascadeIndex] >= dynamicDrawCount
-            ? cascadeDrawCounts_[cascadeIndex] - dynamicDrawCount
-            : 0u;
+    const uint32_t staticDrawCount = cascadeStaticCasterCounts[cascadeIndex];
+    const uint32_t dynamicDrawCount = cascadeDynamicCasterCounts[cascadeIndex];
+    cascadeDrawCounts_[cascadeIndex] = staticDrawCount + dynamicDrawCount;
+    cascadeDynamicDrawCounts_[cascadeIndex] = dynamicDrawCount;
     currentStaticOnlyCascadeStates[cascadeIndex].staticDrawCount =
         staticDrawCount;
     currentStaticOnlyCascadeStates[cascadeIndex].dynamicDrawCount =
@@ -4385,13 +5669,16 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     if (reuseStaticOnlyCascadePass_[cascadeIndex]) {
       const shadow_detail::DirectionalShadowFit rawFit =
           currentRawShadowFits_[cascadeIndex];
-      writeShadowCascadeFit(previousState.renderedFit, cascadeIndex,
-                            settings.shadow,
+      const shadow_detail::DirectionalShadowFit reuseFit =
+          makeStaticOnlyReuseFitForCurrentFrame(previousState.renderedFit,
+                                                rawFit);
+      writeShadowCascadeFit(reuseFit, cascadeIndex, settings.shadow,
                             frame.sharedResources.shadowCompareSamplerId,
                             frame.sharedResources.shadowRawSamplerId,
                             shadowDepthTextures_[cascadeIndex], gpu_,
                             shadowFrameCpuData_, shadowDebugFrameData_);
       currentState = previousState;
+      currentState.renderedFit = reuseFit;
       currentState.rawFit = rawFit;
       staticOnlyCascadeContentSignatures_[cascadeIndex] =
           previousState.rasterSignature;
@@ -4464,6 +5751,27 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     shadowDebugFrameData_.cascades[cascadeIndex].staticOnlyReuseStatus =
         ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::None;
   }
+  float minCascadeTexelWorldSize = std::numeric_limits<float>::max();
+  float maxCascadeTexelWorldSize = 0.0f;
+  float totalCascadeTexelWorldSize = 0.0f;
+  uint32_t validCascadeTexelWorldSizeCount = 0u;
+  for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+       ++cascadeIndex) {
+    const float texelWorldSize =
+        shadowDebugFrameData_.cascades[cascadeIndex].texelWorldSize;
+    if (!std::isfinite(texelWorldSize) || texelWorldSize <= 0.0f) {
+      continue;
+    }
+    minCascadeTexelWorldSize =
+        std::min(minCascadeTexelWorldSize, texelWorldSize);
+    maxCascadeTexelWorldSize =
+        std::max(maxCascadeTexelWorldSize, texelWorldSize);
+    totalCascadeTexelWorldSize += texelWorldSize;
+    ++validCascadeTexelWorldSizeCount;
+  }
+  if (validCascadeTexelWorldSizeCount == 0u) {
+    minCascadeTexelWorldSize = 0.0f;
+  }
   frame.metrics.shadow.cascadeCount = cascadeCount;
   frame.metrics.shadow.shadowMapSize = shadowMapSize_;
   frame.metrics.shadow.totalDraws = totalDraws;
@@ -4493,6 +5801,17 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   frame.metrics.shadow.cascadeTextureBytes =
       static_cast<uint64_t>(cascadeCount) * shadowMapSize_ * shadowMapSize_ *
       2ull;
+  frame.metrics.shadow.minCascadeTexelWorldSize = minCascadeTexelWorldSize;
+  frame.metrics.shadow.maxCascadeTexelWorldSize = maxCascadeTexelWorldSize;
+  frame.metrics.shadow.averageCascadeTexelWorldSize =
+      validCascadeTexelWorldSizeCount > 0u
+          ? totalCascadeTexelWorldSize /
+                static_cast<float>(validCascadeTexelWorldSizeCount)
+          : 0.0f;
+  frame.metrics.shadow.farCascadeTexelWorldSize =
+      cascadeCount > 0u
+          ? shadowDebugFrameData_.cascades[cascadeCount - 1u].texelWorldSize
+          : 0.0f;
   frame.sharedResources.shadowDebugFrameData = shadowDebugFrameData_;
   emitShadowDiagnostics();
   return Result<bool, std::string>::makeResult(true);
@@ -4516,6 +5835,31 @@ uint64_t ShadowRenderer::shadowPipelineSignature() const noexcept {
 
 void ShadowRenderer::invalidateStaticShadowCasterCache() noexcept {
   staticShadowCasterCache_.clear();
+  staticShadowBatchTemplates_.clear();
+  staticShadowBatchInstanceIndices_.clear();
+  staticShadowCasterDrawBuffers_.clear();
+  staticShadowCasterFitPoints_.clear();
+  staticShadowCasterLightSpaceBounds_.clear();
+  staticShadowBatchLightSpaceBounds_.clear();
+  staticShadowCasterLightGridCells_.clear();
+  staticShadowCasterLightGridEntries_.clear();
+  staticShadowCasterLargeLightGridEntries_.clear();
+  staticShadowCasterLightGridQueryMarks_.clear();
+  staticShadowCasterLightGridQueryEntries_.clear();
+  staticShadowCasterLightGridQueryMarker_ = 1u;
+  staticShadowCasterLightGrid_ = {};
+  staticShadowCasterBoundsMin_ = glm::vec3(std::numeric_limits<float>::max());
+  staticShadowCasterBoundsMax_ =
+      glm::vec3(std::numeric_limits<float>::lowest());
+  staticShadowCasterLightSpaceBoundsMin_ =
+      glm::vec3(std::numeric_limits<float>::max());
+  staticShadowCasterLightSpaceBoundsMax_ =
+      glm::vec3(std::numeric_limits<float>::lowest());
+  staticShadowCasterCacheContentSignature_ = 0u;
+  staticShadowCasterCacheIndexCountEstimate_ = 0u;
+  hasStaticShadowCasterBounds_ = false;
+  hasStaticShadowCasterLightDepthBounds_ = false;
+  hasStaticShadowCasterLightSpaceBounds_ = false;
   staticShadowCasterCacheTransformVersion_ =
       std::numeric_limits<uint64_t>::max();
   staticShadowCasterCachePipelineSignature_ = 0u;
@@ -4590,6 +5934,7 @@ void ShadowRenderer::destroyBuffers() {
   shadowFrameRing_.clear();
   sdsmReduceResultRing_.clear();
   instanceDataRingUploadVersions_.clear();
+  instanceRemapUploadSignatures_.clear();
   shadowFrameUploadSignatures_.clear();
   sdsmReduceResultRingPublishedFrames_.clear();
 }
@@ -4672,12 +6017,19 @@ void ShadowRenderer::resetCachedState() {
   meshDrawTemplates_.clear();
   staticShadowTemplateIndices_.clear();
   dynamicShadowTemplateIndices_.clear();
+  staticShadowCasterDrawBuffers_.clear();
   invalidateStaticShadowCasterCache();
   invalidateReusableStaticOnlyCascadeCache();
   resetCascadeStabilizationHistory();
   instanceMatrices_.clear();
   instanceRemap_.clear();
   passTextureDependencies_.clear();
+  passDependencyBuffers_.clear();
+  passDependencyBufferAccessModes_.clear();
+  passDependencyBufferBindings_.clear();
+  passDependencyTextureBindings_.clear();
+  preResolvedDrawBuffers_.clear();
+  preResolvedDrawBufferIds_.clear();
 }
 
 void ShadowRenderer::resetFrameBuildState() {
@@ -4697,6 +6049,12 @@ void ShadowRenderer::resetFrameBuildState() {
     cascadeDrawItems_[cascadeIndex].clear();
   }
   passBufferDependencies_.clear();
+  passDependencyBuffers_.clear();
+  passDependencyBufferAccessModes_.clear();
+  passDependencyBufferBindings_.clear();
+  passDependencyTextureBindings_.clear();
+  preResolvedDrawBuffers_.clear();
+  preResolvedDrawBufferIds_.clear();
   previewTextureDependencies_.clear();
   previewPushConstants_ = {};
   previewDraw_ = {};
@@ -4718,6 +6076,7 @@ void ShadowRenderer::resetSdsmState() { sdsmState_ = {}; }
 
 Result<bool, std::string>
 ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   frame.sharedResources.shadowCascadeTextures = {};
   frame.sharedResources.shadowCascadeGraphTextures = {};
   frame.sharedResources.shadowDebugPreviewTexture = {};
@@ -4730,8 +6089,8 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   frame.sharedResources.shadowDebugFrameData.reset();
   frame.metrics.shadow = {};
 
-  RenderSettings::ShadowSettings settings =
-      renderSettingsOrDefault(frame).shadow;
+  const RenderSettings &frameSettings = renderSettingsOrDefault(frame);
+  RenderSettings::ShadowSettings settings = frameSettings.shadow;
   sanitizeShadowSettings(settings);
   if (settings.enabled) {
     frame.metrics.shadow.filterSampleBudget = shadowFilterSampleBudget(
@@ -4918,10 +6277,11 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
 
 Result<bool, std::string>
 ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   resetFrameBuildState();
 
-  RenderSettings::ShadowSettings settings =
-      renderSettingsOrDefault(frame).shadow;
+  const RenderSettings &frameSettings = renderSettingsOrDefault(frame);
+  RenderSettings::ShadowSettings settings = frameSettings.shadow;
   sanitizeShadowSettings(settings);
   if (!settings.enabled) {
     diagnosticLogState_ = {};
@@ -4971,7 +6331,8 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   }
 
   auto shadowFrameDataResult =
-      updateShadowFrameData(frame, settings, settings.shadowMapSize);
+      updateShadowFrameData(frame, settings, settings.shadowMapSize,
+                            frameSettings.opaque.forcedMeshLod);
   if (shadowFrameDataResult.hasError()) {
     return shadowFrameDataResult;
   }
@@ -5106,6 +6467,7 @@ bool ShadowRenderer::hasPreparedShadowDepthPasses() const noexcept {
 Result<bool, std::string>
 ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
                                         RenderGraphBuilder &graph) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
   if (!hasPreparedShadowDepthPasses_ || activeCascadeCount_ == 0u ||
       !nuri::isValid(shadowDepthTextures_[0])) {
     return Result<bool, std::string>::makeResult(true);
@@ -5113,18 +6475,81 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
   const AnimationSceneFrameData *animationSceneData =
       resolveAnimationSceneFrameData(frame);
 
-  std::pmr::vector<BufferHandle> dependencyBuffers(memory_);
-  std::pmr::vector<RenderGraphAccessMode> dependencyBufferAccessModes(memory_);
+  passDependencyBuffers_.clear();
+  passDependencyBufferAccessModes_.clear();
+  passDependencyBufferBindings_.clear();
+  passDependencyTextureBindings_.clear();
+  preResolvedDrawBufferIds_.clear();
   std::pmr::vector<TextureHandle> dependencyTextures(memory_);
   std::pmr::vector<RenderGraphAccessMode> dependencyTextureAccessModes(memory_);
   splitDependencies(
       std::span<const BufferDependency>(passBufferDependencies_.data(),
                                         passBufferDependencies_.size()),
-      dependencyBuffers, dependencyBufferAccessModes);
+      passDependencyBuffers_, passDependencyBufferAccessModes_);
   splitDependencies(
       std::span<const TextureDependency>(passTextureDependencies_.data(),
                                          passTextureDependencies_.size()),
       dependencyTextures, dependencyTextureAccessModes);
+
+  bool hasNonReusedShadowCascade = false;
+  for (uint32_t cascadeIndex = 0u; cascadeIndex < activeCascadeCount_;
+       ++cascadeIndex) {
+    hasNonReusedShadowCascade =
+        hasNonReusedShadowCascade ||
+        (nuri::isValid(shadowDepthTextures_[cascadeIndex]) &&
+         !reuseStaticOnlyCascadePass_[cascadeIndex]);
+  }
+  if (hasNonReusedShadowCascade) {
+    passDependencyBufferBindings_.reserve(passDependencyBuffers_.size());
+    for (size_t i = 0; i < passDependencyBuffers_.size(); ++i) {
+      const BufferHandle dependency = passDependencyBuffers_[i];
+      if (!nuri::isValid(dependency)) {
+        continue;
+      }
+      auto importResult =
+          graph.importBuffer(dependency, kShadowPassDependencyBufferLabel);
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      passDependencyBufferBindings_.push_back(
+          RenderGraphPreparedDependencyBufferBinding{
+              .dependencyIndex = static_cast<uint32_t>(i),
+              .buffer = importResult.value(),
+              .mode = passDependencyBufferAccessModes_[i],
+          });
+    }
+
+    passDependencyTextureBindings_.reserve(dependencyTextures.size());
+    for (size_t i = 0; i < dependencyTextures.size(); ++i) {
+      const TextureHandle dependency = dependencyTextures[i];
+      if (!nuri::isValid(dependency)) {
+        continue;
+      }
+      auto importResult =
+          graph.importTexture(dependency, kShadowPassDependencyTextureLabel);
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      passDependencyTextureBindings_.push_back(
+          RenderGraphPreparedDependencyTextureBinding{
+              .texture = importResult.value(),
+              .mode = dependencyTextureAccessModes[i],
+          });
+    }
+
+    preResolvedDrawBufferIds_.reserve(preResolvedDrawBuffers_.size());
+    for (const BufferHandle buffer : preResolvedDrawBuffers_) {
+      if (!nuri::isValid(buffer)) {
+        continue;
+      }
+      auto importResult =
+          graph.importBuffer(buffer, kShadowPassDrawBufferLabel);
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      preResolvedDrawBufferIds_.push_back(importResult.value());
+    }
+  }
 
   for (uint32_t cascadeIndex = 0u; cascadeIndex < activeCascadeCount_;
        ++cascadeIndex) {
@@ -5145,18 +6570,15 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     const float shadowViewportHeight =
         static_cast<float>(std::max(shadowDepthDimensions.height, 1u));
 
-    const std::string importName =
-        "shadow_depth_map_cascade" + std::to_string(cascadeIndex);
-    auto depthImportResult =
-        graph.importTexture(shadowDepthTexture, importName);
+    auto depthImportResult = graph.importTexture(
+        shadowDepthTexture, shadowCascadeTextureImportName(cascadeIndex));
     if (depthImportResult.hasError()) {
       return Result<bool, std::string>::makeError(depthImportResult.error());
     }
     frame.sharedResources.shadowCascadeGraphTextures[cascadeIndex] =
         depthImportResult.value();
 
-    const std::string passLabel =
-        "ShadowDepthPass.Cascade" + std::to_string(cascadeIndex);
+    const std::string_view passLabel = shadowCascadePassLabel(cascadeIndex);
     const std::span<const ComputeDispatchItem> preDispatches =
         reuseStaticOnlyCascade
             ? std::span<const ComputeDispatchItem>()
@@ -5164,14 +6586,15 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     const std::span<const BufferHandle> passDependencyBuffers =
         reuseStaticOnlyCascade
             ? std::span<const BufferHandle>()
-            : std::span<const BufferHandle>(dependencyBuffers.data(),
-                                            dependencyBuffers.size());
+            : std::span<const BufferHandle>(passDependencyBuffers_.data(),
+                                            passDependencyBuffers_.size());
     const std::span<const RenderGraphAccessMode>
         passDependencyBufferAccessModes =
-            reuseStaticOnlyCascade ? std::span<const RenderGraphAccessMode>()
-                                   : std::span<const RenderGraphAccessMode>(
-                                         dependencyBufferAccessModes.data(),
-                                         dependencyBufferAccessModes.size());
+            reuseStaticOnlyCascade
+                ? std::span<const RenderGraphAccessMode>()
+                : std::span<const RenderGraphAccessMode>(
+                      passDependencyBufferAccessModes_.data(),
+                      passDependencyBufferAccessModes_.size());
     const std::span<const TextureHandle> passDependencyTextures =
         reuseStaticOnlyCascade
             ? std::span<const TextureHandle>()
@@ -5188,40 +6611,108 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
             ? std::span<const DrawItem>()
             : std::span<const DrawItem>(cascadeDrawItems_[cascadeIndex].data(),
                                         cascadeDrawItems_[cascadeIndex].size());
-    const RenderGraphGraphicsPassDesc desc{
-        .color = {},
-        .colorTexture = {},
-        .hasColorAttachment = false,
-        .depth = {.loadOp =
-                      reuseStaticOnlyCascade ? LoadOp::Load : LoadOp::Clear,
-                  .storeOp = StoreOp::Store,
-                  .clearDepth = 1.0f,
-                  .clearStencil = 0u},
-        .depthTexture = depthImportResult.value(),
-        .useViewport = true,
-        .viewport = {.x = 0.0f,
-                     .y = 0.0f,
-                     .width = shadowViewportWidth,
-                     .height = shadowViewportHeight,
-                     .minDepth = 0.0f,
-                     .maxDepth = 1.0f},
-        .preDispatches = preDispatches,
-        .dependencyBuffers = passDependencyBuffers,
-        .dependencyBufferAccessModes = passDependencyBufferAccessModes,
-        .dependencyTextures = passDependencyTextures,
-        .dependencyTextureAccessModes = passDependencyTextureAccessModes,
-        .draws = passDraws,
-        .drawBuffersPreResolved = false,
-        .preResolvedDrawBuffers = {},
-        .gpuTimingScope = GpuTimingScope::ShadowDepth,
-        .debugLabel = passLabel,
-        .debugColor = kShadowPassDebugColor,
-        .markColorAsFrameOutput = false,
-        .markImplicitOutputSideEffect = false,
-        .borrowPayload = false,
-    };
+    const std::span<const BufferHandle> passPreResolvedDrawBuffers =
+        reuseStaticOnlyCascade
+            ? std::span<const BufferHandle>()
+            : std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
+                                            preResolvedDrawBuffers_.size());
+    const std::span<const RenderGraphBufferId> passPreResolvedDrawBufferIds =
+        reuseStaticOnlyCascade ? std::span<const RenderGraphBufferId>()
+                               : std::span<const RenderGraphBufferId>(
+                                     preResolvedDrawBufferIds_.data(),
+                                     preResolvedDrawBufferIds_.size());
 
-    auto passResult = graph.addGraphicsPass(desc);
+    Result<RenderGraphPassId, std::string> passResult =
+        Result<RenderGraphPassId, std::string>::makeError(
+            "ShadowRenderer::appendShadowDepthPasses: pass was not built");
+    if (preDispatches.empty()) {
+      const std::span<const RenderGraphPreparedDependencyBufferBinding>
+          preparedDependencyBufferBindings =
+              reuseStaticOnlyCascade
+                  ? std::span<
+                        const RenderGraphPreparedDependencyBufferBinding>()
+                  : std::span<const RenderGraphPreparedDependencyBufferBinding>(
+                        passDependencyBufferBindings_.data(),
+                        passDependencyBufferBindings_.size());
+      const std::span<const RenderGraphPreparedDependencyTextureBinding>
+          preparedDependencyTextureBindings =
+              reuseStaticOnlyCascade
+                  ? std::span<
+                        const RenderGraphPreparedDependencyTextureBinding>()
+                  : std::span<
+                        const RenderGraphPreparedDependencyTextureBinding>(
+                        passDependencyTextureBindings_.data(),
+                        passDependencyTextureBindings_.size());
+      const RenderGraphPreparedGraphicsPassDesc desc{
+          .color = {},
+          .colorTexture = {},
+          .hasColorAttachment = false,
+          .depth = {.loadOp =
+                        reuseStaticOnlyCascade ? LoadOp::Load : LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearDepth = 1.0f,
+                    .clearStencil = 0u},
+          .depthTexture = depthImportResult.value(),
+          .useViewport = true,
+          .viewport = {.x = 0.0f,
+                       .y = 0.0f,
+                       .width = shadowViewportWidth,
+                       .height = shadowViewportHeight,
+                       .minDepth = 0.0f,
+                       .maxDepth = 1.0f},
+          .preDispatches = {},
+          .dependencyBuffers = passDependencyBuffers,
+          .draws = passDraws,
+          .dependencyBufferBindings = preparedDependencyBufferBindings,
+          .dependencyTextureBindings = preparedDependencyTextureBindings,
+          .preDispatchDependencyBindings = {},
+          .drawBufferBindings = {},
+          .drawBuffersPreResolved = true,
+          .preResolvedDrawBuffers = {},
+          .preResolvedDrawBufferIds = passPreResolvedDrawBufferIds,
+          .gpuTimingScope = GpuTimingScope::ShadowDepth,
+          .debugLabel = passLabel,
+          .debugColor = kShadowPassDebugColor,
+          .markColorAsFrameOutput = false,
+          .markImplicitOutputSideEffect = false,
+          .borrowPayload = true,
+      };
+      passResult = graph.addPreparedGraphicsPass(desc);
+    } else {
+      const RenderGraphGraphicsPassDesc desc{
+          .color = {},
+          .colorTexture = {},
+          .hasColorAttachment = false,
+          .depth = {.loadOp =
+                        reuseStaticOnlyCascade ? LoadOp::Load : LoadOp::Clear,
+                    .storeOp = StoreOp::Store,
+                    .clearDepth = 1.0f,
+                    .clearStencil = 0u},
+          .depthTexture = depthImportResult.value(),
+          .useViewport = true,
+          .viewport = {.x = 0.0f,
+                       .y = 0.0f,
+                       .width = shadowViewportWidth,
+                       .height = shadowViewportHeight,
+                       .minDepth = 0.0f,
+                       .maxDepth = 1.0f},
+          .preDispatches = preDispatches,
+          .dependencyBuffers = passDependencyBuffers,
+          .dependencyBufferAccessModes = passDependencyBufferAccessModes,
+          .dependencyTextures = passDependencyTextures,
+          .dependencyTextureAccessModes = passDependencyTextureAccessModes,
+          .draws = passDraws,
+          .drawBuffersPreResolved = true,
+          .preResolvedDrawBuffers = passPreResolvedDrawBuffers,
+          .gpuTimingScope = GpuTimingScope::ShadowDepth,
+          .debugLabel = passLabel,
+          .debugColor = kShadowPassDebugColor,
+          .markColorAsFrameOutput = false,
+          .markImplicitOutputSideEffect = false,
+          .borrowPayload = false,
+      };
+      passResult = graph.addGraphicsPass(desc);
+    }
     if (passResult.hasError()) {
       return Result<bool, std::string>::makeError(passResult.error());
     }
@@ -5323,7 +6814,7 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         .debugColor = kShadowPreviewPassDebugColor,
         .markColorAsFrameOutput = false,
         .markImplicitOutputSideEffect = false,
-        .borrowPayload = false,
+        .borrowPayload = true,
     };
     auto previewPassResult = graph.addGraphicsPass(previewDesc);
     if (previewPassResult.hasError()) {

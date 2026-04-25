@@ -1448,6 +1448,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   uint64_t directDrawBufferSignature = kInvalidDrawSignature;
   bool directDrawBufferSignatureValid = false;
   currentDirectDrawBufferSignature_ = kInvalidDrawSignature;
+  const std::pmr::vector<uint32_t> *instanceRemapUploadSource = &instanceRemap_;
   const SingleInstanceBatchCache *activeSingleInstanceCache = nullptr;
   const bool canUseStaticBatchCache =
       !settings.opaque.enableInstanceAnimation && !useAutoLod &&
@@ -1470,17 +1471,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
 
     remapCount = staticBatchCache_.remap.size();
-    drawPushConstants_.resize(batchCount);
-    drawAlphaMasked_ = staticBatchCache_.alphaMasked;
-    if (drawAlphaMasked_.size() != batchCount) {
-      drawAlphaMasked_.assign(batchCount, 0u);
-    }
     const bool needsStaticBatchRebind =
         boundStaticBatchGeneration_ != staticBatchCache_.generation ||
         drawItems_.size() != batchCount;
     if (needsStaticBatchRebind) {
       drawItems_ = staticBatchCache_.draws;
       drawPushConstants_ = staticBatchCache_.pushConstantsTemplates;
+      drawAlphaMasked_ = staticBatchCache_.alphaMasked;
+      if (drawAlphaMasked_.size() != batchCount) {
+        drawAlphaMasked_.assign(batchCount, 0u);
+      }
       for (size_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
         drawItems_[batchIndex].pushConstants =
             std::span<const std::byte>(reinterpret_cast<const std::byte *>(
@@ -1488,8 +1488,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                        sizeof(PushConstants));
       }
       boundStaticBatchGeneration_ = staticBatchCache_.generation;
+    } else {
+      drawPushConstants_.resize(batchCount);
+      if (drawAlphaMasked_.size() != batchCount) {
+        drawAlphaMasked_ = staticBatchCache_.alphaMasked;
+        if (drawAlphaMasked_.size() != batchCount) {
+          drawAlphaMasked_.assign(batchCount, 0u);
+        }
+      }
     }
-    instanceRemap_ = staticBatchCache_.remap;
+    instanceRemap_.clear();
+    instanceRemapUploadSource = &staticBatchCache_.remap;
     remapSignature = staticBatchCache_.remapSignature;
     remapSignatureValid = remapCount > 0;
     if (settings.opaque.enableIndirectDraw &&
@@ -2346,10 +2355,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         "address");
   }
 
-  if (!instanceRemap_.empty()) {
+  if (!instanceRemapUploadSource->empty()) {
     if (!remapSignatureValid) {
-      remapSignature = computeRemapSignature(std::span<const uint32_t>(
-          instanceRemap_.data(), instanceRemap_.size()));
+      remapSignature = computeRemapSignature(
+          std::span<const uint32_t>(instanceRemapUploadSource->data(),
+                                    instanceRemapUploadSource->size()));
       remapSignatureValid = true;
       cachedRemapSignature_ = remapSignature;
       cachedRemapSignatureValid_ = true;
@@ -2363,8 +2373,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       NURI_PROFILER_ZONE("OpaqueRenderer.remap_upload",
                          NURI_PROFILER_COLOR_CMD_COPY);
       const std::span<const std::byte> remapBytes{
-          reinterpret_cast<const std::byte *>(instanceRemap_.data()),
-          instanceRemap_.size() * sizeof(uint32_t)};
+          reinterpret_cast<const std::byte *>(
+              instanceRemapUploadSource->data()),
+          instanceRemapUploadSource->size() * sizeof(uint32_t)};
       auto updateResult = gpu_.updateBuffer(
           instanceRemapRing_[frameSlot].buffer->handle(), remapBytes, 0);
       if (updateResult.hasError()) {

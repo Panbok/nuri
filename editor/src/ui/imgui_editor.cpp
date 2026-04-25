@@ -240,6 +240,22 @@ const char *shadowFilterModeDisplayName(ShadowFilterMode mode) {
   return "Unknown";
 }
 
+const char *shadowQualityPresetDisplayName(ShadowQualityPreset preset) {
+  switch (sanitizeShadowQualityPreset(preset)) {
+  case ShadowQualityPreset::Custom:
+    return "Custom";
+  case ShadowQualityPreset::Low:
+    return "Low";
+  case ShadowQualityPreset::Medium:
+    return "Medium";
+  case ShadowQualityPreset::High:
+    return "High";
+  case ShadowQualityPreset::Ultra:
+    return "Ultra";
+  }
+  return "Unknown";
+}
+
 const char *shadowCascadeSplitModeDisplayName(ShadowCascadeSplitMode mode) {
   switch (sanitizeShadowCascadeSplitMode(mode)) {
   case ShadowCascadeSplitMode::Uniform:
@@ -1351,12 +1367,28 @@ void drawShadowSettings(
     const std::optional<ShadowDebugFrameData> *shadowDebugFrameData = nullptr) {
   sanitizeShadowSettings(shadow);
   shadow.shadowMapSize = snapShadowMapResolution(shadow.shadowMapSize);
+  const auto markCustomPreset = [&]() {
+    shadow.qualityPreset = ShadowQualityPreset::Custom;
+  };
   ImGui::Checkbox("Enable Shadows##ShadowPass", &shadow.enabled);
+
+  constexpr const char *kQualityPresetLabels[] = {
+      "Custom", "Low", "Medium", "High", "Ultra",
+  };
+  int qualityPreset =
+      static_cast<int>(sanitizeShadowQualityPreset(shadow.qualityPreset));
+  if (ImGui::Combo("Quality Preset##ShadowPass", &qualityPreset,
+                   kQualityPresetLabels, IM_ARRAYSIZE(kQualityPresetLabels))) {
+    applyShadowQualityPreset(shadow,
+                             static_cast<ShadowQualityPreset>(qualityPreset));
+    shadow.shadowMapSize = snapShadowMapResolution(shadow.shadowMapSize);
+  }
 
   int cascadeCount = static_cast<int>(shadow.cascadeCount);
   if (ImGui::SliderInt("Cascade Count##ShadowPass", &cascadeCount, 1,
                        static_cast<int>(kMaxShadowCascades))) {
     shadow.cascadeCount = static_cast<uint32_t>(std::max(cascadeCount, 1));
+    markCustomPreset();
   }
 
   int shadowMapResolution =
@@ -1372,10 +1404,22 @@ void drawShadowSettings(
                    static_cast<int>(kShadowMapResolutions.size()) - 1);
     shadow.shadowMapSize =
         kShadowMapResolutions[static_cast<size_t>(shadowMapResolution)];
+    markCustomPreset();
   }
 
-  ImGui::SliderFloat("Max Distance##ShadowPass", &shadow.maxDistance, 1.0f,
-                     1000.0f, "%.1f");
+  if (ImGui::SliderFloat("Max Distance##ShadowPass", &shadow.maxDistance, 1.0f,
+                         1000.0f, "%.1f")) {
+    markCustomPreset();
+  }
+  if (ImGui::SliderFloat("Max Distance Fade##ShadowPass",
+                         &shadow.maxDistanceFadeFraction, 0.0f, 1.0f, "%.2f")) {
+    markCustomPreset();
+  }
+  if (shadowDebugFrameData != nullptr && shadowDebugFrameData->has_value()) {
+    ImGui::Text("Resolved Fade: %.3f .. %.3f",
+                (*shadowDebugFrameData)->maxDistanceFadeStart,
+                (*shadowDebugFrameData)->maxDistanceFadeEnd);
+  }
   constexpr const char *kSplitModeLabels[] = {
       "Uniform",
       "Logarithmic",
@@ -1386,17 +1430,25 @@ void drawShadowSettings(
   if (ImGui::Combo("Split Mode##ShadowPass", &splitMode, kSplitModeLabels,
                    IM_ARRAYSIZE(kSplitModeLabels))) {
     shadow.splitMode = static_cast<ShadowCascadeSplitMode>(splitMode);
+    markCustomPreset();
   }
-  ImGui::SliderFloat("Split Lambda##ShadowPass", &shadow.splitLambda, 0.0f,
-                     1.0f, "%.2f");
+  if (ImGui::SliderFloat("Split Lambda##ShadowPass", &shadow.splitLambda, 0.0f,
+                         1.0f, "%.2f")) {
+    markCustomPreset();
+  }
   if (sanitizeShadowCascadeSplitMode(shadow.splitMode) !=
       ShadowCascadeSplitMode::Practical) {
     ImGui::TextUnformatted(
         "Split lambda is only used by the practical split mode.");
   }
-  ImGui::Checkbox("Stabilize Texels##ShadowPass", &shadow.stabilizeCascades);
-  ImGui::SliderFloat("Cascade Blend Fraction##ShadowPass",
-                     &shadow.cascadeBlendFraction, 0.0f, 1.0f, "%.2f");
+  if (ImGui::Checkbox("Stabilize Texels##ShadowPass",
+                      &shadow.stabilizeCascades)) {
+    markCustomPreset();
+  }
+  if (ImGui::SliderFloat("Cascade Blend Fraction##ShadowPass",
+                         &shadow.cascadeBlendFraction, 0.0f, 1.0f, "%.2f")) {
+    markCustomPreset();
+  }
   if (shadow.cascadeCount == 1u) {
     ImGui::TextUnformatted("Cascade blending is only visible when more than "
                            "one cascade is active.");
@@ -1404,12 +1456,18 @@ void drawShadowSettings(
 
   ImGui::Separator();
   ImGui::TextUnformatted("Bias");
-  ImGui::DragFloat("Constant Bias##ShadowPass", &shadow.constantBias, 0.0001f,
-                   -0.1f, 0.1f, "%.5f");
-  ImGui::DragFloat("Slope Bias##ShadowPass", &shadow.slopeBias, 0.05f, 0.0f,
-                   16.0f, "%.2f");
-  ImGui::DragFloat("Normal Bias (texels)##ShadowPass", &shadow.normalBias,
-                   0.005f, 0.0f, 8.0f, "%.3f");
+  if (ImGui::DragFloat("Constant Bias##ShadowPass", &shadow.constantBias,
+                       0.0001f, -0.1f, 0.1f, "%.5f")) {
+    markCustomPreset();
+  }
+  if (ImGui::DragFloat("Slope Bias##ShadowPass", &shadow.slopeBias, 0.05f, 0.0f,
+                       16.0f, "%.2f")) {
+    markCustomPreset();
+  }
+  if (ImGui::DragFloat("Normal Bias (texels)##ShadowPass", &shadow.normalBias,
+                       0.005f, 0.0f, 8.0f, "%.3f")) {
+    markCustomPreset();
+  }
   const std::optional<float> debugCascadeTexelWorldSize =
       shadowDebugCascadeTexelWorldSize(shadow, shadowDebugFrameData);
   if (debugCascadeTexelWorldSize.has_value()) {
@@ -1422,6 +1480,7 @@ void drawShadowSettings(
                          "%.6f")) {
       shadow.normalBias =
           std::max(debugCascadeWorldBias / *debugCascadeTexelWorldSize, 0.0f);
+      markCustomPreset();
     }
     ImGui::Text("Debug Cascade Bias Scale: %.6f world units per texel",
                 *debugCascadeTexelWorldSize);
@@ -1444,33 +1503,46 @@ void drawShadowSettings(
   if (ImGui::Combo("Filter Mode##ShadowPass", &filterMode, kFilterLabels,
                    IM_ARRAYSIZE(kFilterLabels))) {
     shadow.filterMode = static_cast<ShadowFilterMode>(filterMode);
+    markCustomPreset();
   }
   int pcfSamples = static_cast<int>(shadow.pcfSampleCount);
   if (ImGui::SliderInt("PCF Samples##ShadowPass", &pcfSamples, 1, 64)) {
     shadow.pcfSampleCount = static_cast<uint32_t>(std::max(pcfSamples, 1));
+    markCustomPreset();
   }
   int blockerSamples = static_cast<int>(shadow.pcssBlockerSampleCount);
   if (ImGui::SliderInt("PCSS Blocker Samples##ShadowPass", &blockerSamples, 1,
                        static_cast<int>(kMaxShadowPcfSamples))) {
     shadow.pcssBlockerSampleCount =
         static_cast<uint32_t>(std::max(blockerSamples, 1));
+    markCustomPreset();
   }
   int filterSamples = static_cast<int>(shadow.pcssFilterSampleCount);
   if (ImGui::SliderInt("PCSS Filter Samples##ShadowPass", &filterSamples, 1,
                        static_cast<int>(kMaxShadowPcfSamples))) {
     shadow.pcssFilterSampleCount =
         static_cast<uint32_t>(std::max(filterSamples, 1));
+    markCustomPreset();
   }
-  ImGui::DragFloat("PCSS Light Radius Scale##ShadowPass",
-                   &shadow.pcssLightRadiusScale, 0.05f, 0.0f, 32.0f, "%.2f");
-  ImGui::DragFloat("PCSS Search Clamp##ShadowPass",
-                   &shadow.pcssSearchRadiusClampTexels, 1.0f, 0.0f, 256.0f,
-                   "%.1f texels");
-  ImGui::DragFloat("PCSS Filter Clamp##ShadowPass",
-                   &shadow.pcssFilterRadiusClampTexels, 1.0f, 0.0f, 256.0f,
-                   "%.1f texels");
-  ImGui::Checkbox("Fixed Poisson Rotation##ShadowPass",
-                  &shadow.debug.fixedPoissonRotation);
+  if (ImGui::DragFloat("PCSS Light Radius Scale##ShadowPass",
+                       &shadow.pcssLightRadiusScale, 0.05f, 0.0f, 32.0f,
+                       "%.2f")) {
+    markCustomPreset();
+  }
+  if (ImGui::DragFloat("PCSS Search Clamp##ShadowPass",
+                       &shadow.pcssSearchRadiusClampTexels, 1.0f, 0.0f, 256.0f,
+                       "%.1f texels")) {
+    markCustomPreset();
+  }
+  if (ImGui::DragFloat("PCSS Filter Clamp##ShadowPass",
+                       &shadow.pcssFilterRadiusClampTexels, 1.0f, 0.0f, 256.0f,
+                       "%.1f texels")) {
+    markCustomPreset();
+  }
+  if (ImGui::Checkbox("Fixed Poisson Rotation##ShadowPass",
+                      &shadow.debug.fixedPoissonRotation)) {
+    markCustomPreset();
+  }
   int poissonSeed = static_cast<int>(
       std::min(shadow.debug.poissonRotationSeed,
                static_cast<uint32_t>(std::numeric_limits<int>::max())));
@@ -1478,6 +1550,7 @@ void drawShadowSettings(
                      std::numeric_limits<int>::max())) {
     shadow.debug.poissonRotationSeed =
         static_cast<uint32_t>(std::max(poissonSeed, 0));
+    markCustomPreset();
   }
 
   ImGui::Separator();
@@ -1491,6 +1564,7 @@ void drawShadowSettings(
   if (ImGui::Combo("SDSM Mode##ShadowPass", &sdsmMode, kSdsmLabels,
                    IM_ARRAYSIZE(kSdsmLabels))) {
     shadow.sdsmMode = static_cast<ShadowSdsmMode>(sdsmMode);
+    markCustomPreset();
   }
   constexpr const char *kSdsmBackendLabels[] = {
       "Auto",
@@ -1503,9 +1577,12 @@ void drawShadowSettings(
                    IM_ARRAYSIZE(kSdsmBackendLabels))) {
     shadow.sdsmReductionBackend =
         static_cast<ShadowSdsmReductionBackend>(sdsmBackend);
+    markCustomPreset();
   }
-  ImGui::SliderFloat("SDSM Temporal Blend##ShadowPass",
-                     &shadow.sdsmTemporalBlend, 0.0f, 1.0f, "%.2f");
+  if (ImGui::SliderFloat("SDSM Temporal Blend##ShadowPass",
+                         &shadow.sdsmTemporalBlend, 0.0f, 1.0f, "%.2f")) {
+    markCustomPreset();
+  }
   const bool histogramSdsm =
       sanitizeShadowSdsmMode(shadow.sdsmMode) == ShadowSdsmMode::Histogram;
   if (histogramSdsm) {
@@ -1516,13 +1593,18 @@ void drawShadowSettings(
             static_cast<int>(kMaxShadowSdsmHistogramBucketCount))) {
       shadow.sdsmHistogramBucketCount = static_cast<uint32_t>(std::max(
           bucketCount, static_cast<int>(kMinShadowSdsmHistogramBucketCount)));
+      markCustomPreset();
     }
-    ImGui::SliderFloat("Histogram Trim Low##ShadowPass",
-                       &shadow.sdsmHistogramTrimLowPercent, 0.0f, 20.0f,
-                       "%.2f%%");
-    ImGui::SliderFloat("Histogram Trim High##ShadowPass",
-                       &shadow.sdsmHistogramTrimHighPercent, 0.0f, 20.0f,
-                       "%.2f%%");
+    if (ImGui::SliderFloat("Histogram Trim Low##ShadowPass",
+                           &shadow.sdsmHistogramTrimLowPercent, 0.0f, 20.0f,
+                           "%.2f%%")) {
+      markCustomPreset();
+    }
+    if (ImGui::SliderFloat("Histogram Trim High##ShadowPass",
+                           &shadow.sdsmHistogramTrimHighPercent, 0.0f, 20.0f,
+                           "%.2f%%")) {
+      markCustomPreset();
+    }
   }
 
   ImGui::Separator();
@@ -1648,6 +1730,8 @@ void drawShadowSettings(
   ImGui::Separator();
   ImGui::Text("Split Mode: %s",
               shadowCascadeSplitModeDisplayName(shadow.splitMode));
+  ImGui::Text("Quality Preset: %s",
+              shadowQualityPresetDisplayName(shadow.qualityPreset));
   ImGui::Text("Filter: %s", shadowFilterModeDisplayName(shadow.filterMode));
   ImGui::Text("SDSM: %s", shadowSdsmModeDisplayName(shadow.sdsmMode));
 }
@@ -2008,6 +2092,11 @@ void drawShadowsWindow(
   ImGui::Text(
       "Cascade Texture Bytes: %llu",
       static_cast<unsigned long long>(frameMetrics.shadow.cascadeTextureBytes));
+  ImGui::Text("Texel World Size [min/avg/max/far]: %.5f / %.5f / %.5f / %.5f",
+              frameMetrics.shadow.minCascadeTexelWorldSize,
+              frameMetrics.shadow.averageCascadeTexelWorldSize,
+              frameMetrics.shadow.maxCascadeTexelWorldSize,
+              frameMetrics.shadow.farCascadeTexelWorldSize);
   ImGui::Text("Static / Dynamic Casters: %u / %u",
               frameMetrics.shadow.staticCasterEntries,
               frameMetrics.shadow.dynamicCasterEntries);

@@ -53,6 +53,14 @@ enum class ShadowFilterMode : uint8_t {
   PCSS = 3,
 };
 
+enum class ShadowQualityPreset : uint8_t {
+  Custom = 0,
+  Low = 1,
+  Medium = 2,
+  High = 3,
+  Ultra = 4,
+};
+
 enum class ShadowCascadeSplitMode : uint8_t {
   Uniform = 0,
   Logarithmic = 1,
@@ -235,9 +243,11 @@ struct RenderSettings {
 
   struct ShadowSettings {
     bool enabled = true;
+    ShadowQualityPreset qualityPreset = ShadowQualityPreset::Custom;
     uint32_t cascadeCount = kMaxShadowCascades;
     uint32_t shadowMapSize = 2048;
     float maxDistance = 150.0f;
+    float maxDistanceFadeFraction = 0.0f;
     ShadowCascadeSplitMode splitMode = ShadowCascadeSplitMode::Practical;
     float splitLambda = 0.75f;
     bool stabilizeCascades = true;
@@ -353,6 +363,20 @@ sanitizeShadowFilterMode(ShadowFilterMode mode) noexcept {
   }
 }
 
+[[nodiscard]] constexpr ShadowQualityPreset
+sanitizeShadowQualityPreset(ShadowQualityPreset preset) noexcept {
+  switch (preset) {
+  case ShadowQualityPreset::Custom:
+  case ShadowQualityPreset::Low:
+  case ShadowQualityPreset::Medium:
+  case ShadowQualityPreset::High:
+  case ShadowQualityPreset::Ultra:
+    return preset;
+  default:
+    return ShadowQualityPreset::Custom;
+  }
+}
+
 [[nodiscard]] constexpr ShadowSdsmMode
 sanitizeShadowSdsmMode(ShadowSdsmMode mode) noexcept {
   switch (mode) {
@@ -401,7 +425,81 @@ sanitizeShadowCascadeSplitMode(ShadowCascadeSplitMode mode) noexcept {
   }
 }
 
+inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings);
+
+inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
+                                     ShadowQualityPreset preset) {
+  settings.qualityPreset = sanitizeShadowQualityPreset(preset);
+  switch (settings.qualityPreset) {
+  case ShadowQualityPreset::Custom:
+    break;
+  case ShadowQualityPreset::Low:
+    settings.cascadeCount = 1u;
+    settings.shadowMapSize = 1024u;
+    settings.maxDistance = 80.0f;
+    settings.maxDistanceFadeFraction = 0.0f;
+    settings.splitLambda = 0.35f;
+    settings.constantBias = 0.0008f;
+    settings.slopeBias = 2.0f;
+    settings.normalBias = 0.25f;
+    settings.filterMode = ShadowFilterMode::PCF3x3;
+    settings.pcfSampleCount = 9u;
+    settings.sdsmMode = ShadowSdsmMode::Disabled;
+    settings.debug.fixedPoissonRotation = false;
+    break;
+  case ShadowQualityPreset::Medium:
+    settings.cascadeCount = 3u;
+    settings.shadowMapSize = 2048u;
+    settings.maxDistance = 120.0f;
+    settings.maxDistanceFadeFraction = 0.0f;
+    settings.splitLambda = 0.30f;
+    settings.constantBias = 0.0006f;
+    settings.slopeBias = 1.75f;
+    settings.normalBias = 0.35f;
+    settings.filterMode = ShadowFilterMode::PoissonPCF;
+    settings.pcfSampleCount = 16u;
+    settings.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+    settings.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
+    settings.debug.fixedPoissonRotation = true;
+    break;
+  case ShadowQualityPreset::High:
+    settings.cascadeCount = 4u;
+    settings.shadowMapSize = 4096u;
+    settings.maxDistance = 150.0f;
+    settings.maxDistanceFadeFraction = 0.0f;
+    settings.splitLambda = 0.25f;
+    settings.constantBias = 0.0005f;
+    settings.slopeBias = 1.5f;
+    settings.normalBias = 0.50f;
+    settings.filterMode = ShadowFilterMode::PoissonPCF;
+    settings.pcfSampleCount = 16u;
+    settings.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+    settings.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
+    settings.debug.fixedPoissonRotation = true;
+    break;
+  case ShadowQualityPreset::Ultra:
+    settings.cascadeCount = 4u;
+    settings.shadowMapSize = 8192u;
+    settings.maxDistance = 220.0f;
+    settings.maxDistanceFadeFraction = 0.0f;
+    settings.splitLambda = 0.0f;
+    settings.constantBias = 0.0004f;
+    settings.slopeBias = 1.3f;
+    settings.normalBias = 0.60f;
+    settings.filterMode = ShadowFilterMode::PoissonPCF;
+    settings.pcfSampleCount = 16u;
+    settings.pcssBlockerSampleCount = 16u;
+    settings.pcssFilterSampleCount = 32u;
+    settings.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+    settings.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
+    settings.debug.fixedPoissonRotation = true;
+    break;
+  }
+  sanitizeShadowSettings(settings);
+}
+
 inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
+  settings.qualityPreset = sanitizeShadowQualityPreset(settings.qualityPreset);
   settings.cascadeCount =
       std::clamp(settings.cascadeCount, 1u, kMaxShadowCascades);
   settings.shadowMapSize = std::max(settings.shadowMapSize, 1u);
@@ -409,9 +507,21 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
       std::isfinite(settings.maxDistance) && settings.maxDistance > 0.0f
           ? settings.maxDistance
           : 150.0f;
+  settings.maxDistanceFadeFraction =
+      std::isfinite(settings.maxDistanceFadeFraction)
+          ? std::clamp(settings.maxDistanceFadeFraction, 0.0f, 1.0f)
+          : 0.0f;
   settings.splitLambda = std::clamp(settings.splitLambda, 0.0f, 1.0f);
   settings.cascadeBlendFraction =
       std::clamp(settings.cascadeBlendFraction, 0.0f, 1.0f);
+  settings.constantBias =
+      std::isfinite(settings.constantBias) ? settings.constantBias : 0.0005f;
+  settings.slopeBias = std::isfinite(settings.slopeBias)
+                           ? std::max(settings.slopeBias, 0.0f)
+                           : 1.5f;
+  settings.normalBias = std::isfinite(settings.normalBias)
+                            ? std::max(settings.normalBias, 0.0f)
+                            : 0.0f;
   settings.filterMode = sanitizeShadowFilterMode(settings.filterMode);
   settings.splitMode = sanitizeShadowCascadeSplitMode(settings.splitMode);
   settings.sdsmMode = sanitizeShadowSdsmMode(settings.sdsmMode);
@@ -681,6 +791,8 @@ struct ShadowSdsmDebugFrameData {
 struct ShadowDebugFrameData {
   LightId selectedShadowLightId = kInvalidLightId;
   uint32_t cascadeCount = 0u;
+  float maxDistanceFadeStart = 0.0f;
+  float maxDistanceFadeEnd = 0.0f;
   uint32_t rawSamplerId = kInvalidShadowBindlessIndex;
   uint32_t compareSamplerId = kInvalidShadowBindlessIndex;
   ShadowSdsmDebugFrameData sdsm{};
@@ -824,6 +936,10 @@ struct ShadowFrameMetrics {
   uint32_t staticOnlyReuseMissRasterStateChangedCount = 0;
   uint32_t staticOnlyReuseMissAdaptiveRefreshCount = 0;
   uint64_t cascadeTextureBytes = 0;
+  float minCascadeTexelWorldSize = 0.0f;
+  float averageCascadeTexelWorldSize = 0.0f;
+  float maxCascadeTexelWorldSize = 0.0f;
+  float farCascadeTexelWorldSize = 0.0f;
   uint32_t filterSampleBudget = 0;
   uint32_t pcssBlockerSampleBudget = 0;
   uint32_t pcssFilterSampleBudget = 0;

@@ -97,52 +97,82 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
       .shared = frame.sharedResources,
   };
 
-  for (const std::unique_ptr<RenderFeature> &feature : features_) {
-    if (!feature) {
-      continue;
+  {
+    NURI_PROFILER_ZONE("RenderPipeline.publish_features",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    for (const std::unique_ptr<RenderFeature> &feature : features_) {
+      if (!feature) {
+        continue;
+      }
+      auto publishResult = feature->publishFrameData(ctx);
+      if (publishResult.hasError()) {
+        return Result<bool, std::string>::makeError(publishResult.error());
+      }
     }
-    auto publishResult = feature->publishFrameData(ctx);
-    if (publishResult.hasError()) {
-      return Result<bool, std::string>::makeError(publishResult.error());
-    }
+    NURI_PROFILER_ZONE_END();
   }
 
-  for (const std::unique_ptr<FrameDataProvider> &provider : providers_) {
-    if (!provider) {
-      continue;
+  {
+    NURI_PROFILER_ZONE("RenderPipeline.prepare_providers",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    for (const std::unique_ptr<FrameDataProvider> &provider : providers_) {
+      if (!provider) {
+        continue;
+      }
+      auto result = provider->prepare(ctx);
+      if (result.hasError()) {
+        return Result<bool, std::string>::makeError(result.error());
+      }
     }
-    auto result = provider->prepare(ctx);
-    if (result.hasError()) {
-      return Result<bool, std::string>::makeError(result.error());
-    }
+    NURI_PROFILER_ZONE_END();
   }
 
-  for (const std::unique_ptr<RenderFeature> &feature : features_) {
-    if (!feature) {
-      continue;
+  {
+    NURI_PROFILER_ZONE("RenderPipeline.prepare_features",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    for (const std::unique_ptr<RenderFeature> &feature : features_) {
+      if (!feature) {
+        continue;
+      }
+      auto prepareResult = feature->prepare(ctx);
+      if (prepareResult.hasError()) {
+        return Result<bool, std::string>::makeError(prepareResult.error());
+      }
     }
-    auto prepareResult = feature->prepare(ctx);
-    if (prepareResult.hasError()) {
-      return Result<bool, std::string>::makeError(prepareResult.error());
-    }
+    NURI_PROFILER_ZONE_END();
   }
 
-  for (const RegisteredPass &entry : passes_) {
-    if (entry.feature == nullptr || entry.pass == nullptr || !entry.enabled) {
-      continue;
+  {
+    NURI_PROFILER_ZONE("RenderPipeline.prepare_build_passes",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    for (const RegisteredPass &entry : passes_) {
+      if (entry.feature == nullptr || entry.pass == nullptr || !entry.enabled) {
+        continue;
+      }
+      RenderFeaturePass &pass = *entry.pass;
+      if (!pass.isEnabled(ctx)) {
+        continue;
+      }
+      {
+        NURI_PROFILER_ZONE("RenderPipeline.pass_prepare",
+                           NURI_PROFILER_COLOR_CMD_COPY);
+        auto prepareResult = pass.prepare(ctx);
+        if (prepareResult.hasError()) {
+          return Result<bool, std::string>::makeError(prepareResult.error());
+        }
+        NURI_PROFILER_ZONE_END();
+      }
+      {
+        NURI_PROFILER_ZONE("RenderPipeline.pass_build",
+                           NURI_PROFILER_COLOR_CMD_DRAW);
+        auto buildResult = pass.build(ctx);
+        if (buildResult.hasError()) {
+          return Result<bool, std::string>::makeError(buildResult.error());
+        }
+        NURI_PROFILER_ZONE_END();
+      }
     }
-    RenderFeaturePass &pass = *entry.pass;
-    if (!pass.isEnabled(ctx)) {
-      continue;
-    }
-    auto prepareResult = pass.prepare(ctx);
-    if (prepareResult.hasError()) {
-      return Result<bool, std::string>::makeError(prepareResult.error());
-    }
-    auto buildResult = pass.build(ctx);
-    if (buildResult.hasError()) {
-      return Result<bool, std::string>::makeError(buildResult.error());
-    }
+    NURI_PROFILER_ZONE_END();
   }
 
   return Result<bool, std::string>::makeResult(true);

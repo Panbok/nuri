@@ -114,6 +114,7 @@ private:
   struct StaticShadowCasterCacheEntry {
     uint32_t templateIndex = 0;
     uint32_t instanceIndex = 0;
+    uint32_t batchIndex = std::numeric_limits<uint32_t>::max();
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
     IndexFormat indexFormat = IndexFormat::U32;
@@ -123,12 +124,50 @@ private:
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = 0;
+    uint64_t rasterSignature = 0;
     uint32_t indexCount = 0;
     uint32_t firstIndex = 0;
     bool doubleSided = false;
     bool alphaMasked = false;
     bool hasCasterCullingBounds = false;
     std::array<glm::vec3, 8> casterWorldCorners{};
+  };
+
+  struct StaticShadowBatchTemplate {
+    RenderPipelineHandle pipeline{};
+    BufferHandle vertexBuffer{};
+    BufferHandle indexBuffer{};
+    uint64_t indexBufferOffset = 0;
+    IndexFormat indexFormat = IndexFormat::U32;
+    uint32_t indexCount = 0;
+    uint32_t firstIndex = 0;
+    uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
+    uint32_t materialIndex = 0;
+    uint32_t firstInstanceIndex = 0;
+    uint32_t instanceCount = 0;
+    uint64_t rasterSignature = 0;
+    uint64_t indexCountEstimate = 0;
+  };
+
+  struct StaticShadowCasterLightSpaceBounds {
+    glm::vec3 min{0.0f};
+    glm::vec3 max{0.0f};
+  };
+
+  struct StaticShadowCasterLightGridCell {
+    uint32_t firstEntry = 0;
+    uint32_t entryCount = 0;
+  };
+
+  struct StaticShadowCasterLightGrid {
+    glm::vec3 min{0.0f};
+    glm::vec3 max{0.0f};
+    glm::vec3 invCellSize{0.0f};
+    glm::uvec3 dimensions{0u};
+    bool valid = false;
   };
 
   struct DynamicBufferSlot {
@@ -276,7 +315,7 @@ private:
   Result<bool, std::string>
   updateShadowFrameData(RenderFrameContext &frame,
                         const RenderSettings::ShadowSettings &settings,
-                        uint32_t shadowMapSize);
+                        uint32_t shadowMapSize, int32_t forcedMeshLod);
   Result<bool, std::string>
   buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                    const ForwardSceneGpuData &sceneGpu);
@@ -306,12 +345,27 @@ private:
   std::pmr::vector<DynamicBufferSlot> shadowFrameRing_;
   std::pmr::vector<DynamicBufferSlot> sdsmReduceResultRing_;
   std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
+  std::pmr::vector<uint64_t> instanceRemapUploadSignatures_;
   std::pmr::vector<uint64_t> shadowFrameUploadSignatures_;
   std::pmr::vector<uint64_t> sdsmReduceResultRingPublishedFrames_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<uint32_t> staticShadowTemplateIndices_;
   std::pmr::vector<uint32_t> dynamicShadowTemplateIndices_;
   std::pmr::vector<StaticShadowCasterCacheEntry> staticShadowCasterCache_;
+  std::pmr::vector<StaticShadowBatchTemplate> staticShadowBatchTemplates_;
+  std::pmr::vector<uint32_t> staticShadowBatchInstanceIndices_;
+  std::pmr::vector<BufferHandle> staticShadowCasterDrawBuffers_;
+  std::pmr::vector<glm::vec3> staticShadowCasterFitPoints_;
+  std::pmr::vector<StaticShadowCasterLightSpaceBounds>
+      staticShadowCasterLightSpaceBounds_;
+  std::pmr::vector<StaticShadowCasterLightSpaceBounds>
+      staticShadowBatchLightSpaceBounds_;
+  std::pmr::vector<StaticShadowCasterLightGridCell>
+      staticShadowCasterLightGridCells_;
+  std::pmr::vector<uint32_t> staticShadowCasterLightGridEntries_;
+  std::pmr::vector<uint32_t> staticShadowCasterLargeLightGridEntries_;
+  std::pmr::vector<uint32_t> staticShadowCasterLightGridQueryMarks_;
+  std::pmr::vector<uint32_t> staticShadowCasterLightGridQueryEntries_;
   std::pmr::vector<InstanceData> instanceMatrices_;
   std::pmr::vector<uint32_t> instanceRemap_;
   std::array<std::pmr::vector<PushConstants>, kMaxShadowCascades>
@@ -321,7 +375,7 @@ private:
   std::array<uint32_t, kMaxShadowCascades> cascadeDrawCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeCulledCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDynamicDrawCounts_{};
-  std::array<uint32_t, kMaxShadowCascades> cascadeIndexCountEstimates_{};
+  std::array<uint64_t, kMaxShadowCascades> cascadeIndexCountEstimates_{};
   std::array<uint64_t, kMaxShadowCascades>
       staticOnlyCascadeContentSignatures_{};
   std::array<uint64_t, kMaxShadowCascades>
@@ -331,6 +385,14 @@ private:
   std::array<bool, kMaxShadowCascades> reuseStaticOnlyCascadePass_{};
   std::array<bool, kMaxShadowCascades> reusableStaticOnlyCascadeValid_{};
   std::pmr::vector<BufferDependency> passBufferDependencies_;
+  std::pmr::vector<BufferHandle> passDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
+  std::pmr::vector<RenderGraphPreparedDependencyBufferBinding>
+      passDependencyBufferBindings_;
+  std::pmr::vector<RenderGraphPreparedDependencyTextureBinding>
+      passDependencyTextureBindings_;
+  std::pmr::vector<BufferHandle> preResolvedDrawBuffers_;
+  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds_;
   std::pmr::vector<TextureDependency> passTextureDependencies_;
   std::pmr::vector<TextureDependency> previewTextureDependencies_;
   std::pmr::vector<std::byte> sdsmReadbackBuffer_;
@@ -373,7 +435,23 @@ private:
   uint64_t staticShadowCasterCachePipelineSignature_ = 0u;
   int32_t staticShadowCasterCacheForcedMeshLod_ =
       std::numeric_limits<int32_t>::min();
+  glm::vec3 staticShadowCasterBoundsMin_{std::numeric_limits<float>::max()};
+  glm::vec3 staticShadowCasterBoundsMax_{std::numeric_limits<float>::lowest()};
+  glm::vec3 staticShadowCasterLightDepthDirection_{0.0f, -1.0f, 0.0f};
+  glm::vec2 staticShadowCasterLightDepthBounds_{0.0f};
+  glm::mat4 staticShadowCasterLightSpaceBoundsView_{1.0f};
+  glm::vec3 staticShadowCasterLightSpaceBoundsMin_{
+      std::numeric_limits<float>::max()};
+  glm::vec3 staticShadowCasterLightSpaceBoundsMax_{
+      std::numeric_limits<float>::lowest()};
+  StaticShadowCasterLightGrid staticShadowCasterLightGrid_{};
+  uint64_t staticShadowCasterCacheContentSignature_ = 0u;
+  uint64_t staticShadowCasterCacheIndexCountEstimate_ = 0u;
+  uint32_t staticShadowCasterLightGridQueryMarker_ = 1u;
   bool hasFrozenShadowFit_ = false;
+  bool hasStaticShadowCasterBounds_ = false;
+  bool hasStaticShadowCasterLightDepthBounds_ = false;
+  bool hasStaticShadowCasterLightSpaceBounds_ = false;
   bool staticShadowCasterCacheValid_ = false;
   LightId frozenShadowLightId_ = kInvalidLightId;
   uint32_t frozenShadowMapSize_ = 0u;
