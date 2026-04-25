@@ -1841,6 +1841,8 @@ std::string antiAliasingSettingsSummary(
   summary += antiAliasingModeDisplayName(settings.mode);
   summary += " jitter=";
   summary += settings.debug.jitterEnabled ? "enabled" : "disabled";
+  summary += " freezeJitter=";
+  summary += settings.debug.freezeJitter ? "true" : "false";
   summary += " debugView=";
   summary += antiAliasingDebugViewDisplayName(settings.debug.view);
   summary += " resetHistoryRequested=";
@@ -1851,7 +1853,8 @@ std::string antiAliasingSettingsSummary(
 }
 
 void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
-                              RenderPipeline *renderPipeline) {
+                              RenderPipeline *renderPipeline,
+                              const RenderFrameMetrics &frameMetrics) {
   sanitizeAntiAliasingSettings(aa);
   int modeIndex = static_cast<int>(aa.mode);
   modeIndex = std::clamp(modeIndex, 0,
@@ -1864,8 +1867,10 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   }
 
   ImGui::Checkbox("Jitter Enabled##AntiAliasing", &aa.debug.jitterEnabled);
+  ImGui::Checkbox("Freeze Jitter##AntiAliasing", &aa.debug.freezeJitter);
   if (sanitizeAntiAliasingMode(aa.mode) == AntiAliasingMode::None) {
     aa.debug.jitterEnabled = false;
+    aa.debug.freezeJitter = false;
   }
 
   if (ImGui::Button("Reset History##AntiAliasing")) {
@@ -1891,14 +1896,29 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Separator();
   ImGui::Text("Active Mode: %s", antiAliasingModeDisplayName(aa.mode));
   ImGui::Text("Jitter: %s", aa.debug.jitterEnabled ? "enabled" : "disabled");
+  ImGui::Text("Freeze Jitter: %s", aa.debug.freezeJitter ? "yes" : "no");
   ImGui::Text("Debug View: %s",
               antiAliasingDebugViewDisplayName(aa.debug.view));
   ImGui::Text("History Reset Request: %s",
               aa.debug.resetHistoryRequested ? "pending" : "clear");
   ImGui::Text("TemporalAAFeature: %s",
               temporalFeaturePresent ? "registered" : "missing");
-  ImGui::TextUnformatted("TAA is selectable but the resolve is not "
-                         "implemented in Phase 0.");
+  const AntiAliasingFrameMetrics &metrics = frameMetrics.antiAliasing;
+  ImGui::Text("Jitter Index: %u / %u", metrics.jitterIndex,
+              metrics.jitterSequenceLength);
+  ImGui::Text("Jitter Offset: %.4f, %.4f px", metrics.jitterPixelOffset.x,
+              metrics.jitterPixelOffset.y);
+  ImGui::Text("Jitter Bounds: %s",
+              metrics.jitterOutOfBounds ? "out of range" : "valid");
+  ImGui::Text("History Valid: %s", metrics.historyValid ? "yes" : "no");
+  const std::string_view resetReason =
+      temporalHistoryResetReasonName(metrics.historyResetReason);
+  ImGui::Text("Reset Reason: %s", resetReason.data());
+  ImGui::Text("Frames Since Reset: %u", metrics.framesSinceHistoryReset);
+  ImGui::Text("Reset Count: %u", metrics.historyResetCount);
+  ImGui::Text("Jitter OOB Count: %u", metrics.jitterOutOfBoundsCount);
+  ImGui::TextUnformatted("TAA resolve is not implemented yet; Phase 1 only "
+                         "publishes jitter and camera history state.");
   if (ImGui::Button("Dump AA Settings To Log##AntiAliasing")) {
     const std::string summary =
         antiAliasingSettingsSummary(aa, temporalFeaturePresent);
@@ -1907,12 +1927,14 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
 }
 
 void drawAntiAliasingWindow(bool &open, RenderSettings &renderSettings,
-                            RenderPipeline *renderPipeline) {
+                            RenderPipeline *renderPipeline,
+                            const RenderFrameMetrics &frameMetrics) {
   if (!ImGui::Begin(kAntiAliasingWindowName, &open)) {
     ImGui::End();
     return;
   }
-  drawAntiAliasingSettings(renderSettings.antiAliasing, renderPipeline);
+  drawAntiAliasingSettings(renderSettings.antiAliasing, renderPipeline,
+                           frameMetrics);
   ImGui::End();
 }
 
@@ -2413,6 +2435,7 @@ void drawPassList(RenderSettings &renderSettings,
 
 void drawPassInspector(RenderSettings &renderSettings,
                        RenderPipeline *renderPipeline,
+                       const RenderFrameMetrics &frameMetrics,
                        size_t &selectedPassIndex) {
   ImGui::BeginChild("PassPanel", ImVec2(0.0f, 0.0f), false,
                     ImGuiWindowFlags_NoScrollbar);
@@ -2484,7 +2507,8 @@ void drawPassInspector(RenderSettings &renderSettings,
           drawCompositeSettings(renderSettings.toneMap);
           break;
         case PassInspectorKind::AntiAliasing:
-          drawAntiAliasingSettings(renderSettings.antiAliasing, renderPipeline);
+          drawAntiAliasingSettings(renderSettings.antiAliasing, renderPipeline,
+                                   frameMetrics);
           break;
         case PassInspectorKind::Debug:
           drawDebugSettings(renderSettings.debug);
@@ -2511,12 +2535,14 @@ void drawLogWindow(LogModel &model, LogFilterState &filterState,
 
 void drawRenderPassesWindow(bool &open, RenderSettings &renderSettings,
                             RenderPipeline *renderPipeline,
+                            const RenderFrameMetrics &frameMetrics,
                             size_t &selectedPassIndex) {
   if (!ImGui::Begin(kRenderPassesWindowName, &open)) {
     ImGui::End();
     return;
   }
-  drawPassInspector(renderSettings, renderPipeline, selectedPassIndex);
+  drawPassInspector(renderSettings, renderPipeline, frameMetrics,
+                    selectedPassIndex);
   ImGui::End();
 }
 
@@ -5061,7 +5087,7 @@ struct ImGuiEditor::Impl {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawRenderPassesWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
       drawRenderPassesWindow(showRenderPassesWindow, renderSettings,
-                             renderPipeline, selectedPassIndex);
+                             renderPipeline, frameMetrics, selectedPassIndex);
       NURI_PROFILER_ZONE_END();
     }
     if (showTextureFilteringWindow) {
@@ -5075,7 +5101,7 @@ struct ImGuiEditor::Impl {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawAntiAliasingWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
       drawAntiAliasingWindow(showAntiAliasingWindow, renderSettings,
-                             renderPipeline);
+                             renderPipeline, frameMetrics);
       NURI_PROFILER_ZONE_END();
     }
     if (showShadowsWindow) {

@@ -1128,7 +1128,8 @@ Result<bool, std::string> TextRenderer::append3DGraphPass(
   worldPcs_.reserve(worldBatches_.size());
   worldTransparentTextureReadList_.clear();
   worldTransparentTextureReadSet_.clear();
-  const glm::mat4 viewProj = frame.camera.proj * frame.camera.view;
+  const glm::mat4 viewProj =
+      cameraCurrentUnjitteredViewProjection(frame.camera);
   for (const WorldBatch &b : worldBatches_) {
     worldPcs_.push_back(WorldPC{
         .viewProj = viewProj,
@@ -1247,7 +1248,8 @@ Result<bool, std::string> TextRenderer::buildTransparentStageContribution(
   worldTransparentDependencyBuffers_.clear();
   worldTransparentDraws_.reserve(worldBatches_.size());
   worldPcs_.reserve(worldBatches_.size());
-  const glm::mat4 viewProj = frame.camera.proj * frame.camera.view;
+  const glm::mat4 viewProj =
+      cameraCurrentUnjitteredViewProjection(frame.camera);
   for (size_t i = 0; i < worldBatches_.size(); ++i) {
     const WorldBatch &b = worldBatches_[i];
     worldPcs_.push_back(WorldPC{

@@ -919,11 +919,22 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
                                       double timeSecondsIn) {
   frameContext_.scene = &scene_;
   frameContext_.resources = &resources();
-  frameContext_.camera = makeCameraFrameState(camera, app_.getAspectRatio());
   frameRenderSettings_ = renderSettings_;
   applyDebugRenderEnvOverrides(frameRenderSettings_);
+  sanitizeAntiAliasingSettings(frameRenderSettings_.antiAliasing);
+  frameContext_.camera = makeTemporalCameraFrameState(
+      camera, app_.getAspectRatio(), frameRenderSettings_.antiAliasing,
+      TemporalCameraFrameDesc{
+          .renderExtent =
+              glm::uvec2(static_cast<uint32_t>(std::max(app_.getWidth(), 0)),
+                         static_cast<uint32_t>(std::max(app_.getHeight(), 0))),
+      },
+      temporalCameraHistory_);
+  frameRenderSettings_.antiAliasing.debug.resetHistoryRequested = false;
   frameContext_.settings = &frameRenderSettings_;
   frameContext_.metrics = {};
+  frameContext_.metrics.antiAliasing =
+      makeAntiAliasingFrameMetrics(frameContext_.camera);
   frameContext_.sharedDepthTexture = {};
   frameContext_.timeSeconds = timeSecondsIn;
   frameContext_.frameIndex = frameIndex_++;

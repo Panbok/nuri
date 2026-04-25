@@ -200,6 +200,8 @@ layout(std430, buffer_reference) readonly buffer ShadowFrameBuffer {
 
 layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   mat4 view;
+  // Current scene projection. Temporal AA applies jitter here when enabled;
+  // CPU CameraFrameState retains unjittered matrices for overlay and velocity use.
   mat4 proj;
   vec4 cameraPos;
   uint cubemapTexId;

@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory_resource>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -55,6 +56,18 @@ enum class AntiAliasingMode : uint8_t {
 enum class AntiAliasingDebugView : uint8_t {
   None = 0,
   Settings = 1,
+};
+
+enum class TemporalHistoryResetReason : uint8_t {
+  None = 0,
+  FirstFrame = 1,
+  HistoryResetRequested = 2,
+  AntiAliasingModeChanged = 3,
+  Resize = 4,
+  ProjectionChanged = 5,
+  RenderScaleChanged = 6,
+  CameraCut = 7,
+  InvalidHistoryTexture = 8,
 };
 
 enum class ShadowFilterMode : uint8_t {
@@ -125,6 +138,7 @@ static constexpr Format kFrameCompositionSceneColorFormat =
 static constexpr Format kFrameCompositionFrameColorFormat =
     Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
+static constexpr uint32_t kTemporalJitterSequenceLength = 8u;
 static constexpr Format kDefaultShadowMapDepthFormat = Format::D16_UNORM;
 static constexpr uint32_t kMaxShadowCascades = 4u;
 static constexpr uint32_t kDefaultShadowSdsmHistogramBucketCount = 64u;
@@ -331,6 +345,7 @@ struct RenderSettings {
 
   struct AntiAliasingDebugSettings {
     bool jitterEnabled = false;
+    bool freezeJitter = false;
     bool resetHistoryRequested = false;
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
   };
@@ -402,6 +417,7 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.debug.view = sanitizeAntiAliasingDebugView(settings.debug.view);
   if (settings.mode == AntiAliasingMode::None) {
     settings.debug.jitterEnabled = false;
+    settings.debug.freezeJitter = false;
   }
 }
 
@@ -690,6 +706,8 @@ shadowFilterSampleBudget(ShadowFilterMode filterMode, uint32_t pcfSampleCount,
 
 struct CameraFrameState {
   glm::mat4 view{1.0f};
+  // Current projection used by scene rendering. This is jittered when temporal
+  // jitter is active; use currentUnjitteredProj for non-temporal overlays.
   glm::mat4 proj{1.0f};
   glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
   float aspectRatio = 1.0f;
@@ -698,6 +716,54 @@ struct CameraFrameState {
   float farPlane = 1000.0f;
   float fovYRadians = glm::radians(60.0f);
   float orthoHeight = 10.0f;
+  glm::mat4 currentUnjitteredProj{1.0f};
+  glm::mat4 currentUnjitteredViewProj{1.0f};
+  glm::mat4 currentJitteredViewProj{1.0f};
+  glm::mat4 previousUnjitteredViewProj{1.0f};
+  glm::mat4 previousJitteredViewProj{1.0f};
+  glm::vec2 jitterPixelOffset{0.0f};
+  glm::vec2 previousJitterPixelOffset{0.0f};
+  glm::uvec2 renderExtent{0u, 0u};
+  uint32_t jitterIndex = 0u;
+  uint32_t jitterSequenceLength = kTemporalJitterSequenceLength;
+  uint32_t framesSinceHistoryReset = 0u;
+  uint32_t historyResetCount = 0u;
+  uint32_t jitterOutOfBoundsCount = 0u;
+  TemporalHistoryResetReason historyResetReason =
+      TemporalHistoryResetReason::None;
+  bool temporalDataValid = false;
+  bool jitterEnabled = false;
+  bool jitterFrozen = false;
+  bool jitterOutOfBounds = false;
+  bool historyValid = false;
+};
+
+struct TemporalCameraHistoryState {
+  glm::mat4 previousUnjitteredViewProj{1.0f};
+  glm::mat4 previousJitteredViewProj{1.0f};
+  glm::vec2 previousJitterPixelOffset{0.0f};
+  glm::uvec2 previousRenderExtent{0u, 0u};
+  glm::vec2 previousRenderScale{1.0f, 1.0f};
+  ProjectionType previousProjectionType = ProjectionType::Perspective;
+  AntiAliasingMode previousAntiAliasingMode = AntiAliasingMode::None;
+  float previousAspectRatio = 1.0f;
+  float previousNearPlane = 0.1f;
+  float previousFarPlane = 1000.0f;
+  float previousFovYRadians = glm::radians(60.0f);
+  float previousOrthoHeight = 10.0f;
+  uint32_t nextJitterIndex = 0u;
+  uint32_t currentJitterIndex = 0u;
+  uint32_t framesSinceHistoryReset = 0u;
+  uint32_t historyResetCount = 0u;
+  uint32_t jitterOutOfBoundsCount = 0u;
+  bool initialized = false;
+};
+
+struct TemporalCameraFrameDesc {
+  glm::uvec2 renderExtent{0u, 0u};
+  glm::vec2 renderScale{1.0f, 1.0f};
+  bool cameraCutRequested = false;
+  bool historyTextureValid = true;
 };
 
 [[nodiscard]] inline CameraFrameState makeCameraFrameState(const Camera &camera,
@@ -705,6 +771,11 @@ struct CameraFrameState {
   CameraFrameState state{};
   state.view = camera.viewMatrix();
   state.proj = camera.projectionMatrix(aspectRatio);
+  state.currentUnjitteredProj = state.proj;
+  state.currentUnjitteredViewProj = state.proj * state.view;
+  state.currentJitteredViewProj = state.currentUnjitteredViewProj;
+  state.previousUnjitteredViewProj = state.currentUnjitteredViewProj;
+  state.previousJitteredViewProj = state.currentJitteredViewProj;
   state.cameraPos = glm::vec4(camera.position(), 1.0f);
   state.aspectRatio = aspectRatio;
   state.projectionType = camera.projectionType();
@@ -720,6 +791,214 @@ struct CameraFrameState {
     state.fovYRadians = perspective.fovYRadians;
   }
   return state;
+}
+
+[[nodiscard]] inline float halton(uint32_t index, uint32_t base) noexcept {
+  float result = 0.0f;
+  float invBase = 1.0f / static_cast<float>(base);
+  float fraction = invBase;
+  while (index > 0u) {
+    result += static_cast<float>(index % base) * fraction;
+    index /= base;
+    fraction *= invBase;
+  }
+  return result;
+}
+
+[[nodiscard]] inline glm::vec2
+temporalJitterPixelOffset(uint32_t jitterIndex) noexcept {
+  const uint32_t sample = (jitterIndex % kTemporalJitterSequenceLength) + 1u;
+  return glm::vec2(halton(sample, 2u) - 0.5f, halton(sample, 3u) - 0.5f);
+}
+
+[[nodiscard]] inline bool jitterOffsetWithinHalfPixel(glm::vec2 offset) {
+  return std::abs(offset.x) <= 0.5f && std::abs(offset.y) <= 0.5f;
+}
+
+[[nodiscard]] inline glm::mat4
+applyProjectionJitter(glm::mat4 projection, glm::vec2 jitterPixelOffset,
+                      glm::uvec2 renderExtent, ProjectionType projectionType) {
+  if (renderExtent.x == 0u || renderExtent.y == 0u) {
+    return projection;
+  }
+
+  const glm::vec2 jitterNdc{
+      2.0f * jitterPixelOffset.x / static_cast<float>(renderExtent.x),
+      2.0f * jitterPixelOffset.y / static_cast<float>(renderExtent.y),
+  };
+  if (projectionType == ProjectionType::Orthographic) {
+    projection[3][0] += jitterNdc.x;
+    projection[3][1] += jitterNdc.y;
+  } else {
+    projection[2][0] -= jitterNdc.x;
+    projection[2][1] -= jitterNdc.y;
+  }
+  return projection;
+}
+
+[[nodiscard]] inline bool
+projectionMetadataChanged(const TemporalCameraHistoryState &history,
+                          const CameraFrameState &state) {
+  constexpr float kProjectionEpsilon = 1.0e-6f;
+  return history.previousProjectionType != state.projectionType ||
+         std::abs(history.previousAspectRatio - state.aspectRatio) >
+             kProjectionEpsilon ||
+         std::abs(history.previousNearPlane - state.nearPlane) >
+             kProjectionEpsilon ||
+         std::abs(history.previousFarPlane - state.farPlane) >
+             kProjectionEpsilon ||
+         std::abs(history.previousFovYRadians - state.fovYRadians) >
+             kProjectionEpsilon ||
+         std::abs(history.previousOrthoHeight - state.orthoHeight) >
+             kProjectionEpsilon;
+}
+
+[[nodiscard]] inline bool
+temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
+                           glm::vec2 renderScale) {
+  constexpr float kRenderScaleEpsilon = 1.0e-6f;
+  return std::abs(history.previousRenderScale.x - renderScale.x) >
+             kRenderScaleEpsilon ||
+         std::abs(history.previousRenderScale.y - renderScale.y) >
+             kRenderScaleEpsilon;
+}
+
+[[nodiscard]] inline CameraFrameState makeTemporalCameraFrameState(
+    const Camera &camera, float aspectRatio,
+    const RenderSettings::AntiAliasingSettings &antiAliasing,
+    const TemporalCameraFrameDesc &desc, TemporalCameraHistoryState &history) {
+  CameraFrameState state = makeCameraFrameState(camera, aspectRatio);
+  state.temporalDataValid = true;
+  state.renderExtent = desc.renderExtent;
+
+  const AntiAliasingMode mode = sanitizeAntiAliasingMode(antiAliasing.mode);
+  const bool taaSelected = mode == AntiAliasingMode::TAA;
+  const bool hasRenderExtent =
+      desc.renderExtent.x > 0u && desc.renderExtent.y > 0u;
+  state.jitterEnabled =
+      taaSelected && antiAliasing.debug.jitterEnabled && hasRenderExtent;
+  state.jitterFrozen = state.jitterEnabled && antiAliasing.debug.freezeJitter;
+
+  TemporalHistoryResetReason resetReason = TemporalHistoryResetReason::None;
+  if (!history.initialized) {
+    resetReason = TemporalHistoryResetReason::FirstFrame;
+  } else if (antiAliasing.debug.resetHistoryRequested) {
+    resetReason = TemporalHistoryResetReason::HistoryResetRequested;
+  } else if (history.previousAntiAliasingMode != mode) {
+    resetReason = TemporalHistoryResetReason::AntiAliasingModeChanged;
+  } else if (desc.cameraCutRequested) {
+    resetReason = TemporalHistoryResetReason::CameraCut;
+  } else if (history.previousRenderExtent != desc.renderExtent) {
+    resetReason = TemporalHistoryResetReason::Resize;
+  } else if (temporalRenderScaleChanged(history, desc.renderScale)) {
+    resetReason = TemporalHistoryResetReason::RenderScaleChanged;
+  } else if (!desc.historyTextureValid) {
+    resetReason = TemporalHistoryResetReason::InvalidHistoryTexture;
+  } else if (projectionMetadataChanged(history, state)) {
+    resetReason = TemporalHistoryResetReason::ProjectionChanged;
+  }
+
+  if (state.jitterEnabled) {
+    if (state.jitterFrozen && history.initialized) {
+      state.jitterIndex = history.currentJitterIndex;
+    } else {
+      state.jitterIndex =
+          history.nextJitterIndex % kTemporalJitterSequenceLength;
+    }
+    state.jitterPixelOffset = temporalJitterPixelOffset(state.jitterIndex);
+    if (!state.jitterFrozen) {
+      history.nextJitterIndex =
+          (state.jitterIndex + 1u) % kTemporalJitterSequenceLength;
+    }
+  } else {
+    state.jitterIndex = 0u;
+    state.jitterPixelOffset = glm::vec2(0.0f);
+  }
+
+  state.jitterOutOfBounds =
+      !jitterOffsetWithinHalfPixel(state.jitterPixelOffset);
+  if (state.jitterOutOfBounds) {
+    ++history.jitterOutOfBoundsCount;
+  }
+  state.jitterOutOfBoundsCount = history.jitterOutOfBoundsCount;
+  state.proj = applyProjectionJitter(state.currentUnjitteredProj,
+                                     state.jitterPixelOffset, desc.renderExtent,
+                                     state.projectionType);
+  state.currentJitteredViewProj = state.proj * state.view;
+
+  const bool resetHistory = resetReason != TemporalHistoryResetReason::None;
+  state.historyValid = taaSelected && history.initialized && !resetHistory;
+  state.previousUnjitteredViewProj = state.historyValid
+                                         ? history.previousUnjitteredViewProj
+                                         : state.currentUnjitteredViewProj;
+  state.previousJitteredViewProj = state.historyValid
+                                       ? history.previousJitteredViewProj
+                                       : state.currentJitteredViewProj;
+  state.previousJitterPixelOffset = state.historyValid
+                                        ? history.previousJitterPixelOffset
+                                        : state.jitterPixelOffset;
+  state.historyResetReason = resetReason;
+  if (resetHistory) {
+    ++history.historyResetCount;
+    history.framesSinceHistoryReset = 0u;
+  } else if (taaSelected) {
+    ++history.framesSinceHistoryReset;
+  }
+  state.framesSinceHistoryReset = history.framesSinceHistoryReset;
+  state.historyResetCount = history.historyResetCount;
+
+  history.previousUnjitteredViewProj = state.currentUnjitteredViewProj;
+  history.previousJitteredViewProj = state.currentJitteredViewProj;
+  history.previousJitterPixelOffset = state.jitterPixelOffset;
+  history.previousRenderExtent = desc.renderExtent;
+  history.previousRenderScale = desc.renderScale;
+  history.previousProjectionType = state.projectionType;
+  history.previousAntiAliasingMode = mode;
+  history.previousAspectRatio = state.aspectRatio;
+  history.previousNearPlane = state.nearPlane;
+  history.previousFarPlane = state.farPlane;
+  history.previousFovYRadians = state.fovYRadians;
+  history.previousOrthoHeight = state.orthoHeight;
+  history.currentJitterIndex = state.jitterIndex;
+  history.initialized = true;
+
+  return state;
+}
+
+[[nodiscard]] inline const glm::mat4 &
+cameraCurrentUnjitteredProjection(const CameraFrameState &camera) noexcept {
+  return camera.temporalDataValid ? camera.currentUnjitteredProj : camera.proj;
+}
+
+[[nodiscard]] inline glm::mat4
+cameraCurrentUnjitteredViewProjection(const CameraFrameState &camera) noexcept {
+  return camera.temporalDataValid ? camera.currentUnjitteredViewProj
+                                  : camera.proj * camera.view;
+}
+
+[[nodiscard]] constexpr std::string_view
+temporalHistoryResetReasonName(TemporalHistoryResetReason reason) noexcept {
+  switch (reason) {
+  case TemporalHistoryResetReason::None:
+    return "None";
+  case TemporalHistoryResetReason::FirstFrame:
+    return "First Frame";
+  case TemporalHistoryResetReason::HistoryResetRequested:
+    return "History Reset Requested";
+  case TemporalHistoryResetReason::AntiAliasingModeChanged:
+    return "AA Mode Changed";
+  case TemporalHistoryResetReason::Resize:
+    return "Resize";
+  case TemporalHistoryResetReason::ProjectionChanged:
+    return "Projection Changed";
+  case TemporalHistoryResetReason::RenderScaleChanged:
+    return "Render Scale Changed";
+  case TemporalHistoryResetReason::CameraCut:
+    return "Camera Cut";
+  case TemporalHistoryResetReason::InvalidHistoryTexture:
+    return "Invalid History Texture";
+  }
+  return "Unknown";
 }
 
 struct alignas(16) ShadowCascadeGpuData {
@@ -860,6 +1139,7 @@ struct ShadowDebugFrameData {
 
 struct ForwardSceneFrameData {
   glm::mat4 view{1.0f};
+  // Current scene projection. This is jittered when temporal jitter is active.
   glm::mat4 proj{1.0f};
   glm::vec4 cameraPos{0.0f, 0.0f, 0.0f, 1.0f};
   uint32_t cubemapTexId = 0;
@@ -1032,9 +1312,44 @@ struct ShadowFrameMetrics {
   uint32_t sdsmGpuTimingAvailable = 0;
 };
 
+struct AntiAliasingFrameMetrics {
+  glm::vec2 jitterPixelOffset{0.0f};
+  uint32_t jitterIndex = 0u;
+  uint32_t jitterSequenceLength = kTemporalJitterSequenceLength;
+  uint32_t jitterOutOfBoundsCount = 0u;
+  uint32_t historyResetCount = 0u;
+  uint32_t framesSinceHistoryReset = 0u;
+  TemporalHistoryResetReason historyResetReason =
+      TemporalHistoryResetReason::None;
+  bool jitterEnabled = false;
+  bool jitterFrozen = false;
+  bool jitterOutOfBounds = false;
+  bool historyValid = false;
+  bool temporalDataValid = false;
+};
+
+[[nodiscard]] inline AntiAliasingFrameMetrics
+makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
+  return AntiAliasingFrameMetrics{
+      .jitterPixelOffset = camera.jitterPixelOffset,
+      .jitterIndex = camera.jitterIndex,
+      .jitterSequenceLength = camera.jitterSequenceLength,
+      .jitterOutOfBoundsCount = camera.jitterOutOfBoundsCount,
+      .historyResetCount = camera.historyResetCount,
+      .framesSinceHistoryReset = camera.framesSinceHistoryReset,
+      .historyResetReason = camera.historyResetReason,
+      .jitterEnabled = camera.jitterEnabled,
+      .jitterFrozen = camera.jitterFrozen,
+      .jitterOutOfBounds = camera.jitterOutOfBounds,
+      .historyValid = camera.historyValid,
+      .temporalDataValid = camera.temporalDataValid,
+  };
+}
+
 struct RenderFrameMetrics {
   OpaqueFrameMetrics opaque{};
   ShadowFrameMetrics shadow{};
+  AntiAliasingFrameMetrics antiAliasing{};
   struct TransparentFrameMetrics {
     uint32_t meshDraws = 0;
     uint32_t contributorSortableDraws = 0;

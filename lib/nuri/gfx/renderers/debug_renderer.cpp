@@ -566,7 +566,7 @@ DebugRenderer::prepareGridDraw(const RenderFrameContext &frame,
   }
 
   gridPushConstants_ = GridPushConstants{
-      .mvp = frame.camera.proj * frame.camera.view,
+      .mvp = cameraCurrentUnjitteredViewProjection(frame.camera),
       .cameraPos = frame.camera.cameraPos,
       .origin = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f),
   };
@@ -619,7 +619,7 @@ Result<bool, std::string> DebugRenderer::appendModelBoundsGraphPass(
   }
 
   debugDraw3D_->clear();
-  debugDraw3D_->setMatrix(frame.camera.proj * frame.camera.view);
+  debugDraw3D_->setMatrix(cameraCurrentUnjitteredViewProjection(frame.camera));
   for (const Renderable &renderable : renderables) {
     const ModelRecord *modelRecord = frame.resources->tryGet(renderable.model);
     if (!modelRecord || !modelRecord->model) {
@@ -702,7 +702,7 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
   }
 
   debugDraw3D_->clear();
-  debugDraw3D_->setMatrix(frame.camera.proj * frame.camera.view);
+  debugDraw3D_->setMatrix(cameraCurrentUnjitteredViewProjection(frame.camera));
 
   const LightId selectedLightId = resolveSelectedLightId(frame);
   bool hasLines = false;

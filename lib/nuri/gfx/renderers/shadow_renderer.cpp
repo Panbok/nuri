@@ -503,8 +503,9 @@ hashShadowSettings(uint64_t hash,
                                     &frame.camera.cameraPos, 1u)));
   hash = hashCombineBytes(
       hash, std::as_bytes(std::span<const glm::mat4>(&frame.camera.view, 1u)));
+  const glm::mat4 &projection = cameraCurrentUnjitteredProjection(frame.camera);
   hash = hashCombineBytes(
-      hash, std::as_bytes(std::span<const glm::mat4>(&frame.camera.proj, 1u)));
+      hash, std::as_bytes(std::span<const glm::mat4>(&projection, 1u)));
   return hash;
 }
 

@@ -195,6 +195,7 @@ private:
   // Transient per-frame render settings after frame-local overrides.
   RenderSettings frameRenderSettings_{};
   RenderFrameContext frameContext_{};
+  TemporalCameraHistoryState temporalCameraHistory_{};
   uint64_t frameIndex_ = 0;
   uint64_t simulationFrameIndex_ = 0;
   double frameDeltaSeconds_ = 0.0;
