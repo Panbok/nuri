@@ -40,6 +40,36 @@ TextureDesc makeTextureDesc(Format format, uint32_t width, uint32_t height,
   };
 }
 
+uint32_t textureBytesPerPixel(Format format) {
+  switch (format) {
+  case Format::RG16_FLOAT:
+    return sizeof(uint16_t) * 2u;
+  case Format::RG32_FLOAT:
+    return sizeof(float) * 2u;
+  case Format::R32_UINT:
+  case Format::R32_FLOAT:
+  case Format::D32_FLOAT:
+    return sizeof(uint32_t);
+  case Format::D16_UNORM:
+    return sizeof(uint16_t);
+  case Format::RGBA8_UNORM:
+  case Format::RGBA8_SRGB:
+  case Format::RGBA8_UINT:
+    return 4u;
+  case Format::RGBA16_FLOAT:
+    return 8u;
+  case Format::RGBA32_FLOAT:
+    return 16u;
+  case Format::BC7_RGBA_UNORM:
+  case Format::BC7_RGBA_SRGB:
+  case Format::ETC2_RGB8_UNORM:
+  case Format::ETC2_RGB8_SRGB:
+  case Format::Count:
+    break;
+  }
+  return 0u;
+}
+
 } // namespace
 
 FrameCompositionProvider::FrameCompositionProvider(
@@ -51,7 +81,8 @@ FrameCompositionProvider::FrameCompositionProvider(
           TextureRing(memory_),
           TextureRing(memory_),
       },
-      frameColorTextures_(memory_), sceneDepthTextures_(memory_) {}
+      frameColorTextures_(memory_), sceneDepthTextures_(memory_),
+      motionVectorTextures_(memory_) {}
 
 FrameCompositionProvider::~FrameCompositionProvider() {
   for (auto &textures : sceneColorMipTextures_) {
@@ -60,6 +91,7 @@ FrameCompositionProvider::~FrameCompositionProvider() {
   destroyTextures(frameColorTextures_);
   destroyTextures(sceneDepthTextures_);
   destroyHistoryTextures();
+  destroyMotionVectorTextures();
 }
 
 Result<bool, std::string>
@@ -70,6 +102,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.frameColorGraphTexture = {};
   ctx.shared.sceneDepthGraphTexture = {};
   ctx.shared.sceneDepthPyramidGraphTextures = {};
+  ctx.shared.motionVectorGraphTexture = {};
+  ctx.shared.previousMotionVectorGraphTexture = {};
 
   auto ensureResult = ensureTextures(ctx.shared.textureRequirements);
   if (ensureResult.hasError()) {
@@ -90,6 +124,39 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       historyColorTextures_[(ctx.frame.frameIndex + 1u) & 1u];
   ctx.shared.historyColorWriteTexture =
       historyColorTextures_[ctx.frame.frameIndex & 1u];
+  ctx.shared.motionVectorTexture =
+      currentRingTexture(motionVectorTextures_, ctx.frame.frameIndex);
+  ctx.shared.previousMotionVectorTexture =
+      ctx.frame.camera.historyValid
+          ? previousRingTexture(motionVectorTextures_, ctx.frame.frameIndex)
+          : TextureHandle{};
+  AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
+  aaMetrics.motionVectorFormat = kFrameCompositionMotionVectorFormat;
+  aaMetrics.motionVectorWidth = framebufferWidth_;
+  aaMetrics.motionVectorHeight = framebufferHeight_;
+  aaMetrics.motionVectorTextureCount =
+      static_cast<uint32_t>(motionVectorTextures_.size());
+  aaMetrics.motionVectorAllocationCount = motionVectorAllocationCount_;
+  aaMetrics.motionVectorReallocationCount = motionVectorReallocationCount_;
+  aaMetrics.motionVectorRg32FallbackCount = 0u;
+  aaMetrics.motionVectorAllocated =
+      nuri::isValid(ctx.shared.motionVectorTexture);
+  aaMetrics.previousMotionVectorValid =
+      nuri::isValid(ctx.shared.previousMotionVectorTexture);
+  aaMetrics.motionVectorFormatSupported =
+      kFrameCompositionMotionVectorFormat == Format::RG16_FLOAT &&
+      textureBytesPerPixel(kFrameCompositionMotionVectorFormat) != 0u;
+  const uint64_t bytesPerTexture = static_cast<uint64_t>(framebufferWidth_) *
+                                   static_cast<uint64_t>(framebufferHeight_) *
+                                   static_cast<uint64_t>(textureBytesPerPixel(
+                                       kFrameCompositionMotionVectorFormat));
+  aaMetrics.motionVectorTextureBytes =
+      aaMetrics.motionVectorAllocated ? bytesPerTexture : 0u;
+  aaMetrics.previousMotionVectorTextureBytes =
+      !motionVectorTextures_.empty() ? bytesPerTexture : 0u;
+  aaMetrics.motionVectorTotalBytes =
+      bytesPerTexture * static_cast<uint64_t>(motionVectorTextures_.size());
+  aaMetrics.motionVectorClearBytes = 0u;
   if (ctx.shared.sceneDepthSamplerId == 0u) {
     ctx.shared.sceneDepthSamplerId = gpu_.getDefaultSamplerBindlessIndex();
   }
@@ -117,25 +184,34 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
     return Result<bool, std::string>::makeResult(true);
   }
 
+  const FrameTextureRequirementFlags previousRequirements =
+      allocatedRequirements_;
+  const bool fullRecreate = dimensionsChanged || ringChanged;
   framebufferWidth_ = safeWidth;
   framebufferHeight_ = safeHeight;
   textureRingCount_ = ringCount;
   allocatedRequirements_ = requirements;
 
-  if (hasFrameTextureRequirementFlag(
-          requirements, FrameTextureRequirementFlags::SceneColor)) {
+  const bool needsSceneColor = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::SceneColor);
+  const bool hadSceneColor = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::SceneColor);
+  if (needsSceneColor && (fullRecreate || !hadSceneColor)) {
     auto recreateResult = recreateMipTextureRing(sceneColorMipTextures_[0], 0u,
                                                  "frame_scene_color");
     if (recreateResult.hasError()) {
       invalidateAllocationState();
       return recreateResult;
     }
-  } else {
+  } else if (!needsSceneColor && hadSceneColor) {
     destroyTextures(sceneColorMipTextures_[0]);
   }
 
-  if (hasFrameTextureRequirementFlag(
-          requirements, FrameTextureRequirementFlags::FrameColor)) {
+  const bool needsFrameColor = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::FrameColor);
+  const bool hadFrameColor = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::FrameColor);
+  if (needsFrameColor && (fullRecreate || !hadFrameColor)) {
     auto recreateResult = recreateFullResTextureRing(
         frameColorTextures_, kFrameCompositionFrameColorFormat,
         TextureUsage::AttachmentSampled, "frame_output_color");
@@ -143,12 +219,15 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
       invalidateAllocationState();
       return recreateResult;
     }
-  } else {
+  } else if (!needsFrameColor && hadFrameColor) {
     destroyTextures(frameColorTextures_);
   }
 
-  if (hasFrameTextureRequirementFlag(
-          requirements, FrameTextureRequirementFlags::SceneDepth)) {
+  const bool needsSceneDepth = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::SceneDepth);
+  const bool hadSceneDepth = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::SceneDepth);
+  if (needsSceneDepth && (fullRecreate || !hadSceneDepth)) {
     auto recreateResult = recreateFullResTextureRing(
         sceneDepthTextures_, kFrameCompositionDepthFormat,
         TextureUsage::AttachmentSampled, "frame_scene_depth");
@@ -156,12 +235,15 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
       invalidateAllocationState();
       return recreateResult;
     }
-  } else {
+  } else if (!needsSceneDepth && hadSceneDepth) {
     destroyTextures(sceneDepthTextures_);
   }
 
-  if (hasFrameTextureRequirementFlag(
-          requirements, FrameTextureRequirementFlags::SceneColorMipChain)) {
+  const bool needsSceneColorMipChain = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::SceneColorMipChain);
+  const bool hadSceneColorMipChain = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::SceneColorMipChain);
+  if (needsSceneColorMipChain && (fullRecreate || !hadSceneColorMipChain)) {
     for (size_t i = 1; i < kSceneColorMipRingSpecs.size(); ++i) {
       const SceneColorMipRingSpec &spec = kSceneColorMipRingSpecs[i];
       auto recreateResult = recreateMipTextureRing(
@@ -171,21 +253,38 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
         return recreateResult;
       }
     }
-  } else {
+  } else if (!needsSceneColorMipChain && hadSceneColorMipChain) {
     for (size_t i = 1; i < sceneColorMipTextures_.size(); ++i) {
       destroyTextures(sceneColorMipTextures_[i]);
     }
   }
 
-  if (hasFrameTextureRequirementFlag(
-          requirements, FrameTextureRequirementFlags::HistoryColor)) {
+  const bool needsHistoryColor = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::HistoryColor);
+  const bool hadHistoryColor = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::HistoryColor);
+  if (needsHistoryColor && (fullRecreate || !hadHistoryColor)) {
     auto historyResult = recreateHistoryTextures();
     if (historyResult.hasError()) {
       invalidateAllocationState();
       return historyResult;
     }
-  } else {
+  } else if (!needsHistoryColor && hadHistoryColor) {
     destroyHistoryTextures();
+  }
+
+  const bool needsMotionVectors = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::MotionVectors);
+  const bool hadMotionVectors = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::MotionVectors);
+  if (needsMotionVectors && (fullRecreate || !hadMotionVectors)) {
+    auto motionVectorResult = recreateMotionVectorTextures();
+    if (motionVectorResult.hasError()) {
+      invalidateAllocationState();
+      return motionVectorResult;
+    }
+  } else if (!needsMotionVectors && hadMotionVectors) {
+    destroyMotionVectorTextures();
   }
 
   return Result<bool, std::string>::makeResult(true);
@@ -260,6 +359,32 @@ Result<bool, std::string> FrameCompositionProvider::recreateHistoryTextures() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string>
+FrameCompositionProvider::recreateMotionVectorTextures() {
+  const bool replacingExistingTextures = !motionVectorTextures_.empty();
+  destroyMotionVectorTextures();
+
+  const uint32_t motionVectorRingCount = std::max(2u, textureRingCount_);
+  motionVectorTextures_.resize(motionVectorRingCount);
+  const TextureDesc desc =
+      makeTextureDesc(kFrameCompositionMotionVectorFormat, framebufferWidth_,
+                      framebufferHeight_, TextureUsage::AttachmentSampled);
+  for (uint32_t i = 0; i < motionVectorRingCount; ++i) {
+    const std::string debugName = "frame_motion_vectors_" + std::to_string(i);
+    auto createResult = gpu_.createTexture(desc, debugName);
+    if (createResult.hasError()) {
+      destroyMotionVectorTextures();
+      return Result<bool, std::string>::makeError(createResult.error());
+    }
+    motionVectorTextures_[i] = createResult.value();
+  }
+  if (replacingExistingTextures) {
+    ++motionVectorReallocationCount_;
+  }
+  motionVectorAllocationCount_ += motionVectorRingCount;
+  return Result<bool, std::string>::makeResult(true);
+}
+
 void FrameCompositionProvider::destroyTextures(TextureRing &textures) {
   for (TextureHandle &texture : textures) {
     if (!nuri::isValid(texture)) {
@@ -281,12 +406,27 @@ void FrameCompositionProvider::destroyHistoryTextures() {
   }
 }
 
+void FrameCompositionProvider::destroyMotionVectorTextures() {
+  destroyTextures(motionVectorTextures_);
+}
+
 TextureHandle FrameCompositionProvider::currentRingTexture(
     const TextureRing &textures, uint64_t frameIndex) const noexcept {
   if (textures.empty()) {
     return {};
   }
   return textures[static_cast<size_t>(frameIndex % textures.size())];
+}
+
+TextureHandle FrameCompositionProvider::previousRingTexture(
+    const TextureRing &textures, uint64_t frameIndex) const noexcept {
+  if (textures.empty()) {
+    return {};
+  }
+  const uint64_t previousIndex =
+      (frameIndex + static_cast<uint64_t>(textures.size()) - 1u) %
+      static_cast<uint64_t>(textures.size());
+  return textures[static_cast<size_t>(previousIndex)];
 }
 
 } // namespace nuri

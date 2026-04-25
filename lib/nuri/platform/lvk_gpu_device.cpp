@@ -136,6 +136,8 @@ lvk::Format toLvkFormat(Format format) {
     return lvk::Format_R_F32;
   case Format::RG32_FLOAT:
     return lvk::Format_RG_F32;
+  case Format::RG16_FLOAT:
+    return lvk::Format_RG_F16;
   case Format::RGBA8_UNORM:
     return lvk::Format_RGBA_UN8;
   case Format::RGBA8_SRGB:
@@ -172,6 +174,8 @@ Format fromLvkFormat(lvk::Format format) {
     return Format::R32_FLOAT;
   case lvk::Format_RG_F32:
     return Format::RG32_FLOAT;
+  case lvk::Format_RG_F16:
+    return Format::RG16_FLOAT;
   case lvk::Format_RGBA_UN8:
     return Format::RGBA8_UNORM;
   case lvk::Format_RGBA_SRGB8:
@@ -3443,6 +3447,9 @@ LvkGPUDevice::readTexture(TextureHandle texture,
     break;
   case Format::RG32_FLOAT:
     bytesPerPixel = sizeof(float) * 2u;
+    break;
+  case Format::RG16_FLOAT:
+    bytesPerPixel = sizeof(uint16_t) * 2u;
     break;
   case Format::RGBA8_UNORM:
   case Format::RGBA8_SRGB:

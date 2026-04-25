@@ -107,7 +107,8 @@ PassInspectorKind classifyPassInspector(std::string_view featureName,
       passName == "OpaquePickPass") {
     return PassInspectorKind::Opaque;
   }
-  if (featureName == "TemporalAAFeature" || passName == "TemporalAANoopPass") {
+  if (featureName == "TemporalAAFeature" ||
+      passName == "TemporalAAMotionVectorClearPass") {
     return PassInspectorKind::AntiAliasing;
   }
   if (featureName == "TransmissionFeature" ||
@@ -139,6 +140,8 @@ const char *formatDisplayName(Format format) {
     return "R32_FLOAT";
   case Format::RG32_FLOAT:
     return "RG32_FLOAT";
+  case Format::RG16_FLOAT:
+    return "RG16_FLOAT";
   case Format::RGBA8_UNORM:
     return "RGBA8_UNORM";
   case Format::RGBA8_SRGB:
@@ -1917,8 +1920,53 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Text("Frames Since Reset: %u", metrics.framesSinceHistoryReset);
   ImGui::Text("Reset Count: %u", metrics.historyResetCount);
   ImGui::Text("Jitter OOB Count: %u", metrics.jitterOutOfBoundsCount);
-  ImGui::TextUnformatted("TAA resolve is not implemented yet; Phase 1 only "
-                         "publishes jitter and camera history state.");
+  if (ImGui::CollapsingHeader("Motion Vector Resource",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Text("Allocated: %s", metrics.motionVectorAllocated ? "yes" : "no");
+    ImGui::Text("Format: %s", formatDisplayName(metrics.motionVectorFormat));
+    ImGui::Text("Format Support: %s", metrics.motionVectorFormatSupported
+                                          ? "supported"
+                                          : "unsupported");
+    ImGui::Text("Dimensions: %u x %u", metrics.motionVectorWidth,
+                metrics.motionVectorHeight);
+    ImGui::Text("Texture Ring Count: %u", metrics.motionVectorTextureCount);
+    ImGui::Text(
+        "Current Texture Bytes: %llu",
+        static_cast<unsigned long long>(metrics.motionVectorTextureBytes));
+    ImGui::Text("Previous Texture Bytes: %llu",
+                static_cast<unsigned long long>(
+                    metrics.previousMotionVectorTextureBytes));
+    ImGui::Text(
+        "Total Velocity Bytes: %llu",
+        static_cast<unsigned long long>(metrics.motionVectorTotalBytes));
+    ImGui::Text("Clear Value: %.3f, %.3f, %.3f, %.3f",
+                kFrameCompositionMotionVectorClearValue.r,
+                kFrameCompositionMotionVectorClearValue.g,
+                kFrameCompositionMotionVectorClearValue.b,
+                kFrameCompositionMotionVectorClearValue.a);
+    ImGui::Text("Clear Passes: %u", metrics.motionVectorClearPassCount);
+    ImGui::Text(
+        "Clear Bandwidth Estimate: %llu bytes",
+        static_cast<unsigned long long>(metrics.motionVectorClearBytes));
+    ImGui::Text("Allocation Count: %u", metrics.motionVectorAllocationCount);
+    ImGui::Text("Reallocation Count: %u",
+                metrics.motionVectorReallocationCount);
+    ImGui::Text("RG32 Fallback Count: %u",
+                metrics.motionVectorRg32FallbackCount);
+    ImGui::Text("Current Graph Resource: %s",
+                metrics.motionVectorGraphPublished ? "published" : "missing");
+    ImGui::Text("Previous Velocity: %s",
+                metrics.previousMotionVectorValid ? "valid" : "invalid");
+    ImGui::Text("Previous Graph Resource: %s",
+                metrics.previousMotionVectorGraphPublished ? "published"
+                                                           : "not imported");
+    ImGui::TextUnformatted("Producer: Temporal AA Motion Vector Clear");
+    ImGui::TextUnformatted(
+        "Consumers: future velocity generation and TAA resolve");
+  }
+  ImGui::TextUnformatted("TAA resolve is not implemented yet; current TAA "
+                         "work publishes jitter, camera history, and cleared "
+                         "motion-vector resources.");
   if (ImGui::Button("Dump AA Settings To Log##AntiAliasing")) {
     const std::string summary =
         antiAliasingSettingsSummary(aa, temporalFeaturePresent);

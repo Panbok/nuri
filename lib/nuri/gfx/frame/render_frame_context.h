@@ -138,6 +138,12 @@ static constexpr Format kFrameCompositionSceneColorFormat =
 static constexpr Format kFrameCompositionFrameColorFormat =
     Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
+static constexpr Format kFrameCompositionMotionVectorFormat =
+    Format::RG16_FLOAT;
+// Motion vectors are normalized UV-space history lookup offsets:
+// historyUv = currentUv + velocity. Current and previous jitter are excluded.
+static constexpr ClearColor kFrameCompositionMotionVectorClearValue{
+    .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
 static constexpr uint32_t kTemporalJitterSequenceLength = 8u;
 static constexpr Format kDefaultShadowMapDepthFormat = Format::D16_UNORM;
 static constexpr uint32_t kMaxShadowCascades = 4u;
@@ -1314,11 +1320,23 @@ struct ShadowFrameMetrics {
 
 struct AntiAliasingFrameMetrics {
   glm::vec2 jitterPixelOffset{0.0f};
+  Format motionVectorFormat = Format::Count;
   uint32_t jitterIndex = 0u;
   uint32_t jitterSequenceLength = kTemporalJitterSequenceLength;
   uint32_t jitterOutOfBoundsCount = 0u;
   uint32_t historyResetCount = 0u;
   uint32_t framesSinceHistoryReset = 0u;
+  uint32_t motionVectorWidth = 0u;
+  uint32_t motionVectorHeight = 0u;
+  uint32_t motionVectorTextureCount = 0u;
+  uint32_t motionVectorAllocationCount = 0u;
+  uint32_t motionVectorReallocationCount = 0u;
+  uint32_t motionVectorRg32FallbackCount = 0u;
+  uint32_t motionVectorClearPassCount = 0u;
+  uint64_t motionVectorTextureBytes = 0u;
+  uint64_t previousMotionVectorTextureBytes = 0u;
+  uint64_t motionVectorTotalBytes = 0u;
+  uint64_t motionVectorClearBytes = 0u;
   TemporalHistoryResetReason historyResetReason =
       TemporalHistoryResetReason::None;
   bool jitterEnabled = false;
@@ -1326,6 +1344,11 @@ struct AntiAliasingFrameMetrics {
   bool jitterOutOfBounds = false;
   bool historyValid = false;
   bool temporalDataValid = false;
+  bool motionVectorAllocated = false;
+  bool motionVectorFormatSupported = false;
+  bool previousMotionVectorValid = false;
+  bool motionVectorGraphPublished = false;
+  bool previousMotionVectorGraphPublished = false;
 };
 
 [[nodiscard]] inline AntiAliasingFrameMetrics
@@ -1472,6 +1495,10 @@ struct FrameSharedResources {
   RenderGraphTextureId frameColorGraphTexture{};
   TextureHandle historyColorReadTexture{};
   TextureHandle historyColorWriteTexture{};
+  TextureHandle motionVectorTexture{};
+  TextureHandle previousMotionVectorTexture{};
+  RenderGraphTextureId motionVectorGraphTexture{};
+  RenderGraphTextureId previousMotionVectorGraphTexture{};
   RenderGraphTextureId opaquePickGraphTexture{};
   RenderGraphTextureId opaquePickDepthGraphTexture{};
   std::optional<LightId> selectedLightId{};
@@ -1645,6 +1672,22 @@ resolveHistoryColorReadTexture(const RenderFrameContext &frame) {
 resolveHistoryColorWriteTexture(const RenderFrameContext &frame) {
   if (nuri::isValid(frame.sharedResources.historyColorWriteTexture)) {
     return frame.sharedResources.historyColorWriteTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline TextureHandle
+resolveMotionVectorTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.motionVectorTexture)) {
+    return frame.sharedResources.motionVectorTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline TextureHandle
+resolvePreviousMotionVectorTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.previousMotionVectorTexture)) {
+    return frame.sharedResources.previousMotionVectorTexture;
   }
   return {};
 }

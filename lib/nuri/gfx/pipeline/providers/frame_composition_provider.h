@@ -46,12 +46,17 @@ private:
   recreateMipTextureRing(TextureRing &textures, uint32_t mipLevel,
                          std::string_view debugNameBase);
   Result<bool, std::string> recreateHistoryTextures();
+  Result<bool, std::string> recreateMotionVectorTextures();
   void invalidateAllocationState() noexcept;
   void destroyTextures(TextureRing &textures);
   void destroyHistoryTextures();
+  void destroyMotionVectorTextures();
   [[nodiscard]] TextureHandle
   currentRingTexture(const TextureRing &textures,
                      uint64_t frameIndex) const noexcept;
+  [[nodiscard]] TextureHandle
+  previousRingTexture(const TextureRing &textures,
+                      uint64_t frameIndex) const noexcept;
 
   GPUDevice &gpu_;
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
@@ -59,9 +64,12 @@ private:
       sceneColorMipTextures_;
   TextureRing frameColorTextures_;
   TextureRing sceneDepthTextures_;
+  TextureRing motionVectorTextures_;
   std::array<TextureHandle, 2> historyColorTextures_{};
   FrameTextureRequirementFlags allocatedRequirements_ =
       FrameTextureRequirementFlags::None;
+  uint32_t motionVectorAllocationCount_ = 0u;
+  uint32_t motionVectorReallocationCount_ = 0u;
   uint32_t textureRingCount_ = 0u;
   uint32_t framebufferWidth_ = 0u;
   uint32_t framebufferHeight_ = 0u;

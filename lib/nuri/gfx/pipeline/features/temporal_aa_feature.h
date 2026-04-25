@@ -9,18 +9,22 @@
 
 namespace nuri {
 
-class NURI_API TemporalAANoopPass final : public RenderFeaturePass {
+class NURI_API TemporalAAMotionVectorClearPass final
+    : public RenderFeaturePass {
 public:
-  TemporalAANoopPass() = default;
-  ~TemporalAANoopPass() override = default;
+  TemporalAAMotionVectorClearPass() = default;
+  ~TemporalAAMotionVectorClearPass() override = default;
 
-  TemporalAANoopPass(const TemporalAANoopPass &) = delete;
-  TemporalAANoopPass &operator=(const TemporalAANoopPass &) = delete;
-  TemporalAANoopPass(TemporalAANoopPass &&) = delete;
-  TemporalAANoopPass &operator=(TemporalAANoopPass &&) = delete;
+  TemporalAAMotionVectorClearPass(const TemporalAAMotionVectorClearPass &) =
+      delete;
+  TemporalAAMotionVectorClearPass &
+  operator=(const TemporalAAMotionVectorClearPass &) = delete;
+  TemporalAAMotionVectorClearPass(TemporalAAMotionVectorClearPass &&) = delete;
+  TemporalAAMotionVectorClearPass &
+  operator=(TemporalAAMotionVectorClearPass &&) = delete;
 
   [[nodiscard]] std::string_view name() const noexcept override {
-    return "TemporalAANoopPass";
+    return "TemporalAAMotionVectorClearPass";
   }
   [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
@@ -40,11 +44,13 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override {
     return "TemporalAAFeature";
   }
+  [[nodiscard]] Result<bool, std::string>
+  publishFrameData(FrameBuildContext &ctx) override;
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:
-  TemporalAANoopPass noopPass_{};
-  std::array<RenderFeaturePass *, 1> passes_{&noopPass_};
+  TemporalAAMotionVectorClearPass motionVectorClearPass_{};
+  std::array<RenderFeaturePass *, 1> passes_{&motionVectorClearPass_};
 };
 
 } // namespace nuri
