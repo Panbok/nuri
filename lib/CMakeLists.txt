@@ -22,6 +22,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/pipeline/features/opaque_feature.cpp
   nuri/gfx/pipeline/features/shadow_feature.cpp
   nuri/gfx/pipeline/features/skybox_feature.cpp
+  nuri/gfx/pipeline/features/temporal_aa_feature.cpp
   nuri/gfx/pipeline/features/text_feature.cpp
   nuri/gfx/pipeline/features/transmission_feature.cpp
   nuri/gfx/pipeline/features/transparent_feature.cpp

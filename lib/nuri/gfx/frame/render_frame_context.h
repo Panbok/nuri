@@ -46,6 +46,17 @@ enum class ToneMapper : uint8_t {
   AgX = 1,
 };
 
+enum class AntiAliasingMode : uint8_t {
+  None = 0,
+  TAA = 1,
+  SpatialFallback = 2,
+};
+
+enum class AntiAliasingDebugView : uint8_t {
+  None = 0,
+  Settings = 1,
+};
+
 enum class ShadowFilterMode : uint8_t {
   Hard = 0,
   PCF3x3 = 1,
@@ -168,6 +179,29 @@ sanitizeToneMapper(ToneMapper mapper) noexcept {
     return mapper;
   default:
     return ToneMapper::ACES2_SDR;
+  }
+}
+
+[[nodiscard]] constexpr AntiAliasingMode
+sanitizeAntiAliasingMode(AntiAliasingMode mode) noexcept {
+  switch (mode) {
+  case AntiAliasingMode::None:
+  case AntiAliasingMode::TAA:
+  case AntiAliasingMode::SpatialFallback:
+    return mode;
+  default:
+    return AntiAliasingMode::None;
+  }
+}
+
+[[nodiscard]] constexpr AntiAliasingDebugView
+sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
+  switch (view) {
+  case AntiAliasingDebugView::None:
+  case AntiAliasingDebugView::Settings:
+    return view;
+  default:
+    return AntiAliasingDebugView::None;
   }
 }
 
@@ -295,12 +329,24 @@ struct RenderSettings {
     float compareSplit = kDefaultToneMapCompareSplit;
   };
 
+  struct AntiAliasingDebugSettings {
+    bool jitterEnabled = false;
+    bool resetHistoryRequested = false;
+    AntiAliasingDebugView view = AntiAliasingDebugView::None;
+  };
+
+  struct AntiAliasingSettings {
+    AntiAliasingMode mode = AntiAliasingMode::None;
+    AntiAliasingDebugSettings debug{};
+  };
+
   SkyboxSettings skybox{};
   OpaqueSettings opaque{};
   TransmissionSettings transmission{};
   TransparentSettings transparent{};
   DebugSettings debug{};
   ShadowSettings shadow{};
+  AntiAliasingSettings antiAliasing{};
   TextureFilteringSettings textureFiltering{};
   ToneMapSettings toneMap{};
 };
@@ -348,6 +394,15 @@ inline void sanitizeToneMapSettings(RenderSettings::ToneMapSettings &settings) {
   settings.operator_ = sanitizeToneMapper(settings.operator_);
   settings.compareSplit = std::clamp(
       settings.compareSplit, kMinToneMapCompareSplit, kMaxToneMapCompareSplit);
+}
+
+inline void
+sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
+  settings.mode = sanitizeAntiAliasingMode(settings.mode);
+  settings.debug.view = sanitizeAntiAliasingDebugView(settings.debug.view);
+  if (settings.mode == AntiAliasingMode::None) {
+    settings.debug.jitterEnabled = false;
+  }
 }
 
 [[nodiscard]] constexpr ShadowFilterMode

@@ -56,6 +56,7 @@ constexpr const char *kHierarchyWindowName = "Hierarchy";
 constexpr const char *kInspectorWindowName = "Inspector";
 constexpr const char *kAnimationPlayerWindowName = "Animation Player";
 constexpr const char *kTextureFilteringWindowName = "Texture Filtering";
+constexpr const char *kAntiAliasingWindowName = "Anti-Aliasing";
 constexpr const char *kShadowsWindowName = "Shadows";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
 constexpr const char *kCameraHelpWindowName = "Camera Help";
@@ -67,6 +68,10 @@ constexpr std::array<const char *, 4> kTextureFilterAnisotropyLabels = {
     "2x", "4x", "8x", "16x"};
 constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
+constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
+    "None", "TAA", "Spatial Fallback"};
+constexpr std::array<const char *, 2> kAntiAliasingDebugViewLabels = {
+    "None", "Settings"};
 constexpr std::array<uint32_t, 4> kShadowMapResolutions = {1024u, 2048u, 4096u,
                                                            8192u};
 constexpr std::array<const char *, 4> kShadowMapResolutionLabels = {"1K", "2K",
@@ -85,6 +90,7 @@ enum class PassInspectorKind : uint8_t {
   Transmission,
   Transparent,
   Composite,
+  AntiAliasing,
   Debug,
   Generic,
 };
@@ -100,6 +106,9 @@ PassInspectorKind classifyPassInspector(std::string_view featureName,
   if (featureName == "OpaqueFeature" || passName == "OpaqueMainPass" ||
       passName == "OpaquePickPass") {
     return PassInspectorKind::Opaque;
+  }
+  if (featureName == "TemporalAAFeature" || passName == "TemporalAANoopPass") {
+    return PassInspectorKind::AntiAliasing;
   }
   if (featureName == "TransmissionFeature" ||
       passName == "TransmissionMainPass") {
@@ -222,6 +231,28 @@ const char *toneMapperDisplayName(ToneMapper mapper) {
     return "ACES 2 SDR";
   case ToneMapper::AgX:
     return "AgX";
+  }
+  return "Unknown";
+}
+
+const char *antiAliasingModeDisplayName(AntiAliasingMode mode) {
+  switch (sanitizeAntiAliasingMode(mode)) {
+  case AntiAliasingMode::None:
+    return "None";
+  case AntiAliasingMode::TAA:
+    return "TAA";
+  case AntiAliasingMode::SpatialFallback:
+    return "Spatial Fallback";
+  }
+  return "Unknown";
+}
+
+const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
+  switch (sanitizeAntiAliasingDebugView(view)) {
+  case AntiAliasingDebugView::None:
+    return "None";
+  case AntiAliasingDebugView::Settings:
+    return "Settings";
   }
   return "Unknown";
 }
@@ -1173,6 +1204,7 @@ bool passKindUsesFeatureToggle(PassInspectorKind kind) {
   case PassInspectorKind::Debug:
     return true;
   case PassInspectorKind::Composite:
+  case PassInspectorKind::AntiAliasing:
   case PassInspectorKind::Generic:
     return false;
   }
@@ -1195,6 +1227,7 @@ bool *renderSettingToggleForPassKind(RenderSettings &renderSettings,
   case PassInspectorKind::Debug:
     return &renderSettings.debug.enabled;
   case PassInspectorKind::Composite:
+  case PassInspectorKind::AntiAliasing:
   case PassInspectorKind::Generic:
     return nullptr;
   }
@@ -1787,6 +1820,102 @@ void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap) {
   ImGui::TextUnformatted("through downsample, resolve, and tone-map passes.");
 }
 
+bool hasTemporalAAFeature(RenderPipeline *renderPipeline) {
+  if (renderPipeline == nullptr) {
+    return false;
+  }
+  for (size_t passIndex = 0; passIndex < renderPipeline->passCount();
+       ++passIndex) {
+    const auto pass = renderPipeline->passInfo(passIndex);
+    if (pass.has_value() && pass->featureName == "TemporalAAFeature") {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string antiAliasingSettingsSummary(
+    const RenderSettings::AntiAliasingSettings &settings,
+    bool temporalFeaturePresent) {
+  std::string summary = "AA mode=";
+  summary += antiAliasingModeDisplayName(settings.mode);
+  summary += " jitter=";
+  summary += settings.debug.jitterEnabled ? "enabled" : "disabled";
+  summary += " debugView=";
+  summary += antiAliasingDebugViewDisplayName(settings.debug.view);
+  summary += " resetHistoryRequested=";
+  summary += settings.debug.resetHistoryRequested ? "true" : "false";
+  summary += " temporalFeaturePresent=";
+  summary += temporalFeaturePresent ? "true" : "false";
+  return summary;
+}
+
+void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
+                              RenderPipeline *renderPipeline) {
+  sanitizeAntiAliasingSettings(aa);
+  int modeIndex = static_cast<int>(aa.mode);
+  modeIndex = std::clamp(modeIndex, 0,
+                         static_cast<int>(kAntiAliasingModeLabels.size()) - 1);
+  if (ImGui::Combo("Mode##AntiAliasing", &modeIndex,
+                   kAntiAliasingModeLabels.data(),
+                   static_cast<int>(kAntiAliasingModeLabels.size()))) {
+    aa.mode = static_cast<AntiAliasingMode>(modeIndex);
+    sanitizeAntiAliasingSettings(aa);
+  }
+
+  ImGui::Checkbox("Jitter Enabled##AntiAliasing", &aa.debug.jitterEnabled);
+  if (sanitizeAntiAliasingMode(aa.mode) == AntiAliasingMode::None) {
+    aa.debug.jitterEnabled = false;
+  }
+
+  if (ImGui::Button("Reset History##AntiAliasing")) {
+    aa.debug.resetHistoryRequested = true;
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Clear Reset##AntiAliasing")) {
+    aa.debug.resetHistoryRequested = false;
+  }
+
+  int debugViewIndex = static_cast<int>(aa.debug.view);
+  debugViewIndex =
+      std::clamp(debugViewIndex, 0,
+                 static_cast<int>(kAntiAliasingDebugViewLabels.size()) - 1);
+  if (ImGui::Combo("Debug View##AntiAliasing", &debugViewIndex,
+                   kAntiAliasingDebugViewLabels.data(),
+                   static_cast<int>(kAntiAliasingDebugViewLabels.size()))) {
+    aa.debug.view = static_cast<AntiAliasingDebugView>(debugViewIndex);
+  }
+  sanitizeAntiAliasingSettings(aa);
+
+  const bool temporalFeaturePresent = hasTemporalAAFeature(renderPipeline);
+  ImGui::Separator();
+  ImGui::Text("Active Mode: %s", antiAliasingModeDisplayName(aa.mode));
+  ImGui::Text("Jitter: %s", aa.debug.jitterEnabled ? "enabled" : "disabled");
+  ImGui::Text("Debug View: %s",
+              antiAliasingDebugViewDisplayName(aa.debug.view));
+  ImGui::Text("History Reset Request: %s",
+              aa.debug.resetHistoryRequested ? "pending" : "clear");
+  ImGui::Text("TemporalAAFeature: %s",
+              temporalFeaturePresent ? "registered" : "missing");
+  ImGui::TextUnformatted("TAA is selectable but the resolve is not "
+                         "implemented in Phase 0.");
+  if (ImGui::Button("Dump AA Settings To Log##AntiAliasing")) {
+    const std::string summary =
+        antiAliasingSettingsSummary(aa, temporalFeaturePresent);
+    NURI_LOG_INFO("%s", summary.c_str());
+  }
+}
+
+void drawAntiAliasingWindow(bool &open, RenderSettings &renderSettings,
+                            RenderPipeline *renderPipeline) {
+  if (!ImGui::Begin(kAntiAliasingWindowName, &open)) {
+    ImGui::End();
+    return;
+  }
+  drawAntiAliasingSettings(renderSettings.antiAliasing, renderPipeline);
+  ImGui::End();
+}
+
 void drawTextureFilteringWindow(bool &open, RenderSettings &renderSettings,
                                 const GPUDevice &gpu) {
   if (!ImGui::Begin(kTextureFilteringWindowName, &open)) {
@@ -2353,6 +2482,9 @@ void drawPassInspector(RenderSettings &renderSettings,
           break;
         case PassInspectorKind::Composite:
           drawCompositeSettings(renderSettings.toneMap);
+          break;
+        case PassInspectorKind::AntiAliasing:
+          drawAntiAliasingSettings(renderSettings.antiAliasing, renderPipeline);
           break;
         case PassInspectorKind::Debug:
           drawDebugSettings(renderSettings.debug);
@@ -4748,6 +4880,7 @@ struct ImGuiEditor::Impl {
       ImGui::MenuItem("Render Passes", nullptr, &showRenderPassesWindow);
       ImGui::MenuItem("Lights", nullptr, &showLightsWindow);
       ImGui::MenuItem("Shadows", nullptr, &showShadowsWindow);
+      ImGui::MenuItem("Anti-Aliasing", nullptr, &showAntiAliasingWindow);
       if (ImGui::BeginMenu("Texture Filtering")) {
         auto &settings = renderSettings.textureFiltering;
         sanitizeTextureFilteringSettings(settings);
@@ -4938,6 +5071,13 @@ struct ImGuiEditor::Impl {
                                  gpu);
       NURI_PROFILER_ZONE_END();
     }
+    if (showAntiAliasingWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawAntiAliasingWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawAntiAliasingWindow(showAntiAliasingWindow, renderSettings,
+                             renderPipeline);
+      NURI_PROFILER_ZONE_END();
+    }
     if (showShadowsWindow) {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawShadowsWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
@@ -5085,6 +5225,7 @@ struct ImGuiEditor::Impl {
   bool showRenderPassesWindow = false;
   bool showLightsWindow = false;
   bool showTextureFilteringWindow = false;
+  bool showAntiAliasingWindow = false;
   bool showShadowsWindow = false;
   bool showRenderGraphTelemetryWindow = false;
   bool showGizmoControlsWindow = false;
@@ -5223,6 +5364,7 @@ void ImGuiEditor::setRenderSettings(const RenderSettings &settings) {
   impl_->renderSettings = settings;
   sanitizeTextureFilteringSettings(impl_->renderSettings.textureFiltering);
   sanitizeToneMapSettings(impl_->renderSettings.toneMap);
+  sanitizeAntiAliasingSettings(impl_->renderSettings.antiAliasing);
   sanitizeShadowSettings(impl_->renderSettings.shadow);
 }
 
@@ -5302,6 +5444,7 @@ RenderSettings ImGuiEditor::renderSettings() const {
   RenderSettings settings = impl_->renderSettings;
   sanitizeTextureFilteringSettings(settings.textureFiltering);
   sanitizeToneMapSettings(settings.toneMap);
+  sanitizeAntiAliasingSettings(settings.antiAliasing);
   sanitizeShadowSettings(settings.shadow);
   return settings;
 }
