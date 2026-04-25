@@ -832,6 +832,16 @@ DirectionalShadowCascadeState makeDirectionalShadowCascadeState(
   return state;
 }
 
+float directionalShadowMaxDistanceFade(readonly ShadowFrameBuffer shadow,
+                                       float viewDepth) {
+  const float fadeStart = shadow.fadeParams.x;
+  const float fadeEnd = shadow.fadeParams.y;
+  if (fadeEnd <= fadeStart + kEpsilon) {
+    return 0.0;
+  }
+  return saturate((viewDepth - fadeStart) / (fadeEnd - fadeStart));
+}
+
 DirectionalShadowResult evaluateDirectionalShadow(
     readonly ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
     vec3 lightDir, float lightAngularRadiusRadians) {
@@ -884,6 +894,9 @@ DirectionalShadowResult evaluateDirectionalShadow(
   }
   r.cascadeIndexDebug = float(state.ctx.cascadeIndex);
   if (!state.hasBlend) {
+    const float distanceFade = directionalShadowMaxDistanceFade(
+        shadow, directionalShadowViewDepth(worldPos));
+    r.factor = mix(r.factor, 1.0, distanceFade);
     return r;
   }
 
@@ -922,6 +935,9 @@ DirectionalShadowResult evaluateDirectionalShadow(
         mix(r.pcssFilterRadiusDebug, nextFilterResult.pcssFilterRadiusRatio,
             r.cascadeBlendDebug);
   }
+  const float distanceFade = directionalShadowMaxDistanceFade(
+      shadow, directionalShadowViewDepth(worldPos));
+  r.factor = mix(r.factor, 1.0, distanceFade);
   return r;
 }
 

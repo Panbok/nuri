@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/core/containers/hash_map.h"
 #include "nuri/core/result.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
@@ -152,6 +153,71 @@ private:
     uint64_t indexCountEstimate = 0;
   };
 
+  struct StaticShadowBatchKey {
+    RenderPipelineHandle pipeline{};
+    BufferHandle vertexBuffer{};
+    BufferHandle indexBuffer{};
+    uint64_t indexBufferOffset = 0;
+    IndexFormat indexFormat = IndexFormat::U32;
+    uint32_t indexCount = 0;
+    uint32_t firstIndex = 0;
+    uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
+    uint32_t materialIndex = 0;
+
+    bool operator==(const StaticShadowBatchKey &other) const noexcept {
+      return pipeline.index == other.pipeline.index &&
+             pipeline.generation == other.pipeline.generation &&
+             vertexBuffer.index == other.vertexBuffer.index &&
+             vertexBuffer.generation == other.vertexBuffer.generation &&
+             indexBuffer.index == other.indexBuffer.index &&
+             indexBuffer.generation == other.indexBuffer.generation &&
+             indexBufferOffset == other.indexBufferOffset &&
+             indexFormat == other.indexFormat &&
+             indexCount == other.indexCount && firstIndex == other.firstIndex &&
+             vertexBufferAddress == other.vertexBufferAddress &&
+             vertexDecodeBufferAddress == other.vertexDecodeBufferAddress &&
+             vertexDecodeIndex == other.vertexDecodeIndex &&
+             packedVertexFormat == other.packedVertexFormat &&
+             materialIndex == other.materialIndex;
+    }
+  };
+
+  struct StaticShadowBatchKeyHash {
+    size_t operator()(const StaticShadowBatchKey &key) const noexcept {
+      constexpr uint64_t kOffsetBasis = 14695981039346656037ull;
+      constexpr uint64_t kPrime = 1099511628211ull;
+      const auto combine = [](uint64_t hash, uint64_t value) {
+        hash ^= value;
+        hash *= kPrime;
+        return hash;
+      };
+      const auto fold = [](uint32_t index, uint32_t generation) {
+        return (static_cast<uint64_t>(generation) << 32u) | index;
+      };
+
+      uint64_t hash = kOffsetBasis;
+      hash = combine(hash, fold(key.pipeline.index, key.pipeline.generation));
+      hash = combine(hash,
+                     fold(key.vertexBuffer.index, key.vertexBuffer.generation));
+      hash = combine(hash,
+                     fold(key.indexBuffer.index, key.indexBuffer.generation));
+      hash = combine(hash, key.indexBufferOffset);
+      hash = combine(hash, static_cast<uint64_t>(key.indexFormat));
+      hash = combine(hash, (static_cast<uint64_t>(key.indexCount) << 32u) |
+                               key.firstIndex);
+      hash = combine(hash, key.vertexBufferAddress);
+      hash = combine(hash, key.vertexDecodeBufferAddress);
+      hash =
+          combine(hash, (static_cast<uint64_t>(key.vertexDecodeIndex) << 32u) |
+                            key.packedVertexFormat);
+      hash = combine(hash, key.materialIndex);
+      return static_cast<size_t>(hash);
+    }
+  };
+
   struct StaticShadowCasterLightSpaceBounds {
     glm::vec3 min{0.0f};
     glm::vec3 max{0.0f};
@@ -221,6 +287,7 @@ private:
   struct StaticOnlyCascadeReuseState {
     shadow_detail::DirectionalShadowFit renderedFit{};
     shadow_detail::DirectionalShadowFit rawFit{};
+    TextureHandle shadowDepthTexture{};
     uint64_t rasterSignature = 0u;
     uint64_t lightViewProjSignature = 0u;
     uint64_t biasSignature = 0u;
@@ -353,6 +420,8 @@ private:
   std::pmr::vector<uint32_t> dynamicShadowTemplateIndices_;
   std::pmr::vector<StaticShadowCasterCacheEntry> staticShadowCasterCache_;
   std::pmr::vector<StaticShadowBatchTemplate> staticShadowBatchTemplates_;
+  PmrHashMap<StaticShadowBatchKey, uint32_t, StaticShadowBatchKeyHash>
+      staticShadowBatchIndexMap_;
   std::pmr::vector<uint32_t> staticShadowBatchInstanceIndices_;
   std::pmr::vector<BufferHandle> staticShadowCasterDrawBuffers_;
   std::pmr::vector<glm::vec3> staticShadowCasterFitPoints_;

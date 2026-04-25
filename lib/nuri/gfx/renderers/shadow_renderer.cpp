@@ -1694,7 +1694,7 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       sdsmReduceResultRingPublishedFrames_(memory_),
       meshDrawTemplates_(memory_), staticShadowTemplateIndices_(memory_),
       dynamicShadowTemplateIndices_(memory_), staticShadowCasterCache_(memory_),
-      staticShadowBatchTemplates_(memory_),
+      staticShadowBatchTemplates_(memory_), staticShadowBatchIndexMap_(memory_),
       staticShadowBatchInstanceIndices_(memory_),
       staticShadowCasterDrawBuffers_(memory_),
       staticShadowCasterFitPoints_(memory_),
@@ -2503,6 +2503,7 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   staticShadowCasterCache_.clear();
   staticShadowBatchTemplates_.clear();
+  staticShadowBatchIndexMap_.clear();
   staticShadowBatchInstanceIndices_.clear();
   staticShadowCasterDrawBuffers_.clear();
   staticShadowCasterFitPoints_.clear();
@@ -2537,6 +2538,7 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
       settings.shadow.debug.enableCascadeCasterCulling;
   staticShadowCasterCache_.reserve(staticShadowTemplateIndices_.size());
   staticShadowBatchTemplates_.reserve(staticShadowTemplateIndices_.size());
+  staticShadowBatchIndexMap_.reserve(staticShadowTemplateIndices_.size());
   staticShadowCasterDrawBuffers_.reserve(staticShadowTemplateIndices_.size() *
                                          2u);
   staticShadowCasterFitPoints_.reserve(staticShadowTemplateIndices_.size() *
@@ -2552,33 +2554,35 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
                ? shadowDoubleSidedPipelineHandle_
                : shadowPipelineHandle_;
   };
-  const auto sameStaticBatch = [](const StaticShadowBatchTemplate &lhs,
-                                  const StaticShadowBatchTemplate &rhs) {
-    return isSamePipelineHandle(lhs.pipeline, rhs.pipeline) &&
-           isSameBufferHandle(lhs.vertexBuffer, rhs.vertexBuffer) &&
-           isSameBufferHandle(lhs.indexBuffer, rhs.indexBuffer) &&
-           lhs.indexBufferOffset == rhs.indexBufferOffset &&
-           lhs.indexFormat == rhs.indexFormat &&
-           lhs.indexCount == rhs.indexCount &&
-           lhs.firstIndex == rhs.firstIndex &&
-           lhs.vertexBufferAddress == rhs.vertexBufferAddress &&
-           lhs.vertexDecodeBufferAddress == rhs.vertexDecodeBufferAddress &&
-           lhs.vertexDecodeIndex == rhs.vertexDecodeIndex &&
-           lhs.packedVertexFormat == rhs.packedVertexFormat &&
-           lhs.materialIndex == rhs.materialIndex;
-  };
+  const auto makeStaticShadowBatchKey =
+      [](const StaticShadowBatchTemplate &batchTemplate) {
+        return StaticShadowBatchKey{
+            .pipeline = batchTemplate.pipeline,
+            .vertexBuffer = batchTemplate.vertexBuffer,
+            .indexBuffer = batchTemplate.indexBuffer,
+            .indexBufferOffset = batchTemplate.indexBufferOffset,
+            .indexFormat = batchTemplate.indexFormat,
+            .indexCount = batchTemplate.indexCount,
+            .firstIndex = batchTemplate.firstIndex,
+            .vertexBufferAddress = batchTemplate.vertexBufferAddress,
+            .vertexDecodeBufferAddress =
+                batchTemplate.vertexDecodeBufferAddress,
+            .vertexDecodeIndex = batchTemplate.vertexDecodeIndex,
+            .packedVertexFormat = batchTemplate.packedVertexFormat,
+            .materialIndex = batchTemplate.materialIndex,
+        };
+      };
   const auto resolveStaticBatchIndex =
       [&](const StaticShadowBatchTemplate &candidate) {
-        for (uint32_t batchIndex = 0u;
-             batchIndex < staticShadowBatchTemplates_.size(); ++batchIndex) {
-          if (sameStaticBatch(staticShadowBatchTemplates_[batchIndex],
-                              candidate)) {
-            return batchIndex;
-          }
+        const StaticShadowBatchKey key = makeStaticShadowBatchKey(candidate);
+        const auto it = staticShadowBatchIndexMap_.find(key);
+        if (it != staticShadowBatchIndexMap_.end()) {
+          return it->second;
         }
         const uint32_t batchIndex =
             static_cast<uint32_t>(staticShadowBatchTemplates_.size());
         staticShadowBatchTemplates_.push_back(candidate);
+        staticShadowBatchIndexMap_.emplace(key, batchIndex);
         return batchIndex;
       };
   for (const uint32_t templateIndex : staticShadowTemplateIndices_) {
@@ -5629,6 +5633,14 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         currentState.dynamicDrawCount == 0u &&
         cascadeHasGuardedDynamicDraw[cascadeIndex] == 0u;
     const bool previousValid = reusableStaticOnlyCascadeValid_[cascadeIndex];
+    const TextureHandle currentShadowDepthTexture =
+        shadowDepthTextures_[cascadeIndex];
+    const bool previousTextureMatches =
+        previousValid &&
+        currentShadowDepthTexture.index ==
+            previousState.shadowDepthTexture.index &&
+        currentShadowDepthTexture.generation ==
+            previousState.shadowDepthTexture.generation;
     const bool lightViewProjChanged =
         previousValid && previousState.lightViewProjSignature !=
                              currentState.lightViewProjSignature;
@@ -5664,8 +5676,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
          motionFitsAdaptiveBudget);
     reuseStaticOnlyCascadePass_[cascadeIndex] =
         staticCacheReused && staticOnlyCandidate && previousValid &&
-        !biasChanged && cachedRenderedFitContainsCurrent &&
-        !needsAdaptiveRefresh;
+        previousTextureMatches && !biasChanged &&
+        cachedRenderedFitContainsCurrent && !needsAdaptiveRefresh;
     if (reuseStaticOnlyCascadePass_[cascadeIndex]) {
       const shadow_detail::DirectionalShadowFit rawFit =
           currentRawShadowFits_[cascadeIndex];
@@ -5836,6 +5848,7 @@ uint64_t ShadowRenderer::shadowPipelineSignature() const noexcept {
 void ShadowRenderer::invalidateStaticShadowCasterCache() noexcept {
   staticShadowCasterCache_.clear();
   staticShadowBatchTemplates_.clear();
+  staticShadowBatchIndexMap_.clear();
   staticShadowBatchInstanceIndices_.clear();
   staticShadowCasterDrawBuffers_.clear();
   staticShadowCasterFitPoints_.clear();
@@ -6731,6 +6744,7 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
               .renderedFit = makeDirectionalShadowFitFromDebugCascade(
                   shadowDebugFrameData_.cascades[cascadeIndex]),
               .rawFit = currentRawShadowFits_[cascadeIndex],
+              .shadowDepthTexture = shadowDepthTexture,
               .rasterSignature =
                   staticOnlyCascadeContentSignatures_[cascadeIndex],
               .lightViewProjSignature =
