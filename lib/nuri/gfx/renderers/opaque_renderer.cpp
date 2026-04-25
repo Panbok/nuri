@@ -3635,8 +3635,16 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
   std::pmr::vector<RenderGraphPreparedDrawBufferBinding> drawBufferBindings(
       passBuildScratch.resource());
   if (pass.desc.drawBuffersPreResolved) {
-    passDesc.preResolvedDrawBufferIds = preResolvedDrawBufferIds;
-    passDesc.preResolvedDrawBuffers = pass.desc.preResolvedDrawBuffers;
+    const bool hasSharedPreResolvedDrawBuffers =
+        !pass.desc.preResolvedDrawBuffers.empty();
+    if (hasSharedPreResolvedDrawBuffers) {
+      passDesc.preResolvedDrawBufferIds = preResolvedDrawBufferIds;
+      passDesc.preResolvedDrawBuffers = pass.desc.preResolvedDrawBuffers;
+    } else {
+      passDesc.preResolvedDrawBufferIds =
+          std::span<const RenderGraphBufferId>();
+      passDesc.preResolvedDrawBuffers = std::span<const BufferHandle>();
+    }
   } else {
     drawBufferBindings.reserve(pass.desc.draws.size() * 4u);
     for (size_t drawIndex = 0; drawIndex < pass.desc.draws.size();

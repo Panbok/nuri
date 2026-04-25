@@ -719,6 +719,10 @@ struct ShadowCascadeDebugFrameData {
   uint32_t culledCount = 0u;
   uint32_t staticDrawCount = 0u;
   uint32_t dynamicDrawCount = 0u;
+  uint32_t staticBatchFullEmitCount = 0u;
+  uint32_t staticLightGridQueryCellCount = 0u;
+  uint32_t staticLightGridCandidateCount = 0u;
+  uint32_t staticLightGridFallbackScanCount = 0u;
   enum class StaticOnlyReuseStatus : uint8_t {
     None = 0u,
     Reused,
@@ -928,6 +932,14 @@ struct ShadowFrameMetrics {
   uint32_t staticCasterEntries = 0;
   uint32_t dynamicCasterEntries = 0;
   uint32_t staticCacheReused = 0;
+  uint32_t staticBatchTemplateCount = 0;
+  uint32_t shadowBatchEntryCount = 0;
+  uint32_t shadowInstanceRemapCount = 0;
+  uint32_t staticBatchFullEmitCount = 0;
+  uint32_t staticLightGridQueryCount = 0;
+  uint32_t staticLightGridFallbackScanCount = 0;
+  uint32_t staticLightGridQueryCellCount = 0;
+  uint32_t staticLightGridCandidateCount = 0;
   uint32_t staticOnlyCandidateCount = 0;
   uint32_t reusedStaticOnlyCascadeCount = 0;
   uint32_t staticOnlyReuseMissStaticCacheRebuiltCount = 0;

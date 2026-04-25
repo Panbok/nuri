@@ -4,6 +4,7 @@
 
 #include "nuri/core/containers/hash_map.h"
 #include "nuri/core/log.h"
+#include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/gfx/renderers/detail/renderable_material_resolution.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
@@ -279,41 +280,54 @@ struct ShadowBatchEntry {
   uint32_t instanceCount = 0u;
   const uint32_t *externalInstanceIndices = nullptr;
   uint32_t externalInstanceCount = 0u;
-  std::pmr::vector<uint32_t> instanceIndices;
+  uint32_t instanceListOffset = 0u;
+  bool hasInstanceList = false;
 
-  explicit ShadowBatchEntry(std::pmr::memory_resource *memory)
-      : instanceIndices(resolveMemoryResource(memory)) {}
-
-  void materializeInstances(uint32_t reserveHint = 0u) {
-    if (!instanceIndices.empty()) {
+  void materializeInstances(std::pmr::vector<uint32_t> &instanceLists,
+                            uint32_t reserveHint = 0u) {
+    if (hasInstanceList) {
       return;
     }
 
-    instanceIndices.reserve(
-        std::max<size_t>(reserveHint, std::max(instanceCount, 2u)));
+    const uint32_t existingCount = instanceCount;
+    const size_t requestedCapacity =
+        instanceLists.size() +
+        std::max<size_t>(reserveHint, std::max(existingCount, 2u));
+    if (requestedCapacity > instanceLists.capacity()) {
+      instanceLists.reserve(requestedCapacity);
+    }
+
+    NURI_ASSERT(instanceLists.size() <= std::numeric_limits<uint32_t>::max(),
+                "Shadow batch instance list offset overflowed");
+    instanceListOffset = static_cast<uint32_t>(instanceLists.size());
+    hasInstanceList = true;
     if (externalInstanceCount != 0u) {
-      instanceIndices.insert(instanceIndices.end(), externalInstanceIndices,
-                             externalInstanceIndices + externalInstanceCount);
+      instanceLists.insert(instanceLists.end(), externalInstanceIndices,
+                           externalInstanceIndices + externalInstanceCount);
       externalInstanceIndices = nullptr;
       externalInstanceCount = 0u;
-    } else if (instanceCount != 0u) {
-      instanceIndices.push_back(inlineInstanceIndex);
+    } else if (existingCount != 0u) {
+      instanceLists.push_back(inlineInstanceIndex);
     }
   }
 
-  void appendInstance(uint32_t instanceIndex, uint32_t reserveHint = 0u) {
+  void appendInstance(uint32_t instanceIndex,
+                      std::pmr::vector<uint32_t> &instanceLists,
+                      uint32_t reserveHint = 0u) {
     if (instanceCount == 0u) {
       inlineInstanceIndex = instanceIndex;
       instanceCount = 1u;
       return;
     }
 
-    materializeInstances(std::max(reserveHint, instanceCount + 1u));
-    instanceIndices.push_back(instanceIndex);
+    materializeInstances(instanceLists,
+                         std::max(reserveHint, instanceCount + 1u));
+    instanceLists.push_back(instanceIndex);
     ++instanceCount;
   }
 
-  void appendInstances(std::span<const uint32_t> indices) {
+  void appendInstances(std::span<const uint32_t> indices,
+                       std::pmr::vector<uint32_t> &instanceLists) {
     const uint32_t addedCount = static_cast<uint32_t>(
         std::min<size_t>(indices.size(), std::numeric_limits<uint32_t>::max()));
     if (addedCount == 0u) {
@@ -326,9 +340,8 @@ struct ShadowBatchEntry {
       return;
     }
 
-    materializeInstances(instanceCount + addedCount);
-    instanceIndices.insert(instanceIndices.end(), indices.begin(),
-                           indices.end());
+    materializeInstances(instanceLists, instanceCount + addedCount);
+    instanceLists.insert(instanceLists.end(), indices.begin(), indices.end());
     instanceCount += addedCount;
   }
 };
@@ -587,6 +600,10 @@ hashCascadeState(uint64_t hash, const ShadowCascadeDebugFrameData &cascade,
   hash = hashCombineValue(hash, cascade.culledCount);
   hash = hashCombineValue(hash, cascade.staticDrawCount);
   hash = hashCombineValue(hash, cascade.dynamicDrawCount);
+  hash = hashCombineValue(hash, cascade.staticBatchFullEmitCount);
+  hash = hashCombineValue(hash, cascade.staticLightGridQueryCellCount);
+  hash = hashCombineValue(hash, cascade.staticLightGridCandidateCount);
+  hash = hashCombineValue(hash, cascade.staticLightGridFallbackScanCount);
   hash = hashCombineValue(hash, cascade.staticOnlyReuseStatus);
   hash = hashCombineValue(hash, cascade.staticOnlyReuseCandidate);
   hash = hashCombineValue(hash, cascade.staticOnlyReusePreviousValid);
@@ -617,6 +634,14 @@ hashCascadeState(uint64_t hash, const ShadowCascadeDebugFrameData &cascade,
   hash = hashCombineValue(hash, metrics.staticCasterEntries);
   hash = hashCombineValue(hash, metrics.dynamicCasterEntries);
   hash = hashCombineValue(hash, metrics.staticCacheReused);
+  hash = hashCombineValue(hash, metrics.staticBatchTemplateCount);
+  hash = hashCombineValue(hash, metrics.shadowBatchEntryCount);
+  hash = hashCombineValue(hash, metrics.shadowInstanceRemapCount);
+  hash = hashCombineValue(hash, metrics.staticBatchFullEmitCount);
+  hash = hashCombineValue(hash, metrics.staticLightGridQueryCount);
+  hash = hashCombineValue(hash, metrics.staticLightGridFallbackScanCount);
+  hash = hashCombineValue(hash, metrics.staticLightGridQueryCellCount);
+  hash = hashCombineValue(hash, metrics.staticLightGridCandidateCount);
   hash = hashCombineValue(hash, metrics.staticOnlyCandidateCount);
   hash = hashCombineValue(hash, metrics.reusedStaticOnlyCascadeCount);
   hash = hashCombineValue(hash,
@@ -1692,7 +1717,8 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       instanceRemapUploadSignatures_(memory_),
       shadowFrameUploadSignatures_(memory_),
       sdsmReduceResultRingPublishedFrames_(memory_),
-      meshDrawTemplates_(memory_), staticShadowTemplateIndices_(memory_),
+      meshDrawTemplates_(memory_), batchBuildScratchArena_(memory_),
+      staticShadowTemplateIndices_(memory_),
       dynamicShadowTemplateIndices_(memory_), staticShadowCasterCache_(memory_),
       staticShadowBatchTemplates_(memory_), staticShadowBatchIndexMap_(memory_),
       staticShadowBatchInstanceIndices_(memory_),
@@ -1703,6 +1729,9 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       staticShadowCasterLightGridCells_(memory_),
       staticShadowCasterLightGridEntries_(memory_),
       staticShadowCasterLargeLightGridEntries_(memory_),
+      staticShadowBatchLightGridCells_(memory_),
+      staticShadowBatchLightGridEntries_(memory_),
+      staticShadowBatchLargeLightGridEntries_(memory_),
       staticShadowCasterLightGridQueryMarks_(memory_),
       staticShadowCasterLightGridQueryEntries_(memory_),
       instanceMatrices_(memory_), instanceRemap_(memory_),
@@ -2512,10 +2541,14 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
   staticShadowCasterLightGridCells_.clear();
   staticShadowCasterLightGridEntries_.clear();
   staticShadowCasterLargeLightGridEntries_.clear();
+  staticShadowBatchLightGridCells_.clear();
+  staticShadowBatchLightGridEntries_.clear();
+  staticShadowBatchLargeLightGridEntries_.clear();
   staticShadowCasterLightGridQueryMarks_.clear();
   staticShadowCasterLightGridQueryEntries_.clear();
   staticShadowCasterLightGridQueryMarker_ = 1u;
   staticShadowCasterLightGrid_ = {};
+  staticShadowBatchLightGrid_ = {};
   staticShadowCasterBoundsMin_ = glm::vec3(std::numeric_limits<float>::max());
   staticShadowCasterBoundsMax_ =
       glm::vec3(std::numeric_limits<float>::lowest());
@@ -4116,6 +4149,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         "pcf=%u pcss=(%u,%u,%.3f,%.3f,%.3f)] metrics=[draws=%u culled=%u "
         "indices=%u staticDynamic=(%u,%u) staticCacheReused=%u "
         "staticOnly=(candidates=%u reused=%u misses=%u/%u/%u/%u/%u) "
+        "staticBatch=(templates=%u full=%u graph=%u remap=%u) "
+        "grid=(queries=%u fallback=%u cells=%u candidates=%u) "
         "cascadeBytes=%llu filterBudget=%u pcssCost=(%u,%u) "
         "sdsmCompute=%u sdsmReadback=%u sdsmSamples=(%u,%u) "
         "sdsmCpuMs=(%.3f, %.3f) gpuMs=(%.3f, %.3f, %.3f) "
@@ -4160,6 +4195,14 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         frame.metrics.shadow.staticOnlyReuseMissNoPreviousCount,
         frame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount,
         frame.metrics.shadow.staticOnlyReuseMissAdaptiveRefreshCount,
+        frame.metrics.shadow.staticBatchTemplateCount,
+        frame.metrics.shadow.staticBatchFullEmitCount,
+        frame.metrics.shadow.shadowBatchEntryCount,
+        frame.metrics.shadow.shadowInstanceRemapCount,
+        frame.metrics.shadow.staticLightGridQueryCount,
+        frame.metrics.shadow.staticLightGridFallbackScanCount,
+        frame.metrics.shadow.staticLightGridQueryCellCount,
+        frame.metrics.shadow.staticLightGridCandidateCount,
         static_cast<unsigned long long>(
             frame.metrics.shadow.cascadeTextureBytes),
         frame.metrics.shadow.filterSampleBudget,
@@ -4535,13 +4578,26 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       static_cast<size_t>(cascadeCount) * staticShadowBatchTemplates_.size();
   const size_t dynamicBatchEstimate =
       static_cast<size_t>(cascadeCount) * frameDynamicTemplateIndices.size();
+  ScopedScratch batchScratch(batchBuildScratchArena_);
+  std::pmr::memory_resource *batchMemory = batchScratch.resource();
   PmrHashMap<ShadowBatchKey, uint32_t, ShadowBatchKeyHash> shadowBatchLookup(
-      memory_);
+      batchMemory);
   shadowBatchLookup.reserve(dynamicBatchEstimate + 1u);
-  std::pmr::vector<ShadowBatchEntry> shadowBatchEntries(memory_);
+  std::pmr::vector<ShadowBatchEntry> shadowBatchEntries(batchMemory);
   shadowBatchEntries.reserve(staticBatchEntryCount + dynamicBatchEstimate);
+  std::pmr::vector<uint32_t> shadowBatchInstanceIndices(batchMemory);
+  shadowBatchInstanceIndices.reserve(
+      std::min<size_t>(maxShadowInstanceRemapCount, 4096u));
   std::array<uint32_t, kMaxShadowCascades> cascadeStaticCasterCounts{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDynamicCasterCounts{};
+  std::array<uint32_t, kMaxShadowCascades> cascadeStaticBatchFullEmitCounts{};
+  std::array<uint32_t, kMaxShadowCascades>
+      cascadeStaticLightGridQueryCellCounts{};
+  std::array<uint32_t, kMaxShadowCascades>
+      cascadeStaticLightGridCandidateCounts{};
+  std::array<uint32_t, kMaxShadowCascades>
+      cascadeStaticLightGridFallbackScanCounts{};
+  uint32_t staticLightGridQueryCount = 0u;
 
   const uint32_t renderableCount = saturateToU32(renderables.size());
   const auto selectShadowPipeline =
@@ -4589,13 +4645,13 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         if (it == shadowBatchLookup.end()) {
           const uint32_t batchIndex =
               static_cast<uint32_t>(shadowBatchEntries.size());
-          shadowBatchEntries.emplace_back(memory_);
+          shadowBatchEntries.emplace_back();
           shadowBatchEntries.back().key = key;
           auto [insertedIt, _] = shadowBatchLookup.emplace(key, batchIndex);
           it = insertedIt;
         }
         ShadowBatchEntry &batch = shadowBatchEntries[it->second];
-        batch.appendInstance(firstInstance);
+        batch.appendInstance(firstInstance, shadowBatchInstanceIndices);
         if (dynamicCaster) {
           ++cascadeDynamicCasterCounts[cascadeIndex];
         } else {
@@ -4824,10 +4880,15 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       staticShadowCasterLightGridCells_.clear();
       staticShadowCasterLightGridEntries_.clear();
       staticShadowCasterLargeLightGridEntries_.clear();
+      staticShadowBatchLightGridCells_.clear();
+      staticShadowBatchLightGridEntries_.clear();
+      staticShadowBatchLargeLightGridEntries_.clear();
       staticShadowCasterLightGrid_ = {};
+      staticShadowBatchLightGrid_ = {};
       NURI_PROFILER_ZONE_END();
     }
-    if (!staticShadowCasterLightGrid_.valid &&
+    if ((!staticShadowCasterLightGrid_.valid ||
+         !staticShadowBatchLightGrid_.valid) &&
         hasStaticShadowCasterLightSpaceBounds_) {
       NURI_PROFILER_ZONE("ShadowRenderer.static_caster_light_grid",
                          NURI_PROFILER_COLOR_CMD_COPY);
@@ -4842,9 +4903,12 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                                       kStaticCasterLightGridDepthResolution);
       const uint32_t gridCellCount =
           gridDimensions.x * gridDimensions.y * gridDimensions.z;
-      std::pmr::vector<uint32_t> cellCounts(memory_);
+      std::pmr::vector<uint32_t> cellCounts(batchMemory);
       cellCounts.resize(gridCellCount, 0u);
       staticShadowCasterLargeLightGridEntries_.clear();
+      std::pmr::vector<uint32_t> batchCellCounts(batchMemory);
+      batchCellCounts.resize(gridCellCount, 0u);
+      staticShadowBatchLargeLightGridEntries_.clear();
 
       const glm::vec3 invCellSize = glm::vec3(gridDimensions) / gridExtent;
       struct StaticCasterLightGridRange {
@@ -4899,6 +4963,32 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         }
       }
 
+      for (uint32_t batchIndex = 0u;
+           batchIndex < staticShadowBatchLightSpaceBounds_.size();
+           ++batchIndex) {
+        if (batchIndex >= staticShadowBatchTemplates_.size() ||
+            staticShadowBatchTemplates_[batchIndex].instanceCount <
+                kStaticBatchOverlapEmitMinInstances) {
+          continue;
+        }
+        const StaticCasterLightGridRange range =
+            gridCellRange(staticShadowBatchLightSpaceBounds_[batchIndex]);
+        const uint32_t coveredCells = (range.maxX - range.minX + 1u) *
+                                      (range.maxY - range.minY + 1u) *
+                                      (range.maxZ - range.minZ + 1u);
+        if (coveredCells > kStaticCasterLightGridMaxCellsPerCaster) {
+          staticShadowBatchLargeLightGridEntries_.push_back(batchIndex);
+          continue;
+        }
+        for (uint32_t z = range.minZ; z <= range.maxZ; ++z) {
+          for (uint32_t y = range.minY; y <= range.maxY; ++y) {
+            for (uint32_t x = range.minX; x <= range.maxX; ++x) {
+              ++batchCellCounts[gridCellIndex(x, y, z)];
+            }
+          }
+        }
+      }
+
       staticShadowCasterLightGridCells_.resize(gridCellCount);
       uint32_t runningEntryCount = 0u;
       for (uint32_t cellIndex = 0u; cellIndex < gridCellCount; ++cellIndex) {
@@ -4910,7 +5000,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       }
 
       staticShadowCasterLightGridEntries_.resize(runningEntryCount);
-      std::pmr::vector<uint32_t> cellWriteOffsets(memory_);
+      std::pmr::vector<uint32_t> cellWriteOffsets(batchMemory);
       cellWriteOffsets.resize(gridCellCount, 0u);
       for (uint32_t cellIndex = 0u; cellIndex < gridCellCount; ++cellIndex) {
         cellWriteOffsets[cellIndex] =
@@ -4938,6 +5028,50 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         }
       }
 
+      staticShadowBatchLightGridCells_.resize(gridCellCount);
+      uint32_t runningBatchEntryCount = 0u;
+      for (uint32_t cellIndex = 0u; cellIndex < gridCellCount; ++cellIndex) {
+        staticShadowBatchLightGridCells_[cellIndex] = {
+            .firstEntry = runningBatchEntryCount,
+            .entryCount = batchCellCounts[cellIndex],
+        };
+        runningBatchEntryCount += batchCellCounts[cellIndex];
+      }
+
+      staticShadowBatchLightGridEntries_.resize(runningBatchEntryCount);
+      std::pmr::vector<uint32_t> batchCellWriteOffsets(batchMemory);
+      batchCellWriteOffsets.resize(gridCellCount, 0u);
+      for (uint32_t cellIndex = 0u; cellIndex < gridCellCount; ++cellIndex) {
+        batchCellWriteOffsets[cellIndex] =
+            staticShadowBatchLightGridCells_[cellIndex].firstEntry;
+      }
+      for (uint32_t batchIndex = 0u;
+           batchIndex < staticShadowBatchLightSpaceBounds_.size();
+           ++batchIndex) {
+        if (batchIndex >= staticShadowBatchTemplates_.size() ||
+            staticShadowBatchTemplates_[batchIndex].instanceCount <
+                kStaticBatchOverlapEmitMinInstances) {
+          continue;
+        }
+        const StaticCasterLightGridRange range =
+            gridCellRange(staticShadowBatchLightSpaceBounds_[batchIndex]);
+        const uint32_t coveredCells = (range.maxX - range.minX + 1u) *
+                                      (range.maxY - range.minY + 1u) *
+                                      (range.maxZ - range.minZ + 1u);
+        if (coveredCells > kStaticCasterLightGridMaxCellsPerCaster) {
+          continue;
+        }
+        for (uint32_t z = range.minZ; z <= range.maxZ; ++z) {
+          for (uint32_t y = range.minY; y <= range.maxY; ++y) {
+            for (uint32_t x = range.minX; x <= range.maxX; ++x) {
+              const uint32_t cellIndex = gridCellIndex(x, y, z);
+              const uint32_t writeOffset = batchCellWriteOffsets[cellIndex]++;
+              staticShadowBatchLightGridEntries_[writeOffset] = batchIndex;
+            }
+          }
+        }
+      }
+
       staticShadowCasterLightGrid_ = {
           .min = gridMin,
           .max = gridMax,
@@ -4945,15 +5079,19 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           .dimensions = gridDimensions,
           .valid = true,
       };
+      staticShadowBatchLightGrid_ = staticShadowCasterLightGrid_;
       NURI_PROFILER_ZONE_END();
     }
   }
 
-  std::pmr::vector<uint32_t> staticBatchEntryIndices(memory_);
+  std::pmr::vector<uint32_t> staticBatchEntryIndices(batchMemory);
   staticBatchEntryIndices.resize(staticBatchEntryCount,
                                  std::numeric_limits<uint32_t>::max());
-  std::pmr::vector<uint8_t> fullyEmittedStaticBatchEntries(memory_);
+  std::pmr::vector<uint8_t> fullyEmittedStaticBatchEntries(batchMemory);
   fullyEmittedStaticBatchEntries.resize(staticBatchEntryCount, uint8_t{0});
+  std::pmr::vector<uint32_t> staticBatchLightGridQueryEntries(batchMemory);
+  std::pmr::vector<uint32_t> staticBatchLightGridQueryMarks(batchMemory);
+  uint32_t staticBatchLightGridQueryMarker = 1u;
   const auto staticBatchEntrySlot = [&](uint32_t cascadeIndex,
                                         uint32_t staticBatchIndex) {
     return static_cast<size_t>(cascadeIndex) *
@@ -4968,7 +5106,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     uint32_t &entryIndex = staticBatchEntryIndices[slotIndex];
     if (entryIndex == std::numeric_limits<uint32_t>::max()) {
       entryIndex = static_cast<uint32_t>(shadowBatchEntries.size());
-      shadowBatchEntries.emplace_back(memory_);
+      shadowBatchEntries.emplace_back();
       ShadowBatchEntry &batch = shadowBatchEntries.back();
       const StaticShadowBatchTemplate &batchTemplate =
           staticShadowBatchTemplates_[staticBatchIndex];
@@ -5015,6 +5153,13 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         std::min(staticShadowCasterCache_.size(),
                  kStaticCasterLightGridSortedCandidateLimit));
   }
+  if (staticShadowBatchLightGrid_.valid) {
+    staticBatchLightGridQueryMarks.resize(staticShadowBatchTemplates_.size(),
+                                          0u);
+    staticBatchLightGridQueryEntries.reserve(
+        std::min(staticShadowBatchTemplates_.size(),
+                 kStaticCasterLightGridSortedCandidateLimit));
+  }
 
   const auto nextStaticCasterQueryMarker = [&]() {
     ++staticShadowCasterLightGridQueryMarker_;
@@ -5024,6 +5169,15 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       staticShadowCasterLightGridQueryMarker_ = 1u;
     }
     return staticShadowCasterLightGridQueryMarker_;
+  };
+  const auto nextStaticBatchQueryMarker = [&]() {
+    ++staticBatchLightGridQueryMarker;
+    if (staticBatchLightGridQueryMarker == 0u) {
+      std::fill(staticBatchLightGridQueryMarks.begin(),
+                staticBatchLightGridQueryMarks.end(), 0u);
+      staticBatchLightGridQueryMarker = 1u;
+    }
+    return staticBatchLightGridQueryMarker;
   };
   const auto staticEntryUsesDynamicPath =
       [&](const StaticShadowCasterCacheEntry &entry) {
@@ -5059,7 +5213,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     ShadowBatchEntry &batch =
         resolveStaticBatchEntry(cascadeIndex, entry.batchIndex);
     batch.appendInstance(
-        entry.instanceIndex,
+        entry.instanceIndex, shadowBatchInstanceIndices,
         staticShadowBatchTemplates_[entry.batchIndex].instanceCount);
     ++cascadeStaticCasterCounts[cascadeIndex];
     StaticOnlyCascadeReuseState &cascadeState =
@@ -5087,9 +5241,11 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     }
 
     ShadowBatchEntry &batch = resolveStaticBatchEntry(cascadeIndex, batchIndex);
-    batch.appendInstances(std::span<const uint32_t>(
-        staticShadowBatchInstanceIndices_.data() + firstInstanceIndex,
-        batchTemplate.instanceCount));
+    batch.appendInstances(
+        std::span<const uint32_t>(staticShadowBatchInstanceIndices_.data() +
+                                      firstInstanceIndex,
+                                  batchTemplate.instanceCount),
+        shadowBatchInstanceIndices);
   };
   const auto emitStaticBatchWithState = [&](uint32_t batchIndex,
                                             uint32_t cascadeIndex) {
@@ -5112,6 +5268,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   const auto emitAllStaticCastersForCascade = [&](uint32_t cascadeIndex) {
     for (uint32_t batchIndex = 0u;
          batchIndex < staticShadowBatchTemplates_.size(); ++batchIndex) {
+      if (staticShadowBatchTemplates_[batchIndex].instanceCount != 0u) {
+        ++cascadeStaticBatchFullEmitCounts[cascadeIndex];
+      }
       emitStaticBatch(batchIndex, cascadeIndex);
     }
 
@@ -5145,6 +5304,141 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
            staticShadowCasterLightSpaceBoundsMax_.y <= cascadeMax.y &&
            staticShadowCasterLightSpaceBoundsMax_.z <= cascadeMax.z;
   };
+  const auto emitOverlappingStaticBatch = [&](uint32_t cascadeIndex,
+                                              uint32_t batchIndex) {
+    if (batchIndex >= staticShadowBatchTemplates_.size()) {
+      return;
+    }
+    const StaticShadowBatchTemplate &batchTemplate =
+        staticShadowBatchTemplates_[batchIndex];
+    if (batchTemplate.instanceCount < kStaticBatchOverlapEmitMinInstances) {
+      return;
+    }
+    const StaticShadowCasterLightSpaceBounds &batchBounds =
+        staticShadowBatchLightSpaceBounds_[batchIndex];
+    if (!normalizedLightSpaceBoundsOverlap(
+            batchBounds.min, batchBounds.max,
+            cascadeLightBoundsMin[cascadeIndex],
+            cascadeLightBoundsMax[cascadeIndex])) {
+      return;
+    }
+
+    const size_t slotIndex = staticBatchEntrySlot(cascadeIndex, batchIndex);
+    NURI_ASSERT(slotIndex < fullyEmittedStaticBatchEntries.size(),
+                "Static shadow batch emitted slot is out of bounds");
+    fullyEmittedStaticBatchEntries[slotIndex] = 1u;
+    emitStaticBatchWithState(batchIndex, cascadeIndex);
+    ++cascadeStaticBatchFullEmitCounts[cascadeIndex];
+  };
+  const auto scanOverlappingStaticBatchesForCascade =
+      [&](uint32_t cascadeIndex) {
+        for (uint32_t batchIndex = 0u;
+             batchIndex < staticShadowBatchTemplates_.size(); ++batchIndex) {
+          emitOverlappingStaticBatch(cascadeIndex, batchIndex);
+        }
+      };
+  struct StaticLightGridQueryRange {
+    uint32_t minX = 0u;
+    uint32_t minY = 0u;
+    uint32_t minZ = 0u;
+    uint32_t maxX = 0u;
+    uint32_t maxY = 0u;
+    uint32_t maxZ = 0u;
+    uint32_t cellCount = 0u;
+    bool outside = false;
+    bool tooBroad = false;
+  };
+  const auto makeStaticLightGridQueryRange =
+      [&](const StaticShadowCasterLightGrid &grid,
+          uint32_t cascadeIndex) -> StaticLightGridQueryRange {
+    const glm::vec3 &queryMin = cascadeLightBoundsMin[cascadeIndex];
+    const glm::vec3 &queryMax = cascadeLightBoundsMax[cascadeIndex];
+    if (queryMax.x < grid.min.x || queryMin.x > grid.max.x ||
+        queryMax.y < grid.min.y || queryMin.y > grid.max.y ||
+        queryMax.z < grid.min.z || queryMin.z > grid.max.z) {
+      return StaticLightGridQueryRange{.outside = true};
+    }
+
+    const glm::ivec3 minCell = glm::clamp(
+        glm::ivec3(glm::floor((queryMin - grid.min) * grid.invCellSize)),
+        glm::ivec3(0), glm::ivec3(grid.dimensions) - glm::ivec3(1));
+    const glm::ivec3 maxCell = glm::clamp(
+        glm::ivec3(glm::floor((queryMax - grid.min) * grid.invCellSize)),
+        glm::ivec3(0), glm::ivec3(grid.dimensions) - glm::ivec3(1));
+    StaticLightGridQueryRange range{
+        .minX = static_cast<uint32_t>(std::min(minCell.x, maxCell.x)),
+        .minY = static_cast<uint32_t>(std::min(minCell.y, maxCell.y)),
+        .minZ = static_cast<uint32_t>(std::min(minCell.z, maxCell.z)),
+        .maxX = static_cast<uint32_t>(std::max(minCell.x, maxCell.x)),
+        .maxY = static_cast<uint32_t>(std::max(minCell.y, maxCell.y)),
+        .maxZ = static_cast<uint32_t>(std::max(minCell.z, maxCell.z)),
+    };
+    range.cellCount = (range.maxX - range.minX + 1u) *
+                      (range.maxY - range.minY + 1u) *
+                      (range.maxZ - range.minZ + 1u);
+    const uint32_t gridCellCount =
+        grid.dimensions.x * grid.dimensions.y * grid.dimensions.z;
+    range.tooBroad = range.cellCount > gridCellCount / 2u;
+    return range;
+  };
+  const auto queryStaticBatchLightGrid = [&](uint32_t cascadeIndex,
+                                             uint32_t queryMarker) {
+    staticBatchLightGridQueryEntries.clear();
+    if (!staticShadowBatchLightGrid_.valid ||
+        staticShadowBatchLightGridCells_.empty() ||
+        cascadeUsesCachedLightBounds[cascadeIndex] == 0u) {
+      return false;
+    }
+    ++staticLightGridQueryCount;
+
+    const StaticShadowCasterLightGrid &grid = staticShadowBatchLightGrid_;
+    const StaticLightGridQueryRange query =
+        makeStaticLightGridQueryRange(grid, cascadeIndex);
+    if (query.outside) {
+      return true;
+    }
+    cascadeStaticLightGridQueryCellCounts[cascadeIndex] += query.cellCount;
+    if (query.tooBroad) {
+      return false;
+    }
+
+    const auto appendCandidate = [&](uint32_t batchIndex) {
+      if (batchIndex >= staticShadowBatchTemplates_.size() ||
+          batchIndex >= staticBatchLightGridQueryMarks.size() ||
+          staticShadowBatchTemplates_[batchIndex].instanceCount <
+              kStaticBatchOverlapEmitMinInstances) {
+        return;
+      }
+      uint32_t &mark = staticBatchLightGridQueryMarks[batchIndex];
+      if (mark == queryMarker) {
+        return;
+      }
+      mark = queryMarker;
+      staticBatchLightGridQueryEntries.push_back(batchIndex);
+    };
+    for (const uint32_t batchIndex : staticShadowBatchLargeLightGridEntries_) {
+      appendCandidate(batchIndex);
+    }
+    for (uint32_t z = query.minZ; z <= query.maxZ; ++z) {
+      for (uint32_t y = query.minY; y <= query.maxY; ++y) {
+        for (uint32_t x = query.minX; x <= query.maxX; ++x) {
+          const uint32_t cellIndex =
+              (z * grid.dimensions.y + y) * grid.dimensions.x + x;
+          const StaticShadowCasterLightGridCell &cell =
+              staticShadowBatchLightGridCells_[cellIndex];
+          const uint32_t endEntry = cell.firstEntry + cell.entryCount;
+          for (uint32_t i = cell.firstEntry; i < endEntry; ++i) {
+            appendCandidate(staticShadowBatchLightGridEntries_[i]);
+          }
+        }
+      }
+    }
+    std::sort(staticBatchLightGridQueryEntries.begin(),
+              staticBatchLightGridQueryEntries.end());
+    cascadeStaticLightGridCandidateCounts[cascadeIndex] +=
+        saturateToU32(staticBatchLightGridQueryEntries.size());
+    return true;
+  };
   const auto emitOverlappingStaticBatchesForCascade =
       [&](uint32_t cascadeIndex) {
         if (overriddenStaticTemplateCount != 0u ||
@@ -5154,31 +5448,17 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           return;
         }
 
-        const glm::vec3 &cascadeMin = cascadeLightBoundsMin[cascadeIndex];
-        const glm::vec3 &cascadeMax = cascadeLightBoundsMax[cascadeIndex];
         // Conservative CPU fast path: this may overdraw a batch, but it keeps
         // per-caster precision for small batches and never drops casters.
-        for (uint32_t batchIndex = 0u;
-             batchIndex < staticShadowBatchTemplates_.size(); ++batchIndex) {
-          const StaticShadowBatchTemplate &batchTemplate =
-              staticShadowBatchTemplates_[batchIndex];
-          if (batchTemplate.instanceCount <
-              kStaticBatchOverlapEmitMinInstances) {
-            continue;
-          }
-          const StaticShadowCasterLightSpaceBounds &batchBounds =
-              staticShadowBatchLightSpaceBounds_[batchIndex];
-          if (!normalizedLightSpaceBoundsOverlap(
-                  batchBounds.min, batchBounds.max, cascadeMin, cascadeMax)) {
-            continue;
-          }
-
-          const size_t slotIndex =
-              staticBatchEntrySlot(cascadeIndex, batchIndex);
-          NURI_ASSERT(slotIndex < fullyEmittedStaticBatchEntries.size(),
-                      "Static shadow batch emitted slot is out of bounds");
-          fullyEmittedStaticBatchEntries[slotIndex] = 1u;
-          emitStaticBatchWithState(batchIndex, cascadeIndex);
+        const bool queriedBatchGrid = queryStaticBatchLightGrid(
+            cascadeIndex, nextStaticBatchQueryMarker());
+        if (!queriedBatchGrid) {
+          ++cascadeStaticLightGridFallbackScanCounts[cascadeIndex];
+          scanOverlappingStaticBatchesForCascade(cascadeIndex);
+          return;
+        }
+        for (const uint32_t batchIndex : staticBatchLightGridQueryEntries) {
+          emitOverlappingStaticBatch(cascadeIndex, batchIndex);
         }
       };
   const auto emitGridCandidateIfVisible = [&](uint32_t entryIndex,
@@ -5210,33 +5490,16 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         cascadeUsesCachedLightBounds[cascadeIndex] == 0u) {
       return false;
     }
+    ++staticLightGridQueryCount;
 
     const StaticShadowCasterLightGrid &grid = staticShadowCasterLightGrid_;
-    const glm::vec3 &queryMin = cascadeLightBoundsMin[cascadeIndex];
-    const glm::vec3 &queryMax = cascadeLightBoundsMax[cascadeIndex];
-    if (queryMax.x < grid.min.x || queryMin.x > grid.max.x ||
-        queryMax.y < grid.min.y || queryMin.y > grid.max.y ||
-        queryMax.z < grid.min.z || queryMin.z > grid.max.z) {
+    const StaticLightGridQueryRange query =
+        makeStaticLightGridQueryRange(grid, cascadeIndex);
+    if (query.outside) {
       return true;
     }
-
-    const glm::ivec3 minCell = glm::clamp(
-        glm::ivec3(glm::floor((queryMin - grid.min) * grid.invCellSize)),
-        glm::ivec3(0), glm::ivec3(grid.dimensions) - glm::ivec3(1));
-    const glm::ivec3 maxCell = glm::clamp(
-        glm::ivec3(glm::floor((queryMax - grid.min) * grid.invCellSize)),
-        glm::ivec3(0), glm::ivec3(grid.dimensions) - glm::ivec3(1));
-    const uint32_t minX = static_cast<uint32_t>(std::min(minCell.x, maxCell.x));
-    const uint32_t minY = static_cast<uint32_t>(std::min(minCell.y, maxCell.y));
-    const uint32_t minZ = static_cast<uint32_t>(std::min(minCell.z, maxCell.z));
-    const uint32_t maxX = static_cast<uint32_t>(std::max(minCell.x, maxCell.x));
-    const uint32_t maxY = static_cast<uint32_t>(std::max(minCell.y, maxCell.y));
-    const uint32_t maxZ = static_cast<uint32_t>(std::max(minCell.z, maxCell.z));
-    const uint32_t queryCellCount =
-        (maxX - minX + 1u) * (maxY - minY + 1u) * (maxZ - minZ + 1u);
-    const uint32_t gridCellCount =
-        grid.dimensions.x * grid.dimensions.y * grid.dimensions.z;
-    if (queryCellCount > gridCellCount / 2u) {
+    cascadeStaticLightGridQueryCellCounts[cascadeIndex] += query.cellCount;
+    if (query.tooBroad) {
       return false;
     }
 
@@ -5258,9 +5521,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     for (const uint32_t entryIndex : staticShadowCasterLargeLightGridEntries_) {
       appendCandidate(entryIndex);
     }
-    for (uint32_t z = minZ; z <= maxZ; ++z) {
-      for (uint32_t y = minY; y <= maxY; ++y) {
-        for (uint32_t x = minX; x <= maxX; ++x) {
+    for (uint32_t z = query.minZ; z <= query.maxZ; ++z) {
+      for (uint32_t y = query.minY; y <= query.maxY; ++y) {
+        for (uint32_t x = query.minX; x <= query.maxX; ++x) {
           const uint32_t cellIndex =
               (z * grid.dimensions.y + y) * grid.dimensions.x + x;
           const StaticShadowCasterLightGridCell &cell =
@@ -5279,6 +5542,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       std::sort(staticShadowCasterLightGridQueryEntries_.begin(),
                 staticShadowCasterLightGridQueryEntries_.end());
     }
+    cascadeStaticLightGridCandidateCounts[cascadeIndex] +=
+        saturateToU32(staticShadowCasterLightGridQueryEntries_.size());
     return true;
   };
   const auto scanStaticCastersForCascade = [&](uint32_t cascadeIndex) {
@@ -5334,9 +5599,14 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
 
       bool emitMarkedByCacheOrder = false;
       const uint32_t queryMarker = nextStaticCasterQueryMarker();
-      if (!enableCascadeCasterCulling ||
-          !queryStaticCasterLightGrid(cascadeIndex, queryMarker,
-                                      emitMarkedByCacheOrder)) {
+      const bool queriedStaticLightGrid =
+          enableCascadeCasterCulling &&
+          queryStaticCasterLightGrid(cascadeIndex, queryMarker,
+                                     emitMarkedByCacheOrder);
+      if (!queriedStaticLightGrid) {
+        if (enableCascadeCasterCulling) {
+          ++cascadeStaticLightGridFallbackScanCounts[cascadeIndex];
+        }
         scanStaticCastersForCascade(cascadeIndex);
         continue;
       }
@@ -5458,6 +5728,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     NURI_PROFILER_ZONE_END();
   }
 
+  uint32_t emittedShadowBatchEntryCount = 0u;
+  uint32_t emittedShadowInstanceRemapCount = 0u;
   {
     NURI_PROFILER_ZONE("ShadowRenderer.batch_emit",
                        NURI_PROFILER_COLOR_CMD_DRAW);
@@ -5467,6 +5739,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       if (batch.instanceCount == 0u) {
         continue;
       }
+      ++emittedShadowBatchEntryCount;
       emittedInstanceRemapCount += batch.instanceCount;
       if (batch.key.cascadeIndex < cascadeBatchCounts.size()) {
         ++cascadeBatchCounts[batch.key.cascadeIndex];
@@ -5494,16 +5767,19 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         std::copy_n(batch.externalInstanceIndices, batch.externalInstanceCount,
                     remapWrite);
         remapWrite += batch.externalInstanceCount;
-      } else if (batch.instanceIndices.empty()) {
+      } else if (batch.hasInstanceList) {
+        const size_t remapEnd =
+            static_cast<size_t>(batch.instanceListOffset) + batch.instanceCount;
+        NURI_ASSERT(remapEnd <= shadowBatchInstanceIndices.size(),
+                    "Materialized shadow batch remap count is inconsistent");
+        std::copy_n(shadowBatchInstanceIndices.data() +
+                        batch.instanceListOffset,
+                    batch.instanceCount, remapWrite);
+        remapWrite += batch.instanceCount;
+      } else {
         NURI_ASSERT(batch.instanceCount == 1u,
                     "Inline shadow batch stores exactly one instance");
         *remapWrite++ = batch.inlineInstanceIndex;
-      } else {
-        NURI_ASSERT(batch.instanceIndices.size() == batch.instanceCount,
-                    "Materialized shadow batch remap count is inconsistent");
-        std::copy_n(batch.instanceIndices.data(), batch.instanceCount,
-                    remapWrite);
-        remapWrite += batch.instanceCount;
       }
 
       PushConstants &pc =
@@ -5552,6 +5828,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       draw.debugLabel = kShadowMeshLabel;
       draw.debugColor = kShadowMeshDebugColor;
     }
+    emittedShadowInstanceRemapCount = saturateToU32(emittedInstanceRemapCount);
     if (!instanceRemap_.empty()) {
       NURI_ASSERT(
           remapWrite == instanceRemap_.data() + instanceRemap_.size(),
@@ -5610,9 +5887,21 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     cascadeDebug.culledCount = cascadeCulledCounts_[cascadeIndex];
     cascadeDebug.staticDrawCount = staticDrawCount;
     cascadeDebug.dynamicDrawCount = dynamicDrawCount;
+    cascadeDebug.staticBatchFullEmitCount =
+        cascadeStaticBatchFullEmitCounts[cascadeIndex];
+    cascadeDebug.staticLightGridQueryCellCount =
+        cascadeStaticLightGridQueryCellCounts[cascadeIndex];
+    cascadeDebug.staticLightGridCandidateCount =
+        cascadeStaticLightGridCandidateCounts[cascadeIndex];
+    cascadeDebug.staticLightGridFallbackScanCount =
+        cascadeStaticLightGridFallbackScanCounts[cascadeIndex];
   }
   uint32_t totalDraws = 0u;
   uint32_t totalCulledDraws = 0u;
+  uint32_t totalStaticBatchFullEmitCount = 0u;
+  uint32_t totalStaticLightGridFallbackScanCount = 0u;
+  uint32_t totalStaticLightGridQueryCellCount = 0u;
+  uint32_t totalStaticLightGridCandidateCount = 0u;
   uint32_t staticOnlyCandidateCount = 0u;
   uint32_t reusedStaticOnlyCascadeCount = 0u;
   uint32_t staticOnlyReuseMissStaticCacheRebuiltCount = 0u;
@@ -5755,6 +6044,14 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         reuseStaticOnlyCascadePass_[cascadeIndex] ? 1u : 0u;
     totalDraws += cascadeDrawCounts_[cascadeIndex];
     totalCulledDraws += cascadeCulledCounts_[cascadeIndex];
+    totalStaticBatchFullEmitCount +=
+        cascadeStaticBatchFullEmitCounts[cascadeIndex];
+    totalStaticLightGridFallbackScanCount +=
+        cascadeStaticLightGridFallbackScanCounts[cascadeIndex];
+    totalStaticLightGridQueryCellCount +=
+        cascadeStaticLightGridQueryCellCounts[cascadeIndex];
+    totalStaticLightGridCandidateCount +=
+        cascadeStaticLightGridCandidateCounts[cascadeIndex];
   }
   for (uint32_t cascadeIndex = cascadeCount; cascadeIndex < kMaxShadowCascades;
        ++cascadeIndex) {
@@ -5797,6 +6094,19 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   frame.metrics.shadow.dynamicCasterEntries =
       saturateToU32(frameDynamicTemplateIndices.size());
   frame.metrics.shadow.staticCacheReused = staticCacheReused ? 1u : 0u;
+  frame.metrics.shadow.staticBatchTemplateCount =
+      saturateToU32(staticShadowBatchTemplates_.size());
+  frame.metrics.shadow.shadowBatchEntryCount = emittedShadowBatchEntryCount;
+  frame.metrics.shadow.shadowInstanceRemapCount =
+      emittedShadowInstanceRemapCount;
+  frame.metrics.shadow.staticBatchFullEmitCount = totalStaticBatchFullEmitCount;
+  frame.metrics.shadow.staticLightGridQueryCount = staticLightGridQueryCount;
+  frame.metrics.shadow.staticLightGridFallbackScanCount =
+      totalStaticLightGridFallbackScanCount;
+  frame.metrics.shadow.staticLightGridQueryCellCount =
+      totalStaticLightGridQueryCellCount;
+  frame.metrics.shadow.staticLightGridCandidateCount =
+      totalStaticLightGridCandidateCount;
   frame.metrics.shadow.staticOnlyCandidateCount = staticOnlyCandidateCount;
   frame.metrics.shadow.reusedStaticOnlyCascadeCount =
       reusedStaticOnlyCascadeCount;
@@ -5857,10 +6167,14 @@ void ShadowRenderer::invalidateStaticShadowCasterCache() noexcept {
   staticShadowCasterLightGridCells_.clear();
   staticShadowCasterLightGridEntries_.clear();
   staticShadowCasterLargeLightGridEntries_.clear();
+  staticShadowBatchLightGridCells_.clear();
+  staticShadowBatchLightGridEntries_.clear();
+  staticShadowBatchLargeLightGridEntries_.clear();
   staticShadowCasterLightGridQueryMarks_.clear();
   staticShadowCasterLightGridQueryEntries_.clear();
   staticShadowCasterLightGridQueryMarker_ = 1u;
   staticShadowCasterLightGrid_ = {};
+  staticShadowBatchLightGrid_ = {};
   staticShadowCasterBoundsMin_ = glm::vec3(std::numeric_limits<float>::max());
   staticShadowCasterBoundsMax_ =
       glm::vec3(std::numeric_limits<float>::lowest());

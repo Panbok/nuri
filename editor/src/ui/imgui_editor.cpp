@@ -2100,6 +2100,18 @@ void drawShadowsWindow(
   ImGui::Text("Static / Dynamic Casters: %u / %u",
               frameMetrics.shadow.staticCasterEntries,
               frameMetrics.shadow.dynamicCasterEntries);
+  ImGui::Text("Static Batches [templates/full]: %u / %u",
+              frameMetrics.shadow.staticBatchTemplateCount,
+              frameMetrics.shadow.staticBatchFullEmitCount);
+  ImGui::Text("Shadow Batches / Remap: %u / %u",
+              frameMetrics.shadow.shadowBatchEntryCount,
+              frameMetrics.shadow.shadowInstanceRemapCount);
+  ImGui::Text(
+      "Static Grid [queries/fallback/cells/candidates]: %u / %u / %u / %u",
+      frameMetrics.shadow.staticLightGridQueryCount,
+      frameMetrics.shadow.staticLightGridFallbackScanCount,
+      frameMetrics.shadow.staticLightGridQueryCellCount,
+      frameMetrics.shadow.staticLightGridCandidateCount);
   ImGui::Text("Static Cache Reused: %s",
               frameMetrics.shadow.staticCacheReused != 0u ? "yes" : "no");
   ImGui::Text("Static-Only Candidates: %u",

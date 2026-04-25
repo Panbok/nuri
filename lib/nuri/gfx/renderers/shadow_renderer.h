@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/core/containers/hash_map.h"
+#include "nuri/core/pmr_scratch.h"
 #include "nuri/core/result.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
@@ -416,6 +417,7 @@ private:
   std::pmr::vector<uint64_t> shadowFrameUploadSignatures_;
   std::pmr::vector<uint64_t> sdsmReduceResultRingPublishedFrames_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
+  ScratchArena batchBuildScratchArena_;
   std::pmr::vector<uint32_t> staticShadowTemplateIndices_;
   std::pmr::vector<uint32_t> dynamicShadowTemplateIndices_;
   std::pmr::vector<StaticShadowCasterCacheEntry> staticShadowCasterCache_;
@@ -433,6 +435,10 @@ private:
       staticShadowCasterLightGridCells_;
   std::pmr::vector<uint32_t> staticShadowCasterLightGridEntries_;
   std::pmr::vector<uint32_t> staticShadowCasterLargeLightGridEntries_;
+  std::pmr::vector<StaticShadowCasterLightGridCell>
+      staticShadowBatchLightGridCells_;
+  std::pmr::vector<uint32_t> staticShadowBatchLightGridEntries_;
+  std::pmr::vector<uint32_t> staticShadowBatchLargeLightGridEntries_;
   std::pmr::vector<uint32_t> staticShadowCasterLightGridQueryMarks_;
   std::pmr::vector<uint32_t> staticShadowCasterLightGridQueryEntries_;
   std::pmr::vector<InstanceData> instanceMatrices_;
@@ -514,6 +520,7 @@ private:
   glm::vec3 staticShadowCasterLightSpaceBoundsMax_{
       std::numeric_limits<float>::lowest()};
   StaticShadowCasterLightGrid staticShadowCasterLightGrid_{};
+  StaticShadowCasterLightGrid staticShadowBatchLightGrid_{};
   uint64_t staticShadowCasterCacheContentSignature_ = 0u;
   uint64_t staticShadowCasterCacheIndexCountEstimate_ = 0u;
   uint32_t staticShadowCasterLightGridQueryMarker_ = 1u;
