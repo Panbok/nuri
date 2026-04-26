@@ -4,16 +4,34 @@ layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 out_FragColor;
 
 const uint kTaaResolveFlagHistoryValid = 1u << 0u;
+const uint kTaaResolveFlagPreviousVelocityValid = 1u << 1u;
+const uint kTaaResolveFlagDepthReject = 1u << 2u;
+const uint kTaaResolveFlagVelocityReject = 1u << 3u;
+const uint kTaaResolveFlagNeighborhoodClamp = 1u << 4u;
+const uint kTaaResolveFlagAdaptiveBlend = 1u << 5u;
+const uint kTaaResolveFlagClampBlendAttenuation = 1u << 6u;
+const uint kTaaResolveFlagNeighborhoodFallback = 1u << 7u;
 const uint kTaaResolveModeResolve = 0u;
 const uint kTaaResolveModeCopyCurrent = 1u;
 const uint kTaaResolveModePreviousHistory = 2u;
 const uint kTaaResolveModeHistoryValidity = 3u;
+const uint kTaaResolveModeRejectionMask = 4u;
+const uint kTaaResolveModeBlendFactor = 5u;
+const uint kTaaResolveModeClampDelta = 6u;
+const uint kTaaResolveModePixelInspector = 7u;
+const uint kTaaClampModeClamp = 0u;
+const uint kTaaClampModeClip = 1u;
+const uint kTaaClampModeVariance = 2u;
+const uint kTaaHdrWeightingModeNone = 0u;
+const uint kTaaHdrWeightingModeLuminance = 1u;
+const uint kTaaHdrWeightingModeLogLuminance = 2u;
 
 layout(push_constant) uniform TAAResolvePushConstants {
   uint currentTexId;
   uint historyTexId;
   uint depthTexId;
   uint velocityTexId;
+  uint previousVelocityTexId;
   uint currentSamplerId;
   uint historySamplerId;
   uint depthSamplerId;
@@ -21,25 +39,51 @@ layout(push_constant) uniform TAAResolvePushConstants {
   uint flags;
   uint mode;
   uint currentWeightBits;
-  uint reserved0;
+  uint inverseWidthBits;
+  uint inverseHeightBits;
+  uint depthThresholdBits;
+  uint velocityThresholdBits;
+  uint velocityBlendScaleBits;
+  uint disocclusionWeightBits;
+  uint clampAttenuationBits;
+  uint varianceGammaBits;
+  uint hdrWeightStrengthBits;
+  uint clampMode;
+  uint hdrWeightingMode;
 }
 pc;
+
+struct Neighborhood {
+  vec3 minColor;
+  vec3 maxColor;
+  vec3 avgColor;
+  vec3 variance;
+  float minDepth;
+  float maxDepth;
+};
+
+struct ResolveEvaluation {
+  vec3 current;
+  vec3 history;
+  vec3 resolved;
+  float currentAlpha;
+  float currentWeight;
+  float clampDelta;
+  float velocityDelta;
+  float hdrWeight;
+  float rejectionStrength;
+  bool validHistory;
+  bool depthRejected;
+  bool velocityRejected;
+};
+
+bool flagEnabled(uint flag) { return (pc.flags & flag) != 0u; }
+
+float pushFloat(uint bits) { return uintBitsToFloat(bits); }
 
 bool uvInBounds(vec2 value) {
   return all(greaterThanEqual(value, vec2(0.0))) &&
          all(lessThanEqual(value, vec2(1.0)));
-}
-
-bool historyAvailable(vec2 historyUv, float depth) {
-  if ((pc.flags & kTaaResolveFlagHistoryValid) == 0u) {
-    return false;
-  }
-  if (!uvInBounds(historyUv)) {
-    return false;
-  }
-  // Clear-depth/background pixels use current color until skybox/background
-  // reprojection has an explicit policy.
-  return depth < 0.999999;
 }
 
 vec4 currentColor(vec2 sampleUv) {
@@ -48,6 +92,214 @@ vec4 currentColor(vec2 sampleUv) {
 
 vec4 historyColor(vec2 sampleUv) {
   return textureBindless2D(pc.historyTexId, pc.historySamplerId, sampleUv);
+}
+
+float sceneDepth(vec2 sampleUv) {
+  return textureBindless2D(pc.depthTexId, pc.depthSamplerId, sampleUv).r;
+}
+
+vec2 velocity(vec2 sampleUv) {
+  return textureBindless2D(pc.velocityTexId, pc.velocitySamplerId, sampleUv).rg;
+}
+
+vec2 previousVelocity(vec2 sampleUv) {
+  return textureBindless2D(pc.previousVelocityTexId, pc.velocitySamplerId,
+                           sampleUv)
+      .rg;
+}
+
+Neighborhood currentNeighborhood(vec2 centerUv) {
+  const vec2 invExtent = vec2(max(pushFloat(pc.inverseWidthBits), 0.0),
+                              max(pushFloat(pc.inverseHeightBits), 0.0));
+  Neighborhood neighborhood;
+  neighborhood.minColor = vec3(3.402823466e+38);
+  neighborhood.maxColor = vec3(-3.402823466e+38);
+  neighborhood.avgColor = vec3(0.0);
+  vec3 colorSquareSum = vec3(0.0);
+  neighborhood.minDepth = 1.0;
+  neighborhood.maxDepth = 0.0;
+
+  for (int y = -1; y <= 1; ++y) {
+    for (int x = -1; x <= 1; ++x) {
+      const vec2 sampleUv =
+          clamp(centerUv + vec2(float(x), float(y)) * invExtent, vec2(0.0),
+                vec2(1.0));
+      const vec3 color = currentColor(sampleUv).rgb;
+      const float depth = sceneDepth(sampleUv);
+      neighborhood.minColor = min(neighborhood.minColor, color);
+      neighborhood.maxColor = max(neighborhood.maxColor, color);
+      neighborhood.avgColor += color;
+      colorSquareSum += color * color;
+      neighborhood.minDepth = min(neighborhood.minDepth, depth);
+      neighborhood.maxDepth = max(neighborhood.maxDepth, depth);
+    }
+  }
+
+  neighborhood.avgColor *= 1.0 / 9.0;
+  neighborhood.variance = max(colorSquareSum * (1.0 / 9.0) -
+                                  neighborhood.avgColor * neighborhood.avgColor,
+                              vec3(0.0));
+  return neighborhood;
+}
+
+vec3 clipToAabb(vec3 value, vec3 minValue, vec3 maxValue) {
+  const vec3 center = (minValue + maxValue) * 0.5;
+  const vec3 extents = max((maxValue - minValue) * 0.5, vec3(1.0e-5));
+  const vec3 offset = value - center;
+  const vec3 unit = abs(offset) / extents;
+  const float maxUnit = max(max(unit.x, unit.y), unit.z);
+  return maxUnit > 1.0 ? center + offset / maxUnit : value;
+}
+
+float luminance(vec3 color) {
+  return dot(max(color, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+}
+
+float hdrWeight(vec3 current, vec3 history, float strength) {
+  const uint mode = pc.hdrWeightingMode;
+  if (mode == kTaaHdrWeightingModeNone || strength <= 0.0) {
+    return 0.0;
+  }
+
+  const float currentLuma = luminance(current);
+  const float historyLuma = luminance(history);
+  float delta = 0.0;
+  if (mode == kTaaHdrWeightingModeLogLuminance) {
+    delta = abs(log2(1.0 + currentLuma) - log2(1.0 + historyLuma));
+  } else {
+    delta = abs(currentLuma - historyLuma) /
+            max(max(currentLuma, historyLuma), 1.0);
+  }
+  return clamp(delta * strength, 0.0, 1.0);
+}
+
+vec3 validateHistoryColor(vec3 history, Neighborhood neighborhood,
+                          out float clampDelta) {
+  const uint mode = pc.clampMode;
+  vec3 validated = history;
+  if (mode == kTaaClampModeVariance) {
+    const float gamma = max(pushFloat(pc.varianceGammaBits), 0.0);
+    const vec3 sigma = sqrt(neighborhood.variance);
+    validated = clamp(history, neighborhood.avgColor - sigma * gamma,
+                      neighborhood.avgColor + sigma * gamma);
+    validated = clamp(validated, neighborhood.minColor, neighborhood.maxColor);
+  } else if (mode == kTaaClampModeClip) {
+    validated =
+        clipToAabb(history, neighborhood.minColor, neighborhood.maxColor);
+  } else {
+    validated = clamp(history, neighborhood.minColor, neighborhood.maxColor);
+  }
+  clampDelta = length(history - validated);
+  return validated;
+}
+
+ResolveEvaluation evaluateResolve(vec2 currentUv) {
+  const vec4 currentSample = currentColor(currentUv);
+  const vec3 current = currentSample.rgb;
+  const float baseCurrentWeight =
+      clamp(pushFloat(pc.currentWeightBits), 0.0, 1.0);
+
+  ResolveEvaluation result;
+  result.current = current;
+  result.history = current;
+  result.resolved = current;
+  result.currentAlpha = currentSample.a;
+  result.currentWeight = 1.0;
+  result.clampDelta = 0.0;
+  result.velocityDelta = 0.0;
+  result.hdrWeight = 0.0;
+  result.rejectionStrength = 0.0;
+  result.validHistory = false;
+  result.depthRejected = false;
+  result.velocityRejected = false;
+
+  if (!flagEnabled(kTaaResolveFlagHistoryValid)) {
+    result.rejectionStrength = 1.0;
+    return result;
+  }
+
+  const vec2 currentVelocity = velocity(currentUv);
+  const vec2 historyUv = currentUv + currentVelocity;
+  if (!uvInBounds(historyUv)) {
+    result.rejectionStrength = 1.0;
+    return result;
+  }
+
+  const float depth = sceneDepth(currentUv);
+  // Clear-depth/background pixels use current color until skybox/background
+  // reprojection has an explicit policy.
+  if (depth >= 0.999999) {
+    result.rejectionStrength = 1.0;
+    return result;
+  }
+
+  const float velocityThreshold = max(pushFloat(pc.velocityThresholdBits), 0.0);
+  bool velocityRejected = false;
+  if (flagEnabled(kTaaResolveFlagVelocityReject) &&
+      flagEnabled(kTaaResolveFlagPreviousVelocityValid) &&
+      velocityThreshold > 0.0) {
+    result.velocityDelta =
+        length(currentVelocity - previousVelocity(historyUv));
+    velocityRejected = result.velocityDelta > velocityThreshold;
+    result.velocityRejected = velocityRejected;
+  }
+
+  const Neighborhood neighborhood = currentNeighborhood(currentUv);
+  const float depthThreshold = max(pushFloat(pc.depthThresholdBits), 0.0);
+  const bool depthRejected =
+      flagEnabled(kTaaResolveFlagDepthReject) &&
+      (neighborhood.maxDepth - neighborhood.minDepth) > depthThreshold;
+  result.depthRejected = depthRejected;
+
+  if (depthRejected || velocityRejected) {
+    result.rejectionStrength = 1.0;
+    if (flagEnabled(kTaaResolveFlagNeighborhoodFallback)) {
+      result.resolved = neighborhood.avgColor;
+    }
+    return result;
+  }
+
+  result.validHistory = true;
+  vec3 history = historyColor(historyUv).rgb;
+  float clampDelta = 0.0;
+  vec3 clampedHistory =
+      flagEnabled(kTaaResolveFlagNeighborhoodClamp)
+          ? validateHistoryColor(history, neighborhood, clampDelta)
+          : history;
+  if (flagEnabled(kTaaResolveFlagNeighborhoodClamp)) {
+    result.clampDelta = clampDelta;
+  }
+  result.history = clampedHistory;
+
+  float currentWeight = baseCurrentWeight;
+  if (flagEnabled(kTaaResolveFlagAdaptiveBlend)) {
+    const float velocityBlendScale =
+        max(pushFloat(pc.velocityBlendScaleBits), 0.0);
+    const float disocclusionWeight =
+        clamp(pushFloat(pc.disocclusionWeightBits), baseCurrentWeight, 1.0);
+    const float motionBlend =
+        clamp(length(currentVelocity) * velocityBlendScale, 0.0, 1.0);
+    currentWeight = max(
+        currentWeight, mix(baseCurrentWeight, disocclusionWeight, motionBlend));
+    if (flagEnabled(kTaaResolveFlagClampBlendAttenuation) &&
+        result.clampDelta > 0.00001) {
+      const float clampAttenuation =
+          clamp(pushFloat(pc.clampAttenuationBits), 0.0, 1.0);
+      currentWeight = max(currentWeight, mix(currentWeight, disocclusionWeight,
+                                             clampAttenuation));
+    }
+    const float hdrWeightStrength =
+        clamp(pushFloat(pc.hdrWeightStrengthBits), 0.0, 1.0);
+    result.hdrWeight = hdrWeight(current, clampedHistory, hdrWeightStrength);
+    if (result.hdrWeight > 0.0) {
+      currentWeight = max(currentWeight, mix(currentWeight, disocclusionWeight,
+                                             result.hdrWeight));
+    }
+  }
+
+  result.currentWeight = clamp(currentWeight, 0.0, 1.0);
+  result.resolved = mix(clampedHistory, current, result.currentWeight);
+  return result;
 }
 
 void main() {
@@ -60,26 +312,44 @@ void main() {
     return;
   }
 
-  const float depth = textureBindless2D(pc.depthTexId, pc.depthSamplerId, uv).r;
-  const vec2 velocity =
-      textureBindless2D(pc.velocityTexId, pc.velocitySamplerId, uv).rg;
-  const vec2 historyUv = uv + velocity;
-  const bool validHistory = historyAvailable(historyUv, depth);
+  const ResolveEvaluation eval = evaluateResolve(uv);
 
   if (pc.mode == kTaaResolveModeHistoryValidity) {
     out_FragColor =
-        validHistory ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+        eval.validHistory ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+    return;
+  }
+  if (pc.mode == kTaaResolveModeRejectionMask) {
+    out_FragColor = vec4(eval.rejectionStrength, eval.depthRejected ? 1.0 : 0.0,
+                         eval.velocityRejected ? 1.0 : 0.0, 1.0);
+    return;
+  }
+  if (pc.mode == kTaaResolveModeBlendFactor) {
+    out_FragColor = vec4(vec3(eval.currentWeight), 1.0);
+    return;
+  }
+  if (pc.mode == kTaaResolveModeClampDelta) {
+    const float delta = clamp(eval.clampDelta * 8.0, 0.0, 1.0);
+    out_FragColor = vec4(delta, delta, delta, 1.0);
+    return;
+  }
+  if (pc.mode == kTaaResolveModePixelInspector) {
+    if (uv.x < 0.5 && uv.y < 0.5) {
+      out_FragColor = vec4(eval.current, 1.0);
+    } else if (uv.x >= 0.5 && uv.y < 0.5) {
+      out_FragColor = vec4(eval.history, 1.0);
+    } else if (uv.x < 0.5) {
+      out_FragColor = vec4(eval.resolved, 1.0);
+    } else {
+      out_FragColor =
+          vec4(eval.rejectionStrength, eval.currentWeight,
+               clamp(eval.velocityDelta /
+                         max(pushFloat(pc.velocityThresholdBits), 1.0e-5),
+                     0.0, 1.0),
+               1.0);
+    }
     return;
   }
 
-  const vec4 current = currentColor(uv);
-  if (!validHistory) {
-    out_FragColor = current;
-    return;
-  }
-
-  const vec4 history = historyColor(historyUv);
-  const float currentWeight =
-      clamp(uintBitsToFloat(pc.currentWeightBits), 0.0, 1.0);
-  out_FragColor = mix(history, current, currentWeight);
+  out_FragColor = vec4(eval.resolved, eval.currentAlpha);
 }

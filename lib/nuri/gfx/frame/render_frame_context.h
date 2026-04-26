@@ -62,6 +62,22 @@ enum class AntiAliasingDebugView : uint8_t {
   TAAPreviousHistory = 5,
   TAAResolved = 6,
   TAAHistoryValidity = 7,
+  TAARejectionMask = 8,
+  TAABlendFactor = 9,
+  TAAClampDelta = 10,
+  TAAPixelInspector = 11,
+};
+
+enum class TemporalAAClampMode : uint8_t {
+  Clamp = 0,
+  Clip = 1,
+  Variance = 2,
+};
+
+enum class TemporalAAHdrWeightingMode : uint8_t {
+  None = 0,
+  Luminance = 1,
+  LogLuminance = 2,
 };
 
 enum class TemporalHistoryResetReason : uint8_t {
@@ -231,9 +247,37 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   case AntiAliasingDebugView::TAAPreviousHistory:
   case AntiAliasingDebugView::TAAResolved:
   case AntiAliasingDebugView::TAAHistoryValidity:
+  case AntiAliasingDebugView::TAARejectionMask:
+  case AntiAliasingDebugView::TAABlendFactor:
+  case AntiAliasingDebugView::TAAClampDelta:
+  case AntiAliasingDebugView::TAAPixelInspector:
     return view;
   default:
     return AntiAliasingDebugView::None;
+  }
+}
+
+[[nodiscard]] constexpr TemporalAAClampMode
+sanitizeTemporalAAClampMode(TemporalAAClampMode mode) noexcept {
+  switch (mode) {
+  case TemporalAAClampMode::Clamp:
+  case TemporalAAClampMode::Clip:
+  case TemporalAAClampMode::Variance:
+    return mode;
+  default:
+    return TemporalAAClampMode::Clamp;
+  }
+}
+
+[[nodiscard]] constexpr TemporalAAHdrWeightingMode
+sanitizeTemporalAAHdrWeightingMode(TemporalAAHdrWeightingMode mode) noexcept {
+  switch (mode) {
+  case TemporalAAHdrWeightingMode::None:
+  case TemporalAAHdrWeightingMode::Luminance:
+  case TemporalAAHdrWeightingMode::LogLuminance:
+    return mode;
+  default:
+    return TemporalAAHdrWeightingMode::Luminance;
   }
 }
 
@@ -367,6 +411,16 @@ struct RenderSettings {
     bool resetHistoryRequested = false;
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
     float taaCurrentFrameWeight = 0.10f;
+    float taaDepthDiscontinuityThreshold = 0.01f;
+    float taaVelocityRejectionThreshold = 0.02f;
+    float taaVelocityBlendScale = 24.0f;
+    float taaDisocclusionCurrentWeight = 0.75f;
+    float taaClampBlendAttenuation = 0.35f;
+    float taaVarianceGamma = 1.25f;
+    float taaHdrWeightStrength = 0.50f;
+    TemporalAAClampMode taaClampMode = TemporalAAClampMode::Clamp;
+    TemporalAAHdrWeightingMode taaHdrWeightingMode =
+        TemporalAAHdrWeightingMode::Luminance;
   };
 
   struct AntiAliasingSettings {
@@ -434,11 +488,50 @@ inline void
 sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.mode = sanitizeAntiAliasingMode(settings.mode);
   settings.debug.view = sanitizeAntiAliasingDebugView(settings.debug.view);
+  settings.debug.taaClampMode =
+      sanitizeTemporalAAClampMode(settings.debug.taaClampMode);
+  settings.debug.taaHdrWeightingMode =
+      sanitizeTemporalAAHdrWeightingMode(settings.debug.taaHdrWeightingMode);
   if (!std::isfinite(settings.debug.taaCurrentFrameWeight)) {
     settings.debug.taaCurrentFrameWeight = 0.10f;
   }
   settings.debug.taaCurrentFrameWeight =
       std::clamp(settings.debug.taaCurrentFrameWeight, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaDepthDiscontinuityThreshold)) {
+    settings.debug.taaDepthDiscontinuityThreshold = 0.01f;
+  }
+  settings.debug.taaDepthDiscontinuityThreshold =
+      std::clamp(settings.debug.taaDepthDiscontinuityThreshold, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaVelocityRejectionThreshold)) {
+    settings.debug.taaVelocityRejectionThreshold = 0.02f;
+  }
+  settings.debug.taaVelocityRejectionThreshold =
+      std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaVelocityBlendScale)) {
+    settings.debug.taaVelocityBlendScale = 24.0f;
+  }
+  settings.debug.taaVelocityBlendScale =
+      std::clamp(settings.debug.taaVelocityBlendScale, 0.0f, 256.0f);
+  if (!std::isfinite(settings.debug.taaDisocclusionCurrentWeight)) {
+    settings.debug.taaDisocclusionCurrentWeight = 0.75f;
+  }
+  settings.debug.taaDisocclusionCurrentWeight =
+      std::clamp(settings.debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaClampBlendAttenuation)) {
+    settings.debug.taaClampBlendAttenuation = 0.35f;
+  }
+  settings.debug.taaClampBlendAttenuation =
+      std::clamp(settings.debug.taaClampBlendAttenuation, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaVarianceGamma)) {
+    settings.debug.taaVarianceGamma = 1.25f;
+  }
+  settings.debug.taaVarianceGamma =
+      std::clamp(settings.debug.taaVarianceGamma, 0.0f, 4.0f);
+  if (!std::isfinite(settings.debug.taaHdrWeightStrength)) {
+    settings.debug.taaHdrWeightStrength = 0.50f;
+  }
+  settings.debug.taaHdrWeightStrength =
+      std::clamp(settings.debug.taaHdrWeightStrength, 0.0f, 1.0f);
   if (settings.mode == AntiAliasingMode::None) {
     settings.debug.jitterEnabled = false;
     settings.debug.freezeJitter = false;
@@ -1383,6 +1476,16 @@ struct AntiAliasingFrameMetrics {
   float taaHistoryFrameWeight = 0.90f;
   float taaHistoryValidPercent = 0.0f;
   float taaOutOfBoundsReprojectionPercent = 0.0f;
+  float taaDepthDiscontinuityThreshold = 0.01f;
+  float taaVelocityRejectionThreshold = 0.02f;
+  float taaVelocityBlendScale = 24.0f;
+  float taaDisocclusionCurrentWeight = 0.75f;
+  float taaClampBlendAttenuation = 0.35f;
+  float taaVarianceGamma = 1.25f;
+  float taaHdrWeightStrength = 0.50f;
+  TemporalAAClampMode taaClampMode = TemporalAAClampMode::Clamp;
+  TemporalAAHdrWeightingMode taaHdrWeightingMode =
+      TemporalAAHdrWeightingMode::Luminance;
   TemporalHistoryResetReason historyResetReason =
       TemporalHistoryResetReason::None;
   bool jitterEnabled = false;
@@ -1403,6 +1506,15 @@ struct AntiAliasingFrameMetrics {
   bool taaHistoryValidityDebugViewRendered = false;
   bool taaOutOfBoundsFallbackEnabled = false;
   bool taaBilinearHistorySampling = false;
+  bool taaDepthRejectionEnabled = false;
+  bool taaVelocityRejectionEnabled = false;
+  bool taaPreviousVelocityDisocclusionEnabled = false;
+  bool taaNeighborhoodClampEnabled = false;
+  bool taaAdaptiveBlendEnabled = false;
+  bool taaClampBlendAttenuationEnabled = false;
+  bool taaNeighborhoodFallbackEnabled = false;
+  bool taaHdrWeightingEnabled = false;
+  bool taaPixelInspectorDebugViewRendered = false;
 };
 
 [[nodiscard]] inline AntiAliasingFrameMetrics
