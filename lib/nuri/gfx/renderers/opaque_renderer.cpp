@@ -26,10 +26,8 @@ constexpr float kClearColorWhite = 1.0f;
 constexpr uint32_t kOpaquePassDebugColor = 0xff0000ff;
 constexpr uint32_t kMeshDebugColor = 0xffcc5500;
 constexpr uint32_t kComputeDispatchColor = 0xff33aa33;
-constexpr uint32_t kVelocityDebugColor = 0xff22ccff;
 constexpr uint32_t kComputeWorkgroupSize = 32;
 constexpr uint32_t kTessellationPatchControlPoints = 3;
-constexpr float kVelocityDebugScale = 64.0f;
 constexpr size_t kIndirectCountHeaderBytes = sizeof(uint32_t);
 constexpr uint32_t kMaxIndirectCommandsPerDraw = 1024u;
 constexpr size_t kMaxDrawItemsForIndirectPath = 8192u;
@@ -594,9 +592,6 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       indirectCommandUploadBytes_(resolveMemoryResource(memory)),
       overlayDrawItems_(resolveMemoryResource(memory)),
       velocityDrawItems_(resolveMemoryResource(memory)),
-      velocityDebugDrawItems_(resolveMemoryResource(memory)),
-      velocityDebugDependencyTextures_(resolveMemoryResource(memory)),
-      velocityDebugDependencyTextureAccessModes_(resolveMemoryResource(memory)),
       pickDrawItems_(resolveMemoryResource(memory)),
       shadowInspectDrawItems_(resolveMemoryResource(memory)),
       passDrawItems_(resolveMemoryResource(memory)),
@@ -688,7 +683,6 @@ void OpaqueRenderer::onDetach() {
   meshPickShader_.reset();
   meshShadowInspectShader_.reset();
   meshVelocityShader_.reset();
-  velocityDebugShader_.reset();
   depthShader_.reset();
   depthAlphaShader_.reset();
   depthPyramidShader_.reset();
@@ -704,8 +698,6 @@ void OpaqueRenderer::onDetach() {
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
-  velocityDebugVertexShader_ = {};
-  velocityDebugFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -738,9 +730,6 @@ void OpaqueRenderer::onDetach() {
   indirectCommandUploadBytes_.clear();
   overlayDrawItems_.clear();
   velocityDrawItems_.clear();
-  velocityDebugDrawItems_.clear();
-  velocityDebugDependencyTextures_.clear();
-  velocityDebugDependencyTextureAccessModes_.clear();
   passDrawItems_.clear();
   depthPrepassDrawItems_.clear();
   depthPyramidPushConstants_.clear();
@@ -3760,75 +3749,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
   }
 
-  const AntiAliasingDebugView aaDebugView =
-      sanitizeAntiAliasingDebugView(settings.antiAliasing.debug.view);
-  const bool velocityDebugRequested =
-      aaDebugView == AntiAliasingDebugView::MotionVectors ||
-      aaDebugView == AntiAliasingDebugView::VelocityMagnitude;
-  if (taaSelected && velocityDebugRequested &&
-      frame.metrics.antiAliasing.opaqueVelocityGenerated &&
-      nuri::isValid(velocityDebugPipelineHandle_) &&
-      nuri::isValid(frame.sharedResources.motionVectorTexture) &&
-      nuri::isValid(frame.sharedResources.sceneColorTexture)) {
-    const uint32_t sourceTexId =
-        gpu_.getTextureBindlessIndex(frame.sharedResources.motionVectorTexture);
-    const uint32_t sourceSamplerId = gpu_.getDefaultSamplerBindlessIndex();
-    if (sourceTexId != kInvalidTextureBindlessIndex &&
-        sourceSamplerId != kInvalidTextureBindlessIndex) {
-      const uint32_t mode =
-          aaDebugView == AntiAliasingDebugView::VelocityMagnitude ? 1u : 0u;
-      velocityDebugPushConstants_ =
-          glm::uvec4(sourceTexId, sourceSamplerId, mode,
-                     std::bit_cast<uint32_t>(kVelocityDebugScale));
-
-      velocityDebugDrawItems_.clear();
-      DrawItem debugDraw{};
-      debugDraw.pipeline = velocityDebugPipelineHandle_;
-      debugDraw.vertexCount = 3u;
-      debugDraw.instanceCount = 1u;
-      debugDraw.pushConstants = std::span<const std::byte>(
-          reinterpret_cast<const std::byte *>(&velocityDebugPushConstants_),
-          sizeof(velocityDebugPushConstants_));
-      debugDraw.debugLabel = "TaaVelocityDebug";
-      debugDraw.debugColor = kVelocityDebugColor;
-      velocityDebugDrawItems_.push_back(debugDraw);
-
-      velocityDebugDependencyTextures_.clear();
-      velocityDebugDependencyTextureAccessModes_.clear();
-      velocityDebugDependencyTextures_.push_back(
-          frame.sharedResources.motionVectorTexture);
-      velocityDebugDependencyTextureAccessModes_.push_back(
-          RenderGraphAccessMode::Read);
-
-      PreparedGraphPass &debugPass =
-          out.emplace_back(drawItems_.get_allocator().resource());
-      debugPass.desc.color = {.loadOp = LoadOp::Clear,
-                              .storeOp = StoreOp::Store,
-                              .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-      debugPass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
-      debugPass.desc.dependencyTextures = std::span<const TextureHandle>(
-          velocityDebugDependencyTextures_.data(),
-          velocityDebugDependencyTextures_.size());
-      debugPass.desc.dependencyTextureAccessModes =
-          std::span<const RenderGraphAccessMode>(
-              velocityDebugDependencyTextureAccessModes_.data(),
-              velocityDebugDependencyTextureAccessModes_.size());
-      debugPass.desc.draws = std::span<const DrawItem>(
-          velocityDebugDrawItems_.data(), velocityDebugDrawItems_.size());
-      debugPass.desc.drawBuffersPreResolved = true;
-      debugPass.desc.debugLabel = "TAA Velocity Debug Pass";
-      debugPass.desc.debugColor = kVelocityDebugColor;
-      debugPass.hasDraws = true;
-      debugPass.desc.borrowPayload = true;
-      debugPass.isVelocityDebugPass = true;
-
-      frame.metrics.antiAliasing.velocityDebugPassCount = 1u;
-      frame.metrics.antiAliasing.velocityDebugBandwidthEstimateBytes =
-          frame.metrics.antiAliasing.motionVectorTextureBytes +
-          textureStorageBytes(gpu_, frame.sharedResources.sceneColorTexture);
-    }
-  }
-
   if (pendingShadowInspectRequest_.has_value() &&
       nuri::isValid(shadowInspectTexture_) &&
       nuri::isValid(meshShadowInspectPipelineHandle_)) {
@@ -4211,10 +4131,6 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
 
   if (pass.isMainPass && nuri::isValid(pass.colorTextureHandle)) {
     frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
-  }
-  if (pass.isVelocityDebugPass && nuri::isValid(pass.colorTextureHandle)) {
-    frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
-    frame.metrics.antiAliasing.velocityDebugViewRendered = true;
   }
   if (pass.isVelocityPass && nuri::isValid(pass.colorTextureHandle)) {
     frame.sharedResources.motionVectorGraphTexture = passDesc.colorTexture;
@@ -4831,7 +4747,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshPickShader_.reset();
     meshShadowInspectShader_.reset();
     meshVelocityShader_.reset();
-    velocityDebugShader_.reset();
     depthShader_.reset();
     depthAlphaShader_.reset();
     depthPyramidShader_.reset();
@@ -4847,8 +4762,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshShadowInspectFragmentShader_ = {};
     meshVelocityVertexShader_ = {};
     meshVelocityFragmentShader_ = {};
-    velocityDebugVertexShader_ = {};
-    velocityDebugFragmentShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -4871,7 +4784,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshPickShader_.reset();
     meshShadowInspectShader_.reset();
     meshVelocityShader_.reset();
-    velocityDebugShader_.reset();
     depthShader_.reset();
     depthAlphaShader_.reset();
     depthPyramidShader_.reset();
@@ -4887,8 +4799,6 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshShadowInspectFragmentShader_ = {};
     meshVelocityVertexShader_ = {};
     meshVelocityFragmentShader_ = {};
-    velocityDebugVertexShader_ = {};
-    velocityDebugFragmentShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -5595,15 +5505,13 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshPickShader_ = Shader::create("main_id", gpu_);
   meshShadowInspectShader_ = Shader::create("shadow_inspect", gpu_);
   meshVelocityShader_ = Shader::create("opaque_velocity", gpu_);
-  velocityDebugShader_ = Shader::create("taa_velocity_debug", gpu_);
   depthShader_ = Shader::create("opaque_depth", gpu_);
   depthAlphaShader_ = Shader::create("opaque_depth_alpha", gpu_);
   depthPyramidShader_ = Shader::create("depth_minmax_pyramid", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
   if (!meshShader_ || !meshTessShader_ || !meshPickShader_ ||
-      !meshShadowInspectShader_ || !meshVelocityShader_ ||
-      !velocityDebugShader_ || !computeShader_ || !depthShader_ ||
-      !depthAlphaShader_ || !depthPyramidShader_) {
+      !meshShadowInspectShader_ || !meshVelocityShader_ || !computeShader_ ||
+      !depthShader_ || !depthAlphaShader_ || !depthPyramidShader_) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::createShaders: failed to create shader objects");
   }
@@ -5619,8 +5527,6 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
-  velocityDebugVertexShader_ = {};
-  velocityDebugFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -5700,29 +5606,6 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
     } else {
       meshVelocityVertexShader_ = vertexResult.value();
       meshVelocityFragmentShader_ = fragmentResult.value();
-    }
-  }
-
-  {
-    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
-    auto vertexResult = velocityDebugShader_->compileFromFile(
-        (shaderDir / "fullscreen_copy.vert").string(), ShaderStage::Vertex);
-    auto fragmentResult = velocityDebugShader_->compileFromFile(
-        (shaderDir / "taa_velocity_debug.frag").string(),
-        ShaderStage::Fragment);
-    if (vertexResult.hasError() || fragmentResult.hasError()) {
-      const std::string error = vertexResult.hasError()
-                                    ? vertexResult.error()
-                                    : fragmentResult.error();
-      NURI_LOG_WARNING(
-          "OpaqueRenderer::createShaders: velocity debug shaders failed, "
-          "velocity debug views will be disabled: %s",
-          error.c_str());
-      velocityDebugVertexShader_ = {};
-      velocityDebugFragmentShader_ = {};
-    } else {
-      velocityDebugVertexShader_ = vertexResult.value();
-      velocityDebugFragmentShader_ = fragmentResult.value();
     }
   }
 
@@ -5924,24 +5807,6 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
         meshVelocityDoubleSidedPipelineHandle_ =
             doubleSidedVelocityResult.value();
       }
-    }
-  }
-
-  if (nuri::isValid(velocityDebugVertexShader_) &&
-      nuri::isValid(velocityDebugFragmentShader_)) {
-    const RenderPipelineDesc debugDesc = fullscreenPipelineDesc(
-        kFrameCompositionSceneColorFormat, velocityDebugVertexShader_,
-        velocityDebugFragmentShader_);
-    auto debugResult =
-        gpu_.createRenderPipeline(debugDesc, "taa_velocity_debug");
-    if (debugResult.hasError()) {
-      NURI_LOG_WARNING(
-          "OpaqueRenderer::createPipelines: velocity debug pipeline failed, "
-          "velocity debug views disabled: %s",
-          debugResult.error().c_str());
-      velocityDebugPipelineHandle_ = {};
-    } else {
-      velocityDebugPipelineHandle_ = debugResult.value();
     }
   }
 
@@ -6641,7 +6506,6 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, meshShadowInspectTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshShadowInspectDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshShadowInspectPipelineHandle_);
-  destroyPipelineHandle(gpu_, velocityDebugPipelineHandle_);
   destroyPipelineHandle(gpu_, meshVelocityDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshVelocityPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedTessPipelineHandle_);
@@ -6665,7 +6529,6 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshShadowInspectDoubleSidedTessPipelineHandle_ = {};
   meshVelocityPipelineHandle_ = {};
   meshVelocityDoubleSidedPipelineHandle_ = {};
-  velocityDebugPipelineHandle_ = {};
   meshDepthPipelineHandle_ = {};
   meshDepthDoubleSidedPipelineHandle_ = {};
   meshDepthTessPipelineHandle_ = {};

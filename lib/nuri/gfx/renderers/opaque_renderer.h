@@ -236,7 +236,6 @@ private:
     bool isDepthPrepass = false;
     bool isDepthPyramidPass = false;
     bool isVelocityPass = false;
-    bool isVelocityDebugPass = false;
     uint32_t depthPyramidLevel = UINT32_MAX;
 
     explicit PreparedGraphPass(
@@ -381,7 +380,6 @@ private:
   std::unique_ptr<Shader> meshPickShader_;
   std::unique_ptr<Shader> meshShadowInspectShader_;
   std::unique_ptr<Shader> meshVelocityShader_;
-  std::unique_ptr<Shader> velocityDebugShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> depthPyramidShader_;
@@ -417,8 +415,6 @@ private:
   ShaderHandle meshShadowInspectFragmentShader_{};
   ShaderHandle meshVelocityVertexShader_{};
   ShaderHandle meshVelocityFragmentShader_{};
-  ShaderHandle velocityDebugVertexShader_{};
-  ShaderHandle velocityDebugFragmentShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle depthPyramidVertexShader_{};
@@ -442,7 +438,6 @@ private:
   RenderPipelineHandle meshShadowInspectDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle meshVelocityPipelineHandle_{};
   RenderPipelineHandle meshVelocityDoubleSidedPipelineHandle_{};
-  RenderPipelineHandle velocityDebugPipelineHandle_{};
   RenderPipelineHandle meshDepthPipelineHandle_{};
   RenderPipelineHandle meshDepthDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshDepthTessPipelineHandle_{};
@@ -534,10 +529,6 @@ private:
   std::pmr::vector<std::byte> indirectCommandUploadBytes_;
   std::pmr::vector<DrawItem> overlayDrawItems_;
   std::pmr::vector<DrawItem> velocityDrawItems_;
-  std::pmr::vector<DrawItem> velocityDebugDrawItems_;
-  std::pmr::vector<TextureHandle> velocityDebugDependencyTextures_;
-  std::pmr::vector<RenderGraphAccessMode>
-      velocityDebugDependencyTextureAccessModes_;
   std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<DrawItem> shadowInspectDrawItems_;
   std::pmr::vector<DrawItem> passDrawItems_;
@@ -573,7 +564,6 @@ private:
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};
-  glm::uvec4 velocityDebugPushConstants_{0u};
   uint64_t cachedPreResolvedBufferSignature_ =
       std::numeric_limits<uint64_t>::max();
   uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();

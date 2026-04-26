@@ -70,9 +70,23 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback"};
-constexpr std::array<const char *, 8> kAntiAliasingDebugViewLabels = {
-    "None",        "Settings",    "Motion Vectors", "Velocity Magnitude",
-    "TAA Current", "TAA History", "TAA Resolved",   "TAA History Validity"};
+constexpr std::array<const char *, 12> kAntiAliasingDebugViewLabels = {
+    "None",
+    "Settings",
+    "Motion Vectors",
+    "Velocity Magnitude",
+    "TAA Current",
+    "TAA History",
+    "TAA Resolved",
+    "TAA History Validity",
+    "TAA Rejection Mask",
+    "TAA Blend Factor",
+    "TAA Clamp Delta",
+    "TAA Pixel Inspector"};
+constexpr std::array<const char *, 3> kTemporalAAClampModeLabels = {
+    "Clamp", "Clip", "Variance"};
+constexpr std::array<const char *, 3> kTemporalAAHdrWeightingModeLabels = {
+    "None", "Luminance", "Log Luminance"};
 constexpr std::array<uint32_t, 4> kShadowMapResolutions = {1024u, 2048u, 4096u,
                                                            8192u};
 constexpr std::array<const char *, 4> kShadowMapResolutionLabels = {"1K", "2K",
@@ -269,9 +283,44 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "TAA Resolved";
   case AntiAliasingDebugView::TAAHistoryValidity:
     return "TAA History Validity";
+  case AntiAliasingDebugView::TAARejectionMask:
+    return "TAA Rejection Mask";
+  case AntiAliasingDebugView::TAABlendFactor:
+    return "TAA Blend Factor";
+  case AntiAliasingDebugView::TAAClampDelta:
+    return "TAA Clamp Delta";
+  case AntiAliasingDebugView::TAAPixelInspector:
+    return "TAA Pixel Inspector";
   }
   return "Unknown";
 }
+
+const char *temporalAAClampModeDisplayName(TemporalAAClampMode mode) {
+  switch (sanitizeTemporalAAClampMode(mode)) {
+  case TemporalAAClampMode::Clamp:
+    return "Clamp";
+  case TemporalAAClampMode::Clip:
+    return "Clip";
+  case TemporalAAClampMode::Variance:
+    return "Variance";
+  }
+  return "Unknown";
+}
+
+const char *
+temporalAAHdrWeightingModeDisplayName(TemporalAAHdrWeightingMode mode) {
+  switch (sanitizeTemporalAAHdrWeightingMode(mode)) {
+  case TemporalAAHdrWeightingMode::None:
+    return "None";
+  case TemporalAAHdrWeightingMode::Luminance:
+    return "Luminance";
+  case TemporalAAHdrWeightingMode::LogLuminance:
+    return "Log Luminance";
+  }
+  return "Unknown";
+}
+
+const char *boolLogValue(bool value) { return value ? "true" : "false"; }
 
 const char *shadowFilterModeDisplayName(ShadowFilterMode mode) {
   switch (sanitizeShadowFilterMode(mode)) {
@@ -1863,11 +1912,131 @@ std::string antiAliasingSettingsSummary(
   summary += antiAliasingDebugViewDisplayName(settings.debug.view);
   summary += " taaCurrentWeight=";
   summary += std::format("{:.2f}", settings.debug.taaCurrentFrameWeight);
+  summary += " taaClampMode=";
+  summary += temporalAAClampModeDisplayName(settings.debug.taaClampMode);
+  summary += " taaHdrWeighting=";
+  summary +=
+      temporalAAHdrWeightingModeDisplayName(settings.debug.taaHdrWeightingMode);
   summary += " resetHistoryRequested=";
   summary += settings.debug.resetHistoryRequested ? "true" : "false";
   summary += " temporalFeaturePresent=";
   summary += temporalFeaturePresent ? "true" : "false";
   return summary;
+}
+
+std::string
+antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
+  const std::string resetReason(
+      temporalHistoryResetReasonName(metrics.historyResetReason));
+  return std::format(
+      "frame=[jitter={{enabled={} frozen={} index={}/{} offset=({:.4f},{:.4f}) "
+      "bounds={} oobCount={}}} history={{valid={} temporalDataValid={} "
+      "resetReason={} framesSinceReset={} resetCount={}}} "
+      "motionVectors={{allocated={} format={} formatSupported={} "
+      "dimensions={}x{} ring={} currentBytes={} previousValid={} "
+      "previousBytes={} totalBytes={} graphPublished={} "
+      "previousGraphPublished={} "
+      "clearPasses={} clearBytes={}}} "
+      "opaqueVelocity={{generated={} passCount={} debugPassCount={} draws={} "
+      "instances={} previousCacheValid={} previousValid={} previousMissing={} "
+      "animatedResponsive={} tessellatedSkipped={} objectMotionAvg={:.5f} "
+      "objectMotionMax={:.5f} velocityAvg={:.5f} velocityMax={:.5f} "
+      "staticResidual={:.6f} cameraDelta={:.6f} missingPreviousRatio={:.3f} "
+      "edgeDiscontinuity={:.3f} passBytes={} debugBytes={} "
+      "debugViewRendered={}}} "
+      "resolve={{passes={} copyBackPasses={} dimensions={}x{} "
+      "currentWeight={:.3f} "
+      "historyWeight={:.3f} historyTextureValid={} "
+      "oobReprojectionMeasured=false qualityValidation={} "
+      "currentFallbackFrames={} bandwidthBytes={} resolvedSceneColor={} "
+      "debugViewRendered={} historyValidityView={} pixelInspectorView={} "
+      "oobFallback={} bilinearHistory={} depthReject={} depthThreshold={:.4f} "
+      "velocityReject={} velocityThreshold={:.4f} "
+      "previousVelocityDisocclusion={} "
+      "neighborhoodClamp={} adaptiveBlend={} velocityBlendScale={:.2f} "
+      "disocclusionWeight={:.2f} clampAttenuationEnabled={} "
+      "clampAttenuation={:.2f} neighborhoodFallback={} clampMode={} "
+      "varianceGamma={:.2f} hdrWeighting={} hdrStrength={:.2f} "
+      "hdrWeightingEnabled={}}}]",
+      boolLogValue(metrics.jitterEnabled), boolLogValue(metrics.jitterFrozen),
+      metrics.jitterIndex, metrics.jitterSequenceLength,
+      metrics.jitterPixelOffset.x, metrics.jitterPixelOffset.y,
+      metrics.jitterOutOfBounds ? "out-of-bounds" : "valid",
+      metrics.jitterOutOfBoundsCount, boolLogValue(metrics.historyValid),
+      boolLogValue(metrics.temporalDataValid), resetReason,
+      metrics.framesSinceHistoryReset, metrics.historyResetCount,
+      boolLogValue(metrics.motionVectorAllocated),
+      formatDisplayName(metrics.motionVectorFormat),
+      boolLogValue(metrics.motionVectorFormatSupported),
+      metrics.motionVectorWidth, metrics.motionVectorHeight,
+      metrics.motionVectorTextureCount,
+      static_cast<unsigned long long>(metrics.motionVectorTextureBytes),
+      boolLogValue(metrics.previousMotionVectorValid),
+      static_cast<unsigned long long>(metrics.previousMotionVectorTextureBytes),
+      static_cast<unsigned long long>(metrics.motionVectorTotalBytes),
+      boolLogValue(metrics.motionVectorGraphPublished),
+      boolLogValue(metrics.previousMotionVectorGraphPublished),
+      metrics.motionVectorClearPassCount,
+      static_cast<unsigned long long>(metrics.motionVectorClearBytes),
+      boolLogValue(metrics.opaqueVelocityGenerated), metrics.velocityPassCount,
+      metrics.velocityDebugPassCount, metrics.velocityDrawCount,
+      metrics.velocityInstanceCount,
+      boolLogValue(metrics.previousTransformCacheValid),
+      metrics.velocityPreviousTransformValidCount,
+      metrics.velocityMissingPreviousTransformCount,
+      metrics.velocityAnimatedResponsiveCount,
+      metrics.velocityTessellatedSkippedDrawCount,
+      metrics.velocityAverageObjectMotion, metrics.velocityMaxObjectMotion,
+      metrics.velocityEstimatedAverageMagnitude,
+      metrics.velocityEstimatedMaxMagnitude,
+      metrics.velocityStaticResidualEstimate, metrics.velocityCameraMatrixDelta,
+      metrics.velocityMissingPreviousRatio,
+      metrics.velocityEdgeDiscontinuityEstimate,
+      static_cast<unsigned long long>(
+          metrics.velocityPassBandwidthEstimateBytes),
+      static_cast<unsigned long long>(
+          metrics.velocityDebugBandwidthEstimateBytes),
+      boolLogValue(metrics.velocityDebugViewRendered),
+      metrics.taaResolvePassCount, metrics.taaCopyBackPassCount,
+      metrics.taaResolveWidth, metrics.taaResolveHeight,
+      metrics.taaCurrentFrameWeight, metrics.taaHistoryFrameWeight,
+      boolLogValue(metrics.historyValid),
+      metrics.taaQualityValidationInvalidatedByFrozenJitter
+          ? "invalid-freeze-jitter"
+          : "valid",
+      metrics.taaCurrentFallbackFrameCount,
+      static_cast<unsigned long long>(metrics.taaHistoryBandwidthEstimateBytes),
+      boolLogValue(metrics.taaResolvedSceneColorPublished),
+      boolLogValue(metrics.taaDebugViewRendered),
+      boolLogValue(metrics.taaHistoryValidityDebugViewRendered),
+      boolLogValue(metrics.taaPixelInspectorDebugViewRendered),
+      boolLogValue(metrics.taaOutOfBoundsFallbackEnabled),
+      boolLogValue(metrics.taaBilinearHistorySampling),
+      boolLogValue(metrics.taaDepthRejectionEnabled),
+      metrics.taaDepthDiscontinuityThreshold,
+      boolLogValue(metrics.taaVelocityRejectionEnabled),
+      metrics.taaVelocityRejectionThreshold,
+      boolLogValue(metrics.taaPreviousVelocityDisocclusionEnabled),
+      boolLogValue(metrics.taaNeighborhoodClampEnabled),
+      boolLogValue(metrics.taaAdaptiveBlendEnabled),
+      metrics.taaVelocityBlendScale, metrics.taaDisocclusionCurrentWeight,
+      boolLogValue(metrics.taaClampBlendAttenuationEnabled),
+      metrics.taaClampBlendAttenuation,
+      boolLogValue(metrics.taaNeighborhoodFallbackEnabled),
+      temporalAAClampModeDisplayName(metrics.taaClampMode),
+      metrics.taaVarianceGamma,
+      temporalAAHdrWeightingModeDisplayName(metrics.taaHdrWeightingMode),
+      metrics.taaHdrWeightStrength,
+      boolLogValue(metrics.taaHdrWeightingEnabled));
+}
+
+std::string antiAliasingDiagnosticsSummary(
+    const RenderSettings::AntiAliasingSettings &settings,
+    const AntiAliasingFrameMetrics &metrics, bool temporalFeaturePresent) {
+  return std::format(
+      "AA diagnostics: {} {}",
+      antiAliasingSettingsSummary(settings, temporalFeaturePresent),
+      antiAliasingMetricsSummary(metrics));
 }
 
 void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
@@ -1891,6 +2060,43 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Checkbox("Freeze Jitter##AntiAliasing", &aa.debug.freezeJitter);
   ImGui::SliderFloat("TAA Current Weight##AntiAliasing",
                      &aa.debug.taaCurrentFrameWeight, 0.0f, 1.0f, "%.2f");
+  ImGui::SliderFloat("TAA Depth Reject##AntiAliasing",
+                     &aa.debug.taaDepthDiscontinuityThreshold, 0.0f, 0.1f,
+                     "%.4f");
+  ImGui::SliderFloat("TAA Velocity Reject##AntiAliasing",
+                     &aa.debug.taaVelocityRejectionThreshold, 0.0f, 0.1f,
+                     "%.4f");
+  ImGui::SliderFloat("TAA Velocity Blend Scale##AntiAliasing",
+                     &aa.debug.taaVelocityBlendScale, 0.0f, 128.0f, "%.1f");
+  ImGui::SliderFloat("TAA Disocclusion Weight##AntiAliasing",
+                     &aa.debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f,
+                     "%.2f");
+  ImGui::SliderFloat("TAA Clamp Attenuation##AntiAliasing",
+                     &aa.debug.taaClampBlendAttenuation, 0.0f, 1.0f, "%.2f");
+  int clampModeIndex = static_cast<int>(aa.debug.taaClampMode);
+  clampModeIndex =
+      std::clamp(clampModeIndex, 0,
+                 static_cast<int>(kTemporalAAClampModeLabels.size()) - 1);
+  if (ImGui::Combo("TAA Clamp Mode##AntiAliasing", &clampModeIndex,
+                   kTemporalAAClampModeLabels.data(),
+                   static_cast<int>(kTemporalAAClampModeLabels.size()))) {
+    aa.debug.taaClampMode = static_cast<TemporalAAClampMode>(clampModeIndex);
+  }
+  ImGui::SliderFloat("TAA Variance Gamma##AntiAliasing",
+                     &aa.debug.taaVarianceGamma, 0.0f, 4.0f, "%.2f");
+  int hdrWeightingModeIndex = static_cast<int>(aa.debug.taaHdrWeightingMode);
+  hdrWeightingModeIndex = std::clamp(
+      hdrWeightingModeIndex, 0,
+      static_cast<int>(kTemporalAAHdrWeightingModeLabels.size()) - 1);
+  if (ImGui::Combo(
+          "TAA HDR Weighting##AntiAliasing", &hdrWeightingModeIndex,
+          kTemporalAAHdrWeightingModeLabels.data(),
+          static_cast<int>(kTemporalAAHdrWeightingModeLabels.size()))) {
+    aa.debug.taaHdrWeightingMode =
+        static_cast<TemporalAAHdrWeightingMode>(hdrWeightingModeIndex);
+  }
+  ImGui::SliderFloat("TAA HDR Weight Strength##AntiAliasing",
+                     &aa.debug.taaHdrWeightStrength, 0.0f, 1.0f, "%.2f");
   ImGui::EndDisabled();
   if (aaDisabled) {
     aa.debug.jitterEnabled = false;
@@ -1921,6 +2127,11 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Text("Active Mode: %s", antiAliasingModeDisplayName(aa.mode));
   ImGui::Text("Jitter: %s", aa.debug.jitterEnabled ? "enabled" : "disabled");
   ImGui::Text("Freeze Jitter: %s", aa.debug.freezeJitter ? "yes" : "no");
+  if (aa.debug.jitterEnabled && aa.debug.freezeJitter) {
+    ImGui::TextColored(
+        ImVec4(1.0f, 0.72f, 0.22f, 1.0f),
+        "TAA quality validation is invalid while jitter is frozen");
+  }
   ImGui::Text("Debug View: %s",
               antiAliasingDebugViewDisplayName(aa.debug.view));
   ImGui::Text("History Reset Request: %s",
@@ -2028,9 +2239,9 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                 metrics.taaResolveHeight);
     ImGui::Text("Blend Weights: current %.2f, history %.2f",
                 metrics.taaCurrentFrameWeight, metrics.taaHistoryFrameWeight);
-    ImGui::Text("History Valid Pixels: %.1f%%", metrics.taaHistoryValidPercent);
-    ImGui::Text("OOB Reprojection: %.1f%%",
-                metrics.taaOutOfBoundsReprojectionPercent);
+    ImGui::Text("History Texture Valid: %s",
+                metrics.historyValid ? "yes" : "no");
+    ImGui::TextUnformatted("OOB Reprojection: not measured");
     ImGui::Text("Current Fallback Frames: %u",
                 metrics.taaCurrentFallbackFrameCount);
     ImGui::Text("History Bandwidth Estimate: %llu bytes",
@@ -2048,10 +2259,41 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                 metrics.taaOutOfBoundsFallbackEnabled ? "enabled" : "off");
     ImGui::Text("History Sampling: %s",
                 metrics.taaBilinearHistorySampling ? "bilinear" : "inactive");
+    ImGui::Text("Depth Rejection: %s threshold %.4f",
+                metrics.taaDepthRejectionEnabled ? "enabled" : "off",
+                metrics.taaDepthDiscontinuityThreshold);
+    ImGui::Text("Velocity Rejection: %s threshold %.4f",
+                metrics.taaVelocityRejectionEnabled ? "enabled" : "off",
+                metrics.taaVelocityRejectionThreshold);
+    ImGui::Text("Previous Velocity Disocclusion: %s",
+                metrics.taaPreviousVelocityDisocclusionEnabled ? "enabled"
+                                                               : "off");
+    ImGui::Text("Neighborhood Clamp: %s",
+                metrics.taaNeighborhoodClampEnabled ? "enabled" : "off");
+    ImGui::Text("Adaptive Blend: %s scale %.1f target %.2f",
+                metrics.taaAdaptiveBlendEnabled ? "enabled" : "off",
+                metrics.taaVelocityBlendScale,
+                metrics.taaDisocclusionCurrentWeight);
+    ImGui::Text("Clamp Attenuation: %s %.2f",
+                metrics.taaClampBlendAttenuationEnabled ? "enabled" : "off",
+                metrics.taaClampBlendAttenuation);
+    ImGui::Text("Neighborhood Fallback: %s",
+                metrics.taaNeighborhoodFallbackEnabled ? "enabled" : "off");
+    ImGui::Text("Clamp Mode: %s variance gamma %.2f",
+                temporalAAClampModeDisplayName(metrics.taaClampMode),
+                metrics.taaVarianceGamma);
+    ImGui::Text(
+        "HDR Weighting: %s strength %.2f (%s)",
+        temporalAAHdrWeightingModeDisplayName(metrics.taaHdrWeightingMode),
+        metrics.taaHdrWeightStrength,
+        metrics.taaHdrWeightingEnabled ? "active" : "inactive");
+    ImGui::Text("Pixel Inspector View: %s",
+                metrics.taaPixelInspectorDebugViewRendered ? "rendered"
+                                                           : "inactive");
   }
-  if (ImGui::Button("Dump AA Settings To Log##AntiAliasing")) {
+  if (ImGui::Button("Dump AA Diagnostics To Log##AntiAliasing")) {
     const std::string summary =
-        antiAliasingSettingsSummary(aa, temporalFeaturePresent);
+        antiAliasingDiagnosticsSummary(aa, metrics, temporalFeaturePresent);
     NURI_LOG_INFO("%s", summary.c_str());
   }
 }

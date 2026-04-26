@@ -1490,6 +1490,7 @@ struct AntiAliasingFrameMetrics {
       TemporalHistoryResetReason::None;
   bool jitterEnabled = false;
   bool jitterFrozen = false;
+  bool taaQualityValidationInvalidatedByFrozenJitter = false;
   bool jitterOutOfBounds = false;
   bool historyValid = false;
   bool temporalDataValid = false;
@@ -1529,6 +1530,7 @@ makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
       .historyResetReason = camera.historyResetReason,
       .jitterEnabled = camera.jitterEnabled,
       .jitterFrozen = camera.jitterFrozen,
+      .taaQualityValidationInvalidatedByFrozenJitter = camera.jitterFrozen,
       .jitterOutOfBounds = camera.jitterOutOfBounds,
       .historyValid = camera.historyValid,
       .temporalDataValid = camera.temporalDataValid,

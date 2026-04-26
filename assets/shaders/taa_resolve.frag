@@ -19,12 +19,15 @@ const uint kTaaResolveModeRejectionMask = 4u;
 const uint kTaaResolveModeBlendFactor = 5u;
 const uint kTaaResolveModeClampDelta = 6u;
 const uint kTaaResolveModePixelInspector = 7u;
+const uint kTaaResolveModeVelocityMotionVectors = 8u;
+const uint kTaaResolveModeVelocityMagnitude = 9u;
 const uint kTaaClampModeClamp = 0u;
 const uint kTaaClampModeClip = 1u;
 const uint kTaaClampModeVariance = 2u;
 const uint kTaaHdrWeightingModeNone = 0u;
 const uint kTaaHdrWeightingModeLuminance = 1u;
 const uint kTaaHdrWeightingModeLogLuminance = 2u;
+const float kVelocityDebugScale = 64.0;
 
 layout(push_constant) uniform TAAResolvePushConstants {
   uint currentTexId;
@@ -86,6 +89,13 @@ bool uvInBounds(vec2 value) {
          all(lessThanEqual(value, vec2(1.0)));
 }
 
+vec2 taaScreenUv(vec2 fullscreenUv) {
+  // fullscreen_copy.vert emits Y in the [1, 2] range and relies on repeat
+  // sampling for copy passes. TAA performs explicit history bounds checks, so
+  // it must evaluate reprojection in normalized screen UV space instead.
+  return fract(fullscreenUv);
+}
+
 vec4 currentColor(vec2 sampleUv) {
   return textureBindless2D(pc.currentTexId, pc.currentSamplerId, sampleUv);
 }
@@ -106,6 +116,26 @@ vec2 previousVelocity(vec2 sampleUv) {
   return textureBindless2D(pc.previousVelocityTexId, pc.velocitySamplerId,
                            sampleUv)
       .rg;
+}
+
+vec3 heatmap(float value) {
+  float t = clamp(value, 0.0, 1.0);
+  return clamp(vec3(1.5) - abs(vec3(4.0, 4.0, 4.0) * t - vec3(3.0, 2.0, 1.0)),
+               vec3(0.0), vec3(1.0));
+}
+
+vec4 velocityDebugColor(vec2 sampleUv, uint mode) {
+  const vec2 sampleVelocity = velocity(sampleUv);
+  const float magnitude = length(sampleVelocity) * kVelocityDebugScale;
+  if (mode == kTaaResolveModeVelocityMagnitude) {
+    return vec4(heatmap(magnitude), 1.0);
+  }
+
+  const vec2 signedVelocity =
+      clamp(sampleVelocity * kVelocityDebugScale * 0.5 + vec2(0.5), vec2(0.0),
+            vec2(1.0));
+  return vec4(signedVelocity.x, signedVelocity.y, clamp(magnitude, 0.0, 1.0),
+              1.0);
 }
 
 Neighborhood currentNeighborhood(vec2 centerUv) {
@@ -234,13 +264,20 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   }
 
   const float velocityThreshold = max(pushFloat(pc.velocityThresholdBits), 0.0);
+  const float velocityBlendScale =
+      max(pushFloat(pc.velocityBlendScaleBits), 0.0);
+  const float motionBlend =
+      clamp(length(currentVelocity) * velocityBlendScale, 0.0, 1.0);
   bool velocityRejected = false;
+  float velocityRejectionStrength = 0.0;
   if (flagEnabled(kTaaResolveFlagVelocityReject) &&
       flagEnabled(kTaaResolveFlagPreviousVelocityValid) &&
       velocityThreshold > 0.0) {
     result.velocityDelta =
         length(currentVelocity - previousVelocity(historyUv));
     velocityRejected = result.velocityDelta > velocityThreshold;
+    velocityRejectionStrength =
+        clamp(result.velocityDelta / max(velocityThreshold, 1.0e-5), 0.0, 1.0);
     result.velocityRejected = velocityRejected;
   }
 
@@ -250,14 +287,12 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
       flagEnabled(kTaaResolveFlagDepthReject) &&
       (neighborhood.maxDepth - neighborhood.minDepth) > depthThreshold;
   result.depthRejected = depthRejected;
-
-  if (depthRejected || velocityRejected) {
-    result.rejectionStrength = 1.0;
-    if (flagEnabled(kTaaResolveFlagNeighborhoodFallback)) {
-      result.resolved = neighborhood.avgColor;
-    }
-    return result;
-  }
+  // Depth and velocity discontinuities are diagnostics and blend-confidence
+  // inputs. A hard current-color fallback here prevents static geometric edges
+  // from ever accumulating the jitter sequence.
+  const float depthRejectionStrength = depthRejected ? motionBlend * 0.5 : 0.0;
+  result.rejectionStrength =
+      max(velocityRejectionStrength, depthRejectionStrength);
 
   result.validHistory = true;
   vec3 history = historyColor(historyUv).rgb;
@@ -273,27 +308,30 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
 
   float currentWeight = baseCurrentWeight;
   if (flagEnabled(kTaaResolveFlagAdaptiveBlend)) {
-    const float velocityBlendScale =
-        max(pushFloat(pc.velocityBlendScaleBits), 0.0);
     const float disocclusionWeight =
         clamp(pushFloat(pc.disocclusionWeightBits), baseCurrentWeight, 1.0);
-    const float motionBlend =
-        clamp(length(currentVelocity) * velocityBlendScale, 0.0, 1.0);
-    currentWeight = max(
-        currentWeight, mix(baseCurrentWeight, disocclusionWeight, motionBlend));
+    const float dynamicDisocclusionBlend =
+        max(velocityRejectionStrength, depthRejectionStrength);
+    currentWeight =
+        max(currentWeight, mix(baseCurrentWeight, disocclusionWeight,
+                               dynamicDisocclusionBlend));
     if (flagEnabled(kTaaResolveFlagClampBlendAttenuation) &&
-        result.clampDelta > 0.00001) {
+        result.clampDelta > 0.00001 && dynamicDisocclusionBlend > 0.0) {
       const float clampAttenuation =
           clamp(pushFloat(pc.clampAttenuationBits), 0.0, 1.0);
+      const float attenuationBlend =
+          clamp(clampAttenuation * dynamicDisocclusionBlend, 0.0, 1.0);
       currentWeight = max(currentWeight, mix(currentWeight, disocclusionWeight,
-                                             clampAttenuation));
+                                             attenuationBlend));
     }
     const float hdrWeightStrength =
         clamp(pushFloat(pc.hdrWeightStrengthBits), 0.0, 1.0);
     result.hdrWeight = hdrWeight(current, clampedHistory, hdrWeightStrength);
-    if (result.hdrWeight > 0.0) {
+    if (result.hdrWeight > 0.0 && dynamicDisocclusionBlend > 0.0) {
+      const float hdrDisocclusionBlend =
+          clamp(result.hdrWeight * dynamicDisocclusionBlend, 0.0, 1.0);
       currentWeight = max(currentWeight, mix(currentWeight, disocclusionWeight,
-                                             result.hdrWeight));
+                                             hdrDisocclusionBlend));
     }
   }
 
@@ -303,16 +341,23 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
 }
 
 void main() {
+  const vec2 screenUv = taaScreenUv(uv);
+
+  if (pc.mode == kTaaResolveModeVelocityMotionVectors ||
+      pc.mode == kTaaResolveModeVelocityMagnitude) {
+    out_FragColor = velocityDebugColor(screenUv, pc.mode);
+    return;
+  }
   if (pc.mode == kTaaResolveModeCopyCurrent) {
-    out_FragColor = currentColor(uv);
+    out_FragColor = currentColor(screenUv);
     return;
   }
   if (pc.mode == kTaaResolveModePreviousHistory) {
-    out_FragColor = historyColor(uv);
+    out_FragColor = historyColor(screenUv);
     return;
   }
 
-  const ResolveEvaluation eval = evaluateResolve(uv);
+  const ResolveEvaluation eval = evaluateResolve(screenUv);
 
   if (pc.mode == kTaaResolveModeHistoryValidity) {
     out_FragColor =
@@ -334,11 +379,11 @@ void main() {
     return;
   }
   if (pc.mode == kTaaResolveModePixelInspector) {
-    if (uv.x < 0.5 && uv.y < 0.5) {
+    if (screenUv.x < 0.5 && screenUv.y < 0.5) {
       out_FragColor = vec4(eval.current, 1.0);
-    } else if (uv.x >= 0.5 && uv.y < 0.5) {
+    } else if (screenUv.x >= 0.5 && screenUv.y < 0.5) {
       out_FragColor = vec4(eval.history, 1.0);
-    } else if (uv.x < 0.5) {
+    } else if (screenUv.x < 0.5) {
       out_FragColor = vec4(eval.resolved, 1.0);
     } else {
       out_FragColor =
