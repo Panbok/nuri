@@ -263,7 +263,8 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
       std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
   renderPipeline_->addFeature(std::make_unique<OpaqueFeature>(
       getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
-  renderPipeline_->addFeature(std::make_unique<TemporalAAFeature>());
+  renderPipeline_->addFeature(
+      std::make_unique<TemporalAAFeature>(getGPU(), shaderConfig.composite));
   renderPipeline_->addFeature(std::make_unique<FrameCompositionFeature>(
       getGPU(), shaderConfig.composite));
   renderPipeline_->addFeature(std::make_unique<TransmissionFeature>(

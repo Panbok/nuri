@@ -58,6 +58,10 @@ enum class AntiAliasingDebugView : uint8_t {
   Settings = 1,
   MotionVectors = 2,
   VelocityMagnitude = 3,
+  TAACurrentColor = 4,
+  TAAPreviousHistory = 5,
+  TAAResolved = 6,
+  TAAHistoryValidity = 7,
 };
 
 enum class TemporalHistoryResetReason : uint8_t {
@@ -223,6 +227,10 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   case AntiAliasingDebugView::Settings:
   case AntiAliasingDebugView::MotionVectors:
   case AntiAliasingDebugView::VelocityMagnitude:
+  case AntiAliasingDebugView::TAACurrentColor:
+  case AntiAliasingDebugView::TAAPreviousHistory:
+  case AntiAliasingDebugView::TAAResolved:
+  case AntiAliasingDebugView::TAAHistoryValidity:
     return view;
   default:
     return AntiAliasingDebugView::None;
@@ -358,6 +366,7 @@ struct RenderSettings {
     bool freezeJitter = false;
     bool resetHistoryRequested = false;
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
+    float taaCurrentFrameWeight = 0.10f;
   };
 
   struct AntiAliasingSettings {
@@ -425,6 +434,11 @@ inline void
 sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.mode = sanitizeAntiAliasingMode(settings.mode);
   settings.debug.view = sanitizeAntiAliasingDebugView(settings.debug.view);
+  if (!std::isfinite(settings.debug.taaCurrentFrameWeight)) {
+    settings.debug.taaCurrentFrameWeight = 0.10f;
+  }
+  settings.debug.taaCurrentFrameWeight =
+      std::clamp(settings.debug.taaCurrentFrameWeight, 0.0f, 1.0f);
   if (settings.mode == AntiAliasingMode::None) {
     settings.debug.jitterEnabled = false;
     settings.debug.freezeJitter = false;
@@ -1345,12 +1359,18 @@ struct AntiAliasingFrameMetrics {
   uint32_t velocityAnimatedResponsiveCount = 0u;
   uint32_t velocityTessellatedSkippedDrawCount = 0u;
   uint32_t velocityDebugPassCount = 0u;
+  uint32_t taaResolvePassCount = 0u;
+  uint32_t taaCopyBackPassCount = 0u;
+  uint32_t taaResolveWidth = 0u;
+  uint32_t taaResolveHeight = 0u;
+  uint32_t taaCurrentFallbackFrameCount = 0u;
   uint64_t motionVectorTextureBytes = 0u;
   uint64_t previousMotionVectorTextureBytes = 0u;
   uint64_t motionVectorTotalBytes = 0u;
   uint64_t motionVectorClearBytes = 0u;
   uint64_t velocityPassBandwidthEstimateBytes = 0u;
   uint64_t velocityDebugBandwidthEstimateBytes = 0u;
+  uint64_t taaHistoryBandwidthEstimateBytes = 0u;
   float velocityAverageObjectMotion = 0.0f;
   float velocityMaxObjectMotion = 0.0f;
   float velocityEstimatedAverageMagnitude = 0.0f;
@@ -1359,6 +1379,10 @@ struct AntiAliasingFrameMetrics {
   float velocityCameraMatrixDelta = 0.0f;
   float velocityMissingPreviousRatio = 0.0f;
   float velocityEdgeDiscontinuityEstimate = 0.0f;
+  float taaCurrentFrameWeight = 0.10f;
+  float taaHistoryFrameWeight = 0.90f;
+  float taaHistoryValidPercent = 0.0f;
+  float taaOutOfBoundsReprojectionPercent = 0.0f;
   TemporalHistoryResetReason historyResetReason =
       TemporalHistoryResetReason::None;
   bool jitterEnabled = false;
@@ -1374,6 +1398,11 @@ struct AntiAliasingFrameMetrics {
   bool opaqueVelocityGenerated = false;
   bool velocityDebugViewRendered = false;
   bool previousTransformCacheValid = false;
+  bool taaResolvedSceneColorPublished = false;
+  bool taaDebugViewRendered = false;
+  bool taaHistoryValidityDebugViewRendered = false;
+  bool taaOutOfBoundsFallbackEnabled = false;
+  bool taaBilinearHistorySampling = false;
 };
 
 [[nodiscard]] inline AntiAliasingFrameMetrics

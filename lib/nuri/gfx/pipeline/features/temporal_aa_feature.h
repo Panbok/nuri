@@ -1,10 +1,15 @@
 #pragma once
 
+#include "nuri/core/runtime_config.h"
 #include "nuri/defines.h"
+#include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/render_feature.h"
 #include "nuri/gfx/pipeline/render_feature_pass.h"
+#include "nuri/gfx/shader.h"
 
 #include <array>
+#include <filesystem>
+#include <memory>
 #include <span>
 
 namespace nuri {
@@ -31,9 +36,38 @@ public:
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
 };
 
+class NURI_API TemporalAAResolvePass final : public RenderFeaturePass {
+public:
+  explicit TemporalAAResolvePass(GPUDevice &gpu, RuntimeCompositeConfig config);
+  ~TemporalAAResolvePass() override;
+
+  TemporalAAResolvePass(const TemporalAAResolvePass &) = delete;
+  TemporalAAResolvePass &operator=(const TemporalAAResolvePass &) = delete;
+  TemporalAAResolvePass(TemporalAAResolvePass &&) = delete;
+  TemporalAAResolvePass &operator=(TemporalAAResolvePass &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "TemporalAAResolvePass";
+  }
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+
+private:
+  GPUDevice &gpu_;
+  std::unique_ptr<Shader> shader_{};
+  ShaderHandle vertexShader_{};
+  ShaderHandle fragmentShader_{};
+  RenderPipelineHandle pipeline_{};
+  Format pipelineColorFormat_ = Format::Count;
+  std::filesystem::path vertexPath_{};
+  std::filesystem::path fragmentPath_{};
+  bool initialized_ = false;
+};
+
 class NURI_API TemporalAAFeature final : public RenderFeature {
 public:
-  TemporalAAFeature() = default;
+  explicit TemporalAAFeature(GPUDevice &gpu, RuntimeCompositeConfig config);
   ~TemporalAAFeature() override = default;
 
   TemporalAAFeature(const TemporalAAFeature &) = delete;
@@ -50,7 +84,9 @@ public:
 
 private:
   TemporalAAMotionVectorClearPass motionVectorClearPass_{};
-  std::array<RenderFeaturePass *, 1> passes_{&motionVectorClearPass_};
+  TemporalAAResolvePass resolvePass_;
+  std::array<RenderFeaturePass *, 2> passes_{&motionVectorClearPass_,
+                                             &resolvePass_};
 };
 
 } // namespace nuri

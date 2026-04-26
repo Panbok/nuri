@@ -65,7 +65,7 @@ private:
   TextureRing frameColorTextures_;
   TextureRing sceneDepthTextures_;
   TextureRing motionVectorTextures_;
-  std::array<TextureHandle, 2> historyColorTextures_{};
+  TextureRing historyColorTextures_;
   FrameTextureRequirementFlags allocatedRequirements_ =
       FrameTextureRequirementFlags::None;
   // motionVectorAllocationCount_ and motionVectorReallocationCount_ track

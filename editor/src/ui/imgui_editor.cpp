@@ -70,8 +70,9 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback"};
-constexpr std::array<const char *, 4> kAntiAliasingDebugViewLabels = {
-    "None", "Settings", "Motion Vectors", "Velocity Magnitude"};
+constexpr std::array<const char *, 8> kAntiAliasingDebugViewLabels = {
+    "None",        "Settings",    "Motion Vectors", "Velocity Magnitude",
+    "TAA Current", "TAA History", "TAA Resolved",   "TAA History Validity"};
 constexpr std::array<uint32_t, 4> kShadowMapResolutions = {1024u, 2048u, 4096u,
                                                            8192u};
 constexpr std::array<const char *, 4> kShadowMapResolutionLabels = {"1K", "2K",
@@ -260,6 +261,14 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "Motion Vectors";
   case AntiAliasingDebugView::VelocityMagnitude:
     return "Velocity Magnitude";
+  case AntiAliasingDebugView::TAACurrentColor:
+    return "TAA Current";
+  case AntiAliasingDebugView::TAAPreviousHistory:
+    return "TAA History";
+  case AntiAliasingDebugView::TAAResolved:
+    return "TAA Resolved";
+  case AntiAliasingDebugView::TAAHistoryValidity:
+    return "TAA History Validity";
   }
   return "Unknown";
 }
@@ -1852,6 +1861,8 @@ std::string antiAliasingSettingsSummary(
   summary += settings.debug.freezeJitter ? "true" : "false";
   summary += " debugView=";
   summary += antiAliasingDebugViewDisplayName(settings.debug.view);
+  summary += " taaCurrentWeight=";
+  summary += std::format("{:.2f}", settings.debug.taaCurrentFrameWeight);
   summary += " resetHistoryRequested=";
   summary += settings.debug.resetHistoryRequested ? "true" : "false";
   summary += " temporalFeaturePresent=";
@@ -1878,6 +1889,8 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::BeginDisabled(aaDisabled);
   ImGui::Checkbox("Jitter Enabled##AntiAliasing", &aa.debug.jitterEnabled);
   ImGui::Checkbox("Freeze Jitter##AntiAliasing", &aa.debug.freezeJitter);
+  ImGui::SliderFloat("TAA Current Weight##AntiAliasing",
+                     &aa.debug.taaCurrentFrameWeight, 0.0f, 1.0f, "%.2f");
   ImGui::EndDisabled();
   if (aaDisabled) {
     aa.debug.jitterEnabled = false;
@@ -2008,9 +2021,34 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     ImGui::TextUnformatted("Producer: Opaque velocity pass or clear fallback");
     ImGui::TextUnformatted("Consumer: future TAA resolve");
   }
-  ImGui::TextUnformatted("TAA resolve is not implemented yet; current TAA "
-                         "work publishes jitter, camera history, and cleared "
-                         "motion-vector resources.");
+  if (ImGui::CollapsingHeader("TAA Resolve", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Text("Resolve Passes: %u", metrics.taaResolvePassCount);
+    ImGui::Text("Copy Back Passes: %u", metrics.taaCopyBackPassCount);
+    ImGui::Text("Resolve Dimensions: %u x %u", metrics.taaResolveWidth,
+                metrics.taaResolveHeight);
+    ImGui::Text("Blend Weights: current %.2f, history %.2f",
+                metrics.taaCurrentFrameWeight, metrics.taaHistoryFrameWeight);
+    ImGui::Text("History Valid Pixels: %.1f%%", metrics.taaHistoryValidPercent);
+    ImGui::Text("OOB Reprojection: %.1f%%",
+                metrics.taaOutOfBoundsReprojectionPercent);
+    ImGui::Text("Current Fallback Frames: %u",
+                metrics.taaCurrentFallbackFrameCount);
+    ImGui::Text("History Bandwidth Estimate: %llu bytes",
+                static_cast<unsigned long long>(
+                    metrics.taaHistoryBandwidthEstimateBytes));
+    ImGui::Text("Resolved Scene Color: %s",
+                metrics.taaResolvedSceneColorPublished ? "published"
+                                                       : "not published");
+    ImGui::Text("TAA Debug View: %s",
+                metrics.taaDebugViewRendered ? "rendered" : "inactive");
+    ImGui::Text("History Validity View: %s",
+                metrics.taaHistoryValidityDebugViewRendered ? "rendered"
+                                                            : "inactive");
+    ImGui::Text("OOB Fallback: %s",
+                metrics.taaOutOfBoundsFallbackEnabled ? "enabled" : "off");
+    ImGui::Text("History Sampling: %s",
+                metrics.taaBilinearHistorySampling ? "bilinear" : "inactive");
+  }
   if (ImGui::Button("Dump AA Settings To Log##AntiAliasing")) {
     const std::string summary =
         antiAliasingSettingsSummary(aa, temporalFeaturePresent);

@@ -82,7 +82,7 @@ FrameCompositionProvider::FrameCompositionProvider(
           TextureRing(memory_),
       },
       frameColorTextures_(memory_), sceneDepthTextures_(memory_),
-      motionVectorTextures_(memory_) {}
+      motionVectorTextures_(memory_), historyColorTextures_(memory_) {}
 
 FrameCompositionProvider::~FrameCompositionProvider() {
   for (auto &textures : sceneColorMipTextures_) {
@@ -121,9 +121,9 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.sceneDepthTexture =
       currentRingTexture(sceneDepthTextures_, ctx.frame.frameIndex);
   ctx.shared.historyColorReadTexture =
-      historyColorTextures_[(ctx.frame.frameIndex + 1u) & 1u];
+      previousRingTexture(historyColorTextures_, ctx.frame.frameIndex);
   ctx.shared.historyColorWriteTexture =
-      historyColorTextures_[ctx.frame.frameIndex & 1u];
+      currentRingTexture(historyColorTextures_, ctx.frame.frameIndex);
   ctx.shared.motionVectorTexture =
       currentRingTexture(motionVectorTextures_, ctx.frame.frameIndex);
   ctx.shared.previousMotionVectorTexture =
@@ -343,10 +343,12 @@ Result<bool, std::string> FrameCompositionProvider::recreateMipTextureRing(
 Result<bool, std::string> FrameCompositionProvider::recreateHistoryTextures() {
   destroyHistoryTextures();
 
+  const uint32_t historyRingCount = std::max(2u, textureRingCount_);
+  historyColorTextures_.resize(historyRingCount);
   const TextureDesc desc =
       makeTextureDesc(kFrameCompositionFrameColorFormat, framebufferWidth_,
                       framebufferHeight_, TextureUsage::AttachmentSampled);
-  for (size_t i = 0; i < historyColorTextures_.size(); ++i) {
+  for (uint32_t i = 0; i < historyRingCount; ++i) {
     const std::string debugName = "frame_history_color_" + std::to_string(i);
     auto createResult = gpu_.createTexture(desc, debugName);
     if (createResult.hasError()) {
@@ -396,13 +398,7 @@ void FrameCompositionProvider::destroyTextures(TextureRing &textures) {
 }
 
 void FrameCompositionProvider::destroyHistoryTextures() {
-  for (TextureHandle &texture : historyColorTextures_) {
-    if (!nuri::isValid(texture)) {
-      continue;
-    }
-    gpu_.destroyTexture(texture);
-    texture = {};
-  }
+  destroyTextures(historyColorTextures_);
 }
 
 void FrameCompositionProvider::destroyMotionVectorTextures() {
