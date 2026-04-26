@@ -47,10 +47,12 @@ private:
                          std::string_view debugNameBase);
   Result<bool, std::string> recreateHistoryTextures();
   Result<bool, std::string> recreateMotionVectorTextures();
+  Result<bool, std::string> recreateReactiveMaskTextures();
   void invalidateAllocationState() noexcept;
   void destroyTextures(TextureRing &textures);
   void destroyHistoryTextures();
   void destroyMotionVectorTextures();
+  void destroyReactiveMaskTextures();
   [[nodiscard]] TextureHandle
   currentRingTexture(const TextureRing &textures,
                      uint64_t frameIndex) const noexcept;
@@ -65,6 +67,7 @@ private:
   TextureRing frameColorTextures_;
   TextureRing sceneDepthTextures_;
   TextureRing motionVectorTextures_;
+  TextureRing reactiveMaskTextures_;
   TextureRing historyColorTextures_;
   FrameTextureRequirementFlags allocatedRequirements_ =
       FrameTextureRequirementFlags::None;
@@ -73,6 +76,8 @@ private:
   // frequency; other frame textures are long-lived baseline resources here.
   uint32_t motionVectorAllocationCount_ = 0u;
   uint32_t motionVectorReallocationCount_ = 0u;
+  uint32_t reactiveMaskAllocationCount_ = 0u;
+  uint32_t reactiveMaskReallocationCount_ = 0u;
   uint32_t textureRingCount_ = 0u;
   uint32_t framebufferWidth_ = 0u;
   uint32_t framebufferHeight_ = 0u;

@@ -70,7 +70,7 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback"};
-constexpr std::array<const char *, 12> kAntiAliasingDebugViewLabels = {
+constexpr std::array<const char *, 15> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
     "Motion Vectors",
@@ -82,11 +82,16 @@ constexpr std::array<const char *, 12> kAntiAliasingDebugViewLabels = {
     "TAA Rejection Mask",
     "TAA Blend Factor",
     "TAA Clamp Delta",
-    "TAA Pixel Inspector"};
+    "TAA Pixel Inspector",
+    "TAA Reactive Mask",
+    "TAA Disocclusion Mask",
+    "TAA Velocity Dilation"};
 constexpr std::array<const char *, 3> kTemporalAAClampModeLabels = {
     "Clamp", "Clip", "Variance"};
 constexpr std::array<const char *, 3> kTemporalAAHdrWeightingModeLabels = {
     "None", "Luminance", "Log Luminance"};
+constexpr std::array<const char *, 3> kTemporalAAVelocityDilationModeLabels = {
+    "None", "Closest Depth", "Largest Magnitude"};
 constexpr std::array<uint32_t, 4> kShadowMapResolutions = {1024u, 2048u, 4096u,
                                                            8192u};
 constexpr std::array<const char *, 4> kShadowMapResolutionLabels = {"1K", "2K",
@@ -291,6 +296,12 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "TAA Clamp Delta";
   case AntiAliasingDebugView::TAAPixelInspector:
     return "TAA Pixel Inspector";
+  case AntiAliasingDebugView::TAAReactiveMask:
+    return "TAA Reactive Mask";
+  case AntiAliasingDebugView::TAADisocclusionMask:
+    return "TAA Disocclusion Mask";
+  case AntiAliasingDebugView::TAAVelocityDilation:
+    return "TAA Velocity Dilation";
   }
   return "Unknown";
 }
@@ -316,6 +327,19 @@ temporalAAHdrWeightingModeDisplayName(TemporalAAHdrWeightingMode mode) {
     return "Luminance";
   case TemporalAAHdrWeightingMode::LogLuminance:
     return "Log Luminance";
+  }
+  return "Unknown";
+}
+
+const char *
+temporalAAVelocityDilationModeDisplayName(TemporalAAVelocityDilationMode mode) {
+  switch (sanitizeTemporalAAVelocityDilationMode(mode)) {
+  case TemporalAAVelocityDilationMode::None:
+    return "None";
+  case TemporalAAVelocityDilationMode::ClosestDepth:
+    return "Closest Depth";
+  case TemporalAAVelocityDilationMode::LargestMagnitude:
+    return "Largest Magnitude";
   }
   return "Unknown";
 }
@@ -2097,6 +2121,24 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   }
   ImGui::SliderFloat("TAA HDR Weight Strength##AntiAliasing",
                      &aa.debug.taaHdrWeightStrength, 0.0f, 1.0f, "%.2f");
+  ImGui::SliderFloat("TAA Reactive Current Weight##AntiAliasing",
+                     &aa.debug.taaReactiveCurrentWeight, 0.0f, 1.0f, "%.2f");
+  ImGui::SliderFloat("TAA Reactive Strength##AntiAliasing",
+                     &aa.debug.taaReactiveStrength, 0.0f, 4.0f, "%.2f");
+  int dilationModeIndex = static_cast<int>(aa.debug.taaVelocityDilationMode);
+  dilationModeIndex = std::clamp(
+      dilationModeIndex, 0,
+      static_cast<int>(kTemporalAAVelocityDilationModeLabels.size()) - 1);
+  if (ImGui::Combo(
+          "TAA Velocity Dilation##AntiAliasing", &dilationModeIndex,
+          kTemporalAAVelocityDilationModeLabels.data(),
+          static_cast<int>(kTemporalAAVelocityDilationModeLabels.size()))) {
+    aa.debug.taaVelocityDilationMode =
+        static_cast<TemporalAAVelocityDilationMode>(dilationModeIndex);
+  }
+  ImGui::SliderFloat("TAA Dilation Depth Threshold##AntiAliasing",
+                     &aa.debug.taaVelocityDilationDepthThreshold, 0.0f, 0.1f,
+                     "%.4f");
   ImGui::EndDisabled();
   if (aaDisabled) {
     aa.debug.jitterEnabled = false;
@@ -2232,6 +2274,37 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     ImGui::TextUnformatted("Producer: Opaque velocity pass or clear fallback");
     ImGui::TextUnformatted("Consumer: future TAA resolve");
   }
+  if (ImGui::CollapsingHeader("Reactive Mask Resource",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Text("Allocated: %s", metrics.reactiveMaskAllocated ? "yes" : "no");
+    ImGui::Text("Format: %s",
+                formatDisplayName(kFrameCompositionReactiveMaskFormat));
+    ImGui::Text("Format Support: %s", metrics.reactiveMaskFormatSupported
+                                          ? "supported"
+                                          : "unsupported");
+    ImGui::Text("Dimensions: %u x %u", metrics.reactiveMaskWidth,
+                metrics.reactiveMaskHeight);
+    ImGui::Text("Texture Ring Count: %u", metrics.reactiveMaskTextureCount);
+    ImGui::Text(
+        "Current Texture Bytes: %llu",
+        static_cast<unsigned long long>(metrics.reactiveMaskTextureBytes));
+    ImGui::Text(
+        "Total Reactive Bytes: %llu",
+        static_cast<unsigned long long>(metrics.reactiveMaskTotalBytes));
+    ImGui::Text("Graph Resource: %s",
+                metrics.reactiveMaskGraphPublished ? "published" : "missing");
+    ImGui::Text("Reactive Passes: %u", metrics.reactiveMaskPassCount);
+    ImGui::Text("Reactive Draws: %u", metrics.reactiveMaskDrawCount);
+    ImGui::Text("Alpha-Masked Draws: %u", metrics.reactiveAlphaMaskedDrawCount);
+    ImGui::Text("Skipped Tessellated Reactive Draws: %u",
+                metrics.reactiveSkippedTessellatedDrawCount);
+    ImGui::Text("Allocation Count: %u", metrics.reactiveMaskAllocationCount);
+    ImGui::Text("Reallocation Count: %u",
+                metrics.reactiveMaskReallocationCount);
+    ImGui::Text("Reactive Bandwidth Estimate: %llu bytes",
+                static_cast<unsigned long long>(
+                    metrics.reactiveMaskPassBandwidthEstimateBytes));
+  }
   if (ImGui::CollapsingHeader("TAA Resolve", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Text("Resolve Passes: %u", metrics.taaResolvePassCount);
     ImGui::Text("Copy Back Passes: %u", metrics.taaCopyBackPassCount);
@@ -2287,9 +2360,29 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
         temporalAAHdrWeightingModeDisplayName(metrics.taaHdrWeightingMode),
         metrics.taaHdrWeightStrength,
         metrics.taaHdrWeightingEnabled ? "active" : "inactive");
+    ImGui::Text("Reactive Mask: %s target %.2f strength %.2f coverage %.3f",
+                metrics.taaReactiveMaskEnabled ? "enabled" : "off",
+                metrics.taaReactiveCurrentWeight, metrics.taaReactiveStrength,
+                metrics.taaReactiveCoverageEstimate);
+    ImGui::Text("Velocity Dilation: %s threshold %.4f affected %.3f",
+                temporalAAVelocityDilationModeDisplayName(
+                    metrics.taaVelocityDilationMode),
+                metrics.taaVelocityDilationDepthThreshold,
+                metrics.taaVelocityDilationAffectedEstimate);
+    ImGui::Text("Disocclusion Estimate: %.3f",
+                metrics.taaDisocclusionRejectionEstimate);
     ImGui::Text("Pixel Inspector View: %s",
                 metrics.taaPixelInspectorDebugViewRendered ? "rendered"
                                                            : "inactive");
+    ImGui::Text("Reactive Mask View: %s",
+                metrics.taaReactiveMaskDebugViewRendered ? "rendered"
+                                                         : "inactive");
+    ImGui::Text("Disocclusion Mask View: %s",
+                metrics.taaDisocclusionMaskDebugViewRendered ? "rendered"
+                                                             : "inactive");
+    ImGui::Text("Velocity Dilation View: %s",
+                metrics.taaVelocityDilationDebugViewRendered ? "rendered"
+                                                             : "inactive");
   }
   if (ImGui::Button("Dump AA Diagnostics To Log##AntiAliasing")) {
     const std::string summary =

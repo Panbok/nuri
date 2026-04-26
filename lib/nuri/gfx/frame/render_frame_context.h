@@ -66,6 +66,9 @@ enum class AntiAliasingDebugView : uint8_t {
   TAABlendFactor = 9,
   TAAClampDelta = 10,
   TAAPixelInspector = 11,
+  TAAReactiveMask = 12,
+  TAADisocclusionMask = 13,
+  TAAVelocityDilation = 14,
 };
 
 enum class TemporalAAClampMode : uint8_t {
@@ -78,6 +81,12 @@ enum class TemporalAAHdrWeightingMode : uint8_t {
   None = 0,
   Luminance = 1,
   LogLuminance = 2,
+};
+
+enum class TemporalAAVelocityDilationMode : uint8_t {
+  None = 0,
+  ClosestDepth = 1,
+  LargestMagnitude = 2,
 };
 
 enum class TemporalHistoryResetReason : uint8_t {
@@ -162,9 +171,12 @@ static constexpr Format kFrameCompositionFrameColorFormat =
 static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
 static constexpr Format kFrameCompositionMotionVectorFormat =
     Format::RG16_FLOAT;
+static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R32_FLOAT;
 // Motion vectors are normalized UV-space history lookup offsets:
 // historyUv = currentUv + velocity. Current and previous jitter are excluded.
 static constexpr ClearColor kFrameCompositionMotionVectorClearValue{
+    .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
+static constexpr ClearColor kFrameCompositionReactiveMaskClearValue{
     .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
 static constexpr uint32_t kTemporalJitterSequenceLength = 8u;
 static constexpr Format kDefaultShadowMapDepthFormat = Format::D16_UNORM;
@@ -251,6 +263,9 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   case AntiAliasingDebugView::TAABlendFactor:
   case AntiAliasingDebugView::TAAClampDelta:
   case AntiAliasingDebugView::TAAPixelInspector:
+  case AntiAliasingDebugView::TAAReactiveMask:
+  case AntiAliasingDebugView::TAADisocclusionMask:
+  case AntiAliasingDebugView::TAAVelocityDilation:
     return view;
   default:
     return AntiAliasingDebugView::None;
@@ -278,6 +293,19 @@ sanitizeTemporalAAHdrWeightingMode(TemporalAAHdrWeightingMode mode) noexcept {
     return mode;
   default:
     return TemporalAAHdrWeightingMode::Luminance;
+  }
+}
+
+[[nodiscard]] constexpr TemporalAAVelocityDilationMode
+sanitizeTemporalAAVelocityDilationMode(
+    TemporalAAVelocityDilationMode mode) noexcept {
+  switch (mode) {
+  case TemporalAAVelocityDilationMode::None:
+  case TemporalAAVelocityDilationMode::ClosestDepth:
+  case TemporalAAVelocityDilationMode::LargestMagnitude:
+    return mode;
+  default:
+    return TemporalAAVelocityDilationMode::ClosestDepth;
   }
 }
 
@@ -418,9 +446,14 @@ struct RenderSettings {
     float taaClampBlendAttenuation = 0.35f;
     float taaVarianceGamma = 1.25f;
     float taaHdrWeightStrength = 0.50f;
+    float taaReactiveCurrentWeight = 0.85f;
+    float taaReactiveStrength = 1.0f;
+    float taaVelocityDilationDepthThreshold = 0.01f;
     TemporalAAClampMode taaClampMode = TemporalAAClampMode::Clamp;
     TemporalAAHdrWeightingMode taaHdrWeightingMode =
         TemporalAAHdrWeightingMode::Luminance;
+    TemporalAAVelocityDilationMode taaVelocityDilationMode =
+        TemporalAAVelocityDilationMode::ClosestDepth;
   };
 
   struct AntiAliasingSettings {
@@ -492,6 +525,9 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
       sanitizeTemporalAAClampMode(settings.debug.taaClampMode);
   settings.debug.taaHdrWeightingMode =
       sanitizeTemporalAAHdrWeightingMode(settings.debug.taaHdrWeightingMode);
+  settings.debug.taaVelocityDilationMode =
+      sanitizeTemporalAAVelocityDilationMode(
+          settings.debug.taaVelocityDilationMode);
   if (!std::isfinite(settings.debug.taaCurrentFrameWeight)) {
     settings.debug.taaCurrentFrameWeight = 0.10f;
   }
@@ -532,6 +568,21 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   }
   settings.debug.taaHdrWeightStrength =
       std::clamp(settings.debug.taaHdrWeightStrength, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaReactiveCurrentWeight)) {
+    settings.debug.taaReactiveCurrentWeight = 0.85f;
+  }
+  settings.debug.taaReactiveCurrentWeight =
+      std::clamp(settings.debug.taaReactiveCurrentWeight, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaReactiveStrength)) {
+    settings.debug.taaReactiveStrength = 1.0f;
+  }
+  settings.debug.taaReactiveStrength =
+      std::clamp(settings.debug.taaReactiveStrength, 0.0f, 4.0f);
+  if (!std::isfinite(settings.debug.taaVelocityDilationDepthThreshold)) {
+    settings.debug.taaVelocityDilationDepthThreshold = 0.01f;
+  }
+  settings.debug.taaVelocityDilationDepthThreshold =
+      std::clamp(settings.debug.taaVelocityDilationDepthThreshold, 0.0f, 1.0f);
   if (settings.mode == AntiAliasingMode::None) {
     settings.debug.jitterEnabled = false;
     settings.debug.freezeJitter = false;
@@ -1452,6 +1503,15 @@ struct AntiAliasingFrameMetrics {
   uint32_t velocityAnimatedResponsiveCount = 0u;
   uint32_t velocityTessellatedSkippedDrawCount = 0u;
   uint32_t velocityDebugPassCount = 0u;
+  uint32_t reactiveMaskWidth = 0u;
+  uint32_t reactiveMaskHeight = 0u;
+  uint32_t reactiveMaskTextureCount = 0u;
+  uint32_t reactiveMaskAllocationCount = 0u;
+  uint32_t reactiveMaskReallocationCount = 0u;
+  uint32_t reactiveMaskPassCount = 0u;
+  uint32_t reactiveMaskDrawCount = 0u;
+  uint32_t reactiveAlphaMaskedDrawCount = 0u;
+  uint32_t reactiveSkippedTessellatedDrawCount = 0u;
   uint32_t taaResolvePassCount = 0u;
   uint32_t taaCopyBackPassCount = 0u;
   uint32_t taaResolveWidth = 0u;
@@ -1463,6 +1523,9 @@ struct AntiAliasingFrameMetrics {
   uint64_t motionVectorClearBytes = 0u;
   uint64_t velocityPassBandwidthEstimateBytes = 0u;
   uint64_t velocityDebugBandwidthEstimateBytes = 0u;
+  uint64_t reactiveMaskTextureBytes = 0u;
+  uint64_t reactiveMaskTotalBytes = 0u;
+  uint64_t reactiveMaskPassBandwidthEstimateBytes = 0u;
   uint64_t taaHistoryBandwidthEstimateBytes = 0u;
   float velocityAverageObjectMotion = 0.0f;
   float velocityMaxObjectMotion = 0.0f;
@@ -1483,9 +1546,18 @@ struct AntiAliasingFrameMetrics {
   float taaClampBlendAttenuation = 0.35f;
   float taaVarianceGamma = 1.25f;
   float taaHdrWeightStrength = 0.50f;
+  float taaReactiveCurrentWeight = 0.85f;
+  float taaReactiveStrength = 1.0f;
+  float taaReactiveCoverageEstimate = 0.0f;
+  float taaAlphaMaskedCoverageEstimate = 0.0f;
+  float taaDisocclusionRejectionEstimate = 0.0f;
+  float taaVelocityDilationDepthThreshold = 0.01f;
+  float taaVelocityDilationAffectedEstimate = 0.0f;
   TemporalAAClampMode taaClampMode = TemporalAAClampMode::Clamp;
   TemporalAAHdrWeightingMode taaHdrWeightingMode =
       TemporalAAHdrWeightingMode::Luminance;
+  TemporalAAVelocityDilationMode taaVelocityDilationMode =
+      TemporalAAVelocityDilationMode::ClosestDepth;
   TemporalHistoryResetReason historyResetReason =
       TemporalHistoryResetReason::None;
   bool jitterEnabled = false;
@@ -1499,6 +1571,9 @@ struct AntiAliasingFrameMetrics {
   bool previousMotionVectorValid = false;
   bool motionVectorGraphPublished = false;
   bool previousMotionVectorGraphPublished = false;
+  bool reactiveMaskAllocated = false;
+  bool reactiveMaskGraphPublished = false;
+  bool reactiveMaskFormatSupported = false;
   bool opaqueVelocityGenerated = false;
   bool velocityDebugViewRendered = false;
   bool previousTransformCacheValid = false;
@@ -1516,6 +1591,11 @@ struct AntiAliasingFrameMetrics {
   bool taaNeighborhoodFallbackEnabled = false;
   bool taaHdrWeightingEnabled = false;
   bool taaPixelInspectorDebugViewRendered = false;
+  bool taaReactiveMaskEnabled = false;
+  bool taaReactiveMaskDebugViewRendered = false;
+  bool taaDisocclusionMaskDebugViewRendered = false;
+  bool taaVelocityDilationEnabled = false;
+  bool taaVelocityDilationDebugViewRendered = false;
 };
 
 [[nodiscard]] inline AntiAliasingFrameMetrics
@@ -1587,6 +1667,7 @@ enum class FrameTextureRequirementFlags : uint32_t {
   MotionVectors = 1u << 5u,
   Normals = 1u << 6u,
   Exposure = 1u << 7u,
+  ReactiveMask = 1u << 8u,
 };
 
 [[nodiscard]] constexpr FrameTextureRequirementFlags
@@ -1665,8 +1746,10 @@ struct FrameSharedResources {
   TextureHandle historyColorWriteTexture{};
   TextureHandle motionVectorTexture{};
   TextureHandle previousMotionVectorTexture{};
+  TextureHandle reactiveMaskTexture{};
   RenderGraphTextureId motionVectorGraphTexture{};
   RenderGraphTextureId previousMotionVectorGraphTexture{};
+  RenderGraphTextureId reactiveMaskGraphTexture{};
   RenderGraphTextureId opaquePickGraphTexture{};
   RenderGraphTextureId opaquePickDepthGraphTexture{};
   std::optional<LightId> selectedLightId{};

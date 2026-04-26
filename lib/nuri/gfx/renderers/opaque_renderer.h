@@ -236,6 +236,7 @@ private:
     bool isDepthPrepass = false;
     bool isDepthPyramidPass = false;
     bool isVelocityPass = false;
+    bool isReactiveMaskPass = false;
     uint32_t depthPyramidLevel = UINT32_MAX;
 
     explicit PreparedGraphPass(
@@ -339,6 +340,8 @@ private:
   [[nodiscard]] RenderPipelineHandle
   selectVelocityPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] RenderPipelineHandle
+  selectReactiveMaskPipeline(RenderPipelineHandle sourcePipeline) const;
+  [[nodiscard]] RenderPipelineHandle
   selectDepthPipeline(RenderPipelineHandle sourcePipeline,
                       bool alphaMasked) const;
   [[nodiscard]] RenderPipelineHandle
@@ -380,6 +383,7 @@ private:
   std::unique_ptr<Shader> meshPickShader_;
   std::unique_ptr<Shader> meshShadowInspectShader_;
   std::unique_ptr<Shader> meshVelocityShader_;
+  std::unique_ptr<Shader> meshReactiveMaskShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> depthPyramidShader_;
@@ -415,6 +419,7 @@ private:
   ShaderHandle meshShadowInspectFragmentShader_{};
   ShaderHandle meshVelocityVertexShader_{};
   ShaderHandle meshVelocityFragmentShader_{};
+  ShaderHandle meshReactiveMaskFragmentShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle depthPyramidVertexShader_{};
@@ -438,6 +443,8 @@ private:
   RenderPipelineHandle meshShadowInspectDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle meshVelocityPipelineHandle_{};
   RenderPipelineHandle meshVelocityDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshReactiveMaskPipelineHandle_{};
+  RenderPipelineHandle meshReactiveMaskDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshDepthPipelineHandle_{};
   RenderPipelineHandle meshDepthDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshDepthTessPipelineHandle_{};
@@ -529,6 +536,7 @@ private:
   std::pmr::vector<std::byte> indirectCommandUploadBytes_;
   std::pmr::vector<DrawItem> overlayDrawItems_;
   std::pmr::vector<DrawItem> velocityDrawItems_;
+  std::pmr::vector<DrawItem> reactiveMaskDrawItems_;
   std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<DrawItem> shadowInspectDrawItems_;
   std::pmr::vector<DrawItem> passDrawItems_;

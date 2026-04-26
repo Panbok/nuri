@@ -82,7 +82,8 @@ FrameCompositionProvider::FrameCompositionProvider(
           TextureRing(memory_),
       },
       frameColorTextures_(memory_), sceneDepthTextures_(memory_),
-      motionVectorTextures_(memory_), historyColorTextures_(memory_) {}
+      motionVectorTextures_(memory_), reactiveMaskTextures_(memory_),
+      historyColorTextures_(memory_) {}
 
 FrameCompositionProvider::~FrameCompositionProvider() {
   for (auto &textures : sceneColorMipTextures_) {
@@ -92,6 +93,7 @@ FrameCompositionProvider::~FrameCompositionProvider() {
   destroyTextures(sceneDepthTextures_);
   destroyHistoryTextures();
   destroyMotionVectorTextures();
+  destroyReactiveMaskTextures();
 }
 
 Result<bool, std::string>
@@ -104,6 +106,7 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.sceneDepthPyramidGraphTextures = {};
   ctx.shared.motionVectorGraphTexture = {};
   ctx.shared.previousMotionVectorGraphTexture = {};
+  ctx.shared.reactiveMaskGraphTexture = {};
 
   auto ensureResult = ensureTextures(ctx.shared.textureRequirements);
   if (ensureResult.hasError()) {
@@ -130,6 +133,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       ctx.frame.camera.historyValid
           ? previousRingTexture(motionVectorTextures_, ctx.frame.frameIndex)
           : TextureHandle{};
+  ctx.shared.reactiveMaskTexture =
+      currentRingTexture(reactiveMaskTextures_, ctx.frame.frameIndex);
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   aaMetrics.motionVectorFormat = kFrameCompositionMotionVectorFormat;
   aaMetrics.motionVectorWidth = framebufferWidth_;
@@ -156,6 +161,26 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aaMetrics.motionVectorTotalBytes =
       bytesPerTexture * static_cast<uint64_t>(motionVectorTextures_.size());
   aaMetrics.motionVectorClearBytes = 0u;
+  aaMetrics.reactiveMaskWidth = framebufferWidth_;
+  aaMetrics.reactiveMaskHeight = framebufferHeight_;
+  aaMetrics.reactiveMaskTextureCount =
+      static_cast<uint32_t>(reactiveMaskTextures_.size());
+  aaMetrics.reactiveMaskAllocationCount = reactiveMaskAllocationCount_;
+  aaMetrics.reactiveMaskReallocationCount = reactiveMaskReallocationCount_;
+  aaMetrics.reactiveMaskAllocated =
+      nuri::isValid(ctx.shared.reactiveMaskTexture);
+  aaMetrics.reactiveMaskFormatSupported =
+      kFrameCompositionReactiveMaskFormat == Format::R32_FLOAT;
+  const uint64_t reactiveBytesPerTexture =
+      static_cast<uint64_t>(framebufferWidth_) *
+      static_cast<uint64_t>(framebufferHeight_) *
+      static_cast<uint64_t>(
+          textureBytesPerPixel(kFrameCompositionReactiveMaskFormat));
+  aaMetrics.reactiveMaskTextureBytes =
+      aaMetrics.reactiveMaskAllocated ? reactiveBytesPerTexture : 0u;
+  aaMetrics.reactiveMaskTotalBytes =
+      reactiveBytesPerTexture *
+      static_cast<uint64_t>(reactiveMaskTextures_.size());
   if (ctx.shared.sceneDepthSamplerId == 0u) {
     ctx.shared.sceneDepthSamplerId = gpu_.getDefaultSamplerBindlessIndex();
   }
@@ -286,6 +311,20 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
     destroyMotionVectorTextures();
   }
 
+  const bool needsReactiveMask = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::ReactiveMask);
+  const bool hadReactiveMask = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::ReactiveMask);
+  if (needsReactiveMask && (fullRecreate || !hadReactiveMask)) {
+    auto reactiveMaskResult = recreateReactiveMaskTextures();
+    if (reactiveMaskResult.hasError()) {
+      invalidateAllocationState();
+      return reactiveMaskResult;
+    }
+  } else if (!needsReactiveMask && hadReactiveMask) {
+    destroyReactiveMaskTextures();
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -386,6 +425,32 @@ FrameCompositionProvider::recreateMotionVectorTextures() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string>
+FrameCompositionProvider::recreateReactiveMaskTextures() {
+  const bool replacingExistingTextures = !reactiveMaskTextures_.empty();
+  destroyReactiveMaskTextures();
+
+  const uint32_t reactiveMaskRingCount = std::max(2u, textureRingCount_);
+  reactiveMaskTextures_.resize(reactiveMaskRingCount);
+  const TextureDesc desc =
+      makeTextureDesc(kFrameCompositionReactiveMaskFormat, framebufferWidth_,
+                      framebufferHeight_, TextureUsage::AttachmentSampled);
+  for (uint32_t i = 0; i < reactiveMaskRingCount; ++i) {
+    const std::string debugName = "frame_reactive_mask_" + std::to_string(i);
+    auto createResult = gpu_.createTexture(desc, debugName);
+    if (createResult.hasError()) {
+      destroyReactiveMaskTextures();
+      return Result<bool, std::string>::makeError(createResult.error());
+    }
+    reactiveMaskTextures_[i] = createResult.value();
+  }
+  if (replacingExistingTextures) {
+    ++reactiveMaskReallocationCount_;
+  }
+  reactiveMaskAllocationCount_ += reactiveMaskRingCount;
+  return Result<bool, std::string>::makeResult(true);
+}
+
 void FrameCompositionProvider::destroyTextures(TextureRing &textures) {
   for (TextureHandle &texture : textures) {
     if (!nuri::isValid(texture)) {
@@ -403,6 +468,10 @@ void FrameCompositionProvider::destroyHistoryTextures() {
 
 void FrameCompositionProvider::destroyMotionVectorTextures() {
   destroyTextures(motionVectorTextures_);
+}
+
+void FrameCompositionProvider::destroyReactiveMaskTextures() {
+  destroyTextures(reactiveMaskTextures_);
 }
 
 TextureHandle FrameCompositionProvider::currentRingTexture(

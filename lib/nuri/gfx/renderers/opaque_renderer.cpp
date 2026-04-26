@@ -592,6 +592,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       indirectCommandUploadBytes_(resolveMemoryResource(memory)),
       overlayDrawItems_(resolveMemoryResource(memory)),
       velocityDrawItems_(resolveMemoryResource(memory)),
+      reactiveMaskDrawItems_(resolveMemoryResource(memory)),
       pickDrawItems_(resolveMemoryResource(memory)),
       shadowInspectDrawItems_(resolveMemoryResource(memory)),
       passDrawItems_(resolveMemoryResource(memory)),
@@ -683,6 +684,7 @@ void OpaqueRenderer::onDetach() {
   meshPickShader_.reset();
   meshShadowInspectShader_.reset();
   meshVelocityShader_.reset();
+  meshReactiveMaskShader_.reset();
   depthShader_.reset();
   depthAlphaShader_.reset();
   depthPyramidShader_.reset();
@@ -698,6 +700,7 @@ void OpaqueRenderer::onDetach() {
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
+  meshReactiveMaskFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -730,6 +733,7 @@ void OpaqueRenderer::onDetach() {
   indirectCommandUploadBytes_.clear();
   overlayDrawItems_.clear();
   velocityDrawItems_.clear();
+  reactiveMaskDrawItems_.clear();
   passDrawItems_.clear();
   depthPrepassDrawItems_.clear();
   depthPyramidPushConstants_.clear();
@@ -3646,6 +3650,94 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
   pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
 
+  if (taaSelected && nuri::isValid(frame.sharedResources.reactiveMaskTexture) &&
+      nuri::isValid(meshReactiveMaskPipelineHandle_) &&
+      baseAlphaMasked.size() == shadedBaseDrawItems.size()) {
+    reactiveMaskDrawItems_.clear();
+    reactiveMaskDrawItems_.reserve(shadedBaseDrawItems.size());
+    uint32_t alphaMaskedDraws = 0u;
+    uint32_t skippedTessellatedReactiveDraws = 0u;
+    for (size_t i = 0; i < shadedBaseDrawItems.size(); ++i) {
+      if (baseAlphaMasked[i] == 0u) {
+        continue;
+      }
+      ++alphaMaskedDraws;
+      const DrawItem &sourceItem = shadedBaseDrawItems[i];
+      if (isTessPipeline(sourceItem.pipeline)) {
+        ++skippedTessellatedReactiveDraws;
+        continue;
+      }
+      const RenderPipelineHandle reactivePipeline =
+          selectReactiveMaskPipeline(sourceItem.pipeline);
+      if (!nuri::isValid(reactivePipeline)) {
+        continue;
+      }
+      DrawItem reactiveItem = sourceItem;
+      reactiveItem.pipeline = reactivePipeline;
+      reactiveItem.useDepthState = true;
+      reactiveItem.depthState = {.compareOp = CompareOp::Equal,
+                                 .isDepthWriteEnabled = false};
+      reactiveItem.debugLabel = "OpaqueReactiveMask";
+      reactiveItem.debugColor = 0xff33cc88;
+      reactiveMaskDrawItems_.push_back(reactiveItem);
+    }
+
+    AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
+    aaMetrics.reactiveMaskDrawCount =
+        saturateToU32(reactiveMaskDrawItems_.size());
+    aaMetrics.reactiveAlphaMaskedDrawCount = alphaMaskedDraws;
+    aaMetrics.reactiveSkippedTessellatedDrawCount =
+        skippedTessellatedReactiveDraws;
+    aaMetrics.reactiveMaskPassBandwidthEstimateBytes =
+        aaMetrics.reactiveMaskTextureBytes;
+    const float drawDenominator =
+        static_cast<float>(std::max<size_t>(shadedBaseDrawItems.size(), 1u));
+    aaMetrics.taaAlphaMaskedCoverageEstimate =
+        static_cast<float>(alphaMaskedDraws) / drawDenominator;
+    aaMetrics.taaReactiveCoverageEstimate =
+        static_cast<float>(reactiveMaskDrawItems_.size()) / drawDenominator;
+
+    if (!reactiveMaskDrawItems_.empty()) {
+      PreparedGraphPass &reactivePass =
+          out.emplace_back(drawItems_.get_allocator().resource());
+      reactivePass.desc.color = AttachmentColor{
+          .loadOp = LoadOp::Clear,
+          .storeOp = StoreOp::Store,
+          .clearColor = kFrameCompositionReactiveMaskClearValue};
+      reactivePass.colorTextureHandle =
+          frame.sharedResources.reactiveMaskTexture;
+      reactivePass.desc.depth = {.loadOp = LoadOp::Load,
+                                 .storeOp = StoreOp::Store,
+                                 .clearDepth = kClearDepthOne,
+                                 .clearStencil = 0};
+      reactivePass.depthTextureHandle = sceneDepthTexture;
+      reactivePass.desc.dependencyBuffers = std::span<const BufferHandle>(
+          passDependencyBuffers_.data(), passDependencyBuffers_.size());
+      reactivePass.desc.dependencyBufferAccessModes =
+          std::span<const RenderGraphAccessMode>(
+              passDependencyBufferAccessModes_.data(),
+              passDependencyBufferAccessModes_.size());
+      reactivePass.desc.dependencyTextures = std::span<const TextureHandle>(
+          passDependencyTextures_.data(), passDependencyTextures_.size());
+      reactivePass.desc.dependencyTextureAccessModes =
+          std::span<const RenderGraphAccessMode>(
+              mainPassDependencyTextureAccessModes_.data(),
+              passDependencyTextures_.size());
+      reactivePass.desc.draws = std::span<const DrawItem>(
+          reactiveMaskDrawItems_.data(), reactiveMaskDrawItems_.size());
+      reactivePass.desc.drawBuffersPreResolved = true;
+      reactivePass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+          preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
+      reactivePass.desc.debugLabel = "Opaque Reactive Mask Pass";
+      reactivePass.desc.debugColor = 0xff33cc88;
+      reactivePass.hasDraws = true;
+      reactivePass.desc.borrowPayload = true;
+      reactivePass.hasIndirectDraws = hasIndirectBaseDraws;
+      reactivePass.isReactiveMaskPass = true;
+      aaMetrics.reactiveMaskPassCount = 1u;
+    }
+  }
+
   if (taaSelected && nuri::isValid(frame.sharedResources.motionVectorTexture) &&
       nuri::isValid(meshVelocityPipelineHandle_) && instanceCount > 0) {
     velocityDrawItems_.clear();
@@ -4137,6 +4229,10 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     frame.metrics.antiAliasing.motionVectorGraphPublished = true;
     frame.metrics.antiAliasing.motionVectorClearPassCount = 0u;
     frame.metrics.antiAliasing.motionVectorClearBytes = 0u;
+  }
+  if (pass.isReactiveMaskPass && nuri::isValid(pass.colorTextureHandle)) {
+    frame.sharedResources.reactiveMaskGraphTexture = passDesc.colorTexture;
+    frame.metrics.antiAliasing.reactiveMaskGraphPublished = true;
   }
   if (pass.isDepthPyramidPass &&
       pass.depthPyramidLevel < kMaxSceneDepthPyramidLevels &&
@@ -4747,6 +4843,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshPickShader_.reset();
     meshShadowInspectShader_.reset();
     meshVelocityShader_.reset();
+    meshReactiveMaskShader_.reset();
     depthShader_.reset();
     depthAlphaShader_.reset();
     depthPyramidShader_.reset();
@@ -4762,6 +4859,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshShadowInspectFragmentShader_ = {};
     meshVelocityVertexShader_ = {};
     meshVelocityFragmentShader_ = {};
+    meshReactiveMaskFragmentShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -4784,6 +4882,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshPickShader_.reset();
     meshShadowInspectShader_.reset();
     meshVelocityShader_.reset();
+    meshReactiveMaskShader_.reset();
     depthShader_.reset();
     depthAlphaShader_.reset();
     depthPyramidShader_.reset();
@@ -4799,6 +4898,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshShadowInspectFragmentShader_ = {};
     meshVelocityVertexShader_ = {};
     meshVelocityFragmentShader_ = {};
+    meshReactiveMaskFragmentShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -5505,13 +5605,15 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshPickShader_ = Shader::create("main_id", gpu_);
   meshShadowInspectShader_ = Shader::create("shadow_inspect", gpu_);
   meshVelocityShader_ = Shader::create("opaque_velocity", gpu_);
+  meshReactiveMaskShader_ = Shader::create("opaque_reactive_mask", gpu_);
   depthShader_ = Shader::create("opaque_depth", gpu_);
   depthAlphaShader_ = Shader::create("opaque_depth_alpha", gpu_);
   depthPyramidShader_ = Shader::create("depth_minmax_pyramid", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
   if (!meshShader_ || !meshTessShader_ || !meshPickShader_ ||
-      !meshShadowInspectShader_ || !meshVelocityShader_ || !computeShader_ ||
-      !depthShader_ || !depthAlphaShader_ || !depthPyramidShader_) {
+      !meshShadowInspectShader_ || !meshVelocityShader_ ||
+      !meshReactiveMaskShader_ || !computeShader_ || !depthShader_ ||
+      !depthAlphaShader_ || !depthPyramidShader_) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::createShaders: failed to create shader objects");
   }
@@ -5527,6 +5629,7 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
+  meshReactiveMaskFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -5606,6 +5709,22 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
     } else {
       meshVelocityVertexShader_ = vertexResult.value();
       meshVelocityFragmentShader_ = fragmentResult.value();
+    }
+  }
+
+  {
+    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    auto fragmentResult = meshReactiveMaskShader_->compileFromFile(
+        (shaderDir / "opaque_reactive_mask.frag").string(),
+        ShaderStage::Fragment);
+    if (fragmentResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: reactive mask shader failed, "
+          "alpha-mask reactive tracking will be disabled: %s",
+          fragmentResult.error().c_str());
+      meshReactiveMaskFragmentShader_ = {};
+    } else {
+      meshReactiveMaskFragmentShader_ = fragmentResult.value();
     }
   }
 
@@ -5806,6 +5925,42 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
       } else {
         meshVelocityDoubleSidedPipelineHandle_ =
             doubleSidedVelocityResult.value();
+      }
+    }
+  }
+
+  if (nuri::isValid(meshVertexShader_) &&
+      nuri::isValid(meshReactiveMaskFragmentShader_)) {
+    const RenderPipelineDesc reactiveMaskDesc = meshPipelineDesc(
+        kFrameCompositionReactiveMaskFormat, depthFormat, meshVertexShader_, {},
+        {}, {}, meshReactiveMaskFragmentShader_, PolygonMode::Fill);
+    auto reactiveMaskResult =
+        gpu_.createRenderPipeline(reactiveMaskDesc, "opaque_reactive_mask");
+    if (reactiveMaskResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createPipelines: reactive mask pipeline failed, "
+          "alpha-mask reactive tracking disabled: %s",
+          reactiveMaskResult.error().c_str());
+      meshReactiveMaskPipelineHandle_ = {};
+      meshReactiveMaskDoubleSidedPipelineHandle_ = {};
+    } else {
+      meshReactiveMaskPipelineHandle_ = reactiveMaskResult.value();
+      const RenderPipelineDesc doubleSidedReactiveMaskDesc = meshPipelineDesc(
+          kFrameCompositionReactiveMaskFormat, depthFormat, meshVertexShader_,
+          {}, {}, {}, meshReactiveMaskFragmentShader_, PolygonMode::Fill,
+          Topology::Triangle, 0, false, CullMode::None);
+      auto doubleSidedReactiveMaskResult = gpu_.createRenderPipeline(
+          doubleSidedReactiveMaskDesc, "opaque_reactive_mask_double_sided");
+      if (doubleSidedReactiveMaskResult.hasError()) {
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createPipelines: double-sided reactive mask "
+            "pipeline failed, double-sided masked draws will use back-face "
+            "culling: %s",
+            doubleSidedReactiveMaskResult.error().c_str());
+        meshReactiveMaskDoubleSidedPipelineHandle_ = {};
+      } else {
+        meshReactiveMaskDoubleSidedPipelineHandle_ =
+            doubleSidedReactiveMaskResult.value();
       }
     }
   }
@@ -6162,6 +6317,16 @@ RenderPipelineHandle OpaqueRenderer::selectVelocityPipeline(
   return meshVelocityPipelineHandle_;
 }
 
+RenderPipelineHandle OpaqueRenderer::selectReactiveMaskPipeline(
+    RenderPipelineHandle sourcePipeline) const {
+  const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
+  if (doubleSided &&
+      nuri::isValid(meshReactiveMaskDoubleSidedPipelineHandle_)) {
+    return meshReactiveMaskDoubleSidedPipelineHandle_;
+  }
+  return meshReactiveMaskPipelineHandle_;
+}
+
 RenderPipelineHandle
 OpaqueRenderer::selectDepthPipeline(RenderPipelineHandle sourcePipeline,
                                     bool alphaMasked) const {
@@ -6508,6 +6673,8 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, meshShadowInspectPipelineHandle_);
   destroyPipelineHandle(gpu_, meshVelocityDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshVelocityPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshReactiveMaskDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshReactiveMaskPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedFillPipelineHandle_);
@@ -6529,6 +6696,8 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshShadowInspectDoubleSidedTessPipelineHandle_ = {};
   meshVelocityPipelineHandle_ = {};
   meshVelocityDoubleSidedPipelineHandle_ = {};
+  meshReactiveMaskPipelineHandle_ = {};
+  meshReactiveMaskDoubleSidedPipelineHandle_ = {};
   meshDepthPipelineHandle_ = {};
   meshDepthDoubleSidedPipelineHandle_ = {};
   meshDepthTessPipelineHandle_ = {};

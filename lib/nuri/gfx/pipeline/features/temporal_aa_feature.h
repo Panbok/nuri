@@ -36,6 +36,28 @@ public:
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
 };
 
+class NURI_API TemporalAAReactiveMaskClearPass final
+    : public RenderFeaturePass {
+public:
+  TemporalAAReactiveMaskClearPass() = default;
+  ~TemporalAAReactiveMaskClearPass() override = default;
+
+  TemporalAAReactiveMaskClearPass(const TemporalAAReactiveMaskClearPass &) =
+      delete;
+  TemporalAAReactiveMaskClearPass &
+  operator=(const TemporalAAReactiveMaskClearPass &) = delete;
+  TemporalAAReactiveMaskClearPass(TemporalAAReactiveMaskClearPass &&) = delete;
+  TemporalAAReactiveMaskClearPass &
+  operator=(TemporalAAReactiveMaskClearPass &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "TemporalAAReactiveMaskClearPass";
+  }
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+};
+
 class NURI_API TemporalAAResolvePass final : public RenderFeaturePass {
 public:
   explicit TemporalAAResolvePass(GPUDevice &gpu, RuntimeCompositeConfig config);
@@ -58,6 +80,7 @@ private:
   std::unique_ptr<Shader> shader_{};
   ShaderHandle vertexShader_{};
   ShaderHandle fragmentShader_{};
+  SamplerHandle linearClampSampler_{};
   RenderPipelineHandle pipeline_{};
   Format pipelineColorFormat_ = Format::Count;
   std::filesystem::path vertexPath_{};
@@ -84,9 +107,10 @@ public:
 
 private:
   TemporalAAMotionVectorClearPass motionVectorClearPass_{};
+  TemporalAAReactiveMaskClearPass reactiveMaskClearPass_{};
   TemporalAAResolvePass resolvePass_;
-  std::array<RenderFeaturePass *, 2> passes_{&motionVectorClearPass_,
-                                             &resolvePass_};
+  std::array<RenderFeaturePass *, 3> passes_{
+      &motionVectorClearPass_, &reactiveMaskClearPass_, &resolvePass_};
 };
 
 } // namespace nuri
