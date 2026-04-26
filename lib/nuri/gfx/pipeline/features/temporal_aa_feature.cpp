@@ -21,6 +21,9 @@ TemporalAAMotionVectorClearPass::prepare(FrameBuildContext &ctx) {
 
 Result<bool, std::string>
 TemporalAAMotionVectorClearPass::build(FrameBuildContext &ctx) {
+  if (nuri::isValid(ctx.shared.motionVectorGraphTexture)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
   if (!nuri::isValid(ctx.shared.motionVectorTexture)) {
     return Result<bool, std::string>::makeResult(false);
   }

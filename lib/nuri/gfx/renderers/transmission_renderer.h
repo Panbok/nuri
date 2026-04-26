@@ -62,9 +62,12 @@ private:
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
+    uint64_t previousInstanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
+    uint64_t velocityInstanceFlagsAddress = 0;
+    uint64_t velocityFrameDataAddress = 0;
     uint32_t instanceCount = 0;
     uint32_t materialIndex = 0;
     uint32_t vertexDecodeIndex = 0;
@@ -86,8 +89,15 @@ private:
     }
   };
   static_assert(
-      sizeof(MeshPushConstants) <= 128,
-      "TransmissionRenderer::MeshPushConstants exceeds Vulkan guarantee");
+      sizeof(MeshPushConstants) == 128,
+      "TransmissionRenderer::MeshPushConstants must match shader layout");
+  static_assert(offsetof(MeshPushConstants, instanceRemapAddress) == 40u);
+  static_assert(offsetof(MeshPushConstants, instanceCentersPhaseAddress) ==
+                48u);
+  static_assert(offsetof(MeshPushConstants, instanceBaseMatricesAddress) ==
+                56u);
+  static_assert(offsetof(MeshPushConstants, instanceCount) == 80u);
+  static_assert(offsetof(MeshPushConstants, shadowCascadeIndex) == 120u);
 
   struct MeshDrawTemplate {
     const Renderable *renderable = nullptr;

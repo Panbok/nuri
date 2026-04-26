@@ -20,6 +20,7 @@
 #include <memory>
 #include <memory_resource>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -65,9 +66,12 @@ private:
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
+    uint64_t previousInstanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
+    uint64_t velocityInstanceFlagsAddress = 0;
+    uint64_t velocityFrameDataAddress = 0;
     uint32_t instanceCount = 0;
     uint32_t materialIndex = 0;
     uint32_t vertexDecodeIndex = 0;
@@ -80,9 +84,13 @@ private:
     uint32_t debugVisualizationMode = 0;
     uint32_t shadowCascadeIndex = 0;
   };
-  static_assert(
-      sizeof(PushConstants) <= 128,
-      "OpaqueRenderer::PushConstants exceeds Vulkan minimum guarantee");
+  static_assert(sizeof(PushConstants) == 128,
+                "OpaqueRenderer::PushConstants must match shader layout");
+  static_assert(offsetof(PushConstants, instanceRemapAddress) == 40u);
+  static_assert(offsetof(PushConstants, instanceCentersPhaseAddress) == 48u);
+  static_assert(offsetof(PushConstants, instanceBaseMatricesAddress) == 56u);
+  static_assert(offsetof(PushConstants, instanceCount) == 80u);
+  static_assert(offsetof(PushConstants, shadowCascadeIndex) == 120u);
 
   struct alignas(16) ShadowSdsmReducePushConstants {
     uint64_t resultBufferAddress = 0u;
@@ -147,6 +155,13 @@ private:
     std::unique_ptr<Buffer> buffer;
     size_t capacityBytes = 0;
   };
+
+  struct alignas(16) VelocityFrameGpuData {
+    glm::mat4 currentViewProjNoJitter{1.0f};
+    glm::mat4 previousViewProjNoJitter{1.0f};
+  };
+  static_assert(sizeof(VelocityFrameGpuData) == sizeof(glm::mat4) * 2u,
+                "OpaqueRenderer::VelocityFrameGpuData layout changed");
 
   struct SingleInstanceBatchEntry {
     DrawItem draw{};
@@ -220,6 +235,8 @@ private:
     bool isPickPass = false;
     bool isDepthPrepass = false;
     bool isDepthPyramidPass = false;
+    bool isVelocityPass = false;
+    bool isVelocityDebugPass = false;
     uint32_t depthPyramidLevel = UINT32_MAX;
 
     explicit PreparedGraphPass(
@@ -261,6 +278,16 @@ private:
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensurePreviousInstanceMatricesRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureVelocityInstanceFlagsRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureVelocityFrameDataRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureDynamicRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
+                            size_t requiredBytes, size_t minimumBytes,
+                            std::string_view debugNamePrefix);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -311,6 +338,8 @@ private:
   [[nodiscard]] RenderPipelineHandle selectMeshPipeline(bool doubleSided,
                                                         bool tessellated) const;
   [[nodiscard]] RenderPipelineHandle
+  selectVelocityPipeline(RenderPipelineHandle sourcePipeline) const;
+  [[nodiscard]] RenderPipelineHandle
   selectDepthPipeline(RenderPipelineHandle sourcePipeline,
                       bool alphaMasked) const;
   [[nodiscard]] RenderPipelineHandle
@@ -335,6 +364,7 @@ private:
   void invalidateSingleInstanceBatchCache();
   void invalidateIndirectPackCache();
   void resetPickState();
+  void capturePreviousTransforms(const RenderScene &scene, uint64_t frameIndex);
   void destroyMeshPipelineState();
   void resetMeshPipelineState();
   void destroyDepthPyramidTextures();
@@ -350,6 +380,8 @@ private:
   std::unique_ptr<Shader> meshDebugOverlayShader_;
   std::unique_ptr<Shader> meshPickShader_;
   std::unique_ptr<Shader> meshShadowInspectShader_;
+  std::unique_ptr<Shader> meshVelocityShader_;
+  std::unique_ptr<Shader> velocityDebugShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> depthPyramidShader_;
@@ -359,6 +391,9 @@ private:
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
+  std::pmr::vector<DynamicBufferSlot> previousInstanceMatricesRing_;
+  std::pmr::vector<DynamicBufferSlot> velocityInstanceFlagsRing_;
+  std::pmr::vector<DynamicBufferSlot> velocityFrameDataRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
   TextureHandle pickIdTexture_{};
@@ -380,6 +415,10 @@ private:
   ShaderHandle meshDebugOverlayFragmentShader_{};
   ShaderHandle meshPickFragmentShader_{};
   ShaderHandle meshShadowInspectFragmentShader_{};
+  ShaderHandle meshVelocityVertexShader_{};
+  ShaderHandle meshVelocityFragmentShader_{};
+  ShaderHandle velocityDebugVertexShader_{};
+  ShaderHandle velocityDebugFragmentShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle depthPyramidVertexShader_{};
@@ -401,6 +440,9 @@ private:
   RenderPipelineHandle meshShadowInspectDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshShadowInspectTessPipelineHandle_{};
   RenderPipelineHandle meshShadowInspectDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle meshVelocityPipelineHandle_{};
+  RenderPipelineHandle meshVelocityDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle velocityDebugPipelineHandle_{};
   RenderPipelineHandle meshDepthPipelineHandle_{};
   RenderPipelineHandle meshDepthDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshDepthTessPipelineHandle_{};
@@ -491,6 +533,11 @@ private:
   std::pmr::vector<uint8_t> indirectAlphaMasked_;
   std::pmr::vector<std::byte> indirectCommandUploadBytes_;
   std::pmr::vector<DrawItem> overlayDrawItems_;
+  std::pmr::vector<DrawItem> velocityDrawItems_;
+  std::pmr::vector<DrawItem> velocityDebugDrawItems_;
+  std::pmr::vector<TextureHandle> velocityDebugDependencyTextures_;
+  std::pmr::vector<RenderGraphAccessMode>
+      velocityDebugDependencyTextureAccessModes_;
   std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<DrawItem> shadowInspectDrawItems_;
   std::pmr::vector<DrawItem> passDrawItems_;
@@ -516,10 +563,17 @@ private:
   std::pmr::vector<RenderGraphAccessMode> mainPassDependencyBufferAccessModes_;
   std::pmr::vector<TextureHandle> mainPassDependencyTextures_;
   std::pmr::vector<RenderGraphAccessMode> mainPassDependencyTextureAccessModes_;
+  std::pmr::vector<BufferHandle> velocityPassDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode>
+      velocityPassDependencyBufferAccessModes_;
+  std::pmr::unordered_map<RenderableId, glm::mat4> previousTransformById_;
+  std::pmr::vector<InstanceData> previousInstanceMatricesCpuCache_;
+  std::pmr::vector<uint32_t> velocityInstanceFlagsCpuCache_;
   std::pmr::vector<PreparedGraphPass> preparedGraphPasses_;
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};
+  glm::uvec4 velocityDebugPushConstants_{0u};
   uint64_t cachedPreResolvedBufferSignature_ =
       std::numeric_limits<uint64_t>::max();
   uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();
@@ -532,6 +586,9 @@ private:
   BufferHandle registeredCentersPhaseBufferHandle_{};
   BufferHandle registeredBaseMatricesBufferHandle_{};
   uint64_t boundStaticBatchGeneration_ = 0;
+  uint64_t previousTransformSceneId_ = 0u;
+  uint64_t previousTransformCaptureFrameIndex_ =
+      std::numeric_limits<uint64_t>::max();
   std::optional<OpaquePickRequest> pendingPickRequest_{};
   std::optional<ShadowInspectRequest> pendingShadowInspectRequest_{};
 

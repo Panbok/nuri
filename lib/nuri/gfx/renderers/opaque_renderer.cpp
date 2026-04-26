@@ -26,8 +26,10 @@ constexpr float kClearColorWhite = 1.0f;
 constexpr uint32_t kOpaquePassDebugColor = 0xff0000ff;
 constexpr uint32_t kMeshDebugColor = 0xffcc5500;
 constexpr uint32_t kComputeDispatchColor = 0xff33aa33;
+constexpr uint32_t kVelocityDebugColor = 0xff22ccff;
 constexpr uint32_t kComputeWorkgroupSize = 32;
 constexpr uint32_t kTessellationPatchControlPoints = 3;
+constexpr float kVelocityDebugScale = 64.0f;
 constexpr size_t kIndirectCountHeaderBytes = sizeof(uint32_t);
 constexpr uint32_t kMaxIndirectCommandsPerDraw = 1024u;
 constexpr size_t kMaxDrawItemsForIndirectPath = 8192u;
@@ -164,6 +166,22 @@ meshPipelineDesc(Format swapchainFormat, Format depthFormat,
   };
 }
 
+RenderPipelineDesc fullscreenPipelineDesc(Format colorFormat,
+                                          ShaderHandle vertexShader,
+                                          ShaderHandle fragmentShader) {
+  return RenderPipelineDesc{
+      .vertexInput = {},
+      .vertexShader = vertexShader,
+      .fragmentShader = fragmentShader,
+      .colorFormats = {colorFormat},
+      .depthFormat = Format::Count,
+      .cullMode = CullMode::None,
+      .polygonMode = PolygonMode::Fill,
+      .topology = Topology::Triangle,
+      .blendEnabled = false,
+  };
+}
+
 RenderPipelineDesc
 depthPipelineDesc(Format depthFormat, ShaderHandle vertexShader,
                   ShaderHandle tessControlShader, ShaderHandle tessEvalShader,
@@ -225,6 +243,56 @@ float maxAxisScale(const glm::mat4 &transform) {
 bool nearlyEqualVec3(const glm::vec3 &a, const glm::vec3 &b, float epsilon) {
   const glm::vec3 delta = glm::abs(a - b);
   return delta.x <= epsilon && delta.y <= epsilon && delta.z <= epsilon;
+}
+
+float maxMatrixElementDelta(const glm::mat4 &a, const glm::mat4 &b) {
+  float maxDelta = 0.0f;
+  for (glm::length_t column = 0; column < 4; ++column) {
+    for (glm::length_t row = 0; row < 4; ++row) {
+      maxDelta = std::max(maxDelta, std::abs(a[column][row] - b[column][row]));
+    }
+  }
+  return maxDelta;
+}
+
+uint64_t textureBytesPerPixel(Format format) {
+  switch (format) {
+  case Format::RG16_FLOAT:
+    return sizeof(uint16_t) * 2u;
+  case Format::RG32_FLOAT:
+    return sizeof(float) * 2u;
+  case Format::R32_UINT:
+  case Format::R32_FLOAT:
+  case Format::D32_FLOAT:
+    return sizeof(uint32_t);
+  case Format::D16_UNORM:
+    return sizeof(uint16_t);
+  case Format::RGBA8_UNORM:
+  case Format::RGBA8_SRGB:
+  case Format::RGBA8_UINT:
+    return 4u;
+  case Format::RGBA16_FLOAT:
+    return 8u;
+  case Format::RGBA32_FLOAT:
+    return 16u;
+  case Format::BC7_RGBA_UNORM:
+  case Format::BC7_RGBA_SRGB:
+  case Format::ETC2_RGB8_UNORM:
+  case Format::ETC2_RGB8_SRGB:
+  case Format::Count:
+    break;
+  }
+  return 0u;
+}
+
+uint64_t textureStorageBytes(GPUDevice &gpu, TextureHandle texture) {
+  if (!nuri::isValid(texture)) {
+    return 0u;
+  }
+  const TextureDimensions dimensions = gpu.getTextureDimensions(texture);
+  return static_cast<uint64_t>(std::max(dimensions.width, 1u)) *
+         static_cast<uint64_t>(std::max(dimensions.height, 1u)) *
+         textureBytesPerPixel(gpu.getTextureFormat(texture));
 }
 
 bool nearlyEqualThresholds(const std::array<float, 3> &a,
@@ -475,6 +543,9 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
                                std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(std::move(config)),
       instanceMatricesRing_(resolveMemoryResource(memory)),
+      previousInstanceMatricesRing_(resolveMemoryResource(memory)),
+      velocityInstanceFlagsRing_(resolveMemoryResource(memory)),
+      velocityFrameDataRing_(resolveMemoryResource(memory)),
       instanceRemapRing_(resolveMemoryResource(memory)),
       indirectCommandRing_(resolveMemoryResource(memory)),
       singleInstanceBatchCaches_(resolveMemoryResource(memory)),
@@ -503,6 +574,10 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       indirectAlphaMasked_(resolveMemoryResource(memory)),
       indirectCommandUploadBytes_(resolveMemoryResource(memory)),
       overlayDrawItems_(resolveMemoryResource(memory)),
+      velocityDrawItems_(resolveMemoryResource(memory)),
+      velocityDebugDrawItems_(resolveMemoryResource(memory)),
+      velocityDebugDependencyTextures_(resolveMemoryResource(memory)),
+      velocityDebugDependencyTextureAccessModes_(resolveMemoryResource(memory)),
       pickDrawItems_(resolveMemoryResource(memory)),
       shadowInspectDrawItems_(resolveMemoryResource(memory)),
       passDrawItems_(resolveMemoryResource(memory)),
@@ -526,6 +601,11 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       mainPassDependencyBufferAccessModes_(resolveMemoryResource(memory)),
       mainPassDependencyTextures_(resolveMemoryResource(memory)),
       mainPassDependencyTextureAccessModes_(resolveMemoryResource(memory)),
+      velocityPassDependencyBuffers_(resolveMemoryResource(memory)),
+      velocityPassDependencyBufferAccessModes_(resolveMemoryResource(memory)),
+      previousTransformById_(resolveMemoryResource(memory)),
+      previousInstanceMatricesCpuCache_(resolveMemoryResource(memory)),
+      velocityInstanceFlagsCpuCache_(resolveMemoryResource(memory)),
       preparedGraphPasses_(resolveMemoryResource(memory)) {
   auto *resource = resolveMemoryResource(memory);
   singleInstanceBatchCaches_.reserve(kSingleInstanceCacheVariantCount);
@@ -551,6 +631,25 @@ void OpaqueRenderer::resetPickState() {
   inFlightShadowInspectReadback_.reset();
 }
 
+void OpaqueRenderer::capturePreviousTransforms(const RenderScene &scene,
+                                               uint64_t frameIndex) {
+  if (previousTransformCaptureFrameIndex_ == frameIndex &&
+      previousTransformSceneId_ == scene.id()) {
+    return;
+  }
+
+  const std::span<const Renderable> renderables = scene.renderables();
+  previousTransformById_.clear();
+  previousTransformById_.reserve(renderables.size());
+  for (const Renderable &renderable : renderables) {
+    if (nuri::isValid(renderable.id)) {
+      previousTransformById_[renderable.id] = renderable.modelMatrix;
+    }
+  }
+  previousTransformSceneId_ = scene.id();
+  previousTransformCaptureFrameIndex_ = frameIndex;
+}
+
 void OpaqueRenderer::onDetach() {
   destroyBuffers();
   destroyPickTexture();
@@ -569,6 +668,8 @@ void OpaqueRenderer::onDetach() {
   meshDebugOverlayShader_.reset();
   meshPickShader_.reset();
   meshShadowInspectShader_.reset();
+  meshVelocityShader_.reset();
+  velocityDebugShader_.reset();
   depthShader_.reset();
   depthAlphaShader_.reset();
   depthPyramidShader_.reset();
@@ -582,6 +683,10 @@ void OpaqueRenderer::onDetach() {
   meshDebugOverlayFragmentShader_ = {};
   meshPickFragmentShader_ = {};
   meshShadowInspectFragmentShader_ = {};
+  meshVelocityVertexShader_ = {};
+  meshVelocityFragmentShader_ = {};
+  velocityDebugVertexShader_ = {};
+  velocityDebugFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -596,6 +701,8 @@ void OpaqueRenderer::onDetach() {
   instanceCentersPhase_.clear();
   instanceBaseMatrices_.clear();
   instanceMatricesCpuCache_.clear();
+  previousInstanceMatricesCpuCache_.clear();
+  velocityInstanceFlagsCpuCache_.clear();
   instanceMatricesUploadVersions_.clear();
   instanceLodCentersInvRadiusSq_.clear();
   materialTextureAccessHandles_.clear();
@@ -611,6 +718,10 @@ void OpaqueRenderer::onDetach() {
   indirectAlphaMasked_.clear();
   indirectCommandUploadBytes_.clear();
   overlayDrawItems_.clear();
+  velocityDrawItems_.clear();
+  velocityDebugDrawItems_.clear();
+  velocityDebugDependencyTextures_.clear();
+  velocityDebugDependencyTextureAccessModes_.clear();
   passDrawItems_.clear();
   depthPrepassDrawItems_.clear();
   depthPyramidPushConstants_.clear();
@@ -627,6 +738,9 @@ void OpaqueRenderer::onDetach() {
   mainPassDependencyBufferAccessModes_.clear();
   mainPassDependencyTextures_.clear();
   mainPassDependencyTextureAccessModes_.clear();
+  velocityPassDependencyBuffers_.clear();
+  velocityPassDependencyBufferAccessModes_.clear();
+  previousTransformById_.clear();
   pickDrawItems_.clear();
   cachedPreResolvedBufferSignature_ = std::numeric_limits<uint64_t>::max();
   currentDirectDrawBufferSignature_ = std::numeric_limits<uint64_t>::max();
@@ -638,6 +752,8 @@ void OpaqueRenderer::onDetach() {
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
   cachedAnimationSceneActive_ = false;
+  previousTransformSceneId_ = 0u;
+  previousTransformCaptureFrameIndex_ = std::numeric_limits<uint64_t>::max();
   instanceStaticBuffersDirty_ = true;
   uniformSingleSubmeshPath_ = false;
   invalidateAutoLodCache();
@@ -1073,6 +1189,26 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (matricesResult.hasError()) {
     return matricesResult;
   }
+  const bool taaSelected =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+      AntiAliasingMode::TAA;
+  if (taaSelected) {
+    auto previousMatricesResult = ensurePreviousInstanceMatricesRingCapacity(
+        std::max(instanceCount * sizeof(InstanceData), sizeof(InstanceData)));
+    if (previousMatricesResult.hasError()) {
+      return previousMatricesResult;
+    }
+    auto velocityFlagsResult = ensureVelocityInstanceFlagsRingCapacity(
+        std::max(instanceCount * sizeof(uint32_t), sizeof(uint32_t)));
+    if (velocityFlagsResult.hasError()) {
+      return velocityFlagsResult;
+    }
+    auto velocityFrameResult =
+        ensureVelocityFrameDataRingCapacity(sizeof(VelocityFrameGpuData));
+    if (velocityFrameResult.hasError()) {
+      return velocityFrameResult;
+    }
+  }
   if (instanceStaticBuffersDirty_) {
     if (!instanceCentersPhase_.empty()) {
       const std::span<const std::byte> centersBytes{
@@ -1127,8 +1263,39 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       animationSceneData != nullptr
           ? animationSceneData->instanceMatricesAddress
           : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
+  const BufferHandle previousInstanceMatricesBufferHandle =
+      taaSelected && frameSlot < previousInstanceMatricesRing_.size() &&
+              previousInstanceMatricesRing_[frameSlot].buffer
+          ? previousInstanceMatricesRing_[frameSlot].buffer->handle()
+          : BufferHandle{};
+  const BufferHandle velocityInstanceFlagsBufferHandle =
+      taaSelected && frameSlot < velocityInstanceFlagsRing_.size() &&
+              velocityInstanceFlagsRing_[frameSlot].buffer
+          ? velocityInstanceFlagsRing_[frameSlot].buffer->handle()
+          : BufferHandle{};
+  const BufferHandle velocityFrameDataBufferHandle =
+      taaSelected && frameSlot < velocityFrameDataRing_.size() &&
+              velocityFrameDataRing_[frameSlot].buffer
+          ? velocityFrameDataRing_[frameSlot].buffer->handle()
+          : BufferHandle{};
+  const uint64_t previousInstanceMatricesAddress =
+      nuri::isValid(previousInstanceMatricesBufferHandle)
+          ? gpu_.getBufferDeviceAddress(previousInstanceMatricesBufferHandle)
+          : 0u;
+  const uint64_t velocityInstanceFlagsAddress =
+      nuri::isValid(velocityInstanceFlagsBufferHandle)
+          ? gpu_.getBufferDeviceAddress(velocityInstanceFlagsBufferHandle)
+          : 0u;
+  const uint64_t velocityFrameDataAddress =
+      nuri::isValid(velocityFrameDataBufferHandle)
+          ? gpu_.getBufferDeviceAddress(velocityFrameDataBufferHandle)
+          : 0u;
   if (frameDataAddress == 0 || instanceCentersPhaseAddress == 0 ||
       instanceBaseMatricesAddress == 0 || instanceMatricesAddress == 0 ||
+      (taaSelected && instanceCount > 0 &&
+       (previousInstanceMatricesAddress == 0u ||
+        velocityInstanceFlagsAddress == 0u ||
+        velocityFrameDataAddress == 0u)) ||
       materialGpu->headerBufferAddress == 0u ||
       materialGpu->clearcoatBufferAddress == 0u ||
       materialGpu->sheenBufferAddress == 0u ||
@@ -1141,6 +1308,121 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
        sceneGpu->shadowFrameBufferAddress == 0u)) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::buildOpaquePasses: invalid GPU buffer address");
+  }
+
+  if (taaSelected && instanceCount > 0) {
+    const bool previousCacheValid =
+        frame.camera.historyValid && frame.camera.temporalDataValid &&
+        previousTransformSceneId_ == frame.scene->id() &&
+        previousTransformCaptureFrameIndex_ !=
+            std::numeric_limits<uint64_t>::max() &&
+        previousTransformCaptureFrameIndex_ < frame.frameIndex;
+    previousInstanceMatricesCpuCache_.clear();
+    velocityInstanceFlagsCpuCache_.clear();
+    previousInstanceMatricesCpuCache_.reserve(instanceCount);
+    velocityInstanceFlagsCpuCache_.reserve(instanceCount);
+
+    uint32_t validPreviousCount = 0u;
+    uint32_t missingPreviousCount = 0u;
+    uint32_t animatedResponsiveCount = 0u;
+    double totalObjectMotion = 0.0;
+    float maxObjectMotion = 0.0f;
+    const bool animatedInstances = settings.opaque.enableInstanceAnimation ||
+                                   animationSceneData != nullptr;
+    for (size_t i = 0; i < instanceCount; ++i) {
+      const RenderableTemplate &templ = renderableTemplates_[i];
+      const Renderable *renderable = templ.renderable;
+      const glm::mat4 currentModel =
+          renderable != nullptr ? renderable->modelMatrix : glm::mat4(1.0f);
+      glm::mat4 previousModel = currentModel;
+      bool hasPrevious = false;
+      if (!animatedInstances && previousCacheValid && renderable != nullptr &&
+          nuri::isValid(renderable->id)) {
+        if (const auto it = previousTransformById_.find(renderable->id);
+            it != previousTransformById_.end()) {
+          previousModel = it->second;
+          hasPrevious = true;
+        }
+      }
+
+      if (hasPrevious) {
+        ++validPreviousCount;
+        const float motion = glm::length(glm::vec3(currentModel[3]) -
+                                         glm::vec3(previousModel[3]));
+        totalObjectMotion += static_cast<double>(motion);
+        maxObjectMotion = std::max(maxObjectMotion, motion);
+      } else {
+        ++missingPreviousCount;
+        if (animatedInstances) {
+          ++animatedResponsiveCount;
+        }
+      }
+
+      previousInstanceMatricesCpuCache_.push_back(
+          makeInstanceData(previousModel));
+      velocityInstanceFlagsCpuCache_.push_back(hasPrevious ? 1u : 0u);
+    }
+
+    const std::span<const std::byte> previousMatricesBytes{
+        reinterpret_cast<const std::byte *>(
+            previousInstanceMatricesCpuCache_.data()),
+        previousInstanceMatricesCpuCache_.size() * sizeof(InstanceData)};
+    auto previousUpdateResult = gpu_.updateBuffer(
+        previousInstanceMatricesBufferHandle, previousMatricesBytes, 0);
+    if (previousUpdateResult.hasError()) {
+      return previousUpdateResult;
+    }
+
+    const std::span<const std::byte> velocityFlagsBytes{
+        reinterpret_cast<const std::byte *>(
+            velocityInstanceFlagsCpuCache_.data()),
+        velocityInstanceFlagsCpuCache_.size() * sizeof(uint32_t)};
+    auto flagsUpdateResult = gpu_.updateBuffer(
+        velocityInstanceFlagsBufferHandle, velocityFlagsBytes, 0);
+    if (flagsUpdateResult.hasError()) {
+      return flagsUpdateResult;
+    }
+
+    const VelocityFrameGpuData velocityFrameData{
+        .currentViewProjNoJitter = frame.camera.currentUnjitteredViewProj,
+        .previousViewProjNoJitter = frame.camera.previousUnjitteredViewProj,
+    };
+    const std::span<const std::byte> velocityFrameBytes{
+        reinterpret_cast<const std::byte *>(&velocityFrameData),
+        sizeof(velocityFrameData)};
+    auto frameUpdateResult =
+        gpu_.updateBuffer(velocityFrameDataBufferHandle, velocityFrameBytes, 0);
+    if (frameUpdateResult.hasError()) {
+      return frameUpdateResult;
+    }
+
+    AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
+    aaMetrics.velocityInstanceCount = saturateToU32(instanceCount);
+    aaMetrics.velocityPreviousTransformValidCount = validPreviousCount;
+    aaMetrics.velocityMissingPreviousTransformCount = missingPreviousCount;
+    aaMetrics.velocityAnimatedResponsiveCount = animatedResponsiveCount;
+    aaMetrics.previousTransformCacheValid = previousCacheValid;
+    aaMetrics.velocityAverageObjectMotion =
+        validPreviousCount > 0u
+            ? static_cast<float>(totalObjectMotion / validPreviousCount)
+            : 0.0f;
+    aaMetrics.velocityMaxObjectMotion = maxObjectMotion;
+    aaMetrics.velocityMissingPreviousRatio =
+        instanceCount > 0 ? static_cast<float>(missingPreviousCount) /
+                                static_cast<float>(instanceCount)
+                          : 0.0f;
+    aaMetrics.velocityCameraMatrixDelta =
+        maxMatrixElementDelta(frame.camera.currentUnjitteredViewProj,
+                              frame.camera.previousUnjitteredViewProj);
+    aaMetrics.velocityStaticResidualEstimate =
+        maxObjectMotion == 0.0f && missingPreviousCount == 0u
+            ? aaMetrics.velocityCameraMatrixDelta
+            : 0.0f;
+    aaMetrics.velocityEstimatedAverageMagnitude =
+        aaMetrics.velocityAverageObjectMotion +
+        aaMetrics.velocityCameraMatrixDelta;
+    aaMetrics.velocityEstimatedMaxMagnitude =
+        maxObjectMotion + aaMetrics.velocityCameraMatrixDelta;
   }
 
   const OpaqueDebugVisualization debugVisualization =
@@ -2394,6 +2676,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
   for (PushConstants &constants : drawPushConstants_) {
     constants.instanceRemapAddress = instanceRemapAddress;
+    constants.previousInstanceMatricesAddress = previousInstanceMatricesAddress;
+    constants.velocityInstanceFlagsAddress = velocityInstanceFlagsAddress;
+    constants.velocityFrameDataAddress = velocityFrameDataAddress;
   }
 
   if (settings.opaque.enableIndirectDraw) {
@@ -2416,9 +2701,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       .vertexBufferAddress = 0,
       .vertexDecodeBufferAddress = 0u,
       .instanceMatricesAddress = instanceMatricesAddress,
+      .previousInstanceMatricesAddress = previousInstanceMatricesAddress,
       .instanceRemapAddress = instanceRemapAddress,
       .instanceCentersPhaseAddress = instanceCentersPhaseAddress,
       .instanceBaseMatricesAddress = instanceBaseMatricesAddress,
+      .velocityInstanceFlagsAddress = velocityInstanceFlagsAddress,
+      .velocityFrameDataAddress = velocityFrameDataAddress,
       .instanceCount = static_cast<uint32_t>(instanceCount),
       .materialIndex = 0u,
       .vertexDecodeIndex = 0u,
@@ -3347,6 +3635,176 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
   pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
 
+  if (taaSelected && nuri::isValid(frame.sharedResources.motionVectorTexture) &&
+      nuri::isValid(meshVelocityPipelineHandle_) && instanceCount > 0) {
+    velocityDrawItems_.clear();
+    velocityDrawItems_.reserve(shadedBaseDrawItems.size());
+    uint32_t skippedTessellatedDraws = 0u;
+    for (const DrawItem &sourceItem : shadedBaseDrawItems) {
+      if (isTessPipeline(sourceItem.pipeline)) {
+        ++skippedTessellatedDraws;
+        continue;
+      }
+      const RenderPipelineHandle velocityPipeline =
+          selectVelocityPipeline(sourceItem.pipeline);
+      if (!nuri::isValid(velocityPipeline)) {
+        continue;
+      }
+      DrawItem velocityItem = sourceItem;
+      velocityItem.pipeline = velocityPipeline;
+      velocityItem.useDepthState = true;
+      velocityItem.depthState = {.compareOp = CompareOp::Equal,
+                                 .isDepthWriteEnabled = false};
+      velocityItem.debugLabel = "OpaqueVelocity";
+      velocityItem.debugColor = 0xff44aaff;
+      velocityDrawItems_.push_back(velocityItem);
+    }
+
+    frame.metrics.antiAliasing.velocityTessellatedSkippedDrawCount =
+        skippedTessellatedDraws;
+    if (!velocityDrawItems_.empty()) {
+      velocityPassDependencyBuffers_ = passDependencyBuffers_;
+      velocityPassDependencyBufferAccessModes_ = passDependencyBufferAccessModes_;
+      for (const BufferHandle handle : {previousInstanceMatricesBufferHandle,
+                                        velocityInstanceFlagsBufferHandle,
+                                        velocityFrameDataBufferHandle}) {
+        auto velocityDepResult = appendUniqueDependency(
+            velocityPassDependencyBuffers_,
+            velocityPassDependencyBufferAccessModes_, handle,
+            RenderGraphAccessMode::Read,
+            "OpaqueRenderer::buildOpaquePasses(velocity pass)");
+        if (velocityDepResult.hasError()) {
+          return velocityDepResult;
+        }
+      }
+
+      PreparedGraphPass &velocityPass =
+          out.emplace_back(drawItems_.get_allocator().resource());
+      velocityPass.desc.color = AttachmentColor{
+          .loadOp = LoadOp::Clear,
+          .storeOp = StoreOp::Store,
+          .clearColor = kFrameCompositionMotionVectorClearValue};
+      velocityPass.colorTextureHandle =
+          frame.sharedResources.motionVectorTexture;
+      velocityPass.desc.depth = {.loadOp = LoadOp::Load,
+                                 .storeOp = StoreOp::Store,
+                                 .clearDepth = kClearDepthOne,
+                                 .clearStencil = 0};
+      velocityPass.depthTextureHandle = sceneDepthTexture;
+      velocityPass.desc.dependencyBuffers = std::span<const BufferHandle>(
+          velocityPassDependencyBuffers_.data(),
+          velocityPassDependencyBuffers_.size());
+      velocityPass.desc.dependencyBufferAccessModes =
+          std::span<const RenderGraphAccessMode>(
+              velocityPassDependencyBufferAccessModes_.data(),
+              velocityPassDependencyBufferAccessModes_.size());
+      velocityPass.desc.dependencyTextures =
+          std::span<const TextureHandle>(passDependencyTextures_.data(),
+                                         passDependencyTextures_.size());
+      velocityPass.desc.dependencyTextureAccessModes =
+          std::span<const RenderGraphAccessMode>(
+              mainPassDependencyTextureAccessModes_.data(),
+              passDependencyTextures_.size());
+      velocityPass.desc.draws = std::span<const DrawItem>(
+          velocityDrawItems_.data(), velocityDrawItems_.size());
+      velocityPass.desc.drawBuffersPreResolved = true;
+      velocityPass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+          preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
+      velocityPass.desc.debugLabel = "Opaque Velocity Pass";
+      velocityPass.desc.debugColor = 0xff44aaff;
+      velocityPass.hasDraws = true;
+      velocityPass.desc.borrowPayload = true;
+      velocityPass.hasIndirectDraws = hasIndirectBaseDraws;
+      velocityPass.isVelocityPass = true;
+
+      frame.metrics.antiAliasing.velocityPassCount = 1u;
+      frame.metrics.antiAliasing.velocityDrawCount =
+          saturateToU32(velocityDrawItems_.size());
+      frame.metrics.antiAliasing.opaqueVelocityGenerated = true;
+      frame.metrics.antiAliasing.velocityPassBandwidthEstimateBytes =
+          frame.metrics.antiAliasing.motionVectorTextureBytes;
+    }
+    const uint32_t velocityInstanceCount =
+        frame.metrics.antiAliasing.velocityInstanceCount;
+    if (velocityInstanceCount > 0u) {
+      const float tessellatedRatio =
+          static_cast<float>(skippedTessellatedDraws) /
+          static_cast<float>(std::max<size_t>(shadedBaseDrawItems.size(), 1u));
+      frame.metrics.antiAliasing.velocityEdgeDiscontinuityEstimate = std::min(
+          1.0f, frame.metrics.antiAliasing.velocityMissingPreviousRatio +
+                    tessellatedRatio);
+    }
+  }
+
+  const AntiAliasingDebugView aaDebugView =
+      sanitizeAntiAliasingDebugView(settings.antiAliasing.debug.view);
+  const bool velocityDebugRequested =
+      aaDebugView == AntiAliasingDebugView::MotionVectors ||
+      aaDebugView == AntiAliasingDebugView::VelocityMagnitude;
+  if (taaSelected && velocityDebugRequested &&
+      frame.metrics.antiAliasing.opaqueVelocityGenerated &&
+      nuri::isValid(velocityDebugPipelineHandle_) &&
+      nuri::isValid(frame.sharedResources.motionVectorTexture) &&
+      nuri::isValid(frame.sharedResources.sceneColorTexture)) {
+    const uint32_t sourceTexId =
+        gpu_.getTextureBindlessIndex(frame.sharedResources.motionVectorTexture);
+    const uint32_t sourceSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+    if (sourceTexId != kInvalidTextureBindlessIndex &&
+        sourceSamplerId != kInvalidTextureBindlessIndex) {
+      const uint32_t mode =
+          aaDebugView == AntiAliasingDebugView::VelocityMagnitude ? 1u : 0u;
+      velocityDebugPushConstants_ =
+          glm::uvec4(sourceTexId, sourceSamplerId, mode,
+                     std::bit_cast<uint32_t>(kVelocityDebugScale));
+
+      velocityDebugDrawItems_.clear();
+      DrawItem debugDraw{};
+      debugDraw.pipeline = velocityDebugPipelineHandle_;
+      debugDraw.vertexCount = 3u;
+      debugDraw.instanceCount = 1u;
+      debugDraw.pushConstants = std::span<const std::byte>(
+          reinterpret_cast<const std::byte *>(&velocityDebugPushConstants_),
+          sizeof(velocityDebugPushConstants_));
+      debugDraw.debugLabel = "TaaVelocityDebug";
+      debugDraw.debugColor = kVelocityDebugColor;
+      velocityDebugDrawItems_.push_back(debugDraw);
+
+      velocityDebugDependencyTextures_.clear();
+      velocityDebugDependencyTextureAccessModes_.clear();
+      velocityDebugDependencyTextures_.push_back(
+          frame.sharedResources.motionVectorTexture);
+      velocityDebugDependencyTextureAccessModes_.push_back(
+          RenderGraphAccessMode::Read);
+
+      PreparedGraphPass &debugPass =
+          out.emplace_back(drawItems_.get_allocator().resource());
+      debugPass.desc.color = {.loadOp = LoadOp::Clear,
+                              .storeOp = StoreOp::Store,
+                              .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+      debugPass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
+      debugPass.desc.dependencyTextures = std::span<const TextureHandle>(
+          velocityDebugDependencyTextures_.data(),
+          velocityDebugDependencyTextures_.size());
+      debugPass.desc.dependencyTextureAccessModes =
+          std::span<const RenderGraphAccessMode>(
+              velocityDebugDependencyTextureAccessModes_.data(),
+              velocityDebugDependencyTextureAccessModes_.size());
+      debugPass.desc.draws = std::span<const DrawItem>(
+          velocityDebugDrawItems_.data(), velocityDebugDrawItems_.size());
+      debugPass.desc.drawBuffersPreResolved = true;
+      debugPass.desc.debugLabel = "TAA Velocity Debug Pass";
+      debugPass.desc.debugColor = kVelocityDebugColor;
+      debugPass.hasDraws = true;
+      debugPass.desc.borrowPayload = true;
+      debugPass.isVelocityDebugPass = true;
+
+      frame.metrics.antiAliasing.velocityDebugPassCount = 1u;
+      frame.metrics.antiAliasing.velocityDebugBandwidthEstimateBytes =
+          frame.metrics.antiAliasing.motionVectorTextureBytes +
+          textureStorageBytes(gpu_, frame.sharedResources.sceneColorTexture);
+    }
+  }
+
   if (pendingShadowInspectRequest_.has_value() &&
       nuri::isValid(shadowInspectTexture_) &&
       nuri::isValid(meshShadowInspectPipelineHandle_)) {
@@ -3424,6 +3882,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
 
   frame.metrics.opaque.computeDispatches = saturateToU32(preDispatches_.size());
+  capturePreviousTransforms(*frame.scene, frame.frameIndex);
   NURI_PROFILER_ZONE_END();
   return Result<bool, std::string>::makeResult(true);
 }
@@ -3728,6 +4187,16 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
 
   if (pass.isMainPass && nuri::isValid(pass.colorTextureHandle)) {
     frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
+  }
+  if (pass.isVelocityDebugPass && nuri::isValid(pass.colorTextureHandle)) {
+    frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
+    frame.metrics.antiAliasing.velocityDebugViewRendered = true;
+  }
+  if (pass.isVelocityPass && nuri::isValid(pass.colorTextureHandle)) {
+    frame.sharedResources.motionVectorGraphTexture = passDesc.colorTexture;
+    frame.metrics.antiAliasing.motionVectorGraphPublished = true;
+    frame.metrics.antiAliasing.motionVectorClearPassCount = 0u;
+    frame.metrics.antiAliasing.motionVectorClearBytes = 0u;
   }
   if (pass.isDepthPyramidPass &&
       pass.depthPyramidLevel < kMaxSceneDepthPyramidLevels &&
@@ -4336,6 +4805,9 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshTessShader_.reset();
     meshDebugOverlayShader_.reset();
     meshPickShader_.reset();
+    meshShadowInspectShader_.reset();
+    meshVelocityShader_.reset();
+    velocityDebugShader_.reset();
     depthShader_.reset();
     depthAlphaShader_.reset();
     depthPyramidShader_.reset();
@@ -4348,6 +4820,11 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
     meshPickFragmentShader_ = {};
+    meshShadowInspectFragmentShader_ = {};
+    meshVelocityVertexShader_ = {};
+    meshVelocityFragmentShader_ = {};
+    velocityDebugVertexShader_ = {};
+    velocityDebugFragmentShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -4368,6 +4845,9 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshTessShader_.reset();
     meshDebugOverlayShader_.reset();
     meshPickShader_.reset();
+    meshShadowInspectShader_.reset();
+    meshVelocityShader_.reset();
+    velocityDebugShader_.reset();
     depthShader_.reset();
     depthAlphaShader_.reset();
     depthPyramidShader_.reset();
@@ -4380,6 +4860,11 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
     meshPickFragmentShader_ = {};
+    meshShadowInspectFragmentShader_ = {};
+    meshVelocityVertexShader_ = {};
+    meshVelocityFragmentShader_ = {};
+    velocityDebugVertexShader_ = {};
+    velocityDebugFragmentShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -4617,6 +5102,9 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
     requiredCount = 1;
   }
   if (instanceMatricesRing_.size() == requiredCount &&
+      previousInstanceMatricesRing_.size() == requiredCount &&
+      velocityInstanceFlagsRing_.size() == requiredCount &&
+      velocityFrameDataRing_.size() == requiredCount &&
       instanceRemapRing_.size() == requiredCount &&
       indirectCommandRing_.size() == requiredCount) {
     return Result<bool, std::string>::makeResult(true);
@@ -4625,6 +5113,21 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   gpu_.waitIdle();
 
   for (DynamicBufferSlot &slot : instanceMatricesRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+  }
+  for (DynamicBufferSlot &slot : previousInstanceMatricesRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+  }
+  for (DynamicBufferSlot &slot : velocityInstanceFlagsRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+  }
+  for (DynamicBufferSlot &slot : velocityFrameDataRing_) {
     if (slot.buffer && slot.buffer->valid()) {
       gpu_.destroyBuffer(slot.buffer->handle());
     }
@@ -4641,9 +5144,15 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   }
 
   instanceMatricesRing_.clear();
+  previousInstanceMatricesRing_.clear();
+  velocityInstanceFlagsRing_.clear();
+  velocityFrameDataRing_.clear();
   instanceRemapRing_.clear();
   indirectCommandRing_.clear();
   instanceMatricesRing_.resize(requiredCount);
+  previousInstanceMatricesRing_.resize(requiredCount);
+  velocityInstanceFlagsRing_.resize(requiredCount);
+  velocityFrameDataRing_.resize(requiredCount);
   instanceRemapRing_.resize(requiredCount);
   indirectCommandRing_.resize(requiredCount);
   instanceMatricesUploadVersions_.assign(requiredCount,
@@ -4695,6 +5204,72 @@ OpaqueRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
     }
   }
   return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string> OpaqueRenderer::ensureDynamicRingCapacity(
+    std::pmr::vector<DynamicBufferSlot> &ring, size_t requiredBytes,
+    size_t minimumBytes, std::string_view debugNamePrefix) {
+  const size_t requested = std::max(requiredBytes, minimumBytes);
+  bool needsGrowth = false;
+  for (const DynamicBufferSlot &slot : ring) {
+    if (slot.buffer && slot.buffer->valid() && slot.capacityBytes < requested) {
+      needsGrowth = true;
+      break;
+    }
+  }
+  if (needsGrowth) {
+    gpu_.waitIdle();
+  }
+  for (size_t i = 0; i < ring.size(); ++i) {
+    DynamicBufferSlot &slot = ring[i];
+    if (slot.buffer && slot.buffer->valid() &&
+        slot.capacityBytes >= requested) {
+      continue;
+    }
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+      slot.buffer.reset();
+      slot.capacityBytes = 0;
+    }
+
+    const BufferDesc desc{
+        .usage = BufferUsage::Storage,
+        .storage = Storage::Device,
+        .size = requested,
+    };
+    std::string debugName(debugNamePrefix);
+    debugName += "_";
+    debugName += std::to_string(i);
+    auto createResult = Buffer::create(gpu_, desc, debugName);
+    if (createResult.hasError()) {
+      return Result<bool, std::string>::makeError(createResult.error());
+    }
+    slot.buffer = std::move(createResult.value());
+    slot.capacityBytes = requested;
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+OpaqueRenderer::ensurePreviousInstanceMatricesRingCapacity(
+    size_t requiredBytes) {
+  return ensureDynamicRingCapacity(previousInstanceMatricesRing_, requiredBytes,
+                                   sizeof(InstanceData),
+                                   "opaque_previous_instance_matrices_buffer");
+}
+
+Result<bool, std::string>
+OpaqueRenderer::ensureVelocityInstanceFlagsRingCapacity(size_t requiredBytes) {
+  return ensureDynamicRingCapacity(velocityInstanceFlagsRing_, requiredBytes,
+                                   sizeof(uint32_t),
+                                   "opaque_velocity_instance_flags_buffer");
+}
+
+Result<bool, std::string>
+OpaqueRenderer::ensureVelocityFrameDataRingCapacity(size_t requiredBytes) {
+  return ensureDynamicRingCapacity(velocityFrameDataRing_, requiredBytes,
+                                   sizeof(VelocityFrameGpuData),
+                                   "opaque_velocity_frame_data_buffer");
 }
 
 Result<bool, std::string>
@@ -4995,12 +5570,15 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshDebugOverlayShader_ = Shader::create("mesh_debug_overlay", gpu_);
   meshPickShader_ = Shader::create("main_id", gpu_);
   meshShadowInspectShader_ = Shader::create("shadow_inspect", gpu_);
+  meshVelocityShader_ = Shader::create("opaque_velocity", gpu_);
+  velocityDebugShader_ = Shader::create("taa_velocity_debug", gpu_);
   depthShader_ = Shader::create("opaque_depth", gpu_);
   depthAlphaShader_ = Shader::create("opaque_depth_alpha", gpu_);
   depthPyramidShader_ = Shader::create("depth_minmax_pyramid", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
   if (!meshShader_ || !meshTessShader_ || !meshPickShader_ ||
-      !meshShadowInspectShader_ || !computeShader_ || !depthShader_ ||
+      !meshShadowInspectShader_ || !meshVelocityShader_ ||
+      !velocityDebugShader_ || !computeShader_ || !depthShader_ ||
       !depthAlphaShader_ || !depthPyramidShader_) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::createShaders: failed to create shader objects");
@@ -5015,6 +5593,10 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshDebugOverlayFragmentShader_ = {};
   meshPickFragmentShader_ = {};
   meshShadowInspectFragmentShader_ = {};
+  meshVelocityVertexShader_ = {};
+  meshVelocityFragmentShader_ = {};
+  velocityDebugVertexShader_ = {};
+  velocityDebugFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -5073,6 +5655,51 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       return Result<bool, std::string>::makeError(compileResult.error());
     }
     meshShadowInspectFragmentShader_ = compileResult.value();
+  }
+
+  {
+    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    auto vertexResult = meshVelocityShader_->compileFromFile(
+        (shaderDir / "opaque_velocity.vert").string(), ShaderStage::Vertex);
+    auto fragmentResult = meshVelocityShader_->compileFromFile(
+        (shaderDir / "opaque_velocity.frag").string(), ShaderStage::Fragment);
+    if (vertexResult.hasError() || fragmentResult.hasError()) {
+      const std::string error = vertexResult.hasError()
+                                    ? vertexResult.error()
+                                    : fragmentResult.error();
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: velocity shaders failed, opaque "
+          "velocity generation will be disabled: %s",
+          error.c_str());
+      meshVelocityVertexShader_ = {};
+      meshVelocityFragmentShader_ = {};
+    } else {
+      meshVelocityVertexShader_ = vertexResult.value();
+      meshVelocityFragmentShader_ = fragmentResult.value();
+    }
+  }
+
+  {
+    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    auto vertexResult = velocityDebugShader_->compileFromFile(
+        (shaderDir / "fullscreen_copy.vert").string(), ShaderStage::Vertex);
+    auto fragmentResult = velocityDebugShader_->compileFromFile(
+        (shaderDir / "taa_velocity_debug.frag").string(),
+        ShaderStage::Fragment);
+    if (vertexResult.hasError() || fragmentResult.hasError()) {
+      const std::string error = vertexResult.hasError()
+                                    ? vertexResult.error()
+                                    : fragmentResult.error();
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: velocity debug shaders failed, "
+          "velocity debug views will be disabled: %s",
+          error.c_str());
+      velocityDebugVertexShader_ = {};
+      velocityDebugFragmentShader_ = {};
+    } else {
+      velocityDebugVertexShader_ = vertexResult.value();
+      velocityDebugFragmentShader_ = fragmentResult.value();
+    }
   }
 
   {
@@ -5237,6 +5864,61 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
           doubleSidedMeshResult.error());
     }
     meshDoubleSidedFillPipelineHandle_ = doubleSidedMeshResult.value();
+  }
+
+  if (nuri::isValid(meshVelocityVertexShader_) &&
+      nuri::isValid(meshVelocityFragmentShader_)) {
+    const RenderPipelineDesc velocityDesc =
+        meshPipelineDesc(kFrameCompositionMotionVectorFormat, depthFormat,
+                         meshVelocityVertexShader_, {}, {}, {},
+                         meshVelocityFragmentShader_, PolygonMode::Fill);
+    auto velocityResult =
+        gpu_.createRenderPipeline(velocityDesc, "opaque_velocity");
+    if (velocityResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createPipelines: velocity pipeline failed, opaque "
+          "velocity generation disabled: %s",
+          velocityResult.error().c_str());
+      meshVelocityPipelineHandle_ = {};
+      meshVelocityDoubleSidedPipelineHandle_ = {};
+    } else {
+      meshVelocityPipelineHandle_ = velocityResult.value();
+      const RenderPipelineDesc doubleSidedVelocityDesc = meshPipelineDesc(
+          kFrameCompositionMotionVectorFormat, depthFormat,
+          meshVelocityVertexShader_, {}, {}, {}, meshVelocityFragmentShader_,
+          PolygonMode::Fill, Topology::Triangle, 0, false, CullMode::None);
+      auto doubleSidedVelocityResult = gpu_.createRenderPipeline(
+          doubleSidedVelocityDesc, "opaque_velocity_double_sided");
+      if (doubleSidedVelocityResult.hasError()) {
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createPipelines: double-sided velocity pipeline "
+            "failed, double-sided velocity draws will use back-face culling: "
+            "%s",
+            doubleSidedVelocityResult.error().c_str());
+        meshVelocityDoubleSidedPipelineHandle_ = {};
+      } else {
+        meshVelocityDoubleSidedPipelineHandle_ =
+            doubleSidedVelocityResult.value();
+      }
+    }
+  }
+
+  if (nuri::isValid(velocityDebugVertexShader_) &&
+      nuri::isValid(velocityDebugFragmentShader_)) {
+    const RenderPipelineDesc debugDesc = fullscreenPipelineDesc(
+        kFrameCompositionSceneColorFormat, velocityDebugVertexShader_,
+        velocityDebugFragmentShader_);
+    auto debugResult =
+        gpu_.createRenderPipeline(debugDesc, "taa_velocity_debug");
+    if (debugResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createPipelines: velocity debug pipeline failed, "
+          "velocity debug views disabled: %s",
+          debugResult.error().c_str());
+      velocityDebugPipelineHandle_ = {};
+    } else {
+      velocityDebugPipelineHandle_ = debugResult.value();
+    }
   }
 
   const auto createDepthPipeline =
@@ -5580,6 +6262,15 @@ OpaqueRenderer::selectMeshPipeline(bool doubleSided, bool tessellated) const {
     return meshDoubleSidedFillPipelineHandle_;
   }
   return meshFillPipelineHandle_;
+}
+
+RenderPipelineHandle OpaqueRenderer::selectVelocityPipeline(
+    RenderPipelineHandle sourcePipeline) const {
+  const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
+  if (doubleSided && nuri::isValid(meshVelocityDoubleSidedPipelineHandle_)) {
+    return meshVelocityDoubleSidedPipelineHandle_;
+  }
+  return meshVelocityPipelineHandle_;
 }
 
 RenderPipelineHandle
@@ -5926,6 +6617,9 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, meshShadowInspectTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshShadowInspectDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshShadowInspectPipelineHandle_);
+  destroyPipelineHandle(gpu_, velocityDebugPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshVelocityDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshVelocityPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedFillPipelineHandle_);
@@ -5945,6 +6639,9 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshShadowInspectDoubleSidedPipelineHandle_ = {};
   meshShadowInspectTessPipelineHandle_ = {};
   meshShadowInspectDoubleSidedTessPipelineHandle_ = {};
+  meshVelocityPipelineHandle_ = {};
+  meshVelocityDoubleSidedPipelineHandle_ = {};
+  velocityDebugPipelineHandle_ = {};
   meshDepthPipelineHandle_ = {};
   meshDepthDoubleSidedPipelineHandle_ = {};
   meshDepthTessPipelineHandle_ = {};
@@ -6024,6 +6721,27 @@ void OpaqueRenderer::destroyBuffers() {
     slot.buffer.reset();
     slot.capacityBytes = 0;
   }
+  for (DynamicBufferSlot &slot : previousInstanceMatricesRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0;
+  }
+  for (DynamicBufferSlot &slot : velocityInstanceFlagsRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0;
+  }
+  for (DynamicBufferSlot &slot : velocityFrameDataRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0;
+  }
   for (DynamicBufferSlot &slot : instanceRemapRing_) {
     if (slot.buffer && slot.buffer->valid()) {
       gpu_.destroyBuffer(slot.buffer->handle());
@@ -6039,6 +6757,9 @@ void OpaqueRenderer::destroyBuffers() {
     slot.capacityBytes = 0;
   }
   instanceMatricesRing_.clear();
+  previousInstanceMatricesRing_.clear();
+  velocityInstanceFlagsRing_.clear();
+  velocityFrameDataRing_.clear();
   instanceRemapRing_.clear();
   indirectCommandRing_.clear();
   instanceMatricesUploadVersions_.clear();

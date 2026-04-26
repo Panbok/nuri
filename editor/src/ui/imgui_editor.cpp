@@ -70,8 +70,8 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback"};
-constexpr std::array<const char *, 2> kAntiAliasingDebugViewLabels = {
-    "None", "Settings"};
+constexpr std::array<const char *, 4> kAntiAliasingDebugViewLabels = {
+    "None", "Settings", "Motion Vectors", "Velocity Magnitude"};
 constexpr std::array<uint32_t, 4> kShadowMapResolutions = {1024u, 2048u, 4096u,
                                                            8192u};
 constexpr std::array<const char *, 4> kShadowMapResolutionLabels = {"1K", "2K",
@@ -256,6 +256,10 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "None";
   case AntiAliasingDebugView::Settings:
     return "Settings";
+  case AntiAliasingDebugView::MotionVectors:
+    return "Motion Vectors";
+  case AntiAliasingDebugView::VelocityMagnitude:
+    return "Velocity Magnitude";
   }
   return "Unknown";
 }
@@ -1960,9 +1964,42 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     ImGui::Text("Previous Graph Resource: %s",
                 metrics.previousMotionVectorGraphPublished ? "published"
                                                            : "not imported");
-    ImGui::TextUnformatted("Producer: Temporal AA Motion Vector Clear");
-    ImGui::TextUnformatted(
-        "Consumers: future velocity generation and TAA resolve");
+    ImGui::Text("Opaque Velocity Passes: %u", metrics.velocityPassCount);
+    ImGui::Text("Opaque Velocity Draws: %u", metrics.velocityDrawCount);
+    ImGui::Text("Velocity Debug Passes: %u", metrics.velocityDebugPassCount);
+    ImGui::Text("Velocity Instances: %u", metrics.velocityInstanceCount);
+    ImGui::Text("Previous Transform Cache: %s",
+                metrics.previousTransformCacheValid ? "valid" : "invalid");
+    ImGui::Text("Previous Transforms: %u valid, %u missing",
+                metrics.velocityPreviousTransformValidCount,
+                metrics.velocityMissingPreviousTransformCount);
+    ImGui::Text("Animated/Responsive Instances: %u",
+                metrics.velocityAnimatedResponsiveCount);
+    ImGui::Text("Skipped Tessellated Draws: %u",
+                metrics.velocityTessellatedSkippedDrawCount);
+    ImGui::Text("Object Motion: avg %.5f, max %.5f",
+                metrics.velocityAverageObjectMotion,
+                metrics.velocityMaxObjectMotion);
+    ImGui::Text("Estimated Velocity: avg %.5f, max %.5f",
+                metrics.velocityEstimatedAverageMagnitude,
+                metrics.velocityEstimatedMaxMagnitude);
+    ImGui::Text("Static Residual Estimate: %.6f",
+                metrics.velocityStaticResidualEstimate);
+    ImGui::Text("Camera Matrix Delta: %.6f", metrics.velocityCameraMatrixDelta);
+    ImGui::Text("Missing Previous Ratio: %.3f",
+                metrics.velocityMissingPreviousRatio);
+    ImGui::Text("Edge Discontinuity Estimate: %.3f",
+                metrics.velocityEdgeDiscontinuityEstimate);
+    ImGui::Text("Velocity Pass Bandwidth Estimate: %llu bytes",
+                static_cast<unsigned long long>(
+                    metrics.velocityPassBandwidthEstimateBytes));
+    ImGui::Text("Velocity Debug Bandwidth Estimate: %llu bytes",
+                static_cast<unsigned long long>(
+                    metrics.velocityDebugBandwidthEstimateBytes));
+    ImGui::Text("Velocity Debug View: %s",
+                metrics.velocityDebugViewRendered ? "rendered" : "inactive");
+    ImGui::TextUnformatted("Producer: Opaque velocity pass or clear fallback");
+    ImGui::TextUnformatted("Consumer: future TAA resolve");
   }
   ImGui::TextUnformatted("TAA resolve is not implemented yet; current TAA "
                          "work publishes jitter, camera history, and cleared "

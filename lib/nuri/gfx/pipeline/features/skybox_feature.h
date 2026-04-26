@@ -55,9 +55,12 @@ private:
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
+    uint64_t previousInstanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
     uint64_t instanceCentersPhaseAddress = 0;
     uint64_t instanceBaseMatricesAddress = 0;
+    uint64_t velocityInstanceFlagsAddress = 0;
+    uint64_t velocityFrameDataAddress = 0;
     uint32_t instanceCount = 0;
     uint32_t materialIndex = 0;
     uint32_t vertexDecodeIndex = 0;
@@ -68,9 +71,15 @@ private:
     float tessMinFactor = 1.0f;
     float tessMaxFactor = 1.0f;
     uint32_t debugVisualizationMode = 0;
+    uint32_t shadowCascadeIndex = 0;
   };
-  static_assert(sizeof(PushConstants) <= 128,
-                "SkyboxPass::PushConstants exceeds Vulkan guarantee");
+  static_assert(sizeof(PushConstants) == 128,
+                "SkyboxPass::PushConstants must match shader layout");
+  static_assert(offsetof(PushConstants, instanceRemapAddress) == 40u);
+  static_assert(offsetof(PushConstants, instanceCentersPhaseAddress) == 48u);
+  static_assert(offsetof(PushConstants, instanceBaseMatricesAddress) == 56u);
+  static_assert(offsetof(PushConstants, instanceCount) == 80u);
+  static_assert(offsetof(PushConstants, shadowCascadeIndex) == 120u);
 
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> ensureFrameBufferCapacity(size_t requiredBytes);

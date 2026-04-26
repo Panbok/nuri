@@ -94,9 +94,12 @@ struct CommonMeshPushConstantsProbe {
   uint64_t vertexBufferAddress = 0u;
   uint64_t vertexDecodeBufferAddress = 0u;
   uint64_t instanceMatricesAddress = 0u;
+  uint64_t previousInstanceMatricesAddress = 0u;
   uint64_t instanceRemapAddress = 0u;
   uint64_t instanceCentersPhaseAddress = 0u;
   uint64_t instanceBaseMatricesAddress = 0u;
+  uint64_t velocityInstanceFlagsAddress = 0u;
+  uint64_t velocityFrameDataAddress = 0u;
   uint32_t instanceCount = 0u;
   uint32_t materialIndex = 0u;
   uint32_t vertexDecodeIndex = 0u;
@@ -107,10 +110,21 @@ struct CommonMeshPushConstantsProbe {
   float tessMinFactor = 0.0f;
   float tessMaxFactor = 0.0f;
   uint32_t debugVisualizationMode = 0u;
+  uint32_t shadowCascadeIndex = 0u;
 };
+static_assert(sizeof(CommonMeshPushConstantsProbe) == 128u);
+static_assert(offsetof(CommonMeshPushConstantsProbe, instanceRemapAddress) ==
+              40u);
+static_assert(offsetof(CommonMeshPushConstantsProbe,
+                       instanceCentersPhaseAddress) == 48u);
+static_assert(offsetof(CommonMeshPushConstantsProbe,
+                       instanceBaseMatricesAddress) == 56u);
+static_assert(offsetof(CommonMeshPushConstantsProbe, instanceCount) == 80u);
+static_assert(offsetof(CommonMeshPushConstantsProbe, shadowCascadeIndex) ==
+              120u);
 
 constexpr size_t kCommonMeshPushConstantsProbeBytes =
-    offsetof(CommonMeshPushConstantsProbe, debugVisualizationMode) +
+    offsetof(CommonMeshPushConstantsProbe, shadowCascadeIndex) +
     sizeof(uint32_t);
 constexpr size_t kDebugDraw3DVertexBufferAddressOffset = sizeof(float) * 16u;
 

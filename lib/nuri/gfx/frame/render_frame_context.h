@@ -56,6 +56,8 @@ enum class AntiAliasingMode : uint8_t {
 enum class AntiAliasingDebugView : uint8_t {
   None = 0,
   Settings = 1,
+  MotionVectors = 2,
+  VelocityMagnitude = 3,
 };
 
 enum class TemporalHistoryResetReason : uint8_t {
@@ -219,6 +221,8 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   switch (view) {
   case AntiAliasingDebugView::None:
   case AntiAliasingDebugView::Settings:
+  case AntiAliasingDebugView::MotionVectors:
+  case AntiAliasingDebugView::VelocityMagnitude:
     return view;
   default:
     return AntiAliasingDebugView::None;
@@ -1333,10 +1337,28 @@ struct AntiAliasingFrameMetrics {
   uint32_t motionVectorReallocationCount = 0u;
   uint32_t motionVectorRg32FallbackCount = 0u;
   uint32_t motionVectorClearPassCount = 0u;
+  uint32_t velocityPassCount = 0u;
+  uint32_t velocityDrawCount = 0u;
+  uint32_t velocityInstanceCount = 0u;
+  uint32_t velocityPreviousTransformValidCount = 0u;
+  uint32_t velocityMissingPreviousTransformCount = 0u;
+  uint32_t velocityAnimatedResponsiveCount = 0u;
+  uint32_t velocityTessellatedSkippedDrawCount = 0u;
+  uint32_t velocityDebugPassCount = 0u;
   uint64_t motionVectorTextureBytes = 0u;
   uint64_t previousMotionVectorTextureBytes = 0u;
   uint64_t motionVectorTotalBytes = 0u;
   uint64_t motionVectorClearBytes = 0u;
+  uint64_t velocityPassBandwidthEstimateBytes = 0u;
+  uint64_t velocityDebugBandwidthEstimateBytes = 0u;
+  float velocityAverageObjectMotion = 0.0f;
+  float velocityMaxObjectMotion = 0.0f;
+  float velocityEstimatedAverageMagnitude = 0.0f;
+  float velocityEstimatedMaxMagnitude = 0.0f;
+  float velocityStaticResidualEstimate = 0.0f;
+  float velocityCameraMatrixDelta = 0.0f;
+  float velocityMissingPreviousRatio = 0.0f;
+  float velocityEdgeDiscontinuityEstimate = 0.0f;
   TemporalHistoryResetReason historyResetReason =
       TemporalHistoryResetReason::None;
   bool jitterEnabled = false;
@@ -1349,6 +1371,9 @@ struct AntiAliasingFrameMetrics {
   bool previousMotionVectorValid = false;
   bool motionVectorGraphPublished = false;
   bool previousMotionVectorGraphPublished = false;
+  bool opaqueVelocityGenerated = false;
+  bool velocityDebugViewRendered = false;
+  bool previousTransformCacheValid = false;
 };
 
 [[nodiscard]] inline AntiAliasingFrameMetrics
