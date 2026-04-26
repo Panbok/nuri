@@ -84,9 +84,18 @@ private:
   };
   static_assert(sizeof(PushConstants) == 128,
                 "TransparentRenderer::PushConstants must match shader layout");
+  static_assert(offsetof(PushConstants, previousInstanceMatricesAddress) == 32u,
+                "TransparentRenderer::PushConstants "
+                "previousInstanceMatricesAddress offset changed");
   static_assert(offsetof(PushConstants, instanceRemapAddress) == 40u);
   static_assert(offsetof(PushConstants, instanceCentersPhaseAddress) == 48u);
   static_assert(offsetof(PushConstants, instanceBaseMatricesAddress) == 56u);
+  static_assert(offsetof(PushConstants, velocityInstanceFlagsAddress) == 64u,
+                "TransparentRenderer::PushConstants "
+                "velocityInstanceFlagsAddress offset changed");
+  static_assert(offsetof(PushConstants, velocityFrameDataAddress) == 72u,
+                "TransparentRenderer::PushConstants "
+                "velocityFrameDataAddress offset changed");
   static_assert(offsetof(PushConstants, instanceCount) == 80u);
   static_assert(offsetof(PushConstants, shadowCascadeIndex) == 120u);
 

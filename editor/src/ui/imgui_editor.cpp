@@ -1873,9 +1873,13 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     sanitizeAntiAliasingSettings(aa);
   }
 
+  const bool aaDisabled =
+      sanitizeAntiAliasingMode(aa.mode) == AntiAliasingMode::None;
+  ImGui::BeginDisabled(aaDisabled);
   ImGui::Checkbox("Jitter Enabled##AntiAliasing", &aa.debug.jitterEnabled);
   ImGui::Checkbox("Freeze Jitter##AntiAliasing", &aa.debug.freezeJitter);
-  if (sanitizeAntiAliasingMode(aa.mode) == AntiAliasingMode::None) {
+  ImGui::EndDisabled();
+  if (aaDisabled) {
     aa.debug.jitterEnabled = false;
     aa.debug.freezeJitter = false;
   }
@@ -1920,7 +1924,10 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Text("History Valid: %s", metrics.historyValid ? "yes" : "no");
   const std::string_view resetReason =
       temporalHistoryResetReasonName(metrics.historyResetReason);
-  ImGui::Text("Reset Reason: %s", resetReason.data());
+  ImGui::TextUnformatted("Reset Reason: ");
+  ImGui::SameLine();
+  ImGui::TextUnformatted(resetReason.data(),
+                         resetReason.data() + resetReason.size());
   ImGui::Text("Frames Since Reset: %u", metrics.framesSinceHistoryReset);
   ImGui::Text("Reset Count: %u", metrics.historyResetCount);
   ImGui::Text("Jitter OOB Count: %u", metrics.jitterOutOfBoundsCount);

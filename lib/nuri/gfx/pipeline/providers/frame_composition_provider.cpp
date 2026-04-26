@@ -144,8 +144,7 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aaMetrics.previousMotionVectorValid =
       nuri::isValid(ctx.shared.previousMotionVectorTexture);
   aaMetrics.motionVectorFormatSupported =
-      kFrameCompositionMotionVectorFormat == Format::RG16_FLOAT &&
-      textureBytesPerPixel(kFrameCompositionMotionVectorFormat) != 0u;
+      kFrameCompositionMotionVectorFormat == Format::RG16_FLOAT;
   const uint64_t bytesPerTexture = static_cast<uint64_t>(framebufferWidth_) *
                                    static_cast<uint64_t>(framebufferHeight_) *
                                    static_cast<uint64_t>(textureBytesPerPixel(

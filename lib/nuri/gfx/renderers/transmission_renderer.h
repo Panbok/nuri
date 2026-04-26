@@ -91,11 +91,22 @@ private:
   static_assert(
       sizeof(MeshPushConstants) == 128,
       "TransmissionRenderer::MeshPushConstants must match shader layout");
+  static_assert(offsetof(MeshPushConstants, previousInstanceMatricesAddress) ==
+                    32u,
+                "TransmissionRenderer::MeshPushConstants "
+                "previousInstanceMatricesAddress offset changed");
   static_assert(offsetof(MeshPushConstants, instanceRemapAddress) == 40u);
   static_assert(offsetof(MeshPushConstants, instanceCentersPhaseAddress) ==
                 48u);
   static_assert(offsetof(MeshPushConstants, instanceBaseMatricesAddress) ==
                 56u);
+  static_assert(offsetof(MeshPushConstants, velocityInstanceFlagsAddress) ==
+                    64u,
+                "TransmissionRenderer::MeshPushConstants "
+                "velocityInstanceFlagsAddress offset changed");
+  static_assert(offsetof(MeshPushConstants, velocityFrameDataAddress) == 72u,
+                "TransmissionRenderer::MeshPushConstants "
+                "velocityFrameDataAddress offset changed");
   static_assert(offsetof(MeshPushConstants, instanceCount) == 80u);
   static_assert(offsetof(MeshPushConstants, shadowCascadeIndex) == 120u);
 

@@ -72,6 +72,7 @@ private:
     float tessMaxFactor = 1.0f;
     uint32_t debugVisualizationMode = 0;
     uint32_t shadowCascadeIndex = 0;
+    uint32_t reservedAfterShadowCascadeIndex = 0;
   };
   static_assert(sizeof(PushConstants) == 128,
                 "SkyboxPass::PushConstants must match shader layout");

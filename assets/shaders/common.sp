@@ -273,6 +273,23 @@ layout(std430, buffer_reference) buffer InstanceMatricesBuffer {
   InstanceData instances[];
 };
 
+layout(std430, buffer_reference) readonly buffer ReadonlyInstanceMatricesBuffer {
+  InstanceData instances[];
+};
+
+layout(std430, buffer_reference) readonly buffer VelocityInstanceFlagsBuffer {
+  uint flags[];
+};
+
+struct VelocityFrameData {
+  mat4 currentViewProjNoJitter;
+  mat4 previousViewProjNoJitter;
+};
+
+layout(std430, buffer_reference) readonly buffer VelocityFrameDataBuffer {
+  VelocityFrameData data;
+};
+
 struct StaticVertexDecodeGpuData {
   vec4 offset;
   vec4 scale;
@@ -287,9 +304,12 @@ layout(push_constant) uniform PushConstants {
   PackedVertexWordBuffer vertexBuffer;
   StaticVertexDecodeBuffer vertexDecodeBuffer;
   InstanceMatricesBuffer instanceMatrices;
+  ReadonlyInstanceMatricesBuffer previousInstanceMatrices;
   InstanceRemapBuffer instanceRemap;
   InstanceCentersPhaseBuffer instanceCentersPhase;
   InstanceBaseMatricesBuffer instanceBaseMatrices;
+  VelocityInstanceFlagsBuffer velocityInstanceFlags;
+  VelocityFrameDataBuffer velocityFrameData;
   uint instanceCount;
   uint materialIndex;
   uint vertexDecodeIndex;

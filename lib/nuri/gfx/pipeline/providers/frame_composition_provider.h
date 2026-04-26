@@ -68,6 +68,9 @@ private:
   std::array<TextureHandle, 2> historyColorTextures_{};
   FrameTextureRequirementFlags allocatedRequirements_ =
       FrameTextureRequirementFlags::None;
+  // motionVectorAllocationCount_ and motionVectorReallocationCount_ track
+  // motion-vector texture ring churn for profiling/debugging TAA reallocation
+  // frequency; other frame textures are long-lived baseline resources here.
   uint32_t motionVectorAllocationCount_ = 0u;
   uint32_t motionVectorReallocationCount_ = 0u;
   uint32_t textureRingCount_ = 0u;

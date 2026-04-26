@@ -127,6 +127,25 @@ resolveAnimationSceneFrameData(const RenderFrameContext &frame) {
   return &data;
 }
 
+bool animationSceneAnimatesRenderable(
+    const AnimationSceneFrameData &animationSceneData,
+    size_t runtimeRenderableIndex) noexcept {
+  for (const uint32_t animatedIndex :
+       animationSceneData.animatedRenderableIndices) {
+    if (animatedIndex == runtimeRenderableIndex) {
+      return true;
+    }
+  }
+  if (runtimeRenderableIndex >=
+      animationSceneData.geometryOverridesByRenderable.size()) {
+    return false;
+  }
+  const AnimatedRenderableGeometryOverride &geometryOverride =
+      animationSceneData.geometryOverridesByRenderable[runtimeRenderableIndex];
+  return geometryOverride.enabled &&
+         nuri::isValid(geometryOverride.vertexBuffer);
+}
+
 bool animationOverrideCoversSubmesh(
     const AnimatedRenderableGeometryOverride &geometryOverride,
     const Submesh &submesh) noexcept {
@@ -1327,16 +1346,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     uint32_t animatedResponsiveCount = 0u;
     double totalObjectMotion = 0.0;
     float maxObjectMotion = 0.0f;
-    const bool animatedInstances = settings.opaque.enableInstanceAnimation ||
-                                   animationSceneData != nullptr;
     for (size_t i = 0; i < instanceCount; ++i) {
       const RenderableTemplate &templ = renderableTemplates_[i];
       const Renderable *renderable = templ.renderable;
+      bool animatedInstance = settings.opaque.enableInstanceAnimation;
+      if (!animatedInstance && animationSceneData != nullptr) {
+        animatedInstance =
+            animationSceneAnimatesRenderable(*animationSceneData, i);
+      }
       const glm::mat4 currentModel =
           renderable != nullptr ? renderable->modelMatrix : glm::mat4(1.0f);
       glm::mat4 previousModel = currentModel;
       bool hasPrevious = false;
-      if (!animatedInstances && previousCacheValid && renderable != nullptr &&
+      if (!animatedInstance && previousCacheValid && renderable != nullptr &&
           nuri::isValid(renderable->id)) {
         if (const auto it = previousTransformById_.find(renderable->id);
             it != previousTransformById_.end()) {
@@ -1353,7 +1375,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         maxObjectMotion = std::max(maxObjectMotion, motion);
       } else {
         ++missingPreviousCount;
-        if (animatedInstances) {
+        if (animatedInstance) {
           ++animatedResponsiveCount;
         }
       }
@@ -3643,6 +3665,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     for (const DrawItem &sourceItem : shadedBaseDrawItems) {
       if (isTessPipeline(sourceItem.pipeline)) {
         ++skippedTessellatedDraws;
+        frame.metrics.antiAliasing.opaqueVelocityGenerated = false;
         continue;
       }
       const RenderPipelineHandle velocityPipeline =
@@ -3664,10 +3687,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         skippedTessellatedDraws;
     if (!velocityDrawItems_.empty()) {
       velocityPassDependencyBuffers_ = passDependencyBuffers_;
-      velocityPassDependencyBufferAccessModes_ = passDependencyBufferAccessModes_;
-      for (const BufferHandle handle : {previousInstanceMatricesBufferHandle,
-                                        velocityInstanceFlagsBufferHandle,
-                                        velocityFrameDataBufferHandle}) {
+      velocityPassDependencyBufferAccessModes_ =
+          passDependencyBufferAccessModes_;
+      for (const BufferHandle handle :
+           {previousInstanceMatricesBufferHandle,
+            velocityInstanceFlagsBufferHandle, velocityFrameDataBufferHandle}) {
         auto velocityDepResult = appendUniqueDependency(
             velocityPassDependencyBuffers_,
             velocityPassDependencyBufferAccessModes_, handle,
@@ -3691,16 +3715,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                  .clearDepth = kClearDepthOne,
                                  .clearStencil = 0};
       velocityPass.depthTextureHandle = sceneDepthTexture;
-      velocityPass.desc.dependencyBuffers = std::span<const BufferHandle>(
-          velocityPassDependencyBuffers_.data(),
-          velocityPassDependencyBuffers_.size());
+      velocityPass.desc.dependencyBuffers =
+          std::span<const BufferHandle>(velocityPassDependencyBuffers_.data(),
+                                        velocityPassDependencyBuffers_.size());
       velocityPass.desc.dependencyBufferAccessModes =
           std::span<const RenderGraphAccessMode>(
               velocityPassDependencyBufferAccessModes_.data(),
               velocityPassDependencyBufferAccessModes_.size());
-      velocityPass.desc.dependencyTextures =
-          std::span<const TextureHandle>(passDependencyTextures_.data(),
-                                         passDependencyTextures_.size());
+      velocityPass.desc.dependencyTextures = std::span<const TextureHandle>(
+          passDependencyTextures_.data(), passDependencyTextures_.size());
       velocityPass.desc.dependencyTextureAccessModes =
           std::span<const RenderGraphAccessMode>(
               mainPassDependencyTextureAccessModes_.data(),
@@ -3720,7 +3743,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       frame.metrics.antiAliasing.velocityPassCount = 1u;
       frame.metrics.antiAliasing.velocityDrawCount =
           saturateToU32(velocityDrawItems_.size());
-      frame.metrics.antiAliasing.opaqueVelocityGenerated = true;
+      frame.metrics.antiAliasing.opaqueVelocityGenerated =
+          skippedTessellatedDraws == 0u;
       frame.metrics.antiAliasing.velocityPassBandwidthEstimateBytes =
           frame.metrics.antiAliasing.motionVectorTextureBytes;
     }

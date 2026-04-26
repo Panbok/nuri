@@ -5,12 +5,20 @@
 #include "nuri/gfx/frame/render_frame_context.h"
 
 namespace nuri {
+namespace {
+
+[[nodiscard]] inline bool
+isTAAEnabled(const RenderSettings &settings) noexcept {
+  return sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+         AntiAliasingMode::TAA;
+}
+
+} // namespace
 
 bool TemporalAAMotionVectorClearPass::isEnabled(
     const FrameBuildContext &ctx) const {
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  return sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-         AntiAliasingMode::TAA;
+  return isTAAEnabled(settings);
 }
 
 Result<bool, std::string>
@@ -58,8 +66,7 @@ TemporalAAMotionVectorClearPass::build(FrameBuildContext &ctx) {
 Result<bool, std::string>
 TemporalAAFeature::publishFrameData(FrameBuildContext &ctx) {
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  if (sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-      AntiAliasingMode::TAA) {
+  if (isTAAEnabled(settings)) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::MotionVectors;
   }

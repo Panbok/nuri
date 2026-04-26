@@ -45,6 +45,10 @@ struct NURI_API AnimationSceneFrameData {
   // resources.
   std::span<const AnimatedRenderableGeometryOverride>
       geometryOverridesByRenderable{};
+  // Runtime renderable indices whose instance matrix is written by animation
+  // scatter this frame. Includes transform-only animated renderables that do
+  // not need a geometry override.
+  std::span<const uint32_t> animatedRenderableIndices{};
   // Scene identity this frame data was prepared for. Renderers use this to
   // reject stale animation data across scene switches.
   const RenderScene *scene = nullptr;

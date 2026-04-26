@@ -390,7 +390,8 @@ struct AnimationPoseInstance {
 struct SceneFrameState {
   explicit SceneFrameState(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
-      : baseInstances(memory), geometryOverrides(memory), preDispatches(memory),
+      : baseInstances(memory), geometryOverrides(memory),
+        animatedRenderableIndices(memory), preDispatches(memory),
         samplePushConstants(memory), sampleDependencies(memory),
         blendPushConstants(memory), blendDependencies(memory),
         worldPushConstants(memory), worldDependencies(memory),
@@ -403,6 +404,7 @@ struct SceneFrameState {
   size_t instanceMatricesCapacityBytes = 0u;
   std::pmr::vector<InstanceData> baseInstances;
   std::pmr::vector<AnimatedRenderableGeometryOverride> geometryOverrides;
+  std::pmr::vector<uint32_t> animatedRenderableIndices;
   std::pmr::vector<ComputeDispatchItem> preDispatches;
   std::pmr::vector<SamplePushConstants> samplePushConstants;
   std::pmr::vector<std::array<BufferHandle, 4>> sampleDependencies;
@@ -441,12 +443,14 @@ struct SceneFrameState {
     skinPaletteDependencies.clear();
     skinPushConstants.clear();
     skinDependencies.clear();
+    animatedRenderableIndices.clear();
   }
 };
 
 void invalidatePreparedSceneFrame(SceneFrameState &sceneFrame) noexcept {
   sceneFrame.resetTransientDispatchState();
   sceneFrame.geometryOverrides.clear();
+  sceneFrame.animatedRenderableIndices.clear();
   sceneFrame.publishedData = {};
   sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
   sceneFrame.scene = nullptr;
@@ -1048,6 +1052,7 @@ Result<bool, std::string> ensureSceneFrameBuffer(AnimationGpuServices &services,
 
   frameState.baseInstances.clear();
   frameState.geometryOverrides.clear();
+  frameState.animatedRenderableIndices.clear();
   frameState.baseInstances.reserve(scene.renderables().size());
   frameState.geometryOverrides.resize(scene.renderables().size());
   for (const Renderable &renderable : scene.renderables()) {
@@ -1350,6 +1355,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   size_t blendDispatchCount = 0u;
   size_t worldDispatchCount = 0u;
   size_t scatterDispatchCount = 0u;
+  size_t animatedRenderableIndexCount = 0u;
   size_t morphDispatchCount = 0u;
   size_t skinPaletteDispatchCount = 0u;
   size_t skinDispatchCount = 0u;
@@ -1384,6 +1390,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
     worldDispatchCount += instance.depthBucketStarts.size();
     if (!instance.renderableBindings.empty()) {
       ++scatterDispatchCount;
+      animatedRenderableIndexCount += instance.renderableBindings.size();
     }
     for (const AnimatedRenderableState &animated :
          instance.animatedRenderables) {
@@ -1405,6 +1412,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   sceneFrame.worldDependencies.reserve(worldDispatchCount);
   sceneFrame.scatterPushConstants.reserve(scatterDispatchCount);
   sceneFrame.scatterDependencies.reserve(scatterDispatchCount);
+  sceneFrame.animatedRenderableIndices.reserve(animatedRenderableIndexCount);
   sceneFrame.morphPushConstants.reserve(morphDispatchCount);
   sceneFrame.morphDependencies.reserve(morphDispatchCount);
   sceneFrame.skinPalettePushConstants.reserve(skinPaletteDispatchCount);
@@ -1667,6 +1675,11 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
     }
 
     if (!instance.renderableBindings.empty()) {
+      for (const AnimationRenderableBindingGpu &binding :
+           instance.renderableBindings) {
+        sceneFrame.animatedRenderableIndices.push_back(
+            binding.runtimeRenderableIndex);
+      }
       sceneFrame.scatterPushConstants.push_back(ScatterPushConstants{
           .renderableBindingsAddress = services_->gpu().getBufferDeviceAddress(
               instance.renderableBindingsBuffer->handle()),
@@ -1872,6 +1885,9 @@ AnimationPoseSimulationBackend::currentSceneFrameData() const noexcept {
       std::span<const AnimatedRenderableGeometryOverride>(
           impl_->sceneFrame.geometryOverrides.data(),
           impl_->sceneFrame.geometryOverrides.size());
+  frameData.animatedRenderableIndices = std::span<const uint32_t>(
+      impl_->sceneFrame.animatedRenderableIndices.data(),
+      impl_->sceneFrame.animatedRenderableIndices.size());
   frameData.scene = impl_->sceneFrame.scene;
   frameData.sceneTopologyVersion = impl_->sceneFrame.sceneTopologyVersion;
   frameData.renderableCount = impl_->sceneFrame.renderableCount;
