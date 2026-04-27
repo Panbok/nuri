@@ -71,6 +71,8 @@ TextureDesc makeTransientTextureDesc(Format format, uint32_t width,
     return sizeof(float);
   case Format::RG32_FLOAT:
     return sizeof(float) * 2u;
+  case Format::RG16_FLOAT:
+    return sizeof(uint16_t) * 2u;
   case Format::RGBA8_UNORM:
   case Format::RGBA8_SRGB:
   case Format::RGBA8_UINT:
