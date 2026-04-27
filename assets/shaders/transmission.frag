@@ -71,6 +71,15 @@ vec3 sampleTransmissionColor(vec2 uv, float roughness, float ior) {
   }
 
   float lod = clamp(transmissionFramebufferLod(roughness, ior), 0.0, 2.0);
+  if ((pc.frameData.flags & kFrameDataFlagTransmissionMipDebug) != 0u) {
+    const vec3 fullRes = vec3(1.0, 0.1, 0.1);
+    const vec3 halfRes = vec3(0.1, 1.0, 0.1);
+    const vec3 quarterRes = vec3(0.1, 0.35, 1.0);
+    if (lod <= 1.0) {
+      return mix(fullRes, halfRes, lod);
+    }
+    return mix(halfRes, quarterRes, lod - 1.0);
+  }
   if (lod <= 1.0) {
     return mix(level0, level1, lod);
   }

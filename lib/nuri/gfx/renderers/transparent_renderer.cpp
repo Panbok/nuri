@@ -714,6 +714,21 @@ TransparentRenderer::appendTransparentMainPass(RenderFrameContext &frame,
   const TextureHandle colorTexture = resolveFrameColorTexture(frame);
   const RenderGraphTextureId sceneDepthGraphTexture =
       resolveSceneDepthGraphTexture(frame);
+  const uint32_t transparentDrawCount =
+      saturateToU32(sortableDraws_.size() + fixedDraws_.size());
+  AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
+  if (transparentDrawCount > 0u && aaMetrics.taaResolvedSceneColorPublished) {
+    aaMetrics.taaTransparentPostTaaDrawCount = transparentDrawCount;
+    aaMetrics.taaTransparentPostTaaMeshDrawCount =
+        saturateToU32(meshSortableDraws_.size());
+    aaMetrics.taaTransparentPostTaaContributorDrawCount = saturateToU32(
+        contributorSortableDraws_.size() + contributorFixedDraws_.size());
+    aaMetrics.taaTransparentPostTaaFixedDrawCount =
+        saturateToU32(fixedDraws_.size());
+    aaMetrics.taaTransparentEdgeJitterTracked = true;
+    aaMetrics.taaTransparentEdgeJitterEstimate =
+        frame.camera.jitterEnabled ? 1.0f : 0.0f;
+  }
 
   return appendTransparentPass(
       graph, colorTexture, depthTexture, sceneDepthGraphTexture,

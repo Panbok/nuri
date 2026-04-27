@@ -241,6 +241,8 @@ Result<bool, std::string>
 TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   resetFrameBuildState();
   preparedSceneColorTexture_ = {};
+  preparedSceneColorHalfResTexture_ = {};
+  preparedSceneColorQuarterResTexture_ = {};
   preparedFrameColorTexture_ = {};
   preparedDepthTexture_ = {};
   preparedSceneDepthGraphTexture_ = {};
@@ -277,6 +279,10 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   }
   const TextureHandle sceneColorTexture =
       frame.sharedResources.sceneColorTexture;
+  const TextureHandle sceneColorHalfResTexture =
+      frame.sharedResources.sceneColorHalfResTexture;
+  const TextureHandle sceneColorQuarterResTexture =
+      frame.sharedResources.sceneColorQuarterResTexture;
   const TextureHandle frameColorTexture =
       frame.sharedResources.frameColorTexture;
   const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
@@ -663,12 +669,12 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   }
 
   appendUniqueTexture(passTextureReads_, sceneColorTexture);
-  appendUniqueTexture(passTextureReads_,
-                      frame.sharedResources.sceneColorHalfResTexture);
-  appendUniqueTexture(passTextureReads_,
-                      frame.sharedResources.sceneColorQuarterResTexture);
+  appendUniqueTexture(passTextureReads_, sceneColorHalfResTexture);
+  appendUniqueTexture(passTextureReads_, sceneColorQuarterResTexture);
 
   preparedSceneColorTexture_ = sceneColorTexture;
+  preparedSceneColorHalfResTexture_ = sceneColorHalfResTexture;
+  preparedSceneColorQuarterResTexture_ = sceneColorQuarterResTexture;
   preparedFrameColorTexture_ = frameColorTexture;
   preparedDepthTexture_ = depthTexture;
   preparedSceneDepthGraphTexture_ = sceneDepthGraphTexture;
@@ -699,6 +705,40 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
         "is "
         "unavailable at build time");
   }
+  AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
+  const RenderSettings &settings = settingsOrDefault(frame);
+  const AntiAliasingDebugView debugView =
+      sanitizeAntiAliasingDebugView(settings.antiAliasing.debug.view);
+  const bool normalTaaResolve =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+          AntiAliasingMode::TAA &&
+      (debugView == AntiAliasingDebugView::None ||
+       debugView == AntiAliasingDebugView::TAAResolved);
+  const bool hasSceneColorInputs =
+      nuri::isValid(preparedSceneColorTexture_) &&
+      nuri::isValid(preparedSceneColorHalfResTexture_) &&
+      nuri::isValid(preparedSceneColorQuarterResTexture_);
+  const bool consumedPostTaaSceneColor =
+      hasSceneColorInputs && aaMetrics.taaResolvedSceneColorPublished &&
+      aaMetrics.taaPostResolveSceneColorMipChainGenerated;
+  aaMetrics.taaTransmissionPostResolveSceneColorConsumed =
+      consumedPostTaaSceneColor;
+  if (normalTaaResolve && !consumedPostTaaSceneColor) {
+    ++aaMetrics.taaTransmissionStaleSceneColorFrameCount;
+  }
+  if (debugView == AntiAliasingDebugView::TAATransmissionMipSource) {
+    aaMetrics.taaTransmissionMipDebugViewRendered = true;
+    ++aaMetrics.taaTransmissionMipDebugPassCount;
+  }
+  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  if (hasGpuTimingScope(timingReport, GpuTimingScope::Transmission)) {
+    aaMetrics.taaTransmissionGpuTimeMs = timingReport.transmissionTimeMs;
+    aaMetrics.taaTransmissionGpuTimingSourceFrameIndex =
+        timingReport.transmissionSourceFrameIndex;
+    aaMetrics.taaTransmissionGpuTimingAvailable = 1u;
+  }
+  aaMetrics.taaTransmissionFlickerEstimate =
+      normalTaaResolve && !consumedPostTaaSceneColor ? 1.0f : 0.0f;
 
   NURI_PROFILER_ZONE("TransmissionRenderer.main_pass_build",
                      NURI_PROFILER_COLOR_CMD_DRAW);
@@ -802,6 +842,7 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
   passDesc.debugLabel = kTransmissionPassLabel;
   passDesc.debugColor = kTransmissionPassDebugColor;
   passDesc.borrowPayload = true;
+  passDesc.gpuTimingScope = GpuTimingScope::Transmission;
 
   auto addResult = graph.addGraphicsPass(passDesc);
   if (addResult.hasError()) {
@@ -1189,6 +1230,8 @@ void TransmissionRenderer::resetFrameBuildState() {
   passDependencyBuffers_.clear();
   passDependencyBufferAccessModes_.clear();
   preparedSceneColorTexture_ = {};
+  preparedSceneColorHalfResTexture_ = {};
+  preparedSceneColorQuarterResTexture_ = {};
   preparedFrameColorTexture_ = {};
   preparedDepthTexture_ = {};
   preparedSceneDepthGraphTexture_ = {};

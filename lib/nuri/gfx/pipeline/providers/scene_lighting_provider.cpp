@@ -19,6 +19,7 @@ enum ForwardSceneFlags : uint32_t {
   kForwardSceneHasSceneColor = 1u << 5u,
   kForwardSceneHasSceneDepth = 1u << 6u,
   kForwardSceneHasSceneDepthPyramid = 1u << 7u,
+  kForwardSceneTransmissionMipDebug = 1u << 8u,
 };
 
 struct SceneDataBufferLayout {
@@ -119,6 +120,11 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   const uint32_t materialSamplerId =
       resolveMaterialSamplerId(gpu_, textureFilteringSettingsOrDefault(frame));
   const EnvironmentHandles environment = frame.scene->environment();
+  if (sanitizeAntiAliasingDebugView(
+          renderSettingsOrDefault(frame).antiAliasing.debug.view) ==
+      AntiAliasingDebugView::TAATransmissionMipSource) {
+    flags |= kForwardSceneTransmissionMipDebug;
+  }
 
   if (const TextureRecord *cubemap =
           frame.resources->tryGet(environment.cubemap);

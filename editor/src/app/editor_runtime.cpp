@@ -922,6 +922,7 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
   frameRenderSettings_ = renderSettings_;
   applyDebugRenderEnvOverrides(frameRenderSettings_);
   sanitizeAntiAliasingSettings(frameRenderSettings_.antiAliasing);
+  frameContext_.frameIndex = frameIndex_++;
   frameContext_.camera = makeTemporalCameraFrameState(
       camera, app_.getAspectRatio(), frameRenderSettings_.antiAliasing,
       TemporalCameraFrameDesc{
@@ -933,11 +934,11 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
   frameRenderSettings_.antiAliasing.debug.resetHistoryRequested = false;
   frameContext_.settings = &frameRenderSettings_;
   frameContext_.metrics = {};
+  frameContext_.metrics.frameIndex = frameContext_.frameIndex;
   frameContext_.metrics.antiAliasing =
       makeAntiAliasingFrameMetrics(frameContext_.camera);
   frameContext_.sharedDepthTexture = {};
   frameContext_.timeSeconds = timeSecondsIn;
-  frameContext_.frameIndex = frameIndex_++;
 }
 
 void EditorRuntime::submitPipelineFrame() {

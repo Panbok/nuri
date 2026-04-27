@@ -216,6 +216,8 @@ private:
   std::filesystem::path transmissionVertexPath_{};
   std::filesystem::path transmissionFragmentPath_{};
   TextureHandle preparedSceneColorTexture_{};
+  TextureHandle preparedSceneColorHalfResTexture_{};
+  TextureHandle preparedSceneColorQuarterResTexture_{};
   TextureHandle preparedFrameColorTexture_{};
   TextureHandle preparedDepthTexture_{};
   RenderGraphTextureId preparedSceneDepthGraphTexture_{};

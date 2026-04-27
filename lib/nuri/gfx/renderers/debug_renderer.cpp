@@ -9,6 +9,8 @@
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
 
+#include <limits>
+
 namespace nuri {
 namespace {
 
@@ -35,6 +37,12 @@ const glm::vec4 kShadowTexelSnapColor(0.95f, 0.95f, 1.0f, 1.0f);
 
 [[nodiscard]] bool isSameTextureHandle(TextureHandle a, TextureHandle b) {
   return a.index == b.index && a.generation == b.generation;
+}
+
+[[nodiscard]] uint32_t saturateDebugDrawCount(size_t value) {
+  return value > std::numeric_limits<uint32_t>::max()
+             ? std::numeric_limits<uint32_t>::max()
+             : static_cast<uint32_t>(value);
 }
 
 [[nodiscard]] glm::vec3 safeNormalize(const glm::vec3 &value,
@@ -876,6 +884,14 @@ DebugRenderer::appendDebugGridPass(RenderFrameContext &frame,
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
+  AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
+  if (aaMetrics.taaResolvedSceneColorPublished) {
+    ++aaMetrics.taaOverlayPostTaaDrawCount;
+  } else if (sanitizeAntiAliasingMode(
+                 renderSettingsOrDefault(frame).antiAliasing.mode) ==
+             AntiAliasingMode::TAA) {
+    ++aaMetrics.taaOverlayHistoryContaminationFrameCount;
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -932,6 +948,15 @@ DebugRenderer::appendDebugSceneOverlayPass(RenderFrameContext &frame,
   auto addResult = graph.addGraphicsPass(pass.desc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
+  }
+  AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
+  if (aaMetrics.taaResolvedSceneColorPublished) {
+    aaMetrics.taaOverlayPostTaaDrawCount +=
+        saturateDebugDrawCount(pass.desc.draws.size());
+  } else if (sanitizeAntiAliasingMode(
+                 renderSettingsOrDefault(frame).antiAliasing.mode) ==
+             AntiAliasingMode::TAA) {
+    ++aaMetrics.taaOverlayHistoryContaminationFrameCount;
   }
   return Result<bool, std::string>::makeResult(true);
 }

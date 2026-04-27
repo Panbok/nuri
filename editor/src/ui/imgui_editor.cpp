@@ -4,6 +4,7 @@
 
 #include "nuri/app/editor_animation_player_service.h"
 #include "nuri/bakery/bakery_system.h"
+#include "nuri/core/log.h"
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
@@ -70,7 +71,7 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback"};
-constexpr std::array<const char *, 15> kAntiAliasingDebugViewLabels = {
+constexpr std::array<const char *, 21> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
     "Motion Vectors",
@@ -85,13 +86,21 @@ constexpr std::array<const char *, 15> kAntiAliasingDebugViewLabels = {
     "TAA Pixel Inspector",
     "TAA Reactive Mask",
     "TAA Disocclusion Mask",
-    "TAA Velocity Dilation"};
+    "TAA Velocity Dilation",
+    "TAA Scene Half",
+    "TAA Scene Quarter",
+    "TAA Transmission Mip",
+    "TAA Reprojected History",
+    "TAA Resolve Confidence",
+    "TAA Clamp Diagnostics"};
 constexpr std::array<const char *, 3> kTemporalAAClampModeLabels = {
     "Clamp", "Clip", "Variance"};
 constexpr std::array<const char *, 3> kTemporalAAHdrWeightingModeLabels = {
     "None", "Luminance", "Log Luminance"};
 constexpr std::array<const char *, 3> kTemporalAAVelocityDilationModeLabels = {
     "None", "Closest Depth", "Largest Magnitude"};
+constexpr std::array<const char *, 2> kTemporalAAHistoryFilterModeLabels = {
+    "Catmull-Rom", "Bilinear"};
 constexpr std::array<uint32_t, 4> kShadowMapResolutions = {1024u, 2048u, 4096u,
                                                            8192u};
 constexpr std::array<const char *, 4> kShadowMapResolutionLabels = {"1K", "2K",
@@ -302,6 +311,18 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "TAA Disocclusion Mask";
   case AntiAliasingDebugView::TAAVelocityDilation:
     return "TAA Velocity Dilation";
+  case AntiAliasingDebugView::TAASceneColorHalfRes:
+    return "TAA Scene Half";
+  case AntiAliasingDebugView::TAASceneColorQuarterRes:
+    return "TAA Scene Quarter";
+  case AntiAliasingDebugView::TAATransmissionMipSource:
+    return "TAA Transmission Mip";
+  case AntiAliasingDebugView::TAAReprojectedHistory:
+    return "TAA Reprojected History";
+  case AntiAliasingDebugView::TAAResolveConfidence:
+    return "TAA Resolve Confidence";
+  case AntiAliasingDebugView::TAAClampDiagnostics:
+    return "TAA Clamp Diagnostics";
   }
   return "Unknown";
 }
@@ -340,6 +361,17 @@ temporalAAVelocityDilationModeDisplayName(TemporalAAVelocityDilationMode mode) {
     return "Closest Depth";
   case TemporalAAVelocityDilationMode::LargestMagnitude:
     return "Largest Magnitude";
+  }
+  return "Unknown";
+}
+
+const char *
+temporalAAHistoryFilterModeDisplayName(TemporalAAHistoryFilterMode mode) {
+  switch (sanitizeTemporalAAHistoryFilterMode(mode)) {
+  case TemporalAAHistoryFilterMode::Bilinear:
+    return "Bilinear";
+  case TemporalAAHistoryFilterMode::CatmullRom:
+    return "Catmull-Rom";
   }
   return "Unknown";
 }
@@ -1932,10 +1964,23 @@ std::string antiAliasingSettingsSummary(
   summary += settings.debug.jitterEnabled ? "enabled" : "disabled";
   summary += " freezeJitter=";
   summary += settings.debug.freezeJitter ? "true" : "false";
+  summary += " logDiagnostics=";
+  summary += settings.debug.logDiagnostics ? "true" : "false";
+  summary += " logIntervalSec=";
+  summary += std::format("{:.2f}", settings.debug.diagnosticLogIntervalSeconds);
   summary += " debugView=";
   summary += antiAliasingDebugViewDisplayName(settings.debug.view);
+  summary += " taaJitterScale=";
+  summary += std::format("{:.2f}", settings.debug.taaJitterScale);
   summary += " taaCurrentWeight=";
   summary += std::format("{:.2f}", settings.debug.taaCurrentFrameWeight);
+  summary += " taaMotionWeight=";
+  summary += std::format("{:.2f}", settings.debug.taaMotionCurrentWeight);
+  summary += " taaClampWeight=";
+  summary += std::format("{:.2f}", settings.debug.taaClampCurrentWeight);
+  summary += " taaHistoryFilter=";
+  summary += temporalAAHistoryFilterModeDisplayName(
+      settings.debug.taaHistoryFilterMode);
   summary += " taaClampMode=";
   summary += temporalAAClampModeDisplayName(settings.debug.taaClampMode);
   summary += " taaHdrWeighting=";
@@ -1954,7 +1999,11 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       temporalHistoryResetReasonName(metrics.historyResetReason));
   return std::format(
       "frame=[jitter={{enabled={} frozen={} index={}/{} offset=({:.4f},{:.4f}) "
-      "bounds={} oobCount={}}} history={{valid={} temporalDataValid={} "
+      "previousOffset=({:.4f},{:.4f}) delta=({:.4f},{:.4f}) "
+      "deltaMag={:.4f} bounds={} oobCount={}}} "
+      "camera={{pos=({:.3f},{:.3f},{:.3f}) "
+      "previous=({:.3f},{:.3f},{:.3f}) delta={:.6f}}} "
+      "history={{valid={} temporalDataValid={} "
       "resetReason={} framesSinceReset={} resetCount={}}} "
       "motionVectors={{allocated={} format={} formatSupported={} "
       "dimensions={}x{} ring={} currentBytes={} previousValid={} "
@@ -1969,15 +2018,25 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       "edgeDiscontinuity={:.3f} passBytes={} debugBytes={} "
       "debugViewRendered={}}} "
       "resolve={{passes={} copyBackPasses={} dimensions={}x{} "
-      "currentWeight={:.3f} "
-      "historyWeight={:.3f} historyTextureValid={} "
+      "postTaaMipPasses={} postTaaMipChain={} transmissionPostTaa={} "
+      "staleTransmissionFrames={} mipDebugView={} "
+      "downsampleGpuMs={:.3f} downsampleTiming={} "
+      "transmissionGpuMs={:.3f} transmissionTiming={} "
+      "transmissionMipDebug={} transmissionFlicker={:.3f} "
+      "transparentPostTaaDraws={} transparentMesh={} "
+      "transparentContributors={} "
+      "transparentFixed={} transparentEdgeJitter={:.3f} "
+      "overlayPostTaaDraws={} overlayContaminationFrames={} "
+      "jitterScale={:.2f} currentWeight={:.3f} "
+      "historyWeight={:.3f} motionWeight={:.3f} clampWeight={:.3f} "
+      "historyFilter={} historyTextureValid={} "
       "oobReprojectionMeasured=false qualityValidation={} "
       "currentFallbackFrames={} bandwidthBytes={} resolvedSceneColor={} "
       "debugViewRendered={} historyValidityView={} pixelInspectorView={} "
       "oobFallback={} bilinearHistory={} depthReject={} depthThreshold={:.4f} "
       "velocityReject={} velocityThreshold={:.4f} "
       "previousVelocityDisocclusion={} "
-      "neighborhoodClamp={} adaptiveBlend={} velocityBlendScale={:.2f} "
+      "neighborhoodClamp={} adaptiveBlend={} motionBlendPerPixel={:.2f} "
       "disocclusionWeight={:.2f} clampAttenuationEnabled={} "
       "clampAttenuation={:.2f} neighborhoodFallback={} clampMode={} "
       "varianceGamma={:.2f} hdrWeighting={} hdrStrength={:.2f} "
@@ -1985,8 +2044,15 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       boolLogValue(metrics.jitterEnabled), boolLogValue(metrics.jitterFrozen),
       metrics.jitterIndex, metrics.jitterSequenceLength,
       metrics.jitterPixelOffset.x, metrics.jitterPixelOffset.y,
+      metrics.previousJitterPixelOffset.x, metrics.previousJitterPixelOffset.y,
+      metrics.jitterDeltaPixelOffset.x, metrics.jitterDeltaPixelOffset.y,
+      metrics.jitterDeltaMagnitude,
       metrics.jitterOutOfBounds ? "out-of-bounds" : "valid",
-      metrics.jitterOutOfBoundsCount, boolLogValue(metrics.historyValid),
+      metrics.jitterOutOfBoundsCount, metrics.cameraPosition.x,
+      metrics.cameraPosition.y, metrics.cameraPosition.z,
+      metrics.previousCameraPosition.x, metrics.previousCameraPosition.y,
+      metrics.previousCameraPosition.z, metrics.cameraPositionDelta,
+      boolLogValue(metrics.historyValid),
       boolLogValue(metrics.temporalDataValid), resetReason,
       metrics.framesSinceHistoryReset, metrics.historyResetCount,
       boolLogValue(metrics.motionVectorAllocated),
@@ -2023,7 +2089,27 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       boolLogValue(metrics.velocityDebugViewRendered),
       metrics.taaResolvePassCount, metrics.taaCopyBackPassCount,
       metrics.taaResolveWidth, metrics.taaResolveHeight,
+      metrics.taaPostResolveSceneColorMipPassCount,
+      boolLogValue(metrics.taaPostResolveSceneColorMipChainGenerated),
+      boolLogValue(metrics.taaTransmissionPostResolveSceneColorConsumed),
+      metrics.taaTransmissionStaleSceneColorFrameCount,
+      boolLogValue(metrics.taaSceneColorMipDebugViewRendered),
+      metrics.taaSceneColorDownsampleGpuTimeMs,
+      metrics.taaSceneColorDownsampleGpuTimingAvailable,
+      metrics.taaTransmissionGpuTimeMs,
+      metrics.taaTransmissionGpuTimingAvailable,
+      boolLogValue(metrics.taaTransmissionMipDebugViewRendered),
+      metrics.taaTransmissionFlickerEstimate,
+      metrics.taaTransparentPostTaaDrawCount,
+      metrics.taaTransparentPostTaaMeshDrawCount,
+      metrics.taaTransparentPostTaaContributorDrawCount,
+      metrics.taaTransparentPostTaaFixedDrawCount,
+      metrics.taaTransparentEdgeJitterEstimate,
+      metrics.taaOverlayPostTaaDrawCount,
+      metrics.taaOverlayHistoryContaminationFrameCount, metrics.taaJitterScale,
       metrics.taaCurrentFrameWeight, metrics.taaHistoryFrameWeight,
+      metrics.taaMotionCurrentWeight, metrics.taaClampCurrentWeight,
+      temporalAAHistoryFilterModeDisplayName(metrics.taaHistoryFilterMode),
       boolLogValue(metrics.historyValid),
       metrics.taaQualityValidationInvalidatedByFrozenJitter
           ? "invalid-freeze-jitter"
@@ -2082,16 +2168,38 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::BeginDisabled(aaDisabled);
   ImGui::Checkbox("Jitter Enabled##AntiAliasing", &aa.debug.jitterEnabled);
   ImGui::Checkbox("Freeze Jitter##AntiAliasing", &aa.debug.freezeJitter);
+  ImGui::Checkbox("Log TAA Diagnostics##AntiAliasing",
+                  &aa.debug.logDiagnostics);
+  ImGui::SliderFloat("TAA Log Interval##AntiAliasing",
+                     &aa.debug.diagnosticLogIntervalSeconds, 0.033f, 5.0f,
+                     "%.2f s");
+  ImGui::SliderFloat("TAA Jitter Scale##AntiAliasing", &aa.debug.taaJitterScale,
+                     0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Current Weight##AntiAliasing",
                      &aa.debug.taaCurrentFrameWeight, 0.0f, 1.0f, "%.2f");
+  ImGui::SliderFloat("TAA Motion Current Weight##AntiAliasing",
+                     &aa.debug.taaMotionCurrentWeight, 0.0f, 1.0f, "%.2f");
+  ImGui::SliderFloat("TAA Clamp Current Weight##AntiAliasing",
+                     &aa.debug.taaClampCurrentWeight, 0.0f, 1.0f, "%.2f");
+  int historyFilterModeIndex = static_cast<int>(aa.debug.taaHistoryFilterMode);
+  historyFilterModeIndex = std::clamp(
+      historyFilterModeIndex, 0,
+      static_cast<int>(kTemporalAAHistoryFilterModeLabels.size()) - 1);
+  if (ImGui::Combo(
+          "TAA History Filter##AntiAliasing", &historyFilterModeIndex,
+          kTemporalAAHistoryFilterModeLabels.data(),
+          static_cast<int>(kTemporalAAHistoryFilterModeLabels.size()))) {
+    aa.debug.taaHistoryFilterMode =
+        static_cast<TemporalAAHistoryFilterMode>(historyFilterModeIndex);
+  }
   ImGui::SliderFloat("TAA Depth Reject##AntiAliasing",
                      &aa.debug.taaDepthDiscontinuityThreshold, 0.0f, 0.1f,
                      "%.4f");
   ImGui::SliderFloat("TAA Velocity Reject##AntiAliasing",
                      &aa.debug.taaVelocityRejectionThreshold, 0.0f, 0.1f,
                      "%.4f");
-  ImGui::SliderFloat("TAA Velocity Blend Scale##AntiAliasing",
-                     &aa.debug.taaVelocityBlendScale, 0.0f, 128.0f, "%.1f");
+  ImGui::SliderFloat("TAA Motion Blend / px##AntiAliasing",
+                     &aa.debug.taaVelocityBlendScale, 0.0f, 4.0f, "%.2f");
   ImGui::SliderFloat("TAA Disocclusion Weight##AntiAliasing",
                      &aa.debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f,
                      "%.2f");
@@ -2169,6 +2277,9 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Text("Active Mode: %s", antiAliasingModeDisplayName(aa.mode));
   ImGui::Text("Jitter: %s", aa.debug.jitterEnabled ? "enabled" : "disabled");
   ImGui::Text("Freeze Jitter: %s", aa.debug.freezeJitter ? "yes" : "no");
+  ImGui::Text("Interval Log: %s every %.2f s",
+              aa.debug.logDiagnostics ? "enabled" : "disabled",
+              aa.debug.diagnosticLogIntervalSeconds);
   if (aa.debug.jitterEnabled && aa.debug.freezeJitter) {
     ImGui::TextColored(
         ImVec4(1.0f, 0.72f, 0.22f, 1.0f),
@@ -2185,8 +2296,12 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
               metrics.jitterSequenceLength);
   ImGui::Text("Jitter Offset: %.4f, %.4f px", metrics.jitterPixelOffset.x,
               metrics.jitterPixelOffset.y);
+  ImGui::Text("Jitter Delta: %.4f, %.4f px (%.4f)",
+              metrics.jitterDeltaPixelOffset.x,
+              metrics.jitterDeltaPixelOffset.y, metrics.jitterDeltaMagnitude);
   ImGui::Text("Jitter Bounds: %s",
               metrics.jitterOutOfBounds ? "out of range" : "valid");
+  ImGui::Text("Camera Delta: %.6f", metrics.cameraPositionDelta);
   ImGui::Text("History Valid: %s", metrics.historyValid ? "yes" : "no");
   const std::string_view resetReason =
       temporalHistoryResetReasonName(metrics.historyResetReason);
@@ -2308,10 +2423,56 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   if (ImGui::CollapsingHeader("TAA Resolve", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Text("Resolve Passes: %u", metrics.taaResolvePassCount);
     ImGui::Text("Copy Back Passes: %u", metrics.taaCopyBackPassCount);
+    ImGui::Text("Post-TAA Mip Passes: %u (%s)",
+                metrics.taaPostResolveSceneColorMipPassCount,
+                metrics.taaPostResolveSceneColorMipChainGenerated
+                    ? "generated"
+                    : "not generated");
+    ImGui::Text("Transmission Source: %s, stale frames %u",
+                metrics.taaTransmissionPostResolveSceneColorConsumed
+                    ? "post-TAA"
+                    : "not confirmed",
+                metrics.taaTransmissionStaleSceneColorFrameCount);
+    ImGui::Text("Scene Mip Debug View: %s",
+                metrics.taaSceneColorMipDebugViewRendered ? "rendered"
+                                                          : "inactive");
+    ImGui::Text("Downsample GPU Time: %.3f ms (%s, frame %llu)",
+                metrics.taaSceneColorDownsampleGpuTimeMs,
+                metrics.taaSceneColorDownsampleGpuTimingAvailable != 0u
+                    ? "available"
+                    : "pending",
+                static_cast<unsigned long long>(
+                    metrics.taaSceneColorDownsampleGpuTimingSourceFrameIndex));
+    ImGui::Text("Transmission GPU Time: %.3f ms (%s, frame %llu)",
+                metrics.taaTransmissionGpuTimeMs,
+                metrics.taaTransmissionGpuTimingAvailable != 0u ? "available"
+                                                                : "pending",
+                static_cast<unsigned long long>(
+                    metrics.taaTransmissionGpuTimingSourceFrameIndex));
+    ImGui::Text("Transmission Mip Debug: %s (%u passes)",
+                metrics.taaTransmissionMipDebugViewRendered ? "rendered"
+                                                            : "inactive",
+                metrics.taaTransmissionMipDebugPassCount);
+    ImGui::Text("Transmission Flicker Estimate: %.2f",
+                metrics.taaTransmissionFlickerEstimate);
+    ImGui::Text("Transparent Edge Jitter: %.2f (%u post-TAA draws)",
+                metrics.taaTransparentEdgeJitterEstimate,
+                metrics.taaTransparentPostTaaDrawCount);
+    ImGui::Text(
+        "Transparent Post-TAA Split: mesh %u, contributors %u, fixed %u",
+        metrics.taaTransparentPostTaaMeshDrawCount,
+        metrics.taaTransparentPostTaaContributorDrawCount,
+        metrics.taaTransparentPostTaaFixedDrawCount);
+    ImGui::Text("Overlay Contamination: %u frames, %u post-TAA draws",
+                metrics.taaOverlayHistoryContaminationFrameCount,
+                metrics.taaOverlayPostTaaDrawCount);
     ImGui::Text("Resolve Dimensions: %u x %u", metrics.taaResolveWidth,
                 metrics.taaResolveHeight);
+    ImGui::Text("Jitter Scale: %.2f", metrics.taaJitterScale);
     ImGui::Text("Blend Weights: current %.2f, history %.2f",
                 metrics.taaCurrentFrameWeight, metrics.taaHistoryFrameWeight);
+    ImGui::Text("Motion/Clamp Targets: motion %.2f, clamp %.2f",
+                metrics.taaMotionCurrentWeight, metrics.taaClampCurrentWeight);
     ImGui::Text("History Texture Valid: %s",
                 metrics.historyValid ? "yes" : "no");
     ImGui::TextUnformatted("OOB Reprojection: not measured");
@@ -2330,8 +2491,8 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                                                             : "inactive");
     ImGui::Text("OOB Fallback: %s",
                 metrics.taaOutOfBoundsFallbackEnabled ? "enabled" : "off");
-    ImGui::Text("History Sampling: %s",
-                metrics.taaBilinearHistorySampling ? "bilinear" : "inactive");
+    ImGui::Text("History Sampling: %s", temporalAAHistoryFilterModeDisplayName(
+                                            metrics.taaHistoryFilterMode));
     ImGui::Text("Depth Rejection: %s threshold %.4f",
                 metrics.taaDepthRejectionEnabled ? "enabled" : "off",
                 metrics.taaDepthDiscontinuityThreshold);
@@ -2343,13 +2504,15 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                                                                : "off");
     ImGui::Text("Neighborhood Clamp: %s",
                 metrics.taaNeighborhoodClampEnabled ? "enabled" : "off");
-    ImGui::Text("Adaptive Blend: %s scale %.1f target %.2f",
-                metrics.taaAdaptiveBlendEnabled ? "enabled" : "off",
-                metrics.taaVelocityBlendScale,
-                metrics.taaDisocclusionCurrentWeight);
-    ImGui::Text("Clamp Attenuation: %s %.2f",
+    ImGui::Text(
+        "Adaptive Blend: %s motion/px %.2f motion %.2f disocclusion %.2f",
+        metrics.taaAdaptiveBlendEnabled ? "enabled" : "off",
+        metrics.taaVelocityBlendScale, metrics.taaMotionCurrentWeight,
+        metrics.taaDisocclusionCurrentWeight);
+    ImGui::Text("Clamp Attenuation: %s %.2f target %.2f",
                 metrics.taaClampBlendAttenuationEnabled ? "enabled" : "off",
-                metrics.taaClampBlendAttenuation);
+                metrics.taaClampBlendAttenuation,
+                metrics.taaClampCurrentWeight);
     ImGui::Text("Neighborhood Fallback: %s",
                 metrics.taaNeighborhoodFallbackEnabled ? "enabled" : "off");
     ImGui::Text("Clamp Mode: %s variance gamma %.2f",
@@ -5431,6 +5594,33 @@ struct ImGuiEditor::Impl {
         graphSampleAccumulatorSeconds, kMetricGraphUpdateIntervalSeconds);
   }
 
+  void updateAntiAliasingDiagnosticsLog(double deltaSeconds) {
+    sanitizeAntiAliasingSettings(renderSettings.antiAliasing);
+    const auto &aa = renderSettings.antiAliasing;
+    if (!aa.debug.logDiagnostics) {
+      antiAliasingLogAccumulatorSeconds = 0.0;
+      return;
+    }
+
+    const double interval = static_cast<double>(
+        std::clamp(aa.debug.diagnosticLogIntervalSeconds, 0.033f, 5.0f));
+    antiAliasingLogAccumulatorSeconds += std::max(deltaSeconds, 0.0);
+    if (antiAliasingLogAccumulatorSeconds < interval ||
+        lastAntiAliasingLogFrame == frameMetrics.frameIndex) {
+      return;
+    }
+
+    const bool temporalFeaturePresent = hasTemporalAAFeature(renderPipeline);
+    const std::string diagnostics = antiAliasingDiagnosticsSummary(
+        aa, frameMetrics.antiAliasing, temporalFeaturePresent);
+    NURI_LOG_INFO("AA interval diagnostics: frame=%llu dtMs=%.3f %s",
+                  static_cast<unsigned long long>(frameMetrics.frameIndex),
+                  frameDeltaSeconds * 1000.0, diagnostics.c_str());
+    lastAntiAliasingLogFrame = frameMetrics.frameIndex;
+    antiAliasingLogAccumulatorSeconds =
+        std::fmod(antiAliasingLogAccumulatorSeconds, interval);
+  }
+
   void beginFrame() {
     NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DRAW);
     platform->newFrame();
@@ -5457,6 +5647,7 @@ struct ImGuiEditor::Impl {
                        NURI_PROFILER_COLOR_CMD_DRAW);
     fpsCounter.tick(frameDeltaSeconds, true);
     updateMetricGraphs(std::max(frameDeltaSeconds, 0.0));
+    updateAntiAliasingDiagnosticsLog(frameDeltaSeconds);
 
     logUpdateAccumulatorSeconds += std::max(frameDeltaSeconds, 0.0);
     if (logUpdateAccumulatorSeconds >= kLogUpdateIntervalSeconds) {
@@ -5708,6 +5899,8 @@ struct ImGuiEditor::Impl {
       createImPlotLinearGraph(kMetricGraphSampleCount);
   double graphSampleAccumulatorSeconds = kMetricGraphUpdateIntervalSeconds;
   double logUpdateAccumulatorSeconds = kLogUpdateIntervalSeconds;
+  double antiAliasingLogAccumulatorSeconds = 0.0;
+  uint64_t lastAntiAliasingLogFrame = std::numeric_limits<uint64_t>::max();
   bool showBakeryWindow = false;
   bool showFontCompilerWindow = false;
   bool showHierarchyWindow = true;

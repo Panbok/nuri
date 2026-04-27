@@ -989,13 +989,19 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
 
     GpuTimingReport completedReport{};
     completedReport.shadowSourceFrameIndex = pending.frameIndex;
+    completedReport.sceneColorDownsampleSourceFrameIndex = pending.frameIndex;
+    completedReport.transmissionSourceFrameIndex = pending.frameIndex;
     bool hadShadowSdsmRange = false;
     double shadowTimeMs = 0.0;
     double shadowDepthTimeMs = 0.0;
     double shadowSdsmTimeMs = 0.0;
+    double sceneColorDownsampleTimeMs = 0.0;
+    double transmissionTimeMs = 0.0;
     bool shadowTimingAvailable = false;
     bool shadowDepthTimingAvailable = false;
     bool shadowSdsmTimingAvailable = false;
+    bool sceneColorDownsampleTimingAvailable = false;
+    bool transmissionTimingAvailable = false;
     std::vector<uint64_t> queryData;
     for (const PendingTimingQueryRange &range : pending.timingRanges) {
       hadShadowSdsmRange =
@@ -1036,6 +1042,14 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
           shadowTimingAvailable = true;
           shadowSdsmTimingAvailable = true;
           break;
+        case GpuTimingScope::SceneColorDownsample:
+          sceneColorDownsampleTimeMs += intervalTimeMs;
+          sceneColorDownsampleTimingAvailable = true;
+          break;
+        case GpuTimingScope::Transmission:
+          transmissionTimeMs += intervalTimeMs;
+          transmissionTimingAvailable = true;
+          break;
         case GpuTimingScope::None:
           break;
         }
@@ -1067,6 +1081,20 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
             static_cast<unsigned long long>(pending.frameIndex),
             static_cast<float>(shadowSdsmTimeMs));
       }
+    }
+    if (sceneColorDownsampleTimingAvailable) {
+      completedReport.sceneColorDownsampleTimeMs =
+          static_cast<float>(sceneColorDownsampleTimeMs);
+      completedReport.sceneColorDownsampleSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample);
+    }
+    if (transmissionTimingAvailable) {
+      completedReport.transmissionTimeMs =
+          static_cast<float>(transmissionTimeMs);
+      completedReport.transmissionSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::Transmission);
     }
     if (hadShadowSdsmRange && !shadowSdsmTimingAvailable &&
         !impl.loggedShadowSdsmTimingCollectionWarning) {

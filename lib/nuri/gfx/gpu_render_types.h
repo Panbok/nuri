@@ -73,6 +73,8 @@ enum class GpuTimingScope : uint8_t {
   Shadow = 1,
   ShadowDepth = 2,
   ShadowSdsm = 3,
+  SceneColorDownsample = 4,
+  Transmission = 5,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -88,14 +90,23 @@ constexpr uint32_t kGpuTimingScopeShadowDepthBit =
     gpuTimingScopeToBit(GpuTimingScope::ShadowDepth);
 constexpr uint32_t kGpuTimingScopeShadowSdsmBit =
     gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
+constexpr uint32_t kGpuTimingScopeSceneColorDownsampleBit =
+    gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample);
+constexpr uint32_t kGpuTimingScopeTransmissionBit =
+    gpuTimingScopeToBit(GpuTimingScope::Transmission);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t shadowDepthSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t shadowSdsmSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t sceneColorDownsampleSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t transmissionSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
+  float sceneColorDownsampleTimeMs = 0.0f;
+  float transmissionTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
 };
 
@@ -120,6 +131,18 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
     dst.shadowSdsmTimeMs = src.shadowSdsmTimeMs;
     dst.shadowSdsmSourceFrameIndex = src.shadowSdsmSourceFrameIndex;
     dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::SceneColorDownsample)) {
+    dst.sceneColorDownsampleTimeMs = src.sceneColorDownsampleTimeMs;
+    dst.sceneColorDownsampleSourceFrameIndex =
+        src.sceneColorDownsampleSourceFrameIndex;
+    dst.availableScopeMask |=
+        gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample);
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::Transmission)) {
+    dst.transmissionTimeMs = src.transmissionTimeMs;
+    dst.transmissionSourceFrameIndex = src.transmissionSourceFrameIndex;
+    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::Transmission);
   }
 }
 

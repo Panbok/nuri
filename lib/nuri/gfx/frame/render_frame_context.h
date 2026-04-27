@@ -69,6 +69,12 @@ enum class AntiAliasingDebugView : uint8_t {
   TAAReactiveMask = 12,
   TAADisocclusionMask = 13,
   TAAVelocityDilation = 14,
+  TAASceneColorHalfRes = 15,
+  TAASceneColorQuarterRes = 16,
+  TAATransmissionMipSource = 17,
+  TAAReprojectedHistory = 18,
+  TAAResolveConfidence = 19,
+  TAAClampDiagnostics = 20,
 };
 
 enum class TemporalAAClampMode : uint8_t {
@@ -87,6 +93,11 @@ enum class TemporalAAVelocityDilationMode : uint8_t {
   None = 0,
   ClosestDepth = 1,
   LargestMagnitude = 2,
+};
+
+enum class TemporalAAHistoryFilterMode : uint8_t {
+  CatmullRom = 0,
+  Bilinear = 1,
 };
 
 enum class TemporalHistoryResetReason : uint8_t {
@@ -266,6 +277,12 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   case AntiAliasingDebugView::TAAReactiveMask:
   case AntiAliasingDebugView::TAADisocclusionMask:
   case AntiAliasingDebugView::TAAVelocityDilation:
+  case AntiAliasingDebugView::TAASceneColorHalfRes:
+  case AntiAliasingDebugView::TAASceneColorQuarterRes:
+  case AntiAliasingDebugView::TAATransmissionMipSource:
+  case AntiAliasingDebugView::TAAReprojectedHistory:
+  case AntiAliasingDebugView::TAAResolveConfidence:
+  case AntiAliasingDebugView::TAAClampDiagnostics:
     return view;
   default:
     return AntiAliasingDebugView::None;
@@ -280,7 +297,7 @@ sanitizeTemporalAAClampMode(TemporalAAClampMode mode) noexcept {
   case TemporalAAClampMode::Variance:
     return mode;
   default:
-    return TemporalAAClampMode::Clamp;
+    return TemporalAAClampMode::Variance;
   }
 }
 
@@ -306,6 +323,17 @@ sanitizeTemporalAAVelocityDilationMode(
     return mode;
   default:
     return TemporalAAVelocityDilationMode::ClosestDepth;
+  }
+}
+
+[[nodiscard]] constexpr TemporalAAHistoryFilterMode
+sanitizeTemporalAAHistoryFilterMode(TemporalAAHistoryFilterMode mode) noexcept {
+  switch (mode) {
+  case TemporalAAHistoryFilterMode::Bilinear:
+  case TemporalAAHistoryFilterMode::CatmullRom:
+    return mode;
+  default:
+    return TemporalAAHistoryFilterMode::CatmullRom;
   }
 }
 
@@ -437,23 +465,30 @@ struct RenderSettings {
     bool jitterEnabled = false;
     bool freezeJitter = false;
     bool resetHistoryRequested = false;
+    bool logDiagnostics = false;
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
-    float taaCurrentFrameWeight = 0.10f;
+    float diagnosticLogIntervalSeconds = 0.25f;
+    float taaJitterScale = 0.75f;
+    float taaCurrentFrameWeight = 0.06f;
     float taaDepthDiscontinuityThreshold = 0.01f;
-    float taaVelocityRejectionThreshold = 0.02f;
-    float taaVelocityBlendScale = 24.0f;
-    float taaDisocclusionCurrentWeight = 0.75f;
+    float taaVelocityRejectionThreshold = 0.0015f;
+    float taaVelocityBlendScale = 0.35f;
+    float taaMotionCurrentWeight = 0.35f;
+    float taaDisocclusionCurrentWeight = 0.65f;
+    float taaClampCurrentWeight = 0.50f;
     float taaClampBlendAttenuation = 0.35f;
-    float taaVarianceGamma = 1.25f;
+    float taaVarianceGamma = 1.50f;
     float taaHdrWeightStrength = 0.50f;
     float taaReactiveCurrentWeight = 0.85f;
     float taaReactiveStrength = 1.0f;
     float taaVelocityDilationDepthThreshold = 0.01f;
-    TemporalAAClampMode taaClampMode = TemporalAAClampMode::Clamp;
+    TemporalAAClampMode taaClampMode = TemporalAAClampMode::Variance;
     TemporalAAHdrWeightingMode taaHdrWeightingMode =
         TemporalAAHdrWeightingMode::Luminance;
     TemporalAAVelocityDilationMode taaVelocityDilationMode =
         TemporalAAVelocityDilationMode::ClosestDepth;
+    TemporalAAHistoryFilterMode taaHistoryFilterMode =
+        TemporalAAHistoryFilterMode::CatmullRom;
   };
 
   struct AntiAliasingSettings {
@@ -529,37 +564,59 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
       sanitizeTemporalAAVelocityDilationMode(
           settings.debug.taaVelocityDilationMode);
   if (!std::isfinite(settings.debug.taaCurrentFrameWeight)) {
-    settings.debug.taaCurrentFrameWeight = 0.10f;
+    settings.debug.taaCurrentFrameWeight = 0.06f;
   }
   settings.debug.taaCurrentFrameWeight =
       std::clamp(settings.debug.taaCurrentFrameWeight, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.diagnosticLogIntervalSeconds)) {
+    settings.debug.diagnosticLogIntervalSeconds = 0.25f;
+  }
+  settings.debug.diagnosticLogIntervalSeconds =
+      std::clamp(settings.debug.diagnosticLogIntervalSeconds, 0.033f, 5.0f);
+  if (!std::isfinite(settings.debug.taaJitterScale)) {
+    settings.debug.taaJitterScale = 0.75f;
+  }
+  settings.debug.taaJitterScale =
+      std::clamp(settings.debug.taaJitterScale, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaDepthDiscontinuityThreshold)) {
     settings.debug.taaDepthDiscontinuityThreshold = 0.01f;
   }
   settings.debug.taaDepthDiscontinuityThreshold =
       std::clamp(settings.debug.taaDepthDiscontinuityThreshold, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaVelocityRejectionThreshold)) {
-    settings.debug.taaVelocityRejectionThreshold = 0.02f;
+    settings.debug.taaVelocityRejectionThreshold = 0.0015f;
   }
   settings.debug.taaVelocityRejectionThreshold =
       std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaVelocityBlendScale)) {
-    settings.debug.taaVelocityBlendScale = 24.0f;
+    settings.debug.taaVelocityBlendScale = 0.35f;
+  } else if (settings.debug.taaVelocityBlendScale > 4.0f) {
+    settings.debug.taaVelocityBlendScale = 0.35f;
   }
   settings.debug.taaVelocityBlendScale =
-      std::clamp(settings.debug.taaVelocityBlendScale, 0.0f, 256.0f);
+      std::clamp(settings.debug.taaVelocityBlendScale, 0.0f, 4.0f);
+  if (!std::isfinite(settings.debug.taaMotionCurrentWeight)) {
+    settings.debug.taaMotionCurrentWeight = 0.35f;
+  }
+  settings.debug.taaMotionCurrentWeight =
+      std::clamp(settings.debug.taaMotionCurrentWeight, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaDisocclusionCurrentWeight)) {
-    settings.debug.taaDisocclusionCurrentWeight = 0.75f;
+    settings.debug.taaDisocclusionCurrentWeight = 0.65f;
   }
   settings.debug.taaDisocclusionCurrentWeight =
       std::clamp(settings.debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaClampCurrentWeight)) {
+    settings.debug.taaClampCurrentWeight = 0.50f;
+  }
+  settings.debug.taaClampCurrentWeight =
+      std::clamp(settings.debug.taaClampCurrentWeight, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaClampBlendAttenuation)) {
     settings.debug.taaClampBlendAttenuation = 0.35f;
   }
   settings.debug.taaClampBlendAttenuation =
       std::clamp(settings.debug.taaClampBlendAttenuation, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaVarianceGamma)) {
-    settings.debug.taaVarianceGamma = 1.25f;
+    settings.debug.taaVarianceGamma = 1.50f;
   }
   settings.debug.taaVarianceGamma =
       std::clamp(settings.debug.taaVarianceGamma, 0.0f, 4.0f);
@@ -583,6 +640,8 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   }
   settings.debug.taaVelocityDilationDepthThreshold =
       std::clamp(settings.debug.taaVelocityDilationDepthThreshold, 0.0f, 1.0f);
+  settings.debug.taaHistoryFilterMode =
+      sanitizeTemporalAAHistoryFilterMode(settings.debug.taaHistoryFilterMode);
   if (settings.mode == AntiAliasingMode::None) {
     settings.debug.jitterEnabled = false;
     settings.debug.freezeJitter = false;
@@ -891,6 +950,7 @@ struct CameraFrameState {
   glm::mat4 previousJitteredViewProj{1.0f};
   glm::vec2 jitterPixelOffset{0.0f};
   glm::vec2 previousJitterPixelOffset{0.0f};
+  glm::vec4 previousCameraPos{0.0f, 0.0f, 0.0f, 1.0f};
   glm::uvec2 renderExtent{0u, 0u};
   uint32_t jitterIndex = 0u;
   uint32_t jitterSequenceLength = kTemporalJitterSequenceLength;
@@ -910,6 +970,7 @@ struct TemporalCameraHistoryState {
   glm::mat4 previousUnjitteredViewProj{1.0f};
   glm::mat4 previousJitteredViewProj{1.0f};
   glm::vec2 previousJitterPixelOffset{0.0f};
+  glm::vec4 previousCameraPos{0.0f, 0.0f, 0.0f, 1.0f};
   glm::uvec2 previousRenderExtent{0u, 0u};
   glm::vec2 previousRenderScale{1.0f, 1.0f};
   ProjectionType previousProjectionType = ProjectionType::Perspective;
@@ -1073,7 +1134,12 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
       state.jitterIndex =
           history.nextJitterIndex % kTemporalJitterSequenceLength;
     }
-    state.jitterPixelOffset = temporalJitterPixelOffset(state.jitterIndex);
+    const float jitterScale =
+        std::isfinite(antiAliasing.debug.taaJitterScale)
+            ? std::clamp(antiAliasing.debug.taaJitterScale, 0.0f, 1.0f)
+            : 0.75f;
+    state.jitterPixelOffset =
+        temporalJitterPixelOffset(state.jitterIndex) * jitterScale;
     if (!state.jitterFrozen) {
       history.nextJitterIndex =
           (state.jitterIndex + 1u) % kTemporalJitterSequenceLength;
@@ -1105,6 +1171,8 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
   state.previousJitterPixelOffset = state.historyValid
                                         ? history.previousJitterPixelOffset
                                         : state.jitterPixelOffset;
+  state.previousCameraPos =
+      state.historyValid ? history.previousCameraPos : state.cameraPos;
   state.historyResetReason = resetReason;
   if (resetHistory) {
     ++history.historyResetCount;
@@ -1118,6 +1186,7 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
   history.previousUnjitteredViewProj = state.currentUnjitteredViewProj;
   history.previousJitteredViewProj = state.currentJitteredViewProj;
   history.previousJitterPixelOffset = state.jitterPixelOffset;
+  history.previousCameraPos = state.cameraPos;
   history.previousRenderExtent = desc.renderExtent;
   history.previousRenderScale = desc.renderScale;
   history.previousProjectionType = state.projectionType;
@@ -1482,6 +1551,10 @@ struct ShadowFrameMetrics {
 
 struct AntiAliasingFrameMetrics {
   glm::vec2 jitterPixelOffset{0.0f};
+  glm::vec2 previousJitterPixelOffset{0.0f};
+  glm::vec2 jitterDeltaPixelOffset{0.0f};
+  glm::vec4 cameraPosition{0.0f, 0.0f, 0.0f, 1.0f};
+  glm::vec4 previousCameraPosition{0.0f, 0.0f, 0.0f, 1.0f};
   Format motionVectorFormat = Format::Count;
   uint32_t jitterIndex = 0u;
   uint32_t jitterSequenceLength = kTemporalJitterSequenceLength;
@@ -1514,8 +1587,23 @@ struct AntiAliasingFrameMetrics {
   uint32_t reactiveSkippedTessellatedDrawCount = 0u;
   uint32_t taaResolvePassCount = 0u;
   uint32_t taaCopyBackPassCount = 0u;
+  uint32_t taaPostResolveSceneColorMipPassCount = 0u;
+  uint32_t taaTransmissionStaleSceneColorFrameCount = 0u;
+  uint32_t taaSceneColorDownsampleGpuTimingAvailable = 0u;
+  uint32_t taaTransmissionGpuTimingAvailable = 0u;
+  uint32_t taaTransmissionMipDebugPassCount = 0u;
+  uint32_t taaTransparentPostTaaDrawCount = 0u;
+  uint32_t taaTransparentPostTaaMeshDrawCount = 0u;
+  uint32_t taaTransparentPostTaaContributorDrawCount = 0u;
+  uint32_t taaTransparentPostTaaFixedDrawCount = 0u;
+  uint32_t taaOverlayPostTaaDrawCount = 0u;
+  uint32_t taaOverlayHistoryContaminationFrameCount = 0u;
   uint32_t taaResolveWidth = 0u;
   uint32_t taaResolveHeight = 0u;
+  uint64_t taaSceneColorDownsampleGpuTimingSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t taaTransmissionGpuTimingSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
   uint32_t taaCurrentFallbackFrameCount = 0u;
   uint64_t motionVectorTextureBytes = 0u;
   uint64_t previousMotionVectorTextureBytes = 0u;
@@ -1533,18 +1621,23 @@ struct AntiAliasingFrameMetrics {
   float velocityEstimatedMaxMagnitude = 0.0f;
   float velocityStaticResidualEstimate = 0.0f;
   float velocityCameraMatrixDelta = 0.0f;
+  float cameraPositionDelta = 0.0f;
+  float jitterDeltaMagnitude = 0.0f;
   float velocityMissingPreviousRatio = 0.0f;
   float velocityEdgeDiscontinuityEstimate = 0.0f;
-  float taaCurrentFrameWeight = 0.10f;
-  float taaHistoryFrameWeight = 0.90f;
+  float taaJitterScale = 0.75f;
+  float taaCurrentFrameWeight = 0.06f;
+  float taaHistoryFrameWeight = 0.94f;
   float taaHistoryValidPercent = 0.0f;
   float taaOutOfBoundsReprojectionPercent = 0.0f;
   float taaDepthDiscontinuityThreshold = 0.01f;
-  float taaVelocityRejectionThreshold = 0.02f;
-  float taaVelocityBlendScale = 24.0f;
-  float taaDisocclusionCurrentWeight = 0.75f;
+  float taaVelocityRejectionThreshold = 0.0015f;
+  float taaVelocityBlendScale = 0.35f;
+  float taaMotionCurrentWeight = 0.35f;
+  float taaDisocclusionCurrentWeight = 0.65f;
+  float taaClampCurrentWeight = 0.50f;
   float taaClampBlendAttenuation = 0.35f;
-  float taaVarianceGamma = 1.25f;
+  float taaVarianceGamma = 1.50f;
   float taaHdrWeightStrength = 0.50f;
   float taaReactiveCurrentWeight = 0.85f;
   float taaReactiveStrength = 1.0f;
@@ -1553,11 +1646,17 @@ struct AntiAliasingFrameMetrics {
   float taaDisocclusionRejectionEstimate = 0.0f;
   float taaVelocityDilationDepthThreshold = 0.01f;
   float taaVelocityDilationAffectedEstimate = 0.0f;
-  TemporalAAClampMode taaClampMode = TemporalAAClampMode::Clamp;
+  float taaSceneColorDownsampleGpuTimeMs = 0.0f;
+  float taaTransmissionGpuTimeMs = 0.0f;
+  float taaTransmissionFlickerEstimate = 0.0f;
+  float taaTransparentEdgeJitterEstimate = 0.0f;
+  TemporalAAClampMode taaClampMode = TemporalAAClampMode::Variance;
   TemporalAAHdrWeightingMode taaHdrWeightingMode =
       TemporalAAHdrWeightingMode::Luminance;
   TemporalAAVelocityDilationMode taaVelocityDilationMode =
       TemporalAAVelocityDilationMode::ClosestDepth;
+  TemporalAAHistoryFilterMode taaHistoryFilterMode =
+      TemporalAAHistoryFilterMode::CatmullRom;
   TemporalHistoryResetReason historyResetReason =
       TemporalHistoryResetReason::None;
   bool jitterEnabled = false;
@@ -1596,17 +1695,31 @@ struct AntiAliasingFrameMetrics {
   bool taaDisocclusionMaskDebugViewRendered = false;
   bool taaVelocityDilationEnabled = false;
   bool taaVelocityDilationDebugViewRendered = false;
+  bool taaPostResolveSceneColorMipChainGenerated = false;
+  bool taaTransmissionPostResolveSceneColorConsumed = false;
+  bool taaSceneColorMipDebugViewRendered = false;
+  bool taaTransmissionMipDebugViewRendered = false;
+  bool taaTransparentEdgeJitterTracked = false;
 };
 
 [[nodiscard]] inline AntiAliasingFrameMetrics
 makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
   return AntiAliasingFrameMetrics{
       .jitterPixelOffset = camera.jitterPixelOffset,
+      .previousJitterPixelOffset = camera.previousJitterPixelOffset,
+      .jitterDeltaPixelOffset =
+          camera.jitterPixelOffset - camera.previousJitterPixelOffset,
+      .cameraPosition = camera.cameraPos,
+      .previousCameraPosition = camera.previousCameraPos,
       .jitterIndex = camera.jitterIndex,
       .jitterSequenceLength = camera.jitterSequenceLength,
       .jitterOutOfBoundsCount = camera.jitterOutOfBoundsCount,
       .historyResetCount = camera.historyResetCount,
       .framesSinceHistoryReset = camera.framesSinceHistoryReset,
+      .cameraPositionDelta = glm::length(glm::vec3(camera.cameraPos) -
+                                         glm::vec3(camera.previousCameraPos)),
+      .jitterDeltaMagnitude = glm::length(camera.jitterPixelOffset -
+                                          camera.previousJitterPixelOffset),
       .historyResetReason = camera.historyResetReason,
       .jitterEnabled = camera.jitterEnabled,
       .jitterFrozen = camera.jitterFrozen,
@@ -1618,6 +1731,7 @@ makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
 }
 
 struct RenderFrameMetrics {
+  uint64_t frameIndex = 0u;
   OpaqueFrameMetrics opaque{};
   ShadowFrameMetrics shadow{};
   AntiAliasingFrameMetrics antiAliasing{};

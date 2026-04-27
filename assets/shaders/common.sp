@@ -12,6 +12,7 @@ const uint kFrameDataFlagOutputLinearToSrgb = 1u << 4u;
 const uint kFrameDataFlagHasSceneColor = 1u << 5u;
 const uint kFrameDataFlagHasSceneDepth = 1u << 6u;
 const uint kFrameDataFlagHasSceneDepthPyramid = 1u << 7u;
+const uint kFrameDataFlagTransmissionMipDebug = 1u << 8u;
 const uint kMaxSceneDepthPyramidLevels = 16u;
 const uint kSceneDepthPyramidTexIdPackWidth = 4u;
 const uint kSceneDepthPyramidArraySize =

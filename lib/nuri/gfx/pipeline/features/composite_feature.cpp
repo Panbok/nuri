@@ -197,7 +197,8 @@ Result<bool, std::string> addFullscreenTexturePass(
     RenderGraphBuilder &graph, RenderGraphTextureId colorTexture,
     std::span<const DrawItem> draws,
     std::span<const TextureHandle> textureReads, std::string_view debugLabel,
-    uint32_t debugColor, bool markColorAsFrameOutput = false) {
+    uint32_t debugColor, bool markColorAsFrameOutput = false,
+    GpuTimingScope gpuTimingScope = GpuTimingScope::None) {
   RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
@@ -208,6 +209,7 @@ Result<bool, std::string> addFullscreenTexturePass(
   passDesc.debugLabel = debugLabel;
   passDesc.debugColor = debugColor;
   passDesc.markColorAsFrameOutput = markColorAsFrameOutput;
+  passDesc.gpuTimingScope = gpuTimingScope;
   auto addResult = graph.addGraphicsPass(passDesc);
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
@@ -258,6 +260,21 @@ uint32_t buildPresentFlags(const PresentToneMapState &state,
     flags |= kPresentFlagCompareLegacyFallback;
   }
   return flags;
+}
+
+[[nodiscard]] TextureHandle
+resolveSceneResolveSource(const FrameBuildContext &ctx) {
+  const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
+      renderSettingsOrDefault(ctx.frame).antiAliasing.debug.view);
+  if (debugView == AntiAliasingDebugView::TAASceneColorHalfRes &&
+      nuri::isValid(ctx.shared.sceneColorHalfResTexture)) {
+    return ctx.shared.sceneColorHalfResTexture;
+  }
+  if (debugView == AntiAliasingDebugView::TAASceneColorQuarterRes &&
+      nuri::isValid(ctx.shared.sceneColorQuarterResTexture)) {
+    return ctx.shared.sceneColorQuarterResTexture;
+  }
+  return ctx.shared.sceneColorTexture;
 }
 
 Result<uint32_t, std::string> resolveLutBindlessIndex(GPUDevice &gpu,
@@ -349,6 +366,16 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeResult(true);
   }
 
+  AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
+  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  if (hasGpuTimingScope(timingReport, GpuTimingScope::SceneColorDownsample)) {
+    aaMetrics.taaSceneColorDownsampleGpuTimeMs =
+        timingReport.sceneColorDownsampleTimeMs;
+    aaMetrics.taaSceneColorDownsampleGpuTimingSourceFrameIndex =
+        timingReport.sceneColorDownsampleSourceFrameIndex;
+    aaMetrics.taaSceneColorDownsampleGpuTimingAvailable = 1u;
+  }
+
   for (uint32_t mipLevel = 1u; mipLevel < kFrameCompositionSceneColorMipCount;
        ++mipLevel) {
     const TextureHandle source =
@@ -388,9 +415,15 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
     auto addResult = addFullscreenTexturePass(
         ctx.graph, colorImportResult.value(),
         std::span<const DrawItem>(&draw, 1u), textureReads, debugLabel,
-        kDownsamplePassDebugColor);
+        kDownsamplePassDebugColor, false, GpuTimingScope::SceneColorDownsample);
     if (addResult.hasError()) {
       return addResult;
+    }
+    if (aaMetrics.taaResolvedSceneColorPublished) {
+      ++aaMetrics.taaPostResolveSceneColorMipPassCount;
+      aaMetrics.taaPostResolveSceneColorMipChainGenerated =
+          aaMetrics.taaPostResolveSceneColorMipPassCount >=
+          kFrameCompositionSceneColorMipCount - 1u;
     }
   }
 
@@ -432,11 +465,19 @@ Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  const TextureHandle source = ctx.shared.sceneColorTexture;
+  const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
+      renderSettingsOrDefault(ctx.frame).antiAliasing.debug.view);
+  const TextureHandle source = resolveSceneResolveSource(ctx);
   const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(source);
   if (sourceTexId == kInvalidTextureBindlessIndex) {
     return Result<bool, std::string>::makeError(
         "SceneResolvePass::build: invalid scene color bindless index");
+  }
+  const bool mipDebugView =
+      debugView == AntiAliasingDebugView::TAASceneColorHalfRes ||
+      debugView == AntiAliasingDebugView::TAASceneColorQuarterRes;
+  if (mipDebugView) {
+    ctx.frame.metrics.antiAliasing.taaSceneColorMipDebugViewRendered = true;
   }
 
   const CopyPushConstants pushConstants{

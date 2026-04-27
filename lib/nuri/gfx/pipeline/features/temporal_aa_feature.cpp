@@ -39,12 +39,20 @@ constexpr uint32_t kTaaResolveModeVelocityMagnitude = 9u;
 constexpr uint32_t kTaaResolveModeReactiveMask = 10u;
 constexpr uint32_t kTaaResolveModeDisocclusionMask = 11u;
 constexpr uint32_t kTaaResolveModeVelocityDilation = 12u;
+constexpr uint32_t kTaaResolveModeReprojectedHistory = 13u;
+constexpr uint32_t kTaaResolveModeResolveConfidence = 14u;
+constexpr uint32_t kTaaResolveModeClampDiagnostics = 15u;
+constexpr uint32_t kTaaHistoryFilterModeCatmullRom = 0u;
+constexpr uint32_t kTaaHistoryFilterModeBilinear = 1u;
 constexpr uint32_t kTaaResolvePassDebugColor = 0xffaa55ffu;
 constexpr uint32_t kTaaCopyBackPassDebugColor = 0xff8844ffu;
 constexpr uint32_t kTaaDebugPassDebugColor = 0xffcc77ffu;
 constexpr uint32_t kDrawDebugColor = 0xffaa44ffu;
 constexpr uint32_t kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
-constexpr float kDefaultTaaCurrentFrameWeight = 0.10f;
+constexpr float kDefaultTaaCurrentFrameWeight = 0.06f;
+constexpr float kDefaultTaaVelocityRejectionThreshold = 0.0015f;
+constexpr float kDefaultTaaVelocityBlendScale = 0.35f;
+constexpr float kDefaultTaaVarianceGamma = 1.50f;
 
 struct TAAResolvePushConstants {
   uint32_t currentTexId = 0u;
@@ -76,6 +84,9 @@ struct TAAResolvePushConstants {
   uint32_t clampMode = 0u;
   uint32_t hdrWeightingMode = 0u;
   uint32_t velocityDilationMode = 0u;
+  uint32_t motionCurrentWeightBits = 0u;
+  uint32_t clampCurrentWeightBits = 0u;
+  uint32_t historyFilterMode = 0u;
 };
 static_assert(sizeof(TAAResolvePushConstants) <= 128);
 
@@ -100,7 +111,10 @@ isTaaResolveEvaluationDebugView(AntiAliasingDebugView view) noexcept {
          view == AntiAliasingDebugView::TAAPixelInspector ||
          view == AntiAliasingDebugView::TAAReactiveMask ||
          view == AntiAliasingDebugView::TAADisocclusionMask ||
-         view == AntiAliasingDebugView::TAAVelocityDilation;
+         view == AntiAliasingDebugView::TAAVelocityDilation ||
+         view == AntiAliasingDebugView::TAAReprojectedHistory ||
+         view == AntiAliasingDebugView::TAAResolveConfidence ||
+         view == AntiAliasingDebugView::TAAClampDiagnostics;
 }
 
 [[nodiscard]] inline std::string_view
@@ -122,6 +136,12 @@ taaResolveEvaluationDebugLabel(AntiAliasingDebugView view) noexcept {
     return "TAA Disocclusion Mask Debug Pass";
   case AntiAliasingDebugView::TAAVelocityDilation:
     return "TAA Velocity Dilation Debug Pass";
+  case AntiAliasingDebugView::TAAReprojectedHistory:
+    return "TAA Reprojected History Debug Pass";
+  case AntiAliasingDebugView::TAAResolveConfidence:
+    return "TAA Resolve Confidence Debug Pass";
+  case AntiAliasingDebugView::TAAClampDiagnostics:
+    return "TAA Clamp Diagnostics Debug Pass";
   default:
     return "TAA Debug Display Pass";
   }
@@ -146,6 +166,12 @@ taaResolveModeForDebugView(AntiAliasingDebugView view) noexcept {
     return kTaaResolveModeDisocclusionMask;
   case AntiAliasingDebugView::TAAVelocityDilation:
     return kTaaResolveModeVelocityDilation;
+  case AntiAliasingDebugView::TAAReprojectedHistory:
+    return kTaaResolveModeReprojectedHistory;
+  case AntiAliasingDebugView::TAAResolveConfidence:
+    return kTaaResolveModeResolveConfidence;
+  case AntiAliasingDebugView::TAAClampDiagnostics:
+    return kTaaResolveModeClampDiagnostics;
   case AntiAliasingDebugView::MotionVectors:
     return kTaaResolveModeVelocityMotionVectors;
   case AntiAliasingDebugView::VelocityMagnitude:
@@ -158,20 +184,24 @@ taaResolveModeForDebugView(AntiAliasingDebugView view) noexcept {
 struct TAAResolveTuning {
   float currentWeight = kDefaultTaaCurrentFrameWeight;
   float depthDiscontinuityThreshold = 0.01f;
-  float velocityRejectionThreshold = 0.02f;
-  float velocityBlendScale = 24.0f;
-  float disocclusionCurrentWeight = 0.75f;
+  float velocityRejectionThreshold = kDefaultTaaVelocityRejectionThreshold;
+  float velocityBlendScale = kDefaultTaaVelocityBlendScale;
+  float motionCurrentWeight = 0.35f;
+  float disocclusionCurrentWeight = 0.65f;
+  float clampCurrentWeight = 0.50f;
   float clampBlendAttenuation = 0.35f;
-  float varianceGamma = 1.25f;
+  float varianceGamma = kDefaultTaaVarianceGamma;
   float hdrWeightStrength = 0.50f;
   float reactiveCurrentWeight = 0.85f;
   float reactiveStrength = 1.0f;
   float velocityDilationDepthThreshold = 0.01f;
-  TemporalAAClampMode clampMode = TemporalAAClampMode::Clamp;
+  TemporalAAClampMode clampMode = TemporalAAClampMode::Variance;
   TemporalAAHdrWeightingMode hdrWeightingMode =
       TemporalAAHdrWeightingMode::Luminance;
   TemporalAAVelocityDilationMode velocityDilationMode =
       TemporalAAVelocityDilationMode::ClosestDepth;
+  TemporalAAHistoryFilterMode historyFilterMode =
+      TemporalAAHistoryFilterMode::CatmullRom;
 };
 
 [[nodiscard]] inline std::filesystem::path
@@ -283,17 +313,32 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
   tuning.velocityRejectionThreshold =
       std::isfinite(settings.debug.taaVelocityRejectionThreshold)
           ? std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f, 1.0f)
-          : 0.02f;
-  tuning.velocityBlendScale =
-      std::isfinite(settings.debug.taaVelocityBlendScale)
-          ? std::clamp(settings.debug.taaVelocityBlendScale, 0.0f, 256.0f)
-          : 24.0f;
+          : kDefaultTaaVelocityRejectionThreshold;
+  if (!std::isfinite(settings.debug.taaVelocityBlendScale) ||
+      settings.debug.taaVelocityBlendScale > 4.0f) {
+    tuning.velocityBlendScale = kDefaultTaaVelocityBlendScale;
+  } else {
+    tuning.velocityBlendScale =
+        std::clamp(settings.debug.taaVelocityBlendScale, 0.0f, 4.0f);
+  }
+  tuning.motionCurrentWeight =
+      std::isfinite(settings.debug.taaMotionCurrentWeight)
+          ? std::clamp(settings.debug.taaMotionCurrentWeight, 0.0f, 1.0f)
+          : 0.35f;
+  tuning.motionCurrentWeight =
+      std::max(tuning.motionCurrentWeight, tuning.currentWeight);
   tuning.disocclusionCurrentWeight =
       std::isfinite(settings.debug.taaDisocclusionCurrentWeight)
           ? std::clamp(settings.debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f)
-          : 0.75f;
+          : 0.65f;
   tuning.disocclusionCurrentWeight =
       std::max(tuning.disocclusionCurrentWeight, tuning.currentWeight);
+  tuning.clampCurrentWeight =
+      std::isfinite(settings.debug.taaClampCurrentWeight)
+          ? std::clamp(settings.debug.taaClampCurrentWeight, 0.0f, 1.0f)
+          : 0.50f;
+  tuning.clampCurrentWeight =
+      std::max(tuning.clampCurrentWeight, tuning.currentWeight);
   tuning.clampBlendAttenuation =
       std::isfinite(settings.debug.taaClampBlendAttenuation)
           ? std::clamp(settings.debug.taaClampBlendAttenuation, 0.0f, 1.0f)
@@ -301,7 +346,7 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
   tuning.varianceGamma =
       std::isfinite(settings.debug.taaVarianceGamma)
           ? std::clamp(settings.debug.taaVarianceGamma, 0.0f, 4.0f)
-          : 1.25f;
+          : kDefaultTaaVarianceGamma;
   tuning.hdrWeightStrength =
       std::isfinite(settings.debug.taaHdrWeightStrength)
           ? std::clamp(settings.debug.taaHdrWeightStrength, 0.0f, 1.0f)
@@ -324,6 +369,8 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
       sanitizeTemporalAAHdrWeightingMode(settings.debug.taaHdrWeightingMode);
   tuning.velocityDilationMode = sanitizeTemporalAAVelocityDilationMode(
       settings.debug.taaVelocityDilationMode);
+  tuning.historyFilterMode =
+      sanitizeTemporalAAHistoryFilterMode(settings.debug.taaHistoryFilterMode);
   return tuning;
 }
 
@@ -625,8 +672,12 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       std::bit_cast<uint32_t>(tuning.velocityRejectionThreshold);
   const uint32_t velocityBlendScaleBits =
       std::bit_cast<uint32_t>(tuning.velocityBlendScale);
+  const uint32_t motionCurrentWeightBits =
+      std::bit_cast<uint32_t>(tuning.motionCurrentWeight);
   const uint32_t disocclusionWeightBits =
       std::bit_cast<uint32_t>(tuning.disocclusionCurrentWeight);
+  const uint32_t clampCurrentWeightBits =
+      std::bit_cast<uint32_t>(tuning.clampCurrentWeight);
   const uint32_t clampAttenuationBits =
       std::bit_cast<uint32_t>(tuning.clampBlendAttenuation);
   const uint32_t varianceGammaBits =
@@ -645,6 +696,11 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       sanitizeTemporalAAHdrWeightingMode(tuning.hdrWeightingMode));
   const uint32_t velocityDilationMode = static_cast<uint32_t>(
       sanitizeTemporalAAVelocityDilationMode(tuning.velocityDilationMode));
+  const uint32_t historyFilterMode =
+      sanitizeTemporalAAHistoryFilterMode(tuning.historyFilterMode) ==
+              TemporalAAHistoryFilterMode::Bilinear
+          ? kTaaHistoryFilterModeBilinear
+          : kTaaHistoryFilterModeCatmullRom;
 
   auto importScene = ctx.graph.importTexture(ctx.shared.sceneColorTexture,
                                              "taa_scene_color_current");
@@ -685,17 +741,26 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   aaMetrics.taaResolveWidth = sceneDimensions.width;
   aaMetrics.taaResolveHeight = sceneDimensions.height;
+  const float jitterScale =
+      ctx.frame.settings != nullptr
+          ? ctx.frame.settings->antiAliasing.debug.taaJitterScale
+          : 0.75f;
+  aaMetrics.taaJitterScale =
+      std::isfinite(jitterScale) ? std::clamp(jitterScale, 0.0f, 1.0f) : 0.75f;
   aaMetrics.taaCurrentFrameWeight = tuning.currentWeight;
   aaMetrics.taaHistoryFrameWeight = 1.0f - tuning.currentWeight;
   aaMetrics.taaHistoryValidPercent =
       ctx.frame.camera.historyValid ? 100.0f : 0.0f;
   aaMetrics.taaOutOfBoundsFallbackEnabled = true;
-  aaMetrics.taaBilinearHistorySampling = true;
+  aaMetrics.taaBilinearHistorySampling =
+      tuning.historyFilterMode == TemporalAAHistoryFilterMode::Bilinear;
   aaMetrics.previousMotionVectorGraphPublished = usePreviousVelocity;
   aaMetrics.taaDepthDiscontinuityThreshold = tuning.depthDiscontinuityThreshold;
   aaMetrics.taaVelocityRejectionThreshold = tuning.velocityRejectionThreshold;
   aaMetrics.taaVelocityBlendScale = tuning.velocityBlendScale;
+  aaMetrics.taaMotionCurrentWeight = tuning.motionCurrentWeight;
   aaMetrics.taaDisocclusionCurrentWeight = tuning.disocclusionCurrentWeight;
+  aaMetrics.taaClampCurrentWeight = tuning.clampCurrentWeight;
   aaMetrics.taaClampBlendAttenuation = tuning.clampBlendAttenuation;
   aaMetrics.taaVarianceGamma = tuning.varianceGamma;
   aaMetrics.taaHdrWeightStrength = tuning.hdrWeightStrength;
@@ -706,6 +771,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   aaMetrics.taaClampMode = tuning.clampMode;
   aaMetrics.taaHdrWeightingMode = tuning.hdrWeightingMode;
   aaMetrics.taaVelocityDilationMode = tuning.velocityDilationMode;
+  aaMetrics.taaHistoryFilterMode = tuning.historyFilterMode;
   aaMetrics.taaDepthRejectionEnabled = temporalHistoryValid;
   aaMetrics.taaVelocityRejectionEnabled = usePreviousVelocity;
   aaMetrics.taaPreviousVelocityDisocclusionEnabled = usePreviousVelocity;
@@ -756,6 +822,9 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       .clampMode = clampMode,
       .hdrWeightingMode = hdrWeightingMode,
       .velocityDilationMode = velocityDilationMode,
+      .motionCurrentWeightBits = motionCurrentWeightBits,
+      .clampCurrentWeightBits = clampCurrentWeightBits,
+      .historyFilterMode = historyFilterMode,
   };
   const DrawItem resolveDraw = makeFullscreenDraw(
       pipeline_,
@@ -880,6 +949,9 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       .clampMode = clampMode,
       .hdrWeightingMode = hdrWeightingMode,
       .velocityDilationMode = velocityDilationMode,
+      .motionCurrentWeightBits = motionCurrentWeightBits,
+      .clampCurrentWeightBits = clampCurrentWeightBits,
+      .historyFilterMode = historyFilterMode,
   };
   const DrawItem copyDraw = makeFullscreenDraw(
       pipeline_,
@@ -911,23 +983,85 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     copyReads[copyReadCount++] = ctx.shared.historyColorWriteTexture;
   }
 
-  RenderGraphGraphicsPassDesc copyPass{};
-  copyPass.color = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  copyPass.colorTexture = importScene.value();
-  copyPass.dependencyTextures =
-      std::span<const TextureHandle>(copyReads.data(), copyReadCount);
-  copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
-  copyPass.debugLabel = displayLabel;
-  copyPass.debugColor = displayColor;
-  auto addCopy = ctx.graph.addGraphicsPass(copyPass);
-  if (addCopy.hasError()) {
-    return Result<bool, std::string>::makeError(addCopy.error());
+  if (displaySamplesTemporalEvaluation) {
+    if (!nuri::isValid(ctx.shared.frameColorTexture)) {
+      return Result<bool, std::string>::makeError(
+          "TemporalAAResolvePass::build: missing TAA debug output texture");
+    }
+
+    const uint32_t debugOutputTexId =
+        gpu_.getTextureBindlessIndex(ctx.shared.frameColorTexture);
+    if (debugOutputTexId == kInvalidTextureBindlessIndex) {
+      return Result<bool, std::string>::makeError(
+          "TemporalAAResolvePass::build: invalid TAA debug output texture");
+    }
+
+    auto importDebugOutput = ctx.graph.importTexture(
+        ctx.shared.frameColorTexture, "taa_debug_output");
+    if (importDebugOutput.hasError()) {
+      return Result<bool, std::string>::makeError(importDebugOutput.error());
+    }
+
+    RenderGraphGraphicsPassDesc debugPass{};
+    debugPass.color = {.loadOp = LoadOp::Clear,
+                       .storeOp = StoreOp::Store,
+                       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+    debugPass.colorTexture = importDebugOutput.value();
+    debugPass.dependencyTextures =
+        std::span<const TextureHandle>(copyReads.data(), copyReadCount);
+    debugPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
+    debugPass.debugLabel = displayLabel;
+    debugPass.debugColor = displayColor;
+    auto addDebug = ctx.graph.addGraphicsPass(debugPass);
+    if (addDebug.hasError()) {
+      return Result<bool, std::string>::makeError(addDebug.error());
+    }
+
+    TAAResolvePushConstants debugCopyConstants = copyConstants;
+    debugCopyConstants.currentTexId = debugOutputTexId;
+    debugCopyConstants.mode = kTaaResolveModeCopyCurrent;
+    const DrawItem debugCopyDraw = makeFullscreenDraw(
+        pipeline_,
+        std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(&debugCopyConstants),
+            sizeof(debugCopyConstants)),
+        "TaaDebugCopyBack");
+
+    const std::array<TextureHandle, 1> debugCopyReads{
+        ctx.shared.frameColorTexture};
+    RenderGraphGraphicsPassDesc debugCopyPass{};
+    debugCopyPass.color = {.loadOp = LoadOp::Clear,
+                           .storeOp = StoreOp::Store,
+                           .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+    debugCopyPass.colorTexture = importScene.value();
+    debugCopyPass.dependencyTextures = std::span<const TextureHandle>(
+        debugCopyReads.data(), debugCopyReads.size());
+    debugCopyPass.draws = std::span<const DrawItem>(&debugCopyDraw, 1u);
+    debugCopyPass.debugLabel = "TAA Debug Copy Back Pass";
+    debugCopyPass.debugColor = kTaaCopyBackPassDebugColor;
+    auto addDebugCopy = ctx.graph.addGraphicsPass(debugCopyPass);
+    if (addDebugCopy.hasError()) {
+      return Result<bool, std::string>::makeError(addDebugCopy.error());
+    }
+  } else {
+    RenderGraphGraphicsPassDesc copyPass{};
+    copyPass.color = {.loadOp = LoadOp::Clear,
+                      .storeOp = StoreOp::Store,
+                      .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+    copyPass.colorTexture = importScene.value();
+    copyPass.dependencyTextures =
+        std::span<const TextureHandle>(copyReads.data(), copyReadCount);
+    copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
+    copyPass.debugLabel = displayLabel;
+    copyPass.debugColor = displayColor;
+    auto addCopy = ctx.graph.addGraphicsPass(copyPass);
+    if (addCopy.hasError()) {
+      return Result<bool, std::string>::makeError(addCopy.error());
+    }
   }
 
   ctx.shared.sceneColorGraphTexture = importScene.value();
-  ++aaMetrics.taaCopyBackPassCount;
+  aaMetrics.taaCopyBackPassCount += displaySamplesTemporalEvaluation ? 2u : 1u;
   aaMetrics.taaResolvedSceneColorPublished = !debugDisplay;
   aaMetrics.taaDebugViewRendered = debugDisplay;
   aaMetrics.taaHistoryValidityDebugViewRendered =
@@ -950,6 +1084,9 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   aaMetrics.taaHistoryBandwidthEstimateBytes +=
       textureStorageBytes(gpu_, displaySource) +
       textureStorageBytes(gpu_, ctx.shared.sceneColorTexture) +
+      (displaySamplesTemporalEvaluation
+           ? textureStorageBytes(gpu_, ctx.shared.frameColorTexture) * 2u
+           : 0u) +
       (displaySamplesTemporalEvaluation && temporalHistoryValid
            ? textureStorageBytes(gpu_, ctx.shared.historyColorReadTexture) +
                  textureStorageBytes(gpu_, ctx.shared.sceneDepthTexture) +
