@@ -41,6 +41,24 @@ const uint kTaaVelocityDilationModeLargestMagnitude = 2u;
 const uint kTaaHistoryFilterModeCatmullRom = 0u;
 const uint kTaaHistoryFilterModeBilinear = 1u;
 const float kVelocityDebugScale = 64.0;
+const float kClampEpsilon = 0.00001;
+// Shader-local TAA neighborhood thresholds. Promote these to settings only when
+// runtime tuning is needed; the push constant block is kept within 128 bytes.
+const float kHighFrequencyLuminanceScaleFloor = 0.25;
+const float kHighFrequencySpanLow = 0.015;
+const float kHighFrequencySpanHigh = 0.12;
+const float kEdgeLuminanceScaleFloor = 0.25;
+const float kEdgeSpanLow = 0.03;
+const float kEdgeSpanHigh = 0.18;
+const float kCenterDeviationLow = 0.01;
+const float kCenterDeviationHigh = 0.10;
+const float kAntialiasMotionLow = 0.50;
+const float kAntialiasMotionHigh = 8.0;
+const float kAntialiasMotionScale = 0.22;
+const float kAntialiasRejectionLow = 0.10;
+const float kAntialiasRejectionHigh = 0.75;
+const float kAntialiasRejectionScale = 0.35;
+const float kMaxAntialiasFilterStrength = 0.35;
 
 layout(push_constant) uniform TAAResolvePushConstants {
   uint currentTexId;
@@ -134,6 +152,7 @@ vec4 historyColor(vec2 sampleUv) {
   return textureBindless2D(pc.historyTexId, pc.historySamplerId, sampleUv);
 }
 
+// Uses the depth sampler as the shared point sampler for exact texel taps.
 vec4 historyColorPoint(vec2 sampleUv) {
   return textureBindless2D(pc.historyTexId, pc.depthSamplerId, sampleUv);
 }
@@ -159,7 +178,7 @@ vec3 historyColorCatmullRom(vec2 sampleUv) {
   const vec2 texelFraction = texelPosition - baseTexel;
   const vec2 halfTexel = invExtent * 0.5;
   const vec2 minUv = halfTexel;
-  const vec2 maxUv = max(halfTexel, vec2(1.0) - halfTexel);
+  const vec2 maxUv = vec2(1.0) - halfTexel;
 
   vec3 sum = vec3(0.0);
   float weightSum = 0.0;
@@ -280,6 +299,10 @@ vec4 velocityDebugColor(vec2 sampleUv, uint mode) {
               1.0);
 }
 
+float luminance(vec3 color) {
+  return dot(max(color, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+}
+
 Neighborhood currentNeighborhood(vec2 centerUv) {
   const vec2 invExtent = vec2(max(pushFloat(pc.inverseWidthBits), 0.0),
                               max(pushFloat(pc.inverseHeightBits), 0.0));
@@ -300,8 +323,7 @@ Neighborhood currentNeighborhood(vec2 centerUv) {
                 vec2(1.0));
       const vec3 color = currentColor(sampleUv).rgb;
       const float depth = sceneDepth(sampleUv);
-      const float colorLuminance =
-          dot(max(color, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+      const float colorLuminance = luminance(color);
       neighborhood.minColor = min(neighborhood.minColor, color);
       neighborhood.maxColor = max(neighborhood.maxColor, color);
       neighborhood.avgColor += color;
@@ -329,10 +351,6 @@ vec3 clipToAabb(vec3 value, vec3 minValue, vec3 maxValue) {
   const vec3 unit = abs(offset) / extents;
   const float maxUnit = max(max(unit.x, unit.y), unit.z);
   return maxUnit > 1.0 ? center + offset / maxUnit : value;
-}
-
-float luminance(vec3 color) {
-  return dot(max(color, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
 }
 
 float hdrWeight(vec3 current, vec3 history, float strength) {
@@ -377,37 +395,42 @@ vec3 validateHistoryColor(vec3 history, Neighborhood neighborhood,
 
 float neighborhoodHighFrequencyStrength(Neighborhood neighborhood) {
   const float avgLuminance = luminance(neighborhood.avgColor);
-  const float luminanceScale = max(abs(avgLuminance), 0.25);
+  const float luminanceScale =
+      max(abs(avgLuminance), kHighFrequencyLuminanceScaleFloor);
   const float neighborhoodSpan =
       (neighborhood.maxLuminance - neighborhood.minLuminance) / luminanceScale;
-  return smoothstep(0.015, 0.12, neighborhoodSpan);
+  return smoothstep(kHighFrequencySpanLow, kHighFrequencySpanHigh,
+                    neighborhoodSpan);
 }
 
 float neighborhoodEdgeStrength(vec3 current, Neighborhood neighborhood) {
   const float currentLuminance = luminance(current);
   const float avgLuminance = luminance(neighborhood.avgColor);
-  const float luminanceScale =
-      max(max(abs(currentLuminance), abs(avgLuminance)), 0.25);
+  const float luminanceScale = max(
+      max(abs(currentLuminance), abs(avgLuminance)), kEdgeLuminanceScaleFloor);
   const float neighborhoodSpan =
       (neighborhood.maxLuminance - neighborhood.minLuminance) / luminanceScale;
   const float centerDeviation =
       abs(currentLuminance - avgLuminance) / luminanceScale;
-  return smoothstep(0.03, 0.18, neighborhoodSpan) *
-         smoothstep(0.01, 0.10, centerDeviation);
+  return smoothstep(kEdgeSpanLow, kEdgeSpanHigh, neighborhoodSpan) *
+         smoothstep(kCenterDeviationLow, kCenterDeviationHigh, centerDeviation);
 }
 
 vec3 antialiasCurrentColor(vec3 current, Neighborhood neighborhood,
                            float motionPixels, float disocclusionBlend,
                            float clampConfidence, float rejectionStrength) {
   const float edgeStrength = neighborhoodEdgeStrength(current, neighborhood);
-  const float motionFilter = smoothstep(0.50, 8.0, motionPixels) * 0.22;
+  const float motionFilter =
+      smoothstep(kAntialiasMotionLow, kAntialiasMotionHigh, motionPixels) *
+      kAntialiasMotionScale;
   const float rejectionFilter =
       smoothstep(
-          0.10, 0.75,
+          kAntialiasRejectionLow, kAntialiasRejectionHigh,
           max(max(disocclusionBlend, clampConfidence), rejectionStrength)) *
-      0.35;
+      kAntialiasRejectionScale;
   const float filterStrength =
-      clamp(edgeStrength * max(motionFilter, rejectionFilter), 0.0, 0.35);
+      clamp(edgeStrength * max(motionFilter, rejectionFilter), 0.0,
+            kMaxAntialiasFilterStrength);
   return mix(current, neighborhood.avgColor, filterStrength);
 }
 
@@ -512,7 +535,7 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   if (flagEnabled(kTaaResolveFlagNeighborhoodClamp)) {
     result.rawClampDelta = clampDelta;
     result.clampDelta = clampDelta;
-    if (result.clampDelta > 0.00001) {
+    if (result.clampDelta > kClampEpsilon) {
       // On static subpixel geometry the jittered current neighborhood can
       // over-constrain an already aligned history sample. Keep the clamp
       // strict once reprojection is moving, but let stable pixels retain more
@@ -556,8 +579,9 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
                                dynamicDisocclusionBlend));
 
     float clampStrength = 0.0;
+    float confidenceForBlend = 0.0;
     if (flagEnabled(kTaaResolveFlagNeighborhoodClamp) &&
-        result.clampDelta > 0.00001) {
+        result.clampDelta > kClampEpsilon) {
       clampStrength =
           clamp(result.clampDelta / neighborhoodColorSpan, 0.0, 1.0);
       clampConfidence = clamp(
@@ -568,12 +592,13 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
                                              clampConfidence));
       result.rejectionStrength =
           max(result.rejectionStrength, clampConfidence * 0.25);
-      clampStrength = clampConfidence;
+      confidenceForBlend = clampConfidence;
     }
-    const float confidenceBlend = max(dynamicDisocclusionBlend, clampStrength);
+    const float confidenceBlend =
+        max(dynamicDisocclusionBlend, confidenceForBlend);
 
     if (flagEnabled(kTaaResolveFlagClampBlendAttenuation) &&
-        result.clampDelta > 0.00001 && confidenceBlend > 0.0) {
+        result.clampDelta > kClampEpsilon && confidenceBlend > 0.0) {
       const float clampAttenuation =
           clamp(pushFloat(pc.clampAttenuationBits), 0.0, 1.0);
       const float attenuationBlend =

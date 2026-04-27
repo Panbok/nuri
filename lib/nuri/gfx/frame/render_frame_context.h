@@ -590,8 +590,6 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
       std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaVelocityBlendScale)) {
     settings.debug.taaVelocityBlendScale = 0.35f;
-  } else if (settings.debug.taaVelocityBlendScale > 4.0f) {
-    settings.debug.taaVelocityBlendScale = 0.35f;
   }
   settings.debug.taaVelocityBlendScale =
       std::clamp(settings.debug.taaVelocityBlendScale, 0.0f, 4.0f);
@@ -1704,11 +1702,12 @@ struct AntiAliasingFrameMetrics {
 
 [[nodiscard]] inline AntiAliasingFrameMetrics
 makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
+  const glm::vec2 jitterDelta =
+      camera.jitterPixelOffset - camera.previousJitterPixelOffset;
   return AntiAliasingFrameMetrics{
       .jitterPixelOffset = camera.jitterPixelOffset,
       .previousJitterPixelOffset = camera.previousJitterPixelOffset,
-      .jitterDeltaPixelOffset =
-          camera.jitterPixelOffset - camera.previousJitterPixelOffset,
+      .jitterDeltaPixelOffset = jitterDelta,
       .cameraPosition = camera.cameraPos,
       .previousCameraPosition = camera.previousCameraPos,
       .jitterIndex = camera.jitterIndex,
@@ -1718,8 +1717,7 @@ makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
       .framesSinceHistoryReset = camera.framesSinceHistoryReset,
       .cameraPositionDelta = glm::length(glm::vec3(camera.cameraPos) -
                                          glm::vec3(camera.previousCameraPos)),
-      .jitterDeltaMagnitude = glm::length(camera.jitterPixelOffset -
-                                          camera.previousJitterPixelOffset),
+      .jitterDeltaMagnitude = glm::length(jitterDelta),
       .historyResetReason = camera.historyResetReason,
       .jitterEnabled = camera.jitterEnabled,
       .jitterFrozen = camera.jitterFrozen,

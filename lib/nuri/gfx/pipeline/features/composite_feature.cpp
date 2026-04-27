@@ -262,19 +262,26 @@ uint32_t buildPresentFlags(const PresentToneMapState &state,
   return flags;
 }
 
-[[nodiscard]] TextureHandle
+struct SceneResolveSource {
+  TextureHandle texture{};
+  AntiAliasingDebugView debugView = AntiAliasingDebugView::None;
+};
+
+[[nodiscard]] SceneResolveSource
 resolveSceneResolveSource(const FrameBuildContext &ctx) {
   const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
       renderSettingsOrDefault(ctx.frame).antiAliasing.debug.view);
   if (debugView == AntiAliasingDebugView::TAASceneColorHalfRes &&
       nuri::isValid(ctx.shared.sceneColorHalfResTexture)) {
-    return ctx.shared.sceneColorHalfResTexture;
+    return {.texture = ctx.shared.sceneColorHalfResTexture,
+            .debugView = debugView};
   }
   if (debugView == AntiAliasingDebugView::TAASceneColorQuarterRes &&
       nuri::isValid(ctx.shared.sceneColorQuarterResTexture)) {
-    return ctx.shared.sceneColorQuarterResTexture;
+    return {.texture = ctx.shared.sceneColorQuarterResTexture,
+            .debugView = debugView};
   }
-  return ctx.shared.sceneColorTexture;
+  return {.texture = ctx.shared.sceneColorTexture, .debugView = debugView};
 }
 
 Result<uint32_t, std::string> resolveLutBindlessIndex(GPUDevice &gpu,
@@ -465,17 +472,15 @@ Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
-      renderSettingsOrDefault(ctx.frame).antiAliasing.debug.view);
-  const TextureHandle source = resolveSceneResolveSource(ctx);
-  const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(source);
+  const SceneResolveSource source = resolveSceneResolveSource(ctx);
+  const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(source.texture);
   if (sourceTexId == kInvalidTextureBindlessIndex) {
     return Result<bool, std::string>::makeError(
         "SceneResolvePass::build: invalid scene color bindless index");
   }
   const bool mipDebugView =
-      debugView == AntiAliasingDebugView::TAASceneColorHalfRes ||
-      debugView == AntiAliasingDebugView::TAASceneColorQuarterRes;
+      source.debugView == AntiAliasingDebugView::TAASceneColorHalfRes ||
+      source.debugView == AntiAliasingDebugView::TAASceneColorQuarterRes;
   if (mipDebugView) {
     ctx.frame.metrics.antiAliasing.taaSceneColorMipDebugViewRendered = true;
   }
@@ -495,8 +500,9 @@ Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
   if (ctx.frame.frameIndex < kInitialDebugFrames) {
     NURI_LOG_DEBUG("SceneResolvePass::build: frame=%" PRIu64
                    " sourceHandle=%u:%u sourceTexId=%u targetHandle=%u:%u",
-                   ctx.frame.frameIndex, source.index, source.generation,
-                   sourceTexId, ctx.shared.frameColorTexture.index,
+                   ctx.frame.frameIndex, source.texture.index,
+                   source.texture.generation, sourceTexId,
+                   ctx.shared.frameColorTexture.index,
                    ctx.shared.frameColorTexture.generation);
   }
 
@@ -505,7 +511,7 @@ Result<bool, std::string> SceneResolvePass::build(FrameBuildContext &ctx) {
   if (colorImportResult.hasError()) {
     return Result<bool, std::string>::makeError(colorImportResult.error());
   }
-  const std::span<const TextureHandle> textureReads(&source, 1u);
+  const std::span<const TextureHandle> textureReads(&source.texture, 1u);
   auto addResult = addFullscreenTexturePass(
       ctx.graph, colorImportResult.value(),
       std::span<const DrawItem>(&draw, 1u), textureReads, "Scene Resolve Pass",

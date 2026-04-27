@@ -216,6 +216,7 @@ private:
   std::filesystem::path transmissionVertexPath_{};
   std::filesystem::path transmissionFragmentPath_{};
   TextureHandle preparedSceneColorTexture_{};
+  // Downsampled scene color prepared for transmission mip/debug paths.
   TextureHandle preparedSceneColorHalfResTexture_{};
   TextureHandle preparedSceneColorQuarterResTexture_{};
   TextureHandle preparedFrameColorTexture_{};

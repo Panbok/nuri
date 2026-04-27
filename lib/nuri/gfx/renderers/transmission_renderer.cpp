@@ -714,10 +714,7 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
           AntiAliasingMode::TAA &&
       (debugView == AntiAliasingDebugView::None ||
        debugView == AntiAliasingDebugView::TAAResolved);
-  const bool hasSceneColorInputs =
-      nuri::isValid(preparedSceneColorTexture_) &&
-      nuri::isValid(preparedSceneColorHalfResTexture_) &&
-      nuri::isValid(preparedSceneColorQuarterResTexture_);
+  const bool hasSceneColorInputs = nuri::isValid(preparedSceneColorTexture_);
   const bool consumedPostTaaSceneColor =
       hasSceneColorInputs && aaMetrics.taaResolvedSceneColorPublished &&
       aaMetrics.taaPostResolveSceneColorMipChainGenerated;

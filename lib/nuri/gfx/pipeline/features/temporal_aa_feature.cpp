@@ -314,8 +314,7 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
       std::isfinite(settings.debug.taaVelocityRejectionThreshold)
           ? std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f, 1.0f)
           : kDefaultTaaVelocityRejectionThreshold;
-  if (!std::isfinite(settings.debug.taaVelocityBlendScale) ||
-      settings.debug.taaVelocityBlendScale > 4.0f) {
+  if (!std::isfinite(settings.debug.taaVelocityBlendScale)) {
     tuning.velocityBlendScale = kDefaultTaaVelocityBlendScale;
   } else {
     tuning.velocityBlendScale =
@@ -697,8 +696,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   const uint32_t velocityDilationMode = static_cast<uint32_t>(
       sanitizeTemporalAAVelocityDilationMode(tuning.velocityDilationMode));
   const uint32_t historyFilterMode =
-      sanitizeTemporalAAHistoryFilterMode(tuning.historyFilterMode) ==
-              TemporalAAHistoryFilterMode::Bilinear
+      tuning.historyFilterMode == TemporalAAHistoryFilterMode::Bilinear
           ? kTaaHistoryFilterModeBilinear
           : kTaaHistoryFilterModeCatmullRom;
 
