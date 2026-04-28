@@ -10,6 +10,7 @@
 #include "nuri/gfx/pipeline/features/opaque_feature.h"
 #include "nuri/gfx/pipeline/features/shadow_feature.h"
 #include "nuri/gfx/pipeline/features/skybox_feature.h"
+#include "nuri/gfx/pipeline/features/spatial_aa_feature.h"
 #include "nuri/gfx/pipeline/features/temporal_aa_feature.h"
 #include "nuri/gfx/pipeline/features/transmission_feature.h"
 #include "nuri/gfx/pipeline/features/transparent_feature.h"
@@ -265,6 +266,8 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
       getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(
       std::make_unique<TemporalAAFeature>(getGPU(), shaderConfig.composite));
+  renderPipeline_->addFeature(
+      std::make_unique<SpatialAAFeature>(getGPU(), shaderConfig.composite));
   renderPipeline_->addFeature(std::make_unique<FrameCompositionFeature>(
       getGPU(), shaderConfig.composite));
   renderPipeline_->addFeature(std::make_unique<TransmissionFeature>(

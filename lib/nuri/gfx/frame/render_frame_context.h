@@ -80,6 +80,10 @@ enum class AntiAliasingDebugView : uint8_t {
   TAAHistoryFilterDelta = 23,
   TAADisocclusionFallback = 24,
   TAASplitCompare = 25,
+  SpatialAAEdges = 26,
+  SpatialAABlendWeights = 27,
+  SpatialAACleanupMask = 28,
+  SpatialAASplitCompare = 29,
 };
 
 enum class TemporalAAClampMode : uint8_t {
@@ -293,6 +297,10 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   case AntiAliasingDebugView::TAAHistoryFilterDelta:
   case AntiAliasingDebugView::TAADisocclusionFallback:
   case AntiAliasingDebugView::TAASplitCompare:
+  case AntiAliasingDebugView::SpatialAAEdges:
+  case AntiAliasingDebugView::SpatialAABlendWeights:
+  case AntiAliasingDebugView::SpatialAACleanupMask:
+  case AntiAliasingDebugView::SpatialAASplitCompare:
     return view;
   default:
     return AntiAliasingDebugView::None;
@@ -476,6 +484,7 @@ struct RenderSettings {
     bool freezeJitter = false;
     bool resetHistoryRequested = false;
     bool logDiagnostics = false;
+    bool spatialPostTaaCleanup = false;
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
     float diagnosticLogIntervalSeconds = 0.25f;
     float taaJitterScale = 0.75f;
@@ -1610,6 +1619,19 @@ struct AntiAliasingFrameMetrics {
   uint32_t taaOverlayHistoryContaminationFrameCount = 0u;
   uint32_t taaResolveWidth = 0u;
   uint32_t taaResolveHeight = 0u;
+  uint32_t spatialAAWidth = 0u;
+  uint32_t spatialAAHeight = 0u;
+  uint32_t spatialAAPassCount = 0u;
+  uint32_t spatialAAEdgePassCount = 0u;
+  uint32_t spatialAABlendPassCount = 0u;
+  uint32_t spatialAANeighborhoodPassCount = 0u;
+  uint32_t spatialAACopyBackPassCount = 0u;
+  uint32_t spatialAAFallbackFrameCount = 0u;
+  uint32_t spatialAACleanupFrameCount = 0u;
+  uint32_t spatialAADebugPassCount = 0u;
+  uint32_t spatialAATextureCount = 0u;
+  uint32_t spatialAALutTextureCount = 0u;
+  uint32_t spatialAAGpuTimingAvailable = 0u;
   uint64_t taaResolveGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t taaDebugGpuTimingSourceFrameIndex =
@@ -1617,6 +1639,8 @@ struct AntiAliasingFrameMetrics {
   uint64_t taaSceneColorDownsampleGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t taaTransmissionGpuTimingSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t spatialAAGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint32_t taaCurrentFallbackFrameCount = 0u;
   uint64_t motionVectorTextureBytes = 0u;
@@ -1629,6 +1653,10 @@ struct AntiAliasingFrameMetrics {
   uint64_t reactiveMaskTotalBytes = 0u;
   uint64_t reactiveMaskPassBandwidthEstimateBytes = 0u;
   uint64_t taaHistoryBandwidthEstimateBytes = 0u;
+  uint64_t spatialAATextureBytes = 0u;
+  uint64_t spatialAATotalBytes = 0u;
+  uint64_t spatialAALutTextureBytes = 0u;
+  uint64_t spatialAABandwidthEstimateBytes = 0u;
   float velocityAverageObjectMotion = 0.0f;
   float velocityMaxObjectMotion = 0.0f;
   float velocityEstimatedAverageMagnitude = 0.0f;
@@ -1666,6 +1694,9 @@ struct AntiAliasingFrameMetrics {
   float taaTransmissionGpuTimeMs = 0.0f;
   float taaTransmissionFlickerEstimate = 0.0f;
   float taaTransparentEdgeJitterEstimate = 0.0f;
+  float spatialAAGpuTimeMs = 0.0f;
+  float spatialAAEdgePixelEstimate = 0.0f;
+  float spatialAAModifiedPixelEstimate = 0.0f;
   TemporalAAClampMode taaClampMode = TemporalAAClampMode::Variance;
   TemporalAAHdrWeightingMode taaHdrWeightingMode =
       TemporalAAHdrWeightingMode::Luminance;
@@ -1721,6 +1752,13 @@ struct AntiAliasingFrameMetrics {
   bool taaSceneColorMipDebugViewRendered = false;
   bool taaTransmissionMipDebugViewRendered = false;
   bool taaTransparentEdgeJitterTracked = false;
+  bool spatialAAEnabled = false;
+  bool spatialAAFallbackActive = false;
+  bool spatialAACleanupActive = false;
+  bool spatialAAEdgesDebugViewRendered = false;
+  bool spatialAABlendWeightsDebugViewRendered = false;
+  bool spatialAACleanupMaskDebugViewRendered = false;
+  bool spatialAASplitCompareDebugViewRendered = false;
 };
 
 [[nodiscard]] inline AntiAliasingFrameMetrics

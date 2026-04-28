@@ -77,6 +77,7 @@ enum class GpuTimingScope : uint8_t {
   Transmission = 5,
   TemporalAAResolve = 6,
   TemporalAADebug = 7,
+  SpatialAA = 8,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -100,6 +101,8 @@ constexpr uint32_t kGpuTimingScopeTemporalAAResolveBit =
     gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
 constexpr uint32_t kGpuTimingScopeTemporalAADebugBit =
     gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
+constexpr uint32_t kGpuTimingScopeSpatialAABit =
+    gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -112,6 +115,7 @@ struct GpuTimingReport {
       std::numeric_limits<uint64_t>::max();
   uint64_t temporalAADebugSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
+  uint64_t spatialAASourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -119,6 +123,7 @@ struct GpuTimingReport {
   float transmissionTimeMs = 0.0f;
   float temporalAAResolveTimeMs = 0.0f;
   float temporalAADebugTimeMs = 0.0f;
+  float spatialAATimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
 };
 
@@ -168,6 +173,11 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
     dst.temporalAADebugSourceFrameIndex = src.temporalAADebugSourceFrameIndex;
     dst.availableScopeMask |=
         gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::SpatialAA)) {
+    dst.spatialAATimeMs = src.spatialAATimeMs;
+    dst.spatialAASourceFrameIndex = src.spatialAASourceFrameIndex;
+    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
   }
 }
 
