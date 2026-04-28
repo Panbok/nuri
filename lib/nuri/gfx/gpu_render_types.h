@@ -75,6 +75,8 @@ enum class GpuTimingScope : uint8_t {
   ShadowSdsm = 3,
   SceneColorDownsample = 4,
   Transmission = 5,
+  TemporalAAResolve = 6,
+  TemporalAADebug = 7,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -94,6 +96,10 @@ constexpr uint32_t kGpuTimingScopeSceneColorDownsampleBit =
     gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample);
 constexpr uint32_t kGpuTimingScopeTransmissionBit =
     gpuTimingScopeToBit(GpuTimingScope::Transmission);
+constexpr uint32_t kGpuTimingScopeTemporalAAResolveBit =
+    gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
+constexpr uint32_t kGpuTimingScopeTemporalAADebugBit =
+    gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -102,11 +108,17 @@ struct GpuTimingReport {
   uint64_t sceneColorDownsampleSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t transmissionSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t temporalAAResolveSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t temporalAADebugSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
   float sceneColorDownsampleTimeMs = 0.0f;
   float transmissionTimeMs = 0.0f;
+  float temporalAAResolveTimeMs = 0.0f;
+  float temporalAADebugTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
 };
 
@@ -143,6 +155,19 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
     dst.transmissionTimeMs = src.transmissionTimeMs;
     dst.transmissionSourceFrameIndex = src.transmissionSourceFrameIndex;
     dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::Transmission);
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::TemporalAAResolve)) {
+    dst.temporalAAResolveTimeMs = src.temporalAAResolveTimeMs;
+    dst.temporalAAResolveSourceFrameIndex =
+        src.temporalAAResolveSourceFrameIndex;
+    dst.availableScopeMask |=
+        gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::TemporalAADebug)) {
+    dst.temporalAADebugTimeMs = src.temporalAADebugTimeMs;
+    dst.temporalAADebugSourceFrameIndex = src.temporalAADebugSourceFrameIndex;
+    dst.availableScopeMask |=
+        gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
   }
 }
 

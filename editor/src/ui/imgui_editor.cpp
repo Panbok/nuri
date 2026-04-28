@@ -71,7 +71,7 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback"};
-constexpr std::array<const char *, 21> kAntiAliasingDebugViewLabels = {
+constexpr std::array<const char *, 26> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
     "Motion Vectors",
@@ -92,7 +92,12 @@ constexpr std::array<const char *, 21> kAntiAliasingDebugViewLabels = {
     "TAA Transmission Mip",
     "TAA Reprojected History",
     "TAA Resolve Confidence",
-    "TAA Clamp Diagnostics"};
+    "TAA Clamp Diagnostics",
+    "TAA Previous Velocity",
+    "TAA HDR Weight",
+    "TAA History Filter Delta",
+    "TAA Disocclusion Fallback",
+    "TAA Split Compare"};
 constexpr std::array<const char *, 3> kTemporalAAClampModeLabels = {
     "Clamp", "Clip", "Variance"};
 constexpr std::array<const char *, 3> kTemporalAAHdrWeightingModeLabels = {
@@ -323,6 +328,16 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "TAA Resolve Confidence";
   case AntiAliasingDebugView::TAAClampDiagnostics:
     return "TAA Clamp Diagnostics";
+  case AntiAliasingDebugView::TAAPreviousVelocity:
+    return "TAA Previous Velocity";
+  case AntiAliasingDebugView::TAAHdrWeight:
+    return "TAA HDR Weight";
+  case AntiAliasingDebugView::TAAHistoryFilterDelta:
+    return "TAA History Filter Delta";
+  case AntiAliasingDebugView::TAADisocclusionFallback:
+    return "TAA Disocclusion Fallback";
+  case AntiAliasingDebugView::TAASplitCompare:
+    return "TAA Split Compare";
   }
   return "Unknown";
 }
@@ -2018,6 +2033,8 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       "edgeDiscontinuity={:.3f} passBytes={} debugBytes={} "
       "debugViewRendered={}}} "
       "resolve={{passes={} copyBackPasses={} dimensions={}x{} "
+      "resolveGpuMs={:.3f} resolveTiming={} debugGpuMs={:.3f} "
+      "debugTiming={} "
       "postTaaMipPasses={} postTaaMipChain={} transmissionPostTaa={} "
       "staleTransmissionFrames={} mipDebugView={} "
       "downsampleGpuMs={:.3f} downsampleTiming={} "
@@ -2089,6 +2106,8 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       boolLogValue(metrics.velocityDebugViewRendered),
       metrics.taaResolvePassCount, metrics.taaCopyBackPassCount,
       metrics.taaResolveWidth, metrics.taaResolveHeight,
+      metrics.taaResolveGpuTimeMs, metrics.taaResolveGpuTimingAvailable,
+      metrics.taaDebugGpuTimeMs, metrics.taaDebugGpuTimingAvailable,
       metrics.taaPostResolveSceneColorMipPassCount,
       boolLogValue(metrics.taaPostResolveSceneColorMipChainGenerated),
       boolLogValue(metrics.taaTransmissionPostResolveSceneColorConsumed),
@@ -2292,6 +2311,27 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Text("TemporalAAFeature: %s",
               temporalFeaturePresent ? "registered" : "missing");
   const AntiAliasingFrameMetrics &metrics = frameMetrics.antiAliasing;
+  if (ImGui::CollapsingHeader("TAA Capture HUD",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    const std::string_view hudResetReason =
+        temporalHistoryResetReasonName(metrics.historyResetReason);
+    ImGui::Text("Mode: %s", antiAliasingModeDisplayName(aa.mode));
+    ImGui::Text("View: %s", antiAliasingDebugViewDisplayName(aa.debug.view));
+    ImGui::Text("Jitter: %u / %u  History: %s", metrics.jitterIndex,
+                metrics.jitterSequenceLength,
+                metrics.historyValid ? "valid" : "invalid");
+    ImGui::Text("Reset: %.*s  Frames: %u",
+                static_cast<int>(hudResetReason.size()), hudResetReason.data(),
+                metrics.framesSinceHistoryReset);
+    ImGui::Text("Resolve GPU: %.3f ms (%s)", metrics.taaResolveGpuTimeMs,
+                metrics.taaResolveGpuTimingAvailable != 0u ? "ready"
+                                                           : "pending");
+    ImGui::Text("Debug GPU: %.3f ms (%s)", metrics.taaDebugGpuTimeMs,
+                metrics.taaDebugGpuTimingAvailable != 0u ? "ready" : "pending");
+    ImGui::Text(
+        "Rejection: %.3f  Filter: %s", metrics.taaDisocclusionRejectionEstimate,
+        temporalAAHistoryFilterModeDisplayName(metrics.taaHistoryFilterMode));
+  }
   ImGui::Text("Jitter Index: %u / %u", metrics.jitterIndex,
               metrics.jitterSequenceLength);
   ImGui::Text("Jitter Offset: %.4f, %.4f px", metrics.jitterPixelOffset.x,
@@ -2428,6 +2468,18 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                 metrics.taaPostResolveSceneColorMipChainGenerated
                     ? "generated"
                     : "not generated");
+    ImGui::Text("TAA Resolve GPU Time: %.3f ms (%s, frame %llu)",
+                metrics.taaResolveGpuTimeMs,
+                metrics.taaResolveGpuTimingAvailable != 0u ? "available"
+                                                           : "pending",
+                static_cast<unsigned long long>(
+                    metrics.taaResolveGpuTimingSourceFrameIndex));
+    ImGui::Text("TAA Debug GPU Time: %.3f ms (%s, frame %llu)",
+                metrics.taaDebugGpuTimeMs,
+                metrics.taaDebugGpuTimingAvailable != 0u ? "available"
+                                                         : "pending",
+                static_cast<unsigned long long>(
+                    metrics.taaDebugGpuTimingSourceFrameIndex));
     ImGui::Text("Transmission Source: %s, stale frames %u",
                 metrics.taaTransmissionPostResolveSceneColorConsumed
                     ? "post-TAA"
@@ -2546,6 +2598,21 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     ImGui::Text("Velocity Dilation View: %s",
                 metrics.taaVelocityDilationDebugViewRendered ? "rendered"
                                                              : "inactive");
+    ImGui::Text("Previous Velocity View: %s",
+                metrics.taaPreviousVelocityDebugViewRendered ? "rendered"
+                                                             : "inactive");
+    ImGui::Text("HDR Weight View: %s", metrics.taaHdrWeightDebugViewRendered
+                                           ? "rendered"
+                                           : "inactive");
+    ImGui::Text("History Filter Delta View: %s",
+                metrics.taaHistoryFilterDeltaDebugViewRendered ? "rendered"
+                                                               : "inactive");
+    ImGui::Text("Disocclusion Fallback View: %s",
+                metrics.taaDisocclusionFallbackDebugViewRendered ? "rendered"
+                                                                 : "inactive");
+    ImGui::Text("Split Compare View: %s",
+                metrics.taaSplitCompareDebugViewRendered ? "rendered"
+                                                         : "inactive");
   }
   if (ImGui::Button("Dump AA Diagnostics To Log##AntiAliasing")) {
     const std::string summary =

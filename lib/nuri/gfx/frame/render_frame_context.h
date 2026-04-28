@@ -75,6 +75,11 @@ enum class AntiAliasingDebugView : uint8_t {
   TAAReprojectedHistory = 18,
   TAAResolveConfidence = 19,
   TAAClampDiagnostics = 20,
+  TAAPreviousVelocity = 21,
+  TAAHdrWeight = 22,
+  TAAHistoryFilterDelta = 23,
+  TAADisocclusionFallback = 24,
+  TAASplitCompare = 25,
 };
 
 enum class TemporalAAClampMode : uint8_t {
@@ -283,6 +288,11 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   case AntiAliasingDebugView::TAAReprojectedHistory:
   case AntiAliasingDebugView::TAAResolveConfidence:
   case AntiAliasingDebugView::TAAClampDiagnostics:
+  case AntiAliasingDebugView::TAAPreviousVelocity:
+  case AntiAliasingDebugView::TAAHdrWeight:
+  case AntiAliasingDebugView::TAAHistoryFilterDelta:
+  case AntiAliasingDebugView::TAADisocclusionFallback:
+  case AntiAliasingDebugView::TAASplitCompare:
     return view;
   default:
     return AntiAliasingDebugView::None;
@@ -1587,6 +1597,8 @@ struct AntiAliasingFrameMetrics {
   uint32_t taaCopyBackPassCount = 0u;
   uint32_t taaPostResolveSceneColorMipPassCount = 0u;
   uint32_t taaTransmissionStaleSceneColorFrameCount = 0u;
+  uint32_t taaResolveGpuTimingAvailable = 0u;
+  uint32_t taaDebugGpuTimingAvailable = 0u;
   uint32_t taaSceneColorDownsampleGpuTimingAvailable = 0u;
   uint32_t taaTransmissionGpuTimingAvailable = 0u;
   uint32_t taaTransmissionMipDebugPassCount = 0u;
@@ -1598,6 +1610,10 @@ struct AntiAliasingFrameMetrics {
   uint32_t taaOverlayHistoryContaminationFrameCount = 0u;
   uint32_t taaResolveWidth = 0u;
   uint32_t taaResolveHeight = 0u;
+  uint64_t taaResolveGpuTimingSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t taaDebugGpuTimingSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
   uint64_t taaSceneColorDownsampleGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t taaTransmissionGpuTimingSourceFrameIndex =
@@ -1644,6 +1660,8 @@ struct AntiAliasingFrameMetrics {
   float taaDisocclusionRejectionEstimate = 0.0f;
   float taaVelocityDilationDepthThreshold = 0.01f;
   float taaVelocityDilationAffectedEstimate = 0.0f;
+  float taaResolveGpuTimeMs = 0.0f;
+  float taaDebugGpuTimeMs = 0.0f;
   float taaSceneColorDownsampleGpuTimeMs = 0.0f;
   float taaTransmissionGpuTimeMs = 0.0f;
   float taaTransmissionFlickerEstimate = 0.0f;
@@ -1693,6 +1711,11 @@ struct AntiAliasingFrameMetrics {
   bool taaDisocclusionMaskDebugViewRendered = false;
   bool taaVelocityDilationEnabled = false;
   bool taaVelocityDilationDebugViewRendered = false;
+  bool taaPreviousVelocityDebugViewRendered = false;
+  bool taaHdrWeightDebugViewRendered = false;
+  bool taaHistoryFilterDeltaDebugViewRendered = false;
+  bool taaDisocclusionFallbackDebugViewRendered = false;
+  bool taaSplitCompareDebugViewRendered = false;
   bool taaPostResolveSceneColorMipChainGenerated = false;
   bool taaTransmissionPostResolveSceneColorConsumed = false;
   bool taaSceneColorMipDebugViewRendered = false;

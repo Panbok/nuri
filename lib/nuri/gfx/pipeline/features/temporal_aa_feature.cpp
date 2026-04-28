@@ -42,6 +42,11 @@ constexpr uint32_t kTaaResolveModeVelocityDilation = 12u;
 constexpr uint32_t kTaaResolveModeReprojectedHistory = 13u;
 constexpr uint32_t kTaaResolveModeResolveConfidence = 14u;
 constexpr uint32_t kTaaResolveModeClampDiagnostics = 15u;
+constexpr uint32_t kTaaResolveModePreviousVelocity = 16u;
+constexpr uint32_t kTaaResolveModeHdrWeight = 17u;
+constexpr uint32_t kTaaResolveModeHistoryFilterDelta = 18u;
+constexpr uint32_t kTaaResolveModeDisocclusionFallback = 19u;
+constexpr uint32_t kTaaResolveModeSplitCompare = 20u;
 constexpr uint32_t kTaaHistoryFilterModeCatmullRom = 0u;
 constexpr uint32_t kTaaHistoryFilterModeBilinear = 1u;
 constexpr uint32_t kTaaResolvePassDebugColor = 0xffaa55ffu;
@@ -109,12 +114,15 @@ isTaaResolveEvaluationDebugView(AntiAliasingDebugView view) noexcept {
          view == AntiAliasingDebugView::TAABlendFactor ||
          view == AntiAliasingDebugView::TAAClampDelta ||
          view == AntiAliasingDebugView::TAAPixelInspector ||
-         view == AntiAliasingDebugView::TAAReactiveMask ||
          view == AntiAliasingDebugView::TAADisocclusionMask ||
          view == AntiAliasingDebugView::TAAVelocityDilation ||
          view == AntiAliasingDebugView::TAAReprojectedHistory ||
          view == AntiAliasingDebugView::TAAResolveConfidence ||
-         view == AntiAliasingDebugView::TAAClampDiagnostics;
+         view == AntiAliasingDebugView::TAAClampDiagnostics ||
+         view == AntiAliasingDebugView::TAAHdrWeight ||
+         view == AntiAliasingDebugView::TAAHistoryFilterDelta ||
+         view == AntiAliasingDebugView::TAADisocclusionFallback ||
+         view == AntiAliasingDebugView::TAASplitCompare;
 }
 
 [[nodiscard]] inline std::string_view
@@ -130,8 +138,6 @@ taaResolveEvaluationDebugLabel(AntiAliasingDebugView view) noexcept {
     return "TAA Clamp Delta Debug Pass";
   case AntiAliasingDebugView::TAAPixelInspector:
     return "TAA Pixel Inspector Debug Pass";
-  case AntiAliasingDebugView::TAAReactiveMask:
-    return "TAA Reactive Mask Debug Pass";
   case AntiAliasingDebugView::TAADisocclusionMask:
     return "TAA Disocclusion Mask Debug Pass";
   case AntiAliasingDebugView::TAAVelocityDilation:
@@ -142,6 +148,14 @@ taaResolveEvaluationDebugLabel(AntiAliasingDebugView view) noexcept {
     return "TAA Resolve Confidence Debug Pass";
   case AntiAliasingDebugView::TAAClampDiagnostics:
     return "TAA Clamp Diagnostics Debug Pass";
+  case AntiAliasingDebugView::TAAHdrWeight:
+    return "TAA HDR Weight Debug Pass";
+  case AntiAliasingDebugView::TAAHistoryFilterDelta:
+    return "TAA History Filter Delta Debug Pass";
+  case AntiAliasingDebugView::TAADisocclusionFallback:
+    return "TAA Disocclusion Fallback Debug Pass";
+  case AntiAliasingDebugView::TAASplitCompare:
+    return "TAA Split Compare Debug Pass";
   default:
     return "TAA Debug Display Pass";
   }
@@ -172,6 +186,16 @@ taaResolveModeForDebugView(AntiAliasingDebugView view) noexcept {
     return kTaaResolveModeResolveConfidence;
   case AntiAliasingDebugView::TAAClampDiagnostics:
     return kTaaResolveModeClampDiagnostics;
+  case AntiAliasingDebugView::TAAPreviousVelocity:
+    return kTaaResolveModePreviousVelocity;
+  case AntiAliasingDebugView::TAAHdrWeight:
+    return kTaaResolveModeHdrWeight;
+  case AntiAliasingDebugView::TAAHistoryFilterDelta:
+    return kTaaResolveModeHistoryFilterDelta;
+  case AntiAliasingDebugView::TAADisocclusionFallback:
+    return kTaaResolveModeDisocclusionFallback;
+  case AntiAliasingDebugView::TAASplitCompare:
+    return kTaaResolveModeSplitCompare;
   case AntiAliasingDebugView::MotionVectors:
     return kTaaResolveModeVelocityMotionVectors;
   case AntiAliasingDebugView::VelocityMagnitude:
@@ -737,6 +761,19 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   }
 
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
+  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  if (hasGpuTimingScope(timingReport, GpuTimingScope::TemporalAAResolve)) {
+    aaMetrics.taaResolveGpuTimeMs = timingReport.temporalAAResolveTimeMs;
+    aaMetrics.taaResolveGpuTimingSourceFrameIndex =
+        timingReport.temporalAAResolveSourceFrameIndex;
+    aaMetrics.taaResolveGpuTimingAvailable = 1u;
+  }
+  if (hasGpuTimingScope(timingReport, GpuTimingScope::TemporalAADebug)) {
+    aaMetrics.taaDebugGpuTimeMs = timingReport.temporalAADebugTimeMs;
+    aaMetrics.taaDebugGpuTimingSourceFrameIndex =
+        timingReport.temporalAADebugSourceFrameIndex;
+    aaMetrics.taaDebugGpuTimingAvailable = 1u;
+  }
   aaMetrics.taaResolveWidth = sceneDimensions.width;
   aaMetrics.taaResolveHeight = sceneDimensions.height;
   const float jitterScale =
@@ -839,6 +876,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   resolvePass.dependencyTextures =
       std::span<const TextureHandle>(resolveReads.data(), resolveReadCount);
   resolvePass.draws = std::span<const DrawItem>(&resolveDraw, 1u);
+  resolvePass.gpuTimingScope = GpuTimingScope::TemporalAAResolve;
   resolvePass.debugLabel = "TAA Resolve Pass";
   resolvePass.debugColor = kTaaResolvePassDebugColor;
   auto addResolve = ctx.graph.addGraphicsPass(resolvePass);
@@ -896,61 +934,38 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
                        : "TAA Velocity Debug Pass";
     displayColor = kTaaDebugPassDebugColor;
     debugDisplay = true;
+  } else if (debugView == AntiAliasingDebugView::TAAPreviousVelocity) {
+    displaySource = usePreviousVelocity ? ctx.shared.previousMotionVectorTexture
+                                        : ctx.shared.motionVectorTexture;
+    displaySourceTexId = previousVelocityTexId;
+    displayMode = kTaaResolveModePreviousVelocity;
+    displayLabel = "TAA Previous Velocity Debug Pass";
+    displayColor = kTaaDebugPassDebugColor;
+    debugDisplay = true;
   } else if (isTaaResolveEvaluationDebugView(debugView)) {
-    if (debugView == AntiAliasingDebugView::TAAReactiveMask) {
-      displaySource = ctx.shared.reactiveMaskTexture;
-      displaySourceTexId = reactiveMaskTexId;
-    } else {
-      displaySource = ctx.shared.sceneColorTexture;
-      displaySourceTexId = sceneTexId;
-    }
+    displaySource = ctx.shared.sceneColorTexture;
+    displaySourceTexId = sceneTexId;
     displayMode = taaResolveModeForDebugView(debugView);
     displayLabel = taaResolveEvaluationDebugLabel(debugView);
     displayColor = kTaaDebugPassDebugColor;
     debugDisplay = true;
+  } else if (debugView == AntiAliasingDebugView::TAAReactiveMask) {
+    displaySource = ctx.shared.reactiveMaskTexture;
+    displaySourceTexId = reactiveMaskTexId;
+    displayMode = kTaaResolveModeReactiveMask;
+    displayLabel = "TAA Reactive Mask Debug Pass";
+    displayColor = kTaaDebugPassDebugColor;
+    debugDisplay = true;
   }
 
-  const bool displayEvaluatesResolve =
-      isTaaResolveEvaluationDebugView(debugView);
   const bool displaySamplesReactiveMask =
       debugView == AntiAliasingDebugView::TAAReactiveMask;
   const bool displaySamplesTemporalEvaluation =
-      displayEvaluatesResolve && !displaySamplesReactiveMask;
-  const TAAResolvePushConstants copyConstants{
-      .currentTexId =
-          displaySamplesTemporalEvaluation ? sceneTexId : displaySourceTexId,
-      .historyTexId = historyReadTexId,
-      .depthTexId = depthTexId,
-      .velocityTexId = velocityTexId,
-      .previousVelocityTexId = previousVelocityTexId,
-      .reactiveMaskTexId = reactiveMaskTexId,
-      .currentSamplerId = linearSamplerId,
-      .historySamplerId = linearSamplerId,
-      .depthSamplerId = pointSamplerId,
-      .velocitySamplerId = pointSamplerId,
-      .reactiveMaskSamplerId = pointSamplerId,
-      .flags = resolveFlags,
-      .mode = displayMode,
-      .currentWeightBits = currentWeightBits,
-      .inverseWidthBits = inverseWidthBits,
-      .inverseHeightBits = inverseHeightBits,
-      .depthThresholdBits = depthThresholdBits,
-      .velocityThresholdBits = velocityThresholdBits,
-      .velocityBlendScaleBits = velocityBlendScaleBits,
-      .disocclusionWeightBits = disocclusionWeightBits,
-      .clampAttenuationBits = clampAttenuationBits,
-      .varianceGammaBits = varianceGammaBits,
-      .hdrWeightStrengthBits = hdrWeightStrengthBits,
-      .reactiveCurrentWeightBits = reactiveCurrentWeightBits,
-      .reactiveStrengthBits = reactiveStrengthBits,
-      .velocityDilationDepthThresholdBits = velocityDilationDepthThresholdBits,
-      .clampMode = clampMode,
-      .hdrWeightingMode = hdrWeightingMode,
-      .velocityDilationMode = velocityDilationMode,
-      .motionCurrentWeightBits = motionCurrentWeightBits,
-      .clampCurrentWeightBits = clampCurrentWeightBits,
-      .historyFilterMode = historyFilterMode,
-  };
+      isTaaResolveEvaluationDebugView(debugView);
+  TAAResolvePushConstants copyConstants = resolveConstants;
+  copyConstants.currentTexId =
+      displaySamplesTemporalEvaluation ? sceneTexId : displaySourceTexId;
+  copyConstants.mode = displayMode;
   const DrawItem copyDraw = makeFullscreenDraw(
       pipeline_,
       std::span<const std::byte>(
@@ -1008,6 +1023,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     debugPass.dependencyTextures =
         std::span<const TextureHandle>(copyReads.data(), copyReadCount);
     debugPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
+    debugPass.gpuTimingScope = GpuTimingScope::TemporalAADebug;
     debugPass.debugLabel = displayLabel;
     debugPass.debugColor = displayColor;
     auto addDebug = ctx.graph.addGraphicsPass(debugPass);
@@ -1035,6 +1051,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     debugCopyPass.dependencyTextures = std::span<const TextureHandle>(
         debugCopyReads.data(), debugCopyReads.size());
     debugCopyPass.draws = std::span<const DrawItem>(&debugCopyDraw, 1u);
+    debugCopyPass.gpuTimingScope = GpuTimingScope::TemporalAADebug;
     debugCopyPass.debugLabel = "TAA Debug Copy Back Pass";
     debugCopyPass.debugColor = kTaaCopyBackPassDebugColor;
     auto addDebugCopy = ctx.graph.addGraphicsPass(debugCopyPass);
@@ -1050,6 +1067,8 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
     copyPass.dependencyTextures =
         std::span<const TextureHandle>(copyReads.data(), copyReadCount);
     copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
+    copyPass.gpuTimingScope = debugDisplay ? GpuTimingScope::TemporalAADebug
+                                           : GpuTimingScope::TemporalAAResolve;
     copyPass.debugLabel = displayLabel;
     copyPass.debugColor = displayColor;
     auto addCopy = ctx.graph.addGraphicsPass(copyPass);
@@ -1072,6 +1091,16 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       debugView == AntiAliasingDebugView::TAADisocclusionMask;
   aaMetrics.taaVelocityDilationDebugViewRendered =
       debugView == AntiAliasingDebugView::TAAVelocityDilation;
+  aaMetrics.taaPreviousVelocityDebugViewRendered =
+      debugView == AntiAliasingDebugView::TAAPreviousVelocity;
+  aaMetrics.taaHdrWeightDebugViewRendered =
+      debugView == AntiAliasingDebugView::TAAHdrWeight;
+  aaMetrics.taaHistoryFilterDeltaDebugViewRendered =
+      debugView == AntiAliasingDebugView::TAAHistoryFilterDelta;
+  aaMetrics.taaDisocclusionFallbackDebugViewRendered =
+      debugView == AntiAliasingDebugView::TAADisocclusionFallback;
+  aaMetrics.taaSplitCompareDebugViewRendered =
+      debugView == AntiAliasingDebugView::TAASplitCompare;
   if (isVelocityDebugView(debugView)) {
     aaMetrics.velocityDebugPassCount = 1u;
     aaMetrics.velocityDebugViewRendered = true;

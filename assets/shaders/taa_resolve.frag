@@ -29,6 +29,11 @@ const uint kTaaResolveModeVelocityDilation = 12u;
 const uint kTaaResolveModeReprojectedHistory = 13u;
 const uint kTaaResolveModeResolveConfidence = 14u;
 const uint kTaaResolveModeClampDiagnostics = 15u;
+const uint kTaaResolveModePreviousVelocity = 16u;
+const uint kTaaResolveModeHdrWeight = 17u;
+const uint kTaaResolveModeHistoryFilterDelta = 18u;
+const uint kTaaResolveModeDisocclusionFallback = 19u;
+const uint kTaaResolveModeSplitCompare = 20u;
 const uint kTaaClampModeClamp = 0u;
 const uint kTaaClampModeClip = 1u;
 const uint kTaaClampModeVariance = 2u;
@@ -119,8 +124,10 @@ struct ResolveEvaluation {
   float staticClampRelax;
   float velocityDelta;
   float velocityDilationDelta;
+  float historyFilterDelta;
   float hdrWeight;
   float reactiveWeight;
+  float fallbackStrength;
   float rejectionStrength;
   bool validHistory;
   bool depthRejected;
@@ -285,18 +292,21 @@ vec3 heatmap(float value) {
                vec3(0.0), vec3(1.0));
 }
 
-vec4 velocityDebugColor(vec2 sampleUv, uint mode) {
-  const vec2 sampleVelocity = velocity(sampleUv);
+vec4 signedVelocityDebugColor(vec2 sampleVelocity) {
   const float magnitude = length(sampleVelocity) * kVelocityDebugScale;
-  if (mode == kTaaResolveModeVelocityMagnitude) {
-    return vec4(heatmap(magnitude), 1.0);
-  }
-
   const vec2 signedVelocity =
       clamp(sampleVelocity * kVelocityDebugScale * 0.5 + vec2(0.5), vec2(0.0),
             vec2(1.0));
   return vec4(signedVelocity.x, signedVelocity.y, clamp(magnitude, 0.0, 1.0),
               1.0);
+}
+
+vec4 velocityDebugColor(vec2 sampleUv, uint mode) {
+  const vec2 sampleVelocity = velocity(sampleUv);
+  const float magnitude = length(sampleVelocity) * kVelocityDebugScale;
+  return mode == kTaaResolveModeVelocityMagnitude
+             ? vec4(heatmap(magnitude), 1.0)
+             : signedVelocityDebugColor(sampleVelocity);
 }
 
 float luminance(vec3 color) {
@@ -459,6 +469,8 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   result.depthRejected = false;
   result.velocityRejected = false;
   result.velocityDilated = false;
+  result.historyFilterDelta = 0.0;
+  result.fallbackStrength = 0.0;
 
   if (!flagEnabled(kTaaResolveFlagHistoryValid)) {
     result.rejectionStrength = 1.0;
@@ -526,6 +538,17 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
 
   result.validHistory = true;
   vec3 history = historyColorFiltered(historyUv);
+  if (pc.mode == kTaaResolveModeHistoryFilterDelta) {
+    const vec3 catmullRomHistory =
+        pc.historyFilterMode == kTaaHistoryFilterModeCatmullRom
+            ? history
+            : historyColorCatmullRom(historyUv);
+    const vec3 bilinearHistory =
+        pc.historyFilterMode == kTaaHistoryFilterModeBilinear
+            ? history
+            : historyColorBilinear(historyUv);
+    result.historyFilterDelta = length(catmullRomHistory - bilinearHistory);
+  }
   result.reprojectedHistory = history;
   float clampDelta = 0.0;
   vec3 clampedHistory =
@@ -647,6 +670,7 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
       result.rejectionStrength > 0.0) {
     const float fallbackStrength =
         smoothstep(0.75, 1.0, clamp(result.rejectionStrength, 0.0, 1.0));
+    result.fallbackStrength = fallbackStrength;
     currentResolveColor = mix(current, neighborhood.avgColor, fallbackStrength);
   }
   result.resolved =
@@ -660,6 +684,14 @@ void main() {
   if (pc.mode == kTaaResolveModeVelocityMotionVectors ||
       pc.mode == kTaaResolveModeVelocityMagnitude) {
     out_FragColor = velocityDebugColor(screenUv, pc.mode);
+    return;
+  }
+  if (pc.mode == kTaaResolveModePreviousVelocity) {
+    if (!flagEnabled(kTaaResolveFlagPreviousVelocityValid)) {
+      out_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      return;
+    }
+    out_FragColor = signedVelocityDebugColor(previousVelocity(screenUv));
     return;
   }
   if (pc.mode == kTaaResolveModeCopyCurrent) {
@@ -702,6 +734,19 @@ void main() {
                          clamp(eval.staticClampRelax, 0.0, 1.0), 1.0);
     return;
   }
+  if (pc.mode == kTaaResolveModeHdrWeight) {
+    out_FragColor = vec4(heatmap(eval.hdrWeight), 1.0);
+    return;
+  }
+  if (pc.mode == kTaaResolveModeHistoryFilterDelta) {
+    out_FragColor =
+        vec4(heatmap(clamp(eval.historyFilterDelta * 8.0, 0.0, 1.0)), 1.0);
+    return;
+  }
+  if (pc.mode == kTaaResolveModeDisocclusionFallback) {
+    out_FragColor = vec4(heatmap(eval.fallbackStrength), 1.0);
+    return;
+  }
   if (pc.mode == kTaaResolveModeDisocclusionMask) {
     out_FragColor = vec4(eval.rejectionStrength, eval.depthRejected ? 1.0 : 0.0,
                          eval.velocityRejected ? 1.0 : 0.0, 1.0);
@@ -742,6 +787,18 @@ void main() {
                      0.0, 1.0),
                1.0);
     }
+    return;
+  }
+  if (pc.mode == kTaaResolveModeSplitCompare) {
+    const float invWidth = pushFloat(pc.inverseWidthBits);
+    const float splitUvX =
+        invWidth > 0.0 ? gl_FragCoord.x * invWidth : screenUv.x;
+    if (invWidth > 0.0 && abs(splitUvX - 0.5) <= invWidth) {
+      out_FragColor = vec4(vec3(1.0), eval.currentAlpha);
+      return;
+    }
+    out_FragColor = splitUvX < 0.5 ? vec4(eval.current, eval.currentAlpha)
+                                   : vec4(eval.resolved, eval.currentAlpha);
     return;
   }
 

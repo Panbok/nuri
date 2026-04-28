@@ -991,17 +991,23 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     completedReport.shadowSourceFrameIndex = pending.frameIndex;
     completedReport.sceneColorDownsampleSourceFrameIndex = pending.frameIndex;
     completedReport.transmissionSourceFrameIndex = pending.frameIndex;
+    completedReport.temporalAAResolveSourceFrameIndex = pending.frameIndex;
+    completedReport.temporalAADebugSourceFrameIndex = pending.frameIndex;
     bool hadShadowSdsmRange = false;
     double shadowTimeMs = 0.0;
     double shadowDepthTimeMs = 0.0;
     double shadowSdsmTimeMs = 0.0;
     double sceneColorDownsampleTimeMs = 0.0;
     double transmissionTimeMs = 0.0;
+    double temporalAAResolveTimeMs = 0.0;
+    double temporalAADebugTimeMs = 0.0;
     bool shadowTimingAvailable = false;
     bool shadowDepthTimingAvailable = false;
     bool shadowSdsmTimingAvailable = false;
     bool sceneColorDownsampleTimingAvailable = false;
     bool transmissionTimingAvailable = false;
+    bool temporalAAResolveTimingAvailable = false;
+    bool temporalAADebugTimingAvailable = false;
     std::vector<uint64_t> queryData;
     for (const PendingTimingQueryRange &range : pending.timingRanges) {
       hadShadowSdsmRange =
@@ -1050,6 +1056,14 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
           transmissionTimeMs += intervalTimeMs;
           transmissionTimingAvailable = true;
           break;
+        case GpuTimingScope::TemporalAAResolve:
+          temporalAAResolveTimeMs += intervalTimeMs;
+          temporalAAResolveTimingAvailable = true;
+          break;
+        case GpuTimingScope::TemporalAADebug:
+          temporalAADebugTimeMs += intervalTimeMs;
+          temporalAADebugTimingAvailable = true;
+          break;
         case GpuTimingScope::None:
           break;
         }
@@ -1095,6 +1109,20 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
       completedReport.transmissionSourceFrameIndex = pending.frameIndex;
       completedReport.availableScopeMask |=
           gpuTimingScopeToBit(GpuTimingScope::Transmission);
+    }
+    if (temporalAAResolveTimingAvailable) {
+      completedReport.temporalAAResolveTimeMs =
+          static_cast<float>(temporalAAResolveTimeMs);
+      completedReport.temporalAAResolveSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
+    }
+    if (temporalAADebugTimingAvailable) {
+      completedReport.temporalAADebugTimeMs =
+          static_cast<float>(temporalAADebugTimeMs);
+      completedReport.temporalAADebugSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
     }
     if (hadShadowSdsmRange && !shadowSdsmTimingAvailable &&
         !impl.loggedShadowSdsmTimingCollectionWarning) {
