@@ -71,7 +71,7 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback"};
-constexpr std::array<const char *, 26> kAntiAliasingDebugViewLabels = {
+constexpr std::array<const char *, 30> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
     "Motion Vectors",
@@ -97,7 +97,11 @@ constexpr std::array<const char *, 26> kAntiAliasingDebugViewLabels = {
     "TAA HDR Weight",
     "TAA History Filter Delta",
     "TAA Disocclusion Fallback",
-    "TAA Split Compare"};
+    "TAA Split Compare",
+    "Spatial AA Edges",
+    "Spatial AA Blend Weights",
+    "Spatial AA Cleanup Mask",
+    "Spatial AA Split Compare"};
 constexpr std::array<const char *, 3> kTemporalAAClampModeLabels = {
     "Clamp", "Clip", "Variance"};
 constexpr std::array<const char *, 3> kTemporalAAHdrWeightingModeLabels = {
@@ -338,6 +342,14 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "TAA Disocclusion Fallback";
   case AntiAliasingDebugView::TAASplitCompare:
     return "TAA Split Compare";
+  case AntiAliasingDebugView::SpatialAAEdges:
+    return "Spatial AA Edges";
+  case AntiAliasingDebugView::SpatialAABlendWeights:
+    return "Spatial AA Blend Weights";
+  case AntiAliasingDebugView::SpatialAACleanupMask:
+    return "Spatial AA Cleanup Mask";
+  case AntiAliasingDebugView::SpatialAASplitCompare:
+    return "Spatial AA Split Compare";
   }
   return "Unknown";
 }
@@ -2159,13 +2171,41 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       boolLogValue(metrics.taaHdrWeightingEnabled));
 }
 
+std::string spatialAAMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
+  return std::format(
+      "spatialAA={{enabled={} fallback={} cleanup={} dimensions={}x{} "
+      "passes={} edge={} blend={} neighborhood={} copyBack={} debug={} "
+      "gpuMs={:.3f} gpuTiming={} sourceFrame={} textureBytes={} "
+      "lutBytes={} bandwidthBytes={} edgeEstimate={:.3f} "
+      "modifiedEstimate={:.3f} edgesDebug={} blendDebug={} "
+      "cleanupDebug={} splitDebug={}}}",
+      boolLogValue(metrics.spatialAAEnabled),
+      boolLogValue(metrics.spatialAAFallbackActive),
+      boolLogValue(metrics.spatialAACleanupActive), metrics.spatialAAWidth,
+      metrics.spatialAAHeight, metrics.spatialAAPassCount,
+      metrics.spatialAAEdgePassCount, metrics.spatialAABlendPassCount,
+      metrics.spatialAANeighborhoodPassCount,
+      metrics.spatialAACopyBackPassCount, metrics.spatialAADebugPassCount,
+      metrics.spatialAAGpuTimeMs, metrics.spatialAAGpuTimingAvailable,
+      metrics.spatialAAGpuTimingSourceFrameIndex,
+      static_cast<unsigned long long>(metrics.spatialAATotalBytes),
+      static_cast<unsigned long long>(metrics.spatialAALutTextureBytes),
+      static_cast<unsigned long long>(metrics.spatialAABandwidthEstimateBytes),
+      metrics.spatialAAEdgePixelEstimate,
+      metrics.spatialAAModifiedPixelEstimate,
+      boolLogValue(metrics.spatialAAEdgesDebugViewRendered),
+      boolLogValue(metrics.spatialAABlendWeightsDebugViewRendered),
+      boolLogValue(metrics.spatialAACleanupMaskDebugViewRendered),
+      boolLogValue(metrics.spatialAASplitCompareDebugViewRendered));
+}
+
 std::string antiAliasingDiagnosticsSummary(
     const RenderSettings::AntiAliasingSettings &settings,
     const AntiAliasingFrameMetrics &metrics, bool temporalFeaturePresent) {
   return std::format(
-      "AA diagnostics: {} {}",
+      "AA diagnostics: {} {} {}",
       antiAliasingSettingsSummary(settings, temporalFeaturePresent),
-      antiAliasingMetricsSummary(metrics));
+      antiAliasingMetricsSummary(metrics), spatialAAMetricsSummary(metrics));
 }
 
 void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
@@ -2189,6 +2229,8 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Checkbox("Freeze Jitter##AntiAliasing", &aa.debug.freezeJitter);
   ImGui::Checkbox("Log TAA Diagnostics##AntiAliasing",
                   &aa.debug.logDiagnostics);
+  ImGui::Checkbox("Post-TAA Spatial Cleanup##AntiAliasing",
+                  &aa.debug.spatialPostTaaCleanup);
   ImGui::SliderFloat("TAA Log Interval##AntiAliasing",
                      &aa.debug.diagnosticLogIntervalSeconds, 0.033f, 5.0f,
                      "%.2f s");
@@ -2328,6 +2370,9 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                                                            : "pending");
     ImGui::Text("Debug GPU: %.3f ms (%s)", metrics.taaDebugGpuTimeMs,
                 metrics.taaDebugGpuTimingAvailable != 0u ? "ready" : "pending");
+    ImGui::Text("Spatial GPU: %.3f ms (%s)", metrics.spatialAAGpuTimeMs,
+                metrics.spatialAAGpuTimingAvailable != 0u ? "ready"
+                                                          : "pending");
     ImGui::Text(
         "Rejection: %.3f  Filter: %s", metrics.taaDisocclusionRejectionEstimate,
         temporalAAHistoryFilterModeDisplayName(metrics.taaHistoryFilterMode));
@@ -2352,6 +2397,27 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::Text("Frames Since Reset: %u", metrics.framesSinceHistoryReset);
   ImGui::Text("Reset Count: %u", metrics.historyResetCount);
   ImGui::Text("Jitter OOB Count: %u", metrics.jitterOutOfBoundsCount);
+  if (ImGui::CollapsingHeader("Spatial AA", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Text("Enabled: %s", metrics.spatialAAEnabled ? "yes" : "no");
+    ImGui::Text("Fallback: %s", metrics.spatialAAFallbackActive ? "yes" : "no");
+    ImGui::Text("Cleanup: %s", metrics.spatialAACleanupActive ? "yes" : "no");
+    ImGui::Text("Dimensions: %u x %u", metrics.spatialAAWidth,
+                metrics.spatialAAHeight);
+    ImGui::Text("Passes: %u (edge %u, blend %u, neighborhood %u, copy %u)",
+                metrics.spatialAAPassCount, metrics.spatialAAEdgePassCount,
+                metrics.spatialAABlendPassCount,
+                metrics.spatialAANeighborhoodPassCount,
+                metrics.spatialAACopyBackPassCount);
+    ImGui::Text("GPU Time: %.3f ms (%s, frame %llu)",
+                metrics.spatialAAGpuTimeMs,
+                metrics.spatialAAGpuTimingAvailable != 0u ? "ready" : "pending",
+                static_cast<unsigned long long>(
+                    metrics.spatialAAGpuTimingSourceFrameIndex));
+    ImGui::Text(
+        "Texture Bytes: %llu  LUT Bytes: %llu",
+        static_cast<unsigned long long>(metrics.spatialAATotalBytes),
+        static_cast<unsigned long long>(metrics.spatialAALutTextureBytes));
+  }
   if (ImGui::CollapsingHeader("Motion Vector Resource",
                               ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Text("Allocated: %s", metrics.motionVectorAllocated ? "yes" : "no");
