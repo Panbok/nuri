@@ -1854,7 +1854,7 @@ TEST(RenderGraphCompileBehaviorTest,
   RenderGraphBuilder builder;
   builder.beginFrame(212u);
 
-  std::array<BufferHandle, kMaxDependencyBuffers + 1u> deps{};
+  std::array<BufferHandle, kMaxDependencyResources + 1u> deps{};
   RenderPass pass{};
   pass.debugLabel = "contract_dep_limit";
   pass.dependencyBuffers =
@@ -1864,12 +1864,12 @@ TEST(RenderGraphCompileBehaviorTest,
   if (!(addResult.hasError())) {
     ADD_FAILURE()
         << "addLegacyRenderPass should reject dependency buffer count "
-           "over kMaxDependencyBuffers";
+           "over kMaxDependencyResources";
     return;
   }
-  if (((addResult.error()).find("exceeds kMaxDependencyBuffers") ==
+  if (((addResult.error()).find("exceeds kMaxDependencyResources") ==
        std::string_view::npos)) {
-    ADD_FAILURE() << "error should mention kMaxDependencyBuffers contract "
+    ADD_FAILURE() << "error should mention kMaxDependencyResources contract "
                      "limit";
     return;
   }
@@ -1881,7 +1881,7 @@ TEST(
   RenderGraphBuilder builder;
   builder.beginFrame(213u);
 
-  std::array<BufferHandle, kMaxDependencyBuffers + 1u> dispatchDeps{};
+  std::array<BufferHandle, kMaxDependencyResources + 1u> dispatchDeps{};
   ComputeDispatchItem dispatch{};
   dispatch.dependencyBuffers =
       std::span<const BufferHandle>(dispatchDeps.data(), dispatchDeps.size());
@@ -1896,12 +1896,12 @@ TEST(
   if (!(addResult.hasError())) {
     ADD_FAILURE()
         << "addLegacyRenderPass should reject pre-dispatch dependency buffer "
-           "count over kMaxDependencyBuffers";
+           "count over kMaxDependencyResources";
     return;
   }
-  if (((addResult.error()).find("exceeds kMaxDependencyBuffers") ==
+  if (((addResult.error()).find("exceeds kMaxDependencyResources") ==
        std::string_view::npos)) {
-    ADD_FAILURE() << "error should mention kMaxDependencyBuffers contract "
+    ADD_FAILURE() << "error should mention kMaxDependencyResources contract "
                      "limit";
     return;
   }
@@ -1912,7 +1912,7 @@ TEST(RenderGraphCompileBehaviorTest,
   RenderGraphBuilder builder;
   builder.beginFrame(214u);
 
-  std::array<BufferHandle, kMaxDependencyBuffers> deps{};
+  std::array<BufferHandle, kMaxDependencyResources> deps{};
   RenderPass pass{};
   pass.debugLabel = "contract_bind_dep_limit";
   pass.dependencyBuffers =
@@ -1933,17 +1933,17 @@ TEST(RenderGraphCompileBehaviorTest,
   }
 
   auto bindResult = builder.bindPassDependencyBuffer(
-      addResult.value(), static_cast<uint32_t>(kMaxDependencyBuffers),
+      addResult.value(), static_cast<uint32_t>(kMaxDependencyResources),
       transientBufferResult.value());
   if (!(bindResult.hasError())) {
     ADD_FAILURE() << "bindPassDependencyBuffer should reject dependency index "
-                     "over kMaxDependencyBuffers";
+                     "over kMaxDependencyResources";
     return;
   }
-  if (((bindResult.error()).find("exceeds kMaxDependencyBuffers") ==
+  if (((bindResult.error()).find("exceeds kMaxDependencyResources") ==
        std::string_view::npos)) {
     ADD_FAILURE() << "bindPassDependencyBuffer error should mention "
-                     "kMaxDependencyBuffers contract limit";
+                     "kMaxDependencyResources contract limit";
     return;
   }
 }
@@ -1953,7 +1953,7 @@ TEST(RenderGraphCompileBehaviorTest,
   RenderGraphBuilder builder;
   builder.beginFrame(215u);
 
-  std::array<BufferHandle, kMaxDependencyBuffers> dispatchDeps{};
+  std::array<BufferHandle, kMaxDependencyResources> dispatchDeps{};
   ComputeDispatchItem dispatch{};
   dispatch.dependencyBuffers =
       std::span<const BufferHandle>(dispatchDeps.data(), dispatchDeps.size());
@@ -1980,17 +1980,17 @@ TEST(RenderGraphCompileBehaviorTest,
   }
 
   auto bindResult = builder.bindPreDispatchDependencyBuffer(
-      addResult.value(), 0u, static_cast<uint32_t>(kMaxDependencyBuffers),
+      addResult.value(), 0u, static_cast<uint32_t>(kMaxDependencyResources),
       transientBufferResult.value());
   if (!(bindResult.hasError())) {
     ADD_FAILURE() << "bindPreDispatchDependencyBuffer should reject dependency "
-                     "index over kMaxDependencyBuffers";
+                     "index over kMaxDependencyResources";
     return;
   }
-  if (((bindResult.error()).find("exceeds kMaxDependencyBuffers") ==
+  if (((bindResult.error()).find("exceeds kMaxDependencyResources") ==
        std::string_view::npos)) {
     ADD_FAILURE() << "bindPreDispatchDependencyBuffer error should mention "
-                     "kMaxDependencyBuffers contract limit";
+                     "kMaxDependencyResources contract limit";
     return;
   }
 }
@@ -2418,6 +2418,41 @@ TEST(RenderGraphCompileBehaviorTest,
                edge.after == readPassResult.value().value;
       });
   EXPECT_NE(edgeIt, compiled.edges.end());
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     PassLevelTextureDependenciesCanExceedSubmitDependencyLimit) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(209u);
+
+  auto colorResult = builder.createTransientTexture(
+      makeTransientTextureDesc(Format::RGBA8_UNORM, 16u, 16u),
+      "many_texture_reads_color");
+  ASSERT_FALSE(colorResult.hasError()) << colorResult.error();
+
+  std::array<TextureHandle, kMaxDependencyResources + 4u> dependencyTextures{};
+  for (size_t i = 0; i < dependencyTextures.size(); ++i) {
+    dependencyTextures[i] = TextureHandle{
+        .index = static_cast<uint32_t>(700u + i),
+        .generation = 1u,
+    };
+  }
+
+  RenderGraphGraphicsPassDesc desc{};
+  desc.color = {.loadOp = LoadOp::Clear,
+                .storeOp = StoreOp::Store,
+                .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+  desc.colorTexture = colorResult.value();
+  desc.dependencyTextures = std::span<const TextureHandle>(
+      dependencyTextures.data(), dependencyTextures.size());
+  desc.debugLabel = "many_texture_reads";
+
+  auto passResult = builder.addGraphicsPass(desc);
+  ASSERT_FALSE(passResult.hasError()) << passResult.error();
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  EXPECT_EQ(compileResult.value().recordedGraphicsPasses.size(), 1u);
 }
 
 } // namespace
