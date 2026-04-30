@@ -2122,8 +2122,8 @@ TEST_F(RenderGraphExecutorTest,
   }
 
   invalid.dependencyBufferRangesByPass[0u].count =
-      static_cast<uint32_t>(kMaxDependencyBuffers + 1u);
-  invalid.resolvedDependencyBuffers.resize(kMaxDependencyBuffers + 1u,
+      static_cast<uint32_t>(kMaxDependencyResources + 1u);
+  invalid.resolvedDependencyBuffers.resize(kMaxDependencyResources + 1u,
                                            BufferHandle{});
 
   FakeGPUDevice gpu;
@@ -2131,12 +2131,12 @@ TEST_F(RenderGraphExecutorTest,
   auto executeResult = executeCompiled(executor, gpu, invalid);
   if (!executeResult.hasError()) {
     ADD_FAILURE() << "executor should reject pass dependency range over "
-                     "kMaxDependencyBuffers";
+                     "kMaxDependencyResources";
     return;
   }
   if (((executeResult.error())
            .find("pass dependency buffer range exceeds "
-                 "kMaxDependencyBuffers") == std::string_view::npos)) {
+                 "kMaxDependencyResources") == std::string_view::npos)) {
     ADD_FAILURE() << "expected pass dependency range contract-limit "
                      "error";
     return;
@@ -2206,9 +2206,9 @@ TEST_F(RenderGraphExecutorTest,
   }
 
   invalid.preDispatchDependencyRanges[0u].count =
-      static_cast<uint32_t>(kMaxDependencyBuffers + 1u);
+      static_cast<uint32_t>(kMaxDependencyResources + 1u);
   invalid.resolvedPreDispatchDependencyBuffers.resize(
-      kMaxDependencyBuffers + 1u, BufferHandle{});
+      kMaxDependencyResources + 1u, BufferHandle{});
 
   FakeGPUDevice gpu;
   RenderGraphExecutor executor;
@@ -2216,12 +2216,12 @@ TEST_F(RenderGraphExecutorTest,
   if (!executeResult.hasError()) {
     ADD_FAILURE()
         << "executor should reject pre-dispatch dependency range over "
-           "kMaxDependencyBuffers";
+           "kMaxDependencyResources";
     return;
   }
   if (((executeResult.error())
            .find("pre-dispatch dependency range exceeds "
-                 "kMaxDependencyBuffers") == std::string_view::npos)) {
+                 "kMaxDependencyResources") == std::string_view::npos)) {
     ADD_FAILURE() << "expected pre-dispatch dependency range "
                      "contract-limit error";
     return;
