@@ -42,12 +42,14 @@ struct ClearColor {
 struct AttachmentColor {
   LoadOp loadOp = LoadOp::Clear;
   StoreOp storeOp = StoreOp::Store;
+  ResolveMode resolveMode = ResolveMode::Average;
   ClearColor clearColor{};
 };
 
 struct AttachmentDepth {
   LoadOp loadOp = LoadOp::Clear;
   StoreOp storeOp = StoreOp::Store;
+  ResolveMode resolveMode = ResolveMode::Min;
   float clearDepth = 1.0f;
   uint32_t clearStencil = 0;
 };
@@ -330,6 +332,7 @@ struct DrawItem {
   RectU32 scissor{};
   bool useDepthState = false;
   DepthState depthState{};
+  bool alphaMasked = false;
   bool depthBiasEnable = false;
   float depthBiasConstant = 0.0f;
   float depthBiasSlope = 0.0f;
@@ -348,9 +351,11 @@ struct RenderPass {
   RenderPassExecutionMode executionMode = RenderPassExecutionMode::Graphics;
   AttachmentColor color;
   TextureHandle colorTexture{};
+  TextureHandle colorResolveTexture{};
   bool hasColorAttachment = true;
   AttachmentDepth depth;
   TextureHandle depthTexture{};
+  TextureHandle depthResolveTexture{};
   bool useViewport = false;
   Viewport viewport{};
   std::span<const ComputeDispatchItem> preDispatches{};

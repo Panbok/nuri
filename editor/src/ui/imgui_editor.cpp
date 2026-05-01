@@ -69,8 +69,8 @@ constexpr std::array<const char *, 4> kTextureFilterAnisotropyLabels = {
     "2x", "4x", "8x", "16x"};
 constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
-constexpr std::array<const char *, 3> kAntiAliasingModeLabels = {
-    "None", "TAA", "Spatial Fallback"};
+constexpr std::array<const char *, 4> kAntiAliasingModeLabels = {
+    "None", "TAA", "Spatial Fallback", "MSAA 4x"};
 constexpr std::array<const char *, 30> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
@@ -146,6 +146,7 @@ PassInspectorKind classifyPassInspector(std::string_view featureName,
     return PassInspectorKind::Opaque;
   }
   if (featureName == "TemporalAAFeature" ||
+      featureName == "MsaaResolveFeature" || passName == "MsaaResolvePass" ||
       passName == "TemporalAAMotionVectorClearPass") {
     return PassInspectorKind::AntiAliasing;
   }
@@ -284,6 +285,8 @@ const char *antiAliasingModeDisplayName(AntiAliasingMode mode) {
     return "TAA";
   case AntiAliasingMode::SpatialFallback:
     return "Spatial Fallback";
+  case AntiAliasingMode::MSAA4x:
+    return "MSAA 4x";
   }
   return "Unknown";
 }
@@ -2199,13 +2202,42 @@ std::string spatialAAMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       boolLogValue(metrics.spatialAASplitCompareDebugViewRendered));
 }
 
+std::string msaaMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
+  return std::format(
+      "msaa={{enabled={} samples={} dimensions={}x{} colorAllocated={} "
+      "depthAllocated={} colorGraph={} depthGraph={} colorResolve={} "
+      "depthResolve={} resolvePasses={} alphaMaskedDraws={} "
+      "alphaToCoverage={} sampleShading={} spatialCleanupEnabled={} "
+      "spatialCleanupActive={} colorBytes={} depthBytes={} totalBytes={} "
+      "bandwidthBytes={}}}",
+      boolLogValue(metrics.msaaEnabled), metrics.msaaSampleCount,
+      metrics.msaaWidth, metrics.msaaHeight,
+      boolLogValue(metrics.msaaColorAllocated),
+      boolLogValue(metrics.msaaDepthAllocated),
+      boolLogValue(metrics.msaaColorGraphPublished),
+      boolLogValue(metrics.msaaDepthGraphPublished),
+      boolLogValue(metrics.msaaColorResolveTargetBound),
+      boolLogValue(metrics.msaaDepthResolveTargetBound),
+      metrics.msaaResolvePassCount, metrics.msaaAlphaMaskedDrawCount,
+      boolLogValue(metrics.msaaAlphaToCoverageEnabled),
+      boolLogValue(metrics.msaaSampleShadingEnabled),
+      boolLogValue(metrics.msaaSpatialCleanupEnabled),
+      boolLogValue(metrics.msaaSpatialCleanupActive),
+      static_cast<unsigned long long>(metrics.msaaColorTextureBytes),
+      static_cast<unsigned long long>(metrics.msaaDepthTextureBytes),
+      static_cast<unsigned long long>(metrics.msaaTotalBytes),
+      static_cast<unsigned long long>(
+          metrics.msaaResolveBandwidthEstimateBytes));
+}
+
 std::string antiAliasingDiagnosticsSummary(
     const RenderSettings::AntiAliasingSettings &settings,
     const AntiAliasingFrameMetrics &metrics, bool temporalFeaturePresent) {
   return std::format(
-      "AA diagnostics: {} {} {}",
+      "AA diagnostics: {} {} {} {}",
       antiAliasingSettingsSummary(settings, temporalFeaturePresent),
-      antiAliasingMetricsSummary(metrics), spatialAAMetricsSummary(metrics));
+      antiAliasingMetricsSummary(metrics), spatialAAMetricsSummary(metrics),
+      msaaMetricsSummary(metrics));
 }
 
 void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
@@ -2222,9 +2254,9 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     sanitizeAntiAliasingSettings(aa);
   }
 
-  const bool aaDisabled =
-      sanitizeAntiAliasingMode(aa.mode) == AntiAliasingMode::None;
-  ImGui::BeginDisabled(aaDisabled);
+  const bool temporalControlsDisabled =
+      sanitizeAntiAliasingMode(aa.mode) != AntiAliasingMode::TAA;
+  ImGui::BeginDisabled(temporalControlsDisabled);
   ImGui::Checkbox("Jitter Enabled##AntiAliasing", &aa.debug.jitterEnabled);
   ImGui::Checkbox("Freeze Jitter##AntiAliasing", &aa.debug.freezeJitter);
   ImGui::Checkbox("Log TAA Diagnostics##AntiAliasing",
@@ -2309,10 +2341,16 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                      &aa.debug.taaVelocityDilationDepthThreshold, 0.0f, 0.1f,
                      "%.4f");
   ImGui::EndDisabled();
-  if (aaDisabled) {
+  if (temporalControlsDisabled) {
     aa.debug.jitterEnabled = false;
     aa.debug.freezeJitter = false;
   }
+  const bool msaaControlsDisabled =
+      sanitizeAntiAliasingMode(aa.mode) != AntiAliasingMode::MSAA4x;
+  ImGui::BeginDisabled(msaaControlsDisabled);
+  ImGui::Checkbox("Post-MSAA Spatial Cleanup##AntiAliasing",
+                  &aa.debug.spatialPostMsaaCleanup);
+  ImGui::EndDisabled();
 
   if (ImGui::Button("Reset History##AntiAliasing")) {
     aa.debug.resetHistoryRequested = true;
@@ -2417,6 +2455,34 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
         "Texture Bytes: %llu  LUT Bytes: %llu",
         static_cast<unsigned long long>(metrics.spatialAATotalBytes),
         static_cast<unsigned long long>(metrics.spatialAALutTextureBytes));
+  }
+  if (ImGui::CollapsingHeader("MSAA", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Text("Enabled: %s", metrics.msaaEnabled ? "yes" : "no");
+    ImGui::Text("Samples: %u", metrics.msaaSampleCount);
+    ImGui::Text("Dimensions: %u x %u", metrics.msaaWidth, metrics.msaaHeight);
+    ImGui::Text("Scene Targets: color %s, depth %s",
+                metrics.msaaColorAllocated ? "allocated" : "missing",
+                metrics.msaaDepthAllocated ? "allocated" : "missing");
+    ImGui::Text("Graph Targets: color %s, depth %s",
+                metrics.msaaColorGraphPublished ? "published" : "missing",
+                metrics.msaaDepthGraphPublished ? "published" : "missing");
+    ImGui::Text("Resolve Targets: color %s, depth %s",
+                metrics.msaaColorResolveTargetBound ? "bound" : "missing",
+                metrics.msaaDepthResolveTargetBound ? "bound" : "missing");
+    ImGui::Text("Resolve Passes: %u", metrics.msaaResolvePassCount);
+    ImGui::Text("Alpha-Masked Draws: %u", metrics.msaaAlphaMaskedDrawCount);
+    ImGui::Text("Alpha-to-Coverage: %s",
+                metrics.msaaAlphaToCoverageEnabled ? "enabled" : "inactive");
+    ImGui::Text("Sample Shading: %s",
+                metrics.msaaSampleShadingEnabled ? "enabled" : "inactive");
+    ImGui::Text("Spatial Cleanup: %s (%s)",
+                metrics.msaaSpatialCleanupEnabled ? "enabled" : "disabled",
+                metrics.msaaSpatialCleanupActive ? "active" : "inactive");
+    ImGui::Text(
+        "Texture Bytes: color %llu, depth %llu, total %llu",
+        static_cast<unsigned long long>(metrics.msaaColorTextureBytes),
+        static_cast<unsigned long long>(metrics.msaaDepthTextureBytes),
+        static_cast<unsigned long long>(metrics.msaaTotalBytes));
   }
   if (ImGui::CollapsingHeader("Motion Vector Resource",
                               ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -3777,8 +3843,12 @@ const char *passTextureBindingTargetName(
   switch (target) {
   case RenderGraphCompileResult::PassTextureBindingTarget::Color:
     return "color";
+  case RenderGraphCompileResult::PassTextureBindingTarget::ColorResolve:
+    return "color_resolve";
   case RenderGraphCompileResult::PassTextureBindingTarget::Depth:
     return "depth";
+  case RenderGraphCompileResult::PassTextureBindingTarget::DepthResolve:
+    return "depth_resolve";
   }
   return "unknown";
 }

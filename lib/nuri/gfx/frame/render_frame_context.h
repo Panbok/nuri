@@ -51,6 +51,7 @@ enum class AntiAliasingMode : uint8_t {
   None = 0,
   TAA = 1,
   SpatialFallback = 2,
+  MSAA4x = 3,
 };
 
 enum class AntiAliasingDebugView : uint8_t {
@@ -189,6 +190,7 @@ static constexpr Format kFrameCompositionSceneColorFormat =
 static constexpr Format kFrameCompositionFrameColorFormat =
     Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
+static constexpr uint32_t kMsaa4xSampleCount = 4u;
 static constexpr Format kFrameCompositionMotionVectorFormat =
     Format::RG16_FLOAT;
 static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R32_FLOAT;
@@ -262,6 +264,7 @@ sanitizeAntiAliasingMode(AntiAliasingMode mode) noexcept {
   case AntiAliasingMode::None:
   case AntiAliasingMode::TAA:
   case AntiAliasingMode::SpatialFallback:
+  case AntiAliasingMode::MSAA4x:
     return mode;
   default:
     return AntiAliasingMode::None;
@@ -485,6 +488,7 @@ struct RenderSettings {
     bool resetHistoryRequested = false;
     bool logDiagnostics = false;
     bool spatialPostTaaCleanup = false;
+    bool spatialPostMsaaCleanup = true;
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
     float diagnosticLogIntervalSeconds = 0.25f;
     float taaJitterScale = 0.75f;
@@ -659,7 +663,7 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
       std::clamp(settings.debug.taaVelocityDilationDepthThreshold, 0.0f, 1.0f);
   settings.debug.taaHistoryFilterMode =
       sanitizeTemporalAAHistoryFilterMode(settings.debug.taaHistoryFilterMode);
-  if (settings.mode == AntiAliasingMode::None) {
+  if (settings.mode != AntiAliasingMode::TAA) {
     settings.debug.jitterEnabled = false;
     settings.debug.freezeJitter = false;
   }
@@ -1632,6 +1636,11 @@ struct AntiAliasingFrameMetrics {
   uint32_t spatialAATextureCount = 0u;
   uint32_t spatialAALutTextureCount = 0u;
   uint32_t spatialAAGpuTimingAvailable = 0u;
+  uint32_t msaaSampleCount = 1u;
+  uint32_t msaaWidth = 0u;
+  uint32_t msaaHeight = 0u;
+  uint32_t msaaResolvePassCount = 0u;
+  uint32_t msaaAlphaMaskedDrawCount = 0u;
   uint64_t taaResolveGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t taaDebugGpuTimingSourceFrameIndex =
@@ -1657,6 +1666,10 @@ struct AntiAliasingFrameMetrics {
   uint64_t spatialAATotalBytes = 0u;
   uint64_t spatialAALutTextureBytes = 0u;
   uint64_t spatialAABandwidthEstimateBytes = 0u;
+  uint64_t msaaColorTextureBytes = 0u;
+  uint64_t msaaDepthTextureBytes = 0u;
+  uint64_t msaaTotalBytes = 0u;
+  uint64_t msaaResolveBandwidthEstimateBytes = 0u;
   float velocityAverageObjectMotion = 0.0f;
   float velocityMaxObjectMotion = 0.0f;
   float velocityEstimatedAverageMagnitude = 0.0f;
@@ -1755,6 +1768,17 @@ struct AntiAliasingFrameMetrics {
   bool spatialAAEnabled = false;
   bool spatialAAFallbackActive = false;
   bool spatialAACleanupActive = false;
+  bool msaaEnabled = false;
+  bool msaaColorAllocated = false;
+  bool msaaDepthAllocated = false;
+  bool msaaColorGraphPublished = false;
+  bool msaaDepthGraphPublished = false;
+  bool msaaColorResolveTargetBound = false;
+  bool msaaDepthResolveTargetBound = false;
+  bool msaaAlphaToCoverageEnabled = false;
+  bool msaaSampleShadingEnabled = false;
+  bool msaaSpatialCleanupEnabled = false;
+  bool msaaSpatialCleanupActive = false;
   bool spatialAAEdgesDebugViewRendered = false;
   bool spatialAABlendWeightsDebugViewRendered = false;
   bool spatialAACleanupMaskDebugViewRendered = false;
@@ -1841,6 +1865,8 @@ enum class FrameTextureRequirementFlags : uint32_t {
   Normals = 1u << 6u,
   Exposure = 1u << 7u,
   ReactiveMask = 1u << 8u,
+  MsaaSceneColor = 1u << 9u,
+  MsaaSceneDepth = 1u << 10u,
 };
 
 [[nodiscard]] constexpr FrameTextureRequirementFlags
@@ -1895,6 +1921,8 @@ struct FrameSharedResources {
       kBaselineFrameTextureRequirements;
   TextureHandle sceneDepthTexture{};
   RenderGraphTextureId sceneDepthGraphTexture{};
+  TextureHandle msaaSceneDepthTexture{};
+  RenderGraphTextureId msaaSceneDepthGraphTexture{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures{};
   std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>
@@ -1910,9 +1938,11 @@ struct FrameSharedResources {
   uint32_t sceneDepthPyramidLevelCount = 0;
   uint32_t sceneDepthSamplerId = 0;
   TextureHandle sceneColorTexture{};
+  TextureHandle msaaSceneColorTexture{};
   TextureHandle sceneColorHalfResTexture{};
   TextureHandle sceneColorQuarterResTexture{};
   RenderGraphTextureId sceneColorGraphTexture{};
+  RenderGraphTextureId msaaSceneColorGraphTexture{};
   TextureHandle frameColorTexture{};
   RenderGraphTextureId frameColorGraphTexture{};
   TextureHandle historyColorReadTexture{};

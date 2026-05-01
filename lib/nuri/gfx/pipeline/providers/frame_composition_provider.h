@@ -46,11 +46,13 @@ private:
   recreateMipTextureRing(TextureRing &textures, uint32_t mipLevel,
                          std::string_view debugNameBase);
   Result<bool, std::string> recreateHistoryTextures();
+  Result<bool, std::string> recreateMsaaSceneTextures();
   Result<bool, std::string> recreateMotionVectorTextures();
   Result<bool, std::string> recreateReactiveMaskTextures();
   void invalidateAllocationState() noexcept;
   void destroyTextures(TextureRing &textures);
   void destroyHistoryTextures();
+  void destroyMsaaSceneTextures();
   void destroyMotionVectorTextures();
   void destroyReactiveMaskTextures();
   [[nodiscard]] TextureHandle
@@ -66,6 +68,8 @@ private:
       sceneColorMipTextures_;
   TextureRing frameColorTextures_;
   TextureRing sceneDepthTextures_;
+  TextureRing msaaSceneColorTextures_;
+  TextureRing msaaSceneDepthTextures_;
   TextureRing motionVectorTextures_;
   TextureRing reactiveMaskTextures_;
   TextureRing historyColorTextures_;

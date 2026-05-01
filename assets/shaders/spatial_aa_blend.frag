@@ -17,6 +17,8 @@ layout(push_constant) uniform SpatialAAPushConstants {
   uint edgeThresholdBits;
   uint maxSearchSteps;
   uint resolveStrengthBits;
+  uint localContrastFactorBits;
+  uint cornerRoundingBits;
 }
 pc;
 
@@ -41,27 +43,58 @@ float sampleSearch(vec2 sampleUv) {
 }
 
 float compressedLuma(vec3 color) {
-  float luma = dot(max(color, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
-  return log2(1.0 + luma);
+  vec3 compressed = max(color, vec3(0.0));
+  compressed = compressed / (vec3(1.0) + compressed);
+  return dot(compressed, vec3(0.2126, 0.7152, 0.0722));
 }
 
 float edgeResponse(float delta, float threshold) {
-  return smoothstep(threshold, threshold * 3.0, delta);
+  return smoothstep(threshold, threshold * 2.5, delta);
 }
 
-float searchDistance(vec2 centerUv, vec2 stepUv, int component) {
+float edgeComponent(vec2 edge, uint component) {
+  return component == 0u ? edge.r : edge.g;
+}
+
+float sampleEdgeComponent(vec2 sampleUv, uint component) {
+  return edgeComponent(sampleEdges(sampleUv).rg, component);
+}
+
+float searchDistance(vec2 centerUv, vec2 stepUv, uint component) {
   float distanceValue = 0.0;
   uint maxSteps = max(pc.maxSearchSteps, 1u);
   for (uint i = 1u; i <= maxSteps; ++i) {
     vec2 sampleUv = clamp(centerUv + stepUv * float(i), vec2(0.0), vec2(1.0));
-    vec2 edge = sampleEdges(sampleUv).rg;
-    float edgeActive = component == 0 ? edge.r : edge.g;
+    float edgeActive = edgeComponent(sampleEdges(sampleUv).rg, component);
     distanceValue = float(i);
-    if (edgeActive < 0.5) {
+    if (edgeActive < 0.05) {
       break;
     }
   }
   return distanceValue;
+}
+
+float cornerAttenuation(vec2 centerUv, vec2 texel, uint majorComponent) {
+  float rounding = clamp(pushFloat(pc.cornerRoundingBits), 0.0, 1.0);
+  uint crossComponent = 1u - majorComponent;
+  vec2 perpendicular =
+      majorComponent == 0u ? vec2(0.0, texel.y) : vec2(texel.x, 0.0);
+  float crossing = sampleEdgeComponent(centerUv, crossComponent);
+  crossing = max(crossing, sampleEdgeComponent(clamp(centerUv + perpendicular,
+                                                     vec2(0.0), vec2(1.0)),
+                                               crossComponent));
+  crossing = max(crossing, sampleEdgeComponent(clamp(centerUv - perpendicular,
+                                                     vec2(0.0), vec2(1.0)),
+                                               crossComponent));
+  crossing =
+      max(crossing, sampleEdgeComponent(clamp(centerUv + vec2(texel.x, texel.y),
+                                              vec2(0.0), vec2(1.0)),
+                                        crossComponent));
+  crossing =
+      max(crossing, sampleEdgeComponent(clamp(centerUv - vec2(texel.x, texel.y),
+                                              vec2(0.0), vec2(1.0)),
+                                        crossComponent));
+  return 1.0 - clamp(crossing * rounding, 0.0, 0.75);
 }
 
 float areaWeight(float negativeDistance, float positiveDistance,
@@ -100,20 +133,24 @@ void main() {
   float leftWeight = 0.0;
   float topWeight = 0.0;
 
-  if (edges.r > 0.5) {
-    float leftDistance = searchDistance(centerUv, vec2(-texel.x, 0.0), 0);
-    float rightDistance = searchDistance(centerUv, vec2(texel.x, 0.0), 0);
+  if (edges.r > 0.05) {
+    float leftDistance = searchDistance(centerUv, vec2(-texel.x, 0.0), 0u);
+    float rightDistance = searchDistance(centerUv, vec2(texel.x, 0.0), 0u);
     float continuity =
         0.35 + 0.65 * areaWeight(leftDistance, rightDistance, edges.g);
-    leftWeight = 0.24 * continuity * edgeResponse(leftDelta, threshold);
+    leftWeight = edges.r * 0.24 * continuity *
+                 cornerAttenuation(centerUv, texel, 0u) *
+                 edgeResponse(leftDelta, threshold);
   }
 
-  if (edges.g > 0.5) {
-    float topDistance = searchDistance(centerUv, vec2(0.0, -texel.y), 1);
-    float bottomDistance = searchDistance(centerUv, vec2(0.0, texel.y), 1);
+  if (edges.g > 0.05) {
+    float topDistance = searchDistance(centerUv, vec2(0.0, -texel.y), 1u);
+    float bottomDistance = searchDistance(centerUv, vec2(0.0, texel.y), 1u);
     float continuity =
         0.35 + 0.65 * areaWeight(topDistance, bottomDistance, edges.r);
-    topWeight = 0.24 * continuity * edgeResponse(topDelta, threshold);
+    topWeight = edges.g * 0.24 * continuity *
+                cornerAttenuation(centerUv, texel, 1u) *
+                edgeResponse(topDelta, threshold);
   }
 
   vec4 weights = vec4(leftWeight, topWeight, 0.0, 0.0);

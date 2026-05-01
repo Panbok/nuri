@@ -423,10 +423,30 @@ lvk::StoreOp toLvkStoreOp(StoreOp op) {
   switch (op) {
   case StoreOp::Store:
     return lvk::StoreOp_Store;
+  case StoreOp::MsaaResolve:
+    return lvk::StoreOp_MsaaResolve;
   case StoreOp::DontCare:
     return lvk::StoreOp_DontCare;
   }
   return lvk::StoreOp_DontCare;
+}
+
+lvk::ResolveMode toLvkResolveMode(ResolveMode mode) {
+  switch (mode) {
+  case ResolveMode::None:
+    return lvk::ResolveMode_None;
+  case ResolveMode::SampleZero:
+    return lvk::ResolveMode_SampleZero;
+  case ResolveMode::Average:
+    return lvk::ResolveMode_Average;
+  case ResolveMode::Min:
+    return lvk::ResolveMode_Min;
+  case ResolveMode::Max:
+    return lvk::ResolveMode_Max;
+  case ResolveMode::Count:
+    break;
+  }
+  return lvk::ResolveMode_Average;
 }
 
 lvk::VertexFormat toLvkVertexFormat(VertexFormat format) {
@@ -1989,7 +2009,10 @@ LvkGPUDevice::createRenderPipeline(const RenderPipelineDesc &desc,
       .depthFormat = toLvkFormat(desc.depthFormat),
       .cullMode = toLvkCullMode(desc.cullMode),
       .polygonMode = toLvkPolygonMode(desc.polygonMode),
+      .samplesCount = std::max(desc.sampleCount, 1u),
       .patchControlPoints = desc.patchControlPoints,
+      .minSampleShading = desc.minSampleShading,
+      .alphaToCoverageEnabled = desc.alphaToCoverageEnabled,
       .debugName = reserved.debugNameCStr,
   };
   for (uint32_t i = 0u; i < desc.colorAttachmentCount; ++i) {
@@ -2420,13 +2443,17 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
     lvk::RenderPass renderPass{};
     lvk::Framebuffer framebuffer{};
     lvk::TextureHandle colorTexture{};
+    lvk::TextureHandle colorResolveTexture{};
     lvk::TextureHandle depthTexture{};
+    lvk::TextureHandle depthResolveTexture{};
     lvk::TextureHandle viewportTexture{};
     const bool computeOnly =
         pass.executionMode == RenderPassExecutionMode::ComputeOnly;
     if (computeOnly) {
       if (pass.hasColorAttachment || nuri::isValid(pass.colorTexture) ||
-          nuri::isValid(pass.depthTexture) || !pass.draws.empty()) {
+          nuri::isValid(pass.colorResolveTexture) ||
+          nuri::isValid(pass.depthTexture) ||
+          nuri::isValid(pass.depthResolveTexture) || !pass.draws.empty()) {
         return returnPassError(
             "LvkGPUDevice::recordGraphicsPass: invalid compute-only pass "
             "attachments or draws");
@@ -2437,6 +2464,7 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
       renderPass.color[0] = {
           .loadOp = toLvkLoadOp(pass.color.loadOp),
           .storeOp = toLvkStoreOp(pass.color.storeOp),
+          .resolveMode = toLvkResolveMode(pass.color.resolveMode),
           .clearColor = {pass.color.clearColor.r, pass.color.clearColor.g,
                          pass.color.clearColor.b, pass.color.clearColor.a},
       };
@@ -2461,7 +2489,23 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
         }
       }
 
-      framebuffer.color[0] = {.texture = colorTexture};
+      if (nuri::isValid(pass.colorResolveTexture)) {
+        if (!impl_->textures.isValid(pass.colorResolveTexture)) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid pass color resolve "
+              "texture handle");
+        }
+        colorResolveTexture =
+            impl_->textures.getLvkHandle(pass.colorResolveTexture);
+        if (!colorResolveTexture.valid()) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid LVK pass color "
+              "resolve texture handle");
+        }
+      }
+
+      framebuffer.color[0] = {.texture = colorTexture,
+                              .resolveTexture = colorResolveTexture};
       viewportTexture = colorTexture;
     } else {
       renderPass.color[0].loadOp = lvk::LoadOp_Invalid;
@@ -2469,6 +2513,11 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
         return returnPassError(
             "LvkGPUDevice::recordGraphicsPass: no-color pass has color "
             "texture");
+      }
+      if (nuri::isValid(pass.colorResolveTexture)) {
+        return returnPassError(
+            "LvkGPUDevice::recordGraphicsPass: no-color pass has color "
+            "resolve texture");
       }
     }
 
@@ -2487,14 +2536,35 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
       renderPass.depth = {
           .loadOp = toLvkLoadOp(pass.depth.loadOp),
           .storeOp = toLvkStoreOp(pass.depth.storeOp),
+          .resolveMode = toLvkResolveMode(pass.depth.resolveMode),
           .clearDepth = pass.depth.clearDepth,
           .clearStencil = pass.depth.clearStencil,
       };
-      framebuffer.depthStencil = {.texture = depthTexture};
+      if (nuri::isValid(pass.depthResolveTexture)) {
+        if (!impl_->textures.isValid(pass.depthResolveTexture)) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid pass depth resolve "
+              "texture handle");
+        }
+        depthResolveTexture =
+            impl_->textures.getLvkHandle(pass.depthResolveTexture);
+        if (!depthResolveTexture.valid()) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid LVK pass depth "
+              "resolve texture handle");
+        }
+      }
+      framebuffer.depthStencil = {.texture = depthTexture,
+                                  .resolveTexture = depthResolveTexture};
       if (!viewportTexture.valid()) {
         viewportTexture = depthTexture;
       }
     } else if (!computeOnly) {
+      if (nuri::isValid(pass.depthResolveTexture)) {
+        return returnPassError(
+            "LvkGPUDevice::recordGraphicsPass: depth resolve texture requires "
+            "a depth texture");
+      }
       renderPass.depth.loadOp = lvk::LoadOp_Invalid;
     }
 

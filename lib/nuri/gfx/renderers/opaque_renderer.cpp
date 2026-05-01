@@ -596,6 +596,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       pickDrawItems_(resolveMemoryResource(memory)),
       shadowInspectDrawItems_(resolveMemoryResource(memory)),
       passDrawItems_(resolveMemoryResource(memory)),
+      msaaPassDrawItems_(resolveMemoryResource(memory)),
       depthPrepassDrawItems_(resolveMemoryResource(memory)),
       depthPyramidPushConstants_(resolveMemoryResource(memory)),
       depthPyramidDrawItems_(resolveMemoryResource(memory)),
@@ -1204,6 +1205,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const bool taaSelected =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
       AntiAliasingMode::TAA;
+  const bool msaaSelected =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+      AntiAliasingMode::MSAA4x;
+  const TextureHandle sceneDepthTarget =
+      msaaSelected && nuri::isValid(frame.sharedResources.msaaSceneDepthTexture)
+          ? frame.sharedResources.msaaSceneDepthTexture
+          : sceneDepthTexture;
+  if (msaaSelected && !nuri::isValid(sceneDepthTarget)) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::buildOpaquePasses: MSAA scene depth texture is "
+        "unavailable");
+  }
   if (taaSelected) {
     auto previousMatricesResult = ensurePreviousInstanceMatricesRingCapacity(
         std::max(instanceCount * sizeof(InstanceData), sizeof(InstanceData)));
@@ -1509,6 +1522,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.draw.indexCount = lodRange.indexCount;
         entry.draw.firstIndex = lodRange.indexOffset;
         entry.draw.vertexOffset = 0;
+        entry.draw.alphaMasked = alphaMasked;
         entry.vertexBuffer = vertexBuffer;
         entry.vertexBufferAddress = vertexBufferAddress;
         entry.vertexDecodeBufferAddress = vertexDecodeBufferAddress;
@@ -1779,6 +1793,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         drawAlphaMasked_.assign(batchCount, 0u);
       }
       for (size_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
+        drawItems_[batchIndex].alphaMasked =
+            batchIndex < drawAlphaMasked_.size() &&
+            drawAlphaMasked_[batchIndex] != 0u;
         drawItems_[batchIndex].pushConstants =
             std::span<const std::byte>(reinterpret_cast<const std::byte *>(
                                            &drawPushConstants_[batchIndex]),
@@ -2187,6 +2204,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.draw.indexCount = lodRange.indexCount;
         entry.draw.firstIndex = lodRange.indexOffset;
         entry.draw.vertexOffset = 0;
+        entry.draw.alphaMasked = templateEntry.alphaMasked;
         entry.vertexBuffer = templateEntry.vertexBuffer;
         entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
         entry.vertexDecodeBufferAddress =
@@ -2421,6 +2439,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         drawAlphaMasked_[batchIndex] = batch.alphaMasked ? 1u : 0u;
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
+        draw.alphaMasked = batch.alphaMasked;
         draw.vertexBuffer = batch.vertexBuffer;
         draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
         draw.firstInstance = 0;
@@ -2488,6 +2507,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         drawAlphaMasked_[batchIndex] = batch.alphaMasked ? 1u : 0u;
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
+        draw.alphaMasked = batch.alphaMasked;
         draw.vertexBuffer = batch.vertexBuffer;
         draw.instanceCount = static_cast<uint32_t>(batch.instanceCount);
         draw.firstInstance = static_cast<uint32_t>(batch.firstInstance);
@@ -2611,6 +2631,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           expandedPushConstants.push_back(sourceConstants);
 
           DrawItem expandedDraw = sourceDraw;
+          expandedDraw.alphaMasked =
+              i < drawAlphaMasked_.size() && drawAlphaMasked_[i] != 0u;
           expandedDraw.instanceCount = 1;
           expandedDraw.firstInstance =
               sourceDraw.firstInstance + instanceOffset;
@@ -2946,6 +2968,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   size_t debugPatchHeatmapDraws = 0;
   overlayDrawItems_.clear();
   passDrawItems_.clear();
+  msaaPassDrawItems_.clear();
   depthPrepassDrawItems_.clear();
 
   bool depthPrepassEnabled = settings.opaque.enableDepthPrepass &&
@@ -2953,21 +2976,32 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (depthPrepassEnabled && baseAlphaMasked.size() != baseDrawItems.size()) {
     depthPrepassEnabled = false;
   }
+  bool useDepthPreparedMainDrawItems = false;
   if (depthPrepassEnabled) {
     NURI_PROFILER_ZONE("OpaqueRenderer.depth_prepass_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    depthPrepassDrawItems_.resize(baseDrawItems.size());
-    passDrawItems_.resize(baseDrawItems.size());
-    size_t populatedDepthDrawCount = 0u;
+    depthPrepassDrawItems_.reserve(baseDrawItems.size());
+    passDrawItems_.reserve(baseDrawItems.size());
     for (size_t i = 0; i < baseDrawItems.size(); ++i) {
       const DrawItem &source = baseDrawItems[i];
       const bool alphaMasked = baseAlphaMasked[i] != 0u;
+      if (msaaSelected && alphaMasked) {
+        DrawItem shadeDraw = source;
+        shadeDraw.alphaMasked = true;
+        shadeDraw.useDepthState = true;
+        shadeDraw.depthState = {.compareOp = CompareOp::Less,
+                                .isDepthWriteEnabled = true};
+        passDrawItems_.push_back(shadeDraw);
+        continue;
+      }
+
       const RenderPipelineHandle depthPipeline =
-          selectDepthPipeline(source.pipeline, alphaMasked);
+          selectDepthPipeline(source.pipeline, alphaMasked, msaaSelected);
       if (!nuri::isValid(depthPipeline)) {
         depthPrepassEnabled = false;
         depthPrepassDrawItems_.clear();
         passDrawItems_.clear();
+        useDepthPreparedMainDrawItems = false;
         if (!loggedDepthPrepassUnsupported_) {
           loggedDepthPrepassUnsupported_ = true;
           NURI_LOG_WARNING(
@@ -2984,31 +3018,33 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                               .isDepthWriteEnabled = true};
       depthDraw.debugLabel =
           alphaMasked ? "OpaqueMeshDepthAlpha" : "OpaqueMeshDepth";
-      depthPrepassDrawItems_[populatedDepthDrawCount] = depthDraw;
+      depthPrepassDrawItems_.push_back(depthDraw);
 
       DrawItem shadeDraw = source;
       shadeDraw.useDepthState = true;
       shadeDraw.depthState = {.compareOp = CompareOp::Equal,
                               .isDepthWriteEnabled = false};
-      passDrawItems_[populatedDepthDrawCount] = shadeDraw;
-      ++populatedDepthDrawCount;
+      passDrawItems_.push_back(shadeDraw);
     }
     if (depthPrepassEnabled) {
-      depthPrepassDrawItems_.resize(populatedDepthDrawCount);
-      passDrawItems_.resize(populatedDepthDrawCount);
+      useDepthPreparedMainDrawItems = !passDrawItems_.empty();
+      if (depthPrepassDrawItems_.empty()) {
+        depthPrepassEnabled = false;
+      }
     }
     NURI_PROFILER_ZONE_END();
   }
   std::span<const DrawItem> shadedBaseDrawItems =
-      depthPrepassEnabled ? std::span<const DrawItem>(passDrawItems_.data(),
-                                                      passDrawItems_.size())
-                          : baseDrawItems;
+      useDepthPreparedMainDrawItems
+          ? std::span<const DrawItem>(passDrawItems_.data(),
+                                      passDrawItems_.size())
+          : baseDrawItems;
   std::span<const DrawItem> finalPassDrawItems = shadedBaseDrawItems;
   if (wireframeOnlyRequested && !baseDrawItems.empty()) {
     bool lineOverlayAvailable = false;
     bool lineTessOverlayAvailable = false;
 
-    auto lineResult = ensureWireframePipeline();
+    auto lineResult = ensureWireframePipeline(msaaSelected);
     if (lineResult.hasError()) {
       if (!loggedWireframeFallbackUnsupported_) {
         loggedWireframeFallbackUnsupported_ = true;
@@ -3020,7 +3056,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       lineOverlayAvailable = lineResult.value();
     }
 
-    auto lineTessResult = ensureTessWireframePipeline();
+    auto lineTessResult = ensureTessWireframePipeline(msaaSelected);
     if (lineTessResult.hasError()) {
       if (!loggedTessWireframeFallbackUnsupported_) {
         loggedTessWireframeFallbackUnsupported_ = true;
@@ -3038,9 +3074,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       RenderPipelineHandle wireframePipeline{};
       bool usedFallback = false;
       if (isTessDraw && lineTessOverlayAvailable) {
-        wireframePipeline = meshTessWireframePipelineHandle_;
+        wireframePipeline = msaaSelected ? meshMsaaTessWireframePipelineHandle_
+                                         : meshTessWireframePipelineHandle_;
       } else if (lineOverlayAvailable) {
-        wireframePipeline = meshWireframePipelineHandle_;
+        wireframePipeline = msaaSelected ? meshMsaaWireframePipelineHandle_
+                                         : meshWireframePipelineHandle_;
         usedFallback = isTessDraw;
       }
 
@@ -3076,7 +3114,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       bool lineOverlayAvailable = false;
       bool lineTessOverlayAvailable = false;
 
-      auto gsOverlayResult = ensureGsOverlayPipeline();
+      auto gsOverlayResult = ensureGsOverlayPipeline(msaaSelected);
       if (gsOverlayResult.hasError()) {
         if (!loggedGsOverlayUnsupported_) {
           loggedGsOverlayUnsupported_ = true;
@@ -3089,7 +3127,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         gsOverlayAvailable = gsOverlayResult.value();
       }
 
-      auto gsTessOverlayResult = ensureGsTessOverlayPipeline();
+      auto gsTessOverlayResult = ensureGsTessOverlayPipeline(msaaSelected);
       if (gsTessOverlayResult.hasError()) {
         if (!loggedGsTessOverlayUnsupported_) {
           loggedGsTessOverlayUnsupported_ = true;
@@ -3103,7 +3141,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
 
       if (!gsOverlayAvailable) {
-        auto lineResult = ensureWireframePipeline();
+        auto lineResult = ensureWireframePipeline(msaaSelected);
         if (lineResult.hasError()) {
           if (!loggedWireframeFallbackUnsupported_) {
             loggedWireframeFallbackUnsupported_ = true;
@@ -3116,7 +3154,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         }
       }
       if (!gsTessOverlayAvailable) {
-        auto lineTessResult = ensureTessWireframePipeline();
+        auto lineTessResult = ensureTessWireframePipeline(msaaSelected);
         if (lineTessResult.hasError()) {
           if (!loggedTessWireframeFallbackUnsupported_) {
             loggedTessWireframeFallbackUnsupported_ = true;
@@ -3136,16 +3174,22 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         bool usedFallback = false;
         if (isTessDraw) {
           if (gsTessOverlayAvailable) {
-            overlayPipeline = meshGsTessOverlayPipelineHandle_;
+            overlayPipeline = msaaSelected
+                                  ? meshMsaaGsTessOverlayPipelineHandle_
+                                  : meshGsTessOverlayPipelineHandle_;
           } else if (lineTessOverlayAvailable) {
-            overlayPipeline = meshTessWireframePipelineHandle_;
+            overlayPipeline = msaaSelected
+                                  ? meshMsaaTessWireframePipelineHandle_
+                                  : meshTessWireframePipelineHandle_;
             usedFallback = true;
           }
         } else {
           if (gsOverlayAvailable) {
-            overlayPipeline = meshGsOverlayPipelineHandle_;
+            overlayPipeline = msaaSelected ? meshMsaaGsOverlayPipelineHandle_
+                                           : meshGsOverlayPipelineHandle_;
           } else if (lineOverlayAvailable) {
-            overlayPipeline = meshWireframePipelineHandle_;
+            overlayPipeline = msaaSelected ? meshMsaaWireframePipelineHandle_
+                                           : meshWireframePipelineHandle_;
             usedFallback = true;
           }
         }
@@ -3300,7 +3344,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                             .storeOp = StoreOp::Store,
                             .clearDepth = kClearDepthOne,
                             .clearStencil = 0};
-    depthPass.depthTextureHandle = sceneDepthTexture;
+    depthPass.depthTextureHandle = sceneDepthTarget;
     if (!pickPassSubmitted) {
       depthPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
           preDispatches_.data(), preDispatches_.size());
@@ -3329,10 +3373,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
 
   const bool requiresDepthPyramid = this->requiresDepthPyramid(settings);
-  const bool depthPyramidEnabled =
-      requiresDepthPyramid && nuri::isValid(sceneDepthTexture) &&
-      nuri::isValid(depthPyramidPipelineHandle_) &&
-      sceneDepthPyramidLevelCount_ > 0u && !baseDrawItems.empty();
+  const bool depthPyramidEnabled = !msaaSelected && requiresDepthPyramid &&
+                                   nuri::isValid(sceneDepthTexture) &&
+                                   nuri::isValid(depthPyramidPipelineHandle_) &&
+                                   sceneDepthPyramidLevelCount_ > 0u &&
+                                   !baseDrawItems.empty();
   frame.metrics.shadow.sdsmComputePassCount = 0u;
   if (depthPyramidEnabled) {
     NURI_PROFILER_ZONE("OpaqueRenderer.depth_pyramid_build",
@@ -3582,7 +3627,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                      .storeOp = StoreOp::Store,
                      .clearDepth = kClearDepthOne,
                      .clearStencil = 0};
-  pass.depthTextureHandle = sceneDepthTexture;
+  pass.depthTextureHandle = sceneDepthTarget;
   if (!pickPassSubmitted && !depthPrepassEnabled) {
     pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
@@ -3631,6 +3676,23 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       std::span<const RenderGraphAccessMode>(
           mainPassDependencyTextureAccessModes_.data(),
           mainPassDependencyTextureAccessModes_.size());
+  uint32_t msaaAlphaMaskedDrawCount = 0u;
+  if (msaaSelected && !finalPassDrawItems.empty()) {
+    msaaPassDrawItems_.assign(finalPassDrawItems.begin(),
+                              finalPassDrawItems.end());
+    for (DrawItem &draw : msaaPassDrawItems_) {
+      if (draw.alphaMasked) {
+        ++msaaAlphaMaskedDrawCount;
+      }
+      const RenderPipelineHandle msaaPipeline =
+          selectMsaaScenePipeline(draw.pipeline, draw.alphaMasked);
+      if (nuri::isValid(msaaPipeline)) {
+        draw.pipeline = msaaPipeline;
+      }
+    }
+    finalPassDrawItems = std::span<const DrawItem>(msaaPassDrawItems_.data(),
+                                                   msaaPassDrawItems_.size());
+  }
   pass.desc.draws = finalPassDrawItems;
   pass.desc.drawBuffersPreResolved = true;
   pass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
@@ -3643,12 +3705,42 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   pass.desc.borrowPayload = !pass.hasPreDispatch;
   pass.hasIndirectDraws = hasIndirectBaseDraws;
   pass.isMainPass = true;
-  if (!nuri::isValid(frame.sharedResources.sceneColorTexture)) {
+  const TextureHandle sceneColorTarget =
+      msaaSelected && nuri::isValid(frame.sharedResources.msaaSceneColorTexture)
+          ? frame.sharedResources.msaaSceneColorTexture
+          : frame.sharedResources.sceneColorTexture;
+  if (!nuri::isValid(sceneColorTarget)) {
     return Result<bool, std::string>::makeError(
-        "OpaqueRenderer::buildOpaquePasses: scene color texture is "
-        "unavailable");
+        msaaSelected ? "OpaqueRenderer::buildOpaquePasses: MSAA scene color "
+                       "texture is unavailable"
+                     : "OpaqueRenderer::buildOpaquePasses: scene color "
+                       "texture is unavailable");
   }
-  pass.colorTextureHandle = frame.sharedResources.sceneColorTexture;
+  pass.colorTextureHandle = sceneColorTarget;
+  if (msaaSelected) {
+    if (!nuri::isValid(frame.sharedResources.sceneColorTexture) ||
+        !nuri::isValid(sceneDepthTexture)) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueRenderer::buildOpaquePasses: MSAA resolve target texture is "
+          "unavailable");
+    }
+    pass.desc.color.storeOp = StoreOp::MsaaResolve;
+    pass.desc.color.resolveMode = ResolveMode::Average;
+    pass.colorResolveTextureHandle = frame.sharedResources.sceneColorTexture;
+    pass.desc.depth.storeOp = StoreOp::MsaaResolve;
+    pass.desc.depth.resolveMode = ResolveMode::Min;
+    pass.depthResolveTextureHandle = sceneDepthTexture;
+
+    AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
+    aaMetrics.msaaResolvePassCount = 1u;
+    aaMetrics.msaaColorResolveTargetBound = true;
+    aaMetrics.msaaDepthResolveTargetBound = true;
+    aaMetrics.msaaAlphaMaskedDrawCount = msaaAlphaMaskedDrawCount;
+    aaMetrics.msaaAlphaToCoverageEnabled = msaaAlphaMaskedDrawCount > 0u;
+    aaMetrics.msaaSampleShadingEnabled = msaaAlphaMaskedDrawCount > 0u;
+    aaMetrics.msaaResolveBandwidthEstimateBytes =
+        aaMetrics.msaaColorTextureBytes + aaMetrics.msaaDepthTextureBytes;
+  }
 
   if (taaSelected && nuri::isValid(frame.sharedResources.reactiveMaskTexture) &&
       nuri::isValid(meshReactiveMaskPipelineHandle_) &&
@@ -4021,6 +4113,16 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     passDesc.colorTexture = colorImportResult.value();
   }
 
+  if (nuri::isValid(pass.colorResolveTextureHandle)) {
+    auto colorResolveImportResult = graph.importTexture(
+        pass.colorResolveTextureHandle, "opaque_pass_color_resolve_texture");
+    if (colorResolveImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(
+          colorResolveImportResult.error());
+    }
+    passDesc.colorResolveTexture = colorResolveImportResult.value();
+  }
+
   if (nuri::isValid(pass.depthTextureHandle)) {
     auto depthImportResult = graph.importTexture(pass.depthTextureHandle,
                                                  "opaque_pass_depth_texture");
@@ -4028,6 +4130,16 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
       return Result<bool, std::string>::makeError(depthImportResult.error());
     }
     passDesc.depthTexture = depthImportResult.value();
+  }
+
+  if (nuri::isValid(pass.depthResolveTextureHandle)) {
+    auto depthResolveImportResult = graph.importTexture(
+        pass.depthResolveTextureHandle, "opaque_pass_depth_resolve_texture");
+    if (depthResolveImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(
+          depthResolveImportResult.error());
+    }
+    passDesc.depthResolveTexture = depthResolveImportResult.value();
   }
 
   ScratchArena passBuildScratchArena;
@@ -4215,14 +4327,41 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     frame.sharedResources.opaquePickDepthGraphTexture = pickDepthResult.value();
   }
 
+  const bool publishDepthGraphTexture =
+      shouldPublishSceneDepthGraphTexture(frame) ||
+      (pass.isMainPass && nuri::isValid(pass.depthResolveTextureHandle));
   if ((pass.isDepthPrepass || pass.isMainPass) &&
-      nuri::isValid(pass.depthTextureHandle) &&
-      shouldPublishSceneDepthGraphTexture(frame)) {
-    frame.sharedResources.sceneDepthGraphTexture = passDesc.depthTexture;
+      nuri::isValid(pass.depthTextureHandle) && publishDepthGraphTexture) {
+    if (isSameTextureHandle(pass.depthTextureHandle,
+                            frame.sharedResources.msaaSceneDepthTexture)) {
+      frame.sharedResources.msaaSceneDepthGraphTexture = passDesc.depthTexture;
+      frame.metrics.antiAliasing.msaaDepthGraphPublished = true;
+    } else {
+      frame.sharedResources.sceneDepthGraphTexture = passDesc.depthTexture;
+    }
+  }
+  if (pass.isMainPass && nuri::isValid(pass.depthResolveTextureHandle) &&
+      isSameTextureHandle(pass.depthResolveTextureHandle,
+                          frame.sharedResources.sceneDepthTexture)) {
+    frame.sharedResources.sceneDepthGraphTexture = passDesc.depthResolveTexture;
+    frame.metrics.antiAliasing.msaaDepthResolveTargetBound = true;
   }
 
   if (pass.isMainPass && nuri::isValid(pass.colorTextureHandle)) {
-    frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
+    if (isSameTextureHandle(pass.colorTextureHandle,
+                            frame.sharedResources.msaaSceneColorTexture)) {
+      frame.sharedResources.msaaSceneColorGraphTexture = passDesc.colorTexture;
+      frame.metrics.antiAliasing.msaaColorGraphPublished = true;
+      if (nuri::isValid(pass.colorResolveTextureHandle) &&
+          isSameTextureHandle(pass.colorResolveTextureHandle,
+                              frame.sharedResources.sceneColorTexture)) {
+        frame.sharedResources.sceneColorGraphTexture =
+            passDesc.colorResolveTexture;
+        frame.metrics.antiAliasing.msaaColorResolveTargetBound = true;
+      }
+    } else {
+      frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
+    }
   }
   if (pass.isVelocityPass && nuri::isValid(pass.colorTextureHandle)) {
     frame.sharedResources.motionVectorGraphTexture = passDesc.colorTexture;
@@ -4456,6 +4595,7 @@ Result<bool, std::string> OpaqueRenderer::ensureSingleInstanceBatchCache(
       entry.draw.indexCount = lodRange.indexCount;
       entry.draw.firstIndex = lodRange.indexOffset;
       entry.draw.vertexOffset = 0;
+      entry.draw.alphaMasked = templateEntry.alphaMasked;
       entry.vertexBuffer = templateEntry.vertexBuffer;
       entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
       entry.vertexDecodeBufferAddress = templateEntry.vertexDecodeBufferAddress;
@@ -4729,6 +4869,9 @@ OpaqueRenderer::rebuildIndirectPack(uint32_t frameSlot, size_t remapCount,
                 commandByteOffset + commandByteSize);
 
         DrawItem indirectDraw = group.baseDraw;
+        indirectDraw.alphaMasked =
+            group.sourceDrawIndex < drawAlphaMasked_.size() &&
+            drawAlphaMasked_[group.sourceDrawIndex] != 0u;
         indirectDraw.command = DrawCommandType::IndexedIndirect;
         indirectDraw.indirectBuffer = indirectBufferHandle;
         indirectDraw.indirectBufferOffset =
@@ -4806,6 +4949,7 @@ OpaqueRenderer::refreshCachedIndirectPack(uint32_t frameSlot,
     indirectAlphaMasked_[i] = sourceIndex < drawAlphaMasked_.size()
                                   ? drawAlphaMasked_[sourceIndex]
                                   : 0u;
+    indirectDrawItems_[i].alphaMasked = indirectAlphaMasked_[i] != 0u;
   }
   currentIndirectDrawBufferSignature_ = indirectDrawItems_.empty()
                                             ? kInvalidDrawSignature
@@ -5878,6 +6022,33 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
   }
   meshFillPipelineHandle_ = meshPipeline_->getRenderPipeline();
 
+  const auto makeMsaaSceneDesc = [](RenderPipelineDesc desc) {
+    desc.sampleCount = kMsaa4xSampleCount;
+    return desc;
+  };
+  const auto makeAlphaMsaaSceneDesc = [](RenderPipelineDesc desc) {
+    desc.sampleCount = kMsaa4xSampleCount;
+    desc.alphaToCoverageEnabled = true;
+    desc.minSampleShading = 1.0f;
+    return desc;
+  };
+
+  RenderPipelineDesc meshMsaaDesc = makeMsaaSceneDesc(meshDesc);
+  auto meshMsaaResult =
+      gpu_.createRenderPipeline(meshMsaaDesc, "opaque_mesh_msaa4x");
+  if (meshMsaaResult.hasError()) {
+    return Result<bool, std::string>::makeError(meshMsaaResult.error());
+  }
+  meshMsaaFillPipelineHandle_ = meshMsaaResult.value();
+
+  RenderPipelineDesc meshAlphaMsaaDesc = makeAlphaMsaaSceneDesc(meshDesc);
+  auto meshAlphaMsaaResult =
+      gpu_.createRenderPipeline(meshAlphaMsaaDesc, "opaque_mesh_alpha_msaa4x");
+  if (meshAlphaMsaaResult.hasError()) {
+    return Result<bool, std::string>::makeError(meshAlphaMsaaResult.error());
+  }
+  meshMsaaAlphaFillPipelineHandle_ = meshAlphaMsaaResult.value();
+
   {
     const RenderPipelineDesc doubleSidedMeshDesc = meshPipelineDesc(
         kFrameCompositionSceneColorFormat, depthFormat, meshVertexShader_, {},
@@ -5890,6 +6061,27 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
           doubleSidedMeshResult.error());
     }
     meshDoubleSidedFillPipelineHandle_ = doubleSidedMeshResult.value();
+
+    RenderPipelineDesc doubleSidedMsaaDesc =
+        makeMsaaSceneDesc(doubleSidedMeshDesc);
+    auto doubleSidedMsaaResult = gpu_.createRenderPipeline(
+        doubleSidedMsaaDesc, "opaque_mesh_double_sided_msaa4x");
+    if (doubleSidedMsaaResult.hasError()) {
+      return Result<bool, std::string>::makeError(
+          doubleSidedMsaaResult.error());
+    }
+    meshMsaaDoubleSidedFillPipelineHandle_ = doubleSidedMsaaResult.value();
+
+    RenderPipelineDesc doubleSidedAlphaMsaaDesc =
+        makeAlphaMsaaSceneDesc(doubleSidedMeshDesc);
+    auto doubleSidedAlphaMsaaResult = gpu_.createRenderPipeline(
+        doubleSidedAlphaMsaaDesc, "opaque_mesh_alpha_double_sided_msaa4x");
+    if (doubleSidedAlphaMsaaResult.hasError()) {
+      return Result<bool, std::string>::makeError(
+          doubleSidedAlphaMsaaResult.error());
+    }
+    meshMsaaAlphaDoubleSidedFillPipelineHandle_ =
+        doubleSidedAlphaMsaaResult.value();
   }
 
   if (nuri::isValid(meshVelocityVertexShader_) &&
@@ -5984,26 +6176,47 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     outHandle = result.value();
     return true;
   };
+  const auto createMsaaDepthPipeline =
+      [&createDepthPipeline](RenderPipelineDesc desc,
+                             std::string_view debugName,
+                             RenderPipelineHandle &outHandle) -> bool {
+    desc.sampleCount = kMsaa4xSampleCount;
+    return createDepthPipeline(desc, debugName, outHandle);
+  };
   if (nuri::isValid(depthFragmentShader_)) {
-    createDepthPipeline(depthPipelineDesc(depthFormat, meshVertexShader_, {},
-                                          {}, depthFragmentShader_,
-                                          CullMode::Back),
-                        "opaque_mesh_depth", meshDepthPipelineHandle_);
-    createDepthPipeline(
+    const RenderPipelineDesc depthDesc =
         depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
-                          depthFragmentShader_, CullMode::None),
-        "opaque_mesh_depth_double_sided", meshDepthDoubleSidedPipelineHandle_);
+                          depthFragmentShader_, CullMode::Back);
+    createDepthPipeline(depthDesc, "opaque_mesh_depth",
+                        meshDepthPipelineHandle_);
+    createMsaaDepthPipeline(depthDesc, "opaque_mesh_depth_msaa4x",
+                            meshMsaaDepthPipelineHandle_);
+    const RenderPipelineDesc doubleSidedDepthDesc =
+        depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
+                          depthFragmentShader_, CullMode::None);
+    createDepthPipeline(doubleSidedDepthDesc, "opaque_mesh_depth_double_sided",
+                        meshDepthDoubleSidedPipelineHandle_);
+    createMsaaDepthPipeline(doubleSidedDepthDesc,
+                            "opaque_mesh_depth_double_sided_msaa4x",
+                            meshMsaaDepthDoubleSidedPipelineHandle_);
   }
   if (nuri::isValid(depthAlphaFragmentShader_)) {
-    createDepthPipeline(
+    const RenderPipelineDesc depthAlphaDesc =
         depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
-                          depthAlphaFragmentShader_, CullMode::Back),
-        "opaque_mesh_depth_alpha", meshDepthAlphaPipelineHandle_);
-    createDepthPipeline(depthPipelineDesc(depthFormat, meshVertexShader_, {},
-                                          {}, depthAlphaFragmentShader_,
-                                          CullMode::None),
+                          depthAlphaFragmentShader_, CullMode::Back);
+    createDepthPipeline(depthAlphaDesc, "opaque_mesh_depth_alpha",
+                        meshDepthAlphaPipelineHandle_);
+    createMsaaDepthPipeline(depthAlphaDesc, "opaque_mesh_depth_alpha_msaa4x",
+                            meshMsaaDepthAlphaPipelineHandle_);
+    const RenderPipelineDesc doubleSidedDepthAlphaDesc =
+        depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
+                          depthAlphaFragmentShader_, CullMode::None);
+    createDepthPipeline(doubleSidedDepthAlphaDesc,
                         "opaque_mesh_depth_alpha_double_sided",
                         meshDepthAlphaDoubleSidedPipelineHandle_);
+    createMsaaDepthPipeline(doubleSidedDepthAlphaDesc,
+                            "opaque_mesh_depth_alpha_double_sided_msaa4x",
+                            meshMsaaDepthAlphaDoubleSidedPipelineHandle_);
   }
   const bool canCreateTessPipeline =
       !tessellationUnsupported_ && nuri::isValid(meshTessVertexShader_) &&
@@ -6023,6 +6236,38 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                        tessResult.error().c_str());
     } else {
       meshTessPipelineHandle_ = tessResult.value();
+      RenderPipelineDesc tessMsaaDesc = makeMsaaSceneDesc(tessDesc);
+      auto tessMsaaResult =
+          gpu_.createRenderPipeline(tessMsaaDesc, "opaque_mesh_tess_msaa4x");
+      if (tessMsaaResult.hasError()) {
+        tessellationUnsupported_ = true;
+        gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+        meshTessPipelineHandle_ = {};
+        meshMsaaTessPipelineHandle_ = {};
+        NURI_LOG_WARNING("OpaqueRenderer::createPipelines: MSAA tessellation "
+                         "pipeline failed, fallback to non-tessellation path: "
+                         "%s",
+                         tessMsaaResult.error().c_str());
+      } else {
+        meshMsaaTessPipelineHandle_ = tessMsaaResult.value();
+        RenderPipelineDesc tessAlphaMsaaDesc = makeAlphaMsaaSceneDesc(tessDesc);
+        auto tessAlphaMsaaResult = gpu_.createRenderPipeline(
+            tessAlphaMsaaDesc, "opaque_mesh_tess_alpha_msaa4x");
+        if (tessAlphaMsaaResult.hasError()) {
+          tessellationUnsupported_ = true;
+          gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+          meshTessPipelineHandle_ = {};
+          gpu_.destroyRenderPipeline(meshMsaaTessPipelineHandle_);
+          meshMsaaTessPipelineHandle_ = {};
+          meshMsaaAlphaTessPipelineHandle_ = {};
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::createPipelines: alpha MSAA tessellation "
+              "pipeline failed, fallback to non-tessellation path: %s",
+              tessAlphaMsaaResult.error().c_str());
+        } else {
+          meshMsaaAlphaTessPipelineHandle_ = tessAlphaMsaaResult.value();
+        }
+      }
     }
     if (!tessellationUnsupported_) {
       const RenderPipelineDesc doubleSidedTessDesc = meshPipelineDesc(
@@ -6038,6 +6283,14 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
           gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
           meshTessPipelineHandle_ = {};
         }
+        if (nuri::isValid(meshMsaaTessPipelineHandle_)) {
+          gpu_.destroyRenderPipeline(meshMsaaTessPipelineHandle_);
+          meshMsaaTessPipelineHandle_ = {};
+        }
+        if (nuri::isValid(meshMsaaAlphaTessPipelineHandle_)) {
+          gpu_.destroyRenderPipeline(meshMsaaAlphaTessPipelineHandle_);
+          meshMsaaAlphaTessPipelineHandle_ = {};
+        }
         meshDoubleSidedTessPipelineHandle_ = {};
         NURI_LOG_WARNING("OpaqueRenderer::createPipelines: double-sided "
                          "tessellation pipeline failed, fallback to "
@@ -6045,38 +6298,114 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                          doubleSidedTessResult.error().c_str());
       } else {
         meshDoubleSidedTessPipelineHandle_ = doubleSidedTessResult.value();
+        RenderPipelineDesc doubleSidedTessMsaaDesc =
+            makeMsaaSceneDesc(doubleSidedTessDesc);
+        auto doubleSidedTessMsaaResult = gpu_.createRenderPipeline(
+            doubleSidedTessMsaaDesc, "opaque_mesh_tess_double_sided_msaa4x");
+        if (doubleSidedTessMsaaResult.hasError()) {
+          tessellationUnsupported_ = true;
+          gpu_.destroyRenderPipeline(meshDoubleSidedTessPipelineHandle_);
+          meshDoubleSidedTessPipelineHandle_ = {};
+          meshMsaaDoubleSidedTessPipelineHandle_ = {};
+          if (nuri::isValid(meshTessPipelineHandle_)) {
+            gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+            meshTessPipelineHandle_ = {};
+          }
+          if (nuri::isValid(meshMsaaTessPipelineHandle_)) {
+            gpu_.destroyRenderPipeline(meshMsaaTessPipelineHandle_);
+            meshMsaaTessPipelineHandle_ = {};
+          }
+          if (nuri::isValid(meshMsaaAlphaTessPipelineHandle_)) {
+            gpu_.destroyRenderPipeline(meshMsaaAlphaTessPipelineHandle_);
+            meshMsaaAlphaTessPipelineHandle_ = {};
+          }
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::createPipelines: double-sided MSAA "
+              "tessellation pipeline failed, fallback to non-tessellation "
+              "path: %s",
+              doubleSidedTessMsaaResult.error().c_str());
+        } else {
+          meshMsaaDoubleSidedTessPipelineHandle_ =
+              doubleSidedTessMsaaResult.value();
+          RenderPipelineDesc doubleSidedTessAlphaMsaaDesc =
+              makeAlphaMsaaSceneDesc(doubleSidedTessDesc);
+          auto doubleSidedTessAlphaMsaaResult = gpu_.createRenderPipeline(
+              doubleSidedTessAlphaMsaaDesc,
+              "opaque_mesh_tess_alpha_double_sided_msaa4x");
+          if (doubleSidedTessAlphaMsaaResult.hasError()) {
+            tessellationUnsupported_ = true;
+            gpu_.destroyRenderPipeline(meshDoubleSidedTessPipelineHandle_);
+            meshDoubleSidedTessPipelineHandle_ = {};
+            gpu_.destroyRenderPipeline(meshMsaaDoubleSidedTessPipelineHandle_);
+            meshMsaaDoubleSidedTessPipelineHandle_ = {};
+            meshMsaaAlphaDoubleSidedTessPipelineHandle_ = {};
+            if (nuri::isValid(meshTessPipelineHandle_)) {
+              gpu_.destroyRenderPipeline(meshTessPipelineHandle_);
+              meshTessPipelineHandle_ = {};
+            }
+            if (nuri::isValid(meshMsaaTessPipelineHandle_)) {
+              gpu_.destroyRenderPipeline(meshMsaaTessPipelineHandle_);
+              meshMsaaTessPipelineHandle_ = {};
+            }
+            if (nuri::isValid(meshMsaaAlphaTessPipelineHandle_)) {
+              gpu_.destroyRenderPipeline(meshMsaaAlphaTessPipelineHandle_);
+              meshMsaaAlphaTessPipelineHandle_ = {};
+            }
+            NURI_LOG_WARNING(
+                "OpaqueRenderer::createPipelines: double-sided alpha MSAA "
+                "tessellation pipeline failed, fallback to non-tessellation "
+                "path: %s",
+                doubleSidedTessAlphaMsaaResult.error().c_str());
+          } else {
+            meshMsaaAlphaDoubleSidedTessPipelineHandle_ =
+                doubleSidedTessAlphaMsaaResult.value();
+          }
+        }
       }
     }
     if (!tessellationUnsupported_) {
       if (nuri::isValid(depthFragmentShader_)) {
-        createDepthPipeline(
-            depthPipelineDesc(depthFormat, meshTessVertexShader_,
-                              meshTessControlShader_, meshTessEvalShader_,
-                              depthFragmentShader_, CullMode::Back,
-                              Topology::Patch, kTessellationPatchControlPoints),
-            "opaque_mesh_depth_tess", meshDepthTessPipelineHandle_);
-        createDepthPipeline(
-            depthPipelineDesc(depthFormat, meshTessVertexShader_,
-                              meshTessControlShader_, meshTessEvalShader_,
-                              depthFragmentShader_, CullMode::None,
-                              Topology::Patch, kTessellationPatchControlPoints),
-            "opaque_mesh_depth_tess_double_sided",
-            meshDepthDoubleSidedTessPipelineHandle_);
+        const RenderPipelineDesc depthTessDesc = depthPipelineDesc(
+            depthFormat, meshTessVertexShader_, meshTessControlShader_,
+            meshTessEvalShader_, depthFragmentShader_, CullMode::Back,
+            Topology::Patch, kTessellationPatchControlPoints);
+        createDepthPipeline(depthTessDesc, "opaque_mesh_depth_tess",
+                            meshDepthTessPipelineHandle_);
+        createMsaaDepthPipeline(depthTessDesc, "opaque_mesh_depth_tess_msaa4x",
+                                meshMsaaDepthTessPipelineHandle_);
+        const RenderPipelineDesc depthDoubleSidedTessDesc = depthPipelineDesc(
+            depthFormat, meshTessVertexShader_, meshTessControlShader_,
+            meshTessEvalShader_, depthFragmentShader_, CullMode::None,
+            Topology::Patch, kTessellationPatchControlPoints);
+        createDepthPipeline(depthDoubleSidedTessDesc,
+                            "opaque_mesh_depth_tess_double_sided",
+                            meshDepthDoubleSidedTessPipelineHandle_);
+        createMsaaDepthPipeline(depthDoubleSidedTessDesc,
+                                "opaque_mesh_depth_tess_double_sided_msaa4x",
+                                meshMsaaDepthDoubleSidedTessPipelineHandle_);
       }
       if (nuri::isValid(depthAlphaFragmentShader_)) {
-        createDepthPipeline(
-            depthPipelineDesc(depthFormat, meshTessVertexShader_,
-                              meshTessControlShader_, meshTessEvalShader_,
-                              depthAlphaFragmentShader_, CullMode::Back,
-                              Topology::Patch, kTessellationPatchControlPoints),
-            "opaque_mesh_depth_alpha_tess", meshDepthAlphaTessPipelineHandle_);
-        createDepthPipeline(
+        const RenderPipelineDesc depthAlphaTessDesc = depthPipelineDesc(
+            depthFormat, meshTessVertexShader_, meshTessControlShader_,
+            meshTessEvalShader_, depthAlphaFragmentShader_, CullMode::Back,
+            Topology::Patch, kTessellationPatchControlPoints);
+        createDepthPipeline(depthAlphaTessDesc, "opaque_mesh_depth_alpha_tess",
+                            meshDepthAlphaTessPipelineHandle_);
+        createMsaaDepthPipeline(depthAlphaTessDesc,
+                                "opaque_mesh_depth_alpha_tess_msaa4x",
+                                meshMsaaDepthAlphaTessPipelineHandle_);
+        const RenderPipelineDesc depthAlphaDoubleSidedTessDesc =
             depthPipelineDesc(depthFormat, meshTessVertexShader_,
                               meshTessControlShader_, meshTessEvalShader_,
                               depthAlphaFragmentShader_, CullMode::None,
-                              Topology::Patch, kTessellationPatchControlPoints),
-            "opaque_mesh_depth_alpha_tess_double_sided",
-            meshDepthAlphaDoubleSidedTessPipelineHandle_);
+                              Topology::Patch, kTessellationPatchControlPoints);
+        createDepthPipeline(depthAlphaDoubleSidedTessDesc,
+                            "opaque_mesh_depth_alpha_tess_double_sided",
+                            meshDepthAlphaDoubleSidedTessPipelineHandle_);
+        createMsaaDepthPipeline(
+            depthAlphaDoubleSidedTessDesc,
+            "opaque_mesh_depth_alpha_tess_double_sided_msaa4x",
+            meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_);
       }
     }
   } else {
@@ -6329,20 +6658,36 @@ RenderPipelineHandle OpaqueRenderer::selectReactiveMaskPipeline(
 
 RenderPipelineHandle
 OpaqueRenderer::selectDepthPipeline(RenderPipelineHandle sourcePipeline,
-                                    bool alphaMasked) const {
+                                    bool alphaMasked, bool msaa) const {
   const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
   const bool tessellated = isTessPipeline(sourcePipeline);
   if (alphaMasked) {
     if (tessellated) {
+      if (msaa) {
+        return doubleSided ? meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_
+                           : meshMsaaDepthAlphaTessPipelineHandle_;
+      }
       return doubleSided ? meshDepthAlphaDoubleSidedTessPipelineHandle_
                          : meshDepthAlphaTessPipelineHandle_;
+    }
+    if (msaa) {
+      return doubleSided ? meshMsaaDepthAlphaDoubleSidedPipelineHandle_
+                         : meshMsaaDepthAlphaPipelineHandle_;
     }
     return doubleSided ? meshDepthAlphaDoubleSidedPipelineHandle_
                        : meshDepthAlphaPipelineHandle_;
   }
   if (tessellated) {
+    if (msaa) {
+      return doubleSided ? meshMsaaDepthDoubleSidedTessPipelineHandle_
+                         : meshMsaaDepthTessPipelineHandle_;
+    }
     return doubleSided ? meshDepthDoubleSidedTessPipelineHandle_
                        : meshDepthTessPipelineHandle_;
+  }
+  if (msaa) {
+    return doubleSided ? meshMsaaDepthDoubleSidedPipelineHandle_
+                       : meshMsaaDepthPipelineHandle_;
   }
   return doubleSided ? meshDepthDoubleSidedPipelineHandle_
                      : meshDepthPipelineHandle_;
@@ -6386,22 +6731,82 @@ RenderPipelineHandle OpaqueRenderer::selectShadowInspectPipeline(
   return meshShadowInspectPipelineHandle_;
 }
 
+RenderPipelineHandle
+OpaqueRenderer::selectMsaaScenePipeline(RenderPipelineHandle sourcePipeline,
+                                        bool alphaMasked) const {
+  if (isSamePipelineHandle(sourcePipeline, meshFillPipelineHandle_)) {
+    if (alphaMasked && nuri::isValid(meshMsaaAlphaFillPipelineHandle_)) {
+      return meshMsaaAlphaFillPipelineHandle_;
+    }
+    return meshMsaaFillPipelineHandle_;
+  }
+  if (isSamePipelineHandle(sourcePipeline,
+                           meshDoubleSidedFillPipelineHandle_)) {
+    if (alphaMasked &&
+        nuri::isValid(meshMsaaAlphaDoubleSidedFillPipelineHandle_)) {
+      return meshMsaaAlphaDoubleSidedFillPipelineHandle_;
+    }
+    return meshMsaaDoubleSidedFillPipelineHandle_;
+  }
+  if (isSamePipelineHandle(sourcePipeline, meshTessPipelineHandle_)) {
+    if (alphaMasked && nuri::isValid(meshMsaaAlphaTessPipelineHandle_)) {
+      return meshMsaaAlphaTessPipelineHandle_;
+    }
+    return meshMsaaTessPipelineHandle_;
+  }
+  if (isSamePipelineHandle(sourcePipeline,
+                           meshDoubleSidedTessPipelineHandle_)) {
+    if (alphaMasked &&
+        nuri::isValid(meshMsaaAlphaDoubleSidedTessPipelineHandle_)) {
+      return meshMsaaAlphaDoubleSidedTessPipelineHandle_;
+    }
+    return meshMsaaDoubleSidedTessPipelineHandle_;
+  }
+  if (isSamePipelineHandle(sourcePipeline, meshWireframePipelineHandle_)) {
+    return meshMsaaWireframePipelineHandle_;
+  }
+  if (isSamePipelineHandle(sourcePipeline, meshTessWireframePipelineHandle_)) {
+    return meshMsaaTessWireframePipelineHandle_;
+  }
+  if (isSamePipelineHandle(sourcePipeline, meshGsOverlayPipelineHandle_)) {
+    return meshMsaaGsOverlayPipelineHandle_;
+  }
+  if (isSamePipelineHandle(sourcePipeline, meshGsTessOverlayPipelineHandle_)) {
+    return meshMsaaGsTessOverlayPipelineHandle_;
+  }
+  return sourcePipeline;
+}
+
 bool OpaqueRenderer::isDoubleSidedPipeline(RenderPipelineHandle handle) const {
   return isSamePipelineHandle(handle, meshDoubleSidedFillPipelineHandle_) ||
-         isSamePipelineHandle(handle, meshDoubleSidedTessPipelineHandle_);
+         isSamePipelineHandle(handle, meshDoubleSidedTessPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshMsaaDoubleSidedFillPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshMsaaDoubleSidedTessPipelineHandle_) ||
+         isSamePipelineHandle(handle,
+                              meshMsaaAlphaDoubleSidedFillPipelineHandle_) ||
+         isSamePipelineHandle(handle,
+                              meshMsaaAlphaDoubleSidedTessPipelineHandle_);
 }
 
 bool OpaqueRenderer::isTessPipeline(RenderPipelineHandle handle) const {
   return isSamePipelineHandle(handle, meshTessPipelineHandle_) ||
-         isSamePipelineHandle(handle, meshDoubleSidedTessPipelineHandle_);
+         isSamePipelineHandle(handle, meshDoubleSidedTessPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshMsaaTessPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshMsaaDoubleSidedTessPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshMsaaAlphaTessPipelineHandle_) ||
+         isSamePipelineHandle(handle,
+                              meshMsaaAlphaDoubleSidedTessPipelineHandle_);
 }
 
-Result<bool, std::string> OpaqueRenderer::ensureWireframePipeline() {
+Result<bool, std::string>
+OpaqueRenderer::ensureWireframePipeline(bool requireMsaa) {
   if (wireframePipelineInitialized_ &&
-      nuri::isValid(meshWireframePipelineHandle_)) {
+      nuri::isValid(meshWireframePipelineHandle_) &&
+      (!requireMsaa || nuri::isValid(meshMsaaWireframePipelineHandle_))) {
     return Result<bool, std::string>::makeResult(true);
   }
-  if (wireframePipelineUnsupported_) {
+  if (wireframePipelineUnsupported_ ||
+      (requireMsaa && msaaWireframePipelineUnsupported_)) {
     return Result<bool, std::string>::makeResult(false);
   }
   if (!nuri::isValid(meshFillPipelineHandle_)) {
@@ -6414,34 +6819,56 @@ Result<bool, std::string> OpaqueRenderer::ensureWireframePipeline() {
       kFrameCompositionSceneColorFormat, depthFormat, meshVertexShader_, {}, {},
       {}, meshFragmentShader_, PolygonMode::Line, Topology::Triangle, 0, true);
 
-  auto pipelineResult =
-      gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_wireframe");
-  if (pipelineResult.hasError()) {
-    wireframePipelineUnsupported_ = true;
-    if (!loggedWireframeFallbackUnsupported_) {
-      loggedWireframeFallbackUnsupported_ = true;
-      NURI_LOG_WARNING("OpaqueRenderer::ensureWireframePipeline: %s",
-                       pipelineResult.error().c_str());
+  if (!nuri::isValid(meshWireframePipelineHandle_)) {
+    auto pipelineResult =
+        gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_wireframe");
+    if (pipelineResult.hasError()) {
+      wireframePipelineUnsupported_ = true;
+      if (!loggedWireframeFallbackUnsupported_) {
+        loggedWireframeFallbackUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::ensureWireframePipeline: %s",
+                         pipelineResult.error().c_str());
+      }
+      return Result<bool, std::string>::makeResult(false);
     }
-    return Result<bool, std::string>::makeResult(false);
+
+    meshWireframePipelineHandle_ = pipelineResult.value();
+    wireframePipelineInitialized_ = true;
+
+    baseMeshWireframeDraw_ = baseMeshFillDraw_;
+    baseMeshWireframeDraw_.pipeline = meshWireframePipelineHandle_;
+    baseMeshWireframeDraw_.debugLabel = "OpaqueMeshWireframe";
   }
 
-  meshWireframePipelineHandle_ = pipelineResult.value();
-  wireframePipelineInitialized_ = true;
-
-  baseMeshWireframeDraw_ = baseMeshFillDraw_;
-  baseMeshWireframeDraw_.pipeline = meshWireframePipelineHandle_;
-  baseMeshWireframeDraw_.debugLabel = "OpaqueMeshWireframe";
+  if (requireMsaa && !nuri::isValid(meshMsaaWireframePipelineHandle_)) {
+    RenderPipelineDesc msaaDesc = wireframeDesc;
+    msaaDesc.sampleCount = kMsaa4xSampleCount;
+    auto msaaResult =
+        gpu_.createRenderPipeline(msaaDesc, "opaque_mesh_wireframe_msaa4x");
+    if (msaaResult.hasError()) {
+      msaaWireframePipelineUnsupported_ = true;
+      if (!loggedWireframeFallbackUnsupported_) {
+        loggedWireframeFallbackUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::ensureWireframePipeline: %s",
+                         msaaResult.error().c_str());
+      }
+      return Result<bool, std::string>::makeResult(false);
+    }
+    meshMsaaWireframePipelineHandle_ = msaaResult.value();
+  }
 
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> OpaqueRenderer::ensureTessWireframePipeline() {
+Result<bool, std::string>
+OpaqueRenderer::ensureTessWireframePipeline(bool requireMsaa) {
   if (tessWireframePipelineInitialized_ &&
-      nuri::isValid(meshTessWireframePipelineHandle_)) {
+      nuri::isValid(meshTessWireframePipelineHandle_) &&
+      (!requireMsaa || nuri::isValid(meshMsaaTessWireframePipelineHandle_))) {
     return Result<bool, std::string>::makeResult(true);
   }
-  if (tessWireframePipelineUnsupported_) {
+  if (tessWireframePipelineUnsupported_ ||
+      (requireMsaa && msaaTessWireframePipelineUnsupported_)) {
     return Result<bool, std::string>::makeResult(false);
   }
   if (!nuri::isValid(meshTessPipelineHandle_)) {
@@ -6455,30 +6882,52 @@ Result<bool, std::string> OpaqueRenderer::ensureTessWireframePipeline() {
       PolygonMode::Line, Topology::Patch, kTessellationPatchControlPoints,
       true);
 
-  auto pipelineResult =
-      gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_tess_wireframe");
-  if (pipelineResult.hasError()) {
-    tessWireframePipelineUnsupported_ = true;
-    if (!loggedTessWireframeFallbackUnsupported_) {
-      loggedTessWireframeFallbackUnsupported_ = true;
-      NURI_LOG_WARNING("OpaqueRenderer::ensureTessWireframePipeline: %s",
-                       pipelineResult.error().c_str());
+  if (!nuri::isValid(meshTessWireframePipelineHandle_)) {
+    auto pipelineResult =
+        gpu_.createRenderPipeline(wireframeDesc, "opaque_mesh_tess_wireframe");
+    if (pipelineResult.hasError()) {
+      tessWireframePipelineUnsupported_ = true;
+      if (!loggedTessWireframeFallbackUnsupported_) {
+        loggedTessWireframeFallbackUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::ensureTessWireframePipeline: %s",
+                         pipelineResult.error().c_str());
+      }
+      return Result<bool, std::string>::makeResult(false);
     }
-    return Result<bool, std::string>::makeResult(false);
+
+    meshTessWireframePipelineHandle_ = pipelineResult.value();
+    tessWireframePipelineInitialized_ = true;
   }
 
-  meshTessWireframePipelineHandle_ = pipelineResult.value();
-  tessWireframePipelineInitialized_ = true;
+  if (requireMsaa && !nuri::isValid(meshMsaaTessWireframePipelineHandle_)) {
+    RenderPipelineDesc msaaDesc = wireframeDesc;
+    msaaDesc.sampleCount = kMsaa4xSampleCount;
+    auto msaaResult = gpu_.createRenderPipeline(
+        msaaDesc, "opaque_mesh_tess_wireframe_msaa4x");
+    if (msaaResult.hasError()) {
+      msaaTessWireframePipelineUnsupported_ = true;
+      if (!loggedTessWireframeFallbackUnsupported_) {
+        loggedTessWireframeFallbackUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::ensureTessWireframePipeline: %s",
+                         msaaResult.error().c_str());
+      }
+      return Result<bool, std::string>::makeResult(false);
+    }
+    meshMsaaTessWireframePipelineHandle_ = msaaResult.value();
+  }
 
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> OpaqueRenderer::ensureGsOverlayPipeline() {
+Result<bool, std::string>
+OpaqueRenderer::ensureGsOverlayPipeline(bool requireMsaa) {
   if (gsOverlayPipelineInitialized_ &&
-      nuri::isValid(meshGsOverlayPipelineHandle_)) {
+      nuri::isValid(meshGsOverlayPipelineHandle_) &&
+      (!requireMsaa || nuri::isValid(meshMsaaGsOverlayPipelineHandle_))) {
     return Result<bool, std::string>::makeResult(true);
   }
-  if (gsOverlayPipelineUnsupported_) {
+  if (gsOverlayPipelineUnsupported_ ||
+      (requireMsaa && msaaGsOverlayPipelineUnsupported_)) {
     return Result<bool, std::string>::makeResult(false);
   }
   if (!nuri::isValid(meshDebugOverlayGeometryShader_) ||
@@ -6498,29 +6947,51 @@ Result<bool, std::string> OpaqueRenderer::ensureGsOverlayPipeline() {
       meshDebugOverlayGeometryShader_, meshDebugOverlayFragmentShader_,
       PolygonMode::Fill, Topology::Triangle, 0, true);
 
-  auto pipelineResult =
-      gpu_.createRenderPipeline(overlayDesc, "opaque_mesh_overlay_gs");
-  if (pipelineResult.hasError()) {
-    gsOverlayPipelineUnsupported_ = true;
-    if (!loggedGsOverlayUnsupported_) {
-      loggedGsOverlayUnsupported_ = true;
-      NURI_LOG_WARNING("OpaqueRenderer::ensureGsOverlayPipeline: %s",
-                       pipelineResult.error().c_str());
+  if (!nuri::isValid(meshGsOverlayPipelineHandle_)) {
+    auto pipelineResult =
+        gpu_.createRenderPipeline(overlayDesc, "opaque_mesh_overlay_gs");
+    if (pipelineResult.hasError()) {
+      gsOverlayPipelineUnsupported_ = true;
+      if (!loggedGsOverlayUnsupported_) {
+        loggedGsOverlayUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::ensureGsOverlayPipeline: %s",
+                         pipelineResult.error().c_str());
+      }
+      return Result<bool, std::string>::makeResult(false);
     }
-    return Result<bool, std::string>::makeResult(false);
+
+    meshGsOverlayPipelineHandle_ = pipelineResult.value();
+    gsOverlayPipelineInitialized_ = true;
   }
 
-  meshGsOverlayPipelineHandle_ = pipelineResult.value();
-  gsOverlayPipelineInitialized_ = true;
+  if (requireMsaa && !nuri::isValid(meshMsaaGsOverlayPipelineHandle_)) {
+    RenderPipelineDesc msaaDesc = overlayDesc;
+    msaaDesc.sampleCount = kMsaa4xSampleCount;
+    auto msaaResult =
+        gpu_.createRenderPipeline(msaaDesc, "opaque_mesh_overlay_gs_msaa4x");
+    if (msaaResult.hasError()) {
+      msaaGsOverlayPipelineUnsupported_ = true;
+      if (!loggedGsOverlayUnsupported_) {
+        loggedGsOverlayUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::ensureGsOverlayPipeline: %s",
+                         msaaResult.error().c_str());
+      }
+      return Result<bool, std::string>::makeResult(false);
+    }
+    meshMsaaGsOverlayPipelineHandle_ = msaaResult.value();
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> OpaqueRenderer::ensureGsTessOverlayPipeline() {
+Result<bool, std::string>
+OpaqueRenderer::ensureGsTessOverlayPipeline(bool requireMsaa) {
   if (gsTessOverlayPipelineInitialized_ &&
-      nuri::isValid(meshGsTessOverlayPipelineHandle_)) {
+      nuri::isValid(meshGsTessOverlayPipelineHandle_) &&
+      (!requireMsaa || nuri::isValid(meshMsaaGsTessOverlayPipelineHandle_))) {
     return Result<bool, std::string>::makeResult(true);
   }
-  if (gsTessOverlayPipelineUnsupported_) {
+  if (gsTessOverlayPipelineUnsupported_ ||
+      (requireMsaa && msaaGsTessOverlayPipelineUnsupported_)) {
     return Result<bool, std::string>::makeResult(false);
   }
   if (!nuri::isValid(meshTessPipelineHandle_)) {
@@ -6546,20 +7017,39 @@ Result<bool, std::string> OpaqueRenderer::ensureGsTessOverlayPipeline() {
                        meshDebugOverlayFragmentShader_, PolygonMode::Fill,
                        Topology::Patch, kTessellationPatchControlPoints, true);
 
-  auto pipelineResult =
-      gpu_.createRenderPipeline(overlayDesc, "opaque_mesh_tess_overlay_gs");
-  if (pipelineResult.hasError()) {
-    gsTessOverlayPipelineUnsupported_ = true;
-    if (!loggedGsTessOverlayUnsupported_) {
-      loggedGsTessOverlayUnsupported_ = true;
-      NURI_LOG_WARNING("OpaqueRenderer::ensureGsTessOverlayPipeline: %s",
-                       pipelineResult.error().c_str());
+  if (!nuri::isValid(meshGsTessOverlayPipelineHandle_)) {
+    auto pipelineResult =
+        gpu_.createRenderPipeline(overlayDesc, "opaque_mesh_tess_overlay_gs");
+    if (pipelineResult.hasError()) {
+      gsTessOverlayPipelineUnsupported_ = true;
+      if (!loggedGsTessOverlayUnsupported_) {
+        loggedGsTessOverlayUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::ensureGsTessOverlayPipeline: %s",
+                         pipelineResult.error().c_str());
+      }
+      return Result<bool, std::string>::makeResult(false);
     }
-    return Result<bool, std::string>::makeResult(false);
+
+    meshGsTessOverlayPipelineHandle_ = pipelineResult.value();
+    gsTessOverlayPipelineInitialized_ = true;
   }
 
-  meshGsTessOverlayPipelineHandle_ = pipelineResult.value();
-  gsTessOverlayPipelineInitialized_ = true;
+  if (requireMsaa && !nuri::isValid(meshMsaaGsTessOverlayPipelineHandle_)) {
+    RenderPipelineDesc msaaDesc = overlayDesc;
+    msaaDesc.sampleCount = kMsaa4xSampleCount;
+    auto msaaResult = gpu_.createRenderPipeline(
+        msaaDesc, "opaque_mesh_tess_overlay_gs_msaa4x");
+    if (msaaResult.hasError()) {
+      msaaGsTessOverlayPipelineUnsupported_ = true;
+      if (!loggedGsTessOverlayUnsupported_) {
+        loggedGsTessOverlayUnsupported_ = true;
+        NURI_LOG_WARNING("OpaqueRenderer::ensureGsTessOverlayPipeline: %s",
+                         msaaResult.error().c_str());
+      }
+      return Result<bool, std::string>::makeResult(false);
+    }
+    meshMsaaGsTessOverlayPipelineHandle_ = msaaResult.value();
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -6576,10 +7066,26 @@ void OpaqueRenderer::resetOverlayPipelineState() {
   if (nuri::isValid(meshTessWireframePipelineHandle_)) {
     gpu_.destroyRenderPipeline(meshTessWireframePipelineHandle_);
   }
+  if (nuri::isValid(meshMsaaGsOverlayPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshMsaaGsOverlayPipelineHandle_);
+  }
+  if (nuri::isValid(meshMsaaGsTessOverlayPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshMsaaGsTessOverlayPipelineHandle_);
+  }
+  if (nuri::isValid(meshMsaaWireframePipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshMsaaWireframePipelineHandle_);
+  }
+  if (nuri::isValid(meshMsaaTessWireframePipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshMsaaTessWireframePipelineHandle_);
+  }
   meshGsOverlayPipelineHandle_ = {};
   meshGsTessOverlayPipelineHandle_ = {};
   meshWireframePipelineHandle_ = {};
   meshTessWireframePipelineHandle_ = {};
+  meshMsaaGsOverlayPipelineHandle_ = {};
+  meshMsaaGsTessOverlayPipelineHandle_ = {};
+  meshMsaaWireframePipelineHandle_ = {};
+  meshMsaaTessWireframePipelineHandle_ = {};
   gsOverlayPipelineInitialized_ = false;
   gsTessOverlayPipelineInitialized_ = false;
   wireframePipelineInitialized_ = false;
@@ -6588,6 +7094,10 @@ void OpaqueRenderer::resetOverlayPipelineState() {
   gsTessOverlayPipelineUnsupported_ = false;
   wireframePipelineUnsupported_ = false;
   tessWireframePipelineUnsupported_ = false;
+  msaaWireframePipelineUnsupported_ = false;
+  msaaTessWireframePipelineUnsupported_ = false;
+  msaaGsOverlayPipelineUnsupported_ = false;
+  msaaGsTessOverlayPipelineUnsupported_ = false;
   loggedWireframeFallbackUnsupported_ = false;
   loggedTessWireframeFallbackUnsupported_ = false;
   loggedGsOverlayUnsupported_ = false;
@@ -6655,6 +7165,14 @@ void OpaqueRenderer::invalidateIndirectPackCache() {
 
 void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, depthPyramidPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDepthAlphaTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDepthAlphaDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDepthAlphaPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDepthDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDepthTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDepthDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDepthPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDepthAlphaDoubleSidedTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDepthAlphaTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDepthAlphaDoubleSidedPipelineHandle_);
@@ -6675,6 +7193,14 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, meshVelocityPipelineHandle_);
   destroyPipelineHandle(gpu_, meshReactiveMaskDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshReactiveMaskPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaAlphaDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaAlphaTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaAlphaDoubleSidedFillPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaAlphaFillPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaDoubleSidedFillPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshMsaaFillPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedFillPipelineHandle_);
@@ -6686,6 +7212,14 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshDoubleSidedFillPipelineHandle_ = {};
   meshTessPipelineHandle_ = {};
   meshDoubleSidedTessPipelineHandle_ = {};
+  meshMsaaFillPipelineHandle_ = {};
+  meshMsaaDoubleSidedFillPipelineHandle_ = {};
+  meshMsaaTessPipelineHandle_ = {};
+  meshMsaaDoubleSidedTessPipelineHandle_ = {};
+  meshMsaaAlphaFillPipelineHandle_ = {};
+  meshMsaaAlphaDoubleSidedFillPipelineHandle_ = {};
+  meshMsaaAlphaTessPipelineHandle_ = {};
+  meshMsaaAlphaDoubleSidedTessPipelineHandle_ = {};
   meshPickPipelineHandle_ = {};
   meshPickDoubleSidedPipelineHandle_ = {};
   meshPickTessPipelineHandle_ = {};
@@ -6706,6 +7240,14 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshDepthAlphaDoubleSidedPipelineHandle_ = {};
   meshDepthAlphaTessPipelineHandle_ = {};
   meshDepthAlphaDoubleSidedTessPipelineHandle_ = {};
+  meshMsaaDepthPipelineHandle_ = {};
+  meshMsaaDepthDoubleSidedPipelineHandle_ = {};
+  meshMsaaDepthTessPipelineHandle_ = {};
+  meshMsaaDepthDoubleSidedTessPipelineHandle_ = {};
+  meshMsaaDepthAlphaPipelineHandle_ = {};
+  meshMsaaDepthAlphaDoubleSidedPipelineHandle_ = {};
+  meshMsaaDepthAlphaTessPipelineHandle_ = {};
+  meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_ = {};
   depthPyramidPipelineHandle_ = {};
   baseMeshFillDraw_ = {};
 }

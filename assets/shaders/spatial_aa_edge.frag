@@ -17,6 +17,8 @@ layout(push_constant) uniform SpatialAAPushConstants {
   uint edgeThresholdBits;
   uint maxSearchSteps;
   uint resolveStrengthBits;
+  uint localContrastFactorBits;
+  uint cornerRoundingBits;
 }
 pc;
 
@@ -29,8 +31,15 @@ vec4 sampleSource(vec2 sampleUv) {
 }
 
 float compressedLuma(vec3 color) {
-  float luma = dot(max(color, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
-  return log2(1.0 + luma);
+  vec3 compressed = max(color, vec3(0.0));
+  compressed = compressed / (vec3(1.0) + compressed);
+  return dot(compressed, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec2 localContrastGate(vec2 delta, float localMax, float contrastFactor) {
+  float high = max(localMax, 1.0e-5);
+  float low = high / max(contrastFactor, 1.0);
+  return smoothstep(vec2(low), vec2(high), delta);
 }
 
 void main() {
@@ -48,8 +57,8 @@ void main() {
       sampleSource(clamp(centerUv - vec2(0.0, texel.y), minUv, maxUv)).rgb);
 
   vec2 delta = abs(vec2(center - left, center - top));
-  vec2 edges = step(vec2(threshold), delta);
-  if (dot(edges, vec2(1.0)) == 0.0) {
+  vec2 edges = smoothstep(vec2(threshold), vec2(threshold * 2.5), delta);
+  if (dot(edges, vec2(1.0)) <= 1.0e-5) {
     out_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
     return;
   }
@@ -68,7 +77,8 @@ void main() {
   vec2 maxDelta = max(delta, abs(vec2(center - right, center - bottom)));
   maxDelta = max(maxDelta, abs(vec2(left - leftLeft, top - topTop)));
   float finalDelta = max(maxDelta.x, maxDelta.y);
-  edges *= step(vec2(finalDelta), delta * 2.0);
+  edges *= localContrastGate(delta, finalDelta,
+                             max(pushFloat(pc.localContrastFactorBits), 1.0));
 
   out_FragColor = vec4(edges, 0.0, 1.0);
 }

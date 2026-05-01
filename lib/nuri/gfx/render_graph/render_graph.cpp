@@ -90,6 +90,8 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
   for (const RenderPass &pass : passes) {
     mix(static_cast<uint64_t>(pass.executionMode));
     mix(pass.hasColorAttachment ? 1u : 0u);
+    mix(nuri::isValid(pass.colorResolveTexture) ? 1u : 0u);
+    mix(nuri::isValid(pass.depthResolveTexture) ? 1u : 0u);
     mix(pass.useViewport ? 1u : 0u);
     mix(pass.drawBuffersPreResolved ? 1u : 0u);
     mix(static_cast<uint64_t>(pass.gpuTimingScope));
@@ -126,10 +128,20 @@ validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
                                                 ": compute-only pass cannot "
                                                 "bind a color texture");
   }
+  if (nuri::isValid(desc.colorResolveTexture)) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "bind a color resolve texture");
+  }
   if (nuri::isValid(desc.depthTexture)) {
     return Result<bool, std::string>::makeError(std::string(caller) +
                                                 ": compute-only pass cannot "
                                                 "bind a depth texture");
+  }
+  if (nuri::isValid(desc.depthResolveTexture)) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "bind a depth resolve texture");
   }
   if (!desc.draws.empty()) {
     return Result<bool, std::string>::makeError(std::string(caller) +
@@ -350,7 +362,10 @@ RenderGraphBuilder::RenderGraphBuilder(std::pmr::memory_resource *memory)
     : memory_(memory != nullptr ? memory : std::pmr::get_default_resource()),
       textures_(memory_), buffers_(memory_), ownedPassPayloads_(memory_),
       passes_(memory_), passDebugNames_(memory_),
-      passColorTextureBindings_(memory_), passDepthTextureBindings_(memory_),
+      passColorTextureBindings_(memory_),
+      passColorResolveTextureBindings_(memory_),
+      passDepthTextureBindings_(memory_),
+      passDepthResolveTextureBindings_(memory_),
       passDependencyBufferBindingOffsets_(memory_),
       passDependencyBufferBindingCounts_(memory_),
       passDependencyBufferBindingResourceIndices_(memory_),
@@ -383,7 +398,9 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   passes_.clear();
   passDebugNames_.clear();
   passColorTextureBindings_.clear();
+  passColorResolveTextureBindings_.clear();
   passDepthTextureBindings_.clear();
+  passDepthResolveTextureBindings_.clear();
   passDependencyBufferBindingOffsets_.clear();
   passDependencyBufferBindingCounts_.clear();
   passDependencyBufferBindingResourceIndices_.clear();
@@ -605,12 +622,30 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
             textures_[colorIdx].importedHandle;
       }
     }
+    if (passIndex < passColorResolveTextureBindings_.size()) {
+      const uint32_t colorResolveIdx =
+          passColorResolveTextureBindings_[passIndex];
+      if (colorResolveIdx != UINT32_MAX && colorResolveIdx < textures_.size() &&
+          textures_[colorResolveIdx].imported) {
+        result.orderedPasses[i].colorResolveTexture =
+            textures_[colorResolveIdx].importedHandle;
+      }
+    }
     if (passIndex < passDepthTextureBindings_.size()) {
       const uint32_t depthIdx = passDepthTextureBindings_[passIndex];
       if (depthIdx != UINT32_MAX && depthIdx < textures_.size() &&
           textures_[depthIdx].imported) {
         result.orderedPasses[i].depthTexture =
             textures_[depthIdx].importedHandle;
+      }
+    }
+    if (passIndex < passDepthResolveTextureBindings_.size()) {
+      const uint32_t depthResolveIdx =
+          passDepthResolveTextureBindings_[passIndex];
+      if (depthResolveIdx != UINT32_MAX && depthResolveIdx < textures_.size() &&
+          textures_[depthResolveIdx].imported) {
+        result.orderedPasses[i].depthResolveTexture =
+            textures_[depthResolveIdx].importedHandle;
       }
     }
   }
@@ -1180,9 +1215,28 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
       return bindResult;
     }
   }
+  if (nuri::isValid(desc.colorResolveTexture)) {
+    if (!desc.hasColorAttachment) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::bindImplicitPassResources: no-color pass has a "
+          "color resolve texture");
+    }
+    auto bindResult =
+        bindPassColorResolveTexture(pass, desc.colorResolveTexture);
+    if (bindResult.hasError()) {
+      return bindResult;
+    }
+  }
 
   if (nuri::isValid(desc.depthTexture)) {
     auto bindResult = bindPassDepthTexture(pass, desc.depthTexture);
+    if (bindResult.hasError()) {
+      return bindResult;
+    }
+  }
+  if (nuri::isValid(desc.depthResolveTexture)) {
+    auto bindResult =
+        bindPassDepthResolveTexture(pass, desc.depthResolveTexture);
     if (bindResult.hasError()) {
       return bindResult;
     }
@@ -1340,8 +1394,10 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
   RenderPass pass{};
   pass.executionMode = desc.executionMode;
   pass.color = desc.color;
+  pass.colorResolveTexture = {};
   pass.hasColorAttachment = desc.hasColorAttachment;
   pass.depth = desc.depth;
+  pass.depthResolveTexture = {};
   pass.useViewport = desc.useViewport;
   pass.viewport = desc.viewport;
   pass.gpuTimingScope = desc.gpuTimingScope;
@@ -1395,8 +1451,10 @@ RenderGraphBuilder::addPreparedGraphicsPass(
   RenderGraphGraphicsPassDesc validationDesc{};
   validationDesc.executionMode = desc.executionMode;
   validationDesc.colorTexture = desc.colorTexture;
+  validationDesc.colorResolveTexture = desc.colorResolveTexture;
   validationDesc.hasColorAttachment = desc.hasColorAttachment;
   validationDesc.depthTexture = desc.depthTexture;
+  validationDesc.depthResolveTexture = desc.depthResolveTexture;
   validationDesc.preDispatches = desc.preDispatches;
   validationDesc.draws = desc.draws;
   validationDesc.drawBuffersPreResolved = desc.drawBuffersPreResolved;
@@ -1422,8 +1480,10 @@ RenderGraphBuilder::addPreparedGraphicsPass(
   RenderPass pass{};
   pass.executionMode = desc.executionMode;
   pass.color = desc.color;
+  pass.colorResolveTexture = {};
   pass.hasColorAttachment = desc.hasColorAttachment;
   pass.depth = desc.depth;
+  pass.depthResolveTexture = {};
   pass.useViewport = desc.useViewport;
   pass.viewport = desc.viewport;
   pass.gpuTimingScope = desc.gpuTimingScope;
@@ -1439,9 +1499,11 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     clonedDesc.executionMode = desc.executionMode;
     clonedDesc.color = desc.color;
     clonedDesc.colorTexture = desc.colorTexture;
+    clonedDesc.colorResolveTexture = desc.colorResolveTexture;
     clonedDesc.hasColorAttachment = desc.hasColorAttachment;
     clonedDesc.depth = desc.depth;
     clonedDesc.depthTexture = desc.depthTexture;
+    clonedDesc.depthResolveTexture = desc.depthResolveTexture;
     clonedDesc.useViewport = desc.useViewport;
     clonedDesc.viewport = desc.viewport;
     clonedDesc.preDispatches = desc.preDispatches;
@@ -1489,9 +1551,30 @@ RenderGraphBuilder::addPreparedGraphicsPass(
             bindResult.error());
       }
     }
+    if (nuri::isValid(desc.colorResolveTexture)) {
+      if (!desc.hasColorAttachment) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            "RenderGraphBuilder::addPreparedGraphicsPass: no-color pass has a "
+            "color resolve texture");
+      }
+      auto bindResult =
+          bindPassColorResolveTexture(passId, desc.colorResolveTexture);
+      if (bindResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            bindResult.error());
+      }
+    }
 
     if (nuri::isValid(desc.depthTexture)) {
       auto bindResult = bindPassDepthTexture(passId, desc.depthTexture);
+      if (bindResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            bindResult.error());
+      }
+    }
+    if (nuri::isValid(desc.depthResolveTexture)) {
+      auto bindResult =
+          bindPassDepthResolveTexture(passId, desc.depthResolveTexture);
       if (bindResult.hasError()) {
         return Result<RenderGraphPassId, std::string>::makeError(
             bindResult.error());
@@ -1649,7 +1732,9 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
   resolvedName.assign(selectedName.data(), selectedName.size());
   passDebugNames_.push_back(std::move(resolvedName));
   passColorTextureBindings_.push_back(UINT32_MAX);
+  passColorResolveTextureBindings_.push_back(UINT32_MAX);
   passDepthTextureBindings_.push_back(UINT32_MAX);
+  passDepthResolveTextureBindings_.push_back(UINT32_MAX);
   passDependencyBufferBindingOffsets_.push_back(dependencyBindingOffset);
   passDependencyBufferBindingCounts_.push_back(
       static_cast<uint32_t>(dependencyCount));
@@ -1718,6 +1803,32 @@ RenderGraphBuilder::bindPassColorTexture(RenderGraphPassId pass,
 }
 
 Result<bool, std::string>
+RenderGraphBuilder::bindPassColorResolveTexture(RenderGraphPassId pass,
+                                                RenderGraphTextureId texture) {
+  if (!isValid(pass) || !isValid(texture)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassColorResolveTexture: id is invalid");
+  }
+  if (!isValidPassIndex(pass.value) || !isValidTextureIndex(texture.value)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassColorResolveTexture: id is out of range");
+  }
+  if (!passes_[pass.value].hasColorAttachment) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassColorResolveTexture: no-color pass cannot "
+        "bind a color resolve texture");
+  }
+  if (pass.value >= passColorResolveTextureBindings_.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassColorResolveTexture: pass binding table "
+        "is out of sync");
+  }
+
+  passColorResolveTextureBindings_[pass.value] = texture.value;
+  return addTextureAccess(pass, texture, RenderGraphAccessMode::Write);
+}
+
+Result<bool, std::string>
 RenderGraphBuilder::bindPassDepthTexture(RenderGraphPassId pass,
                                          RenderGraphTextureId texture) {
   if (!isValid(pass) || !isValid(texture)) {
@@ -1743,6 +1854,27 @@ RenderGraphBuilder::bindPassDepthTexture(RenderGraphPassId pass,
     return Result<bool, std::string>::makeResult(true);
   }
   return addTextureAccess(pass, texture, mode);
+}
+
+Result<bool, std::string>
+RenderGraphBuilder::bindPassDepthResolveTexture(RenderGraphPassId pass,
+                                                RenderGraphTextureId texture) {
+  if (!isValid(pass) || !isValid(texture)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDepthResolveTexture: id is invalid");
+  }
+  if (!isValidPassIndex(pass.value) || !isValidTextureIndex(texture.value)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDepthResolveTexture: id is out of range");
+  }
+  if (pass.value >= passDepthResolveTextureBindings_.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDepthResolveTexture: pass binding table "
+        "is out of sync");
+  }
+
+  passDepthResolveTextureBindings_[pass.value] = texture.value;
+  return addTextureAccess(pass, texture, RenderGraphAccessMode::Write);
 }
 
 Result<bool, std::string> RenderGraphBuilder::bindPassDependencyBuffer(
@@ -2277,7 +2409,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC0ValidateInputs(
     return Result<bool, std::string>::makeResult(true);
   }
   if (passColorTextureBindings_.size() != passes_.size() ||
+      passColorResolveTextureBindings_.size() != passes_.size() ||
       passDepthTextureBindings_.size() != passes_.size() ||
+      passDepthResolveTextureBindings_.size() != passes_.size() ||
       passDependencyBufferBindingOffsets_.size() != passes_.size() ||
       passDependencyBufferBindingCounts_.size() != passes_.size() ||
       passPreDispatchBindingOffsets_.size() != passes_.size() ||
@@ -2773,7 +2907,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   struct PassResolvePlan {
     uint32_t passIndex = UINT32_MAX;
     uint32_t colorTextureIndex = UINT32_MAX;
+    uint32_t colorResolveTextureIndex = UINT32_MAX;
     uint32_t depthTextureIndex = UINT32_MAX;
+    uint32_t depthResolveTextureIndex = UINT32_MAX;
     uint32_t dependencyCount = 0u;
     uint32_t dependencyBindingOffset = 0u;
     uint32_t resolvedDependencyOffset = 0u;
@@ -2808,7 +2944,11 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       PassResolvePlan plan{};
       plan.passIndex = passIndex;
       plan.colorTextureIndex = passColorTextureBindings_[passIndex];
+      plan.colorResolveTextureIndex =
+          passColorResolveTextureBindings_[passIndex];
       plan.depthTextureIndex = passDepthTextureBindings_[passIndex];
+      plan.depthResolveTextureIndex =
+          passDepthResolveTextureBindings_[passIndex];
       const uint32_t dependencyCount =
           passDependencyBufferBindingCounts_[passIndex];
       if (dependencyCount > kMaxDependencyResources) {
@@ -2953,6 +3093,26 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         };
         return;
       }
+      if (nuri::isValid(sourcePass.colorResolveTexture) &&
+          passColorResolveTextureBindings_[passIndex] == UINT32_MAX) {
+        resolveErrors[workerIndex] = IndexedResolveError{
+            .hasError = true,
+            .orderedPassIndex = orderedPassIndex,
+            .message = "RenderGraphBuilder::compile: pass requires explicit "
+                       "color resolve texture binding",
+        };
+        return;
+      }
+      if (nuri::isValid(sourcePass.depthResolveTexture) &&
+          passDepthResolveTextureBindings_[passIndex] == UINT32_MAX) {
+        resolveErrors[workerIndex] = IndexedResolveError{
+            .hasError = true,
+            .orderedPassIndex = orderedPassIndex,
+            .message = "RenderGraphBuilder::compile: pass requires explicit "
+                       "depth resolve texture binding",
+        };
+        return;
+      }
       if (plan.colorTextureIndex != UINT32_MAX &&
           !isValidTextureIndex(plan.colorTextureIndex)) {
         resolveErrors[workerIndex] = IndexedResolveError{
@@ -2960,6 +3120,16 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
             .orderedPassIndex = orderedPassIndex,
             .message = "RenderGraphBuilder::compile: color texture binding "
                        "references out-of-range texture",
+        };
+        return;
+      }
+      if (plan.colorResolveTextureIndex != UINT32_MAX &&
+          !isValidTextureIndex(plan.colorResolveTextureIndex)) {
+        resolveErrors[workerIndex] = IndexedResolveError{
+            .hasError = true,
+            .orderedPassIndex = orderedPassIndex,
+            .message = "RenderGraphBuilder::compile: color resolve texture "
+                       "binding references out-of-range texture",
         };
         return;
       }
@@ -2973,12 +3143,30 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         };
         return;
       }
+      if (plan.depthResolveTextureIndex != UINT32_MAX &&
+          !isValidTextureIndex(plan.depthResolveTextureIndex)) {
+        resolveErrors[workerIndex] = IndexedResolveError{
+            .hasError = true,
+            .orderedPassIndex = orderedPassIndex,
+            .message = "RenderGraphBuilder::compile: depth resolve texture "
+                       "binding references out-of-range texture",
+        };
+        return;
+      }
       if (plan.colorTextureIndex != UINT32_MAX &&
           !textures_[plan.colorTextureIndex].imported) {
         ++plan.unresolvedTextureCount;
       }
+      if (plan.colorResolveTextureIndex != UINT32_MAX &&
+          !textures_[plan.colorResolveTextureIndex].imported) {
+        ++plan.unresolvedTextureCount;
+      }
       if (plan.depthTextureIndex != UINT32_MAX &&
           !textures_[plan.depthTextureIndex].imported) {
+        ++plan.unresolvedTextureCount;
+      }
+      if (plan.depthResolveTextureIndex != UINT32_MAX &&
+          !textures_[plan.depthResolveTextureIndex].imported) {
         ++plan.unresolvedTextureCount;
       }
       for (uint32_t depIndex = 0; depIndex < dependencyCount; ++depIndex) {
@@ -3283,6 +3471,20 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
                   RenderGraphCompileResult::PassTextureBindingTarget::Color};
         }
       }
+      if (plan.colorResolveTextureIndex != UINT32_MAX) {
+        const TextureResource &resource =
+            textures_[plan.colorResolveTextureIndex];
+        if (resource.imported) {
+          resolvedPass.colorResolveTexture = resource.importedHandle;
+        } else {
+          resolvedPass.colorResolveTexture = {};
+          compiled.unresolvedTextureBindings[unresolvedTextureWriteOffset++] = {
+              .orderedPassIndex = orderedPassIndex,
+              .textureResourceIndex = plan.colorResolveTextureIndex,
+              .target = RenderGraphCompileResult::PassTextureBindingTarget::
+                  ColorResolve};
+        }
+      }
       if (plan.depthTextureIndex != UINT32_MAX) {
         const TextureResource &resource = textures_[plan.depthTextureIndex];
         if (resource.imported) {
@@ -3294,6 +3496,20 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
               .textureResourceIndex = plan.depthTextureIndex,
               .target =
                   RenderGraphCompileResult::PassTextureBindingTarget::Depth};
+        }
+      }
+      if (plan.depthResolveTextureIndex != UINT32_MAX) {
+        const TextureResource &resource =
+            textures_[plan.depthResolveTextureIndex];
+        if (resource.imported) {
+          resolvedPass.depthResolveTexture = resource.importedHandle;
+        } else {
+          resolvedPass.depthResolveTexture = {};
+          compiled.unresolvedTextureBindings[unresolvedTextureWriteOffset++] = {
+              .orderedPassIndex = orderedPassIndex,
+              .textureResourceIndex = plan.depthResolveTextureIndex,
+              .target = RenderGraphCompileResult::PassTextureBindingTarget::
+                  DepthResolve};
         }
       }
 
@@ -3553,7 +3769,11 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC4PlanBarriers(
         hasAccessFlag(access.mode, RenderGraphAccessMode::Write);
     if (access.resourceKind == AccessResourceKind::Texture &&
         (passColorTextureBindings_[access.passIndex] == access.resourceIndex ||
-         passDepthTextureBindings_[access.passIndex] == access.resourceIndex)) {
+         passColorResolveTextureBindings_[access.passIndex] ==
+             access.resourceIndex ||
+         passDepthTextureBindings_[access.passIndex] == access.resourceIndex ||
+         passDepthResolveTextureBindings_[access.passIndex] ==
+             access.resourceIndex)) {
       return RenderGraphResourceState::Attachment;
     }
     return hasWrite ? RenderGraphResourceState::Write
@@ -4478,7 +4698,11 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
       if (binding.target !=
               RenderGraphCompileResult::PassTextureBindingTarget::Color &&
           binding.target !=
-              RenderGraphCompileResult::PassTextureBindingTarget::Depth) {
+              RenderGraphCompileResult::PassTextureBindingTarget::Depth &&
+          binding.target != RenderGraphCompileResult::PassTextureBindingTarget::
+                                ColorResolve &&
+          binding.target != RenderGraphCompileResult::PassTextureBindingTarget::
+                                DepthResolve) {
         return Result<bool, std::string>::makeError(
             "RenderGraphBuilder::compile: unresolved texture binding target is "
             "invalid");
@@ -5293,9 +5517,15 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       if (binding.target ==
           RenderGraphCompileResult::PassTextureBindingTarget::Color) {
         pass.colorTexture = transientTextureHandles[allocationIndex];
+      } else if (binding.target == RenderGraphCompileResult::
+                                       PassTextureBindingTarget::ColorResolve) {
+        pass.colorResolveTexture = transientTextureHandles[allocationIndex];
       } else if (binding.target ==
                  RenderGraphCompileResult::PassTextureBindingTarget::Depth) {
         pass.depthTexture = transientTextureHandles[allocationIndex];
+      } else if (binding.target == RenderGraphCompileResult::
+                                       PassTextureBindingTarget::DepthResolve) {
+        pass.depthResolveTexture = transientTextureHandles[allocationIndex];
       } else {
         destroyMaterializedResources();
         return fail(

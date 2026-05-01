@@ -19,6 +19,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/renderers/shadow_renderer.cpp
   nuri/gfx/pipeline/features/composite_feature.cpp
   nuri/gfx/pipeline/features/debug_feature.cpp
+  nuri/gfx/pipeline/features/msaa_resolve_feature.cpp
   nuri/gfx/pipeline/features/opaque_feature.cpp
   nuri/gfx/pipeline/features/shadow_feature.cpp
   nuri/gfx/pipeline/features/spatial_aa_feature.cpp

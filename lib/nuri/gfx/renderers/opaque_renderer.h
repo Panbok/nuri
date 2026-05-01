@@ -222,7 +222,9 @@ private:
 
     RenderGraphGraphicsPassDesc desc{};
     TextureHandle colorTextureHandle{};
+    TextureHandle colorResolveTextureHandle{};
     TextureHandle depthTextureHandle{};
+    TextureHandle depthResolveTextureHandle{};
     std::pmr::vector<DependencyBufferBinding> dependencyBufferBindings;
     std::pmr::vector<DependencyTextureBinding> dependencyTextureBindings;
     std::pmr::vector<PreDispatchDependencyBinding>
@@ -342,19 +344,24 @@ private:
   [[nodiscard]] RenderPipelineHandle
   selectReactiveMaskPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] RenderPipelineHandle
-  selectDepthPipeline(RenderPipelineHandle sourcePipeline,
-                      bool alphaMasked) const;
+  selectDepthPipeline(RenderPipelineHandle sourcePipeline, bool alphaMasked,
+                      bool msaa) const;
   [[nodiscard]] RenderPipelineHandle
   selectPickPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] RenderPipelineHandle
   selectShadowInspectPipeline(RenderPipelineHandle sourcePipeline) const;
+  [[nodiscard]] RenderPipelineHandle
+  selectMsaaScenePipeline(RenderPipelineHandle sourcePipeline,
+                          bool alphaMasked) const;
   [[nodiscard]] bool isDoubleSidedPipeline(RenderPipelineHandle handle) const;
   [[nodiscard]] bool isTessPipeline(RenderPipelineHandle handle) const;
   Result<bool, std::string> ensureSceneDepthSampler();
-  Result<bool, std::string> ensureWireframePipeline();
-  Result<bool, std::string> ensureTessWireframePipeline();
-  Result<bool, std::string> ensureGsOverlayPipeline();
-  Result<bool, std::string> ensureGsTessOverlayPipeline();
+  Result<bool, std::string> ensureWireframePipeline(bool requireMsaa = false);
+  Result<bool, std::string>
+  ensureTessWireframePipeline(bool requireMsaa = false);
+  Result<bool, std::string> ensureGsOverlayPipeline(bool requireMsaa = false);
+  Result<bool, std::string>
+  ensureGsTessOverlayPipeline(bool requireMsaa = false);
   void resetOverlayPipelineState();
   void invalidateAutoLodCache();
   void updateFastAutoLodCache(
@@ -429,10 +436,22 @@ private:
   RenderPipelineHandle meshDoubleSidedFillPipelineHandle_{};
   RenderPipelineHandle meshTessPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle meshMsaaFillPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDoubleSidedFillPipelineHandle_{};
+  RenderPipelineHandle meshMsaaTessPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle meshMsaaAlphaFillPipelineHandle_{};
+  RenderPipelineHandle meshMsaaAlphaDoubleSidedFillPipelineHandle_{};
+  RenderPipelineHandle meshMsaaAlphaTessPipelineHandle_{};
+  RenderPipelineHandle meshMsaaAlphaDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle meshGsOverlayPipelineHandle_{};
   RenderPipelineHandle meshGsTessOverlayPipelineHandle_{};
   RenderPipelineHandle meshWireframePipelineHandle_{};
   RenderPipelineHandle meshTessWireframePipelineHandle_{};
+  RenderPipelineHandle meshMsaaGsOverlayPipelineHandle_{};
+  RenderPipelineHandle meshMsaaGsTessOverlayPipelineHandle_{};
+  RenderPipelineHandle meshMsaaWireframePipelineHandle_{};
+  RenderPipelineHandle meshMsaaTessWireframePipelineHandle_{};
   RenderPipelineHandle meshPickPipelineHandle_{};
   RenderPipelineHandle meshPickDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshPickTessPipelineHandle_{};
@@ -453,6 +472,14 @@ private:
   RenderPipelineHandle meshDepthAlphaDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshDepthAlphaTessPipelineHandle_{};
   RenderPipelineHandle meshDepthAlphaDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDepthPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDepthDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDepthTessPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDepthDoubleSidedTessPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDepthAlphaPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDepthAlphaDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDepthAlphaTessPipelineHandle_{};
+  RenderPipelineHandle meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle depthPyramidPipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
 
@@ -468,6 +495,10 @@ private:
   bool gsOverlayPipelineUnsupported_ = false;
   bool gsTessOverlayPipelineInitialized_ = false;
   bool gsTessOverlayPipelineUnsupported_ = false;
+  bool msaaWireframePipelineUnsupported_ = false;
+  bool msaaTessWireframePipelineUnsupported_ = false;
+  bool msaaGsOverlayPipelineUnsupported_ = false;
+  bool msaaGsTessOverlayPipelineUnsupported_ = false;
   bool loggedWireframeFallbackUnsupported_ = false;
   bool loggedTessWireframeFallbackUnsupported_ = false;
   bool loggedGsOverlayUnsupported_ = false;
@@ -540,6 +571,7 @@ private:
   std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<DrawItem> shadowInspectDrawItems_;
   std::pmr::vector<DrawItem> passDrawItems_;
+  std::pmr::vector<DrawItem> msaaPassDrawItems_;
   std::pmr::vector<DrawItem> depthPrepassDrawItems_;
   std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
   std::pmr::vector<DrawItem> depthPyramidDrawItems_;

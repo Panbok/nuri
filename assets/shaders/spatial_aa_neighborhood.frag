@@ -22,6 +22,8 @@ layout(push_constant) uniform SpatialAAPushConstants {
   uint edgeThresholdBits;
   uint maxSearchSteps;
   uint resolveStrengthBits;
+  uint localContrastFactorBits;
+  uint cornerRoundingBits;
 }
 pc;
 
@@ -35,6 +37,10 @@ vec4 sampleSource(vec2 sampleUv) {
 
 vec4 sampleBlend(vec2 sampleUv) {
   return textureBindless2D(pc.blendTexId, pc.pointSamplerId, sampleUv);
+}
+
+vec2 sampleEdges(vec2 sampleUv) {
+  return textureBindless2D(pc.edgeTexId, pc.pointSamplerId, sampleUv).rg;
 }
 
 vec4 spatialResolve(vec2 centerUv) {
@@ -69,7 +75,16 @@ vec4 spatialResolve(vec2 centerUv) {
                                 : (top * topWeight + bottom * bottomWeight) /
                                       max(verticalWeight, 1.0e-5);
   float maxBlend = clamp(pushFloat(pc.resolveStrengthBits), 0.0, 1.0);
-  float strength = clamp(weightSum, 0.0, maxBlend);
+  vec2 centerEdges = sampleEdges(centerUv);
+  vec2 rightEdges =
+      sampleEdges(clamp(centerUv + vec2(texel.x, 0.0), minUv, maxUv));
+  vec2 bottomEdges =
+      sampleEdges(clamp(centerUv + vec2(0.0, texel.y), minUv, maxUv));
+  float edgeGate =
+      max(max(centerEdges.r, centerEdges.g),
+          max(horizontal ? rightEdges.r : bottomEdges.g, weightSum));
+  float strength =
+      clamp(weightSum, 0.0, maxBlend) * smoothstep(0.03, 0.35, edgeGate);
   return mix(center, directional, strength);
 }
 

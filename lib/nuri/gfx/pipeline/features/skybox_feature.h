@@ -98,6 +98,7 @@ private:
   ShaderHandle skyboxVertexShader_{};
   ShaderHandle skyboxFragmentShader_{};
   RenderPipelineHandle skyboxPipelineHandle_{};
+  RenderPipelineHandle skyboxMsaaPipelineHandle_{};
 
   size_t frameBufferCapacityBytes_ = 0;
   bool initialized_ = false;

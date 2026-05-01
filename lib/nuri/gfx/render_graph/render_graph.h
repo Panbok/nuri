@@ -79,9 +79,11 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   RenderPassExecutionMode executionMode = RenderPassExecutionMode::Graphics;
   AttachmentColor color{};
   RenderGraphTextureId colorTexture{};
+  RenderGraphTextureId colorResolveTexture{};
   bool hasColorAttachment = true;
   AttachmentDepth depth{};
   RenderGraphTextureId depthTexture{};
+  RenderGraphTextureId depthResolveTexture{};
   bool useViewport = false;
   Viewport viewport{};
   std::span<const ComputeDispatchItem> preDispatches{};
@@ -141,9 +143,11 @@ struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   RenderPassExecutionMode executionMode = RenderPassExecutionMode::Graphics;
   AttachmentColor color{};
   RenderGraphTextureId colorTexture{};
+  RenderGraphTextureId colorResolveTexture{};
   bool hasColorAttachment = true;
   AttachmentDepth depth{};
   RenderGraphTextureId depthTexture{};
+  RenderGraphTextureId depthResolveTexture{};
   bool useViewport = false;
   Viewport viewport{};
   std::span<const ComputeDispatchItem> preDispatches{};
@@ -299,6 +303,8 @@ struct NURI_API RenderGraphCompileResult {
   enum class PassTextureBindingTarget : uint8_t {
     Color = 0,
     Depth = 1,
+    ColorResolve = 2,
+    DepthResolve = 3,
   };
 
   struct PassTextureBinding {
@@ -486,7 +492,13 @@ public:
   [[nodiscard]] Result<bool, std::string>
   bindPassColorTexture(RenderGraphPassId pass, RenderGraphTextureId texture);
   [[nodiscard]] Result<bool, std::string>
+  bindPassColorResolveTexture(RenderGraphPassId pass,
+                              RenderGraphTextureId texture);
+  [[nodiscard]] Result<bool, std::string>
   bindPassDepthTexture(RenderGraphPassId pass, RenderGraphTextureId texture);
+  [[nodiscard]] Result<bool, std::string>
+  bindPassDepthResolveTexture(RenderGraphPassId pass,
+                              RenderGraphTextureId texture);
   [[nodiscard]] Result<bool, std::string> bindPassDependencyBuffer(
       RenderGraphPassId pass, uint32_t dependencyIndex,
       RenderGraphBufferId buffer,
@@ -751,7 +763,9 @@ private:
   std::pmr::vector<RenderPass> passes_;
   std::pmr::vector<std::pmr::string> passDebugNames_;
   std::pmr::vector<uint32_t> passColorTextureBindings_;
+  std::pmr::vector<uint32_t> passColorResolveTextureBindings_;
   std::pmr::vector<uint32_t> passDepthTextureBindings_;
+  std::pmr::vector<uint32_t> passDepthResolveTextureBindings_;
   std::pmr::vector<uint32_t> passDependencyBufferBindingOffsets_;
   std::pmr::vector<uint32_t> passDependencyBufferBindingCounts_;
   std::pmr::vector<uint32_t> passDependencyBufferBindingResourceIndices_;

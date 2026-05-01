@@ -28,7 +28,13 @@ constexpr uint32_t kSpatialAACopyBackPassDebugColor = 0xff4499ffu;
 constexpr uint32_t kSpatialAADrawDebugColor = 0xff66aaffu;
 constexpr float kSpatialAAEdgeThreshold = 0.12f;
 constexpr float kSpatialAAFallbackResolveStrength = 0.30f;
-constexpr float kSpatialAACleanupResolveStrength = 0.16f;
+constexpr float kSpatialAAMsaaCleanupResolveStrength = 0.16f;
+constexpr float kSpatialAATaaCleanupEdgeThreshold = 0.14f;
+constexpr float kSpatialAATaaCleanupResolveStrength = 0.10f;
+constexpr float kSpatialAAFallbackLocalContrastFactor = 2.0f;
+constexpr float kSpatialAATaaCleanupLocalContrastFactor = 1.45f;
+constexpr float kSpatialAAFallbackCornerRounding = 0.25f;
+constexpr float kSpatialAATaaCleanupCornerRounding = 0.40f;
 constexpr uint32_t kSpatialAAMaxSearchSteps = 16u;
 
 struct SpatialAAPushConstants {
@@ -45,8 +51,18 @@ struct SpatialAAPushConstants {
   uint32_t edgeThresholdBits = 0u;
   uint32_t maxSearchSteps = 0u;
   uint32_t resolveStrengthBits = 0u;
+  uint32_t localContrastFactorBits = 0u;
+  uint32_t cornerRoundingBits = 0u;
 };
 static_assert(sizeof(SpatialAAPushConstants) <= 128);
+
+struct SpatialAAProfile {
+  float edgeThreshold = kSpatialAAEdgeThreshold;
+  float resolveStrength = kSpatialAAFallbackResolveStrength;
+  float localContrastFactor = kSpatialAAFallbackLocalContrastFactor;
+  float cornerRounding = kSpatialAAFallbackCornerRounding;
+  uint32_t maxSearchSteps = kSpatialAAMaxSearchSteps;
+};
 
 [[nodiscard]] inline bool
 isSpatialAADebugView(AntiAliasingDebugView view) noexcept {
@@ -74,6 +90,10 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
   if (mode == AntiAliasingMode::SpatialFallback) {
     return true;
   }
+  if (mode == AntiAliasingMode::MSAA4x) {
+    return settings.antiAliasing.debug.spatialPostMsaaCleanup &&
+           !isTaaDebugView(debugView);
+  }
   if (mode != AntiAliasingMode::TAA || isTaaDebugView(debugView)) {
     return false;
   }
@@ -99,10 +119,46 @@ isSpatialFallbackActive(const RenderFrameContext &frame) noexcept {
 [[nodiscard]] inline bool
 isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const AntiAliasingMode mode =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode);
+  if (mode == AntiAliasingMode::MSAA4x) {
+    return settings.antiAliasing.debug.spatialPostMsaaCleanup;
+  }
+  return mode == AntiAliasingMode::TAA &&
+         settings.antiAliasing.debug.spatialPostTaaCleanup &&
+         !isSpatialFallbackActive(frame);
+}
+
+[[nodiscard]] inline bool
+isTaaPostSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
   return sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
              AntiAliasingMode::TAA &&
          settings.antiAliasing.debug.spatialPostTaaCleanup &&
          !isSpatialFallbackActive(frame);
+}
+
+[[nodiscard]] inline SpatialAAProfile
+spatialAAProfile(const RenderFrameContext &frame) noexcept {
+  if (isTaaPostSpatialCleanupActive(frame)) {
+    return SpatialAAProfile{
+        .edgeThreshold = kSpatialAATaaCleanupEdgeThreshold,
+        .resolveStrength = kSpatialAATaaCleanupResolveStrength,
+        .localContrastFactor = kSpatialAATaaCleanupLocalContrastFactor,
+        .cornerRounding = kSpatialAATaaCleanupCornerRounding,
+        .maxSearchSteps = kSpatialAAMaxSearchSteps,
+    };
+  }
+  if (isSpatialCleanupActive(frame)) {
+    return SpatialAAProfile{
+        .edgeThreshold = kSpatialAAEdgeThreshold,
+        .resolveStrength = kSpatialAAMsaaCleanupResolveStrength,
+        .localContrastFactor = kSpatialAAFallbackLocalContrastFactor,
+        .cornerRounding = kSpatialAAFallbackCornerRounding,
+        .maxSearchSteps = kSpatialAAMaxSearchSteps,
+    };
+  }
+  return SpatialAAProfile{};
 }
 
 [[nodiscard]] inline std::filesystem::path
@@ -576,11 +632,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       1.0f / static_cast<float>(std::max(dimensions.height, 1u));
   const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
       renderSettingsOrDefault(ctx.frame).antiAliasing.debug.view);
+  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  const AntiAliasingMode aaMode =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode);
   const bool fallbackActive = isSpatialFallbackActive(ctx.frame);
   const bool cleanupActive = isSpatialCleanupActive(ctx.frame);
-  const float resolveStrength = cleanupActive
-                                    ? kSpatialAACleanupResolveStrength
-                                    : kSpatialAAFallbackResolveStrength;
+  const SpatialAAProfile profile = spatialAAProfile(ctx.frame);
   const SpatialAAPushConstants baseConstants{
       .sourceTexId = sourceTexId,
       .edgeTexId = edgeTexId,
@@ -592,9 +649,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       .mode = kSpatialAAModeNeighborhood,
       .inverseWidthBits = std::bit_cast<uint32_t>(inverseWidth),
       .inverseHeightBits = std::bit_cast<uint32_t>(inverseHeight),
-      .edgeThresholdBits = std::bit_cast<uint32_t>(kSpatialAAEdgeThreshold),
-      .maxSearchSteps = kSpatialAAMaxSearchSteps,
-      .resolveStrengthBits = std::bit_cast<uint32_t>(resolveStrength),
+      .edgeThresholdBits = std::bit_cast<uint32_t>(profile.edgeThreshold),
+      .maxSearchSteps = profile.maxSearchSteps,
+      .resolveStrengthBits = std::bit_cast<uint32_t>(profile.resolveStrength),
+      .localContrastFactorBits =
+          std::bit_cast<uint32_t>(profile.localContrastFactor),
+      .cornerRoundingBits = std::bit_cast<uint32_t>(profile.cornerRounding),
   };
 
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
@@ -608,6 +668,11 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   aaMetrics.spatialAAEnabled = true;
   aaMetrics.spatialAAFallbackActive = fallbackActive;
   aaMetrics.spatialAACleanupActive = cleanupActive;
+  aaMetrics.msaaSpatialCleanupEnabled =
+      aaMode == AntiAliasingMode::MSAA4x &&
+      settings.antiAliasing.debug.spatialPostMsaaCleanup;
+  aaMetrics.msaaSpatialCleanupActive =
+      aaMode == AntiAliasingMode::MSAA4x && cleanupActive;
   aaMetrics.spatialAAWidth = dimensions.width;
   aaMetrics.spatialAAHeight = dimensions.height;
   aaMetrics.spatialAATextureCount =

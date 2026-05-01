@@ -40,6 +40,15 @@ TextureDesc makeTextureDesc(Format format, uint32_t width, uint32_t height,
   };
 }
 
+TextureDesc makeMsaaTextureDesc(Format format, uint32_t width,
+                                uint32_t height) {
+  TextureDesc desc =
+      makeTextureDesc(format, width, height, TextureUsage::Attachment);
+  desc.numSamples = kMsaa4xSampleCount;
+  desc.storage = Storage::Device;
+  return desc;
+}
+
 uint32_t textureBytesPerPixel(Format format) {
   switch (format) {
   case Format::RG16_FLOAT:
@@ -82,6 +91,7 @@ FrameCompositionProvider::FrameCompositionProvider(
           TextureRing(memory_),
       },
       frameColorTextures_(memory_), sceneDepthTextures_(memory_),
+      msaaSceneColorTextures_(memory_), msaaSceneDepthTextures_(memory_),
       motionVectorTextures_(memory_), reactiveMaskTextures_(memory_),
       historyColorTextures_(memory_) {}
 
@@ -91,6 +101,7 @@ FrameCompositionProvider::~FrameCompositionProvider() {
   }
   destroyTextures(frameColorTextures_);
   destroyTextures(sceneDepthTextures_);
+  destroyMsaaSceneTextures();
   destroyHistoryTextures();
   destroyMotionVectorTextures();
   destroyReactiveMaskTextures();
@@ -103,10 +114,20 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.sceneColorGraphTexture = {};
   ctx.shared.frameColorGraphTexture = {};
   ctx.shared.sceneDepthGraphTexture = {};
+  ctx.shared.msaaSceneColorGraphTexture = {};
+  ctx.shared.msaaSceneDepthGraphTexture = {};
   ctx.shared.sceneDepthPyramidGraphTextures = {};
   ctx.shared.motionVectorGraphTexture = {};
   ctx.shared.previousMotionVectorGraphTexture = {};
   ctx.shared.reactiveMaskGraphTexture = {};
+
+  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  if (sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+      AntiAliasingMode::MSAA4x) {
+    ctx.shared.textureRequirements |=
+        FrameTextureRequirementFlags::MsaaSceneColor |
+        FrameTextureRequirementFlags::MsaaSceneDepth;
+  }
 
   auto ensureResult = ensureTextures(ctx.shared.textureRequirements);
   if (ensureResult.hasError()) {
@@ -123,6 +144,10 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       currentRingTexture(frameColorTextures_, ctx.frame.frameIndex);
   ctx.shared.sceneDepthTexture =
       currentRingTexture(sceneDepthTextures_, ctx.frame.frameIndex);
+  ctx.shared.msaaSceneColorTexture =
+      currentRingTexture(msaaSceneColorTextures_, ctx.frame.frameIndex);
+  ctx.shared.msaaSceneDepthTexture =
+      currentRingTexture(msaaSceneDepthTextures_, ctx.frame.frameIndex);
   ctx.shared.historyColorReadTexture =
       previousRingTexture(historyColorTextures_, ctx.frame.frameIndex);
   ctx.shared.historyColorWriteTexture =
@@ -136,6 +161,37 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.reactiveMaskTexture =
       currentRingTexture(reactiveMaskTextures_, ctx.frame.frameIndex);
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
+  aaMetrics.msaaEnabled =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+      AntiAliasingMode::MSAA4x;
+  aaMetrics.msaaSampleCount = aaMetrics.msaaEnabled ? kMsaa4xSampleCount : 1u;
+  aaMetrics.msaaSpatialCleanupEnabled =
+      aaMetrics.msaaEnabled &&
+      settings.antiAliasing.debug.spatialPostMsaaCleanup;
+  aaMetrics.msaaWidth = framebufferWidth_;
+  aaMetrics.msaaHeight = framebufferHeight_;
+  aaMetrics.msaaColorAllocated =
+      nuri::isValid(ctx.shared.msaaSceneColorTexture);
+  aaMetrics.msaaDepthAllocated =
+      nuri::isValid(ctx.shared.msaaSceneDepthTexture);
+  const uint64_t msaaPixelCount = static_cast<uint64_t>(framebufferWidth_) *
+                                  static_cast<uint64_t>(framebufferHeight_);
+  aaMetrics.msaaColorTextureBytes =
+      aaMetrics.msaaColorAllocated
+          ? msaaPixelCount *
+                static_cast<uint64_t>(
+                    textureBytesPerPixel(kFrameCompositionSceneColorFormat)) *
+                static_cast<uint64_t>(kMsaa4xSampleCount)
+          : 0u;
+  aaMetrics.msaaDepthTextureBytes =
+      aaMetrics.msaaDepthAllocated
+          ? msaaPixelCount *
+                static_cast<uint64_t>(
+                    textureBytesPerPixel(kFrameCompositionDepthFormat)) *
+                static_cast<uint64_t>(kMsaa4xSampleCount)
+          : 0u;
+  aaMetrics.msaaTotalBytes =
+      aaMetrics.msaaColorTextureBytes + aaMetrics.msaaDepthTextureBytes;
   aaMetrics.motionVectorFormat = kFrameCompositionMotionVectorFormat;
   aaMetrics.motionVectorWidth = framebufferWidth_;
   aaMetrics.motionVectorHeight = framebufferHeight_;
@@ -261,6 +317,26 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
     }
   } else if (!needsSceneDepth && hadSceneDepth) {
     destroyTextures(sceneDepthTextures_);
+  }
+
+  const bool needsMsaaScene =
+      hasFrameTextureRequirementFlag(
+          requirements, FrameTextureRequirementFlags::MsaaSceneColor) ||
+      hasFrameTextureRequirementFlag(
+          requirements, FrameTextureRequirementFlags::MsaaSceneDepth);
+  const bool hadMsaaScene =
+      hasFrameTextureRequirementFlag(
+          previousRequirements, FrameTextureRequirementFlags::MsaaSceneColor) ||
+      hasFrameTextureRequirementFlag(
+          previousRequirements, FrameTextureRequirementFlags::MsaaSceneDepth);
+  if (needsMsaaScene && (fullRecreate || !hadMsaaScene)) {
+    auto msaaResult = recreateMsaaSceneTextures();
+    if (msaaResult.hasError()) {
+      invalidateAllocationState();
+      return msaaResult;
+    }
+  } else if (!needsMsaaScene && hadMsaaScene) {
+    destroyMsaaSceneTextures();
   }
 
   const bool needsSceneColorMipChain = hasFrameTextureRequirementFlag(
@@ -400,6 +476,36 @@ Result<bool, std::string> FrameCompositionProvider::recreateHistoryTextures() {
 }
 
 Result<bool, std::string>
+FrameCompositionProvider::recreateMsaaSceneTextures() {
+  destroyMsaaSceneTextures();
+
+  msaaSceneColorTextures_.resize(textureRingCount_);
+  msaaSceneDepthTextures_.resize(textureRingCount_);
+  const TextureDesc colorDesc = makeMsaaTextureDesc(
+      kFrameCompositionSceneColorFormat, framebufferWidth_, framebufferHeight_);
+  const TextureDesc depthDesc = makeMsaaTextureDesc(
+      kFrameCompositionDepthFormat, framebufferWidth_, framebufferHeight_);
+  for (uint32_t i = 0; i < textureRingCount_; ++i) {
+    const std::string colorName = "frame_msaa_scene_color_" + std::to_string(i);
+    auto colorResult = gpu_.createTexture(colorDesc, colorName);
+    if (colorResult.hasError()) {
+      destroyMsaaSceneTextures();
+      return Result<bool, std::string>::makeError(colorResult.error());
+    }
+    msaaSceneColorTextures_[i] = colorResult.value();
+
+    const std::string depthName = "frame_msaa_scene_depth_" + std::to_string(i);
+    auto depthResult = gpu_.createTexture(depthDesc, depthName);
+    if (depthResult.hasError()) {
+      destroyMsaaSceneTextures();
+      return Result<bool, std::string>::makeError(depthResult.error());
+    }
+    msaaSceneDepthTextures_[i] = depthResult.value();
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
 FrameCompositionProvider::recreateMotionVectorTextures() {
   const bool replacingExistingTextures = !motionVectorTextures_.empty();
   destroyMotionVectorTextures();
@@ -464,6 +570,11 @@ void FrameCompositionProvider::destroyTextures(TextureRing &textures) {
 
 void FrameCompositionProvider::destroyHistoryTextures() {
   destroyTextures(historyColorTextures_);
+}
+
+void FrameCompositionProvider::destroyMsaaSceneTextures() {
+  destroyTextures(msaaSceneColorTextures_);
+  destroyTextures(msaaSceneDepthTextures_);
 }
 
 void FrameCompositionProvider::destroyMotionVectorTextures() {
