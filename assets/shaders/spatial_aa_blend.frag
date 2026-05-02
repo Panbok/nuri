@@ -22,6 +22,12 @@ layout(push_constant) uniform SpatialAAPushConstants {
 }
 pc;
 
+const float EDGE_ACTIVE_THRESHOLD = 0.05;
+// Empirical SMAA-style tuning constants for continuity and blend strength.
+const float CONTINUITY_BASE = 0.35;
+const float CONTINUITY_SCALE = 0.65;
+const float BLEND_WEIGHT_SCALE = 0.24;
+
 float pushFloat(uint bits) { return uintBitsToFloat(bits); }
 
 vec2 screenUv(vec2 fullscreenUv) { return fract(fullscreenUv); }
@@ -67,7 +73,8 @@ float searchDistance(vec2 centerUv, vec2 stepUv, uint component) {
     vec2 sampleUv = clamp(centerUv + stepUv * float(i), vec2(0.0), vec2(1.0));
     float edgeActive = edgeComponent(sampleEdges(sampleUv).rg, component);
     distanceValue = float(i);
-    if (edgeActive < 0.05) {
+    // Shared with main(); pc.maxSearchSteps caps soft-gradient search cost.
+    if (edgeActive < EDGE_ACTIVE_THRESHOLD) {
       break;
     }
   }
@@ -78,7 +85,7 @@ float cornerAttenuation(vec2 centerUv, vec2 texel, uint majorComponent) {
   float rounding = clamp(pushFloat(pc.cornerRoundingBits), 0.0, 1.0);
   uint crossComponent = 1u - majorComponent;
   vec2 perpendicular =
-      majorComponent == 0u ? vec2(0.0, texel.y) : vec2(texel.x, 0.0);
+      texel * vec2(float(majorComponent), 1.0 - float(majorComponent));
   float crossing = sampleEdgeComponent(centerUv, crossComponent);
   crossing = max(crossing, sampleEdgeComponent(clamp(centerUv + perpendicular,
                                                      vec2(0.0), vec2(1.0)),
@@ -86,14 +93,6 @@ float cornerAttenuation(vec2 centerUv, vec2 texel, uint majorComponent) {
   crossing = max(crossing, sampleEdgeComponent(clamp(centerUv - perpendicular,
                                                      vec2(0.0), vec2(1.0)),
                                                crossComponent));
-  crossing =
-      max(crossing, sampleEdgeComponent(clamp(centerUv + vec2(texel.x, texel.y),
-                                              vec2(0.0), vec2(1.0)),
-                                        crossComponent));
-  crossing =
-      max(crossing, sampleEdgeComponent(clamp(centerUv - vec2(texel.x, texel.y),
-                                              vec2(0.0), vec2(1.0)),
-                                        crossComponent));
   return 1.0 - clamp(crossing * rounding, 0.0, 0.75);
 }
 
@@ -133,22 +132,24 @@ void main() {
   float leftWeight = 0.0;
   float topWeight = 0.0;
 
-  if (edges.r > 0.05) {
+  if (edges.r > EDGE_ACTIVE_THRESHOLD) {
     float leftDistance = searchDistance(centerUv, vec2(-texel.x, 0.0), 0u);
     float rightDistance = searchDistance(centerUv, vec2(texel.x, 0.0), 0u);
     float continuity =
-        0.35 + 0.65 * areaWeight(leftDistance, rightDistance, edges.g);
-    leftWeight = edges.r * 0.24 * continuity *
+        CONTINUITY_BASE +
+        CONTINUITY_SCALE * areaWeight(leftDistance, rightDistance, edges.g);
+    leftWeight = edges.r * BLEND_WEIGHT_SCALE * continuity *
                  cornerAttenuation(centerUv, texel, 0u) *
                  edgeResponse(leftDelta, threshold);
   }
 
-  if (edges.g > 0.05) {
+  if (edges.g > EDGE_ACTIVE_THRESHOLD) {
     float topDistance = searchDistance(centerUv, vec2(0.0, -texel.y), 1u);
     float bottomDistance = searchDistance(centerUv, vec2(0.0, texel.y), 1u);
     float continuity =
-        0.35 + 0.65 * areaWeight(topDistance, bottomDistance, edges.r);
-    topWeight = edges.g * 0.24 * continuity *
+        CONTINUITY_BASE +
+        CONTINUITY_SCALE * areaWeight(topDistance, bottomDistance, edges.r);
+    topWeight = edges.g * BLEND_WEIGHT_SCALE * continuity *
                 cornerAttenuation(centerUv, texel, 1u) *
                 edgeResponse(topDelta, threshold);
   }

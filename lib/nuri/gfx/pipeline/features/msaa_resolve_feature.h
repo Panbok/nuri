@@ -22,7 +22,8 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override {
     return "MsaaResolvePass";
   }
-  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  [[nodiscard]] bool
+  isEnabled(const FrameBuildContext &ctx) const noexcept override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
 };
@@ -44,6 +45,9 @@ public:
 
 private:
   MsaaResolvePass pass_{};
+  // passes_ stores a RenderFeaturePass pointer to the sibling pass_
+  // MsaaResolvePass. Keep pass_ declared first; copy/move must remain deleted
+  // to preserve the declaration-order and no-dangling-pointer invariant.
   std::array<RenderFeaturePass *, 1> passes_{&pass_};
 };
 

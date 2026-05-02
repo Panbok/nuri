@@ -12,6 +12,12 @@ namespace {
 
 constexpr uint32_t kSkyboxVertexCount = 36;
 
+[[nodiscard]] bool isMsaa4xSelected(const RenderFrameContext &frame) noexcept {
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  return sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+         AntiAliasingMode::MSAA4x;
+}
+
 } // namespace
 
 SkyboxPass::SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config)
@@ -20,6 +26,7 @@ SkyboxPass::SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config)
 SkyboxPass::~SkyboxPass() {
   destroyFrameBuffer();
   skyboxShader_.reset();
+  skyboxMsaaPipeline_.reset();
   skyboxPipeline_.reset();
   skyboxVertexShader_ = {};
   skyboxFragmentShader_ = {};
@@ -40,14 +47,12 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
   NURI_PROFILER_FUNCTION();
 
   RenderGraphGraphicsPassDesc passDesc{};
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  const bool msaaSelected =
-      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-      AntiAliasingMode::MSAA4x;
-  const TextureHandle sceneColorTexture =
-      msaaSelected && nuri::isValid(ctx.shared.msaaSceneColorTexture)
-          ? ctx.shared.msaaSceneColorTexture
-          : ctx.shared.sceneColorTexture;
+  const bool msaaSelected = isMsaa4xSelected(ctx.frame);
+  const bool usedMsaa =
+      msaaSelected && nuri::isValid(ctx.shared.msaaSceneColorTexture);
+  const TextureHandle sceneColorTexture = usedMsaa
+                                              ? ctx.shared.msaaSceneColorTexture
+                                              : ctx.shared.sceneColorTexture;
   passDesc.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
@@ -60,7 +65,7 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
       return Result<bool, std::string>::makeError(sceneColorImport.error());
     }
     passDesc.colorTexture = sceneColorImport.value();
-    if (msaaSelected) {
+    if (usedMsaa) {
       ctx.shared.msaaSceneColorGraphTexture = sceneColorImport.value();
       ctx.frame.metrics.antiAliasing.msaaColorGraphPublished = true;
     } else {
@@ -196,7 +201,8 @@ Result<bool, std::string> SkyboxPass::createShaders() {
 
 Result<bool, std::string> SkyboxPass::createPipeline() {
   skyboxPipeline_ = Pipeline::create(gpu_);
-  if (!skyboxPipeline_) {
+  skyboxMsaaPipeline_ = Pipeline::create(gpu_);
+  if (!skyboxPipeline_ || !skyboxMsaaPipeline_) {
     return Result<bool, std::string>::makeError(
         "SkyboxPass::createPipeline: failed to create skybox pipeline");
   }
@@ -221,13 +227,13 @@ Result<bool, std::string> SkyboxPass::createPipeline() {
   skyboxPipelineHandle_ = skyboxPipeline_->getRenderPipeline();
 
   RenderPipelineDesc skyboxMsaaDesc = skyboxDesc;
-  skyboxMsaaDesc.sampleCount = kMsaa4xSampleCount;
-  auto msaaPipelineResult =
-      gpu_.createRenderPipeline(skyboxMsaaDesc, "skybox_msaa4x");
+  skyboxMsaaDesc.numSamples = kMsaa4xSampleCount;
+  auto msaaPipelineResult = skyboxMsaaPipeline_->createRenderPipeline(
+      skyboxMsaaDesc, "skybox_msaa4x");
   if (msaaPipelineResult.hasError()) {
     return Result<bool, std::string>::makeError(msaaPipelineResult.error());
   }
-  skyboxMsaaPipelineHandle_ = msaaPipelineResult.value();
+  skyboxMsaaPipelineHandle_ = skyboxMsaaPipeline_->getRenderPipeline();
 
   return Result<bool, std::string>::makeResult(true);
 }
@@ -317,13 +323,9 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
   pushConstants_ = PushConstants{
       .frameDataAddress = baseAddress,
   };
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
-  const bool msaaSelected =
-      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-      AntiAliasingMode::MSAA4x;
   drawItem_ = DrawItem{};
-  drawItem_.pipeline =
-      msaaSelected ? skyboxMsaaPipelineHandle_ : skyboxPipelineHandle_;
+  drawItem_.pipeline = isMsaa4xSelected(frame) ? skyboxMsaaPipelineHandle_
+                                               : skyboxPipelineHandle_;
   drawItem_.vertexCount = kSkyboxVertexCount;
   drawItem_.pushConstants = std::span<const std::byte>(
       reinterpret_cast<const std::byte *>(&pushConstants_),

@@ -2073,6 +2073,24 @@ resolveSceneColorTexture(const RenderFrameContext &frame) {
 }
 
 [[nodiscard]] inline TextureHandle
+resolveMsaaSceneColorTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.msaaSceneColorTexture) &&
+      nuri::isValid(frame.sharedResources.msaaSceneColorGraphTexture)) {
+    return frame.sharedResources.msaaSceneColorTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline TextureHandle
+resolveMsaaSceneDepthTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.msaaSceneDepthTexture) &&
+      nuri::isValid(frame.sharedResources.msaaSceneDepthGraphTexture)) {
+    return frame.sharedResources.msaaSceneDepthTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline TextureHandle
 resolveSceneColorMipTexture(const RenderFrameContext &frame,
                             uint32_t mipLevel) {
   switch (mipLevel) {

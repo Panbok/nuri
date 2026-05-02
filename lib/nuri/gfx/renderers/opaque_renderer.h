@@ -495,9 +495,13 @@ private:
   bool gsOverlayPipelineUnsupported_ = false;
   bool gsTessOverlayPipelineInitialized_ = false;
   bool gsTessOverlayPipelineUnsupported_ = false;
+  bool msaaWireframePipelineInitialized_ = false;
   bool msaaWireframePipelineUnsupported_ = false;
+  bool msaaTessWireframePipelineInitialized_ = false;
   bool msaaTessWireframePipelineUnsupported_ = false;
+  bool msaaGsOverlayPipelineInitialized_ = false;
   bool msaaGsOverlayPipelineUnsupported_ = false;
+  bool msaaGsTessOverlayPipelineInitialized_ = false;
   bool msaaGsTessOverlayPipelineUnsupported_ = false;
   bool loggedWireframeFallbackUnsupported_ = false;
   bool loggedTessWireframeFallbackUnsupported_ = false;

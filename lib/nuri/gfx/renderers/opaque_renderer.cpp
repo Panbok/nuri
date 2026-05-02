@@ -1208,10 +1208,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const bool msaaSelected =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
       AntiAliasingMode::MSAA4x;
+  if (msaaSelected &&
+      (!nuri::isValid(frame.sharedResources.msaaSceneDepthTexture) ||
+       !nuri::isValid(frame.sharedResources.msaaSceneColorTexture))) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::buildOpaquePasses: MSAA scene color/depth textures "
+        "are unavailable");
+  }
   const TextureHandle sceneDepthTarget =
-      msaaSelected && nuri::isValid(frame.sharedResources.msaaSceneDepthTexture)
-          ? frame.sharedResources.msaaSceneDepthTexture
-          : sceneDepthTexture;
+      msaaSelected ? frame.sharedResources.msaaSceneDepthTexture
+                   : sceneDepthTexture;
   if (msaaSelected && !nuri::isValid(sceneDepthTarget)) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::buildOpaquePasses: MSAA scene depth texture is "
@@ -3706,9 +3712,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   pass.hasIndirectDraws = hasIndirectBaseDraws;
   pass.isMainPass = true;
   const TextureHandle sceneColorTarget =
-      msaaSelected && nuri::isValid(frame.sharedResources.msaaSceneColorTexture)
-          ? frame.sharedResources.msaaSceneColorTexture
-          : frame.sharedResources.sceneColorTexture;
+      msaaSelected ? frame.sharedResources.msaaSceneColorTexture
+                   : frame.sharedResources.sceneColorTexture;
   if (!nuri::isValid(sceneColorTarget)) {
     return Result<bool, std::string>::makeError(
         msaaSelected ? "OpaqueRenderer::buildOpaquePasses: MSAA scene color "
@@ -6023,11 +6028,11 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
   meshFillPipelineHandle_ = meshPipeline_->getRenderPipeline();
 
   const auto makeMsaaSceneDesc = [](RenderPipelineDesc desc) {
-    desc.sampleCount = kMsaa4xSampleCount;
+    desc.numSamples = kMsaa4xSampleCount;
     return desc;
   };
   const auto makeAlphaMsaaSceneDesc = [](RenderPipelineDesc desc) {
-    desc.sampleCount = kMsaa4xSampleCount;
+    desc.numSamples = kMsaa4xSampleCount;
     desc.alphaToCoverageEnabled = true;
     desc.minSampleShading = 1.0f;
     return desc;
@@ -6180,7 +6185,7 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
       [&createDepthPipeline](RenderPipelineDesc desc,
                              std::string_view debugName,
                              RenderPipelineHandle &outHandle) -> bool {
-    desc.sampleCount = kMsaa4xSampleCount;
+    desc.numSamples = kMsaa4xSampleCount;
     return createDepthPipeline(desc, debugName, outHandle);
   };
   if (nuri::isValid(depthFragmentShader_)) {
@@ -6802,7 +6807,8 @@ Result<bool, std::string>
 OpaqueRenderer::ensureWireframePipeline(bool requireMsaa) {
   if (wireframePipelineInitialized_ &&
       nuri::isValid(meshWireframePipelineHandle_) &&
-      (!requireMsaa || nuri::isValid(meshMsaaWireframePipelineHandle_))) {
+      (!requireMsaa || (msaaWireframePipelineInitialized_ &&
+                        nuri::isValid(meshMsaaWireframePipelineHandle_)))) {
     return Result<bool, std::string>::makeResult(true);
   }
   if (wireframePipelineUnsupported_ ||
@@ -6840,9 +6846,9 @@ OpaqueRenderer::ensureWireframePipeline(bool requireMsaa) {
     baseMeshWireframeDraw_.debugLabel = "OpaqueMeshWireframe";
   }
 
-  if (requireMsaa && !nuri::isValid(meshMsaaWireframePipelineHandle_)) {
+  if (requireMsaa && !msaaWireframePipelineInitialized_) {
     RenderPipelineDesc msaaDesc = wireframeDesc;
-    msaaDesc.sampleCount = kMsaa4xSampleCount;
+    msaaDesc.numSamples = kMsaa4xSampleCount;
     auto msaaResult =
         gpu_.createRenderPipeline(msaaDesc, "opaque_mesh_wireframe_msaa4x");
     if (msaaResult.hasError()) {
@@ -6855,16 +6861,19 @@ OpaqueRenderer::ensureWireframePipeline(bool requireMsaa) {
       return Result<bool, std::string>::makeResult(false);
     }
     meshMsaaWireframePipelineHandle_ = msaaResult.value();
+    msaaWireframePipelineInitialized_ = true;
   }
 
-  return Result<bool, std::string>::makeResult(true);
+  return Result<bool, std::string>::makeResult(
+      !requireMsaa || nuri::isValid(meshMsaaWireframePipelineHandle_));
 }
 
 Result<bool, std::string>
 OpaqueRenderer::ensureTessWireframePipeline(bool requireMsaa) {
   if (tessWireframePipelineInitialized_ &&
       nuri::isValid(meshTessWireframePipelineHandle_) &&
-      (!requireMsaa || nuri::isValid(meshMsaaTessWireframePipelineHandle_))) {
+      (!requireMsaa || (msaaTessWireframePipelineInitialized_ &&
+                        nuri::isValid(meshMsaaTessWireframePipelineHandle_)))) {
     return Result<bool, std::string>::makeResult(true);
   }
   if (tessWireframePipelineUnsupported_ ||
@@ -6899,9 +6908,9 @@ OpaqueRenderer::ensureTessWireframePipeline(bool requireMsaa) {
     tessWireframePipelineInitialized_ = true;
   }
 
-  if (requireMsaa && !nuri::isValid(meshMsaaTessWireframePipelineHandle_)) {
+  if (requireMsaa && !msaaTessWireframePipelineInitialized_) {
     RenderPipelineDesc msaaDesc = wireframeDesc;
-    msaaDesc.sampleCount = kMsaa4xSampleCount;
+    msaaDesc.numSamples = kMsaa4xSampleCount;
     auto msaaResult = gpu_.createRenderPipeline(
         msaaDesc, "opaque_mesh_tess_wireframe_msaa4x");
     if (msaaResult.hasError()) {
@@ -6914,16 +6923,19 @@ OpaqueRenderer::ensureTessWireframePipeline(bool requireMsaa) {
       return Result<bool, std::string>::makeResult(false);
     }
     meshMsaaTessWireframePipelineHandle_ = msaaResult.value();
+    msaaTessWireframePipelineInitialized_ = true;
   }
 
-  return Result<bool, std::string>::makeResult(true);
+  return Result<bool, std::string>::makeResult(
+      !requireMsaa || nuri::isValid(meshMsaaTessWireframePipelineHandle_));
 }
 
 Result<bool, std::string>
 OpaqueRenderer::ensureGsOverlayPipeline(bool requireMsaa) {
   if (gsOverlayPipelineInitialized_ &&
       nuri::isValid(meshGsOverlayPipelineHandle_) &&
-      (!requireMsaa || nuri::isValid(meshMsaaGsOverlayPipelineHandle_))) {
+      (!requireMsaa || (msaaGsOverlayPipelineInitialized_ &&
+                        nuri::isValid(meshMsaaGsOverlayPipelineHandle_)))) {
     return Result<bool, std::string>::makeResult(true);
   }
   if (gsOverlayPipelineUnsupported_ ||
@@ -6964,9 +6976,9 @@ OpaqueRenderer::ensureGsOverlayPipeline(bool requireMsaa) {
     gsOverlayPipelineInitialized_ = true;
   }
 
-  if (requireMsaa && !nuri::isValid(meshMsaaGsOverlayPipelineHandle_)) {
+  if (requireMsaa && !msaaGsOverlayPipelineInitialized_) {
     RenderPipelineDesc msaaDesc = overlayDesc;
-    msaaDesc.sampleCount = kMsaa4xSampleCount;
+    msaaDesc.numSamples = kMsaa4xSampleCount;
     auto msaaResult =
         gpu_.createRenderPipeline(msaaDesc, "opaque_mesh_overlay_gs_msaa4x");
     if (msaaResult.hasError()) {
@@ -6979,15 +6991,18 @@ OpaqueRenderer::ensureGsOverlayPipeline(bool requireMsaa) {
       return Result<bool, std::string>::makeResult(false);
     }
     meshMsaaGsOverlayPipelineHandle_ = msaaResult.value();
+    msaaGsOverlayPipelineInitialized_ = true;
   }
-  return Result<bool, std::string>::makeResult(true);
+  return Result<bool, std::string>::makeResult(
+      !requireMsaa || nuri::isValid(meshMsaaGsOverlayPipelineHandle_));
 }
 
 Result<bool, std::string>
 OpaqueRenderer::ensureGsTessOverlayPipeline(bool requireMsaa) {
   if (gsTessOverlayPipelineInitialized_ &&
       nuri::isValid(meshGsTessOverlayPipelineHandle_) &&
-      (!requireMsaa || nuri::isValid(meshMsaaGsTessOverlayPipelineHandle_))) {
+      (!requireMsaa || (msaaGsTessOverlayPipelineInitialized_ &&
+                        nuri::isValid(meshMsaaGsTessOverlayPipelineHandle_)))) {
     return Result<bool, std::string>::makeResult(true);
   }
   if (gsTessOverlayPipelineUnsupported_ ||
@@ -7034,9 +7049,9 @@ OpaqueRenderer::ensureGsTessOverlayPipeline(bool requireMsaa) {
     gsTessOverlayPipelineInitialized_ = true;
   }
 
-  if (requireMsaa && !nuri::isValid(meshMsaaGsTessOverlayPipelineHandle_)) {
+  if (requireMsaa && !msaaGsTessOverlayPipelineInitialized_) {
     RenderPipelineDesc msaaDesc = overlayDesc;
-    msaaDesc.sampleCount = kMsaa4xSampleCount;
+    msaaDesc.numSamples = kMsaa4xSampleCount;
     auto msaaResult = gpu_.createRenderPipeline(
         msaaDesc, "opaque_mesh_tess_overlay_gs_msaa4x");
     if (msaaResult.hasError()) {
@@ -7049,8 +7064,10 @@ OpaqueRenderer::ensureGsTessOverlayPipeline(bool requireMsaa) {
       return Result<bool, std::string>::makeResult(false);
     }
     meshMsaaGsTessOverlayPipelineHandle_ = msaaResult.value();
+    msaaGsTessOverlayPipelineInitialized_ = true;
   }
-  return Result<bool, std::string>::makeResult(true);
+  return Result<bool, std::string>::makeResult(
+      !requireMsaa || nuri::isValid(meshMsaaGsTessOverlayPipelineHandle_));
 }
 
 void OpaqueRenderer::resetOverlayPipelineState() {
@@ -7090,6 +7107,10 @@ void OpaqueRenderer::resetOverlayPipelineState() {
   gsTessOverlayPipelineInitialized_ = false;
   wireframePipelineInitialized_ = false;
   tessWireframePipelineInitialized_ = false;
+  msaaWireframePipelineInitialized_ = false;
+  msaaTessWireframePipelineInitialized_ = false;
+  msaaGsOverlayPipelineInitialized_ = false;
+  msaaGsTessOverlayPipelineInitialized_ = false;
   gsOverlayPipelineUnsupported_ = false;
   gsTessOverlayPipelineUnsupported_ = false;
   wireframePipelineUnsupported_ = false;

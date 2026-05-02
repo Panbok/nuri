@@ -111,6 +111,18 @@ isComputeOnlyExecutionMode(RenderPassExecutionMode mode) noexcept {
   return mode == RenderPassExecutionMode::ComputeOnly;
 }
 
+[[nodiscard]] RenderGraphTextureId
+graphicsPassRootColorTexture(const RenderGraphGraphicsPassDesc &desc) noexcept {
+  return nuri::isValid(desc.colorResolveTexture) ? desc.colorResolveTexture
+                                                 : desc.colorTexture;
+}
+
+[[nodiscard]] RenderGraphTextureId graphicsPassRootColorTexture(
+    const RenderGraphPreparedGraphicsPassDesc &desc) noexcept {
+  return nuri::isValid(desc.colorResolveTexture) ? desc.colorResolveTexture
+                                                 : desc.colorTexture;
+}
+
 [[nodiscard]] Result<bool, std::string>
 validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
                           std::string_view caller) {
@@ -1175,9 +1187,14 @@ Result<bool, std::string> RenderGraphBuilder::applyImplicitPassRoots(
           "RenderGraphBuilder::applyImplicitPassRoots: no-color pass has a "
           "color texture");
     }
+    if (nuri::isValid(desc.colorResolveTexture)) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::applyImplicitPassRoots: no-color pass has a "
+          "color resolve texture");
+    }
     return Result<bool, std::string>::makeResult(true);
   }
-  return applyGraphicsPassRoots(pass, desc.colorTexture,
+  return applyGraphicsPassRoots(pass, graphicsPassRootColorTexture(desc),
                                 desc.markColorAsFrameOutput,
                                 desc.markImplicitOutputSideEffect);
 }
@@ -1647,10 +1664,11 @@ RenderGraphBuilder::addPreparedGraphicsPass(
                      ? markPassSideEffect(passId)
                      : Result<bool, std::string>::makeResult(true);
   } else if (desc.hasColorAttachment) {
-    rootResult = applyGraphicsPassRoots(passId, desc.colorTexture,
-                                        desc.markColorAsFrameOutput,
-                                        desc.markImplicitOutputSideEffect);
-  } else if (nuri::isValid(desc.colorTexture)) {
+    rootResult = applyGraphicsPassRoots(
+        passId, graphicsPassRootColorTexture(desc), desc.markColorAsFrameOutput,
+        desc.markImplicitOutputSideEffect);
+  } else if (nuri::isValid(desc.colorTexture) ||
+             nuri::isValid(desc.colorResolveTexture)) {
     rootResult = Result<bool, std::string>::makeError(
         "RenderGraphBuilder::addPreparedGraphicsPass: no-color pass has a "
         "color texture");
@@ -1825,7 +1843,17 @@ RenderGraphBuilder::bindPassColorResolveTexture(RenderGraphPassId pass,
   }
 
   passColorResolveTextureBindings_[pass.value] = texture.value;
-  return addTextureAccess(pass, texture, RenderGraphAccessMode::Write);
+  auto accessResult =
+      addTextureAccess(pass, texture, RenderGraphAccessMode::Write);
+  if (accessResult.hasError()) {
+    return accessResult;
+  }
+  const TextureResource &resource = textures_[texture.value];
+  passes_[pass.value].colorResolveTexture =
+      resource.imported
+          ? resource.importedHandle
+          : TextureHandle{.index = texture.value, .generation = 1u};
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
@@ -1874,7 +1902,17 @@ RenderGraphBuilder::bindPassDepthResolveTexture(RenderGraphPassId pass,
   }
 
   passDepthResolveTextureBindings_[pass.value] = texture.value;
-  return addTextureAccess(pass, texture, RenderGraphAccessMode::Write);
+  auto accessResult =
+      addTextureAccess(pass, texture, RenderGraphAccessMode::Write);
+  if (accessResult.hasError()) {
+    return accessResult;
+  }
+  const TextureResource &resource = textures_[texture.value];
+  passes_[pass.value].depthResolveTexture =
+      resource.imported
+          ? resource.importedHandle
+          : TextureHandle{.index = texture.value, .generation = 1u};
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> RenderGraphBuilder::bindPassDependencyBuffer(

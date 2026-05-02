@@ -134,8 +134,7 @@ isTaaPostSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   return sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
              AntiAliasingMode::TAA &&
-         settings.antiAliasing.debug.spatialPostTaaCleanup &&
-         !isSpatialFallbackActive(frame);
+         isSpatialCleanupActive(frame);
 }
 
 [[nodiscard]] inline SpatialAAProfile

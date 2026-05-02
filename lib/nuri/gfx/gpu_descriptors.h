@@ -61,7 +61,7 @@ struct RenderPipelineDesc {
   PolygonMode polygonMode = PolygonMode::Fill;
   Topology topology = Topology::Triangle;
   uint32_t patchControlPoints = 0;
-  uint32_t sampleCount = 1u;
+  uint32_t numSamples = 1u;
   float minSampleShading = 0.0f;
   bool alphaToCoverageEnabled = false;
   bool blendEnabled = false;

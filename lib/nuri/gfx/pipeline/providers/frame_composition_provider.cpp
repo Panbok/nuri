@@ -45,7 +45,6 @@ TextureDesc makeMsaaTextureDesc(Format format, uint32_t width,
   TextureDesc desc =
       makeTextureDesc(format, width, height, TextureUsage::Attachment);
   desc.numSamples = kMsaa4xSampleCount;
-  desc.storage = Storage::Device;
   return desc;
 }
 

@@ -17,13 +17,15 @@ hasBoundMsaaResolveTargets(const FrameBuildContext &ctx) noexcept {
   const AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
   return metrics.msaaColorResolveTargetBound &&
          metrics.msaaDepthResolveTargetBound &&
+         nuri::isValid(resolveMsaaSceneColorTexture(ctx.frame)) &&
+         nuri::isValid(resolveMsaaSceneDepthTexture(ctx.frame)) &&
          nuri::isValid(ctx.shared.sceneColorGraphTexture) &&
          nuri::isValid(ctx.shared.sceneDepthGraphTexture);
 }
 
 } // namespace
 
-bool MsaaResolvePass::isEnabled(const FrameBuildContext &ctx) const {
+bool MsaaResolvePass::isEnabled(const FrameBuildContext &ctx) const noexcept {
   return isMsaa4xSelected(ctx.frame) && !hasBoundMsaaResolveTargets(ctx) &&
          nuri::isValid(ctx.shared.msaaSceneColorTexture) &&
          nuri::isValid(ctx.shared.msaaSceneDepthTexture) &&
@@ -58,6 +60,8 @@ Result<bool, std::string> MsaaResolvePass::build(FrameBuildContext &ctx) {
   if (msaaDepthResult.hasError()) {
     return Result<bool, std::string>::makeError(msaaDepthResult.error());
   }
+  ctx.shared.msaaSceneColorGraphTexture = msaaColorResult.value();
+  ctx.shared.msaaSceneDepthGraphTexture = msaaDepthResult.value();
   auto colorResolveResult = ctx.graph.importTexture(
       ctx.shared.sceneColorTexture, "msaa_resolve_scene_color_target");
   if (colorResolveResult.hasError()) {
@@ -72,15 +76,12 @@ Result<bool, std::string> MsaaResolvePass::build(FrameBuildContext &ctx) {
   RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Load,
                     .storeOp = StoreOp::MsaaResolve,
-                    .resolveMode = ResolveMode::Average,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+                    .resolveMode = ResolveMode::Average};
   passDesc.colorTexture = msaaColorResult.value();
   passDesc.colorResolveTexture = colorResolveResult.value();
   passDesc.depth = {.loadOp = LoadOp::Load,
                     .storeOp = StoreOp::MsaaResolve,
-                    .resolveMode = ResolveMode::Min,
-                    .clearDepth = 1.0f,
-                    .clearStencil = 0u};
+                    .resolveMode = ResolveMode::Min};
   passDesc.depthTexture = msaaDepthResult.value();
   passDesc.depthResolveTexture = depthResolveResult.value();
   passDesc.debugLabel = "MSAA Resolve Pass";
