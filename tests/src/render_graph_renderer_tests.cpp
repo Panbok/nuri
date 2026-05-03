@@ -8,8 +8,14 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/gfx/pipeline/features/composite_feature.h"
 #include "nuri/gfx/pipeline/features/debug_feature.h"
+#include "nuri/gfx/pipeline/features/msaa_resolve_feature.h"
 #include "nuri/gfx/pipeline/features/opaque_feature.h"
 #include "nuri/gfx/pipeline/features/shadow_feature.h"
+#include "nuri/gfx/pipeline/features/skybox_feature.h"
+#include "nuri/gfx/pipeline/features/spatial_aa_feature.h"
+#include "nuri/gfx/pipeline/features/temporal_aa_feature.h"
+#include "nuri/gfx/pipeline/features/transmission_feature.h"
+#include "nuri/gfx/pipeline/features/transparent_feature.h"
 #include "nuri/gfx/pipeline/providers/frame_composition_provider.h"
 #include "nuri/gfx/pipeline/providers/material_table_gpu_provider.h"
 #include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
@@ -30,6 +36,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory_resource>
 #include <span>
@@ -47,12 +54,30 @@ using namespace nuri::test_support;
 constexpr uint32_t kShadowPreviewProbeFlagInvert = 1u << 0u;
 constexpr uint32_t kShadowPreviewProbeFlagLog = 1u << 1u;
 constexpr uint32_t kShadowPreviewProbeFlagTiled = 1u << 2u;
+constexpr uint32_t kForwardSceneTransmissionMipDebugProbe = 1u << 8u;
 
 struct ShadowPreviewPushConstantsProbe {
   std::array<uint32_t, 4> sourceTexIds{};
   std::array<uint32_t, 4> previewParams{};
   std::array<float, 4> depthParams{};
 };
+
+struct GpuSdsmMinMaxResultProbe {
+  glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
+  uint32_t sourceFrameIndex = 0u;
+  uint32_t valid = 0u;
+};
+static_assert(sizeof(GpuSdsmMinMaxResultProbe) == 16u);
+
+struct alignas(16) GpuSdsmHistogramResultProbe {
+  glm::vec4 rawDeviceMinMaxLinearMinMax{1.0f, 0.0f, 0.0f, 0.0f};
+  glm::vec4 histogramRangeWeightClear{0.0f};
+  glm::uvec4 metadata{0u};
+  glm::vec4 splitDepths0{0.0f};
+  glm::vec4 splitDepths1{0.0f};
+  std::array<float, kMaxShadowSdsmHistogramBucketCount> bucketWeights{};
+};
+static_assert(sizeof(GpuSdsmHistogramResultProbe) == 592u);
 
 std::filesystem::path makeTempRendererPath(std::string_view stem) {
   const auto tick =
@@ -94,6 +119,14 @@ RuntimeOpaqueShaderConfig makeOpaqueConfig(const std::filesystem::path &root) {
 RuntimeOpaqueShaderConfig makeShadowConfig(const std::filesystem::path &root) {
   return RuntimeOpaqueShaderConfig{
       .shaderBasePath = root / "assets" / "shaders",
+  };
+}
+
+RuntimeSkyboxShaderConfig makeSkyboxConfig(const std::filesystem::path &root) {
+  const std::filesystem::path shaders = root / "assets" / "shaders";
+  return RuntimeSkyboxShaderConfig{
+      .vertex = shaders / "skybox.vert",
+      .fragment = shaders / "skybox.frag",
   };
 }
 
@@ -145,6 +178,32 @@ float deviceDepthForViewDepth(float viewDepth, const CameraFrameState &camera) {
                     1.0f);
 }
 
+bool mat4Near(const glm::mat4 &a, const glm::mat4 &b, float epsilon) {
+  for (int c = 0; c < 4; ++c) {
+    for (int r = 0; r < 4; ++r) {
+      if (std::abs(a[c][r] - b[c][r]) > epsilon) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+glm::vec2 projectedPixelShift(const glm::mat4 &baseProjection,
+                              const glm::mat4 &jitteredProjection,
+                              const glm::vec4 &viewPosition,
+                              glm::uvec2 renderExtent) {
+  const glm::vec4 baseClip = baseProjection * viewPosition;
+  const glm::vec4 jitteredClip = jitteredProjection * viewPosition;
+  const glm::vec2 baseNdc = glm::vec2(baseClip) / baseClip.w;
+  const glm::vec2 jitteredNdc = glm::vec2(jitteredClip) / jitteredClip.w;
+  return (jitteredNdc - baseNdc) * (0.5f * glm::vec2(renderExtent));
+}
+
+glm::vec2 taaScreenUvFromClipNdc(glm::vec2 ndc) {
+  return glm::vec2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
+}
+
 std::array<float, kMaxShadowCascades + 1u>
 expectedHistogramEffectiveSplitDepths(const ShadowSdsmDebugFrameData &sdsm) {
   std::array<float, kMaxShadowCascades + 1u> expected =
@@ -176,6 +235,25 @@ expectedHistogramEffectiveSplitDepths(const ShadowSdsmDebugFrameData &sdsm) {
   shadow_detail::enforceMonotonicShadowSplitDepths(expected, cascadeCount,
                                                    effectiveNear, effectiveFar);
   return expected;
+}
+
+void expectGpuSdsmResultAvailable(const ShadowSdsmDebugFrameData &sdsm,
+                                  uint64_t sourceFrameIndex,
+                                  bool splitPayloadValid) {
+  EXPECT_GT(sdsm.gpuResultRingSlotCount, 0u);
+  EXPECT_NE(sdsm.gpuResultSelectedSlot, std::numeric_limits<uint32_t>::max());
+  EXPECT_TRUE(sdsm.gpuReductionResultAvailable);
+  EXPECT_EQ(sdsm.gpuSplitPayloadValid, splitPayloadValid);
+  EXPECT_EQ(sdsm.gpuResultSourceFrameIndex, sourceFrameIndex);
+}
+
+void expectNoGpuSdsmResult(const ShadowSdsmDebugFrameData &sdsm) {
+  EXPECT_GT(sdsm.gpuResultRingSlotCount, 0u);
+  EXPECT_EQ(sdsm.gpuResultSelectedSlot, std::numeric_limits<uint32_t>::max());
+  EXPECT_FALSE(sdsm.gpuReductionResultAvailable);
+  EXPECT_FALSE(sdsm.gpuSplitPayloadValid);
+  EXPECT_EQ(sdsm.gpuResultSourceFrameIndex,
+            std::numeric_limits<uint64_t>::max());
 }
 
 void addDirectionalLightToScene(RenderScene &scene) {
@@ -296,7 +374,7 @@ private:
   uint32_t nextComputePipelineIndex_ = 1u;
 };
 
-class FakeShadowSceneGpuDevice final : public FakeFullscreenGpuDevice {
+class FakeShadowSceneGpuDevice : public FakeFullscreenGpuDevice {
 public:
   Result<GeometryAllocationHandle, std::string>
   allocateGeometry(std::span<const std::byte> vertexBytes, uint32_t vertexCount,
@@ -391,6 +469,14 @@ private:
   std::vector<Allocation> allocations_{};
 };
 
+class FakeStableBindlessShadowSceneGpuDevice final
+    : public FakeShadowSceneGpuDevice {
+public:
+  uint32_t getTextureBindlessIndex(TextureHandle h) const override {
+    return nuri::isValid(h) ? h.index : 0xFFFFFFFFu;
+  }
+};
+
 class FakeNoComputeFullscreenGpuDevice final : public FakeFullscreenGpuDevice {
 public:
   Result<ComputePipelineHandle, std::string>
@@ -415,6 +501,25 @@ struct PresentPushConstantsProbe {
   float shaperInvRange = 0.0f;
 };
 static_assert(sizeof(PresentPushConstantsProbe) <= 128u);
+
+struct SpatialAAPushConstantsProbe {
+  uint32_t sourceTexId = 0u;
+  uint32_t edgeTexId = 0u;
+  uint32_t blendTexId = 0u;
+  uint32_t areaTexId = 0u;
+  uint32_t searchTexId = 0u;
+  uint32_t linearSamplerId = 0u;
+  uint32_t pointSamplerId = 0u;
+  uint32_t mode = 0u;
+  uint32_t inverseWidthBits = 0u;
+  uint32_t inverseHeightBits = 0u;
+  uint32_t edgeThresholdBits = 0u;
+  uint32_t maxSearchSteps = 0u;
+  uint32_t resolveStrengthBits = 0u;
+  uint32_t localContrastFactorBits = 0u;
+  uint32_t cornerRoundingBits = 0u;
+};
+static_assert(sizeof(SpatialAAPushConstantsProbe) <= 128u);
 
 constexpr uint32_t kPresentFlagManualSrgbEncode = 1u << 0u;
 constexpr uint32_t kPresentFlagPrimaryUseAgx = 1u << 1u;
@@ -460,6 +565,151 @@ void writeTextFile(const std::filesystem::path &path, std::string_view text) {
   ASSERT_TRUE(out.is_open());
   out.write(text.data(), static_cast<std::streamsize>(text.size()));
   ASSERT_TRUE(out.good());
+}
+
+std::string readTextFile(const std::filesystem::path &path) {
+  std::ifstream in(path, std::ios::binary);
+  EXPECT_TRUE(in.is_open());
+  if (!in.is_open()) {
+    return {};
+  }
+  return std::string(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
+}
+
+uint32_t compiledPassIndex(std::span<const RenderPass> passes,
+                           std::string_view label) {
+  for (uint32_t i = 0u; i < passes.size(); ++i) {
+    if (passes[i].debugLabel == label) {
+      return i;
+    }
+  }
+  return UINT32_MAX;
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuHistogramShaderSkipsClearOnlyTiles) {
+  const std::string shader =
+      readTextFile(std::filesystem::path(PROJECT_SOURCE_DIR) / "assets" /
+                   "shaders" / "shadow_sdsm_histogram.comp");
+  ASSERT_FALSE(shader.empty());
+
+  const size_t clearOnlySkip = shader.find("if (tileClearMin && tileClearMax)");
+  const size_t rawMinUpdate =
+      shader.find("rawDeviceMin = min(rawDeviceMin", clearOnlySkip);
+  const size_t histogramAdd = shader.find("addHistogramInterval", rawMinUpdate);
+  ASSERT_NE(clearOnlySkip, std::string::npos);
+  ASSERT_NE(rawMinUpdate, std::string::npos);
+  ASSERT_NE(histogramAdd, std::string::npos);
+  EXPECT_LT(clearOnlySkip, rawMinUpdate);
+  EXPECT_LT(rawMinUpdate, histogramAdd);
+  EXPECT_NE(shader.find("bool clearOnly = !anyNonClear && rawValidTiles > 0u"),
+            std::string::npos);
+  EXPECT_NE(shader.find("splits[i] = clearOnly ? mix(fixedNear, fixedFar"),
+            std::string::npos);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureLightingShaderUsesGeometricNormalAndCheapPcssBlend) {
+  const std::string shader =
+      readTextFile(std::filesystem::path(PROJECT_SOURCE_DIR) / "assets" /
+                   "shaders" / "material_lighting.sp");
+  ASSERT_FALSE(shader.empty());
+
+  EXPECT_NE(shader.find("shadow, worldPos, sm.nGeom, l,"), std::string::npos);
+  EXPECT_EQ(shader.find("shadow, worldPos, sm.nBase, l,"), std::string::npos);
+  EXPECT_NE(shader.find("directionalShadowBlendFactorFromContext"),
+            std::string::npos);
+  EXPECT_NE(shader.find("min(directionalShadowPcssBlockerSampleCount(shadow), "
+                        "8)"),
+            std::string::npos);
+  EXPECT_NE(shader.find("min(directionalShadowPcssFilterSampleCount(shadow), "
+                        "16)"),
+            std::string::npos);
+  EXPECT_NE(shader.find("const uint shadowRawSamplerId = "
+                        "ctx.cascade.textureSampler.z"),
+            std::string::npos);
+  EXPECT_NE(shader.find("const uint storedShadowSize = "
+                        "ctx.cascade.textureSampler.w"),
+            std::string::npos);
+  EXPECT_NE(shader.find("textureBindless2D(shadowTexId, shadowRawSamplerId"),
+            std::string::npos);
+  EXPECT_NE(shader.find("if (sampleCount <= 1) {\n"
+                        "    return hardDirectionalShadowFactor(ctx);"),
+            std::string::npos);
+  EXPECT_NE(shader.find("if (sampleCount >= 16)"), std::string::npos);
+  EXPECT_NE(shader.find("tryResolveUniformPoissonPcf"), std::string::npos);
+  EXPECT_NE(shader.find("const vec2 probes[8]"), std::string::npos);
+  const size_t fixedRotation =
+      shader.find("kShadowFrameFlagFixedPoissonRotation) != 0u");
+  const size_t fixedRotationReturn =
+      shader.find("return mat2(1.0)", fixedRotation);
+  const size_t dynamicRotationSin =
+      shader.find("sin(angle)", fixedRotationReturn);
+  ASSERT_NE(fixedRotation, std::string::npos);
+  ASSERT_NE(fixedRotationReturn, std::string::npos);
+  ASSERT_NE(dynamicRotationSin, std::string::npos);
+  EXPECT_LT(fixedRotationReturn, dynamicRotationSin);
+  EXPECT_NE(shader.find("const vec2 kShadowPoissonDisk[64]"),
+            std::string::npos);
+  EXPECT_NE(shader.find("return kShadowPoissonDisk[sampleIndex & 63]"),
+            std::string::npos);
+  const size_t poissonSample =
+      shader.find("vec2 shadowPoissonDiskSample(int sampleIndex)");
+  const size_t shadowHash = shader.find("uint shadowHash", poissonSample);
+  ASSERT_NE(poissonSample, std::string::npos);
+  ASSERT_NE(shadowHash, std::string::npos);
+  EXPECT_EQ(
+      shader.substr(poissonSample, shadowHash - poissonSample).find("switch"),
+      std::string::npos);
+  const size_t rawTapBoundsCheck =
+      shader.find("if (any(lessThan(sampleUv, vec2(0.0)))");
+  const size_t rawTapSample =
+      shader.find("textureBindless2D(shadowTexId, shadowRawSamplerId, "
+                  "sampleUv)");
+  ASSERT_NE(rawTapBoundsCheck, std::string::npos);
+  ASSERT_NE(rawTapSample, std::string::npos);
+  EXPECT_LT(rawTapBoundsCheck, rawTapSample);
+}
+
+float spatialAAPushFloat(uint32_t bits) {
+  float value = 0.0f;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+SpatialAAPushConstantsProbe
+readSpatialAAPushConstants(std::span<const RenderPass> passes,
+                           std::string_view label) {
+  const uint32_t passIndex = compiledPassIndex(passes, label);
+  EXPECT_NE(passIndex, UINT32_MAX);
+  if (passIndex == UINT32_MAX) {
+    return {};
+  }
+  const RenderPass &pass = passes[passIndex];
+  EXPECT_FALSE(pass.draws.empty());
+  if (pass.draws.empty()) {
+    return {};
+  }
+  const DrawItem &draw = pass.draws.front();
+  EXPECT_EQ(draw.pushConstants.size(), sizeof(SpatialAAPushConstantsProbe));
+  SpatialAAPushConstantsProbe probe{};
+  if (draw.pushConstants.size() == sizeof(SpatialAAPushConstantsProbe)) {
+    std::memcpy(&probe, draw.pushConstants.data(), sizeof(probe));
+  }
+  return probe;
+}
+
+void writeTransmissionTriangleObj(const std::filesystem::path &path) {
+  writeTextFile(path, "o TaaTransmissionTriangle\n"
+                      "v -1.0 0.0 0.0\n"
+                      "v 1.0 0.0 0.0\n"
+                      "v 0.0 1.0 0.0\n"
+                      "vt 0.0 0.0\n"
+                      "vt 1.0 0.0\n"
+                      "vt 0.5 1.0\n"
+                      "vn 0.0 0.0 1.0\n"
+                      "f 1/1/1 2/2/1 3/3/1\n");
 }
 
 void writeTinyPngFile(const std::filesystem::path &path) {
@@ -669,10 +919,79 @@ TEST(RenderGraphRendererTest, RenderSettingsDefaultToAces2SdrToneMapping) {
   EXPECT_FLOAT_EQ(settings.toneMap.compareSplit, 0.5f);
 }
 
+TEST(RenderGraphRendererTest, RenderSettingsDefaultToAntiAliasingDisabled) {
+  const RenderSettings settings{};
+  EXPECT_EQ(settings.antiAliasing.mode, AntiAliasingMode::None);
+  EXPECT_FALSE(settings.antiAliasing.debug.jitterEnabled);
+  EXPECT_FALSE(settings.antiAliasing.debug.freezeJitter);
+  EXPECT_FALSE(settings.antiAliasing.debug.resetHistoryRequested);
+  EXPECT_FALSE(settings.antiAliasing.debug.logDiagnostics);
+  EXPECT_FALSE(settings.antiAliasing.debug.spatialPostTaaCleanup);
+  EXPECT_TRUE(settings.antiAliasing.debug.spatialPostMsaaCleanup);
+  EXPECT_EQ(settings.antiAliasing.debug.view, AntiAliasingDebugView::None);
+  EXPECT_EQ(
+      sanitizeAntiAliasingDebugView(AntiAliasingDebugView::TAAPreviousVelocity),
+      AntiAliasingDebugView::TAAPreviousVelocity);
+  EXPECT_EQ(sanitizeAntiAliasingDebugView(AntiAliasingDebugView::TAAHdrWeight),
+            AntiAliasingDebugView::TAAHdrWeight);
+  EXPECT_EQ(sanitizeAntiAliasingDebugView(
+                AntiAliasingDebugView::TAAHistoryFilterDelta),
+            AntiAliasingDebugView::TAAHistoryFilterDelta);
+  EXPECT_EQ(sanitizeAntiAliasingDebugView(
+                AntiAliasingDebugView::TAADisocclusionFallback),
+            AntiAliasingDebugView::TAADisocclusionFallback);
+  EXPECT_EQ(
+      sanitizeAntiAliasingDebugView(AntiAliasingDebugView::TAASplitCompare),
+      AntiAliasingDebugView::TAASplitCompare);
+  EXPECT_EQ(
+      sanitizeAntiAliasingDebugView(AntiAliasingDebugView::SpatialAAEdges),
+      AntiAliasingDebugView::SpatialAAEdges);
+  EXPECT_EQ(sanitizeAntiAliasingDebugView(
+                AntiAliasingDebugView::SpatialAABlendWeights),
+            AntiAliasingDebugView::SpatialAABlendWeights);
+  EXPECT_EQ(sanitizeAntiAliasingDebugView(
+                AntiAliasingDebugView::SpatialAACleanupMask),
+            AntiAliasingDebugView::SpatialAACleanupMask);
+  EXPECT_EQ(sanitizeAntiAliasingDebugView(
+                AntiAliasingDebugView::SpatialAASplitCompare),
+            AntiAliasingDebugView::SpatialAASplitCompare);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.diagnosticLogIntervalSeconds,
+                  0.25f);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaJitterScale, 0.75f);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaVelocityRejectionThreshold,
+                  0.0015f);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaVelocityBlendScale, 0.35f);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaCurrentFrameWeight, 0.06f);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaMotionCurrentWeight, 0.35f);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaDisocclusionCurrentWeight,
+                  0.65f);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaClampCurrentWeight, 0.50f);
+  EXPECT_EQ(settings.antiAliasing.debug.taaClampMode,
+            TemporalAAClampMode::Variance);
+  EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaVarianceGamma, 1.50f);
+}
+
+TEST(RenderGraphRendererTest, Msaa4xAntiAliasingModeSanitizesTemporalState) {
+  RenderSettings::AntiAliasingSettings aa{};
+  aa.mode = AntiAliasingMode::MSAA4x;
+  aa.debug.jitterEnabled = true;
+  aa.debug.freezeJitter = true;
+
+  sanitizeAntiAliasingSettings(aa);
+
+  EXPECT_EQ(aa.mode, AntiAliasingMode::MSAA4x);
+  EXPECT_EQ(sanitizeAntiAliasingMode(AntiAliasingMode::MSAA4x),
+            AntiAliasingMode::MSAA4x);
+  EXPECT_FALSE(aa.debug.jitterEnabled);
+  EXPECT_FALSE(aa.debug.freezeJitter);
+}
+
 TEST(RenderGraphRendererTest, RenderSettingsDefaultToShadowsEnabled) {
   const RenderSettings settings{};
   EXPECT_TRUE(settings.shadow.enabled);
+  EXPECT_EQ(settings.shadow.qualityPreset, ShadowQualityPreset::Custom);
   EXPECT_EQ(settings.shadow.cascadeCount, kMaxShadowCascades);
+  EXPECT_FLOAT_EQ(settings.shadow.maxDistanceFadeFraction, 0.0f);
   EXPECT_EQ(settings.shadow.splitMode, ShadowCascadeSplitMode::Practical);
   EXPECT_EQ(settings.shadow.filterMode, ShadowFilterMode::Hard);
   EXPECT_EQ(settings.shadow.pcssBlockerSampleCount, 16u);
@@ -693,11 +1012,16 @@ TEST(RenderGraphRendererTest, RenderSettingsDefaultToShadowsEnabled) {
 TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
   RenderSettings::ShadowSettings settings{};
   settings.cascadeCount = 0u;
+  settings.qualityPreset = static_cast<ShadowQualityPreset>(99u);
   settings.shadowMapSize = 0u;
   settings.maxDistance = -10.0f;
+  settings.maxDistanceFadeFraction = -1.0f;
   settings.splitMode = static_cast<ShadowCascadeSplitMode>(99u);
   settings.splitLambda = 2.0f;
   settings.cascadeBlendFraction = -1.0f;
+  settings.constantBias = std::numeric_limits<float>::quiet_NaN();
+  settings.slopeBias = std::numeric_limits<float>::quiet_NaN();
+  settings.normalBias = std::numeric_limits<float>::quiet_NaN();
   settings.pcfSampleCount = 0u;
   settings.pcssBlockerSampleCount = 0u;
   settings.pcssFilterSampleCount = 0u;
@@ -716,11 +1040,16 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
   sanitizeShadowSettings(settings);
 
   EXPECT_EQ(settings.cascadeCount, 1u);
+  EXPECT_EQ(settings.qualityPreset, ShadowQualityPreset::Custom);
   EXPECT_EQ(settings.shadowMapSize, 1u);
   EXPECT_FLOAT_EQ(settings.maxDistance, 150.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
   EXPECT_EQ(settings.splitMode, ShadowCascadeSplitMode::Practical);
   EXPECT_FLOAT_EQ(settings.splitLambda, 1.0f);
   EXPECT_FLOAT_EQ(settings.cascadeBlendFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.constantBias, 0.0005f);
+  EXPECT_FLOAT_EQ(settings.slopeBias, 1.5f);
+  EXPECT_FLOAT_EQ(settings.normalBias, 0.0f);
   EXPECT_EQ(settings.pcfSampleCount, 1u);
   EXPECT_EQ(settings.pcssBlockerSampleCount, 1u);
   EXPECT_EQ(settings.pcssFilterSampleCount, 1u);
@@ -737,6 +1066,7 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
   EXPECT_FLOAT_EQ(settings.debug.previewDepthMax, 1.0f);
 
   settings.cascadeCount = kMaxShadowCascades + 8u;
+  settings.maxDistanceFadeFraction = 2.0f;
   settings.splitLambda = -2.0f;
   settings.cascadeBlendFraction = 2.0f;
   settings.pcfSampleCount = kMaxShadowPcfSamples + 1u;
@@ -744,6 +1074,7 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
   settings.debug.previewDepthMax = 0.2f;
   sanitizeShadowSettings(settings);
   EXPECT_EQ(settings.cascadeCount, kMaxShadowCascades);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 1.0f);
   EXPECT_FLOAT_EQ(settings.splitLambda, 0.0f);
   EXPECT_FLOAT_EQ(settings.cascadeBlendFraction, 1.0f);
   EXPECT_EQ(settings.pcfSampleCount, kMaxShadowPcfSamples);
@@ -752,8 +1083,83 @@ TEST(RenderGraphRendererTest, ShadowSettingsSanitizeClampsCoreValues) {
               1.0e-4f, 1.0e-6f);
 }
 
+TEST(RenderGraphRendererTest, ShadowQualityPresetAppliesExpectedValues) {
+  RenderSettings::ShadowSettings settings{};
+  settings.debug.showShadowMapViewport = true;
+  applyShadowQualityPreset(settings, ShadowQualityPreset::Low);
+  EXPECT_EQ(settings.qualityPreset, ShadowQualityPreset::Low);
+  EXPECT_EQ(settings.cascadeCount, 1u);
+  EXPECT_EQ(settings.shadowMapSize, 1024u);
+  EXPECT_FLOAT_EQ(settings.maxDistance, 80.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.splitLambda, 0.35f);
+  EXPECT_EQ(settings.filterMode, ShadowFilterMode::PCF3x3);
+  EXPECT_EQ(settings.pcfSampleCount, 9u);
+  EXPECT_EQ(settings.sdsmMode, ShadowSdsmMode::Disabled);
+  EXPECT_FALSE(settings.debug.fixedPoissonRotation);
+  EXPECT_FLOAT_EQ(settings.constantBias, 0.0008f);
+  EXPECT_FLOAT_EQ(settings.slopeBias, 2.0f);
+  EXPECT_FLOAT_EQ(settings.normalBias, 0.25f);
+  EXPECT_TRUE(settings.debug.showShadowMapViewport);
+
+  applyShadowQualityPreset(settings, ShadowQualityPreset::Medium);
+  EXPECT_EQ(settings.qualityPreset, ShadowQualityPreset::Medium);
+  EXPECT_EQ(settings.cascadeCount, 3u);
+  EXPECT_EQ(settings.shadowMapSize, 2048u);
+  EXPECT_FLOAT_EQ(settings.maxDistance, 120.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.splitLambda, 0.30f);
+  EXPECT_EQ(settings.filterMode, ShadowFilterMode::PoissonPCF);
+  EXPECT_EQ(settings.pcfSampleCount, 16u);
+  EXPECT_EQ(settings.sdsmMode, ShadowSdsmMode::PreviousFrameMinMax);
+  EXPECT_EQ(settings.sdsmReductionBackend, ShadowSdsmReductionBackend::Auto);
+  EXPECT_TRUE(settings.debug.fixedPoissonRotation);
+  EXPECT_FLOAT_EQ(settings.constantBias, 0.0006f);
+  EXPECT_FLOAT_EQ(settings.slopeBias, 1.75f);
+  EXPECT_FLOAT_EQ(settings.normalBias, 0.35f);
+
+  applyShadowQualityPreset(settings, ShadowQualityPreset::High);
+  EXPECT_EQ(settings.qualityPreset, ShadowQualityPreset::High);
+  EXPECT_EQ(settings.cascadeCount, 4u);
+  EXPECT_EQ(settings.shadowMapSize, 4096u);
+  EXPECT_FLOAT_EQ(settings.maxDistance, 150.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.splitLambda, 0.25f);
+  EXPECT_EQ(settings.filterMode, ShadowFilterMode::PoissonPCF);
+  EXPECT_EQ(settings.pcfSampleCount, 24u);
+  EXPECT_EQ(settings.sdsmMode, ShadowSdsmMode::PreviousFrameMinMax);
+  EXPECT_EQ(settings.sdsmReductionBackend, ShadowSdsmReductionBackend::Auto);
+  EXPECT_TRUE(settings.debug.fixedPoissonRotation);
+  EXPECT_FLOAT_EQ(settings.constantBias, 0.0005f);
+  EXPECT_FLOAT_EQ(settings.slopeBias, 1.5f);
+  EXPECT_FLOAT_EQ(settings.normalBias, 0.50f);
+
+  applyShadowQualityPreset(settings, ShadowQualityPreset::Ultra);
+  EXPECT_EQ(settings.qualityPreset, ShadowQualityPreset::Ultra);
+  EXPECT_EQ(settings.cascadeCount, 4u);
+  EXPECT_EQ(settings.shadowMapSize, 8192u);
+  EXPECT_FLOAT_EQ(settings.maxDistance, 220.0f);
+  EXPECT_FLOAT_EQ(settings.maxDistanceFadeFraction, 0.0f);
+  EXPECT_FLOAT_EQ(settings.splitLambda, 0.0f);
+  EXPECT_EQ(settings.filterMode, ShadowFilterMode::PoissonPCF);
+  EXPECT_EQ(settings.pcfSampleCount, 32u);
+  EXPECT_EQ(settings.pcssBlockerSampleCount, 16u);
+  EXPECT_EQ(settings.pcssFilterSampleCount, 32u);
+  EXPECT_EQ(settings.sdsmMode, ShadowSdsmMode::PreviousFrameMinMax);
+  EXPECT_EQ(settings.sdsmReductionBackend, ShadowSdsmReductionBackend::Auto);
+  EXPECT_TRUE(settings.debug.fixedPoissonRotation);
+  EXPECT_FLOAT_EQ(settings.constantBias, 0.0004f);
+  EXPECT_FLOAT_EQ(settings.slopeBias, 1.3f);
+  EXPECT_FLOAT_EQ(settings.normalBias, 0.60f);
+}
+
 TEST(RenderGraphRendererTest, LvkD16DepthFormatMapsToVulkanD16Unorm) {
   EXPECT_EQ(lvk::formatToVkFormat(lvk::Format_Z_UN16), VK_FORMAT_D16_UNORM);
+}
+
+TEST(RenderGraphRendererTest, LvkRg16FloatFormatMapsToVulkanRg16Sfloat) {
+  EXPECT_EQ(lvk::formatToVkFormat(lvk::Format_RG_F16), VK_FORMAT_R16G16_SFLOAT);
+  EXPECT_EQ(lvk::vkFormatToFormat(VK_FORMAT_R16G16_SFLOAT), lvk::Format_RG_F16);
 }
 
 TEST(RenderGraphRendererTest,
@@ -761,7 +1167,7 @@ TEST(RenderGraphRendererTest,
   std::array<std::byte, 128 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
-  FakeShadowSceneGpuDevice gpu;
+  FakeFullscreenGpuDevice gpu;
   Renderer renderer(gpu, memory);
   RenderPipeline pipeline(&memory);
   pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
@@ -901,6 +1307,268 @@ TEST(RenderGraphRendererTest,
   EXPECT_FLOAT_EQ(state.nearPlane, params.nearPlane);
   EXPECT_FLOAT_EQ(state.farPlane, params.farPlane);
   EXPECT_FLOAT_EQ(state.orthoHeight, params.height);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalHaltonJitterSequenceStaysWithinHalfPixel) {
+  for (uint32_t i = 0u; i < kTemporalJitterSequenceLength; ++i) {
+    const glm::vec2 offset = temporalJitterPixelOffset(i);
+    EXPECT_LE(std::abs(offset.x), 0.5f);
+    EXPECT_LE(std::abs(offset.y), 0.5f);
+    EXPECT_TRUE(jitterOffsetWithinHalfPixel(offset));
+  }
+
+  const glm::vec2 firstOffset = temporalJitterPixelOffset(0u);
+  EXPECT_FLOAT_EQ(firstOffset.x, 0.0f);
+  EXPECT_FLOAT_EQ(firstOffset.y, -1.0f / 6.0f);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalProjectionJitterMovesSamplesByConfiguredPixelOffset) {
+  const glm::uvec2 renderExtent{1920u, 1080u};
+  const glm::vec2 jitterOffset{0.375f, -0.25f};
+
+  const glm::mat4 perspective =
+      glm::perspective(glm::radians(60.0f), 16.0f / 9.0f, 0.1f, 100.0f);
+  const glm::mat4 jitteredPerspective = applyProjectionJitter(
+      perspective, jitterOffset, renderExtent, ProjectionType::Perspective);
+  const glm::vec2 perspectiveShift =
+      projectedPixelShift(perspective, jitteredPerspective,
+                          glm::vec4(0.2f, -0.1f, -5.0f, 1.0f), renderExtent);
+  EXPECT_NEAR(perspectiveShift.x, jitterOffset.x, 1.0e-4f);
+  EXPECT_NEAR(perspectiveShift.y, jitterOffset.y, 1.0e-4f);
+
+  const glm::mat4 orthographic =
+      glm::ortho(-8.0f, 8.0f, -4.5f, 4.5f, 0.1f, 100.0f);
+  const glm::mat4 jitteredOrthographic = applyProjectionJitter(
+      orthographic, jitterOffset, renderExtent, ProjectionType::Orthographic);
+  const glm::vec2 orthographicShift =
+      projectedPixelShift(orthographic, jitteredOrthographic,
+                          glm::vec4(0.2f, -0.1f, -5.0f, 1.0f), renderExtent);
+  EXPECT_NEAR(orthographicShift.x, jitterOffset.x, 1.0e-4f);
+  EXPECT_NEAR(orthographicShift.y, jitterOffset.y, 1.0e-4f);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalVelocityConventionMatchesTaaResolveScreenUv) {
+  const glm::vec2 currentNdc{0.25f, -0.40f};
+  const glm::vec2 previousNdc{-0.15f, 0.30f};
+  const glm::vec2 currentUv = taaScreenUvFromClipNdc(currentNdc);
+  const glm::vec2 previousUv = taaScreenUvFromClipNdc(previousNdc);
+  const glm::vec2 velocity = previousUv - currentUv;
+  const glm::vec2 historyUv = currentUv + velocity;
+
+  EXPECT_NEAR(historyUv.x, previousUv.x, 1.0e-6f);
+  EXPECT_NEAR(historyUv.y, previousUv.y, 1.0e-6f);
+  EXPECT_FLOAT_EQ(taaScreenUvFromClipNdc(glm::vec2(0.0f, 1.0f)).y, 0.0f);
+  EXPECT_FLOAT_EQ(taaScreenUvFromClipNdc(glm::vec2(0.0f, -1.0f)).y, 1.0f);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalCameraFrameStateAppliesJitterAndTracksPreviousMatrices) {
+  Camera camera{};
+  camera.setLookAt(glm::vec3(0.0f, 1.0f, 4.0f), glm::vec3(0.0f, 1.0f, 3.0f),
+                   glm::vec3(0.0f, 1.0f, 0.0f));
+
+  RenderSettings::AntiAliasingSettings aa{};
+  aa.mode = AntiAliasingMode::TAA;
+  aa.debug.jitterEnabled = true;
+
+  TemporalCameraHistoryState history{};
+  const TemporalCameraFrameDesc desc{.renderExtent = glm::uvec2(1920u, 1080u)};
+  const CameraFrameState first =
+      makeTemporalCameraFrameState(camera, 16.0f / 9.0f, aa, desc, history);
+
+  EXPECT_TRUE(first.temporalDataValid);
+  EXPECT_TRUE(first.jitterEnabled);
+  EXPECT_FALSE(first.historyValid);
+  EXPECT_EQ(first.historyResetReason, TemporalHistoryResetReason::FirstFrame);
+  EXPECT_EQ(first.jitterIndex, 0u);
+  EXPECT_EQ(first.jitterSequenceLength, kTemporalJitterSequenceLength);
+  EXPECT_TRUE(jitterOffsetWithinHalfPixel(first.jitterPixelOffset));
+  EXPECT_FALSE(mat4Near(first.proj, first.currentUnjitteredProj, 1.0e-8f));
+  EXPECT_TRUE(mat4Near(first.previousUnjitteredViewProj,
+                       first.currentUnjitteredViewProj, 1.0e-6f));
+  EXPECT_TRUE(mat4Near(first.previousJitteredViewProj,
+                       first.currentJitteredViewProj, 1.0e-6f));
+
+  const CameraFrameState second =
+      makeTemporalCameraFrameState(camera, 16.0f / 9.0f, aa, desc, history);
+
+  EXPECT_TRUE(second.historyValid);
+  EXPECT_EQ(second.historyResetReason, TemporalHistoryResetReason::None);
+  EXPECT_EQ(second.jitterIndex, 1u);
+  EXPECT_TRUE(mat4Near(second.previousUnjitteredViewProj,
+                       first.currentUnjitteredViewProj, 1.0e-6f));
+  EXPECT_TRUE(mat4Near(second.previousJitteredViewProj,
+                       first.currentJitteredViewProj, 1.0e-6f));
+  EXPECT_FLOAT_EQ(second.previousJitterPixelOffset.x,
+                  first.jitterPixelOffset.x);
+  EXPECT_FLOAT_EQ(second.previousJitterPixelOffset.y,
+                  first.jitterPixelOffset.y);
+  EXPECT_NEAR(second.previousCameraPos.x, first.cameraPos.x, 1.0e-6f);
+  EXPECT_NEAR(second.previousCameraPos.y, first.cameraPos.y, 1.0e-6f);
+  EXPECT_NEAR(second.previousCameraPos.z, first.cameraPos.z, 1.0e-6f);
+}
+
+TEST(RenderGraphRendererTest, TemporalCameraFrameStateScalesJitterOffset) {
+  Camera camera{};
+  RenderSettings::AntiAliasingSettings aa{};
+  aa.mode = AntiAliasingMode::TAA;
+  aa.debug.jitterEnabled = true;
+  aa.debug.taaJitterScale = 0.5f;
+
+  TemporalCameraHistoryState history{};
+  const TemporalCameraFrameDesc desc{.renderExtent = glm::uvec2(1920u, 1080u)};
+  const CameraFrameState state =
+      makeTemporalCameraFrameState(camera, 16.0f / 9.0f, aa, desc, history);
+
+  const glm::vec2 expected = temporalJitterPixelOffset(0u) * 0.5f;
+  EXPECT_FLOAT_EQ(state.jitterPixelOffset.x, expected.x);
+  EXPECT_FLOAT_EQ(state.jitterPixelOffset.y, expected.y);
+  EXPECT_TRUE(jitterOffsetWithinHalfPixel(state.jitterPixelOffset));
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalCameraFrameStateForMsaa4xDisablesJitterAndHistory) {
+  Camera camera{};
+  RenderSettings::AntiAliasingSettings aa{};
+  aa.mode = AntiAliasingMode::MSAA4x;
+  aa.debug.jitterEnabled = true;
+  aa.debug.freezeJitter = true;
+
+  TemporalCameraHistoryState history{};
+  history.initialized = true;
+  history.previousRenderExtent = glm::uvec2(1920u, 1080u);
+  history.previousAntiAliasingMode = AntiAliasingMode::MSAA4x;
+  history.previousUnjitteredViewProj = glm::mat4(2.0f);
+  history.previousJitteredViewProj = glm::mat4(3.0f);
+  history.previousJitterPixelOffset = glm::vec2(0.25f, -0.25f);
+  const TemporalCameraFrameDesc desc{.renderExtent = glm::uvec2(1920u, 1080u)};
+
+  const CameraFrameState state =
+      makeTemporalCameraFrameState(camera, 16.0f / 9.0f, aa, desc, history);
+
+  EXPECT_TRUE(state.temporalDataValid);
+  EXPECT_FALSE(state.jitterEnabled);
+  EXPECT_FALSE(state.jitterFrozen);
+  EXPECT_FALSE(state.historyValid);
+  EXPECT_EQ(state.jitterPixelOffset, glm::vec2(0.0f));
+  EXPECT_EQ(state.previousJitterPixelOffset, glm::vec2(0.0f));
+  EXPECT_TRUE(mat4Near(state.proj, state.currentUnjitteredProj, 1.0e-8f));
+}
+
+TEST(RenderGraphRendererTest, TemporalCameraFrameStateFreezeJitterHoldsIndex) {
+  Camera camera{};
+  RenderSettings::AntiAliasingSettings aa{};
+  aa.mode = AntiAliasingMode::TAA;
+  aa.debug.jitterEnabled = true;
+
+  TemporalCameraHistoryState history{};
+  const TemporalCameraFrameDesc desc{.renderExtent = glm::uvec2(1280u, 720u)};
+  const CameraFrameState first =
+      makeTemporalCameraFrameState(camera, 16.0f / 9.0f, aa, desc, history);
+
+  aa.debug.freezeJitter = true;
+  const CameraFrameState second =
+      makeTemporalCameraFrameState(camera, 16.0f / 9.0f, aa, desc, history);
+  const CameraFrameState third =
+      makeTemporalCameraFrameState(camera, 16.0f / 9.0f, aa, desc, history);
+
+  EXPECT_EQ(second.jitterIndex, first.jitterIndex);
+  EXPECT_EQ(third.jitterIndex, second.jitterIndex);
+  EXPECT_FLOAT_EQ(third.jitterPixelOffset.x, second.jitterPixelOffset.x);
+  EXPECT_FLOAT_EQ(third.jitterPixelOffset.y, second.jitterPixelOffset.y);
+  EXPECT_TRUE(third.jitterFrozen);
+
+  const AntiAliasingFrameMetrics metrics = makeAntiAliasingFrameMetrics(third);
+  EXPECT_TRUE(metrics.taaQualityValidationInvalidatedByFrozenJitter);
+}
+
+TEST(RenderGraphRendererTest, TemporalCameraFrameStateResetsOnResize) {
+  Camera camera{};
+  RenderSettings::AntiAliasingSettings aa{};
+  aa.mode = AntiAliasingMode::TAA;
+  aa.debug.jitterEnabled = true;
+
+  TemporalCameraHistoryState history{};
+  const CameraFrameState first = makeTemporalCameraFrameState(
+      camera, 16.0f / 9.0f, aa,
+      TemporalCameraFrameDesc{.renderExtent = glm::uvec2(1920u, 1080u)},
+      history);
+  ASSERT_EQ(first.historyResetReason, TemporalHistoryResetReason::FirstFrame);
+
+  const CameraFrameState resized = makeTemporalCameraFrameState(
+      camera, 16.0f / 9.0f, aa,
+      TemporalCameraFrameDesc{.renderExtent = glm::uvec2(1280u, 720u)},
+      history);
+
+  EXPECT_FALSE(resized.historyValid);
+  EXPECT_EQ(resized.historyResetReason, TemporalHistoryResetReason::Resize);
+  EXPECT_EQ(resized.framesSinceHistoryReset, 0u);
+  EXPECT_EQ(resized.historyResetCount, 2u);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalCameraFrameStateTracksRenderScaleChanges) {
+  Camera camera{};
+  RenderSettings::AntiAliasingSettings aa{};
+  aa.mode = AntiAliasingMode::TAA;
+  aa.debug.jitterEnabled = true;
+
+  TemporalCameraHistoryState history{};
+  const TemporalCameraFrameDesc scaledDesc{
+      .renderExtent = glm::uvec2(1920u, 1080u),
+      .renderScale = glm::vec2(0.75f, 0.75f),
+  };
+  const CameraFrameState first = makeTemporalCameraFrameState(
+      camera, 16.0f / 9.0f, aa, scaledDesc, history);
+  ASSERT_EQ(first.historyResetReason, TemporalHistoryResetReason::FirstFrame);
+
+  const CameraFrameState stable = makeTemporalCameraFrameState(
+      camera, 16.0f / 9.0f, aa, scaledDesc, history);
+
+  EXPECT_TRUE(stable.historyValid);
+  EXPECT_EQ(stable.historyResetReason, TemporalHistoryResetReason::None);
+  EXPECT_EQ(stable.historyResetCount, 1u);
+
+  TemporalCameraFrameDesc changedDesc = scaledDesc;
+  changedDesc.renderScale = glm::vec2(1.0f, 1.0f);
+  const CameraFrameState changed = makeTemporalCameraFrameState(
+      camera, 16.0f / 9.0f, aa, changedDesc, history);
+
+  EXPECT_FALSE(changed.historyValid);
+  EXPECT_EQ(changed.historyResetReason,
+            TemporalHistoryResetReason::RenderScaleChanged);
+  EXPECT_EQ(changed.framesSinceHistoryReset, 0u);
+  EXPECT_EQ(changed.historyResetCount, 2u);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalCameraFrameStateResetsOnInvalidHistoryTexture) {
+  Camera camera{};
+  RenderSettings::AntiAliasingSettings aa{};
+  aa.mode = AntiAliasingMode::TAA;
+  aa.debug.jitterEnabled = true;
+
+  TemporalCameraHistoryState history{};
+  const TemporalCameraFrameDesc validDesc{
+      .renderExtent = glm::uvec2(1920u, 1080u),
+  };
+  const CameraFrameState first = makeTemporalCameraFrameState(
+      camera, 16.0f / 9.0f, aa, validDesc, history);
+  ASSERT_EQ(first.historyResetReason, TemporalHistoryResetReason::FirstFrame);
+
+  TemporalCameraFrameDesc invalidHistoryDesc = validDesc;
+  invalidHistoryDesc.historyTextureValid = false;
+  const CameraFrameState invalidHistory = makeTemporalCameraFrameState(
+      camera, 16.0f / 9.0f, aa, invalidHistoryDesc, history);
+
+  EXPECT_FALSE(invalidHistory.historyValid);
+  EXPECT_EQ(invalidHistory.historyResetReason,
+            TemporalHistoryResetReason::InvalidHistoryTexture);
+  EXPECT_EQ(invalidHistory.framesSinceHistoryReset, 0u);
+  EXPECT_EQ(invalidHistory.historyResetCount, 2u);
 }
 
 TEST(RenderGraphRendererTest, DirectionalShadowBoundsFitIsCameraInvariant) {
@@ -1074,6 +1742,45 @@ TEST(RenderGraphRendererTest,
   EXPECT_GT(std::abs(movedFit.snappedLightSpaceCenter.x -
                      baseFit.snappedLightSpaceCenter.x),
             baseFit.texelWorldSize * 0.5f);
+}
+
+TEST(RenderGraphRendererTest,
+     DirectionalShadowCascadeFitKeepsStableTexelSizeAcrossCameraYaw) {
+  constexpr uint32_t kShadowMapSize = 4096u;
+  const glm::vec3 eye(0.0f, 2.0f, 6.0f);
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+
+  CameraFrameState cameraA{};
+  cameraA.view = glm::lookAt(eye, glm::vec3(0.0f, 0.5f, 0.0f), up);
+  cameraA.cameraPos = glm::vec4(eye, 1.0f);
+  cameraA.aspectRatio = 16.0f / 9.0f;
+  cameraA.projectionType = ProjectionType::Perspective;
+  cameraA.nearPlane = 0.1f;
+  cameraA.farPlane = 220.0f;
+  cameraA.fovYRadians = glm::radians(60.0f);
+
+  CameraFrameState cameraB = cameraA;
+  cameraB.view = glm::lookAt(eye, glm::vec3(0.6f, 0.5f, 0.0f), up);
+
+  const glm::vec3 lightDirection =
+      glm::normalize(glm::vec3(-0.35f, -1.0f, -0.2f));
+  const glm::mat4 lightView =
+      shadow_detail::makeDirectionalLightView(lightDirection);
+
+  const shadow_detail::DirectionalShadowFit fitA =
+      shadow_detail::fitDirectionalShadowCascadeSliceWithCasterDepthBounds(
+          cameraA, 0.1f, 55.0f, lightView, kShadowMapSize, false,
+          glm::vec2(0.0f), true);
+  const shadow_detail::DirectionalShadowFit fitB =
+      shadow_detail::fitDirectionalShadowCascadeSliceWithCasterDepthBounds(
+          cameraB, 0.1f, 55.0f, lightView, kShadowMapSize, false,
+          glm::vec2(0.0f), true);
+
+  EXPECT_NEAR(fitA.texelWorldSize, fitB.texelWorldSize, 1.0e-6f);
+  const glm::vec2 extentA = shadow_detail::orthoExtentFromShadowFit(fitA);
+  const glm::vec2 extentB = shadow_detail::orthoExtentFromShadowFit(fitB);
+  EXPECT_NEAR(extentA.x, extentB.x, 1.0e-5f);
+  EXPECT_NEAR(extentA.y, extentB.y, 1.0e-5f);
 }
 
 TEST(RenderGraphRendererTest,
@@ -1476,7 +2183,7 @@ TEST(RenderGraphRendererTest,
   std::array<std::byte, 32 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
-  FakeFullscreenGpuDevice gpu;
+  FakeShadowSceneGpuDevice gpu;
   Renderer renderer(gpu, memory);
   FrameCompositionProvider provider(gpu, &memory);
   RenderGraphBuilder graph(&memory);
@@ -1500,6 +2207,2922 @@ TEST(RenderGraphRendererTest,
   EXPECT_TRUE(isValid(frameContext.sharedResources.sceneDepthTexture));
   EXPECT_TRUE(isValid(frameContext.sharedResources.historyColorReadTexture));
   EXPECT_TRUE(isValid(frameContext.sharedResources.historyColorWriteTexture));
+  EXPECT_FALSE(isValid(frameContext.sharedResources.motionVectorTexture));
+  EXPECT_FALSE(
+      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+}
+
+TEST(
+    RenderGraphRendererTest,
+    FrameCompositionProviderPublishesPreviousMotionVectorsOnlyForValidHistory) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  gpu.swapchainImageCount = 3u;
+  Renderer renderer(gpu, memory);
+  FrameCompositionProvider provider(gpu, &memory);
+  RenderGraphBuilder graph(&memory);
+  RenderFrameContext frameContext{};
+  frameContext.sharedResources.textureRequirements =
+      kBaselineFrameTextureRequirements |
+      FrameTextureRequirementFlags::MotionVectors;
+  FrameBuildContext ctx{
+      .frame = frameContext,
+      .graph = graph,
+      .resources = renderer.resources(),
+      .shared = frameContext.sharedResources,
+  };
+
+  frameContext.frameIndex = 0u;
+  frameContext.camera.historyValid = false;
+  auto prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+  ASSERT_TRUE(isValid(frameContext.sharedResources.motionVectorTexture));
+  EXPECT_FALSE(
+      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+  const TextureHandle firstMotionVector =
+      frameContext.sharedResources.motionVectorTexture;
+  const TextureHandle firstHistoryWrite =
+      frameContext.sharedResources.historyColorWriteTexture;
+
+  frameContext.frameIndex = 1u;
+  frameContext.camera.historyValid = true;
+  prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+  ASSERT_TRUE(isValid(frameContext.sharedResources.motionVectorTexture));
+  ASSERT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+  EXPECT_TRUE(
+      sameTexture(frameContext.sharedResources.previousMotionVectorTexture,
+                  firstMotionVector));
+  EXPECT_FALSE(sameTexture(frameContext.sharedResources.motionVectorTexture,
+                           firstMotionVector));
+  EXPECT_TRUE(sameTexture(frameContext.sharedResources.historyColorReadTexture,
+                          firstHistoryWrite));
+  const TextureHandle secondHistoryWrite =
+      frameContext.sharedResources.historyColorWriteTexture;
+  EXPECT_FALSE(sameTexture(secondHistoryWrite, firstHistoryWrite));
+
+  frameContext.frameIndex = 2u;
+  prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+  EXPECT_TRUE(sameTexture(frameContext.sharedResources.historyColorReadTexture,
+                          secondHistoryWrite));
+  EXPECT_FALSE(
+      sameTexture(frameContext.sharedResources.historyColorWriteTexture,
+                  firstHistoryWrite));
+  EXPECT_FALSE(
+      sameTexture(frameContext.sharedResources.historyColorWriteTexture,
+                  secondHistoryWrite));
+
+  uint32_t motionVectorTextureCount = 0u;
+  for (const TextureDesc &desc : gpu.createdTextureDescs) {
+    if (desc.format == kFrameCompositionMotionVectorFormat) {
+      ++motionVectorTextureCount;
+    }
+  }
+  EXPECT_EQ(motionVectorTextureCount, 3u);
+}
+
+TEST(
+    RenderGraphRendererTest,
+    FrameCompositionProviderAddsMotionVectorsWithoutRecreatingBaselineTextures) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  FrameCompositionProvider provider(gpu, &memory);
+  RenderGraphBuilder graph(&memory);
+  RenderFrameContext frameContext{};
+  FrameBuildContext ctx{
+      .frame = frameContext,
+      .graph = graph,
+      .resources = renderer.resources(),
+      .shared = frameContext.sharedResources,
+  };
+
+  frameContext.frameIndex = 0u;
+  auto prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+  const TextureHandle sceneColor =
+      frameContext.sharedResources.sceneColorTexture;
+  const TextureHandle frameColor =
+      frameContext.sharedResources.frameColorTexture;
+  const TextureHandle sceneDepth =
+      frameContext.sharedResources.sceneDepthTexture;
+  const TextureHandle historyRead =
+      frameContext.sharedResources.historyColorReadTexture;
+  const TextureHandle historyWrite =
+      frameContext.sharedResources.historyColorWriteTexture;
+  const uint32_t destroyedBeforeMotion = gpu.destroyedTextureCount;
+
+  frameContext.sharedResources.textureRequirements |=
+      FrameTextureRequirementFlags::MotionVectors;
+  frameContext.camera.historyValid = true;
+  prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+
+  EXPECT_TRUE(
+      sameTexture(frameContext.sharedResources.sceneColorTexture, sceneColor));
+  EXPECT_TRUE(
+      sameTexture(frameContext.sharedResources.frameColorTexture, frameColor));
+  EXPECT_TRUE(
+      sameTexture(frameContext.sharedResources.sceneDepthTexture, sceneDepth));
+  EXPECT_TRUE(sameTexture(frameContext.sharedResources.historyColorReadTexture,
+                          historyRead));
+  EXPECT_TRUE(sameTexture(frameContext.sharedResources.historyColorWriteTexture,
+                          historyWrite));
+  EXPECT_EQ(gpu.destroyedTextureCount, destroyedBeforeMotion);
+  EXPECT_TRUE(isValid(frameContext.sharedResources.motionVectorTexture));
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.motionVectorAllocated);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.previousMotionVectorValid);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.motionVectorFormatSupported);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorFormat,
+            kFrameCompositionMotionVectorFormat);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorWidth, 1280u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorHeight, 720u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorTextureCount, 2u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorAllocationCount, 2u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorReallocationCount,
+            0u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorRg32FallbackCount,
+            0u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorTextureBytes,
+            1280ull * 720ull * 4ull);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.previousMotionVectorTextureBytes,
+            1280ull * 720ull * 4ull);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorTotalBytes,
+            2ull * 1280ull * 720ull * 4ull);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorClearBytes, 0ull);
+
+  gpu.resizeSwapchain(1920, 1080);
+  frameContext.frameIndex = 1u;
+  prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.motionVectorAllocated);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorAllocationCount, 4u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorReallocationCount,
+            1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorTextureBytes,
+            1920ull * 1080ull * 4ull);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorTotalBytes,
+            2ull * 1920ull * 1080ull * 4ull);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorClearBytes, 0ull);
+}
+
+TEST(RenderGraphRendererTest,
+     FrameCompositionProviderAllocatesMsaa4xSceneTexturesOnlyForMsaaMode) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  FrameCompositionProvider provider(gpu, &memory);
+  RenderGraphBuilder graph(&memory);
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+  RenderFrameContext frameContext{};
+  frameContext.settings = &settings;
+  FrameBuildContext ctx{
+      .frame = frameContext,
+      .graph = graph,
+      .resources = renderer.resources(),
+      .shared = frameContext.sharedResources,
+  };
+
+  auto prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+  ASSERT_TRUE(prepareResult.value());
+
+  EXPECT_TRUE(isValid(frameContext.sharedResources.sceneColorTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.sceneDepthTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.msaaSceneColorTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.msaaSceneDepthTexture));
+  EXPECT_TRUE(hasFrameTextureRequirementFlag(
+      frameContext.sharedResources.textureRequirements,
+      FrameTextureRequirementFlags::MsaaSceneColor));
+  EXPECT_TRUE(hasFrameTextureRequirementFlag(
+      frameContext.sharedResources.textureRequirements,
+      FrameTextureRequirementFlags::MsaaSceneDepth));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.msaaEnabled);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.msaaSampleCount,
+            kMsaa4xSampleCount);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.msaaColorAllocated);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.msaaDepthAllocated);
+
+  uint32_t msaaSceneColorCount = 0u;
+  uint32_t msaaSceneDepthCount = 0u;
+  for (const TextureDesc &desc : gpu.createdTextureDescs) {
+    if (desc.numSamples != kMsaa4xSampleCount) {
+      continue;
+    }
+    EXPECT_EQ(desc.usage, TextureUsage::Attachment);
+    EXPECT_EQ(desc.storage, Storage::Device);
+    if (desc.format == kFrameCompositionSceneColorFormat) {
+      ++msaaSceneColorCount;
+    } else if (desc.format == kFrameCompositionDepthFormat) {
+      ++msaaSceneDepthCount;
+    }
+  }
+  EXPECT_EQ(msaaSceneColorCount, gpu.swapchainImageCount);
+  EXPECT_EQ(msaaSceneDepthCount, gpu.swapchainImageCount);
+
+  FakeFullscreenGpuDevice nonMsaaGpu;
+  Renderer nonMsaaRenderer(nonMsaaGpu, memory);
+  FrameCompositionProvider nonMsaaProvider(nonMsaaGpu, &memory);
+  RenderGraphBuilder nonMsaaGraph(&memory);
+  RenderFrameContext nonMsaaFrame{};
+  FrameBuildContext nonMsaaCtx{
+      .frame = nonMsaaFrame,
+      .graph = nonMsaaGraph,
+      .resources = nonMsaaRenderer.resources(),
+      .shared = nonMsaaFrame.sharedResources,
+  };
+  prepareResult = nonMsaaProvider.prepare(nonMsaaCtx);
+  ASSERT_FALSE(prepareResult.hasError());
+  EXPECT_FALSE(isValid(nonMsaaFrame.sharedResources.msaaSceneColorTexture));
+  EXPECT_FALSE(isValid(nonMsaaFrame.sharedResources.msaaSceneDepthTexture));
+  for (const TextureDesc &desc : nonMsaaGpu.createdTextureDescs) {
+    EXPECT_EQ(desc.numSamples, 1u);
+  }
+}
+
+TEST(
+    RenderGraphRendererTest,
+    FrameCompositionProviderAddsReactiveMaskWithoutRecreatingBaselineTextures) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  FrameCompositionProvider provider(gpu, &memory);
+  RenderGraphBuilder graph(&memory);
+  RenderFrameContext frameContext{};
+  FrameBuildContext ctx{
+      .frame = frameContext,
+      .graph = graph,
+      .resources = renderer.resources(),
+      .shared = frameContext.sharedResources,
+  };
+
+  frameContext.frameIndex = 0u;
+  auto prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+  const TextureHandle sceneColor =
+      frameContext.sharedResources.sceneColorTexture;
+  const TextureHandle frameColor =
+      frameContext.sharedResources.frameColorTexture;
+  const TextureHandle sceneDepth =
+      frameContext.sharedResources.sceneDepthTexture;
+  const TextureHandle historyRead =
+      frameContext.sharedResources.historyColorReadTexture;
+  const TextureHandle historyWrite =
+      frameContext.sharedResources.historyColorWriteTexture;
+  const uint32_t destroyedBeforeReactive = gpu.destroyedTextureCount;
+
+  frameContext.sharedResources.textureRequirements |=
+      FrameTextureRequirementFlags::ReactiveMask;
+  prepareResult = provider.prepare(ctx);
+  ASSERT_FALSE(prepareResult.hasError());
+
+  EXPECT_TRUE(
+      sameTexture(frameContext.sharedResources.sceneColorTexture, sceneColor));
+  EXPECT_TRUE(
+      sameTexture(frameContext.sharedResources.frameColorTexture, frameColor));
+  EXPECT_TRUE(
+      sameTexture(frameContext.sharedResources.sceneDepthTexture, sceneDepth));
+  EXPECT_TRUE(sameTexture(frameContext.sharedResources.historyColorReadTexture,
+                          historyRead));
+  EXPECT_TRUE(sameTexture(frameContext.sharedResources.historyColorWriteTexture,
+                          historyWrite));
+  EXPECT_EQ(gpu.destroyedTextureCount, destroyedBeforeReactive);
+  EXPECT_TRUE(isValid(frameContext.sharedResources.reactiveMaskTexture));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskAllocated);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskFormatSupported);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskWidth, 1280u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskHeight, 720u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskTextureCount, 2u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskAllocationCount, 2u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskReallocationCount,
+            0u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskTextureBytes,
+            1280ull * 720ull * 4ull);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskTotalBytes,
+            2ull * 1280ull * 720ull * 4ull);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureRequestsAndClearsMotionVectorTexture) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(hasFrameTextureRequirementFlag(
+      frameContext.sharedResources.textureRequirements,
+      FrameTextureRequirementFlags::MotionVectors));
+  EXPECT_TRUE(hasFrameTextureRequirementFlag(
+      frameContext.sharedResources.textureRequirements,
+      FrameTextureRequirementFlags::ReactiveMask));
+  ASSERT_TRUE(isValid(frameContext.sharedResources.motionVectorTexture));
+  ASSERT_TRUE(isValid(frameContext.sharedResources.reactiveMaskTexture));
+  EXPECT_FALSE(
+      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.motionVectorGraphTexture));
+  EXPECT_FALSE(
+      isValid(frameContext.sharedResources.previousMotionVectorGraphTexture));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.motionVectorAllocated);
+  EXPECT_FALSE(frameContext.metrics.antiAliasing.previousMotionVectorValid);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.motionVectorGraphPublished);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskGraphPublished);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskAllocated);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskFormatSupported);
+  EXPECT_FALSE(
+      frameContext.metrics.antiAliasing.previousMotionVectorGraphPublished);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorClearPassCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorClearBytes,
+            1280ull * 720ull * 4ull);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolvePassCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaCopyBackPassCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaCurrentFallbackFrameCount, 1u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaResolvedSceneColorPublished);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaOutOfBoundsFallbackEnabled);
+  EXPECT_FALSE(frameContext.metrics.antiAliasing.taaBilinearHistorySampling);
+  EXPECT_EQ(sanitizeTemporalAAHistoryFilterMode(
+                static_cast<TemporalAAHistoryFilterMode>(0)),
+            TemporalAAHistoryFilterMode::CatmullRom);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaHistoryFilterMode,
+            TemporalAAHistoryFilterMode::CatmullRom);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolveWidth, 1280u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolveHeight, 720u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaCurrentFrameWeight,
+                  0.06f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaHistoryFrameWeight,
+                  0.94f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaJitterScale, 0.75f);
+  EXPECT_FLOAT_EQ(
+      frameContext.metrics.antiAliasing.taaVelocityRejectionThreshold, 0.0015f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaVelocityBlendScale,
+                  0.35f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaMotionCurrentWeight,
+                  0.35f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaClampCurrentWeight,
+                  0.50f);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaClampMode,
+            TemporalAAClampMode::Variance);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaVarianceGamma, 1.50f);
+  EXPECT_EQ(
+      gpu.getTextureFormat(frameContext.sharedResources.motionVectorTexture),
+      kFrameCompositionMotionVectorFormat);
+  EXPECT_EQ(
+      gpu.getTextureFormat(frameContext.sharedResources.reactiveMaskTexture),
+      kFrameCompositionReactiveMaskFormat);
+  const TextureDimensions motionVectorDimensions = gpu.getTextureDimensions(
+      frameContext.sharedResources.motionVectorTexture);
+  EXPECT_EQ(motionVectorDimensions.width, 1280u);
+  EXPECT_EQ(motionVectorDimensions.height, 720u);
+  EXPECT_EQ(motionVectorDimensions.depth, 1u);
+
+  uint32_t motionVectorTextureCount = 0u;
+  for (const TextureDesc &desc : gpu.createdTextureDescs) {
+    if (desc.format != kFrameCompositionMotionVectorFormat) {
+      continue;
+    }
+    ++motionVectorTextureCount;
+    EXPECT_EQ(desc.usage, TextureUsage::AttachmentSampled);
+    EXPECT_EQ(desc.dimensions.width, 1280u);
+    EXPECT_EQ(desc.dimensions.height, 720u);
+  }
+  EXPECT_EQ(motionVectorTextureCount, 2u);
+  uint32_t reactiveMaskTextureCount = 0u;
+  for (const TextureDesc &desc : gpu.createdTextureDescs) {
+    if (desc.format != kFrameCompositionReactiveMaskFormat) {
+      continue;
+    }
+    ++reactiveMaskTextureCount;
+    EXPECT_EQ(desc.usage, TextureUsage::AttachmentSampled);
+    EXPECT_EQ(desc.dimensions.width, 1280u);
+    EXPECT_EQ(desc.dimensions.height, 720u);
+  }
+  EXPECT_EQ(reactiveMaskTextureCount, 2u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.orderedPasses.size(), 4u);
+  const RenderPass &clearPass = compiled.orderedPasses[0];
+  EXPECT_EQ(clearPass.debugLabel, "Temporal AA Motion Vector Clear");
+  EXPECT_TRUE(clearPass.hasColorAttachment);
+  EXPECT_TRUE(sameTexture(clearPass.colorTexture,
+                          frameContext.sharedResources.motionVectorTexture));
+  EXPECT_EQ(clearPass.color.loadOp, LoadOp::Clear);
+  EXPECT_EQ(clearPass.color.storeOp, StoreOp::Store);
+  EXPECT_FLOAT_EQ(clearPass.color.clearColor.r,
+                  kFrameCompositionMotionVectorClearValue.r);
+  EXPECT_FLOAT_EQ(clearPass.color.clearColor.g,
+                  kFrameCompositionMotionVectorClearValue.g);
+  EXPECT_FLOAT_EQ(clearPass.color.clearColor.b,
+                  kFrameCompositionMotionVectorClearValue.b);
+  EXPECT_FLOAT_EQ(clearPass.color.clearColor.a,
+                  kFrameCompositionMotionVectorClearValue.a);
+
+  const RenderPass &reactiveClearPass = compiled.orderedPasses[1];
+  EXPECT_EQ(reactiveClearPass.debugLabel, "Temporal AA Reactive Mask Clear");
+  EXPECT_TRUE(sameTexture(reactiveClearPass.colorTexture,
+                          frameContext.sharedResources.reactiveMaskTexture));
+  EXPECT_EQ(reactiveClearPass.color.loadOp, LoadOp::Clear);
+  EXPECT_FLOAT_EQ(reactiveClearPass.color.clearColor.r,
+                  kFrameCompositionReactiveMaskClearValue.r);
+
+  const RenderPass &resolvePass = compiled.orderedPasses[2];
+  EXPECT_EQ(resolvePass.debugLabel, "TAA Resolve Pass");
+  EXPECT_TRUE(
+      sameTexture(resolvePass.colorTexture,
+                  frameContext.sharedResources.historyColorWriteTexture));
+  EXPECT_FALSE(resolvePass.draws.empty());
+
+  const RenderPass &copyBackPass = compiled.orderedPasses[3];
+  EXPECT_EQ(copyBackPass.debugLabel, "TAA Copy Back Pass");
+  EXPECT_TRUE(sameTexture(copyBackPass.colorTexture,
+                          frameContext.sharedResources.sceneColorTexture));
+  EXPECT_TRUE(sameTexture(frameContext.sharedResources.sceneColorTexture,
+                          copyBackPass.colorTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.sceneColorGraphTexture));
+}
+
+TEST(RenderGraphRendererTest,
+     MsaaResolveFeaturePublishesSingleSampleSceneTargets) {
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  gpu.latestCompletedGpuTimingReport = GpuTimingReport{
+      .msaaResolveSourceFrameIndex = 42u,
+      .msaaResolveTimeMs = 0.21f,
+      .availableScopeMask = kGpuTimingScopeMsaaResolveBit,
+  };
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<MsaaResolveFeature>(gpu));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_FALSE(hasFrameTextureRequirementFlag(
+      frameContext.sharedResources.textureRequirements,
+      FrameTextureRequirementFlags::MotionVectors));
+  EXPECT_FALSE(hasFrameTextureRequirementFlag(
+      frameContext.sharedResources.textureRequirements,
+      FrameTextureRequirementFlags::ReactiveMask));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.msaaSceneColorTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.msaaSceneDepthTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.sceneColorGraphTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.sceneDepthGraphTexture));
+  EXPECT_EQ(frameContext.metrics.antiAliasing.msaaResolvePassCount, 1u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.msaaColorResolveTargetBound);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.msaaDepthResolveTargetBound);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.msaaResolveGpuTimingAvailable,
+            1u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.msaaResolveGpuTimeMs,
+                  0.21f);
+  EXPECT_EQ(
+      frameContext.metrics.antiAliasing.msaaResolveGpuTimingSourceFrameIndex,
+      42u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+  ASSERT_EQ(passes.size(), 1u);
+  const RenderPass &resolvePass = passes.front();
+  EXPECT_EQ(resolvePass.debugLabel, "MSAA Resolve Pass");
+  EXPECT_TRUE(sameTexture(resolvePass.colorTexture,
+                          frameContext.sharedResources.msaaSceneColorTexture));
+  EXPECT_TRUE(sameTexture(resolvePass.depthTexture,
+                          frameContext.sharedResources.msaaSceneDepthTexture));
+  EXPECT_TRUE(sameTexture(resolvePass.colorResolveTexture,
+                          frameContext.sharedResources.sceneColorTexture));
+  EXPECT_TRUE(sameTexture(resolvePass.depthResolveTexture,
+                          frameContext.sharedResources.sceneDepthTexture));
+  EXPECT_EQ(resolvePass.color.storeOp, StoreOp::MsaaResolve);
+  EXPECT_EQ(resolvePass.depth.storeOp, StoreOp::MsaaResolve);
+  EXPECT_EQ(resolvePass.color.resolveMode, ResolveMode::Average);
+  EXPECT_EQ(resolvePass.depth.resolveMode, ResolveMode::Min);
+  EXPECT_EQ(resolvePass.gpuTimingScope, GpuTimingScope::MsaaResolve);
+  EXPECT_TRUE(resolvePass.draws.empty());
+}
+
+TEST(RenderGraphRendererTest,
+     Msaa4xRendererPipelinesKeepSampleCountScopedToSceneTargets) {
+  std::array<std::byte, 128 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  gpu.latestCompletedGpuTimingReport = GpuTimingReport{
+      .opaqueSourceFrameIndex = 43u,
+      .opaqueTimeMs = 1.25f,
+      .availableScopeMask = kGpuTimingScopeOpaqueBit,
+  };
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+
+  const std::filesystem::path root = std::filesystem::path(PROJECT_SOURCE_DIR);
+  pipeline.addFeature(
+      std::make_unique<SkyboxFeature>(gpu, makeSkyboxConfig(root)));
+  pipeline.addFeature(
+      std::make_unique<OpaqueFeature>(gpu, makeOpaqueConfig(root), &memory));
+  pipeline.addFeature(std::make_unique<MsaaResolveFeature>(gpu));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  const auto pipelineDescFor =
+      [&gpu](std::string_view debugName) -> const RenderPipelineDesc * {
+    for (size_t i = 0u; i < gpu.createdRenderPipelineNames.size(); ++i) {
+      if (gpu.createdRenderPipelineNames[i] == debugName) {
+        return &gpu.createdRenderPipelineDescs[i];
+      }
+    }
+    return nullptr;
+  };
+  const auto expectSampleCount = [&pipelineDescFor](std::string_view debugName,
+                                                    uint32_t sampleCount) {
+    const RenderPipelineDesc *desc = pipelineDescFor(debugName);
+    ASSERT_NE(desc, nullptr) << debugName;
+    EXPECT_EQ(desc->numSamples, sampleCount) << debugName;
+  };
+  const auto expectMsaaCoverageState =
+      [&pipelineDescFor](std::string_view debugName, bool alphaToCoverage,
+                         float minSampleShading) {
+        const RenderPipelineDesc *desc = pipelineDescFor(debugName);
+        ASSERT_NE(desc, nullptr) << debugName;
+        EXPECT_EQ(desc->numSamples, kMsaa4xSampleCount) << debugName;
+        EXPECT_EQ(desc->alphaToCoverageEnabled, alphaToCoverage) << debugName;
+        EXPECT_FLOAT_EQ(desc->minSampleShading, minSampleShading) << debugName;
+      };
+
+  expectSampleCount("skybox", 1u);
+  expectSampleCount("skybox_msaa4x", kMsaa4xSampleCount);
+  expectSampleCount("opaque_mesh", 1u);
+  expectSampleCount("opaque_mesh_msaa4x", kMsaa4xSampleCount);
+  expectSampleCount("opaque_mesh_double_sided", 1u);
+  expectSampleCount("opaque_mesh_double_sided_msaa4x", kMsaa4xSampleCount);
+  expectMsaaCoverageState("opaque_mesh_msaa4x", false, 0.0f);
+  expectMsaaCoverageState("opaque_mesh_double_sided_msaa4x", false, 0.0f);
+  expectMsaaCoverageState("opaque_mesh_alpha_msaa4x", true, 1.0f);
+  expectMsaaCoverageState("opaque_mesh_alpha_double_sided_msaa4x", true, 1.0f);
+  if (pipelineDescFor("opaque_mesh_tess_msaa4x") != nullptr) {
+    expectMsaaCoverageState("opaque_mesh_tess_msaa4x", false, 0.0f);
+    expectMsaaCoverageState("opaque_mesh_tess_alpha_msaa4x", true, 1.0f);
+  }
+  if (pipelineDescFor("opaque_mesh_tess_double_sided_msaa4x") != nullptr) {
+    expectMsaaCoverageState("opaque_mesh_tess_double_sided_msaa4x", false,
+                            0.0f);
+    expectMsaaCoverageState("opaque_mesh_tess_alpha_double_sided_msaa4x", true,
+                            1.0f);
+  }
+  expectSampleCount("opaque_mesh_depth", 1u);
+  expectSampleCount("opaque_mesh_depth_msaa4x", kMsaa4xSampleCount);
+  expectSampleCount("opaque_mesh_depth_alpha", 1u);
+  expectSampleCount("opaque_mesh_depth_alpha_msaa4x", kMsaa4xSampleCount);
+  expectSampleCount("opaque_mesh_pick", 1u);
+  expectSampleCount("opaque_velocity", 1u);
+  expectSampleCount("opaque_reactive_mask", 1u);
+  expectSampleCount("opaque_mesh_shadow_inspect", 1u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderPass *opaquePass = nullptr;
+  uint32_t standaloneResolvePassCount = 0u;
+  for (const RenderPass &pass : compileResult.value().orderedPasses) {
+    if (pass.debugLabel == "Opaque Pass") {
+      opaquePass = &pass;
+    } else if (pass.debugLabel == "MSAA Resolve Pass") {
+      ++standaloneResolvePassCount;
+    }
+  }
+  ASSERT_NE(opaquePass, nullptr);
+  EXPECT_EQ(standaloneResolvePassCount, 0u);
+  EXPECT_EQ(opaquePass->gpuTimingScope, GpuTimingScope::Opaque);
+  EXPECT_EQ(frameContext.metrics.opaque.gpuTimingAvailable, 1u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.opaque.gpuTimeMs, 1.25f);
+  EXPECT_EQ(frameContext.metrics.opaque.gpuTimingSourceFrameIndex, 43u);
+  EXPECT_TRUE(sameTexture(opaquePass->colorTexture,
+                          frameContext.sharedResources.msaaSceneColorTexture));
+  EXPECT_TRUE(sameTexture(opaquePass->colorResolveTexture,
+                          frameContext.sharedResources.sceneColorTexture));
+  EXPECT_TRUE(sameTexture(opaquePass->depthTexture,
+                          frameContext.sharedResources.msaaSceneDepthTexture));
+  EXPECT_TRUE(sameTexture(opaquePass->depthResolveTexture,
+                          frameContext.sharedResources.sceneDepthTexture));
+  EXPECT_EQ(opaquePass->color.storeOp, StoreOp::MsaaResolve);
+  EXPECT_EQ(opaquePass->depth.storeOp, StoreOp::MsaaResolve);
+  EXPECT_EQ(opaquePass->color.resolveMode, ResolveMode::Average);
+  EXPECT_EQ(opaquePass->depth.resolveMode, ResolveMode::Min);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.msaaColorResolveTargetBound);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.msaaDepthResolveTargetBound);
+}
+
+TEST(RenderGraphRendererTest,
+     Msaa4xOpaquePipelineSelectionSurvivesModeSwitches) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<MsaaResolveFeature>(gpu));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("msaa_pipeline_switch");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTextFile(objPath, "o MsaaSwitchTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "msaa_pipeline_switch_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "msaa_pipeline_switch_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.opaque.enableDepthPrepass = false;
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  const auto pipelineNameFor =
+      [&gpu](RenderPipelineHandle handle) -> std::string_view {
+    if (handle.index == 0u) {
+      return {};
+    }
+    const size_t index = static_cast<size_t>(handle.index - 1u);
+    if (index >= gpu.createdRenderPipelineNames.size()) {
+      return {};
+    }
+    return gpu.createdRenderPipelineNames[index];
+  };
+
+  const auto buildAndExpect = [&](uint64_t frameIndex, AntiAliasingMode mode,
+                                  std::string_view expectedPipelineName,
+                                  bool expectMsaa) {
+    settings.antiAliasing.mode = mode;
+
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera = makeSdsmPerspectiveCamera(30.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+    ASSERT_TRUE(buildResult.value());
+
+    RenderGraphRuntime runtime;
+    auto compileResult = graph.compile(runtime);
+    ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+    const RenderPass *opaquePass = nullptr;
+    for (const RenderPass &pass : compileResult.value().orderedPasses) {
+      if (pass.debugLabel == "Opaque Pass") {
+        opaquePass = &pass;
+        break;
+      }
+    }
+    ASSERT_NE(opaquePass, nullptr);
+    ASSERT_FALSE(opaquePass->draws.empty());
+    EXPECT_EQ(pipelineNameFor(opaquePass->draws.front().pipeline),
+              expectedPipelineName);
+
+    if (expectMsaa) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing.msaaEnabled);
+      EXPECT_EQ(frameContext.metrics.antiAliasing.msaaSampleCount,
+                kMsaa4xSampleCount);
+      EXPECT_TRUE(
+          sameTexture(opaquePass->colorTexture,
+                      frameContext.sharedResources.msaaSceneColorTexture));
+      EXPECT_TRUE(sameTexture(opaquePass->colorResolveTexture,
+                              frameContext.sharedResources.sceneColorTexture));
+      EXPECT_TRUE(
+          sameTexture(opaquePass->depthTexture,
+                      frameContext.sharedResources.msaaSceneDepthTexture));
+      EXPECT_TRUE(sameTexture(opaquePass->depthResolveTexture,
+                              frameContext.sharedResources.sceneDepthTexture));
+      EXPECT_EQ(opaquePass->color.storeOp, StoreOp::MsaaResolve);
+      EXPECT_EQ(opaquePass->depth.storeOp, StoreOp::MsaaResolve);
+      EXPECT_TRUE(
+          frameContext.metrics.antiAliasing.msaaColorResolveTargetBound);
+      EXPECT_TRUE(
+          frameContext.metrics.antiAliasing.msaaDepthResolveTargetBound);
+    } else {
+      EXPECT_FALSE(frameContext.metrics.antiAliasing.msaaEnabled);
+      EXPECT_EQ(frameContext.metrics.antiAliasing.msaaSampleCount, 1u);
+      EXPECT_TRUE(sameTexture(opaquePass->colorTexture,
+                              frameContext.sharedResources.sceneColorTexture));
+      EXPECT_FALSE(isValid(opaquePass->colorResolveTexture));
+      EXPECT_FALSE(isValid(opaquePass->depthResolveTexture));
+      EXPECT_EQ(opaquePass->color.storeOp, StoreOp::Store);
+      EXPECT_FALSE(isValid(frameContext.sharedResources.msaaSceneColorTexture));
+      EXPECT_FALSE(isValid(frameContext.sharedResources.msaaSceneDepthTexture));
+    }
+  };
+
+  buildAndExpect(0u, AntiAliasingMode::None, "opaque_mesh", false);
+  buildAndExpect(1u, AntiAliasingMode::MSAA4x, "opaque_mesh_msaa4x", true);
+  buildAndExpect(2u, AntiAliasingMode::None, "opaque_mesh", false);
+}
+
+TEST(RenderGraphRendererTest,
+     Msaa4xAlphaMaskedOpaqueDrawsUseAlphaCoveragePipeline) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<MsaaResolveFeature>(gpu));
+
+  const std::filesystem::path tempDir = makeTempRendererPath("msaa_masked");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTextFile(objPath, "o MsaaMaskedTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "msaa_masked_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "msaa_masked_material";
+  materialRequest.desc.alphaMode = MaterialAlphaMode::Mask;
+  materialRequest.desc.alphaCutoff = 0.5f;
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+  settings.opaque.enableDepthPrepass = true;
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = makeSdsmPerspectiveCamera(30.0f);
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  const AntiAliasingFrameMetrics &metrics = frameContext.metrics.antiAliasing;
+  EXPECT_GT(metrics.msaaAlphaMaskedDrawCount, 0u);
+  EXPECT_TRUE(metrics.msaaAlphaToCoverageEnabled);
+  EXPECT_TRUE(metrics.msaaSampleShadingEnabled);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+  EXPECT_EQ(compiledPassIndex(passes, "Opaque Depth Pre-Pass"), UINT32_MAX);
+
+  const RenderPass *opaquePass = nullptr;
+  for (const RenderPass &pass : passes) {
+    if (pass.debugLabel == "Opaque Pass") {
+      opaquePass = &pass;
+      break;
+    }
+  }
+  ASSERT_NE(opaquePass, nullptr);
+  ASSERT_FALSE(opaquePass->draws.empty());
+  EXPECT_EQ(opaquePass->depth.loadOp, LoadOp::Clear);
+
+  const auto pipelineNameFor =
+      [&gpu](RenderPipelineHandle handle) -> std::string_view {
+    if (handle.index == 0u) {
+      return {};
+    }
+    const size_t index = static_cast<size_t>(handle.index - 1u);
+    if (index >= gpu.createdRenderPipelineNames.size()) {
+      return {};
+    }
+    return gpu.createdRenderPipelineNames[index];
+  };
+
+  bool sawMaskedDraw = false;
+  for (const DrawItem &draw : opaquePass->draws) {
+    if (!draw.alphaMasked) {
+      continue;
+    }
+    sawMaskedDraw = true;
+    EXPECT_EQ(pipelineNameFor(draw.pipeline), "opaque_mesh_alpha_msaa4x");
+    EXPECT_TRUE(draw.useDepthState);
+    EXPECT_EQ(draw.depthState.compareOp, CompareOp::Less);
+    EXPECT_TRUE(draw.depthState.isDepthWriteEnabled);
+  }
+  EXPECT_TRUE(sawMaskedDraw);
+}
+
+TEST(RenderGraphRendererTest, SpatialFallbackModeRunsSmaaPassesAndCopyBack) {
+  std::array<std::byte, 64 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  gpu.latestCompletedGpuTimingReport = GpuTimingReport{
+      .spatialAASourceFrameIndex = 7u,
+      .spatialAATimeMs = 0.42f,
+      .availableScopeMask = kGpuTimingScopeSpatialAABit,
+  };
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<SpatialAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::SpatialFallback;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  const AntiAliasingFrameMetrics &metrics = frameContext.metrics.antiAliasing;
+  EXPECT_TRUE(metrics.spatialAAEnabled);
+  EXPECT_TRUE(metrics.spatialAAFallbackActive);
+  EXPECT_FALSE(metrics.spatialAACleanupActive);
+  EXPECT_EQ(metrics.spatialAAWidth, 1280u);
+  EXPECT_EQ(metrics.spatialAAHeight, 720u);
+  EXPECT_EQ(metrics.spatialAAPassCount, 4u);
+  EXPECT_EQ(metrics.spatialAAEdgePassCount, 1u);
+  EXPECT_EQ(metrics.spatialAABlendPassCount, 1u);
+  EXPECT_EQ(metrics.spatialAANeighborhoodPassCount, 1u);
+  EXPECT_EQ(metrics.spatialAACopyBackPassCount, 1u);
+  EXPECT_EQ(metrics.spatialAAFallbackFrameCount, 1u);
+  EXPECT_EQ(metrics.spatialAATextureCount, 4u);
+  EXPECT_EQ(metrics.spatialAALutTextureCount, 2u);
+  EXPECT_EQ(metrics.spatialAAGpuTimingAvailable, 1u);
+  EXPECT_FLOAT_EQ(metrics.spatialAAGpuTimeMs, 0.42f);
+  EXPECT_EQ(metrics.spatialAAGpuTimingSourceFrameIndex, 7u);
+
+  uint32_t rgba8TextureCount = 0u;
+  uint32_t lutTextureCount = 0u;
+  for (const TextureDesc &desc : gpu.createdTextureDescs) {
+    if (desc.format != Format::RGBA8_UNORM) {
+      continue;
+    }
+    ++rgba8TextureCount;
+    if (desc.usage == TextureUsage::Sampled) {
+      ++lutTextureCount;
+    } else {
+      EXPECT_EQ(desc.usage, TextureUsage::AttachmentSampled);
+      EXPECT_EQ(desc.dimensions.width, 1280u);
+      EXPECT_EQ(desc.dimensions.height, 720u);
+    }
+  }
+  EXPECT_EQ(rgba8TextureCount, 6u);
+  EXPECT_EQ(lutTextureCount, 2u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+  ASSERT_EQ(passes.size(), 4u);
+  EXPECT_EQ(passes[0].debugLabel, "SMAA Edge Detection Pass");
+  EXPECT_EQ(passes[0].gpuTimingScope, GpuTimingScope::SpatialAA);
+  EXPECT_EQ(passes[1].debugLabel, "SMAA Blend Weight Pass");
+  EXPECT_EQ(passes[2].debugLabel, "SMAA Neighborhood Pass");
+  EXPECT_EQ(passes[3].debugLabel, "SMAA Copy Back Pass");
+  EXPECT_TRUE(sameTexture(passes[3].colorTexture,
+                          frameContext.sharedResources.sceneColorTexture));
+  const SpatialAAPushConstantsProbe fallbackConstants =
+      readSpatialAAPushConstants(passes, "SMAA Edge Detection Pass");
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(fallbackConstants.edgeThresholdBits),
+                  0.12f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(fallbackConstants.resolveStrengthBits),
+                  0.30f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(fallbackConstants.localContrastFactorBits),
+                  2.0f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(fallbackConstants.cornerRoundingBits),
+                  0.25f);
+  EXPECT_EQ(fallbackConstants.maxSearchSteps, 16u);
+}
+
+TEST(RenderGraphRendererTest,
+     SpatialFallbackRunsAfterTaaResolveWhenHistoryIsInvalid) {
+  std::array<std::byte, 96 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<SpatialAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera.temporalDataValid = true;
+  frameContext.camera.historyValid = false;
+  frameContext.camera.framesSinceHistoryReset = 0u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.spatialAAEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.spatialAAFallbackActive);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.spatialAAPassCount, 4u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+  const uint32_t taaCopyBackIndex =
+      compiledPassIndex(passes, "TAA Copy Back Pass");
+  const uint32_t spatialEdgeIndex =
+      compiledPassIndex(passes, "SMAA Edge Detection Pass");
+  ASSERT_NE(taaCopyBackIndex, UINT32_MAX);
+  ASSERT_NE(spatialEdgeIndex, UINT32_MAX);
+  EXPECT_LT(taaCopyBackIndex, spatialEdgeIndex);
+  const SpatialAAPushConstantsProbe fallbackConstants =
+      readSpatialAAPushConstants(passes, "SMAA Edge Detection Pass");
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(fallbackConstants.edgeThresholdBits),
+                  0.12f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(fallbackConstants.resolveStrengthBits),
+                  0.30f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(fallbackConstants.localContrastFactorBits),
+                  2.0f);
+}
+
+TEST(RenderGraphRendererTest,
+     SpatialCleanupRunsAfterTaaWhenDebugToggleIsEnabled) {
+  std::array<std::byte, 96 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<SpatialAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.spatialPostTaaCleanup = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera.temporalDataValid = true;
+  frameContext.camera.historyValid = true;
+  frameContext.camera.framesSinceHistoryReset = kTemporalJitterSequenceLength;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.spatialAAEnabled);
+  EXPECT_FALSE(frameContext.metrics.antiAliasing.spatialAAFallbackActive);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.spatialAACleanupActive);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.spatialAAPassCount, 4u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.spatialAACleanupFrameCount, 1u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+  const uint32_t taaCopyBackIndex =
+      compiledPassIndex(passes, "TAA Copy Back Pass");
+  const uint32_t spatialEdgeIndex =
+      compiledPassIndex(passes, "SMAA Edge Detection Pass");
+  ASSERT_NE(taaCopyBackIndex, UINT32_MAX);
+  ASSERT_NE(spatialEdgeIndex, UINT32_MAX);
+  EXPECT_LT(taaCopyBackIndex, spatialEdgeIndex);
+  const SpatialAAPushConstantsProbe cleanupConstants =
+      readSpatialAAPushConstants(passes, "SMAA Edge Detection Pass");
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(cleanupConstants.edgeThresholdBits),
+                  0.14f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(cleanupConstants.resolveStrengthBits),
+                  0.10f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(cleanupConstants.localContrastFactorBits),
+                  1.45f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(cleanupConstants.cornerRoundingBits),
+                  0.40f);
+  EXPECT_EQ(cleanupConstants.maxSearchSteps, 16u);
+}
+
+TEST(RenderGraphRendererTest, SpatialCleanupRunsAfterMsaaResolveWhenEnabled) {
+  std::array<std::byte, 128 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<MsaaResolveFeature>(gpu));
+  pipeline.addFeature(std::make_unique<SpatialAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+  settings.antiAliasing.debug.spatialPostMsaaCleanup = true;
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  const AntiAliasingFrameMetrics &metrics = frameContext.metrics.antiAliasing;
+  EXPECT_TRUE(metrics.spatialAAEnabled);
+  EXPECT_FALSE(metrics.spatialAAFallbackActive);
+  EXPECT_TRUE(metrics.spatialAACleanupActive);
+  EXPECT_TRUE(metrics.msaaSpatialCleanupEnabled);
+  EXPECT_TRUE(metrics.msaaSpatialCleanupActive);
+  EXPECT_EQ(metrics.spatialAAPassCount, 4u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+  const uint32_t opaqueIndex = compiledPassIndex(passes, "Opaque Pass");
+  const uint32_t standaloneResolveIndex =
+      compiledPassIndex(passes, "MSAA Resolve Pass");
+  const uint32_t spatialEdgeIndex =
+      compiledPassIndex(passes, "SMAA Edge Detection Pass");
+  ASSERT_NE(opaqueIndex, UINT32_MAX);
+  EXPECT_EQ(standaloneResolveIndex, UINT32_MAX);
+  ASSERT_NE(spatialEdgeIndex, UINT32_MAX);
+  EXPECT_LT(opaqueIndex, spatialEdgeIndex);
+  const SpatialAAPushConstantsProbe msaaCleanupConstants =
+      readSpatialAAPushConstants(passes, "SMAA Edge Detection Pass");
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(msaaCleanupConstants.edgeThresholdBits),
+                  0.12f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(msaaCleanupConstants.resolveStrengthBits),
+                  0.16f);
+  EXPECT_FLOAT_EQ(
+      spatialAAPushFloat(msaaCleanupConstants.localContrastFactorBits), 2.0f);
+  EXPECT_FLOAT_EQ(spatialAAPushFloat(msaaCleanupConstants.cornerRoundingBits),
+                  0.25f);
+}
+
+TEST(RenderGraphRendererTest, SpatialCleanupDoesNotRunAfterMsaaWhenDisabled) {
+  std::array<std::byte, 96 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<SpatialAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::MSAA4x;
+  settings.antiAliasing.debug.spatialPostMsaaCleanup = false;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_FALSE(frameContext.metrics.antiAliasing.spatialAAEnabled);
+  EXPECT_FALSE(frameContext.metrics.antiAliasing.msaaSpatialCleanupEnabled);
+  EXPECT_FALSE(frameContext.metrics.antiAliasing.msaaSpatialCleanupActive);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+  EXPECT_EQ(compiledPassIndex(passes, "SMAA Edge Detection Pass"), UINT32_MAX);
+}
+
+TEST(RenderGraphRendererTest, SpatialAABypassesTaaDebugViews) {
+  std::array<std::byte, 96 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<SpatialAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::TAAHdrWeight;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera.temporalDataValid = true;
+  frameContext.camera.historyValid = true;
+  frameContext.camera.framesSinceHistoryReset = kTemporalJitterSequenceLength;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  EXPECT_FALSE(frameContext.metrics.antiAliasing.spatialAAEnabled);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+  EXPECT_EQ(compiledPassIndex(passes, "SMAA Edge Detection Pass"), UINT32_MAX);
+}
+
+TEST(RenderGraphRendererTest, SpatialAADebugViewsRenderExpectedPasses) {
+  struct DebugCase {
+    AntiAliasingDebugView view = AntiAliasingDebugView::None;
+    std::string_view label{};
+  };
+  const std::array<DebugCase, 4> cases{{
+      {.view = AntiAliasingDebugView::SpatialAAEdges,
+       .label = "SMAA Edge Debug Pass"},
+      {.view = AntiAliasingDebugView::SpatialAABlendWeights,
+       .label = "SMAA Blend Weight Debug Pass"},
+      {.view = AntiAliasingDebugView::SpatialAACleanupMask,
+       .label = "SMAA Cleanup Mask Debug Pass"},
+      {.view = AntiAliasingDebugView::SpatialAASplitCompare,
+       .label = "SMAA Split Compare Debug Pass"},
+  }};
+
+  for (const DebugCase &debugCase : cases) {
+    std::array<std::byte, 96 * 1024> scratchBytes{};
+    std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                               scratchBytes.size());
+    FakeFullscreenGpuDevice gpu;
+    Renderer renderer(gpu, memory);
+    RenderPipeline pipeline(&memory);
+    pipeline.addProvider(
+        std::make_unique<FrameCompositionProvider>(gpu, &memory));
+    pipeline.addFeature(std::make_unique<SpatialAAFeature>(
+        gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+    RenderSettings settings{};
+    settings.antiAliasing.mode = AntiAliasingMode::TAA;
+    settings.antiAliasing.debug.view = debugCase.view;
+
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = 0u;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.temporalDataValid = true;
+    frameContext.camera.historyValid = true;
+    frameContext.camera.framesSinceHistoryReset = kTemporalJitterSequenceLength;
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+    ASSERT_TRUE(buildResult.value());
+    EXPECT_TRUE(frameContext.metrics.antiAliasing.spatialAAEnabled);
+    EXPECT_EQ(frameContext.metrics.antiAliasing.spatialAADebugPassCount, 1u);
+
+    if (debugCase.view == AntiAliasingDebugView::SpatialAAEdges) {
+      EXPECT_TRUE(
+          frameContext.metrics.antiAliasing.spatialAAEdgesDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::SpatialAABlendWeights) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing
+                      .spatialAABlendWeightsDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::SpatialAACleanupMask) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing
+                      .spatialAACleanupMaskDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::SpatialAASplitCompare) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing
+                      .spatialAASplitCompareDebugViewRendered);
+    }
+
+    RenderGraphRuntime runtime;
+    auto compileResult = graph.compile(runtime);
+    ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+    const auto &passes = compileResult.value().orderedPasses;
+    EXPECT_NE(compiledPassIndex(passes, debugCase.label), UINT32_MAX);
+    EXPECT_NE(compiledPassIndex(passes, "SMAA Copy Back Pass"), UINT32_MAX);
+  }
+}
+
+TEST(RenderGraphRendererTest, OpaqueVelocityPassPublishesMotionVectorsForTaa) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_opaque_velocity");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTextFile(objPath, "o TaaVelocityTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_velocity_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  auto materialResult = renderer.resources().acquireMaterial(MaterialRequest{
+      .debugName = "taa_velocity_material",
+  });
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::VelocityMagnitude;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  CameraFrameState camera = makeSdsmPerspectiveCamera(30.0f);
+  camera.currentUnjitteredViewProj = camera.proj * camera.view;
+  camera.previousUnjitteredViewProj = camera.currentUnjitteredViewProj;
+  camera.temporalDataValid = true;
+  camera.historyValid = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.opaqueVelocityGenerated);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.velocityPassCount, 1u);
+  EXPECT_GT(frameContext.metrics.antiAliasing.velocityDrawCount, 0u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.velocityDebugPassCount, 1u);
+  EXPECT_GT(
+      frameContext.metrics.antiAliasing.velocityPassBandwidthEstimateBytes, 0u);
+  EXPECT_GT(
+      frameContext.metrics.antiAliasing.velocityDebugBandwidthEstimateBytes,
+      0u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorClearPassCount, 0u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.motionVectorClearBytes, 0ull);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolvePassCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaCopyBackPassCount, 1u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.motionVectorGraphPublished);
+  EXPECT_FALSE(frameContext.metrics.antiAliasing.previousTransformCacheValid);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.velocityDebugViewRendered);
+  EXPECT_TRUE(isValid(frameContext.sharedResources.motionVectorGraphTexture));
+  EXPECT_TRUE(isValid(frameContext.sharedResources.sceneColorGraphTexture));
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+  bool sawOpaquePass = false;
+  bool sawVelocityPass = false;
+  bool sawVelocityDebugPass = false;
+  bool sawTaaResolvePass = false;
+  bool sawClearFallback = false;
+  for (const RenderPass &pass : compileResult.value().orderedPasses) {
+    if (pass.debugLabel == "Opaque Pass") {
+      sawOpaquePass = true;
+    } else if (pass.debugLabel == "Opaque Velocity Pass") {
+      sawVelocityPass = true;
+      EXPECT_TRUE(sameTexture(
+          pass.colorTexture, frameContext.sharedResources.motionVectorTexture));
+      EXPECT_EQ(pass.color.loadOp, LoadOp::Clear);
+      EXPECT_EQ(pass.depth.loadOp, LoadOp::Load);
+      EXPECT_FALSE(pass.draws.empty());
+    } else if (pass.debugLabel == "TAA Velocity Debug Pass") {
+      sawVelocityDebugPass = true;
+      EXPECT_TRUE(sameTexture(pass.colorTexture,
+                              frameContext.sharedResources.sceneColorTexture));
+      EXPECT_EQ(pass.color.loadOp, LoadOp::Clear);
+      EXPECT_FALSE(pass.draws.empty());
+    } else if (pass.debugLabel == "TAA Resolve Pass") {
+      sawTaaResolvePass = true;
+    } else if (pass.debugLabel == "Temporal AA Motion Vector Clear") {
+      sawClearFallback = true;
+    }
+  }
+  EXPECT_TRUE(sawOpaquePass);
+  EXPECT_TRUE(sawVelocityPass);
+  EXPECT_TRUE(sawTaaResolvePass);
+  EXPECT_TRUE(sawVelocityDebugPass);
+  EXPECT_FALSE(sawClearFallback);
+
+  RenderFrameContext secondFrameContext{};
+  secondFrameContext.frameIndex = 1u;
+  secondFrameContext.scene = &scene;
+  secondFrameContext.resources = &renderer.resources();
+  secondFrameContext.settings = &settings;
+  secondFrameContext.camera = camera;
+
+  RenderGraphBuilder secondGraph(&memory);
+  secondGraph.beginFrame(secondFrameContext.frameIndex);
+  auto secondBuildResult = pipeline.buildRenderGraph(
+      secondFrameContext, renderer.resources(), secondGraph);
+  ASSERT_FALSE(secondBuildResult.hasError()) << secondBuildResult.error();
+  ASSERT_TRUE(secondBuildResult.value());
+  EXPECT_TRUE(
+      secondFrameContext.metrics.antiAliasing.previousTransformCacheValid);
+  EXPECT_GT(secondFrameContext.metrics.antiAliasing
+                .velocityPreviousTransformValidCount,
+            0u);
+  EXPECT_EQ(secondFrameContext.metrics.antiAliasing.motionVectorClearBytes,
+            0ull);
+
+  RenderFrameContext sameFrameRebuildContext{};
+  sameFrameRebuildContext.frameIndex = 1u;
+  sameFrameRebuildContext.scene = &scene;
+  sameFrameRebuildContext.resources = &renderer.resources();
+  sameFrameRebuildContext.settings = &settings;
+  sameFrameRebuildContext.camera = camera;
+
+  RenderGraphBuilder sameFrameGraph(&memory);
+  sameFrameGraph.beginFrame(sameFrameRebuildContext.frameIndex);
+  auto sameFrameBuildResult = pipeline.buildRenderGraph(
+      sameFrameRebuildContext, renderer.resources(), sameFrameGraph);
+  ASSERT_FALSE(sameFrameBuildResult.hasError()) << sameFrameBuildResult.error();
+  ASSERT_TRUE(sameFrameBuildResult.value());
+  EXPECT_FALSE(
+      sameFrameRebuildContext.metrics.antiAliasing.previousTransformCacheValid);
+
+  RenderFrameContext invalidTemporalContext{};
+  invalidTemporalContext.frameIndex = 2u;
+  invalidTemporalContext.scene = &scene;
+  invalidTemporalContext.resources = &renderer.resources();
+  invalidTemporalContext.settings = &settings;
+  invalidTemporalContext.camera = camera;
+  invalidTemporalContext.camera.temporalDataValid = false;
+
+  RenderGraphBuilder invalidTemporalGraph(&memory);
+  invalidTemporalGraph.beginFrame(invalidTemporalContext.frameIndex);
+  auto invalidTemporalBuildResult = pipeline.buildRenderGraph(
+      invalidTemporalContext, renderer.resources(), invalidTemporalGraph);
+  ASSERT_FALSE(invalidTemporalBuildResult.hasError())
+      << invalidTemporalBuildResult.error();
+  ASSERT_TRUE(invalidTemporalBuildResult.value());
+  EXPECT_FALSE(
+      invalidTemporalContext.metrics.antiAliasing.previousTransformCacheValid);
+}
+
+TEST(RenderGraphRendererTest, OpaqueReactiveMaskPassPublishesMaskForTaa) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_opaque_reactive");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTextFile(objPath, "o TaaReactiveTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_reactive_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "taa_reactive_material";
+  materialRequest.desc.alphaMode = MaterialAlphaMode::Mask;
+  materialRequest.desc.alphaCutoff = 0.5f;
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  CameraFrameState camera = makeSdsmPerspectiveCamera(30.0f);
+  camera.currentUnjitteredViewProj = camera.proj * camera.view;
+  camera.previousUnjitteredViewProj = camera.currentUnjitteredViewProj;
+  camera.temporalDataValid = true;
+  camera.historyValid = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskAllocated);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskGraphPublished);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskPassCount, 1u);
+  EXPECT_GT(frameContext.metrics.antiAliasing.reactiveMaskDrawCount, 0u);
+  EXPECT_GT(frameContext.metrics.antiAliasing.reactiveAlphaMaskedDrawCount, 0u);
+  EXPECT_GT(
+      frameContext.metrics.antiAliasing.reactiveMaskPassBandwidthEstimateBytes,
+      0ull);
+  EXPECT_GT(frameContext.metrics.antiAliasing.taaReactiveCoverageEstimate,
+            0.0f);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+  bool sawReactivePass = false;
+  bool sawReactiveClearFallback = false;
+  for (const RenderPass &pass : compileResult.value().orderedPasses) {
+    if (pass.debugLabel == "Opaque Reactive Mask Pass") {
+      sawReactivePass = true;
+      EXPECT_TRUE(sameTexture(
+          pass.colorTexture, frameContext.sharedResources.reactiveMaskTexture));
+      EXPECT_EQ(pass.color.loadOp, LoadOp::Clear);
+      EXPECT_EQ(pass.depth.loadOp, LoadOp::Load);
+      EXPECT_FALSE(pass.draws.empty());
+    } else if (pass.debugLabel == "Temporal AA Reactive Mask Clear") {
+      sawReactiveClearFallback = true;
+    }
+  }
+  EXPECT_TRUE(sawReactivePass);
+  EXPECT_FALSE(sawReactiveClearFallback);
+}
+
+TEST(RenderGraphRendererTest, TaaVelocityBuffersDoNotOverflowShadowedMainPass) {
+  std::vector<std::byte> scratchBytes(1024 * 1024);
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_shadow_velocity_dependencies");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTextFile(objPath, "o TaaShadowVelocityTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_shadow_velocity_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  auto materialResult = renderer.resources().acquireMaterial(MaterialRequest{
+      .debugName = "taa_shadow_velocity_material",
+  });
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  addDirectionalLightToScene(scene);
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 512u;
+  settings.shadow.sdsmMode = ShadowSdsmMode::Disabled;
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::None;
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  CameraFrameState camera = makeSdsmPerspectiveCamera(30.0f);
+  camera.currentUnjitteredViewProj = camera.proj * camera.view;
+  camera.previousUnjitteredViewProj = camera.currentUnjitteredViewProj;
+  camera.temporalDataValid = true;
+  camera.historyValid = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 4u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowFrameGpuData.has_value());
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.opaqueVelocityGenerated);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+  const RenderPass *opaquePass = nullptr;
+  const RenderPass *velocityPass = nullptr;
+  uint32_t shadowPassCount = 0u;
+  for (const RenderPass &pass : compileResult.value().orderedPasses) {
+    if (std::string_view(pass.debugLabel)
+            .starts_with("ShadowDepthPass.Cascade")) {
+      ++shadowPassCount;
+    } else if (pass.debugLabel == "Opaque Pass") {
+      opaquePass = &pass;
+    } else if (pass.debugLabel == "Opaque Velocity Pass") {
+      velocityPass = &pass;
+    }
+  }
+
+  EXPECT_EQ(shadowPassCount, 4u);
+  ASSERT_NE(opaquePass, nullptr);
+  ASSERT_NE(velocityPass, nullptr);
+  EXPECT_LE(opaquePass->dependencyBuffers.size(), kMaxDependencyResources);
+  EXPECT_LE(velocityPass->dependencyBuffers.size(), kMaxDependencyResources);
+  EXPECT_LT(opaquePass->dependencyBuffers.size(),
+            velocityPass->dependencyBuffers.size());
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureImportsPreviousMotionVectorWhenResolveConsumesIt) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.taaClampMode = TemporalAAClampMode::Variance;
+  settings.antiAliasing.debug.taaHdrWeightingMode =
+      TemporalAAHdrWeightingMode::LogLuminance;
+  settings.antiAliasing.debug.taaVarianceGamma = 1.75f;
+  settings.antiAliasing.debug.taaHdrWeightStrength = 0.65f;
+  settings.antiAliasing.debug.taaMotionCurrentWeight = 0.33f;
+  settings.antiAliasing.debug.taaClampCurrentWeight = 0.52f;
+  settings.antiAliasing.debug.taaHistoryFilterMode =
+      TemporalAAHistoryFilterMode::Bilinear;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.camera.historyValid = true;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorGraphTexture));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.previousMotionVectorValid);
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.previousMotionVectorGraphPublished);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDepthRejectionEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaVelocityRejectionEnabled);
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.taaPreviousVelocityDisocclusionEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaNeighborhoodClampEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaAdaptiveBlendEnabled);
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.taaClampBlendAttenuationEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaNeighborhoodFallbackEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaHdrWeightingEnabled);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaClampMode,
+            TemporalAAClampMode::Variance);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaHdrWeightingMode,
+            TemporalAAHdrWeightingMode::LogLuminance);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaHistoryFilterMode,
+            TemporalAAHistoryFilterMode::Bilinear);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaBilinearHistorySampling);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaMotionCurrentWeight,
+                  0.33f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaClampCurrentWeight,
+                  0.52f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaVarianceGamma, 1.75f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaHdrWeightStrength,
+                  0.65f);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  ASSERT_EQ(compileResult.value().orderedPasses.size(), 4u);
+  EXPECT_EQ(compileResult.value().orderedPasses[0].debugLabel,
+            "Temporal AA Motion Vector Clear");
+  EXPECT_EQ(compileResult.value().orderedPasses[1].debugLabel,
+            "Temporal AA Reactive Mask Clear");
+  EXPECT_EQ(compileResult.value().orderedPasses[2].debugLabel,
+            "TAA Resolve Pass");
+  EXPECT_EQ(compileResult.value().orderedPasses[3].debugLabel,
+            "TAA Copy Back Pass");
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeaturePublishesResolveAndDebugGpuTimingMetrics) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  gpu.latestCompletedGpuTimingReport = GpuTimingReport{
+      .temporalAAResolveSourceFrameIndex = 9u,
+      .temporalAADebugSourceFrameIndex = 9u,
+      .temporalAAResolveTimeMs = 0.42f,
+      .temporalAADebugTimeMs = 0.17f,
+      .availableScopeMask = kGpuTimingScopeTemporalAAResolveBit |
+                            kGpuTimingScopeTemporalAADebugBit,
+  };
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::TAAHdrWeight;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 10u;
+  frameContext.camera.historyValid = true;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolveGpuTimingAvailable, 1u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaResolveGpuTimeMs, 0.42f);
+  EXPECT_EQ(
+      frameContext.metrics.antiAliasing.taaResolveGpuTimingSourceFrameIndex,
+      9u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaDebugGpuTimingAvailable, 1u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaDebugGpuTimeMs, 0.17f);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaDebugGpuTimingSourceFrameIndex,
+            9u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &orderedPasses = compileResult.value().orderedPasses;
+  ASSERT_EQ(orderedPasses.size(), 5u);
+  EXPECT_EQ(orderedPasses[2].debugLabel, "TAA Resolve Pass");
+  EXPECT_EQ(orderedPasses[2].gpuTimingScope, GpuTimingScope::TemporalAAResolve);
+  EXPECT_EQ(orderedPasses[3].debugLabel, "TAA HDR Weight Debug Pass");
+  EXPECT_EQ(orderedPasses[3].gpuTimingScope, GpuTimingScope::TemporalAADebug);
+  EXPECT_EQ(orderedPasses[4].debugLabel, "TAA Debug Copy Back Pass");
+  EXPECT_EQ(orderedPasses[4].gpuTimingScope, GpuTimingScope::TemporalAADebug);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureCopyBackRunsBeforeFrameCompositionReadsSceneColor) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<FrameCompositionFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.camera.historyValid = true;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &passes = compileResult.value().orderedPasses;
+
+  uint32_t taaResolveIndex = UINT32_MAX;
+  uint32_t taaCopyBackIndex = UINT32_MAX;
+  uint32_t downsampleHalfIndex = UINT32_MAX;
+  uint32_t sceneResolveIndex = UINT32_MAX;
+  for (uint32_t i = 0u; i < passes.size(); ++i) {
+    if (passes[i].debugLabel == "TAA Resolve Pass") {
+      taaResolveIndex = i;
+    } else if (passes[i].debugLabel == "TAA Copy Back Pass") {
+      taaCopyBackIndex = i;
+    } else if (passes[i].debugLabel == "Scene Color Downsample Half") {
+      downsampleHalfIndex = i;
+    } else if (passes[i].debugLabel == "Scene Resolve Pass") {
+      sceneResolveIndex = i;
+    }
+  }
+
+  ASSERT_NE(taaResolveIndex, UINT32_MAX);
+  ASSERT_NE(taaCopyBackIndex, UINT32_MAX);
+  ASSERT_NE(downsampleHalfIndex, UINT32_MAX);
+  ASSERT_NE(sceneResolveIndex, UINT32_MAX);
+  EXPECT_LT(taaResolveIndex, taaCopyBackIndex);
+  EXPECT_LT(taaCopyBackIndex, downsampleHalfIndex);
+  EXPECT_LT(taaCopyBackIndex, sceneResolveIndex);
+  EXPECT_EQ(passes[taaResolveIndex].gpuTimingScope,
+            GpuTimingScope::TemporalAAResolve);
+  EXPECT_EQ(passes[taaCopyBackIndex].gpuTimingScope,
+            GpuTimingScope::TemporalAAResolve);
+  EXPECT_TRUE(sameTexture(passes[taaCopyBackIndex].colorTexture,
+                          frameContext.sharedResources.sceneColorTexture));
+  EXPECT_TRUE(sameTexture(passes[sceneResolveIndex].colorTexture,
+                          frameContext.sharedResources.frameColorTexture));
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureFeedsPostTaaSceneColorMipsToTransmission) {
+  std::vector<std::byte> scratchBytes(1024 * 1024);
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeStableBindlessShadowSceneGpuDevice gpu;
+  gpu.latestCompletedGpuTimingReport = GpuTimingReport{
+      .sceneColorDownsampleSourceFrameIndex = 2u,
+      .transmissionSourceFrameIndex = 2u,
+      .sceneColorDownsampleTimeMs = 0.21f,
+      .transmissionTimeMs = 0.37f,
+      .availableScopeMask = kGpuTimingScopeSceneColorDownsampleBit |
+                            kGpuTimingScopeTransmissionBit,
+  };
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<FrameCompositionFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<TransmissionFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_transmission_mips");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTransmissionTriangleObj(objPath);
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_transmission_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "taa_transmission_material";
+  materialRequest.desc.transmissionFactor = 1.0f;
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.transmission.enabled = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 3u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = makeSdsmPerspectiveCamera(30.0f);
+  frameContext.camera.historyValid = true;
+  frameContext.camera.temporalDataValid = true;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const std::span<const RenderPass> passes(
+      compileResult.value().orderedPasses.data(),
+      compileResult.value().orderedPasses.size());
+
+  const uint32_t copyBackIndex =
+      compiledPassIndex(passes, "TAA Copy Back Pass");
+  const uint32_t halfIndex =
+      compiledPassIndex(passes, "Scene Color Downsample Half");
+  const uint32_t quarterIndex =
+      compiledPassIndex(passes, "Scene Color Downsample Quarter");
+  const uint32_t transmissionIndex =
+      compiledPassIndex(passes, "Transmission Pass");
+  ASSERT_NE(copyBackIndex, UINT32_MAX);
+  ASSERT_NE(halfIndex, UINT32_MAX);
+  ASSERT_NE(quarterIndex, UINT32_MAX);
+  ASSERT_NE(transmissionIndex, UINT32_MAX);
+  EXPECT_LT(copyBackIndex, halfIndex);
+  EXPECT_LT(halfIndex, quarterIndex);
+  EXPECT_LT(quarterIndex, transmissionIndex);
+  EXPECT_EQ(passes[halfIndex].gpuTimingScope,
+            GpuTimingScope::SceneColorDownsample);
+  EXPECT_EQ(passes[quarterIndex].gpuTimingScope,
+            GpuTimingScope::SceneColorDownsample);
+  EXPECT_EQ(passes[transmissionIndex].gpuTimingScope,
+            GpuTimingScope::Transmission);
+
+  EXPECT_TRUE(nuri::isValid(frameContext.sharedResources.sceneColorTexture));
+  EXPECT_TRUE(
+      nuri::isValid(frameContext.sharedResources.sceneColorHalfResTexture));
+  EXPECT_TRUE(
+      nuri::isValid(frameContext.sharedResources.sceneColorQuarterResTexture));
+  EXPECT_EQ(
+      frameContext.metrics.antiAliasing.taaPostResolveSceneColorMipPassCount,
+      2u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing
+                  .taaPostResolveSceneColorMipChainGenerated);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing
+                  .taaTransmissionPostResolveSceneColorConsumed);
+  EXPECT_EQ(frameContext.metrics.antiAliasing
+                .taaTransmissionStaleSceneColorFrameCount,
+            0u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing
+                .taaSceneColorDownsampleGpuTimingAvailable,
+            1u);
+  EXPECT_FLOAT_EQ(
+      frameContext.metrics.antiAliasing.taaSceneColorDownsampleGpuTimeMs,
+      0.21f);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaTransmissionGpuTimingAvailable,
+            1u);
+  EXPECT_FLOAT_EQ(frameContext.metrics.antiAliasing.taaTransmissionGpuTimeMs,
+                  0.37f);
+  EXPECT_FLOAT_EQ(
+      frameContext.metrics.antiAliasing.taaTransmissionFlickerEstimate, 0.0f);
+
+  std::filesystem::remove_all(tempDir);
+}
+
+TEST(RenderGraphRendererTest,
+     SceneLightingFrameDataSceneColorIdsMatchPostTaaTextureHandles) {
+  std::vector<std::byte> scratchBytes(1024 * 1024);
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeStableBindlessShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<FrameCompositionFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 5u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = makeSdsmPerspectiveCamera(30.0f);
+  frameContext.camera.historyValid = true;
+  frameContext.camera.temporalDataValid = true;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  ASSERT_TRUE(frameContext.sharedResources.forwardSceneGpuData.has_value());
+  const ForwardSceneGpuData &sceneGpu =
+      *frameContext.sharedResources.forwardSceneGpuData;
+  ASSERT_TRUE(nuri::isValid(sceneGpu.buffer));
+  ForwardSceneFrameData uploaded{};
+  std::span<std::byte> uploadedBytes(reinterpret_cast<std::byte *>(&uploaded),
+                                     sizeof(uploaded));
+  auto readResult = gpu.readBuffer(sceneGpu.buffer, 0u, uploadedBytes);
+  ASSERT_FALSE(readResult.hasError()) << readResult.error();
+
+  EXPECT_EQ(uploaded.sceneColorTexId,
+            gpu.getTextureBindlessIndex(
+                frameContext.sharedResources.sceneColorTexture));
+  EXPECT_EQ(uploaded.sceneColorHalfResTexId,
+            gpu.getTextureBindlessIndex(
+                frameContext.sharedResources.sceneColorHalfResTexture));
+  EXPECT_EQ(uploaded.sceneColorQuarterResTexId,
+            gpu.getTextureBindlessIndex(
+                frameContext.sharedResources.sceneColorQuarterResTexture));
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const std::span<const RenderPass> passes(
+      compileResult.value().orderedPasses.data(),
+      compileResult.value().orderedPasses.size());
+  const uint32_t copyBackIndex =
+      compiledPassIndex(passes, "TAA Copy Back Pass");
+  ASSERT_NE(copyBackIndex, UINT32_MAX);
+  EXPECT_TRUE(sameTexture(passes[copyBackIndex].colorTexture,
+                          frameContext.sharedResources.sceneColorTexture));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing
+                  .taaPostResolveSceneColorMipChainGenerated);
+}
+
+TEST(RenderGraphRendererTest,
+     FrameCompositionRendersPostTaaSceneColorMipDebugViews) {
+  struct DebugMipCase {
+    AntiAliasingDebugView view = AntiAliasingDebugView::None;
+    TextureHandle FrameSharedResources::*texture = nullptr;
+  };
+  const std::array<DebugMipCase, 2> cases{{
+      {.view = AntiAliasingDebugView::TAASceneColorHalfRes,
+       .texture = &FrameSharedResources::sceneColorHalfResTexture},
+      {.view = AntiAliasingDebugView::TAASceneColorQuarterRes,
+       .texture = &FrameSharedResources::sceneColorQuarterResTexture},
+  }};
+
+  for (const DebugMipCase &debugCase : cases) {
+    std::vector<std::byte> scratchBytes(64 * 1024);
+    std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                               scratchBytes.size());
+    FakeStableBindlessShadowSceneGpuDevice gpu;
+    Renderer renderer(gpu, memory);
+    RenderPipeline pipeline(&memory);
+    pipeline.addProvider(
+        std::make_unique<FrameCompositionProvider>(gpu, &memory));
+    pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+        gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+    pipeline.addFeature(std::make_unique<FrameCompositionFeature>(
+        gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+    RenderSettings settings{};
+    settings.antiAliasing.mode = AntiAliasingMode::TAA;
+    settings.antiAliasing.debug.view = debugCase.view;
+
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = 7u;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.historyValid = true;
+    frameContext.camera.temporalDataValid = true;
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+    ASSERT_TRUE(buildResult.value());
+
+    RenderGraphRuntime runtime;
+    auto compileResult = graph.compile(runtime);
+    ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+    const std::span<const RenderPass> passes(
+        compileResult.value().orderedPasses.data(),
+        compileResult.value().orderedPasses.size());
+    const uint32_t resolveIndex =
+        compiledPassIndex(passes, "Scene Resolve Pass");
+    ASSERT_NE(resolveIndex, UINT32_MAX);
+    ASSERT_FALSE(passes[resolveIndex].draws.empty());
+    const DrawItem &draw = passes[resolveIndex].draws.front();
+    ASSERT_EQ(draw.pushConstants.size(), sizeof(CopyPushConstants));
+    CopyPushConstants probe{};
+    std::memcpy(&probe, draw.pushConstants.data(), sizeof(probe));
+    const TextureHandle expectedSource =
+        frameContext.sharedResources.*(debugCase.texture);
+    EXPECT_EQ(probe.sourceTexId, gpu.getTextureBindlessIndex(expectedSource));
+    EXPECT_TRUE(
+        frameContext.metrics.antiAliasing.taaSceneColorMipDebugViewRendered);
+    EXPECT_TRUE(frameContext.metrics.antiAliasing
+                    .taaPostResolveSceneColorMipChainGenerated);
+  }
+}
+
+TEST(RenderGraphRendererTest,
+     TransmissionMipSourceDebugViewPublishesShaderFlagAndMetric) {
+  std::vector<std::byte> scratchBytes(1024 * 1024);
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeStableBindlessShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<FrameCompositionFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<TransmissionFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_transmission_mip_debug");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTransmissionTriangleObj(objPath);
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_transmission_mip_debug_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "taa_transmission_mip_debug_material";
+  materialRequest.desc.transmissionFactor = 1.0f;
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view =
+      AntiAliasingDebugView::TAATransmissionMipSource;
+  settings.transmission.enabled = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 9u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = makeSdsmPerspectiveCamera(30.0f);
+  frameContext.camera.historyValid = true;
+  frameContext.camera.temporalDataValid = true;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  ASSERT_TRUE(frameContext.sharedResources.forwardSceneGpuData.has_value());
+  const ForwardSceneGpuData &sceneGpu =
+      *frameContext.sharedResources.forwardSceneGpuData;
+  ForwardSceneFrameData uploaded{};
+  std::span<std::byte> uploadedBytes(reinterpret_cast<std::byte *>(&uploaded),
+                                     sizeof(uploaded));
+  auto readResult = gpu.readBuffer(sceneGpu.buffer, 0u, uploadedBytes);
+  ASSERT_FALSE(readResult.hasError()) << readResult.error();
+  EXPECT_NE(uploaded.flags & kForwardSceneTransmissionMipDebugProbe, 0u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const std::span<const RenderPass> passes(
+      compileResult.value().orderedPasses.data(),
+      compileResult.value().orderedPasses.size());
+  const uint32_t transmissionIndex =
+      compiledPassIndex(passes, "Transmission Pass");
+  ASSERT_NE(transmissionIndex, UINT32_MAX);
+  EXPECT_EQ(passes[transmissionIndex].gpuTimingScope,
+            GpuTimingScope::Transmission);
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.taaTransmissionMipDebugViewRendered);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaTransmissionMipDebugPassCount,
+            1u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing
+                  .taaTransmissionPostResolveSceneColorConsumed);
+
+  std::filesystem::remove_all(tempDir);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureKeepsDebugOverlayOutsideHistory) {
+  std::array<std::byte, 256 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<FrameCompositionFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  DebugRendererConfig debugConfig{};
+  const std::filesystem::path shaderRoot =
+      std::filesystem::path(PROJECT_SOURCE_DIR) / "assets" / "shaders";
+  debugConfig.vertex = shaderRoot / "grid.vert";
+  debugConfig.fragment = shaderRoot / "grid.frag";
+  pipeline.addFeature(
+      std::make_unique<DebugFeature>(gpu, debugConfig, &memory));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.debug.grid = true;
+  settings.debug.lightIcons = false;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 10u;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera.view = glm::mat4(1.0f);
+  frameContext.camera.proj = glm::mat4(1.0f);
+  frameContext.camera.historyValid = true;
+  frameContext.camera.temporalDataValid = true;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const std::span<const RenderPass> passes(
+      compileResult.value().orderedPasses.data(),
+      compileResult.value().orderedPasses.size());
+  const uint32_t copyBackIndex =
+      compiledPassIndex(passes, "TAA Copy Back Pass");
+  const uint32_t resolveIndex = compiledPassIndex(passes, "Scene Resolve Pass");
+  const uint32_t debugGridIndex = compiledPassIndex(passes, "DebugGrid Pass");
+  ASSERT_NE(copyBackIndex, UINT32_MAX);
+  ASSERT_NE(resolveIndex, UINT32_MAX);
+  ASSERT_NE(debugGridIndex, UINT32_MAX);
+  EXPECT_LT(copyBackIndex, resolveIndex);
+  EXPECT_LT(resolveIndex, debugGridIndex);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaOverlayPostTaaDrawCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing
+                .taaOverlayHistoryContaminationFrameCount,
+            0u);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureTracksTransparentEdgeJitterOutsideHistory) {
+  std::vector<std::byte> scratchBytes(1024 * 1024);
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeStableBindlessShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<FrameCompositionFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+  pipeline.addFeature(std::make_unique<TransparentFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_transparent_jitter");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "transparent.obj";
+  writeTransmissionTriangleObj(objPath);
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_transparent_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "taa_transparent_material";
+  materialRequest.desc.alphaMode = MaterialAlphaMode::Blend;
+  materialRequest.desc.baseColorFactor = glm::vec4(1.0f, 1.0f, 1.0f, 0.45f);
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.transparent.enabled = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 11u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = makeSdsmPerspectiveCamera(30.0f);
+  frameContext.camera.historyValid = true;
+  frameContext.camera.temporalDataValid = true;
+  frameContext.camera.jitterEnabled = true;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const std::span<const RenderPass> passes(
+      compileResult.value().orderedPasses.data(),
+      compileResult.value().orderedPasses.size());
+  const uint32_t copyBackIndex =
+      compiledPassIndex(passes, "TAA Copy Back Pass");
+  const uint32_t transparentIndex =
+      compiledPassIndex(passes, "Transparent Pass");
+  ASSERT_NE(copyBackIndex, UINT32_MAX);
+  ASSERT_NE(transparentIndex, UINT32_MAX);
+  EXPECT_LT(copyBackIndex, transparentIndex);
+  EXPECT_GT(frameContext.metrics.antiAliasing.taaTransparentPostTaaDrawCount,
+            0u);
+  EXPECT_EQ(
+      frameContext.metrics.antiAliasing.taaTransparentPostTaaMeshDrawCount,
+      frameContext.metrics.antiAliasing.taaTransparentPostTaaDrawCount);
+  EXPECT_EQ(frameContext.metrics.antiAliasing
+                .taaTransparentPostTaaContributorDrawCount,
+            0u);
+  EXPECT_EQ(
+      frameContext.metrics.antiAliasing.taaTransparentPostTaaFixedDrawCount,
+      0u);
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.taaTransparentEdgeJitterTracked);
+  EXPECT_FLOAT_EQ(
+      frameContext.metrics.antiAliasing.taaTransparentEdgeJitterEstimate, 1.0f);
+
+  std::filesystem::remove_all(tempDir);
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureAdvancesHistoryForPreviousHistoryDebugView) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::TAAPreviousHistory;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.camera.historyValid = true;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorGraphTexture));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.previousMotionVectorValid);
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.previousMotionVectorGraphPublished);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolvePassCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaCopyBackPassCount, 1u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDebugViewRendered);
+  EXPECT_FALSE(
+      frameContext.metrics.antiAliasing.taaResolvedSceneColorPublished);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDepthRejectionEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaVelocityRejectionEnabled);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  ASSERT_EQ(compileResult.value().orderedPasses.size(), 4u);
+  EXPECT_EQ(compileResult.value().orderedPasses[0].debugLabel,
+            "Temporal AA Motion Vector Clear");
+  EXPECT_EQ(compileResult.value().orderedPasses[1].debugLabel,
+            "Temporal AA Reactive Mask Clear");
+  EXPECT_EQ(compileResult.value().orderedPasses[2].debugLabel,
+            "TAA Resolve Pass");
+  EXPECT_EQ(compileResult.value().orderedPasses[3].debugLabel,
+            "TAA Previous History Debug Pass");
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureRendersPhase5DebugViewsAfterHiddenHistoryResolve) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::TAARejectionMask;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.camera.historyValid = true;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorTexture));
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorGraphTexture));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.previousMotionVectorValid);
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.previousMotionVectorGraphPublished);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolvePassCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaCopyBackPassCount, 2u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDebugViewRendered);
+  EXPECT_FALSE(
+      frameContext.metrics.antiAliasing.taaResolvedSceneColorPublished);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDepthRejectionEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaVelocityRejectionEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaNeighborhoodClampEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaHdrWeightingEnabled);
+  EXPECT_FLOAT_EQ(
+      frameContext.metrics.antiAliasing.taaDepthDiscontinuityThreshold, 0.01f);
+  EXPECT_FLOAT_EQ(
+      frameContext.metrics.antiAliasing.taaVelocityRejectionThreshold, 0.0015f);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &orderedPasses = compileResult.value().orderedPasses;
+  ASSERT_EQ(orderedPasses.size(), 5u);
+  EXPECT_EQ(orderedPasses[0].debugLabel, "Temporal AA Motion Vector Clear");
+  EXPECT_EQ(orderedPasses[1].debugLabel, "Temporal AA Reactive Mask Clear");
+  EXPECT_EQ(orderedPasses[2].debugLabel, "TAA Resolve Pass");
+  EXPECT_EQ(orderedPasses[3].debugLabel, "TAA Rejection Mask Debug Pass");
+  EXPECT_TRUE(sameTexture(orderedPasses[3].colorTexture,
+                          frameContext.sharedResources.frameColorTexture));
+  EXPECT_FALSE(sameTexture(orderedPasses[3].colorTexture,
+                           frameContext.sharedResources.sceneColorTexture));
+  EXPECT_EQ(orderedPasses[4].debugLabel, "TAA Debug Copy Back Pass");
+  EXPECT_TRUE(sameTexture(orderedPasses[4].colorTexture,
+                          frameContext.sharedResources.sceneColorTexture));
+}
+
+TEST(RenderGraphRendererTest, TemporalAAFeatureRendersPixelInspectorDebugView) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::TAAPixelInspector;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.camera.historyValid = true;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorGraphTexture));
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDebugViewRendered);
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.taaPixelInspectorDebugViewRendered);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaNeighborhoodClampEnabled);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolvePassCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaCopyBackPassCount, 2u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const auto &orderedPasses = compileResult.value().orderedPasses;
+  ASSERT_EQ(orderedPasses.size(), 5u);
+  EXPECT_EQ(orderedPasses[0].debugLabel, "Temporal AA Motion Vector Clear");
+  EXPECT_EQ(orderedPasses[1].debugLabel, "Temporal AA Reactive Mask Clear");
+  EXPECT_EQ(orderedPasses[2].debugLabel, "TAA Resolve Pass");
+  EXPECT_EQ(orderedPasses[3].debugLabel, "TAA Pixel Inspector Debug Pass");
+  EXPECT_TRUE(sameTexture(orderedPasses[3].colorTexture,
+                          frameContext.sharedResources.frameColorTexture));
+  EXPECT_FALSE(sameTexture(orderedPasses[3].colorTexture,
+                           frameContext.sharedResources.sceneColorTexture));
+  EXPECT_EQ(orderedPasses[4].debugLabel, "TAA Debug Copy Back Pass");
+  EXPECT_TRUE(sameTexture(orderedPasses[4].colorTexture,
+                          frameContext.sharedResources.sceneColorTexture));
+}
+
+TEST(RenderGraphRendererTest, TemporalAAFeatureRendersResolveDebugViews) {
+  struct DebugViewCase {
+    AntiAliasingDebugView view = AntiAliasingDebugView::None;
+    std::string_view label{};
+  };
+  const std::array<DebugViewCase, 11> cases{{
+      {.view = AntiAliasingDebugView::TAAReactiveMask,
+       .label = "TAA Reactive Mask Debug Pass"},
+      {.view = AntiAliasingDebugView::TAADisocclusionMask,
+       .label = "TAA Disocclusion Mask Debug Pass"},
+      {.view = AntiAliasingDebugView::TAAVelocityDilation,
+       .label = "TAA Velocity Dilation Debug Pass"},
+      {.view = AntiAliasingDebugView::TAAReprojectedHistory,
+       .label = "TAA Reprojected History Debug Pass"},
+      {.view = AntiAliasingDebugView::TAAResolveConfidence,
+       .label = "TAA Resolve Confidence Debug Pass"},
+      {.view = AntiAliasingDebugView::TAAClampDiagnostics,
+       .label = "TAA Clamp Diagnostics Debug Pass"},
+      {.view = AntiAliasingDebugView::TAAPreviousVelocity,
+       .label = "TAA Previous Velocity Debug Pass"},
+      {.view = AntiAliasingDebugView::TAAHdrWeight,
+       .label = "TAA HDR Weight Debug Pass"},
+      {.view = AntiAliasingDebugView::TAAHistoryFilterDelta,
+       .label = "TAA History Filter Delta Debug Pass"},
+      {.view = AntiAliasingDebugView::TAADisocclusionFallback,
+       .label = "TAA Disocclusion Fallback Debug Pass"},
+      {.view = AntiAliasingDebugView::TAASplitCompare,
+       .label = "TAA Split Compare Debug Pass"},
+  }};
+
+  for (const DebugViewCase &debugCase : cases) {
+    std::array<std::byte, 32 * 1024> scratchBytes{};
+    std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                               scratchBytes.size());
+    FakeFullscreenGpuDevice gpu;
+    Renderer renderer(gpu, memory);
+    RenderPipeline pipeline(&memory);
+    pipeline.addProvider(
+        std::make_unique<FrameCompositionProvider>(gpu, &memory));
+    pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+        gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+    RenderSettings settings{};
+    settings.antiAliasing.mode = AntiAliasingMode::TAA;
+    settings.antiAliasing.debug.view = debugCase.view;
+    settings.antiAliasing.debug.taaVelocityDilationMode =
+        TemporalAAVelocityDilationMode::ClosestDepth;
+
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = 1u;
+    frameContext.camera.historyValid = true;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+    ASSERT_TRUE(buildResult.value());
+
+    EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDebugViewRendered);
+    EXPECT_TRUE(frameContext.metrics.antiAliasing.taaReactiveMaskEnabled);
+    EXPECT_TRUE(frameContext.metrics.antiAliasing.taaVelocityDilationEnabled);
+    const bool temporalEvaluationDebug =
+        debugCase.view != AntiAliasingDebugView::TAAReactiveMask &&
+        debugCase.view != AntiAliasingDebugView::TAAPreviousVelocity;
+    EXPECT_EQ(frameContext.metrics.antiAliasing.taaCopyBackPassCount,
+              temporalEvaluationDebug ? 2u : 1u);
+    if (debugCase.view == AntiAliasingDebugView::TAAReactiveMask) {
+      EXPECT_TRUE(
+          frameContext.metrics.antiAliasing.taaReactiveMaskDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::TAADisocclusionMask) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing
+                      .taaDisocclusionMaskDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::TAAVelocityDilation) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing
+                      .taaVelocityDilationDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::TAAPreviousVelocity) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing
+                      .taaPreviousVelocityDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::TAAHdrWeight) {
+      EXPECT_TRUE(
+          frameContext.metrics.antiAliasing.taaHdrWeightDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::TAAHistoryFilterDelta) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing
+                      .taaHistoryFilterDeltaDebugViewRendered);
+    } else if (debugCase.view ==
+               AntiAliasingDebugView::TAADisocclusionFallback) {
+      EXPECT_TRUE(frameContext.metrics.antiAliasing
+                      .taaDisocclusionFallbackDebugViewRendered);
+    } else if (debugCase.view == AntiAliasingDebugView::TAASplitCompare) {
+      EXPECT_TRUE(
+          frameContext.metrics.antiAliasing.taaSplitCompareDebugViewRendered);
+    }
+
+    RenderGraphRuntime runtime;
+    auto compileResult = graph.compile(runtime);
+    ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+    const auto &orderedPasses = compileResult.value().orderedPasses;
+    ASSERT_EQ(orderedPasses.size(), temporalEvaluationDebug ? 5u : 4u);
+    EXPECT_EQ(orderedPasses[3].debugLabel, debugCase.label);
+    if (temporalEvaluationDebug) {
+      EXPECT_TRUE(sameTexture(orderedPasses[3].colorTexture,
+                              frameContext.sharedResources.frameColorTexture));
+      EXPECT_FALSE(sameTexture(orderedPasses[3].colorTexture,
+                               frameContext.sharedResources.sceneColorTexture));
+      EXPECT_EQ(orderedPasses[4].debugLabel, "TAA Debug Copy Back Pass");
+      EXPECT_TRUE(sameTexture(orderedPasses[4].colorTexture,
+                              frameContext.sharedResources.sceneColorTexture));
+    } else {
+      EXPECT_TRUE(sameTexture(orderedPasses[3].colorTexture,
+                              frameContext.sharedResources.sceneColorTexture));
+    }
+  }
+}
+
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureDisplaysCurrentColorWhileAdvancingHistory) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  RenderSettings settings{};
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.debug.view = AntiAliasingDebugView::TAACurrentColor;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.camera.historyValid = true;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_TRUE(
+      isValid(frameContext.sharedResources.previousMotionVectorGraphTexture));
+  EXPECT_TRUE(
+      frameContext.metrics.antiAliasing.previousMotionVectorGraphPublished);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaResolvePassCount, 1u);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.taaCopyBackPassCount, 0u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDebugViewRendered);
+  EXPECT_FALSE(
+      frameContext.metrics.antiAliasing.taaResolvedSceneColorPublished);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaDepthRejectionEnabled);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.taaVelocityRejectionEnabled);
+  EXPECT_TRUE(isValid(frameContext.sharedResources.sceneColorGraphTexture));
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  ASSERT_EQ(compileResult.value().orderedPasses.size(), 3u);
+  EXPECT_EQ(compileResult.value().orderedPasses[0].debugLabel,
+            "Temporal AA Motion Vector Clear");
+  EXPECT_EQ(compileResult.value().orderedPasses[1].debugLabel,
+            "Temporal AA Reactive Mask Clear");
+  EXPECT_EQ(compileResult.value().orderedPasses[2].debugLabel,
+            "TAA Resolve Pass");
 }
 
 TEST(RenderGraphRendererTest,
@@ -1702,6 +5325,57 @@ TEST(RenderGraphRendererTest, ShadowFeatureRegistersDepthPassPlaceholder) {
   EXPECT_EQ(pass->passName, "ShadowDepthPass");
 }
 
+TEST(RenderGraphRendererTest,
+     TemporalAAFeatureRegistersBetweenOpaqueAndFrameComposition) {
+  std::array<std::byte, 32 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeRendererGPUDevice gpu;
+  RenderPipeline pipeline(&memory);
+
+  pipeline.addFeature(std::make_unique<ShadowFeature>(gpu, &memory));
+  pipeline.addFeature(
+      std::make_unique<SkyboxFeature>(gpu, RuntimeSkyboxShaderConfig{}));
+  pipeline.addFeature(
+      std::make_unique<OpaqueFeature>(gpu, OpaqueRendererConfig{}, &memory));
+  pipeline.addFeature(
+      std::make_unique<TemporalAAFeature>(gpu, RuntimeCompositeConfig{}));
+  pipeline.addFeature(
+      std::make_unique<SpatialAAFeature>(gpu, RuntimeCompositeConfig{}));
+  pipeline.addFeature(
+      std::make_unique<FrameCompositionFeature>(gpu, RuntimeCompositeConfig{}));
+
+  ASSERT_EQ(pipeline.passCount(), 10u);
+  const auto skybox = pipeline.passInfo(1u);
+  const auto opaque = pipeline.passInfo(2u);
+  const auto opaquePick = pipeline.passInfo(3u);
+  const auto temporalClear = pipeline.passInfo(4u);
+  const auto temporalReactiveClear = pipeline.passInfo(5u);
+  const auto temporalResolve = pipeline.passInfo(6u);
+  const auto spatial = pipeline.passInfo(7u);
+  const auto composition = pipeline.passInfo(8u);
+  ASSERT_TRUE(skybox.has_value());
+  ASSERT_TRUE(opaque.has_value());
+  ASSERT_TRUE(opaquePick.has_value());
+  ASSERT_TRUE(temporalClear.has_value());
+  ASSERT_TRUE(temporalReactiveClear.has_value());
+  ASSERT_TRUE(temporalResolve.has_value());
+  ASSERT_TRUE(spatial.has_value());
+  ASSERT_TRUE(composition.has_value());
+  EXPECT_EQ(skybox->featureName, "SkyboxFeature");
+  EXPECT_EQ(opaque->featureName, "OpaqueFeature");
+  EXPECT_EQ(opaquePick->featureName, "OpaqueFeature");
+  EXPECT_EQ(temporalClear->featureName, "TemporalAAFeature");
+  EXPECT_EQ(temporalClear->passName, "TemporalAAMotionVectorClearPass");
+  EXPECT_EQ(temporalReactiveClear->featureName, "TemporalAAFeature");
+  EXPECT_EQ(temporalReactiveClear->passName, "TemporalAAReactiveMaskClearPass");
+  EXPECT_EQ(temporalResolve->featureName, "TemporalAAFeature");
+  EXPECT_EQ(temporalResolve->passName, "TemporalAAResolvePass");
+  EXPECT_EQ(spatial->featureName, "SpatialAAFeature");
+  EXPECT_EQ(spatial->passName, "SpatialAAPass");
+  EXPECT_EQ(composition->featureName, "FrameCompositionFeature");
+}
+
 TEST(RenderGraphRendererTest, ShadowFeatureBuildsNoGraphPassesWhenDisabled) {
   std::array<std::byte, 32 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
@@ -1756,7 +5430,7 @@ TEST(RenderGraphRendererTest,
                                              scratchBytes.size());
   FakeRendererGPUDevice gpu;
   gpu.latestCompletedGpuTimingReport = GpuTimingReport{
-      .sourceFrameIndex = 7u,
+      .shadowSourceFrameIndex = 7u,
       .shadowDepthSourceFrameIndex = 7u,
       .shadowSdsmSourceFrameIndex = 6u,
       .shadowTimeMs = 1.75f,
@@ -2646,6 +6320,8 @@ TEST(RenderGraphRendererTest,
   EXPECT_EQ(frameContext.metrics.shadow.filterSampleBudget, 60u);
   EXPECT_EQ(frameContext.metrics.shadow.pcssBlockerSampleBudget, 19u);
   EXPECT_EQ(frameContext.metrics.shadow.pcssFilterSampleBudget, 41u);
+  EXPECT_EQ(frameContext.metrics.shadow.pcssMaxSamplesPerReceiver, 60u);
+  EXPECT_EQ(frameContext.metrics.shadow.pcssMaxSamplesPerBlendedReceiver, 120u);
 
   RenderGraphRuntime runtime;
   auto compileResult = graph.compile(runtime);
@@ -2663,10 +6339,121 @@ TEST(RenderGraphRendererTest,
   ASSERT_EQ(reducePass->preDispatches.size(), 1u);
   EXPECT_EQ(reducePass->preDispatches[0].debugLabel, "Shadow SDSM Reduce");
   ASSERT_EQ(reducePass->preDispatches[0].dependencyBuffers.size(), 1u);
+  ASSERT_EQ(reducePass->preDispatches[0].dependencyTextures.size(), 1u);
 }
 
 TEST(RenderGraphRendererTest,
-     ShadowFeatureHistogramModeAlwaysUsesCpuReductionBackend) {
+     OpaqueFeatureAppendsShadowSdsmHistogramReducePassForGpuHistogram) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("sdsm_gpu_histogram_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "sdsm_gpu_histogram_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  auto materialResult = renderer.resources().acquireMaterial(MaterialRequest{
+      .debugName = "sdsm_gpu_histogram_material",
+  });
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  addDirectionalLightToScene(scene);
+
+  RenderSettings settings{};
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::Histogram;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.sdsmHistogramBucketCount = 16u;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera.view =
+      glm::lookAt(glm::vec3(0.0f, 1.5f, 4.0f), glm::vec3(0.0f, 0.5f, 0.0f),
+                  glm::vec3(0.0f, 1.0f, 0.0f));
+  frameContext.camera.proj =
+      glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 30.0f);
+  frameContext.camera.cameraPos = glm::vec4(0.0f, 1.5f, 4.0f, 1.0f);
+  frameContext.camera.aspectRatio = 1.0f;
+  frameContext.camera.projectionType = ProjectionType::Perspective;
+  frameContext.camera.nearPlane = 0.1f;
+  frameContext.camera.farPlane = 30.0f;
+  frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  EXPECT_TRUE(
+      frameContext.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+  EXPECT_TRUE(
+      nuri::isValid(frameContext.sharedResources.shadowSdsmGpuReducePipeline));
+  EXPECT_EQ(frameContext.metrics.shadow.sdsmComputePassCount, 1u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderPass *reducePass = nullptr;
+  for (const RenderPass &pass : compileResult.value().orderedPasses) {
+    if (pass.debugLabel == "Shadow SDSM Histogram Reduce") {
+      reducePass = &pass;
+      break;
+    }
+  }
+  ASSERT_NE(reducePass, nullptr);
+  EXPECT_EQ(reducePass->executionMode, RenderPassExecutionMode::ComputeOnly);
+  EXPECT_TRUE(reducePass->draws.empty());
+  ASSERT_EQ(reducePass->preDispatches.size(), 1u);
+  EXPECT_EQ(reducePass->preDispatches[0].debugLabel,
+            "Shadow SDSM Histogram Reduce");
+  ASSERT_EQ(reducePass->preDispatches[0].dependencyBuffers.size(), 1u);
+  ASSERT_EQ(reducePass->preDispatches[0].dependencyTextures.size(), 1u);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureHistogramGpuReductionFallsBackToCpuWhenResourcesUnavailable) {
   std::array<std::byte, 64 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
@@ -2711,14 +6498,16 @@ TEST(RenderGraphRendererTest,
   ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
   ASSERT_TRUE(buildResult.value());
   ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+  EXPECT_FALSE(
+      frameContext.sharedResources.shadowSdsmGpuReduceTarget.has_value());
   EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm
                 .requestedReductionBackend,
             ShadowSdsmReductionBackend::Gpu);
   EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm
                 .activeReductionBackend,
             ShadowSdsmReductionBackend::Cpu);
-  EXPECT_FALSE(frameContext.sharedResources.shadowDebugFrameData->sdsm
-                   .reductionFallbackActive);
+  EXPECT_TRUE(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                  .reductionFallbackActive);
 }
 
 TEST(RenderGraphRendererTest,
@@ -2781,12 +6570,6 @@ TEST(RenderGraphRendererTest,
 
 TEST(RenderGraphRendererTest,
      ShadowFeatureGpuSdsmConsumesPreviousFrameBufferAndMatchesCpuPath) {
-  struct GpuSdsmMinMaxResult {
-    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
-    uint32_t sourceFrameIndex = 0u;
-    uint32_t valid = 0u;
-  };
-
   const CameraFrameState camera{
       .projectionType = ProjectionType::Perspective,
       .nearPlane = 0.1f,
@@ -2850,14 +6633,15 @@ TEST(RenderGraphRendererTest,
         return ShadowSdsmDebugFrameData{};
       }
 
-      const GpuSdsmMinMaxResult gpuResult{
+      const GpuSdsmMinMaxResultProbe gpuResult{
           .rawDeviceMinMax = glm::vec2(0.2f, 0.5f),
           .sourceFrameIndex = 0u,
           .valid = 1u,
       };
       auto writeResult = gpu.updateBuffer(
           publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
-          std::as_bytes(std::span<const GpuSdsmMinMaxResult>(&gpuResult, 1u)),
+          std::as_bytes(
+              std::span<const GpuSdsmMinMaxResultProbe>(&gpuResult, 1u)),
           0u);
       EXPECT_FALSE(writeResult.hasError()) << writeResult.error();
     }
@@ -2901,6 +6685,9 @@ TEST(RenderGraphRendererTest,
   ASSERT_EQ(cpuSdsm.status, ShadowSdsmStatus::Active);
   EXPECT_EQ(gpuSdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
   EXPECT_EQ(cpuSdsm.activeReductionBackend, ShadowSdsmReductionBackend::Cpu);
+  expectGpuSdsmResultAvailable(gpuSdsm, 0u, false);
+  EXPECT_EQ(cpuSdsm.gpuResultRingSlotCount, 0u);
+  EXPECT_FALSE(cpuSdsm.gpuReductionResultAvailable);
   EXPECT_NEAR(gpuSdsm.rawLinearMin, cpuSdsm.rawLinearMin, 1.0e-5f);
   EXPECT_NEAR(gpuSdsm.rawLinearMax, cpuSdsm.rawLinearMax, 1.0e-5f);
   EXPECT_NEAR(gpuSdsm.effectiveRangeNear, cpuSdsm.effectiveRangeNear, 1.0e-5f);
@@ -2909,13 +6696,207 @@ TEST(RenderGraphRendererTest,
 }
 
 TEST(RenderGraphRendererTest,
-     ShadowFeatureGpuSdsmUsesNewestCompletedRingResultWhenLatestSlotIsInvalid) {
-  struct GpuSdsmMinMaxResult {
-    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
-    uint32_t sourceFrameIndex = 0u;
-    uint32_t valid = 0u;
+     ShadowFeatureGpuHistogramSdsmConsumesPreviousFrameBuffer) {
+  std::array<std::byte, 128 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 1u, 1u),
+                        "sdsm_histogram_gpu_result");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+
+  const CameraFrameState camera{
+      .projectionType = ProjectionType::Perspective,
+      .nearPlane = 0.1f,
+      .farPlane = 30.0f,
   };
 
+  RenderSettings publishSettings{};
+  publishSettings.shadow.enabled = true;
+  publishSettings.shadow.sdsmMode = ShadowSdsmMode::Histogram;
+  publishSettings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  publishSettings.shadow.cascadeCount = 4u;
+  publishSettings.shadow.sdsmHistogramBucketCount = 8u;
+
+  RenderFrameContext publishFrame{};
+  publishFrame.frameIndex = 0u;
+  publishFrame.scene = &scene;
+  publishFrame.resources = &renderer.resources();
+  publishFrame.settings = &publishSettings;
+  publishFrame.camera = camera;
+
+  RenderGraphBuilder publishGraph(&memory);
+  publishGraph.beginFrame(publishFrame.frameIndex);
+  auto publishResult = pipeline.buildRenderGraph(
+      publishFrame, renderer.resources(), publishGraph);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  ASSERT_TRUE(publishResult.value());
+  ASSERT_TRUE(
+      publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+  ASSERT_TRUE(
+      nuri::isValid(publishFrame.sharedResources.shadowSdsmGpuReducePipeline));
+
+  GpuSdsmHistogramResultProbe gpuResult{};
+  gpuResult.rawDeviceMinMaxLinearMinMax = glm::vec4(0.2f, 0.6f, 2.0f, 24.0f);
+  gpuResult.histogramRangeWeightClear = glm::vec4(2.5f, 22.0f, 4.0f, 0.0f);
+  gpuResult.metadata = glm::uvec4(0u, 1u, 4u, 8u);
+  gpuResult.splitDepths0 = glm::vec4(0.1f, 4.0f, 9.0f, 15.0f);
+  gpuResult.splitDepths1 = glm::vec4(30.0f, 24.0f, 0.0f, 0.0f);
+  gpuResult.bucketWeights[0] = 1.0f;
+  gpuResult.bucketWeights[3] = 2.0f;
+  gpuResult.bucketWeights[7] = 1.0f;
+  auto writeResult = gpu.updateBuffer(
+      publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
+      std::as_bytes(
+          std::span<const GpuSdsmHistogramResultProbe>(&gpuResult, 1u)),
+      0u);
+  ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::Histogram;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.sdsmHistogramBucketCount = 8u;
+  settings.shadow.sdsmTemporalBlend = 0.0f;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 1u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.sceneDepthPyramidTextures[0] =
+      pyramidTextureResult.value();
+  frameContext.sharedResources.sceneDepthPyramidLevelCount = 1u;
+  frameContext.sharedResources.sceneDepthPyramidSourceFrameIndex = 0u;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+
+  const ShadowSdsmDebugFrameData &sdsm =
+      frameContext.sharedResources.shadowDebugFrameData->sdsm;
+  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Active);
+  EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
+  EXPECT_FALSE(sdsm.fixedFallbackActive);
+  EXPECT_FALSE(sdsm.reductionFallbackActive);
+  EXPECT_EQ(sdsm.sourceFrameIndex, 0u);
+  expectGpuSdsmResultAvailable(sdsm, 0u, true);
+  EXPECT_EQ(sdsm.histogramBucketCount, 8u);
+  EXPECT_EQ(sdsm.histogramValidTileCount, 4u);
+  EXPECT_FLOAT_EQ(sdsm.histogramTotalWeight, 4.0f);
+  EXPECT_FLOAT_EQ(sdsm.histogramTrimmedRangeNear, 2.5f);
+  EXPECT_FLOAT_EQ(sdsm.histogramTrimmedRangeFar, 22.0f);
+  EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
+  EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.6f);
+  EXPECT_FLOAT_EQ(sdsm.rawLinearMin, 2.0f);
+  EXPECT_FLOAT_EQ(sdsm.rawLinearMax, 24.0f);
+  EXPECT_FLOAT_EQ(sdsm.histogramBucketWeights[3], 2.0f);
+  EXPECT_FLOAT_EQ(sdsm.histogramSplitDepths[1], 4.0f);
+  EXPECT_FLOAT_EQ(sdsm.histogramSplitDepths[2], 9.0f);
+  EXPECT_FLOAT_EQ(sdsm.histogramSplitDepths[3], 15.0f);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuHistogramSdsmFallsBackToCpuWhenResultIsStale) {
+  std::array<std::byte, 128 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeFullscreenGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeShadowConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  addDirectionalLightToScene(scene);
+
+  auto pyramidTextureResult =
+      gpu.createTexture(makeTransientTextureDesc(Format::RG32_FLOAT, 4u, 4u),
+                        "sdsm_histogram_stale_gpu_cpu_fallback");
+  ASSERT_FALSE(pyramidTextureResult.hasError()) << pyramidTextureResult.error();
+  const TextureHandle pyramidTexture = pyramidTextureResult.value();
+
+  const CameraFrameState camera = makeSdsmPerspectiveCamera(150.0f);
+  std::vector<float> depths(4u * 4u * 2u, 0.0f);
+  for (size_t tile = 0u; tile < depths.size() / 2u; ++tile) {
+    depths[tile * 2u] = deviceDepthForViewDepth(2.0f, camera);
+    depths[tile * 2u + 1u] = deviceDepthForViewDepth(60.0f, camera);
+  }
+  auto seedResult = gpu.seedTextureBytes(
+      pyramidTexture,
+      std::as_bytes(std::span<const float>(depths.data(), depths.size())));
+  ASSERT_FALSE(seedResult.hasError()) << seedResult.error();
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.sdsmMode = ShadowSdsmMode::Histogram;
+  settings.shadow.sdsmReductionBackend = ShadowSdsmReductionBackend::Gpu;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.maxDistance = 150.0f;
+  settings.shadow.sdsmHistogramBucketCount = 8u;
+  settings.shadow.sdsmHistogramTrimLowPercent = 0.0f;
+  settings.shadow.sdsmHistogramTrimHighPercent = 0.0f;
+  settings.shadow.sdsmTemporalBlend = 0.0f;
+
+  RenderFrameContext publishFrame{};
+  publishFrame.frameIndex = 0u;
+  publishFrame.scene = &scene;
+  publishFrame.resources = &renderer.resources();
+  publishFrame.settings = &settings;
+  publishFrame.camera = camera;
+
+  RenderGraphBuilder publishGraph(&memory);
+  publishGraph.beginFrame(publishFrame.frameIndex);
+  auto publishResult = pipeline.buildRenderGraph(
+      publishFrame, renderer.resources(), publishGraph);
+  ASSERT_FALSE(publishResult.hasError()) << publishResult.error();
+  ASSERT_TRUE(publishResult.value());
+  ASSERT_TRUE(
+      publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
+
+  ShadowSdsmDebugFrameData sdsm{};
+  for (uint64_t frameIndex = 1u; frameIndex <= 3u; ++frameIndex) {
+    sdsm = buildShadowSdsmFrame(
+        pipeline, renderer, memory, scene, settings, camera, frameIndex,
+        frameIndex - 1u, std::span<const TextureHandle>(&pyramidTexture, 1u));
+    ASSERT_EQ(sdsm.status, ShadowSdsmStatus::Active);
+    ASSERT_FALSE(sdsm.fixedFallbackActive);
+  }
+
+  EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
+  EXPECT_TRUE(sdsm.reductionFallbackActive);
+  expectNoGpuSdsmResult(sdsm);
+  EXPECT_EQ(sdsm.sourceFrameIndex, 2u);
+  EXPECT_EQ(sdsm.histogramBucketCount, 8u);
+  EXPECT_EQ(sdsm.histogramValidTileCount, 16u);
+  EXPECT_FLOAT_EQ(sdsm.histogramTotalWeight, 16.0f);
+  EXPECT_GT(sdsm.histogramTrimmedRangeFar, sdsm.histogramTrimmedRangeNear);
+  EXPECT_GT(sdsm.smoothedLinearMax, sdsm.smoothedLinearMin);
+  EXPECT_EQ(sdsm.effectiveSplitDepths,
+            expectedHistogramEffectiveSplitDepths(sdsm));
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureGpuSdsmUsesNewestCompletedRingResultWhenLatestSlotIsInvalid) {
   std::array<std::byte, 64 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
@@ -2965,14 +6946,15 @@ TEST(RenderGraphRendererTest,
         publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
 
     if (publishFrameIndex == 0u) {
-      const GpuSdsmMinMaxResult gpuResult{
+      const GpuSdsmMinMaxResultProbe gpuResult{
           .rawDeviceMinMax = glm::vec2(0.2f, 0.5f),
           .sourceFrameIndex = 0u,
           .valid = 1u,
       };
       auto writeResult = gpu.updateBuffer(
           publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
-          std::as_bytes(std::span<const GpuSdsmMinMaxResult>(&gpuResult, 1u)),
+          std::as_bytes(
+              std::span<const GpuSdsmMinMaxResultProbe>(&gpuResult, 1u)),
           0u);
       ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
     }
@@ -3010,12 +6992,13 @@ TEST(RenderGraphRendererTest,
   EXPECT_FALSE(sdsm.fixedFallbackActive);
   EXPECT_FALSE(sdsm.reductionFallbackActive);
   EXPECT_EQ(sdsm.sourceFrameIndex, 0u);
+  expectGpuSdsmResultAvailable(sdsm, 0u, false);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.5f);
 }
 
 TEST(RenderGraphRendererTest,
-     ShadowFeatureGpuSdsmMarksMissingCompletedResultAsStale) {
+     ShadowFeatureGpuSdsmFallsBackToCpuWhenResultIsMissing) {
   std::array<std::byte, 64 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
@@ -3089,9 +7072,11 @@ TEST(RenderGraphRendererTest,
 
   const ShadowSdsmDebugFrameData &sdsm =
       frameContext.sharedResources.shadowDebugFrameData->sdsm;
-  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Stale);
+  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Active);
   EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
-  EXPECT_TRUE(sdsm.fixedFallbackActive);
+  EXPECT_FALSE(sdsm.fixedFallbackActive);
+  EXPECT_FALSE(sdsm.reductionFallbackActive);
+  expectNoGpuSdsmResult(sdsm);
 }
 
 TEST(RenderGraphRendererTest,
@@ -3168,9 +7153,9 @@ TEST(RenderGraphRendererTest,
 
   const ShadowSdsmDebugFrameData &sdsm =
       frameContext.sharedResources.shadowDebugFrameData->sdsm;
-  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Stale);
+  EXPECT_EQ(sdsm.status, ShadowSdsmStatus::Active);
   EXPECT_EQ(sdsm.activeReductionBackend, ShadowSdsmReductionBackend::Gpu);
-  EXPECT_TRUE(sdsm.fixedFallbackActive);
+  EXPECT_FALSE(sdsm.fixedFallbackActive);
   EXPECT_FALSE(sdsm.reductionFallbackActive);
   EXPECT_EQ(countLogEntriesSince(baselineSequence, "GPU SDSM ring diagnostics"),
             0u);
@@ -3280,10 +7265,17 @@ TEST(RenderGraphRendererTest,
       pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
   ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
   ASSERT_TRUE(buildResult.value());
+  ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
+  EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->sdsm.status,
+            ShadowSdsmStatus::Active);
+  EXPECT_FALSE(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                   .fixedFallbackActive);
+  EXPECT_TRUE(frameContext.sharedResources.shadowDebugFrameData->sdsm
+                  .reductionFallbackActive);
 
   EXPECT_EQ(countLogEntriesSince(baselineSequence, "GPU SDSM ring diagnostics"),
             1u);
-  EXPECT_EQ(countLogEntriesSince(baselineSequence, "SDSM source warning"), 1u);
+  EXPECT_EQ(countLogEntriesSince(baselineSequence, "SDSM source warning"), 0u);
   EXPECT_EQ(countLogEntriesSince(
                 baselineSequence,
                 "requested GPU SDSM reduction fell back to CPU path"),
@@ -3349,12 +7341,6 @@ TEST(RenderGraphRendererTest,
 
 TEST(RenderGraphRendererTest,
      ShadowFeatureGpuSdsmReadsPublishedResultBeyondSwapchainDepth) {
-  struct GpuSdsmMinMaxResult {
-    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
-    uint32_t sourceFrameIndex = 0u;
-    uint32_t valid = 0u;
-  };
-
   std::array<std::byte, 512 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
@@ -3405,14 +7391,15 @@ TEST(RenderGraphRendererTest,
         publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
 
     if (publishFrameIndex == 10u) {
-      const GpuSdsmMinMaxResult gpuResult{
+      const GpuSdsmMinMaxResultProbe gpuResult{
           .rawDeviceMinMax = glm::vec2(0.2f, 0.5f),
           .sourceFrameIndex = 10u,
           .valid = 1u,
       };
       auto writeResult = gpu.updateBuffer(
           publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
-          std::as_bytes(std::span<const GpuSdsmMinMaxResult>(&gpuResult, 1u)),
+          std::as_bytes(
+              std::span<const GpuSdsmMinMaxResultProbe>(&gpuResult, 1u)),
           0u);
       ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
     }
@@ -3450,18 +7437,13 @@ TEST(RenderGraphRendererTest,
   EXPECT_FALSE(sdsm.fixedFallbackActive);
   EXPECT_FALSE(sdsm.reductionFallbackActive);
   EXPECT_EQ(sdsm.sourceFrameIndex, 10u);
+  expectGpuSdsmResultAvailable(sdsm, 10u, false);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.5f);
 }
 
 TEST(RenderGraphRendererTest,
      ShadowFeatureGpuSdsmIgnoresRingResultWithMismatchedSourceFrameIndex) {
-  struct GpuSdsmMinMaxResult {
-    glm::vec2 rawDeviceMinMax{1.0f, 1.0f};
-    uint32_t sourceFrameIndex = 0u;
-    uint32_t valid = 0u;
-  };
-
   std::array<std::byte, 64 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
@@ -3510,7 +7492,7 @@ TEST(RenderGraphRendererTest,
     ASSERT_TRUE(
         publishFrame.sharedResources.shadowSdsmGpuReduceTarget.has_value());
 
-    const GpuSdsmMinMaxResult gpuResult{
+    const GpuSdsmMinMaxResultProbe gpuResult{
         .rawDeviceMinMax = publishFrameIndex == 0u ? glm::vec2(0.2f, 0.5f)
                                                    : glm::vec2(0.8f, 0.9f),
         .sourceFrameIndex = 0u,
@@ -3518,7 +7500,8 @@ TEST(RenderGraphRendererTest,
     };
     auto writeResult = gpu.updateBuffer(
         publishFrame.sharedResources.shadowSdsmGpuReduceTarget->buffer,
-        std::as_bytes(std::span<const GpuSdsmMinMaxResult>(&gpuResult, 1u)),
+        std::as_bytes(
+            std::span<const GpuSdsmMinMaxResultProbe>(&gpuResult, 1u)),
         0u);
     ASSERT_FALSE(writeResult.hasError()) << writeResult.error();
   }
@@ -3555,6 +7538,7 @@ TEST(RenderGraphRendererTest,
   EXPECT_FALSE(sdsm.fixedFallbackActive);
   EXPECT_FALSE(sdsm.reductionFallbackActive);
   EXPECT_EQ(sdsm.sourceFrameIndex, 0u);
+  expectGpuSdsmResultAvailable(sdsm, 0u, false);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMin, 0.2f);
   EXPECT_FLOAT_EQ(sdsm.rawDeviceMax, 0.5f);
 }
@@ -6355,6 +10339,7 @@ TEST(RenderGraphRendererTest,
   settings.shadow.cascadeCount = 4u;
   settings.shadow.shadowMapSize = 512u;
   settings.shadow.maxDistance = 25.0f;
+  settings.shadow.maxDistanceFadeFraction = 0.20f;
   settings.shadow.debug.enableCascadeCasterCulling = false;
   settings.shadow.cascadeBlendFraction = 0.125f;
   settings.shadow.normalBias = 0.25f;
@@ -6407,7 +10392,11 @@ TEST(RenderGraphRendererTest,
       std::as_writable_bytes(std::span<ShadowFrameGpuData>(&shadowFrame, 1u)));
   ASSERT_FALSE(shadowFrameReadResult.hasError())
       << shadowFrameReadResult.error();
-  EXPECT_FLOAT_EQ(shadowFrame.fadeParams.x, frameContext.camera.nearPlane);
+  const float expectedFadeEnd = settings.shadow.maxDistance;
+  const float expectedFadeStart =
+      expectedFadeEnd - (expectedFadeEnd - frameContext.camera.nearPlane) *
+                            settings.shadow.maxDistanceFadeFraction;
+  EXPECT_NEAR(shadowFrame.fadeParams.x, expectedFadeStart, 1.0e-4f);
   EXPECT_NEAR(shadowFrame.fadeParams.y, settings.shadow.maxDistance, 1.0e-4f);
   EXPECT_FLOAT_EQ(shadowFrame.fadeParams.z,
                   settings.shadow.cascadeBlendFraction);
@@ -6443,20 +10432,40 @@ TEST(RenderGraphRendererTest,
                   settings.shadow.normalBias);
   EXPECT_FLOAT_EQ(shadowFrame.cascades[3].biasParams.z,
                   settings.shadow.normalBias);
+  EXPECT_EQ(shadowFrame.cascades[0].textureSampler.w,
+            settings.shadow.shadowMapSize);
+  EXPECT_EQ(shadowFrame.cascades[3].textureSampler.w,
+            settings.shadow.shadowMapSize);
   EXPECT_FLOAT_EQ(shadowFrame.cascades[0].pcssParams.y,
                   settings.shadow.pcssSearchRadiusClampTexels);
   EXPECT_FLOAT_EQ(shadowFrame.cascades[0].pcssParams.z,
                   settings.shadow.pcssFilterRadiusClampTexels);
   EXPECT_GT(shadowFrame.cascades[0].pcssParams.x, 0.0f);
+  EXPECT_LE(shadowFrame.cascades[0].pcssParams.x,
+            (shadowFrame.cascades[0].splitDepthTexelSize.y -
+             shadowFrame.cascades[0].splitDepthTexelSize.x) *
+                    2.0f +
+                1.0e-4f);
   EXPECT_FLOAT_EQ(shadowFrame.cascades[3].pcssParams.y,
                   settings.shadow.pcssSearchRadiusClampTexels);
   EXPECT_FLOAT_EQ(shadowFrame.cascades[3].pcssParams.z,
                   settings.shadow.pcssFilterRadiusClampTexels);
   EXPECT_GT(shadowFrame.cascades[3].pcssParams.x, 0.0f);
+  EXPECT_LE(shadowFrame.cascades[3].pcssParams.x,
+            (shadowFrame.cascades[3].splitDepthTexelSize.y -
+             shadowFrame.cascades[3].splitDepthTexelSize.x) *
+                    2.0f +
+                1.0e-4f);
   ASSERT_TRUE(frameContext.sharedResources.shadowDebugFrameData.has_value());
   ASSERT_TRUE(frameContext.sharedResources.selectedShadowLightId.has_value());
   EXPECT_EQ(frameContext.sharedResources.shadowDebugFrameData->cascadeCount,
             4u);
+  EXPECT_NEAR(
+      frameContext.sharedResources.shadowDebugFrameData->maxDistanceFadeStart,
+      expectedFadeStart, 1.0e-4f);
+  EXPECT_NEAR(
+      frameContext.sharedResources.shadowDebugFrameData->maxDistanceFadeEnd,
+      expectedFadeEnd, 1.0e-4f);
   EXPECT_GT(
       frameContext.sharedResources.shadowDebugFrameData->cascades[0].splitFar,
       frameContext.camera.nearPlane);
@@ -7107,7 +11116,7 @@ TEST(RenderGraphRendererTest,
 
   const glm::vec3 guardBandedMotion = glm::vec3(
       glm::inverse(baseCascade.lightView) *
-      glm::vec4(baseCascade.texelWorldSize * 2000.0f, 0.0f, 0.0f, 0.0f));
+      glm::vec4(baseCascade.texelWorldSize * 96.0f, 0.0f, 0.0f, 0.0f));
   const RenderFrameContext movedFrame = buildFrame(
       71u, baseEye + guardBandedMotion, baseTarget + guardBandedMotion);
 
@@ -7130,40 +11139,157 @@ TEST(RenderGraphRendererTest,
 
   const glm::vec3 fastStep = glm::vec3(
       glm::inverse(baseCascade.lightView) *
-      glm::vec4(baseCascade.texelWorldSize * 2600.0f, 0.0f, 0.0f, 0.0f));
+      glm::vec4(baseCascade.texelWorldSize * 512.0f, 0.0f, 0.0f, 0.0f));
   const RenderFrameContext fastFrame =
       buildFrame(72u, baseEye + guardBandedMotion + fastStep,
                  baseTarget + guardBandedMotion + fastStep);
   EXPECT_EQ(fastFrame.metrics.shadow.staticCacheReused, 1u);
   EXPECT_EQ(fastFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
   EXPECT_LT(fastFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_GT(fastFrame.metrics.shadow.staticOnlyReuseMissAdaptiveRefreshCount,
+            0u);
+  EXPECT_EQ(fastFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount,
+            0u);
   ASSERT_TRUE(fastFrame.sharedResources.shadowDebugFrameData.has_value());
   const ShadowCascadeDebugFrameData &fastCascade =
       fastFrame.sharedResources.shadowDebugFrameData->cascades[0];
-  EXPECT_LE(fastCascade.texelWorldSize, baseCascade.texelWorldSize * 1.35f);
+  EXPECT_EQ(
+      fastCascade.staticOnlyReuseStatus,
+      ShadowCascadeDebugFrameData::StaticOnlyReuseStatus::AdaptiveRefresh);
+  EXPECT_TRUE(fastCascade.staticOnlyReuseAdaptiveRefresh);
+  EXPECT_LE(baseCascade.texelWorldSize, fastCascade.texelWorldSize * 1.15f);
 
   const RenderFrameContext fastNextFrame =
       buildFrame(73u, baseEye + guardBandedMotion + fastStep * 2.0f,
                  baseTarget + guardBandedMotion + fastStep * 2.0f);
   EXPECT_EQ(fastNextFrame.metrics.shadow.staticCacheReused, 1u);
   EXPECT_EQ(fastNextFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
-  EXPECT_EQ(fastNextFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_LT(fastNextFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_GT(
+      fastNextFrame.metrics.shadow.staticOnlyReuseMissAdaptiveRefreshCount, 0u);
   EXPECT_EQ(
       fastNextFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount,
       0u);
-  EXPECT_EQ(fastNextFrame.metrics.shadow.totalDraws, 0u);
-  EXPECT_EQ(fastNextFrame.metrics.shadow.totalIndexCountEstimate, 0u);
+  EXPECT_GT(fastNextFrame.metrics.shadow.totalDraws, 0u);
+  EXPECT_GT(fastNextFrame.metrics.shadow.totalIndexCountEstimate, 0u);
   ASSERT_TRUE(fastNextFrame.sharedResources.shadowDebugFrameData.has_value());
   const ShadowCascadeDebugFrameData &fastNextCascade =
       fastNextFrame.sharedResources.shadowDebugFrameData->cascades[0];
-  EXPECT_NEAR(fastNextCascade.texelWorldSize, fastCascade.texelWorldSize,
-              1.0e-6f);
-  for (int c = 0; c < 4; ++c) {
-    for (int r = 0; r < 4; ++r) {
-      EXPECT_NEAR(fastNextCascade.lightViewProj[c][r],
-                  fastCascade.lightViewProj[c][r], 1.0e-6f);
-    }
-  }
+  EXPECT_LE(fastNextCascade.texelWorldSize, fastCascade.texelWorldSize * 1.05f);
+}
+
+TEST(RenderGraphRendererTest,
+     ShadowFeatureReusesStaticOnlyShadowCascadesAcrossSplitDepthDrift) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<ShadowFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("shadow_static_only_reuse_split_drift_scene");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "shadow_triangle.obj";
+  writeTextFile(objPath, "o ShadowTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "shadow_static_only_reuse_split_drift_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "shadow_static_only_reuse_split_drift_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+
+  LightDesc light{};
+  light.type = LightType::Directional;
+  light.intensity = 6.0f;
+  auto addLightResult = scene.graph().addLight(scene.graph().rootNode(), light);
+  ASSERT_FALSE(addLightResult.hasError()) << addLightResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.shadow.enabled = true;
+  settings.shadow.cascadeCount = 4u;
+  settings.shadow.shadowMapSize = 2048u;
+  settings.shadow.maxDistance = 150.0f;
+  settings.shadow.debug.enableCascadeCasterCulling = false;
+
+  const glm::vec3 eye(0.0f, 1.5f, 4.0f);
+  const glm::vec3 target(0.0f, 0.5f, 0.0f);
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  const auto buildFrame = [&](uint64_t frameIndex) {
+    RenderFrameContext frameContext{};
+    frameContext.frameIndex = frameIndex;
+    frameContext.scene = &scene;
+    frameContext.resources = &renderer.resources();
+    frameContext.settings = &settings;
+    frameContext.camera.view = glm::lookAt(eye, target, up);
+    frameContext.camera.proj =
+        glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 180.0f);
+    frameContext.camera.cameraPos = glm::vec4(eye, 1.0f);
+    frameContext.camera.aspectRatio = 1.0f;
+    frameContext.camera.projectionType = ProjectionType::Perspective;
+    frameContext.camera.nearPlane = 0.1f;
+    frameContext.camera.farPlane = 180.0f;
+    frameContext.camera.fovYRadians = glm::radians(60.0f);
+
+    RenderGraphBuilder graph(&memory);
+    graph.beginFrame(frameContext.frameIndex);
+    auto buildResult =
+        pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+    EXPECT_FALSE(buildResult.hasError()) << buildResult.error();
+    EXPECT_TRUE(buildResult.value());
+    return frameContext;
+  };
+
+  const RenderFrameContext firstFrame = buildFrame(80u);
+  ASSERT_TRUE(firstFrame.sharedResources.shadowDebugFrameData.has_value());
+  const float firstCascadeFar =
+      firstFrame.sharedResources.shadowDebugFrameData->cascades[0].splitFar;
+
+  settings.shadow.maxDistance = 149.0f;
+  const RenderFrameContext splitDriftFrame = buildFrame(81u);
+
+  ASSERT_TRUE(splitDriftFrame.sharedResources.shadowDebugFrameData.has_value());
+  const ShadowDebugFrameData &debug =
+      *splitDriftFrame.sharedResources.shadowDebugFrameData;
+  EXPECT_EQ(splitDriftFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(splitDriftFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
+  EXPECT_EQ(splitDriftFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_EQ(
+      splitDriftFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount,
+      0u);
+  EXPECT_EQ(splitDriftFrame.metrics.shadow.totalDraws, 0u);
+  EXPECT_LT(debug.cascades[0].splitFar, firstCascadeFar);
+  EXPECT_NEAR(debug.cascades[0].splitFar, debug.sdsm.effectiveSplitDepths[1],
+              1.0e-5f);
 }
 
 TEST(RenderGraphRendererTest,
@@ -7268,7 +11394,11 @@ TEST(RenderGraphRendererTest,
   EXPECT_EQ(movedFrame.metrics.shadow.staticOnlyCandidateCount, 4u);
   EXPECT_EQ(movedFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 0u);
   EXPECT_EQ(
-      movedFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount, 4u);
+      movedFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount +
+          movedFrame.metrics.shadow.staticOnlyReuseMissAdaptiveRefreshCount,
+      4u);
+  EXPECT_GT(
+      movedFrame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount, 0u);
   ASSERT_TRUE(movedFrame.sharedResources.shadowDebugFrameData.has_value());
   const ShadowCascadeDebugFrameData &cascade =
       movedFrame.sharedResources.shadowDebugFrameData->cascades[0];
@@ -7493,6 +11623,8 @@ TEST(RenderGraphRendererTest,
   settings.shadow.debug.enableCascadeCasterCulling = true;
   settings.shadow.filterMode = ShadowFilterMode::Hard;
   settings.shadow.pcssLightRadiusScale = 0.05f;
+  settings.shadow.normalBias = 0.0f;
+  settings.shadow.maxDistanceFadeFraction = 0.10f;
 
   const auto buildFrame = [&](uint64_t frameIndex)
       -> std::pair<RenderFrameContext, RenderGraphCompileResult> {
@@ -7568,6 +11700,24 @@ TEST(RenderGraphRendererTest,
     EXPECT_TRUE(pass.draws.empty());
   }
   EXPECT_EQ(secondShadowPassCount, 4u);
+
+  settings.shadow.normalBias = 1.25f;
+  settings.shadow.maxDistanceFadeFraction = 0.35f;
+  const auto [thirdFrame, thirdCompiled] = buildFrame(102u);
+  EXPECT_EQ(thirdFrame.metrics.shadow.staticCacheReused, 1u);
+  EXPECT_EQ(thirdFrame.metrics.shadow.reusedStaticOnlyCascadeCount, 4u);
+  EXPECT_EQ(thirdFrame.metrics.shadow.totalDraws, 0u);
+  uint32_t thirdShadowPassCount = 0u;
+  for (const RenderPass &pass : thirdCompiled.orderedPasses) {
+    if (!std::string_view(pass.debugLabel)
+             .starts_with("ShadowDepthPass.Cascade")) {
+      continue;
+    }
+    ++thirdShadowPassCount;
+    EXPECT_EQ(pass.depth.loadOp, LoadOp::Load);
+    EXPECT_TRUE(pass.draws.empty());
+  }
+  EXPECT_EQ(thirdShadowPassCount, 4u);
 }
 
 TEST(RenderGraphRendererTest,
@@ -7793,6 +11943,20 @@ TEST(RenderGraphRendererTest, ShadowFeatureUsesAlphaPipelineForMaskedCasters) {
       std::find(gpu.createdRenderPipelineNames.begin(),
                 gpu.createdRenderPipelineNames.end(), "shadow_depth_alpha");
   ASSERT_NE(alphaPipelineIt, gpu.createdRenderPipelineNames.end());
+  auto opaquePipelineIt =
+      std::find(gpu.createdRenderPipelineNames.begin(),
+                gpu.createdRenderPipelineNames.end(), "shadow_depth_opaque");
+  ASSERT_NE(opaquePipelineIt, gpu.createdRenderPipelineNames.end());
+  const size_t opaquePipelineDescIndex = static_cast<size_t>(
+      std::distance(gpu.createdRenderPipelineNames.begin(), opaquePipelineIt));
+  const size_t alphaPipelineDescIndex = static_cast<size_t>(
+      std::distance(gpu.createdRenderPipelineNames.begin(), alphaPipelineIt));
+  ASSERT_LT(opaquePipelineDescIndex, gpu.createdRenderPipelineDescs.size());
+  ASSERT_LT(alphaPipelineDescIndex, gpu.createdRenderPipelineDescs.size());
+  EXPECT_NE(gpu.createdRenderPipelineDescs[opaquePipelineDescIndex]
+                .vertexShader.index,
+            gpu.createdRenderPipelineDescs[alphaPipelineDescIndex]
+                .vertexShader.index);
   const uint32_t alphaPipelineIndex =
       static_cast<uint32_t>(std::distance(
           gpu.createdRenderPipelineNames.begin(), alphaPipelineIt)) +
@@ -8138,6 +12302,14 @@ TEST(RenderGraphRendererTest, ShadowFeatureUsesRepeatableCameraMaxDistanceFit) {
   EXPECT_NEAR(cascade.splitNear, frameContext.camera.nearPlane, 1.0e-5f);
   EXPECT_NEAR(cascade.splitFar, settings.shadow.maxDistance, 1.0e-5f);
   EXPECT_GT(cascade.texelWorldSize, 0.0f);
+  EXPECT_FLOAT_EQ(frameContext.metrics.shadow.minCascadeTexelWorldSize,
+                  cascade.texelWorldSize);
+  EXPECT_FLOAT_EQ(frameContext.metrics.shadow.averageCascadeTexelWorldSize,
+                  cascade.texelWorldSize);
+  EXPECT_FLOAT_EQ(frameContext.metrics.shadow.maxCascadeTexelWorldSize,
+                  cascade.texelWorldSize);
+  EXPECT_FLOAT_EQ(frameContext.metrics.shadow.farCascadeTexelWorldSize,
+                  cascade.texelWorldSize);
 }
 
 TEST(RenderGraphRendererTest,
