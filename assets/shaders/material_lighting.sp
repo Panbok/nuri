@@ -773,6 +773,12 @@ DirectionalShadowFilterResult directionalShadowBlendFactorFromContext(
     readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
     uint filterMode, float lightAngularRadiusRadians) {
   if (filterMode == kShadowFilterModePCSS) {
+    // directionalShadowBlendFactorFromContext deliberately clamps
+    // directionalShadowPcssBlockerSampleCount to 8 and
+    // directionalShadowPcssFilterSampleCount to 16 before
+    // pcssDirectionalShadowFactor for blend work. This can cause subtle
+    // quality discontinuities when the primary cascade uses higher counts;
+    // raise 8/16 here only after accepting the performance cost.
     const int blendBlockerSamples =
         min(directionalShadowPcssBlockerSampleCount(shadow), 8);
     const int blendFilterSamples =

@@ -1939,7 +1939,12 @@ Result<bool, std::string> ShadowRenderer::createSdsmHistogramReduceShaders() {
 
 Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
   const Format targetDepthFormat = sanitizeShadowDepthFormat(depthFormat);
-  destroyShadowDepthPipelineState();
+  const auto destroyPipelineIfValid = [this](RenderPipelineHandle pipeline) {
+    if (nuri::isValid(pipeline)) {
+      gpu_.destroyRenderPipeline(pipeline);
+    }
+  };
+
   auto shadowResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowOpaqueVertexShader_, depthFragmentShader_,
                               CullMode::Back, targetDepthFormat),
@@ -1947,47 +1952,59 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
   if (shadowResult.hasError()) {
     return Result<bool, std::string>::makeError(shadowResult.error());
   }
-  shadowPipelineHandle_ = shadowResult.value();
+  RenderPipelineHandle newShadowPipeline = shadowResult.value();
 
   auto doubleSidedResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowOpaqueVertexShader_, depthFragmentShader_,
                               CullMode::None, targetDepthFormat),
       "shadow_depth_opaque_double_sided");
   if (doubleSidedResult.hasError()) {
-    gpu_.destroyRenderPipeline(shadowPipelineHandle_);
-    shadowPipelineHandle_ = {};
+    destroyPipelineIfValid(newShadowPipeline);
     return Result<bool, std::string>::makeError(doubleSidedResult.error());
   }
-  shadowDoubleSidedPipelineHandle_ = doubleSidedResult.value();
+  RenderPipelineHandle newShadowDoubleSidedPipeline = doubleSidedResult.value();
 
   auto alphaResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowVertexShader_, depthAlphaFragmentShader_,
                               CullMode::Back, targetDepthFormat),
       "shadow_depth_alpha");
   if (alphaResult.hasError()) {
-    gpu_.destroyRenderPipeline(shadowDoubleSidedPipelineHandle_);
-    gpu_.destroyRenderPipeline(shadowPipelineHandle_);
-    shadowDoubleSidedPipelineHandle_ = {};
-    shadowPipelineHandle_ = {};
+    destroyPipelineIfValid(newShadowDoubleSidedPipeline);
+    destroyPipelineIfValid(newShadowPipeline);
     return Result<bool, std::string>::makeError(alphaResult.error());
   }
-  shadowAlphaPipelineHandle_ = alphaResult.value();
+  RenderPipelineHandle newShadowAlphaPipeline = alphaResult.value();
 
   auto alphaDoubleSidedResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowVertexShader_, depthAlphaFragmentShader_,
                               CullMode::None, targetDepthFormat),
       "shadow_depth_alpha_double_sided");
   if (alphaDoubleSidedResult.hasError()) {
-    gpu_.destroyRenderPipeline(shadowAlphaPipelineHandle_);
-    gpu_.destroyRenderPipeline(shadowDoubleSidedPipelineHandle_);
-    gpu_.destroyRenderPipeline(shadowPipelineHandle_);
-    shadowAlphaPipelineHandle_ = {};
-    shadowDoubleSidedPipelineHandle_ = {};
-    shadowPipelineHandle_ = {};
+    destroyPipelineIfValid(newShadowAlphaPipeline);
+    destroyPipelineIfValid(newShadowDoubleSidedPipeline);
+    destroyPipelineIfValid(newShadowPipeline);
     return Result<bool, std::string>::makeError(alphaDoubleSidedResult.error());
   }
-  shadowAlphaDoubleSidedPipelineHandle_ = alphaDoubleSidedResult.value();
+  RenderPipelineHandle newShadowAlphaDoubleSidedPipeline =
+      alphaDoubleSidedResult.value();
+
+  const RenderPipelineHandle oldShadowPipeline = shadowPipelineHandle_;
+  const RenderPipelineHandle oldShadowDoubleSidedPipeline =
+      shadowDoubleSidedPipelineHandle_;
+  const RenderPipelineHandle oldShadowAlphaPipeline =
+      shadowAlphaPipelineHandle_;
+  const RenderPipelineHandle oldShadowAlphaDoubleSidedPipeline =
+      shadowAlphaDoubleSidedPipelineHandle_;
+  shadowPipelineHandle_ = newShadowPipeline;
+  shadowDoubleSidedPipelineHandle_ = newShadowDoubleSidedPipeline;
+  shadowAlphaPipelineHandle_ = newShadowAlphaPipeline;
+  shadowAlphaDoubleSidedPipelineHandle_ = newShadowAlphaDoubleSidedPipeline;
   shadowDepthPipelineFormat_ = targetDepthFormat;
+
+  destroyPipelineIfValid(oldShadowDoubleSidedPipeline);
+  destroyPipelineIfValid(oldShadowAlphaDoubleSidedPipeline);
+  destroyPipelineIfValid(oldShadowAlphaPipeline);
+  destroyPipelineIfValid(oldShadowPipeline);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2233,8 +2250,12 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
   const SamplerHandle newRawDepthSampler = samplerResult.value();
 
   SamplerDesc compareSamplerDesc = rawSamplerDesc;
-  compareSamplerDesc.minFilter = SamplerFilter::Linear;
-  compareSamplerDesc.magFilter = SamplerFilter::Linear;
+  const SamplerFilter compareSamplerFilter =
+      gpu_.supportsSampledImageLinearFiltering(targetDepthFormat)
+          ? SamplerFilter::Linear
+          : SamplerFilter::Nearest;
+  compareSamplerDesc.minFilter = compareSamplerFilter;
+  compareSamplerDesc.magFilter = compareSamplerFilter;
   compareSamplerDesc.depthCompareEnabled = true;
   compareSamplerDesc.depthCompareOp = CompareOp::LessEqual;
   auto compareSamplerResult =

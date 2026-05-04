@@ -2,6 +2,7 @@
 
 #include "nuri/gfx/gpu_types.h"
 
+#include <array>
 #include <cstddef>
 #include <limits>
 #include <span>
@@ -144,62 +145,62 @@ struct GpuTimingReport {
   return (report.availableScopeMask & gpuTimingScopeToBit(scope)) != 0u;
 }
 
+struct GpuTimingScopeMergeDesc {
+  GpuTimingScope scope = GpuTimingScope::None;
+  float GpuTimingReport::*timeMs = nullptr;
+  uint64_t GpuTimingReport::*sourceFrameIndex = nullptr;
+  uint32_t bit = 0u;
+};
+
+inline void mergeGpuTimingReportScope(GpuTimingReport &dst,
+                                      const GpuTimingReport &src,
+                                      GpuTimingScopeMergeDesc desc) {
+  if (!hasGpuTimingScope(src, desc.scope)) {
+    return;
+  }
+  dst.*desc.timeMs = src.*desc.timeMs;
+  dst.*desc.sourceFrameIndex = src.*desc.sourceFrameIndex;
+  dst.availableScopeMask |= desc.bit;
+}
+
 inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
                                        const GpuTimingReport &src) {
-  if (hasGpuTimingScope(src, GpuTimingScope::Shadow)) {
-    dst.shadowTimeMs = src.shadowTimeMs;
-    dst.shadowSourceFrameIndex = src.shadowSourceFrameIndex;
-    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::Shadow);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::ShadowDepth)) {
-    dst.shadowDepthTimeMs = src.shadowDepthTimeMs;
-    dst.shadowDepthSourceFrameIndex = src.shadowDepthSourceFrameIndex;
-    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::ShadowDepth);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::ShadowSdsm)) {
-    dst.shadowSdsmTimeMs = src.shadowSdsmTimeMs;
-    dst.shadowSdsmSourceFrameIndex = src.shadowSdsmSourceFrameIndex;
-    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::SceneColorDownsample)) {
-    dst.sceneColorDownsampleTimeMs = src.sceneColorDownsampleTimeMs;
-    dst.sceneColorDownsampleSourceFrameIndex =
-        src.sceneColorDownsampleSourceFrameIndex;
-    dst.availableScopeMask |=
-        gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::Transmission)) {
-    dst.transmissionTimeMs = src.transmissionTimeMs;
-    dst.transmissionSourceFrameIndex = src.transmissionSourceFrameIndex;
-    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::Transmission);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::TemporalAAResolve)) {
-    dst.temporalAAResolveTimeMs = src.temporalAAResolveTimeMs;
-    dst.temporalAAResolveSourceFrameIndex =
-        src.temporalAAResolveSourceFrameIndex;
-    dst.availableScopeMask |=
-        gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::TemporalAADebug)) {
-    dst.temporalAADebugTimeMs = src.temporalAADebugTimeMs;
-    dst.temporalAADebugSourceFrameIndex = src.temporalAADebugSourceFrameIndex;
-    dst.availableScopeMask |=
-        gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::SpatialAA)) {
-    dst.spatialAATimeMs = src.spatialAATimeMs;
-    dst.spatialAASourceFrameIndex = src.spatialAASourceFrameIndex;
-    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::Opaque)) {
-    dst.opaqueTimeMs = src.opaqueTimeMs;
-    dst.opaqueSourceFrameIndex = src.opaqueSourceFrameIndex;
-    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::Opaque);
-  }
-  if (hasGpuTimingScope(src, GpuTimingScope::MsaaResolve)) {
-    dst.msaaResolveTimeMs = src.msaaResolveTimeMs;
-    dst.msaaResolveSourceFrameIndex = src.msaaResolveSourceFrameIndex;
-    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
+  static constexpr std::array<GpuTimingScopeMergeDesc, 10> kScopeDescs{{
+      {GpuTimingScope::Shadow, &GpuTimingReport::shadowTimeMs,
+       &GpuTimingReport::shadowSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::Shadow)},
+      {GpuTimingScope::ShadowDepth, &GpuTimingReport::shadowDepthTimeMs,
+       &GpuTimingReport::shadowDepthSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::ShadowDepth)},
+      {GpuTimingScope::ShadowSdsm, &GpuTimingReport::shadowSdsmTimeMs,
+       &GpuTimingReport::shadowSdsmSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm)},
+      {GpuTimingScope::SceneColorDownsample,
+       &GpuTimingReport::sceneColorDownsampleTimeMs,
+       &GpuTimingReport::sceneColorDownsampleSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample)},
+      {GpuTimingScope::Transmission, &GpuTimingReport::transmissionTimeMs,
+       &GpuTimingReport::transmissionSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::Transmission)},
+      {GpuTimingScope::TemporalAAResolve,
+       &GpuTimingReport::temporalAAResolveTimeMs,
+       &GpuTimingReport::temporalAAResolveSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve)},
+      {GpuTimingScope::TemporalAADebug, &GpuTimingReport::temporalAADebugTimeMs,
+       &GpuTimingReport::temporalAADebugSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug)},
+      {GpuTimingScope::SpatialAA, &GpuTimingReport::spatialAATimeMs,
+       &GpuTimingReport::spatialAASourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::SpatialAA)},
+      {GpuTimingScope::Opaque, &GpuTimingReport::opaqueTimeMs,
+       &GpuTimingReport::opaqueSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::Opaque)},
+      {GpuTimingScope::MsaaResolve, &GpuTimingReport::msaaResolveTimeMs,
+       &GpuTimingReport::msaaResolveSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::MsaaResolve)},
+  }};
+  for (const GpuTimingScopeMergeDesc desc : kScopeDescs) {
+    mergeGpuTimingReportScope(dst, src, desc);
   }
 }
 

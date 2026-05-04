@@ -199,9 +199,7 @@ void main() {
       if (tileClearMax && !tileClearMin) {
         histogramLinearMax = linearMin;
       }
-      if (!tileClearMin || !tileClearMax) {
-        anyNonClear = true;
-      }
+      anyNonClear = true;
       addHistogramInterval(fixedNear, fixedFar, linearMin, histogramLinearMax);
       ++validTiles;
     }

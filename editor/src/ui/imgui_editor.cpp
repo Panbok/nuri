@@ -2023,6 +2023,28 @@ std::string antiAliasingSettingsSummary(
   return summary;
 }
 
+struct AAMemoryAndBandwidthMetrics {
+  uint64_t residentBytes = 0u;
+  uint64_t bandwidthBytes = 0u;
+};
+
+AAMemoryAndBandwidthMetrics
+ComputeAAMetrics(const AntiAliasingFrameMetrics &metrics) {
+  return {
+      .residentBytes =
+          metrics.motionVectorTotalBytes + metrics.reactiveMaskTotalBytes +
+          metrics.spatialAATotalBytes + metrics.spatialAALutTextureBytes +
+          metrics.msaaTotalBytes,
+      .bandwidthBytes = metrics.motionVectorClearBytes +
+                        metrics.velocityPassBandwidthEstimateBytes +
+                        metrics.velocityDebugBandwidthEstimateBytes +
+                        metrics.reactiveMaskPassBandwidthEstimateBytes +
+                        metrics.taaHistoryBandwidthEstimateBytes +
+                        metrics.spatialAABandwidthEstimateBytes +
+                        metrics.msaaResolveBandwidthEstimateBytes,
+  };
+}
+
 std::string
 antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
   const std::string resetReason(
@@ -2429,34 +2451,22 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                                                            : "pending");
     ImGui::Text("Debug GPU: %.3f ms (%s)", metrics.taaDebugGpuTimeMs,
                 metrics.taaDebugGpuTimingAvailable != 0u ? "ready" : "pending");
-    ImGui::Text("Opaque GPU: %.3f ms (%s, frame %llu)",
-                frameMetrics.opaque.gpuTimeMs,
-                frameMetrics.opaque.gpuTimingAvailable != 0u ? "ready"
-                                                             : "pending",
-                static_cast<unsigned long long>(
-                    frameMetrics.opaque.gpuTimingSourceFrameIndex));
+    ImGui::Text(
+        "Opaque GPU: %.3f ms (%s, frame %llu)", frameMetrics.opaque.gpuTimeMs,
+        frameMetrics.opaque.gpuTimingAvailable != 0u ? "ready" : "pending",
+        static_cast<unsigned long long>(
+            frameMetrics.opaque.gpuTimingSourceFrameIndex));
     ImGui::Text("Spatial GPU: %.3f ms (%s)", metrics.spatialAAGpuTimeMs,
                 metrics.spatialAAGpuTimingAvailable != 0u ? "ready"
                                                           : "pending");
-    ImGui::Text("MSAA Resolve GPU: %.3f ms (%s)",
-                metrics.msaaResolveGpuTimeMs,
+    ImGui::Text("MSAA Resolve GPU: %.3f ms (%s)", metrics.msaaResolveGpuTimeMs,
                 metrics.msaaResolveGpuTimingAvailable != 0u ? "ready"
                                                             : "pending");
-    const uint64_t aaResidentBytes =
-        metrics.motionVectorTotalBytes + metrics.reactiveMaskTotalBytes +
-        metrics.spatialAATotalBytes + metrics.spatialAALutTextureBytes +
-        metrics.msaaTotalBytes;
-    const uint64_t aaBandwidthBytes =
-        metrics.motionVectorClearBytes +
-        metrics.velocityPassBandwidthEstimateBytes +
-        metrics.velocityDebugBandwidthEstimateBytes +
-        metrics.reactiveMaskPassBandwidthEstimateBytes +
-        metrics.taaHistoryBandwidthEstimateBytes +
-        metrics.spatialAABandwidthEstimateBytes +
-        metrics.msaaResolveBandwidthEstimateBytes;
-    ImGui::Text("AA Memory: %.2f MiB  Bandwidth Est: %.2f MiB",
-                static_cast<double>(aaResidentBytes) / (1024.0 * 1024.0),
-                static_cast<double>(aaBandwidthBytes) / (1024.0 * 1024.0));
+    const AAMemoryAndBandwidthMetrics aaMetrics = ComputeAAMetrics(metrics);
+    ImGui::Text(
+        "AA Memory: %.2f MiB  Bandwidth Est: %.2f MiB",
+        static_cast<double>(aaMetrics.residentBytes) / (1024.0 * 1024.0),
+        static_cast<double>(aaMetrics.bandwidthBytes) / (1024.0 * 1024.0));
     ImGui::Text("Opaque Work: %u/%u visible, draws %u, indirect %u/%u",
                 frameMetrics.opaque.visibleInstances,
                 frameMetrics.opaque.totalInstances,
@@ -2541,11 +2551,10 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     ImGui::Text("Spatial Cleanup: %s (%s)",
                 metrics.msaaSpatialCleanupEnabled ? "enabled" : "disabled",
                 metrics.msaaSpatialCleanupActive ? "active" : "inactive");
-    ImGui::Text(
-        "Texture Bytes: color %llu, depth %llu, total %llu",
-        static_cast<unsigned long long>(metrics.msaaColorTextureBytes),
-        static_cast<unsigned long long>(metrics.msaaDepthTextureBytes),
-        static_cast<unsigned long long>(metrics.msaaTotalBytes));
+    ImGui::Text("Texture Bytes: color %llu, depth %llu, total %llu",
+                static_cast<unsigned long long>(metrics.msaaColorTextureBytes),
+                static_cast<unsigned long long>(metrics.msaaDepthTextureBytes),
+                static_cast<unsigned long long>(metrics.msaaTotalBytes));
   }
   if (ImGui::CollapsingHeader("Motion Vector Resource",
                               ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2810,9 +2819,8 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                                                          : "inactive");
   }
   if (ImGui::Button("Dump AA Diagnostics To Log##AntiAliasing")) {
-    const std::string summary =
-        antiAliasingDiagnosticsSummary(aa, frameMetrics,
-                                       temporalFeaturePresent);
+    const std::string summary = antiAliasingDiagnosticsSummary(
+        aa, frameMetrics, temporalFeaturePresent);
     NURI_LOG_INFO("%s", summary.c_str());
   }
 }

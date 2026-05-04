@@ -2295,6 +2295,30 @@ TextureCompressionCaps LvkGPUDevice::getTextureCompressionCaps() const {
   return impl_->compressionCaps;
 }
 
+bool LvkGPUDevice::supportsSampledImageLinearFiltering(Format format) const {
+  if (!impl_ || !impl_->context) {
+    return false;
+  }
+#if NURI_LVK_HAS_VULKAN_COMMAND_BUFFER
+  auto *vkContext = dynamic_cast<lvk::VulkanContext *>(impl_->context.get());
+  if (vkContext == nullptr) {
+    return false;
+  }
+  const VkFormat vkFormat = lvk::formatToVkFormat(toLvkFormat(format));
+  if (vkFormat == VK_FORMAT_UNDEFINED) {
+    return false;
+  }
+  VkFormatProperties2 props{.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+  vkGetPhysicalDeviceFormatProperties2(vkContext->getVkPhysicalDevice(),
+                                       vkFormat, &props);
+  return (props.formatProperties.optimalTilingFeatures &
+          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0u;
+#else
+  (void)format;
+  return false;
+#endif
+}
+
 uint32_t LvkGPUDevice::getTextureBindlessIndex(TextureHandle h) const {
   if (!impl_->textures.isValid(h)) {
     // Must not return 0: that is a valid bindless heap slot.  Shaders compare

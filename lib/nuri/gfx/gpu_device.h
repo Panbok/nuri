@@ -87,6 +87,10 @@ public:
   virtual Format getTextureFormat(TextureHandle h) const = 0;
   virtual TextureDimensions getTextureDimensions(TextureHandle h) const = 0;
   virtual TextureCompressionCaps getTextureCompressionCaps() const = 0;
+  virtual bool supportsSampledImageLinearFiltering(Format format) const {
+    (void)format;
+    return false;
+  }
   // Bindless index used by LVK shaders (kTextures2D[]).
   virtual uint32_t getTextureBindlessIndex(TextureHandle h) const = 0;
   virtual uint32_t getSamplerBindlessIndex(SamplerHandle h) const = 0;

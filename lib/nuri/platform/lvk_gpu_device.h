@@ -71,6 +71,7 @@ public:
   Format getTextureFormat(TextureHandle h) const override;
   TextureDimensions getTextureDimensions(TextureHandle h) const override;
   TextureCompressionCaps getTextureCompressionCaps() const override;
+  bool supportsSampledImageLinearFiltering(Format format) const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
   uint32_t getSamplerBindlessIndex(SamplerHandle h) const override;
   uint8_t getMaxSamplerAnisotropy() const override;
