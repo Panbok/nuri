@@ -14,8 +14,6 @@ void main() {
   const vec2 uv1 = decodePackedUv1(gl_VertexIndex);
 
   const InstanceData inst = pc.instanceMatrices.instances[globalInstanceId];
-  const InstanceData previousInst =
-      pc.previousInstanceMatrices.instances[globalInstanceId];
   const mat4 model = inst.modelMatrix;
 
   const vec4 localPos = vec4(pos, 1.0);
@@ -23,11 +21,21 @@ void main() {
   const vec4 currentClipNoJitter =
       pc.velocityFrameData.data.currentViewProjNoJitter * worldPos4;
 
-  const uint velocityFlags = pc.velocityInstanceFlags.flags[globalInstanceId];
-  const vec4 previousClipNoJitter =
-      velocityFlags != 0u ? pc.velocityFrameData.data.previousViewProjNoJitter *
-                                previousInst.modelMatrix * localPos
-                          : currentClipNoJitter;
+  uint velocityFlags = 0u;
+  const uint instanceFlagsMode = pc.velocityFrameData.data.instanceFlagsMode.x;
+  if (instanceFlagsMode == kVelocityInstanceFlagsModeAllValid) {
+    velocityFlags = 1u;
+  } else if (instanceFlagsMode == kVelocityInstanceFlagsModeBuffer) {
+    velocityFlags = pc.velocityInstanceFlags.flags[globalInstanceId];
+  }
+
+  vec4 previousClipNoJitter = currentClipNoJitter;
+  if (velocityFlags != 0u) {
+    const InstanceData previousInst =
+        pc.previousInstanceMatrices.instances[globalInstanceId];
+    previousClipNoJitter = pc.velocityFrameData.data.previousViewProjNoJitter *
+                           previousInst.modelMatrix * localPos;
+  }
 
   gl_Position = pc.frameData.proj * pc.frameData.view * worldPos4;
 

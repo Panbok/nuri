@@ -159,9 +159,17 @@ private:
   struct alignas(16) VelocityFrameGpuData {
     glm::mat4 currentViewProjNoJitter{1.0f};
     glm::mat4 previousViewProjNoJitter{1.0f};
+    glm::uvec4 instanceFlagsMode{0u};
   };
-  static_assert(sizeof(VelocityFrameGpuData) == sizeof(glm::mat4) * 2u,
+  static_assert(sizeof(VelocityFrameGpuData) ==
+                    sizeof(glm::mat4) * 2u + sizeof(glm::uvec4),
                 "OpaqueRenderer::VelocityFrameGpuData layout changed");
+
+  enum class VelocityInstanceFlagsMode : uint32_t {
+    Buffer = 0u,
+    AllValid = 1u,
+    AllInvalid = 2u,
+  };
 
   struct SingleInstanceBatchEntry {
     DrawItem draw{};
@@ -622,6 +630,10 @@ private:
   uint64_t boundStaticBatchGeneration_ = 0;
   uint64_t previousTransformSceneId_ = 0u;
   uint64_t previousTransformCaptureFrameIndex_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t previousTransformCaptureTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t previousTransformCaptureTransformVersion_ =
       std::numeric_limits<uint64_t>::max();
   std::optional<OpaquePickRequest> pendingPickRequest_{};
   std::optional<ShadowInspectRequest> pendingShadowInspectRequest_{};

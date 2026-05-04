@@ -284,9 +284,14 @@ layout(std430, buffer_reference) readonly buffer VelocityInstanceFlagsBuffer {
   uint flags[];
 };
 
+const uint kVelocityInstanceFlagsModeBuffer = 0u;
+const uint kVelocityInstanceFlagsModeAllValid = 1u;
+const uint kVelocityInstanceFlagsModeAllInvalid = 2u;
+
 struct VelocityFrameData {
   mat4 currentViewProjNoJitter;
   mat4 previousViewProjNoJitter;
+  uvec4 instanceFlagsMode;
 };
 
 layout(std430, buffer_reference) readonly buffer VelocityFrameDataBuffer {

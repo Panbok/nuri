@@ -654,6 +654,15 @@ void OpaqueRenderer::capturePreviousTransforms(const RenderScene &scene,
     return;
   }
 
+  const uint64_t topologyVersion = scene.topologyVersion();
+  const uint64_t transformVersion = scene.transformVersion();
+  if (previousTransformSceneId_ == scene.id() &&
+      previousTransformCaptureTopologyVersion_ == topologyVersion &&
+      previousTransformCaptureTransformVersion_ == transformVersion) {
+    previousTransformCaptureFrameIndex_ = frameIndex;
+    return;
+  }
+
   const std::span<const Renderable> renderables = scene.renderables();
   previousTransformById_.clear();
   previousTransformById_.reserve(renderables.size());
@@ -664,6 +673,8 @@ void OpaqueRenderer::capturePreviousTransforms(const RenderScene &scene,
   }
   previousTransformSceneId_ = scene.id();
   previousTransformCaptureFrameIndex_ = frameIndex;
+  previousTransformCaptureTopologyVersion_ = topologyVersion;
+  previousTransformCaptureTransformVersion_ = transformVersion;
 }
 
 void OpaqueRenderer::onDetach() {
@@ -767,6 +778,10 @@ void OpaqueRenderer::onDetach() {
   cachedAnimationSceneActive_ = false;
   previousTransformSceneId_ = 0u;
   previousTransformCaptureFrameIndex_ = std::numeric_limits<uint64_t>::max();
+  previousTransformCaptureTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  previousTransformCaptureTransformVersion_ =
+      std::numeric_limits<uint64_t>::max();
   instanceStaticBuffersDirty_ = true;
   uniformSingleSubmeshPath_ = false;
   invalidateAutoLodCache();
@@ -1215,6 +1230,31 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const bool msaaSelected =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
       AntiAliasingMode::MSAA4x;
+  const bool hasTaaVelocityInstances = taaSelected && instanceCount > 0;
+  const bool previousCacheValid =
+      hasTaaVelocityInstances && frame.camera.historyValid &&
+      frame.camera.temporalDataValid &&
+      previousTransformSceneId_ == frame.scene->id() &&
+      previousTransformCaptureFrameIndex_ !=
+          std::numeric_limits<uint64_t>::max() &&
+      previousTransformCaptureFrameIndex_ < frame.frameIndex;
+  const bool staticVelocityScene = hasTaaVelocityInstances &&
+                                   !settings.opaque.enableInstanceAnimation &&
+                                   animationSceneData == nullptr;
+  const bool canReuseStaticPreviousMatrices =
+      staticVelocityScene && previousCacheValid && !transformDirty &&
+      !animationSceneStateDirty;
+  const bool canUseAllInvalidVelocityFlags =
+      staticVelocityScene && !previousCacheValid;
+  const VelocityInstanceFlagsMode velocityInstanceFlagsMode =
+      canReuseStaticPreviousMatrices
+          ? VelocityInstanceFlagsMode::AllValid
+          : (canUseAllInvalidVelocityFlags
+                 ? VelocityInstanceFlagsMode::AllInvalid
+                 : VelocityInstanceFlagsMode::Buffer);
+  const bool needsVelocityInstanceBufferUpload =
+      hasTaaVelocityInstances &&
+      velocityInstanceFlagsMode == VelocityInstanceFlagsMode::Buffer;
   if (msaaSelected &&
       (!nuri::isValid(frame.sharedResources.msaaSceneDepthTexture) ||
        !nuri::isValid(frame.sharedResources.msaaSceneColorTexture))) {
@@ -1230,7 +1270,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         "OpaqueRenderer::buildOpaquePasses: MSAA scene depth texture is "
         "unavailable");
   }
-  if (taaSelected) {
+  if (needsVelocityInstanceBufferUpload) {
     auto previousMatricesResult = ensurePreviousInstanceMatricesRingCapacity(
         std::max(instanceCount * sizeof(InstanceData), sizeof(InstanceData)));
     if (previousMatricesResult.hasError()) {
@@ -1241,6 +1281,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     if (velocityFlagsResult.hasError()) {
       return velocityFlagsResult;
     }
+  }
+  if (hasTaaVelocityInstances) {
     auto velocityFrameResult =
         ensureVelocityFrameDataRingCapacity(sizeof(VelocityFrameGpuData));
     if (velocityFrameResult.hasError()) {
@@ -1302,24 +1344,31 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? animationSceneData->instanceMatricesAddress
           : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
   const BufferHandle previousInstanceMatricesBufferHandle =
-      taaSelected && frameSlot < previousInstanceMatricesRing_.size() &&
+      needsVelocityInstanceBufferUpload &&
+              frameSlot < previousInstanceMatricesRing_.size() &&
               previousInstanceMatricesRing_[frameSlot].buffer
           ? previousInstanceMatricesRing_[frameSlot].buffer->handle()
           : BufferHandle{};
   const BufferHandle velocityInstanceFlagsBufferHandle =
-      taaSelected && frameSlot < velocityInstanceFlagsRing_.size() &&
+      needsVelocityInstanceBufferUpload &&
+              frameSlot < velocityInstanceFlagsRing_.size() &&
               velocityInstanceFlagsRing_[frameSlot].buffer
           ? velocityInstanceFlagsRing_[frameSlot].buffer->handle()
           : BufferHandle{};
   const BufferHandle velocityFrameDataBufferHandle =
-      taaSelected && frameSlot < velocityFrameDataRing_.size() &&
+      hasTaaVelocityInstances && frameSlot < velocityFrameDataRing_.size() &&
               velocityFrameDataRing_[frameSlot].buffer
           ? velocityFrameDataRing_[frameSlot].buffer->handle()
           : BufferHandle{};
+  const bool reuseCurrentMatricesForVelocity =
+      canReuseStaticPreviousMatrices || canUseAllInvalidVelocityFlags;
   const uint64_t previousInstanceMatricesAddress =
-      nuri::isValid(previousInstanceMatricesBufferHandle)
-          ? gpu_.getBufferDeviceAddress(previousInstanceMatricesBufferHandle)
-          : 0u;
+      reuseCurrentMatricesForVelocity
+          ? instanceMatricesAddress
+          : (nuri::isValid(previousInstanceMatricesBufferHandle)
+                 ? gpu_.getBufferDeviceAddress(
+                       previousInstanceMatricesBufferHandle)
+                 : 0u);
   const uint64_t velocityInstanceFlagsAddress =
       nuri::isValid(velocityInstanceFlagsBufferHandle)
           ? gpu_.getBufferDeviceAddress(velocityInstanceFlagsBufferHandle)
@@ -1330,10 +1379,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           : 0u;
   if (frameDataAddress == 0 || instanceCentersPhaseAddress == 0 ||
       instanceBaseMatricesAddress == 0 || instanceMatricesAddress == 0 ||
-      (taaSelected && instanceCount > 0 &&
-       (previousInstanceMatricesAddress == 0u ||
-        velocityInstanceFlagsAddress == 0u ||
-        velocityFrameDataAddress == 0u)) ||
+      (hasTaaVelocityInstances && (previousInstanceMatricesAddress == 0u ||
+                                   (needsVelocityInstanceBufferUpload &&
+                                    velocityInstanceFlagsAddress == 0u) ||
+                                   velocityFrameDataAddress == 0u)) ||
       materialGpu->headerBufferAddress == 0u ||
       materialGpu->clearcoatBufferAddress == 0u ||
       materialGpu->sheenBufferAddress == 0u ||
@@ -1348,85 +1397,88 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         "OpaqueRenderer::buildOpaquePasses: invalid GPU buffer address");
   }
 
-  if (taaSelected && instanceCount > 0) {
-    const bool previousCacheValid =
-        frame.camera.historyValid && frame.camera.temporalDataValid &&
-        previousTransformSceneId_ == frame.scene->id() &&
-        previousTransformCaptureFrameIndex_ !=
-            std::numeric_limits<uint64_t>::max() &&
-        previousTransformCaptureFrameIndex_ < frame.frameIndex;
-    previousInstanceMatricesCpuCache_.clear();
-    velocityInstanceFlagsCpuCache_.clear();
-    previousInstanceMatricesCpuCache_.reserve(instanceCount);
-    velocityInstanceFlagsCpuCache_.reserve(instanceCount);
-
+  if (hasTaaVelocityInstances) {
     uint32_t validPreviousCount = 0u;
     uint32_t missingPreviousCount = 0u;
     uint32_t animatedResponsiveCount = 0u;
     double totalObjectMotion = 0.0;
     float maxObjectMotion = 0.0f;
-    for (size_t i = 0; i < instanceCount; ++i) {
-      const RenderableTemplate &templ = renderableTemplates_[i];
-      const Renderable *renderable = templ.renderable;
-      bool animatedInstance = settings.opaque.enableInstanceAnimation;
-      if (!animatedInstance && animationSceneData != nullptr) {
-        animatedInstance =
-            animationSceneAnimatesRenderable(*animationSceneData, i);
-      }
-      const glm::mat4 currentModel =
-          renderable != nullptr ? renderable->modelMatrix : glm::mat4(1.0f);
-      glm::mat4 previousModel = currentModel;
-      bool hasPrevious = false;
-      if (!animatedInstance && previousCacheValid && renderable != nullptr &&
-          nuri::isValid(renderable->id)) {
-        if (const auto it = previousTransformById_.find(renderable->id);
-            it != previousTransformById_.end()) {
-          previousModel = it->second;
-          hasPrevious = true;
+
+    if (canReuseStaticPreviousMatrices) {
+      validPreviousCount = saturateToU32(instanceCount);
+    } else if (canUseAllInvalidVelocityFlags) {
+      missingPreviousCount = saturateToU32(instanceCount);
+    } else {
+      previousInstanceMatricesCpuCache_.clear();
+      velocityInstanceFlagsCpuCache_.clear();
+      previousInstanceMatricesCpuCache_.reserve(instanceCount);
+      velocityInstanceFlagsCpuCache_.reserve(instanceCount);
+
+      for (size_t i = 0; i < instanceCount; ++i) {
+        const RenderableTemplate &templ = renderableTemplates_[i];
+        const Renderable *renderable = templ.renderable;
+        bool animatedInstance = settings.opaque.enableInstanceAnimation;
+        if (!animatedInstance && animationSceneData != nullptr) {
+          animatedInstance =
+              animationSceneAnimatesRenderable(*animationSceneData, i);
         }
-      }
-
-      if (hasPrevious) {
-        ++validPreviousCount;
-        const float motion = glm::length(glm::vec3(currentModel[3]) -
-                                         glm::vec3(previousModel[3]));
-        totalObjectMotion += static_cast<double>(motion);
-        maxObjectMotion = std::max(maxObjectMotion, motion);
-      } else {
-        ++missingPreviousCount;
-        if (animatedInstance) {
-          ++animatedResponsiveCount;
+        const glm::mat4 currentModel =
+            renderable != nullptr ? renderable->modelMatrix : glm::mat4(1.0f);
+        glm::mat4 previousModel = currentModel;
+        bool hasPrevious = false;
+        if (!animatedInstance && previousCacheValid && renderable != nullptr &&
+            nuri::isValid(renderable->id)) {
+          if (const auto it = previousTransformById_.find(renderable->id);
+              it != previousTransformById_.end()) {
+            previousModel = it->second;
+            hasPrevious = true;
+          }
         }
+
+        if (hasPrevious) {
+          ++validPreviousCount;
+          const float motion = glm::length(glm::vec3(currentModel[3]) -
+                                           glm::vec3(previousModel[3]));
+          totalObjectMotion += static_cast<double>(motion);
+          maxObjectMotion = std::max(maxObjectMotion, motion);
+        } else {
+          ++missingPreviousCount;
+          if (animatedInstance) {
+            ++animatedResponsiveCount;
+          }
+        }
+
+        previousInstanceMatricesCpuCache_.push_back(
+            makeInstanceData(previousModel));
+        velocityInstanceFlagsCpuCache_.push_back(hasPrevious ? 1u : 0u);
       }
 
-      previousInstanceMatricesCpuCache_.push_back(
-          makeInstanceData(previousModel));
-      velocityInstanceFlagsCpuCache_.push_back(hasPrevious ? 1u : 0u);
-    }
+      const std::span<const std::byte> previousMatricesBytes{
+          reinterpret_cast<const std::byte *>(
+              previousInstanceMatricesCpuCache_.data()),
+          previousInstanceMatricesCpuCache_.size() * sizeof(InstanceData)};
+      auto previousUpdateResult = gpu_.updateBuffer(
+          previousInstanceMatricesBufferHandle, previousMatricesBytes, 0);
+      if (previousUpdateResult.hasError()) {
+        return previousUpdateResult;
+      }
 
-    const std::span<const std::byte> previousMatricesBytes{
-        reinterpret_cast<const std::byte *>(
-            previousInstanceMatricesCpuCache_.data()),
-        previousInstanceMatricesCpuCache_.size() * sizeof(InstanceData)};
-    auto previousUpdateResult = gpu_.updateBuffer(
-        previousInstanceMatricesBufferHandle, previousMatricesBytes, 0);
-    if (previousUpdateResult.hasError()) {
-      return previousUpdateResult;
-    }
-
-    const std::span<const std::byte> velocityFlagsBytes{
-        reinterpret_cast<const std::byte *>(
-            velocityInstanceFlagsCpuCache_.data()),
-        velocityInstanceFlagsCpuCache_.size() * sizeof(uint32_t)};
-    auto flagsUpdateResult = gpu_.updateBuffer(
-        velocityInstanceFlagsBufferHandle, velocityFlagsBytes, 0);
-    if (flagsUpdateResult.hasError()) {
-      return flagsUpdateResult;
+      const std::span<const std::byte> velocityFlagsBytes{
+          reinterpret_cast<const std::byte *>(
+              velocityInstanceFlagsCpuCache_.data()),
+          velocityInstanceFlagsCpuCache_.size() * sizeof(uint32_t)};
+      auto flagsUpdateResult = gpu_.updateBuffer(
+          velocityInstanceFlagsBufferHandle, velocityFlagsBytes, 0);
+      if (flagsUpdateResult.hasError()) {
+        return flagsUpdateResult;
+      }
     }
 
     const VelocityFrameGpuData velocityFrameData{
         .currentViewProjNoJitter = frame.camera.currentUnjitteredViewProj,
         .previousViewProjNoJitter = frame.camera.previousUnjitteredViewProj,
+        .instanceFlagsMode = glm::uvec4(
+            static_cast<uint32_t>(velocityInstanceFlagsMode), 0u, 0u, 0u),
     };
     const std::span<const std::byte> velocityFrameBytes{
         reinterpret_cast<const std::byte *>(&velocityFrameData),
