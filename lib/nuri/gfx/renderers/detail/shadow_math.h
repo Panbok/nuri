@@ -790,7 +790,6 @@ inline void enforceMonotonicShadowSplitDepths(
   fit.lightView = makeDirectionalLightView(lightDirection);
   const glm::vec3 lightSpaceCenter =
       glm::vec3(fit.lightView * glm::vec4(fit.frustumCenter, 1.0f));
-
   glm::vec3 lightMin(lightSpaceCenter.x - frustum.radius,
                      lightSpaceCenter.y - frustum.radius,
                      std::numeric_limits<float>::max());
@@ -835,14 +834,12 @@ fitDirectionalShadowCascadeSliceWithCasterDepthBounds(
   fit.lightView = lightView;
   const glm::vec3 lightSpaceCenter =
       glm::vec3(fit.lightView * glm::vec4(fit.frustumCenter, 1.0f));
-
   glm::vec3 lightMin(lightSpaceCenter.x - frustum.radius,
                      lightSpaceCenter.y - frustum.radius,
                      std::numeric_limits<float>::max());
   glm::vec3 lightMax(lightSpaceCenter.x + frustum.radius,
                      lightSpaceCenter.y + frustum.radius,
                      std::numeric_limits<float>::lowest());
-
   const auto accumulateDepth = [&](glm::vec3 point) {
     const float z = glm::vec3(fit.lightView * glm::vec4(point, 1.0f)).z;
     lightMin.z = std::min(lightMin.z, z);

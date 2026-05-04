@@ -80,6 +80,8 @@ enum class GpuTimingScope : uint8_t {
   TemporalAAResolve = 6,
   TemporalAADebug = 7,
   SpatialAA = 8,
+  Opaque = 9,
+  MsaaResolve = 10,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -105,6 +107,10 @@ constexpr uint32_t kGpuTimingScopeTemporalAADebugBit =
     gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
 constexpr uint32_t kGpuTimingScopeSpatialAABit =
     gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
+constexpr uint32_t kGpuTimingScopeOpaqueBit =
+    gpuTimingScopeToBit(GpuTimingScope::Opaque);
+constexpr uint32_t kGpuTimingScopeMsaaResolveBit =
+    gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -118,6 +124,8 @@ struct GpuTimingReport {
   uint64_t temporalAADebugSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t spatialAASourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t opaqueSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t msaaResolveSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -126,6 +134,8 @@ struct GpuTimingReport {
   float temporalAAResolveTimeMs = 0.0f;
   float temporalAADebugTimeMs = 0.0f;
   float spatialAATimeMs = 0.0f;
+  float opaqueTimeMs = 0.0f;
+  float msaaResolveTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
 };
 
@@ -180,6 +190,16 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
     dst.spatialAATimeMs = src.spatialAATimeMs;
     dst.spatialAASourceFrameIndex = src.spatialAASourceFrameIndex;
     dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::Opaque)) {
+    dst.opaqueTimeMs = src.opaqueTimeMs;
+    dst.opaqueSourceFrameIndex = src.opaqueSourceFrameIndex;
+    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::Opaque);
+  }
+  if (hasGpuTimingScope(src, GpuTimingScope::MsaaResolve)) {
+    dst.msaaResolveTimeMs = src.msaaResolveTimeMs;
+    dst.msaaResolveSourceFrameIndex = src.msaaResolveSourceFrameIndex;
+    dst.availableScopeMask |= gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
   }
 }
 

@@ -57,6 +57,28 @@ constexpr float kSdsmHistogramClearDepthEpsilon = 1.0e-4f;
 constexpr uint32_t kMinSdsmReduceResultRingCount = 16u;
 constexpr uint32_t kSdsmGpuWarmupGraceMissFrames = 2u;
 
+[[nodiscard]] constexpr Format
+sanitizeShadowDepthFormat(Format format) noexcept {
+  switch (format) {
+  case Format::D16_UNORM:
+  case Format::D32_FLOAT:
+    return format;
+  default:
+    return kDefaultShadowMapDepthFormat;
+  }
+}
+
+[[nodiscard]] constexpr uint64_t
+shadowDepthTextureBytesPerPixel(Format format) noexcept {
+  switch (sanitizeShadowDepthFormat(format)) {
+  case Format::D32_FLOAT:
+    return sizeof(float);
+  case Format::D16_UNORM:
+  default:
+    return sizeof(uint16_t);
+  }
+}
+
 [[nodiscard]] constexpr std::string_view
 shadowCascadePassLabel(uint32_t cascadeIndex) {
   switch (cascadeIndex) {
@@ -464,6 +486,7 @@ hashShadowSettings(uint64_t hash,
   hash = hashCombineValue(hash, settings.qualityPreset);
   hash = hashCombineValue(hash, settings.cascadeCount);
   hash = hashCombineValue(hash, settings.shadowMapSize);
+  hash = hashCombineValue(hash, settings.depthFormat);
   hash = hashCombineValue(hash, settings.maxDistance);
   hash = hashCombineValue(hash, settings.maxDistanceFadeFraction);
   hash = hashCombineValue(hash, settings.splitMode);
@@ -1433,6 +1456,14 @@ makeStaticOnlyReuseFitForCurrentFrame(
   return fit;
 }
 
+[[nodiscard]] float
+pcssReceiverDepthWorldScale(const shadow_detail::DirectionalShadowFit &fit) {
+  const float splitDepthSpan = std::max(fit.splitFar - fit.splitNear, 1.0e-6f);
+  const float lightDepthSpan =
+      std::max(fit.lightSpaceBoundsMax.z - fit.lightSpaceBoundsMin.z, 1.0e-6f);
+  return std::min(lightDepthSpan, splitDepthSpan * 2.0f);
+}
+
 void writeShadowCascadeFit(const shadow_detail::DirectionalShadowFit &fit,
                            uint32_t cascadeIndex,
                            const RenderSettings::ShadowSettings &settings,
@@ -1448,14 +1479,12 @@ void writeShadowCascadeFit(const shadow_detail::DirectionalShadowFit &fit,
       .uvScaleBias = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
       .biasParams = glm::vec4(settings.constantBias, settings.slopeBias,
                               settings.normalBias, 0.0f),
-      .pcssParams = glm::vec4(
-          std::max(fit.lightSpaceBoundsMax.z - fit.lightSpaceBoundsMin.z,
-                   1.0e-6f),
-          settings.pcssSearchRadiusClampTexels,
-          settings.pcssFilterRadiusClampTexels, 0.0f),
+      .pcssParams = glm::vec4(pcssReceiverDepthWorldScale(fit),
+                              settings.pcssSearchRadiusClampTexels,
+                              settings.pcssFilterRadiusClampTexels, 0.0f),
       .textureSampler =
           glm::uvec4(gpu.getTextureBindlessIndex(shadowDepthTexture),
-                     compareSamplerId, rawSamplerId, 0u),
+                     compareSamplerId, rawSamplerId, settings.shadowMapSize),
   };
 
   ShadowCascadeDebugFrameData &cascadeDebug =
@@ -1564,14 +1593,14 @@ resolveShadowLod(const Submesh &submesh, const RenderSettings &settings) {
 
 [[nodiscard]] RenderPipelineDesc
 shadowDepthPipelineDesc(ShaderHandle vertexShader, ShaderHandle fragmentShader,
-                        CullMode cullMode) {
+                        CullMode cullMode, Format depthFormat) {
   return RenderPipelineDesc{
       .vertexInput = {},
       .vertexShader = vertexShader,
       .fragmentShader = fragmentShader,
       .colorFormats = {Format::RGBA8_UNORM},
       .colorAttachmentCount = 0u,
-      .depthFormat = kDefaultShadowMapDepthFormat,
+      .depthFormat = sanitizeShadowDepthFormat(depthFormat),
       .cullMode = cullMode,
       .polygonMode = PolygonMode::Fill,
       .topology = Topology::Triangle,
@@ -1602,14 +1631,16 @@ shadowPreviewPipelineDesc(ShaderHandle vertexShader,
 
 [[nodiscard]] bool isValidShadowDepthTexture(const GPUDevice &gpu,
                                              TextureHandle texture,
-                                             uint32_t shadowMapSize) {
+                                             uint32_t shadowMapSize,
+                                             Format depthFormat) {
   if (!nuri::isValid(texture)) {
     return false;
   }
   const TextureDimensions dimensions = gpu.getTextureDimensions(texture);
   return dimensions.width == shadowMapSize &&
          dimensions.height == shadowMapSize &&
-         gpu.getTextureFormat(texture) == kDefaultShadowMapDepthFormat;
+         gpu.getTextureFormat(texture) ==
+             sanitizeShadowDepthFormat(depthFormat);
 }
 
 [[nodiscard]] TextureDimensions
@@ -1768,13 +1799,17 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
   }
 
   shadowShader_ = Shader::create("shadow_depth", gpu_);
+  shadowOpaqueShader_ = Shader::create("shadow_depth_opaque", gpu_);
   depthShader_ = Shader::create("shadow_depth_only", gpu_);
   depthAlphaShader_ = Shader::create("shadow_depth_alpha", gpu_);
-  if (!shadowShader_ || !depthShader_ || !depthAlphaShader_) {
+  if (!shadowShader_ || !shadowOpaqueShader_ || !depthShader_ ||
+      !depthAlphaShader_) {
     return Result<bool, std::string>::makeError(
         "ShadowRenderer::createShaders: failed to create shader wrappers");
   }
 
+  const std::filesystem::path shadowOpaqueVertexPath =
+      config_.shaderBasePath / "shadow_depth_opaque.vert";
   const std::filesystem::path shadowVertexPath =
       config_.shaderBasePath / "shadow_depth.vert";
   const std::filesystem::path depthFragmentPath =
@@ -1782,6 +1817,11 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
   const std::filesystem::path depthAlphaFragmentPath =
       config_.shaderBasePath / "opaque_depth_alpha.frag";
 
+  auto opaqueVertexResult = shadowOpaqueShader_->compileFromFile(
+      shadowOpaqueVertexPath.string(), ShaderStage::Vertex);
+  if (opaqueVertexResult.hasError()) {
+    return Result<bool, std::string>::makeError(opaqueVertexResult.error());
+  }
   auto vertexResult = shadowShader_->compileFromFile(shadowVertexPath.string(),
                                                      ShaderStage::Vertex);
   if (vertexResult.hasError()) {
@@ -1798,6 +1838,7 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
     return Result<bool, std::string>::makeError(alphaFragmentResult.error());
   }
 
+  shadowOpaqueVertexShader_ = opaqueVertexResult.value();
   shadowVertexShader_ = vertexResult.value();
   depthFragmentShader_ = fragmentResult.value();
   depthAlphaFragmentShader_ = alphaFragmentResult.value();
@@ -1896,11 +1937,12 @@ Result<bool, std::string> ShadowRenderer::createSdsmHistogramReduceShaders() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> ShadowRenderer::createPipelines() {
-  destroyPipelineState();
+Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
+  const Format targetDepthFormat = sanitizeShadowDepthFormat(depthFormat);
+  destroyShadowDepthPipelineState();
   auto shadowResult = gpu_.createRenderPipeline(
-      shadowDepthPipelineDesc(shadowVertexShader_, depthFragmentShader_,
-                              CullMode::Back),
+      shadowDepthPipelineDesc(shadowOpaqueVertexShader_, depthFragmentShader_,
+                              CullMode::Back, targetDepthFormat),
       "shadow_depth_opaque");
   if (shadowResult.hasError()) {
     return Result<bool, std::string>::makeError(shadowResult.error());
@@ -1908,8 +1950,8 @@ Result<bool, std::string> ShadowRenderer::createPipelines() {
   shadowPipelineHandle_ = shadowResult.value();
 
   auto doubleSidedResult = gpu_.createRenderPipeline(
-      shadowDepthPipelineDesc(shadowVertexShader_, depthFragmentShader_,
-                              CullMode::None),
+      shadowDepthPipelineDesc(shadowOpaqueVertexShader_, depthFragmentShader_,
+                              CullMode::None, targetDepthFormat),
       "shadow_depth_opaque_double_sided");
   if (doubleSidedResult.hasError()) {
     gpu_.destroyRenderPipeline(shadowPipelineHandle_);
@@ -1920,7 +1962,7 @@ Result<bool, std::string> ShadowRenderer::createPipelines() {
 
   auto alphaResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowVertexShader_, depthAlphaFragmentShader_,
-                              CullMode::Back),
+                              CullMode::Back, targetDepthFormat),
       "shadow_depth_alpha");
   if (alphaResult.hasError()) {
     gpu_.destroyRenderPipeline(shadowDoubleSidedPipelineHandle_);
@@ -1933,7 +1975,7 @@ Result<bool, std::string> ShadowRenderer::createPipelines() {
 
   auto alphaDoubleSidedResult = gpu_.createRenderPipeline(
       shadowDepthPipelineDesc(shadowVertexShader_, depthAlphaFragmentShader_,
-                              CullMode::None),
+                              CullMode::None, targetDepthFormat),
       "shadow_depth_alpha_double_sided");
   if (alphaDoubleSidedResult.hasError()) {
     gpu_.destroyRenderPipeline(shadowAlphaPipelineHandle_);
@@ -1945,6 +1987,7 @@ Result<bool, std::string> ShadowRenderer::createPipelines() {
     return Result<bool, std::string>::makeError(alphaDoubleSidedResult.error());
   }
   shadowAlphaDoubleSidedPipelineHandle_ = alphaDoubleSidedResult.value();
+  shadowDepthPipelineFormat_ = targetDepthFormat;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2044,7 +2087,7 @@ Result<bool, std::string> ShadowRenderer::ensureInitialized() {
   if (shaderResult.hasError()) {
     return shaderResult;
   }
-  auto pipelineResult = createPipelines();
+  auto pipelineResult = createPipelines(kDefaultShadowMapDepthFormat);
   if (pipelineResult.hasError()) {
     return pipelineResult;
   }
@@ -2059,13 +2102,16 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
       sanitizeShadowPreviewMode(settings.debug.previewMode);
   const uint32_t requestedCascadeCount =
       std::clamp(settings.cascadeCount, 1u, kMaxShadowCascades);
+  const Format targetDepthFormat =
+      sanitizeShadowDepthFormat(settings.depthFormat);
   bool depthValid = nuri::isValid(rawDepthSampler_) &&
                     nuri::isValid(compareDepthSampler_) &&
                     activeCascadeCount_ == requestedCascadeCount;
   for (uint32_t cascadeIndex = 0u;
        depthValid && cascadeIndex < requestedCascadeCount; ++cascadeIndex) {
-    depthValid = isValidShadowDepthTexture(
-        gpu_, shadowDepthTextures_[cascadeIndex], settings.shadowMapSize);
+    depthValid =
+        isValidShadowDepthTexture(gpu_, shadowDepthTextures_[cascadeIndex],
+                                  settings.shadowMapSize, targetDepthFormat);
   }
   for (uint32_t cascadeIndex = requestedCascadeCount;
        depthValid && cascadeIndex < kMaxShadowCascades; ++cascadeIndex) {
@@ -2134,7 +2180,7 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
        ++cascadeIndex) {
     const TextureDesc shadowDesc{
         .type = TextureType::Texture2D,
-        .format = kDefaultShadowMapDepthFormat,
+        .format = targetDepthFormat,
         .dimensions = {.width = settings.shadowMapSize,
                        .height = settings.shadowMapSize,
                        .depth = 1u},
@@ -2187,6 +2233,8 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
   const SamplerHandle newRawDepthSampler = samplerResult.value();
 
   SamplerDesc compareSamplerDesc = rawSamplerDesc;
+  compareSamplerDesc.minFilter = SamplerFilter::Linear;
+  compareSamplerDesc.magFilter = SamplerFilter::Linear;
   compareSamplerDesc.depthCompareEnabled = true;
   compareSamplerDesc.depthCompareOp = CompareOp::LessEqual;
   auto compareSamplerResult =
@@ -4063,7 +4111,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   frame.metrics.shadow.shadowMapSize = shadowMapSize;
   frame.metrics.shadow.cascadeTextureBytes =
       static_cast<uint64_t>(cascadeCount) * shadowMapSize * shadowMapSize *
-      2ull;
+      shadowDepthTextureBytesPerPixel(settings.depthFormat);
   frame.metrics.shadow.minCascadeTexelWorldSize = minCascadeTexelWorldSize;
   frame.metrics.shadow.maxCascadeTexelWorldSize = maxCascadeTexelWorldSize;
   frame.metrics.shadow.averageCascadeTexelWorldSize =
@@ -4416,6 +4464,14 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   auto initResult = ensureInitialized();
   if (initResult.hasError()) {
     return initResult;
+  }
+  const Format targetDepthFormat =
+      sanitizeShadowDepthFormat(shadowSettings.depthFormat);
+  if (shadowDepthPipelineFormat_ != targetDepthFormat) {
+    auto pipelineResult = createPipelines(targetDepthFormat);
+    if (pipelineResult.hasError()) {
+      return pipelineResult;
+    }
   }
 
   const std::span<const Renderable> renderables = frame.scene->renderables();
@@ -6123,7 +6179,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       staticOnlyReuseMissAdaptiveRefreshCount;
   frame.metrics.shadow.cascadeTextureBytes =
       static_cast<uint64_t>(cascadeCount) * shadowMapSize_ * shadowMapSize_ *
-      2ull;
+      shadowDepthTextureBytesPerPixel(shadowDepthPipelineFormat_);
   frame.metrics.shadow.minCascadeTexelWorldSize = minCascadeTexelWorldSize;
   frame.metrics.shadow.maxCascadeTexelWorldSize = maxCascadeTexelWorldSize;
   frame.metrics.shadow.averageCascadeTexelWorldSize =
@@ -6280,6 +6336,10 @@ void ShadowRenderer::destroyShaders() {
     gpu_.destroyShaderModule(shadowVertexShader_);
     shadowVertexShader_ = {};
   }
+  if (nuri::isValid(shadowOpaqueVertexShader_)) {
+    gpu_.destroyShaderModule(shadowOpaqueVertexShader_);
+    shadowOpaqueVertexShader_ = {};
+  }
   if (nuri::isValid(depthFragmentShader_)) {
     gpu_.destroyShaderModule(depthFragmentShader_);
     depthFragmentShader_ = {};
@@ -6297,6 +6357,7 @@ void ShadowRenderer::destroyShaders() {
     sdsmHistogramReduceComputeShader_ = {};
   }
   shadowShader_.reset();
+  shadowOpaqueShader_.reset();
   depthShader_.reset();
   depthAlphaShader_.reset();
   sdsmReduceShader_.reset();
@@ -6304,11 +6365,7 @@ void ShadowRenderer::destroyShaders() {
   initialized_ = false;
 }
 
-void ShadowRenderer::destroyPipelineState() {
-  if (nuri::isValid(previewPipelineHandle_)) {
-    gpu_.destroyRenderPipeline(previewPipelineHandle_);
-    previewPipelineHandle_ = {};
-  }
+void ShadowRenderer::destroyShadowDepthPipelineState() {
   if (nuri::isValid(shadowDoubleSidedPipelineHandle_)) {
     gpu_.destroyRenderPipeline(shadowDoubleSidedPipelineHandle_);
     shadowDoubleSidedPipelineHandle_ = {};
@@ -6325,6 +6382,15 @@ void ShadowRenderer::destroyPipelineState() {
     gpu_.destroyRenderPipeline(shadowPipelineHandle_);
     shadowPipelineHandle_ = {};
   }
+  shadowDepthPipelineFormat_ = Format::Count;
+}
+
+void ShadowRenderer::destroyPipelineState() {
+  if (nuri::isValid(previewPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(previewPipelineHandle_);
+    previewPipelineHandle_ = {};
+  }
+  destroyShadowDepthPipelineState();
   if (nuri::isValid(sdsmReducePipelineHandle_)) {
     gpu_.destroyComputePipeline(sdsmReducePipelineHandle_);
     sdsmReducePipelineHandle_ = {};

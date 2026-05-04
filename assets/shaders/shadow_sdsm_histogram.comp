@@ -57,6 +57,7 @@ shared float sharedRawDeviceMax[LOCAL_INVOCATION_COUNT];
 shared float sharedRawLinearMin[LOCAL_INVOCATION_COUNT];
 shared float sharedRawLinearMax[LOCAL_INVOCATION_COUNT];
 shared float sharedMaxObservedLinear[LOCAL_INVOCATION_COUNT];
+shared uint sharedRawValidTiles[LOCAL_INVOCATION_COUNT];
 shared uint sharedValidTiles[LOCAL_INVOCATION_COUNT];
 shared uint sharedAnyNonClear[LOCAL_INVOCATION_COUNT];
 
@@ -163,6 +164,7 @@ void main() {
   float rawLinearMin = fixedFar;
   float rawLinearMax = fixedNear;
   float maxObservedLinear = fixedNear;
+  uint rawValidTiles = 0u;
   uint validTiles = 0u;
   bool anyNonClear = false;
 
@@ -177,21 +179,27 @@ void main() {
           tileMax < tileMin) {
         continue;
       }
-      rawDeviceMin = min(rawDeviceMin, tileMin);
-      rawDeviceMax = max(rawDeviceMax, tileMax);
       float linearMin = linearizeDeviceDepth(tileMin);
       float linearMax = linearizeDeviceDepth(tileMax);
       if (!isFiniteFloat(linearMin) || !isFiniteFloat(linearMax)) {
         continue;
       }
+      ++rawValidTiles;
+      bool tileClearMin = isClearDepth(tileMin);
+      bool tileClearMax = isClearDepth(tileMax);
+      if (tileClearMin && tileClearMax) {
+        continue;
+      }
+      rawDeviceMin = min(rawDeviceMin, tileMin);
+      rawDeviceMax = max(rawDeviceMax, tileMax);
       rawLinearMin = min(rawLinearMin, linearMin);
       rawLinearMax = max(rawLinearMax, linearMax);
       maxObservedLinear = max(maxObservedLinear, linearMax);
       float histogramLinearMax = linearMax;
-      if (isClearDepth(tileMax) && !isClearDepth(tileMin)) {
+      if (tileClearMax && !tileClearMin) {
         histogramLinearMax = linearMin;
       }
-      if (!isClearDepth(tileMin) || !isClearDepth(tileMax)) {
+      if (!tileClearMin || !tileClearMax) {
         anyNonClear = true;
       }
       addHistogramInterval(fixedNear, fixedFar, linearMin, histogramLinearMax);
@@ -204,6 +212,7 @@ void main() {
   sharedRawLinearMin[localIndex] = rawLinearMin;
   sharedRawLinearMax[localIndex] = rawLinearMax;
   sharedMaxObservedLinear[localIndex] = maxObservedLinear;
+  sharedRawValidTiles[localIndex] = rawValidTiles;
   sharedValidTiles[localIndex] = validTiles;
   sharedAnyNonClear[localIndex] = anyNonClear ? 1u : 0u;
   barrier();
@@ -221,6 +230,7 @@ void main() {
           max(sharedRawLinearMax[localIndex], sharedRawLinearMax[other]);
       sharedMaxObservedLinear[localIndex] = max(
           sharedMaxObservedLinear[localIndex], sharedMaxObservedLinear[other]);
+      sharedRawValidTiles[localIndex] += sharedRawValidTiles[other];
       sharedValidTiles[localIndex] += sharedValidTiles[other];
       sharedAnyNonClear[localIndex] |= sharedAnyNonClear[other];
     }
@@ -236,6 +246,7 @@ void main() {
   rawLinearMin = sharedRawLinearMin[0];
   rawLinearMax = sharedRawLinearMax[0];
   maxObservedLinear = sharedMaxObservedLinear[0];
+  rawValidTiles = sharedRawValidTiles[0];
   validTiles = sharedValidTiles[0];
   anyNonClear = sharedAnyNonClear[0] != 0u;
 
@@ -248,8 +259,18 @@ void main() {
   for (uint i = bucketCount; i < MAX_BUCKETS; ++i) {
     pc.resultBuffer.bucketWeights[i] = 0.0;
   }
-  bool valid = validTiles > 0u && isFiniteFloat(rawLinearMin) &&
-               isFiniteFloat(rawLinearMax) && rawLinearMax >= rawLinearMin;
+  bool clearOnly = !anyNonClear && rawValidTiles > 0u;
+  if (clearOnly) {
+    float clearLinearDepth = linearizeDeviceDepth(1.0);
+    rawDeviceMin = 1.0;
+    rawDeviceMax = 1.0;
+    rawLinearMin = clearLinearDepth;
+    rawLinearMax = clearLinearDepth;
+    maxObservedLinear = clearLinearDepth;
+  }
+  bool valid = (validTiles > 0u && isFiniteFloat(rawLinearMin) &&
+                isFiniteFloat(rawLinearMax) && rawLinearMax >= rawLinearMin) ||
+               clearOnly;
   if (!valid) {
     pc.resultBuffer.metadata.y = 0u;
     return;
@@ -259,7 +280,6 @@ void main() {
   float highTrim = clamp(pc.trimParams.y, 0.0, 20.0) * 0.01;
   float trimmedNear = percentileDepth(fixedNear, fixedFar, lowTrim);
   float trimmedFar = percentileDepth(fixedNear, fixedFar, 1.0 - highTrim);
-  bool clearOnly = !anyNonClear;
   if (clearOnly) {
     trimmedNear = rawLinearMin;
     trimmedFar = rawLinearMax;

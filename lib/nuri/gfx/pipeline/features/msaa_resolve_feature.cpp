@@ -1,6 +1,7 @@
 #include "nuri/gfx/pipeline/features/msaa_resolve_feature.h"
 
 #include "nuri/gfx/frame/render_frame_context.h"
+#include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/frame_build_context.h"
 
 namespace nuri {
@@ -86,6 +87,7 @@ Result<bool, std::string> MsaaResolvePass::build(FrameBuildContext &ctx) {
   passDesc.depthResolveTexture = depthResolveResult.value();
   passDesc.debugLabel = "MSAA Resolve Pass";
   passDesc.debugColor = 0xff44ccff;
+  passDesc.gpuTimingScope = GpuTimingScope::MsaaResolve;
   passDesc.markImplicitOutputSideEffect = true;
 
   auto addResult = ctx.graph.addGraphicsPass(passDesc);
@@ -103,6 +105,13 @@ Result<bool, std::string> MsaaResolvePass::build(FrameBuildContext &ctx) {
   metrics.msaaDepthResolveTargetBound = true;
   metrics.msaaResolveBandwidthEstimateBytes =
       metrics.msaaColorTextureBytes + metrics.msaaDepthTextureBytes;
+  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  if (hasGpuTimingScope(timingReport, GpuTimingScope::MsaaResolve)) {
+    metrics.msaaResolveGpuTimeMs = timingReport.msaaResolveTimeMs;
+    metrics.msaaResolveGpuTimingSourceFrameIndex =
+        timingReport.msaaResolveSourceFrameIndex;
+    metrics.msaaResolveGpuTimingAvailable = 1u;
+  }
 
   return Result<bool, std::string>::makeResult(true);
 }

@@ -433,6 +433,7 @@ struct RenderSettings {
     ShadowQualityPreset qualityPreset = ShadowQualityPreset::Custom;
     uint32_t cascadeCount = kMaxShadowCascades;
     uint32_t shadowMapSize = 2048;
+    Format depthFormat = kDefaultShadowMapDepthFormat;
     float maxDistance = 150.0f;
     float maxDistanceFadeFraction = 0.0f;
     ShadowCascadeSplitMode splitMode = ShadowCascadeSplitMode::Practical;
@@ -755,6 +756,7 @@ inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
   case ShadowQualityPreset::Low:
     settings.cascadeCount = 1u;
     settings.shadowMapSize = 1024u;
+    settings.depthFormat = kDefaultShadowMapDepthFormat;
     settings.maxDistance = 80.0f;
     settings.maxDistanceFadeFraction = 0.0f;
     settings.splitLambda = 0.35f;
@@ -769,6 +771,7 @@ inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
   case ShadowQualityPreset::Medium:
     settings.cascadeCount = 3u;
     settings.shadowMapSize = 2048u;
+    settings.depthFormat = kDefaultShadowMapDepthFormat;
     settings.maxDistance = 120.0f;
     settings.maxDistanceFadeFraction = 0.0f;
     settings.splitLambda = 0.30f;
@@ -784,6 +787,7 @@ inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
   case ShadowQualityPreset::High:
     settings.cascadeCount = 4u;
     settings.shadowMapSize = 4096u;
+    settings.depthFormat = kDefaultShadowMapDepthFormat;
     settings.maxDistance = 150.0f;
     settings.maxDistanceFadeFraction = 0.0f;
     settings.splitLambda = 0.25f;
@@ -791,7 +795,7 @@ inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
     settings.slopeBias = 1.5f;
     settings.normalBias = 0.50f;
     settings.filterMode = ShadowFilterMode::PoissonPCF;
-    settings.pcfSampleCount = 16u;
+    settings.pcfSampleCount = 24u;
     settings.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
     settings.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
     settings.debug.fixedPoissonRotation = true;
@@ -799,14 +803,15 @@ inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
   case ShadowQualityPreset::Ultra:
     settings.cascadeCount = 4u;
     settings.shadowMapSize = 8192u;
+    settings.depthFormat = Format::D32_FLOAT;
     settings.maxDistance = 220.0f;
     settings.maxDistanceFadeFraction = 0.0f;
-    settings.splitLambda = 0.0f;
-    settings.constantBias = 0.0004f;
-    settings.slopeBias = 1.3f;
-    settings.normalBias = 0.60f;
+    settings.splitLambda = 0.50f;
+    settings.constantBias = 0.00035f;
+    settings.slopeBias = 1.15f;
+    settings.normalBias = 0.40f;
     settings.filterMode = ShadowFilterMode::PoissonPCF;
-    settings.pcfSampleCount = 16u;
+    settings.pcfSampleCount = 32u;
     settings.pcssBlockerSampleCount = 16u;
     settings.pcssFilterSampleCount = 32u;
     settings.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
@@ -822,6 +827,14 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   settings.cascadeCount =
       std::clamp(settings.cascadeCount, 1u, kMaxShadowCascades);
   settings.shadowMapSize = std::max(settings.shadowMapSize, 1u);
+  switch (settings.depthFormat) {
+  case Format::D16_UNORM:
+  case Format::D32_FLOAT:
+    break;
+  default:
+    settings.depthFormat = kDefaultShadowMapDepthFormat;
+    break;
+  }
   settings.maxDistance =
       std::isfinite(settings.maxDistance) && settings.maxDistance > 0.0f
           ? settings.maxDistance
@@ -1265,6 +1278,7 @@ struct alignas(16) ShadowCascadeGpuData {
   glm::vec4 splitDepthTexelSize{0.0f};
   glm::vec4 uvScaleBias{1.0f, 1.0f, 0.0f, 0.0f};
   glm::vec4 biasParams{0.0f};
+  // x: PCSS receiver-depth world scale, y/z: search/filter radius clamps.
   glm::vec4 pcssParams{0.0f};
   glm::uvec4 textureSampler{kInvalidShadowBindlessIndex,
                             kInvalidShadowBindlessIndex, 0u, 0u};
@@ -1514,6 +1528,9 @@ struct OpaqueFrameMetrics {
   uint32_t depthPrepassIndirectDraws = 0;
   uint32_t depthPyramidLevels = 0;
   uint32_t depthPrepassEnabled = 0;
+  float gpuTimeMs = 0.0f;
+  uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint32_t gpuTimingAvailable = 0u;
 };
 
 struct ShadowFrameMetrics {
@@ -1641,6 +1658,7 @@ struct AntiAliasingFrameMetrics {
   uint32_t msaaHeight = 0u;
   uint32_t msaaResolvePassCount = 0u;
   uint32_t msaaAlphaMaskedDrawCount = 0u;
+  uint32_t msaaResolveGpuTimingAvailable = 0u;
   uint64_t taaResolveGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t taaDebugGpuTimingSourceFrameIndex =
@@ -1650,6 +1668,8 @@ struct AntiAliasingFrameMetrics {
   uint64_t taaTransmissionGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t spatialAAGpuTimingSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t msaaResolveGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint32_t taaCurrentFallbackFrameCount = 0u;
   uint64_t motionVectorTextureBytes = 0u;
@@ -1708,6 +1728,7 @@ struct AntiAliasingFrameMetrics {
   float taaTransmissionFlickerEstimate = 0.0f;
   float taaTransparentEdgeJitterEstimate = 0.0f;
   float spatialAAGpuTimeMs = 0.0f;
+  float msaaResolveGpuTimeMs = 0.0f;
   float spatialAAEdgePixelEstimate = 0.0f;
   float spatialAAModifiedPixelEstimate = 0.0f;
   TemporalAAClampMode taaClampMode = TemporalAAClampMode::Variance;

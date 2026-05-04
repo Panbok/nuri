@@ -359,7 +359,7 @@ private:
   Result<bool, std::string> createPreviewShaders();
   Result<bool, std::string> createSdsmReduceShaders();
   Result<bool, std::string> createSdsmHistogramReduceShaders();
-  Result<bool, std::string> createPipelines();
+  Result<bool, std::string> createPipelines(Format depthFormat);
   Result<bool, std::string> createPreviewPipeline();
   Result<bool, std::string> createSdsmReducePipeline();
   Result<bool, std::string> createSdsmHistogramReducePipeline();
@@ -400,6 +400,7 @@ private:
   void destroyShadowResources();
   void destroyBuffers();
   void destroyShaders();
+  void destroyShadowDepthPipelineState();
   void destroyPipelineState();
   void resetCachedState();
   void resetFrameBuildState();
@@ -411,6 +412,7 @@ private:
   ShadowRendererConfig config_{};
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> shadowShader_;
+  std::unique_ptr<Shader> shadowOpaqueShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> sdsmReduceShader_;
@@ -480,6 +482,7 @@ private:
   std::pmr::vector<std::byte> sdsmReadbackBuffer_;
 
   ShaderHandle shadowVertexShader_{};
+  ShaderHandle shadowOpaqueVertexShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle sdsmReduceComputeShader_{};
@@ -490,6 +493,7 @@ private:
   RenderPipelineHandle shadowDoubleSidedPipelineHandle_{};
   RenderPipelineHandle shadowAlphaPipelineHandle_{};
   RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
+  Format shadowDepthPipelineFormat_ = Format::Count;
   ComputePipelineHandle sdsmReducePipelineHandle_{};
   ComputePipelineHandle sdsmHistogramReducePipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};

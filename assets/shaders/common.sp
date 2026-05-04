@@ -180,7 +180,9 @@ struct ShadowCascadeGpuData {
   vec4 splitDepthTexelSize;
   vec4 uvScaleBias;
   vec4 biasParams;
+  // x: PCSS receiver-depth world scale, y/z: search/filter radius clamps.
   vec4 pcssParams;
+  // x: depth texture, y: compare sampler, z: raw sampler, w: square map size.
   uvec4 textureSampler;
 };
 

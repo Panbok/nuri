@@ -863,6 +863,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                   std::pmr::vector<PreparedGraphPass> &out) {
   NURI_PROFILER_FUNCTION();
   frame.metrics.opaque = {};
+  const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
+  if (hasGpuTimingScope(timingReport, GpuTimingScope::Opaque)) {
+    frame.metrics.opaque.gpuTimeMs = timingReport.opaqueTimeMs;
+    frame.metrics.opaque.gpuTimingSourceFrameIndex =
+        timingReport.opaqueSourceFrameIndex;
+    frame.metrics.opaque.gpuTimingAvailable = 1u;
+  }
   frame.opaquePickResult.reset();
   if (frame.opaquePickRequest.has_value()) {
     pendingPickRequest_ = frame.opaquePickRequest;
@@ -3370,6 +3377,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
     depthPass.desc.debugLabel = "Opaque Depth Pre-Pass";
     depthPass.desc.debugColor = kOpaquePassDebugColor;
+    depthPass.desc.gpuTimingScope = GpuTimingScope::Opaque;
     depthPass.desc.markImplicitOutputSideEffect = true;
     depthPass.hasDraws = !depthPrepassDrawItems_.empty();
     depthPass.hasPreDispatch = !pickPassSubmitted && !preDispatches_.empty();
@@ -3705,6 +3713,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
   pass.desc.debugLabel = kOpaqueMainPassLabel;
   pass.desc.debugColor = kOpaquePassDebugColor;
+  pass.desc.gpuTimingScope = GpuTimingScope::Opaque;
   pass.hasDraws = !finalPassDrawItems.empty();
   pass.hasPreDispatch =
       !pickPassSubmitted && !depthPrepassEnabled && !preDispatches_.empty();

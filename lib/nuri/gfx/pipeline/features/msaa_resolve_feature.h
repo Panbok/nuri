@@ -9,9 +9,11 @@
 
 namespace nuri {
 
+class GPUDevice;
+
 class NURI_API MsaaResolvePass final : public RenderFeaturePass {
 public:
-  MsaaResolvePass() = default;
+  explicit MsaaResolvePass(GPUDevice &gpu) : gpu_(gpu) {}
   ~MsaaResolvePass() override = default;
 
   MsaaResolvePass(const MsaaResolvePass &) = delete;
@@ -26,11 +28,14 @@ public:
   isEnabled(const FrameBuildContext &ctx) const noexcept override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
+
+private:
+  GPUDevice &gpu_;
 };
 
 class NURI_API MsaaResolveFeature final : public RenderFeature {
 public:
-  MsaaResolveFeature() = default;
+  explicit MsaaResolveFeature(GPUDevice &gpu) : pass_(gpu) {}
   ~MsaaResolveFeature() override = default;
 
   MsaaResolveFeature(const MsaaResolveFeature &) = delete;
@@ -44,7 +49,7 @@ public:
   [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
 
 private:
-  MsaaResolvePass pass_{};
+  MsaaResolvePass pass_;
   // passes_ stores a RenderFeaturePass pointer to the sibling pass_
   // MsaaResolvePass. Keep pass_ declared first; copy/move must remain deleted
   // to preserve the declaration-order and no-dangling-pointer invariant.

@@ -389,15 +389,15 @@ float directionalShadowViewDepth(vec3 worldPos) {
 
 float hardDirectionalShadowFactor(DirectionalShadowSampleContext ctx) {
   const uint shadowTexId = ctx.cascade.textureSampler.x;
-  const uint shadowSamplerId = ctx.cascade.textureSampler.y;
+  const uint shadowRawSamplerId = ctx.cascade.textureSampler.z;
   if (!ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
-      shadowSamplerId == kInvalidSamplerBindlessIndex) {
+      shadowRawSamplerId == kInvalidSamplerBindlessIndex) {
     return 1.0;
   }
 
-  return textureBindless2DShadow(
-      shadowTexId, shadowSamplerId,
-      vec3(ctx.shadowUv, ctx.receiverCompareDepth));
+  float sampleDepth =
+      textureBindless2D(shadowTexId, shadowRawSamplerId, ctx.shadowUv).r;
+  return ctx.receiverCompareDepth <= sampleDepth ? 1.0 : 0.0;
 }
 
 struct DirectionalShadowFilterResult {
@@ -435,13 +435,48 @@ bool directionalShadowFrameFlag(readonly ShadowFrameBuffer shadow, uint flag) {
   return (shadow.flagsCascadeCountLightIndex.x & flag) != 0u;
 }
 
+ivec2 directionalShadowTextureSize(DirectionalShadowSampleContext ctx,
+                                   uint shadowTexId) {
+  const uint storedShadowSize = ctx.cascade.textureSampler.w;
+  if (storedShadowSize > 0u) {
+    return ivec2(int(storedShadowSize));
+  }
+  return max(textureBindlessSize2D(shadowTexId), ivec2(1));
+}
+
+vec2 directionalShadowTexelSize(DirectionalShadowSampleContext ctx,
+                                uint shadowTexId) {
+  const uint storedShadowSize = ctx.cascade.textureSampler.w;
+  if (storedShadowSize > 0u) {
+    return vec2(1.0 / float(storedShadowSize));
+  }
+  return 1.0 / vec2(directionalShadowTextureSize(ctx, shadowTexId));
+}
+
 float sampleDirectionalShadowVisibility(DirectionalShadowSampleContext ctx,
                                         uint shadowTexId,
                                         uint shadowRawSamplerId,
                                         vec2 sampleUv) {
+  if (any(lessThan(sampleUv, vec2(0.0))) ||
+      any(greaterThan(sampleUv, vec2(1.0)))) {
+    return 1.0;
+  }
   float sampleDepth =
       textureBindless2D(shadowTexId, shadowRawSamplerId, sampleUv).r;
   return ctx.receiverCompareDepth <= sampleDepth ? 1.0 : 0.0;
+}
+
+float sampleDirectionalShadowCompare(DirectionalShadowSampleContext ctx,
+                                     uint shadowTexId,
+                                     uint shadowCompareSamplerId,
+                                     vec2 sampleUv) {
+  if (any(lessThan(sampleUv, vec2(0.0))) ||
+      any(greaterThan(sampleUv, vec2(1.0)))) {
+    return 1.0;
+  }
+  return textureBindless2DShadow(
+      shadowTexId, shadowCompareSamplerId,
+      vec3(sampleUv, ctx.receiverCompareDepth));
 }
 
 float sampleDirectionalShadowDepth(DirectionalShadowSampleContext ctx) {
@@ -457,15 +492,18 @@ float sampleDirectionalShadowDepth(DirectionalShadowSampleContext ctx) {
 float pcfGridDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
                                      DirectionalShadowSampleContext ctx) {
   const uint shadowTexId = ctx.cascade.textureSampler.x;
-  const uint shadowRawSamplerId = ctx.cascade.textureSampler.z;
+  const uint shadowCompareSamplerId = ctx.cascade.textureSampler.y;
   if (!ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
-      shadowRawSamplerId == kInvalidSamplerBindlessIndex) {
+      shadowCompareSamplerId == kInvalidSamplerBindlessIndex) {
     return 1.0;
   }
 
-  ivec2 shadowSize = max(textureBindlessSize2D(shadowTexId), ivec2(1));
-  vec2 texelSize = 1.0 / vec2(shadowSize);
   int sampleCount = directionalShadowPcfSampleCount(shadow);
+  if (sampleCount <= 1) {
+    return hardDirectionalShadowFactor(ctx);
+  }
+
+  vec2 texelSize = directionalShadowTexelSize(ctx, shadowTexId);
   int gridSide = int(ceil(sqrt(float(sampleCount))));
   float halfGrid = (float(gridSide) - 1.0) * 0.5;
 
@@ -475,148 +513,52 @@ float pcfGridDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
     int x = sampleIndex % gridSide;
     int y = sampleIndex / gridSide;
     vec2 gridOffset = vec2(float(x), float(y)) - vec2(halfGrid);
-    visibility += sampleDirectionalShadowVisibility(
-        ctx, shadowTexId, shadowRawSamplerId,
+    visibility += sampleDirectionalShadowCompare(
+        ctx, shadowTexId, shadowCompareSamplerId,
         ctx.shadowUv + gridOffset * texelSize);
     ++usedSamples;
   }
   return visibility / float(max(usedSamples, 1));
 }
 
-// shadowPoissonDiskSample stores 64 Poisson points and uses `sampleIndex & 63`
-// for wrap-around. If kMaxShadowPcfSamples is increased above 64, samples will
-// repeat unless this table is expanded or the indexing strategy is changed.
+const vec2 kShadowPoissonDisk[64] = vec2[64](
+    vec2(-0.613392, 0.617481), vec2(0.170019, -0.040254),
+    vec2(-0.299417, 0.791925), vec2(0.645680, 0.493210),
+    vec2(-0.651784, 0.717887), vec2(0.421003, 0.027070),
+    vec2(-0.817194, -0.271096), vec2(-0.705374, -0.668203),
+    vec2(0.977050, -0.108615), vec2(0.063326, 0.142369),
+    vec2(0.203528, 0.214331), vec2(-0.667531, 0.326090),
+    vec2(-0.098422, -0.295755), vec2(-0.885922, 0.215369),
+    vec2(0.566637, 0.605213), vec2(0.039766, -0.396100),
+    vec2(0.751946, 0.453352), vec2(0.078707, -0.715323),
+    vec2(-0.075838, -0.529344), vec2(0.724479, -0.580798),
+    vec2(0.222999, -0.215125), vec2(-0.467574, -0.405438),
+    vec2(-0.248268, -0.814753), vec2(0.354411, -0.887570),
+    vec2(0.175817, 0.382366), vec2(0.487472, -0.063082),
+    vec2(-0.084078, 0.898312), vec2(0.488876, -0.783441),
+    vec2(0.470016, 0.217933), vec2(-0.696890, -0.549791),
+    vec2(-0.149693, 0.605762), vec2(0.034211, 0.979980),
+    vec2(0.503098, -0.308878), vec2(-0.016205, -0.872921),
+    vec2(0.385784, -0.393902), vec2(-0.146886, -0.859249),
+    vec2(0.643361, 0.164098), vec2(0.634388, -0.049471),
+    vec2(-0.688894, 0.007843), vec2(0.464034, -0.188818),
+    vec2(-0.440840, 0.137486), vec2(0.364483, 0.511704),
+    vec2(0.034028, 0.325968), vec2(0.099094, -0.308023),
+    vec2(0.693960, -0.366253), vec2(0.678884, -0.204688),
+    vec2(0.001801, 0.780328), vec2(0.145177, -0.898984),
+    vec2(0.062655, -0.611866), vec2(0.315226, -0.604297),
+    vec2(-0.780145, 0.486251), vec2(-0.371868, 0.882138),
+    vec2(0.200476, 0.494430), vec2(-0.494552, -0.711051),
+    vec2(0.612476, 0.705252), vec2(-0.578845, -0.768792),
+    vec2(-0.772454, -0.090976), vec2(0.504440, 0.372295),
+    vec2(0.155736, 0.065157), vec2(0.391522, 0.849605),
+    vec2(-0.620106, -0.328104), vec2(0.789239, -0.419965),
+    vec2(-0.545396, 0.538133), vec2(-0.178564, -0.596057));
+
+// If kMaxShadowPcfSamples is increased above 64, samples will repeat unless
+// this table is expanded or the indexing strategy is changed.
 vec2 shadowPoissonDiskSample(int sampleIndex) {
-  switch (sampleIndex & 63) {
-  case 0:
-    return vec2(-0.613392, 0.617481);
-  case 1:
-    return vec2(0.170019, -0.040254);
-  case 2:
-    return vec2(-0.299417, 0.791925);
-  case 3:
-    return vec2(0.645680, 0.493210);
-  case 4:
-    return vec2(-0.651784, 0.717887);
-  case 5:
-    return vec2(0.421003, 0.027070);
-  case 6:
-    return vec2(-0.817194, -0.271096);
-  case 7:
-    return vec2(-0.705374, -0.668203);
-  case 8:
-    return vec2(0.977050, -0.108615);
-  case 9:
-    return vec2(0.063326, 0.142369);
-  case 10:
-    return vec2(0.203528, 0.214331);
-  case 11:
-    return vec2(-0.667531, 0.326090);
-  case 12:
-    return vec2(-0.098422, -0.295755);
-  case 13:
-    return vec2(-0.885922, 0.215369);
-  case 14:
-    return vec2(0.566637, 0.605213);
-  case 15:
-    return vec2(0.039766, -0.396100);
-  case 16:
-    return vec2(0.751946, 0.453352);
-  case 17:
-    return vec2(0.078707, -0.715323);
-  case 18:
-    return vec2(-0.075838, -0.529344);
-  case 19:
-    return vec2(0.724479, -0.580798);
-  case 20:
-    return vec2(0.222999, -0.215125);
-  case 21:
-    return vec2(-0.467574, -0.405438);
-  case 22:
-    return vec2(-0.248268, -0.814753);
-  case 23:
-    return vec2(0.354411, -0.887570);
-  case 24:
-    return vec2(0.175817, 0.382366);
-  case 25:
-    return vec2(0.487472, -0.063082);
-  case 26:
-    return vec2(-0.084078, 0.898312);
-  case 27:
-    return vec2(0.488876, -0.783441);
-  case 28:
-    return vec2(0.470016, 0.217933);
-  case 29:
-    return vec2(-0.696890, -0.549791);
-  case 30:
-    return vec2(-0.149693, 0.605762);
-  case 31:
-    return vec2(0.034211, 0.979980);
-  case 32:
-    return vec2(0.503098, -0.308878);
-  case 33:
-    return vec2(-0.016205, -0.872921);
-  case 34:
-    return vec2(0.385784, -0.393902);
-  case 35:
-    return vec2(-0.146886, -0.859249);
-  case 36:
-    return vec2(0.643361, 0.164098);
-  case 37:
-    return vec2(0.634388, -0.049471);
-  case 38:
-    return vec2(-0.688894, 0.007843);
-  case 39:
-    return vec2(0.464034, -0.188818);
-  case 40:
-    return vec2(-0.440840, 0.137486);
-  case 41:
-    return vec2(0.364483, 0.511704);
-  case 42:
-    return vec2(0.034028, 0.325968);
-  case 43:
-    return vec2(0.099094, -0.308023);
-  case 44:
-    return vec2(0.693960, -0.366253);
-  case 45:
-    return vec2(0.678884, -0.204688);
-  case 46:
-    return vec2(0.001801, 0.780328);
-  case 47:
-    return vec2(0.145177, -0.898984);
-  case 48:
-    return vec2(0.062655, -0.611866);
-  case 49:
-    return vec2(0.315226, -0.604297);
-  case 50:
-    return vec2(-0.780145, 0.486251);
-  case 51:
-    return vec2(-0.371868, 0.882138);
-  case 52:
-    return vec2(0.200476, 0.494430);
-  case 53:
-    return vec2(-0.494552, -0.711051);
-  case 54:
-    return vec2(0.612476, 0.705252);
-  case 55:
-    return vec2(-0.578845, -0.768792);
-  case 56:
-    return vec2(-0.772454, -0.090976);
-  case 57:
-    return vec2(0.504440, 0.372295);
-  case 58:
-    return vec2(0.155736, 0.065157);
-  case 59:
-    return vec2(0.391522, 0.849605);
-  case 60:
-    return vec2(-0.620106, -0.328104);
-  case 61:
-    return vec2(0.789239, -0.419965);
-  case 62:
-    return vec2(-0.545396, 0.538133);
-  default:
-    return vec2(-0.178564, -0.596057);
-  }
+  return kShadowPoissonDisk[sampleIndex & 63];
 }
 
 uint shadowHash(uint value) {
@@ -630,17 +572,29 @@ uint shadowHash(uint value) {
 
 mat2 shadowPoissonRotation(readonly ShadowFrameBuffer shadow,
                            DirectionalShadowSampleContext ctx,
-                           ivec2 shadowSize) {
+                           uint shadowTexId) {
   uint seed = shadow.filterParams.w ^ (ctx.cascadeIndex * 0x9e3779b9u);
   if ((shadow.flagsCascadeCountLightIndex.x &
-       kShadowFrameFlagFixedPoissonRotation) == 0u) {
-    vec2 clampedUv = clamp(ctx.shadowUv, vec2(0.0), vec2(0.99999994));
-    ivec2 texelCoord =
-        clamp(ivec2(clampedUv * vec2(shadowSize)), ivec2(0),
-              shadowSize - ivec2(1));
-    seed ^= uint(texelCoord.x) * 0x85ebca6bu;
-    seed ^= uint(texelCoord.y) * 0xc2b2ae35u;
+       kShadowFrameFlagFixedPoissonRotation) != 0u) {
+    uint orientation = seed & 3u;
+    if (orientation == 1u) {
+      return mat2(0.0, 1.0, -1.0, 0.0);
+    }
+    if (orientation == 2u) {
+      return mat2(-1.0, 0.0, 0.0, -1.0);
+    }
+    if (orientation == 3u) {
+      return mat2(0.0, -1.0, 1.0, 0.0);
+    }
+    return mat2(1.0);
   }
+  ivec2 shadowSize = directionalShadowTextureSize(ctx, shadowTexId);
+  vec2 clampedUv = clamp(ctx.shadowUv, vec2(0.0), vec2(0.99999994));
+  ivec2 texelCoord =
+      clamp(ivec2(clampedUv * vec2(shadowSize)), ivec2(0),
+            shadowSize - ivec2(1));
+  seed ^= uint(texelCoord.x) * 0x85ebca6bu;
+  seed ^= uint(texelCoord.y) * 0xc2b2ae35u;
   float angle = float(shadowHash(seed) & 0xffffu) *
                 (6.28318530718 / 65536.0);
   float s = sin(angle);
@@ -648,27 +602,68 @@ mat2 shadowPoissonRotation(readonly ShadowFrameBuffer shadow,
   return mat2(c, -s, s, c);
 }
 
+bool tryResolveUniformPoissonPcf(DirectionalShadowSampleContext ctx,
+                                 uint shadowTexId, uint shadowRawSamplerId,
+                                 vec2 texelSize, mat2 rotation,
+                                 float radius, out float factor) {
+  const vec2 probes[8] = vec2[8](
+      vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0),
+      vec2(0.707107, 0.707107), vec2(-0.707107, 0.707107),
+      vec2(0.707107, -0.707107), vec2(-0.707107, -0.707107));
+  float sum = sampleDirectionalShadowVisibility(
+      ctx, shadowTexId, shadowRawSamplerId, ctx.shadowUv);
+  for (int probeIndex = 0; probeIndex < 8; ++probeIndex) {
+    vec2 offset = rotation * probes[probeIndex];
+    sum += sampleDirectionalShadowVisibility(
+        ctx, shadowTexId, shadowRawSamplerId,
+        ctx.shadowUv + offset * radius * texelSize);
+  }
+  if (sum <= 0.0) {
+    factor = 0.0;
+    return true;
+  }
+  if (sum >= 9.0) {
+    factor = 1.0;
+    return true;
+  }
+  factor = 1.0;
+  return false;
+}
+
 float poissonPcfDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
                                         DirectionalShadowSampleContext ctx,
                                         int sampleCount,
                                         float radiusTexels) {
   const uint shadowTexId = ctx.cascade.textureSampler.x;
+  const uint shadowCompareSamplerId = ctx.cascade.textureSampler.y;
   const uint shadowRawSamplerId = ctx.cascade.textureSampler.z;
   if (!ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
+      shadowCompareSamplerId == kInvalidSamplerBindlessIndex ||
       shadowRawSamplerId == kInvalidSamplerBindlessIndex) {
     return 1.0;
   }
 
-  ivec2 shadowSize = max(textureBindlessSize2D(shadowTexId), ivec2(1));
-  vec2 texelSize = 1.0 / vec2(shadowSize);
-  mat2 rotation = shadowPoissonRotation(shadow, ctx, shadowSize);
+  if (sampleCount <= 1) {
+    return hardDirectionalShadowFactor(ctx);
+  }
+
+  vec2 texelSize = directionalShadowTexelSize(ctx, shadowTexId);
+  mat2 rotation = shadowPoissonRotation(shadow, ctx, shadowTexId);
   float radius = max(radiusTexels, 0.0);
+  if (sampleCount >= 16) {
+    float uniformFactor = 1.0;
+    if (tryResolveUniformPoissonPcf(ctx, shadowTexId, shadowRawSamplerId,
+                                    texelSize, rotation, radius,
+                                    uniformFactor)) {
+      return uniformFactor;
+    }
+  }
   float visibility = 0.0;
   int usedSamples = 0;
   for (int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
     vec2 offset = rotation * shadowPoissonDiskSample(sampleIndex);
-    visibility += sampleDirectionalShadowVisibility(
-        ctx, shadowTexId, shadowRawSamplerId,
+    visibility += sampleDirectionalShadowCompare(
+        ctx, shadowTexId, shadowCompareSamplerId,
         ctx.shadowUv + offset * radius * texelSize);
     ++usedSamples;
   }
@@ -679,13 +674,14 @@ DirectionalShadowFilterResult poissonPcfDirectionalShadowFactor(
     readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx) {
   return makeDirectionalShadowFilterResult(
       poissonPcfDirectionalShadowFactor(
-          shadow, ctx, directionalShadowPcfSampleCount(shadow), 1.5),
+          shadow, ctx, directionalShadowPcfSampleCount(shadow), 1.0),
       0.0, 0.0, 0.0);
 }
 
 DirectionalShadowFilterResult pcssDirectionalShadowFactor(
     readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
-    float lightAngularRadiusRadians) {
+    float lightAngularRadiusRadians, int blockerSampleCount,
+    int filterSampleCount) {
   const uint shadowTexId = ctx.cascade.textureSampler.x;
   const uint shadowRawSamplerId = ctx.cascade.textureSampler.z;
   if (!ctx.valid || shadowTexId == kInvalidTextureBindlessIndex ||
@@ -693,9 +689,8 @@ DirectionalShadowFilterResult pcssDirectionalShadowFactor(
     return makeDirectionalShadowFilterResult(1.0, 0.0, 0.0, 0.0);
   }
 
-  ivec2 shadowSize = max(textureBindlessSize2D(shadowTexId), ivec2(1));
-  vec2 texelSize = 1.0 / vec2(shadowSize);
-  mat2 rotation = shadowPoissonRotation(shadow, ctx, shadowSize);
+  vec2 texelSize = directionalShadowTexelSize(ctx, shadowTexId);
+  mat2 rotation = shadowPoissonRotation(shadow, ctx, shadowTexId);
   float lightAngleScale = tan(max(lightAngularRadiusRadians, 0.0)) *
                           max(shadow.fadeParams.w, 0.0);
   float depthSpanWorld = max(ctx.cascade.pcssParams.x, kEpsilon);
@@ -705,16 +700,17 @@ DirectionalShadowFilterResult pcssDirectionalShadowFactor(
       clamp(sourceRadiusTexels, 0.0,
             max(ctx.cascade.pcssParams.y, 0.0));
 
-  int blockerSampleCount = directionalShadowPcssBlockerSampleCount(shadow);
   float blockerDepthSum = 0.0;
   int blockerCount = 0;
   for (int sampleIndex = 0; sampleIndex < blockerSampleCount; ++sampleIndex) {
     vec2 offset = rotation * shadowPoissonDiskSample(sampleIndex);
+    vec2 sampleUv = ctx.shadowUv + offset * searchRadiusTexels * texelSize;
+    if (any(lessThan(sampleUv, vec2(0.0))) ||
+        any(greaterThan(sampleUv, vec2(1.0)))) {
+      continue;
+    }
     float sampleDepth =
-        textureBindless2D(shadowTexId, shadowRawSamplerId,
-                          ctx.shadowUv + offset * searchRadiusTexels *
-                                             texelSize)
-            .r;
+        textureBindless2D(shadowTexId, shadowRawSamplerId, sampleUv).r;
     if (sampleDepth < ctx.receiverCompareDepth) {
       blockerDepthSum += sampleDepth;
       ++blockerCount;
@@ -740,11 +736,19 @@ DirectionalShadowFilterResult pcssDirectionalShadowFactor(
           ? saturate(filterRadiusTexels / ctx.cascade.pcssParams.z)
           : 0.0;
   float visibility = poissonPcfDirectionalShadowFactor(
-      shadow, ctx, directionalShadowPcssFilterSampleCount(shadow),
-      filterRadiusTexels);
+      shadow, ctx, max(filterSampleCount, 1), filterRadiusTexels);
   return makeDirectionalShadowFilterResult(visibility, blockerRatio,
                                            avgBlockerDepth,
                                            filterRadiusRatio);
+}
+
+DirectionalShadowFilterResult pcssDirectionalShadowFactor(
+    readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
+    float lightAngularRadiusRadians) {
+  return pcssDirectionalShadowFactor(
+      shadow, ctx, lightAngularRadiusRadians,
+      directionalShadowPcssBlockerSampleCount(shadow),
+      directionalShadowPcssFilterSampleCount(shadow));
 }
 
 DirectionalShadowFilterResult directionalShadowFactorFromContext(
@@ -763,6 +767,25 @@ DirectionalShadowFilterResult directionalShadowFactorFromContext(
   }
   return makeDirectionalShadowFilterResult(hardDirectionalShadowFactor(ctx),
                                            0.0, 0.0, 0.0);
+}
+
+DirectionalShadowFilterResult directionalShadowBlendFactorFromContext(
+    readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
+    uint filterMode, float lightAngularRadiusRadians) {
+  if (filterMode == kShadowFilterModePCSS) {
+    const int blendBlockerSamples =
+        min(directionalShadowPcssBlockerSampleCount(shadow), 8);
+    const int blendFilterSamples =
+        min(directionalShadowPcssFilterSampleCount(shadow), 16);
+    return pcssDirectionalShadowFactor(shadow, ctx, lightAngularRadiusRadians,
+                                       blendBlockerSamples,
+                                       blendFilterSamples);
+  }
+  if (filterMode == kShadowFilterModePoissonPCF) {
+    return poissonPcfDirectionalShadowFactor(shadow, ctx);
+  }
+  return directionalShadowFactorFromContext(shadow, ctx, filterMode,
+                                            lightAngularRadiusRadians);
 }
 
 struct DirectionalShadowResult {
@@ -901,8 +924,8 @@ DirectionalShadowResult evaluateDirectionalShadow(
   }
 
   DirectionalShadowFilterResult nextFilterResult =
-      directionalShadowFactorFromContext(shadow, state.nextCtx, filterMode,
-                                         lightAngularRadiusRadians);
+      directionalShadowBlendFactorFromContext(shadow, state.nextCtx, filterMode,
+                                              lightAngularRadiusRadians);
   r.cascadeBlendDebug = state.cascadeBlend;
   r.factor = mix(r.factor, nextFilterResult.factor, r.cascadeBlendDebug);
   if (needsPcfDebug) {
@@ -1013,7 +1036,7 @@ DirectLightingResult evaluateDirectLighting(ShadedMaterial sm, vec3 worldPos) {
           shadowState.y > 0u && shadowState.z == i) {
         DirectionalShadowResult shadowResult =
             evaluateDirectionalShadow(
-                shadow, worldPos, sm.nBase, l,
+                shadow, worldPos, sm.nGeom, l,
                 directionalLightAngularRadiusRadians(light));
         shadowFactor = shadowResult.factor;
         r.shadowFactorDebug = shadowResult.factor;

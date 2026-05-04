@@ -2208,7 +2208,8 @@ std::string msaaMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       "depthAllocated={} colorGraph={} depthGraph={} colorResolve={} "
       "depthResolve={} resolvePasses={} alphaMaskedDraws={} "
       "alphaToCoverage={} sampleShading={} spatialCleanupEnabled={} "
-      "spatialCleanupActive={} colorBytes={} depthBytes={} totalBytes={} "
+      "spatialCleanupActive={} resolveGpuMs={:.3f} resolveTiming={} "
+      "resolveTimingSourceFrame={} colorBytes={} depthBytes={} totalBytes={} "
       "bandwidthBytes={}}}",
       boolLogValue(metrics.msaaEnabled), metrics.msaaSampleCount,
       metrics.msaaWidth, metrics.msaaHeight,
@@ -2223,6 +2224,8 @@ std::string msaaMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       boolLogValue(metrics.msaaSampleShadingEnabled),
       boolLogValue(metrics.msaaSpatialCleanupEnabled),
       boolLogValue(metrics.msaaSpatialCleanupActive),
+      metrics.msaaResolveGpuTimeMs, metrics.msaaResolveGpuTimingAvailable,
+      metrics.msaaResolveGpuTimingSourceFrameIndex,
       static_cast<unsigned long long>(metrics.msaaColorTextureBytes),
       static_cast<unsigned long long>(metrics.msaaDepthTextureBytes),
       static_cast<unsigned long long>(metrics.msaaTotalBytes),
@@ -2230,14 +2233,32 @@ std::string msaaMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
           metrics.msaaResolveBandwidthEstimateBytes));
 }
 
+std::string opaqueMetricsSummary(const OpaqueFrameMetrics &metrics) {
+  return std::format(
+      "opaque={{gpuMs={:.3f} gpuTiming={} sourceFrame={} totalInstances={} "
+      "visibleInstances={} draws={} indirectDraws={} indirectCommands={} "
+      "computeDispatches={} computeDispatchX={} depthPrepass={} "
+      "depthPrepassDraws={} tessDraws={} tessInstances={} overlays={}}}",
+      metrics.gpuTimeMs, metrics.gpuTimingAvailable,
+      metrics.gpuTimingSourceFrameIndex, metrics.totalInstances,
+      metrics.visibleInstances, metrics.instancedDraws,
+      metrics.indirectDrawCalls, metrics.indirectCommands,
+      metrics.computeDispatches, metrics.computeDispatchX,
+      metrics.depthPrepassEnabled, metrics.depthPrepassDraws,
+      metrics.tessellatedDraws, metrics.tessellatedInstances,
+      metrics.debugOverlayDraws);
+}
+
 std::string antiAliasingDiagnosticsSummary(
     const RenderSettings::AntiAliasingSettings &settings,
-    const AntiAliasingFrameMetrics &metrics, bool temporalFeaturePresent) {
+    const RenderFrameMetrics &frameMetrics, bool temporalFeaturePresent) {
   return std::format(
-      "AA diagnostics: {} {} {} {}",
+      "AA diagnostics: {} {} {} {} {}",
       antiAliasingSettingsSummary(settings, temporalFeaturePresent),
-      antiAliasingMetricsSummary(metrics), spatialAAMetricsSummary(metrics),
-      msaaMetricsSummary(metrics));
+      antiAliasingMetricsSummary(frameMetrics.antiAliasing),
+      spatialAAMetricsSummary(frameMetrics.antiAliasing),
+      msaaMetricsSummary(frameMetrics.antiAliasing),
+      opaqueMetricsSummary(frameMetrics.opaque));
 }
 
 void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
@@ -2408,9 +2429,45 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                                                            : "pending");
     ImGui::Text("Debug GPU: %.3f ms (%s)", metrics.taaDebugGpuTimeMs,
                 metrics.taaDebugGpuTimingAvailable != 0u ? "ready" : "pending");
+    ImGui::Text("Opaque GPU: %.3f ms (%s, frame %llu)",
+                frameMetrics.opaque.gpuTimeMs,
+                frameMetrics.opaque.gpuTimingAvailable != 0u ? "ready"
+                                                             : "pending",
+                static_cast<unsigned long long>(
+                    frameMetrics.opaque.gpuTimingSourceFrameIndex));
     ImGui::Text("Spatial GPU: %.3f ms (%s)", metrics.spatialAAGpuTimeMs,
                 metrics.spatialAAGpuTimingAvailable != 0u ? "ready"
                                                           : "pending");
+    ImGui::Text("MSAA Resolve GPU: %.3f ms (%s)",
+                metrics.msaaResolveGpuTimeMs,
+                metrics.msaaResolveGpuTimingAvailable != 0u ? "ready"
+                                                            : "pending");
+    const uint64_t aaResidentBytes =
+        metrics.motionVectorTotalBytes + metrics.reactiveMaskTotalBytes +
+        metrics.spatialAATotalBytes + metrics.spatialAALutTextureBytes +
+        metrics.msaaTotalBytes;
+    const uint64_t aaBandwidthBytes =
+        metrics.motionVectorClearBytes +
+        metrics.velocityPassBandwidthEstimateBytes +
+        metrics.velocityDebugBandwidthEstimateBytes +
+        metrics.reactiveMaskPassBandwidthEstimateBytes +
+        metrics.taaHistoryBandwidthEstimateBytes +
+        metrics.spatialAABandwidthEstimateBytes +
+        metrics.msaaResolveBandwidthEstimateBytes;
+    ImGui::Text("AA Memory: %.2f MiB  Bandwidth Est: %.2f MiB",
+                static_cast<double>(aaResidentBytes) / (1024.0 * 1024.0),
+                static_cast<double>(aaBandwidthBytes) / (1024.0 * 1024.0));
+    ImGui::Text("Opaque Work: %u/%u visible, draws %u, indirect %u/%u",
+                frameMetrics.opaque.visibleInstances,
+                frameMetrics.opaque.totalInstances,
+                frameMetrics.opaque.instancedDraws,
+                frameMetrics.opaque.indirectDrawCalls,
+                frameMetrics.opaque.indirectCommands);
+    ImGui::Text("Opaque Compute: dispatches %u x%u, depth prepass %s (%u)",
+                frameMetrics.opaque.computeDispatches,
+                frameMetrics.opaque.computeDispatchX,
+                frameMetrics.opaque.depthPrepassEnabled != 0u ? "on" : "off",
+                frameMetrics.opaque.depthPrepassDraws);
     ImGui::Text(
         "Rejection: %.3f  Filter: %s", metrics.taaDisocclusionRejectionEstimate,
         temporalAAHistoryFilterModeDisplayName(metrics.taaHistoryFilterMode));
@@ -2470,6 +2527,12 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                 metrics.msaaColorResolveTargetBound ? "bound" : "missing",
                 metrics.msaaDepthResolveTargetBound ? "bound" : "missing");
     ImGui::Text("Resolve Passes: %u", metrics.msaaResolvePassCount);
+    ImGui::Text("Standalone Resolve GPU Time: %.3f ms (%s, frame %llu)",
+                metrics.msaaResolveGpuTimeMs,
+                metrics.msaaResolveGpuTimingAvailable != 0u ? "available"
+                                                            : "pending",
+                static_cast<unsigned long long>(
+                    metrics.msaaResolveGpuTimingSourceFrameIndex));
     ImGui::Text("Alpha-Masked Draws: %u", metrics.msaaAlphaMaskedDrawCount);
     ImGui::Text("Alpha-to-Coverage: %s",
                 metrics.msaaAlphaToCoverageEnabled ? "enabled" : "inactive");
@@ -2748,7 +2811,8 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   }
   if (ImGui::Button("Dump AA Diagnostics To Log##AntiAliasing")) {
     const std::string summary =
-        antiAliasingDiagnosticsSummary(aa, metrics, temporalFeaturePresent);
+        antiAliasingDiagnosticsSummary(aa, frameMetrics,
+                                       temporalFeaturePresent);
     NURI_LOG_INFO("%s", summary.c_str());
   }
 }
@@ -5815,7 +5879,7 @@ struct ImGuiEditor::Impl {
 
     const bool temporalFeaturePresent = hasTemporalAAFeature(renderPipeline);
     const std::string diagnostics = antiAliasingDiagnosticsSummary(
-        aa, frameMetrics.antiAliasing, temporalFeaturePresent);
+        aa, frameMetrics, temporalFeaturePresent);
     NURI_LOG_INFO("AA interval diagnostics: frame=%llu dtMs=%.3f %s",
                   static_cast<unsigned long long>(frameMetrics.frameIndex),
                   frameDeltaSeconds * 1000.0, diagnostics.c_str());

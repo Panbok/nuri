@@ -1014,6 +1014,8 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     completedReport.temporalAAResolveSourceFrameIndex = pending.frameIndex;
     completedReport.temporalAADebugSourceFrameIndex = pending.frameIndex;
     completedReport.spatialAASourceFrameIndex = pending.frameIndex;
+    completedReport.opaqueSourceFrameIndex = pending.frameIndex;
+    completedReport.msaaResolveSourceFrameIndex = pending.frameIndex;
     bool hadShadowSdsmRange = false;
     double shadowTimeMs = 0.0;
     double shadowDepthTimeMs = 0.0;
@@ -1023,6 +1025,8 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     double temporalAAResolveTimeMs = 0.0;
     double temporalAADebugTimeMs = 0.0;
     double spatialAATimeMs = 0.0;
+    double opaqueTimeMs = 0.0;
+    double msaaResolveTimeMs = 0.0;
     bool shadowTimingAvailable = false;
     bool shadowDepthTimingAvailable = false;
     bool shadowSdsmTimingAvailable = false;
@@ -1031,6 +1035,8 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     bool temporalAAResolveTimingAvailable = false;
     bool temporalAADebugTimingAvailable = false;
     bool spatialAATimingAvailable = false;
+    bool opaqueTimingAvailable = false;
+    bool msaaResolveTimingAvailable = false;
     std::vector<uint64_t> queryData;
     for (const PendingTimingQueryRange &range : pending.timingRanges) {
       hadShadowSdsmRange =
@@ -1056,9 +1062,9 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
         const double intervalTimeMs =
             static_cast<double>(endTicks - beginTicks) *
             impl.gpuTimingTimestampPeriodToMs;
-        shadowTimeMs += intervalTimeMs;
         switch (range.scope) {
         case GpuTimingScope::Shadow:
+          shadowTimeMs += intervalTimeMs;
           shadowTimingAvailable = true;
           break;
         case GpuTimingScope::ShadowDepth:
@@ -1090,6 +1096,14 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
         case GpuTimingScope::SpatialAA:
           spatialAATimeMs += intervalTimeMs;
           spatialAATimingAvailable = true;
+          break;
+        case GpuTimingScope::Opaque:
+          opaqueTimeMs += intervalTimeMs;
+          opaqueTimingAvailable = true;
+          break;
+        case GpuTimingScope::MsaaResolve:
+          msaaResolveTimeMs += intervalTimeMs;
+          msaaResolveTimingAvailable = true;
           break;
         case GpuTimingScope::None:
           break;
@@ -1156,6 +1170,18 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
       completedReport.spatialAASourceFrameIndex = pending.frameIndex;
       completedReport.availableScopeMask |=
           gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
+    }
+    if (opaqueTimingAvailable) {
+      completedReport.opaqueTimeMs = static_cast<float>(opaqueTimeMs);
+      completedReport.opaqueSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::Opaque);
+    }
+    if (msaaResolveTimingAvailable) {
+      completedReport.msaaResolveTimeMs = static_cast<float>(msaaResolveTimeMs);
+      completedReport.msaaResolveSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
     }
     if (hadShadowSdsmRange && !shadowSdsmTimingAvailable &&
         !impl.loggedShadowSdsmTimingCollectionWarning) {
