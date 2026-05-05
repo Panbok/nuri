@@ -6,7 +6,7 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
-layout(set = 0, binding = 2, rgba16f) uniform image2D kImagesRGBA16F[];
+layout(set = 0, binding = 2, r32f) uniform image2D kImagesR32F[];
 
 layout(push_constant) uniform constants {
   uint sourceTexId;
@@ -14,15 +14,13 @@ layout(push_constant) uniform constants {
   uint edgeTexId;
   uint width;
   uint height;
-  uint passIndex;
 }
 pc;
 
-const float kNormalEpsilon = 1.0e-6;
 const float kMaxVisibilityReduction = 0.45;
 
-vec4 sampleAo(ivec2 pos) {
-  return texelFetch(kTextures2D[nonuniformEXT(pc.sourceTexId)], pos, 0);
+float sampleAo(ivec2 pos) {
+  return texelFetch(kTextures2D[nonuniformEXT(pc.sourceTexId)], pos, 0).r;
 }
 
 float samplePackedEdges(ivec2 pos) {
@@ -39,16 +37,7 @@ vec4 unpackEdges(float packedEdges) {
   return clamp(edgesLRTB, 0.0, 1.0);
 }
 
-vec3 safeNormalize(vec3 v, vec3 fallback) {
-  float l = length(v);
-  return l < kNormalEpsilon ? fallback : v / l;
-}
-
-float edgeWeightForOffset(ivec2 pos, ivec2 offset, vec4 centerEdges) {
-  ivec2 size = ivec2(int(pc.width), int(pc.height));
-  ivec2 samplePos = clamp(pos + offset, ivec2(0), size - ivec2(1));
-  vec4 neighborEdges = unpackEdges(samplePackedEdges(samplePos));
-
+float edgeWeightForOffset(ivec2 offset, vec4 centerEdges, vec4 neighborEdges) {
   if (offset.x < 0 && offset.y == 0) {
     return centerEdges.x * neighborEdges.y;
   }
@@ -67,14 +56,12 @@ float edgeWeightForOffset(ivec2 pos, ivec2 offset, vec4 centerEdges) {
   return 0.425 * (horizontal + vertical);
 }
 
-void addSample(ivec2 pos, ivec2 offset, vec4 centerEdges, inout vec3 bentSum,
+void addSample(ivec2 pos, ivec2 offset, ivec2 maxPos, vec4 centerEdges,
                inout float visibilitySum, inout float weightSum) {
-  ivec2 size = ivec2(int(pc.width), int(pc.height));
-  ivec2 samplePos = clamp(pos + offset, ivec2(0), size - ivec2(1));
-  float weight = edgeWeightForOffset(pos, offset, centerEdges);
-  vec4 sampleValue = sampleAo(samplePos);
-  bentSum += (sampleValue.xyz * 2.0 - 1.0) * weight;
-  visibilitySum += sampleValue.a * weight;
+  ivec2 samplePos = clamp(pos + offset, ivec2(0), maxPos);
+  vec4 neighborEdges = unpackEdges(samplePackedEdges(samplePos));
+  float weight = edgeWeightForOffset(offset, centerEdges, neighborEdges);
+  visibilitySum += sampleAo(samplePos) * weight;
   weightSum += weight;
 }
 
@@ -85,28 +72,26 @@ void main() {
     return;
   }
 
-  vec4 center = sampleAo(pos);
-  vec3 centerBent = safeNormalize(center.xyz * 2.0 - 1.0, vec3(0.0, 0.0, 1.0));
+  float center = sampleAo(pos);
   vec4 centerEdges = unpackEdges(samplePackedEdges(pos));
+  ivec2 maxPos = size - ivec2(1);
 
   const float centerWeight = 1.0;
-  vec3 bentSum = centerBent * centerWeight;
-  float visibilitySum = center.a * centerWeight;
+  float visibilitySum = center * centerWeight;
   float weightSum = centerWeight;
 
-  addSample(pos, ivec2(-1, 0), centerEdges, bentSum, visibilitySum, weightSum);
-  addSample(pos, ivec2(1, 0), centerEdges, bentSum, visibilitySum, weightSum);
-  addSample(pos, ivec2(0, -1), centerEdges, bentSum, visibilitySum, weightSum);
-  addSample(pos, ivec2(0, 1), centerEdges, bentSum, visibilitySum, weightSum);
-  addSample(pos, ivec2(-1, -1), centerEdges, bentSum, visibilitySum, weightSum);
-  addSample(pos, ivec2(1, -1), centerEdges, bentSum, visibilitySum, weightSum);
-  addSample(pos, ivec2(-1, 1), centerEdges, bentSum, visibilitySum, weightSum);
-  addSample(pos, ivec2(1, 1), centerEdges, bentSum, visibilitySum, weightSum);
+  addSample(pos, ivec2(-1, 0), maxPos, centerEdges, visibilitySum, weightSum);
+  addSample(pos, ivec2(1, 0), maxPos, centerEdges, visibilitySum, weightSum);
+  addSample(pos, ivec2(0, -1), maxPos, centerEdges, visibilitySum, weightSum);
+  addSample(pos, ivec2(0, 1), maxPos, centerEdges, visibilitySum, weightSum);
+  addSample(pos, ivec2(-1, -1), maxPos, centerEdges, visibilitySum, weightSum);
+  addSample(pos, ivec2(1, -1), maxPos, centerEdges, visibilitySum, weightSum);
+  addSample(pos, ivec2(-1, 1), maxPos, centerEdges, visibilitySum, weightSum);
+  addSample(pos, ivec2(1, 1), maxPos, centerEdges, visibilitySum, weightSum);
 
   float invWeight = 1.0 / max(weightSum, 1.0e-4);
-  vec3 bent = safeNormalize(bentSum * invWeight, centerBent);
   float visibility =
       clamp(visibilitySum * invWeight, 1.0 - kMaxVisibilityReduction, 1.0);
-  imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
-             vec4(bent * 0.5 + 0.5, visibility));
+  imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+             vec4(visibility, 0.0, 0.0, 0.0));
 }

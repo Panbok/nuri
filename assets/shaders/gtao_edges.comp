@@ -16,10 +16,8 @@ layout(push_constant) uniform constants {
 }
 pc;
 
-float sampleViewDepth(ivec2 pos) {
-  ivec2 size = ivec2(int(pc.width), int(pc.height));
-  ivec2 clampedPos = clamp(pos, ivec2(0), size - ivec2(1));
-  return texelFetch(kTextures2D[nonuniformEXT(pc.depthTexId)], clampedPos, 0).r;
+float fetchViewDepth(ivec2 pos) {
+  return texelFetch(kTextures2D[nonuniformEXT(pc.depthTexId)], pos, 0).r;
 }
 
 vec4 calculateEdges(float centerZ, float leftZ, float rightZ, float topZ,
@@ -45,11 +43,12 @@ void main() {
     return;
   }
 
-  float centerZ = sampleViewDepth(pos);
-  float leftZ = sampleViewDepth(pos + ivec2(-1, 0));
-  float rightZ = sampleViewDepth(pos + ivec2(1, 0));
-  float topZ = sampleViewDepth(pos + ivec2(0, -1));
-  float bottomZ = sampleViewDepth(pos + ivec2(0, 1));
+  ivec2 maxPos = size - ivec2(1);
+  float centerZ = fetchViewDepth(pos);
+  float leftZ = fetchViewDepth(clamp(pos + ivec2(-1, 0), ivec2(0), maxPos));
+  float rightZ = fetchViewDepth(clamp(pos + ivec2(1, 0), ivec2(0), maxPos));
+  float topZ = fetchViewDepth(clamp(pos + ivec2(0, -1), ivec2(0), maxPos));
+  float bottomZ = fetchViewDepth(clamp(pos + ivec2(0, 1), ivec2(0), maxPos));
   float packedEdges =
       packEdges(calculateEdges(centerZ, leftZ, rightZ, topZ, bottomZ));
   imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,

@@ -6,8 +6,7 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
-layout(set = 0, binding = 1) uniform sampler kSamplers[];
-layout(set = 0, binding = 2, rgba16f) uniform image2D kImagesRGBA16F[];
+layout(set = 0, binding = 2, r32f) uniform image2D kImagesR32F[];
 
 const uint kViewDepthMipCount = 5u;
 const float kPi = 3.14159265359;
@@ -102,8 +101,12 @@ float sampleViewDepth(float mipLevel, vec2 uv) {
   uint mip0 = uint(floor(clampedMip));
   uint mip1 = min(mip0 + 1u, kViewDepthMipCount - 1u);
   float depth0 = sampleViewDepthLevel(mip0, uv);
+  float blend = fract(clampedMip);
+  if (blend <= 1.0e-5 || mip0 == mip1) {
+    return depth0;
+  }
   float depth1 = sampleViewDepthLevel(mip1, uv);
-  return mix(depth0, depth1, fract(clampedMip));
+  return mix(depth0, depth1, blend);
 }
 
 float samplePackedEdges(ivec2 pos) {
@@ -172,13 +175,13 @@ void main() {
   vec2 invSize = 1.0 / vec2(size);
   vec2 halfTexel = vec2(0.5) * invSize;
   vec2 uv = (vec2(pos) + vec2(0.5)) * invSize;
-  float centerDepth = sampleViewDepth(0.0, uv);
+  float centerDepth = sampleViewDepthLevel(0u, uv);
   vec4 normalSample = sampleTexture(pc.normalTexId, pos);
   vec3 viewNormal = normalSample.xyz * 2.0 - 1.0;
   float normalLenSq = dot(viewNormal, viewNormal);
   if (normalSample.a <= 0.0 || normalLenSq <= 1.0e-6 || centerDepth <= 1.0e-5) {
-    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
-               vec4(0.5, 0.5, 1.0, 1.0));
+    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+               vec4(1.0, 0.0, 0.0, 0.0));
     return;
   }
   viewNormal *= inversesqrt(normalLenSq);
@@ -193,8 +196,8 @@ void main() {
                 max(float(pc.height), 1.0);
   float radiusPixels = min(effectRadius / max(viewUnitsPerPixel, 1.0e-4), 96.0);
   if (radiusPixels < kPixelTooCloseThreshold) {
-    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
-               vec4(viewNormal * 0.5 + 0.5, 1.0));
+    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+               vec4(1.0, 0.0, 0.0, 0.0));
     return;
   }
 
@@ -330,7 +333,6 @@ void main() {
   float strength = clamp(unpackFloat(pc.strengthBits), 0.0, 1.0);
   visibility = mix(1.0, rawVisibility, strength);
   visibility = max(visibility, 1.0 - kMaxVisibilityReduction);
-  vec3 packedBent = viewNormal * 0.5 + 0.5;
-  imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
-             vec4(packedBent, visibility));
+  imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+             vec4(visibility, 0.0, 0.0, 0.0));
 }

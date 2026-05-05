@@ -240,10 +240,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
         gpu_.getTextureBindlessIndex(ctx.shared.ambientOcclusionTexture);
     ambientOcclusionSamplerId = gpu_.getDefaultSamplerBindlessIndex();
     if (ambientOcclusionTexId != kInvalidTextureBindlessIndex) {
-      flags |=
-          kForwardSceneHasAmbientOcclusion | kForwardSceneHasAmbientBentNormal;
+      flags |= kForwardSceneHasAmbientOcclusion;
       ambientOcclusionFlags =
-          kAmbientOcclusionFlagScalarAo | kAmbientOcclusionFlagBentNormal |
+          kAmbientOcclusionFlagScalarAo |
           ((static_cast<uint32_t>(ambientOcclusionSettings.debugView) &
             kAmbientOcclusionDebugViewMask)
            << kAmbientOcclusionDebugViewShift);

@@ -225,7 +225,7 @@ static constexpr Format kFrameCompositionMotionVectorFormat =
 static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R32_FLOAT;
 static constexpr Format kFrameCompositionNormalFormat = Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionAmbientOcclusionFormat =
-    Format::RGBA16_FLOAT;
+    Format::R32_FLOAT;
 // Motion vectors are normalized UV-space history lookup offsets:
 // historyUv = currentUv + velocity. Current and previous jitter are excluded.
 static constexpr ClearColor kFrameCompositionMotionVectorClearValue{
@@ -234,12 +234,10 @@ static constexpr ClearColor kFrameCompositionReactiveMaskClearValue{
     .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
 static constexpr ClearColor kFrameCompositionNormalClearValue{
     .r = 0.0f, .g = 0.0f, .b = 1.0f, .a = 0.0f};
-// Ambient occlusion RGBA stores bent normal in rgb when
-// kAmbientOcclusionFlagBentNormal is set and scalar visibility in alpha when
-// kAmbientOcclusionFlagScalarAo is set. The clear value is view-space +Z
-// encoded as rgb=(0,0,1) and fully visible scalar AO a=1.
+// Ambient occlusion stores scalar visibility in R when
+// kAmbientOcclusionFlagScalarAo is set. The clear value is fully visible AO.
 static constexpr ClearColor kFrameCompositionAmbientOcclusionClearValue{
-    .r = 0.0f, .g = 0.0f, .b = 1.0f, .a = 1.0f};
+    .r = 1.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
 static constexpr uint32_t kAmbientOcclusionFlagScalarAo = 1u << 0u;
 static constexpr uint32_t kAmbientOcclusionFlagBentNormal = 1u << 1u;
 static constexpr uint32_t kAmbientOcclusionDebugViewShift = 8u;
