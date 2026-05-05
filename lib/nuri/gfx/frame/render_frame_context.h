@@ -556,6 +556,7 @@ struct RenderSettings {
     AmbientOcclusionDebugView debugView = AmbientOcclusionDebugView::None;
     float strength = 1.0f;
     bool active = true;
+    bool temporalAccumulation = true;
     AmbientOcclusionDisabledReason disabledReason =
         AmbientOcclusionDisabledReason::None;
     uint32_t sliceCount = 2u;
@@ -647,6 +648,7 @@ inline void sanitizeAmbientOcclusionSettings(
   } else if (sanitizeAntiAliasingMode(antiAliasing.mode) ==
              AntiAliasingMode::MSAA4x) {
     settings.disabledReason = AmbientOcclusionDisabledReason::Msaa4x;
+    settings.temporalAccumulation = false;
   } else {
     settings.active = true;
   }
@@ -1975,6 +1977,7 @@ struct AmbientOcclusionFrameMetrics {
   uint32_t depthPrefilterPassCount = 0u;
   uint32_t mainPassCount = 0u;
   uint32_t denoisePassCount = 0u;
+  uint32_t temporalPassCount = 0u;
   uint32_t depthMipCount = 0u;
   uint32_t sliceCount = 0u;
   uint32_t stepCount = 0u;
@@ -1986,6 +1989,7 @@ struct AmbientOcclusionFrameMetrics {
   uint64_t normalTextureBytes = 0u;
   uint64_t ambientOcclusionTextureBytes = 0u;
   uint64_t depthPrefilterTextureBytes = 0u;
+  uint64_t edgeTextureBytes = 0u;
   uint64_t scratchTextureBytes = 0u;
   uint64_t totalTextureBytes = 0u;
   float strength = 1.0f;
@@ -1998,6 +2002,10 @@ struct AmbientOcclusionFrameMetrics {
   bool ambientOcclusionAllocated = false;
   bool normalGraphPublished = false;
   bool ambientOcclusionGraphPublished = false;
+  bool temporalAccumulationEnabled = false;
+  bool temporalAccumulationActive = false;
+  bool temporalHistoryValid = false;
+  bool temporalMotionVectorsConsumed = false;
   bool scalarAoAvailable = false;
   bool bentNormalAvailable = false;
 };
@@ -2145,6 +2153,7 @@ struct FrameSharedResources {
   TextureHandle normalTexture{};
   RenderGraphTextureId normalGraphTexture{};
   TextureHandle ambientOcclusionTexture{};
+  TextureHandle previousAmbientOcclusionTexture{};
   RenderGraphTextureId ambientOcclusionGraphTexture{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures{};

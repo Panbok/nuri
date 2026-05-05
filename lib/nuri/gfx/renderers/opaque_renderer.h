@@ -255,6 +255,7 @@ private:
     bool isNormalPrepass = false;
     bool isDepthPyramidPass = false;
     bool isVelocityPass = false;
+    bool isEarlyVelocityPass = false;
     bool isReactiveMaskPass = false;
     uint32_t depthPyramidLevel = UINT32_MAX;
 

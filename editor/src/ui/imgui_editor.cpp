@@ -2044,6 +2044,8 @@ void drawAmbientOcclusionSettings(
 
   ImGui::SliderFloat("Strength##AmbientOcclusion", &ao.strength, 0.0f, 1.0f,
                      "%.2f");
+  ImGui::Checkbox("Temporal Accumulation##AmbientOcclusion",
+                  &ao.temporalAccumulation);
 
   int debugViewIndex =
       static_cast<int>(sanitizeAmbientOcclusionDebugView(ao.debugView));
@@ -2079,9 +2081,9 @@ void drawAmbientOcclusionSettings(
     ImGui::Text("AO Format: %s",
                 formatDisplayName(metrics.ambientOcclusionFormat));
     ImGui::Text("Normal Prepass Draws: %u", metrics.normalPrepassDraws);
-    ImGui::Text("Passes: depth %u, main %u, denoise %u",
+    ImGui::Text("Passes: depth %u, main %u, denoise %u, temporal %u",
                 metrics.depthPrefilterPassCount, metrics.mainPassCount,
-                metrics.denoisePassCount);
+                metrics.denoisePassCount, metrics.temporalPassCount);
     ImGui::Text("Sampling: slices %u, steps %u, mips %u", metrics.sliceCount,
                 metrics.stepCount, metrics.depthMipCount);
     ImGui::Text(
@@ -2091,6 +2093,12 @@ void drawAmbientOcclusionSettings(
     ImGui::Text("Textures: %u, %.2f MiB", metrics.textureCount,
                 static_cast<double>(metrics.totalTextureBytes) /
                     (1024.0 * 1024.0));
+    ImGui::Text(
+        "GTAO Textures: depth %.2f, edge %.2f, work %.2f MiB",
+        static_cast<double>(metrics.depthPrefilterTextureBytes) /
+            (1024.0 * 1024.0),
+        static_cast<double>(metrics.edgeTextureBytes) / (1024.0 * 1024.0),
+        static_cast<double>(metrics.scratchTextureBytes) / (1024.0 * 1024.0));
     ImGui::Text("Normal Texture Churn: alloc %u, realloc %u",
                 metrics.normalTextureAllocationCount,
                 metrics.normalTextureReallocationCount);
@@ -2100,6 +2108,12 @@ void drawAmbientOcclusionSettings(
     ImGui::Text("Outputs: scalar %s, bent normal %s",
                 metrics.scalarAoAvailable ? "yes" : "no",
                 metrics.bentNormalAvailable ? "yes" : "no");
+    ImGui::Text("Temporal: requested %s, active %s, history %s, motion %s",
+                metrics.temporalAccumulationEnabled ? "yes" : "no",
+                metrics.temporalAccumulationActive ? "yes" : "no",
+                metrics.temporalHistoryValid ? "valid" : "invalid",
+                metrics.temporalMotionVectorsConsumed ? "consumed"
+                                                      : "not used");
     ImGui::Text("Graph: normals %s, AO %s",
                 metrics.normalGraphPublished ? "published" : "missing",
                 metrics.ambientOcclusionGraphPublished ? "published"

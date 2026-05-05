@@ -1245,8 +1245,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   aoMetrics.sliceCount = ambientOcclusionSettings.sliceCount;
   aoMetrics.stepCount = ambientOcclusionSettings.stepCount;
   aoMetrics.denoisePassCount = ambientOcclusionSettings.denoisePassCount;
+  aoMetrics.temporalAccumulationEnabled =
+      ambientOcclusionSettings.temporalAccumulation;
   aoMetrics.disabledReason = ambientOcclusionSettings.disabledReason;
   aoMetrics.active = ambientOcclusionSettings.active;
+  const bool gtaoTemporalVelocityRequested =
+      ambientOcclusionSettings.active &&
+      ambientOcclusionSettings.temporalAccumulation && taaSelected &&
+      frame.camera.historyValid && frame.camera.temporalDataValid &&
+      nuri::isValid(frame.sharedResources.previousAmbientOcclusionTexture);
   const bool hasTaaVelocityInstances = taaSelected && instanceCount > 0;
   const bool previousCacheValid =
       hasTaaVelocityInstances && frame.camera.historyValid &&
@@ -4088,6 +4095,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       velocityPass.desc.borrowPayload = true;
       velocityPass.hasIndirectDraws = hasIndirectBaseDraws;
       velocityPass.isVelocityPass = true;
+      velocityPass.isEarlyVelocityPass = gtaoTemporalVelocityRequested;
 
       frame.metrics.antiAliasing.velocityPassCount = 1u;
       frame.metrics.antiAliasing.velocityDrawCount =
@@ -4277,7 +4285,7 @@ void OpaqueRenderer::cachePreparedGraphPassMetadata(PreparedGraphPass &) const {
 
 bool OpaqueRenderer::isPreLightingPass(const PreparedGraphPass &pass) noexcept {
   return pass.isDepthPrepass || pass.isNormalPrepass ||
-         pass.isDepthPyramidPass ||
+         pass.isDepthPyramidPass || pass.isEarlyVelocityPass ||
          pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm;
 }
 

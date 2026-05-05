@@ -1,0 +1,57 @@
+#version 460
+
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
+layout(set = 0, binding = 2, r32f) uniform image2D kImagesR32F[];
+
+layout(push_constant) uniform constants {
+  uint depthTexId;
+  uint outputTexId;
+  uint width;
+  uint height;
+}
+pc;
+
+float sampleViewDepth(ivec2 pos) {
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  ivec2 clampedPos = clamp(pos, ivec2(0), size - ivec2(1));
+  return texelFetch(kTextures2D[nonuniformEXT(pc.depthTexId)], clampedPos, 0).r;
+}
+
+vec4 calculateEdges(float centerZ, float leftZ, float rightZ, float topZ,
+                    float bottomZ) {
+  vec4 edgesLRTB = vec4(leftZ, rightZ, topZ, bottomZ) - vec4(centerZ);
+  float slopeLR = (edgesLRTB.y - edgesLRTB.x) * 0.5;
+  float slopeTB = (edgesLRTB.w - edgesLRTB.z) * 0.5;
+  vec4 slopeAdjusted = edgesLRTB + vec4(slopeLR, -slopeLR, slopeTB, -slopeTB);
+  edgesLRTB = min(abs(edgesLRTB), abs(slopeAdjusted));
+  return clamp(1.25 - edgesLRTB / max(centerZ * 0.011, 1.0e-5), 0.0, 1.0);
+}
+
+float packEdges(vec4 edgesLRTB) {
+  edgesLRTB = round(clamp(edgesLRTB, 0.0, 1.0) * 2.9);
+  return dot(edgesLRTB,
+             vec4(64.0 / 255.0, 16.0 / 255.0, 4.0 / 255.0, 1.0 / 255.0));
+}
+
+void main() {
+  ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  if (pos.x >= size.x || pos.y >= size.y) {
+    return;
+  }
+
+  float centerZ = sampleViewDepth(pos);
+  float leftZ = sampleViewDepth(pos + ivec2(-1, 0));
+  float rightZ = sampleViewDepth(pos + ivec2(1, 0));
+  float topZ = sampleViewDepth(pos + ivec2(0, -1));
+  float bottomZ = sampleViewDepth(pos + ivec2(0, 1));
+  float packedEdges =
+      packEdges(calculateEdges(centerZ, leftZ, rightZ, topZ, bottomZ));
+  imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+             vec4(packedEdges, 0.0, 0.0, 0.0));
+}

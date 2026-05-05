@@ -20,19 +20,28 @@ constexpr uint32_t kGTAODebugColor = 0xff44ddaa;
 struct DepthPrefilterPushConstants {
   uint32_t sourceDepthTexId = kInvalidTextureBindlessIndex;
   uint32_t sourceSamplerId = 0u;
-  uint32_t outputTexId = kInvalidTextureBindlessIndex;
+  std::array<uint32_t, GTAOPass::kViewDepthMipCount> outputTexIds{};
   uint32_t width = 1u;
   uint32_t height = 1u;
-  uint32_t mipLevel = 0u;
   uint32_t projectionType = 0u;
+  uint32_t radiusBits = 0u;
   float nearPlane = 0.01f;
   float farPlane = 1000.0f;
 };
 static_assert(sizeof(DepthPrefilterPushConstants) <= 128u);
 
+struct EdgePushConstants {
+  uint32_t depthTexId = kInvalidTextureBindlessIndex;
+  uint32_t outputTexId = kInvalidTextureBindlessIndex;
+  uint32_t width = 1u;
+  uint32_t height = 1u;
+};
+static_assert(sizeof(EdgePushConstants) <= 128u);
+
 struct MainPushConstants {
   std::array<uint32_t, GTAOPass::kViewDepthMipCount> depthTexIds{};
   uint32_t normalTexId = kInvalidTextureBindlessIndex;
+  uint32_t edgeTexId = kInvalidTextureBindlessIndex;
   uint32_t outputTexId = kInvalidTextureBindlessIndex;
   uint32_t width = 1u;
   uint32_t height = 1u;
@@ -51,18 +60,29 @@ static_assert(sizeof(MainPushConstants) <= 128u);
 struct DenoisePushConstants {
   uint32_t sourceTexId = kInvalidTextureBindlessIndex;
   uint32_t outputTexId = kInvalidTextureBindlessIndex;
-  uint32_t depthTexId = kInvalidTextureBindlessIndex;
+  uint32_t edgeTexId = kInvalidTextureBindlessIndex;
   uint32_t width = 1u;
   uint32_t height = 1u;
   uint32_t passIndex = 0u;
-  float normalSimilarityMin = 0.65f;
-  float normalSimilarityMax = 0.98f;
-  float depthScaleMultiplier = 0.0125f;
-  float depthScaleMin = 0.025f;
-  float spatialWeightNear = 0.8f;
-  float spatialWeightFar = 0.35f;
 };
 static_assert(sizeof(DenoisePushConstants) <= 128u);
+
+struct TemporalPushConstants {
+  uint32_t currentTexId = kInvalidTextureBindlessIndex;
+  uint32_t historyTexId = kInvalidTextureBindlessIndex;
+  uint32_t motionVectorTexId = kInvalidTextureBindlessIndex;
+  uint32_t sceneDepthTexId = kInvalidTextureBindlessIndex;
+  uint32_t edgeTexId = kInvalidTextureBindlessIndex;
+  uint32_t outputTexId = kInvalidTextureBindlessIndex;
+  uint32_t pointSamplerId = 0u;
+  uint32_t historySamplerId = 0u;
+  uint32_t width = 1u;
+  uint32_t height = 1u;
+  uint32_t flags = 0u;
+  uint32_t baseCurrentWeightBits = 0u;
+  uint32_t rejectedCurrentWeightBits = 0u;
+};
+static_assert(sizeof(TemporalPushConstants) <= 128u);
 
 template <typename T>
 std::span<const std::byte> copyPushConstants(std::array<std::byte, 128> &dst,
@@ -217,13 +237,32 @@ Result<bool, std::string> GTAOPass::ensureResources(FrameBuildContext &ctx) {
     pointClampSampler_ = samplerResult.value();
   }
 
+  if (!nuri::isValid(linearClampSampler_)) {
+    auto samplerResult =
+        gpu_.createSampler(SamplerDesc{.minFilter = SamplerFilter::Linear,
+                                       .magFilter = SamplerFilter::Linear,
+                                       .mipMode = SamplerMipMode::Disabled,
+                                       .wrapU = SamplerWrapMode::Clamp,
+                                       .wrapV = SamplerWrapMode::Clamp,
+                                       .wrapW = SamplerWrapMode::Clamp},
+                           "gtao_linear_clamp");
+    if (samplerResult.hasError()) {
+      return Result<bool, std::string>::makeError(samplerResult.error());
+    }
+    linearClampSampler_ = samplerResult.value();
+  }
+
   if (!nuri::isValid(depthPrefilterPipeline_) ||
-      !nuri::isValid(mainPipeline_) || !nuri::isValid(denoisePipeline_)) {
+      !nuri::isValid(edgePipeline_) || !nuri::isValid(mainPipeline_) ||
+      !nuri::isValid(denoisePipeline_) || !nuri::isValid(temporalPipeline_)) {
     const std::filesystem::path shaderDir = resolveShaderDir(config_);
     depthPrefilterShader_ = Shader::create("gtao_depth_prefilter", gpu_);
+    edgeShader_ = Shader::create("gtao_edges", gpu_);
     mainShader_ = Shader::create("gtao_main", gpu_);
     denoiseShader_ = Shader::create("gtao_denoise", gpu_);
-    if (!depthPrefilterShader_ || !mainShader_ || !denoiseShader_) {
+    temporalShader_ = Shader::create("gtao_temporal", gpu_);
+    if (!depthPrefilterShader_ || !edgeShader_ || !mainShader_ ||
+        !denoiseShader_ || !temporalShader_) {
       return Result<bool, std::string>::makeError(
           "GTAOPass::ensureResources: failed to create shader objects");
     }
@@ -231,43 +270,68 @@ Result<bool, std::string> GTAOPass::ensureResources(FrameBuildContext &ctx) {
     auto depthShaderResult = depthPrefilterShader_->compileFromFile(
         (shaderDir / "gtao_depth_prefilter.comp").string(),
         ShaderStage::Compute);
+    auto edgeShaderResult = edgeShader_->compileFromFile(
+        (shaderDir / "gtao_edges.comp").string(), ShaderStage::Compute);
     auto mainShaderResult = mainShader_->compileFromFile(
         (shaderDir / "gtao_main.comp").string(), ShaderStage::Compute);
     auto denoiseShaderResult = denoiseShader_->compileFromFile(
         (shaderDir / "gtao_denoise.comp").string(), ShaderStage::Compute);
-    if (depthShaderResult.hasError() || mainShaderResult.hasError() ||
-        denoiseShaderResult.hasError()) {
+    auto temporalShaderResult = temporalShader_->compileFromFile(
+        (shaderDir / "gtao_temporal.comp").string(), ShaderStage::Compute);
+    if (depthShaderResult.hasError() || edgeShaderResult.hasError() ||
+        mainShaderResult.hasError() || denoiseShaderResult.hasError() ||
+        temporalShaderResult.hasError()) {
       const std::string error =
           depthShaderResult.hasError()
               ? depthShaderResult.error()
-              : (mainShaderResult.hasError() ? mainShaderResult.error()
-                                             : denoiseShaderResult.error());
+              : (edgeShaderResult.hasError()
+                     ? edgeShaderResult.error()
+                     : (mainShaderResult.hasError()
+                            ? mainShaderResult.error()
+                            : (denoiseShaderResult.hasError()
+                                   ? denoiseShaderResult.error()
+                                   : temporalShaderResult.error())));
       return Result<bool, std::string>::makeError(error);
     }
     depthPrefilterShaderHandle_ = depthShaderResult.value();
+    edgeShaderHandle_ = edgeShaderResult.value();
     mainShaderHandle_ = mainShaderResult.value();
     denoiseShaderHandle_ = denoiseShaderResult.value();
+    temporalShaderHandle_ = temporalShaderResult.value();
 
     auto depthPipelineResult = gpu_.createComputePipeline(
         ComputePipelineDesc{.computeShader = depthPrefilterShaderHandle_},
         "gtao_depth_prefilter");
+    auto edgePipelineResult = gpu_.createComputePipeline(
+        ComputePipelineDesc{.computeShader = edgeShaderHandle_}, "gtao_edges");
     auto mainPipelineResult = gpu_.createComputePipeline(
         ComputePipelineDesc{.computeShader = mainShaderHandle_}, "gtao_main");
     auto denoisePipelineResult = gpu_.createComputePipeline(
         ComputePipelineDesc{.computeShader = denoiseShaderHandle_},
         "gtao_denoise");
-    if (depthPipelineResult.hasError() || mainPipelineResult.hasError() ||
-        denoisePipelineResult.hasError()) {
+    auto temporalPipelineResult = gpu_.createComputePipeline(
+        ComputePipelineDesc{.computeShader = temporalShaderHandle_},
+        "gtao_temporal");
+    if (depthPipelineResult.hasError() || edgePipelineResult.hasError() ||
+        mainPipelineResult.hasError() || denoisePipelineResult.hasError() ||
+        temporalPipelineResult.hasError()) {
       const std::string error =
           depthPipelineResult.hasError()
               ? depthPipelineResult.error()
-              : (mainPipelineResult.hasError() ? mainPipelineResult.error()
-                                               : denoisePipelineResult.error());
+              : (edgePipelineResult.hasError()
+                     ? edgePipelineResult.error()
+                     : (mainPipelineResult.hasError()
+                            ? mainPipelineResult.error()
+                            : (denoisePipelineResult.hasError()
+                                   ? denoisePipelineResult.error()
+                                   : temporalPipelineResult.error())));
       return Result<bool, std::string>::makeError(error);
     }
     depthPrefilterPipeline_ = depthPipelineResult.value();
+    edgePipeline_ = edgePipelineResult.value();
     mainPipeline_ = mainPipelineResult.value();
     denoisePipeline_ = denoisePipelineResult.value();
+    temporalPipeline_ = temporalPipelineResult.value();
   }
 
   const TextureDimensions sceneDimensions =
@@ -308,6 +372,15 @@ GTAOPass::recreateScratchTextures(uint32_t width, uint32_t height,
       textures.viewDepthMips[level] = textureResult.value();
     }
 
+    auto edgeResult = gpu_.createTexture(
+        makeStorageSampledTextureDesc(Format::R32_FLOAT, width, height),
+        "gtao_edges_" + std::to_string(slot));
+    if (edgeResult.hasError()) {
+      destroyScratchTextures();
+      return Result<bool, std::string>::makeError(edgeResult.error());
+    }
+    textures.edges = edgeResult.value();
+
     auto rawResult = gpu_.createTexture(
         makeStorageSampledTextureDesc(kFrameCompositionAmbientOcclusionFormat,
                                       width, height),
@@ -341,6 +414,10 @@ void GTAOPass::destroyResources() {
     gpu_.destroyComputePipeline(depthPrefilterPipeline_);
     depthPrefilterPipeline_ = {};
   }
+  if (nuri::isValid(edgePipeline_)) {
+    gpu_.destroyComputePipeline(edgePipeline_);
+    edgePipeline_ = {};
+  }
   if (nuri::isValid(mainPipeline_)) {
     gpu_.destroyComputePipeline(mainPipeline_);
     mainPipeline_ = {};
@@ -349,16 +426,28 @@ void GTAOPass::destroyResources() {
     gpu_.destroyComputePipeline(denoisePipeline_);
     denoisePipeline_ = {};
   }
+  if (nuri::isValid(temporalPipeline_)) {
+    gpu_.destroyComputePipeline(temporalPipeline_);
+    temporalPipeline_ = {};
+  }
   if (nuri::isValid(pointClampSampler_)) {
     gpu_.destroySampler(pointClampSampler_);
     pointClampSampler_ = {};
   }
+  if (nuri::isValid(linearClampSampler_)) {
+    gpu_.destroySampler(linearClampSampler_);
+    linearClampSampler_ = {};
+  }
   depthPrefilterShader_.reset();
+  edgeShader_.reset();
   mainShader_.reset();
   denoiseShader_.reset();
+  temporalShader_.reset();
   depthPrefilterShaderHandle_ = {};
+  edgeShaderHandle_ = {};
   mainShaderHandle_ = {};
   denoiseShaderHandle_ = {};
+  temporalShaderHandle_ = {};
 }
 
 void GTAOPass::destroyScratchTextures() {
@@ -368,6 +457,10 @@ void GTAOPass::destroyScratchTextures() {
         gpu_.destroyTexture(texture);
         texture = {};
       }
+    }
+    if (nuri::isValid(textures.edges)) {
+      gpu_.destroyTexture(textures.edges);
+      textures.edges = {};
     }
     if (nuri::isValid(textures.rawAmbientOcclusion)) {
       gpu_.destroyTexture(textures.rawAmbientOcclusion);
@@ -410,8 +503,14 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
 
   const RenderSettings::AmbientOcclusionSettings ao =
       resolvedAmbientOcclusionSettings(ctx.frame);
+  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  const bool taaSelected =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+      AntiAliasingMode::TAA;
   const uint32_t pointSamplerId =
       gpu_.getSamplerBindlessIndex(pointClampSampler_);
+  const uint32_t linearSamplerId =
+      gpu_.getSamplerBindlessIndex(linearClampSampler_);
   const TextureDimensions dimensions =
       gpu_.getTextureDimensions(ctx.shared.sceneDepthTexture);
   const uint32_t width = std::max(dimensions.width, 1u);
@@ -440,6 +539,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   metrics.depthPrefilterPassCount = 1u;
   metrics.mainPassCount = 1u;
   metrics.denoisePassCount = ao.denoisePassCount;
+  metrics.temporalAccumulationEnabled = ao.temporalAccumulation;
   metrics.scalarAoAvailable = true;
   metrics.bentNormalAvailable = true;
 
@@ -449,24 +549,30 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
                                levelDimension(height, level));
   }
   metrics.depthPrefilterTextureBytes = depthBytes;
+  metrics.edgeTextureBytes = textureBytes(Format::R32_FLOAT, width, height);
   metrics.scratchTextureBytes =
       textureBytes(kFrameCompositionAmbientOcclusionFormat, width, height) * 2u;
-  metrics.textureCount += kViewDepthMipCount + 2u;
-  metrics.totalTextureBytes +=
-      metrics.depthPrefilterTextureBytes + metrics.scratchTextureBytes;
+  metrics.textureCount += kViewDepthMipCount + 3u;
+  metrics.totalTextureBytes += metrics.depthPrefilterTextureBytes +
+                               metrics.edgeTextureBytes +
+                               metrics.scratchTextureBytes;
 
   const uint32_t sourceDepthTexId =
       gpu_.getTextureBindlessIndex(ctx.shared.sceneDepthTexture);
   const uint32_t normalTexId =
       gpu_.getTextureBindlessIndex(ctx.shared.normalTexture);
+  const uint32_t edgeTexId = gpu_.getTextureBindlessIndex(scratch->edges);
   const uint32_t rawTexId =
       gpu_.getTextureBindlessIndex(scratch->rawAmbientOcclusion);
   const uint32_t scratchTexId =
       gpu_.getTextureBindlessIndex(scratch->denoiseScratch);
   const uint32_t finalTexId =
       gpu_.getTextureBindlessIndex(ctx.shared.ambientOcclusionTexture);
-  if (sourceDepthTexId == kInvalidTextureBindlessIndex ||
+  if (pointSamplerId == kInvalidTextureBindlessIndex ||
+      linearSamplerId == kInvalidTextureBindlessIndex ||
+      sourceDepthTexId == kInvalidTextureBindlessIndex ||
       normalTexId == kInvalidTextureBindlessIndex ||
+      edgeTexId == kInvalidTextureBindlessIndex ||
       rawTexId == kInvalidTextureBindlessIndex ||
       scratchTexId == kInvalidTextureBindlessIndex ||
       finalTexId == kInvalidTextureBindlessIndex) {
@@ -481,6 +587,8 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
       .width = width,
       .height = height,
       .projectionType = static_cast<uint32_t>(ctx.frame.camera.projectionType),
+      .radiusBits =
+          std::bit_cast<uint32_t>(ambientOcclusionPresetRadius(ao.preset)),
       .nearPlane = ctx.frame.camera.nearPlane,
       .farPlane = ctx.frame.camera.farPlane,
   };
@@ -493,6 +601,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
       metrics.disabledReason = AmbientOcclusionDisabledReason::MissingResources;
       return Result<bool, std::string>::makeResult(false);
     }
+    depthPc.outputTexIds[level] = depthTexIds[level];
   }
 
   depthPrefilterDependencies_[0] = ctx.shared.sceneDepthTexture;
@@ -500,24 +609,18 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   for (uint32_t level = 0u; level < kViewDepthMipCount; ++level) {
     depthPrefilterDependencies_[level + 1u] = scratch->viewDepthMips[level];
     depthPrefilterAccessModes_[level + 1u] = RenderGraphAccessMode::Write;
-    DepthPrefilterPushConstants levelDepthPc = depthPc;
-    levelDepthPc.outputTexId = depthTexIds[level];
-    levelDepthPc.mipLevel = level;
-    depthPrefilterDispatches_[level] = ComputeDispatchItem{
-        .pipeline = depthPrefilterPipeline_,
-        .dispatch = DispatchSize{.x = divRoundUp(levelDimension(width, level),
-                                                 kGTAOWorkgroupSizeX),
-                                 .y = divRoundUp(levelDimension(height, level),
-                                                 kGTAOWorkgroupSizeY),
-                                 .z = 1u},
-        .pushConstants =
-            copyPushConstants(depthPrefilterPushBytes_[level], levelDepthPc),
-        .dependencyTextures = std::span<const TextureHandle>(
-            depthPrefilterDependencies_.data(), kViewDepthMipCount + 1u),
-        .debugLabel = "GTAO Depth Prefilter",
-        .debugColor = kGTAODebugColor,
-    };
   }
+  depthPrefilterDispatches_[0] = ComputeDispatchItem{
+      .pipeline = depthPrefilterPipeline_,
+      .dispatch = DispatchSize{.x = divRoundUp(width, 16u),
+                               .y = divRoundUp(height, 16u),
+                               .z = 1u},
+      .pushConstants = copyPushConstants(depthPrefilterPushBytes_, depthPc),
+      .dependencyTextures = std::span<const TextureHandle>(
+          depthPrefilterDependencies_.data(), kViewDepthMipCount + 1u),
+      .debugLabel = "GTAO Depth Prefilter",
+      .debugColor = kGTAODebugColor,
+  };
 
   RenderGraphGraphicsPassDesc depthPass{};
   depthPass.executionMode = RenderPassExecutionMode::ComputeOnly;
@@ -537,8 +640,46 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addDepth.error());
   }
 
+  const EdgePushConstants edgePc{
+      .depthTexId = depthTexIds[0],
+      .outputTexId = edgeTexId,
+      .width = width,
+      .height = height,
+  };
+  edgeDependencies_[0] = scratch->viewDepthMips[0];
+  edgeAccessModes_[0] = RenderGraphAccessMode::Read;
+  edgeDependencies_[1] = scratch->edges;
+  edgeAccessModes_[1] = RenderGraphAccessMode::Write;
+  edgeDispatches_[0] = ComputeDispatchItem{
+      .pipeline = edgePipeline_,
+      .dispatch = dispatch,
+      .pushConstants = copyPushConstants(edgePushBytes_, edgePc),
+      .dependencyTextures =
+          std::span<const TextureHandle>(edgeDependencies_.data(), 2u),
+      .debugLabel = "GTAO Edges",
+      .debugColor = kGTAODebugColor,
+  };
+
+  RenderGraphGraphicsPassDesc edgePass{};
+  edgePass.executionMode = RenderPassExecutionMode::ComputeOnly;
+  edgePass.hasColorAttachment = false;
+  edgePass.preDispatches = std::span<const ComputeDispatchItem>(
+      edgeDispatches_.data(), edgeDispatches_.size());
+  edgePass.dependencyTextures =
+      std::span<const TextureHandle>(edgeDependencies_.data(), 2u);
+  edgePass.dependencyTextureAccessModes =
+      std::span<const RenderGraphAccessMode>(edgeAccessModes_.data(), 2u);
+  edgePass.gpuTimingScope = GpuTimingScope::GTAO;
+  edgePass.debugLabel = "GTAO Edge Pass";
+  edgePass.debugColor = kGTAODebugColor;
+  auto addEdge = ctx.graph.addGraphicsPass(edgePass);
+  if (addEdge.hasError()) {
+    return Result<bool, std::string>::makeError(addEdge.error());
+  }
+
   MainPushConstants mainPc{
       .normalTexId = normalTexId,
+      .edgeTexId = edgeTexId,
       .outputTexId = rawTexId,
       .width = width,
       .height = height,
@@ -560,14 +701,16 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   }
   mainDependencies_[kViewDepthMipCount] = ctx.shared.normalTexture;
   mainAccessModes_[kViewDepthMipCount] = RenderGraphAccessMode::Read;
-  mainDependencies_[kViewDepthMipCount + 1u] = scratch->rawAmbientOcclusion;
-  mainAccessModes_[kViewDepthMipCount + 1u] = RenderGraphAccessMode::Write;
+  mainDependencies_[kViewDepthMipCount + 1u] = scratch->edges;
+  mainAccessModes_[kViewDepthMipCount + 1u] = RenderGraphAccessMode::Read;
+  mainDependencies_[kViewDepthMipCount + 2u] = scratch->rawAmbientOcclusion;
+  mainAccessModes_[kViewDepthMipCount + 2u] = RenderGraphAccessMode::Write;
   mainDispatches_[0] = ComputeDispatchItem{
       .pipeline = mainPipeline_,
       .dispatch = dispatch,
       .pushConstants = copyPushConstants(mainPushBytes_, mainPc),
       .dependencyTextures = std::span<const TextureHandle>(
-          mainDependencies_.data(), kViewDepthMipCount + 2u),
+          mainDependencies_.data(), kViewDepthMipCount + 3u),
       .debugLabel = "GTAO Main",
       .debugColor = kGTAODebugColor,
   };
@@ -578,10 +721,10 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   mainPass.preDispatches = std::span<const ComputeDispatchItem>(
       mainDispatches_.data(), mainDispatches_.size());
   mainPass.dependencyTextures = std::span<const TextureHandle>(
-      mainDependencies_.data(), kViewDepthMipCount + 2u);
+      mainDependencies_.data(), kViewDepthMipCount + 3u);
   mainPass.dependencyTextureAccessModes =
       std::span<const RenderGraphAccessMode>(mainAccessModes_.data(),
-                                             kViewDepthMipCount + 2u);
+                                             kViewDepthMipCount + 3u);
   mainPass.gpuTimingScope = GpuTimingScope::GTAO;
   mainPass.debugLabel = "GTAO Main Pass";
   mainPass.debugColor = kGTAODebugColor;
@@ -590,11 +733,33 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addMain.error());
   }
 
+  bool temporalActive =
+      ao.temporalAccumulation && taaSelected && ctx.frame.camera.historyValid &&
+      ctx.frame.camera.temporalDataValid &&
+      nuri::isValid(ctx.shared.previousAmbientOcclusionTexture) &&
+      nuri::isValid(ctx.shared.motionVectorTexture) &&
+      nuri::isValid(ctx.shared.motionVectorGraphTexture);
+  uint32_t previousAoTexId = kInvalidTextureBindlessIndex;
+  uint32_t motionVectorTexId = kInvalidTextureBindlessIndex;
+  if (temporalActive) {
+    previousAoTexId = gpu_.getTextureBindlessIndex(
+        ctx.shared.previousAmbientOcclusionTexture);
+    motionVectorTexId =
+        gpu_.getTextureBindlessIndex(ctx.shared.motionVectorTexture);
+    temporalActive = previousAoTexId != kInvalidTextureBindlessIndex &&
+                     motionVectorTexId != kInvalidTextureBindlessIndex;
+  }
+  metrics.temporalHistoryValid =
+      nuri::isValid(ctx.shared.previousAmbientOcclusionTexture);
+  metrics.temporalAccumulationActive = temporalActive;
+  metrics.temporalMotionVectorsConsumed = temporalActive;
+  metrics.temporalPassCount = temporalActive ? 1u : 0u;
+
   TextureHandle denoiseSource = scratch->rawAmbientOcclusion;
   uint32_t denoiseSourceTexId = rawTexId;
   const uint32_t passCount = std::max(ao.denoisePassCount, 1u);
   for (uint32_t passIndex = 0u; passIndex < passCount; ++passIndex) {
-    const bool finalPass = passIndex + 1u == passCount;
+    const bool finalPass = !temporalActive && passIndex + 1u == passCount;
     TextureHandle outputTexture =
         finalPass ? ctx.shared.ambientOcclusionTexture
                   : (passIndex % 2u == 0u ? scratch->denoiseScratch
@@ -605,14 +770,14 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     DenoisePushConstants denoisePc{
         .sourceTexId = denoiseSourceTexId,
         .outputTexId = outputTexId,
-        .depthTexId = depthTexIds[0],
+        .edgeTexId = edgeTexId,
         .width = width,
         .height = height,
         .passIndex = passIndex,
     };
 
     denoiseDependencies_[0] = denoiseSource;
-    denoiseDependencies_[1] = scratch->viewDepthMips[0];
+    denoiseDependencies_[1] = scratch->edges;
     denoiseDependencies_[2] = outputTexture;
     denoiseAccessModes_[0] = RenderGraphAccessMode::Read;
     denoiseAccessModes_[1] = RenderGraphAccessMode::Read;
@@ -649,6 +814,60 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     denoiseSourceTexId = outputTexId;
   }
 
+  if (temporalActive) {
+    const TemporalPushConstants temporalPc{
+        .currentTexId = denoiseSourceTexId,
+        .historyTexId = previousAoTexId,
+        .motionVectorTexId = motionVectorTexId,
+        .sceneDepthTexId = sourceDepthTexId,
+        .edgeTexId = edgeTexId,
+        .outputTexId = finalTexId,
+        .pointSamplerId = pointSamplerId,
+        .historySamplerId = linearSamplerId,
+        .width = width,
+        .height = height,
+        .flags = 1u,
+        .baseCurrentWeightBits = std::bit_cast<uint32_t>(0.20f),
+        .rejectedCurrentWeightBits = std::bit_cast<uint32_t>(0.65f),
+    };
+    temporalDependencies_[0] = denoiseSource;
+    temporalDependencies_[1] = ctx.shared.previousAmbientOcclusionTexture;
+    temporalDependencies_[2] = ctx.shared.motionVectorTexture;
+    temporalDependencies_[3] = ctx.shared.sceneDepthTexture;
+    temporalDependencies_[4] = scratch->edges;
+    temporalDependencies_[5] = ctx.shared.ambientOcclusionTexture;
+    for (uint32_t i = 0u; i < 5u; ++i) {
+      temporalAccessModes_[i] = RenderGraphAccessMode::Read;
+    }
+    temporalAccessModes_[5] = RenderGraphAccessMode::Write;
+    temporalDispatches_[0] = ComputeDispatchItem{
+        .pipeline = temporalPipeline_,
+        .dispatch = dispatch,
+        .pushConstants = copyPushConstants(temporalPushBytes_, temporalPc),
+        .dependencyTextures =
+            std::span<const TextureHandle>(temporalDependencies_.data(), 6u),
+        .debugLabel = "GTAO Temporal",
+        .debugColor = kGTAODebugColor,
+    };
+
+    RenderGraphGraphicsPassDesc temporalPass{};
+    temporalPass.executionMode = RenderPassExecutionMode::ComputeOnly;
+    temporalPass.hasColorAttachment = false;
+    temporalPass.preDispatches = std::span<const ComputeDispatchItem>(
+        temporalDispatches_.data(), temporalDispatches_.size());
+    temporalPass.dependencyTextures =
+        std::span<const TextureHandle>(temporalDependencies_.data(), 6u);
+    temporalPass.dependencyTextureAccessModes =
+        std::span<const RenderGraphAccessMode>(temporalAccessModes_.data(), 6u);
+    temporalPass.gpuTimingScope = GpuTimingScope::GTAO;
+    temporalPass.debugLabel = "GTAO Temporal Pass";
+    temporalPass.debugColor = kGTAODebugColor;
+    auto addTemporal = ctx.graph.addGraphicsPass(temporalPass);
+    if (addTemporal.hasError()) {
+      return Result<bool, std::string>::makeError(addTemporal.error());
+    }
+  }
+
   auto importFinal = ctx.graph.importTexture(ctx.shared.ambientOcclusionTexture,
                                              "gtao_final_ambient_occlusion");
   if (importFinal.hasError()) {
@@ -667,6 +886,10 @@ Result<bool, std::string>
 GTAOFeature::publishFrameData(FrameBuildContext &ctx) {
   const RenderSettings::AmbientOcclusionSettings ao =
       resolvedAmbientOcclusionSettings(ctx.frame);
+  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  const bool taaSelected =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+      AntiAliasingMode::TAA;
   AmbientOcclusionFrameMetrics &metrics = ctx.frame.metrics.ambientOcclusion;
   metrics.enabled = ao.mode != AmbientOcclusionMode::Disabled;
   metrics.active = ao.active;
@@ -676,10 +899,16 @@ GTAOFeature::publishFrameData(FrameBuildContext &ctx) {
   metrics.sliceCount = ao.sliceCount;
   metrics.stepCount = ao.stepCount;
   metrics.denoisePassCount = ao.denoisePassCount;
+  metrics.temporalAccumulationEnabled = ao.temporalAccumulation;
   if (ao.active) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::Normals |
         FrameTextureRequirementFlags::AmbientOcclusion;
+    if (ao.temporalAccumulation && taaSelected &&
+        ctx.frame.camera.historyValid && ctx.frame.camera.temporalDataValid) {
+      ctx.shared.textureRequirements |=
+          FrameTextureRequirementFlags::MotionVectors;
+    }
   }
   return Result<bool, std::string>::makeResult(true);
 }

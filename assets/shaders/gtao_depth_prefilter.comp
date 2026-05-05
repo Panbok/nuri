@@ -10,19 +10,30 @@ layout(set = 0, binding = 1) uniform sampler kSamplers[];
 layout(set = 0, binding = 2, r32f) uniform image2D kImagesR32F[];
 
 const uint kViewDepthMipCount = 5u;
+const float kDepthFalloffRange = 0.615;
+const float kDepthRangeScaleFactor = 0.75;
+
+shared float g_scratchDepths[8][8];
 
 layout(push_constant) uniform constants {
   uint sourceDepthTexId;
   uint sourceSamplerId;
-  uint outputTexId;
+  uint outputTexIds[kViewDepthMipCount];
   uint width;
   uint height;
-  uint mipLevel;
   uint projectionType;
+  uint radiusBits;
   float nearPlane;
   float farPlane;
 }
 pc;
+
+float unpackFloat(uint bits) { return uintBitsToFloat(bits); }
+
+ivec2 mipSize(uint mipLevel) {
+  return max(ivec2(int(pc.width >> mipLevel), int(pc.height >> mipLevel)),
+             ivec2(1));
+}
 
 float linearizeDepth(float deviceDepth) {
   float nearPlane = max(pc.nearPlane, 1.0e-4);
@@ -35,21 +46,117 @@ float linearizeDepth(float deviceDepth) {
          max(farPlane - clampedDeviceDepth * (farPlane - nearPlane), 1.0e-4);
 }
 
-void main() {
-  ivec2 globalPos = ivec2(gl_GlobalInvocationID.xy);
-  uint level = min(pc.mipLevel, kViewDepthMipCount - 1u);
-  ivec2 mipSize =
-      max(ivec2(int(pc.width >> level), int(pc.height >> level)), ivec2(1));
-  if (globalPos.x >= mipSize.x || globalPos.y >= mipSize.y) {
-    return;
-  }
-
-  vec2 uv = (vec2(globalPos) + vec2(0.5)) / vec2(mipSize);
+float readLinearDepth(ivec2 pos) {
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  ivec2 clampedPos = clamp(pos, ivec2(0), size - ivec2(1));
+  vec2 uv = (vec2(clampedPos) + vec2(0.5)) / vec2(size);
   float rawDepth =
       texture(nonuniformEXT(sampler2D(kTextures2D[pc.sourceDepthTexId],
                                       kSamplers[pc.sourceSamplerId])),
               uv)
           .r;
-  imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], globalPos,
-             vec4(linearizeDepth(rawDepth), 0.0, 0.0, 0.0));
+  return linearizeDepth(rawDepth);
+}
+
+float depthMipFilter(float depth0, float depth1, float depth2, float depth3) {
+  float maxDepth = max(max(depth0, depth1), max(depth2, depth3));
+  float effectRadius =
+      max(unpackFloat(pc.radiusBits), 0.25) * kDepthRangeScaleFactor;
+  float falloffRange = max(kDepthFalloffRange * effectRadius, 1.0e-4);
+  float falloffFrom = effectRadius * (1.0 - kDepthFalloffRange);
+  float falloffMul = -1.0 / falloffRange;
+  float falloffAdd = falloffFrom / falloffRange + 1.0;
+
+  vec4 depths = vec4(depth0, depth1, depth2, depth3);
+  vec4 weights = clamp((maxDepth - depths) * falloffMul + falloffAdd, vec4(0.0),
+                       vec4(1.0));
+  float weightSum = max(dot(weights, vec4(1.0)), 1.0e-4);
+  return dot(weights, depths) / weightSum;
+}
+
+void main() {
+  uvec2 groupThreadId = gl_LocalInvocationID.xy;
+  uvec2 baseCoord = gl_GlobalInvocationID.xy;
+  ivec2 screenPos = ivec2(baseCoord) * 2;
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+
+  float depth0 = readLinearDepth(screenPos + ivec2(0, 0));
+  float depth1 = readLinearDepth(screenPos + ivec2(1, 0));
+  float depth2 = readLinearDepth(screenPos + ivec2(0, 1));
+  float depth3 = readLinearDepth(screenPos + ivec2(1, 1));
+
+  if (screenPos.x < size.x && screenPos.y < size.y) {
+    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[0])], screenPos,
+               vec4(depth0, 0.0, 0.0, 0.0));
+  }
+  if (screenPos.x + 1 < size.x && screenPos.y < size.y) {
+    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[0])],
+               screenPos + ivec2(1, 0), vec4(depth1, 0.0, 0.0, 0.0));
+  }
+  if (screenPos.x < size.x && screenPos.y + 1 < size.y) {
+    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[0])],
+               screenPos + ivec2(0, 1), vec4(depth2, 0.0, 0.0, 0.0));
+  }
+  if (screenPos.x + 1 < size.x && screenPos.y + 1 < size.y) {
+    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[0])],
+               screenPos + ivec2(1, 1), vec4(depth3, 0.0, 0.0, 0.0));
+  }
+
+  float dm1 = depthMipFilter(depth0, depth1, depth2, depth3);
+  ivec2 mip1Size = mipSize(1u);
+  if (int(baseCoord.x) < mip1Size.x && int(baseCoord.y) < mip1Size.y) {
+    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[1])], ivec2(baseCoord),
+               vec4(dm1, 0.0, 0.0, 0.0));
+  }
+  g_scratchDepths[groupThreadId.x][groupThreadId.y] = dm1;
+
+  memoryBarrierShared();
+  barrier();
+
+  if (all(equal(groupThreadId % uvec2(2u), uvec2(0u)))) {
+    float inTL = g_scratchDepths[groupThreadId.x + 0u][groupThreadId.y + 0u];
+    float inTR = g_scratchDepths[groupThreadId.x + 1u][groupThreadId.y + 0u];
+    float inBL = g_scratchDepths[groupThreadId.x + 0u][groupThreadId.y + 1u];
+    float inBR = g_scratchDepths[groupThreadId.x + 1u][groupThreadId.y + 1u];
+    float dm2 = depthMipFilter(inTL, inTR, inBL, inBR);
+    ivec2 mip2Pos = ivec2(baseCoord / 2u);
+    if (all(lessThan(mip2Pos, mipSize(2u)))) {
+      imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[2])], mip2Pos,
+                 vec4(dm2, 0.0, 0.0, 0.0));
+    }
+    g_scratchDepths[groupThreadId.x][groupThreadId.y] = dm2;
+  }
+
+  memoryBarrierShared();
+  barrier();
+
+  if (all(equal(groupThreadId % uvec2(4u), uvec2(0u)))) {
+    float inTL = g_scratchDepths[groupThreadId.x + 0u][groupThreadId.y + 0u];
+    float inTR = g_scratchDepths[groupThreadId.x + 2u][groupThreadId.y + 0u];
+    float inBL = g_scratchDepths[groupThreadId.x + 0u][groupThreadId.y + 2u];
+    float inBR = g_scratchDepths[groupThreadId.x + 2u][groupThreadId.y + 2u];
+    float dm3 = depthMipFilter(inTL, inTR, inBL, inBR);
+    ivec2 mip3Pos = ivec2(baseCoord / 4u);
+    if (all(lessThan(mip3Pos, mipSize(3u)))) {
+      imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[3])], mip3Pos,
+                 vec4(dm3, 0.0, 0.0, 0.0));
+    }
+    g_scratchDepths[groupThreadId.x][groupThreadId.y] = dm3;
+  }
+
+  memoryBarrierShared();
+  barrier();
+
+  if (all(equal(groupThreadId % uvec2(8u), uvec2(0u)))) {
+    float inTL = g_scratchDepths[groupThreadId.x + 0u][groupThreadId.y + 0u];
+    float inTR = g_scratchDepths[groupThreadId.x + 4u][groupThreadId.y + 0u];
+    float inBL = g_scratchDepths[groupThreadId.x + 0u][groupThreadId.y + 4u];
+    float inBR = g_scratchDepths[groupThreadId.x + 4u][groupThreadId.y + 4u];
+    float dm4 = depthMipFilter(inTL, inTR, inBL, inBR);
+    ivec2 mip4Pos = ivec2(baseCoord / 8u);
+    if (all(lessThan(mip4Pos, mipSize(4u)))) {
+      imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[4])], mip4Pos,
+                 vec4(dm4, 0.0, 0.0, 0.0));
+    }
+  }
 }

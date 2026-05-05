@@ -6,38 +6,76 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
-layout(set = 0, binding = 1) uniform sampler kSamplers[];
 layout(set = 0, binding = 2, rgba16f) uniform image2D kImagesRGBA16F[];
 
 layout(push_constant) uniform constants {
   uint sourceTexId;
   uint outputTexId;
-  uint depthTexId;
+  uint edgeTexId;
   uint width;
   uint height;
   uint passIndex;
-  float normalSimilarityMin;
-  float normalSimilarityMax;
-  float depthScaleMultiplier;
-  float depthScaleMin;
-  float spatialWeightNear;
-  float spatialWeightFar;
 }
 pc;
 
 const float kNormalEpsilon = 1.0e-6;
+const float kMaxVisibilityReduction = 0.45;
 
 vec4 sampleAo(ivec2 pos) {
   return texelFetch(kTextures2D[nonuniformEXT(pc.sourceTexId)], pos, 0);
 }
 
-float sampleViewDepth(ivec2 pos) {
-  return texelFetch(kTextures2D[nonuniformEXT(pc.depthTexId)], pos, 0).r;
+float samplePackedEdges(ivec2 pos) {
+  return texelFetch(kTextures2D[nonuniformEXT(pc.edgeTexId)], pos, 0).r;
+}
+
+vec4 unpackEdges(float packedEdges) {
+  uint packedValue = uint(packedEdges * 255.5);
+  vec4 edgesLRTB;
+  edgesLRTB.x = float((packedValue >> 6) & 0x03u) / 3.0;
+  edgesLRTB.y = float((packedValue >> 4) & 0x03u) / 3.0;
+  edgesLRTB.z = float((packedValue >> 2) & 0x03u) / 3.0;
+  edgesLRTB.w = float((packedValue >> 0) & 0x03u) / 3.0;
+  return clamp(edgesLRTB, 0.0, 1.0);
 }
 
 vec3 safeNormalize(vec3 v, vec3 fallback) {
   float l = length(v);
   return l < kNormalEpsilon ? fallback : v / l;
+}
+
+float edgeWeightForOffset(ivec2 pos, ivec2 offset, vec4 centerEdges) {
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  ivec2 samplePos = clamp(pos + offset, ivec2(0), size - ivec2(1));
+  vec4 neighborEdges = unpackEdges(samplePackedEdges(samplePos));
+
+  if (offset.x < 0 && offset.y == 0) {
+    return centerEdges.x * neighborEdges.y;
+  }
+  if (offset.x > 0 && offset.y == 0) {
+    return centerEdges.y * neighborEdges.x;
+  }
+  if (offset.x == 0 && offset.y < 0) {
+    return centerEdges.z * neighborEdges.w;
+  }
+  if (offset.x == 0 && offset.y > 0) {
+    return centerEdges.w * neighborEdges.z;
+  }
+
+  float horizontal = offset.x < 0 ? centerEdges.x : centerEdges.y;
+  float vertical = offset.y < 0 ? centerEdges.z : centerEdges.w;
+  return 0.425 * (horizontal + vertical);
+}
+
+void addSample(ivec2 pos, ivec2 offset, vec4 centerEdges, inout vec3 bentSum,
+               inout float visibilitySum, inout float weightSum) {
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  ivec2 samplePos = clamp(pos + offset, ivec2(0), size - ivec2(1));
+  float weight = edgeWeightForOffset(pos, offset, centerEdges);
+  vec4 sampleValue = sampleAo(samplePos);
+  bentSum += (sampleValue.xyz * 2.0 - 1.0) * weight;
+  visibilitySum += sampleValue.a * weight;
+  weightSum += weight;
 }
 
 void main() {
@@ -48,40 +86,27 @@ void main() {
   }
 
   vec4 center = sampleAo(pos);
-  float centerDepth = sampleViewDepth(pos);
-  vec3 centerNormal =
-      safeNormalize(center.xyz * 2.0 - 1.0, vec3(0.0, 0.0, 1.0));
-  vec4 accum = center * 2.0;
-  float weightSum = 2.0;
-  int axis = int(pc.passIndex & 1u);
+  vec3 centerBent = safeNormalize(center.xyz * 2.0 - 1.0, vec3(0.0, 0.0, 1.0));
+  vec4 centerEdges = unpackEdges(samplePackedEdges(pos));
 
-  for (int offset = -2; offset <= 2; ++offset) {
-    if (offset == 0) {
-      continue;
-    }
-    ivec2 samplePos = pos + (axis == 0 ? ivec2(offset, 0) : ivec2(0, offset));
-    samplePos = clamp(samplePos, ivec2(0), size - ivec2(1));
-    vec4 sampleValue = sampleAo(samplePos);
-    float sampleDepth = sampleViewDepth(samplePos);
-    vec3 sampleNormal =
-        safeNormalize(sampleValue.xyz * 2.0 - 1.0, centerNormal);
-    float normalWeight =
-        smoothstep(pc.normalSimilarityMin, pc.normalSimilarityMax,
-                   dot(centerNormal, sampleNormal));
-    float depthDelta = abs(sampleDepth - centerDepth);
-    float depthScale =
-        max(centerDepth * pc.depthScaleMultiplier, pc.depthScaleMin);
-    float depthWeight = exp2(-depthDelta / depthScale);
-    float spatialWeight = offset == -1 || offset == 1 ? pc.spatialWeightNear
-                                                      : pc.spatialWeightFar;
-    float weight = normalWeight * depthWeight * spatialWeight;
-    accum += sampleValue * weight;
-    weightSum += weight;
-  }
+  const float centerWeight = 1.0;
+  vec3 bentSum = centerBent * centerWeight;
+  float visibilitySum = center.a * centerWeight;
+  float weightSum = centerWeight;
 
-  vec4 result = accum / max(weightSum, 1.0);
-  vec3 bent = safeNormalize(result.xyz * 2.0 - 1.0, centerNormal);
-  result.xyz = bent * 0.5 + 0.5;
-  result.a = clamp(result.a, 0.0, 1.0);
-  imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos, result);
+  addSample(pos, ivec2(-1, 0), centerEdges, bentSum, visibilitySum, weightSum);
+  addSample(pos, ivec2(1, 0), centerEdges, bentSum, visibilitySum, weightSum);
+  addSample(pos, ivec2(0, -1), centerEdges, bentSum, visibilitySum, weightSum);
+  addSample(pos, ivec2(0, 1), centerEdges, bentSum, visibilitySum, weightSum);
+  addSample(pos, ivec2(-1, -1), centerEdges, bentSum, visibilitySum, weightSum);
+  addSample(pos, ivec2(1, -1), centerEdges, bentSum, visibilitySum, weightSum);
+  addSample(pos, ivec2(-1, 1), centerEdges, bentSum, visibilitySum, weightSum);
+  addSample(pos, ivec2(1, 1), centerEdges, bentSum, visibilitySum, weightSum);
+
+  float invWeight = 1.0 / max(weightSum, 1.0e-4);
+  vec3 bent = safeNormalize(bentSum * invWeight, centerBent);
+  float visibility =
+      clamp(visibilitySum * invWeight, 1.0 - kMaxVisibilityReduction, 1.0);
+  imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
+             vec4(bent * 0.5 + 0.5, visibility));
 }

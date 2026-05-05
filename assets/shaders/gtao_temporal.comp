@@ -1,0 +1,151 @@
+#version 460
+
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
+layout(set = 0, binding = 1) uniform sampler kSamplers[];
+layout(set = 0, binding = 2, rgba16f) uniform image2D kImagesRGBA16F[];
+
+layout(push_constant) uniform constants {
+  uint currentTexId;
+  uint historyTexId;
+  uint motionVectorTexId;
+  uint sceneDepthTexId;
+  uint edgeTexId;
+  uint outputTexId;
+  uint pointSamplerId;
+  uint historySamplerId;
+  uint width;
+  uint height;
+  uint flags;
+  uint baseCurrentWeightBits;
+  uint rejectedCurrentWeightBits;
+}
+pc;
+
+const uint kTemporalFlagHistoryValid = 1u << 0u;
+const float kMaxVisibilityReduction = 0.45;
+const float kVelocityRejectPixels = 2.0;
+const float kDepthEdgeRejectThreshold = 0.35;
+
+float pushFloat(uint bits) { return uintBitsToFloat(bits); }
+
+bool historyValid() { return (pc.flags & kTemporalFlagHistoryValid) != 0u; }
+
+bool uvInBounds(vec2 uv) {
+  return all(greaterThanEqual(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)));
+}
+
+vec4 sampleCurrentTexel(ivec2 pos) {
+  return texelFetch(kTextures2D[nonuniformEXT(pc.currentTexId)], pos, 0);
+}
+
+vec4 sampleHistory(vec2 uv) {
+  return texture(nonuniformEXT(sampler2D(kTextures2D[pc.historyTexId],
+                                         kSamplers[pc.historySamplerId])),
+                 uv);
+}
+
+vec2 sampleVelocity(vec2 uv) {
+  return texture(nonuniformEXT(sampler2D(kTextures2D[pc.motionVectorTexId],
+                                         kSamplers[pc.pointSamplerId])),
+                 uv)
+      .rg;
+}
+
+float sampleSceneDepth(vec2 uv) {
+  return texture(nonuniformEXT(sampler2D(kTextures2D[pc.sceneDepthTexId],
+                                         kSamplers[pc.pointSamplerId])),
+                 uv)
+      .r;
+}
+
+float samplePackedEdges(ivec2 pos) {
+  return texelFetch(kTextures2D[nonuniformEXT(pc.edgeTexId)], pos, 0).r;
+}
+
+vec4 unpackEdges(float packedEdges) {
+  uint packedValue = uint(packedEdges * 255.5);
+  vec4 edgesLRTB;
+  edgesLRTB.x = float((packedValue >> 6) & 0x03u) / 3.0;
+  edgesLRTB.y = float((packedValue >> 4) & 0x03u) / 3.0;
+  edgesLRTB.z = float((packedValue >> 2) & 0x03u) / 3.0;
+  edgesLRTB.w = float((packedValue >> 0) & 0x03u) / 3.0;
+  return clamp(edgesLRTB, 0.0, 1.0);
+}
+
+vec3 safeNormalize(vec3 v, vec3 fallback) {
+  float lenSq = dot(v, v);
+  return lenSq <= 1.0e-8 ? fallback : v * inversesqrt(lenSq);
+}
+
+void currentNeighborhood(ivec2 pos, out float minVisibility,
+                         out float maxVisibility) {
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  minVisibility = 1.0;
+  maxVisibility = 0.0;
+  for (int y = -1; y <= 1; ++y) {
+    for (int x = -1; x <= 1; ++x) {
+      ivec2 samplePos = clamp(pos + ivec2(x, y), ivec2(0), size - ivec2(1));
+      float visibility = sampleCurrentTexel(samplePos).a;
+      minVisibility = min(minVisibility, visibility);
+      maxVisibility = max(maxVisibility, visibility);
+    }
+  }
+}
+
+void main() {
+  ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  if (pos.x >= size.x || pos.y >= size.y) {
+    return;
+  }
+
+  vec4 current = sampleCurrentTexel(pos);
+  vec3 currentBent =
+      safeNormalize(current.xyz * 2.0 - 1.0, vec3(0.0, 0.0, 1.0));
+  float currentVisibility =
+      clamp(current.a, 1.0 - kMaxVisibilityReduction, 1.0);
+  vec4 currentPacked = vec4(currentBent * 0.5 + 0.5, currentVisibility);
+  vec2 uv = (vec2(pos) + vec2(0.5)) / vec2(size);
+
+  vec2 velocity = sampleVelocity(uv);
+  vec2 historyUv = uv + velocity;
+  float sceneDepth = sampleSceneDepth(uv);
+  bool validHistory =
+      historyValid() && uvInBounds(historyUv) && sceneDepth < 0.999999;
+  if (!validHistory) {
+    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
+               currentPacked);
+    return;
+  }
+
+  vec4 history = sampleHistory(historyUv);
+  vec3 historyBent = safeNormalize(history.xyz * 2.0 - 1.0, currentBent);
+  float minVisibility;
+  float maxVisibility;
+  currentNeighborhood(pos, minVisibility, maxVisibility);
+  float historyVisibility = clamp(history.a, minVisibility, maxVisibility);
+
+  vec4 edges = unpackEdges(samplePackedEdges(pos));
+  float motionPixels = length(velocity * vec2(size));
+  bool velocityRejected = motionPixels > kVelocityRejectPixels;
+  bool depthEdgeRejected = min(min(edges.x, edges.y), min(edges.z, edges.w)) <
+                           kDepthEdgeRejectThreshold;
+  float currentWeight = (velocityRejected || depthEdgeRejected)
+                            ? pushFloat(pc.rejectedCurrentWeightBits)
+                            : pushFloat(pc.baseCurrentWeightBits);
+  currentWeight = clamp(currentWeight, 0.0, 1.0);
+
+  float historyWeight = 1.0 - currentWeight;
+  vec3 bent = safeNormalize(
+      currentBent * currentWeight + historyBent * historyWeight, currentBent);
+  float visibility = clamp(currentVisibility * currentWeight +
+                               historyVisibility * historyWeight,
+                           1.0 - kMaxVisibilityReduction, 1.0);
+  imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
+             vec4(bent * 0.5 + 0.5, visibility));
+}

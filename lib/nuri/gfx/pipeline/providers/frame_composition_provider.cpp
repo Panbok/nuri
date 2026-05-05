@@ -120,6 +120,7 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.msaaSceneDepthGraphTexture = {};
   ctx.shared.normalGraphTexture = {};
   ctx.shared.ambientOcclusionGraphTexture = {};
+  ctx.shared.previousAmbientOcclusionTexture = {};
   ctx.shared.sceneDepthPyramidGraphTextures = {};
   ctx.shared.motionVectorGraphTexture = {};
   ctx.shared.previousMotionVectorGraphTexture = {};
@@ -168,6 +169,10 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       currentRingTexture(normalTextures_, ctx.frame.frameIndex);
   ctx.shared.ambientOcclusionTexture =
       currentRingTexture(ambientOcclusionTextures_, ctx.frame.frameIndex);
+  ctx.shared.previousAmbientOcclusionTexture =
+      ctx.frame.camera.historyValid
+          ? previousRingTexture(ambientOcclusionTextures_, ctx.frame.frameIndex)
+          : TextureHandle{};
   AmbientOcclusionFrameMetrics &aoMetrics = ctx.frame.metrics.ambientOcclusion;
   aoMetrics.normalFormat = kFrameCompositionNormalFormat;
   aoMetrics.ambientOcclusionFormat = kFrameCompositionAmbientOcclusionFormat;
@@ -176,6 +181,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aoMetrics.normalsAllocated = nuri::isValid(ctx.shared.normalTexture);
   aoMetrics.ambientOcclusionAllocated =
       nuri::isValid(ctx.shared.ambientOcclusionTexture);
+  aoMetrics.temporalHistoryValid =
+      nuri::isValid(ctx.shared.previousAmbientOcclusionTexture);
   aoMetrics.normalTextureAllocationCount = normalTextureAllocationCount_;
   aoMetrics.normalTextureReallocationCount = normalTextureReallocationCount_;
   aoMetrics.ambientOcclusionTextureAllocationCount =
@@ -640,16 +647,28 @@ Result<bool, std::string> FrameCompositionProvider::recreateNormalTextures() {
 Result<bool, std::string>
 FrameCompositionProvider::recreateAmbientOcclusionTextures() {
   const bool replacingExistingTextures = !ambientOcclusionTextures_.empty();
-  auto result = recreateFullResTextureRing(
-      ambientOcclusionTextures_, kFrameCompositionAmbientOcclusionFormat,
-      TextureUsage::StorageSampled, "frame_ambient_occlusion");
-  if (!result.hasError()) {
-    if (replacingExistingTextures) {
-      ++ambientOcclusionTextureReallocationCount_;
+  destroyAmbientOcclusionTextures();
+
+  const uint32_t ambientOcclusionRingCount = std::max(2u, textureRingCount_);
+  ambientOcclusionTextures_.resize(ambientOcclusionRingCount);
+  const TextureDesc desc = makeTextureDesc(
+      kFrameCompositionAmbientOcclusionFormat, framebufferWidth_,
+      framebufferHeight_, TextureUsage::StorageSampled);
+  for (uint32_t i = 0; i < ambientOcclusionRingCount; ++i) {
+    const std::string debugName =
+        "frame_ambient_occlusion_" + std::to_string(i);
+    auto createResult = gpu_.createTexture(desc, debugName);
+    if (createResult.hasError()) {
+      destroyAmbientOcclusionTextures();
+      return Result<bool, std::string>::makeError(createResult.error());
     }
-    ambientOcclusionTextureAllocationCount_ += textureRingCount_;
+    ambientOcclusionTextures_[i] = createResult.value();
   }
-  return result;
+  if (replacingExistingTextures) {
+    ++ambientOcclusionTextureReallocationCount_;
+  }
+  ambientOcclusionTextureAllocationCount_ += ambientOcclusionRingCount;
+  return Result<bool, std::string>::makeResult(true);
 }
 
 void FrameCompositionProvider::destroyTextures(TextureRing &textures) {

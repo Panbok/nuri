@@ -36,6 +36,7 @@ public:
 private:
   struct FrameScratchTextures {
     std::array<TextureHandle, kViewDepthMipCount> viewDepthMips{};
+    TextureHandle edges{};
     TextureHandle rawAmbientOcclusion{};
     TextureHandle denoiseScratch{};
   };
@@ -43,15 +44,22 @@ private:
   GPUDevice &gpu_;
   RuntimeOpaqueShaderConfig config_{};
   std::unique_ptr<Shader> depthPrefilterShader_{};
+  std::unique_ptr<Shader> edgeShader_{};
   std::unique_ptr<Shader> mainShader_{};
   std::unique_ptr<Shader> denoiseShader_{};
+  std::unique_ptr<Shader> temporalShader_{};
   ShaderHandle depthPrefilterShaderHandle_{};
+  ShaderHandle edgeShaderHandle_{};
   ShaderHandle mainShaderHandle_{};
   ShaderHandle denoiseShaderHandle_{};
+  ShaderHandle temporalShaderHandle_{};
   ComputePipelineHandle depthPrefilterPipeline_{};
+  ComputePipelineHandle edgePipeline_{};
   ComputePipelineHandle mainPipeline_{};
   ComputePipelineHandle denoisePipeline_{};
+  ComputePipelineHandle temporalPipeline_{};
   SamplerHandle pointClampSampler_{};
+  SamplerHandle linearClampSampler_{};
   std::vector<FrameScratchTextures> scratchTextures_{};
   uint32_t scratchWidth_ = 0u;
   uint32_t scratchHeight_ = 0u;
@@ -59,18 +67,24 @@ private:
 
   std::array<TextureHandle, 8> depthPrefilterDependencies_{};
   std::array<RenderGraphAccessMode, 8> depthPrefilterAccessModes_{};
-  std::array<ComputeDispatchItem, kViewDepthMipCount>
-      depthPrefilterDispatches_{};
+  std::array<ComputeDispatchItem, 1> depthPrefilterDispatches_{};
+  std::array<TextureHandle, 3> edgeDependencies_{};
+  std::array<RenderGraphAccessMode, 3> edgeAccessModes_{};
+  std::array<ComputeDispatchItem, 1> edgeDispatches_{};
   std::array<TextureHandle, 8> mainDependencies_{};
   std::array<RenderGraphAccessMode, 8> mainAccessModes_{};
   std::array<ComputeDispatchItem, 1> mainDispatches_{};
   std::array<TextureHandle, 3> denoiseDependencies_{};
   std::array<RenderGraphAccessMode, 3> denoiseAccessModes_{};
   std::array<ComputeDispatchItem, 1> denoiseDispatches_{};
-  std::array<std::array<std::byte, 128>, kViewDepthMipCount>
-      depthPrefilterPushBytes_{};
+  std::array<TextureHandle, 6> temporalDependencies_{};
+  std::array<RenderGraphAccessMode, 6> temporalAccessModes_{};
+  std::array<ComputeDispatchItem, 1> temporalDispatches_{};
+  std::array<std::byte, 128> depthPrefilterPushBytes_{};
+  std::array<std::byte, 128> edgePushBytes_{};
   std::array<std::byte, 128> mainPushBytes_{};
   std::array<std::byte, 128> denoisePushBytes_{};
+  std::array<std::byte, 128> temporalPushBytes_{};
 
   Result<bool, std::string> ensureResources(FrameBuildContext &ctx);
   Result<bool, std::string>
