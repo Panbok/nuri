@@ -124,11 +124,6 @@ void main() {
                 max(float(pc.height), 1.0);
   float radiusPixels =
       clamp(effectRadius / max(viewUnitsPerPixel, 1.0e-4), 2.0, 96.0);
-  if (radiusPixels < 2.0) {
-    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
-               vec4(viewNormal * 0.5 + 0.5, 1.0));
-    return;
-  }
 
   vec2 uv = (vec2(pos) + vec2(0.5)) / vec2(size);
   vec3 centerPos = reconstructViewPosition(uv, centerDepth * 0.998);

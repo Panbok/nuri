@@ -176,6 +176,12 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aoMetrics.normalsAllocated = nuri::isValid(ctx.shared.normalTexture);
   aoMetrics.ambientOcclusionAllocated =
       nuri::isValid(ctx.shared.ambientOcclusionTexture);
+  aoMetrics.normalTextureAllocationCount = normalTextureAllocationCount_;
+  aoMetrics.normalTextureReallocationCount = normalTextureReallocationCount_;
+  aoMetrics.ambientOcclusionTextureAllocationCount =
+      ambientOcclusionTextureAllocationCount_;
+  aoMetrics.ambientOcclusionTextureReallocationCount =
+      ambientOcclusionTextureReallocationCount_;
   const uint64_t fullResPixels = static_cast<uint64_t>(framebufferWidth_) *
                                  static_cast<uint64_t>(framebufferHeight_);
   aoMetrics.normalTextureBytes =
@@ -618,16 +624,32 @@ FrameCompositionProvider::recreateReactiveMaskTextures() {
 }
 
 Result<bool, std::string> FrameCompositionProvider::recreateNormalTextures() {
-  return recreateFullResTextureRing(
+  const bool replacingExistingTextures = !normalTextures_.empty();
+  auto result = recreateFullResTextureRing(
       normalTextures_, kFrameCompositionNormalFormat,
       TextureUsage::AttachmentSampled, "frame_material_normals");
+  if (!result.hasError()) {
+    if (replacingExistingTextures) {
+      ++normalTextureReallocationCount_;
+    }
+    normalTextureAllocationCount_ += textureRingCount_;
+  }
+  return result;
 }
 
 Result<bool, std::string>
 FrameCompositionProvider::recreateAmbientOcclusionTextures() {
-  return recreateFullResTextureRing(
+  const bool replacingExistingTextures = !ambientOcclusionTextures_.empty();
+  auto result = recreateFullResTextureRing(
       ambientOcclusionTextures_, kFrameCompositionAmbientOcclusionFormat,
       TextureUsage::StorageSampled, "frame_ambient_occlusion");
+  if (!result.hasError()) {
+    if (replacingExistingTextures) {
+      ++ambientOcclusionTextureReallocationCount_;
+    }
+    ambientOcclusionTextureAllocationCount_ += textureRingCount_;
+  }
+  return result;
 }
 
 void FrameCompositionProvider::destroyTextures(TextureRing &textures) {

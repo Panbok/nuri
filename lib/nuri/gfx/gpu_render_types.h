@@ -170,7 +170,7 @@ inline void mergeGpuTimingReportScope(GpuTimingReport &dst,
 
 inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
                                        const GpuTimingReport &src) {
-  static constexpr std::array<GpuTimingScopeMergeDesc, 11> kScopeDescs{{
+  static constexpr auto kScopeDescs = std::to_array<GpuTimingScopeMergeDesc>({
       {GpuTimingScope::Shadow, &GpuTimingReport::shadowTimeMs,
        &GpuTimingReport::shadowSourceFrameIndex,
        gpuTimingScopeToBit(GpuTimingScope::Shadow)},
@@ -206,7 +206,7 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
       {GpuTimingScope::GTAO, &GpuTimingReport::gtaoTimeMs,
        &GpuTimingReport::gtaoSourceFrameIndex,
        gpuTimingScopeToBit(GpuTimingScope::GTAO)},
-  }};
+  });
   for (const GpuTimingScopeMergeDesc desc : kScopeDescs) {
     mergeGpuTimingReportScope(dst, src, desc);
   }

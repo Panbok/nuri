@@ -122,8 +122,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   const uint32_t materialSamplerId =
       resolveMaterialSamplerId(gpu_, textureFilteringSettingsOrDefault(frame));
   const EnvironmentHandles environment = frame.scene->environment();
-  if (sanitizeAntiAliasingDebugView(
-          renderSettingsOrDefault(frame).antiAliasing.debug.view) ==
+  const RenderSettings &renderSettings = renderSettingsOrDefault(frame);
+  if (sanitizeAntiAliasingDebugView(renderSettings.antiAliasing.debug.view) ==
       AntiAliasingDebugView::TAATransmissionMipSource) {
     flags |= kForwardSceneTransmissionMipDebug;
   }
@@ -230,10 +230,10 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     }
   }
   RenderSettings::AmbientOcclusionSettings ambientOcclusionSettings =
-      renderSettingsOrDefault(frame).ambientOcclusion;
+      renderSettings.ambientOcclusion;
   sanitizeAmbientOcclusionSettings(ambientOcclusionSettings,
-                                   renderSettingsOrDefault(frame).opaque,
-                                   renderSettingsOrDefault(frame).antiAliasing);
+                                   renderSettings.opaque,
+                                   renderSettings.antiAliasing);
   if (ambientOcclusionSettings.active &&
       nuri::isValid(ctx.shared.ambientOcclusionTexture)) {
     ambientOcclusionTexId =

@@ -97,6 +97,7 @@ enum class AmbientOcclusionPreset : uint8_t {
   Balanced = 1,
   High = 2,
   Ultra = 3,
+  Custom = 4,
 };
 
 enum class AmbientOcclusionDebugView : uint8_t {
@@ -233,6 +234,10 @@ static constexpr ClearColor kFrameCompositionReactiveMaskClearValue{
     .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
 static constexpr ClearColor kFrameCompositionNormalClearValue{
     .r = 0.0f, .g = 0.0f, .b = 1.0f, .a = 0.0f};
+// Ambient occlusion RGBA stores bent normal in rgb when
+// kAmbientOcclusionFlagBentNormal is set and scalar visibility in alpha when
+// kAmbientOcclusionFlagScalarAo is set. The clear value is view-space +Z
+// encoded as rgb=(0,0,1) and fully visible scalar AO a=1.
 static constexpr ClearColor kFrameCompositionAmbientOcclusionClearValue{
     .r = 0.0f, .g = 0.0f, .b = 1.0f, .a = 1.0f};
 static constexpr uint32_t kAmbientOcclusionFlagScalarAo = 1u << 0u;
@@ -328,6 +333,7 @@ sanitizeAmbientOcclusionPreset(AmbientOcclusionPreset preset) noexcept {
   case AmbientOcclusionPreset::Balanced:
   case AmbientOcclusionPreset::High:
   case AmbientOcclusionPreset::Ultra:
+  case AmbientOcclusionPreset::Custom:
     return preset;
   default:
     return AmbientOcclusionPreset::Balanced;
@@ -665,6 +671,8 @@ inline void sanitizeAmbientOcclusionSettings(
     settings.sliceCount = 4u;
     settings.stepCount = 8u;
     settings.denoisePassCount = 2u;
+    break;
+  case AmbientOcclusionPreset::Custom:
     break;
   }
 }
@@ -1971,6 +1979,10 @@ struct AmbientOcclusionFrameMetrics {
   uint32_t sliceCount = 0u;
   uint32_t stepCount = 0u;
   uint32_t textureCount = 0u;
+  uint32_t normalTextureAllocationCount = 0u;
+  uint32_t normalTextureReallocationCount = 0u;
+  uint32_t ambientOcclusionTextureAllocationCount = 0u;
+  uint32_t ambientOcclusionTextureReallocationCount = 0u;
   uint64_t normalTextureBytes = 0u;
   uint64_t ambientOcclusionTextureBytes = 0u;
   uint64_t depthPrefilterTextureBytes = 0u;

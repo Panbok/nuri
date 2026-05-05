@@ -351,6 +351,8 @@ private:
       RenderFrameContext &frame, RenderGraphBuilder &graph,
       const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight,
       std::span<const RenderGraphBufferId> preResolvedDrawBufferIds);
+  [[nodiscard]] static bool
+  isPreLightingPass(const PreparedGraphPass &pass) noexcept;
   void cachePreparedGraphPassMetadata(PreparedGraphPass &pass) const;
   [[nodiscard]] bool
   shouldPublishSceneDepthGraphTexture(const RenderFrameContext &frame) const;

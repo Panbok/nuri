@@ -88,6 +88,10 @@ private:
   uint32_t motionVectorReallocationCount_ = 0u;
   uint32_t reactiveMaskAllocationCount_ = 0u;
   uint32_t reactiveMaskReallocationCount_ = 0u;
+  uint32_t normalTextureAllocationCount_ = 0u;
+  uint32_t normalTextureReallocationCount_ = 0u;
+  uint32_t ambientOcclusionTextureAllocationCount_ = 0u;
+  uint32_t ambientOcclusionTextureReallocationCount_ = 0u;
   uint32_t textureRingCount_ = 0u;
   uint32_t framebufferWidth_ = 0u;
   uint32_t framebufferHeight_ = 0u;

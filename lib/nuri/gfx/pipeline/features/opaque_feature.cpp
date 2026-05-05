@@ -32,6 +32,9 @@ bool OpaqueMainLightingPass::isEnabled(const FrameBuildContext &ctx) const {
 
 Result<bool, std::string>
 OpaqueMainLightingPass::build(FrameBuildContext &ctx) {
+  NURI_ASSERT(renderer_.hasPreparedOpaqueMainLightingPasses(),
+              "OpaqueMainFeature requires OpaquePrepassFeature prepare() "
+              "before build");
   return renderer_.appendOpaqueMainLightingPasses(ctx.frame, ctx.graph);
 }
 

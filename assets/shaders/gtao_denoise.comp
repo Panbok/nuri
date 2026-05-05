@@ -16,8 +16,16 @@ layout(push_constant) uniform constants {
   uint width;
   uint height;
   uint passIndex;
+  float normalSimilarityMin;
+  float normalSimilarityMax;
+  float depthScaleMultiplier;
+  float depthScaleMin;
+  float spatialWeightNear;
+  float spatialWeightFar;
 }
 pc;
+
+const float kNormalEpsilon = 1.0e-6;
 
 vec4 sampleAo(ivec2 pos) {
   return texelFetch(kTextures2D[nonuniformEXT(pc.sourceTexId)], pos, 0);
@@ -25,6 +33,11 @@ vec4 sampleAo(ivec2 pos) {
 
 float sampleViewDepth(ivec2 pos) {
   return texelFetch(kTextures2D[nonuniformEXT(pc.depthTexId)], pos, 0).r;
+}
+
+vec3 safeNormalize(vec3 v, vec3 fallback) {
+  float l = length(v);
+  return l < kNormalEpsilon ? fallback : v / l;
 }
 
 void main() {
@@ -36,7 +49,8 @@ void main() {
 
   vec4 center = sampleAo(pos);
   float centerDepth = sampleViewDepth(pos);
-  vec3 centerNormal = normalize(center.xyz * 2.0 - 1.0);
+  vec3 centerNormal =
+      safeNormalize(center.xyz * 2.0 - 1.0, vec3(0.0, 0.0, 1.0));
   vec4 accum = center * 2.0;
   float weightSum = 2.0;
   int axis = int(pc.passIndex & 1u);
@@ -49,20 +63,24 @@ void main() {
     samplePos = clamp(samplePos, ivec2(0), size - ivec2(1));
     vec4 sampleValue = sampleAo(samplePos);
     float sampleDepth = sampleViewDepth(samplePos);
-    vec3 sampleNormal = normalize(sampleValue.xyz * 2.0 - 1.0);
+    vec3 sampleNormal =
+        safeNormalize(sampleValue.xyz * 2.0 - 1.0, centerNormal);
     float normalWeight =
-        smoothstep(0.65, 0.98, dot(centerNormal, sampleNormal));
+        smoothstep(pc.normalSimilarityMin, pc.normalSimilarityMax,
+                   dot(centerNormal, sampleNormal));
     float depthDelta = abs(sampleDepth - centerDepth);
-    float depthScale = max(centerDepth * 0.0125, 0.025);
+    float depthScale =
+        max(centerDepth * pc.depthScaleMultiplier, pc.depthScaleMin);
     float depthWeight = exp2(-depthDelta / depthScale);
-    float spatialWeight = offset == -1 || offset == 1 ? 0.8 : 0.35;
+    float spatialWeight = offset == -1 || offset == 1 ? pc.spatialWeightNear
+                                                      : pc.spatialWeightFar;
     float weight = normalWeight * depthWeight * spatialWeight;
     accum += sampleValue * weight;
     weightSum += weight;
   }
 
   vec4 result = accum / max(weightSum, 1.0);
-  vec3 bent = normalize(result.xyz * 2.0 - 1.0);
+  vec3 bent = safeNormalize(result.xyz * 2.0 - 1.0, centerNormal);
   result.xyz = bent * 0.5 + 0.5;
   result.a = clamp(result.a, 0.0, 1.0);
   imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos, result);

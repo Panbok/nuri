@@ -151,6 +151,10 @@ private:
 
 class NURI_API OpaqueMainFeature final : public RenderFeature {
 public:
+  // OpaqueMainFeature must share a SharedOpaqueRenderer with
+  // OpaquePrepassFeature and be scheduled after it: OpaquePrepassFeature calls
+  // publishFrameData() and prepare(), which populate renderer_ frame data and
+  // prepared passes consumed by the main lighting pass.
   explicit OpaqueMainFeature(SharedOpaqueRenderer renderer);
   ~OpaqueMainFeature() override = default;
 

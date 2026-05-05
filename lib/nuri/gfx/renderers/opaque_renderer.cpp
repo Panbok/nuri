@@ -3137,6 +3137,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       if (!nuri::isValid(normalPipeline)) {
         normalPrepassDrawItems_.clear();
         normalPrepassEnabled = false;
+        ambientOcclusionSettings.active = false;
+        frame.sharedResources.ambientOcclusionTexture = {};
+        frame.sharedResources.ambientOcclusionGraphTexture = {};
         aoMetrics.active = false;
         aoMetrics.disabledReason = AmbientOcclusionDisabledReason::Unsupported;
         if (!loggedNormalPrepassUnsupported_) {
@@ -4227,9 +4230,7 @@ bool OpaqueRenderer::hasPreparedOpaqueMainPasses() const noexcept {
 
 bool OpaqueRenderer::hasPreparedOpaquePrepassPasses() const noexcept {
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
-    if (pass.isDepthPrepass || pass.isNormalPrepass ||
-        pass.isDepthPyramidPass ||
-        pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm) {
+    if (isPreLightingPass(pass)) {
       return true;
     }
   }
@@ -4238,9 +4239,7 @@ bool OpaqueRenderer::hasPreparedOpaquePrepassPasses() const noexcept {
 
 bool OpaqueRenderer::hasPreparedOpaqueMainLightingPasses() const noexcept {
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
-    if (!pass.isPickPass && !pass.isDepthPrepass && !pass.isNormalPrepass &&
-        !pass.isDepthPyramidPass &&
-        pass.desc.gpuTimingScope != GpuTimingScope::ShadowSdsm) {
+    if (!pass.isPickPass && !isPreLightingPass(pass)) {
       return true;
     }
   }
@@ -4274,6 +4273,12 @@ bool OpaqueRenderer::shouldPublishSceneDepthGraphTexture(
 }
 
 void OpaqueRenderer::cachePreparedGraphPassMetadata(PreparedGraphPass &) const {
+}
+
+bool OpaqueRenderer::isPreLightingPass(const PreparedGraphPass &pass) noexcept {
+  return pass.isDepthPrepass || pass.isNormalPrepass ||
+         pass.isDepthPyramidPass ||
+         pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm;
 }
 
 Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
@@ -4685,11 +4690,7 @@ OpaqueRenderer::appendOpaquePrepassPasses(RenderFrameContext &frame,
   std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds =
       std::move(preResolvedDrawBufferIdsResult).value();
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
-    const bool preLightingPass =
-        pass.isDepthPrepass || pass.isNormalPrepass ||
-        pass.isDepthPyramidPass ||
-        pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm;
-    if (!preLightingPass) {
+    if (!isPreLightingPass(pass)) {
       continue;
     }
     auto appendResult = appendPreparedGraphPass(
@@ -4729,11 +4730,7 @@ OpaqueRenderer::appendOpaqueMainLightingPasses(RenderFrameContext &frame,
   std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds =
       std::move(preResolvedDrawBufferIdsResult).value();
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
-    const bool preLightingPass =
-        pass.isDepthPrepass || pass.isNormalPrepass ||
-        pass.isDepthPyramidPass ||
-        pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm;
-    if (pass.isPickPass || preLightingPass) {
+    if (pass.isPickPass || isPreLightingPass(pass)) {
       continue;
     }
     auto appendResult = appendPreparedGraphPass(
@@ -7064,6 +7061,7 @@ RenderPipelineHandle OpaqueRenderer::selectNormalPipeline(
     if (nuri::isValid(meshNormalTessPipelineHandle_)) {
       return meshNormalTessPipelineHandle_;
     }
+    return {};
   }
   if (doubleSided && nuri::isValid(meshNormalDoubleSidedPipelineHandle_)) {
     return meshNormalDoubleSidedPipelineHandle_;

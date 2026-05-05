@@ -7,6 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 
 namespace nuri {
 namespace {
@@ -19,10 +20,10 @@ constexpr uint32_t kGTAODebugColor = 0xff44ddaa;
 struct DepthPrefilterPushConstants {
   uint32_t sourceDepthTexId = kInvalidTextureBindlessIndex;
   uint32_t sourceSamplerId = 0u;
-  std::array<uint32_t, GTAOPass::kViewDepthMipCount> outputTexIds{};
+  uint32_t outputTexId = kInvalidTextureBindlessIndex;
   uint32_t width = 1u;
   uint32_t height = 1u;
-  uint32_t mipCount = GTAOPass::kViewDepthMipCount;
+  uint32_t mipLevel = 0u;
   uint32_t projectionType = 0u;
   float nearPlane = 0.01f;
   float farPlane = 1000.0f;
@@ -54,6 +55,12 @@ struct DenoisePushConstants {
   uint32_t width = 1u;
   uint32_t height = 1u;
   uint32_t passIndex = 0u;
+  float normalSimilarityMin = 0.65f;
+  float normalSimilarityMax = 0.98f;
+  float depthScaleMultiplier = 0.0125f;
+  float depthScaleMin = 0.025f;
+  float spatialWeightNear = 0.8f;
+  float spatialWeightFar = 0.35f;
 };
 static_assert(sizeof(DenoisePushConstants) <= 128u);
 
@@ -95,9 +102,21 @@ std::span<const std::byte> copyPushConstants(std::array<std::byte, 128> &dst,
   case Format::ETC2_RGB8_UNORM:
   case Format::ETC2_RGB8_SRGB:
   case Format::Count:
-    break;
+    NURI_LOG_WARNING(
+        "GTAO texture byte metric requested unsupported format %u; using 1 "
+        "byte per pixel sentinel",
+        static_cast<uint32_t>(format));
+    NURI_ASSERT(false, "Unsupported GTAO texture byte metric format %u",
+                static_cast<uint32_t>(format));
+    return 1u;
   }
-  return 0u;
+  NURI_LOG_WARNING(
+      "GTAO texture byte metric requested unknown format %u; using 1 byte per "
+      "pixel sentinel",
+      static_cast<uint32_t>(format));
+  NURI_ASSERT(false, "Unknown GTAO texture byte metric format %u",
+              static_cast<uint32_t>(format));
+  return 1u;
 }
 
 [[nodiscard]] uint64_t textureBytes(Format format, uint32_t width,
@@ -155,6 +174,8 @@ ambientOcclusionPresetRadius(AmbientOcclusionPreset preset) noexcept {
     return 1.6f;
   case AmbientOcclusionPreset::Ultra:
     return 2.2f;
+  case AmbientOcclusionPreset::Custom:
+    return 1.15f;
   }
   return 1.15f;
 }
@@ -459,14 +480,19 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
       .sourceSamplerId = pointSamplerId,
       .width = width,
       .height = height,
-      .mipCount = kViewDepthMipCount,
       .projectionType = static_cast<uint32_t>(ctx.frame.camera.projectionType),
       .nearPlane = ctx.frame.camera.nearPlane,
       .farPlane = ctx.frame.camera.farPlane,
   };
+  std::array<uint32_t, kViewDepthMipCount> depthTexIds{};
   for (uint32_t level = 0u; level < kViewDepthMipCount; ++level) {
-    depthPc.outputTexIds[level] =
+    depthTexIds[level] =
         gpu_.getTextureBindlessIndex(scratch->viewDepthMips[level]);
+    if (depthTexIds[level] == kInvalidTextureBindlessIndex) {
+      metrics.active = false;
+      metrics.disabledReason = AmbientOcclusionDisabledReason::MissingResources;
+      return Result<bool, std::string>::makeResult(false);
+    }
   }
 
   depthPrefilterDependencies_[0] = ctx.shared.sceneDepthTexture;
@@ -474,16 +500,24 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   for (uint32_t level = 0u; level < kViewDepthMipCount; ++level) {
     depthPrefilterDependencies_[level + 1u] = scratch->viewDepthMips[level];
     depthPrefilterAccessModes_[level + 1u] = RenderGraphAccessMode::Write;
+    DepthPrefilterPushConstants levelDepthPc = depthPc;
+    levelDepthPc.outputTexId = depthTexIds[level];
+    levelDepthPc.mipLevel = level;
+    depthPrefilterDispatches_[level] = ComputeDispatchItem{
+        .pipeline = depthPrefilterPipeline_,
+        .dispatch = DispatchSize{.x = divRoundUp(levelDimension(width, level),
+                                                 kGTAOWorkgroupSizeX),
+                                 .y = divRoundUp(levelDimension(height, level),
+                                                 kGTAOWorkgroupSizeY),
+                                 .z = 1u},
+        .pushConstants =
+            copyPushConstants(depthPrefilterPushBytes_[level], levelDepthPc),
+        .dependencyTextures = std::span<const TextureHandle>(
+            depthPrefilterDependencies_.data(), kViewDepthMipCount + 1u),
+        .debugLabel = "GTAO Depth Prefilter",
+        .debugColor = kGTAODebugColor,
+    };
   }
-  depthPrefilterDispatches_[0] = ComputeDispatchItem{
-      .pipeline = depthPrefilterPipeline_,
-      .dispatch = dispatch,
-      .pushConstants = copyPushConstants(depthPrefilterPushBytes_, depthPc),
-      .dependencyTextures = std::span<const TextureHandle>(
-          depthPrefilterDependencies_.data(), kViewDepthMipCount + 1u),
-      .debugLabel = "GTAO Depth Prefilter",
-      .debugColor = kGTAODebugColor,
-  };
 
   RenderGraphGraphicsPassDesc depthPass{};
   depthPass.executionMode = RenderPassExecutionMode::ComputeOnly;
@@ -520,7 +554,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
       .projectionType = static_cast<uint32_t>(ctx.frame.camera.projectionType),
   };
   for (uint32_t level = 0u; level < kViewDepthMipCount; ++level) {
-    mainPc.depthTexIds[level] = depthPc.outputTexIds[level];
+    mainPc.depthTexIds[level] = depthTexIds[level];
     mainDependencies_[level] = scratch->viewDepthMips[level];
     mainAccessModes_[level] = RenderGraphAccessMode::Read;
   }
@@ -561,13 +595,17 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   const uint32_t passCount = std::max(ao.denoisePassCount, 1u);
   for (uint32_t passIndex = 0u; passIndex < passCount; ++passIndex) {
     const bool finalPass = passIndex + 1u == passCount;
-    TextureHandle outputTexture = finalPass ? ctx.shared.ambientOcclusionTexture
-                                            : scratch->denoiseScratch;
-    const uint32_t outputTexId = finalPass ? finalTexId : scratchTexId;
+    TextureHandle outputTexture =
+        finalPass ? ctx.shared.ambientOcclusionTexture
+                  : (passIndex % 2u == 0u ? scratch->denoiseScratch
+                                          : scratch->rawAmbientOcclusion);
+    const uint32_t outputTexId =
+        finalPass ? finalTexId
+                  : (passIndex % 2u == 0u ? scratchTexId : rawTexId);
     DenoisePushConstants denoisePc{
         .sourceTexId = denoiseSourceTexId,
         .outputTexId = outputTexId,
-        .depthTexId = depthPc.outputTexIds[0],
+        .depthTexId = depthTexIds[0],
         .width = width,
         .height = height,
         .passIndex = passIndex,

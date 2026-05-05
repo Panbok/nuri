@@ -8,7 +8,6 @@
 #include "nuri/gfx/shader.h"
 
 #include <array>
-#include <filesystem>
 #include <memory>
 #include <span>
 #include <vector>
@@ -60,14 +59,16 @@ private:
 
   std::array<TextureHandle, 8> depthPrefilterDependencies_{};
   std::array<RenderGraphAccessMode, 8> depthPrefilterAccessModes_{};
-  std::array<ComputeDispatchItem, 1> depthPrefilterDispatches_{};
+  std::array<ComputeDispatchItem, kViewDepthMipCount>
+      depthPrefilterDispatches_{};
   std::array<TextureHandle, 8> mainDependencies_{};
   std::array<RenderGraphAccessMode, 8> mainAccessModes_{};
   std::array<ComputeDispatchItem, 1> mainDispatches_{};
   std::array<TextureHandle, 3> denoiseDependencies_{};
   std::array<RenderGraphAccessMode, 3> denoiseAccessModes_{};
   std::array<ComputeDispatchItem, 1> denoiseDispatches_{};
-  std::array<std::byte, 128> depthPrefilterPushBytes_{};
+  std::array<std::array<std::byte, 128>, kViewDepthMipCount>
+      depthPrefilterPushBytes_{};
   std::array<std::byte, 128> mainPushBytes_{};
   std::array<std::byte, 128> denoisePushBytes_{};
 

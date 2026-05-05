@@ -140,10 +140,10 @@ constexpr bool hasBufferUsage(BufferUsage usage, BufferUsage flags) {
 enum class TextureUsage : uint8_t {
   Sampled,
   Storage,
-  StorageSampled,
   Attachment,
   AttachmentSampled,
   InputAttachment,
+  StorageSampled,
   Count
 };
 

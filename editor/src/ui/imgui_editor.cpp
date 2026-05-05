@@ -74,8 +74,8 @@ constexpr std::array<const char *, 4> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback", "MSAA 4x"};
 constexpr std::array<const char *, 2> kAmbientOcclusionModeLabels = {"Disabled",
                                                                      "GTAO"};
-constexpr std::array<const char *, 4> kAmbientOcclusionPresetLabels = {
-    "Low", "Balanced", "High", "Ultra"};
+constexpr std::array<const char *, 5> kAmbientOcclusionPresetLabels = {
+    "Low", "Balanced", "High", "Ultra", "Custom"};
 constexpr std::array<const char *, 4> kAmbientOcclusionDebugViewLabels = {
     "None", "Visibility", "Bent Normal", "Normals"};
 constexpr std::array<const char *, 30> kAntiAliasingDebugViewLabels = {
@@ -373,9 +373,9 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
 const char *ambientOcclusionModeDisplayName(AmbientOcclusionMode mode) {
   switch (sanitizeAmbientOcclusionMode(mode)) {
   case AmbientOcclusionMode::Disabled:
-    return "Disabled";
+    return kAmbientOcclusionModeLabels[0];
   case AmbientOcclusionMode::GTAO:
-    return "GTAO";
+    return kAmbientOcclusionModeLabels[1];
   }
   return "Unknown";
 }
@@ -383,13 +383,15 @@ const char *ambientOcclusionModeDisplayName(AmbientOcclusionMode mode) {
 const char *ambientOcclusionPresetDisplayName(AmbientOcclusionPreset preset) {
   switch (sanitizeAmbientOcclusionPreset(preset)) {
   case AmbientOcclusionPreset::Low:
-    return "Low";
+    return kAmbientOcclusionPresetLabels[0];
   case AmbientOcclusionPreset::Balanced:
-    return "Balanced";
+    return kAmbientOcclusionPresetLabels[1];
   case AmbientOcclusionPreset::High:
-    return "High";
+    return kAmbientOcclusionPresetLabels[2];
   case AmbientOcclusionPreset::Ultra:
-    return "Ultra";
+    return kAmbientOcclusionPresetLabels[3];
+  case AmbientOcclusionPreset::Custom:
+    return kAmbientOcclusionPresetLabels[4];
   }
   return "Unknown";
 }
@@ -398,13 +400,13 @@ const char *
 ambientOcclusionDebugViewDisplayName(AmbientOcclusionDebugView view) {
   switch (sanitizeAmbientOcclusionDebugView(view)) {
   case AmbientOcclusionDebugView::None:
-    return "None";
+    return kAmbientOcclusionDebugViewLabels[0];
   case AmbientOcclusionDebugView::Visibility:
-    return "Visibility";
+    return kAmbientOcclusionDebugViewLabels[1];
   case AmbientOcclusionDebugView::BentNormal:
-    return "Bent Normal";
+    return kAmbientOcclusionDebugViewLabels[2];
   case AmbientOcclusionDebugView::Normals:
-    return "Normals";
+    return kAmbientOcclusionDebugViewLabels[3];
   }
   return "Unknown";
 }
@@ -2089,6 +2091,12 @@ void drawAmbientOcclusionSettings(
     ImGui::Text("Textures: %u, %.2f MiB", metrics.textureCount,
                 static_cast<double>(metrics.totalTextureBytes) /
                     (1024.0 * 1024.0));
+    ImGui::Text("Normal Texture Churn: alloc %u, realloc %u",
+                metrics.normalTextureAllocationCount,
+                metrics.normalTextureReallocationCount);
+    ImGui::Text("AO Texture Churn: alloc %u, realloc %u",
+                metrics.ambientOcclusionTextureAllocationCount,
+                metrics.ambientOcclusionTextureReallocationCount);
     ImGui::Text("Outputs: scalar %s, bent normal %s",
                 metrics.scalarAoAvailable ? "yes" : "no",
                 metrics.bentNormalAvailable ? "yes" : "no");

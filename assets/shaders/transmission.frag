@@ -305,14 +305,18 @@ void main() {
     discard;
   }
 
-  const uint aoDebugView = getAmbientOcclusionDebugView(pc.frameData);
   if ((pc.frameData.flags & kFrameDataFlagHasAmbientOcclusion) != 0u) {
+    const uint aoDebugView = getAmbientOcclusionDebugView(pc.frameData);
     if (aoDebugView == kAmbientOcclusionDebugViewVisibility) {
       out_FragColor = vec4(vec3(sm.screenAo), 1.0);
       return;
     }
     if (aoDebugView == kAmbientOcclusionDebugViewBentNormal) {
-      out_FragColor = vec4(normalize(sm.ambientBentNormal) * 0.5 + 0.5, 1.0);
+      vec3 bentNormal = sm.ambientBentNormal;
+      float bentNormalLen = length(bentNormal);
+      bentNormal =
+          bentNormalLen < 1.0e-6 ? sm.nBase : bentNormal / bentNormalLen;
+      out_FragColor = vec4(bentNormal * 0.5 + 0.5, 1.0);
       return;
     }
     if (aoDebugView == kAmbientOcclusionDebugViewNormals) {

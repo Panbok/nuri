@@ -32,8 +32,8 @@ void main() {
     discard;
   }
 
-  const uint aoDebugView = getAmbientOcclusionDebugView(pc.frameData);
   if ((pc.frameData.flags & kFrameDataFlagHasAmbientOcclusion) != 0u) {
+    const uint aoDebugView = getAmbientOcclusionDebugView(pc.frameData);
     if (aoDebugView == kAmbientOcclusionDebugViewVisibility) {
       out_FragColor = vec4(vec3(sm.screenAo), 1.0);
       return;
