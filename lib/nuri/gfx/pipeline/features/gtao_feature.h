@@ -8,6 +8,7 @@
 #include "nuri/gfx/shader.h"
 
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <span>
 #include <vector>
@@ -40,6 +41,8 @@ private:
     TextureHandle rawAmbientOcclusion{};
     TextureHandle denoiseScratch{};
   };
+
+  static constexpr std::size_t kPushConstantBufferSize = 128u;
 
   GPUDevice &gpu_;
   RuntimeOpaqueShaderConfig config_{};
@@ -80,11 +83,11 @@ private:
   std::array<TextureHandle, 6> temporalDependencies_{};
   std::array<RenderGraphAccessMode, 6> temporalAccessModes_{};
   std::array<ComputeDispatchItem, 1> temporalDispatches_{};
-  std::array<std::byte, 128> depthPrefilterPushBytes_{};
-  std::array<std::byte, 128> edgePushBytes_{};
-  std::array<std::byte, 128> mainPushBytes_{};
-  std::array<std::byte, 128> denoisePushBytes_{};
-  std::array<std::byte, 128> temporalPushBytes_{};
+  std::array<std::byte, kPushConstantBufferSize> depthPrefilterPushBytes_{};
+  std::array<std::byte, kPushConstantBufferSize> edgePushBytes_{};
+  std::array<std::byte, kPushConstantBufferSize> mainPushBytes_{};
+  std::array<std::byte, kPushConstantBufferSize> denoisePushBytes_{};
+  std::array<std::byte, kPushConstantBufferSize> temporalPushBytes_{};
 
   Result<bool, std::string> ensureResources(FrameBuildContext &ctx);
   Result<bool, std::string>

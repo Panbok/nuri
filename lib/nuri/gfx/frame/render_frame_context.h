@@ -637,7 +637,9 @@ inline void sanitizeAmbientOcclusionSettings(
                           ? std::clamp(settings.strength, 0.0f, 4.0f)
                           : 1.0f;
 
+  const bool temporalAccumulationRequested = settings.temporalAccumulation;
   settings.active = false;
+  settings.temporalAccumulation = false;
   settings.disabledReason = AmbientOcclusionDisabledReason::None;
   if (settings.mode == AmbientOcclusionMode::Disabled) {
     settings.disabledReason = AmbientOcclusionDisabledReason::ModeDisabled;
@@ -646,9 +648,9 @@ inline void sanitizeAmbientOcclusionSettings(
   } else if (sanitizeAntiAliasingMode(antiAliasing.mode) ==
              AntiAliasingMode::MSAA4x) {
     settings.disabledReason = AmbientOcclusionDisabledReason::Msaa4x;
-    settings.temporalAccumulation = false;
   } else {
     settings.active = true;
+    settings.temporalAccumulation = temporalAccumulationRequested;
   }
 
   switch (settings.preset) {
@@ -2390,6 +2392,18 @@ resolveMotionVectorTexture(const RenderFrameContext &frame) {
 resolvePreviousMotionVectorTexture(const RenderFrameContext &frame) {
   if (nuri::isValid(frame.sharedResources.previousMotionVectorTexture)) {
     return frame.sharedResources.previousMotionVectorTexture;
+  }
+  return {};
+}
+
+[[nodiscard]] inline RenderGraphTextureId
+resolvePreviousAmbientOcclusionTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.ambientOcclusionGraphTexture) &&
+      nuri::isValid(frame.sharedResources.ambientOcclusionTexture)) {
+    return frame.sharedResources.ambientOcclusionGraphTexture;
+  }
+  if (nuri::isValid(frame.sharedResources.previousAmbientOcclusionTexture)) {
+    return {};
   }
   return {};
 }

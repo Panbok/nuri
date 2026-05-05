@@ -103,8 +103,7 @@ void main() {
     return;
   }
 
-  float currentVisibility =
-      clamp(sampleCurrentTexel(pos), 1.0 - kMaxVisibilityReduction, 1.0);
+  float currentVisibility = sampleCurrentTexel(pos);
   vec2 uv = (vec2(pos) + vec2(0.5)) / vec2(size);
 
   vec2 velocity = sampleVelocity(uv);

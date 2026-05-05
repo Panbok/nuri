@@ -21,7 +21,6 @@ enum ForwardSceneFlags : uint32_t {
   kForwardSceneHasSceneDepthPyramid = 1u << 7u,
   kForwardSceneTransmissionMipDebug = 1u << 8u,
   kForwardSceneHasAmbientOcclusion = 1u << 9u,
-  kForwardSceneHasAmbientBentNormal = 1u << 10u,
 };
 
 struct SceneDataBufferLayout {

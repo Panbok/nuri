@@ -16,6 +16,9 @@ constexpr uint32_t kInvalidTextureBindlessIndex = 0xffffffffu;
 constexpr uint32_t kGTAOWorkgroupSizeX = 8u;
 constexpr uint32_t kGTAOWorkgroupSizeY = 8u;
 constexpr uint32_t kGTAODebugColor = 0xff44ddaa;
+constexpr uint32_t kTemporalFlagsDefault = 1u;
+constexpr float kTemporalBaseCurrentWeight = 0.20f;
+constexpr float kTemporalRejectedCurrentWeight = 0.65f;
 
 struct DepthPrefilterPushConstants {
   uint32_t sourceDepthTexId = kInvalidTextureBindlessIndex;
@@ -82,10 +85,10 @@ struct TemporalPushConstants {
 };
 static_assert(sizeof(TemporalPushConstants) <= 128u);
 
-template <typename T>
-std::span<const std::byte> copyPushConstants(std::array<std::byte, 128> &dst,
+template <std::size_t Size, typename T>
+std::span<const std::byte> copyPushConstants(std::array<std::byte, Size> &dst,
                                              const T &src) {
-  static_assert(sizeof(T) <= 128u);
+  static_assert(sizeof(T) <= Size);
   std::memcpy(dst.data(), &src, sizeof(T));
   return std::span<const std::byte>(dst.data(), sizeof(T));
 }
@@ -279,16 +282,22 @@ Result<bool, std::string> GTAOPass::ensureResources(FrameBuildContext &ctx) {
     if (depthShaderResult.hasError() || edgeShaderResult.hasError() ||
         mainShaderResult.hasError() || denoiseShaderResult.hasError() ||
         temporalShaderResult.hasError()) {
-      const std::string error =
-          depthShaderResult.hasError()
-              ? depthShaderResult.error()
-              : (edgeShaderResult.hasError()
-                     ? edgeShaderResult.error()
-                     : (mainShaderResult.hasError()
-                            ? mainShaderResult.error()
-                            : (denoiseShaderResult.hasError()
-                                   ? denoiseShaderResult.error()
-                                   : temporalShaderResult.error())));
+      const auto getFirstShaderError = [&]() -> const std::string & {
+        if (depthShaderResult.hasError()) {
+          return depthShaderResult.error();
+        }
+        if (edgeShaderResult.hasError()) {
+          return edgeShaderResult.error();
+        }
+        if (mainShaderResult.hasError()) {
+          return mainShaderResult.error();
+        }
+        if (denoiseShaderResult.hasError()) {
+          return denoiseShaderResult.error();
+        }
+        return temporalShaderResult.error();
+      };
+      const std::string error = getFirstShaderError();
       return Result<bool, std::string>::makeError(error);
     }
     depthPrefilterShaderHandle_ = depthShaderResult.value();
@@ -839,9 +848,11 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
         .historySamplerId = linearSamplerId,
         .width = width,
         .height = height,
-        .flags = 1u,
-        .baseCurrentWeightBits = std::bit_cast<uint32_t>(0.20f),
-        .rejectedCurrentWeightBits = std::bit_cast<uint32_t>(0.65f),
+        .flags = kTemporalFlagsDefault,
+        .baseCurrentWeightBits =
+            std::bit_cast<uint32_t>(kTemporalBaseCurrentWeight),
+        .rejectedCurrentWeightBits =
+            std::bit_cast<uint32_t>(kTemporalRejectedCurrentWeight),
     };
     temporalDependencies_[0] = denoiseSource;
     temporalDependencies_[1] = ctx.shared.previousAmbientOcclusionTexture;

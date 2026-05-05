@@ -2044,8 +2044,13 @@ void drawAmbientOcclusionSettings(
 
   ImGui::SliderFloat("Strength##AmbientOcclusion", &ao.strength, 0.0f, 1.0f,
                      "%.2f");
+  const bool temporalAccumulationDisabled =
+      ao.mode == AmbientOcclusionMode::Disabled || !opaque.enabled ||
+      sanitizeAntiAliasingMode(antiAliasing.mode) == AntiAliasingMode::MSAA4x;
+  ImGui::BeginDisabled(temporalAccumulationDisabled);
   ImGui::Checkbox("Temporal Accumulation##AmbientOcclusion",
                   &ao.temporalAccumulation);
+  ImGui::EndDisabled();
 
   int debugViewIndex =
       static_cast<int>(sanitizeAmbientOcclusionDebugView(ao.debugView));
@@ -2076,6 +2081,7 @@ void drawAmbientOcclusionSettings(
 
   if (ImGui::CollapsingHeader("Metrics##AmbientOcclusion",
                               ImGuiTreeNodeFlags_DefaultOpen)) {
+    constexpr double MiB = 1024.0 * 1024.0;
     ImGui::Text("Dimensions: %u x %u", metrics.width, metrics.height);
     ImGui::Text("Normal Format: %s", formatDisplayName(metrics.normalFormat));
     ImGui::Text("AO Format: %s",
@@ -2091,14 +2097,11 @@ void drawAmbientOcclusionSettings(
         metrics.gpuTimingAvailable != 0u ? "ready" : "pending",
         static_cast<unsigned long long>(metrics.gpuTimingSourceFrameIndex));
     ImGui::Text("Textures: %u, %.2f MiB", metrics.textureCount,
-                static_cast<double>(metrics.totalTextureBytes) /
-                    (1024.0 * 1024.0));
-    ImGui::Text(
-        "GTAO Textures: depth %.2f, edge %.2f, work %.2f MiB",
-        static_cast<double>(metrics.depthPrefilterTextureBytes) /
-            (1024.0 * 1024.0),
-        static_cast<double>(metrics.edgeTextureBytes) / (1024.0 * 1024.0),
-        static_cast<double>(metrics.scratchTextureBytes) / (1024.0 * 1024.0));
+                static_cast<double>(metrics.totalTextureBytes) / MiB);
+    ImGui::Text("GTAO Textures: depth %.2f, edge %.2f, work %.2f MiB",
+                static_cast<double>(metrics.depthPrefilterTextureBytes) / MiB,
+                static_cast<double>(metrics.edgeTextureBytes) / MiB,
+                static_cast<double>(metrics.scratchTextureBytes) / MiB);
     ImGui::Text("Normal Texture Churn: alloc %u, realloc %u",
                 metrics.normalTextureAllocationCount,
                 metrics.normalTextureReallocationCount);

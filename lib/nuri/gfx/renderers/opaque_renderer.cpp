@@ -1249,11 +1249,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       ambientOcclusionSettings.temporalAccumulation;
   aoMetrics.disabledReason = ambientOcclusionSettings.disabledReason;
   aoMetrics.active = ambientOcclusionSettings.active;
-  const bool gtaoTemporalVelocityRequested =
-      ambientOcclusionSettings.active &&
-      ambientOcclusionSettings.temporalAccumulation && taaSelected &&
-      frame.camera.historyValid && frame.camera.temporalDataValid &&
-      nuri::isValid(frame.sharedResources.previousAmbientOcclusionTexture);
   const bool hasTaaVelocityInstances = taaSelected && instanceCount > 0;
   const bool previousCacheValid =
       hasTaaVelocityInstances && frame.camera.historyValid &&
@@ -4095,6 +4090,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       velocityPass.desc.borrowPayload = true;
       velocityPass.hasIndirectDraws = hasIndirectBaseDraws;
       velocityPass.isVelocityPass = true;
+      const bool gtaoTemporalVelocityRequested =
+          ambientOcclusionSettings.active &&
+          ambientOcclusionSettings.temporalAccumulation && taaSelected &&
+          frame.camera.historyValid && frame.camera.temporalDataValid &&
+          nuri::isValid(frame.sharedResources.previousAmbientOcclusionTexture);
       velocityPass.isEarlyVelocityPass = gtaoTemporalVelocityRequested;
 
       frame.metrics.antiAliasing.velocityPassCount = 1u;

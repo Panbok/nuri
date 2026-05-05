@@ -184,7 +184,7 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
                                       aoUv);
     if ((pc.frameData.ambientOcclusionFlags &
          kAmbientOcclusionFlagScalarAo) != 0u) {
-      sm.screenAo = saturate(aoSample.a);
+      sm.screenAo = saturate(aoSample.r);
     }
     if ((pc.frameData.flags & kFrameDataFlagHasAmbientBentNormal) != 0u &&
         (pc.frameData.ambientOcclusionFlags &
