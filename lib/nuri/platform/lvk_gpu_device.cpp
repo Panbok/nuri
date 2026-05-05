@@ -312,6 +312,9 @@ lvk::TextureUsageBits toLvkTextureUsage(TextureUsage usage) {
     return lvk::TextureUsageBits_Sampled;
   case TextureUsage::Storage:
     return lvk::TextureUsageBits_Storage;
+  case TextureUsage::StorageSampled:
+    return static_cast<lvk::TextureUsageBits>(lvk::TextureUsageBits_Storage |
+                                              lvk::TextureUsageBits_Sampled);
   case TextureUsage::Attachment:
     return lvk::TextureUsageBits_Attachment;
   case TextureUsage::AttachmentSampled:
@@ -1027,6 +1030,7 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     double spatialAATimeMs = 0.0;
     double opaqueTimeMs = 0.0;
     double msaaResolveTimeMs = 0.0;
+    double gtaoTimeMs = 0.0;
     bool shadowTimingAvailable = false;
     bool shadowDepthTimingAvailable = false;
     bool shadowSdsmTimingAvailable = false;
@@ -1037,6 +1041,7 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     bool spatialAATimingAvailable = false;
     bool opaqueTimingAvailable = false;
     bool msaaResolveTimingAvailable = false;
+    bool gtaoTimingAvailable = false;
     std::vector<uint64_t> queryData;
     for (const PendingTimingQueryRange &range : pending.timingRanges) {
       hadShadowSdsmRange =
@@ -1104,6 +1109,10 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
         case GpuTimingScope::MsaaResolve:
           msaaResolveTimeMs += intervalTimeMs;
           msaaResolveTimingAvailable = true;
+          break;
+        case GpuTimingScope::GTAO:
+          gtaoTimeMs += intervalTimeMs;
+          gtaoTimingAvailable = true;
           break;
         case GpuTimingScope::None:
           break;
@@ -1182,6 +1191,12 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
       completedReport.msaaResolveSourceFrameIndex = pending.frameIndex;
       completedReport.availableScopeMask |=
           gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
+    }
+    if (gtaoTimingAvailable) {
+      completedReport.gtaoTimeMs = static_cast<float>(gtaoTimeMs);
+      completedReport.gtaoSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::GTAO);
     }
     if (hadShadowSdsmRange && !shadowSdsmTimingAvailable &&
         !impl.loggedShadowSdsmTimingCollectionWarning) {

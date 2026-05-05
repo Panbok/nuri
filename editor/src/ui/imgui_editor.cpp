@@ -58,6 +58,7 @@ constexpr const char *kInspectorWindowName = "Inspector";
 constexpr const char *kAnimationPlayerWindowName = "Animation Player";
 constexpr const char *kTextureFilteringWindowName = "Texture Filtering";
 constexpr const char *kAntiAliasingWindowName = "Anti-Aliasing";
+constexpr const char *kAmbientOcclusionWindowName = "Ambient Occlusion";
 constexpr const char *kShadowsWindowName = "Shadows";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
 constexpr const char *kCameraHelpWindowName = "Camera Help";
@@ -71,6 +72,12 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 4> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback", "MSAA 4x"};
+constexpr std::array<const char *, 2> kAmbientOcclusionModeLabels = {"Disabled",
+                                                                     "GTAO"};
+constexpr std::array<const char *, 4> kAmbientOcclusionPresetLabels = {
+    "Low", "Balanced", "High", "Ultra"};
+constexpr std::array<const char *, 4> kAmbientOcclusionDebugViewLabels = {
+    "None", "Visibility", "Bent Normal", "Normals"};
 constexpr std::array<const char *, 30> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
@@ -129,6 +136,7 @@ enum class PassInspectorKind : uint8_t {
   Transparent,
   Composite,
   AntiAliasing,
+  AmbientOcclusion,
   Debug,
   Generic,
 };
@@ -141,9 +149,14 @@ PassInspectorKind classifyPassInspector(std::string_view featureName,
   if (featureName == "ShadowFeature" || passName == "ShadowDepthPass") {
     return PassInspectorKind::Shadow;
   }
-  if (featureName == "OpaqueFeature" || passName == "OpaqueMainPass" ||
+  if (featureName == "OpaqueFeature" || featureName == "OpaquePrepassFeature" ||
+      featureName == "OpaqueMainFeature" || passName == "OpaqueMainPass" ||
+      passName == "OpaqueMainLightingPass" || passName == "OpaquePrepassPass" ||
       passName == "OpaquePickPass") {
     return PassInspectorKind::Opaque;
+  }
+  if (featureName == "GTAOFeature" || passName == "GTAOPass") {
+    return PassInspectorKind::AmbientOcclusion;
   }
   if (featureName == "TemporalAAFeature" ||
       featureName == "MsaaResolveFeature" || passName == "MsaaResolvePass" ||
@@ -353,6 +366,64 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "Spatial AA Cleanup Mask";
   case AntiAliasingDebugView::SpatialAASplitCompare:
     return "Spatial AA Split Compare";
+  }
+  return "Unknown";
+}
+
+const char *ambientOcclusionModeDisplayName(AmbientOcclusionMode mode) {
+  switch (sanitizeAmbientOcclusionMode(mode)) {
+  case AmbientOcclusionMode::Disabled:
+    return "Disabled";
+  case AmbientOcclusionMode::GTAO:
+    return "GTAO";
+  }
+  return "Unknown";
+}
+
+const char *ambientOcclusionPresetDisplayName(AmbientOcclusionPreset preset) {
+  switch (sanitizeAmbientOcclusionPreset(preset)) {
+  case AmbientOcclusionPreset::Low:
+    return "Low";
+  case AmbientOcclusionPreset::Balanced:
+    return "Balanced";
+  case AmbientOcclusionPreset::High:
+    return "High";
+  case AmbientOcclusionPreset::Ultra:
+    return "Ultra";
+  }
+  return "Unknown";
+}
+
+const char *
+ambientOcclusionDebugViewDisplayName(AmbientOcclusionDebugView view) {
+  switch (sanitizeAmbientOcclusionDebugView(view)) {
+  case AmbientOcclusionDebugView::None:
+    return "None";
+  case AmbientOcclusionDebugView::Visibility:
+    return "Visibility";
+  case AmbientOcclusionDebugView::BentNormal:
+    return "Bent Normal";
+  case AmbientOcclusionDebugView::Normals:
+    return "Normals";
+  }
+  return "Unknown";
+}
+
+const char *ambientOcclusionDisabledReasonDisplayName(
+    AmbientOcclusionDisabledReason reason) {
+  switch (reason) {
+  case AmbientOcclusionDisabledReason::None:
+    return "None";
+  case AmbientOcclusionDisabledReason::ModeDisabled:
+    return "Mode Disabled";
+  case AmbientOcclusionDisabledReason::OpaqueDisabled:
+    return "Opaque Disabled";
+  case AmbientOcclusionDisabledReason::Msaa4x:
+    return "MSAA 4x";
+  case AmbientOcclusionDisabledReason::MissingResources:
+    return "Missing Resources";
+  case AmbientOcclusionDisabledReason::Unsupported:
+    return "Unsupported";
   }
   return "Unknown";
 }
@@ -1352,6 +1423,7 @@ bool passKindUsesFeatureToggle(PassInspectorKind kind) {
   case PassInspectorKind::Opaque:
   case PassInspectorKind::Transmission:
   case PassInspectorKind::Transparent:
+  case PassInspectorKind::AmbientOcclusion:
   case PassInspectorKind::Debug:
     return true;
   case PassInspectorKind::Composite:
@@ -1377,6 +1449,7 @@ bool *renderSettingToggleForPassKind(RenderSettings &renderSettings,
     return &renderSettings.transparent.enabled;
   case PassInspectorKind::Debug:
     return &renderSettings.debug.enabled;
+  case PassInspectorKind::AmbientOcclusion:
   case PassInspectorKind::Composite:
   case PassInspectorKind::AntiAliasing:
   case PassInspectorKind::Generic:
@@ -1435,6 +1508,14 @@ void setPassFamilyEnabled(RenderPipeline *renderPipeline,
 
 void syncFeatureToggleToRenderSettings(RenderSettings &renderSettings,
                                        PassInspectorKind kind, bool enabled) {
+  if (kind == PassInspectorKind::AmbientOcclusion) {
+    renderSettings.ambientOcclusion.mode =
+        enabled ? AmbientOcclusionMode::GTAO : AmbientOcclusionMode::Disabled;
+    sanitizeAmbientOcclusionSettings(renderSettings.ambientOcclusion,
+                                     renderSettings.opaque,
+                                     renderSettings.antiAliasing);
+    return;
+  }
   if (bool *const toggle = renderSettingToggleForPassKind(renderSettings, kind);
       toggle != nullptr) {
     *toggle = enabled;
@@ -1929,6 +2010,93 @@ void drawTransmissionSettings(
     RenderSettings::TransmissionSettings &transmission) {
   ImGui::Text("Transmission shading: %s",
               transmission.enabled ? "enabled" : "disabled");
+}
+
+void drawAmbientOcclusionSettings(
+    RenderSettings::AmbientOcclusionSettings &ao,
+    const RenderSettings::OpaqueSettings &opaque,
+    const RenderSettings::AntiAliasingSettings &antiAliasing,
+    const RenderFrameMetrics &frameMetrics) {
+  sanitizeAmbientOcclusionSettings(ao, opaque, antiAliasing);
+
+  int modeIndex = static_cast<int>(sanitizeAmbientOcclusionMode(ao.mode));
+  modeIndex = std::clamp(
+      modeIndex, 0, static_cast<int>(kAmbientOcclusionModeLabels.size()) - 1);
+  if (ImGui::Combo("Mode##AmbientOcclusion", &modeIndex,
+                   kAmbientOcclusionModeLabels.data(),
+                   static_cast<int>(kAmbientOcclusionModeLabels.size()))) {
+    ao.mode = static_cast<AmbientOcclusionMode>(modeIndex);
+    sanitizeAmbientOcclusionSettings(ao, opaque, antiAliasing);
+  }
+
+  int presetIndex = static_cast<int>(sanitizeAmbientOcclusionPreset(ao.preset));
+  presetIndex =
+      std::clamp(presetIndex, 0,
+                 static_cast<int>(kAmbientOcclusionPresetLabels.size()) - 1);
+  if (ImGui::Combo("Preset##AmbientOcclusion", &presetIndex,
+                   kAmbientOcclusionPresetLabels.data(),
+                   static_cast<int>(kAmbientOcclusionPresetLabels.size()))) {
+    ao.preset = static_cast<AmbientOcclusionPreset>(presetIndex);
+    sanitizeAmbientOcclusionSettings(ao, opaque, antiAliasing);
+  }
+
+  ImGui::SliderFloat("Strength##AmbientOcclusion", &ao.strength, 0.0f, 1.0f,
+                     "%.2f");
+
+  int debugViewIndex =
+      static_cast<int>(sanitizeAmbientOcclusionDebugView(ao.debugView));
+  debugViewIndex =
+      std::clamp(debugViewIndex, 0,
+                 static_cast<int>(kAmbientOcclusionDebugViewLabels.size()) - 1);
+  if (ImGui::Combo("Debug View##AmbientOcclusion", &debugViewIndex,
+                   kAmbientOcclusionDebugViewLabels.data(),
+                   static_cast<int>(kAmbientOcclusionDebugViewLabels.size()))) {
+    ao.debugView = static_cast<AmbientOcclusionDebugView>(debugViewIndex);
+  }
+
+  sanitizeAmbientOcclusionSettings(ao, opaque, antiAliasing);
+  const AmbientOcclusionFrameMetrics &metrics = frameMetrics.ambientOcclusion;
+
+  ImGui::Separator();
+  ImGui::Text("Mode: %s", ambientOcclusionModeDisplayName(ao.mode));
+  ImGui::Text("Preset: %s", ambientOcclusionPresetDisplayName(ao.preset));
+  ImGui::Text("Debug View: %s",
+              ambientOcclusionDebugViewDisplayName(ao.debugView));
+  ImGui::Text("Requested Active: %s", ao.active ? "yes" : "no");
+  ImGui::Text("Effective Active: %s", metrics.active ? "yes" : "no");
+  ImGui::Text("Settings Disabled Reason: %s",
+              ambientOcclusionDisabledReasonDisplayName(ao.disabledReason));
+  ImGui::Text(
+      "Frame Disabled Reason: %s",
+      ambientOcclusionDisabledReasonDisplayName(metrics.disabledReason));
+
+  if (ImGui::CollapsingHeader("Metrics##AmbientOcclusion",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Text("Dimensions: %u x %u", metrics.width, metrics.height);
+    ImGui::Text("Normal Format: %s", formatDisplayName(metrics.normalFormat));
+    ImGui::Text("AO Format: %s",
+                formatDisplayName(metrics.ambientOcclusionFormat));
+    ImGui::Text("Normal Prepass Draws: %u", metrics.normalPrepassDraws);
+    ImGui::Text("Passes: depth %u, main %u, denoise %u",
+                metrics.depthPrefilterPassCount, metrics.mainPassCount,
+                metrics.denoisePassCount);
+    ImGui::Text("Sampling: slices %u, steps %u, mips %u", metrics.sliceCount,
+                metrics.stepCount, metrics.depthMipCount);
+    ImGui::Text(
+        "GPU Time: %.3f ms (%s, frame %llu)", metrics.gpuTimeMs,
+        metrics.gpuTimingAvailable != 0u ? "ready" : "pending",
+        static_cast<unsigned long long>(metrics.gpuTimingSourceFrameIndex));
+    ImGui::Text("Textures: %u, %.2f MiB", metrics.textureCount,
+                static_cast<double>(metrics.totalTextureBytes) /
+                    (1024.0 * 1024.0));
+    ImGui::Text("Outputs: scalar %s, bent normal %s",
+                metrics.scalarAoAvailable ? "yes" : "no",
+                metrics.bentNormalAvailable ? "yes" : "no");
+    ImGui::Text("Graph: normals %s, AO %s",
+                metrics.normalGraphPublished ? "published" : "missing",
+                metrics.ambientOcclusionGraphPublished ? "published"
+                                                       : "missing");
+  }
 }
 
 void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap) {
@@ -2837,6 +3005,18 @@ void drawAntiAliasingWindow(bool &open, RenderSettings &renderSettings,
   ImGui::End();
 }
 
+void drawAmbientOcclusionWindow(bool &open, RenderSettings &renderSettings,
+                                const RenderFrameMetrics &frameMetrics) {
+  if (!ImGui::Begin(kAmbientOcclusionWindowName, &open)) {
+    ImGui::End();
+    return;
+  }
+  drawAmbientOcclusionSettings(renderSettings.ambientOcclusion,
+                               renderSettings.opaque,
+                               renderSettings.antiAliasing, frameMetrics);
+  ImGui::End();
+}
+
 void drawTextureFilteringWindow(bool &open, RenderSettings &renderSettings,
                                 const GPUDevice &gpu) {
   if (!ImGui::Begin(kTextureFilteringWindowName, &open)) {
@@ -3408,6 +3588,11 @@ void drawPassInspector(RenderSettings &renderSettings,
         case PassInspectorKind::AntiAliasing:
           drawAntiAliasingSettings(renderSettings.antiAliasing, renderPipeline,
                                    frameMetrics);
+          break;
+        case PassInspectorKind::AmbientOcclusion:
+          drawAmbientOcclusionSettings(
+              renderSettings.ambientOcclusion, renderSettings.opaque,
+              renderSettings.antiAliasing, frameMetrics);
           break;
         case PassInspectorKind::Debug:
           drawDebugSettings(renderSettings.debug);
@@ -5810,6 +5995,8 @@ struct ImGuiEditor::Impl {
       ImGui::MenuItem("Lights", nullptr, &showLightsWindow);
       ImGui::MenuItem("Shadows", nullptr, &showShadowsWindow);
       ImGui::MenuItem("Anti-Aliasing", nullptr, &showAntiAliasingWindow);
+      ImGui::MenuItem("Ambient Occlusion", nullptr,
+                      &showAmbientOcclusionWindow);
       if (ImGui::BeginMenu("Texture Filtering")) {
         auto &settings = renderSettings.textureFiltering;
         sanitizeTextureFilteringSettings(settings);
@@ -6035,6 +6222,13 @@ struct ImGuiEditor::Impl {
                              renderPipeline, frameMetrics);
       NURI_PROFILER_ZONE_END();
     }
+    if (showAmbientOcclusionWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawAmbientOcclusionWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawAmbientOcclusionWindow(showAmbientOcclusionWindow, renderSettings,
+                                 frameMetrics);
+      NURI_PROFILER_ZONE_END();
+    }
     if (showShadowsWindow) {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawShadowsWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
@@ -6185,6 +6379,7 @@ struct ImGuiEditor::Impl {
   bool showLightsWindow = false;
   bool showTextureFilteringWindow = false;
   bool showAntiAliasingWindow = false;
+  bool showAmbientOcclusionWindow = false;
   bool showShadowsWindow = false;
   bool showRenderGraphTelemetryWindow = false;
   bool showGizmoControlsWindow = false;
@@ -6324,6 +6519,9 @@ void ImGuiEditor::setRenderSettings(const RenderSettings &settings) {
   sanitizeTextureFilteringSettings(impl_->renderSettings.textureFiltering);
   sanitizeToneMapSettings(impl_->renderSettings.toneMap);
   sanitizeAntiAliasingSettings(impl_->renderSettings.antiAliasing);
+  sanitizeAmbientOcclusionSettings(impl_->renderSettings.ambientOcclusion,
+                                   impl_->renderSettings.opaque,
+                                   impl_->renderSettings.antiAliasing);
   sanitizeShadowSettings(impl_->renderSettings.shadow);
 }
 
@@ -6404,6 +6602,8 @@ RenderSettings ImGuiEditor::renderSettings() const {
   sanitizeTextureFilteringSettings(settings.textureFiltering);
   sanitizeToneMapSettings(settings.toneMap);
   sanitizeAntiAliasingSettings(settings.antiAliasing);
+  sanitizeAmbientOcclusionSettings(settings.ambientOcclusion, settings.opaque,
+                                   settings.antiAliasing);
   sanitizeShadowSettings(settings.shadow);
   return settings;
 }

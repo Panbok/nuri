@@ -64,7 +64,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 352,
+  static_assert(sizeof(FrameData) == 368,
                 "ShadowRenderer::FrameData must match shader layout");
 
   struct PushConstants {

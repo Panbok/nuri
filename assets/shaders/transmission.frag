@@ -305,6 +305,22 @@ void main() {
     discard;
   }
 
+  const uint aoDebugView = getAmbientOcclusionDebugView(pc.frameData);
+  if ((pc.frameData.flags & kFrameDataFlagHasAmbientOcclusion) != 0u) {
+    if (aoDebugView == kAmbientOcclusionDebugViewVisibility) {
+      out_FragColor = vec4(vec3(sm.screenAo), 1.0);
+      return;
+    }
+    if (aoDebugView == kAmbientOcclusionDebugViewBentNormal) {
+      out_FragColor = vec4(normalize(sm.ambientBentNormal) * 0.5 + 0.5, 1.0);
+      return;
+    }
+    if (aoDebugView == kAmbientOcclusionDebugViewNormals) {
+      out_FragColor = vec4(normalize(sm.nBase) * 0.5 + 0.5, 1.0);
+      return;
+    }
+  }
+
   // Direct lighting ---------------------------------------------------
   // Keep transmission on the reduced direct-light model.
   DirectLightingResult direct =
@@ -444,7 +460,7 @@ void main() {
            ibl.indirectScale * (indirectDiffuseTerm + ibl.iblSpecular)) +
       ibl.clearcoatIblSpecular;
   if (ibl.hasIndirectLighting) {
-    indirectLighting *= sm.ao;
+    indirectLighting *= sm.ao * sm.screenAo;
   }
 
   vec3 directLighting =

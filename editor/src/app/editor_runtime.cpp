@@ -922,6 +922,9 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
   frameRenderSettings_ = renderSettings_;
   applyDebugRenderEnvOverrides(frameRenderSettings_);
   sanitizeAntiAliasingSettings(frameRenderSettings_.antiAliasing);
+  sanitizeAmbientOcclusionSettings(frameRenderSettings_.ambientOcclusion,
+                                   frameRenderSettings_.opaque,
+                                   frameRenderSettings_.antiAliasing);
   frameContext_.frameIndex = frameIndex_++;
   frameContext_.camera = makeTemporalCameraFrameState(
       camera, app_.getAspectRatio(), frameRenderSettings_.antiAliasing,

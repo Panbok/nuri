@@ -1,0 +1,233 @@
+#version 460
+
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
+layout(set = 0, binding = 1) uniform sampler kSamplers[];
+layout(set = 0, binding = 2, rgba16f) uniform image2D kImagesRGBA16F[];
+
+const uint kViewDepthMipCount = 5u;
+const float kPi = 3.14159265359;
+const float kHalfPi = 1.57079632679;
+const float kMaxVisibilityReduction = 0.45;
+
+layout(push_constant) uniform constants {
+  uint depthTexIds[kViewDepthMipCount];
+  uint normalTexId;
+  uint outputTexId;
+  uint width;
+  uint height;
+  uint noiseIndex;
+  uint sliceCount;
+  uint stepCount;
+  uint strengthBits;
+  uint radiusBits;
+  float tanHalfFovY;
+  float aspectRatio;
+  float orthoHeight;
+  uint projectionType;
+}
+pc;
+
+float unpackFloat(uint bits) { return uintBitsToFloat(bits); }
+
+float safeAcos(float value) { return acos(clamp(value, -1.0, 1.0)); }
+
+uint hilbertIndex(uint x, uint y) {
+  x &= 63u;
+  y &= 63u;
+  uint index = 0u;
+  for (uint s = 32u; s > 0u; s >>= 1u) {
+    uint rx = (x & s) != 0u ? 1u : 0u;
+    uint ry = (y & s) != 0u ? 1u : 0u;
+    index += s * s * ((3u * rx) ^ ry);
+    if (ry == 0u) {
+      if (rx != 0u) {
+        x = 63u - x;
+        y = 63u - y;
+      }
+      uint t = x;
+      x = y;
+      y = t;
+    }
+  }
+  return index;
+}
+
+vec2 spatioTemporalNoise(ivec2 pixel, uint temporalIndex) {
+  uint index = hilbertIndex(uint(pixel.x), uint(pixel.y));
+  index += 288u * (temporalIndex % 64u);
+  return fract(vec2(0.5) +
+               float(index) * vec2(0.7548776662466928, 0.5698402909980533));
+}
+
+vec4 sampleTexture(uint texId, ivec2 pos) {
+  return texelFetch(kTextures2D[nonuniformEXT(texId)], pos, 0);
+}
+
+ivec2 mipSize(uint mipLevel) {
+  return max(ivec2(int(pc.width >> mipLevel), int(pc.height >> mipLevel)),
+             ivec2(1));
+}
+
+float sampleViewDepth(uint mipLevel, ivec2 fullResPos) {
+  uint clampedMip = min(mipLevel, kViewDepthMipCount - 1u);
+  int divisor = int(1u << clampedMip);
+  ivec2 pos =
+      clamp(fullResPos / divisor, ivec2(0), mipSize(clampedMip) - ivec2(1));
+  return texelFetch(kTextures2D[nonuniformEXT(pc.depthTexIds[clampedMip])], pos,
+                    0)
+      .r;
+}
+
+vec3 reconstructViewPosition(vec2 uv, float viewDepth) {
+  vec2 ndc = uv * 2.0 - 1.0;
+  if (pc.projectionType != 0u) {
+    float halfHeight = max(pc.orthoHeight, 1.0e-4) * 0.5;
+    return vec3(ndc.x * halfHeight * max(pc.aspectRatio, 1.0e-4),
+                -ndc.y * halfHeight, -viewDepth);
+  }
+
+  float yScale = max(pc.tanHalfFovY, 1.0e-4);
+  return vec3(ndc.x * yScale * max(pc.aspectRatio, 1.0e-4) * viewDepth,
+              -ndc.y * yScale * viewDepth, -viewDepth);
+}
+
+void main() {
+  ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+  ivec2 size = ivec2(int(pc.width), int(pc.height));
+  if (pos.x >= size.x || pos.y >= size.y) {
+    return;
+  }
+
+  float centerDepth = sampleViewDepth(0u, pos);
+  vec4 normalSample = sampleTexture(pc.normalTexId, pos);
+  vec3 viewNormal = normalSample.xyz * 2.0 - 1.0;
+  float normalLenSq = dot(viewNormal, viewNormal);
+  if (normalSample.a <= 0.0 || normalLenSq <= 1.0e-6 || centerDepth <= 1.0e-5) {
+    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
+               vec4(0.5, 0.5, 1.0, 1.0));
+    return;
+  }
+  viewNormal *= inversesqrt(normalLenSq);
+
+  uint slices = max(pc.sliceCount, 1u);
+  uint steps = max(pc.stepCount, 1u);
+  float effectRadius = max(unpackFloat(pc.radiusBits), 0.25);
+  float viewUnitsPerPixel =
+      pc.projectionType != 0u
+          ? max(pc.orthoHeight, 1.0e-4) / max(float(pc.height), 1.0)
+          : (2.0 * max(pc.tanHalfFovY, 1.0e-4) * centerDepth) /
+                max(float(pc.height), 1.0);
+  float radiusPixels =
+      clamp(effectRadius / max(viewUnitsPerPixel, 1.0e-4), 2.0, 96.0);
+  if (radiusPixels < 2.0) {
+    imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
+               vec4(viewNormal * 0.5 + 0.5, 1.0));
+    return;
+  }
+
+  vec2 uv = (vec2(pos) + vec2(0.5)) / vec2(size);
+  vec3 centerPos = reconstructViewPosition(uv, centerDepth * 0.998);
+  vec3 viewVec = normalize(-centerPos);
+  viewNormal =
+      normalize(viewNormal + max(0.0, -dot(viewNormal, viewVec)) * viewVec);
+
+  vec2 noise = spatioTemporalNoise(pos, pc.noiseIndex);
+  float visibility = 0.0;
+
+  for (uint slice = 0u; slice < slices; ++slice) {
+    float sliceNoise = fract(noise.x + float(slice) * 0.61803398875);
+    float sampleNoise = fract(noise.y + float(slice) * 0.75487766625);
+    float angle = (float(slice) + sliceNoise) * (kPi / float(slices));
+    float cosAngle = cos(angle);
+    float sinAngle = sin(angle);
+    vec2 dir = vec2(cosAngle, sinAngle);
+    vec3 directionVec = vec3(cosAngle, sinAngle, 0.0);
+    vec3 orthoDirection = directionVec - dot(directionVec, viewVec) * viewVec;
+    float orthoLenSq = dot(orthoDirection, orthoDirection);
+    if (orthoLenSq <= 1.0e-6) {
+      visibility += 1.0;
+      continue;
+    }
+    orthoDirection *= inversesqrt(orthoLenSq);
+
+    vec3 axis = normalize(cross(orthoDirection, viewVec));
+    vec3 projectedNormal = viewNormal - axis * dot(viewNormal, axis);
+    float projectedNormalLen = length(projectedNormal);
+    if (projectedNormalLen <= 1.0e-5) {
+      visibility += 1.0;
+      continue;
+    }
+
+    float signNorm = sign(dot(orthoDirection, projectedNormal));
+    float cosNorm =
+        clamp(dot(projectedNormal, viewVec) / projectedNormalLen, 0.0, 1.0);
+    float normalAngle = signNorm * safeAcos(cosNorm);
+    float lowHorizonCos0 = cos(normalAngle + kHalfPi);
+    float lowHorizonCos1 = cos(normalAngle - kHalfPi);
+    float horizonCos0 = lowHorizonCos0;
+    float horizonCos1 = lowHorizonCos1;
+
+    for (uint stepIndex = 1u; stepIndex <= steps; ++stepIndex) {
+      float stepRatio = (float(stepIndex) - 0.5 + sampleNoise) / float(steps);
+      stepRatio = pow(clamp(stepRatio, 0.0, 1.0), 1.45);
+      vec2 sampleOffset = round(dir * max(stepRatio * radiusPixels, 1.0));
+      float offsetLength = max(length(sampleOffset), 1.0);
+      uint mipLevel = uint(clamp(floor(log2(offsetLength)) - 2.0, 0.0,
+                                 float(kViewDepthMipCount - 1u)));
+
+      for (int side = 0; side < 2; ++side) {
+        vec2 signedOffset = side == 0 ? sampleOffset : -sampleOffset;
+        ivec2 samplePixel =
+            clamp(pos + ivec2(signedOffset), ivec2(0), size - ivec2(1));
+        vec2 sampleUv = (vec2(samplePixel) + vec2(0.5)) / vec2(size);
+        float sampleDepth = sampleViewDepth(mipLevel, samplePixel);
+        if (sampleDepth <= 1.0e-5) {
+          continue;
+        }
+
+        vec3 samplePos = reconstructViewPosition(sampleUv, sampleDepth);
+        vec3 sampleDelta = samplePos - centerPos;
+        float sampleDist = length(sampleDelta);
+        if (sampleDist <= 1.0e-5) {
+          continue;
+        }
+
+        vec3 horizonVec = sampleDelta / sampleDist;
+        float horizonCos = dot(horizonVec, viewVec);
+        float falloff =
+            1.0 - smoothstep(effectRadius * 0.25, effectRadius, sampleDist);
+        if (side == 0) {
+          horizonCos0 =
+              max(horizonCos0, mix(lowHorizonCos0, horizonCos, falloff));
+        } else {
+          horizonCos1 =
+              max(horizonCos1, mix(lowHorizonCos1, horizonCos, falloff));
+        }
+      }
+    }
+
+    projectedNormalLen = mix(projectedNormalLen, 1.0, 0.05);
+    float h0 = -safeAcos(horizonCos1);
+    float h1 = safeAcos(horizonCos0);
+    float iarc0 =
+        (cosNorm + 2.0 * h0 * sin(normalAngle) - cos(2.0 * h0 - normalAngle)) *
+        0.25;
+    float iarc1 =
+        (cosNorm + 2.0 * h1 * sin(normalAngle) - cos(2.0 * h1 - normalAngle)) *
+        0.25;
+    visibility += clamp(projectedNormalLen * (iarc0 + iarc1), 0.0, 1.0);
+  }
+
+  float rawVisibility = clamp(visibility / float(slices), 0.0, 1.0);
+  float strength = clamp(unpackFloat(pc.strengthBits), 0.0, 1.0);
+  visibility = mix(1.0, rawVisibility, strength);
+  visibility = max(visibility, 1.0 - kMaxVisibilityReduction);
+  vec3 packedBent = viewNormal * 0.5 + 0.5;
+  imageStore(kImagesRGBA16F[nonuniformEXT(pc.outputTexId)], pos,
+             vec4(packedBent, visibility));
+}

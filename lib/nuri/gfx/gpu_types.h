@@ -140,6 +140,7 @@ constexpr bool hasBufferUsage(BufferUsage usage, BufferUsage flags) {
 enum class TextureUsage : uint8_t {
   Sampled,
   Storage,
+  StorageSampled,
   Attachment,
   AttachmentSampled,
   InputAttachment,
@@ -188,14 +189,7 @@ enum class LoadOp : uint8_t { DontCare, Load, Clear };
 
 enum class StoreOp : uint8_t { DontCare, Store, MsaaResolve };
 
-enum class ResolveMode : uint8_t {
-  None,
-  SampleZero,
-  Average,
-  Min,
-  Max,
-  Count
-};
+enum class ResolveMode : uint8_t { None, SampleZero, Average, Min, Max, Count };
 
 enum class VertexFormat : uint8_t {
   Float1,

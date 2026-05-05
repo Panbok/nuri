@@ -7,6 +7,7 @@
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/features/composite_feature.h"
 #include "nuri/gfx/pipeline/features/debug_feature.h"
+#include "nuri/gfx/pipeline/features/gtao_feature.h"
 #include "nuri/gfx/pipeline/features/msaa_resolve_feature.h"
 #include "nuri/gfx/pipeline/features/opaque_feature.h"
 #include "nuri/gfx/pipeline/features/shadow_feature.h"
@@ -263,8 +264,14 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
       getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(
       std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
-  renderPipeline_->addFeature(std::make_unique<OpaqueFeature>(
-      getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
+  auto opaqueRenderer = makeSharedOpaqueRenderer(getGPU(), shaderConfig.opaque,
+                                                 pipelineMemoryResource());
+  renderPipeline_->addFeature(
+      std::make_unique<OpaquePrepassFeature>(opaqueRenderer));
+  renderPipeline_->addFeature(
+      std::make_unique<GTAOFeature>(getGPU(), shaderConfig.opaque));
+  renderPipeline_->addFeature(
+      std::make_unique<OpaqueMainFeature>(opaqueRenderer));
   renderPipeline_->addFeature(std::make_unique<MsaaResolveFeature>(getGPU()));
   renderPipeline_->addFeature(
       std::make_unique<TemporalAAFeature>(getGPU(), shaderConfig.composite));

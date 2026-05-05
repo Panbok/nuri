@@ -83,6 +83,7 @@ enum class GpuTimingScope : uint8_t {
   SpatialAA = 8,
   Opaque = 9,
   MsaaResolve = 10,
+  GTAO = 11,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -112,6 +113,8 @@ constexpr uint32_t kGpuTimingScopeOpaqueBit =
     gpuTimingScopeToBit(GpuTimingScope::Opaque);
 constexpr uint32_t kGpuTimingScopeMsaaResolveBit =
     gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
+constexpr uint32_t kGpuTimingScopeGTAOBit =
+    gpuTimingScopeToBit(GpuTimingScope::GTAO);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -127,6 +130,7 @@ struct GpuTimingReport {
   uint64_t spatialAASourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t opaqueSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t msaaResolveSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t gtaoSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -137,6 +141,7 @@ struct GpuTimingReport {
   float spatialAATimeMs = 0.0f;
   float opaqueTimeMs = 0.0f;
   float msaaResolveTimeMs = 0.0f;
+  float gtaoTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
 };
 
@@ -165,7 +170,7 @@ inline void mergeGpuTimingReportScope(GpuTimingReport &dst,
 
 inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
                                        const GpuTimingReport &src) {
-  static constexpr std::array<GpuTimingScopeMergeDesc, 10> kScopeDescs{{
+  static constexpr std::array<GpuTimingScopeMergeDesc, 11> kScopeDescs{{
       {GpuTimingScope::Shadow, &GpuTimingReport::shadowTimeMs,
        &GpuTimingReport::shadowSourceFrameIndex,
        gpuTimingScopeToBit(GpuTimingScope::Shadow)},
@@ -198,6 +203,9 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
       {GpuTimingScope::MsaaResolve, &GpuTimingReport::msaaResolveTimeMs,
        &GpuTimingReport::msaaResolveSourceFrameIndex,
        gpuTimingScopeToBit(GpuTimingScope::MsaaResolve)},
+      {GpuTimingScope::GTAO, &GpuTimingReport::gtaoTimeMs,
+       &GpuTimingReport::gtaoSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::GTAO)},
   }};
   for (const GpuTimingScopeMergeDesc desc : kScopeDescs) {
     mergeGpuTimingReportScope(dst, src, desc);

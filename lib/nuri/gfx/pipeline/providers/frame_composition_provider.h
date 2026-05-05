@@ -49,12 +49,16 @@ private:
   Result<bool, std::string> recreateMsaaSceneTextures();
   Result<bool, std::string> recreateMotionVectorTextures();
   Result<bool, std::string> recreateReactiveMaskTextures();
+  Result<bool, std::string> recreateNormalTextures();
+  Result<bool, std::string> recreateAmbientOcclusionTextures();
   void invalidateAllocationState() noexcept;
   void destroyTextures(TextureRing &textures);
   void destroyHistoryTextures();
   void destroyMsaaSceneTextures();
   void destroyMotionVectorTextures();
   void destroyReactiveMaskTextures();
+  void destroyNormalTextures();
+  void destroyAmbientOcclusionTextures();
   [[nodiscard]] TextureHandle
   currentRingTexture(const TextureRing &textures,
                      uint64_t frameIndex) const noexcept;
@@ -72,6 +76,8 @@ private:
   TextureRing msaaSceneDepthTextures_;
   TextureRing motionVectorTextures_;
   TextureRing reactiveMaskTextures_;
+  TextureRing normalTextures_;
+  TextureRing ambientOcclusionTextures_;
   TextureRing historyColorTextures_;
   FrameTextureRequirementFlags allocatedRequirements_ =
       FrameTextureRequirementFlags::None;

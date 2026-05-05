@@ -92,6 +92,7 @@ FrameCompositionProvider::FrameCompositionProvider(
       frameColorTextures_(memory_), sceneDepthTextures_(memory_),
       msaaSceneColorTextures_(memory_), msaaSceneDepthTextures_(memory_),
       motionVectorTextures_(memory_), reactiveMaskTextures_(memory_),
+      normalTextures_(memory_), ambientOcclusionTextures_(memory_),
       historyColorTextures_(memory_) {}
 
 FrameCompositionProvider::~FrameCompositionProvider() {
@@ -104,6 +105,8 @@ FrameCompositionProvider::~FrameCompositionProvider() {
   destroyHistoryTextures();
   destroyMotionVectorTextures();
   destroyReactiveMaskTextures();
+  destroyNormalTextures();
+  destroyAmbientOcclusionTextures();
 }
 
 Result<bool, std::string>
@@ -115,6 +118,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.sceneDepthGraphTexture = {};
   ctx.shared.msaaSceneColorGraphTexture = {};
   ctx.shared.msaaSceneDepthGraphTexture = {};
+  ctx.shared.normalGraphTexture = {};
+  ctx.shared.ambientOcclusionGraphTexture = {};
   ctx.shared.sceneDepthPyramidGraphTextures = {};
   ctx.shared.motionVectorGraphTexture = {};
   ctx.shared.previousMotionVectorGraphTexture = {};
@@ -159,6 +164,34 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
           : TextureHandle{};
   ctx.shared.reactiveMaskTexture =
       currentRingTexture(reactiveMaskTextures_, ctx.frame.frameIndex);
+  ctx.shared.normalTexture =
+      currentRingTexture(normalTextures_, ctx.frame.frameIndex);
+  ctx.shared.ambientOcclusionTexture =
+      currentRingTexture(ambientOcclusionTextures_, ctx.frame.frameIndex);
+  AmbientOcclusionFrameMetrics &aoMetrics = ctx.frame.metrics.ambientOcclusion;
+  aoMetrics.normalFormat = kFrameCompositionNormalFormat;
+  aoMetrics.ambientOcclusionFormat = kFrameCompositionAmbientOcclusionFormat;
+  aoMetrics.width = framebufferWidth_;
+  aoMetrics.height = framebufferHeight_;
+  aoMetrics.normalsAllocated = nuri::isValid(ctx.shared.normalTexture);
+  aoMetrics.ambientOcclusionAllocated =
+      nuri::isValid(ctx.shared.ambientOcclusionTexture);
+  const uint64_t fullResPixels = static_cast<uint64_t>(framebufferWidth_) *
+                                 static_cast<uint64_t>(framebufferHeight_);
+  aoMetrics.normalTextureBytes =
+      aoMetrics.normalsAllocated
+          ? fullResPixels * static_cast<uint64_t>(textureBytesPerPixel(
+                                kFrameCompositionNormalFormat))
+          : 0u;
+  aoMetrics.ambientOcclusionTextureBytes =
+      aoMetrics.ambientOcclusionAllocated
+          ? fullResPixels * static_cast<uint64_t>(textureBytesPerPixel(
+                                kFrameCompositionAmbientOcclusionFormat))
+          : 0u;
+  aoMetrics.textureCount = (aoMetrics.normalsAllocated ? 1u : 0u) +
+                           (aoMetrics.ambientOcclusionAllocated ? 1u : 0u);
+  aoMetrics.totalTextureBytes =
+      aoMetrics.normalTextureBytes + aoMetrics.ambientOcclusionTextureBytes;
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   aaMetrics.msaaEnabled =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
@@ -400,6 +433,34 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
     destroyReactiveMaskTextures();
   }
 
+  const bool needsNormals = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::Normals);
+  const bool hadNormals = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::Normals);
+  if (needsNormals && (fullRecreate || !hadNormals)) {
+    auto normalResult = recreateNormalTextures();
+    if (normalResult.hasError()) {
+      invalidateAllocationState();
+      return normalResult;
+    }
+  } else if (!needsNormals && hadNormals) {
+    destroyNormalTextures();
+  }
+
+  const bool needsAmbientOcclusion = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::AmbientOcclusion);
+  const bool hadAmbientOcclusion = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::AmbientOcclusion);
+  if (needsAmbientOcclusion && (fullRecreate || !hadAmbientOcclusion)) {
+    auto aoResult = recreateAmbientOcclusionTextures();
+    if (aoResult.hasError()) {
+      invalidateAllocationState();
+      return aoResult;
+    }
+  } else if (!needsAmbientOcclusion && hadAmbientOcclusion) {
+    destroyAmbientOcclusionTextures();
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -556,6 +617,19 @@ FrameCompositionProvider::recreateReactiveMaskTextures() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string> FrameCompositionProvider::recreateNormalTextures() {
+  return recreateFullResTextureRing(
+      normalTextures_, kFrameCompositionNormalFormat,
+      TextureUsage::AttachmentSampled, "frame_material_normals");
+}
+
+Result<bool, std::string>
+FrameCompositionProvider::recreateAmbientOcclusionTextures() {
+  return recreateFullResTextureRing(
+      ambientOcclusionTextures_, kFrameCompositionAmbientOcclusionFormat,
+      TextureUsage::StorageSampled, "frame_ambient_occlusion");
+}
+
 void FrameCompositionProvider::destroyTextures(TextureRing &textures) {
   for (TextureHandle &texture : textures) {
     if (!nuri::isValid(texture)) {
@@ -582,6 +656,14 @@ void FrameCompositionProvider::destroyMotionVectorTextures() {
 
 void FrameCompositionProvider::destroyReactiveMaskTextures() {
   destroyTextures(reactiveMaskTextures_);
+}
+
+void FrameCompositionProvider::destroyNormalTextures() {
+  destroyTextures(normalTextures_);
+}
+
+void FrameCompositionProvider::destroyAmbientOcclusionTextures() {
+  destroyTextures(ambientOcclusionTextures_);
 }
 
 TextureHandle FrameCompositionProvider::currentRingTexture(

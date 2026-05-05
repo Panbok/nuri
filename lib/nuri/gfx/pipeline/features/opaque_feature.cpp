@@ -14,6 +14,27 @@ Result<bool, std::string> OpaqueMainPass::build(FrameBuildContext &ctx) {
   return renderer_.appendOpaqueMainPasses(ctx.frame, ctx.graph);
 }
 
+bool OpaquePrepassPass::isEnabled(const FrameBuildContext &ctx) const {
+  return (ctx.frame.settings == nullptr ||
+          ctx.frame.settings->opaque.enabled) &&
+         renderer_.hasPreparedOpaquePrepassPasses();
+}
+
+Result<bool, std::string> OpaquePrepassPass::build(FrameBuildContext &ctx) {
+  return renderer_.appendOpaquePrepassPasses(ctx.frame, ctx.graph);
+}
+
+bool OpaqueMainLightingPass::isEnabled(const FrameBuildContext &ctx) const {
+  return (ctx.frame.settings == nullptr ||
+          ctx.frame.settings->opaque.enabled) &&
+         renderer_.hasPreparedOpaqueMainLightingPasses();
+}
+
+Result<bool, std::string>
+OpaqueMainLightingPass::build(FrameBuildContext &ctx) {
+  return renderer_.appendOpaqueMainLightingPasses(ctx.frame, ctx.graph);
+}
+
 bool OpaquePickPass::isEnabled(const FrameBuildContext &ctx) const {
   return (ctx.frame.settings == nullptr ||
           ctx.frame.settings->opaque.enabled) &&
@@ -22,6 +43,12 @@ bool OpaquePickPass::isEnabled(const FrameBuildContext &ctx) const {
 
 Result<bool, std::string> OpaquePickPass::build(FrameBuildContext &ctx) {
   return renderer_.appendOpaquePickPasses(ctx.frame, ctx.graph);
+}
+
+SharedOpaqueRenderer
+makeSharedOpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
+                         std::pmr::memory_resource *memory) {
+  return std::make_shared<OpaqueRenderer>(gpu, std::move(config), memory);
 }
 
 OpaqueFeature::OpaqueFeature(GPUDevice &gpu, OpaqueRendererConfig config,
@@ -50,6 +77,41 @@ OpaqueFeature::publishFrameData(FrameBuildContext &ctx) {
 }
 
 std::span<RenderFeaturePass *const> OpaqueFeature::passes() noexcept {
+  return passes_;
+}
+
+OpaquePrepassFeature::OpaquePrepassFeature(SharedOpaqueRenderer renderer)
+    : renderer_(std::move(renderer)), pickPass_(*renderer_),
+      prepass_(*renderer_), passes_{&pickPass_, &prepass_} {
+  renderer_->onAttach();
+}
+
+OpaquePrepassFeature::~OpaquePrepassFeature() {
+  if (renderer_) {
+    renderer_->onDetach();
+  }
+}
+
+Result<bool, std::string>
+OpaquePrepassFeature::prepare(FrameBuildContext &ctx) {
+  return renderer_->prepareOpaqueGraphPasses(ctx.frame);
+}
+
+Result<bool, std::string>
+OpaquePrepassFeature::publishFrameData(FrameBuildContext &ctx) {
+  renderer_->publishFrameData(ctx.frame);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+std::span<RenderFeaturePass *const> OpaquePrepassFeature::passes() noexcept {
+  return passes_;
+}
+
+OpaqueMainFeature::OpaqueMainFeature(SharedOpaqueRenderer renderer)
+    : renderer_(std::move(renderer)), mainLightingPass_(*renderer_),
+      passes_{&mainLightingPass_} {}
+
+std::span<RenderFeaturePass *const> OpaqueMainFeature::passes() noexcept {
   return passes_;
 }
 

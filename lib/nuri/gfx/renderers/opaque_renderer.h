@@ -49,15 +49,23 @@ public:
   void publishFrameData(RenderFrameContext &frame);
   Result<bool, std::string> prepareOpaqueGraphPasses(RenderFrameContext &frame);
   [[nodiscard]] bool hasPreparedOpaqueMainPasses() const noexcept;
+  [[nodiscard]] bool hasPreparedOpaquePrepassPasses() const noexcept;
+  [[nodiscard]] bool hasPreparedOpaqueMainLightingPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaquePickPasses() const noexcept;
   Result<bool, std::string> appendOpaqueMainPasses(RenderFrameContext &frame,
                                                    RenderGraphBuilder &graph);
+  Result<bool, std::string>
+  appendOpaquePrepassPasses(RenderFrameContext &frame,
+                            RenderGraphBuilder &graph);
+  Result<bool, std::string>
+  appendOpaqueMainLightingPasses(RenderFrameContext &frame,
+                                 RenderGraphBuilder &graph);
   Result<bool, std::string> appendOpaquePickPasses(RenderFrameContext &frame,
                                                    RenderGraphBuilder &graph);
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 352,
+  static_assert(sizeof(FrameData) == 368,
                 "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
@@ -244,6 +252,7 @@ private:
     bool isMainPass = false;
     bool isPickPass = false;
     bool isDepthPrepass = false;
+    bool isNormalPrepass = false;
     bool isDepthPyramidPass = false;
     bool isVelocityPass = false;
     bool isReactiveMaskPass = false;
@@ -355,6 +364,8 @@ private:
   selectDepthPipeline(RenderPipelineHandle sourcePipeline, bool alphaMasked,
                       bool msaa) const;
   [[nodiscard]] RenderPipelineHandle
+  selectNormalPipeline(RenderPipelineHandle sourcePipeline) const;
+  [[nodiscard]] RenderPipelineHandle
   selectPickPipeline(RenderPipelineHandle sourcePipeline) const;
   [[nodiscard]] RenderPipelineHandle
   selectShadowInspectPipeline(RenderPipelineHandle sourcePipeline) const;
@@ -399,6 +410,7 @@ private:
   std::unique_ptr<Shader> meshShadowInspectShader_;
   std::unique_ptr<Shader> meshVelocityShader_;
   std::unique_ptr<Shader> meshReactiveMaskShader_;
+  std::unique_ptr<Shader> meshNormalShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> depthPyramidShader_;
@@ -435,6 +447,7 @@ private:
   ShaderHandle meshVelocityVertexShader_{};
   ShaderHandle meshVelocityFragmentShader_{};
   ShaderHandle meshReactiveMaskFragmentShader_{};
+  ShaderHandle meshNormalFragmentShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle depthPyramidVertexShader_{};
@@ -472,6 +485,10 @@ private:
   RenderPipelineHandle meshVelocityDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshReactiveMaskPipelineHandle_{};
   RenderPipelineHandle meshReactiveMaskDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshNormalPipelineHandle_{};
+  RenderPipelineHandle meshNormalDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshNormalTessPipelineHandle_{};
+  RenderPipelineHandle meshNormalDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle meshDepthPipelineHandle_{};
   RenderPipelineHandle meshDepthDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshDepthTessPipelineHandle_{};
@@ -516,6 +533,7 @@ private:
   bool loggedGsOverlayUnsupported_ = false;
   bool loggedGsTessOverlayUnsupported_ = false;
   bool loggedDepthPrepassUnsupported_ = false;
+  bool loggedNormalPrepassUnsupported_ = false;
   bool loggedDepthPyramidUnsupported_ = false;
   bool loggedMaterialFallbackWarning_ = false;
   bool loggedBlendMaterialUnsupportedWarning_ = false;
@@ -585,6 +603,7 @@ private:
   std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<DrawItem> msaaPassDrawItems_;
   std::pmr::vector<DrawItem> depthPrepassDrawItems_;
+  std::pmr::vector<DrawItem> normalPrepassDrawItems_;
   std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
   std::pmr::vector<DrawItem> depthPyramidDrawItems_;
   std::pmr::vector<TextureHandle> depthPyramidDependencyTextures_;

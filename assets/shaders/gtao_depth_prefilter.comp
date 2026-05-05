@@ -1,0 +1,56 @@
+#version 460
+
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
+layout(set = 0, binding = 1) uniform sampler kSamplers[];
+layout(set = 0, binding = 2, r32f) uniform image2D kImagesR32F[];
+
+const uint kViewDepthMipCount = 5u;
+
+layout(push_constant) uniform constants {
+  uint sourceDepthTexId;
+  uint sourceSamplerId;
+  uint outputTexIds[kViewDepthMipCount];
+  uint width;
+  uint height;
+  uint mipCount;
+  uint projectionType;
+  float nearPlane;
+  float farPlane;
+}
+pc;
+
+float linearizeDepth(float deviceDepth) {
+  float nearPlane = max(pc.nearPlane, 1.0e-4);
+  float farPlane = max(pc.farPlane, nearPlane + 1.0e-3);
+  if (pc.projectionType != 0u) {
+    return mix(nearPlane, farPlane, clamp(deviceDepth, 0.0, 1.0));
+  }
+  return (nearPlane * farPlane) /
+         max(farPlane - deviceDepth * (farPlane - nearPlane), 1.0e-4);
+}
+
+void main() {
+  ivec2 globalPos = ivec2(gl_GlobalInvocationID.xy);
+  uint mipLimit = min(pc.mipCount, kViewDepthMipCount);
+  for (uint level = 0u; level < mipLimit; ++level) {
+    ivec2 mipSize =
+        max(ivec2(int(pc.width >> level), int(pc.height >> level)), ivec2(1));
+    if (globalPos.x >= mipSize.x || globalPos.y >= mipSize.y) {
+      continue;
+    }
+
+    vec2 uv = (vec2(globalPos) + vec2(0.5)) / vec2(mipSize);
+    float rawDepth =
+        texture(nonuniformEXT(sampler2D(kTextures2D[pc.sourceDepthTexId],
+                                        kSamplers[pc.sourceSamplerId])),
+                uv)
+            .r;
+    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexIds[level])], globalPos,
+               vec4(linearizeDepth(rawDepth), 0.0, 0.0, 0.0));
+  }
+}

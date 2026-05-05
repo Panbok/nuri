@@ -24,10 +24,12 @@ struct ShadedMaterial {
   float roughness;
   float alphaRoughness;
   float ao;
+  float screenAo;
   float ior;
   bool iorCompatMode;
   vec3 nGeom;
   vec3 nBase;
+  vec3 ambientBentNormal;
   vec3 nClearcoat;
   vec3 v;
   float ndotv;
@@ -126,6 +128,7 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
       occlusionTexId, matSampler);
   sm.ao = mix(1.0, occlusion,
               saturate(material.header.metallicRoughnessOcclusionAlphaCutoff.z));
+  sm.screenAo = 1.0;
 
   sm.nGeom = normalize(vtx.worldNormal);
   if (!gl_FrontFacing) {
@@ -168,6 +171,32 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
     }
     sm.nBase = applyNormalMap(sm.nBase, vtx.worldTangent, vtx.worldPos,
                               uvNormal, n);
+  }
+  sm.ambientBentNormal = sm.nBase;
+  if ((pc.frameData.flags & kFrameDataFlagHasAmbientOcclusion) != 0u &&
+      pc.frameData.ambientOcclusionTexId != kInvalidTextureBindlessIndex &&
+      pc.frameData.ambientOcclusionSamplerId != kInvalidSamplerBindlessIndex) {
+    ivec2 aoSize = max(textureBindlessSize2D(pc.frameData.ambientOcclusionTexId),
+                       ivec2(1));
+    vec2 aoUv = gl_FragCoord.xy / vec2(aoSize);
+    vec4 aoSample = textureBindless2D(pc.frameData.ambientOcclusionTexId,
+                                      pc.frameData.ambientOcclusionSamplerId,
+                                      aoUv);
+    if ((pc.frameData.ambientOcclusionFlags &
+         kAmbientOcclusionFlagScalarAo) != 0u) {
+      sm.screenAo = saturate(aoSample.a);
+    }
+    if ((pc.frameData.flags & kFrameDataFlagHasAmbientBentNormal) != 0u &&
+        (pc.frameData.ambientOcclusionFlags &
+         kAmbientOcclusionFlagBentNormal) != 0u) {
+      vec3 viewBent = aoSample.rgb * 2.0 - 1.0;
+      float bentLenSq = dot(viewBent, viewBent);
+      if (bentLenSq > 1.0e-6) {
+        vec3 worldBent = transpose(mat3(pc.frameData.view)) *
+                         (viewBent * inversesqrt(bentLenSq));
+        sm.ambientBentNormal = normalize(mix(sm.nBase, worldBent, 0.75));
+      }
+    }
   }
   sm.roughness = applySpecularAARoughnessBias(sm.roughness, sm.nBase);
 
@@ -1129,7 +1158,8 @@ IblResult evaluateIbl(ShadedMaterial sm) {
       pc.frameData.irradianceTexId != kInvalidTextureBindlessIndex) {
     vec3 irradiance =
         textureBindlessCube(pc.frameData.irradianceTexId,
-                            pc.frameData.cubemapSamplerId, sm.nBase).rgb;
+                            pc.frameData.cubemapSamplerId,
+                            sm.ambientBentNormal).rgb;
     if (!sm.iorCompatMode) {
       r.iblDiffuse = hasBrdfLut
                          ? computeIblDiffuse(sm.diffuseColor, sm.f0, sm.f90,
@@ -1144,7 +1174,7 @@ IblResult evaluateIbl(ShadedMaterial sm) {
 
   if ((pc.frameData.flags & kFrameDataFlagHasIblSpecular) != 0u &&
       pc.frameData.prefilteredGgxTexId != kInvalidTextureBindlessIndex) {
-    vec3 ref = reflect(-sm.v, sm.nBase);
+    vec3 ref = reflect(-sm.v, sm.ambientBentNormal);
     if (hasBrdfLut) {
       float mipCount = float(
           textureBindlessQueryLevelsCube(pc.frameData.prefilteredGgxTexId));
@@ -1166,7 +1196,7 @@ IblResult evaluateIbl(ShadedMaterial sm) {
   if ((pc.frameData.flags & kFrameDataFlagHasIblSheen) != 0u &&
       pc.frameData.prefilteredCharlieTexId != kInvalidTextureBindlessIndex &&
       hasBrdfLut && sm.sheenWeight > 0.0) {
-    vec3 ref = reflect(-sm.v, sm.nBase);
+    vec3 ref = reflect(-sm.v, sm.ambientBentNormal);
     float mipCount = float(
         textureBindlessQueryLevelsCube(pc.frameData.prefilteredCharlieTexId));
     float lod = sm.sheenRoughness * max(mipCount - 1.0, 0.0);

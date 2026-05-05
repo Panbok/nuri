@@ -87,6 +87,34 @@ enum class AntiAliasingDebugView : uint8_t {
   SpatialAASplitCompare = 29,
 };
 
+enum class AmbientOcclusionMode : uint8_t {
+  Disabled = 0,
+  GTAO = 1,
+};
+
+enum class AmbientOcclusionPreset : uint8_t {
+  Low = 0,
+  Balanced = 1,
+  High = 2,
+  Ultra = 3,
+};
+
+enum class AmbientOcclusionDebugView : uint8_t {
+  None = 0,
+  Visibility = 1,
+  BentNormal = 2,
+  Normals = 3,
+};
+
+enum class AmbientOcclusionDisabledReason : uint8_t {
+  None = 0,
+  ModeDisabled = 1,
+  OpaqueDisabled = 2,
+  Msaa4x = 3,
+  MissingResources = 4,
+  Unsupported = 5,
+};
+
 enum class TemporalAAClampMode : uint8_t {
   Clamp = 0,
   Clip = 1,
@@ -194,12 +222,23 @@ static constexpr uint32_t kMsaa4xSampleCount = 4u;
 static constexpr Format kFrameCompositionMotionVectorFormat =
     Format::RG16_FLOAT;
 static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R32_FLOAT;
+static constexpr Format kFrameCompositionNormalFormat = Format::RGBA16_FLOAT;
+static constexpr Format kFrameCompositionAmbientOcclusionFormat =
+    Format::RGBA16_FLOAT;
 // Motion vectors are normalized UV-space history lookup offsets:
 // historyUv = currentUv + velocity. Current and previous jitter are excluded.
 static constexpr ClearColor kFrameCompositionMotionVectorClearValue{
     .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
 static constexpr ClearColor kFrameCompositionReactiveMaskClearValue{
     .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
+static constexpr ClearColor kFrameCompositionNormalClearValue{
+    .r = 0.0f, .g = 0.0f, .b = 1.0f, .a = 0.0f};
+static constexpr ClearColor kFrameCompositionAmbientOcclusionClearValue{
+    .r = 0.0f, .g = 0.0f, .b = 1.0f, .a = 1.0f};
+static constexpr uint32_t kAmbientOcclusionFlagScalarAo = 1u << 0u;
+static constexpr uint32_t kAmbientOcclusionFlagBentNormal = 1u << 1u;
+static constexpr uint32_t kAmbientOcclusionDebugViewShift = 8u;
+static constexpr uint32_t kAmbientOcclusionDebugViewMask = 0xffu;
 static constexpr uint32_t kTemporalJitterSequenceLength = 8u;
 static constexpr Format kDefaultShadowMapDepthFormat = Format::D16_UNORM;
 static constexpr uint32_t kMaxShadowCascades = 4u;
@@ -268,6 +307,43 @@ sanitizeAntiAliasingMode(AntiAliasingMode mode) noexcept {
     return mode;
   default:
     return AntiAliasingMode::None;
+  }
+}
+
+[[nodiscard]] constexpr AmbientOcclusionMode
+sanitizeAmbientOcclusionMode(AmbientOcclusionMode mode) noexcept {
+  switch (mode) {
+  case AmbientOcclusionMode::Disabled:
+  case AmbientOcclusionMode::GTAO:
+    return mode;
+  default:
+    return AmbientOcclusionMode::GTAO;
+  }
+}
+
+[[nodiscard]] constexpr AmbientOcclusionPreset
+sanitizeAmbientOcclusionPreset(AmbientOcclusionPreset preset) noexcept {
+  switch (preset) {
+  case AmbientOcclusionPreset::Low:
+  case AmbientOcclusionPreset::Balanced:
+  case AmbientOcclusionPreset::High:
+  case AmbientOcclusionPreset::Ultra:
+    return preset;
+  default:
+    return AmbientOcclusionPreset::Balanced;
+  }
+}
+
+[[nodiscard]] constexpr AmbientOcclusionDebugView
+sanitizeAmbientOcclusionDebugView(AmbientOcclusionDebugView view) noexcept {
+  switch (view) {
+  case AmbientOcclusionDebugView::None:
+  case AmbientOcclusionDebugView::Visibility:
+  case AmbientOcclusionDebugView::BentNormal:
+  case AmbientOcclusionDebugView::Normals:
+    return view;
+  default:
+    return AmbientOcclusionDebugView::None;
   }
 }
 
@@ -468,6 +544,19 @@ struct RenderSettings {
     bool enabled = true;
   };
 
+  struct AmbientOcclusionSettings {
+    AmbientOcclusionMode mode = AmbientOcclusionMode::GTAO;
+    AmbientOcclusionPreset preset = AmbientOcclusionPreset::Balanced;
+    AmbientOcclusionDebugView debugView = AmbientOcclusionDebugView::None;
+    float strength = 1.0f;
+    bool active = true;
+    AmbientOcclusionDisabledReason disabledReason =
+        AmbientOcclusionDisabledReason::None;
+    uint32_t sliceCount = 2u;
+    uint32_t stepCount = 4u;
+    uint32_t denoisePassCount = 2u;
+  };
+
   struct TextureFilteringSettings {
     TextureFilterMode mode = TextureFilterMode::Trilinear;
     uint8_t anisotropy = 8u;
@@ -527,9 +616,65 @@ struct RenderSettings {
   DebugSettings debug{};
   ShadowSettings shadow{};
   AntiAliasingSettings antiAliasing{};
+  AmbientOcclusionSettings ambientOcclusion{};
   TextureFilteringSettings textureFiltering{};
   ToneMapSettings toneMap{};
 };
+
+inline void sanitizeAmbientOcclusionSettings(
+    RenderSettings::AmbientOcclusionSettings &settings,
+    const RenderSettings::OpaqueSettings &opaque,
+    const RenderSettings::AntiAliasingSettings &antiAliasing) {
+  settings.mode = sanitizeAmbientOcclusionMode(settings.mode);
+  settings.preset = sanitizeAmbientOcclusionPreset(settings.preset);
+  settings.debugView = sanitizeAmbientOcclusionDebugView(settings.debugView);
+  settings.strength = std::isfinite(settings.strength)
+                          ? std::clamp(settings.strength, 0.0f, 4.0f)
+                          : 1.0f;
+
+  settings.active = false;
+  settings.disabledReason = AmbientOcclusionDisabledReason::None;
+  if (settings.mode == AmbientOcclusionMode::Disabled) {
+    settings.disabledReason = AmbientOcclusionDisabledReason::ModeDisabled;
+  } else if (!opaque.enabled) {
+    settings.disabledReason = AmbientOcclusionDisabledReason::OpaqueDisabled;
+  } else if (sanitizeAntiAliasingMode(antiAliasing.mode) ==
+             AntiAliasingMode::MSAA4x) {
+    settings.disabledReason = AmbientOcclusionDisabledReason::Msaa4x;
+  } else {
+    settings.active = true;
+  }
+
+  switch (settings.preset) {
+  case AmbientOcclusionPreset::Low:
+    settings.sliceCount = 1u;
+    settings.stepCount = 3u;
+    settings.denoisePassCount = 1u;
+    break;
+  case AmbientOcclusionPreset::Balanced:
+    settings.sliceCount = 2u;
+    settings.stepCount = 4u;
+    settings.denoisePassCount = 2u;
+    break;
+  case AmbientOcclusionPreset::High:
+    settings.sliceCount = 3u;
+    settings.stepCount = 6u;
+    settings.denoisePassCount = 2u;
+    break;
+  case AmbientOcclusionPreset::Ultra:
+    settings.sliceCount = 4u;
+    settings.stepCount = 8u;
+    settings.denoisePassCount = 2u;
+    break;
+  }
+}
+
+[[nodiscard]] inline bool
+isAmbientOcclusionActive(const RenderSettings &settings) noexcept {
+  RenderSettings::AmbientOcclusionSettings ao = settings.ambientOcclusion;
+  sanitizeAmbientOcclusionSettings(ao, settings.opaque, settings.antiAliasing);
+  return ao.active;
+}
 
 [[nodiscard]] inline uint32_t
 shadowDebugFrameFlags(const RenderSettings::ShadowDebugSettings &debug) {
@@ -1431,6 +1576,10 @@ struct ForwardSceneFrameData {
   uint32_t sceneDepthSamplerId = 0;
   uint32_t sceneDepthPyramidLevelCount = 0;
   std::array<glm::uvec4, kSceneDepthPyramidArraySize> sceneDepthPyramidTexIds{};
+  uint32_t ambientOcclusionTexId = 0;
+  uint32_t ambientOcclusionSamplerId = 0;
+  uint32_t ambientOcclusionFlags = 0;
+  uint32_t ambientOcclusionReserved0 = 0;
   uint64_t directionalLightBufferAddress = 0;
   uint64_t localLightBufferAddress = 0;
   uint64_t materialHeaderBufferAddress = 0;
@@ -1454,26 +1603,26 @@ struct ForwardSceneFrameData {
     return !(*this == other);
   }
 };
-static_assert(sizeof(ForwardSceneFrameData) == 352,
+static_assert(sizeof(ForwardSceneFrameData) == 368,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
 static_assert(offsetof(ForwardSceneFrameData, directionalLightBufferAddress) ==
-              272u);
-static_assert(offsetof(ForwardSceneFrameData, localLightBufferAddress) == 280u);
-static_assert(offsetof(ForwardSceneFrameData, materialHeaderBufferAddress) ==
               288u);
-static_assert(offsetof(ForwardSceneFrameData, materialClearcoatBufferAddress) ==
-              296u);
-static_assert(offsetof(ForwardSceneFrameData, materialSheenBufferAddress) ==
+static_assert(offsetof(ForwardSceneFrameData, localLightBufferAddress) == 296u);
+static_assert(offsetof(ForwardSceneFrameData, materialHeaderBufferAddress) ==
               304u);
-static_assert(offsetof(ForwardSceneFrameData,
-                       materialTransmissionBufferAddress) == 312u);
-static_assert(offsetof(ForwardSceneFrameData, materialSpecularBufferAddress) ==
+static_assert(offsetof(ForwardSceneFrameData, materialClearcoatBufferAddress) ==
+              312u);
+static_assert(offsetof(ForwardSceneFrameData, materialSheenBufferAddress) ==
               320u);
-static_assert(offsetof(ForwardSceneFrameData, directionalLightCount) == 328u);
-static_assert(offsetof(ForwardSceneFrameData, localLightCount) == 332u);
-static_assert(offsetof(ForwardSceneFrameData, shadowFrameBufferAddress) ==
+static_assert(offsetof(ForwardSceneFrameData,
+                       materialTransmissionBufferAddress) == 328u);
+static_assert(offsetof(ForwardSceneFrameData, materialSpecularBufferAddress) ==
               336u);
-static_assert(offsetof(ForwardSceneFrameData, shadowFlags) == 344u);
+static_assert(offsetof(ForwardSceneFrameData, directionalLightCount) == 344u);
+static_assert(offsetof(ForwardSceneFrameData, localLightCount) == 348u);
+static_assert(offsetof(ForwardSceneFrameData, shadowFrameBufferAddress) ==
+              352u);
+static_assert(offsetof(ForwardSceneFrameData, shadowFlags) == 360u);
 
 // GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.
 // The CPU owns allocation and updates of ForwardSceneFrameData, then derives
@@ -1806,6 +1955,41 @@ struct AntiAliasingFrameMetrics {
   bool spatialAASplitCompareDebugViewRendered = false;
 };
 
+struct AmbientOcclusionFrameMetrics {
+  AmbientOcclusionPreset activePreset = AmbientOcclusionPreset::Balanced;
+  AmbientOcclusionDisabledReason disabledReason =
+      AmbientOcclusionDisabledReason::None;
+  Format normalFormat = Format::Count;
+  Format ambientOcclusionFormat = Format::Count;
+  uint32_t width = 0u;
+  uint32_t height = 0u;
+  uint32_t normalPrepassDraws = 0u;
+  uint32_t depthPrefilterPassCount = 0u;
+  uint32_t mainPassCount = 0u;
+  uint32_t denoisePassCount = 0u;
+  uint32_t depthMipCount = 0u;
+  uint32_t sliceCount = 0u;
+  uint32_t stepCount = 0u;
+  uint32_t textureCount = 0u;
+  uint64_t normalTextureBytes = 0u;
+  uint64_t ambientOcclusionTextureBytes = 0u;
+  uint64_t depthPrefilterTextureBytes = 0u;
+  uint64_t scratchTextureBytes = 0u;
+  uint64_t totalTextureBytes = 0u;
+  float strength = 1.0f;
+  float gpuTimeMs = 0.0f;
+  uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint32_t gpuTimingAvailable = 0u;
+  bool enabled = false;
+  bool active = false;
+  bool normalsAllocated = false;
+  bool ambientOcclusionAllocated = false;
+  bool normalGraphPublished = false;
+  bool ambientOcclusionGraphPublished = false;
+  bool scalarAoAvailable = false;
+  bool bentNormalAvailable = false;
+};
+
 [[nodiscard]] inline AntiAliasingFrameMetrics
 makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
   const glm::vec2 jitterDelta =
@@ -1839,6 +2023,7 @@ struct RenderFrameMetrics {
   OpaqueFrameMetrics opaque{};
   ShadowFrameMetrics shadow{};
   AntiAliasingFrameMetrics antiAliasing{};
+  AmbientOcclusionFrameMetrics ambientOcclusion{};
   struct TransparentFrameMetrics {
     uint32_t meshDraws = 0;
     uint32_t contributorSortableDraws = 0;
@@ -1888,6 +2073,7 @@ enum class FrameTextureRequirementFlags : uint32_t {
   ReactiveMask = 1u << 8u,
   MsaaSceneColor = 1u << 9u,
   MsaaSceneDepth = 1u << 10u,
+  AmbientOcclusion = 1u << 11u,
 };
 
 [[nodiscard]] constexpr FrameTextureRequirementFlags
@@ -1944,6 +2130,10 @@ struct FrameSharedResources {
   RenderGraphTextureId sceneDepthGraphTexture{};
   TextureHandle msaaSceneDepthTexture{};
   RenderGraphTextureId msaaSceneDepthGraphTexture{};
+  TextureHandle normalTexture{};
+  RenderGraphTextureId normalGraphTexture{};
+  TextureHandle ambientOcclusionTexture{};
+  RenderGraphTextureId ambientOcclusionGraphTexture{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures{};
   std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>

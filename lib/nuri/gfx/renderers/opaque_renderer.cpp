@@ -598,6 +598,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       passDrawItems_(resolveMemoryResource(memory)),
       msaaPassDrawItems_(resolveMemoryResource(memory)),
       depthPrepassDrawItems_(resolveMemoryResource(memory)),
+      normalPrepassDrawItems_(resolveMemoryResource(memory)),
       depthPyramidPushConstants_(resolveMemoryResource(memory)),
       depthPyramidDrawItems_(resolveMemoryResource(memory)),
       depthPyramidDependencyTextures_(resolveMemoryResource(memory)),
@@ -697,6 +698,7 @@ void OpaqueRenderer::onDetach() {
   meshShadowInspectShader_.reset();
   meshVelocityShader_.reset();
   meshReactiveMaskShader_.reset();
+  meshNormalShader_.reset();
   depthShader_.reset();
   depthAlphaShader_.reset();
   depthPyramidShader_.reset();
@@ -713,6 +715,7 @@ void OpaqueRenderer::onDetach() {
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
   meshReactiveMaskFragmentShader_ = {};
+  meshNormalFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -1230,6 +1233,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const bool msaaSelected =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
       AntiAliasingMode::MSAA4x;
+  RenderSettings::AmbientOcclusionSettings ambientOcclusionSettings =
+      settings.ambientOcclusion;
+  sanitizeAmbientOcclusionSettings(ambientOcclusionSettings, settings.opaque,
+                                   settings.antiAliasing);
+  AmbientOcclusionFrameMetrics &aoMetrics = frame.metrics.ambientOcclusion;
+  aoMetrics.enabled =
+      ambientOcclusionSettings.mode != AmbientOcclusionMode::Disabled;
+  aoMetrics.activePreset = ambientOcclusionSettings.preset;
+  aoMetrics.strength = ambientOcclusionSettings.strength;
+  aoMetrics.sliceCount = ambientOcclusionSettings.sliceCount;
+  aoMetrics.stepCount = ambientOcclusionSettings.stepCount;
+  aoMetrics.denoisePassCount = ambientOcclusionSettings.denoisePassCount;
+  aoMetrics.disabledReason = ambientOcclusionSettings.disabledReason;
+  aoMetrics.active = ambientOcclusionSettings.active;
   const bool hasTaaVelocityInstances = taaSelected && instanceCount > 0;
   const bool previousCacheValid =
       hasTaaVelocityInstances && frame.camera.historyValid &&
@@ -3035,9 +3052,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   passDrawItems_.clear();
   msaaPassDrawItems_.clear();
   depthPrepassDrawItems_.clear();
+  normalPrepassDrawItems_.clear();
 
-  bool depthPrepassEnabled = settings.opaque.enableDepthPrepass &&
-                             !wireframeOnlyRequested && !baseDrawItems.empty();
+  const bool normalPrepassRequested =
+      ambientOcclusionSettings.active && !msaaSelected &&
+      nuri::isValid(frame.sharedResources.normalTexture) &&
+      !wireframeOnlyRequested && !baseDrawItems.empty();
+  bool depthPrepassEnabled =
+      (settings.opaque.enableDepthPrepass || normalPrepassRequested) &&
+      !wireframeOnlyRequested && !baseDrawItems.empty();
   if (depthPrepassEnabled && baseAlphaMasked.size() != baseDrawItems.size()) {
     depthPrepassEnabled = false;
   }
@@ -3104,6 +3127,36 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? std::span<const DrawItem>(passDrawItems_.data(),
                                       passDrawItems_.size())
           : baseDrawItems;
+  bool normalPrepassEnabled = normalPrepassRequested && depthPrepassEnabled &&
+                              !shadedBaseDrawItems.empty();
+  if (normalPrepassEnabled) {
+    normalPrepassDrawItems_.reserve(shadedBaseDrawItems.size());
+    for (const DrawItem &source : shadedBaseDrawItems) {
+      const RenderPipelineHandle normalPipeline =
+          selectNormalPipeline(source.pipeline);
+      if (!nuri::isValid(normalPipeline)) {
+        normalPrepassDrawItems_.clear();
+        normalPrepassEnabled = false;
+        aoMetrics.active = false;
+        aoMetrics.disabledReason = AmbientOcclusionDisabledReason::Unsupported;
+        if (!loggedNormalPrepassUnsupported_) {
+          loggedNormalPrepassUnsupported_ = true;
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::buildOpaquePasses: material normal pre-pass "
+              "pipeline is unavailable, disabling GTAO for this frame");
+        }
+        break;
+      }
+      DrawItem normalDraw = source;
+      normalDraw.pipeline = normalPipeline;
+      normalDraw.useDepthState = true;
+      normalDraw.depthState = {.compareOp = CompareOp::Equal,
+                               .isDepthWriteEnabled = false};
+      normalDraw.debugLabel = "OpaqueMaterialNormals";
+      normalDraw.debugColor = 0xff66ddff;
+      normalPrepassDrawItems_.push_back(normalDraw);
+    }
+  }
   std::span<const DrawItem> finalPassDrawItems = shadedBaseDrawItems;
   if (wireframeOnlyRequested && !baseDrawItems.empty()) {
     bool lineOverlayAvailable = false;
@@ -3335,6 +3388,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           : 0u;
   frame.metrics.opaque.depthPyramidLevels = 0u;
   frame.metrics.opaque.depthPrepassEnabled = depthPrepassEnabled ? 1u : 0u;
+  aoMetrics.normalPrepassDraws = saturateToU32(normalPrepassDrawItems_.size());
 
   bool pickPassSubmitted = false;
   if (pendingPickRequest_.has_value() && nuri::isValid(pickIdTexture_) &&
@@ -3436,6 +3490,48 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     depthPass.desc.borrowPayload = !depthPass.hasPreDispatch;
     depthPass.hasIndirectDraws = hasIndirectBaseDraws;
     depthPass.isDepthPrepass = true;
+  }
+
+  if (normalPrepassEnabled && !normalPrepassDrawItems_.empty() &&
+      nuri::isValid(frame.sharedResources.normalTexture)) {
+    PreparedGraphPass &normalPass =
+        out.emplace_back(drawItems_.get_allocator().resource());
+    normalPass.desc.color = {.loadOp = LoadOp::Clear,
+                             .storeOp = StoreOp::Store,
+                             .clearColor = kFrameCompositionNormalClearValue};
+    normalPass.colorTextureHandle = frame.sharedResources.normalTexture;
+    normalPass.desc.depth = {.loadOp = LoadOp::Load,
+                             .storeOp = StoreOp::Store,
+                             .clearDepth = kClearDepthOne,
+                             .clearStencil = 0};
+    normalPass.depthTextureHandle = sceneDepthTarget;
+    normalPass.desc.dependencyBuffers = std::span<const BufferHandle>(
+        passDependencyBuffers_.data(), passDependencyBuffers_.size());
+    normalPass.desc.dependencyBufferAccessModes =
+        std::span<const RenderGraphAccessMode>(
+            passDependencyBufferAccessModes_.data(),
+            passDependencyBufferAccessModes_.size());
+    normalPass.desc.dependencyTextures = std::span<const TextureHandle>(
+        passDependencyTextures_.data(), passDependencyTextures_.size());
+    normalPass.desc.draws = std::span<const DrawItem>(
+        normalPrepassDrawItems_.data(), normalPrepassDrawItems_.size());
+    normalPass.desc.drawBuffersPreResolved = true;
+    normalPass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+        preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
+    normalPass.desc.debugLabel = "Opaque Material Normal Pre-Pass";
+    normalPass.desc.debugColor = 0xff66ddff;
+    normalPass.desc.gpuTimingScope = GpuTimingScope::Opaque;
+    normalPass.desc.markImplicitOutputSideEffect = true;
+    normalPass.hasDraws = true;
+    normalPass.hasPreDispatch = false;
+    normalPass.desc.borrowPayload = true;
+    normalPass.hasIndirectDraws = hasIndirectBaseDraws;
+    normalPass.isNormalPrepass = true;
+    aoMetrics.normalPrepassDraws =
+        saturateToU32(normalPrepassDrawItems_.size());
+  } else if (ambientOcclusionSettings.active) {
+    aoMetrics.active = false;
+    aoMetrics.disabledReason = AmbientOcclusionDisabledReason::MissingResources;
   }
 
   const bool requiresDepthPyramid = this->requiresDepthPyramid(settings);
@@ -3728,6 +3824,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         mainPassDependencyTextureAccessModes_.push_back(
             RenderGraphAccessMode::Read);
       }
+    }
+  }
+  if (ambientOcclusionSettings.active &&
+      nuri::isValid(frame.sharedResources.ambientOcclusionTexture)) {
+    const size_t oldTextureDependencyCount = mainPassDependencyTextures_.size();
+    appendUniqueTextureDependency(
+        mainPassDependencyTextures_,
+        frame.sharedResources.ambientOcclusionTexture);
+    if (mainPassDependencyTextures_.size() != oldTextureDependencyCount) {
+      mainPassDependencyTextureAccessModes_.push_back(
+          RenderGraphAccessMode::Read);
     }
   }
   pass.desc.dependencyBuffers = std::span<const BufferHandle>(
@@ -4118,6 +4225,28 @@ bool OpaqueRenderer::hasPreparedOpaqueMainPasses() const noexcept {
   return false;
 }
 
+bool OpaqueRenderer::hasPreparedOpaquePrepassPasses() const noexcept {
+  for (const PreparedGraphPass &pass : preparedGraphPasses_) {
+    if (pass.isDepthPrepass || pass.isNormalPrepass ||
+        pass.isDepthPyramidPass ||
+        pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool OpaqueRenderer::hasPreparedOpaqueMainLightingPasses() const noexcept {
+  for (const PreparedGraphPass &pass : preparedGraphPasses_) {
+    if (!pass.isPickPass && !pass.isDepthPrepass && !pass.isNormalPrepass &&
+        !pass.isDepthPyramidPass &&
+        pass.desc.gpuTimingScope != GpuTimingScope::ShadowSdsm) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool OpaqueRenderer::hasPreparedOpaquePickPasses() const noexcept {
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
     if (pass.isPickPass) {
@@ -4439,6 +4568,10 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     frame.sharedResources.reactiveMaskGraphTexture = passDesc.colorTexture;
     frame.metrics.antiAliasing.reactiveMaskGraphPublished = true;
   }
+  if (pass.isNormalPrepass && nuri::isValid(pass.colorTextureHandle)) {
+    frame.sharedResources.normalGraphTexture = passDesc.colorTexture;
+    frame.metrics.ambientOcclusion.normalGraphPublished = true;
+  }
   if (pass.isDepthPyramidPass &&
       pass.depthPyramidLevel < kMaxSceneDepthPyramidLevels &&
       nuri::isValid(passDesc.colorTexture)) {
@@ -4497,6 +4630,110 @@ OpaqueRenderer::appendOpaqueMainPasses(RenderFrameContext &frame,
       std::move(preResolvedDrawBufferIdsResult).value();
   for (const PreparedGraphPass &pass : preparedGraphPasses_) {
     if (pass.isPickPass) {
+      continue;
+    }
+    auto appendResult = appendPreparedGraphPass(
+        frame, graph, pass, safeWidth, safeHeight, preResolvedDrawBufferIds);
+    if (appendResult.hasError()) {
+      return appendResult;
+    }
+  }
+  NURI_PROFILER_ZONE_END();
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+OpaqueRenderer::appendOpaquePrepassPasses(RenderFrameContext &frame,
+                                          RenderGraphBuilder &graph) {
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+  const uint32_t safeWidth =
+      static_cast<uint32_t>(std::max(framebufferWidth, 1));
+  const uint32_t safeHeight =
+      static_cast<uint32_t>(std::max(framebufferHeight, 1));
+
+  const BufferHandle centersHandle =
+      (instanceCentersPhaseBuffer_ && instanceCentersPhaseBuffer_->valid())
+          ? instanceCentersPhaseBuffer_->handle()
+          : BufferHandle{};
+  registerOrUpdatePersistentBuffer(
+      graph, persistentCentersPhaseBuffer_, registeredCentersPhaseBufferHandle_,
+      centersHandle, "opaque_instance_centers_phase_buffer");
+
+  const BufferHandle baseMatHandle =
+      (instanceBaseMatricesBuffer_ && instanceBaseMatricesBuffer_->valid())
+          ? instanceBaseMatricesBuffer_->handle()
+          : BufferHandle{};
+  registerOrUpdatePersistentBuffer(
+      graph, persistentBaseMatricesBuffer_, registeredBaseMatricesBufferHandle_,
+      baseMatHandle, "opaque_instance_base_matrices_buffer");
+
+  NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_prepass_passes",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
+  auto preResolvedDrawBufferIdsResult = importPreResolvedBuffers(
+      graph,
+      std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
+                                    preResolvedDrawBuffers_.size()),
+      preparedGraphPasses_.get_allocator().resource(),
+      "opaque_pass_draw_buffer");
+  if (preResolvedDrawBufferIdsResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        preResolvedDrawBufferIdsResult.error());
+  }
+  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds =
+      std::move(preResolvedDrawBufferIdsResult).value();
+  for (const PreparedGraphPass &pass : preparedGraphPasses_) {
+    const bool preLightingPass =
+        pass.isDepthPrepass || pass.isNormalPrepass ||
+        pass.isDepthPyramidPass ||
+        pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm;
+    if (!preLightingPass) {
+      continue;
+    }
+    auto appendResult = appendPreparedGraphPass(
+        frame, graph, pass, safeWidth, safeHeight, preResolvedDrawBufferIds);
+    if (appendResult.hasError()) {
+      return appendResult;
+    }
+  }
+  NURI_PROFILER_ZONE_END();
+
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+OpaqueRenderer::appendOpaqueMainLightingPasses(RenderFrameContext &frame,
+                                               RenderGraphBuilder &graph) {
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+  const uint32_t safeWidth =
+      static_cast<uint32_t>(std::max(framebufferWidth, 1));
+  const uint32_t safeHeight =
+      static_cast<uint32_t>(std::max(framebufferHeight, 1));
+
+  NURI_PROFILER_ZONE("OpaqueRenderer.graph_add_main_lighting_passes",
+                     NURI_PROFILER_COLOR_CMD_DRAW);
+  auto preResolvedDrawBufferIdsResult = importPreResolvedBuffers(
+      graph,
+      std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
+                                    preResolvedDrawBuffers_.size()),
+      preparedGraphPasses_.get_allocator().resource(),
+      "opaque_pass_draw_buffer");
+  if (preResolvedDrawBufferIdsResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        preResolvedDrawBufferIdsResult.error());
+  }
+  std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds =
+      std::move(preResolvedDrawBufferIdsResult).value();
+  for (const PreparedGraphPass &pass : preparedGraphPasses_) {
+    const bool preLightingPass =
+        pass.isDepthPrepass || pass.isNormalPrepass ||
+        pass.isDepthPyramidPass ||
+        pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm;
+    if (pass.isPickPass || preLightingPass) {
       continue;
     }
     auto appendResult = appendPreparedGraphPass(
@@ -5054,6 +5291,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshShadowInspectShader_.reset();
     meshVelocityShader_.reset();
     meshReactiveMaskShader_.reset();
+    meshNormalShader_.reset();
     depthShader_.reset();
     depthAlphaShader_.reset();
     depthPyramidShader_.reset();
@@ -5070,6 +5308,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshVelocityVertexShader_ = {};
     meshVelocityFragmentShader_ = {};
     meshReactiveMaskFragmentShader_ = {};
+    meshNormalFragmentShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -5093,6 +5332,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshShadowInspectShader_.reset();
     meshVelocityShader_.reset();
     meshReactiveMaskShader_.reset();
+    meshNormalShader_.reset();
     depthShader_.reset();
     depthAlphaShader_.reset();
     depthPyramidShader_.reset();
@@ -5109,6 +5349,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshVelocityVertexShader_ = {};
     meshVelocityFragmentShader_ = {};
     meshReactiveMaskFragmentShader_ = {};
+    meshNormalFragmentShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -5816,14 +6057,15 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshShadowInspectShader_ = Shader::create("shadow_inspect", gpu_);
   meshVelocityShader_ = Shader::create("opaque_velocity", gpu_);
   meshReactiveMaskShader_ = Shader::create("opaque_reactive_mask", gpu_);
+  meshNormalShader_ = Shader::create("opaque_normal", gpu_);
   depthShader_ = Shader::create("opaque_depth", gpu_);
   depthAlphaShader_ = Shader::create("opaque_depth_alpha", gpu_);
   depthPyramidShader_ = Shader::create("depth_minmax_pyramid", gpu_);
   computeShader_ = Shader::create("duck_instances", gpu_);
   if (!meshShader_ || !meshTessShader_ || !meshPickShader_ ||
       !meshShadowInspectShader_ || !meshVelocityShader_ ||
-      !meshReactiveMaskShader_ || !computeShader_ || !depthShader_ ||
-      !depthAlphaShader_ || !depthPyramidShader_) {
+      !meshReactiveMaskShader_ || !meshNormalShader_ || !computeShader_ ||
+      !depthShader_ || !depthAlphaShader_ || !depthPyramidShader_) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::createShaders: failed to create shader objects");
   }
@@ -5840,6 +6082,7 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
   meshReactiveMaskFragmentShader_ = {};
+  meshNormalFragmentShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -5935,6 +6178,21 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       meshReactiveMaskFragmentShader_ = {};
     } else {
       meshReactiveMaskFragmentShader_ = fragmentResult.value();
+    }
+  }
+
+  {
+    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    auto fragmentResult = meshNormalShader_->compileFromFile(
+        (shaderDir / "opaque_normal.frag").string(), ShaderStage::Fragment);
+    if (fragmentResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: material normal shader failed, "
+          "GTAO normal pre-pass will be disabled: %s",
+          fragmentResult.error().c_str());
+      meshNormalFragmentShader_ = {};
+    } else {
+      meshNormalFragmentShader_ = fragmentResult.value();
     }
   }
 
@@ -6223,6 +6481,41 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     }
   }
 
+  if (nuri::isValid(meshVertexShader_) &&
+      nuri::isValid(meshNormalFragmentShader_)) {
+    const RenderPipelineDesc normalDesc = meshPipelineDesc(
+        kFrameCompositionNormalFormat, depthFormat, meshVertexShader_, {}, {},
+        {}, meshNormalFragmentShader_, PolygonMode::Fill);
+    auto normalResult =
+        gpu_.createRenderPipeline(normalDesc, "opaque_material_normals");
+    if (normalResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createPipelines: material normal pipeline failed, "
+          "GTAO normal pre-pass disabled: %s",
+          normalResult.error().c_str());
+      meshNormalPipelineHandle_ = {};
+      meshNormalDoubleSidedPipelineHandle_ = {};
+    } else {
+      meshNormalPipelineHandle_ = normalResult.value();
+      const RenderPipelineDesc doubleSidedNormalDesc = meshPipelineDesc(
+          kFrameCompositionNormalFormat, depthFormat, meshVertexShader_, {}, {},
+          {}, meshNormalFragmentShader_, PolygonMode::Fill, Topology::Triangle,
+          0, false, CullMode::None);
+      auto doubleSidedNormalResult = gpu_.createRenderPipeline(
+          doubleSidedNormalDesc, "opaque_material_normals_double_sided");
+      if (doubleSidedNormalResult.hasError()) {
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createPipelines: double-sided material normal "
+            "pipeline failed, double-sided normals will use back-face culling: "
+            "%s",
+            doubleSidedNormalResult.error().c_str());
+        meshNormalDoubleSidedPipelineHandle_ = {};
+      } else {
+        meshNormalDoubleSidedPipelineHandle_ = doubleSidedNormalResult.value();
+      }
+    }
+  }
+
   const auto createDepthPipeline =
       [this](const RenderPipelineDesc &desc, std::string_view debugName,
              RenderPipelineHandle &outHandle) -> bool {
@@ -6473,6 +6766,43 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
             "opaque_mesh_depth_alpha_tess_double_sided_msaa4x",
             meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_);
       }
+      if (nuri::isValid(meshNormalFragmentShader_)) {
+        const RenderPipelineDesc normalTessDesc = meshPipelineDesc(
+            kFrameCompositionNormalFormat, depthFormat, meshTessVertexShader_,
+            meshTessControlShader_, meshTessEvalShader_, {},
+            meshNormalFragmentShader_, PolygonMode::Fill, Topology::Patch,
+            kTessellationPatchControlPoints);
+        auto normalTessResult = gpu_.createRenderPipeline(
+            normalTessDesc, "opaque_material_normals_tess");
+        if (normalTessResult.hasError()) {
+          meshNormalTessPipelineHandle_ = {};
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::createPipelines: tessellation material normal "
+              "pipeline failed, tessellated GTAO normals disabled: %s",
+              normalTessResult.error().c_str());
+        } else {
+          meshNormalTessPipelineHandle_ = normalTessResult.value();
+        }
+        const RenderPipelineDesc doubleSidedNormalTessDesc = meshPipelineDesc(
+            kFrameCompositionNormalFormat, depthFormat, meshTessVertexShader_,
+            meshTessControlShader_, meshTessEvalShader_, {},
+            meshNormalFragmentShader_, PolygonMode::Fill, Topology::Patch,
+            kTessellationPatchControlPoints, false, CullMode::None);
+        auto doubleSidedNormalTessResult = gpu_.createRenderPipeline(
+            doubleSidedNormalTessDesc,
+            "opaque_material_normals_tess_double_sided");
+        if (doubleSidedNormalTessResult.hasError()) {
+          meshNormalDoubleSidedTessPipelineHandle_ = {};
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::createPipelines: double-sided tessellation "
+              "material normal pipeline failed, double-sided tessellated GTAO "
+              "normals disabled: %s",
+              doubleSidedNormalTessResult.error().c_str());
+        } else {
+          meshNormalDoubleSidedTessPipelineHandle_ =
+              doubleSidedNormalTessResult.value();
+        }
+      }
     }
   } else {
     tessellationUnsupported_ = true;
@@ -6722,6 +7052,25 @@ RenderPipelineHandle OpaqueRenderer::selectReactiveMaskPipeline(
   return meshReactiveMaskPipelineHandle_;
 }
 
+RenderPipelineHandle OpaqueRenderer::selectNormalPipeline(
+    RenderPipelineHandle sourcePipeline) const {
+  const bool tessellated = isTessPipeline(sourcePipeline);
+  const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
+  if (tessellated) {
+    if (doubleSided &&
+        nuri::isValid(meshNormalDoubleSidedTessPipelineHandle_)) {
+      return meshNormalDoubleSidedTessPipelineHandle_;
+    }
+    if (nuri::isValid(meshNormalTessPipelineHandle_)) {
+      return meshNormalTessPipelineHandle_;
+    }
+  }
+  if (doubleSided && nuri::isValid(meshNormalDoubleSidedPipelineHandle_)) {
+    return meshNormalDoubleSidedPipelineHandle_;
+  }
+  return meshNormalPipelineHandle_;
+}
+
 RenderPipelineHandle
 OpaqueRenderer::selectDepthPipeline(RenderPipelineHandle sourcePipeline,
                                     bool alphaMasked, bool msaa) const {
@@ -6846,6 +7195,9 @@ OpaqueRenderer::selectMsaaScenePipeline(RenderPipelineHandle sourcePipeline,
 bool OpaqueRenderer::isDoubleSidedPipeline(RenderPipelineHandle handle) const {
   return isSamePipelineHandle(handle, meshDoubleSidedFillPipelineHandle_) ||
          isSamePipelineHandle(handle, meshDoubleSidedTessPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshNormalDoubleSidedPipelineHandle_) ||
+         isSamePipelineHandle(handle,
+                              meshNormalDoubleSidedTessPipelineHandle_) ||
          isSamePipelineHandle(handle, meshMsaaDoubleSidedFillPipelineHandle_) ||
          isSamePipelineHandle(handle, meshMsaaDoubleSidedTessPipelineHandle_) ||
          isSamePipelineHandle(handle,
@@ -6857,6 +7209,9 @@ bool OpaqueRenderer::isDoubleSidedPipeline(RenderPipelineHandle handle) const {
 bool OpaqueRenderer::isTessPipeline(RenderPipelineHandle handle) const {
   return isSamePipelineHandle(handle, meshTessPipelineHandle_) ||
          isSamePipelineHandle(handle, meshDoubleSidedTessPipelineHandle_) ||
+         isSamePipelineHandle(handle, meshNormalTessPipelineHandle_) ||
+         isSamePipelineHandle(handle,
+                              meshNormalDoubleSidedTessPipelineHandle_) ||
          isSamePipelineHandle(handle, meshMsaaTessPipelineHandle_) ||
          isSamePipelineHandle(handle, meshMsaaDoubleSidedTessPipelineHandle_) ||
          isSamePipelineHandle(handle, meshMsaaAlphaTessPipelineHandle_) ||
@@ -7275,6 +7630,10 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, meshVelocityPipelineHandle_);
   destroyPipelineHandle(gpu_, meshReactiveMaskDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshReactiveMaskPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshNormalDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshNormalTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshNormalDoubleSidedPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshNormalPipelineHandle_);
   destroyPipelineHandle(gpu_, meshMsaaAlphaDoubleSidedTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshMsaaAlphaTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshMsaaAlphaDoubleSidedFillPipelineHandle_);
@@ -7314,6 +7673,10 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshVelocityDoubleSidedPipelineHandle_ = {};
   meshReactiveMaskPipelineHandle_ = {};
   meshReactiveMaskDoubleSidedPipelineHandle_ = {};
+  meshNormalPipelineHandle_ = {};
+  meshNormalDoubleSidedPipelineHandle_ = {};
+  meshNormalTessPipelineHandle_ = {};
+  meshNormalDoubleSidedTessPipelineHandle_ = {};
   meshDepthPipelineHandle_ = {};
   meshDepthDoubleSidedPipelineHandle_ = {};
   meshDepthTessPipelineHandle_ = {};

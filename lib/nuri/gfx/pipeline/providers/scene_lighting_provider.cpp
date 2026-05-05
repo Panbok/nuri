@@ -20,6 +20,8 @@ enum ForwardSceneFlags : uint32_t {
   kForwardSceneHasSceneDepth = 1u << 6u,
   kForwardSceneHasSceneDepthPyramid = 1u << 7u,
   kForwardSceneTransmissionMipDebug = 1u << 8u,
+  kForwardSceneHasAmbientOcclusion = 1u << 9u,
+  kForwardSceneHasAmbientBentNormal = 1u << 10u,
 };
 
 struct SceneDataBufferLayout {
@@ -177,6 +179,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   uint32_t sceneDepthSamplerId = ctx.shared.sceneDepthSamplerId;
   uint32_t sceneDepthPyramidLevelCount = 0u;
   std::array<glm::uvec4, kSceneDepthPyramidArraySize> sceneDepthPyramidTexIds{};
+  uint32_t ambientOcclusionTexId = kInvalidTextureBindlessIndex;
+  uint32_t ambientOcclusionSamplerId = 0u;
+  uint32_t ambientOcclusionFlags = 0u;
   if (nuri::isValid(ctx.shared.sceneColorTexture)) {
     sceneColorTexId =
         gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
@@ -222,6 +227,26 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     }
     if (sceneDepthPyramidLevelCount > 0u) {
       flags |= kForwardSceneHasSceneDepthPyramid;
+    }
+  }
+  RenderSettings::AmbientOcclusionSettings ambientOcclusionSettings =
+      renderSettingsOrDefault(frame).ambientOcclusion;
+  sanitizeAmbientOcclusionSettings(ambientOcclusionSettings,
+                                   renderSettingsOrDefault(frame).opaque,
+                                   renderSettingsOrDefault(frame).antiAliasing);
+  if (ambientOcclusionSettings.active &&
+      nuri::isValid(ctx.shared.ambientOcclusionTexture)) {
+    ambientOcclusionTexId =
+        gpu_.getTextureBindlessIndex(ctx.shared.ambientOcclusionTexture);
+    ambientOcclusionSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+    if (ambientOcclusionTexId != kInvalidTextureBindlessIndex) {
+      flags |=
+          kForwardSceneHasAmbientOcclusion | kForwardSceneHasAmbientBentNormal;
+      ambientOcclusionFlags =
+          kAmbientOcclusionFlagScalarAo | kAmbientOcclusionFlagBentNormal |
+          ((static_cast<uint32_t>(ambientOcclusionSettings.debugView) &
+            kAmbientOcclusionDebugViewMask)
+           << kAmbientOcclusionDebugViewShift);
     }
   }
   const uint64_t sceneDataBaseAddress =
@@ -287,6 +312,10 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .sceneDepthSamplerId = sceneDepthSamplerId,
       .sceneDepthPyramidLevelCount = sceneDepthPyramidLevelCount,
       .sceneDepthPyramidTexIds = sceneDepthPyramidTexIds,
+      .ambientOcclusionTexId = ambientOcclusionTexId,
+      .ambientOcclusionSamplerId = ambientOcclusionSamplerId,
+      .ambientOcclusionFlags = ambientOcclusionFlags,
+      .ambientOcclusionReserved0 = 0u,
       .directionalLightBufferAddress = directionalLightBufferAddress,
       .localLightBufferAddress = localLightBufferAddress,
       .materialHeaderBufferAddress =

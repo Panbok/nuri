@@ -13,6 +13,16 @@ const uint kFrameDataFlagHasSceneColor = 1u << 5u;
 const uint kFrameDataFlagHasSceneDepth = 1u << 6u;
 const uint kFrameDataFlagHasSceneDepthPyramid = 1u << 7u;
 const uint kFrameDataFlagTransmissionMipDebug = 1u << 8u;
+const uint kFrameDataFlagHasAmbientOcclusion = 1u << 9u;
+const uint kFrameDataFlagHasAmbientBentNormal = 1u << 10u;
+const uint kAmbientOcclusionFlagScalarAo = 1u << 0u;
+const uint kAmbientOcclusionFlagBentNormal = 1u << 1u;
+const uint kAmbientOcclusionDebugViewShift = 8u;
+const uint kAmbientOcclusionDebugViewMask = 0xFFu;
+const uint kAmbientOcclusionDebugViewNone = 0u;
+const uint kAmbientOcclusionDebugViewVisibility = 1u;
+const uint kAmbientOcclusionDebugViewBentNormal = 2u;
+const uint kAmbientOcclusionDebugViewNormals = 3u;
 const uint kMaxSceneDepthPyramidLevels = 16u;
 const uint kSceneDepthPyramidTexIdPackWidth = 4u;
 const uint kSceneDepthPyramidArraySize =
@@ -224,6 +234,10 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint sceneDepthSamplerId;
   uint sceneDepthPyramidLevelCount;
   uvec4 sceneDepthPyramidTexIds[kSceneDepthPyramidArraySize];
+  uint ambientOcclusionTexId;
+  uint ambientOcclusionSamplerId;
+  uint ambientOcclusionFlags;
+  uint ambientOcclusionReserved0;
   DirectionalLightBuffer directionalLightBuffer;
   LocalLightBuffer localLightBuffer;
   MaterialHeaderBuffer materialHeaderBuffer;
@@ -237,6 +251,11 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint shadowFlags;
   uint shadowReserved0;
 };
+
+uint getAmbientOcclusionDebugView(FrameDataBuffer frameData) {
+  return (frameData.ambientOcclusionFlags >> kAmbientOcclusionDebugViewShift) &
+         kAmbientOcclusionDebugViewMask;
+}
 
 uint getSceneColorPyramidTexId(FrameDataBuffer frameData, uint level) {
   if (level == 0u) {
