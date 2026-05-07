@@ -6774,6 +6774,7 @@ void ImGuiEditor::setRenderSettings(const RenderSettings &settings) {
                                    impl_->renderSettings.opaque,
                                    impl_->renderSettings.antiAliasing);
   sanitizeShadowSettings(impl_->renderSettings.shadow);
+  sanitizeTransmissionSettings(impl_->renderSettings.transmission);
 }
 
 void ImGuiEditor::setShadowDebugResources(

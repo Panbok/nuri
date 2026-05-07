@@ -885,7 +885,7 @@ DebugRenderer::appendDebugGridPass(RenderFrameContext &frame,
     return Result<bool, std::string>::makeError(addResult.error());
   }
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const RenderSettings settings = renderSettingsOrDefault(frame);
   if (aaMetrics.taaResolvedSceneColorPublished ||
       isTemporalAAResolvedSceneColorOutput(settings.antiAliasing)) {
     ++aaMetrics.taaOverlayPostTaaDrawCount;
@@ -951,7 +951,7 @@ DebugRenderer::appendDebugSceneOverlayPass(RenderFrameContext &frame,
     return Result<bool, std::string>::makeError(addResult.error());
   }
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
-  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const RenderSettings settings = renderSettingsOrDefault(frame);
   if (aaMetrics.taaResolvedSceneColorPublished ||
       isTemporalAAResolvedSceneColorOutput(settings.antiAliasing)) {
     aaMetrics.taaOverlayPostTaaDrawCount +=

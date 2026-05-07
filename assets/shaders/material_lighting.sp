@@ -2,9 +2,6 @@
 // fragment shader passes. Include after common.sp, BRDF.sp, and
 // material_inputs.sp.
 
-const uint kAlphaModeOpaque = 0u;
-const uint kAlphaModeMask = 1u;
-
 float applySpecularAARoughnessBias(float roughness, vec3 shadingNormal) {
   vec3 dndx = dFdx(shadingNormal);
   vec3 dndy = dFdy(shadingNormal);
@@ -54,8 +51,11 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   const uint matSampler = pc.frameData.materialSamplerId;
   const uint alphaMode = materialAlphaMode(material);
   const uint baseColorSampler =
-      alphaMode == kAlphaModeMask ? pc.frameData.materialCoverageSamplerId
-                                  : matSampler;
+      alphaMode == kAlphaModeMask &&
+              pc.frameData.materialCoverageSamplerId !=
+                  kInvalidSamplerBindlessIndex
+          ? pc.frameData.materialCoverageSamplerId
+          : matSampler;
 
   const uint baseColorTexId =
       getMaterialTextureIndex(material, kMaterialTextureSlotBaseColor);

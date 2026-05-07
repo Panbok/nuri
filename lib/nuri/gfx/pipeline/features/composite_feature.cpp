@@ -287,8 +287,8 @@ resolveSceneResolveSource(const FrameBuildContext &ctx) {
   return {.texture = ctx.shared.sceneColorTexture, .debugView = debugView};
 }
 
-[[nodiscard]] bool isPostTaaSceneColorMipFrame(
-    const RenderFrameContext &frame) noexcept {
+[[nodiscard]] bool
+isPostTaaSceneColorMipFrame(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   return isTemporalAAResolvedSceneColorOutput(settings.antiAliasing);
 }
@@ -392,6 +392,7 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
     aaMetrics.taaSceneColorDownsampleGpuTimingAvailable = 1u;
   }
 
+  const bool isPostTaaSceneColorMip = isPostTaaSceneColorMipFrame(ctx.frame);
   for (uint32_t mipLevel = 1u; mipLevel < kFrameCompositionSceneColorMipCount;
        ++mipLevel) {
     const TextureHandle source =
@@ -435,8 +436,7 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
     if (addResult.hasError()) {
       return addResult;
     }
-    if (aaMetrics.taaResolvedSceneColorPublished ||
-        isPostTaaSceneColorMipFrame(ctx.frame)) {
+    if (aaMetrics.taaResolvedSceneColorPublished || isPostTaaSceneColorMip) {
       ++aaMetrics.taaPostResolveSceneColorMipPassCount;
       aaMetrics.taaPostResolveSceneColorMipChainGenerated =
           aaMetrics.taaPostResolveSceneColorMipPassCount >=

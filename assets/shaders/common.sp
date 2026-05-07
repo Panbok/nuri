@@ -2,6 +2,8 @@
 
 const uint kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
 const uint kInvalidSamplerBindlessIndex = 0xFFFFFFFFu;
+const uint kAlphaModeOpaque = 0u;
+const uint kAlphaModeMask = 1u;
 const uint kInvalidMaterialExtensionIndex = 0xFFFFFFFFu;
 
 const uint kFrameDataFlagHasIblDiffuse = 1u << 0u;
@@ -249,6 +251,9 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint localLightCount;
   ShadowFrameBuffer shadowFrameBuffer;
   uint shadowFlags;
+  // Base-color texture indices remain per-material/per-draw; only the coverage
+  // sampler is frame-scoped so alpha-test passes can bypass TAA material mip
+  // bias.
   uint materialCoverageSamplerId;
 };
 

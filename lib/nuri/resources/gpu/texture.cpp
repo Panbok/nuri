@@ -8,6 +8,7 @@
 #include "nuri/resources/storage/mesh/mesh_cache_utils.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
 
+#include <atomic>
 #include <cmath>
 #include <ktx.h>
 #include <stb_image.h>
@@ -207,6 +208,13 @@ convertFloatBitmapToHalfBytes(std::span<const uint8_t> srcBytes) {
     } else if (std::isinf(value)) {
       value = std::signbit(value) ? 0.0f : kMaxFiniteHalf;
     } else {
+      static std::atomic_bool warnedNegativeRadiance{false};
+      if (value < 0.0f &&
+          !warnedNegativeRadiance.exchange(true, std::memory_order_relaxed)) {
+        NURI_LOG_WARNING(
+            "Texture: finite negative radiance value encountered; clamping to "
+            "0.0 for half-float upload");
+      }
       value = std::clamp(value, 0.0f, kMaxFiniteHalf);
     }
     const uint16_t half = static_cast<uint16_t>(glm::packHalf1x16(value));

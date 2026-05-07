@@ -7,7 +7,14 @@ layout(location = 0) out vec4 out_Normal;
 
 void main() {
   const MaterialData material = loadMaterialData(pc.materialIndex);
-  const uint matSampler = pc.frameData.materialSamplerId;
+  const uint materialSampler = pc.frameData.materialSamplerId;
+  const uint normalSampler = materialSampler;
+  const uint alphaMode = materialAlphaMode(material);
+  const uint baseColorSampler =
+      alphaMode == kAlphaModeMask && pc.frameData.materialCoverageSamplerId !=
+                                         kInvalidSamplerBindlessIndex
+          ? pc.frameData.materialCoverageSamplerId
+          : materialSampler;
   const uint baseColorTexId =
       getMaterialTextureIndex(material, kMaterialTextureSlotBaseColor);
   const vec2 baseColorUv =
@@ -15,14 +22,13 @@ void main() {
 
   vec4 baseColor = material.header.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {
-    baseColor *= textureBindless2D(
-        baseColorTexId, pc.frameData.materialCoverageSamplerId, baseColorUv);
+    baseColor *=
+        textureBindless2D(baseColorTexId, baseColorSampler, baseColorUv);
   }
 
-  const uint alphaMode = materialAlphaMode(material);
   const float alphaCutoff =
       material.header.metallicRoughnessOcclusionAlphaCutoff.w;
-  if (alphaMode == 1u && baseColor.a < alphaCutoff) {
+  if (alphaMode == kAlphaModeMask && baseColor.a < alphaCutoff) {
     discard;
   }
 
@@ -37,7 +43,7 @@ void main() {
     const vec2 normalUv =
         transformedUv(material, vtx, kMaterialTextureSlotNormal);
     vec3 tangentNormal =
-        textureBindless2D(normalTexId, matSampler, normalUv).xyz * 2.0 - 1.0;
+        textureBindless2D(normalTexId, normalSampler, normalUv).xyz * 2.0 - 1.0;
     tangentNormal.xy *= materialNormalScale(material);
     float tangentLen = length(tangentNormal);
     tangentNormal =

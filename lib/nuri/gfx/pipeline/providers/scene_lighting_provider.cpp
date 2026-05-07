@@ -160,8 +160,8 @@ Result<SamplerHandle, std::string>
 SceneLightingProvider::ensureTaaMaterialMipBiasSampler(
     const SamplerDesc &desc) {
   if (nuri::isValid(taaMaterialMipBiasSampler_) &&
-      hasTaaMaterialMipBiasSamplerDesc_ &&
-      sameSamplerDesc(taaMaterialMipBiasSamplerDesc_, desc)) {
+      taaMaterialMipBiasSamplerDesc_.has_value() &&
+      sameSamplerDesc(*taaMaterialMipBiasSamplerDesc_, desc)) {
     return Result<SamplerHandle, std::string>::makeResult(
         taaMaterialMipBiasSampler_);
   }
@@ -174,13 +174,12 @@ SceneLightingProvider::ensureTaaMaterialMipBiasSampler(
   auto samplerResult =
       gpu_.createSampler(desc, "taa_material_mip_bias_sampler");
   if (samplerResult.hasError()) {
-    hasTaaMaterialMipBiasSamplerDesc_ = false;
+    taaMaterialMipBiasSamplerDesc_.reset();
     return samplerResult;
   }
 
   taaMaterialMipBiasSampler_ = samplerResult.value();
   taaMaterialMipBiasSamplerDesc_ = desc;
-  hasTaaMaterialMipBiasSamplerDesc_ = true;
   return Result<SamplerHandle, std::string>::makeResult(
       taaMaterialMipBiasSampler_);
 }
@@ -665,8 +664,7 @@ void SceneLightingProvider::destroyCachedSamplers() {
     gpu_.destroySampler(taaMaterialMipBiasSampler_);
   }
   taaMaterialMipBiasSampler_ = {};
-  taaMaterialMipBiasSamplerDesc_ = {};
-  hasTaaMaterialMipBiasSamplerDesc_ = false;
+  taaMaterialMipBiasSamplerDesc_.reset();
 }
 
 Buffer *

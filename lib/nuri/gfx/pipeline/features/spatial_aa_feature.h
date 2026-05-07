@@ -54,7 +54,7 @@ private:
 
   GPUDevice &gpu_;
   RuntimeCompositeConfig config_{};
-  SpatialAAPlacement placement_ = SpatialAAPlacement::SceneColor;
+  SpatialAAPlacement placement_;
   FullscreenResources edgeResources_{};
   FullscreenResources blendResources_{};
   FullscreenResources neighborhoodResources_{};

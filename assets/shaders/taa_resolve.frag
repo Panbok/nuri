@@ -98,14 +98,14 @@ const float kTaaStaticDirectColorDeltaLow = 0.01;
 const float kTaaStaticDirectColorDeltaHigh = 0.05;
 const float kTaaMotionVarianceGamma = 0.85;
 const float kTaaPatchProbeTolerancePx = 4.0;
-const vec2 kTaaPatchProbeLeftMin = vec2(523.0, 499.0);
-const vec2 kTaaPatchProbeLeftMax = vec2(695.0, 718.0);
-const vec2 kTaaPatchProbeCenterMin = vec2(813.0, 420.0);
-const vec2 kTaaPatchProbeCenterMax = vec2(994.0, 570.0);
-const vec2 kTaaPatchProbeVerticalMin = vec2(997.0, 480.0);
-const vec2 kTaaPatchProbeVerticalMax = vec2(1060.0, 837.0);
-const vec2 kTaaPatchProbeRightMin = vec2(1180.0, 420.0);
-const vec2 kTaaPatchProbeRightMax = vec2(1414.0, 592.0);
+const vec2 kTaaPatchProbeLeftMinUv = vec2(0.326875, 0.554444);
+const vec2 kTaaPatchProbeLeftMaxUv = vec2(0.434375, 0.797778);
+const vec2 kTaaPatchProbeCenterMinUv = vec2(0.508125, 0.466667);
+const vec2 kTaaPatchProbeCenterMaxUv = vec2(0.621250, 0.633333);
+const vec2 kTaaPatchProbeVerticalMinUv = vec2(0.623125, 0.533333);
+const vec2 kTaaPatchProbeVerticalMaxUv = vec2(0.662500, 0.930000);
+const vec2 kTaaPatchProbeRightMinUv = vec2(0.737500, 0.466667);
+const vec2 kTaaPatchProbeRightMaxUv = vec2(0.883750, 0.657778);
 
 layout(push_constant) uniform TAAResolvePushConstants {
   uint currentTexId;
@@ -312,13 +312,15 @@ vec3 sceneCopyHistoryColor(vec2 centerUv) {
   }
 
   const float confidence = clamp(centerStored.a, 0.0, 1.0);
-  const float strength = clamp(pushFloat(pc.velocityThresholdBits), 0.0, 1.0);
-  const float threshold = clamp(pushFloat(pc.velocityBlendScaleBits), 0.0, 1.0);
-  const float confidenceRange = max(1.0 - threshold, 1.0e-5);
-  const float confidenceT =
-      clamp((confidence - threshold) / confidenceRange, 0.0, 1.0);
+  const float sharpenStrength =
+      clamp(pushFloat(pc.velocityThresholdBits), 0.0, 1.0);
+  const float sharpenConfidenceThreshold =
+      clamp(pushFloat(pc.velocityBlendScaleBits), 0.0, 1.0);
+  const float confidenceRange = max(1.0 - sharpenConfidenceThreshold, 1.0e-5);
+  const float confidenceT = clamp(
+      (confidence - sharpenConfidenceThreshold) / confidenceRange, 0.0, 1.0);
   const float sharpenGate =
-      strength * confidenceT * confidenceT * (3.0 - 2.0 * confidenceT);
+      sharpenStrength * confidenceT * confidenceT * (3.0 - 2.0 * confidenceT);
   if (sharpenGate <= 0.0) {
     return centerColor;
   }
@@ -409,6 +411,8 @@ HistorySample historyColorCatmullRom(vec2 sampleUv) {
   filteredStored.rgb =
       clamp(filteredStored.rgb, minPremultipliedRgb, maxPremultipliedRgb);
   HistorySample historySample;
+  // Confidence intentionally uses bilinear sampling at sampleUv; filteredStored
+  // is Catmull-Rom filtered color, but confidence gates reprojection stability.
   historySample.confidence = historyConfidenceBilinear(sampleUv);
   historySample.premultiplied =
       vec4(sanitizePremultipliedHistoryRgb(filteredStored.rgb,
@@ -1102,6 +1106,8 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
       stableHistoryBlend, previousDepthConfidence, velocityConfidence);
   float directHistoryClampDelta = 0.0;
   if (flagEnabled(kTaaResolveFlagNeighborhoodClamp)) {
+    // The static-lock test uses the preset gamma clamp delta; final blending
+    // below recomputes clampedHistory with adaptiveVarianceGamma.
     validateHistoryColor(history, neighborhood, pushFloat(pc.varianceGammaBits),
                          directHistoryClampDelta);
   }
@@ -1291,41 +1297,55 @@ bool patchProbeBorder(vec2 pixel, vec2 minPx, vec2 maxPx) {
          pixel.y <= lo.y + borderWidth || pixel.y >= hi.y - borderWidth;
 }
 
+vec2 patchProbeViewportSize() {
+  const vec2 invExtent = vec2(max(pushFloat(pc.inverseWidthBits), 1.0e-8),
+                              max(pushFloat(pc.inverseHeightBits), 1.0e-8));
+  return 1.0 / invExtent;
+}
+
 bool patchProbeRegion(vec2 pixel, out vec2 minPx, out vec2 maxPx) {
-  if (patchProbeInside(pixel, kTaaPatchProbeLeftMin, kTaaPatchProbeLeftMax)) {
-    minPx = kTaaPatchProbeLeftMin;
-    maxPx = kTaaPatchProbeLeftMax;
+  const vec2 viewportSize = patchProbeViewportSize();
+  const vec2 leftMin = kTaaPatchProbeLeftMinUv * viewportSize;
+  const vec2 leftMax = kTaaPatchProbeLeftMaxUv * viewportSize;
+  if (patchProbeInside(pixel, leftMin, leftMax)) {
+    minPx = leftMin;
+    maxPx = leftMax;
     return true;
   }
-  if (patchProbeInside(pixel, kTaaPatchProbeCenterMin,
-                       kTaaPatchProbeCenterMax)) {
-    minPx = kTaaPatchProbeCenterMin;
-    maxPx = kTaaPatchProbeCenterMax;
+  const vec2 centerMin = kTaaPatchProbeCenterMinUv * viewportSize;
+  const vec2 centerMax = kTaaPatchProbeCenterMaxUv * viewportSize;
+  if (patchProbeInside(pixel, centerMin, centerMax)) {
+    minPx = centerMin;
+    maxPx = centerMax;
     return true;
   }
-  if (patchProbeInside(pixel, kTaaPatchProbeVerticalMin,
-                       kTaaPatchProbeVerticalMax)) {
-    minPx = kTaaPatchProbeVerticalMin;
-    maxPx = kTaaPatchProbeVerticalMax;
+  const vec2 verticalMin = kTaaPatchProbeVerticalMinUv * viewportSize;
+  const vec2 verticalMax = kTaaPatchProbeVerticalMaxUv * viewportSize;
+  if (patchProbeInside(pixel, verticalMin, verticalMax)) {
+    minPx = verticalMin;
+    maxPx = verticalMax;
     return true;
   }
-  if (patchProbeInside(pixel, kTaaPatchProbeRightMin, kTaaPatchProbeRightMax)) {
-    minPx = kTaaPatchProbeRightMin;
-    maxPx = kTaaPatchProbeRightMax;
+  const vec2 rightMin = kTaaPatchProbeRightMinUv * viewportSize;
+  const vec2 rightMax = kTaaPatchProbeRightMaxUv * viewportSize;
+  if (patchProbeInside(pixel, rightMin, rightMax)) {
+    minPx = rightMin;
+    maxPx = rightMax;
     return true;
   }
   return false;
 }
 
 bool patchProbeBorderAny(vec2 pixel) {
-  return patchProbeBorder(pixel, kTaaPatchProbeLeftMin,
-                          kTaaPatchProbeLeftMax) ||
-         patchProbeBorder(pixel, kTaaPatchProbeCenterMin,
-                          kTaaPatchProbeCenterMax) ||
-         patchProbeBorder(pixel, kTaaPatchProbeVerticalMin,
-                          kTaaPatchProbeVerticalMax) ||
-         patchProbeBorder(pixel, kTaaPatchProbeRightMin,
-                          kTaaPatchProbeRightMax);
+  const vec2 viewportSize = patchProbeViewportSize();
+  return patchProbeBorder(pixel, kTaaPatchProbeLeftMinUv * viewportSize,
+                          kTaaPatchProbeLeftMaxUv * viewportSize) ||
+         patchProbeBorder(pixel, kTaaPatchProbeCenterMinUv * viewportSize,
+                          kTaaPatchProbeCenterMaxUv * viewportSize) ||
+         patchProbeBorder(pixel, kTaaPatchProbeVerticalMinUv * viewportSize,
+                          kTaaPatchProbeVerticalMaxUv * viewportSize) ||
+         patchProbeBorder(pixel, kTaaPatchProbeRightMinUv * viewportSize,
+                          kTaaPatchProbeRightMaxUv * viewportSize);
 }
 
 vec2 patchProbeTopLeftPixel() { return gl_FragCoord.xy; }
@@ -1573,6 +1593,8 @@ void main() {
       }
       const vec2 markedUv = patchProbeMarkedUv(screenUv, screenUvDx, screenUvDy,
                                                probePixel, markedPixel);
+      // Debug visualization intentionally evaluates the marked probe per pixel.
+      // Production paths should compute probe results once and reuse them.
       const ResolveEvaluation markedEval = evaluateResolve(markedUv);
       out_FragColor =
           patchProbeRoiColor(markedEval, probePixel, probeMin, probeMax);

@@ -850,6 +850,7 @@ struct LvkGPUDevice::Impl {
   SamplerHandle trilinearSampler{};
   std::array<SamplerHandle, 4> anisotropicSamplers{};
   uint8_t maxSamplerAnisotropy = 1u;
+  float maxSamplerLodBias = std::numeric_limits<float>::max();
 
   ResourceTable<BufferHandle, lvk::BufferHandle> buffers;
   ResourceTable<TextureHandle, lvk::TextureHandle> textures;
@@ -1300,6 +1301,7 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
         deviceFeatures.textureCompressionETC2 == VK_TRUE;
     device->impl_->compressionCaps.astc =
         deviceFeatures.textureCompressionASTC_LDR == VK_TRUE;
+    device->impl_->maxSamplerLodBias = properties.limits.maxSamplerLodBias;
     if (deviceFeatures.samplerAnisotropy == VK_TRUE &&
         properties.limits.maxSamplerAnisotropy > 1.0f) {
       device->impl_->maxSamplerAnisotropy = static_cast<uint8_t>(std::clamp(
@@ -1798,7 +1800,8 @@ LvkGPUDevice::createSampler(const SamplerDesc &desc,
   samplerDesc.depthCompareOp = toLvkCompareOp(desc.depthCompareOp);
   samplerDesc.mipLodMin = desc.mipLodMin;
   samplerDesc.mipLodMax = std::max(desc.mipLodMax, desc.mipLodMin);
-  samplerDesc.mipLodBias = desc.mipLodBias;
+  samplerDesc.mipLodBias = std::clamp(
+      desc.mipLodBias, -impl_->maxSamplerLodBias, impl_->maxSamplerLodBias);
   samplerDesc.maxAnisotropic =
       std::min(desc.maxAnisotropy, impl_->maxSamplerAnisotropy);
   if (samplerDesc.maxAnisotropic < 1u) {

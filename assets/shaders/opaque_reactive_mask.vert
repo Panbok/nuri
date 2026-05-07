@@ -33,9 +33,12 @@ void main() {
   vtx.worldNormal = worldNormal;
   vec3 transformedTangent = mat3(model) * tangent.xyz;
   transformedTangent -= worldNormal * dot(transformedTangent, worldNormal);
+  const vec3 tangentBasis =
+      abs(worldNormal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+  const vec3 fallbackTangent = normalize(cross(tangentBasis, worldNormal));
   vtx.worldTangent = dot(transformedTangent, transformedTangent) > 1.0e-10
                          ? vec4(normalize(transformedTangent), tangent.w)
-                         : vec4(0.0, 0.0, 0.0, 1.0);
+                         : vec4(fallbackTangent, tangent.w);
   vtx.worldPos = worldPos4.xyz;
   vtx.patchBarycentric = vec3(0.0);
   vtx.triBarycentric = vec3(0.0);

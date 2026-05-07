@@ -1094,6 +1094,8 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       tuning.sharpenStrength > 0.0f;
   if (sharpenCopyBack) {
     copyConstants.flags |= kTaaResolveFlagSharpen;
+    // With kTaaResolveFlagSharpen, the shader reads these velocity fields as
+    // sharpen strength and confidence threshold for the copy-back pass.
     copyConstants.velocityThresholdBits =
         std::bit_cast<uint32_t>(tuning.sharpenStrength);
     copyConstants.velocityBlendScaleBits =

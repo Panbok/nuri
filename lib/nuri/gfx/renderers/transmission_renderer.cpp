@@ -699,6 +699,9 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           .vertexDecodeIndex = vertexDecodeIndex,
           .packedVertexFormat = packedVertexFormat,
           .timeSeconds = static_cast<float>(frame.timeSeconds),
+          // Alias tessMaxFactor as taaJitterMinLod: a scene-color pyramid LOD
+          // in mip levels. Transmission shaders do not tessellate, so this
+          // push-constant slot is otherwise unused in this pipeline.
           .tessMaxFactor = taaJitterMinLod,
           .debugVisualizationMode = debugFlags,
       };
@@ -716,8 +719,6 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       draw.instanceCount = 1u;
       draw.firstIndex = lod->indexOffset;
       draw.firstInstance = entry.instanceIndex;
-      draw.depthState = {.compareOp = CompareOp::LessEqual,
-                         .isDepthWriteEnabled = false};
       if (hasDepthAttachment) {
         draw.useDepthState = true;
         draw.depthState = {.compareOp = CompareOp::LessEqual,

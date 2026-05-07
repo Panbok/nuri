@@ -4064,6 +4064,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     for (size_t i = 0; i < shadedBaseDrawItems.size(); ++i) {
       const bool alphaMasked = baseAlphaMasked[i] != 0u;
       alphaMaskedCoverageDraws += alphaMasked ? 1u : 0u;
+      reactiveAlphaMaskedDraws += alphaMasked ? 1u : 0u;
       const bool motionUncertain = motionUncertainReactiveMode;
       if (!motionUncertain) {
         continue;
@@ -4073,8 +4074,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         ++skippedTessellatedReactiveDraws;
         continue;
       }
-      reactiveAlphaMaskedDraws += alphaMasked ? 1u : 0u;
-      motionUncertainDraws += motionUncertain ? 1u : 0u;
+      ++motionUncertainDraws;
       const RenderPipelineHandle reactivePipeline =
           selectReactiveMaskPipeline(sourceItem.pipeline);
       if (!nuri::isValid(reactivePipeline)) {
@@ -5660,7 +5660,7 @@ Result<bool, std::string> OpaqueRenderer::recreatePickTexture() {
       .type = TextureType::Texture2D,
       .format = Format::R32_UINT,
       .dimensions = {1, 1, 1},
-      .usage = TextureUsage::Attachment,
+      .usage = TextureUsage::AttachmentSampled,
       .storage = Storage::Device,
       .numLayers = 1,
       .numSamples = 1,

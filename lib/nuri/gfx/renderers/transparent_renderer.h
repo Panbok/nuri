@@ -188,6 +188,7 @@ private:
 
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;
+  bool transparentUsesJitteredProjection_ = true;
   uint32_t loggedContributorCollections_ = 0u;
   uint64_t loggedAddressProbeTopologyVersion_ =
       std::numeric_limits<uint64_t>::max();

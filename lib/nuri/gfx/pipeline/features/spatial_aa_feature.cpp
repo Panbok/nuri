@@ -156,9 +156,8 @@ isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   if (mode == AntiAliasingMode::MSAA4x) {
     return aaDebug.spatialPostMsaaCleanup;
   }
-  return mode == AntiAliasingMode::TAA &&
-         aaDebug.spatialPostTaaCleanup && !frame.camera.jitterEnabled &&
-         !isSpatialFallbackActive(frame);
+  return mode == AntiAliasingMode::TAA && aaDebug.spatialPostTaaCleanup &&
+         !frame.camera.jitterEnabled && !isSpatialFallbackActive(frame);
 }
 
 [[nodiscard]] inline bool
@@ -573,27 +572,14 @@ SpatialAAPass::ensureResources(FrameBuildContext &ctx) {
   edgeTextures_.reserve(ringCount);
   blendTextures_.reserve(ringCount);
   if (needsOutputScratch) {
+    NURI_ASSERT(outputScratchFormat != Format::Count,
+                "SpatialAAPass output scratch format must be resolved");
     outputTextures_.reserve(ringCount);
   }
 
   const TextureDesc scratchDesc{
       .type = TextureType::Texture2D,
       .format = Format::RGBA8_UNORM,
-      .dimensions = TextureDimensions{std::max(dimensions.width, 1u),
-                                      std::max(dimensions.height, 1u), 1u},
-      .usage = TextureUsage::AttachmentSampled,
-      .storage = Storage::Device,
-      .numLayers = 1u,
-      .numSamples = 1u,
-      .numMipLevels = 1u,
-      .data = {},
-      .dataNumMipLevels = 1u,
-      .generateMipmaps = false};
-  const TextureDesc outputDesc{
-      .type = TextureType::Texture2D,
-      .format = outputScratchFormat == Format::Count
-                    ? kFrameCompositionFrameColorFormat
-                    : outputScratchFormat,
       .dimensions = TextureDimensions{std::max(dimensions.width, 1u),
                                       std::max(dimensions.height, 1u), 1u},
       .usage = TextureUsage::AttachmentSampled,
@@ -618,6 +604,19 @@ SpatialAAPass::ensureResources(FrameBuildContext &ctx) {
     edgeTextures_.push_back(edgeTexture.value());
     blendTextures_.push_back(blendTexture.value());
     if (needsOutputScratch) {
+      const TextureDesc outputDesc{
+          .type = TextureType::Texture2D,
+          .format = outputScratchFormat,
+          .dimensions = TextureDimensions{std::max(dimensions.width, 1u),
+                                          std::max(dimensions.height, 1u), 1u},
+          .usage = TextureUsage::AttachmentSampled,
+          .storage = Storage::Device,
+          .numLayers = 1u,
+          .numSamples = 1u,
+          .numMipLevels = 1u,
+          .data = {},
+          .dataNumMipLevels = 1u,
+          .generateMipmaps = false};
       auto outputTexture =
           gpu_.createTexture(outputDesc, "transparent_spatial_aa_output");
       if (outputTexture.hasError()) {
@@ -658,13 +657,6 @@ Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
 }
 
 Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
-  if (placement_ == SpatialAAPlacement::PostTransparent) {
-    const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-    const RenderSettings::AntiAliasingDebugSettings aaDebug =
-        effectiveTemporalAADebugSettings(settings.antiAliasing);
-    ctx.frame.metrics.antiAliasing.taaTransparentPostSpatialCleanupEnabled =
-        aaDebug.transparentPostTaaSpatialCleanup;
-  }
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(false);
   }
@@ -786,8 +778,6 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
         timingReport.spatialAASourceFrameIndex;
     aaMetrics.spatialAAGpuTimingAvailable = 1u;
   }
-  aaMetrics.taaTransparentPostSpatialCleanupEnabled =
-      aaDebug.transparentPostTaaSpatialCleanup;
   if (!postTransparent) {
     aaMetrics.spatialAAEnabled = true;
     aaMetrics.spatialAAFallbackActive = fallbackActive;

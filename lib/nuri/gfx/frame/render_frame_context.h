@@ -267,6 +267,7 @@ static constexpr uint32_t kDefaultShadowSdsmHistogramBucketCount = 64u;
 static constexpr uint32_t kMinShadowSdsmHistogramBucketCount = 8u;
 static constexpr uint32_t kMaxShadowSdsmHistogramBucketCount = 128u;
 static constexpr uint32_t kInvalidShadowBindlessIndex = 0xFFFFFFFFu;
+static constexpr uint32_t kInvalidSamplerBindlessIndex = 0xFFFFFFFFu;
 static constexpr uint32_t kShadowFrameFlagEnabled = 1u << 0u;
 static constexpr uint32_t kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
 static constexpr uint32_t kShadowFrameFlagVisualizeCascadeIndex = 1u << 2u;
@@ -1830,7 +1831,7 @@ struct ForwardSceneFrameData {
   uint32_t localLightCount = 0;
   uint64_t shadowFrameBufferAddress = 0;
   uint32_t shadowFlags = 0;
-  uint32_t materialCoverageSamplerId = 0;
+  uint32_t materialCoverageSamplerId = kInvalidSamplerBindlessIndex;
 
   [[nodiscard]] bool
   operator==(const ForwardSceneFrameData &other) const noexcept {
@@ -1844,6 +1845,10 @@ struct ForwardSceneFrameData {
 };
 static_assert(sizeof(ForwardSceneFrameData) == 368,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
+static_assert(sizeof(ForwardSceneFrameData) % 8u == 0u,
+              "ForwardSceneFrameData std430 size must stay 8-byte aligned");
+static_assert(sizeof(ForwardSceneFrameData) % 16u == 0u,
+              "ForwardSceneFrameData std430 struct stride must stay aligned");
 static_assert(offsetof(ForwardSceneFrameData, directionalLightBufferAddress) ==
               288u);
 static_assert(offsetof(ForwardSceneFrameData, localLightBufferAddress) == 296u);
