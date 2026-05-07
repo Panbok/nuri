@@ -116,6 +116,9 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.sceneColorGraphTexture = {};
   ctx.shared.frameColorGraphTexture = {};
   ctx.shared.sceneDepthGraphTexture = {};
+  ctx.shared.previousSceneDepthGraphTexture = {};
+  ctx.shared.transmissionVisibilityDepthTexture = {};
+  ctx.shared.transmissionVisibilityDepthGraphTexture = {};
   ctx.shared.msaaSceneColorGraphTexture = {};
   ctx.shared.msaaSceneDepthGraphTexture = {};
   ctx.shared.normalGraphTexture = {};
@@ -149,6 +152,10 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       currentRingTexture(frameColorTextures_, ctx.frame.frameIndex);
   ctx.shared.sceneDepthTexture =
       currentRingTexture(sceneDepthTextures_, ctx.frame.frameIndex);
+  ctx.shared.previousSceneDepthTexture =
+      ctx.frame.camera.historyValid && sceneDepthTextures_.size() > 1u
+          ? previousRingTexture(sceneDepthTextures_, ctx.frame.frameIndex)
+          : TextureHandle{};
   ctx.shared.msaaSceneColorTexture =
       currentRingTexture(msaaSceneColorTextures_, ctx.frame.frameIndex);
   ctx.shared.msaaSceneDepthTexture =
@@ -249,6 +256,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       nuri::isValid(ctx.shared.motionVectorTexture);
   aaMetrics.previousMotionVectorValid =
       nuri::isValid(ctx.shared.previousMotionVectorTexture);
+  aaMetrics.previousSceneDepthValid =
+      nuri::isValid(ctx.shared.previousSceneDepthTexture);
   aaMetrics.motionVectorFormatSupported =
       kFrameCompositionMotionVectorFormat == Format::RG16_FLOAT;
   const uint64_t bytesPerTexture = static_cast<uint64_t>(framebufferWidth_) *
@@ -262,6 +271,13 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aaMetrics.motionVectorTotalBytes =
       bytesPerTexture * static_cast<uint64_t>(motionVectorTextures_.size());
   aaMetrics.motionVectorClearBytes = 0u;
+  aaMetrics.previousSceneDepthTextureBytes =
+      aaMetrics.previousSceneDepthValid
+          ? static_cast<uint64_t>(framebufferWidth_) *
+                static_cast<uint64_t>(framebufferHeight_) *
+                static_cast<uint64_t>(
+                    textureBytesPerPixel(kFrameCompositionDepthFormat))
+          : 0u;
   aaMetrics.reactiveMaskWidth = framebufferWidth_;
   aaMetrics.reactiveMaskHeight = framebufferHeight_;
   aaMetrics.reactiveMaskTextureCount =

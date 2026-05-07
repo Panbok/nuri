@@ -36,6 +36,7 @@ struct SamplerDesc {
   SamplerWrapMode wrapW = SamplerWrapMode::Repeat;
   float mipLodMin = 0.0f;
   float mipLodMax = 15.0f;
+  float mipLodBias = 0.0f;
   uint8_t maxAnisotropy = 1;
   bool depthCompareEnabled = false;
   CompareOp depthCompareOp = CompareOp::LessEqual;

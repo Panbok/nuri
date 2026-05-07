@@ -921,6 +921,7 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
   frameContext_.resources = &resources();
   frameRenderSettings_ = renderSettings_;
   applyDebugRenderEnvOverrides(frameRenderSettings_);
+  sanitizeTransmissionSettings(frameRenderSettings_.transmission);
   sanitizeAntiAliasingSettings(frameRenderSettings_.antiAliasing);
   sanitizeAmbientOcclusionSettings(frameRenderSettings_.ambientOcclusion,
                                    frameRenderSettings_.opaque,

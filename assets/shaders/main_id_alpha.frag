@@ -9,7 +9,7 @@ void main() {
   const MaterialData material = loadMaterialData(pc.materialIndex);
   const uint baseColorTexId =
       getMaterialTextureIndex(material, kMaterialTextureSlotBaseColor);
-  const uint baseColorSampler = pc.frameData.materialSamplerId;
+  const uint baseColorSampler = pc.frameData.materialCoverageSamplerId;
 
   const vec2 baseColorUv =
       transformedUv(material, vtx, kMaterialTextureSlotBaseColor);

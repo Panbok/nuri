@@ -598,6 +598,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       passDrawItems_(resolveMemoryResource(memory)),
       msaaPassDrawItems_(resolveMemoryResource(memory)),
       depthPrepassDrawItems_(resolveMemoryResource(memory)),
+      transmissionVisibilityDepthDrawItems_(resolveMemoryResource(memory)),
       normalPrepassDrawItems_(resolveMemoryResource(memory)),
       depthPyramidPushConstants_(resolveMemoryResource(memory)),
       depthPyramidDrawItems_(resolveMemoryResource(memory)),
@@ -620,9 +621,12 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       mainPassDependencyTextureAccessModes_(resolveMemoryResource(memory)),
       velocityPassDependencyBuffers_(resolveMemoryResource(memory)),
       velocityPassDependencyBufferAccessModes_(resolveMemoryResource(memory)),
+      reactivePassDependencyBuffers_(resolveMemoryResource(memory)),
+      reactivePassDependencyBufferAccessModes_(resolveMemoryResource(memory)),
       previousTransformById_(resolveMemoryResource(memory)),
       previousInstanceMatricesCpuCache_(resolveMemoryResource(memory)),
       velocityInstanceFlagsCpuCache_(resolveMemoryResource(memory)),
+      transmissionVisibilityDepthPushConstants_(resolveMemoryResource(memory)),
       preparedGraphPasses_(resolveMemoryResource(memory)) {
   auto *resource = resolveMemoryResource(memory);
   singleInstanceBatchCaches_.reserve(kSingleInstanceCacheVariantCount);
@@ -682,6 +686,7 @@ void OpaqueRenderer::onDetach() {
   destroyBuffers();
   destroyPickTexture();
   destroyShadowInspectTexture();
+  destroyTransmissionVisibilityDepthTexture();
   destroyDepthPyramidTextures();
   if (nuri::isValid(sceneDepthSampler_)) {
     gpu_.destroySampler(sceneDepthSampler_);
@@ -714,6 +719,7 @@ void OpaqueRenderer::onDetach() {
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
+  meshReactiveMaskVertexShader_ = {};
   meshReactiveMaskFragmentShader_ = {};
   meshNormalFragmentShader_ = {};
   depthFragmentShader_ = {};
@@ -751,6 +757,8 @@ void OpaqueRenderer::onDetach() {
   reactiveMaskDrawItems_.clear();
   passDrawItems_.clear();
   depthPrepassDrawItems_.clear();
+  transmissionVisibilityDepthDrawItems_.clear();
+  transmissionVisibilityDepthPushConstants_.clear();
   depthPyramidPushConstants_.clear();
   depthPyramidDrawItems_.clear();
   depthPyramidDependencyTextures_.clear();
@@ -767,6 +775,8 @@ void OpaqueRenderer::onDetach() {
   mainPassDependencyTextureAccessModes_.clear();
   velocityPassDependencyBuffers_.clear();
   velocityPassDependencyBufferAccessModes_.clear();
+  reactivePassDependencyBuffers_.clear();
+  reactivePassDependencyBufferAccessModes_.clear();
   previousTransformById_.clear();
   pickDrawItems_.clear();
   cachedPreResolvedBufferSignature_ = std::numeric_limits<uint64_t>::max();
@@ -800,6 +810,7 @@ void OpaqueRenderer::onDetach() {
 void OpaqueRenderer::onResize(uint32_t, uint32_t) {
   destroyPickTexture();
   destroyShadowInspectTexture();
+  destroyTransmissionVisibilityDepthTexture();
   destroyDepthPyramidTextures();
   resetPickState();
 }
@@ -920,6 +931,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     return Result<bool, std::string>::makeError(initResult.error());
   }
   const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
+  frame.sharedResources.transmissionVisibilityDepthTexture = {};
+  frame.sharedResources.transmissionVisibilityDepthGraphTexture = {};
   if (!nuri::isValid(sceneDepthTexture)) {
     return Result<bool, std::string>::makeError(
         "OpaqueRenderer::buildOpaquePasses: scene depth texture is "
@@ -3054,6 +3067,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   passDrawItems_.clear();
   msaaPassDrawItems_.clear();
   depthPrepassDrawItems_.clear();
+  transmissionVisibilityDepthDrawItems_.clear();
+  transmissionVisibilityDepthPushConstants_.clear();
   normalPrepassDrawItems_.clear();
 
   const bool normalPrepassRequested =
@@ -3121,6 +3136,71 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       if (depthPrepassDrawItems_.empty()) {
         depthPrepassEnabled = false;
       }
+    }
+    NURI_PROFILER_ZONE_END();
+  }
+  bool transmissionVisibilityDepthEnabled =
+      shouldBuildTransmissionVisibilityDepth(frame, settings) &&
+      !wireframeOnlyRequested && !baseDrawItems.empty();
+  if (transmissionVisibilityDepthEnabled &&
+      baseAlphaMasked.size() != baseDrawItems.size()) {
+    transmissionVisibilityDepthEnabled = false;
+  }
+  if (transmissionVisibilityDepthEnabled) {
+    auto visibilityDepthResult =
+        ensureTransmissionVisibilityDepthTexture(sceneDepthTexture);
+    if (visibilityDepthResult.hasError()) {
+      return visibilityDepthResult;
+    }
+    frame.sharedResources.transmissionVisibilityDepthTexture =
+        transmissionVisibilityDepthTexture_;
+
+    NURI_PROFILER_ZONE("OpaqueRenderer.transmission_visibility_depth_build",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    transmissionVisibilityDepthDrawItems_.reserve(baseDrawItems.size());
+    transmissionVisibilityDepthPushConstants_.reserve(baseDrawItems.size());
+    for (size_t i = 0; i < baseDrawItems.size(); ++i) {
+      const DrawItem &source = baseDrawItems[i];
+      const bool alphaMasked = baseAlphaMasked[i] != 0u;
+      const RenderPipelineHandle depthPipeline =
+          selectDepthPipeline(source.pipeline, alphaMasked, false);
+      if (!nuri::isValid(depthPipeline) ||
+          source.pushConstants.size() != sizeof(PushConstants)) {
+        transmissionVisibilityDepthEnabled = false;
+        transmissionVisibilityDepthDrawItems_.clear();
+        transmissionVisibilityDepthPushConstants_.clear();
+        frame.sharedResources.transmissionVisibilityDepthTexture = {};
+        if (!loggedTransmissionVisibilityDepthUnsupported_) {
+          loggedTransmissionVisibilityDepthUnsupported_ = true;
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::buildOpaquePasses: transmission visibility "
+              "depth is unavailable, falling back to jittered scene depth");
+        }
+        break;
+      }
+
+      PushConstants constants{};
+      std::memcpy(&constants, source.pushConstants.data(), sizeof(constants));
+      constants.frameDataAddress = sceneGpu->postTaaFrameDataAddress;
+      transmissionVisibilityDepthPushConstants_.push_back(constants);
+
+      DrawItem depthDraw = source;
+      depthDraw.pipeline = depthPipeline;
+      depthDraw.useDepthState = true;
+      depthDraw.depthState = {.compareOp = CompareOp::Less,
+                              .isDepthWriteEnabled = true};
+      depthDraw.pushConstants = std::span<const std::byte>(
+          reinterpret_cast<const std::byte *>(
+              &transmissionVisibilityDepthPushConstants_.back()),
+          sizeof(PushConstants));
+      depthDraw.debugLabel = alphaMasked ? "TransmissionVisibilityDepthAlpha"
+                                         : "TransmissionVisibilityDepth";
+      transmissionVisibilityDepthDrawItems_.push_back(depthDraw);
+    }
+    if (transmissionVisibilityDepthEnabled &&
+        transmissionVisibilityDepthDrawItems_.empty()) {
+      transmissionVisibilityDepthEnabled = false;
+      frame.sharedResources.transmissionVisibilityDepthTexture = {};
     }
     NURI_PROFILER_ZONE_END();
   }
@@ -3497,6 +3577,55 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     depthPass.isDepthPrepass = true;
   }
 
+  if (transmissionVisibilityDepthEnabled) {
+    PreparedGraphPass &visibilityDepthPass =
+        out.emplace_back(drawItems_.get_allocator().resource());
+    visibilityDepthPass.desc.hasColorAttachment = false;
+    visibilityDepthPass.desc.depth = {.loadOp = LoadOp::Clear,
+                                      .storeOp = StoreOp::Store,
+                                      .clearDepth = kClearDepthOne,
+                                      .clearStencil = 0};
+    visibilityDepthPass.depthTextureHandle =
+        transmissionVisibilityDepthTexture_;
+    if (!pickPassSubmitted && !depthPrepassEnabled) {
+      visibilityDepthPass.desc.preDispatches =
+          std::span<const ComputeDispatchItem>(preDispatches_.data(),
+                                               preDispatches_.size());
+    }
+    visibilityDepthPass.desc.dependencyBuffers = std::span<const BufferHandle>(
+        passDependencyBuffers_.data(), passDependencyBuffers_.size());
+    visibilityDepthPass.desc.dependencyBufferAccessModes =
+        std::span<const RenderGraphAccessMode>(
+            passDependencyBufferAccessModes_.data(),
+            passDependencyBufferAccessModes_.size());
+    visibilityDepthPass.desc.dependencyTextures =
+        std::span<const TextureHandle>(passDependencyTextures_.data(),
+                                       passDependencyTextures_.size());
+    visibilityDepthPass.desc.draws =
+        std::span<const DrawItem>(transmissionVisibilityDepthDrawItems_.data(),
+                                  transmissionVisibilityDepthDrawItems_.size());
+    visibilityDepthPass.desc.drawBuffersPreResolved = true;
+    visibilityDepthPass.desc.preResolvedDrawBuffers =
+        std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
+                                      preResolvedDrawBuffers_.size());
+    visibilityDepthPass.desc.debugLabel =
+        "Opaque Transmission Visibility Depth";
+    visibilityDepthPass.desc.debugColor = kOpaquePassDebugColor;
+    visibilityDepthPass.desc.gpuTimingScope = GpuTimingScope::Opaque;
+    visibilityDepthPass.hasDraws =
+        !transmissionVisibilityDepthDrawItems_.empty();
+    visibilityDepthPass.hasPreDispatch =
+        !pickPassSubmitted && !depthPrepassEnabled && !preDispatches_.empty();
+    visibilityDepthPass.desc.borrowPayload =
+        !visibilityDepthPass.hasPreDispatch;
+    visibilityDepthPass.hasIndirectDraws = hasIndirectBaseDraws;
+    visibilityDepthPass.isTransmissionVisibilityDepthPass = true;
+  }
+
+  const bool preDispatchSubmittedBeforeMain =
+      pickPassSubmitted || depthPrepassEnabled ||
+      transmissionVisibilityDepthEnabled;
+
   if (normalPrepassEnabled && !normalPrepassDrawItems_.empty() &&
       nuri::isValid(frame.sharedResources.normalTexture)) {
     PreparedGraphPass &normalPass =
@@ -3795,7 +3924,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                      .clearDepth = kClearDepthOne,
                      .clearStencil = 0};
   pass.depthTextureHandle = sceneDepthTarget;
-  if (!pickPassSubmitted && !depthPrepassEnabled) {
+  if (!preDispatchSubmittedBeforeMain) {
     pass.desc.preDispatches = std::span<const ComputeDispatchItem>(
         preDispatches_.data(), preDispatches_.size());
   }
@@ -3880,7 +4009,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   pass.desc.gpuTimingScope = GpuTimingScope::Opaque;
   pass.hasDraws = !finalPassDrawItems.empty();
   pass.hasPreDispatch =
-      !pickPassSubmitted && !depthPrepassEnabled && !preDispatches_.empty();
+      !preDispatchSubmittedBeforeMain && !preDispatches_.empty();
   pass.desc.borrowPayload = !pass.hasPreDispatch;
   pass.hasIndirectDraws = hasIndirectBaseDraws;
   pass.isMainPass = true;
@@ -3925,18 +4054,27 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       baseAlphaMasked.size() == shadedBaseDrawItems.size()) {
     reactiveMaskDrawItems_.clear();
     reactiveMaskDrawItems_.reserve(shadedBaseDrawItems.size());
-    uint32_t alphaMaskedDraws = 0u;
+    const bool motionUncertainReactiveMode =
+        hasTaaVelocityInstances &&
+        velocityInstanceFlagsMode != VelocityInstanceFlagsMode::AllValid;
+    uint32_t alphaMaskedCoverageDraws = 0u;
+    uint32_t reactiveAlphaMaskedDraws = 0u;
+    uint32_t motionUncertainDraws = 0u;
     uint32_t skippedTessellatedReactiveDraws = 0u;
     for (size_t i = 0; i < shadedBaseDrawItems.size(); ++i) {
-      if (baseAlphaMasked[i] == 0u) {
+      const bool alphaMasked = baseAlphaMasked[i] != 0u;
+      alphaMaskedCoverageDraws += alphaMasked ? 1u : 0u;
+      const bool motionUncertain = motionUncertainReactiveMode;
+      if (!motionUncertain) {
         continue;
       }
-      ++alphaMaskedDraws;
       const DrawItem &sourceItem = shadedBaseDrawItems[i];
       if (isTessPipeline(sourceItem.pipeline)) {
         ++skippedTessellatedReactiveDraws;
         continue;
       }
+      reactiveAlphaMaskedDraws += alphaMasked ? 1u : 0u;
+      motionUncertainDraws += motionUncertain ? 1u : 0u;
       const RenderPipelineHandle reactivePipeline =
           selectReactiveMaskPipeline(sourceItem.pipeline);
       if (!nuri::isValid(reactivePipeline)) {
@@ -3955,7 +4093,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
     aaMetrics.reactiveMaskDrawCount =
         saturateToU32(reactiveMaskDrawItems_.size());
-    aaMetrics.reactiveAlphaMaskedDrawCount = alphaMaskedDraws;
+    aaMetrics.reactiveAlphaMaskedDrawCount = reactiveAlphaMaskedDraws;
+    aaMetrics.reactiveMotionUncertainDrawCount = motionUncertainDraws;
     aaMetrics.reactiveSkippedTessellatedDrawCount =
         skippedTessellatedReactiveDraws;
     aaMetrics.reactiveMaskPassBandwidthEstimateBytes =
@@ -3963,11 +4102,26 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     const float drawDenominator =
         static_cast<float>(std::max<size_t>(shadedBaseDrawItems.size(), 1u));
     aaMetrics.taaAlphaMaskedCoverageEstimate =
-        static_cast<float>(alphaMaskedDraws) / drawDenominator;
+        static_cast<float>(alphaMaskedCoverageDraws) / drawDenominator;
     aaMetrics.taaReactiveCoverageEstimate =
         static_cast<float>(reactiveMaskDrawItems_.size()) / drawDenominator;
 
     if (!reactiveMaskDrawItems_.empty()) {
+      reactivePassDependencyBuffers_ = passDependencyBuffers_;
+      reactivePassDependencyBufferAccessModes_ =
+          passDependencyBufferAccessModes_;
+      for (const BufferHandle handle :
+           {velocityInstanceFlagsBufferHandle, velocityFrameDataBufferHandle}) {
+        auto reactiveDepResult = appendUniqueDependency(
+            reactivePassDependencyBuffers_,
+            reactivePassDependencyBufferAccessModes_, handle,
+            RenderGraphAccessMode::Read,
+            "OpaqueRenderer::buildOpaquePasses(reactive pass)");
+        if (reactiveDepResult.hasError()) {
+          return reactiveDepResult;
+        }
+      }
+
       PreparedGraphPass &reactivePass =
           out.emplace_back(drawItems_.get_allocator().resource());
       reactivePass.desc.color = AttachmentColor{
@@ -3981,12 +4135,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                  .clearDepth = kClearDepthOne,
                                  .clearStencil = 0};
       reactivePass.depthTextureHandle = sceneDepthTexture;
-      reactivePass.desc.dependencyBuffers = std::span<const BufferHandle>(
-          passDependencyBuffers_.data(), passDependencyBuffers_.size());
+      reactivePass.desc.dependencyBuffers =
+          std::span<const BufferHandle>(reactivePassDependencyBuffers_.data(),
+                                        reactivePassDependencyBuffers_.size());
       reactivePass.desc.dependencyBufferAccessModes =
           std::span<const RenderGraphAccessMode>(
-              passDependencyBufferAccessModes_.data(),
-              passDependencyBufferAccessModes_.size());
+              reactivePassDependencyBufferAccessModes_.data(),
+              reactivePassDependencyBufferAccessModes_.size());
       reactivePass.desc.dependencyTextures = std::span<const TextureHandle>(
           passDependencyTextures_.data(), passDependencyTextures_.size());
       reactivePass.desc.dependencyTextureAccessModes =
@@ -4209,6 +4364,23 @@ bool OpaqueRenderer::requiresDepthPyramid(
            sanitizedSdsm == ShadowSdsmMode::Histogram));
 }
 
+bool OpaqueRenderer::shouldBuildTransmissionVisibilityDepth(
+    const RenderFrameContext &frame, const RenderSettings &settings) const {
+  if (!settings.transmission.enabled || !frame.camera.jitterEnabled ||
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode) !=
+          AntiAliasingMode::TAA) {
+    return false;
+  }
+  if (!frame.sharedResources.forwardSceneGpuData.has_value()) {
+    return false;
+  }
+  const ForwardSceneGpuData &sceneGpu =
+      *frame.sharedResources.forwardSceneGpuData;
+  return sceneGpu.frameDataAddress != 0u &&
+         sceneGpu.postTaaFrameDataAddress != 0u &&
+         sceneGpu.frameDataAddress != sceneGpu.postTaaFrameDataAddress;
+}
+
 Result<bool, std::string>
 OpaqueRenderer::prepareOpaqueGraphPasses(RenderFrameContext &frame) {
   preparedGraphPasses_.clear();
@@ -4285,7 +4457,8 @@ void OpaqueRenderer::cachePreparedGraphPassMetadata(PreparedGraphPass &) const {
 
 bool OpaqueRenderer::isPreLightingPass(const PreparedGraphPass &pass) noexcept {
   return pass.isDepthPrepass || pass.isNormalPrepass ||
-         pass.isDepthPyramidPass || pass.isEarlyVelocityPass ||
+         pass.isTransmissionVisibilityDepthPass || pass.isDepthPyramidPass ||
+         pass.isEarlyVelocityPass ||
          pass.desc.gpuTimingScope == GpuTimingScope::ShadowSdsm;
 }
 
@@ -4547,6 +4720,11 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     } else {
       frame.sharedResources.sceneDepthGraphTexture = passDesc.depthTexture;
     }
+  }
+  if (pass.isTransmissionVisibilityDepthPass &&
+      nuri::isValid(pass.depthTextureHandle)) {
+    frame.sharedResources.transmissionVisibilityDepthGraphTexture =
+        passDesc.depthTexture;
   }
   if (pass.isMainPass && nuri::isValid(pass.depthResolveTextureHandle) &&
       isSameTextureHandle(pass.depthResolveTextureHandle,
@@ -5312,6 +5490,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshShadowInspectFragmentShader_ = {};
     meshVelocityVertexShader_ = {};
     meshVelocityFragmentShader_ = {};
+    meshReactiveMaskVertexShader_ = {};
     meshReactiveMaskFragmentShader_ = {};
     meshNormalFragmentShader_ = {};
     depthFragmentShader_ = {};
@@ -5353,6 +5532,7 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshShadowInspectFragmentShader_ = {};
     meshVelocityVertexShader_ = {};
     meshVelocityFragmentShader_ = {};
+    meshReactiveMaskVertexShader_ = {};
     meshReactiveMaskFragmentShader_ = {};
     meshNormalFragmentShader_ = {};
     depthFragmentShader_ = {};
@@ -5495,6 +5675,56 @@ Result<bool, std::string> OpaqueRenderer::recreatePickTexture() {
     return Result<bool, std::string>::makeError(pickResult.error());
   }
   pickIdTexture_ = pickResult.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+OpaqueRenderer::ensureTransmissionVisibilityDepthTexture(
+    TextureHandle sceneDepthTexture) {
+  if (!nuri::isValid(sceneDepthTexture)) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::ensureTransmissionVisibilityDepthTexture: scene "
+        "depth texture is unavailable");
+  }
+
+  const TextureDimensions dimensions =
+      gpu_.getTextureDimensions(sceneDepthTexture);
+  const Format format = gpu_.getTextureFormat(sceneDepthTexture);
+  const uint32_t width = std::max(dimensions.width, 1u);
+  const uint32_t height = std::max(dimensions.height, 1u);
+  bool recreate = !nuri::isValid(transmissionVisibilityDepthTexture_) ||
+                  !gpu_.isValid(transmissionVisibilityDepthTexture_);
+  if (!recreate) {
+    const TextureDimensions currentDimensions =
+        gpu_.getTextureDimensions(transmissionVisibilityDepthTexture_);
+    recreate =
+        gpu_.getTextureFormat(transmissionVisibilityDepthTexture_) != format ||
+        currentDimensions.width != width || currentDimensions.height != height;
+  }
+  if (!recreate) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  destroyTransmissionVisibilityDepthTexture();
+  const TextureDesc desc{
+      .type = TextureType::Texture2D,
+      .format = format,
+      .dimensions = {width, height, 1u},
+      .usage = TextureUsage::Attachment,
+      .storage = Storage::Device,
+      .numLayers = 1u,
+      .numSamples = 1u,
+      .numMipLevels = 1u,
+      .data = {},
+      .dataNumMipLevels = 1u,
+      .generateMipmaps = false,
+  };
+  auto textureResult =
+      gpu_.createTexture(desc, "opaque_transmission_visibility_depth");
+  if (textureResult.hasError()) {
+    return Result<bool, std::string>::makeError(textureResult.error());
+  }
+  transmissionVisibilityDepthTexture_ = textureResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -6086,6 +6316,7 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
+  meshReactiveMaskVertexShader_ = {};
   meshReactiveMaskFragmentShader_ = {};
   meshNormalFragmentShader_ = {};
   depthFragmentShader_ = {};
@@ -6172,16 +6403,24 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
 
   {
     const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    auto vertexResult = meshReactiveMaskShader_->compileFromFile(
+        (shaderDir / "opaque_reactive_mask.vert").string(),
+        ShaderStage::Vertex);
     auto fragmentResult = meshReactiveMaskShader_->compileFromFile(
         (shaderDir / "opaque_reactive_mask.frag").string(),
         ShaderStage::Fragment);
-    if (fragmentResult.hasError()) {
+    if (vertexResult.hasError() || fragmentResult.hasError()) {
+      const std::string error = vertexResult.hasError()
+                                    ? vertexResult.error()
+                                    : fragmentResult.error();
       NURI_LOG_WARNING(
           "OpaqueRenderer::createShaders: reactive mask shader failed, "
           "alpha-mask reactive tracking will be disabled: %s",
-          fragmentResult.error().c_str());
+          error.c_str());
+      meshReactiveMaskVertexShader_ = {};
       meshReactiveMaskFragmentShader_ = {};
     } else {
+      meshReactiveMaskVertexShader_ = vertexResult.value();
       meshReactiveMaskFragmentShader_ = fragmentResult.value();
     }
   }
@@ -6450,11 +6689,12 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     }
   }
 
-  if (nuri::isValid(meshVertexShader_) &&
+  if (nuri::isValid(meshReactiveMaskVertexShader_) &&
       nuri::isValid(meshReactiveMaskFragmentShader_)) {
-    const RenderPipelineDesc reactiveMaskDesc = meshPipelineDesc(
-        kFrameCompositionReactiveMaskFormat, depthFormat, meshVertexShader_, {},
-        {}, {}, meshReactiveMaskFragmentShader_, PolygonMode::Fill);
+    const RenderPipelineDesc reactiveMaskDesc =
+        meshPipelineDesc(kFrameCompositionReactiveMaskFormat, depthFormat,
+                         meshReactiveMaskVertexShader_, {}, {}, {},
+                         meshReactiveMaskFragmentShader_, PolygonMode::Fill);
     auto reactiveMaskResult =
         gpu_.createRenderPipeline(reactiveMaskDesc, "opaque_reactive_mask");
     if (reactiveMaskResult.hasError()) {
@@ -6466,10 +6706,11 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
       meshReactiveMaskDoubleSidedPipelineHandle_ = {};
     } else {
       meshReactiveMaskPipelineHandle_ = reactiveMaskResult.value();
-      const RenderPipelineDesc doubleSidedReactiveMaskDesc = meshPipelineDesc(
-          kFrameCompositionReactiveMaskFormat, depthFormat, meshVertexShader_,
-          {}, {}, {}, meshReactiveMaskFragmentShader_, PolygonMode::Fill,
-          Topology::Triangle, 0, false, CullMode::None);
+      const RenderPipelineDesc doubleSidedReactiveMaskDesc =
+          meshPipelineDesc(kFrameCompositionReactiveMaskFormat, depthFormat,
+                           meshReactiveMaskVertexShader_, {}, {}, {},
+                           meshReactiveMaskFragmentShader_, PolygonMode::Fill,
+                           Topology::Triangle, 0, false, CullMode::None);
       auto doubleSidedReactiveMaskResult = gpu_.createRenderPipeline(
           doubleSidedReactiveMaskDesc, "opaque_reactive_mask_double_sided");
       if (doubleSidedReactiveMaskResult.hasError()) {
@@ -7740,6 +7981,13 @@ void OpaqueRenderer::destroyPickTexture() {
   if (nuri::isValid(pickIdTexture_)) {
     gpu_.destroyTexture(pickIdTexture_);
     pickIdTexture_ = TextureHandle{};
+  }
+}
+
+void OpaqueRenderer::destroyTransmissionVisibilityDepthTexture() {
+  if (nuri::isValid(transmissionVisibilityDepthTexture_)) {
+    gpu_.destroyTexture(transmissionVisibilityDepthTexture_);
+    transmissionVisibilityDepthTexture_ = TextureHandle{};
   }
 }
 

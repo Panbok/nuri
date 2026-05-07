@@ -8,6 +8,7 @@
 #include "nuri/gfx/shader.h"
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <span>
@@ -15,9 +16,16 @@
 
 namespace nuri {
 
+enum class SpatialAAPlacement : uint8_t {
+  SceneColor = 0,
+  PostTransparent = 1,
+};
+
 class NURI_API SpatialAAPass final : public RenderFeaturePass {
 public:
-  explicit SpatialAAPass(GPUDevice &gpu, RuntimeCompositeConfig config);
+  explicit SpatialAAPass(
+      GPUDevice &gpu, RuntimeCompositeConfig config,
+      SpatialAAPlacement placement = SpatialAAPlacement::SceneColor);
   ~SpatialAAPass() override;
 
   SpatialAAPass(const SpatialAAPass &) = delete;
@@ -46,6 +54,7 @@ private:
 
   GPUDevice &gpu_;
   RuntimeCompositeConfig config_{};
+  SpatialAAPlacement placement_ = SpatialAAPlacement::SceneColor;
   FullscreenResources edgeResources_{};
   FullscreenResources blendResources_{};
   FullscreenResources neighborhoodResources_{};
@@ -55,9 +64,11 @@ private:
   TextureHandle searchLutTexture_{};
   std::vector<TextureHandle> edgeTextures_{};
   std::vector<TextureHandle> blendTextures_{};
+  std::vector<TextureHandle> outputTextures_{};
   uint32_t scratchWidth_ = 0u;
   uint32_t scratchHeight_ = 0u;
   uint32_t scratchRingCount_ = 0u;
+  Format outputScratchFormat_ = Format::Count;
 
   Result<bool, std::string> ensureResources(FrameBuildContext &ctx);
   void destroyResources();
@@ -66,7 +77,9 @@ private:
 
 class NURI_API SpatialAAFeature final : public RenderFeature {
 public:
-  explicit SpatialAAFeature(GPUDevice &gpu, RuntimeCompositeConfig config);
+  explicit SpatialAAFeature(
+      GPUDevice &gpu, RuntimeCompositeConfig config,
+      SpatialAAPlacement placement = SpatialAAPlacement::SceneColor);
   ~SpatialAAFeature() override = default;
 
   SpatialAAFeature(const SpatialAAFeature &) = delete;

@@ -23,6 +23,13 @@ float applyIorToRoughness(float roughness, float ior) {
   return roughness * clamp(ior * 2.0 - 2.0, 0.0, 1.0);
 }
 
+float transmissionJitterMinLod() {
+  // This pass is post-TAA, so its screen-space refraction is not itself
+  // temporally accumulated. The renderer stores a jitter/current-weight based
+  // minimum scene-color LOD in this otherwise unused tessellation slot.
+  return clamp(pc.tessMaxFactor, 0.0, 2.0);
+}
+
 vec3 getVolumeTransmissionRay(vec3 n, vec3 v, float thickness, float ior,
                               vec3 modelScale) {
   vec3 refractionVector = refract(-v, n, 1.0 / max(ior, 1.0));
@@ -44,7 +51,8 @@ vec3 applyVolumeAttenuation(vec3 radiance, float transmissionDistance,
 }
 
 float transmissionFramebufferLod(float roughness, float ior) {
-  return applyIorToRoughness(roughness, ior) * 2.0;
+  return max(applyIorToRoughness(roughness, ior) * 2.0,
+             transmissionJitterMinLod());
 }
 
 vec3 sampleTransmissionColor(vec2 uv, float roughness, float ior) {

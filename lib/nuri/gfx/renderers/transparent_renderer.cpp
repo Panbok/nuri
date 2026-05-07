@@ -409,7 +409,9 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
     instanceDataRingUploadVersions_[frameSlot] = cachedTransformVersion_;
   }
 
-  const uint64_t frameDataAddress = sceneGpu->frameDataAddress;
+  const uint64_t frameDataAddress = sceneGpu->postTaaFrameDataAddress != 0u
+                                        ? sceneGpu->postTaaFrameDataAddress
+                                        : sceneGpu->frameDataAddress;
   const uint64_t directionalLightBufferAddress =
       sceneGpu->directionalLightBufferAddress;
   const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
@@ -726,8 +728,16 @@ TransparentRenderer::appendTransparentMainPass(RenderFrameContext &frame,
     aaMetrics.taaTransparentPostTaaFixedDrawCount =
         saturateToU32(fixedDraws_.size());
     aaMetrics.taaTransparentEdgeJitterTracked = true;
+    const ForwardSceneGpuData *const sceneGpu =
+        frame.sharedResources.forwardSceneGpuData.has_value()
+            ? &*frame.sharedResources.forwardSceneGpuData
+            : nullptr;
+    const bool transparentUsesJitteredProjection =
+        sceneGpu == nullptr || sceneGpu->postTaaFrameDataAddress == 0u ||
+        sceneGpu->postTaaFrameDataAddress == sceneGpu->frameDataAddress;
     aaMetrics.taaTransparentEdgeJitterEstimate =
-        frame.camera.jitterEnabled ? 1.0f : 0.0f;
+        frame.camera.jitterEnabled && transparentUsesJitteredProjection ? 1.0f
+                                                                        : 0.0f;
   }
 
   return appendTransparentPass(

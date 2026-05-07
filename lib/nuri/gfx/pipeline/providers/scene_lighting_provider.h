@@ -42,18 +42,27 @@ private:
     uint32_t localLightCount = std::numeric_limits<uint32_t>::max();
     bool hasFrameData = false;
     ForwardSceneFrameData frameData{};
+    ForwardSceneFrameData postTaaFrameData{};
   };
 
   Result<bool, std::string> ensureBufferRingCapacity(size_t requiredBytes,
                                                      uint32_t requiredCount);
   Result<uint64_t, std::string> ensureDisabledShadowFrameBuffer();
+  Result<uint32_t, std::string>
+  resolveMaterialSamplerId(RenderFrameContext &frame);
+  Result<SamplerHandle, std::string>
+  ensureTaaMaterialMipBiasSampler(const SamplerDesc &desc);
   void destroyBuffers();
+  void destroyCachedSamplers();
   [[nodiscard]] Buffer *currentBuffer(uint64_t frameIndex) const noexcept;
 
   GPUDevice &gpu_;
   std::vector<std::unique_ptr<Buffer>> sceneDataBuffers_;
   std::vector<SlotUploadState> slotUploadStates_;
   std::unique_ptr<Buffer> disabledShadowFrameBuffer_;
+  SamplerHandle taaMaterialMipBiasSampler_{};
+  SamplerDesc taaMaterialMipBiasSamplerDesc_{};
+  bool hasTaaMaterialMipBiasSamplerDesc_ = false;
   size_t sceneDataBufferCapacityBytes_ = 0;
   uint64_t loggedAddressProbeTopologyVersion_ =
       std::numeric_limits<uint64_t>::max();

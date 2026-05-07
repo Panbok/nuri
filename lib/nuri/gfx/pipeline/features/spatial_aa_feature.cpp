@@ -78,6 +78,12 @@ isSpatialAADebugView(AntiAliasingDebugView view) noexcept {
 }
 
 [[nodiscard]] inline bool
+isAADebugOutputView(AntiAliasingDebugView view) noexcept {
+  return view != AntiAliasingDebugView::None &&
+         view != AntiAliasingDebugView::Settings;
+}
+
+[[nodiscard]] inline bool
 shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   const AntiAliasingMode mode =
@@ -100,7 +106,25 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
   const bool fallbackWindow =
       !frame.camera.historyValid ||
       frame.camera.framesSinceHistoryReset < frame.camera.jitterSequenceLength;
-  return fallbackWindow || settings.antiAliasing.debug.spatialPostTaaCleanup;
+  return fallbackWindow || (!frame.camera.jitterEnabled &&
+                            settings.antiAliasing.debug.spatialPostTaaCleanup);
+}
+
+[[nodiscard]] inline bool
+shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  const AntiAliasingMode mode =
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode);
+  const AntiAliasingDebugView debugView =
+      sanitizeAntiAliasingDebugView(settings.antiAliasing.debug.view);
+  const bool jitteredPostTaaTransmission =
+      frame.camera.jitterEnabled &&
+      frame.metrics.antiAliasing.taaTransmissionPostResolveSceneColorConsumed;
+  return mode == AntiAliasingMode::TAA && settings.transparent.enabled &&
+         settings.antiAliasing.debug.transparentPostTaaSpatialCleanup &&
+         !jitteredPostTaaTransmission && !isAADebugOutputView(debugView) &&
+         frame.metrics.antiAliasing.taaResolvedSceneColorPublished &&
+         frame.metrics.antiAliasing.taaTransparentPostTaaDrawCount > 0u;
 }
 
 [[nodiscard]] inline bool
@@ -126,7 +150,7 @@ isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   }
   return mode == AntiAliasingMode::TAA &&
          settings.antiAliasing.debug.spatialPostTaaCleanup &&
-         !isSpatialFallbackActive(frame);
+         !frame.camera.jitterEnabled && !isSpatialFallbackActive(frame);
 }
 
 [[nodiscard]] inline bool
@@ -278,8 +302,9 @@ fullscreenPipelineDesc(Format colorFormat, ShaderHandle vertexShader,
 
 } // namespace
 
-SpatialAAPass::SpatialAAPass(GPUDevice &gpu, RuntimeCompositeConfig config)
-    : gpu_(gpu), config_(std::move(config)) {
+SpatialAAPass::SpatialAAPass(GPUDevice &gpu, RuntimeCompositeConfig config,
+                             SpatialAAPlacement placement)
+    : gpu_(gpu), config_(std::move(config)), placement_(placement) {
   const std::filesystem::path basePath = resolveShaderBasePath(config_);
   const std::filesystem::path vertexPath =
       config_.fullscreenVertex.empty() ? basePath / "fullscreen_copy.vert"
@@ -327,11 +352,18 @@ void SpatialAAPass::destroyResources() {
       gpu_.destroyTexture(texture);
     }
   }
+  for (TextureHandle texture : outputTextures_) {
+    if (nuri::isValid(texture)) {
+      gpu_.destroyTexture(texture);
+    }
+  }
   edgeTextures_.clear();
   blendTextures_.clear();
+  outputTextures_.clear();
   scratchWidth_ = 0u;
   scratchHeight_ = 0u;
   scratchRingCount_ = 0u;
+  outputScratchFormat_ = Format::Count;
   if (nuri::isValid(areaLutTexture_)) {
     gpu_.destroyTexture(areaLutTexture_);
   }
@@ -491,13 +523,23 @@ SpatialAAPass::ensureResources(FrameBuildContext &ctx) {
     searchLutTexture_ = textureResult.value();
   }
 
-  const TextureDimensions dimensions =
-      gpu_.getTextureDimensions(ctx.shared.sceneColorTexture);
+  const TextureHandle sourceTexture =
+      placement_ == SpatialAAPlacement::PostTransparent
+          ? ctx.shared.frameColorTexture
+          : ctx.shared.sceneColorTexture;
+  const TextureDimensions dimensions = gpu_.getTextureDimensions(sourceTexture);
   const uint32_t ringCount = std::max(2u, gpu_.getSwapchainImageCount());
+  const bool needsOutputScratch =
+      placement_ == SpatialAAPlacement::PostTransparent;
+  const Format outputScratchFormat =
+      needsOutputScratch ? gpu_.getTextureFormat(sourceTexture) : Format::Count;
   const bool recreateScratch =
       scratchWidth_ != dimensions.width ||
       scratchHeight_ != dimensions.height || scratchRingCount_ != ringCount ||
-      edgeTextures_.size() != ringCount || blendTextures_.size() != ringCount;
+      edgeTextures_.size() != ringCount || blendTextures_.size() != ringCount ||
+      (needsOutputScratch && (outputTextures_.size() != ringCount ||
+                              outputScratchFormat_ != outputScratchFormat)) ||
+      (!needsOutputScratch && !outputTextures_.empty());
   if (!recreateScratch) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -512,14 +554,38 @@ SpatialAAPass::ensureResources(FrameBuildContext &ctx) {
       gpu_.destroyTexture(texture);
     }
   }
+  for (TextureHandle texture : outputTextures_) {
+    if (nuri::isValid(texture)) {
+      gpu_.destroyTexture(texture);
+    }
+  }
   edgeTextures_.clear();
   blendTextures_.clear();
+  outputTextures_.clear();
   edgeTextures_.reserve(ringCount);
   blendTextures_.reserve(ringCount);
+  if (needsOutputScratch) {
+    outputTextures_.reserve(ringCount);
+  }
 
   const TextureDesc scratchDesc{
       .type = TextureType::Texture2D,
       .format = Format::RGBA8_UNORM,
+      .dimensions = TextureDimensions{std::max(dimensions.width, 1u),
+                                      std::max(dimensions.height, 1u), 1u},
+      .usage = TextureUsage::AttachmentSampled,
+      .storage = Storage::Device,
+      .numLayers = 1u,
+      .numSamples = 1u,
+      .numMipLevels = 1u,
+      .data = {},
+      .dataNumMipLevels = 1u,
+      .generateMipmaps = false};
+  const TextureDesc outputDesc{
+      .type = TextureType::Texture2D,
+      .format = outputScratchFormat == Format::Count
+                    ? kFrameCompositionFrameColorFormat
+                    : outputScratchFormat,
       .dimensions = TextureDimensions{std::max(dimensions.width, 1u),
                                       std::max(dimensions.height, 1u), 1u},
       .usage = TextureUsage::AttachmentSampled,
@@ -543,20 +609,38 @@ SpatialAAPass::ensureResources(FrameBuildContext &ctx) {
     }
     edgeTextures_.push_back(edgeTexture.value());
     blendTextures_.push_back(blendTexture.value());
+    if (needsOutputScratch) {
+      auto outputTexture =
+          gpu_.createTexture(outputDesc, "transparent_spatial_aa_output");
+      if (outputTexture.hasError()) {
+        return Result<bool, std::string>::makeError(outputTexture.error());
+      }
+      outputTextures_.push_back(outputTexture.value());
+    }
   }
   scratchWidth_ = dimensions.width;
   scratchHeight_ = dimensions.height;
   scratchRingCount_ = ringCount;
+  outputScratchFormat_ = outputScratchFormat;
   return Result<bool, std::string>::makeResult(true);
 }
 
 bool SpatialAAPass::isEnabled(const FrameBuildContext &ctx) const {
+  if (placement_ == SpatialAAPlacement::PostTransparent) {
+    return nuri::isValid(ctx.shared.frameColorTexture) &&
+           shouldRunPostTransparentSpatialAA(ctx.frame);
+  }
   return nuri::isValid(ctx.shared.sceneColorTexture) &&
          nuri::isValid(ctx.shared.frameColorTexture) &&
          shouldRunSpatialAA(ctx.frame);
 }
 
 Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
+  if (placement_ == SpatialAAPlacement::PostTransparent) {
+    ctx.frame.metrics.antiAliasing.taaTransparentPostSpatialCleanupEnabled =
+        renderSettingsOrDefault(ctx.frame)
+            .antiAliasing.debug.transparentPostTaaSpatialCleanup;
+  }
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -564,6 +648,11 @@ Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
 }
 
 Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
+  if (placement_ == SpatialAAPlacement::PostTransparent) {
+    ctx.frame.metrics.antiAliasing.taaTransparentPostSpatialCleanupEnabled =
+        renderSettingsOrDefault(ctx.frame)
+            .antiAliasing.debug.transparentPostTaaSpatialCleanup;
+  }
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(false);
   }
@@ -571,7 +660,10 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   if (resourcesResult.hasError()) {
     return resourcesResult;
   }
-  if (edgeTextures_.empty() || blendTextures_.empty()) {
+  const bool postTransparent =
+      placement_ == SpatialAAPlacement::PostTransparent;
+  if (edgeTextures_.empty() || blendTextures_.empty() ||
+      (postTransparent && outputTextures_.empty())) {
     return Result<bool, std::string>::makeResult(false);
   }
 
@@ -579,14 +671,18 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       static_cast<uint32_t>(ctx.frame.frameIndex % edgeTextures_.size());
   const TextureHandle edgeTexture = edgeTextures_[ringIndex];
   const TextureHandle blendTexture = blendTextures_[ringIndex];
-  const uint32_t sourceTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.sceneColorTexture);
+  const TextureHandle sourceTexture = postTransparent
+                                          ? ctx.shared.frameColorTexture
+                                          : ctx.shared.sceneColorTexture;
+  const TextureHandle outputTexture = postTransparent
+                                          ? outputTextures_[ringIndex]
+                                          : ctx.shared.frameColorTexture;
+  const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(sourceTexture);
   const uint32_t edgeTexId = gpu_.getTextureBindlessIndex(edgeTexture);
   const uint32_t blendTexId = gpu_.getTextureBindlessIndex(blendTexture);
   const uint32_t areaTexId = gpu_.getTextureBindlessIndex(areaLutTexture_);
   const uint32_t searchTexId = gpu_.getTextureBindlessIndex(searchLutTexture_);
-  const uint32_t frameTexId =
-      gpu_.getTextureBindlessIndex(ctx.shared.frameColorTexture);
+  const uint32_t outputTexId = gpu_.getTextureBindlessIndex(outputTexture);
   const uint32_t linearSamplerId =
       gpu_.getSamplerBindlessIndex(linearClampSampler_);
   const uint32_t pointSamplerId =
@@ -596,22 +692,24 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       blendTexId == kInvalidTextureBindlessIndex ||
       areaTexId == kInvalidTextureBindlessIndex ||
       searchTexId == kInvalidTextureBindlessIndex ||
-      frameTexId == kInvalidTextureBindlessIndex ||
+      outputTexId == kInvalidTextureBindlessIndex ||
       linearSamplerId == kInvalidTextureBindlessIndex ||
       pointSamplerId == kInvalidTextureBindlessIndex) {
     return Result<bool, std::string>::makeError(
         "SpatialAAPass::build: invalid bindless texture or sampler");
   }
 
-  auto importScene =
-      ctx.graph.importTexture(ctx.shared.sceneColorTexture, "spatial_aa_scene");
-  if (importScene.hasError()) {
-    return Result<bool, std::string>::makeError(importScene.error());
+  auto importSource = ctx.graph.importTexture(
+      sourceTexture, postTransparent ? "transparent_spatial_aa_frame_color"
+                                     : "spatial_aa_scene");
+  if (importSource.hasError()) {
+    return Result<bool, std::string>::makeError(importSource.error());
   }
-  auto importFrame = ctx.graph.importTexture(ctx.shared.frameColorTexture,
-                                             "spatial_aa_output");
-  if (importFrame.hasError()) {
-    return Result<bool, std::string>::makeError(importFrame.error());
+  auto importOutput = ctx.graph.importTexture(
+      outputTexture,
+      postTransparent ? "transparent_spatial_aa_output" : "spatial_aa_output");
+  if (importOutput.hasError()) {
+    return Result<bool, std::string>::makeError(importOutput.error());
   }
   auto importEdges = ctx.graph.importTexture(edgeTexture, "spatial_aa_edges");
   if (importEdges.hasError()) {
@@ -623,8 +721,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(importBlend.error());
   }
 
-  const TextureDimensions dimensions =
-      gpu_.getTextureDimensions(ctx.shared.sceneColorTexture);
+  const TextureDimensions dimensions = gpu_.getTextureDimensions(sourceTexture);
   const float inverseWidth =
       1.0f / static_cast<float>(std::max(dimensions.width, 1u));
   const float inverseHeight =
@@ -634,9 +731,20 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
   const AntiAliasingMode aaMode =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode);
-  const bool fallbackActive = isSpatialFallbackActive(ctx.frame);
-  const bool cleanupActive = isSpatialCleanupActive(ctx.frame);
-  const SpatialAAProfile profile = spatialAAProfile(ctx.frame);
+  const bool fallbackActive =
+      postTransparent ? false : isSpatialFallbackActive(ctx.frame);
+  const bool cleanupActive =
+      postTransparent ? true : isSpatialCleanupActive(ctx.frame);
+  const SpatialAAProfile profile =
+      postTransparent
+          ? SpatialAAProfile{
+                .edgeThreshold = kSpatialAATaaCleanupEdgeThreshold,
+                .resolveStrength = kSpatialAATaaCleanupResolveStrength,
+                .localContrastFactor = kSpatialAATaaCleanupLocalContrastFactor,
+                .cornerRounding = kSpatialAATaaCleanupCornerRounding,
+                .maxSearchSteps = kSpatialAAMaxSearchSteps,
+            }
+          : spatialAAProfile(ctx.frame);
   const SpatialAAPushConstants baseConstants{
       .sourceTexId = sourceTexId,
       .edgeTexId = edgeTexId,
@@ -664,35 +772,41 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
         timingReport.spatialAASourceFrameIndex;
     aaMetrics.spatialAAGpuTimingAvailable = 1u;
   }
-  aaMetrics.spatialAAEnabled = true;
-  aaMetrics.spatialAAFallbackActive = fallbackActive;
-  aaMetrics.spatialAACleanupActive = cleanupActive;
-  aaMetrics.msaaSpatialCleanupEnabled =
-      aaMode == AntiAliasingMode::MSAA4x &&
-      settings.antiAliasing.debug.spatialPostMsaaCleanup;
-  aaMetrics.msaaSpatialCleanupActive =
-      aaMode == AntiAliasingMode::MSAA4x && cleanupActive;
-  aaMetrics.spatialAAWidth = dimensions.width;
-  aaMetrics.spatialAAHeight = dimensions.height;
-  aaMetrics.spatialAATextureCount =
-      static_cast<uint32_t>(edgeTextures_.size() + blendTextures_.size());
-  aaMetrics.spatialAALutTextureCount =
-      nuri::isValid(areaLutTexture_) && nuri::isValid(searchLutTexture_) ? 2u
-                                                                         : 0u;
-  aaMetrics.spatialAATextureBytes = textureStorageBytes(gpu_, edgeTexture) +
-                                    textureStorageBytes(gpu_, blendTexture);
-  aaMetrics.spatialAATotalBytes = aaMetrics.spatialAATextureBytes *
-                                  static_cast<uint64_t>(edgeTextures_.size());
-  aaMetrics.spatialAALutTextureBytes =
-      textureStorageBytes(gpu_, areaLutTexture_) +
-      textureStorageBytes(gpu_, searchLutTexture_);
-  aaMetrics.spatialAAEdgePixelEstimate = 0.0f;
-  aaMetrics.spatialAAModifiedPixelEstimate = 0.0f;
-  if (fallbackActive) {
-    ++aaMetrics.spatialAAFallbackFrameCount;
-  }
-  if (cleanupActive) {
-    ++aaMetrics.spatialAACleanupFrameCount;
+  aaMetrics.taaTransparentPostSpatialCleanupEnabled =
+      settings.antiAliasing.debug.transparentPostTaaSpatialCleanup;
+  if (!postTransparent) {
+    aaMetrics.spatialAAEnabled = true;
+    aaMetrics.spatialAAFallbackActive = fallbackActive;
+    aaMetrics.spatialAACleanupActive = cleanupActive;
+    aaMetrics.msaaSpatialCleanupEnabled =
+        aaMode == AntiAliasingMode::MSAA4x &&
+        settings.antiAliasing.debug.spatialPostMsaaCleanup;
+    aaMetrics.msaaSpatialCleanupActive =
+        aaMode == AntiAliasingMode::MSAA4x && cleanupActive;
+    aaMetrics.spatialAAWidth = dimensions.width;
+    aaMetrics.spatialAAHeight = dimensions.height;
+    aaMetrics.spatialAATextureCount =
+        static_cast<uint32_t>(edgeTextures_.size() + blendTextures_.size());
+    aaMetrics.spatialAALutTextureCount =
+        nuri::isValid(areaLutTexture_) && nuri::isValid(searchLutTexture_) ? 2u
+                                                                           : 0u;
+    aaMetrics.spatialAATextureBytes = textureStorageBytes(gpu_, edgeTexture) +
+                                      textureStorageBytes(gpu_, blendTexture);
+    aaMetrics.spatialAATotalBytes = aaMetrics.spatialAATextureBytes *
+                                    static_cast<uint64_t>(edgeTextures_.size());
+    aaMetrics.spatialAALutTextureBytes =
+        textureStorageBytes(gpu_, areaLutTexture_) +
+        textureStorageBytes(gpu_, searchLutTexture_);
+    aaMetrics.spatialAAEdgePixelEstimate = 0.0f;
+    aaMetrics.spatialAAModifiedPixelEstimate = 0.0f;
+    if (fallbackActive) {
+      ++aaMetrics.spatialAAFallbackFrameCount;
+    }
+    if (cleanupActive) {
+      ++aaMetrics.spatialAACleanupFrameCount;
+    }
+  } else {
+    aaMetrics.taaTransparentPostSpatialCleanupActive = true;
   }
 
   const DrawItem edgeDraw = makeFullscreenDraw(
@@ -701,7 +815,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&baseConstants),
           sizeof(baseConstants)),
       "SpatialAAEdge");
-  const std::array<TextureHandle, 1> edgeReads{ctx.shared.sceneColorTexture};
+  const std::array<TextureHandle, 1> edgeReads{sourceTexture};
   RenderGraphGraphicsPassDesc edgePass{};
   edgePass.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
@@ -711,16 +825,21 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       std::span<const TextureHandle>(edgeReads.data(), edgeReads.size());
   edgePass.draws = std::span<const DrawItem>(&edgeDraw, 1u);
   edgePass.gpuTimingScope = GpuTimingScope::SpatialAA;
-  edgePass.debugLabel = "SMAA Edge Detection Pass";
+  edgePass.debugLabel = postTransparent ? "Transparent SpatialAA Edge Pass"
+                                        : "SMAA Edge Detection Pass";
   edgePass.debugColor = kSpatialAAPassDebugColor;
   auto addEdge = ctx.graph.addGraphicsPass(edgePass);
   if (addEdge.hasError()) {
     return Result<bool, std::string>::makeError(addEdge.error());
   }
-  ++aaMetrics.spatialAAPassCount;
-  ++aaMetrics.spatialAAEdgePassCount;
+  if (postTransparent) {
+    ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+  } else {
+    ++aaMetrics.spatialAAPassCount;
+    ++aaMetrics.spatialAAEdgePassCount;
+  }
   aaMetrics.spatialAABandwidthEstimateBytes +=
-      textureStorageBytes(gpu_, ctx.shared.sceneColorTexture) +
+      textureStorageBytes(gpu_, sourceTexture) +
       textureStorageBytes(gpu_, edgeTexture);
 
   const bool edgeDebug = debugView == AntiAliasingDebugView::SpatialAAEdges;
@@ -734,8 +853,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
             sizeof(baseConstants)),
         "SpatialAABlend");
     const std::array<TextureHandle, 4> blendReads{
-        edgeTexture, ctx.shared.sceneColorTexture, areaLutTexture_,
-        searchLutTexture_};
+        edgeTexture, sourceTexture, areaLutTexture_, searchLutTexture_};
     RenderGraphGraphicsPassDesc blendPass{};
     blendPass.color = {.loadOp = LoadOp::Clear,
                        .storeOp = StoreOp::Store,
@@ -745,27 +863,33 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
         std::span<const TextureHandle>(blendReads.data(), blendReads.size());
     blendPass.draws = std::span<const DrawItem>(&blendDraw, 1u);
     blendPass.gpuTimingScope = GpuTimingScope::SpatialAA;
-    blendPass.debugLabel = "SMAA Blend Weight Pass";
+    blendPass.debugLabel = postTransparent ? "Transparent SpatialAA Blend Pass"
+                                           : "SMAA Blend Weight Pass";
     blendPass.debugColor = kSpatialAAPassDebugColor;
     auto addBlend = ctx.graph.addGraphicsPass(blendPass);
     if (addBlend.hasError()) {
       return Result<bool, std::string>::makeError(addBlend.error());
     }
-    ++aaMetrics.spatialAAPassCount;
-    ++aaMetrics.spatialAABlendPassCount;
+    if (postTransparent) {
+      ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+    } else {
+      ++aaMetrics.spatialAAPassCount;
+      ++aaMetrics.spatialAABlendPassCount;
+    }
     aaMetrics.spatialAABandwidthEstimateBytes +=
         textureStorageBytes(gpu_, edgeTexture) +
-        textureStorageBytes(gpu_, ctx.shared.sceneColorTexture) +
+        textureStorageBytes(gpu_, sourceTexture) +
         textureStorageBytes(gpu_, areaLutTexture_) +
         textureStorageBytes(gpu_, searchLutTexture_) +
         textureStorageBytes(gpu_, blendTexture);
   }
 
   SpatialAAPushConstants outputConstants = baseConstants;
-  std::string_view outputLabel = "SMAA Neighborhood Pass";
-  TextureHandle outputSource = ctx.shared.sceneColorTexture;
-  std::array<TextureHandle, 2> outputReads{ctx.shared.sceneColorTexture,
-                                           blendTexture};
+  std::string_view outputLabel = postTransparent
+                                     ? "Transparent SpatialAA Neighborhood Pass"
+                                     : "SMAA Neighborhood Pass";
+  TextureHandle outputSource = sourceTexture;
+  std::array<TextureHandle, 2> outputReads{sourceTexture, blendTexture};
   size_t outputReadCount = 2u;
   if (edgeDebug || blendDebug) {
     outputConstants.sourceTexId = edgeDebug ? edgeTexId : blendTexId;
@@ -800,7 +924,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   outputPass.color = {.loadOp = LoadOp::Clear,
                       .storeOp = StoreOp::Store,
                       .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  outputPass.colorTexture = importFrame.value();
+  outputPass.colorTexture = importOutput.value();
   outputPass.dependencyTextures =
       std::span<const TextureHandle>(outputReads.data(), outputReadCount);
   outputPass.draws = std::span<const DrawItem>(&outputDraw, 1u);
@@ -813,15 +937,19 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   if (addOutput.hasError()) {
     return Result<bool, std::string>::makeError(addOutput.error());
   }
-  ++aaMetrics.spatialAAPassCount;
-  ++aaMetrics.spatialAANeighborhoodPassCount;
+  if (postTransparent) {
+    ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+  } else {
+    ++aaMetrics.spatialAAPassCount;
+    ++aaMetrics.spatialAANeighborhoodPassCount;
+  }
   aaMetrics.spatialAABandwidthEstimateBytes +=
       textureStorageBytes(gpu_, outputSource) +
       (outputReadCount > 1u ? textureStorageBytes(gpu_, blendTexture) : 0u) +
-      textureStorageBytes(gpu_, ctx.shared.frameColorTexture);
+      textureStorageBytes(gpu_, outputTexture);
 
   SpatialAAPushConstants copyConstants = baseConstants;
-  copyConstants.sourceTexId = frameTexId;
+  copyConstants.sourceTexId = outputTexId;
   copyConstants.mode = kSpatialAAModeCopy;
   const DrawItem copyDraw = makeFullscreenDraw(
       neighborhoodResources_.pipeline,
@@ -829,36 +957,47 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&copyConstants),
           sizeof(copyConstants)),
       "SpatialAACopyBack");
-  const std::array<TextureHandle, 1> copyReads{ctx.shared.frameColorTexture};
+  const std::array<TextureHandle, 1> copyReads{outputTexture};
   RenderGraphGraphicsPassDesc copyPass{};
   copyPass.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
                     .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  copyPass.colorTexture = importScene.value();
+  copyPass.colorTexture = importSource.value();
   copyPass.dependencyTextures =
       std::span<const TextureHandle>(copyReads.data(), copyReads.size());
   copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
   copyPass.gpuTimingScope = GpuTimingScope::SpatialAA;
-  copyPass.debugLabel = "SMAA Copy Back Pass";
+  copyPass.debugLabel = postTransparent ? "Transparent SpatialAA Copy Back Pass"
+                                        : "SMAA Copy Back Pass";
   copyPass.debugColor = kSpatialAACopyBackPassDebugColor;
   auto addCopy = ctx.graph.addGraphicsPass(copyPass);
   if (addCopy.hasError()) {
     return Result<bool, std::string>::makeError(addCopy.error());
   }
-  ++aaMetrics.spatialAAPassCount;
-  ++aaMetrics.spatialAACopyBackPassCount;
+  if (postTransparent) {
+    ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+  } else {
+    ++aaMetrics.spatialAAPassCount;
+    ++aaMetrics.spatialAACopyBackPassCount;
+  }
   aaMetrics.spatialAABandwidthEstimateBytes +=
-      textureStorageBytes(gpu_, ctx.shared.frameColorTexture) +
-      textureStorageBytes(gpu_, ctx.shared.sceneColorTexture);
+      textureStorageBytes(gpu_, outputTexture) +
+      textureStorageBytes(gpu_, sourceTexture);
 
-  ctx.shared.sceneColorGraphTexture = importScene.value();
-  ctx.frame.sharedResources.sceneColorGraphTexture = importScene.value();
+  if (postTransparent) {
+    ctx.shared.frameColorGraphTexture = importSource.value();
+    ctx.frame.sharedResources.frameColorGraphTexture = importSource.value();
+  } else {
+    ctx.shared.sceneColorGraphTexture = importSource.value();
+    ctx.frame.sharedResources.sceneColorGraphTexture = importSource.value();
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
 SpatialAAFeature::SpatialAAFeature(GPUDevice &gpu,
-                                   RuntimeCompositeConfig config)
-    : spatialPass_(gpu, std::move(config)) {}
+                                   RuntimeCompositeConfig config,
+                                   SpatialAAPlacement placement)
+    : spatialPass_(gpu, std::move(config), placement) {}
 
 std::span<RenderFeaturePass *const> SpatialAAFeature::passes() noexcept {
   return std::span<RenderFeaturePass *const>(passes_.data(), passes_.size());

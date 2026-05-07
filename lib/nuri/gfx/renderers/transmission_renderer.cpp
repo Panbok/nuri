@@ -17,6 +17,7 @@ constexpr std::string_view kTransmissionPassLabel = "Transmission Pass";
 constexpr std::string_view kTransmissionMeshLabel = "TransmissionMesh";
 constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
+constexpr float kDefaultTaaCurrentFrameWeight = 0.06f;
 
 [[nodiscard]] std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
@@ -68,6 +69,11 @@ bool animationOverrideCoversSubmesh(
   return hash;
 }
 
+[[nodiscard]] bool isSameTextureHandle(TextureHandle lhs,
+                                       TextureHandle rhs) noexcept {
+  return lhs.index == rhs.index && lhs.generation == rhs.generation;
+}
+
 [[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
   return (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
 }
@@ -80,6 +86,64 @@ bool animationOverrideCoversSubmesh(
       std::max(glm::length(glm::vec3(model[0])) * authoredScale.x, 1.0e-4f),
       std::max(glm::length(glm::vec3(model[1])) * authoredScale.y, 1.0e-4f),
       std::max(glm::length(glm::vec3(model[2])) * authoredScale.z, 1.0e-4f));
+}
+
+[[nodiscard]] float smoothStep(float edge0, float edge1, float value) noexcept {
+  if (edge1 <= edge0) {
+    return value >= edge1 ? 1.0f : 0.0f;
+  }
+  const float t = std::clamp((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+[[nodiscard]] float
+transmissionTaaJitterMinLod(const RenderFrameContext &frame,
+                            const RenderSettings &settings) noexcept {
+  if (!settings.transmission.taaJitterPrefilter ||
+      sanitizeAntiAliasingMode(settings.antiAliasing.mode) !=
+          AntiAliasingMode::TAA ||
+      !frame.camera.jitterEnabled) {
+    return 0.0f;
+  }
+
+  const float jitterScale =
+      std::isfinite(settings.antiAliasing.debug.taaJitterScale)
+          ? std::clamp(settings.antiAliasing.debug.taaJitterScale, 0.0f, 1.0f)
+          : 0.75f;
+  const float currentWeight =
+      std::isfinite(settings.antiAliasing.debug.taaCurrentFrameWeight)
+          ? std::clamp(settings.antiAliasing.debug.taaCurrentFrameWeight, 0.0f,
+                       1.0f)
+          : kDefaultTaaCurrentFrameWeight;
+  const float maxLod =
+      std::isfinite(settings.transmission.taaJitterPrefilterMaxLod)
+          ? std::clamp(settings.transmission.taaJitterPrefilterMaxLod, 0.0f,
+                       2.0f)
+          : 1.0f;
+  const float jitterFactor = smoothStep(0.05f, 0.50f, jitterScale);
+  const float weightFactor =
+      smoothStep(0.0f, kDefaultTaaCurrentFrameWeight, currentWeight);
+  return std::clamp(maxLod * jitterFactor * weightFactor, 0.0f, maxLod);
+}
+
+[[nodiscard]] float transmissionTaaJitterDepthBiasConstant(
+    const RenderSettings &settings) noexcept {
+  if (!std::isfinite(settings.transmission.taaJitterDepthBiasConstant)) {
+    return -8.0f;
+  }
+  return std::clamp(settings.transmission.taaJitterDepthBiasConstant, -64.0f,
+                    0.0f);
+}
+
+[[nodiscard]] bool transmissionUsesJitteredPostTaaDepthBias(
+    const RenderFrameContext &frame, const RenderSettings &settings,
+    uint64_t frameDataAddress, const ForwardSceneGpuData &sceneGpu) noexcept {
+  return frame.camera.jitterEnabled &&
+         sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
+             AntiAliasingMode::TAA &&
+         frameDataAddress != 0u && sceneGpu.postTaaFrameDataAddress != 0u &&
+         frameDataAddress == sceneGpu.postTaaFrameDataAddress &&
+         sceneGpu.postTaaFrameDataAddress != sceneGpu.frameDataAddress;
 }
 
 void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
@@ -285,9 +349,18 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       frame.sharedResources.sceneColorQuarterResTexture;
   const TextureHandle frameColorTexture =
       frame.sharedResources.frameColorTexture;
-  const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
+  const bool stableVisibilityDepth =
+      nuri::isValid(frame.sharedResources.transmissionVisibilityDepthTexture);
+  const TextureHandle depthTexture =
+      stableVisibilityDepth
+          ? frame.sharedResources.transmissionVisibilityDepthTexture
+          : resolveFrameDepthTexture(frame);
   const RenderGraphTextureId sceneDepthGraphTexture =
-      resolveSceneDepthGraphTexture(frame);
+      stableVisibilityDepth
+          ? frame.sharedResources.transmissionVisibilityDepthGraphTexture
+          : resolveSceneDepthGraphTexture(frame);
+  frame.metrics.antiAliasing.taaTransmissionStableVisibilityDepth =
+      stableVisibilityDepth;
 
   const MaterialTableSnapshot materialSnapshot =
       frame.resources->materialSnapshot();
@@ -379,6 +452,19 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       &*frame.sharedResources.materialTableGpuData;
   const AnimationSceneFrameData *animationSceneData =
       resolveAnimationSceneFrameData(frame);
+  const uint64_t frameDataAddress = sceneGpu->postTaaFrameDataAddress != 0u
+                                        ? sceneGpu->postTaaFrameDataAddress
+                                        : sceneGpu->frameDataAddress;
+  const bool jitteredPostTaaDepthBias =
+      !stableVisibilityDepth && nuri::isValid(depthTexture) &&
+      transmissionUsesJitteredPostTaaDepthBias(frame, settings,
+                                               frameDataAddress, *sceneGpu);
+  const float jitterDepthBiasConstant =
+      jitteredPostTaaDepthBias
+          ? transmissionTaaJitterDepthBiasConstant(settings)
+          : 0.0f;
+  frame.metrics.antiAliasing.taaTransmissionDepthBiasConstant =
+      jitterDepthBiasConstant;
 
   const std::span<const Renderable> renderables = frame.scene->renderables();
   if (!meshDrawTemplates_.empty()) {
@@ -475,7 +561,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
 
     NURI_PROFILER_ZONE("TransmissionRenderer.mesh_draw_build",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    const uint64_t frameDataAddress = sceneGpu->frameDataAddress;
+    const float taaJitterMinLod = transmissionTaaJitterMinLod(frame, settings);
+    frame.metrics.antiAliasing.taaTransmissionJitterMinLod = taaJitterMinLod;
     const uint64_t directionalLightBufferAddress =
         sceneGpu->directionalLightBufferAddress;
     const uint64_t localLightBufferAddress = sceneGpu->localLightBufferAddress;
@@ -511,7 +598,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           "buffer is smaller than the renderable set");
     }
     const bool hasDepthAttachment =
-        nuri::isValid(depthTexture) || nuri::isValid(sceneDepthGraphTexture);
+        (nuri::isValid(depthTexture) || nuri::isValid(sceneDepthGraphTexture));
     constexpr uint32_t debugFlags = 0u;
     for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
       if (entry.renderable == nullptr || entry.submesh == nullptr) {
@@ -600,7 +687,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           .vertexDecodeIndex = vertexDecodeIndex,
           .packedVertexFormat = packedVertexFormat,
           .timeSeconds = static_cast<float>(frame.timeSeconds),
-          .tessMaxFactor = 1.0f,
+          .tessMaxFactor = taaJitterMinLod,
           .debugVisualizationMode = debugFlags,
       };
       constants.setTransmissionScale(transmissionScale);
@@ -617,10 +704,16 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       draw.instanceCount = 1u;
       draw.firstIndex = lod->indexOffset;
       draw.firstInstance = entry.instanceIndex;
+      draw.depthState = {.compareOp = CompareOp::LessEqual,
+                         .isDepthWriteEnabled = false};
       if (hasDepthAttachment) {
         draw.useDepthState = true;
         draw.depthState = {.compareOp = CompareOp::LessEqual,
                            .isDepthWriteEnabled = false};
+        if (jitteredPostTaaDepthBias && jitterDepthBiasConstant != 0.0f) {
+          draw.depthBiasEnable = true;
+          draw.depthBiasConstant = jitterDepthBiasConstant;
+        }
       }
       draw.pushConstants = std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&pc), sizeof(MeshPushConstants));
@@ -812,8 +905,19 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
                       .storeOp = StoreOp::Store,
                       .clearDepth = 1.0f,
                       .clearStencil = 0u};
-    if (nuri::isValid(preparedSceneDepthGraphTexture_)) {
-      passDesc.depthTexture = preparedSceneDepthGraphTexture_;
+    RenderGraphTextureId depthGraphTexture = preparedSceneDepthGraphTexture_;
+    if (nuri::isValid(
+            frame.sharedResources.transmissionVisibilityDepthGraphTexture) &&
+        nuri::isValid(
+            frame.sharedResources.transmissionVisibilityDepthTexture) &&
+        isSameTextureHandle(
+            preparedDepthTexture_,
+            frame.sharedResources.transmissionVisibilityDepthTexture)) {
+      depthGraphTexture =
+          frame.sharedResources.transmissionVisibilityDepthGraphTexture;
+    }
+    if (nuri::isValid(depthGraphTexture)) {
+      passDesc.depthTexture = depthGraphTexture;
     } else {
       auto depthImportResult = graph.importTexture(preparedDepthTexture_,
                                                    "transmission_scene_depth");

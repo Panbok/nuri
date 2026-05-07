@@ -81,10 +81,13 @@ enum class AntiAliasingDebugView : uint8_t {
   TAAHistoryFilterDelta = 23,
   TAADisocclusionFallback = 24,
   TAASplitCompare = 25,
-  SpatialAAEdges = 26,
-  SpatialAABlendWeights = 27,
-  SpatialAACleanupMask = 28,
-  SpatialAASplitCompare = 29,
+  TAATemporalConfidence = 26,
+  TAAPreviousDepthRejection = 27,
+  TAAStabilityDiagnostics = 28,
+  SpatialAAEdges = 29,
+  SpatialAABlendWeights = 30,
+  SpatialAACleanupMask = 31,
+  SpatialAASplitCompare = 32,
 };
 
 enum class AmbientOcclusionMode : uint8_t {
@@ -120,12 +123,16 @@ enum class TemporalAAClampMode : uint8_t {
   Clamp = 0,
   Clip = 1,
   Variance = 2,
+  ClampYCoCg = 3,
+  ClipYCoCg = 4,
+  VarianceYCoCg = 5,
 };
 
 enum class TemporalAAHdrWeightingMode : uint8_t {
   None = 0,
   Luminance = 1,
   LogLuminance = 2,
+  ToneMapped = 3,
 };
 
 enum class TemporalAAVelocityDilationMode : uint8_t {
@@ -384,6 +391,9 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   case AntiAliasingDebugView::SpatialAABlendWeights:
   case AntiAliasingDebugView::SpatialAACleanupMask:
   case AntiAliasingDebugView::SpatialAASplitCompare:
+  case AntiAliasingDebugView::TAATemporalConfidence:
+  case AntiAliasingDebugView::TAAPreviousDepthRejection:
+  case AntiAliasingDebugView::TAAStabilityDiagnostics:
     return view;
   default:
     return AntiAliasingDebugView::None;
@@ -396,9 +406,12 @@ sanitizeTemporalAAClampMode(TemporalAAClampMode mode) noexcept {
   case TemporalAAClampMode::Clamp:
   case TemporalAAClampMode::Clip:
   case TemporalAAClampMode::Variance:
+  case TemporalAAClampMode::ClampYCoCg:
+  case TemporalAAClampMode::ClipYCoCg:
+  case TemporalAAClampMode::VarianceYCoCg:
     return mode;
   default:
-    return TemporalAAClampMode::Variance;
+    return TemporalAAClampMode::VarianceYCoCg;
   }
 }
 
@@ -408,6 +421,7 @@ sanitizeTemporalAAHdrWeightingMode(TemporalAAHdrWeightingMode mode) noexcept {
   case TemporalAAHdrWeightingMode::None:
   case TemporalAAHdrWeightingMode::Luminance:
   case TemporalAAHdrWeightingMode::LogLuminance:
+  case TemporalAAHdrWeightingMode::ToneMapped:
     return mode;
   default:
     return TemporalAAHdrWeightingMode::Luminance;
@@ -546,6 +560,9 @@ struct RenderSettings {
 
   struct TransmissionSettings {
     bool enabled = true;
+    bool taaJitterPrefilter = true;
+    float taaJitterPrefilterMaxLod = 1.0f;
+    float taaJitterDepthBiasConstant = -8.0f;
   };
 
   struct AmbientOcclusionSettings {
@@ -584,12 +601,18 @@ struct RenderSettings {
     bool logDiagnostics = false;
     bool spatialPostTaaCleanup = false;
     bool spatialPostMsaaCleanup = true;
+    bool taaSharpenEnabled = true;
+    bool taaMaterialMipBiasEnabled = false;
+    bool transparentPostTaaSpatialCleanup = true;
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
     float diagnosticLogIntervalSeconds = 0.25f;
     float taaJitterScale = 0.75f;
     float taaCurrentFrameWeight = 0.06f;
+    float taaSharpenStrength = 0.18f;
+    float taaSharpenConfidenceThreshold = 0.75f;
+    float taaMaterialMipBias = 0.0f;
     float taaDepthDiscontinuityThreshold = 0.01f;
-    float taaVelocityRejectionThreshold = 0.0015f;
+    float taaVelocityRejectionThreshold = 1.5f;
     float taaVelocityBlendScale = 0.35f;
     float taaMotionCurrentWeight = 0.35f;
     float taaDisocclusionCurrentWeight = 0.65f;
@@ -600,7 +623,7 @@ struct RenderSettings {
     float taaReactiveCurrentWeight = 0.85f;
     float taaReactiveStrength = 1.0f;
     float taaVelocityDilationDepthThreshold = 0.01f;
-    TemporalAAClampMode taaClampMode = TemporalAAClampMode::Variance;
+    TemporalAAClampMode taaClampMode = TemporalAAClampMode::VarianceYCoCg;
     TemporalAAHdrWeightingMode taaHdrWeightingMode =
         TemporalAAHdrWeightingMode::Luminance;
     TemporalAAVelocityDilationMode taaVelocityDilationMode =
@@ -732,6 +755,20 @@ inline void sanitizeToneMapSettings(RenderSettings::ToneMapSettings &settings) {
 }
 
 inline void
+sanitizeTransmissionSettings(RenderSettings::TransmissionSettings &settings) {
+  if (!std::isfinite(settings.taaJitterPrefilterMaxLod)) {
+    settings.taaJitterPrefilterMaxLod = 1.0f;
+  }
+  settings.taaJitterPrefilterMaxLod =
+      std::clamp(settings.taaJitterPrefilterMaxLod, 0.0f, 2.0f);
+  if (!std::isfinite(settings.taaJitterDepthBiasConstant)) {
+    settings.taaJitterDepthBiasConstant = -8.0f;
+  }
+  settings.taaJitterDepthBiasConstant =
+      std::clamp(settings.taaJitterDepthBiasConstant, -64.0f, 0.0f);
+}
+
+inline void
 sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.mode = sanitizeAntiAliasingMode(settings.mode);
   settings.debug.view = sanitizeAntiAliasingDebugView(settings.debug.view);
@@ -757,16 +794,31 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   }
   settings.debug.taaJitterScale =
       std::clamp(settings.debug.taaJitterScale, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaSharpenStrength)) {
+    settings.debug.taaSharpenStrength = 0.18f;
+  }
+  settings.debug.taaSharpenStrength =
+      std::clamp(settings.debug.taaSharpenStrength, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaSharpenConfidenceThreshold)) {
+    settings.debug.taaSharpenConfidenceThreshold = 0.75f;
+  }
+  settings.debug.taaSharpenConfidenceThreshold =
+      std::clamp(settings.debug.taaSharpenConfidenceThreshold, 0.0f, 1.0f);
+  if (!std::isfinite(settings.debug.taaMaterialMipBias)) {
+    settings.debug.taaMaterialMipBias = 0.0f;
+  }
+  settings.debug.taaMaterialMipBias =
+      std::clamp(settings.debug.taaMaterialMipBias, -1.0f, 0.0f);
   if (!std::isfinite(settings.debug.taaDepthDiscontinuityThreshold)) {
     settings.debug.taaDepthDiscontinuityThreshold = 0.01f;
   }
   settings.debug.taaDepthDiscontinuityThreshold =
       std::clamp(settings.debug.taaDepthDiscontinuityThreshold, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaVelocityRejectionThreshold)) {
-    settings.debug.taaVelocityRejectionThreshold = 0.0015f;
+    settings.debug.taaVelocityRejectionThreshold = 1.5f;
   }
   settings.debug.taaVelocityRejectionThreshold =
-      std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f, 1.0f);
+      std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f, 64.0f);
   if (!std::isfinite(settings.debug.taaVelocityBlendScale)) {
     settings.debug.taaVelocityBlendScale = 0.35f;
   }
@@ -1601,7 +1653,7 @@ struct ForwardSceneFrameData {
   uint32_t localLightCount = 0;
   uint64_t shadowFrameBufferAddress = 0;
   uint32_t shadowFlags = 0;
-  uint32_t shadowReserved0 = 0;
+  uint32_t materialCoverageSamplerId = 0;
 
   [[nodiscard]] bool
   operator==(const ForwardSceneFrameData &other) const noexcept {
@@ -1633,6 +1685,8 @@ static_assert(offsetof(ForwardSceneFrameData, localLightCount) == 348u);
 static_assert(offsetof(ForwardSceneFrameData, shadowFrameBufferAddress) ==
               352u);
 static_assert(offsetof(ForwardSceneFrameData, shadowFlags) == 360u);
+static_assert(offsetof(ForwardSceneFrameData, materialCoverageSamplerId) ==
+              364u);
 
 // GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.
 // The CPU owns allocation and updates of ForwardSceneFrameData, then derives
@@ -1643,6 +1697,7 @@ static_assert(offsetof(ForwardSceneFrameData, shadowFlags) == 360u);
 struct ForwardSceneGpuData {
   BufferHandle buffer{};
   uint64_t frameDataAddress = 0;
+  uint64_t postTaaFrameDataAddress = 0;
   uint64_t directionalLightBufferAddress = 0;
   uint64_t localLightBufferAddress = 0;
   uint64_t shadowFrameBufferAddress = 0;
@@ -1781,6 +1836,7 @@ struct AntiAliasingFrameMetrics {
   uint32_t reactiveMaskPassCount = 0u;
   uint32_t reactiveMaskDrawCount = 0u;
   uint32_t reactiveAlphaMaskedDrawCount = 0u;
+  uint32_t reactiveMotionUncertainDrawCount = 0u;
   uint32_t reactiveSkippedTessellatedDrawCount = 0u;
   uint32_t taaResolvePassCount = 0u;
   uint32_t taaCopyBackPassCount = 0u;
@@ -1795,6 +1851,7 @@ struct AntiAliasingFrameMetrics {
   uint32_t taaTransparentPostTaaMeshDrawCount = 0u;
   uint32_t taaTransparentPostTaaContributorDrawCount = 0u;
   uint32_t taaTransparentPostTaaFixedDrawCount = 0u;
+  uint32_t taaTransparentPostSpatialAAPassCount = 0u;
   uint32_t taaOverlayPostTaaDrawCount = 0u;
   uint32_t taaOverlayHistoryContaminationFrameCount = 0u;
   uint32_t taaResolveWidth = 0u;
@@ -1835,6 +1892,7 @@ struct AntiAliasingFrameMetrics {
   uint64_t previousMotionVectorTextureBytes = 0u;
   uint64_t motionVectorTotalBytes = 0u;
   uint64_t motionVectorClearBytes = 0u;
+  uint64_t previousSceneDepthTextureBytes = 0u;
   uint64_t velocityPassBandwidthEstimateBytes = 0u;
   uint64_t velocityDebugBandwidthEstimateBytes = 0u;
   uint64_t reactiveMaskTextureBytes = 0u;
@@ -1864,8 +1922,11 @@ struct AntiAliasingFrameMetrics {
   float taaHistoryFrameWeight = 0.94f;
   float taaHistoryValidPercent = 0.0f;
   float taaOutOfBoundsReprojectionPercent = 0.0f;
+  float taaSharpenStrength = 0.18f;
+  float taaSharpenConfidenceThreshold = 0.75f;
+  float taaMaterialMipBias = 0.0f;
   float taaDepthDiscontinuityThreshold = 0.01f;
-  float taaVelocityRejectionThreshold = 0.0015f;
+  float taaVelocityRejectionThreshold = 1.5f;
   float taaVelocityBlendScale = 0.35f;
   float taaMotionCurrentWeight = 0.35f;
   float taaDisocclusionCurrentWeight = 0.65f;
@@ -1885,12 +1946,14 @@ struct AntiAliasingFrameMetrics {
   float taaSceneColorDownsampleGpuTimeMs = 0.0f;
   float taaTransmissionGpuTimeMs = 0.0f;
   float taaTransmissionFlickerEstimate = 0.0f;
+  float taaTransmissionJitterMinLod = 0.0f;
+  float taaTransmissionDepthBiasConstant = 0.0f;
   float taaTransparentEdgeJitterEstimate = 0.0f;
   float spatialAAGpuTimeMs = 0.0f;
   float msaaResolveGpuTimeMs = 0.0f;
   float spatialAAEdgePixelEstimate = 0.0f;
   float spatialAAModifiedPixelEstimate = 0.0f;
-  TemporalAAClampMode taaClampMode = TemporalAAClampMode::Variance;
+  TemporalAAClampMode taaClampMode = TemporalAAClampMode::VarianceYCoCg;
   TemporalAAHdrWeightingMode taaHdrWeightingMode =
       TemporalAAHdrWeightingMode::Luminance;
   TemporalAAVelocityDilationMode taaVelocityDilationMode =
@@ -1908,8 +1971,10 @@ struct AntiAliasingFrameMetrics {
   bool motionVectorAllocated = false;
   bool motionVectorFormatSupported = false;
   bool previousMotionVectorValid = false;
+  bool previousSceneDepthValid = false;
   bool motionVectorGraphPublished = false;
   bool previousMotionVectorGraphPublished = false;
+  bool previousSceneDepthGraphPublished = false;
   bool reactiveMaskAllocated = false;
   bool reactiveMaskGraphPublished = false;
   bool reactiveMaskFormatSupported = false;
@@ -1918,10 +1983,15 @@ struct AntiAliasingFrameMetrics {
   bool previousTransformCacheValid = false;
   bool taaResolvedSceneColorPublished = false;
   bool taaDebugViewRendered = false;
+  bool taaSharpenEnabled = false;
+  bool taaSharpenActive = false;
+  bool taaMaterialMipBiasEnabled = false;
+  bool taaMaterialMipBiasApplied = false;
   bool taaHistoryValidityDebugViewRendered = false;
   bool taaOutOfBoundsFallbackEnabled = false;
   bool taaBilinearHistorySampling = false;
   bool taaDepthRejectionEnabled = false;
+  bool taaPreviousDepthRejectionEnabled = false;
   bool taaVelocityRejectionEnabled = false;
   bool taaPreviousVelocityDisocclusionEnabled = false;
   bool taaNeighborhoodClampEnabled = false;
@@ -1940,11 +2010,16 @@ struct AntiAliasingFrameMetrics {
   bool taaHistoryFilterDeltaDebugViewRendered = false;
   bool taaDisocclusionFallbackDebugViewRendered = false;
   bool taaSplitCompareDebugViewRendered = false;
+  bool taaTemporalConfidenceDebugViewRendered = false;
+  bool taaPreviousDepthRejectionDebugViewRendered = false;
   bool taaPostResolveSceneColorMipChainGenerated = false;
   bool taaTransmissionPostResolveSceneColorConsumed = false;
+  bool taaTransmissionStableVisibilityDepth = false;
   bool taaSceneColorMipDebugViewRendered = false;
   bool taaTransmissionMipDebugViewRendered = false;
   bool taaTransparentEdgeJitterTracked = false;
+  bool taaTransparentPostSpatialCleanupEnabled = false;
+  bool taaTransparentPostSpatialCleanupActive = false;
   bool spatialAAEnabled = false;
   bool spatialAAFallbackActive = false;
   bool spatialAACleanupActive = false;
@@ -1963,6 +2038,8 @@ struct AntiAliasingFrameMetrics {
   bool spatialAABlendWeightsDebugViewRendered = false;
   bool spatialAACleanupMaskDebugViewRendered = false;
   bool spatialAASplitCompareDebugViewRendered = false;
+  bool taaStabilityDiagnosticsDebugViewRendered = false;
+  bool taaStaticFrameVelocitySanitizationEnabled = false;
 };
 
 struct AmbientOcclusionFrameMetrics {
@@ -2147,7 +2224,11 @@ struct FrameSharedResources {
   FrameTextureRequirementFlags textureRequirements =
       kBaselineFrameTextureRequirements;
   TextureHandle sceneDepthTexture{};
+  TextureHandle previousSceneDepthTexture{};
+  TextureHandle transmissionVisibilityDepthTexture{};
   RenderGraphTextureId sceneDepthGraphTexture{};
+  RenderGraphTextureId previousSceneDepthGraphTexture{};
+  RenderGraphTextureId transmissionVisibilityDepthGraphTexture{};
   TextureHandle msaaSceneDepthTexture{};
   RenderGraphTextureId msaaSceneDepthGraphTexture{};
   TextureHandle normalTexture{};
@@ -2286,6 +2367,14 @@ resolveFrameDepthTexture(const RenderFrameContext &frame) {
     return frame.sharedResources.sceneDepthTexture;
   }
   return frame.sharedDepthTexture;
+}
+
+[[nodiscard]] inline TextureHandle
+resolvePreviousSceneDepthTexture(const RenderFrameContext &frame) {
+  if (nuri::isValid(frame.sharedResources.previousSceneDepthTexture)) {
+    return frame.sharedResources.previousSceneDepthTexture;
+  }
+  return {};
 }
 
 [[nodiscard]] inline TextureHandle

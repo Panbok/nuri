@@ -78,7 +78,9 @@ private:
     float tessNearDistance = 1.0f;
     float tessFarDistance = 8.0f;
     float tessMinFactor = 1.0f;
-    float tessMaxFactor = 1.0f;
+    // Transmission fragment shading aliases this tessellation slot as the
+    // minimum scene-color pyramid LOD used to stabilize post-TAA refraction.
+    float tessMaxFactor = 0.0f;
     uint32_t debugVisualizationMode = 0;
     uint32_t shadowCascadeIndex = 0;
 

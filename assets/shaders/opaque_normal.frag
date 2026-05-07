@@ -15,7 +15,8 @@ void main() {
 
   vec4 baseColor = material.header.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {
-    baseColor *= textureBindless2D(baseColorTexId, matSampler, baseColorUv);
+    baseColor *= textureBindless2D(
+        baseColorTexId, pc.frameData.materialCoverageSamplerId, baseColorUv);
   }
 
   const uint alphaMode = materialAlphaMode(material);

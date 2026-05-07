@@ -252,6 +252,7 @@ private:
     bool isMainPass = false;
     bool isPickPass = false;
     bool isDepthPrepass = false;
+    bool isTransmissionVisibilityDepthPass = false;
     bool isNormalPrepass = false;
     bool isDepthPyramidPass = false;
     bool isVelocityPass = false;
@@ -348,6 +349,9 @@ private:
                     std::pmr::vector<PreparedGraphPass> &out);
   Result<bool, std::string> ensureDepthPyramidTextures();
   [[nodiscard]] bool requiresDepthPyramid(const RenderSettings &settings) const;
+  [[nodiscard]] bool
+  shouldBuildTransmissionVisibilityDepth(const RenderFrameContext &frame,
+                                         const RenderSettings &settings) const;
   Result<bool, std::string> appendPreparedGraphPass(
       RenderFrameContext &frame, RenderGraphBuilder &graph,
       const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight,
@@ -399,6 +403,9 @@ private:
   void destroyMeshPipelineState();
   void resetMeshPipelineState();
   void destroyDepthPyramidTextures();
+  Result<bool, std::string>
+  ensureTransmissionVisibilityDepthTexture(TextureHandle sceneDepthTexture);
+  void destroyTransmissionVisibilityDepthTexture();
   void destroyPickTexture();
   Result<bool, std::string> recreateShadowInspectTexture();
   void destroyShadowInspectTexture();
@@ -430,6 +437,7 @@ private:
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
   TextureHandle pickIdTexture_{};
   TextureHandle shadowInspectTexture_{};
+  TextureHandle transmissionVisibilityDepthTexture_{};
   std::array<TextureHandle, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidTextures_{};
   uint32_t sceneDepthPyramidLevelCount_ = 0;
@@ -449,6 +457,7 @@ private:
   ShaderHandle meshShadowInspectFragmentShader_{};
   ShaderHandle meshVelocityVertexShader_{};
   ShaderHandle meshVelocityFragmentShader_{};
+  ShaderHandle meshReactiveMaskVertexShader_{};
   ShaderHandle meshReactiveMaskFragmentShader_{};
   ShaderHandle meshNormalFragmentShader_{};
   ShaderHandle depthFragmentShader_{};
@@ -536,6 +545,7 @@ private:
   bool loggedGsOverlayUnsupported_ = false;
   bool loggedGsTessOverlayUnsupported_ = false;
   bool loggedDepthPrepassUnsupported_ = false;
+  bool loggedTransmissionVisibilityDepthUnsupported_ = false;
   bool loggedNormalPrepassUnsupported_ = false;
   bool loggedDepthPyramidUnsupported_ = false;
   bool loggedMaterialFallbackWarning_ = false;
@@ -606,6 +616,7 @@ private:
   std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<DrawItem> msaaPassDrawItems_;
   std::pmr::vector<DrawItem> depthPrepassDrawItems_;
+  std::pmr::vector<DrawItem> transmissionVisibilityDepthDrawItems_;
   std::pmr::vector<DrawItem> normalPrepassDrawItems_;
   std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
   std::pmr::vector<DrawItem> depthPyramidDrawItems_;
@@ -631,9 +642,13 @@ private:
   std::pmr::vector<BufferHandle> velocityPassDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode>
       velocityPassDependencyBufferAccessModes_;
+  std::pmr::vector<BufferHandle> reactivePassDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode>
+      reactivePassDependencyBufferAccessModes_;
   std::pmr::unordered_map<RenderableId, glm::mat4> previousTransformById_;
   std::pmr::vector<InstanceData> previousInstanceMatricesCpuCache_;
   std::pmr::vector<uint32_t> velocityInstanceFlagsCpuCache_;
+  std::pmr::vector<PushConstants> transmissionVisibilityDepthPushConstants_;
   std::pmr::vector<PreparedGraphPass> preparedGraphPasses_;
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};

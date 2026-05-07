@@ -52,6 +52,10 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   const uint featureMask = materialFeatureMask(material);
   const uint workflow = materialWorkflow(material);
   const uint matSampler = pc.frameData.materialSamplerId;
+  const uint alphaMode = materialAlphaMode(material);
+  const uint baseColorSampler =
+      alphaMode == kAlphaModeMask ? pc.frameData.materialCoverageSamplerId
+                                  : matSampler;
 
   const uint baseColorTexId =
       getMaterialTextureIndex(material, kMaterialTextureSlotBaseColor);
@@ -104,7 +108,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
 
   sm.baseColor = material.header.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {
-    sm.baseColor *= textureBindless2D(baseColorTexId, matSampler, uvBaseColor);
+    sm.baseColor *=
+        textureBindless2D(baseColorTexId, baseColorSampler, uvBaseColor);
   }
 
   vec4 mrSample = vec4(1.0);

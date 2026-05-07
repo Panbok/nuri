@@ -249,7 +249,7 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint localLightCount;
   ShadowFrameBuffer shadowFrameBuffer;
   uint shadowFlags;
-  uint shadowReserved0;
+  uint materialCoverageSamplerId;
 };
 
 uint getAmbientOcclusionDebugView(FrameDataBuffer frameData) {
