@@ -885,10 +885,11 @@ DebugRenderer::appendDebugGridPass(RenderFrameContext &frame,
     return Result<bool, std::string>::makeError(addResult.error());
   }
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
-  if (aaMetrics.taaResolvedSceneColorPublished) {
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  if (aaMetrics.taaResolvedSceneColorPublished ||
+      isTemporalAAResolvedSceneColorOutput(settings.antiAliasing)) {
     ++aaMetrics.taaOverlayPostTaaDrawCount;
-  } else if (sanitizeAntiAliasingMode(
-                 renderSettingsOrDefault(frame).antiAliasing.mode) ==
+  } else if (sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
              AntiAliasingMode::TAA) {
     ++aaMetrics.taaOverlayHistoryContaminationFrameCount;
   }
@@ -950,11 +951,12 @@ DebugRenderer::appendDebugSceneOverlayPass(RenderFrameContext &frame,
     return Result<bool, std::string>::makeError(addResult.error());
   }
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
-  if (aaMetrics.taaResolvedSceneColorPublished) {
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  if (aaMetrics.taaResolvedSceneColorPublished ||
+      isTemporalAAResolvedSceneColorOutput(settings.antiAliasing)) {
     aaMetrics.taaOverlayPostTaaDrawCount +=
         saturateDebugDrawCount(pass.desc.draws.size());
-  } else if (sanitizeAntiAliasingMode(
-                 renderSettingsOrDefault(frame).antiAliasing.mode) ==
+  } else if (sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
              AntiAliasingMode::TAA) {
     ++aaMetrics.taaOverlayHistoryContaminationFrameCount;
   }

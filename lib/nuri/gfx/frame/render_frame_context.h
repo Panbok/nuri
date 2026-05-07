@@ -84,10 +84,13 @@ enum class AntiAliasingDebugView : uint8_t {
   TAATemporalConfidence = 26,
   TAAPreviousDepthRejection = 27,
   TAAStabilityDiagnostics = 28,
-  SpatialAAEdges = 29,
-  SpatialAABlendWeights = 30,
-  SpatialAACleanupMask = 31,
-  SpatialAASplitCompare = 32,
+  TAAStabilityOwnership = 29,
+  TAAPatchProbe = 30,
+  TAAMotionFilter = 31,
+  SpatialAAEdges = 32,
+  SpatialAABlendWeights = 33,
+  SpatialAACleanupMask = 34,
+  SpatialAASplitCompare = 35,
 };
 
 enum class AmbientOcclusionMode : uint8_t {
@@ -144,6 +147,14 @@ enum class TemporalAAVelocityDilationMode : uint8_t {
 enum class TemporalAAHistoryFilterMode : uint8_t {
   CatmullRom = 0,
   Bilinear = 1,
+};
+
+enum class TemporalAAQualityPreset : uint8_t {
+  Performance = 0,
+  Balanced = 1,
+  Quality = 2,
+  Ultra = 3,
+  Custom = 4,
 };
 
 enum class TemporalHistoryResetReason : uint8_t {
@@ -394,6 +405,9 @@ sanitizeAntiAliasingDebugView(AntiAliasingDebugView view) noexcept {
   case AntiAliasingDebugView::TAATemporalConfidence:
   case AntiAliasingDebugView::TAAPreviousDepthRejection:
   case AntiAliasingDebugView::TAAStabilityDiagnostics:
+  case AntiAliasingDebugView::TAAStabilityOwnership:
+  case AntiAliasingDebugView::TAAPatchProbe:
+  case AntiAliasingDebugView::TAAMotionFilter:
     return view;
   default:
     return AntiAliasingDebugView::None;
@@ -449,6 +463,20 @@ sanitizeTemporalAAHistoryFilterMode(TemporalAAHistoryFilterMode mode) noexcept {
     return mode;
   default:
     return TemporalAAHistoryFilterMode::CatmullRom;
+  }
+}
+
+[[nodiscard]] constexpr TemporalAAQualityPreset
+sanitizeTemporalAAQualityPreset(TemporalAAQualityPreset preset) noexcept {
+  switch (preset) {
+  case TemporalAAQualityPreset::Performance:
+  case TemporalAAQualityPreset::Balanced:
+  case TemporalAAQualityPreset::Quality:
+  case TemporalAAQualityPreset::Ultra:
+  case TemporalAAQualityPreset::Custom:
+    return preset;
+  default:
+    return TemporalAAQualityPreset::Quality;
   }
 }
 
@@ -599,7 +627,7 @@ struct RenderSettings {
     bool freezeJitter = false;
     bool resetHistoryRequested = false;
     bool logDiagnostics = false;
-    bool spatialPostTaaCleanup = false;
+    bool spatialPostTaaCleanup = true;
     bool spatialPostMsaaCleanup = true;
     bool taaSharpenEnabled = true;
     bool taaMaterialMipBiasEnabled = false;
@@ -607,18 +635,18 @@ struct RenderSettings {
     AntiAliasingDebugView view = AntiAliasingDebugView::None;
     float diagnosticLogIntervalSeconds = 0.25f;
     float taaJitterScale = 0.75f;
-    float taaCurrentFrameWeight = 0.06f;
-    float taaSharpenStrength = 0.18f;
-    float taaSharpenConfidenceThreshold = 0.75f;
+    float taaCurrentFrameWeight = 0.045f;
+    float taaSharpenStrength = 0.14f;
+    float taaSharpenConfidenceThreshold = 0.82f;
     float taaMaterialMipBias = 0.0f;
     float taaDepthDiscontinuityThreshold = 0.01f;
     float taaVelocityRejectionThreshold = 1.5f;
-    float taaVelocityBlendScale = 0.35f;
-    float taaMotionCurrentWeight = 0.35f;
-    float taaDisocclusionCurrentWeight = 0.65f;
-    float taaClampCurrentWeight = 0.50f;
+    float taaVelocityBlendScale = 0.22f;
+    float taaMotionCurrentWeight = 0.22f;
+    float taaDisocclusionCurrentWeight = 0.62f;
+    float taaClampCurrentWeight = 0.38f;
     float taaClampBlendAttenuation = 0.35f;
-    float taaVarianceGamma = 1.50f;
+    float taaVarianceGamma = 1.85f;
     float taaHdrWeightStrength = 0.50f;
     float taaReactiveCurrentWeight = 0.85f;
     float taaReactiveStrength = 1.0f;
@@ -634,6 +662,7 @@ struct RenderSettings {
 
   struct AntiAliasingSettings {
     AntiAliasingMode mode = AntiAliasingMode::None;
+    TemporalAAQualityPreset qualityPreset = TemporalAAQualityPreset::Quality;
     AntiAliasingDebugSettings debug{};
   };
 
@@ -771,6 +800,8 @@ sanitizeTransmissionSettings(RenderSettings::TransmissionSettings &settings) {
 inline void
 sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.mode = sanitizeAntiAliasingMode(settings.mode);
+  settings.qualityPreset =
+      sanitizeTemporalAAQualityPreset(settings.qualityPreset);
   settings.debug.view = sanitizeAntiAliasingDebugView(settings.debug.view);
   settings.debug.taaClampMode =
       sanitizeTemporalAAClampMode(settings.debug.taaClampMode);
@@ -780,7 +811,7 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
       sanitizeTemporalAAVelocityDilationMode(
           settings.debug.taaVelocityDilationMode);
   if (!std::isfinite(settings.debug.taaCurrentFrameWeight)) {
-    settings.debug.taaCurrentFrameWeight = 0.06f;
+    settings.debug.taaCurrentFrameWeight = 0.045f;
   }
   settings.debug.taaCurrentFrameWeight =
       std::clamp(settings.debug.taaCurrentFrameWeight, 0.0f, 1.0f);
@@ -795,12 +826,12 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.debug.taaJitterScale =
       std::clamp(settings.debug.taaJitterScale, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaSharpenStrength)) {
-    settings.debug.taaSharpenStrength = 0.18f;
+    settings.debug.taaSharpenStrength = 0.14f;
   }
   settings.debug.taaSharpenStrength =
       std::clamp(settings.debug.taaSharpenStrength, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaSharpenConfidenceThreshold)) {
-    settings.debug.taaSharpenConfidenceThreshold = 0.75f;
+    settings.debug.taaSharpenConfidenceThreshold = 0.82f;
   }
   settings.debug.taaSharpenConfidenceThreshold =
       std::clamp(settings.debug.taaSharpenConfidenceThreshold, 0.0f, 1.0f);
@@ -820,22 +851,22 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.debug.taaVelocityRejectionThreshold =
       std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f, 64.0f);
   if (!std::isfinite(settings.debug.taaVelocityBlendScale)) {
-    settings.debug.taaVelocityBlendScale = 0.35f;
+    settings.debug.taaVelocityBlendScale = 0.22f;
   }
   settings.debug.taaVelocityBlendScale =
       std::clamp(settings.debug.taaVelocityBlendScale, 0.0f, 4.0f);
   if (!std::isfinite(settings.debug.taaMotionCurrentWeight)) {
-    settings.debug.taaMotionCurrentWeight = 0.35f;
+    settings.debug.taaMotionCurrentWeight = 0.22f;
   }
   settings.debug.taaMotionCurrentWeight =
       std::clamp(settings.debug.taaMotionCurrentWeight, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaDisocclusionCurrentWeight)) {
-    settings.debug.taaDisocclusionCurrentWeight = 0.65f;
+    settings.debug.taaDisocclusionCurrentWeight = 0.62f;
   }
   settings.debug.taaDisocclusionCurrentWeight =
       std::clamp(settings.debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaClampCurrentWeight)) {
-    settings.debug.taaClampCurrentWeight = 0.50f;
+    settings.debug.taaClampCurrentWeight = 0.38f;
   }
   settings.debug.taaClampCurrentWeight =
       std::clamp(settings.debug.taaClampCurrentWeight, 0.0f, 1.0f);
@@ -845,7 +876,7 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
   settings.debug.taaClampBlendAttenuation =
       std::clamp(settings.debug.taaClampBlendAttenuation, 0.0f, 1.0f);
   if (!std::isfinite(settings.debug.taaVarianceGamma)) {
-    settings.debug.taaVarianceGamma = 1.50f;
+    settings.debug.taaVarianceGamma = 1.85f;
   }
   settings.debug.taaVarianceGamma =
       std::clamp(settings.debug.taaVarianceGamma, 0.0f, 4.0f);
@@ -875,6 +906,151 @@ sanitizeAntiAliasingSettings(RenderSettings::AntiAliasingSettings &settings) {
     settings.debug.jitterEnabled = false;
     settings.debug.freezeJitter = false;
   }
+}
+
+inline void copyTemporalAAPresetTuning(
+    RenderSettings::AntiAliasingDebugSettings &dst,
+    const RenderSettings::AntiAliasingDebugSettings &src) {
+  dst.spatialPostTaaCleanup = src.spatialPostTaaCleanup;
+  dst.taaSharpenEnabled = src.taaSharpenEnabled;
+  dst.taaMaterialMipBiasEnabled = src.taaMaterialMipBiasEnabled;
+  dst.transparentPostTaaSpatialCleanup = src.transparentPostTaaSpatialCleanup;
+  dst.taaJitterScale = src.taaJitterScale;
+  dst.taaCurrentFrameWeight = src.taaCurrentFrameWeight;
+  dst.taaSharpenStrength = src.taaSharpenStrength;
+  dst.taaSharpenConfidenceThreshold = src.taaSharpenConfidenceThreshold;
+  dst.taaMaterialMipBias = src.taaMaterialMipBias;
+  dst.taaDepthDiscontinuityThreshold = src.taaDepthDiscontinuityThreshold;
+  dst.taaVelocityRejectionThreshold = src.taaVelocityRejectionThreshold;
+  dst.taaVelocityBlendScale = src.taaVelocityBlendScale;
+  dst.taaMotionCurrentWeight = src.taaMotionCurrentWeight;
+  dst.taaDisocclusionCurrentWeight = src.taaDisocclusionCurrentWeight;
+  dst.taaClampCurrentWeight = src.taaClampCurrentWeight;
+  dst.taaClampBlendAttenuation = src.taaClampBlendAttenuation;
+  dst.taaVarianceGamma = src.taaVarianceGamma;
+  dst.taaHdrWeightStrength = src.taaHdrWeightStrength;
+  dst.taaReactiveCurrentWeight = src.taaReactiveCurrentWeight;
+  dst.taaReactiveStrength = src.taaReactiveStrength;
+  dst.taaVelocityDilationDepthThreshold = src.taaVelocityDilationDepthThreshold;
+  dst.taaClampMode = src.taaClampMode;
+  dst.taaHdrWeightingMode = src.taaHdrWeightingMode;
+  dst.taaVelocityDilationMode = src.taaVelocityDilationMode;
+  dst.taaHistoryFilterMode = src.taaHistoryFilterMode;
+}
+
+[[nodiscard]] inline RenderSettings::AntiAliasingDebugSettings
+temporalAAQualityPresetDebugSettings(TemporalAAQualityPreset preset) {
+  RenderSettings::AntiAliasingDebugSettings debug{};
+  debug.spatialPostTaaCleanup = true;
+  debug.transparentPostTaaSpatialCleanup = true;
+  debug.taaClampMode = TemporalAAClampMode::VarianceYCoCg;
+  debug.taaHdrWeightingMode = TemporalAAHdrWeightingMode::Luminance;
+  debug.taaVelocityDilationMode = TemporalAAVelocityDilationMode::ClosestDepth;
+  debug.taaHistoryFilterMode = TemporalAAHistoryFilterMode::CatmullRom;
+
+  switch (sanitizeTemporalAAQualityPreset(preset)) {
+  case TemporalAAQualityPreset::Performance:
+    debug.taaJitterScale = 0.60f;
+    debug.taaCurrentFrameWeight = 0.075f;
+    debug.taaMotionCurrentWeight = 0.30f;
+    debug.taaDisocclusionCurrentWeight = 0.68f;
+    debug.taaClampCurrentWeight = 0.48f;
+    debug.taaVelocityBlendScale = 0.34f;
+    debug.taaVarianceGamma = 1.35f;
+    debug.taaSharpenStrength = 0.18f;
+    debug.taaSharpenConfidenceThreshold = 0.74f;
+    debug.taaHistoryFilterMode = TemporalAAHistoryFilterMode::Bilinear;
+    break;
+  case TemporalAAQualityPreset::Balanced:
+    debug.taaJitterScale = 0.70f;
+    debug.taaCurrentFrameWeight = 0.055f;
+    debug.taaMotionCurrentWeight = 0.27f;
+    debug.taaDisocclusionCurrentWeight = 0.64f;
+    debug.taaClampCurrentWeight = 0.43f;
+    debug.taaVelocityBlendScale = 0.28f;
+    debug.taaVarianceGamma = 1.60f;
+    debug.taaSharpenStrength = 0.16f;
+    debug.taaSharpenConfidenceThreshold = 0.78f;
+    break;
+  case TemporalAAQualityPreset::Quality:
+  case TemporalAAQualityPreset::Custom:
+    debug.taaJitterScale = 0.75f;
+    debug.taaCurrentFrameWeight = 0.045f;
+    debug.taaMotionCurrentWeight = 0.22f;
+    debug.taaDisocclusionCurrentWeight = 0.62f;
+    debug.taaClampCurrentWeight = 0.38f;
+    debug.taaVelocityBlendScale = 0.22f;
+    debug.taaVarianceGamma = 1.85f;
+    debug.taaSharpenStrength = 0.14f;
+    debug.taaSharpenConfidenceThreshold = 0.82f;
+    break;
+  case TemporalAAQualityPreset::Ultra:
+    debug.taaJitterScale = 0.75f;
+    debug.taaCurrentFrameWeight = 0.035f;
+    debug.taaMotionCurrentWeight = 0.18f;
+    debug.taaDisocclusionCurrentWeight = 0.58f;
+    debug.taaClampCurrentWeight = 0.32f;
+    debug.taaVelocityBlendScale = 0.18f;
+    debug.taaVarianceGamma = 2.15f;
+    debug.taaSharpenStrength = 0.10f;
+    debug.taaSharpenConfidenceThreshold = 0.88f;
+    break;
+  }
+
+  RenderSettings::AntiAliasingSettings settings{
+      .mode = AntiAliasingMode::TAA,
+      .qualityPreset = TemporalAAQualityPreset::Custom,
+      .debug = debug,
+  };
+  sanitizeAntiAliasingSettings(settings);
+  return settings.debug;
+}
+
+[[nodiscard]] inline RenderSettings::AntiAliasingDebugSettings
+effectiveTemporalAADebugSettings(
+    const RenderSettings::AntiAliasingSettings &settings) {
+  RenderSettings::AntiAliasingSettings sanitized = settings;
+  sanitizeAntiAliasingSettings(sanitized);
+  RenderSettings::AntiAliasingDebugSettings effective = sanitized.debug;
+  const TemporalAAQualityPreset preset =
+      sanitizeTemporalAAQualityPreset(sanitized.qualityPreset);
+  if (preset != TemporalAAQualityPreset::Custom) {
+    const RenderSettings::AntiAliasingDebugSettings presetDebug =
+        temporalAAQualityPresetDebugSettings(preset);
+    copyTemporalAAPresetTuning(effective, presetDebug);
+  }
+  return effective;
+}
+
+[[nodiscard]] inline bool isTemporalAAResolvedSceneColorOutput(
+    const RenderSettings::AntiAliasingSettings &settings) {
+  if (sanitizeAntiAliasingMode(settings.mode) != AntiAliasingMode::TAA) {
+    return false;
+  }
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings);
+  const AntiAliasingDebugView debugView =
+      sanitizeAntiAliasingDebugView(aaDebug.view);
+  return debugView == AntiAliasingDebugView::None ||
+         debugView == AntiAliasingDebugView::TAAResolved ||
+         debugView == AntiAliasingDebugView::TAASceneColorHalfRes ||
+         debugView == AntiAliasingDebugView::TAASceneColorQuarterRes ||
+         debugView == AntiAliasingDebugView::TAATransmissionMipSource;
+}
+
+inline void copyTemporalAAQualityPresetToCustom(
+    RenderSettings::AntiAliasingSettings &settings) {
+  RenderSettings::AntiAliasingSettings sanitized = settings;
+  sanitizeAntiAliasingSettings(sanitized);
+  const TemporalAAQualityPreset preset =
+      sanitizeTemporalAAQualityPreset(sanitized.qualityPreset);
+  settings = sanitized;
+  if (preset != TemporalAAQualityPreset::Custom) {
+    const RenderSettings::AntiAliasingDebugSettings presetDebug =
+        temporalAAQualityPresetDebugSettings(preset);
+    copyTemporalAAPresetTuning(settings.debug, presetDebug);
+  }
+  settings.qualityPreset = TemporalAAQualityPreset::Custom;
 }
 
 [[nodiscard]] constexpr ShadowFilterMode
@@ -1342,17 +1518,18 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
   state.renderExtent = desc.renderExtent;
 
   const AntiAliasingMode mode = sanitizeAntiAliasingMode(antiAliasing.mode);
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(antiAliasing);
   const bool taaSelected = mode == AntiAliasingMode::TAA;
   const bool hasRenderExtent =
       desc.renderExtent.x > 0u && desc.renderExtent.y > 0u;
-  state.jitterEnabled =
-      taaSelected && antiAliasing.debug.jitterEnabled && hasRenderExtent;
-  state.jitterFrozen = state.jitterEnabled && antiAliasing.debug.freezeJitter;
+  state.jitterEnabled = taaSelected && aaDebug.jitterEnabled && hasRenderExtent;
+  state.jitterFrozen = state.jitterEnabled && aaDebug.freezeJitter;
 
   TemporalHistoryResetReason resetReason = TemporalHistoryResetReason::None;
   if (!history.initialized) {
     resetReason = TemporalHistoryResetReason::FirstFrame;
-  } else if (antiAliasing.debug.resetHistoryRequested) {
+  } else if (aaDebug.resetHistoryRequested) {
     resetReason = TemporalHistoryResetReason::HistoryResetRequested;
   } else if (history.previousAntiAliasingMode != mode) {
     resetReason = TemporalHistoryResetReason::AntiAliasingModeChanged;
@@ -1376,8 +1553,8 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
           history.nextJitterIndex % kTemporalJitterSequenceLength;
     }
     const float jitterScale =
-        std::isfinite(antiAliasing.debug.taaJitterScale)
-            ? std::clamp(antiAliasing.debug.taaJitterScale, 0.0f, 1.0f)
+        std::isfinite(aaDebug.taaJitterScale)
+            ? std::clamp(aaDebug.taaJitterScale, 0.0f, 1.0f)
             : 0.75f;
     state.jitterPixelOffset =
         temporalJitterPixelOffset(state.jitterIndex) * jitterScale;
@@ -1918,21 +2095,21 @@ struct AntiAliasingFrameMetrics {
   float velocityMissingPreviousRatio = 0.0f;
   float velocityEdgeDiscontinuityEstimate = 0.0f;
   float taaJitterScale = 0.75f;
-  float taaCurrentFrameWeight = 0.06f;
-  float taaHistoryFrameWeight = 0.94f;
+  float taaCurrentFrameWeight = 0.045f;
+  float taaHistoryFrameWeight = 0.955f;
   float taaHistoryValidPercent = 0.0f;
   float taaOutOfBoundsReprojectionPercent = 0.0f;
-  float taaSharpenStrength = 0.18f;
-  float taaSharpenConfidenceThreshold = 0.75f;
+  float taaSharpenStrength = 0.14f;
+  float taaSharpenConfidenceThreshold = 0.82f;
   float taaMaterialMipBias = 0.0f;
   float taaDepthDiscontinuityThreshold = 0.01f;
   float taaVelocityRejectionThreshold = 1.5f;
-  float taaVelocityBlendScale = 0.35f;
-  float taaMotionCurrentWeight = 0.35f;
-  float taaDisocclusionCurrentWeight = 0.65f;
-  float taaClampCurrentWeight = 0.50f;
+  float taaVelocityBlendScale = 0.22f;
+  float taaMotionCurrentWeight = 0.22f;
+  float taaDisocclusionCurrentWeight = 0.62f;
+  float taaClampCurrentWeight = 0.38f;
   float taaClampBlendAttenuation = 0.35f;
-  float taaVarianceGamma = 1.50f;
+  float taaVarianceGamma = 1.85f;
   float taaHdrWeightStrength = 0.50f;
   float taaReactiveCurrentWeight = 0.85f;
   float taaReactiveStrength = 1.0f;
@@ -1960,6 +2137,7 @@ struct AntiAliasingFrameMetrics {
       TemporalAAVelocityDilationMode::ClosestDepth;
   TemporalAAHistoryFilterMode taaHistoryFilterMode =
       TemporalAAHistoryFilterMode::CatmullRom;
+  TemporalAAQualityPreset taaQualityPreset = TemporalAAQualityPreset::Quality;
   TemporalHistoryResetReason historyResetReason =
       TemporalHistoryResetReason::None;
   bool jitterEnabled = false;
@@ -2039,6 +2217,9 @@ struct AntiAliasingFrameMetrics {
   bool spatialAACleanupMaskDebugViewRendered = false;
   bool spatialAASplitCompareDebugViewRendered = false;
   bool taaStabilityDiagnosticsDebugViewRendered = false;
+  bool taaStabilityOwnershipDebugViewRendered = false;
+  bool taaPatchProbeDebugViewRendered = false;
+  bool taaMotionFilterDebugViewRendered = false;
   bool taaStaticFrameVelocitySanitizationEnabled = false;
 };
 

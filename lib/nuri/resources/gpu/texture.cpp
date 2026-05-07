@@ -8,6 +8,7 @@
 #include "nuri/resources/storage/mesh/mesh_cache_utils.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
 
+#include <cmath>
 #include <ktx.h>
 #include <stb_image.h>
 
@@ -62,6 +63,7 @@ constexpr uint32_t kDdsMagic = 0x20534444u;
 constexpr uint32_t kDdsFourCcDx10 = 0x30315844u;
 constexpr uint32_t kDxgiFormatBc7Unorm = 98u;
 constexpr uint32_t kDxgiFormatBc7Srgb = 99u;
+constexpr float kMaxFiniteHalf = 65504.0f;
 
 #pragma pack(push, 1)
 struct DdsPixelFormatHeader {
@@ -200,6 +202,13 @@ convertFloatBitmapToHalfBytes(std::span<const uint8_t> srcBytes) {
   for (size_t i = 0; i < floatCount; ++i) {
     float value = 0.0f;
     std::memcpy(&value, srcBytes.data() + (i * sizeof(float)), sizeof(float));
+    if (std::isnan(value)) {
+      value = 0.0f;
+    } else if (std::isinf(value)) {
+      value = std::signbit(value) ? 0.0f : kMaxFiniteHalf;
+    } else {
+      value = std::clamp(value, 0.0f, kMaxFiniteHalf);
+    }
     const uint16_t half = static_cast<uint16_t>(glm::packHalf1x16(value));
     std::memcpy(dstBytes.data() + (i * sizeof(uint16_t)), &half,
                 sizeof(uint16_t));

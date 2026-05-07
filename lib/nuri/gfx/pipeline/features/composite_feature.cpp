@@ -269,8 +269,11 @@ struct SceneResolveSource {
 
 [[nodiscard]] SceneResolveSource
 resolveSceneResolveSource(const FrameBuildContext &ctx) {
-  const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
-      renderSettingsOrDefault(ctx.frame).antiAliasing.debug.view);
+  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings.antiAliasing);
+  const AntiAliasingDebugView debugView =
+      sanitizeAntiAliasingDebugView(aaDebug.view);
   if (debugView == AntiAliasingDebugView::TAASceneColorHalfRes &&
       nuri::isValid(ctx.shared.sceneColorHalfResTexture)) {
     return {.texture = ctx.shared.sceneColorHalfResTexture,
@@ -282,6 +285,12 @@ resolveSceneResolveSource(const FrameBuildContext &ctx) {
             .debugView = debugView};
   }
   return {.texture = ctx.shared.sceneColorTexture, .debugView = debugView};
+}
+
+[[nodiscard]] bool isPostTaaSceneColorMipFrame(
+    const RenderFrameContext &frame) noexcept {
+  const RenderSettings &settings = renderSettingsOrDefault(frame);
+  return isTemporalAAResolvedSceneColorOutput(settings.antiAliasing);
 }
 
 Result<uint32_t, std::string> resolveLutBindlessIndex(GPUDevice &gpu,
@@ -426,7 +435,8 @@ SceneColorDownsamplePass::build(FrameBuildContext &ctx) {
     if (addResult.hasError()) {
       return addResult;
     }
-    if (aaMetrics.taaResolvedSceneColorPublished) {
+    if (aaMetrics.taaResolvedSceneColorPublished ||
+        isPostTaaSceneColorMipFrame(ctx.frame)) {
       ++aaMetrics.taaPostResolveSceneColorMipPassCount;
       aaMetrics.taaPostResolveSceneColorMipChainGenerated =
           aaMetrics.taaPostResolveSceneColorMipPassCount >=

@@ -17,7 +17,7 @@ constexpr std::string_view kTransmissionPassLabel = "Transmission Pass";
 constexpr std::string_view kTransmissionMeshLabel = "TransmissionMesh";
 constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
-constexpr float kDefaultTaaCurrentFrameWeight = 0.06f;
+constexpr float kDefaultTaaCurrentFrameWeight = 0.045f;
 
 [[nodiscard]] std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
@@ -28,6 +28,18 @@ resolveMemoryResource(std::pmr::memory_resource *memory) {
 settingsOrDefault(const RenderFrameContext &frame) {
   static const RenderSettings kDefaultSettings{};
   return frame.settings ? *frame.settings : kDefaultSettings;
+}
+
+[[nodiscard]] bool
+isAntiAliasingDebugOutputView(AntiAliasingDebugView view) noexcept {
+  return view != AntiAliasingDebugView::None &&
+         view != AntiAliasingDebugView::Settings;
+}
+
+[[nodiscard]] bool shouldSuppressTransmissionForAntiAliasingDebugView(
+    AntiAliasingDebugView view) noexcept {
+  return isAntiAliasingDebugOutputView(view) &&
+         view != AntiAliasingDebugView::TAATransmissionMipSource;
 }
 
 const AnimationSceneFrameData *
@@ -106,14 +118,14 @@ transmissionTaaJitterMinLod(const RenderFrameContext &frame,
     return 0.0f;
   }
 
-  const float jitterScale =
-      std::isfinite(settings.antiAliasing.debug.taaJitterScale)
-          ? std::clamp(settings.antiAliasing.debug.taaJitterScale, 0.0f, 1.0f)
-          : 0.75f;
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings.antiAliasing);
+  const float jitterScale = std::isfinite(aaDebug.taaJitterScale)
+                                ? std::clamp(aaDebug.taaJitterScale, 0.0f, 1.0f)
+                                : 0.75f;
   const float currentWeight =
-      std::isfinite(settings.antiAliasing.debug.taaCurrentFrameWeight)
-          ? std::clamp(settings.antiAliasing.debug.taaCurrentFrameWeight, 0.0f,
-                       1.0f)
+      std::isfinite(aaDebug.taaCurrentFrameWeight)
+          ? std::clamp(aaDebug.taaCurrentFrameWeight, 0.0f, 1.0f)
           : kDefaultTaaCurrentFrameWeight;
   const float maxLod =
       std::isfinite(settings.transmission.taaJitterPrefilterMaxLod)
@@ -802,6 +814,9 @@ TransmissionRenderer::appendTransmissionMainPass(RenderFrameContext &frame,
   const RenderSettings &settings = settingsOrDefault(frame);
   const AntiAliasingDebugView debugView =
       sanitizeAntiAliasingDebugView(settings.antiAliasing.debug.view);
+  if (shouldSuppressTransmissionForAntiAliasingDebugView(debugView)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
   const bool normalTaaResolve =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
           AntiAliasingMode::TAA &&

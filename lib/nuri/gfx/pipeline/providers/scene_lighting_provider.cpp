@@ -110,17 +110,17 @@ SceneLightingProvider::resolveMaterialSamplerId(RenderFrameContext &frame) {
   const bool mipFilteringActive = filterMode != TextureFilterMode::Bilinear;
   const bool taaMode = sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
                        AntiAliasingMode::TAA;
-  const float mipBias = sanitizeTaaMaterialMipBias(
-      settings.antiAliasing.debug.taaMaterialMipBias);
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings.antiAliasing);
+  const float mipBias = sanitizeTaaMaterialMipBias(aaDebug.taaMaterialMipBias);
 
   AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
-  aaMetrics.taaMaterialMipBiasEnabled =
-      settings.antiAliasing.debug.taaMaterialMipBiasEnabled;
+  aaMetrics.taaMaterialMipBiasEnabled = aaDebug.taaMaterialMipBiasEnabled;
   aaMetrics.taaMaterialMipBias = mipBias;
   aaMetrics.taaMaterialMipBiasApplied = false;
 
-  if (!taaMode || !settings.antiAliasing.debug.taaMaterialMipBiasEnabled ||
-      !mipFilteringActive || mipBias >= 0.0f) {
+  if (!taaMode || !aaDebug.taaMaterialMipBiasEnabled || !mipFilteringActive ||
+      mipBias >= 0.0f) {
     return Result<uint32_t, std::string>::makeResult(
         resolveDefaultMaterialSamplerId(gpu_, filtering));
   }

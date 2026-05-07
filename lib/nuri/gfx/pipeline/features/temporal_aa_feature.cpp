@@ -54,6 +54,9 @@ constexpr uint32_t kTaaResolveModeCopyHistoryToScene = 21u;
 constexpr uint32_t kTaaResolveModeTemporalConfidence = 22u;
 constexpr uint32_t kTaaResolveModePreviousDepthRejection = 23u;
 constexpr uint32_t kTaaResolveModeStabilityDiagnostics = 24u;
+constexpr uint32_t kTaaResolveModeStabilityOwnership = 25u;
+constexpr uint32_t kTaaResolveModePatchProbe = 26u;
+constexpr uint32_t kTaaResolveModeMotionFilter = 27u;
 constexpr uint32_t kTaaHistoryFilterModeCatmullRom = 0u;
 constexpr uint32_t kTaaHistoryFilterModeBilinear = 1u;
 constexpr uint32_t kTaaResolvePassDebugColor = 0xffaa55ffu;
@@ -61,12 +64,12 @@ constexpr uint32_t kTaaCopyBackPassDebugColor = 0xff8844ffu;
 constexpr uint32_t kTaaDebugPassDebugColor = 0xffcc77ffu;
 constexpr uint32_t kDrawDebugColor = 0xffaa44ffu;
 constexpr uint32_t kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
-constexpr float kDefaultTaaCurrentFrameWeight = 0.06f;
+constexpr float kDefaultTaaCurrentFrameWeight = 0.045f;
 constexpr float kDefaultTaaVelocityRejectionThreshold = 1.5f;
-constexpr float kDefaultTaaVelocityBlendScale = 0.35f;
-constexpr float kDefaultTaaVarianceGamma = 1.50f;
-constexpr float kDefaultTaaSharpenStrength = 0.18f;
-constexpr float kDefaultTaaSharpenConfidenceThreshold = 0.75f;
+constexpr float kDefaultTaaVelocityBlendScale = 0.22f;
+constexpr float kDefaultTaaVarianceGamma = 1.85f;
+constexpr float kDefaultTaaSharpenStrength = 0.14f;
+constexpr float kDefaultTaaSharpenConfidenceThreshold = 0.82f;
 constexpr float kStaticFrameVelocityEpsilon = 1.0e-5f;
 
 struct TAAResolvePushConstants {
@@ -135,7 +138,10 @@ isTaaResolveEvaluationDebugView(AntiAliasingDebugView view) noexcept {
          view == AntiAliasingDebugView::TAASplitCompare ||
          view == AntiAliasingDebugView::TAATemporalConfidence ||
          view == AntiAliasingDebugView::TAAPreviousDepthRejection ||
-         view == AntiAliasingDebugView::TAAStabilityDiagnostics;
+         view == AntiAliasingDebugView::TAAStabilityDiagnostics ||
+         view == AntiAliasingDebugView::TAAStabilityOwnership ||
+         view == AntiAliasingDebugView::TAAPatchProbe ||
+         view == AntiAliasingDebugView::TAAMotionFilter;
 }
 
 [[nodiscard]] inline bool staticFrameVelocitySanitizationEligible(
@@ -188,6 +194,12 @@ taaResolveEvaluationDebugLabel(AntiAliasingDebugView view) noexcept {
     return "TAA Previous Depth Rejection Debug Pass";
   case AntiAliasingDebugView::TAAStabilityDiagnostics:
     return "TAA Stability Diagnostics Debug Pass";
+  case AntiAliasingDebugView::TAAStabilityOwnership:
+    return "TAA Stability Ownership Debug Pass";
+  case AntiAliasingDebugView::TAAPatchProbe:
+    return "TAA Patch Probe Debug Pass";
+  case AntiAliasingDebugView::TAAMotionFilter:
+    return "TAA Motion Filter Debug Pass";
   default:
     return "TAA Debug Display Pass";
   }
@@ -234,6 +246,12 @@ taaResolveModeForDebugView(AntiAliasingDebugView view) noexcept {
     return kTaaResolveModePreviousDepthRejection;
   case AntiAliasingDebugView::TAAStabilityDiagnostics:
     return kTaaResolveModeStabilityDiagnostics;
+  case AntiAliasingDebugView::TAAStabilityOwnership:
+    return kTaaResolveModeStabilityOwnership;
+  case AntiAliasingDebugView::TAAPatchProbe:
+    return kTaaResolveModePatchProbe;
+  case AntiAliasingDebugView::TAAMotionFilter:
+    return kTaaResolveModeMotionFilter;
   case AntiAliasingDebugView::MotionVectors:
     return kTaaResolveModeVelocityMotionVectors;
   case AntiAliasingDebugView::VelocityMagnitude:
@@ -250,9 +268,9 @@ struct TAAResolveTuning {
   float depthDiscontinuityThreshold = 0.01f;
   float velocityRejectionThreshold = kDefaultTaaVelocityRejectionThreshold;
   float velocityBlendScale = kDefaultTaaVelocityBlendScale;
-  float motionCurrentWeight = 0.35f;
-  float disocclusionCurrentWeight = 0.65f;
-  float clampCurrentWeight = 0.50f;
+  float motionCurrentWeight = 0.22f;
+  float disocclusionCurrentWeight = 0.62f;
+  float clampCurrentWeight = 0.38f;
   float clampBlendAttenuation = 0.35f;
   float varianceGamma = kDefaultTaaVarianceGamma;
   float hdrWeightStrength = 0.50f;
@@ -359,7 +377,9 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
 
 [[nodiscard]] float sanitizedCurrentWeight(
     const RenderSettings::AntiAliasingSettings &settings) noexcept {
-  const float value = settings.debug.taaCurrentFrameWeight;
+  const RenderSettings::AntiAliasingDebugSettings debug =
+      effectiveTemporalAADebugSettings(settings);
+  const float value = debug.taaCurrentFrameWeight;
   if (!std::isfinite(value)) {
     return kDefaultTaaCurrentFrameWeight;
   }
@@ -368,83 +388,82 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
 
 [[nodiscard]] TAAResolveTuning sanitizedResolveTuning(
     const RenderSettings::AntiAliasingSettings &settings) noexcept {
+  const RenderSettings::AntiAliasingDebugSettings debug =
+      effectiveTemporalAADebugSettings(settings);
   TAAResolveTuning tuning{};
   tuning.currentWeight = sanitizedCurrentWeight(settings);
-  tuning.sharpenEnabled = settings.debug.taaSharpenEnabled;
+  tuning.sharpenEnabled = debug.taaSharpenEnabled;
   tuning.sharpenStrength =
-      std::isfinite(settings.debug.taaSharpenStrength)
-          ? std::clamp(settings.debug.taaSharpenStrength, 0.0f, 1.0f)
+      std::isfinite(debug.taaSharpenStrength)
+          ? std::clamp(debug.taaSharpenStrength, 0.0f, 1.0f)
           : kDefaultTaaSharpenStrength;
   tuning.sharpenConfidenceThreshold =
-      std::isfinite(settings.debug.taaSharpenConfidenceThreshold)
-          ? std::clamp(settings.debug.taaSharpenConfidenceThreshold, 0.0f, 1.0f)
+      std::isfinite(debug.taaSharpenConfidenceThreshold)
+          ? std::clamp(debug.taaSharpenConfidenceThreshold, 0.0f, 1.0f)
           : kDefaultTaaSharpenConfidenceThreshold;
   tuning.depthDiscontinuityThreshold =
-      std::isfinite(settings.debug.taaDepthDiscontinuityThreshold)
-          ? std::clamp(settings.debug.taaDepthDiscontinuityThreshold, 0.0f,
-                       1.0f)
+      std::isfinite(debug.taaDepthDiscontinuityThreshold)
+          ? std::clamp(debug.taaDepthDiscontinuityThreshold, 0.0f, 1.0f)
           : 0.01f;
   tuning.velocityRejectionThreshold =
-      std::isfinite(settings.debug.taaVelocityRejectionThreshold)
-          ? std::clamp(settings.debug.taaVelocityRejectionThreshold, 0.0f,
-                       64.0f)
+      std::isfinite(debug.taaVelocityRejectionThreshold)
+          ? std::clamp(debug.taaVelocityRejectionThreshold, 0.0f, 64.0f)
           : kDefaultTaaVelocityRejectionThreshold;
-  if (!std::isfinite(settings.debug.taaVelocityBlendScale)) {
+  if (!std::isfinite(debug.taaVelocityBlendScale)) {
     tuning.velocityBlendScale = kDefaultTaaVelocityBlendScale;
   } else {
     tuning.velocityBlendScale =
-        std::clamp(settings.debug.taaVelocityBlendScale, 0.0f, 4.0f);
+        std::clamp(debug.taaVelocityBlendScale, 0.0f, 4.0f);
   }
   tuning.motionCurrentWeight =
-      std::isfinite(settings.debug.taaMotionCurrentWeight)
-          ? std::clamp(settings.debug.taaMotionCurrentWeight, 0.0f, 1.0f)
-          : 0.35f;
+      std::isfinite(debug.taaMotionCurrentWeight)
+          ? std::clamp(debug.taaMotionCurrentWeight, 0.0f, 1.0f)
+          : 0.22f;
   tuning.motionCurrentWeight =
       std::max(tuning.motionCurrentWeight, tuning.currentWeight);
   tuning.disocclusionCurrentWeight =
-      std::isfinite(settings.debug.taaDisocclusionCurrentWeight)
-          ? std::clamp(settings.debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f)
-          : 0.65f;
+      std::isfinite(debug.taaDisocclusionCurrentWeight)
+          ? std::clamp(debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f)
+          : 0.62f;
   tuning.disocclusionCurrentWeight =
       std::max(tuning.disocclusionCurrentWeight, tuning.currentWeight);
   tuning.clampCurrentWeight =
-      std::isfinite(settings.debug.taaClampCurrentWeight)
-          ? std::clamp(settings.debug.taaClampCurrentWeight, 0.0f, 1.0f)
-          : 0.50f;
+      std::isfinite(debug.taaClampCurrentWeight)
+          ? std::clamp(debug.taaClampCurrentWeight, 0.0f, 1.0f)
+          : 0.38f;
   tuning.clampCurrentWeight =
       std::max(tuning.clampCurrentWeight, tuning.currentWeight);
   tuning.clampBlendAttenuation =
-      std::isfinite(settings.debug.taaClampBlendAttenuation)
-          ? std::clamp(settings.debug.taaClampBlendAttenuation, 0.0f, 1.0f)
+      std::isfinite(debug.taaClampBlendAttenuation)
+          ? std::clamp(debug.taaClampBlendAttenuation, 0.0f, 1.0f)
           : 0.35f;
   tuning.varianceGamma =
-      std::isfinite(settings.debug.taaVarianceGamma)
-          ? std::clamp(settings.debug.taaVarianceGamma, 0.0f, 4.0f)
+      std::isfinite(debug.taaVarianceGamma)
+          ? std::clamp(debug.taaVarianceGamma, 0.0f, 4.0f)
           : kDefaultTaaVarianceGamma;
   tuning.hdrWeightStrength =
-      std::isfinite(settings.debug.taaHdrWeightStrength)
-          ? std::clamp(settings.debug.taaHdrWeightStrength, 0.0f, 1.0f)
+      std::isfinite(debug.taaHdrWeightStrength)
+          ? std::clamp(debug.taaHdrWeightStrength, 0.0f, 1.0f)
           : 0.50f;
   tuning.reactiveCurrentWeight =
-      std::isfinite(settings.debug.taaReactiveCurrentWeight)
-          ? std::clamp(settings.debug.taaReactiveCurrentWeight, 0.0f, 1.0f)
+      std::isfinite(debug.taaReactiveCurrentWeight)
+          ? std::clamp(debug.taaReactiveCurrentWeight, 0.0f, 1.0f)
           : 0.85f;
   tuning.reactiveStrength =
-      std::isfinite(settings.debug.taaReactiveStrength)
-          ? std::clamp(settings.debug.taaReactiveStrength, 0.0f, 4.0f)
+      std::isfinite(debug.taaReactiveStrength)
+          ? std::clamp(debug.taaReactiveStrength, 0.0f, 4.0f)
           : 1.0f;
   tuning.velocityDilationDepthThreshold =
-      std::isfinite(settings.debug.taaVelocityDilationDepthThreshold)
-          ? std::clamp(settings.debug.taaVelocityDilationDepthThreshold, 0.0f,
-                       1.0f)
+      std::isfinite(debug.taaVelocityDilationDepthThreshold)
+          ? std::clamp(debug.taaVelocityDilationDepthThreshold, 0.0f, 1.0f)
           : 0.01f;
-  tuning.clampMode = sanitizeTemporalAAClampMode(settings.debug.taaClampMode);
+  tuning.clampMode = sanitizeTemporalAAClampMode(debug.taaClampMode);
   tuning.hdrWeightingMode =
-      sanitizeTemporalAAHdrWeightingMode(settings.debug.taaHdrWeightingMode);
+      sanitizeTemporalAAHdrWeightingMode(debug.taaHdrWeightingMode);
   tuning.velocityDilationMode = sanitizeTemporalAAVelocityDilationMode(
-      settings.debug.taaVelocityDilationMode);
+      debug.taaVelocityDilationMode);
   tuning.historyFilterMode =
-      sanitizeTemporalAAHistoryFilterMode(settings.debug.taaHistoryFilterMode);
+      sanitizeTemporalAAHistoryFilterMode(debug.taaHistoryFilterMode);
   return tuning;
 }
 
@@ -655,8 +674,10 @@ TemporalAAResolvePass::prepare(FrameBuildContext &ctx) {
 
 Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings.antiAliasing);
   const AntiAliasingDebugView debugView =
-      sanitizeAntiAliasingDebugView(settings.antiAliasing.debug.view);
+      sanitizeAntiAliasingDebugView(aaDebug.view);
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(false);
   }
@@ -869,12 +890,11 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   }
   aaMetrics.taaResolveWidth = sceneDimensions.width;
   aaMetrics.taaResolveHeight = sceneDimensions.height;
-  const float jitterScale =
-      ctx.frame.settings != nullptr
-          ? ctx.frame.settings->antiAliasing.debug.taaJitterScale
-          : 0.75f;
+  const float jitterScale = aaDebug.taaJitterScale;
   aaMetrics.taaJitterScale =
       std::isfinite(jitterScale) ? std::clamp(jitterScale, 0.0f, 1.0f) : 0.75f;
+  aaMetrics.taaQualityPreset =
+      sanitizeTemporalAAQualityPreset(settings.antiAliasing.qualityPreset);
   aaMetrics.taaCurrentFrameWeight = tuning.currentWeight;
   aaMetrics.taaHistoryFrameWeight = 1.0f - tuning.currentWeight;
   aaMetrics.taaSharpenEnabled = tuning.sharpenEnabled;
@@ -1224,6 +1244,12 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
       debugView == AntiAliasingDebugView::TAAPreviousDepthRejection;
   aaMetrics.taaStabilityDiagnosticsDebugViewRendered =
       debugView == AntiAliasingDebugView::TAAStabilityDiagnostics;
+  aaMetrics.taaStabilityOwnershipDebugViewRendered =
+      debugView == AntiAliasingDebugView::TAAStabilityOwnership;
+  aaMetrics.taaPatchProbeDebugViewRendered =
+      debugView == AntiAliasingDebugView::TAAPatchProbe;
+  aaMetrics.taaMotionFilterDebugViewRendered =
+      debugView == AntiAliasingDebugView::TAAMotionFilter;
   if (isVelocityDebugView(debugView)) {
     aaMetrics.velocityDebugPassCount = 1u;
     aaMetrics.velocityDebugViewRendered = true;

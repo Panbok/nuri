@@ -41,6 +41,9 @@ const uint kTaaResolveModeCopyHistoryToScene = 21u;
 const uint kTaaResolveModeTemporalConfidence = 22u;
 const uint kTaaResolveModePreviousDepthRejection = 23u;
 const uint kTaaResolveModeStabilityDiagnostics = 24u;
+const uint kTaaResolveModeStabilityOwnership = 25u;
+const uint kTaaResolveModePatchProbe = 26u;
+const uint kTaaResolveModeMotionFilter = 27u;
 
 const float kTaaStabilityBranchNormal = 0.0;
 const float kTaaStabilityBranchNoHistory = 1.0;
@@ -76,14 +79,33 @@ const float kCenterDeviationLow = 0.01;
 const float kCenterDeviationHigh = 0.10;
 const float kAntialiasMotionLow = 0.50;
 const float kAntialiasMotionHigh = 8.0;
-const float kAntialiasMotionScale = 0.22;
+const float kAntialiasMotionScale = 0.30;
 const float kAntialiasRejectionLow = 0.10;
 const float kAntialiasRejectionHigh = 0.75;
 const float kAntialiasRejectionScale = 0.35;
 const float kMaxAntialiasFilterStrength = 0.35;
+const float kMinFallbackFilterStrength = 0.20;
+const float kMaxFallbackFilterStrength = 0.75;
 const float kCoverageDepthMotionLow = 0.25;
 const float kCoverageDepthMotionHigh = 2.0;
 const float kClearDepth = 0.999999;
+const float kTaaMaxHistoryColor = 65000.0;
+const float kTaaStaticDepthAgreementLow = 0.80;
+const float kTaaStaticDepthAgreementHigh = 0.98;
+const float kTaaStaticDirectHistoryPresence = 0.35;
+const float kTaaStaticDirectHistoryConfidence = 0.85;
+const float kTaaStaticDirectColorDeltaLow = 0.01;
+const float kTaaStaticDirectColorDeltaHigh = 0.05;
+const float kTaaMotionVarianceGamma = 0.85;
+const float kTaaPatchProbeTolerancePx = 4.0;
+const vec2 kTaaPatchProbeLeftMin = vec2(523.0, 499.0);
+const vec2 kTaaPatchProbeLeftMax = vec2(695.0, 718.0);
+const vec2 kTaaPatchProbeCenterMin = vec2(813.0, 420.0);
+const vec2 kTaaPatchProbeCenterMax = vec2(994.0, 570.0);
+const vec2 kTaaPatchProbeVerticalMin = vec2(997.0, 480.0);
+const vec2 kTaaPatchProbeVerticalMax = vec2(1060.0, 837.0);
+const vec2 kTaaPatchProbeRightMin = vec2(1180.0, 420.0);
+const vec2 kTaaPatchProbeRightMax = vec2(1414.0, 592.0);
 
 layout(push_constant) uniform TAAResolvePushConstants {
   uint currentTexId;
@@ -125,6 +147,7 @@ struct Neighborhood {
   vec3 minColor;
   vec3 maxColor;
   vec3 avgColor;
+  vec3 crossAvgColor;
   vec3 variance;
   vec3 minYCoCg;
   vec3 maxYCoCg;
@@ -134,6 +157,7 @@ struct Neighborhood {
   float maxLuminance;
   float minDepth;
   float maxDepth;
+  float avgDepth;
 };
 
 struct ResolveEvaluation {
@@ -141,9 +165,20 @@ struct ResolveEvaluation {
   vec3 reprojectedHistory;
   vec3 history;
   vec3 resolved;
+  vec3 neighborhoodMinColor;
+  vec3 neighborhoodMaxColor;
+  vec3 neighborhoodAvgColor;
+  vec2 historyUv;
+  vec2 previousRawUv;
   float currentAlpha;
+  float currentDepth;
+  float neighborhoodMinDepth;
+  float neighborhoodMaxDepth;
+  float neighborhoodAvgDepth;
+  float previousDepth;
   float currentWeight;
   float historyConfidence;
+  float rawPreviousDepthConfidence;
   float previousDepthConfidence;
   float outputConfidence;
   float clampDelta;
@@ -155,12 +190,14 @@ struct ResolveEvaluation {
   float hdrWeight;
   float reactiveWeight;
   float fallbackStrength;
+  float currentFilterStrength;
   float rejectionStrength;
   float stableHistoryBlend;
   float velocityRejectionStrength;
   float staticFrameFlag;
   float motionPixels;
   float stabilityBranch;
+  float directHistoryLock;
   bool validHistory;
   bool depthRejected;
   bool previousDepthRejected;
@@ -178,6 +215,52 @@ bool flagEnabled(uint flag) { return (pc.flags & flag) != 0u; }
 
 float pushFloat(uint bits) { return uintBitsToFloat(bits); }
 
+bool finiteFloat(float value) { return !isnan(value) && !isinf(value); }
+
+float finiteOr(float value, float fallback) {
+  return finiteFloat(value) ? value : fallback;
+}
+
+float sanitizeColorChannel(float value, float maxValue) {
+  if (isnan(value)) {
+    return 0.0;
+  }
+  if (isinf(value)) {
+    return value > 0.0 ? maxValue : 0.0;
+  }
+  return clamp(value, 0.0, maxValue);
+}
+
+vec3 sanitizeColorRange(vec3 color, float maxValue) {
+  return vec3(sanitizeColorChannel(color.r, maxValue),
+              sanitizeColorChannel(color.g, maxValue),
+              sanitizeColorChannel(color.b, maxValue));
+}
+
+float sanitizeUnit(float value, float fallback) {
+  return clamp(finiteOr(value, fallback), 0.0, 1.0);
+}
+
+vec3 sanitizeSceneColor(vec3 color) {
+  return sanitizeColorRange(color, kTaaMaxHistoryColor);
+}
+
+vec3 sanitizePremultipliedHistoryRgb(vec3 rgb, float confidence) {
+  const float boundedConfidence = sanitizeUnit(confidence, 0.0);
+  return sanitizeColorRange(rgb, kTaaMaxHistoryColor * boundedConfidence);
+}
+
+vec4 sanitizeCurrentColor(vec4 sampleValue) {
+  return vec4(sanitizeSceneColor(sampleValue.rgb),
+              sanitizeUnit(sampleValue.a, 1.0));
+}
+
+vec4 sanitizeStoredHistory(vec4 storedValue) {
+  const float confidence = sanitizeUnit(storedValue.a, 0.0);
+  return vec4(sanitizePremultipliedHistoryRgb(storedValue.rgb, confidence),
+              confidence);
+}
+
 bool uvInBounds(vec2 value) {
   return all(greaterThanEqual(value, vec2(0.0))) &&
          all(lessThan(value, vec2(1.0)));
@@ -191,29 +274,34 @@ vec2 taaScreenUv(vec2 fullscreenUv) {
 }
 
 vec4 currentColor(vec2 sampleUv) {
-  return textureBindless2D(pc.currentTexId, pc.linearSamplerId, sampleUv);
+  return sanitizeCurrentColor(
+      textureBindless2D(pc.currentTexId, pc.linearSamplerId, sampleUv));
 }
 
 vec4 historyColor(vec2 sampleUv) {
-  return textureBindless2D(pc.historyTexId, pc.linearSamplerId, sampleUv);
+  return sanitizeStoredHistory(
+      textureBindless2D(pc.historyTexId, pc.linearSamplerId, sampleUv));
 }
 
 // Uses the depth sampler as the shared point sampler for exact texel taps.
 vec4 historyColorPoint(vec2 sampleUv) {
-  return textureBindless2D(pc.historyTexId, pc.pointSamplerId, sampleUv);
+  return sanitizeStoredHistory(
+      textureBindless2D(pc.historyTexId, pc.pointSamplerId, sampleUv));
 }
 
 vec4 storedHistoryColorFromCurrent(vec2 sampleUv) {
-  return textureBindless2D(pc.currentTexId, pc.linearSamplerId, sampleUv);
+  return sanitizeStoredHistory(
+      textureBindless2D(pc.currentTexId, pc.linearSamplerId, sampleUv));
 }
 
 vec4 storedHistoryColorFromCurrentPoint(vec2 sampleUv) {
-  return textureBindless2D(pc.currentTexId, pc.pointSamplerId, sampleUv);
+  return sanitizeStoredHistory(
+      textureBindless2D(pc.currentTexId, pc.pointSamplerId, sampleUv));
 }
 
 vec3 unpremultiplyHistory(vec4 storedValue) {
-  const float confidence = clamp(storedValue.a, 0.0, 1.0);
-  return storedValue.rgb / max(confidence, 1.0e-5);
+  const vec4 sanitized = sanitizeStoredHistory(storedValue);
+  return sanitized.rgb / max(sanitized.a, 1.0e-5);
 }
 
 vec3 sceneCopyHistoryColor(vec2 centerUv) {
@@ -261,10 +349,11 @@ vec3 sceneCopyHistoryColor(vec2 centerUv) {
 }
 
 HistorySample makeHistorySample(vec4 storedValue) {
+  const vec4 sanitized = sanitizeStoredHistory(storedValue);
   HistorySample historySample;
-  historySample.premultiplied = storedValue;
-  historySample.confidence = clamp(storedValue.a, 0.0, 1.0);
-  historySample.color = storedValue.rgb / max(historySample.confidence, 1.0e-5);
+  historySample.premultiplied = sanitized;
+  historySample.confidence = sanitized.a;
+  historySample.color = sanitized.rgb / max(historySample.confidence, 1.0e-5);
   return historySample;
 }
 
@@ -299,6 +388,8 @@ HistorySample historyColorCatmullRom(vec2 sampleUv) {
 
   vec4 sum = vec4(0.0);
   float weightSum = 0.0;
+  vec3 minPremultipliedRgb = vec3(kTaaMaxHistoryColor);
+  vec3 maxPremultipliedRgb = vec3(0.0);
   for (int y = -1; y <= 2; ++y) {
     const float weightY = catmullRomWeight(float(y) - texelFraction.y);
     for (int x = -1; x <= 2; ++x) {
@@ -307,12 +398,24 @@ HistorySample historyColorCatmullRom(vec2 sampleUv) {
       const vec2 texelUv =
           clamp((baseTexel + vec2(float(x), float(y)) + vec2(0.5)) * invExtent,
                 minUv, maxUv);
-      sum += historyColorPoint(texelUv) * weight;
+      const vec4 tap = historyColorPoint(texelUv);
+      sum += tap * weight;
       weightSum += weight;
+      minPremultipliedRgb = min(minPremultipliedRgb, tap.rgb);
+      maxPremultipliedRgb = max(maxPremultipliedRgb, tap.rgb);
     }
   }
-  HistorySample historySample = makeHistorySample(sum / max(weightSum, 1.0e-5));
+  vec4 filteredStored = sum / max(weightSum, 1.0e-5);
+  filteredStored.rgb =
+      clamp(filteredStored.rgb, minPremultipliedRgb, maxPremultipliedRgb);
+  HistorySample historySample;
   historySample.confidence = historyConfidenceBilinear(sampleUv);
+  historySample.premultiplied =
+      vec4(sanitizePremultipliedHistoryRgb(filteredStored.rgb,
+                                           historySample.confidence),
+           historySample.confidence);
+  historySample.color =
+      historySample.premultiplied.rgb / max(historySample.confidence, 1.0e-5);
   return historySample;
 }
 
@@ -449,6 +552,7 @@ Neighborhood currentNeighborhood(vec2 centerUv) {
   neighborhood.minColor = vec3(3.402823466e+38);
   neighborhood.maxColor = vec3(-3.402823466e+38);
   neighborhood.avgColor = vec3(0.0);
+  neighborhood.crossAvgColor = vec3(0.0);
   vec3 colorSquareSum = vec3(0.0);
   neighborhood.minYCoCg = vec3(3.402823466e+38);
   neighborhood.maxYCoCg = vec3(-3.402823466e+38);
@@ -458,6 +562,7 @@ Neighborhood currentNeighborhood(vec2 centerUv) {
   neighborhood.maxLuminance = -3.402823466e+38;
   neighborhood.minDepth = 1.0;
   neighborhood.maxDepth = 0.0;
+  neighborhood.avgDepth = 0.0;
 
   for (int y = -1; y <= 1; ++y) {
     for (int x = -1; x <= 1; ++x) {
@@ -471,6 +576,9 @@ Neighborhood currentNeighborhood(vec2 centerUv) {
       neighborhood.minColor = min(neighborhood.minColor, color);
       neighborhood.maxColor = max(neighborhood.maxColor, color);
       neighborhood.avgColor += color;
+      if (x == 0 || y == 0) {
+        neighborhood.crossAvgColor += color;
+      }
       colorSquareSum += color * color;
       neighborhood.minYCoCg = min(neighborhood.minYCoCg, yCoCg);
       neighborhood.maxYCoCg = max(neighborhood.maxYCoCg, yCoCg);
@@ -482,10 +590,12 @@ Neighborhood currentNeighborhood(vec2 centerUv) {
           max(neighborhood.maxLuminance, colorLuminance);
       neighborhood.minDepth = min(neighborhood.minDepth, depth);
       neighborhood.maxDepth = max(neighborhood.maxDepth, depth);
+      neighborhood.avgDepth += depth;
     }
   }
 
   neighborhood.avgColor *= 1.0 / 9.0;
+  neighborhood.crossAvgColor *= 1.0 / 5.0;
   neighborhood.variance = max(colorSquareSum * (1.0 / 9.0) -
                                   neighborhood.avgColor * neighborhood.avgColor,
                               vec3(0.0));
@@ -494,6 +604,7 @@ Neighborhood currentNeighborhood(vec2 centerUv) {
       max(yCoCgSquareSum * (1.0 / 9.0) -
               neighborhood.avgYCoCg * neighborhood.avgYCoCg,
           vec3(0.0));
+  neighborhood.avgDepth *= 1.0 / 9.0;
   return neighborhood;
 }
 
@@ -553,7 +664,7 @@ vec3 blendResolveColor(vec3 history, vec3 current, float currentWeight) {
 }
 
 vec3 validateHistoryColor(vec3 history, Neighborhood neighborhood,
-                          out float clampDelta) {
+                          float varianceGamma, out float clampDelta) {
   const uint mode = pc.clampMode;
   const bool yCoCgMode = mode == kTaaClampModeClampYCoCg ||
                          mode == kTaaClampModeClipYCoCg ||
@@ -570,7 +681,7 @@ vec3 validateHistoryColor(vec3 history, Neighborhood neighborhood,
       yCoCgMode ? neighborhood.varianceYCoCg : neighborhood.variance;
   vec3 validated = value;
   if (baseMode == kTaaClampModeVariance) {
-    const float gamma = max(pushFloat(pc.varianceGammaBits), 0.0);
+    const float gamma = max(varianceGamma, 0.0);
     const vec3 sigma = sqrt(variance);
     const vec3 minColor = max(minValue, avgValue - sigma * gamma);
     const vec3 maxColor = min(maxValue, avgValue + sigma * gamma);
@@ -583,6 +694,18 @@ vec3 validateHistoryColor(vec3 history, Neighborhood neighborhood,
   const vec3 validatedRgb = yCoCgMode ? yCoCgToRgb(validated) : validated;
   clampDelta = length(history - validatedRgb);
   return validatedRgb;
+}
+
+float motionAdaptiveVarianceGamma(float stableHistoryBlend,
+                                  float previousDepthConfidence,
+                                  float velocityConfidence) {
+  const float presetGamma = max(pushFloat(pc.varianceGammaBits), 0.0);
+  const float motionGamma = min(kTaaMotionVarianceGamma, presetGamma);
+  const float confidence =
+      clamp(stableHistoryBlend * previousDepthConfidence * velocityConfidence,
+            0.0, 1.0);
+  const float stableBlend = confidence * confidence;
+  return mix(motionGamma, presetGamma, stableBlend);
 }
 
 float neighborhoodHighFrequencyStrength(Neighborhood neighborhood) {
@@ -610,20 +733,24 @@ float neighborhoodEdgeStrength(vec3 current, Neighborhood neighborhood) {
 
 vec3 antialiasCurrentColor(vec3 current, Neighborhood neighborhood,
                            float motionPixels, float disocclusionBlend,
-                           float clampConfidence, float rejectionStrength) {
+                           float clampConfidence, float rejectionStrength,
+                           out float filterStrength) {
   const float edgeStrength = neighborhoodEdgeStrength(current, neighborhood);
-  const float motionFilter =
+  const float coherentMotion =
       smoothstep(kAntialiasMotionLow, kAntialiasMotionHigh, motionPixels) *
-      kAntialiasMotionScale;
+      (1.0 - clamp(disocclusionBlend, 0.0, 1.0));
+  const float motionFilter = coherentMotion * kAntialiasMotionScale;
   const float rejectionFilter =
       smoothstep(
           kAntialiasRejectionLow, kAntialiasRejectionHigh,
           max(max(disocclusionBlend, clampConfidence), rejectionStrength)) *
       kAntialiasRejectionScale;
-  const float filterStrength =
-      clamp(edgeStrength * max(motionFilter, rejectionFilter), 0.0,
-            kMaxAntialiasFilterStrength);
-  return mix(current, neighborhood.avgColor, filterStrength);
+  filterStrength = clamp(edgeStrength * max(motionFilter, rejectionFilter), 0.0,
+                         kMaxAntialiasFilterStrength);
+  const vec3 motionTarget =
+      mix(neighborhood.crossAvgColor, neighborhood.avgColor,
+          smoothstep(0.25, 0.85, max(disocclusionBlend, rejectionStrength)));
+  return mix(current, motionTarget, filterStrength);
 }
 
 vec2 previousRawJitterDeltaUv() {
@@ -664,9 +791,18 @@ float previousDepthConfidenceFromDelta(float depthDelta, float depthThreshold,
   return mix(staticCoverageConfidence, 0.0, motionHardReject);
 }
 
+float staticPreviousDepthAgreement(float previousDepthConfidence) {
+  return smoothstep(kTaaStaticDepthAgreementLow, kTaaStaticDepthAgreementHigh,
+                    previousDepthConfidence);
+}
+
 float staticPreviousDepthConfidence(float previousDepthConfidence,
                                     float stableHistoryBlend) {
-  return mix(previousDepthConfidence, 1.0, clamp(stableHistoryBlend, 0.0, 1.0));
+  const float sameSurfaceAgreement =
+      staticPreviousDepthAgreement(previousDepthConfidence);
+  const float recovery =
+      clamp(stableHistoryBlend * sameSurfaceAgreement, 0.0, 1.0);
+  return mix(previousDepthConfidence, 1.0, recovery);
 }
 
 float staticHistoryPresence(float historyConfidence) {
@@ -694,11 +830,41 @@ float stableFeedbackSuppression(float historyConfidence,
   return clamp(stableHistoryBlend * confidence, 0.0, 1.0);
 }
 
+float staticDirectHistoryColorConfidence(float clampDelta, vec3 history,
+                                         Neighborhood neighborhood) {
+  const float colorScale = max(
+      max(abs(luminance(history)), abs(luminance(neighborhood.avgColor))), 1.0);
+  const float normalizedDelta = clampDelta / colorScale;
+  return 1.0 - smoothstep(kTaaStaticDirectColorDeltaLow,
+                          kTaaStaticDirectColorDeltaHigh, normalizedDelta);
+}
+
+float lowConfidenceFallbackFilterStrength(vec3 current,
+                                          Neighborhood neighborhood) {
+  const float edgeStrength = neighborhoodEdgeStrength(current, neighborhood);
+  const float highFrequencyStrength =
+      neighborhoodHighFrequencyStrength(neighborhood);
+  const float filterSignal =
+      clamp(max(edgeStrength, highFrequencyStrength * 0.65), 0.0, 1.0);
+  return mix(kMinFallbackFilterStrength, kMaxFallbackFilterStrength,
+             filterSignal);
+}
+
 vec3 lowConfidenceFallback(vec3 current, Neighborhood neighborhood,
                            out float fallbackStrength) {
-  const float edgeStrength = neighborhoodEdgeStrength(current, neighborhood);
-  fallbackStrength = edgeStrength * kMaxAntialiasFilterStrength;
+  fallbackStrength = lowConfidenceFallbackFilterStrength(current, neighborhood);
   return mix(current, neighborhood.avgColor, fallbackStrength);
+}
+
+void recordNeighborhoodDiagnostics(inout ResolveEvaluation result, float depth,
+                                   Neighborhood neighborhood) {
+  result.currentDepth = depth;
+  result.neighborhoodMinColor = neighborhood.minColor;
+  result.neighborhoodMaxColor = neighborhood.maxColor;
+  result.neighborhoodAvgColor = neighborhood.avgColor;
+  result.neighborhoodMinDepth = neighborhood.minDepth;
+  result.neighborhoodMaxDepth = neighborhood.maxDepth;
+  result.neighborhoodAvgDepth = neighborhood.avgDepth;
 }
 
 ResolveEvaluation evaluateResolve(vec2 currentUv) {
@@ -713,9 +879,20 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   result.reprojectedHistory = current;
   result.history = current;
   result.resolved = current;
+  result.neighborhoodMinColor = current;
+  result.neighborhoodMaxColor = current;
+  result.neighborhoodAvgColor = current;
+  result.historyUv = currentUv;
+  result.previousRawUv = currentUv;
   result.currentAlpha = currentSample.a;
+  result.currentDepth = 1.0;
+  result.neighborhoodMinDepth = 1.0;
+  result.neighborhoodMaxDepth = 1.0;
+  result.neighborhoodAvgDepth = 1.0;
+  result.previousDepth = 1.0;
   result.currentWeight = 1.0;
   result.historyConfidence = 0.0;
+  result.rawPreviousDepthConfidence = 0.0;
   result.previousDepthConfidence = 0.0;
   result.outputConfidence = 0.5;
   result.clampDelta = 0.0;
@@ -725,12 +902,14 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   result.velocityDilationDelta = 0.0;
   result.hdrWeight = 0.0;
   result.reactiveWeight = 0.0;
+  result.currentFilterStrength = 0.0;
   result.rejectionStrength = 0.0;
   result.stableHistoryBlend = 0.0;
   result.velocityRejectionStrength = 0.0;
   result.staticFrameFlag = staticFrame ? 1.0 : 0.0;
   result.motionPixels = 0.0;
   result.stabilityBranch = kTaaStabilityBranchNormal;
+  result.directHistoryLock = 0.0;
   result.validHistory = false;
   result.depthRejected = false;
   result.previousDepthRejected = false;
@@ -740,7 +919,9 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   result.fallbackStrength = 0.0;
 
   if (!flagEnabled(kTaaResolveFlagHistoryValid)) {
+    const float depth = sceneDepth(currentUv);
     const Neighborhood neighborhood = currentNeighborhood(currentUv);
+    recordNeighborhoodDiagnostics(result, depth, neighborhood);
     float fallbackStrength = 0.0;
     result.resolved =
         lowConfidenceFallback(current, neighborhood, fallbackStrength);
@@ -752,12 +933,14 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
 
   const float depth = sceneDepth(currentUv);
   const Neighborhood neighborhood = currentNeighborhood(currentUv);
+  recordNeighborhoodDiagnostics(result, depth, neighborhood);
   // A clear center pixel next to foreground geometry is still a valid subpixel
   // coverage candidate. Let stable history accumulate those railing/foliage
   // misses instead of turning every missed jitter sample into pure background.
   const bool backgroundCoverage =
       depth >= kClearDepth && neighborhood.minDepth < kClearDepth;
-  if (depth >= kClearDepth && !backgroundCoverage && !staticFrame) {
+  const bool allClearBackground = depth >= kClearDepth && !backgroundCoverage;
+  if (allClearBackground && !staticFrame) {
     float fallbackStrength = 0.0;
     result.resolved =
         lowConfidenceFallback(current, neighborhood, fallbackStrength);
@@ -777,8 +960,8 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   result.velocityDilated = velocityDilated;
   result.velocityDilationDelta = length(rawCurrentVelocity - baseVelocity);
   const vec2 historyUv = currentUv + currentVelocity;
+  result.historyUv = historyUv;
   if (!uvInBounds(historyUv)) {
-    const Neighborhood neighborhood = currentNeighborhood(currentUv);
     float fallbackStrength = 0.0;
     result.resolved =
         lowConfidenceFallback(current, neighborhood, fallbackStrength);
@@ -788,6 +971,7 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
     return result;
   }
   const vec2 previousRawUv = rawPreviousAttachmentUv(historyUv);
+  result.previousRawUv = previousRawUv;
 
   const float velocityThreshold = max(pushFloat(pc.velocityThresholdBits), 0.0);
   const float velocityBlendScale =
@@ -836,6 +1020,7 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
                         (1.0 - velocityRejectionStrength);
   result.stableHistoryBlend = stableHistoryBlend;
   result.velocityRejectionStrength = velocityRejectionStrength;
+  const float velocityConfidence = 1.0 - velocityRejectionStrength;
   float previousDepthConfidence = 1.0;
   float previousDepthRejectionStrength = 0.0;
   bool previousDepthInBounds = false;
@@ -846,6 +1031,7 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
       previousDepthInBounds = true;
       const float reprojectedPreviousDepth =
           previousSceneDepth(previousDepthUv);
+      result.previousDepth = reprojectedPreviousDepth;
       const float previousDepthCompare = previousDepthCompareDepth(
           depth, neighborhood, motionPixels, depthThreshold);
       const float previousDepthDelta =
@@ -858,6 +1044,7 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
       previousDepthConfidence = 0.0;
     }
   }
+  result.rawPreviousDepthConfidence = previousDepthConfidence;
   if (result.previousDepthRejected && previousDepthInBounds) {
     previousDepthConfidence = staticPreviousDepthConfidence(
         previousDepthConfidence, stableHistoryBlend);
@@ -878,31 +1065,54 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
           previousDepthRejectionStrength);
 
   result.validHistory = true;
-  const HistorySample filteredHistory = historyColorFiltered(historyUv);
+  const bool allClearBackgroundBilinearHistory = allClearBackground;
+  const bool useBilinearHistory =
+      allClearBackgroundBilinearHistory ||
+      pc.historyFilterMode == kTaaHistoryFilterModeBilinear;
+  const HistorySample filteredHistory = useBilinearHistory
+                                            ? historyColorBilinear(historyUv)
+                                            : historyColorCatmullRom(historyUv);
   vec3 history = filteredHistory.color;
   result.historyConfidence = staticHistoryConfidence(
       filteredHistory.confidence, previousDepthConfidence, stableHistoryBlend);
   if (pc.mode == kTaaResolveModeHistoryFilterDelta) {
-    HistorySample catmullRomHistory;
-    if (pc.historyFilterMode == kTaaHistoryFilterModeCatmullRom) {
-      catmullRomHistory = filteredHistory;
+    if (allClearBackgroundBilinearHistory) {
+      result.historyFilterDelta = 0.0;
     } else {
-      catmullRomHistory = historyColorCatmullRom(historyUv);
+      HistorySample catmullRomHistory;
+      if (pc.historyFilterMode == kTaaHistoryFilterModeCatmullRom) {
+        catmullRomHistory = filteredHistory;
+      } else {
+        catmullRomHistory = historyColorCatmullRom(historyUv);
+      }
+      HistorySample bilinearHistory;
+      if (pc.historyFilterMode == kTaaHistoryFilterModeBilinear) {
+        bilinearHistory = filteredHistory;
+      } else {
+        bilinearHistory = historyColorBilinear(historyUv);
+      }
+      result.historyFilterDelta =
+          length(catmullRomHistory.color - bilinearHistory.color);
     }
-    HistorySample bilinearHistory;
-    if (pc.historyFilterMode == kTaaHistoryFilterModeBilinear) {
-      bilinearHistory = filteredHistory;
-    } else {
-      bilinearHistory = historyColorBilinear(historyUv);
-    }
-    result.historyFilterDelta =
-        length(catmullRomHistory.color - bilinearHistory.color);
   }
   result.reprojectedHistory = history;
   const float filteredHistoryPresence =
       staticHistoryPresence(filteredHistory.confidence);
+  const float adaptiveVarianceGamma = motionAdaptiveVarianceGamma(
+      stableHistoryBlend, previousDepthConfidence, velocityConfidence);
+  float directHistoryClampDelta = 0.0;
+  if (flagEnabled(kTaaResolveFlagNeighborhoodClamp)) {
+    validateHistoryColor(history, neighborhood, pushFloat(pc.varianceGammaBits),
+                         directHistoryClampDelta);
+  }
+  const float directHistoryColorConfidence = staticDirectHistoryColorConfidence(
+      directHistoryClampDelta, history, neighborhood);
   if (flagEnabled(kTaaResolveFlagStaticFrame) && stableHistoryBlend > 0.999 &&
-      previousDepthConfidence > 0.999 && filteredHistoryPresence > 0.999) {
+      result.rawPreviousDepthConfidence > kTaaStaticDepthAgreementHigh &&
+      previousDepthConfidence > 0.999 &&
+      filteredHistoryPresence > kTaaStaticDirectHistoryPresence &&
+      result.historyConfidence > kTaaStaticDirectHistoryConfidence &&
+      directHistoryColorConfidence > 0.999) {
     result.history = history;
     result.rawClampDelta = 0.0;
     result.clampDelta = 0.0;
@@ -911,12 +1121,14 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
     result.currentWeight = 0.0;
     result.outputConfidence = 1.0;
     result.resolved = history;
+    result.directHistoryLock = 1.0;
     return result;
   }
   float clampDelta = 0.0;
   vec3 clampedHistory =
       flagEnabled(kTaaResolveFlagNeighborhoodClamp)
-          ? validateHistoryColor(history, neighborhood, clampDelta)
+          ? validateHistoryColor(history, neighborhood, adaptiveVarianceGamma,
+                                 clampDelta)
           : history;
   if (flagEnabled(kTaaResolveFlagNeighborhoodClamp)) {
     result.rawClampDelta = clampDelta;
@@ -929,7 +1141,10 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
       const float historyTrust =
           smoothstep(0.75, 0.95, result.historyConfidence) *
           previousDepthConfidence;
-      const float staticClampRelax = stableHistoryBlend * historyTrust;
+      const float staticClampAgreement =
+          allClearBackground ? directHistoryColorConfidence : 1.0;
+      const float staticClampRelax =
+          stableHistoryBlend * historyTrust * staticClampAgreement;
       result.staticClampRelax = staticClampRelax;
       clampedHistory = mix(clampedHistory, history, staticClampRelax);
       result.clampDelta = length(history - clampedHistory);
@@ -957,14 +1172,6 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
 
     const float disocclusionWeight =
         clamp(pushFloat(pc.disocclusionWeightBits), baseCurrentWeight, 1.0);
-    const float strongMotionBlend = smoothstep(6.0, 24.0, motionPixels);
-    const float coherentMotionWeight =
-        mix(motionCurrentWeight, disocclusionWeight, 0.25);
-    currentWeight = max(currentWeight, mix(currentWeight, coherentMotionWeight,
-                                           strongMotionBlend));
-    result.rejectionStrength =
-        max(result.rejectionStrength, strongMotionBlend * 0.10);
-
     currentWeight =
         max(currentWeight, mix(stableCurrentWeight, disocclusionWeight,
                                dynamicDisocclusionBlend));
@@ -1023,33 +1230,210 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
     }
   }
 
-  const float velocityConfidence = 1.0 - velocityRejectionStrength;
   const float preliminaryCurrentWeight = clamp(currentWeight, 0.0, 1.0);
   const float effectiveHistoryWeight =
       (1.0 - preliminaryCurrentWeight) * result.historyConfidence *
       previousDepthConfidence * velocityConfidence;
   result.currentWeight = 1.0 - clamp(effectiveHistoryWeight, 0.0, 1.0);
   result.outputConfidence = updatedTemporalConfidence(effectiveHistoryWeight);
-  vec3 currentResolveColor =
-      flagEnabled(kTaaResolveFlagAdaptiveBlend)
-          ? antialiasCurrentColor(current, neighborhood, motionPixels,
-                                  dynamicDisocclusionBlend, clampConfidence,
-                                  result.rejectionStrength)
-          : current;
+  float currentFilterStrength = 0.0;
+  vec3 currentResolveColor = current;
+  if (flagEnabled(kTaaResolveFlagAdaptiveBlend)) {
+    currentResolveColor = antialiasCurrentColor(
+        current, neighborhood, motionPixels, dynamicDisocclusionBlend,
+        clampConfidence, result.rejectionStrength, currentFilterStrength);
+  }
+  result.currentFilterStrength = currentFilterStrength;
   if (flagEnabled(kTaaResolveFlagNeighborhoodFallback) &&
       result.rejectionStrength > 0.0) {
-    const float fallbackStrength =
-        smoothstep(0.75, 1.0, clamp(result.rejectionStrength, 0.0, 1.0));
-    result.fallbackStrength = fallbackStrength;
-    currentResolveColor = mix(current, neighborhood.avgColor, fallbackStrength);
+    const float fallbackBlend =
+        smoothstep(0.35, 1.0, clamp(result.rejectionStrength, 0.0, 1.0));
+    const float fallbackFilterStrength =
+        lowConfidenceFallbackFilterStrength(current, neighborhood);
+    const vec3 fallbackColor =
+        mix(current, neighborhood.avgColor, fallbackFilterStrength);
+    result.fallbackStrength =
+        max(result.fallbackStrength, fallbackBlend * fallbackFilterStrength);
+    currentResolveColor =
+        mix(currentResolveColor, fallbackColor, fallbackBlend);
   }
   result.resolved = blendResolveColor(clampedHistory, currentResolveColor,
                                       result.currentWeight);
   return result;
 }
 
+vec4 stabilityDiagnosticsColor(ResolveEvaluation eval) {
+  const float staticFrame = flagEnabled(kTaaResolveFlagStaticFrame) ? 1.0 : 0.0;
+  const float fallbackBranch =
+      clamp(eval.stabilityBranch / kTaaStabilityBranchPreviousDepth, 0.0, 1.0);
+  return vec4(staticFrame > 0.5 ? 1.0 : fallbackBranch,
+              staticFrame > 0.5 ? 1.0
+                                : clamp(eval.stableHistoryBlend, 0.0, 1.0),
+              clamp(eval.currentWeight, 0.0, 1.0), 1.0);
+}
+
+bool patchProbeInside(vec2 pixel, vec2 minPx, vec2 maxPx) {
+  const vec2 tolerance = vec2(kTaaPatchProbeTolerancePx);
+  const vec2 lo = minPx - tolerance;
+  const vec2 hi = maxPx + tolerance;
+  return all(greaterThanEqual(pixel, lo)) && all(lessThanEqual(pixel, hi));
+}
+
+bool patchProbeBorder(vec2 pixel, vec2 minPx, vec2 maxPx) {
+  if (!patchProbeInside(pixel, minPx, maxPx)) {
+    return false;
+  }
+  const vec2 tolerance = vec2(kTaaPatchProbeTolerancePx);
+  const vec2 lo = minPx - tolerance;
+  const vec2 hi = maxPx + tolerance;
+  const float borderWidth = 3.0;
+  return pixel.x <= lo.x + borderWidth || pixel.x >= hi.x - borderWidth ||
+         pixel.y <= lo.y + borderWidth || pixel.y >= hi.y - borderWidth;
+}
+
+bool patchProbeRegion(vec2 pixel, out vec2 minPx, out vec2 maxPx) {
+  if (patchProbeInside(pixel, kTaaPatchProbeLeftMin, kTaaPatchProbeLeftMax)) {
+    minPx = kTaaPatchProbeLeftMin;
+    maxPx = kTaaPatchProbeLeftMax;
+    return true;
+  }
+  if (patchProbeInside(pixel, kTaaPatchProbeCenterMin,
+                       kTaaPatchProbeCenterMax)) {
+    minPx = kTaaPatchProbeCenterMin;
+    maxPx = kTaaPatchProbeCenterMax;
+    return true;
+  }
+  if (patchProbeInside(pixel, kTaaPatchProbeVerticalMin,
+                       kTaaPatchProbeVerticalMax)) {
+    minPx = kTaaPatchProbeVerticalMin;
+    maxPx = kTaaPatchProbeVerticalMax;
+    return true;
+  }
+  if (patchProbeInside(pixel, kTaaPatchProbeRightMin, kTaaPatchProbeRightMax)) {
+    minPx = kTaaPatchProbeRightMin;
+    maxPx = kTaaPatchProbeRightMax;
+    return true;
+  }
+  return false;
+}
+
+bool patchProbeBorderAny(vec2 pixel) {
+  return patchProbeBorder(pixel, kTaaPatchProbeLeftMin,
+                          kTaaPatchProbeLeftMax) ||
+         patchProbeBorder(pixel, kTaaPatchProbeCenterMin,
+                          kTaaPatchProbeCenterMax) ||
+         patchProbeBorder(pixel, kTaaPatchProbeVerticalMin,
+                          kTaaPatchProbeVerticalMax) ||
+         patchProbeBorder(pixel, kTaaPatchProbeRightMin,
+                          kTaaPatchProbeRightMax);
+}
+
+vec2 patchProbeTopLeftPixel() { return gl_FragCoord.xy; }
+
+vec2 patchProbeMarkedPixel(vec2 minPx, vec2 maxPx) {
+  return floor((minPx + maxPx) * 0.5) + vec2(0.5);
+}
+
+vec2 patchProbeMarkedUv(vec2 screenUv, vec2 uvDx, vec2 uvDy, vec2 pixel,
+                        vec2 markedPixel) {
+  const vec2 pixelDelta = markedPixel - pixel;
+  return screenUv + uvDx * pixelDelta.x + uvDy * pixelDelta.y;
+}
+
+bool patchProbeMarkedPixelGuide(vec2 pixel, vec2 markedPixel) {
+  const vec2 delta = abs(pixel - markedPixel);
+  const float armLength = 9.0;
+  const float lineWidth = 1.5;
+  const bool vertical = delta.x <= lineWidth && delta.y <= armLength;
+  const bool horizontal = delta.y <= lineWidth && delta.x <= armLength;
+  return vertical || horizontal;
+}
+
+vec4 patchProbeMetricsColor(ResolveEvaluation eval) {
+  const float historyDepthConfidence =
+      clamp(eval.historyConfidence * eval.previousDepthConfidence, 0.0, 1.0);
+  const float rejection =
+      clamp(max(eval.rejectionStrength, eval.rawClampDelta * 8.0), 0.0, 1.0);
+  return vec4(clamp(eval.currentWeight, 0.0, 1.0), historyDepthConfidence,
+              rejection, 1.0);
+}
+
+vec4 patchProbeRoiColor(ResolveEvaluation eval, vec2 pixel, vec2 minPx,
+                        vec2 maxPx) {
+  const vec2 lo = minPx - vec2(kTaaPatchProbeTolerancePx);
+  const vec2 hi = maxPx + vec2(kTaaPatchProbeTolerancePx);
+  const float width = max(hi.x - lo.x, 1.0);
+  const float height = max(hi.y - lo.y, 1.0);
+  const float x = clamp(pixel.x - lo.x, 0.0, width);
+  const float y = clamp(pixel.y - lo.y, 0.0, height);
+  const float band = x / width;
+  const int bandIndex = int(clamp(floor(band * 8.0), 0.0, 7.0));
+  const bool topRow = y < height * 0.5;
+  const float dividerWidth = 2.0;
+  if (abs(y - height * 0.5) <= dividerWidth) {
+    return vec4(1.0);
+  }
+  for (int divider = 1; divider < 8; ++divider) {
+    if (abs(x - width * (float(divider) / 8.0)) <= dividerWidth) {
+      return vec4(1.0);
+    }
+  }
+  if (bandIndex == 0) {
+    return vec4(topRow ? eval.current : eval.neighborhoodAvgColor, 1.0);
+  }
+  if (bandIndex == 1) {
+    return vec4(topRow ? eval.neighborhoodMinColor : eval.neighborhoodMaxColor,
+                1.0);
+  }
+  if (bandIndex == 2) {
+    return vec4(topRow ? eval.reprojectedHistory : eval.history, 1.0);
+  }
+  if (bandIndex == 3) {
+    return topRow ? vec4(eval.resolved, 1.0)
+                  : vec4(clamp(eval.currentWeight, 0.0, 1.0),
+                         clamp(eval.outputConfidence, 0.0, 1.0),
+                         clamp(eval.fallbackStrength, 0.0, 1.0), 1.0);
+  }
+  if (bandIndex == 4) {
+    return topRow ? vec4(clamp(eval.currentDepth, 0.0, 1.0),
+                         clamp(eval.neighborhoodMinDepth, 0.0, 1.0),
+                         clamp(eval.neighborhoodMaxDepth, 0.0, 1.0), 1.0)
+                  : vec4(clamp(eval.neighborhoodAvgDepth, 0.0, 1.0),
+                         clamp(eval.previousDepth, 0.0, 1.0),
+                         clamp(eval.rawPreviousDepthConfidence, 0.0, 1.0), 1.0);
+  }
+  if (bandIndex == 5) {
+    return topRow ? vec4(clamp(eval.previousDepthConfidence, 0.0, 1.0),
+                         eval.previousDepthRejected ? 1.0 : 0.0,
+                         eval.depthRejected ? 1.0 : 0.0, 1.0)
+                  : vec4(clamp(eval.historyConfidence, 0.0, 1.0),
+                         clamp(eval.directHistoryLock, 0.0, 1.0),
+                         eval.validHistory ? 1.0 : 0.0, 1.0);
+  }
+  if (bandIndex == 6) {
+    return topRow ? vec4(clamp(eval.historyUv, vec2(0.0), vec2(1.0)),
+                         clamp(eval.rejectionStrength, 0.0, 1.0), 1.0)
+                  : vec4(clamp(eval.previousRawUv, vec2(0.0), vec2(1.0)),
+                         clamp(eval.clampDelta * 8.0, 0.0, 1.0), 1.0);
+  }
+  if (bandIndex == 7) {
+    return topRow ? vec4(clamp(eval.rawClampDelta * 8.0, 0.0, 1.0),
+                         clamp(eval.staticClampRelax, 0.0, 1.0),
+                         clamp(eval.staticFrameFlag, 0.0, 1.0), 1.0)
+                  : vec4(clamp(eval.motionPixels / 24.0, 0.0, 1.0),
+                         clamp(eval.velocityDelta /
+                                   max(pushFloat(pc.velocityThresholdBits),
+                                       1.0e-5),
+                               0.0, 1.0),
+                         clamp(eval.velocityRejectionStrength, 0.0, 1.0), 1.0);
+  }
+  return patchProbeMetricsColor(eval);
+}
+
 void main() {
   const vec2 screenUv = taaScreenUv(uv);
+  const vec2 screenUvDx = dFdx(screenUv);
+  const vec2 screenUvDy = dFdy(screenUv);
 
   if (pc.mode == kTaaResolveModeVelocityMotionVectors ||
       pc.mode == kTaaResolveModeVelocityMagnitude) {
@@ -1080,6 +1464,12 @@ void main() {
     out_FragColor = vec4(vec3(reactiveMask(screenUv)), 1.0);
     return;
   }
+  if (pc.mode == kTaaResolveModeStabilityOwnership) {
+    out_FragColor = flagEnabled(kTaaResolveFlagStaticFrame)
+                        ? vec4(1.0, 1.0, 0.0, 1.0)
+                        : vec4(0.0, 0.0, 1.0, 1.0);
+    return;
+  }
 
   const ResolveEvaluation eval = evaluateResolve(screenUv);
 
@@ -1095,6 +1485,12 @@ void main() {
   }
   if (pc.mode == kTaaResolveModeBlendFactor) {
     out_FragColor = vec4(vec3(eval.currentWeight), 1.0);
+    return;
+  }
+  if (pc.mode == kTaaResolveModeMotionFilter) {
+    out_FragColor = vec4(clamp(eval.currentWeight, 0.0, 1.0),
+                         clamp(eval.currentFilterStrength, 0.0, 1.0),
+                         clamp(eval.motionPixels / 24.0, 0.0, 1.0), 1.0);
     return;
   }
   if (pc.mode == kTaaResolveModeClampDelta) {
@@ -1158,14 +1554,31 @@ void main() {
     return;
   }
   if (pc.mode == kTaaResolveModeStabilityDiagnostics) {
-    const float staticFrame =
-        flagEnabled(kTaaResolveFlagStaticFrame) ? 1.0 : 0.0;
-    const float fallbackBranch = clamp(
-        eval.stabilityBranch / kTaaStabilityBranchPreviousDepth, 0.0, 1.0);
-    out_FragColor =
-        vec4(staticFrame > 0.5 ? 1.0 : fallbackBranch,
-             staticFrame > 0.5 ? 1.0 : clamp(eval.stableHistoryBlend, 0.0, 1.0),
-             clamp(eval.currentWeight, 0.0, 1.0), 1.0);
+    out_FragColor = stabilityDiagnosticsColor(eval);
+    return;
+  }
+  if (pc.mode == kTaaResolveModePatchProbe) {
+    const vec2 probePixel = patchProbeTopLeftPixel();
+    vec2 probeMin = vec2(0.0);
+    vec2 probeMax = vec2(0.0);
+    if (patchProbeBorderAny(probePixel)) {
+      out_FragColor = vec4(1.0);
+      return;
+    }
+    if (patchProbeRegion(probePixel, probeMin, probeMax)) {
+      const vec2 markedPixel = patchProbeMarkedPixel(probeMin, probeMax);
+      if (patchProbeMarkedPixelGuide(probePixel, markedPixel)) {
+        out_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+        return;
+      }
+      const vec2 markedUv = patchProbeMarkedUv(screenUv, screenUvDx, screenUvDy,
+                                               probePixel, markedPixel);
+      const ResolveEvaluation markedEval = evaluateResolve(markedUv);
+      out_FragColor =
+          patchProbeRoiColor(markedEval, probePixel, probeMin, probeMax);
+      return;
+    }
+    out_FragColor = vec4(eval.resolved * 0.20, 1.0);
     return;
   }
   if (pc.mode == kTaaResolveModePixelInspector) {
@@ -1198,6 +1611,7 @@ void main() {
     return;
   }
 
-  out_FragColor =
-      vec4(eval.resolved * eval.outputConfidence, eval.outputConfidence);
+  const vec3 resolved = sanitizeSceneColor(eval.resolved);
+  const float outputConfidence = sanitizeUnit(eval.outputConfidence, 0.0);
+  out_FragColor = vec4(resolved * outputConfidence, outputConfidence);
 }

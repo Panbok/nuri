@@ -88,8 +88,15 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   const AntiAliasingMode mode =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode);
-  const AntiAliasingDebugView debugView =
+  const AntiAliasingDebugView rawDebugView =
       sanitizeAntiAliasingDebugView(settings.antiAliasing.debug.view);
+  if (isSpatialAADebugView(rawDebugView)) {
+    return true;
+  }
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings.antiAliasing);
+  const AntiAliasingDebugView debugView =
+      sanitizeAntiAliasingDebugView(aaDebug.view);
   if (isSpatialAADebugView(debugView)) {
     return true;
   }
@@ -97,8 +104,7 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
     return true;
   }
   if (mode == AntiAliasingMode::MSAA4x) {
-    return settings.antiAliasing.debug.spatialPostMsaaCleanup &&
-           !isTaaDebugView(debugView);
+    return aaDebug.spatialPostMsaaCleanup && !isTaaDebugView(debugView);
   }
   if (mode != AntiAliasingMode::TAA || isTaaDebugView(debugView)) {
     return false;
@@ -106,8 +112,8 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
   const bool fallbackWindow =
       !frame.camera.historyValid ||
       frame.camera.framesSinceHistoryReset < frame.camera.jitterSequenceLength;
-  return fallbackWindow || (!frame.camera.jitterEnabled &&
-                            settings.antiAliasing.debug.spatialPostTaaCleanup);
+  return fallbackWindow ||
+         (!frame.camera.jitterEnabled && aaDebug.spatialPostTaaCleanup);
 }
 
 [[nodiscard]] inline bool
@@ -115,14 +121,14 @@ shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   const AntiAliasingMode mode =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode);
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings.antiAliasing);
   const AntiAliasingDebugView debugView =
-      sanitizeAntiAliasingDebugView(settings.antiAliasing.debug.view);
-  const bool jitteredPostTaaTransmission =
-      frame.camera.jitterEnabled &&
-      frame.metrics.antiAliasing.taaTransmissionPostResolveSceneColorConsumed;
+      sanitizeAntiAliasingDebugView(aaDebug.view);
+  const bool jitteredTaaFrame = frame.camera.jitterEnabled;
   return mode == AntiAliasingMode::TAA && settings.transparent.enabled &&
-         settings.antiAliasing.debug.transparentPostTaaSpatialCleanup &&
-         !jitteredPostTaaTransmission && !isAADebugOutputView(debugView) &&
+         aaDebug.transparentPostTaaSpatialCleanup && !jitteredTaaFrame &&
+         !isAADebugOutputView(debugView) &&
          frame.metrics.antiAliasing.taaResolvedSceneColorPublished &&
          frame.metrics.antiAliasing.taaTransparentPostTaaDrawCount > 0u;
 }
@@ -145,12 +151,14 @@ isSpatialCleanupActive(const RenderFrameContext &frame) noexcept {
   const RenderSettings &settings = renderSettingsOrDefault(frame);
   const AntiAliasingMode mode =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode);
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings.antiAliasing);
   if (mode == AntiAliasingMode::MSAA4x) {
-    return settings.antiAliasing.debug.spatialPostMsaaCleanup;
+    return aaDebug.spatialPostMsaaCleanup;
   }
   return mode == AntiAliasingMode::TAA &&
-         settings.antiAliasing.debug.spatialPostTaaCleanup &&
-         !frame.camera.jitterEnabled && !isSpatialFallbackActive(frame);
+         aaDebug.spatialPostTaaCleanup && !frame.camera.jitterEnabled &&
+         !isSpatialFallbackActive(frame);
 }
 
 [[nodiscard]] inline bool
@@ -637,9 +645,11 @@ bool SpatialAAPass::isEnabled(const FrameBuildContext &ctx) const {
 
 Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
   if (placement_ == SpatialAAPlacement::PostTransparent) {
+    const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+    const RenderSettings::AntiAliasingDebugSettings aaDebug =
+        effectiveTemporalAADebugSettings(settings.antiAliasing);
     ctx.frame.metrics.antiAliasing.taaTransparentPostSpatialCleanupEnabled =
-        renderSettingsOrDefault(ctx.frame)
-            .antiAliasing.debug.transparentPostTaaSpatialCleanup;
+        aaDebug.transparentPostTaaSpatialCleanup;
   }
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(true);
@@ -649,9 +659,11 @@ Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
 
 Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   if (placement_ == SpatialAAPlacement::PostTransparent) {
+    const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+    const RenderSettings::AntiAliasingDebugSettings aaDebug =
+        effectiveTemporalAADebugSettings(settings.antiAliasing);
     ctx.frame.metrics.antiAliasing.taaTransparentPostSpatialCleanupEnabled =
-        renderSettingsOrDefault(ctx.frame)
-            .antiAliasing.debug.transparentPostTaaSpatialCleanup;
+        aaDebug.transparentPostTaaSpatialCleanup;
   }
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(false);
@@ -726,9 +738,11 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       1.0f / static_cast<float>(std::max(dimensions.width, 1u));
   const float inverseHeight =
       1.0f / static_cast<float>(std::max(dimensions.height, 1u));
-  const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
-      renderSettingsOrDefault(ctx.frame).antiAliasing.debug.view);
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  const RenderSettings::AntiAliasingDebugSettings aaDebug =
+      effectiveTemporalAADebugSettings(settings.antiAliasing);
+  const AntiAliasingDebugView debugView =
+      sanitizeAntiAliasingDebugView(aaDebug.view);
   const AntiAliasingMode aaMode =
       sanitizeAntiAliasingMode(settings.antiAliasing.mode);
   const bool fallbackActive =
@@ -773,14 +787,13 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     aaMetrics.spatialAAGpuTimingAvailable = 1u;
   }
   aaMetrics.taaTransparentPostSpatialCleanupEnabled =
-      settings.antiAliasing.debug.transparentPostTaaSpatialCleanup;
+      aaDebug.transparentPostTaaSpatialCleanup;
   if (!postTransparent) {
     aaMetrics.spatialAAEnabled = true;
     aaMetrics.spatialAAFallbackActive = fallbackActive;
     aaMetrics.spatialAACleanupActive = cleanupActive;
     aaMetrics.msaaSpatialCleanupEnabled =
-        aaMode == AntiAliasingMode::MSAA4x &&
-        settings.antiAliasing.debug.spatialPostMsaaCleanup;
+        aaMode == AntiAliasingMode::MSAA4x && aaDebug.spatialPostMsaaCleanup;
     aaMetrics.msaaSpatialCleanupActive =
         aaMode == AntiAliasingMode::MSAA4x && cleanupActive;
     aaMetrics.spatialAAWidth = dimensions.width;

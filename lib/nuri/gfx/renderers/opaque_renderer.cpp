@@ -3127,7 +3127,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
       DrawItem shadeDraw = source;
       shadeDraw.useDepthState = true;
-      shadeDraw.depthState = {.compareOp = CompareOp::Equal,
+      shadeDraw.depthState = {.compareOp = CompareOp::LessEqual,
                               .isDepthWriteEnabled = false};
       passDrawItems_.push_back(shadeDraw);
     }
@@ -3235,7 +3235,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       DrawItem normalDraw = source;
       normalDraw.pipeline = normalPipeline;
       normalDraw.useDepthState = true;
-      normalDraw.depthState = {.compareOp = CompareOp::Equal,
+      normalDraw.depthState = {.compareOp = CompareOp::LessEqual,
                                .isDepthWriteEnabled = false};
       normalDraw.debugLabel = "OpaqueMaterialNormals";
       normalDraw.debugColor = 0xff66ddff;
@@ -4083,7 +4083,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       DrawItem reactiveItem = sourceItem;
       reactiveItem.pipeline = reactivePipeline;
       reactiveItem.useDepthState = true;
-      reactiveItem.depthState = {.compareOp = CompareOp::Equal,
+      reactiveItem.depthState = {.compareOp = CompareOp::LessEqual,
                                  .isDepthWriteEnabled = false};
       reactiveItem.debugLabel = "OpaqueReactiveMask";
       reactiveItem.debugColor = 0xff33cc88;
@@ -4182,7 +4182,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       DrawItem velocityItem = sourceItem;
       velocityItem.pipeline = velocityPipeline;
       velocityItem.useDepthState = true;
-      velocityItem.depthState = {.compareOp = CompareOp::Equal,
+      velocityItem.depthState = {.compareOp = CompareOp::LessEqual,
                                  .isDepthWriteEnabled = false};
       velocityItem.debugLabel = "OpaqueVelocity";
       velocityItem.debugColor = 0xff44aaff;

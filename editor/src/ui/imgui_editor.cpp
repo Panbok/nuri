@@ -72,13 +72,15 @@ constexpr std::array<const char *, 3> kTextureFilterModeLabels = {
     "Bilinear", "Trilinear", "Anisotropic"};
 constexpr std::array<const char *, 4> kAntiAliasingModeLabels = {
     "None", "TAA", "Spatial Fallback", "MSAA 4x"};
+constexpr std::array<const char *, 5> kTemporalAAQualityPresetLabels = {
+    "Performance", "Balanced", "Quality", "Ultra", "Custom"};
 constexpr std::array<const char *, 2> kAmbientOcclusionModeLabels = {"Disabled",
                                                                      "GTAO"};
 constexpr std::array<const char *, 5> kAmbientOcclusionPresetLabels = {
     "Low", "Balanced", "High", "Ultra", "Custom"};
 constexpr std::array<const char *, 4> kAmbientOcclusionDebugViewLabels = {
     "None", "Visibility", "Bent Normal", "Normals"};
-constexpr std::array<const char *, 33> kAntiAliasingDebugViewLabels = {
+constexpr std::array<const char *, 36> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
     "Motion Vectors",
@@ -108,6 +110,9 @@ constexpr std::array<const char *, 33> kAntiAliasingDebugViewLabels = {
     "TAA Temporal Confidence",
     "TAA Previous Depth Rejection",
     "TAA Stability Diagnostics",
+    "TAA Stability Ownership",
+    "TAA Patch Probe",
+    "TAA Motion Filter",
     "Spatial AA Edges",
     "Spatial AA Blend Weights",
     "Spatial AA Cleanup Mask",
@@ -308,6 +313,22 @@ const char *antiAliasingModeDisplayName(AntiAliasingMode mode) {
   return "Unknown";
 }
 
+const char *temporalAAQualityPresetDisplayName(TemporalAAQualityPreset preset) {
+  switch (sanitizeTemporalAAQualityPreset(preset)) {
+  case TemporalAAQualityPreset::Performance:
+    return kTemporalAAQualityPresetLabels[0];
+  case TemporalAAQualityPreset::Balanced:
+    return kTemporalAAQualityPresetLabels[1];
+  case TemporalAAQualityPreset::Quality:
+    return kTemporalAAQualityPresetLabels[2];
+  case TemporalAAQualityPreset::Ultra:
+    return kTemporalAAQualityPresetLabels[3];
+  case TemporalAAQualityPreset::Custom:
+    return kTemporalAAQualityPresetLabels[4];
+  }
+  return "Unknown";
+}
+
 const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
   switch (sanitizeAntiAliasingDebugView(view)) {
   case AntiAliasingDebugView::None:
@@ -376,6 +397,12 @@ const char *antiAliasingDebugViewDisplayName(AntiAliasingDebugView view) {
     return "TAA Previous Depth Rejection";
   case AntiAliasingDebugView::TAAStabilityDiagnostics:
     return "TAA Stability Diagnostics";
+  case AntiAliasingDebugView::TAAStabilityOwnership:
+    return "TAA Stability Ownership";
+  case AntiAliasingDebugView::TAAPatchProbe:
+    return "TAA Patch Probe";
+  case AntiAliasingDebugView::TAAMotionFilter:
+    return "TAA Motion Filter";
   }
   return "Unknown";
 }
@@ -2207,8 +2234,12 @@ bool hasTemporalAAFeature(RenderPipeline *renderPipeline) {
 std::string antiAliasingSettingsSummary(
     const RenderSettings::AntiAliasingSettings &settings,
     bool temporalFeaturePresent) {
+  const RenderSettings::AntiAliasingDebugSettings effectiveDebug =
+      effectiveTemporalAADebugSettings(settings);
   std::string summary = "AA mode=";
   summary += antiAliasingModeDisplayName(settings.mode);
+  summary += " taaPreset=";
+  summary += temporalAAQualityPresetDisplayName(settings.qualityPreset);
   summary += " jitter=";
   summary += settings.debug.jitterEnabled ? "enabled" : "disabled";
   summary += " freezeJitter=";
@@ -2220,34 +2251,35 @@ std::string antiAliasingSettingsSummary(
   summary += " debugView=";
   summary += antiAliasingDebugViewDisplayName(settings.debug.view);
   summary += " taaJitterScale=";
-  summary += std::format("{:.2f}", settings.debug.taaJitterScale);
+  summary += std::format("{:.2f}", effectiveDebug.taaJitterScale);
   summary += " taaCurrentWeight=";
-  summary += std::format("{:.2f}", settings.debug.taaCurrentFrameWeight);
+  summary += std::format("{:.2f}", effectiveDebug.taaCurrentFrameWeight);
   summary += " taaSharpen=";
-  summary += settings.debug.taaSharpenEnabled ? "enabled" : "disabled";
+  summary += effectiveDebug.taaSharpenEnabled ? "enabled" : "disabled";
   summary += " taaSharpenStrength=";
-  summary += std::format("{:.2f}", settings.debug.taaSharpenStrength);
+  summary += std::format("{:.2f}", effectiveDebug.taaSharpenStrength);
   summary += " taaMaterialMipBias=";
-  summary += settings.debug.taaMaterialMipBiasEnabled ? "enabled" : "disabled";
+  summary +=
+      effectiveDebug.taaMaterialMipBiasEnabled ? "enabled" : "disabled";
   summary += "/";
-  summary += std::format("{:.2f}", settings.debug.taaMaterialMipBias);
+  summary += std::format("{:.2f}", effectiveDebug.taaMaterialMipBias);
   summary += " transparentPostTaaSpatialCleanup=";
   summary +=
-      settings.debug.transparentPostTaaSpatialCleanup ? "enabled" : "disabled";
+      effectiveDebug.transparentPostTaaSpatialCleanup ? "enabled" : "disabled";
   summary += " spatialPostTaaCleanup=";
-  summary += settings.debug.spatialPostTaaCleanup ? "enabled" : "disabled";
+  summary += effectiveDebug.spatialPostTaaCleanup ? "enabled" : "disabled";
   summary += " taaMotionWeight=";
-  summary += std::format("{:.2f}", settings.debug.taaMotionCurrentWeight);
+  summary += std::format("{:.2f}", effectiveDebug.taaMotionCurrentWeight);
   summary += " taaClampWeight=";
-  summary += std::format("{:.2f}", settings.debug.taaClampCurrentWeight);
+  summary += std::format("{:.2f}", effectiveDebug.taaClampCurrentWeight);
   summary += " taaHistoryFilter=";
   summary += temporalAAHistoryFilterModeDisplayName(
-      settings.debug.taaHistoryFilterMode);
+      effectiveDebug.taaHistoryFilterMode);
   summary += " taaClampMode=";
-  summary += temporalAAClampModeDisplayName(settings.debug.taaClampMode);
+  summary += temporalAAClampModeDisplayName(effectiveDebug.taaClampMode);
   summary += " taaHdrWeighting=";
   summary +=
-      temporalAAHdrWeightingModeDisplayName(settings.debug.taaHdrWeightingMode);
+      temporalAAHdrWeightingModeDisplayName(effectiveDebug.taaHdrWeightingMode);
   summary += " resetHistoryRequested=";
   summary += settings.debug.resetHistoryRequested ? "true" : "false";
   summary += " temporalFeaturePresent=";
@@ -2316,13 +2348,15 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       "transparentContributors={} "
       "transparentFixed={} transparentEdgeJitter={:.3f} "
       "overlayPostTaaDraws={} overlayContaminationFrames={} "
-      "jitterScale={:.2f} currentWeight={:.3f} "
+      "jitterScale={:.2f} preset={} currentWeight={:.3f} "
       "historyWeight={:.3f} motionWeight={:.3f} clampWeight={:.3f} "
       "historyFilter={} historyTextureValid={} "
       "oobReprojectionMeasured=false qualityValidation={} "
       "currentFallbackFrames={} bandwidthBytes={} resolvedSceneColor={} "
       "debugViewRendered={} historyValidityView={} pixelInspectorView={} "
-      "stabilityDiagnosticsView={} oobFallback={} bilinearHistory={} "
+      "stabilityDiagnosticsView={} stabilityOwnershipView={} patchProbeView={} "
+      "motionFilterView={} "
+      "oobFallback={} bilinearHistory={} "
       "depthReject={} depthThreshold={:.4f} "
       "previousDepthReject={} velocityReject={} "
       "staticVelocitySanitization={} velocityThresholdPx={:.2f} "
@@ -2406,6 +2440,7 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       metrics.taaTransparentEdgeJitterEstimate,
       metrics.taaOverlayPostTaaDrawCount,
       metrics.taaOverlayHistoryContaminationFrameCount, metrics.taaJitterScale,
+      temporalAAQualityPresetDisplayName(metrics.taaQualityPreset),
       metrics.taaCurrentFrameWeight, metrics.taaHistoryFrameWeight,
       metrics.taaMotionCurrentWeight, metrics.taaClampCurrentWeight,
       temporalAAHistoryFilterModeDisplayName(metrics.taaHistoryFilterMode),
@@ -2420,6 +2455,9 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       boolLogValue(metrics.taaHistoryValidityDebugViewRendered),
       boolLogValue(metrics.taaPixelInspectorDebugViewRendered),
       boolLogValue(metrics.taaStabilityDiagnosticsDebugViewRendered),
+      boolLogValue(metrics.taaStabilityOwnershipDebugViewRendered),
+      boolLogValue(metrics.taaPatchProbeDebugViewRendered),
+      boolLogValue(metrics.taaMotionFilterDebugViewRendered),
       boolLogValue(metrics.taaOutOfBoundsFallbackEnabled),
       boolLogValue(metrics.taaBilinearHistorySampling),
       boolLogValue(metrics.taaDepthRejectionEnabled),
@@ -2576,36 +2614,66 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   const bool temporalControlsDisabled =
       sanitizeAntiAliasingMode(aa.mode) != AntiAliasingMode::TAA;
   ImGui::BeginDisabled(temporalControlsDisabled);
+  int presetIndex = static_cast<int>(aa.qualityPreset);
+  presetIndex = std::clamp(
+      presetIndex, 0,
+      static_cast<int>(kTemporalAAQualityPresetLabels.size()) - 1);
+  if (ImGui::Combo("TAA Quality Preset##AntiAliasing", &presetIndex,
+                   kTemporalAAQualityPresetLabels.data(),
+                   static_cast<int>(kTemporalAAQualityPresetLabels.size()))) {
+    aa.qualityPreset = static_cast<TemporalAAQualityPreset>(presetIndex);
+    sanitizeAntiAliasingSettings(aa);
+  }
+  const bool customTemporalPreset =
+      sanitizeTemporalAAQualityPreset(aa.qualityPreset) ==
+      TemporalAAQualityPreset::Custom;
+  ImGui::BeginDisabled(customTemporalPreset);
+  if (ImGui::Button("Copy Preset to Custom##AntiAliasing")) {
+    copyTemporalAAQualityPresetToCustom(aa);
+  }
+  ImGui::EndDisabled();
   ImGui::Checkbox("Jitter Enabled##AntiAliasing", &aa.debug.jitterEnabled);
   ImGui::Checkbox("Freeze Jitter##AntiAliasing", &aa.debug.freezeJitter);
   ImGui::Checkbox("Log TAA Diagnostics##AntiAliasing",
                   &aa.debug.logDiagnostics);
-  ImGui::Checkbox("Post-TAA Spatial Cleanup##AntiAliasing",
-                  &aa.debug.spatialPostTaaCleanup);
-  ImGui::Checkbox("Transparent Post-TAA Spatial Cleanup##AntiAliasing",
-                  &aa.debug.transparentPostTaaSpatialCleanup);
-  ImGui::Checkbox("TAA Sharpen##AntiAliasing", &aa.debug.taaSharpenEnabled);
-  ImGui::Checkbox("TAA Material Mip Bias##AntiAliasing",
-                  &aa.debug.taaMaterialMipBiasEnabled);
   ImGui::SliderFloat("TAA Log Interval##AntiAliasing",
                      &aa.debug.diagnosticLogIntervalSeconds, 0.033f, 5.0f,
                      "%.2f s");
-  ImGui::SliderFloat("TAA Jitter Scale##AntiAliasing", &aa.debug.taaJitterScale,
-                     0.0f, 1.0f, "%.2f");
+  ImGui::EndDisabled();
+
+  RenderSettings::AntiAliasingDebugSettings effectiveDebug =
+      effectiveTemporalAADebugSettings(aa);
+  RenderSettings::AntiAliasingDebugSettings presetPreview = effectiveDebug;
+  RenderSettings::AntiAliasingDebugSettings *tuningDebug =
+      customTemporalPreset ? &aa.debug : &presetPreview;
+  ImGui::BeginDisabled(temporalControlsDisabled || !customTemporalPreset);
+  ImGui::Checkbox("Post-TAA Spatial Cleanup##AntiAliasing",
+                  &tuningDebug->spatialPostTaaCleanup);
+  ImGui::Checkbox("Transparent Post-TAA Spatial Cleanup##AntiAliasing",
+                  &tuningDebug->transparentPostTaaSpatialCleanup);
+  ImGui::Checkbox("TAA Sharpen##AntiAliasing",
+                  &tuningDebug->taaSharpenEnabled);
+  ImGui::Checkbox("TAA Material Mip Bias##AntiAliasing",
+                  &tuningDebug->taaMaterialMipBiasEnabled);
+  ImGui::SliderFloat("TAA Jitter Scale##AntiAliasing",
+                     &tuningDebug->taaJitterScale, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Current Weight##AntiAliasing",
-                     &aa.debug.taaCurrentFrameWeight, 0.0f, 1.0f, "%.2f");
+                     &tuningDebug->taaCurrentFrameWeight, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Sharpen Strength##AntiAliasing",
-                     &aa.debug.taaSharpenStrength, 0.0f, 1.0f, "%.2f");
+                     &tuningDebug->taaSharpenStrength, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Sharpen Confidence##AntiAliasing",
-                     &aa.debug.taaSharpenConfidenceThreshold, 0.0f, 1.0f,
+                     &tuningDebug->taaSharpenConfidenceThreshold, 0.0f, 1.0f,
                      "%.2f");
   ImGui::SliderFloat("TAA Material Mip Bias Value##AntiAliasing",
-                     &aa.debug.taaMaterialMipBias, -1.0f, 0.0f, "%.2f");
+                     &tuningDebug->taaMaterialMipBias, -1.0f, 0.0f, "%.2f");
   ImGui::SliderFloat("TAA Motion Current Weight##AntiAliasing",
-                     &aa.debug.taaMotionCurrentWeight, 0.0f, 1.0f, "%.2f");
+                     &tuningDebug->taaMotionCurrentWeight, 0.0f, 1.0f,
+                     "%.2f");
   ImGui::SliderFloat("TAA Clamp Current Weight##AntiAliasing",
-                     &aa.debug.taaClampCurrentWeight, 0.0f, 1.0f, "%.2f");
-  int historyFilterModeIndex = static_cast<int>(aa.debug.taaHistoryFilterMode);
+                     &tuningDebug->taaClampCurrentWeight, 0.0f, 1.0f,
+                     "%.2f");
+  int historyFilterModeIndex =
+      static_cast<int>(tuningDebug->taaHistoryFilterMode);
   historyFilterModeIndex = std::clamp(
       historyFilterModeIndex, 0,
       static_cast<int>(kTemporalAAHistoryFilterModeLabels.size()) - 1);
@@ -2613,34 +2681,38 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
           "TAA History Filter##AntiAliasing", &historyFilterModeIndex,
           kTemporalAAHistoryFilterModeLabels.data(),
           static_cast<int>(kTemporalAAHistoryFilterModeLabels.size()))) {
-    aa.debug.taaHistoryFilterMode =
+    tuningDebug->taaHistoryFilterMode =
         static_cast<TemporalAAHistoryFilterMode>(historyFilterModeIndex);
   }
   ImGui::SliderFloat("TAA Depth Reject##AntiAliasing",
-                     &aa.debug.taaDepthDiscontinuityThreshold, 0.0f, 0.1f,
+                     &tuningDebug->taaDepthDiscontinuityThreshold, 0.0f, 0.1f,
                      "%.4f");
   ImGui::SliderFloat("TAA Velocity Reject (px)##AntiAliasing",
-                     &aa.debug.taaVelocityRejectionThreshold, 0.0f, 16.0f,
+                     &tuningDebug->taaVelocityRejectionThreshold, 0.0f, 16.0f,
                      "%.2f");
   ImGui::SliderFloat("TAA Motion Blend / px##AntiAliasing",
-                     &aa.debug.taaVelocityBlendScale, 0.0f, 4.0f, "%.2f");
+                     &tuningDebug->taaVelocityBlendScale, 0.0f, 4.0f,
+                     "%.2f");
   ImGui::SliderFloat("TAA Disocclusion Weight##AntiAliasing",
-                     &aa.debug.taaDisocclusionCurrentWeight, 0.0f, 1.0f,
+                     &tuningDebug->taaDisocclusionCurrentWeight, 0.0f, 1.0f,
                      "%.2f");
   ImGui::SliderFloat("TAA Clamp Attenuation##AntiAliasing",
-                     &aa.debug.taaClampBlendAttenuation, 0.0f, 1.0f, "%.2f");
-  int clampModeIndex = static_cast<int>(aa.debug.taaClampMode);
+                     &tuningDebug->taaClampBlendAttenuation, 0.0f, 1.0f,
+                     "%.2f");
+  int clampModeIndex = static_cast<int>(tuningDebug->taaClampMode);
   clampModeIndex =
       std::clamp(clampModeIndex, 0,
                  static_cast<int>(kTemporalAAClampModeLabels.size()) - 1);
   if (ImGui::Combo("TAA Clamp Mode##AntiAliasing", &clampModeIndex,
                    kTemporalAAClampModeLabels.data(),
                    static_cast<int>(kTemporalAAClampModeLabels.size()))) {
-    aa.debug.taaClampMode = static_cast<TemporalAAClampMode>(clampModeIndex);
+    tuningDebug->taaClampMode =
+        static_cast<TemporalAAClampMode>(clampModeIndex);
   }
   ImGui::SliderFloat("TAA Variance Gamma##AntiAliasing",
-                     &aa.debug.taaVarianceGamma, 0.0f, 4.0f, "%.2f");
-  int hdrWeightingModeIndex = static_cast<int>(aa.debug.taaHdrWeightingMode);
+                     &tuningDebug->taaVarianceGamma, 0.0f, 4.0f, "%.2f");
+  int hdrWeightingModeIndex =
+      static_cast<int>(tuningDebug->taaHdrWeightingMode);
   hdrWeightingModeIndex = std::clamp(
       hdrWeightingModeIndex, 0,
       static_cast<int>(kTemporalAAHdrWeightingModeLabels.size()) - 1);
@@ -2648,16 +2720,18 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
           "TAA HDR Weighting##AntiAliasing", &hdrWeightingModeIndex,
           kTemporalAAHdrWeightingModeLabels.data(),
           static_cast<int>(kTemporalAAHdrWeightingModeLabels.size()))) {
-    aa.debug.taaHdrWeightingMode =
+    tuningDebug->taaHdrWeightingMode =
         static_cast<TemporalAAHdrWeightingMode>(hdrWeightingModeIndex);
   }
   ImGui::SliderFloat("TAA HDR Weight Strength##AntiAliasing",
-                     &aa.debug.taaHdrWeightStrength, 0.0f, 1.0f, "%.2f");
+                     &tuningDebug->taaHdrWeightStrength, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Reactive Current Weight##AntiAliasing",
-                     &aa.debug.taaReactiveCurrentWeight, 0.0f, 1.0f, "%.2f");
+                     &tuningDebug->taaReactiveCurrentWeight, 0.0f, 1.0f,
+                     "%.2f");
   ImGui::SliderFloat("TAA Reactive Strength##AntiAliasing",
-                     &aa.debug.taaReactiveStrength, 0.0f, 4.0f, "%.2f");
-  int dilationModeIndex = static_cast<int>(aa.debug.taaVelocityDilationMode);
+                     &tuningDebug->taaReactiveStrength, 0.0f, 4.0f, "%.2f");
+  int dilationModeIndex =
+      static_cast<int>(tuningDebug->taaVelocityDilationMode);
   dilationModeIndex = std::clamp(
       dilationModeIndex, 0,
       static_cast<int>(kTemporalAAVelocityDilationModeLabels.size()) - 1);
@@ -2665,12 +2739,12 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
           "TAA Velocity Dilation##AntiAliasing", &dilationModeIndex,
           kTemporalAAVelocityDilationModeLabels.data(),
           static_cast<int>(kTemporalAAVelocityDilationModeLabels.size()))) {
-    aa.debug.taaVelocityDilationMode =
+    tuningDebug->taaVelocityDilationMode =
         static_cast<TemporalAAVelocityDilationMode>(dilationModeIndex);
   }
   ImGui::SliderFloat("TAA Dilation Depth Threshold##AntiAliasing",
-                     &aa.debug.taaVelocityDilationDepthThreshold, 0.0f, 0.1f,
-                     "%.4f");
+                     &tuningDebug->taaVelocityDilationDepthThreshold, 0.0f,
+                     0.1f, "%.4f");
   ImGui::EndDisabled();
   if (temporalControlsDisabled) {
     aa.debug.jitterEnabled = false;
@@ -2705,6 +2779,8 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   const bool temporalFeaturePresent = hasTemporalAAFeature(renderPipeline);
   ImGui::Separator();
   ImGui::Text("Active Mode: %s", antiAliasingModeDisplayName(aa.mode));
+  ImGui::Text("TAA Preset: %s",
+              temporalAAQualityPresetDisplayName(aa.qualityPreset));
   ImGui::Text("Jitter: %s", aa.debug.jitterEnabled ? "enabled" : "disabled");
   ImGui::Text("Freeze Jitter: %s", aa.debug.freezeJitter ? "yes" : "no");
   ImGui::Text("Interval Log: %s every %.2f s",
@@ -2727,6 +2803,8 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     const std::string_view hudResetReason =
         temporalHistoryResetReasonName(metrics.historyResetReason);
     ImGui::Text("Mode: %s", antiAliasingModeDisplayName(aa.mode));
+    ImGui::Text("Preset: %s",
+                temporalAAQualityPresetDisplayName(metrics.taaQualityPreset));
     ImGui::Text("View: %s", antiAliasingDebugViewDisplayName(aa.debug.view));
     ImGui::Text("Jitter: %u / %u  History: %s", metrics.jitterIndex,
                 metrics.jitterSequenceLength,
@@ -3149,6 +3227,15 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     ImGui::Text("Stability Diagnostics View: %s",
                 metrics.taaStabilityDiagnosticsDebugViewRendered ? "rendered"
                                                                  : "inactive");
+    ImGui::Text("Stability Ownership View: %s",
+                metrics.taaStabilityOwnershipDebugViewRendered ? "rendered"
+                                                               : "inactive");
+    ImGui::Text("Patch Probe View: %s",
+                metrics.taaPatchProbeDebugViewRendered ? "rendered"
+                                                       : "inactive");
+    ImGui::Text("Motion Filter View: %s",
+                metrics.taaMotionFilterDebugViewRendered ? "rendered"
+                                                         : "inactive");
   }
   if (ImGui::Button("Dump AA Diagnostics To Log##AntiAliasing")) {
     const std::string summary = antiAliasingDiagnosticsSummary(

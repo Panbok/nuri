@@ -100,6 +100,12 @@ settingsOrDefault(const RenderFrameContext &frame) {
   return frame.settings ? *frame.settings : kDefaultSettings;
 }
 
+[[nodiscard]] bool
+isAntiAliasingDebugOutputView(AntiAliasingDebugView view) noexcept {
+  return view != AntiAliasingDebugView::None &&
+         view != AntiAliasingDebugView::Settings;
+}
+
 const AnimationSceneFrameData *
 resolveAnimationSceneFrameData(const RenderFrameContext &frame) {
   if (!frame.sharedResources.animationSceneGpuData.has_value()) {
@@ -712,6 +718,12 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
 Result<bool, std::string>
 TransparentRenderer::appendTransparentMainPass(RenderFrameContext &frame,
                                                RenderGraphBuilder &graph) {
+  const AntiAliasingDebugView debugView = sanitizeAntiAliasingDebugView(
+      settingsOrDefault(frame).antiAliasing.debug.view);
+  if (isAntiAliasingDebugOutputView(debugView)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
   const TextureHandle depthTexture = resolveFrameDepthTexture(frame);
   const TextureHandle colorTexture = resolveFrameColorTexture(frame);
   const RenderGraphTextureId sceneDepthGraphTexture =
