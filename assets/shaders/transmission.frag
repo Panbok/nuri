@@ -313,24 +313,10 @@ void main() {
     discard;
   }
 
-  if ((pc.frameData.flags & kFrameDataFlagHasAmbientOcclusion) != 0u) {
-    const uint aoDebugView = getAmbientOcclusionDebugView(pc.frameData);
-    if (aoDebugView == kAmbientOcclusionDebugViewVisibility) {
-      out_FragColor = vec4(vec3(sm.screenAo), 1.0);
-      return;
-    }
-    if (aoDebugView == kAmbientOcclusionDebugViewBentNormal) {
-      vec3 bentNormal = sm.ambientBentNormal;
-      float bentNormalLen = length(bentNormal);
-      bentNormal =
-          bentNormalLen < 1.0e-6 ? sm.nBase : bentNormal / bentNormalLen;
-      out_FragColor = vec4(bentNormal * 0.5 + 0.5, 1.0);
-      return;
-    }
-    if (aoDebugView == kAmbientOcclusionDebugViewNormals) {
-      out_FragColor = vec4(normalize(sm.nBase) * 0.5 + 0.5, 1.0);
-      return;
-    }
+  vec4 aoDebugColor;
+  if (tryAmbientOcclusionDebugColor(pc.frameData, sm, aoDebugColor)) {
+    out_FragColor = aoDebugColor;
+    return;
   }
 
   // Direct lighting ---------------------------------------------------

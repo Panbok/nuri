@@ -2242,6 +2242,9 @@ struct AmbientOcclusionFrameMetrics {
   uint32_t denoisePassCount = 0u;
   uint32_t temporalPassCount = 0u;
   uint32_t depthMipCount = 0u;
+  uint32_t requestedSliceCount = 0u;
+  uint32_t requestedStepCount = 0u;
+  uint32_t requestedDenoisePassCount = 0u;
   uint32_t sliceCount = 0u;
   uint32_t stepCount = 0u;
   uint32_t textureCount = 0u;
@@ -2267,6 +2270,7 @@ struct AmbientOcclusionFrameMetrics {
   bool ambientOcclusionGraphPublished = false;
   bool temporalAccumulationEnabled = false;
   bool temporalAccumulationActive = false;
+  bool temporalHistoryInvalidated = false;
   bool temporalHistoryValid = false;
   bool temporalMotionVectorsConsumed = false;
   bool scalarAoAvailable = false;

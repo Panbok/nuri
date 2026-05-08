@@ -31,6 +31,8 @@ public:
   [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
+  void observeTemporalPolicy(
+      const RenderSettings::AmbientOcclusionSettings &ao) noexcept;
 
   static constexpr uint32_t kViewDepthMipCount = 5u;
 
@@ -67,6 +69,9 @@ private:
   uint32_t scratchWidth_ = 0u;
   uint32_t scratchHeight_ = 0u;
   uint32_t scratchRingCount_ = 0u;
+  uint64_t lastTemporalPolicySignature_ = 0u;
+  bool hasLastTemporalPolicySignature_ = false;
+  bool temporalPolicyChanged_ = false;
 
   std::array<TextureHandle, 8> depthPrefilterDependencies_{};
   std::array<RenderGraphAccessMode, 8> depthPrefilterAccessModes_{};

@@ -2143,8 +2143,12 @@ void drawAmbientOcclusionSettings(
     ImGui::Text("Passes: depth %u, main %u, denoise %u, temporal %u",
                 metrics.depthPrefilterPassCount, metrics.mainPassCount,
                 metrics.denoisePassCount, metrics.temporalPassCount);
-    ImGui::Text("Sampling: slices %u, steps %u, mips %u", metrics.sliceCount,
-                metrics.stepCount, metrics.depthMipCount);
+    ImGui::Text("Requested Sampling: slices %u, steps %u, denoise %u",
+                metrics.requestedSliceCount, metrics.requestedStepCount,
+                metrics.requestedDenoisePassCount);
+    ImGui::Text("Effective Sampling: slices %u, steps %u, denoise %u, mips %u",
+                metrics.sliceCount, metrics.stepCount, metrics.denoisePassCount,
+                metrics.depthMipCount);
     ImGui::Text(
         "GPU Time: %.3f ms (%s, frame %llu)", metrics.gpuTimeMs,
         metrics.gpuTimingAvailable != 0u ? "ready" : "pending",
@@ -2167,7 +2171,9 @@ void drawAmbientOcclusionSettings(
     ImGui::Text("Temporal: requested %s, active %s, history %s, motion %s",
                 metrics.temporalAccumulationEnabled ? "yes" : "no",
                 metrics.temporalAccumulationActive ? "yes" : "no",
-                metrics.temporalHistoryValid ? "valid" : "invalid",
+                metrics.temporalHistoryInvalidated
+                    ? "invalidated"
+                    : (metrics.temporalHistoryValid ? "valid" : "invalid"),
                 metrics.temporalMotionVectorsConsumed ? "consumed"
                                                       : "not used");
     ImGui::Text("Graph: normals %s, AO %s",
@@ -2259,8 +2265,7 @@ std::string antiAliasingSettingsSummary(
   summary += " taaSharpenStrength=";
   summary += std::format("{:.2f}", effectiveDebug.taaSharpenStrength);
   summary += " taaMaterialMipBias=";
-  summary +=
-      effectiveDebug.taaMaterialMipBiasEnabled ? "enabled" : "disabled";
+  summary += effectiveDebug.taaMaterialMipBiasEnabled ? "enabled" : "disabled";
   summary += "/";
   summary += std::format("{:.2f}", effectiveDebug.taaMaterialMipBias);
   summary += " transparentPostTaaSpatialCleanup=";
@@ -2615,9 +2620,9 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
       sanitizeAntiAliasingMode(aa.mode) != AntiAliasingMode::TAA;
   ImGui::BeginDisabled(temporalControlsDisabled);
   int presetIndex = static_cast<int>(aa.qualityPreset);
-  presetIndex = std::clamp(
-      presetIndex, 0,
-      static_cast<int>(kTemporalAAQualityPresetLabels.size()) - 1);
+  presetIndex =
+      std::clamp(presetIndex, 0,
+                 static_cast<int>(kTemporalAAQualityPresetLabels.size()) - 1);
   if (ImGui::Combo("TAA Quality Preset##AntiAliasing", &presetIndex,
                    kTemporalAAQualityPresetLabels.data(),
                    static_cast<int>(kTemporalAAQualityPresetLabels.size()))) {
@@ -2651,8 +2656,7 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                   &tuningDebug->spatialPostTaaCleanup);
   ImGui::Checkbox("Transparent Post-TAA Spatial Cleanup##AntiAliasing",
                   &tuningDebug->transparentPostTaaSpatialCleanup);
-  ImGui::Checkbox("TAA Sharpen##AntiAliasing",
-                  &tuningDebug->taaSharpenEnabled);
+  ImGui::Checkbox("TAA Sharpen##AntiAliasing", &tuningDebug->taaSharpenEnabled);
   ImGui::Checkbox("TAA Material Mip Bias##AntiAliasing",
                   &tuningDebug->taaMaterialMipBiasEnabled);
   ImGui::SliderFloat("TAA Jitter Scale##AntiAliasing",
@@ -2667,11 +2671,9 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
   ImGui::SliderFloat("TAA Material Mip Bias Value##AntiAliasing",
                      &tuningDebug->taaMaterialMipBias, -1.0f, 0.0f, "%.2f");
   ImGui::SliderFloat("TAA Motion Current Weight##AntiAliasing",
-                     &tuningDebug->taaMotionCurrentWeight, 0.0f, 1.0f,
-                     "%.2f");
+                     &tuningDebug->taaMotionCurrentWeight, 0.0f, 1.0f, "%.2f");
   ImGui::SliderFloat("TAA Clamp Current Weight##AntiAliasing",
-                     &tuningDebug->taaClampCurrentWeight, 0.0f, 1.0f,
-                     "%.2f");
+                     &tuningDebug->taaClampCurrentWeight, 0.0f, 1.0f, "%.2f");
   int historyFilterModeIndex =
       static_cast<int>(tuningDebug->taaHistoryFilterMode);
   historyFilterModeIndex = std::clamp(
@@ -2691,8 +2693,7 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                      &tuningDebug->taaVelocityRejectionThreshold, 0.0f, 16.0f,
                      "%.2f");
   ImGui::SliderFloat("TAA Motion Blend / px##AntiAliasing",
-                     &tuningDebug->taaVelocityBlendScale, 0.0f, 4.0f,
-                     "%.2f");
+                     &tuningDebug->taaVelocityBlendScale, 0.0f, 4.0f, "%.2f");
   ImGui::SliderFloat("TAA Disocclusion Weight##AntiAliasing",
                      &tuningDebug->taaDisocclusionCurrentWeight, 0.0f, 1.0f,
                      "%.2f");
@@ -3230,9 +3231,9 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
     ImGui::Text("Stability Ownership View: %s",
                 metrics.taaStabilityOwnershipDebugViewRendered ? "rendered"
                                                                : "inactive");
-    ImGui::Text("Patch Probe View: %s",
-                metrics.taaPatchProbeDebugViewRendered ? "rendered"
-                                                       : "inactive");
+    ImGui::Text("Patch Probe View: %s", metrics.taaPatchProbeDebugViewRendered
+                                            ? "rendered"
+                                            : "inactive");
     ImGui::Text("Motion Filter View: %s",
                 metrics.taaMotionFilterDebugViewRendered ? "rendered"
                                                          : "inactive");

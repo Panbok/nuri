@@ -201,12 +201,41 @@ ambientOcclusionPresetRadius(AmbientOcclusionPreset preset) noexcept {
   return 1.15f;
 }
 
+[[nodiscard]] uint64_t mixSignature(uint64_t seed, uint64_t value) noexcept {
+  seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+  return seed;
+}
+
+[[nodiscard]] uint64_t ambientOcclusionTemporalPolicySignature(
+    const RenderSettings::AmbientOcclusionSettings &ao) noexcept {
+  uint64_t signature = 0xcbf29ce484222325ull;
+  signature = mixSignature(signature, static_cast<uint32_t>(ao.mode));
+  signature = mixSignature(signature, static_cast<uint32_t>(ao.preset));
+  signature = mixSignature(signature, std::bit_cast<uint32_t>(ao.strength));
+  signature = mixSignature(signature, ao.temporalAccumulation ? 1u : 0u);
+  signature = mixSignature(signature, ao.sliceCount);
+  signature = mixSignature(signature, ao.stepCount);
+  signature = mixSignature(signature, ao.denoisePassCount);
+  return signature;
+}
+
 } // namespace
 
 GTAOPass::GTAOPass(GPUDevice &gpu, RuntimeOpaqueShaderConfig config)
     : gpu_(gpu), config_(std::move(config)) {}
 
 GTAOPass::~GTAOPass() { destroyResources(); }
+
+void GTAOPass::observeTemporalPolicy(
+    const RenderSettings::AmbientOcclusionSettings &ao) noexcept {
+  const uint64_t temporalPolicySignature =
+      ambientOcclusionTemporalPolicySignature(ao);
+  temporalPolicyChanged_ =
+      hasLastTemporalPolicySignature_ &&
+      lastTemporalPolicySignature_ != temporalPolicySignature;
+  hasLastTemporalPolicySignature_ = true;
+  lastTemporalPolicySignature_ = temporalPolicySignature;
+}
 
 bool GTAOPass::isEnabled(const FrameBuildContext &ctx) const {
   const RenderSettings::AmbientOcclusionSettings ao =
@@ -542,6 +571,9 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   metrics.temporalAccumulationEnabled = ao.temporalAccumulation;
   metrics.scalarAoAvailable = true;
   metrics.bentNormalAvailable = false;
+  metrics.requestedSliceCount = ao.sliceCount;
+  metrics.requestedStepCount = ao.stepCount;
+  metrics.requestedDenoisePassCount = ao.denoisePassCount;
 
   uint64_t depthBytes = 0u;
   for (uint32_t level = 0u; level < kViewDepthMipCount; ++level) {
@@ -602,25 +634,22 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
                      linearSamplerId != kInvalidTextureBindlessIndex;
   }
 
-  const bool temporalAmortizationPreset =
-      ao.preset == AmbientOcclusionPreset::High ||
-      ao.preset == AmbientOcclusionPreset::Ultra;
-  const bool temporalPresetAmortized =
-      temporalActive && temporalAmortizationPreset;
-  const uint32_t mainSliceCount =
-      temporalPresetAmortized ? std::min(ao.sliceCount, 2u) : ao.sliceCount;
-  const uint32_t mainStepCount =
-      temporalPresetAmortized ? std::min(ao.stepCount, 4u) : ao.stepCount;
-  // Temporal resolve clamps current AO against its neighborhood, so stable
-  // High/Ultra history frames can skip a separate full-resolution denoise.
-  const uint32_t denoisePassCount =
-      temporalPresetAmortized ? 0u : std::max(ao.denoisePassCount, 1u);
+  const bool temporalHistoryInvalidated = temporalPolicyChanged_;
+  temporalPolicyChanged_ = false;
+  if (temporalHistoryInvalidated) {
+    temporalActive = false;
+  }
+
+  const uint32_t mainSliceCount = ao.sliceCount;
+  const uint32_t mainStepCount = ao.stepCount;
+  const uint32_t denoisePassCount = std::max(ao.denoisePassCount, 1u);
   const uint32_t mainNoiseIndex =
       temporalActive ? static_cast<uint32_t>(ctx.frame.frameIndex & 63u) : 0u;
 
   metrics.sliceCount = mainSliceCount;
   metrics.stepCount = mainStepCount;
   metrics.denoisePassCount = denoisePassCount;
+  metrics.temporalHistoryInvalidated = temporalHistoryInvalidated;
   metrics.temporalHistoryValid =
       nuri::isValid(ctx.shared.previousAmbientOcclusionTexture);
   metrics.temporalAccumulationActive = temporalActive;
@@ -920,10 +949,14 @@ GTAOFeature::publishFrameData(FrameBuildContext &ctx) {
   metrics.activePreset = ao.preset;
   metrics.disabledReason = ao.disabledReason;
   metrics.strength = ao.strength;
+  metrics.requestedSliceCount = ao.sliceCount;
+  metrics.requestedStepCount = ao.stepCount;
+  metrics.requestedDenoisePassCount = ao.denoisePassCount;
   metrics.sliceCount = ao.sliceCount;
   metrics.stepCount = ao.stepCount;
   metrics.denoisePassCount = ao.denoisePassCount;
   metrics.temporalAccumulationEnabled = ao.temporalAccumulation;
+  pass_.observeTemporalPolicy(ao);
   if (ao.active) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::Normals |

@@ -1255,6 +1255,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       ambientOcclusionSettings.mode != AmbientOcclusionMode::Disabled;
   aoMetrics.activePreset = ambientOcclusionSettings.preset;
   aoMetrics.strength = ambientOcclusionSettings.strength;
+  aoMetrics.requestedSliceCount = ambientOcclusionSettings.sliceCount;
+  aoMetrics.requestedStepCount = ambientOcclusionSettings.stepCount;
+  aoMetrics.requestedDenoisePassCount =
+      ambientOcclusionSettings.denoisePassCount;
   aoMetrics.sliceCount = ambientOcclusionSettings.sliceCount;
   aoMetrics.stepCount = ambientOcclusionSettings.stepCount;
   aoMetrics.denoisePassCount = ambientOcclusionSettings.denoisePassCount;

@@ -43,6 +43,29 @@ struct ShadedMaterial {
   vec3 emissive;
 };
 
+bool tryAmbientOcclusionDebugColor(FrameDataBuffer frameData,
+                                   ShadedMaterial sm, out vec4 color) {
+  color = vec4(0.0, 0.0, 0.0, 1.0);
+  if ((frameData.flags & kFrameDataFlagHasAmbientOcclusion) == 0u) {
+    return false;
+  }
+
+  const uint aoDebugView = getAmbientOcclusionDebugView(frameData);
+  if (aoDebugView == kAmbientOcclusionDebugViewVisibility) {
+    color = vec4(vec3(sm.screenAo), 1.0);
+    return true;
+  }
+  if (aoDebugView == kAmbientOcclusionDebugViewBentNormal) {
+    color = vec4(normalize(sm.nBase) * 0.5 + 0.5, 1.0);
+    return true;
+  }
+  if (aoDebugView == kAmbientOcclusionDebugViewNormals) {
+    color = vec4(normalize(sm.nBase) * 0.5 + 0.5, 1.0);
+    return true;
+  }
+  return false;
+}
+
 ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   ShadedMaterial sm;
 
