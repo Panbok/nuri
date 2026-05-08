@@ -1248,6 +1248,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       AntiAliasingMode::MSAA4x;
   RenderSettings::AmbientOcclusionSettings ambientOcclusionSettings =
       settings.ambientOcclusion;
+  const auto requestedAmbientOcclusionSettings = ambientOcclusionSettings;
   sanitizeAmbientOcclusionSettings(ambientOcclusionSettings, settings.opaque,
                                    settings.antiAliasing);
   AmbientOcclusionFrameMetrics &aoMetrics = frame.metrics.ambientOcclusion;
@@ -1255,10 +1256,10 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       ambientOcclusionSettings.mode != AmbientOcclusionMode::Disabled;
   aoMetrics.activePreset = ambientOcclusionSettings.preset;
   aoMetrics.strength = ambientOcclusionSettings.strength;
-  aoMetrics.requestedSliceCount = ambientOcclusionSettings.sliceCount;
-  aoMetrics.requestedStepCount = ambientOcclusionSettings.stepCount;
+  aoMetrics.requestedSliceCount = requestedAmbientOcclusionSettings.sliceCount;
+  aoMetrics.requestedStepCount = requestedAmbientOcclusionSettings.stepCount;
   aoMetrics.requestedDenoisePassCount =
-      ambientOcclusionSettings.denoisePassCount;
+      requestedAmbientOcclusionSettings.denoisePassCount;
   aoMetrics.sliceCount = ambientOcclusionSettings.sliceCount;
   aoMetrics.stepCount = ambientOcclusionSettings.stepCount;
   aoMetrics.denoisePassCount = ambientOcclusionSettings.denoisePassCount;

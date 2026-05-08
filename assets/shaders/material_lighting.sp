@@ -56,7 +56,7 @@ bool tryAmbientOcclusionDebugColor(FrameDataBuffer frameData,
     return true;
   }
   if (aoDebugView == kAmbientOcclusionDebugViewBentNormal) {
-    color = vec4(normalize(sm.nBase) * 0.5 + 0.5, 1.0);
+    color = vec4(normalize(sm.ambientBentNormal) * 0.5 + 0.5, 1.0);
     return true;
   }
   if (aoDebugView == kAmbientOcclusionDebugViewNormals) {
