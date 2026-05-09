@@ -205,6 +205,33 @@ transmissionTaaJitterMinLod(const RenderFrameContext &frame,
          sceneGpu.postTaaFrameDataAddress != sceneGpu.frameDataAddress;
 }
 
+Result<ForwardSceneFrameData, std::string>
+readForwardSceneFrameData(GPUDevice &gpu, const ForwardSceneGpuData &sceneGpu,
+                          uint64_t frameDataAddress) {
+  if (!nuri::isValid(sceneGpu.buffer) || frameDataAddress == 0u) {
+    return Result<ForwardSceneFrameData, std::string>::makeError(
+        "TransmissionRenderer::prepareTransmissionPasses: invalid forward "
+        "scene frame data source");
+  }
+  const uint64_t baseAddress = gpu.getBufferDeviceAddress(sceneGpu.buffer);
+  if (baseAddress == 0u || frameDataAddress < baseAddress) {
+    return Result<ForwardSceneFrameData, std::string>::makeError(
+        "TransmissionRenderer::prepareTransmissionPasses: invalid forward "
+        "scene frame data address");
+  }
+
+  ForwardSceneFrameData frameData{};
+  const auto offset = static_cast<size_t>(frameDataAddress - baseAddress);
+  auto readResult = gpu.readBuffer(
+      sceneGpu.buffer, offset,
+      std::as_writable_bytes(std::span<ForwardSceneFrameData>(&frameData, 1u)));
+  if (readResult.hasError()) {
+    return Result<ForwardSceneFrameData, std::string>::makeError(
+        readResult.error());
+  }
+  return Result<ForwardSceneFrameData, std::string>::makeResult(frameData);
+}
+
 void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
                          TextureHandle handle) {
   if (!nuri::isValid(handle)) {
@@ -585,7 +612,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   uint64_t blendedFrameDataAddress = 0u;
   BufferHandle blendedFrameDataBufferHandle{};
   if (hasSortedFeedbackDraws) {
-    auto frameDataRingResult = ensureBlendedFrameDataRingCapacity();
+    auto frameDataRingResult =
+        ensureBlendedFrameDataRingCapacity(sizeof(FrameData));
     if (frameDataRingResult.hasError()) {
       return frameDataRingResult;
     }
@@ -600,9 +628,13 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           "TransmissionRenderer::prepareTransmissionPasses: blended frame "
           "data buffer is unavailable");
     }
-    FrameData blendedFrameData = sceneGpu->postTaaFrameDataAddress != 0u
-                                     ? sceneGpu->postTaaFrameData
-                                     : sceneGpu->frameData;
+    auto blendedFrameDataResult =
+        readForwardSceneFrameData(gpu_, *sceneGpu, frameDataAddress);
+    if (blendedFrameDataResult.hasError()) {
+      return Result<bool, std::string>::makeError(
+          blendedFrameDataResult.error());
+    }
+    FrameData blendedFrameData = blendedFrameDataResult.value();
     const TextureHandle feedbackFull =
         frame.sharedResources.transparentTransmissionFeedbackTexture;
     const TextureHandle feedbackHalf =
@@ -870,7 +902,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
       const MeshPushConstants &pc = pushConstants.back();
 
       DrawItem draw{};
-      draw.pipeline = selectMeshPipeline(sortedFeedbackDraw);
+      draw.pipeline = selectMeshPipeline(entry.doubleSided, sortedFeedbackDraw);
       draw.vertexBuffer = vertexBuffer;
       draw.indexBuffer = entry.indexBuffer;
       draw.indexBufferOffset = entry.indexBufferOffset;
@@ -1366,18 +1398,22 @@ TransmissionRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
 }
 
 Result<bool, std::string>
-TransmissionRenderer::ensureBlendedFrameDataRingCapacity() {
+TransmissionRenderer::ensureBlendedFrameDataRingCapacity(size_t requiredBytes) {
   const uint32_t count = std::max(1u, gpu_.getSwapchainImageCount());
   while (blendedFrameDataRing_.size() < count) {
     blendedFrameDataRing_.push_back(DynamicBufferSlot{});
   }
-  const size_t requiredBytes = sizeof(FrameData);
+  bool waitedForResize = false;
   for (DynamicBufferSlot &slot : blendedFrameDataRing_) {
     if (slot.buffer && slot.buffer->valid() &&
         slot.capacityBytes >= requiredBytes) {
       continue;
     }
     if (slot.buffer && slot.buffer->valid()) {
+      if (slot.capacityBytes < requiredBytes && !waitedForResize) {
+        gpu_.waitIdle();
+        waitedForResize = true;
+      }
       gpu_.destroyBuffer(slot.buffer->handle());
     }
     slot.buffer.reset();
@@ -1440,8 +1476,7 @@ TransmissionRenderer::ensureTransparentFeedbackTextures(
     }
   }
   const uint32_t frameSlot =
-      ringCount == 0u ? 0u
-                      : static_cast<uint32_t>(frame.frameIndex % ringCount);
+      static_cast<uint32_t>(frame.frameIndex % ringCount);
   frame.sharedResources.transparentTransmissionFeedbackTexture =
       transparentFeedbackTextures_[0][frameSlot];
   frame.sharedResources.transparentTransmissionFeedbackHalfResTexture =
@@ -1783,18 +1818,15 @@ bool TransmissionRenderer::hasTransmissionContent(
 }
 
 RenderPipelineHandle
-TransmissionRenderer::selectMeshPipeline(bool useBlendPipeline) const {
+TransmissionRenderer::selectMeshPipeline(bool doubleSided,
+                                         bool useBlendPipeline) const {
   if (useBlendPipeline) {
-    if (nuri::isValid(meshBlendDoubleSidedPipelineHandle_)) {
+    if (doubleSided && nuri::isValid(meshBlendDoubleSidedPipelineHandle_)) {
       return meshBlendDoubleSidedPipelineHandle_;
     }
     return meshBlendPipelineHandle_;
   }
-  // Transmission correctness is more important than backface-culling wins.
-  // Imported scene-mesh paths can preserve source winding differently from the
-  // standalone model path, and closed transmissive assets disappearing is much
-  // worse than extra overdraw.
-  if (nuri::isValid(meshDoubleSidedPipelineHandle_)) {
+  if (doubleSided && nuri::isValid(meshDoubleSidedPipelineHandle_)) {
     return meshDoubleSidedPipelineHandle_;
   }
   return meshPipelineHandle_;

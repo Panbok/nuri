@@ -1358,7 +1358,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (materialDirty) {
     cachedMaterialVersion_ = materialSnapshot.version;
   }
-  if (materialDirty || materialTextureAccessHandles_.empty()) {
+  if (materialDirty || transmissionPolicyDirty ||
+      materialTextureAccessHandles_.empty()) {
     NURI_PROFILER_ZONE("OpaqueRenderer.material_access_cache",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     auto materialAccessCacheResult = rebuildMaterialTextureAccessCache(

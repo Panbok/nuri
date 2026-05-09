@@ -35,6 +35,8 @@ TransmissionFeature::publishFrameData(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(
         "TransmissionFeature::publishFrameData: renderer is null");
   }
+  // TransmissionRenderer::publishFrameData is currently void; it only publishes
+  // the transparent-stage contribution hook.
   renderer_->publishFrameData(ctx.frame);
   return Result<bool, std::string>::makeResult(true);
 }

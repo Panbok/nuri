@@ -154,7 +154,8 @@ private:
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
-  Result<bool, std::string> ensureBlendedFrameDataRingCapacity();
+  Result<bool, std::string>
+  ensureBlendedFrameDataRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureTransparentFeedbackTextures(RenderFrameContext &frame);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
@@ -171,7 +172,7 @@ private:
   void destroyBuffers();
   [[nodiscard]] bool hasTransmissionContent(const RenderFrameContext &frame);
   [[nodiscard]] RenderPipelineHandle
-  selectMeshPipeline(bool useBlendPipeline) const;
+  selectMeshPipeline(bool doubleSided, bool useBlendPipeline) const;
   void destroyFeedbackTextures();
 
   GPUDevice &gpu_;

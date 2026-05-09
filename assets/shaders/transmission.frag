@@ -8,6 +8,8 @@ layout(location = 0) in PerVertex vtx;
 
 layout(location = 0) out vec4 out_FragColor;
 
+const float kTransmissionMinAlpha = 0.08;
+
 vec2 currentScreenUv();
 
 vec3 transmissionModelScale() {
@@ -157,7 +159,7 @@ float transmissionOutputAlpha(uint alphaMode, uint featureMask, float baseAlpha,
   if ((featureMask & kMaterialFeatureVolume) != 0u) {
     return 1.0;
   }
-  return max(1.0 - transmissionFactor, 0.08);
+  return max(1.0 - transmissionFactor, kTransmissionMinAlpha);
 }
 
 vec3 getDirectTransmission(vec3 n, vec3 v, vec3 pointToLight,

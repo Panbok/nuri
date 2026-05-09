@@ -1783,6 +1783,7 @@ void TransparentRenderer::resetCachedState() {
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
   cachedExcludeTransmissionBlend_ = true;
   loggedMaterialFallbackWarning_ = false;
+  loggedTransmissionFeedbackFallbackWarning_ = false;
   loggedContributorCollections_ = 0u;
   loggedAddressProbeTopologyVersion_ = std::numeric_limits<uint64_t>::max();
 

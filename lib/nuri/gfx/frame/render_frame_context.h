@@ -1880,8 +1880,6 @@ struct ForwardSceneGpuData {
   BufferHandle buffer{};
   uint64_t frameDataAddress = 0;
   uint64_t postTaaFrameDataAddress = 0;
-  ForwardSceneFrameData frameData{};
-  ForwardSceneFrameData postTaaFrameData{};
   uint64_t directionalLightBufferAddress = 0;
   uint64_t localLightBufferAddress = 0;
   uint64_t shadowFrameBufferAddress = 0;
