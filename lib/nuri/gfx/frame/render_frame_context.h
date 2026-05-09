@@ -1880,6 +1880,8 @@ struct ForwardSceneGpuData {
   BufferHandle buffer{};
   uint64_t frameDataAddress = 0;
   uint64_t postTaaFrameDataAddress = 0;
+  ForwardSceneFrameData frameData{};
+  ForwardSceneFrameData postTaaFrameData{};
   uint64_t directionalLightBufferAddress = 0;
   uint64_t localLightBufferAddress = 0;
   uint64_t shadowFrameBufferAddress = 0;
@@ -2029,6 +2031,9 @@ struct AntiAliasingFrameMetrics {
   uint32_t taaSceneColorDownsampleGpuTimingAvailable = 0u;
   uint32_t taaTransmissionGpuTimingAvailable = 0u;
   uint32_t taaTransmissionMipDebugPassCount = 0u;
+  uint32_t transparentTransmissionFeedbackRefreshCount = 0u;
+  uint32_t transparentTransmissionBlendDrawCount = 0u;
+  uint32_t transparentTransmissionFeedbackSourceAvailable = 0u;
   uint32_t taaTransparentPostTaaDrawCount = 0u;
   uint32_t taaTransparentPostTaaMeshDrawCount = 0u;
   uint32_t taaTransparentPostTaaContributorDrawCount = 0u;
@@ -2446,6 +2451,9 @@ struct FrameSharedResources {
   TextureHandle msaaSceneColorTexture{};
   TextureHandle sceneColorHalfResTexture{};
   TextureHandle sceneColorQuarterResTexture{};
+  TextureHandle transparentTransmissionFeedbackTexture{};
+  TextureHandle transparentTransmissionFeedbackHalfResTexture{};
+  TextureHandle transparentTransmissionFeedbackQuarterResTexture{};
   RenderGraphTextureId sceneColorGraphTexture{};
   RenderGraphTextureId msaaSceneColorGraphTexture{};
   TextureHandle frameColorTexture{};
@@ -2463,12 +2471,23 @@ struct FrameSharedResources {
   std::optional<LightId> selectedLightId{};
   std::optional<LightId> selectedShadowLightId{};
   bool transparentStageEnabled = false;
+  bool transparentTransmissionStageEnabled = false;
+};
+
+enum TransparentStageDrawFlags : uint32_t {
+  kTransparentStageDrawFlagNone = 0u,
+  kTransparentStageDrawFlagRequiresFrameColorFeedback = 1u << 0u,
 };
 
 struct TransparentStageSortableDraw {
   DrawItem draw{};
   float sortDepth = 0.0f;
   uint32_t stableOrder = 0;
+  uint32_t flags = kTransparentStageDrawFlagNone;
+  // Internal transparent-stage dependency range. Contributors publish a shared
+  // dependency span; TransparentRenderer owns the copied range for the frame.
+  uint32_t dependencyOffset = 0;
+  uint32_t dependencyCount = 0;
 };
 
 // These spans are non-owning views into contributor-managed frame storage.

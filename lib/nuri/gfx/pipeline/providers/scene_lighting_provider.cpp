@@ -550,6 +550,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .frameDataAddress = sceneDataBaseAddress + layout.frameDataOffset,
       .postTaaFrameDataAddress =
           sceneDataBaseAddress + layout.postTaaFrameDataOffset,
+      .frameData = frameData,
+      .postTaaFrameData = postTaaFrameData,
       .directionalLightBufferAddress = directionalLightBufferAddress,
       .localLightBufferAddress = localLightBufferAddress,
       .shadowFrameBufferAddress = shadowFrameBufferAddress,

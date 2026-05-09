@@ -338,10 +338,12 @@ private:
                                                       uint64_t drawSignature);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
-                                              uint32_t materialCount);
+                                              uint32_t materialCount,
+                                              bool excludeTransmission);
   Result<bool, std::string>
   rebuildMaterialTextureAccessCache(const RenderScene &scene,
-                                    const ResourceManager &resources);
+                                    const ResourceManager &resources,
+                                    bool excludeTransmission);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
   Result<bool, std::string>
@@ -558,6 +560,7 @@ private:
   uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
+  bool cachedExcludeTransmission_ = true;
   uint64_t cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t currentDirectDrawBufferSignature_ =
       std::numeric_limits<uint64_t>::max();

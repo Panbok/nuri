@@ -130,10 +130,17 @@ private:
     size_t capacityBytes = 0;
   };
 
+  struct FixedDrawEntry {
+    DrawItem draw{};
+    uint32_t dependencyOffset = 0;
+    uint32_t dependencyCount = 0;
+  };
+
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
   Result<bool, std::string> ensurePipelines(Format colorFormat,
                                             Format depthFormat);
+  Result<bool, std::string> ensureFeedbackCopyPipeline(Format colorFormat);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
@@ -141,17 +148,29 @@ private:
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
-                                              uint32_t materialCount);
+                                              uint32_t materialCount,
+                                              bool excludeTransmissionBlend);
   Result<bool, std::string>
   rebuildMaterialTextureAccessCache(const ResourceManager &resources);
   Result<bool, std::string> collectContributorDraws(RenderFrameContext &frame);
   Result<bool, std::string> appendTransparentPass(
-      RenderGraphBuilder &graph, TextureHandle colorTexture,
-      TextureHandle depthTexture, RenderGraphTextureId sceneDepthGraphTexture,
+      RenderFrameContext &frame, RenderGraphBuilder &graph,
+      TextureHandle colorTexture, TextureHandle depthTexture,
+      RenderGraphTextureId sceneDepthGraphTexture,
       std::span<const TransparentStageSortableDraw> sortableDraws,
-      std::span<const DrawItem> fixedDraws,
+      std::span<const FixedDrawEntry> fixedDraws,
       std::span<const TextureHandle> textureReads,
       std::span<const BufferHandle> dependencyBuffers);
+  Result<bool, std::string> appendTransparentDrawRun(
+      RenderGraphBuilder &graph, TextureHandle colorTexture,
+      TextureHandle depthTexture, RenderGraphTextureId sceneDepthGraphTexture,
+      std::span<const DrawItem> draws,
+      std::span<const TextureHandle> textureReads,
+      std::span<const BufferHandle> dependencyBuffers,
+      std::string_view debugLabel);
+  Result<bool, std::string>
+  appendTransparentTransmissionFeedbackRefresh(RenderFrameContext &frame,
+                                               RenderGraphBuilder &graph);
   void collectEnvironmentTextureReads(const RenderScene &scene,
                                       const ResourceManager &resources);
   void resetCachedState();
@@ -169,25 +188,31 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> meshShader_;
   std::unique_ptr<Shader> meshPickShader_;
+  std::unique_ptr<Shader> feedbackCopyShader_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshFragmentShader_{};
   ShaderHandle meshPickFragmentShader_{};
+  ShaderHandle feedbackCopyVertexShader_{};
+  ShaderHandle feedbackCopyFragmentShader_{};
   RenderPipelineHandle meshPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshPickPipelineHandle_{};
   RenderPipelineHandle meshPickDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle feedbackCopyPipelineHandle_{};
 
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
   // The pick pass writes a fixed object-ID color target, so only the depth
   // format needs to be cached here.
   Format pickPipelineDepthFormat_ = Format::Count;
+  Format feedbackCopyPipelineColorFormat_ = Format::Count;
 
   bool initialized_ = false;
   bool loggedMaterialFallbackWarning_ = false;
+  bool loggedTransmissionFeedbackFallbackWarning_ = false;
   bool transparentUsesJitteredProjection_ = true;
   uint32_t loggedContributorCollections_ = 0u;
   uint64_t loggedAddressProbeTopologyVersion_ =
@@ -199,6 +224,7 @@ private:
   uint64_t cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
+  bool cachedExcludeTransmissionBlend_ = true;
 
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<InstanceData> instanceMatrices_;
@@ -207,18 +233,24 @@ private:
   std::pmr::vector<TextureHandle> materialTextureAccessHandles_;
   std::pmr::vector<TextureHandle> environmentTextureAccessHandles_;
   std::pmr::vector<TransparentStageSortableDraw> contributorSortableDraws_;
-  std::pmr::vector<DrawItem> contributorFixedDraws_;
+  std::pmr::vector<FixedDrawEntry> contributorFixedDraws_;
   std::pmr::vector<TextureHandle> contributorTextureReads_;
+  std::pmr::vector<BufferHandle> contributorDependencyBuffers_;
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<PushConstants> pickPushConstants_;
   std::pmr::vector<TransparentStageSortableDraw> meshSortableDraws_;
   std::pmr::vector<TransparentStageSortableDraw> sortableDraws_;
-  std::pmr::vector<DrawItem> fixedDraws_;
+  std::pmr::vector<FixedDrawEntry> fixedDraws_;
   std::pmr::vector<DrawItem> passDrawItems_;
+  std::pmr::vector<DrawItem> transparentRunDrawItems_;
+  std::pmr::vector<BufferHandle> transparentRunDependencyBuffers_;
+  std::pmr::vector<BufferHandle> transparentCandidateDependencyBuffers_;
   std::pmr::vector<DrawItem> pickDrawItems_;
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::filesystem::path alphaPickFragmentPath_{};
+  std::filesystem::path feedbackCopyVertexPath_{};
+  std::filesystem::path feedbackCopyFragmentPath_{};
 };
 
 } // namespace nuri

@@ -15,9 +15,27 @@ constexpr uint32_t kTransparentPassDebugColor = 0x66aaffffu;
 constexpr uint32_t kTransparentPickPassDebugColor = 0x66ff88ffu;
 constexpr uint32_t kTransparentMeshDebugColor = 0x66aaffffu;
 constexpr std::string_view kTransparentPassLabel = "Transparent Pass";
+constexpr std::string_view kTransparentTransmissionPassLabel =
+    "Transparent Transmission Pass";
+constexpr std::string_view kTransparentTransmissionFeedbackCopyLabel =
+    "Transparent Transmission Feedback Copy";
+constexpr std::string_view kTransparentTransmissionFeedbackHalfLabel =
+    "Transparent Transmission Feedback Half";
+constexpr std::string_view kTransparentTransmissionFeedbackQuarterLabel =
+    "Transparent Transmission Feedback Quarter";
 constexpr std::string_view kTransparentPickPassLabel = "Transparent Pick Pass";
 constexpr std::string_view kTransparentMeshLabel = "TransparentMesh";
 constexpr std::string_view kTransparentMeshPickLabel = "TransparentMeshPick";
+constexpr uint32_t kSceneCopyFlagDownsample = 1u << 0u;
+constexpr uint32_t kMaxExactTransmissionFeedbackDraws = 64u;
+
+struct CopyPushConstants {
+  uint32_t sourceTexId = 0u;
+  uint32_t sourceSamplerId = 0u;
+  uint32_t flags = 0u;
+  uint32_t reserved0 = 0u;
+};
+static_assert(sizeof(CopyPushConstants) <= 128);
 
 [[nodiscard]] std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
@@ -34,6 +52,25 @@ resolveMemoryResource(std::pmr::memory_resource *memory) {
 
 [[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
   return (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
+}
+
+[[nodiscard]] float transparentSortDepth(const glm::mat4 &view,
+                                         const glm::mat4 &model,
+                                         const BoundingBox &bounds) {
+  const glm::vec3 min = bounds.min_;
+  const glm::vec3 max = bounds.max_;
+  const glm::vec3 corners[] = {
+      glm::vec3(min.x, min.y, min.z), glm::vec3(min.x, max.y, min.z),
+      glm::vec3(min.x, min.y, max.z), glm::vec3(min.x, max.y, max.z),
+      glm::vec3(max.x, min.y, min.z), glm::vec3(max.x, max.y, min.z),
+      glm::vec3(max.x, min.y, max.z), glm::vec3(max.x, max.y, max.z),
+  };
+  float depth = std::numeric_limits<float>::lowest();
+  for (const glm::vec3 &corner : corners) {
+    const glm::vec4 viewPos = view * model * glm::vec4(corner, 1.0f);
+    depth = std::max(depth, -viewPos.z);
+  }
+  return std::isfinite(depth) ? depth : 0.0f;
 }
 
 void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
@@ -86,6 +123,22 @@ RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
       .polygonMode = PolygonMode::Fill,
       .topology = Topology::Triangle,
       .blendEnabled = blendEnabled,
+  };
+}
+
+RenderPipelineDesc fullscreenPipelineDesc(Format colorFormat,
+                                          ShaderHandle vertexShader,
+                                          ShaderHandle fragmentShader) {
+  return RenderPipelineDesc{
+      .vertexInput = {},
+      .vertexShader = vertexShader,
+      .fragmentShader = fragmentShader,
+      .colorFormats = {colorFormat},
+      .depthFormat = Format::Count,
+      .cullMode = CullMode::None,
+      .polygonMode = PolygonMode::Fill,
+      .topology = Topology::Triangle,
+      .blendEnabled = false,
   };
 }
 
@@ -202,15 +255,20 @@ TransparentRenderer::TransparentRenderer(GPUDevice &gpu,
       materialTextureAccessHandles_(memory_),
       environmentTextureAccessHandles_(memory_),
       contributorSortableDraws_(memory_), contributorFixedDraws_(memory_),
-      contributorTextureReads_(memory_), drawPushConstants_(memory_),
-      pickPushConstants_(memory_), meshSortableDraws_(memory_),
-      sortableDraws_(memory_), fixedDraws_(memory_), passDrawItems_(memory_),
-      pickDrawItems_(memory_), passTextureReads_(memory_),
-      passDependencyBuffers_(memory_) {
+      contributorTextureReads_(memory_), contributorDependencyBuffers_(memory_),
+      drawPushConstants_(memory_), pickPushConstants_(memory_),
+      meshSortableDraws_(memory_), sortableDraws_(memory_),
+      fixedDraws_(memory_), passDrawItems_(memory_),
+      transparentRunDrawItems_(memory_),
+      transparentRunDependencyBuffers_(memory_),
+      transparentCandidateDependencyBuffers_(memory_), pickDrawItems_(memory_),
+      passTextureReads_(memory_), passDependencyBuffers_(memory_) {
   const std::filesystem::path basePath =
       !config_.pickFragment.empty() ? config_.pickFragment.parent_path()
                                     : config_.meshFragment.parent_path();
   alphaPickFragmentPath_ = basePath / "main_id_alpha.frag";
+  feedbackCopyVertexPath_ = basePath / "fullscreen_copy.vert";
+  feedbackCopyFragmentPath_ = basePath / "scene_copy.frag";
 }
 
 TransparentRenderer::~TransparentRenderer() { onDetach(); }
@@ -276,16 +334,22 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
   const bool transformDirty =
       topologyDirty ||
       cachedTransformVersion_ != frame.scene->transformVersion();
+  const bool excludeTransmissionBlend =
+      frame.sharedResources.transparentTransmissionStageEnabled;
+  const bool transmissionBlendPolicyDirty =
+      cachedExcludeTransmissionBlend_ != excludeTransmissionBlend;
   const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
   const bool geometryDirty =
       geometryMutationVersion != 0u &&
       geometryMutationVersion != cachedGeometryMutationVersion_;
   const bool needsGeometryRebuild =
       geometryDirty && !meshDrawTemplates_.empty();
-  if (topologyDirty || materialDirty || needsGeometryRebuild) {
+  if (topologyDirty || materialDirty || needsGeometryRebuild ||
+      transmissionBlendPolicyDirty) {
     auto rebuildResult = rebuildSceneCache(
         *frame.scene, *frame.resources,
-        static_cast<uint32_t>(materialSnapshot.headers.size()));
+        static_cast<uint32_t>(materialSnapshot.headers.size()),
+        excludeTransmissionBlend);
     if (rebuildResult.hasError()) {
       return rebuildResult;
     }
@@ -308,7 +372,7 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
     for (const TransparentStageSortableDraw &draw : contributorSortableDraws_) {
       sortableDraws_.push_back(draw);
     }
-    for (const DrawItem &draw : contributorFixedDraws_) {
+    for (const FixedDrawEntry &draw : contributorFixedDraws_) {
       fixedDraws_.push_back(draw);
     }
     for (const TextureHandle handle : contributorTextureReads_) {
@@ -504,9 +568,9 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
           "is invalid");
     }
 
-    const glm::vec3 worldCenter =
-        glm::vec3(entry.renderable->modelMatrix *
-                  glm::vec4(entry.submesh->bounds.getCenter(), 1.0f));
+    const float sortDepth =
+        transparentSortDepth(frame.camera.view, entry.renderable->modelMatrix,
+                             entry.submesh->bounds);
     BufferHandle vertexBuffer = entry.baseVertexBuffer;
     uint64_t vertexBufferAddress = gpu_.getBufferDeviceAddress(
         entry.baseVertexBuffer, entry.vertexBufferByteOffset);
@@ -549,9 +613,6 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
         }
       }
     }
-
-    const float sortDepth =
-        -(frame.camera.view * glm::vec4(worldCenter, 1.0f)).z;
 
     drawPushConstants_.push_back(PushConstants{
         .frameDataAddress = frameDataAddress,
@@ -629,9 +690,12 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
         .draw = source.draw,
         .sortDepth = source.sortDepth,
         .stableOrder = stableOrderBase + source.stableOrder,
+        .flags = source.flags,
+        .dependencyOffset = source.dependencyOffset,
+        .dependencyCount = source.dependencyCount,
     });
   }
-  for (const DrawItem &draw : contributorFixedDraws_) {
+  for (const FixedDrawEntry &draw : contributorFixedDraws_) {
     fixedDraws_.push_back(draw);
   }
   for (const TextureHandle handle : contributorTextureReads_) {
@@ -711,6 +775,27 @@ TransparentRenderer::prepareTransparentPasses(RenderFrameContext &frame) {
         meshSortableDraws_.size(), passDependencyBuffers_.size());
   }
 
+  const bool hasFeedbackDraw = std::any_of(
+      sortableDraws_.begin(), sortableDraws_.end(),
+      [](const TransparentStageSortableDraw &draw) {
+        return (draw.flags &
+                kTransparentStageDrawFlagRequiresFrameColorFeedback) != 0u;
+      });
+  if (hasFeedbackDraw) {
+    const TextureHandle feedbackTexture =
+        frame.sharedResources.transparentTransmissionFeedbackTexture;
+    if (!nuri::isValid(feedbackTexture)) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::prepareTransparentPasses: transparent "
+          "transmission feedback texture is unavailable");
+    }
+    auto feedbackPipelineResult =
+        ensureFeedbackCopyPipeline(gpu_.getTextureFormat(feedbackTexture));
+    if (feedbackPipelineResult.hasError()) {
+      return feedbackPipelineResult;
+    }
+  }
+
   frame.metrics.transparent.meshDraws =
       saturateToU32(meshSortableDraws_.size());
   frame.metrics.transparent.pickDraws = saturateToU32(pickDrawItems_.size());
@@ -748,10 +833,10 @@ TransparentRenderer::appendTransparentMainPass(RenderFrameContext &frame,
   }
 
   return appendTransparentPass(
-      graph, colorTexture, depthTexture, sceneDepthGraphTexture,
+      frame, graph, colorTexture, depthTexture, sceneDepthGraphTexture,
       std::span<const TransparentStageSortableDraw>(sortableDraws_.data(),
                                                     sortableDraws_.size()),
-      std::span<const DrawItem>(fixedDraws_.data(), fixedDraws_.size()),
+      std::span<const FixedDrawEntry>(fixedDraws_.data(), fixedDraws_.size()),
       std::span<const TextureHandle>(passTextureReads_.data(),
                                      passTextureReads_.size()),
       std::span<const BufferHandle>(passDependencyBuffers_.data(),
@@ -774,7 +859,9 @@ Result<bool, std::string> TransparentRenderer::createShaders() {
   destroyShaders();
   meshShader_ = Shader::create("transparent_main", gpu_);
   meshPickShader_ = Shader::create("transparent_main_pick", gpu_);
-  if (!meshShader_ || !meshPickShader_) {
+  feedbackCopyShader_ =
+      Shader::create("transparent_transmission_feedback", gpu_);
+  if (!meshShader_ || !meshPickShader_ || !feedbackCopyShader_) {
     return Result<bool, std::string>::makeError(
         "TransparentRenderer::createShaders: failed to create shader wrappers");
   }
@@ -794,10 +881,22 @@ Result<bool, std::string> TransparentRenderer::createShaders() {
   if (pickResult.hasError()) {
     return Result<bool, std::string>::makeError(pickResult.error());
   }
+  auto copyVertexResult = feedbackCopyShader_->compileFromFile(
+      feedbackCopyVertexPath_.string(), ShaderStage::Vertex);
+  if (copyVertexResult.hasError()) {
+    return Result<bool, std::string>::makeError(copyVertexResult.error());
+  }
+  auto copyFragmentResult = feedbackCopyShader_->compileFromFile(
+      feedbackCopyFragmentPath_.string(), ShaderStage::Fragment);
+  if (copyFragmentResult.hasError()) {
+    return Result<bool, std::string>::makeError(copyFragmentResult.error());
+  }
 
   meshVertexShader_ = vertexResult.value();
   meshFragmentShader_ = fragmentResult.value();
   meshPickFragmentShader_ = pickResult.value();
+  feedbackCopyVertexShader_ = copyVertexResult.value();
+  feedbackCopyFragmentShader_ = copyFragmentResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -860,6 +959,34 @@ TransparentRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
   meshPipelineColorFormat_ = colorFormat;
   meshPipelineDepthFormat_ = depthFormat;
   pickPipelineDepthFormat_ = depthFormat;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+TransparentRenderer::ensureFeedbackCopyPipeline(Format colorFormat) {
+  if (nuri::isValid(feedbackCopyPipelineHandle_) &&
+      feedbackCopyPipelineColorFormat_ == colorFormat) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!nuri::isValid(feedbackCopyVertexShader_) ||
+      !nuri::isValid(feedbackCopyFragmentShader_)) {
+    return Result<bool, std::string>::makeError(
+        "TransparentRenderer::ensureFeedbackCopyPipeline: invalid shader "
+        "handle");
+  }
+  if (nuri::isValid(feedbackCopyPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(feedbackCopyPipelineHandle_);
+    feedbackCopyPipelineHandle_ = {};
+  }
+  auto pipelineResult = gpu_.createRenderPipeline(
+      fullscreenPipelineDesc(colorFormat, feedbackCopyVertexShader_,
+                             feedbackCopyFragmentShader_),
+      "transparent_transmission_feedback_copy");
+  if (pipelineResult.hasError()) {
+    return Result<bool, std::string>::makeError(pipelineResult.error());
+  }
+  feedbackCopyPipelineHandle_ = pipelineResult.value();
+  feedbackCopyPipelineColorFormat_ = colorFormat;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -959,10 +1086,9 @@ TransparentRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-TransparentRenderer::rebuildSceneCache(const RenderScene &scene,
-                                       const ResourceManager &resources,
-                                       uint32_t materialCount) {
+Result<bool, std::string> TransparentRenderer::rebuildSceneCache(
+    const RenderScene &scene, const ResourceManager &resources,
+    uint32_t materialCount, bool excludeTransmissionBlend) {
   meshDrawTemplates_.clear();
 
   const std::span<const Renderable> renderables = scene.renderables();
@@ -1002,9 +1128,11 @@ TransparentRenderer::rebuildSceneCache(const RenderScene &scene,
       const MaterialRef resolvedMaterial = resolveRenderableMaterial(
           renderable, *modelRecord, static_cast<uint32_t>(submeshIndex));
       const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
+      const bool isTransmission =
+          materialRecord != nullptr && isTransmissionMaterial(*materialRecord);
       if (materialRecord == nullptr ||
           materialRecord->desc.alphaMode != MaterialAlphaMode::Blend ||
-          isTransmissionMaterial(*materialRecord)) {
+          (isTransmission && excludeTransmissionBlend)) {
         continue;
       }
 
@@ -1056,6 +1184,7 @@ TransparentRenderer::rebuildSceneCache(const RenderScene &scene,
   cachedScene_ = &scene;
   cachedTopologyVersion_ = scene.topologyVersion();
   cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
+  cachedExcludeTransmissionBlend_ = excludeTransmissionBlend;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1098,9 +1227,11 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
   contributorSortableDraws_.clear();
   contributorFixedDraws_.clear();
   contributorTextureReads_.clear();
+  contributorDependencyBuffers_.clear();
   contributorSortableDraws_.reserve(16u);
   contributorFixedDraws_.reserve(8u);
   contributorTextureReads_.reserve(8u);
+  contributorDependencyBuffers_.reserve(16u);
 
   if (frame.transparentContributors.empty()) {
     return Result<bool, std::string>::makeResult(true);
@@ -1125,6 +1256,13 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
     if (contributionResult.hasError()) {
       return contributionResult;
     }
+    const uint32_t dependencyOffset =
+        saturateToU32(contributorDependencyBuffers_.size());
+    for (const BufferHandle handle : contribution.dependencyBuffers) {
+      contributorDependencyBuffers_.push_back(handle);
+    }
+    const uint32_t dependencyCount =
+        saturateToU32(contributorDependencyBuffers_.size() - dependencyOffset);
 
     const uint32_t stableOrderBase =
         saturateToU32(contributorSortableDraws_.size());
@@ -1136,12 +1274,19 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
           .draw = draw,
           .sortDepth = source.sortDepth,
           .stableOrder = stableOrderBase + source.stableOrder,
+          .flags = source.flags,
+          .dependencyOffset = dependencyOffset,
+          .dependencyCount = dependencyCount,
       });
     }
     for (const DrawItem &source : contribution.fixedDraws) {
       DrawItem draw = source;
       applyContributorDependencies(draw, contribution.dependencyBuffers);
-      contributorFixedDraws_.push_back(draw);
+      contributorFixedDraws_.push_back(FixedDrawEntry{
+          .draw = draw,
+          .dependencyOffset = dependencyOffset,
+          .dependencyCount = dependencyCount,
+      });
     }
     for (const TextureHandle handle : contribution.textureReads) {
       appendUniqueTexture(contributorTextureReads_, handle);
@@ -1167,23 +1312,213 @@ TransparentRenderer::collectContributorDraws(RenderFrameContext &frame) {
 }
 
 Result<bool, std::string> TransparentRenderer::appendTransparentPass(
-    RenderGraphBuilder &graph, TextureHandle colorTexture,
-    TextureHandle depthTexture, RenderGraphTextureId sceneDepthGraphTexture,
+    RenderFrameContext &frame, RenderGraphBuilder &graph,
+    TextureHandle colorTexture, TextureHandle depthTexture,
+    RenderGraphTextureId sceneDepthGraphTexture,
     std::span<const TransparentStageSortableDraw> sortableDraws,
-    std::span<const DrawItem> fixedDraws,
+    std::span<const FixedDrawEntry> fixedDraws,
     std::span<const TextureHandle> textureReads,
     std::span<const BufferHandle> dependencyBuffers) {
   if (sortableDraws.empty() && fixedDraws.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
 
-  passDrawItems_.clear();
-  passDrawItems_.reserve(sortableDraws.size() + fixedDraws.size());
-  for (const TransparentStageSortableDraw &draw : sortableDraws) {
-    passDrawItems_.push_back(draw.draw);
+  transparentRunDrawItems_.clear();
+  transparentRunDrawItems_.reserve(sortableDraws.size() + fixedDraws.size());
+  transparentRunDependencyBuffers_.clear();
+  transparentCandidateDependencyBuffers_.clear();
+  const uint32_t feedbackDrawCount = static_cast<uint32_t>(std::count_if(
+      sortableDraws.begin(), sortableDraws.end(),
+      [](const TransparentStageSortableDraw &draw) {
+        return (draw.flags &
+                kTransparentStageDrawFlagRequiresFrameColorFeedback) != 0u;
+      }));
+  const bool exactFeedbackPerDraw =
+      feedbackDrawCount <= kMaxExactTransmissionFeedbackDraws;
+  bool feedbackFallbackSourceReady = false;
+  if (!exactFeedbackPerDraw && !loggedTransmissionFeedbackFallbackWarning_) {
+    loggedTransmissionFeedbackFallbackWarning_ = true;
+    NURI_LOG_WARNING(
+        "TransparentRenderer::appendTransparentPass: %u blended "
+        "transmission draw(s) exceed exact feedback budget %u; using one "
+        "shared feedback refresh for this frame",
+        feedbackDrawCount, kMaxExactTransmissionFeedbackDraws);
   }
-  for (const DrawItem &draw : fixedDraws) {
-    passDrawItems_.push_back(draw);
+  const auto resetRunDependencies = [this, dependencyBuffers]() {
+    transparentRunDependencyBuffers_.clear();
+    for (const BufferHandle handle : dependencyBuffers) {
+      appendUniqueBuffer(transparentRunDependencyBuffers_, handle);
+    }
+  };
+  const auto appendDrawDependencyRange =
+      [this](std::pmr::vector<BufferHandle> &target, uint32_t offset,
+             uint32_t count) -> Result<bool, std::string> {
+    const size_t begin = static_cast<size_t>(offset);
+    const size_t end = begin + static_cast<size_t>(count);
+    if (begin > contributorDependencyBuffers_.size() ||
+        end > contributorDependencyBuffers_.size()) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::appendTransparentPass: contributor "
+          "dependency range is out of bounds");
+    }
+    for (size_t index = begin; index < end; ++index) {
+      appendUniqueBuffer(target, contributorDependencyBuffers_[index]);
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+  resetRunDependencies();
+
+  const auto flushTransparentRun =
+      [this, &graph, colorTexture, depthTexture, sceneDepthGraphTexture,
+       textureReads, &resetRunDependencies, &run = transparentRunDrawItems_](
+          std::string_view debugLabel) -> Result<bool, std::string> {
+    if (run.empty()) {
+      return Result<bool, std::string>::makeResult(true);
+    }
+
+    auto runResult = appendTransparentDrawRun(
+        graph, colorTexture, depthTexture, sceneDepthGraphTexture,
+        std::span<const DrawItem>(run.data(), run.size()), textureReads,
+        std::span<const BufferHandle>(transparentRunDependencyBuffers_.data(),
+                                      transparentRunDependencyBuffers_.size()),
+        debugLabel);
+    run.clear();
+    resetRunDependencies();
+    return runResult;
+  };
+  const auto prepareRunDependenciesForDraw =
+      [this, &appendDrawDependencyRange, &flushTransparentRun,
+       &resetRunDependencies](uint32_t offset,
+                              uint32_t count) -> Result<bool, std::string> {
+    transparentCandidateDependencyBuffers_.assign(
+        transparentRunDependencyBuffers_.begin(),
+        transparentRunDependencyBuffers_.end());
+    auto appendResult = appendDrawDependencyRange(
+        transparentCandidateDependencyBuffers_, offset, count);
+    if (appendResult.hasError()) {
+      return appendResult;
+    }
+    if (transparentCandidateDependencyBuffers_.size() <=
+        kMaxDependencyResources) {
+      transparentRunDependencyBuffers_.assign(
+          transparentCandidateDependencyBuffers_.begin(),
+          transparentCandidateDependencyBuffers_.end());
+      return Result<bool, std::string>::makeResult(true);
+    }
+    if (transparentRunDrawItems_.empty()) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::appendTransparentPass: single transparent "
+          "draw dependency buffer count exceeds kMaxDependencyResources");
+    }
+    auto flushResult = flushTransparentRun(kTransparentPassLabel);
+    if (flushResult.hasError()) {
+      return flushResult;
+    }
+    resetRunDependencies();
+    transparentCandidateDependencyBuffers_.assign(
+        transparentRunDependencyBuffers_.begin(),
+        transparentRunDependencyBuffers_.end());
+    appendResult = appendDrawDependencyRange(
+        transparentCandidateDependencyBuffers_, offset, count);
+    if (appendResult.hasError()) {
+      return appendResult;
+    }
+    if (transparentCandidateDependencyBuffers_.size() >
+        kMaxDependencyResources) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::appendTransparentPass: single transparent "
+          "draw dependency buffer count exceeds kMaxDependencyResources");
+    }
+    transparentRunDependencyBuffers_.assign(
+        transparentCandidateDependencyBuffers_.begin(),
+        transparentCandidateDependencyBuffers_.end());
+    return Result<bool, std::string>::makeResult(true);
+  };
+
+  for (const TransparentStageSortableDraw &draw : sortableDraws) {
+    const bool requiresFeedback =
+        (draw.flags & kTransparentStageDrawFlagRequiresFrameColorFeedback) !=
+        0u;
+    if (!requiresFeedback) {
+      auto dependencyResult = prepareRunDependenciesForDraw(
+          draw.dependencyOffset, draw.dependencyCount);
+      if (dependencyResult.hasError()) {
+        return dependencyResult;
+      }
+      transparentRunDrawItems_.push_back(draw.draw);
+      continue;
+    }
+
+    if (!exactFeedbackPerDraw) {
+      if (!feedbackFallbackSourceReady) {
+        auto flushResult = flushTransparentRun(kTransparentPassLabel);
+        if (flushResult.hasError()) {
+          return flushResult;
+        }
+        auto feedbackResult =
+            appendTransparentTransmissionFeedbackRefresh(frame, graph);
+        if (feedbackResult.hasError()) {
+          return feedbackResult;
+        }
+        feedbackFallbackSourceReady = true;
+      }
+      auto dependencyResult = prepareRunDependenciesForDraw(
+          draw.dependencyOffset, draw.dependencyCount);
+      if (dependencyResult.hasError()) {
+        return dependencyResult;
+      }
+      transparentRunDrawItems_.push_back(draw.draw);
+      continue;
+    }
+
+    auto flushResult = flushTransparentRun(kTransparentPassLabel);
+    if (flushResult.hasError()) {
+      return flushResult;
+    }
+
+    auto feedbackResult =
+        appendTransparentTransmissionFeedbackRefresh(frame, graph);
+    if (feedbackResult.hasError()) {
+      return feedbackResult;
+    }
+
+    auto dependencyResult = prepareRunDependenciesForDraw(draw.dependencyOffset,
+                                                          draw.dependencyCount);
+    if (dependencyResult.hasError()) {
+      return dependencyResult;
+    }
+    auto drawResult = appendTransparentDrawRun(
+        graph, colorTexture, depthTexture, sceneDepthGraphTexture,
+        std::span<const DrawItem>(&draw.draw, 1u), textureReads,
+        std::span<const BufferHandle>(transparentRunDependencyBuffers_.data(),
+                                      transparentRunDependencyBuffers_.size()),
+        kTransparentTransmissionPassLabel);
+    if (drawResult.hasError()) {
+      return drawResult;
+    }
+    resetRunDependencies();
+  }
+  for (const FixedDrawEntry &draw : fixedDraws) {
+    auto dependencyResult = prepareRunDependenciesForDraw(draw.dependencyOffset,
+                                                          draw.dependencyCount);
+    if (dependencyResult.hasError()) {
+      return dependencyResult;
+    }
+    transparentRunDrawItems_.push_back(draw.draw);
+  }
+
+  return flushTransparentRun(kTransparentPassLabel);
+}
+
+Result<bool, std::string> TransparentRenderer::appendTransparentDrawRun(
+    RenderGraphBuilder &graph, TextureHandle colorTexture,
+    TextureHandle depthTexture, RenderGraphTextureId sceneDepthGraphTexture,
+    std::span<const DrawItem> draws,
+    std::span<const TextureHandle> textureReads,
+    std::span<const BufferHandle> dependencyBuffers,
+    std::string_view debugLabel) {
+  if (draws.empty()) {
+    return Result<bool, std::string>::makeResult(true);
   }
 
   const bool hasPriorColorPass =
@@ -1216,24 +1551,21 @@ Result<bool, std::string> TransparentRenderer::appendTransparentPass(
       passDesc.depthTexture = importResult.value();
     }
   }
-  passDesc.draws =
-      std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size());
+  passDesc.draws = draws;
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers(memory_);
   preResolvedDrawBuffers.reserve(meshDrawTemplates_.size() * 3u +
-                                 passDrawItems_.size() * 2u + 8u);
+                                 draws.size() * 2u + 8u);
   for (const MeshDrawTemplate &entry : meshDrawTemplates_) {
     appendUniqueBuffer(preResolvedDrawBuffers, entry.baseVertexBuffer);
     appendUniqueBuffer(preResolvedDrawBuffers, entry.baseVertexDecodeBuffer);
     appendUniqueBuffer(preResolvedDrawBuffers, entry.indexBuffer);
   }
-  appendPreResolvedDrawBuffers(
-      preResolvedDrawBuffers,
-      std::span<const DrawItem>(passDrawItems_.data(), passDrawItems_.size()));
+  appendPreResolvedDrawBuffers(preResolvedDrawBuffers, draws);
   passDesc.drawBuffersPreResolved = true;
   passDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
       preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
   passDesc.dependencyBuffers = dependencyBuffers;
-  passDesc.debugLabel = kTransparentPassLabel;
+  passDesc.debugLabel = debugLabel;
   passDesc.debugColor = kTransparentPassDebugColor;
 
   auto addResult = graph.addGraphicsPass(passDesc);
@@ -1252,6 +1584,108 @@ Result<bool, std::string> TransparentRenderer::appendTransparentPass(
     }
   }
 
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+TransparentRenderer::appendTransparentTransmissionFeedbackRefresh(
+    RenderFrameContext &frame, RenderGraphBuilder &graph) {
+  const TextureHandle frameColorTexture = resolveFrameColorTexture(frame);
+  const TextureHandle feedbackFull =
+      frame.sharedResources.transparentTransmissionFeedbackTexture;
+  const TextureHandle feedbackHalf =
+      frame.sharedResources.transparentTransmissionFeedbackHalfResTexture;
+  const TextureHandle feedbackQuarter =
+      frame.sharedResources.transparentTransmissionFeedbackQuarterResTexture;
+  if (!nuri::isValid(frameColorTexture) || !nuri::isValid(feedbackFull) ||
+      !nuri::isValid(feedbackHalf) || !nuri::isValid(feedbackQuarter)) {
+    return Result<bool, std::string>::makeError(
+        "TransparentRenderer::appendTransparentTransmissionFeedbackRefresh: "
+        "transparent transmission feedback pyramid is incomplete");
+  }
+  auto pipelineResult =
+      ensureFeedbackCopyPipeline(gpu_.getTextureFormat(feedbackFull));
+  if (pipelineResult.hasError()) {
+    return pipelineResult;
+  }
+  if (!nuri::isValid(feedbackCopyPipelineHandle_)) {
+    return Result<bool, std::string>::makeError(
+        "TransparentRenderer::appendTransparentTransmissionFeedbackRefresh: "
+        "feedback copy pipeline is invalid");
+  }
+
+  const auto appendCopyPass =
+      [this, &graph](TextureHandle source, TextureHandle destination,
+                     std::string_view debugLabel,
+                     bool downsample) -> Result<bool, std::string> {
+    const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(source);
+    if (sourceTexId == kInvalidTextureBindlessIndex) {
+      return Result<bool, std::string>::makeError(
+          "TransparentRenderer::appendTransparentTransmissionFeedbackRefresh: "
+          "invalid source texture bindless index");
+    }
+
+    const CopyPushConstants pushConstants{
+        .sourceTexId = sourceTexId,
+        .sourceSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u),
+        .flags = downsample ? kSceneCopyFlagDownsample : 0u,
+        .reserved0 = 0u,
+    };
+    const DrawItem draw{
+        .command = DrawCommandType::Direct,
+        .pipeline = feedbackCopyPipelineHandle_,
+        .vertexCount = 3u,
+        .instanceCount = 1u,
+        .pushConstants = std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(&pushConstants),
+            sizeof(pushConstants)),
+        .debugLabel = debugLabel,
+        .debugColor = kTransparentPassDebugColor,
+    };
+
+    auto colorImportResult =
+        graph.importTexture(destination, "transparent_transmission_feedback");
+    if (colorImportResult.hasError()) {
+      return Result<bool, std::string>::makeError(colorImportResult.error());
+    }
+    RenderGraphGraphicsPassDesc passDesc{};
+    passDesc.color = {.loadOp = LoadOp::Clear,
+                      .storeOp = StoreOp::Store,
+                      .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+    passDesc.colorTexture = colorImportResult.value();
+    passDesc.draws = std::span<const DrawItem>(&draw, 1u);
+    passDesc.dependencyTextures = std::span<const TextureHandle>(&source, 1u);
+    passDesc.debugLabel = debugLabel;
+    passDesc.debugColor = kTransparentPassDebugColor;
+
+    auto addResult = graph.addGraphicsPass(passDesc);
+    if (addResult.hasError()) {
+      return Result<bool, std::string>::makeError(addResult.error());
+    }
+
+    return Result<bool, std::string>::makeResult(true);
+  };
+
+  auto fullResult =
+      appendCopyPass(frameColorTexture, feedbackFull,
+                     kTransparentTransmissionFeedbackCopyLabel, false);
+  if (fullResult.hasError()) {
+    return fullResult;
+  }
+  auto halfResult =
+      appendCopyPass(feedbackFull, feedbackHalf,
+                     kTransparentTransmissionFeedbackHalfLabel, true);
+  if (halfResult.hasError()) {
+    return halfResult;
+  }
+  auto quarterResult =
+      appendCopyPass(feedbackHalf, feedbackQuarter,
+                     kTransparentTransmissionFeedbackQuarterLabel, true);
+  if (quarterResult.hasError()) {
+    return quarterResult;
+  }
+
+  ++frame.metrics.antiAliasing.transparentTransmissionFeedbackRefreshCount;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1347,6 +1781,7 @@ void TransparentRenderer::resetCachedState() {
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedExcludeTransmissionBlend_ = true;
   loggedMaterialFallbackWarning_ = false;
   loggedContributorCollections_ = 0u;
   loggedAddressProbeTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -1363,12 +1798,16 @@ void TransparentRenderer::resetFrameBuildState() {
   contributorSortableDraws_.clear();
   contributorFixedDraws_.clear();
   contributorTextureReads_.clear();
+  contributorDependencyBuffers_.clear();
   drawPushConstants_.clear();
   pickPushConstants_.clear();
   meshSortableDraws_.clear();
   sortableDraws_.clear();
   fixedDraws_.clear();
   passDrawItems_.clear();
+  transparentRunDrawItems_.clear();
+  transparentRunDependencyBuffers_.clear();
+  transparentCandidateDependencyBuffers_.clear();
   pickDrawItems_.clear();
   passTextureReads_.clear();
   passDependencyBuffers_.clear();
@@ -1376,6 +1815,9 @@ void TransparentRenderer::resetFrameBuildState() {
 }
 
 void TransparentRenderer::destroyPipelineState() {
+  if (nuri::isValid(feedbackCopyPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(feedbackCopyPipelineHandle_);
+  }
   if (nuri::isValid(meshPickDoubleSidedPipelineHandle_)) {
     gpu_.destroyRenderPipeline(meshPickDoubleSidedPipelineHandle_);
   }
@@ -1392,12 +1834,20 @@ void TransparentRenderer::destroyPipelineState() {
   meshDoubleSidedPipelineHandle_ = {};
   meshPickPipelineHandle_ = {};
   meshPickDoubleSidedPipelineHandle_ = {};
+  feedbackCopyPipelineHandle_ = {};
   meshPipelineColorFormat_ = Format::Count;
   meshPipelineDepthFormat_ = Format::Count;
   pickPipelineDepthFormat_ = Format::Count;
+  feedbackCopyPipelineColorFormat_ = Format::Count;
 }
 
 void TransparentRenderer::destroyShaders() {
+  if (nuri::isValid(feedbackCopyVertexShader_)) {
+    gpu_.destroyShaderModule(feedbackCopyVertexShader_);
+  }
+  if (nuri::isValid(feedbackCopyFragmentShader_)) {
+    gpu_.destroyShaderModule(feedbackCopyFragmentShader_);
+  }
   if (nuri::isValid(meshVertexShader_)) {
     gpu_.destroyShaderModule(meshVertexShader_);
   }
@@ -1410,6 +1860,9 @@ void TransparentRenderer::destroyShaders() {
   meshVertexShader_ = {};
   meshFragmentShader_ = {};
   meshPickFragmentShader_ = {};
+  feedbackCopyVertexShader_ = {};
+  feedbackCopyFragmentShader_ = {};
+  feedbackCopyShader_.reset();
 }
 
 void TransparentRenderer::destroyBuffers() {

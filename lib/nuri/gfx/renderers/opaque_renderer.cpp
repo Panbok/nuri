@@ -787,6 +787,7 @@ void OpaqueRenderer::onDetach() {
   cachedTransformVersion_ = std::numeric_limits<uint64_t>::max();
   cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   cachedGeometryMutationVersion_ = std::numeric_limits<uint64_t>::max();
+  cachedExcludeTransmission_ = true;
   cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
   cachedAnimationSceneActive_ = false;
   previousTransformSceneId_ = 0u;
@@ -1033,12 +1034,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       cachedTopologyVersion_ != frame.scene->topologyVersion();
   const bool materialDirty = topologyDirty || cachedScene_ != frame.scene ||
                              cachedMaterialVersion_ != materialSnapshot.version;
+  const bool excludeTransmission = true;
+  const bool transmissionPolicyDirty =
+      cachedExcludeTransmission_ != excludeTransmission;
   const uint64_t geometryMutationVersion = gpu_.geometryMutationVersion();
   const bool hasGeometryMutationTracking = geometryMutationVersion != 0;
-  if (topologyDirty || materialDirty) {
+  if (topologyDirty || materialDirty || transmissionPolicyDirty) {
     auto cacheResult = rebuildSceneCache(
         *frame.scene, *frame.resources,
-        static_cast<uint32_t>(materialSnapshot.headers.size()));
+        static_cast<uint32_t>(materialSnapshot.headers.size()),
+        excludeTransmission);
     if (cacheResult.hasError()) {
       return cacheResult;
     }
@@ -1356,8 +1361,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (materialDirty || materialTextureAccessHandles_.empty()) {
     NURI_PROFILER_ZONE("OpaqueRenderer.material_access_cache",
                        NURI_PROFILER_COLOR_CMD_DRAW);
-    auto materialAccessCacheResult =
-        rebuildMaterialTextureAccessCache(*frame.scene, *frame.resources);
+    auto materialAccessCacheResult = rebuildMaterialTextureAccessCache(
+        *frame.scene, *frame.resources, excludeTransmission);
     if (materialAccessCacheResult.hasError()) {
       return materialAccessCacheResult;
     }
@@ -6085,10 +6090,9 @@ OpaqueRenderer::ensureIndirectCommandRingCapacity(size_t requiredBytes) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
-                                  const ResourceManager &resources,
-                                  uint32_t materialCount) {
+Result<bool, std::string> OpaqueRenderer::rebuildSceneCache(
+    const RenderScene &scene, const ResourceManager &resources,
+    uint32_t materialCount, bool excludeTransmission) {
   renderableTemplates_.clear();
   meshDrawTemplates_.clear();
 
@@ -6160,7 +6164,7 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
           materialRecord->desc.alphaMode == MaterialAlphaMode::Mask;
       if (materialRecord != nullptr &&
           (materialRecord->desc.alphaMode == MaterialAlphaMode::Blend ||
-           isTransmissionMaterial(*materialRecord))) {
+           (excludeTransmission && isTransmissionMaterial(*materialRecord)))) {
         ++skippedBlendSubmeshCount;
         continue;
       }
@@ -6215,6 +6219,7 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
   cachedScene_ = &scene;
   cachedTopologyVersion_ = scene.topologyVersion();
   cachedGeometryMutationVersion_ = gpu_.geometryMutationVersion();
+  cachedExcludeTransmission_ = excludeTransmission;
   uniformSingleSubmeshPath_ = false;
   if (!meshDrawTemplates_.empty() &&
       meshDrawTemplates_.size() == renderableTemplates_.size()) {
@@ -6240,7 +6245,8 @@ OpaqueRenderer::rebuildSceneCache(const RenderScene &scene,
 }
 
 Result<bool, std::string> OpaqueRenderer::rebuildMaterialTextureAccessCache(
-    const RenderScene &scene, const ResourceManager &resources) {
+    const RenderScene &scene, const ResourceManager &resources,
+    bool excludeTransmission) {
   NURI_PROFILER_FUNCTION();
   materialTextureAccessHandles_.clear();
   const std::span<const Renderable> renderables = scene.renderables();
@@ -6267,7 +6273,7 @@ Result<bool, std::string> OpaqueRenderer::rebuildMaterialTextureAccessCache(
       const MaterialRecord *materialRecord = resources.tryGet(resolvedMaterial);
       if (materialRecord == nullptr ||
           materialRecord->desc.alphaMode == MaterialAlphaMode::Blend ||
-          isTransmissionMaterial(*materialRecord)) {
+          (excludeTransmission && isTransmissionMaterial(*materialRecord))) {
         continue;
       }
       forEachMaterialTextureRef(

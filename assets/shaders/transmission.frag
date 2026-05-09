@@ -50,12 +50,16 @@ vec3 applyVolumeAttenuation(vec3 radiance, float transmissionDistance,
   return transmittance * radiance;
 }
 
-float transmissionFramebufferLod(float roughness, float ior) {
+float transmissionFramebufferLod(float roughness, float ior, uint alphaMode) {
+  if (alphaMode == kAlphaModeBlend) {
+    return 0.0;
+  }
   return max(applyIorToRoughness(roughness, ior) * 2.0,
              transmissionJitterMinLod());
 }
 
-vec3 sampleTransmissionColor(vec2 uv, float roughness, float ior) {
+vec3 sampleTransmissionColor(vec2 uv, float roughness, float ior,
+                             uint alphaMode) {
   vec2 clampedUv = clamp(uv, vec2(0.0), vec2(1.0));
   vec3 level0 = textureBindless2D(getSceneColorPyramidTexId(pc.frameData, 0u),
                                   pc.frameData.sceneColorSamplerId, clampedUv)
@@ -78,7 +82,8 @@ vec3 sampleTransmissionColor(vec2 uv, float roughness, float ior) {
     level2 = level1;
   }
 
-  float lod = clamp(transmissionFramebufferLod(roughness, ior), 0.0, 2.0);
+  float lod =
+      clamp(transmissionFramebufferLod(roughness, ior, alphaMode), 0.0, 2.0);
   if ((pc.frameData.flags & kFrameDataFlagTransmissionMipDebug) != 0u) {
     const vec3 fullRes = vec3(1.0, 0.1, 0.1);
     const vec3 halfRes = vec3(0.1, 1.0, 0.1);
@@ -115,14 +120,14 @@ vec2 resolveTransmissionUv(vec3 refractedRayExit) {
 vec3 getIndirectTransmission(vec3 n, vec3 v, float roughness, vec3 baseColor,
                              vec3 f0, vec3 f90, vec3 worldPos, float ior,
                              float thickness, vec3 attenuationColor,
-                             float attenuationDistance) {
+                             float attenuationDistance, uint alphaMode) {
   vec3 transmissionRay =
       getVolumeTransmissionRay(n, v, thickness, ior, transmissionModelScale());
   vec3 refractedRayExit = worldPos + transmissionRay;
 
   vec2 refractionCoords = resolveTransmissionUv(refractedRayExit);
   vec3 transmittedLight =
-      sampleTransmissionColor(refractionCoords, roughness, ior);
+      sampleTransmissionColor(refractionCoords, roughness, ior, alphaMode);
   vec3 attenuatedColor =
       applyVolumeAttenuation(transmittedLight, length(transmissionRay),
                              attenuationColor, attenuationDistance);
@@ -142,6 +147,17 @@ vec3 getIndirectTransmission(vec3 n, vec3 v, float roughness, vec3 baseColor,
     specularColor = fresnelSchlick(ndotv, f0);
   }
   return (vec3(1.0) - specularColor) * attenuatedColor * baseColor;
+}
+
+float transmissionOutputAlpha(uint alphaMode, uint featureMask, float baseAlpha,
+                              float transmissionFactor) {
+  if (alphaMode != kAlphaModeOpaque) {
+    return baseAlpha;
+  }
+  if ((featureMask & kMaterialFeatureVolume) != 0u) {
+    return 1.0;
+  }
+  return max(1.0 - transmissionFactor, 0.08);
 }
 
 vec3 getDirectTransmission(vec3 n, vec3 v, vec3 pointToLight,
@@ -442,7 +458,7 @@ void main() {
     indirectTransmission = getIndirectTransmission(
         sm.nBase, sm.v, sm.roughness, sm.diffuseColor, sm.f0, sm.f90,
         vtx.worldPos, transmissionIor, thickness, attenuationColor,
-        attenuationDistance);
+        attenuationDistance, alphaMode);
   }
 
   // Mix transmission into the diffuse terms ---------------------------
@@ -469,6 +485,7 @@ void main() {
       directLighting + indirectLighting + sm.clearcoatAttenuation * sm.emissive;
   color = max(color, vec3(0.0));
 
-  float outAlpha = (alphaMode == kAlphaModeOpaque) ? 1.0 : sm.baseColor.a;
+  float outAlpha = transmissionOutputAlpha(alphaMode, featureMask,
+                                           sm.baseColor.a, transmissionFactor);
   out_FragColor = vec4(color, outAlpha);
 }

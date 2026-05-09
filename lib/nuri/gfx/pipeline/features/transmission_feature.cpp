@@ -29,6 +29,16 @@ TransmissionFeature::~TransmissionFeature() {
   }
 }
 
+Result<bool, std::string>
+TransmissionFeature::publishFrameData(FrameBuildContext &ctx) {
+  if (!renderer_) {
+    return Result<bool, std::string>::makeError(
+        "TransmissionFeature::publishFrameData: renderer is null");
+  }
+  renderer_->publishFrameData(ctx.frame);
+  return Result<bool, std::string>::makeResult(true);
+}
+
 Result<bool, std::string> TransmissionFeature::prepare(FrameBuildContext &ctx) {
   return renderer_->prepareTransmissionPasses(ctx.frame);
 }

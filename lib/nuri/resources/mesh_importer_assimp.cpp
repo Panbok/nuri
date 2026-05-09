@@ -450,13 +450,13 @@ void warnOnTransmissionBlendCombination(const ImportedMaterialInfo &material,
 
   if (!material.name.empty()) {
     NURI_LOG_WARNING("%s: material '%s' combines transmission with alphaMode "
-                     "BLEND; glTF optical transparency is expected to use "
-                     "OPAQUE or MASK",
+                     "BLEND; this uses the expensive exact transparent "
+                     "transmission path",
                      context, material.name.c_str());
   } else {
     NURI_LOG_WARNING("%s: unnamed material combines transmission with "
-                     "alphaMode BLEND; glTF optical transparency is expected "
-                     "to use OPAQUE or MASK",
+                     "alphaMode BLEND; this uses the expensive exact "
+                     "transparent transmission path",
                      context);
   }
 }

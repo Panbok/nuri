@@ -4,6 +4,7 @@ const uint kInvalidTextureBindlessIndex = 0xFFFFFFFFu;
 const uint kInvalidSamplerBindlessIndex = 0xFFFFFFFFu;
 const uint kAlphaModeOpaque = 0u;
 const uint kAlphaModeMask = 1u;
+const uint kAlphaModeBlend = 2u;
 const uint kInvalidMaterialExtensionIndex = 0xFFFFFFFFu;
 
 const uint kFrameDataFlagHasIblDiffuse = 1u << 0u;

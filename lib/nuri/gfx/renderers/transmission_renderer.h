@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -45,6 +46,9 @@ public:
   void onAttach();
   void onDetach();
   void publishFrameData(RenderFrameContext &frame);
+  Result<bool, std::string>
+  buildTransparentStageContribution(RenderFrameContext &frame,
+                                    TransparentStageContribution &out);
   [[nodiscard]] bool hasPreparedTransmissionMainPass() const noexcept;
   Result<bool, std::string>
   prepareTransmissionPasses(RenderFrameContext &frame);
@@ -133,6 +137,7 @@ private:
     uint32_t materialIndex = kInvalidMaterialIndex;
     uint32_t instanceIndex = 0;
     bool doubleSided = false;
+    bool sortedFeedback = false;
   };
 
   struct DynamicBufferSlot {
@@ -149,6 +154,9 @@ private:
   ensureInstanceMatricesRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
+  Result<bool, std::string> ensureBlendedFrameDataRingCapacity();
+  Result<bool, std::string>
+  ensureTransparentFeedbackTextures(RenderFrameContext &frame);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
                                               uint32_t materialCount);
@@ -162,7 +170,9 @@ private:
   void destroyShaders();
   void destroyBuffers();
   [[nodiscard]] bool hasTransmissionContent(const RenderFrameContext &frame);
-  [[nodiscard]] RenderPipelineHandle selectMeshPipeline() const;
+  [[nodiscard]] RenderPipelineHandle
+  selectMeshPipeline(bool useBlendPipeline) const;
+  void destroyFeedbackTextures();
 
   GPUDevice &gpu_;
   TransmissionRendererConfig config_{};
@@ -170,11 +180,14 @@ private:
   std::unique_ptr<Shader> meshShader_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
+  std::pmr::vector<DynamicBufferSlot> blendedFrameDataRing_;
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshFragmentShader_{};
   RenderPipelineHandle meshPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshBlendPipelineHandle_{};
+  RenderPipelineHandle meshBlendDoubleSidedPipelineHandle_{};
 
   Format meshPipelineColorFormat_ = Format::Count;
   Format meshPipelineDepthFormat_ = Format::Count;
@@ -207,9 +220,13 @@ private:
   std::pmr::vector<TextureHandle> environmentTextureAccessHandles_;
   std::pmr::vector<TextureHandle> staticPassTextureReads_;
   std::pmr::vector<MeshPushConstants> meshPushConstants_;
+  std::pmr::vector<MeshPushConstants> blendedPushConstants_;
   std::pmr::vector<DrawItem> passDrawItems_;
+  std::pmr::vector<TransparentStageSortableDraw> blendedSortableDraws_;
   std::pmr::vector<TextureHandle> passTextureReads_;
+  std::pmr::vector<TextureHandle> blendedTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
+  std::pmr::vector<BufferHandle> blendedDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
   std::pmr::vector<BufferHandle> preResolvedTemplateBuffers_;
   std::pmr::vector<BufferHandle> cachedPreResolvedDrawBuffers_;
@@ -224,6 +241,12 @@ private:
   TextureHandle preparedFrameColorTexture_{};
   TextureHandle preparedDepthTexture_{};
   RenderGraphTextureId preparedSceneDepthGraphTexture_{};
+  std::array<std::pmr::vector<TextureHandle>,
+             kFrameCompositionSceneColorMipCount>
+      transparentFeedbackTextures_;
+  uint32_t transparentFeedbackWidth_ = 0u;
+  uint32_t transparentFeedbackHeight_ = 0u;
+  uint32_t transparentFeedbackRingCount_ = 0u;
 };
 
 } // namespace nuri

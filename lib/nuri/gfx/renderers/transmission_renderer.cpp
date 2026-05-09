@@ -18,6 +18,7 @@ constexpr std::string_view kTransmissionMeshLabel = "TransmissionMesh";
 constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr float kDefaultTaaCurrentFrameWeight = 0.045f;
+constexpr uint32_t kForwardSceneHasSceneColor = 1u << 5u;
 
 [[nodiscard]] std::pmr::memory_resource *
 resolveMemoryResource(std::pmr::memory_resource *memory) {
@@ -88,6 +89,52 @@ bool animationOverrideCoversSubmesh(
 
 [[nodiscard]] bool isTransmissionMaterial(const MaterialRecord &material) {
   return (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
+}
+
+[[nodiscard]] bool
+usesSortedTransmissionFeedback(const MaterialRecord &material) {
+  return isTransmissionMaterial(material) &&
+         material.desc.alphaMode != MaterialAlphaMode::Mask;
+}
+
+[[nodiscard]] float transmissionSortDepth(const glm::mat4 &view,
+                                          const glm::mat4 &model,
+                                          const BoundingBox &bounds) {
+  const glm::vec3 min = bounds.min_;
+  const glm::vec3 max = bounds.max_;
+  const glm::vec3 corners[] = {
+      glm::vec3(min.x, min.y, min.z), glm::vec3(min.x, max.y, min.z),
+      glm::vec3(min.x, min.y, max.z), glm::vec3(min.x, max.y, max.z),
+      glm::vec3(max.x, min.y, min.z), glm::vec3(max.x, max.y, min.z),
+      glm::vec3(max.x, min.y, max.z), glm::vec3(max.x, max.y, max.z),
+  };
+  float depth = std::numeric_limits<float>::lowest();
+  for (const glm::vec3 &corner : corners) {
+    const glm::vec4 viewPos = view * model * glm::vec4(corner, 1.0f);
+    depth = std::max(depth, -viewPos.z);
+  }
+  return std::isfinite(depth) ? depth : 0.0f;
+}
+
+[[nodiscard]] uint32_t levelDimension(uint32_t value, uint32_t mipLevel) {
+  return std::max(1u, value >> mipLevel);
+}
+
+[[nodiscard]] TextureDesc makeTransparentFeedbackTextureDesc(uint32_t width,
+                                                             uint32_t height) {
+  return TextureDesc{
+      .type = TextureType::Texture2D,
+      .format = kFrameCompositionFrameColorFormat,
+      .dimensions = {.width = width, .height = height, .depth = 1u},
+      .usage = TextureUsage::AttachmentSampled,
+      .storage = Storage::Device,
+      .numLayers = 1u,
+      .numSamples = 1u,
+      .numMipLevels = 1u,
+      .data = {},
+      .dataNumMipLevels = 1u,
+      .generateMipmaps = false,
+  };
 }
 
 [[nodiscard]] glm::vec3 transmissionScaleForDraw(const Renderable &renderable,
@@ -248,7 +295,7 @@ resolveTransmissionLod(const Submesh &submesh, const RenderSettings &settings) {
 RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
                                     ShaderHandle vertexShader,
                                     ShaderHandle fragmentShader,
-                                    CullMode cullMode) {
+                                    CullMode cullMode, bool blendEnabled) {
   return RenderPipelineDesc{
       .vertexInput = {},
       .vertexShader = vertexShader,
@@ -258,7 +305,7 @@ RenderPipelineDesc meshPipelineDesc(Format colorFormat, Format depthFormat,
       .cullMode = cullMode,
       .polygonMode = PolygonMode::Fill,
       .topology = Topology::Triangle,
-      .blendEnabled = false,
+      .blendEnabled = blendEnabled,
   };
 }
 
@@ -274,16 +321,22 @@ TransmissionRenderer::TransmissionRenderer(
     std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(config), memory_(resolveMemoryResource(memory)),
       instanceMatricesRing_(memory_), instanceRemapRing_(memory_),
-      meshDrawTemplates_(memory_), instanceMatrices_(memory_),
-      instanceRemap_(memory_), instanceDataRingUploadVersions_(memory_),
+      blendedFrameDataRing_(memory_), meshDrawTemplates_(memory_),
+      instanceMatrices_(memory_), instanceRemap_(memory_),
+      instanceDataRingUploadVersions_(memory_),
       materialTextureAccessHandles_(memory_),
       environmentTextureAccessHandles_(memory_),
       staticPassTextureReads_(memory_), meshPushConstants_(memory_),
-      passDrawItems_(memory_), passTextureReads_(memory_),
-      passDependencyBuffers_(memory_),
+      blendedPushConstants_(memory_), passDrawItems_(memory_),
+      blendedSortableDraws_(memory_), passTextureReads_(memory_),
+      blendedTextureReads_(memory_), passDependencyBuffers_(memory_),
+      blendedDependencyBuffers_(memory_),
       passDependencyBufferAccessModes_(memory_),
       preResolvedTemplateBuffers_(memory_),
-      cachedPreResolvedDrawBuffers_(memory_) {
+      cachedPreResolvedDrawBuffers_(memory_),
+      transparentFeedbackTextures_{std::pmr::vector<TextureHandle>(memory_),
+                                   std::pmr::vector<TextureHandle>(memory_),
+                                   std::pmr::vector<TextureHandle>(memory_)} {
   const std::filesystem::path basePath = config_.meshFragment.parent_path();
   transmissionVertexPath_ = basePath / "transmission.vert";
   transmissionFragmentPath_ = basePath / "transmission.frag";
@@ -301,6 +354,7 @@ void TransmissionRenderer::onAttach() {
 
 void TransmissionRenderer::onDetach() {
   destroyBuffers();
+  destroyFeedbackTextures();
   destroyPipelineState();
   destroyShaders();
   meshShader_.reset();
@@ -310,7 +364,20 @@ void TransmissionRenderer::onDetach() {
 }
 
 void TransmissionRenderer::publishFrameData(RenderFrameContext &frame) {
-  (void)frame;
+  const RenderSettings &settings = settingsOrDefault(frame);
+  if (!settings.transmission.enabled) {
+    return;
+  }
+  frame.sharedResources.transparentTransmissionStageEnabled = true;
+  frame.transparentContributors.publish(TransparentContributionCollector{
+      .user = this,
+      .collect =
+          [](void *user, RenderFrameContext &frame,
+             TransparentStageContribution &out) -> Result<bool, std::string> {
+        return static_cast<TransmissionRenderer *>(user)
+            ->buildTransparentStageContribution(frame, out);
+      },
+  });
 }
 
 Result<bool, std::string>
@@ -322,6 +389,9 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   preparedFrameColorTexture_ = {};
   preparedDepthTexture_ = {};
   preparedSceneDepthGraphTexture_ = {};
+  frame.sharedResources.transparentTransmissionFeedbackTexture = {};
+  frame.sharedResources.transparentTransmissionFeedbackHalfResTexture = {};
+  frame.sharedResources.transparentTransmissionFeedbackQuarterResTexture = {};
 
   const RenderSettings &settings = settingsOrDefault(frame);
   if (!settings.transmission.enabled) {
@@ -467,6 +537,26 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   const uint64_t frameDataAddress = sceneGpu->postTaaFrameDataAddress != 0u
                                         ? sceneGpu->postTaaFrameDataAddress
                                         : sceneGpu->frameDataAddress;
+  const bool hasSortedFeedbackDraws = std::any_of(
+      meshDrawTemplates_.begin(), meshDrawTemplates_.end(),
+      [](const MeshDrawTemplate &entry) { return entry.sortedFeedback; });
+  if (hasSortedFeedbackDraws) {
+    auto feedbackResult = ensureTransparentFeedbackTextures(frame);
+    if (feedbackResult.hasError()) {
+      return feedbackResult;
+    }
+    frame.metrics.antiAliasing.transparentTransmissionFeedbackSourceAvailable =
+        nuri::isValid(
+            frame.sharedResources.transparentTransmissionFeedbackTexture) &&
+                nuri::isValid(
+                    frame.sharedResources
+                        .transparentTransmissionFeedbackHalfResTexture) &&
+                nuri::isValid(
+                    frame.sharedResources
+                        .transparentTransmissionFeedbackQuarterResTexture)
+            ? 1u
+            : 0u;
+  }
   const bool jitteredPostTaaDepthBias =
       !stableVisibilityDepth && nuri::isValid(depthTexture) &&
       transmissionUsesJitteredPostTaaDepthBias(frame, settings,
@@ -492,6 +582,63 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           ? 0u
           : static_cast<uint32_t>(frame.frameIndex %
                                   instanceMatricesRing_.size());
+  uint64_t blendedFrameDataAddress = 0u;
+  BufferHandle blendedFrameDataBufferHandle{};
+  if (hasSortedFeedbackDraws) {
+    auto frameDataRingResult = ensureBlendedFrameDataRingCapacity();
+    if (frameDataRingResult.hasError()) {
+      return frameDataRingResult;
+    }
+    const uint32_t blendFrameSlot =
+        blendedFrameDataRing_.empty()
+            ? 0u
+            : static_cast<uint32_t>(frame.frameIndex %
+                                    blendedFrameDataRing_.size());
+    DynamicBufferSlot &blendSlot = blendedFrameDataRing_[blendFrameSlot];
+    if (!blendSlot.buffer || !blendSlot.buffer->valid()) {
+      return Result<bool, std::string>::makeError(
+          "TransmissionRenderer::prepareTransmissionPasses: blended frame "
+          "data buffer is unavailable");
+    }
+    FrameData blendedFrameData = sceneGpu->postTaaFrameDataAddress != 0u
+                                     ? sceneGpu->postTaaFrameData
+                                     : sceneGpu->frameData;
+    const TextureHandle feedbackFull =
+        frame.sharedResources.transparentTransmissionFeedbackTexture;
+    const TextureHandle feedbackHalf =
+        frame.sharedResources.transparentTransmissionFeedbackHalfResTexture;
+    const TextureHandle feedbackQuarter =
+        frame.sharedResources.transparentTransmissionFeedbackQuarterResTexture;
+    blendedFrameData.sceneColorTexId =
+        gpu_.getTextureBindlessIndex(feedbackFull);
+    blendedFrameData.sceneColorHalfResTexId =
+        gpu_.getTextureBindlessIndex(feedbackHalf);
+    blendedFrameData.sceneColorQuarterResTexId =
+        gpu_.getTextureBindlessIndex(feedbackQuarter);
+    blendedFrameData.sceneColorSamplerId =
+        gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
+    if (blendedFrameData.sceneColorTexId == kInvalidTextureBindlessIndex ||
+        blendedFrameData.sceneColorHalfResTexId ==
+            kInvalidTextureBindlessIndex ||
+        blendedFrameData.sceneColorQuarterResTexId ==
+            kInvalidTextureBindlessIndex) {
+      return Result<bool, std::string>::makeError(
+          "TransmissionRenderer::prepareTransmissionPasses: invalid "
+          "transparent transmission feedback texture bindless index");
+    }
+    blendedFrameData.flags |= kForwardSceneHasSceneColor;
+    const std::span<const std::byte> frameDataBytes{
+        reinterpret_cast<const std::byte *>(&blendedFrameData),
+        sizeof(blendedFrameData)};
+    auto updateResult =
+        gpu_.updateBuffer(blendSlot.buffer->handle(), frameDataBytes, 0u);
+    if (updateResult.hasError()) {
+      return updateResult;
+    }
+    blendedFrameDataBufferHandle = blendSlot.buffer->handle();
+    blendedFrameDataAddress =
+        gpu_.getBufferDeviceAddress(blendedFrameDataBufferHandle);
+  }
 
   if (!meshDrawTemplates_.empty() && transformDirty) {
     instanceMatrices_.clear();
@@ -536,9 +683,13 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   }
 
   passDrawItems_.clear();
+  blendedSortableDraws_.clear();
   passTextureReads_.clear();
+  blendedTextureReads_.clear();
   passDependencyBuffers_.clear();
+  blendedDependencyBuffers_.clear();
   meshPushConstants_.clear();
+  blendedPushConstants_.clear();
 
   if (!meshDrawTemplates_.empty()) {
     NURI_PROFILER_ZONE("TransmissionRenderer.material_instance_uploads",
@@ -594,6 +745,9 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
         materialGpu->transmissionBufferAddress == 0u ||
         materialGpu->specularBufferAddress == 0u ||
         instanceMatricesAddress == 0u || instanceRemapAddress == 0u ||
+        (hasSortedFeedbackDraws &&
+         (blendedFrameDataAddress == 0u ||
+          !nuri::isValid(blendedFrameDataBufferHandle))) ||
         (sceneGpu->directionalLightCount > 0u &&
          directionalLightBufferAddress == 0u) ||
         (sceneGpu->localLightCount > 0u && localLightBufferAddress == 0u)) {
@@ -603,6 +757,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     }
 
     meshPushConstants_.reserve(meshDrawTemplates_.size());
+    blendedPushConstants_.reserve(meshDrawTemplates_.size());
+    blendedSortableDraws_.reserve(meshDrawTemplates_.size());
     const uint32_t renderableCount = saturateToU32(renderables.size());
     if (instanceRemap_.size() < renderables.size()) {
       return Result<bool, std::string>::makeError(
@@ -686,8 +842,10 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
 
       const glm::vec3 transmissionScale = transmissionScaleForDraw(
           renderables[entry.instanceIndex], *entry.submesh);
+      const bool sortedFeedbackDraw = entry.sortedFeedback;
       MeshPushConstants constants{
-          .frameDataAddress = frameDataAddress,
+          .frameDataAddress =
+              sortedFeedbackDraw ? blendedFrameDataAddress : frameDataAddress,
           .vertexBufferAddress = vertexBufferAddress,
           .vertexDecodeBufferAddress = vertexDecodeBufferAddress,
           .instanceMatricesAddress = instanceMatricesAddress,
@@ -702,15 +860,17 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           // Alias tessMaxFactor as taaJitterMinLod: a scene-color pyramid LOD
           // in mip levels. Transmission shaders do not tessellate, so this
           // push-constant slot is otherwise unused in this pipeline.
-          .tessMaxFactor = taaJitterMinLod,
+          .tessMaxFactor = sortedFeedbackDraw ? 0.0f : taaJitterMinLod,
           .debugVisualizationMode = debugFlags,
       };
       constants.setTransmissionScale(transmissionScale);
-      meshPushConstants_.push_back(constants);
-      const MeshPushConstants &pc = meshPushConstants_.back();
+      std::pmr::vector<MeshPushConstants> &pushConstants =
+          sortedFeedbackDraw ? blendedPushConstants_ : meshPushConstants_;
+      pushConstants.push_back(constants);
+      const MeshPushConstants &pc = pushConstants.back();
 
       DrawItem draw{};
-      draw.pipeline = selectMeshPipeline();
+      draw.pipeline = selectMeshPipeline(sortedFeedbackDraw);
       draw.vertexBuffer = vertexBuffer;
       draw.indexBuffer = entry.indexBuffer;
       draw.indexBufferOffset = entry.indexBufferOffset;
@@ -732,7 +892,19 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           reinterpret_cast<const std::byte *>(&pc), sizeof(MeshPushConstants));
       draw.debugLabel = kTransmissionMeshLabel;
       draw.debugColor = kTransmissionMeshDebugColor;
-      passDrawItems_.push_back(draw);
+      if (sortedFeedbackDraw) {
+        const float sortDepth = transmissionSortDepth(
+            frame.camera.view, entry.renderable->modelMatrix,
+            entry.submesh->bounds);
+        blendedSortableDraws_.push_back(TransparentStageSortableDraw{
+            .draw = draw,
+            .sortDepth = sortDepth,
+            .stableOrder = static_cast<uint32_t>(blendedSortableDraws_.size()),
+            .flags = kTransparentStageDrawFlagRequiresFrameColorFeedback,
+        });
+      } else {
+        passDrawItems_.push_back(draw);
+      }
     }
 
     appendUniqueBuffer(passDependencyBuffers_, sceneGpu->buffer);
@@ -745,6 +917,23 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
     appendUniqueBuffer(passDependencyBuffers_,
                        instanceRemapRing_[frameSlot].buffer->handle());
     passTextureReads_ = staticPassTextureReads_;
+    blendedDependencyBuffers_ = passDependencyBuffers_;
+    if (nuri::isValid(blendedFrameDataBufferHandle)) {
+      appendUniqueBuffer(blendedDependencyBuffers_,
+                         blendedFrameDataBufferHandle);
+    }
+    blendedTextureReads_ = staticPassTextureReads_;
+    appendUniqueTexture(
+        blendedTextureReads_,
+        frame.sharedResources.transparentTransmissionFeedbackTexture);
+    appendUniqueTexture(
+        blendedTextureReads_,
+        frame.sharedResources.transparentTransmissionFeedbackHalfResTexture);
+    appendUniqueTexture(
+        blendedTextureReads_,
+        frame.sharedResources.transparentTransmissionFeedbackQuarterResTexture);
+    frame.metrics.antiAliasing.transparentTransmissionBlendDrawCount =
+        saturateToU32(blendedSortableDraws_.size());
     if (loggedAddressProbeTopologyVersion_ != frame.scene->topologyVersion() &&
         !meshPushConstants_.empty()) {
       loggedAddressProbeTopologyVersion_ = frame.scene->topologyVersion();
@@ -785,7 +974,8 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
   preparedDepthTexture_ = depthTexture;
   preparedSceneDepthGraphTexture_ = sceneDepthGraphTexture;
 
-  if (!meshDrawTemplates_.empty() && passDrawItems_.empty()) {
+  if (!meshDrawTemplates_.empty() && passDrawItems_.empty() &&
+      blendedSortableDraws_.empty()) {
     NURI_LOG_WARNING("TransmissionRenderer::prepareTransmissionPasses: "
                      "transmission cache has "
                      "%zu template draw(s) but produced no pass draw(s)",
@@ -796,6 +986,20 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
 
 bool TransmissionRenderer::hasPreparedTransmissionMainPass() const noexcept {
   return !passDrawItems_.empty();
+}
+
+Result<bool, std::string>
+TransmissionRenderer::buildTransparentStageContribution(
+    RenderFrameContext &frame, TransparentStageContribution &out) {
+  (void)frame;
+  out.sortableDraws = std::span<const TransparentStageSortableDraw>(
+      blendedSortableDraws_.data(), blendedSortableDraws_.size());
+  out.fixedDraws = {};
+  out.dependencyBuffers = std::span<const BufferHandle>(
+      blendedDependencyBuffers_.data(), blendedDependencyBuffers_.size());
+  out.textureReads = std::span<const TextureHandle>(
+      blendedTextureReads_.data(), blendedTextureReads_.size());
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
@@ -1011,6 +1215,8 @@ TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
   const bool meshPipelinesValid =
       nuri::isValid(meshPipelineHandle_) &&
       nuri::isValid(meshDoubleSidedPipelineHandle_) &&
+      nuri::isValid(meshBlendPipelineHandle_) &&
+      nuri::isValid(meshBlendDoubleSidedPipelineHandle_) &&
       meshPipelineColorFormat_ == colorFormat &&
       meshPipelineDepthFormat_ == depthFormat;
   if (meshPipelinesValid) {
@@ -1021,7 +1227,7 @@ TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
 
   auto meshResult = gpu_.createRenderPipeline(
       meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::Back),
+                       meshFragmentShader_, CullMode::Back, false),
       "transmission_mesh");
   if (meshResult.hasError()) {
     return Result<bool, std::string>::makeError(meshResult.error());
@@ -1030,13 +1236,33 @@ TransmissionRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
 
   auto meshDoubleResult = gpu_.createRenderPipeline(
       meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
-                       meshFragmentShader_, CullMode::None),
+                       meshFragmentShader_, CullMode::None, false),
       "transmission_mesh_double_sided");
   if (meshDoubleResult.hasError()) {
     destroyPipelineState();
     return Result<bool, std::string>::makeError(meshDoubleResult.error());
   }
   meshDoubleSidedPipelineHandle_ = meshDoubleResult.value();
+
+  auto blendResult = gpu_.createRenderPipeline(
+      meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
+                       meshFragmentShader_, CullMode::Back, true),
+      "transmission_mesh_blend");
+  if (blendResult.hasError()) {
+    destroyPipelineState();
+    return Result<bool, std::string>::makeError(blendResult.error());
+  }
+  meshBlendPipelineHandle_ = blendResult.value();
+
+  auto blendDoubleResult = gpu_.createRenderPipeline(
+      meshPipelineDesc(colorFormat, depthFormat, meshVertexShader_,
+                       meshFragmentShader_, CullMode::None, true),
+      "transmission_mesh_blend_double_sided");
+  if (blendDoubleResult.hasError()) {
+    destroyPipelineState();
+    return Result<bool, std::string>::makeError(blendDoubleResult.error());
+  }
+  meshBlendDoubleSidedPipelineHandle_ = blendDoubleResult.value();
 
   meshPipelineColorFormat_ = colorFormat;
   meshPipelineDepthFormat_ = depthFormat;
@@ -1140,6 +1366,92 @@ TransmissionRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
 }
 
 Result<bool, std::string>
+TransmissionRenderer::ensureBlendedFrameDataRingCapacity() {
+  const uint32_t count = std::max(1u, gpu_.getSwapchainImageCount());
+  while (blendedFrameDataRing_.size() < count) {
+    blendedFrameDataRing_.push_back(DynamicBufferSlot{});
+  }
+  const size_t requiredBytes = sizeof(FrameData);
+  for (DynamicBufferSlot &slot : blendedFrameDataRing_) {
+    if (slot.buffer && slot.buffer->valid() &&
+        slot.capacityBytes >= requiredBytes) {
+      continue;
+    }
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    auto bufferResult = Buffer::create(gpu_,
+                                       BufferDesc{.usage = BufferUsage::Storage,
+                                                  .storage = Storage::Device,
+                                                  .size = requiredBytes},
+                                       "transparent_transmission_frame_data");
+    if (bufferResult.hasError()) {
+      return Result<bool, std::string>::makeError(bufferResult.error());
+    }
+    slot.buffer = std::move(bufferResult.value());
+    slot.capacityBytes = requiredBytes;
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+TransmissionRenderer::ensureTransparentFeedbackTextures(
+    RenderFrameContext &frame) {
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+  const uint32_t safeWidth =
+      static_cast<uint32_t>(std::max(framebufferWidth, 1));
+  const uint32_t safeHeight =
+      static_cast<uint32_t>(std::max(framebufferHeight, 1));
+  const uint32_t ringCount = std::max(1u, gpu_.getSwapchainImageCount());
+  const bool needsRecreate =
+      transparentFeedbackWidth_ != safeWidth ||
+      transparentFeedbackHeight_ != safeHeight ||
+      transparentFeedbackRingCount_ != ringCount ||
+      transparentFeedbackTextures_[0].size() != ringCount ||
+      transparentFeedbackTextures_[1].size() != ringCount ||
+      transparentFeedbackTextures_[2].size() != ringCount;
+  if (needsRecreate) {
+    destroyFeedbackTextures();
+    transparentFeedbackWidth_ = safeWidth;
+    transparentFeedbackHeight_ = safeHeight;
+    transparentFeedbackRingCount_ = ringCount;
+    for (uint32_t mipLevel = 0u; mipLevel < kFrameCompositionSceneColorMipCount;
+         ++mipLevel) {
+      std::pmr::vector<TextureHandle> &textures =
+          transparentFeedbackTextures_[mipLevel];
+      textures.resize(ringCount);
+      const TextureDesc desc = makeTransparentFeedbackTextureDesc(
+          levelDimension(safeWidth, mipLevel),
+          levelDimension(safeHeight, mipLevel));
+      for (uint32_t i = 0u; i < ringCount; ++i) {
+        const std::string debugName = "transparent_transmission_feedback_" +
+                                      std::to_string(mipLevel) + "_" +
+                                      std::to_string(i);
+        auto createResult = gpu_.createTexture(desc, debugName);
+        if (createResult.hasError()) {
+          destroyFeedbackTextures();
+          return Result<bool, std::string>::makeError(createResult.error());
+        }
+        textures[i] = createResult.value();
+      }
+    }
+  }
+  const uint32_t frameSlot =
+      ringCount == 0u ? 0u
+                      : static_cast<uint32_t>(frame.frameIndex % ringCount);
+  frame.sharedResources.transparentTransmissionFeedbackTexture =
+      transparentFeedbackTextures_[0][frameSlot];
+  frame.sharedResources.transparentTransmissionFeedbackHalfResTexture =
+      transparentFeedbackTextures_[1][frameSlot];
+  frame.sharedResources.transparentTransmissionFeedbackQuarterResTexture =
+      transparentFeedbackTextures_[2][frameSlot];
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
 TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
                                         const ResourceManager &resources,
                                         uint32_t materialCount) {
@@ -1191,6 +1503,8 @@ TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
         continue;
       }
       hasTransmissionContent = true;
+      const bool sortedFeedback =
+          usesSortedTransmissionFeedback(*materialRecord);
 
       uint32_t materialIndex = resources.materialTableIndex(resolvedMaterial);
       if (materialCount == 0u || materialIndex >= materialCount) {
@@ -1217,6 +1531,7 @@ TransmissionRenderer::rebuildSceneCache(const RenderScene &scene,
           .materialIndex = materialIndex,
           .instanceIndex = renderableIndex,
           .doubleSided = materialRecord->desc.doubleSided,
+          .sortedFeedback = sortedFeedback,
       });
     }
   }
@@ -1334,6 +1649,8 @@ void TransmissionRenderer::resetCachedState() {
   materialTextureAccessHandles_.clear();
   environmentTextureAccessHandles_.clear();
   staticPassTextureReads_.clear();
+  blendedTextureReads_.clear();
+  blendedDependencyBuffers_.clear();
   passDependencyBufferAccessModes_.clear();
   preResolvedTemplateBuffers_.clear();
   cachedPreResolvedDrawBuffers_.clear();
@@ -1342,9 +1659,13 @@ void TransmissionRenderer::resetCachedState() {
 
 void TransmissionRenderer::resetFrameBuildState() {
   meshPushConstants_.clear();
+  blendedPushConstants_.clear();
   passDrawItems_.clear();
+  blendedSortableDraws_.clear();
   passTextureReads_.clear();
+  blendedTextureReads_.clear();
   passDependencyBuffers_.clear();
+  blendedDependencyBuffers_.clear();
   passDependencyBufferAccessModes_.clear();
   preparedSceneColorTexture_ = {};
   preparedSceneColorHalfResTexture_ = {};
@@ -1355,6 +1676,12 @@ void TransmissionRenderer::resetFrameBuildState() {
 }
 
 void TransmissionRenderer::destroyPipelineState() {
+  if (nuri::isValid(meshBlendDoubleSidedPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshBlendDoubleSidedPipelineHandle_);
+  }
+  if (nuri::isValid(meshBlendPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(meshBlendPipelineHandle_);
+  }
   if (nuri::isValid(meshDoubleSidedPipelineHandle_)) {
     gpu_.destroyRenderPipeline(meshDoubleSidedPipelineHandle_);
   }
@@ -1363,6 +1690,8 @@ void TransmissionRenderer::destroyPipelineState() {
   }
   meshPipelineHandle_ = {};
   meshDoubleSidedPipelineHandle_ = {};
+  meshBlendPipelineHandle_ = {};
+  meshBlendDoubleSidedPipelineHandle_ = {};
   meshPipelineColorFormat_ = Format::Count;
   meshPipelineDepthFormat_ = Format::Count;
 }
@@ -1393,9 +1722,32 @@ void TransmissionRenderer::destroyBuffers() {
     slot.buffer.reset();
     slot.capacityBytes = 0;
   }
+  for (DynamicBufferSlot &slot : blendedFrameDataRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0;
+  }
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
+  blendedFrameDataRing_.clear();
   instanceDataRingUploadVersions_.clear();
+}
+
+void TransmissionRenderer::destroyFeedbackTextures() {
+  for (std::pmr::vector<TextureHandle> &textures :
+       transparentFeedbackTextures_) {
+    for (const TextureHandle texture : textures) {
+      if (nuri::isValid(texture)) {
+        gpu_.destroyTexture(texture);
+      }
+    }
+    textures.clear();
+  }
+  transparentFeedbackWidth_ = 0u;
+  transparentFeedbackHeight_ = 0u;
+  transparentFeedbackRingCount_ = 0u;
 }
 
 bool TransmissionRenderer::hasTransmissionContent(
@@ -1430,7 +1782,14 @@ bool TransmissionRenderer::hasTransmissionContent(
          cachedTransmissionContent_;
 }
 
-RenderPipelineHandle TransmissionRenderer::selectMeshPipeline() const {
+RenderPipelineHandle
+TransmissionRenderer::selectMeshPipeline(bool useBlendPipeline) const {
+  if (useBlendPipeline) {
+    if (nuri::isValid(meshBlendDoubleSidedPipelineHandle_)) {
+      return meshBlendDoubleSidedPipelineHandle_;
+    }
+    return meshBlendPipelineHandle_;
+  }
   // Transmission correctness is more important than backface-culling wins.
   // Imported scene-mesh paths can preserve source winding differently from the
   // standalone model path, and closed transmissive assets disappearing is much
