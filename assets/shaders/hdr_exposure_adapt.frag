@@ -62,11 +62,11 @@ void main() {
                 .r,
             1.0e-4);
   }
-  float currentLogLuminance = log2(max(currentLuminance, 1.0e-4));
-  float previousLogLuminance = log2(max(previousLuminance, 1.0e-4));
+  float currentLogLuminance = log2(currentLuminance);
+  float previousLogLuminance = log2(previousLuminance);
   float blend = 1.0 - exp(-max(pc.speed, 0.0) * max(pc.deltaSeconds, 0.0));
   float adaptedLogLuminance =
-      mix(previousLogLuminance, currentLogLuminance, clamp(blend, 0.0, 1.0));
+      mix(previousLogLuminance, currentLogLuminance, blend);
   float adaptedLuminance =
       clamp(exp2(adaptedLogLuminance), kHDRAdaptationMeterMinLuminance,
             kHDRAdaptationMeterMaxLuminance);

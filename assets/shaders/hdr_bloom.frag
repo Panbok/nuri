@@ -31,6 +31,7 @@ vec3 bloomPrefilter(vec3 color) {
   return color * clamp(contribution / max(luma, 1.0e-4), 0.0, 16.0);
 }
 
+// fullscreen_copy.vert emits framebuffer-space UVs; wrap them to screen space.
 vec2 screenUv() { return fract(uv); }
 
 vec3 sampleBloom(uint texId, vec2 sampleUv, vec2 texel) {
@@ -132,7 +133,9 @@ void main() {
   vec3 low = sampleTent(pc.sourceTexId, sourceTexel);
   if (pc.mode == kHDRBloomModeUpsample &&
       pc.secondaryTexId != kInvalidTextureBindlessIndex) {
-    vec3 high = sampleBloom(pc.secondaryTexId, screenUv(), sourceTexel);
+    ivec2 secondarySize = textureBindlessSize2D(pc.secondaryTexId);
+    vec2 secondaryTexel = 1.0 / max(vec2(secondarySize), vec2(1.0));
+    vec3 high = sampleBloom(pc.secondaryTexId, screenUv(), secondaryTexel);
     out_FragColor = vec4(high + low * pc.scatter, 1.0);
     return;
   }

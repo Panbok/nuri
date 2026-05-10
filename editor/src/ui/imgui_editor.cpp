@@ -2189,11 +2189,8 @@ void drawAmbientOcclusionSettings(
   }
 }
 
-void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap,
-                           RenderSettings::HDRPostProcessSettings &hdr,
-                           const RenderFrameMetrics &frameMetrics) {
+void drawToneMapSettings(RenderSettings::ToneMapSettings &toneMap) {
   sanitizeToneMapSettings(toneMap);
-  sanitizeHDRPostProcessSettings(hdr);
   constexpr const char *kToneMapperLabels[] = {"ACES 2 SDR", "AgX"};
   int toneMapperIndex = static_cast<int>(toneMap.operator_);
   toneMapperIndex =
@@ -2226,6 +2223,11 @@ void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap,
     ImGui::Text("Left: %s", toneMapperDisplayName(toneMap.operator_));
     ImGui::Text("Right: %s", toneMapperDisplayName(compareMapper));
   }
+}
+
+void drawHDRPostProcessSettings(RenderSettings::HDRPostProcessSettings &hdr,
+                                const RenderFrameMetrics &frameMetrics) {
+  sanitizeHDRPostProcessSettings(hdr);
   ImGui::Separator();
   ImGui::TextUnformatted("HDR Postprocess");
   ImGui::Checkbox("Bloom##HDRPostProcess", &hdr.bloomEnabled);
@@ -2272,6 +2274,19 @@ void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap,
               hdrMetrics.exposureHistoryValid ? "valid" : "invalid");
   ImGui::Text("Adapted EV: %.2f  Effective EV: %.2f",
               hdrMetrics.adaptedExposureEv, hdrMetrics.effectiveExposureEv);
+  ImGui::Text("Exposure textures: alloc %u, realloc %u",
+              hdrMetrics.exposureTextureAllocationCount,
+              hdrMetrics.exposureTextureReallocationCount);
+  ImGui::Text("Exposure history: alloc %u, realloc %u",
+              hdrMetrics.exposureHistoryAllocationCount,
+              hdrMetrics.exposureHistoryReallocationCount);
+}
+
+void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap,
+                           RenderSettings::HDRPostProcessSettings &hdr,
+                           const RenderFrameMetrics &frameMetrics) {
+  drawToneMapSettings(toneMap);
+  drawHDRPostProcessSettings(hdr, frameMetrics);
   ImGui::Separator();
   ImGui::TextUnformatted(
       "Frame composition is always active and presents the HDR frame");
@@ -3330,8 +3345,7 @@ void drawHDRPostProcessWindow(bool &open, RenderSettings &renderSettings,
     ImGui::End();
     return;
   }
-  drawCompositeSettings(renderSettings.toneMap, renderSettings.hdrPostProcess,
-                        frameMetrics);
+  drawHDRPostProcessSettings(renderSettings.hdrPostProcess, frameMetrics);
   ImGui::End();
 }
 

@@ -1020,31 +1020,64 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     completedReport.spatialAASourceFrameIndex = pending.frameIndex;
     completedReport.opaqueSourceFrameIndex = pending.frameIndex;
     completedReport.msaaResolveSourceFrameIndex = pending.frameIndex;
+    static constexpr auto kTimingCollectionDescs =
+        std::to_array<GpuTimingScopeMergeDesc>({
+            {GpuTimingScope::Shadow, &GpuTimingReport::shadowTimeMs,
+             &GpuTimingReport::shadowSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::Shadow)},
+            {GpuTimingScope::ShadowDepth, &GpuTimingReport::shadowDepthTimeMs,
+             &GpuTimingReport::shadowDepthSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::ShadowDepth)},
+            {GpuTimingScope::ShadowSdsm, &GpuTimingReport::shadowSdsmTimeMs,
+             &GpuTimingReport::shadowSdsmSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm)},
+            {GpuTimingScope::SceneColorDownsample,
+             &GpuTimingReport::sceneColorDownsampleTimeMs,
+             &GpuTimingReport::sceneColorDownsampleSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample)},
+            {GpuTimingScope::Transmission, &GpuTimingReport::transmissionTimeMs,
+             &GpuTimingReport::transmissionSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::Transmission)},
+            {GpuTimingScope::TemporalAAResolve,
+             &GpuTimingReport::temporalAAResolveTimeMs,
+             &GpuTimingReport::temporalAAResolveSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve)},
+            {GpuTimingScope::TemporalAADebug,
+             &GpuTimingReport::temporalAADebugTimeMs,
+             &GpuTimingReport::temporalAADebugSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug)},
+            {GpuTimingScope::SpatialAA, &GpuTimingReport::spatialAATimeMs,
+             &GpuTimingReport::spatialAASourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::SpatialAA)},
+            {GpuTimingScope::Opaque, &GpuTimingReport::opaqueTimeMs,
+             &GpuTimingReport::opaqueSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::Opaque)},
+            {GpuTimingScope::MsaaResolve, &GpuTimingReport::msaaResolveTimeMs,
+             &GpuTimingReport::msaaResolveSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::MsaaResolve)},
+            {GpuTimingScope::GTAO, &GpuTimingReport::gtaoTimeMs,
+             &GpuTimingReport::gtaoSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::GTAO)},
+            {GpuTimingScope::HDRPostProcess,
+             &GpuTimingReport::hdrPostProcessTimeMs,
+             &GpuTimingReport::hdrPostProcessSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
+        });
+    constexpr size_t kTimingScopeCount = kTimingCollectionDescs.size();
+    std::array<double, kTimingScopeCount> timingMs{};
+    std::array<bool, kTimingScopeCount> timingAvailable{};
+    const auto findTimingIndex = [](GpuTimingScope scope) -> size_t {
+      for (size_t i = 0u; i < kTimingCollectionDescs.size(); ++i) {
+        if (kTimingCollectionDescs[i].scope == scope) {
+          return i;
+        }
+      }
+      return kTimingCollectionDescs.size();
+    };
+    const size_t shadowTimingIndex = findTimingIndex(GpuTimingScope::Shadow);
+    const size_t shadowSdsmTimingIndex =
+        findTimingIndex(GpuTimingScope::ShadowSdsm);
     bool hadShadowSdsmRange = false;
-    double shadowTimeMs = 0.0;
-    double shadowDepthTimeMs = 0.0;
-    double shadowSdsmTimeMs = 0.0;
-    double sceneColorDownsampleTimeMs = 0.0;
-    double transmissionTimeMs = 0.0;
-    double temporalAAResolveTimeMs = 0.0;
-    double temporalAADebugTimeMs = 0.0;
-    double spatialAATimeMs = 0.0;
-    double opaqueTimeMs = 0.0;
-    double msaaResolveTimeMs = 0.0;
-    double gtaoTimeMs = 0.0;
-    double hdrPostProcessTimeMs = 0.0;
-    bool shadowTimingAvailable = false;
-    bool shadowDepthTimingAvailable = false;
-    bool shadowSdsmTimingAvailable = false;
-    bool sceneColorDownsampleTimingAvailable = false;
-    bool transmissionTimingAvailable = false;
-    bool temporalAAResolveTimingAvailable = false;
-    bool temporalAADebugTimingAvailable = false;
-    bool spatialAATimingAvailable = false;
-    bool opaqueTimingAvailable = false;
-    bool msaaResolveTimingAvailable = false;
-    bool gtaoTimingAvailable = false;
-    bool hdrPostProcessTimingAvailable = false;
     std::vector<uint64_t> queryData;
     for (const PendingTimingQueryRange &range : pending.timingRanges) {
       hadShadowSdsmRange =
@@ -1070,149 +1103,44 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
         const double intervalTimeMs =
             static_cast<double>(endTicks - beginTicks) *
             impl.gpuTimingTimestampPeriodToMs;
-        switch (range.scope) {
-        case GpuTimingScope::Shadow:
-          shadowTimeMs += intervalTimeMs;
-          shadowTimingAvailable = true;
-          break;
-        case GpuTimingScope::ShadowDepth:
-          shadowDepthTimeMs += intervalTimeMs;
-          shadowTimingAvailable = true;
-          shadowDepthTimingAvailable = true;
-          break;
-        case GpuTimingScope::ShadowSdsm:
-          shadowSdsmTimeMs += intervalTimeMs;
-          shadowTimingAvailable = true;
-          shadowSdsmTimingAvailable = true;
-          break;
-        case GpuTimingScope::SceneColorDownsample:
-          sceneColorDownsampleTimeMs += intervalTimeMs;
-          sceneColorDownsampleTimingAvailable = true;
-          break;
-        case GpuTimingScope::Transmission:
-          transmissionTimeMs += intervalTimeMs;
-          transmissionTimingAvailable = true;
-          break;
-        case GpuTimingScope::TemporalAAResolve:
-          temporalAAResolveTimeMs += intervalTimeMs;
-          temporalAAResolveTimingAvailable = true;
-          break;
-        case GpuTimingScope::TemporalAADebug:
-          temporalAADebugTimeMs += intervalTimeMs;
-          temporalAADebugTimingAvailable = true;
-          break;
-        case GpuTimingScope::SpatialAA:
-          spatialAATimeMs += intervalTimeMs;
-          spatialAATimingAvailable = true;
-          break;
-        case GpuTimingScope::Opaque:
-          opaqueTimeMs += intervalTimeMs;
-          opaqueTimingAvailable = true;
-          break;
-        case GpuTimingScope::MsaaResolve:
-          msaaResolveTimeMs += intervalTimeMs;
-          msaaResolveTimingAvailable = true;
-          break;
-        case GpuTimingScope::GTAO:
-          gtaoTimeMs += intervalTimeMs;
-          gtaoTimingAvailable = true;
-          break;
-        case GpuTimingScope::HDRPostProcess:
-          hdrPostProcessTimeMs += intervalTimeMs;
-          hdrPostProcessTimingAvailable = true;
-          break;
-        case GpuTimingScope::None:
-          break;
+        const size_t timingIndex = findTimingIndex(range.scope);
+        if (timingIndex == kTimingScopeCount) {
+          continue;
+        }
+        timingMs[timingIndex] += intervalTimeMs;
+        timingAvailable[timingIndex] = true;
+        if ((range.scope == GpuTimingScope::ShadowDepth ||
+             range.scope == GpuTimingScope::ShadowSdsm) &&
+            shadowTimingIndex != kTimingScopeCount) {
+          timingAvailable[shadowTimingIndex] = true;
         }
       }
     }
 
-    if (shadowTimingAvailable) {
-      completedReport.shadowTimeMs = static_cast<float>(shadowTimeMs);
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::Shadow);
-      completedReport.shadowSourceFrameIndex = pending.frameIndex;
+    for (size_t i = 0u; i < kTimingScopeCount; ++i) {
+      if (!timingAvailable[i]) {
+        continue;
+      }
+      const GpuTimingScopeMergeDesc desc = kTimingCollectionDescs[i];
+      completedReport.*(desc.timeMs) = static_cast<float>(timingMs[i]);
+      completedReport.*(desc.sourceFrameIndex) = pending.frameIndex;
+      completedReport.availableScopeMask |= desc.bit;
     }
-    if (shadowDepthTimingAvailable) {
-      completedReport.shadowDepthTimeMs = static_cast<float>(shadowDepthTimeMs);
-      completedReport.shadowDepthSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::ShadowDepth);
-    }
-    if (shadowSdsmTimingAvailable) {
-      completedReport.shadowSdsmTimeMs = static_cast<float>(shadowSdsmTimeMs);
-      completedReport.shadowSdsmSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::ShadowSdsm);
+
+    if (shadowSdsmTimingIndex != kTimingScopeCount &&
+        timingAvailable[shadowSdsmTimingIndex]) {
       if (!impl.loggedShadowSdsmTimingCollectionDiagnostic) {
         impl.loggedShadowSdsmTimingCollectionDiagnostic = true;
         NURI_LOG_INFO(
             "LvkGPUDevice: collected shadow SDSM timing result frame=%llu "
             "timeMs=%.3f",
             static_cast<unsigned long long>(pending.frameIndex),
-            static_cast<float>(shadowSdsmTimeMs));
+            static_cast<float>(timingMs[shadowSdsmTimingIndex]));
       }
     }
-    if (sceneColorDownsampleTimingAvailable) {
-      completedReport.sceneColorDownsampleTimeMs =
-          static_cast<float>(sceneColorDownsampleTimeMs);
-      completedReport.sceneColorDownsampleSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::SceneColorDownsample);
-    }
-    if (transmissionTimingAvailable) {
-      completedReport.transmissionTimeMs =
-          static_cast<float>(transmissionTimeMs);
-      completedReport.transmissionSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::Transmission);
-    }
-    if (temporalAAResolveTimingAvailable) {
-      completedReport.temporalAAResolveTimeMs =
-          static_cast<float>(temporalAAResolveTimeMs);
-      completedReport.temporalAAResolveSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::TemporalAAResolve);
-    }
-    if (temporalAADebugTimingAvailable) {
-      completedReport.temporalAADebugTimeMs =
-          static_cast<float>(temporalAADebugTimeMs);
-      completedReport.temporalAADebugSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::TemporalAADebug);
-    }
-    if (spatialAATimingAvailable) {
-      completedReport.spatialAATimeMs = static_cast<float>(spatialAATimeMs);
-      completedReport.spatialAASourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::SpatialAA);
-    }
-    if (opaqueTimingAvailable) {
-      completedReport.opaqueTimeMs = static_cast<float>(opaqueTimeMs);
-      completedReport.opaqueSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::Opaque);
-    }
-    if (msaaResolveTimingAvailable) {
-      completedReport.msaaResolveTimeMs = static_cast<float>(msaaResolveTimeMs);
-      completedReport.msaaResolveSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
-    }
-    if (gtaoTimingAvailable) {
-      completedReport.gtaoTimeMs = static_cast<float>(gtaoTimeMs);
-      completedReport.gtaoSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::GTAO);
-    }
-    if (hdrPostProcessTimingAvailable) {
-      completedReport.hdrPostProcessTimeMs =
-          static_cast<float>(hdrPostProcessTimeMs);
-      completedReport.hdrPostProcessSourceFrameIndex = pending.frameIndex;
-      completedReport.availableScopeMask |=
-          gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess);
-    }
-    if (hadShadowSdsmRange && !shadowSdsmTimingAvailable &&
+    if (hadShadowSdsmRange &&
+        (shadowSdsmTimingIndex == kTimingScopeCount ||
+         !timingAvailable[shadowSdsmTimingIndex]) &&
         !impl.loggedShadowSdsmTimingCollectionWarning) {
       impl.loggedShadowSdsmTimingCollectionWarning = true;
       NURI_LOG_WARNING(

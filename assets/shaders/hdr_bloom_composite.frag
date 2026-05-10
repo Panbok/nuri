@@ -30,6 +30,7 @@ const uint kInvalidTextureBindlessIndex = 0xffffffffu;
 
 float luminance(vec3 color) { return dot(color, vec3(0.2126, 0.7152, 0.0722)); }
 
+// fullscreen_copy.vert emits framebuffer-space UVs; wrap them to screen space.
 vec2 screenUv() { return fract(uv); }
 
 vec3 sampleTexture(uint texId, vec2 sampleUv) {

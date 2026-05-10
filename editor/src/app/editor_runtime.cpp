@@ -944,6 +944,7 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
       makeAntiAliasingFrameMetrics(frameContext_.camera);
   frameContext_.sharedDepthTexture = {};
   frameContext_.timeSeconds = timeSecondsIn;
+  frameContext_.deltaSeconds = frameDeltaSeconds_;
 }
 
 void EditorRuntime::submitPipelineFrame() {

@@ -334,7 +334,40 @@ uint32_t bytesPerPixel(Format format) {
   default:
     break;
   }
+  NURI_ASSERT(
+      false, "HDR postprocess texture storage estimate missing Format value %u",
+      static_cast<uint32_t>(format));
   return 0u;
+}
+
+[[nodiscard]] float
+exposureEvFromLuminance(float luminance,
+                        const RenderSettings::HDRPostProcessSettings &hdr) {
+  const float safeLuminance = std::max(luminance, 1.0e-4f);
+  const float safeTargetGray = std::max(hdr.adaptationTargetGray, 1.0e-4f);
+  return std::clamp(std::log2(safeTargetGray / safeLuminance),
+                    hdr.adaptationMinEv, hdr.adaptationMaxEv);
+}
+
+[[nodiscard]] std::optional<float>
+readExposureLuminance(GPUDevice &gpu, TextureHandle texture) {
+  if (!nuri::isValid(texture)) {
+    return std::nullopt;
+  }
+  std::array<std::byte, sizeof(float)> bytes{};
+  const TextureReadbackRegion region{
+      .x = 0u, .y = 0u, .width = 1u, .height = 1u, .mipLevel = 0u, .layer = 0u};
+  auto readResult = gpu.readTexture(texture, region, bytes);
+  if (readResult.hasError()) {
+    NURI_LOG_DEBUG("HDR postprocess exposure readback unavailable: %s",
+                   readResult.error().c_str());
+    return std::nullopt;
+  }
+
+  float luminance = 0.0f;
+  std::memcpy(&luminance, bytes.data(), sizeof(luminance));
+  return std::isfinite(luminance) ? std::optional<float>(luminance)
+                                  : std::nullopt;
 }
 
 uint64_t textureStorageBytes(GPUDevice &gpu, TextureHandle texture) {
@@ -749,7 +782,7 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
       .speed = hdr.adaptationSpeed,
       .minEv = hdr.adaptationMinEv,
       .maxEv = hdr.adaptationMaxEv,
-      .deltaSeconds = 1.0f / 60.0f,
+      .deltaSeconds = static_cast<float>(std::max(ctx.frame.deltaSeconds, 0.0)),
   };
 
   auto sourceImport =
@@ -1372,6 +1405,19 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
   }
   metrics.effectiveExposureEv = 0.0f;
   metrics.adaptedExposureEv = 0.0f;
+  if (hdr.adaptationEnabled && ctx.shared.exposureHistoryValid) {
+    const std::optional<float> adaptedLuminance =
+        readExposureLuminance(gpu_, ctx.shared.exposureReadTexture);
+    if (adaptedLuminance.has_value()) {
+      metrics.adaptedExposureEv =
+          exposureEvFromLuminance(*adaptedLuminance, hdr);
+      metrics.effectiveExposureEv =
+          metrics.adaptedExposureEv +
+          renderSettingsOrDefault(ctx.frame).toneMap.exposureEv;
+      metrics.measuredLogAverageLuminance =
+          std::log2(std::max(*adaptedLuminance, 1.0e-4f));
+    }
+  }
   const GpuTimingReport timingReport = gpu_.getLatestCompletedGpuTimingReport();
   if (hasGpuTimingScope(timingReport, GpuTimingScope::HDRPostProcess)) {
     metrics.gpuTimeMs = timingReport.hdrPostProcessTimeMs;

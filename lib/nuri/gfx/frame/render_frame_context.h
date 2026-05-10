@@ -1956,8 +1956,8 @@ static_assert(offsetof(ForwardSceneFrameData, materialCoverageSamplerId) ==
 
 // CPU/GPU forwarding of the light metadata carried in ForwardSceneFrameData.
 // The CPU owns allocation and updates of ForwardSceneFrameData, keeps mirrors
-// for consumers that need to derive small variants, then publishes resolved GPU
-// addresses/counts for shader consumers.
+// for transmission feedback passes that need to derive small variants, then
+// publishes resolved GPU addresses/counts for shader consumers.
 // Keep this struct in sync with ForwardSceneFrameData's layout/semantics for
 // directional/local light buffer addresses and counts to avoid
 // desynchronization bugs when the CPU-side contract changes.
@@ -2377,6 +2377,10 @@ struct HDRPostProcessFrameMetrics {
   uint32_t luminancePassCount = 0u;
   uint32_t adaptationPassCount = 0u;
   uint32_t textureCount = 0u;
+  uint32_t exposureTextureAllocationCount = 0u;
+  uint32_t exposureTextureReallocationCount = 0u;
+  uint32_t exposureHistoryAllocationCount = 0u;
+  uint32_t exposureHistoryReallocationCount = 0u;
   uint32_t gpuTimingAvailable = 0u;
   uint64_t textureBytes = 0u;
   uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -2666,6 +2670,7 @@ struct RenderFrameContext {
   TextureHandle sharedDepthTexture{};
   const ResourceManager *resources = nullptr;
   double timeSeconds = 0.0;
+  double deltaSeconds = 1.0 / 60.0;
   uint64_t frameIndex = 0;
 };
 

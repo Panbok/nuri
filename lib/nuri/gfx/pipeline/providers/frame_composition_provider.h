@@ -95,7 +95,11 @@ private:
   uint32_t normalTextureReallocationCount_ = 0u;
   uint32_t ambientOcclusionTextureAllocationCount_ = 0u;
   uint32_t ambientOcclusionTextureReallocationCount_ = 0u;
-  bool exposureHistoryValid_ = false;
+  uint32_t exposureTextureAllocationCount_ = 0u;
+  uint32_t exposureTextureReallocationCount_ = 0u;
+  uint32_t exposureHistoryAllocationCount_ = 0u;
+  uint32_t exposureHistoryReallocationCount_ = 0u;
+  uint32_t exposureHistoryWriteCount_ = 0u;
   uint32_t textureRingCount_ = 0u;
   uint32_t framebufferWidth_ = 0u;
   uint32_t framebufferHeight_ = 0u;

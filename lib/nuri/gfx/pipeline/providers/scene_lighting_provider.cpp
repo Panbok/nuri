@@ -545,6 +545,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   slotState.frameData = frameData;
   slotState.postTaaFrameData = postTaaFrameData;
 
+  // Transmission feedback builds a small CPU-side variant of this frame data,
+  // so keep mirrors alongside the GPU buffer addresses.
   ctx.shared.forwardSceneGpuData = ForwardSceneGpuData{
       .buffer = sceneDataBuffer->handle(),
       .frameData = frameData,

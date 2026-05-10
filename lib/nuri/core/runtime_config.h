@@ -61,9 +61,13 @@ struct NURI_API RuntimeCompositeConfig {
   std::filesystem::path fullscreenVertex;
   std::filesystem::path sceneCopyFragment;
   std::filesystem::path presentFragment;
+  // Reduces scene luminance for average/auto-exposure.
   std::filesystem::path hdrLuminanceReduceFragment;
+  // Computes and adapts exposure over time.
   std::filesystem::path hdrExposureAdaptFragment;
+  // Extracts and blurs bright areas for bloom.
   std::filesystem::path hdrBloomFragment;
+  // Combines bloom with the base image.
   std::filesystem::path hdrBloomCompositeFragment;
   std::filesystem::path aces2SdrLut;
   std::filesystem::path agxLut;
