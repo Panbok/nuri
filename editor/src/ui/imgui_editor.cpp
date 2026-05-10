@@ -59,6 +59,7 @@ constexpr const char *kAnimationPlayerWindowName = "Animation Player";
 constexpr const char *kTextureFilteringWindowName = "Texture Filtering";
 constexpr const char *kAntiAliasingWindowName = "Anti-Aliasing";
 constexpr const char *kAmbientOcclusionWindowName = "Ambient Occlusion";
+constexpr const char *kHDRPostProcessWindowName = "HDR Postprocess";
 constexpr const char *kShadowsWindowName = "Shadows";
 constexpr const char *kCameraControllerWindowName = "Camera Controller";
 constexpr const char *kCameraHelpWindowName = "Camera Help";
@@ -80,6 +81,9 @@ constexpr std::array<const char *, 5> kAmbientOcclusionPresetLabels = {
     "Low", "Balanced", "High", "Ultra", "Custom"};
 constexpr std::array<const char *, 4> kAmbientOcclusionDebugViewLabels = {
     "None", "Visibility", "Bent Normal", "Normals"};
+constexpr std::array<const char *, 5> kHDRPostProcessDebugViewLabels = {
+    "None", "Bloom Prefilter", "Bloom Final", "Log Average Luminance",
+    "Adapted Exposure"};
 constexpr std::array<const char *, 36> kAntiAliasingDebugViewLabels = {
     "None",
     "Settings",
@@ -181,9 +185,11 @@ PassInspectorKind classifyPassInspector(std::string_view featureName,
     return PassInspectorKind::Transparent;
   }
   if (featureName == "FrameCompositionFeature" ||
+      featureName == "HDRPostProcessFeature" ||
       featureName == "FramePresentFeature" ||
       passName == "SceneColorDownsamplePass" ||
-      passName == "SceneResolvePass" || passName == "PresentToneMapPass") {
+      passName == "SceneResolvePass" || passName == "HDRExposureAdaptPass" ||
+      passName == "HDRBloomCompositePass" || passName == "PresentToneMapPass") {
     return PassInspectorKind::Composite;
   }
   if (featureName == "DebugFeature" || passName == "DebugGridPass" ||
@@ -2183,8 +2189,11 @@ void drawAmbientOcclusionSettings(
   }
 }
 
-void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap) {
+void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap,
+                           RenderSettings::HDRPostProcessSettings &hdr,
+                           const RenderFrameMetrics &frameMetrics) {
   sanitizeToneMapSettings(toneMap);
+  sanitizeHDRPostProcessSettings(hdr);
   constexpr const char *kToneMapperLabels[] = {"ACES 2 SDR", "AgX"};
   int toneMapperIndex = static_cast<int>(toneMap.operator_);
   toneMapperIndex =
@@ -2217,6 +2226,52 @@ void drawCompositeSettings(RenderSettings::ToneMapSettings &toneMap) {
     ImGui::Text("Left: %s", toneMapperDisplayName(toneMap.operator_));
     ImGui::Text("Right: %s", toneMapperDisplayName(compareMapper));
   }
+  ImGui::Separator();
+  ImGui::TextUnformatted("HDR Postprocess");
+  ImGui::Checkbox("Bloom##HDRPostProcess", &hdr.bloomEnabled);
+  if (hdr.bloomEnabled) {
+    ImGui::SliderFloat("Bloom Strength##HDRPostProcess", &hdr.bloomStrength,
+                       0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Bloom Threshold##HDRPostProcess", &hdr.bloomThreshold,
+                       0.0f, 16.0f, "%.2f");
+    ImGui::SliderFloat("Bloom Soft Knee##HDRPostProcess", &hdr.bloomSoftKnee,
+                       0.0f, 4.0f, "%.2f");
+    int bloomMipCount = static_cast<int>(hdr.bloomMaxMipCount);
+    if (ImGui::SliderInt("Bloom Mips##HDRPostProcess", &bloomMipCount, 1,
+                         static_cast<int>(kMaxSceneDepthPyramidLevels))) {
+      hdr.bloomMaxMipCount = static_cast<uint32_t>(std::max(bloomMipCount, 1));
+    }
+  }
+  ImGui::Checkbox("Adaptation##HDRPostProcess", &hdr.adaptationEnabled);
+  if (hdr.adaptationEnabled) {
+    ImGui::SliderFloat("Target Gray##HDRPostProcess", &hdr.adaptationTargetGray,
+                       0.01f, 2.0f, "%.3f");
+    ImGui::SliderFloat("Adaptation Speed##HDRPostProcess", &hdr.adaptationSpeed,
+                       0.0f, 16.0f, "%.2f");
+    ImGui::SliderFloat("Min EV##HDRPostProcess", &hdr.adaptationMinEv, -16.0f,
+                       16.0f, "%.2f");
+    ImGui::SliderFloat("Max EV##HDRPostProcess", &hdr.adaptationMaxEv, -16.0f,
+                       16.0f, "%.2f");
+  }
+  int hdrDebugIndex = static_cast<int>(hdr.debugView);
+  hdrDebugIndex =
+      std::clamp(hdrDebugIndex, 0,
+                 static_cast<int>(kHDRPostProcessDebugViewLabels.size()) - 1);
+  if (ImGui::Combo("HDR Debug##HDRPostProcess", &hdrDebugIndex,
+                   kHDRPostProcessDebugViewLabels.data(),
+                   static_cast<int>(kHDRPostProcessDebugViewLabels.size()))) {
+    hdr.debugView = static_cast<HDRPostProcessDebugView>(hdrDebugIndex);
+  }
+  sanitizeHDRPostProcessSettings(hdr);
+
+  const HDRPostProcessFrameMetrics &hdrMetrics = frameMetrics.hdrPostProcess;
+  ImGui::Text("Bloom active: %s", hdrMetrics.bloomActive ? "yes" : "no");
+  ImGui::Text("Adaptation active: %s",
+              hdrMetrics.adaptationActive ? "yes" : "no");
+  ImGui::Text("Exposure history: %s",
+              hdrMetrics.exposureHistoryValid ? "valid" : "invalid");
+  ImGui::Text("Adapted EV: %.2f  Effective EV: %.2f",
+              hdrMetrics.adaptedExposureEv, hdrMetrics.effectiveExposureEv);
   ImGui::Separator();
   ImGui::TextUnformatted(
       "Frame composition is always active and presents the HDR frame");
@@ -3269,6 +3324,17 @@ void drawAmbientOcclusionWindow(bool &open, RenderSettings &renderSettings,
   ImGui::End();
 }
 
+void drawHDRPostProcessWindow(bool &open, RenderSettings &renderSettings,
+                              const RenderFrameMetrics &frameMetrics) {
+  if (!ImGui::Begin(kHDRPostProcessWindowName, &open)) {
+    ImGui::End();
+    return;
+  }
+  drawCompositeSettings(renderSettings.toneMap, renderSettings.hdrPostProcess,
+                        frameMetrics);
+  ImGui::End();
+}
+
 void drawTextureFilteringWindow(bool &open, RenderSettings &renderSettings,
                                 const GPUDevice &gpu) {
   if (!ImGui::Begin(kTextureFilteringWindowName, &open)) {
@@ -3835,7 +3901,8 @@ void drawPassInspector(RenderSettings &renderSettings,
           drawTransparentSettings(renderSettings.transparent);
           break;
         case PassInspectorKind::Composite:
-          drawCompositeSettings(renderSettings.toneMap);
+          drawCompositeSettings(renderSettings.toneMap,
+                                renderSettings.hdrPostProcess, frameMetrics);
           break;
         case PassInspectorKind::AntiAliasing:
           drawAntiAliasingSettings(renderSettings.antiAliasing, renderPipeline,
@@ -6249,6 +6316,7 @@ struct ImGuiEditor::Impl {
       ImGui::MenuItem("Anti-Aliasing", nullptr, &showAntiAliasingWindow);
       ImGui::MenuItem("Ambient Occlusion", nullptr,
                       &showAmbientOcclusionWindow);
+      ImGui::MenuItem("HDR Postprocess", nullptr, &showHDRPostProcessWindow);
       if (ImGui::BeginMenu("Texture Filtering")) {
         auto &settings = renderSettings.textureFiltering;
         sanitizeTextureFilteringSettings(settings);
@@ -6481,6 +6549,13 @@ struct ImGuiEditor::Impl {
                                  frameMetrics);
       NURI_PROFILER_ZONE_END();
     }
+    if (showHDRPostProcessWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawHDRPostProcessWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      drawHDRPostProcessWindow(showHDRPostProcessWindow, renderSettings,
+                               frameMetrics);
+      NURI_PROFILER_ZONE_END();
+    }
     if (showShadowsWindow) {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawShadowsWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
@@ -6632,6 +6707,7 @@ struct ImGuiEditor::Impl {
   bool showTextureFilteringWindow = false;
   bool showAntiAliasingWindow = false;
   bool showAmbientOcclusionWindow = false;
+  bool showHDRPostProcessWindow = false;
   bool showShadowsWindow = false;
   bool showRenderGraphTelemetryWindow = false;
   bool showGizmoControlsWindow = false;
@@ -6770,6 +6846,7 @@ void ImGuiEditor::setRenderSettings(const RenderSettings &settings) {
   impl_->renderSettings = settings;
   sanitizeTextureFilteringSettings(impl_->renderSettings.textureFiltering);
   sanitizeToneMapSettings(impl_->renderSettings.toneMap);
+  sanitizeHDRPostProcessSettings(impl_->renderSettings.hdrPostProcess);
   sanitizeAntiAliasingSettings(impl_->renderSettings.antiAliasing);
   sanitizeAmbientOcclusionSettings(impl_->renderSettings.ambientOcclusion,
                                    impl_->renderSettings.opaque,
@@ -6854,6 +6931,7 @@ RenderSettings ImGuiEditor::renderSettings() const {
   RenderSettings settings = impl_->renderSettings;
   sanitizeTextureFilteringSettings(settings.textureFiltering);
   sanitizeToneMapSettings(settings.toneMap);
+  sanitizeHDRPostProcessSettings(settings.hdrPostProcess);
   sanitizeTransmissionSettings(settings.transmission);
   sanitizeAntiAliasingSettings(settings.antiAliasing);
   sanitizeAmbientOcclusionSettings(settings.ambientOcclusion, settings.opaque,

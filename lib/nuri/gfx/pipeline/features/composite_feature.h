@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace nuri {
 
@@ -176,6 +177,86 @@ private:
   SceneColorDownsamplePass downsamplePass_;
   SceneResolvePass resolvePass_;
   std::array<RenderFeaturePass *, 2> passes_{&downsamplePass_, &resolvePass_};
+};
+
+class NURI_API HDRExposureAdaptPass final : public FullscreenRenderPass {
+public:
+  explicit HDRExposureAdaptPass(GPUDevice &gpu,
+                                FrameCompositionFeatureConfig config);
+  ~HDRExposureAdaptPass() override = default;
+
+  HDRExposureAdaptPass(const HDRExposureAdaptPass &) = delete;
+  HDRExposureAdaptPass &operator=(const HDRExposureAdaptPass &) = delete;
+  HDRExposureAdaptPass(HDRExposureAdaptPass &&) = delete;
+  HDRExposureAdaptPass &operator=(HDRExposureAdaptPass &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "HDRExposureAdaptPass";
+  }
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+};
+
+class NURI_API HDRBloomCompositePass final : public FullscreenRenderPass {
+public:
+  explicit HDRBloomCompositePass(GPUDevice &gpu,
+                                 FrameCompositionFeatureConfig config);
+  ~HDRBloomCompositePass() override;
+
+  HDRBloomCompositePass(const HDRBloomCompositePass &) = delete;
+  HDRBloomCompositePass &operator=(const HDRBloomCompositePass &) = delete;
+  HDRBloomCompositePass(HDRBloomCompositePass &&) = delete;
+  HDRBloomCompositePass &operator=(HDRBloomCompositePass &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "HDRBloomCompositePass";
+  }
+  [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
+  Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  Result<bool, std::string> build(FrameBuildContext &ctx) override;
+
+private:
+  Result<bool, std::string> ensureOutputTextures();
+  Result<bool, std::string> ensureBloomTextures(uint32_t requestedMipCount);
+  void destroyOutputTextures();
+  void destroyBloomTextures();
+
+  FullscreenPassResources bloomResources_{};
+  std::vector<TextureHandle> outputTextures_{};
+  std::vector<std::vector<TextureHandle>> bloomDownsampleTextures_{};
+  std::vector<std::vector<TextureHandle>> bloomUpsampleTextures_{};
+  uint32_t outputWidth_ = 0u;
+  uint32_t outputHeight_ = 0u;
+  uint32_t outputRingCount_ = 0u;
+  uint32_t bloomWidth_ = 0u;
+  uint32_t bloomHeight_ = 0u;
+  uint32_t bloomRingCount_ = 0u;
+  uint32_t bloomMipCount_ = 0u;
+};
+
+class NURI_API HDRPostProcessFeature final : public RenderFeature {
+public:
+  explicit HDRPostProcessFeature(GPUDevice &gpu,
+                                 FrameCompositionFeatureConfig config);
+  ~HDRPostProcessFeature() override = default;
+
+  HDRPostProcessFeature(const HDRPostProcessFeature &) = delete;
+  HDRPostProcessFeature &operator=(const HDRPostProcessFeature &) = delete;
+  HDRPostProcessFeature(HDRPostProcessFeature &&) = delete;
+  HDRPostProcessFeature &operator=(HDRPostProcessFeature &&) = delete;
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "HDRPostProcessFeature";
+  }
+  [[nodiscard]] Result<bool, std::string>
+  publishFrameData(FrameBuildContext &ctx) override;
+  [[nodiscard]] std::span<RenderFeaturePass *const> passes() noexcept override;
+
+private:
+  HDRExposureAdaptPass exposurePass_;
+  HDRBloomCompositePass compositePass_;
+  std::array<RenderFeaturePass *, 2> passes_{&exposurePass_, &compositePass_};
 };
 
 class NURI_API FramePresentFeature final : public RenderFeature {

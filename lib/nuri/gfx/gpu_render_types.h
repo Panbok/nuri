@@ -84,6 +84,7 @@ enum class GpuTimingScope : uint8_t {
   Opaque = 9,
   MsaaResolve = 10,
   GTAO = 11,
+  HDRPostProcess = 12,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -115,6 +116,8 @@ constexpr uint32_t kGpuTimingScopeMsaaResolveBit =
     gpuTimingScopeToBit(GpuTimingScope::MsaaResolve);
 constexpr uint32_t kGpuTimingScopeGTAOBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAO);
+constexpr uint32_t kGpuTimingScopeHDRPostProcessBit =
+    gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -131,6 +134,8 @@ struct GpuTimingReport {
   uint64_t opaqueSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t msaaResolveSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t gtaoSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t hdrPostProcessSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -142,6 +147,7 @@ struct GpuTimingReport {
   float opaqueTimeMs = 0.0f;
   float msaaResolveTimeMs = 0.0f;
   float gtaoTimeMs = 0.0f;
+  float hdrPostProcessTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
 };
 
@@ -206,6 +212,9 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
       {GpuTimingScope::GTAO, &GpuTimingReport::gtaoTimeMs,
        &GpuTimingReport::gtaoSourceFrameIndex,
        gpuTimingScopeToBit(GpuTimingScope::GTAO)},
+      {GpuTimingScope::HDRPostProcess, &GpuTimingReport::hdrPostProcessTimeMs,
+       &GpuTimingReport::hdrPostProcessSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
   });
   for (const GpuTimingScopeMergeDesc desc : kScopeDescs) {
     mergeGpuTimingReportScope(dst, src, desc);

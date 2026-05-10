@@ -547,6 +547,8 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
 
   ctx.shared.forwardSceneGpuData = ForwardSceneGpuData{
       .buffer = sceneDataBuffer->handle(),
+      .frameData = frameData,
+      .postTaaFrameData = postTaaFrameData,
       .frameDataAddress = sceneDataBaseAddress + layout.frameDataOffset,
       .postTaaFrameDataAddress =
           sceneDataBaseAddress + layout.postTaaFrameDataOffset,

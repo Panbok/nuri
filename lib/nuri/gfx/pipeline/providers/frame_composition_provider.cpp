@@ -93,7 +93,7 @@ FrameCompositionProvider::FrameCompositionProvider(
       msaaSceneColorTextures_(memory_), msaaSceneDepthTextures_(memory_),
       motionVectorTextures_(memory_), reactiveMaskTextures_(memory_),
       normalTextures_(memory_), ambientOcclusionTextures_(memory_),
-      historyColorTextures_(memory_) {}
+      exposureTextures_(memory_), historyColorTextures_(memory_) {}
 
 FrameCompositionProvider::~FrameCompositionProvider() {
   for (auto &textures : sceneColorMipTextures_) {
@@ -107,6 +107,7 @@ FrameCompositionProvider::~FrameCompositionProvider() {
   destroyReactiveMaskTextures();
   destroyNormalTextures();
   destroyAmbientOcclusionTextures();
+  destroyExposureTextures();
 }
 
 Result<bool, std::string>
@@ -128,6 +129,9 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.motionVectorGraphTexture = {};
   ctx.shared.previousMotionVectorGraphTexture = {};
   ctx.shared.reactiveMaskGraphTexture = {};
+  ctx.shared.exposureReadGraphTexture = {};
+  ctx.shared.exposureWriteGraphTexture = {};
+  ctx.shared.exposureHistoryValid = false;
 
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
   if (sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
@@ -180,6 +184,15 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       ctx.frame.camera.historyValid
           ? previousRingTexture(ambientOcclusionTextures_, ctx.frame.frameIndex)
           : TextureHandle{};
+  ctx.shared.exposureReadTexture =
+      previousRingTexture(exposureTextures_, ctx.frame.frameIndex);
+  ctx.shared.exposureWriteTexture =
+      currentRingTexture(exposureTextures_, ctx.frame.frameIndex);
+  ctx.shared.exposureHistoryValid =
+      exposureHistoryValid_ && nuri::isValid(ctx.shared.exposureReadTexture);
+  exposureHistoryValid_ = nuri::isValid(ctx.shared.exposureWriteTexture);
+  ctx.frame.metrics.hdrPostProcess.exposureHistoryValid =
+      ctx.shared.exposureHistoryValid;
   AmbientOcclusionFrameMetrics &aoMetrics = ctx.frame.metrics.ambientOcclusion;
   aoMetrics.normalFormat = kFrameCompositionNormalFormat;
   aoMetrics.ambientOcclusionFormat = kFrameCompositionAmbientOcclusionFormat;
@@ -490,6 +503,20 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
     destroyAmbientOcclusionTextures();
   }
 
+  const bool needsExposure = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::Exposure);
+  const bool hadExposure = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::Exposure);
+  if (needsExposure && (fullRecreate || !hadExposure)) {
+    auto exposureResult = recreateExposureTextures();
+    if (exposureResult.hasError()) {
+      invalidateAllocationState();
+      return exposureResult;
+    }
+  } else if (!needsExposure && hadExposure) {
+    destroyExposureTextures();
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -498,6 +525,7 @@ void FrameCompositionProvider::invalidateAllocationState() noexcept {
   framebufferHeight_ = 0u;
   textureRingCount_ = 0u;
   allocatedRequirements_ = FrameTextureRequirementFlags::None;
+  exposureHistoryValid_ = false;
 }
 
 Result<bool, std::string> FrameCompositionProvider::recreateFullResTextureRing(
@@ -687,6 +715,26 @@ FrameCompositionProvider::recreateAmbientOcclusionTextures() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string> FrameCompositionProvider::recreateExposureTextures() {
+  destroyExposureTextures();
+
+  const uint32_t exposureRingCount = std::max(2u, textureRingCount_);
+  exposureTextures_.resize(exposureRingCount);
+  const TextureDesc desc = makeTextureDesc(kFrameCompositionExposureFormat, 1u,
+                                           1u, TextureUsage::AttachmentSampled);
+  for (uint32_t i = 0; i < exposureRingCount; ++i) {
+    const std::string debugName = "frame_exposure_ev_" + std::to_string(i);
+    auto createResult = gpu_.createTexture(desc, debugName);
+    if (createResult.hasError()) {
+      destroyExposureTextures();
+      return Result<bool, std::string>::makeError(createResult.error());
+    }
+    exposureTextures_[i] = createResult.value();
+  }
+  exposureHistoryValid_ = false;
+  return Result<bool, std::string>::makeResult(true);
+}
+
 void FrameCompositionProvider::destroyTextures(TextureRing &textures) {
   for (TextureHandle &texture : textures) {
     if (!nuri::isValid(texture)) {
@@ -721,6 +769,11 @@ void FrameCompositionProvider::destroyNormalTextures() {
 
 void FrameCompositionProvider::destroyAmbientOcclusionTextures() {
   destroyTextures(ambientOcclusionTextures_);
+}
+
+void FrameCompositionProvider::destroyExposureTextures() {
+  destroyTextures(exposureTextures_);
+  exposureHistoryValid_ = false;
 }
 
 TextureHandle FrameCompositionProvider::currentRingTexture(

@@ -285,6 +285,8 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
       getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
   renderPipeline_->addFeature(std::make_unique<SpatialAAFeature>(
       getGPU(), shaderConfig.composite, SpatialAAPlacement::PostTransparent));
+  renderPipeline_->addFeature(std::make_unique<HDRPostProcessFeature>(
+      getGPU(), shaderConfig.composite));
   renderPipeline_->addFeature(std::make_unique<DebugFeature>(
       getGPU(), shaderConfig.debugGrid, pipelineMemoryResource()));
   renderPipeline_->addFeature(

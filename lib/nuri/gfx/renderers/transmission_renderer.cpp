@@ -206,30 +206,26 @@ transmissionTaaJitterMinLod(const RenderFrameContext &frame,
 }
 
 Result<ForwardSceneFrameData, std::string>
-readForwardSceneFrameData(GPUDevice &gpu, const ForwardSceneGpuData &sceneGpu,
-                          uint64_t frameDataAddress) {
+resolveForwardSceneFrameData(const ForwardSceneGpuData &sceneGpu,
+                             uint64_t frameDataAddress) {
   if (!nuri::isValid(sceneGpu.buffer) || frameDataAddress == 0u) {
     return Result<ForwardSceneFrameData, std::string>::makeError(
         "TransmissionRenderer::prepareTransmissionPasses: invalid forward "
         "scene frame data source");
   }
-  const uint64_t baseAddress = gpu.getBufferDeviceAddress(sceneGpu.buffer);
-  if (baseAddress == 0u || frameDataAddress < baseAddress) {
-    return Result<ForwardSceneFrameData, std::string>::makeError(
-        "TransmissionRenderer::prepareTransmissionPasses: invalid forward "
-        "scene frame data address");
+  if (frameDataAddress == sceneGpu.postTaaFrameDataAddress &&
+      sceneGpu.postTaaFrameDataAddress != 0u) {
+    return Result<ForwardSceneFrameData, std::string>::makeResult(
+        sceneGpu.postTaaFrameData);
   }
-
-  ForwardSceneFrameData frameData{};
-  const auto offset = static_cast<size_t>(frameDataAddress - baseAddress);
-  auto readResult = gpu.readBuffer(
-      sceneGpu.buffer, offset,
-      std::as_writable_bytes(std::span<ForwardSceneFrameData>(&frameData, 1u)));
-  if (readResult.hasError()) {
-    return Result<ForwardSceneFrameData, std::string>::makeError(
-        readResult.error());
+  if (frameDataAddress == sceneGpu.frameDataAddress &&
+      sceneGpu.frameDataAddress != 0u) {
+    return Result<ForwardSceneFrameData, std::string>::makeResult(
+        sceneGpu.frameData);
   }
-  return Result<ForwardSceneFrameData, std::string>::makeResult(frameData);
+  return Result<ForwardSceneFrameData, std::string>::makeError(
+      "TransmissionRenderer::prepareTransmissionPasses: unknown forward "
+      "scene frame data address");
 }
 
 void appendUniqueTexture(std::pmr::vector<TextureHandle> &handles,
@@ -629,7 +625,7 @@ TransmissionRenderer::prepareTransmissionPasses(RenderFrameContext &frame) {
           "data buffer is unavailable");
     }
     auto blendedFrameDataResult =
-        readForwardSceneFrameData(gpu_, *sceneGpu, frameDataAddress);
+        resolveForwardSceneFrameData(*sceneGpu, frameDataAddress);
     if (blendedFrameDataResult.hasError()) {
       return Result<bool, std::string>::makeError(
           blendedFrameDataResult.error());

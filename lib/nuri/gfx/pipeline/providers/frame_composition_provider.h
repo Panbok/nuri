@@ -51,6 +51,7 @@ private:
   Result<bool, std::string> recreateReactiveMaskTextures();
   Result<bool, std::string> recreateNormalTextures();
   Result<bool, std::string> recreateAmbientOcclusionTextures();
+  Result<bool, std::string> recreateExposureTextures();
   void invalidateAllocationState() noexcept;
   void destroyTextures(TextureRing &textures);
   void destroyHistoryTextures();
@@ -59,6 +60,7 @@ private:
   void destroyReactiveMaskTextures();
   void destroyNormalTextures();
   void destroyAmbientOcclusionTextures();
+  void destroyExposureTextures();
   [[nodiscard]] TextureHandle
   currentRingTexture(const TextureRing &textures,
                      uint64_t frameIndex) const noexcept;
@@ -78,6 +80,7 @@ private:
   TextureRing reactiveMaskTextures_;
   TextureRing normalTextures_;
   TextureRing ambientOcclusionTextures_;
+  TextureRing exposureTextures_;
   TextureRing historyColorTextures_;
   FrameTextureRequirementFlags allocatedRequirements_ =
       FrameTextureRequirementFlags::None;
@@ -92,6 +95,7 @@ private:
   uint32_t normalTextureReallocationCount_ = 0u;
   uint32_t ambientOcclusionTextureAllocationCount_ = 0u;
   uint32_t ambientOcclusionTextureReallocationCount_ = 0u;
+  bool exposureHistoryValid_ = false;
   uint32_t textureRingCount_ = 0u;
   uint32_t framebufferWidth_ = 0u;
   uint32_t framebufferHeight_ = 0u;

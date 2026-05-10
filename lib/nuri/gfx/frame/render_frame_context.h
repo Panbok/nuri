@@ -113,6 +113,14 @@ enum class AmbientOcclusionDebugView : uint8_t {
   Normals = 3,
 };
 
+enum class HDRPostProcessDebugView : uint8_t {
+  None = 0,
+  BloomPrefilter = 1,
+  BloomFinal = 2,
+  LogAverageLuminance = 3,
+  AdaptedExposure = 4,
+};
+
 enum class AmbientOcclusionDisabledReason : uint8_t {
   None = 0,
   ModeDisabled = 1,
@@ -222,6 +230,14 @@ static constexpr float kDefaultAgxExposureOffsetEv = -0.35f;
 static constexpr float kDefaultToneMapCompareSplit = 0.5f;
 static constexpr float kMinToneMapCompareSplit = 0.1f;
 static constexpr float kMaxToneMapCompareSplit = 0.9f;
+static constexpr float kDefaultHDRBloomStrength = 0.08f;
+static constexpr float kDefaultHDRBloomThreshold = 1.0f;
+static constexpr float kDefaultHDRBloomSoftKnee = 0.5f;
+static constexpr uint32_t kDefaultHDRBloomMaxMipCount = 6u;
+static constexpr float kDefaultHDRAdaptationTargetGray = 0.18f;
+static constexpr float kDefaultHDRAdaptationSpeed = 3.0f;
+static constexpr float kDefaultHDRAdaptationMinEv = -8.0f;
+static constexpr float kDefaultHDRAdaptationMaxEv = 8.0f;
 
 static constexpr uint32_t kMaxSceneDepthPyramidLevels = 16u;
 static constexpr uint32_t kSceneDepthPyramidTexIdPackWidth = 4u;
@@ -244,6 +260,7 @@ static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R32_FLOAT;
 static constexpr Format kFrameCompositionNormalFormat = Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionAmbientOcclusionFormat =
     Format::R32_FLOAT;
+static constexpr Format kFrameCompositionExposureFormat = Format::R32_FLOAT;
 // Motion vectors are normalized UV-space history lookup offsets:
 // historyUv = currentUv + velocity. Current and previous jitter are excluded.
 static constexpr ClearColor kFrameCompositionMotionVectorClearValue{
@@ -367,6 +384,20 @@ sanitizeAmbientOcclusionDebugView(AmbientOcclusionDebugView view) noexcept {
     return view;
   default:
     return AmbientOcclusionDebugView::None;
+  }
+}
+
+[[nodiscard]] constexpr HDRPostProcessDebugView
+sanitizeHDRPostProcessDebugView(HDRPostProcessDebugView view) noexcept {
+  switch (view) {
+  case HDRPostProcessDebugView::None:
+  case HDRPostProcessDebugView::BloomPrefilter:
+  case HDRPostProcessDebugView::BloomFinal:
+  case HDRPostProcessDebugView::LogAverageLuminance:
+  case HDRPostProcessDebugView::AdaptedExposure:
+    return view;
+  default:
+    return HDRPostProcessDebugView::None;
   }
 }
 
@@ -623,6 +654,20 @@ struct RenderSettings {
     float compareSplit = kDefaultToneMapCompareSplit;
   };
 
+  struct HDRPostProcessSettings {
+    bool bloomEnabled = true;
+    float bloomStrength = kDefaultHDRBloomStrength;
+    float bloomThreshold = kDefaultHDRBloomThreshold;
+    float bloomSoftKnee = kDefaultHDRBloomSoftKnee;
+    uint32_t bloomMaxMipCount = kDefaultHDRBloomMaxMipCount;
+    bool adaptationEnabled = false;
+    float adaptationTargetGray = kDefaultHDRAdaptationTargetGray;
+    float adaptationSpeed = kDefaultHDRAdaptationSpeed;
+    float adaptationMinEv = kDefaultHDRAdaptationMinEv;
+    float adaptationMaxEv = kDefaultHDRAdaptationMaxEv;
+    HDRPostProcessDebugView debugView = HDRPostProcessDebugView::None;
+  };
+
   struct AntiAliasingDebugSettings {
     bool jitterEnabled = false;
     bool freezeJitter = false;
@@ -677,6 +722,7 @@ struct RenderSettings {
   AmbientOcclusionSettings ambientOcclusion{};
   TextureFilteringSettings textureFiltering{};
   ToneMapSettings toneMap{};
+  HDRPostProcessSettings hdrPostProcess{};
 };
 
 inline void sanitizeAmbientOcclusionSettings(
@@ -782,6 +828,44 @@ inline void sanitizeToneMapSettings(RenderSettings::ToneMapSettings &settings) {
   settings.operator_ = sanitizeToneMapper(settings.operator_);
   settings.compareSplit = std::clamp(
       settings.compareSplit, kMinToneMapCompareSplit, kMaxToneMapCompareSplit);
+}
+
+inline void sanitizeHDRPostProcessSettings(
+    RenderSettings::HDRPostProcessSettings &settings) {
+  settings.bloomStrength = std::isfinite(settings.bloomStrength)
+                               ? std::clamp(settings.bloomStrength, 0.0f, 1.0f)
+                               : kDefaultHDRBloomStrength;
+  settings.bloomThreshold =
+      std::isfinite(settings.bloomThreshold)
+          ? std::clamp(settings.bloomThreshold, 0.0f, 64.0f)
+          : kDefaultHDRBloomThreshold;
+  settings.bloomSoftKnee = std::isfinite(settings.bloomSoftKnee)
+                               ? std::clamp(settings.bloomSoftKnee, 0.0f, 4.0f)
+                               : kDefaultHDRBloomSoftKnee;
+  settings.bloomMaxMipCount =
+      std::clamp(settings.bloomMaxMipCount, 1u, kMaxSceneDepthPyramidLevels);
+  settings.adaptationTargetGray =
+      std::isfinite(settings.adaptationTargetGray)
+          ? std::clamp(settings.adaptationTargetGray, 0.001f, 16.0f)
+          : kDefaultHDRAdaptationTargetGray;
+  settings.adaptationSpeed =
+      std::isfinite(settings.adaptationSpeed)
+          ? std::clamp(settings.adaptationSpeed, 0.0f, 64.0f)
+          : kDefaultHDRAdaptationSpeed;
+  settings.adaptationMinEv = std::isfinite(settings.adaptationMinEv)
+                                 ? settings.adaptationMinEv
+                                 : kDefaultHDRAdaptationMinEv;
+  settings.adaptationMaxEv = std::isfinite(settings.adaptationMaxEv)
+                                 ? settings.adaptationMaxEv
+                                 : kDefaultHDRAdaptationMaxEv;
+  settings.adaptationMinEv =
+      std::clamp(settings.adaptationMinEv, -32.0f, 32.0f);
+  settings.adaptationMaxEv =
+      std::clamp(settings.adaptationMaxEv, -32.0f, 32.0f);
+  if (settings.adaptationMinEv > settings.adaptationMaxEv) {
+    std::swap(settings.adaptationMinEv, settings.adaptationMaxEv);
+  }
+  settings.debugView = sanitizeHDRPostProcessDebugView(settings.debugView);
 }
 
 inline void
@@ -1870,14 +1954,17 @@ static_assert(offsetof(ForwardSceneFrameData, shadowFlags) == 360u);
 static_assert(offsetof(ForwardSceneFrameData, materialCoverageSamplerId) ==
               364u);
 
-// GPU-side forwarding of the light metadata carried in ForwardSceneFrameData.
-// The CPU owns allocation and updates of ForwardSceneFrameData, then derives
-// the resolved GPU addresses/counts below before publishing them for consumers.
+// CPU/GPU forwarding of the light metadata carried in ForwardSceneFrameData.
+// The CPU owns allocation and updates of ForwardSceneFrameData, keeps mirrors
+// for consumers that need to derive small variants, then publishes resolved GPU
+// addresses/counts for shader consumers.
 // Keep this struct in sync with ForwardSceneFrameData's layout/semantics for
 // directional/local light buffer addresses and counts to avoid
 // desynchronization bugs when the CPU-side contract changes.
 struct ForwardSceneGpuData {
   BufferHandle buffer{};
+  ForwardSceneFrameData frameData{};
+  ForwardSceneFrameData postTaaFrameData{};
   uint64_t frameDataAddress = 0;
   uint64_t postTaaFrameDataAddress = 0;
   uint64_t directionalLightBufferAddress = 0;
@@ -2282,6 +2369,28 @@ struct AmbientOcclusionFrameMetrics {
   bool bentNormalAvailable = false;
 };
 
+struct HDRPostProcessFrameMetrics {
+  uint32_t width = 0u;
+  uint32_t height = 0u;
+  uint32_t bloomMipCount = 0u;
+  uint32_t bloomPassCount = 0u;
+  uint32_t luminancePassCount = 0u;
+  uint32_t adaptationPassCount = 0u;
+  uint32_t textureCount = 0u;
+  uint32_t gpuTimingAvailable = 0u;
+  uint64_t textureBytes = 0u;
+  uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  float adaptedExposureEv = 0.0f;
+  float measuredLogAverageLuminance = 0.0f;
+  float effectiveExposureEv = 0.0f;
+  float gpuTimeMs = 0.0f;
+  bool bloomEnabled = false;
+  bool bloomActive = false;
+  bool adaptationEnabled = false;
+  bool adaptationActive = false;
+  bool exposureHistoryValid = false;
+};
+
 [[nodiscard]] inline AntiAliasingFrameMetrics
 makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
   const glm::vec2 jitterDelta =
@@ -2316,6 +2425,7 @@ struct RenderFrameMetrics {
   ShadowFrameMetrics shadow{};
   AntiAliasingFrameMetrics antiAliasing{};
   AmbientOcclusionFrameMetrics ambientOcclusion{};
+  HDRPostProcessFrameMetrics hdrPostProcess{};
   struct TransparentFrameMetrics {
     uint32_t meshDraws = 0;
     uint32_t contributorSortableDraws = 0;
@@ -2458,6 +2568,10 @@ struct FrameSharedResources {
   RenderGraphTextureId frameColorGraphTexture{};
   TextureHandle historyColorReadTexture{};
   TextureHandle historyColorWriteTexture{};
+  TextureHandle exposureReadTexture{};
+  TextureHandle exposureWriteTexture{};
+  RenderGraphTextureId exposureReadGraphTexture{};
+  RenderGraphTextureId exposureWriteGraphTexture{};
   TextureHandle motionVectorTexture{};
   TextureHandle previousMotionVectorTexture{};
   TextureHandle reactiveMaskTexture{};
@@ -2470,6 +2584,7 @@ struct FrameSharedResources {
   std::optional<LightId> selectedShadowLightId{};
   bool transparentStageEnabled = false;
   bool transparentTransmissionStageEnabled = false;
+  bool exposureHistoryValid = false;
 };
 
 enum TransparentStageDrawFlags : uint32_t {

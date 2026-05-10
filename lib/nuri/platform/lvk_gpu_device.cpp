@@ -1032,6 +1032,7 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     double opaqueTimeMs = 0.0;
     double msaaResolveTimeMs = 0.0;
     double gtaoTimeMs = 0.0;
+    double hdrPostProcessTimeMs = 0.0;
     bool shadowTimingAvailable = false;
     bool shadowDepthTimingAvailable = false;
     bool shadowSdsmTimingAvailable = false;
@@ -1043,6 +1044,7 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     bool opaqueTimingAvailable = false;
     bool msaaResolveTimingAvailable = false;
     bool gtaoTimingAvailable = false;
+    bool hdrPostProcessTimingAvailable = false;
     std::vector<uint64_t> queryData;
     for (const PendingTimingQueryRange &range : pending.timingRanges) {
       hadShadowSdsmRange =
@@ -1114,6 +1116,10 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
         case GpuTimingScope::GTAO:
           gtaoTimeMs += intervalTimeMs;
           gtaoTimingAvailable = true;
+          break;
+        case GpuTimingScope::HDRPostProcess:
+          hdrPostProcessTimeMs += intervalTimeMs;
+          hdrPostProcessTimingAvailable = true;
           break;
         case GpuTimingScope::None:
           break;
@@ -1198,6 +1204,13 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
       completedReport.gtaoSourceFrameIndex = pending.frameIndex;
       completedReport.availableScopeMask |=
           gpuTimingScopeToBit(GpuTimingScope::GTAO);
+    }
+    if (hdrPostProcessTimingAvailable) {
+      completedReport.hdrPostProcessTimeMs =
+          static_cast<float>(hdrPostProcessTimeMs);
+      completedReport.hdrPostProcessSourceFrameIndex = pending.frameIndex;
+      completedReport.availableScopeMask |=
+          gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess);
     }
     if (hadShadowSdsmRange && !shadowSdsmTimingAvailable &&
         !impl.loggedShadowSdsmTimingCollectionWarning) {

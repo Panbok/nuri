@@ -61,6 +61,10 @@ struct NURI_API RuntimeCompositeConfig {
   std::filesystem::path fullscreenVertex;
   std::filesystem::path sceneCopyFragment;
   std::filesystem::path presentFragment;
+  std::filesystem::path hdrLuminanceReduceFragment;
+  std::filesystem::path hdrExposureAdaptFragment;
+  std::filesystem::path hdrBloomFragment;
+  std::filesystem::path hdrBloomCompositeFragment;
   std::filesystem::path aces2SdrLut;
   std::filesystem::path agxLut;
 };

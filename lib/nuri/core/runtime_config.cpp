@@ -37,6 +37,14 @@ constexpr std::string_view kDefaultCompositeSceneCopyFragmentShader =
     "scene_copy.frag";
 constexpr std::string_view kDefaultCompositePresentFragmentShader =
     "tonemap_present.frag";
+constexpr std::string_view kDefaultCompositeHdrLuminanceReduceFragmentShader =
+    "hdr_luminance_reduce.frag";
+constexpr std::string_view kDefaultCompositeHdrExposureAdaptFragmentShader =
+    "hdr_exposure_adapt.frag";
+constexpr std::string_view kDefaultCompositeHdrBloomFragmentShader =
+    "hdr_bloom.frag";
+constexpr std::string_view kDefaultCompositeHdrBloomCompositeFragmentShader =
+    "hdr_bloom_composite.frag";
 constexpr std::string_view kDefaultCompositeAces2SdrLut =
     "tonemap_aces2_sdr_64.ktx2";
 constexpr std::string_view kDefaultCompositeAgxLut = "tonemap_agx_sdr_64.ktx2";
@@ -63,9 +71,16 @@ constexpr std::array<std::string_view, 10> kOpaqueShaderKeys = {
     "tess_control",      "tess_eval",
     "overlay_geometry",  "overlay_fragment",
 };
-constexpr std::array<std::string_view, 5> kCompositeShaderKeys = {
-    "fullscreen_vertex", "scene_copy_fragment", "present_fragment",
-    "aces2_sdr_lut", "agx_lut"};
+constexpr std::array<std::string_view, 9> kCompositeShaderKeys = {
+    "fullscreen_vertex",
+    "scene_copy_fragment",
+    "present_fragment",
+    "hdr_luminance_reduce_fragment",
+    "hdr_exposure_adapt_fragment",
+    "hdr_bloom_fragment",
+    "hdr_bloom_composite_fragment",
+    "aces2_sdr_lut",
+    "agx_lut"};
 constexpr std::array<std::string_view, 4> kTextMtsdfShaderKeys = {
     "ui_vertex", "ui_fragment", "world_vertex", "world_fragment"};
 
@@ -698,6 +713,33 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (compositePresentFragmentPath.hasError()) {
     return makeError<RuntimeConfig>(compositePresentFragmentPath.error());
   }
+  auto compositeHdrLuminanceReduceFragmentPath = resolveShaderFileWithDefault(
+      compositeObj, "hdr_luminance_reduce_fragment", "shaders.composite",
+      kDefaultCompositeHdrLuminanceReduceFragmentShader, shadersRoot.value());
+  if (compositeHdrLuminanceReduceFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(
+        compositeHdrLuminanceReduceFragmentPath.error());
+  }
+  auto compositeHdrExposureAdaptFragmentPath = resolveShaderFileWithDefault(
+      compositeObj, "hdr_exposure_adapt_fragment", "shaders.composite",
+      kDefaultCompositeHdrExposureAdaptFragmentShader, shadersRoot.value());
+  if (compositeHdrExposureAdaptFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(
+        compositeHdrExposureAdaptFragmentPath.error());
+  }
+  auto compositeHdrBloomFragmentPath = resolveShaderFileWithDefault(
+      compositeObj, "hdr_bloom_fragment", "shaders.composite",
+      kDefaultCompositeHdrBloomFragmentShader, shadersRoot.value());
+  if (compositeHdrBloomFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(compositeHdrBloomFragmentPath.error());
+  }
+  auto compositeHdrBloomCompositeFragmentPath = resolveShaderFileWithDefault(
+      compositeObj, "hdr_bloom_composite_fragment", "shaders.composite",
+      kDefaultCompositeHdrBloomCompositeFragmentShader, shadersRoot.value());
+  if (compositeHdrBloomCompositeFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(
+        compositeHdrBloomCompositeFragmentPath.error());
+  }
   auto compositeAces2SdrLutPath =
       stringFieldOrDefault(compositeObj, "aces2_sdr_lut", "shaders.composite",
                            kDefaultCompositeAces2SdrLut);
@@ -768,6 +810,13 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
               .fullscreenVertex = compositeFullscreenVertexPath.value(),
               .sceneCopyFragment = compositeSceneCopyFragmentPath.value(),
               .presentFragment = compositePresentFragmentPath.value(),
+              .hdrLuminanceReduceFragment =
+                  compositeHdrLuminanceReduceFragmentPath.value(),
+              .hdrExposureAdaptFragment =
+                  compositeHdrExposureAdaptFragmentPath.value(),
+              .hdrBloomFragment = compositeHdrBloomFragmentPath.value(),
+              .hdrBloomCompositeFragment =
+                  compositeHdrBloomCompositeFragmentPath.value(),
               .aces2SdrLut = aces2SdrLutPath.value(),
               .agxLut = agxLutPath.value(),
           },
