@@ -51,8 +51,7 @@ void SceneRuntimeHost::bindScene(RenderScene *scene) {
   const bool hadBindings = hasBindingTableData(bindings_);
   scene_ = scene;
   bindings_.clear();
-  topologyVersion_ =
-      scene_ != nullptr ? scene_->graph().topologyVersion() : 0u;
+  topologyVersion_ = scene_ != nullptr ? scene_->graph().topologyVersion() : 0u;
   transformVersion_ =
       scene_ != nullptr ? scene_->graph().transformVersion() : 0u;
   const bool bindingsChanged =
@@ -126,8 +125,7 @@ void SceneRuntimeHost::reset() {
   simulationVersion_ = 0u;
   bindingVersion_ = 0u;
   deformationVersion_ = 0u;
-  topologyVersion_ =
-      scene_ != nullptr ? scene_->graph().topologyVersion() : 0u;
+  topologyVersion_ = scene_ != nullptr ? scene_->graph().topologyVersion() : 0u;
   transformVersion_ =
       scene_ != nullptr ? scene_->graph().transformVersion() : 0u;
   simulationControlVersion_ = 0u;

@@ -8,13 +8,13 @@ namespace nuri::material_binary_codec {
 
 namespace {
 
-void appendBytes(std::vector<std::byte> &bytes, std::span<const std::byte> data) {
+void appendBytes(std::vector<std::byte> &bytes,
+                 std::span<const std::byte> data) {
   const auto *src = data.data();
   bytes.insert(bytes.end(), src, src + data.size());
 }
 
-template <typename T>
-[[nodiscard]] T byteSwap(T value) {
+template <typename T> [[nodiscard]] T byteSwap(T value) {
   static_assert(std::is_integral_v<T>);
   if constexpr (sizeof(T) == 1u) {
     return value;
@@ -29,8 +29,7 @@ template <typename T>
   }
 }
 
-template <typename T>
-[[nodiscard]] T byteSwapIfNeeded(T value) {
+template <typename T> [[nodiscard]] T byteSwapIfNeeded(T value) {
   static_assert(std::is_integral_v<T>);
   if constexpr (sizeof(T) == 1u || std::endian::native == std::endian::little) {
     return value;
@@ -52,8 +51,8 @@ void appendLittleEndianU64(std::vector<std::byte> &bytes, uint64_t value) {
 }
 
 template <typename T>
-[[nodiscard]] Result<T, std::string> readLittleEndianIntegral(
-    std::span<const std::byte> bytes, size_t &offset) {
+[[nodiscard]] Result<T, std::string>
+readLittleEndianIntegral(std::span<const std::byte> bytes, size_t &offset) {
   static_assert(std::is_integral_v<T>);
   if (offset > bytes.size() || sizeof(T) > (bytes.size() - offset)) {
     return Result<T, std::string>::makeError(
@@ -88,8 +87,8 @@ void Writer::writeF32(float value) { writeU32(std::bit_cast<uint32_t>(value)); }
 
 void Writer::writeString(std::string_view value) {
   if (value.size() > std::numeric_limits<uint32_t>::max()) {
-    throw std::length_error(
-        "material_binary_codec::Writer::writeString: string exceeds uint32_t length");
+    throw std::length_error("material_binary_codec::Writer::writeString: "
+                            "string exceeds uint32_t length");
   }
   writeU32(static_cast<uint32_t>(value.size()));
   const auto *src = reinterpret_cast<const std::byte *>(value.data());

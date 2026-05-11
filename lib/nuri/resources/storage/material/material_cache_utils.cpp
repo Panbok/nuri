@@ -20,11 +20,12 @@ void fnv1aAddBytes(uint64_t &hash, std::span<const std::byte> bytes) {
 
 std::string hexU64(uint64_t value) { return std::format("{:016x}", value); }
 
-[[nodiscard]] uint64_t hashScenePathNormalized(std::string_view normalizedPath) {
+[[nodiscard]] uint64_t
+hashScenePathNormalized(std::string_view normalizedPath) {
   uint64_t hash = kFnvOffsetBasis;
-  fnv1aAddBytes(
-      hash, {reinterpret_cast<const std::byte *>(normalizedPath.data()),
-             normalizedPath.size()});
+  fnv1aAddBytes(hash,
+                {reinterpret_cast<const std::byte *>(normalizedPath.data()),
+                 normalizedPath.size()});
   return hash;
 }
 

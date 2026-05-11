@@ -49,7 +49,8 @@ meshBinaryEncodeVertexBuffer(std::span<const std::byte> vertexBytes,
       reinterpret_cast<unsigned char *>(encoded.data()), encoded.size(),
       vertexBytes.data(), vertexCount, vertexStrideBytes);
   if (encodedSize == 0) {
-    return makeCodecError("meshBinaryEncodeVertexBuffer: meshopt encode failed");
+    return makeCodecError(
+        "meshBinaryEncodeVertexBuffer: meshopt encode failed");
   }
   encoded.resize(encodedSize);
   return Result<std::vector<std::byte>, std::string>::makeResult(
@@ -58,8 +59,7 @@ meshBinaryEncodeVertexBuffer(std::span<const std::byte> vertexBytes,
 
 Result<std::vector<std::byte>, std::string>
 meshBinaryDecodeVertexBuffer(std::span<const std::byte> encodedBytes,
-                             uint32_t vertexCount,
-                             uint32_t vertexStrideBytes) {
+                             uint32_t vertexCount, uint32_t vertexStrideBytes) {
   if (vertexStrideBytes == 0) {
     return makeCodecError("meshBinaryDecodeVertexBuffer: vertex stride is 0");
   }
@@ -84,7 +84,8 @@ meshBinaryDecodeVertexBuffer(std::span<const std::byte> encodedBytes,
       reinterpret_cast<const unsigned char *>(encodedBytes.data()),
       encodedBytes.size());
   if (decodeResult != 0) {
-    return makeCodecError("meshBinaryDecodeVertexBuffer: meshopt decode failed");
+    return makeCodecError(
+        "meshBinaryDecodeVertexBuffer: meshopt decode failed");
   }
 
   return Result<std::vector<std::byte>, std::string>::makeResult(

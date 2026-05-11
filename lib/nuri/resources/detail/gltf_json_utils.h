@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <yyjson.h>
@@ -15,6 +16,14 @@ namespace nuri::detail {
 
 using YyJsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
 using YyJsonDocResult = Result<YyJsonDocPtr, std::string>;
+
+struct GltfPrimitiveMaterialMapping {
+  uint32_t materialCount = 0;
+  uint32_t meshCount = 0;
+  bool sceneMeshIndicesAreFlatPrimitiveOrder = false;
+  std::vector<uint32_t> singlePrimitiveMeshMaterialIndices{};
+  std::vector<uint32_t> primitiveMaterialIndices{};
+};
 
 [[nodiscard]] bool
 hasExtensionCaseInsensitive(const std::filesystem::path &path,
@@ -41,5 +50,8 @@ loadGltfJsonDocument(const std::filesystem::path &path,
 loadGltfJsonDocument(const std::filesystem::path &path,
                      std::span<const std::byte> fileBytes,
                      std::string_view sourceLabel);
+
+[[nodiscard]] Result<GltfPrimitiveMaterialMapping, std::string>
+readGltfPrimitiveMaterialMapping(yyjson_val *root);
 
 } // namespace nuri::detail

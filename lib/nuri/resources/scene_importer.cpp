@@ -173,7 +173,8 @@ ensureImportedMaterialAsset(ImportedScene &imported, const aiScene &scene,
 void appendRemainingSceneAssets(
     ImportedScene &imported, const aiScene &scene,
     HashMap<uint32_t, uint32_t> &meshOrdinalToAsset,
-    HashMap<uint32_t, uint32_t> &materialOrdinalToAsset) {
+    HashMap<uint32_t, uint32_t> &materialOrdinalToAsset,
+    uint32_t materialCountLimit = std::numeric_limits<uint32_t>::max()) {
   for (uint32_t sourceSceneMeshIndex = 0u;
        sourceSceneMeshIndex < scene.mNumMeshes; ++sourceSceneMeshIndex) {
     if (scene.mMeshes[sourceSceneMeshIndex] == nullptr ||
@@ -185,11 +186,40 @@ void appendRemainingSceneAssets(
                                   sourceSceneMeshIndex);
   }
 
-  for (uint32_t sourceMaterialIndex = 0u;
-       sourceMaterialIndex < scene.mNumMaterials; ++sourceMaterialIndex) {
+  const uint32_t materialEnd =
+      std::min(scene.mNumMaterials, materialCountLimit);
+  for (uint32_t sourceMaterialIndex = 0u; sourceMaterialIndex < materialEnd;
+       ++sourceMaterialIndex) {
     (void)ensureImportedMaterialAsset(imported, scene, materialOrdinalToAsset,
                                       sourceMaterialIndex);
   }
+}
+
+[[nodiscard]] uint32_t resolveGltfPrimitiveMaterialIndex(
+    const detail::GltfPrimitiveMaterialMapping &mapping,
+    uint32_t sourceSceneMeshIndex, uint32_t fallbackMaterialIndex) {
+  if (!mapping.sceneMeshIndicesAreFlatPrimitiveOrder ||
+      sourceSceneMeshIndex >= mapping.primitiveMaterialIndices.size()) {
+    return fallbackMaterialIndex;
+  }
+  const uint32_t sourceMaterialIndex =
+      mapping.primitiveMaterialIndices[sourceSceneMeshIndex];
+  return sourceMaterialIndex == std::numeric_limits<uint32_t>::max()
+             ? fallbackMaterialIndex
+             : sourceMaterialIndex;
+}
+
+[[nodiscard]] uint32_t resolveGltfSinglePrimitiveMeshMaterialIndex(
+    const detail::GltfPrimitiveMaterialMapping &mapping, uint32_t meshIndex,
+    uint32_t fallbackMaterialIndex) {
+  if (meshIndex >= mapping.singlePrimitiveMeshMaterialIndices.size()) {
+    return fallbackMaterialIndex;
+  }
+  const uint32_t sourceMaterialIndex =
+      mapping.singlePrimitiveMeshMaterialIndices[meshIndex];
+  return sourceMaterialIndex == std::numeric_limits<uint32_t>::max()
+             ? fallbackMaterialIndex
+             : sourceMaterialIndex;
 }
 
 [[nodiscard]] bool hasRenderableTriangleGeometry(const aiMesh &mesh) {
@@ -935,6 +965,7 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
     const HashMap<std::string, uint32_t> &importedPathToNode,
     const HashMap<std::string, std::vector<uint32_t>> &importedNameToNodes,
     std::span<const ParsedLightDef> parsedLights,
+    const detail::GltfPrimitiveMaterialMapping &materialMapping,
     std::vector<uint32_t> *outParsedToImportedNodeIndices) {
   if (parsedNodes.empty()) {
     return Result<bool, std::string>::makeResult(false);
@@ -1260,6 +1291,19 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
             structuralMeshAssets[structuralRenderable.meshAssetIndex];
         const ImportedSceneMaterialAsset &structuralMaterialAsset =
             structuralMaterialAssets[structuralRenderable.materialAssetIndex];
+        uint32_t sourceMaterialIndex =
+            structuralMaterialAsset.sourceMaterialIndex;
+        if (parsedNode.meshIndex.has_value()) {
+          sourceMaterialIndex = resolveGltfSinglePrimitiveMeshMaterialIndex(
+              materialMapping, *parsedNode.meshIndex, sourceMaterialIndex);
+        }
+        sourceMaterialIndex = resolveGltfPrimitiveMaterialIndex(
+            materialMapping, structuralMeshAsset.sourceSceneMeshIndex,
+            sourceMaterialIndex);
+        const std::string_view sourceMaterialName =
+            sourceMaterialIndex == structuralMaterialAsset.sourceMaterialIndex
+                ? std::string_view(structuralMaterialAsset.sourceName)
+                : std::string_view{};
         imported.renderables.push_back(ImportedSceneRenderable{
             .nodeIndex = remappedNodeIndices[parsedNodeIndex],
             .meshAssetIndex = ensureImportedMeshAsset(
@@ -1267,9 +1311,8 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
                 structuralMeshAsset.sourceSceneMeshIndex,
                 structuralMeshAsset.sourceName),
             .materialAssetIndex = ensureImportedMaterialAsset(
-                imported, scene, materialOrdinalToAsset,
-                structuralMaterialAsset.sourceMaterialIndex,
-                structuralMaterialAsset.sourceName),
+                imported, scene, materialOrdinalToAsset, sourceMaterialIndex,
+                sourceMaterialName),
             .skinIndex =
                 parsedNode.skinIndex.value_or(kInvalidScenePrefabIndex),
         });
@@ -1293,19 +1336,26 @@ Result<bool, std::string> rebuildImportedSceneFromParsedGltf(
       continue;
     }
 
+    uint32_t sourceMaterialIndex = resolveGltfSinglePrimitiveMeshMaterialIndex(
+        materialMapping, *parsedNode.meshIndex, mesh.mMaterialIndex);
+    sourceMaterialIndex = resolveGltfPrimitiveMaterialIndex(
+        materialMapping, sourceSceneMeshIndex, sourceMaterialIndex);
     imported.renderables.push_back(ImportedSceneRenderable{
         .nodeIndex = remappedNodeIndices[parsedNodeIndex],
         .meshAssetIndex = ensureImportedMeshAsset(
             imported, scene, meshOrdinalToAsset, sourceSceneMeshIndex),
         .materialAssetIndex = ensureImportedMaterialAsset(
-            imported, scene, materialOrdinalToAsset, mesh.mMaterialIndex),
+            imported, scene, materialOrdinalToAsset, sourceMaterialIndex),
         .skinIndex = parsedNode.skinIndex.value_or(kInvalidScenePrefabIndex),
     });
     ++fallbackRenderableCount;
   }
 
+  const uint32_t materialCountLimit =
+      materialMapping.materialCount > 0u ? materialMapping.materialCount
+                                         : std::numeric_limits<uint32_t>::max();
   appendRemainingSceneAssets(imported, scene, meshOrdinalToAsset,
-                             materialOrdinalToAsset);
+                             materialOrdinalToAsset, materialCountLimit);
 
   NURI_LOG_DEBUG(
       "SceneImporter::loadSceneFromFile: glTF rebuild matched %zu/%zu parsed "
@@ -1679,11 +1729,19 @@ SceneImporter::loadSceneFromFile(std::string_view path,
   }
 
   std::vector<uint32_t> parsedToImportedNodeIndex;
+  auto primitiveMaterialMappingResult =
+      detail::readGltfPrimitiveMaterialMapping(root);
+  if (primitiveMaterialMappingResult.hasError()) {
+    return Result<ImportedScene, std::string>::makeError(
+        primitiveMaterialMappingResult.error());
+  }
+  const detail::GltfPrimitiveMaterialMapping primitiveMaterialMapping =
+      std::move(primitiveMaterialMappingResult.value());
 
   if (auto rebuildResult = rebuildImportedSceneFromParsedGltf(
           imported, *scene, parsedNodes, parsedRoots, parsedPaths,
           importedPathToNode, importedNameToNodes, lightsResult.value(),
-          &parsedToImportedNodeIndex);
+          primitiveMaterialMapping, &parsedToImportedNodeIndex);
       rebuildResult.hasError()) {
     return Result<ImportedScene, std::string>::makeError(rebuildResult.error());
   } else if (rebuildResult.value()) {

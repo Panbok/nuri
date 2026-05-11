@@ -16,8 +16,7 @@ meshBinaryEncodeVertexBuffer(std::span<const std::byte> vertexBytes,
 
 [[nodiscard]] Result<std::vector<std::byte>, std::string>
 meshBinaryDecodeVertexBuffer(std::span<const std::byte> encodedBytes,
-                             uint32_t vertexCount,
-                             uint32_t vertexStrideBytes);
+                             uint32_t vertexCount, uint32_t vertexStrideBytes);
 
 [[nodiscard]] Result<std::vector<std::byte>, std::string>
 meshBinaryEncodeIndexBuffer(std::span<const uint32_t> indices,

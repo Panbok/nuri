@@ -322,4 +322,61 @@ YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path,
   return loadGltfJsonDocumentFromBytes(path, fileBytes, sourceLabel);
 }
 
+Result<GltfPrimitiveMaterialMapping, std::string>
+readGltfPrimitiveMaterialMapping(yyjson_val *root) {
+  if (!yyjson_is_obj(root)) {
+    return Result<GltfPrimitiveMaterialMapping, std::string>::makeError(
+        "glTF root is not a JSON object");
+  }
+
+  GltfPrimitiveMaterialMapping mapping{};
+  if (yyjson_val *materials = yyjson_obj_get(root, "materials");
+      yyjson_is_arr(materials)) {
+    mapping.materialCount = static_cast<uint32_t>(std::min<size_t>(
+        yyjson_arr_size(materials), std::numeric_limits<uint32_t>::max()));
+  }
+
+  yyjson_val *meshes = yyjson_obj_get(root, "meshes");
+  if (!yyjson_is_arr(meshes)) {
+    return Result<GltfPrimitiveMaterialMapping, std::string>::makeResult(
+        std::move(mapping));
+  }
+
+  mapping.meshCount = static_cast<uint32_t>(std::min<size_t>(
+      yyjson_arr_size(meshes), std::numeric_limits<uint32_t>::max()));
+  mapping.singlePrimitiveMeshMaterialIndices.reserve(yyjson_arr_size(meshes));
+  yyjson_arr_iter meshIter = yyjson_arr_iter_with(meshes);
+  yyjson_val *meshValue = nullptr;
+  while ((meshValue = yyjson_arr_iter_next(&meshIter)) != nullptr) {
+    yyjson_val *primitives = yyjson_obj_get(meshValue, "primitives");
+    if (!yyjson_is_arr(primitives)) {
+      mapping.singlePrimitiveMeshMaterialIndices.push_back(
+          std::numeric_limits<uint32_t>::max());
+      continue;
+    }
+
+    const size_t primitiveCount = yyjson_arr_size(primitives);
+    uint32_t singlePrimitiveMaterialIndex =
+        std::numeric_limits<uint32_t>::max();
+    yyjson_arr_iter primitiveIter = yyjson_arr_iter_with(primitives);
+    yyjson_val *primitiveValue = nullptr;
+    while ((primitiveValue = yyjson_arr_iter_next(&primitiveIter)) != nullptr) {
+      uint32_t materialIndex = std::numeric_limits<uint32_t>::max();
+      (void)tryReadJsonUint32(yyjson_obj_get(primitiveValue, "material"),
+                              materialIndex);
+      if (primitiveCount == 1u) {
+        singlePrimitiveMaterialIndex = materialIndex;
+      }
+      mapping.primitiveMaterialIndices.push_back(materialIndex);
+    }
+    mapping.singlePrimitiveMeshMaterialIndices.push_back(
+        singlePrimitiveMaterialIndex);
+  }
+  mapping.sceneMeshIndicesAreFlatPrimitiveOrder =
+      mapping.meshCount == 1u && mapping.primitiveMaterialIndices.size() > 1u;
+
+  return Result<GltfPrimitiveMaterialMapping, std::string>::makeResult(
+      std::move(mapping));
+}
+
 } // namespace nuri::detail

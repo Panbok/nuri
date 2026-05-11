@@ -203,8 +203,6 @@ bool tryReadJsonBool(yyjson_val *value, bool &out) {
   return true;
 }
 
-constexpr size_t kInvalidMaterialIndex = std::numeric_limits<size_t>::max();
-
 [[nodiscard]] std::string_view readJsonStringView(yyjson_val *value) {
   return detail::readJsonStringView(value);
 }
@@ -236,33 +234,6 @@ parseGltfAlphaMode(std::string_view alphaMode) {
     return ImportedMaterialAlphaMode::Blend;
   }
   return ImportedMaterialAlphaMode::Opaque;
-}
-
-[[nodiscard]] size_t
-findMaterialIndexByName(std::span<const ImportedMaterialInfo> materials,
-                        const std::vector<bool> &matchedExisting,
-                        std::string_view materialName) {
-  if (materialName.empty()) {
-    return kInvalidMaterialIndex;
-  }
-  if (matchedExisting.size() != materials.size()) {
-    NURI_LOG_WARNING(
-        "findMaterialIndexByName: matchedExisting size %zu does not match "
-        "materials size %zu",
-        matchedExisting.size(), materials.size());
-    return kInvalidMaterialIndex;
-  }
-
-  for (size_t materialIndex = 0; materialIndex < materials.size();
-       ++materialIndex) {
-    if (matchedExisting[materialIndex]) {
-      continue;
-    }
-    if (materials[materialIndex].name == materialName) {
-      return materialIndex;
-    }
-  }
-  return kInvalidMaterialIndex;
 }
 
 ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
@@ -362,34 +333,6 @@ ImportedMaterialTexture parseGltfTextureSlot(yyjson_val *root,
     (void)tryReadJsonFloat(scaleValue, *scale);
   }
   return texture;
-}
-
-void resetGltfOverlayState(ImportedMaterialInfo &material) {
-  material.workflow = MaterialWorkflow::MetallicRoughness;
-  material.emissiveStrength = 1.0f;
-  material.clearcoatFactor = 0.0f;
-  material.clearcoatRoughnessFactor = 0.0f;
-  material.clearcoatNormalScale = kDefaultTextureScale;
-  material.clearcoat = ImportedMaterialTexture{};
-  material.clearcoatRoughness = ImportedMaterialTexture{};
-  material.clearcoatNormal = ImportedMaterialTexture{};
-  material.specularFactor = 1.0f;
-  material.glossinessFactor = 1.0f;
-  material.specularColorFactor = glm::vec3(1.0f);
-  material.specular = ImportedMaterialTexture{};
-  material.specularColor = ImportedMaterialTexture{};
-  material.sheenColorFactor = glm::vec3(0.0f);
-  material.sheenWeight = 0.0f;
-  material.sheenRoughnessFactor = 0.0f;
-  material.sheenColor = ImportedMaterialTexture{};
-  material.sheenRoughness = ImportedMaterialTexture{};
-  material.transmissionFactor = 0.0f;
-  material.thicknessFactor = 0.0f;
-  material.attenuationColor = kDefaultAttenuationColor;
-  material.attenuationDistance = kDefaultAttenuationDistance;
-  material.ior = kDefaultIor;
-  material.transmission = ImportedMaterialTexture{};
-  material.thickness = ImportedMaterialTexture{};
 }
 
 void updateDerivedSheenState(ImportedMaterialInfo &material) {
@@ -766,6 +709,50 @@ YyJsonDocResult loadGltfJsonDocument(const std::filesystem::path &path) {
   return detail::loadGltfJsonDocument(path, "glTF material overlay source");
 }
 
+std::optional<detail::GltfPrimitiveMaterialMapping>
+loadGltfPrimitiveMaterialMapping(std::string_view path) {
+  if (!isGltfJsonAssetPath(path)) {
+    return std::nullopt;
+  }
+
+  auto docResult =
+      loadGltfJsonDocument(std::filesystem::path(std::string(path)));
+  if (docResult.hasError()) {
+    NURI_LOG_WARNING(
+        "MeshImporter: failed to read glTF primitive materials for '%.*s': %s",
+        static_cast<int>(path.size()), path.data(), docResult.error().c_str());
+    return std::nullopt;
+  }
+
+  auto mappingResult = detail::readGltfPrimitiveMaterialMapping(
+      yyjson_doc_get_root(docResult.value().get()));
+  if (mappingResult.hasError()) {
+    NURI_LOG_WARNING(
+        "MeshImporter: failed to parse glTF primitive materials for '%.*s': %s",
+        static_cast<int>(path.size()), path.data(),
+        mappingResult.error().c_str());
+    return std::nullopt;
+  }
+  return std::move(mappingResult.value());
+}
+
+void applyGltfPrimitiveMaterialOverride(
+    MeshData &mesh, uint32_t sourceSceneMeshIndex,
+    const std::optional<detail::GltfPrimitiveMaterialMapping> &mapping) {
+  if (!mapping.has_value() || !mapping->sceneMeshIndicesAreFlatPrimitiveOrder ||
+      sourceSceneMeshIndex >= mapping->primitiveMaterialIndices.size()) {
+    return;
+  }
+  const uint32_t sourceMaterialIndex =
+      mapping->primitiveMaterialIndices[sourceSceneMeshIndex];
+  if (sourceMaterialIndex == std::numeric_limits<uint32_t>::max()) {
+    return;
+  }
+  for (Submesh &submesh : mesh.submeshes) {
+    submesh.materialIndex = sourceMaterialIndex;
+  }
+}
+
 Result<bool, std::string>
 overlayMaterialInfoFromGltf(std::string_view path, ImportedMaterialSet &set) {
   const std::string pathString(path);
@@ -795,34 +782,20 @@ overlayMaterialInfoFromGltf(std::string_view path, ImportedMaterialSet &set) {
   if (set.materials.size() > materialCount) {
     NURI_LOG_WARNING(
         "MeshImporter::loadMaterialInfoFromFile: Assimp reported %zu extra "
-        "material(s) for '%s'; keeping unmatched Assimp materials intact",
+        "material(s) for '%s'; using glTF material order",
         set.materials.size() - materialCount, pathString.c_str());
   }
 
-  std::vector<bool> matchedExisting(set.materials.size(), false);
+  std::vector<ImportedMaterialInfo> gltfMaterials;
+  gltfMaterials.reserve(materialCount);
 
   for (size_t materialIndex = 0; materialIndex < materialCount;
        ++materialIndex) {
     yyjson_val *materialValue = yyjson_arr_get(materials, materialIndex);
     if (!yyjson_is_obj(materialValue)) {
-      continue;
-    }
-
-    size_t targetIndex =
-        findMaterialIndexByName(set.materials, matchedExisting,
-                                readJsonStringView(materialValue, "name"));
-
-    if (targetIndex == kInvalidMaterialIndex &&
-        materialIndex < set.materials.size() &&
-        !matchedExisting[materialIndex]) {
-      targetIndex = materialIndex;
-    }
-
-    if (targetIndex != kInvalidMaterialIndex) {
-      matchedExisting[targetIndex] = true;
-      resetGltfOverlayState(set.materials[targetIndex]);
-      overlayMaterialInfoFromGltfValue(set.materials[targetIndex], root,
-                                       modelPath, materialValue);
+      ImportedMaterialInfo fallback{};
+      fallback.name = makeFallbackMaterialName(materialIndex);
+      gltfMaterials.push_back(std::move(fallback));
       continue;
     }
 
@@ -831,9 +804,10 @@ overlayMaterialInfoFromGltf(std::string_view path, ImportedMaterialSet &set) {
     if (material.name.empty()) {
       material.name = makeFallbackMaterialName(materialIndex);
     }
-    set.materials.push_back(std::move(material));
+    gltfMaterials.push_back(std::move(material));
   }
 
+  set.materials = std::move(gltfMaterials);
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2013,6 +1987,9 @@ nuri::Result<MeshData, std::string> detail::loadSceneMeshFromSourceIndex(
     return nuri::Result<MeshData, std::string>::makeError(
         "detail::loadSceneMeshFromSourceIndex: " + meshDataResult.error());
   }
+  auto mapping = loadGltfPrimitiveMaterialMapping(path);
+  applyGltfPrimitiveMaterialOverride(meshDataResult.value(), sceneMeshIndex,
+                                     mapping);
   return meshDataResult;
 }
 
@@ -2046,6 +2023,7 @@ detail::loadSceneMeshesFromSourceIndices(
   meshData.reserve(sceneMeshIndices.size());
   const std::string sceneName = importedSceneName(*scene, path);
   ScratchArena scratch(mem);
+  auto mapping = loadGltfPrimitiveMaterialMapping(path);
 
   for (const uint32_t sceneMeshIndex : sceneMeshIndices) {
     auto meshResult = resolveSceneMesh(*scene, sceneMeshIndex,
@@ -2062,6 +2040,8 @@ detail::loadSceneMeshesFromSourceIndices(
           "detail::loadSceneMeshesFromSourceIndices: mesh index " +
           std::to_string(sceneMeshIndex) + ": " + meshDataResult.error());
     }
+    applyGltfPrimitiveMaterialOverride(meshDataResult.value(), sceneMeshIndex,
+                                       mapping);
     meshData.push_back(std::move(meshDataResult.value()));
   }
 
