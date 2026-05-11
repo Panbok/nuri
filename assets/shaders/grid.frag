@@ -1,8 +1,8 @@
 //
 #version 460 core
 
-#include "grid_params.sp"
 #include "grid_calculation.sp"
+#include "grid_params.sp"
 
 layout(location = 0) in vec2 uv;
 layout(location = 1) in vec2 camPos;

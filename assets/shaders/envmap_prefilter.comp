@@ -43,7 +43,6 @@ const uint kDistributionLambertian = 0u;
 const uint kDistributionGGX = 1u;
 const uint kDistributionCharlie = 2u;
 
-
 #include "sheen.sp"
 
 vec2 hammersley2d(uint i, uint N) {

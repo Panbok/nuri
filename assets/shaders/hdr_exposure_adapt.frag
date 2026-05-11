@@ -20,6 +20,7 @@ layout(push_constant) uniform HDRExposurePushConstants {
 pc;
 
 const uint kHDRPostFlagExposureHistoryValid = 1u << 2u;
+const uint kHDRPostFlagReducedLuminanceSource = 1u << 3u;
 const float kHDRAdaptationMeterMinLuminance = 0.03;
 const float kHDRAdaptationMeterMaxLuminance = 64.0;
 
@@ -32,6 +33,12 @@ float meterWeight(vec2 sampleUv) {
 }
 
 float sampleAverageLuminance() {
+  if ((pc.flags & kHDRPostFlagReducedLuminanceSource) != 0u) {
+    return clamp(
+        textureBindless2D(pc.sourceTexId, pc.sourceSamplerId, vec2(0.5, 0.5)).r,
+        kHDRAdaptationMeterMinLuminance, kHDRAdaptationMeterMaxLuminance);
+  }
+
   const int gridSize = 32;
   float weightedLogSum = 0.0;
   float weightSum = 0.0;

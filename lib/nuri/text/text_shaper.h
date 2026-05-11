@@ -53,10 +53,10 @@ public:
   TextShaper(TextShaper &&) = delete;
   TextShaper &operator=(TextShaper &&) = delete;
 
-  Result<ShapedRun, std::string>
-  shapeUtf8(std::string_view utf8, const TextStyle &style,
-            const TextLayoutParams &params,
-            std::pmr::memory_resource &scratch);
+  Result<ShapedRun, std::string> shapeUtf8(std::string_view utf8,
+                                           const TextStyle &style,
+                                           const TextLayoutParams &params,
+                                           std::pmr::memory_resource &scratch);
 
 private:
   Result<bool, std::string> ensureHbObjects();

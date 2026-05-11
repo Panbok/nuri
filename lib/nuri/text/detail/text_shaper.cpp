@@ -333,8 +333,7 @@ TextShaper::shapeUtf8(std::string_view utf8, const TextStyle &style,
 
   const FontHandle primaryFont = pickPrimaryFont(fonts_, style);
   if (!::nuri::isValid(primaryFont)) {
-    return makeError(
-        "TextShaper::shapeUtf8: no valid font in style/fallback");
+    return makeError("TextShaper::shapeUtf8: no valid font in style/fallback");
   }
   std::pmr::vector<FontHandle> candidates(&scratch);
   candidates.reserve(16);
@@ -344,8 +343,7 @@ TextShaper::shapeUtf8(std::string_view utf8, const TextStyle &style,
                           candidates);
   NURI_PROFILER_ZONE_END();
   if (candidates.empty()) {
-    return makeError(
-        "TextShaper::shapeUtf8: fallback candidate set is empty");
+    return makeError("TextShaper::shapeUtf8: fallback candidate set is empty");
   }
   const std::span<const FontHandle> candidateSpan(candidates.data(),
                                                   candidates.size());
@@ -377,8 +375,7 @@ TextShaper::shapeUtf8(std::string_view utf8, const TextStyle &style,
   NURI_PROFILER_ZONE_END();
 
   const unsigned int count = hb_buffer_get_length(hbBuffer_);
-  const hb_glyph_info_t *infos =
-      hb_buffer_get_glyph_infos(hbBuffer_, nullptr);
+  const hb_glyph_info_t *infos = hb_buffer_get_glyph_infos(hbBuffer_, nullptr);
   const hb_glyph_position_t *positions =
       hb_buffer_get_glyph_positions(hbBuffer_, nullptr);
 
@@ -415,8 +412,7 @@ TextShaper::shapeUtf8(std::string_view utf8, const TextStyle &style,
   bool hasBounds = false;
   uint32_t fallbackGlyphCount = 0;
   uint32_t missingGlyphCount = 0;
-  NURI_PROFILER_ZONE("TextShaper::resolveGlyphs",
-                     NURI_PROFILER_COLOR_CMD_DRAW);
+  NURI_PROFILER_ZONE("TextShaper::resolveGlyphs", NURI_PROFILER_COLOR_CMD_DRAW);
   for (unsigned int i = 0; i < count; ++i) {
     const uint32_t cluster = infos[i].cluster;
     const uint32_t sourceCodepoint =
@@ -488,8 +484,7 @@ TextShaper::shapeUtf8(std::string_view utf8, const TextStyle &style,
     auto [scaleIt, scaleInserted] =
         scaleCache.try_emplace(resolved.font.value, 0.0f);
     if (scaleInserted) {
-      scaleIt->second =
-          fontScaleForPxSize(fonts_, resolved.font, style.pxSize);
+      scaleIt->second = fontScaleForPxSize(fonts_, resolved.font, style.pxSize);
     }
     const float resolvedScale = scaleIt->second;
 
@@ -510,14 +505,14 @@ TextShaper::shapeUtf8(std::string_view utf8, const TextStyle &style,
     run.glyphs.push_back(glyph);
 
     if (resolved.metrics != nullptr) {
-      const float minX = penX + glyph.offsetX +
-                         (resolved.metrics->planeMinX * resolvedScale);
-      const float minY = penY + glyph.offsetY +
-                         (resolved.metrics->planeMinY * resolvedScale);
-      const float maxX = penX + glyph.offsetX +
-                         (resolved.metrics->planeMaxX * resolvedScale);
-      const float maxY = penY + glyph.offsetY +
-                         (resolved.metrics->planeMaxY * resolvedScale);
+      const float minX =
+          penX + glyph.offsetX + (resolved.metrics->planeMinX * resolvedScale);
+      const float minY =
+          penY + glyph.offsetY + (resolved.metrics->planeMinY * resolvedScale);
+      const float maxX =
+          penX + glyph.offsetX + (resolved.metrics->planeMaxX * resolvedScale);
+      const float maxY =
+          penY + glyph.offsetY + (resolved.metrics->planeMaxY * resolvedScale);
       growBounds(run.inkBounds, hasBounds, minX, minY, maxX, maxY);
     }
 

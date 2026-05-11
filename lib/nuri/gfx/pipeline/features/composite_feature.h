@@ -183,7 +183,7 @@ class NURI_API HDRExposureAdaptPass final : public FullscreenRenderPass {
 public:
   explicit HDRExposureAdaptPass(GPUDevice &gpu,
                                 FrameCompositionFeatureConfig config);
-  ~HDRExposureAdaptPass() override = default;
+  ~HDRExposureAdaptPass() override;
 
   HDRExposureAdaptPass(const HDRExposureAdaptPass &) = delete;
   HDRExposureAdaptPass &operator=(const HDRExposureAdaptPass &) = delete;
@@ -196,6 +196,17 @@ public:
   [[nodiscard]] bool isEnabled(const FrameBuildContext &ctx) const override;
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
   Result<bool, std::string> build(FrameBuildContext &ctx) override;
+
+private:
+  Result<bool, std::string> ensureLuminanceTextures();
+  void destroyLuminanceTextures();
+
+  FullscreenPassResources luminanceResources_{};
+  std::vector<std::vector<TextureHandle>> luminanceTextures_{};
+  uint32_t luminanceWidth_ = 0u;
+  uint32_t luminanceHeight_ = 0u;
+  uint32_t luminanceRingCount_ = 0u;
+  uint32_t luminanceMipCount_ = 0u;
 };
 
 class NURI_API HDRBloomCompositePass final : public FullscreenRenderPass {

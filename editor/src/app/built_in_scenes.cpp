@@ -40,6 +40,7 @@ constexpr std::string_view kMedievalFantasyBookModelRelativePath =
     "MedievalFantasyBook/scene.gltf";
 constexpr std::string_view kAnimatedMorphCubeModelRelativePath =
     "AnimatedMorphCube/AnimatedMorphCube.gltf";
+constexpr std::string_view kSponzaModelRelativePath = "Sponza/Sponza.gltf";
 constexpr uint32_t kDuckGridSide = 32;
 constexpr uint32_t kDuckInstanceCount =
     kDuckGridSide * kDuckGridSide * kDuckGridSide;
@@ -52,6 +53,14 @@ constexpr uint32_t kDuckInstanceCount =
 [[nodiscard]] glm::mat4 dragonBaseModel() {
   return glm::rotate(glm::mat4(1.0f), glm::radians(180.0f),
                      glm::vec3(0.0f, 1.0f, 0.0f));
+}
+
+[[nodiscard]] glm::mat4 sponzaBaseModel() {
+  constexpr glm::vec3 kViewFocus(820.0f, 270.0f, -20.0f);
+  constexpr float kScale = 2.2f;
+  return glm::translate(glm::mat4(1.0f), kViewFocus) *
+         glm::scale(glm::mat4(1.0f), glm::vec3(kScale)) *
+         glm::translate(glm::mat4(1.0f), -kViewFocus);
 }
 
 [[nodiscard]] glm::quat rotationFromLightDirection(glm::vec3 direction) {
@@ -1025,6 +1034,42 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
                     bounds, glm::mat4(1.0f), 2.8f, 4.0f,
                     glm::vec4(0.42f, 0.20f, 1.0f, 0.35f),
                     glm::vec2(0.06f, 0.0f));
+              },
+      });
+  if (result.hasError()) {
+    return result;
+  }
+
+  result = appendPrefab(
+      catalog,
+      {
+          .info = {.id = "sponza", .label = "Sponza"},
+          .sourcePath = modelPath(config, kSponzaModelRelativePath),
+          .importOptions = flipUvImport,
+          .instanceName = "Sponza",
+          .baseModel = sponzaBaseModel(),
+          .configureRender =
+              [](EditorRuntime &runtime) {
+                runtime.configureStaticModelOpaqueSettings(
+                    glm::vec3(12.0f, 24.0f, 48.0f));
+              },
+          .configureCamera =
+              [](EditorRuntime &runtime, const ImportedPrefabSceneResources &,
+                 const BoundingBox &) {
+                Camera *camera = runtime.mainCamera();
+                NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+                PerspectiveParams perspective = camera->perspective();
+                perspective.nearPlane = 0.1f;
+                perspective.farPlane = 6000.0f;
+                camera->setProjectionType(ProjectionType::Perspective);
+                camera->setPerspective(perspective);
+                // Sponza is authored as one node with a large exterior shell;
+                // bounds-framing starts outside that shell and makes it look
+                // like a tiled box instead of the atrium.
+                camera->setLookAt(glm::vec3(-720.0f, 250.0f, -65.0f),
+                                  glm::vec3(820.0f, 270.0f, -20.0f),
+                                  glm::vec3(0.0f, 1.0f, 0.0f));
+                runtime.syncEditorCameraWidgetState(*camera);
               },
       });
   if (result.hasError()) {

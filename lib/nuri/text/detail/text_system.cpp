@@ -44,7 +44,7 @@ Result<bool, std::string> TextSystem::initialize() {
     });
   } catch (const std::exception &e) {
     return makeError<bool>("TextSystem: failed to create TextShaper (",
-                          e.what(), ")");
+                           e.what(), ")");
   } catch (...) {
     return Result<bool, std::string>::makeError(
         "TextSystem: failed to create TextShaper (unknown exception)");
@@ -83,8 +83,8 @@ Result<bool, std::string> TextSystem::initialize() {
     if (loadResult.hasError()) {
       if (requireDefaultFont_) {
         return makeError<bool>("TextSystem: failed to load default font '",
-                               defaultFontPathString, "' (",
-                               loadResult.error(), ")");
+                               defaultFontPathString, "' (", loadResult.error(),
+                               ")");
       }
       NURI_LOG_WARNING(
           "TextSystem: failed to load optional default font '%s': %s",
@@ -107,8 +107,7 @@ FontManager &TextSystem::fonts() {
 }
 
 TextRenderer &TextSystem::renderer() {
-  NURI_ASSERT(renderer_ != nullptr,
-              "TextSystem::renderer is not initialized");
+  NURI_ASSERT(renderer_ != nullptr, "TextSystem::renderer is not initialized");
   return *renderer_;
 }
 

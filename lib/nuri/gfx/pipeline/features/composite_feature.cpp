@@ -27,6 +27,7 @@ constexpr uint64_t kInitialDebugFrames = 4u;
 constexpr uint32_t kHDRPostFlagBloomEnabled = 1u << 0u;
 constexpr uint32_t kHDRPostFlagAdaptationEnabled = 1u << 1u;
 constexpr uint32_t kHDRPostFlagExposureHistoryValid = 1u << 2u;
+constexpr uint32_t kHDRPostFlagReducedLuminanceSource = 1u << 3u;
 constexpr uint32_t kHDRBloomModePrefilterDownsample = 0u;
 constexpr uint32_t kHDRBloomModeDownsample = 1u;
 constexpr uint32_t kHDRBloomModeUpsample = 2u;
@@ -60,6 +61,18 @@ struct HDRExposurePushConstants {
 };
 static_assert(sizeof(HDRExposurePushConstants) <= 128u);
 
+struct HDRLuminanceReducePushConstants {
+  uint32_t sourceTexId = 0u;
+  uint32_t sourceSamplerId = 0u;
+  uint32_t mode = 0u;
+  uint32_t reserved0 = 0u;
+  float texelSizeX = 1.0f;
+  float texelSizeY = 1.0f;
+  float reserved1 = 0.0f;
+  float reserved2 = 0.0f;
+};
+static_assert(sizeof(HDRLuminanceReducePushConstants) <= 128u);
+
 struct HDRBloomCompositePushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t bloomTexId = kInvalidTextureBindlessIndex;
@@ -80,12 +93,17 @@ static_assert(sizeof(HDRBloomCompositePushConstants) <= 128u);
 struct HDRBloomPushConstants {
   uint32_t sourceTexId = 0u;
   uint32_t secondaryTexId = kInvalidTextureBindlessIndex;
+  uint32_t exposureTexId = kInvalidTextureBindlessIndex;
   uint32_t sourceSamplerId = 0u;
   uint32_t mode = kHDRBloomModeDownsample;
+  uint32_t flags = 0u;
   float threshold = kDefaultHDRBloomThreshold;
   float softKnee = kDefaultHDRBloomSoftKnee;
   float scatter = kHDRBloomUpsampleScatter;
-  float reserved0 = 0.0f;
+  float manualExposureEv = 0.0f;
+  float adaptationTargetGray = kDefaultHDRAdaptationTargetGray;
+  float adaptationMinEv = kDefaultHDRAdaptationMinEv;
+  float adaptationMaxEv = kDefaultHDRAdaptationMaxEv;
 };
 static_assert(sizeof(HDRBloomPushConstants) <= 128u);
 
@@ -287,6 +305,12 @@ TextureDesc makePostProcessTextureDesc(uint32_t width, uint32_t height) {
   };
 }
 
+TextureDesc makeLuminanceTextureDesc(uint32_t width, uint32_t height) {
+  TextureDesc desc = makePostProcessTextureDesc(width, height);
+  desc.format = kFrameCompositionExposureFormat;
+  return desc;
+}
+
 TextureDimensions bloomMipDimensions(uint32_t width, uint32_t height,
                                      uint32_t mipIndex) {
   uint32_t mipWidth = std::max(width, 1u);
@@ -295,6 +319,18 @@ TextureDimensions bloomMipDimensions(uint32_t width, uint32_t height,
   for (uint32_t i = 0u; i < downsampleCount; ++i) {
     mipWidth = std::max(mipWidth / 2u, 1u);
     mipHeight = std::max(mipHeight / 2u, 1u);
+  }
+  return TextureDimensions{.width = mipWidth, .height = mipHeight, .depth = 1u};
+}
+
+TextureDimensions luminanceMipDimensions(uint32_t width, uint32_t height,
+                                         uint32_t mipIndex) {
+  uint32_t mipWidth = std::max(width, 1u);
+  uint32_t mipHeight = std::max(height, 1u);
+  const uint32_t downsampleCount = mipIndex + 1u;
+  for (uint32_t i = 0u; i < downsampleCount; ++i) {
+    mipWidth = std::max((mipWidth + 1u) / 2u, 1u);
+    mipHeight = std::max((mipHeight + 1u) / 2u, 1u);
   }
   return TextureDimensions{.width = mipWidth, .height = mipHeight, .depth = 1u};
 }
@@ -317,6 +353,18 @@ uint32_t effectiveBloomMipCount(uint32_t width, uint32_t height,
     mipHeight = std::max(mipHeight / 2u, 1u);
   }
   return mipCount;
+}
+
+uint32_t effectiveLuminanceMipCount(uint32_t width, uint32_t height) {
+  uint32_t mipCount = 0u;
+  uint32_t mipWidth = std::max(width, 1u);
+  uint32_t mipHeight = std::max(height, 1u);
+  while (mipWidth > 1u || mipHeight > 1u) {
+    ++mipCount;
+    mipWidth = std::max((mipWidth + 1u) / 2u, 1u);
+    mipHeight = std::max((mipHeight + 1u) / 2u, 1u);
+  }
+  return std::max(mipCount, 1u);
 }
 
 uint32_t bytesPerPixel(Format format) {
@@ -721,6 +769,74 @@ HDRExposureAdaptPass::HDRExposureAdaptPass(GPUDevice &gpu,
   resources_.fragmentPath = config.hdrExposureAdaptFragment.empty()
                                 ? basePath / "hdr_exposure_adapt.frag"
                                 : config.hdrExposureAdaptFragment;
+  luminanceResources_.vertexPath = resources_.vertexPath;
+  luminanceResources_.fragmentPath =
+      config.hdrLuminanceReduceFragment.empty()
+          ? basePath / "hdr_luminance_reduce.frag"
+          : config.hdrLuminanceReduceFragment;
+}
+
+HDRExposureAdaptPass::~HDRExposureAdaptPass() {
+  destroyLuminanceTextures();
+  destroyFullscreenPassResources(gpu_, luminanceResources_);
+}
+
+void HDRExposureAdaptPass::destroyLuminanceTextures() {
+  for (std::vector<TextureHandle> &mipTextures : luminanceTextures_) {
+    for (TextureHandle texture : mipTextures) {
+      if (nuri::isValid(texture)) {
+        gpu_.destroyTexture(texture);
+      }
+    }
+  }
+  luminanceTextures_.clear();
+  luminanceWidth_ = 0u;
+  luminanceHeight_ = 0u;
+  luminanceRingCount_ = 0u;
+  luminanceMipCount_ = 0u;
+}
+
+Result<bool, std::string> HDRExposureAdaptPass::ensureLuminanceTextures() {
+  int32_t framebufferWidth = 0;
+  int32_t framebufferHeight = 0;
+  gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
+  const uint32_t width = static_cast<uint32_t>(std::max(framebufferWidth, 1));
+  const uint32_t height = static_cast<uint32_t>(std::max(framebufferHeight, 1));
+  const uint32_t ringCount = std::max(1u, gpu_.getSwapchainImageCount());
+  const uint32_t mipCount = effectiveLuminanceMipCount(width, height);
+
+  if (luminanceWidth_ == width && luminanceHeight_ == height &&
+      luminanceRingCount_ == ringCount && luminanceMipCount_ == mipCount &&
+      luminanceTextures_.size() == mipCount) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  destroyLuminanceTextures();
+  luminanceTextures_.resize(mipCount);
+  for (uint32_t mip = 0u; mip < mipCount; ++mip) {
+    const TextureDimensions dimensions =
+        luminanceMipDimensions(width, height, mip);
+    const TextureDesc desc =
+        makeLuminanceTextureDesc(dimensions.width, dimensions.height);
+    luminanceTextures_[mip].resize(ringCount);
+    for (uint32_t ring = 0u; ring < ringCount; ++ring) {
+      const std::string debugName = "hdr_luminance_reduce_mip_" +
+                                    std::to_string(mip) + "_slot_" +
+                                    std::to_string(ring);
+      auto createResult = gpu_.createTexture(desc, debugName);
+      if (createResult.hasError()) {
+        destroyLuminanceTextures();
+        return Result<bool, std::string>::makeError(createResult.error());
+      }
+      luminanceTextures_[mip][ring] = createResult.value();
+    }
+  }
+
+  luminanceWidth_ = width;
+  luminanceHeight_ = height;
+  luminanceRingCount_ = ringCount;
+  luminanceMipCount_ = mipCount;
+  return Result<bool, std::string>::makeResult(true);
 }
 
 bool HDRExposureAdaptPass::isEnabled(const FrameBuildContext &ctx) const {
@@ -745,8 +861,25 @@ HDRExposureAdaptPass::prepare(FrameBuildContext &ctx) {
   if (initResult.hasError()) {
     return initResult;
   }
-  return ensurePipeline(kFrameCompositionExposureFormat, "hdr_exposure_adapt",
-                        "HDRExposureAdaptPass::ensurePipeline");
+  auto luminanceInitResult = ensureFullscreenPassInitialized(
+      gpu_, luminanceResources_, "hdr_luminance_reduce",
+      "HDRExposureAdaptPass::createLuminanceShaders");
+  if (luminanceInitResult.hasError()) {
+    return luminanceInitResult;
+  }
+  auto exposurePipelineResult =
+      ensurePipeline(kFrameCompositionExposureFormat, "hdr_exposure_adapt",
+                     "HDRExposureAdaptPass::ensurePipeline");
+  if (exposurePipelineResult.hasError()) {
+    return exposurePipelineResult;
+  }
+  auto luminancePipelineResult = ensureFullscreenPassPipeline(
+      gpu_, luminanceResources_, kFrameCompositionExposureFormat,
+      "hdr_luminance_reduce", "HDRExposureAdaptPass::ensureLuminancePipeline");
+  if (luminancePipelineResult.hasError()) {
+    return luminancePipelineResult;
+  }
+  return ensureLuminanceTextures();
 }
 
 Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
@@ -760,30 +893,15 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
   const TextureHandle source = ctx.shared.frameColorTexture;
   const TextureHandle exposureWrite = ctx.shared.exposureWriteTexture;
   const TextureHandle exposureRead = ctx.shared.exposureReadTexture;
-  const uint32_t sourceTexId = gpu_.getTextureBindlessIndex(source);
+  const uint32_t frameColorTexId = gpu_.getTextureBindlessIndex(source);
   const uint32_t previousExposureTexId =
       ctx.shared.exposureHistoryValid && nuri::isValid(exposureRead)
           ? gpu_.getTextureBindlessIndex(exposureRead)
           : kInvalidTextureBindlessIndex;
-  if (sourceTexId == kInvalidTextureBindlessIndex) {
+  if (frameColorTexId == kInvalidTextureBindlessIndex) {
     return Result<bool, std::string>::makeError(
         "HDRExposureAdaptPass::build: invalid frame color bindless index");
   }
-  const uint32_t flags = kHDRPostFlagAdaptationEnabled |
-                         (previousExposureTexId != kInvalidTextureBindlessIndex
-                              ? kHDRPostFlagExposureHistoryValid
-                              : 0u);
-  const HDRExposurePushConstants pushConstants{
-      .sourceTexId = sourceTexId,
-      .previousExposureTexId = previousExposureTexId,
-      .sourceSamplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u),
-      .flags = flags,
-      .targetGray = hdr.adaptationTargetGray,
-      .speed = hdr.adaptationSpeed,
-      .minEv = hdr.adaptationMinEv,
-      .maxEv = hdr.adaptationMaxEv,
-      .deltaSeconds = static_cast<float>(std::max(ctx.frame.deltaSeconds, 0.0)),
-  };
 
   auto sourceImport =
       nuri::isValid(ctx.shared.frameColorGraphTexture)
@@ -793,12 +911,111 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
   if (sourceImport.hasError()) {
     return Result<bool, std::string>::makeError(sourceImport.error());
   }
+  const uint32_t ringIndex =
+      luminanceTextures_.empty()
+          ? 0u
+          : static_cast<uint32_t>(ctx.frame.frameIndex %
+                                  luminanceTextures_[0u].size());
+  const uint32_t samplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
+  TextureHandle meteringSource = source;
+  RenderGraphTextureId meteringSourceImport = sourceImport.value();
+  uint32_t sourceTexId = frameColorTexId;
+  bool reducedLuminanceSource = false;
+  if (!luminanceTextures_.empty()) {
+    RenderGraphTextureId previousImport = sourceImport.value();
+    TextureHandle previousTexture = source;
+    for (uint32_t mip = 0u; mip < luminanceMipCount_; ++mip) {
+      const TextureHandle target = luminanceTextures_[mip][ringIndex];
+      const uint32_t reduceSourceTexId =
+          gpu_.getTextureBindlessIndex(previousTexture);
+      if (reduceSourceTexId == kInvalidTextureBindlessIndex) {
+        return Result<bool, std::string>::makeError(
+            "HDRExposureAdaptPass::build: invalid luminance source bindless "
+            "index");
+      }
+      auto targetImport =
+          ctx.graph.importTexture(target, "hdr_luminance_reduce");
+      if (targetImport.hasError()) {
+        return Result<bool, std::string>::makeError(targetImport.error());
+      }
+
+      const TextureDimensions sourceDimensions =
+          gpu_.getTextureDimensions(previousTexture);
+      const HDRLuminanceReducePushConstants reduceConstants{
+          .sourceTexId = reduceSourceTexId,
+          .sourceSamplerId = samplerId,
+          .mode = mip == 0u ? 0u : 1u,
+          .reserved0 = 0u,
+          .texelSizeX =
+              1.0f / static_cast<float>(std::max(sourceDimensions.width, 1u)),
+          .texelSizeY =
+              1.0f / static_cast<float>(std::max(sourceDimensions.height, 1u)),
+      };
+      const DrawItem reduceDraw = makeFullscreenDraw(
+          luminanceResources_.pipelineHandle,
+          std::span<const std::byte>(
+              reinterpret_cast<const std::byte *>(&reduceConstants),
+              sizeof(reduceConstants)),
+          "HDRLuminanceReduce");
+      RenderGraphGraphicsPassDesc reducePass{};
+      reducePass.color = {.loadOp = LoadOp::Clear,
+                          .storeOp = StoreOp::Store,
+                          .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+      reducePass.colorTexture = targetImport.value();
+      reducePass.dependencyTextures =
+          std::span<const TextureHandle>(&previousTexture, 1u);
+      reducePass.draws = std::span<const DrawItem>(&reduceDraw, 1u);
+      reducePass.gpuTimingScope = GpuTimingScope::HDRPostProcess;
+      reducePass.debugLabel = "HDR Luminance Reduce Pass";
+      reducePass.debugColor = kHDRPassDebugColor;
+      auto addReduce = ctx.graph.addGraphicsPass(reducePass);
+      if (addReduce.hasError()) {
+        return Result<bool, std::string>::makeError(addReduce.error());
+      }
+      auto sourceRead =
+          ctx.graph.addTextureRead(addReduce.value(), previousImport);
+      if (sourceRead.hasError()) {
+        return Result<bool, std::string>::makeError(sourceRead.error());
+      }
+
+      previousTexture = target;
+      previousImport = targetImport.value();
+    }
+    meteringSource = previousTexture;
+    meteringSourceImport = previousImport;
+    sourceTexId = gpu_.getTextureBindlessIndex(meteringSource);
+    if (sourceTexId == kInvalidTextureBindlessIndex) {
+      return Result<bool, std::string>::makeError(
+          "HDRExposureAdaptPass::build: invalid reduced luminance bindless "
+          "index");
+    }
+    reducedLuminanceSource = true;
+  }
+
+  const uint32_t flags =
+      kHDRPostFlagAdaptationEnabled |
+      (previousExposureTexId != kInvalidTextureBindlessIndex
+           ? kHDRPostFlagExposureHistoryValid
+           : 0u) |
+      (reducedLuminanceSource ? kHDRPostFlagReducedLuminanceSource : 0u);
+  const HDRExposurePushConstants pushConstants{
+      .sourceTexId = sourceTexId,
+      .previousExposureTexId = previousExposureTexId,
+      .sourceSamplerId = samplerId,
+      .flags = flags,
+      .targetGray = hdr.adaptationTargetGray,
+      .speed = hdr.adaptationSpeed,
+      .minEv = hdr.adaptationMinEv,
+      .maxEv = hdr.adaptationMaxEv,
+      .deltaSeconds = static_cast<float>(std::max(ctx.frame.deltaSeconds, 0.0)),
+  };
+
   auto exposureImport =
       ctx.graph.importTexture(exposureWrite, "hdr_exposure_write");
   if (exposureImport.hasError()) {
     return Result<bool, std::string>::makeError(exposureImport.error());
   }
-  std::array<TextureHandle, 2> reads{source, {}};
+  std::array<TextureHandle, 2> reads{meteringSource, {}};
   size_t readCount = 1u;
   RenderGraphTextureId previousExposureImport{};
   if (previousExposureTexId != kInvalidTextureBindlessIndex) {
@@ -833,7 +1050,7 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
   auto sourceRead =
-      ctx.graph.addTextureRead(addResult.value(), sourceImport.value());
+      ctx.graph.addTextureRead(addResult.value(), meteringSourceImport);
   if (sourceRead.hasError()) {
     return Result<bool, std::string>::makeError(sourceRead.error());
   }
@@ -848,9 +1065,18 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
   HDRPostProcessFrameMetrics &metrics = ctx.frame.metrics.hdrPostProcess;
   metrics.adaptationActive = true;
   metrics.adaptationPassCount += 1u;
+  metrics.luminancePassCount +=
+      reducedLuminanceSource ? luminanceMipCount_ : 0u;
   metrics.exposureHistoryValid = ctx.shared.exposureHistoryValid;
   metrics.textureCount += 1u;
   metrics.textureBytes += textureStorageBytes(gpu_, exposureWrite);
+  if (reducedLuminanceSource) {
+    metrics.textureCount += luminanceMipCount_;
+    for (uint32_t mip = 0u; mip < luminanceMipCount_; ++mip) {
+      metrics.textureBytes +=
+          textureStorageBytes(gpu_, luminanceTextures_[mip][ringIndex]);
+    }
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1106,8 +1332,18 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
   if (outputImport.hasError()) {
     return Result<bool, std::string>::makeError(outputImport.error());
   }
+  RenderGraphTextureId exposureImport{};
+  if (hdr.adaptationEnabled && exposureTexId != kInvalidTextureBindlessIndex) {
+    auto importExposure = ctx.graph.importTexture(exposure, "hdr_exposure");
+    if (importExposure.hasError()) {
+      return Result<bool, std::string>::makeError(importExposure.error());
+    }
+    exposureImport = importExposure.value();
+  }
 
   const uint32_t samplerId = gpu_.getLinearRepeatSamplerBindlessIndex(true, 1u);
+  const float manualExposureEv =
+      renderSettingsOrDefault(ctx.frame).toneMap.exposureEv;
   const bool bloomAvailable = needsBloomChain && bloomMipCount_ != 0u &&
                               !bloomDownsampleTextures_.empty() &&
                               !bloomUpsampleTextures_.empty();
@@ -1136,12 +1372,20 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
       const HDRBloomPushConstants downsampleConstants{
           .sourceTexId = downsampleSourceTexId,
           .secondaryTexId = kInvalidTextureBindlessIndex,
+          .exposureTexId = exposureTexId,
           .sourceSamplerId = samplerId,
           .mode = mip == 0u ? kHDRBloomModePrefilterDownsample
                             : kHDRBloomModeDownsample,
+          .flags = mip == 0u && exposureTexId != kInvalidTextureBindlessIndex
+                       ? kHDRPostFlagAdaptationEnabled
+                       : 0u,
           .threshold = hdr.bloomThreshold,
           .softKnee = hdr.bloomSoftKnee,
           .scatter = kHDRBloomUpsampleScatter,
+          .manualExposureEv = manualExposureEv,
+          .adaptationTargetGray = hdr.adaptationTargetGray,
+          .adaptationMinEv = hdr.adaptationMinEv,
+          .adaptationMaxEv = hdr.adaptationMaxEv,
       };
       const DrawItem downsampleDraw = makeFullscreenDraw(
           bloomResources_.pipelineHandle,
@@ -1154,8 +1398,11 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
                               .storeOp = StoreOp::Store,
                               .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
       downsamplePass.colorTexture = targetImport.value();
-      downsamplePass.dependencyTextures =
-          std::span<const TextureHandle>(&downsampleSource, 1u);
+      std::array<TextureHandle, 2> downsampleReads{downsampleSource, exposure};
+      const size_t downsampleReadCount =
+          mip == 0u && exposureTexId != kInvalidTextureBindlessIndex ? 2u : 1u;
+      downsamplePass.dependencyTextures = std::span<const TextureHandle>(
+          downsampleReads.data(), downsampleReadCount);
       downsamplePass.draws = std::span<const DrawItem>(&downsampleDraw, 1u);
       downsamplePass.gpuTimingScope = GpuTimingScope::HDRPostProcess;
       downsamplePass.debugLabel = "HDR Bloom Downsample Pass";
@@ -1170,6 +1417,13 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
                                                  downsampleSourceImport);
       if (sourceRead.hasError()) {
         return Result<bool, std::string>::makeError(sourceRead.error());
+      }
+      if (mip == 0u && nuri::isValid(exposureImport)) {
+        auto exposureRead =
+            ctx.graph.addTextureRead(addDownsample.value(), exposureImport);
+        if (exposureRead.hasError()) {
+          return Result<bool, std::string>::makeError(exposureRead.error());
+        }
       }
     }
 
@@ -1204,11 +1458,17 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
       const HDRBloomPushConstants upsampleConstants{
           .sourceTexId = lowSourceTexId,
           .secondaryTexId = highSourceTexId,
+          .exposureTexId = kInvalidTextureBindlessIndex,
           .sourceSamplerId = samplerId,
           .mode = smallestMip ? kHDRBloomModeCopy : kHDRBloomModeUpsample,
+          .flags = 0u,
           .threshold = hdr.bloomThreshold,
           .softKnee = hdr.bloomSoftKnee,
           .scatter = kHDRBloomUpsampleScatter,
+          .manualExposureEv = manualExposureEv,
+          .adaptationTargetGray = hdr.adaptationTargetGray,
+          .adaptationMinEv = hdr.adaptationMinEv,
+          .adaptationMaxEv = hdr.adaptationMaxEv,
       };
       const DrawItem upsampleDraw = makeFullscreenDraw(
           bloomResources_.pipelineHandle,
@@ -1253,13 +1513,7 @@ Result<bool, std::string> HDRBloomCompositePass::build(FrameBuildContext &ctx) {
 
   std::array<TextureHandle, 3> compositeReads{source, {}, {}};
   size_t compositeReadCount = 1u;
-  RenderGraphTextureId exposureImport{};
-  if (hdr.adaptationEnabled && exposureTexId != kInvalidTextureBindlessIndex) {
-    auto importExposure = ctx.graph.importTexture(exposure, "hdr_exposure");
-    if (importExposure.hasError()) {
-      return Result<bool, std::string>::makeError(importExposure.error());
-    }
-    exposureImport = importExposure.value();
+  if (nuri::isValid(exposureImport)) {
     compositeReads[compositeReadCount++] = exposure;
   }
 

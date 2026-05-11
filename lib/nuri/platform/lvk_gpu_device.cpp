@@ -2904,10 +2904,15 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
   return Result<bool, std::string>::makeResult(true);
 }
 
-bool LvkGPUDevice::supportsParallelGraphicsRecording() const { return true; }
+bool LvkGPUDevice::supportsParallelGraphicsRecording() const {
+  // LVK command buffer recording reaches context-owned backend state while
+  // encoding draws. Keep it serialized until the backend explicitly supports
+  // independent worker command recording.
+  return false;
+}
 
 uint32_t LvkGPUDevice::maxParallelGraphicsRecordingContexts() const {
-  return kMaxGraphicsRecordingContexts;
+  return 1u;
 }
 
 Result<RecordingContextHandle, std::string>

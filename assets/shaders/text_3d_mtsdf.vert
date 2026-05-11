@@ -86,6 +86,7 @@ void main() {
   // Compute pxRange / atlasSize once per vertex so the fragment shader avoids
   // a per-fragment textureSize query.
   vec2 atlasSize = vec2(textureSize(
-      nonuniformEXT(sampler2D(kTextures2D[pc.atlasBindless], kSamplers[0])), 0));
+      nonuniformEXT(sampler2D(kTextures2D[pc.atlasBindless], kSamplers[0])),
+      0));
   outUnitRange = vec2(max(pc.pxRange, 0.001)) / max(atlasSize, vec2(1.0));
 }

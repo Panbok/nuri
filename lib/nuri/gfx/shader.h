@@ -1,7 +1,7 @@
 #pragma once
 
-#include "nuri/core/result.h"
 #include "nuri/core/containers/hash_map.h"
+#include "nuri/core/result.h"
 #include "nuri/defines.h"
 #include "nuri/gfx/gpu_types.h"
 

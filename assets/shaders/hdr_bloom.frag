@@ -6,12 +6,17 @@ layout(location = 0) out vec4 out_FragColor;
 layout(push_constant) uniform HDRBloomPushConstants {
   uint sourceTexId;
   uint secondaryTexId;
+  uint exposureTexId;
   uint sourceSamplerId;
   uint mode;
+  uint flags;
   float threshold;
   float softKnee;
   float scatter;
-  float reserved0;
+  float manualExposureEv;
+  float adaptationTargetGray;
+  float adaptationMinEv;
+  float adaptationMaxEv;
 }
 pc;
 
@@ -19,12 +24,27 @@ const uint kHDRBloomModePrefilterDownsample = 0u;
 const uint kHDRBloomModeDownsample = 1u;
 const uint kHDRBloomModeUpsample = 2u;
 const uint kHDRBloomModeCopy = 3u;
+const uint kHDRPostFlagAdaptationEnabled = 1u << 1u;
 const uint kInvalidTextureBindlessIndex = 0xffffffffu;
 
 float luminance(vec3 color) { return dot(color, vec3(0.2126, 0.7152, 0.0722)); }
 
+float exposureEv() {
+  float ev = pc.manualExposureEv;
+  if ((pc.flags & kHDRPostFlagAdaptationEnabled) != 0u &&
+      pc.exposureTexId != kInvalidTextureBindlessIndex) {
+    float adaptedLuminance = max(
+        textureBindless2D(pc.exposureTexId, pc.sourceSamplerId, vec2(0.5)).r,
+        1.0e-4);
+    ev += clamp(log2(max(pc.adaptationTargetGray, 1.0e-4) / adaptedLuminance),
+                pc.adaptationMinEv, pc.adaptationMaxEv);
+  }
+  return ev;
+}
+
 vec3 bloomPrefilter(vec3 color) {
-  float luma = luminance(color);
+  float exposureScale = exp2(exposureEv());
+  float luma = luminance(color * exposureScale);
   float knee = max(pc.softKnee, 1.0e-4);
   float soft = clamp((luma - pc.threshold + knee) / (2.0 * knee), 0.0, 1.0);
   float contribution = max(luma - pc.threshold, 0.0) + soft * soft * knee;

@@ -53,7 +53,7 @@ public:
   virtual AtlasPageHandle resolveAtlasPage(FontHandle font,
                                            uint16_t localPageIndex) const = 0;
   virtual GlyphLookupResult resolveGlyph(FontHandle font,
-                                          GlyphId glyph) const = 0;
+                                         GlyphId glyph) const = 0;
   virtual TextureHandle atlasTexture(AtlasPageHandle page) const = 0;
   virtual uint32_t atlasBindlessIndex(AtlasPageHandle page) const = 0;
 

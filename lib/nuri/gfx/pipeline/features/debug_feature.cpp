@@ -2,31 +2,7 @@
 
 #include "nuri/gfx/pipeline/features/debug_feature.h"
 
-#include "nuri/core/log.h"
-
 namespace nuri {
-namespace {
-
-Result<bool, std::string>
-collectDebugTransparentContribution(void *user, RenderFrameContext &frame,
-                                    TransparentStageContribution &out) {
-  if (user == nullptr) {
-    out = {};
-    return Result<bool, std::string>::makeResult(true);
-  }
-  static std::atomic<uint32_t> loggedCollectorCalls{0u};
-  if (loggedCollectorCalls.fetch_add(1u, std::memory_order_relaxed) < 16u) {
-    NURI_LOG_DEBUG(
-        "DebugFeature::collectDebugTransparentContribution: frame=%llu "
-        "transparentStageEnabled=%u",
-        static_cast<unsigned long long>(frame.frameIndex),
-        frame.sharedResources.transparentStageEnabled ? 1u : 0u);
-  }
-  return static_cast<DebugRenderer *>(user)->buildTransparentStageContribution(
-      frame, out);
-}
-
-} // namespace
 
 bool DebugGridPass::isEnabled(const FrameBuildContext &ctx) const {
   return ctx.frame.settings != nullptr && renderer_.hasPreparedDebugGridPass();
@@ -55,10 +31,7 @@ DebugFeature::~DebugFeature() = default;
 
 Result<bool, std::string>
 DebugFeature::publishFrameData(FrameBuildContext &ctx) {
-  ctx.frame.transparentContributors.publish(TransparentContributionCollector{
-      .user = renderer_.get(),
-      .collect = &collectDebugTransparentContribution,
-  });
+  (void)ctx;
   return Result<bool, std::string>::makeResult(true);
 }
 

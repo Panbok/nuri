@@ -6,12 +6,10 @@
 #include <cmath>
 #include <cstdint>
 
-
 #include <glm/ext/matrix_relational.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/quaternion.hpp>
-
 
 namespace nuri {
 

@@ -437,10 +437,9 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
       std::isfinite(debug.taaClampBlendAttenuation)
           ? std::clamp(debug.taaClampBlendAttenuation, 0.0f, 1.0f)
           : 0.35f;
-  tuning.varianceGamma =
-      std::isfinite(debug.taaVarianceGamma)
-          ? std::clamp(debug.taaVarianceGamma, 0.0f, 4.0f)
-          : kDefaultTaaVarianceGamma;
+  tuning.varianceGamma = std::isfinite(debug.taaVarianceGamma)
+                             ? std::clamp(debug.taaVarianceGamma, 0.0f, 4.0f)
+                             : kDefaultTaaVarianceGamma;
   tuning.hdrWeightStrength =
       std::isfinite(debug.taaHdrWeightStrength)
           ? std::clamp(debug.taaHdrWeightStrength, 0.0f, 1.0f)
@@ -460,8 +459,8 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
   tuning.clampMode = sanitizeTemporalAAClampMode(debug.taaClampMode);
   tuning.hdrWeightingMode =
       sanitizeTemporalAAHdrWeightingMode(debug.taaHdrWeightingMode);
-  tuning.velocityDilationMode = sanitizeTemporalAAVelocityDilationMode(
-      debug.taaVelocityDilationMode);
+  tuning.velocityDilationMode =
+      sanitizeTemporalAAVelocityDilationMode(debug.taaVelocityDilationMode);
   tuning.historyFilterMode =
       sanitizeTemporalAAHistoryFilterMode(debug.taaHistoryFilterMode);
   return tuning;
