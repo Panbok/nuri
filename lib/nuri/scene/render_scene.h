@@ -111,6 +111,9 @@ public:
   [[nodiscard]] const EnvironmentHandles &environment() const noexcept {
     return environment_;
   }
+  [[nodiscard]] uint64_t environmentVersion() const noexcept {
+    return environmentVersion_;
+  }
 
 private:
   static constexpr uint32_t kInvalidIndex =
@@ -147,6 +150,7 @@ private:
   uint64_t deformationVersion_ = 0u;
   uint64_t lightTopologyVersion_ = 0u;
   uint64_t lightTransformVersion_ = 0u;
+  uint64_t environmentVersion_ = 0u;
 };
 
 } // namespace nuri

@@ -615,7 +615,7 @@ toNuriSubmissionHandle(lvk::SubmitHandle handle) {
 }
 
 constexpr bool kEnablePerDrawDebugLabels = false;
-constexpr uint32_t kMaxGraphicsRecordingContexts = 8u;
+constexpr uint32_t kMaxGraphicsRecordingContexts = 1u;
 constexpr uint32_t kGpuTimingIntervalsPerContext = 16u;
 constexpr uint32_t kGpuTimingQueriesPerContext =
     kGpuTimingIntervalsPerContext * 2u;

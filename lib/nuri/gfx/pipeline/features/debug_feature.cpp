@@ -31,7 +31,15 @@ DebugFeature::~DebugFeature() = default;
 
 Result<bool, std::string>
 DebugFeature::publishFrameData(FrameBuildContext &ctx) {
-  (void)ctx;
+  ctx.frame.transparentContributors.publish(TransparentContributionCollector{
+      .user = renderer_.get(),
+      .collect =
+          [](void *user, RenderFrameContext &frame,
+             TransparentStageContribution &out) -> Result<bool, std::string> {
+        return static_cast<DebugRenderer *>(user)
+            ->buildTransparentStageContribution(frame, out);
+      },
+  });
   return Result<bool, std::string>::makeResult(true);
 }
 

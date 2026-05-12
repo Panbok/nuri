@@ -1059,8 +1059,8 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
                 Camera *camera = runtime.mainCamera();
                 NURI_ASSERT(camera != nullptr, "Failed to get main camera");
                 PerspectiveParams perspective = camera->perspective();
-                perspective.nearPlane = 0.1f;
-                perspective.farPlane = 6000.0f;
+                perspective.nearPlane = 0.5f;
+                perspective.farPlane = 2500.0f;
                 camera->setProjectionType(ProjectionType::Perspective);
                 camera->setPerspective(perspective);
                 // Sponza is authored as one node with a large exterior shell;

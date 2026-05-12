@@ -928,12 +928,20 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
                                    frameRenderSettings_.opaque,
                                    frameRenderSettings_.antiAliasing);
   frameContext_.frameIndex = frameIndex_++;
+  const MaterialTableSnapshot materialSnapshot = resources().materialSnapshot();
+  const TemporalSceneContentState sceneContent{
+      .lightTopologyVersion = scene_.lightTopologyVersion(),
+      .lightTransformVersion = scene_.lightTransformVersion(),
+      .materialTableVersion = materialSnapshot.version,
+      .environmentVersion = scene_.environmentVersion(),
+  };
   frameContext_.camera = makeTemporalCameraFrameState(
       camera, app_.getAspectRatio(), frameRenderSettings_.antiAliasing,
       TemporalCameraFrameDesc{
           .renderExtent =
               glm::uvec2(static_cast<uint32_t>(std::max(app_.getWidth(), 0)),
                          static_cast<uint32_t>(std::max(app_.getHeight(), 0))),
+          .sceneContent = sceneContent,
       },
       temporalCameraHistory_);
   frameRenderSettings_.antiAliasing.debug.resetHistoryRequested = false;

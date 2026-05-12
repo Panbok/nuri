@@ -828,10 +828,12 @@ float updatedTemporalConfidence(float effectiveHistoryWeight) {
 
 float stableFeedbackSuppression(float historyConfidence,
                                 float previousDepthConfidence,
-                                float stableHistoryBlend) {
+                                float stableHistoryBlend,
+                                float staticHistoryAgreement) {
   const float confidence =
       smoothstep(0.50, 0.80, historyConfidence) * previousDepthConfidence;
-  return clamp(stableHistoryBlend * confidence, 0.0, 1.0);
+  return clamp(stableHistoryBlend * confidence * staticHistoryAgreement, 0.0,
+               1.0);
 }
 
 float staticDirectHistoryColorConfidence(float clampDelta, vec3 history,
@@ -841,6 +843,14 @@ float staticDirectHistoryColorConfidence(float clampDelta, vec3 history,
   const float normalizedDelta = clampDelta / colorScale;
   return 1.0 - smoothstep(kTaaStaticDirectColorDeltaLow,
                           kTaaStaticDirectColorDeltaHigh, normalizedDelta);
+}
+
+float staticNeighborhoodHistoryColorConfidence(vec3 history,
+                                               Neighborhood neighborhood) {
+  const vec3 rangedHistory =
+      clamp(history, neighborhood.minColor, neighborhood.maxColor);
+  const float rangeDelta = length(history - rangedHistory);
+  return staticDirectHistoryColorConfidence(rangeDelta, history, neighborhood);
 }
 
 float lowConfidenceFallbackFilterStrength(vec3 current,
@@ -1113,6 +1123,10 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   }
   const float directHistoryColorConfidence = staticDirectHistoryColorConfidence(
       directHistoryClampDelta, history, neighborhood);
+  const float neighborhoodHistoryColorConfidence =
+      staticNeighborhoodHistoryColorConfidence(history, neighborhood);
+  const float staticHistoryAgreement =
+      max(directHistoryColorConfidence, neighborhoodHistoryColorConfidence);
   if (flagEnabled(kTaaResolveFlagStaticFrame) && stableHistoryBlend > 0.999 &&
       result.rawPreviousDepthConfidence > kTaaStaticDepthAgreementHigh &&
       previousDepthConfidence > 0.999 &&
@@ -1147,8 +1161,7 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
       const float historyTrust =
           smoothstep(0.75, 0.95, result.historyConfidence) *
           previousDepthConfidence;
-      const float staticClampAgreement =
-          allClearBackground ? directHistoryColorConfidence : 1.0;
+      const float staticClampAgreement = staticHistoryAgreement;
       const float staticClampRelax =
           stableHistoryBlend * historyTrust * staticClampAgreement;
       result.staticClampRelax = staticClampRelax;
@@ -1164,7 +1177,8 @@ ResolveEvaluation evaluateResolve(vec2 currentUv) {
   const float neighborhoodColorSpan =
       max(length(neighborhood.maxColor - neighborhood.minColor), 1.0e-4);
   const float stableSuppression = stableFeedbackSuppression(
-      result.historyConfidence, previousDepthConfidence, stableHistoryBlend);
+      result.historyConfidence, previousDepthConfidence, stableHistoryBlend,
+      staticHistoryAgreement);
   const float stableCurrentWeight =
       mix(baseCurrentWeight, 0.0, stableSuppression);
   float currentWeight = stableCurrentWeight;

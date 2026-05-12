@@ -41,6 +41,14 @@ void forEachEnvironmentTextureRef(const EnvironmentHandles &handles, Fn &&fn) {
   fn(handles.brdfLut);
 }
 
+bool sameEnvironmentHandles(const EnvironmentHandles &lhs,
+                            const EnvironmentHandles &rhs) {
+  return lhs.cubemap == rhs.cubemap && lhs.irradiance == rhs.irradiance &&
+         lhs.prefilteredGgx == rhs.prefilteredGgx &&
+         lhs.prefilteredCharlie == rhs.prefilteredCharlie &&
+         lhs.brdfLut == rhs.brdfLut;
+}
+
 } // namespace
 
 RenderScene::RenderScene(std::pmr::memory_resource *memory)
@@ -438,22 +446,32 @@ void RenderScene::bindResources(ResourceManager *resources) {
       ref = kInvalidTextureRef;
     }
   };
+  const EnvironmentHandles previousEnvironment = environment_;
   sanitizeTextureRef(environment_.cubemap);
   sanitizeTextureRef(environment_.irradiance);
   sanitizeTextureRef(environment_.prefilteredGgx);
   sanitizeTextureRef(environment_.prefilteredCharlie);
   sanitizeTextureRef(environment_.brdfLut);
+  if (!sameEnvironmentHandles(previousEnvironment, environment_)) {
+    ++environmentVersion_;
+  }
   retainEnvironment(environment_);
 }
 
 void RenderScene::setEnvironment(EnvironmentHandles handles) {
   if (resources_ == nullptr) {
+    if (sameEnvironmentHandles(environment_, handles)) {
+      return;
+    }
     environment_ = handles;
+    ++environmentVersion_;
     return;
   }
 
-  const auto updateTextureRef = [this](TextureRef &currentRef,
-                                       TextureRef nextRef) {
+  bool environmentChanged = false;
+  const auto updateTextureRef = [this,
+                                 &environmentChanged](TextureRef &currentRef,
+                                                      TextureRef nextRef) {
     if (currentRef.value == nextRef.value) {
       return;
     }
@@ -467,6 +485,7 @@ void RenderScene::setEnvironment(EnvironmentHandles handles) {
       }
     }
     currentRef = nextRef;
+    environmentChanged = true;
   };
 
   updateTextureRef(environment_.cubemap, handles.cubemap);
@@ -474,6 +493,9 @@ void RenderScene::setEnvironment(EnvironmentHandles handles) {
   updateTextureRef(environment_.prefilteredGgx, handles.prefilteredGgx);
   updateTextureRef(environment_.prefilteredCharlie, handles.prefilteredCharlie);
   updateTextureRef(environment_.brdfLut, handles.brdfLut);
+  if (environmentChanged) {
+    ++environmentVersion_;
+  }
 }
 
 void RenderScene::noteLightTopologyChanged() noexcept {

@@ -175,6 +175,7 @@ enum class TemporalHistoryResetReason : uint8_t {
   RenderScaleChanged = 6,
   CameraCut = 7,
   InvalidHistoryTexture = 8,
+  SceneContentChanged = 9,
 };
 
 enum class ShadowFilterMode : uint8_t {
@@ -1468,6 +1469,26 @@ struct CameraFrameState {
   bool historyValid = false;
 };
 
+struct TemporalSceneContentState {
+  uint64_t lightTopologyVersion = 0u;
+  uint64_t lightTransformVersion = 0u;
+  uint64_t materialTableVersion = 0u;
+  uint64_t environmentVersion = 0u;
+};
+
+[[nodiscard]] inline bool operator==(const TemporalSceneContentState &lhs,
+                                     const TemporalSceneContentState &rhs) {
+  return lhs.lightTopologyVersion == rhs.lightTopologyVersion &&
+         lhs.lightTransformVersion == rhs.lightTransformVersion &&
+         lhs.materialTableVersion == rhs.materialTableVersion &&
+         lhs.environmentVersion == rhs.environmentVersion;
+}
+
+[[nodiscard]] inline bool operator!=(const TemporalSceneContentState &lhs,
+                                     const TemporalSceneContentState &rhs) {
+  return !(lhs == rhs);
+}
+
 struct TemporalCameraHistoryState {
   glm::mat4 previousUnjitteredViewProj{1.0f};
   glm::mat4 previousJitteredViewProj{1.0f};
@@ -1482,6 +1503,7 @@ struct TemporalCameraHistoryState {
   float previousFarPlane = 1000.0f;
   float previousFovYRadians = glm::radians(60.0f);
   float previousOrthoHeight = 10.0f;
+  TemporalSceneContentState previousSceneContent{};
   uint32_t nextJitterIndex = 0u;
   uint32_t currentJitterIndex = 0u;
   uint32_t framesSinceHistoryReset = 0u;
@@ -1493,6 +1515,7 @@ struct TemporalCameraHistoryState {
 struct TemporalCameraFrameDesc {
   glm::uvec2 renderExtent{0u, 0u};
   glm::vec2 renderScale{1.0f, 1.0f};
+  TemporalSceneContentState sceneContent{};
   bool cameraCutRequested = false;
   bool historyTextureValid = true;
 };
@@ -1626,6 +1649,8 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
     resetReason = TemporalHistoryResetReason::RenderScaleChanged;
   } else if (!desc.historyTextureValid) {
     resetReason = TemporalHistoryResetReason::InvalidHistoryTexture;
+  } else if (history.previousSceneContent != desc.sceneContent) {
+    resetReason = TemporalHistoryResetReason::SceneContentChanged;
   } else if (projectionMetadataChanged(history, state)) {
     resetReason = TemporalHistoryResetReason::ProjectionChanged;
   }
@@ -1699,6 +1724,7 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
   history.previousFarPlane = state.farPlane;
   history.previousFovYRadians = state.fovYRadians;
   history.previousOrthoHeight = state.orthoHeight;
+  history.previousSceneContent = desc.sceneContent;
   history.currentJitterIndex = state.jitterIndex;
   history.initialized = true;
 
@@ -1737,6 +1763,8 @@ temporalHistoryResetReasonName(TemporalHistoryResetReason reason) noexcept {
     return "Camera Cut";
   case TemporalHistoryResetReason::InvalidHistoryTexture:
     return "Invalid History Texture";
+  case TemporalHistoryResetReason::SceneContentChanged:
+    return "Scene Content Changed";
   }
   return "Unknown";
 }

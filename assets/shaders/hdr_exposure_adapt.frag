@@ -33,6 +33,10 @@ float meterWeight(vec2 sampleUv) {
 }
 
 float sampleAverageLuminance() {
+  // pc.flags with kHDRPostFlagReducedLuminanceSource means
+  // textureBindless2D(pc.sourceTexId, pc.sourceSamplerId, ...) already stores
+  // precomputed luminance in .r, unlike the RGB grid path below; clamp to
+  // kHDRAdaptationMeterMinLuminance/kHDRAdaptationMeterMaxLuminance.
   if ((pc.flags & kHDRPostFlagReducedLuminanceSource) != 0u) {
     return clamp(
         textureBindless2D(pc.sourceTexId, pc.sourceSamplerId, vec2(0.5, 0.5)).r,

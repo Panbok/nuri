@@ -342,12 +342,17 @@ readGltfPrimitiveMaterialMapping(yyjson_val *root) {
         std::move(mapping));
   }
 
-  mapping.meshCount = static_cast<uint32_t>(std::min<size_t>(
-      yyjson_arr_size(meshes), std::numeric_limits<uint32_t>::max()));
-  mapping.singlePrimitiveMeshMaterialIndices.reserve(yyjson_arr_size(meshes));
+  const size_t meshArraySize = yyjson_arr_size(meshes);
+  mapping.meshCount = static_cast<uint32_t>(
+      std::min<size_t>(meshArraySize, std::numeric_limits<uint32_t>::max()));
+  mapping.singlePrimitiveMeshMaterialIndices.reserve(mapping.meshCount);
+  mapping.primitiveMaterialIndices.reserve(mapping.meshCount);
   yyjson_arr_iter meshIter = yyjson_arr_iter_with(meshes);
   yyjson_val *meshValue = nullptr;
-  while ((meshValue = yyjson_arr_iter_next(&meshIter)) != nullptr) {
+  for (uint32_t meshIndex = 0;
+       meshIndex < mapping.meshCount &&
+       (meshValue = yyjson_arr_iter_next(&meshIter)) != nullptr;
+       ++meshIndex) {
     yyjson_val *primitives = yyjson_obj_get(meshValue, "primitives");
     if (!yyjson_is_arr(primitives)) {
       mapping.singlePrimitiveMeshMaterialIndices.push_back(
