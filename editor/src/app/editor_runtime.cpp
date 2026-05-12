@@ -928,11 +928,10 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
                                    frameRenderSettings_.opaque,
                                    frameRenderSettings_.antiAliasing);
   frameContext_.frameIndex = frameIndex_++;
-  const MaterialTableSnapshot materialSnapshot = resources().materialSnapshot();
   const TemporalSceneContentState sceneContent{
       .lightTopologyVersion = scene_.lightTopologyVersion(),
       .lightTransformVersion = scene_.lightTransformVersion(),
-      .materialTableVersion = materialSnapshot.version,
+      .materialTableVersion = resources().materialVersion(),
       .environmentVersion = scene_.environmentVersion(),
   };
   frameContext_.camera = makeTemporalCameraFrameState(

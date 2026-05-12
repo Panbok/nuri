@@ -1474,20 +1474,8 @@ struct TemporalSceneContentState {
   uint64_t lightTransformVersion = 0u;
   uint64_t materialTableVersion = 0u;
   uint64_t environmentVersion = 0u;
+  bool operator==(const TemporalSceneContentState &) const = default;
 };
-
-[[nodiscard]] inline bool operator==(const TemporalSceneContentState &lhs,
-                                     const TemporalSceneContentState &rhs) {
-  return lhs.lightTopologyVersion == rhs.lightTopologyVersion &&
-         lhs.lightTransformVersion == rhs.lightTransformVersion &&
-         lhs.materialTableVersion == rhs.materialTableVersion &&
-         lhs.environmentVersion == rhs.environmentVersion;
-}
-
-[[nodiscard]] inline bool operator!=(const TemporalSceneContentState &lhs,
-                                     const TemporalSceneContentState &rhs) {
-  return !(lhs == rhs);
-}
 
 struct TemporalCameraHistoryState {
   glm::mat4 previousUnjitteredViewProj{1.0f};

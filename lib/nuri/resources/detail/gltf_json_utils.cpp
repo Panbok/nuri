@@ -346,7 +346,19 @@ readGltfPrimitiveMaterialMapping(yyjson_val *root) {
   mapping.meshCount = static_cast<uint32_t>(
       std::min<size_t>(meshArraySize, std::numeric_limits<uint32_t>::max()));
   mapping.singlePrimitiveMeshMaterialIndices.reserve(mapping.meshCount);
-  mapping.primitiveMaterialIndices.reserve(mapping.meshCount);
+  size_t totalPrimitiveCount = 0;
+  yyjson_arr_iter reserveMeshIter = yyjson_arr_iter_with(meshes);
+  yyjson_val *reserveMeshValue = nullptr;
+  for (uint32_t meshIndex = 0;
+       meshIndex < mapping.meshCount &&
+       (reserveMeshValue = yyjson_arr_iter_next(&reserveMeshIter)) != nullptr;
+       ++meshIndex) {
+    yyjson_val *primitives = yyjson_obj_get(reserveMeshValue, "primitives");
+    if (yyjson_is_arr(primitives)) {
+      totalPrimitiveCount += yyjson_arr_size(primitives);
+    }
+  }
+  mapping.primitiveMaterialIndices.reserve(totalPrimitiveCount);
   yyjson_arr_iter meshIter = yyjson_arr_iter_with(meshes);
   yyjson_val *meshValue = nullptr;
   for (uint32_t meshIndex = 0;
@@ -356,17 +368,16 @@ readGltfPrimitiveMaterialMapping(yyjson_val *root) {
     yyjson_val *primitives = yyjson_obj_get(meshValue, "primitives");
     if (!yyjson_is_arr(primitives)) {
       mapping.singlePrimitiveMeshMaterialIndices.push_back(
-          std::numeric_limits<uint32_t>::max());
+          kInvalidMaterialIndex);
       continue;
     }
 
     const size_t primitiveCount = yyjson_arr_size(primitives);
-    uint32_t singlePrimitiveMaterialIndex =
-        std::numeric_limits<uint32_t>::max();
+    uint32_t singlePrimitiveMaterialIndex = kInvalidMaterialIndex;
     yyjson_arr_iter primitiveIter = yyjson_arr_iter_with(primitives);
     yyjson_val *primitiveValue = nullptr;
     while ((primitiveValue = yyjson_arr_iter_next(&primitiveIter)) != nullptr) {
-      uint32_t materialIndex = std::numeric_limits<uint32_t>::max();
+      uint32_t materialIndex = kInvalidMaterialIndex;
       (void)tryReadJsonUint32(yyjson_obj_get(primitiveValue, "material"),
                               materialIndex);
       if (primitiveCount == 1u) {

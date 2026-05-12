@@ -28,9 +28,8 @@ void main() {
   outColor = inColor;
   // Compute pxRange / atlasSize once per vertex so the fragment shader avoids
   // a per-fragment textureSize query.
-  vec2 atlasSize = vec2(textureSize(
-      nonuniformEXT(sampler2D(kTextures2D[pc.atlasBindless], kSamplers[0])),
-      0));
+  vec2 atlasSize =
+      vec2(textureSize(kTextures2D[nonuniformEXT(pc.atlasBindless)], 0));
   outUnitRange = vec2(max(pc.pxRange, 0.001)) / max(atlasSize, vec2(1.0));
   gl_Position = pc.projection * vec4(inPos, 0.0, 1.0);
 }

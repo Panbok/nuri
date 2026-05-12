@@ -2912,7 +2912,7 @@ bool LvkGPUDevice::supportsParallelGraphicsRecording() const {
 }
 
 uint32_t LvkGPUDevice::maxParallelGraphicsRecordingContexts() const {
-  return 1u;
+  return kMaxGraphicsRecordingContexts;
 }
 
 Result<RecordingContextHandle, std::string>

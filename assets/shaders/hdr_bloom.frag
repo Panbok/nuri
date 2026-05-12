@@ -42,8 +42,7 @@ float exposureEv() {
   return ev;
 }
 
-vec3 bloomPrefilter(vec3 color) {
-  float exposureScale = exp2(exposureEv());
+vec3 bloomPrefilter(vec3 color, float exposureScale) {
   float luma = luminance(color * exposureScale);
   float knee = max(pc.softKnee, 1.0e-4);
   float soft = clamp((luma - pc.threshold + knee) / (2.0 * knee), 0.0, 1.0);
@@ -77,19 +76,20 @@ vec3 sampleKarisAverage(uint texId, vec2 texel, bool prefilter) {
   vec3 l = sampleBloom(texId, baseUv + texel * vec2(-1.0, 1.0), texel);
   vec3 m = sampleBloom(texId, baseUv + texel * vec2(1.0, 1.0), texel);
   if (prefilter) {
-    a = bloomPrefilter(a);
-    b = bloomPrefilter(b);
-    c = bloomPrefilter(c);
-    d = bloomPrefilter(d);
-    e = bloomPrefilter(e);
-    f = bloomPrefilter(f);
-    g = bloomPrefilter(g);
-    h = bloomPrefilter(h);
-    i = bloomPrefilter(i);
-    j = bloomPrefilter(j);
-    k = bloomPrefilter(k);
-    l = bloomPrefilter(l);
-    m = bloomPrefilter(m);
+    float exposureScale = exp2(exposureEv());
+    a = bloomPrefilter(a, exposureScale);
+    b = bloomPrefilter(b, exposureScale);
+    c = bloomPrefilter(c, exposureScale);
+    d = bloomPrefilter(d, exposureScale);
+    e = bloomPrefilter(e, exposureScale);
+    f = bloomPrefilter(f, exposureScale);
+    g = bloomPrefilter(g, exposureScale);
+    h = bloomPrefilter(h, exposureScale);
+    i = bloomPrefilter(i, exposureScale);
+    j = bloomPrefilter(j, exposureScale);
+    k = bloomPrefilter(k, exposureScale);
+    l = bloomPrefilter(l, exposureScale);
+    m = bloomPrefilter(m, exposureScale);
   }
 
   vec3 wide = (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + e * 0.125;

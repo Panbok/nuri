@@ -259,6 +259,9 @@ public:
         .version = materialTableVersion_,
     };
   }
+  [[nodiscard]] uint64_t materialVersion() const noexcept {
+    return materialTableVersion_;
+  }
 
   void beginFrame(uint64_t frameIndex);
   void collectGarbage(uint64_t completedFrameIndex);

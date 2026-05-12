@@ -4,9 +4,19 @@
 
 namespace nuri {
 
+namespace {
+
+Result<bool, std::string>
+collectText3DTransparentContribution(void *user, RenderFrameContext &frame,
+                                     TransparentStageContribution &out) {
+  return static_cast<TextRenderer *>(user)->buildTransparentStageContribution(
+      frame, out);
+}
+
+} // namespace
+
 bool Text3DPass::isEnabled(const FrameBuildContext &ctx) const {
-  (void)ctx;
-  return true;
+  return !ctx.frame.sharedResources.transparentStageEnabled;
 }
 
 Result<bool, std::string> Text3DPass::prepare(FrameBuildContext &ctx) {
@@ -27,7 +37,10 @@ Result<bool, std::string> Text3DPass::build(FrameBuildContext &ctx) {
 
 Result<bool, std::string>
 Text3DFeature::publishFrameData(FrameBuildContext &ctx) {
-  (void)ctx;
+  ctx.frame.transparentContributors.publish(TransparentContributionCollector{
+      .user = &pass_.textSystem().renderer(),
+      .collect = collectText3DTransparentContribution,
+  });
   return Result<bool, std::string>::makeResult(true);
 }
 

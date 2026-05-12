@@ -3,6 +3,7 @@
 #include "nuri/core/result.h"
 
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -17,18 +18,21 @@ namespace nuri::detail {
 using YyJsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
 using YyJsonDocResult = Result<YyJsonDocPtr, std::string>;
 
+inline constexpr uint32_t kInvalidMaterialIndex =
+    std::numeric_limits<uint32_t>::max();
+
 /// CPU-side lookup table for glTF material indices referenced by meshes and
 /// primitives.
 ///
 /// `meshCount` is the number of processed entries in `meshes`, capped to
 /// `uint32_t::max()`. `singlePrimitiveMeshMaterialIndices` has one entry per
 /// processed mesh and stores the material index when that mesh has exactly one
-/// primitive; otherwise it stores `uint32_t::max()`. `primitiveMaterialIndices`
-/// stores material indices in mesh order, then primitive order within each
-/// mesh, and may contain more entries than `meshCount`. All material indices
-/// refer to
-/// `[0, materialCount)`, with `uint32_t::max()` used when a primitive omits
-/// `primitive.material` or the index cannot be read.
+/// primitive; otherwise it stores `kInvalidMaterialIndex`.
+/// `primitiveMaterialIndices` stores material indices in mesh order, then
+/// primitive order within each mesh, and may contain more entries than
+/// `meshCount`. All material indices refer to `[0, materialCount)`, with
+/// `kInvalidMaterialIndex` used when a primitive omits `primitive.material` or
+/// the index cannot be read.
 struct GltfPrimitiveMaterialMapping {
   /// Number of entries in the glTF top-level `materials` array, capped to
   /// `uint32_t::max()`.
@@ -40,11 +44,12 @@ struct GltfPrimitiveMaterialMapping {
   /// for single-mesh assets whose primitives become individual scene entries.
   bool sceneMeshIndicesAreFlatPrimitiveOrder = false;
   /// Per-mesh fast path for meshes with exactly one primitive. Entries are
-  /// material indices or `uint32_t::max()` for multi-primitive/no-material
-  /// meshes.
+  /// material indices or `kInvalidMaterialIndex` for
+  /// multi-primitive/no-material meshes.
   std::vector<uint32_t> singlePrimitiveMeshMaterialIndices{};
   /// Per-primitive material indices flattened by mesh order. Multi-primitive
-  /// meshes use this vector for primitive-level material assignment.
+  /// meshes use this vector for primitive-level material assignment, with
+  /// `kInvalidMaterialIndex` representing omitted or unreadable materials.
   std::vector<uint32_t> primitiveMaterialIndices{};
 };
 
@@ -80,7 +85,8 @@ loadGltfJsonDocument(const std::filesystem::path &path,
 /// On success, returns a populated `GltfPrimitiveMaterialMapping`. The current
 /// implementation treats missing `materials`, missing `meshes`, missing
 /// `primitives`, missing `primitive.material`, and material type mismatches as
-/// absent data represented by zero counts or `uint32_t::max()` sentinels. It
+/// absent data represented by zero counts or `kInvalidMaterialIndex` sentinels.
+/// It
 /// returns an error string when `root` is not the expected JSON object
 /// ("glTF root is not a JSON object"). Callers should pass the document root,
 /// not an individual primitive, and interpret indices according to the glTF
