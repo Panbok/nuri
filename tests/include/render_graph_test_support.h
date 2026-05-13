@@ -191,6 +191,7 @@ public:
   std::vector<TextureDesc> createdTextureDescs{};
   std::vector<SamplerDesc> createdSamplerDescs{};
   GpuTimingReport latestCompletedGpuTimingReport{};
+  bool rejectDeviceLocalReadBuffer = false;
 
 protected:
   Result<BufferHandle, std::string> createBufferImpl() {
@@ -233,6 +234,7 @@ private:
   struct BufferState {
     BufferHandle handle{};
     size_t size = 0u;
+    Storage storage = Storage::Device;
     std::vector<std::byte> bytes{};
     bool live = false;
   };
@@ -289,6 +291,10 @@ private:
 
 class FakeRendererGPUDevice final : public FakeGPUDeviceBase {
 public:
+  bool supportsSampledImageLinearFiltering(Format format) const override {
+    return format == Format::D16_UNORM;
+  }
+
   Result<SubmissionHandle, std::string> submitRecordedGraphicsFrame(
       std::span<const RecordedCommandBufferHandle> commandBuffers,
       std::span<const SubmitBatchMeta> batches) override;
