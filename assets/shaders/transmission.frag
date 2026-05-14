@@ -154,7 +154,8 @@ const float kTransmissionThinSurfaceMinAlpha = 0.35;
 float transmissionOutputAlpha(uint alphaMode, uint featureMask, float baseAlpha,
                               float transmissionFactor) {
   if (alphaMode == kAlphaModeBlend) {
-    return baseAlpha;
+    return baseAlpha *
+           mix(1.0, kTransmissionThinSurfaceMinAlpha, transmissionFactor);
   }
   if (alphaMode == kAlphaModeMask ||
       (featureMask & kMaterialFeatureVolume) != 0u) {
