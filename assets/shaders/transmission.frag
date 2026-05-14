@@ -8,8 +8,6 @@ layout(location = 0) in PerVertex vtx;
 
 layout(location = 0) out vec4 out_FragColor;
 
-const float kTransmissionMinAlpha = 0.08;
-
 vec2 currentScreenUv();
 
 vec3 transmissionModelScale() {
@@ -151,15 +149,20 @@ vec3 getIndirectTransmission(vec3 n, vec3 v, float roughness, vec3 baseColor,
   return (vec3(1.0) - specularColor) * attenuatedColor * baseColor;
 }
 
+const float kTransmissionThinSurfaceMinAlpha = 0.35;
+
 float transmissionOutputAlpha(uint alphaMode, uint featureMask, float baseAlpha,
                               float transmissionFactor) {
-  if (alphaMode != kAlphaModeOpaque) {
+  if (alphaMode == kAlphaModeBlend) {
     return baseAlpha;
   }
-  if ((featureMask & kMaterialFeatureVolume) != 0u) {
+  if (alphaMode == kAlphaModeMask ||
+      (featureMask & kMaterialFeatureVolume) != 0u) {
     return 1.0;
   }
-  return max(1.0 - transmissionFactor, kTransmissionMinAlpha);
+  // Thin non-volume panes such as legacy window/light glass still need blend
+  // coverage. The floor keeps high-transmission props from vanishing.
+  return mix(1.0, kTransmissionThinSurfaceMinAlpha, transmissionFactor);
 }
 
 vec3 getDirectTransmission(vec3 n, vec3 v, vec3 pointToLight,
