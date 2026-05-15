@@ -642,6 +642,20 @@ TEST(MaterialImportTests, DamagedHelmetLeavesClearcoatDisabled) {
   EXPECT_FALSE(texturedIt->metallicRoughness.path.empty());
 }
 
+TEST(MaterialImportTests, SponzaUsesGltfDefaultAlphaModeForOpaqueMaterials) {
+  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
+      modelPath("Sponza/Sponza.gltf"));
+  ASSERT_FALSE(result.hasError()) << result.error();
+
+  const nuri::ImportedMaterialSet &set = result.value();
+  ASSERT_EQ(set.materials.size(), 25u);
+
+  EXPECT_EQ(set.materials[0].alphaMode, nuri::MaterialAlphaMode::Mask);
+  EXPECT_EQ(set.materials[1].alphaMode, nuri::MaterialAlphaMode::Opaque);
+  EXPECT_EQ(set.materials[3].alphaMode, nuri::MaterialAlphaMode::Mask);
+  EXPECT_EQ(set.materials[20].alphaMode, nuri::MaterialAlphaMode::Mask);
+}
+
 TEST(MaterialImportTests, SheenChairImportsSheenFactorsAndTextures) {
   auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
       modelPath("SheenChair/SheenChair.gltf"));

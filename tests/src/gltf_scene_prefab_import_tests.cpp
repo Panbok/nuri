@@ -2,10 +2,16 @@
 
 #include "nuri/resources/gltf_scene_importer.h"
 #include "nuri/resources/mesh_importer.h"
+#include "nuri/resources/scene_importer.h"
 #include "nuri/scene/scene_prefab.h"
 
 #include <chrono>
+#include <functional>
+#include <sstream>
 #include <thread>
+#include <unordered_map>
+
+#include <yyjson.h>
 
 namespace {
 
@@ -32,6 +38,17 @@ struct ScopedTempDir {
   ScopedTempDir &operator=(ScopedTempDir &&) = delete;
 
   std::filesystem::path path;
+};
+
+struct TestGltfNode {
+  std::string name{};
+  std::vector<uint32_t> children{};
+  std::optional<uint32_t> meshIndex{};
+};
+
+struct NodeMaterialExpectation {
+  std::string path{};
+  uint32_t materialIndex = std::numeric_limits<uint32_t>::max();
 };
 
 void writeTextFile(const std::filesystem::path &path, std::string_view text) {
@@ -100,6 +117,226 @@ void expectVec3Near(const glm::vec3 &actual, const glm::vec3 &expected,
   EXPECT_NEAR(actual.x, expected.x, epsilon);
   EXPECT_NEAR(actual.y, expected.y, epsilon);
   EXPECT_NEAR(actual.z, expected.z, epsilon);
+}
+
+std::string modelPath(std::string_view relativePath) {
+  const std::filesystem::path root(PROJECT_SOURCE_DIR);
+  return (root / "assets" / "models" / std::filesystem::path(relativePath))
+      .string();
+}
+
+[[nodiscard]] std::string testNodePath(std::string_view parentPath,
+                                       std::string_view nodeName,
+                                       uint32_t siblingOrdinal) {
+  const std::string component = nodeName.empty()
+                                    ? ("#" + std::to_string(siblingOrdinal))
+                                    : std::string(nodeName);
+  if (parentPath.empty()) {
+    return component;
+  }
+  return std::string(parentPath) + "/" + component;
+}
+
+[[nodiscard]] bool testReadJsonUint32(yyjson_val *value, uint32_t &out) {
+  if (!yyjson_is_uint(value)) {
+    return false;
+  }
+  const uint64_t rawValue = yyjson_get_uint(value);
+  if (rawValue > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  out = static_cast<uint32_t>(rawValue);
+  return true;
+}
+
+[[nodiscard]] std::string_view testReadJsonStringView(yyjson_val *object,
+                                                      const char *key) {
+  yyjson_val *value = yyjson_obj_get(object, key);
+  if (!yyjson_is_str(value)) {
+    return {};
+  }
+  return std::string_view(yyjson_get_str(value), yyjson_get_len(value));
+}
+
+[[nodiscard]] std::optional<std::string>
+readTextFileForTest(const std::filesystem::path &path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file.is_open()) {
+    ADD_FAILURE() << "failed to open " << path.string();
+    return std::nullopt;
+  }
+  std::ostringstream stream;
+  stream << file.rdbuf();
+  return stream.str();
+}
+
+[[nodiscard]] std::optional<std::vector<NodeMaterialExpectation>>
+readSinglePrimitiveNodeMaterialExpectations(const std::filesystem::path &path) {
+  std::optional<std::string> json = readTextFileForTest(path);
+  if (!json.has_value()) {
+    return std::nullopt;
+  }
+
+  yyjson_read_err parseError{};
+  std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> doc(
+      yyjson_read_opts(json->data(), json->size(), 0, nullptr, &parseError),
+      &yyjson_doc_free);
+  if (doc == nullptr) {
+    ADD_FAILURE() << "failed to parse " << path.string() << " near byte "
+                  << parseError.pos;
+    return std::nullopt;
+  }
+
+  yyjson_val *root = yyjson_doc_get_root(doc.get());
+  yyjson_val *meshes = yyjson_obj_get(root, "meshes");
+  if (!yyjson_is_arr(meshes)) {
+    ADD_FAILURE() << "glTF meshes array is missing";
+    return std::nullopt;
+  }
+
+  std::vector<uint32_t> meshMaterials;
+  meshMaterials.reserve(yyjson_arr_size(meshes));
+  yyjson_arr_iter meshIter = yyjson_arr_iter_with(meshes);
+  yyjson_val *meshValue = nullptr;
+  while ((meshValue = yyjson_arr_iter_next(&meshIter)) != nullptr) {
+    uint32_t materialIndex = std::numeric_limits<uint32_t>::max();
+    yyjson_val *primitives = yyjson_obj_get(meshValue, "primitives");
+    if (yyjson_is_arr(primitives) && yyjson_arr_size(primitives) == 1u) {
+      (void)testReadJsonUint32(
+          yyjson_obj_get(yyjson_arr_get(primitives, 0), "material"),
+          materialIndex);
+    }
+    meshMaterials.push_back(materialIndex);
+  }
+
+  yyjson_val *nodesValue = yyjson_obj_get(root, "nodes");
+  if (!yyjson_is_arr(nodesValue)) {
+    ADD_FAILURE() << "glTF nodes array is missing";
+    return std::nullopt;
+  }
+
+  std::vector<TestGltfNode> nodes(yyjson_arr_size(nodesValue));
+  for (uint32_t nodeIndex = 0; nodeIndex < nodes.size(); ++nodeIndex) {
+    yyjson_val *nodeValue = yyjson_arr_get(nodesValue, nodeIndex);
+    const std::string_view name = testReadJsonStringView(nodeValue, "name");
+    nodes[nodeIndex].name.assign(name.begin(), name.end());
+
+    uint32_t meshIndex = 0u;
+    if (testReadJsonUint32(yyjson_obj_get(nodeValue, "mesh"), meshIndex)) {
+      nodes[nodeIndex].meshIndex = meshIndex;
+    }
+
+    yyjson_val *children = yyjson_obj_get(nodeValue, "children");
+    if (yyjson_is_arr(children)) {
+      nodes[nodeIndex].children.reserve(yyjson_arr_size(children));
+      yyjson_arr_iter childIter = yyjson_arr_iter_with(children);
+      yyjson_val *childValue = nullptr;
+      while ((childValue = yyjson_arr_iter_next(&childIter)) != nullptr) {
+        uint32_t childIndex = 0u;
+        if (testReadJsonUint32(childValue, childIndex)) {
+          nodes[nodeIndex].children.push_back(childIndex);
+        }
+      }
+    }
+  }
+
+  yyjson_val *scenes = yyjson_obj_get(root, "scenes");
+  if (!yyjson_is_arr(scenes)) {
+    ADD_FAILURE() << "glTF scenes array is missing";
+    return std::nullopt;
+  }
+
+  uint32_t sceneIndex = 0u;
+  (void)testReadJsonUint32(yyjson_obj_get(root, "scene"), sceneIndex);
+  if (sceneIndex >= yyjson_arr_size(scenes)) {
+    ADD_FAILURE() << "glTF default scene index is out of range";
+    return std::nullopt;
+  }
+
+  yyjson_val *rootNodes =
+      yyjson_obj_get(yyjson_arr_get(scenes, sceneIndex), "nodes");
+  if (!yyjson_is_arr(rootNodes)) {
+    ADD_FAILURE() << "glTF scene nodes array is missing";
+    return std::nullopt;
+  }
+
+  std::vector<NodeMaterialExpectation> expectations;
+  std::vector<uint8_t> active(nodes.size(), 0u);
+  std::function<void(uint32_t, const std::string &, uint32_t)> visit =
+      [&](uint32_t nodeIndex, const std::string &parentPath,
+          uint32_t siblingOrdinal) {
+        if (nodeIndex >= nodes.size() || active[nodeIndex] != 0u) {
+          return;
+        }
+        active[nodeIndex] = 1u;
+        const TestGltfNode &node = nodes[nodeIndex];
+        const std::string pathKey =
+            testNodePath(parentPath, node.name, siblingOrdinal);
+        if (node.meshIndex.has_value() &&
+            *node.meshIndex < meshMaterials.size() &&
+            meshMaterials[*node.meshIndex] !=
+                std::numeric_limits<uint32_t>::max()) {
+          expectations.push_back(NodeMaterialExpectation{
+              .path = pathKey,
+              .materialIndex = meshMaterials[*node.meshIndex],
+          });
+        }
+        for (uint32_t childOrdinal = 0u; childOrdinal < node.children.size();
+             ++childOrdinal) {
+          visit(node.children[childOrdinal], pathKey, childOrdinal);
+        }
+        active[nodeIndex] = 0u;
+      };
+
+  yyjson_arr_iter rootIter = yyjson_arr_iter_with(rootNodes);
+  yyjson_val *rootValue = nullptr;
+  uint32_t rootOrdinal = 0u;
+  while ((rootValue = yyjson_arr_iter_next(&rootIter)) != nullptr) {
+    uint32_t rootNodeIndex = 0u;
+    if (testReadJsonUint32(rootValue, rootNodeIndex)) {
+      visit(rootNodeIndex, std::string(), rootOrdinal);
+    }
+    ++rootOrdinal;
+  }
+
+  return expectations;
+}
+
+[[nodiscard]] std::vector<std::string>
+buildImportedNodePaths(const nuri::ImportedScene &scene) {
+  std::vector<std::vector<uint32_t>> children(scene.nodes.size());
+  for (uint32_t nodeIndex = 0u; nodeIndex < scene.nodes.size(); ++nodeIndex) {
+    const uint32_t parentIndex = scene.nodes[nodeIndex].parentIndex;
+    if (parentIndex != nuri::kInvalidScenePrefabIndex &&
+        parentIndex < children.size()) {
+      children[parentIndex].push_back(nodeIndex);
+    }
+  }
+
+  std::vector<std::string> paths(scene.nodes.size());
+  std::vector<uint8_t> active(scene.nodes.size(), 0u);
+  std::function<void(uint32_t, const std::string &, uint32_t)> visit =
+      [&](uint32_t nodeIndex, const std::string &parentPath,
+          uint32_t siblingOrdinal) {
+        if (nodeIndex >= scene.nodes.size() || active[nodeIndex] != 0u) {
+          return;
+        }
+        active[nodeIndex] = 1u;
+        paths[nodeIndex] = testNodePath(parentPath, scene.nodes[nodeIndex].name,
+                                        siblingOrdinal);
+        for (uint32_t childOrdinal = 0u;
+             childOrdinal < children[nodeIndex].size(); ++childOrdinal) {
+          visit(children[nodeIndex][childOrdinal], paths[nodeIndex],
+                childOrdinal);
+        }
+        active[nodeIndex] = 0u;
+      };
+
+  for (uint32_t rootOrdinal = 0u; rootOrdinal < scene.rootNodes.size();
+       ++rootOrdinal) {
+    visit(scene.rootNodes[rootOrdinal], std::string(), rootOrdinal);
+  }
+  return paths;
 }
 
 } // namespace
@@ -360,6 +597,7 @@ TEST(GltfScenePrefabImport, BatchLoadsSceneMeshesFromSingleImportPass) {
     {"byteLength": 84, "uri": "scene.bin"}
   ]
 }
+
 )json";
 
   const std::filesystem::path gltfPath = dir.path / "scene_meshes.gltf";
@@ -409,4 +647,237 @@ TEST(GltfScenePrefabImport, BatchLoadsSceneMeshesFromSingleImportPass) {
                  singleMesh1.value().vertices[0].position);
   expectVec3Near(batchMesh1.vertices[2].position,
                  singleMesh1.value().vertices[2].position);
+}
+
+TEST(GltfScenePrefabImport, PreservesSingleMeshPrimitiveMaterialBindings) {
+  ScopedTempDir dir("nuri_gltf_single_mesh_primitives");
+
+  const std::vector<uint8_t> buffer = twoMeshBuffer();
+  const std::filesystem::path bufferPath = dir.path / "scene.bin";
+  writeBinaryFile(bufferPath, buffer);
+
+  const std::string json = R"json(
+{
+  "asset": {"version": "2.0"},
+  "scene": 0,
+  "scenes": [{"nodes": [0]}],
+  "nodes": [{"name": "SingleMeshNode", "mesh": 0}],
+  "materials": [
+    {
+      "name": "Mat0",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [1, 0, 0, 1],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 1.0
+      }
+    },
+    {
+      "name": "Mat1",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [0, 1, 0, 1],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 1.0
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "primitives": [
+        {"attributes": {"POSITION": 0}, "indices": 2, "material": 0},
+        {"attributes": {"POSITION": 1}, "indices": 3, "material": 1}
+      ]
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "max": [1, 1, 0],
+      "min": [0, 0, 0]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 3,
+      "type": "VEC3",
+      "max": [3, 1, 0],
+      "min": [2, 0, 0]
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5123,
+      "count": 3,
+      "type": "SCALAR",
+      "max": [2],
+      "min": [0]
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5123,
+      "count": 3,
+      "type": "SCALAR",
+      "max": [2],
+      "min": [0]
+    }
+  ],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962},
+    {"buffer": 0, "byteOffset": 36, "byteLength": 36, "target": 34962},
+    {"buffer": 0, "byteOffset": 72, "byteLength": 6, "target": 34963},
+    {"buffer": 0, "byteOffset": 78, "byteLength": 6, "target": 34963}
+  ],
+  "buffers": [{"byteLength": 84, "uri": "scene.bin"}]
+}
+)json";
+
+  const std::filesystem::path gltfPath = dir.path / "single_mesh.gltf";
+  writeTextFile(gltfPath, json);
+
+  nuri::MeshImportOptions options{};
+  options.optimize = false;
+  options.generateLods = false;
+  options.lodCount = 1u;
+
+  auto sceneResult = nuri::SceneImporter::loadSceneFromFile(
+      gltfPath.string(),
+      nuri::SceneImportOptions{.assetBuildOptions = options});
+  ASSERT_FALSE(sceneResult.hasError()) << sceneResult.error();
+
+  const nuri::ImportedScene &scene = sceneResult.value();
+  ASSERT_EQ(scene.renderables.size(), 2u);
+  ASSERT_EQ(scene.meshAssets.size(), 2u);
+  ASSERT_GE(scene.materialAssets.size(), 2u);
+
+  EXPECT_EQ(scene.materialAssets[scene.renderables[0].materialAssetIndex]
+                .sourceMaterialIndex,
+            0u);
+  EXPECT_EQ(scene.materialAssets[scene.renderables[1].materialAssetIndex]
+                .sourceMaterialIndex,
+            1u);
+
+  constexpr std::array<uint32_t, 2> kSceneMeshIndices = {0u, 1u};
+  auto meshResult = nuri::MeshImporter::loadSceneMeshesFromFile(
+      gltfPath.string(), kSceneMeshIndices, options);
+  ASSERT_FALSE(meshResult.hasError()) << meshResult.error();
+  ASSERT_EQ(meshResult.value().size(), 2u);
+  ASSERT_EQ(meshResult.value()[0].submeshes.size(), 1u);
+  ASSERT_EQ(meshResult.value()[1].submeshes.size(), 1u);
+  EXPECT_EQ(meshResult.value()[0].submeshes[0].materialIndex, 0u);
+  EXPECT_EQ(meshResult.value()[1].submeshes[0].materialIndex, 1u);
+}
+
+TEST(GltfScenePrefabImport, NiagaraBistroUsesNodeMeshPrimitiveMaterials) {
+  const std::filesystem::path bistroPath =
+      modelPath("NiagaraBistro/bistrox.gltf");
+  auto expectationsResult =
+      readSinglePrimitiveNodeMaterialExpectations(bistroPath);
+  ASSERT_TRUE(expectationsResult.has_value());
+
+  std::unordered_map<std::string, uint32_t> expectedMaterialByPath;
+  expectedMaterialByPath.reserve(expectationsResult->size());
+  for (const NodeMaterialExpectation &expectation : *expectationsResult) {
+    expectedMaterialByPath.emplace(expectation.path, expectation.materialIndex);
+  }
+  ASSERT_GT(expectedMaterialByPath.size(), 100u);
+
+  auto sceneResult =
+      nuri::SceneImporter::loadSceneFromFile(bistroPath.string());
+  ASSERT_FALSE(sceneResult.hasError()) << sceneResult.error();
+
+  const nuri::ImportedScene &scene = sceneResult.value();
+  const std::vector<std::string> nodePaths = buildImportedNodePaths(scene);
+  size_t comparedRenderableCount = 0u;
+  size_t mismatchCount = 0u;
+  constexpr size_t kMaxReportedMismatches = 8u;
+  for (const nuri::ImportedSceneRenderable &renderable : scene.renderables) {
+    ASSERT_LT(renderable.nodeIndex, nodePaths.size());
+    ASSERT_LT(renderable.materialAssetIndex, scene.materialAssets.size());
+    const auto expectedIt =
+        expectedMaterialByPath.find(nodePaths[renderable.nodeIndex]);
+    if (expectedIt == expectedMaterialByPath.end()) {
+      continue;
+    }
+
+    ++comparedRenderableCount;
+    const uint32_t actualSourceMaterial =
+        scene.materialAssets[renderable.materialAssetIndex].sourceMaterialIndex;
+    if (actualSourceMaterial != expectedIt->second) {
+      if (mismatchCount < kMaxReportedMismatches) {
+        ADD_FAILURE() << "node path " << nodePaths[renderable.nodeIndex]
+                      << " expected material " << expectedIt->second
+                      << " actual material " << actualSourceMaterial
+                      << " renderable mesh asset " << renderable.meshAssetIndex;
+      }
+      ++mismatchCount;
+    }
+  }
+
+  EXPECT_GT(comparedRenderableCount, 100u);
+  EXPECT_EQ(mismatchCount, 0u);
+}
+
+TEST(GltfScenePrefabImport, SponzaSceneMeshIndicesMatchLoadedMeshMaterials) {
+  nuri::MeshImportOptions options{};
+  options.flipUVs = true;
+
+  auto sceneResult = nuri::SceneImporter::loadSceneFromFile(
+      modelPath("Sponza/Sponza.gltf"),
+      nuri::SceneImportOptions{.assetBuildOptions = options});
+  ASSERT_FALSE(sceneResult.hasError()) << sceneResult.error();
+
+  const nuri::ImportedScene &scene = sceneResult.value();
+  ASSERT_EQ(scene.renderables.size(), 103u);
+
+  std::vector<uint32_t> sourceSceneMeshIndices;
+  sourceSceneMeshIndices.reserve(scene.renderables.size());
+  for (const nuri::ImportedSceneRenderable &renderable : scene.renderables) {
+    ASSERT_LT(renderable.meshAssetIndex, scene.meshAssets.size());
+    sourceSceneMeshIndices.push_back(
+        scene.meshAssets[renderable.meshAssetIndex].sourceSceneMeshIndex);
+  }
+
+  auto meshResult = nuri::MeshImporter::loadSceneMeshesFromFile(
+      modelPath("Sponza/Sponza.gltf"), sourceSceneMeshIndices, options);
+  ASSERT_FALSE(meshResult.hasError()) << meshResult.error();
+  ASSERT_EQ(meshResult.value().size(), scene.renderables.size());
+
+  for (size_t index = 0; index < scene.renderables.size(); ++index) {
+    const nuri::ImportedSceneRenderable &renderable = scene.renderables[index];
+    ASSERT_LT(renderable.materialAssetIndex, scene.materialAssets.size());
+    ASSERT_EQ(meshResult.value()[index].submeshes.size(), 1u);
+    EXPECT_EQ(
+        meshResult.value()[index].submeshes[0].materialIndex,
+        scene.materialAssets[renderable.materialAssetIndex].sourceMaterialIndex)
+        << "renderable " << index << " source scene mesh "
+        << sourceSceneMeshIndices[index];
+  }
+}
+
+TEST(GltfScenePrefabImport, SponzaKeepsAuthoredTiledUvs) {
+  nuri::MeshImportOptions options{};
+  options.flipUVs = true;
+
+  constexpr uint32_t kLargeBrickShellMeshIndex = 100u;
+  constexpr uint32_t kLargeBrickShellMaterialIndex = 5u;
+  auto meshResult = nuri::MeshImporter::loadSceneMeshFromFile(
+      modelPath("Sponza/Sponza.gltf"), kLargeBrickShellMeshIndex, options);
+  ASSERT_FALSE(meshResult.hasError()) << meshResult.error();
+
+  const nuri::MeshData &mesh = meshResult.value();
+  ASSERT_EQ(mesh.submeshes.size(), 1u);
+  EXPECT_EQ(mesh.submeshes[0].materialIndex, kLargeBrickShellMaterialIndex);
+  ASSERT_FALSE(mesh.vertices.empty());
+
+  glm::vec2 minUv(std::numeric_limits<float>::max());
+  glm::vec2 maxUv(std::numeric_limits<float>::lowest());
+  for (const nuri::Vertex &vertex : mesh.vertices) {
+    minUv = glm::min(minUv, vertex.uv);
+    maxUv = glm::max(maxUv, vertex.uv);
+  }
+
+  EXPECT_LT(minUv.x, -5.0f);
+  EXPECT_GT(maxUv.x, 20.0f);
+  EXPECT_GT(maxUv.y - minUv.y, 8.0f);
 }
