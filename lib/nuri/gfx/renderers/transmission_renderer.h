@@ -132,6 +132,10 @@ private:
     BufferHandle baseVertexDecodeBuffer{};
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
+    glm::vec3 transmissionScale{1.0f};
+    std::array<glm::vec3, 8> worldBoundsCorners{};
+    DrawItem cachedDrawItem{};
+    uint64_t cachedDrawLayoutSignature = std::numeric_limits<uint64_t>::max();
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
@@ -165,6 +169,7 @@ private:
   rebuildMaterialTextureAccessCache(const ResourceManager &resources);
   void collectEnvironmentTextureReads(const RenderScene &scene,
                                       const ResourceManager &resources);
+  void refreshDrawTemplateTransforms(std::span<const Renderable> renderables);
   void resetCachedState();
   void resetFrameBuildState();
   void destroyPipelineState();
@@ -212,6 +217,9 @@ private:
   bool cachedTransmissionContentValid_ = false;
   bool cachedTransmissionContent_ = false;
   EnvironmentHandles cachedEnvironmentHandles_{};
+  bool environmentTextureAccessCacheValid_ = false;
+  bool materialTextureAccessCacheValid_ = false;
+  bool staticPassTextureReadsValid_ = false;
 
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   std::pmr::vector<InstanceData> instanceMatrices_;
@@ -224,6 +232,7 @@ private:
   std::pmr::vector<MeshPushConstants> blendedPushConstants_;
   std::pmr::vector<DrawItem> passDrawItems_;
   std::pmr::vector<TransparentStageSortableDraw> blendedSortableDraws_;
+  std::pmr::vector<const MeshDrawTemplate *> sortedDepthTemplates_;
   std::pmr::vector<TextureHandle> passTextureReads_;
   std::pmr::vector<TextureHandle> blendedTextureReads_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
@@ -232,6 +241,10 @@ private:
   std::pmr::vector<BufferHandle> preResolvedTemplateBuffers_;
   std::pmr::vector<BufferHandle> cachedPreResolvedDrawBuffers_;
   uint64_t cachedPreResolvedDrawBufferSignature_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t cachedPassTextureReadSignature_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t cachedBlendedTextureReadSignature_ =
       std::numeric_limits<uint64_t>::max();
   std::filesystem::path transmissionVertexPath_{};
   std::filesystem::path transmissionFragmentPath_{};
