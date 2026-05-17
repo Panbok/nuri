@@ -166,6 +166,7 @@ public:
   uint32_t backgroundCopySubmitCount = 0u;
   uint32_t waitIdleCallCount = 0u;
   uint32_t updateBufferCallCount = 0u;
+  mutable uint32_t bufferDeviceAddressCallCount = 0u;
   uint32_t discardedRecordingContextCount = 0u;
   uint32_t discardedRecordedCommandBufferCount = 0u;
   uint32_t finishedRecordingContextCount = 0u;
