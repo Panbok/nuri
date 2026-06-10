@@ -51,6 +51,33 @@ TEST(RenderSceneLightStoreTests,
 }
 
 TEST(RenderSceneLightStoreTests,
+     EnvironmentVersionIncrementsOnlyOnActualHandleChanges) {
+  nuri::RenderScene scene;
+  EXPECT_EQ(scene.environmentVersion(), 0u);
+
+  scene.setEnvironment(nuri::EnvironmentHandles{});
+  EXPECT_EQ(scene.environmentVersion(), 0u);
+
+  nuri::EnvironmentHandles environment{};
+  environment.cubemap = nuri::TextureRef{nuri::packResourceHandle(1u, 1u)};
+  scene.setEnvironment(environment);
+  EXPECT_EQ(scene.environmentVersion(), 1u);
+
+  scene.setEnvironment(environment);
+  EXPECT_EQ(scene.environmentVersion(), 1u);
+
+  environment.irradiance = nuri::TextureRef{nuri::packResourceHandle(2u, 1u)};
+  scene.setEnvironment(environment);
+  EXPECT_EQ(scene.environmentVersion(), 2u);
+
+  scene.setEnvironment(nuri::EnvironmentHandles{});
+  EXPECT_EQ(scene.environmentVersion(), 3u);
+
+  scene.setEnvironment(nuri::EnvironmentHandles{});
+  EXPECT_EQ(scene.environmentVersion(), 3u);
+}
+
+TEST(RenderSceneLightStoreTests,
      DisabledLocalLightStaysOutOfPackedTableUntilEnabled) {
   nuri::RenderScene scene;
   nuri::SceneGraph &graph = scene.graph();

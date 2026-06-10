@@ -240,6 +240,7 @@ FakeGPUDeviceBase::createBufferImpl(const BufferDesc &desc) {
   BufferState &state = buffers_[handle.index - 1u];
   state.handle = handle;
   state.size = desc.size != 0u ? desc.size : desc.data.size();
+  state.storage = desc.storage;
   state.bytes.assign(state.size, std::byte{0});
   if (!desc.data.empty()) {
     std::copy(desc.data.begin(), desc.data.end(), state.bytes.begin());
@@ -489,6 +490,7 @@ uint32_t FakeGPUDeviceBase::getCubemapSamplerBindlessIndex() const {
 
 uint64_t FakeGPUDeviceBase::getBufferDeviceAddress(BufferHandle h,
                                                    size_t offset) const {
+  ++bufferDeviceAddressCallCount;
   if (!isValid(h)) {
     return 0ull;
   }
@@ -838,6 +840,10 @@ FakeGPUDeviceBase::readBuffer(BufferHandle buffer, size_t offset,
         "fake readBuffer: invalid buffer");
   }
   const BufferState &state = buffers_[buffer.index - 1u];
+  if (rejectDeviceLocalReadBuffer && state.storage == Storage::Device) {
+    return Result<bool, std::string>::makeError(
+        "fake readBuffer: buffer is not host-visible/mapped");
+  }
   if (offset > state.size || outBytes.size() > state.size - offset) {
     return Result<bool, std::string>::makeError(
         "fake readBuffer: range out of bounds");

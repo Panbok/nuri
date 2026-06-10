@@ -68,6 +68,15 @@ void writeTextFile(const std::filesystem::path &path, std::string_view text) {
   ASSERT_TRUE(file.good()) << path.string();
 }
 
+std::string readTextFile(const std::filesystem::path &path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file.is_open()) {
+    return {};
+  }
+  return std::string(std::istreambuf_iterator<char>(file),
+                     std::istreambuf_iterator<char>());
+}
+
 } // namespace
 
 TEST(TextureCacheUtilsTests, BuildsPortableAndNativePaths) {
@@ -158,4 +167,21 @@ TEST(TextureCacheUtilsTests, UpToDateCheckTracksWriteTimes) {
   const auto sourceNewerTime = baseTime + std::chrono::seconds(4);
   std::filesystem::last_write_time(sourcePath, sourceNewerTime);
   EXPECT_FALSE(nuri::isTextureCacheUpToDate(cachePath, sourcePath));
+}
+
+TEST(TextureCacheUtilsTests, HdrHalfConversionClampsPositiveOverflow) {
+  const std::string source =
+      readTextFile(std::filesystem::path(PROJECT_SOURCE_DIR) / "lib" / "nuri" /
+                   "resources" / "gpu" / "texture.cpp");
+  ASSERT_FALSE(source.empty());
+
+  EXPECT_NE(source.find("constexpr float kMaxFiniteHalf = 65504.0f"),
+            std::string::npos);
+  EXPECT_NE(source.find("std::isnan(value)"), std::string::npos);
+  EXPECT_NE(source.find("std::isinf(value)"), std::string::npos);
+  EXPECT_NE(source.find("std::signbit(value) ? 0.0f : kMaxFiniteHalf"),
+            std::string::npos);
+  EXPECT_NE(source.find("std::clamp(value, 0.0f, kMaxFiniteHalf)"),
+            std::string::npos);
+  EXPECT_NE(source.find("glm::packHalf1x16(value)"), std::string::npos);
 }
