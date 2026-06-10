@@ -5,17 +5,17 @@
 #include "nuri/core/pmr_scratch.h"
 #include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
-#include "nuri/gfx/layers/opaque_layer.h"
-#include "nuri/gfx/layers/render_frame_context.h"
-#include "nuri/gfx/layers/skybox_layer.h"
-#include "nuri/gfx/layers/transparent_layer.h"
+#include "nuri/gfx/frame/render_frame_context.h"
+#include "nuri/gfx/pipeline/features/text_feature.h"
+#include "nuri/math/light.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/model.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/gpu/texture.h"
+#include "nuri/resources/scene_importer.h"
 #include "nuri/scene/camera_system.h"
 #include "nuri/scene/render_scene.h"
-#include "nuri/text/text_layer_2d.h"
+#include "nuri/scene_runtime/scene_runtime_host.h"
 #include "nuri/text/text_system.h"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -28,13 +28,9 @@ constexpr std::string_view kSampleEnvironmentHdrRelativePath =
     "qwantani_moon_noon_puresky_4k.hdr";
 constexpr float kHelmetRotationSpeedRadians = glm::radians(35.0f);
 
-nuri::ApplicationConfig toApplicationConfig(const nuri::RuntimeConfig &config) {
-  return nuri::ApplicationConfig{
-      .title = config.window.title,
-      .width = config.window.width,
-      .height = config.window.height,
-      .windowMode = config.window.mode,
-  };
+[[nodiscard]] glm::mat4 makeTransformMatrix(const glm::vec3 &position,
+                                            const glm::quat &rotation) {
+  return glm::translate(glm::mat4(1.0f), position) * glm::mat4_cast(rotation);
 }
 
 std::filesystem::path pickDefaultNfontPath(const nuri::RuntimeConfig &config) {
@@ -92,21 +88,32 @@ std::filesystem::path pickDefaultNfontPath(const nuri::RuntimeConfig &config) {
 
 } // namespace
 
+namespace {
+
+[[nodiscard]] nuri::ApplicationConfig
+makeSampleApplicationConfig(const nuri::RuntimeConfig &config) {
+  nuri::ApplicationConfig appConfig = nuri::makeApplicationConfig(config);
+  appConfig.renderComposition = nuri::RenderCompositionMode::PipelineOnly;
+  return appConfig;
+}
+
+} // namespace
+
 class NuriApplication : public nuri::Application {
 public:
   explicit NuriApplication(nuri::RuntimeConfig config)
-      : nuri::Application(toApplicationConfig(config)),
+      : nuri::Application(makeSampleApplicationConfig(config)),
         config_(std::move(config)), cameraSystem_(cameraMemory_),
-        scene_(&sceneMemory_) {}
+        scene_(&sceneMemory_), sceneRuntime_(&sceneMemory_) {}
 
   void onInit() override {
     NURI_PROFILER_FUNCTION();
     scene_.bindResources(&getRenderer().resources());
+    sceneRuntime_.bindScene(&scene_);
     initializeCamera();
     initializeTextSystem();
     loadSceneResources();
-    initializeRenderLayers();
-    initializeTextOverlayLayer();
+    initializeTextOverlayFeature();
 
     NURI_LOG_INFO("Application was initialized");
   }
@@ -116,15 +123,23 @@ public:
 
     const nuri::Camera *activeCamera = cameraSystem_.activeCamera();
     NURI_ASSERT(activeCamera != nullptr, "No active camera");
+    auto commitResult = scene_.commit();
+    NURI_ASSERT(!commitResult.hasError(), "Scene commit failed: %s",
+                commitResult.error().c_str());
 
     buildFrameContext(*activeCamera, getTime());
     queuePerformanceOverlay();
-    submitLayeredFrame();
+    submitPipelineFrame();
   }
 
   void onUpdate(double deltaTime) override {
     updatePerformanceMetrics(deltaTime);
     updateHelmetRotation(deltaTime);
+    (void)sceneRuntime_.tick({
+        .frameDeltaSeconds = std::max(0.0, deltaTime),
+        .absoluteTimeSeconds = getTime(),
+        .frameIndex = simulationFrameIndex_++,
+    });
     cameraSystem_.update(deltaTime, getInput());
   }
 
@@ -138,7 +153,10 @@ public:
   }
 
   void onShutdown() override {
-    scene_.clearOpaqueRenderables();
+    sceneRuntime_.reset();
+    sceneRuntime_.bindScene(nullptr);
+    scene_.graph().clearRenderables();
+    scene_.graph().clearLights();
     scene_.setEnvironment(nuri::EnvironmentHandles{});
     releaseOwnedResourceHandles();
     scene_.bindResources(nullptr);
@@ -161,40 +179,14 @@ private:
     NURI_ASSERT(setActive, "Failed to activate main camera");
   }
 
-  void initializeRenderLayers() {
-    auto skyboxLayer =
-        nuri::SkyboxLayer::create(getGPU(), config_.shaders.skybox);
-    NURI_ASSERT(skyboxLayer != nullptr, "Failed to create skybox layer");
-    NURI_ASSERT(getLayerStack().pushLayer(std::move(skyboxLayer)) != nullptr,
-                "Failed to push skybox layer");
-
-    auto opaqueLayer = nuri::OpaqueLayer::create(
-        getGPU(), config_.shaders.opaque, layerMemoryResource());
-    NURI_ASSERT(opaqueLayer != nullptr, "Failed to create opaque layer");
-    NURI_ASSERT(getLayerStack().pushLayer(std::move(opaqueLayer)) != nullptr,
-                "Failed to push opaque layer");
-
-    auto transparentLayer = nuri::TransparentLayer::create(
-        getGPU(), config_.shaders.opaque, layerMemoryResource());
-    NURI_ASSERT(transparentLayer != nullptr,
-                "Failed to create transparent layer");
-    NURI_ASSERT(getLayerStack().pushLayer(std::move(transparentLayer)) !=
-                    nullptr,
-                "Failed to push transparent layer");
-  }
-
-  void initializeTextOverlayLayer() {
-    if (textLayer2D_ != nullptr || textSystem_ == nullptr) {
+  void initializeTextOverlayFeature() {
+    if (textOverlayEnabled_ || textSystem_ == nullptr) {
       return;
     }
-
-    auto textLayer2D = nuri::TextLayer2D::create({
-        .text = *textSystem_,
-    });
-    NURI_ASSERT(textLayer2D != nullptr, "Failed to create 2D text layer");
-    textLayer2D_ = static_cast<nuri::TextLayer2D *>(
-        getLayerStack().pushOverlay(std::move(textLayer2D)));
-    NURI_ASSERT(textLayer2D_ != nullptr, "Failed to push 2D text layer");
+    auto *feature = getRenderPipeline().addFeature(
+        std::make_unique<nuri::Text2DFeature>(*textSystem_));
+    NURI_ASSERT(feature != nullptr, "Failed to register 2D text feature");
+    textOverlayEnabled_ = true;
   }
 
   void initializeTextSystem() {
@@ -206,7 +198,7 @@ private:
 
     auto textSystemResult = nuri::TextSystem::create({
         .gpu = getGPU(),
-        .memory = *layerMemoryResource(),
+        .memory = *pipelineMemoryResource(),
         .defaultFontPath = defaultFontPath,
         .requireDefaultFont = requireDefaultFont,
         .shaderPaths =
@@ -225,7 +217,7 @@ private:
   }
 
   void queuePerformanceOverlay() {
-    if (textSystem_ == nullptr || textLayer2D_ == nullptr) {
+    if (textSystem_ == nullptr || !textOverlayEnabled_) {
       return;
     }
 
@@ -269,7 +261,8 @@ private:
 
   void loadSceneResources() {
     nuri::ResourceManager &resources = getRenderer().resources();
-    scene_.clearOpaqueRenderables();
+    scene_.graph().clearRenderables();
+    scene_.graph().clearLights();
     scene_.setEnvironment(nuri::EnvironmentHandles{});
     releaseOwnedResourceHandles();
 
@@ -280,15 +273,20 @@ private:
 
     nuri::MeshImportOptions helmetImportOptions{};
     helmetImportOptions.flipUVs = true;
-    auto helmetModelResult = resources.acquireModel(nuri::ModelRequest{
-        .path = helmetModelPath,
-        .importOptions = helmetImportOptions,
-        .debugName = "damaged_helmet",
-    });
-    NURI_ASSERT(!helmetModelResult.hasError(),
-                "Failed to create DamagedHelmet model: %s",
-                helmetModelResult.error().c_str());
-    helmetModel_ = helmetModelResult.value();
+    auto helmetPrefabResult = nuri::SceneImporter::loadScenePrefabFromFile(
+        helmetModelPath, nuri::SceneImportOptions{
+                             .assetBuildOptions = helmetImportOptions,
+                         });
+    NURI_ASSERT(!helmetPrefabResult.hasError(),
+                "Failed to load DamagedHelmet scene prefab: %s",
+                helmetPrefabResult.error().c_str());
+    helmetPrefab_ = std::move(helmetPrefabResult.value());
+
+    auto helmetAssetsResult = resources.acquireScenePrefabAssets(helmetPrefab_);
+    NURI_ASSERT(!helmetAssetsResult.hasError(),
+                "Failed to acquire DamagedHelmet scene prefab assets: %s",
+                helmetAssetsResult.error().c_str());
+    helmetSceneAssets_ = std::move(helmetAssetsResult.value());
 
     auto cubemapResult = resources.acquireTexture(nuri::TextureRequest{
         .path = environmentHdrPath,
@@ -462,36 +460,18 @@ private:
       resources.release(brdfLutTexture);
     }
 
-    auto importedMaterialsResult =
-        resources.acquireMaterialsFromModel(nuri::ImportedMaterialRequest{
-            .modelPath = helmetModelPath,
-            .model = helmetModel_,
-            .debugNamePrefix = "damaged_helmet",
-        });
-    if (!importedMaterialsResult.hasError() &&
-        nuri::isValid(importedMaterialsResult.value().firstMaterial)) {
-      helmetMaterial_ = importedMaterialsResult.value().firstMaterial;
-    } else {
-      if (importedMaterialsResult.hasError()) {
-        NURI_LOG_WARNING("NuriApplication::loadSceneResources: Failed to "
-                         "import DamagedHelmet materials from '%s': %s",
-                         helmetModelPath.c_str(),
-                         importedMaterialsResult.error().c_str());
+    nuri::ModelRef helmetPrimaryModel = nuri::kInvalidModelRef;
+    for (nuri::ModelRef model : helmetSceneAssets_.models) {
+      if (nuri::isValid(model)) {
+        helmetPrimaryModel = model;
+        break;
       }
-
-      auto fallbackMaterialResult =
-          resources.acquireMaterial(nuri::MaterialRequest{
-              .desc = nuri::MaterialDesc{},
-              .debugName = "damaged_helmet_fallback_material",
-          });
-      NURI_ASSERT(!fallbackMaterialResult.hasError(),
-                  "Failed to acquire DamagedHelmet fallback material: %s",
-                  fallbackMaterialResult.error().c_str());
-      helmetMaterial_ = fallbackMaterialResult.value();
-      resources.setModelMaterialForAllSources(helmetModel_, helmetMaterial_);
     }
+    NURI_ASSERT(nuri::isValid(helmetPrimaryModel),
+                "DamagedHelmet prefab did not resolve any model assets");
 
-    const nuri::ModelRecord *helmetRecord = resources.tryGet(helmetModel_);
+    const nuri::ModelRecord *helmetRecord =
+        resources.tryGet(helmetPrimaryModel);
     NURI_ASSERT(helmetRecord != nullptr && helmetRecord->model != nullptr,
                 "DamagedHelmet model record lookup failed");
     const nuri::Model &helmetModel = *helmetRecord->model;
@@ -505,12 +485,27 @@ private:
     renderSettings_.opaque.enableInstanceAnimation = false;
 
     helmetRotationRadians_ = 0.0f;
-    auto addResult = scene_.addOpaqueRenderable(helmetModel_, helmetMaterial_,
-                                                helmetBaseModel_);
-    NURI_ASSERT(!addResult.hasError(),
-                "Failed to add DamagedHelmet renderable: %s",
-                addResult.error().c_str());
-    helmetRenderableIndex_ = addResult.value();
+    auto helmetNodeResult = scene_.graph().createNode(
+        scene_.graph().rootNode(), "DamagedHelmet", helmetBaseModel_);
+    NURI_ASSERT(!helmetNodeResult.hasError(),
+                "Failed to create DamagedHelmet node: %s",
+                helmetNodeResult.error().c_str());
+    helmetNode_ = helmetNodeResult.value();
+
+    nuri::SceneInstantiationMap instantiated;
+    auto instantiateResult = scene_.graph().instantiatePrefab(
+        helmetPrefab_, helmetNode_, helmetSceneAssets_, &instantiated);
+    NURI_ASSERT(!instantiateResult.hasError(),
+                "Failed to instantiate DamagedHelmet prefab: %s",
+                instantiateResult.error().c_str());
+    for (nuri::RenderableId renderable : instantiated.renderables) {
+      if (nuri::isValid(renderable)) {
+        helmetRenderableId_ = renderable;
+        break;
+      }
+    }
+    NURI_ASSERT(nuri::isValid(helmetRenderableId_),
+                "DamagedHelmet prefab did not produce any renderables");
 
     const nuri::BoundingBox &bounds = helmetModel.bounds();
     const float rawRadius =
@@ -532,6 +527,37 @@ private:
                                          -cameraDistance),
                       center + glm::vec3(0.0f, radius * 0.03f, 0.0f),
                       glm::vec3(0.0f, 1.0f, 0.0f));
+    if (instantiated.lights.empty()) {
+      addDefaultDirectionalLight();
+    }
+  }
+
+  void addDefaultDirectionalLight() {
+    nuri::Camera *camera = cameraSystem_.camera(mainCameraHandle_);
+    if (camera == nullptr) {
+      return;
+    }
+
+    nuri::LightDesc light{};
+    light.type = nuri::LightType::Directional;
+    light.name = "Default Directional";
+    light.position = camera->position() + camera->forward() * 2.0f;
+    light.rotation = camera->orientation();
+    light.color = glm::vec3(1.0f);
+    light.intensity = 2.0f;
+    light.enabled = true;
+    auto nodeResult = scene_.graph().createNode(
+        scene_.graph().rootNode(), light.name,
+        makeTransformMatrix(light.position, light.rotation));
+    NURI_ASSERT(!nodeResult.hasError(),
+                "Failed to create default directional light node: %s",
+                nodeResult.error().c_str());
+    light.position = glm::vec3(0.0f);
+    light.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    auto addResult = scene_.graph().addLight(nodeResult.value(), light);
+    NURI_ASSERT(!addResult.hasError(),
+                "Failed to add default directional light: %s",
+                addResult.error().c_str());
   }
 
   void releaseOwnedResourceHandles() {
@@ -543,9 +569,20 @@ private:
       ref = invalidRef;
     };
 
-    releaseRef(helmetModel_, nuri::kInvalidModelRef);
-    releaseRef(helmetMaterial_, nuri::kInvalidMaterialRef);
-    helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+    for (nuri::ModelRef model : helmetSceneAssets_.models) {
+      if (nuri::isValid(model)) {
+        resources.release(model);
+      }
+    }
+    for (nuri::MaterialRef material : helmetSceneAssets_.materials) {
+      if (nuri::isValid(material)) {
+        resources.release(material);
+      }
+    }
+    helmetSceneAssets_ = nuri::ScenePrefabAssets{};
+    helmetPrefab_ = nuri::ScenePrefab{};
+    helmetRenderableId_ = nuri::kInvalidRenderableId;
+    helmetNode_ = nuri::kInvalidNodeId;
   }
 
   void updatePerformanceMetrics(double deltaTime) {
@@ -565,8 +602,8 @@ private:
   }
 
   void updateHelmetRotation(double deltaTime) {
-    if (helmetRenderableIndex_ == std::numeric_limits<uint32_t>::max() ||
-        !std::isfinite(deltaTime) || deltaTime <= 0.0) {
+    if (!nuri::isValid(helmetNode_) || !std::isfinite(deltaTime) ||
+        deltaTime <= 0.0) {
       return;
     }
 
@@ -578,29 +615,53 @@ private:
 
     const glm::mat4 modelMatrix = glm::rotate(
         helmetBaseModel_, helmetRotationRadians_, glm::vec3(0.0f, 0.0f, 1.0f));
-    const bool updated = scene_.setOpaqueRenderableTransform(
-        helmetRenderableIndex_, modelMatrix);
-    NURI_ASSERT(updated, "Failed to update DamagedHelmet transform");
+    const bool updated =
+        scene_.graph().setNodeLocalTransform(helmetNode_, modelMatrix);
+    NURI_ASSERT(updated, "Failed to update DamagedHelmet node transform");
   }
 
   void buildFrameContext(const nuri::Camera &camera, double timeSeconds) {
+    nuri::sanitizeHDRPostProcessSettings(renderSettings_.hdrPostProcess);
+    nuri::sanitizeTransmissionSettings(renderSettings_.transmission);
+    nuri::sanitizeAntiAliasingSettings(renderSettings_.antiAliasing);
+    nuri::sanitizeAmbientOcclusionSettings(renderSettings_.ambientOcclusion,
+                                           renderSettings_.opaque,
+                                           renderSettings_.antiAliasing);
     frameContext_.scene = &scene_;
-    frameContext_.resources = &getRenderer().resources();
-    frameContext_.camera.view = camera.viewMatrix();
-    frameContext_.camera.proj = camera.projectionMatrix(getAspectRatio());
-    frameContext_.camera.cameraPos = glm::vec4(camera.position(), 1.0f);
-    frameContext_.camera.aspectRatio = getAspectRatio();
+    nuri::ResourceManager &resources = getRenderer().resources();
+    frameContext_.resources = &resources;
+    frameContext_.frameIndex = frameIndex_++;
+    const nuri::MaterialTableSnapshot materialSnapshot =
+        resources.materialSnapshot();
+    const nuri::TemporalSceneContentState sceneContent{
+        .lightTopologyVersion = scene_.lightTopologyVersion(),
+        .lightTransformVersion = scene_.lightTransformVersion(),
+        .materialTableVersion = materialSnapshot.version,
+        .environmentVersion = scene_.environmentVersion(),
+    };
+    frameContext_.camera = nuri::makeTemporalCameraFrameState(
+        camera, getAspectRatio(), renderSettings_.antiAliasing,
+        nuri::TemporalCameraFrameDesc{
+            .renderExtent =
+                glm::uvec2(static_cast<uint32_t>(std::max(getWidth(), 0)),
+                           static_cast<uint32_t>(std::max(getHeight(), 0))),
+            .sceneContent = sceneContent,
+        },
+        temporalCameraHistory_);
+    renderSettings_.antiAliasing.debug.resetHistoryRequested = false;
     frameContext_.settings = &renderSettings_;
     frameContext_.metrics = {};
-    frameContext_.channels.clear();
-    frameContext_.layerStack = nullptr;
+    frameContext_.metrics.frameIndex = frameContext_.frameIndex;
+    frameContext_.metrics.antiAliasing =
+        nuri::makeAntiAliasingFrameMetrics(frameContext_.camera);
     frameContext_.sharedDepthTexture = {};
     frameContext_.timeSeconds = timeSeconds;
-    frameContext_.frameIndex = frameIndex_++;
+    frameContext_.deltaSeconds = frameDeltaSeconds_;
   }
 
-  void submitLayeredFrame() {
-    auto renderResult = getRenderer().render(getLayerStack(), frameContext_);
+  void submitPipelineFrame() {
+    auto renderResult =
+        getRenderer().render(getRenderPipeline(), frameContext_);
     NURI_ASSERT(!renderResult.hasError(), "Render failed: %s",
                 renderResult.error().c_str());
   }
@@ -610,16 +671,20 @@ private:
   std::pmr::unsynchronized_pool_resource sceneMemory_;
   nuri::CameraSystem cameraSystem_;
   nuri::RenderScene scene_;
-  nuri::ModelRef helmetModel_ = nuri::kInvalidModelRef;
-  nuri::MaterialRef helmetMaterial_ = nuri::kInvalidMaterialRef;
+  nuri::SceneRuntimeHost sceneRuntime_;
+  nuri::ScenePrefab helmetPrefab_{};
+  nuri::ScenePrefabAssets helmetSceneAssets_{};
   nuri::CameraHandle mainCameraHandle_{};
-  uint32_t helmetRenderableIndex_ = std::numeric_limits<uint32_t>::max();
+  nuri::NodeId helmetNode_ = nuri::kInvalidNodeId;
+  nuri::RenderableId helmetRenderableId_ = nuri::kInvalidRenderableId;
   glm::mat4 helmetBaseModel_ =
       glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0));
 
   nuri::RenderSettings renderSettings_{};
   nuri::RenderFrameContext frameContext_{};
+  nuri::TemporalCameraHistoryState temporalCameraHistory_{};
   uint64_t frameIndex_ = 0;
+  uint64_t simulationFrameIndex_ = 0;
   double frameDeltaSeconds_ = 0.0;
   double fpsAccumulatorSeconds_ = 0.0;
   uint32_t fpsFrameCount_ = 0;
@@ -627,7 +692,7 @@ private:
   float helmetRotationRadians_ = 0.0f;
   std::unique_ptr<nuri::TextSystem> textSystem_{};
   nuri::ScratchArena textScratchArena_{};
-  nuri::TextLayer2D *textLayer2D_ = nullptr;
+  bool textOverlayEnabled_ = false;
 };
 
 int main() {
