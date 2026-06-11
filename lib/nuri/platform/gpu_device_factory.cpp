@@ -13,10 +13,9 @@ namespace nuri {
 std::unique_ptr<GPUDevice> GPUDevice::create(Window &window,
                                              const GPUDeviceCreateDesc &desc) {
   std::string backend = readEnvVar("NURI_GPU_BACKEND").value_or("nvrhi");
-  std::transform(backend.begin(), backend.end(), backend.begin(),
-                 [](unsigned char c) {
-                   return static_cast<char>(std::tolower(c));
-                 });
+  std::transform(
+      backend.begin(), backend.end(), backend.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
   if (backend == "lvk") {
     NURI_LOG_INFO("GPUDevice::create: creating LVK backend");

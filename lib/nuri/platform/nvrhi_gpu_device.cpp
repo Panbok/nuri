@@ -684,9 +684,7 @@ toNvrhiBufferState(GraphicsBarrierState state,
         "kTextures2DShadow[];\n"
         "layout (set = 0, binding = 1) uniform sampler       kSamplers[];\n"
         "layout (set = 3, binding = 1) uniform samplerShadow "
-        "kSamplersShadow[];\n"
-        "layout (set = 0, binding = 3) uniform sampler2D     "
-        "kSamplersYUV[];\n";
+        "kSamplersShadow[];\n";
     if (contains("textureBindless2D(")) {
       patched +=
           "vec4 textureBindless2D(uint textureid, uint samplerid, vec2 uv) {\n"
