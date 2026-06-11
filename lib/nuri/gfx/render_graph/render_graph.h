@@ -324,6 +324,17 @@ struct NURI_API RenderGraphCompileResult {
     uint32_t bufferResourceIndex = UINT32_MAX;
   };
 
+  struct PassDependencyTextureRange {
+    uint32_t offset = 0;
+    uint32_t count = 0;
+  };
+
+  struct UnresolvedDependencyTextureBinding {
+    uint32_t orderedPassIndex = UINT32_MAX;
+    uint32_t dependencyTextureIndex = UINT32_MAX;
+    uint32_t textureResourceIndex = UINT32_MAX;
+  };
+
   struct PassDispatchRange {
     uint32_t offset = 0;
     uint32_t count = 0;
@@ -403,6 +414,11 @@ struct NURI_API RenderGraphCompileResult {
   std::pmr::vector<PassDependencyBufferRange> dependencyBufferRangesByPass;
   std::pmr::vector<UnresolvedDependencyBufferBinding>
       unresolvedDependencyBufferBindings;
+  std::pmr::vector<TextureHandle> resolvedDependencyTextures;
+  std::pmr::vector<uint32_t> resolvedDependencyTextureResourceIndices;
+  std::pmr::vector<PassDependencyTextureRange> dependencyTextureRangesByPass;
+  std::pmr::vector<UnresolvedDependencyTextureBinding>
+      unresolvedDependencyTextureBindings;
   std::pmr::vector<ComputeDispatchItem> ownedPreDispatches;
   std::pmr::vector<DrawItem> ownedDrawItems;
   std::pmr::vector<PassDispatchRange> preDispatchRangesByPass;
@@ -438,6 +454,10 @@ struct NURI_API RenderGraphCompileResult {
         resolvedDependencyBufferResourceIndices(ensureMemory(memory)),
         dependencyBufferRangesByPass(ensureMemory(memory)),
         unresolvedDependencyBufferBindings(ensureMemory(memory)),
+        resolvedDependencyTextures(ensureMemory(memory)),
+        resolvedDependencyTextureResourceIndices(ensureMemory(memory)),
+        dependencyTextureRangesByPass(ensureMemory(memory)),
+        unresolvedDependencyTextureBindings(ensureMemory(memory)),
         ownedPreDispatches(ensureMemory(memory)),
         ownedDrawItems(ensureMemory(memory)),
         preDispatchRangesByPass(ensureMemory(memory)),
@@ -665,6 +685,7 @@ private:
     std::pmr::vector<std::pmr::vector<TextureHandle>>
         preDispatchDependencyTextures;
     std::pmr::vector<BufferHandle> dependencyBuffers;
+    std::pmr::vector<TextureHandle> dependencyTextures;
     std::pmr::vector<DrawItem> draws;
     std::pmr::vector<std::pmr::string> drawDebugLabels;
     std::pmr::vector<std::pmr::vector<std::byte>> drawPushConstants;
@@ -675,7 +696,8 @@ private:
           preDispatchDebugLabels(memory), preDispatchPushConstants(memory),
           preDispatchDependencyBuffers(memory),
           preDispatchDependencyTextures(memory), dependencyBuffers(memory),
-          draws(memory), drawDebugLabels(memory), drawPushConstants(memory) {}
+          dependencyTextures(memory), draws(memory), drawDebugLabels(memory),
+          drawPushConstants(memory) {}
   };
 
   struct CompileWorkState {
@@ -722,6 +744,13 @@ private:
                                    std::string_view debugLabel);
   [[nodiscard]] Result<bool, std::string> addPreResolvedDrawBufferAccesses(
       RenderGraphPassId pass, std::span<const RenderGraphBufferId> buffers);
+  [[nodiscard]] Result<bool, std::string> bindPassDependencyTexture(
+      RenderGraphPassId pass, uint32_t dependencyIndex,
+      RenderGraphTextureId texture,
+      RenderGraphAccessMode mode = RenderGraphAccessMode::Read);
+  [[nodiscard]] Result<bool, std::string> appendPassDependencyTexture(
+      RenderGraphPassId pass, RenderGraphTextureId texture,
+      RenderGraphAccessMode mode = RenderGraphAccessMode::Read);
   [[nodiscard]] Result<bool, std::string>
   applyImplicitPassRoots(RenderGraphPassId pass,
                          const RenderGraphGraphicsPassDesc &desc);
@@ -769,6 +798,9 @@ private:
   std::pmr::vector<uint32_t> passDependencyBufferBindingOffsets_;
   std::pmr::vector<uint32_t> passDependencyBufferBindingCounts_;
   std::pmr::vector<uint32_t> passDependencyBufferBindingResourceIndices_;
+  std::pmr::vector<uint32_t> passDependencyTextureBindingOffsets_;
+  std::pmr::vector<uint32_t> passDependencyTextureBindingCounts_;
+  std::pmr::vector<uint32_t> passDependencyTextureBindingResourceIndices_;
   std::pmr::vector<uint32_t> passPreDispatchBindingOffsets_;
   std::pmr::vector<uint32_t> passPreDispatchBindingCounts_;
   std::pmr::vector<uint32_t> preDispatchDependencyBindingOffsets_;

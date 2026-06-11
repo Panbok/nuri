@@ -2,19 +2,11 @@
 
 layout(vertices = 3) out;
 
-layout(location = 0) in vec2 inUv0[];
-layout(location = 1) in vec2 inUv1[];
-layout(location = 2) in vec3 inWorldNormal[];
-layout(location = 3) in vec3 inWorldPos[];
-layout(location = 4) in vec4 inWorldTangent[];
+layout(location = 0) in vec3 inWorldPos[];
+layout(location = 5) flat in uint inInstanceId[];
 
-layout(location = 0) out vec2 outUv0[];
-layout(location = 1) out vec2 outUv1[];
-layout(location = 2) out vec3 outWorldNormal[];
-layout(location = 3) out vec3 outWorldPos[];
-layout(location = 4) out vec4 outWorldTangent[];
-layout(location = 6) patch out vec3 outPatchOuterFactors;
-layout(location = 7) patch out float outPatchInnerFactor;
+layout(location = 0) out vec3 outWorldPos[];
+layout(location = 5) flat out uint outInstanceId[];
 
 float distanceToTessFactor(float distanceToCamera) {
   const float nearDistance = max(pc.tessNearDistance, 0.0);
@@ -28,11 +20,8 @@ float distanceToTessFactor(float distanceToCamera) {
 }
 
 void main() {
-  outUv0[gl_InvocationID] = inUv0[gl_InvocationID];
-  outUv1[gl_InvocationID] = inUv1[gl_InvocationID];
-  outWorldNormal[gl_InvocationID] = inWorldNormal[gl_InvocationID];
   outWorldPos[gl_InvocationID] = inWorldPos[gl_InvocationID];
-  outWorldTangent[gl_InvocationID] = inWorldTangent[gl_InvocationID];
+  outInstanceId[gl_InvocationID] = inInstanceId[gl_InvocationID];
   gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
 
   if (gl_InvocationID != 0u) {
@@ -54,6 +43,4 @@ void main() {
   gl_TessLevelOuter[1] = outer1;
   gl_TessLevelOuter[2] = outer2;
   gl_TessLevelInner[0] = (outer0 + outer1 + outer2) * (1.0 / 3.0);
-  outPatchOuterFactors = vec3(outer0, outer1, outer2);
-  outPatchInnerFactor = gl_TessLevelInner[0];
 }

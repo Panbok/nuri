@@ -182,6 +182,8 @@ struct StreamingSceneFactoryDesc {
   std::string fallbackMaterialDebugName{};
   glm::vec3 lodThresholds{8.0f, 24.0f, 48.0f};
   std::function<void(EditorRuntime &)> configureRender{};
+  std::function<void(EditorRuntime &, StreamingSceneState &)>
+      configureLoadedScene{};
   std::function<void(EditorRuntime &, StreamingSceneState &)> configureCamera{};
 };
 

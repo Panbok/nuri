@@ -10,12 +10,12 @@
 
 namespace nuri {
 
-// Public render-graph contract: a submit item may depend on up to 12 resources
-// of each dependency kind.
-// Backends can impose stricter limits, but higher-level layers should respect
-// this cap to avoid backend-specific failures.
+// Buffer dependency spans are capped to match LVK submit dependency storage.
+// Texture dependencies can be much larger for bindless material passes; NVRHI
+// consumes them as state-transition spans instead of fixed submit arrays.
 constexpr size_t kMaxDependencyResources = 12;
 constexpr size_t kMaxDependencyBuffers = kMaxDependencyResources;
+constexpr size_t kMaxDependencyTextures = 1024;
 
 struct Viewport {
   float x = 0.0f;
@@ -398,6 +398,7 @@ struct RenderPass {
   Viewport viewport{};
   std::span<const ComputeDispatchItem> preDispatches{};
   std::span<const BufferHandle> dependencyBuffers{};
+  std::span<const TextureHandle> dependencyTextures{};
   std::span<const DrawItem> draws{};
   bool drawBuffersPreResolved = false;
   GpuTimingScope gpuTimingScope = GpuTimingScope::None;

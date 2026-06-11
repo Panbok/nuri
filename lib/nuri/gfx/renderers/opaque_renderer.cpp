@@ -715,6 +715,10 @@ void OpaqueRenderer::onDetach() {
   meshFragmentShader_ = {};
   meshDebugOverlayGeometryShader_ = {};
   meshDebugOverlayFragmentShader_ = {};
+  meshPickVertexShader_ = {};
+  meshPickTessVertexShader_ = {};
+  meshPickTessControlShader_ = {};
+  meshPickTessEvalShader_ = {};
   meshPickFragmentShader_ = {};
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
@@ -722,6 +726,14 @@ void OpaqueRenderer::onDetach() {
   meshReactiveMaskVertexShader_ = {};
   meshReactiveMaskFragmentShader_ = {};
   meshNormalFragmentShader_ = {};
+  depthVertexShader_ = {};
+  depthTessVertexShader_ = {};
+  depthTessControlShader_ = {};
+  depthTessEvalShader_ = {};
+  depthAlphaVertexShader_ = {};
+  depthAlphaTessVertexShader_ = {};
+  depthAlphaTessControlShader_ = {};
+  depthAlphaTessEvalShader_ = {};
   depthFragmentShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
@@ -5497,6 +5509,10 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshFragmentShader_ = {};
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
+    meshPickVertexShader_ = {};
+    meshPickTessVertexShader_ = {};
+    meshPickTessControlShader_ = {};
+    meshPickTessEvalShader_ = {};
     meshPickFragmentShader_ = {};
     meshShadowInspectFragmentShader_ = {};
     meshVelocityVertexShader_ = {};
@@ -5504,6 +5520,14 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshReactiveMaskVertexShader_ = {};
     meshReactiveMaskFragmentShader_ = {};
     meshNormalFragmentShader_ = {};
+    depthVertexShader_ = {};
+    depthTessVertexShader_ = {};
+    depthTessControlShader_ = {};
+    depthTessEvalShader_ = {};
+    depthAlphaVertexShader_ = {};
+    depthAlphaTessVertexShader_ = {};
+    depthAlphaTessControlShader_ = {};
+    depthAlphaTessEvalShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -5539,6 +5563,10 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshFragmentShader_ = {};
     meshDebugOverlayGeometryShader_ = {};
     meshDebugOverlayFragmentShader_ = {};
+    meshPickVertexShader_ = {};
+    meshPickTessVertexShader_ = {};
+    meshPickTessControlShader_ = {};
+    meshPickTessEvalShader_ = {};
     meshPickFragmentShader_ = {};
     meshShadowInspectFragmentShader_ = {};
     meshVelocityVertexShader_ = {};
@@ -5546,6 +5574,14 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
     meshReactiveMaskVertexShader_ = {};
     meshReactiveMaskFragmentShader_ = {};
     meshNormalFragmentShader_ = {};
+    depthVertexShader_ = {};
+    depthTessVertexShader_ = {};
+    depthTessControlShader_ = {};
+    depthTessEvalShader_ = {};
+    depthAlphaVertexShader_ = {};
+    depthAlphaTessVertexShader_ = {};
+    depthAlphaTessControlShader_ = {};
+    depthAlphaTessEvalShader_ = {};
     depthFragmentShader_ = {};
     depthAlphaFragmentShader_ = {};
     depthPyramidVertexShader_ = {};
@@ -6324,14 +6360,26 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshFragmentShader_ = {};
   meshDebugOverlayGeometryShader_ = {};
   meshDebugOverlayFragmentShader_ = {};
+  meshPickVertexShader_ = {};
   meshPickFragmentShader_ = {};
+  meshPickTessVertexShader_ = {};
+  meshPickTessControlShader_ = {};
+  meshPickTessEvalShader_ = {};
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
   meshVelocityFragmentShader_ = {};
   meshReactiveMaskVertexShader_ = {};
   meshReactiveMaskFragmentShader_ = {};
   meshNormalFragmentShader_ = {};
+  depthVertexShader_ = {};
   depthFragmentShader_ = {};
+  depthTessVertexShader_ = {};
+  depthTessControlShader_ = {};
+  depthTessEvalShader_ = {};
+  depthAlphaVertexShader_ = {};
+  depthAlphaTessVertexShader_ = {};
+  depthAlphaTessControlShader_ = {};
+  depthAlphaTessEvalShader_ = {};
   depthAlphaFragmentShader_ = {};
   depthPyramidVertexShader_ = {};
   depthPyramidFragmentShader_ = {};
@@ -6369,13 +6417,18 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   }
 
   {
-    const std::string shaderPath = config_.pickFragment.string();
-    auto compileResult =
-        meshPickShader_->compileFromFile(shaderPath, ShaderStage::Fragment);
-    if (compileResult.hasError()) {
-      return Result<bool, std::string>::makeError(compileResult.error());
+    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    auto vertexResult = meshPickShader_->compileFromFile(
+        (shaderDir / "main_id_only.vert").string(), ShaderStage::Vertex);
+    auto fragmentResult = meshPickShader_->compileFromFile(
+        config_.pickFragment.string(), ShaderStage::Fragment);
+    if (vertexResult.hasError() || fragmentResult.hasError()) {
+      return Result<bool, std::string>::makeError(vertexResult.hasError()
+                                                      ? vertexResult.error()
+                                                      : fragmentResult.error());
     }
-    meshPickFragmentShader_ = compileResult.value();
+    meshPickVertexShader_ = vertexResult.value();
+    meshPickFragmentShader_ = fragmentResult.value();
   }
 
   {
@@ -6454,6 +6507,18 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
 
   {
     const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    auto depthVertexCompileResult = depthShader_->compileFromFile(
+        (shaderDir / "opaque_depth.vert").string(), ShaderStage::Vertex);
+    if (depthVertexCompileResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: depth pre-pass vertex shader "
+          "failed, depth pre-pass will be disabled: %s",
+          depthVertexCompileResult.error().c_str());
+      depthVertexShader_ = {};
+    } else {
+      depthVertexShader_ = depthVertexCompileResult.value();
+    }
+
     const std::filesystem::path depthPath = shaderDir / "opaque_depth.frag";
     auto depthCompileResult = depthShader_->compileFromFile(
         depthPath.string(), ShaderStage::Fragment);
@@ -6465,6 +6530,18 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       depthFragmentShader_ = {};
     } else {
       depthFragmentShader_ = depthCompileResult.value();
+    }
+
+    auto depthAlphaVertexCompileResult = depthAlphaShader_->compileFromFile(
+        (shaderDir / "opaque_depth_alpha.vert").string(), ShaderStage::Vertex);
+    if (depthAlphaVertexCompileResult.hasError()) {
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createShaders: masked depth pre-pass vertex "
+          "shader failed, masked depth pre-pass will be disabled: %s",
+          depthAlphaVertexCompileResult.error().c_str());
+      depthAlphaVertexShader_ = {};
+    } else {
+      depthAlphaVertexShader_ = depthAlphaVertexCompileResult.value();
     }
 
     const std::filesystem::path depthAlphaPath =
@@ -6537,6 +6614,95 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
       break;
     }
     *spec.outHandle = compileResult.value();
+  }
+
+  if (!tessellationUnsupported_) {
+    const std::filesystem::path shaderDir = config_.meshFragment.parent_path();
+    const std::array<std::filesystem::path, 3> pickTessPaths = {
+        shaderDir / "main_id_tess.vert", shaderDir / "main_id_tess.tesc",
+        shaderDir / "main_id_tess.tese"};
+    const std::array<ShaderSpec, 3> pickTessShaderSpecs = {
+        ShaderSpec{meshPickShader_.get(), &pickTessPaths[0],
+                   ShaderStage::Vertex, &meshPickTessVertexShader_},
+        ShaderSpec{meshPickShader_.get(), &pickTessPaths[1],
+                   ShaderStage::TessControl, &meshPickTessControlShader_},
+        ShaderSpec{meshPickShader_.get(), &pickTessPaths[2],
+                   ShaderStage::TessEval, &meshPickTessEvalShader_},
+    };
+    for (const ShaderSpec &spec : pickTessShaderSpecs) {
+      const std::string shaderPath = spec.path->string();
+      auto compileResult = spec.shader->compileFromFile(shaderPath, spec.stage);
+      if (compileResult.hasError()) {
+        meshPickTessVertexShader_ = {};
+        meshPickTessControlShader_ = {};
+        meshPickTessEvalShader_ = {};
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createShaders: pick tessellation shader path "
+            "'%s' failed, tessellated picking will fall back to the "
+            "non-tessellation path: %s",
+            shaderPath.c_str(), compileResult.error().c_str());
+        break;
+      }
+      *spec.outHandle = compileResult.value();
+    }
+
+    const std::array<std::filesystem::path, 3> depthAlphaTessPaths = {
+        shaderDir / "opaque_depth_alpha_tess.vert",
+        shaderDir / "opaque_depth_alpha_tess.tesc",
+        shaderDir / "opaque_depth_alpha_tess.tese"};
+    const std::array<ShaderSpec, 3> depthAlphaTessShaderSpecs = {
+        ShaderSpec{depthAlphaShader_.get(), &depthAlphaTessPaths[0],
+                   ShaderStage::Vertex, &depthAlphaTessVertexShader_},
+        ShaderSpec{depthAlphaShader_.get(), &depthAlphaTessPaths[1],
+                   ShaderStage::TessControl, &depthAlphaTessControlShader_},
+        ShaderSpec{depthAlphaShader_.get(), &depthAlphaTessPaths[2],
+                   ShaderStage::TessEval, &depthAlphaTessEvalShader_},
+    };
+    for (const ShaderSpec &spec : depthAlphaTessShaderSpecs) {
+      const std::string shaderPath = spec.path->string();
+      auto compileResult = spec.shader->compileFromFile(shaderPath, spec.stage);
+      if (compileResult.hasError()) {
+        depthAlphaTessVertexShader_ = {};
+        depthAlphaTessControlShader_ = {};
+        depthAlphaTessEvalShader_ = {};
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createShaders: masked depth tessellation shader "
+            "path '%s' failed, tessellated masked depth pre-pass will fall "
+            "back to the non-tessellation depth path: %s",
+            shaderPath.c_str(), compileResult.error().c_str());
+        break;
+      }
+      *spec.outHandle = compileResult.value();
+    }
+
+    const std::array<std::filesystem::path, 3> depthTessPaths = {
+        shaderDir / "opaque_depth_tess.vert",
+        shaderDir / "opaque_depth_tess.tesc",
+        shaderDir / "opaque_depth_tess.tese"};
+    const std::array<ShaderSpec, 3> depthTessShaderSpecs = {
+        ShaderSpec{depthShader_.get(), &depthTessPaths[0], ShaderStage::Vertex,
+                   &depthTessVertexShader_},
+        ShaderSpec{depthShader_.get(), &depthTessPaths[1],
+                   ShaderStage::TessControl, &depthTessControlShader_},
+        ShaderSpec{depthShader_.get(), &depthTessPaths[2],
+                   ShaderStage::TessEval, &depthTessEvalShader_},
+    };
+    for (const ShaderSpec &spec : depthTessShaderSpecs) {
+      const std::string shaderPath = spec.path->string();
+      auto compileResult = spec.shader->compileFromFile(shaderPath, spec.stage);
+      if (compileResult.hasError()) {
+        depthTessVertexShader_ = {};
+        depthTessControlShader_ = {};
+        depthTessEvalShader_ = {};
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::createShaders: depth tessellation shader path "
+            "'%s' failed, tessellated depth pre-pass will fall back to the "
+            "non-tessellation depth path: %s",
+            shaderPath.c_str(), compileResult.error().c_str());
+        break;
+      }
+      *spec.outHandle = compileResult.value();
+    }
   }
 
   if (!meshDebugOverlayShader_) {
@@ -6800,16 +6966,17 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     desc.numSamples = kMsaa4xSampleCount;
     return createDepthPipeline(desc, debugName, outHandle);
   };
-  if (nuri::isValid(depthFragmentShader_)) {
+  if (nuri::isValid(depthVertexShader_) &&
+      nuri::isValid(depthFragmentShader_)) {
     const RenderPipelineDesc depthDesc =
-        depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
+        depthPipelineDesc(depthFormat, depthVertexShader_, {}, {},
                           depthFragmentShader_, CullMode::Back);
     createDepthPipeline(depthDesc, "opaque_mesh_depth",
                         meshDepthPipelineHandle_);
     createMsaaDepthPipeline(depthDesc, "opaque_mesh_depth_msaa4x",
                             meshMsaaDepthPipelineHandle_);
     const RenderPipelineDesc doubleSidedDepthDesc =
-        depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
+        depthPipelineDesc(depthFormat, depthVertexShader_, {}, {},
                           depthFragmentShader_, CullMode::None);
     createDepthPipeline(doubleSidedDepthDesc, "opaque_mesh_depth_double_sided",
                         meshDepthDoubleSidedPipelineHandle_);
@@ -6817,16 +6984,17 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                             "opaque_mesh_depth_double_sided_msaa4x",
                             meshMsaaDepthDoubleSidedPipelineHandle_);
   }
-  if (nuri::isValid(depthAlphaFragmentShader_)) {
+  if (nuri::isValid(depthAlphaVertexShader_) &&
+      nuri::isValid(depthAlphaFragmentShader_)) {
     const RenderPipelineDesc depthAlphaDesc =
-        depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
+        depthPipelineDesc(depthFormat, depthAlphaVertexShader_, {}, {},
                           depthAlphaFragmentShader_, CullMode::Back);
     createDepthPipeline(depthAlphaDesc, "opaque_mesh_depth_alpha",
                         meshDepthAlphaPipelineHandle_);
     createMsaaDepthPipeline(depthAlphaDesc, "opaque_mesh_depth_alpha_msaa4x",
                             meshMsaaDepthAlphaPipelineHandle_);
     const RenderPipelineDesc doubleSidedDepthAlphaDesc =
-        depthPipelineDesc(depthFormat, meshVertexShader_, {}, {},
+        depthPipelineDesc(depthFormat, depthAlphaVertexShader_, {}, {},
                           depthAlphaFragmentShader_, CullMode::None);
     createDepthPipeline(doubleSidedDepthAlphaDesc,
                         "opaque_mesh_depth_alpha_double_sided",
@@ -6839,6 +7007,26 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
       !tessellationUnsupported_ && nuri::isValid(meshTessVertexShader_) &&
       nuri::isValid(meshTessControlShader_) &&
       nuri::isValid(meshTessEvalShader_) && nuri::isValid(meshFragmentShader_);
+  const auto canCreatePickTessPipeline = [this]() -> bool {
+    return !tessellationUnsupported_ &&
+           nuri::isValid(meshPickTessVertexShader_) &&
+           nuri::isValid(meshPickTessControlShader_) &&
+           nuri::isValid(meshPickTessEvalShader_) &&
+           nuri::isValid(meshPickFragmentShader_);
+  };
+  const auto canCreateDepthTessPipeline = [this]() -> bool {
+    return !tessellationUnsupported_ && nuri::isValid(depthTessVertexShader_) &&
+           nuri::isValid(depthTessControlShader_) &&
+           nuri::isValid(depthTessEvalShader_) &&
+           nuri::isValid(depthFragmentShader_);
+  };
+  const auto canCreateDepthAlphaTessPipeline = [this]() -> bool {
+    return !tessellationUnsupported_ &&
+           nuri::isValid(depthAlphaTessVertexShader_) &&
+           nuri::isValid(depthAlphaTessControlShader_) &&
+           nuri::isValid(depthAlphaTessEvalShader_) &&
+           nuri::isValid(depthAlphaFragmentShader_);
+  };
   if (canCreateTessPipeline) {
     const RenderPipelineDesc tessDesc = meshPipelineDesc(
         kFrameCompositionSceneColorFormat, depthFormat, meshTessVertexShader_,
@@ -6981,18 +7169,18 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
       }
     }
     if (!tessellationUnsupported_) {
-      if (nuri::isValid(depthFragmentShader_)) {
+      if (canCreateDepthTessPipeline()) {
         const RenderPipelineDesc depthTessDesc = depthPipelineDesc(
-            depthFormat, meshTessVertexShader_, meshTessControlShader_,
-            meshTessEvalShader_, depthFragmentShader_, CullMode::Back,
+            depthFormat, depthTessVertexShader_, depthTessControlShader_,
+            depthTessEvalShader_, depthFragmentShader_, CullMode::Back,
             Topology::Patch, kTessellationPatchControlPoints);
         createDepthPipeline(depthTessDesc, "opaque_mesh_depth_tess",
                             meshDepthTessPipelineHandle_);
         createMsaaDepthPipeline(depthTessDesc, "opaque_mesh_depth_tess_msaa4x",
                                 meshMsaaDepthTessPipelineHandle_);
         const RenderPipelineDesc depthDoubleSidedTessDesc = depthPipelineDesc(
-            depthFormat, meshTessVertexShader_, meshTessControlShader_,
-            meshTessEvalShader_, depthFragmentShader_, CullMode::None,
+            depthFormat, depthTessVertexShader_, depthTessControlShader_,
+            depthTessEvalShader_, depthFragmentShader_, CullMode::None,
             Topology::Patch, kTessellationPatchControlPoints);
         createDepthPipeline(depthDoubleSidedTessDesc,
                             "opaque_mesh_depth_tess_double_sided",
@@ -7001,19 +7189,21 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
                                 "opaque_mesh_depth_tess_double_sided_msaa4x",
                                 meshMsaaDepthDoubleSidedTessPipelineHandle_);
       }
-      if (nuri::isValid(depthAlphaFragmentShader_)) {
+      if (canCreateDepthAlphaTessPipeline()) {
         const RenderPipelineDesc depthAlphaTessDesc = depthPipelineDesc(
-            depthFormat, meshTessVertexShader_, meshTessControlShader_,
-            meshTessEvalShader_, depthAlphaFragmentShader_, CullMode::Back,
-            Topology::Patch, kTessellationPatchControlPoints);
+            depthFormat, depthAlphaTessVertexShader_,
+            depthAlphaTessControlShader_, depthAlphaTessEvalShader_,
+            depthAlphaFragmentShader_, CullMode::Back, Topology::Patch,
+            kTessellationPatchControlPoints);
         createDepthPipeline(depthAlphaTessDesc, "opaque_mesh_depth_alpha_tess",
                             meshDepthAlphaTessPipelineHandle_);
         createMsaaDepthPipeline(depthAlphaTessDesc,
                                 "opaque_mesh_depth_alpha_tess_msaa4x",
                                 meshMsaaDepthAlphaTessPipelineHandle_);
         const RenderPipelineDesc depthAlphaDoubleSidedTessDesc =
-            depthPipelineDesc(depthFormat, meshTessVertexShader_,
-                              meshTessControlShader_, meshTessEvalShader_,
+            depthPipelineDesc(depthFormat, depthAlphaTessVertexShader_,
+                              depthAlphaTessControlShader_,
+                              depthAlphaTessEvalShader_,
                               depthAlphaFragmentShader_, CullMode::None,
                               Topology::Patch, kTessellationPatchControlPoints);
         createDepthPipeline(depthAlphaDoubleSidedTessDesc,
@@ -7067,9 +7257,9 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
   }
 
   {
-    const RenderPipelineDesc pickDesc =
-        meshPipelineDesc(Format::R32_UINT, depthFormat, meshVertexShader_, {},
-                         {}, {}, meshPickFragmentShader_, PolygonMode::Fill);
+    const RenderPipelineDesc pickDesc = meshPipelineDesc(
+        Format::R32_UINT, depthFormat, meshPickVertexShader_, {}, {}, {},
+        meshPickFragmentShader_, PolygonMode::Fill);
     auto pickPipelineResult =
         gpu_.createRenderPipeline(pickDesc, "opaque_mesh_pick");
     if (pickPipelineResult.hasError()) {
@@ -7092,8 +7282,8 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
 
   {
     const RenderPipelineDesc doubleSidedPickDesc =
-        meshPipelineDesc(Format::R32_UINT, depthFormat, meshVertexShader_, {},
-                         {}, {}, meshPickFragmentShader_, PolygonMode::Fill,
+        meshPipelineDesc(Format::R32_UINT, depthFormat, meshPickVertexShader_,
+                         {}, {}, {}, meshPickFragmentShader_, PolygonMode::Fill,
                          Topology::Triangle, 0, false, CullMode::None);
     auto doubleSidedPickResult = gpu_.createRenderPipeline(
         doubleSidedPickDesc, "opaque_mesh_pick_double_sided");
@@ -7120,12 +7310,12 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     meshPickDoubleSidedPipelineHandle_ = doubleSidedPickResult.value();
   }
 
-  if (canCreateTessPipeline) {
-    const RenderPipelineDesc pickTessDesc =
-        meshPipelineDesc(Format::R32_UINT, depthFormat, meshTessVertexShader_,
-                         meshTessControlShader_, meshTessEvalShader_, {},
-                         meshPickFragmentShader_, PolygonMode::Fill,
-                         Topology::Patch, kTessellationPatchControlPoints);
+  if (canCreatePickTessPipeline()) {
+    const RenderPipelineDesc pickTessDesc = meshPipelineDesc(
+        Format::R32_UINT, depthFormat, meshPickTessVertexShader_,
+        meshPickTessControlShader_, meshPickTessEvalShader_, {},
+        meshPickFragmentShader_, PolygonMode::Fill, Topology::Patch,
+        kTessellationPatchControlPoints);
     auto pickTessResult =
         gpu_.createRenderPipeline(pickTessDesc, "opaque_mesh_tess_pick");
     if (pickTessResult.hasError()) {
@@ -7139,8 +7329,8 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     }
     if (!tessellationUnsupported_) {
       const RenderPipelineDesc doubleSidedPickTessDesc = meshPipelineDesc(
-          Format::R32_UINT, depthFormat, meshTessVertexShader_,
-          meshTessControlShader_, meshTessEvalShader_, {},
+          Format::R32_UINT, depthFormat, meshPickTessVertexShader_,
+          meshPickTessControlShader_, meshPickTessEvalShader_, {},
           meshPickFragmentShader_, PolygonMode::Fill, Topology::Patch,
           kTessellationPatchControlPoints, false, CullMode::None);
       auto doubleSidedPickTessResult = gpu_.createRenderPipeline(
@@ -7165,11 +7355,14 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     auto inspectPipelineResult =
         gpu_.createRenderPipeline(inspectDesc, "opaque_mesh_shadow_inspect");
     if (inspectPipelineResult.hasError()) {
-      destroyMeshPipelineState();
-      return Result<bool, std::string>::makeError(
-          inspectPipelineResult.error());
+      meshShadowInspectPipelineHandle_ = {};
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createPipelines: shadow inspect pipeline disabled: "
+          "%s",
+          inspectPipelineResult.error().c_str());
+    } else {
+      meshShadowInspectPipelineHandle_ = inspectPipelineResult.value();
     }
-    meshShadowInspectPipelineHandle_ = inspectPipelineResult.value();
   }
 
   {
@@ -7180,12 +7373,15 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
     auto doubleSidedInspectResult = gpu_.createRenderPipeline(
         doubleSidedInspectDesc, "opaque_mesh_shadow_inspect_double_sided");
     if (doubleSidedInspectResult.hasError()) {
-      destroyMeshPipelineState();
-      return Result<bool, std::string>::makeError(
-          doubleSidedInspectResult.error());
+      meshShadowInspectDoubleSidedPipelineHandle_ = {};
+      NURI_LOG_WARNING(
+          "OpaqueRenderer::createPipelines: double-sided shadow inspect "
+          "pipeline disabled: %s",
+          doubleSidedInspectResult.error().c_str());
+    } else {
+      meshShadowInspectDoubleSidedPipelineHandle_ =
+          doubleSidedInspectResult.value();
     }
-    meshShadowInspectDoubleSidedPipelineHandle_ =
-        doubleSidedInspectResult.value();
   }
 
   if (canCreateTessPipeline) {

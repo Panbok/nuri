@@ -43,9 +43,11 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/sim/simulation_gpu_context.cpp
   nuri/gfx/renderer.cpp
   nuri/gfx/shader.cpp
+  nuri/platform/gpu_device_factory.cpp
   nuri/platform/glfw_window.cpp
   nuri/platform/lvk_gpu_device.cpp
   nuri/platform/minilog_log.cpp
+  nuri/platform/nvrhi_gpu_device.cpp
   nuri/resources/gpu/geometry_pool.cpp
   nuri/resources/gpu/material.cpp
   nuri/resources/gpu/model.cpp
@@ -143,6 +145,10 @@ if(NURI_WITH_ASSERTS)
   target_compile_definitions(nuri_renderer PUBLIC NURI_ASSERTS=1)
 endif()
 
+if(WIN32)
+  target_compile_definitions(nuri_renderer PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 find_package(glm CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
@@ -193,6 +199,15 @@ set(LVK_WITH_IMPLOT OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_OPENXR OFF CACHE BOOL "" FORCE)
 set(LVK_WITH_SLANG OFF CACHE BOOL "" FORCE)
 set(MINILOG_RAW_OUTPUT OFF CACHE BOOL "" FORCE)
+set(NVRHI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(NVRHI_INSTALL OFF CACHE BOOL "" FORCE)
+set(NVRHI_WITH_VALIDATION ${NURI_WITH_ASSERTS} CACHE BOOL "" FORCE)
+set(NVRHI_WITH_VULKAN ON CACHE BOOL "" FORCE)
+set(NVRHI_WITH_DX11 OFF CACHE BOOL "" FORCE)
+set(NVRHI_WITH_DX12 OFF CACHE BOOL "" FORCE)
+set(NVRHI_WITH_NVAPI OFF CACHE BOOL "" FORCE)
+set(NVRHI_WITH_AFTERMATH OFF CACHE BOOL "" FORCE)
+set(NVRHI_WITH_RTXMU OFF CACHE BOOL "" FORCE)
 
 set(LVK_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/lightweightvk")
 if(NOT EXISTS "${LVK_SOURCE_DIR}/CMakeLists.txt")
@@ -200,6 +215,13 @@ if(NOT EXISTS "${LVK_SOURCE_DIR}/CMakeLists.txt")
 endif()
 
 add_subdirectory("${LVK_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/lightweightvk-build")
+
+set(NVRHI_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/nvrhi")
+if(NOT EXISTS "${NVRHI_SOURCE_DIR}/CMakeLists.txt")
+  message(FATAL_ERROR "NVRHI submodule is missing at: ${NVRHI_SOURCE_DIR}. Run: git submodule update --init --recursive")
+endif()
+
+add_subdirectory("${NVRHI_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/nvrhi-build")
 
 if(NURI_WITH_TRACY_GPU_DRAW_ZONES)
   if(NURI_WITH_TRACY_GPU AND TARGET LVKVulkan)
@@ -214,6 +236,9 @@ target_link_libraries(nuri_renderer
     glm::glm
     assimp::assimp
     LVKLibrary
+  PRIVATE
+    nvrhi
+    nvrhi_vk
 )
 
 set(NURI_KTX_TARGET "")

@@ -213,10 +213,7 @@ TEST(RenderGraphTelemetryTest, CaptureDeepCopiesStructuredData) {
   EXPECT_TRUE(snapshot->summary.usedParallelHazardAnalysis);
   EXPECT_FALSE(snapshot->summary.usedParallelLifetimeAnalysis);
   EXPECT_TRUE(snapshot->summary.usedParallelRecording);
-  EXPECT_FALSE(snapshot->summary.compileCacheHit);
-  EXPECT_EQ(snapshot->summary.orderedDrawItemCount, 2u);
-  EXPECT_EQ(snapshot->summary.orderedIndirectDrawItemCount, 1u);
-  EXPECT_EQ(snapshot->summary.orderedIndirectCommandCount, 7u);
+  EXPECT_EQ(snapshot->summary.ownedDrawItemCount, 2u);
   EXPECT_NE(snapshot->summary.compileFingerprint, 0ull);
   EXPECT_NE(snapshot->summary.barrierFingerprint, 0ull);
   EXPECT_NE(snapshot->summary.executionFingerprint, 0ull);
@@ -265,11 +262,7 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
   EXPECT_NE(contents.find("used_parallel_validation: 1"), std::string::npos);
   EXPECT_NE(contents.find("used_parallel_payload_resolution: 1"),
             std::string::npos);
-  EXPECT_NE(contents.find("compile_cache_hit: 0"), std::string::npos);
-  EXPECT_NE(contents.find("ordered_draw_items: 2"), std::string::npos);
-  EXPECT_NE(contents.find("ordered_indirect_draw_items: 1"),
-            std::string::npos);
-  EXPECT_NE(contents.find("ordered_indirect_commands: 7"), std::string::npos);
+  EXPECT_NE(contents.find("owned_draw_items: 2"), std::string::npos);
   EXPECT_NE(contents.find("Recorded Command Buffers:"), std::string::npos);
   EXPECT_NE(contents.find("Submit Batches:"), std::string::npos);
   EXPECT_NE(contents.find("Final Barrier Plan:"), std::string::npos);
@@ -278,27 +271,6 @@ TEST(RenderGraphTelemetryTest, WriteDumpSerializesSnapshotAndValidatesInputs) {
 
   std::error_code ec;
   std::filesystem::remove(outputPath, ec);
-}
-
-TEST(RenderGraphTelemetryTest, CaptureRecordsCompileCacheHit) {
-  std::array<std::byte, 32 * 1024> serviceBytes{};
-  std::pmr::monotonic_buffer_resource serviceMemory(serviceBytes.data(),
-                                                    serviceBytes.size());
-  RenderGraphTelemetryService telemetry(&serviceMemory);
-
-  std::array<std::byte, 32 * 1024> compileBytes{};
-  std::pmr::monotonic_buffer_resource compileMemory(compileBytes.data(),
-                                                    compileBytes.size());
-  RenderGraphCompileResult compiled(&compileMemory);
-  RenderGraphExecutionMetadata execution(&compileMemory);
-  populateTelemetryCompileResult(compiled, &compileMemory);
-  populateTelemetryExecutionMetadata(execution, &compileMemory);
-
-  telemetry.capture(compiled, execution, true);
-
-  const RenderGraphTelemetrySnapshot *snapshot = telemetry.latestSnapshot();
-  ASSERT_NE(snapshot, nullptr);
-  EXPECT_TRUE(snapshot->summary.compileCacheHit);
 }
 
 TEST(RenderGraphTelemetryTest, SuggestDumpPathUsesEnvDirectorySeed) {

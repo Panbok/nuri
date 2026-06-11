@@ -6734,6 +6734,7 @@ struct ImGuiEditor::Impl {
   RenderFrameMetrics frameMetrics{};
   std::optional<ShadowDebugFrameData> shadowDebugFrameData{};
   std::optional<ShadowInspectResult> shadowInspectResult{};
+  uint64_t lastLoggedShadowInspectRequestId = 0;
   TextureHandle shadowPreviewTexture{};
   size_t selectedPassIndex = 0u;
   double frameDeltaSeconds = 0.0;
@@ -6885,6 +6886,17 @@ void ImGuiEditor::setShadowInspectResult(
     return;
   }
   if (inspectResult.has_value()) {
+    if (impl_->lastLoggedShadowInspectRequestId != inspectResult->requestId) {
+      NURI_LOG_INFO(
+          "ImGuiEditor: shadow inspect result request=%llu "
+          "valid=%s receiverDepth=%.6f receiverCompareDepth=%.6f "
+          "sampledDepth=%.6f cascade=%u cascadeBlend=%.6f",
+          static_cast<unsigned long long>(inspectResult->requestId),
+          inspectResult->valid ? "true" : "false", inspectResult->receiverDepth,
+          inspectResult->receiverCompareDepth, inspectResult->sampledDepth,
+          inspectResult->cascadeIndex, inspectResult->cascadeBlendFactor);
+      impl_->lastLoggedShadowInspectRequestId = inspectResult->requestId;
+    }
     impl_->shadowInspectResult = inspectResult;
   }
 }
@@ -6936,6 +6948,10 @@ bool ImGuiEditor::isGizmoControlsWindowOpen() const {
 
 bool ImGuiEditor::isLightsWindowOpen() const {
   return impl_ != nullptr && impl_->showLightsWindow;
+}
+
+bool ImGuiEditor::isShadowsWindowOpen() const {
+  return impl_ != nullptr && impl_->showShadowsWindow;
 }
 
 RenderSettings ImGuiEditor::renderSettings() const {

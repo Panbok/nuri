@@ -5,8 +5,18 @@
 #include "nuri/core/log.h"
 #include "nuri/ui/imgui_editor.h"
 #include "nuri/ui/imgui_gizmo_controller.h"
+#include "nuri/utils/env_utils.h"
 
 namespace nuri {
+namespace {
+
+[[nodiscard]] bool debugShadowInspectOnClickEnabled() {
+  static const bool enabled = readEnvFlag("NURI_DEBUG_SHADOW_INSPECT_ON_CLICK");
+  return enabled;
+}
+
+} // namespace
+
 std::unique_ptr<EditorOverlayController>
 EditorOverlayController::create(Window &window, GPUDevice &gpu,
                                 std::function<void()> callback,
@@ -105,6 +115,10 @@ bool EditorOverlayController::onInput(const InputEvent &event) {
       }
       return true;
     }
+    if (gizmoController_) {
+      gizmoController_->setShadowInspectRequestsEnabled(
+          editor_->isShadowsWindowOpen() || debugShadowInspectOnClickEnabled());
+    }
     if (gizmoController_ && gizmoController_->onInput(event)) {
       return true;
     }
@@ -129,6 +143,9 @@ void EditorOverlayController::onUpdate(double deltaTime) {
 void EditorOverlayController::prepareOverlayFrameContext(
     RenderFrameContext &frame) {
   if (gizmoController_) {
+    gizmoController_->setShadowInspectRequestsEnabled(
+        editor_ != nullptr &&
+        (editor_->isShadowsWindowOpen() || debugShadowInspectOnClickEnabled()));
     gizmoController_->onFrame(frame);
   }
 }

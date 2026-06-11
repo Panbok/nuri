@@ -187,9 +187,10 @@ struct ImGuizmoController::Impl {
     if (tryPickLightAtCursor()) {
       pendingPickRequest.reset();
       pickRequestFloorId = nextPickRequestId;
+      queueShadowInspectAtCursor();
       return true;
     }
-    queuePickAtCursor();
+    queueViewportRequestsAtCursor();
     return true;
   }
 
@@ -198,6 +199,11 @@ struct ImGuizmoController::Impl {
     if (pendingPickRequest.has_value()) {
       frame->opaquePickRequest = pendingPickRequest;
       pendingPickRequest.reset();
+    }
+    if (pendingShadowInspectRequest.has_value() &&
+        !frame->shadowInspectRequest.has_value()) {
+      frame->shadowInspectRequest = pendingShadowInspectRequest;
+      pendingShadowInspectRequest.reset();
     }
     if (selectionState->kind == SceneSelectionKind::Light &&
         isValid(selectionState->lightId)) {
@@ -449,11 +455,19 @@ struct ImGuizmoController::Impl {
 
   void invalidatePendingPicks() {
     pendingPickRequest.reset();
+    pendingShadowInspectRequest.reset();
     pickRequestFloorId = nextPickRequestId;
   }
 
+  void setShadowInspectRequestsEnabled(bool enabled) {
+    shadowInspectRequestsEnabled = enabled;
+    if (!enabled) {
+      pendingShadowInspectRequest.reset();
+    }
+  }
+
 private:
-  void queuePickAtCursor() {
+  void queueViewportRequestsAtCursor() {
     uint32_t x = 0;
     uint32_t y = 0;
     uint32_t width = 0;
@@ -466,6 +480,37 @@ private:
         .y = y,
         .requestId = nextPickRequestId++,
     };
+    queueShadowInspectAt(x, y);
+  }
+
+  void queueShadowInspectAtCursor() {
+    if (!shadowInspectRequestsEnabled) {
+      return;
+    }
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    if (!cursorFramebufferPosition(gpu, x, y, width, height)) {
+      return;
+    }
+    queueShadowInspectAt(x, y);
+  }
+
+  void queueShadowInspectAt(uint32_t x, uint32_t y) {
+    if (!shadowInspectRequestsEnabled) {
+      return;
+    }
+    pendingShadowInspectRequest = ShadowInspectRequest{
+        .x = x,
+        .y = y,
+        .requestId = nextShadowInspectRequestId++,
+    };
+    NURI_LOG_INFO(
+        "ImGuizmoController: queued shadow inspect request=%llu "
+        "pixel=(%u,%u)",
+        static_cast<unsigned long long>(pendingShadowInspectRequest->requestId),
+        x, y);
   }
 
   bool tryPickLightAtCursor() {
@@ -635,7 +680,9 @@ private:
   SceneEditorSelectionState *selectionState = nullptr;
   RenderFrameContext *frame = nullptr;
   std::optional<OpaquePickRequest> pendingPickRequest{};
+  std::optional<ShadowInspectRequest> pendingShadowInspectRequest{};
   uint64_t nextPickRequestId = 1;
+  uint64_t nextShadowInspectRequestId = 1;
   uint64_t pickRequestFloorId = 1;
   ImGuizmo::OPERATION gizmoOperation = ImGuizmo::TRANSLATE;
   ImGuizmo::MODE gizmoMode = ImGuizmo::LOCAL;
@@ -643,6 +690,7 @@ private:
   glm::vec3 gizmoSnapValues{1.0f, 1.0f, 1.0f};
   float gizmoAngleSnapDegrees = 15.0f;
   bool gizmoHoverOrUsing = false;
+  bool shadowInspectRequestsEnabled = false;
   LightEditorDraft lightEditorDraft{};
 };
 
@@ -661,6 +709,10 @@ void ImGuizmoController::onFrame(RenderFrameContext &frame) {
 
 void ImGuizmoController::drawUi(const GizmoUiDrawConfig &config) {
   impl_->drawUi(config);
+}
+
+void ImGuizmoController::setShadowInspectRequestsEnabled(bool enabled) {
+  impl_->setShadowInspectRequestsEnabled(enabled);
 }
 
 void ImGuizmoController::invalidatePendingPicks() {

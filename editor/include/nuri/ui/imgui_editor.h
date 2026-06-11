@@ -43,6 +43,7 @@ public:
   [[nodiscard]] bool *lightsWindowOpenState();
   [[nodiscard]] bool isGizmoControlsWindowOpen() const;
   [[nodiscard]] bool isLightsWindowOpen() const;
+  [[nodiscard]] bool isShadowsWindowOpen() const;
   [[nodiscard]] RenderSettings renderSettings() const;
   bool wantsCaptureKeyboard() const;
   bool wantsCaptureMouse() const;

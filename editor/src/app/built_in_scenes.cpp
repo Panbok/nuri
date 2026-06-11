@@ -5,6 +5,7 @@
 
 #include "nuri/app/editor_runtime.h"
 #include "nuri/app/editor_scene_catalog.h"
+#include "nuri/core/log.h"
 #include "nuri/resources/gpu/material.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/gpu/texture.h"
@@ -680,7 +681,9 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
 
   {
     auto result = catalog.append(makeStreamingScene({
-        .info = {.id = "niagara_bistro", .label = "Niagara Bistro"},
+        .info = {.id = "niagara_bistro",
+                 .label = "Niagara Bistro",
+                 .initiallySelected = true},
         .sourcePath = modelPath(config, kNiagaraBistroModelRelativePath),
         .instanceName = "NiagaraBistro",
         .fallbackMaterialDebugName = "niagara_bistro_fallback_material",
@@ -697,18 +700,56 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
                   TextureFilterMode::Anisotropic;
               runtime.renderSettings().textureFiltering.anisotropy = 8u;
             },
+        .configureLoadedScene =
+            [](EditorRuntime &, StreamingSceneState &state) {
+              for (ImportedSceneLight &light : state.prefab.fallbackLights) {
+                if (light.light.name == "Sun") {
+                  light.light.intensity = 10.0f;
+                }
+              }
+              for (ScenePrefabLight &light : state.prefab.prefab.lights) {
+                if (light.light.name == "Sun") {
+                  light.light.intensity = 10.0f;
+                }
+              }
+              const float scale = glm::length(glm::vec3(state.baseModel[0]));
+              NURI_LOG_INFO("Niagara Bistro reference setup scale=%.6f "
+                            "sunIntensity=10.000",
+                            scale);
+            },
         .configureCamera =
             [](EditorRuntime &runtime, StreamingSceneState &state) {
-              const Model &model = runtime.requireLoadedModel(
-                  state.model, "Niagara Bistro model is not loaded",
-                  "Niagara Bistro model record lookup failed");
-              const BoundingBox bounds = runtime
-                                             .computeImportedPrefabBounds(
-                                                 state.prefab, state.baseModel)
-                                             .value_or(model.bounds());
-              (void)runtime.frameSceneCamera(
-                  bounds, state.baseModel, 1.8f, 50.0f,
-                  glm::vec4(0.32f, 0.14f, 1.0f, 4.0f), glm::vec2(0.03f, 0.0f));
+              (void)state;
+              Camera *camera = runtime.mainCamera();
+              NURI_ASSERT(camera != nullptr, "Failed to get main camera");
+              PerspectiveParams perspective = camera->perspective();
+              perspective.nearPlane = 0.05f;
+              perspective.farPlane = 500.0f;
+              camera->setProjectionType(ProjectionType::Perspective);
+              camera->setPerspective(perspective);
+              const glm::vec3 position(-37.326633f, 8.540223f, 12.257857f);
+              const glm::vec3 requestedDirection =
+                  glm::normalize(glm::vec3(0.911857f, -0.287630f, 0.292892f));
+              const glm::vec3 direction = glm::normalize(
+                  glm::vec3(-requestedDirection.x, requestedDirection.y,
+                            -requestedDirection.z));
+              camera->setLookAt(position, position + direction,
+                                glm::vec3(0.0f, 1.0f, 0.0f));
+              if (CameraController *controller =
+                      runtime.cameraSystem().activeController()) {
+                controller->reset();
+              }
+              const glm::vec3 actualPosition = camera->position();
+              const glm::vec3 actualDirection = camera->forward();
+              NURI_LOG_INFO(
+                  "Niagara Bistro reference camera requestedDirection="
+                  "(%.6f, %.6f, %.6f) appliedPosition=(%.6f, %.6f, "
+                  "%.6f) appliedDirection=(%.6f, %.6f, %.6f)",
+                  requestedDirection.x, requestedDirection.y,
+                  requestedDirection.z, actualPosition.x, actualPosition.y,
+                  actualPosition.z, actualDirection.x, actualDirection.y,
+                  actualDirection.z);
+              runtime.syncEditorCameraWidgetState(*camera);
             },
     }));
     if (result.hasError()) {
@@ -1175,7 +1216,7 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
   result = catalog.append(makeCustomScene(EditorSceneSpec{
       .info = {.id = "text_3d_test",
                .label = "Text 3D Test",
-               .initiallySelected = true},
+               .initiallySelected = false},
       .activate =
           [](EditorSceneActivateContext &ctx) -> Result<void, std::string> {
         ctx.runtime.setupText3DTestScene();

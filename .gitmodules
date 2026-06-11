@@ -4,3 +4,6 @@
 [submodule "external/msdf-atlas-gen"]
 	path = external/msdf-atlas-gen
 	url = https://github.com/Chlumsky/msdf-atlas-gen
+[submodule "external/nvrhi"]
+	path = external/nvrhi
+	url = https://github.com/NVIDIA-RTX/NVRHI

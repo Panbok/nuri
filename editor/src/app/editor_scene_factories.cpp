@@ -349,6 +349,9 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
                 state->model, modelError.c_str(), recordError.c_str());
             const float scale = computeNiagaraBistroScale(model.bounds());
             state->baseModel = glm::scale(glm::mat4(1.0f), glm::vec3(scale));
+            if (desc.configureLoadedScene) {
+              desc.configureLoadedScene(ctx.runtime, *state);
+            }
             state->renderableId = ctx.runtime.instantiateImportedPrefabScene(
                 sceneInstanceName, state->prefab, state->baseModel);
             if (!isValid(state->renderableId)) {

@@ -13,7 +13,10 @@
 #include "nuri/resources/gpu/texture.h"
 #include "nuri/utils/env_utils.h"
 
+#include <cctype>
+#include <charconv>
 #include <ctime>
+#include <optional>
 
 namespace nuri {
 namespace {
@@ -101,11 +104,190 @@ void logDebugRenderOverrideOnce(const char *envName, const char *effect,
   }
 }
 
+[[nodiscard]] bool stringEqualsIgnoreCase(std::string_view lhs,
+                                          std::string_view rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    const char left =
+        static_cast<char>(std::tolower(static_cast<unsigned char>(lhs[i])));
+    const char right =
+        static_cast<char>(std::tolower(static_cast<unsigned char>(rhs[i])));
+    if (left != right) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] std::string_view trimAsciiWhitespace(std::string_view value) {
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+    value.remove_prefix(1);
+  }
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+    value.remove_suffix(1);
+  }
+  return value;
+}
+
+[[nodiscard]] std::optional<uint32_t> parseUint32(std::string_view value) {
+  value = trimAsciiWhitespace(value);
+  if (value.empty()) {
+    return std::nullopt;
+  }
+  uint32_t parsed = 0;
+  const char *begin = value.data();
+  const char *end = value.data() + value.size();
+  const std::from_chars_result result = std::from_chars(begin, end, parsed);
+  if (result.ec != std::errc{} || result.ptr != end) {
+    return std::nullopt;
+  }
+  return parsed;
+}
+
+struct DebugShadowInspectProbeConfig {
+  bool enabled = false;
+  bool explicitPixel = false;
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint64_t warmupFrames = 120;
+  uint64_t timeoutFrames = 240;
+};
+
+[[nodiscard]] DebugShadowInspectProbeConfig
+readDebugShadowInspectProbeConfig() {
+  const std::optional<std::string> value =
+      readEnvVar("NURI_DEBUG_SHADOW_INSPECT");
+  if (!value.has_value()) {
+    return {};
+  }
+
+  const std::string_view view = trimAsciiWhitespace(*value);
+  if (view.empty() || stringEqualsIgnoreCase(view, "0") ||
+      stringEqualsIgnoreCase(view, "false") ||
+      stringEqualsIgnoreCase(view, "off") ||
+      stringEqualsIgnoreCase(view, "no")) {
+    return {};
+  }
+  if (stringEqualsIgnoreCase(view, "1") ||
+      stringEqualsIgnoreCase(view, "true") ||
+      stringEqualsIgnoreCase(view, "on") ||
+      stringEqualsIgnoreCase(view, "yes")) {
+    return {.enabled = true};
+  }
+
+  const size_t comma = view.find(',');
+  if (comma == std::string_view::npos) {
+    NURI_LOG_WARNING(
+        "EditorRuntime: ignoring unrecognized NURI_DEBUG_SHADOW_INSPECT=%s",
+        value->c_str());
+    return {};
+  }
+  const std::optional<uint32_t> x = parseUint32(view.substr(0, comma));
+  const std::optional<uint32_t> y = parseUint32(view.substr(comma + 1));
+  if (!x.has_value() || !y.has_value()) {
+    NURI_LOG_WARNING(
+        "EditorRuntime: ignoring unrecognized NURI_DEBUG_SHADOW_INSPECT=%s",
+        value->c_str());
+    return {};
+  }
+  return {.enabled = true, .explicitPixel = true, .x = *x, .y = *y};
+}
+
+[[nodiscard]] const DebugShadowInspectProbeConfig &
+debugShadowInspectProbeConfig() {
+  static const DebugShadowInspectProbeConfig config =
+      readDebugShadowInspectProbeConfig();
+  return config;
+}
+
+[[nodiscard]] std::optional<AntiAliasingMode> readDebugAntiAliasingMode() {
+  const std::optional<std::string> value = readEnvVar("NURI_DEBUG_AA_MODE");
+  if (!value.has_value()) {
+    return std::nullopt;
+  }
+  const std::string_view view = *value;
+  if (stringEqualsIgnoreCase(view, "none")) {
+    return AntiAliasingMode::None;
+  }
+  if (stringEqualsIgnoreCase(view, "taa")) {
+    return AntiAliasingMode::TAA;
+  }
+  if (stringEqualsIgnoreCase(view, "spatial") ||
+      stringEqualsIgnoreCase(view, "spatial_fallback")) {
+    return AntiAliasingMode::SpatialFallback;
+  }
+  if (stringEqualsIgnoreCase(view, "msaa") ||
+      stringEqualsIgnoreCase(view, "msaa4x")) {
+    return AntiAliasingMode::MSAA4x;
+  }
+  NURI_LOG_WARNING("EditorRuntime: ignoring unrecognized NURI_DEBUG_AA_MODE=%s",
+                   value->c_str());
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<ShadowSdsmMode> readDebugShadowSdsmMode() {
+  const std::optional<std::string> value =
+      readEnvVar("NURI_DEBUG_SHADOW_SDSM_MODE");
+  if (!value.has_value()) {
+    return std::nullopt;
+  }
+  const std::string_view view = *value;
+  if (stringEqualsIgnoreCase(view, "disabled") ||
+      stringEqualsIgnoreCase(view, "off") ||
+      stringEqualsIgnoreCase(view, "none")) {
+    return ShadowSdsmMode::Disabled;
+  }
+  if (stringEqualsIgnoreCase(view, "previous") ||
+      stringEqualsIgnoreCase(view, "previous_frame") ||
+      stringEqualsIgnoreCase(view, "previous_frame_minmax") ||
+      stringEqualsIgnoreCase(view, "minmax")) {
+    return ShadowSdsmMode::PreviousFrameMinMax;
+  }
+  if (stringEqualsIgnoreCase(view, "histogram")) {
+    return ShadowSdsmMode::Histogram;
+  }
+  NURI_LOG_WARNING(
+      "EditorRuntime: ignoring unrecognized NURI_DEBUG_SHADOW_SDSM_MODE=%s",
+      value->c_str());
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<ShadowSdsmReductionBackend>
+readDebugShadowSdsmBackend() {
+  const std::optional<std::string> value =
+      readEnvVar("NURI_DEBUG_SHADOW_SDSM_BACKEND");
+  if (!value.has_value()) {
+    return std::nullopt;
+  }
+  const std::string_view view = *value;
+  if (stringEqualsIgnoreCase(view, "auto")) {
+    return ShadowSdsmReductionBackend::Auto;
+  }
+  if (stringEqualsIgnoreCase(view, "cpu")) {
+    return ShadowSdsmReductionBackend::Cpu;
+  }
+  if (stringEqualsIgnoreCase(view, "gpu")) {
+    return ShadowSdsmReductionBackend::Gpu;
+  }
+  NURI_LOG_WARNING(
+      "EditorRuntime: ignoring unrecognized NURI_DEBUG_SHADOW_SDSM_BACKEND=%s",
+      value->c_str());
+  return std::nullopt;
+}
+
 struct DebugRenderEnvOverrides {
   bool disableOpaque = false;
   bool disableTransmission = false;
   bool disableTransparent = false;
   bool disableSkybox = false;
+  std::optional<AntiAliasingMode> antiAliasingMode{};
+  std::optional<ShadowSdsmMode> shadowSdsmMode{};
+  std::optional<ShadowSdsmReductionBackend> shadowSdsmBackend{};
+  bool shadowDiagnostics = false;
 };
 
 [[nodiscard]] const DebugRenderEnvOverrides &debugRenderEnvOverrides() {
@@ -114,6 +296,10 @@ struct DebugRenderEnvOverrides {
       .disableTransmission = readEnvFlag("NURI_DEBUG_DISABLE_TRANSMISSION"),
       .disableTransparent = readEnvFlag("NURI_DEBUG_DISABLE_TRANSPARENT"),
       .disableSkybox = readEnvFlag("NURI_DEBUG_DISABLE_SKYBOX"),
+      .antiAliasingMode = readDebugAntiAliasingMode(),
+      .shadowSdsmMode = readDebugShadowSdsmMode(),
+      .shadowSdsmBackend = readDebugShadowSdsmBackend(),
+      .shadowDiagnostics = readEnvFlag("NURI_DEBUG_SHADOW_DIAGNOSTICS"),
   };
   return overrides;
 }
@@ -143,6 +329,32 @@ void applyDebugRenderEnvOverrides(RenderSettings &settings) {
     static bool logged = false;
     logDebugRenderOverrideOnce("NURI_DEBUG_DISABLE_SKYBOX",
                                "skybox pass disabled", logged);
+  }
+  if (overrides.antiAliasingMode.has_value()) {
+    settings.antiAliasing.mode = *overrides.antiAliasingMode;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_AA_MODE",
+                               "anti-aliasing mode overridden", logged);
+  }
+  if (overrides.shadowSdsmMode.has_value()) {
+    settings.shadow.sdsmMode = *overrides.shadowSdsmMode;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_SHADOW_SDSM_MODE",
+                               "shadow SDSM mode overridden", logged);
+  }
+  if (overrides.shadowSdsmBackend.has_value()) {
+    settings.shadow.sdsmReductionBackend = *overrides.shadowSdsmBackend;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_SHADOW_SDSM_BACKEND",
+                               "shadow SDSM backend overridden", logged);
+  }
+  if (overrides.shadowDiagnostics) {
+    settings.shadow.debug.logDiagnostics = true;
+    settings.shadow.debug.diagnosticLogLevel = LogLevel::Info;
+    settings.shadow.debug.diagnosticLogIntervalFrames = 15u;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_SHADOW_DIAGNOSTICS",
+                               "shadow diagnostics enabled", logged);
   }
 }
 
@@ -332,7 +544,14 @@ void EditorRuntime::initialize() {
   initializeCamera();
   initializeTextSystem();
   initializeEditorRenderFeature();
-  initializeEditorOverlay();
+  if (readEnvFlag("NURI_DEBUG_EDITOR_OVERLAY")) {
+    initializeEditorOverlay();
+    NURI_LOG_WARNING(
+        "EditorRuntime: NURI_DEBUG_EDITOR_OVERLAY active; editor overlay "
+        "enabled at startup");
+  } else {
+    textOverlayEnabled_ = false;
+  }
   loadSharedEnvironment(*this);
 }
 
@@ -952,6 +1171,7 @@ void EditorRuntime::buildFrameContext(const Camera &camera,
   frameContext_.sharedDepthTexture = {};
   frameContext_.timeSeconds = timeSecondsIn;
   frameContext_.deltaSeconds = frameDeltaSeconds_;
+  enqueueDebugShadowInspectProbe();
 }
 
 void EditorRuntime::submitPipelineFrame() {
@@ -959,7 +1179,78 @@ void EditorRuntime::submitPipelineFrame() {
       app_.getRenderer().render(app_.getRenderPipeline(), frameContext_);
   NURI_ASSERT(!renderResult.hasError(), "Render failed: %s",
               renderResult.error().c_str());
+  logDebugShadowInspectProbeResult();
   persistFrameRenderSettings(renderSettings_, frameRenderSettings_);
+}
+
+void EditorRuntime::enqueueDebugShadowInspectProbe() {
+  const DebugShadowInspectProbeConfig &config = debugShadowInspectProbeConfig();
+  if (!config.enabled || debugShadowInspectProbe_.submitted ||
+      debugShadowInspectProbe_.completed ||
+      frameContext_.shadowInspectRequest.has_value() ||
+      frameContext_.frameIndex < config.warmupFrames ||
+      scene_.renderables().empty()) {
+    return;
+  }
+
+  const uint32_t framebufferWidth =
+      static_cast<uint32_t>(std::max(app_.getWidth(), 1));
+  const uint32_t framebufferHeight =
+      static_cast<uint32_t>(std::max(app_.getHeight(), 1));
+  const uint32_t x = config.explicitPixel
+                         ? std::min(config.x, framebufferWidth - 1u)
+                         : framebufferWidth / 2u;
+  const uint32_t y = config.explicitPixel
+                         ? std::min(config.y, framebufferHeight - 1u)
+                         : framebufferHeight / 2u;
+
+  const uint64_t requestId = ++debugShadowInspectProbe_.requestId;
+  frameContext_.shadowInspectRequest =
+      ShadowInspectRequest{.x = x, .y = y, .requestId = requestId};
+  debugShadowInspectProbe_.submitted = true;
+  debugShadowInspectProbe_.submissionFrame = frameContext_.frameIndex;
+  NURI_LOG_INFO("EditorRuntime: NURI_DEBUG_SHADOW_INSPECT queued "
+                "request=%llu pixel=(%u,%u) frame=%llu renderables=%zu",
+                static_cast<unsigned long long>(requestId), x, y,
+                static_cast<unsigned long long>(frameContext_.frameIndex),
+                scene_.renderables().size());
+}
+
+void EditorRuntime::logDebugShadowInspectProbeResult() {
+  const DebugShadowInspectProbeConfig &config = debugShadowInspectProbeConfig();
+  if (!config.enabled || !debugShadowInspectProbe_.submitted ||
+      debugShadowInspectProbe_.completed) {
+    return;
+  }
+
+  if (frameContext_.shadowInspectResult.has_value() &&
+      frameContext_.shadowInspectResult->requestId ==
+          debugShadowInspectProbe_.requestId) {
+    const ShadowInspectResult &result = *frameContext_.shadowInspectResult;
+    NURI_LOG_INFO("EditorRuntime: NURI_DEBUG_SHADOW_INSPECT result "
+                  "request=%llu valid=%s receiverDepth=%.6f "
+                  "receiverCompareDepth=%.6f sampledDepth=%.6f cascade=%u "
+                  "cascadeBlend=%.6f",
+                  static_cast<unsigned long long>(result.requestId),
+                  boolToString(result.valid), result.receiverDepth,
+                  result.receiverCompareDepth, result.sampledDepth,
+                  result.cascadeIndex, result.cascadeBlendFactor);
+    debugShadowInspectProbe_.completed = true;
+    return;
+  }
+
+  if (!debugShadowInspectProbe_.timeoutLogged &&
+      frameContext_.frameIndex >
+          debugShadowInspectProbe_.submissionFrame + config.timeoutFrames) {
+    NURI_LOG_WARNING(
+        "EditorRuntime: NURI_DEBUG_SHADOW_INSPECT timed out "
+        "waiting for request=%llu after %llu frames",
+        static_cast<unsigned long long>(debugShadowInspectProbe_.requestId),
+        static_cast<unsigned long long>(
+            frameContext_.frameIndex -
+            debugShadowInspectProbe_.submissionFrame));
+    debugShadowInspectProbe_.timeoutLogged = true;
+  }
 }
 
 void EditorRuntime::queueTextSamples() {

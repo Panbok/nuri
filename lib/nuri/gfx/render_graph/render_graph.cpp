@@ -81,13 +81,15 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
 }
 
 [[nodiscard]] uint64_t computePassPayloadLayoutHash(
-    const std::pmr::vector<RenderPass> &passes) noexcept {
+    const std::pmr::vector<RenderPass> &passes,
+    const std::pmr::vector<uint32_t> &dependencyTextureCounts) noexcept {
   uint64_t hash = 0xcbf29ce484222325ull;
   const auto mix = [&hash](uint64_t value) noexcept {
     hash ^= value;
     hash *= 0x100000001b3ull;
   };
-  for (const RenderPass &pass : passes) {
+  for (size_t passIndex = 0; passIndex < passes.size(); ++passIndex) {
+    const RenderPass &pass = passes[passIndex];
     mix(static_cast<uint64_t>(pass.executionMode));
     mix(pass.hasColorAttachment ? 1u : 0u);
     mix(nuri::isValid(pass.colorResolveTexture) ? 1u : 0u);
@@ -96,6 +98,11 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
     mix(pass.drawBuffersPreResolved ? 1u : 0u);
     mix(static_cast<uint64_t>(pass.gpuTimingScope));
     mix(static_cast<uint64_t>(pass.dependencyBuffers.size()));
+    const size_t dependencyTextureCount =
+        passIndex < dependencyTextureCounts.size()
+            ? dependencyTextureCounts[passIndex]
+            : pass.dependencyTextures.size();
+    mix(static_cast<uint64_t>(dependencyTextureCount));
     mix(static_cast<uint64_t>(pass.preDispatches.size()));
     mix(quantizeToNextPow2(static_cast<uint64_t>(pass.draws.size())));
     for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
@@ -381,6 +388,9 @@ RenderGraphBuilder::RenderGraphBuilder(std::pmr::memory_resource *memory)
       passDependencyBufferBindingOffsets_(memory_),
       passDependencyBufferBindingCounts_(memory_),
       passDependencyBufferBindingResourceIndices_(memory_),
+      passDependencyTextureBindingOffsets_(memory_),
+      passDependencyTextureBindingCounts_(memory_),
+      passDependencyTextureBindingResourceIndices_(memory_),
       passPreDispatchBindingOffsets_(memory_),
       passPreDispatchBindingCounts_(memory_),
       preDispatchDependencyBindingOffsets_(memory_),
@@ -416,6 +426,9 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   passDependencyBufferBindingOffsets_.clear();
   passDependencyBufferBindingCounts_.clear();
   passDependencyBufferBindingResourceIndices_.clear();
+  passDependencyTextureBindingOffsets_.clear();
+  passDependencyTextureBindingCounts_.clear();
+  passDependencyTextureBindingResourceIndices_.clear();
   passPreDispatchBindingOffsets_.clear();
   passPreDispatchBindingCounts_.clear();
   preDispatchDependencyBindingOffsets_.clear();
@@ -560,7 +573,8 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .frameOutputCount = frameOutputTextureIndices_.size(),
       .sideEffectMarkCount = sideEffectPassMarks_.size(),
       .allPassesBorrowPayload = allPassesBorrowPayload_,
-      .payloadLayoutHash = computePassPayloadLayoutHash(passes_),
+      .payloadLayoutHash = computePassPayloadLayoutHash(
+          passes_, passDependencyTextureBindingCounts_),
       .transientResourceDescriptorsHash = transientResourceDescriptorsHash_,
       .persistentHandlesVersion = persistentHandlesVersion_,
       .dynamicPayloadVersion = dynamicPayloadVersion_,
@@ -603,6 +617,20 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
           buffers_[resourceIndex].importedHandle;
     }
   }
+  for (size_t i = 0;
+       i < result.resolvedDependencyTextureResourceIndices.size() &&
+       i < result.resolvedDependencyTextures.size();
+       ++i) {
+    const uint32_t resourceIndex =
+        result.resolvedDependencyTextureResourceIndices[i];
+    if (resourceIndex == UINT32_MAX || resourceIndex >= textures_.size()) {
+      continue;
+    }
+    if (textures_[resourceIndex].imported) {
+      result.resolvedDependencyTextures[i] =
+          textures_[resourceIndex].importedHandle;
+    }
+  }
   // Same refresh for pre-dispatch dependency buffers.
   for (size_t i = 0;
        i < result.resolvedPreDispatchDependencyBufferResourceIndices.size() &&
@@ -623,6 +651,7 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
       std::min({result.orderedPasses.size(), result.drawRangesByPass.size(),
                 result.preDispatchRangesByPass.size(),
                 result.dependencyBufferRangesByPass.size(),
+                result.dependencyTextureRangesByPass.size(),
                 result.orderedPassIndices.size()});
   for (size_t i = 0; i < passCount; ++i) {
     const uint32_t passIndex = result.orderedPassIndices[i];
@@ -693,6 +722,20 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
           dependencyRange.count);
     } else {
       refreshedPass.dependencyBuffers = {};
+    }
+    const auto dependencyTextureRange = result.dependencyTextureRangesByPass[i];
+    if (dependencyTextureRange.count > 0u &&
+        dependencyTextureRange.offset <=
+            result.resolvedDependencyTextures.size() &&
+        dependencyTextureRange.count <=
+            result.resolvedDependencyTextures.size() -
+                dependencyTextureRange.offset) {
+      refreshedPass.dependencyTextures = std::span<const TextureHandle>(
+          result.resolvedDependencyTextures.data() +
+              dependencyTextureRange.offset,
+          dependencyTextureRange.count);
+    } else {
+      refreshedPass.dependencyTextures = {};
     }
 
     const auto preDispatchRange = result.preDispatchRangesByPass[i];
@@ -1075,6 +1118,8 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
                                  desc.debugLabel.size());
   ownedPayload.dependencyBuffers.assign(desc.dependencyBuffers.begin(),
                                         desc.dependencyBuffers.end());
+  ownedPayload.dependencyTextures.assign(desc.dependencyTextures.begin(),
+                                         desc.dependencyTextures.end());
 
   ownedPayload.preDispatchDebugLabels.reserve(desc.preDispatches.size());
   ownedPayload.preDispatchPushConstants.reserve(desc.preDispatches.size());
@@ -1311,10 +1356,10 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     if (importResult.hasError()) {
       return Result<bool, std::string>::makeError(importResult.error());
     }
-    auto accessResult =
-        addTextureAccess(pass, importResult.value(), accessMode);
-    if (accessResult.hasError()) {
-      return accessResult;
+    auto bindResult = bindPassDependencyTexture(
+        pass, static_cast<uint32_t>(i), importResult.value(), accessMode);
+    if (bindResult.hasError()) {
+      return bindResult;
     }
   }
 
@@ -1423,6 +1468,7 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
   if (desc.borrowPayload) {
     pass.preDispatches = desc.preDispatches;
     pass.dependencyBuffers = desc.dependencyBuffers;
+    pass.dependencyTextures = desc.dependencyTextures;
     pass.draws = desc.draws;
     pass.debugLabel = desc.debugLabel;
   } else {
@@ -1434,6 +1480,9 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
     pass.dependencyBuffers =
         std::span<const BufferHandle>(storedPayload.dependencyBuffers.data(),
                                       storedPayload.dependencyBuffers.size());
+    pass.dependencyTextures =
+        std::span<const TextureHandle>(storedPayload.dependencyTextures.data(),
+                                       storedPayload.dependencyTextures.size());
     pass.draws = std::span<const DrawItem>(storedPayload.draws.data(),
                                            storedPayload.draws.size());
     pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
@@ -1509,6 +1558,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
   if (desc.borrowPayload) {
     pass.preDispatches = desc.preDispatches;
     pass.dependencyBuffers = desc.dependencyBuffers;
+    pass.dependencyTextures = {};
     pass.draws = desc.draws;
     pass.debugLabel = desc.debugLabel;
   } else {
@@ -1525,6 +1575,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     clonedDesc.viewport = desc.viewport;
     clonedDesc.preDispatches = desc.preDispatches;
     clonedDesc.dependencyBuffers = desc.dependencyBuffers;
+    clonedDesc.dependencyTextures = {};
     clonedDesc.draws = desc.draws;
     clonedDesc.drawBuffersPreResolved = desc.drawBuffersPreResolved;
     clonedDesc.preResolvedDrawBuffers = desc.preResolvedDrawBuffers;
@@ -1541,6 +1592,9 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     pass.dependencyBuffers =
         std::span<const BufferHandle>(storedPayload.dependencyBuffers.data(),
                                       storedPayload.dependencyBuffers.size());
+    pass.dependencyTextures =
+        std::span<const TextureHandle>(storedPayload.dependencyTextures.data(),
+                                       storedPayload.dependencyTextures.size());
     pass.draws = std::span<const DrawItem>(storedPayload.draws.data(),
                                            storedPayload.draws.size());
     pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
@@ -1608,11 +1662,11 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     }
 
     for (const auto &binding : desc.dependencyTextureBindings) {
-      auto accessResult =
-          addTextureAccess(passId, binding.texture, binding.mode);
-      if (accessResult.hasError()) {
+      auto bindResult =
+          appendPassDependencyTexture(passId, binding.texture, binding.mode);
+      if (bindResult.hasError()) {
         return Result<RenderGraphPassId, std::string>::makeError(
-            accessResult.error());
+            bindResult.error());
       }
     }
 
@@ -1691,6 +1745,8 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
 
   const uint32_t dependencyBindingOffset =
       static_cast<uint32_t>(passDependencyBufferBindingResourceIndices_.size());
+  const uint32_t dependencyTextureBindingOffset = static_cast<uint32_t>(
+      passDependencyTextureBindingResourceIndices_.size());
   const uint32_t preDispatchBindingOffset =
       static_cast<uint32_t>(preDispatchDependencyBindingOffsets_.size());
   const uint32_t drawBindingOffset =
@@ -1707,6 +1763,17 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
     return Result<RenderGraphPassId, std::string>::makeError(
         "RenderGraphBuilder::addPassRecord: dependency buffer count "
         "exceeds kMaxDependencyResources");
+  }
+  const size_t dependencyTextureCount = pass.dependencyTextures.size();
+  if (dependencyTextureCount > UINT32_MAX) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        "RenderGraphBuilder::addPassRecord: dependency texture count "
+        "exceeds uint32_t");
+  }
+  if (dependencyTextureCount > kMaxDependencyTextures) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        "RenderGraphBuilder::addPassRecord: dependency texture count "
+        "exceeds kMaxDependencyTextures");
   }
   const size_t preDispatchCount = pass.preDispatches.size();
   if (preDispatchCount > UINT32_MAX) {
@@ -1730,10 +1797,10 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
           "texture count exceeds uint32_t");
     }
-    if (dispatch.dependencyTextures.size() > kMaxDependencyResources) {
+    if (dispatch.dependencyTextures.size() > kMaxDependencyTextures) {
       return Result<RenderGraphPassId, std::string>::makeError(
           "RenderGraphBuilder::addPassRecord: pre-dispatch dependency "
-          "texture count exceeds kMaxDependencyResources");
+          "texture count exceeds kMaxDependencyTextures");
     }
   }
 
@@ -1758,6 +1825,13 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
       static_cast<uint32_t>(dependencyCount));
   for (size_t i = 0; i < dependencyCount; ++i) {
     passDependencyBufferBindingResourceIndices_.push_back(UINT32_MAX);
+  }
+  passDependencyTextureBindingOffsets_.push_back(
+      dependencyTextureBindingOffset);
+  passDependencyTextureBindingCounts_.push_back(
+      static_cast<uint32_t>(dependencyTextureCount));
+  for (size_t i = 0; i < dependencyTextureCount; ++i) {
+    passDependencyTextureBindingResourceIndices_.push_back(UINT32_MAX);
   }
 
   passPreDispatchBindingOffsets_.push_back(preDispatchBindingOffset);
@@ -1962,6 +2036,98 @@ Result<bool, std::string> RenderGraphBuilder::bindPassDependencyBuffer(
   passDependencyBufferBindingResourceIndices_[offset + dependencyIndex] =
       buffer.value;
   return addBufferAccess(pass, buffer, mode);
+}
+
+Result<bool, std::string> RenderGraphBuilder::bindPassDependencyTexture(
+    RenderGraphPassId pass, uint32_t dependencyIndex,
+    RenderGraphTextureId texture, RenderGraphAccessMode mode) {
+  if (!isValid(pass) || !isValid(texture)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDependencyTexture: id is invalid");
+  }
+  if (!hasAccessFlag(mode, RenderGraphAccessMode::Read) &&
+      !hasAccessFlag(mode, RenderGraphAccessMode::Write)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDependencyTexture: access mode must "
+        "contain read or write");
+  }
+  if (!isValidPassIndex(pass.value) || !isValidTextureIndex(texture.value)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDependencyTexture: id is out of range");
+  }
+  if (pass.value >= passDependencyTextureBindingOffsets_.size() ||
+      pass.value >= passDependencyTextureBindingCounts_.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDependencyTexture: pass binding table is "
+        "out of sync");
+  }
+
+  const uint32_t count = passDependencyTextureBindingCounts_[pass.value];
+  if (dependencyIndex >= kMaxDependencyTextures) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDependencyTexture: dependency index "
+        "exceeds kMaxDependencyTextures");
+  }
+  if (dependencyIndex >= count) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDependencyTexture: dependency index is "
+        "out of range");
+  }
+
+  const uint32_t offset = passDependencyTextureBindingOffsets_[pass.value];
+  if (offset > passDependencyTextureBindingResourceIndices_.size() ||
+      count > passDependencyTextureBindingResourceIndices_.size() - offset) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindPassDependencyTexture: pass dependency "
+        "binding range is invalid");
+  }
+
+  passDependencyTextureBindingResourceIndices_[offset + dependencyIndex] =
+      texture.value;
+  return addTextureAccess(pass, texture, mode);
+}
+
+Result<bool, std::string>
+RenderGraphBuilder::appendPassDependencyTexture(RenderGraphPassId pass,
+                                                RenderGraphTextureId texture,
+                                                RenderGraphAccessMode mode) {
+  if (!isValid(pass) || !isValid(texture)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::appendPassDependencyTexture: id is invalid");
+  }
+  if (!isValidPassIndex(pass.value) || !isValidTextureIndex(texture.value)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::appendPassDependencyTexture: id is out of range");
+  }
+  if (pass.value >= passDependencyTextureBindingOffsets_.size() ||
+      pass.value >= passDependencyTextureBindingCounts_.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::appendPassDependencyTexture: pass binding table "
+        "is out of sync");
+  }
+  if (!hasAccessFlag(mode, RenderGraphAccessMode::Read) &&
+      !hasAccessFlag(mode, RenderGraphAccessMode::Write)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::appendPassDependencyTexture: access mode must "
+        "contain read or write");
+  }
+
+  const uint32_t offset = passDependencyTextureBindingOffsets_[pass.value];
+  const uint32_t count = passDependencyTextureBindingCounts_[pass.value];
+  if (count >= kMaxDependencyTextures) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::appendPassDependencyTexture: dependency count "
+        "exceeds kMaxDependencyTextures");
+  }
+  if (offset + count != passDependencyTextureBindingResourceIndices_.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::appendPassDependencyTexture: dependency texture "
+        "bindings can only be appended before the next pass is recorded");
+  }
+
+  passDependencyTextureBindingResourceIndices_.push_back(texture.value);
+  ++passDependencyTextureBindingCounts_[pass.value];
+  return addTextureAccess(pass, texture, mode);
 }
 
 Result<bool, std::string> RenderGraphBuilder::bindPreDispatchDependencyBuffer(
@@ -2452,6 +2618,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC0ValidateInputs(
       passDepthResolveTextureBindings_.size() != passes_.size() ||
       passDependencyBufferBindingOffsets_.size() != passes_.size() ||
       passDependencyBufferBindingCounts_.size() != passes_.size() ||
+      passDependencyTextureBindingOffsets_.size() != passes_.size() ||
+      passDependencyTextureBindingCounts_.size() != passes_.size() ||
       passPreDispatchBindingOffsets_.size() != passes_.size() ||
       passPreDispatchBindingCounts_.size() != passes_.size() ||
       passDrawBindingOffsets_.size() != passes_.size() ||
@@ -2951,6 +3119,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t dependencyCount = 0u;
     uint32_t dependencyBindingOffset = 0u;
     uint32_t resolvedDependencyOffset = 0u;
+    uint32_t dependencyTextureCount = 0u;
+    uint32_t dependencyTextureBindingOffset = 0u;
+    uint32_t resolvedDependencyTextureOffset = 0u;
     uint32_t preDispatchCount = 0u;
     uint32_t preDispatchBindingOffset = 0u;
     uint32_t preDispatchOutputOffset = 0u;
@@ -2964,6 +3135,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t unresolvedTextureCount = 0u;
     uint32_t unresolvedDependencyOffset = 0u;
     uint32_t unresolvedDependencyCount = 0u;
+    uint32_t unresolvedDependencyTextureOffset = 0u;
+    uint32_t unresolvedDependencyTextureCount = 0u;
     uint32_t unresolvedPreDispatchDependencyOffset = 0u;
     uint32_t unresolvedPreDispatchDependencyCount = 0u;
     uint32_t unresolvedDrawOffset = 0u;
@@ -3023,6 +3196,34 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       }
       plan.dependencyCount = dependencyCount;
       plan.dependencyBindingOffset = dependencyOffset;
+      const uint32_t dependencyTextureCount =
+          passDependencyTextureBindingCounts_[passIndex];
+      if (dependencyTextureCount > kMaxDependencyTextures) {
+        resolveErrors[workerIndex] = IndexedResolveError{
+            .hasError = true,
+            .orderedPassIndex = orderedPassIndex,
+            .message = "RenderGraphBuilder::compile: pass dependency texture "
+                       "count exceeds kMaxDependencyTextures",
+        };
+        return;
+      }
+      const uint32_t dependencyTextureOffset =
+          passDependencyTextureBindingOffsets_[passIndex];
+      if (dependencyTextureOffset >
+              passDependencyTextureBindingResourceIndices_.size() ||
+          dependencyTextureCount >
+              passDependencyTextureBindingResourceIndices_.size() -
+                  dependencyTextureOffset) {
+        resolveErrors[workerIndex] = IndexedResolveError{
+            .hasError = true,
+            .orderedPassIndex = orderedPassIndex,
+            .message = "RenderGraphBuilder::compile: dependency texture "
+                       "binding range is invalid",
+        };
+        return;
+      }
+      plan.dependencyTextureCount = dependencyTextureCount;
+      plan.dependencyTextureBindingOffset = dependencyTextureOffset;
       const uint32_t preDispatchCount =
           passPreDispatchBindingCounts_[passIndex];
       const uint32_t preDispatchOffset =
@@ -3239,6 +3440,41 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           ++plan.unresolvedDependencyCount;
         }
       }
+      for (uint32_t depIndex = 0; depIndex < dependencyTextureCount;
+           ++depIndex) {
+        const TextureHandle sourceHandle =
+            depIndex < sourcePass.dependencyTextures.size()
+                ? sourcePass.dependencyTextures[depIndex]
+                : TextureHandle{};
+        const uint32_t resourceIndex =
+            passDependencyTextureBindingResourceIndices_
+                [dependencyTextureOffset + depIndex];
+        if (nuri::isValid(sourceHandle) && resourceIndex == UINT32_MAX) {
+          resolveErrors[workerIndex] = IndexedResolveError{
+              .hasError = true,
+              .orderedPassIndex = orderedPassIndex,
+              .message = "RenderGraphBuilder::compile: pass requires explicit "
+                         "dependency texture binding",
+          };
+          return;
+        }
+        if (resourceIndex == UINT32_MAX) {
+          continue;
+        }
+        if (!isValidTextureIndex(resourceIndex)) {
+          resolveErrors[workerIndex] = IndexedResolveError{
+              .hasError = true,
+              .orderedPassIndex = orderedPassIndex,
+              .message =
+                  "RenderGraphBuilder::compile: dependency texture binding "
+                  "references out-of-range resource",
+          };
+          return;
+        }
+        if (!textures_[resourceIndex].imported) {
+          ++plan.unresolvedDependencyTextureCount;
+        }
+      }
       for (uint32_t dispatchIndex = 0; dispatchIndex < preDispatchCount;
            ++dispatchIndex) {
         const ComputeDispatchItem &dispatch =
@@ -3397,11 +3633,13 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   }
 
   size_t totalDependencyBufferSlots = 0u;
+  size_t totalDependencyTextureSlots = 0u;
   size_t totalPreDispatchItems = 0u;
   size_t totalPreDispatchDependencySlots = 0u;
   size_t totalDrawItems = 0u;
   size_t totalUnresolvedTextureBindings = 0u;
   size_t totalUnresolvedDependencyBufferBindings = 0u;
+  size_t totalUnresolvedDependencyTextureBindings = 0u;
   size_t totalUnresolvedPreDispatchDependencyBufferBindings = 0u;
   size_t totalUnresolvedDrawBufferBindings = 0u;
   for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passPlans.size();
@@ -3410,6 +3648,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     plan.resolvedDependencyOffset =
         static_cast<uint32_t>(totalDependencyBufferSlots);
     totalDependencyBufferSlots += plan.dependencyCount;
+    plan.resolvedDependencyTextureOffset =
+        static_cast<uint32_t>(totalDependencyTextureSlots);
+    totalDependencyTextureSlots += plan.dependencyTextureCount;
     plan.preDispatchOutputOffset = static_cast<uint32_t>(totalPreDispatchItems);
     totalPreDispatchItems += plan.preDispatchCount;
     plan.preDispatchDependencyOffset =
@@ -3453,6 +3694,10 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     plan.unresolvedDependencyOffset =
         static_cast<uint32_t>(totalUnresolvedDependencyBufferBindings);
     totalUnresolvedDependencyBufferBindings += plan.unresolvedDependencyCount;
+    plan.unresolvedDependencyTextureOffset =
+        static_cast<uint32_t>(totalUnresolvedDependencyTextureBindings);
+    totalUnresolvedDependencyTextureBindings +=
+        plan.unresolvedDependencyTextureCount;
     plan.unresolvedPreDispatchDependencyOffset = static_cast<uint32_t>(
         totalUnresolvedPreDispatchDependencyBufferBindings);
     totalUnresolvedPreDispatchDependencyBufferBindings +=
@@ -3466,6 +3711,10 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   compiled.resolvedDependencyBufferResourceIndices.assign(
       totalDependencyBufferSlots, UINT32_MAX);
   compiled.dependencyBufferRangesByPass.resize(work.order.size());
+  compiled.resolvedDependencyTextures.resize(totalDependencyTextureSlots);
+  compiled.resolvedDependencyTextureResourceIndices.assign(
+      totalDependencyTextureSlots, UINT32_MAX);
+  compiled.dependencyTextureRangesByPass.resize(work.order.size());
   compiled.ownedPreDispatches.resize(totalPreDispatchItems);
   compiled.preDispatchRangesByPass.resize(work.order.size());
   compiled.resolvedPreDispatchDependencyBuffers.resize(
@@ -3482,6 +3731,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   compiled.unresolvedTextureBindings.resize(totalUnresolvedTextureBindings);
   compiled.unresolvedDependencyBufferBindings.resize(
       totalUnresolvedDependencyBufferBindings);
+  compiled.unresolvedDependencyTextureBindings.resize(
+      totalUnresolvedDependencyTextureBindings);
   compiled.unresolvedPreDispatchDependencyBufferBindings.resize(
       totalUnresolvedPreDispatchDependencyBufferBindings);
   compiled.unresolvedDrawBufferBindings.resize(
@@ -3588,6 +3839,45 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
             plan.dependencyCount);
       } else {
         resolvedPass.dependencyBuffers = {};
+      }
+      compiled.dependencyTextureRangesByPass[orderedPassIndex] = {
+          .offset = plan.resolvedDependencyTextureOffset,
+          .count = plan.dependencyTextureCount};
+      uint32_t unresolvedDependencyTextureWriteOffset =
+          plan.unresolvedDependencyTextureOffset;
+      for (uint32_t depIndex = 0; depIndex < plan.dependencyTextureCount;
+           ++depIndex) {
+        const uint32_t resourceIndex =
+            passDependencyTextureBindingResourceIndices_
+                [plan.dependencyTextureBindingOffset + depIndex];
+        TextureHandle &resolvedHandle =
+            compiled.resolvedDependencyTextures
+                [plan.resolvedDependencyTextureOffset + depIndex];
+        if (resourceIndex == UINT32_MAX) {
+          resolvedHandle = {};
+          continue;
+        }
+        const TextureResource &resource = textures_[resourceIndex];
+        if (resource.imported) {
+          resolvedHandle = resource.importedHandle;
+          compiled.resolvedDependencyTextureResourceIndices
+              [plan.resolvedDependencyTextureOffset + depIndex] = resourceIndex;
+        } else {
+          resolvedHandle = {};
+          compiled.unresolvedDependencyTextureBindings
+              [unresolvedDependencyTextureWriteOffset++] = {
+              .orderedPassIndex = orderedPassIndex,
+              .dependencyTextureIndex = depIndex,
+              .textureResourceIndex = resourceIndex};
+        }
+      }
+      if (plan.dependencyTextureCount > 0u) {
+        resolvedPass.dependencyTextures = std::span<const TextureHandle>(
+            compiled.resolvedDependencyTextures.data() +
+                plan.resolvedDependencyTextureOffset,
+            plan.dependencyTextureCount);
+      } else {
+        resolvedPass.dependencyTextures = {};
       }
 
       compiled.preDispatchRangesByPass[orderedPassIndex] = {
@@ -4670,6 +4960,12 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
           "RenderGraphBuilder::compile: dependency buffer range metadata count "
           "mismatch");
     }
+    if (compiled.dependencyTextureRangesByPass.size() !=
+        compiled.orderedPasses.size()) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::compile: dependency texture range metadata "
+          "count mismatch");
+    }
     if (compiled.preDispatchRangesByPass.size() !=
         compiled.orderedPasses.size()) {
       return Result<bool, std::string>::makeError(
@@ -4701,6 +4997,21 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
               compiled.resolvedDependencyBuffers.size() - depRange.offset) {
         return Result<bool, std::string>::makeError(
             "RenderGraphBuilder::compile: dependency buffer range is out of "
+            "bounds");
+      }
+
+      const auto &depTextureRange =
+          compiled.dependencyTextureRangesByPass[passExecIndex];
+      if (depTextureRange.count > kMaxDependencyTextures) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: dependency texture range exceeds "
+            "kMaxDependencyTextures");
+      }
+      if (depTextureRange.offset > compiled.resolvedDependencyTextures.size() ||
+          depTextureRange.count > compiled.resolvedDependencyTextures.size() -
+                                      depTextureRange.offset) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: dependency texture range is out of "
             "bounds");
       }
 
@@ -4784,6 +5095,37 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
         return Result<bool, std::string>::makeError(
             "RenderGraphBuilder::compile: unresolved dependency buffer binding "
             "slot index is out of range");
+      }
+    }
+
+    for (const auto &binding : compiled.unresolvedDependencyTextureBindings) {
+      if (binding.orderedPassIndex >=
+          compiled.dependencyTextureRangesByPass.size()) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved dependency texture "
+            "binding pass index is out of range");
+      }
+      if (binding.textureResourceIndex >=
+          compiled.transientTextureAllocationByResource.size()) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved dependency texture "
+            "binding resource index is out of range");
+      }
+      const uint32_t allocationIndex =
+          compiled.transientTextureAllocationByResource
+              [binding.textureResourceIndex];
+      if (allocationIndex == UINT32_MAX ||
+          allocationIndex >= compiled.transientTexturePhysicalCount) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved dependency texture "
+            "binding has no transient allocation");
+      }
+      const auto &range =
+          compiled.dependencyTextureRangesByPass[binding.orderedPassIndex];
+      if (binding.dependencyTextureIndex >= range.count) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved dependency texture "
+            "binding slot index is out of range");
       }
     }
 
@@ -5360,6 +5702,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
 
   std::pmr::vector<RenderPass> executablePasses(memory_);
   std::pmr::vector<BufferHandle> executableDependencyBuffers(memory_);
+  std::pmr::vector<TextureHandle> executableDependencyTextures(memory_);
   std::pmr::vector<ComputeDispatchItem> executablePreDispatches(memory_);
   std::pmr::vector<DrawItem> executableDrawItems(memory_);
   std::pmr::vector<BufferHandle> executablePreDispatchDependencyBuffers(
@@ -5370,11 +5713,16 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
                        NURI_PROFILER_COLOR_CMD_COPY);
     const bool needsMutableDependencyBuffers =
         !compiled.unresolvedDependencyBufferBindings.empty();
+    const bool needsMutableDependencyTextures =
+        !compiled.unresolvedDependencyTextureBindings.empty();
     const bool needsMutableDrawItems =
         !compiled.unresolvedDrawBufferBindings.empty();
     executablePasses = compiled.orderedPasses;
     if (needsMutableDependencyBuffers) {
       executableDependencyBuffers = compiled.resolvedDependencyBuffers;
+    }
+    if (needsMutableDependencyTextures) {
+      executableDependencyTextures = compiled.resolvedDependencyTextures;
     }
     executablePreDispatches = compiled.ownedPreDispatches;
     if (needsMutableDrawItems) {
@@ -5390,6 +5738,13 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
           RenderGraphExecutionFailureStage::BuildExecutablePayload,
           "RenderGraphExecutor::execute: pass dependency buffer range metadata "
           "count mismatch");
+    }
+    if (compiled.dependencyTextureRangesByPass.size() !=
+        executablePasses.size()) {
+      destroyMaterializedResources();
+      return fail(RenderGraphExecutionFailureStage::BuildExecutablePayload,
+                  "RenderGraphExecutor::execute: pass dependency texture range "
+                  "metadata count mismatch");
     }
     if (compiled.preDispatchRangesByPass.size() != executablePasses.size()) {
       destroyMaterializedResources();
@@ -5448,6 +5803,36 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
         executablePasses[orderedPassIndex].dependencyBuffers =
             std::span<const BufferHandle>(
                 executableDependencyBuffers.data() + range.offset, range.count);
+      }
+
+      const auto &textureRange =
+          compiled.dependencyTextureRangesByPass[orderedPassIndex];
+      if (textureRange.count > kMaxDependencyTextures) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::BuildExecutablePayload,
+            "RenderGraphExecutor::execute: pass dependency texture range "
+            "exceeds kMaxDependencyTextures");
+      }
+      const size_t dependencyTextureCount =
+          needsMutableDependencyTextures
+              ? executableDependencyTextures.size()
+              : compiled.resolvedDependencyTextures.size();
+      if (textureRange.offset > dependencyTextureCount ||
+          textureRange.count > dependencyTextureCount - textureRange.offset) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::BuildExecutablePayload,
+            "RenderGraphExecutor::execute: pass dependency texture range is "
+            "out of bounds");
+      }
+      if (textureRange.count == 0u) {
+        executablePasses[orderedPassIndex].dependencyTextures = {};
+      } else if (needsMutableDependencyTextures) {
+        executablePasses[orderedPassIndex].dependencyTextures =
+            std::span<const TextureHandle>(executableDependencyTextures.data() +
+                                               textureRange.offset,
+                                           textureRange.count);
       }
 
       const auto &preDispatchRange =
@@ -5621,6 +6006,51 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       executableDependencyBuffers[range.offset +
                                   binding.dependencyBufferIndex] =
           transientBufferHandles[allocationIndex];
+    }
+
+    for (const auto &binding : compiled.unresolvedDependencyTextureBindings) {
+      if (binding.orderedPassIndex >= executablePasses.size()) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved dependency texture "
+            "binding pass index is out of range");
+      }
+      if (binding.textureResourceIndex >=
+          compiled.transientTextureAllocationByResource.size()) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved dependency texture "
+            "binding resource index is out of range");
+      }
+
+      const auto &range =
+          compiled.dependencyTextureRangesByPass[binding.orderedPassIndex];
+      if (binding.dependencyTextureIndex >= range.count) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved dependency texture "
+            "binding slot index is out of range");
+      }
+
+      const uint32_t allocationIndex =
+          compiled.transientTextureAllocationByResource
+              [binding.textureResourceIndex];
+      if (allocationIndex == UINT32_MAX ||
+          allocationIndex >= transientTextureHandles.size() ||
+          !nuri::isValid(transientTextureHandles[allocationIndex])) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved dependency texture "
+            "binding has no materialized allocation");
+      }
+
+      executableDependencyTextures[range.offset +
+                                   binding.dependencyTextureIndex] =
+          transientTextureHandles[allocationIndex];
     }
 
     for (const auto &binding :

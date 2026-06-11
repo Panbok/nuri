@@ -1,13 +1,20 @@
 #include "common.sp"
 
-layout(location = 0) in PerVertex vtx;
+layout(location = 0) in vec2 inUv0;
+layout(location = 1) in vec2 inUv1;
+
+vec2 depthAlphaBaseColorUv(MaterialData material) {
+  return applyTextureTransform(
+      selectUv(inUv0, inUv1,
+               getMaterialUvSet(material, kMaterialTextureSlotBaseColor)),
+      getMaterialTransform(material, kMaterialTextureSlotBaseColor));
+}
 
 void main() {
   const MaterialData material = loadMaterialData(pc.materialIndex);
   const uint baseColorTexId =
       getMaterialTextureIndex(material, kMaterialTextureSlotBaseColor);
-  const vec2 baseColorUv =
-      transformedUv(material, vtx, kMaterialTextureSlotBaseColor);
+  const vec2 baseColorUv = depthAlphaBaseColorUv(material);
 
   vec4 baseColor = material.header.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {

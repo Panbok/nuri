@@ -1351,12 +1351,6 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
   return device;
 }
 
-std::unique_ptr<GPUDevice> GPUDevice::create(Window &window,
-                                             const GPUDeviceCreateDesc &desc) {
-  NURI_LOG_DEBUG("GPUDevice::create: Creating Vulkan GPU device");
-  return LvkGPUDevice::create(window, desc);
-}
-
 bool LvkGPUDevice::shouldClose() const {
   return impl_->window ? impl_->window->shouldClose() : true;
 }

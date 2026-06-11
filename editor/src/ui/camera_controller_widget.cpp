@@ -2,6 +2,8 @@
 
 #include "nuri/ui/camera_controller_widget.h"
 
+#include "nuri/core/log.h"
+
 namespace nuri {
 
 namespace {
@@ -25,6 +27,19 @@ glm::quat cameraOrientationFromYawPitch(float yawRadians, float pitchRadians) {
       glm::normalize(yawRotation * glm::vec3(1.0f, 0.0f, 0.0f));
   const glm::quat pitchRotation = glm::angleAxis(pitchRadians, rightAxis);
   return glm::normalize(pitchRotation * yawRotation);
+}
+
+void logCurrentCameraPose(const Camera &camera) {
+#if defined(NURI_LOGGING) && NURI_LOGGING
+  const glm::vec3 position = camera.position();
+  const glm::vec3 direction = camera.forward();
+  NURI_LOG_INFO("Camera Controller: position=(%.6f, %.6f, %.6f) "
+                "direction=(%.6f, %.6f, %.6f)",
+                position.x, position.y, position.z, direction.x, direction.y,
+                direction.z);
+#else
+  (void)camera;
+#endif
 }
 
 } // namespace
@@ -53,6 +68,10 @@ void drawCameraControllerContents(CameraSystem &cameraSystem,
   if (ImGui::Combo("Preset", &presetIndex, kPresetNames,
                    IM_ARRAYSIZE(kPresetNames))) {
     controller->setPreset(static_cast<CameraPreset>(presetIndex));
+  }
+
+  if (ImGui::Button("Log Camera Pose")) {
+    logCurrentCameraPose(*camera);
   }
 
   if (controller->preset() == CameraPreset::FpsMoveTo) {

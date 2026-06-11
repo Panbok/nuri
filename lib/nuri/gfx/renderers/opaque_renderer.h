@@ -111,6 +111,7 @@ private:
 
   struct alignas(16) ShadowSdsmHistogramReducePushConstants {
     uint64_t resultBufferAddress = 0u;
+    uint64_t resultBufferAddressPadding = 0u;
     glm::uvec4 sourceParams{0u};
     glm::uvec4 histogramParams{0u};
     glm::vec4 cameraParams{0.0f};
@@ -119,6 +120,14 @@ private:
   static_assert(sizeof(ShadowSdsmHistogramReducePushConstants) == 80u,
                 "OpaqueRenderer::ShadowSdsmHistogramReducePushConstants "
                 "layout changed");
+  static_assert(offsetof(ShadowSdsmHistogramReducePushConstants,
+                         sourceParams) == 16u);
+  static_assert(offsetof(ShadowSdsmHistogramReducePushConstants,
+                         histogramParams) == 32u);
+  static_assert(offsetof(ShadowSdsmHistogramReducePushConstants,
+                         cameraParams) == 48u);
+  static_assert(offsetof(ShadowSdsmHistogramReducePushConstants, trimParams) ==
+                64u);
 
   // These templates hold non-owning borrowed pointers. Callers must ensure the
   // referenced scene/model data outlives the cached template usage.
@@ -455,6 +464,10 @@ private:
   ShaderHandle meshFragmentShader_{};
   ShaderHandle meshDebugOverlayGeometryShader_{};
   ShaderHandle meshDebugOverlayFragmentShader_{};
+  ShaderHandle meshPickVertexShader_{};
+  ShaderHandle meshPickTessVertexShader_{};
+  ShaderHandle meshPickTessControlShader_{};
+  ShaderHandle meshPickTessEvalShader_{};
   ShaderHandle meshPickFragmentShader_{};
   ShaderHandle meshShadowInspectFragmentShader_{};
   ShaderHandle meshVelocityVertexShader_{};
@@ -462,6 +475,14 @@ private:
   ShaderHandle meshReactiveMaskVertexShader_{};
   ShaderHandle meshReactiveMaskFragmentShader_{};
   ShaderHandle meshNormalFragmentShader_{};
+  ShaderHandle depthVertexShader_{};
+  ShaderHandle depthTessVertexShader_{};
+  ShaderHandle depthTessControlShader_{};
+  ShaderHandle depthTessEvalShader_{};
+  ShaderHandle depthAlphaVertexShader_{};
+  ShaderHandle depthAlphaTessVertexShader_{};
+  ShaderHandle depthAlphaTessControlShader_{};
+  ShaderHandle depthAlphaTessEvalShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle depthPyramidVertexShader_{};

@@ -10,13 +10,9 @@ void main() {
   const vec2 uv1 = decodePackedUv1(gl_VertexIndex);
 
   const InstanceData inst = pc.instanceMatrices.instances[globalInstanceId];
-  const mat4 model = inst.modelMatrix;
-  const mat4 lightViewProj =
-      pc.frameData.shadowFrameBuffer.cascades[pc.shadowCascadeIndex]
-          .lightViewProj;
+  const vec4 worldPos4 = inst.modelMatrix * vec4(pos, 1.0);
 
-  const vec4 worldPos4 = model * vec4(pos, 1.0);
-  gl_Position = lightViewProj * worldPos4;
+  gl_Position = pc.frameData.proj * pc.frameData.view * worldPos4;
   outUv0 = uv0;
   outUv1 = uv1;
 }

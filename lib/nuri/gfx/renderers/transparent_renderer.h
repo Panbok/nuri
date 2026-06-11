@@ -194,6 +194,7 @@ private:
 
   ShaderHandle meshVertexShader_{};
   ShaderHandle meshFragmentShader_{};
+  ShaderHandle meshPickVertexShader_{};
   ShaderHandle meshPickFragmentShader_{};
   ShaderHandle feedbackCopyVertexShader_{};
   ShaderHandle feedbackCopyFragmentShader_{};

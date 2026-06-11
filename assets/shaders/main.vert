@@ -1,7 +1,6 @@
 #include "common.sp"
 
 layout(location = 0) out PerVertex vtx;
-layout(location = 10) flat out uint outInstanceId;
 
 void main() {
   const uint globalInstanceId = pc.instanceRemap.ids[gl_InstanceIndex];
@@ -36,5 +35,4 @@ void main() {
   vtx.patchOuterFactors = vec3(1.0);
   vtx.patchInnerFactor = 1.0;
   vtx.tessellatedFlag = 0.0;
-  outInstanceId = globalInstanceId;
 }

@@ -487,7 +487,7 @@ TEST(TransmissionRendererTest,
             gpu.geometryMutationVersion());
 }
 
-TEST(TransmissionRendererTest, StableSortedTransmissionReusesSortDepthCache) {
+TEST(TransmissionRendererTest, StableSortedTransmissionRecomputesSortDepths) {
   std::array<std::byte, 256 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
@@ -509,9 +509,8 @@ TEST(TransmissionRendererTest, StableSortedTransmissionReusesSortDepthCache) {
   for (uint32_t i = 0u; i < kRenderableCount; ++i) {
     const glm::mat4 transform = glm::translate(
         glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -static_cast<float>(i)));
-    auto nodeResult =
-        scene.graph().createNode(scene.graph().rootNode(),
-                                 "transmission_sorted_node", transform);
+    auto nodeResult = scene.graph().createNode(
+        scene.graph().rootNode(), "transmission_sorted_node", transform);
     ASSERT_FALSE(nodeResult.hasError()) << nodeResult.error();
     auto renderableResult = scene.graph().addRenderable(
         nodeResult.value(), modelResult.value(), materialResult.value());
@@ -523,12 +522,12 @@ TEST(TransmissionRendererTest, StableSortedTransmissionReusesSortDepthCache) {
   auto commitResult = scene.commit();
   ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
 
-  auto sceneColorTexture = createTestTexture(
-      gpu, Format::RGBA16_FLOAT, TextureUsage::AttachmentSampled,
-      "transmission_sorted_scene_color");
-  auto frameColorTexture = createTestTexture(
-      gpu, Format::RGBA16_FLOAT, TextureUsage::AttachmentSampled,
-      "transmission_sorted_frame_color");
+  auto sceneColorTexture = createTestTexture(gpu, Format::RGBA16_FLOAT,
+                                             TextureUsage::AttachmentSampled,
+                                             "transmission_sorted_scene_color");
+  auto frameColorTexture = createTestTexture(gpu, Format::RGBA16_FLOAT,
+                                             TextureUsage::AttachmentSampled,
+                                             "transmission_sorted_frame_color");
   ASSERT_NE(sceneColorTexture, nullptr);
   ASSERT_NE(frameColorTexture, nullptr);
 
@@ -553,36 +552,45 @@ TEST(TransmissionRendererTest, StableSortedTransmissionReusesSortDepthCache) {
   ASSERT_FALSE(firstPrepare.hasError()) << firstPrepare.error();
   ASSERT_TRUE(firstPrepare.value());
   ASSERT_EQ(renderer.blendedSortableDraws_.size(), kRenderableCount);
-  ASSERT_EQ(renderer.cachedSortedDepths_.size(), kRenderableCount);
+  std::array<float, kRenderableCount> initialSortDepths{};
+  for (uint32_t i = 0u; i < kRenderableCount; ++i) {
+    initialSortDepths[i] = renderer.blendedSortableDraws_[i].sortDepth;
+    EXPECT_EQ(renderer.blendedSortableDraws_[i].stableOrder, i);
+  }
 
-  renderer.cachedSortedDepths_[0] = 12345.0f;
   frame.frameIndex = 1u;
   auto stablePrepare = renderer.prepareTransmissionPasses(frame);
   ASSERT_FALSE(stablePrepare.hasError()) << stablePrepare.error();
   ASSERT_TRUE(stablePrepare.value());
   ASSERT_EQ(renderer.blendedSortableDraws_.size(), kRenderableCount);
-  EXPECT_FLOAT_EQ(renderer.blendedSortableDraws_[0].sortDepth, 12345.0f);
+  for (uint32_t i = 0u; i < kRenderableCount; ++i) {
+    EXPECT_FLOAT_EQ(renderer.blendedSortableDraws_[i].sortDepth,
+                    initialSortDepths[i]);
+    EXPECT_EQ(renderer.blendedSortableDraws_[i].stableOrder, i);
+  }
 
-  renderer.cachedSortedDepths_[0] = 54321.0f;
+  const float stableFirstSortDepth =
+      renderer.blendedSortableDraws_[0].sortDepth;
   frame.camera.view =
       glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -2.0f));
   frame.frameIndex = 2u;
   auto cameraPrepare = renderer.prepareTransmissionPasses(frame);
   ASSERT_FALSE(cameraPrepare.hasError()) << cameraPrepare.error();
   ASSERT_TRUE(cameraPrepare.value());
-  EXPECT_NE(renderer.blendedSortableDraws_[0].sortDepth, 54321.0f);
+  EXPECT_NE(renderer.blendedSortableDraws_[0].sortDepth, stableFirstSortDepth);
 
-  renderer.cachedSortedDepths_[0] = 77777.0f;
+  const float cameraFirstSortDepth =
+      renderer.blendedSortableDraws_[0].sortDepth;
   ASSERT_TRUE(scene.graph().setNodeLocalTransform(
-      firstNode, glm::translate(glm::mat4(1.0f),
-                                glm::vec3(5.0f, 0.0f, -4.0f))));
+      firstNode,
+      glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 0.0f, -4.0f))));
   commitResult = scene.commit();
   ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
   frame.frameIndex = 3u;
   auto transformPrepare = renderer.prepareTransmissionPasses(frame);
   ASSERT_FALSE(transformPrepare.hasError()) << transformPrepare.error();
   ASSERT_TRUE(transformPrepare.value());
-  EXPECT_NE(renderer.blendedSortableDraws_[0].sortDepth, 77777.0f);
+  EXPECT_NE(renderer.blendedSortableDraws_[0].sortDepth, cameraFirstSortDepth);
 }
 
 } // namespace

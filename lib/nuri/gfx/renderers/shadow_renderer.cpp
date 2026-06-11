@@ -3601,6 +3601,78 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                 sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
                 suppressGpuWarmupWarning = false;
               }
+              if (!suppressGpuWarmupWarning &&
+                  !sdsmState_.loggedGpuResultRingDiagnosticWarning_) {
+                sdsmState_.loggedGpuResultRingDiagnosticWarning_ = true;
+                const uint64_t requestedSourceFrameIndex =
+                    frame.sharedResources.sceneDepthPyramidSourceFrameIndex
+                        .value_or(std::numeric_limits<uint64_t>::max());
+                NURI_LOG_WARNING(
+                    "ShadowRenderer::updateShadowFrameData: GPU SDSM "
+                    "histogram ring diagnostics frame=%llu "
+                    "requestedSourceFrame=%llu slotCount=%zu reason=%s",
+                    static_cast<unsigned long long>(frame.frameIndex),
+                    static_cast<unsigned long long>(
+                        requestedSourceFrameIndex ==
+                                std::numeric_limits<uint64_t>::max()
+                            ? 0u
+                            : requestedSourceFrameIndex),
+                    sdsmReduceResultRing_.size(), fallbackReason.data());
+                for (size_t slotIndex = 0u;
+                     slotIndex < sdsmReduceResultRing_.size(); ++slotIndex) {
+                  const DynamicBufferSlot &slot =
+                      sdsmReduceResultRing_[slotIndex];
+                  const uint64_t expectedPublishedFrame =
+                      slotIndex < sdsmReduceResultRingPublishedFrames_.size()
+                          ? sdsmReduceResultRingPublishedFrames_[slotIndex]
+                          : std::numeric_limits<uint64_t>::max();
+                  if (!slot.buffer || !slot.buffer->valid()) {
+                    NURI_LOG_WARNING(
+                        "ShadowRenderer::updateShadowFrameData: GPU SDSM "
+                        "histogram ring slot=%zu bufferValid=0 "
+                        "expectedFrame=%llu readOk=0 valid=0 sourceFrame=0 "
+                        "validTiles=0 bucketCount=0 rawDeviceMinMax=(0.000000, "
+                        "0.000000) histogramRange=(0.000000, 0.000000) "
+                        "totalWeight=0.000000 clear=0.000000",
+                        slotIndex,
+                        static_cast<unsigned long long>(
+                            expectedPublishedFrame ==
+                                    std::numeric_limits<uint64_t>::max()
+                                ? 0u
+                                : expectedPublishedFrame));
+                    continue;
+                  }
+
+                  SdsmGpuHistogramResult gpuResult{};
+                  auto readResult = gpu_.readBuffer(
+                      slot.buffer->handle(), 0u,
+                      std::as_writable_bytes(
+                          std::span<SdsmGpuHistogramResult>(&gpuResult, 1u)));
+                  const bool readOk = !readResult.hasError();
+                  NURI_LOG_WARNING(
+                      "ShadowRenderer::updateShadowFrameData: GPU SDSM "
+                      "histogram ring slot=%zu bufferValid=1 "
+                      "expectedFrame=%llu readOk=%u valid=%u sourceFrame=%u "
+                      "validTiles=%u bucketCount=%u rawDeviceMinMax=(%.6f, "
+                      "%.6f) histogramRange=(%.6f, %.6f) totalWeight=%.6f "
+                      "clear=%.6f",
+                      slotIndex,
+                      static_cast<unsigned long long>(
+                          expectedPublishedFrame ==
+                                  std::numeric_limits<uint64_t>::max()
+                              ? 0u
+                              : expectedPublishedFrame),
+                      readOk ? 1u : 0u, gpuResult.metadata.y,
+                      gpuResult.metadata.x, gpuResult.metadata.z,
+                      gpuResult.metadata.w,
+                      gpuResult.rawDeviceMinMaxLinearMinMax.x,
+                      gpuResult.rawDeviceMinMaxLinearMinMax.y,
+                      gpuResult.histogramRangeWeightClear.x,
+                      gpuResult.histogramRangeWeightClear.y,
+                      gpuResult.histogramRangeWeightClear.z,
+                      gpuResult.histogramRangeWeightClear.w);
+                }
+              }
               if (!suppressGpuWarmupWarning) {
                 activateReductionFallback(fallbackReason);
               }

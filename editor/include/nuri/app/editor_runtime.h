@@ -155,6 +155,8 @@ private:
   void updateMetrics(double deltaTime);
   void buildFrameContext(const Camera &camera, double timeSeconds);
   void submitPipelineFrame();
+  void enqueueDebugShadowInspectProbe();
+  void logDebugShadowInspectProbeResult();
   [[nodiscard]] bool enqueue2DTextSamples(FontHandle defaultFont,
                                           float baseFontSizePx,
                                           std::pmr::memory_resource &scratch);
@@ -198,6 +200,13 @@ private:
   TemporalCameraHistoryState temporalCameraHistory_{};
   uint64_t frameIndex_ = 0;
   uint64_t simulationFrameIndex_ = 0;
+  struct DebugShadowInspectProbeState {
+    bool submitted = false;
+    bool completed = false;
+    bool timeoutLogged = false;
+    uint64_t requestId = 0;
+    uint64_t submissionFrame = 0;
+  } debugShadowInspectProbe_{};
   double frameDeltaSeconds_ = 0.0;
   double fpsAccumulatorSeconds_ = 0.0;
   uint32_t fpsFrameCount_ = 0;

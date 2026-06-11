@@ -881,6 +881,12 @@ Result<bool, std::string> TransparentRenderer::createShaders() {
   if (pickResult.hasError()) {
     return Result<bool, std::string>::makeError(pickResult.error());
   }
+  auto pickVertexResult = meshPickShader_->compileFromFile(
+      (alphaPickFragmentPath_.parent_path() / "main_id.vert").string(),
+      ShaderStage::Vertex);
+  if (pickVertexResult.hasError()) {
+    return Result<bool, std::string>::makeError(pickVertexResult.error());
+  }
   auto copyVertexResult = feedbackCopyShader_->compileFromFile(
       feedbackCopyVertexPath_.string(), ShaderStage::Vertex);
   if (copyVertexResult.hasError()) {
@@ -894,6 +900,7 @@ Result<bool, std::string> TransparentRenderer::createShaders() {
 
   meshVertexShader_ = vertexResult.value();
   meshFragmentShader_ = fragmentResult.value();
+  meshPickVertexShader_ = pickVertexResult.value();
   meshPickFragmentShader_ = pickResult.value();
   feedbackCopyVertexShader_ = copyVertexResult.value();
   feedbackCopyFragmentShader_ = copyFragmentResult.value();
@@ -937,7 +944,7 @@ TransparentRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
   meshDoubleSidedPipelineHandle_ = meshDoubleResult.value();
 
   auto pickResult = gpu_.createRenderPipeline(
-      meshPipelineDesc(Format::R32_UINT, depthFormat, meshVertexShader_,
+      meshPipelineDesc(Format::R32_UINT, depthFormat, meshPickVertexShader_,
                        meshPickFragmentShader_, false, CullMode::Back),
       "transparent_mesh_pick");
   if (pickResult.hasError()) {
@@ -947,7 +954,7 @@ TransparentRenderer::ensurePipelines(Format colorFormat, Format depthFormat) {
   meshPickPipelineHandle_ = pickResult.value();
 
   auto pickDoubleResult = gpu_.createRenderPipeline(
-      meshPipelineDesc(Format::R32_UINT, depthFormat, meshVertexShader_,
+      meshPipelineDesc(Format::R32_UINT, depthFormat, meshPickVertexShader_,
                        meshPickFragmentShader_, false, CullMode::None),
       "transparent_mesh_pick_double_sided");
   if (pickDoubleResult.hasError()) {
@@ -1855,11 +1862,15 @@ void TransparentRenderer::destroyShaders() {
   if (nuri::isValid(meshFragmentShader_)) {
     gpu_.destroyShaderModule(meshFragmentShader_);
   }
+  if (nuri::isValid(meshPickVertexShader_)) {
+    gpu_.destroyShaderModule(meshPickVertexShader_);
+  }
   if (nuri::isValid(meshPickFragmentShader_)) {
     gpu_.destroyShaderModule(meshPickFragmentShader_);
   }
   meshVertexShader_ = {};
   meshFragmentShader_ = {};
+  meshPickVertexShader_ = {};
   meshPickFragmentShader_ = {};
   feedbackCopyVertexShader_ = {};
   feedbackCopyFragmentShader_ = {};

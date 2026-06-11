@@ -427,7 +427,7 @@ DirectionalShadowSampleContext makeDirectionalShadowSampleContextForCascade(
   return ctx;
 }
 
-uint selectDirectionalShadowCascade(readonly ShadowFrameBuffer shadow,
+uint selectDirectionalShadowCascade(ShadowFrameBuffer shadow,
                                     float viewDepth) {
   const uint cascadeCount =
       clamp(shadow.flagsCascadeCountLightIndex.y, 1u, kMaxShadowCascades);
@@ -476,19 +476,19 @@ DirectionalShadowFilterResult makeDirectionalShadowFilterResult(float factor,
   return r;
 }
 
-int directionalShadowPcfSampleCount(readonly ShadowFrameBuffer shadow) {
+int directionalShadowPcfSampleCount(ShadowFrameBuffer shadow) {
   return int(clamp(shadow.filterParams.x, 1u, kMaxShadowPcfSamples));
 }
 
-int directionalShadowPcssBlockerSampleCount(readonly ShadowFrameBuffer shadow) {
+int directionalShadowPcssBlockerSampleCount(ShadowFrameBuffer shadow) {
   return int(clamp(shadow.filterParams.y, 1u, kMaxShadowPcfSamples));
 }
 
-int directionalShadowPcssFilterSampleCount(readonly ShadowFrameBuffer shadow) {
+int directionalShadowPcssFilterSampleCount(ShadowFrameBuffer shadow) {
   return int(clamp(shadow.filterParams.z, 1u, kMaxShadowPcfSamples));
 }
 
-bool directionalShadowFrameFlag(readonly ShadowFrameBuffer shadow, uint flag) {
+bool directionalShadowFrameFlag(ShadowFrameBuffer shadow, uint flag) {
   return (shadow.flagsCascadeCountLightIndex.x & flag) != 0u;
 }
 
@@ -546,7 +546,7 @@ float sampleDirectionalShadowDepth(DirectionalShadowSampleContext ctx) {
   return textureBindless2D(shadowTexId, shadowRawSamplerId, ctx.shadowUv).r;
 }
 
-float pcfGridDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
+float pcfGridDirectionalShadowFactor(ShadowFrameBuffer shadow,
                                      DirectionalShadowSampleContext ctx) {
   const uint shadowTexId = ctx.cascade.textureSampler.x;
   const uint shadowCompareSamplerId = ctx.cascade.textureSampler.y;
@@ -627,7 +627,7 @@ uint shadowHash(uint value) {
   return value;
 }
 
-mat2 shadowPoissonRotation(readonly ShadowFrameBuffer shadow,
+mat2 shadowPoissonRotation(ShadowFrameBuffer shadow,
                            DirectionalShadowSampleContext ctx,
                            uint shadowTexId) {
   uint seed = shadow.filterParams.w ^ (ctx.cascadeIndex * 0x9e3779b9u);
@@ -687,7 +687,7 @@ bool tryResolveUniformPoissonPcf(DirectionalShadowSampleContext ctx,
   return false;
 }
 
-float poissonPcfDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
+float poissonPcfDirectionalShadowFactor(ShadowFrameBuffer shadow,
                                         DirectionalShadowSampleContext ctx,
                                         int sampleCount,
                                         float radiusTexels) {
@@ -728,7 +728,7 @@ float poissonPcfDirectionalShadowFactor(readonly ShadowFrameBuffer shadow,
 }
 
 DirectionalShadowFilterResult poissonPcfDirectionalShadowFactor(
-    readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx) {
+    ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx) {
   return makeDirectionalShadowFilterResult(
       poissonPcfDirectionalShadowFactor(
           shadow, ctx, directionalShadowPcfSampleCount(shadow), 1.0),
@@ -736,7 +736,7 @@ DirectionalShadowFilterResult poissonPcfDirectionalShadowFactor(
 }
 
 DirectionalShadowFilterResult pcssDirectionalShadowFactor(
-    readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
+    ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
     float lightAngularRadiusRadians, int blockerSampleCount,
     int filterSampleCount) {
   const uint shadowTexId = ctx.cascade.textureSampler.x;
@@ -800,7 +800,7 @@ DirectionalShadowFilterResult pcssDirectionalShadowFactor(
 }
 
 DirectionalShadowFilterResult pcssDirectionalShadowFactor(
-    readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
+    ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
     float lightAngularRadiusRadians) {
   return pcssDirectionalShadowFactor(
       shadow, ctx, lightAngularRadiusRadians,
@@ -809,7 +809,7 @@ DirectionalShadowFilterResult pcssDirectionalShadowFactor(
 }
 
 DirectionalShadowFilterResult directionalShadowFactorFromContext(
-    readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
+    ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
     uint filterMode, float lightAngularRadiusRadians) {
   if (filterMode == kShadowFilterModePCF3x3) {
     return makeDirectionalShadowFilterResult(
@@ -827,7 +827,7 @@ DirectionalShadowFilterResult directionalShadowFactorFromContext(
 }
 
 DirectionalShadowFilterResult directionalShadowBlendFactorFromContext(
-    readonly ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
+    ShadowFrameBuffer shadow, DirectionalShadowSampleContext ctx,
     uint filterMode, float lightAngularRadiusRadians) {
   if (filterMode == kShadowFilterModePCSS) {
     // directionalShadowBlendFactorFromContext deliberately clamps
@@ -871,7 +871,7 @@ struct DirectionalShadowCascadeState {
 };
 
 DirectionalShadowCascadeState makeDirectionalShadowCascadeState(
-    readonly ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
+    ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
     vec3 lightDir) {
   DirectionalShadowCascadeState state;
 
@@ -918,7 +918,7 @@ DirectionalShadowCascadeState makeDirectionalShadowCascadeState(
   return state;
 }
 
-float directionalShadowMaxDistanceFade(readonly ShadowFrameBuffer shadow,
+float directionalShadowMaxDistanceFade(ShadowFrameBuffer shadow,
                                        float viewDepth) {
   const float fadeStart = shadow.fadeParams.x;
   const float fadeEnd = shadow.fadeParams.y;
@@ -929,7 +929,7 @@ float directionalShadowMaxDistanceFade(readonly ShadowFrameBuffer shadow,
 }
 
 DirectionalShadowResult evaluateDirectionalShadow(
-    readonly ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
+    ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
     vec3 lightDir, float lightAngularRadiusRadians) {
   DirectionalShadowResult r;
   r.factor = 1.0;
@@ -1027,7 +1027,7 @@ DirectionalShadowResult evaluateDirectionalShadow(
   return r;
 }
 
-float directionalShadowFactor(readonly ShadowFrameBuffer shadow, vec3 worldPos,
+float directionalShadowFactor(ShadowFrameBuffer shadow, vec3 worldPos,
                               vec3 surfaceNormal, vec3 lightDir) {
   const DirectionalShadowResult r =
       evaluateDirectionalShadow(shadow, worldPos, surfaceNormal, lightDir,
@@ -1036,7 +1036,7 @@ float directionalShadowFactor(readonly ShadowFrameBuffer shadow, vec3 worldPos,
 }
 
 HardShadowInspectResult inspectHardDirectionalShadow(
-    readonly ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
+    ShadowFrameBuffer shadow, vec3 worldPos, vec3 surfaceNormal,
     vec3 lightDir) {
   HardShadowInspectResult r;
   r.receiverDepth = 0.0;

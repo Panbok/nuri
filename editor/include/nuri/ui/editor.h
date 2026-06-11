@@ -37,6 +37,7 @@ public:
   [[nodiscard]] virtual bool onInput(const InputEvent &event) = 0;
   virtual void onFrame(RenderFrameContext &frame) = 0;
   virtual void drawUi(const GizmoUiDrawConfig &config) = 0;
+  virtual void setShadowInspectRequestsEnabled(bool enabled) = 0;
   virtual void invalidatePendingPicks() = 0;
   virtual void reset() = 0;
 

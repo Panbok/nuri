@@ -7,12 +7,10 @@ layout(location = 1) in vec2 inUv1[];
 layout(location = 2) in vec3 inWorldNormal[];
 layout(location = 3) in vec3 inWorldPos[];
 layout(location = 4) in vec4 inWorldTangent[];
-layout(location = 5) flat in uint inInstanceId[];
 layout(location = 6) patch in vec3 inPatchOuterFactors;
 layout(location = 7) patch in float inPatchInnerFactor;
 
 layout(location = 0) out PerVertex vtx;
-layout(location = 10) flat out uint outInstanceId;
 
 void main() {
   const vec3 bary = gl_TessCoord;
@@ -55,6 +53,5 @@ void main() {
   vtx.patchOuterFactors = inPatchOuterFactors;
   vtx.patchInnerFactor = inPatchInnerFactor;
   vtx.tessellatedFlag = 1.0;
-  outInstanceId = inInstanceId[0];
   gl_Position = pc.frameData.proj * pc.frameData.view * vec4(linearPos, 1.0);
 }
