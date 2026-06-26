@@ -65,7 +65,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 368,
+  static_assert(sizeof(FrameData) == 384,
                 "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
@@ -177,10 +177,27 @@ private:
     glm::mat4 currentViewProjNoJitter{1.0f};
     glm::mat4 previousViewProjNoJitter{1.0f};
     glm::uvec4 instanceFlagsMode{0u};
+    uint64_t previousGeometryAddress = 0u;
+    uint64_t previousGeometryAddressPadding = 0u;
+    glm::uvec4 previousGeometryInfo{0u};
   };
-  static_assert(sizeof(VelocityFrameGpuData) ==
-                    sizeof(glm::mat4) * 2u + sizeof(glm::uvec4),
+  static_assert(sizeof(VelocityFrameGpuData) == sizeof(glm::mat4) * 2u +
+                                                    sizeof(glm::uvec4) * 2u +
+                                                    sizeof(uint64_t) * 2u,
                 "OpaqueRenderer::VelocityFrameGpuData layout changed");
+  static_assert(offsetof(VelocityFrameGpuData, previousGeometryAddress) ==
+                144u);
+  static_assert(offsetof(VelocityFrameGpuData, previousGeometryInfo) == 160u);
+
+  struct alignas(16) VelocityRenderableGeometryGpuData {
+    uint64_t previousVertexBufferAddress = 0u;
+    uint64_t previousVertexBufferAddressPadding = 0u;
+    glm::uvec4 metadata{0u};
+  };
+  static_assert(sizeof(VelocityRenderableGeometryGpuData) == 32u,
+                "OpaqueRenderer::VelocityRenderableGeometryGpuData layout "
+                "changed");
+  static_assert(offsetof(VelocityRenderableGeometryGpuData, metadata) == 16u);
 
   enum class VelocityInstanceFlagsMode : uint32_t {
     Buffer = 0u,
@@ -315,6 +332,8 @@ private:
   Result<bool, std::string>
   ensureVelocityFrameDataRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
+  ensureVelocityGeometryRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
   ensureDynamicRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
                             size_t requiredBytes, size_t minimumBytes,
                             std::string_view debugNamePrefix);
@@ -444,6 +463,7 @@ private:
   std::pmr::vector<DynamicBufferSlot> previousInstanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> velocityInstanceFlagsRing_;
   std::pmr::vector<DynamicBufferSlot> velocityFrameDataRing_;
+  std::pmr::vector<DynamicBufferSlot> velocityGeometryRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
   TextureHandle pickIdTexture_{};
@@ -471,6 +491,9 @@ private:
   ShaderHandle meshPickFragmentShader_{};
   ShaderHandle meshShadowInspectFragmentShader_{};
   ShaderHandle meshVelocityVertexShader_{};
+  ShaderHandle meshVelocityTessVertexShader_{};
+  ShaderHandle meshVelocityTessControlShader_{};
+  ShaderHandle meshVelocityTessEvalShader_{};
   ShaderHandle meshVelocityFragmentShader_{};
   ShaderHandle meshReactiveMaskVertexShader_{};
   ShaderHandle meshReactiveMaskFragmentShader_{};
@@ -518,6 +541,8 @@ private:
   RenderPipelineHandle meshShadowInspectDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle meshVelocityPipelineHandle_{};
   RenderPipelineHandle meshVelocityDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle meshVelocityTessPipelineHandle_{};
+  RenderPipelineHandle meshVelocityDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle meshReactiveMaskPipelineHandle_{};
   RenderPipelineHandle meshReactiveMaskDoubleSidedPipelineHandle_{};
   RenderPipelineHandle meshNormalPipelineHandle_{};
@@ -672,6 +697,7 @@ private:
   std::pmr::unordered_map<RenderableId, glm::mat4> previousTransformById_;
   std::pmr::vector<InstanceData> previousInstanceMatricesCpuCache_;
   std::pmr::vector<uint32_t> velocityInstanceFlagsCpuCache_;
+  std::pmr::vector<VelocityRenderableGeometryGpuData> velocityGeometryCpuCache_;
   std::pmr::vector<PushConstants> transmissionVisibilityDepthPushConstants_;
   std::pmr::vector<PreparedGraphPass> preparedGraphPasses_;
   PushConstants computePushConstants_{};

@@ -24,7 +24,8 @@ vec3 shadowInspectSurfaceNormal(MaterialData material, PerVertex vertex) {
   const vec2 normalUv =
       transformedUv(material, vertex, kMaterialTextureSlotNormal);
   vec3 tangentNormal =
-      textureBindless2D(normalTexId, pc.frameData.materialSamplerId, normalUv)
+      textureBindless2D(normalTexId, pc.frameData.materialDataSamplerId,
+                        normalUv)
               .xyz *
           2.0 -
       1.0;

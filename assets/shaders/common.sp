@@ -256,6 +256,11 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   // sampler is frame-scoped so alpha-test passes can bypass TAA material mip
   // bias.
   uint materialCoverageSamplerId;
+  // Material data textures should not inherit TAA color-detail mip bias.
+  uint materialDataSamplerId;
+  uint materialSamplerReserved0;
+  uint materialSamplerReserved1;
+  uint materialSamplerReserved2;
 };
 
 uint getAmbientOcclusionDebugView(FrameDataBuffer frameData) {
@@ -312,11 +317,23 @@ layout(std430, buffer_reference) readonly buffer VelocityInstanceFlagsBuffer {
 const uint kVelocityInstanceFlagsModeBuffer = 0u;
 const uint kVelocityInstanceFlagsModeAllValid = 1u;
 const uint kVelocityInstanceFlagsModeAllInvalid = 2u;
+const uint kVelocityGeometryFlagPreviousVertexBuffer = 1u << 0u;
+
+struct VelocityRenderableGeometryData {
+  PackedVertexWordBuffer previousVertexBuffer;
+  uvec4 metadata;
+};
+
+layout(std430, buffer_reference) readonly buffer VelocityRenderableGeometryBuffer {
+  VelocityRenderableGeometryData values[];
+};
 
 struct VelocityFrameData {
   mat4 currentViewProjNoJitter;
   mat4 previousViewProjNoJitter;
   uvec4 instanceFlagsMode;
+  VelocityRenderableGeometryBuffer previousGeometry;
+  uvec4 previousGeometryInfo;
 };
 
 layout(std430, buffer_reference) readonly buffer VelocityFrameDataBuffer {
@@ -392,18 +409,38 @@ uint packedVertexStrideWords(uint packedVertexFormat) {
   return packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ? 6u : 5u;
 }
 
-uint packedVertexWord(uint vertexIndex, uint wordIndex) {
-  return pc.vertexBuffer
-      .words[vertexIndex * packedVertexStrideWords(pc.packedVertexFormat) +
+uint packedVertexWordFrom(PackedVertexWordBuffer vertexBuffer,
+                          uint vertexIndex, uint wordIndex,
+                          uint packedVertexFormat) {
+  return vertexBuffer
+      .words[vertexIndex * packedVertexStrideWords(packedVertexFormat) +
              wordIndex];
+}
+
+uint packedVertexWord(uint vertexIndex, uint wordIndex) {
+  return packedVertexWordFrom(pc.vertexBuffer, vertexIndex, wordIndex,
+                              pc.packedVertexFormat);
+}
+
+vec3 decodeAnimatedPositionFrom(PackedVertexWordBuffer vertexBuffer,
+                                uint vertexIndex,
+                                uint packedVertexFormat) {
+  return vec3(uintBitsToFloat(
+                  packedVertexWordFrom(vertexBuffer, vertexIndex, 0u,
+                                       packedVertexFormat)),
+              uintBitsToFloat(
+                  packedVertexWordFrom(vertexBuffer, vertexIndex, 1u,
+                                       packedVertexFormat)),
+              uintBitsToFloat(
+                  packedVertexWordFrom(vertexBuffer, vertexIndex, 2u,
+                                       packedVertexFormat)));
 }
 
 vec3 decodePackedPosition(uint vertexIndex) {
   if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
       pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
-    return vec3(uintBitsToFloat(packedVertexWord(vertexIndex, 0u)),
-                uintBitsToFloat(packedVertexWord(vertexIndex, 1u)),
-                uintBitsToFloat(packedVertexWord(vertexIndex, 2u)));
+    return decodeAnimatedPositionFrom(pc.vertexBuffer, vertexIndex,
+                                      pc.packedVertexFormat);
   }
 
   StaticVertexDecodeGpuData decode =

@@ -14,6 +14,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>
 
+#include <array>
 #include <optional>
 #include <vector>
 
@@ -28,6 +29,7 @@ constexpr float kBlendWeightEpsilon = 1.0e-5f;
 constexpr size_t kClipSlotCount = 2u;
 constexpr size_t kPrimaryClipSlot = 0u;
 constexpr size_t kSecondaryClipSlot = 1u;
+constexpr size_t kAnimationSceneFrameHistorySlots = 3u;
 
 struct ClipBufferLabels {
   std::string_view keyTimes;
@@ -317,8 +319,10 @@ struct AnimatedRenderableState {
   uint32_t paletteOffset = 0u;
   bool hasMorph = false;
   bool hasSkin = false;
-  std::unique_ptr<Buffer> morphOutputVertexBuffer;
-  std::unique_ptr<Buffer> finalOutputVertexBuffer;
+  std::array<std::unique_ptr<Buffer>, kAnimationSceneFrameHistorySlots>
+      morphOutputVertexBuffers;
+  std::array<std::unique_ptr<Buffer>, kAnimationSceneFrameHistorySlots>
+      finalOutputVertexBuffers;
 };
 
 struct AnimationClipGpuData {
@@ -391,19 +395,24 @@ struct SceneFrameState {
   explicit SceneFrameState(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : baseInstances(memory), geometryOverrides(memory),
-        animatedRenderableIndices(memory), preDispatches(memory),
-        samplePushConstants(memory), sampleDependencies(memory),
-        blendPushConstants(memory), blendDependencies(memory),
-        worldPushConstants(memory), worldDependencies(memory),
-        scatterPushConstants(memory), scatterDependencies(memory),
-        morphPushConstants(memory), morphDependencies(memory),
-        skinPalettePushConstants(memory), skinPaletteDependencies(memory),
-        skinPushConstants(memory), skinDependencies(memory) {}
+        previousGeometryOverrides(memory), animatedRenderableIndices(memory),
+        preDispatches(memory), samplePushConstants(memory),
+        sampleDependencies(memory), blendPushConstants(memory),
+        blendDependencies(memory), worldPushConstants(memory),
+        worldDependencies(memory), scatterPushConstants(memory),
+        scatterDependencies(memory), morphPushConstants(memory),
+        morphDependencies(memory), skinPalettePushConstants(memory),
+        skinPaletteDependencies(memory), skinPushConstants(memory),
+        skinDependencies(memory), pendingBufferDeletes(memory) {}
 
-  std::unique_ptr<Buffer> instanceMatricesBuffer;
-  size_t instanceMatricesCapacityBytes = 0u;
+  std::array<std::unique_ptr<Buffer>, kAnimationSceneFrameHistorySlots>
+      instanceMatricesBuffers;
+  std::array<size_t, kAnimationSceneFrameHistorySlots>
+      instanceMatricesCapacityBytes{};
   std::pmr::vector<InstanceData> baseInstances;
   std::pmr::vector<AnimatedRenderableGeometryOverride> geometryOverrides;
+  std::pmr::vector<AnimatedRenderableGeometryOverride>
+      previousGeometryOverrides;
   std::pmr::vector<uint32_t> animatedRenderableIndices;
   std::pmr::vector<ComputeDispatchItem> preDispatches;
   std::pmr::vector<SamplePushConstants> samplePushConstants;
@@ -420,8 +429,16 @@ struct SceneFrameState {
   std::pmr::vector<std::array<BufferHandle, 4>> skinPaletteDependencies;
   std::pmr::vector<SkinPushConstants> skinPushConstants;
   std::pmr::vector<std::array<BufferHandle, 4>> skinDependencies;
+  struct PendingBufferDelete {
+    BufferHandle buffer{};
+    uint64_t retireAfterFrame = 0u;
+  };
+  std::pmr::vector<PendingBufferDelete> pendingBufferDeletes;
   uint64_t version = 0u;
   uint64_t preparedFrameIndex = std::numeric_limits<uint64_t>::max();
+  size_t currentHistorySlot = 0u;
+  size_t previousHistorySlot = 0u;
+  bool previousFrameValid = false;
   const RenderScene *scene = nullptr;
   uint64_t sceneTopologyVersion = 0u;
   size_t renderableCount = 0u;
@@ -447,12 +464,76 @@ struct SceneFrameState {
   }
 };
 
+[[nodiscard]] uint64_t bufferRetireLagFrames(const GPUDevice &gpu) noexcept {
+  return static_cast<uint64_t>(std::max(1u, gpu.getSwapchainImageCount())) + 1u;
+}
+
+[[nodiscard]] uint64_t
+retireAfterPreparedFrame(const GPUDevice &gpu,
+                         const SceneFrameState &sceneFrame) noexcept {
+  if (sceneFrame.preparedFrameIndex == std::numeric_limits<uint64_t>::max()) {
+    return 0u;
+  }
+  return sceneFrame.preparedFrameIndex + bufferRetireLagFrames(gpu);
+}
+
+void destroyOwnedBuffer(GPUDevice &gpu, std::unique_ptr<Buffer> &buffer,
+                        SceneFrameState *sceneFrame,
+                        uint64_t retireAfterFrame) {
+  if (buffer && buffer->valid()) {
+    const BufferHandle handle = buffer->handle();
+    if (sceneFrame != nullptr && retireAfterFrame != 0u) {
+      sceneFrame->pendingBufferDeletes.push_back(
+          SceneFrameState::PendingBufferDelete{
+              .buffer = handle,
+              .retireAfterFrame = retireAfterFrame,
+          });
+    } else {
+      gpu.destroyBuffer(handle);
+    }
+  }
+  buffer.reset();
+}
+
+void processPendingBufferDeletes(GPUDevice &gpu, SceneFrameState &sceneFrame,
+                                 uint64_t frameIndex) {
+  size_t writeIndex = 0u;
+  for (size_t readIndex = 0u;
+       readIndex < sceneFrame.pendingBufferDeletes.size(); ++readIndex) {
+    const SceneFrameState::PendingBufferDelete pending =
+        sceneFrame.pendingBufferDeletes[readIndex];
+    if (frameIndex >= pending.retireAfterFrame) {
+      if (nuri::isValid(pending.buffer)) {
+        gpu.destroyBuffer(pending.buffer);
+      }
+      continue;
+    }
+    if (writeIndex != readIndex) {
+      sceneFrame.pendingBufferDeletes[writeIndex] = pending;
+    }
+    ++writeIndex;
+  }
+  sceneFrame.pendingBufferDeletes.resize(writeIndex);
+}
+
+void destroyPendingBufferDeletes(GPUDevice &gpu, SceneFrameState &sceneFrame) {
+  for (const SceneFrameState::PendingBufferDelete pending :
+       sceneFrame.pendingBufferDeletes) {
+    if (nuri::isValid(pending.buffer)) {
+      gpu.destroyBuffer(pending.buffer);
+    }
+  }
+  sceneFrame.pendingBufferDeletes.clear();
+}
+
 void invalidatePreparedSceneFrame(SceneFrameState &sceneFrame) noexcept {
   sceneFrame.resetTransientDispatchState();
   sceneFrame.geometryOverrides.clear();
+  sceneFrame.previousGeometryOverrides.clear();
   sceneFrame.animatedRenderableIndices.clear();
   sceneFrame.publishedData = {};
   sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
+  sceneFrame.previousFrameValid = false;
   sceneFrame.scene = nullptr;
   sceneFrame.sceneTopologyVersion = 0u;
   sceneFrame.renderableCount = 0u;
@@ -460,39 +541,80 @@ void invalidatePreparedSceneFrame(SceneFrameState &sceneFrame) noexcept {
 
 void destroyAnimatedRenderableBuffers(
     GPUDevice &gpu,
-    std::pmr::vector<AnimatedRenderableState> &animatedRenderables) {
+    std::pmr::vector<AnimatedRenderableState> &animatedRenderables,
+    SceneFrameState *sceneFrame = nullptr, uint64_t retireAfterFrame = 0u) {
   for (AnimatedRenderableState &renderable : animatedRenderables) {
-    destroyOwnedBuffer(gpu, renderable.morphOutputVertexBuffer);
-    destroyOwnedBuffer(gpu, renderable.finalOutputVertexBuffer);
+    for (std::unique_ptr<Buffer> &buffer :
+         renderable.morphOutputVertexBuffers) {
+      destroyOwnedBuffer(gpu, buffer, sceneFrame, retireAfterFrame);
+    }
+    for (std::unique_ptr<Buffer> &buffer :
+         renderable.finalOutputVertexBuffers) {
+      destroyOwnedBuffer(gpu, buffer, sceneFrame, retireAfterFrame);
+    }
   }
 }
 
-void destroyInstanceBuffers(GPUDevice &gpu, AnimationPoseInstance &instance) {
-  destroyOwnedBuffer(gpu, instance.nodeMetaBuffer);
-  destroyOwnedBuffer(gpu, instance.depthOrderedNodesBuffer);
-  destroyOwnedBuffer(gpu, instance.renderableBindingsBuffer);
+void destroyClipBuffers(GPUDevice &gpu, AnimationClipGpuData &clip,
+                        SceneFrameState *sceneFrame,
+                        uint64_t retireAfterFrame) {
+  destroyOwnedBuffer(gpu, clip.keyTimesBuffer, sceneFrame, retireAfterFrame);
+  destroyOwnedBuffer(gpu, clip.valuesBuffer, sceneFrame, retireAfterFrame);
+  destroyOwnedBuffer(gpu, clip.channelsBuffer, sceneFrame, retireAfterFrame);
+  destroyOwnedBuffer(gpu, clip.sampledNodeStatesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, clip.sampledWeightsBuffer, sceneFrame,
+                     retireAfterFrame);
+}
+
+void destroyInstanceBuffers(GPUDevice &gpu, AnimationPoseInstance &instance,
+                            SceneFrameState *sceneFrame = nullptr,
+                            uint64_t retireAfterFrame = 0u) {
+  destroyOwnedBuffer(gpu, instance.nodeMetaBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.depthOrderedNodesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.renderableBindingsBuffer, sceneFrame,
+                     retireAfterFrame);
   for (AnimationClipGpuData &clip : instance.clips) {
-    destroyClipBuffers(gpu, clip);
+    destroyClipBuffers(gpu, clip, sceneFrame, retireAfterFrame);
   }
-  destroyOwnedBuffer(gpu, instance.blendedNodeStatesBuffer);
-  destroyOwnedBuffer(gpu, instance.blendedWeightsBuffer);
-  destroyOwnedBuffer(gpu, instance.worldMatricesBuffer);
-  destroyOwnedBuffer(gpu, instance.jointNodeIndicesBuffer);
-  destroyOwnedBuffer(gpu, instance.inverseBindMatricesBuffer);
-  destroyOwnedBuffer(gpu, instance.jointPaletteBuffer);
-  destroyAnimatedRenderableBuffers(gpu, instance.animatedRenderables);
+  destroyOwnedBuffer(gpu, instance.blendedNodeStatesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.blendedWeightsBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.worldMatricesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.jointNodeIndicesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.inverseBindMatricesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.jointPaletteBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyAnimatedRenderableBuffers(gpu, instance.animatedRenderables,
+                                   sceneFrame, retireAfterFrame);
 }
 
-void destroyBindingBuffers(GPUDevice &gpu, AnimationPoseInstance &instance) {
-  destroyOwnedBuffer(gpu, instance.renderableBindingsBuffer);
-  destroyOwnedBuffer(gpu, instance.jointNodeIndicesBuffer);
-  destroyOwnedBuffer(gpu, instance.inverseBindMatricesBuffer);
-  destroyOwnedBuffer(gpu, instance.jointPaletteBuffer);
-  destroyAnimatedRenderableBuffers(gpu, instance.animatedRenderables);
+void destroyBindingBuffers(GPUDevice &gpu, AnimationPoseInstance &instance,
+                           SceneFrameState *sceneFrame = nullptr,
+                           uint64_t retireAfterFrame = 0u) {
+  destroyOwnedBuffer(gpu, instance.renderableBindingsBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.jointNodeIndicesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.inverseBindMatricesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.jointPaletteBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyAnimatedRenderableBuffers(gpu, instance.animatedRenderables,
+                                   sceneFrame, retireAfterFrame);
 }
 
-void destroySceneFrameBuffers(GPUDevice &gpu, SceneFrameState &sceneFrame) {
-  destroyOwnedBuffer(gpu, sceneFrame.instanceMatricesBuffer);
+void destroySceneFrameBuffers(GPUDevice &gpu, SceneFrameState &sceneFrame,
+                              uint64_t retireAfterFrame = 0u) {
+  for (std::unique_ptr<Buffer> &buffer : sceneFrame.instanceMatricesBuffers) {
+    destroyOwnedBuffer(gpu, buffer, &sceneFrame, retireAfterFrame);
+  }
 }
 
 [[nodiscard]] bool controlsPrefabNode(const AnimationPoseInstance &instance,
@@ -687,16 +809,22 @@ Result<bool, std::string> createClipBuffers(
   return uploadVector(gpu, *clipData.channelsBuffer, clipData.channels);
 }
 
-Result<bool, std::string> createStaticBuffers(AnimationGpuServices &services,
-                                              AnimationPoseInstance &instance) {
+Result<bool, std::string> createStaticBuffers(
+    AnimationGpuServices &services, AnimationPoseInstance &instance,
+    SceneFrameState *sceneFrame = nullptr, uint64_t retireAfterFrame = 0u) {
   auto &gpu = services.gpu();
-  destroyOwnedBuffer(gpu, instance.nodeMetaBuffer);
-  destroyOwnedBuffer(gpu, instance.depthOrderedNodesBuffer);
-  destroyOwnedBuffer(gpu, instance.blendedNodeStatesBuffer);
-  destroyOwnedBuffer(gpu, instance.blendedWeightsBuffer);
-  destroyOwnedBuffer(gpu, instance.worldMatricesBuffer);
+  destroyOwnedBuffer(gpu, instance.nodeMetaBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.depthOrderedNodesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.blendedNodeStatesBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.blendedWeightsBuffer, sceneFrame,
+                     retireAfterFrame);
+  destroyOwnedBuffer(gpu, instance.worldMatricesBuffer, sceneFrame,
+                     retireAfterFrame);
   for (AnimationClipGpuData &clip : instance.clips) {
-    destroyClipBuffers(gpu, clip);
+    destroyClipBuffers(gpu, clip, sceneFrame, retireAfterFrame);
   }
 
   auto nodeMetaResult = services.createStorageBuffer(
@@ -896,12 +1024,15 @@ Result<bool, std::string> appendAnimatedRenderableBinding(
   const size_t requiredBytes =
       static_cast<size_t>(animated.vertexCount) * kPackedVertexStrideBytes;
   if (animated.hasMorph) {
-    auto morphOutputResult = services.createStorageVertexBuffer(
-        requiredBytes, "animation_pose_morph_output");
-    if (morphOutputResult.hasError()) {
-      return Result<bool, std::string>::makeError(morphOutputResult.error());
+    for (size_t slot = 0u; slot < kAnimationSceneFrameHistorySlots; ++slot) {
+      auto morphOutputResult = services.createStorageVertexBuffer(
+          requiredBytes, "animation_pose_morph_output");
+      if (morphOutputResult.hasError()) {
+        return Result<bool, std::string>::makeError(morphOutputResult.error());
+      }
+      animated.morphOutputVertexBuffers[slot] =
+          std::move(morphOutputResult.value());
     }
-    animated.morphOutputVertexBuffer = std::move(morphOutputResult.value());
   }
 
   if (animated.hasSkin) {
@@ -910,12 +1041,15 @@ Result<bool, std::string> appendAnimatedRenderableBinding(
           "AnimationPoseSimulationBackend: skin jointNodeIndices and "
           "inverseBindMatrices counts do not match");
     }
-    auto finalOutputResult = services.createStorageVertexBuffer(
-        requiredBytes, "animation_pose_skin_output");
-    if (finalOutputResult.hasError()) {
-      return Result<bool, std::string>::makeError(finalOutputResult.error());
+    for (size_t slot = 0u; slot < kAnimationSceneFrameHistorySlots; ++slot) {
+      auto finalOutputResult = services.createStorageVertexBuffer(
+          requiredBytes, "animation_pose_skin_output");
+      if (finalOutputResult.hasError()) {
+        return Result<bool, std::string>::makeError(finalOutputResult.error());
+      }
+      animated.finalOutputVertexBuffers[slot] =
+          std::move(finalOutputResult.value());
     }
-    animated.finalOutputVertexBuffer = std::move(finalOutputResult.value());
     animated.jointNodeOffset =
         static_cast<uint32_t>(instance.flattenedJointNodeIndices.size());
     animated.jointCount = static_cast<uint32_t>(skin->jointNodeIndices.size());
@@ -999,7 +1133,9 @@ Result<bool, std::string> createRenderableBindingBuffers(
 
 Result<bool, std::string>
 ensureRenderableBindings(SceneRuntimeHost &host, AnimationGpuServices &services,
-                         AnimationPoseInstance &instance) {
+                         AnimationPoseInstance &instance,
+                         SceneFrameState *sceneFrame = nullptr,
+                         uint64_t retireAfterFrame = 0u) {
   const RenderScene *scene = host.scene();
   if (scene == nullptr) {
     return Result<bool, std::string>::makeError(
@@ -1010,7 +1146,7 @@ ensureRenderableBindings(SceneRuntimeHost &host, AnimationGpuServices &services,
     return Result<bool, std::string>::makeError(
         "AnimationPoseSimulationBackend: render scene resources are null");
   }
-  destroyBindingBuffers(services.gpu(), instance);
+  destroyBindingBuffers(services.gpu(), instance, sceneFrame, retireAfterFrame);
   instance.renderableBindings.clear();
   instance.animatedRenderables.clear();
   instance.flattenedJointNodeIndices.clear();
@@ -1035,34 +1171,47 @@ ensureRenderableBindings(SceneRuntimeHost &host, AnimationGpuServices &services,
 
 Result<bool, std::string> ensureSceneFrameBuffer(AnimationGpuServices &services,
                                                  const RenderScene &scene,
-                                                 SceneFrameState &frameState) {
+                                                 SceneFrameState &frameState,
+                                                 size_t currentHistorySlot) {
   const size_t requiredBytes = std::max(
       scene.renderables().size() * sizeof(InstanceData), sizeof(InstanceData));
-  if (!frameState.instanceMatricesBuffer ||
-      frameState.instanceMatricesCapacityBytes < requiredBytes) {
-    destroyOwnedBuffer(services.gpu(), frameState.instanceMatricesBuffer);
+  if (currentHistorySlot >= frameState.instanceMatricesBuffers.size()) {
+    return Result<bool, std::string>::makeError(
+        "AnimationPoseSimulationBackend: invalid scene frame history slot");
+  }
+  for (size_t slot = 0u; slot < frameState.instanceMatricesBuffers.size();
+       ++slot) {
+    if (frameState.instanceMatricesBuffers[slot] &&
+        frameState.instanceMatricesCapacityBytes[slot] >= requiredBytes) {
+      continue;
+    }
+    destroyOwnedBuffer(services.gpu(), frameState.instanceMatricesBuffers[slot],
+                       &frameState,
+                       retireAfterPreparedFrame(services.gpu(), frameState));
     auto bufferResult = services.createStorageBuffer(
-        requiredBytes, "animation_scene_instances");
+        requiredBytes, "animation_scene_instances_" + std::to_string(slot));
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }
-    frameState.instanceMatricesBuffer = std::move(bufferResult.value());
-    frameState.instanceMatricesCapacityBytes = requiredBytes;
+    frameState.instanceMatricesBuffers[slot] = std::move(bufferResult.value());
+    frameState.instanceMatricesCapacityBytes[slot] = requiredBytes;
   }
 
   frameState.baseInstances.clear();
   frameState.geometryOverrides.clear();
+  frameState.previousGeometryOverrides.clear();
   frameState.animatedRenderableIndices.clear();
   frameState.baseInstances.reserve(scene.renderables().size());
   frameState.geometryOverrides.resize(scene.renderables().size());
+  frameState.previousGeometryOverrides.resize(scene.renderables().size());
   for (const Renderable &renderable : scene.renderables()) {
     frameState.baseInstances.push_back(
         makeInstanceData(renderable.modelMatrix));
   }
 
-  auto uploadResult =
-      uploadVector(services.gpu(), *frameState.instanceMatricesBuffer,
-                   frameState.baseInstances);
+  auto uploadResult = uploadVector(
+      services.gpu(), *frameState.instanceMatricesBuffers[currentHistorySlot],
+      frameState.baseInstances);
   if (uploadResult.hasError()) {
     return uploadResult;
   }
@@ -1174,16 +1323,22 @@ AnimationPoseSimulationBackend::destroyInstance(SceneRuntimeHost &,
     return Result<bool, std::string>::makeResult(false);
   }
   if (services_ != nullptr) {
-    destroyInstanceBuffers(services_->gpu(), it->second);
+    const uint64_t retireAfterFrame =
+        retireAfterPreparedFrame(services_->gpu(), impl_->sceneFrame);
+    destroyInstanceBuffers(services_->gpu(), it->second, &impl_->sceneFrame,
+                           retireAfterFrame);
   }
   impl_->instances.erase(it);
   if (impl_->instances.empty()) {
     if (services_ != nullptr) {
-      destroySceneFrameBuffers(services_->gpu(), impl_->sceneFrame);
+      destroySceneFrameBuffers(
+          services_->gpu(), impl_->sceneFrame,
+          retireAfterPreparedFrame(services_->gpu(), impl_->sceneFrame));
     }
     impl_->sceneFrame.publishedData = {};
     impl_->sceneFrame.version = 0u;
     impl_->sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
+    impl_->sceneFrame.previousFrameValid = false;
     impl_->sceneFrame.scene = nullptr;
     impl_->sceneFrame.sceneTopologyVersion = 0u;
     impl_->sceneFrame.renderableCount = 0u;
@@ -1230,7 +1385,9 @@ Result<bool, std::string> AnimationPoseSimulationBackend::updateParams(
   it->second.params = decoded;
   if (primaryClipChanged || wasBlendEnabled != isBlendEnabledNow ||
       (isBlendEnabledNow && secondaryClipChanged)) {
-    auto recreateResult = createStaticBuffers(*services_, it->second);
+    auto recreateResult = createStaticBuffers(
+        *services_, it->second, &impl_->sceneFrame,
+        retireAfterPreparedFrame(services_->gpu(), impl_->sceneFrame));
     if (recreateResult.hasError()) {
       return recreateResult;
     }
@@ -1329,13 +1486,16 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   }
 
   SceneFrameState &sceneFrame = impl_->sceneFrame;
+  processPendingBufferDeletes(services_->gpu(), sceneFrame, frameIndex);
   sceneFrame.resetTransientDispatchState();
 
   if (impl_->instances.empty()) {
     sceneFrame.geometryOverrides.clear();
+    sceneFrame.previousGeometryOverrides.clear();
     sceneFrame.publishedData = {};
     sceneFrame.version = 0u;
     sceneFrame.preparedFrameIndex = frameIndex;
+    sceneFrame.previousFrameValid = false;
     sceneFrame.scene = nullptr;
     sceneFrame.sceneTopologyVersion = 0u;
     sceneFrame.renderableCount = 0u;
@@ -1343,10 +1503,26 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   }
 
   const RenderScene &scene = *host.scene();
-  auto frameResult = ensureSceneFrameBuffer(*services_, scene, sceneFrame);
+  const bool previousFrameValid =
+      sceneFrame.preparedFrameIndex != std::numeric_limits<uint64_t>::max() &&
+      sceneFrame.preparedFrameIndex + 1u == frameIndex &&
+      sceneFrame.scene == &scene &&
+      sceneFrame.sceneTopologyVersion == scene.topologyVersion() &&
+      sceneFrame.renderableCount == scene.renderables().size();
+  const size_t previousHistorySlot = sceneFrame.currentHistorySlot;
+  const size_t currentHistorySlot =
+      static_cast<size_t>(frameIndex % kAnimationSceneFrameHistorySlots);
+  auto frameResult =
+      ensureSceneFrameBuffer(*services_, scene, sceneFrame, currentHistorySlot);
   if (frameResult.hasError()) {
     return frameResult;
   }
+  sceneFrame.currentHistorySlot = currentHistorySlot;
+  sceneFrame.previousHistorySlot =
+      previousFrameValid ? previousHistorySlot : currentHistorySlot;
+  sceneFrame.previousFrameValid =
+      previousFrameValid &&
+      sceneFrame.previousHistorySlot != currentHistorySlot;
   sceneFrame.scene = &scene;
   sceneFrame.sceneTopologyVersion = scene.topologyVersion();
   sceneFrame.renderableCount = scene.renderables().size();
@@ -1364,7 +1540,9 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
     if (scene.topologyVersion() != instance.cachedSceneTopologyVersion ||
         services_->gpu().geometryMutationVersion() !=
             instance.cachedGeometryMutationVersion) {
-      auto bindingResult = ensureRenderableBindings(host, *services_, instance);
+      auto bindingResult = ensureRenderableBindings(
+          host, *services_, instance, &sceneFrame,
+          retireAfterPreparedFrame(services_->gpu(), sceneFrame));
       if (bindingResult.hasError()) {
         return bindingResult;
       }
@@ -1422,7 +1600,8 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
 
   const uint64_t instanceMatricesAddress =
       services_->gpu().getBufferDeviceAddress(
-          sceneFrame.instanceMatricesBuffer->handle());
+          sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot]
+              ->handle());
   if (instanceMatricesAddress == 0u) {
     return Result<bool, std::string>::makeError(
         "AnimationPoseSimulationBackend: invalid scene frame buffer address");
@@ -1691,7 +1870,9 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
       sceneFrame.scatterDependencies.push_back(
           {instance.renderableBindingsBuffer->handle(),
            instance.worldMatricesBuffer->handle(),
-           sceneFrame.instanceMatricesBuffer->handle(), BufferHandle{}});
+           sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot]
+               ->handle(),
+           BufferHandle{}});
       appendComputeDispatch(
           sceneFrame.preDispatches, services_->scatterPipeline(),
           dispatchCount(sceneFrame.scatterPushConstants.back().bindingCount),
@@ -1702,6 +1883,35 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
 
     for (AnimatedRenderableState &animated : instance.animatedRenderables) {
       BufferHandle overrideBuffer{};
+      BufferHandle previousOverrideBuffer{};
+      Buffer *currentMorphOutput =
+          animated.hasMorph
+              ? animated.morphOutputVertexBuffers[sceneFrame.currentHistorySlot]
+                    .get()
+              : nullptr;
+      Buffer *previousMorphOutput =
+          sceneFrame.previousFrameValid && animated.hasMorph
+              ? animated
+                    .morphOutputVertexBuffers[sceneFrame.previousHistorySlot]
+                    .get()
+              : nullptr;
+      Buffer *currentSkinOutput =
+          animated.hasSkin
+              ? animated.finalOutputVertexBuffers[sceneFrame.currentHistorySlot]
+                    .get()
+              : nullptr;
+      Buffer *previousSkinOutput =
+          sceneFrame.previousFrameValid && animated.hasSkin
+              ? animated
+                    .finalOutputVertexBuffers[sceneFrame.previousHistorySlot]
+                    .get()
+              : nullptr;
+      if (previousSkinOutput != nullptr && previousSkinOutput->valid()) {
+        previousOverrideBuffer = previousSkinOutput->handle();
+      } else if (previousMorphOutput != nullptr &&
+                 previousMorphOutput->valid()) {
+        previousOverrideBuffer = previousMorphOutput->handle();
+      }
 
       if (animated.hasSkin && instance.jointNodeIndicesBuffer &&
           instance.inverseBindMatricesBuffer && instance.jointPaletteBuffer &&
@@ -1745,12 +1955,12 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
         }
       }
 
-      if (animated.hasMorph && animated.morphOutputVertexBuffer &&
-          animated.morphOutputVertexBuffer->valid() &&
+      if (animated.hasMorph && currentMorphOutput != nullptr &&
+          currentMorphOutput->valid() &&
           animated.nodeIndex < instance.nodeMeta.size()) {
         const uint64_t outputVertexAddress =
             services_->gpu().getBufferDeviceAddress(
-                animated.morphOutputVertexBuffer->handle());
+                currentMorphOutput->handle());
         const uint64_t morphDeltaAddress =
             services_->gpu().getBufferDeviceAddress(animated.morphDeltaBuffer);
         if (outputVertexAddress != 0u && morphDeltaAddress != 0u &&
@@ -1768,8 +1978,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           });
           sceneFrame.morphDependencies.push_back(
               {animated.sourceVertexBuffer, animated.morphDeltaBuffer,
-               sampledWeightsBuffer,
-               animated.morphOutputVertexBuffer->handle()});
+               sampledWeightsBuffer, currentMorphOutput->handle()});
           appendComputeDispatch(sceneFrame.preDispatches,
                                 services_->morphPipeline(),
                                 dispatchCount(animated.vertexCount),
@@ -1778,25 +1987,25 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
                                 sceneFrame.morphDependencies.back().size(),
                                 "AnimationPose Morph", 0xffaa7733u);
           if (!animated.hasSkin) {
-            overrideBuffer = animated.morphOutputVertexBuffer->handle();
+            overrideBuffer = currentMorphOutput->handle();
           }
         }
       }
 
-      if (animated.hasSkin && animated.finalOutputVertexBuffer &&
-          animated.finalOutputVertexBuffer->valid()) {
+      if (animated.hasSkin && currentSkinOutput != nullptr &&
+          currentSkinOutput->valid()) {
         const uint64_t skinSourceAddress =
-            animated.hasMorph && animated.morphOutputVertexBuffer
+            animated.hasMorph && currentMorphOutput != nullptr
                 ? services_->gpu().getBufferDeviceAddress(
-                      animated.morphOutputVertexBuffer->handle())
+                      currentMorphOutput->handle())
                 : animated.sourceVertexAddress;
         const BufferHandle skinSourceBuffer =
-            animated.hasMorph && animated.morphOutputVertexBuffer
-                ? animated.morphOutputVertexBuffer->handle()
+            animated.hasMorph && currentMorphOutput != nullptr
+                ? currentMorphOutput->handle()
                 : animated.sourceVertexBuffer;
         const uint64_t outputVertexAddress =
             services_->gpu().getBufferDeviceAddress(
-                animated.finalOutputVertexBuffer->handle());
+                currentSkinOutput->handle());
         const uint64_t skinInfluenceAddress =
             services_->gpu().getBufferDeviceAddress(
                 animated.skinInfluenceBuffer);
@@ -1819,7 +2028,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           sceneFrame.skinDependencies.push_back(
               {skinSourceBuffer, animated.skinInfluenceBuffer,
                instance.jointPaletteBuffer->handle(),
-               animated.finalOutputVertexBuffer->handle()});
+               currentSkinOutput->handle()});
           appendComputeDispatch(sceneFrame.preDispatches,
                                 services_->skinPipeline(),
                                 dispatchCount(animated.vertexCount),
@@ -1827,7 +2036,7 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
                                 sceneFrame.skinDependencies.back(),
                                 sceneFrame.skinDependencies.back().size(),
                                 "AnimationPose Skin", 0xffcc8844u);
-          overrideBuffer = animated.finalOutputVertexBuffer->handle();
+          overrideBuffer = currentSkinOutput->handle();
         }
       }
 
@@ -1837,6 +2046,19 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
           sceneFrame.geometryOverrides[animated.runtimeRenderableIndex] =
               AnimatedRenderableGeometryOverride{
                   .vertexBuffer = overrideBuffer,
+                  .vertexByteOffset = 0u,
+                  .vertexCount = animated.vertexCount,
+                  .enabled = true,
+              };
+        }
+        if (sceneFrame.previousFrameValid &&
+            nuri::isValid(previousOverrideBuffer) &&
+            animated.runtimeRenderableIndex <
+                sceneFrame.previousGeometryOverrides.size()) {
+          sceneFrame
+              .previousGeometryOverrides[animated.runtimeRenderableIndex] =
+              AnimatedRenderableGeometryOverride{
+                  .vertexBuffer = previousOverrideBuffer,
                   .vertexByteOffset = 0u,
                   .vertexCount = animated.vertexCount,
                   .enabled = true,
@@ -1859,6 +2081,7 @@ void AnimationPoseSimulationBackend::reset() {
         destroyInstanceBuffers(services_->gpu(), instance);
       }
       destroySceneFrameBuffers(services_->gpu(), impl_->sceneFrame);
+      destroyPendingBufferDeletes(services_->gpu(), impl_->sceneFrame);
     }
     impl_->instances.clear();
     impl_->sceneFrame = SceneFrameState(memory_);
@@ -1868,16 +2091,38 @@ void AnimationPoseSimulationBackend::reset() {
 const AnimationSceneFrameData *
 AnimationPoseSimulationBackend::currentSceneFrameData() const noexcept {
   if (impl_ == nullptr || impl_->sceneFrame.version == 0u ||
-      impl_->instances.empty() || !impl_->sceneFrame.instanceMatricesBuffer ||
-      !impl_->sceneFrame.instanceMatricesBuffer->valid() ||
-      services_ == nullptr) {
+      impl_->instances.empty() || services_ == nullptr) {
+    return nullptr;
+  }
+  const SceneFrameState &sceneFrame = impl_->sceneFrame;
+  if (sceneFrame.currentHistorySlot >=
+          sceneFrame.instanceMatricesBuffers.size() ||
+      !sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot] ||
+      !sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot]
+           ->valid()) {
     return nullptr;
   }
   AnimationSceneFrameData &frameData = impl_->sceneFrame.publishedData;
   frameData.instanceMatricesBuffer =
-      impl_->sceneFrame.instanceMatricesBuffer->handle();
-  frameData.instanceMatricesAddress = services_->gpu().getBufferDeviceAddress(
-      impl_->sceneFrame.instanceMatricesBuffer->handle());
+      sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot]
+          ->handle();
+  frameData.instanceMatricesAddress =
+      services_->gpu().getBufferDeviceAddress(frameData.instanceMatricesBuffer);
+  frameData.previousInstanceMatricesBuffer = {};
+  frameData.previousInstanceMatricesAddress = 0u;
+  if (sceneFrame.previousFrameValid &&
+      sceneFrame.previousHistorySlot <
+          sceneFrame.instanceMatricesBuffers.size() &&
+      sceneFrame.instanceMatricesBuffers[sceneFrame.previousHistorySlot] &&
+      sceneFrame.instanceMatricesBuffers[sceneFrame.previousHistorySlot]
+          ->valid()) {
+    frameData.previousInstanceMatricesBuffer =
+        sceneFrame.instanceMatricesBuffers[sceneFrame.previousHistorySlot]
+            ->handle();
+    frameData.previousInstanceMatricesAddress =
+        services_->gpu().getBufferDeviceAddress(
+            frameData.previousInstanceMatricesBuffer);
+  }
   frameData.preDispatches = std::span<const ComputeDispatchItem>(
       impl_->sceneFrame.preDispatches.data(),
       impl_->sceneFrame.preDispatches.size());
@@ -1885,6 +2130,14 @@ AnimationPoseSimulationBackend::currentSceneFrameData() const noexcept {
       std::span<const AnimatedRenderableGeometryOverride>(
           impl_->sceneFrame.geometryOverrides.data(),
           impl_->sceneFrame.geometryOverrides.size());
+  if (sceneFrame.previousFrameValid) {
+    frameData.previousGeometryOverridesByRenderable =
+        std::span<const AnimatedRenderableGeometryOverride>(
+            impl_->sceneFrame.previousGeometryOverrides.data(),
+            impl_->sceneFrame.previousGeometryOverrides.size());
+  } else {
+    frameData.previousGeometryOverridesByRenderable = {};
+  }
   frameData.animatedRenderableIndices = std::span<const uint32_t>(
       impl_->sceneFrame.animatedRenderableIndices.data(),
       impl_->sceneFrame.animatedRenderableIndices.size());

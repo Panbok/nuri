@@ -55,6 +55,7 @@ struct ImportedTextureAcquireSpec {
   const char *logName = nullptr;
   const char *debugSuffix = nullptr;
   bool srgb = false;
+  TextureMipSemantic mipSemantic = TextureMipSemantic::Generic;
   MaterialTextureSlotData MaterialData::*slot = nullptr;
   TextureRef MaterialRequest::TextureRefs::*outRef = nullptr;
 };
@@ -94,39 +95,40 @@ constexpr std::array<MaterialTextureResolveSpec, kMaterialTextureSlotCount>
 
 constexpr std::array<ImportedTextureAcquireSpec, kMaterialTextureSlotCount>
     kImportedTextureAcquireSpecs{{
-        {"baseColor", "_base_color_", true, &MaterialData::baseColor,
-         &MaterialRequest::TextureRefs::baseColor},
-        {"metal/rough", "_metal_rough_", false,
+        {"baseColor", "_base_color_", true, TextureMipSemantic::Generic,
+         &MaterialData::baseColor, &MaterialRequest::TextureRefs::baseColor},
+        {"metal/rough", "_metal_rough_", false, TextureMipSemantic::RoughnessG,
          &MaterialData::metallicRoughness,
          &MaterialRequest::TextureRefs::metallicRoughness},
-        {"normal", "_normal_", false, &MaterialData::normal,
-         &MaterialRequest::TextureRefs::normal},
-        {"occlusion", "_occlusion_", false, &MaterialData::occlusion,
-         &MaterialRequest::TextureRefs::occlusion},
-        {"emissive", "_emissive_", true, &MaterialData::emissive,
-         &MaterialRequest::TextureRefs::emissive},
-        {"clearcoat", "_clearcoat_", false, &MaterialData::clearcoat,
-         &MaterialRequest::TextureRefs::clearcoat},
+        {"normal", "_normal_", false, TextureMipSemantic::NormalMap,
+         &MaterialData::normal, &MaterialRequest::TextureRefs::normal},
+        {"occlusion", "_occlusion_", false, TextureMipSemantic::Generic,
+         &MaterialData::occlusion, &MaterialRequest::TextureRefs::occlusion},
+        {"emissive", "_emissive_", true, TextureMipSemantic::Generic,
+         &MaterialData::emissive, &MaterialRequest::TextureRefs::emissive},
+        {"clearcoat", "_clearcoat_", false, TextureMipSemantic::Generic,
+         &MaterialData::clearcoat, &MaterialRequest::TextureRefs::clearcoat},
         {"clearcoat roughness", "_clearcoat_roughness_", false,
-         &MaterialData::clearcoatRoughness,
+         TextureMipSemantic::RoughnessG, &MaterialData::clearcoatRoughness,
          &MaterialRequest::TextureRefs::clearcoatRoughness},
         {"clearcoat normal", "_clearcoat_normal_", false,
-         &MaterialData::clearcoatNormal,
+         TextureMipSemantic::NormalMap, &MaterialData::clearcoatNormal,
          &MaterialRequest::TextureRefs::clearcoatNormal},
-        {"specular", "_specular_", false, &MaterialData::specular,
-         &MaterialRequest::TextureRefs::specular},
+        {"specular", "_specular_", false, TextureMipSemantic::Generic,
+         &MaterialData::specular, &MaterialRequest::TextureRefs::specular},
         {"specular color", "_specular_color_", true,
-         &MaterialData::specularColor,
+         TextureMipSemantic::Generic, &MaterialData::specularColor,
          &MaterialRequest::TextureRefs::specularColor},
-        {"sheen color", "_sheen_color_", true, &MaterialData::sheenColor,
-         &MaterialRequest::TextureRefs::sheenColor},
+        {"sheen color", "_sheen_color_", true, TextureMipSemantic::Generic,
+         &MaterialData::sheenColor, &MaterialRequest::TextureRefs::sheenColor},
         {"sheen roughness", "_sheen_roughness_", false,
-         &MaterialData::sheenRoughness,
+         TextureMipSemantic::RoughnessA, &MaterialData::sheenRoughness,
          &MaterialRequest::TextureRefs::sheenRoughness},
-        {"transmission", "_transmission_", false, &MaterialData::transmission,
+        {"transmission", "_transmission_", false, TextureMipSemantic::Generic,
+         &MaterialData::transmission,
          &MaterialRequest::TextureRefs::transmission},
-        {"thickness", "_thickness_", false, &MaterialData::thickness,
-         &MaterialRequest::TextureRefs::thickness},
+        {"thickness", "_thickness_", false, TextureMipSemantic::Generic,
+         &MaterialData::thickness, &MaterialRequest::TextureRefs::thickness},
     }};
 
 [[nodiscard]] ModelKey makeSceneMeshModelKey(std::string_view canonicalPath,
@@ -252,8 +254,8 @@ tryLoadSceneMaterialCache(std::string_view sourcePath) {
 
 [[nodiscard]] Result<TextureRef, std::string> acquireExternalImportedTexture(
     ResourceManager &resources, const ImportedMaterialTexture &slotData,
-    bool srgb, TextureRequestKind kind, std::string_view debugName,
-    bool generateMipmaps) {
+    const TextureLoadOptions &options, TextureRequestKind kind,
+    std::string_view debugName) {
   if (slotData.sourceKind != MaterialTextureSourceKind::ExternalFile ||
       slotData.path.empty()) {
     return Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
@@ -261,11 +263,27 @@ tryLoadSceneMaterialCache(std::string_view sourcePath) {
 
   TextureRequest textureRequest{};
   textureRequest.path = slotData.path;
-  textureRequest.loadOptions =
-      TextureLoadOptions{.srgb = srgb, .generateMipmaps = generateMipmaps};
+  textureRequest.loadOptions = options;
   textureRequest.kind = resolveTextureRequestKindForPath(slotData.path, kind);
   textureRequest.debugName = std::string(debugName);
   return resources.acquireTexture(textureRequest);
+}
+
+[[nodiscard]] TextureLoadOptions
+makeImportedTextureLoadOptions(const ImportedMaterialInfo &imported,
+                               const ImportedTextureAcquireSpec &spec,
+                               bool generateMipmaps) {
+  TextureLoadOptions options{
+      .srgb = spec.srgb,
+      .generateMipmaps = generateMipmaps,
+      .mipSemantic = spec.mipSemantic,
+      .alphaCoverageCutoff = imported.alphaCutoff,
+  };
+  if (spec.slot == &MaterialData::baseColor &&
+      imported.alphaMode == MaterialAlphaMode::Mask) {
+    options.mipSemantic = TextureMipSemantic::AlphaCoverage;
+  }
+  return options;
 }
 
 void releaseMaterialTextureRefs(ResourceManager &resources,
@@ -309,12 +327,13 @@ makeImportedMaterialSourceIdentity(std::string_view canonicalModelPath,
     uint32_t sourceMaterialIndex) {
   MaterialRequest::TextureRefs textureRefs{};
   for (const ImportedTextureAcquireSpec &spec : kImportedTextureAcquireSpecs) {
+    const TextureLoadOptions options =
+        makeImportedTextureLoadOptions(imported, spec, true);
     auto textureResult = acquireExternalImportedTexture(
-        resources, imported.*(spec.slot), spec.srgb,
+        resources, imported.*(spec.slot), options,
         TextureRequestKind::Texture2D,
         makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
-                                     sourceMaterialIndex),
-        true);
+                                     sourceMaterialIndex));
     if (textureResult.hasError()) {
       NURI_LOG_WARNING("%.*s: %s load failed for material %u: %s",
                        static_cast<int>(logContext.size()), logContext.data(),
@@ -354,16 +373,18 @@ struct CachedTextureRefsAcquireResult {
     if (kEnablePortableSceneTextureRuntime &&
         !cacheRecord.portablePath.empty() &&
         std::filesystem::exists(cacheRecord.portablePath, ec) && !ec) {
+      TextureLoadOptions options =
+          makeImportedTextureLoadOptions(imported, spec, false);
+      options.srgb = cacheRecord.srgb;
       textureResult = acquireExternalImportedTexture(
           resources,
           ImportedMaterialTexture{
               .path = cacheRecord.portablePath,
               .sourceKind = MaterialTextureSourceKind::ExternalFile,
           },
-          cacheRecord.srgb, TextureRequestKind::PortableKtx2Texture2D,
+          options, TextureRequestKind::PortableKtx2Texture2D,
           makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
-                                       cached.sourceMaterialIndex),
-          false);
+                                       cached.sourceMaterialIndex));
       if (textureResult.hasError()) {
         NURI_LOG_WARNING("%.*s: portable %s load failed for material %u: %s",
                          static_cast<int>(logContext.size()), logContext.data(),
@@ -373,11 +394,12 @@ struct CachedTextureRefsAcquireResult {
     }
 
     if (textureResult.hasError() || !isValid(textureResult.value())) {
+      const TextureLoadOptions options =
+          makeImportedTextureLoadOptions(imported, spec, true);
       textureResult = acquireExternalImportedTexture(
-          resources, sourceSlot, spec.srgb, TextureRequestKind::Texture2D,
+          resources, sourceSlot, options, TextureRequestKind::Texture2D,
           makeImportedTextureDebugName(debugNamePrefix, spec.debugSuffix,
-                                       cached.sourceMaterialIndex),
-          true);
+                                       cached.sourceMaterialIndex));
       if (textureResult.hasError()) {
         NURI_LOG_WARNING("%.*s: raw %s load failed for material %u: %s",
                          static_cast<int>(logContext.size()), logContext.data(),

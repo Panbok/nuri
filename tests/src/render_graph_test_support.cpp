@@ -65,6 +65,8 @@ TextureDesc makeTransientTextureDesc(Format format, uint32_t width,
 
 [[nodiscard]] size_t fakeTextureBytesPerPixel(Format format) {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::R32_UINT:
     return sizeof(uint32_t);
   case Format::R32_FLOAT:
@@ -271,6 +273,7 @@ FakeGPUDeviceBase::createTextureImpl(const TextureDesc &desc) {
   TextureDesc storedDesc = desc;
   storedDesc.data = {};
   createdTextureDescs.push_back(storedDesc);
+  createdTextureData.emplace_back(desc.data.begin(), desc.data.end());
   return Result<TextureHandle, std::string>::makeResult(handle);
 }
 

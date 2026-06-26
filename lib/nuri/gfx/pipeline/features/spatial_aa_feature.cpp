@@ -239,6 +239,8 @@ fullscreenPipelineDesc(Format colorFormat, ShaderHandle vertexShader,
 
 [[nodiscard]] uint64_t textureFormatBytesPerPixel(Format format) noexcept {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::R32_UINT:
   case Format::R32_FLOAT:
   case Format::RG16_FLOAT:

@@ -134,6 +134,8 @@ allocateMonotonicHandleIndex(uint32_t &nextIndex, std::string_view context) {
   switch (format) {
   case Format::R32_UINT:
     return nvrhi::Format::R32_UINT;
+  case Format::R8_UNORM:
+    return nvrhi::Format::R8_UNORM;
   case Format::R32_FLOAT:
     return nvrhi::Format::R32_FLOAT;
   case Format::RG32_FLOAT:
@@ -170,6 +172,8 @@ allocateMonotonicHandleIndex(uint32_t &nextIndex, std::string_view context) {
   switch (format) {
   case Format::R32_UINT:
     return VK_FORMAT_R32_UINT;
+  case Format::R8_UNORM:
+    return VK_FORMAT_R8_UNORM;
   case Format::R32_FLOAT:
     return VK_FORMAT_R32_SFLOAT;
   case Format::RG32_FLOAT:
@@ -463,6 +467,8 @@ toNvrhiAddressMode(SamplerWrapMode mode) {
 
 [[nodiscard]] size_t bytesPerBlock(Format format) {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::R32_UINT:
   case Format::R32_FLOAT:
     return 4u;
@@ -507,6 +513,8 @@ toNvrhiAddressMode(SamplerWrapMode mode) {
 
 [[nodiscard]] size_t textureReadbackBytesPerPixel(Format format) {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::R32_UINT:
   case Format::R32_FLOAT:
     return 4u;

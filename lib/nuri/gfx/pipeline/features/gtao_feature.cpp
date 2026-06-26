@@ -103,6 +103,8 @@ std::span<const std::byte> copyPushConstants(std::array<std::byte, Size> &dst,
 
 [[nodiscard]] uint64_t bytesPerPixel(Format format) noexcept {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::R32_FLOAT:
   case Format::R32_UINT:
   case Format::RG16_FLOAT:

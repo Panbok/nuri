@@ -8,8 +8,11 @@
 #include "nuri/resources/storage/mesh/mesh_cache_utils.h"
 #include "nuri/resources/storage/texture/texture_cache_utils.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <ktx.h>
 #include <stb_image.h>
 
@@ -24,6 +27,282 @@ namespace {
     ++mipCount;
   }
   return mipCount;
+}
+
+[[nodiscard]] uint32_t mipDimension(uint32_t base, uint32_t mip) {
+  return std::max(1u, base >> std::min(mip, 31u));
+}
+
+[[nodiscard]] uint8_t clampByteFromUnit(float value) {
+  return static_cast<uint8_t>(
+      std::round(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+}
+
+[[nodiscard]] float byteToUnit(std::byte value) {
+  return static_cast<float>(std::to_integer<uint32_t>(value)) / 255.0f;
+}
+
+[[nodiscard]] float sanitizeAlphaCoverageCutoff(float cutoff) {
+  if (!std::isfinite(cutoff)) {
+    return 0.5f;
+  }
+  return std::clamp(cutoff, 1.0f / 255.0f, 254.0f / 255.0f);
+}
+
+[[nodiscard]] float alphaCoverage(std::span<const std::byte> rgba,
+                                  float cutoff) {
+  if (rgba.empty()) {
+    return 0.0f;
+  }
+  uint32_t covered = 0u;
+  const size_t texelCount = rgba.size() / 4u;
+  for (size_t i = 0u; i < texelCount; ++i) {
+    covered += byteToUnit(rgba[i * 4u + 3u]) >= cutoff ? 1u : 0u;
+  }
+  return texelCount > 0u
+             ? static_cast<float>(covered) / static_cast<float>(texelCount)
+             : 0.0f;
+}
+
+[[nodiscard]] float scaledAlphaCoverage(std::span<const std::byte> rgba,
+                                        float cutoff, float scale) {
+  if (rgba.empty()) {
+    return 0.0f;
+  }
+  uint32_t covered = 0u;
+  const size_t texelCount = rgba.size() / 4u;
+  for (size_t i = 0u; i < texelCount; ++i) {
+    const float alpha = std::min(byteToUnit(rgba[i * 4u + 3u]) * scale, 1.0f);
+    covered += alpha >= cutoff ? 1u : 0u;
+  }
+  return texelCount > 0u
+             ? static_cast<float>(covered) / static_cast<float>(texelCount)
+             : 0.0f;
+}
+
+void scaleAlphaCoverage(std::vector<std::byte> &rgba, float cutoff,
+                        float targetCoverage) {
+  if (rgba.empty() || targetCoverage <= 0.0f) {
+    return;
+  }
+
+  float lo = 0.0f;
+  float hi = 1.0f;
+  while (scaledAlphaCoverage(rgba, cutoff, hi) < targetCoverage && hi < 16.0f) {
+    hi *= 2.0f;
+  }
+
+  for (uint32_t i = 0u; i < 10u; ++i) {
+    const float mid = (lo + hi) * 0.5f;
+    if (scaledAlphaCoverage(rgba, cutoff, mid) < targetCoverage) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  for (size_t i = 0u; i + 3u < rgba.size(); i += 4u) {
+    rgba[i + 3u] = static_cast<std::byte>(
+        clampByteFromUnit(byteToUnit(rgba[i + 3u]) * hi));
+  }
+}
+
+[[nodiscard]] std::vector<std::byte>
+generateNextRgba8BoxMip(std::span<const std::byte> src, uint32_t srcWidth,
+                        uint32_t srcHeight) {
+  const uint32_t dstWidth = std::max(1u, srcWidth >> 1u);
+  const uint32_t dstHeight = std::max(1u, srcHeight >> 1u);
+  std::vector<std::byte> dst(static_cast<size_t>(dstWidth) * dstHeight * 4u);
+  for (uint32_t y = 0u; y < dstHeight; ++y) {
+    for (uint32_t x = 0u; x < dstWidth; ++x) {
+      std::array<uint32_t, 4> sum{};
+      uint32_t count = 0u;
+      for (uint32_t dy = 0u; dy < 2u; ++dy) {
+        const uint32_t sy = y * 2u + dy;
+        if (sy >= srcHeight) {
+          continue;
+        }
+        for (uint32_t dx = 0u; dx < 2u; ++dx) {
+          const uint32_t sx = x * 2u + dx;
+          if (sx >= srcWidth) {
+            continue;
+          }
+          const size_t srcOffset =
+              (static_cast<size_t>(sy) * srcWidth + sx) * 4u;
+          for (uint32_t c = 0u; c < 4u; ++c) {
+            sum[c] += std::to_integer<uint32_t>(src[srcOffset + c]);
+          }
+          ++count;
+        }
+      }
+      const size_t dstOffset = (static_cast<size_t>(y) * dstWidth + x) * 4u;
+      for (uint32_t c = 0u; c < 4u; ++c) {
+        dst[dstOffset + c] =
+            static_cast<std::byte>((sum[c] + count / 2u) / count);
+      }
+    }
+  }
+  return dst;
+}
+
+[[nodiscard]] std::vector<std::byte>
+generateNextAlphaCoverageMip(std::span<const std::byte> src, uint32_t srcWidth,
+                             uint32_t srcHeight, float alphaCutoff) {
+  std::vector<std::byte> dst =
+      generateNextRgba8BoxMip(src, srcWidth, srcHeight);
+  scaleAlphaCoverage(dst, alphaCutoff, alphaCoverage(src, alphaCutoff));
+  return dst;
+}
+
+[[nodiscard]] std::vector<std::byte>
+generateNextNormalMip(std::span<const std::byte> src, uint32_t srcWidth,
+                      uint32_t srcHeight) {
+  const uint32_t dstWidth = std::max(1u, srcWidth >> 1u);
+  const uint32_t dstHeight = std::max(1u, srcHeight >> 1u);
+  std::vector<std::byte> dst(static_cast<size_t>(dstWidth) * dstHeight * 4u);
+  for (uint32_t y = 0u; y < dstHeight; ++y) {
+    for (uint32_t x = 0u; x < dstWidth; ++x) {
+      glm::vec3 normalSum(0.0f);
+      uint32_t alphaSum = 0u;
+      uint32_t count = 0u;
+      for (uint32_t dy = 0u; dy < 2u; ++dy) {
+        const uint32_t sy = y * 2u + dy;
+        if (sy >= srcHeight) {
+          continue;
+        }
+        for (uint32_t dx = 0u; dx < 2u; ++dx) {
+          const uint32_t sx = x * 2u + dx;
+          if (sx >= srcWidth) {
+            continue;
+          }
+          const size_t srcOffset =
+              (static_cast<size_t>(sy) * srcWidth + sx) * 4u;
+          normalSum += glm::vec3(byteToUnit(src[srcOffset + 0u]) * 2.0f - 1.0f,
+                                 byteToUnit(src[srcOffset + 1u]) * 2.0f - 1.0f,
+                                 byteToUnit(src[srcOffset + 2u]) * 2.0f - 1.0f);
+          alphaSum += std::to_integer<uint32_t>(src[srcOffset + 3u]);
+          ++count;
+        }
+      }
+
+      const float lenSq = glm::dot(normalSum, normalSum);
+      const glm::vec3 normal = lenSq > 1.0e-8f ? glm::normalize(normalSum)
+                                               : glm::vec3(0.0f, 0.0f, 1.0f);
+      const size_t dstOffset = (static_cast<size_t>(y) * dstWidth + x) * 4u;
+      dst[dstOffset + 0u] =
+          static_cast<std::byte>(clampByteFromUnit(normal.x * 0.5f + 0.5f));
+      dst[dstOffset + 1u] =
+          static_cast<std::byte>(clampByteFromUnit(normal.y * 0.5f + 0.5f));
+      dst[dstOffset + 2u] =
+          static_cast<std::byte>(clampByteFromUnit(normal.z * 0.5f + 0.5f));
+      dst[dstOffset + 3u] =
+          static_cast<std::byte>((alphaSum + count / 2u) / count);
+    }
+  }
+  return dst;
+}
+
+[[nodiscard]] std::vector<std::byte>
+generateNextRoughnessMip(std::span<const std::byte> src, uint32_t srcWidth,
+                         uint32_t srcHeight, uint32_t roughnessChannel) {
+  const uint32_t dstWidth = std::max(1u, srcWidth >> 1u);
+  const uint32_t dstHeight = std::max(1u, srcHeight >> 1u);
+  std::vector<std::byte> dst =
+      generateNextRgba8BoxMip(src, srcWidth, srcHeight);
+  for (uint32_t y = 0u; y < dstHeight; ++y) {
+    for (uint32_t x = 0u; x < dstWidth; ++x) {
+      float roughnessSqSum = 0.0f;
+      uint32_t count = 0u;
+      for (uint32_t dy = 0u; dy < 2u; ++dy) {
+        const uint32_t sy = y * 2u + dy;
+        if (sy >= srcHeight) {
+          continue;
+        }
+        for (uint32_t dx = 0u; dx < 2u; ++dx) {
+          const uint32_t sx = x * 2u + dx;
+          if (sx >= srcWidth) {
+            continue;
+          }
+          const size_t srcOffset =
+              (static_cast<size_t>(sy) * srcWidth + sx) * 4u;
+          const float roughness = byteToUnit(src[srcOffset + roughnessChannel]);
+          roughnessSqSum += roughness * roughness;
+          ++count;
+        }
+      }
+      const float roughness =
+          count > 0u ? std::sqrt(roughnessSqSum / static_cast<float>(count))
+                     : 1.0f;
+      const size_t dstOffset = (static_cast<size_t>(y) * dstWidth + x) * 4u;
+      dst[dstOffset + roughnessChannel] =
+          static_cast<std::byte>(clampByteFromUnit(roughness));
+    }
+  }
+  return dst;
+}
+
+[[nodiscard]] Result<std::vector<std::byte>, std::string>
+generateSemanticRgba8MipChain(std::span<const std::byte> baseData,
+                              uint32_t width, uint32_t height,
+                              uint32_t mipLevels,
+                              const TextureLoadOptions &options) {
+  const size_t requiredBaseBytes = static_cast<size_t>(std::max(width, 1u)) *
+                                   static_cast<size_t>(std::max(height, 1u)) *
+                                   4u;
+  if (baseData.size() < requiredBaseBytes) {
+    return Result<std::vector<std::byte>, std::string>::makeError(
+        "Texture::generateSemanticRgba8MipChain: base mip data is truncated");
+  }
+
+  size_t totalBytes = 0u;
+  for (uint32_t mip = 0u; mip < mipLevels; ++mip) {
+    totalBytes += static_cast<size_t>(mipDimension(width, mip)) *
+                  static_cast<size_t>(mipDimension(height, mip)) * 4u;
+  }
+
+  std::vector<std::byte> mipChain;
+  mipChain.reserve(totalBytes);
+  std::vector<std::byte> current(baseData.begin(),
+                                 baseData.begin() +
+                                     static_cast<ptrdiff_t>(requiredBaseBytes));
+  uint32_t srcWidth = width;
+  uint32_t srcHeight = height;
+  const float alphaCutoff =
+      sanitizeAlphaCoverageCutoff(options.alphaCoverageCutoff);
+
+  for (uint32_t mip = 0u; mip < mipLevels; ++mip) {
+    mipChain.insert(mipChain.end(), current.begin(), current.end());
+    if (mip + 1u == mipLevels) {
+      break;
+    }
+
+    if (options.mipSemantic == TextureMipSemantic::AlphaCoverage) {
+      current = generateNextAlphaCoverageMip(current, srcWidth, srcHeight,
+                                             alphaCutoff);
+    } else if (options.mipSemantic == TextureMipSemantic::NormalMap) {
+      current = generateNextNormalMip(current, srcWidth, srcHeight);
+    } else {
+      const uint32_t roughnessChannel =
+          options.mipSemantic == TextureMipSemantic::RoughnessA ? 3u : 1u;
+      current = generateNextRoughnessMip(current, srcWidth, srcHeight,
+                                         roughnessChannel);
+    }
+    srcWidth = std::max(1u, srcWidth >> 1u);
+    srcHeight = std::max(1u, srcHeight >> 1u);
+  }
+
+  return Result<std::vector<std::byte>, std::string>::makeResult(
+      std::move(mipChain));
+}
+
+[[nodiscard]] bool
+shouldGenerateSemanticRgba8MipChain(const TextureLoadOptions &options,
+                                    uint32_t mipLevels) noexcept {
+  return options.generateMipmaps && mipLevels > 1u &&
+         (options.mipSemantic == TextureMipSemantic::AlphaCoverage ||
+          options.mipSemantic == TextureMipSemantic::NormalMap ||
+          options.mipSemantic == TextureMipSemantic::RoughnessG ||
+          options.mipSemantic == TextureMipSemantic::RoughnessA);
 }
 
 struct KtxLoadPayload {
@@ -732,6 +1011,25 @@ Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
   const uint32_t heightU32 = static_cast<uint32_t>(height);
   const uint32_t mipLevels =
       options.generateMipmaps ? computeMipLevelCount(widthU32, heightU32) : 1u;
+  std::vector<std::byte> semanticMipData;
+  std::span<const std::byte> textureData = initialData;
+  uint32_t dataMipLevels = 1u;
+  bool generateMipmaps = options.generateMipmaps;
+  if (shouldGenerateSemanticRgba8MipChain(options, mipLevels)) {
+    auto mipResult = generateSemanticRgba8MipChain(
+        initialData, widthU32, heightU32, mipLevels, options);
+    if (mipResult.hasError()) {
+      stbi_image_free(pixels);
+      return Result<std::unique_ptr<Texture>, std::string>::makeError(
+          mipResult.error());
+    }
+    semanticMipData = std::move(mipResult).value();
+    textureData = std::span<const std::byte>(semanticMipData.data(),
+                                             semanticMipData.size());
+    dataMipLevels = mipLevels;
+    generateMipmaps = false;
+  }
+
   TextureDesc desc{
       .type = TextureType::Texture2D,
       .format = options.srgb ? Format::RGBA8_SRGB : Format::RGBA8_UNORM,
@@ -741,9 +1039,9 @@ Texture::loadTexture(GPUDevice &gpu, std::string_view filePath,
       .numLayers = 1,
       .numSamples = 1,
       .numMipLevels = mipLevels,
-      .data = initialData,
-      .dataNumMipLevels = 1,
-      .generateMipmaps = options.generateMipmaps,
+      .data = textureData,
+      .dataNumMipLevels = dataMipLevels,
+      .generateMipmaps = generateMipmaps,
   };
   auto result = gpu.createTexture(desc, debugName);
   if (result.hasError()) {

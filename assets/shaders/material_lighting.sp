@@ -72,6 +72,7 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   const uint featureMask = materialFeatureMask(material);
   const uint workflow = materialWorkflow(material);
   const uint matSampler = pc.frameData.materialSamplerId;
+  const uint dataSampler = pc.frameData.materialDataSamplerId;
   const uint alphaMode = materialAlphaMode(material);
   const uint baseColorSampler =
       alphaMode == kAlphaModeMask &&
@@ -137,8 +138,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
 
   vec4 mrSample = vec4(1.0);
   if (metallicRoughnessTexId != kInvalidTextureBindlessIndex) {
-    mrSample =
-        textureBindless2D(metallicRoughnessTexId, matSampler, uvMetallicRoughness);
+    mrSample = textureBindless2D(metallicRoughnessTexId, dataSampler,
+                                 uvMetallicRoughness);
   }
   sm.metallic = 0.0;
   sm.roughness = kBrdfMinRoughness;
@@ -148,12 +149,12 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   sm.ior = materialIor(material);
   decodeMaterialBaseWorkflow(
       material, workflow, sm.baseColor, mrSample, uvSpecular, specularTexId,
-      matSampler, uvSpecularColor, specularColorTexId, matSampler, sm.ior,
+      dataSampler, uvSpecularColor, specularColorTexId, matSampler, sm.ior,
       sm.metallic, sm.roughness, sm.f0, sm.f90, sm.diffuseColor);
 
   float occlusion = sampleMaterialOcclusion(
       material, workflow, mrSample, metallicRoughnessTexId, uvOcclusion,
-      occlusionTexId, matSampler);
+      occlusionTexId, dataSampler);
   sm.ao = mix(1.0, occlusion,
               saturate(material.header.metallicRoughnessOcclusionAlphaCutoff.z));
   sm.screenAo = 1.0;
@@ -181,7 +182,7 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
     if (clearcoatRoughnessTexId != kInvalidTextureBindlessIndex) {
       sm.clearcoatRoughness = clamp(
           sm.clearcoatRoughness *
-              textureBindless2D(clearcoatRoughnessTexId, matSampler,
+              textureBindless2D(clearcoatRoughnessTexId, dataSampler,
                                 uvClearcoatRoughness).g,
           kBrdfMinRoughness, 1.0);
     }
@@ -189,7 +190,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
 
   sm.nBase = sm.nGeom;
   if (normalTexId != kInvalidTextureBindlessIndex) {
-    vec3 n = textureBindless2D(normalTexId, matSampler, uvNormal).xyz * 2.0 - 1.0;
+    vec3 n =
+        textureBindless2D(normalTexId, dataSampler, uvNormal).xyz * 2.0 - 1.0;
     n.xy *= materialNormalScale(material);
     float nLen = length(n);
     if (nLen > kEpsilon) {
@@ -230,8 +232,10 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
 
   sm.nClearcoat = sm.nGeom;
   if (sm.hasClearcoat && clearcoatNormalTexId != kInvalidTextureBindlessIndex) {
-    vec3 n = textureBindless2D(clearcoatNormalTexId, matSampler, uvClearcoatNormal)
-                 .xyz * 2.0 - 1.0;
+    vec3 n = textureBindless2D(clearcoatNormalTexId, dataSampler,
+                               uvClearcoatNormal).xyz *
+                 2.0 -
+             1.0;
     n.xy *= material.clearcoat.clearcoatFactors.z;
     float nLen = length(n);
     if (nLen > kEpsilon) {
@@ -274,7 +278,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   if (sheenRoughnessTexId != kInvalidTextureBindlessIndex) {
     sm.sheenRoughness = clamp(
         sm.sheenRoughness *
-            textureBindless2D(sheenRoughnessTexId, matSampler, uvSheenRoughness)
+            textureBindless2D(sheenRoughnessTexId, dataSampler,
+                              uvSheenRoughness)
                 .a,
         kBrdfMinRoughness, 1.0);
   }

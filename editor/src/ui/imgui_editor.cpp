@@ -203,6 +203,8 @@ const char *formatDisplayName(Format format) {
   switch (format) {
   case Format::R32_UINT:
     return "R32_UINT";
+  case Format::R8_UNORM:
+    return "R8_UNORM";
   case Format::R32_FLOAT:
     return "R32_FLOAT";
   case Format::RG32_FLOAT:
@@ -2404,7 +2406,8 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       "clearPasses={} clearBytes={}}} "
       "opaqueVelocity={{generated={} passCount={} debugPassCount={} draws={} "
       "instances={} previousCacheValid={} previousValid={} previousMissing={} "
-      "animatedResponsive={} tessellatedSkipped={} objectMotionAvg={:.5f} "
+      "animatedResponsive={} animatedPreviousGeometry={} "
+      "tessellatedSkipped={} objectMotionAvg={:.5f} "
       "objectMotionMax={:.5f} velocityAvg={:.5f} velocityMax={:.5f} "
       "staticResidual={:.6f} cameraDelta={:.6f} missingPreviousRatio={:.3f} "
       "edgeDiscontinuity={:.3f} passBytes={} debugBytes={} "
@@ -2478,6 +2481,7 @@ antiAliasingMetricsSummary(const AntiAliasingFrameMetrics &metrics) {
       metrics.velocityPreviousTransformValidCount,
       metrics.velocityMissingPreviousTransformCount,
       metrics.velocityAnimatedResponsiveCount,
+      metrics.velocityAnimatedPreviousGeometryCount,
       metrics.velocityTessellatedSkippedDrawCount,
       metrics.velocityAverageObjectMotion, metrics.velocityMaxObjectMotion,
       metrics.velocityEstimatedAverageMagnitude,
@@ -3044,6 +3048,8 @@ void drawAntiAliasingSettings(RenderSettings::AntiAliasingSettings &aa,
                 metrics.velocityMissingPreviousTransformCount);
     ImGui::Text("Animated/Responsive Instances: %u",
                 metrics.velocityAnimatedResponsiveCount);
+    ImGui::Text("Animated Previous Geometry: %u",
+                metrics.velocityAnimatedPreviousGeometryCount);
     ImGui::Text("Skipped Tessellated Draws: %u",
                 metrics.velocityTessellatedSkippedDrawCount);
     ImGui::Text("Object Motion: avg %.5f, max %.5f",

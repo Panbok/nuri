@@ -229,6 +229,35 @@ debugShadowInspectProbeConfig() {
   return std::nullopt;
 }
 
+[[nodiscard]] std::optional<TemporalAAQualityPreset>
+readDebugTemporalAAQualityPreset() {
+  const std::optional<std::string> value = readEnvVar("NURI_DEBUG_TAA_PRESET");
+  if (!value.has_value()) {
+    return std::nullopt;
+  }
+  const std::string_view view = trimAsciiWhitespace(*value);
+  if (stringEqualsIgnoreCase(view, "performance") ||
+      stringEqualsIgnoreCase(view, "perf")) {
+    return TemporalAAQualityPreset::Performance;
+  }
+  if (stringEqualsIgnoreCase(view, "balanced")) {
+    return TemporalAAQualityPreset::Balanced;
+  }
+  if (stringEqualsIgnoreCase(view, "quality")) {
+    return TemporalAAQualityPreset::Quality;
+  }
+  if (stringEqualsIgnoreCase(view, "ultra")) {
+    return TemporalAAQualityPreset::Ultra;
+  }
+  if (stringEqualsIgnoreCase(view, "custom")) {
+    return TemporalAAQualityPreset::Custom;
+  }
+  NURI_LOG_WARNING(
+      "EditorRuntime: ignoring unrecognized NURI_DEBUG_TAA_PRESET=%s",
+      value->c_str());
+  return std::nullopt;
+}
+
 [[nodiscard]] std::optional<ShadowSdsmMode> readDebugShadowSdsmMode() {
   const std::optional<std::string> value =
       readEnvVar("NURI_DEBUG_SHADOW_SDSM_MODE");
@@ -285,6 +314,9 @@ struct DebugRenderEnvOverrides {
   bool disableTransparent = false;
   bool disableSkybox = false;
   std::optional<AntiAliasingMode> antiAliasingMode{};
+  std::optional<TemporalAAQualityPreset> temporalAAQualityPreset{};
+  std::optional<bool> temporalAAJitterEnabled{};
+  std::optional<bool> temporalAADiagnostics{};
   std::optional<ShadowSdsmMode> shadowSdsmMode{};
   std::optional<ShadowSdsmReductionBackend> shadowSdsmBackend{};
   bool shadowDiagnostics = false;
@@ -297,6 +329,10 @@ struct DebugRenderEnvOverrides {
       .disableTransparent = readEnvFlag("NURI_DEBUG_DISABLE_TRANSPARENT"),
       .disableSkybox = readEnvFlag("NURI_DEBUG_DISABLE_SKYBOX"),
       .antiAliasingMode = readDebugAntiAliasingMode(),
+      .temporalAAQualityPreset = readDebugTemporalAAQualityPreset(),
+      .temporalAAJitterEnabled = readEnvBoolOverride("NURI_DEBUG_TAA_JITTER"),
+      .temporalAADiagnostics =
+          readEnvBoolOverride("NURI_DEBUG_TAA_DIAGNOSTICS"),
       .shadowSdsmMode = readDebugShadowSdsmMode(),
       .shadowSdsmBackend = readDebugShadowSdsmBackend(),
       .shadowDiagnostics = readEnvFlag("NURI_DEBUG_SHADOW_DIAGNOSTICS"),
@@ -335,6 +371,26 @@ void applyDebugRenderEnvOverrides(RenderSettings &settings) {
     static bool logged = false;
     logDebugRenderOverrideOnce("NURI_DEBUG_AA_MODE",
                                "anti-aliasing mode overridden", logged);
+  }
+  if (overrides.temporalAAQualityPreset.has_value()) {
+    settings.antiAliasing.qualityPreset = *overrides.temporalAAQualityPreset;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_TAA_PRESET",
+                               "TAA quality preset overridden", logged);
+  }
+  if (overrides.temporalAAJitterEnabled.has_value()) {
+    settings.antiAliasing.debug.jitterEnabled =
+        *overrides.temporalAAJitterEnabled;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_TAA_JITTER", "TAA jitter overridden",
+                               logged);
+  }
+  if (overrides.temporalAADiagnostics.has_value()) {
+    settings.antiAliasing.debug.logDiagnostics =
+        *overrides.temporalAADiagnostics;
+    static bool logged = false;
+    logDebugRenderOverrideOnce("NURI_DEBUG_TAA_DIAGNOSTICS",
+                               "TAA diagnostics overridden", logged);
   }
   if (overrides.shadowSdsmMode.has_value()) {
     settings.shadow.sdsmMode = *overrides.shadowSdsmMode;

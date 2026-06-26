@@ -347,7 +347,7 @@ void main() {
       evaluateTransmissionDirectLighting(sm, vtx.worldPos);
 
   // Transmission-specific material fields ----------------------------
-  const uint matSampler = pc.frameData.materialSamplerId;
+  const uint dataSampler = pc.frameData.materialDataSamplerId;
   const uint transmissionTexId =
       getMaterialTextureIndex(material, kMaterialTextureSlotTransmission);
   const uint thicknessTexId =
@@ -361,14 +361,14 @@ void main() {
       material.transmission.transmissionThicknessDistance.x;
   if (transmissionTexId != kInvalidTextureBindlessIndex) {
     transmissionFactor *=
-        textureBindless2D(transmissionTexId, matSampler, uvTransmission).r;
+        textureBindless2D(transmissionTexId, dataSampler, uvTransmission).r;
   }
   transmissionFactor = saturate(transmissionFactor);
 
   float thickness =
       max(material.transmission.transmissionThicknessDistance.y, 0.0);
   if (thicknessTexId != kInvalidTextureBindlessIndex) {
-    thickness *= textureBindless2D(thicknessTexId, matSampler, uvThickness).g;
+    thickness *= textureBindless2D(thicknessTexId, dataSampler, uvThickness).g;
   }
   thickness = max(thickness, 0.0);
 

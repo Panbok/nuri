@@ -160,6 +160,19 @@ allDependencyBuffersValid(const FakeAnimationGpuDevice &gpu,
       });
 }
 
+[[nodiscard]] std::vector<nuri::BufferHandle>
+collectDependencyBuffers(const nuri::AnimationSceneFrameData &frameData) {
+  std::vector<nuri::BufferHandle> handles;
+  for (const nuri::ComputeDispatchItem &dispatch : frameData.preDispatches) {
+    for (nuri::BufferHandle handle : dispatch.dependencyBuffers) {
+      if (nuri::isValid(handle)) {
+        handles.push_back(handle);
+      }
+    }
+  }
+  return handles;
+}
+
 [[nodiscard]] uint32_t findClipIndex(const nuri::ScenePrefab &prefab,
                                      std::string_view clipName) {
   for (uint32_t i = 0; i < prefab.animations.size(); ++i) {
@@ -530,6 +543,9 @@ TEST(AnimationPoseSimulationTests,
   EXPECT_EQ(frameData->renderableCount, scene.renderables().size());
   EXPECT_EQ(frameData->geometryOverridesByRenderable.size(),
             scene.renderables().size());
+  EXPECT_FALSE(nuri::isValid(frameData->previousInstanceMatricesBuffer));
+  EXPECT_EQ(frameData->previousInstanceMatricesAddress, 0u);
+  EXPECT_TRUE(frameData->previousGeometryOverridesByRenderable.empty());
   EXPECT_GT(countDispatches(*frameData, "AnimationPose Sample"), 0u);
   EXPECT_GT(countDispatches(*frameData, "AnimationPose World"), 0u);
   EXPECT_GT(countDispatches(*frameData, "AnimationPose Scatter"), 0u);
@@ -545,6 +561,49 @@ TEST(AnimationPoseSimulationTests,
                nuri::isValid(overrideEntry.vertexBuffer);
       });
   EXPECT_TRUE(hasGeometryOverride);
+  const auto firstOverrideIt = std::find_if(
+      frameData->geometryOverridesByRenderable.begin(),
+      frameData->geometryOverridesByRenderable.end(),
+      [](const nuri::AnimatedRenderableGeometryOverride &overrideEntry) {
+        return overrideEntry.enabled &&
+               nuri::isValid(overrideEntry.vertexBuffer);
+      });
+  ASSERT_NE(firstOverrideIt, frameData->geometryOverridesByRenderable.end());
+  const nuri::BufferHandle firstInstanceMatricesBuffer =
+      frameData->instanceMatricesBuffer;
+  const nuri::BufferHandle firstOverrideBuffer = firstOverrideIt->vertexBuffer;
+
+  prepareResult = runtime.prepareAnimationSceneFrame(1u);
+  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+  frameData = runtime.animationSceneFrameData();
+  ASSERT_NE(frameData, nullptr);
+  EXPECT_TRUE(nuri::isValid(frameData->previousInstanceMatricesBuffer));
+  EXPECT_TRUE(nuri::test_support::sameBuffer(
+      frameData->previousInstanceMatricesBuffer, firstInstanceMatricesBuffer));
+  EXPECT_NE(frameData->previousInstanceMatricesAddress, 0u);
+  EXPECT_EQ(frameData->previousGeometryOverridesByRenderable.size(),
+            scene.renderables().size());
+  const auto previousOverrideIt = std::find_if(
+      frameData->previousGeometryOverridesByRenderable.begin(),
+      frameData->previousGeometryOverridesByRenderable.end(),
+      [](const nuri::AnimatedRenderableGeometryOverride &overrideEntry) {
+        return overrideEntry.enabled &&
+               nuri::isValid(overrideEntry.vertexBuffer);
+      });
+  ASSERT_NE(previousOverrideIt,
+            frameData->previousGeometryOverridesByRenderable.end());
+  EXPECT_TRUE(nuri::test_support::sameBuffer(previousOverrideIt->vertexBuffer,
+                                             firstOverrideBuffer));
+  const auto secondOverrideIt = std::find_if(
+      frameData->geometryOverridesByRenderable.begin(),
+      frameData->geometryOverridesByRenderable.end(),
+      [](const nuri::AnimatedRenderableGeometryOverride &overrideEntry) {
+        return overrideEntry.enabled &&
+               nuri::isValid(overrideEntry.vertexBuffer);
+      });
+  ASSERT_NE(secondOverrideIt, frameData->geometryOverridesByRenderable.end());
+  EXPECT_FALSE(nuri::test_support::sameBuffer(
+      secondOverrideIt->vertexBuffer, previousOverrideIt->vertexBuffer));
 
   EXPECT_TRUE(runtime.destroyAnimationPoseSimulation(createResult.value()));
   EXPECT_EQ(runtime.animationSceneFrameData(), nullptr);
@@ -628,6 +687,113 @@ TEST(AnimationPoseSimulationTests,
 
   EXPECT_TRUE(runtime.destroyAnimationPoseSimulation(createResult.value()));
   EXPECT_EQ(runtime.animationSceneFrameData(), nullptr);
+}
+
+TEST(AnimationPoseSimulationTests,
+     ParamUpdateKeepsPreparedBlendDependenciesAlive) {
+  const std::filesystem::path path = foxPath();
+  ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
+
+  auto prefabResult =
+      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
+  ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
+  const nuri::ScenePrefab &prefab = prefabResult.value();
+  const uint32_t surveyClipIndex = findClipIndex(prefab, "Survey");
+  const uint32_t walkClipIndex = findClipIndex(prefab, "Walk");
+  ASSERT_NE(surveyClipIndex, std::numeric_limits<uint32_t>::max());
+  ASSERT_NE(walkClipIndex, std::numeric_limits<uint32_t>::max());
+
+  FakeAnimationGpuDevice gpu;
+  nuri::ResourceManager resources(gpu);
+  auto assetsResult = resources.acquireScenePrefabAssets(prefab);
+  ASSERT_FALSE(assetsResult.hasError()) << assetsResult.error();
+
+  nuri::RenderScene scene;
+  scene.bindResources(&resources);
+
+  nuri::SceneInstantiationMap instantiation;
+  auto instantiateResult = scene.graph().instantiatePrefab(
+      prefab, scene.graph().rootNode(), assetsResult.value(), &instantiation);
+  ASSERT_FALSE(instantiateResult.hasError()) << instantiateResult.error();
+
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+
+  nuri::SceneRuntimeHost runtime;
+  runtime.bindScene(&scene);
+  nuri::AnimationGpuServices services(gpu, shaderRootPath());
+  runtime.attachAnimationGpuServices(&services);
+
+  auto createResult = runtime.createAnimationPoseSimulation(
+      nuri::AnimationPoseSimulationCreateInfo{
+          .prefab = &prefab,
+          .instantiationMap = &instantiation,
+          .rootNode = instantiateResult.value(),
+          .debugName = "FoxBlendAnimation",
+          .params =
+              nuri::AnimationPoseSimulationParams{
+                  .primary =
+                      nuri::AnimationPoseClipState{
+                          .clipIndex = surveyClipIndex,
+                          .timeSeconds = 0.0f,
+                          .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
+                          .playing = true,
+                      },
+                  .secondary =
+                      nuri::AnimationPoseClipState{
+                          .clipIndex = walkClipIndex,
+                          .timeSeconds = 0.0f,
+                          .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
+                          .playing = true,
+                      },
+                  .blendWeight = 0.5f,
+                  .blendMode = nuri::AnimationPoseBlendMode::Lerp,
+                  .blendSyncMode =
+                      nuri::AnimationPoseBlendSyncMode::NormalizedTime,
+              },
+      });
+  ASSERT_FALSE(createResult.hasError()) << createResult.error();
+
+  auto prepareResult = runtime.prepareAnimationSceneFrame(0u);
+  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+
+  const nuri::AnimationSceneFrameData *frameData =
+      runtime.animationSceneFrameData();
+  ASSERT_NE(frameData, nullptr);
+  const std::vector<nuri::BufferHandle> submittedDependencyBuffers =
+      collectDependencyBuffers(*frameData);
+  ASSERT_FALSE(submittedDependencyBuffers.empty());
+
+  nuri::AnimationPoseSimulationParams updatedParams{
+      .primary =
+          nuri::AnimationPoseClipState{
+              .clipIndex = walkClipIndex,
+              .timeSeconds = 0.0f,
+              .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
+              .playing = true,
+          },
+  };
+  ASSERT_TRUE(runtime.simulations().setParams(createResult.value(),
+                                              nuri::asBytes(updatedParams)));
+
+  for (nuri::BufferHandle handle : submittedDependencyBuffers) {
+    EXPECT_TRUE(gpu.isValid(handle));
+  }
+
+  const uint32_t destroyedAfterParamUpdate = gpu.destroyedBufferCount;
+  prepareResult = runtime.prepareAnimationSceneFrame(1u);
+  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+  EXPECT_EQ(gpu.destroyedBufferCount, destroyedAfterParamUpdate);
+
+  prepareResult = runtime.prepareAnimationSceneFrame(2u);
+  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+  EXPECT_EQ(gpu.destroyedBufferCount, destroyedAfterParamUpdate);
+
+  prepareResult = runtime.prepareAnimationSceneFrame(3u);
+  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
+  EXPECT_GT(gpu.destroyedBufferCount, destroyedAfterParamUpdate);
+
+  EXPECT_TRUE(runtime.destroyAnimationPoseSimulation(createResult.value()));
 }
 
 TEST(AnimationPoseSimulationTests,

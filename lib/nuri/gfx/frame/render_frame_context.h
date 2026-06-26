@@ -257,7 +257,7 @@ static constexpr Format kFrameCompositionDepthFormat = Format::D32_FLOAT;
 static constexpr uint32_t kMsaa4xSampleCount = 4u;
 static constexpr Format kFrameCompositionMotionVectorFormat =
     Format::RG16_FLOAT;
-static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R32_FLOAT;
+static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R8_UNORM;
 static constexpr Format kFrameCompositionNormalFormat = Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionAmbientOcclusionFormat =
     Format::R32_FLOAT;
@@ -670,7 +670,7 @@ struct RenderSettings {
   };
 
   struct AntiAliasingDebugSettings {
-    bool jitterEnabled = false;
+    bool jitterEnabled = true;
     bool freezeJitter = false;
     bool resetHistoryRequested = false;
     bool logDiagnostics = false;
@@ -1932,6 +1932,10 @@ struct ForwardSceneFrameData {
   uint64_t shadowFrameBufferAddress = 0;
   uint32_t shadowFlags = 0;
   uint32_t materialCoverageSamplerId = kInvalidSamplerBindlessIndex;
+  uint32_t materialDataSamplerId = kInvalidSamplerBindlessIndex;
+  uint32_t materialSamplerReserved0 = 0;
+  uint32_t materialSamplerReserved1 = 0;
+  uint32_t materialSamplerReserved2 = 0;
 
   [[nodiscard]] bool
   operator==(const ForwardSceneFrameData &other) const noexcept {
@@ -1943,7 +1947,7 @@ struct ForwardSceneFrameData {
     return !(*this == other);
   }
 };
-static_assert(sizeof(ForwardSceneFrameData) == 368,
+static_assert(sizeof(ForwardSceneFrameData) == 384,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
 static_assert(sizeof(ForwardSceneFrameData) % 8u == 0u,
               "ForwardSceneFrameData std430 size must stay 8-byte aligned");
@@ -1969,6 +1973,7 @@ static_assert(offsetof(ForwardSceneFrameData, shadowFrameBufferAddress) ==
 static_assert(offsetof(ForwardSceneFrameData, shadowFlags) == 360u);
 static_assert(offsetof(ForwardSceneFrameData, materialCoverageSamplerId) ==
               364u);
+static_assert(offsetof(ForwardSceneFrameData, materialDataSamplerId) == 368u);
 
 // CPU/GPU forwarding of the light metadata carried in ForwardSceneFrameData.
 // The CPU owns allocation and updates of ForwardSceneFrameData, keeps mirrors
@@ -2111,6 +2116,7 @@ struct AntiAliasingFrameMetrics {
   uint32_t velocityPreviousTransformValidCount = 0u;
   uint32_t velocityMissingPreviousTransformCount = 0u;
   uint32_t velocityAnimatedResponsiveCount = 0u;
+  uint32_t velocityAnimatedPreviousGeometryCount = 0u;
   uint32_t velocityTessellatedSkippedDrawCount = 0u;
   uint32_t velocityDebugPassCount = 0u;
   uint32_t reactiveMaskWidth = 0u;

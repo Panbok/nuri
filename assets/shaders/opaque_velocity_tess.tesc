@@ -1,0 +1,68 @@
+#include "common.sp"
+
+layout(vertices = 3) out;
+
+layout(location = 0) in vec2 inUv0[];
+layout(location = 1) in vec2 inUv1[];
+layout(location = 2) in vec3 inWorldNormal[];
+layout(location = 3) in vec3 inWorldPos[];
+layout(location = 4) in vec4 inWorldTangent[];
+layout(location = 10) in vec3 inCurrentWorldPos[];
+layout(location = 11) in vec3 inPreviousWorldPos[];
+layout(location = 12) in uint inVelocityFlags[];
+
+layout(location = 0) out vec2 outUv0[];
+layout(location = 1) out vec2 outUv1[];
+layout(location = 2) out vec3 outWorldNormal[];
+layout(location = 3) out vec3 outWorldPos[];
+layout(location = 4) out vec4 outWorldTangent[];
+layout(location = 6) patch out vec3 outPatchOuterFactors;
+layout(location = 7) patch out float outPatchInnerFactor;
+layout(location = 10) out vec3 outCurrentWorldPos[];
+layout(location = 11) out vec3 outPreviousWorldPos[];
+layout(location = 12) out uint outVelocityFlags[];
+
+float distanceToTessFactor(float distanceToCamera) {
+  const float nearDistance = max(pc.tessNearDistance, 0.0);
+  const float farDistance = max(pc.tessFarDistance, nearDistance + 1.0e-3);
+  const float minFactor = clamp(pc.tessMinFactor, 1.0, 64.0);
+  const float maxFactor = clamp(pc.tessMaxFactor, minFactor, 64.0);
+  const float t =
+      clamp((distanceToCamera - nearDistance) / (farDistance - nearDistance),
+            0.0, 1.0);
+  return mix(maxFactor, minFactor, t);
+}
+
+void main() {
+  outUv0[gl_InvocationID] = inUv0[gl_InvocationID];
+  outUv1[gl_InvocationID] = inUv1[gl_InvocationID];
+  outWorldNormal[gl_InvocationID] = inWorldNormal[gl_InvocationID];
+  outWorldPos[gl_InvocationID] = inWorldPos[gl_InvocationID];
+  outWorldTangent[gl_InvocationID] = inWorldTangent[gl_InvocationID];
+  outCurrentWorldPos[gl_InvocationID] = inCurrentWorldPos[gl_InvocationID];
+  outPreviousWorldPos[gl_InvocationID] = inPreviousWorldPos[gl_InvocationID];
+  outVelocityFlags[gl_InvocationID] = inVelocityFlags[gl_InvocationID];
+  gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
+
+  if (gl_InvocationID != 0u) {
+    return;
+  }
+
+  const vec3 p0 = inCurrentWorldPos[0];
+  const vec3 p1 = inCurrentWorldPos[1];
+  const vec3 p2 = inCurrentWorldPos[2];
+  const vec3 cameraPos = pc.frameData.cameraPos.xyz;
+
+  const float outer0 =
+      distanceToTessFactor(length(cameraPos - 0.5 * (p1 + p2)));
+  const float outer1 =
+      distanceToTessFactor(length(cameraPos - 0.5 * (p2 + p0)));
+  const float outer2 =
+      distanceToTessFactor(length(cameraPos - 0.5 * (p0 + p1)));
+  gl_TessLevelOuter[0] = outer0;
+  gl_TessLevelOuter[1] = outer1;
+  gl_TessLevelOuter[2] = outer2;
+  gl_TessLevelInner[0] = (outer0 + outer1 + outer2) * (1.0 / 3.0);
+  outPatchOuterFactors = vec3(outer0, outer1, outer2);
+  outPatchInnerFactor = gl_TessLevelInner[0];
+}

@@ -36,6 +36,10 @@ struct NURI_API AnimationSceneFrameData {
   // Device address for instanceMatricesBuffer, in bytes, expected to be
   // non-zero.
   uint64_t instanceMatricesAddress = 0u;
+  // Previous frame's per-instance matrices. Valid only when
+  // previousInstanceMatricesAddress is non-zero.
+  BufferHandle previousInstanceMatricesBuffer{};
+  uint64_t previousInstanceMatricesAddress = 0u;
   // Non-owning span of pre-dispatch compute work. The backing array must stay
   // alive until the frame graph finishes consuming this
   // AnimationSceneFrameData.
@@ -45,6 +49,10 @@ struct NURI_API AnimationSceneFrameData {
   // resources.
   std::span<const AnimatedRenderableGeometryOverride>
       geometryOverridesByRenderable{};
+  // Previous frame's animated geometry overrides indexed by runtime renderable.
+  // Empty when no contiguous previous animation frame is available.
+  std::span<const AnimatedRenderableGeometryOverride>
+      previousGeometryOverridesByRenderable{};
   // Runtime renderable indices whose instance matrix is written by animation
   // scatter this frame. Includes transform-only animated renderables that do
   // not need a geometry override.

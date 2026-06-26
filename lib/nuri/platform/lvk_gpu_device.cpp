@@ -146,6 +146,8 @@ lvk::Format toLvkFormat(Format format) {
   switch (format) {
   case Format::R32_UINT:
     return lvk::Format_R_UI32;
+  case Format::R8_UNORM:
+    return lvk::Format_R_UN8;
   case Format::R32_FLOAT:
     return lvk::Format_R_F32;
   case Format::RG32_FLOAT:
@@ -182,6 +184,8 @@ lvk::Format toLvkFormat(Format format) {
 
 Format fromLvkFormat(lvk::Format format) {
   switch (format) {
+  case lvk::Format_R_UN8:
+    return Format::R8_UNORM;
   case lvk::Format_R_UI32:
     return Format::R32_UINT;
   case lvk::Format_R_F32:
@@ -3601,6 +3605,9 @@ LvkGPUDevice::readTexture(TextureHandle texture,
   const Format format = impl_->textures.getFormat(texture);
   size_t bytesPerPixel = 0;
   switch (format) {
+  case Format::R8_UNORM:
+    bytesPerPixel = 1u;
+    break;
   case Format::R32_UINT:
     bytesPerPixel = sizeof(uint32_t);
     break;

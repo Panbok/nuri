@@ -46,7 +46,7 @@ private:
   };
 
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 368,
+  static_assert(sizeof(FrameData) == 384,
                 "SkyboxPass::FrameData must match shader FrameDataBuffer "
                 "layout");
 

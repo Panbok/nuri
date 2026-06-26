@@ -32,6 +32,7 @@ constexpr size_t kIndirectCountHeaderBytes = sizeof(uint32_t);
 constexpr uint32_t kMaxIndirectCommandsPerDraw = 1024u;
 constexpr size_t kMaxDrawItemsForIndirectPath = 8192u;
 constexpr uint32_t kUnlimitedTessInstanceCap = 0u;
+constexpr uint32_t kVelocityGeometryFlagPreviousVertexBuffer = 1u << 0u;
 constexpr float kOverlayDepthBiasConstant = -1.0f;
 constexpr float kOverlayDepthBiasSlope = -1.0f;
 constexpr uint32_t kAutoLodCacheInvalidationSeed = 1664525u;
@@ -274,6 +275,8 @@ float maxMatrixElementDelta(const glm::mat4 &a, const glm::mat4 &b) {
 
 uint64_t textureBytesPerPixel(Format format) {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::RG16_FLOAT:
     return sizeof(uint16_t) * 2u;
   case Format::RG32_FLOAT:
@@ -563,6 +566,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       previousInstanceMatricesRing_(resolveMemoryResource(memory)),
       velocityInstanceFlagsRing_(resolveMemoryResource(memory)),
       velocityFrameDataRing_(resolveMemoryResource(memory)),
+      velocityGeometryRing_(resolveMemoryResource(memory)),
       instanceRemapRing_(resolveMemoryResource(memory)),
       indirectCommandRing_(resolveMemoryResource(memory)),
       singleInstanceBatchCaches_(resolveMemoryResource(memory)),
@@ -626,6 +630,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       previousTransformById_(resolveMemoryResource(memory)),
       previousInstanceMatricesCpuCache_(resolveMemoryResource(memory)),
       velocityInstanceFlagsCpuCache_(resolveMemoryResource(memory)),
+      velocityGeometryCpuCache_(resolveMemoryResource(memory)),
       transmissionVisibilityDepthPushConstants_(resolveMemoryResource(memory)),
       preparedGraphPasses_(resolveMemoryResource(memory)) {
   auto *resource = resolveMemoryResource(memory);
@@ -750,6 +755,7 @@ void OpaqueRenderer::onDetach() {
   instanceMatricesCpuCache_.clear();
   previousInstanceMatricesCpuCache_.clear();
   velocityInstanceFlagsCpuCache_.clear();
+  velocityGeometryCpuCache_.clear();
   instanceMatricesUploadVersions_.clear();
   instanceLodCentersInvRadiusSq_.clear();
   materialTextureAccessHandles_.clear();
@@ -1285,30 +1291,46 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   aoMetrics.disabledReason = ambientOcclusionSettings.disabledReason;
   aoMetrics.active = ambientOcclusionSettings.active;
   const bool hasTaaVelocityInstances = taaSelected && instanceCount > 0;
-  const bool previousCacheValid =
+  const bool animationPreviousFrameValid =
+      hasTaaVelocityInstances && animationSceneData != nullptr &&
+      frame.camera.historyValid && frame.camera.temporalDataValid &&
+      nuri::isValid(animationSceneData->previousInstanceMatricesBuffer) &&
+      animationSceneData->previousInstanceMatricesAddress != 0u;
+  const bool transformPreviousCacheValid =
       hasTaaVelocityInstances && frame.camera.historyValid &&
       frame.camera.temporalDataValid &&
       previousTransformSceneId_ == frame.scene->id() &&
       previousTransformCaptureFrameIndex_ !=
           std::numeric_limits<uint64_t>::max() &&
       previousTransformCaptureFrameIndex_ < frame.frameIndex;
+  const bool previousCacheValid = animationSceneData != nullptr
+                                      ? animationPreviousFrameValid
+                                      : transformPreviousCacheValid;
   const bool staticVelocityScene = hasTaaVelocityInstances &&
                                    !settings.opaque.enableInstanceAnimation &&
                                    animationSceneData == nullptr;
   const bool canReuseStaticPreviousMatrices =
-      staticVelocityScene && previousCacheValid && !transformDirty &&
+      staticVelocityScene && transformPreviousCacheValid && !transformDirty &&
       !animationSceneStateDirty;
   const bool canUseAllInvalidVelocityFlags =
-      staticVelocityScene && !previousCacheValid;
-  const VelocityInstanceFlagsMode velocityInstanceFlagsMode =
-      canReuseStaticPreviousMatrices
-          ? VelocityInstanceFlagsMode::AllValid
-          : (canUseAllInvalidVelocityFlags
-                 ? VelocityInstanceFlagsMode::AllInvalid
-                 : VelocityInstanceFlagsMode::Buffer);
+      staticVelocityScene && !transformPreviousCacheValid;
+  VelocityInstanceFlagsMode velocityInstanceFlagsMode =
+      VelocityInstanceFlagsMode::Buffer;
+  if (animationSceneData != nullptr) {
+    velocityInstanceFlagsMode = animationPreviousFrameValid
+                                    ? VelocityInstanceFlagsMode::AllValid
+                                    : VelocityInstanceFlagsMode::AllInvalid;
+  } else if (canReuseStaticPreviousMatrices) {
+    velocityInstanceFlagsMode = VelocityInstanceFlagsMode::AllValid;
+  } else if (canUseAllInvalidVelocityFlags) {
+    velocityInstanceFlagsMode = VelocityInstanceFlagsMode::AllInvalid;
+  }
   const bool needsVelocityInstanceBufferUpload =
       hasTaaVelocityInstances &&
       velocityInstanceFlagsMode == VelocityInstanceFlagsMode::Buffer;
+  const bool needsVelocityGeometryUpload =
+      hasTaaVelocityInstances && animationPreviousFrameValid &&
+      !animationSceneData->previousGeometryOverridesByRenderable.empty();
   if (msaaSelected &&
       (!nuri::isValid(frame.sharedResources.msaaSceneDepthTexture) ||
        !nuri::isValid(frame.sharedResources.msaaSceneColorTexture))) {
@@ -1341,6 +1363,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         ensureVelocityFrameDataRingCapacity(sizeof(VelocityFrameGpuData));
     if (velocityFrameResult.hasError()) {
       return velocityFrameResult;
+    }
+  }
+  if (needsVelocityGeometryUpload) {
+    auto velocityGeometryResult = ensureVelocityGeometryRingCapacity(
+        std::max(instanceCount * sizeof(VelocityRenderableGeometryGpuData),
+                 sizeof(VelocityRenderableGeometryGpuData)));
+    if (velocityGeometryResult.hasError()) {
+      return velocityGeometryResult;
     }
   }
   if (instanceStaticBuffersDirty_) {
@@ -1399,11 +1429,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? animationSceneData->instanceMatricesAddress
           : gpu_.getBufferDeviceAddress(instanceMatricesBufferHandle);
   const BufferHandle previousInstanceMatricesBufferHandle =
-      needsVelocityInstanceBufferUpload &&
-              frameSlot < previousInstanceMatricesRing_.size() &&
-              previousInstanceMatricesRing_[frameSlot].buffer
-          ? previousInstanceMatricesRing_[frameSlot].buffer->handle()
-          : BufferHandle{};
+      animationPreviousFrameValid
+          ? animationSceneData->previousInstanceMatricesBuffer
+          : (needsVelocityInstanceBufferUpload &&
+                     frameSlot < previousInstanceMatricesRing_.size() &&
+                     previousInstanceMatricesRing_[frameSlot].buffer
+                 ? previousInstanceMatricesRing_[frameSlot].buffer->handle()
+                 : BufferHandle{});
   const BufferHandle velocityInstanceFlagsBufferHandle =
       needsVelocityInstanceBufferUpload &&
               frameSlot < velocityInstanceFlagsRing_.size() &&
@@ -1415,15 +1447,23 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
               velocityFrameDataRing_[frameSlot].buffer
           ? velocityFrameDataRing_[frameSlot].buffer->handle()
           : BufferHandle{};
+  const BufferHandle velocityGeometryBufferHandle =
+      needsVelocityGeometryUpload && frameSlot < velocityGeometryRing_.size() &&
+              velocityGeometryRing_[frameSlot].buffer
+          ? velocityGeometryRing_[frameSlot].buffer->handle()
+          : BufferHandle{};
   const bool reuseCurrentMatricesForVelocity =
-      canReuseStaticPreviousMatrices || canUseAllInvalidVelocityFlags;
+      velocityInstanceFlagsMode == VelocityInstanceFlagsMode::AllInvalid ||
+      canReuseStaticPreviousMatrices;
   const uint64_t previousInstanceMatricesAddress =
-      reuseCurrentMatricesForVelocity
-          ? instanceMatricesAddress
-          : (nuri::isValid(previousInstanceMatricesBufferHandle)
-                 ? gpu_.getBufferDeviceAddress(
-                       previousInstanceMatricesBufferHandle)
-                 : 0u);
+      animationPreviousFrameValid
+          ? animationSceneData->previousInstanceMatricesAddress
+          : (reuseCurrentMatricesForVelocity
+                 ? instanceMatricesAddress
+                 : (nuri::isValid(previousInstanceMatricesBufferHandle)
+                        ? gpu_.getBufferDeviceAddress(
+                              previousInstanceMatricesBufferHandle)
+                        : 0u));
   const uint64_t velocityInstanceFlagsAddress =
       nuri::isValid(velocityInstanceFlagsBufferHandle)
           ? gpu_.getBufferDeviceAddress(velocityInstanceFlagsBufferHandle)
@@ -1432,12 +1472,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       nuri::isValid(velocityFrameDataBufferHandle)
           ? gpu_.getBufferDeviceAddress(velocityFrameDataBufferHandle)
           : 0u;
+  const uint64_t velocityGeometryAddress =
+      nuri::isValid(velocityGeometryBufferHandle)
+          ? gpu_.getBufferDeviceAddress(velocityGeometryBufferHandle)
+          : 0u;
   if (frameDataAddress == 0 || instanceCentersPhaseAddress == 0 ||
       instanceBaseMatricesAddress == 0 || instanceMatricesAddress == 0 ||
-      (hasTaaVelocityInstances && (previousInstanceMatricesAddress == 0u ||
-                                   (needsVelocityInstanceBufferUpload &&
-                                    velocityInstanceFlagsAddress == 0u) ||
-                                   velocityFrameDataAddress == 0u)) ||
+      (hasTaaVelocityInstances &&
+       (previousInstanceMatricesAddress == 0u ||
+        (needsVelocityInstanceBufferUpload &&
+         velocityInstanceFlagsAddress == 0u) ||
+        (needsVelocityGeometryUpload && velocityGeometryAddress == 0u) ||
+        velocityFrameDataAddress == 0u)) ||
       materialGpu->headerBufferAddress == 0u ||
       materialGpu->clearcoatBufferAddress == 0u ||
       materialGpu->sheenBufferAddress == 0u ||
@@ -1456,13 +1502,20 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     uint32_t validPreviousCount = 0u;
     uint32_t missingPreviousCount = 0u;
     uint32_t animatedResponsiveCount = 0u;
+    uint32_t animatedPreviousGeometryCount = 0u;
     double totalObjectMotion = 0.0;
     float maxObjectMotion = 0.0f;
 
-    if (canReuseStaticPreviousMatrices) {
+    if (velocityInstanceFlagsMode == VelocityInstanceFlagsMode::AllValid) {
       validPreviousCount = saturateToU32(instanceCount);
-    } else if (canUseAllInvalidVelocityFlags) {
+    } else if (velocityInstanceFlagsMode ==
+               VelocityInstanceFlagsMode::AllInvalid) {
       missingPreviousCount = saturateToU32(instanceCount);
+      animatedResponsiveCount =
+          animationSceneData != nullptr
+              ? saturateToU32(
+                    animationSceneData->animatedRenderableIndices.size())
+              : 0u;
     } else {
       previousInstanceMatricesCpuCache_.clear();
       velocityInstanceFlagsCpuCache_.clear();
@@ -1529,11 +1582,55 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       }
     }
 
+    if (needsVelocityGeometryUpload) {
+      velocityGeometryCpuCache_.clear();
+      velocityGeometryCpuCache_.resize(instanceCount);
+      const size_t previousOverrideCount = std::min(
+          animationSceneData->previousGeometryOverridesByRenderable.size(),
+          instanceCount);
+      for (size_t i = 0; i < previousOverrideCount; ++i) {
+        const AnimatedRenderableGeometryOverride &previousOverride =
+            animationSceneData->previousGeometryOverridesByRenderable[i];
+        if (!previousOverride.enabled ||
+            !nuri::isValid(previousOverride.vertexBuffer)) {
+          continue;
+        }
+        const uint64_t previousVertexAddress = gpu_.getBufferDeviceAddress(
+            previousOverride.vertexBuffer, previousOverride.vertexByteOffset);
+        if (previousVertexAddress == 0u) {
+          continue;
+        }
+        velocityGeometryCpuCache_[i] = VelocityRenderableGeometryGpuData{
+            .previousVertexBufferAddress = previousVertexAddress,
+            .metadata = glm::uvec4(
+                kVelocityGeometryFlagPreviousVertexBuffer,
+                static_cast<uint32_t>(PackedVertexFormat::AnimatedFloat32),
+                previousOverride.vertexCount, 0u),
+        };
+        ++animatedPreviousGeometryCount;
+      }
+
+      const std::span<const std::byte> velocityGeometryBytes{
+          reinterpret_cast<const std::byte *>(velocityGeometryCpuCache_.data()),
+          velocityGeometryCpuCache_.size() *
+              sizeof(VelocityRenderableGeometryGpuData)};
+      auto geometryUpdateResult = gpu_.updateBuffer(
+          velocityGeometryBufferHandle, velocityGeometryBytes, 0);
+      if (geometryUpdateResult.hasError()) {
+        return geometryUpdateResult;
+      }
+    } else {
+      velocityGeometryCpuCache_.clear();
+    }
+
     const VelocityFrameGpuData velocityFrameData{
         .currentViewProjNoJitter = frame.camera.currentUnjitteredViewProj,
         .previousViewProjNoJitter = frame.camera.previousUnjitteredViewProj,
         .instanceFlagsMode = glm::uvec4(
             static_cast<uint32_t>(velocityInstanceFlagsMode), 0u, 0u, 0u),
+        .previousGeometryAddress = velocityGeometryAddress,
+        .previousGeometryInfo = glm::uvec4(
+            needsVelocityGeometryUpload ? instanceCount : 0u, 0u, 0u, 0u),
     };
     const std::span<const std::byte> velocityFrameBytes{
         reinterpret_cast<const std::byte *>(&velocityFrameData),
@@ -1549,6 +1646,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     aaMetrics.velocityPreviousTransformValidCount = validPreviousCount;
     aaMetrics.velocityMissingPreviousTransformCount = missingPreviousCount;
     aaMetrics.velocityAnimatedResponsiveCount = animatedResponsiveCount;
+    aaMetrics.velocityAnimatedPreviousGeometryCount =
+        animatedPreviousGeometryCount;
     aaMetrics.previousTransformCacheValid = previousCacheValid;
     aaMetrics.velocityAverageObjectMotion =
         validPreviousCount > 0u
@@ -3071,6 +3170,72 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
 
   const bool hasIndirectBaseDraws = !indirectDrawItems_.empty();
+  const auto populateCoverageDependencyBuffers =
+      [&](std::pmr::vector<BufferHandle> &dependencies,
+          std::pmr::vector<RenderGraphAccessMode> &accessModes,
+          std::string_view context) -> Result<bool, std::string> {
+    dependencies.clear();
+    accessModes.clear();
+
+    auto appendRead = [&](BufferHandle handle,
+                          std::string_view dependencyContext) {
+      return appendUniqueDependency(dependencies, accessModes, handle,
+                                    RenderGraphAccessMode::Read,
+                                    dependencyContext);
+    };
+
+    if (nuri::isValid(sceneGpu->buffer)) {
+      auto depResult = appendRead(sceneGpu->buffer, context);
+      if (depResult.hasError()) {
+        return depResult;
+      }
+    }
+    auto materialHeaderDepResult =
+        appendRead(materialGpu->headerBuffer, context);
+    if (materialHeaderDepResult.hasError()) {
+      return materialHeaderDepResult;
+    }
+
+    if (animationSceneData != nullptr) {
+      for (const AnimatedRenderableGeometryOverride &geometryOverride :
+           animationSceneData->geometryOverridesByRenderable) {
+        if (!geometryOverride.enabled ||
+            !nuri::isValid(geometryOverride.vertexBuffer)) {
+          continue;
+        }
+        auto depResult = appendRead(geometryOverride.vertexBuffer, context);
+        if (depResult.hasError()) {
+          return depResult;
+        }
+      }
+    }
+
+    if (frameSlot < instanceRemapRing_.size() &&
+        instanceRemapRing_[frameSlot].buffer &&
+        instanceRemapRing_[frameSlot].buffer->valid()) {
+      auto depResult =
+          appendRead(instanceRemapRing_[frameSlot].buffer->handle(), context);
+      if (depResult.hasError()) {
+        return depResult;
+      }
+    }
+
+    if (hasIndirectBaseDraws) {
+      auto depResult =
+          appendRead(indirectCommandRing_[frameSlot].buffer->handle(), context);
+      if (depResult.hasError()) {
+        return depResult;
+      }
+    }
+
+    if (instanceCount > 0) {
+      auto depResult = appendRead(instanceMatricesBufferHandle, context);
+      if (depResult.hasError()) {
+        return depResult;
+      }
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
   const std::span<const DrawItem> baseDrawItems =
       hasIndirectBaseDraws
           ? std::span<const DrawItem>(indirectDrawItems_.data(),
@@ -4080,6 +4245,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     const bool motionUncertainReactiveMode =
         hasTaaVelocityInstances &&
         velocityInstanceFlagsMode != VelocityInstanceFlagsMode::AllValid;
+    const bool jitteredAlphaReactiveMode = frame.camera.jitterEnabled;
     uint32_t alphaMaskedCoverageDraws = 0u;
     uint32_t reactiveAlphaMaskedDraws = 0u;
     uint32_t motionUncertainDraws = 0u;
@@ -4087,9 +4253,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     for (size_t i = 0; i < shadedBaseDrawItems.size(); ++i) {
       const bool alphaMasked = baseAlphaMasked[i] != 0u;
       alphaMaskedCoverageDraws += alphaMasked ? 1u : 0u;
-      reactiveAlphaMaskedDraws += alphaMasked ? 1u : 0u;
       const bool motionUncertain = motionUncertainReactiveMode;
-      if (!motionUncertain) {
+      const bool alphaReactive = alphaMasked && jitteredAlphaReactiveMode;
+      if (!motionUncertain && !alphaReactive) {
         continue;
       }
       const DrawItem &sourceItem = shadedBaseDrawItems[i];
@@ -4097,7 +4263,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         ++skippedTessellatedReactiveDraws;
         continue;
       }
-      ++motionUncertainDraws;
+      motionUncertainDraws += motionUncertain ? 1u : 0u;
+      reactiveAlphaMaskedDraws += alphaMasked ? 1u : 0u;
       const RenderPipelineHandle reactivePipeline =
           selectReactiveMaskPipeline(sourceItem.pipeline);
       if (!nuri::isValid(reactivePipeline)) {
@@ -4130,9 +4297,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         static_cast<float>(reactiveMaskDrawItems_.size()) / drawDenominator;
 
     if (!reactiveMaskDrawItems_.empty()) {
-      reactivePassDependencyBuffers_ = passDependencyBuffers_;
-      reactivePassDependencyBufferAccessModes_ =
-          passDependencyBufferAccessModes_;
+      auto reactiveBaseDepResult = populateCoverageDependencyBuffers(
+          reactivePassDependencyBuffers_,
+          reactivePassDependencyBufferAccessModes_,
+          "OpaqueRenderer::buildOpaquePasses(reactive pass)");
+      if (reactiveBaseDepResult.hasError()) {
+        return reactiveBaseDepResult;
+      }
       for (const BufferHandle handle :
            {velocityInstanceFlagsBufferHandle, velocityFrameDataBufferHandle}) {
         auto reactiveDepResult = appendUniqueDependency(
@@ -4192,14 +4363,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     velocityDrawItems_.reserve(shadedBaseDrawItems.size());
     uint32_t skippedTessellatedDraws = 0u;
     for (const DrawItem &sourceItem : shadedBaseDrawItems) {
-      if (isTessPipeline(sourceItem.pipeline)) {
-        ++skippedTessellatedDraws;
-        frame.metrics.antiAliasing.opaqueVelocityGenerated = false;
-        continue;
-      }
       const RenderPipelineHandle velocityPipeline =
           selectVelocityPipeline(sourceItem.pipeline);
       if (!nuri::isValid(velocityPipeline)) {
+        if (isTessPipeline(sourceItem.pipeline)) {
+          ++skippedTessellatedDraws;
+          frame.metrics.antiAliasing.opaqueVelocityGenerated = false;
+        }
         continue;
       }
       DrawItem velocityItem = sourceItem;
@@ -4215,12 +4385,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     frame.metrics.antiAliasing.velocityTessellatedSkippedDrawCount =
         skippedTessellatedDraws;
     if (!velocityDrawItems_.empty()) {
-      velocityPassDependencyBuffers_ = passDependencyBuffers_;
-      velocityPassDependencyBufferAccessModes_ =
-          passDependencyBufferAccessModes_;
+      auto velocityBaseDepResult = populateCoverageDependencyBuffers(
+          velocityPassDependencyBuffers_,
+          velocityPassDependencyBufferAccessModes_,
+          "OpaqueRenderer::buildOpaquePasses(velocity pass)");
+      if (velocityBaseDepResult.hasError()) {
+        return velocityBaseDepResult;
+      }
       for (const BufferHandle handle :
            {previousInstanceMatricesBufferHandle,
-            velocityInstanceFlagsBufferHandle, velocityFrameDataBufferHandle}) {
+            velocityInstanceFlagsBufferHandle, velocityFrameDataBufferHandle,
+            velocityGeometryBufferHandle}) {
         auto velocityDepResult = appendUniqueDependency(
             velocityPassDependencyBuffers_,
             velocityPassDependencyBufferAccessModes_, handle,
@@ -5872,6 +6047,7 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
       previousInstanceMatricesRing_.size() == requiredCount &&
       velocityInstanceFlagsRing_.size() == requiredCount &&
       velocityFrameDataRing_.size() == requiredCount &&
+      velocityGeometryRing_.size() == requiredCount &&
       instanceRemapRing_.size() == requiredCount &&
       indirectCommandRing_.size() == requiredCount) {
     return Result<bool, std::string>::makeResult(true);
@@ -5899,6 +6075,11 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
       gpu_.destroyBuffer(slot.buffer->handle());
     }
   }
+  for (DynamicBufferSlot &slot : velocityGeometryRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+  }
   for (DynamicBufferSlot &slot : instanceRemapRing_) {
     if (slot.buffer && slot.buffer->valid()) {
       gpu_.destroyBuffer(slot.buffer->handle());
@@ -5914,12 +6095,14 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   previousInstanceMatricesRing_.clear();
   velocityInstanceFlagsRing_.clear();
   velocityFrameDataRing_.clear();
+  velocityGeometryRing_.clear();
   instanceRemapRing_.clear();
   indirectCommandRing_.clear();
   instanceMatricesRing_.resize(requiredCount);
   previousInstanceMatricesRing_.resize(requiredCount);
   velocityInstanceFlagsRing_.resize(requiredCount);
   velocityFrameDataRing_.resize(requiredCount);
+  velocityGeometryRing_.resize(requiredCount);
   instanceRemapRing_.resize(requiredCount);
   indirectCommandRing_.resize(requiredCount);
   instanceMatricesUploadVersions_.assign(requiredCount,
@@ -6037,6 +6220,13 @@ OpaqueRenderer::ensureVelocityFrameDataRingCapacity(size_t requiredBytes) {
   return ensureDynamicRingCapacity(velocityFrameDataRing_, requiredBytes,
                                    sizeof(VelocityFrameGpuData),
                                    "opaque_velocity_frame_data_buffer");
+}
+
+Result<bool, std::string>
+OpaqueRenderer::ensureVelocityGeometryRingCapacity(size_t requiredBytes) {
+  return ensureDynamicRingCapacity(velocityGeometryRing_, requiredBytes,
+                                   sizeof(VelocityRenderableGeometryGpuData),
+                                   "opaque_velocity_geometry_buffer");
 }
 
 Result<bool, std::string>
@@ -6367,6 +6557,9 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
   meshPickTessEvalShader_ = {};
   meshShadowInspectFragmentShader_ = {};
   meshVelocityVertexShader_ = {};
+  meshVelocityTessVertexShader_ = {};
+  meshVelocityTessControlShader_ = {};
+  meshVelocityTessEvalShader_ = {};
   meshVelocityFragmentShader_ = {};
   meshReactiveMaskVertexShader_ = {};
   meshReactiveMaskFragmentShader_ = {};
@@ -6450,20 +6643,41 @@ Result<bool, std::string> OpaqueRenderer::createShaders() {
         (shaderDir / "opaque_velocity.vert").string(), ShaderStage::Vertex);
     auto fragmentResult = meshVelocityShader_->compileFromFile(
         (shaderDir / "opaque_velocity.frag").string(), ShaderStage::Fragment);
+    auto tessVertexResult = meshVelocityShader_->compileFromFile(
+        (shaderDir / "opaque_velocity_tess.vert").string(),
+        ShaderStage::Vertex);
+    auto tessControlResult = meshVelocityShader_->compileFromFile(
+        (shaderDir / "opaque_velocity_tess.tesc").string(),
+        ShaderStage::TessControl);
+    auto tessEvalResult = meshVelocityShader_->compileFromFile(
+        (shaderDir / "opaque_velocity_tess.tese").string(),
+        ShaderStage::TessEval);
     if (vertexResult.hasError() || fragmentResult.hasError()) {
       const std::string error = vertexResult.hasError()
                                     ? vertexResult.error()
                                     : fragmentResult.error();
-      NURI_LOG_WARNING(
-          "OpaqueRenderer::createShaders: velocity shaders failed, opaque "
-          "velocity generation will be disabled: %s",
-          error.c_str());
-      meshVelocityVertexShader_ = {};
-      meshVelocityFragmentShader_ = {};
-    } else {
-      meshVelocityVertexShader_ = vertexResult.value();
-      meshVelocityFragmentShader_ = fragmentResult.value();
+      return Result<bool, std::string>::makeError(
+          "OpaqueRenderer::createShaders: velocity shader compile failed: " +
+          error);
     }
+    meshVelocityVertexShader_ = vertexResult.value();
+    meshVelocityFragmentShader_ = fragmentResult.value();
+
+    if (tessVertexResult.hasError() || tessControlResult.hasError() ||
+        tessEvalResult.hasError()) {
+      const std::string error =
+          tessVertexResult.hasError()
+              ? tessVertexResult.error()
+              : (tessControlResult.hasError() ? tessControlResult.error()
+                                              : tessEvalResult.error());
+      return Result<bool, std::string>::makeError(
+          "OpaqueRenderer::createShaders: tessellated velocity shader compile "
+          "failed: " +
+          error);
+    }
+    meshVelocityTessVertexShader_ = tessVertexResult.value();
+    meshVelocityTessControlShader_ = tessControlResult.value();
+    meshVelocityTessEvalShader_ = tessEvalResult.value();
   }
 
   {
@@ -7251,6 +7465,49 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
               doubleSidedNormalTessResult.value();
         }
       }
+      if (nuri::isValid(meshVelocityTessVertexShader_) &&
+          nuri::isValid(meshVelocityTessControlShader_) &&
+          nuri::isValid(meshVelocityTessEvalShader_) &&
+          nuri::isValid(meshVelocityFragmentShader_)) {
+        const RenderPipelineDesc velocityTessDesc = meshPipelineDesc(
+            kFrameCompositionMotionVectorFormat, depthFormat,
+            meshVelocityTessVertexShader_, meshVelocityTessControlShader_,
+            meshVelocityTessEvalShader_, {}, meshVelocityFragmentShader_,
+            PolygonMode::Fill, Topology::Patch,
+            kTessellationPatchControlPoints);
+        auto velocityTessResult =
+            gpu_.createRenderPipeline(velocityTessDesc, "opaque_velocity_tess");
+        if (velocityTessResult.hasError()) {
+          meshVelocityTessPipelineHandle_ = {};
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::createPipelines: tessellated velocity pipeline "
+              "failed, tessellated opaque velocity draws will be marked "
+              "missing: %s",
+              velocityTessResult.error().c_str());
+        } else {
+          meshVelocityTessPipelineHandle_ = velocityTessResult.value();
+        }
+
+        const RenderPipelineDesc doubleSidedVelocityTessDesc = meshPipelineDesc(
+            kFrameCompositionMotionVectorFormat, depthFormat,
+            meshVelocityTessVertexShader_, meshVelocityTessControlShader_,
+            meshVelocityTessEvalShader_, {}, meshVelocityFragmentShader_,
+            PolygonMode::Fill, Topology::Patch, kTessellationPatchControlPoints,
+            false, CullMode::None);
+        auto doubleSidedVelocityTessResult = gpu_.createRenderPipeline(
+            doubleSidedVelocityTessDesc, "opaque_velocity_tess_double_sided");
+        if (doubleSidedVelocityTessResult.hasError()) {
+          meshVelocityDoubleSidedTessPipelineHandle_ = {};
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::createPipelines: double-sided tessellated "
+              "velocity pipeline failed, double-sided tessellated velocity "
+              "draws will use the culling variant when available: %s",
+              doubleSidedVelocityTessResult.error().c_str());
+        } else {
+          meshVelocityDoubleSidedTessPipelineHandle_ =
+              doubleSidedVelocityTessResult.value();
+        }
+      }
     }
   } else {
     tessellationUnsupported_ = true;
@@ -7489,7 +7746,18 @@ OpaqueRenderer::selectMeshPipeline(bool doubleSided, bool tessellated) const {
 
 RenderPipelineHandle OpaqueRenderer::selectVelocityPipeline(
     RenderPipelineHandle sourcePipeline) const {
+  const bool tessellated = isTessPipeline(sourcePipeline);
   const bool doubleSided = isDoubleSidedPipeline(sourcePipeline);
+  if (tessellated) {
+    if (doubleSided &&
+        nuri::isValid(meshVelocityDoubleSidedTessPipelineHandle_)) {
+      return meshVelocityDoubleSidedTessPipelineHandle_;
+    }
+    if (nuri::isValid(meshVelocityTessPipelineHandle_)) {
+      return meshVelocityTessPipelineHandle_;
+    }
+    return {};
+  }
   if (doubleSided && nuri::isValid(meshVelocityDoubleSidedPipelineHandle_)) {
     return meshVelocityDoubleSidedPipelineHandle_;
   }
@@ -8081,6 +8349,8 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, meshShadowInspectTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshShadowInspectDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshShadowInspectPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshVelocityDoubleSidedTessPipelineHandle_);
+  destroyPipelineHandle(gpu_, meshVelocityTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshVelocityDoubleSidedPipelineHandle_);
   destroyPipelineHandle(gpu_, meshVelocityPipelineHandle_);
   destroyPipelineHandle(gpu_, meshReactiveMaskDoubleSidedPipelineHandle_);
@@ -8126,6 +8396,8 @@ void OpaqueRenderer::resetMeshPipelineState() {
   meshShadowInspectDoubleSidedTessPipelineHandle_ = {};
   meshVelocityPipelineHandle_ = {};
   meshVelocityDoubleSidedPipelineHandle_ = {};
+  meshVelocityTessPipelineHandle_ = {};
+  meshVelocityDoubleSidedTessPipelineHandle_ = {};
   meshReactiveMaskPipelineHandle_ = {};
   meshReactiveMaskDoubleSidedPipelineHandle_ = {};
   meshNormalPipelineHandle_ = {};
@@ -8247,6 +8519,13 @@ void OpaqueRenderer::destroyBuffers() {
     slot.buffer.reset();
     slot.capacityBytes = 0;
   }
+  for (DynamicBufferSlot &slot : velocityGeometryRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0;
+  }
   for (DynamicBufferSlot &slot : instanceRemapRing_) {
     if (slot.buffer && slot.buffer->valid()) {
       gpu_.destroyBuffer(slot.buffer->handle());
@@ -8265,6 +8544,7 @@ void OpaqueRenderer::destroyBuffers() {
   previousInstanceMatricesRing_.clear();
   velocityInstanceFlagsRing_.clear();
   velocityFrameDataRing_.clear();
+  velocityGeometryRing_.clear();
   instanceRemapRing_.clear();
   indirectCommandRing_.clear();
   instanceMatricesUploadVersions_.clear();

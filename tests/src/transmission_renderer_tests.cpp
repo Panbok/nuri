@@ -275,6 +275,7 @@ createForwardSceneGpuData(GPUDevice &gpu,
   frameData.sceneColorTexId = gpu.getTextureBindlessIndex(sceneColorTexture);
   frameData.sceneColorSamplerId = gpu.getLinearRepeatSamplerBindlessIndex(true);
   frameData.materialSamplerId = gpu.getDefaultSamplerBindlessIndex();
+  frameData.materialDataSamplerId = gpu.getDefaultSamplerBindlessIndex();
   frameData.materialHeaderBufferAddress = materialGpu.headerBufferAddress;
   frameData.materialClearcoatBufferAddress = materialGpu.clearcoatBufferAddress;
   frameData.materialSheenBufferAddress = materialGpu.sheenBufferAddress;

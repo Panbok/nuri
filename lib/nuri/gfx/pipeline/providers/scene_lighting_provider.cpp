@@ -233,6 +233,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   const RenderSettings &renderSettings = renderSettingsOrDefault(frame);
   const uint32_t materialCoverageSamplerId = resolveDefaultMaterialSamplerId(
       gpu_, textureFilteringSettingsOrDefault(frame));
+  const uint32_t materialDataSamplerId = materialCoverageSamplerId;
   auto materialSamplerIdResult = resolveMaterialSamplerId(frame);
   if (materialSamplerIdResult.hasError()) {
     return Result<bool, std::string>::makeError(
@@ -449,6 +450,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .shadowFrameBufferAddress = shadowFrameBufferAddress,
       .shadowFlags = shadowFlags,
       .materialCoverageSamplerId = materialCoverageSamplerId,
+      .materialDataSamplerId = materialDataSamplerId,
   };
   ForwardSceneFrameData postTaaFrameData = frameData;
   postTaaFrameData.proj = cameraCurrentUnjitteredProjection(frame.camera);

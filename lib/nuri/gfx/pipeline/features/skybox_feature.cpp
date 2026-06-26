@@ -299,6 +299,10 @@ SkyboxPass::prepareSkyboxDraw(FrameBuildContext &ctx) {
       .materialSpecularBufferAddress = 0u,
       .directionalLightCount = 0u,
       .localLightCount = 0u,
+      .shadowFrameBufferAddress = 0u,
+      .shadowFlags = 0u,
+      .materialCoverageSamplerId = kInvalidSamplerBindlessIndex,
+      .materialDataSamplerId = 0u,
   };
 
   auto bufferResult = ensureFrameBufferCapacity(sizeof(frameData_));

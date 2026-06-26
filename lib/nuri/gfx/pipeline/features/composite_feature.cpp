@@ -369,6 +369,8 @@ uint32_t effectiveLuminanceMipCount(uint32_t width, uint32_t height) {
 
 uint32_t bytesPerPixel(Format format) {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::R32_FLOAT:
   case Format::R32_UINT:
   case Format::RGBA8_UNORM:

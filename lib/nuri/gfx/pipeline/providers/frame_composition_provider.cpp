@@ -50,6 +50,8 @@ TextureDesc makeMsaaTextureDesc(Format format, uint32_t width,
 
 uint32_t textureBytesPerPixel(Format format) {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::RG16_FLOAT:
     return sizeof(uint16_t) * 2u;
   case Format::RG32_FLOAT:
@@ -309,7 +311,7 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   aaMetrics.reactiveMaskAllocated =
       nuri::isValid(ctx.shared.reactiveMaskTexture);
   aaMetrics.reactiveMaskFormatSupported =
-      kFrameCompositionReactiveMaskFormat == Format::R32_FLOAT;
+      textureBytesPerPixel(kFrameCompositionReactiveMaskFormat) != 0u;
   const uint64_t reactiveBytesPerTexture =
       static_cast<uint64_t>(framebufferWidth_) *
       static_cast<uint64_t>(framebufferHeight_) *

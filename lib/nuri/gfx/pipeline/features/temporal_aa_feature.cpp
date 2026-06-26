@@ -150,6 +150,7 @@ isTaaResolveEvaluationDebugView(AntiAliasingDebugView view) noexcept {
          metrics.previousTransformCacheValid &&
          metrics.velocityMissingPreviousTransformCount == 0u &&
          metrics.velocityAnimatedResponsiveCount == 0u &&
+         metrics.velocityAnimatedPreviousGeometryCount == 0u &&
          metrics.velocityTessellatedSkippedDrawCount == 0u &&
          metrics.velocityEstimatedMaxMagnitude <= kStaticFrameVelocityEpsilon &&
          metrics.velocityStaticResidualEstimate <=
@@ -336,6 +337,8 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
 
 [[nodiscard]] uint64_t textureBytesPerPixel(Format format) {
   switch (format) {
+  case Format::R8_UNORM:
+    return 1u;
   case Format::RG16_FLOAT:
     return sizeof(uint16_t) * 2u;
   case Format::RG32_FLOAT:

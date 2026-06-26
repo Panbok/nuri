@@ -122,6 +122,9 @@ hashTextureLoadOptions(const TextureLoadOptions &options) {
   };
   mix(options.srgb ? 1ull : 0ull);
   mix(options.generateMipmaps ? 1ull : 0ull);
+  mix(static_cast<uint64_t>(options.mipSemantic));
+  mix(static_cast<uint64_t>(
+      std::bit_cast<uint32_t>(options.alphaCoverageCutoff)));
   return hash;
 }
 

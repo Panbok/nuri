@@ -1151,19 +1151,50 @@ TEST(RenderGraphRendererTest,
   EXPECT_EQ(shader.find("if (depth >= 0.999999)"), std::string::npos);
 }
 
-TEST(RenderGraphRendererTest, OpaqueReactiveMaskSkipsStaticAlphaMasks) {
+TEST(RenderGraphRendererTest, OpaqueReactiveMaskUsesLowAlphaMaskFeedback) {
   const std::string shader =
       readTextFile(std::filesystem::path(PROJECT_SOURCE_DIR) / "assets" /
                    "shaders" / "opaque_reactive_mask.frag");
   ASSERT_FALSE(shader.empty());
 
-  EXPECT_NE(shader.find("const float kFullReactiveWeight = 1.0"),
+  EXPECT_NE(shader.find("const float kMotionReactiveWeight = 1.0"),
             std::string::npos);
-  EXPECT_NE(shader.find("if (inMotionReactive == 0u)"), std::string::npos);
-  EXPECT_NE(shader.find("materialAlphaMode(material) == kAlphaModeMask"),
+  EXPECT_NE(shader.find("const float kAlphaMaskReactiveWeight = 0.12"),
             std::string::npos);
-  EXPECT_EQ(shader.find("kAlphaMaskReactiveWeight"), std::string::npos);
+  EXPECT_NE(
+      shader.find("(material.materialFlags & kMaterialFlagsAlphaModeMask) "
+                  "== kAlphaModeMask"),
+      std::string::npos);
+  const size_t alphaMaskCheck = shader.find("const bool alphaMasked");
+  const size_t motionDiscard = shader.find("else if (inMotionReactive == 0u)");
+  ASSERT_NE(alphaMaskCheck, std::string::npos);
+  ASSERT_NE(motionDiscard, std::string::npos);
+  EXPECT_LT(alphaMaskCheck, motionDiscard);
+  EXPECT_NE(shader.find("inMotionReactive != 0u ? kMotionReactiveWeight : "
+                        "kAlphaMaskReactiveWeight"),
+            std::string::npos);
+  EXPECT_EQ(shader.find("kFullReactiveWeight"), std::string::npos);
   EXPECT_EQ(shader.find("out_ReactiveMask = 1.0;"), std::string::npos);
+}
+
+TEST(RenderGraphRendererTest,
+     OpaqueVelocityShadersAvoidConstBufferReferenceLocals) {
+  const std::filesystem::path shaderDir =
+      std::filesystem::path(PROJECT_SOURCE_DIR) / "assets" / "shaders";
+  const std::array<std::string_view, 2u> shaderNames = {
+      "opaque_velocity.vert", "opaque_velocity_tess.vert"};
+
+  for (const std::string_view shaderName : shaderNames) {
+    const std::string shader = readTextFile(shaderDir / shaderName);
+    ASSERT_FALSE(shader.empty()) << shaderName;
+    EXPECT_EQ(
+        shader.find("const VelocityRenderableGeometryData previousGeometry"),
+        std::string::npos)
+        << shaderName;
+    EXPECT_NE(shader.find("VelocityRenderableGeometryData previousGeometry ="),
+              std::string::npos)
+        << shaderName;
+  }
 }
 
 TEST(RenderGraphRendererTest, TaaResolveLetsStaticHistoryConfidenceConverge) {
@@ -1339,6 +1370,23 @@ TEST(RenderGraphRendererTest, EditorExposesTemporalAAPresetControls) {
             std::string::npos);
   EXPECT_NE(editorSource.find("!customTemporalPreset"), std::string::npos);
   EXPECT_NE(editorSource.find("\"TAA Motion Filter\""), std::string::npos);
+}
+
+TEST(RenderGraphRendererTest, EditorRuntimeExposesTemporalAAEnvOverrides) {
+  const std::string runtimeSource =
+      readTextFile(std::filesystem::path(PROJECT_SOURCE_DIR) / "editor" /
+                   "src" / "app" / "editor_runtime.cpp");
+  ASSERT_FALSE(runtimeSource.empty());
+
+  EXPECT_NE(runtimeSource.find("NURI_DEBUG_AA_MODE"), std::string::npos);
+  EXPECT_NE(runtimeSource.find("NURI_DEBUG_TAA_PRESET"), std::string::npos);
+  EXPECT_NE(runtimeSource.find("NURI_DEBUG_TAA_JITTER"), std::string::npos);
+  EXPECT_NE(runtimeSource.find("NURI_DEBUG_TAA_DIAGNOSTICS"),
+            std::string::npos);
+  EXPECT_NE(runtimeSource.find("readDebugTemporalAAQualityPreset"),
+            std::string::npos);
+  EXPECT_NE(runtimeSource.find("TemporalAAQualityPreset::Ultra"),
+            std::string::npos);
 }
 
 TEST(RenderGraphRendererTest,
@@ -2048,7 +2096,7 @@ TEST(RenderGraphRendererTest, RenderSettingsDefaultToAntiAliasingDisabled) {
   EXPECT_EQ(settings.antiAliasing.mode, AntiAliasingMode::None);
   EXPECT_EQ(settings.antiAliasing.qualityPreset,
             TemporalAAQualityPreset::Quality);
-  EXPECT_FALSE(settings.antiAliasing.debug.jitterEnabled);
+  EXPECT_TRUE(settings.antiAliasing.debug.jitterEnabled);
   EXPECT_FALSE(settings.antiAliasing.debug.freezeJitter);
   EXPECT_FALSE(settings.antiAliasing.debug.resetHistoryRequested);
   EXPECT_FALSE(settings.antiAliasing.debug.logDiagnostics);
@@ -2121,6 +2169,10 @@ TEST(RenderGraphRendererTest, RenderSettingsDefaultToAntiAliasingDisabled) {
                 static_cast<TemporalAAHdrWeightingMode>(UINT8_MAX)),
             TemporalAAHdrWeightingMode::Luminance);
   EXPECT_FLOAT_EQ(settings.antiAliasing.debug.taaVarianceGamma, 1.85f);
+
+  RenderSettings::AntiAliasingSettings sanitized = settings.antiAliasing;
+  sanitizeAntiAliasingSettings(sanitized);
+  EXPECT_FALSE(sanitized.debug.jitterEnabled);
 }
 
 TEST(RenderGraphRendererTest, TemporalAAQualityPresetDrivesEffectiveSettings) {
@@ -4195,6 +4247,7 @@ TEST(
   EXPECT_TRUE(isValid(frameContext.sharedResources.reactiveMaskTexture));
   EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskAllocated);
   EXPECT_TRUE(frameContext.metrics.antiAliasing.reactiveMaskFormatSupported);
+  EXPECT_EQ(kFrameCompositionReactiveMaskFormat, Format::R8_UNORM);
   EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskWidth, 1280u);
   EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskHeight, 720u);
   EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskTextureCount, 2u);
@@ -4202,9 +4255,9 @@ TEST(
   EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskReallocationCount,
             0u);
   EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskTextureBytes,
-            1280ull * 720ull * 4ull);
+            1280ull * 720ull);
   EXPECT_EQ(frameContext.metrics.antiAliasing.reactiveMaskTotalBytes,
-            2ull * 1280ull * 720ull * 4ull);
+            2ull * 1280ull * 720ull);
 }
 
 TEST(RenderGraphRendererTest,
@@ -5834,6 +5887,146 @@ TEST(RenderGraphRendererTest, OpaqueVelocityPassPublishesMotionVectorsForTaa) {
       invalidTemporalContext.metrics.antiAliasing.previousTransformCacheValid);
 }
 
+TEST(RenderGraphRendererTest, OpaqueVelocityCoversTessellatedDraws) {
+  std::vector<std::byte> scratchBytes(1024 * 1024);
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_tess_velocity");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTextFile(objPath, "o TaaTessVelocityTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_tess_velocity_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+  auto materialResult = renderer.resources().acquireMaterial(MaterialRequest{
+      .debugName = "taa_tess_velocity_material",
+  });
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.opaque.enableTessellation = true;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  CameraFrameState camera = makeSdsmPerspectiveCamera(30.0f);
+  camera.currentUnjitteredViewProj = camera.proj * camera.view;
+  camera.previousUnjitteredViewProj = camera.currentUnjitteredViewProj;
+  camera.temporalDataValid = true;
+  camera.historyValid = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 0u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  EXPECT_GT(frameContext.metrics.opaque.tessellatedDraws, 0u);
+  EXPECT_TRUE(frameContext.metrics.antiAliasing.opaqueVelocityGenerated);
+  EXPECT_EQ(frameContext.metrics.antiAliasing.velocityPassCount, 1u);
+  EXPECT_GT(frameContext.metrics.antiAliasing.velocityDrawCount, 0u);
+  EXPECT_EQ(
+      frameContext.metrics.antiAliasing.velocityTessellatedSkippedDrawCount,
+      0u);
+
+  const auto pipelineNameFor =
+      [&gpu](RenderPipelineHandle handle) -> std::string_view {
+    if (handle.index == 0u) {
+      return {};
+    }
+    const size_t offset = static_cast<size_t>(handle.index - 1u);
+    if (offset >= gpu.createdRenderPipelineNames.size()) {
+      return {};
+    }
+    return gpu.createdRenderPipelineNames[offset];
+  };
+  const auto pipelineDescFor =
+      [&gpu](std::string_view debugName) -> const RenderPipelineDesc * {
+    for (size_t i = 0u; i < gpu.createdRenderPipelineNames.size(); ++i) {
+      if (gpu.createdRenderPipelineNames[i] == debugName) {
+        return &gpu.createdRenderPipelineDescs[i];
+      }
+    }
+    return nullptr;
+  };
+
+  const RenderPipelineDesc *const velocityTessDesc =
+      pipelineDescFor("opaque_velocity_tess");
+  ASSERT_NE(velocityTessDesc, nullptr);
+  EXPECT_EQ(velocityTessDesc->topology, Topology::Patch);
+  EXPECT_EQ(velocityTessDesc->patchControlPoints, 3u);
+  ASSERT_FALSE(velocityTessDesc->colorFormats.empty());
+  EXPECT_EQ(velocityTessDesc->colorFormats.front(),
+            kFrameCompositionMotionVectorFormat);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+  const RenderPass *opaquePass = nullptr;
+  const RenderPass *velocityPass = nullptr;
+  for (const RenderPass &pass : compileResult.value().orderedPasses) {
+    if (pass.debugLabel == "Opaque Pass") {
+      opaquePass = &pass;
+    } else if (pass.debugLabel == "Opaque Velocity Pass") {
+      velocityPass = &pass;
+    }
+  }
+
+  ASSERT_NE(opaquePass, nullptr);
+  ASSERT_NE(velocityPass, nullptr);
+  ASSERT_FALSE(opaquePass->draws.empty());
+  ASSERT_FALSE(velocityPass->draws.empty());
+  EXPECT_EQ(pipelineNameFor(opaquePass->draws.front().pipeline),
+            "opaque_mesh_tess");
+  EXPECT_EQ(pipelineNameFor(velocityPass->draws.front().pipeline),
+            "opaque_velocity_tess");
+}
+
 TEST(RenderGraphRendererTest,
      GtaoTemporalUsesEarlyOpaqueVelocityBeforeMainLighting) {
   std::vector<std::byte> scratchBytes(1024 * 1024);
@@ -6013,7 +6206,7 @@ TEST(RenderGraphRendererTest,
 }
 
 TEST(RenderGraphRendererTest,
-     OpaqueReactiveMaskPassSkipsStaticAlphaMasksForTaa) {
+     OpaqueReactiveMaskPassPublishesStaticAlphaMasksForJitteredTaa) {
   std::array<std::byte, 512 * 1024> scratchBytes{};
   std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
                                              scratchBytes.size());
@@ -6078,6 +6271,7 @@ TEST(RenderGraphRendererTest,
   camera.previousUnjitteredViewProj = camera.currentUnjitteredViewProj;
   camera.temporalDataValid = true;
   camera.historyValid = true;
+  camera.jitterEnabled = true;
 
   RenderFrameContext frameContext{};
   frameContext.frameIndex = 0u;
@@ -6114,16 +6308,18 @@ TEST(RenderGraphRendererTest,
   EXPECT_TRUE(steadyFrameContext.metrics.antiAliasing.reactiveMaskAllocated);
   EXPECT_TRUE(
       steadyFrameContext.metrics.antiAliasing.reactiveMaskGraphPublished);
-  EXPECT_EQ(steadyFrameContext.metrics.antiAliasing.reactiveMaskPassCount, 0u);
-  EXPECT_EQ(steadyFrameContext.metrics.antiAliasing.reactiveMaskDrawCount, 0u);
+  EXPECT_EQ(steadyFrameContext.metrics.antiAliasing.reactiveMaskPassCount, 1u);
+  EXPECT_EQ(steadyFrameContext.metrics.antiAliasing.reactiveMaskDrawCount, 1u);
   EXPECT_EQ(
       steadyFrameContext.metrics.antiAliasing.reactiveAlphaMaskedDrawCount, 1u);
+  EXPECT_EQ(
+      steadyFrameContext.metrics.antiAliasing.reactiveMotionUncertainDrawCount,
+      0u);
   EXPECT_GT(steadyFrameContext.metrics.antiAliasing
                 .reactiveMaskPassBandwidthEstimateBytes,
             0ull);
-  EXPECT_FLOAT_EQ(
-      steadyFrameContext.metrics.antiAliasing.taaReactiveCoverageEstimate,
-      0.0f);
+  EXPECT_GT(steadyFrameContext.metrics.antiAliasing.taaReactiveCoverageEstimate,
+            0.0f);
   EXPECT_GT(
       steadyFrameContext.metrics.antiAliasing.taaAlphaMaskedCoverageEstimate,
       0.0f);
@@ -6147,8 +6343,8 @@ TEST(RenderGraphRendererTest,
       sawReactiveClearFallback = true;
     }
   }
-  EXPECT_FALSE(sawReactivePass);
-  EXPECT_TRUE(sawReactiveClearFallback);
+  EXPECT_TRUE(sawReactivePass);
+  EXPECT_FALSE(sawReactiveClearFallback);
 }
 
 TEST(RenderGraphRendererTest,
@@ -6252,6 +6448,354 @@ TEST(RenderGraphRendererTest,
                             frameContext.sharedResources.reactiveMaskTexture));
   }
   EXPECT_TRUE(sawReactivePass);
+}
+
+TEST(RenderGraphRendererTest,
+     OpaqueVelocityUsesPreviousAnimatedGeometryWhenPublished) {
+  std::array<std::byte, 512 * 1024> scratchBytes{};
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_animated_velocity_history");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTextFile(objPath, "o TaaAnimatedVelocityTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_animated_velocity_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  MaterialRequest materialRequest{};
+  materialRequest.debugName = "taa_animated_velocity_material";
+  auto materialResult = renderer.resources().acquireMaterial(materialRequest);
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  auto renderableResult = scene.graph().addRenderable(
+      scene.graph().rootNode(), modelResult.value(), materialResult.value());
+  ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  auto currentMatricesResult =
+      gpu.createBuffer(BufferDesc{.usage = BufferUsage::Storage,
+                                  .storage = Storage::Device,
+                                  .size = 256u},
+                       "taa_anim_current_instance_matrices");
+  ASSERT_FALSE(currentMatricesResult.hasError())
+      << currentMatricesResult.error();
+  auto previousMatricesResult =
+      gpu.createBuffer(BufferDesc{.usage = BufferUsage::Storage,
+                                  .storage = Storage::Device,
+                                  .size = 256u},
+                       "taa_anim_previous_instance_matrices");
+  ASSERT_FALSE(previousMatricesResult.hasError())
+      << previousMatricesResult.error();
+  const BufferHandle currentMatricesBuffer = currentMatricesResult.value();
+  const BufferHandle previousMatricesBuffer = previousMatricesResult.value();
+  const uint64_t currentMatricesAddress =
+      gpu.getBufferDeviceAddress(currentMatricesBuffer, 0u);
+  const uint64_t previousMatricesAddress =
+      gpu.getBufferDeviceAddress(previousMatricesBuffer, 0u);
+  ASSERT_NE(currentMatricesAddress, 0u);
+  ASSERT_NE(previousMatricesAddress, 0u);
+
+  auto currentVertexResult = gpu.createBuffer(
+      BufferDesc{.usage = BufferUsage::Vertex | BufferUsage::Storage,
+                 .storage = Storage::Device,
+                 .size = 256u},
+      "taa_anim_current_vertices");
+  ASSERT_FALSE(currentVertexResult.hasError()) << currentVertexResult.error();
+  auto previousVertexResult = gpu.createBuffer(
+      BufferDesc{.usage = BufferUsage::Vertex | BufferUsage::Storage,
+                 .storage = Storage::Device,
+                 .size = 256u},
+      "taa_anim_previous_vertices");
+  ASSERT_FALSE(previousVertexResult.hasError()) << previousVertexResult.error();
+  const BufferHandle currentVertexBuffer = currentVertexResult.value();
+  const BufferHandle previousVertexBuffer = previousVertexResult.value();
+
+  std::array<AnimatedRenderableGeometryOverride, 1> currentOverrides{};
+  currentOverrides[0] = AnimatedRenderableGeometryOverride{
+      .vertexBuffer = currentVertexBuffer,
+      .vertexByteOffset = 0u,
+      .vertexCount = 3u,
+      .enabled = true,
+  };
+  std::array<AnimatedRenderableGeometryOverride, 1> previousOverrides{};
+  previousOverrides[0] = AnimatedRenderableGeometryOverride{
+      .vertexBuffer = previousVertexBuffer,
+      .vertexByteOffset = 0u,
+      .vertexCount = 3u,
+      .enabled = true,
+  };
+  std::array<uint32_t, 1> animatedRenderableIndices{0u};
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  CameraFrameState camera = makeSdsmPerspectiveCamera(30.0f);
+  camera.currentUnjitteredViewProj = camera.proj * camera.view;
+  camera.previousUnjitteredViewProj = camera.currentUnjitteredViewProj;
+  camera.temporalDataValid = true;
+  camera.historyValid = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 7u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.animationSceneGpuData = AnimationSceneFrameData{
+      .instanceMatricesBuffer = currentMatricesBuffer,
+      .instanceMatricesAddress = currentMatricesAddress,
+      .previousInstanceMatricesBuffer = previousMatricesBuffer,
+      .previousInstanceMatricesAddress = previousMatricesAddress,
+      .preDispatches = {},
+      .geometryOverridesByRenderable = currentOverrides,
+      .previousGeometryOverridesByRenderable = previousOverrides,
+      .animatedRenderableIndices = animatedRenderableIndices,
+      .scene = &scene,
+      .sceneTopologyVersion = scene.topologyVersion(),
+      .renderableCount = scene.renderables().size(),
+      .version = 3u,
+  };
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  const AntiAliasingFrameMetrics &metrics = frameContext.metrics.antiAliasing;
+  EXPECT_TRUE(metrics.previousTransformCacheValid);
+  EXPECT_EQ(metrics.velocityPreviousTransformValidCount, 1u);
+  EXPECT_EQ(metrics.velocityMissingPreviousTransformCount, 0u);
+  EXPECT_EQ(metrics.velocityAnimatedResponsiveCount, 0u);
+  EXPECT_EQ(metrics.velocityAnimatedPreviousGeometryCount, 1u);
+  EXPECT_EQ(metrics.reactiveMotionUncertainDrawCount, 0u);
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+  const uint32_t velocityIndex = compiledPassIndex(
+      compileResult.value().orderedPasses, "Opaque Velocity Pass");
+  ASSERT_NE(velocityIndex, UINT32_MAX);
+  const RenderPass &velocityPass =
+      compileResult.value().orderedPasses[velocityIndex];
+  ASSERT_FALSE(velocityPass.draws.empty());
+  const DrawItem &velocityDraw = velocityPass.draws.front();
+  EXPECT_TRUE(sameBuffer(velocityDraw.vertexBuffer, currentVertexBuffer));
+  ASSERT_EQ(velocityDraw.pushConstants.size(),
+            sizeof(OpaquePushConstantsProbe));
+  OpaquePushConstantsProbe pc{};
+  std::memcpy(&pc, velocityDraw.pushConstants.data(), sizeof(pc));
+  EXPECT_EQ(pc.previousInstanceMatricesAddress, previousMatricesAddress);
+  EXPECT_EQ(pc.velocityInstanceFlagsAddress, 0u);
+  EXPECT_NE(pc.velocityFrameDataAddress, 0u);
+}
+
+TEST(RenderGraphRendererTest,
+     TaaVelocityAnimatedGeometryDependenciesStayUnderGraphLimit) {
+  std::vector<std::byte> scratchBytes(1024 * 1024);
+  std::pmr::monotonic_buffer_resource memory(scratchBytes.data(),
+                                             scratchBytes.size());
+  FakeShadowSceneGpuDevice gpu;
+  gpu.forcedIndexStrideBytes = sizeof(uint16_t);
+  Renderer renderer(gpu, memory);
+  RenderPipeline pipeline(&memory);
+  pipeline.addProvider(
+      std::make_unique<FrameCompositionProvider>(gpu, &memory));
+  pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
+  pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
+  pipeline.addFeature(std::make_unique<OpaqueFeature>(
+      gpu, makeOpaqueConfig(std::filesystem::path(PROJECT_SOURCE_DIR)),
+      &memory));
+  pipeline.addFeature(std::make_unique<TemporalAAFeature>(
+      gpu, makeCompositeConfig(std::filesystem::path(PROJECT_SOURCE_DIR))));
+
+  const std::filesystem::path tempDir =
+      makeTempRendererPath("taa_velocity_anim_dependency_limit");
+  ASSERT_TRUE(std::filesystem::create_directories(tempDir));
+  const std::filesystem::path objPath = tempDir / "triangle.obj";
+  writeTextFile(objPath, "o TaaVelocityDependencyTriangle\n"
+                         "v -1.0 0.0 0.0\n"
+                         "v 1.0 0.0 0.0\n"
+                         "v 0.0 1.0 0.0\n"
+                         "vt 0.0 0.0\n"
+                         "vt 1.0 0.0\n"
+                         "vt 0.5 1.0\n"
+                         "vn 0.0 0.0 1.0\n"
+                         "f 1/1/1 2/2/1 3/3/1\n");
+
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = objPath.string(),
+      .debugName = "taa_velocity_dependency_triangle",
+  });
+  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
+
+  auto materialResult = renderer.resources().acquireMaterial(MaterialRequest{
+      .debugName = "taa_velocity_dependency_material",
+  });
+  ASSERT_FALSE(materialResult.hasError()) << materialResult.error();
+
+  RenderScene scene(&memory);
+  scene.bindResources(&renderer.resources());
+  for (uint32_t i = 0u; i < 2u; ++i) {
+    auto renderableResult = scene.graph().addRenderable(
+        scene.graph().rootNode(), modelResult.value(), materialResult.value());
+    ASSERT_FALSE(renderableResult.hasError()) << renderableResult.error();
+  }
+  auto commitResult = scene.commit();
+  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
+  ASSERT_TRUE(commitResult.value());
+
+  auto currentMatricesResult =
+      gpu.createBuffer(BufferDesc{.usage = BufferUsage::Storage,
+                                  .storage = Storage::Device,
+                                  .size = 512u},
+                       "taa_velocity_dependency_current_matrices");
+  ASSERT_FALSE(currentMatricesResult.hasError())
+      << currentMatricesResult.error();
+  auto previousMatricesResult =
+      gpu.createBuffer(BufferDesc{.usage = BufferUsage::Storage,
+                                  .storage = Storage::Device,
+                                  .size = 512u},
+                       "taa_velocity_dependency_previous_matrices");
+  ASSERT_FALSE(previousMatricesResult.hasError())
+      << previousMatricesResult.error();
+  const BufferHandle currentMatricesBuffer = currentMatricesResult.value();
+  const BufferHandle previousMatricesBuffer = previousMatricesResult.value();
+  const uint64_t currentMatricesAddress =
+      gpu.getBufferDeviceAddress(currentMatricesBuffer, 0u);
+  const uint64_t previousMatricesAddress =
+      gpu.getBufferDeviceAddress(previousMatricesBuffer, 0u);
+  ASSERT_NE(currentMatricesAddress, 0u);
+  ASSERT_NE(previousMatricesAddress, 0u);
+
+  std::array<BufferHandle, 2u> currentVertexBuffers{};
+  std::array<BufferHandle, 2u> previousVertexBuffers{};
+  for (uint32_t i = 0u; i < 2u; ++i) {
+    auto currentVertexResult = gpu.createBuffer(
+        BufferDesc{.usage = BufferUsage::Vertex | BufferUsage::Storage,
+                   .storage = Storage::Device,
+                   .size = 256u},
+        "taa_velocity_dependency_current_vertices");
+    ASSERT_FALSE(currentVertexResult.hasError()) << currentVertexResult.error();
+    auto previousVertexResult = gpu.createBuffer(
+        BufferDesc{.usage = BufferUsage::Vertex | BufferUsage::Storage,
+                   .storage = Storage::Device,
+                   .size = 256u},
+        "taa_velocity_dependency_previous_vertices");
+    ASSERT_FALSE(previousVertexResult.hasError())
+        << previousVertexResult.error();
+    currentVertexBuffers[i] = currentVertexResult.value();
+    previousVertexBuffers[i] = previousVertexResult.value();
+  }
+
+  std::array<AnimatedRenderableGeometryOverride, 2u> currentOverrides{};
+  std::array<AnimatedRenderableGeometryOverride, 2u> previousOverrides{};
+  for (uint32_t i = 0u; i < 2u; ++i) {
+    currentOverrides[i] = AnimatedRenderableGeometryOverride{
+        .vertexBuffer = currentVertexBuffers[i],
+        .vertexByteOffset = 0u,
+        .vertexCount = 3u,
+        .enabled = true,
+    };
+    previousOverrides[i] = AnimatedRenderableGeometryOverride{
+        .vertexBuffer = previousVertexBuffers[i],
+        .vertexByteOffset = 0u,
+        .vertexCount = 3u,
+        .enabled = true,
+    };
+  }
+  std::array<uint32_t, 2u> animatedRenderableIndices{0u, 1u};
+
+  RenderSettings settings{};
+  settings.skybox.enabled = false;
+  settings.antiAliasing.mode = AntiAliasingMode::TAA;
+  settings.antiAliasing.qualityPreset = TemporalAAQualityPreset::Ultra;
+  settings.opaque.enableDepthPyramid = false;
+  settings.opaque.enableInstanceAnimation = false;
+  settings.opaque.enableInstanceCompute = false;
+  settings.opaque.enableIndirectDraw = false;
+
+  CameraFrameState camera = makeSdsmPerspectiveCamera(30.0f);
+  camera.currentUnjitteredViewProj = camera.proj * camera.view;
+  camera.previousUnjitteredViewProj = camera.currentUnjitteredViewProj;
+  camera.temporalDataValid = true;
+  camera.historyValid = true;
+
+  RenderFrameContext frameContext{};
+  frameContext.frameIndex = 7u;
+  frameContext.scene = &scene;
+  frameContext.resources = &renderer.resources();
+  frameContext.settings = &settings;
+  frameContext.camera = camera;
+  frameContext.sharedResources.animationSceneGpuData = AnimationSceneFrameData{
+      .instanceMatricesBuffer = currentMatricesBuffer,
+      .instanceMatricesAddress = currentMatricesAddress,
+      .previousInstanceMatricesBuffer = previousMatricesBuffer,
+      .previousInstanceMatricesAddress = previousMatricesAddress,
+      .preDispatches = {},
+      .geometryOverridesByRenderable = currentOverrides,
+      .previousGeometryOverridesByRenderable = previousOverrides,
+      .animatedRenderableIndices = animatedRenderableIndices,
+      .scene = &scene,
+      .sceneTopologyVersion = scene.topologyVersion(),
+      .renderableCount = scene.renderables().size(),
+      .version = 3u,
+  };
+
+  RenderGraphBuilder graph(&memory);
+  graph.beginFrame(frameContext.frameIndex);
+  auto buildResult =
+      pipeline.buildRenderGraph(frameContext, renderer.resources(), graph);
+  ASSERT_FALSE(buildResult.hasError()) << buildResult.error();
+  ASSERT_TRUE(buildResult.value());
+
+  RenderGraphRuntime runtime;
+  auto compileResult = graph.compile(runtime);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+
+  const uint32_t velocityIndex = compiledPassIndex(
+      compileResult.value().orderedPasses, "Opaque Velocity Pass");
+  ASSERT_NE(velocityIndex, UINT32_MAX);
+  const RenderPass &velocityPass =
+      compileResult.value().orderedPasses[velocityIndex];
+  EXPECT_LE(velocityPass.dependencyBuffers.size(), kMaxDependencyResources);
 }
 
 TEST(RenderGraphRendererTest, TaaVelocityBuffersDoNotOverflowShadowedMainPass) {
@@ -6364,8 +6908,8 @@ TEST(RenderGraphRendererTest, TaaVelocityBuffersDoNotOverflowShadowedMainPass) {
   ASSERT_NE(velocityPass, nullptr);
   EXPECT_LE(opaquePass->dependencyBuffers.size(), kMaxDependencyResources);
   EXPECT_LE(velocityPass->dependencyBuffers.size(), kMaxDependencyResources);
-  EXPECT_LE(opaquePass->dependencyBuffers.size(),
-            velocityPass->dependencyBuffers.size());
+  EXPECT_LT(velocityPass->dependencyBuffers.size(),
+            opaquePass->dependencyBuffers.size());
 }
 
 TEST(RenderGraphRendererTest,
@@ -7304,6 +7848,8 @@ TEST(RenderGraphRendererTest,
     }
     EXPECT_EQ(uploaded.materialCoverageSamplerId,
               testCase.expectedDefaultSamplerId);
+    EXPECT_EQ(uploaded.materialDataSamplerId,
+              testCase.expectedDefaultSamplerId);
   }
 }
 
@@ -7320,6 +7866,8 @@ TEST(RenderGraphRendererTest,
   const std::string reactive =
       readTextFile(shaderDir / "opaque_reactive_mask.frag");
   const std::string normal = readTextFile(shaderDir / "opaque_normal.frag");
+  const std::string transmission =
+      readTextFile(shaderDir / "transmission.frag");
   const std::string idAlpha = readTextFile(shaderDir / "main_id_alpha.frag");
 
   ASSERT_FALSE(common.empty());
@@ -7328,10 +7876,14 @@ TEST(RenderGraphRendererTest,
   ASSERT_FALSE(velocity.empty());
   ASSERT_FALSE(reactive.empty());
   ASSERT_FALSE(normal.empty());
+  ASSERT_FALSE(transmission.empty());
   ASSERT_FALSE(idAlpha.empty());
 
   EXPECT_NE(common.find("uint materialCoverageSamplerId"), std::string::npos);
+  EXPECT_NE(common.find("uint materialDataSamplerId"), std::string::npos);
   EXPECT_NE(materialLighting.find("pc.frameData.materialCoverageSamplerId"),
+            std::string::npos);
+  EXPECT_NE(materialLighting.find("pc.frameData.materialDataSamplerId"),
             std::string::npos);
   EXPECT_NE(materialLighting.find("alphaMode == kAlphaModeMask"),
             std::string::npos);
@@ -7342,6 +7894,10 @@ TEST(RenderGraphRendererTest,
   EXPECT_NE(reactive.find("pc.frameData.materialCoverageSamplerId"),
             std::string::npos);
   EXPECT_NE(normal.find("pc.frameData.materialCoverageSamplerId"),
+            std::string::npos);
+  EXPECT_NE(normal.find("pc.frameData.materialDataSamplerId"),
+            std::string::npos);
+  EXPECT_NE(transmission.find("pc.frameData.materialDataSamplerId"),
             std::string::npos);
   EXPECT_NE(idAlpha.find("pc.frameData.materialCoverageSamplerId"),
             std::string::npos);

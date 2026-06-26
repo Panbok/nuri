@@ -190,6 +190,7 @@ public:
   SubmissionHandle lastBackgroundCopyHandle{};
   uint32_t failBackgroundCopySubmitAtCall = 0u;
   std::vector<TextureDesc> createdTextureDescs{};
+  std::vector<std::vector<std::byte>> createdTextureData{};
   std::vector<SamplerDesc> createdSamplerDescs{};
   GpuTimingReport latestCompletedGpuTimingReport{};
   bool rejectDeviceLocalReadBuffer = false;

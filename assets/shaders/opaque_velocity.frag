@@ -14,20 +14,22 @@ vec2 clipNdcToTaaScreenUv(vec2 ndc) {
 }
 
 void main() {
-  const MaterialData material = loadMaterialData(pc.materialIndex);
-  if (materialAlphaMode(material) == 1u) {
-    const uint baseColorTexId =
-        getMaterialTextureIndex(material, kMaterialTextureSlotBaseColor);
-    const vec2 baseColorUv =
-        transformedUv(material, vtx, kMaterialTextureSlotBaseColor);
+  const MaterialHeaderGpuData material =
+      pc.frameData.materialHeaderBuffer.materials[pc.materialIndex];
+  if ((material.materialFlags & kMaterialFlagsAlphaModeMask) ==
+      kAlphaModeMask) {
+    const uint baseColorTexId = material.commonTextureIndices.x;
+    const vec2 baseColorUv = applyTextureTransform(
+        selectUv(vtx.uv0, vtx.uv1, getPackedUvBit(material.uvSetBits, 0u)),
+        material.commonTransforms[0]);
 
-    vec4 baseColor = material.header.baseColorFactor;
+    vec4 baseColor = material.baseColorFactor;
     if (baseColorTexId != kInvalidTextureBindlessIndex) {
       baseColor *= textureBindless2D(
           baseColorTexId, pc.frameData.materialCoverageSamplerId, baseColorUv);
     }
 
-    if (baseColor.a < material.header.metallicRoughnessOcclusionAlphaCutoff.w) {
+    if (baseColor.a < material.metallicRoughnessOcclusionAlphaCutoff.w) {
       discard;
     }
   }

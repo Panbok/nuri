@@ -8,7 +8,7 @@ layout(location = 0) out vec4 out_Normal;
 void main() {
   const MaterialData material = loadMaterialData(pc.materialIndex);
   const uint materialSampler = pc.frameData.materialSamplerId;
-  const uint normalSampler = materialSampler;
+  const uint normalSampler = pc.frameData.materialDataSamplerId;
   const uint alphaMode = materialAlphaMode(material);
   const uint baseColorSampler =
       alphaMode == kAlphaModeMask && pc.frameData.materialCoverageSamplerId !=
