@@ -1078,7 +1078,9 @@ struct NvrhiGPUDeviceImpl {
   std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
   std::vector<PendingGpuTimingSubmission> pendingGpuTimingSubmissions;
   std::vector<PendingBackgroundCopySubmission> pendingBackgroundCopySubmissions;
+  std::deque<GpuTimingReport> completedGpuTimingReports;
   GpuTimingReport latestCompletedGpuTimingReport{};
+  uint64_t droppedGpuTimingReports = 0u;
   std::vector<uint32_t> recordingContextGenerations;
   std::vector<uint32_t> recordedCommandBufferGenerations;
   std::vector<uint32_t> submissionGenerations;
@@ -1307,6 +1309,11 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
     }
     mergeGpuTimingReportScopes(impl.latestCompletedGpuTimingReport,
                                completedReport);
+    if (impl.completedGpuTimingReports.size() >= 256u) {
+      impl.completedGpuTimingReports.pop_front();
+      ++impl.droppedGpuTimingReports;
+    }
+    impl.completedGpuTimingReports.push_back(completedReport);
   }
 
   impl.pendingGpuTimingSubmissions.resize(writeIndex);
@@ -4084,6 +4091,29 @@ GpuTimingReport NvrhiGPUDevice::getLatestCompletedGpuTimingReport() const {
   }
   std::lock_guard lock(impl_->immediateMutex);
   return impl_->latestCompletedGpuTimingReport;
+}
+
+size_t NvrhiGPUDevice::drainCompletedGpuTimingReports(
+    std::span<GpuTimingReport> outReports) {
+  if (impl_ == nullptr || outReports.empty()) {
+    return 0u;
+  }
+  std::lock_guard lock(impl_->immediateMutex);
+  size_t count = 0u;
+  while (count < outReports.size() &&
+         !impl_->completedGpuTimingReports.empty()) {
+    outReports[count++] = impl_->completedGpuTimingReports.front();
+    impl_->completedGpuTimingReports.pop_front();
+  }
+  return count;
+}
+
+uint64_t NvrhiGPUDevice::droppedGpuTimingReportCount() const {
+  if (impl_ == nullptr) {
+    return 0u;
+  }
+  std::lock_guard lock(impl_->immediateMutex);
+  return impl_->droppedGpuTimingReports;
 }
 
 Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {

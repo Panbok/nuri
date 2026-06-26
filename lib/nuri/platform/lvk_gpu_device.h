@@ -85,6 +85,9 @@ public:
                        GeometryAllocationView &out) const override;
   uint64_t geometryMutationVersion() const override;
   GpuTimingReport getLatestCompletedGpuTimingReport() const override;
+  size_t drainCompletedGpuTimingReports(
+      std::span<GpuTimingReport> outReports) override;
+  uint64_t droppedGpuTimingReportCount() const override;
 
   // Rendering
   Result<bool, std::string> beginFrame(uint64_t frameIndex) override;

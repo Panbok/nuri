@@ -13,10 +13,33 @@ namespace nuri {
 namespace {
 
 std::atomic<int> s_glfwRefCount{0};
-std::once_flag s_glfwInitOnce;
-std::atomic<bool> s_glfwInitSucceeded{false};
+std::mutex s_glfwMutex;
+bool s_glfwInitialized = false;
 
-void doGlfwInit() { s_glfwInitSucceeded.store(glfwInit()); }
+[[nodiscard]] bool acquireGlfw() {
+  std::lock_guard lock(s_glfwMutex);
+  if (s_glfwRefCount.load() == 0) {
+    s_glfwInitialized = glfwInit() == GLFW_TRUE;
+    if (!s_glfwInitialized) {
+      return false;
+    }
+  }
+  s_glfwRefCount.fetch_add(1);
+  return true;
+}
+
+void releaseGlfw() {
+  std::lock_guard lock(s_glfwMutex);
+  const int oldCount = s_glfwRefCount.load();
+  if (oldCount <= 0) {
+    return;
+  }
+  s_glfwRefCount.store(oldCount - 1);
+  if (oldCount == 1 && s_glfwInitialized) {
+    glfwTerminate();
+    s_glfwInitialized = false;
+  }
+}
 
 } // namespace
 
@@ -182,19 +205,14 @@ GlfwWindow::~GlfwWindow() {
   if (impl_ && impl_->window) {
     glfwDestroyWindow(impl_->window);
     impl_->window = nullptr;
-    if (--s_glfwRefCount == 0) {
-      glfwTerminate();
-    }
+    releaseGlfw();
   }
 }
 
 std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
                                                int32_t width, int32_t height,
                                                WindowMode mode) {
-  s_glfwRefCount.fetch_add(1);
-  std::call_once(s_glfwInitOnce, doGlfwInit);
-  if (!s_glfwInitSucceeded.load()) {
-    s_glfwRefCount--;
+  if (!acquireGlfw()) {
     NURI_LOG_WARNING("GlfwWindow::create: glfwInit failed");
     return nullptr;
   }
@@ -206,9 +224,7 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
   auto fail = [&]() -> std::unique_ptr<GlfwWindow> {
-    if (--s_glfwRefCount == 0) {
-      glfwTerminate();
-    }
+    releaseGlfw();
     return nullptr;
   };
 

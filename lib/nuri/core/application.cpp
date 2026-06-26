@@ -5,20 +5,7 @@
 #include "nuri/core/profiling.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/gpu_device.h"
-#include "nuri/gfx/pipeline/features/composite_feature.h"
-#include "nuri/gfx/pipeline/features/debug_feature.h"
-#include "nuri/gfx/pipeline/features/gtao_feature.h"
-#include "nuri/gfx/pipeline/features/msaa_resolve_feature.h"
-#include "nuri/gfx/pipeline/features/opaque_feature.h"
-#include "nuri/gfx/pipeline/features/shadow_feature.h"
-#include "nuri/gfx/pipeline/features/skybox_feature.h"
-#include "nuri/gfx/pipeline/features/spatial_aa_feature.h"
-#include "nuri/gfx/pipeline/features/temporal_aa_feature.h"
-#include "nuri/gfx/pipeline/features/transmission_feature.h"
-#include "nuri/gfx/pipeline/features/transparent_feature.h"
-#include "nuri/gfx/pipeline/providers/frame_composition_provider.h"
-#include "nuri/gfx/pipeline/providers/material_table_gpu_provider.h"
-#include "nuri/gfx/pipeline/providers/scene_lighting_provider.h"
+#include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/renderer.h"
 
 namespace nuri {
@@ -254,45 +241,8 @@ Result<bool, std::string> Application::registerDefaultRenderPipeline(
         "Application::registerDefaultRenderPipeline: render pipeline is null");
   }
 
-  renderPipeline_->addProvider(
-      std::make_unique<MaterialTableGpuProvider>(getGPU()));
-  renderPipeline_->addProvider(std::make_unique<FrameCompositionProvider>(
-      getGPU(), pipelineMemoryResource()));
-  renderPipeline_->addProvider(
-      std::make_unique<SceneLightingProvider>(getGPU()));
-  renderPipeline_->addFeature(std::make_unique<ShadowFeature>(
-      getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
-  renderPipeline_->addFeature(
-      std::make_unique<SkyboxFeature>(getGPU(), shaderConfig.skybox));
-  auto opaqueRenderer = makeSharedOpaqueRenderer(getGPU(), shaderConfig.opaque,
-                                                 pipelineMemoryResource());
-  renderPipeline_->addFeature(
-      std::make_unique<OpaquePrepassFeature>(opaqueRenderer));
-  renderPipeline_->addFeature(
-      std::make_unique<GTAOFeature>(getGPU(), shaderConfig.opaque));
-  renderPipeline_->addFeature(
-      std::make_unique<OpaqueMainFeature>(opaqueRenderer));
-  renderPipeline_->addFeature(std::make_unique<MsaaResolveFeature>(getGPU()));
-  renderPipeline_->addFeature(
-      std::make_unique<TemporalAAFeature>(getGPU(), shaderConfig.composite));
-  renderPipeline_->addFeature(
-      std::make_unique<SpatialAAFeature>(getGPU(), shaderConfig.composite));
-  renderPipeline_->addFeature(std::make_unique<FrameCompositionFeature>(
-      getGPU(), shaderConfig.composite));
-  renderPipeline_->addFeature(std::make_unique<TransmissionFeature>(
-      getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
-  renderPipeline_->addFeature(std::make_unique<TransparentFeature>(
-      getGPU(), shaderConfig.opaque, pipelineMemoryResource()));
-  renderPipeline_->addFeature(std::make_unique<SpatialAAFeature>(
-      getGPU(), shaderConfig.composite, SpatialAAPlacement::PostTransparent));
-  renderPipeline_->addFeature(std::make_unique<HDRPostProcessFeature>(
-      getGPU(), shaderConfig.composite));
-  renderPipeline_->addFeature(std::make_unique<DebugFeature>(
-      getGPU(), shaderConfig.debugGrid, pipelineMemoryResource()));
-  renderPipeline_->addFeature(
-      std::make_unique<FramePresentFeature>(getGPU(), shaderConfig.composite));
-
-  return Result<bool, std::string>::makeResult(true);
+  return nuri::registerDefaultRenderPipeline(
+      *renderPipeline_, getGPU(), shaderConfig, pipelineMemoryResource());
 }
 
 } // namespace nuri

@@ -29,6 +29,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/pipeline/features/text_feature.cpp
   nuri/gfx/pipeline/features/transmission_feature.cpp
   nuri/gfx/pipeline/features/transparent_feature.cpp
+  nuri/gfx/pipeline/default_render_pipeline.cpp
   nuri/gfx/pipeline/render_pipeline.cpp
   nuri/gfx/pipeline/providers/frame_composition_provider.cpp
   nuri/gfx/pipeline/providers/material_table_gpu_provider.cpp

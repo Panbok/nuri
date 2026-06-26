@@ -294,8 +294,15 @@ struct GeometryPoolConfig {
   size_t compactionCopyBudgetBytesPerFrame = 32u * 1024u * 1024u;
 };
 
+enum class GPUBackendPreference : uint8_t {
+  Default = 0,
+  Nvrhi = 1,
+  Lvk = 2,
+};
+
 struct GPUDeviceCreateDesc {
   GeometryPoolConfig geometryPool{};
+  GPUBackendPreference backend = GPUBackendPreference::Default;
 };
 
 struct BufferCopyRegion {

@@ -114,6 +114,14 @@ public:
   virtual GpuTimingReport getLatestCompletedGpuTimingReport() const {
     return {};
   }
+  // Drains completed per-submission GPU timing reports into `outReports` in
+  // completion order and removes returned reports from the device queue.
+  virtual size_t
+  drainCompletedGpuTimingReports(std::span<GpuTimingReport> outReports) {
+    (void)outReports;
+    return 0u;
+  }
+  virtual uint64_t droppedGpuTimingReportCount() const { return 0u; }
 
   // Rendering
   virtual bool supportsParallelGraphicsRecording() const { return false; }

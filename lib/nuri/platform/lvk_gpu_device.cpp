@@ -878,7 +878,9 @@ struct LvkGPUDevice::Impl {
   std::vector<TimingQueryPoolSlot> availableTimingQueryPools;
   std::optional<CurrentFrameTimingCapture> currentFrameTimingCapture;
   std::vector<PendingGpuTimingSubmission> pendingGpuTimingSubmissions;
+  std::deque<GpuTimingReport> completedGpuTimingReports;
   GpuTimingReport latestCompletedGpuTimingReport{};
+  uint64_t droppedGpuTimingReports = 0u;
   double gpuTimingTimestampPeriodToMs = 0.0;
   bool gpuTimingQueriesEnabled = false;
   bool loggedGpuTimingQueryWarning = false;
@@ -1154,6 +1156,11 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
     }
     mergeGpuTimingReportScopes(impl.latestCompletedGpuTimingReport,
                                completedReport);
+    if (impl.completedGpuTimingReports.size() >= 256u) {
+      impl.completedGpuTimingReports.pop_front();
+      ++impl.droppedGpuTimingReports;
+    }
+    impl.completedGpuTimingReports.push_back(completedReport);
     recycleTimingQueryPool(impl, std::move(pending.pool));
   }
 
@@ -2352,6 +2359,29 @@ GpuTimingReport LvkGPUDevice::getLatestCompletedGpuTimingReport() const {
   }
   std::lock_guard immediateLock(impl_->contextImmediateMutex);
   return impl_->latestCompletedGpuTimingReport;
+}
+
+size_t LvkGPUDevice::drainCompletedGpuTimingReports(
+    std::span<GpuTimingReport> outReports) {
+  if (!impl_ || outReports.empty()) {
+    return 0u;
+  }
+  std::lock_guard immediateLock(impl_->contextImmediateMutex);
+  size_t count = 0u;
+  while (count < outReports.size() &&
+         !impl_->completedGpuTimingReports.empty()) {
+    outReports[count++] = impl_->completedGpuTimingReports.front();
+    impl_->completedGpuTimingReports.pop_front();
+  }
+  return count;
+}
+
+uint64_t LvkGPUDevice::droppedGpuTimingReportCount() const {
+  if (!impl_) {
+    return 0u;
+  }
+  std::lock_guard immediateLock(impl_->contextImmediateMutex);
+  return impl_->droppedGpuTimingReports;
 }
 
 Result<GeometryAllocationHandle, std::string> LvkGPUDevice::allocateGeometry(
