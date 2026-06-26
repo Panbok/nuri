@@ -1,0 +1,276 @@
+diff --git a/include/nvrhi/nvrhi.h b/include/nvrhi/nvrhi.h
+index 8c3e13e..42df63d 100644
+--- a/include/nvrhi/nvrhi.h
++++ b/include/nvrhi/nvrhi.h
+@@ -1272,15 +1272,32 @@ namespace nvrhi
+     // Framebuffer
+     //////////////////////////////////////////////////////////////////////////
+ 
++    enum class ResolveMode : uint8_t
++    {
++        SampleZero,
++        Average,
++        Min,
++        Max
++    };
++
+     struct FramebufferAttachment
+     {
+         ITexture* texture = nullptr;
+         TextureSubresourceSet subresources = TextureSubresourceSet(0, 1, 0, 1);
++        ITexture* resolveTexture = nullptr;
++        TextureSubresourceSet resolveSubresources = TextureSubresourceSet(0, 1, 0, 1);
+         Format format = Format::UNKNOWN;
++        ResolveMode resolveMode = ResolveMode::Average;
+         bool isReadOnly = false;
+         
+         constexpr FramebufferAttachment& setTexture(ITexture* t) { texture = t; return *this; }
+         constexpr FramebufferAttachment& setSubresources(TextureSubresourceSet value) { subresources = value; return *this; }
++        constexpr FramebufferAttachment& setResolveTexture(ITexture* t) { resolveTexture = t; return *this; }
++        constexpr FramebufferAttachment& setResolveSubresources(TextureSubresourceSet value) { resolveSubresources = value; return *this; }
++        constexpr FramebufferAttachment& setResolveArraySlice(ArraySlice index) { resolveSubresources.baseArraySlice = index; resolveSubresources.numArraySlices = 1; return *this; }
++        constexpr FramebufferAttachment& setResolveArraySliceRange(ArraySlice index, ArraySlice count) { resolveSubresources.baseArraySlice = index; resolveSubresources.numArraySlices = count; return *this; }
++        constexpr FramebufferAttachment& setResolveMipLevel(MipLevel level) { resolveSubresources.baseMipLevel = level; resolveSubresources.numMipLevels = 1; return *this; }
++        constexpr FramebufferAttachment& setResolveMode(ResolveMode mode) { resolveMode = mode; return *this; }
+         constexpr FramebufferAttachment& setArraySlice(ArraySlice index) { subresources.baseArraySlice = index; subresources.numArraySlices = 1; return *this; }
+         constexpr FramebufferAttachment& setArraySliceRange(ArraySlice index, ArraySlice count) { subresources.baseArraySlice = index; subresources.numArraySlices = count; return *this; }
+         constexpr FramebufferAttachment& setMipLevel(MipLevel level) { subresources.baseMipLevel = level; subresources.numMipLevels = 1; return *this; }
+@@ -1288,6 +1305,7 @@ namespace nvrhi
+         constexpr FramebufferAttachment& setReadOnly(bool ro) { isReadOnly = ro; return *this; }
+ 
+         [[nodiscard]] bool valid() const { return texture != nullptr; }
++        [[nodiscard]] bool hasResolveAttachment() const { return resolveTexture != nullptr; }
+     };
+ 
+     struct FramebufferDesc
+@@ -3226,6 +3244,10 @@ namespace nvrhi
+         virtual void resolveTexture(ITexture* dest, const TextureSubresourceSet& dstSubresources, ITexture* src,
+             const TextureSubresourceSet& srcSubresources) = 0;
+ 
++        // Executes an attachment-only rendering scope for framebuffer attachments that specify resolve targets.
++        // - Vulkan: Uses dynamic rendering resolve attachments, which is required for depth resolves.
++        virtual void resolveFramebuffer(IFramebuffer* framebuffer) = 0;
++
+         // Uploads 'dataSize' bytes of data from CPU memory into the GPU buffer 'b' at offset 'destOffsetBytes'.
+         // - DX11: If the buffer's 'cpuAccess' mode is set to Write, maps the buffer and uploads the data that way.
+         //   Otherwise, uses UpdateSubresource.
+diff --git a/src/common/misc.cpp b/src/common/misc.cpp
+index aada5c0..9d4776c 100644
+--- a/src/common/misc.cpp
++++ b/src/common/misc.cpp
+@@ -192,12 +192,22 @@ namespace nvrhi
+         {
+             setTextureState(attachment.texture, attachment.subresources,
+                 ResourceStates::RenderTarget);
++            if (attachment.hasResolveAttachment())
++            {
++                setTextureState(attachment.resolveTexture, attachment.resolveSubresources,
++                    ResourceStates::RenderTarget);
++            }
+         }
+ 
+         if (desc.depthAttachment.valid())
+         {
+             setTextureState(desc.depthAttachment.texture, desc.depthAttachment.subresources,
+                 desc.depthAttachment.isReadOnly ? ResourceStates::DepthRead : ResourceStates::DepthWrite);
++            if (desc.depthAttachment.hasResolveAttachment())
++            {
++                setTextureState(desc.depthAttachment.resolveTexture, desc.depthAttachment.resolveSubresources,
++                    ResourceStates::DepthWrite);
++            }
+         }
+         
+         if (desc.shadingRateAttachment.valid())
+@@ -261,4 +271,4 @@ namespace nvrhi
+         }
+     }
+ 
+-} // namespace nvrhi
+\ No newline at end of file
++} // namespace nvrhi
+diff --git a/src/validation/validation-backend.h b/src/validation/validation-backend.h
+index 1eeb56a..db62795 100644
+--- a/src/validation/validation-backend.h
++++ b/src/validation/validation-backend.h
+@@ -207,6 +207,7 @@ namespace nvrhi::validation
+         void copyTexture(ITexture* dest, const TextureSlice& destSlice, IStagingTexture* src, const TextureSlice& srcSlice) override;
+         void writeTexture(ITexture* dest, uint32_t arraySlice, uint32_t mipLevel, const void* data, size_t rowPitch, size_t depthPitch) override;
+         void resolveTexture(ITexture* dest, const TextureSubresourceSet& dstSubresources, ITexture* src, const TextureSubresourceSet& srcSubresources) override;
++        void resolveFramebuffer(IFramebuffer* framebuffer) override;
+ 
+         void writeBuffer(IBuffer* b, const void* data, size_t dataSize, uint64_t destOffsetBytes) override;
+         void clearBufferUInt(IBuffer* b, uint32_t clearValue) override;
+diff --git a/src/validation/validation-commandlist.cpp b/src/validation/validation-commandlist.cpp
+index df6ea52..d45d989 100644
+--- a/src/validation/validation-commandlist.cpp
++++ b/src/validation/validation-commandlist.cpp
+@@ -422,6 +422,36 @@ namespace nvrhi::validation
+         m_CommandList->resolveTexture(dest, dstSubresources, src, srcSubresources);
+     }
+ 
++    void CommandListWrapper::resolveFramebuffer(IFramebuffer* framebuffer)
++    {
++        if (!requireOpenState())
++            return;
++
++        if (!requireType(CommandQueue::Graphics, "resolveFramebuffer"))
++            return;
++
++        if (!framebuffer)
++        {
++            error("resolveFramebuffer: framebuffer is NULL");
++            return;
++        }
++
++        const FramebufferDesc& desc = framebuffer->getDesc();
++        bool hasResolveAttachment = false;
++        for (const auto& attachment : desc.colorAttachments)
++        {
++            hasResolveAttachment |= attachment.hasResolveAttachment();
++        }
++        hasResolveAttachment |= desc.depthAttachment.hasResolveAttachment();
++        if (!hasResolveAttachment)
++        {
++            error("resolveFramebuffer: framebuffer has no resolve attachments");
++            return;
++        }
++
++        m_CommandList->resolveFramebuffer(framebuffer);
++    }
++
+     void CommandListWrapper::writeBuffer(IBuffer* b, const void* data, size_t dataSize, uint64_t destOffsetBytes)
+     {
+         if (!requireOpenState())
+diff --git a/src/vulkan/vulkan-backend.h b/src/vulkan/vulkan-backend.h
+index f619f13..ad839f5 100644
+--- a/src/vulkan/vulkan-backend.h
++++ b/src/vulkan/vulkan-backend.h
+@@ -1229,6 +1229,7 @@ namespace nvrhi::vulkan
+         void copyTexture(ITexture* dest, const TextureSlice& dstSlice, IStagingTexture* src, const TextureSlice& srcSlice) override;
+         void writeTexture(ITexture* dest, uint32_t arraySlice, uint32_t mipLevel, const void* data, size_t rowPitch, size_t depthPitch) override;
+         void resolveTexture(ITexture* dest, const TextureSubresourceSet& dstSubresources, ITexture* src, const TextureSubresourceSet& srcSubresources) override;
++        void resolveFramebuffer(IFramebuffer* framebuffer) override;
+ 
+         void writeBuffer(IBuffer* b, const void* data, size_t dataSize, uint64_t destOffsetBytes = 0) override;
+         void clearBufferUInt(IBuffer* b, uint32_t clearValue) override;
+diff --git a/src/vulkan/vulkan-graphics.cpp b/src/vulkan/vulkan-graphics.cpp
+index 57e4c96..c0b0365 100644
+--- a/src/vulkan/vulkan-graphics.cpp
++++ b/src/vulkan/vulkan-graphics.cpp
+@@ -53,6 +53,22 @@ namespace nvrhi::vulkan
+         return dimension;
+     }
+ 
++    static vk::ResolveModeFlagBits convertResolveMode(ResolveMode mode)
++    {
++        switch (mode)
++        {
++        case ResolveMode::SampleZero:
++            return vk::ResolveModeFlagBits::eSampleZero;
++        case ResolveMode::Min:
++            return vk::ResolveModeFlagBits::eMin;
++        case ResolveMode::Max:
++            return vk::ResolveModeFlagBits::eMax;
++        case ResolveMode::Average:
++        default:
++            return vk::ResolveModeFlagBits::eAverage;
++        }
++    }
++
+     FramebufferHandle Device::createFramebuffer(const FramebufferDesc& desc)
+     {
+         Framebuffer *fb = new Framebuffer();
+@@ -80,6 +96,29 @@ namespace nvrhi::vulkan
+                 .setLoadOp(vk::AttachmentLoadOp::eLoad)
+                 .setStoreOp(vk::AttachmentStoreOp::eStore);
+ 
++            if (rt.hasResolveAttachment())
++            {
++                Texture* resolveTexture = checked_cast<Texture*>(rt.resolveTexture);
++
++                assert(fb->framebufferInfo.width == std::max(resolveTexture->desc.width >> rt.resolveSubresources.baseMipLevel, 1u));
++                assert(fb->framebufferInfo.height == std::max(resolveTexture->desc.height >> rt.resolveSubresources.baseMipLevel, 1u));
++                assert(t->desc.format == resolveTexture->desc.format);
++                assert(t->desc.sampleCount > 1);
++                assert(resolveTexture->desc.sampleCount == 1);
++
++                TextureSubresourceSet resolveSubresources = rt.resolveSubresources.resolve(resolveTexture->desc, true);
++
++                TextureDimension resolveDimension = getDimensionForFramebuffer(resolveTexture->desc.dimension, resolveSubresources.numArraySlices > 1);
++
++                const auto& resolveView = resolveTexture->getSubresourceView(resolveSubresources, resolveDimension, rt.format, vk::ImageUsageFlagBits::eColorAttachment);
++                attachmentInfo
++                    .setResolveImageView(resolveView.view)
++                    .setResolveImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
++                    .setResolveMode(convertResolveMode(rt.resolveMode));
++
++                fb->resources.push_back(rt.resolveTexture);
++            }
++
+             fb->resources.push_back(rt.texture);
+         }
+ 
+@@ -111,6 +150,29 @@ namespace nvrhi::vulkan
+                 .setLoadOp(vk::AttachmentLoadOp::eLoad)
+                 .setStoreOp(vk::AttachmentStoreOp::eStore);
+ 
++            if (att.hasResolveAttachment())
++            {
++                Texture* resolveTexture = checked_cast<Texture*>(att.resolveTexture);
++
++                assert(fb->framebufferInfo.width == std::max(resolveTexture->desc.width >> att.resolveSubresources.baseMipLevel, 1u));
++                assert(fb->framebufferInfo.height == std::max(resolveTexture->desc.height >> att.resolveSubresources.baseMipLevel, 1u));
++                assert(texture->desc.format == resolveTexture->desc.format);
++                assert(texture->desc.sampleCount > 1);
++                assert(resolveTexture->desc.sampleCount == 1);
++
++                TextureSubresourceSet resolveSubresources = att.resolveSubresources.resolve(resolveTexture->desc, true);
++
++                TextureDimension resolveDimension = getDimensionForFramebuffer(resolveTexture->desc.dimension, resolveSubresources.numArraySlices > 1);
++
++                const auto& resolveView = resolveTexture->getSubresourceView(resolveSubresources, resolveDimension, att.format, vk::ImageUsageFlagBits::eDepthStencilAttachment);
++                fb->depthAttachment
++                    .setResolveImageView(resolveView.view)
++                    .setResolveImageLayout(depthLayout)
++                    .setResolveMode(convertResolveMode(att.resolveMode));
++
++                fb->resources.push_back(att.resolveTexture);
++            }
++
+             if (getFormatInfo(texture->desc.format).hasStencil)
+                 fb->stencilAttachment = fb->depthAttachment;
+                 
+@@ -447,7 +509,6 @@ namespace nvrhi::vulkan
+                                                      1, &pipelineInfo,
+                                                      m_Context.allocationCallbacks,
+                                                      &pso->pipeline);
+-        ASSERT_VK_OK(res); // for debugging
+         CHECK_VK_FAIL(res);
+         
+         return GraphicsPipelineHandle::Create(pso);
+@@ -525,6 +586,25 @@ namespace nvrhi::vulkan
+         }
+     }
+ 
++    void CommandList::resolveFramebuffer(IFramebuffer* _framebuffer)
++    {
++        endRenderPass();
++
++        Framebuffer* framebuffer = checked_cast<Framebuffer*>(_framebuffer);
++        if (!framebuffer)
++            return;
++
++        if (m_EnableAutomaticBarriers)
++        {
++            setResourceStatesForFramebuffer(framebuffer);
++            m_BindingStatesDirty = true;
++        }
++        commitBarriers();
++
++        beginRenderPass(framebuffer);
++        endRenderPass();
++    }
++
+     static vk::Viewport VKViewportWithDXCoords(const Viewport& v)
+     {
+         return vk::Viewport(v.minX, v.maxY, v.maxX - v.minX, -(v.maxY - v.minY), v.minZ, v.maxZ);
