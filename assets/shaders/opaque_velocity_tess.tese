@@ -61,12 +61,10 @@ void main() {
   vtx.patchInnerFactor = inPatchInnerFactor;
   vtx.tessellatedFlag = 1.0;
 
-  outCurrentClipNoJitter =
-      pc.velocityFrameData.data.currentViewProjNoJitter *
-      vec4(currentWorldPos, 1.0);
-  outPreviousClipNoJitter =
-      pc.velocityFrameData.data.previousViewProjNoJitter *
-      vec4(previousWorldPos, 1.0);
+  outCurrentClipNoJitter = pc.velocityFrameData.data.currentViewProjNoJitter *
+                           vec4(currentWorldPos, 1.0);
+  outPreviousClipNoJitter = pc.velocityFrameData.data.previousViewProjNoJitter *
+                            vec4(previousWorldPos, 1.0);
   outVelocityFlags = inVelocityFlags[0];
   gl_Position =
       pc.frameData.proj * pc.frameData.view * vec4(currentWorldPos, 1.0);

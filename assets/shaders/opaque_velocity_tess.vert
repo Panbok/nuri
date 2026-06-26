@@ -40,7 +40,8 @@ void main() {
           (previousGeometry.metadata.x &
            kVelocityGeometryFlagPreviousVertexBuffer) != 0u;
       const uint previousVertexCount = previousGeometry.metadata.z;
-      if (hasPreviousVertexBuffer && uint(gl_VertexIndex) < previousVertexCount) {
+      if (hasPreviousVertexBuffer &&
+          uint(gl_VertexIndex) < previousVertexCount) {
         previousPos = decodeAnimatedPositionFrom(
             previousGeometry.previousVertexBuffer, uint(gl_VertexIndex),
             previousGeometry.metadata.y);
