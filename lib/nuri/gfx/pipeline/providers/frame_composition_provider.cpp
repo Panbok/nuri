@@ -95,7 +95,8 @@ FrameCompositionProvider::FrameCompositionProvider(
       msaaSceneColorTextures_(memory_), msaaSceneDepthTextures_(memory_),
       motionVectorTextures_(memory_), reactiveMaskTextures_(memory_),
       normalTextures_(memory_), ambientOcclusionTextures_(memory_),
-      exposureTextures_(memory_), historyColorTextures_(memory_) {}
+      exposureTextures_(memory_), presentCaptureTextures_(memory_),
+      historyColorTextures_(memory_) {}
 
 FrameCompositionProvider::~FrameCompositionProvider() {
   for (auto &textures : sceneColorMipTextures_) {
@@ -110,6 +111,7 @@ FrameCompositionProvider::~FrameCompositionProvider() {
   destroyNormalTextures();
   destroyAmbientOcclusionTextures();
   destroyExposureTextures();
+  destroyPresentCaptureTextures();
 }
 
 Result<bool, std::string>
@@ -118,6 +120,7 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.textureRequirements |= kBaselineFrameTextureRequirements;
   ctx.shared.sceneColorGraphTexture = {};
   ctx.shared.frameColorGraphTexture = {};
+  ctx.shared.presentCaptureGraphTexture = {};
   ctx.shared.sceneDepthGraphTexture = {};
   ctx.shared.previousSceneDepthGraphTexture = {};
   ctx.shared.transmissionVisibilityDepthTexture = {};
@@ -136,6 +139,10 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
   ctx.shared.exposureHistoryValid = false;
 
   const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
+  if (isRenderCaptureRequested(ctx.frame, "final_color")) {
+    ctx.shared.textureRequirements |=
+        FrameTextureRequirementFlags::PresentCapture;
+  }
   if (sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
       AntiAliasingMode::MSAA4x) {
     ctx.shared.textureRequirements |=
@@ -156,6 +163,8 @@ FrameCompositionProvider::prepare(FrameBuildContext &ctx) {
       currentRingTexture(sceneColorMipTextures_[2], ctx.frame.frameIndex);
   ctx.shared.frameColorTexture =
       currentRingTexture(frameColorTextures_, ctx.frame.frameIndex);
+  ctx.shared.presentCaptureTexture =
+      currentRingTexture(presentCaptureTextures_, ctx.frame.frameIndex);
   ctx.shared.sceneDepthTexture =
       currentRingTexture(sceneDepthTextures_, ctx.frame.frameIndex);
   ctx.shared.previousSceneDepthTexture =
@@ -528,6 +537,20 @@ Result<bool, std::string> FrameCompositionProvider::ensureTextures(
     destroyExposureTextures();
   }
 
+  const bool needsPresentCapture = hasFrameTextureRequirementFlag(
+      requirements, FrameTextureRequirementFlags::PresentCapture);
+  const bool hadPresentCapture = hasFrameTextureRequirementFlag(
+      previousRequirements, FrameTextureRequirementFlags::PresentCapture);
+  if (needsPresentCapture && (fullRecreate || !hadPresentCapture)) {
+    auto presentResult = recreatePresentCaptureTextures();
+    if (presentResult.hasError()) {
+      invalidateAllocationState();
+      return presentResult;
+    }
+  } else if (!needsPresentCapture && hadPresentCapture) {
+    destroyPresentCaptureTextures();
+  }
+
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -753,6 +776,13 @@ Result<bool, std::string> FrameCompositionProvider::recreateExposureTextures() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string>
+FrameCompositionProvider::recreatePresentCaptureTextures() {
+  return recreateFullResTextureRing(
+      presentCaptureTextures_, Format::RGBA8_UNORM,
+      TextureUsage::AttachmentSampled, "frame_present_capture");
+}
+
 void FrameCompositionProvider::destroyTextures(TextureRing &textures) {
   for (TextureHandle &texture : textures) {
     if (!nuri::isValid(texture)) {
@@ -792,6 +822,10 @@ void FrameCompositionProvider::destroyAmbientOcclusionTextures() {
 void FrameCompositionProvider::destroyExposureTextures() {
   destroyTextures(exposureTextures_);
   exposureHistoryWriteCount_ = 0u;
+}
+
+void FrameCompositionProvider::destroyPresentCaptureTextures() {
+  destroyTextures(presentCaptureTextures_);
 }
 
 TextureHandle FrameCompositionProvider::currentRingTexture(

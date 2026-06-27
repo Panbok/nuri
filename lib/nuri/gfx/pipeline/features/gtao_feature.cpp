@@ -148,6 +148,34 @@ std::span<const std::byte> copyPushConstants(std::array<std::byte, Size> &dst,
          static_cast<uint64_t>(std::max(height, 1u)) * bytesPerPixel(format);
 }
 
+void publishRequestedCapture(RenderFrameContext &frame, GPUDevice &gpu,
+                             std::string_view name, TextureHandle texture,
+                             RenderCaptureValueKind kind,
+                             RenderCaptureLifetimeClass lifetime,
+                             std::string_view colorSpace,
+                             std::string_view compareProfile,
+                             std::string_view producerPassLabel) {
+  if (!isRenderCaptureRequested(frame, name) || !nuri::isValid(texture)) {
+    return;
+  }
+  frame.captureRegistry.publish(RenderCapturePoint{
+      .name = name,
+      .version = 1u,
+      .texture = texture,
+      .format = gpu.getTextureFormat(texture),
+      .dimensions = gpu.getTextureDimensions(texture),
+      .frameIndex = frame.frameIndex,
+      .mip = 0u,
+      .layer = 0u,
+      .kind = kind,
+      .lifetime = lifetime,
+      .colorSpace = colorSpace,
+      .defaultCompareProfile = compareProfile,
+      .producerPassLabel = producerPassLabel,
+      .debugLabel = name,
+  });
+}
+
 [[nodiscard]] TextureDesc
 makeStorageSampledTextureDesc(Format format, uint32_t width, uint32_t height) {
   return TextureDesc{
@@ -931,6 +959,11 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   ctx.shared.ambientOcclusionGraphTexture = importFinal.value();
   ctx.frame.sharedResources.ambientOcclusionGraphTexture = importFinal.value();
   ctx.frame.metrics.ambientOcclusion.ambientOcclusionGraphPublished = true;
+  publishRequestedCapture(ctx.frame, gpu_, "ambient_occlusion",
+                          ctx.shared.ambientOcclusionTexture,
+                          RenderCaptureValueKind::Scalar,
+                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                          "linear_scalar", "scalar", "GTAO Denoise Final Pass");
   return Result<bool, std::string>::makeResult(true);
 }
 

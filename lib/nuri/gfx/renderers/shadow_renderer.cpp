@@ -111,6 +111,50 @@ shadowCascadeTextureImportName(uint32_t cascadeIndex) {
   }
 }
 
+[[nodiscard]] constexpr std::string_view
+shadowCascadeCaptureName(uint32_t cascadeIndex) {
+  switch (cascadeIndex) {
+  case 0u:
+    return "shadow_cascade_0";
+  case 1u:
+    return "shadow_cascade_1";
+  case 2u:
+    return "shadow_cascade_2";
+  case 3u:
+    return "shadow_cascade_3";
+  default:
+    return {};
+  }
+}
+
+void publishRequestedCapture(RenderFrameContext &frame, GPUDevice &gpu,
+                             std::string_view name, TextureHandle texture,
+                             RenderCaptureValueKind kind,
+                             RenderCaptureLifetimeClass lifetime,
+                             std::string_view colorSpace,
+                             std::string_view compareProfile,
+                             std::string_view producerPassLabel) {
+  if (!isRenderCaptureRequested(frame, name) || !nuri::isValid(texture)) {
+    return;
+  }
+  frame.captureRegistry.publish(RenderCapturePoint{
+      .name = name,
+      .version = 1u,
+      .texture = texture,
+      .format = gpu.getTextureFormat(texture),
+      .dimensions = gpu.getTextureDimensions(texture),
+      .frameIndex = frame.frameIndex,
+      .mip = 0u,
+      .layer = 0u,
+      .kind = kind,
+      .lifetime = lifetime,
+      .colorSpace = colorSpace,
+      .defaultCompareProfile = compareProfile,
+      .producerPassLabel = producerPassLabel,
+      .debugLabel = name,
+  });
+}
+
 [[nodiscard]] float
 elapsedMilliseconds(std::chrono::steady_clock::time_point begin,
                     std::chrono::steady_clock::time_point end) {
@@ -7064,6 +7108,11 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     }
     frame.sharedResources.shadowCascadeGraphTextures[cascadeIndex] =
         depthImportResult.value();
+    publishRequestedCapture(
+        frame, gpu_, shadowCascadeCaptureName(cascadeIndex), shadowDepthTexture,
+        RenderCaptureValueKind::ShadowDepth,
+        RenderCaptureLifetimeClass::FeaturePersistentTexture, "linear_depth",
+        "shadow_depth", shadowCascadePassLabel(cascadeIndex));
 
     const std::string_view passLabel = shadowCascadePassLabel(cascadeIndex);
     const std::span<const ComputeDispatchItem> preDispatches =
@@ -7263,6 +7312,11 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     }
     frame.sharedResources.shadowDebugPreviewGraphTexture =
         previewImportResult.value();
+    publishRequestedCapture(
+        frame, gpu_, "shadow_preview", shadowDebugPreviewTexture_,
+        RenderCaptureValueKind::DebugPreview,
+        RenderCaptureLifetimeClass::FeaturePersistentTexture, "display_sdr",
+        "debug_preview", "Shadow Depth Preview Pass");
 
     std::pmr::vector<TextureHandle> previewDependencyTextures(memory_);
     std::pmr::vector<RenderGraphAccessMode> previewDependencyTextureAccessModes(

@@ -2488,6 +2488,117 @@ struct ShadowInspectResult {
   float cascadeBlendFactor = 0.0f;
 };
 
+enum class RenderCaptureValueKind : uint8_t {
+  Color,
+  LinearHdrColor,
+  Depth,
+  ShadowDepth,
+  Normal,
+  Velocity,
+  Mask,
+  Scalar,
+  DebugPreview,
+};
+
+enum class RenderCaptureLifetimeClass : uint8_t {
+  FrameSharedRingTexture,
+  FeaturePersistentTexture,
+  ToolCaptureTexture,
+  CaptureCopyTexture,
+};
+
+struct RenderCapturePoint {
+  std::string_view name{};
+  uint32_t version = 1u;
+  TextureHandle texture{};
+  Format format = Format::Count;
+  TextureDimensions dimensions{};
+  uint64_t frameIndex = 0u;
+  uint32_t mip = 0u;
+  uint32_t layer = 0u;
+  RenderCaptureValueKind kind = RenderCaptureValueKind::Color;
+  RenderCaptureLifetimeClass lifetime =
+      RenderCaptureLifetimeClass::FrameSharedRingTexture;
+  std::string_view colorSpace{};
+  std::string_view defaultCompareProfile{};
+  std::string_view producerPassLabel{};
+  std::string_view debugLabel{};
+};
+
+class RenderCaptureRequest {
+public:
+  explicit RenderCaptureRequest(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : names_(memory != nullptr ? memory : std::pmr::get_default_resource()) {}
+
+  void clear() { names_.clear(); }
+
+  void request(std::string_view name) {
+    if (name.empty() || contains(name)) {
+      return;
+    }
+    names_.push_back(name);
+  }
+
+  [[nodiscard]] bool contains(std::string_view name) const noexcept {
+    for (const std::string_view entry : names_) {
+      if (entry == name) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  [[nodiscard]] bool empty() const noexcept { return names_.empty(); }
+
+  [[nodiscard]] std::span<const std::string_view> names() const noexcept {
+    return std::span<const std::string_view>(names_.data(), names_.size());
+  }
+
+private:
+  std::pmr::vector<std::string_view> names_;
+};
+
+class RenderCaptureRegistry {
+public:
+  explicit RenderCaptureRegistry(
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+      : points_(memory != nullptr ? memory : std::pmr::get_default_resource()) {
+  }
+
+  void clear() { points_.clear(); }
+
+  void publish(const RenderCapturePoint &point) {
+    if (point.name.empty() || !nuri::isValid(point.texture)) {
+      return;
+    }
+    for (RenderCapturePoint &entry : points_) {
+      if (entry.name == point.name) {
+        entry = point;
+        return;
+      }
+    }
+    points_.push_back(point);
+  }
+
+  [[nodiscard]] const RenderCapturePoint *
+  find(std::string_view name) const noexcept {
+    for (const RenderCapturePoint &point : points_) {
+      if (point.name == name) {
+        return &point;
+      }
+    }
+    return nullptr;
+  }
+
+  [[nodiscard]] std::span<const RenderCapturePoint> points() const noexcept {
+    return std::span<const RenderCapturePoint>(points_.data(), points_.size());
+  }
+
+private:
+  std::pmr::vector<RenderCapturePoint> points_;
+};
+
 enum class FrameTextureRequirementFlags : uint32_t {
   None = 0u,
   SceneColor = 1u << 0u,
@@ -2502,6 +2613,7 @@ enum class FrameTextureRequirementFlags : uint32_t {
   MsaaSceneColor = 1u << 9u,
   MsaaSceneDepth = 1u << 10u,
   AmbientOcclusion = 1u << 11u,
+  PresentCapture = 1u << 12u,
 };
 
 [[nodiscard]] constexpr FrameTextureRequirementFlags
@@ -2592,6 +2704,8 @@ struct FrameSharedResources {
   RenderGraphTextureId msaaSceneColorGraphTexture{};
   TextureHandle frameColorTexture{};
   RenderGraphTextureId frameColorGraphTexture{};
+  TextureHandle presentCaptureTexture{};
+  RenderGraphTextureId presentCaptureGraphTexture{};
   TextureHandle historyColorReadTexture{};
   TextureHandle historyColorWriteTexture{};
   TextureHandle exposureReadTexture{};
@@ -2688,6 +2802,8 @@ struct RenderFrameContext {
   std::optional<ShadowInspectRequest> shadowInspectRequest{};
   std::optional<ShadowInspectResult> shadowInspectResult{};
   FrameSharedResources sharedResources{};
+  RenderCaptureRequest captureRequests{};
+  RenderCaptureRegistry captureRegistry{};
   TransparentContributionRegistry transparentContributors{};
   TextureHandle sharedDepthTexture{};
   const ResourceManager *resources = nullptr;
@@ -2695,6 +2811,12 @@ struct RenderFrameContext {
   double deltaSeconds = 1.0 / 60.0;
   uint64_t frameIndex = 0;
 };
+
+[[nodiscard]] inline bool
+isRenderCaptureRequested(const RenderFrameContext &frame,
+                         std::string_view name) noexcept {
+  return !frame.captureRequests.empty() && frame.captureRequests.contains(name);
+}
 
 [[nodiscard]] inline const RenderSettings &
 renderSettingsOrDefault(const RenderFrameContext &frame) {
@@ -2709,6 +2831,7 @@ expectsCurrentFrameSceneColor(const RenderFrameContext &frame) {
 
 inline void resetFrameSharedResources(RenderFrameContext &frame) {
   frame.sharedResources = {};
+  frame.captureRegistry.clear();
   frame.transparentContributors.clear();
 }
 

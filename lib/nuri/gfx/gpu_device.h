@@ -172,6 +172,11 @@ public:
   // visible to the GPU. No-op if the buffer is not host-visible or not mapped.
   virtual void flushMappedBuffer(BufferHandle buffer, size_t offset,
                                  size_t size) = 0;
+  // Reads the requested texture region into tightly packed, row-major rows.
+  // The first output row is the texture's top row at (region.x, region.y), and
+  // each following row starts immediately after width * bytesPerPixel bytes.
+  // Callers must synchronize GPU work before reading textures written by
+  // previous submissions.
   virtual Result<bool, std::string>
   readTexture(TextureHandle texture, const TextureReadbackRegion &region,
               std::span<std::byte> outBytes) = 0;

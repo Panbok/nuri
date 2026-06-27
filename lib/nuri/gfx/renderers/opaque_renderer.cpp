@@ -106,6 +106,34 @@ const RenderSettings &settingsOrDefault(const RenderFrameContext &frame) {
   return frame.settings ? *frame.settings : kDefaultSettings;
 }
 
+void publishRequestedCapture(RenderFrameContext &frame, GPUDevice &gpu,
+                             std::string_view name, TextureHandle texture,
+                             RenderCaptureValueKind kind,
+                             RenderCaptureLifetimeClass lifetime,
+                             std::string_view colorSpace,
+                             std::string_view compareProfile,
+                             std::string_view producerPassLabel) {
+  if (!isRenderCaptureRequested(frame, name) || !nuri::isValid(texture)) {
+    return;
+  }
+  frame.captureRegistry.publish(RenderCapturePoint{
+      .name = name,
+      .version = 1u,
+      .texture = texture,
+      .format = gpu.getTextureFormat(texture),
+      .dimensions = gpu.getTextureDimensions(texture),
+      .frameIndex = frame.frameIndex,
+      .mip = 0u,
+      .layer = 0u,
+      .kind = kind,
+      .lifetime = lifetime,
+      .colorSpace = colorSpace,
+      .defaultCompareProfile = compareProfile,
+      .producerPassLabel = producerPassLabel,
+      .debugLabel = name,
+  });
+}
+
 const AnimationSceneFrameData *
 resolveAnimationSceneFrameData(const RenderFrameContext &frame) {
   if (!frame.sharedResources.animationSceneGpuData.has_value()) {
@@ -4636,6 +4664,9 @@ bool OpaqueRenderer::hasPreparedOpaquePickPasses() const noexcept {
 bool OpaqueRenderer::shouldPublishSceneDepthGraphTexture(
     const RenderFrameContext &frame) const {
   const RenderSettings &settings = settingsOrDefault(frame);
+  if (isRenderCaptureRequested(frame, "scene_depth")) {
+    return true;
+  }
   if (settings.opaque.enableDepthPyramid) {
     return true;
   }
@@ -4917,18 +4948,33 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
       frame.metrics.antiAliasing.msaaDepthGraphPublished = true;
     } else {
       frame.sharedResources.sceneDepthGraphTexture = passDesc.depthTexture;
+      publishRequestedCapture(
+          frame, gpu_, "scene_depth", frame.sharedResources.sceneDepthTexture,
+          RenderCaptureValueKind::Depth,
+          RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_depth",
+          "depth", pass.desc.debugLabel);
     }
   }
   if (pass.isTransmissionVisibilityDepthPass &&
       nuri::isValid(pass.depthTextureHandle)) {
     frame.sharedResources.transmissionVisibilityDepthGraphTexture =
         passDesc.depthTexture;
+    publishRequestedCapture(
+        frame, gpu_, "transmission_visibility_depth", pass.depthTextureHandle,
+        RenderCaptureValueKind::Depth,
+        RenderCaptureLifetimeClass::FeaturePersistentTexture, "linear_depth",
+        "depth", pass.desc.debugLabel);
   }
   if (pass.isMainPass && nuri::isValid(pass.depthResolveTextureHandle) &&
       isSameTextureHandle(pass.depthResolveTextureHandle,
                           frame.sharedResources.sceneDepthTexture)) {
     frame.sharedResources.sceneDepthGraphTexture = passDesc.depthResolveTexture;
     frame.metrics.antiAliasing.msaaDepthResolveTargetBound = true;
+    publishRequestedCapture(frame, gpu_, "scene_depth",
+                            frame.sharedResources.sceneDepthTexture,
+                            RenderCaptureValueKind::Depth,
+                            RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                            "linear_depth", "depth", pass.desc.debugLabel);
   }
 
   if (pass.isMainPass && nuri::isValid(pass.colorTextureHandle)) {
@@ -4942,9 +4988,21 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
         frame.sharedResources.sceneColorGraphTexture =
             passDesc.colorResolveTexture;
         frame.metrics.antiAliasing.msaaColorResolveTargetBound = true;
+        publishRequestedCapture(
+            frame, gpu_, "scene_color_hdr",
+            frame.sharedResources.sceneColorTexture,
+            RenderCaptureValueKind::LinearHdrColor,
+            RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_hdr",
+            "hdr_color", pass.desc.debugLabel);
       }
     } else {
       frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
+      publishRequestedCapture(
+          frame, gpu_, "scene_color_hdr",
+          frame.sharedResources.sceneColorTexture,
+          RenderCaptureValueKind::LinearHdrColor,
+          RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_hdr",
+          "hdr_color", pass.desc.debugLabel);
     }
   }
   if (pass.isVelocityPass && nuri::isValid(pass.colorTextureHandle)) {
@@ -4952,14 +5010,29 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
     frame.metrics.antiAliasing.motionVectorGraphPublished = true;
     frame.metrics.antiAliasing.motionVectorClearPassCount = 0u;
     frame.metrics.antiAliasing.motionVectorClearBytes = 0u;
+    publishRequestedCapture(frame, gpu_, "motion_vectors",
+                            pass.colorTextureHandle,
+                            RenderCaptureValueKind::Velocity,
+                            RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                            "uv_velocity", "velocity", pass.desc.debugLabel);
   }
   if (pass.isReactiveMaskPass && nuri::isValid(pass.colorTextureHandle)) {
     frame.sharedResources.reactiveMaskGraphTexture = passDesc.colorTexture;
     frame.metrics.antiAliasing.reactiveMaskGraphPublished = true;
+    publishRequestedCapture(frame, gpu_, "reactive_mask",
+                            pass.colorTextureHandle,
+                            RenderCaptureValueKind::Mask,
+                            RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                            "linear_scalar", "mask", pass.desc.debugLabel);
   }
   if (pass.isNormalPrepass && nuri::isValid(pass.colorTextureHandle)) {
     frame.sharedResources.normalGraphTexture = passDesc.colorTexture;
     frame.metrics.ambientOcclusion.normalGraphPublished = true;
+    publishRequestedCapture(frame, gpu_, "material_normals",
+                            pass.colorTextureHandle,
+                            RenderCaptureValueKind::Normal,
+                            RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                            "world_normal", "normal", pass.desc.debugLabel);
   }
   if (pass.isDepthPyramidPass &&
       pass.depthPyramidLevel < kMaxSceneDepthPyramidLevels &&

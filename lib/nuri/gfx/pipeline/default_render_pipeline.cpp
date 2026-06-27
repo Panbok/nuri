@@ -26,12 +26,12 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
                               const RuntimeShaderConfig &shaderConfig,
                               std::pmr::memory_resource *memory) {
   pipeline.addProvider(std::make_unique<MaterialTableGpuProvider>(gpu));
-  pipeline.addProvider(
-      std::make_unique<FrameCompositionProvider>(gpu, memory));
+  pipeline.addProvider(std::make_unique<FrameCompositionProvider>(gpu, memory));
   pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
   pipeline.addFeature(
       std::make_unique<ShadowFeature>(gpu, shaderConfig.opaque, memory));
-  pipeline.addFeature(std::make_unique<SkyboxFeature>(gpu, shaderConfig.skybox));
+  pipeline.addFeature(
+      std::make_unique<SkyboxFeature>(gpu, shaderConfig.skybox));
   auto opaqueRenderer =
       makeSharedOpaqueRenderer(gpu, shaderConfig.opaque, memory);
   pipeline.addFeature(std::make_unique<OpaquePrepassFeature>(opaqueRenderer));

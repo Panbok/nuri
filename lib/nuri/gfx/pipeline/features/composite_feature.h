@@ -155,6 +155,7 @@ private:
   ToneMapLutResource aces2SdrLut_{};
   ToneMapLutResource agxLut_{};
   SamplerHandle lutSampler_{};
+  FullscreenPassResources captureResources_{};
 };
 
 class NURI_API FrameCompositionFeature final : public RenderFeature {

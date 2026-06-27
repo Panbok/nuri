@@ -52,6 +52,7 @@ private:
   Result<bool, std::string> recreateNormalTextures();
   Result<bool, std::string> recreateAmbientOcclusionTextures();
   Result<bool, std::string> recreateExposureTextures();
+  Result<bool, std::string> recreatePresentCaptureTextures();
   void invalidateAllocationState() noexcept;
   void destroyTextures(TextureRing &textures);
   void destroyHistoryTextures();
@@ -61,6 +62,7 @@ private:
   void destroyNormalTextures();
   void destroyAmbientOcclusionTextures();
   void destroyExposureTextures();
+  void destroyPresentCaptureTextures();
   [[nodiscard]] TextureHandle
   currentRingTexture(const TextureRing &textures,
                      uint64_t frameIndex) const noexcept;
@@ -81,6 +83,7 @@ private:
   TextureRing normalTextures_;
   TextureRing ambientOcclusionTextures_;
   TextureRing exposureTextures_;
+  TextureRing presentCaptureTextures_;
   TextureRing historyColorTextures_;
   FrameTextureRequirementFlags allocatedRequirements_ =
       FrameTextureRequirementFlags::None;

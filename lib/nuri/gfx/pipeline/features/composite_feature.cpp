@@ -150,6 +150,35 @@ DrawItem makeFullscreenDraw(RenderPipelineHandle pipeline,
   return draw;
 }
 
+void publishRequestedCapture(RenderFrameContext &frame, GPUDevice &gpu,
+                             std::string_view name, TextureHandle texture,
+                             RenderCaptureValueKind kind,
+                             RenderCaptureLifetimeClass lifetime,
+                             std::string_view colorSpace,
+                             std::string_view compareProfile,
+                             std::string_view producerPassLabel,
+                             std::string_view debugLabel) {
+  if (!isRenderCaptureRequested(frame, name) || !nuri::isValid(texture)) {
+    return;
+  }
+  frame.captureRegistry.publish(RenderCapturePoint{
+      .name = name,
+      .version = 1u,
+      .texture = texture,
+      .format = gpu.getTextureFormat(texture),
+      .dimensions = gpu.getTextureDimensions(texture),
+      .frameIndex = frame.frameIndex,
+      .mip = 0u,
+      .layer = 0u,
+      .kind = kind,
+      .lifetime = lifetime,
+      .colorSpace = colorSpace,
+      .defaultCompareProfile = compareProfile,
+      .producerPassLabel = producerPassLabel,
+      .debugLabel = debugLabel,
+  });
+}
+
 void destroyFullscreenPassResources(GPUDevice &gpu,
                                     FullscreenPassResources &resources) {
   if (nuri::isValid(resources.pipelineHandle)) {
@@ -1696,11 +1725,16 @@ PresentToneMapPass::PresentToneMapPass(GPUDevice &gpu,
   resources_.fragmentPath = config.presentFragment.empty()
                                 ? basePath / "tonemap_present.frag"
                                 : config.presentFragment;
+  captureResources_.vertexPath = resources_.vertexPath;
+  captureResources_.fragmentPath = resources_.fragmentPath;
   aces2SdrLut_.path = config.aces2SdrLut;
   agxLut_.path = config.agxLut;
 }
 
-PresentToneMapPass::~PresentToneMapPass() { destroyToneMapAssets(); }
+PresentToneMapPass::~PresentToneMapPass() {
+  destroyFullscreenPassResources(gpu_, captureResources_);
+  destroyToneMapAssets();
+}
 
 bool PresentToneMapPass::isEnabled(const FrameBuildContext &ctx) const {
   return nuri::isValid(ctx.shared.frameColorTexture);
@@ -1719,8 +1753,25 @@ Result<bool, std::string> PresentToneMapPass::prepare(FrameBuildContext &ctx) {
   if (assetsResult.hasError()) {
     return assetsResult;
   }
-  return ensurePipeline(gpu_.getSwapchainFormat(), "present_tonemap",
-                        "PresentToneMapPass::ensurePipeline");
+  auto pipelineResult =
+      ensurePipeline(gpu_.getSwapchainFormat(), "present_tonemap",
+                     "PresentToneMapPass::ensurePipeline");
+  if (pipelineResult.hasError()) {
+    return pipelineResult;
+  }
+  if (isRenderCaptureRequested(ctx.frame, "final_color") &&
+      nuri::isValid(ctx.shared.presentCaptureTexture)) {
+    auto captureInit = ensureFullscreenPassInitialized(
+        gpu_, captureResources_, "present_tonemap_capture",
+        "PresentToneMapPass::createCaptureShaders");
+    if (captureInit.hasError()) {
+      return captureInit;
+    }
+    return ensureFullscreenPassPipeline(
+        gpu_, captureResources_, Format::RGBA8_UNORM, "present_tonemap_capture",
+        "PresentToneMapPass::ensureCapturePipeline");
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
@@ -1794,6 +1845,12 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
           reinterpret_cast<const std::byte *>(&pushConstants),
           sizeof(pushConstants)),
       "Present ToneMap");
+  const DrawItem captureDraw = makeFullscreenDraw(
+      captureResources_.pipelineHandle,
+      std::span<const std::byte>(
+          reinterpret_cast<const std::byte *>(&pushConstants),
+          sizeof(pushConstants)),
+      "Present ToneMap Capture");
   if (ctx.frame.frameIndex < kInitialDebugFrames) {
     NURI_LOG_DEBUG(
         "PresentToneMapPass::build: frame=%" PRIu64
@@ -1829,6 +1886,73 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
     dependencies[dependencyCount++] = agxLut_.texture->handle();
   }
 
+  const auto addToneMapReads =
+      [&](RenderGraphPassId passId) -> Result<bool, std::string> {
+    auto readResult =
+        ctx.graph.addTextureRead(passId, sourceImportResult.value());
+    if (readResult.hasError()) {
+      return Result<bool, std::string>::makeError(readResult.error());
+    }
+    if (acesLutAvailable) {
+      auto lutReadResult = ctx.graph.addTextureRead(passId, lutImports[0]);
+      if (lutReadResult.hasError()) {
+        return Result<bool, std::string>::makeError(lutReadResult.error());
+      }
+    }
+    if (agxLutAvailable) {
+      auto lutReadResult = ctx.graph.addTextureRead(passId, lutImports[1]);
+      if (lutReadResult.hasError()) {
+        return Result<bool, std::string>::makeError(lutReadResult.error());
+      }
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+
+  publishRequestedCapture(ctx.frame, gpu_, "frame_color_hdr", source,
+                          RenderCaptureValueKind::LinearHdrColor,
+                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                          "linear_hdr", "hdr_color", "PresentToneMapPass",
+                          "frame_color_hdr");
+
+  if (isRenderCaptureRequested(ctx.frame, "final_color") &&
+      nuri::isValid(ctx.shared.presentCaptureTexture)) {
+    if (!nuri::isValid(captureResources_.pipelineHandle)) {
+      return Result<bool, std::string>::makeError(
+          "PresentToneMapPass::build: invalid capture pipeline");
+    }
+    auto captureImport = ctx.graph.importTexture(
+        ctx.shared.presentCaptureTexture, "present_capture_color");
+    if (captureImport.hasError()) {
+      return Result<bool, std::string>::makeError(captureImport.error());
+    }
+    RenderGraphGraphicsPassDesc captureDesc{};
+    captureDesc.color = {.loadOp = LoadOp::Clear,
+                         .storeOp = StoreOp::Store,
+                         .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
+    captureDesc.colorTexture = captureImport.value();
+    captureDesc.draws = std::span<const DrawItem>(&captureDraw, 1u);
+    captureDesc.debugLabel = "Present ToneMap Capture Pass";
+    captureDesc.debugColor = kPresentPassDebugColor;
+    captureDesc.dependencyTextures =
+        std::span<const TextureHandle>(dependencies.data(), dependencyCount);
+    auto captureAdd = ctx.graph.addGraphicsPass(captureDesc);
+    if (captureAdd.hasError()) {
+      return Result<bool, std::string>::makeError(captureAdd.error());
+    }
+    auto captureReads = addToneMapReads(captureAdd.value());
+    if (captureReads.hasError()) {
+      return captureReads;
+    }
+    ctx.shared.presentCaptureGraphTexture = captureImport.value();
+    ctx.frame.sharedResources.presentCaptureGraphTexture =
+        captureImport.value();
+    publishRequestedCapture(
+        ctx.frame, gpu_, "final_color", ctx.shared.presentCaptureTexture,
+        RenderCaptureValueKind::Color,
+        RenderCaptureLifetimeClass::ToolCaptureTexture, "display_sdr",
+        "ldr_color", "Present ToneMap Capture Pass", "final_color");
+  }
+
   RenderGraphGraphicsPassDesc passDesc{};
   passDesc.color = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
@@ -1843,24 +1967,9 @@ Result<bool, std::string> PresentToneMapPass::build(FrameBuildContext &ctx) {
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
-  auto readResult =
-      ctx.graph.addTextureRead(addResult.value(), sourceImportResult.value());
-  if (readResult.hasError()) {
-    return Result<bool, std::string>::makeError(readResult.error());
-  }
-  if (acesLutAvailable) {
-    auto lutReadResult =
-        ctx.graph.addTextureRead(addResult.value(), lutImports[0]);
-    if (lutReadResult.hasError()) {
-      return Result<bool, std::string>::makeError(lutReadResult.error());
-    }
-  }
-  if (agxLutAvailable) {
-    auto lutReadResult =
-        ctx.graph.addTextureRead(addResult.value(), lutImports[1]);
-    if (lutReadResult.hasError()) {
-      return Result<bool, std::string>::makeError(lutReadResult.error());
-    }
+  auto presentReads = addToneMapReads(addResult.value());
+  if (presentReads.hasError()) {
+    return presentReads;
   }
 
   return Result<bool, std::string>::makeResult(true);

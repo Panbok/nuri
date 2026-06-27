@@ -54,6 +54,34 @@ resolveMemoryResource(std::pmr::memory_resource *memory) {
   return (material.desc.featureMask & kMaterialFeatureTransmission) != 0u;
 }
 
+void publishRequestedCapture(RenderFrameContext &frame, GPUDevice &gpu,
+                             std::string_view name, TextureHandle texture,
+                             RenderCaptureValueKind kind,
+                             RenderCaptureLifetimeClass lifetime,
+                             std::string_view colorSpace,
+                             std::string_view compareProfile,
+                             std::string_view producerPassLabel) {
+  if (!isRenderCaptureRequested(frame, name) || !nuri::isValid(texture)) {
+    return;
+  }
+  frame.captureRegistry.publish(RenderCapturePoint{
+      .name = name,
+      .version = 1u,
+      .texture = texture,
+      .format = gpu.getTextureFormat(texture),
+      .dimensions = gpu.getTextureDimensions(texture),
+      .frameIndex = frame.frameIndex,
+      .mip = 0u,
+      .layer = 0u,
+      .kind = kind,
+      .lifetime = lifetime,
+      .colorSpace = colorSpace,
+      .defaultCompareProfile = compareProfile,
+      .producerPassLabel = producerPassLabel,
+      .debugLabel = name,
+  });
+}
+
 [[nodiscard]] float transparentSortDepth(const glm::mat4 &view,
                                          const glm::mat4 &model,
                                          const BoundingBox &bounds) {
@@ -1692,6 +1720,21 @@ TransparentRenderer::appendTransparentTransmissionFeedbackRefresh(
     return quarterResult;
   }
 
+  publishRequestedCapture(frame, gpu_, "transmission_feedback", feedbackFull,
+                          RenderCaptureValueKind::LinearHdrColor,
+                          RenderCaptureLifetimeClass::FeaturePersistentTexture,
+                          "linear_hdr", "hdr_color",
+                          kTransparentTransmissionFeedbackCopyLabel);
+  publishRequestedCapture(frame, gpu_, "transmission_feedback_half",
+                          feedbackHalf, RenderCaptureValueKind::LinearHdrColor,
+                          RenderCaptureLifetimeClass::FeaturePersistentTexture,
+                          "linear_hdr", "hdr_color",
+                          kTransparentTransmissionFeedbackHalfLabel);
+  publishRequestedCapture(
+      frame, gpu_, "transmission_feedback_quarter", feedbackQuarter,
+      RenderCaptureValueKind::LinearHdrColor,
+      RenderCaptureLifetimeClass::FeaturePersistentTexture, "linear_hdr",
+      "hdr_color", kTransparentTransmissionFeedbackQuarterLabel);
   ++frame.metrics.antiAliasing.transparentTransmissionFeedbackRefreshCount;
   return Result<bool, std::string>::makeResult(true);
 }
