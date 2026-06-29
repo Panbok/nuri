@@ -1,0 +1,1046 @@
+#include "nuri/tools/snapshot/snapshot_manifest.h"
+
+#include "nuri/core/runtime_config.h"
+#include "nuri/tools/snapshot/snapshot_capture_point.h"
+#include "nuri/tools/snapshot/snapshot_environment.h"
+
+#include <algorithm>
+#include <array>
+#include <climits>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <span>
+#include <string_view>
+
+#include <yyjson.h>
+
+namespace nuri::tools::snapshot {
+namespace {
+
+using JsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+
+[[nodiscard]] std::string jsonPath(std::string_view path,
+                                   std::string_view key) {
+  std::string out(path);
+  if (!out.empty()) {
+    out += ".";
+  }
+  out += key;
+  return out;
+}
+
+[[nodiscard]] bool hasKey(std::span<const std::string_view> keys,
+                          std::string_view key) {
+  return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+[[nodiscard]] Result<bool, std::string>
+rejectUnknownKeys(yyjson_val *object, std::span<const std::string_view> keys,
+                  std::string_view path) {
+  if (!yyjson_is_obj(object)) {
+    return Result<bool, std::string>::makeError(std::string(path) +
+                                                " must be an object");
+  }
+  yyjson_obj_iter iter;
+  yyjson_obj_iter_init(object, &iter);
+  yyjson_val *key = nullptr;
+  while ((key = yyjson_obj_iter_next(&iter)) != nullptr) {
+    const std::string_view name(yyjson_get_str(key), yyjson_get_len(key));
+    if (!hasKey(keys, name)) {
+      return Result<bool, std::string>::makeError(
+          std::string(path) + ": unknown key '" + std::string(name) + "'");
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] yyjson_val *optionalObject(yyjson_val *object,
+                                         std::string_view key) {
+  return yyjson_obj_getn(object, key.data(), key.size());
+}
+
+[[nodiscard]] Result<std::string, std::string>
+readString(yyjson_val *object, std::string_view key, std::string_view path,
+           bool required = false, std::string defaultValue = {}) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    if (required) {
+      return Result<std::string, std::string>::makeError(
+          jsonPath(path, key) + " is required");
+    }
+    return Result<std::string, std::string>::makeResult(std::move(defaultValue));
+  }
+  if (!yyjson_is_str(value)) {
+    return Result<std::string, std::string>::makeError(jsonPath(path, key) +
+                                                       " must be a string");
+  }
+  return Result<std::string, std::string>::makeResult(
+      std::string(yyjson_get_str(value), yyjson_get_len(value)));
+}
+
+[[nodiscard]] Result<bool, std::string>
+readBool(yyjson_val *object, std::string_view key, std::string_view path,
+         bool defaultValue = false) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    return Result<bool, std::string>::makeResult(defaultValue);
+  }
+  if (!yyjson_is_bool(value)) {
+    return Result<bool, std::string>::makeError(jsonPath(path, key) +
+                                                " must be a bool");
+  }
+  return Result<bool, std::string>::makeResult(yyjson_get_bool(value));
+}
+
+[[nodiscard]] Result<uint32_t, std::string>
+readU32(yyjson_val *object, std::string_view key, std::string_view path,
+        uint32_t defaultValue = 0u) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    return Result<uint32_t, std::string>::makeResult(defaultValue);
+  }
+  if (!yyjson_is_uint(value) || yyjson_get_uint(value) > UINT32_MAX) {
+    return Result<uint32_t, std::string>::makeError(jsonPath(path, key) +
+                                                    " must be a uint32");
+  }
+  return Result<uint32_t, std::string>::makeResult(
+      static_cast<uint32_t>(yyjson_get_uint(value)));
+}
+
+[[nodiscard]] Result<double, std::string>
+readDouble(yyjson_val *object, std::string_view key, std::string_view path,
+           double defaultValue = 0.0) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    return Result<double, std::string>::makeResult(defaultValue);
+  }
+  if (!yyjson_is_num(value)) {
+    return Result<double, std::string>::makeError(jsonPath(path, key) +
+                                                  " must be a number");
+  }
+  return Result<double, std::string>::makeResult(yyjson_get_num(value));
+}
+
+[[nodiscard]] Result<std::vector<std::string>, std::string>
+readStringArray(yyjson_val *object, std::string_view key,
+                std::string_view path) {
+  std::vector<std::string> out;
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    return Result<std::vector<std::string>, std::string>::makeResult(
+        std::move(out));
+  }
+  if (!yyjson_is_arr(value)) {
+    return Result<std::vector<std::string>, std::string>::makeError(
+        jsonPath(path, key) + " must be an array");
+  }
+  out.reserve(yyjson_arr_size(value));
+  yyjson_arr_iter iter;
+  yyjson_arr_iter_init(value, &iter);
+  yyjson_val *item = nullptr;
+  while ((item = yyjson_arr_iter_next(&iter)) != nullptr) {
+    if (!yyjson_is_str(item)) {
+      return Result<std::vector<std::string>, std::string>::makeError(
+          jsonPath(path, key) + " entries must be strings");
+    }
+    out.emplace_back(yyjson_get_str(item), yyjson_get_len(item));
+  }
+  return Result<std::vector<std::string>, std::string>::makeResult(
+      std::move(out));
+}
+
+[[nodiscard]] Result<glm::vec3, std::string>
+readVec3(yyjson_val *object, std::string_view key, std::string_view path,
+         glm::vec3 defaultValue) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    return Result<glm::vec3, std::string>::makeResult(defaultValue);
+  }
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 3u) {
+    return Result<glm::vec3, std::string>::makeError(jsonPath(path, key) +
+                                                     " must be a vec3 array");
+  }
+  glm::vec3 out{};
+  for (uint32_t i = 0u; i < 3u; ++i) {
+    yyjson_val *entry = yyjson_arr_get(value, i);
+    if (!yyjson_is_num(entry)) {
+      return Result<glm::vec3, std::string>::makeError(
+          jsonPath(path, key) + " entries must be numbers");
+    }
+    out[i] = static_cast<float>(yyjson_get_num(entry));
+  }
+  return Result<glm::vec3, std::string>::makeResult(out);
+}
+
+template <typename Enum>
+[[nodiscard]] Result<Enum, std::string>
+parseEnum(std::string_view text,
+          std::initializer_list<std::pair<std::string_view, Enum>> values,
+          std::string_view path) {
+  for (const auto &[name, value] : values) {
+    if (text == name) {
+      return Result<Enum, std::string>::makeResult(value);
+    }
+  }
+  return Result<Enum, std::string>::makeError(std::string(path) +
+                                              ": invalid enum value '" +
+                                              std::string(text) + "'");
+}
+
+template <typename Enum>
+[[nodiscard]] Result<bool, std::string>
+readEnumField(yyjson_val *object, std::string_view key, std::string_view path,
+              Enum &out,
+              std::initializer_list<std::pair<std::string_view, Enum>> values) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!yyjson_is_str(value)) {
+    return Result<bool, std::string>::makeError(jsonPath(path, key) +
+                                                " must be a string");
+  }
+  auto parsed =
+      parseEnum<Enum>(std::string_view(yyjson_get_str(value),
+                                       yyjson_get_len(value)),
+                      values, jsonPath(path, key));
+  if (parsed.hasError()) {
+    return Result<bool, std::string>::makeError(parsed.error());
+  }
+  out = parsed.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+parseSettings(yyjson_val *object, RenderSettings &settings) {
+  static constexpr std::array keys{
+      std::string_view("opaque"),          std::string_view("antiAliasing"),
+      std::string_view("ambientOcclusion"), std::string_view("shadow"),
+      std::string_view("hdrPostProcess"), std::string_view("transmission"),
+      std::string_view("transparent"),    std::string_view("textureFiltering"),
+  };
+  auto result = rejectUnknownKeys(object, keys, "settings");
+  if (result.hasError()) {
+    return result;
+  }
+
+  if (yyjson_val *opaque = optionalObject(object, "opaque")) {
+    static constexpr std::array opaqueKeys{
+        std::string_view("enabled"), std::string_view("enableDepthPrepass"),
+        std::string_view("enableInstanceCompute"),
+        std::string_view("enableInstanceAnimation"),
+        std::string_view("enableMeshLod"),
+        std::string_view("enableTessellation"),
+        std::string_view("forcedMeshLod"), std::string_view("meshletMode"),
+        std::string_view("enableMeshletFrustumCulling"),
+        std::string_view("enableMeshletConeCulling")};
+    result = rejectUnknownKeys(opaque, opaqueKeys, "settings.opaque");
+    if (result.hasError()) {
+      return result;
+    }
+    auto boolean =
+        readBool(opaque, "enabled", "settings.opaque", settings.opaque.enabled);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enabled = boolean.value();
+    boolean = readBool(opaque, "enableDepthPrepass", "settings.opaque",
+                       settings.opaque.enableDepthPrepass);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableDepthPrepass = boolean.value();
+    boolean = readBool(opaque, "enableInstanceCompute", "settings.opaque",
+                       settings.opaque.enableInstanceCompute);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableInstanceCompute = boolean.value();
+    boolean = readBool(opaque, "enableInstanceAnimation", "settings.opaque",
+                       settings.opaque.enableInstanceAnimation);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableInstanceAnimation = boolean.value();
+    boolean = readBool(opaque, "enableMeshLod", "settings.opaque",
+                       settings.opaque.enableMeshLod);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableMeshLod = boolean.value();
+    result = readEnumField(
+        opaque, "meshletMode", "settings.opaque", settings.opaque.meshletMode,
+        {{"Disabled", MeshletRenderMode::Disabled},
+         {"Opportunistic", MeshletRenderMode::Opportunistic},
+         {"Required", MeshletRenderMode::Required}});
+    if (result.hasError()) {
+      return result;
+    }
+    boolean = readBool(opaque, "enableMeshletFrustumCulling",
+                       "settings.opaque",
+                       settings.opaque.enableMeshletFrustumCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableMeshletFrustumCulling = boolean.value();
+    boolean = readBool(opaque, "enableMeshletConeCulling", "settings.opaque",
+                       settings.opaque.enableMeshletConeCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableMeshletConeCulling = boolean.value();
+    boolean = readBool(opaque, "enableTessellation", "settings.opaque",
+                       settings.opaque.enableTessellation);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableTessellation = boolean.value();
+    yyjson_val *forced = optionalObject(opaque, "forcedMeshLod");
+    if (forced != nullptr) {
+      if (yyjson_is_sint(forced) && yyjson_get_sint(forced) >= INT32_MIN &&
+          yyjson_get_sint(forced) <= INT32_MAX) {
+        settings.opaque.forcedMeshLod =
+            static_cast<int32_t>(yyjson_get_sint(forced));
+      } else if (yyjson_is_uint(forced) &&
+                 yyjson_get_uint(forced) <= INT32_MAX) {
+        settings.opaque.forcedMeshLod =
+            static_cast<int32_t>(yyjson_get_uint(forced));
+      } else {
+        return Result<bool, std::string>::makeError(
+            "settings.opaque.forcedMeshLod must be an int32");
+      }
+    }
+  }
+
+  if (yyjson_val *aa = optionalObject(object, "antiAliasing")) {
+    static constexpr std::array aaKeys{std::string_view("mode"),
+                                      std::string_view("qualityPreset")};
+    result = rejectUnknownKeys(aa, aaKeys, "settings.antiAliasing");
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(
+        aa, "mode", "settings.antiAliasing", settings.antiAliasing.mode,
+        {{"None", AntiAliasingMode::None},
+         {"TAA", AntiAliasingMode::TAA},
+         {"SpatialFallback", AntiAliasingMode::SpatialFallback},
+         {"MSAA4x", AntiAliasingMode::MSAA4x}});
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(
+        aa, "qualityPreset", "settings.antiAliasing",
+        settings.antiAliasing.qualityPreset,
+        {{"Performance", TemporalAAQualityPreset::Performance},
+         {"Balanced", TemporalAAQualityPreset::Balanced},
+         {"Quality", TemporalAAQualityPreset::Quality},
+         {"Ultra", TemporalAAQualityPreset::Ultra},
+         {"Custom", TemporalAAQualityPreset::Custom}});
+    if (result.hasError()) {
+      return result;
+    }
+  }
+
+  if (yyjson_val *ao = optionalObject(object, "ambientOcclusion")) {
+    static constexpr std::array aoKeys{std::string_view("mode"),
+                                      std::string_view("preset")};
+    result = rejectUnknownKeys(ao, aoKeys, "settings.ambientOcclusion");
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(
+        ao, "mode", "settings.ambientOcclusion",
+        settings.ambientOcclusion.mode,
+        {{"Disabled", AmbientOcclusionMode::Disabled},
+         {"GTAO", AmbientOcclusionMode::GTAO}});
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(
+        ao, "preset", "settings.ambientOcclusion",
+        settings.ambientOcclusion.preset,
+        {{"Low", AmbientOcclusionPreset::Low},
+         {"Balanced", AmbientOcclusionPreset::Balanced},
+         {"High", AmbientOcclusionPreset::High},
+         {"Ultra", AmbientOcclusionPreset::Ultra},
+         {"Custom", AmbientOcclusionPreset::Custom}});
+    if (result.hasError()) {
+      return result;
+    }
+  }
+
+  if (yyjson_val *shadow = optionalObject(object, "shadow")) {
+    static constexpr std::array shadowKeys{std::string_view("enabled"),
+                                          std::string_view("qualityPreset"),
+                                          std::string_view("debug")};
+    result = rejectUnknownKeys(shadow, shadowKeys, "settings.shadow");
+    if (result.hasError()) {
+      return result;
+    }
+    auto enabled =
+        readBool(shadow, "enabled", "settings.shadow", settings.shadow.enabled);
+    if (enabled.hasError()) {
+      return Result<bool, std::string>::makeError(enabled.error());
+    }
+    settings.shadow.enabled = enabled.value();
+    ShadowQualityPreset preset = settings.shadow.qualityPreset;
+    result =
+        readEnumField(shadow, "qualityPreset", "settings.shadow", preset,
+                      {{"Custom", ShadowQualityPreset::Custom},
+                       {"Low", ShadowQualityPreset::Low},
+                       {"Medium", ShadowQualityPreset::Medium},
+                       {"High", ShadowQualityPreset::High},
+                       {"Ultra", ShadowQualityPreset::Ultra}});
+    if (result.hasError()) {
+      return result;
+    }
+    if (optionalObject(shadow, "qualityPreset") != nullptr) {
+      applyShadowQualityPreset(settings.shadow, preset);
+    }
+    if (yyjson_val *debug = optionalObject(shadow, "debug")) {
+      static constexpr std::array debugKeys{
+          std::string_view("showShadowMapViewport"),
+          std::string_view("previewMode"),
+          std::string_view("debugCascadeIndex"),
+          std::string_view("previewDepthMin"),
+          std::string_view("previewDepthMax"),
+          std::string_view("previewDepthInvert"),
+          std::string_view("previewDepthLog")};
+      result = rejectUnknownKeys(debug, debugKeys, "settings.shadow.debug");
+      if (result.hasError()) {
+        return result;
+      }
+      enabled = readBool(debug, "showShadowMapViewport",
+                         "settings.shadow.debug",
+                         settings.shadow.debug.showShadowMapViewport);
+      if (enabled.hasError()) {
+        return Result<bool, std::string>::makeError(enabled.error());
+      }
+      settings.shadow.debug.showShadowMapViewport = enabled.value();
+      result = readEnumField(
+          debug, "previewMode", "settings.shadow.debug",
+          settings.shadow.debug.previewMode,
+          {{"SelectedCascade", ShadowPreviewMode::SelectedCascade},
+           {"TiledAllCascades", ShadowPreviewMode::TiledAllCascades}});
+      if (result.hasError()) {
+        return result;
+      }
+      auto u32 = readU32(debug, "debugCascadeIndex", "settings.shadow.debug",
+                         settings.shadow.debug.debugCascadeIndex);
+      if (u32.hasError()) {
+        return Result<bool, std::string>::makeError(u32.error());
+      }
+      settings.shadow.debug.debugCascadeIndex = u32.value();
+      auto real = readDouble(debug, "previewDepthMin", "settings.shadow.debug",
+                             settings.shadow.debug.previewDepthMin);
+      if (real.hasError()) {
+        return Result<bool, std::string>::makeError(real.error());
+      }
+      settings.shadow.debug.previewDepthMin = static_cast<float>(real.value());
+      real = readDouble(debug, "previewDepthMax", "settings.shadow.debug",
+                        settings.shadow.debug.previewDepthMax);
+      if (real.hasError()) {
+        return Result<bool, std::string>::makeError(real.error());
+      }
+      settings.shadow.debug.previewDepthMax = static_cast<float>(real.value());
+      enabled = readBool(debug, "previewDepthInvert", "settings.shadow.debug",
+                         settings.shadow.debug.previewDepthInvert);
+      if (enabled.hasError()) {
+        return Result<bool, std::string>::makeError(enabled.error());
+      }
+      settings.shadow.debug.previewDepthInvert = enabled.value();
+      enabled = readBool(debug, "previewDepthLog", "settings.shadow.debug",
+                         settings.shadow.debug.previewDepthLog);
+      if (enabled.hasError()) {
+        return Result<bool, std::string>::makeError(enabled.error());
+      }
+      settings.shadow.debug.previewDepthLog = enabled.value();
+    }
+  }
+
+  if (yyjson_val *hdr = optionalObject(object, "hdrPostProcess")) {
+    static constexpr std::array hdrKeys{std::string_view("bloomEnabled"),
+                                       std::string_view("adaptationEnabled")};
+    result = rejectUnknownKeys(hdr, hdrKeys, "settings.hdrPostProcess");
+    if (result.hasError()) {
+      return result;
+    }
+    auto boolean = readBool(hdr, "bloomEnabled", "settings.hdrPostProcess",
+                            settings.hdrPostProcess.bloomEnabled);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.hdrPostProcess.bloomEnabled = boolean.value();
+    boolean = readBool(hdr, "adaptationEnabled", "settings.hdrPostProcess",
+                       settings.hdrPostProcess.adaptationEnabled);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.hdrPostProcess.adaptationEnabled = boolean.value();
+  }
+
+  if (yyjson_val *transmission = optionalObject(object, "transmission")) {
+    static constexpr std::array keys{std::string_view("enabled")};
+    result = rejectUnknownKeys(transmission, keys, "settings.transmission");
+    if (result.hasError()) {
+      return result;
+    }
+    auto enabled = readBool(transmission, "enabled", "settings.transmission",
+                            settings.transmission.enabled);
+    if (enabled.hasError()) {
+      return Result<bool, std::string>::makeError(enabled.error());
+    }
+    settings.transmission.enabled = enabled.value();
+  }
+  if (yyjson_val *transparent = optionalObject(object, "transparent")) {
+    static constexpr std::array keys{std::string_view("enabled")};
+    result = rejectUnknownKeys(transparent, keys, "settings.transparent");
+    if (result.hasError()) {
+      return result;
+    }
+    auto enabled = readBool(transparent, "enabled", "settings.transparent",
+                            settings.transparent.enabled);
+    if (enabled.hasError()) {
+      return Result<bool, std::string>::makeError(enabled.error());
+    }
+    settings.transparent.enabled = enabled.value();
+  }
+  if (yyjson_val *filtering = optionalObject(object, "textureFiltering")) {
+    static constexpr std::array keys{std::string_view("mode"),
+                                    std::string_view("anisotropy")};
+    result = rejectUnknownKeys(filtering, keys, "settings.textureFiltering");
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(
+        filtering, "mode", "settings.textureFiltering",
+        settings.textureFiltering.mode,
+        {{"Bilinear", TextureFilterMode::Bilinear},
+         {"Trilinear", TextureFilterMode::Trilinear},
+         {"Anisotropic", TextureFilterMode::Anisotropic}});
+    if (result.hasError()) {
+      return result;
+    }
+    auto anisotropy = readU32(filtering, "anisotropy",
+                              "settings.textureFiltering",
+                              settings.textureFiltering.anisotropy);
+    if (anisotropy.hasError()) {
+      return Result<bool, std::string>::makeError(anisotropy.error());
+    }
+    settings.textureFiltering.anisotropy =
+        static_cast<uint8_t>(std::min<uint32_t>(anisotropy.value(), 255u));
+  }
+
+  sanitizeSnapshotRenderSettings(settings);
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+parseScene(yyjson_val *object, SnapshotSceneConfig &scene) {
+  static constexpr std::array keys{
+      std::string_view("kind"), std::string_view("pathBase"),
+      std::string_view("path"), std::string_view("importOptions"),
+      std::string_view("generator"), std::string_view("seed"),
+      std::string_view("contentHash")};
+  auto result = rejectUnknownKeys(object, keys, "scene");
+  if (result.hasError()) {
+    return result;
+  }
+  auto text = readString(object, "kind", "scene", false, scene.kind);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  scene.kind = std::move(text.value());
+  text = readString(object, "pathBase", "scene", false, scene.pathBase);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  scene.pathBase = std::move(text.value());
+  text = readString(object, "path", "scene", false, scene.path.string());
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  scene.path = text.value();
+  text = readString(object, "generator", "scene", false, scene.generator);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  scene.generator = std::move(text.value());
+  text = readString(object, "contentHash", "scene", false, scene.contentHash);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  scene.contentHash = std::move(text.value());
+  auto seed = readU32(object, "seed", "scene", scene.seed);
+  if (seed.hasError()) {
+    return Result<bool, std::string>::makeError(seed.error());
+  }
+  scene.seed = seed.value();
+  if (yyjson_val *importOptions = optionalObject(object, "importOptions")) {
+    static constexpr std::array importKeys{std::string_view("mesh")};
+    result = rejectUnknownKeys(importOptions, importKeys,
+                               "scene.importOptions");
+    if (result.hasError()) {
+      return result;
+    }
+    if (yyjson_val *mesh = optionalObject(importOptions, "mesh")) {
+      static constexpr std::array meshKeys{
+          std::string_view("flipUVs"), std::string_view("generateMeshlets"),
+          std::string_view("meshletMaxVertices"),
+          std::string_view("meshletMaxPrimitives"),
+          std::string_view("meshletConeWeight")};
+      result = rejectUnknownKeys(mesh, meshKeys, "scene.importOptions.mesh");
+      if (result.hasError()) {
+        return result;
+      }
+      auto flip = readBool(mesh, "flipUVs", "scene.importOptions.mesh",
+                           scene.flipUVs);
+      if (flip.hasError()) {
+        return Result<bool, std::string>::makeError(flip.error());
+      }
+      scene.flipUVs = flip.value();
+      auto generateMeshlets =
+          readBool(mesh, "generateMeshlets", "scene.importOptions.mesh",
+                   scene.generateMeshlets);
+      if (generateMeshlets.hasError()) {
+        return Result<bool, std::string>::makeError(
+            generateMeshlets.error());
+      }
+      scene.generateMeshlets = generateMeshlets.value();
+      auto u32 = readU32(mesh, "meshletMaxVertices",
+                         "scene.importOptions.mesh",
+                         scene.meshletMaxVertices);
+      if (u32.hasError()) {
+        return Result<bool, std::string>::makeError(u32.error());
+      }
+      scene.meshletMaxVertices = u32.value();
+      u32 = readU32(mesh, "meshletMaxPrimitives",
+                    "scene.importOptions.mesh", scene.meshletMaxPrimitives);
+      if (u32.hasError()) {
+        return Result<bool, std::string>::makeError(u32.error());
+      }
+      scene.meshletMaxPrimitives = u32.value();
+      auto real = readDouble(mesh, "meshletConeWeight",
+                             "scene.importOptions.mesh",
+                             scene.meshletConeWeight);
+      if (real.hasError()) {
+        return Result<bool, std::string>::makeError(real.error());
+      }
+      scene.meshletConeWeight = static_cast<float>(real.value());
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+parseCamera(yyjson_val *object, SnapshotCameraConfig &camera) {
+  static constexpr std::array keys{
+      std::string_view("position"), std::string_view("direction"),
+      std::string_view("target"),
+      std::string_view("positionDeltaPerFrame"),
+      std::string_view("verticalFovDegrees"),
+      std::string_view("nearPlane"), std::string_view("farPlane")};
+  auto result = rejectUnknownKeys(object, keys, "camera");
+  if (result.hasError()) {
+    return result;
+  }
+  auto vec = readVec3(object, "position", "camera", camera.position);
+  if (vec.hasError()) {
+    return Result<bool, std::string>::makeError(vec.error());
+  }
+  camera.position = vec.value();
+  if (optionalObject(object, "target") != nullptr) {
+    vec = readVec3(object, "target", "camera",
+                   camera.position + camera.direction);
+    if (vec.hasError()) {
+      return Result<bool, std::string>::makeError(vec.error());
+    }
+    camera.direction = glm::normalize(vec.value() - camera.position);
+  } else {
+    vec = readVec3(object, "direction", "camera", camera.direction);
+    if (vec.hasError()) {
+      return Result<bool, std::string>::makeError(vec.error());
+    }
+    camera.direction = glm::normalize(vec.value());
+  }
+  vec = readVec3(object, "positionDeltaPerFrame", "camera",
+                 camera.positionDeltaPerFrame);
+  if (vec.hasError()) {
+    return Result<bool, std::string>::makeError(vec.error());
+  }
+  camera.positionDeltaPerFrame = vec.value();
+  auto number = readDouble(object, "verticalFovDegrees", "camera",
+                           camera.verticalFovDegrees);
+  if (number.hasError()) {
+    return Result<bool, std::string>::makeError(number.error());
+  }
+  camera.verticalFovDegrees = static_cast<float>(number.value());
+  number = readDouble(object, "nearPlane", "camera", camera.nearPlane);
+  if (number.hasError()) {
+    return Result<bool, std::string>::makeError(number.error());
+  }
+  camera.nearPlane = static_cast<float>(number.value());
+  number = readDouble(object, "farPlane", "camera", camera.farPlane);
+  if (number.hasError()) {
+    return Result<bool, std::string>::makeError(number.error());
+  }
+  camera.farPlane = static_cast<float>(number.value());
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<std::vector<SnapshotCaptureTarget>, std::string>
+parseCaptures(yyjson_val *root) {
+  std::vector<SnapshotCaptureTarget> captures;
+  yyjson_val *array = optionalObject(root, "captures");
+  if (array == nullptr) {
+    return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeResult(
+        std::move(captures));
+  }
+  if (!yyjson_is_arr(array)) {
+    return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeError(
+        "captures must be an array");
+  }
+  captures.reserve(yyjson_arr_size(array));
+  yyjson_arr_iter iter;
+  yyjson_arr_iter_init(array, &iter);
+  yyjson_val *entry = nullptr;
+  while ((entry = yyjson_arr_iter_next(&iter)) != nullptr) {
+    SnapshotCaptureTarget target{};
+    if (yyjson_is_str(entry)) {
+      target.name = std::string(yyjson_get_str(entry), yyjson_get_len(entry));
+    } else if (yyjson_is_obj(entry)) {
+      static constexpr std::array keys{std::string_view("target"),
+                                      std::string_view("profile"),
+                                      std::string_view("required")};
+      auto result = rejectUnknownKeys(entry, keys, "captures[]");
+      if (result.hasError()) {
+        return Result<std::vector<SnapshotCaptureTarget>, std::string>::
+            makeError(result.error());
+      }
+      auto name = readString(entry, "target", "captures[]", true);
+      if (name.hasError()) {
+        return Result<std::vector<SnapshotCaptureTarget>, std::string>::
+            makeError(name.error());
+      }
+      target.name = std::move(name.value());
+      auto profile = readString(entry, "profile", "captures[]", false, {});
+      if (profile.hasError()) {
+        return Result<std::vector<SnapshotCaptureTarget>, std::string>::
+            makeError(profile.error());
+      }
+      target.profile = std::move(profile.value());
+      auto required = readBool(entry, "required", "captures[]", true);
+      if (required.hasError()) {
+        return Result<std::vector<SnapshotCaptureTarget>, std::string>::
+            makeError(required.error());
+      }
+      target.required = required.value();
+    } else {
+      return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeError(
+          "captures entries must be strings or objects");
+    }
+    const SnapshotCaptureCatalogEntry *catalog =
+        findSnapshotCaptureCatalogEntry(target.name);
+    if (catalog == nullptr) {
+      return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeError(
+          "unknown capture target '" + target.name + "'");
+    }
+    if (catalog->availability ==
+        SnapshotCaptureAvailability::KnownNotCapturable) {
+      return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeError(
+          "capture target '" + target.name +
+          "' is known but not capturable yet: " +
+          std::string(catalog->diagnosticWork));
+    }
+    if (target.profile.empty()) {
+      target.profile = std::string(catalog->defaultCompareProfile);
+    }
+    captures.push_back(std::move(target));
+  }
+  return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeResult(
+      std::move(captures));
+}
+
+} // namespace
+
+std::filesystem::path defaultSnapshotCaseRoot() {
+  return snapshotRepoRoot() / "tools" / "cases" / "snapshots";
+}
+
+Result<std::filesystem::path, std::string>
+resolveSnapshotPath(std::string_view base, const std::filesystem::path &path) {
+  if (path.is_absolute()) {
+    return Result<std::filesystem::path, std::string>::makeResult(path);
+  }
+  if (base == "repoRoot") {
+    return Result<std::filesystem::path, std::string>::makeResult(
+        snapshotRepoRoot() / path);
+  }
+  auto configResult = loadRuntimeConfigFromEnvOrDefault();
+  if (configResult.hasError()) {
+    return Result<std::filesystem::path, std::string>::makeError(
+        "resolveSnapshotPath: " + configResult.error());
+  }
+  const RuntimeConfig &config = configResult.value();
+  if (base == "modelsRoot") {
+    return Result<std::filesystem::path, std::string>::makeResult(
+        config.roots.models / path);
+  }
+  if (base == "texturesRoot") {
+    return Result<std::filesystem::path, std::string>::makeResult(
+        config.roots.textures / path);
+  }
+  return Result<std::filesystem::path, std::string>::makeError(
+      "resolveSnapshotPath: unsupported base '" + std::string(base) + "'");
+}
+
+Result<SnapshotCase, std::string>
+loadSnapshotCaseManifest(const std::filesystem::path &path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return Result<SnapshotCase, std::string>::makeError(
+        "loadSnapshotCaseManifest: failed to open " + path.string());
+  }
+  std::string json((std::istreambuf_iterator<char>(file)),
+                   std::istreambuf_iterator<char>());
+  yyjson_read_err error{};
+  JsonDocPtr doc(yyjson_read_opts(json.data(), json.size(), 0, nullptr, &error),
+                 &yyjson_doc_free);
+  if (!doc) {
+    return Result<SnapshotCase, std::string>::makeError(
+        "loadSnapshotCaseManifest: JSON parse failed at byte " +
+        std::to_string(error.pos) + ": " + error.msg);
+  }
+  yyjson_val *root = yyjson_doc_get_root(doc.get());
+  static constexpr std::array rootKeys{
+      std::string_view("schemaVersion"), std::string_view("id"),
+      std::string_view("suite"), std::string_view("description"),
+      std::string_view("scene"), std::string_view("backend"),
+      std::string_view("resolution"), std::string_view("fixedDeltaSeconds"),
+      std::string_view("warmupFrames"), std::string_view("captureFrame"),
+      std::string_view("authoritative"), std::string_view("presentMode"),
+      std::string_view("windowMode"), std::string_view("renderGraph"),
+      std::string_view("camera"), std::string_view("settings"),
+      std::string_view("requirements"), std::string_view("captures"),
+  };
+  auto keysResult = rejectUnknownKeys(root, rootKeys, "$");
+  if (keysResult.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(keysResult.error());
+  }
+
+  SnapshotCase out{};
+  out.manifestPath = path;
+  auto schema = readU32(root, "schemaVersion", "$", 1u);
+  if (schema.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(schema.error());
+  }
+  out.schemaVersion = schema.value();
+  if (out.schemaVersion != 1u) {
+    return Result<SnapshotCase, std::string>::makeError(
+        "schemaVersion must be 1");
+  }
+  auto text = readString(root, "id", "$", true);
+  if (text.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(text.error());
+  }
+  out.id = std::move(text.value());
+  text = readString(root, "suite", "$", true);
+  if (text.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(text.error());
+  }
+  out.suite = std::move(text.value());
+  text = readString(root, "description", "$", false, out.description);
+  if (text.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(text.error());
+  }
+  out.description = std::move(text.value());
+  text = readString(root, "backend", "$", false, out.backend);
+  if (text.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(text.error());
+  }
+  out.backend = std::move(text.value());
+  text = readString(root, "presentMode", "$", false, out.presentMode);
+  if (text.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(text.error());
+  }
+  out.presentMode = std::move(text.value());
+  text = readString(root, "windowMode", "$", false, out.windowMode);
+  if (text.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(text.error());
+  }
+  out.windowMode = std::move(text.value());
+
+  yyjson_val *resolution = optionalObject(root, "resolution");
+  if (resolution != nullptr) {
+    if (!yyjson_is_arr(resolution) || yyjson_arr_size(resolution) != 2u) {
+      return Result<SnapshotCase, std::string>::makeError(
+          "resolution must be [width, height]");
+    }
+    for (uint32_t i = 0u; i < 2u; ++i) {
+      yyjson_val *entry = yyjson_arr_get(resolution, i);
+      if (!yyjson_is_uint(entry) || yyjson_get_uint(entry) > UINT32_MAX) {
+        return Result<SnapshotCase, std::string>::makeError(
+            "resolution entries must be uint32");
+      }
+      out.resolution[i] = static_cast<uint32_t>(yyjson_get_uint(entry));
+    }
+  }
+
+  auto number = readDouble(root, "fixedDeltaSeconds", "$",
+                           out.fixedDeltaSeconds);
+  if (number.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(number.error());
+  }
+  out.fixedDeltaSeconds = number.value();
+  auto u32 = readU32(root, "warmupFrames", "$", out.warmupFrames);
+  if (u32.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(u32.error());
+  }
+  out.warmupFrames = u32.value();
+  u32 = readU32(root, "captureFrame", "$", out.captureFrame);
+  if (u32.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(u32.error());
+  }
+  out.captureFrame = std::max(out.warmupFrames, u32.value());
+  auto boolean = readBool(root, "authoritative", "$", out.authoritative);
+  if (boolean.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(boolean.error());
+  }
+  out.authoritative = boolean.value();
+
+  if (yyjson_val *scene = optionalObject(root, "scene")) {
+    auto parsed = parseScene(scene, out.scene);
+    if (parsed.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(parsed.error());
+    }
+  }
+  if (yyjson_val *camera = optionalObject(root, "camera")) {
+    auto parsed = parseCamera(camera, out.camera);
+    if (parsed.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(parsed.error());
+    }
+  }
+  if (yyjson_val *settings = optionalObject(root, "settings")) {
+    auto parsed = parseSettings(settings, out.settings);
+    if (parsed.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(parsed.error());
+    }
+  }
+  if (yyjson_val *renderGraph = optionalObject(root, "renderGraph")) {
+    static constexpr std::array keys{std::string_view("workerCount"),
+                                    std::string_view("parallelCompile"),
+                                    std::string_view("parallelRecording")};
+    auto parsed = rejectUnknownKeys(renderGraph, keys, "renderGraph");
+    if (parsed.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(parsed.error());
+    }
+    u32 = readU32(renderGraph, "workerCount", "renderGraph",
+                  out.renderGraph.workerCount);
+    if (u32.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(u32.error());
+    }
+    out.renderGraph.workerCount = std::max(1u, u32.value());
+    boolean = readBool(renderGraph, "parallelCompile", "renderGraph",
+                       out.renderGraph.parallelCompile);
+    if (boolean.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(boolean.error());
+    }
+    out.renderGraph.parallelCompile = boolean.value();
+    boolean = readBool(renderGraph, "parallelRecording", "renderGraph",
+                       out.renderGraph.parallelRecording);
+    if (boolean.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(boolean.error());
+    }
+    out.renderGraph.parallelRecording = boolean.value();
+  }
+  if (yyjson_val *requirements = optionalObject(root, "requirements")) {
+    static constexpr std::array keys{std::string_view("assets"),
+                                    std::string_view("backends"),
+                                    std::string_view("allowVisibleWindow")};
+    auto parsed = rejectUnknownKeys(requirements, keys, "requirements");
+    if (parsed.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(parsed.error());
+    }
+    auto array = readStringArray(requirements, "assets", "requirements");
+    if (array.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(array.error());
+    }
+    out.requirements.assets = std::move(array.value());
+    array = readStringArray(requirements, "backends", "requirements");
+    if (array.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(array.error());
+    }
+    out.requirements.backends = std::move(array.value());
+    boolean = readBool(requirements, "allowVisibleWindow", "requirements",
+                       out.requirements.allowVisibleWindow);
+    if (boolean.hasError()) {
+      return Result<SnapshotCase, std::string>::makeError(boolean.error());
+    }
+    out.requirements.allowVisibleWindow = boolean.value();
+  }
+  auto captures = parseCaptures(root);
+  if (captures.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(captures.error());
+  }
+  out.captures = std::move(captures.value());
+  if (out.captures.empty()) {
+    out.captures.push_back(SnapshotCaptureTarget{
+        .name = "final_color", .profile = "ldr_color", .required = true});
+  }
+  return Result<SnapshotCase, std::string>::makeResult(std::move(out));
+}
+
+Result<std::vector<SnapshotCase>, std::string>
+discoverSnapshotCases(const SnapshotManifestLoadOptions &options) {
+  const std::filesystem::path root =
+      options.caseRoot.empty() ? defaultSnapshotCaseRoot() : options.caseRoot;
+  std::vector<SnapshotCase> cases;
+  if (!std::filesystem::exists(root)) {
+    return Result<std::vector<SnapshotCase>, std::string>::makeResult(
+        std::move(cases));
+  }
+  for (const std::filesystem::directory_entry &entry :
+       std::filesystem::recursive_directory_iterator(root)) {
+    if (!entry.is_regular_file() || entry.path().extension() != ".json") {
+      continue;
+    }
+    auto loaded = loadSnapshotCaseManifest(entry.path());
+    if (loaded.hasError()) {
+      return Result<std::vector<SnapshotCase>, std::string>::makeError(
+          loaded.error());
+    }
+    cases.push_back(std::move(loaded.value()));
+  }
+  std::sort(cases.begin(), cases.end(),
+            [](const SnapshotCase &lhs, const SnapshotCase &rhs) {
+              return lhs.id < rhs.id;
+            });
+  return Result<std::vector<SnapshotCase>, std::string>::makeResult(
+      std::move(cases));
+}
+
+const SnapshotCase *findSnapshotCaseById(const std::vector<SnapshotCase> &cases,
+                                         std::string_view id) {
+  for (const SnapshotCase &snapshotCase : cases) {
+    if (snapshotCase.id == id) {
+      return &snapshotCase;
+    }
+  }
+  return nullptr;
+}
+
+std::vector<const SnapshotCase *>
+filterSnapshotCasesBySuite(const std::vector<SnapshotCase> &cases,
+                           std::string_view suite) {
+  std::vector<const SnapshotCase *> out;
+  for (const SnapshotCase &snapshotCase : cases) {
+    if (suite.empty() || snapshotCase.suite == suite) {
+      out.push_back(&snapshotCase);
+    }
+  }
+  return out;
+}
+
+} // namespace nuri::tools::snapshot
