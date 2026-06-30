@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "smoke.procedural.depth",
+  "suite": "smoke",
+  "description": "Procedural renderer visual snapshot smoke case for the scene depth capture point",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.v1",
+    "seed": 2,
+    "contentHash": "procedural-empty-v1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 2,
+  "captureFrame": 4,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 1.2, 4.0],
+    "direction": [0.0, -0.15, -1.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Bilinear",
+      "anisotropy": 1
+    }
+  },
+  "requirements": {
+    "assets": [],
+    "backends": [],
+    "allowVisibleWindow": true
+  },
+  "captures": [
+    {
+      "target": "scene_depth",
+      "profile": "depth",
+      "required": false
+    }
+  ]
+}

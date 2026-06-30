@@ -67,4 +67,3 @@ runSnapshotSuite(std::vector<SnapshotCase> snapshotCases,
                  const SnapshotRunOptions &options = {});
 
 } // namespace nuri::tools::snapshot
-

@@ -98,9 +98,11 @@ template <typename T>
   case Format::D16_UNORM:
     return static_cast<float>(loadScalar<uint16_t>(bytes)) / 65535.0f;
   case Format::RG16_FLOAT:
-    return halfToFloat(loadScalar<uint16_t>(bytes + channel * sizeof(uint16_t)));
+    return halfToFloat(
+        loadScalar<uint16_t>(bytes + channel * sizeof(uint16_t)));
   case Format::RGBA16_FLOAT:
-    return halfToFloat(loadScalar<uint16_t>(bytes + channel * sizeof(uint16_t)));
+    return halfToFloat(
+        loadScalar<uint16_t>(bytes + channel * sizeof(uint16_t)));
   case Format::BC7_RGBA_UNORM:
   case Format::BC7_RGBA_SRGB:
   case Format::ETC2_RGB8_UNORM:
@@ -143,7 +145,7 @@ template <typename T>
 
 [[nodiscard]] std::vector<uint8_t> makePreviewRgba(const SnapshotImage &image) {
   std::vector<uint8_t> rgba(static_cast<size_t>(image.width) * image.height *
-                           4u);
+                            4u);
   if (image.values.empty() || image.channelCount == 0u) {
     return rgba;
   }
@@ -194,12 +196,10 @@ template <typename T>
       rgba[dst + 2u] = toU8(v);
       rgba[dst + 3u] = 255u;
     } else if (image.channelCount == 2u) {
-      const float x = std::isfinite(image.values[src + 0u])
-                          ? image.values[src + 0u]
-                          : 0.0f;
-      const float y = std::isfinite(image.values[src + 1u])
-                          ? image.values[src + 1u]
-                          : 0.0f;
+      const float x =
+          std::isfinite(image.values[src + 0u]) ? image.values[src + 0u] : 0.0f;
+      const float y =
+          std::isfinite(image.values[src + 1u]) ? image.values[src + 1u] : 0.0f;
       const float magnitude = std::sqrt(x * x + y * y);
       if (magnitude <= 1.0e-8f) {
         rgba[dst + 0u] = 0u;
@@ -208,8 +208,8 @@ template <typename T>
       } else {
         constexpr float kInvTwoPi = 0.15915494309189535f;
         const float hue = std::atan2(y, x) * kInvTwoPi + 1.0f;
-        const float value = std::clamp(magnitude * vectorScale * 2.0f, 0.18f,
-                                       1.0f);
+        const float value =
+            std::clamp(magnitude * vectorScale * 2.0f, 0.18f, 1.0f);
         const std::array<float, 3u> rgb = hsvToRgb(hue, 0.9f, value);
         rgba[dst + 0u] = toU8(rgb[0u]);
         rgba[dst + 1u] = toU8(rgb[1u]);
@@ -277,7 +277,8 @@ payloadExtension(SnapshotArtifactPayloadKind kind) noexcept {
 }
 
 [[nodiscard]] Result<bool, std::string>
-writeOiioFloatImage(const SnapshotImage &image, const std::filesystem::path &path,
+writeOiioFloatImage(const SnapshotImage &image,
+                    const std::filesystem::path &path,
                     std::string_view colorSpace) {
   OIIO::ImageSpec spec(static_cast<int>(image.width),
                        static_cast<int>(image.height),
@@ -421,9 +422,9 @@ decodeSnapshotImage(const SnapshotReadbackImage &image) {
   out.values.resize(static_cast<size_t>(width) * height * channels);
   for (uint32_t y = 0u; y < height; ++y) {
     for (uint32_t x = 0u; x < width; ++x) {
-      const std::byte *pixel =
-          image.bytes.data() + static_cast<size_t>(y) * image.rowStride +
-          static_cast<size_t>(x) * bpp;
+      const std::byte *pixel = image.bytes.data() +
+                               static_cast<size_t>(y) * image.rowStride +
+                               static_cast<size_t>(x) * bpp;
       const size_t dst =
           (static_cast<size_t>(y) * width + static_cast<size_t>(x)) * channels;
       for (uint32_t c = 0u; c < channels; ++c) {
@@ -471,8 +472,8 @@ writeSnapshotArtifacts(const SnapshotReadbackImage &image,
     if (decoded.hasError()) {
       return Result<bool, std::string>::makeError(decoded.error());
     }
-    auto written =
-        writeOiioFloatImage(decoded.value(), outPaths.raw, image.point.colorSpace);
+    auto written = writeOiioFloatImage(decoded.value(), outPaths.raw,
+                                       image.point.colorSpace);
     if (written.hasError()) {
       return written;
     }
@@ -523,8 +524,7 @@ readSnapshotImageFile(const std::filesystem::path &path) {
   const OIIO::ImageSpec spec = input->spec(0, 0);
   if (spec.width <= 0 || spec.height <= 0 || spec.nchannels <= 0) {
     return Result<SnapshotImage, std::string>::makeError(
-        "readSnapshotImageFile: invalid image dimensions for " +
-        path.string());
+        "readSnapshotImageFile: invalid image dimensions for " + path.string());
   }
   SnapshotImage out{};
   out.width = static_cast<uint32_t>(spec.width);

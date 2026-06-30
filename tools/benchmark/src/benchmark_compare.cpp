@@ -107,10 +107,10 @@ compareBenchmarkReports(const BenchmarkReport &current,
   addCompatibilityError(out, options.force,
                         current.benchmarkCase.id != baseline.benchmarkCase.id,
                         "case id mismatch");
-  addCompatibilityError(
-      out, options.force,
-      current.benchmarkCase.resolution != baseline.benchmarkCase.resolution,
-      "resolution mismatch");
+  addCompatibilityError(out, options.force,
+                        current.benchmarkCase.resolution !=
+                            baseline.benchmarkCase.resolution,
+                        "resolution mismatch");
   addCompatibilityError(out, options.force,
                         current.environment.gpuBackend !=
                             baseline.environment.gpuBackend,
@@ -123,14 +123,13 @@ compareBenchmarkReports(const BenchmarkReport &current,
                         current.environment.cmakeToolProfile !=
                             baseline.environment.cmakeToolProfile,
                         "tool profile mismatch");
-  addCompatibilityError(out, options.force,
-                        current.environment.tracyEnabled !=
-                                baseline.environment.tracyEnabled ||
-                            current.environment.tracyGpuEnabled !=
-                                baseline.environment.tracyGpuEnabled ||
-                            current.environment.devChecks !=
-                                baseline.environment.devChecks,
-                        "Tracy/dev-check flags mismatch");
+  addCompatibilityError(
+      out, options.force,
+      current.environment.tracyEnabled != baseline.environment.tracyEnabled ||
+          current.environment.tracyGpuEnabled !=
+              baseline.environment.tracyGpuEnabled ||
+          current.environment.devChecks != baseline.environment.devChecks,
+      "Tracy/dev-check flags mismatch");
   addCompatibilityError(out, options.force, !current.run.validForComparison,
                         "current report is not valid for comparison");
   addCompatibilityError(out, options.force, !baseline.run.validForComparison,

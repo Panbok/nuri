@@ -15,14 +15,14 @@ double percentileR7(std::vector<double> sortedValues, double percentile) {
   const double h = 1.0 + (static_cast<double>(sortedValues.size()) - 1.0) * p;
   const double floorH = std::floor(h);
   const size_t lowerIndex = static_cast<size_t>(floorH) - 1u;
-  const size_t upperIndex =
-      std::min(lowerIndex + 1u, sortedValues.size() - 1u);
+  const size_t upperIndex = std::min(lowerIndex + 1u, sortedValues.size() - 1u);
   const double fraction = h - floorH;
   return sortedValues[lowerIndex] +
          fraction * (sortedValues[upperIndex] - sortedValues[lowerIndex]);
 }
 
-Result<MetricStats, std::string> computeMetricStats(std::vector<double> values) {
+Result<MetricStats, std::string>
+computeMetricStats(std::vector<double> values) {
   if (values.empty()) {
     return Result<MetricStats, std::string>::makeError(
         "computeMetricStats: no values");

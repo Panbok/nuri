@@ -21,9 +21,9 @@
 #include <filesystem>
 #include <format>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory_resource>
-#include <limits>
 #include <optional>
 #include <sstream>
 #include <thread>
@@ -35,9 +35,9 @@
 #ifndef PSAPI_VERSION
 #define PSAPI_VERSION 2
 #endif
+#include <psapi.h>
 #include <stdlib.h>
 #include <windows.h>
-#include <psapi.h>
 #else
 #include <sys/resource.h>
 #endif
@@ -57,12 +57,8 @@ public:
       std::pmr::memory_resource *upstream = std::pmr::get_default_resource())
       : upstream_(upstream) {}
 
-  [[nodiscard]] uint64_t currentBytes() const noexcept {
-    return currentBytes_;
-  }
-  [[nodiscard]] uint64_t peakBytes() const noexcept {
-    return peakBytes_;
-  }
+  [[nodiscard]] uint64_t currentBytes() const noexcept { return currentBytes_; }
+  [[nodiscard]] uint64_t peakBytes() const noexcept { return peakBytes_; }
 
 private:
   void *do_allocate(size_t bytes, size_t alignment) override {
@@ -77,7 +73,8 @@ private:
     currentBytes_ -= bytes;
   }
 
-  bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override {
+  bool
+  do_is_equal(const std::pmr::memory_resource &other) const noexcept override {
     return this == &other;
   }
 
@@ -115,7 +112,7 @@ struct ProcessMemorySnapshot {
   snapshot.peakPagefileUsageBytes =
       static_cast<uint64_t>(counters.PeakPagefileUsage);
 #else
-  struct rusage usage {};
+  struct rusage usage{};
   if (getrusage(RUSAGE_SELF, &usage) != 0) {
     return snapshot;
   }
@@ -123,8 +120,7 @@ struct ProcessMemorySnapshot {
 #if defined(__APPLE__)
   snapshot.peakWorkingSetBytes = static_cast<uint64_t>(usage.ru_maxrss);
 #else
-  snapshot.peakWorkingSetBytes =
-      static_cast<uint64_t>(usage.ru_maxrss) * 1024u;
+  snapshot.peakWorkingSetBytes = static_cast<uint64_t>(usage.ru_maxrss) * 1024u;
 #endif
 #endif
   return snapshot;
@@ -201,8 +197,7 @@ void addRendererFrameMetrics(std::map<std::string, double> &measurements,
 
   const ShadowFrameMetrics &shadow = metrics.shadow;
   addIfNonzero(measurements, "renderer.shadow.cascades", shadow.cascadeCount);
-  addIfNonzero(measurements, "renderer.shadow.total_draws",
-               shadow.totalDraws);
+  addIfNonzero(measurements, "renderer.shadow.total_draws", shadow.totalDraws);
   addIfNonzero(measurements, "renderer.shadow.total_culled_draws",
                shadow.totalCulledDraws);
   addIfNonzero(measurements, "renderer.shadow.static_caster_entries",
@@ -247,8 +242,7 @@ void addRendererFrameMetrics(std::map<std::string, double> &measurements,
                 aa.reactiveMaskTotalBytes);
   addBytesAsMiB(measurements, "gpu.memory.aa.spatial_aa_total_mb",
                 aa.spatialAATotalBytes);
-  addBytesAsMiB(measurements, "gpu.memory.aa.msaa_total_mb",
-                aa.msaaTotalBytes);
+  addBytesAsMiB(measurements, "gpu.memory.aa.msaa_total_mb", aa.msaaTotalBytes);
 
   const AmbientOcclusionFrameMetrics &ao = metrics.ambientOcclusion;
   addIfNonzero(measurements, "renderer.ao.normal_prepass_draws",
@@ -263,8 +257,7 @@ void addRendererFrameMetrics(std::map<std::string, double> &measurements,
                 ao.totalTextureBytes);
 
   const HDRPostProcessFrameMetrics &hdr = metrics.hdrPostProcess;
-  addIfNonzero(measurements, "renderer.hdr.bloom_passes",
-               hdr.bloomPassCount);
+  addIfNonzero(measurements, "renderer.hdr.bloom_passes", hdr.bloomPassCount);
   addIfNonzero(measurements, "renderer.hdr.luminance_passes",
                hdr.luminancePassCount);
   addIfNonzero(measurements, "renderer.hdr.adaptation_passes",
@@ -369,8 +362,8 @@ public:
   return "nvrhi";
 }
 
-[[nodiscard]] std::string
-resolvePresentMode(const BenchmarkCase &benchmarkCase, std::string &source) {
+[[nodiscard]] std::string resolvePresentMode(const BenchmarkCase &benchmarkCase,
+                                             std::string &source) {
   const std::string envPresent = readProcessEnvironment("NURI_PRESENT_MODE");
   if (benchmarkCase.presentMode != "default") {
     source = "manifest";
@@ -385,10 +378,8 @@ resolvePresentMode(const BenchmarkCase &benchmarkCase, std::string &source) {
 }
 
 [[nodiscard]] Result<bool, BenchmarkExitCode>
-checkRequirements(const BenchmarkCase &benchmarkCase,
-                  std::string_view backend,
-                  std::vector<std::string> &warnings,
-                  std::string &message) {
+checkRequirements(const BenchmarkCase &benchmarkCase, std::string_view backend,
+                  std::vector<std::string> &warnings, std::string &message) {
   if (!benchmarkCase.requirements.allowVisibleWindow) {
     message = "case requires hidden/headless execution, which is unavailable";
     return Result<bool, BenchmarkExitCode>::makeError(
@@ -413,8 +404,8 @@ checkRequirements(const BenchmarkCase &benchmarkCase,
       return Result<bool, BenchmarkExitCode>::makeError(
           BenchmarkExitCode::InvalidInput);
     }
-    auto path = resolveBenchmarkPath(asset.substr(0, colon),
-                                     asset.substr(colon + 1u));
+    auto path =
+        resolveBenchmarkPath(asset.substr(0, colon), asset.substr(colon + 1u));
     if (path.hasError()) {
       message = path.error();
       return Result<bool, BenchmarkExitCode>::makeError(
@@ -436,8 +427,9 @@ checkRequirements(const BenchmarkCase &benchmarkCase,
 }
 
 void addGpuTimingMetric(std::map<std::string, double> &measurements,
-                        std::string_view metricId, const GpuTimingReport &report,
-                        GpuTimingScope scope, float timeMs) {
+                        std::string_view metricId,
+                        const GpuTimingReport &report, GpuTimingScope scope,
+                        float timeMs) {
   if (hasGpuTimingScope(report, scope)) {
     measurements.emplace(std::string(metricId), static_cast<double>(timeMs));
   }
@@ -526,20 +518,18 @@ void drainGpuTimings(GPUDevice &gpu, BenchmarkReport &report,
 
 [[nodiscard]] Result<bool, std::string>
 populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
-              RenderScene &scene,
-              std::pmr::memory_resource *memory,
+              RenderScene &scene, std::pmr::memory_resource *memory,
               std::optional<ScenePrefab> &prefab,
               std::optional<ScenePrefabAssets> &prefabAssets) {
   scene.bindResources(&renderer.resources());
-  auto lightResult =
-      scene.graph().addLight(scene.graph().rootNode(),
-                             LightDesc{
-                                 .type = LightType::Directional,
-                                 .name = "benchmark_key",
-                                 .color = glm::vec3(1.0f),
-                                 .intensity = 4.0f,
-                                 .enabled = true,
-                             });
+  auto lightResult = scene.graph().addLight(scene.graph().rootNode(),
+                                            LightDesc{
+                                                .type = LightType::Directional,
+                                                .name = "benchmark_key",
+                                                .color = glm::vec3(1.0f),
+                                                .intensity = 4.0f,
+                                                .enabled = true,
+                                            });
   if (lightResult.hasError()) {
     return Result<bool, std::string>::makeError(lightResult.error());
   }
@@ -550,15 +540,14 @@ populateScene(const BenchmarkCase &benchmarkCase, Renderer &renderer,
       return Result<bool, std::string>::makeError(
           "prefab scene requires pathBase and path");
     }
-    auto path =
-        resolveBenchmarkPath(benchmarkCase.scene.pathBase,
-                             benchmarkCase.scene.path);
+    auto path = resolveBenchmarkPath(benchmarkCase.scene.pathBase,
+                                     benchmarkCase.scene.path);
     if (path.hasError()) {
       return Result<bool, std::string>::makeError(path.error());
     }
     if (!std::filesystem::exists(path.value())) {
-      return Result<bool, std::string>::makeError(
-          "missing scene asset: " + path.value().string());
+      return Result<bool, std::string>::makeError("missing scene asset: " +
+                                                  path.value().string());
     }
     SceneImportOptions importOptions{};
     importOptions.assetBuildOptions.flipUVs = benchmarkCase.scene.flipUVs;
@@ -610,8 +599,8 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
                        Renderer &renderer, RenderSettings &settings,
                        TemporalCameraHistoryState &cameraHistory,
                        const Camera &camera, uint64_t frameIndex,
-                       double timeSeconds, double deltaSeconds,
-                       uint32_t width, uint32_t height) {
+                       double timeSeconds, double deltaSeconds, uint32_t width,
+                       uint32_t height) {
   sanitizeBenchmarkRenderSettings(settings);
   frameContext.scene = &scene;
   frameContext.resources = &renderer.resources();
@@ -643,9 +632,9 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.deltaSeconds = deltaSeconds;
 }
 
-[[nodiscard]] double elapsedMs(
-    std::chrono::steady_clock::time_point begin,
-    std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now()) {
+[[nodiscard]] double elapsedMs(std::chrono::steady_clock::time_point begin,
+                               std::chrono::steady_clock::time_point end =
+                                   std::chrono::steady_clock::now()) {
   return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
@@ -703,8 +692,8 @@ formatBenchmarkCaseExplanationJson(const BenchmarkCase &benchmarkCase) {
   return Result<std::string, std::string>::makeResult(out.str());
 }
 
-std::string formatBenchmarkCaseExplanationText(
-    const BenchmarkCase &benchmarkCase) {
+std::string
+formatBenchmarkCaseExplanationText(const BenchmarkCase &benchmarkCase) {
   std::ostringstream out;
   out << benchmarkCase.id << "\n"
       << "suite: " << benchmarkCase.suite << "\n"
@@ -743,7 +732,8 @@ formatEffectiveConfigJson(const BenchmarkCase &benchmarkCase,
 BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
                                     const BenchmarkRunOptions &options) {
   BenchmarkRunResult result{};
-  const uint32_t samples = options.samplesOverride.value_or(benchmarkCase.samples);
+  const uint32_t samples =
+      options.samplesOverride.value_or(benchmarkCase.samples);
   benchmarkCase.samples = samples;
   std::string backendSource;
   const std::string backend = resolveBackendName(benchmarkCase, backendSource);
@@ -773,9 +763,9 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
   report.run.fixedDeltaSeconds = benchmarkCase.fixedDeltaSeconds;
   report.artifacts.artifactDir = artifactDir;
   report.timingDrain.drainTimeoutMs = benchmarkCase.drainTimeoutMs;
-  report.environment = collectBenchmarkEnvironment(
-      backend, backendSource, presentMode, presentSource,
-      options.tracyDiagnostic);
+  report.environment =
+      collectBenchmarkEnvironment(backend, backendSource, presentMode,
+                                  presentSource, options.tracyDiagnostic);
   report.environment.renderGraphWorkerCount =
       benchmarkCase.renderGraph.workerCount;
   report.environment.renderGraphParallelCompile =
@@ -885,8 +875,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     std::pmr::unsynchronized_pool_resource pipelineMemory(
         &pipelineMemoryTracker);
     std::pmr::unsynchronized_pool_resource sceneMemory(&sceneMemoryTracker);
-    std::unique_ptr<Renderer> renderer =
-        Renderer::create(*gpu, rendererMemory);
+    std::unique_ptr<Renderer> renderer = Renderer::create(*gpu, rendererMemory);
     RenderPipeline pipeline(&pipelineMemory);
     auto pipelineResult = registerDefaultRenderPipeline(
         pipeline, *gpu, config.shaders, &pipelineMemory);
@@ -925,8 +914,8 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     double timeSeconds = 0.0;
     std::map<uint64_t, size_t> measuredFrameByIndex;
 
-    const auto renderOneFrame = [&](uint32_t sampleIndex,
-                                    bool measured) -> Result<bool, std::string> {
+    const auto renderOneFrame =
+        [&](uint32_t sampleIndex, bool measured) -> Result<bool, std::string> {
       window->pollEvents();
       BenchmarkFrameRecord frame{};
       frame.frameIndex = frameIndex;
@@ -941,11 +930,10 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
         return Result<bool, std::string>::makeError(commitResult.error());
       }
       const double sceneCommitMs = elapsedMs(commitBegin);
-      buildFrameContext(frameContext, scene, *renderer, settings, cameraHistory,
-                        camera, frameIndex, timeSeconds,
-                        benchmarkCase.fixedDeltaSeconds,
-                        benchmarkCase.resolution[0],
-                        benchmarkCase.resolution[1]);
+      buildFrameContext(
+          frameContext, scene, *renderer, settings, cameraHistory, camera,
+          frameIndex, timeSeconds, benchmarkCase.fixedDeltaSeconds,
+          benchmarkCase.resolution[0], benchmarkCase.resolution[1]);
       const auto renderBegin = std::chrono::steady_clock::now();
       auto renderResult = renderer->render(pipeline, frameContext);
       const double renderSubmitMs = elapsedMs(renderBegin);

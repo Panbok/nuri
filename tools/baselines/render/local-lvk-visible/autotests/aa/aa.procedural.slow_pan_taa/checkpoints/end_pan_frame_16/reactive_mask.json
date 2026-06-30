@@ -1,0 +1,11 @@
+{
+  "target": "reactive_mask",
+  "format": 15,
+  "width": 640,
+  "height": 360,
+  "rowStride": 640,
+  "origin": "top_left",
+  "colorSpace": "linear_scalar",
+  "payload": "reactive_mask.png",
+  "hash": "fnv1a64:d1afd2826a19e3e6"
+}

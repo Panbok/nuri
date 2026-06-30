@@ -23,4 +23,3 @@ writeSnapshotSuiteHtmlFile(std::span<const SnapshotReport> reports,
                            const std::filesystem::path &path);
 
 } // namespace nuri::tools::snapshot
-

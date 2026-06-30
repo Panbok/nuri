@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.procedural.slow_pan_taa",
+  "suite": "aa",
+  "description": "Slow pan across reactive-mask procedural geometry with TAA enabled",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 7,
+    "contentHash": "nuri.procedural.reactive_mask.v1:7"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 16,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [-1.2, 0.85, 3.6],
+    "target": [0.0, 0.55, 0.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Quality"
+    }
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "taa_pan",
+        "startFrame": 0,
+        "endFrame": 16,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-1.2, 0.85, 3.6],
+            "target": [0.0, 0.55, 0.0]
+          },
+          {
+            "frame": 16,
+            "position": [1.2, 0.85, 3.6],
+            "target": [0.0, 0.55, 0.0]
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "end_pan",
+      "frame": 16,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
+        {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": true},
+        {"target": "reactive_mask", "profile": "mask", "required": false, "compare": true}
+      ],
+      "assertions": [
+        {
+          "id": "taa_resolve_present",
+          "metric": "renderer.aa.taa_resolve_passes",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "metricWindows": [
+    {
+      "id": "steady_pan",
+      "frames": [4, 16],
+      "assertions": [
+        {
+          "id": "history_reset_count_stable",
+          "metric": "renderer.aa.history_reset_count",
+          "max": 1
+        },
+        {
+          "id": "history_valid_by_end_window",
+          "metric": "renderer.aa.history_valid",
+          "min": 1
+        }
+      ]
+    }
+  ]
+}

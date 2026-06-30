@@ -31,17 +31,18 @@ makeInitialCaptureReport(const SnapshotCaptureTarget &target) {
 } // namespace
 
 Result<SnapshotCaptureArtifactResult, std::string>
-writeSnapshotCaptureArtifacts(
-    GPUDevice &gpu, const RenderFrameContext &frameContext,
-    std::span<const SnapshotCaptureTarget> targets,
-    const std::filesystem::path &caseDir,
-    const std::filesystem::path &artifactStemDir) {
+writeSnapshotCaptureArtifacts(GPUDevice &gpu,
+                              const RenderFrameContext &frameContext,
+                              std::span<const SnapshotCaptureTarget> targets,
+                              const std::filesystem::path &caseDir,
+                              const std::filesystem::path &artifactStemDir) {
   SnapshotCaptureArtifactResult result{};
   result.captures.reserve(targets.size());
   for (const SnapshotCaptureTarget &target : targets) {
     result.captures.push_back(makeInitialCaptureReport(target));
   }
-  for (const RenderCapturePoint &point : frameContext.captureRegistry.points()) {
+  for (const RenderCapturePoint &point :
+       frameContext.captureRegistry.points()) {
     result.availableCapturePoints.emplace_back(point.name);
   }
 
@@ -83,9 +84,8 @@ writeSnapshotCaptureArtifacts(
       continue;
     }
     SnapshotArtifactPaths paths{};
-    auto written = writeSnapshotArtifacts(readback.value(),
-                                          artifactStemDir / capture.target,
-                                          paths);
+    auto written = writeSnapshotArtifacts(
+        readback.value(), artifactStemDir / capture.target, paths);
     if (written.hasError()) {
       return Result<SnapshotCaptureArtifactResult, std::string>::makeError(
           written.error());

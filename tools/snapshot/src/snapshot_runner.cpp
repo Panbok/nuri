@@ -119,8 +119,8 @@ public:
   return "nvrhi";
 }
 
-[[nodiscard]] std::string
-resolvePresentMode(const SnapshotCase &snapshotCase, std::string &source) {
+[[nodiscard]] std::string resolvePresentMode(const SnapshotCase &snapshotCase,
+                                             std::string &source) {
   const std::string envPresent = readProcessEnvironment("NURI_PRESENT_MODE");
   if (snapshotCase.presentMode != "default") {
     source = "manifest";
@@ -220,68 +220,60 @@ populateTransmissionTransparencyScene(const SnapshotCase &snapshotCase,
     return renderer.resources().acquireMaterial(request);
   };
 
-  auto backgroundMaterial =
-      acquireMaterial("snapshot_transmission_background",
-                      glm::vec4(0.03f, 0.12f, 0.24f, 1.0f),
-                      MaterialAlphaMode::Opaque, 0.0f);
+  auto backgroundMaterial = acquireMaterial(
+      "snapshot_transmission_background", glm::vec4(0.03f, 0.12f, 0.24f, 1.0f),
+      MaterialAlphaMode::Opaque, 0.0f);
   if (backgroundMaterial.hasError()) {
     return Result<bool, std::string>::makeError(backgroundMaterial.error());
   }
-  auto warmMaterial =
-      acquireMaterial("snapshot_transmission_warm_band",
-                      glm::vec4(1.0f, 0.34f, 0.10f, 1.0f),
-                      MaterialAlphaMode::Opaque, 0.0f);
+  auto warmMaterial = acquireMaterial("snapshot_transmission_warm_band",
+                                      glm::vec4(1.0f, 0.34f, 0.10f, 1.0f),
+                                      MaterialAlphaMode::Opaque, 0.0f);
   if (warmMaterial.hasError()) {
     return Result<bool, std::string>::makeError(warmMaterial.error());
   }
-  auto coolMaterial =
-      acquireMaterial("snapshot_transmission_cool_band",
-                      glm::vec4(0.08f, 0.72f, 0.95f, 1.0f),
-                      MaterialAlphaMode::Opaque, 0.0f);
+  auto coolMaterial = acquireMaterial("snapshot_transmission_cool_band",
+                                      glm::vec4(0.08f, 0.72f, 0.95f, 1.0f),
+                                      MaterialAlphaMode::Opaque, 0.0f);
   if (coolMaterial.hasError()) {
     return Result<bool, std::string>::makeError(coolMaterial.error());
   }
-  auto transparentMaterial =
-      acquireMaterial("snapshot_plain_transparent",
-                      glm::vec4(1.0f, 0.82f, 0.20f, 0.46f),
-                      MaterialAlphaMode::Blend, 0.0f);
+  auto transparentMaterial = acquireMaterial(
+      "snapshot_plain_transparent", glm::vec4(1.0f, 0.82f, 0.20f, 0.46f),
+      MaterialAlphaMode::Blend, 0.0f);
   if (transparentMaterial.hasError()) {
     return Result<bool, std::string>::makeError(transparentMaterial.error());
   }
-  auto transmissionMaterial =
-      acquireMaterial("snapshot_blended_transmission",
-                      glm::vec4(0.52f, 0.96f, 1.0f, 0.42f),
-                      MaterialAlphaMode::Blend, 1.0f);
+  auto transmissionMaterial = acquireMaterial(
+      "snapshot_blended_transmission", glm::vec4(0.52f, 0.96f, 1.0f, 0.42f),
+      MaterialAlphaMode::Blend, 1.0f);
   if (transmissionMaterial.hasError()) {
     return Result<bool, std::string>::makeError(transmissionMaterial.error());
   }
 
-  const glm::mat4 upright =
-      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
-                  glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
   auto addPlane = [&](std::string_view name, const glm::vec3 &translation,
                       const glm::vec3 &scale,
                       MaterialRef material) -> Result<bool, std::string> {
-    const glm::mat4 transform =
-        glm::translate(glm::mat4(1.0f), translation) * upright *
-        glm::scale(glm::mat4(1.0f), scale);
+    const glm::mat4 transform = glm::translate(glm::mat4(1.0f), translation) *
+                                upright * glm::scale(glm::mat4(1.0f), scale);
     auto nodeResult =
         scene.graph().createNode(scene.graph().rootNode(), name, transform);
     if (nodeResult.hasError()) {
       return Result<bool, std::string>::makeError(nodeResult.error());
     }
-    auto renderableResult =
-        scene.graph().addRenderable(nodeResult.value(), modelResult.value(),
-                                    material);
+    auto renderableResult = scene.graph().addRenderable(
+        nodeResult.value(), modelResult.value(), material);
     if (renderableResult.hasError()) {
       return Result<bool, std::string>::makeError(renderableResult.error());
     }
     return Result<bool, std::string>::makeResult(true);
   };
 
-  auto result = addPlane("OpaqueBackground", glm::vec3(0.0f, 0.0f, -0.80f),
-                         glm::vec3(5.0f, 3.0f, 1.0f),
-                         backgroundMaterial.value());
+  auto result =
+      addPlane("OpaqueBackground", glm::vec3(0.0f, 0.0f, -0.80f),
+               glm::vec3(5.0f, 3.0f, 1.0f), backgroundMaterial.value());
   if (result.hasError()) {
     return result;
   }
@@ -296,14 +288,12 @@ populateTransmissionTransparencyScene(const SnapshotCase &snapshotCase,
     return result;
   }
   result = addPlane("PlainTransparentBehind", glm::vec3(-0.38f, 0.04f, 0.0f),
-                    glm::vec3(2.15f, 1.72f, 1.0f),
-                    transparentMaterial.value());
+                    glm::vec3(2.15f, 1.72f, 1.0f), transparentMaterial.value());
   if (result.hasError()) {
     return result;
   }
   return addPlane("BlendedTransmissionInFront", glm::vec3(0.34f, -0.02f, 0.25f),
-                  glm::vec3(2.0f, 1.9f, 1.0f),
-                  transmissionMaterial.value());
+                  glm::vec3(2.0f, 1.9f, 1.0f), transmissionMaterial.value());
 }
 
 [[nodiscard]] Result<bool, std::string>
@@ -341,47 +331,42 @@ populateReactiveMaskScene(const SnapshotCase &snapshotCase, Renderer &renderer,
     return renderer.resources().acquireMaterial(request);
   };
 
-  auto backgroundMaterial =
-      acquireMaterial("snapshot_reactive_background",
-                      glm::vec4(0.04f, 0.12f, 0.22f, 1.0f),
-                      MaterialAlphaMode::Opaque);
+  auto backgroundMaterial = acquireMaterial(
+      "snapshot_reactive_background", glm::vec4(0.04f, 0.12f, 0.22f, 1.0f),
+      MaterialAlphaMode::Opaque);
   if (backgroundMaterial.hasError()) {
     return Result<bool, std::string>::makeError(backgroundMaterial.error());
   }
-  auto maskedMaterial =
-      acquireMaterial("snapshot_alpha_mask_reactive",
-                      glm::vec4(0.32f, 1.0f, 0.48f, 0.85f),
-                      MaterialAlphaMode::Mask);
+  auto maskedMaterial = acquireMaterial("snapshot_alpha_mask_reactive",
+                                        glm::vec4(0.32f, 1.0f, 0.48f, 0.85f),
+                                        MaterialAlphaMode::Mask);
   if (maskedMaterial.hasError()) {
     return Result<bool, std::string>::makeError(maskedMaterial.error());
   }
 
-  const glm::mat4 upright =
-      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
-                  glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
   auto addPlane = [&](std::string_view name, const glm::vec3 &translation,
                       const glm::vec3 &scale,
                       MaterialRef material) -> Result<bool, std::string> {
-    const glm::mat4 transform =
-        glm::translate(glm::mat4(1.0f), translation) * upright *
-        glm::scale(glm::mat4(1.0f), scale);
+    const glm::mat4 transform = glm::translate(glm::mat4(1.0f), translation) *
+                                upright * glm::scale(glm::mat4(1.0f), scale);
     auto nodeResult =
         scene.graph().createNode(scene.graph().rootNode(), name, transform);
     if (nodeResult.hasError()) {
       return Result<bool, std::string>::makeError(nodeResult.error());
     }
-    auto renderableResult =
-        scene.graph().addRenderable(nodeResult.value(), modelResult.value(),
-                                    material);
+    auto renderableResult = scene.graph().addRenderable(
+        nodeResult.value(), modelResult.value(), material);
     if (renderableResult.hasError()) {
       return Result<bool, std::string>::makeError(renderableResult.error());
     }
     return Result<bool, std::string>::makeResult(true);
   };
 
-  auto result = addPlane("ReactiveBackground", glm::vec3(0.0f, 0.0f, -0.65f),
-                         glm::vec3(4.6f, 2.8f, 1.0f),
-                         backgroundMaterial.value());
+  auto result =
+      addPlane("ReactiveBackground", glm::vec3(0.0f, 0.0f, -0.65f),
+               glm::vec3(4.6f, 2.8f, 1.0f), backgroundMaterial.value());
   if (result.hasError()) {
     return result;
   }
@@ -414,8 +399,8 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
   }
 
   auto acquireMaterial =
-      [&](std::string_view name, const glm::vec4 &color)
-      -> Result<MaterialRef, std::string> {
+      [&](std::string_view name,
+          const glm::vec4 &color) -> Result<MaterialRef, std::string> {
     MaterialRequest request{};
     request.debugName = std::string(name);
     request.desc.baseColorFactor = color;
@@ -427,64 +412,56 @@ populateShadowPlanesScene(const SnapshotCase &snapshotCase, Renderer &renderer,
     return renderer.resources().acquireMaterial(request);
   };
 
-  auto floorMaterial =
-      acquireMaterial("snapshot_shadow_floor",
-                      glm::vec4(0.72f, 0.70f, 0.64f, 1.0f));
+  auto floorMaterial = acquireMaterial("snapshot_shadow_floor",
+                                       glm::vec4(0.72f, 0.70f, 0.64f, 1.0f));
   if (floorMaterial.hasError()) {
     return Result<bool, std::string>::makeError(floorMaterial.error());
   }
-  auto wallMaterial =
-      acquireMaterial("snapshot_shadow_wall",
-                      glm::vec4(0.58f, 0.68f, 0.78f, 1.0f));
+  auto wallMaterial = acquireMaterial("snapshot_shadow_wall",
+                                      glm::vec4(0.58f, 0.68f, 0.78f, 1.0f));
   if (wallMaterial.hasError()) {
     return Result<bool, std::string>::makeError(wallMaterial.error());
   }
-  auto redMaterial =
-      acquireMaterial("snapshot_shadow_red",
-                      glm::vec4(0.86f, 0.18f, 0.12f, 1.0f));
+  auto redMaterial = acquireMaterial("snapshot_shadow_red",
+                                     glm::vec4(0.86f, 0.18f, 0.12f, 1.0f));
   if (redMaterial.hasError()) {
     return Result<bool, std::string>::makeError(redMaterial.error());
   }
-  auto blueMaterial =
-      acquireMaterial("snapshot_shadow_blue",
-                      glm::vec4(0.12f, 0.36f, 0.88f, 1.0f));
+  auto blueMaterial = acquireMaterial("snapshot_shadow_blue",
+                                      glm::vec4(0.12f, 0.36f, 0.88f, 1.0f));
   if (blueMaterial.hasError()) {
     return Result<bool, std::string>::makeError(blueMaterial.error());
   }
-  auto greenMaterial =
-      acquireMaterial("snapshot_shadow_green",
-                      glm::vec4(0.16f, 0.72f, 0.34f, 1.0f));
+  auto greenMaterial = acquireMaterial("snapshot_shadow_green",
+                                       glm::vec4(0.16f, 0.72f, 0.34f, 1.0f));
   if (greenMaterial.hasError()) {
     return Result<bool, std::string>::makeError(greenMaterial.error());
   }
 
-  const glm::mat4 upright =
-      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
-                  glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
   auto addPlane = [&](std::string_view name, const glm::mat4 &orientation,
                       const glm::vec3 &translation, const glm::vec3 &scale,
                       MaterialRef material) -> Result<bool, std::string> {
-    const glm::mat4 transform =
-        glm::translate(glm::mat4(1.0f), translation) * orientation *
-        glm::scale(glm::mat4(1.0f), scale);
+    const glm::mat4 transform = glm::translate(glm::mat4(1.0f), translation) *
+                                orientation *
+                                glm::scale(glm::mat4(1.0f), scale);
     auto nodeResult =
         scene.graph().createNode(scene.graph().rootNode(), name, transform);
     if (nodeResult.hasError()) {
       return Result<bool, std::string>::makeError(nodeResult.error());
     }
-    auto renderableResult =
-        scene.graph().addRenderable(nodeResult.value(), modelResult.value(),
-                                    material);
+    auto renderableResult = scene.graph().addRenderable(
+        nodeResult.value(), modelResult.value(), material);
     if (renderableResult.hasError()) {
       return Result<bool, std::string>::makeError(renderableResult.error());
     }
     return Result<bool, std::string>::makeResult(true);
   };
 
-  auto result = addPlane("ShadowFloor", glm::mat4(1.0f),
-                         glm::vec3(0.0f, -0.72f, 0.0f),
-                         glm::vec3(5.2f, 1.0f, 4.4f),
-                         floorMaterial.value());
+  auto result =
+      addPlane("ShadowFloor", glm::mat4(1.0f), glm::vec3(0.0f, -0.72f, 0.0f),
+               glm::vec3(5.2f, 1.0f, 4.4f), floorMaterial.value());
   if (result.hasError()) {
     return result;
   }
@@ -519,19 +496,19 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
                      .intensity = 4.0f,
                      .enabled = true};
   if (snapshotCase.scene.generator == "nuri.procedural.shadow_planes.v1") {
-    keyLight.rotation = glm::quatLookAt(
-        glm::normalize(glm::vec3(-0.45f, -0.78f, -0.44f)),
-        glm::vec3(0.0f, 1.0f, 0.0f));
+    keyLight.rotation =
+        glm::quatLookAt(glm::normalize(glm::vec3(-0.45f, -0.78f, -0.44f)),
+                        glm::vec3(0.0f, 1.0f, 0.0f));
     keyLight.intensity = 5.5f;
   }
-  auto lightResult = scene.graph().addLight(
-      scene.graph().rootNode(), keyLight);
+  auto lightResult = scene.graph().addLight(scene.graph().rootNode(), keyLight);
   if (lightResult.hasError()) {
     return Result<bool, std::string>::makeError(lightResult.error());
   }
 
   if (snapshotCase.scene.kind == "prefab") {
-    if (snapshotCase.scene.pathBase.empty() || snapshotCase.scene.path.empty()) {
+    if (snapshotCase.scene.pathBase.empty() ||
+        snapshotCase.scene.path.empty()) {
       return Result<bool, std::string>::makeError(
           "prefab scene requires pathBase and path");
     }
@@ -541,8 +518,8 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
       return Result<bool, std::string>::makeError(path.error());
     }
     if (!std::filesystem::exists(path.value())) {
-      return Result<bool, std::string>::makeError(
-          "missing scene asset: " + path.value().string());
+      return Result<bool, std::string>::makeError("missing scene asset: " +
+                                                  path.value().string());
     }
     SceneImportOptions importOptions{};
     importOptions.assetBuildOptions.flipUVs = snapshotCase.scene.flipUVs;
@@ -608,11 +585,9 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
           ? glm::normalize(snapshotCase.camera.direction)
           : glm::vec3(0.0f, 0.0f, -1.0f);
   const glm::vec3 position =
-      snapshotCase.camera.position +
-      snapshotCase.camera.positionDeltaPerFrame * static_cast<float>(frameIndex);
-  camera.setLookAt(position,
-                   position + direction,
-                   glm::vec3(0.0f, 1.0f, 0.0f));
+      snapshotCase.camera.position + snapshotCase.camera.positionDeltaPerFrame *
+                                         static_cast<float>(frameIndex);
+  camera.setLookAt(position, position + direction, glm::vec3(0.0f, 1.0f, 0.0f));
   return camera;
 }
 
@@ -620,8 +595,8 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
                        Renderer &renderer, RenderSettings &settings,
                        TemporalCameraHistoryState &cameraHistory,
                        const Camera &camera, uint64_t frameIndex,
-                       double timeSeconds, double deltaSeconds,
-                       uint32_t width, uint32_t height) {
+                       double timeSeconds, double deltaSeconds, uint32_t width,
+                       uint32_t height) {
   sanitizeSnapshotRenderSettings(settings);
   frameContext.scene = &scene;
   frameContext.resources = &renderer.resources();
@@ -680,28 +655,23 @@ void writeReports(SnapshotRunResult &result, SnapshotReport &report,
   result.htmlPath = htmlPath;
   report.artifacts.caseHtml = htmlPath;
   auto writeJson = writeSnapshotReportFile(report, jsonPath);
-  if (writeJson.hasError() &&
-      result.exitCode == SnapshotExitCode::Success) {
+  if (writeJson.hasError() && result.exitCode == SnapshotExitCode::Success) {
     result.exitCode = SnapshotExitCode::RuntimeError;
     result.message = writeJson.error();
   }
   auto writeHtml = writeSnapshotHtmlReportFile(report, htmlPath);
-  if (writeHtml.hasError() &&
-      result.exitCode == SnapshotExitCode::Success) {
+  if (writeHtml.hasError() && result.exitCode == SnapshotExitCode::Success) {
     result.exitCode = SnapshotExitCode::RuntimeError;
     result.message = writeHtml.error();
   }
 }
 
-[[nodiscard]] SnapshotReport
-makeInitialReport(const SnapshotCase &snapshotCase,
-                  const SnapshotRunOptions &options,
-                  const std::filesystem::path &artifactDir,
-                  const std::filesystem::path &caseDir,
-                  const std::filesystem::path &htmlPath,
-                  std::string_view backend, std::string_view backendSource,
-                  std::string_view presentMode,
-                  std::string_view presentSource) {
+[[nodiscard]] SnapshotReport makeInitialReport(
+    const SnapshotCase &snapshotCase, const SnapshotRunOptions &options,
+    const std::filesystem::path &artifactDir,
+    const std::filesystem::path &caseDir, const std::filesystem::path &htmlPath,
+    std::string_view backend, std::string_view backendSource,
+    std::string_view presentMode, std::string_view presentSource) {
   SnapshotReport report{};
   report.generatedAtUtc = utcTimestampIso8601();
   report.command = options.command;
@@ -712,7 +682,8 @@ makeInitialReport(const SnapshotCase &snapshotCase,
   report.environment = collectSnapshotEnvironment(
       backend, backendSource, presentMode, presentSource, options.windowMode,
       options.windowMode);
-  report.environment.renderGraphWorkerCount = snapshotCase.renderGraph.workerCount;
+  report.environment.renderGraphWorkerCount =
+      snapshotCase.renderGraph.workerCount;
   report.environment.renderGraphParallelCompile =
       snapshotCase.renderGraph.parallelCompile;
   report.environment.renderGraphParallelRecording =
@@ -798,8 +769,8 @@ formatSnapshotCaseExplanationJson(const SnapshotCase &snapshotCase) {
   return Result<std::string, std::string>::makeResult(out.str());
 }
 
-std::string formatSnapshotCaseExplanationText(
-    const SnapshotCase &snapshotCase) {
+std::string
+formatSnapshotCaseExplanationText(const SnapshotCase &snapshotCase) {
   std::ostringstream out;
   out << snapshotCase.id << "\n"
       << "suite: " << snapshotCase.suite << "\n"
@@ -846,19 +817,17 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
   const std::string presentMode =
       resolvePresentMode(snapshotCase, presentSource);
   const std::filesystem::path artifactDir =
-      options.artifactDir.empty()
-          ? snapshotRepoRoot() / "artifacts" / "snapshots" /
-                utcTimestampForPath()
-          : options.artifactDir;
-  const std::filesystem::path caseDir =
-      artifactDir / "cases" / snapshotCase.id;
+      options.artifactDir.empty() ? snapshotRepoRoot() / "artifacts" /
+                                        "snapshots" / utcTimestampForPath()
+                                  : options.artifactDir;
+  const std::filesystem::path caseDir = artifactDir / "cases" / snapshotCase.id;
   const std::filesystem::path reportPath =
       options.jsonOut.empty() ? caseDir / "report.json" : options.jsonOut;
   const std::filesystem::path htmlPath =
       options.htmlOut.empty() ? caseDir / "report.html" : options.htmlOut;
-  SnapshotReport report = makeInitialReport(
-      snapshotCase, options, artifactDir, caseDir, htmlPath, backend,
-      backendSource, presentMode, presentSource);
+  SnapshotReport report =
+      makeInitialReport(snapshotCase, options, artifactDir, caseDir, htmlPath,
+                        backend, backendSource, presentMode, presentSource);
 
   std::string requirementMessage;
   auto requirements = checkRequirements(snapshotCase, backend, report.warnings,
@@ -950,9 +919,9 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     config.window.height = static_cast<int32_t>(snapshotCase.resolution[1]);
     config.window.mode = WindowMode::Windowed;
 
-    std::unique_ptr<Window> window = Window::create(
-        config.window.title, config.window.width, config.window.height,
-        config.window.mode);
+    std::unique_ptr<Window> window =
+        Window::create(config.window.title, config.window.width,
+                       config.window.height, config.window.mode);
     if (!window) {
       result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
       result.message = "failed to create snapshot window";
@@ -977,8 +946,7 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     std::pmr::unsynchronized_pool_resource rendererMemory;
     std::pmr::unsynchronized_pool_resource pipelineMemory;
     std::pmr::unsynchronized_pool_resource sceneMemory;
-    std::unique_ptr<Renderer> renderer =
-        Renderer::create(*gpu, rendererMemory);
+    std::unique_ptr<Renderer> renderer = Renderer::create(*gpu, rendererMemory);
     RenderPipeline pipeline(&pipelineMemory);
     auto pipelineResult = registerDefaultRenderPipeline(
         pipeline, *gpu, config.shaders, &pipelineMemory);
@@ -994,9 +962,8 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     RenderScene scene(&sceneMemory);
     std::optional<ScenePrefab> prefab;
     std::optional<ScenePrefabAssets> prefabAssets;
-    auto sceneResult =
-        populateScene(snapshotCase, *renderer, scene, &sceneMemory, prefab,
-                      prefabAssets);
+    auto sceneResult = populateScene(snapshotCase, *renderer, scene,
+                                     &sceneMemory, prefab, prefabAssets);
     if (sceneResult.hasError()) {
       result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
       result.message = sceneResult.error();
@@ -1138,9 +1105,9 @@ SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
     const bool usePreview =
         actualExtension == ".nuri_tex" || actualExtension.empty();
     const std::filesystem::path expected =
-        usePreview ? baseline.caseDir / (capture.target + "_preview.png")
-                   : baseline.caseDir /
-                         (capture.target + actualExtension.string());
+        usePreview
+            ? baseline.caseDir / (capture.target + "_preview.png")
+            : baseline.caseDir / (capture.target + actualExtension.string());
     capture.expected = expected;
     if (!std::filesystem::exists(expected)) {
       capture.status = "missing_baseline";
@@ -1159,9 +1126,8 @@ SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
     }
     const SnapshotCompareProfile profile =
         builtinSnapshotCompareProfile(capture.profile);
-    SnapshotCompareResult comparison =
-        compareSnapshotImages(actualImage.value(), expectedImage.value(),
-                              profile);
+    SnapshotCompareResult comparison = compareSnapshotImages(
+        actualImage.value(), expectedImage.value(), profile);
     capture.metrics = comparison.metrics;
     capture.failedThresholds = comparison.failedThresholds;
     if (!comparison.compatible) {
@@ -1216,9 +1182,9 @@ SnapshotRunResult runSnapshotCase(SnapshotCase snapshotCase,
   return compareSnapshotCase(std::move(snapshotCase), compareOptions);
 }
 
-SnapshotSuiteRunResult
-runSnapshotSuite(std::vector<SnapshotCase> snapshotCases,
-                 std::string_view suite, const SnapshotRunOptions &options) {
+SnapshotSuiteRunResult runSnapshotSuite(std::vector<SnapshotCase> snapshotCases,
+                                        std::string_view suite,
+                                        const SnapshotRunOptions &options) {
   SnapshotSuiteRunResult suiteResult{};
   for (SnapshotCase &snapshotCase : snapshotCases) {
     if (snapshotCase.suite != suite) {
@@ -1227,8 +1193,8 @@ runSnapshotSuite(std::vector<SnapshotCase> snapshotCases,
     SnapshotRunOptions caseOptions = options;
     caseOptions.jsonOut.clear();
     caseOptions.htmlOut.clear();
-    SnapshotRunResult result = runSnapshotCase(std::move(snapshotCase),
-                                               caseOptions);
+    SnapshotRunResult result =
+        runSnapshotCase(std::move(snapshotCase), caseOptions);
     if (static_cast<int>(result.exitCode) >
         static_cast<int>(suiteResult.exitCode)) {
       suiteResult.exitCode = result.exitCode;
@@ -1241,10 +1207,9 @@ runSnapshotSuite(std::vector<SnapshotCase> snapshotCases,
     reports.push_back(caseResult.report);
   }
   const std::filesystem::path artifactDir =
-      options.artifactDir.empty()
-          ? snapshotRepoRoot() / "artifacts" / "snapshots" /
-                utcTimestampForPath()
-          : options.artifactDir;
+      options.artifactDir.empty() ? snapshotRepoRoot() / "artifacts" /
+                                        "snapshots" / utcTimestampForPath()
+                                  : options.artifactDir;
   suiteResult.reportPath =
       options.jsonOut.empty() ? artifactDir / "run.json" : options.jsonOut;
   suiteResult.htmlPath =

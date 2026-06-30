@@ -1,0 +1,10 @@
+{
+  "case": "smoke.procedural.depth",
+  "baselineProfile": "local-lvk-visible",
+  "reason": "smoke_depth_baseline_after_scene_depth_publication",
+  "approvedAtUtc": "2026-06-27T11:21:27Z",
+  "sourceArtifactDir": "artifacts/snapshots-renderer-baseline-seed/cases/smoke.procedural.depth",
+  "captures": [
+    {"target": "scene_depth", "newHash": "fnv1a64:3c33f5b8ea42c325"}
+  ]
+}

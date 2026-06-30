@@ -61,14 +61,14 @@ void writeCaptureCard(std::ostringstream &out, const SnapshotReport &report,
       << "</dl>\n";
   if (!capture.preview.empty()) {
     out << "<img alt=\"" << escapeHtml(capture.target) << " preview\" src=\""
-        << escapeHtml(relPath(htmlPath, report.artifacts.caseDir /
-                                            capture.preview))
+        << escapeHtml(
+               relPath(htmlPath, report.artifacts.caseDir / capture.preview))
         << "\">\n";
   }
   if (!capture.diff.empty()) {
     out << "<img alt=\"" << escapeHtml(capture.target) << " diff\" src=\""
-        << escapeHtml(relPath(htmlPath, report.artifacts.caseDir /
-                                            capture.diff))
+        << escapeHtml(
+               relPath(htmlPath, report.artifacts.caseDir / capture.diff))
         << "\">\n";
   }
   out << "<p class=\"paths\">";
@@ -76,8 +76,7 @@ void writeCaptureCard(std::ostringstream &out, const SnapshotReport &report,
     out << "actual: " << escapeHtml(capture.actual.generic_string()) << " ";
   }
   if (!capture.expected.empty()) {
-    out << "expected: " << escapeHtml(capture.expected.generic_string())
-        << " ";
+    out << "expected: " << escapeHtml(capture.expected.generic_string()) << " ";
   }
   out << "</p>\n</section>\n";
 }
@@ -91,14 +90,20 @@ writeSnapshotHtmlReport(const SnapshotReport &report) {
       << "<title>Nuri Snapshot " << escapeHtml(report.snapshotCase.id)
       << "</title>\n"
       << "<style>"
-      << "body{font-family:system-ui,sans-serif;margin:24px;background:#f7f7f5;color:#191919}"
+      << "body{font-family:system-ui,sans-serif;margin:24px;background:#f7f7f5;"
+         "color:#191919}"
       << "header{margin-bottom:24px}"
-      << ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}"
-      << ".capture{background:white;border:1px solid #d8d8d2;border-radius:8px;padding:16px}"
-      << ".capture img{display:block;max-width:100%;height:auto;border:1px solid #ddd;margin:8px 0}"
+      << ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax("
+         "320px,1fr));gap:16px}"
+      << ".capture{background:white;border:1px solid "
+         "#d8d8d2;border-radius:8px;padding:16px}"
+      << ".capture img{display:block;max-width:100%;height:auto;border:1px "
+         "solid #ddd;margin:8px 0}"
       << ".status-fail{border-color:#b42318}.status-pass{border-color:#1b7f3a}"
-      << ".status-missing_baseline,.status-missing_capture_point{border-color:#a15c00}"
-      << "dt{font-weight:600;float:left;clear:left;width:90px}dd{margin-left:100px}"
+      << ".status-missing_baseline,.status-missing_capture_point{border-color:#"
+         "a15c00}"
+      << "dt{font-weight:600;float:left;clear:left;width:90px}dd{margin-left:"
+         "100px}"
       << ".paths{font-family:ui-monospace,monospace;font-size:12px;color:#555}"
       << "</style></head><body>\n";
   out << "<header><h1>" << escapeHtml(report.snapshotCase.id) << "</h1>\n"
@@ -140,7 +145,8 @@ writeSnapshotSuiteHtml(std::span<const SnapshotReport> reports,
   std::ostringstream out;
   out << "<!doctype html><html><head><meta charset=\"utf-8\"><title>Nuri "
       << escapeHtml(suite)
-      << " Snapshots</title><style>body{font-family:system-ui,sans-serif;margin:24px}"
+      << " Snapshots</"
+         "title><style>body{font-family:system-ui,sans-serif;margin:24px}"
       << "li{margin:8px 0}.fail{color:#b42318}.pass{color:#1b7f3a}</style>"
       << "</head><body><h1>" << escapeHtml(suite) << "</h1><ul>\n";
   for (const SnapshotReport &report : reports) {

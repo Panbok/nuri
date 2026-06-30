@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "id": "smoke.procedural.default",
+  "suite": "smoke",
+  "description": "Lightweight procedural renderer benchmark for CLI and report smoke checks",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.v1",
+    "seed": 1,
+    "contentHash": "procedural-empty-v1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 2,
+  "measurementFrames": 5,
+  "cooldownFrames": 0,
+  "maxDrainFrames": 30,
+  "drainTimeoutMs": 2500,
+  "samples": 1,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 1.2, 4.0],
+    "direction": [0.0, -0.15, -1.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableInstanceCompute": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Bilinear",
+      "anisotropy": 1
+    }
+  },
+  "requirements": {
+    "assets": [],
+    "backends": [],
+    "allowVisibleWindow": true
+  },
+  "thresholds": {
+    "failPercent": 10.0,
+    "failAbsoluteMs": 0.2,
+    "warnPercent": 5.0,
+    "warnAbsoluteMs": 0.1
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms"
+  ]
+}

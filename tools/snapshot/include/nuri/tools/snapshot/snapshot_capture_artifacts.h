@@ -22,10 +22,10 @@ struct SnapshotCaptureArtifactResult {
 };
 
 [[nodiscard]] Result<SnapshotCaptureArtifactResult, std::string>
-writeSnapshotCaptureArtifacts(
-    GPUDevice &gpu, const RenderFrameContext &frameContext,
-    std::span<const SnapshotCaptureTarget> targets,
-    const std::filesystem::path &caseDir,
-    const std::filesystem::path &artifactStemDir);
+writeSnapshotCaptureArtifacts(GPUDevice &gpu,
+                              const RenderFrameContext &frameContext,
+                              std::span<const SnapshotCaptureTarget> targets,
+                              const std::filesystem::path &caseDir,
+                              const std::filesystem::path &artifactStemDir);
 
 } // namespace nuri::tools::snapshot

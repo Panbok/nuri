@@ -1,0 +1,31 @@
+{
+  "kind": "nuri.autotest.record_metadata",
+  "schemaVersion": 1,
+  "caseId": "smoke.procedural.camera_pan",
+  "case": "smoke.procedural.camera_pan",
+  "suite": "smoke",
+  "manifestHash": "fnv1a64:f17603e4fb9781db",
+  "baselineProfile": "local-lvk-visible",
+  "backend": "default",
+  "resolvedBackend": "nvrhi",
+  "gpuBackendSource": "default",
+  "presentMode": "immediate",
+  "resolvedPresentMode": "immediate",
+  "windowMode": "visible",
+  "resolvedWindowMode": "visible",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "build": {
+    "buildType": "Release",
+    "cmakeToolProfile": "autotest",
+    "vcpkgManifestFeatures": "autotest-tools",
+    "NURI_WITH_TRACY": false,
+    "NURI_WITH_TRACY_GPU": false,
+    "devChecks": false
+  },
+  "generatedAtUtc": "2026-06-27T19:35:25Z",
+  "checkpoints": [
+    {"id": "start", "frame": 2, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false, "width": 640, "height": 360, "format": "RGBA8_UNORM", "colorSpace": "display_sdr", "hash": "fnv1a64:228ac2a83ee5d905"}]},
+    {"id": "end", "frame": 8, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false, "width": 640, "height": 360, "format": "RGBA8_UNORM", "colorSpace": "display_sdr", "hash": "fnv1a64:e5d29f22920be39d"}]}
+  ]
+}

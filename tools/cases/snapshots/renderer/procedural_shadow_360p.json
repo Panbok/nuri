@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.procedural.shadow_360p",
+  "suite": "renderer",
+  "description": "Generated colored shadow-caster scene with medium cascaded shadows at 640x360",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.shadow_planes.v1",
+    "contentHash": "shadow-planes-v1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 8,
+  "captureFrame": 12,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 1.55, 4.9],
+    "target": [0.0, 0.05, -0.35],
+    "verticalFovDegrees": 48.0,
+    "nearPlane": 0.05,
+    "farPlane": 40.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Medium",
+      "debug": {
+        "showShadowMapViewport": true,
+        "previewMode": "SelectedCascade",
+        "debugCascadeIndex": 0,
+        "previewDepthMin": 0.0,
+        "previewDepthMax": 1.0,
+        "previewDepthInvert": true,
+        "previewDepthLog": true
+      }
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:common/flat_plane.obj"
+    ],
+    "backends": [],
+    "allowVisibleWindow": true
+  },
+  "captures": [
+    {
+      "target": "final_color",
+      "profile": "ldr_color",
+      "required": true
+    },
+    {
+      "target": "scene_depth",
+      "profile": "depth",
+      "required": true
+    },
+    {
+      "target": "shadow_cascade_0",
+      "profile": "shadow_depth",
+      "required": true
+    },
+    {
+      "target": "shadow_cascade_1",
+      "profile": "shadow_depth",
+      "required": true
+    },
+    {
+      "target": "shadow_cascade_2",
+      "profile": "shadow_depth",
+      "required": true
+    },
+    {
+      "target": "shadow_preview",
+      "profile": "debug_preview",
+      "required": true
+    }
+  ]
+}

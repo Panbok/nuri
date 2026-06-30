@@ -1,0 +1,30 @@
+{
+  "kind": "nuri.autotest.record_metadata",
+  "schemaVersion": 1,
+  "caseId": "animation.procedural.instance_animation_taa",
+  "case": "animation.procedural.instance_animation_taa",
+  "suite": "animation",
+  "manifestHash": "fnv1a64:d2cf5da2621d0f9b",
+  "baselineProfile": "local-lvk-visible",
+  "backend": "default",
+  "resolvedBackend": "nvrhi",
+  "gpuBackendSource": "default",
+  "presentMode": "immediate",
+  "resolvedPresentMode": "immediate",
+  "windowMode": "visible",
+  "resolvedWindowMode": "visible",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "build": {
+    "buildType": "Release",
+    "cmakeToolProfile": "autotest",
+    "vcpkgManifestFeatures": "autotest-tools",
+    "NURI_WITH_TRACY": false,
+    "NURI_WITH_TRACY_GPU": false,
+    "devChecks": false
+  },
+  "generatedAtUtc": "2026-06-27T19:27:26Z",
+  "checkpoints": [
+    {"id": "animated_end", "frame": 12, "captures": [{"target": "final_color", "profile": "ldr_color", "required": true, "compare": false, "width": 640, "height": 360, "format": "RGBA8_UNORM", "colorSpace": "display_sdr", "hash": "fnv1a64:9465532e5941f7a2"}, {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": false, "width": 640, "height": 360, "format": "RG16_FLOAT", "colorSpace": "uv_velocity", "hash": "fnv1a64:4bd87a07a4536325"}]}
+  ]
+}

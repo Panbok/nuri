@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "id": "hdr.procedural.exposure_bloom_stability",
+  "suite": "hdr",
+  "description": "HDR frame color and bloom stability over emissive procedural geometry",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 31,
+    "contentHash": "nuri.procedural.reactive_mask.v1:31"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 10,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [0.0, 0.2, 3.2],
+    "target": [0.0, 0.15, 0.0],
+    "verticalFovDegrees": 52.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Quality"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": true,
+      "adaptationEnabled": false
+    }
+  },
+  "checkpoints": [
+    {
+      "id": "bloom_end",
+      "frame": 10,
+      "captures": [
+        {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": true},
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {
+          "id": "bloom_enabled",
+          "metric": "renderer.hdr.bloom_enabled",
+          "equals": 1
+        },
+        {
+          "id": "bloom_active",
+          "metric": "renderer.hdr.bloom_active",
+          "equals": 1
+        },
+        {
+          "id": "bloom_passes_present",
+          "metric": "renderer.hdr.bloom_passes",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

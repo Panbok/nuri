@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "id": "smoke.procedural.static_multiframe",
+  "suite": "smoke",
+  "description": "Static procedural scene across multiple checkpoint frames",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 1,
+    "contentHash": "nuri.procedural.reactive_mask.v1:1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 2,
+  "endFrame": 4,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.85, 3.6],
+    "target": [0.0, 0.55, 0.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "checkpoints": [
+    {
+      "id": "warm",
+      "frame": 2,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": true
+        }
+      ],
+      "assertions": [
+        {
+          "id": "frame_index_warm",
+          "metric": "renderer.frame_index",
+          "equals": 2
+        },
+        {
+          "id": "visible_instances_warm",
+          "metric": "renderer.opaque.visible_instances",
+          "greaterOrEqual": 1
+        }
+      ]
+    },
+    {
+      "id": "end",
+      "frame": 4,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": true
+        }
+      ],
+      "assertions": [
+        {
+          "id": "frame_index_end",
+          "metric": "renderer.frame_index",
+          "equals": 4
+        },
+        {
+          "id": "visible_instances_end",
+          "metric": "renderer.opaque.visible_instances",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

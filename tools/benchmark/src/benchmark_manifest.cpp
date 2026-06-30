@@ -65,8 +65,8 @@ rejectUnknownKeys(yyjson_val *object, std::span<const std::string_view> keys,
 requiredValue(yyjson_val *object, std::string_view key, std::string_view path) {
   yyjson_val *value = optionalObject(object, key);
   if (value == nullptr) {
-    return Result<yyjson_val *, std::string>::makeError(
-        jsonPath(path, key) + " is required");
+    return Result<yyjson_val *, std::string>::makeError(jsonPath(path, key) +
+                                                        " is required");
   }
   return Result<yyjson_val *, std::string>::makeResult(value);
 }
@@ -77,10 +77,11 @@ readString(yyjson_val *object, std::string_view key, std::string_view path,
   yyjson_val *value = optionalObject(object, key);
   if (value == nullptr) {
     if (required) {
-      return Result<std::string, std::string>::makeError(
-          jsonPath(path, key) + " is required");
+      return Result<std::string, std::string>::makeError(jsonPath(path, key) +
+                                                         " is required");
     }
-    return Result<std::string, std::string>::makeResult(std::move(defaultValue));
+    return Result<std::string, std::string>::makeResult(
+        std::move(defaultValue));
   }
   if (!yyjson_is_str(value)) {
     return Result<std::string, std::string>::makeError(jsonPath(path, key) +
@@ -90,9 +91,10 @@ readString(yyjson_val *object, std::string_view key, std::string_view path,
       std::string(yyjson_get_str(value), yyjson_get_len(value)));
 }
 
-[[nodiscard]] Result<bool, std::string>
-readBool(yyjson_val *object, std::string_view key, std::string_view path,
-         bool defaultValue = false) {
+[[nodiscard]] Result<bool, std::string> readBool(yyjson_val *object,
+                                                 std::string_view key,
+                                                 std::string_view path,
+                                                 bool defaultValue = false) {
   yyjson_val *value = optionalObject(object, key);
   if (value == nullptr) {
     return Result<bool, std::string>::makeResult(defaultValue);
@@ -161,9 +163,10 @@ readStringArray(yyjson_val *object, std::string_view key,
       std::move(out));
 }
 
-[[nodiscard]] Result<glm::vec3, std::string>
-readVec3(yyjson_val *object, std::string_view key, std::string_view path,
-         glm::vec3 defaultValue) {
+[[nodiscard]] Result<glm::vec3, std::string> readVec3(yyjson_val *object,
+                                                      std::string_view key,
+                                                      std::string_view path,
+                                                      glm::vec3 defaultValue) {
   yyjson_val *value = optionalObject(object, key);
   if (value == nullptr) {
     return Result<glm::vec3, std::string>::makeResult(defaultValue);
@@ -194,9 +197,8 @@ parseEnum(std::string_view text,
       return Result<Enum, std::string>::makeResult(value);
     }
   }
-  return Result<Enum, std::string>::makeError(std::string(path) +
-                                              ": invalid enum value '" +
-                                              std::string(text) + "'");
+  return Result<Enum, std::string>::makeError(
+      std::string(path) + ": invalid enum value '" + std::string(text) + "'");
 }
 
 template <typename Enum>
@@ -212,10 +214,9 @@ readEnumField(yyjson_val *object, std::string_view key, std::string_view path,
     return Result<bool, std::string>::makeError(jsonPath(path, key) +
                                                 " must be a string");
   }
-  auto parsed =
-      parseEnum<Enum>(std::string_view(yyjson_get_str(value),
-                                       yyjson_get_len(value)),
-                      values, jsonPath(path, key));
+  auto parsed = parseEnum<Enum>(
+      std::string_view(yyjson_get_str(value), yyjson_get_len(value)), values,
+      jsonPath(path, key));
   if (parsed.hasError()) {
     return Result<bool, std::string>::makeError(parsed.error());
   }
@@ -261,8 +262,8 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
   settings.opaque.enableTessellation = b.value();
   yyjson_val *forced = optionalObject(object, "forcedMeshLod");
   if (forced != nullptr) {
-    if (yyjson_is_uint(forced) && yyjson_get_uint(forced) <=
-                                      static_cast<uint64_t>(INT32_MAX)) {
+    if (yyjson_is_uint(forced) &&
+        yyjson_get_uint(forced) <= static_cast<uint64_t>(INT32_MAX)) {
       settings.opaque.forcedMeshLod =
           static_cast<int32_t>(yyjson_get_uint(forced));
       return Result<bool, std::string>::makeResult(true);
@@ -282,59 +283,58 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
 parseAntiAliasingSettings(yyjson_val *object, RenderSettings &settings,
                           std::string_view path) {
   static constexpr std::array keys{std::string_view("mode"),
-                                  std::string_view("qualityPreset")};
+                                   std::string_view("qualityPreset")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
   }
-  auto result = readEnumField(
-      object, "mode", path, settings.antiAliasing.mode,
-      {{"None", AntiAliasingMode::None},
-       {"TAA", AntiAliasingMode::TAA},
-       {"SpatialFallback", AntiAliasingMode::SpatialFallback},
-       {"MSAA4x", AntiAliasingMode::MSAA4x}});
+  auto result =
+      readEnumField(object, "mode", path, settings.antiAliasing.mode,
+                    {{"None", AntiAliasingMode::None},
+                     {"TAA", AntiAliasingMode::TAA},
+                     {"SpatialFallback", AntiAliasingMode::SpatialFallback},
+                     {"MSAA4x", AntiAliasingMode::MSAA4x}});
   if (result.hasError()) {
     return result;
   }
-  return readEnumField(
-      object, "qualityPreset", path, settings.antiAliasing.qualityPreset,
-      {{"Performance", TemporalAAQualityPreset::Performance},
-       {"Balanced", TemporalAAQualityPreset::Balanced},
-       {"Quality", TemporalAAQualityPreset::Quality},
-       {"Ultra", TemporalAAQualityPreset::Ultra},
-       {"Custom", TemporalAAQualityPreset::Custom}});
+  return readEnumField(object, "qualityPreset", path,
+                       settings.antiAliasing.qualityPreset,
+                       {{"Performance", TemporalAAQualityPreset::Performance},
+                        {"Balanced", TemporalAAQualityPreset::Balanced},
+                        {"Quality", TemporalAAQualityPreset::Quality},
+                        {"Ultra", TemporalAAQualityPreset::Ultra},
+                        {"Custom", TemporalAAQualityPreset::Custom}});
 }
 
 [[nodiscard]] Result<bool, std::string>
 parseAmbientOcclusionSettings(yyjson_val *object, RenderSettings &settings,
                               std::string_view path) {
   static constexpr std::array keys{std::string_view("mode"),
-                                  std::string_view("preset")};
+                                   std::string_view("preset")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
   }
-  auto result = readEnumField(object, "mode", path,
-                              settings.ambientOcclusion.mode,
-                              {{"Disabled", AmbientOcclusionMode::Disabled},
-                               {"GTAO", AmbientOcclusionMode::GTAO}});
+  auto result =
+      readEnumField(object, "mode", path, settings.ambientOcclusion.mode,
+                    {{"Disabled", AmbientOcclusionMode::Disabled},
+                     {"GTAO", AmbientOcclusionMode::GTAO}});
   if (result.hasError()) {
     return result;
   }
-  return readEnumField(
-      object, "preset", path, settings.ambientOcclusion.preset,
-      {{"Low", AmbientOcclusionPreset::Low},
-       {"Balanced", AmbientOcclusionPreset::Balanced},
-       {"High", AmbientOcclusionPreset::High},
-       {"Ultra", AmbientOcclusionPreset::Ultra},
-       {"Custom", AmbientOcclusionPreset::Custom}});
+  return readEnumField(object, "preset", path, settings.ambientOcclusion.preset,
+                       {{"Low", AmbientOcclusionPreset::Low},
+                        {"Balanced", AmbientOcclusionPreset::Balanced},
+                        {"High", AmbientOcclusionPreset::High},
+                        {"Ultra", AmbientOcclusionPreset::Ultra},
+                        {"Custom", AmbientOcclusionPreset::Custom}});
 }
 
 [[nodiscard]] Result<bool, std::string>
 parseShadowSettings(yyjson_val *object, RenderSettings &settings,
                     std::string_view path) {
   static constexpr std::array keys{std::string_view("enabled"),
-                                  std::string_view("qualityPreset")};
+                                   std::string_view("qualityPreset")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -345,13 +345,12 @@ parseShadowSettings(yyjson_val *object, RenderSettings &settings,
   }
   settings.shadow.enabled = enabled.value();
   ShadowQualityPreset preset = settings.shadow.qualityPreset;
-  auto presetResult = readEnumField(
-      object, "qualityPreset", path, preset,
-      {{"Custom", ShadowQualityPreset::Custom},
-       {"Low", ShadowQualityPreset::Low},
-       {"Medium", ShadowQualityPreset::Medium},
-       {"High", ShadowQualityPreset::High},
-       {"Ultra", ShadowQualityPreset::Ultra}});
+  auto presetResult = readEnumField(object, "qualityPreset", path, preset,
+                                    {{"Custom", ShadowQualityPreset::Custom},
+                                     {"Low", ShadowQualityPreset::Low},
+                                     {"Medium", ShadowQualityPreset::Medium},
+                                     {"High", ShadowQualityPreset::High},
+                                     {"Ultra", ShadowQualityPreset::Ultra}});
   if (presetResult.hasError()) {
     return presetResult;
   }
@@ -365,7 +364,7 @@ parseShadowSettings(yyjson_val *object, RenderSettings &settings,
 parseHdrSettings(yyjson_val *object, RenderSettings &settings,
                  std::string_view path) {
   static constexpr std::array keys{std::string_view("bloomEnabled"),
-                                  std::string_view("adaptationEnabled")};
+                                   std::string_view("adaptationEnabled")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -389,7 +388,7 @@ parseHdrSettings(yyjson_val *object, RenderSettings &settings,
 parseTextureFilteringSettings(yyjson_val *object, RenderSettings &settings,
                               std::string_view path) {
   static constexpr std::array keys{std::string_view("mode"),
-                                  std::string_view("anisotropy")};
+                                   std::string_view("anisotropy")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -402,8 +401,8 @@ parseTextureFilteringSettings(yyjson_val *object, RenderSettings &settings,
   if (modeResult.hasError()) {
     return modeResult;
   }
-  auto anisotropy = readU32(object, "anisotropy", path,
-                            settings.textureFiltering.anisotropy);
+  auto anisotropy =
+      readU32(object, "anisotropy", path, settings.textureFiltering.anisotropy);
   if (anisotropy.hasError()) {
     return Result<bool, std::string>::makeError(anisotropy.error());
   }
@@ -415,10 +414,14 @@ parseTextureFilteringSettings(yyjson_val *object, RenderSettings &settings,
 [[nodiscard]] Result<bool, std::string>
 parseSettings(yyjson_val *object, RenderSettings &settings) {
   static constexpr std::array keys{
-      std::string_view("opaque"),          std::string_view("antiAliasing"),
-      std::string_view("ambientOcclusion"), std::string_view("shadow"),
-      std::string_view("hdrPostProcess"), std::string_view("transmission"),
-      std::string_view("transparent"),    std::string_view("textureFiltering"),
+      std::string_view("opaque"),
+      std::string_view("antiAliasing"),
+      std::string_view("ambientOcclusion"),
+      std::string_view("shadow"),
+      std::string_view("hdrPostProcess"),
+      std::string_view("transmission"),
+      std::string_view("transparent"),
+      std::string_view("textureFiltering"),
   };
   auto keysResult = rejectUnknownKeys(object, keys, "settings");
   if (keysResult.hasError()) {
@@ -484,10 +487,10 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
 [[nodiscard]] Result<bool, std::string>
 parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
   static constexpr std::array sceneKeys{
-      std::string_view("kind"),          std::string_view("pathBase"),
-      std::string_view("path"),          std::string_view("importOptions"),
-      std::string_view("baseModel"),     std::string_view("generator"),
-      std::string_view("seed"),          std::string_view("contentHash"),
+      std::string_view("kind"),      std::string_view("pathBase"),
+      std::string_view("path"),      std::string_view("importOptions"),
+      std::string_view("baseModel"), std::string_view("generator"),
+      std::string_view("seed"),      std::string_view("contentHash"),
   };
   auto result = rejectUnknownKeys(object, sceneKeys, "scene");
   if (result.hasError()) {
@@ -527,20 +530,20 @@ parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
   yyjson_val *importOptions = optionalObject(object, "importOptions");
   if (importOptions != nullptr) {
     static constexpr std::array importKeys{std::string_view("mesh")};
-    result = rejectUnknownKeys(importOptions, importKeys, "scene.importOptions");
+    result =
+        rejectUnknownKeys(importOptions, importKeys, "scene.importOptions");
     if (result.hasError()) {
       return result;
     }
     yyjson_val *mesh = optionalObject(importOptions, "mesh");
     if (mesh != nullptr) {
       static constexpr std::array meshKeys{std::string_view("flipUVs")};
-      result =
-          rejectUnknownKeys(mesh, meshKeys, "scene.importOptions.mesh");
+      result = rejectUnknownKeys(mesh, meshKeys, "scene.importOptions.mesh");
       if (result.hasError()) {
         return result;
       }
-      auto flip = readBool(mesh, "flipUVs", "scene.importOptions.mesh",
-                           scene.flipUVs);
+      auto flip =
+          readBool(mesh, "flipUVs", "scene.importOptions.mesh", scene.flipUVs);
       if (flip.hasError()) {
         return Result<bool, std::string>::makeError(flip.error());
       }
@@ -569,16 +572,14 @@ parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
       return Result<bool, std::string>::makeError(number.error());
     }
     scene.baseModelTargetRadius = number.value();
-    number =
-        readDouble(baseModel, "minScale", "scene.baseModel",
-                   scene.baseModelMinScale);
+    number = readDouble(baseModel, "minScale", "scene.baseModel",
+                        scene.baseModelMinScale);
     if (number.hasError()) {
       return Result<bool, std::string>::makeError(number.error());
     }
     scene.baseModelMinScale = number.value();
-    number =
-        readDouble(baseModel, "maxScale", "scene.baseModel",
-                   scene.baseModelMaxScale);
+    number = readDouble(baseModel, "maxScale", "scene.baseModel",
+                        scene.baseModelMaxScale);
     if (number.hasError()) {
       return Result<bool, std::string>::makeError(number.error());
     }
@@ -590,8 +591,8 @@ parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
 [[nodiscard]] Result<bool, std::string>
 parseCamera(yyjson_val *object, BenchmarkCameraConfig &camera) {
   static constexpr std::array keys{
-      std::string_view("position"), std::string_view("direction"),
-      std::string_view("target"),   std::string_view("verticalFovDegrees"),
+      std::string_view("position"),  std::string_view("direction"),
+      std::string_view("target"),    std::string_view("verticalFovDegrees"),
       std::string_view("nearPlane"), std::string_view("farPlane")};
   auto result = rejectUnknownKeys(object, keys, "camera");
   if (result.hasError()) {
@@ -687,17 +688,17 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
   }
   yyjson_val *root = yyjson_doc_get_root(doc.get());
   static constexpr std::array rootKeys{
-      std::string_view("schemaVersion"),      std::string_view("id"),
-      std::string_view("suite"),              std::string_view("description"),
-      std::string_view("scene"),              std::string_view("backend"),
-      std::string_view("resolution"),         std::string_view("fixedDeltaSeconds"),
-      std::string_view("warmupFrames"),       std::string_view("measurementFrames"),
-      std::string_view("cooldownFrames"),     std::string_view("maxDrainFrames"),
-      std::string_view("drainTimeoutMs"),     std::string_view("samples"),
-      std::string_view("authoritative"),      std::string_view("presentMode"),
-      std::string_view("renderGraph"),        std::string_view("camera"),
-      std::string_view("settings"),           std::string_view("requirements"),
-      std::string_view("thresholds"),         std::string_view("requiredMetrics"),
+      std::string_view("schemaVersion"),  std::string_view("id"),
+      std::string_view("suite"),          std::string_view("description"),
+      std::string_view("scene"),          std::string_view("backend"),
+      std::string_view("resolution"),     std::string_view("fixedDeltaSeconds"),
+      std::string_view("warmupFrames"),   std::string_view("measurementFrames"),
+      std::string_view("cooldownFrames"), std::string_view("maxDrainFrames"),
+      std::string_view("drainTimeoutMs"), std::string_view("samples"),
+      std::string_view("authoritative"),  std::string_view("presentMode"),
+      std::string_view("renderGraph"),    std::string_view("camera"),
+      std::string_view("settings"),       std::string_view("requirements"),
+      std::string_view("thresholds"),     std::string_view("requiredMetrics"),
   };
   auto keysResult = rejectUnknownKeys(root, rootKeys, "$");
   if (keysResult.hasError()) {
@@ -757,8 +758,8 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     }
   }
 
-  auto number = readDouble(root, "fixedDeltaSeconds", "$",
-                           out.fixedDeltaSeconds);
+  auto number =
+      readDouble(root, "fixedDeltaSeconds", "$", out.fixedDeltaSeconds);
   if (number.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(number.error());
   }
@@ -824,8 +825,8 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
   yyjson_val *renderGraph = optionalObject(root, "renderGraph");
   if (renderGraph != nullptr) {
     static constexpr std::array keys{std::string_view("workerCount"),
-                                    std::string_view("parallelCompile"),
-                                    std::string_view("parallelRecording")};
+                                     std::string_view("parallelCompile"),
+                                     std::string_view("parallelRecording")};
     auto parsed = rejectUnknownKeys(renderGraph, keys, "renderGraph");
     if (parsed.hasError()) {
       return Result<BenchmarkCase, std::string>::makeError(parsed.error());
@@ -853,8 +854,8 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
   yyjson_val *requirements = optionalObject(root, "requirements");
   if (requirements != nullptr) {
     static constexpr std::array keys{std::string_view("assets"),
-                                    std::string_view("backends"),
-                                    std::string_view("allowVisibleWindow")};
+                                     std::string_view("backends"),
+                                     std::string_view("allowVisibleWindow")};
     auto parsed = rejectUnknownKeys(requirements, keys, "requirements");
     if (parsed.hasError()) {
       return Result<BenchmarkCase, std::string>::makeError(parsed.error());

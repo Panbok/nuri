@@ -1,0 +1,11 @@
+{
+  "target": "transmission_feedback_half",
+  "format": 4,
+  "width": 320,
+  "height": 180,
+  "rowStride": 2560,
+  "origin": "top_left",
+  "colorSpace": "linear_hdr",
+  "payload": "transmission_feedback_half.exr",
+  "hash": "fnv1a64:55476ea7fc068f73"
+}

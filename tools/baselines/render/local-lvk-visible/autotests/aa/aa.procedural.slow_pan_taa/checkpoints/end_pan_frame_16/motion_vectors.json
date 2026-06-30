@@ -1,0 +1,11 @@
+{
+  "target": "motion_vectors",
+  "format": 14,
+  "width": 640,
+  "height": 360,
+  "rowStride": 2560,
+  "origin": "top_left",
+  "colorSpace": "uv_velocity",
+  "payload": "motion_vectors.exr",
+  "hash": "fnv1a64:4bd87a07a4536325"
+}

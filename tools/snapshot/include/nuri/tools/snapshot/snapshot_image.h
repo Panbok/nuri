@@ -49,4 +49,3 @@ writeSnapshotPreviewPng(const SnapshotImage &image,
                         const std::filesystem::path &path);
 
 } // namespace nuri::tools::snapshot
-

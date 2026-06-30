@@ -43,16 +43,12 @@ struct SnapshotEnvironment {
 
 [[nodiscard]] std::filesystem::path snapshotRepoRoot();
 [[nodiscard]] std::string readProcessEnvironment(std::string_view name);
-[[nodiscard]] SnapshotEnvironment
-collectSnapshotEnvironment(std::string_view backend,
-                           std::string_view backendSource,
-                           std::string_view requestedPresentMode,
-                           std::string_view presentModeSource,
-                           std::string_view requestedWindowMode,
-                           std::string_view resolvedWindowMode);
+[[nodiscard]] SnapshotEnvironment collectSnapshotEnvironment(
+    std::string_view backend, std::string_view backendSource,
+    std::string_view requestedPresentMode, std::string_view presentModeSource,
+    std::string_view requestedWindowMode, std::string_view resolvedWindowMode);
 [[nodiscard]] std::string joinCommandLine(int argc, char **argv);
 [[nodiscard]] std::string utcTimestampIso8601();
 [[nodiscard]] std::string utcTimestampForPath();
 
 } // namespace nuri::tools::snapshot
-

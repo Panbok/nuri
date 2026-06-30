@@ -1,9 +1,9 @@
 #include "nuri/tools/benchmark/benchmark_report.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
-#include <cstdlib>
 #include <set>
 #include <sstream>
 
@@ -35,8 +35,9 @@ yyjson_mut_val *makeStringArray(yyjson_mut_doc *doc,
   return array;
 }
 
-yyjson_mut_val *makePathArray(yyjson_mut_doc *doc,
-                              const std::vector<std::filesystem::path> &values) {
+yyjson_mut_val *
+makePathArray(yyjson_mut_doc *doc,
+              const std::vector<std::filesystem::path> &values) {
   yyjson_mut_val *array = yyjson_mut_arr(doc);
   for (const std::filesystem::path &value : values) {
     yyjson_mut_arr_add_strcpy(doc, array, value.generic_string().c_str());
@@ -117,8 +118,7 @@ yyjson_mut_val *makeEnvironmentObject(yyjson_mut_doc *doc,
                           env.tracyGpuEnabled);
   yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_TRACY_GPU_DRAW_ZONES",
                           env.tracyGpuDrawZonesEnabled);
-  yyjson_mut_obj_add_bool(doc, object, "tracyDiagnostic",
-                          env.tracyDiagnostic);
+  yyjson_mut_obj_add_bool(doc, object, "tracyDiagnostic", env.tracyDiagnostic);
   yyjson_mut_obj_add_bool(doc, object, "devChecks", env.devChecks);
   return object;
 }
@@ -252,8 +252,7 @@ yyjson_mut_val *makeSampleStatsObject(yyjson_mut_doc *doc,
   stats.stddev = readReal(object, "stddev");
   stats.mad = readReal(object, "mad");
   stats.iqr = readReal(object, "iqr");
-  stats.coefficientOfVariation =
-      readReal(object, "coefficientOfVariation");
+  stats.coefficientOfVariation = readReal(object, "coefficientOfVariation");
   return stats;
 }
 
@@ -355,16 +354,18 @@ writeBenchmarkReportJson(const BenchmarkReport &report, bool verboseFrames) {
 
   yyjson_mut_val *artifacts = yyjson_mut_obj(doc.get());
   addPath(doc.get(), artifacts, "artifactDir", report.artifacts.artifactDir);
-  yyjson_mut_obj_add_val(doc.get(), artifacts, "caseReports",
-                         makePathArray(doc.get(), report.artifacts.caseReports));
-  yyjson_mut_obj_add_val(doc.get(), artifacts, "tracy",
-                         makePathArray(doc.get(), report.artifacts.tracyArtifacts));
+  yyjson_mut_obj_add_val(
+      doc.get(), artifacts, "caseReports",
+      makePathArray(doc.get(), report.artifacts.caseReports));
+  yyjson_mut_obj_add_val(
+      doc.get(), artifacts, "tracy",
+      makePathArray(doc.get(), report.artifacts.tracyArtifacts));
   yyjson_mut_obj_add_val(doc.get(), root, "artifacts", artifacts);
 
   yyjson_mut_val *frames = yyjson_mut_arr(doc.get());
   for (const BenchmarkFrameRecord &frame : report.frames) {
-    yyjson_mut_arr_add_val(
-        frames, makeFrameObject(doc.get(), frame, verboseFrames));
+    yyjson_mut_arr_add_val(frames,
+                           makeFrameObject(doc.get(), frame, verboseFrames));
   }
   yyjson_mut_obj_add_val(doc.get(), root, "frames", frames);
 
@@ -376,7 +377,8 @@ writeBenchmarkReportJson(const BenchmarkReport &report, bool verboseFrames) {
   yyjson_mut_obj_add_val(doc.get(), root, "stats",
                          makeStatsMapObject(doc.get(), report.stats));
 
-  yyjson_mut_obj_add_val(doc.get(), root, "renderGraph", yyjson_mut_obj(doc.get()));
+  yyjson_mut_obj_add_val(doc.get(), root, "renderGraph",
+                         yyjson_mut_obj(doc.get()));
   yyjson_mut_obj_add_val(doc.get(), root, "resourceStats",
                          yyjson_mut_obj(doc.get()));
 
@@ -509,8 +511,7 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
   yyjson_val *run = yyjson_obj_get(root, "run");
   if (yyjson_is_obj(run)) {
     report.run.samples = readU32(run, "samples", 1u);
-    report.run.validForComparison =
-        readBool(run, "validForComparison", true);
+    report.run.validForComparison = readBool(run, "validForComparison", true);
   }
 
   yyjson_val *stats = yyjson_obj_get(root, "stats");
@@ -520,8 +521,9 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
     yyjson_val *key = nullptr;
     while ((key = yyjson_obj_iter_next(&iter)) != nullptr) {
       yyjson_val *value = yyjson_obj_iter_get_val(key);
-      report.stats.emplace(std::string(yyjson_get_str(key), yyjson_get_len(key)),
-                           readStats(value));
+      report.stats.emplace(
+          std::string(yyjson_get_str(key), yyjson_get_len(key)),
+          readStats(value));
     }
   }
   return Result<BenchmarkReport, std::string>::makeResult(std::move(report));

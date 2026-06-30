@@ -69,10 +69,8 @@ yyjson_mut_val *makeEnvironmentObject(yyjson_mut_doc *doc,
   addString(doc, object, "cmakeToolProfile", env.cmakeToolProfile);
   addString(doc, object, "vcpkgManifestFeatures", env.vcpkgManifestFeatures);
   yyjson_mut_obj_add_bool(doc, object, "NURI_BUILD_SHARED", env.buildShared);
-  yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_LOGGING",
-                          env.loggingEnabled);
-  yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_ASSERTS",
-                          env.assertsEnabled);
+  yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_LOGGING", env.loggingEnabled);
+  yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_ASSERTS", env.assertsEnabled);
   yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_TRACY", env.tracyEnabled);
   yyjson_mut_obj_add_bool(doc, object, "NURI_WITH_TRACY_GPU",
                           env.tracyGpuEnabled);
@@ -122,8 +120,7 @@ yyjson_mut_val *makeMetricsObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_real(doc, object, "rmse", metrics.rmse);
   yyjson_mut_obj_add_real(doc, object, "maxAbsError", metrics.maxAbsError);
   yyjson_mut_obj_add_real(doc, object, "p99AbsError", metrics.p99AbsError);
-  yyjson_mut_obj_add_uint(doc, object, "failingValues",
-                          metrics.failingValues);
+  yyjson_mut_obj_add_uint(doc, object, "failingValues", metrics.failingValues);
   yyjson_mut_obj_add_uint(doc, object, "comparedValues",
                           metrics.comparedValues);
   return object;
@@ -162,8 +159,7 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           opaque.meshletRejectedMissingFeature);
   yyjson_mut_obj_add_uint(doc, opaqueObject, "meshletRejectedMissingAssetData",
                           opaque.meshletRejectedMissingAssetData);
-  yyjson_mut_obj_add_uint(doc, opaqueObject,
-                          "meshletRejectedIncompatibleFrame",
+  yyjson_mut_obj_add_uint(doc, opaqueObject, "meshletRejectedIncompatibleFrame",
                           opaque.meshletRejectedIncompatibleFrame);
   yyjson_mut_obj_add_val(doc, object, "opaque", opaqueObject);
 
@@ -173,8 +169,7 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           shadow.cascadeCount);
   yyjson_mut_obj_add_uint(doc, shadowObject, "shadowMapSize",
                           shadow.shadowMapSize);
-  yyjson_mut_obj_add_uint(doc, shadowObject, "totalDraws",
-                          shadow.totalDraws);
+  yyjson_mut_obj_add_uint(doc, shadowObject, "totalDraws", shadow.totalDraws);
   yyjson_mut_obj_add_uint(doc, shadowObject, "totalCulledDraws",
                           shadow.totalCulledDraws);
   yyjson_mut_obj_add_uint(doc, shadowObject, "meshletDispatchCount",
@@ -230,14 +225,12 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           aa.velocityDrawCount);
   yyjson_mut_obj_add_uint(doc, aaObject, "velocityInstanceCount",
                           aa.velocityInstanceCount);
-  yyjson_mut_obj_add_uint(doc, aaObject,
-                          "velocityPreviousTransformValidCount",
+  yyjson_mut_obj_add_uint(doc, aaObject, "velocityPreviousTransformValidCount",
                           aa.velocityPreviousTransformValidCount);
   yyjson_mut_obj_add_uint(doc, aaObject,
                           "velocityMissingPreviousTransformCount",
                           aa.velocityMissingPreviousTransformCount);
-  yyjson_mut_obj_add_uint(doc, aaObject,
-                          "velocityTessellatedSkippedDrawCount",
+  yyjson_mut_obj_add_uint(doc, aaObject, "velocityTessellatedSkippedDrawCount",
                           aa.velocityTessellatedSkippedDrawCount);
   yyjson_mut_obj_add_bool(doc, aaObject, "previousTransformCacheValid",
                           aa.previousTransformCacheValid);
@@ -251,8 +244,7 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           aa.velocityCameraMatrixDelta);
   yyjson_mut_obj_add_real(doc, aaObject, "velocityStaticResidualEstimate",
                           aa.velocityStaticResidualEstimate);
-  yyjson_mut_obj_add_real(doc, aaObject,
-                          "velocityEstimatedAverageMagnitude",
+  yyjson_mut_obj_add_real(doc, aaObject, "velocityEstimatedAverageMagnitude",
                           aa.velocityEstimatedAverageMagnitude);
   yyjson_mut_obj_add_real(doc, aaObject, "velocityEstimatedMaxMagnitude",
                           aa.velocityEstimatedMaxMagnitude);
@@ -271,8 +263,7 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           aa.transparentTransmissionFeedbackSourceAvailable);
   yyjson_mut_obj_add_uint(doc, aaObject, "taaTransparentPostTaaDrawCount",
                           aa.taaTransparentPostTaaDrawCount);
-  yyjson_mut_obj_add_uint(doc, aaObject,
-                          "taaTransparentPostSpatialAAPassCount",
+  yyjson_mut_obj_add_uint(doc, aaObject, "taaTransparentPostSpatialAAPassCount",
                           aa.taaTransparentPostSpatialAAPassCount);
   yyjson_mut_obj_add_uint(doc, aaObject, "taaResolvePassCount",
                           aa.taaResolvePassCount);
@@ -295,8 +286,7 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
   yyjson_mut_val *hdrObject = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_bool(doc, hdrObject, "bloomEnabled", hdr.bloomEnabled);
   yyjson_mut_obj_add_bool(doc, hdrObject, "bloomActive", hdr.bloomActive);
-  yyjson_mut_obj_add_uint(doc, hdrObject, "bloomPassCount",
-                          hdr.bloomPassCount);
+  yyjson_mut_obj_add_uint(doc, hdrObject, "bloomPassCount", hdr.bloomPassCount);
   yyjson_mut_obj_add_bool(doc, hdrObject, "adaptationEnabled",
                           hdr.adaptationEnabled);
   yyjson_mut_obj_add_bool(doc, hdrObject, "adaptationActive",
@@ -504,8 +494,8 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
         readU32(opaqueObject, "meshletTaskGroups", opaque.meshletTaskGroups);
     opaque.meshletCandidateCount = readU32(
         opaqueObject, "meshletCandidateCount", opaque.meshletCandidateCount);
-    opaque.meshletModeRequired = readU32(
-        opaqueObject, "meshletModeRequired", opaque.meshletModeRequired);
+    opaque.meshletModeRequired = readU32(opaqueObject, "meshletModeRequired",
+                                         opaque.meshletModeRequired);
     opaque.meshletModeActive =
         readU32(opaqueObject, "meshletModeActive", opaque.meshletModeActive);
     opaque.meshletRejectedMissingFeature =
@@ -535,10 +525,10 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
     shadow.shadowMeshletTaskGroupCount =
         readU32(shadowObject, "meshletTaskGroupCount",
                 shadow.shadowMeshletTaskGroupCount);
-    shadow.staticCasterEntries = readU32(
-        shadowObject, "staticCasterEntries", shadow.staticCasterEntries);
-    shadow.dynamicCasterEntries = readU32(
-        shadowObject, "dynamicCasterEntries", shadow.dynamicCasterEntries);
+    shadow.staticCasterEntries = readU32(shadowObject, "staticCasterEntries",
+                                         shadow.staticCasterEntries);
+    shadow.dynamicCasterEntries = readU32(shadowObject, "dynamicCasterEntries",
+                                          shadow.dynamicCasterEntries);
     shadow.staticCacheReused =
         readU32(shadowObject, "staticCacheReused", shadow.staticCacheReused);
     shadow.minCascadeTexelWorldSize =
@@ -558,14 +548,13 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
     aa.historyValid = readBool(aaObject, "historyValid", aa.historyValid);
     aa.temporalDataValid =
         readBool(aaObject, "temporalDataValid", aa.temporalDataValid);
-    aa.historyResetReason = readTemporalHistoryResetReason(
-        readString(aaObject, "historyResetReason",
-                   std::string(temporalHistoryResetReasonName(
-                       aa.historyResetReason))));
+    aa.historyResetReason = readTemporalHistoryResetReason(readString(
+        aaObject, "historyResetReason",
+        std::string(temporalHistoryResetReasonName(aa.historyResetReason))));
     aa.historyResetCount =
         readU32(aaObject, "historyResetCount", aa.historyResetCount);
-    aa.framesSinceHistoryReset = readU32(
-        aaObject, "framesSinceHistoryReset", aa.framesSinceHistoryReset);
+    aa.framesSinceHistoryReset = readU32(aaObject, "framesSinceHistoryReset",
+                                         aa.framesSinceHistoryReset);
     aa.cameraPositionDelta =
         readF32(aaObject, "cameraPositionDelta", aa.cameraPositionDelta);
     aa.jitterDeltaMagnitude =
@@ -577,8 +566,8 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
         readU32(aaObject, "motionVectorWidth", aa.motionVectorWidth);
     aa.motionVectorHeight =
         readU32(aaObject, "motionVectorHeight", aa.motionVectorHeight);
-    aa.motionVectorTextureCount = readU32(
-        aaObject, "motionVectorTextureCount", aa.motionVectorTextureCount);
+    aa.motionVectorTextureCount = readU32(aaObject, "motionVectorTextureCount",
+                                          aa.motionVectorTextureCount);
     aa.motionVectorClearPassCount = readU32(
         aaObject, "motionVectorClearPassCount", aa.motionVectorClearPassCount);
     aa.motionVectorGraphPublished = readBool(
@@ -601,18 +590,15 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
     aa.previousTransformCacheValid =
         readBool(aaObject, "previousTransformCacheValid",
                  aa.previousTransformCacheValid);
-    aa.opaqueVelocityGenerated =
-        readBool(aaObject, "opaqueVelocityGenerated",
-                 aa.opaqueVelocityGenerated);
+    aa.opaqueVelocityGenerated = readBool(aaObject, "opaqueVelocityGenerated",
+                                          aa.opaqueVelocityGenerated);
     aa.velocityAverageObjectMotion =
         readF32(aaObject, "velocityAverageObjectMotion",
                 aa.velocityAverageObjectMotion);
-    aa.velocityMaxObjectMotion =
-        readF32(aaObject, "velocityMaxObjectMotion",
-                aa.velocityMaxObjectMotion);
-    aa.velocityCameraMatrixDelta =
-        readF32(aaObject, "velocityCameraMatrixDelta",
-                aa.velocityCameraMatrixDelta);
+    aa.velocityMaxObjectMotion = readF32(aaObject, "velocityMaxObjectMotion",
+                                         aa.velocityMaxObjectMotion);
+    aa.velocityCameraMatrixDelta = readF32(
+        aaObject, "velocityCameraMatrixDelta", aa.velocityCameraMatrixDelta);
     aa.velocityStaticResidualEstimate =
         readF32(aaObject, "velocityStaticResidualEstimate",
                 aa.velocityStaticResidualEstimate);
@@ -650,13 +636,11 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
     AmbientOcclusionFrameMetrics &ao = metrics.ambientOcclusion;
     ao.enabled = readBool(aoObject, "enabled", ao.enabled);
     ao.active = readBool(aoObject, "active", ao.active);
-    ao.mainPassCount =
-        readU32(aoObject, "mainPassCount", ao.mainPassCount);
+    ao.mainPassCount = readU32(aoObject, "mainPassCount", ao.mainPassCount);
     ao.temporalPassCount =
         readU32(aoObject, "temporalPassCount", ao.temporalPassCount);
-    ao.temporalAccumulationActive =
-        readBool(aoObject, "temporalAccumulationActive",
-                 ao.temporalAccumulationActive);
+    ao.temporalAccumulationActive = readBool(
+        aoObject, "temporalAccumulationActive", ao.temporalAccumulationActive);
     ao.temporalMotionVectorsConsumed =
         readBool(aoObject, "temporalMotionVectorsConsumed",
                  ao.temporalMotionVectorsConsumed);
@@ -665,8 +649,7 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
   yyjson_val *hdrObject = yyjson_obj_get(object, "hdrPostProcess");
   if (yyjson_is_obj(hdrObject)) {
     HDRPostProcessFrameMetrics &hdr = metrics.hdrPostProcess;
-    hdr.bloomEnabled =
-        readBool(hdrObject, "bloomEnabled", hdr.bloomEnabled);
+    hdr.bloomEnabled = readBool(hdrObject, "bloomEnabled", hdr.bloomEnabled);
     hdr.bloomActive = readBool(hdrObject, "bloomActive", hdr.bloomActive);
     hdr.bloomPassCount =
         readU32(hdrObject, "bloomPassCount", hdr.bloomPassCount);
@@ -766,14 +749,14 @@ writeSnapshotReportJson(const SnapshotReport &report) {
     yyjson_mut_arr_add_val(captures, makeCaptureObject(doc.get(), capture));
   }
   yyjson_mut_obj_add_val(doc.get(), root, "captures", captures);
-  yyjson_mut_obj_add_val(doc.get(), root, "availableCapturePoints",
-                         makeStringArray(doc.get(),
-                                         report.availableCapturePoints));
+  yyjson_mut_obj_add_val(
+      doc.get(), root, "availableCapturePoints",
+      makeStringArray(doc.get(), report.availableCapturePoints));
   yyjson_mut_obj_add_strcpy(doc.get(), root, "captureSynchronization",
                             report.captureSynchronization.c_str());
-  yyjson_mut_obj_add_val(doc.get(), root, "rendererMetrics",
-                         makeRendererMetricsObject(doc.get(),
-                                                   report.rendererMetrics));
+  yyjson_mut_obj_add_val(
+      doc.get(), root, "rendererMetrics",
+      makeRendererMetricsObject(doc.get(), report.rendererMetrics));
   yyjson_mut_obj_add_val(doc.get(), root, "renderGraph",
                          yyjson_mut_obj(doc.get()));
   addString(doc.get(), root, "reproduceCommand", report.reproduceCommand);

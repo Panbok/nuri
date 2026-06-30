@@ -1,0 +1,226 @@
+if(NOT DEFINED NURI_TOOL_PROFILE)
+  set(NURI_TOOL_PROFILE "tools")
+endif()
+
+option(NURI_BUILD_BENCHMARK_CLI "Build nuri-bench executable" ON)
+option(NURI_BUILD_SNAPSHOT_CLI "Build nuri-snapshot executable" ON)
+option(NURI_BUILD_SNAPSHOT_TESTING "Build nuri snapshot testing library" ${NURI_BUILD_SNAPSHOT_CLI})
+option(NURI_BUILD_AUTOTEST_CLI "Build nuri-autotest executable" ON)
+option(NURI_BUILD_AUTOTESTING "Build nuri autotesting library" ${NURI_BUILD_AUTOTEST_CLI})
+
+if(NOT DEFINED NURI_DEV_CHECKS)
+  set(NURI_DEV_CHECKS OFF)
+endif()
+
+set(NURI_VCPKG_MANIFEST_FEATURES "${VCPKG_MANIFEST_FEATURES}")
+
+foreach(_nuri_bool IN ITEMS
+  NURI_BUILD_SHARED
+  NURI_WITH_LOGGING
+  NURI_WITH_ASSERTS
+  NURI_WITH_TRACY
+  NURI_WITH_TRACY_GPU
+  NURI_WITH_TRACY_GPU_DRAW_ZONES
+  NURI_DEV_CHECKS
+)
+  if(${_nuri_bool})
+    set(${_nuri_bool}_VALUE 1)
+  else()
+    set(${_nuri_bool}_VALUE 0)
+  endif()
+endforeach()
+
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/cmake/benchmark_build_config.h.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/nuri/tools/benchmark/build_config.h"
+  @ONLY
+)
+
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/snapshot/cmake/snapshot_build_config.h.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/nuri/tools/snapshot/build_config.h"
+  @ONLY
+)
+
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/autotest/cmake/autotest_build_config.h.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/nuri/tools/autotest/build_config.h"
+  @ONLY
+)
+
+add_library(nuri_tools_runtime STATIC
+  runtime/src/tools_runtime.cpp
+)
+
+target_include_directories(nuri_tools_runtime
+  PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/include"
+)
+
+target_link_libraries(nuri_tools_runtime
+  PUBLIC
+    nuri_renderer
+)
+
+target_compile_features(nuri_tools_runtime PUBLIC cxx_std_20)
+
+add_library(nuri_benchmarking STATIC
+  benchmark/src/benchmark_case.cpp
+  benchmark/src/benchmark_compare.cpp
+  benchmark/src/benchmark_environment.cpp
+  benchmark/src/benchmark_graph.cpp
+  benchmark/src/benchmark_manifest.cpp
+  benchmark/src/benchmark_report.cpp
+  benchmark/src/benchmark_runner.cpp
+  benchmark/src/benchmark_stats.cpp
+)
+
+target_include_directories(nuri_benchmarking
+  PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/include"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
+
+target_link_libraries(nuri_benchmarking
+  PUBLIC
+    nuri_renderer
+)
+
+target_compile_features(nuri_benchmarking PUBLIC cxx_std_20)
+
+if(NURI_BUILD_SNAPSHOT_TESTING OR NURI_BUILD_SNAPSHOT_CLI OR NURI_BUILD_AUTOTESTING OR NURI_BUILD_AUTOTEST_CLI)
+  add_library(nuri_snapshot_testing STATIC
+    snapshot/src/snapshot_baseline.cpp
+    snapshot/src/snapshot_capture_artifacts.cpp
+    snapshot/src/snapshot_capture_point.cpp
+    snapshot/src/snapshot_case.cpp
+    snapshot/src/snapshot_compare.cpp
+    snapshot/src/snapshot_environment.cpp
+    snapshot/src/snapshot_html_report.cpp
+    snapshot/src/snapshot_image.cpp
+    snapshot/src/snapshot_manifest.cpp
+    snapshot/src/snapshot_report.cpp
+    snapshot/src/snapshot_runner.cpp
+  )
+
+  find_package(OpenImageIO CONFIG REQUIRED)
+
+  target_include_directories(nuri_snapshot_testing
+    PUBLIC
+      "${CMAKE_CURRENT_SOURCE_DIR}/snapshot/include"
+      "${CMAKE_CURRENT_BINARY_DIR}/generated"
+  )
+
+  target_link_libraries(nuri_snapshot_testing
+    PUBLIC
+      nuri_renderer
+    PRIVATE
+      OpenImageIO::OpenImageIO
+  )
+
+  target_compile_features(nuri_snapshot_testing PUBLIC cxx_std_20)
+endif()
+
+if(NURI_BUILD_AUTOTESTING OR NURI_BUILD_AUTOTEST_CLI)
+  add_library(nuri_autotesting STATIC
+    autotest/src/autotest_assertion.cpp
+    autotest/src/autotest_case.cpp
+    autotest/src/autotest_environment.cpp
+    autotest/src/autotest_manifest.cpp
+    autotest/src/autotest_record.cpp
+    autotest/src/autotest_report.cpp
+    autotest/src/autotest_runner.cpp
+    autotest/src/autotest_timeline.cpp
+  )
+
+  target_include_directories(nuri_autotesting
+    PUBLIC
+      "${CMAKE_CURRENT_SOURCE_DIR}/autotest/include"
+      "${CMAKE_CURRENT_BINARY_DIR}/generated"
+  )
+
+  target_link_libraries(nuri_autotesting
+    PUBLIC
+      nuri_renderer
+      nuri_snapshot_testing
+    PRIVATE
+      nuri_tools_runtime
+  )
+
+  target_compile_features(nuri_autotesting PUBLIC cxx_std_20)
+endif()
+
+if(NURI_BUILD_BENCHMARK_CLI)
+  find_package(CLI11 CONFIG REQUIRED)
+
+  add_executable(nuri-bench
+    cli/nuri_benchmark_main.cpp
+  )
+
+  target_link_libraries(nuri-bench
+    PRIVATE
+      nuri_benchmarking
+      CLI11::CLI11
+  )
+
+  set_target_properties(nuri-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  )
+
+  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${_cfg}" _cfg_upper)
+    set_target_properties(nuri-bench PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+endif()
+
+if(NURI_BUILD_SNAPSHOT_CLI)
+  find_package(CLI11 CONFIG REQUIRED)
+
+  add_executable(nuri-snapshot
+    cli/nuri_snapshot_main.cpp
+  )
+
+  target_link_libraries(nuri-snapshot
+    PRIVATE
+      nuri_snapshot_testing
+      CLI11::CLI11
+  )
+
+  set_target_properties(nuri-snapshot PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  )
+
+  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${_cfg}" _cfg_upper)
+    set_target_properties(nuri-snapshot PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+endif()
+
+if(NURI_BUILD_AUTOTEST_CLI)
+  find_package(CLI11 CONFIG REQUIRED)
+
+  add_executable(nuri-autotest
+    cli/nuri_autotest_main.cpp
+  )
+
+  target_link_libraries(nuri-autotest
+    PRIVATE
+      nuri_autotesting
+      CLI11::CLI11
+  )
+
+  set_target_properties(nuri-autotest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  )
+
+  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${_cfg}" _cfg_upper)
+    set_target_properties(nuri-autotest PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+endif()

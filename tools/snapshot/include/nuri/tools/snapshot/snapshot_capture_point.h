@@ -37,4 +37,3 @@ renderCaptureValueKindName(RenderCaptureValueKind kind) noexcept;
 renderCaptureLifetimeName(RenderCaptureLifetimeClass lifetime) noexcept;
 
 } // namespace nuri::tools::snapshot
-

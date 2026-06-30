@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "id": "shadows.procedural.cascade_stability_pan",
+  "suite": "shadows",
+  "description": "Pan across procedural shadow planes and capture cascade outputs",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.shadow_planes.v1",
+    "seed": 11,
+    "contentHash": "nuri.procedural.shadow_planes.v1:11"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 12,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [-1.4, 0.9, 3.8],
+    "target": [0.0, 0.15, -0.2],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Medium",
+      "debug": {
+        "showShadowMapViewport": true,
+        "previewMode": "TiledAllCascades",
+        "previewDepthInvert": true,
+        "previewDepthLog": true
+      }
+    }
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "shadow_pan",
+        "startFrame": 0,
+        "endFrame": 12,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-1.4, 0.9, 3.8],
+            "target": [0.0, 0.15, -0.2]
+          },
+          {
+            "frame": 12,
+            "position": [1.4, 0.9, 3.8],
+            "target": [0.0, 0.15, -0.2]
+          }
+        ]
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "end_pan",
+      "frame": 12,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
+        {"target": "shadow_preview", "profile": "debug_preview", "required": true, "compare": true},
+        {"target": "shadow_cascade_0", "profile": "shadow_depth", "required": true, "compare": true}
+      ],
+      "readouts": [
+        {
+          "id": "shadow_probe_center",
+          "type": "shadowInspect",
+          "x": 320,
+          "y": 180,
+          "required": false,
+          "assertions": [
+            {
+              "id": "shadow_probe_valid_value",
+              "metric": "valid",
+              "min": 0,
+              "max": 1,
+              "severity": "warn",
+              "optional": true
+            }
+          ]
+        }
+      ],
+      "assertions": [
+        {
+          "id": "shadow_cascades_present",
+          "metric": "renderer.shadow.cascades",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "case": "renderer.damaged_helmet.opaque_360p",
+  "baselineProfile": "local-lvk-visible",
+  "reason": "Refresh opaque damaged helmet baseline after snapshot capture path stabilization",
+  "approvedAtUtc": "2026-06-27T14:27:42Z",
+  "sourceArtifactDir": "artifacts/snapshots-expanded-verify/cases/renderer.damaged_helmet.opaque_360p",
+  "captures": [
+    {"target": "final_color", "newHash": "fnv1a64:dbf262faf90f456c"},
+    {"target": "scene_color_hdr", "newHash": "fnv1a64:2b466875880d537d"},
+    {"target": "frame_color_hdr", "newHash": "fnv1a64:2b466875880d537d"},
+    {"target": "scene_depth", "newHash": "fnv1a64:909bf8d63d1f41f8"}
+  ]
+}

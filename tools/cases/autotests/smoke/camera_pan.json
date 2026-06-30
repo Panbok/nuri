@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "id": "smoke.procedural.camera_pan",
+  "suite": "smoke",
+  "description": "Slow camera pan over procedural geometry",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 2,
+    "contentHash": "nuri.procedural.reactive_mask.v1:2"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 2,
+  "endFrame": 8,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [-1.2, 0.85, 3.6],
+    "target": [0.0, 0.55, 0.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "slow_pan",
+        "startFrame": 0,
+        "endFrame": 8,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-1.2, 0.85, 3.6],
+            "target": [0.0, 0.55, 0.0]
+          },
+          {
+            "frame": 8,
+            "position": [1.2, 0.85, 3.6],
+            "target": [0.0, 0.55, 0.0]
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "start",
+      "frame": 2,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": true
+        }
+      ],
+      "assertions": [
+        {
+          "id": "visible_instances_start",
+          "metric": "renderer.opaque.visible_instances",
+          "greaterOrEqual": 1
+        }
+      ]
+    },
+    {
+      "id": "end",
+      "frame": 8,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": true
+        }
+      ],
+      "assertions": [
+        {
+          "id": "frame_index_end",
+          "metric": "renderer.frame_index",
+          "equals": 8
+        },
+        {
+          "id": "visible_instances_end",
+          "metric": "renderer.opaque.visible_instances",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "metricWindows": [
+    {
+      "id": "pan_frames",
+      "frames": [2, 8],
+      "assertions": [
+        {
+          "id": "frame_index_reaches_end",
+          "metric": "renderer.frame_index",
+          "max": 8
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

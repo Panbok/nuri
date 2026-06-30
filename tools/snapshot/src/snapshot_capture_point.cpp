@@ -157,8 +157,7 @@ constexpr std::array kCatalog{
 
 } // namespace
 
-std::span<const SnapshotCaptureCatalogEntry>
-snapshotCaptureCatalog() noexcept {
+std::span<const SnapshotCaptureCatalogEntry> snapshotCaptureCatalog() noexcept {
   return kCatalog;
 }
 
@@ -213,4 +212,3 @@ renderCaptureLifetimeName(RenderCaptureLifetimeClass lifetime) noexcept {
 }
 
 } // namespace nuri::tools::snapshot
-

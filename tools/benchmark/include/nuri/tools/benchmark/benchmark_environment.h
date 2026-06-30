@@ -47,12 +47,10 @@ struct BenchmarkEnvironment {
 };
 
 [[nodiscard]] std::filesystem::path benchmarkRepoRoot();
-[[nodiscard]] BenchmarkEnvironment
-collectBenchmarkEnvironment(std::string_view backend,
-                            std::string_view backendSource,
-                            std::string_view requestedPresentMode,
-                            std::string_view presentModeSource,
-                            bool tracyDiagnostic);
+[[nodiscard]] BenchmarkEnvironment collectBenchmarkEnvironment(
+    std::string_view backend, std::string_view backendSource,
+    std::string_view requestedPresentMode, std::string_view presentModeSource,
+    bool tracyDiagnostic);
 [[nodiscard]] std::string joinCommandLine(int argc, char **argv);
 [[nodiscard]] std::string utcTimestampForPath();
 [[nodiscard]] std::string utcTimestampIso8601();

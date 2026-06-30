@@ -63,17 +63,17 @@ approveSnapshotBaselines(const SnapshotReport &report,
     const std::filesystem::path targetActual =
         targetStem.string() + sourceRaw.extension().string();
     std::error_code ec;
-    std::filesystem::copy_file(sourceRaw, targetActual,
-                               std::filesystem::copy_options::overwrite_existing,
-                               ec);
+    std::filesystem::copy_file(
+        sourceRaw, targetActual,
+        std::filesystem::copy_options::overwrite_existing, ec);
     if (ec) {
       return Result<bool, std::string>::makeError(
           "approveSnapshotBaselines: failed to copy actual artifact: " +
           ec.message());
     }
-    std::filesystem::copy_file(sourceMeta, targetStem.string() + ".json",
-                               std::filesystem::copy_options::overwrite_existing,
-                               ec);
+    std::filesystem::copy_file(
+        sourceMeta, targetStem.string() + ".json",
+        std::filesystem::copy_options::overwrite_existing, ec);
     if (ec) {
       return Result<bool, std::string>::makeError(
           "approveSnapshotBaselines: failed to copy metadata artifact: " +
@@ -93,8 +93,8 @@ approveSnapshotBaselines(const SnapshotReport &report,
       metadata << ",\n";
     }
     first = false;
-    metadata << "    {\"target\": \"" << capture.target
-             << "\", \"newHash\": \"" << capture.actualHash << "\"}";
+    metadata << "    {\"target\": \"" << capture.target << "\", \"newHash\": \""
+             << capture.actualHash << "\"}";
   }
   metadata << "\n  ]\n}\n";
   return Result<bool, std::string>::makeResult(true);

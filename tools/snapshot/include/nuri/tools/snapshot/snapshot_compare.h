@@ -46,4 +46,3 @@ writeSnapshotDiffPng(const SnapshotImage &actual, const SnapshotImage &expected,
                      const std::filesystem::path &path);
 
 } // namespace nuri::tools::snapshot
-

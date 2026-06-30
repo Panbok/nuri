@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.sponza.cached_shadow_720p",
+  "suite": "renderer",
+  "description": "Sponza glTF large-scene opaque workload with stable medium cascaded shadow cache reuse at 1280x720",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "Sponza/Sponza.gltf"
+  },
+  "backend": "default",
+  "resolution": [1280, 720],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 20,
+  "measurementFrames": 60,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 160,
+  "drainTimeoutMs": 8000,
+  "samples": 1,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 260.0, 900.0],
+    "target": [0.0, 300.0, 0.0],
+    "verticalFovDegrees": 65.0,
+    "nearPlane": 1.0,
+    "farPlane": 5000.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableInstanceCompute": true,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Medium"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:Sponza/Sponza.gltf"
+    ],
+    "backends": [],
+    "allowVisibleWindow": true
+  },
+  "thresholds": {
+    "failPercent": 12.0,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6.0,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes.shadow_ms",
+    "gpu.scopes.shadow_depth_ms",
+    "gpu.scopes_sum_ms"
+  ]
+}

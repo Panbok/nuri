@@ -30,4 +30,3 @@ filterSnapshotCasesBySuite(const std::vector<SnapshotCase> &cases,
 resolveSnapshotPath(std::string_view base, const std::filesystem::path &path);
 
 } // namespace nuri::tools::snapshot
-

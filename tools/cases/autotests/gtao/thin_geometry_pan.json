@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "gtao.procedural.thin_geometry_pan",
+  "suite": "gtao",
+  "description": "GTAO over procedural planes with ambient occlusion and normal captures",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.shadow_planes.v1",
+    "seed": 23,
+    "contentHash": "nuri.procedural.shadow_planes.v1:23"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 12,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [-0.75, 0.65, 3.6],
+    "target": [0.0, 0.0, -0.35],
+    "verticalFovDegrees": 58.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Quality"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "High"
+    },
+    "shadow": {
+      "enabled": false
+    }
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "gtao_probe_pan",
+        "startFrame": 0,
+        "endFrame": 12,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-0.75, 0.65, 3.6],
+            "target": [0.0, 0.0, -0.35]
+          },
+          {
+            "frame": 12,
+            "position": [0.75, 0.65, 3.6],
+            "target": [0.0, 0.0, -0.35]
+          }
+        ]
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "end_pan",
+      "frame": 12,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
+        {"target": "ambient_occlusion", "profile": "scalar", "required": true, "compare": true},
+        {"target": "material_normals", "profile": "normal", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {
+          "id": "gtao_active",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        },
+        {
+          "id": "gtao_main_pass_present",
+          "metric": "renderer.ao.main_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_normal_prepass_present",
+          "metric": "renderer.ao.normal_prepass_draws",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

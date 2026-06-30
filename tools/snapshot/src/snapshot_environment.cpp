@@ -23,15 +23,13 @@ namespace nuri::tools::snapshot {
 namespace {
 
 [[nodiscard]] std::string trim(std::string text) {
-  while (!text.empty() &&
-         (text.back() == '\n' || text.back() == '\r' || text.back() == ' ' ||
-          text.back() == '\t')) {
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r' ||
+                           text.back() == ' ' || text.back() == '\t')) {
     text.pop_back();
   }
   size_t first = 0u;
-  while (first < text.size() &&
-         (text[first] == ' ' || text[first] == '\t' ||
-          text[first] == '\n' || text[first] == '\r')) {
+  while (first < text.size() && (text[first] == ' ' || text[first] == '\t' ||
+                                 text[first] == '\n' || text[first] == '\r')) {
     ++first;
   }
   return text.substr(first);
@@ -39,11 +37,11 @@ namespace {
 
 [[nodiscard]] std::string runCommand(std::string_view command,
                                      const std::filesystem::path &cwd) {
-  std::string full = "cd /d \"" + cwd.string() + "\" && " +
-                     std::string(command) + " 2>nul";
+  std::string full =
+      "cd /d \"" + cwd.string() + "\" && " + std::string(command) + " 2>nul";
 #if !defined(_WIN32)
-  full = "cd \"" + cwd.string() + "\" && " + std::string(command) +
-         " 2>/dev/null";
+  full =
+      "cd \"" + cwd.string() + "\" && " + std::string(command) + " 2>/dev/null";
 #endif
   std::array<char, 256> buffer{};
 #if defined(_WIN32)
@@ -255,4 +253,3 @@ std::string utcTimestampForPath() {
 }
 
 } // namespace nuri::tools::snapshot
-

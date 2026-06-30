@@ -23,4 +23,3 @@ approveSnapshotBaselines(const SnapshotReport &report,
                          std::string_view reason);
 
 } // namespace nuri::tools::snapshot
-

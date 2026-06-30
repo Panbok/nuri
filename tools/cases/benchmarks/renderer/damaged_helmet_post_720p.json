@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.damaged_helmet.post_720p",
+  "suite": "renderer",
+  "description": "DamagedHelmet with GTAO, TAA, and HDR postprocess at 1280x720",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "DamagedHelmet/DamagedHelmet.gltf",
+    "importOptions": {
+      "mesh": {
+        "flipUVs": true
+      }
+    }
+  },
+  "backend": "default",
+  "resolution": [1280, 720],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30,
+  "measurementFrames": 90,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 120,
+  "drainTimeoutMs": 5000,
+  "samples": 1,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.25, 3.2],
+    "target": [0.0, -0.05, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableInstanceCompute": true,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Quality"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "High"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": true,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:DamagedHelmet/DamagedHelmet.gltf"
+    ],
+    "backends": [],
+    "allowVisibleWindow": true
+  },
+  "thresholds": {
+    "failPercent": 12.0,
+    "failAbsoluteMs": 0.25,
+    "warnPercent": 6.0,
+    "warnAbsoluteMs": 0.12
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes.gtao_ms",
+    "gpu.scopes.taa_resolve_ms",
+    "gpu.scopes.hdr_postprocess_ms",
+    "gpu.scopes_sum_ms"
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "animation.procedural.instance_animation_taa",
+  "suite": "animation",
+  "description": "Animated procedural instances with TAA velocity and motion-vector capture",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 17,
+    "contentHash": "nuri.procedural.reactive_mask.v1:17"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 12,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [0.0, 0.35, 3.4],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {
+      "enableInstanceAnimation": true
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Quality"
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "animated_end",
+      "frame": 12,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
+        {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {
+          "id": "velocity_pass_present",
+          "metric": "renderer.aa.velocity_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "animated_responsive_present",
+          "metric": "renderer.aa.velocity_animated_responsive",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "animated_velocity_discontinuity_seen",
+          "metric": "renderer.aa.velocity_edge_discontinuity_estimate",
+          "greaterThan": 0
+        }
+      ]
+    }
+  ],
+  "metricWindows": [
+    {
+      "id": "animated_window",
+      "frames": [4, 12],
+      "assertions": [
+        {
+          "id": "animated_responsive_stable",
+          "metric": "renderer.aa.velocity_animated_responsive",
+          "min": 1
+        },
+        {
+          "id": "history_valid_during_animation",
+          "metric": "renderer.aa.history_valid",
+          "min": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

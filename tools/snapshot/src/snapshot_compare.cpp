@@ -78,9 +78,9 @@ compareSnapshotImages(const SnapshotImage &actual,
   out.metrics.comparedValues = static_cast<uint64_t>(absErrors.size());
   if (!absErrors.empty()) {
     std::sort(absErrors.begin(), absErrors.end());
-    const size_t p99Index = std::min(
-        absErrors.size() - 1u,
-        static_cast<size_t>(std::ceil(absErrors.size() * 0.99)) - 1u);
+    const size_t p99Index =
+        std::min(absErrors.size() - 1u,
+                 static_cast<size_t>(std::ceil(absErrors.size() * 0.99)) - 1u);
     out.metrics.meanAbsError = absSum / static_cast<double>(absErrors.size());
     out.metrics.rmse =
         std::sqrt(squareSum / static_cast<double>(absErrors.size()));
@@ -98,8 +98,7 @@ compareSnapshotImages(const SnapshotImage &actual,
   fail(out.metrics.meanAbsError > profile.meanAbsError, "mean_abs_error");
   fail(out.metrics.rmse > profile.rmse, "rmse");
   fail(out.metrics.p99AbsError > profile.p99AbsError, "p99_abs_error");
-  fail(out.metrics.failingValues > profile.maxFailingValues,
-       "failing_values");
+  fail(out.metrics.failingValues > profile.maxFailingValues, "failing_values");
   return out;
 }
 
@@ -123,9 +122,9 @@ writeSnapshotDiffPng(const SnapshotImage &actual, const SnapshotImage &expected,
     const size_t dst = i * 4u;
     double maxErr = 0.0;
     for (uint32_t c = 0u; c < actual.channelCount; ++c) {
-      maxErr = std::max(maxErr, std::abs(static_cast<double>(
-                                 actual.values[src + c] -
-                                 expected.values[src + c])));
+      maxErr = std::max(
+          maxErr, std::abs(static_cast<double>(actual.values[src + c] -
+                                               expected.values[src + c])));
     }
     const float heat = static_cast<float>(std::min(maxErr * 16.0, 1.0));
     diff.values[dst + 0u] = heat;
@@ -137,4 +136,3 @@ writeSnapshotDiffPng(const SnapshotImage &actual, const SnapshotImage &expected,
 }
 
 } // namespace nuri::tools::snapshot
-

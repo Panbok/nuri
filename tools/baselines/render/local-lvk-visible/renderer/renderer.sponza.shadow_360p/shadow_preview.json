@@ -1,0 +1,11 @@
+{
+  "target": "shadow_preview",
+  "format": 1,
+  "width": 2048,
+  "height": 2048,
+  "rowStride": 8192,
+  "origin": "top_left",
+  "colorSpace": "display_sdr",
+  "payload": "shadow_preview.png",
+  "hash": "fnv1a64:5afe419939dc8d81"
+}

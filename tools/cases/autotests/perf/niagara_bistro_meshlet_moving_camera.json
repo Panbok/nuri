@@ -1,0 +1,242 @@
+{
+  "schemaVersion": 1,
+  "id": "perf.niagara_bistro.meshlet_moving_camera",
+  "suite": "perf",
+  "description": "Niagara Bistro meshlet renderer moving-camera perf coverage",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 600,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-25.175787, 5.760150, 8.267586],
+    "target": [-34.294270, 2.883850, 5.338666],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableMeshletFrustumCulling": false,
+      "enableMeshletConeCulling": false,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "street_forward",
+        "startFrame": 0,
+        "endFrame": 600,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-25.175787, 5.760150, 8.267586],
+            "target": [-34.294270, 2.883850, 5.338666]
+          },
+          {
+            "frame": 150,
+            "position": [-23.645787, 5.760150, 3.507586],
+            "target": [-32.764270, 2.883850, 0.578666]
+          },
+          {
+            "frame": 300,
+            "position": [-25.175787, 5.760150, 8.267586],
+            "target": [-34.294270, 2.883850, 5.338666]
+          },
+          {
+            "frame": 450,
+            "position": [-23.645787, 5.760150, 3.507586],
+            "target": [-32.764270, 2.883850, 0.578666]
+          },
+          {
+            "frame": 600,
+            "position": [-25.175787, 5.760150, 8.267586],
+            "target": [-34.294270, 2.883850, 5.338666]
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "warm",
+      "frame": 12,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {
+          "id": "meshlet_mode_active_warm",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches_warm",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_active_warm",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "id": "mid",
+      "frame": 300,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {
+          "id": "meshlet_mode_active_mid",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches_mid",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_active_mid",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "id": "end",
+      "frame": 600,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false},
+        {"target": "material_normals", "profile": "normal", "required": true, "compare": false},
+        {"target": "ambient_occlusion", "profile": "scalar", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {
+          "id": "frame_index_end",
+          "metric": "renderer.frame_index",
+          "equals": 600
+        },
+        {
+          "id": "meshlet_mode_active_end",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches_end",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_task_groups_end",
+          "metric": "renderer.opaque.meshlet_task_groups",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_main_pass_end",
+          "metric": "renderer.ao.main_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_normal_prepass_end",
+          "metric": "renderer.ao.normal_prepass_draws",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "metricWindows": [
+    {
+      "id": "moving_camera",
+      "frames": [12, 600],
+      "assertions": [
+        {
+          "id": "meshlet_mode_stays_active",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches_nonzero",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "medianMin": 1
+        },
+        {
+          "id": "gtao_stays_active",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  }
+}

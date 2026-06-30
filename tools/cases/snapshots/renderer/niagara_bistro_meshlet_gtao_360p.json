@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "id": "renderer.niagara_bistro.meshlet_gtao_360p",
+  "suite": "renderer",
+  "description": "Niagara Bistro meshlet opaque path with GTAO at 640x360",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "captureFrame": 6,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-25.175787, 5.760150, 8.267586],
+    "direction": [-0.911857, -0.287630, -0.292892],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableMeshletFrustumCulling": false,
+      "enableMeshletConeCulling": false,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:NiagaraBistro/bistrox.gltf"
+    ],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  },
+  "captures": [
+    {
+      "target": "final_color",
+      "profile": "ldr_color",
+      "required": true
+    },
+    {
+      "target": "scene_depth",
+      "profile": "depth",
+      "required": true
+    },
+    {
+      "target": "material_normals",
+      "profile": "normal",
+      "required": true
+    },
+    {
+      "target": "ambient_occlusion",
+      "profile": "scalar",
+      "required": true
+    }
+  ]
+}

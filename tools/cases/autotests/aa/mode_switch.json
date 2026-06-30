@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.procedural.mode_switch",
+  "suite": "aa",
+  "description": "Switch AA modes through timeline settings and verify SpatialAA and MSAA passes",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 19,
+    "contentHash": "nuri.procedural.reactive_mask.v1:19"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 2,
+  "endFrame": 8,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "camera": {
+    "position": [0.0, 0.35, 3.25],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "antiAliasing": {
+      "mode": "None"
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 4,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {
+            "mode": "SpatialFallback"
+          }
+        }
+      },
+      {
+        "frame": 8,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {
+            "mode": "MSAA4x"
+          }
+        }
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "spatial",
+      "frame": 4,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {
+          "id": "spatial_aa_pass_present",
+          "metric": "renderer.aa.spatial_aa_passes",
+          "greaterOrEqual": 1
+        }
+      ]
+    },
+    {
+      "id": "msaa",
+      "frame": 8,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {
+          "id": "msaa_resolve_present",
+          "metric": "renderer.aa.msaa_resolve_passes",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

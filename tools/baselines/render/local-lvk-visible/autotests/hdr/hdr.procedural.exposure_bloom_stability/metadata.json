@@ -1,0 +1,30 @@
+{
+  "kind": "nuri.autotest.record_metadata",
+  "schemaVersion": 1,
+  "caseId": "hdr.procedural.exposure_bloom_stability",
+  "case": "hdr.procedural.exposure_bloom_stability",
+  "suite": "hdr",
+  "manifestHash": "fnv1a64:d9bec89c35f9462f",
+  "baselineProfile": "local-lvk-visible",
+  "backend": "default",
+  "resolvedBackend": "nvrhi",
+  "gpuBackendSource": "default",
+  "presentMode": "immediate",
+  "resolvedPresentMode": "immediate",
+  "windowMode": "visible",
+  "resolvedWindowMode": "visible",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "build": {
+    "buildType": "Release",
+    "cmakeToolProfile": "autotest",
+    "vcpkgManifestFeatures": "autotest-tools",
+    "NURI_WITH_TRACY": false,
+    "NURI_WITH_TRACY_GPU": false,
+    "devChecks": false
+  },
+  "generatedAtUtc": "2026-06-27T19:28:07Z",
+  "checkpoints": [
+    {"id": "bloom_end", "frame": 10, "captures": [{"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false, "width": 640, "height": 360, "format": "RGBA16_FLOAT", "colorSpace": "linear_hdr", "hash": "fnv1a64:562ad9ac7389c5e1"}, {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false, "width": 640, "height": 360, "format": "RGBA8_UNORM", "colorSpace": "display_sdr", "hash": "fnv1a64:f9149a6dfeed5aa8"}]}
+  ]
+}

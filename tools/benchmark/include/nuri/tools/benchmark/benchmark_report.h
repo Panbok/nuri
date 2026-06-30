@@ -77,8 +77,7 @@ struct BenchmarkReport {
 writeBenchmarkReportJson(const BenchmarkReport &report, bool verboseFrames);
 [[nodiscard]] Result<bool, std::string>
 writeBenchmarkReportFile(const BenchmarkReport &report,
-                         const std::filesystem::path &path,
-                         bool verboseFrames);
+                         const std::filesystem::path &path, bool verboseFrames);
 [[nodiscard]] Result<BenchmarkReport, std::string>
 readBenchmarkReportFile(const std::filesystem::path &path);
 void computeBenchmarkReportStats(BenchmarkReport &report);
