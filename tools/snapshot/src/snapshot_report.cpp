@@ -177,6 +177,10 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           shadow.totalDraws);
   yyjson_mut_obj_add_uint(doc, shadowObject, "totalCulledDraws",
                           shadow.totalCulledDraws);
+  yyjson_mut_obj_add_uint(doc, shadowObject, "meshletDispatchCount",
+                          shadow.shadowMeshletDispatchCount);
+  yyjson_mut_obj_add_uint(doc, shadowObject, "meshletTaskGroupCount",
+                          shadow.shadowMeshletTaskGroupCount);
   yyjson_mut_obj_add_uint(doc, shadowObject, "staticCasterEntries",
                           shadow.staticCasterEntries);
   yyjson_mut_obj_add_uint(doc, shadowObject, "dynamicCasterEntries",
@@ -525,6 +529,12 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
     shadow.totalDraws = readU32(shadowObject, "totalDraws", shadow.totalDraws);
     shadow.totalCulledDraws =
         readU32(shadowObject, "totalCulledDraws", shadow.totalCulledDraws);
+    shadow.shadowMeshletDispatchCount =
+        readU32(shadowObject, "meshletDispatchCount",
+                shadow.shadowMeshletDispatchCount);
+    shadow.shadowMeshletTaskGroupCount =
+        readU32(shadowObject, "meshletTaskGroupCount",
+                shadow.shadowMeshletTaskGroupCount);
     shadow.staticCasterEntries = readU32(
         shadowObject, "staticCasterEntries", shadow.staticCasterEntries);
     shadow.dynamicCasterEntries = readU32(

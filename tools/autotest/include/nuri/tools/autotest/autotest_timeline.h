@@ -1,0 +1,27 @@
+#pragma once
+
+#include "nuri/core/result.h"
+#include "nuri/tools/autotest/autotest_case.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace nuri::tools::autotest {
+
+struct AutotestFramePlan {
+  uint32_t frame = 0u;
+  AutotestCameraConfig camera{};
+  RenderSettings settings{};
+  bool resetTemporalHistory = false;
+  bool cameraCut = false;
+  std::string resetReason{};
+  std::vector<const AutotestCheckpoint *> checkpoints{};
+};
+
+[[nodiscard]] Result<AutotestCameraConfig, std::string>
+evaluateAutotestCameraAtFrame(const AutotestCase &testCase, uint32_t frame);
+[[nodiscard]] Result<std::vector<AutotestFramePlan>, std::string>
+compileAutotestTimeline(const AutotestCase &testCase);
+
+} // namespace nuri::tools::autotest
