@@ -12,6 +12,12 @@ constexpr std::string_view kDefaultSkyboxVertexShader = "skybox.vert";
 constexpr std::string_view kDefaultSkyboxFragmentShader = "skybox.frag";
 constexpr std::string_view kDefaultOpaqueMeshVertexShader = "main.vert";
 constexpr std::string_view kDefaultOpaqueMeshFragmentShader = "main.frag";
+constexpr std::string_view kDefaultOpaqueMeshletTaskShader =
+    "opaque_meshlet.task.glsl";
+constexpr std::string_view kDefaultOpaqueMeshletMeshShader =
+    "opaque_meshlet.mesh.glsl";
+constexpr std::string_view kDefaultOpaqueMeshletFragmentShader =
+    "opaque_meshlet.frag";
 constexpr std::string_view kDefaultOpaquePickFragmentShader = "main_id.frag";
 constexpr std::string_view kDefaultOpaqueShadowInspectFragmentShader =
     "shadow_inspect.frag";
@@ -64,12 +70,20 @@ constexpr std::array<std::string_view, 2> kDebugGridShaderKeys = {"vertex",
                                                                   "fragment"};
 constexpr std::array<std::string_view, 2> kSkyboxShaderKeys = {"vertex",
                                                                "fragment"};
-constexpr std::array<std::string_view, 10> kOpaqueShaderKeys = {
-    "mesh_vertex",       "mesh_fragment",
-    "pick_fragment",     "shadow_inspect_fragment",
-    "compute_instances", "tess_vertex",
-    "tess_control",      "tess_eval",
-    "overlay_geometry",  "overlay_fragment",
+constexpr std::array<std::string_view, 13> kOpaqueShaderKeys = {
+    "mesh_vertex",
+    "mesh_fragment",
+    "meshlet_task",
+    "meshlet_mesh",
+    "meshlet_fragment",
+    "pick_fragment",
+    "shadow_inspect_fragment",
+    "compute_instances",
+    "tess_vertex",
+    "tess_control",
+    "tess_eval",
+    "overlay_geometry",
+    "overlay_fragment",
 };
 constexpr std::array<std::string_view, 9> kCompositeShaderKeys = {
     "fullscreen_vertex",
@@ -623,6 +637,24 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (meshFragmentPath.hasError()) {
     return makeError<RuntimeConfig>(meshFragmentPath.error());
   }
+  auto meshletTaskPath = resolveShaderFileWithDefault(
+      opaqueObj, "meshlet_task", "shaders.opaque",
+      kDefaultOpaqueMeshletTaskShader, shadersRoot.value());
+  if (meshletTaskPath.hasError()) {
+    return makeError<RuntimeConfig>(meshletTaskPath.error());
+  }
+  auto meshletMeshPath = resolveShaderFileWithDefault(
+      opaqueObj, "meshlet_mesh", "shaders.opaque",
+      kDefaultOpaqueMeshletMeshShader, shadersRoot.value());
+  if (meshletMeshPath.hasError()) {
+    return makeError<RuntimeConfig>(meshletMeshPath.error());
+  }
+  auto meshletFragmentPath = resolveShaderFileWithDefault(
+      opaqueObj, "meshlet_fragment", "shaders.opaque",
+      kDefaultOpaqueMeshletFragmentShader, shadersRoot.value());
+  if (meshletFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(meshletFragmentPath.error());
+  }
   auto pickFragmentPath = resolveShaderFileWithDefault(
       opaqueObj, "pick_fragment", "shaders.opaque",
       kDefaultOpaquePickFragmentShader, shadersRoot.value());
@@ -795,6 +827,9 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
               .shaderBasePath = shadersRoot.value(),
               .meshVertex = meshVertexPath.value(),
               .meshFragment = meshFragmentPath.value(),
+              .meshletTask = meshletTaskPath.value(),
+              .meshletMesh = meshletMeshPath.value(),
+              .meshletFragment = meshletFragmentPath.value(),
               .pickFragment = pickFragmentPath.value(),
               .shadowInspectFragment = shadowInspectFragmentPath.value(),
               .computeInstances = computeInstancesPath.value(),

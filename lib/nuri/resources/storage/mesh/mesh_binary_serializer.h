@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "nuri/core/result.h"
+#include "nuri/defines.h"
 #include "nuri/math/types.h"
 #include "nuri/resources/cpu/mesh_data.h"
 
@@ -44,6 +45,9 @@ struct MeshBinarySerializeInput {
   BufferLayout<std::span<const std::byte>> staticVertexDecode{};
   std::span<const uint32_t> indices{};
   std::span<const Submesh> submeshes{};
+  std::span<const MeshletDescriptor> meshlets{};
+  std::span<const uint32_t> meshletVertexIndices{};
+  std::span<const uint8_t> meshletPrimitiveIndices{};
   BufferLayout<std::span<const std::byte>> skinInfluences{};
   BufferLayout<std::span<const std::byte>> morphMeta{};
   BufferLayout<std::span<const std::byte>> morphDeltas{};
@@ -64,6 +68,9 @@ struct MeshBinaryDecodedMesh {
   BufferLayout<std::vector<std::byte>> staticVertexDecode{};
   std::vector<uint32_t> indices;
   std::vector<Submesh> submeshes;
+  std::vector<MeshletDescriptor> meshlets;
+  std::vector<uint32_t> meshletVertexIndices;
+  std::vector<uint8_t> meshletPrimitiveIndices;
   BoundingBox bounds{glm::vec3(0.0f), glm::vec3(0.0f)};
   BufferLayout<std::vector<std::byte>> skinInfluences{};
   BufferLayout<std::vector<std::byte>> morphMeta{};
@@ -85,10 +92,10 @@ struct MeshBinaryDeserializeError {
   }
 };
 
-[[nodiscard]] Result<std::vector<std::byte>, std::string>
+[[nodiscard]] NURI_API Result<std::vector<std::byte>, std::string>
 meshBinarySerialize(const MeshBinarySerializeInput &input);
 
-[[nodiscard]] Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
+[[nodiscard]] NURI_API Result<MeshBinaryDecodedMesh, MeshBinaryDeserializeError>
 meshBinaryDeserialize(std::span<const std::byte> fileBytes,
                       const MeshBinaryDeserializeContext &context);
 

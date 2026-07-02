@@ -69,9 +69,13 @@ public:
   virtual Result<ComputePipelineHandle, std::string>
   createComputePipeline(const ComputePipelineDesc &desc,
                         std::string_view debugName = {}) = 0;
+  virtual Result<MeshletPipelineHandle, std::string>
+  createMeshletPipeline(const MeshletPipelineDesc &desc,
+                        std::string_view debugName = {}) = 0;
 
   virtual void destroyRenderPipeline(RenderPipelineHandle pipeline) = 0;
   virtual void destroyComputePipeline(ComputePipelineHandle pipeline) = 0;
+  virtual void destroyMeshletPipeline(MeshletPipelineHandle pipeline) = 0;
   virtual void destroyBuffer(BufferHandle buffer) = 0;
   virtual void destroyTexture(TextureHandle texture) = 0;
   virtual void destroySampler(SamplerHandle sampler) = 0;
@@ -84,9 +88,15 @@ public:
   virtual bool isValid(ShaderHandle h) const = 0;
   virtual bool isValid(RenderPipelineHandle h) const = 0;
   virtual bool isValid(ComputePipelineHandle h) const = 0;
+  virtual bool isValid(MeshletPipelineHandle h) const = 0;
   virtual Format getTextureFormat(TextureHandle h) const = 0;
   virtual TextureDimensions getTextureDimensions(TextureHandle h) const = 0;
   virtual TextureCompressionCaps getTextureCompressionCaps() const = 0;
+  virtual bool supportsFeature(GPUFeature feature) const {
+    (void)feature;
+    return false;
+  }
+  virtual MeshletLimits getMeshletLimits() const { return {}; }
   virtual bool supportsSampledImageLinearFiltering(Format format) const {
     (void)format;
     return false;

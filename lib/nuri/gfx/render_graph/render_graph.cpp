@@ -105,7 +105,12 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
     mix(static_cast<uint64_t>(dependencyTextureCount));
     mix(static_cast<uint64_t>(pass.preDispatches.size()));
     mix(quantizeToNextPow2(static_cast<uint64_t>(pass.draws.size())));
+    mix(static_cast<uint64_t>(pass.meshDispatches.size()));
     for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
+      mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
+      mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
+    }
+    for (const MeshDispatchItem &dispatch : pass.meshDispatches) {
       mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
       mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
     }
@@ -166,6 +171,11 @@ validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
     return Result<bool, std::string>::makeError(std::string(caller) +
                                                 ": compute-only pass cannot "
                                                 "contain draws");
+  }
+  if (!desc.meshDispatches.empty()) {
+    return Result<bool, std::string>::makeError(std::string(caller) +
+                                                ": compute-only pass cannot "
+                                                "contain mesh dispatches");
   }
   if (desc.drawBuffersPreResolved) {
     return Result<bool, std::string>::makeError(std::string(caller) +
@@ -650,6 +660,7 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
   const size_t passCount =
       std::min({result.orderedPasses.size(), result.drawRangesByPass.size(),
                 result.preDispatchRangesByPass.size(),
+                result.meshDispatchRangesByPass.size(),
                 result.dependencyBufferRangesByPass.size(),
                 result.dependencyTextureRangesByPass.size(),
                 result.orderedPassIndices.size()});
@@ -806,6 +817,30 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
       }
     } else {
       refreshedPass.draws = sourcePass.draws;
+    }
+
+    const auto meshDispatchRange = result.meshDispatchRangesByPass[i];
+    if (meshDispatchRange.count > 0u) {
+      const uint32_t actualDispatchCount =
+          static_cast<uint32_t>(sourcePass.meshDispatches.size());
+      if (actualDispatchCount <= meshDispatchRange.count &&
+          meshDispatchRange.offset <= result.ownedMeshDispatchItems.size() &&
+          meshDispatchRange.count <=
+              result.ownedMeshDispatchItems.size() - meshDispatchRange.offset) {
+        for (uint32_t dispatchIndex = 0; dispatchIndex < actualDispatchCount;
+             ++dispatchIndex) {
+          result.ownedMeshDispatchItems[meshDispatchRange.offset +
+                                        dispatchIndex] =
+              sourcePass.meshDispatches[dispatchIndex];
+        }
+        refreshedPass.meshDispatches = std::span<const MeshDispatchItem>(
+            result.ownedMeshDispatchItems.data() + meshDispatchRange.offset,
+            actualDispatchCount);
+      } else {
+        refreshedPass.meshDispatches = {};
+      }
+    } else {
+      refreshedPass.meshDispatches = sourcePass.meshDispatches;
     }
   }
 }
@@ -1196,6 +1231,57 @@ RenderGraphBuilder::OwnedPassPayload RenderGraphBuilder::clonePassPayload(
                                        ownedPayload.drawDebugLabels[i].size());
   }
 
+  ownedPayload.meshDispatchDebugLabels.reserve(desc.meshDispatches.size());
+  ownedPayload.meshDispatchPushConstants.reserve(desc.meshDispatches.size());
+  ownedPayload.meshDispatchDependencyBuffers.reserve(
+      desc.meshDispatches.size());
+  ownedPayload.meshDispatchDependencyTextures.reserve(
+      desc.meshDispatches.size());
+  ownedPayload.meshDispatches.reserve(desc.meshDispatches.size());
+  for (const MeshDispatchItem &sourceDispatch : desc.meshDispatches) {
+    ownedPayload.meshDispatchDebugLabels.push_back(std::pmr::string(memory_));
+    auto &label = ownedPayload.meshDispatchDebugLabels.back();
+    label.assign(sourceDispatch.debugLabel.data(),
+                 sourceDispatch.debugLabel.size());
+
+    ownedPayload.meshDispatchPushConstants.push_back(
+        std::pmr::vector<std::byte>(memory_));
+    auto &pushConstants = ownedPayload.meshDispatchPushConstants.back();
+    pushConstants.assign(sourceDispatch.pushConstants.begin(),
+                         sourceDispatch.pushConstants.end());
+
+    ownedPayload.meshDispatchDependencyBuffers.push_back(
+        std::pmr::vector<BufferHandle>(memory_));
+    auto &dependencyBuffers = ownedPayload.meshDispatchDependencyBuffers.back();
+    dependencyBuffers.assign(sourceDispatch.dependencyBuffers.begin(),
+                             sourceDispatch.dependencyBuffers.end());
+
+    ownedPayload.meshDispatchDependencyTextures.push_back(
+        std::pmr::vector<TextureHandle>(memory_));
+    auto &dependencyTextures =
+        ownedPayload.meshDispatchDependencyTextures.back();
+    dependencyTextures.assign(sourceDispatch.dependencyTextures.begin(),
+                              sourceDispatch.dependencyTextures.end());
+  }
+  ownedPayload.meshDispatches.resize(desc.meshDispatches.size());
+  for (size_t i = 0; i < desc.meshDispatches.size(); ++i) {
+    const MeshDispatchItem &sourceDispatch = desc.meshDispatches[i];
+    MeshDispatchItem &dispatch = ownedPayload.meshDispatches[i];
+    dispatch = sourceDispatch;
+    dispatch.pushConstants = std::span<const std::byte>(
+        ownedPayload.meshDispatchPushConstants[i].data(),
+        ownedPayload.meshDispatchPushConstants[i].size());
+    dispatch.dependencyBuffers = std::span<const BufferHandle>(
+        ownedPayload.meshDispatchDependencyBuffers[i].data(),
+        ownedPayload.meshDispatchDependencyBuffers[i].size());
+    dispatch.dependencyTextures = std::span<const TextureHandle>(
+        ownedPayload.meshDispatchDependencyTextures[i].data(),
+        ownedPayload.meshDispatchDependencyTextures[i].size());
+    dispatch.debugLabel =
+        std::string_view(ownedPayload.meshDispatchDebugLabels[i].data(),
+                         ownedPayload.meshDispatchDebugLabels[i].size());
+  }
+
   return ownedPayload;
 }
 
@@ -1393,6 +1479,50 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     }
   }
 
+  const std::string meshDispatchDependencyBufferDebugName =
+      makePassResourceDebugName(desc.debugLabel,
+                                "mesh_dispatch_dependency_buffer");
+  const std::string meshDispatchDependencyTextureDebugName =
+      makePassResourceDebugName(desc.debugLabel,
+                                "mesh_dispatch_dependency_texture");
+  for (const MeshDispatchItem &dispatch : desc.meshDispatches) {
+    if (dispatch.command != MeshDispatchCommandType::Direct) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::bindImplicitPassResources: mesh dispatches "
+          "must be direct in graph v1");
+    }
+    for (const BufferHandle dependency : dispatch.dependencyBuffers) {
+      if (!nuri::isValid(dependency)) {
+        continue;
+      }
+      auto importResult =
+          importBuffer(dependency, meshDispatchDependencyBufferDebugName);
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      auto accessResult = addBufferAccess(pass, importResult.value(),
+                                          RenderGraphAccessMode::Read);
+      if (accessResult.hasError()) {
+        return accessResult;
+      }
+    }
+    for (const TextureHandle dependency : dispatch.dependencyTextures) {
+      if (!nuri::isValid(dependency)) {
+        continue;
+      }
+      auto importResult =
+          importTexture(dependency, meshDispatchDependencyTextureDebugName);
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      auto accessResult = addTextureAccess(pass, importResult.value(),
+                                           RenderGraphAccessMode::Read);
+      if (accessResult.hasError()) {
+        return accessResult;
+      }
+    }
+  }
+
   if (desc.drawBuffersPreResolved) {
     auto accessResult = addPreResolvedDrawBufferAccesses(
         pass, desc.preResolvedDrawBuffers, desc.debugLabel);
@@ -1470,6 +1600,7 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
     pass.dependencyBuffers = desc.dependencyBuffers;
     pass.dependencyTextures = desc.dependencyTextures;
     pass.draws = desc.draws;
+    pass.meshDispatches = desc.meshDispatches;
     pass.debugLabel = desc.debugLabel;
   } else {
     OwnedPassPayload ownedPayload = clonePassPayload(desc);
@@ -1485,6 +1616,9 @@ RenderGraphBuilder::addGraphicsPass(const RenderGraphGraphicsPassDesc &desc) {
                                        storedPayload.dependencyTextures.size());
     pass.draws = std::span<const DrawItem>(storedPayload.draws.data(),
                                            storedPayload.draws.size());
+    pass.meshDispatches =
+        std::span<const MeshDispatchItem>(storedPayload.meshDispatches.data(),
+                                          storedPayload.meshDispatches.size());
     pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
                                        storedPayload.debugLabel.size());
   }
@@ -1523,6 +1657,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
   validationDesc.depthResolveTexture = desc.depthResolveTexture;
   validationDesc.preDispatches = desc.preDispatches;
   validationDesc.draws = desc.draws;
+  validationDesc.meshDispatches = desc.meshDispatches;
   validationDesc.drawBuffersPreResolved = desc.drawBuffersPreResolved;
   validationDesc.gpuTimingScope = desc.gpuTimingScope;
   validationDesc.markColorAsFrameOutput = desc.markColorAsFrameOutput;
@@ -1560,6 +1695,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     pass.dependencyBuffers = desc.dependencyBuffers;
     pass.dependencyTextures = {};
     pass.draws = desc.draws;
+    pass.meshDispatches = desc.meshDispatches;
     pass.debugLabel = desc.debugLabel;
   } else {
     RenderGraphGraphicsPassDesc clonedDesc{};
@@ -1577,6 +1713,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     clonedDesc.dependencyBuffers = desc.dependencyBuffers;
     clonedDesc.dependencyTextures = {};
     clonedDesc.draws = desc.draws;
+    clonedDesc.meshDispatches = desc.meshDispatches;
     clonedDesc.drawBuffersPreResolved = desc.drawBuffersPreResolved;
     clonedDesc.preResolvedDrawBuffers = desc.preResolvedDrawBuffers;
     clonedDesc.gpuTimingScope = desc.gpuTimingScope;
@@ -1597,6 +1734,9 @@ RenderGraphBuilder::addPreparedGraphicsPass(
                                        storedPayload.dependencyTextures.size());
     pass.draws = std::span<const DrawItem>(storedPayload.draws.data(),
                                            storedPayload.draws.size());
+    pass.meshDispatches =
+        std::span<const MeshDispatchItem>(storedPayload.meshDispatches.data(),
+                                          storedPayload.meshDispatches.size());
     pass.debugLabel = std::string_view(storedPayload.debugLabel.data(),
                                        storedPayload.debugLabel.size());
   }
@@ -1677,6 +1817,54 @@ RenderGraphBuilder::addPreparedGraphicsPass(
       if (bindResult.hasError()) {
         return Result<RenderGraphPassId, std::string>::makeError(
             bindResult.error());
+      }
+    }
+
+    const std::string meshDispatchDependencyBufferDebugName =
+        makePassResourceDebugName(desc.debugLabel,
+                                  "mesh_dispatch_dependency_buffer");
+    const std::string meshDispatchDependencyTextureDebugName =
+        makePassResourceDebugName(desc.debugLabel,
+                                  "mesh_dispatch_dependency_texture");
+    for (const MeshDispatchItem &dispatch : desc.meshDispatches) {
+      if (dispatch.command != MeshDispatchCommandType::Direct) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            "RenderGraphBuilder::addPreparedGraphicsPass: mesh dispatches "
+            "must be direct in graph v1");
+      }
+      for (const BufferHandle dependency : dispatch.dependencyBuffers) {
+        if (!nuri::isValid(dependency)) {
+          continue;
+        }
+        auto importResult =
+            importBuffer(dependency, meshDispatchDependencyBufferDebugName);
+        if (importResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              importResult.error());
+        }
+        auto accessResult = addBufferAccess(passId, importResult.value(),
+                                            RenderGraphAccessMode::Read);
+        if (accessResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              accessResult.error());
+        }
+      }
+      for (const TextureHandle dependency : dispatch.dependencyTextures) {
+        if (!nuri::isValid(dependency)) {
+          continue;
+        }
+        auto importResult =
+            importTexture(dependency, meshDispatchDependencyTextureDebugName);
+        if (importResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              importResult.error());
+        }
+        auto accessResult = addTextureAccess(passId, importResult.value(),
+                                             RenderGraphAccessMode::Read);
+        if (accessResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              accessResult.error());
+        }
       }
     }
 
@@ -1808,6 +1996,35 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
   if (drawCount > UINT32_MAX) {
     return Result<RenderGraphPassId, std::string>::makeError(
         "RenderGraphBuilder::addPassRecord: draw count exceeds uint32_t");
+  }
+  const size_t meshDispatchCount = pass.meshDispatches.size();
+  if (meshDispatchCount > UINT32_MAX) {
+    return Result<RenderGraphPassId, std::string>::makeError(
+        "RenderGraphBuilder::addPassRecord: mesh dispatch count exceeds "
+        "uint32_t");
+  }
+  for (const MeshDispatchItem &dispatch : pass.meshDispatches) {
+    if (dispatch.dependencyBuffers.size() > UINT32_MAX) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addPassRecord: mesh dispatch dependency "
+          "buffer count exceeds uint32_t");
+    }
+    if (dispatch.dependencyBuffers.size() >
+        kMaxMeshDispatchDependencyResources) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addPassRecord: mesh dispatch dependency "
+          "buffer count exceeds kMaxMeshDispatchDependencyResources");
+    }
+    if (dispatch.dependencyTextures.size() > UINT32_MAX) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addPassRecord: mesh dispatch dependency "
+          "texture count exceeds uint32_t");
+    }
+    if (dispatch.dependencyTextures.size() > kMaxDependencyTextures) {
+      return Result<RenderGraphPassId, std::string>::makeError(
+          "RenderGraphBuilder::addPassRecord: mesh dispatch dependency "
+          "texture count exceeds kMaxDependencyTextures");
+    }
   }
 
   passes_.push_back(pass);
@@ -3131,6 +3348,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t drawBindingOffset = 0u;
     uint32_t drawOutputOffset = 0u;
     uint32_t quantizedDrawCount = 0u;
+    uint32_t meshDispatchCount = 0u;
+    uint32_t meshDispatchOutputOffset = 0u;
     uint32_t unresolvedTextureOffset = 0u;
     uint32_t unresolvedTextureCount = 0u;
     uint32_t unresolvedDependencyOffset = 0u;
@@ -3312,6 +3531,22 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         };
         return;
       }
+      plan.drawCount = drawCount;
+      plan.drawBindingOffset = drawOffset;
+      const uint32_t meshDispatchCount =
+          static_cast<uint32_t>(sourcePass.meshDispatches.size());
+      for (const MeshDispatchItem &dispatch : sourcePass.meshDispatches) {
+        if (dispatch.command != MeshDispatchCommandType::Direct) {
+          resolveErrors[workerIndex] = IndexedResolveError{
+              .hasError = true,
+              .orderedPassIndex = orderedPassIndex,
+              .message = "RenderGraphBuilder::compile: graph mesh dispatches "
+                         "must be direct in v1",
+          };
+          return;
+        }
+      }
+      plan.meshDispatchCount = meshDispatchCount;
       if (nuri::isValid(sourcePass.colorTexture) &&
           passColorTextureBindings_[passIndex] == UINT32_MAX) {
         resolveErrors[workerIndex] = IndexedResolveError{
@@ -3637,6 +3872,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   size_t totalPreDispatchItems = 0u;
   size_t totalPreDispatchDependencySlots = 0u;
   size_t totalDrawItems = 0u;
+  size_t totalMeshDispatchItems = 0u;
   size_t totalUnresolvedTextureBindings = 0u;
   size_t totalUnresolvedDependencyBufferBindings = 0u;
   size_t totalUnresolvedDependencyTextureBindings = 0u;
@@ -3688,6 +3924,20 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       plan.drawOutputOffset = 0u;
       plan.quantizedDrawCount = 0u;
     }
+    if (totalMeshDispatchItems > UINT32_MAX) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::compile: mesh dispatch output offset exceeds "
+          "uint32_t range");
+    }
+    plan.meshDispatchOutputOffset =
+        static_cast<uint32_t>(totalMeshDispatchItems);
+    if (plan.meshDispatchCount >
+        static_cast<uint64_t>(std::numeric_limits<size_t>::max() -
+                              totalMeshDispatchItems)) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::compile: total mesh dispatch count overflow");
+    }
+    totalMeshDispatchItems += plan.meshDispatchCount;
     plan.unresolvedTextureOffset =
         static_cast<uint32_t>(totalUnresolvedTextureBindings);
     totalUnresolvedTextureBindings += plan.unresolvedTextureCount;
@@ -3724,6 +3974,25 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   compiled.preDispatchDependencyRanges.resize(totalPreDispatchItems);
   compiled.ownedDrawItems.resize(totalDrawItems);
   compiled.drawRangesByPass.resize(work.order.size());
+  compiled.ownedMeshDispatchItems.resize(totalMeshDispatchItems);
+  {
+    compiled.ownedMeshDispatchDebugLabels.clear();
+    compiled.ownedMeshDispatchPushConstants.clear();
+    compiled.ownedMeshDispatchDependencyBuffers.clear();
+    compiled.ownedMeshDispatchDependencyTextures.clear();
+    compiled.ownedMeshDispatchDebugLabels.reserve(totalMeshDispatchItems);
+    compiled.ownedMeshDispatchPushConstants.reserve(totalMeshDispatchItems);
+    compiled.ownedMeshDispatchDependencyBuffers.reserve(totalMeshDispatchItems);
+    compiled.ownedMeshDispatchDependencyTextures.reserve(
+        totalMeshDispatchItems);
+    for (size_t i = 0u; i < totalMeshDispatchItems; ++i) {
+      compiled.ownedMeshDispatchDebugLabels.emplace_back();
+      compiled.ownedMeshDispatchPushConstants.emplace_back();
+      compiled.ownedMeshDispatchDependencyBuffers.emplace_back();
+      compiled.ownedMeshDispatchDependencyTextures.emplace_back();
+    }
+  }
+  compiled.meshDispatchRangesByPass.resize(work.order.size());
   compiled.orderedPasses.resize(work.order.size());
   compiled.orderedPassIndices.resize(work.order.size());
   compiled.recordedGraphicsPasses.resize(work.order.size());
@@ -4011,6 +4280,57 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
         } else {
           resolvedPass.draws = {};
         }
+      }
+
+      compiled.meshDispatchRangesByPass[orderedPassIndex] = {
+          .offset = plan.meshDispatchOutputOffset,
+          .count = plan.meshDispatchCount};
+      if (plan.meshDispatchCount > 0u) {
+        for (uint32_t dispatchIndex = 0; dispatchIndex < plan.meshDispatchCount;
+             ++dispatchIndex) {
+          const size_t outputIndex =
+              static_cast<size_t>(plan.meshDispatchOutputOffset) +
+              dispatchIndex;
+          const MeshDispatchItem &sourceDispatch =
+              sourcePass.meshDispatches[dispatchIndex];
+          MeshDispatchItem resolvedDispatch = sourceDispatch;
+
+          std::pmr::string &debugLabel =
+              compiled.ownedMeshDispatchDebugLabels[outputIndex];
+          debugLabel.assign(sourceDispatch.debugLabel.data(),
+                            sourceDispatch.debugLabel.size());
+          resolvedDispatch.debugLabel =
+              std::string_view(debugLabel.data(), debugLabel.size());
+
+          std::pmr::vector<std::byte> &pushConstants =
+              compiled.ownedMeshDispatchPushConstants[outputIndex];
+          pushConstants.assign(sourceDispatch.pushConstants.begin(),
+                               sourceDispatch.pushConstants.end());
+          resolvedDispatch.pushConstants = std::span<const std::byte>(
+              pushConstants.data(), pushConstants.size());
+
+          std::pmr::vector<BufferHandle> &dependencyBuffers =
+              compiled.ownedMeshDispatchDependencyBuffers[outputIndex];
+          dependencyBuffers.assign(sourceDispatch.dependencyBuffers.begin(),
+                                   sourceDispatch.dependencyBuffers.end());
+          resolvedDispatch.dependencyBuffers = std::span<const BufferHandle>(
+              dependencyBuffers.data(), dependencyBuffers.size());
+
+          std::pmr::vector<TextureHandle> &dependencyTextures =
+              compiled.ownedMeshDispatchDependencyTextures[outputIndex];
+          dependencyTextures.assign(sourceDispatch.dependencyTextures.begin(),
+                                    sourceDispatch.dependencyTextures.end());
+          resolvedDispatch.dependencyTextures = std::span<const TextureHandle>(
+              dependencyTextures.data(), dependencyTextures.size());
+
+          compiled.ownedMeshDispatchItems[outputIndex] = resolvedDispatch;
+        }
+        resolvedPass.meshDispatches = std::span<const MeshDispatchItem>(
+            compiled.ownedMeshDispatchItems.data() +
+                plan.meshDispatchOutputOffset,
+            plan.meshDispatchCount);
+      } else {
+        resolvedPass.meshDispatches = {};
       }
       if (passIndex < compiled.passDebugNames.size()) {
         const std::pmr::string &compiledName =
@@ -4976,6 +5296,12 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
       return Result<bool, std::string>::makeError(
           "RenderGraphBuilder::compile: draw range metadata count mismatch");
     }
+    if (compiled.meshDispatchRangesByPass.size() !=
+        compiled.orderedPasses.size()) {
+      return Result<bool, std::string>::makeError(
+          "RenderGraphBuilder::compile: mesh dispatch range metadata count "
+          "mismatch");
+    }
     if (compiled.preDispatchDependencyRanges.size() !=
         compiled.ownedPreDispatches.size()) {
       return Result<bool, std::string>::makeError(
@@ -5029,6 +5355,16 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
           drawRange.count > compiled.ownedDrawItems.size() - drawRange.offset) {
         return Result<bool, std::string>::makeError(
             "RenderGraphBuilder::compile: draw range is out of bounds");
+      }
+
+      const auto &meshDispatchRange =
+          compiled.meshDispatchRangesByPass[passExecIndex];
+      if (meshDispatchRange.offset > compiled.ownedMeshDispatchItems.size() ||
+          meshDispatchRange.count > compiled.ownedMeshDispatchItems.size() -
+                                        meshDispatchRange.offset) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: mesh dispatch range is out of "
+            "bounds");
       }
     }
 
@@ -5705,6 +6041,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
   std::pmr::vector<TextureHandle> executableDependencyTextures(memory_);
   std::pmr::vector<ComputeDispatchItem> executablePreDispatches(memory_);
   std::pmr::vector<DrawItem> executableDrawItems(memory_);
+  std::pmr::vector<MeshDispatchItem> executableMeshDispatches(memory_);
   std::pmr::vector<BufferHandle> executablePreDispatchDependencyBuffers(
       memory_);
 
@@ -5728,6 +6065,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
     if (needsMutableDrawItems) {
       executableDrawItems = compiled.ownedDrawItems;
     }
+    executableMeshDispatches = compiled.ownedMeshDispatchItems;
     executablePreDispatchDependencyBuffers =
         compiled.resolvedPreDispatchDependencyBuffers;
 
@@ -5760,6 +6098,13 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
           RenderGraphExecutionFailureStage::BuildExecutablePayload,
           "RenderGraphExecutor::execute: pass draw range metadata count "
           "mismatch");
+    }
+    if (compiled.meshDispatchRangesByPass.size() != executablePasses.size()) {
+      destroyMaterializedResources();
+      return fail(
+          RenderGraphExecutionFailureStage::BuildExecutablePayload,
+          "RenderGraphExecutor::execute: pass mesh dispatch range metadata "
+          "count mismatch");
     }
     if (compiled.preDispatchDependencyRanges.size() !=
         executablePreDispatches.size()) {
@@ -5898,6 +6243,25 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       if (drawRange.count > 0u && needsMutableDrawItems) {
         executablePasses[orderedPassIndex].draws = std::span<const DrawItem>(
             executableDrawItems.data() + drawRange.offset, drawRange.count);
+      }
+
+      const auto &meshDispatchRange =
+          compiled.meshDispatchRangesByPass[orderedPassIndex];
+      if (meshDispatchRange.offset > executableMeshDispatches.size() ||
+          meshDispatchRange.count >
+              executableMeshDispatches.size() - meshDispatchRange.offset) {
+        destroyMaterializedResources();
+        return fail(RenderGraphExecutionFailureStage::BuildExecutablePayload,
+                    "RenderGraphExecutor::execute: pass mesh dispatch range "
+                    "is out of bounds");
+      }
+      if (meshDispatchRange.count > 0u) {
+        executablePasses[orderedPassIndex].meshDispatches =
+            std::span<const MeshDispatchItem>(executableMeshDispatches.data() +
+                                                  meshDispatchRange.offset,
+                                              meshDispatchRange.count);
+      } else {
+        executablePasses[orderedPassIndex].meshDispatches = {};
       }
     }
     NURI_PROFILER_ZONE_END();

@@ -153,7 +153,7 @@ SkyboxPass::ensureFrameBufferCapacity(size_t requiredBytes) {
 
   const BufferDesc frameBufferDesc{
       .usage = BufferUsage::Storage,
-      .storage = Storage::Device,
+      .storage = Storage::HostVisible,
       .size = requested,
   };
   auto bufferResult =

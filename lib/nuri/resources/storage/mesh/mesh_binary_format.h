@@ -7,7 +7,7 @@
 namespace nuri {
 
 constexpr uint16_t kMeshBinaryFormatMajorVersion = 2;
-constexpr uint16_t kMeshBinaryFormatMinorVersion = 1;
+constexpr uint16_t kMeshBinaryFormatMinorVersion = 2;
 
 constexpr std::array<char, 8> kMeshBinaryMagic = {'N', 'U', 'R', 'I',
                                                   'M', 'S', 'H', '\0'};
@@ -42,6 +42,14 @@ constexpr uint32_t kMeshBinarySectionMmta =
     makeMeshBinaryFourCC('M', 'M', 'T', 'A'); // Morph Metadata
 constexpr uint32_t kMeshBinarySectionMdel =
     makeMeshBinaryFourCC('M', 'D', 'E', 'L'); // Morph Deltas
+constexpr uint32_t kMeshBinarySectionMlds =
+    makeMeshBinaryFourCC('M', 'L', 'D', 'S'); // Meshlet descriptors
+constexpr uint32_t kMeshBinarySectionMlvi =
+    makeMeshBinaryFourCC('M', 'L', 'V', 'I'); // Meshlet vertex indices
+constexpr uint32_t kMeshBinarySectionMlpi =
+    makeMeshBinaryFourCC('M', 'L', 'P', 'I'); // Meshlet primitive indices
+constexpr uint32_t kMeshBinarySectionMlrg =
+    makeMeshBinaryFourCC('M', 'L', 'R', 'G'); // LOD meshlet ranges
 
 constexpr uint32_t kMeshBinaryLayoutIdStaticQuantized20 = 0u;
 constexpr uint32_t kMeshBinaryLayoutIdAnimatedFloat24 = 1u;
@@ -140,6 +148,21 @@ struct MeshBinaryLodRecord {
   uint32_t reserved = 0;
 };
 
+struct MeshBinaryLodMeshletRangeRecord {
+  uint32_t meshletOffset = 0;
+  uint32_t meshletCount = 0;
+};
+
+struct MeshBinaryMeshletRecord {
+  uint32_t vertexOffset = 0;
+  uint32_t vertexCount = 0;
+  uint32_t primitiveOffset = 0;
+  uint32_t primitiveCount = 0;
+  float boundsSphere[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float coneApex[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float coneAxisCutoff[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+
 struct MeshBinaryBufferSectionHeader {
   uint32_t elementCount = 0;
   uint32_t elementStrideBytes = 0;
@@ -161,6 +184,8 @@ static_assert(sizeof(MeshBinarySubmeshRecord) == 72);
 static_assert(sizeof(MeshBinarySubmeshRecordV0) == 48);
 static_assert(sizeof(MeshBinarySubmeshRecordV1) == 56);
 static_assert(sizeof(MeshBinaryLodRecord) == 16);
+static_assert(sizeof(MeshBinaryLodMeshletRangeRecord) == 8);
+static_assert(sizeof(MeshBinaryMeshletRecord) == 64);
 static_assert(sizeof(MeshBinaryBufferSectionHeader) == 16);
 static_assert(sizeof(MeshBinaryMorphMetaRecord) == 16);
 static_assert(std::is_standard_layout_v<MeshBinaryHeader>);
@@ -170,6 +195,8 @@ static_assert(std::is_standard_layout_v<MeshBinarySubmeshRecord>);
 static_assert(std::is_standard_layout_v<MeshBinarySubmeshRecordV0>);
 static_assert(std::is_standard_layout_v<MeshBinarySubmeshRecordV1>);
 static_assert(std::is_standard_layout_v<MeshBinaryLodRecord>);
+static_assert(std::is_standard_layout_v<MeshBinaryLodMeshletRangeRecord>);
+static_assert(std::is_standard_layout_v<MeshBinaryMeshletRecord>);
 static_assert(std::is_standard_layout_v<MeshBinaryBufferSectionHeader>);
 static_assert(std::is_standard_layout_v<MeshBinaryMorphMetaRecord>);
 static_assert(std::is_trivially_copyable_v<MeshBinaryHeader>);
@@ -179,6 +206,8 @@ static_assert(std::is_trivially_copyable_v<MeshBinarySubmeshRecord>);
 static_assert(std::is_trivially_copyable_v<MeshBinarySubmeshRecordV0>);
 static_assert(std::is_trivially_copyable_v<MeshBinarySubmeshRecordV1>);
 static_assert(std::is_trivially_copyable_v<MeshBinaryLodRecord>);
+static_assert(std::is_trivially_copyable_v<MeshBinaryLodMeshletRangeRecord>);
+static_assert(std::is_trivially_copyable_v<MeshBinaryMeshletRecord>);
 static_assert(std::is_trivially_copyable_v<MeshBinaryBufferSectionHeader>);
 static_assert(std::is_trivially_copyable_v<MeshBinaryMorphMetaRecord>);
 

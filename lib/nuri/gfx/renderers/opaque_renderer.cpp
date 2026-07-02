@@ -37,6 +37,14 @@ constexpr float kOverlayDepthBiasConstant = -1.0f;
 constexpr float kOverlayDepthBiasSlope = -1.0f;
 constexpr uint32_t kAutoLodCacheInvalidationSeed = 1664525u;
 constexpr uint32_t kAutoLodCacheInvalidationMagic = 1013904223u;
+constexpr uint32_t kMeshletFlagFrustumCulling = 1u << 0u;
+constexpr uint32_t kMeshletFlagConeCulling = 1u << 1u;
+constexpr uint32_t kMeshletFlagDoubleSided = 1u << 2u;
+constexpr uint32_t kMeshletFlagDebugMeshletId = 1u << 3u;
+constexpr uint32_t kMeshletFlagGpuLod = 1u << 4u;
+constexpr uint32_t kMeshletFlagDebugSelectedLod = 1u << 5u;
+constexpr uint32_t kMeshletFlagForcedLodShift = 8u;
+constexpr uint32_t kMeshletFlagForcedLodMask = 0x3u;
 // Phase hash: normalize 24-bit hash to [0, 1] then scale to [0, 2*pi]
 constexpr uint32_t kPhaseHashMask = 0x00ffffffu;
 constexpr float kPhaseNormDivisor = 16777215.0f; // 2^24 - 1
@@ -267,6 +275,14 @@ void destroyPipelineHandle(GPUDevice &gpu, RenderPipelineHandle &handle) {
   }
 }
 
+void destroyMeshletPipelineHandle(GPUDevice &gpu,
+                                  MeshletPipelineHandle &handle) {
+  if (nuri::isValid(handle)) {
+    gpu.destroyMeshletPipeline(handle);
+    handle = {};
+  }
+}
+
 DrawItem makeBaseMeshDraw(RenderPipelineHandle pipeline,
                           std::string_view debugLabel) {
   DrawItem draw{};
@@ -473,6 +489,17 @@ std::optional<uint32_t> resolveAvailableLod(const Submesh &submesh,
   return candidate;
 }
 
+uint32_t maxMeshletCountForSubmesh(const Submesh &submesh) {
+  const uint32_t lodCount =
+      std::clamp(submesh.lodCount, 1u, Submesh::kMaxLodCount);
+  uint32_t maxMeshletCount = 0;
+  for (uint32_t lodIndex = 0; lodIndex < lodCount; ++lodIndex) {
+    maxMeshletCount =
+        std::max(maxMeshletCount, submesh.lods[lodIndex].meshletCount);
+  }
+  return maxMeshletCount;
+}
+
 float deterministicPhase(uint32_t index) {
   uint32_t hash =
       index * kAutoLodCacheInvalidationSeed + kAutoLodCacheInvalidationMagic;
@@ -494,6 +521,10 @@ struct BatchKey {
   uint32_t vertexDecodeIndex = 0;
   uint32_t packedVertexFormat = 0;
   uint32_t materialIndex = kInvalidMaterialIndex;
+  BufferHandle meshletBuffer{};
+  uint32_t meshletOffset = 0;
+  uint32_t meshletCount = 0;
+  uint32_t meshletSubmeshIndex = 0;
 
   bool operator==(const BatchKey &other) const {
     return isSamePipelineHandle(pipeline, other.pipeline) &&
@@ -504,7 +535,11 @@ struct BatchKey {
            vertexDecodeBufferAddress == other.vertexDecodeBufferAddress &&
            vertexDecodeIndex == other.vertexDecodeIndex &&
            packedVertexFormat == other.packedVertexFormat &&
-           materialIndex == other.materialIndex;
+           materialIndex == other.materialIndex &&
+           isSameBufferHandle(meshletBuffer, other.meshletBuffer) &&
+           meshletOffset == other.meshletOffset &&
+           meshletCount == other.meshletCount &&
+           meshletSubmeshIndex == other.meshletSubmeshIndex;
   }
 };
 
@@ -526,6 +561,10 @@ struct BatchKeyHash {
     mix((static_cast<uint64_t>(key.vertexDecodeIndex) << 32u) |
         key.packedVertexFormat);
     mix(static_cast<uint64_t>(key.materialIndex));
+    mix((static_cast<uint64_t>(key.meshletBuffer.generation) << 32u) |
+        key.meshletBuffer.index);
+    mix((static_cast<uint64_t>(key.meshletOffset) << 32u) | key.meshletCount);
+    mix(static_cast<uint64_t>(key.meshletSubmeshIndex));
     return static_cast<size_t>(h64);
   }
 };
@@ -597,6 +636,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       velocityGeometryRing_(resolveMemoryResource(memory)),
       instanceRemapRing_(resolveMemoryResource(memory)),
       indirectCommandRing_(resolveMemoryResource(memory)),
+      meshletBatchRing_(resolveMemoryResource(memory)),
       singleInstanceBatchCaches_(resolveMemoryResource(memory)),
       staticBatchCache_(resolveMemoryResource(memory)),
       renderableTemplates_(resolveMemoryResource(memory)),
@@ -619,6 +659,7 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       drawPushConstants_(resolveMemoryResource(memory)),
       drawItems_(resolveMemoryResource(memory)),
       drawAlphaMasked_(resolveMemoryResource(memory)),
+      meshletBatchInfos_(resolveMemoryResource(memory)),
       indirectDrawItems_(resolveMemoryResource(memory)),
       indirectAlphaMasked_(resolveMemoryResource(memory)),
       indirectCommandUploadBytes_(resolveMemoryResource(memory)),
@@ -634,6 +675,10 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
       normalPrepassDrawItems_(resolveMemoryResource(memory)),
       depthPyramidPushConstants_(resolveMemoryResource(memory)),
       depthPyramidDrawItems_(resolveMemoryResource(memory)),
+      meshletDispatchItems_(resolveMemoryResource(memory)),
+      meshletPushConstants_(resolveMemoryResource(memory)),
+      meshletBatchGpuData_(resolveMemoryResource(memory)),
+      meshletDispatchDependencyBuffers_(resolveMemoryResource(memory)),
       depthPyramidDependencyTextures_(resolveMemoryResource(memory)),
       shadowSdsmReducePushConstants_(resolveMemoryResource(memory)),
       shadowSdsmHistogramReducePushConstants_(resolveMemoryResource(memory)),
@@ -726,9 +771,11 @@ void OpaqueRenderer::onDetach() {
     sceneDepthSampler_ = {};
   }
   resetOverlayPipelineState();
+  destroyMeshletPipelineState();
   destroyMeshPipelineState();
   meshPipeline_.reset();
   computePipeline_.reset();
+  meshletShader_.reset();
   meshShader_.reset();
   meshTessShader_.reset();
   meshDebugOverlayShader_.reset();
@@ -772,6 +819,9 @@ void OpaqueRenderer::onDetach() {
   depthPyramidVertexShader_ = {};
   depthPyramidFragmentShader_ = {};
   computeShaderHandle_ = {};
+  meshletTaskShader_ = {};
+  meshletMeshShader_ = {};
+  meshletFragmentShader_ = {};
   computePipelineHandle_ = {};
   tessellationUnsupported_ = false;
   renderableTemplates_.clear();
@@ -794,6 +844,7 @@ void OpaqueRenderer::onDetach() {
   drawPushConstants_.clear();
   drawItems_.clear();
   drawAlphaMasked_.clear();
+  meshletBatchInfos_.clear();
   indirectUploadSignatures_.clear();
   indirectDrawItems_.clear();
   indirectAlphaMasked_.clear();
@@ -807,6 +858,10 @@ void OpaqueRenderer::onDetach() {
   transmissionVisibilityDepthPushConstants_.clear();
   depthPyramidPushConstants_.clear();
   depthPyramidDrawItems_.clear();
+  meshletDispatchItems_.clear();
+  meshletPushConstants_.clear();
+  meshletBatchGpuData_.clear();
+  meshletDispatchDependencyBuffers_.clear();
   depthPyramidDependencyTextures_.clear();
   preDispatches_.clear();
   passDependencyBuffers_.clear();
@@ -1281,6 +1336,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   if (centersResult.hasError()) {
     return centersResult;
   }
+  auto lodBoundsResult = ensureInstanceLodBoundsBufferCapacity(
+      std::max(instanceCount * sizeof(glm::vec4), sizeof(glm::vec4)));
+  if (lodBoundsResult.hasError()) {
+    return lodBoundsResult;
+  }
   auto baseMatricesResult = ensureInstanceBaseMatricesBufferCapacity(
       std::max(instanceCount * sizeof(glm::mat4), sizeof(glm::mat4)));
   if (baseMatricesResult.hasError()) {
@@ -1422,6 +1482,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         return updateResult;
       }
     }
+    if (!instanceLodCentersInvRadiusSq_.empty()) {
+      const std::span<const std::byte> lodBoundsBytes{
+          reinterpret_cast<const std::byte *>(
+              instanceLodCentersInvRadiusSq_.data()),
+          instanceLodCentersInvRadiusSq_.size() * sizeof(glm::vec4)};
+      auto updateResult = gpu_.updateBuffer(instanceLodBoundsBuffer_->handle(),
+                                            lodBoundsBytes, 0);
+      if (updateResult.hasError()) {
+        return updateResult;
+      }
+    }
     instanceStaticBuffersDirty_ = false;
   }
 
@@ -1443,6 +1514,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   const uint64_t frameDataAddress = sceneGpu->frameDataAddress;
   const uint64_t instanceCentersPhaseAddress =
       gpu_.getBufferDeviceAddress(instanceCentersPhaseBuffer_->handle());
+  const uint64_t instanceLodBoundsAddress =
+      gpu_.getBufferDeviceAddress(instanceLodBoundsBuffer_->handle());
   const uint64_t instanceBaseMatricesAddress =
       gpu_.getBufferDeviceAddress(instanceBaseMatricesBuffer_->handle());
   const uint64_t directionalLightBufferAddress =
@@ -1505,7 +1578,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? gpu_.getBufferDeviceAddress(velocityGeometryBufferHandle)
           : 0u;
   if (frameDataAddress == 0 || instanceCentersPhaseAddress == 0 ||
-      instanceBaseMatricesAddress == 0 || instanceMatricesAddress == 0 ||
+      instanceLodBoundsAddress == 0 || instanceBaseMatricesAddress == 0 ||
+      instanceMatricesAddress == 0 ||
       (hasTaaVelocityInstances &&
        (previousInstanceMatricesAddress == 0u ||
         (needsVelocityInstanceBufferUpload &&
@@ -1702,12 +1776,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
   const OpaqueDebugVisualization debugVisualization =
       settings.opaque.debugVisualization;
+  const MeshletRenderMode meshletMode = settings.opaque.meshletMode;
+  const bool meshletRequested = meshletMode != MeshletRenderMode::Disabled;
+  const bool meshletRequired = meshletMode == MeshletRenderMode::Required;
+  frame.metrics.opaque.meshletModeRequired = meshletRequired ? 1u : 0u;
   const bool wireOverlayRequested =
       debugVisualization == OpaqueDebugVisualization::WireframeOverlay;
   const bool wireframeOnlyRequested =
       debugVisualization == OpaqueDebugVisualization::WireframeOnly;
   const bool patchHeatmapRequested =
       debugVisualization == OpaqueDebugVisualization::TessPatchEdgesHeatmap;
+  const bool meshletDebugRequested =
+      debugVisualization == OpaqueDebugVisualization::MeshletId ||
+      debugVisualization == OpaqueDebugVisualization::MeshletSelectedLod;
   const bool overlayRequested = wireOverlayRequested || patchHeatmapRequested;
   const uint32_t debugVisualizationMode =
       static_cast<uint32_t>(debugVisualization);
@@ -1733,11 +1814,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   struct BatchEntry {
     DrawItem draw{};
     BufferHandle vertexBuffer{};
+    BufferHandle vertexDecodeBuffer{};
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
+    const Model::ModelMeshletGpuView *meshletView = nullptr;
+    uint32_t meshletOffset = 0;
+    uint32_t meshletCount = 0;
+    uint32_t submeshIndex = 0;
+    uint32_t meshletMaxCount = 0;
+    uint32_t vertexOffset = 0;
+    bool doubleSided = false;
     size_t instanceCount = 0;
     size_t firstInstance = 0;
     bool alphaMasked = false;
@@ -1751,13 +1840,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       std::min<size_t>(meshDrawTemplates_.size(), kMaxBatchReserve);
   batches.reserve(batchReserve);
   const auto appendBatch =
-      [&baseDraw,
-       &batches](RenderPipelineHandle pipeline, BufferHandle indexBuffer,
-                 uint64_t indexBufferOffset, const SubmeshLod &lodRange,
-                 BufferHandle vertexBuffer, uint64_t vertexBufferAddress,
-                 uint64_t vertexDecodeBufferAddress, uint32_t vertexDecodeIndex,
-                 uint32_t packedVertexFormat, uint32_t materialIndex,
-                 bool alphaMasked, size_t count, size_t firstInstance) {
+      [&baseDraw, &batches](
+          RenderPipelineHandle pipeline, BufferHandle indexBuffer,
+          uint64_t indexBufferOffset, const SubmeshLod &lodRange,
+          uint32_t vertexOffset, uint32_t submeshIndex,
+          uint32_t meshletMaxCount, BufferHandle vertexBuffer,
+          BufferHandle vertexDecodeBuffer, uint64_t vertexBufferAddress,
+          uint64_t vertexDecodeBufferAddress, uint32_t vertexDecodeIndex,
+          uint32_t packedVertexFormat, uint32_t materialIndex,
+          const Model::ModelMeshletGpuView *meshletView, bool doubleSided,
+          bool alphaMasked, size_t count, size_t firstInstance) {
         if (count == 0) {
           return;
         }
@@ -1771,11 +1863,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.draw.vertexOffset = 0;
         entry.draw.alphaMasked = alphaMasked;
         entry.vertexBuffer = vertexBuffer;
+        entry.vertexDecodeBuffer = vertexDecodeBuffer;
         entry.vertexBufferAddress = vertexBufferAddress;
         entry.vertexDecodeBufferAddress = vertexDecodeBufferAddress;
         entry.vertexDecodeIndex = vertexDecodeIndex;
         entry.packedVertexFormat = packedVertexFormat;
         entry.materialIndex = materialIndex;
+        entry.meshletView = meshletView;
+        entry.meshletOffset = lodRange.meshletOffset;
+        entry.meshletCount = lodRange.meshletCount;
+        entry.submeshIndex = submeshIndex;
+        entry.meshletMaxCount = meshletMaxCount;
+        entry.vertexOffset = vertexOffset;
+        entry.doubleSided = doubleSided;
         entry.alphaMasked = alphaMasked;
         entry.instanceCount = count;
         entry.firstInstance = firstInstance;
@@ -1794,8 +1894,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
   const std::array<float, 3> &sortedLodThresholds = cachedSortedLodThresholds_;
   const glm::vec3 cameraPosition = glm::vec3(frame.camera.cameraPos);
-  const bool useAutoLod =
-      settings.opaque.enableMeshLod && settings.opaque.forcedMeshLod < 0;
+  const bool useAutoLod = settings.opaque.enableMeshLod &&
+                          settings.opaque.forcedMeshLod < 0 &&
+                          !meshletRequested;
   const bool canUseUniformAutoLodFastPath =
       uniformSingleSubmeshPath_ && !meshDrawTemplates_.empty() && useAutoLod &&
       instanceCount == meshDrawTemplates_.size();
@@ -2014,6 +2115,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       !uniformSingleSubmeshPath_ && instanceCount > 1;
   const bool canReuseStaticBatchCache =
       canUseStaticBatchCache && staticBatchCache_.valid &&
+      staticBatchCache_.meshletRequested == meshletRequested &&
       staticBatchCache_.enableMeshLod == settings.opaque.enableMeshLod &&
       staticBatchCache_.forcedMeshLod == settings.opaque.forcedMeshLod;
   bool reusedStaticBatchCache = false;
@@ -2031,13 +2133,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     remapCount = staticBatchCache_.remap.size();
     const bool needsStaticBatchRebind =
         boundStaticBatchGeneration_ != staticBatchCache_.generation ||
-        drawItems_.size() != batchCount;
+        drawItems_.size() != batchCount ||
+        meshletBatchInfos_.size() != batchCount;
     if (needsStaticBatchRebind) {
       drawItems_ = staticBatchCache_.draws;
       drawPushConstants_ = staticBatchCache_.pushConstantsTemplates;
       drawAlphaMasked_ = staticBatchCache_.alphaMasked;
+      meshletBatchInfos_ = staticBatchCache_.meshletBatchInfos;
       if (drawAlphaMasked_.size() != batchCount) {
         drawAlphaMasked_.assign(batchCount, 0u);
+      }
+      if (meshletBatchInfos_.size() != batchCount) {
+        meshletBatchInfos_.assign(batchCount, MeshletBatchInfo{});
       }
       for (size_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
         drawItems_[batchIndex].alphaMasked =
@@ -2103,6 +2210,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     }
 
     const Submesh &submesh = *templateEntry.submesh;
+    const uint32_t submeshMeshletMaxCount = maxMeshletCountForSubmesh(submesh);
     activeFastAutoLodSubmesh = &submesh;
 
     const bool canTemporallyReuseFastAutoLod =
@@ -2235,10 +2343,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       appendBatch(
           selectMeshPipeline(templateEntry.doubleSided, false),
           templateEntry.indexBuffer, templateEntry.indexBufferOffset, lod0Range,
-          templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
+          submesh.vertexOffset, templateEntry.submeshIndex,
+          submeshMeshletMaxCount, templateEntry.vertexBuffer,
+          templateEntry.vertexDecodeBuffer, templateEntry.vertexBufferAddress,
           templateEntry.vertexDecodeBufferAddress,
           templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
-          templateEntry.materialIndex, templateEntry.alphaMasked,
+          templateEntry.materialIndex, templateEntry.meshletView,
+          templateEntry.doubleSided, templateEntry.alphaMasked,
           autoLodBucketCounts[0], firstInstance);
       firstInstance += autoLodBucketCounts[0];
 
@@ -2247,10 +2358,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       appendBatch(
           selectMeshPipeline(templateEntry.doubleSided, true),
           templateEntry.indexBuffer, templateEntry.indexBufferOffset, lod0Range,
-          templateEntry.vertexBuffer, templateEntry.vertexBufferAddress,
+          submesh.vertexOffset, templateEntry.submeshIndex,
+          submeshMeshletMaxCount, templateEntry.vertexBuffer,
+          templateEntry.vertexDecodeBuffer, templateEntry.vertexBufferAddress,
           templateEntry.vertexDecodeBufferAddress,
           templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
-          templateEntry.materialIndex, templateEntry.alphaMasked,
+          templateEntry.materialIndex, templateEntry.meshletView,
+          templateEntry.doubleSided, templateEntry.alphaMasked,
           autoLodTessBucketCount, firstInstance);
       if (autoLodTessBucketCount > 0) {
         usedUniformAutoLodTessSplit = true;
@@ -2266,15 +2380,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         }
         const SubmeshLod &lodRange = submesh.lods[lod];
 
-        appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
-                    templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                    lodRange, templateEntry.vertexBuffer,
-                    templateEntry.vertexBufferAddress,
-                    templateEntry.vertexDecodeBufferAddress,
-                    templateEntry.vertexDecodeIndex,
-                    templateEntry.packedVertexFormat,
-                    templateEntry.materialIndex, templateEntry.alphaMasked,
-                    count, firstInstance);
+        appendBatch(
+            selectMeshPipeline(templateEntry.doubleSided, false),
+            templateEntry.indexBuffer, templateEntry.indexBufferOffset,
+            lodRange, submesh.vertexOffset, templateEntry.submeshIndex,
+            submeshMeshletMaxCount, templateEntry.vertexBuffer,
+            templateEntry.vertexDecodeBuffer, templateEntry.vertexBufferAddress,
+            templateEntry.vertexDecodeBufferAddress,
+            templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
+            templateEntry.materialIndex, templateEntry.meshletView,
+            templateEntry.doubleSided, templateEntry.alphaMasked, count,
+            firstInstance);
         firstInstance += count;
       }
     } else {
@@ -2287,15 +2403,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         }
         const SubmeshLod &lodRange = submesh.lods[lod];
 
-        appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
-                    templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                    lodRange, templateEntry.vertexBuffer,
-                    templateEntry.vertexBufferAddress,
-                    templateEntry.vertexDecodeBufferAddress,
-                    templateEntry.vertexDecodeIndex,
-                    templateEntry.packedVertexFormat,
-                    templateEntry.materialIndex, templateEntry.alphaMasked,
-                    count, firstInstance);
+        appendBatch(
+            selectMeshPipeline(templateEntry.doubleSided, false),
+            templateEntry.indexBuffer, templateEntry.indexBufferOffset,
+            lodRange, submesh.vertexOffset, templateEntry.submeshIndex,
+            submeshMeshletMaxCount, templateEntry.vertexBuffer,
+            templateEntry.vertexDecodeBuffer, templateEntry.vertexBufferAddress,
+            templateEntry.vertexDecodeBufferAddress,
+            templateEntry.vertexDecodeIndex, templateEntry.packedVertexFormat,
+            templateEntry.materialIndex, templateEntry.meshletView,
+            templateEntry.doubleSided, templateEntry.alphaMasked, count,
+            firstInstance);
         firstInstance += count;
       }
     }
@@ -2308,7 +2426,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
   }
 
   const bool isSingleRenderableInstance = instanceCount == 1;
-  if (!reusedStaticBatchCache && !usedUniformFastPath &&
+  if (!meshletRequested && !reusedStaticBatchCache && !usedUniformFastPath &&
       isSingleRenderableInstance && !meshDrawTemplates_.empty() &&
       !uniformSingleSubmeshPath_) {
     NURI_PROFILER_ZONE("OpaqueRenderer.batch_build_single_instance_cache",
@@ -2361,11 +2479,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       const SubmeshLod &lodRange = templateEntry.submesh->lods[*lodIndex];
       appendBatch(selectMeshPipeline(templateEntry.doubleSided, false),
                   templateEntry.indexBuffer, templateEntry.indexBufferOffset,
-                  lodRange, templateEntry.vertexBuffer,
+                  lodRange, templateEntry.submesh->vertexOffset,
+                  templateEntry.submeshIndex,
+                  maxMeshletCountForSubmesh(*templateEntry.submesh),
+                  templateEntry.vertexBuffer, templateEntry.vertexDecodeBuffer,
                   templateEntry.vertexBufferAddress,
                   templateEntry.vertexDecodeBufferAddress,
                   templateEntry.vertexDecodeIndex,
                   templateEntry.packedVertexFormat, templateEntry.materialIndex,
+                  templateEntry.meshletView, templateEntry.doubleSided,
                   templateEntry.alphaMasked, instanceCount, 0);
       remapCount = instanceCount;
       templateBatchIndices_.clear();
@@ -2396,6 +2518,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         requestedLod = 0;
       } else if (settings.opaque.forcedMeshLod >= 0) {
         requestedLod = forcedLod;
+      } else if (meshletRequested) {
+        requestedLod = 0;
       } else {
         if (templateEntry.instanceIndex >= instanceAutoLodLevels_.size()) {
           return Result<bool, std::string>::makeError(
@@ -2439,6 +2563,14 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           .vertexDecodeIndex = templateEntry.vertexDecodeIndex,
           .packedVertexFormat = templateEntry.packedVertexFormat,
           .materialIndex = templateEntry.materialIndex,
+          .meshletBuffer =
+              meshletRequested && templateEntry.meshletView != nullptr
+                  ? templateEntry.meshletView->meshletBuffer
+                  : BufferHandle{},
+          .meshletOffset = meshletRequested ? lodRange.meshletOffset : 0u,
+          .meshletCount = meshletRequested ? lodRange.meshletCount : 0u,
+          .meshletSubmeshIndex =
+              meshletRequested ? templateEntry.submeshIndex : 0u,
       };
 
       auto it = batchLookup.find(key);
@@ -2453,12 +2585,21 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         entry.draw.vertexOffset = 0;
         entry.draw.alphaMasked = templateEntry.alphaMasked;
         entry.vertexBuffer = templateEntry.vertexBuffer;
+        entry.vertexDecodeBuffer = templateEntry.vertexDecodeBuffer;
         entry.vertexBufferAddress = templateEntry.vertexBufferAddress;
         entry.vertexDecodeBufferAddress =
             templateEntry.vertexDecodeBufferAddress;
         entry.vertexDecodeIndex = templateEntry.vertexDecodeIndex;
         entry.packedVertexFormat = templateEntry.packedVertexFormat;
         entry.materialIndex = templateEntry.materialIndex;
+        entry.meshletView = templateEntry.meshletView;
+        entry.meshletOffset = lodRange.meshletOffset;
+        entry.meshletCount = lodRange.meshletCount;
+        entry.submeshIndex = templateEntry.submeshIndex;
+        entry.meshletMaxCount =
+            maxMeshletCountForSubmesh(*templateEntry.submesh);
+        entry.vertexOffset = templateEntry.submesh->vertexOffset;
+        entry.doubleSided = templateEntry.doubleSided;
         entry.alphaMasked = templateEntry.alphaMasked;
         batches.push_back(std::move(entry));
         const size_t insertedIndex = batches.size() - 1;
@@ -2494,6 +2635,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     drawItems_.resize(batchCount);
     drawPushConstants_.resize(batchCount);
     drawAlphaMasked_.resize(batchCount, 0u);
+    meshletBatchInfos_.resize(batchCount);
 
     const bool singleRenderableInstance = instanceCount == 1;
     const bool needsBatchWriteOffsets =
@@ -2684,6 +2826,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         constants.tessMaxFactor = tessMaxFactor;
         constants.debugVisualizationMode = debugVisualizationMode;
         drawAlphaMasked_[batchIndex] = batch.alphaMasked ? 1u : 0u;
+        meshletBatchInfos_[batchIndex] = {};
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
         draw.alphaMasked = batch.alphaMasked;
@@ -2752,6 +2895,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         constants.tessMaxFactor = tessMaxFactor;
         constants.debugVisualizationMode = debugVisualizationMode;
         drawAlphaMasked_[batchIndex] = batch.alphaMasked ? 1u : 0u;
+        meshletBatchInfos_[batchIndex] = MeshletBatchInfo{
+            .view = batch.meshletView,
+            .vertexDecodeBuffer = batch.vertexDecodeBuffer,
+            .meshletOffset = batch.meshletOffset,
+            .meshletCount = batch.meshletCount,
+            .submeshIndex = batch.submeshIndex,
+            .meshletMaxCount = batch.meshletMaxCount,
+            .vertexOffset = batch.vertexOffset,
+            .doubleSided = batch.doubleSided,
+            .alphaMasked = batch.alphaMasked,
+        };
         DrawItem &draw = drawItems_[batchIndex];
         draw = batch.draw;
         draw.alphaMasked = batch.alphaMasked;
@@ -2803,6 +2957,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                             : kInvalidDrawSignature;
 
     if (canUseStaticBatchCache) {
+      staticBatchCache_.meshletRequested = meshletRequested;
       staticBatchCache_.enableMeshLod = settings.opaque.enableMeshLod;
       staticBatchCache_.forcedMeshLod = settings.opaque.forcedMeshLod;
       staticBatchCache_.remapSignature =
@@ -2814,6 +2969,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       staticBatchCache_.draws = drawItems_;
       staticBatchCache_.pushConstantsTemplates = drawPushConstants_;
       staticBatchCache_.alphaMasked = drawAlphaMasked_;
+      staticBatchCache_.meshletBatchInfos = meshletBatchInfos_;
       for (size_t i = 0; i < drawPushConstants_.size(); ++i) {
         staticBatchCache_.draws[i].pushConstants = {};
         staticBatchCache_.pushConstantsTemplates[i].frameDataAddress = 0;
@@ -2855,9 +3011,12 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           drawItems_.get_allocator().resource());
       std::pmr::vector<uint8_t> expandedAlphaMasked(
           drawAlphaMasked_.get_allocator().resource());
+      std::pmr::vector<MeshletBatchInfo> expandedMeshletBatchInfos(
+          meshletBatchInfos_.get_allocator().resource());
       expandedPushConstants.reserve(expandedDrawCount);
       expandedDrawItems.reserve(expandedDrawCount);
       expandedAlphaMasked.reserve(expandedDrawCount);
+      expandedMeshletBatchInfos.reserve(expandedDrawCount);
 
       for (size_t i = 0; i < drawItems_.size(); ++i) {
         const DrawItem &sourceDraw = drawItems_[i];
@@ -2890,12 +3049,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           expandedDrawItems.push_back(expandedDraw);
           expandedAlphaMasked.push_back(
               i < drawAlphaMasked_.size() ? drawAlphaMasked_[i] : 0u);
+          expandedMeshletBatchInfos.push_back(i < meshletBatchInfos_.size()
+                                                  ? meshletBatchInfos_[i]
+                                                  : MeshletBatchInfo{});
         }
       }
 
       drawPushConstants_ = std::move(expandedPushConstants);
       drawItems_ = std::move(expandedDrawItems);
       drawAlphaMasked_ = std::move(expandedAlphaMasked);
+      meshletBatchInfos_ = std::move(expandedMeshletBatchInfos);
       for (size_t i = 0; i < drawItems_.size(); ++i) {
         drawItems_[i].pushConstants = std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(&drawPushConstants_[i]),
@@ -3275,7 +3438,73 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                      indirectAlphaMasked_.size())
           : std::span<const uint8_t>(drawAlphaMasked_.data(),
                                      drawAlphaMasked_.size());
+  bool meshletActive = false;
+  if (meshletRequested && !drawItems_.empty()) {
+    const bool hasIncompatibleFrameSettings =
+        animationSceneData != nullptr || msaaSelected || taaSelected ||
+        settings.opaque.enableDepthPrepass ||
+        settings.opaque.enableDepthPyramid ||
+        settings.opaque.enableTessellation || pendingPickRequest_.has_value() ||
+        (debugVisualization != OpaqueDebugVisualization::None &&
+         !meshletDebugRequested);
+    bool missingMeshletData = meshletBatchInfos_.size() != drawItems_.size();
+    for (size_t i = 0; i < meshletBatchInfos_.size() && !missingMeshletData;
+         ++i) {
+      const MeshletBatchInfo &info = meshletBatchInfos_[i];
+      missingMeshletData =
+          info.view == nullptr || info.meshletCount == 0u ||
+          info.meshletMaxCount == 0u ||
+          info.submeshIndex >= info.view->lodRangeCount ||
+          !nuri::isValid(info.view->meshletBuffer) ||
+          !nuri::isValid(info.view->meshletVertexIndexBuffer) ||
+          !nuri::isValid(info.view->meshletPrimitiveIndexBuffer) ||
+          !nuri::isValid(info.view->lodRangeBuffer);
+    }
 
+    if (hasIncompatibleFrameSettings) {
+      frame.metrics.opaque.meshletRejectedIncompatibleFrame = 1u;
+      if (meshletRequired) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::buildOpaquePasses: meshlet mode required but the "
+            "current opaque frame uses unsupported passes or material modes");
+      }
+      if (!loggedMeshletIncompatibleWarning_) {
+        loggedMeshletIncompatibleWarning_ = true;
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::buildOpaquePasses: meshlet mode skipped because "
+            "the frame uses unsupported opaque passes or material modes");
+      }
+    } else if (missingMeshletData) {
+      frame.metrics.opaque.meshletRejectedMissingAssetData = 1u;
+      if (meshletRequired) {
+        return Result<bool, std::string>::makeError(
+            "OpaqueRenderer::buildOpaquePasses: meshlet mode required but at "
+            "least one opaque batch has no meshlet buffers");
+      }
+      if (!loggedMeshletAssetWarning_) {
+        loggedMeshletAssetWarning_ = true;
+        NURI_LOG_WARNING(
+            "OpaqueRenderer::buildOpaquePasses: meshlet mode skipped because "
+            "an opaque batch has no meshlet buffers");
+      }
+    } else {
+      auto meshletPipelineResult = ensureMeshletPipelineState();
+      if (meshletPipelineResult.hasError()) {
+        frame.metrics.opaque.meshletRejectedMissingFeature = 1u;
+        if (meshletRequired) {
+          return meshletPipelineResult;
+        }
+        if (!loggedMeshletUnsupportedWarning_) {
+          loggedMeshletUnsupportedWarning_ = true;
+          NURI_LOG_WARNING(
+              "OpaqueRenderer::buildOpaquePasses: meshlet mode skipped: %s",
+              meshletPipelineResult.error().c_str());
+        }
+      } else {
+        meshletActive = true;
+      }
+    }
+  }
   size_t debugOverlayDraws = 0;
   size_t debugOverlayFallbackDraws = 0;
   size_t debugPatchHeatmapDraws = 0;
@@ -3292,6 +3521,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       nuri::isValid(frame.sharedResources.normalTexture) &&
       !wireframeOnlyRequested && !baseDrawItems.empty();
   bool depthPrepassEnabled =
+      !meshletActive &&
       (settings.opaque.enableDepthPrepass || normalPrepassRequested) &&
       !wireframeOnlyRequested && !baseDrawItems.empty();
   if (depthPrepassEnabled && baseAlphaMasked.size() != baseDrawItems.size()) {
@@ -3356,6 +3586,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     NURI_PROFILER_ZONE_END();
   }
   bool transmissionVisibilityDepthEnabled =
+      !meshletActive &&
       shouldBuildTransmissionVisibilityDepth(frame, settings) &&
       !wireframeOnlyRequested && !baseDrawItems.empty();
   if (transmissionVisibilityDepthEnabled &&
@@ -3425,11 +3656,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? std::span<const DrawItem>(passDrawItems_.data(),
                                       passDrawItems_.size())
           : baseDrawItems;
-  bool normalPrepassEnabled = normalPrepassRequested && depthPrepassEnabled &&
-                              !shadedBaseDrawItems.empty();
+  const bool classicNormalPrepassWritesDepth =
+      meshletActive && normalPrepassRequested;
+  const std::span<const DrawItem> normalPrepassSourceDrawItems =
+      classicNormalPrepassWritesDepth ? baseDrawItems : shadedBaseDrawItems;
+  bool normalPrepassEnabled =
+      normalPrepassRequested && !normalPrepassSourceDrawItems.empty() &&
+      (classicNormalPrepassWritesDepth || depthPrepassEnabled);
   if (normalPrepassEnabled) {
-    normalPrepassDrawItems_.reserve(shadedBaseDrawItems.size());
-    for (const DrawItem &source : shadedBaseDrawItems) {
+    normalPrepassDrawItems_.reserve(normalPrepassSourceDrawItems.size());
+    for (const DrawItem &source : normalPrepassSourceDrawItems) {
       const RenderPipelineHandle normalPipeline =
           selectNormalPipeline(source.pipeline);
       if (!nuri::isValid(normalPipeline)) {
@@ -3451,15 +3687,491 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       DrawItem normalDraw = source;
       normalDraw.pipeline = normalPipeline;
       normalDraw.useDepthState = true;
-      normalDraw.depthState = {.compareOp = CompareOp::LessEqual,
-                               .isDepthWriteEnabled = false};
+      normalDraw.depthState =
+          classicNormalPrepassWritesDepth
+              ? DepthState{.compareOp = CompareOp::Less,
+                           .isDepthWriteEnabled = true}
+              : DepthState{.compareOp = CompareOp::LessEqual,
+                           .isDepthWriteEnabled = false};
       normalDraw.debugLabel = "OpaqueMaterialNormals";
       normalDraw.debugColor = 0xff66ddff;
       normalPrepassDrawItems_.push_back(normalDraw);
     }
   }
+
+  const MeshletLimits meshletLimits = gpu_.getMeshletLimits();
+  uint32_t maxTaskGroupsX = meshletLimits.maxTaskWorkGroupCountX != 0u
+                                ? meshletLimits.maxTaskWorkGroupCountX
+                                : std::numeric_limits<uint32_t>::max();
+  if (meshletLimits.maxTaskWorkGroupTotalCount != 0u) {
+    maxTaskGroupsX =
+        std::min(maxTaskGroupsX, meshletLimits.maxTaskWorkGroupTotalCount);
+  }
+  maxTaskGroupsX = std::max(maxTaskGroupsX, 1u);
+
+  const auto maxTaskGroupsYFor = [&](uint32_t groupsX) -> uint32_t {
+    uint32_t maxGroupsY = meshletLimits.maxTaskWorkGroupCountY != 0u
+                              ? meshletLimits.maxTaskWorkGroupCountY
+                              : std::numeric_limits<uint32_t>::max();
+    if (meshletLimits.maxTaskWorkGroupTotalCount != 0u) {
+      maxGroupsY = std::min(
+          maxGroupsY,
+          std::max(meshletLimits.maxTaskWorkGroupTotalCount / groupsX, 1u));
+    }
+    return std::max(maxGroupsY, 1u);
+  };
+
+  const auto meshletDispatchBucket = [](uint32_t groupCount) -> uint32_t {
+    uint32_t bucket = 0u;
+    uint32_t value = groupCount > 0u ? groupCount - 1u : 0u;
+    while (value > 0u) {
+      value >>= 1u;
+      ++bucket;
+    }
+    return bucket;
+  };
+
+  const auto estimateMeshletBatchDescriptorCount =
+      [&]() -> Result<size_t, std::string> {
+    size_t descriptorCount = 0u;
+    for (size_t i = 0; i < drawItems_.size(); ++i) {
+      const DrawItem &draw = drawItems_[i];
+      const MeshletBatchInfo &info = meshletBatchInfos_[i];
+      if (info.view == nullptr || draw.instanceCount == 0u ||
+          info.meshletCount == 0u) {
+        continue;
+      }
+      const uint64_t candidateCount =
+          static_cast<uint64_t>(info.meshletMaxCount) * draw.instanceCount;
+      if (candidateCount > std::numeric_limits<uint32_t>::max()) {
+        return Result<size_t, std::string>::makeError(
+            "OpaqueRenderer::buildOpaquePasses: meshlet candidate count "
+            "exceeds UINT32_MAX");
+      }
+      descriptorCount += static_cast<size_t>(
+          (candidateCount + maxTaskGroupsX - 1u) / maxTaskGroupsX);
+    }
+    return Result<size_t, std::string>::makeResult(descriptorCount);
+  };
+
+  meshletBatchGpuData_.clear();
+  BufferHandle meshletBatchBufferHandle{};
+  uint64_t meshletBatchBufferAddress = 0u;
+  if (meshletActive) {
+    auto descriptorCountResult = estimateMeshletBatchDescriptorCount();
+    if (descriptorCountResult.hasError()) {
+      return Result<bool, std::string>::makeError(
+          descriptorCountResult.error());
+    }
+    const size_t descriptorCapacity = descriptorCountResult.value();
+    if (descriptorCapacity >
+        std::numeric_limits<uint32_t>::max() / sizeof(MeshletBatchGpuData)) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueRenderer::buildOpaquePasses: meshlet batch descriptor count "
+          "exceeds UINT32_MAX");
+    }
+    auto batchBufferResult = ensureMeshletBatchRingCapacity(
+        std::max(descriptorCapacity * sizeof(MeshletBatchGpuData),
+                 sizeof(MeshletBatchGpuData)));
+    if (batchBufferResult.hasError()) {
+      return batchBufferResult;
+    }
+    if (frameSlot >= meshletBatchRing_.size() ||
+        !meshletBatchRing_[frameSlot].buffer ||
+        !meshletBatchRing_[frameSlot].buffer->valid()) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueRenderer::buildOpaquePasses: meshlet batch buffer is "
+          "unavailable");
+    }
+    meshletBatchBufferHandle = meshletBatchRing_[frameSlot].buffer->handle();
+    meshletBatchBufferAddress =
+        gpu_.getBufferDeviceAddress(meshletBatchBufferHandle);
+    if (meshletBatchBufferAddress == 0u) {
+      return Result<bool, std::string>::makeError(
+          "OpaqueRenderer::buildOpaquePasses: invalid meshlet batch buffer "
+          "address");
+    }
+  }
+
+  const auto buildMeshletDispatches =
+      [&](std::pmr::vector<MeshDispatchItem> &dispatchItems,
+          std::pmr::vector<MeshletPushConstants> &pushConstants,
+          std::pmr::vector<MeshletDispatchDependencyBuffers>
+              &dispatchDependencyBuffers,
+          MeshletPipelineHandle singleSidedPipeline,
+          MeshletPipelineHandle doubleSidedPipeline, CompareOp depthCompareOp,
+          bool depthWriteEnabled, std::string_view debugLabel,
+          uint32_t debugColor, bool allowStaticMeshletDispatchCache)
+      -> Result<uint64_t, std::string> {
+    dispatchItems.clear();
+    pushConstants.clear();
+    dispatchDependencyBuffers.clear();
+
+    uint64_t dispatchSignature = hashCombine64(kFnvOffsetBasis64, 0x4d455348u);
+    dispatchSignature = hashCombine64(
+        dispatchSignature,
+        foldHandle(singleSidedPipeline.index, singleSidedPipeline.generation));
+    dispatchSignature = hashCombine64(
+        dispatchSignature,
+        foldHandle(doubleSidedPipeline.index, doubleSidedPipeline.generation));
+    dispatchSignature =
+        hashCombine64(dispatchSignature, static_cast<uint64_t>(depthCompareOp));
+    dispatchSignature =
+        hashCombine64(dispatchSignature, depthWriteEnabled ? 1u : 0u);
+    dispatchSignature = hashCombine64(dispatchSignature,
+                                      settings.opaque.enableMeshLod ? 1u : 0u);
+    dispatchSignature =
+        hashCombine64(dispatchSignature, static_cast<uint64_t>(forcedLod));
+    dispatchSignature =
+        hashCombine64(dispatchSignature,
+                      settings.opaque.enableMeshletFrustumCulling ? 1u : 0u);
+    dispatchSignature = hashCombine64(
+        dispatchSignature, settings.opaque.enableMeshletConeCulling ? 1u : 0u);
+    dispatchSignature = hashCombine64(
+        dispatchSignature, static_cast<uint64_t>(debugVisualization));
+    dispatchSignature = hashCombine64(dispatchSignature, maxTaskGroupsX);
+
+    const auto patchCachedDispatches =
+        [&](uint64_t cachedCandidateCount) -> Result<uint64_t, std::string> {
+      const auto &cachedDispatches = staticBatchCache_.meshletDispatches;
+      const auto &cachedPushConstants =
+          staticBatchCache_.meshletPushConstantsTemplates;
+      const auto &cachedDependencyBuffers =
+          staticBatchCache_.meshletDispatchDependencyBuffers;
+      dispatchItems = cachedDispatches;
+      pushConstants = cachedPushConstants;
+      dispatchDependencyBuffers.clear();
+      dispatchDependencyBuffers.reserve(cachedDependencyBuffers.size());
+      for (const MeshletDispatchDependencyBuffers &cachedDependencies :
+           cachedDependencyBuffers) {
+        dispatchDependencyBuffers.emplace_back(
+            dispatchDependencyBuffers.get_allocator().resource());
+        dispatchDependencyBuffers.back().buffers.assign(
+            cachedDependencies.buffers.begin(),
+            cachedDependencies.buffers.end());
+      }
+      if (dispatchItems.size() != pushConstants.size() ||
+          dispatchItems.size() != dispatchDependencyBuffers.size()) {
+        return Result<uint64_t, std::string>::makeError(
+            "OpaqueRenderer::buildOpaquePasses: cached meshlet dispatch size "
+            "mismatch");
+      }
+      for (size_t i = 0; i < pushConstants.size(); ++i) {
+        MeshletPushConstants &constants = pushConstants[i];
+        constants.frameDataAddress = frameDataAddress;
+        constants.instanceMatricesAddress = instanceMatricesAddress;
+        constants.instanceRemapAddress = instanceRemapAddress;
+        constants.instanceLodBoundsAddress = instanceLodBoundsAddress;
+        constants.lodThresholds =
+            glm::vec4(sortedLodThresholds[0], sortedLodThresholds[1],
+                      sortedLodThresholds[2], 0.0f);
+        constants.meshletBatchBufferAddress = meshletBatchBufferAddress;
+        dispatchItems[i].pushConstants = std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(&pushConstants[i]),
+            sizeof(MeshletPushConstants));
+        dispatchItems[i].dependencyBuffers =
+            dispatchDependencyBuffers[i].span();
+      }
+      meshletBatchGpuData_ = staticBatchCache_.meshletBatchGpuData;
+      return Result<uint64_t, std::string>::makeResult(cachedCandidateCount);
+    };
+
+    if (allowStaticMeshletDispatchCache &&
+        staticBatchCache_.meshletDispatchCacheValid &&
+        staticBatchCache_.meshletDispatchSignature == dispatchSignature) {
+      return patchCachedDispatches(staticBatchCache_.meshletCandidateCount);
+    }
+
+    struct MeshletBuildSource {
+      MeshletBatchGpuData batch{};
+      std::array<BufferHandle, 6> dependencies{};
+      MeshletPipelineHandle pipeline{};
+      uint32_t candidateCount = 0u;
+    };
+
+    std::pmr::vector<MeshletBuildSource> sources(
+        drawItems_.get_allocator().resource());
+    sources.reserve(drawItems_.size());
+
+    uint64_t totalCandidateCount = 0;
+    uint32_t maxCandidateCount = 0u;
+    for (size_t i = 0; i < drawItems_.size(); ++i) {
+      const DrawItem &draw = drawItems_[i];
+      const MeshletBatchInfo &info = meshletBatchInfos_[i];
+      const Model::ModelMeshletGpuView *view = info.view;
+      if (view == nullptr || draw.instanceCount == 0u ||
+          info.meshletCount == 0u) {
+        continue;
+      }
+      if (draw.pushConstants.size() != sizeof(PushConstants)) {
+        return Result<uint64_t, std::string>::makeError(
+            "OpaqueRenderer::buildOpaquePasses: invalid meshlet source push "
+            "constants");
+      }
+      const PushConstants *classicConstants =
+          reinterpret_cast<const PushConstants *>(draw.pushConstants.data());
+      const uint64_t meshletBufferAddress =
+          gpu_.getBufferDeviceAddress(view->meshletBuffer);
+      const uint64_t meshletVertexIndexAddress =
+          gpu_.getBufferDeviceAddress(view->meshletVertexIndexBuffer);
+      const uint64_t meshletPrimitiveIndexAddress =
+          gpu_.getBufferDeviceAddress(view->meshletPrimitiveIndexBuffer);
+      const uint64_t meshletLodRangeAddress =
+          gpu_.getBufferDeviceAddress(view->lodRangeBuffer);
+      if (meshletBufferAddress == 0u || meshletVertexIndexAddress == 0u ||
+          meshletPrimitiveIndexAddress == 0u || meshletLodRangeAddress == 0u) {
+        return Result<uint64_t, std::string>::makeError(
+            "OpaqueRenderer::buildOpaquePasses: invalid meshlet buffer "
+            "address");
+      }
+
+      uint32_t flags = 0u;
+      const bool meshletGpuLod =
+          settings.opaque.enableMeshLod && settings.opaque.forcedMeshLod < 0;
+      flags |= meshletGpuLod ? kMeshletFlagGpuLod : 0u;
+      flags |= settings.opaque.enableMeshletFrustumCulling
+                   ? kMeshletFlagFrustumCulling
+                   : 0u;
+      flags |= settings.opaque.enableMeshletConeCulling
+                   ? kMeshletFlagConeCulling
+                   : 0u;
+      flags |= debugVisualization == OpaqueDebugVisualization::MeshletId
+                   ? kMeshletFlagDebugMeshletId
+                   : 0u;
+      flags |=
+          debugVisualization == OpaqueDebugVisualization::MeshletSelectedLod
+              ? kMeshletFlagDebugSelectedLod
+              : 0u;
+      flags |= info.doubleSided ? kMeshletFlagDoubleSided : 0u;
+      const uint32_t forcedMeshLod =
+          settings.opaque.enableMeshLod
+              ? std::min(forcedLod, Submesh::kMaxLodCount - 1u)
+              : 0u;
+      flags |= (forcedMeshLod & kMeshletFlagForcedLodMask)
+               << kMeshletFlagForcedLodShift;
+
+      const uint32_t candidateCount = static_cast<uint32_t>(
+          static_cast<uint64_t>(info.meshletMaxCount) * draw.instanceCount);
+      totalCandidateCount += candidateCount;
+      maxCandidateCount = std::max(maxCandidateCount, candidateCount);
+
+      MeshletBatchGpuData batch{};
+      batch.vertexBufferAddress = classicConstants->vertexBufferAddress;
+      batch.vertexDecodeBufferAddress =
+          classicConstants->vertexDecodeBufferAddress;
+      batch.meshletBufferAddress = meshletBufferAddress;
+      batch.meshletVertexIndexBufferAddress = meshletVertexIndexAddress;
+      batch.meshletPrimitiveIndexBufferAddress = meshletPrimitiveIndexAddress;
+      batch.meshletLodRangeBufferAddress = meshletLodRangeAddress;
+      batch.draw = glm::uvec4(draw.instanceCount, draw.firstInstance,
+                              classicConstants->materialIndex,
+                              classicConstants->vertexDecodeIndex);
+      batch.mesh =
+          glm::uvec4(classicConstants->packedVertexFormat, info.vertexOffset,
+                     info.submeshIndex, info.meshletMaxCount);
+      batch.flags = glm::uvec4(flags, 0u, 0u, 0u);
+
+      sources.push_back(MeshletBuildSource{
+          .batch = batch,
+          .dependencies = {draw.vertexBuffer, info.vertexDecodeBuffer,
+                           view->meshletBuffer, view->meshletVertexIndexBuffer,
+                           view->meshletPrimitiveIndexBuffer,
+                           view->lodRangeBuffer},
+          .pipeline =
+              info.doubleSided ? doubleSidedPipeline : singleSidedPipeline,
+          .candidateCount = candidateCount,
+      });
+    }
+
+    if (sources.empty()) {
+      return Result<uint64_t, std::string>::makeResult(totalCandidateCount);
+    }
+
+    const auto samePipeline = [](MeshletPipelineHandle lhs,
+                                 MeshletPipelineHandle rhs) noexcept {
+      return lhs.index == rhs.index && lhs.generation == rhs.generation;
+    };
+    const auto appendMeshletDependency =
+        [](MeshletDispatchDependencyBuffers &dependencies,
+           PmrHashSet<uint64_t> &dependencyKeys, BufferHandle handle,
+           std::string_view context) -> Result<bool, std::string> {
+      if (!nuri::isValid(handle)) {
+        return Result<bool, std::string>::makeResult(true);
+      }
+      const uint64_t key = foldHandle(handle.index, handle.generation);
+      if (!dependencyKeys.insert(key).second) {
+        return Result<bool, std::string>::makeResult(true);
+      }
+      dependencies.buffers.push_back(handle);
+      return Result<bool, std::string>::makeResult(true);
+    };
+    const auto sourceMatches = [&](const MeshletBuildSource &source,
+                                   MeshletPipelineHandle pipeline,
+                                   uint32_t candidateOffset, uint32_t bucket) {
+      if (!samePipeline(source.pipeline, pipeline) ||
+          source.candidateCount <= candidateOffset) {
+        return false;
+      }
+      const uint32_t groupCount =
+          std::min(maxTaskGroupsX, source.candidateCount - candidateOffset);
+      return meshletDispatchBucket(groupCount) == bucket;
+    };
+
+    const MeshletPipelineHandle pipelines[2] = {singleSidedPipeline,
+                                                doubleSidedPipeline};
+    std::pmr::vector<uint8_t> grouped(drawItems_.get_allocator().resource());
+    grouped.resize(sources.size(), 0u);
+    for (uint32_t candidateOffset = 0u; candidateOffset < maxCandidateCount;) {
+      for (const MeshletPipelineHandle pipeline : pipelines) {
+        if (!nuri::isValid(pipeline)) {
+          continue;
+        }
+        for (uint32_t bucket = 0u; bucket < 32u; ++bucket) {
+          std::fill(grouped.begin(), grouped.end(), 0u);
+          for (size_t seedIndex = 0; seedIndex < sources.size(); ++seedIndex) {
+            if (grouped[seedIndex] != 0u ||
+                !sourceMatches(sources[seedIndex], pipeline, candidateOffset,
+                               bucket)) {
+              continue;
+            }
+
+            const size_t groupBatchBase = meshletBatchGpuData_.size();
+            MeshletDispatchDependencyBuffers groupDependencies(
+                dispatchDependencyBuffers.get_allocator().resource());
+            PmrHashSet<uint64_t> groupDependencyKeys(
+                dispatchDependencyBuffers.get_allocator().resource());
+            groupDependencyKeys.reserve(std::min(
+                sources.size() * 6u + 1u, kMaxMeshDispatchDependencyResources));
+            auto batchDepResult = appendMeshletDependency(
+                groupDependencies, groupDependencyKeys,
+                meshletBatchBufferHandle,
+                "OpaqueRenderer::buildOpaquePasses(meshlet dispatch)");
+            if (batchDepResult.hasError()) {
+              return Result<uint64_t, std::string>::makeError(
+                  batchDepResult.error());
+            }
+            uint32_t groupBatchCount = 0u;
+            uint32_t groupsX = 0u;
+            for (size_t sourceIndex = seedIndex; sourceIndex < sources.size();
+                 ++sourceIndex) {
+              const MeshletBuildSource &source = sources[sourceIndex];
+              if (grouped[sourceIndex] != 0u ||
+                  !sourceMatches(source, pipeline, candidateOffset, bucket)) {
+                continue;
+              }
+              const uint32_t groupCount = std::min(
+                  maxTaskGroupsX, source.candidateCount - candidateOffset);
+              if (meshletBatchGpuData_.size() >=
+                  static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+                return Result<uint64_t, std::string>::makeError(
+                    "OpaqueRenderer::buildOpaquePasses: meshlet batch index "
+                    "exceeds UINT32_MAX");
+              }
+              grouped[sourceIndex] = 1u;
+              meshletBatchGpuData_.push_back(source.batch);
+              for (const BufferHandle handle : source.dependencies) {
+                auto depResult = appendMeshletDependency(
+                    groupDependencies, groupDependencyKeys, handle,
+                    "OpaqueRenderer::buildOpaquePasses(meshlet dispatch)");
+                if (depResult.hasError()) {
+                  return Result<uint64_t, std::string>::makeError(
+                      depResult.error());
+                }
+              }
+              groupsX = std::max(groupsX, groupCount);
+              ++groupBatchCount;
+            }
+
+            const uint32_t maxGroupsY = maxTaskGroupsYFor(groupsX);
+            uint32_t emittedBatches = 0u;
+            while (emittedBatches < groupBatchCount) {
+              const uint32_t groupsY =
+                  std::min(maxGroupsY, groupBatchCount - emittedBatches);
+              MeshletPushConstants constants{};
+              constants.frameDataAddress = frameDataAddress;
+              constants.instanceMatricesAddress = instanceMatricesAddress;
+              constants.instanceRemapAddress = instanceRemapAddress;
+              constants.instanceLodBoundsAddress = instanceLodBoundsAddress;
+              constants.lodThresholds =
+                  glm::vec4(sortedLodThresholds[0], sortedLodThresholds[1],
+                            sortedLodThresholds[2], 0.0f);
+              constants.meshletBatchBufferAddress = meshletBatchBufferAddress;
+              constants.batchBase =
+                  static_cast<uint32_t>(groupBatchBase + emittedBatches);
+              constants.candidateOffset = candidateOffset;
+              pushConstants.push_back(constants);
+
+              MeshDispatchItem dispatch{};
+              dispatch.command = MeshDispatchCommandType::Direct;
+              dispatch.pipeline = pipeline;
+              dispatch.groupsX = groupsX;
+              dispatch.groupsY = groupsY;
+              dispatch.groupsZ = 1u;
+              dispatch.useDepthState = true;
+              dispatch.depthState = {.compareOp = depthCompareOp,
+                                     .isDepthWriteEnabled = depthWriteEnabled};
+              dispatch.debugLabel = debugLabel;
+              dispatch.debugColor = debugColor;
+              dispatchItems.push_back(dispatch);
+
+              dispatchDependencyBuffers.emplace_back(
+                  dispatchDependencyBuffers.get_allocator().resource());
+              MeshletDispatchDependencyBuffers &dependencies =
+                  dispatchDependencyBuffers.back();
+              dependencies.buffers.assign(groupDependencies.buffers.begin(),
+                                          groupDependencies.buffers.end());
+              emittedBatches += groupsY;
+            }
+          }
+        }
+      }
+      if (maxCandidateCount - candidateOffset <= maxTaskGroupsX) {
+        break;
+      }
+      candidateOffset += maxTaskGroupsX;
+    }
+
+    for (size_t i = 0; i < dispatchItems.size(); ++i) {
+      dispatchItems[i].pushConstants = std::span<const std::byte>(
+          reinterpret_cast<const std::byte *>(&pushConstants[i]),
+          sizeof(MeshletPushConstants));
+      dispatchItems[i].dependencyBuffers = dispatchDependencyBuffers[i].span();
+    }
+
+    if (allowStaticMeshletDispatchCache) {
+      auto &cachedDispatches = staticBatchCache_.meshletDispatches;
+      auto &cachedPushConstants =
+          staticBatchCache_.meshletPushConstantsTemplates;
+      auto &cachedDependencyBuffers =
+          staticBatchCache_.meshletDispatchDependencyBuffers;
+      auto &cachedBatchGpuData = staticBatchCache_.meshletBatchGpuData;
+      cachedDispatches = dispatchItems;
+      cachedPushConstants = pushConstants;
+      for (MeshDispatchItem &cachedDispatch : cachedDispatches) {
+        cachedDispatch.pushConstants = {};
+        cachedDispatch.dependencyBuffers = {};
+        cachedDispatch.dependencyTextures = {};
+      }
+      cachedDependencyBuffers.clear();
+      cachedDependencyBuffers.reserve(dispatchDependencyBuffers.size());
+      for (const MeshletDispatchDependencyBuffers &dependencies :
+           dispatchDependencyBuffers) {
+        cachedDependencyBuffers.emplace_back(
+            cachedDependencyBuffers.get_allocator().resource());
+        cachedDependencyBuffers.back().buffers.assign(
+            dependencies.buffers.begin(), dependencies.buffers.end());
+      }
+      cachedBatchGpuData = meshletBatchGpuData_;
+      staticBatchCache_.meshletCandidateCount = totalCandidateCount;
+      staticBatchCache_.meshletDispatchSignature = dispatchSignature;
+      staticBatchCache_.meshletDispatchCacheValid = true;
+    }
+
+    return Result<uint64_t, std::string>::makeResult(totalCandidateCount);
+  };
+
   std::span<const DrawItem> finalPassDrawItems = shadedBaseDrawItems;
-  if (wireframeOnlyRequested && !baseDrawItems.empty()) {
+  if (!meshletActive && wireframeOnlyRequested && !baseDrawItems.empty()) {
     bool lineOverlayAvailable = false;
     bool lineTessOverlayAvailable = false;
 
@@ -3527,7 +4239,7 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                                      overlayDrawItems_.size());
     }
   } else {
-    if (overlayRequested && !baseDrawItems.empty()) {
+    if (!meshletActive && overlayRequested && !baseDrawItems.empty()) {
       bool gsOverlayAvailable = false;
       bool gsTessOverlayAvailable = false;
       bool lineOverlayAvailable = false;
@@ -3688,7 +4400,8 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           ? saturateToU32(depthPrepassDrawItems_.size())
           : 0u;
   frame.metrics.opaque.depthPyramidLevels = 0u;
-  frame.metrics.opaque.depthPrepassEnabled = depthPrepassEnabled ? 1u : 0u;
+  frame.metrics.opaque.depthPrepassEnabled =
+      (depthPrepassEnabled || classicNormalPrepassWritesDepth) ? 1u : 0u;
   aoMetrics.normalPrepassDraws = saturateToU32(normalPrepassDrawItems_.size());
 
   bool pickPassSubmitted = false;
@@ -3838,11 +4551,15 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     visibilityDepthPass.isTransmissionVisibilityDepthPass = true;
   }
 
-  const bool preDispatchSubmittedBeforeMain =
+  const bool preDispatchSubmittedBeforeNormal =
       pickPassSubmitted || depthPrepassEnabled ||
       transmissionVisibilityDepthEnabled;
+  const bool hasClassicNormalPrepass =
+      normalPrepassEnabled && !normalPrepassDrawItems_.empty();
+  const bool hasClassicNormalDepthPrepass =
+      hasClassicNormalPrepass && classicNormalPrepassWritesDepth;
 
-  if (normalPrepassEnabled && !normalPrepassDrawItems_.empty() &&
+  if (hasClassicNormalPrepass &&
       nuri::isValid(frame.sharedResources.normalTexture)) {
     PreparedGraphPass &normalPass =
         out.emplace_back(drawItems_.get_allocator().resource());
@@ -3850,11 +4567,18 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                              .storeOp = StoreOp::Store,
                              .clearColor = kFrameCompositionNormalClearValue};
     normalPass.colorTextureHandle = frame.sharedResources.normalTexture;
-    normalPass.desc.depth = {.loadOp = LoadOp::Load,
-                             .storeOp = StoreOp::Store,
-                             .clearDepth = kClearDepthOne,
-                             .clearStencil = 0};
+    normalPass.desc.depth = {
+        .loadOp = hasClassicNormalDepthPrepass ? LoadOp::Clear : LoadOp::Load,
+        .storeOp = StoreOp::Store,
+        .clearDepth = kClearDepthOne,
+        .clearStencil = 0};
     normalPass.depthTextureHandle = sceneDepthTarget;
+    if (hasClassicNormalDepthPrepass) {
+      if (!preDispatchSubmittedBeforeNormal) {
+        normalPass.desc.preDispatches = std::span<const ComputeDispatchItem>(
+            preDispatches_.data(), preDispatches_.size());
+      }
+    }
     normalPass.desc.dependencyBuffers = std::span<const BufferHandle>(
         passDependencyBuffers_.data(), passDependencyBuffers_.size());
     normalPass.desc.dependencyBufferAccessModes =
@@ -3873,9 +4597,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     normalPass.desc.gpuTimingScope = GpuTimingScope::Opaque;
     normalPass.desc.markImplicitOutputSideEffect = true;
     normalPass.hasDraws = true;
-    normalPass.hasPreDispatch = false;
-    normalPass.desc.borrowPayload = true;
-    normalPass.hasIndirectDraws = hasIndirectBaseDraws;
+    normalPass.hasPreDispatch = hasClassicNormalDepthPrepass &&
+                                !preDispatchSubmittedBeforeNormal &&
+                                !preDispatches_.empty();
+    normalPass.desc.borrowPayload = !normalPass.hasPreDispatch;
+    normalPass.hasIndirectDraws =
+        hasClassicNormalPrepass && hasIndirectBaseDraws;
+    normalPass.isDepthPrepass = hasClassicNormalDepthPrepass;
     normalPass.isNormalPrepass = true;
     aoMetrics.normalPrepassDraws =
         saturateToU32(normalPrepassDrawItems_.size());
@@ -3884,12 +4612,16 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     aoMetrics.disabledReason = AmbientOcclusionDisabledReason::MissingResources;
   }
 
+  const bool preDispatchSubmittedBeforeMain =
+      pickPassSubmitted || depthPrepassEnabled ||
+      transmissionVisibilityDepthEnabled || hasClassicNormalDepthPrepass;
+
   const bool requiresDepthPyramid = this->requiresDepthPyramid(settings);
-  const bool depthPyramidEnabled = !msaaSelected && requiresDepthPyramid &&
-                                   nuri::isValid(sceneDepthTexture) &&
-                                   nuri::isValid(depthPyramidPipelineHandle_) &&
-                                   sceneDepthPyramidLevelCount_ > 0u &&
-                                   !baseDrawItems.empty();
+  const bool depthPyramidEnabled =
+      !meshletActive && !msaaSelected && requiresDepthPyramid &&
+      nuri::isValid(sceneDepthTexture) &&
+      nuri::isValid(depthPyramidPipelineHandle_) &&
+      sceneDepthPyramidLevelCount_ > 0u && !baseDrawItems.empty();
   frame.metrics.shadow.sdsmComputePassCount = 0u;
   if (depthPyramidEnabled) {
     NURI_PROFILER_ZONE("OpaqueRenderer.depth_pyramid_build",
@@ -4135,7 +4867,9 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                      .clearColor = {kClearColorWhite, kClearColorWhite,
                                     kClearColorWhite, kClearColorWhite}};
   pass.desc.depth = {.loadOp =
-                         depthPrepassEnabled ? LoadOp::Load : LoadOp::Clear,
+                         (depthPrepassEnabled || hasClassicNormalDepthPrepass)
+                             ? LoadOp::Load
+                             : LoadOp::Clear,
                      .storeOp = StoreOp::Store,
                      .clearDepth = kClearDepthOne,
                      .clearStencil = 0};
@@ -4187,6 +4921,51 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
           RenderGraphAccessMode::Read);
     }
   }
+  meshletDispatchItems_.clear();
+  meshletPushConstants_.clear();
+  meshletDispatchDependencyBuffers_.clear();
+  if (meshletActive) {
+    NURI_PROFILER_ZONE("OpaqueRenderer.meshlet_dispatch_build",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    auto lodBoundsDepResult = appendUniqueDependency(
+        mainPassDependencyBuffers_, mainPassDependencyBufferAccessModes_,
+        instanceLodBoundsBuffer_->handle(), RenderGraphAccessMode::Read,
+        "OpaqueRenderer::buildOpaquePasses(meshlet pass)");
+    if (lodBoundsDepResult.hasError()) {
+      return lodBoundsDepResult;
+    }
+
+    const bool hasDepthPreparedMeshletMain = hasClassicNormalDepthPrepass;
+    auto meshletBuildResult = buildMeshletDispatches(
+        meshletDispatchItems_, meshletPushConstants_,
+        meshletDispatchDependencyBuffers_, meshletPipelineHandle_,
+        meshletDoubleSidedPipelineHandle_,
+        hasDepthPreparedMeshletMain ? CompareOp::LessEqual : CompareOp::Less,
+        !hasDepthPreparedMeshletMain, "OpaqueMeshlet", kMeshDebugColor,
+        canUseStaticBatchCache);
+    if (meshletBuildResult.hasError()) {
+      return Result<bool, std::string>::makeError(meshletBuildResult.error());
+    }
+    if (!meshletBatchGpuData_.empty()) {
+      const std::span<const std::byte> batchBytes{
+          reinterpret_cast<const std::byte *>(meshletBatchGpuData_.data()),
+          meshletBatchGpuData_.size() * sizeof(MeshletBatchGpuData)};
+      auto updateResult =
+          gpu_.updateBuffer(meshletBatchBufferHandle, batchBytes, 0u);
+      if (updateResult.hasError()) {
+        return updateResult;
+      }
+    }
+    const uint64_t mainCandidateCount = meshletBuildResult.value();
+    finalPassDrawItems = {};
+    frame.metrics.opaque.meshletModeActive = 1u;
+    frame.metrics.opaque.meshletDispatches =
+        saturateToU32(meshletDispatchItems_.size());
+    frame.metrics.opaque.meshletTaskGroups = saturateToU32(mainCandidateCount);
+    frame.metrics.opaque.meshletCandidateCount =
+        saturateToU32(mainCandidateCount);
+    NURI_PROFILER_ZONE_END();
+  }
   pass.desc.dependencyBuffers = std::span<const BufferHandle>(
       mainPassDependencyBuffers_.data(), mainPassDependencyBuffers_.size());
   pass.desc.dependencyBufferAccessModes =
@@ -4217,17 +4996,19 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
                                                    msaaPassDrawItems_.size());
   }
   pass.desc.draws = finalPassDrawItems;
+  pass.desc.meshDispatches = std::span<const MeshDispatchItem>(
+      meshletDispatchItems_.data(), meshletDispatchItems_.size());
   pass.desc.drawBuffersPreResolved = true;
   pass.desc.preResolvedDrawBuffers = std::span<const BufferHandle>(
       preResolvedDrawBuffers_.data(), preResolvedDrawBuffers_.size());
   pass.desc.debugLabel = kOpaqueMainPassLabel;
   pass.desc.debugColor = kOpaquePassDebugColor;
   pass.desc.gpuTimingScope = GpuTimingScope::Opaque;
-  pass.hasDraws = !finalPassDrawItems.empty();
+  pass.hasDraws = !finalPassDrawItems.empty() || !meshletDispatchItems_.empty();
   pass.hasPreDispatch =
       !preDispatchSubmittedBeforeMain && !preDispatches_.empty();
   pass.desc.borrowPayload = !pass.hasPreDispatch;
-  pass.hasIndirectDraws = hasIndirectBaseDraws;
+  pass.hasIndirectDraws = !meshletActive && hasIndirectBaseDraws;
   pass.isMainPass = true;
   const TextureHandle sceneColorTarget =
       msaaSelected ? frame.sharedResources.msaaSceneColorTexture
@@ -4705,6 +5486,7 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
   passDesc.preDispatches = pass.desc.preDispatches;
   passDesc.dependencyBuffers = pass.desc.dependencyBuffers;
   passDesc.draws = pass.desc.draws;
+  passDesc.meshDispatches = pass.desc.meshDispatches;
   passDesc.drawBuffersPreResolved = pass.desc.drawBuffersPreResolved;
   passDesc.gpuTimingScope = pass.desc.gpuTimingScope;
   passDesc.debugLabel = pass.desc.debugLabel;
@@ -5845,6 +6627,11 @@ Result<bool, std::string> OpaqueRenderer::ensureInitialized() {
   if (centersResult.hasError()) {
     return centersResult;
   }
+  auto lodBoundsResult =
+      ensureInstanceLodBoundsBufferCapacity(sizeof(glm::vec4));
+  if (lodBoundsResult.hasError()) {
+    return lodBoundsResult;
+  }
   auto baseMatricesResult =
       ensureInstanceBaseMatricesBufferCapacity(sizeof(glm::mat4));
   if (baseMatricesResult.hasError()) {
@@ -6082,6 +6869,36 @@ OpaqueRenderer::ensureCentersPhaseBufferCapacity(size_t requiredBytes) {
 }
 
 Result<bool, std::string>
+OpaqueRenderer::ensureInstanceLodBoundsBufferCapacity(size_t requiredBytes) {
+  const size_t requested = std::max(requiredBytes, sizeof(glm::vec4));
+  if (instanceLodBoundsBuffer_ && instanceLodBoundsBuffer_->valid() &&
+      instanceLodBoundsBufferCapacityBytes_ >= requested) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  if (instanceLodBoundsBuffer_ && instanceLodBoundsBuffer_->valid()) {
+    gpu_.waitIdle();
+    gpu_.destroyBuffer(instanceLodBoundsBuffer_->handle());
+    instanceLodBoundsBuffer_.reset();
+    instanceLodBoundsBufferCapacityBytes_ = 0;
+  }
+
+  const BufferDesc desc{
+      .usage = BufferUsage::Storage,
+      .storage = Storage::Device,
+      .size = requested,
+  };
+  auto createResult =
+      Buffer::create(gpu_, desc, "opaque_instance_lod_bounds_buffer");
+  if (createResult.hasError()) {
+    return Result<bool, std::string>::makeError(createResult.error());
+  }
+  instanceLodBoundsBuffer_ = std::move(createResult.value());
+  instanceLodBoundsBufferCapacityBytes_ = requested;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
 OpaqueRenderer::ensureInstanceBaseMatricesBufferCapacity(size_t requiredBytes) {
   const size_t requested = std::max(requiredBytes, sizeof(glm::mat4));
   if (instanceBaseMatricesBuffer_ && instanceBaseMatricesBuffer_->valid() &&
@@ -6122,7 +6939,8 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
       velocityFrameDataRing_.size() == requiredCount &&
       velocityGeometryRing_.size() == requiredCount &&
       instanceRemapRing_.size() == requiredCount &&
-      indirectCommandRing_.size() == requiredCount) {
+      indirectCommandRing_.size() == requiredCount &&
+      meshletBatchRing_.size() == requiredCount) {
     return Result<bool, std::string>::makeResult(true);
   }
 
@@ -6163,6 +6981,11 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
       gpu_.destroyBuffer(slot.buffer->handle());
     }
   }
+  for (DynamicBufferSlot &slot : meshletBatchRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+  }
 
   instanceMatricesRing_.clear();
   previousInstanceMatricesRing_.clear();
@@ -6171,6 +6994,7 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   velocityGeometryRing_.clear();
   instanceRemapRing_.clear();
   indirectCommandRing_.clear();
+  meshletBatchRing_.clear();
   instanceMatricesRing_.resize(requiredCount);
   previousInstanceMatricesRing_.resize(requiredCount);
   velocityInstanceFlagsRing_.resize(requiredCount);
@@ -6178,6 +7002,7 @@ OpaqueRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   velocityGeometryRing_.resize(requiredCount);
   instanceRemapRing_.resize(requiredCount);
   indirectCommandRing_.resize(requiredCount);
+  meshletBatchRing_.resize(requiredCount);
   instanceMatricesUploadVersions_.assign(requiredCount,
                                          std::numeric_limits<uint64_t>::max());
   indirectUploadSignatures_.assign(requiredCount, kInvalidDrawSignature);
@@ -6300,6 +7125,42 @@ OpaqueRenderer::ensureVelocityGeometryRingCapacity(size_t requiredBytes) {
   return ensureDynamicRingCapacity(velocityGeometryRing_, requiredBytes,
                                    sizeof(VelocityRenderableGeometryGpuData),
                                    "opaque_velocity_geometry_buffer");
+}
+
+Result<bool, std::string>
+OpaqueRenderer::ensureMeshletBatchRingCapacity(size_t requiredBytes) {
+  const size_t requested =
+      ((std::max(requiredBytes, sizeof(MeshletBatchGpuData)) +
+        sizeof(MeshletBatchGpuData) - 1u) /
+       sizeof(MeshletBatchGpuData)) *
+      sizeof(MeshletBatchGpuData);
+  for (size_t i = 0; i < meshletBatchRing_.size(); ++i) {
+    DynamicBufferSlot &slot = meshletBatchRing_[i];
+    if (slot.buffer && slot.buffer->valid() &&
+        slot.capacityBytes >= requested) {
+      continue;
+    }
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+      slot.buffer.reset();
+      slot.capacityBytes = 0;
+    }
+
+    const BufferDesc desc{
+        .usage = BufferUsage::Storage,
+        .storage = Storage::HostVisible,
+        .size = requested,
+    };
+    std::string debugName("opaque_meshlet_batch_buffer_");
+    debugName += std::to_string(i);
+    auto createResult = Buffer::create(gpu_, desc, debugName);
+    if (createResult.hasError()) {
+      return Result<bool, std::string>::makeError(createResult.error());
+    }
+    slot.buffer = std::move(createResult.value());
+    slot.capacityBytes = requested;
+  }
+  return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string>
@@ -6496,6 +7357,8 @@ Result<bool, std::string> OpaqueRenderer::rebuildSceneCache(
           .packedVertexFormat =
               static_cast<uint32_t>(model->drawVertexFormat()),
           .materialIndex = finalMaterialIndex,
+          .meshletView =
+              model->hasMeshlets() ? &model->meshletGpuView() : nullptr,
           .doubleSided = doubleSided,
           .alphaMasked = alphaMasked,
       });
@@ -7803,6 +8666,99 @@ Result<bool, std::string> OpaqueRenderer::createPipelines() {
   return Result<bool, std::string>::makeResult(true);
 }
 
+Result<bool, std::string> OpaqueRenderer::ensureMeshletPipelineState() {
+  if (meshletPipelineInitialized_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (meshletPipelineUnsupported_) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::ensureMeshletPipelineState: meshlet pipeline is "
+        "unsupported");
+  }
+  if (!gpu_.supportsFeature(GPUFeature::Meshlets)) {
+    meshletPipelineUnsupported_ = true;
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::ensureMeshletPipelineState: GPU meshlets are "
+        "unsupported");
+  }
+  if (config_.meshletTask.empty() || config_.meshletMesh.empty() ||
+      config_.meshletFragment.empty()) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::ensureMeshletPipelineState: meshlet shader paths are "
+        "not configured");
+  }
+
+  meshletShader_ = Shader::create("opaque_meshlet", gpu_);
+  if (!meshletShader_) {
+    return Result<bool, std::string>::makeError(
+        "OpaqueRenderer::ensureMeshletPipelineState: failed to create shader "
+        "object");
+  }
+
+  auto taskResult = meshletShader_->compileFromFile(
+      config_.meshletTask.string(), ShaderStage::Task);
+  if (taskResult.hasError()) {
+    meshletShader_.reset();
+    return Result<bool, std::string>::makeError(taskResult.error());
+  }
+  auto meshResult = meshletShader_->compileFromFile(
+      config_.meshletMesh.string(), ShaderStage::Mesh);
+  if (meshResult.hasError()) {
+    meshletShader_.reset();
+    meshletTaskShader_ = {};
+    return Result<bool, std::string>::makeError(meshResult.error());
+  }
+  auto fragmentResult = meshletShader_->compileFromFile(
+      config_.meshletFragment.string(), ShaderStage::Fragment);
+  if (fragmentResult.hasError()) {
+    meshletShader_.reset();
+    meshletTaskShader_ = {};
+    meshletMeshShader_ = {};
+    return Result<bool, std::string>::makeError(fragmentResult.error());
+  }
+  meshletTaskShader_ = taskResult.value();
+  meshletMeshShader_ = meshResult.value();
+  meshletFragmentShader_ = fragmentResult.value();
+
+  MeshletPipelineDesc desc{};
+  desc.taskShader = meshletTaskShader_;
+  desc.meshShader = meshletMeshShader_;
+  desc.fragmentShader = meshletFragmentShader_;
+  desc.colorFormats = {kFrameCompositionSceneColorFormat};
+  desc.colorAttachmentCount = 1u;
+  desc.depthFormat = kFrameCompositionDepthFormat;
+  desc.cullMode = CullMode::Back;
+  desc.polygonMode = PolygonMode::Fill;
+  desc.numSamples = 1u;
+  auto pipelineResult = gpu_.createMeshletPipeline(desc, "opaque_meshlet");
+  if (pipelineResult.hasError()) {
+    meshletShader_.reset();
+    meshletTaskShader_ = {};
+    meshletMeshShader_ = {};
+    meshletFragmentShader_ = {};
+    meshletPipelineUnsupported_ = true;
+    return Result<bool, std::string>::makeError(pipelineResult.error());
+  }
+  meshletPipelineHandle_ = pipelineResult.value();
+
+  desc.cullMode = CullMode::None;
+  auto doubleSidedResult =
+      gpu_.createMeshletPipeline(desc, "opaque_meshlet_double_sided");
+  if (doubleSidedResult.hasError()) {
+    destroyMeshletPipelineHandle(gpu_, meshletPipelineHandle_);
+    meshletShader_.reset();
+    meshletTaskShader_ = {};
+    meshletMeshShader_ = {};
+    meshletFragmentShader_ = {};
+    meshletPipelineUnsupported_ = true;
+    return Result<bool, std::string>::makeError(doubleSidedResult.error());
+  }
+  meshletDoubleSidedPipelineHandle_ = doubleSidedResult.value();
+  meshletPipelineInitialized_ = true;
+  meshletPipelineUnsupported_ = false;
+  return Result<bool, std::string>::makeResult(true);
+}
+
 RenderPipelineHandle
 OpaqueRenderer::selectMeshPipeline(bool doubleSided, bool tessellated) const {
   if (tessellated) {
@@ -8349,6 +9305,8 @@ void OpaqueRenderer::invalidateAutoLodCache() {
 
 void OpaqueRenderer::invalidateStaticBatchCache() {
   staticBatchCache_.valid = false;
+  staticBatchCache_.meshletRequested = false;
+  staticBatchCache_.meshletDispatchCacheValid = false;
   staticBatchCache_.enableMeshLod = false;
   staticBatchCache_.forcedMeshLod = -1;
   ++staticBatchCache_.generation;
@@ -8358,9 +9316,16 @@ void OpaqueRenderer::invalidateStaticBatchCache() {
   staticBatchCache_.remapSignature = kInvalidDrawSignature;
   staticBatchCache_.indirectDrawSignature = kInvalidDrawSignature;
   staticBatchCache_.drawBufferSignature = kInvalidDrawSignature;
+  staticBatchCache_.meshletDispatchSignature = kInvalidDrawSignature;
+  staticBatchCache_.meshletCandidateCount = 0u;
   staticBatchCache_.draws.clear();
   staticBatchCache_.pushConstantsTemplates.clear();
   staticBatchCache_.alphaMasked.clear();
+  staticBatchCache_.meshletBatchInfos.clear();
+  staticBatchCache_.meshletDispatches.clear();
+  staticBatchCache_.meshletPushConstantsTemplates.clear();
+  staticBatchCache_.meshletDispatchDependencyBuffers.clear();
+  staticBatchCache_.meshletBatchGpuData.clear();
   staticBatchCache_.remap.clear();
   boundStaticBatchGeneration_ = 0;
 }
@@ -8444,6 +9409,22 @@ void OpaqueRenderer::destroyMeshPipelineState() {
   destroyPipelineHandle(gpu_, meshTessPipelineHandle_);
   destroyPipelineHandle(gpu_, meshDoubleSidedFillPipelineHandle_);
   resetMeshPipelineState();
+}
+
+void OpaqueRenderer::destroyMeshletPipelineState() {
+  destroyMeshletPipelineHandle(gpu_, meshletDoubleSidedPipelineHandle_);
+  destroyMeshletPipelineHandle(gpu_, meshletPipelineHandle_);
+  resetMeshletPipelineState();
+}
+
+void OpaqueRenderer::resetMeshletPipelineState() {
+  meshletPipelineHandle_ = {};
+  meshletDoubleSidedPipelineHandle_ = {};
+  meshletTaskShader_ = {};
+  meshletMeshShader_ = {};
+  meshletFragmentShader_ = {};
+  meshletPipelineInitialized_ = false;
+  meshletPipelineUnsupported_ = false;
 }
 
 void OpaqueRenderer::resetMeshPipelineState() {
@@ -8558,6 +9539,12 @@ void OpaqueRenderer::destroyBuffers() {
   instanceCentersPhaseBuffer_.reset();
   instanceCentersPhaseBufferCapacityBytes_ = 0;
 
+  if (instanceLodBoundsBuffer_ && instanceLodBoundsBuffer_->valid()) {
+    gpu_.destroyBuffer(instanceLodBoundsBuffer_->handle());
+  }
+  instanceLodBoundsBuffer_.reset();
+  instanceLodBoundsBufferCapacityBytes_ = 0;
+
   if (instanceBaseMatricesBuffer_ && instanceBaseMatricesBuffer_->valid()) {
     gpu_.destroyBuffer(instanceBaseMatricesBuffer_->handle());
   }
@@ -8613,6 +9600,13 @@ void OpaqueRenderer::destroyBuffers() {
     slot.buffer.reset();
     slot.capacityBytes = 0;
   }
+  for (DynamicBufferSlot &slot : meshletBatchRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0;
+  }
   instanceMatricesRing_.clear();
   previousInstanceMatricesRing_.clear();
   velocityInstanceFlagsRing_.clear();
@@ -8620,6 +9614,7 @@ void OpaqueRenderer::destroyBuffers() {
   velocityGeometryRing_.clear();
   instanceRemapRing_.clear();
   indirectCommandRing_.clear();
+  meshletBatchRing_.clear();
   instanceMatricesUploadVersions_.clear();
   remapUploadSignatures_.clear();
   indirectUploadSignatures_.clear();

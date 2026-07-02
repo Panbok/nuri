@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <future>
 #include <limits>
@@ -96,6 +97,27 @@ public:
     uint32_t morphVertexCount = 0;
   };
 
+  struct SubmeshMeshletLodRangeGpu {
+    std::array<uint32_t, Submesh::kMaxLodCount> meshletOffset{};
+    std::array<uint32_t, Submesh::kMaxLodCount> meshletCount{};
+    std::array<float, Submesh::kMaxLodCount> error{};
+    uint32_t lodCount = 0;
+    uint32_t _pad0 = 0;
+    uint32_t _pad1 = 0;
+    uint32_t _pad2 = 0;
+  };
+
+  struct ModelMeshletGpuView {
+    BufferHandle meshletBuffer{};
+    BufferHandle meshletVertexIndexBuffer{};
+    BufferHandle meshletPrimitiveIndexBuffer{};
+    BufferHandle lodRangeBuffer{};
+    uint32_t meshletCount = 0;
+    uint32_t meshletVertexIndexCount = 0;
+    uint32_t meshletPrimitiveIndexCount = 0;
+    uint32_t lodRangeCount = 0;
+  };
+
   ~Model();
 
   Model(const Model &) = delete;
@@ -133,6 +155,16 @@ public:
   [[nodiscard]] const BoundingBox &bounds() const noexcept { return bounds_; }
   [[nodiscard]] const ModelAnimationGpuView &animationGpuView() const noexcept {
     return animationGpuView_;
+  }
+  [[nodiscard]] const ModelMeshletGpuView &meshletGpuView() const noexcept {
+    return meshletGpuView_;
+  }
+  [[nodiscard]] bool hasMeshlets() const noexcept {
+    return meshletGpuView_.meshletCount != 0u &&
+           nuri::isValid(meshletGpuView_.meshletBuffer) &&
+           nuri::isValid(meshletGpuView_.meshletVertexIndexBuffer) &&
+           nuri::isValid(meshletGpuView_.meshletPrimitiveIndexBuffer) &&
+           nuri::isValid(meshletGpuView_.lodRangeBuffer);
   }
   [[nodiscard]] PackedVertexFormat drawVertexFormat() const noexcept {
     return drawVertexFormat_;
@@ -181,21 +213,29 @@ private:
         uint32_t indexCount, BoundingBox bounds,
         PackedVertexFormat drawVertexFormat,
         ModelAnimationGpuView animationGpuView,
-        uint64_t vertexDecodeBufferAddress,
+        ModelMeshletGpuView meshletGpuView, uint64_t vertexDecodeBufferAddress,
         std::unique_ptr<Buffer> vertexDecodeBuffer,
         std::unique_ptr<Buffer> skinInfluenceBuffer,
         std::unique_ptr<Buffer> morphMetaBuffer,
         std::unique_ptr<Buffer> morphDeltaBuffer,
+        std::unique_ptr<Buffer> meshletBuffer,
+        std::unique_ptr<Buffer> meshletVertexIndexBuffer,
+        std::unique_ptr<Buffer> meshletPrimitiveIndexBuffer,
+        std::unique_ptr<Buffer> meshletLodRangeBuffer,
         std::pmr::vector<uint32_t> sourceMaterialToRuntime)
       : gpu_(&gpu), geometry_(geometry), submeshes_(std::move(submeshes)),
         vertexCount_(vertexCount), indexCount_(indexCount), bounds_(bounds),
         drawVertexFormat_(drawVertexFormat),
-        animationGpuView_(animationGpuView),
+        animationGpuView_(animationGpuView), meshletGpuView_(meshletGpuView),
         vertexDecodeBufferAddress_(vertexDecodeBufferAddress),
         vertexDecodeBuffer_(std::move(vertexDecodeBuffer)),
         skinInfluenceBuffer_(std::move(skinInfluenceBuffer)),
         morphMetaBuffer_(std::move(morphMetaBuffer)),
         morphDeltaBuffer_(std::move(morphDeltaBuffer)),
+        meshletBuffer_(std::move(meshletBuffer)),
+        meshletVertexIndexBuffer_(std::move(meshletVertexIndexBuffer)),
+        meshletPrimitiveIndexBuffer_(std::move(meshletPrimitiveIndexBuffer)),
+        meshletLodRangeBuffer_(std::move(meshletLodRangeBuffer)),
         sourceMaterialToRuntime_(std::move(sourceMaterialToRuntime)) {}
 
   GPUDevice *gpu_ = nullptr;
@@ -206,11 +246,16 @@ private:
   BoundingBox bounds_{};
   PackedVertexFormat drawVertexFormat_ = PackedVertexFormat::StaticQuantized20;
   ModelAnimationGpuView animationGpuView_{};
+  ModelMeshletGpuView meshletGpuView_{};
   uint64_t vertexDecodeBufferAddress_ = 0u;
   std::unique_ptr<Buffer> vertexDecodeBuffer_;
   std::unique_ptr<Buffer> skinInfluenceBuffer_;
   std::unique_ptr<Buffer> morphMetaBuffer_;
   std::unique_ptr<Buffer> morphDeltaBuffer_;
+  std::unique_ptr<Buffer> meshletBuffer_;
+  std::unique_ptr<Buffer> meshletVertexIndexBuffer_;
+  std::unique_ptr<Buffer> meshletPrimitiveIndexBuffer_;
+  std::unique_ptr<Buffer> meshletLodRangeBuffer_;
   std::pmr::vector<uint32_t> sourceMaterialToRuntime_;
 };
 

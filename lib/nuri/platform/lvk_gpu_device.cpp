@@ -637,12 +637,13 @@ makeDependencyError(std::string_view context, std::string_view detail) {
   return Result<bool, std::string>::makeError(std::move(message));
 }
 
-[[nodiscard]] Result<bool, std::string>
-makeDependencyCountExceededError(std::string_view context) {
+[[nodiscard]] Result<bool, std::string> makeDependencyCountExceededError(
+    std::string_view context,
+    size_t maxDependencyCount = kMaxDependencyResources) {
   std::array<char, 96> detail{};
-  const int written = std::snprintf(
-      detail.data(), detail.size(), "dependency resource count exceeds %u",
-      static_cast<unsigned>(kMaxDependencyResources));
+  const int written = std::snprintf(detail.data(), detail.size(),
+                                    "dependency resource count exceeds %u",
+                                    static_cast<unsigned>(maxDependencyCount));
   if (written > 0 && static_cast<size_t>(written) < detail.size()) {
     return makeDependencyError(
         context, std::string_view(detail.data(), static_cast<size_t>(written)));
@@ -2165,6 +2166,16 @@ LvkGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
       reserved.handle);
 }
 
+Result<MeshletPipelineHandle, std::string>
+LvkGPUDevice::createMeshletPipeline(const MeshletPipelineDesc &desc,
+                                    std::string_view debugName) {
+  (void)desc;
+  (void)debugName;
+  return Result<MeshletPipelineHandle, std::string>::makeError(
+      "LvkGPUDevice::createMeshletPipeline: meshlets are unsupported by the "
+      "LVK backend");
+}
+
 void LvkGPUDevice::destroyRenderPipeline(RenderPipelineHandle pipeline) {
   if (!impl_) {
     return;
@@ -2177,6 +2188,10 @@ void LvkGPUDevice::destroyComputePipeline(ComputePipelineHandle pipeline) {
     return;
   }
   impl_->computePipelines.deallocate(pipeline);
+}
+
+void LvkGPUDevice::destroyMeshletPipeline(MeshletPipelineHandle pipeline) {
+  (void)pipeline;
 }
 
 void LvkGPUDevice::destroyBuffer(BufferHandle buffer) {
@@ -2238,6 +2253,11 @@ bool LvkGPUDevice::isValid(ComputePipelineHandle h) const {
   return impl_->computePipelines.isValid(h);
 }
 
+bool LvkGPUDevice::isValid(MeshletPipelineHandle h) const {
+  (void)h;
+  return false;
+}
+
 Format LvkGPUDevice::getTextureFormat(TextureHandle h) const {
   return impl_->textures.getFormat(h);
 }
@@ -2259,6 +2279,17 @@ TextureDimensions LvkGPUDevice::getTextureDimensions(TextureHandle h) const {
 TextureCompressionCaps LvkGPUDevice::getTextureCompressionCaps() const {
   return impl_->compressionCaps;
 }
+
+bool LvkGPUDevice::supportsFeature(GPUFeature feature) const {
+  switch (feature) {
+  case GPUFeature::Meshlets:
+  case GPUFeature::RayTracingClusters:
+    return false;
+  }
+  return false;
+}
+
+MeshletLimits LvkGPUDevice::getMeshletLimits() const { return {}; }
 
 bool LvkGPUDevice::supportsSampledImageLinearFiltering(Format format) const {
   if (!impl_ || !impl_->context) {
@@ -2405,8 +2436,6 @@ void LvkGPUDevice::releaseGeometry(GeometryAllocationHandle h) {
 Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
     lvk::ICommandBuffer &commandBuffer, std::span<const RenderPass> passes,
     std::span<const PassTimingReservation> passTimings) {
-  static_assert(kMaxDependencyResources <=
-                lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES);
   if (passes.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -2423,9 +2452,12 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
              std::span<const TextureHandle> dependencyTextures,
              lvk::Dependencies &deps,
              std::string_view context) -> Result<bool, std::string> {
-    if (dependencyBuffers.size() > kMaxDependencyResources ||
-        dependencyTextures.size() > kMaxDependencyResources) {
-      return makeDependencyCountExceededError(context);
+    constexpr size_t kMaxLvkSubmitDependencies =
+        lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES;
+    if (dependencyBuffers.size() > kMaxLvkSubmitDependencies ||
+        dependencyTextures.size() > kMaxLvkSubmitDependencies) {
+      return makeDependencyCountExceededError(context,
+                                              kMaxLvkSubmitDependencies);
     }
 
     size_t bufferDstIndex = 0;
@@ -2487,6 +2519,11 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
     lvk::TextureHandle viewportTexture{};
     const bool computeOnly =
         pass.executionMode == RenderPassExecutionMode::ComputeOnly;
+    if (!pass.meshDispatches.empty()) {
+      return returnPassError(
+          "LvkGPUDevice::recordGraphicsPass: mesh dispatches are unsupported "
+          "by the LVK backend");
+    }
     if (computeOnly) {
       if (pass.hasColorAttachment || nuri::isValid(pass.colorTexture) ||
           nuri::isValid(pass.colorResolveTexture) ||
@@ -3448,8 +3485,6 @@ bool LvkGPUDevice::isSubmissionComplete(SubmissionHandle handle) const {
 Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
     std::span<const ComputeDispatchItem> dispatches) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_DISPATCH);
-  static_assert(kMaxDependencyResources <=
-                lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES);
   if (dispatches.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -3460,8 +3495,11 @@ Result<bool, std::string> LvkGPUDevice::submitComputeDispatches(
       [this](std::span<const BufferHandle> dependencyBuffers,
              lvk::Dependencies &deps,
              std::string_view context) -> Result<bool, std::string> {
-    if (dependencyBuffers.size() > kMaxDependencyResources) {
-      return makeDependencyCountExceededError(context);
+    constexpr size_t kMaxLvkSubmitDependencies =
+        lvk::Dependencies::LVK_MAX_SUBMIT_DEPENDENCIES;
+    if (dependencyBuffers.size() > kMaxLvkSubmitDependencies) {
+      return makeDependencyCountExceededError(context,
+                                              kMaxLvkSubmitDependencies);
     }
 
     size_t dstIndex = 0;

@@ -34,6 +34,14 @@ enum class OpaqueDebugVisualization : uint8_t {
   WireframeOverlay = 1,
   WireframeOnly = 2,
   TessPatchEdgesHeatmap = 3,
+  MeshletId = 4,
+  MeshletSelectedLod = 5,
+};
+
+enum class MeshletRenderMode : uint8_t {
+  Disabled = 0,
+  Opportunistic = 1,
+  Required = 2,
 };
 
 enum class TextureFilterMode : uint8_t {
@@ -532,6 +540,9 @@ struct RenderSettings {
     bool enableIndirectDraw = true;
     bool enableInstancedDraw = true;
     bool enableMeshLod = true;
+    MeshletRenderMode meshletMode = MeshletRenderMode::Disabled;
+    bool enableMeshletFrustumCulling = false;
+    bool enableMeshletConeCulling = false;
     int32_t forcedMeshLod = -1;
     glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
     bool enableInstanceAnimation = true;
@@ -2028,6 +2039,14 @@ struct OpaqueFrameMetrics {
   uint32_t debugPatchHeatmapDraws = 0;
   uint32_t computeDispatches = 0;
   uint32_t computeDispatchX = 0;
+  uint32_t meshletDispatches = 0;
+  uint32_t meshletTaskGroups = 0;
+  uint32_t meshletCandidateCount = 0;
+  uint32_t meshletModeRequired = 0;
+  uint32_t meshletModeActive = 0;
+  uint32_t meshletRejectedMissingFeature = 0;
+  uint32_t meshletRejectedMissingAssetData = 0;
+  uint32_t meshletRejectedIncompatibleFrame = 0;
   uint32_t depthPrepassDraws = 0;
   uint32_t depthPrepassIndirectDraws = 0;
   uint32_t depthPyramidLevels = 0;
@@ -2048,6 +2067,8 @@ struct ShadowFrameMetrics {
   uint32_t staticCacheReused = 0;
   uint32_t staticBatchTemplateCount = 0;
   uint32_t shadowBatchEntryCount = 0;
+  uint32_t shadowMeshletDispatchCount = 0;
+  uint32_t shadowMeshletTaskGroupCount = 0;
   uint32_t shadowInstanceRemapCount = 0;
   uint32_t staticBatchFullEmitCount = 0;
   uint32_t staticLightGridQueryCount = 0;

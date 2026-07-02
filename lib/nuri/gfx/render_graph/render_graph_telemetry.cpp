@@ -116,6 +116,8 @@ buildSummary(const RenderGraphCompileResult &compiled) {
       static_cast<uint32_t>(compiled.ownedPreDispatches.size());
   summary.ownedDrawItemCount =
       static_cast<uint32_t>(compiled.ownedDrawItems.size());
+  summary.ownedMeshDispatchItemCount =
+      static_cast<uint32_t>(compiled.ownedMeshDispatchItems.size());
   summary.resolvedPreDispatchDependencyBufferSlotCount = static_cast<uint32_t>(
       compiled.resolvedPreDispatchDependencyBuffers.size());
   summary.unresolvedPreDispatchDependencyBufferBindingCount =
@@ -310,6 +312,8 @@ void copyCompileSnapshotData(RenderGraphTelemetrySnapshot &snapshot,
   copyVector(snapshot.unresolvedPreDispatchDependencyBufferBindings,
              compiled.unresolvedPreDispatchDependencyBufferBindings);
   copyVector(snapshot.drawRangesByPass, compiled.drawRangesByPass);
+  copyVector(snapshot.meshDispatchRangesByPass,
+             compiled.meshDispatchRangesByPass);
   copyVector(snapshot.unresolvedDrawBufferBindings,
              compiled.unresolvedDrawBufferBindings);
 }
@@ -416,6 +420,7 @@ RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
       preDispatchDependencyRanges(ensureMemory(memory)),
       unresolvedPreDispatchDependencyBufferBindings(ensureMemory(memory)),
       drawRangesByPass(ensureMemory(memory)),
+      meshDispatchRangesByPass(ensureMemory(memory)),
       unresolvedDrawBufferBindings(ensureMemory(memory)) {}
 
 void RenderGraphTelemetrySnapshot::captureFrom(
@@ -464,6 +469,7 @@ void RenderGraphTelemetrySnapshot::reset() {
   preDispatchDependencyRanges.clear();
   unresolvedPreDispatchDependencyBufferBindings.clear();
   drawRangesByPass.clear();
+  meshDispatchRangesByPass.clear();
   unresolvedDrawBufferBindings.clear();
 }
 
@@ -578,6 +584,8 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
                 summary.unresolvedDependencyBufferBindingCount);
   writeKeyValue(file, "owned_pre_dispatches", summary.ownedPreDispatchCount);
   writeKeyValue(file, "owned_draw_items", summary.ownedDrawItemCount);
+  writeKeyValue(file, "owned_mesh_dispatch_items",
+                summary.ownedMeshDispatchItemCount);
   writeKeyValue(file, "resolved_pre_dispatch_dependency_buffer_slots",
                 summary.resolvedPreDispatchDependencyBufferSlotCount);
   writeKeyValue(file, "unresolved_pre_dispatch_dependency_buffer_bindings",
@@ -858,6 +866,16 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
       file, "Pass Draw Ranges", std::span{snapshot.drawRangesByPass},
       [&](uint32_t passIndex,
           const RenderGraphCompileResult::PassDrawRange &range) {
+        file << "  pass_exec[" << passIndex << "] offset=" << range.offset
+             << " count=" << range.count << "\n";
+        return true;
+      });
+
+  writeIndexedSection(
+      file, "Pass Mesh Dispatch Ranges",
+      std::span{snapshot.meshDispatchRangesByPass},
+      [&](uint32_t passIndex,
+          const RenderGraphCompileResult::PassDispatchRange &range) {
         file << "  pass_exec[" << passIndex << "] offset=" << range.offset
              << " count=" << range.count << "\n";
         return true;

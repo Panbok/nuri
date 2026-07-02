@@ -1512,12 +1512,112 @@ void optimizeVertexFetchForAllLods(
   NURI_PROFILER_ZONE_END();
 }
 
+[[nodiscard]] SubmeshLod
+appendMeshletsForLod(MeshData &data, std::span<const Vertex> vertices,
+                     std::span<const uint32_t> localIndices,
+                     const MeshImportOptions &options) {
+  SubmeshLod range{};
+  if (!options.generateMeshlets || vertices.empty() ||
+      localIndices.size() < kTriangleIndexCount) {
+    return range;
+  }
+
+  const size_t maxVertices =
+      std::clamp<size_t>(options.meshletMaxVertices, 1u, 256u);
+  const size_t maxPrimitives =
+      std::clamp<size_t>(options.meshletMaxPrimitives, 1u, 512u);
+  if (maxVertices > std::numeric_limits<uint8_t>::max() + 1u) {
+    NURI_LOG_WARNING(
+        "MeshImporter::appendMeshletsForLod: meshletMaxVertices exceeds "
+        "8-bit local primitive index range");
+    return range;
+  }
+
+  std::pmr::memory_resource *mem = data.meshlets.get_allocator().resource();
+  const size_t maxMeshlets = meshopt_buildMeshletsBound(
+      localIndices.size(), maxVertices, maxPrimitives);
+  std::pmr::vector<meshopt_Meshlet> meshlets(mem);
+  std::pmr::vector<unsigned int> meshletVertices(mem);
+  std::pmr::vector<unsigned char> meshletTriangles(mem);
+  size_t meshletCount = 0u;
+
+  NURI_PROFILER_ZONE("MeshImporter.meshopt_meshlet_generation",
+                     NURI_PROFILER_COLOR_CREATE);
+  meshlets.resize(maxMeshlets);
+  meshletVertices.resize(localIndices.size());
+  meshletTriangles.resize(localIndices.size());
+
+  meshletCount = meshopt_buildMeshlets(
+      meshlets.data(), meshletVertices.data(), meshletTriangles.data(),
+      localIndices.data(), localIndices.size(), &vertices.front().position.x,
+      vertices.size(), sizeof(Vertex), maxVertices, maxPrimitives,
+      options.meshletConeWeight);
+  NURI_PROFILER_ZONE_END();
+  if (meshletCount == 0u) {
+    return range;
+  }
+
+  const meshopt_Meshlet &lastMeshlet = meshlets[meshletCount - 1u];
+  meshletVertices.resize(lastMeshlet.vertex_offset + lastMeshlet.vertex_count);
+  meshletTriangles.resize(lastMeshlet.triangle_offset +
+                          lastMeshlet.triangle_count * 3u);
+
+  for (size_t meshletIndex = 0; meshletIndex < meshletCount; ++meshletIndex) {
+    const meshopt_Meshlet &meshlet = meshlets[meshletIndex];
+    meshopt_optimizeMeshlet(meshletVertices.data() + meshlet.vertex_offset,
+                            meshletTriangles.data() + meshlet.triangle_offset,
+                            meshlet.triangle_count, meshlet.vertex_count);
+  }
+
+  range.meshletOffset = static_cast<uint32_t>(data.meshlets.size());
+  range.meshletCount = static_cast<uint32_t>(meshletCount);
+  const uint32_t vertexStreamBase =
+      static_cast<uint32_t>(data.meshletVertexIndices.size());
+  const uint32_t primitiveStreamBase =
+      static_cast<uint32_t>(data.meshletPrimitiveIndices.size());
+  data.meshlets.reserve(data.meshlets.size() + meshletCount);
+  data.meshletVertexIndices.reserve(data.meshletVertexIndices.size() +
+                                    meshletVertices.size());
+  data.meshletPrimitiveIndices.reserve(data.meshletPrimitiveIndices.size() +
+                                       meshletTriangles.size());
+
+  for (const unsigned int vertexIndex : meshletVertices) {
+    data.meshletVertexIndices.push_back(static_cast<uint32_t>(vertexIndex));
+  }
+  for (const unsigned char primitiveIndex : meshletTriangles) {
+    data.meshletPrimitiveIndices.push_back(
+        static_cast<uint8_t>(primitiveIndex));
+  }
+
+  for (size_t meshletIndex = 0; meshletIndex < meshletCount; ++meshletIndex) {
+    const meshopt_Meshlet &meshlet = meshlets[meshletIndex];
+    const meshopt_Bounds bounds = meshopt_computeMeshletBounds(
+        meshletVertices.data() + meshlet.vertex_offset,
+        meshletTriangles.data() + meshlet.triangle_offset,
+        meshlet.triangle_count, &vertices.front().position.x, vertices.size(),
+        sizeof(Vertex));
+    data.meshlets.push_back(MeshletDescriptor{
+        .vertexOffset = vertexStreamBase + meshlet.vertex_offset,
+        .vertexCount = meshlet.vertex_count,
+        .primitiveOffset = primitiveStreamBase + meshlet.triangle_offset,
+        .primitiveCount = meshlet.triangle_count,
+        .boundsSphere = glm::vec4(bounds.center[0], bounds.center[1],
+                                  bounds.center[2], bounds.radius),
+        .coneApex = glm::vec4(bounds.cone_apex[0], bounds.cone_apex[1],
+                              bounds.cone_apex[2], 0.0f),
+        .coneAxisCutoff = glm::vec4(bounds.cone_axis[0], bounds.cone_axis[1],
+                                    bounds.cone_axis[2], bounds.cone_cutoff),
+    });
+  }
+  return range;
+}
+
 void appendSubmeshToMeshData(
     MeshData &data, const aiMesh &mesh, std::span<const Vertex> vertices,
     std::span<const VertexSkinInfluence> skinInfluences,
     std::span<const MorphTarget> morphTargets, const BoundingBox &bounds,
     const glm::vec3 &authoredScale, uint32_t sourceMaterialIndex,
-    uint32_t lodCount,
+    uint32_t lodCount, const MeshImportOptions &options,
     std::span<const std::pmr::vector<uint32_t>> lodIndexBuffers,
     const std::array<float, Submesh::kMaxLodCount> &lodErrors,
     uint32_t meshIndex) {
@@ -1553,9 +1653,13 @@ void appendSubmeshToMeshData(
 
     const uint32_t lodIndexCount =
         static_cast<uint32_t>(data.indices.size() - lodOffset);
+    const SubmeshLod meshletRange = appendMeshletsForLod(
+        data, vertices, lodIndexBuffers[lodIndex], options);
     submesh.lods[lodIndex] = SubmeshLod{
         .indexOffset = lodOffset,
         .indexCount = lodIndexCount,
+        .meshletOffset = meshletRange.meshletOffset,
+        .meshletCount = meshletRange.meshletCount,
         .error = lodErrors[lodIndex],
     };
     if (lodIndex == 0) {
@@ -1686,7 +1790,7 @@ buildSceneMeshData(const aiMesh &mesh, uint32_t sceneMeshIndex,
   const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
   appendSubmeshToMeshData(data, mesh, meshVertices, meshSkinInfluences,
                           meshMorphTargets, submeshBounds, glm::vec3(1.0f),
-                          mesh.mMaterialIndex, generatedLodCount,
+                          mesh.mMaterialIndex, generatedLodCount, options,
                           lodIndexBuffers, lodErrors, sceneMeshIndex);
   return nuri::Result<MeshData, std::string>::makeResult(std::move(data));
 }
@@ -1821,7 +1925,7 @@ buildFlattenedSceneDataFromImportedScene(std::string_view path,
     const BoundingBox submeshBounds = computeSubmeshBounds(meshVertices);
     appendSubmeshToMeshData(data, mesh, meshVertices, meshSkinInfluences,
                             meshMorphTargets, submeshBounds, authoredScale,
-                            sourceMaterialIndex, generatedLodCount,
+                            sourceMaterialIndex, generatedLodCount, options,
                             lodIndexBuffers, lodErrors, sourceSceneMeshIndex);
   };
 

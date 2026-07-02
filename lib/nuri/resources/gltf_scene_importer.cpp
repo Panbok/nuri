@@ -83,12 +83,19 @@ GltfSceneImporter::loadLightsFromFile(std::string_view path) {
 Result<ScenePrefab, std::string>
 GltfSceneImporter::loadScenePrefabFromFile(std::string_view path,
                                            std::pmr::memory_resource *memory) {
+  return loadScenePrefabFromFile(path, SceneImportOptions{}, memory);
+}
+
+Result<ScenePrefab, std::string>
+GltfSceneImporter::loadScenePrefabFromFile(std::string_view path,
+                                           const SceneImportOptions &options,
+                                           std::pmr::memory_resource *memory) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
   if (!detail::isGltfJsonAssetPath(path)) {
     return Result<ScenePrefab, std::string>::makeError(
         "GltfSceneImporter::loadScenePrefabFromFile: path is not .gltf/.glb");
   }
-  return SceneImporter::loadScenePrefabFromFile(path, {}, memory);
+  return SceneImporter::loadScenePrefabFromFile(path, options, memory);
 }
 
 } // namespace nuri

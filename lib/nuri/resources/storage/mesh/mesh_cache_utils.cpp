@@ -9,7 +9,7 @@ namespace {
 
 constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
-constexpr uint32_t kMeshCacheContentVersion = 10u;
+constexpr uint32_t kMeshCacheContentVersion = 11u;
 
 void fnv1aAddByte(uint64_t &hash, uint8_t byte) {
   hash ^= byte;
@@ -66,7 +66,11 @@ uint64_t hashMeshImportOptions(const MeshImportOptions &options) {
   addBool(options.limitBoneWeights);
   addBool(options.optimize);
   addBool(options.generateLods);
+  addBool(options.generateMeshlets);
   fnv1aAddPod(hash, options.lodCount);
+  fnv1aAddPod(hash, options.meshletMaxVertices);
+  fnv1aAddPod(hash, options.meshletMaxPrimitives);
+  fnv1aAddPod(hash, std::bit_cast<uint32_t>(options.meshletConeWeight));
   const uint32_t lodRatioCount =
       static_cast<uint32_t>(options.lodTriangleRatios.size());
   fnv1aAddPod(hash, lodRatioCount);

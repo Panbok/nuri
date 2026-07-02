@@ -10,11 +10,12 @@
 
 namespace nuri {
 
-// Buffer dependency spans are capped to match LVK submit dependency storage.
-// Texture dependencies can be much larger for bindless material passes; NVRHI
-// consumes them as state-transition spans instead of fixed submit arrays.
-constexpr size_t kMaxDependencyResources = 12;
+// Buffer dependency spans are capped for graph payload size. LVK has a smaller
+// backend submit array and validates that cap when recording LVK passes; NVRHI
+// consumes these as state-transition spans.
+constexpr size_t kMaxDependencyResources = 32;
 constexpr size_t kMaxDependencyBuffers = kMaxDependencyResources;
+constexpr size_t kMaxMeshDispatchDependencyResources = 4096;
 constexpr size_t kMaxDependencyTextures = 1024;
 
 struct Viewport {
@@ -380,6 +381,38 @@ struct DrawItem {
   uint32_t debugColor = 0xffffffffu;
 };
 
+enum class MeshDispatchCommandType : uint8_t {
+  Direct,
+  Indirect,
+  IndirectCount,
+};
+
+struct MeshDispatchItem {
+  MeshDispatchCommandType command = MeshDispatchCommandType::Direct;
+  MeshletPipelineHandle pipeline{};
+  BufferHandle indirectBuffer{};
+  uint64_t indirectBufferOffset = 0;
+  BufferHandle indirectCountBuffer{};
+  uint64_t indirectCountBufferOffset = 0;
+  uint32_t indirectDispatchCount = 0;
+  uint32_t groupsX = 1;
+  uint32_t groupsY = 1;
+  uint32_t groupsZ = 1;
+  bool useScissor = false;
+  RectU32 scissor{};
+  bool useDepthState = false;
+  DepthState depthState{};
+  bool depthBiasEnable = false;
+  float depthBiasConstant = 0.0f;
+  float depthBiasSlope = 0.0f;
+  float depthBiasClamp = 0.0f;
+  std::span<const std::byte> pushConstants{};
+  std::span<const BufferHandle> dependencyBuffers{};
+  std::span<const TextureHandle> dependencyTextures{};
+  std::string_view debugLabel{};
+  uint32_t debugColor = 0xffffffffu;
+};
+
 enum class RenderPassExecutionMode : uint8_t {
   Graphics = 0,
   ComputeOnly = 1,
@@ -400,6 +433,7 @@ struct RenderPass {
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const TextureHandle> dependencyTextures{};
   std::span<const DrawItem> draws{};
+  std::span<const MeshDispatchItem> meshDispatches{};
   bool drawBuffersPreResolved = false;
   GpuTimingScope gpuTimingScope = GpuTimingScope::None;
   std::string_view debugLabel{};

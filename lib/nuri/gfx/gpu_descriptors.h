@@ -11,6 +11,7 @@ struct BufferDesc {
   Storage storage = Storage::Device;
   size_t size = 0;
   std::span<const std::byte> data{};
+  bool immutable = false;
 };
 
 struct TextureDesc {
@@ -71,6 +72,22 @@ struct RenderPipelineDesc {
 
 struct ComputePipelineDesc {
   ShaderHandle computeShader{};
+  SpecializationInfo specInfo{};
+};
+
+struct MeshletPipelineDesc {
+  ShaderHandle taskShader{};
+  ShaderHandle meshShader{};
+  ShaderHandle fragmentShader{};
+  std::vector<Format> colorFormats{Format::RGBA8_UNORM};
+  uint32_t colorAttachmentCount = 1;
+  Format depthFormat = Format::Count;
+  CullMode cullMode = CullMode::Back;
+  PolygonMode polygonMode = PolygonMode::Fill;
+  uint32_t numSamples = 1u;
+  float minSampleShading = 0.0f;
+  bool alphaToCoverageEnabled = false;
+  bool blendEnabled = false;
   SpecializationInfo specInfo{};
 };
 

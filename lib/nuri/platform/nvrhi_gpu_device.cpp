@@ -17,7 +17,6 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <glslang/Include/glslang_c_interface.h>
-#include <lvk/LVK.h>
 #include <nvrhi/nvrhi.h>
 #include <nvrhi/vulkan.h>
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
@@ -28,7 +27,6 @@
 #include <bit>
 #include <cctype>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <format>
@@ -50,13 +48,6 @@
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
-namespace lvk {
-glslang_resource_t getGlslangResource(const VkPhysicalDeviceLimits &limits);
-Result compileShaderGlslang(lvk::ShaderStage stage, const char *code,
-                            std::vector<uint8_t> *outSPIRV,
-                            const glslang_resource_t *glslLangResource);
-} // namespace lvk
-
 namespace nuri {
 namespace {
 
@@ -65,7 +56,75 @@ constexpr uint32_t kSwapchainFramesInFlight = 2u;
 constexpr uint32_t kBindlessCapacity = 4096u;
 constexpr uint32_t kMaxNvrhiGpuTimerQueries = 2048u;
 constexpr size_t kPushConstantByteSize = 128u;
+constexpr uint32_t kDefaultMeshletMaxVertices = 64u;
+constexpr uint32_t kDefaultMeshletMaxPrimitives = 124u;
 constexpr std::array<uint8_t, 4> kSupportedAnisotropyLevels = {2u, 4u, 8u, 16u};
+constexpr uint16_t kSpvOpExecutionMode = 16u;
+constexpr uint16_t kSpvOpConstant = 43u;
+constexpr uint16_t kSpvOpSpecConstant = 50u;
+constexpr uint16_t kSpvOpExecutionModeId = 331u;
+constexpr uint32_t kSpvExecutionModeLocalSize = 17u;
+constexpr uint32_t kSpvExecutionModeLocalSizeId = 38u;
+constexpr size_t kSpvHeaderWordCount = 5u;
+
+[[nodiscard]] bool normalizeSpirvLocalSizeId(std::vector<uint8_t> &spirv) {
+  if (spirv.size() % sizeof(uint32_t) != 0u ||
+      spirv.size() < kSpvHeaderWordCount * sizeof(uint32_t)) {
+    return false;
+  }
+
+  std::vector<uint32_t> words(spirv.size() / sizeof(uint32_t));
+  std::memcpy(words.data(), spirv.data(), spirv.size());
+
+  std::unordered_map<uint32_t, uint32_t> scalarConstants;
+  for (size_t wordIndex = kSpvHeaderWordCount; wordIndex < words.size();) {
+    const uint32_t instruction = words[wordIndex];
+    const uint16_t wordCount = static_cast<uint16_t>(instruction >> 16u);
+    const uint16_t opcode = static_cast<uint16_t>(instruction & 0xffffu);
+    if (wordCount == 0u || wordIndex + wordCount > words.size()) {
+      return false;
+    }
+
+    if ((opcode == kSpvOpConstant || opcode == kSpvOpSpecConstant) &&
+        wordCount >= 4u) {
+      scalarConstants[words[wordIndex + 2u]] = words[wordIndex + 3u];
+    }
+    wordIndex += wordCount;
+  }
+
+  bool changed = false;
+  for (size_t wordIndex = kSpvHeaderWordCount; wordIndex < words.size();) {
+    const uint32_t instruction = words[wordIndex];
+    const uint16_t wordCount = static_cast<uint16_t>(instruction >> 16u);
+    const uint16_t opcode = static_cast<uint16_t>(instruction & 0xffffu);
+    if (wordCount == 0u || wordIndex + wordCount > words.size()) {
+      return false;
+    }
+
+    if (opcode == kSpvOpExecutionModeId && wordCount == 6u &&
+        words[wordIndex + 2u] == kSpvExecutionModeLocalSizeId) {
+      const auto x = scalarConstants.find(words[wordIndex + 3u]);
+      const auto y = scalarConstants.find(words[wordIndex + 4u]);
+      const auto z = scalarConstants.find(words[wordIndex + 5u]);
+      if (x != scalarConstants.end() && y != scalarConstants.end() &&
+          z != scalarConstants.end()) {
+        words[wordIndex] =
+            (static_cast<uint32_t>(wordCount) << 16u) | kSpvOpExecutionMode;
+        words[wordIndex + 2u] = kSpvExecutionModeLocalSize;
+        words[wordIndex + 3u] = x->second;
+        words[wordIndex + 4u] = y->second;
+        words[wordIndex + 5u] = z->second;
+        changed = true;
+      }
+    }
+    wordIndex += wordCount;
+  }
+
+  if (changed) {
+    std::memcpy(spirv.data(), words.data(), spirv.size());
+  }
+  return changed;
+}
 
 template <typename HandleType>
 [[nodiscard]] constexpr bool areSameHandle(HandleType a, HandleType b) {
@@ -420,40 +479,287 @@ toNvrhiAddressMode(SamplerWrapMode mode) {
   return nvrhi::ShaderType::None;
 }
 
-[[nodiscard]] lvk::ShaderStage toLvkShaderStage(ShaderStage stage) {
+[[nodiscard]] glslang_stage_t toGlslangStage(ShaderStage stage) {
   switch (stage) {
   case ShaderStage::Vertex:
-    return lvk::ShaderStage::Stage_Vert;
+    return GLSLANG_STAGE_VERTEX;
   case ShaderStage::TessControl:
-    return lvk::ShaderStage::Stage_Tesc;
+    return GLSLANG_STAGE_TESSCONTROL;
   case ShaderStage::TessEval:
-    return lvk::ShaderStage::Stage_Tese;
+    return GLSLANG_STAGE_TESSEVALUATION;
   case ShaderStage::Geometry:
-    return lvk::ShaderStage::Stage_Geom;
+    return GLSLANG_STAGE_GEOMETRY;
   case ShaderStage::Fragment:
-    return lvk::ShaderStage::Stage_Frag;
+    return GLSLANG_STAGE_FRAGMENT;
   case ShaderStage::Compute:
-    return lvk::ShaderStage::Stage_Comp;
+    return GLSLANG_STAGE_COMPUTE;
   case ShaderStage::Task:
-    return lvk::ShaderStage::Stage_Task;
+    return GLSLANG_STAGE_TASK;
   case ShaderStage::Mesh:
-    return lvk::ShaderStage::Stage_Mesh;
+    return GLSLANG_STAGE_MESH;
   case ShaderStage::RayGen:
-    return lvk::ShaderStage::Stage_RayGen;
+    return GLSLANG_STAGE_RAYGEN;
   case ShaderStage::AnyHit:
-    return lvk::ShaderStage::Stage_AnyHit;
+    return GLSLANG_STAGE_ANYHIT;
   case ShaderStage::ClosestHit:
-    return lvk::ShaderStage::Stage_ClosestHit;
+    return GLSLANG_STAGE_CLOSESTHIT;
   case ShaderStage::Miss:
-    return lvk::ShaderStage::Stage_Miss;
+    return GLSLANG_STAGE_MISS;
   case ShaderStage::Intersection:
-    return lvk::ShaderStage::Stage_Intersection;
+    return GLSLANG_STAGE_INTERSECT;
   case ShaderStage::Callable:
-    return lvk::ShaderStage::Stage_Callable;
+    return GLSLANG_STAGE_CALLABLE;
   case ShaderStage::Count:
     break;
   }
-  return lvk::ShaderStage::Stage_Vert;
+  return GLSLANG_STAGE_VERTEX;
+}
+
+[[nodiscard]] glslang_resource_t
+makeGlslangResource(const VkPhysicalDeviceLimits &limits) {
+  const glslang_resource_t resource{
+      .max_lights = 32,
+      .max_clip_planes = static_cast<int>(limits.maxClipDistances),
+      .max_texture_units = 32,
+      .max_texture_coords = 32,
+      .max_vertex_attribs = static_cast<int>(limits.maxVertexInputAttributes),
+      .max_vertex_uniform_components =
+          static_cast<int>(limits.maxUniformBufferRange / 4u),
+      .max_varying_floats = static_cast<int>(std::min(
+          limits.maxVertexOutputComponents, limits.maxFragmentInputComponents)),
+      .max_vertex_texture_image_units = 32,
+      .max_combined_texture_image_units = 80,
+      .max_texture_image_units = 32,
+      .max_fragment_uniform_components = 4096,
+      .max_draw_buffers = 32,
+      .max_vertex_uniform_vectors = 128,
+      .max_varying_vectors = 8,
+      .max_fragment_uniform_vectors = 16,
+      .max_vertex_output_vectors =
+          static_cast<int>(limits.maxVertexOutputComponents / 4u),
+      .max_fragment_input_vectors =
+          static_cast<int>(limits.maxFragmentInputComponents / 4u),
+      .min_program_texel_offset = limits.minTexelOffset,
+      .max_program_texel_offset = static_cast<int>(limits.maxTexelOffset),
+      .max_clip_distances = static_cast<int>(limits.maxClipDistances),
+      .max_compute_work_group_count_x =
+          static_cast<int>(limits.maxComputeWorkGroupCount[0]),
+      .max_compute_work_group_count_y =
+          static_cast<int>(limits.maxComputeWorkGroupCount[1]),
+      .max_compute_work_group_count_z =
+          static_cast<int>(limits.maxComputeWorkGroupCount[2]),
+      .max_compute_work_group_size_x =
+          static_cast<int>(limits.maxComputeWorkGroupSize[0]),
+      .max_compute_work_group_size_y =
+          static_cast<int>(limits.maxComputeWorkGroupSize[1]),
+      .max_compute_work_group_size_z =
+          static_cast<int>(limits.maxComputeWorkGroupSize[2]),
+      .max_compute_uniform_components = 1024,
+      .max_compute_texture_image_units = 16,
+      .max_compute_image_uniforms = 8,
+      .max_compute_atomic_counters = 8,
+      .max_compute_atomic_counter_buffers = 1,
+      .max_varying_components = 60,
+      .max_vertex_output_components =
+          static_cast<int>(limits.maxVertexOutputComponents),
+      .max_geometry_input_components =
+          static_cast<int>(limits.maxGeometryInputComponents),
+      .max_geometry_output_components =
+          static_cast<int>(limits.maxGeometryOutputComponents),
+      .max_fragment_input_components =
+          static_cast<int>(limits.maxFragmentInputComponents),
+      .max_image_units = 8,
+      .max_combined_image_units_and_fragment_outputs = 8,
+      .max_combined_shader_output_resources = 8,
+      .max_image_samples = 0,
+      .max_vertex_image_uniforms = 0,
+      .max_tess_control_image_uniforms = 0,
+      .max_tess_evaluation_image_uniforms = 0,
+      .max_geometry_image_uniforms = 0,
+      .max_fragment_image_uniforms = 8,
+      .max_combined_image_uniforms = 8,
+      .max_geometry_texture_image_units = 16,
+      .max_geometry_output_vertices =
+          static_cast<int>(limits.maxGeometryOutputVertices),
+      .max_geometry_total_output_components =
+          static_cast<int>(limits.maxGeometryTotalOutputComponents),
+      .max_geometry_uniform_components = 1024,
+      .max_geometry_varying_components = 64,
+      .max_tess_control_input_components = static_cast<int>(
+          limits.maxTessellationControlPerVertexInputComponents),
+      .max_tess_control_output_components = static_cast<int>(
+          limits.maxTessellationControlPerVertexOutputComponents),
+      .max_tess_control_texture_image_units = 16,
+      .max_tess_control_uniform_components = 1024,
+      .max_tess_control_total_output_components = 4096,
+      .max_tess_evaluation_input_components =
+          static_cast<int>(limits.maxTessellationEvaluationInputComponents),
+      .max_tess_evaluation_output_components =
+          static_cast<int>(limits.maxTessellationEvaluationOutputComponents),
+      .max_tess_evaluation_texture_image_units = 16,
+      .max_tess_evaluation_uniform_components = 1024,
+      .max_tess_patch_components = 120,
+      .max_patch_vertices = 32,
+      .max_tess_gen_level = 64,
+      .max_viewports = static_cast<int>(limits.maxViewports),
+      .max_vertex_atomic_counters = 0,
+      .max_tess_control_atomic_counters = 0,
+      .max_tess_evaluation_atomic_counters = 0,
+      .max_geometry_atomic_counters = 0,
+      .max_fragment_atomic_counters = 8,
+      .max_combined_atomic_counters = 8,
+      .max_atomic_counter_bindings = 1,
+      .max_vertex_atomic_counter_buffers = 0,
+      .max_tess_control_atomic_counter_buffers = 0,
+      .max_tess_evaluation_atomic_counter_buffers = 0,
+      .max_geometry_atomic_counter_buffers = 0,
+      .max_fragment_atomic_counter_buffers = 1,
+      .max_combined_atomic_counter_buffers = 1,
+      .max_atomic_counter_buffer_size = 16384,
+      .max_transform_feedback_buffers = 4,
+      .max_transform_feedback_interleaved_components = 64,
+      .max_cull_distances = static_cast<int>(limits.maxCullDistances),
+      .max_combined_clip_and_cull_distances =
+          static_cast<int>(limits.maxCombinedClipAndCullDistances),
+      .max_samples = 4,
+      .max_mesh_output_vertices_nv = 256,
+      .max_mesh_output_primitives_nv = 512,
+      .max_mesh_work_group_size_x_nv = 32,
+      .max_mesh_work_group_size_y_nv = 1,
+      .max_mesh_work_group_size_z_nv = 1,
+      .max_task_work_group_size_x_nv = 32,
+      .max_task_work_group_size_y_nv = 1,
+      .max_task_work_group_size_z_nv = 1,
+      .max_mesh_view_count_nv = 4,
+      .max_mesh_output_vertices_ext = 256,
+      .max_mesh_output_primitives_ext = 512,
+      .max_mesh_work_group_size_x_ext = 32,
+      .max_mesh_work_group_size_y_ext = 1,
+      .max_mesh_work_group_size_z_ext = 1,
+      .max_task_work_group_size_x_ext = 32,
+      .max_task_work_group_size_y_ext = 1,
+      .max_task_work_group_size_z_ext = 1,
+      .max_mesh_view_count_ext = 4,
+      .maxDualSourceDrawBuffersEXT = 1,
+      .limits =
+          {
+              .non_inductive_for_loops = true,
+              .while_loops = true,
+              .do_while_loops = true,
+              .general_uniform_indexing = true,
+              .general_attribute_matrix_vector_indexing = true,
+              .general_varying_indexing = true,
+              .general_sampler_indexing = true,
+              .general_variable_indexing = true,
+              .general_constant_matrix_vector_indexing = true,
+          },
+  };
+  return resource;
+}
+
+void appendGlslangLog(std::string &message, std::string_view label,
+                      const char *log) {
+  if (log == nullptr || log[0] == '\0') {
+    return;
+  }
+  message += "\n";
+  message += label;
+  message += ": ";
+  message += log;
+}
+
+[[nodiscard]] Result<std::vector<uint8_t>, std::string>
+compileGlslToSpirv(ShaderStage stage, const char *code,
+                   const glslang_resource_t &resource) {
+  const glslang_input_t input{
+      .language = GLSLANG_SOURCE_GLSL,
+      .stage = toGlslangStage(stage),
+      .client = GLSLANG_CLIENT_VULKAN,
+      .client_version = GLSLANG_TARGET_VULKAN_1_3,
+      .target_language = GLSLANG_TARGET_SPV,
+      .target_language_version = GLSLANG_TARGET_SPV_1_6,
+      .code = code,
+      .default_version = 100,
+      .default_profile = GLSLANG_NO_PROFILE,
+      .force_default_version_and_profile = false,
+      .forward_compatible = false,
+      .messages = GLSLANG_MSG_DEFAULT_BIT,
+      .resource = &resource,
+  };
+
+  glslang_shader_t *shader = glslang_shader_create(&input);
+  if (shader == nullptr) {
+    return Result<std::vector<uint8_t>, std::string>::makeError(
+        "glslang_shader_create() failed");
+  }
+  std::unique_ptr<glslang_shader_t, decltype(&glslang_shader_delete)>
+      shaderGuard(shader, glslang_shader_delete);
+
+  if (!glslang_shader_preprocess(shader, &input)) {
+    std::string message = "glslang_shader_preprocess() failed";
+    appendGlslangLog(message, "info", glslang_shader_get_info_log(shader));
+    appendGlslangLog(message, "debug",
+                     glslang_shader_get_info_debug_log(shader));
+    return Result<std::vector<uint8_t>, std::string>::makeError(
+        std::move(message));
+  }
+
+  if (!glslang_shader_parse(shader, &input)) {
+    std::string message = "glslang_shader_parse() failed";
+    appendGlslangLog(message, "info", glslang_shader_get_info_log(shader));
+    appendGlslangLog(message, "debug",
+                     glslang_shader_get_info_debug_log(shader));
+    return Result<std::vector<uint8_t>, std::string>::makeError(
+        std::move(message));
+  }
+
+  glslang_program_t *program = glslang_program_create();
+  if (program == nullptr) {
+    return Result<std::vector<uint8_t>, std::string>::makeError(
+        "glslang_program_create() failed");
+  }
+  std::unique_ptr<glslang_program_t, decltype(&glslang_program_delete)>
+      programGuard(program, glslang_program_delete);
+
+  glslang_program_add_shader(program, shader);
+  if (!glslang_program_link(program, GLSLANG_MSG_SPV_RULES_BIT |
+                                         GLSLANG_MSG_VULKAN_RULES_BIT)) {
+    std::string message = "glslang_program_link() failed";
+    appendGlslangLog(message, "info", glslang_program_get_info_log(program));
+    appendGlslangLog(message, "debug",
+                     glslang_program_get_info_debug_log(program));
+    return Result<std::vector<uint8_t>, std::string>::makeError(
+        std::move(message));
+  }
+
+  glslang_spv_options_t options{
+      .generate_debug_info = true,
+      .strip_debug_info = false,
+      .disable_optimizer = false,
+      .optimize_size = true,
+      .disassemble = false,
+      .validate = true,
+      .emit_nonsemantic_shader_debug_info = false,
+      .emit_nonsemantic_shader_debug_source = false,
+  };
+  glslang_program_SPIRV_generate_with_options(program, input.stage, &options);
+  if (const char *messages = glslang_program_SPIRV_get_messages(program);
+      messages != nullptr && messages[0] != '\0') {
+    NURI_LOG_WARNING("glslang SPIR-V generation: %s", messages);
+  }
+
+  const auto *spirv =
+      reinterpret_cast<const uint8_t *>(glslang_program_SPIRV_get_ptr(program));
+  const size_t numBytes =
+      glslang_program_SPIRV_get_size(program) * sizeof(uint32_t);
+  if (spirv == nullptr || numBytes == 0u) {
+    return Result<std::vector<uint8_t>, std::string>::makeError(
+        "glslang produced an empty SPIR-V module");
+  }
+
+  std::vector<uint8_t> bytes(spirv, spirv + numBytes);
+  return Result<std::vector<uint8_t>, std::string>::makeResult(
+      std::move(bytes));
 }
 
 [[nodiscard]] nvrhi::Format toNvrhiIndexFormat(IndexFormat format) {
@@ -609,6 +915,22 @@ toNvrhiBufferState(GraphicsBarrierState state,
   }
 }
 
+[[nodiscard]] nvrhi::ResourceStates
+permanentReadBufferState(BufferUsage usage) {
+  nvrhi::ResourceStates state = nvrhi::ResourceStates::ShaderResource |
+                                nvrhi::ResourceStates::VertexBuffer |
+                                nvrhi::ResourceStates::IndexBuffer |
+                                nvrhi::ResourceStates::IndirectArgument;
+  if (hasBufferUsage(usage, BufferUsage::Uniform)) {
+    state = state | nvrhi::ResourceStates::ConstantBuffer;
+  }
+  return state;
+}
+
+[[nodiscard]] bool usesPermanentReadState(const BufferDesc &desc) {
+  return desc.immutable && desc.storage == Storage::Device;
+}
+
 [[nodiscard]] nvrhi::Color toNvrhiColor(const ClearColor &color) {
   return nvrhi::Color(color.r, color.g, color.b, color.a);
 }
@@ -632,8 +954,8 @@ toNvrhiBufferState(GraphicsBarrierState state,
                      static_cast<int>(viewport.y + viewport.height));
 }
 
-[[nodiscard]] std::string patchLvkGlslPrelude(ShaderStage stage,
-                                              std::string_view source) {
+[[nodiscard]] std::string patchGlslPrelude(ShaderStage stage,
+                                           std::string_view source) {
   if (source.find("#version ") != std::string_view::npos) {
     return std::string(source);
   }
@@ -798,6 +1120,7 @@ struct BufferResource {
   std::byte *mapped = nullptr;
   VkDeviceMemory mappedMemory = VK_NULL_HANDLE;
   bool hostVisible = false;
+  bool immutable = false;
 };
 
 struct TextureResource {
@@ -862,6 +1185,16 @@ struct RenderPipelineResource {
 struct ComputePipelineResource {
   nvrhi::ComputePipelineHandle pipeline{};
   nvrhi::ShaderHandle specializedShader{};
+  std::string debugName;
+};
+
+struct MeshletPipelineResource {
+  nvrhi::MeshletPipelineDesc baseDesc{};
+  nvrhi::FramebufferInfo framebufferInfo{};
+  std::vector<nvrhi::ShaderHandle> specializedShaders;
+  std::unordered_map<PipelineVariantKey, nvrhi::MeshletPipelineHandle,
+                     PipelineVariantKeyHasher>
+      variants;
   std::string debugName;
 };
 
@@ -1015,6 +1348,7 @@ struct NvrhiGPUDeviceImpl {
   NvrhiLogCallback nvrhiLog{};
   bool renderDocAttached = false;
   bool validationEnabled = false;
+  bool glslangInitialized = false;
   uint64_t currentFrameIndex = 0u;
   uint64_t submittedFrameCount = 0u;
   uint32_t preparedSwapchainImageIndex = 0u;
@@ -1035,6 +1369,7 @@ struct NvrhiGPUDeviceImpl {
   std::vector<VkSemaphore> imageAvailableSemaphores;
   std::vector<VkSemaphore> renderFinishedSemaphores;
   std::vector<uint64_t> frameSemaphoreReuseWaitInstances;
+  std::vector<uint64_t> frameResourceReuseWaitInstances;
   std::vector<uint64_t> swapchainImageReuseWaitInstances;
   uint32_t semaphoreFrameIndex = 0u;
   uint64_t preparedSwapchainImageWaitInstance = 0u;
@@ -1056,6 +1391,10 @@ struct NvrhiGPUDeviceImpl {
   uint8_t maxSamplerAnisotropy = 1u;
   float maxSamplerLodBias = 0.0f;
   bool supportsDrawIndirectCount = false;
+  bool meshletExtensionEnabled = false;
+  bool meshletFeaturesEnabled = false;
+  bool meshletsSupported = false;
+  MeshletLimits meshletLimits{};
 
   ResourceTable<SamplerHandle, ResourceSlot<nvrhi::SamplerHandle>> samplers;
   SamplerHandle cubemapSampler{};
@@ -1069,6 +1408,8 @@ struct NvrhiGPUDeviceImpl {
   ResourceTable<RenderPipelineHandle, RenderPipelineResource> renderPipelines;
   ResourceTable<ComputePipelineHandle, ComputePipelineResource>
       computePipelines;
+  ResourceTable<MeshletPipelineHandle, MeshletPipelineResource>
+      meshletPipelines;
   std::vector<FramebufferTexture> framebufferTextures;
 
   mutable std::mutex immediateMutex;
@@ -1413,6 +1754,66 @@ void collectCompletedBackgroundCopySubmissions(Impl &impl) {
                      });
 }
 
+[[nodiscard]] MeshletLimits
+toMeshletLimits(const VkPhysicalDeviceMeshShaderPropertiesEXT &props) {
+  MeshletLimits limits{};
+  limits.maxTaskWorkGroupTotalCount = props.maxTaskWorkGroupTotalCount;
+  limits.maxTaskWorkGroupInvocations = props.maxTaskWorkGroupInvocations;
+  limits.maxTaskWorkGroupSizeX = props.maxTaskWorkGroupSize[0];
+  limits.maxTaskWorkGroupSizeY = props.maxTaskWorkGroupSize[1];
+  limits.maxTaskWorkGroupSizeZ = props.maxTaskWorkGroupSize[2];
+  limits.maxTaskWorkGroupCountX = props.maxTaskWorkGroupCount[0];
+  limits.maxTaskWorkGroupCountY = props.maxTaskWorkGroupCount[1];
+  limits.maxTaskWorkGroupCountZ = props.maxTaskWorkGroupCount[2];
+  limits.maxTaskPayloadBytes = props.maxTaskPayloadSize;
+  limits.maxTaskSharedMemoryBytes = props.maxTaskSharedMemorySize;
+  limits.maxTaskPayloadAndSharedMemoryBytes =
+      props.maxTaskPayloadAndSharedMemorySize;
+  limits.maxMeshWorkGroupTotalCount = props.maxMeshWorkGroupTotalCount;
+  limits.maxMeshWorkGroupInvocations = props.maxMeshWorkGroupInvocations;
+  limits.maxMeshWorkGroupSizeX = props.maxMeshWorkGroupSize[0];
+  limits.maxMeshWorkGroupSizeY = props.maxMeshWorkGroupSize[1];
+  limits.maxMeshWorkGroupSizeZ = props.maxMeshWorkGroupSize[2];
+  limits.maxMeshWorkGroupCountX = props.maxMeshWorkGroupCount[0];
+  limits.maxMeshWorkGroupCountY = props.maxMeshWorkGroupCount[1];
+  limits.maxMeshWorkGroupCountZ = props.maxMeshWorkGroupCount[2];
+  limits.maxMeshSharedMemoryBytes = props.maxMeshSharedMemorySize;
+  limits.maxMeshPayloadAndSharedMemoryBytes =
+      props.maxMeshPayloadAndSharedMemorySize;
+  limits.maxMeshOutputMemoryBytes = props.maxMeshOutputMemorySize;
+  limits.maxMeshPayloadAndOutputMemoryBytes =
+      props.maxMeshPayloadAndOutputMemorySize;
+  limits.maxMeshOutputComponents = props.maxMeshOutputComponents;
+  limits.meshOutputPerVertexGranularity = props.meshOutputPerVertexGranularity;
+  limits.meshOutputPerPrimitiveGranularity =
+      props.meshOutputPerPrimitiveGranularity;
+  limits.maxMeshOutputVertices = props.maxMeshOutputVertices;
+  limits.maxMeshOutputPrimitives = props.maxMeshOutputPrimitives;
+  limits.maxMeshOutputLayers = props.maxMeshOutputLayers;
+  limits.maxPreferredTaskWorkGroupInvocations =
+      props.maxPreferredTaskWorkGroupInvocations;
+  limits.maxPreferredMeshWorkGroupInvocations =
+      props.maxPreferredMeshWorkGroupInvocations;
+  limits.prefersLocalInvocationVertexOutput =
+      props.prefersLocalInvocationVertexOutput == VK_TRUE;
+  limits.prefersLocalInvocationPrimitiveOutput =
+      props.prefersLocalInvocationPrimitiveOutput == VK_TRUE;
+  limits.prefersCompactVertexOutput =
+      props.prefersCompactVertexOutput == VK_TRUE;
+  limits.prefersCompactPrimitiveOutput =
+      props.prefersCompactPrimitiveOutput == VK_TRUE;
+  return limits;
+}
+
+[[nodiscard]] bool meshletLimitsSupportDefaults(const MeshletLimits &limits) {
+  return limits.maxMeshOutputVertices >= kDefaultMeshletMaxVertices &&
+         limits.maxMeshOutputPrimitives >= kDefaultMeshletMaxPrimitives &&
+         limits.maxMeshWorkGroupInvocations != 0u &&
+         limits.maxTaskWorkGroupInvocations != 0u &&
+         limits.maxMeshWorkGroupSizeX != 0u &&
+         limits.maxTaskWorkGroupSizeX != 0u && limits.maxTaskPayloadBytes != 0u;
+}
+
 VKAPI_ATTR VkBool32 VKAPI_CALL nvrhiDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     VkDebugUtilsMessageTypeFlagsEXT,
@@ -1481,6 +1882,12 @@ void destroyDebugMessenger(Impl &impl) {
     return Result<bool, std::string>::makeError(
         vkError("NvrhiGPUDevice::createInstance volkInitialize", volkResult));
   }
+  if (glslang_initialize_process() == 0) {
+    return Result<bool, std::string>::makeError(
+        "NvrhiGPUDevice::createInstance glslang_initialize_process failed");
+  }
+  impl.glslangInitialized = true;
+
   uint32_t glfwExtensionCount = 0u;
   const char **glfwExtensions =
       glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
@@ -1717,11 +2124,38 @@ void destroyDebugMessenger(Impl &impl) {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
       .pNext = &supported13,
   };
-  VkPhysicalDeviceFeatures2 supported2{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+  VkPhysicalDeviceMeshShaderFeaturesEXT supportedMesh{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
       .pNext = &supported12,
   };
+  VkPhysicalDeviceFeatures2 supported2{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &supportedMesh,
+  };
   vkGetPhysicalDeviceFeatures2(impl.physicalDevice, &supported2);
+
+  impl.meshletExtensionEnabled = false;
+  impl.meshletFeaturesEnabled = false;
+  impl.meshletsSupported = false;
+  impl.meshletLimits = {};
+  const bool meshShaderExtensionPresent = hasDeviceExtension(
+      impl.physicalDevice, VK_EXT_MESH_SHADER_EXTENSION_NAME);
+  const bool meshShaderFeaturesPresent = supportedMesh.taskShader == VK_TRUE &&
+                                         supportedMesh.meshShader == VK_TRUE &&
+                                         supported13.maintenance4 == VK_TRUE;
+  const bool enableMeshShaderExtension =
+      meshShaderExtensionPresent && meshShaderFeaturesPresent;
+  if (enableMeshShaderExtension) {
+    VkPhysicalDeviceMeshShaderPropertiesEXT meshProps{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT,
+    };
+    VkPhysicalDeviceProperties2 props2{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &meshProps,
+    };
+    vkGetPhysicalDeviceProperties2(impl.physicalDevice, &props2);
+    impl.meshletLimits = toMeshletLimits(meshProps);
+  }
 
   VkPhysicalDeviceVulkan13Features enabled13{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -1729,6 +2163,7 @@ void destroyDebugMessenger(Impl &impl) {
   enabled13.synchronization2 = VK_TRUE;
   enabled13.dynamicRendering = VK_TRUE;
   enabled13.shaderDemoteToHelperInvocation = VK_TRUE;
+  enabled13.maintenance4 = supported13.maintenance4;
 
   VkPhysicalDeviceVulkan12Features enabled12{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -1748,9 +2183,18 @@ void destroyDebugMessenger(Impl &impl) {
   enabled12.runtimeDescriptorArray = VK_TRUE;
   enabled12.timelineSemaphore = VK_TRUE;
   enabled12.bufferDeviceAddress = VK_TRUE;
+  VkPhysicalDeviceMeshShaderFeaturesEXT enabledMesh{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+      .pNext = &enabled12,
+  };
+  if (enableMeshShaderExtension) {
+    enabledMesh.taskShader = VK_TRUE;
+    enabledMesh.meshShader = VK_TRUE;
+  }
   VkPhysicalDeviceFeatures2 enabled2{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-      .pNext = &enabled12,
+      .pNext = enableMeshShaderExtension ? static_cast<void *>(&enabledMesh)
+                                         : static_cast<void *>(&enabled12),
   };
   enabled2.features.samplerAnisotropy = supported2.features.samplerAnisotropy;
   enabled2.features.fillModeNonSolid = supported2.features.fillModeNonSolid;
@@ -1760,6 +2204,11 @@ void destroyDebugMessenger(Impl &impl) {
   enabled2.features.geometryShader = VK_TRUE;
 
   impl.deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  if (enableMeshShaderExtension) {
+    impl.deviceExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+    impl.meshletExtensionEnabled = true;
+    impl.meshletFeaturesEnabled = true;
+  }
   const VkDeviceCreateInfo createInfo{
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
       .pNext = &enabled2,
@@ -1850,6 +2299,24 @@ void destroyDebugMessenger(Impl &impl) {
         "NvrhiGPUDevice::createNvrhiDevice: nvrhi::vulkan::createDevice "
         "failed");
   }
+  const bool meshDispatchEntryPointsPresent =
+      vkCmdDrawMeshTasksEXT != nullptr &&
+      vkCmdDrawMeshTasksIndirectEXT != nullptr &&
+      vkCmdDrawMeshTasksIndirectCountEXT != nullptr;
+  impl.meshletsSupported =
+      impl.meshletExtensionEnabled && impl.meshletFeaturesEnabled &&
+      meshletLimitsSupportDefaults(impl.meshletLimits) &&
+      meshDispatchEntryPointsPresent &&
+      impl.nvrhiDevice->queryFeatureSupport(nvrhi::Feature::Meshlets);
+  if (impl.meshletExtensionEnabled && impl.meshletFeaturesEnabled &&
+      !meshDispatchEntryPointsPresent) {
+    NURI_LOG_WARNING(
+        "NvrhiGPUDevice::createNvrhiDevice: VK_EXT_mesh_shader is enabled, "
+        "but one or more mesh dispatch entry points are unavailable");
+  }
+  impl.meshletLimits.supportsMeshDispatchIndirect = impl.meshletsSupported;
+  impl.meshletLimits.supportsMeshDispatchIndirectCount =
+      impl.meshletsSupported && impl.supportsDrawIndirectCount;
   impl.immediateCommandList = impl.nvrhiDevice->createCommandList();
   if (!impl.immediateCommandList) {
     return Result<bool, std::string>::makeError(
@@ -2004,6 +2471,7 @@ void destroySwapchain(Impl &impl) {
     impl.swapchain.handle = VK_NULL_HANDLE;
   }
   impl.frameSemaphoreReuseWaitInstances.assign(kSwapchainFramesInFlight, 0u);
+  impl.frameResourceReuseWaitInstances.clear();
   impl.swapchainImageReuseWaitInstances.clear();
   impl.preparedSwapchainImageWaitInstance = 0u;
   impl.hasPreparedSwapchainImage = false;
@@ -2110,6 +2578,7 @@ void destroySwapchain(Impl &impl) {
   impl.swapchain.images.clear();
   impl.swapchain.images.reserve(actualImageCount);
   impl.frameSemaphoreReuseWaitInstances.assign(kSwapchainFramesInFlight, 0u);
+  impl.frameResourceReuseWaitInstances.assign(actualImageCount, 0u);
   impl.swapchainImageReuseWaitInstances.assign(actualImageCount, 0u);
   impl.preparedSwapchainImageWaitInstance = 0u;
 
@@ -2213,6 +2682,7 @@ void destroyVulkan(Impl &impl) {
   impl.imageAvailableSemaphores.clear();
   impl.renderFinishedSemaphores.clear();
   impl.frameSemaphoreReuseWaitInstances.clear();
+  impl.frameResourceReuseWaitInstances.clear();
   impl.swapchainImageReuseWaitInstances.clear();
   impl.preparedSwapchainImageWaitInstance = 0u;
   if (impl.device != VK_NULL_HANDLE) {
@@ -2227,6 +2697,10 @@ void destroyVulkan(Impl &impl) {
   if (impl.instance != VK_NULL_HANDLE) {
     vkDestroyInstance(impl.instance, nullptr);
     impl.instance = VK_NULL_HANDLE;
+  }
+  if (impl.glslangInitialized) {
+    glslang_finalize_process();
+    impl.glslangInitialized = false;
   }
 }
 
@@ -2781,6 +3255,10 @@ void bindGlobalSets(nvrhi::ComputeState &state, Impl &impl) {
   state.bindings = globalBindingSets(impl);
 }
 
+void bindGlobalSets(nvrhi::MeshletState &state, Impl &impl) {
+  state.bindings = globalBindingSets(impl);
+}
+
 [[nodiscard]] PipelineVariantKey makePipelineVariantKey(const DrawItem &draw) {
   PipelineVariantKey key{};
   if (draw.useDepthState) {
@@ -2794,6 +3272,25 @@ void bindGlobalSets(nvrhi::ComputeState &state, Impl &impl) {
           : 0;
   key.depthBiasSlope = draw.depthBiasEnable ? draw.depthBiasSlope : 0.0f;
   key.depthBiasClamp = draw.depthBiasEnable ? draw.depthBiasClamp : 0.0f;
+  return key;
+}
+
+[[nodiscard]] PipelineVariantKey
+makePipelineVariantKey(const MeshDispatchItem &dispatch) {
+  PipelineVariantKey key{};
+  if (dispatch.useDepthState) {
+    key.compareOp = dispatch.depthState.compareOp;
+    key.depthWrite = dispatch.depthState.isDepthWriteEnabled;
+  }
+  key.depthBiasEnable = dispatch.depthBiasEnable;
+  key.depthBiasConstant =
+      dispatch.depthBiasEnable
+          ? static_cast<int>(std::lround(dispatch.depthBiasConstant))
+          : 0;
+  key.depthBiasSlope =
+      dispatch.depthBiasEnable ? dispatch.depthBiasSlope : 0.0f;
+  key.depthBiasClamp =
+      dispatch.depthBiasEnable ? dispatch.depthBiasClamp : 0.0f;
   return key;
 }
 
@@ -2827,8 +3324,51 @@ graphicsPipelineVariant(Impl &impl, RenderPipelineResource &pipeline,
   return std::nullopt;
 }
 
+[[nodiscard]] std::optional<std::string>
+meshletPipelineVariant(Impl &impl, MeshletPipelineResource &pipeline,
+                       const MeshDispatchItem &dispatch,
+                       nvrhi::IMeshletPipeline *&outPipeline) {
+  const PipelineVariantKey key = makePipelineVariantKey(dispatch);
+  if (auto found = pipeline.variants.find(key);
+      found != pipeline.variants.end()) {
+    outPipeline = found->second.Get();
+    return std::nullopt;
+  }
+  nvrhi::MeshletPipelineDesc desc = pipeline.baseDesc;
+  desc.renderState.depthStencilState.setDepthFunc(
+      toNvrhiCompareOp(key.compareOp));
+  desc.renderState.depthStencilState.setDepthWriteEnable(key.depthWrite);
+  desc.renderState.rasterState.setDepthBias(
+      key.depthBiasEnable ? key.depthBiasConstant : 0);
+  desc.renderState.rasterState.setSlopeScaleDepthBias(
+      key.depthBiasEnable ? key.depthBiasSlope : 0.0f);
+  desc.renderState.rasterState.setDepthBiasClamp(
+      key.depthBiasEnable ? key.depthBiasClamp : 0.0f);
+  nvrhi::MeshletPipelineHandle handle =
+      impl.nvrhiDevice->createMeshletPipeline(desc, pipeline.framebufferInfo);
+  if (!handle) {
+    return std::string("Failed to create meshlet pipeline variant");
+  }
+  auto [it, _] = pipeline.variants.emplace(key, std::move(handle));
+  outPipeline = it->second.Get();
+  return std::nullopt;
+}
+
 [[nodiscard]] nvrhi::FramebufferInfo
 makeFramebufferInfo(const RenderPipelineDesc &desc) {
+  nvrhi::FramebufferInfo info{};
+  for (uint32_t i = 0u; i < desc.colorAttachmentCount; ++i) {
+    info.addColorFormat(toNvrhiFormat(desc.colorFormats[i]));
+  }
+  if (desc.depthFormat != Format::Count) {
+    info.setDepthFormat(toNvrhiFormat(desc.depthFormat));
+  }
+  info.setSampleCount(std::max(desc.numSamples, 1u));
+  return info;
+}
+
+[[nodiscard]] nvrhi::FramebufferInfo
+makeFramebufferInfo(const MeshletPipelineDesc &desc) {
   nvrhi::FramebufferInfo info{};
   for (uint32_t i = 0u; i < desc.colorAttachmentCount; ++i) {
     info.addColorFormat(toNvrhiFormat(desc.colorFormats[i]));
@@ -2850,6 +3390,12 @@ makeFramebufferInfo(const RenderPipelineDesc &desc) {
     state.addScissorRect(viewportRect(viewport));
   }
   return state;
+}
+
+[[nodiscard]] bool areSameRect(const RectU32 &lhs,
+                               const RectU32 &rhs) noexcept {
+  return lhs.x == rhs.x && lhs.y == rhs.y && lhs.width == rhs.width &&
+         lhs.height == rhs.height;
 }
 
 [[nodiscard]] nvrhi::TextureHandle
@@ -2939,6 +3485,9 @@ requestBufferDependencyStates(Impl &impl, nvrhi::ICommandList &commandList,
       return Result<bool, std::string>::makeError(
           std::string(context) + ": invalid dependency buffer");
     }
+    if (buffer->immutable && !computeDependency) {
+      continue;
+    }
     commandList.setBufferState(buffer->buffer.Get(), state);
   }
   return Result<bool, std::string>::makeResult(true);
@@ -2990,11 +3539,163 @@ recordComputeDispatches(Impl &impl, nvrhi::ICommandList &commandList,
     std::array<std::byte, kPushConstantByteSize> push{};
     if (!makePaddedPushConstants(dispatch.pushConstants, push)) {
       return Result<bool, std::string>::makeError(
-          std::string(context) + ": push constants exceed 128 bytes");
+          std::string(context) + ": push constants exceed 128 bytes (" +
+          std::to_string(dispatch.pushConstants.size()) + " bytes)");
     }
     commandList.setPushConstants(push.data(), push.size());
     commandList.dispatch(dispatch.dispatch.x, dispatch.dispatch.y,
                          dispatch.dispatch.z);
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+recordMeshDispatches(Impl &impl, nvrhi::ICommandList &commandList,
+                     nvrhi::IFramebuffer *framebuffer, const Viewport &viewport,
+                     std::span<const MeshDispatchItem> dispatches,
+                     std::string_view context) {
+  if (dispatches.empty()) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!impl.meshletsSupported) {
+    return Result<bool, std::string>::makeError(
+        std::string(context) + ": meshlets are unsupported by this device");
+  }
+
+  struct BoundMeshletState {
+    MeshletPipelineHandle pipeline{};
+    PipelineVariantKey variantKey{};
+    nvrhi::IMeshletPipeline *variant = nullptr;
+    MeshDispatchCommandType command = MeshDispatchCommandType::Direct;
+    BufferHandle indirectBuffer{};
+    BufferHandle indirectCountBuffer{};
+    bool useScissor = false;
+    RectU32 scissor{};
+    bool valid = false;
+  };
+  BoundMeshletState boundState{};
+
+  for (const MeshDispatchItem &dispatch : dispatches) {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.mesh_dispatch_submission",
+                       NURI_PROFILER_COLOR_CMD_DISPATCH);
+    MeshletPipelineResource *pipeline =
+        impl.meshletPipelines.get(dispatch.pipeline);
+    if (pipeline == nullptr) {
+      return Result<bool, std::string>::makeError(
+          std::string(context) + ": invalid meshlet pipeline handle");
+    }
+    if (dispatch.command == MeshDispatchCommandType::Direct &&
+        (dispatch.groupsX == 0u || dispatch.groupsY == 0u ||
+         dispatch.groupsZ == 0u)) {
+      return Result<bool, std::string>::makeError(
+          std::string(context) + ": invalid direct mesh dispatch size");
+    }
+
+    auto dependencyBufferResult = requestBufferDependencyStates(
+        impl, commandList, dispatch.dependencyBuffers, false, context);
+    if (dependencyBufferResult.hasError()) {
+      return dependencyBufferResult;
+    }
+    auto dependencyTextureResult = requestTextureDependencyStates(
+        impl, commandList, dispatch.dependencyTextures, false, context);
+    if (dependencyTextureResult.hasError()) {
+      return dependencyTextureResult;
+    }
+    commandList.commitBarriers();
+
+    nvrhi::IMeshletPipeline *variant = nullptr;
+    auto variantError =
+        meshletPipelineVariant(impl, *pipeline, dispatch, variant);
+    if (variantError) {
+      return Result<bool, std::string>::makeError(*variantError);
+    }
+
+    const PipelineVariantKey variantKey = makePipelineVariantKey(dispatch);
+    const bool needsStateBind =
+        !boundState.valid ||
+        !areSameHandle(boundState.pipeline, dispatch.pipeline) ||
+        !(boundState.variantKey == variantKey) ||
+        boundState.variant != variant ||
+        boundState.command != dispatch.command ||
+        !areSameHandle(boundState.indirectBuffer, dispatch.indirectBuffer) ||
+        !areSameHandle(boundState.indirectCountBuffer,
+                       dispatch.indirectCountBuffer) ||
+        boundState.useScissor != dispatch.useScissor ||
+        (dispatch.useScissor &&
+         !areSameRect(boundState.scissor, dispatch.scissor));
+    nvrhi::MeshletState state{};
+    if (dispatch.command != MeshDispatchCommandType::Direct) {
+      nvrhi::BufferHandle indirectBuffer =
+          passBufferHandle(impl, dispatch.indirectBuffer);
+      if (!indirectBuffer) {
+        return Result<bool, std::string>::makeError(
+            std::string(context) + ": invalid mesh dispatch indirect buffer");
+      }
+      state.setIndirectParams(indirectBuffer.Get());
+      if (dispatch.command == MeshDispatchCommandType::IndirectCount) {
+        if (!impl.meshletLimits.supportsMeshDispatchIndirectCount) {
+          return Result<bool, std::string>::makeError(
+              std::string(context) +
+              ": mesh dispatch indirect-count is unsupported by this device");
+        }
+        nvrhi::BufferHandle countBuffer =
+            passBufferHandle(impl, dispatch.indirectCountBuffer);
+        if (!countBuffer) {
+          return Result<bool, std::string>::makeError(
+              std::string(context) +
+              ": invalid mesh dispatch indirect count buffer");
+        }
+        state.setIndirectCountBuffer(countBuffer.Get());
+      }
+    }
+
+    if (needsStateBind) {
+      state.setPipeline(variant)
+          .setFramebuffer(framebuffer)
+          .setViewport(makeViewportState(
+              viewport, dispatch.useScissor ? &dispatch.scissor : nullptr));
+      bindGlobalSets(state, impl);
+      commandList.setMeshletState(state);
+      boundState = BoundMeshletState{
+          .pipeline = dispatch.pipeline,
+          .variantKey = variantKey,
+          .variant = variant,
+          .command = dispatch.command,
+          .indirectBuffer = dispatch.indirectBuffer,
+          .indirectCountBuffer = dispatch.indirectCountBuffer,
+          .useScissor = dispatch.useScissor,
+          .scissor = dispatch.scissor,
+          .valid = true,
+      };
+    }
+
+    std::array<std::byte, kPushConstantByteSize> push{};
+    if (!makePaddedPushConstants(dispatch.pushConstants, push)) {
+      return Result<bool, std::string>::makeError(
+          std::string(context) + ": push constants exceed 128 bytes (" +
+          std::to_string(dispatch.pushConstants.size()) + " bytes)");
+    }
+    commandList.setPushConstants(push.data(), push.size());
+
+    switch (dispatch.command) {
+    case MeshDispatchCommandType::Indirect:
+      commandList.dispatchMeshIndirect(
+          static_cast<uint32_t>(dispatch.indirectBufferOffset),
+          std::max(dispatch.indirectDispatchCount, 1u));
+      break;
+    case MeshDispatchCommandType::IndirectCount:
+      commandList.dispatchMeshIndirectCount(
+          static_cast<uint32_t>(dispatch.indirectBufferOffset),
+          static_cast<uint32_t>(dispatch.indirectCountBufferOffset),
+          std::max(dispatch.indirectDispatchCount, 1u));
+      break;
+    case MeshDispatchCommandType::Direct:
+    default:
+      commandList.dispatchMesh(dispatch.groupsX, dispatch.groupsY,
+                               dispatch.groupsZ);
+      break;
+    }
+    NURI_PROFILER_ZONE_END();
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -3013,6 +3714,11 @@ recordRenderPass(Impl &impl,
     return preDispatchResult;
   }
   if (pass.executionMode == RenderPassExecutionMode::ComputeOnly) {
+    if (!pass.meshDispatches.empty()) {
+      return Result<bool, std::string>::makeError(
+          "NvrhiGPUDevice::recordRenderPass: compute-only pass contains mesh "
+          "dispatches");
+    }
     passTiming.commit();
     return Result<bool, std::string>::makeResult(true);
   }
@@ -3080,8 +3786,14 @@ recordRenderPass(Impl &impl,
     }
     framebufferDesc.setDepthAttachment(depthAttachment);
   }
-  nvrhi::FramebufferHandle framebuffer =
-      impl.nvrhiDevice->createFramebuffer(framebufferDesc);
+  nvrhi::FramebufferHandle framebuffer = [&]() {
+    nvrhi::FramebufferHandle created{};
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.create_framebuffer",
+                       NURI_PROFILER_COLOR_CREATE);
+    created = impl.nvrhiDevice->createFramebuffer(framebufferDesc);
+    NURI_PROFILER_ZONE_END();
+    return created;
+  }();
   if (!framebuffer) {
     return Result<bool, std::string>::makeError(
         "NvrhiGPUDevice::recordRenderPass: failed to create framebuffer");
@@ -3124,135 +3836,160 @@ recordRenderPass(Impl &impl,
                 .maxDepth = 1.0f};
   }
 
-  auto dependencyBufferResult =
-      requestBufferDependencyStates(impl, commandList, pass.dependencyBuffers,
-                                    false, "NvrhiGPUDevice::recordRenderPass");
-  if (dependencyBufferResult.hasError()) {
-    return dependencyBufferResult;
+  {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.record_pass_dependencies",
+                       NURI_PROFILER_COLOR_BARRIER);
+    auto dependencyBufferResult = requestBufferDependencyStates(
+        impl, commandList, pass.dependencyBuffers, false,
+        "NvrhiGPUDevice::recordRenderPass");
+    if (dependencyBufferResult.hasError()) {
+      return dependencyBufferResult;
+    }
+    auto dependencyTextureResult = requestTextureDependencyStates(
+        impl, commandList, pass.dependencyTextures, false,
+        "NvrhiGPUDevice::recordRenderPass");
+    if (dependencyTextureResult.hasError()) {
+      return dependencyTextureResult;
+    }
+    commandList.commitBarriers();
+    NURI_PROFILER_ZONE_END();
   }
-  auto dependencyTextureResult =
-      requestTextureDependencyStates(impl, commandList, pass.dependencyTextures,
-                                     false, "NvrhiGPUDevice::recordRenderPass");
-  if (dependencyTextureResult.hasError()) {
-    return dependencyTextureResult;
-  }
-  commandList.commitBarriers();
 
-  for (const DrawItem &draw : pass.draws) {
-    RenderPipelineResource *pipeline = impl.renderPipelines.get(draw.pipeline);
-    if (pipeline == nullptr) {
-      return Result<bool, std::string>::makeError(
-          "NvrhiGPUDevice::recordRenderPass: invalid render pipeline handle");
-    }
-    nvrhi::IGraphicsPipeline *variant = nullptr;
-    auto variantError = graphicsPipelineVariant(impl, *pipeline, draw, variant);
-    if (variantError) {
-      return Result<bool, std::string>::makeError(*variantError);
-    }
+  {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.record_draws",
+                       NURI_PROFILER_COLOR_CMD_DRAW);
+    for (const DrawItem &draw : pass.draws) {
+      RenderPipelineResource *pipeline =
+          impl.renderPipelines.get(draw.pipeline);
+      if (pipeline == nullptr) {
+        return Result<bool, std::string>::makeError(
+            "NvrhiGPUDevice::recordRenderPass: invalid render pipeline handle");
+      }
+      nvrhi::IGraphicsPipeline *variant = nullptr;
+      auto variantError =
+          graphicsPipelineVariant(impl, *pipeline, draw, variant);
+      if (variantError) {
+        return Result<bool, std::string>::makeError(*variantError);
+      }
 
-    nvrhi::GraphicsState state{};
-    state.setPipeline(variant)
-        .setFramebuffer(framebuffer.Get())
-        .setViewport(makeViewportState(viewport, draw.useScissor ? &draw.scissor
-                                                                 : nullptr));
-    bindGlobalSets(state, impl);
+      nvrhi::GraphicsState state{};
+      state.setPipeline(variant)
+          .setFramebuffer(framebuffer.Get())
+          .setViewport(makeViewportState(
+              viewport, draw.useScissor ? &draw.scissor : nullptr));
+      bindGlobalSets(state, impl);
 
-    if (nuri::isValid(draw.vertexBuffer)) {
-      nvrhi::BufferHandle vertexBuffer =
-          passBufferHandle(impl, draw.vertexBuffer);
-      if (!vertexBuffer) {
-        return Result<bool, std::string>::makeError(
-            "NvrhiGPUDevice::recordRenderPass: invalid vertex buffer handle");
-      }
-      state.addVertexBuffer(nvrhi::VertexBufferBinding()
-                                .setBuffer(vertexBuffer.Get())
-                                .setSlot(0u)
-                                .setOffset(draw.vertexBufferOffset));
-    }
-    if (draw.indexCount > 0u || draw.command != DrawCommandType::Direct) {
-      nvrhi::BufferHandle indexBuffer =
-          passBufferHandle(impl, draw.indexBuffer);
-      if (!indexBuffer) {
-        return Result<bool, std::string>::makeError(
-            "NvrhiGPUDevice::recordRenderPass: invalid index buffer handle");
-      }
-      state.setIndexBuffer(
-          nvrhi::IndexBufferBinding()
-              .setBuffer(indexBuffer.Get())
-              .setFormat(toNvrhiIndexFormat(draw.indexFormat))
-              .setOffset(static_cast<uint32_t>(draw.indexBufferOffset)));
-    }
-    if (draw.command != DrawCommandType::Direct) {
-      nvrhi::BufferHandle indirectBuffer =
-          passBufferHandle(impl, draw.indirectBuffer);
-      if (!indirectBuffer) {
-        return Result<bool, std::string>::makeError(
-            "NvrhiGPUDevice::recordRenderPass: invalid indirect buffer "
-            "handle");
-      }
-      state.setIndirectParams(indirectBuffer.Get());
-      if (draw.command == DrawCommandType::IndexedIndirectCount) {
-        nvrhi::BufferHandle countBuffer =
-            passBufferHandle(impl, draw.indirectCountBuffer);
-        if (!countBuffer) {
+      if (nuri::isValid(draw.vertexBuffer)) {
+        nvrhi::BufferHandle vertexBuffer =
+            passBufferHandle(impl, draw.vertexBuffer);
+        if (!vertexBuffer) {
           return Result<bool, std::string>::makeError(
-              "NvrhiGPUDevice::recordRenderPass: invalid indirect count "
-              "buffer handle");
+              "NvrhiGPUDevice::recordRenderPass: invalid vertex buffer handle");
         }
-        state.setIndirectCountBuffer(countBuffer.Get());
+        state.addVertexBuffer(nvrhi::VertexBufferBinding()
+                                  .setBuffer(vertexBuffer.Get())
+                                  .setSlot(0u)
+                                  .setOffset(draw.vertexBufferOffset));
       }
-    }
+      if (draw.indexCount > 0u || draw.command != DrawCommandType::Direct) {
+        nvrhi::BufferHandle indexBuffer =
+            passBufferHandle(impl, draw.indexBuffer);
+        if (!indexBuffer) {
+          return Result<bool, std::string>::makeError(
+              "NvrhiGPUDevice::recordRenderPass: invalid index buffer handle");
+        }
+        state.setIndexBuffer(
+            nvrhi::IndexBufferBinding()
+                .setBuffer(indexBuffer.Get())
+                .setFormat(toNvrhiIndexFormat(draw.indexFormat))
+                .setOffset(static_cast<uint32_t>(draw.indexBufferOffset)));
+      }
+      if (draw.command != DrawCommandType::Direct) {
+        nvrhi::BufferHandle indirectBuffer =
+            passBufferHandle(impl, draw.indirectBuffer);
+        if (!indirectBuffer) {
+          return Result<bool, std::string>::makeError(
+              "NvrhiGPUDevice::recordRenderPass: invalid indirect buffer "
+              "handle");
+        }
+        state.setIndirectParams(indirectBuffer.Get());
+        if (draw.command == DrawCommandType::IndexedIndirectCount) {
+          nvrhi::BufferHandle countBuffer =
+              passBufferHandle(impl, draw.indirectCountBuffer);
+          if (!countBuffer) {
+            return Result<bool, std::string>::makeError(
+                "NvrhiGPUDevice::recordRenderPass: invalid indirect count "
+                "buffer handle");
+          }
+          state.setIndirectCountBuffer(countBuffer.Get());
+        }
+      }
 
-    commandList.setGraphicsState(state);
-    std::array<std::byte, kPushConstantByteSize> push{};
-    if (!makePaddedPushConstants(draw.pushConstants, push)) {
-      return Result<bool, std::string>::makeError(
-          "NvrhiGPUDevice::recordRenderPass: push constants exceed 128 bytes");
-    }
-    commandList.setPushConstants(push.data(), push.size());
+      commandList.setGraphicsState(state);
+      std::array<std::byte, kPushConstantByteSize> push{};
+      if (!makePaddedPushConstants(draw.pushConstants, push)) {
+        return Result<bool, std::string>::makeError(
+            "NvrhiGPUDevice::recordRenderPass: push constants exceed 128 "
+            "bytes");
+      }
+      commandList.setPushConstants(push.data(), push.size());
 
-    switch (draw.command) {
-    case DrawCommandType::IndexedIndirect:
-      commandList.drawIndexedIndirect(
-          static_cast<uint32_t>(draw.indirectBufferOffset),
-          std::max(draw.indirectDrawCount, 1u));
-      break;
-    case DrawCommandType::IndexedIndirectCount:
-      if (impl.supportsDrawIndirectCount) {
-        commandList.drawIndexedIndirectCount(
-            static_cast<uint32_t>(draw.indirectBufferOffset),
-            static_cast<uint32_t>(draw.indirectCountBufferOffset),
-            std::max(draw.indirectDrawCount, 1u));
-      } else {
+      switch (draw.command) {
+      case DrawCommandType::IndexedIndirect:
         commandList.drawIndexedIndirect(
             static_cast<uint32_t>(draw.indirectBufferOffset),
             std::max(draw.indirectDrawCount, 1u));
+        break;
+      case DrawCommandType::IndexedIndirectCount:
+        if (impl.supportsDrawIndirectCount) {
+          commandList.drawIndexedIndirectCount(
+              static_cast<uint32_t>(draw.indirectBufferOffset),
+              static_cast<uint32_t>(draw.indirectCountBufferOffset),
+              std::max(draw.indirectDrawCount, 1u));
+        } else {
+          commandList.drawIndexedIndirect(
+              static_cast<uint32_t>(draw.indirectBufferOffset),
+              std::max(draw.indirectDrawCount, 1u));
+        }
+        break;
+      case DrawCommandType::Direct:
+      default:
+        if (draw.indexCount > 0u) {
+          commandList.drawIndexed(
+              nvrhi::DrawArguments()
+                  .setVertexCount(draw.indexCount)
+                  .setInstanceCount(draw.instanceCount)
+                  .setStartIndexLocation(draw.firstIndex)
+                  .setStartVertexLocation(
+                      static_cast<uint32_t>(draw.vertexOffset))
+                  .setStartInstanceLocation(draw.firstInstance));
+        } else {
+          commandList.draw(nvrhi::DrawArguments()
+                               .setVertexCount(draw.vertexCount)
+                               .setInstanceCount(draw.instanceCount)
+                               .setStartVertexLocation(draw.firstVertex)
+                               .setStartInstanceLocation(draw.firstInstance));
+        }
+        break;
       }
-      break;
-    case DrawCommandType::Direct:
-    default:
-      if (draw.indexCount > 0u) {
-        commandList.drawIndexed(
-            nvrhi::DrawArguments()
-                .setVertexCount(draw.indexCount)
-                .setInstanceCount(draw.instanceCount)
-                .setStartIndexLocation(draw.firstIndex)
-                .setStartVertexLocation(
-                    static_cast<uint32_t>(draw.vertexOffset))
-                .setStartInstanceLocation(draw.firstInstance));
-      } else {
-        commandList.draw(nvrhi::DrawArguments()
-                             .setVertexCount(draw.vertexCount)
-                             .setInstanceCount(draw.instanceCount)
-                             .setStartVertexLocation(draw.firstVertex)
-                             .setStartInstanceLocation(draw.firstInstance));
-      }
-      break;
     }
+    NURI_PROFILER_ZONE_END();
+  }
+
+  {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.record_mesh_dispatches",
+                       NURI_PROFILER_COLOR_CMD_DISPATCH);
+    auto meshDispatchResult = recordMeshDispatches(
+        impl, commandList, framebuffer.Get(), viewport, pass.meshDispatches,
+        "NvrhiGPUDevice::recordRenderPass meshDispatch");
+    if (meshDispatchResult.hasError()) {
+      return meshDispatchResult;
+    }
+    NURI_PROFILER_ZONE_END();
   }
 
   if ((colorFramebufferResolve || depthFramebufferResolve) &&
-      pass.draws.empty()) {
+      pass.draws.empty() && pass.meshDispatches.empty()) {
     commandList.resolveFramebuffer(framebuffer.Get());
   }
   if (colorResolveTexture && colorTexture && !colorFramebufferResolve) {
@@ -3367,6 +4104,7 @@ NvrhiGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
   auto instanceResult = createInstance(impl);
   if (instanceResult.hasError()) {
     NURI_LOG_ERROR("%s", instanceResult.error().c_str());
+    destroyVulkan(impl);
     return nullptr;
   }
   VkResult result = glfwCreateWindowSurface(impl.instance, impl.glfwWindow,
@@ -3537,7 +4275,16 @@ NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
     return Result<BufferHandle, std::string>::makeError(
         "Buffer usage is empty");
   }
+  if (desc.immutable && desc.storage != Storage::Device) {
+    return Result<BufferHandle, std::string>::makeError(
+        "Immutable buffers must use device-local storage");
+  }
+  if (desc.immutable && desc.data.empty()) {
+    return Result<BufferHandle, std::string>::makeError(
+        "Immutable buffers require initial data");
+  }
 
+  const bool permanentReadState = usesPermanentReadState(desc);
   nvrhi::BufferDesc bufferDesc{};
   bufferDesc.setByteSize(static_cast<uint64_t>(resolvedSize))
       .setDebugName(std::string(debugName))
@@ -3564,7 +4311,8 @@ NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
                           .byteSize = resolvedSize,
                           .mapped = nullptr,
                           .mappedMemory = VK_NULL_HANDLE,
-                          .hostVisible = desc.storage == Storage::HostVisible};
+                          .hostVisible = desc.storage == Storage::HostVisible,
+                          .immutable = desc.immutable};
   if (resource.hostVisible) {
     const nvrhi::Object nativeMemory =
         buffer->getNativeObject(nvrhi::ObjectTypes::VK_DeviceMemory);
@@ -3584,6 +4332,10 @@ NvrhiGPUDevice::createBuffer(const BufferDesc &desc,
     impl_->immediateCommandList->open();
     impl_->immediateCommandList->writeBuffer(buffer.Get(), desc.data.data(),
                                              desc.data.size(), 0u);
+    if (permanentReadState) {
+      impl_->immediateCommandList->setPermanentBufferState(
+          buffer.Get(), permanentReadBufferState(desc.usage));
+    }
     impl_->immediateCommandList->close();
     executeCommandListAndWait(*impl_, impl_->immediateCommandList);
   }
@@ -3683,17 +4435,17 @@ NvrhiGPUDevice::createShaderModule(const ShaderDesc &desc) {
         "Shader source is empty");
   }
   const std::string moduleName(desc.moduleName);
-  const std::string patched = patchLvkGlslPrelude(desc.stage, desc.source);
+  const std::string patched = patchGlslPrelude(desc.stage, desc.source);
   const glslang_resource_t resource =
-      lvk::getGlslangResource(impl_->physicalDeviceProperties.limits);
-  std::vector<uint8_t> spirv;
-  lvk::Result compileResult = lvk::compileShaderGlslang(
-      toLvkShaderStage(desc.stage), patched.c_str(), &spirv, &resource);
-  if (!compileResult.isOk()) {
-    return Result<ShaderHandle, std::string>::makeError(
-        compileResult.message != nullptr
-            ? std::string(compileResult.message)
-            : std::string("Shader compile failed"));
+      makeGlslangResource(impl_->physicalDeviceProperties.limits);
+  auto compileResult =
+      compileGlslToSpirv(desc.stage, patched.c_str(), resource);
+  if (compileResult.hasError()) {
+    return Result<ShaderHandle, std::string>::makeError(compileResult.error());
+  }
+  std::vector<uint8_t> spirv = std::move(compileResult.value());
+  if (desc.stage == ShaderStage::Task || desc.stage == ShaderStage::Mesh) {
+    [[maybe_unused]] const bool normalized = normalizeSpirvLocalSizeId(spirv);
   }
 
   nvrhi::ShaderDesc shaderDesc{};
@@ -3913,6 +4665,128 @@ NvrhiGPUDevice::createComputePipeline(const ComputePipelineDesc &desc,
       reserved.handle);
 }
 
+Result<MeshletPipelineHandle, std::string>
+NvrhiGPUDevice::createMeshletPipeline(const MeshletPipelineDesc &desc,
+                                      std::string_view debugName) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CREATE);
+  if (impl_ == nullptr || !impl_->meshletsSupported) {
+    return Result<MeshletPipelineHandle, std::string>::makeError(
+        "NvrhiGPUDevice::createMeshletPipeline: meshlets are unsupported by "
+        "this device");
+  }
+  if (desc.colorAttachmentCount > desc.colorFormats.size()) {
+    return Result<MeshletPipelineHandle, std::string>::makeError(
+        "Color attachment count exceeds provided color formats");
+  }
+
+  ShaderResource *taskShader = nuri::isValid(desc.taskShader)
+                                   ? impl_->shaders.get(desc.taskShader)
+                                   : nullptr;
+  ShaderResource *meshShader = impl_->shaders.get(desc.meshShader);
+  ShaderResource *fragmentShader = impl_->shaders.get(desc.fragmentShader);
+  if (meshShader == nullptr || fragmentShader == nullptr) {
+    return Result<MeshletPipelineHandle, std::string>::makeError(
+        "Invalid meshlet pipeline shader handle");
+  }
+  if (taskShader != nullptr && taskShader->stage != ShaderStage::Task) {
+    return Result<MeshletPipelineHandle, std::string>::makeError(
+        "Meshlet task shader handle has the wrong shader stage");
+  }
+  if (meshShader->stage != ShaderStage::Mesh) {
+    return Result<MeshletPipelineHandle, std::string>::makeError(
+        "Meshlet mesh shader handle has the wrong shader stage");
+  }
+  if (fragmentShader->stage != ShaderStage::Fragment) {
+    return Result<MeshletPipelineHandle, std::string>::makeError(
+        "Meshlet fragment shader handle has the wrong shader stage");
+  }
+
+  const auto reserved = impl_->meshletPipelines.reserve(std::string(debugName));
+  MeshletPipelineResource &resource = *reserved.resource;
+  resource.debugName = std::string(debugName);
+  resource.framebufferInfo = makeFramebufferInfo(desc);
+
+  auto specialize =
+      [&](ShaderResource *shader, const char *stageName,
+          nvrhi::IShader *&outShader) -> std::optional<std::string> {
+    if (shader == nullptr) {
+      outShader = nullptr;
+      return std::nullopt;
+    }
+    if (desc.specInfo.entries.empty()) {
+      outShader = shader->shader.Get();
+      return std::nullopt;
+    }
+    auto result =
+        specializeShader(*impl_, shader->shader, desc.specInfo, stageName);
+    if (result.hasError()) {
+      return result.error();
+    }
+    nvrhi::ShaderHandle specialized = std::move(result).value();
+    outShader = specialized.Get();
+    resource.specializedShaders.push_back(std::move(specialized));
+    return std::nullopt;
+  };
+
+  nvrhi::IShader *asShader = nullptr;
+  nvrhi::IShader *msShader = nullptr;
+  nvrhi::IShader *fsShader = nullptr;
+  auto asError = specialize(
+      taskShader, "NvrhiGPUDevice::createMeshletPipeline AS", asShader);
+  auto msError = specialize(
+      meshShader, "NvrhiGPUDevice::createMeshletPipeline MS", msShader);
+  auto fsError = specialize(
+      fragmentShader, "NvrhiGPUDevice::createMeshletPipeline FS", fsShader);
+  if (asError || msError || fsError) {
+    std::string error = asError ? *asError : msError ? *msError : *fsError;
+    impl_->meshletPipelines.deallocate(reserved.handle);
+    return Result<MeshletPipelineHandle, std::string>::makeError(error);
+  }
+
+  nvrhi::RenderState renderState{};
+  renderState.rasterState.setCullMode(toNvrhiCullMode(desc.cullMode))
+      .setFillMode(toNvrhiFillMode(desc.polygonMode))
+      .setFrontCounterClockwise(true)
+      .setScissorEnable(true)
+      .setMultisampleEnable(desc.numSamples > 1u);
+  renderState.depthStencilState
+      .setDepthTestEnable(desc.depthFormat != Format::Count)
+      .setDepthWriteEnable(desc.depthFormat != Format::Count)
+      .setDepthFunc(nvrhi::ComparisonFunc::Less);
+  renderState.blendState.setAlphaToCoverageEnable(desc.alphaToCoverageEnabled);
+  for (uint32_t i = 0u; i < desc.colorAttachmentCount; ++i) {
+    nvrhi::BlendState::RenderTarget target{};
+    target.setBlendEnable(desc.blendEnabled)
+        .setSrcBlend(desc.blendEnabled ? nvrhi::BlendFactor::SrcAlpha
+                                       : nvrhi::BlendFactor::One)
+        .setDestBlend(desc.blendEnabled ? nvrhi::BlendFactor::InvSrcAlpha
+                                        : nvrhi::BlendFactor::Zero)
+        .setSrcBlendAlpha(nvrhi::BlendFactor::One)
+        .setDestBlendAlpha(desc.blendEnabled ? nvrhi::BlendFactor::InvSrcAlpha
+                                             : nvrhi::BlendFactor::Zero);
+    renderState.blendState.setRenderTarget(i, target);
+  }
+
+  resource.baseDesc.setPrimType(nvrhi::PrimitiveType::TriangleList)
+      .setTaskShader(asShader)
+      .setMeshShader(msShader)
+      .setFragmentShader(fsShader)
+      .setRenderState(renderState);
+  resource.baseDesc.bindingLayouts = globalBindingLayouts(*impl_);
+
+  MeshDispatchItem defaultDispatch{};
+  nvrhi::IMeshletPipeline *pipeline = nullptr;
+  auto pipelineError =
+      meshletPipelineVariant(*impl_, resource, defaultDispatch, pipeline);
+  if (pipelineError) {
+    impl_->meshletPipelines.deallocate(reserved.handle);
+    return Result<MeshletPipelineHandle, std::string>::makeError(
+        *pipelineError);
+  }
+  return Result<MeshletPipelineHandle, std::string>::makeResult(
+      reserved.handle);
+}
+
 void NvrhiGPUDevice::destroyRenderPipeline(RenderPipelineHandle pipeline) {
   if (impl_) {
     impl_->renderPipelines.deallocate(pipeline);
@@ -3922,6 +4796,12 @@ void NvrhiGPUDevice::destroyRenderPipeline(RenderPipelineHandle pipeline) {
 void NvrhiGPUDevice::destroyComputePipeline(ComputePipelineHandle pipeline) {
   if (impl_) {
     impl_->computePipelines.deallocate(pipeline);
+  }
+}
+
+void NvrhiGPUDevice::destroyMeshletPipeline(MeshletPipelineHandle pipeline) {
+  if (impl_) {
+    impl_->meshletPipelines.deallocate(pipeline);
   }
 }
 
@@ -3987,6 +4867,10 @@ bool NvrhiGPUDevice::isValid(ComputePipelineHandle h) const {
   return impl_ != nullptr && impl_->computePipelines.isValid(h);
 }
 
+bool NvrhiGPUDevice::isValid(MeshletPipelineHandle h) const {
+  return impl_ != nullptr && impl_->meshletPipelines.isValid(h);
+}
+
 Format NvrhiGPUDevice::getTextureFormat(TextureHandle h) const {
   return impl_ != nullptr ? impl_->textures.getFormat(h) : Format::RGBA8_UNORM;
 }
@@ -4001,6 +4885,24 @@ TextureDimensions NvrhiGPUDevice::getTextureDimensions(TextureHandle h) const {
 
 TextureCompressionCaps NvrhiGPUDevice::getTextureCompressionCaps() const {
   return impl_ != nullptr ? impl_->compressionCaps : TextureCompressionCaps{};
+}
+
+bool NvrhiGPUDevice::supportsFeature(GPUFeature feature) const {
+  if (impl_ == nullptr || !impl_->nvrhiDevice) {
+    return false;
+  }
+  switch (feature) {
+  case GPUFeature::Meshlets:
+    return impl_->meshletsSupported;
+  case GPUFeature::RayTracingClusters:
+    return impl_->nvrhiDevice->queryFeatureSupport(
+        nvrhi::Feature::RayTracingClusters);
+  }
+  return false;
+}
+
+MeshletLimits NvrhiGPUDevice::getMeshletLimits() const {
+  return impl_ != nullptr ? impl_->meshletLimits : MeshletLimits{};
 }
 
 bool NvrhiGPUDevice::supportsSampledImageLinearFiltering(Format format) const {
@@ -4120,11 +5022,33 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
   if (impl_ == nullptr) {
     return Result<bool, std::string>::makeError("NVRHI device is null");
   }
+  uint64_t frameResourceWaitInstance = 0u;
+  size_t frameResourceSlot = std::numeric_limits<size_t>::max();
   {
     std::lock_guard lock(impl_->immediateMutex);
     impl_->currentFrameIndex = frameIndex;
     impl_->hasPreparedSwapchainImage = false;
     impl_->preparedSwapchainImageWaitInstance = 0u;
+    if (!impl_->frameResourceReuseWaitInstances.empty()) {
+      frameResourceSlot = static_cast<size_t>(
+          frameIndex % impl_->frameResourceReuseWaitInstances.size());
+      frameResourceWaitInstance =
+          impl_->frameResourceReuseWaitInstances[frameResourceSlot];
+    }
+  }
+  auto waitResult = waitForGraphicsQueueInstance(
+      *impl_, frameResourceWaitInstance,
+      "NvrhiGPUDevice::beginFrame frame resource reuse");
+  if (waitResult.hasError()) {
+    return waitResult;
+  }
+  {
+    std::lock_guard lock(impl_->immediateMutex);
+    if (frameResourceSlot < impl_->frameResourceReuseWaitInstances.size() &&
+        impl_->frameResourceReuseWaitInstances[frameResourceSlot] ==
+            frameResourceWaitInstance) {
+      impl_->frameResourceReuseWaitInstances[frameResourceSlot] = 0u;
+    }
     collectCompletedBackgroundCopySubmissions(*impl_);
     impl_->nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(*impl_);
@@ -4215,13 +5139,23 @@ NvrhiGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
                                                 0u);
   }
 
-  nvrhi::CommandListHandle commandList =
-      impl_->nvrhiDevice->createCommandList();
+  nvrhi::CommandListHandle commandList{};
+  {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.create_command_list",
+                       NURI_PROFILER_COLOR_CREATE);
+    commandList = impl_->nvrhiDevice->createCommandList();
+    NURI_PROFILER_ZONE_END();
+  }
   if (!commandList) {
     return Result<RecordingContextHandle, std::string>::makeError(
         "Failed to create command list");
   }
-  commandList->open();
+  {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.open_command_list",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    commandList->open();
+    NURI_PROFILER_ZONE_END();
+  }
   impl_->activeGraphicsContexts[index] = ActiveGraphicsRecordingContext{
       .handle = handle,
       .commandList = commandList,
@@ -4236,6 +5170,7 @@ NvrhiGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
 Result<bool, std::string> NvrhiGPUDevice::recordGraphicsBarriers(
     RecordingContextHandle ctx,
     std::span<const GraphicsBarrierRecord> barriers) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_BARRIER);
   if (barriers.empty()) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -4274,6 +5209,14 @@ Result<bool, std::string> NvrhiGPUDevice::recordGraphicsBarriers(
       return Result<bool, std::string>::makeError(
           "NvrhiGPUDevice::recordGraphicsBarriers: invalid buffer handle");
     }
+    if (buffer->immutable) {
+      if (barrier.afterState == GraphicsBarrierState::Read) {
+        continue;
+      }
+      return Result<bool, std::string>::makeError(
+          "NvrhiGPUDevice::recordGraphicsBarriers: immutable buffer cannot "
+          "transition to a write or non-read state");
+    }
     commandList->setBufferState(
         buffer->buffer.Get(),
         toNvrhiBufferState(barrier.afterState, barrier.afterAccess));
@@ -4307,7 +5250,12 @@ NvrhiGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
         "context");
   }
 
-  active->commandList->close();
+  {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.close_command_list",
+                       NURI_PROFILER_COLOR_CMD_COPY);
+    active->commandList->close();
+    NURI_PROFILER_ZONE_END();
+  }
   auto indexResult = allocateMonotonicHandleIndex(
       impl_->nextRecordedCommandBufferIndex,
       "NvrhiGPUDevice::finishGraphicsRecordingContext");
@@ -4468,6 +5416,12 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
       nvrhiCommandLists.data(), nvrhiCommandLists.size(),
       nvrhi::CommandQueue::Graphics);
   ++impl_->submittedFrameCount;
+  if (!impl_->frameResourceReuseWaitInstances.empty()) {
+    const size_t frameResourceSlot =
+        static_cast<size_t>(impl_->currentFrameIndex %
+                            impl_->frameResourceReuseWaitInstances.size());
+    impl_->frameResourceReuseWaitInstances[frameResourceSlot] = instance;
+  }
   if (!timingQueries.empty()) {
     impl_->pendingGpuTimingSubmissions.push_back(PendingGpuTimingSubmission{
         .frameIndex = impl_->currentFrameIndex,
@@ -4610,6 +5564,11 @@ NvrhiGPUDevice::submitBackgroundBufferCopies(
           "NvrhiGPUDevice::submitBackgroundBufferCopies: destination copy "
           "range is out of bounds");
     }
+    if (dst->immutable) {
+      return Result<SubmissionHandle, std::string>::makeError(
+          "NvrhiGPUDevice::submitBackgroundBufferCopies: destination buffer "
+          "is immutable");
+    }
     ++copyCount;
   }
   if (copyCount == 0u) {
@@ -4661,6 +5620,10 @@ NvrhiGPUDevice::updateBuffer(BufferHandle bufferHandle,
   if (buffer == nullptr || offset + data.size() > buffer->byteSize) {
     return Result<bool, std::string>::makeError(
         "NvrhiGPUDevice::updateBuffer: invalid buffer range");
+  }
+  if (buffer->immutable) {
+    return Result<bool, std::string>::makeError(
+        "NvrhiGPUDevice::updateBuffer: buffer is immutable");
   }
   if (buffer->mapped != nullptr) {
     std::memcpy(buffer->mapped + offset, data.data(), data.size());

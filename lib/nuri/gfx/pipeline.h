@@ -13,6 +13,7 @@ namespace nuri {
 enum class PipelineType : uint8_t {
   Graphics,
   Compute,
+  Meshlet,
   Count,
 };
 
@@ -20,7 +21,7 @@ class Pipeline {
 public:
   explicit Pipeline(GPUDevice &gpu)
       : gpu_(gpu), type_(PipelineType::Count), renderPipeline_{},
-        computePipeline_{} {}
+        computePipeline_{}, meshletPipeline_{} {}
 
   ~Pipeline() {
     if (type_ == PipelineType::Graphics && nuri::isValid(renderPipeline_)) {
@@ -28,6 +29,9 @@ public:
     } else if (type_ == PipelineType::Compute &&
                nuri::isValid(computePipeline_)) {
       gpu_.destroyComputePipeline(computePipeline_);
+    } else if (type_ == PipelineType::Meshlet &&
+               nuri::isValid(meshletPipeline_)) {
+      gpu_.destroyMeshletPipeline(meshletPipeline_);
     }
   }
 
@@ -80,6 +84,26 @@ public:
         computePipeline_);
   }
 
+  Result<MeshletPipelineHandle, std::string>
+  createMeshletPipeline(const MeshletPipelineDesc &desc,
+                        std::string_view debugName = {}) {
+    if (isCreated()) {
+      return Result<MeshletPipelineHandle, std::string>::makeError(
+          "Pipeline already created");
+    }
+
+    auto result = gpu_.createMeshletPipeline(desc, debugName);
+    if (result.hasError()) {
+      return Result<MeshletPipelineHandle, std::string>::makeError(
+          result.error());
+    }
+
+    meshletPipeline_ = result.value();
+    type_ = PipelineType::Meshlet;
+    return Result<MeshletPipelineHandle, std::string>::makeResult(
+        meshletPipeline_);
+  }
+
   [[nodiscard]] RenderPipelineHandle getRenderPipeline() const {
     NURI_ASSERT(type_ == PipelineType::Graphics,
                 "Pipeline type is not Graphics");
@@ -91,6 +115,11 @@ public:
     return computePipeline_;
   }
 
+  [[nodiscard]] MeshletPipelineHandle getMeshletPipeline() const {
+    NURI_ASSERT(type_ == PipelineType::Meshlet, "Pipeline type is not Meshlet");
+    return meshletPipeline_;
+  }
+
   [[nodiscard]] PipelineType getType() const { return type_; }
   [[nodiscard]] bool isCreated() const { return type_ != PipelineType::Count; }
 
@@ -99,6 +128,7 @@ private:
   PipelineType type_ = PipelineType::Count;
   RenderPipelineHandle renderPipeline_{};
   ComputePipelineHandle computePipeline_{};
+  MeshletPipelineHandle meshletPipeline_{};
 };
 
 } // namespace nuri

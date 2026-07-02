@@ -46,9 +46,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/shader.cpp
   nuri/platform/gpu_device_factory.cpp
   nuri/platform/glfw_window.cpp
-  nuri/platform/lvk_gpu_device.cpp
   nuri/platform/minilog_log.cpp
-  nuri/platform/nvrhi_gpu_device.cpp
   nuri/resources/gpu/geometry_pool.cpp
   nuri/resources/gpu/material.cpp
   nuri/resources/gpu/model.cpp
@@ -225,6 +223,7 @@ endif()
 set(NVRHI_ACTIVE_SOURCE_DIR "${NVRHI_SOURCE_DIR}")
 set(NVRHI_PATCH_FILE "${CMAKE_SOURCE_DIR}/patches/nvrhi/framebuffer-resolve.patch")
 if(EXISTS "${NVRHI_PATCH_FILE}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${NVRHI_PATCH_FILE}")
   find_package(Git REQUIRED)
 
   execute_process(
@@ -300,6 +299,12 @@ endif()
 
 add_subdirectory("${NVRHI_ACTIVE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/nvrhi-build")
 
+if(TARGET nvrhi_vk)
+  target_include_directories(nvrhi_vk PRIVATE
+    "${LVK_SOURCE_DIR}/third-party/deps/src/volk"
+  )
+endif()
+
 if(NURI_WITH_TRACY_GPU_DRAW_ZONES)
   if(NURI_WITH_TRACY_GPU AND TARGET LVKVulkan)
     target_compile_definitions(LVKVulkan PUBLIC "LVK_WITH_TRACY_GPU_DRAW_ZONES=1")
@@ -312,10 +317,13 @@ target_link_libraries(nuri_renderer
   PUBLIC
     glm::glm
     assimp::assimp
-    LVKLibrary
   PRIVATE
+    LVKLibrary
     nvrhi
     nvrhi_vk
+    glslang
+    SPIRV
+    glslang-default-resource-limits
 )
 
 set(NURI_KTX_TARGET "")
@@ -385,6 +393,82 @@ if(NURI_BUILD_SHARED)
   target_compile_definitions(nuri_renderer PUBLIC NURI_SHARED)
   target_compile_definitions(nuri_renderer PRIVATE NURI_EXPORTS)
 endif()
+
+function(nuri_configure_backend_adapter target_name)
+  target_include_directories(${target_name}
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${Vulkan_INCLUDE_DIRS}
+  )
+
+  target_compile_features(${target_name} PUBLIC cxx_std_20)
+
+  if(MSVC)
+    target_compile_options(${target_name} PRIVATE /arch:AVX2)
+  else()
+    target_compile_options(${target_name} PRIVATE -march=native)
+  endif()
+
+  if(NURI_WITH_LOGGING)
+    target_compile_definitions(${target_name} PUBLIC NURI_LOGGING=1)
+  endif()
+
+  if(NURI_WITH_ASSERTS)
+    target_compile_definitions(${target_name} PUBLIC NURI_ASSERTS=1)
+  endif()
+
+  if(WIN32)
+    target_compile_definitions(${target_name} PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+  endif()
+
+  if(NURI_WITH_TRACY)
+    target_compile_definitions(${target_name} PUBLIC NURI_PROFILING=1 TRACY_ENABLE=1)
+    target_link_libraries(${target_name} PRIVATE ${NURI_TRACY_CLIENT_TARGET})
+  endif()
+
+  if(NURI_BUILD_SHARED)
+    target_compile_definitions(${target_name} PUBLIC NURI_SHARED)
+    target_compile_definitions(${target_name} PRIVATE NURI_EXPORTS)
+  endif()
+
+  target_link_libraries(${target_name}
+    PRIVATE
+      glm::glm
+      ${NURI_MESHOPT_TARGET}
+      ${NURI_YYJSON_TARGET}
+      ${NURI_UNORDERED_DENSE_TARGET}
+  )
+
+  target_precompile_headers(${target_name} PRIVATE nuri/pch.h)
+endfunction()
+
+add_library(nuri_lvk_backend OBJECT
+  nuri/platform/lvk_gpu_device.cpp
+)
+nuri_configure_backend_adapter(nuri_lvk_backend)
+target_link_libraries(nuri_lvk_backend PRIVATE LVKLibrary)
+
+add_library(nuri_nvrhi_backend OBJECT
+  nuri/platform/nvrhi_gpu_device.cpp
+)
+nuri_configure_backend_adapter(nuri_nvrhi_backend)
+target_include_directories(nuri_nvrhi_backend
+  PRIVATE
+    "${LVK_SOURCE_DIR}/third-party/deps/src/volk"
+)
+target_link_libraries(nuri_nvrhi_backend
+  PRIVATE
+    glfw
+    glslang
+    nvrhi
+    nvrhi_vk
+)
+
+target_sources(nuri_renderer
+  PRIVATE
+    $<TARGET_OBJECTS:nuri_lvk_backend>
+    $<TARGET_OBJECTS:nuri_nvrhi_backend>
+)
 
 set_source_files_properties(
   nuri/resources/stb_image.cpp

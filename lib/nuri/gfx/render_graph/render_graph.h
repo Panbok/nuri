@@ -92,6 +92,7 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   std::span<const TextureHandle> dependencyTextures{};
   std::span<const RenderGraphAccessMode> dependencyTextureAccessModes{};
   std::span<const DrawItem> draws{};
+  std::span<const MeshDispatchItem> meshDispatches{};
   bool drawBuffersPreResolved = false;
   // Explicit extra draw-buffer dependencies; draw items are not scanned when
   // drawBuffersPreResolved is true.
@@ -158,6 +159,7 @@ struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   // populated together.
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const DrawItem> draws{};
+  std::span<const MeshDispatchItem> meshDispatches{};
   std::span<const RenderGraphPreparedDependencyBufferBinding>
       dependencyBufferBindings{};
   std::span<const RenderGraphPreparedDependencyTextureBinding>
@@ -421,8 +423,16 @@ struct NURI_API RenderGraphCompileResult {
       unresolvedDependencyTextureBindings;
   std::pmr::vector<ComputeDispatchItem> ownedPreDispatches;
   std::pmr::vector<DrawItem> ownedDrawItems;
+  std::pmr::vector<MeshDispatchItem> ownedMeshDispatchItems;
+  std::pmr::vector<std::pmr::string> ownedMeshDispatchDebugLabels;
+  std::pmr::vector<std::pmr::vector<std::byte>> ownedMeshDispatchPushConstants;
+  std::pmr::vector<std::pmr::vector<BufferHandle>>
+      ownedMeshDispatchDependencyBuffers;
+  std::pmr::vector<std::pmr::vector<TextureHandle>>
+      ownedMeshDispatchDependencyTextures;
   std::pmr::vector<PassDispatchRange> preDispatchRangesByPass;
   std::pmr::vector<PassDrawRange> drawRangesByPass;
+  std::pmr::vector<PassDispatchRange> meshDispatchRangesByPass;
   std::pmr::vector<BufferHandle> resolvedPreDispatchDependencyBuffers;
   // Parallel to resolvedPreDispatchDependencyBuffers: resource index per slot.
   std::pmr::vector<uint32_t> resolvedPreDispatchDependencyBufferResourceIndices;
@@ -460,8 +470,14 @@ struct NURI_API RenderGraphCompileResult {
         unresolvedDependencyTextureBindings(ensureMemory(memory)),
         ownedPreDispatches(ensureMemory(memory)),
         ownedDrawItems(ensureMemory(memory)),
+        ownedMeshDispatchItems(ensureMemory(memory)),
+        ownedMeshDispatchDebugLabels(ensureMemory(memory)),
+        ownedMeshDispatchPushConstants(ensureMemory(memory)),
+        ownedMeshDispatchDependencyBuffers(ensureMemory(memory)),
+        ownedMeshDispatchDependencyTextures(ensureMemory(memory)),
         preDispatchRangesByPass(ensureMemory(memory)),
         drawRangesByPass(ensureMemory(memory)),
+        meshDispatchRangesByPass(ensureMemory(memory)),
         resolvedPreDispatchDependencyBuffers(ensureMemory(memory)),
         resolvedPreDispatchDependencyBufferResourceIndices(
             ensureMemory(memory)),
@@ -689,6 +705,13 @@ private:
     std::pmr::vector<DrawItem> draws;
     std::pmr::vector<std::pmr::string> drawDebugLabels;
     std::pmr::vector<std::pmr::vector<std::byte>> drawPushConstants;
+    std::pmr::vector<MeshDispatchItem> meshDispatches;
+    std::pmr::vector<std::pmr::string> meshDispatchDebugLabels;
+    std::pmr::vector<std::pmr::vector<std::byte>> meshDispatchPushConstants;
+    std::pmr::vector<std::pmr::vector<BufferHandle>>
+        meshDispatchDependencyBuffers;
+    std::pmr::vector<std::pmr::vector<TextureHandle>>
+        meshDispatchDependencyTextures;
 
     explicit OwnedPassPayload(
         std::pmr::memory_resource *memory = std::pmr::get_default_resource())
@@ -697,7 +720,10 @@ private:
           preDispatchDependencyBuffers(memory),
           preDispatchDependencyTextures(memory), dependencyBuffers(memory),
           dependencyTextures(memory), draws(memory), drawDebugLabels(memory),
-          drawPushConstants(memory) {}
+          drawPushConstants(memory), meshDispatches(memory),
+          meshDispatchDebugLabels(memory), meshDispatchPushConstants(memory),
+          meshDispatchDependencyBuffers(memory),
+          meshDispatchDependencyTextures(memory) {}
   };
 
   struct CompileWorkState {

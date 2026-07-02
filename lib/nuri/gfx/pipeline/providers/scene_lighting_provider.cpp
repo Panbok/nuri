@@ -596,11 +596,12 @@ SceneLightingProvider::ensureBufferRingCapacity(size_t requiredBytes,
   sceneDataBuffers_.reserve(safeCount);
   slotUploadStates_.assign(safeCount, SlotUploadState{});
   for (uint32_t i = 0u; i < safeCount; ++i) {
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
-                                                  .size = requested},
-                                       "forward_scene_data");
+    auto bufferResult =
+        Buffer::create(gpu_,
+                       BufferDesc{.usage = BufferUsage::Storage,
+                                  .storage = Storage::HostVisible,
+                                  .size = requested},
+                       "forward_scene_data");
     if (bufferResult.hasError()) {
       destroyBuffers();
       return Result<bool, std::string>::makeError(bufferResult.error());
@@ -618,7 +619,7 @@ SceneLightingProvider::ensureDisabledShadowFrameBuffer() {
     auto bufferResult =
         Buffer::create(gpu_,
                        BufferDesc{.usage = BufferUsage::Storage,
-                                  .storage = Storage::Device,
+                                  .storage = Storage::HostVisible,
                                   .size = sizeof(ShadowFrameGpuData)},
                        "forward_scene_disabled_shadow_frame");
     if (bufferResult.hasError()) {

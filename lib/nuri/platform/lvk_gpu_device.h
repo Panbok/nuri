@@ -52,10 +52,14 @@ public:
   Result<ComputePipelineHandle, std::string>
   createComputePipeline(const ComputePipelineDesc &desc,
                         std::string_view debugName = {}) override;
+  Result<MeshletPipelineHandle, std::string>
+  createMeshletPipeline(const MeshletPipelineDesc &desc,
+                        std::string_view debugName = {}) override;
 
   // Resource destruction
   void destroyRenderPipeline(RenderPipelineHandle pipeline) override;
   void destroyComputePipeline(ComputePipelineHandle pipeline) override;
+  void destroyMeshletPipeline(MeshletPipelineHandle pipeline) override;
   void destroyBuffer(BufferHandle buffer) override;
   void destroyTexture(TextureHandle texture) override;
   void destroySampler(SamplerHandle sampler) override;
@@ -68,9 +72,12 @@ public:
   bool isValid(ShaderHandle h) const override;
   bool isValid(RenderPipelineHandle h) const override;
   bool isValid(ComputePipelineHandle h) const override;
+  bool isValid(MeshletPipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
   TextureDimensions getTextureDimensions(TextureHandle h) const override;
   TextureCompressionCaps getTextureCompressionCaps() const override;
+  bool supportsFeature(GPUFeature feature) const override;
+  MeshletLimits getMeshletLimits() const override;
   bool supportsSampledImageLinearFiltering(Format format) const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
   uint32_t getSamplerBindlessIndex(SamplerHandle h) const override;

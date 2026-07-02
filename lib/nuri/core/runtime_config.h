@@ -39,6 +39,9 @@ struct NURI_API RuntimeOpaqueShaderConfig {
   std::filesystem::path shaderBasePath;
   std::filesystem::path meshVertex;
   std::filesystem::path meshFragment;
+  std::filesystem::path meshletTask;
+  std::filesystem::path meshletMesh;
+  std::filesystem::path meshletFragment;
   std::filesystem::path pickFragment;
   std::filesystem::path shadowInspectFragment;
   std::filesystem::path computeInstances;

@@ -2,6 +2,7 @@
 
 #include "nuri/core/result.h"
 #include "nuri/defines.h"
+#include "nuri/resources/scene_importer.h"
 #include "nuri/scene/light.h"
 #include "nuri/scene/scene_prefab.h"
 
@@ -33,6 +34,9 @@ public:
   loadLightsFromFile(std::string_view path);
   [[nodiscard]] static Result<ScenePrefab, std::string> loadScenePrefabFromFile(
       std::string_view path,
+      std::pmr::memory_resource *memory = std::pmr::get_default_resource());
+  [[nodiscard]] static Result<ScenePrefab, std::string> loadScenePrefabFromFile(
+      std::string_view path, const SceneImportOptions &options,
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
 };
 

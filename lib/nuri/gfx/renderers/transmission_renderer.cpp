@@ -1617,11 +1617,12 @@ TransmissionRenderer::ensureBlendedFrameDataRingCapacity(size_t requiredBytes) {
       gpu_.destroyBuffer(slot.buffer->handle());
     }
     slot.buffer.reset();
-    auto bufferResult = Buffer::create(gpu_,
-                                       BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
-                                                  .size = requiredBytes},
-                                       "transparent_transmission_frame_data");
+    auto bufferResult =
+        Buffer::create(gpu_,
+                       BufferDesc{.usage = BufferUsage::Storage,
+                                  .storage = Storage::HostVisible,
+                                  .size = requiredBytes},
+                       "transparent_transmission_frame_data");
     if (bufferResult.hasError()) {
       return Result<bool, std::string>::makeError(bufferResult.error());
     }

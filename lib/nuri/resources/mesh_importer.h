@@ -27,7 +27,11 @@ struct MeshImportOptions {
   bool limitBoneWeights = true;
   bool optimize = true;
   bool generateLods = true;
+  bool generateMeshlets = false;
   uint32_t lodCount = kMaxLodCount;
+  uint32_t meshletMaxVertices = 64u;
+  uint32_t meshletMaxPrimitives = 124u;
+  float meshletConeWeight = 0.0f;
   std::array<float, kMaxLodCount - 1> lodTriangleRatios{0.60f, 0.35f, 0.20f};
   float lodTargetError = 1e-2f;
 };

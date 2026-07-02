@@ -33,7 +33,19 @@ struct MorphTarget {
 struct SubmeshLod {
   uint32_t indexOffset = 0;
   uint32_t indexCount = 0;
+  uint32_t meshletOffset = 0;
+  uint32_t meshletCount = 0;
   float error = 0.0f;
+};
+
+struct MeshletDescriptor {
+  uint32_t vertexOffset = 0;
+  uint32_t vertexCount = 0;
+  uint32_t primitiveOffset = 0;
+  uint32_t primitiveCount = 0;
+  glm::vec4 boundsSphere{0.0f};
+  glm::vec4 coneApex{0.0f};
+  glm::vec4 coneAxisCutoff{0.0f};
 };
 
 struct Submesh {
@@ -57,12 +69,16 @@ struct MeshData {
   std::pmr::vector<VertexSkinInfluence> skinInfluences;
   std::pmr::vector<uint32_t> indices;
   std::pmr::vector<Submesh> submeshes;
+  std::pmr::vector<MeshletDescriptor> meshlets;
+  std::pmr::vector<uint32_t> meshletVertexIndices;
+  std::pmr::vector<uint8_t> meshletPrimitiveIndices;
   std::pmr::vector<MorphTarget> morphTargets;
   std::pmr::string name;
 
   explicit MeshData(
       std::pmr::memory_resource *mem = std::pmr::get_default_resource())
       : vertices(mem), skinInfluences(mem), indices(mem), submeshes(mem),
+        meshlets(mem), meshletVertexIndices(mem), meshletPrimitiveIndices(mem),
         morphTargets(mem), name(mem) {}
 };
 

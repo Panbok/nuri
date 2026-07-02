@@ -98,6 +98,31 @@ private:
   static_assert(offsetof(PushConstants, instanceCount) == 80u);
   static_assert(offsetof(PushConstants, shadowCascadeIndex) == 120u);
 
+  struct MeshletPushConstants {
+    uint64_t frameDataAddress = 0;
+    uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint64_t instanceMatricesAddress = 0;
+    uint64_t instanceRemapAddress = 0;
+    uint64_t instanceLodBoundsAddress = 0;
+    uint64_t meshletBufferAddress = 0;
+    uint64_t meshletVertexIndexBufferAddress = 0;
+    uint64_t meshletPrimitiveIndexBufferAddress = 0;
+    uint64_t meshletLodRangeBufferAddress = 0;
+    uint32_t instanceCount = 0;
+    uint32_t materialIndex = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
+    uint32_t firstInstance = 0;
+    uint32_t candidateOffset = 0;
+    uint32_t meshletFlags = 0;
+    uint32_t vertexOffset = 0;
+    glm::vec4 lodThresholds{0.0f};
+  };
+  static_assert(sizeof(MeshletPushConstants) == 128,
+                "ShadowRenderer::MeshletPushConstants must match shader "
+                "layout");
+
   struct MeshDrawTemplate {
     const Renderable *renderable = nullptr;
     const Submesh *submesh = nullptr;
@@ -107,12 +132,15 @@ private:
     uint64_t indexBufferOffset = 0;
     IndexFormat indexFormat = IndexFormat::U32;
     BufferHandle baseVertexBuffer{};
+    BufferHandle vertexDecodeBuffer{};
     uint64_t vertexBufferByteOffset = 0;
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = 0;
+    const Model::ModelMeshletGpuView *meshletView = nullptr;
+    uint32_t meshletMaxCount = 0;
     bool doubleSided = false;
     bool alphaMasked = false;
     bool dynamicCaster = false;
@@ -128,6 +156,7 @@ private:
     uint64_t indexBufferOffset = 0;
     IndexFormat indexFormat = IndexFormat::U32;
     BufferHandle vertexBuffer{};
+    BufferHandle vertexDecodeBuffer{};
     uint64_t vertexBufferAddress = 0;
     uint64_t vertexDecodeBufferAddress = 0;
     uint32_t vertexDecodeIndex = 0;
@@ -136,15 +165,24 @@ private:
     uint64_t rasterSignature = 0;
     uint32_t indexCount = 0;
     uint32_t firstIndex = 0;
+    const Model::ModelMeshletGpuView *meshletView = nullptr;
+    uint32_t submeshIndex = 0;
+    uint32_t meshletMaxCount = 0;
+    uint32_t meshletCount = 0;
+    uint32_t vertexOffset = 0;
     bool doubleSided = false;
     bool alphaMasked = false;
+    bool useMeshlets = false;
     bool hasCasterCullingBounds = false;
     std::array<glm::vec3, 8> casterWorldCorners{};
   };
 
   struct StaticShadowBatchTemplate {
+    bool useMeshlets = false;
     RenderPipelineHandle pipeline{};
+    MeshletPipelineHandle meshletPipeline{};
     BufferHandle vertexBuffer{};
+    BufferHandle vertexDecodeBuffer{};
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
     IndexFormat indexFormat = IndexFormat::U32;
@@ -155,6 +193,11 @@ private:
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = 0;
+    const Model::ModelMeshletGpuView *meshletView = nullptr;
+    uint32_t submeshIndex = 0;
+    uint32_t meshletMaxCount = 0;
+    uint32_t meshletCount = 0;
+    uint32_t vertexOffset = 0;
     uint32_t firstInstanceIndex = 0;
     uint32_t instanceCount = 0;
     uint64_t rasterSignature = 0;
@@ -162,8 +205,11 @@ private:
   };
 
   struct StaticShadowBatchKey {
+    bool useMeshlets = false;
     RenderPipelineHandle pipeline{};
+    MeshletPipelineHandle meshletPipeline{};
     BufferHandle vertexBuffer{};
+    BufferHandle vertexDecodeBuffer{};
     BufferHandle indexBuffer{};
     uint64_t indexBufferOffset = 0;
     IndexFormat indexFormat = IndexFormat::U32;
@@ -174,12 +220,26 @@ private:
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = 0;
+    BufferHandle meshletBuffer{};
+    BufferHandle meshletVertexIndexBuffer{};
+    BufferHandle meshletPrimitiveIndexBuffer{};
+    BufferHandle meshletLodRangeBuffer{};
+    uint32_t submeshIndex = 0;
+    uint32_t meshletMaxCount = 0;
+    uint32_t meshletCount = 0;
+    uint32_t vertexOffset = 0;
 
     bool operator==(const StaticShadowBatchKey &other) const noexcept {
-      return pipeline.index == other.pipeline.index &&
+      return useMeshlets == other.useMeshlets &&
+             pipeline.index == other.pipeline.index &&
              pipeline.generation == other.pipeline.generation &&
+             meshletPipeline.index == other.meshletPipeline.index &&
+             meshletPipeline.generation == other.meshletPipeline.generation &&
              vertexBuffer.index == other.vertexBuffer.index &&
              vertexBuffer.generation == other.vertexBuffer.generation &&
+             vertexDecodeBuffer.index == other.vertexDecodeBuffer.index &&
+             vertexDecodeBuffer.generation ==
+                 other.vertexDecodeBuffer.generation &&
              indexBuffer.index == other.indexBuffer.index &&
              indexBuffer.generation == other.indexBuffer.generation &&
              indexBufferOffset == other.indexBufferOffset &&
@@ -189,7 +249,24 @@ private:
              vertexDecodeBufferAddress == other.vertexDecodeBufferAddress &&
              vertexDecodeIndex == other.vertexDecodeIndex &&
              packedVertexFormat == other.packedVertexFormat &&
-             materialIndex == other.materialIndex;
+             materialIndex == other.materialIndex &&
+             meshletBuffer.index == other.meshletBuffer.index &&
+             meshletBuffer.generation == other.meshletBuffer.generation &&
+             meshletVertexIndexBuffer.index ==
+                 other.meshletVertexIndexBuffer.index &&
+             meshletVertexIndexBuffer.generation ==
+                 other.meshletVertexIndexBuffer.generation &&
+             meshletPrimitiveIndexBuffer.index ==
+                 other.meshletPrimitiveIndexBuffer.index &&
+             meshletPrimitiveIndexBuffer.generation ==
+                 other.meshletPrimitiveIndexBuffer.generation &&
+             meshletLodRangeBuffer.index == other.meshletLodRangeBuffer.index &&
+             meshletLodRangeBuffer.generation ==
+                 other.meshletLodRangeBuffer.generation &&
+             submeshIndex == other.submeshIndex &&
+             meshletMaxCount == other.meshletMaxCount &&
+             meshletCount == other.meshletCount &&
+             vertexOffset == other.vertexOffset;
     }
   };
 
@@ -207,9 +284,14 @@ private:
       };
 
       uint64_t hash = kOffsetBasis;
+      hash = combine(hash, key.useMeshlets ? 1ull : 0ull);
       hash = combine(hash, fold(key.pipeline.index, key.pipeline.generation));
+      hash = combine(hash, fold(key.meshletPipeline.index,
+                                key.meshletPipeline.generation));
       hash = combine(hash,
                      fold(key.vertexBuffer.index, key.vertexBuffer.generation));
+      hash = combine(hash, fold(key.vertexDecodeBuffer.index,
+                                key.vertexDecodeBuffer.generation));
       hash = combine(hash,
                      fold(key.indexBuffer.index, key.indexBuffer.generation));
       hash = combine(hash, key.indexBufferOffset);
@@ -222,6 +304,18 @@ private:
           combine(hash, (static_cast<uint64_t>(key.vertexDecodeIndex) << 32u) |
                             key.packedVertexFormat);
       hash = combine(hash, key.materialIndex);
+      hash = combine(
+          hash, fold(key.meshletBuffer.index, key.meshletBuffer.generation));
+      hash = combine(hash, fold(key.meshletVertexIndexBuffer.index,
+                                key.meshletVertexIndexBuffer.generation));
+      hash = combine(hash, fold(key.meshletPrimitiveIndexBuffer.index,
+                                key.meshletPrimitiveIndexBuffer.generation));
+      hash = combine(hash, fold(key.meshletLodRangeBuffer.index,
+                                key.meshletLodRangeBuffer.generation));
+      hash = combine(hash, (static_cast<uint64_t>(key.submeshIndex) << 32u) |
+                               key.meshletMaxCount);
+      hash = combine(hash, (static_cast<uint64_t>(key.meshletCount) << 32u) |
+                               key.vertexOffset);
       return static_cast<size_t>(hash);
     }
   };
@@ -356,10 +450,13 @@ private:
 
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
+  Result<bool, std::string> createShadowMeshletShaders();
   Result<bool, std::string> createPreviewShaders();
   Result<bool, std::string> createSdsmReduceShaders();
   Result<bool, std::string> createSdsmHistogramReduceShaders();
   Result<bool, std::string> createPipelines(Format depthFormat);
+  Result<bool, std::string>
+  ensureShadowMeshletPipelineState(Format depthFormat);
   Result<bool, std::string> createPreviewPipeline();
   Result<bool, std::string> createSdsmReducePipeline();
   Result<bool, std::string> createSdsmHistogramReducePipeline();
@@ -401,6 +498,7 @@ private:
   void destroyBuffers();
   void destroyShaders();
   void destroyShadowDepthPipelineState();
+  void destroyShadowMeshletPipelineState();
   void destroyPipelineState();
   void resetCachedState();
   void resetFrameBuildState();
@@ -413,6 +511,7 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> shadowShader_;
   std::unique_ptr<Shader> shadowOpaqueShader_;
+  std::unique_ptr<Shader> shadowMeshletShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> sdsmReduceShader_;
@@ -456,6 +555,13 @@ private:
       cascadePushConstants_{};
   std::array<std::pmr::vector<DrawItem>, kMaxShadowCascades>
       cascadeDrawItems_{};
+  std::array<std::pmr::vector<MeshletPushConstants>, kMaxShadowCascades>
+      cascadeMeshletPushConstants_{};
+  std::array<std::pmr::vector<MeshDispatchItem>, kMaxShadowCascades>
+      cascadeMeshDispatchItems_{};
+  std::array<std::pmr::vector<std::pmr::vector<BufferHandle>>,
+             kMaxShadowCascades>
+      cascadeMeshDispatchDependencyBuffers_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDrawCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeCulledCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDynamicDrawCounts_{};
@@ -483,6 +589,10 @@ private:
 
   ShaderHandle shadowVertexShader_{};
   ShaderHandle shadowOpaqueVertexShader_{};
+  ShaderHandle shadowMeshletTaskShader_{};
+  ShaderHandle shadowMeshletMeshShader_{};
+  ShaderHandle shadowMeshletDepthFragmentShader_{};
+  ShaderHandle shadowMeshletDepthAlphaFragmentShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle sdsmReduceComputeShader_{};
@@ -494,6 +604,11 @@ private:
   RenderPipelineHandle shadowAlphaPipelineHandle_{};
   RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
   Format shadowDepthPipelineFormat_ = Format::Count;
+  MeshletPipelineHandle shadowMeshletPipelineHandle_{};
+  MeshletPipelineHandle shadowMeshletDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle shadowMeshletAlphaPipelineHandle_{};
+  MeshletPipelineHandle shadowMeshletAlphaDoubleSidedPipelineHandle_{};
+  Format shadowMeshletDepthPipelineFormat_ = Format::Count;
   ComputePipelineHandle sdsmReducePipelineHandle_{};
   ComputePipelineHandle sdsmHistogramReducePipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};
@@ -507,6 +622,8 @@ private:
   bool hasPreparedShadowDepthPasses_ = false;
   bool hasPreparedShadowPreviewPass_ = false;
   bool hasActiveShadowLightForFrame_ = false;
+  bool shadowMeshletPipelineUnsupported_ = false;
+  bool loggedShadowMeshletFallbackWarning_ = false;
   PreviewPushConstants previewPushConstants_{};
   DrawItem previewDraw_{};
 

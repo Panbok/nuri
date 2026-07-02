@@ -38,6 +38,11 @@ struct ComputePipelineHandle {
   uint32_t generation = 0;
 };
 
+struct MeshletPipelineHandle {
+  uint32_t index = 0;
+  uint32_t generation = 0;
+};
+
 struct RecordingContextHandle {
   uint32_t index = 0;
   uint32_t generation = 0;
@@ -64,6 +69,7 @@ constexpr bool isValid(SamplerHandle h) { return h.generation != 0; }
 constexpr bool isValid(ShaderHandle h) { return h.generation != 0; }
 constexpr bool isValid(RenderPipelineHandle h) { return h.generation != 0; }
 constexpr bool isValid(ComputePipelineHandle h) { return h.generation != 0; }
+constexpr bool isValid(MeshletPipelineHandle h) { return h.generation != 0; }
 constexpr bool isValid(RecordingContextHandle h) { return h.generation != 0; }
 constexpr bool isValid(RecordedCommandBufferHandle h) {
   return h.generation != 0;
@@ -77,6 +83,7 @@ static_assert(std::is_trivially_destructible_v<SamplerHandle>);
 static_assert(std::is_trivially_destructible_v<ShaderHandle>);
 static_assert(std::is_trivially_destructible_v<RenderPipelineHandle>);
 static_assert(std::is_trivially_destructible_v<ComputePipelineHandle>);
+static_assert(std::is_trivially_destructible_v<MeshletPipelineHandle>);
 static_assert(std::is_trivially_destructible_v<RecordingContextHandle>);
 static_assert(std::is_trivially_destructible_v<RecordedCommandBufferHandle>);
 static_assert(std::is_trivially_destructible_v<SubmissionHandle>);
@@ -231,6 +238,11 @@ enum class ShaderStage : uint8_t {
   Count
 };
 
+enum class GPUFeature : uint8_t {
+  Meshlets,
+  RayTracingClusters,
+};
+
 constexpr const char *ShaderStageToString(ShaderStage stage) {
   switch (stage) {
   case ShaderStage::Vertex:
@@ -292,6 +304,46 @@ struct GeometryPoolConfig {
   float compactionFragmentationThreshold = 0.3f;
   size_t compactionMinSavingsBytes = 16u * 1024u * 1024u;
   size_t compactionCopyBudgetBytesPerFrame = 32u * 1024u * 1024u;
+};
+
+struct MeshletLimits {
+  uint32_t maxTaskWorkGroupTotalCount = 0;
+  uint32_t maxTaskWorkGroupInvocations = 0;
+  uint32_t maxTaskWorkGroupSizeX = 0;
+  uint32_t maxTaskWorkGroupSizeY = 0;
+  uint32_t maxTaskWorkGroupSizeZ = 0;
+  uint32_t maxTaskWorkGroupCountX = 0;
+  uint32_t maxTaskWorkGroupCountY = 0;
+  uint32_t maxTaskWorkGroupCountZ = 0;
+  uint32_t maxTaskPayloadBytes = 0;
+  uint32_t maxTaskSharedMemoryBytes = 0;
+  uint32_t maxTaskPayloadAndSharedMemoryBytes = 0;
+  uint32_t maxMeshWorkGroupTotalCount = 0;
+  uint32_t maxMeshWorkGroupInvocations = 0;
+  uint32_t maxMeshWorkGroupSizeX = 0;
+  uint32_t maxMeshWorkGroupSizeY = 0;
+  uint32_t maxMeshWorkGroupSizeZ = 0;
+  uint32_t maxMeshWorkGroupCountX = 0;
+  uint32_t maxMeshWorkGroupCountY = 0;
+  uint32_t maxMeshWorkGroupCountZ = 0;
+  uint32_t maxMeshSharedMemoryBytes = 0;
+  uint32_t maxMeshPayloadAndSharedMemoryBytes = 0;
+  uint32_t maxMeshOutputMemoryBytes = 0;
+  uint32_t maxMeshPayloadAndOutputMemoryBytes = 0;
+  uint32_t maxMeshOutputComponents = 0;
+  uint32_t meshOutputPerVertexGranularity = 0;
+  uint32_t meshOutputPerPrimitiveGranularity = 0;
+  uint32_t maxMeshOutputVertices = 0;
+  uint32_t maxMeshOutputPrimitives = 0;
+  uint32_t maxMeshOutputLayers = 0;
+  uint32_t maxPreferredTaskWorkGroupInvocations = 0;
+  uint32_t maxPreferredMeshWorkGroupInvocations = 0;
+  bool prefersLocalInvocationVertexOutput = false;
+  bool prefersLocalInvocationPrimitiveOutput = false;
+  bool prefersCompactVertexOutput = false;
+  bool prefersCompactPrimitiveOutput = false;
+  bool supportsMeshDispatchIndirect = false;
+  bool supportsMeshDispatchIndirectCount = false;
 };
 
 enum class GPUBackendPreference : uint8_t {

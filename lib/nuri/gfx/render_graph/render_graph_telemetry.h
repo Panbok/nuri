@@ -43,6 +43,7 @@ struct NURI_API RenderGraphTelemetrySnapshot {
     uint32_t unresolvedDependencyBufferBindingCount = 0;
     uint32_t ownedPreDispatchCount = 0;
     uint32_t ownedDrawItemCount = 0;
+    uint32_t ownedMeshDispatchItemCount = 0;
     uint32_t resolvedPreDispatchDependencyBufferSlotCount = 0;
     uint32_t unresolvedPreDispatchDependencyBufferBindingCount = 0;
     uint32_t unresolvedDrawBufferBindingCount = 0;
@@ -97,6 +98,8 @@ struct NURI_API RenderGraphTelemetrySnapshot {
       RenderGraphCompileResult::UnresolvedPreDispatchDependencyBufferBinding>
       unresolvedPreDispatchDependencyBufferBindings;
   std::pmr::vector<RenderGraphCompileResult::PassDrawRange> drawRangesByPass;
+  std::pmr::vector<RenderGraphCompileResult::PassDispatchRange>
+      meshDispatchRangesByPass;
   std::pmr::vector<RenderGraphCompileResult::UnresolvedDrawBufferBinding>
       unresolvedDrawBufferBindings;
 

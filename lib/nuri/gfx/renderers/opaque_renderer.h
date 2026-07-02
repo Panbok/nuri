@@ -20,6 +20,7 @@
 #include <memory>
 #include <memory_resource>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -100,6 +101,41 @@ private:
   static_assert(offsetof(PushConstants, instanceCount) == 80u);
   static_assert(offsetof(PushConstants, shadowCascadeIndex) == 120u);
 
+  struct MeshletPushConstants {
+    uint64_t frameDataAddress = 0;
+    uint64_t instanceMatricesAddress = 0;
+    uint64_t instanceRemapAddress = 0;
+    uint64_t instanceLodBoundsAddress = 0;
+    glm::vec4 lodThresholds{0.0f};
+    uint64_t meshletBatchBufferAddress = 0;
+    uint32_t batchBase = 0;
+    uint32_t candidateOffset = 0;
+  };
+  static_assert(sizeof(MeshletPushConstants) == 64,
+                "OpaqueRenderer::MeshletPushConstants must match shader "
+                "layout");
+  static_assert(offsetof(MeshletPushConstants, lodThresholds) == 32u);
+  static_assert(offsetof(MeshletPushConstants, meshletBatchBufferAddress) ==
+                48u);
+  static_assert(offsetof(MeshletPushConstants, batchBase) == 56u);
+
+  struct alignas(16) MeshletBatchGpuData {
+    uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint64_t meshletBufferAddress = 0;
+    uint64_t meshletVertexIndexBufferAddress = 0;
+    uint64_t meshletPrimitiveIndexBufferAddress = 0;
+    uint64_t meshletLodRangeBufferAddress = 0;
+    glm::uvec4 draw{0u};
+    glm::uvec4 mesh{0u};
+    glm::uvec4 flags{0u};
+  };
+  static_assert(sizeof(MeshletBatchGpuData) == 96,
+                "OpaqueRenderer::MeshletBatchGpuData layout changed");
+  static_assert(offsetof(MeshletBatchGpuData, draw) == 48u);
+  static_assert(offsetof(MeshletBatchGpuData, mesh) == 64u);
+  static_assert(offsetof(MeshletBatchGpuData, flags) == 80u);
+
   struct alignas(16) ShadowSdsmReducePushConstants {
     uint64_t resultBufferAddress = 0u;
     uint32_t sourceTexId = kInvalidShadowBindlessIndex;
@@ -159,6 +195,7 @@ private:
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = kInvalidMaterialIndex;
+    const Model::ModelMeshletGpuView *meshletView = nullptr;
     bool doubleSided = false;
     bool alphaMasked = false;
   };
@@ -166,6 +203,30 @@ private:
   struct TessCandidate {
     float distanceSq = 0.0f;
     uint32_t instanceId = 0;
+  };
+
+  struct MeshletBatchInfo {
+    const Model::ModelMeshletGpuView *view = nullptr;
+    BufferHandle vertexDecodeBuffer{};
+    uint32_t meshletOffset = 0;
+    uint32_t meshletCount = 0;
+    uint32_t submeshIndex = 0;
+    uint32_t meshletMaxCount = 0;
+    uint32_t vertexOffset = 0;
+    bool doubleSided = false;
+    bool alphaMasked = false;
+  };
+
+  struct MeshletDispatchDependencyBuffers {
+    std::pmr::vector<BufferHandle> buffers;
+
+    explicit MeshletDispatchDependencyBuffers(
+        std::pmr::memory_resource *memory = std::pmr::get_default_resource())
+        : buffers(memory) {}
+
+    [[nodiscard]] std::span<const BufferHandle> span() const noexcept {
+      return std::span<const BufferHandle>(buffers.data(), buffers.size());
+    }
   };
 
   struct DynamicBufferSlot {
@@ -300,19 +361,32 @@ private:
 
   struct StaticBatchCache {
     bool valid = false;
+    bool meshletRequested = false;
+    bool meshletDispatchCacheValid = false;
     bool enableMeshLod = false;
     int32_t forcedMeshLod = -1;
     uint64_t generation = 1;
     uint64_t remapSignature = std::numeric_limits<uint64_t>::max();
     uint64_t indirectDrawSignature = std::numeric_limits<uint64_t>::max();
     uint64_t drawBufferSignature = std::numeric_limits<uint64_t>::max();
+    uint64_t meshletDispatchSignature = std::numeric_limits<uint64_t>::max();
+    uint64_t meshletCandidateCount = 0;
     std::pmr::vector<DrawItem> draws;
     std::pmr::vector<PushConstants> pushConstantsTemplates;
     std::pmr::vector<uint8_t> alphaMasked;
+    std::pmr::vector<MeshletBatchInfo> meshletBatchInfos;
+    std::pmr::vector<MeshDispatchItem> meshletDispatches;
+    std::pmr::vector<MeshletPushConstants> meshletPushConstantsTemplates;
+    std::pmr::vector<MeshletDispatchDependencyBuffers>
+        meshletDispatchDependencyBuffers;
+    std::pmr::vector<MeshletBatchGpuData> meshletBatchGpuData;
     std::pmr::vector<uint32_t> remap;
 
     explicit StaticBatchCache(std::pmr::memory_resource *memory)
         : draws(memory), pushConstantsTemplates(memory), alphaMasked(memory),
+          meshletBatchInfos(memory), meshletDispatches(memory),
+          meshletPushConstantsTemplates(memory),
+          meshletDispatchDependencyBuffers(memory), meshletBatchGpuData(memory),
           remap(memory) {}
   };
 
@@ -320,6 +394,8 @@ private:
   Result<bool, std::string> recreatePickTexture();
   Result<bool, std::string>
   ensureCentersPhaseBufferCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureInstanceLodBoundsBufferCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureInstanceBaseMatricesBufferCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
@@ -333,6 +409,8 @@ private:
   ensureVelocityFrameDataRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureVelocityGeometryRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureMeshletBatchRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureDynamicRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
                             size_t requiredBytes, size_t minimumBytes,
@@ -374,6 +452,7 @@ private:
                                     bool excludeTransmission);
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
+  Result<bool, std::string> ensureMeshletPipelineState();
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
@@ -430,7 +509,9 @@ private:
   void invalidateIndirectPackCache();
   void resetPickState();
   void capturePreviousTransforms(const RenderScene &scene, uint64_t frameIndex);
+  void destroyMeshletPipelineState();
   void destroyMeshPipelineState();
+  void resetMeshletPipelineState();
   void resetMeshPipelineState();
   void destroyDepthPyramidTextures();
   Result<bool, std::string>
@@ -455,9 +536,11 @@ private:
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> depthPyramidShader_;
   std::unique_ptr<Shader> computeShader_;
+  std::unique_ptr<Shader> meshletShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
   std::unique_ptr<Pipeline> computePipeline_;
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
+  std::unique_ptr<Buffer> instanceLodBoundsBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> previousInstanceMatricesRing_;
@@ -466,6 +549,7 @@ private:
   std::pmr::vector<DynamicBufferSlot> velocityGeometryRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
+  std::pmr::vector<DynamicBufferSlot> meshletBatchRing_;
   TextureHandle pickIdTexture_{};
   TextureHandle shadowInspectTexture_{};
   TextureHandle transmissionVisibilityDepthTexture_{};
@@ -511,6 +595,9 @@ private:
   ShaderHandle depthPyramidVertexShader_{};
   ShaderHandle depthPyramidFragmentShader_{};
   ShaderHandle computeShaderHandle_{};
+  ShaderHandle meshletTaskShader_{};
+  ShaderHandle meshletMeshShader_{};
+  ShaderHandle meshletFragmentShader_{};
   RenderPipelineHandle meshFillPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedFillPipelineHandle_{};
   RenderPipelineHandle meshTessPipelineHandle_{};
@@ -567,8 +654,11 @@ private:
   RenderPipelineHandle meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle depthPyramidPipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
+  MeshletPipelineHandle meshletPipelineHandle_{};
+  MeshletPipelineHandle meshletDoubleSidedPipelineHandle_{};
 
   size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
+  size_t instanceLodBoundsBufferCapacityBytes_ = 0;
   size_t instanceBaseMatricesBufferCapacityBytes_ = 0;
   bool initialized_ = false;
   bool tessellationUnsupported_ = false;
@@ -599,6 +689,11 @@ private:
   bool loggedMaterialFallbackWarning_ = false;
   bool loggedBlendMaterialUnsupportedWarning_ = false;
   bool loggedShadowSdsmReduceSkipWarning_ = false;
+  bool meshletPipelineInitialized_ = false;
+  bool meshletPipelineUnsupported_ = false;
+  bool loggedMeshletUnsupportedWarning_ = false;
+  bool loggedMeshletAssetWarning_ = false;
+  bool loggedMeshletIncompatibleWarning_ = false;
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -654,6 +749,7 @@ private:
   std::pmr::vector<PushConstants> drawPushConstants_;
   std::pmr::vector<DrawItem> drawItems_;
   std::pmr::vector<uint8_t> drawAlphaMasked_;
+  std::pmr::vector<MeshletBatchInfo> meshletBatchInfos_;
   std::pmr::vector<DrawItem> indirectDrawItems_;
   std::pmr::vector<uint8_t> indirectAlphaMasked_;
   std::pmr::vector<std::byte> indirectCommandUploadBytes_;
@@ -669,6 +765,11 @@ private:
   std::pmr::vector<DrawItem> normalPrepassDrawItems_;
   std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
   std::pmr::vector<DrawItem> depthPyramidDrawItems_;
+  std::pmr::vector<MeshDispatchItem> meshletDispatchItems_;
+  std::pmr::vector<MeshletPushConstants> meshletPushConstants_;
+  std::pmr::vector<MeshletBatchGpuData> meshletBatchGpuData_;
+  std::pmr::vector<MeshletDispatchDependencyBuffers>
+      meshletDispatchDependencyBuffers_;
   std::pmr::vector<TextureHandle> depthPyramidDependencyTextures_;
   std::pmr::vector<ShadowSdsmReducePushConstants>
       shadowSdsmReducePushConstants_;
