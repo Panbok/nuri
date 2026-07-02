@@ -81,13 +81,18 @@ index aada5c0..9d4776c 100644
          }
          
          if (desc.shadingRateAttachment.valid())
-@@ -261,4 +271,4 @@ namespace nvrhi
-         }
+diff --git a/src/common/state-tracking.cpp b/src/common/state-tracking.cpp
+index 0e875df..4940bbd 100644
+--- a/src/common/state-tracking.cpp
++++ b/src/common/state-tracking.cpp
+@@ -130,6 +130,7 @@ namespace nvrhi
+         requireBufferState(buffer, stateBits);
+ 
+         m_PermanentBufferStates.push_back(std::make_pair(buffer, stateBits));
++        getBufferStateTracking(buffer, true)->permanentTransition = true;
      }
  
--} // namespace nvrhi
-\ No newline at end of file
-+} // namespace nvrhi
+     ResourceStates CommandListResourceStateTracker::getTextureSubresourceState(TextureStateExtension* texture, ArraySlice arraySlice, MipLevel mipLevel)
 diff --git a/src/validation/validation-backend.h b/src/validation/validation-backend.h
 index 1eeb56a..db62795 100644
 --- a/src/validation/validation-backend.h
@@ -274,3 +279,93 @@ index 57e4c96..c0b0365 100644
      static vk::Viewport VKViewportWithDXCoords(const Viewport& v)
      {
          return vk::Viewport(v.minX, v.maxY, v.maxX - v.minX, -(v.maxY - v.minY), v.minZ, v.maxZ);
+
+diff --git a/src/vulkan/vulkan-constants.cpp b/src/vulkan/vulkan-constants.cpp
+index 8ab73c6..219bd04 100644
+--- a/src/vulkan/vulkan-constants.cpp
++++ b/src/vulkan/vulkan-constants.cpp
+@@ -157,5 +157,5 @@ namespace nvrhi::vulkan
+         if ((shaderType & ShaderType::Geometry) != 0)       result |= uint32_t(vk::PipelineStageFlagBits2::eGeometryShader);
+         if ((shaderType & ShaderType::Pixel) != 0)          result |= uint32_t(vk::PipelineStageFlagBits2::eFragmentShader);
+-        if ((shaderType & ShaderType::Amplification) != 0)  result |= uint32_t(vk::PipelineStageFlagBits2::eTaskShaderNV);
+-        if ((shaderType & ShaderType::Mesh) != 0)           result |= uint32_t(vk::PipelineStageFlagBits2::eMeshShaderNV);
++        if ((shaderType & ShaderType::Amplification) != 0)  result |= uint32_t(vk::PipelineStageFlagBits2::eTaskShaderEXT);
++        if ((shaderType & ShaderType::Mesh) != 0)           result |= uint32_t(vk::PipelineStageFlagBits2::eMeshShaderEXT);
+         if ((shaderType & ShaderType::AllRayTracing) != 0)  result |= uint32_t(vk::PipelineStageFlagBits2::eRayTracingShaderKHR); // or eRayTracingShaderNV, they have the same value
+@@ -179,5 +179,5 @@ namespace nvrhi::vulkan
+         static_assert(uint32_t(ShaderType::Pixel)         == uint32_t(VK_SHADER_STAGE_FRAGMENT_BIT));
+         static_assert(uint32_t(ShaderType::Compute)       == uint32_t(VK_SHADER_STAGE_COMPUTE_BIT));
+-        static_assert(uint32_t(ShaderType::Amplification) == uint32_t(VK_SHADER_STAGE_TASK_BIT_NV));
+-        static_assert(uint32_t(ShaderType::Mesh)          == uint32_t(VK_SHADER_STAGE_MESH_BIT_NV));
++        static_assert(uint32_t(ShaderType::Amplification) == uint32_t(VK_SHADER_STAGE_TASK_BIT_EXT));
++        static_assert(uint32_t(ShaderType::Mesh)          == uint32_t(VK_SHADER_STAGE_MESH_BIT_EXT));
+         static_assert(uint32_t(ShaderType::RayGeneration) == uint32_t(VK_SHADER_STAGE_RAYGEN_BIT_KHR));
+@@ -198,5 +198,5 @@ namespace nvrhi::vulkan
+         if ((shaderType & ShaderType::Geometry) != 0)       result |= uint32_t(vk::ShaderStageFlagBits::eGeometry);
+         if ((shaderType & ShaderType::Pixel) != 0)          result |= uint32_t(vk::ShaderStageFlagBits::eFragment);
+-        if ((shaderType & ShaderType::Amplification) != 0)  result |= uint32_t(vk::ShaderStageFlagBits::eTaskNV);
+-        if ((shaderType & ShaderType::Mesh) != 0)           result |= uint32_t(vk::ShaderStageFlagBits::eMeshNV);
++        if ((shaderType & ShaderType::Amplification) != 0)  result |= uint32_t(vk::ShaderStageFlagBits::eTaskEXT);
++        if ((shaderType & ShaderType::Mesh) != 0)           result |= uint32_t(vk::ShaderStageFlagBits::eMeshEXT);
+         if ((shaderType & ShaderType::RayGeneration) != 0)  result |= uint32_t(vk::ShaderStageFlagBits::eRaygenKHR); // or eRaygenNV, they have the same value
+diff --git a/src/vulkan/vulkan-meshlets.cpp b/src/vulkan/vulkan-meshlets.cpp
+index c0c0565..2f0ff1b 100644
+--- a/src/vulkan/vulkan-meshlets.cpp
++++ b/src/vulkan/vulkan-meshlets.cpp
+@@ -23,2 +23,7 @@
++#if !defined(VK_NO_PROTOTYPES)
++#define VK_NO_PROTOTYPES 1
++#endif
++#include <volk.h>
++
+ #include "vulkan-backend.h"
+ #include <nvrhi/common/misc.h>
+@@ -72,3 +77,3 @@ namespace nvrhi::vulkan
+                 specInfos, specMapEntries, specData));
+-            pso->shaderMask = pso->shaderMask | ShaderType::Vertex;
++            pso->shaderMask = pso->shaderMask | ShaderType::Amplification;
+         }
+@@ -79,3 +84,3 @@ namespace nvrhi::vulkan
+                 specInfos, specMapEntries, specData));
+-            pso->shaderMask = pso->shaderMask | ShaderType::Hull;
++            pso->shaderMask = pso->shaderMask | ShaderType::Mesh;
+         }
+@@ -90,2 +95,2 @@ namespace nvrhi::vulkan
+-        auto inputAssembly = vk::PipelineInputAssemblyStateCreateInfo()
++        [[maybe_unused]] auto inputAssembly = vk::PipelineInputAssemblyStateCreateInfo()
+             .setTopology(convertPrimitiveTopology(desc.primType));
+@@ -178,3 +183,3 @@ namespace nvrhi::vulkan
+             .setPStages(shaderStages.data())
+-            .setPInputAssemblyState(&inputAssembly)
++            .setPInputAssemblyState(nullptr)
+             .setPViewportState(&viewportState)
+@@ -280,2 +285,2 @@ namespace nvrhi::vulkan
+-        if (arraysAreDifferent(m_CurrentComputeState.bindings, state.bindings) || m_AnyVolatileBufferWrites)
++        if (arraysAreDifferent(m_CurrentMeshletState.bindings, state.bindings) || m_AnyVolatileBufferWrites)
+         {
+@@ -348,2 +353,6 @@ namespace nvrhi::vulkan
+-        m_CurrentCmdBuf->cmdBuf.drawMeshTasksEXT(groupsX, groupsY, groupsZ);
++        if (vkCmdDrawMeshTasksEXT == nullptr)
++            return;
++
++        vkCmdDrawMeshTasksEXT(static_cast<VkCommandBuffer>(m_CurrentCmdBuf->cmdBuf),
++            groupsX, groupsY, groupsZ);
+     }
+@@ -360,2 +369,7 @@ namespace nvrhi::vulkan
+-        m_CurrentCmdBuf->cmdBuf.drawMeshTasksIndirectEXT(indirectParams->buffer, offsetBytes, maxDrawCount, sizeof(DispatchIndirectArguments));
++        if (vkCmdDrawMeshTasksIndirectEXT == nullptr)
++            return;
++
++        vkCmdDrawMeshTasksIndirectEXT(static_cast<VkCommandBuffer>(m_CurrentCmdBuf->cmdBuf),
++            indirectParams->buffer, offsetBytes, maxDrawCount,
++            sizeof(DispatchIndirectArguments));
+     }
+@@ -375,2 +389,7 @@ namespace nvrhi::vulkan
+-        m_CurrentCmdBuf->cmdBuf.drawMeshTasksIndirectCountEXT(indirectParams->buffer, paramOffsetBytes, indirectCount->buffer, countOffsetBytes, maxDrawCount, sizeof(DispatchIndirectArguments));
++        if (vkCmdDrawMeshTasksIndirectCountEXT == nullptr)
++            return;
++
++        vkCmdDrawMeshTasksIndirectCountEXT(static_cast<VkCommandBuffer>(m_CurrentCmdBuf->cmdBuf),
++            indirectParams->buffer, paramOffsetBytes, indirectCount->buffer,
++            countOffsetBytes, maxDrawCount, sizeof(DispatchIndirectArguments));
+     }

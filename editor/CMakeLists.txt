@@ -58,6 +58,7 @@ endif()
 
 find_package(imgui CONFIG REQUIRED)
 find_package(implot CONFIG REQUIRED)
+find_package(Vulkan REQUIRED)
 find_package(Ktx CONFIG QUIET)
 if(NOT Ktx_FOUND)
   find_package(ktx CONFIG REQUIRED)
@@ -91,6 +92,7 @@ target_include_directories(nuri_editor
     ${CMAKE_SOURCE_DIR}/lib
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/im-guizmo
+    ${Vulkan_INCLUDE_DIRS}
 )
 
 target_link_libraries(nuri_editor

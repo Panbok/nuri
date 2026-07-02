@@ -357,6 +357,8 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
                                                 const RuntimeConfig &config) {
   MeshImportOptions flipUvImport{};
   flipUvImport.flipUVs = true;
+  MeshImportOptions meshletImport{};
+  meshletImport.generateMeshlets = true;
   MeshImportOptions dragonImportOptions{};
   dragonImportOptions.flipUVs = false;
 
@@ -685,12 +687,15 @@ Result<void, std::string> registerBuiltInScenes(EditorSceneCatalog &catalog,
                  .label = "Niagara Bistro",
                  .initiallySelected = true},
         .sourcePath = modelPath(config, kNiagaraBistroModelRelativePath),
+        .importOptions = meshletImport,
         .instanceName = "NiagaraBistro",
         .fallbackMaterialDebugName = "niagara_bistro_fallback_material",
         .configureRender =
             [](EditorRuntime &runtime) {
               runtime.renderSettings().opaque.enableInstanceCompute = false;
               runtime.renderSettings().opaque.enableMeshLod = false;
+              runtime.renderSettings().opaque.meshletMode =
+                  MeshletRenderMode::Opportunistic;
               runtime.renderSettings().opaque.enableTessellation = false;
               runtime.renderSettings().opaque.forcedMeshLod = 0;
               runtime.renderSettings().opaque.meshLodDistanceThresholds =

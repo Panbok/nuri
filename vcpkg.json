@@ -36,6 +36,33 @@
       "dependencies": [
         "gtest"
       ]
+    },
+    "benchmark-tools": {
+      "description": "Build the nuri renderer benchmarking tools",
+      "dependencies": [
+        "cli11"
+      ]
+    },
+    "snapshot-tools": {
+      "description": "Build the nuri renderer visual snapshot tools",
+      "dependencies": [
+        "cli11",
+        "openimageio"
+      ]
+    },
+    "autotest-tools": {
+      "description": "Build the nuri renderer autotesting tools",
+      "dependencies": [
+        "cli11",
+        "openimageio"
+      ]
+    },
+    "tools": {
+      "description": "Build nuri automation tools",
+      "dependencies": [
+        "cli11",
+        "openimageio"
+      ]
     }
   }
 }

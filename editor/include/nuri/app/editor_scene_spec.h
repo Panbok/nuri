@@ -178,6 +178,7 @@ struct AnimatedPrefabSceneFactoryDesc {
 struct StreamingSceneFactoryDesc {
   EditorSceneInfo info{};
   std::filesystem::path sourcePath{};
+  MeshImportOptions importOptions{};
   std::string instanceName{};
   std::string fallbackMaterialDebugName{};
   glm::vec3 lodThresholds{8.0f, 24.0f, 48.0f};

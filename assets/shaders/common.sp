@@ -349,6 +349,92 @@ layout(std430, buffer_reference) readonly buffer StaticVertexDecodeBuffer {
   StaticVertexDecodeGpuData values[];
 };
 
+#ifdef NURI_MESHLET_COMMON
+struct MeshletDescriptorGpuData {
+  uvec4 offsetsCounts;
+  vec4 boundsSphere;
+  vec4 coneApex;
+  vec4 coneAxisCutoff;
+};
+
+layout(std430, buffer_reference) readonly buffer MeshletDescriptorBuffer {
+  MeshletDescriptorGpuData values[];
+};
+
+layout(std430, buffer_reference) readonly buffer MeshletVertexIndexBuffer {
+  uint indices[];
+};
+
+layout(std430, buffer_reference) readonly buffer MeshletPrimitiveIndexBuffer {
+  uint indices[];
+};
+
+layout(std430, buffer_reference) readonly buffer InstanceLodBoundsBuffer {
+  vec4 values[];
+};
+
+struct SubmeshMeshletLodRangeGpuData {
+  uvec4 meshletOffset;
+  uvec4 meshletCount;
+  vec4 error;
+  uvec4 metadata;
+};
+
+layout(std430, buffer_reference) readonly buffer MeshletLodRangeBuffer {
+  SubmeshMeshletLodRangeGpuData values[];
+};
+
+#ifdef NURI_OPAQUE_MESHLET_BATCHED
+struct MeshletBatchGpuData {
+  PackedVertexWordBuffer vertexBuffer;
+  StaticVertexDecodeBuffer vertexDecodeBuffer;
+  MeshletDescriptorBuffer meshlets;
+  MeshletVertexIndexBuffer meshletVertices;
+  MeshletPrimitiveIndexBuffer meshletPrimitives;
+  MeshletLodRangeBuffer meshletLodRanges;
+  uvec4 draw;
+  uvec4 mesh;
+  uvec4 flags;
+};
+
+layout(std430, buffer_reference) readonly buffer MeshletBatchBuffer {
+  MeshletBatchGpuData values[];
+};
+
+layout(push_constant) uniform MeshletPushConstants {
+  FrameDataBuffer frameData;
+  InstanceMatricesBuffer instanceMatrices;
+  InstanceRemapBuffer instanceRemap;
+  InstanceLodBoundsBuffer instanceLodBounds;
+  vec4 lodThresholds;
+  MeshletBatchBuffer meshletBatches;
+  uint batchBase;
+  uint candidateOffset;
+} pc;
+#else
+layout(push_constant) uniform MeshletPushConstants {
+  FrameDataBuffer frameData;
+  PackedVertexWordBuffer vertexBuffer;
+  StaticVertexDecodeBuffer vertexDecodeBuffer;
+  InstanceMatricesBuffer instanceMatrices;
+  InstanceRemapBuffer instanceRemap;
+  InstanceLodBoundsBuffer instanceLodBounds;
+  MeshletDescriptorBuffer meshlets;
+  MeshletVertexIndexBuffer meshletVertices;
+  MeshletPrimitiveIndexBuffer meshletPrimitives;
+  MeshletLodRangeBuffer meshletLodRanges;
+  uint instanceCount;
+  uint materialIndex;
+  uint vertexDecodeIndex;
+  uint packedVertexFormat;
+  uint firstInstance;
+  uint candidateOffset;
+  uint meshletFlags;
+  uint vertexOffset;
+  vec4 lodThresholds;
+} pc;
+#endif
+#else
 layout(push_constant) uniform PushConstants {
   FrameDataBuffer frameData;
   PackedVertexWordBuffer vertexBuffer;
@@ -372,11 +458,14 @@ layout(push_constant) uniform PushConstants {
   uint debugVisualizationMode;
   uint shadowCascadeIndex;
 } pc;
+#endif
 
 const uint kDebugVisualizationNone = 0u;
 const uint kDebugVisualizationWireOverlay = 1u;
 const uint kDebugVisualizationWireframeOnly = 2u;
 const uint kDebugVisualizationTessPatchEdgesHeatmap = 3u;
+const uint kDebugVisualizationMeshletId = 4u;
+const uint kDebugVisualizationMeshletSelectedLod = 5u;
 const uint kLocalLightTypePoint = 0u;
 const uint kLocalLightTypeSpot = 1u;
 
@@ -417,11 +506,6 @@ uint packedVertexWordFrom(PackedVertexWordBuffer vertexBuffer,
              wordIndex];
 }
 
-uint packedVertexWord(uint vertexIndex, uint wordIndex) {
-  return packedVertexWordFrom(pc.vertexBuffer, vertexIndex, wordIndex,
-                              pc.packedVertexFormat);
-}
-
 vec3 decodeAnimatedPositionFrom(PackedVertexWordBuffer vertexBuffer,
                                 uint vertexIndex,
                                 uint packedVertexFormat) {
@@ -436,71 +520,125 @@ vec3 decodeAnimatedPositionFrom(PackedVertexWordBuffer vertexBuffer,
                                        packedVertexFormat)));
 }
 
-vec3 decodePackedPosition(uint vertexIndex) {
-  if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
-      pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
-    return decodeAnimatedPositionFrom(pc.vertexBuffer, vertexIndex,
-                                      pc.packedVertexFormat);
+vec3 decodePackedPositionFrom(PackedVertexWordBuffer vertexBuffer,
+                              StaticVertexDecodeBuffer vertexDecodeBuffer,
+                              uint vertexDecodeIndex,
+                              uint packedVertexFormat, uint vertexIndex) {
+  if (packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
+      packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
+    return decodeAnimatedPositionFrom(vertexBuffer, vertexIndex,
+                                      packedVertexFormat);
   }
 
   StaticVertexDecodeGpuData decode =
-      pc.vertexDecodeBuffer.values[pc.vertexDecodeIndex];
-  const vec2 xy = unpackUnorm2x16(packedVertexWord(vertexIndex, 0u));
-  const vec2 zPad = unpackUnorm2x16(packedVertexWord(vertexIndex, 1u));
+      vertexDecodeBuffer.values[vertexDecodeIndex];
+  const vec2 xy = unpackUnorm2x16(
+      packedVertexWordFrom(vertexBuffer, vertexIndex, 0u, packedVertexFormat));
+  const vec2 zPad = unpackUnorm2x16(
+      packedVertexWordFrom(vertexBuffer, vertexIndex, 1u, packedVertexFormat));
   const vec3 normalized = vec3(xy, zPad.x);
   return decode.offset.xyz + decode.scale.xyz * normalized;
 }
 
-vec3 decodePackedNormal(uint vertexIndex) {
+vec3 decodePackedNormalFrom(PackedVertexWordBuffer vertexBuffer,
+                            uint packedVertexFormat, uint vertexIndex) {
   const bool animatedFormat =
-      pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
-      pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32;
-  const uint normalWord = packedVertexWord(vertexIndex,
-                                           animatedFormat ? 3u : 2u);
+      packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
+      packedVertexFormat == kPackedVertexFormatAnimatedFloat32;
+  const uint normalWord = packedVertexWordFrom(
+      vertexBuffer, vertexIndex, animatedFormat ? 3u : 2u,
+      packedVertexFormat);
   return decodeOctNormal(unpackSnorm2x16Custom(normalWord));
 }
 
-vec4 decodePackedTangent(uint vertexIndex) {
-  const vec3 normal = decodePackedNormal(vertexIndex);
+vec4 decodePackedTangentFrom(PackedVertexWordBuffer vertexBuffer,
+                             uint packedVertexFormat, uint vertexIndex) {
+  const vec3 normal =
+      decodePackedNormalFrom(vertexBuffer, packedVertexFormat, vertexIndex);
   const vec3 tangentHelper =
       abs(normal.x) < 0.999 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
   const vec4 fallbackTangent =
       vec4(normalize(cross(tangentHelper, normal)), 1.0);
-  if (pc.packedVertexFormat != kPackedVertexFormatAnimatedFloat32) {
+  if (packedVertexFormat != kPackedVertexFormatAnimatedFloat32) {
     return fallbackTangent;
   }
-  const uint handednessWord = packedVertexWord(vertexIndex, 5u);
+  const uint handednessWord =
+      packedVertexWordFrom(vertexBuffer, vertexIndex, 5u, packedVertexFormat);
   // word5 stores +/-1.0f handedness; 0u is the "no tangent encoded"
   // sentinel, so return an orthogonal fallback to keep TBN construction valid.
   if (handednessWord == 0u) {
     return fallbackTangent;
   }
   return vec4(decodeOctNormal(unpackSnorm2x16Custom(
-                  packedVertexWord(vertexIndex, 4u))),
+                  packedVertexWordFrom(vertexBuffer, vertexIndex, 4u,
+                                       packedVertexFormat))),
               uintBitsToFloat(handednessWord));
 }
 
-vec2 decodePackedUv(uint vertexIndex) {
-  if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
-    return unpackHalf2x16(packedVertexWord(vertexIndex, 6u));
+vec2 decodePackedUvFrom(PackedVertexWordBuffer vertexBuffer,
+                        uint packedVertexFormat, uint vertexIndex) {
+  if (packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
+    return unpackHalf2x16(
+        packedVertexWordFrom(vertexBuffer, vertexIndex, 6u,
+                             packedVertexFormat));
   }
   return unpackHalf2x16(
-      packedVertexWord(vertexIndex,
-                       pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24
-                           ? 4u
-                           : 3u));
+      packedVertexWordFrom(vertexBuffer, vertexIndex,
+                           packedVertexFormat ==
+                                   kPackedVertexFormatAnimatedFloat24
+                               ? 4u
+                               : 3u,
+                           packedVertexFormat));
+}
+
+vec2 decodePackedUv1From(PackedVertexWordBuffer vertexBuffer,
+                         uint packedVertexFormat, uint vertexIndex) {
+  if (packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
+    return unpackHalf2x16(
+        packedVertexWordFrom(vertexBuffer, vertexIndex, 7u,
+                             packedVertexFormat));
+  }
+  return unpackHalf2x16(
+      packedVertexWordFrom(vertexBuffer, vertexIndex,
+                           packedVertexFormat ==
+                                   kPackedVertexFormatAnimatedFloat24
+                               ? 5u
+                               : 4u,
+                           packedVertexFormat));
+}
+
+#ifndef NURI_OPAQUE_MESHLET_BATCHED
+uint packedVertexWord(uint vertexIndex, uint wordIndex) {
+  return packedVertexWordFrom(pc.vertexBuffer, vertexIndex, wordIndex,
+                              pc.packedVertexFormat);
+}
+
+vec3 decodePackedPosition(uint vertexIndex) {
+  return decodePackedPositionFrom(pc.vertexBuffer, pc.vertexDecodeBuffer,
+                                  pc.vertexDecodeIndex, pc.packedVertexFormat,
+                                  vertexIndex);
+}
+
+vec3 decodePackedNormal(uint vertexIndex) {
+  return decodePackedNormalFrom(pc.vertexBuffer, pc.packedVertexFormat,
+                                vertexIndex);
+}
+
+vec4 decodePackedTangent(uint vertexIndex) {
+  return decodePackedTangentFrom(pc.vertexBuffer, pc.packedVertexFormat,
+                                 vertexIndex);
+}
+
+vec2 decodePackedUv(uint vertexIndex) {
+  return decodePackedUvFrom(pc.vertexBuffer, pc.packedVertexFormat,
+                            vertexIndex);
 }
 
 vec2 decodePackedUv1(uint vertexIndex) {
-  if (pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32) {
-    return unpackHalf2x16(packedVertexWord(vertexIndex, 7u));
-  }
-  return unpackHalf2x16(
-      packedVertexWord(vertexIndex,
-                       pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24
-                           ? 5u
-                           : 4u));
+  return decodePackedUv1From(pc.vertexBuffer, pc.packedVertexFormat,
+                             vertexIndex);
 }
+#endif
 
 uint getPackedUvBit(uint uvBits, uint bitIndex) { return (uvBits >> bitIndex) & 1u; }
 

@@ -5023,6 +5023,7 @@ void setLogWindowPlacementWithoutDock(const ImGuiViewport *viewport) {
 void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                     LinearGraph &frametimeGraph,
                     const RenderFrameMetrics &frameMetrics,
+                    const RenderSettings &renderSettings,
                     const TelemetryOverlayUiState &telemetryState,
                     float overlayRightBoundaryX) {
   if (!telemetryState.overlayEnabled) {
@@ -5039,7 +5040,7 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
   }
   ImGui::SetNextWindowBgAlpha(0.30f);
   const float overlayHeight =
-      telemetryState.showGraphs ? kMetricGraphWindowHeight : 140.0f;
+      telemetryState.showGraphs ? kMetricGraphWindowHeight : 158.0f;
   ImGui::SetNextWindowSize(ImVec2(kMetricGraphWindowWidth, overlayHeight),
                            ImGuiCond_Always);
   if (ImGui::Begin("##FPS", nullptr,
@@ -5087,6 +5088,24 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
     if (telemetryState.showDispatchStats) {
       ImGui::Text("Dispatch: %u x%u", frameMetrics.opaque.computeDispatches,
                   frameMetrics.opaque.computeDispatchX);
+      const OpaqueFrameMetrics &opaqueMetrics = frameMetrics.opaque;
+      const bool meshletsRequested =
+          renderSettings.opaque.meshletMode != MeshletRenderMode::Disabled;
+      const char *meshletStatus = "Off";
+      if (opaqueMetrics.meshletModeActive != 0u) {
+        meshletStatus = "Active";
+      } else if (opaqueMetrics.meshletRejectedMissingFeature != 0u) {
+        meshletStatus = "No feature";
+      } else if (opaqueMetrics.meshletRejectedMissingAssetData != 0u) {
+        meshletStatus = "No assets";
+      } else if (opaqueMetrics.meshletRejectedIncompatibleFrame != 0u) {
+        meshletStatus = "Frame fallback";
+      } else if (meshletsRequested) {
+        meshletStatus = "Requested";
+      }
+      ImGui::Text("Meshlets: %s D:%u G:%u", meshletStatus,
+                  opaqueMetrics.meshletDispatches,
+                  opaqueMetrics.meshletTaskGroups);
       drewStats = true;
     }
 
@@ -6650,7 +6669,8 @@ struct ImGuiEditor::Impl {
       }
     }
     drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, frameMetrics,
-                   telemetryOverlayState, overlayRightBoundaryX);
+                   renderSettings, telemetryOverlayState,
+                   overlayRightBoundaryX);
     NURI_PROFILER_ZONE_END();
 
     NURI_PROFILER_ZONE("ImGuiEditor::FinalizeImGuiFrame",

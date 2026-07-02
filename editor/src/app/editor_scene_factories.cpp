@@ -268,7 +268,7 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
         }
         state->material = materialResult.value();
         auto prefabResult = prepareImportedPrefabSceneResources(
-            ctx.runtime, desc.info.label, desc.sourcePath, MeshImportOptions{},
+            ctx.runtime, desc.info.label, desc.sourcePath, desc.importOptions,
             state->prefab);
         if (prefabResult.hasError()) {
           return prefabResult;
@@ -287,7 +287,7 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
         if ((!state->asyncLoad.has_value() || !state->asyncLoad->valid()) &&
             !isValid(state->model) && !state->loadFailed) {
           auto asyncLoadResult = Model::createFromFileAsync(
-              state->sourcePath.string(), MeshImportOptions{});
+              state->sourcePath.string(), desc.importOptions);
           if (asyncLoadResult.hasError()) {
             state->loadFailed = true;
             state->loadError = asyncLoadResult.error();
@@ -326,6 +326,7 @@ EditorSceneSpec makeStreamingScene(StreamingSceneFactoryDesc desc) {
             auto modelResult =
                 ctx.runtime.resources().acquireModel(ModelRequest{
                     .path = state->sourcePath.string(),
+                    .importOptions = desc.importOptions,
                     .debugName = std::string(desc.instanceName),
                 });
             if (modelResult.hasError()) {
