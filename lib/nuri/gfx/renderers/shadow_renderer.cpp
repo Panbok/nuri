@@ -59,8 +59,10 @@ constexpr float kSdsmHistogramClearDepthEpsilon = 1.0e-4f;
 constexpr uint32_t kMinSdsmReduceResultRingCount = 16u;
 constexpr uint32_t kSdsmGpuWarmupGraceMissFrames = 2u;
 constexpr uint32_t kMeshletFlagDoubleSided = 1u << 2u;
+constexpr uint32_t kMeshletFlagShadowCascadeCulling = 1u << 6u;
 constexpr uint32_t kMeshletFlagForcedLodShift = 8u;
 constexpr uint32_t kMeshletFlagForcedLodMask = 0x3u;
+constexpr uint32_t kShadowMeshletCounterFlagEnabled = 1u << 0u;
 
 [[nodiscard]] constexpr Format
 sanitizeShadowDepthFormat(Format format) noexcept {
@@ -130,6 +132,28 @@ shadowCascadeCaptureName(uint32_t cascadeIndex) {
   default:
     return {};
   }
+}
+
+void logShadowVisibilityCounters(const RenderFrameContext &frame) {
+  if (frame.settings == nullptr ||
+      !frame.settings->visibility.debug.logCounters) {
+    return;
+  }
+
+  const VisibilityFrameMetrics &visibility = frame.metrics.visibility;
+  NURI_LOG_INFO(
+      "ShadowRenderer::visibility counters frame=%llu "
+      "meshlet(candidates=%u readback=%u source=%u stale=%u errors=%u "
+      "rejectedBounds=%u) "
+      "cpu(candidates=%u rejected=%u)",
+      static_cast<unsigned long long>(frame.frameIndex),
+      visibility.shadowMeshletCandidates,
+      visibility.shadowMeshletReadbackAvailable,
+      visibility.shadowMeshletReadbackSourceFrame,
+      visibility.shadowMeshletReadbackStaleFrameCount,
+      visibility.shadowMeshletReadbackErrorCount,
+      visibility.shadowMeshletRejectedBounds, visibility.shadowCpuCandidates,
+      visibility.shadowCpuRejected);
 }
 
 void publishRequestedCapture(RenderFrameContext &frame, GPUDevice &gpu,
@@ -340,6 +364,7 @@ struct ShadowBatchKey {
   uint32_t meshletMaxCount = 0u;
   uint32_t meshletCount = 0u;
   uint32_t vertexOffset = 0u;
+  bool enableMeshletCascadeCulling = false;
 
   bool operator==(const ShadowBatchKey &other) const noexcept {
     return cascadeIndex == other.cascadeIndex &&
@@ -369,7 +394,8 @@ struct ShadowBatchKey {
            submeshIndex == other.submeshIndex &&
            meshletMaxCount == other.meshletMaxCount &&
            meshletCount == other.meshletCount &&
-           vertexOffset == other.vertexOffset;
+           vertexOffset == other.vertexOffset &&
+           enableMeshletCascadeCulling == other.enableMeshletCascadeCulling;
   }
 };
 
@@ -416,6 +442,7 @@ struct ShadowBatchKeyHash {
     hash =
         hashCombine64(hash, (static_cast<uint64_t>(key.meshletCount) << 32u) |
                                 key.vertexOffset);
+    hash = hashCombine64(hash, key.enableMeshletCascadeCulling ? 1ull : 0ull);
     return static_cast<size_t>(hash);
   }
 };
@@ -634,6 +661,7 @@ hashShadowSettings(uint64_t hash,
   hash = hashCombineValue(hash, settings.sdsmHistogramBucketCount);
   hash = hashCombineValue(hash, settings.sdsmHistogramTrimLowPercent);
   hash = hashCombineValue(hash, settings.sdsmHistogramTrimHighPercent);
+  hash = hashCombineValue(hash, settings.enableMeshletCascadeCulling);
   hash = hashCombineValue(hash, settings.debug.freezeCascades);
   hash = hashCombineValue(hash, settings.debug.freezeLightView);
   hash = hashCombineValue(hash, settings.debug.enableCascadeCasterCulling);
@@ -1591,6 +1619,22 @@ pcssReceiverDepthWorldScale(const shadow_detail::DirectionalShadowFit &fit) {
   return std::min(lightDepthSpan, splitDepthSpan * 2.0f);
 }
 
+[[nodiscard]] glm::vec3 paddedLightSpaceCullingMin(
+    const shadow_detail::DirectionalShadowFit &fit) noexcept {
+  const float padding =
+      std::max(fit.texelWorldSize * kCullingPaddingTexelMultiplier, 0.01f);
+  return glm::min(fit.lightSpaceBoundsMin, fit.lightSpaceBoundsMax) -
+         glm::vec3(padding);
+}
+
+[[nodiscard]] glm::vec3 paddedLightSpaceCullingMax(
+    const shadow_detail::DirectionalShadowFit &fit) noexcept {
+  const float padding =
+      std::max(fit.texelWorldSize * kCullingPaddingTexelMultiplier, 0.01f);
+  return glm::max(fit.lightSpaceBoundsMin, fit.lightSpaceBoundsMax) +
+         glm::vec3(padding);
+}
+
 void writeShadowCascadeFit(const shadow_detail::DirectionalShadowFit &fit,
                            uint32_t cascadeIndex,
                            const RenderSettings::ShadowSettings &settings,
@@ -1598,6 +1642,8 @@ void writeShadowCascadeFit(const shadow_detail::DirectionalShadowFit &fit,
                            TextureHandle shadowDepthTexture, GPUDevice &gpu,
                            ShadowFrameGpuData &shadowFrameGpuData,
                            ShadowDebugFrameData &shadowDebugFrameData) {
+  const glm::vec3 cullingBoundsMin = paddedLightSpaceCullingMin(fit);
+  const glm::vec3 cullingBoundsMax = paddedLightSpaceCullingMax(fit);
   shadowFrameGpuData.cascades[cascadeIndex] = ShadowCascadeGpuData{
       .lightViewProj = fit.lightViewProj,
       .lightView = fit.lightView,
@@ -1612,6 +1658,8 @@ void writeShadowCascadeFit(const shadow_detail::DirectionalShadowFit &fit,
       .textureSampler =
           glm::uvec4(gpu.getTextureBindlessIndex(shadowDepthTexture),
                      compareSamplerId, rawSamplerId, settings.shadowMapSize),
+      .cullingBoundsMin = glm::vec4(cullingBoundsMin, 1.0f),
+      .cullingBoundsMax = glm::vec4(cullingBoundsMax, 1.0f),
   };
 
   ShadowCascadeDebugFrameData &cascadeDebug =
@@ -1778,6 +1826,17 @@ shadowPreviewPipelineDesc(ShaderHandle vertexShader,
       std::min(value, size_t(std::numeric_limits<uint32_t>::max())));
 }
 
+[[nodiscard]] uint32_t visibilityReadbackAge(uint64_t currentFrame,
+                                             uint32_t sourceFrame) {
+  if (static_cast<uint64_t>(sourceFrame) >= currentFrame) {
+    return 0u;
+  }
+  const uint64_t age = currentFrame - static_cast<uint64_t>(sourceFrame);
+  return age > std::numeric_limits<uint32_t>::max()
+             ? std::numeric_limits<uint32_t>::max()
+             : static_cast<uint32_t>(age);
+}
+
 [[nodiscard]] bool isValidShadowDepthTexture(const GPUDevice &gpu,
                                              TextureHandle texture,
                                              uint32_t shadowMapSize,
@@ -1921,13 +1980,14 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
                                std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(config), memory_(resolveMemoryResource(memory)),
       instanceMatricesRing_(memory_), instanceRemapRing_(memory_),
-      shadowFrameRing_(memory_), sdsmReduceResultRing_(memory_),
-      instanceDataRingUploadVersions_(memory_),
+      shadowFrameRing_(memory_), shadowMeshletCounterRing_(memory_),
+      sdsmReduceResultRing_(memory_), instanceDataRingUploadVersions_(memory_),
       instanceRemapUploadSignatures_(memory_),
       shadowFrameUploadSignatures_(memory_),
+      shadowMeshletCounterRingPublishedFrames_(memory_),
       sdsmReduceResultRingPublishedFrames_(memory_),
-      meshDrawTemplates_(memory_), batchBuildScratchArena_(memory_),
-      staticShadowTemplateIndices_(memory_),
+      shadowMeshletCounterClear_(memory_), meshDrawTemplates_(memory_),
+      batchBuildScratchArena_(memory_), staticShadowTemplateIndices_(memory_),
       dynamicShadowTemplateIndices_(memory_), staticShadowCasterCache_(memory_),
       staticShadowBatchTemplates_(memory_), staticShadowBatchIndexMap_(memory_),
       staticShadowBatchInstanceIndices_(memory_),
@@ -2705,12 +2765,17 @@ ShadowRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   while (shadowFrameRing_.size() < safeCount) {
     shadowFrameRing_.push_back(DynamicBufferSlot{});
   }
+  while (shadowMeshletCounterRing_.size() < safeCount) {
+    shadowMeshletCounterRing_.push_back(DynamicBufferSlot{});
+  }
   instanceDataRingUploadVersions_.resize(safeCount,
                                          std::numeric_limits<uint64_t>::max());
   instanceRemapUploadSignatures_.resize(safeCount,
                                         std::numeric_limits<uint64_t>::max());
   shadowFrameUploadSignatures_.resize(safeCount,
                                       std::numeric_limits<uint64_t>::max());
+  shadowMeshletCounterRingPublishedFrames_.resize(
+      safeCount, std::numeric_limits<uint64_t>::max());
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -2779,6 +2844,104 @@ ShadowRenderer::ensureShadowFrameRingCapacity(size_t requiredBytes) {
   return ensureRingCapacity(shadowFrameRing_, requiredBytes,
                             "shadow_frame_gpu_data",
                             shadowFrameUploadSignatures_);
+}
+
+Result<bool, std::string>
+ShadowRenderer::ensureShadowMeshletCounterRingCapacity(size_t requiredBytes) {
+  const size_t requested =
+      std::max(requiredBytes, sizeof(VisibilityCounterGpuData));
+  bool needsGrowth = false;
+  for (const DynamicBufferSlot &slot : shadowMeshletCounterRing_) {
+    if (slot.buffer && slot.buffer->valid() && slot.capacityBytes < requested) {
+      needsGrowth = true;
+      break;
+    }
+  }
+  if (needsGrowth) {
+    gpu_.waitIdle();
+  }
+  for (size_t i = 0u; i < shadowMeshletCounterRing_.size(); ++i) {
+    DynamicBufferSlot &slot = shadowMeshletCounterRing_[i];
+    if (slot.buffer && slot.buffer->valid() &&
+        slot.capacityBytes >= requested) {
+      continue;
+    }
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0u;
+
+    const BufferDesc desc{
+        .usage = BufferUsage::Storage,
+        .storage = Storage::HostVisible,
+        .size = requested,
+    };
+    std::string debugName("shadow_meshlet_counter_buffer_");
+    debugName += std::to_string(i);
+    auto bufferResult = Buffer::create(gpu_, desc, debugName);
+    if (bufferResult.hasError()) {
+      return Result<bool, std::string>::makeError(bufferResult.error());
+    }
+    slot.buffer = std::move(bufferResult.value());
+    slot.capacityBytes = requested;
+    if (i < shadowMeshletCounterRingPublishedFrames_.size()) {
+      shadowMeshletCounterRingPublishedFrames_[i] =
+          std::numeric_limits<uint64_t>::max();
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+void ShadowRenderer::readLatestShadowMeshletCounterReadback(
+    RenderFrameContext &frame) {
+  VisibilityFrameMetrics &metrics = frame.metrics.visibility;
+  std::optional<VisibilityCounterGpuData> selectedCounter;
+  uint32_t selectedSourceFrame = 0u;
+  uint32_t readbackErrorCount = 0u;
+  for (size_t slotIndex = 0u; slotIndex < shadowMeshletCounterRing_.size();
+       ++slotIndex) {
+    const DynamicBufferSlot &slot = shadowMeshletCounterRing_[slotIndex];
+    if (!slot.buffer || !slot.buffer->valid()) {
+      continue;
+    }
+    const uint64_t expectedFrame =
+        slotIndex < shadowMeshletCounterRingPublishedFrames_.size()
+            ? shadowMeshletCounterRingPublishedFrames_[slotIndex]
+            : std::numeric_limits<uint64_t>::max();
+    if (expectedFrame == std::numeric_limits<uint64_t>::max()) {
+      continue;
+    }
+
+    VisibilityCounterGpuData counter{};
+    auto readResult =
+        gpu_.readBuffer(slot.buffer->handle(), 0u,
+                        std::as_writable_bytes(
+                            std::span<VisibilityCounterGpuData>(&counter, 1u)));
+    if (readResult.hasError()) {
+      ++readbackErrorCount;
+      continue;
+    }
+    const uint32_t valid = counter.status.w;
+    const uint32_t sourceFrame = counter.status.z;
+    if (valid == 0u || static_cast<uint64_t>(sourceFrame) >= frame.frameIndex ||
+        sourceFrame != static_cast<uint32_t>(expectedFrame)) {
+      continue;
+    }
+    if (!selectedCounter.has_value() || sourceFrame > selectedSourceFrame) {
+      selectedCounter = counter;
+      selectedSourceFrame = sourceFrame;
+    }
+  }
+
+  metrics.shadowMeshletReadbackErrorCount = readbackErrorCount;
+  if (selectedCounter.has_value()) {
+    metrics.shadowMeshletReadbackAvailable = 1u;
+    metrics.shadowMeshletReadbackSourceFrame = selectedSourceFrame;
+    metrics.shadowMeshletReadbackStaleFrameCount =
+        visibilityReadbackAge(frame.frameIndex, selectedSourceFrame);
+    metrics.shadowMeshletRejectedBounds = selectedCounter->meshlet.x;
+  }
 }
 
 Result<bool, std::string>
@@ -3075,6 +3238,8 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
             .meshletMaxCount = batchTemplate.meshletMaxCount,
             .meshletCount = batchTemplate.meshletCount,
             .vertexOffset = batchTemplate.vertexOffset,
+            .enableMeshletCascadeCulling =
+                batchTemplate.enableMeshletCascadeCulling,
         };
       };
   const auto resolveStaticBatchIndex =
@@ -3133,6 +3298,8 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
         .meshletMaxCount = entry.meshletMaxCount,
         .meshletCount = lod->meshletCount,
         .vertexOffset = entry.submesh->vertexOffset,
+        .enableMeshletCascadeCulling =
+            useMeshlets && settings.shadow.enableMeshletCascadeCulling,
         .doubleSided = entry.doubleSided,
         .alphaMasked = entry.alphaMasked,
         .useMeshlets = useMeshlets,
@@ -3165,6 +3332,7 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
         .meshletMaxCount = cachedEntry.meshletMaxCount,
         .meshletCount = cachedEntry.meshletCount,
         .vertexOffset = cachedEntry.vertexOffset,
+        .enableMeshletCascadeCulling = cachedEntry.enableMeshletCascadeCulling,
         .firstInstanceIndex = 0u,
         .instanceCount = 0u,
         .rasterSignature = kFnvOffsetBasis64,
@@ -5065,6 +5233,42 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         "ShadowRenderer::buildShadowDraws: invalid GPU buffer address");
   }
 
+  BufferHandle shadowMeshletCounterBuffer{};
+  uint64_t shadowMeshletCounterBufferAddress = 0u;
+  uint32_t shadowMeshletCounterFlags = 0u;
+  if (shadowMeshletActive) {
+    auto counterResult = ensureShadowMeshletCounterRingCapacity(
+        sizeof(VisibilityCounterGpuData));
+    if (counterResult.hasError()) {
+      return counterResult;
+    }
+    if (frameSlot < shadowMeshletCounterRing_.size() &&
+        shadowMeshletCounterRing_[frameSlot].buffer &&
+        shadowMeshletCounterRing_[frameSlot].buffer->valid()) {
+      shadowMeshletCounterBuffer =
+          shadowMeshletCounterRing_[frameSlot].buffer->handle();
+      shadowMeshletCounterClear_.clear();
+      shadowMeshletCounterClear_.push_back(VisibilityCounterGpuData{});
+      auto clearCounterResult = gpu_.updateBuffer(
+          shadowMeshletCounterBuffer,
+          std::as_bytes(std::span<const VisibilityCounterGpuData>(
+              shadowMeshletCounterClear_.data(),
+              shadowMeshletCounterClear_.size())),
+          0u);
+      if (clearCounterResult.hasError()) {
+        return clearCounterResult;
+      }
+      if (frameSlot < shadowMeshletCounterRingPublishedFrames_.size()) {
+        shadowMeshletCounterRingPublishedFrames_[frameSlot] = frame.frameIndex;
+      }
+      shadowMeshletCounterBufferAddress =
+          gpu_.getBufferDeviceAddress(shadowMeshletCounterBuffer);
+      if (shadowMeshletCounterBufferAddress != 0u) {
+        shadowMeshletCounterFlags |= kShadowMeshletCounterFlagEnabled;
+      }
+    }
+  }
+
   const uint32_t cascadeCount =
       std::clamp(shadowFrameCpuData_.flagsCascadeCountLightIndex.y, 1u,
                  activeCascadeCount_);
@@ -5226,7 +5430,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           const Model::ModelMeshletGpuView *meshletView, uint32_t submeshIndex,
           uint32_t meshletMaxCount, uint32_t meshletCount,
           uint32_t vertexOffset, bool dynamicCaster,
-          bool buffersAlreadyPreResolved) {
+          bool enableMeshletCascadeCulling, bool buffersAlreadyPreResolved) {
         const bool useMeshlets =
             shadowMeshletActive &&
             canUseShadowMeshlets(meshletView, submeshIndex, meshletMaxCount,
@@ -5272,6 +5476,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
             .meshletMaxCount = meshletMaxCount,
             .meshletCount = meshletCount,
             .vertexOffset = vertexOffset,
+            .enableMeshletCascadeCulling =
+                useMeshlets && enableMeshletCascadeCulling,
         };
         auto it = shadowBatchLookup.find(key);
         if (it == shadowBatchLookup.end()) {
@@ -5331,6 +5537,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
             .meshletMaxCount = batchTemplate.meshletMaxCount,
             .meshletCount = batchTemplate.meshletCount,
             .vertexOffset = batchTemplate.vertexOffset,
+            .enableMeshletCascadeCulling =
+                batchTemplate.enableMeshletCascadeCulling,
         };
       };
 
@@ -6368,6 +6576,12 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           }
         }
 
+        const bool deformedRenderable =
+            !entry.renderable->morphWeights.empty() ||
+            !entry.renderable->skinPalette.empty();
+        const bool enableMeshletCascadeCulling =
+            settings.shadow.enableMeshletCascadeCulling &&
+            !usesAnimatedOverride && !deformedRenderable;
         appendShadowDraw(
             cascadeIndex, resolvedVertexBuffer, entry.indexBuffer,
             entry.indexBufferOffset, entry.indexFormat, lod->indexCount,
@@ -6376,7 +6590,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
             resolvedVertexDecodeIndex, resolvedPackedVertexFormat,
             entry.materialIndex, entry.doubleSided, entry.alphaMasked,
             entry.meshletView, entry.submeshIndex, entry.meshletMaxCount,
-            lod->meshletCount, entry.submesh->vertexOffset, true, false);
+            lod->meshletCount, entry.submesh->vertexOffset, true,
+            enableMeshletCascadeCulling, false);
         cascadeIndexCountEstimates_[cascadeIndex] += lod->indexCount;
       }
     }
@@ -6386,6 +6601,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   uint32_t emittedShadowBatchEntryCount = 0u;
   uint32_t emittedShadowMeshletDispatchCount = 0u;
   uint32_t emittedShadowMeshletTaskGroupCount = 0u;
+  uint64_t emittedShadowMeshletCandidateCount = 0u;
   uint32_t emittedShadowInstanceRemapCount = 0u;
   {
     NURI_PROFILER_ZONE("ShadowRenderer.batch_emit",
@@ -6480,6 +6696,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
               "count exceeds UINT32_MAX");
         }
         const uint32_t candidateCount = static_cast<uint32_t>(candidateCount64);
+        emittedShadowMeshletCandidateCount += candidateCount;
         const uint32_t forcedMeshLod =
             settings.opaque.forcedMeshLod >= 0
                 ? std::min(static_cast<uint32_t>(settings.opaque.forcedMeshLod),
@@ -6494,6 +6711,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                 key.meshletPipeline,
                 shadowMeshletAlphaDoubleSidedPipelineHandle_);
         meshletFlags |= doubleSidedMeshlet ? kMeshletFlagDoubleSided : 0u;
+        meshletFlags |= key.enableMeshletCascadeCulling
+                            ? kMeshletFlagShadowCascadeCulling
+                            : 0u;
         uint32_t candidateOffset = 0u;
         while (candidateOffset < candidateCount) {
           const uint32_t groupCount =
@@ -6506,7 +6726,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
               .vertexDecodeBufferAddress = key.vertexDecodeBufferAddress,
               .instanceMatricesAddress = instanceMatricesAddress,
               .instanceRemapAddress = instanceRemapAddress,
-              .instanceLodBoundsAddress = 0u,
+              .visibilityCounterAddress = shadowMeshletCounterBufferAddress,
               .meshletBufferAddress = meshletBufferAddress,
               .meshletVertexIndexBufferAddress = meshletVertexIndexAddress,
               .meshletPrimitiveIndexBufferAddress =
@@ -6520,9 +6740,11 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
               .candidateOffset = candidateOffset,
               .meshletFlags = meshletFlags,
               .vertexOffset = key.vertexOffset,
-              .lodThresholds =
-                  glm::vec4(0.0f, 0.0f, std::bit_cast<float>(key.cascadeIndex),
-                            std::bit_cast<float>(key.submeshIndex)),
+              .lodThresholds = glm::vec4(
+                  std::bit_cast<float>(static_cast<uint32_t>(frame.frameIndex)),
+                  std::bit_cast<float>(shadowMeshletCounterFlags),
+                  std::bit_cast<float>(key.cascadeIndex),
+                  std::bit_cast<float>(key.submeshIndex)),
           };
 
           MeshDispatchItem &dispatch =
@@ -6646,6 +6868,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   appendUniqueBufferDependency(passBufferDependencies_, instanceRemapBuffer);
   appendAnimatedGeometryDependencies(passBufferDependencies_,
                                      animationSceneData);
+  appendUniqueBufferDependency(
+      passBufferDependencies_, shadowMeshletCounterBuffer,
+      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
   if (frame.sharedResources.shadowFrameGpuData.has_value()) {
     appendUniqueBufferDependency(
         passBufferDependencies_,
@@ -6870,6 +7095,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   frame.metrics.shadow.shadowMapSize = shadowMapSize_;
   frame.metrics.shadow.totalDraws = totalDraws;
   frame.metrics.shadow.totalCulledDraws = totalCulledDraws;
+  frame.metrics.visibility.shadowCpuRejected = totalCulledDraws;
+  frame.metrics.visibility.shadowCpuCandidates = saturateToU32(
+      static_cast<size_t>(totalDraws) + static_cast<size_t>(totalCulledDraws));
   frame.metrics.shadow.totalIndexCountEstimate =
       saturateToU32(actualTotalIndexCountEstimate);
   frame.metrics.shadow.staticCasterEntries =
@@ -6886,6 +7114,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       emittedShadowMeshletDispatchCount;
   frame.metrics.shadow.shadowMeshletTaskGroupCount =
       emittedShadowMeshletTaskGroupCount;
+  frame.metrics.visibility.shadowMeshletCandidates =
+      saturateToU32(emittedShadowMeshletCandidateCount);
   frame.metrics.shadow.shadowInstanceRemapCount =
       emittedShadowInstanceRemapCount;
   frame.metrics.shadow.staticBatchFullEmitCount = totalStaticBatchFullEmitCount;
@@ -7048,6 +7278,13 @@ void ShadowRenderer::destroyBuffers() {
     slot.buffer.reset();
     slot.capacityBytes = 0u;
   }
+  for (DynamicBufferSlot &slot : shadowMeshletCounterRing_) {
+    if (slot.buffer && slot.buffer->valid()) {
+      gpu_.destroyBuffer(slot.buffer->handle());
+    }
+    slot.buffer.reset();
+    slot.capacityBytes = 0u;
+  }
   for (DynamicBufferSlot &slot : sdsmReduceResultRing_) {
     if (slot.buffer && slot.buffer->valid()) {
       gpu_.destroyBuffer(slot.buffer->handle());
@@ -7058,10 +7295,13 @@ void ShadowRenderer::destroyBuffers() {
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
   shadowFrameRing_.clear();
+  shadowMeshletCounterRing_.clear();
   sdsmReduceResultRing_.clear();
   instanceDataRingUploadVersions_.clear();
   instanceRemapUploadSignatures_.clear();
   shadowFrameUploadSignatures_.clear();
+  shadowMeshletCounterRingPublishedFrames_.clear();
+  shadowMeshletCounterClear_.clear();
   sdsmReduceResultRingPublishedFrames_.clear();
 }
 
@@ -7457,6 +7697,14 @@ Result<bool, std::string>
 ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   resetFrameBuildState();
+  frame.metrics.visibility.shadowMeshletCandidates = 0u;
+  frame.metrics.visibility.shadowMeshletReadbackAvailable = 0u;
+  frame.metrics.visibility.shadowMeshletReadbackSourceFrame = 0u;
+  frame.metrics.visibility.shadowMeshletReadbackStaleFrameCount = 0u;
+  frame.metrics.visibility.shadowMeshletReadbackErrorCount = 0u;
+  frame.metrics.visibility.shadowMeshletRejectedBounds = 0u;
+  frame.metrics.visibility.shadowCpuCandidates = 0u;
+  frame.metrics.visibility.shadowCpuRejected = 0u;
 
   const RenderSettings &frameSettings = renderSettingsOrDefault(frame);
   RenderSettings::ShadowSettings settings = frameSettings.shadow;
@@ -7477,6 +7725,7 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   if (ringCountResult.hasError()) {
     return ringCountResult;
   }
+  readLatestShadowMeshletCounterReadback(frame);
   auto shadowFrameResult =
       ensureShadowFrameRingCapacity(sizeof(ShadowFrameGpuData));
   if (shadowFrameResult.hasError()) {
@@ -7635,6 +7884,7 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
     }
     hasPreparedShadowPreviewPass_ = true;
   }
+  logShadowVisibilityCounters(frame);
   return Result<bool, std::string>::makeResult(true);
 }
 

@@ -125,6 +125,8 @@ buildSummary(const RenderGraphCompileResult &compiled) {
           compiled.unresolvedPreDispatchDependencyBufferBindings.size());
   summary.unresolvedDrawBufferBindingCount =
       static_cast<uint32_t>(compiled.unresolvedDrawBufferBindings.size());
+  summary.unresolvedMeshDispatchBufferBindingCount = static_cast<uint32_t>(
+      compiled.unresolvedMeshDispatchBufferBindings.size());
   summary.usedParallelCompile = compiled.usedParallelCompile;
   summary.usedParallelValidation = compiled.usedParallelValidation;
   summary.usedParallelPayloadResolution =
@@ -316,6 +318,8 @@ void copyCompileSnapshotData(RenderGraphTelemetrySnapshot &snapshot,
              compiled.meshDispatchRangesByPass);
   copyVector(snapshot.unresolvedDrawBufferBindings,
              compiled.unresolvedDrawBufferBindings);
+  copyVector(snapshot.unresolvedMeshDispatchBufferBindings,
+             compiled.unresolvedMeshDispatchBufferBindings);
 }
 
 template <typename Value>
@@ -383,6 +387,18 @@ void writeIndexedSection(std::ostream &stream, std::string_view title,
   return "unknown";
 }
 
+[[nodiscard]] std::string_view resolveMeshDispatchBufferBindingTarget(
+    RenderGraphCompileResult::MeshDispatchBufferBindingTarget target) {
+  switch (target) {
+  case RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect:
+    return "indirect";
+  case RenderGraphCompileResult::MeshDispatchBufferBindingTarget::IndirectCount:
+    return "indirect_count";
+  }
+
+  return "unknown";
+}
+
 [[nodiscard]] std::string
 makeOpenErrorMessage(const std::filesystem::path &path, int errorNumber) {
   std::string message = "writeRenderGraphTelemetryTextDump: failed to open '" +
@@ -421,7 +437,8 @@ RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
       unresolvedPreDispatchDependencyBufferBindings(ensureMemory(memory)),
       drawRangesByPass(ensureMemory(memory)),
       meshDispatchRangesByPass(ensureMemory(memory)),
-      unresolvedDrawBufferBindings(ensureMemory(memory)) {}
+      unresolvedDrawBufferBindings(ensureMemory(memory)),
+      unresolvedMeshDispatchBufferBindings(ensureMemory(memory)) {}
 
 void RenderGraphTelemetrySnapshot::captureFrom(
     const RenderGraphCompileResult &compiled) {
@@ -471,6 +488,7 @@ void RenderGraphTelemetrySnapshot::reset() {
   drawRangesByPass.clear();
   meshDispatchRangesByPass.clear();
   unresolvedDrawBufferBindings.clear();
+  unresolvedMeshDispatchBufferBindings.clear();
 }
 
 RenderGraphTelemetryService::RenderGraphTelemetryService(
@@ -592,6 +610,8 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
                 summary.unresolvedPreDispatchDependencyBufferBindingCount);
   writeKeyValue(file, "unresolved_draw_buffer_bindings",
                 summary.unresolvedDrawBufferBindingCount);
+  writeKeyValue(file, "unresolved_mesh_dispatch_buffer_bindings",
+                summary.unresolvedMeshDispatchBufferBindingCount);
   writeKeyValue(file, "used_parallel_compile", summary.usedParallelCompile);
   writeKeyValue(file, "used_parallel_validation",
                 summary.usedParallelValidation);
@@ -891,6 +911,18 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
                       << " <- buf[" << binding.bufferResourceIndex << "]\n";
                  return true;
                });
+
+  writeSection(
+      file, "Unresolved Mesh Dispatch Buffer Bindings",
+      std::span{snapshot.unresolvedMeshDispatchBufferBindings},
+      [&](const RenderGraphCompileResult::UnresolvedMeshDispatchBufferBinding
+              &binding) {
+        file << "  pass_exec[" << binding.orderedPassIndex << "].mesh_dispatch["
+             << binding.meshDispatchIndex << "]."
+             << resolveMeshDispatchBufferBindingTarget(binding.target)
+             << " <- buf[" << binding.bufferResourceIndex << "]\n";
+        return true;
+      });
 
   file.flush();
   if (file.fail()) {

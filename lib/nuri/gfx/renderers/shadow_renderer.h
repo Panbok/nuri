@@ -11,6 +11,7 @@
 #include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/gfx/renderers/detail/shadow_math.h"
 #include "nuri/gfx/shader.h"
+#include "nuri/gfx/visibility/visibility.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/gpu/material.h"
@@ -64,7 +65,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 384,
+  static_assert(sizeof(FrameData) == 464,
                 "ShadowRenderer::FrameData must match shader layout");
 
   struct PushConstants {
@@ -104,7 +105,7 @@ private:
     uint64_t vertexDecodeBufferAddress = 0;
     uint64_t instanceMatricesAddress = 0;
     uint64_t instanceRemapAddress = 0;
-    uint64_t instanceLodBoundsAddress = 0;
+    uint64_t visibilityCounterAddress = 0;
     uint64_t meshletBufferAddress = 0;
     uint64_t meshletVertexIndexBufferAddress = 0;
     uint64_t meshletPrimitiveIndexBufferAddress = 0;
@@ -170,6 +171,7 @@ private:
     uint32_t meshletMaxCount = 0;
     uint32_t meshletCount = 0;
     uint32_t vertexOffset = 0;
+    bool enableMeshletCascadeCulling = false;
     bool doubleSided = false;
     bool alphaMasked = false;
     bool useMeshlets = false;
@@ -198,6 +200,7 @@ private:
     uint32_t meshletMaxCount = 0;
     uint32_t meshletCount = 0;
     uint32_t vertexOffset = 0;
+    bool enableMeshletCascadeCulling = false;
     uint32_t firstInstanceIndex = 0;
     uint32_t instanceCount = 0;
     uint64_t rasterSignature = 0;
@@ -228,9 +231,11 @@ private:
     uint32_t meshletMaxCount = 0;
     uint32_t meshletCount = 0;
     uint32_t vertexOffset = 0;
+    bool enableMeshletCascadeCulling = false;
 
     bool operator==(const StaticShadowBatchKey &other) const noexcept {
       return useMeshlets == other.useMeshlets &&
+             enableMeshletCascadeCulling == other.enableMeshletCascadeCulling &&
              pipeline.index == other.pipeline.index &&
              pipeline.generation == other.pipeline.generation &&
              meshletPipeline.index == other.meshletPipeline.index &&
@@ -285,6 +290,7 @@ private:
 
       uint64_t hash = kOffsetBasis;
       hash = combine(hash, key.useMeshlets ? 1ull : 0ull);
+      hash = combine(hash, key.enableMeshletCascadeCulling ? 1ull : 0ull);
       hash = combine(hash, fold(key.pipeline.index, key.pipeline.generation));
       hash = combine(hash, fold(key.meshletPipeline.index,
                                 key.meshletPipeline.generation));
@@ -471,6 +477,8 @@ private:
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureShadowFrameRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
+  ensureShadowMeshletCounterRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
   ensureSdsmReduceResultRingCount(uint32_t requiredCount);
   Result<bool, std::string>
   ensureSdsmReduceResultRingCapacity(size_t requiredBytes);
@@ -491,6 +499,7 @@ private:
   Result<bool, std::string>
   buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                    const ForwardSceneGpuData &sceneGpu);
+  void readLatestShadowMeshletCounterReadback(RenderFrameContext &frame);
   [[nodiscard]] uint64_t shadowPipelineSignature() const noexcept;
   void invalidateStaticShadowCasterCache() noexcept;
   void invalidateReusableStaticOnlyCascadeCache() noexcept;
@@ -519,11 +528,14 @@ private:
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> shadowFrameRing_;
+  std::pmr::vector<DynamicBufferSlot> shadowMeshletCounterRing_;
   std::pmr::vector<DynamicBufferSlot> sdsmReduceResultRing_;
   std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
   std::pmr::vector<uint64_t> instanceRemapUploadSignatures_;
   std::pmr::vector<uint64_t> shadowFrameUploadSignatures_;
+  std::pmr::vector<uint64_t> shadowMeshletCounterRingPublishedFrames_;
   std::pmr::vector<uint64_t> sdsmReduceResultRingPublishedFrames_;
+  std::pmr::vector<VisibilityCounterGpuData> shadowMeshletCounterClear_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   ScratchArena batchBuildScratchArena_;
   std::pmr::vector<uint32_t> staticShadowTemplateIndices_;

@@ -111,6 +111,9 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
       mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
     }
     for (const MeshDispatchItem &dispatch : pass.meshDispatches) {
+      mix(static_cast<uint64_t>(dispatch.command));
+      mix(nuri::isValid(dispatch.indirectBuffer) ? 1u : 0u);
+      mix(nuri::isValid(dispatch.indirectCountBuffer) ? 1u : 0u);
       mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
       mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
     }
@@ -217,6 +220,23 @@ toPreparedDrawBindingTarget(RenderGraphDrawBufferBindingTarget target) {
     break;
   }
   return RenderGraphCompileResult::DrawBufferBindingTarget::Vertex;
+}
+
+[[nodiscard]] RenderGraphCompileResult::MeshDispatchBufferBindingTarget
+toPreparedMeshDispatchBindingTarget(
+    RenderGraphMeshDispatchBufferBindingTarget target) {
+  switch (target) {
+  case RenderGraphMeshDispatchBufferBindingTarget::Indirect:
+    return RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect;
+  case RenderGraphMeshDispatchBufferBindingTarget::IndirectCount:
+    return RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
+        IndirectCount;
+  default:
+    NURI_ASSERT(false,
+                "Unhandled RenderGraphMeshDispatchBufferBindingTarget value");
+    break;
+  }
+  return RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect;
 }
 
 [[nodiscard]] bool isTextureDescAliasCompatible(const TextureDesc &a,
@@ -411,6 +431,10 @@ RenderGraphBuilder::RenderGraphBuilder(std::pmr::memory_resource *memory)
       drawIndexBindingResourceIndices_(memory_),
       drawIndirectBindingResourceIndices_(memory_),
       drawIndirectCountBindingResourceIndices_(memory_),
+      passMeshDispatchBindingOffsets_(memory_),
+      passMeshDispatchBindingCounts_(memory_),
+      meshDispatchIndirectBindingResourceIndices_(memory_),
+      meshDispatchIndirectCountBindingResourceIndices_(memory_),
       importedTextureIndicesByHandle_(memory_),
       importedBufferIndicesByHandle_(memory_),
       explicitTextureAccessIndicesByPassResource_(memory_),
@@ -450,6 +474,10 @@ void RenderGraphBuilder::beginFrame(uint64_t frameIndex) {
   drawIndexBindingResourceIndices_.clear();
   drawIndirectBindingResourceIndices_.clear();
   drawIndirectCountBindingResourceIndices_.clear();
+  passMeshDispatchBindingOffsets_.clear();
+  passMeshDispatchBindingCounts_.clear();
+  meshDispatchIndirectBindingResourceIndices_.clear();
+  meshDispatchIndirectCountBindingResourceIndices_.clear();
   importedTextureIndicesByHandle_.clear();
   importedBufferIndicesByHandle_.clear();
   explicitTextureAccessIndicesByPassResource_.clear();
@@ -574,6 +602,39 @@ void RenderGraphBuilder::unregisterPersistentTexture(PersistentTextureId id) {
 
 RenderGraphBuilder::GraphFingerprint
 RenderGraphBuilder::computeGraphFingerprint() const noexcept {
+  uint64_t payloadLayoutHash = computePassPayloadLayoutHash(
+      passes_, passDependencyTextureBindingCounts_);
+  const auto mixPayload = [&payloadLayoutHash](uint64_t value) noexcept {
+    payloadLayoutHash ^= value;
+    payloadLayoutHash *= 0x100000001b3ull;
+  };
+  for (size_t passIndex = 0; passIndex < passes_.size(); ++passIndex) {
+    const uint32_t bindingOffset =
+        passIndex < passMeshDispatchBindingOffsets_.size()
+            ? passMeshDispatchBindingOffsets_[passIndex]
+            : 0u;
+    const uint32_t bindingCount =
+        passIndex < passMeshDispatchBindingCounts_.size()
+            ? passMeshDispatchBindingCounts_[passIndex]
+            : 0u;
+    mixPayload(bindingCount);
+    for (uint32_t bindingIndex = 0; bindingIndex < bindingCount;
+         ++bindingIndex) {
+      const uint32_t globalBindingIndex = bindingOffset + bindingIndex;
+      const bool hasIndirect =
+          globalBindingIndex <
+              meshDispatchIndirectBindingResourceIndices_.size() &&
+          meshDispatchIndirectBindingResourceIndices_[globalBindingIndex] !=
+              UINT32_MAX;
+      const bool hasIndirectCount =
+          globalBindingIndex <
+              meshDispatchIndirectCountBindingResourceIndices_.size() &&
+          meshDispatchIndirectCountBindingResourceIndices_
+                  [globalBindingIndex] != UINT32_MAX;
+      mixPayload(hasIndirect ? 1u : 0u);
+      mixPayload(hasIndirectCount ? 1u : 0u);
+    }
+  }
   return GraphFingerprint{
       .passCount = passes_.size(),
       .totalTextureCount = textures_.size(),
@@ -583,8 +644,7 @@ RenderGraphBuilder::computeGraphFingerprint() const noexcept {
       .frameOutputCount = frameOutputTextureIndices_.size(),
       .sideEffectMarkCount = sideEffectPassMarks_.size(),
       .allPassesBorrowPayload = allPassesBorrowPayload_,
-      .payloadLayoutHash = computePassPayloadLayoutHash(
-          passes_, passDependencyTextureBindingCounts_),
+      .payloadLayoutHash = payloadLayoutHash,
       .transientResourceDescriptorsHash = transientResourceDescriptorsHash_,
       .persistentHandlesVersion = persistentHandlesVersion_,
       .dynamicPayloadVersion = dynamicPayloadVersion_,
@@ -829,9 +889,44 @@ void RenderGraphBuilder::refreshHandlesInCompileResult(
               result.ownedMeshDispatchItems.size() - meshDispatchRange.offset) {
         for (uint32_t dispatchIndex = 0; dispatchIndex < actualDispatchCount;
              ++dispatchIndex) {
-          result.ownedMeshDispatchItems[meshDispatchRange.offset +
-                                        dispatchIndex] =
+          MeshDispatchItem refreshedDispatch =
               sourcePass.meshDispatches[dispatchIndex];
+          if (passIndex < passMeshDispatchBindingOffsets_.size() &&
+              passIndex < passMeshDispatchBindingCounts_.size()) {
+            const uint32_t bindingOffset =
+                passMeshDispatchBindingOffsets_[passIndex];
+            const uint32_t bindingCount =
+                passMeshDispatchBindingCounts_[passIndex];
+            const uint32_t globalBindingIndex = bindingOffset + dispatchIndex;
+            if (dispatchIndex < bindingCount &&
+                globalBindingIndex <
+                    meshDispatchIndirectBindingResourceIndices_.size()) {
+              const uint32_t resourceIndex =
+                  meshDispatchIndirectBindingResourceIndices_
+                      [globalBindingIndex];
+              refreshedDispatch.indirectBuffer =
+                  resourceIndex != UINT32_MAX &&
+                          resourceIndex < buffers_.size() &&
+                          buffers_[resourceIndex].imported
+                      ? buffers_[resourceIndex].importedHandle
+                      : BufferHandle{};
+            }
+            if (dispatchIndex < bindingCount &&
+                globalBindingIndex <
+                    meshDispatchIndirectCountBindingResourceIndices_.size()) {
+              const uint32_t resourceIndex =
+                  meshDispatchIndirectCountBindingResourceIndices_
+                      [globalBindingIndex];
+              refreshedDispatch.indirectCountBuffer =
+                  resourceIndex != UINT32_MAX &&
+                          resourceIndex < buffers_.size() &&
+                          buffers_[resourceIndex].imported
+                      ? buffers_[resourceIndex].importedHandle
+                      : BufferHandle{};
+            }
+          }
+          result.ownedMeshDispatchItems[meshDispatchRange.offset +
+                                        dispatchIndex] = refreshedDispatch;
         }
         refreshedPass.meshDispatches = std::span<const MeshDispatchItem>(
             result.ownedMeshDispatchItems.data() + meshDispatchRange.offset,
@@ -1485,11 +1580,39 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
   const std::string meshDispatchDependencyTextureDebugName =
       makePassResourceDebugName(desc.debugLabel,
                                 "mesh_dispatch_dependency_texture");
-  for (const MeshDispatchItem &dispatch : desc.meshDispatches) {
-    if (dispatch.command != MeshDispatchCommandType::Direct) {
-      return Result<bool, std::string>::makeError(
-          "RenderGraphBuilder::bindImplicitPassResources: mesh dispatches "
-          "must be direct in graph v1");
+  const std::string meshDispatchIndirectDebugName = makePassResourceDebugName(
+      desc.debugLabel, "mesh_dispatch_indirect_buffer");
+  for (size_t dispatchIndex = 0u; dispatchIndex < desc.meshDispatches.size();
+       ++dispatchIndex) {
+    const MeshDispatchItem &dispatch = desc.meshDispatches[dispatchIndex];
+    if (nuri::isValid(dispatch.indirectBuffer)) {
+      auto importResult =
+          importBuffer(dispatch.indirectBuffer, meshDispatchIndirectDebugName);
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      auto bindResult = bindMeshDispatchBuffer(
+          pass, static_cast<uint32_t>(dispatchIndex),
+          RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect,
+          importResult.value(), RenderGraphAccessMode::Read);
+      if (bindResult.hasError()) {
+        return bindResult;
+      }
+    }
+    if (nuri::isValid(dispatch.indirectCountBuffer)) {
+      auto importResult = importBuffer(dispatch.indirectCountBuffer,
+                                       meshDispatchIndirectDebugName);
+      if (importResult.hasError()) {
+        return Result<bool, std::string>::makeError(importResult.error());
+      }
+      auto bindResult = bindMeshDispatchBuffer(
+          pass, static_cast<uint32_t>(dispatchIndex),
+          RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
+              IndirectCount,
+          importResult.value(), RenderGraphAccessMode::Read);
+      if (bindResult.hasError()) {
+        return bindResult;
+      }
     }
     for (const BufferHandle dependency : dispatch.dependencyBuffers) {
       if (!nuri::isValid(dependency)) {
@@ -1669,11 +1792,12 @@ RenderGraphBuilder::addPreparedGraphicsPass(
   }
   if (isComputeOnlyExecutionMode(desc.executionMode) &&
       (!desc.drawBufferBindings.empty() ||
+       !desc.meshDispatchBufferBindings.empty() ||
        !desc.preResolvedDrawBufferIds.empty() ||
        !desc.preResolvedDrawBuffers.empty())) {
     return Result<RenderGraphPassId, std::string>::makeError(
         "RenderGraphBuilder::addPreparedGraphicsPass: compute-only pass "
-        "cannot bind draw buffers");
+        "cannot bind draw or mesh-dispatch buffers");
   }
   if (!desc.borrowPayload) {
     allPassesBorrowPayload_ = false;
@@ -1826,11 +1950,43 @@ RenderGraphBuilder::addPreparedGraphicsPass(
     const std::string meshDispatchDependencyTextureDebugName =
         makePassResourceDebugName(desc.debugLabel,
                                   "mesh_dispatch_dependency_texture");
-    for (const MeshDispatchItem &dispatch : desc.meshDispatches) {
-      if (dispatch.command != MeshDispatchCommandType::Direct) {
-        return Result<RenderGraphPassId, std::string>::makeError(
-            "RenderGraphBuilder::addPreparedGraphicsPass: mesh dispatches "
-            "must be direct in graph v1");
+    const std::string meshDispatchIndirectDebugName = makePassResourceDebugName(
+        desc.debugLabel, "mesh_dispatch_indirect_buffer");
+    for (size_t dispatchIndex = 0u; dispatchIndex < desc.meshDispatches.size();
+         ++dispatchIndex) {
+      const MeshDispatchItem &dispatch = desc.meshDispatches[dispatchIndex];
+      if (nuri::isValid(dispatch.indirectBuffer)) {
+        auto importResult = importBuffer(dispatch.indirectBuffer,
+                                         meshDispatchIndirectDebugName);
+        if (importResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              importResult.error());
+        }
+        auto bindResult = bindMeshDispatchBuffer(
+            passId, static_cast<uint32_t>(dispatchIndex),
+            RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect,
+            importResult.value(), RenderGraphAccessMode::Read);
+        if (bindResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              bindResult.error());
+        }
+      }
+      if (nuri::isValid(dispatch.indirectCountBuffer)) {
+        auto importResult = importBuffer(dispatch.indirectCountBuffer,
+                                         meshDispatchIndirectDebugName);
+        if (importResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              importResult.error());
+        }
+        auto bindResult = bindMeshDispatchBuffer(
+            passId, static_cast<uint32_t>(dispatchIndex),
+            RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
+                IndirectCount,
+            importResult.value(), RenderGraphAccessMode::Read);
+        if (bindResult.hasError()) {
+          return Result<RenderGraphPassId, std::string>::makeError(
+              bindResult.error());
+        }
       }
       for (const BufferHandle dependency : dispatch.dependencyBuffers) {
         if (!nuri::isValid(dependency)) {
@@ -1868,6 +2024,17 @@ RenderGraphBuilder::addPreparedGraphicsPass(
       }
     }
 
+    for (const auto &binding : desc.meshDispatchBufferBindings) {
+      auto bindResult = bindMeshDispatchBuffer(
+          passId, binding.meshDispatchIndex,
+          toPreparedMeshDispatchBindingTarget(binding.target), binding.buffer,
+          binding.mode);
+      if (bindResult.hasError()) {
+        return Result<RenderGraphPassId, std::string>::makeError(
+            bindResult.error());
+      }
+    }
+
     if (desc.drawBuffersPreResolved) {
       if (!desc.drawBufferBindings.empty()) {
         return Result<RenderGraphPassId, std::string>::makeError(
@@ -1896,6 +2063,7 @@ RenderGraphBuilder::addPreparedGraphicsPass(
         }
       }
     }
+
     NURI_PROFILER_ZONE_END();
   }
 
@@ -1939,6 +2107,8 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
       static_cast<uint32_t>(preDispatchDependencyBindingOffsets_.size());
   const uint32_t drawBindingOffset =
       static_cast<uint32_t>(drawVertexBindingResourceIndices_.size());
+  const uint32_t meshDispatchBindingOffset =
+      static_cast<uint32_t>(meshDispatchIndirectBindingResourceIndices_.size());
   const RenderGraphPassId passId{.value = passIndex};
 
   const size_t dependencyCount = pass.dependencyBuffers.size();
@@ -2074,6 +2244,13 @@ RenderGraphBuilder::addPassRecord(RenderPass pass, std::string_view debugName) {
     drawIndexBindingResourceIndices_.push_back(UINT32_MAX);
     drawIndirectBindingResourceIndices_.push_back(UINT32_MAX);
     drawIndirectCountBindingResourceIndices_.push_back(UINT32_MAX);
+  }
+  passMeshDispatchBindingOffsets_.push_back(meshDispatchBindingOffset);
+  passMeshDispatchBindingCounts_.push_back(
+      static_cast<uint32_t>(meshDispatchCount));
+  for (uint32_t i = 0; i < meshDispatchCount; ++i) {
+    meshDispatchIndirectBindingResourceIndices_.push_back(UINT32_MAX);
+    meshDispatchIndirectCountBindingResourceIndices_.push_back(UINT32_MAX);
   }
   return Result<RenderGraphPassId, std::string>::makeResult(passId);
 }
@@ -2486,6 +2663,72 @@ Result<bool, std::string> RenderGraphBuilder::bindDrawBuffer(
   return addBufferAccess(pass, buffer, mode);
 }
 
+Result<bool, std::string> RenderGraphBuilder::bindMeshDispatchBuffer(
+    RenderGraphPassId pass, uint32_t meshDispatchIndex,
+    RenderGraphCompileResult::MeshDispatchBufferBindingTarget target,
+    RenderGraphBufferId buffer, RenderGraphAccessMode mode) {
+  if (!isValid(pass) || !isValid(buffer)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindMeshDispatchBuffer: id is invalid");
+  }
+  if (!hasAccessFlag(mode, RenderGraphAccessMode::Read) &&
+      !hasAccessFlag(mode, RenderGraphAccessMode::Write)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindMeshDispatchBuffer: access mode must contain "
+        "read or write");
+  }
+  if (!isValidPassIndex(pass.value) || !isValidBufferIndex(buffer.value)) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindMeshDispatchBuffer: id is out of range");
+  }
+  if (pass.value >= passMeshDispatchBindingOffsets_.size() ||
+      pass.value >= passMeshDispatchBindingCounts_.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindMeshDispatchBuffer: pass binding table is "
+        "out of sync");
+  }
+
+  const uint32_t meshDispatchCount = passMeshDispatchBindingCounts_[pass.value];
+  if (meshDispatchIndex >= meshDispatchCount) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindMeshDispatchBuffer: mesh dispatch index is "
+        "out of range");
+  }
+  const uint32_t meshDispatchOffset =
+      passMeshDispatchBindingOffsets_[pass.value];
+  if (meshDispatchOffset > meshDispatchIndirectBindingResourceIndices_.size() ||
+      meshDispatchCount > meshDispatchIndirectBindingResourceIndices_.size() -
+                              meshDispatchOffset ||
+      meshDispatchCount >
+          meshDispatchIndirectCountBindingResourceIndices_.size() -
+              meshDispatchOffset) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindMeshDispatchBuffer: mesh dispatch binding "
+        "range is invalid");
+  }
+
+  uint32_t *targetTableEntry = nullptr;
+  switch (target) {
+  case RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect:
+    targetTableEntry =
+        &meshDispatchIndirectBindingResourceIndices_[meshDispatchOffset +
+                                                     meshDispatchIndex];
+    break;
+  case RenderGraphCompileResult::MeshDispatchBufferBindingTarget::IndirectCount:
+    targetTableEntry =
+        &meshDispatchIndirectCountBindingResourceIndices_[meshDispatchOffset +
+                                                          meshDispatchIndex];
+    break;
+  default:
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::bindMeshDispatchBuffer: unsupported binding "
+        "target");
+  }
+
+  *targetTableEntry = buffer.value;
+  return addBufferAccess(pass, buffer, mode);
+}
+
 Result<bool, std::string>
 RenderGraphBuilder::addDependency(RenderGraphPassId before,
                                   RenderGraphPassId after) {
@@ -2840,7 +3083,9 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC0ValidateInputs(
       passPreDispatchBindingOffsets_.size() != passes_.size() ||
       passPreDispatchBindingCounts_.size() != passes_.size() ||
       passDrawBindingOffsets_.size() != passes_.size() ||
-      passDrawBindingCounts_.size() != passes_.size()) {
+      passDrawBindingCounts_.size() != passes_.size() ||
+      passMeshDispatchBindingOffsets_.size() != passes_.size() ||
+      passMeshDispatchBindingCounts_.size() != passes_.size()) {
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::compile: pass texture binding tables are out of "
         "sync");
@@ -2854,6 +3099,12 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC0ValidateInputs(
     return Result<bool, std::string>::makeError(
         "RenderGraphBuilder::compile: draw buffer binding tables are out of "
         "sync");
+  }
+  if (meshDispatchIndirectBindingResourceIndices_.size() !=
+      meshDispatchIndirectCountBindingResourceIndices_.size()) {
+    return Result<bool, std::string>::makeError(
+        "RenderGraphBuilder::compile: mesh dispatch buffer binding tables are "
+        "out of sync");
   }
   if (preDispatchDependencyBindingOffsets_.size() !=
       preDispatchDependencyBindingCounts_.size()) {
@@ -3349,6 +3600,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t drawOutputOffset = 0u;
     uint32_t quantizedDrawCount = 0u;
     uint32_t meshDispatchCount = 0u;
+    uint32_t meshDispatchBindingOffset = 0u;
     uint32_t meshDispatchOutputOffset = 0u;
     uint32_t unresolvedTextureOffset = 0u;
     uint32_t unresolvedTextureCount = 0u;
@@ -3360,6 +3612,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     uint32_t unresolvedPreDispatchDependencyCount = 0u;
     uint32_t unresolvedDrawOffset = 0u;
     uint32_t unresolvedDrawCount = 0u;
+    uint32_t unresolvedMeshDispatchOffset = 0u;
+    uint32_t unresolvedMeshDispatchCount = 0u;
   };
   const uint32_t workerCount = std::max(1u, runtime.workerCount());
   std::vector<IndexedResolveError> resolveErrors(workerCount);
@@ -3535,18 +3789,37 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       plan.drawBindingOffset = drawOffset;
       const uint32_t meshDispatchCount =
           static_cast<uint32_t>(sourcePass.meshDispatches.size());
-      for (const MeshDispatchItem &dispatch : sourcePass.meshDispatches) {
-        if (dispatch.command != MeshDispatchCommandType::Direct) {
-          resolveErrors[workerIndex] = IndexedResolveError{
-              .hasError = true,
-              .orderedPassIndex = orderedPassIndex,
-              .message = "RenderGraphBuilder::compile: graph mesh dispatches "
-                         "must be direct in v1",
-          };
-          return;
-        }
+      const uint32_t meshDispatchBindingCount =
+          passMeshDispatchBindingCounts_[passIndex];
+      const uint32_t meshDispatchOffset =
+          passMeshDispatchBindingOffsets_[passIndex];
+      if (sourcePass.meshDispatches.size() != meshDispatchBindingCount) {
+        resolveErrors[workerIndex] = IndexedResolveError{
+            .hasError = true,
+            .orderedPassIndex = orderedPassIndex,
+            .message = "RenderGraphBuilder::compile: mesh dispatch binding "
+                       "count does not match pass mesh dispatch count",
+        };
+        return;
+      }
+      if (meshDispatchOffset >
+              meshDispatchIndirectBindingResourceIndices_.size() ||
+          meshDispatchBindingCount >
+              meshDispatchIndirectBindingResourceIndices_.size() -
+                  meshDispatchOffset ||
+          meshDispatchBindingCount >
+              meshDispatchIndirectCountBindingResourceIndices_.size() -
+                  meshDispatchOffset) {
+        resolveErrors[workerIndex] = IndexedResolveError{
+            .hasError = true,
+            .orderedPassIndex = orderedPassIndex,
+            .message = "RenderGraphBuilder::compile: mesh dispatch binding "
+                       "range is invalid",
+        };
+        return;
       }
       plan.meshDispatchCount = meshDispatchCount;
+      plan.meshDispatchBindingOffset = meshDispatchOffset;
       if (nuri::isValid(sourcePass.colorTexture) &&
           passColorTextureBindings_[passIndex] == UINT32_MAX) {
         resolveErrors[workerIndex] = IndexedResolveError{
@@ -3827,6 +4100,61 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       }
       plan.drawCount = drawCount;
       plan.drawBindingOffset = drawOffset;
+      for (uint32_t dispatchIndex = 0; dispatchIndex < meshDispatchCount;
+           ++dispatchIndex) {
+        const MeshDispatchItem &dispatch =
+            sourcePass.meshDispatches[dispatchIndex];
+        const uint32_t globalDispatchIndex =
+            plan.meshDispatchBindingOffset + dispatchIndex;
+        const auto validateMeshDispatchBinding =
+            [&](BufferHandle sourceHandle, uint32_t resourceIndex,
+                std::string_view missingBindingMessage,
+                std::string_view invalidBindingMessage) {
+              if (nuri::isValid(sourceHandle) && resourceIndex == UINT32_MAX) {
+                resolveErrors[workerIndex] = IndexedResolveError{
+                    .hasError = true,
+                    .orderedPassIndex = orderedPassIndex,
+                    .message = std::string(missingBindingMessage),
+                };
+                return false;
+              }
+              if (resourceIndex == UINT32_MAX) {
+                return true;
+              }
+              if (!isValidBufferIndex(resourceIndex)) {
+                resolveErrors[workerIndex] = IndexedResolveError{
+                    .hasError = true,
+                    .orderedPassIndex = orderedPassIndex,
+                    .message = std::string(invalidBindingMessage),
+                };
+                return false;
+              }
+              if (!buffers_[resourceIndex].imported) {
+                ++plan.unresolvedMeshDispatchCount;
+              }
+              return true;
+            };
+        if (!validateMeshDispatchBinding(
+                dispatch.indirectBuffer,
+                meshDispatchIndirectBindingResourceIndices_
+                    [globalDispatchIndex],
+                "RenderGraphBuilder::compile: pass requires explicit mesh "
+                "dispatch indirect buffer binding",
+                "RenderGraphBuilder::compile: mesh dispatch buffer binding "
+                "references out-of-range resource")) {
+          return;
+        }
+        if (!validateMeshDispatchBinding(
+                dispatch.indirectCountBuffer,
+                meshDispatchIndirectCountBindingResourceIndices_
+                    [globalDispatchIndex],
+                "RenderGraphBuilder::compile: pass requires explicit mesh "
+                "dispatch indirect-count buffer binding",
+                "RenderGraphBuilder::compile: mesh dispatch buffer binding "
+                "references out-of-range resource")) {
+          return;
+        }
+      }
       passPlans[orderedPassIndex] = plan;
     }
   };
@@ -3878,6 +4206,7 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
   size_t totalUnresolvedDependencyTextureBindings = 0u;
   size_t totalUnresolvedPreDispatchDependencyBufferBindings = 0u;
   size_t totalUnresolvedDrawBufferBindings = 0u;
+  size_t totalUnresolvedMeshDispatchBufferBindings = 0u;
   for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passPlans.size();
        ++orderedPassIndex) {
     PassResolvePlan &plan = passPlans[orderedPassIndex];
@@ -3955,6 +4284,10 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
     plan.unresolvedDrawOffset =
         static_cast<uint32_t>(totalUnresolvedDrawBufferBindings);
     totalUnresolvedDrawBufferBindings += plan.unresolvedDrawCount;
+    plan.unresolvedMeshDispatchOffset =
+        static_cast<uint32_t>(totalUnresolvedMeshDispatchBufferBindings);
+    totalUnresolvedMeshDispatchBufferBindings +=
+        plan.unresolvedMeshDispatchCount;
   }
 
   compiled.resolvedDependencyBuffers.resize(totalDependencyBufferSlots);
@@ -4006,6 +4339,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
       totalUnresolvedPreDispatchDependencyBufferBindings);
   compiled.unresolvedDrawBufferBindings.resize(
       totalUnresolvedDrawBufferBindings);
+  compiled.unresolvedMeshDispatchBufferBindings.resize(
+      totalUnresolvedMeshDispatchBufferBindings);
 
   const auto fillPassRange = [&](uint32_t, RenderGraphContiguousRange range) {
     for (uint32_t orderedPassIndex = range.offset;
@@ -4286,6 +4621,8 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           .offset = plan.meshDispatchOutputOffset,
           .count = plan.meshDispatchCount};
       if (plan.meshDispatchCount > 0u) {
+        uint32_t unresolvedMeshDispatchWriteOffset =
+            plan.unresolvedMeshDispatchOffset;
         for (uint32_t dispatchIndex = 0; dispatchIndex < plan.meshDispatchCount;
              ++dispatchIndex) {
           const size_t outputIndex =
@@ -4294,6 +4631,43 @@ Result<bool, std::string> RenderGraphBuilder::compileStageC3ResolvePassPayloads(
           const MeshDispatchItem &sourceDispatch =
               sourcePass.meshDispatches[dispatchIndex];
           MeshDispatchItem resolvedDispatch = sourceDispatch;
+          const uint32_t globalDispatchIndex =
+              plan.meshDispatchBindingOffset + dispatchIndex;
+
+          const auto resolveMeshDispatchBinding =
+              [&](uint32_t resourceIndex,
+                  RenderGraphCompileResult::MeshDispatchBufferBindingTarget
+                      target,
+                  BufferHandle &slotHandle) {
+                if (resourceIndex == UINT32_MAX) {
+                  slotHandle = {};
+                  return;
+                }
+                const BufferResource &resource = buffers_[resourceIndex];
+                if (resource.imported) {
+                  slotHandle = resource.importedHandle;
+                  return;
+                }
+                slotHandle = {};
+                compiled.unresolvedMeshDispatchBufferBindings
+                    [unresolvedMeshDispatchWriteOffset++] = {
+                    .orderedPassIndex = orderedPassIndex,
+                    .meshDispatchIndex = dispatchIndex,
+                    .target = target,
+                    .bufferResourceIndex = resourceIndex};
+              };
+
+          resolveMeshDispatchBinding(
+              meshDispatchIndirectBindingResourceIndices_[globalDispatchIndex],
+              RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
+                  Indirect,
+              resolvedDispatch.indirectBuffer);
+          resolveMeshDispatchBinding(
+              meshDispatchIndirectCountBindingResourceIndices_
+                  [globalDispatchIndex],
+              RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
+                  IndirectCount,
+              resolvedDispatch.indirectCountBuffer);
 
           std::pmr::string &debugLabel =
               compiled.ownedMeshDispatchDebugLabels[outputIndex];
@@ -5556,6 +5930,47 @@ RenderGraphBuilder::compileStageC7ValidateCompiledMetadata(
             "target is invalid");
       }
     }
+
+    for (const auto &binding : compiled.unresolvedMeshDispatchBufferBindings) {
+      if (binding.orderedPassIndex >=
+          compiled.meshDispatchRangesByPass.size()) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved mesh dispatch buffer "
+            "binding pass index is out of range");
+      }
+      if (binding.bufferResourceIndex >=
+          compiled.transientBufferAllocationByResource.size()) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved mesh dispatch buffer "
+            "binding resource index is out of range");
+      }
+      const uint32_t allocationIndex =
+          compiled
+              .transientBufferAllocationByResource[binding.bufferResourceIndex];
+      if (allocationIndex == UINT32_MAX ||
+          allocationIndex >= compiled.transientBufferPhysicalCount) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved mesh dispatch buffer "
+            "binding has no transient allocation");
+      }
+      const auto &meshDispatchRange =
+          compiled.meshDispatchRangesByPass[binding.orderedPassIndex];
+      if (binding.meshDispatchIndex >= meshDispatchRange.count) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved mesh dispatch buffer "
+            "binding dispatch index is out of range");
+      }
+      if (binding.target != RenderGraphCompileResult::
+                                MeshDispatchBufferBindingTarget::Indirect &&
+          binding.target !=
+              RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
+                  IndirectCount) {
+        return Result<bool, std::string>::makeError(
+            "RenderGraphBuilder::compile: unresolved mesh dispatch buffer "
+            "binding target is invalid");
+      }
+    }
+
     NURI_PROFILER_ZONE_END();
   }
 
@@ -6543,6 +6958,70 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
             "RenderGraphExecutor::execute: unresolved draw buffer binding "
             "target is invalid");
       }
+    }
+
+    for (const auto &binding : compiled.unresolvedMeshDispatchBufferBindings) {
+      if (binding.orderedPassIndex >= executablePasses.size()) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved mesh dispatch buffer "
+            "binding pass index is out of range");
+      }
+      if (binding.bufferResourceIndex >=
+          compiled.transientBufferAllocationByResource.size()) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved mesh dispatch buffer "
+            "binding resource index is out of range");
+      }
+
+      const auto &meshDispatchRange =
+          compiled.meshDispatchRangesByPass[binding.orderedPassIndex];
+      if (binding.meshDispatchIndex >= meshDispatchRange.count) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved mesh dispatch buffer "
+            "binding dispatch index is out of range");
+      }
+
+      const uint32_t allocationIndex =
+          compiled
+              .transientBufferAllocationByResource[binding.bufferResourceIndex];
+      if (allocationIndex == UINT32_MAX ||
+          allocationIndex >= transientBufferHandles.size() ||
+          !nuri::isValid(transientBufferHandles[allocationIndex])) {
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved mesh dispatch buffer "
+            "binding has no materialized allocation");
+      }
+
+      MeshDispatchItem &dispatch =
+          executableMeshDispatches[meshDispatchRange.offset +
+                                   binding.meshDispatchIndex];
+      switch (binding.target) {
+      case RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect:
+        dispatch.indirectBuffer = transientBufferHandles[allocationIndex];
+        break;
+      case RenderGraphCompileResult::MeshDispatchBufferBindingTarget::
+          IndirectCount:
+        dispatch.indirectCountBuffer = transientBufferHandles[allocationIndex];
+        break;
+      default:
+        destroyMaterializedResources();
+        return fail(
+            RenderGraphExecutionFailureStage::PatchUnresolvedBindings,
+            "RenderGraphExecutor::execute: unresolved mesh dispatch buffer "
+            "binding target is invalid");
+      }
+      executablePasses[binding.orderedPassIndex].meshDispatches =
+          std::span<const MeshDispatchItem>(executableMeshDispatches.data() +
+                                                meshDispatchRange.offset,
+                                            meshDispatchRange.count);
     }
     NURI_PROFILER_ZONE_END();
   }

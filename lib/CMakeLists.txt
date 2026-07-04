@@ -42,6 +42,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/sim/animation_gpu_services.cpp
   nuri/gfx/sim/animation_scene_frame_provider.cpp
   nuri/gfx/sim/simulation_gpu_context.cpp
+  nuri/gfx/visibility/visibility.cpp
   nuri/gfx/renderer.cpp
   nuri/gfx/shader.cpp
   nuri/platform/gpu_device_factory.cpp

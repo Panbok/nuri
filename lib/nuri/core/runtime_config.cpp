@@ -18,6 +18,10 @@ constexpr std::string_view kDefaultOpaqueMeshletMeshShader =
     "opaque_meshlet.mesh.glsl";
 constexpr std::string_view kDefaultOpaqueMeshletFragmentShader =
     "opaque_meshlet.frag";
+constexpr std::string_view kDefaultOpaqueMeshletDepthFragmentShader =
+    "opaque_meshlet_depth.frag";
+constexpr std::string_view kDefaultOpaqueMeshletDepthAlphaFragmentShader =
+    "opaque_meshlet_depth_alpha.frag";
 constexpr std::string_view kDefaultOpaquePickFragmentShader = "main_id.frag";
 constexpr std::string_view kDefaultOpaqueShadowInspectFragmentShader =
     "shadow_inspect.frag";
@@ -70,12 +74,14 @@ constexpr std::array<std::string_view, 2> kDebugGridShaderKeys = {"vertex",
                                                                   "fragment"};
 constexpr std::array<std::string_view, 2> kSkyboxShaderKeys = {"vertex",
                                                                "fragment"};
-constexpr std::array<std::string_view, 13> kOpaqueShaderKeys = {
+constexpr std::array<std::string_view, 15> kOpaqueShaderKeys = {
     "mesh_vertex",
     "mesh_fragment",
     "meshlet_task",
     "meshlet_mesh",
     "meshlet_fragment",
+    "meshlet_depth_fragment",
+    "meshlet_depth_alpha_fragment",
     "pick_fragment",
     "shadow_inspect_fragment",
     "compute_instances",
@@ -655,6 +661,18 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
   if (meshletFragmentPath.hasError()) {
     return makeError<RuntimeConfig>(meshletFragmentPath.error());
   }
+  auto meshletDepthFragmentPath = resolveShaderFileWithDefault(
+      opaqueObj, "meshlet_depth_fragment", "shaders.opaque",
+      kDefaultOpaqueMeshletDepthFragmentShader, shadersRoot.value());
+  if (meshletDepthFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(meshletDepthFragmentPath.error());
+  }
+  auto meshletDepthAlphaFragmentPath = resolveShaderFileWithDefault(
+      opaqueObj, "meshlet_depth_alpha_fragment", "shaders.opaque",
+      kDefaultOpaqueMeshletDepthAlphaFragmentShader, shadersRoot.value());
+  if (meshletDepthAlphaFragmentPath.hasError()) {
+    return makeError<RuntimeConfig>(meshletDepthAlphaFragmentPath.error());
+  }
   auto pickFragmentPath = resolveShaderFileWithDefault(
       opaqueObj, "pick_fragment", "shaders.opaque",
       kDefaultOpaquePickFragmentShader, shadersRoot.value());
@@ -830,6 +848,9 @@ loadRuntimeConfig(const std::filesystem::path &configPath) {
               .meshletTask = meshletTaskPath.value(),
               .meshletMesh = meshletMeshPath.value(),
               .meshletFragment = meshletFragmentPath.value(),
+              .meshletDepthFragment = meshletDepthFragmentPath.value(),
+              .meshletDepthAlphaFragment =
+                  meshletDepthAlphaFragmentPath.value(),
               .pickFragment = pickFragmentPath.value(),
               .shadowInspectFragment = shadowInspectFragmentPath.value(),
               .computeInstances = computeInstancesPath.value(),

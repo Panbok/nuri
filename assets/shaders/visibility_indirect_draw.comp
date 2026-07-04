@@ -1,0 +1,75 @@
+#include "visibility_common.sp"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const uint kIndexedIndirectCommandWordCount = 5u;
+
+layout(push_constant) uniform VisibilityIndirectDrawPushConstants {
+  VisibilityIndirectWordBuffer commands;
+  VisibilityInstanceRemapBuffer remap;
+  VisibilityCandidateBuffer candidates;
+  VisibilityPassBuffer passData;
+  VisibilityCounterBuffer counters;
+  uint commandWordOffset;
+  uint commandCount;
+  uint candidateCount;
+  uint flags;
+  uint sourceFrameIndex;
+} pc;
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  bool occlusionEnabled =
+      (pc.flags & kVisibilityGpuFlagOcclusionCulling) != 0u &&
+      pc.passData.data.depthPyramidInfo.z > 0u;
+  if (idx == 0u) {
+    pc.counters.data.status.z = pc.sourceFrameIndex;
+    pc.counters.data.status.w = 1u;
+    pc.counters.data.indirect.w = pc.sourceFrameIndex;
+  }
+  if (idx >= pc.commandCount) {
+    return;
+  }
+
+  atomicAdd(pc.counters.data.indirect.x, 1u);
+
+  uint commandWord = pc.commandWordOffset +
+                     idx * kIndexedIndirectCommandWordCount;
+  uint instanceCount = pc.commands.words[commandWord + 1u];
+  uint firstInstance = pc.commands.words[commandWord + 4u];
+
+  bool visible = false;
+  for (uint instanceOffset = 0u; instanceOffset < instanceCount;
+       ++instanceOffset) {
+    uint candidateIndex = pc.remap.indices[firstInstance + instanceOffset];
+    if (candidateIndex >= pc.candidateCount) {
+      continue;
+    }
+
+    VisibilityCandidateGpu candidate = pc.candidates.values[candidateIndex];
+    bool candidateVisible = true;
+    bool uncertainVisible =
+        (candidate.ranges.z & kVisibilityCandidateConservativeVisible) != 0u &&
+        (pc.flags & kVisibilityGpuFlagVisibleOnUncertain) != 0u;
+    if (!uncertainVisible &&
+        (pc.flags & kVisibilityGpuFlagFrustumCulling) != 0u) {
+      candidateVisible = !visibilitySphereOutsideFrustum(
+          pc.passData.data.planes, candidate.bounds.xyz, candidate.bounds.w);
+    }
+    if (candidateVisible && !uncertainVisible && occlusionEnabled) {
+      candidateVisible =
+          !visibilityBoundsOccludedByPreviousDepth(pc.passData.data, candidate);
+    }
+    if (candidateVisible) {
+      visible = true;
+      break;
+    }
+  }
+
+  pc.commands.words[commandWord + 1u] = visible ? instanceCount : 0u;
+  if (visible) {
+    atomicAdd(pc.counters.data.indirect.y, 1u);
+  } else {
+    atomicAdd(pc.counters.data.indirect.z, 1u);
+  }
+}

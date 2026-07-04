@@ -5,9 +5,8 @@
 layout(local_size_x = 32) in;
 layout(triangles, max_vertices = 64, max_primitives = 124) out;
 
-out gl_MeshPerVertexEXT {
-  vec4 gl_Position;
-} gl_MeshVerticesEXT[];
+out gl_MeshPerVertexEXT { vec4 gl_Position; }
+gl_MeshVerticesEXT[];
 
 layout(location = 0) out vec2 outUv0[];
 layout(location = 1) out vec2 outUv1[];
@@ -51,7 +50,8 @@ void main() {
 
   for (uint primitive = lane; primitive < primitiveCount;
        primitive += gl_WorkGroupSize.x) {
-    const uint packed = pc.meshletPrimitives.indices[primitiveOffset + primitive];
+    const uint packed =
+        pc.meshletPrimitives.indices[primitiveOffset + primitive];
     const uint i0 = packed & 0xffu;
     const uint i1 = (packed >> 8u) & 0xffu;
     const uint i2 = (packed >> 16u) & 0xffu;

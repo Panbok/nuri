@@ -26,6 +26,10 @@ enum ForwardSceneFlags : uint32_t {
   kForwardSceneHasAmbientOcclusion = 1u << 9u,
 };
 
+enum ForwardSceneDepthPyramidFlags : uint32_t {
+  kForwardSceneDepthPyramidPreviousFrame = 1u << 0u,
+};
+
 struct SceneDataBufferLayout {
   size_t frameDataOffset = 0u;
   size_t postTaaFrameDataOffset = 0u;
@@ -297,6 +301,7 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
   uint32_t sceneDepthSamplerId = ctx.shared.sceneDepthSamplerId;
   uint32_t sceneDepthPyramidLevelCount = 0u;
   std::array<glm::uvec4, kSceneDepthPyramidArraySize> sceneDepthPyramidTexIds{};
+  glm::uvec4 sceneDepthPyramidInfo{0u};
   uint32_t ambientOcclusionTexId = kInvalidTextureBindlessIndex;
   uint32_t ambientOcclusionSamplerId = 0u;
   uint32_t ambientOcclusionFlags = 0u;
@@ -345,6 +350,18 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
     }
     if (sceneDepthPyramidLevelCount > 0u) {
       flags |= kForwardSceneHasSceneDepthPyramid;
+      const TextureDimensions dimensions =
+          gpu_.getTextureDimensions(ctx.shared.sceneDepthPyramidTextures[0]);
+      uint32_t depthPyramidFlags = 0u;
+      if (ctx.shared.sceneDepthPyramidSourceFrameIndex.has_value() &&
+          ctx.shared.sceneDepthPyramidSourceViewProj.has_value() &&
+          *ctx.shared.sceneDepthPyramidSourceFrameIndex + 1u ==
+              frame.frameIndex) {
+        depthPyramidFlags |= kForwardSceneDepthPyramidPreviousFrame;
+      }
+      sceneDepthPyramidInfo = glm::uvec4(
+          std::max(dimensions.width, 1u), std::max(dimensions.height, 1u),
+          sceneDepthPyramidLevelCount, depthPyramidFlags);
     }
   }
   RenderSettings::AmbientOcclusionSettings ambientOcclusionSettings =
@@ -451,6 +468,9 @@ SceneLightingProvider::prepare(FrameBuildContext &ctx) {
       .shadowFlags = shadowFlags,
       .materialCoverageSamplerId = materialCoverageSamplerId,
       .materialDataSamplerId = materialDataSamplerId,
+      .previousViewProj = ctx.shared.sceneDepthPyramidSourceViewProj.value_or(
+          frame.camera.currentUnjitteredViewProj),
+      .sceneDepthPyramidInfo = sceneDepthPyramidInfo,
   };
   ForwardSceneFrameData postTaaFrameData = frameData;
   postTaaFrameData.proj = cameraCurrentUnjitteredProjection(frame.camera);

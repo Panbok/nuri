@@ -5,6 +5,7 @@
 #include "nuri/gfx/debug_draw_3d.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline.h"
+#include "nuri/gfx/renderers/detail/visibility_math.h"
 #include "nuri/gfx/shader.h"
 #include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/scene/render_scene.h"
@@ -34,6 +35,13 @@ const std::array<glm::vec4, kMaxShadowCascades> kShadowCascadeColors = {
 const glm::vec4 kShadowLightBoundsColor(1.0f, 0.45f, 0.15f, 1.0f);
 const glm::vec4 kShadowLightRayColor(1.0f, 0.92f, 0.35f, 1.0f);
 const glm::vec4 kShadowTexelSnapColor(0.95f, 0.95f, 1.0f, 1.0f);
+const glm::vec4 kModelBoundsColor(1.0f, 1.0f, 0.0f, 1.0f);
+const glm::vec4 kVisibilityBoundsColor(0.25f, 0.85f, 1.0f, 1.0f);
+const glm::vec4 kVisibilityMeshletBoundsColor(0.35f, 0.62f, 1.0f, 1.0f);
+const glm::vec4 kVisibilityInsideColor(0.18f, 1.0f, 0.32f, 1.0f);
+const glm::vec4 kVisibilityIntersectingColor(1.0f, 0.78f, 0.16f, 1.0f);
+const glm::vec4 kVisibilityOutsideColor(1.0f, 0.18f, 0.12f, 1.0f);
+const glm::vec4 kVisibilityConservativeColor(0.88f, 0.42f, 1.0f, 1.0f);
 
 [[nodiscard]] bool isSameTextureHandle(TextureHandle a, TextureHandle b) {
   return a.index == b.index && a.generation == b.generation;
@@ -58,6 +66,65 @@ const glm::vec4 kShadowTexelSnapColor(0.95f, 0.95f, 1.0f, 1.0f);
                                    const glm::vec3 &position) {
   const float distance = glm::length(glm::vec3(camera.cameraPos) - position);
   return std::clamp(distance * 0.08f, 0.2f, 3.0f);
+}
+
+[[nodiscard]] glm::vec4 visibilityBoundsColor(
+    const RenderFrameContext &frame, const Renderable &renderable,
+    const BoundingBox &bounds,
+    const visibility_detail::FrustumPlanes &frustum) noexcept {
+  if (frame.settings == nullptr ||
+      !frame.settings->visibility.debug.visualizeCullReason) {
+    return kVisibilityBoundsColor;
+  }
+
+  if (!renderable.morphWeights.empty() || !renderable.skinPalette.empty()) {
+    return kVisibilityConservativeColor;
+  }
+
+  const visibility_detail::VisibilityClassification classification =
+      visibility_detail::classifyTransformedBounds(frustum, bounds,
+                                                   renderable.modelMatrix);
+  switch (classification) {
+  case visibility_detail::VisibilityClassification::Outside:
+    return kVisibilityOutsideColor;
+  case visibility_detail::VisibilityClassification::Intersects:
+    return kVisibilityIntersectingColor;
+  case visibility_detail::VisibilityClassification::Inside:
+    return kVisibilityInsideColor;
+  }
+  return kVisibilityBoundsColor;
+}
+
+[[nodiscard]] glm::vec4 visibilityMeshletBoundsColor(
+    const RenderFrameContext &frame, const Renderable &renderable,
+    const glm::vec4 &boundsSphere,
+    const visibility_detail::FrustumPlanes &frustum) noexcept {
+  if (frame.settings == nullptr ||
+      !frame.settings->visibility.debug.visualizeCullReason) {
+    return kVisibilityMeshletBoundsColor;
+  }
+
+  if (!renderable.morphWeights.empty() || !renderable.skinPalette.empty()) {
+    return kVisibilityConservativeColor;
+  }
+
+  const float localRadius =
+      std::isfinite(boundsSphere.w) ? std::max(boundsSphere.w, 0.0f) : 0.0f;
+  const glm::vec3 worldCenter = glm::vec3(
+      renderable.modelMatrix * glm::vec4(glm::vec3(boundsSphere), 1.0f));
+  const float worldRadius =
+      localRadius * visibility_detail::maxAxisScale(renderable.modelMatrix);
+  const visibility_detail::VisibilityClassification classification =
+      visibility_detail::classifySphere(frustum, worldCenter, worldRadius);
+  switch (classification) {
+  case visibility_detail::VisibilityClassification::Outside:
+    return kVisibilityOutsideColor;
+  case visibility_detail::VisibilityClassification::Intersects:
+    return kVisibilityIntersectingColor;
+  case visibility_detail::VisibilityClassification::Inside:
+    return kVisibilityInsideColor;
+  }
+  return kVisibilityMeshletBoundsColor;
 }
 
 void buildLightBasis(const glm::vec3 &direction, glm::vec3 &outRight,
@@ -686,8 +753,11 @@ bool DebugRenderer::hasDebugWork(const RenderFrameContext &frame) const {
     return false;
   }
   const RenderSettings::DebugSettings &debug = frame.settings->debug;
+  const VisibilityDebugSettings &visibilityDebug =
+      frame.settings->visibility.debug;
   return debug.enabled || debug.modelBounds || debug.grid || debug.lightIcons ||
-         shadowOverlayEnabled(frame);
+         visibilityDebug.showObjectBounds ||
+         visibilityDebug.showMeshletBounds || shadowOverlayEnabled(frame);
 }
 
 Result<bool, std::string>
@@ -717,22 +787,58 @@ DebugRenderer::buildSceneDebugLines(const RenderFrameContext &frame,
   const glm::mat4 view = frame.camera.view;
 
   if (frame.scene != nullptr && frame.settings != nullptr &&
-      frame.settings->debug.modelBounds && frame.resources != nullptr) {
+      frame.resources != nullptr &&
+      (frame.settings->debug.modelBounds ||
+       frame.settings->visibility.debug.showObjectBounds ||
+       frame.settings->visibility.debug.showMeshletBounds)) {
     const std::span<const Renderable> renderables = frame.scene->renderables();
+    const bool drawVisibilityBounds =
+        frame.settings->visibility.debug.showObjectBounds;
+    const bool drawMeshletBounds =
+        frame.settings->visibility.debug.showMeshletBounds;
+    const visibility_detail::FrustumPlanes frustum =
+        visibility_detail::buildCameraFrustumPlanes(frame.camera);
     for (const Renderable &renderable : renderables) {
       const ModelRecord *modelRecord =
           frame.resources->tryGet(renderable.model);
       if (!modelRecord || !modelRecord->model) {
         continue;
       }
-      debugDraw3D_->box(renderable.modelMatrix, modelRecord->model->bounds(),
-                        glm::vec4(1.0f, 1.0f, 0.0f, 1.0f));
-      const glm::vec3 center =
-          glm::vec3(renderable.modelMatrix *
-                    glm::vec4(modelRecord->model->bounds().getCenter(), 1.0f));
-      outSortDepth =
-          std::max(outSortDepth, -(view * glm::vec4(center, 1.0f)).z);
-      hasLines = true;
+      const BoundingBox &bounds = modelRecord->model->bounds();
+      if (frame.settings->debug.modelBounds || drawVisibilityBounds) {
+        const glm::vec4 color =
+            drawVisibilityBounds
+                ? visibilityBoundsColor(frame, renderable, bounds, frustum)
+                : kModelBoundsColor;
+        debugDraw3D_->box(renderable.modelMatrix, bounds, color);
+        const glm::vec3 center = glm::vec3(renderable.modelMatrix *
+                                           glm::vec4(bounds.getCenter(), 1.0f));
+        outSortDepth =
+            std::max(outSortDepth, -(view * glm::vec4(center, 1.0f)).z);
+        hasLines = true;
+      }
+
+      if (drawMeshletBounds) {
+        for (const glm::vec4 &boundsSphere :
+             modelRecord->model->meshletBoundsSpheres()) {
+          const float radius = std::isfinite(boundsSphere.w)
+                                   ? std::max(boundsSphere.w, 0.0f)
+                                   : 0.0f;
+          if (radius <= 0.0f) {
+            continue;
+          }
+          glm::mat4 meshletTransform = renderable.modelMatrix;
+          meshletTransform[3] =
+              renderable.modelMatrix * glm::vec4(glm::vec3(boundsSphere), 1.0f);
+          const glm::vec4 color = visibilityMeshletBoundsColor(
+              frame, renderable, boundsSphere, frustum);
+          debugDraw3D_->box(meshletTransform, glm::vec3(radius), color);
+          const glm::vec3 center = glm::vec3(meshletTransform[3]);
+          outSortDepth =
+              std::max(outSortDepth, -(view * glm::vec4(center, 1.0f)).z);
+          hasLines = true;
+        }
+      }
     }
   }
 

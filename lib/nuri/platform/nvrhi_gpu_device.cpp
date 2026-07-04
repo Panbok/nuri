@@ -990,6 +990,23 @@ permanentReadBufferState(BufferUsage usage) {
                "#extension GL_EXT_samplerless_texture_functions : require\n"
                "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : "
                "require\n";
+    if (stage == ShaderStage::Compute) {
+      patched +=
+          "layout (set = 0, binding = 0) uniform texture2D   kTextures2D[];\n"
+          "layout (set = 0, binding = 1) uniform sampler     kSamplers[];\n"
+          "vec4 textureBindless2D(uint textureid, uint samplerid, vec2 uv) {\n"
+          "  return texture(nonuniformEXT(sampler2D(kTextures2D[textureid], "
+          "kSamplers[samplerid])), uv);\n"
+          "}\n"
+          "vec4 textureBindless2DLod(uint textureid, uint samplerid, vec2 uv, "
+          "float lod) {\n"
+          "  return textureLod(nonuniformEXT(sampler2D(kTextures2D[textureid], "
+          "kSamplers[samplerid])), uv, lod);\n"
+          "}\n"
+          "ivec2 textureBindlessSize2D(uint textureid) {\n"
+          "  return textureSize(nonuniformEXT(kTextures2D[textureid]), 0);\n"
+          "}\n";
+    }
     break;
   case ShaderStage::Fragment:
     patched += "#version 460\n"

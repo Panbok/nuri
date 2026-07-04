@@ -159,6 +159,10 @@ public:
   [[nodiscard]] const ModelMeshletGpuView &meshletGpuView() const noexcept {
     return meshletGpuView_;
   }
+  [[nodiscard]] std::span<const glm::vec4>
+  meshletBoundsSpheres() const noexcept {
+    return meshletBoundsSpheres_;
+  }
   [[nodiscard]] bool hasMeshlets() const noexcept {
     return meshletGpuView_.meshletCount != 0u &&
            nuri::isValid(meshletGpuView_.meshletBuffer) &&
@@ -222,6 +226,7 @@ private:
         std::unique_ptr<Buffer> meshletVertexIndexBuffer,
         std::unique_ptr<Buffer> meshletPrimitiveIndexBuffer,
         std::unique_ptr<Buffer> meshletLodRangeBuffer,
+        std::pmr::vector<glm::vec4> meshletBoundsSpheres,
         std::pmr::vector<uint32_t> sourceMaterialToRuntime)
       : gpu_(&gpu), geometry_(geometry), submeshes_(std::move(submeshes)),
         vertexCount_(vertexCount), indexCount_(indexCount), bounds_(bounds),
@@ -236,6 +241,7 @@ private:
         meshletVertexIndexBuffer_(std::move(meshletVertexIndexBuffer)),
         meshletPrimitiveIndexBuffer_(std::move(meshletPrimitiveIndexBuffer)),
         meshletLodRangeBuffer_(std::move(meshletLodRangeBuffer)),
+        meshletBoundsSpheres_(std::move(meshletBoundsSpheres)),
         sourceMaterialToRuntime_(std::move(sourceMaterialToRuntime)) {}
 
   GPUDevice *gpu_ = nullptr;
@@ -256,6 +262,7 @@ private:
   std::unique_ptr<Buffer> meshletVertexIndexBuffer_;
   std::unique_ptr<Buffer> meshletPrimitiveIndexBuffer_;
   std::unique_ptr<Buffer> meshletLodRangeBuffer_;
+  std::pmr::vector<glm::vec4> meshletBoundsSpheres_;
   std::pmr::vector<uint32_t> sourceMaterialToRuntime_;
 };
 

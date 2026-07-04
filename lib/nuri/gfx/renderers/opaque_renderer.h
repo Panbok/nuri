@@ -8,6 +8,7 @@
 #include "nuri/gfx/render_graph/render_graph.h"
 #include "nuri/gfx/renderers/detail/instance_data.h"
 #include "nuri/gfx/shader.h"
+#include "nuri/gfx/visibility/visibility.h"
 #include "nuri/resources/cpu/mesh_data.h"
 #include "nuri/resources/gpu/buffer.h"
 #include "nuri/resources/gpu/material.h"
@@ -66,7 +67,7 @@ public:
 
 private:
   using FrameData = ForwardSceneFrameData;
-  static_assert(sizeof(FrameData) == 384,
+  static_assert(sizeof(FrameData) == 464,
                 "OpaqueRenderer::FrameData must match shader FrameDataBuffer "
                 "layout");
 
@@ -108,16 +109,30 @@ private:
     uint64_t instanceLodBoundsAddress = 0;
     glm::vec4 lodThresholds{0.0f};
     uint64_t meshletBatchBufferAddress = 0;
+    uint64_t visibilityCounterBufferAddress = 0;
+    uint64_t previousInstanceMatricesAddress = 0;
+    uint64_t velocityInstanceFlagsAddress = 0;
+    uint64_t velocityFrameDataAddress = 0;
     uint32_t batchBase = 0;
     uint32_t candidateOffset = 0;
+    uint32_t sourceFrameIndex = 0;
+    uint32_t meshletCounterFlags = 0;
   };
-  static_assert(sizeof(MeshletPushConstants) == 64,
+  static_assert(sizeof(MeshletPushConstants) == 104,
                 "OpaqueRenderer::MeshletPushConstants must match shader "
                 "layout");
   static_assert(offsetof(MeshletPushConstants, lodThresholds) == 32u);
   static_assert(offsetof(MeshletPushConstants, meshletBatchBufferAddress) ==
                 48u);
-  static_assert(offsetof(MeshletPushConstants, batchBase) == 56u);
+  static_assert(offsetof(MeshletPushConstants,
+                         visibilityCounterBufferAddress) == 56u);
+  static_assert(offsetof(MeshletPushConstants,
+                         previousInstanceMatricesAddress) == 64u);
+  static_assert(offsetof(MeshletPushConstants, velocityInstanceFlagsAddress) ==
+                72u);
+  static_assert(offsetof(MeshletPushConstants, velocityFrameDataAddress) ==
+                80u);
+  static_assert(offsetof(MeshletPushConstants, batchBase) == 88u);
 
   struct alignas(16) MeshletBatchGpuData {
     uint64_t vertexBufferAddress = 0;
@@ -345,6 +360,7 @@ private:
     bool isVelocityPass = false;
     bool isEarlyVelocityPass = false;
     bool isReactiveMaskPass = false;
+    bool isVisibilityComputePass = false;
     uint32_t depthPyramidLevel = UINT32_MAX;
 
     explicit PreparedGraphPass(
@@ -412,6 +428,18 @@ private:
   Result<bool, std::string>
   ensureMeshletBatchRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
+  ensureVisibilityGpuRingCapacity(size_t candidateBytes,
+                                  size_t visibleIndexBytes);
+  Result<bool, std::string>
+  ensureVisibilityMeshletIndirectRingCapacity(size_t dispatchBytes,
+                                              size_t commandBytes);
+  Result<bool, std::string>
+  ensureVisibilityMeshletIndirectCommandRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureVisibilityCounterRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
+  ensureVisibilityVisibleIndexRingCapacity(size_t requiredBytes);
+  Result<bool, std::string>
   ensureDynamicRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
                             size_t requiredBytes, size_t minimumBytes,
                             std::string_view debugNamePrefix);
@@ -453,6 +481,14 @@ private:
   Result<bool, std::string> createShaders();
   Result<bool, std::string> createPipelines();
   Result<bool, std::string> ensureMeshletPipelineState();
+  void readLatestVisibilityGpuReadback(RenderFrameContext &frame);
+  Result<bool, std::string>
+  appendGpuVisibilityMainPass(RenderFrameContext &frame, uint32_t frameSlot,
+                              std::span<const VisibilityCandidate> candidates,
+                              std::span<const uint32_t> candidateIndices,
+                              const VisibilityPassRequest &request,
+                              const VisibilityResolvedSettings &settings,
+                              std::pmr::vector<PreparedGraphPass> &out);
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
@@ -536,9 +572,15 @@ private:
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> depthPyramidShader_;
   std::unique_ptr<Shader> computeShader_;
+  std::unique_ptr<Shader> visibilityShader_;
+  std::unique_ptr<Shader> visibilityIndirectDrawShader_;
+  std::unique_ptr<Shader> visibilityIndirectMeshDispatchShader_;
   std::unique_ptr<Shader> meshletShader_;
   std::unique_ptr<Pipeline> meshPipeline_;
   std::unique_ptr<Pipeline> computePipeline_;
+  std::unique_ptr<Pipeline> visibilityComputePipeline_;
+  std::unique_ptr<Pipeline> visibilityIndirectDrawComputePipeline_;
+  std::unique_ptr<Pipeline> visibilityIndirectMeshDispatchComputePipeline_;
   std::unique_ptr<Buffer> instanceCentersPhaseBuffer_;
   std::unique_ptr<Buffer> instanceLodBoundsBuffer_;
   std::unique_ptr<Buffer> instanceBaseMatricesBuffer_;
@@ -550,6 +592,12 @@ private:
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> indirectCommandRing_;
   std::pmr::vector<DynamicBufferSlot> meshletBatchRing_;
+  std::pmr::vector<DynamicBufferSlot> visibilityCandidateRing_;
+  std::pmr::vector<DynamicBufferSlot> visibilityPassRing_;
+  std::pmr::vector<DynamicBufferSlot> visibilityVisibleIndexRing_;
+  std::pmr::vector<DynamicBufferSlot> visibilityCounterRing_;
+  std::pmr::vector<DynamicBufferSlot> visibilityMeshletDispatchRing_;
+  std::pmr::vector<DynamicBufferSlot> visibilityMeshletIndirectCommandRing_;
   TextureHandle pickIdTexture_{};
   TextureHandle shadowInspectTexture_{};
   TextureHandle transmissionVisibilityDepthTexture_{};
@@ -559,6 +607,7 @@ private:
   uint32_t sceneDepthPyramidWidth_ = 0;
   uint32_t sceneDepthPyramidHeight_ = 0;
   std::optional<uint64_t> sceneDepthPyramidSourceFrameIndex_{};
+  std::optional<glm::mat4> sceneDepthPyramidSourceViewProj_{};
   SamplerHandle sceneDepthSampler_{};
 
   ShaderHandle meshVertexShader_{};
@@ -595,9 +644,19 @@ private:
   ShaderHandle depthPyramidVertexShader_{};
   ShaderHandle depthPyramidFragmentShader_{};
   ShaderHandle computeShaderHandle_{};
+  ShaderHandle visibilityComputeShader_{};
+  ShaderHandle visibilityIndirectDrawComputeShader_{};
+  ShaderHandle visibilityIndirectMeshDispatchComputeShader_{};
   ShaderHandle meshletTaskShader_{};
   ShaderHandle meshletMeshShader_{};
   ShaderHandle meshletFragmentShader_{};
+  ShaderHandle meshletDepthFragmentShader_{};
+  ShaderHandle meshletDepthAlphaFragmentShader_{};
+  ShaderHandle meshletNormalFragmentShader_{};
+  ShaderHandle meshletVelocityMeshShader_{};
+  ShaderHandle meshletVelocityFragmentShader_{};
+  ShaderHandle meshletReactiveMaskMeshShader_{};
+  ShaderHandle meshletReactiveMaskFragmentShader_{};
   RenderPipelineHandle meshFillPipelineHandle_{};
   RenderPipelineHandle meshDoubleSidedFillPipelineHandle_{};
   RenderPipelineHandle meshTessPipelineHandle_{};
@@ -654,8 +713,21 @@ private:
   RenderPipelineHandle meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle depthPyramidPipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
+  ComputePipelineHandle visibilityPipelineHandle_{};
+  ComputePipelineHandle visibilityIndirectDrawPipelineHandle_{};
+  ComputePipelineHandle visibilityIndirectMeshDispatchPipelineHandle_{};
   MeshletPipelineHandle meshletPipelineHandle_{};
   MeshletPipelineHandle meshletDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletDepthPipelineHandle_{};
+  MeshletPipelineHandle meshletDepthDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletDepthAlphaPipelineHandle_{};
+  MeshletPipelineHandle meshletDepthAlphaDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletNormalPipelineHandle_{};
+  MeshletPipelineHandle meshletNormalDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletVelocityPipelineHandle_{};
+  MeshletPipelineHandle meshletVelocityDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletReactiveMaskPipelineHandle_{};
+  MeshletPipelineHandle meshletReactiveMaskDoubleSidedPipelineHandle_{};
 
   size_t instanceCentersPhaseBufferCapacityBytes_ = 0;
   size_t instanceLodBoundsBufferCapacityBytes_ = 0;
@@ -694,6 +766,7 @@ private:
   bool loggedMeshletUnsupportedWarning_ = false;
   bool loggedMeshletAssetWarning_ = false;
   bool loggedMeshletIncompatibleWarning_ = false;
+  bool loggedVisibilityGpuUnsupportedWarning_ = false;
 
   const RenderScene *cachedScene_ = nullptr;
   uint64_t cachedTopologyVersion_ = std::numeric_limits<uint64_t>::max();
@@ -735,6 +808,10 @@ private:
   std::pmr::vector<uint64_t> instanceMatricesUploadVersions_;
   std::pmr::vector<uint64_t> indirectUploadSignatures_;
   std::pmr::vector<uint64_t> remapUploadSignatures_;
+  std::pmr::vector<uint64_t> visibilityCounterRingPublishedFrames_;
+  std::pmr::vector<uint32_t> visibilityExpectedVisibleIndexCounts_;
+  std::pmr::vector<uint64_t> visibilityExpectedVisibleIndexHashes_;
+  std::pmr::vector<uint32_t> visibilityVisibleIndexReadback_;
   std::pmr::vector<uint32_t> templateBatchIndices_;
   std::pmr::vector<size_t> batchWriteOffsets_;
   std::pmr::vector<glm::vec4> instanceCentersPhase_;
@@ -765,11 +842,33 @@ private:
   std::pmr::vector<DrawItem> normalPrepassDrawItems_;
   std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
   std::pmr::vector<DrawItem> depthPyramidDrawItems_;
+  std::pmr::vector<MeshDispatchItem> meshletDepthPrepassDispatchItems_;
+  std::pmr::vector<MeshletPushConstants> meshletDepthPrepassPushConstants_;
+  std::pmr::vector<MeshletDispatchDependencyBuffers>
+      meshletDepthPrepassDispatchDependencyBuffers_;
+  std::pmr::vector<BufferHandle> meshletDepthPrepassDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode>
+      meshletDepthPrepassDependencyBufferAccessModes_;
+  std::pmr::vector<MeshDispatchItem> meshletNormalPrepassDispatchItems_;
+  std::pmr::vector<MeshletPushConstants> meshletNormalPrepassPushConstants_;
+  std::pmr::vector<MeshletDispatchDependencyBuffers>
+      meshletNormalPrepassDispatchDependencyBuffers_;
+  std::pmr::vector<BufferHandle> meshletNormalPrepassDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode>
+      meshletNormalPrepassDependencyBufferAccessModes_;
   std::pmr::vector<MeshDispatchItem> meshletDispatchItems_;
   std::pmr::vector<MeshletPushConstants> meshletPushConstants_;
   std::pmr::vector<MeshletBatchGpuData> meshletBatchGpuData_;
   std::pmr::vector<MeshletDispatchDependencyBuffers>
       meshletDispatchDependencyBuffers_;
+  std::pmr::vector<MeshDispatchItem> meshletVelocityDispatchItems_;
+  std::pmr::vector<MeshletPushConstants> meshletVelocityPushConstants_;
+  std::pmr::vector<MeshletDispatchDependencyBuffers>
+      meshletVelocityDispatchDependencyBuffers_;
+  std::pmr::vector<MeshDispatchItem> meshletReactiveMaskDispatchItems_;
+  std::pmr::vector<MeshletPushConstants> meshletReactiveMaskPushConstants_;
+  std::pmr::vector<MeshletDispatchDependencyBuffers>
+      meshletReactiveMaskDispatchDependencyBuffers_;
   std::pmr::vector<TextureHandle> depthPyramidDependencyTextures_;
   std::pmr::vector<ShadowSdsmReducePushConstants>
       shadowSdsmReducePushConstants_;
@@ -779,6 +878,27 @@ private:
   std::pmr::vector<BufferHandle> shadowSdsmReduceDependencyBuffers_;
   std::pmr::vector<TextureHandle> shadowSdsmReduceDependencyTextures_;
   std::pmr::vector<ComputeDispatchItem> preDispatches_;
+  std::pmr::vector<ComputeDispatchItem> mainPreDispatches_;
+  std::pmr::vector<ComputeDispatchItem> visibilityGpuDispatches_;
+  std::pmr::vector<VisibilityCandidateGpu> visibilityGpuCandidates_;
+  std::pmr::vector<VisibilityPassGpuData> visibilityPassGpuData_;
+  std::pmr::vector<VisibilityCounterGpuData> visibilityCounterClear_;
+  std::pmr::vector<VisibilityGpuPushConstants> visibilityGpuPushConstants_;
+  std::pmr::vector<VisibilityIndirectDrawPushConstants>
+      visibilityIndirectDrawPushConstants_;
+  std::pmr::vector<VisibilityMeshletDispatchGpuData>
+      visibilityMeshletDispatchGpuData_;
+  std::pmr::vector<uint32_t> visibilityMeshletCandidateMap_;
+  std::pmr::vector<VisibilityIndirectMeshDispatchPushConstants>
+      visibilityIndirectMeshDispatchPushConstants_;
+  std::pmr::vector<ComputeDispatchItem> visibilityMeshletGpuDispatches_;
+  std::pmr::vector<BufferHandle> visibilityMeshletGpuDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode>
+      visibilityMeshletGpuDependencyBufferAccessModes_;
+  std::pmr::vector<BufferHandle> visibilityGpuDependencyBuffers_;
+  std::pmr::vector<RenderGraphAccessMode>
+      visibilityGpuDependencyBufferAccessModes_;
+  std::pmr::vector<TextureHandle> visibilityGpuDependencyTextures_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
   std::pmr::vector<BufferHandle> preResolvedDecodeBuffers_;

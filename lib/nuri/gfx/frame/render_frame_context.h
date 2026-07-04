@@ -233,6 +233,41 @@ enum class ShadowPreviewMode : uint8_t {
   TiledAllCascades = 1,
 };
 
+enum class VisibilityCullingMode : uint8_t {
+  Disabled = 0,
+  CpuCoarse = 1,
+  Hybrid = 2,
+  GpuDriven = 3,
+};
+
+enum class VisibilityOcclusionMode : uint8_t {
+  Disabled = 0,
+  PreviousFrameHiZ = 1,
+  CurrentFrameHiZExperimental = 2,
+};
+
+struct VisibilityDebugSettings {
+  bool showObjectBounds = false;
+  bool showMeshletBounds = false;
+  bool visualizeCullReason = false;
+  bool logCounters = false;
+  uint32_t forcedVisibleListCapacity = std::numeric_limits<uint32_t>::max();
+};
+
+struct VisibilitySettings {
+  VisibilityCullingMode mainViewMode = VisibilityCullingMode::GpuDriven;
+  VisibilityCullingMode shadowMode = VisibilityCullingMode::Hybrid;
+  VisibilityOcclusionMode occlusionMode = VisibilityOcclusionMode::Disabled;
+  bool enableMeshletFrustumCulling = false;
+  bool enableMeshletConeCulling = false;
+  bool enableShadowMeshletCulling = false;
+  bool enableGpuInstanceCulling = true;
+  bool enableGpuIndirectDraw = true;
+  bool enableIndirectMeshDispatch = true;
+  bool visibleOnUncertain = true;
+  VisibilityDebugSettings debug{};
+};
+
 static constexpr float kDefaultToneMapExposureEv = 0.0f;
 static constexpr float kDefaultAcesExposureOffsetEv = 0.35f;
 static constexpr float kDefaultAgxExposureOffsetEv = -0.35f;
@@ -528,8 +563,8 @@ struct RenderSettings {
 
   struct OpaqueSettings {
     bool enabled = true;
-    // Depth pre-pass is workload dependent. Keep it opt-in because high
-    // instance-count scenes can become vertex-bound and regress badly.
+    // Depth pre-pass is workload dependent. Visibility occlusion can request it
+    // internally on compatible classic frames.
     bool enableDepthPrepass = false;
     // The pyramid is useful for later sampling consumers, but it adds one
     // graph graphics pass per depth level; keep it opt-in until consumed.
@@ -540,9 +575,10 @@ struct RenderSettings {
     bool enableIndirectDraw = true;
     bool enableInstancedDraw = true;
     bool enableMeshLod = true;
+    bool enableCpuFrustumCulling = true;
     MeshletRenderMode meshletMode = MeshletRenderMode::Disabled;
-    bool enableMeshletFrustumCulling = false;
-    bool enableMeshletConeCulling = false;
+    bool enableMeshletFrustumCulling = true;
+    bool enableMeshletConeCulling = true;
     int32_t forcedMeshLod = -1;
     glm::vec3 meshLodDistanceThresholds{8.0f, 16.0f, 32.0f};
     bool enableInstanceAnimation = true;
@@ -623,6 +659,7 @@ struct RenderSettings {
     uint32_t sdsmHistogramBucketCount = kDefaultShadowSdsmHistogramBucketCount;
     float sdsmHistogramTrimLowPercent = 0.5f;
     float sdsmHistogramTrimHighPercent = 1.0f;
+    bool enableMeshletCascadeCulling = true;
     ShadowDebugSettings debug{};
   };
 
@@ -730,12 +767,45 @@ struct RenderSettings {
   TransparentSettings transparent{};
   DebugSettings debug{};
   ShadowSettings shadow{};
+  VisibilitySettings visibility{};
   AntiAliasingSettings antiAliasing{};
   AmbientOcclusionSettings ambientOcclusion{};
   TextureFilteringSettings textureFiltering{};
   ToneMapSettings toneMap{};
   HDRPostProcessSettings hdrPostProcess{};
 };
+
+[[nodiscard]] constexpr VisibilityCullingMode
+sanitizeVisibilityCullingMode(VisibilityCullingMode mode) noexcept {
+  switch (mode) {
+  case VisibilityCullingMode::Disabled:
+  case VisibilityCullingMode::CpuCoarse:
+  case VisibilityCullingMode::Hybrid:
+  case VisibilityCullingMode::GpuDriven:
+    return mode;
+  default:
+    return VisibilityCullingMode::Disabled;
+  }
+}
+
+[[nodiscard]] constexpr VisibilityOcclusionMode
+sanitizeVisibilityOcclusionMode(VisibilityOcclusionMode mode) noexcept {
+  switch (mode) {
+  case VisibilityOcclusionMode::Disabled:
+  case VisibilityOcclusionMode::PreviousFrameHiZ:
+  case VisibilityOcclusionMode::CurrentFrameHiZExperimental:
+    return mode;
+  default:
+    return VisibilityOcclusionMode::Disabled;
+  }
+}
+
+inline void sanitizeVisibilitySettings(VisibilitySettings &settings) noexcept {
+  settings.mainViewMode = sanitizeVisibilityCullingMode(settings.mainViewMode);
+  settings.shadowMode = sanitizeVisibilityCullingMode(settings.shadowMode);
+  settings.occlusionMode =
+      sanitizeVisibilityOcclusionMode(settings.occlusionMode);
+}
 
 inline void sanitizeAmbientOcclusionSettings(
     RenderSettings::AmbientOcclusionSettings &settings,
@@ -1778,8 +1848,10 @@ struct alignas(16) ShadowCascadeGpuData {
   glm::vec4 pcssParams{0.0f};
   glm::uvec4 textureSampler{kInvalidShadowBindlessIndex,
                             kInvalidShadowBindlessIndex, 0u, 0u};
+  glm::vec4 cullingBoundsMin{0.0f};
+  glm::vec4 cullingBoundsMax{0.0f};
 };
-static_assert(sizeof(ShadowCascadeGpuData) == 208u,
+static_assert(sizeof(ShadowCascadeGpuData) == 240u,
               "ShadowCascadeGpuData must match shader layout");
 
 struct alignas(16) ShadowFrameGpuData {
@@ -1788,7 +1860,7 @@ struct alignas(16) ShadowFrameGpuData {
   glm::uvec4 filterParams{0u};
   std::array<ShadowCascadeGpuData, kMaxShadowCascades> cascades{};
 };
-static_assert(sizeof(ShadowFrameGpuData) == 880u,
+static_assert(sizeof(ShadowFrameGpuData) == 1008u,
               "ShadowFrameGpuData must match shader layout");
 
 struct ShadowFrameGpuDataHandle {
@@ -1947,6 +2019,11 @@ struct ForwardSceneFrameData {
   uint32_t materialSamplerReserved0 = 0;
   uint32_t materialSamplerReserved1 = 0;
   uint32_t materialSamplerReserved2 = 0;
+  glm::mat4 previousViewProj{1.0f};
+  // x/y: previous-frame depth pyramid level-0 dimensions, z: level count,
+  // w: flags. The legacy sceneDepthPyramidLevelCount remains for existing
+  // shading paths that only need texture lookup.
+  glm::uvec4 sceneDepthPyramidInfo{0u};
 
   [[nodiscard]] bool
   operator==(const ForwardSceneFrameData &other) const noexcept {
@@ -1958,7 +2035,7 @@ struct ForwardSceneFrameData {
     return !(*this == other);
   }
 };
-static_assert(sizeof(ForwardSceneFrameData) == 384,
+static_assert(sizeof(ForwardSceneFrameData) == 464,
               "ForwardSceneFrameData must match shader FrameDataBuffer layout");
 static_assert(sizeof(ForwardSceneFrameData) % 8u == 0u,
               "ForwardSceneFrameData std430 size must stay 8-byte aligned");
@@ -1985,6 +2062,8 @@ static_assert(offsetof(ForwardSceneFrameData, shadowFlags) == 360u);
 static_assert(offsetof(ForwardSceneFrameData, materialCoverageSamplerId) ==
               364u);
 static_assert(offsetof(ForwardSceneFrameData, materialDataSamplerId) == 368u);
+static_assert(offsetof(ForwardSceneFrameData, previousViewProj) == 384u);
+static_assert(offsetof(ForwardSceneFrameData, sceneDepthPyramidInfo) == 448u);
 
 // CPU/GPU forwarding of the light metadata carried in ForwardSceneFrameData.
 // The CPU owns allocation and updates of ForwardSceneFrameData, keeps mirrors
@@ -2110,6 +2189,53 @@ struct ShadowFrameMetrics {
   uint32_t gpuTimingAvailable = 0;
   uint32_t depthGpuTimingAvailable = 0;
   uint32_t sdsmGpuTimingAvailable = 0;
+};
+
+struct VisibilityFrameMetrics {
+  uint32_t cpuMainCandidates = 0;
+  uint32_t cpuMainVisibleCandidates = 0;
+  uint32_t cpuMainRejected = 0;
+  uint32_t gpuMainCandidates = 0;
+  uint32_t gpuMainVisibleCandidates = 0;
+  uint32_t gpuMainRejectedFrustum = 0;
+  uint32_t gpuMainRejectedOcclusion = 0;
+  uint32_t gpuOutputOverflowCount = 0;
+  uint32_t gpuMainReadbackAvailable = 0;
+  uint32_t gpuMainReadbackSourceFrame = 0;
+  uint32_t gpuMainReadbackStaleFrameCount = 0;
+  uint32_t gpuMainReadbackErrorCount = 0;
+  uint32_t gpuMainReadbackVisibleCandidates = 0;
+  uint32_t gpuMainVisibleListMismatches = 0;
+  uint32_t gpuIndirectDrawUsed = 0;
+  uint32_t gpuIndirectDrawFallback = 0;
+  uint32_t gpuIndirectDrawCommands = 0;
+  uint32_t gpuIndirectDrawReadbackCommands = 0;
+  uint32_t gpuIndirectDrawReadbackTombstoned = 0;
+  uint32_t gpuIndirectDrawReadbackVisible = 0;
+  uint32_t meshletCandidates = 0;
+  uint32_t meshletRejectedFrustum = 0;
+  uint32_t meshletRejectedCone = 0;
+  uint32_t meshletRejectedOcclusion = 0;
+  uint32_t meshletOcclusionAvailable = 0;
+  uint32_t meshletPayloadOverflowCount = 0;
+  uint32_t meshletReadbackAvailable = 0;
+  uint32_t meshletReadbackSourceFrame = 0;
+  uint32_t meshletReadbackStaleFrameCount = 0;
+  uint32_t meshletReadbackErrorCount = 0;
+  uint32_t meshletEmitted = 0;
+  uint32_t meshletTaskGroupsExecuted = 0;
+  uint32_t shadowCpuCandidates = 0;
+  uint32_t shadowCpuRejected = 0;
+  uint32_t shadowMeshletCandidates = 0;
+  uint32_t shadowMeshletReadbackAvailable = 0;
+  uint32_t shadowMeshletReadbackSourceFrame = 0;
+  uint32_t shadowMeshletReadbackStaleFrameCount = 0;
+  uint32_t shadowMeshletReadbackErrorCount = 0;
+  uint32_t shadowMeshletRejectedBounds = 0;
+  uint32_t indirectDrawCount = 0;
+  uint32_t indirectMeshDispatchCount = 0;
+  uint32_t uncertainVisible = 0;
+  uint32_t occlusionAvailable = 0;
 };
 
 struct AntiAliasingFrameMetrics {
@@ -2470,6 +2596,7 @@ struct RenderFrameMetrics {
   uint64_t frameIndex = 0u;
   OpaqueFrameMetrics opaque{};
   ShadowFrameMetrics shadow{};
+  VisibilityFrameMetrics visibility{};
   AntiAliasingFrameMetrics antiAliasing{};
   AmbientOcclusionFrameMetrics ambientOcclusion{};
   HDRPostProcessFrameMetrics hdrPostProcess{};
@@ -2705,6 +2832,7 @@ struct FrameSharedResources {
   std::array<RenderGraphTextureId, kMaxSceneDepthPyramidLevels>
       sceneDepthPyramidGraphTextures{};
   std::optional<uint64_t> sceneDepthPyramidSourceFrameIndex{};
+  std::optional<glm::mat4> sceneDepthPyramidSourceViewProj{};
   std::array<TextureHandle, kMaxShadowCascades> shadowCascadeTextures{};
   std::array<RenderGraphTextureId, kMaxShadowCascades>
       shadowCascadeGraphTextures{};

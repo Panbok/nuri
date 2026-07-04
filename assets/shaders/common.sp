@@ -18,6 +18,7 @@ const uint kFrameDataFlagHasSceneDepthPyramid = 1u << 7u;
 const uint kFrameDataFlagTransmissionMipDebug = 1u << 8u;
 const uint kFrameDataFlagHasAmbientOcclusion = 1u << 9u;
 const uint kFrameDataFlagHasAmbientBentNormal = 1u << 10u;
+const uint kFrameDataDepthPyramidPreviousFrame = 1u << 0u;
 const uint kAmbientOcclusionFlagScalarAo = 1u << 0u;
 const uint kAmbientOcclusionFlagBentNormal = 1u << 1u;
 const uint kAmbientOcclusionDebugViewShift = 8u;
@@ -197,6 +198,8 @@ struct ShadowCascadeGpuData {
   vec4 pcssParams;
   // x: depth texture, y: compare sampler, z: raw sampler, w: square map size.
   uvec4 textureSampler;
+  vec4 cullingBoundsMin;
+  vec4 cullingBoundsMax;
 };
 
 layout(std430, buffer_reference) readonly buffer DirectionalLightBuffer {
@@ -261,6 +264,8 @@ layout(std430, buffer_reference) readonly buffer FrameDataBuffer {
   uint materialSamplerReserved0;
   uint materialSamplerReserved1;
   uint materialSamplerReserved2;
+  mat4 previousViewProj;
+  uvec4 sceneDepthPyramidInfo;
 };
 
 uint getAmbientOcclusionDebugView(FrameDataBuffer frameData) {
@@ -384,6 +389,18 @@ layout(std430, buffer_reference) readonly buffer MeshletLodRangeBuffer {
   SubmeshMeshletLodRangeGpuData values[];
 };
 
+struct VisibilityCounterGpuData {
+  uvec4 main;
+  uvec4 status;
+  uvec4 indirect;
+  uvec4 meshlet;
+  uvec4 meshlet2;
+};
+
+layout(std430, buffer_reference) buffer VisibilityCounterBuffer {
+  VisibilityCounterGpuData data;
+};
+
 #ifdef NURI_OPAQUE_MESHLET_BATCHED
 struct MeshletBatchGpuData {
   PackedVertexWordBuffer vertexBuffer;
@@ -408,8 +425,14 @@ layout(push_constant) uniform MeshletPushConstants {
   InstanceLodBoundsBuffer instanceLodBounds;
   vec4 lodThresholds;
   MeshletBatchBuffer meshletBatches;
+  VisibilityCounterBuffer visibilityCounters;
+  ReadonlyInstanceMatricesBuffer previousInstanceMatrices;
+  VelocityInstanceFlagsBuffer velocityInstanceFlags;
+  VelocityFrameDataBuffer velocityFrameData;
   uint batchBase;
   uint candidateOffset;
+  uint sourceFrameIndex;
+  uint meshletCounterFlags;
 } pc;
 #else
 layout(push_constant) uniform MeshletPushConstants {
@@ -418,7 +441,7 @@ layout(push_constant) uniform MeshletPushConstants {
   StaticVertexDecodeBuffer vertexDecodeBuffer;
   InstanceMatricesBuffer instanceMatrices;
   InstanceRemapBuffer instanceRemap;
-  InstanceLodBoundsBuffer instanceLodBounds;
+  VisibilityCounterBuffer visibilityCounters;
   MeshletDescriptorBuffer meshlets;
   MeshletVertexIndexBuffer meshletVertices;
   MeshletPrimitiveIndexBuffer meshletPrimitives;

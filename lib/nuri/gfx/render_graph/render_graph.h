@@ -112,6 +112,11 @@ enum class RenderGraphDrawBufferBindingTarget : uint8_t {
   IndirectCount = 3,
 };
 
+enum class RenderGraphMeshDispatchBufferBindingTarget : uint8_t {
+  Indirect = 0,
+  IndirectCount = 1,
+};
+
 struct NURI_API RenderGraphPreparedDependencyBufferBinding {
   uint32_t dependencyIndex = UINT32_MAX;
   RenderGraphBufferId buffer{};
@@ -136,6 +141,14 @@ struct NURI_API RenderGraphPreparedDrawBufferBinding {
   uint32_t drawIndex = UINT32_MAX;
   RenderGraphDrawBufferBindingTarget target =
       RenderGraphDrawBufferBindingTarget::Vertex;
+  RenderGraphBufferId buffer{};
+  RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
+};
+
+struct NURI_API RenderGraphPreparedMeshDispatchBufferBinding {
+  uint32_t meshDispatchIndex = UINT32_MAX;
+  RenderGraphMeshDispatchBufferBindingTarget target =
+      RenderGraphMeshDispatchBufferBindingTarget::Indirect;
   RenderGraphBufferId buffer{};
   RenderGraphAccessMode mode = RenderGraphAccessMode::Read;
 };
@@ -167,6 +180,8 @@ struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   std::span<const RenderGraphPreparedPreDispatchDependencyBinding>
       preDispatchDependencyBindings{};
   std::span<const RenderGraphPreparedDrawBufferBinding> drawBufferBindings{};
+  std::span<const RenderGraphPreparedMeshDispatchBufferBinding>
+      meshDispatchBufferBindings{};
   bool drawBuffersPreResolved = false;
   // Explicit extra draw-buffer dependencies; drawBufferBindings must be empty
   // when drawBuffersPreResolved is true.
@@ -359,6 +374,11 @@ struct NURI_API RenderGraphCompileResult {
     IndirectCount = 3,
   };
 
+  enum class MeshDispatchBufferBindingTarget : uint8_t {
+    Indirect = 0,
+    IndirectCount = 1,
+  };
+
   struct UnresolvedPreDispatchDependencyBufferBinding {
     uint32_t orderedPassIndex = UINT32_MAX;
     uint32_t preDispatchIndex = UINT32_MAX;
@@ -370,6 +390,14 @@ struct NURI_API RenderGraphCompileResult {
     uint32_t orderedPassIndex = UINT32_MAX;
     uint32_t drawIndex = UINT32_MAX;
     DrawBufferBindingTarget target = DrawBufferBindingTarget::Vertex;
+    uint32_t bufferResourceIndex = UINT32_MAX;
+  };
+
+  struct UnresolvedMeshDispatchBufferBinding {
+    uint32_t orderedPassIndex = UINT32_MAX;
+    uint32_t meshDispatchIndex = UINT32_MAX;
+    MeshDispatchBufferBindingTarget target =
+        MeshDispatchBufferBindingTarget::Indirect;
     uint32_t bufferResourceIndex = UINT32_MAX;
   };
 
@@ -440,6 +468,8 @@ struct NURI_API RenderGraphCompileResult {
   std::pmr::vector<UnresolvedPreDispatchDependencyBufferBinding>
       unresolvedPreDispatchDependencyBufferBindings;
   std::pmr::vector<UnresolvedDrawBufferBinding> unresolvedDrawBufferBindings;
+  std::pmr::vector<UnresolvedMeshDispatchBufferBinding>
+      unresolvedMeshDispatchBufferBindings;
 
   explicit RenderGraphCompileResult(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
@@ -483,7 +513,8 @@ struct NURI_API RenderGraphCompileResult {
             ensureMemory(memory)),
         preDispatchDependencyRanges(ensureMemory(memory)),
         unresolvedPreDispatchDependencyBufferBindings(ensureMemory(memory)),
-        unresolvedDrawBufferBindings(ensureMemory(memory)) {}
+        unresolvedDrawBufferBindings(ensureMemory(memory)),
+        unresolvedMeshDispatchBufferBindings(ensureMemory(memory)) {}
 
 private:
   static std::pmr::memory_resource *ensureMemory(std::pmr::memory_resource *m) {
@@ -550,6 +581,11 @@ public:
                  RenderGraphCompileResult::DrawBufferBindingTarget target,
                  RenderGraphBufferId buffer,
                  RenderGraphAccessMode mode = RenderGraphAccessMode::Read);
+  [[nodiscard]] Result<bool, std::string> bindMeshDispatchBuffer(
+      RenderGraphPassId pass, uint32_t meshDispatchIndex,
+      RenderGraphCompileResult::MeshDispatchBufferBindingTarget target,
+      RenderGraphBufferId buffer,
+      RenderGraphAccessMode mode = RenderGraphAccessMode::Read);
   [[nodiscard]] Result<bool, std::string>
   addDependency(RenderGraphPassId before, RenderGraphPassId after);
   [[nodiscard]] Result<bool, std::string>
@@ -838,6 +874,10 @@ private:
   std::pmr::vector<uint32_t> drawIndexBindingResourceIndices_;
   std::pmr::vector<uint32_t> drawIndirectBindingResourceIndices_;
   std::pmr::vector<uint32_t> drawIndirectCountBindingResourceIndices_;
+  std::pmr::vector<uint32_t> passMeshDispatchBindingOffsets_;
+  std::pmr::vector<uint32_t> passMeshDispatchBindingCounts_;
+  std::pmr::vector<uint32_t> meshDispatchIndirectBindingResourceIndices_;
+  std::pmr::vector<uint32_t> meshDispatchIndirectCountBindingResourceIndices_;
   PmrHashMap<uint64_t, uint32_t> importedTextureIndicesByHandle_;
   PmrHashMap<uint64_t, uint32_t> importedBufferIndicesByHandle_;
   PmrHashMap<uint64_t, uint32_t> explicitTextureAccessIndicesByPassResource_;

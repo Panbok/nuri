@@ -1,0 +1,84 @@
+#include "visibility_common.sp"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const uint kMeshDispatchCommandWordCount = 3u;
+
+layout(push_constant) uniform VisibilityIndirectMeshDispatchPushConstants {
+  VisibilityMeshDispatchCommandBuffer commands;
+  VisibilityMeshletDispatchBuffer dispatches;
+  VisibilityMeshletBatchBuffer meshletBatches;
+  VisibilityInstanceRemapBuffer remap;
+  VisibilityInstanceRemapBuffer candidateMap;
+  VisibilityCandidateBuffer candidates;
+  VisibilityPassBuffer passData;
+  uint dispatchCount;
+  uint candidateCount;
+  uint candidateMapStride;
+  uint flags;
+  uint sourceFrameIndex;
+} pc;
+
+bool visibilityCandidateVisible(uint candidateIndex) {
+  if (candidateIndex >= pc.candidateCount) {
+    return false;
+  }
+
+  VisibilityCandidateGpu candidate = pc.candidates.values[candidateIndex];
+  bool uncertainVisible =
+      (candidate.ranges.z & kVisibilityCandidateConservativeVisible) != 0u &&
+      (pc.flags & kVisibilityGpuFlagVisibleOnUncertain) != 0u;
+  if (uncertainVisible ||
+      (pc.flags & kVisibilityGpuFlagFrustumCulling) == 0u) {
+    return true;
+  }
+  return !visibilitySphereOutsideFrustum(pc.passData.data.planes,
+                                         candidate.bounds.xyz,
+                                         candidate.bounds.w);
+}
+
+bool meshDispatchVisible(VisibilityMeshletDispatchGpuData dispatchData) {
+  const uint batchBase = dispatchData.batches.x;
+  const uint batchCount = dispatchData.batches.y;
+  for (uint batchOffset = 0u; batchOffset < batchCount; ++batchOffset) {
+    VisibilityMeshletBatchGpuData batch =
+        pc.meshletBatches.values[batchBase + batchOffset];
+    const uint instanceCount = batch.draw.x;
+    const uint firstInstance = batch.draw.y;
+    for (uint instanceOffset = 0u; instanceOffset < instanceCount;
+         ++instanceOffset) {
+      const uint globalInstanceId =
+          pc.remap.indices[firstInstance + instanceOffset];
+      const uint submeshIndex = batch.mesh.z;
+      if (submeshIndex >= pc.candidateMapStride) {
+        return true;
+      }
+      const uint candidateIndex =
+          pc.candidateMap.indices[globalInstanceId * pc.candidateMapStride +
+                                  submeshIndex];
+      if (candidateIndex >= pc.candidateCount) {
+        return true;
+      }
+      if (visibilityCandidateVisible(candidateIndex)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void main() {
+  const uint dispatchIndex = gl_GlobalInvocationID.x;
+  if (dispatchIndex >= pc.dispatchCount) {
+    return;
+  }
+
+  VisibilityMeshletDispatchGpuData dispatchData =
+      pc.dispatches.values[dispatchIndex];
+  const bool visible = meshDispatchVisible(dispatchData);
+  const uint commandWord =
+      dispatchIndex * kMeshDispatchCommandWordCount;
+  pc.commands.words[commandWord + 0u] = visible ? dispatchData.groups.x : 0u;
+  pc.commands.words[commandWord + 1u] = visible ? dispatchData.groups.y : 0u;
+  pc.commands.words[commandWord + 2u] = visible ? dispatchData.groups.z : 0u;
+}

@@ -96,6 +96,17 @@ static_assert(sizeof(Model::SubmeshMeshletLodRangeGpu) == 64);
 constexpr uint32_t kMeshletShaderMaxVertices = 64u;
 constexpr uint32_t kMeshletShaderMaxPrimitives = 124u;
 
+std::pmr::vector<glm::vec4>
+copyMeshletBoundsSpheres(std::span<const MeshletDescriptor> meshlets,
+                         std::pmr::memory_resource *memory) {
+  std::pmr::vector<glm::vec4> bounds(memory);
+  bounds.reserve(meshlets.size());
+  for (const MeshletDescriptor &meshlet : meshlets) {
+    bounds.push_back(meshlet.boundsSphere);
+  }
+  return bounds;
+}
+
 void destroyBuffer(GPUDevice &gpu, std::unique_ptr<Buffer> &buffer) {
   if (buffer && buffer->valid()) {
     gpu.destroyBuffer(buffer->handle());
@@ -577,8 +588,8 @@ Result<ModelMeshletGpuBuffers, std::string> createMeshletGpuBuffers(
         return Result<ModelMeshletGpuBuffers, std::string>::makeError(
             "Model::create: submesh meshlet range out of bounds");
       }
-      for (uint64_t meshletIndex = lod.meshletOffset;
-           meshletIndex < meshletEnd; ++meshletIndex) {
+      for (uint64_t meshletIndex = lod.meshletOffset; meshletIndex < meshletEnd;
+           ++meshletIndex) {
         const MeshletDescriptor &meshlet =
             meshlets[static_cast<size_t>(meshletIndex)];
         const uint64_t vertexEnd =
@@ -1367,6 +1378,10 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
 
   std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
   ownedSubmeshes.assign(data.submeshes.begin(), data.submeshes.end());
+  std::pmr::vector<glm::vec4> meshletBoundsSpheres =
+      copyMeshletBoundsSpheres(std::span<const MeshletDescriptor>(
+                                   data.meshlets.data(), data.meshlets.size()),
+                               storageMemory);
   std::pmr::vector<uint32_t> sourceMaterialToRuntime(
       sourceMaterialCountResult.value(), Model::kInvalidMaterialIndex,
       storageMemory);
@@ -1385,6 +1400,7 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromPackedVertices(
           std::move(meshletBuffers.meshletVertexIndexBuffer),
           std::move(meshletBuffers.meshletPrimitiveIndexBuffer),
           std::move(meshletBuffers.meshletLodRangeBuffer),
+          std::move(meshletBoundsSpheres),
           std::move(sourceMaterialToRuntime))));
 }
 
@@ -1486,6 +1502,11 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
           std::pmr::vector<Submesh> ownedSubmeshes(storageMemory);
           ownedSubmeshes.assign(cachedMesh->submeshes.begin(),
                                 cachedMesh->submeshes.end());
+          std::pmr::vector<glm::vec4> meshletBoundsSpheres =
+              copyMeshletBoundsSpheres(
+                  std::span<const MeshletDescriptor>(
+                      cachedMesh->meshlets.data(), cachedMesh->meshlets.size()),
+                  storageMemory);
           std::pmr::vector<uint32_t> sourceMaterialToRuntime(
               sourceMaterialCountResult.value(), Model::kInvalidMaterialIndex,
               storageMemory);
@@ -1505,6 +1526,7 @@ Result<std::unique_ptr<Model>, std::string> Model::createFromFile(
                   std::move(meshletBuffers.meshletVertexIndexBuffer),
                   std::move(meshletBuffers.meshletPrimitiveIndexBuffer),
                   std::move(meshletBuffers.meshletLodRangeBuffer),
+                  std::move(meshletBoundsSpheres),
                   std::move(sourceMaterialToRuntime))));
         }
         NURI_LOG_WARNING(

@@ -1,0 +1,59 @@
+#include "visibility_common.sp"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform VisibilityGpuPushConstants {
+  VisibilityCandidateBuffer candidates;
+  VisibilityPassBuffer passData;
+  VisibilityVisibleIndexBuffer visibleIndices;
+  VisibilityCounterBuffer counters;
+  uint candidateCount;
+  uint visibleCapacity;
+  uint flags;
+  uint sourceFrameIndex;
+} pc;
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+  bool occlusionEnabled =
+      (pc.flags & kVisibilityGpuFlagOcclusionCulling) != 0u &&
+      pc.passData.data.depthPyramidInfo.z > 0u;
+  if (idx == 0u) {
+    pc.counters.data.status.y = occlusionEnabled ? 1u : 0u;
+    pc.counters.data.status.z = pc.sourceFrameIndex;
+    pc.counters.data.status.w = 1u;
+  }
+  if (idx >= pc.candidateCount) {
+    return;
+  }
+
+  atomicAdd(pc.counters.data.main.x, 1u);
+  VisibilityCandidateGpu candidate = pc.candidates.values[idx];
+
+  bool visible = true;
+  bool uncertainVisible =
+      (candidate.ranges.z & kVisibilityCandidateConservativeVisible) != 0u &&
+      (pc.flags & kVisibilityGpuFlagVisibleOnUncertain) != 0u;
+  if (!uncertainVisible &&
+      (pc.flags & kVisibilityGpuFlagFrustumCulling) != 0u) {
+    visible = !visibilitySphereOutsideFrustum(
+        pc.passData.data.planes, candidate.bounds.xyz, candidate.bounds.w);
+  }
+
+  if (!visible) {
+    atomicAdd(pc.counters.data.main.z, 1u);
+    return;
+  }
+  if (!uncertainVisible && occlusionEnabled &&
+      visibilityBoundsOccludedByPreviousDepth(pc.passData.data, candidate)) {
+    atomicAdd(pc.counters.data.main.w, 1u);
+    return;
+  }
+
+  uint outIndex = atomicAdd(pc.counters.data.main.y, 1u);
+  if (outIndex < pc.visibleCapacity) {
+    pc.visibleIndices.indices[outIndex] = candidate.ids.y;
+  } else {
+    atomicAdd(pc.counters.data.status.x, 1u);
+  }
+}

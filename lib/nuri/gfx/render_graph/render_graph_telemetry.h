@@ -47,6 +47,7 @@ struct NURI_API RenderGraphTelemetrySnapshot {
     uint32_t resolvedPreDispatchDependencyBufferSlotCount = 0;
     uint32_t unresolvedPreDispatchDependencyBufferBindingCount = 0;
     uint32_t unresolvedDrawBufferBindingCount = 0;
+    uint32_t unresolvedMeshDispatchBufferBindingCount = 0;
     uint64_t compileFingerprint = 0;
     uint64_t barrierFingerprint = 0;
     uint64_t executionFingerprint = 0;
@@ -102,6 +103,9 @@ struct NURI_API RenderGraphTelemetrySnapshot {
       meshDispatchRangesByPass;
   std::pmr::vector<RenderGraphCompileResult::UnresolvedDrawBufferBinding>
       unresolvedDrawBufferBindings;
+  std::pmr::vector<
+      RenderGraphCompileResult::UnresolvedMeshDispatchBufferBinding>
+      unresolvedMeshDispatchBufferBindings;
 
   explicit RenderGraphTelemetrySnapshot(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource());
