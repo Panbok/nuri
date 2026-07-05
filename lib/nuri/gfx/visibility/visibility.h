@@ -7,8 +7,8 @@
 #include "nuri/resources/gpu/model.h"
 
 #include <array>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory_resource>
 #include <span>
@@ -42,8 +42,7 @@ enum VisibilityGpuFlags : uint32_t {
 struct VisibilityResolvedSettings {
   VisibilityCullingMode mainViewMode = VisibilityCullingMode::GpuDriven;
   VisibilityCullingMode shadowMode = VisibilityCullingMode::Hybrid;
-  VisibilityOcclusionMode occlusionMode =
-      VisibilityOcclusionMode::Disabled;
+  VisibilityOcclusionMode occlusionMode = VisibilityOcclusionMode::Disabled;
   bool enableCpuMainFrustumCulling = true;
   bool enableGpuInstanceCulling = true;
   bool enableMeshletFrustumCulling = true;
@@ -159,8 +158,8 @@ struct alignas(16) VisibilityIndirectDrawPushConstants {
   uint32_t sourceFrameIndex = 0u;
 };
 static_assert(sizeof(VisibilityIndirectDrawPushConstants) == 64u);
-static_assert(
-    offsetof(VisibilityIndirectDrawPushConstants, commandWordOffset) == 40u);
+static_assert(offsetof(VisibilityIndirectDrawPushConstants,
+                       commandWordOffset) == 40u);
 
 struct alignas(16) VisibilityMeshletDispatchGpuData {
   glm::uvec4 groups{0u};
@@ -217,9 +216,9 @@ public:
 
   void clear();
 
-  [[nodiscard]] VisibilityPassResult evaluateCpu(
-      const VisibilityPassRequest &request,
-      std::span<const VisibilityCandidate> candidates);
+  [[nodiscard]] VisibilityPassResult
+  evaluateCpu(const VisibilityPassRequest &request,
+              std::span<const VisibilityCandidate> candidates);
 
 private:
   std::pmr::memory_resource *memory_;
@@ -228,9 +227,9 @@ private:
 [[nodiscard]] NURI_API VisibilityResolvedSettings
 visibilitySettingsFromRenderSettings(const RenderSettings &settings) noexcept;
 
-[[nodiscard]] NURI_API VisibilityPassRequest
-makeMainViewVisibilityPassRequest(const CameraFrameState &camera,
-                                  const VisibilityResolvedSettings &settings) noexcept;
+[[nodiscard]] NURI_API VisibilityPassRequest makeMainViewVisibilityPassRequest(
+    const CameraFrameState &camera,
+    const VisibilityResolvedSettings &settings) noexcept;
 
 [[nodiscard]] NURI_API VisibilityCandidateGpu
 makeVisibilityCandidateGpu(const VisibilityCandidate &candidate) noexcept;

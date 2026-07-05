@@ -114,8 +114,6 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
       mix(static_cast<uint64_t>(dispatch.command));
       mix(nuri::isValid(dispatch.indirectBuffer) ? 1u : 0u);
       mix(nuri::isValid(dispatch.indirectCountBuffer) ? 1u : 0u);
-      mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
-      mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
     }
   }
   return hash;
@@ -1574,12 +1572,6 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
     }
   }
 
-  const std::string meshDispatchDependencyBufferDebugName =
-      makePassResourceDebugName(desc.debugLabel,
-                                "mesh_dispatch_dependency_buffer");
-  const std::string meshDispatchDependencyTextureDebugName =
-      makePassResourceDebugName(desc.debugLabel,
-                                "mesh_dispatch_dependency_texture");
   const std::string meshDispatchIndirectDebugName = makePassResourceDebugName(
       desc.debugLabel, "mesh_dispatch_indirect_buffer");
   for (size_t dispatchIndex = 0u; dispatchIndex < desc.meshDispatches.size();
@@ -1612,36 +1604,6 @@ Result<bool, std::string> RenderGraphBuilder::bindImplicitPassResources(
           importResult.value(), RenderGraphAccessMode::Read);
       if (bindResult.hasError()) {
         return bindResult;
-      }
-    }
-    for (const BufferHandle dependency : dispatch.dependencyBuffers) {
-      if (!nuri::isValid(dependency)) {
-        continue;
-      }
-      auto importResult =
-          importBuffer(dependency, meshDispatchDependencyBufferDebugName);
-      if (importResult.hasError()) {
-        return Result<bool, std::string>::makeError(importResult.error());
-      }
-      auto accessResult = addBufferAccess(pass, importResult.value(),
-                                          RenderGraphAccessMode::Read);
-      if (accessResult.hasError()) {
-        return accessResult;
-      }
-    }
-    for (const TextureHandle dependency : dispatch.dependencyTextures) {
-      if (!nuri::isValid(dependency)) {
-        continue;
-      }
-      auto importResult =
-          importTexture(dependency, meshDispatchDependencyTextureDebugName);
-      if (importResult.hasError()) {
-        return Result<bool, std::string>::makeError(importResult.error());
-      }
-      auto accessResult = addTextureAccess(pass, importResult.value(),
-                                           RenderGraphAccessMode::Read);
-      if (accessResult.hasError()) {
-        return accessResult;
       }
     }
   }
@@ -1944,12 +1906,6 @@ RenderGraphBuilder::addPreparedGraphicsPass(
       }
     }
 
-    const std::string meshDispatchDependencyBufferDebugName =
-        makePassResourceDebugName(desc.debugLabel,
-                                  "mesh_dispatch_dependency_buffer");
-    const std::string meshDispatchDependencyTextureDebugName =
-        makePassResourceDebugName(desc.debugLabel,
-                                  "mesh_dispatch_dependency_texture");
     const std::string meshDispatchIndirectDebugName = makePassResourceDebugName(
         desc.debugLabel, "mesh_dispatch_indirect_buffer");
     for (size_t dispatchIndex = 0u; dispatchIndex < desc.meshDispatches.size();
@@ -1986,40 +1942,6 @@ RenderGraphBuilder::addPreparedGraphicsPass(
         if (bindResult.hasError()) {
           return Result<RenderGraphPassId, std::string>::makeError(
               bindResult.error());
-        }
-      }
-      for (const BufferHandle dependency : dispatch.dependencyBuffers) {
-        if (!nuri::isValid(dependency)) {
-          continue;
-        }
-        auto importResult =
-            importBuffer(dependency, meshDispatchDependencyBufferDebugName);
-        if (importResult.hasError()) {
-          return Result<RenderGraphPassId, std::string>::makeError(
-              importResult.error());
-        }
-        auto accessResult = addBufferAccess(passId, importResult.value(),
-                                            RenderGraphAccessMode::Read);
-        if (accessResult.hasError()) {
-          return Result<RenderGraphPassId, std::string>::makeError(
-              accessResult.error());
-        }
-      }
-      for (const TextureHandle dependency : dispatch.dependencyTextures) {
-        if (!nuri::isValid(dependency)) {
-          continue;
-        }
-        auto importResult =
-            importTexture(dependency, meshDispatchDependencyTextureDebugName);
-        if (importResult.hasError()) {
-          return Result<RenderGraphPassId, std::string>::makeError(
-              importResult.error());
-        }
-        auto accessResult = addTextureAccess(passId, importResult.value(),
-                                             RenderGraphAccessMode::Read);
-        if (accessResult.hasError()) {
-          return Result<RenderGraphPassId, std::string>::makeError(
-              accessResult.error());
         }
       }
     }

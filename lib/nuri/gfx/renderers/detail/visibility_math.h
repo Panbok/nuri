@@ -55,10 +55,8 @@ buildFrustumPlanes(const glm::mat4 &viewProj,
   out.planes[1] = normalizePlane(row3 - row0);
   out.planes[2] = normalizePlane(row3 + row1);
   out.planes[3] = normalizePlane(row3 - row1);
-  out.planes[4] = normalizePlane(depthConvention ==
-                                         DepthClipConvention::ZeroToOne
-                                     ? row2
-                                     : row3 + row2);
+  out.planes[4] = normalizePlane(
+      depthConvention == DepthClipConvention::ZeroToOne ? row2 : row3 + row2);
   out.planes[5] = normalizePlane(row3 - row2);
   return out;
 }
@@ -113,18 +111,16 @@ classifyAabb(const FrustumPlanes &frustum,
   const glm::vec3 max = worldBounds.max_;
   for (const glm::vec4 &plane : frustum.planes) {
     const glm::vec3 normal = glm::vec3(plane);
-    const glm::vec3 positive(
-        normal.x >= 0.0f ? max.x : min.x,
-        normal.y >= 0.0f ? max.y : min.y,
-        normal.z >= 0.0f ? max.z : min.z);
+    const glm::vec3 positive(normal.x >= 0.0f ? max.x : min.x,
+                             normal.y >= 0.0f ? max.y : min.y,
+                             normal.z >= 0.0f ? max.z : min.z);
     if (glm::dot(normal, positive) + plane.w < 0.0f) {
       return VisibilityClassification::Outside;
     }
 
-    const glm::vec3 negative(
-        normal.x >= 0.0f ? min.x : max.x,
-        normal.y >= 0.0f ? min.y : max.y,
-        normal.z >= 0.0f ? min.z : max.z);
+    const glm::vec3 negative(normal.x >= 0.0f ? min.x : max.x,
+                             normal.y >= 0.0f ? min.y : max.y,
+                             normal.z >= 0.0f ? min.z : max.z);
     if (glm::dot(normal, negative) + plane.w < 0.0f) {
       result = VisibilityClassification::Intersects;
     }

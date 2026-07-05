@@ -232,6 +232,27 @@ private:
     bool alphaMasked = false;
   };
 
+  struct BatchEntry {
+    DrawItem draw{};
+    BufferHandle vertexBuffer{};
+    BufferHandle vertexDecodeBuffer{};
+    uint64_t vertexBufferAddress = 0;
+    uint64_t vertexDecodeBufferAddress = 0;
+    uint32_t vertexDecodeIndex = 0;
+    uint32_t packedVertexFormat = 0;
+    uint32_t materialIndex = kInvalidMaterialIndex;
+    const Model::ModelMeshletGpuView *meshletView = nullptr;
+    uint32_t meshletOffset = 0;
+    uint32_t meshletCount = 0;
+    uint32_t submeshIndex = 0;
+    uint32_t meshletMaxCount = 0;
+    uint32_t vertexOffset = 0;
+    bool doubleSided = false;
+    size_t instanceCount = 0;
+    size_t firstInstance = 0;
+    bool alphaMasked = false;
+  };
+
   struct MeshletDispatchDependencyBuffers {
     std::pmr::vector<BufferHandle> buffers;
 
@@ -442,7 +463,8 @@ private:
   Result<bool, std::string>
   ensureDynamicRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
                             size_t requiredBytes, size_t minimumBytes,
-                            std::string_view debugNamePrefix);
+                            std::string_view debugNamePrefix,
+                            Storage storage = Storage::Device);
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
@@ -482,13 +504,15 @@ private:
   Result<bool, std::string> createPipelines();
   Result<bool, std::string> ensureMeshletPipelineState();
   void readLatestVisibilityGpuReadback(RenderFrameContext &frame);
-  Result<bool, std::string>
-  appendGpuVisibilityMainPass(RenderFrameContext &frame, uint32_t frameSlot,
-                              std::span<const VisibilityCandidate> candidates,
-                              std::span<const uint32_t> candidateIndices,
-                              const VisibilityPassRequest &request,
-                              const VisibilityResolvedSettings &settings,
-                              std::pmr::vector<PreparedGraphPass> &out);
+  Result<bool, std::string> appendGpuVisibilityMainPass(
+      RenderFrameContext &frame, uint32_t frameSlot,
+      std::span<const VisibilityCandidate> candidates,
+      std::span<const VisibilityCandidateGpu> candidateGpuData,
+      std::span<const uint32_t> candidateIndices,
+      const VisibilityPassRequest &request,
+      const VisibilityResolvedSettings &settings,
+      bool candidateIndicesPreculledByCpu,
+      std::pmr::vector<PreparedGraphPass> &out);
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
@@ -501,6 +525,9 @@ private:
       RenderFrameContext &frame, RenderGraphBuilder &graph,
       const PreparedGraphPass &pass, uint32_t safeWidth, uint32_t safeHeight,
       std::span<const RenderGraphBufferId> preResolvedDrawBufferIds);
+  Result<bool, std::string>
+  ensurePreResolvedDrawBufferIds(RenderFrameContext &frame,
+                                 RenderGraphBuilder &graph);
   [[nodiscard]] static bool
   isPreLightingPass(const PreparedGraphPass &pass) noexcept;
   void cachePreparedGraphPassMetadata(PreparedGraphPass &pass) const;
@@ -774,8 +801,27 @@ private:
   uint64_t cachedMaterialVersion_ = std::numeric_limits<uint64_t>::max();
   uint64_t cachedGeometryMutationVersion_ =
       std::numeric_limits<uint64_t>::max();
+  uint64_t cachedVisibilityCandidateTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t cachedVisibilityCandidateTransformVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t cachedVisibilityCandidateDeformationVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t cachedVisibilityCandidateGeometryVersion_ =
+      std::numeric_limits<uint64_t>::max();
   bool cachedExcludeTransmission_ = true;
+  bool cachedVisibilityCandidatesHadDeformedRenderable_ = false;
   uint64_t cachedAnimationSceneVersion_ = std::numeric_limits<uint64_t>::max();
+  uint64_t cachedVisibleBatchTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t cachedVisibleBatchMaterialVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t cachedVisibleBatchGeometryVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  bool cachedVisibleBatchValid_ = false;
+  bool cachedVisibleBatchMeshletRequested_ = false;
+  bool cachedVisibleBatchEnableMeshLod_ = false;
+  int32_t cachedVisibleBatchForcedMeshLod_ = -1;
   uint64_t currentDirectDrawBufferSignature_ =
       std::numeric_limits<uint64_t>::max();
   uint64_t currentIndirectDrawBufferSignature_ =
@@ -812,7 +858,12 @@ private:
   std::pmr::vector<uint32_t> visibilityExpectedVisibleIndexCounts_;
   std::pmr::vector<uint64_t> visibilityExpectedVisibleIndexHashes_;
   std::pmr::vector<uint32_t> visibilityVisibleIndexReadback_;
+  std::pmr::vector<VisibilityCandidate> visibilityCandidates_;
+  std::pmr::vector<VisibilityCandidateGpu> visibilityCandidateGpuData_;
   std::pmr::vector<uint32_t> templateBatchIndices_;
+  std::pmr::vector<uint32_t> cachedVisibleTemplateBatchIndices_;
+  std::pmr::vector<uint32_t> visibleBatchActiveRemap_;
+  std::pmr::vector<BatchEntry> cachedVisibleBatchEntries_;
   std::pmr::vector<size_t> batchWriteOffsets_;
   std::pmr::vector<glm::vec4> instanceCentersPhase_;
   std::pmr::vector<glm::mat4> instanceBaseMatrices_;
@@ -903,6 +954,7 @@ private:
   std::pmr::vector<RenderGraphAccessMode> passDependencyBufferAccessModes_;
   std::pmr::vector<BufferHandle> preResolvedDecodeBuffers_;
   std::pmr::vector<BufferHandle> preResolvedDrawBuffers_;
+  std::pmr::vector<RenderGraphBufferId> cachedPreResolvedDrawBufferIds_;
   std::pmr::vector<BufferHandle> dispatchDependencyBuffers_;
   std::pmr::vector<TextureHandle> passDependencyTextures_;
   std::pmr::vector<BufferHandle> mainPassDependencyBuffers_;
@@ -924,6 +976,8 @@ private:
   PushConstants computePushConstants_{};
   DrawItem baseMeshFillDraw_{};
   DrawItem baseMeshWireframeDraw_{};
+  uint64_t cachedPreResolvedBufferFrameIndex_ =
+      std::numeric_limits<uint64_t>::max();
   uint64_t cachedPreResolvedBufferSignature_ =
       std::numeric_limits<uint64_t>::max();
   uint64_t cachedRemapSignature_ = std::numeric_limits<uint64_t>::max();

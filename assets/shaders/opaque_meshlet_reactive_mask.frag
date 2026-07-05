@@ -25,8 +25,7 @@ void main() {
     vec4 baseColor = material.baseColorFactor;
     if (baseColorTexId != kInvalidTextureBindlessIndex) {
       baseColor *= textureBindless2D(
-          baseColorTexId, pc.frameData.materialCoverageSamplerId,
-          baseColorUv);
+          baseColorTexId, pc.frameData.materialCoverageSamplerId, baseColorUv);
     }
 
     if (baseColor.a < material.metallicRoughnessOcclusionAlphaCutoff.w) {

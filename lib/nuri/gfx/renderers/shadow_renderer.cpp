@@ -2895,22 +2895,25 @@ ShadowRenderer::ensureShadowMeshletCounterRingCapacity(size_t requiredBytes) {
 
 void ShadowRenderer::readLatestShadowMeshletCounterReadback(
     RenderFrameContext &frame) {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   VisibilityFrameMetrics &metrics = frame.metrics.visibility;
   std::optional<VisibilityCounterGpuData> selectedCounter;
   uint32_t selectedSourceFrame = 0u;
   uint32_t readbackErrorCount = 0u;
-  for (size_t slotIndex = 0u; slotIndex < shadowMeshletCounterRing_.size();
-       ++slotIndex) {
+  const auto readCounterSlot = [&](size_t slotIndex) {
+    if (slotIndex >= shadowMeshletCounterRing_.size()) {
+      return;
+    }
     const DynamicBufferSlot &slot = shadowMeshletCounterRing_[slotIndex];
     if (!slot.buffer || !slot.buffer->valid()) {
-      continue;
+      return;
     }
     const uint64_t expectedFrame =
         slotIndex < shadowMeshletCounterRingPublishedFrames_.size()
             ? shadowMeshletCounterRingPublishedFrames_[slotIndex]
             : std::numeric_limits<uint64_t>::max();
     if (expectedFrame == std::numeric_limits<uint64_t>::max()) {
-      continue;
+      return;
     }
 
     VisibilityCounterGpuData counter{};
@@ -2920,17 +2923,33 @@ void ShadowRenderer::readLatestShadowMeshletCounterReadback(
                             std::span<VisibilityCounterGpuData>(&counter, 1u)));
     if (readResult.hasError()) {
       ++readbackErrorCount;
-      continue;
+      return;
     }
     const uint32_t valid = counter.status.w;
     const uint32_t sourceFrame = counter.status.z;
     if (valid == 0u || static_cast<uint64_t>(sourceFrame) >= frame.frameIndex ||
         sourceFrame != static_cast<uint32_t>(expectedFrame)) {
-      continue;
+      return;
     }
     if (!selectedCounter.has_value() || sourceFrame > selectedSourceFrame) {
       selectedCounter = counter;
       selectedSourceFrame = sourceFrame;
+    }
+  };
+
+  const size_t preferredSlotIndex =
+      frame.frameIndex > 0u && !shadowMeshletCounterRing_.empty()
+          ? static_cast<size_t>((frame.frameIndex - 1u) %
+                                shadowMeshletCounterRing_.size())
+          : std::numeric_limits<size_t>::max();
+  readCounterSlot(preferredSlotIndex);
+  if (!selectedCounter.has_value()) {
+    for (size_t slotIndex = 0u; slotIndex < shadowMeshletCounterRing_.size();
+         ++slotIndex) {
+      if (slotIndex == preferredSlotIndex) {
+        continue;
+      }
+      readCounterSlot(slotIndex);
     }
   }
 

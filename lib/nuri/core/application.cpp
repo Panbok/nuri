@@ -164,7 +164,9 @@ void Application::run() {
   }
 
   NURI_LOG_DEBUG("Application::run: Application shutdown");
+  gpu_->waitIdle();
   onShutdown();
+  gpu_->waitIdle();
 }
 
 double Application::getTime() const { return gpu_->getTime(); }

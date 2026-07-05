@@ -17,7 +17,8 @@ layout(push_constant) uniform VisibilityIndirectMeshDispatchPushConstants {
   uint candidateMapStride;
   uint flags;
   uint sourceFrameIndex;
-} pc;
+}
+pc;
 
 bool visibilityCandidateVisible(uint candidateIndex) {
   if (candidateIndex >= pc.candidateCount) {
@@ -28,13 +29,11 @@ bool visibilityCandidateVisible(uint candidateIndex) {
   bool uncertainVisible =
       (candidate.ranges.z & kVisibilityCandidateConservativeVisible) != 0u &&
       (pc.flags & kVisibilityGpuFlagVisibleOnUncertain) != 0u;
-  if (uncertainVisible ||
-      (pc.flags & kVisibilityGpuFlagFrustumCulling) == 0u) {
+  if (uncertainVisible || (pc.flags & kVisibilityGpuFlagFrustumCulling) == 0u) {
     return true;
   }
-  return !visibilitySphereOutsideFrustum(pc.passData.data.planes,
-                                         candidate.bounds.xyz,
-                                         candidate.bounds.w);
+  return !visibilitySphereOutsideFrustum(
+      pc.passData.data.planes, candidate.bounds.xyz, candidate.bounds.w);
 }
 
 bool meshDispatchVisible(VisibilityMeshletDispatchGpuData dispatchData) {
@@ -54,8 +53,8 @@ bool meshDispatchVisible(VisibilityMeshletDispatchGpuData dispatchData) {
         return true;
       }
       const uint candidateIndex =
-          pc.candidateMap.indices[globalInstanceId * pc.candidateMapStride +
-                                  submeshIndex];
+          pc.candidateMap
+              .indices[globalInstanceId * pc.candidateMapStride + submeshIndex];
       if (candidateIndex >= pc.candidateCount) {
         return true;
       }
@@ -76,8 +75,7 @@ void main() {
   VisibilityMeshletDispatchGpuData dispatchData =
       pc.dispatches.values[dispatchIndex];
   const bool visible = meshDispatchVisible(dispatchData);
-  const uint commandWord =
-      dispatchIndex * kMeshDispatchCommandWordCount;
+  const uint commandWord = dispatchIndex * kMeshDispatchCommandWordCount;
   pc.commands.words[commandWord + 0u] = visible ? dispatchData.groups.x : 0u;
   pc.commands.words[commandWord + 1u] = visible ? dispatchData.groups.y : 0u;
   pc.commands.words[commandWord + 2u] = visible ? dispatchData.groups.z : 0u;

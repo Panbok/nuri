@@ -15,7 +15,8 @@ layout(push_constant) uniform VisibilityIndirectDrawPushConstants {
   uint candidateCount;
   uint flags;
   uint sourceFrameIndex;
-} pc;
+}
+pc;
 
 void main() {
   uint idx = gl_GlobalInvocationID.x;
@@ -33,8 +34,8 @@ void main() {
 
   atomicAdd(pc.counters.data.indirect.x, 1u);
 
-  uint commandWord = pc.commandWordOffset +
-                     idx * kIndexedIndirectCommandWordCount;
+  uint commandWord =
+      pc.commandWordOffset + idx * kIndexedIndirectCommandWordCount;
   uint instanceCount = pc.commands.words[commandWord + 1u];
   uint firstInstance = pc.commands.words[commandWord + 4u];
 

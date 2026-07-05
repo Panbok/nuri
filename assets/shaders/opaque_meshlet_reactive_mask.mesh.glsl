@@ -6,9 +6,8 @@
 layout(local_size_x = 32) in;
 layout(triangles, max_vertices = 64, max_primitives = 124) out;
 
-out gl_MeshPerVertexEXT {
-  vec4 gl_Position;
-} gl_MeshVerticesEXT[];
+out gl_MeshPerVertexEXT { vec4 gl_Position; }
+gl_MeshVerticesEXT[];
 
 layout(location = 0) out PerVertex vtx[];
 layout(location = 10) flat out uint outMotionReactive[];
@@ -28,13 +27,12 @@ uint meshletReactiveVelocityFlags(uint globalInstanceId) {
 }
 
 void writeMeshletReactiveVertex(uint outputIndex, uint vertexIndex,
-                                InstanceData inst,
-                                MeshletBatchGpuData batch,
+                                InstanceData inst, MeshletBatchGpuData batch,
                                 uint globalInstanceId) {
   const uint packedVertexFormat = batch.mesh.x;
-  const vec3 pos = decodePackedPositionFrom(
-      batch.vertexBuffer, batch.vertexDecodeBuffer, batch.draw.w,
-      packedVertexFormat, vertexIndex);
+  const vec3 pos =
+      decodePackedPositionFrom(batch.vertexBuffer, batch.vertexDecodeBuffer,
+                               batch.draw.w, packedVertexFormat, vertexIndex);
   const vec2 uv0 =
       decodePackedUvFrom(batch.vertexBuffer, packedVertexFormat, vertexIndex);
   const vec2 uv1 =
@@ -65,8 +63,7 @@ void main() {
   const uint batchIndex = meshletPayload.batchIndex[payloadIndex];
   MeshletBatchGpuData batch = pc.meshletBatches.values[batchIndex];
   const uint meshletIndex = meshletPayload.meshletIndex[payloadIndex];
-  const uint globalInstanceId =
-      meshletPayload.globalInstanceId[payloadIndex];
+  const uint globalInstanceId = meshletPayload.globalInstanceId[payloadIndex];
   const MeshletDescriptorGpuData meshlet = batch.meshlets.values[meshletIndex];
   const uint vertexOffset = meshlet.offsetsCounts.x;
   const uint primitiveOffset = meshlet.offsetsCounts.y;

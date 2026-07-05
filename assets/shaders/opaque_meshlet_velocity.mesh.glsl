@@ -6,9 +6,8 @@
 layout(local_size_x = 32) in;
 layout(triangles, max_vertices = 64, max_primitives = 124) out;
 
-out gl_MeshPerVertexEXT {
-  vec4 gl_Position;
-} gl_MeshVerticesEXT[];
+out gl_MeshPerVertexEXT { vec4 gl_Position; }
+gl_MeshVerticesEXT[];
 
 layout(location = 0) out PerVertex vtx[];
 layout(location = 10) out vec4 outCurrentClipNoJitter[];
@@ -42,8 +41,8 @@ vec3 meshletPreviousPosition(vec3 currentPosition, uint vertexIndex,
   VelocityRenderableGeometryData previousGeometry =
       pc.velocityFrameData.data.previousGeometry.values[globalInstanceId];
   const bool hasPreviousVertexBuffer =
-      (previousGeometry.metadata.x & kVelocityGeometryFlagPreviousVertexBuffer) !=
-      0u;
+      (previousGeometry.metadata.x &
+       kVelocityGeometryFlagPreviousVertexBuffer) != 0u;
   const uint previousVertexCount = previousGeometry.metadata.z;
   if (!hasPreviousVertexBuffer || vertexIndex >= previousVertexCount) {
     return currentPosition;
@@ -54,13 +53,12 @@ vec3 meshletPreviousPosition(vec3 currentPosition, uint vertexIndex,
 }
 
 void writeMeshletVelocityVertex(uint outputIndex, uint vertexIndex,
-                                InstanceData inst,
-                                MeshletBatchGpuData batch,
+                                InstanceData inst, MeshletBatchGpuData batch,
                                 uint globalInstanceId) {
   const uint packedVertexFormat = batch.mesh.x;
-  const vec3 pos = decodePackedPositionFrom(
-      batch.vertexBuffer, batch.vertexDecodeBuffer, batch.draw.w,
-      packedVertexFormat, vertexIndex);
+  const vec3 pos =
+      decodePackedPositionFrom(batch.vertexBuffer, batch.vertexDecodeBuffer,
+                               batch.draw.w, packedVertexFormat, vertexIndex);
   const vec2 uv0 =
       decodePackedUvFrom(batch.vertexBuffer, packedVertexFormat, vertexIndex);
   const vec2 uv1 =
@@ -78,9 +76,8 @@ void writeMeshletVelocityVertex(uint outputIndex, uint vertexIndex,
         pos, vertexIndex, globalInstanceId, packedVertexFormat);
     const InstanceData previousInst =
         pc.previousInstanceMatrices.instances[globalInstanceId];
-    previousClipNoJitter =
-        pc.velocityFrameData.data.previousViewProjNoJitter *
-        previousInst.modelMatrix * vec4(previousPos, 1.0);
+    previousClipNoJitter = pc.velocityFrameData.data.previousViewProjNoJitter *
+                           previousInst.modelMatrix * vec4(previousPos, 1.0);
   }
 
   gl_MeshVerticesEXT[outputIndex].gl_Position =
@@ -108,8 +105,7 @@ void main() {
   const uint batchIndex = meshletPayload.batchIndex[payloadIndex];
   MeshletBatchGpuData batch = pc.meshletBatches.values[batchIndex];
   const uint meshletIndex = meshletPayload.meshletIndex[payloadIndex];
-  const uint globalInstanceId =
-      meshletPayload.globalInstanceId[payloadIndex];
+  const uint globalInstanceId = meshletPayload.globalInstanceId[payloadIndex];
   const MeshletDescriptorGpuData meshlet = batch.meshlets.values[meshletIndex];
   const uint vertexOffset = meshlet.offsetsCounts.x;
   const uint primitiveOffset = meshlet.offsetsCounts.y;

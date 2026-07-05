@@ -7,9 +7,8 @@
 namespace nuri {
 
 VisibilityPassResult::VisibilityPassResult(std::pmr::memory_resource *memory)
-    : visibleCandidateIndices(memory != nullptr ? memory
-                                                : std::pmr::get_default_resource()) {
-}
+    : visibleCandidateIndices(
+          memory != nullptr ? memory : std::pmr::get_default_resource()) {}
 
 void VisibilityPassResult::clear() {
   signature = {};
@@ -154,16 +153,14 @@ VisibilityPassGpuData makeMainViewVisibilityPassGpuData(
     out.planes[i] = request.frustum.planes[i];
   }
   out.cameraOrLightPos = camera.cameraPos;
-  out.passInfo =
-      glm::uvec4(static_cast<uint32_t>(request.kind),
-                 request.signature.cascadeIndex, request.signature.flags,
-                 candidateCount);
-  out.depthPyramidInfo = occlusionAvailable
-                             ? glm::uvec4(depthPyramidWidth,
-                                          depthPyramidHeight,
-                                          depthPyramidLevelCount,
-                                          depthPyramidSamplerId)
-                             : glm::uvec4(0u);
+  out.passInfo = glm::uvec4(static_cast<uint32_t>(request.kind),
+                            request.signature.cascadeIndex,
+                            request.signature.flags, candidateCount);
+  out.depthPyramidInfo =
+      occlusionAvailable
+          ? glm::uvec4(depthPyramidWidth, depthPyramidHeight,
+                       depthPyramidLevelCount, depthPyramidSamplerId)
+          : glm::uvec4(0u);
   const size_t copyCount =
       std::min(depthPyramidTexIds.size(), out.depthPyramidTexIds.size());
   for (size_t i = 0; i < copyCount; ++i) {
