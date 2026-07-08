@@ -146,7 +146,8 @@ isTaaResolveEvaluationDebugView(AntiAliasingDebugView view) noexcept {
 
 [[nodiscard]] inline bool staticFrameVelocitySanitizationEligible(
     const AntiAliasingFrameMetrics &metrics) noexcept {
-  return metrics.velocityPassCount > 0u &&
+  return (metrics.velocityPassCount > 0u ||
+          metrics.motionVectorDepthReprojectionGenerated) &&
          metrics.previousTransformCacheValid &&
          metrics.velocityMissingPreviousTransformCount == 0u &&
          metrics.velocityAnimatedResponsiveCount == 0u &&
@@ -339,6 +340,8 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
   switch (format) {
   case Format::R8_UNORM:
     return 1u;
+  case Format::R16_UNORM:
+    return sizeof(uint16_t);
   case Format::RG16_FLOAT:
     return sizeof(uint16_t) * 2u;
   case Format::RG32_FLOAT:

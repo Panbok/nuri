@@ -148,6 +148,8 @@ lvk::Format toLvkFormat(Format format) {
     return lvk::Format_R_UI32;
   case Format::R8_UNORM:
     return lvk::Format_R_UN8;
+  case Format::R16_UNORM:
+    return lvk::Format_R_UN16;
   case Format::R32_FLOAT:
     return lvk::Format_R_F32;
   case Format::RG32_FLOAT:
@@ -186,6 +188,8 @@ Format fromLvkFormat(lvk::Format format) {
   switch (format) {
   case lvk::Format_R_UN8:
     return Format::R8_UNORM;
+  case lvk::Format_R_UN16:
+    return Format::R16_UNORM;
   case lvk::Format_R_UI32:
     return Format::R32_UINT;
   case lvk::Format_R_F32:
@@ -2442,8 +2446,6 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
 
   lvk::TextureHandle swapchainTexture{};
   {
-    // beginFrame() and resizeSwapchain() reset currentFrameSwapchainTexture
-    // while holding contextImmediateMutex, so copy it under the same lock.
     std::lock_guard immediateLock(impl_->contextImmediateMutex);
     swapchainTexture = impl_->currentFrameSwapchainTexture;
   }
@@ -2509,6 +2511,118 @@ Result<bool, std::string> LvkGPUDevice::recordRenderPasses(
       }
       return result;
     };
+
+    const bool copyOnly =
+        pass.executionMode == RenderPassExecutionMode::CopyOnly;
+    if (copyOnly) {
+      if (pass.hasColorAttachment || nuri::isValid(pass.colorTexture) ||
+          nuri::isValid(pass.colorResolveTexture) ||
+          nuri::isValid(pass.depthTexture) ||
+          nuri::isValid(pass.depthResolveTexture) ||
+          !pass.preDispatches.empty() || !pass.draws.empty() ||
+          !pass.meshDispatches.empty()) {
+        return returnPassError(
+            "LvkGPUDevice::recordGraphicsPass: invalid copy-only pass "
+            "payload");
+      }
+      if (pass.textureCopies.empty()) {
+        return returnPassError(
+            "LvkGPUDevice::recordGraphicsPass: copy-only pass has no copies");
+      }
+
+      if (hasTimingReservation(timingReservation)) {
+        if (timingReservation.resetQueryCount > 0u) {
+          commandBuffer.cmdResetQueryPool(timingReservation.pool,
+                                          timingReservation.resetFirstQuery,
+                                          timingReservation.resetQueryCount);
+        }
+        commandBuffer.cmdWriteTimestamp(timingReservation.pool,
+                                        timingReservation.beginQuery);
+      }
+
+      for (const TextureCopyItem &copy : pass.textureCopies) {
+        if (!impl_->textures.isValid(copy.sourceTexture) ||
+            !impl_->textures.isValid(copy.destinationTexture)) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid texture copy handle");
+        }
+        if (areSameHandle(copy.sourceTexture, copy.destinationTexture)) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: texture copy source and "
+              "destination match");
+        }
+        if (impl_->textures.getFormat(copy.sourceTexture) !=
+            impl_->textures.getFormat(copy.destinationTexture)) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: texture copy format "
+              "mismatch");
+        }
+        if (copy.width == 0u || copy.height == 0u ||
+            copy.sourceMipLevel != 0u || copy.destinationMipLevel != 0u ||
+            copy.sourceLayer != 0u || copy.destinationLayer != 0u) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: unsupported texture copy "
+              "region");
+        }
+
+        const lvk::TextureHandle sourceTexture =
+            impl_->textures.getLvkHandle(copy.sourceTexture);
+        const lvk::TextureHandle destinationTexture =
+            impl_->textures.getLvkHandle(copy.destinationTexture);
+        if (!sourceTexture.valid() || !destinationTexture.valid()) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: invalid LVK texture copy "
+              "handle");
+        }
+        const lvk::Dimensions sourceDimensions =
+            impl_->context->getDimensions(sourceTexture);
+        const lvk::Dimensions destinationDimensions =
+            impl_->context->getDimensions(destinationTexture);
+        if (copy.sourceX >= sourceDimensions.width ||
+            copy.sourceY >= sourceDimensions.height ||
+            copy.width > sourceDimensions.width - copy.sourceX ||
+            copy.height > sourceDimensions.height - copy.sourceY ||
+            copy.destinationX >= destinationDimensions.width ||
+            copy.destinationY >= destinationDimensions.height ||
+            copy.width > destinationDimensions.width - copy.destinationX ||
+            copy.height > destinationDimensions.height - copy.destinationY) {
+          return returnPassError(
+              "LvkGPUDevice::recordGraphicsPass: texture copy region out of "
+              "bounds");
+        }
+
+        commandBuffer.cmdCopyImage(
+            sourceTexture, destinationTexture,
+            lvk::Dimensions{
+                .width = copy.width, .height = copy.height, .depth = 1u},
+            lvk::Offset3D{.x = static_cast<int32_t>(copy.sourceX),
+                          .y = static_cast<int32_t>(copy.sourceY),
+                          .z = 0},
+            lvk::Offset3D{.x = static_cast<int32_t>(copy.destinationX),
+                          .y = static_cast<int32_t>(copy.destinationY),
+                          .z = 0},
+            lvk::TextureLayers{.mipLevel = copy.sourceMipLevel,
+                               .layer = copy.sourceLayer,
+                               .numLayers = 1u},
+            lvk::TextureLayers{.mipLevel = copy.destinationMipLevel,
+                               .layer = copy.destinationLayer,
+                               .numLayers = 1u});
+      }
+
+      if (hasTimingReservation(timingReservation)) {
+        commandBuffer.cmdWriteTimestamp(timingReservation.pool,
+                                        timingReservation.endQuery);
+      }
+      if (passLabelPushed) {
+        commandBuffer.cmdPopDebugGroupLabel();
+      }
+      continue;
+    }
+    if (!pass.textureCopies.empty()) {
+      return returnPassError(
+          "LvkGPUDevice::recordGraphicsPass: non-copy pass contains texture "
+          "copies");
+    }
 
     lvk::RenderPass renderPass{};
     lvk::Framebuffer framebuffer{};
@@ -3675,6 +3789,9 @@ LvkGPUDevice::readTexture(TextureHandle texture,
   switch (format) {
   case Format::R8_UNORM:
     bytesPerPixel = 1u;
+    break;
+  case Format::R16_UNORM:
+    bytesPerPixel = sizeof(uint16_t);
     break;
   case Format::R32_UINT:
     bytesPerPixel = sizeof(uint32_t);

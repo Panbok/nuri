@@ -7,7 +7,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
 layout(set = 0, binding = 1) uniform sampler kSamplers[];
-layout(set = 0, binding = 2, r32f) uniform image2D kImagesR32F[];
+layout(set = 0, binding = 2, r16) uniform image2D kImagesR16[];
 
 layout(push_constant) uniform constants {
   uint currentTexId;
@@ -112,7 +112,7 @@ void main() {
   bool validHistory =
       historyValid() && uvInBounds(historyUv) && sceneDepth < 0.999999;
   if (!validHistory) {
-    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+    imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
                vec4(currentVisibility, 0.0, 0.0, 0.0));
     return;
   }
@@ -137,6 +137,6 @@ void main() {
   float visibility = clamp(currentVisibility * currentWeight +
                                historyVisibility * historyWeight,
                            1.0 - kMaxVisibilityReduction, 1.0);
-  imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+  imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
              vec4(visibility, 0.0, 0.0, 0.0));
 }

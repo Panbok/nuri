@@ -213,6 +213,7 @@ private:
     const Model::ModelMeshletGpuView *meshletView = nullptr;
     bool doubleSided = false;
     bool alphaMasked = false;
+    bool materialNormalRequired = false;
   };
 
   struct TessCandidate {
@@ -230,6 +231,7 @@ private:
     uint32_t vertexOffset = 0;
     bool doubleSided = false;
     bool alphaMasked = false;
+    bool materialNormalRequired = false;
   };
 
   struct BatchEntry {
@@ -251,6 +253,7 @@ private:
     size_t instanceCount = 0;
     size_t firstInstance = 0;
     bool alphaMasked = false;
+    bool materialNormalRequired = false;
   };
 
   struct MeshletDispatchDependencyBuffers {
@@ -302,6 +305,16 @@ private:
     AllInvalid = 2u,
   };
 
+  struct alignas(16) DepthMotionVectorPushConstants {
+    uint32_t depthTexId = 0u;
+    uint32_t pointSamplerId = 0u;
+    uint32_t currentJitterUvXBits = 0u;
+    uint32_t currentJitterUvYBits = 0u;
+    glm::mat4 previousFromCurrentJitteredClip{1.0f};
+  };
+  static_assert(sizeof(DepthMotionVectorPushConstants) <= 128u,
+                "Depth motion vector push constants exceed Vulkan minimum");
+
   struct SingleInstanceBatchEntry {
     DrawItem draw{};
     BufferHandle vertexBuffer{};
@@ -312,6 +325,7 @@ private:
     uint32_t materialIndex = kInvalidMaterialIndex;
     size_t instanceCount = 0;
     bool alphaMasked = false;
+    bool materialNormalRequired = false;
   };
 
   struct SingleInstanceBatchCache {
@@ -516,7 +530,8 @@ private:
   Result<bool, std::string>
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
-  Result<bool, std::string> ensureDepthPyramidTextures();
+  Result<bool, std::string>
+  ensureDepthPyramidTextures(const RenderSettings &settings);
   [[nodiscard]] bool requiresDepthPyramid(const RenderSettings &settings) const;
   [[nodiscard]] bool
   shouldBuildTransmissionVisibilityDepth(const RenderFrameContext &frame,
@@ -598,6 +613,7 @@ private:
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> depthPyramidShader_;
+  std::unique_ptr<Shader> depthMotionVectorShader_;
   std::unique_ptr<Shader> computeShader_;
   std::unique_ptr<Shader> visibilityShader_;
   std::unique_ptr<Shader> visibilityIndirectDrawShader_;
@@ -625,6 +641,10 @@ private:
   std::pmr::vector<DynamicBufferSlot> visibilityCounterRing_;
   std::pmr::vector<DynamicBufferSlot> visibilityMeshletDispatchRing_;
   std::pmr::vector<DynamicBufferSlot> visibilityMeshletIndirectCommandRing_;
+  bool cachedMeshletCounterValid_ = false;
+  uint32_t cachedMeshletCounterSourceFrame_ = 0u;
+  uint32_t cachedMeshletEmitted_ = 0u;
+  uint32_t cachedMeshletTaskGroupsExecuted_ = 0u;
   TextureHandle pickIdTexture_{};
   TextureHandle shadowInspectTexture_{};
   TextureHandle transmissionVisibilityDepthTexture_{};
@@ -670,6 +690,8 @@ private:
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle depthPyramidVertexShader_{};
   ShaderHandle depthPyramidFragmentShader_{};
+  ShaderHandle depthMotionVectorVertexShader_{};
+  ShaderHandle depthMotionVectorFragmentShader_{};
   ShaderHandle computeShaderHandle_{};
   ShaderHandle visibilityComputeShader_{};
   ShaderHandle visibilityIndirectDrawComputeShader_{};
@@ -679,6 +701,8 @@ private:
   ShaderHandle meshletFragmentShader_{};
   ShaderHandle meshletDepthFragmentShader_{};
   ShaderHandle meshletDepthAlphaFragmentShader_{};
+  ShaderHandle meshletSimpleNormalMeshShader_{};
+  ShaderHandle meshletSimpleNormalFragmentShader_{};
   ShaderHandle meshletNormalFragmentShader_{};
   ShaderHandle meshletVelocityMeshShader_{};
   ShaderHandle meshletVelocityFragmentShader_{};
@@ -739,6 +763,7 @@ private:
   RenderPipelineHandle meshMsaaDepthAlphaTessPipelineHandle_{};
   RenderPipelineHandle meshMsaaDepthAlphaDoubleSidedTessPipelineHandle_{};
   RenderPipelineHandle depthPyramidPipelineHandle_{};
+  RenderPipelineHandle depthMotionVectorPipelineHandle_{};
   ComputePipelineHandle computePipelineHandle_{};
   ComputePipelineHandle visibilityPipelineHandle_{};
   ComputePipelineHandle visibilityIndirectDrawPipelineHandle_{};
@@ -749,6 +774,8 @@ private:
   MeshletPipelineHandle meshletDepthDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletDepthAlphaPipelineHandle_{};
   MeshletPipelineHandle meshletDepthAlphaDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletSimpleNormalPipelineHandle_{};
+  MeshletPipelineHandle meshletSimpleNormalDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletNormalPipelineHandle_{};
   MeshletPipelineHandle meshletNormalDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletVelocityPipelineHandle_{};
@@ -893,6 +920,9 @@ private:
   std::pmr::vector<DrawItem> normalPrepassDrawItems_;
   std::pmr::vector<glm::uvec4> depthPyramidPushConstants_;
   std::pmr::vector<DrawItem> depthPyramidDrawItems_;
+  DepthMotionVectorPushConstants depthMotionVectorPushConstants_{};
+  DrawItem depthMotionVectorDrawItem_{};
+  std::array<TextureHandle, 1> depthMotionVectorDependencyTextures_{};
   std::pmr::vector<MeshDispatchItem> meshletDepthPrepassDispatchItems_;
   std::pmr::vector<MeshletPushConstants> meshletDepthPrepassPushConstants_;
   std::pmr::vector<MeshletDispatchDependencyBuffers>

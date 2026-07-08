@@ -404,6 +404,18 @@ private:
     uint32_t dynamicDrawCount = 0u;
   };
 
+  struct StaticOnlyScrollCopyPass {
+    bool active = false;
+    TextureCopyItem copy{};
+    std::array<RectU32, 2u> dirtyRects{};
+    uint32_t dirtyRectCount = 0u;
+  };
+
+  struct ShadowMeshDispatchDependencyBuffers {
+    std::array<BufferHandle, 6> buffers{};
+    uint32_t count = 0u;
+  };
+
   struct CascadeStabilizationHistory {
     bool valid = false;
     LightId lightId = kInvalidLightId;
@@ -485,7 +497,8 @@ private:
   Result<bool, std::string>
   ensureRingCapacity(std::pmr::vector<DynamicBufferSlot> &ring,
                      size_t requiredBytes, std::string_view debugName,
-                     std::span<uint64_t> uploadVersions);
+                     std::span<uint64_t> uploadVersions,
+                     Storage storage = Storage::Device);
   Result<bool, std::string> rebuildSceneCache(const RenderScene &scene,
                                               const ResourceManager &resources,
                                               uint32_t materialCount);
@@ -522,6 +535,7 @@ private:
   std::unique_ptr<Shader> shadowOpaqueShader_;
   std::unique_ptr<Shader> shadowMeshletShader_;
   std::unique_ptr<Shader> depthShader_;
+  std::unique_ptr<Shader> depthClearShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> sdsmReduceShader_;
   std::unique_ptr<Shader> sdsmHistogramReduceShader_;
@@ -567,11 +581,13 @@ private:
       cascadePushConstants_{};
   std::array<std::pmr::vector<DrawItem>, kMaxShadowCascades>
       cascadeDrawItems_{};
+  std::array<std::array<std::pmr::vector<DrawItem>, 2u>, kMaxShadowCascades>
+      staticOnlyScrollDirtyDrawItems_{};
   std::array<std::pmr::vector<MeshletPushConstants>, kMaxShadowCascades>
       cascadeMeshletPushConstants_{};
   std::array<std::pmr::vector<MeshDispatchItem>, kMaxShadowCascades>
       cascadeMeshDispatchItems_{};
-  std::array<std::pmr::vector<std::pmr::vector<BufferHandle>>,
+  std::array<std::pmr::vector<ShadowMeshDispatchDependencyBuffers>,
              kMaxShadowCascades>
       cascadeMeshDispatchDependencyBuffers_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDrawCounts_{};
@@ -585,6 +601,8 @@ private:
   std::array<StaticOnlyCascadeReuseState, kMaxShadowCascades>
       reusableStaticOnlyCascadeStates_{};
   std::array<bool, kMaxShadowCascades> reuseStaticOnlyCascadePass_{};
+  std::array<StaticOnlyScrollCopyPass, kMaxShadowCascades>
+      staticOnlyScrollCopyPasses_{};
   std::array<bool, kMaxShadowCascades> reusableStaticOnlyCascadeValid_{};
   std::pmr::vector<BufferDependency> passBufferDependencies_;
   std::pmr::vector<BufferHandle> passDependencyBuffers_;
@@ -602,9 +620,10 @@ private:
   ShaderHandle shadowVertexShader_{};
   ShaderHandle shadowOpaqueVertexShader_{};
   ShaderHandle shadowMeshletTaskShader_{};
+  ShaderHandle shadowMeshletDepthMeshShader_{};
   ShaderHandle shadowMeshletMeshShader_{};
-  ShaderHandle shadowMeshletDepthFragmentShader_{};
   ShaderHandle shadowMeshletDepthAlphaFragmentShader_{};
+  ShaderHandle shadowDepthClearVertexShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle sdsmReduceComputeShader_{};
@@ -615,6 +634,7 @@ private:
   RenderPipelineHandle shadowDoubleSidedPipelineHandle_{};
   RenderPipelineHandle shadowAlphaPipelineHandle_{};
   RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
+  RenderPipelineHandle shadowDepthClearPipelineHandle_{};
   Format shadowDepthPipelineFormat_ = Format::Count;
   MeshletPipelineHandle shadowMeshletPipelineHandle_{};
   MeshletPipelineHandle shadowMeshletDoubleSidedPipelineHandle_{};
@@ -625,6 +645,7 @@ private:
   ComputePipelineHandle sdsmHistogramReducePipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};
   std::array<TextureHandle, kMaxShadowCascades> shadowDepthTextures_{};
+  std::array<TextureHandle, kMaxShadowCascades> shadowDepthAlternateTextures_{};
   TextureHandle shadowDebugPreviewTexture_{};
   SamplerHandle rawDepthSampler_{};
   SamplerHandle compareDepthSampler_{};

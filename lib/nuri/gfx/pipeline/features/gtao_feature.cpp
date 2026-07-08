@@ -105,6 +105,8 @@ std::span<const std::byte> copyPushConstants(std::array<std::byte, Size> &dst,
   switch (format) {
   case Format::R8_UNORM:
     return 1u;
+  case Format::R16_UNORM:
+    return 2u;
   case Format::R32_FLOAT:
   case Format::R32_UINT:
   case Format::RG16_FLOAT:
@@ -439,7 +441,7 @@ GTAOPass::recreateScratchTextures(uint32_t width, uint32_t height,
     }
 
     auto edgeResult = gpu_.createTexture(
-        makeStorageSampledTextureDesc(Format::R32_FLOAT, width, height),
+        makeStorageSampledTextureDesc(Format::R8_UNORM, width, height),
         "gtao_edges_" + std::to_string(slot));
     if (edgeResult.hasError()) {
       destroyScratchTextures();
@@ -611,7 +613,7 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
                                levelDimension(height, level));
   }
   metrics.depthPrefilterTextureBytes = depthBytes;
-  metrics.edgeTextureBytes = textureBytes(Format::R32_FLOAT, width, height);
+  metrics.edgeTextureBytes = textureBytes(Format::R8_UNORM, width, height);
   metrics.scratchTextureBytes =
       textureBytes(kFrameCompositionAmbientOcclusionFormat, width, height) * 2u;
   metrics.textureCount += kViewDepthMipCount + 3u;

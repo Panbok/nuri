@@ -28,6 +28,13 @@ constexpr std::string_view kShadowPassDependencyTextureLabel =
     "ShadowDepthPass.dependency_texture";
 constexpr std::string_view kShadowPassDrawBufferLabel =
     "ShadowDepthPass.draw_buffer";
+constexpr std::string_view kShadowScrollCopyPassLabel = "ShadowDepthScrollCopy";
+constexpr std::string_view kShadowScrollDirtyPassLabel =
+    "ShadowDepthScrollDirtyPass";
+constexpr std::string_view kShadowScrollDirtyClearLabel =
+    "ShadowDepthScrollDirtyClear";
+constexpr bool kEnableStaticOnlyScrollCopy = false;
+constexpr uint32_t kShadowMeshletTaskCandidatesPerGroup = 32u;
 constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr uint32_t kShadowPreviewFlagInvert = 1u << 0u;
@@ -38,21 +45,22 @@ constexpr uint32_t kStaticCasterLightGridResolution = 64u;
 constexpr uint32_t kStaticCasterLightGridDepthResolution = 16u;
 constexpr uint32_t kStaticCasterLightGridMaxCellsPerCaster = 128u;
 constexpr size_t kStaticCasterLightGridSortedCandidateLimit = 1024u;
-constexpr uint32_t kStaticBatchOverlapEmitMinInstances = 4u;
-constexpr float kStaticOnlyGuardBandShadowMapFraction = 1.0f / 32.0f;
-constexpr float kStaticOnlyGuardBandMaxTexels = 512.0f;
+constexpr uint32_t kStaticBatchOverlapEmitMaxInstances = 0u;
+constexpr float kStaticOnlyGuardBandShadowMapFraction = 1.0f / 8.0f;
+constexpr float kStaticOnlyGuardBandMaxTexels = 1536.0f;
 constexpr float kStaticOnlyGuardBandMinTexels = 8.0f;
-constexpr float kStaticOnlyDepthGuardBandShadowMapFraction = 1.0f / 64.0f;
-constexpr float kStaticOnlyDepthGuardBandMaxTexels = 256.0f;
+constexpr float kStaticOnlyDepthGuardBandShadowMapFraction = 1.0f / 16.0f;
+constexpr float kStaticOnlyDepthGuardBandMaxTexels = 768.0f;
 constexpr float kStaticOnlyDepthGuardBandMinTexels = 4.0f;
-constexpr float kStaticOnlyAdaptiveGuardBandMotionMultiplier = 2.25f;
-constexpr float kStaticOnlyAdaptiveGuardBandMaxShadowMapFraction = 1.0f / 8.0f;
+constexpr float kStaticOnlyAdaptiveGuardBandMotionMultiplier = 3.0f;
+constexpr float kStaticOnlyAdaptiveGuardBandMaxShadowMapFraction = 1.0f / 4.0f;
 constexpr float kStaticOnlyAdaptiveDepthGuardBandMaxShadowMapFraction =
-    1.0f / 16.0f;
+    1.0f / 8.0f;
 constexpr float kStaticOnlyPredictiveCenterMotionMultiplier = 1.0f;
-constexpr float kStaticOnlyPredictiveExtentGrowthFraction = 1.0f / 3.0f;
-constexpr float kStaticOnlyPredictiveTrailingGuardFraction = 3.0f / 8.0f;
+constexpr float kStaticOnlyPredictiveExtentGrowthFraction = 0.5f;
+constexpr float kStaticOnlyPredictiveTrailingGuardFraction = 0.5f;
 constexpr float kStaticOnlyPredictiveMotionEpsilonTexels = 0.5f;
+constexpr uint32_t kStaticOnlyAdaptiveRefreshBudgetPerFrame = 1u;
 constexpr uint32_t kSdsmHistogramSourceMaxTexelCount = 4096u;
 constexpr uint64_t kSdsmDiagnosticRefreshFrames = 120u;
 constexpr float kSdsmHistogramClearDepthEpsilon = 1.0e-4f;
@@ -661,6 +669,7 @@ hashShadowSettings(uint64_t hash,
   hash = hashCombineValue(hash, settings.sdsmHistogramBucketCount);
   hash = hashCombineValue(hash, settings.sdsmHistogramTrimLowPercent);
   hash = hashCombineValue(hash, settings.sdsmHistogramTrimHighPercent);
+  hash = hashCombineValue(hash, settings.enableMeshletDepth);
   hash = hashCombineValue(hash, settings.enableMeshletCascadeCulling);
   hash = hashCombineValue(hash, settings.debug.freezeCascades);
   hash = hashCombineValue(hash, settings.debug.freezeLightView);
@@ -831,6 +840,15 @@ hashCascadeState(uint64_t hash, const ShadowCascadeDebugFrameData &cascade,
                           metrics.staticOnlyReuseMissRasterStateChangedCount);
   hash =
       hashCombineValue(hash, metrics.staticOnlyReuseMissAdaptiveRefreshCount);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollCandidateCount);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollCompatibleCount);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollDirtyAreaBasisPoints);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollDirtyCasterEstimate);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollDirtyIndexEstimate);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollRejectAnchorCount);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollRejectDepthCount);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollRejectExtentCount);
+  hash = hashCombineValue(hash, metrics.staticOnlyScrollRejectShiftCount);
   hash = hashCombineValue(hash, metrics.cascadeTextureBytes);
   hash = hashCombineValue(hash, metrics.minCascadeTexelWorldSize);
   hash = hashCombineValue(hash, metrics.averageCascadeTexelWorldSize);
@@ -1599,6 +1617,130 @@ void applyStaticOnlyGuardBand(
   return shadow_detail::directionalShadowFitContains(renderedFit, currentFit);
 }
 
+struct StaticOnlyScrollCopyEstimate {
+  enum class RejectReason : uint8_t {
+    None = 0,
+    Anchor = 1,
+    Depth = 2,
+    Extent = 3,
+    Shift = 4,
+  };
+
+  bool compatible = false;
+  RejectReason rejectReason = RejectReason::None;
+  int32_t shiftX = 0;
+  int32_t shiftY = 0;
+  uint64_t dirtyTexelCount = 0u;
+  uint32_t dirtyAreaBasisPoints = 0u;
+  glm::vec3 currentMin{0.0f};
+  glm::vec3 currentMax{0.0f};
+  glm::vec2 overlapMin{0.0f};
+  glm::vec2 overlapMax{0.0f};
+};
+
+[[nodiscard]] StaticOnlyScrollCopyEstimate estimateStaticOnlyScrollCopy(
+    const shadow_detail::DirectionalShadowFit &previousFit,
+    const shadow_detail::DirectionalShadowFit &currentRawFit,
+    uint32_t shadowMapSize) {
+  StaticOnlyScrollCopyEstimate estimate{};
+  if (shadowMapSize == 0u) {
+    estimate.rejectReason = StaticOnlyScrollCopyEstimate::RejectReason::Extent;
+    return estimate;
+  }
+  if (!shadow_detail::canReuseDirectionalShadowFitAnchor(previousFit,
+                                                         currentRawFit)) {
+    estimate.rejectReason = StaticOnlyScrollCopyEstimate::RejectReason::Anchor;
+    return estimate;
+  }
+
+  const glm::vec3 previousMin = glm::min(previousFit.lightSpaceBoundsMin,
+                                         previousFit.lightSpaceBoundsMax);
+  const glm::vec3 previousMax = glm::max(previousFit.lightSpaceBoundsMin,
+                                         previousFit.lightSpaceBoundsMax);
+  const glm::vec3 rawMin = glm::min(currentRawFit.lightSpaceBoundsMin,
+                                    currentRawFit.lightSpaceBoundsMax);
+  const glm::vec3 rawMax = glm::max(currentRawFit.lightSpaceBoundsMin,
+                                    currentRawFit.lightSpaceBoundsMax);
+  const glm::vec3 previousExtent = previousMax - previousMin;
+  if (rawMax.x - rawMin.x > previousExtent.x ||
+      rawMax.y - rawMin.y > previousExtent.y) {
+    estimate.rejectReason = StaticOnlyScrollCopyEstimate::RejectReason::Extent;
+    return estimate;
+  }
+  if (rawMin.z < previousMin.z || rawMax.z > previousMax.z) {
+    estimate.rejectReason = StaticOnlyScrollCopyEstimate::RejectReason::Depth;
+    return estimate;
+  }
+
+  const float texelWorldSize = std::max(previousFit.texelWorldSize, 1.0e-6f);
+  const auto chooseIntegerShift =
+      [texelWorldSize](float rawMinAxis, float rawMaxAxis,
+                       float previousMinAxis, float previousMaxAxis,
+                       int32_t &outShiftTexels) {
+        const float minShiftWorld = rawMaxAxis - previousMaxAxis;
+        const float maxShiftWorld = rawMinAxis - previousMinAxis;
+        const int32_t minShiftTexels = static_cast<int32_t>(
+            std::ceil(minShiftWorld / texelWorldSize -
+                      kStaticOnlyPredictiveMotionEpsilonTexels));
+        const int32_t maxShiftTexels = static_cast<int32_t>(
+            std::floor(maxShiftWorld / texelWorldSize +
+                       kStaticOnlyPredictiveMotionEpsilonTexels));
+        if (minShiftTexels > maxShiftTexels) {
+          return false;
+        }
+        if (minShiftTexels <= 0 && maxShiftTexels >= 0) {
+          outShiftTexels = 0;
+        } else {
+          outShiftTexels = minShiftTexels > 0 ? minShiftTexels : maxShiftTexels;
+        }
+        return true;
+      };
+
+  int32_t roundedShiftX = 0;
+  int32_t roundedShiftY = 0;
+  if (!chooseIntegerShift(rawMin.x, rawMax.x, previousMin.x, previousMax.x,
+                          roundedShiftX) ||
+      !chooseIntegerShift(rawMin.y, rawMax.y, previousMin.y, previousMax.y,
+                          roundedShiftY)) {
+    estimate.rejectReason = StaticOnlyScrollCopyEstimate::RejectReason::Shift;
+    return estimate;
+  }
+
+  const uint32_t absShiftX = static_cast<uint32_t>(std::abs(roundedShiftX));
+  const uint32_t absShiftY = static_cast<uint32_t>(std::abs(roundedShiftY));
+  if (absShiftX >= shadowMapSize || absShiftY >= shadowMapSize) {
+    estimate.rejectReason = StaticOnlyScrollCopyEstimate::RejectReason::Shift;
+    return estimate;
+  }
+
+  const uint64_t mapTexels = static_cast<uint64_t>(shadowMapSize) *
+                             static_cast<uint64_t>(shadowMapSize);
+  const uint64_t overlapTexels =
+      static_cast<uint64_t>(shadowMapSize - absShiftX) *
+      static_cast<uint64_t>(shadowMapSize - absShiftY);
+  estimate.compatible = true;
+  estimate.shiftX = roundedShiftX;
+  estimate.shiftY = roundedShiftY;
+  estimate.dirtyTexelCount = mapTexels - overlapTexels;
+  estimate.dirtyAreaBasisPoints = static_cast<uint32_t>(std::min<uint64_t>(
+      (estimate.dirtyTexelCount * 10000u) / std::max<uint64_t>(mapTexels, 1u),
+      10000u));
+  estimate.currentMin = glm::vec3(
+      previousMin.x + static_cast<float>(roundedShiftX) * texelWorldSize,
+      previousMin.y + static_cast<float>(roundedShiftY) * texelWorldSize,
+      previousMin.z);
+  estimate.currentMax =
+      glm::vec3(estimate.currentMin.x + previousExtent.x,
+                estimate.currentMin.y + previousExtent.y, previousMax.z);
+  estimate.overlapMin =
+      glm::vec2(std::max(previousMin.x, estimate.currentMin.x),
+                std::max(previousMin.y, estimate.currentMin.y));
+  estimate.overlapMax =
+      glm::vec2(std::min(previousMax.x, estimate.currentMax.x),
+                std::min(previousMax.y, estimate.currentMax.y));
+  return estimate;
+}
+
 [[nodiscard]] shadow_detail::DirectionalShadowFit
 makeStaticOnlyReuseFitForCurrentFrame(
     const shadow_detail::DirectionalShadowFit &cachedRenderedFit,
@@ -1608,6 +1750,38 @@ makeStaticOnlyReuseFitForCurrentFrame(
   fit.splitFar = currentRawFit.splitFar;
   fit.frustumCenter = currentRawFit.frustumCenter;
   fit.frustumCorners = currentRawFit.frustumCorners;
+  return fit;
+}
+
+[[nodiscard]] shadow_detail::DirectionalShadowFit
+makeStaticOnlyScrollFitForCurrentFrame(
+    const shadow_detail::DirectionalShadowFit &cachedRenderedFit,
+    const shadow_detail::DirectionalShadowFit &currentRawFit,
+    const StaticOnlyScrollCopyEstimate &scrollEstimate,
+    uint32_t shadowMapSize) {
+  shadow_detail::DirectionalShadowFit fit = cachedRenderedFit;
+  fit.splitNear = currentRawFit.splitNear;
+  fit.splitFar = currentRawFit.splitFar;
+  fit.frustumCenter = currentRawFit.frustumCenter;
+  fit.frustumCorners = currentRawFit.frustumCorners;
+
+  glm::vec3 lightMin = scrollEstimate.currentMin;
+  glm::vec3 lightMax = scrollEstimate.currentMax;
+  shadow_detail::stabilizeOrthoBounds(lightMin, lightMax, shadowMapSize, true,
+                                      fit, glm::inverse(fit.lightView));
+  shadow_detail::quantizeShadowZBounds(lightMin, lightMax, fit.texelWorldSize,
+                                       true);
+
+  const float nearPlane = -lightMax.z;
+  float farPlane = -lightMin.z;
+  if (farPlane <= nearPlane + 0.01f) {
+    farPlane = nearPlane + 0.01f;
+  }
+  fit.lightProj = glm::orthoRH_ZO(lightMin.x, lightMax.x, lightMin.y,
+                                  lightMax.y, nearPlane, farPlane);
+  fit.lightViewProj = fit.lightProj * fit.lightView;
+  fit.lightSpaceBoundsMin = glm::vec3(lightMin.x, lightMin.y, -farPlane);
+  fit.lightSpaceBoundsMax = glm::vec3(lightMax.x, lightMax.y, -nearPlane);
   return fit;
 }
 
@@ -2018,12 +2192,16 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
     cascadePushConstants_[cascadeIndex] =
         std::pmr::vector<PushConstants>(memory_);
     cascadeDrawItems_[cascadeIndex] = std::pmr::vector<DrawItem>(memory_);
+    for (std::pmr::vector<DrawItem> &draws :
+         staticOnlyScrollDirtyDrawItems_[cascadeIndex]) {
+      draws = std::pmr::vector<DrawItem>(memory_);
+    }
     cascadeMeshletPushConstants_[cascadeIndex] =
         std::pmr::vector<MeshletPushConstants>(memory_);
     cascadeMeshDispatchItems_[cascadeIndex] =
         std::pmr::vector<MeshDispatchItem>(memory_);
     cascadeMeshDispatchDependencyBuffers_[cascadeIndex] =
-        std::pmr::vector<std::pmr::vector<BufferHandle>>(memory_);
+        std::pmr::vector<ShadowMeshDispatchDependencyBuffers>(memory_);
   }
 }
 
@@ -2044,8 +2222,12 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
   shadowShader_ = Shader::create("shadow_depth", gpu_);
   shadowOpaqueShader_ = Shader::create("shadow_depth_opaque", gpu_);
   depthShader_ = Shader::create("shadow_depth_only", gpu_);
+  if constexpr (kEnableStaticOnlyScrollCopy) {
+    depthClearShader_ = Shader::create("shadow_depth_clear", gpu_);
+  }
   depthAlphaShader_ = Shader::create("shadow_depth_alpha", gpu_);
   if (!shadowShader_ || !shadowOpaqueShader_ || !depthShader_ ||
+      (kEnableStaticOnlyScrollCopy && !depthClearShader_) ||
       !depthAlphaShader_) {
     return Result<bool, std::string>::makeError(
         "ShadowRenderer::createShaders: failed to create shader wrappers");
@@ -2070,6 +2252,18 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
   if (vertexResult.hasError()) {
     return Result<bool, std::string>::makeError(vertexResult.error());
   }
+  ShaderHandle depthClearVertexShader{};
+  if constexpr (kEnableStaticOnlyScrollCopy) {
+    const std::filesystem::path depthClearVertexPath =
+        config_.shaderBasePath / "shadow_depth_clear.vert";
+    auto depthClearVertexResult = depthClearShader_->compileFromFile(
+        depthClearVertexPath.string(), ShaderStage::Vertex);
+    if (depthClearVertexResult.hasError()) {
+      return Result<bool, std::string>::makeError(
+          depthClearVertexResult.error());
+    }
+    depthClearVertexShader = depthClearVertexResult.value();
+  }
   auto fragmentResult = depthShader_->compileFromFile(
       depthFragmentPath.string(), ShaderStage::Fragment);
   if (fragmentResult.hasError()) {
@@ -2083,6 +2277,7 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
 
   shadowOpaqueVertexShader_ = opaqueVertexResult.value();
   shadowVertexShader_ = vertexResult.value();
+  shadowDepthClearVertexShader_ = depthClearVertexShader;
   depthFragmentShader_ = fragmentResult.value();
   depthAlphaFragmentShader_ = alphaFragmentResult.value();
   return Result<bool, std::string>::makeResult(true);
@@ -2090,8 +2285,8 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
 
 Result<bool, std::string> ShadowRenderer::createShadowMeshletShaders() {
   if (nuri::isValid(shadowMeshletTaskShader_) &&
+      nuri::isValid(shadowMeshletDepthMeshShader_) &&
       nuri::isValid(shadowMeshletMeshShader_) &&
-      nuri::isValid(shadowMeshletDepthFragmentShader_) &&
       nuri::isValid(shadowMeshletDepthAlphaFragmentShader_)) {
     return Result<bool, std::string>::makeResult(true);
   }
@@ -2115,10 +2310,10 @@ Result<bool, std::string> ShadowRenderer::createShadowMeshletShaders() {
 
   const std::filesystem::path taskPath =
       config_.shaderBasePath / "shadow_meshlet.task.glsl";
+  const std::filesystem::path depthMeshPath =
+      config_.shaderBasePath / "shadow_meshlet_depth.mesh.glsl";
   const std::filesystem::path meshPath =
       config_.shaderBasePath / "shadow_meshlet.mesh.glsl";
-  const std::filesystem::path depthFragmentPath =
-      config_.shaderBasePath / "shadow_meshlet_depth.frag";
   const std::filesystem::path depthAlphaFragmentPath =
       config_.shaderBasePath / "shadow_meshlet_depth_alpha.frag";
 
@@ -2128,34 +2323,34 @@ Result<bool, std::string> ShadowRenderer::createShadowMeshletShaders() {
     shadowMeshletShader_.reset();
     return Result<bool, std::string>::makeError(taskResult.error());
   }
+  auto depthMeshResult = shadowMeshletShader_->compileFromFile(
+      depthMeshPath.string(), ShaderStage::Mesh);
+  if (depthMeshResult.hasError()) {
+    gpu_.destroyShaderModule(taskResult.value());
+    shadowMeshletShader_.reset();
+    return Result<bool, std::string>::makeError(depthMeshResult.error());
+  }
   auto meshResult = shadowMeshletShader_->compileFromFile(meshPath.string(),
                                                           ShaderStage::Mesh);
   if (meshResult.hasError()) {
+    gpu_.destroyShaderModule(depthMeshResult.value());
     gpu_.destroyShaderModule(taskResult.value());
     shadowMeshletShader_.reset();
     return Result<bool, std::string>::makeError(meshResult.error());
   }
-  auto fragmentResult = shadowMeshletShader_->compileFromFile(
-      depthFragmentPath.string(), ShaderStage::Fragment);
-  if (fragmentResult.hasError()) {
-    gpu_.destroyShaderModule(meshResult.value());
-    gpu_.destroyShaderModule(taskResult.value());
-    shadowMeshletShader_.reset();
-    return Result<bool, std::string>::makeError(fragmentResult.error());
-  }
   auto alphaFragmentResult = shadowMeshletShader_->compileFromFile(
       depthAlphaFragmentPath.string(), ShaderStage::Fragment);
   if (alphaFragmentResult.hasError()) {
-    gpu_.destroyShaderModule(fragmentResult.value());
     gpu_.destroyShaderModule(meshResult.value());
+    gpu_.destroyShaderModule(depthMeshResult.value());
     gpu_.destroyShaderModule(taskResult.value());
     shadowMeshletShader_.reset();
     return Result<bool, std::string>::makeError(alphaFragmentResult.error());
   }
 
   shadowMeshletTaskShader_ = taskResult.value();
+  shadowMeshletDepthMeshShader_ = depthMeshResult.value();
   shadowMeshletMeshShader_ = meshResult.value();
-  shadowMeshletDepthFragmentShader_ = fragmentResult.value();
   shadowMeshletDepthAlphaFragmentShader_ = alphaFragmentResult.value();
   return Result<bool, std::string>::makeResult(true);
 }
@@ -2303,6 +2498,23 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
   RenderPipelineHandle newShadowAlphaDoubleSidedPipeline =
       alphaDoubleSidedResult.value();
 
+  RenderPipelineHandle newShadowDepthClearPipeline{};
+  if constexpr (kEnableStaticOnlyScrollCopy) {
+    auto clearResult = gpu_.createRenderPipeline(
+        shadowDepthPipelineDesc(shadowDepthClearVertexShader_,
+                                depthFragmentShader_, CullMode::None,
+                                targetDepthFormat),
+        "shadow_depth_scissor_clear");
+    if (clearResult.hasError()) {
+      destroyPipelineIfValid(newShadowAlphaDoubleSidedPipeline);
+      destroyPipelineIfValid(newShadowAlphaPipeline);
+      destroyPipelineIfValid(newShadowDoubleSidedPipeline);
+      destroyPipelineIfValid(newShadowPipeline);
+      return Result<bool, std::string>::makeError(clearResult.error());
+    }
+    newShadowDepthClearPipeline = clearResult.value();
+  }
+
   const RenderPipelineHandle oldShadowPipeline = shadowPipelineHandle_;
   const RenderPipelineHandle oldShadowDoubleSidedPipeline =
       shadowDoubleSidedPipelineHandle_;
@@ -2310,12 +2522,16 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
       shadowAlphaPipelineHandle_;
   const RenderPipelineHandle oldShadowAlphaDoubleSidedPipeline =
       shadowAlphaDoubleSidedPipelineHandle_;
+  const RenderPipelineHandle oldShadowDepthClearPipeline =
+      shadowDepthClearPipelineHandle_;
   shadowPipelineHandle_ = newShadowPipeline;
   shadowDoubleSidedPipelineHandle_ = newShadowDoubleSidedPipeline;
   shadowAlphaPipelineHandle_ = newShadowAlphaPipeline;
   shadowAlphaDoubleSidedPipelineHandle_ = newShadowAlphaDoubleSidedPipeline;
+  shadowDepthClearPipelineHandle_ = newShadowDepthClearPipeline;
   shadowDepthPipelineFormat_ = targetDepthFormat;
 
+  destroyPipelineIfValid(oldShadowDepthClearPipeline);
   destroyPipelineIfValid(oldShadowDoubleSidedPipeline);
   destroyPipelineIfValid(oldShadowAlphaDoubleSidedPipeline);
   destroyPipelineIfValid(oldShadowAlphaPipeline);
@@ -2350,11 +2566,13 @@ ShadowRenderer::ensureShadowMeshletPipelineState(Format depthFormat) {
     shadowMeshletPipelineUnsupported_ = true;
     return shaderResult;
   }
-  if (!nuri::isValid(shadowMeshletDepthFragmentShader_) ||
+  if (!nuri::isValid(shadowMeshletTaskShader_) ||
+      !nuri::isValid(shadowMeshletDepthMeshShader_) ||
+      !nuri::isValid(shadowMeshletMeshShader_) ||
       !nuri::isValid(shadowMeshletDepthAlphaFragmentShader_)) {
     return Result<bool, std::string>::makeError(
-        "ShadowRenderer::ensureShadowMeshletPipelineState: invalid depth "
-        "fragment shaders");
+        "ShadowRenderer::ensureShadowMeshletPipelineState: invalid shadow "
+        "meshlet shaders");
   }
 
   destroyShadowMeshletPipelineState();
@@ -2365,9 +2583,9 @@ ShadowRenderer::ensureShadowMeshletPipelineState(Format depthFormat) {
   };
 
   auto shadowResult = gpu_.createMeshletPipeline(
-      shadowMeshletPipelineDesc(
-          shadowMeshletTaskShader_, shadowMeshletMeshShader_,
-          shadowMeshletDepthFragmentShader_, CullMode::Back, targetDepthFormat),
+      shadowMeshletPipelineDesc(shadowMeshletTaskShader_,
+                                shadowMeshletDepthMeshShader_, ShaderHandle{},
+                                CullMode::Back, targetDepthFormat),
       "shadow_meshlet_depth");
   if (shadowResult.hasError()) {
     shadowMeshletPipelineUnsupported_ = true;
@@ -2376,9 +2594,9 @@ ShadowRenderer::ensureShadowMeshletPipelineState(Format depthFormat) {
   MeshletPipelineHandle newShadowPipeline = shadowResult.value();
 
   auto doubleSidedResult = gpu_.createMeshletPipeline(
-      shadowMeshletPipelineDesc(
-          shadowMeshletTaskShader_, shadowMeshletMeshShader_,
-          shadowMeshletDepthFragmentShader_, CullMode::None, targetDepthFormat),
+      shadowMeshletPipelineDesc(shadowMeshletTaskShader_,
+                                shadowMeshletDepthMeshShader_, ShaderHandle{},
+                                CullMode::None, targetDepthFormat),
       "shadow_meshlet_depth_double_sided");
   if (doubleSidedResult.hasError()) {
     destroyPipelineIfValid(newShadowPipeline);
@@ -2546,10 +2764,20 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
     depthValid =
         isValidShadowDepthTexture(gpu_, shadowDepthTextures_[cascadeIndex],
                                   settings.shadowMapSize, targetDepthFormat);
+    if constexpr (kEnableStaticOnlyScrollCopy) {
+      depthValid =
+          depthValid && isValidShadowDepthTexture(
+                            gpu_, shadowDepthAlternateTextures_[cascadeIndex],
+                            settings.shadowMapSize, targetDepthFormat);
+    } else {
+      depthValid = depthValid &&
+                   !nuri::isValid(shadowDepthAlternateTextures_[cascadeIndex]);
+    }
   }
   for (uint32_t cascadeIndex = requestedCascadeCount;
        depthValid && cascadeIndex < kMaxShadowCascades; ++cascadeIndex) {
-    depthValid = !nuri::isValid(shadowDepthTextures_[cascadeIndex]);
+    depthValid = !nuri::isValid(shadowDepthTextures_[cascadeIndex]) &&
+                 !nuri::isValid(shadowDepthAlternateTextures_[cascadeIndex]);
   }
   const bool previewTextureValid = isValidShadowPreviewTexture(
       gpu_, shadowDebugPreviewTexture_, settings.shadowMapSize, previewMode);
@@ -2602,6 +2830,9 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
   for (const TextureHandle texture : shadowDepthTextures_) {
     hasLiveDepthTextures = hasLiveDepthTextures || nuri::isValid(texture);
   }
+  for (const TextureHandle texture : shadowDepthAlternateTextures_) {
+    hasLiveDepthTextures = hasLiveDepthTextures || nuri::isValid(texture);
+  }
   const bool hasLiveResources =
       hasLiveDepthTextures || nuri::isValid(shadowDebugPreviewTexture_) ||
       nuri::isValid(rawDepthSampler_) || nuri::isValid(compareDepthSampler_);
@@ -2610,6 +2841,20 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
   }
 
   std::array<TextureHandle, kMaxShadowCascades> newShadowDepthTextures{};
+  std::array<TextureHandle, kMaxShadowCascades>
+      newShadowDepthAlternateTextures{};
+  const auto destroyNewDepthTextures = [&]() {
+    for (TextureHandle texture : newShadowDepthTextures) {
+      if (nuri::isValid(texture)) {
+        gpu_.destroyTexture(texture);
+      }
+    }
+    for (TextureHandle texture : newShadowDepthAlternateTextures) {
+      if (nuri::isValid(texture)) {
+        gpu_.destroyTexture(texture);
+      }
+    }
+  };
   for (uint32_t cascadeIndex = 0u; cascadeIndex < requestedCascadeCount;
        ++cascadeIndex) {
     const TextureDesc shadowDesc{
@@ -2631,14 +2876,25 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
         "shadow_depth_map_phase4_cascade" + std::to_string(cascadeIndex);
     auto textureResult = gpu_.createTexture(shadowDesc, debugName);
     if (textureResult.hasError()) {
-      for (TextureHandle texture : newShadowDepthTextures) {
-        if (nuri::isValid(texture)) {
-          gpu_.destroyTexture(texture);
-        }
-      }
+      destroyNewDepthTextures();
       return Result<bool, std::string>::makeError(textureResult.error());
     }
     newShadowDepthTextures[cascadeIndex] = textureResult.value();
+
+    if constexpr (kEnableStaticOnlyScrollCopy) {
+      const std::string alternateDebugName = "shadow_depth_map_phase4_cascade" +
+                                             std::to_string(cascadeIndex) +
+                                             "_alternate";
+      auto alternateTextureResult =
+          gpu_.createTexture(shadowDesc, alternateDebugName);
+      if (alternateTextureResult.hasError()) {
+        destroyNewDepthTextures();
+        return Result<bool, std::string>::makeError(
+            alternateTextureResult.error());
+      }
+      newShadowDepthAlternateTextures[cascadeIndex] =
+          alternateTextureResult.value();
+    }
   }
 
   const SamplerDesc rawSamplerDesc{
@@ -2657,11 +2913,7 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
   auto samplerResult =
       gpu_.createSampler(rawSamplerDesc, "shadow_raw_depth_sampler");
   if (samplerResult.hasError()) {
-    for (TextureHandle texture : newShadowDepthTextures) {
-      if (nuri::isValid(texture)) {
-        gpu_.destroyTexture(texture);
-      }
-    }
+    destroyNewDepthTextures();
     return Result<bool, std::string>::makeError(samplerResult.error());
   }
   const SamplerHandle newRawDepthSampler = samplerResult.value();
@@ -2679,11 +2931,7 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
       gpu_.createSampler(compareSamplerDesc, "shadow_compare_depth_sampler");
   if (compareSamplerResult.hasError()) {
     gpu_.destroySampler(newRawDepthSampler);
-    for (TextureHandle texture : newShadowDepthTextures) {
-      if (nuri::isValid(texture)) {
-        gpu_.destroyTexture(texture);
-      }
-    }
+    destroyNewDepthTextures();
     return Result<bool, std::string>::makeError(compareSamplerResult.error());
   }
   const SamplerHandle newCompareDepthSampler = compareSamplerResult.value();
@@ -2710,11 +2958,7 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
     if (previewResult.hasError()) {
       gpu_.destroySampler(newCompareDepthSampler);
       gpu_.destroySampler(newRawDepthSampler);
-      for (TextureHandle texture : newShadowDepthTextures) {
-        if (nuri::isValid(texture)) {
-          gpu_.destroyTexture(texture);
-        }
-      }
+      destroyNewDepthTextures();
       return Result<bool, std::string>::makeError(previewResult.error());
     }
     newPreviewTexture = previewResult.value();
@@ -2722,11 +2966,14 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
 
   const std::array<TextureHandle, kMaxShadowCascades> oldShadowDepthTextures =
       shadowDepthTextures_;
+  const std::array<TextureHandle, kMaxShadowCascades>
+      oldShadowDepthAlternateTextures = shadowDepthAlternateTextures_;
   const TextureHandle oldPreviewTexture = shadowDebugPreviewTexture_;
   const SamplerHandle oldRawDepthSampler = rawDepthSampler_;
   const SamplerHandle oldCompareDepthSampler = compareDepthSampler_;
 
   shadowDepthTextures_ = newShadowDepthTextures;
+  shadowDepthAlternateTextures_ = newShadowDepthAlternateTextures;
   shadowDebugPreviewTexture_ = newPreviewTexture;
   rawDepthSampler_ = newRawDepthSampler;
   compareDepthSampler_ = newCompareDepthSampler;
@@ -2743,6 +2990,11 @@ Result<bool, std::string> ShadowRenderer::ensureShadowResources(
     gpu_.destroyTexture(oldPreviewTexture);
   }
   for (const TextureHandle texture : oldShadowDepthTextures) {
+    if (nuri::isValid(texture)) {
+      gpu_.destroyTexture(texture);
+    }
+  }
+  for (const TextureHandle texture : oldShadowDepthAlternateTextures) {
     if (nuri::isValid(texture)) {
       gpu_.destroyTexture(texture);
     }
@@ -2781,7 +3033,8 @@ ShadowRenderer::ensureRingBufferCount(uint32_t requiredCount) {
 
 Result<bool, std::string> ShadowRenderer::ensureRingCapacity(
     std::pmr::vector<DynamicBufferSlot> &ring, size_t requiredBytes,
-    std::string_view debugName, std::span<uint64_t> uploadVersions) {
+    std::string_view debugName, std::span<uint64_t> uploadVersions,
+    Storage storage) {
   NURI_ASSERT(uploadVersions.size() >= ring.size(),
               "ShadowRenderer::ensureRingCapacity: upload version count "
               "must cover ring slot count");
@@ -2812,7 +3065,7 @@ Result<bool, std::string> ShadowRenderer::ensureRingCapacity(
     slot.buffer.reset();
     auto bufferResult = Buffer::create(gpu_,
                                        BufferDesc{.usage = BufferUsage::Storage,
-                                                  .storage = Storage::Device,
+                                                  .storage = storage,
                                                   .size = requiredBytes},
                                        debugName);
     if (bufferResult.hasError()) {
@@ -2827,23 +3080,23 @@ Result<bool, std::string> ShadowRenderer::ensureRingCapacity(
 
 Result<bool, std::string>
 ShadowRenderer::ensureInstanceMatricesRingCapacity(size_t requiredBytes) {
-  return ensureRingCapacity(instanceMatricesRing_, requiredBytes,
-                            "shadow_instance_matrices",
-                            instanceDataRingUploadVersions_);
+  return ensureRingCapacity(
+      instanceMatricesRing_, requiredBytes, "shadow_instance_matrices",
+      instanceDataRingUploadVersions_, Storage::HostVisible);
 }
 
 Result<bool, std::string>
 ShadowRenderer::ensureInstanceRemapRingCapacity(size_t requiredBytes) {
-  return ensureRingCapacity(instanceRemapRing_, requiredBytes,
-                            "shadow_instance_remap",
-                            instanceRemapUploadSignatures_);
+  return ensureRingCapacity(
+      instanceRemapRing_, requiredBytes, "shadow_instance_remap",
+      instanceRemapUploadSignatures_, Storage::HostVisible);
 }
 
 Result<bool, std::string>
 ShadowRenderer::ensureShadowFrameRingCapacity(size_t requiredBytes) {
   return ensureRingCapacity(shadowFrameRing_, requiredBytes,
                             "shadow_frame_gpu_data",
-                            shadowFrameUploadSignatures_);
+                            shadowFrameUploadSignatures_, Storage::HostVisible);
 }
 
 Result<bool, std::string>
@@ -3204,6 +3457,7 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
                : shadowPipelineHandle_;
   };
   const bool shadowMeshletAvailable =
+      settings.shadow.enableMeshletDepth &&
       nuri::isValid(shadowMeshletPipelineHandle_) &&
       nuri::isValid(shadowMeshletDoubleSidedPipelineHandle_) &&
       nuri::isValid(shadowMeshletAlphaPipelineHandle_) &&
@@ -3327,6 +3581,10 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
     };
     cachedEntry.rasterSignature =
         hashStaticShadowCasterRasterSignature(kFnvOffsetBasis64, cachedEntry);
+    const glm::mat4 &modelMatrix = renderables[entry.instanceIndex].modelMatrix;
+    cachedEntry.rasterSignature = hashCombine64(
+        cachedEntry.rasterSignature,
+        hashBytes(std::as_bytes(std::span<const glm::mat4>(&modelMatrix, 1u))));
     const StaticShadowBatchTemplate batchTemplate{
         .useMeshlets = useMeshlets,
         .pipeline = selectShadowPipeline(entry.doubleSided, entry.alphaMasked),
@@ -3364,8 +3622,8 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
     resolvedBatch.rasterSignature = hashCombine64(resolvedBatch.rasterSignature,
                                                   cachedEntry.rasterSignature);
     resolvedBatch.indexCountEstimate += cachedEntry.indexCount;
-    const BoundingBox worldBounds = entry.submesh->bounds.getTransformed(
-        renderables[entry.instanceIndex].modelMatrix);
+    const BoundingBox worldBounds =
+        entry.submesh->bounds.getTransformed(modelMatrix);
     cachedEntry.casterWorldCorners =
         shadow_detail::computeBoundsCorners(worldBounds.min_, worldBounds.max_);
     cachedEntry.hasCasterCullingBounds = enableCascadeCasterCulling;
@@ -4289,7 +4547,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
               if (!suppressGpuWarmupWarning) {
                 activateReductionFallback(fallbackReason);
               }
-              (void)consumeCpuHistogramSource();
+              reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Stale,
+                                             fallbackReason);
             } else {
               sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
               sdsmState_.loggedGpuReductionFallbackWarning_ = false;
@@ -4521,7 +4780,8 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
             if (!suppressGpuWarmupWarning) {
               activateReductionFallback(fallbackReason);
             }
-            (void)consumeCpuMinMaxSource();
+            reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Stale,
+                                           fallbackReason);
           } else {
             sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
             sdsmState_.loggedGpuReductionFallbackWarning_ = false;
@@ -5180,7 +5440,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     }
   }
   bool shadowMeshletActive = false;
-  if (gpu_.supportsFeature(GPUFeature::Meshlets)) {
+  if (shadowSettings.enableMeshletDepth &&
+      gpu_.supportsFeature(GPUFeature::Meshlets)) {
     auto meshletPipelineResult =
         ensureShadowMeshletPipelineState(targetDepthFormat);
     if (!meshletPipelineResult.hasError()) {
@@ -5307,11 +5568,16 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   const uint64_t cachePipelineSignature =
       shadowPipelineSignature() ^
       (enableCascadeCasterCulling ? 0x9e3779b97f4a7c15ull : 0ull);
-  const bool needsStaticCacheRebuild =
-      !staticShadowCasterCacheValid_ ||
-      staticShadowCasterCacheTransformVersion_ != transformVersion ||
-      staticShadowCasterCacheForcedMeshLod_ != settings.opaque.forcedMeshLod ||
+  const bool staticCacheMissing = !staticShadowCasterCacheValid_;
+  const bool staticCacheTransformChanged =
+      staticShadowCasterCacheTransformVersion_ != transformVersion;
+  const bool staticCacheForcedMeshLodChanged =
+      staticShadowCasterCacheForcedMeshLod_ != settings.opaque.forcedMeshLod;
+  const bool staticCachePipelineChanged =
       staticShadowCasterCachePipelineSignature_ != cachePipelineSignature;
+  const bool needsStaticCacheRebuild =
+      staticCacheMissing || staticCacheTransformChanged ||
+      staticCacheForcedMeshLodChanged || staticCachePipelineChanged;
   if (needsStaticCacheRebuild) {
     auto cacheResult = rebuildStaticShadowCasterCache(*frame.scene, settings);
     if (cacheResult.hasError()) {
@@ -5322,6 +5588,10 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     staticShadowCasterCachePipelineSignature_ = cachePipelineSignature;
   }
   const bool staticCacheReused = !needsStaticCacheRebuild;
+  const bool staticCacheRebuiltForTransformsOnly =
+      needsStaticCacheRebuild && !staticCacheMissing &&
+      staticCacheTransformChanged && !staticCacheForcedMeshLodChanged &&
+      !staticCachePipelineChanged;
   std::array<ShadowRenderer::StaticOnlyCascadeReuseState, kMaxShadowCascades>
       currentStaticOnlyCascadeStates{};
 
@@ -5415,6 +5685,20 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   uint32_t staticLightGridQueryCount = 0u;
 
   const uint32_t renderableCount = saturateToU32(renderables.size());
+  std::pmr::vector<uint32_t> staticShadowEntryByInstance(memory_);
+  if constexpr (kEnableStaticOnlyScrollCopy) {
+    staticShadowEntryByInstance.assign(renderableCount,
+                                       std::numeric_limits<uint32_t>::max());
+    for (uint32_t entryIndex = 0u; entryIndex < staticShadowCasterCache_.size();
+         ++entryIndex) {
+      const StaticShadowCasterCacheEntry &entry =
+          staticShadowCasterCache_[entryIndex];
+      if (entry.instanceIndex < staticShadowEntryByInstance.size()) {
+        staticShadowEntryByInstance[entry.instanceIndex] = entryIndex;
+      }
+    }
+  }
+
   const auto selectShadowPipeline =
       [&](bool doubleSided, bool alphaMasked) -> RenderPipelineHandle {
     if (alphaMasked) {
@@ -5669,6 +5953,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   const bool canUseFastStaticOnlyReusePath =
       staticCacheReused && overriddenStaticTemplateCount == 0u;
   if (canUseFastStaticOnlyReusePath) {
+    uint32_t staticOnlyAdaptiveRefreshesThisFrame = 0u;
     for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
          ++cascadeIndex) {
       StaticOnlyCascadeReuseState &currentState =
@@ -5690,8 +5975,15 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                                          currentRawShadowFits_[cascadeIndex],
                                          previousState.rawFit, previousValid,
                                          settings.shadow.shadowMapSize);
+      const bool deferAdaptiveRefresh =
+          needsAdaptiveRefresh && staticOnlyAdaptiveRefreshesThisFrame >=
+                                      kStaticOnlyAdaptiveRefreshBudgetPerFrame;
       if (!staticOnlyCandidate || !previousValid || biasChanged ||
-          !cachedRenderedFitContainsCurrent || needsAdaptiveRefresh) {
+          !cachedRenderedFitContainsCurrent) {
+        continue;
+      }
+      if (needsAdaptiveRefresh && !deferAdaptiveRefresh) {
+        ++staticOnlyAdaptiveRefreshesThisFrame;
         continue;
       }
 
@@ -5847,8 +6139,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
            batchIndex < staticShadowBatchLightSpaceBounds_.size();
            ++batchIndex) {
         if (batchIndex >= staticShadowBatchTemplates_.size() ||
-            staticShadowBatchTemplates_[batchIndex].instanceCount <
-                kStaticBatchOverlapEmitMinInstances) {
+            staticShadowBatchTemplates_[batchIndex].instanceCount >
+                kStaticBatchOverlapEmitMaxInstances) {
           continue;
         }
         const StaticCasterLightGridRange range =
@@ -5929,8 +6221,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
            batchIndex < staticShadowBatchLightSpaceBounds_.size();
            ++batchIndex) {
         if (batchIndex >= staticShadowBatchTemplates_.size() ||
-            staticShadowBatchTemplates_[batchIndex].instanceCount <
-                kStaticBatchOverlapEmitMinInstances) {
+            staticShadowBatchTemplates_[batchIndex].instanceCount >
+                kStaticBatchOverlapEmitMaxInstances) {
           continue;
         }
         const StaticCasterLightGridRange range =
@@ -6191,7 +6483,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     }
     const StaticShadowBatchTemplate &batchTemplate =
         staticShadowBatchTemplates_[batchIndex];
-    if (batchTemplate.instanceCount < kStaticBatchOverlapEmitMinInstances) {
+    if (batchTemplate.instanceCount > kStaticBatchOverlapEmitMaxInstances) {
       return;
     }
     const StaticShadowCasterLightSpaceBounds &batchBounds =
@@ -6285,8 +6577,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     const auto appendCandidate = [&](uint32_t batchIndex) {
       if (batchIndex >= staticShadowBatchTemplates_.size() ||
           batchIndex >= staticBatchLightGridQueryMarks.size() ||
-          staticShadowBatchTemplates_[batchIndex].instanceCount <
-              kStaticBatchOverlapEmitMinInstances) {
+          staticShadowBatchTemplates_[batchIndex].instanceCount >
+              kStaticBatchOverlapEmitMaxInstances) {
         return;
       }
       uint32_t &mark = staticBatchLightGridQueryMarks[batchIndex];
@@ -6626,6 +6918,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     NURI_PROFILER_ZONE("ShadowRenderer.batch_emit",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     std::array<uint32_t, kMaxShadowCascades> cascadeBatchCounts{};
+    std::array<size_t, kMaxShadowCascades> cascadeMeshDispatchCounts{};
     const MeshletLimits meshletLimits = gpu_.getMeshletLimits();
     uint32_t maxTaskGroupsX = meshletLimits.maxTaskWorkGroupCountX != 0u
                                   ? meshletLimits.maxTaskWorkGroupCountX
@@ -6635,6 +6928,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           std::min(maxTaskGroupsX, meshletLimits.maxTaskWorkGroupTotalCount);
     }
     maxTaskGroupsX = std::max(maxTaskGroupsX, 1u);
+    const uint64_t maxCandidatesPerMeshletDispatch =
+        std::max<uint64_t>(1u, static_cast<uint64_t>(maxTaskGroupsX) *
+                                   kShadowMeshletTaskCandidatesPerGroup);
 
     size_t emittedInstanceRemapCount = 0u;
     for (const ShadowBatchEntry &batch : shadowBatchEntries) {
@@ -6645,6 +6941,16 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       emittedInstanceRemapCount += batch.instanceCount;
       if (batch.key.cascadeIndex < cascadeBatchCounts.size()) {
         ++cascadeBatchCounts[batch.key.cascadeIndex];
+        if (batch.key.useMeshlets && batch.key.meshletCount != 0u) {
+          const uint64_t candidateCount =
+              static_cast<uint64_t>(batch.key.meshletCount) *
+              batch.instanceCount;
+          const uint64_t dispatchCount =
+              (candidateCount + maxCandidatesPerMeshletDispatch - 1u) /
+              maxCandidatesPerMeshletDispatch;
+          cascadeMeshDispatchCounts[batch.key.cascadeIndex] +=
+              static_cast<size_t>(dispatchCount);
+        }
       }
     }
     for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
@@ -6653,14 +6959,31 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           cascadeBatchCounts[cascadeIndex]);
       cascadeDrawItems_[cascadeIndex].reserve(cascadeBatchCounts[cascadeIndex]);
       cascadeMeshletPushConstants_[cascadeIndex].reserve(
-          cascadeBatchCounts[cascadeIndex]);
+          cascadeMeshDispatchCounts[cascadeIndex]);
       cascadeMeshDispatchItems_[cascadeIndex].reserve(
-          cascadeBatchCounts[cascadeIndex]);
+          cascadeMeshDispatchCounts[cascadeIndex]);
       cascadeMeshDispatchDependencyBuffers_[cascadeIndex].reserve(
-          cascadeBatchCounts[cascadeIndex]);
+          cascadeMeshDispatchCounts[cascadeIndex]);
     }
     instanceRemap_.resize(emittedInstanceRemapCount);
     uint32_t *remapWrite = instanceRemap_.data();
+    const auto appendMeshDispatchDependency =
+        [](ShadowMeshDispatchDependencyBuffers &dependencies,
+           BufferHandle handle) {
+          if (!nuri::isValid(handle)) {
+            return;
+          }
+          for (uint32_t i = 0u; i < dependencies.count; ++i) {
+            if (isSameBufferHandle(dependencies.buffers[i], handle)) {
+              return;
+            }
+          }
+          NURI_ASSERT(dependencies.count < dependencies.buffers.size(),
+                      "Shadow mesh dispatch dependency buffer list overflow");
+          if (dependencies.count < dependencies.buffers.size()) {
+            dependencies.buffers[dependencies.count++] = handle;
+          }
+        };
 
     for (ShadowBatchEntry &batch : shadowBatchEntries) {
       if (batch.instanceCount == 0u) {
@@ -6708,7 +7031,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         }
 
         const uint64_t candidateCount64 =
-            static_cast<uint64_t>(key.meshletMaxCount) * batch.instanceCount;
+            static_cast<uint64_t>(key.meshletCount) * batch.instanceCount;
         if (candidateCount64 > std::numeric_limits<uint32_t>::max()) {
           return Result<bool, std::string>::makeError(
               "ShadowRenderer::buildShadowDraws: shadow meshlet candidate "
@@ -6735,8 +7058,12 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                             : 0u;
         uint32_t candidateOffset = 0u;
         while (candidateOffset < candidateCount) {
-          const uint32_t groupCount =
-              std::min(maxTaskGroupsX, candidateCount - candidateOffset);
+          const uint32_t remainingCandidates = candidateCount - candidateOffset;
+          const uint32_t requiredGroups =
+              (remainingCandidates + kShadowMeshletTaskCandidatesPerGroup -
+               1u) /
+              kShadowMeshletTaskCandidatesPerGroup;
+          const uint32_t groupCount = std::min(maxTaskGroupsX, requiredGroups);
           MeshletPushConstants &pc =
               cascadeMeshletPushConstants_[key.cascadeIndex].emplace_back();
           pc = MeshletPushConstants{
@@ -6785,25 +7112,26 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
               reinterpret_cast<const std::byte *>(&pc),
               sizeof(MeshletPushConstants));
 
-          cascadeMeshDispatchDependencyBuffers_[key.cascadeIndex].push_back(
-              std::pmr::vector<BufferHandle>(memory_));
-          std::pmr::vector<BufferHandle> &dependencies =
-              cascadeMeshDispatchDependencyBuffers_[key.cascadeIndex].back();
-          dependencies.reserve(6u);
-          appendUniqueBufferHandle(dependencies, key.vertexBuffer);
-          appendUniqueBufferHandle(dependencies, key.vertexDecodeBuffer);
-          appendUniqueBufferHandle(dependencies, key.meshletBuffer);
-          appendUniqueBufferHandle(dependencies, key.meshletVertexIndexBuffer);
-          appendUniqueBufferHandle(dependencies,
-                                   key.meshletPrimitiveIndexBuffer);
-          appendUniqueBufferHandle(dependencies, key.meshletLodRangeBuffer);
-          dispatch.dependencyBuffers = std::span<const BufferHandle>(
-              dependencies.data(), dependencies.size());
+          ShadowMeshDispatchDependencyBuffers &dependencies =
+              cascadeMeshDispatchDependencyBuffers_[key.cascadeIndex]
+                  .emplace_back();
+          dependencies = {};
+          appendMeshDispatchDependency(dependencies, key.vertexBuffer);
+          appendMeshDispatchDependency(dependencies, key.vertexDecodeBuffer);
+          appendMeshDispatchDependency(dependencies, key.meshletBuffer);
+          appendMeshDispatchDependency(dependencies,
+                                       key.meshletVertexIndexBuffer);
+          appendMeshDispatchDependency(dependencies,
+                                       key.meshletPrimitiveIndexBuffer);
+          appendMeshDispatchDependency(dependencies, key.meshletLodRangeBuffer);
           dispatch.debugLabel = kShadowMeshLabel;
           dispatch.debugColor = kShadowMeshDebugColor;
           ++emittedShadowMeshletDispatchCount;
           emittedShadowMeshletTaskGroupCount += groupCount;
-          candidateOffset += groupCount;
+          candidateOffset = static_cast<uint32_t>(std::min<uint64_t>(
+              candidateCount, static_cast<uint64_t>(candidateOffset) +
+                                  static_cast<uint64_t>(groupCount) *
+                                      kShadowMeshletTaskCandidatesPerGroup));
         }
         continue;
       }
@@ -6853,6 +7181,24 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           reinterpret_cast<const std::byte *>(&pc), sizeof(PushConstants));
       draw.debugLabel = kShadowMeshLabel;
       draw.debugColor = kShadowMeshDebugColor;
+    }
+    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
+         ++cascadeIndex) {
+      auto &dispatches = cascadeMeshDispatchItems_[cascadeIndex];
+      auto &dependencyBuffers =
+          cascadeMeshDispatchDependencyBuffers_[cascadeIndex];
+      NURI_ASSERT(dispatches.size() == dependencyBuffers.size(),
+                  "Shadow mesh dispatch dependency count mismatch");
+      const size_t dispatchCount =
+          std::min(dispatches.size(), dependencyBuffers.size());
+      for (size_t dispatchIndex = 0u; dispatchIndex < dispatchCount;
+           ++dispatchIndex) {
+        const ShadowMeshDispatchDependencyBuffers &dependencies =
+            dependencyBuffers[dispatchIndex];
+        dispatches[dispatchIndex].dependencyBuffers =
+            std::span<const BufferHandle>(dependencies.buffers.data(),
+                                          dependencies.count);
+      }
     }
     emittedShadowInstanceRemapCount = saturateToU32(emittedInstanceRemapCount);
     if (!instanceRemap_.empty()) {
@@ -6938,7 +7284,246 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   uint32_t staticOnlyReuseMissNoPreviousCount = 0u;
   uint32_t staticOnlyReuseMissRasterStateChangedCount = 0u;
   uint32_t staticOnlyReuseMissAdaptiveRefreshCount = 0u;
+  uint32_t staticOnlyAdaptiveRefreshesThisFrame = 0u;
+  uint32_t staticOnlyScrollCandidateCount = 0u;
+  uint32_t staticOnlyScrollCompatibleCount = 0u;
+  uint64_t staticOnlyScrollDirtyTexels = 0u;
+  uint64_t staticOnlyScrollCompatibleTexels = 0u;
+  uint32_t staticOnlyScrollDirtyCasterEstimate = 0u;
+  uint64_t staticOnlyScrollDirtyIndexEstimate = 0u;
+  uint32_t staticOnlyScrollRejectAnchorCount = 0u;
+  uint32_t staticOnlyScrollRejectDepthCount = 0u;
+  uint32_t staticOnlyScrollRejectExtentCount = 0u;
+  uint32_t staticOnlyScrollRejectShiftCount = 0u;
   uint64_t actualTotalIndexCountEstimate = 0u;
+  const auto estimateDirtyStaticCastersForScroll =
+      [&](uint32_t cascadeIndex,
+          const StaticOnlyScrollCopyEstimate &scrollEstimate) {
+        struct DirtyEstimate {
+          uint32_t casterCount = 0u;
+          uint64_t indexCount = 0u;
+        } dirty{};
+        if (!scrollEstimate.compatible ||
+            cascadeUsesCachedLightBounds[cascadeIndex] == 0u ||
+            !hasStaticShadowCasterLightSpaceBounds_ ||
+            staticShadowCasterLightSpaceBounds_.size() !=
+                staticShadowCasterCache_.size()) {
+          return dirty;
+        }
+
+        for (uint32_t entryIndex = 0u;
+             entryIndex < staticShadowCasterCache_.size(); ++entryIndex) {
+          const StaticShadowCasterCacheEntry &entry =
+              staticShadowCasterCache_[entryIndex];
+          if (staticEntryUsesDynamicPath(entry)) {
+            continue;
+          }
+          const StaticShadowCasterLightSpaceBounds &entryBounds =
+              staticShadowCasterLightSpaceBounds_[entryIndex];
+          const glm::vec3 boundsMin =
+              glm::min(entryBounds.min, entryBounds.max);
+          const glm::vec3 boundsMax =
+              glm::max(entryBounds.min, entryBounds.max);
+          if (!normalizedLightSpaceBoundsOverlap(boundsMin, boundsMax,
+                                                 scrollEstimate.currentMin,
+                                                 scrollEstimate.currentMax)) {
+            continue;
+          }
+
+          const bool fullyInsideCopiedOverlap =
+              boundsMin.x >= scrollEstimate.overlapMin.x &&
+              boundsMax.x <= scrollEstimate.overlapMax.x &&
+              boundsMin.y >= scrollEstimate.overlapMin.y &&
+              boundsMax.y <= scrollEstimate.overlapMax.y;
+          if (fullyInsideCopiedOverlap) {
+            continue;
+          }
+
+          ++dirty.casterCount;
+          dirty.indexCount += entry.indexCount;
+        }
+        return dirty;
+      };
+  const auto sameTextureHandle = [](TextureHandle lhs,
+                                    TextureHandle rhs) noexcept {
+    return lhs.index == rhs.index && lhs.generation == rhs.generation;
+  };
+  const auto appendScrollDirtyRect = [](StaticOnlyScrollCopyPass &pass,
+                                        RectU32 rect) {
+    if (rect.width == 0u || rect.height == 0u ||
+        pass.dirtyRectCount >= pass.dirtyRects.size()) {
+      return;
+    }
+    pass.dirtyRects[pass.dirtyRectCount++] = rect;
+  };
+  const auto buildStaticOnlyScrollCopyPass =
+      [&](TextureHandle sourceTexture, TextureHandle destinationTexture,
+          const StaticOnlyScrollCopyEstimate &scrollEstimate,
+          uint32_t shadowMapSize) {
+        StaticOnlyScrollCopyPass pass{};
+        if (!nuri::isValid(sourceTexture) ||
+            !nuri::isValid(destinationTexture) ||
+            !gpu_.isValid(sourceTexture) || !gpu_.isValid(destinationTexture) ||
+            sameTextureHandle(sourceTexture, destinationTexture) ||
+            !scrollEstimate.compatible ||
+            scrollEstimate.dirtyTexelCount == 0u || shadowMapSize == 0u) {
+          return pass;
+        }
+
+        const uint32_t absShiftX =
+            static_cast<uint32_t>(std::abs(scrollEstimate.shiftX));
+        const uint32_t absShiftY =
+            static_cast<uint32_t>(std::abs(scrollEstimate.shiftY));
+        if (absShiftX >= shadowMapSize || absShiftY >= shadowMapSize) {
+          return pass;
+        }
+
+        const uint32_t copyWidth = shadowMapSize - absShiftX;
+        const uint32_t copyHeight = shadowMapSize - absShiftY;
+        const uint32_t sourceX = scrollEstimate.shiftX > 0 ? absShiftX : 0u;
+        const uint32_t sourceY = scrollEstimate.shiftY > 0 ? absShiftY : 0u;
+        const uint32_t destinationX =
+            scrollEstimate.shiftX < 0 ? absShiftX : 0u;
+        const uint32_t destinationY =
+            scrollEstimate.shiftY < 0 ? absShiftY : 0u;
+
+        pass.active = true;
+        pass.copy = TextureCopyItem{
+            .sourceTexture = sourceTexture,
+            .destinationTexture = destinationTexture,
+            .sourceX = sourceX,
+            .sourceY = sourceY,
+            .destinationX = destinationX,
+            .destinationY = destinationY,
+            .width = copyWidth,
+            .height = copyHeight,
+            .sourceMipLevel = 0u,
+            .destinationMipLevel = 0u,
+            .sourceLayer = 0u,
+            .destinationLayer = 0u,
+        };
+
+        if (destinationX > 0u) {
+          appendScrollDirtyRect(pass, RectU32{.x = 0u,
+                                              .y = 0u,
+                                              .width = destinationX,
+                                              .height = shadowMapSize});
+        } else if (destinationX + copyWidth < shadowMapSize) {
+          appendScrollDirtyRect(
+              pass, RectU32{.x = destinationX + copyWidth,
+                            .y = 0u,
+                            .width = shadowMapSize - (destinationX + copyWidth),
+                            .height = shadowMapSize});
+        }
+        if (destinationY > 0u) {
+          appendScrollDirtyRect(pass, RectU32{.x = destinationX,
+                                              .y = 0u,
+                                              .width = copyWidth,
+                                              .height = destinationY});
+        } else if (destinationY + copyHeight < shadowMapSize) {
+          appendScrollDirtyRect(
+              pass,
+              RectU32{.x = destinationX,
+                      .y = destinationY + copyHeight,
+                      .width = copyWidth,
+                      .height = shadowMapSize - (destinationY + copyHeight)});
+        }
+        return pass;
+      };
+  const auto staticCasterIsDirtyForScroll =
+      [&](uint32_t entryIndex,
+          const StaticOnlyScrollCopyEstimate &scrollEstimate) {
+        if (!scrollEstimate.compatible ||
+            entryIndex >= staticShadowCasterCache_.size() ||
+            entryIndex >= staticShadowCasterLightSpaceBounds_.size()) {
+          return true;
+        }
+        const StaticShadowCasterCacheEntry &entry =
+            staticShadowCasterCache_[entryIndex];
+        if (staticEntryUsesDynamicPath(entry)) {
+          return true;
+        }
+
+        const StaticShadowCasterLightSpaceBounds &entryBounds =
+            staticShadowCasterLightSpaceBounds_[entryIndex];
+        const glm::vec3 boundsMin = glm::min(entryBounds.min, entryBounds.max);
+        const glm::vec3 boundsMax = glm::max(entryBounds.min, entryBounds.max);
+        if (!normalizedLightSpaceBoundsOverlap(boundsMin, boundsMax,
+                                               scrollEstimate.currentMin,
+                                               scrollEstimate.currentMax)) {
+          return false;
+        }
+
+        return !(boundsMin.x >= scrollEstimate.overlapMin.x &&
+                 boundsMax.x <= scrollEstimate.overlapMax.x &&
+                 boundsMin.y >= scrollEstimate.overlapMin.y &&
+                 boundsMax.y <= scrollEstimate.overlapMax.y);
+      };
+  const auto drawHasDirtyStaticCaster =
+      [&](const DrawItem &draw,
+          const StaticOnlyScrollCopyEstimate &scrollEstimate) {
+        const uint64_t firstInstance = draw.firstInstance;
+        const uint64_t endInstance =
+            firstInstance + static_cast<uint64_t>(draw.instanceCount);
+        if (draw.instanceCount == 0u || endInstance > instanceRemap_.size()) {
+          return true;
+        }
+        for (uint64_t remapIndex = firstInstance; remapIndex < endInstance;
+             ++remapIndex) {
+          const uint32_t globalInstanceIndex = instanceRemap_[remapIndex];
+          if (globalInstanceIndex >= staticShadowEntryByInstance.size()) {
+            return true;
+          }
+          const uint32_t entryIndex =
+              staticShadowEntryByInstance[globalInstanceIndex];
+          if (entryIndex == std::numeric_limits<uint32_t>::max()) {
+            return true;
+          }
+          if (staticCasterIsDirtyForScroll(entryIndex, scrollEstimate)) {
+            return true;
+          }
+        }
+        return false;
+      };
+  const auto buildStaticOnlyScrollDirtyDrawItems =
+      [&](uint32_t cascadeIndex, const StaticOnlyScrollCopyPass &scrollPass,
+          const StaticOnlyScrollCopyEstimate &scrollEstimate) {
+        uint32_t submittedDrawCount = 0u;
+        for (uint32_t dirtyIndex = 0u; dirtyIndex < scrollPass.dirtyRectCount;
+             ++dirtyIndex) {
+          const RectU32 dirtyRect = scrollPass.dirtyRects[dirtyIndex];
+          auto &dirtyDrawItems =
+              staticOnlyScrollDirtyDrawItems_[cascadeIndex][dirtyIndex];
+          dirtyDrawItems.clear();
+          dirtyDrawItems.reserve(cascadeDrawItems_[cascadeIndex].size() + 1u);
+
+          DrawItem clearDraw{};
+          clearDraw.command = DrawCommandType::Direct;
+          clearDraw.pipeline = shadowDepthClearPipelineHandle_;
+          clearDraw.vertexCount = 3u;
+          clearDraw.instanceCount = 1u;
+          clearDraw.useScissor = true;
+          clearDraw.scissor = dirtyRect;
+          clearDraw.useDepthState = true;
+          clearDraw.depthState = {.compareOp = CompareOp::Always,
+                                  .isDepthWriteEnabled = true};
+          clearDraw.depthBiasEnable = false;
+          clearDraw.debugLabel = kShadowScrollDirtyClearLabel;
+          clearDraw.debugColor = kShadowPassDebugColor;
+          dirtyDrawItems.push_back(clearDraw);
+
+          for (DrawItem draw : cascadeDrawItems_[cascadeIndex]) {
+            if (!drawHasDirtyStaticCaster(draw, scrollEstimate)) {
+              continue;
+            }
+            draw.useScissor = true;
+            draw.scissor = dirtyRect;
+            dirtyDrawItems.push_back(draw);
+          }
+          submittedDrawCount += saturateToU32(dirtyDrawItems.size());
+        }
+        return submittedDrawCount;
+      };
   for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
        ++cascadeIndex) {
     ShadowCascadeDebugFrameData &cascadeDebug =
@@ -6992,10 +7577,24 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         (!cachedRenderedFitContainsCurrent && staticOnlyCandidate &&
          previousValid && !biasChanged && !casterSignatureChanged &&
          motionFitsAdaptiveBudget);
+    const bool staticCacheCompatibleForTextureReuse =
+        staticCacheReused ||
+        (staticCacheRebuiltForTransformsOnly && !casterSignatureChanged);
+    const bool canReuseCurrentStaticOnlyFit =
+        staticCacheCompatibleForTextureReuse && staticOnlyCandidate &&
+        previousValid && previousTextureMatches && !biasChanged &&
+        cachedRenderedFitContainsCurrent;
+    const bool deferAdaptiveRefresh =
+        canReuseCurrentStaticOnlyFit && needsAdaptiveRefresh &&
+        staticOnlyAdaptiveRefreshesThisFrame >=
+            kStaticOnlyAdaptiveRefreshBudgetPerFrame;
     reuseStaticOnlyCascadePass_[cascadeIndex] =
-        staticCacheReused && staticOnlyCandidate && previousValid &&
-        previousTextureMatches && !biasChanged &&
-        cachedRenderedFitContainsCurrent && !needsAdaptiveRefresh;
+        canReuseCurrentStaticOnlyFit &&
+        (!needsAdaptiveRefresh || deferAdaptiveRefresh);
+    if (!reuseStaticOnlyCascadePass_[cascadeIndex] &&
+        canReuseCurrentStaticOnlyFit && needsAdaptiveRefresh) {
+      ++staticOnlyAdaptiveRefreshesThisFrame;
+    }
     if (reuseStaticOnlyCascadePass_[cascadeIndex]) {
       const shadow_detail::DirectionalShadowFit rawFit =
           currentRawShadowFits_[cascadeIndex];
@@ -7015,6 +7614,112 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     } else {
       staticOnlyCascadeContentSignatures_[cascadeIndex] =
           currentState.rasterSignature;
+    }
+    const bool scrollCandidate = !reuseStaticOnlyCascadePass_[cascadeIndex] &&
+                                 staticOnlyCandidate && previousValid &&
+                                 staticCacheReused && !biasChanged &&
+                                 !settings.shadow.enableMeshletDepth;
+    if (scrollCandidate) {
+      ++staticOnlyScrollCandidateCount;
+      const StaticOnlyScrollCopyEstimate scrollEstimate =
+          estimateStaticOnlyScrollCopy(previousState.renderedFit,
+                                       currentRawShadowFits_[cascadeIndex],
+                                       settings.shadow.shadowMapSize);
+      if (scrollEstimate.compatible) {
+        ++staticOnlyScrollCompatibleCount;
+        staticOnlyScrollDirtyTexels += scrollEstimate.dirtyTexelCount;
+        staticOnlyScrollCompatibleTexels +=
+            static_cast<uint64_t>(settings.shadow.shadowMapSize) *
+            static_cast<uint64_t>(settings.shadow.shadowMapSize);
+        const auto dirty =
+            estimateDirtyStaticCastersForScroll(cascadeIndex, scrollEstimate);
+        staticOnlyScrollDirtyCasterEstimate += dirty.casterCount;
+        staticOnlyScrollDirtyIndexEstimate += dirty.indexCount;
+        if (kEnableStaticOnlyScrollCopy &&
+            scrollEstimate.dirtyTexelCount > 0u &&
+            cascadeUsesCachedLightBounds[cascadeIndex] != 0u &&
+            hasStaticShadowCasterLightSpaceBounds_ &&
+            staticShadowCasterLightSpaceBounds_.size() ==
+                staticShadowCasterCache_.size() &&
+            nuri::isValid(shadowDepthClearPipelineHandle_)) {
+          const TextureHandle sourceTexture = previousState.shadowDepthTexture;
+          TextureHandle destinationTexture{};
+          if (sameTextureHandle(sourceTexture, currentShadowDepthTexture)) {
+            destinationTexture = shadowDepthAlternateTextures_[cascadeIndex];
+          } else if (sameTextureHandle(
+                         sourceTexture,
+                         shadowDepthAlternateTextures_[cascadeIndex])) {
+            destinationTexture = currentShadowDepthTexture;
+          }
+
+          const StaticOnlyScrollCopyPass scrollPass =
+              buildStaticOnlyScrollCopyPass(sourceTexture, destinationTexture,
+                                            scrollEstimate,
+                                            settings.shadow.shadowMapSize);
+          if (scrollPass.active && scrollPass.dirtyRectCount > 0u) {
+            const shadow_detail::DirectionalShadowFit rawFit =
+                currentRawShadowFits_[cascadeIndex];
+            const shadow_detail::DirectionalShadowFit scrollFit =
+                makeStaticOnlyScrollFitForCurrentFrame(
+                    previousState.renderedFit, rawFit, scrollEstimate,
+                    settings.shadow.shadowMapSize);
+            writeShadowCascadeFit(scrollFit, cascadeIndex, settings.shadow,
+                                  frame.sharedResources.shadowCompareSamplerId,
+                                  frame.sharedResources.shadowRawSamplerId,
+                                  destinationTexture, gpu_, shadowFrameCpuData_,
+                                  shadowDebugFrameData_);
+
+            shadowDepthTextures_[cascadeIndex] = destinationTexture;
+            shadowDepthAlternateTextures_[cascadeIndex] = sourceTexture;
+            currentState = previousState;
+            currentState.renderedFit = scrollFit;
+            currentState.rawFit = rawFit;
+            currentState.shadowDepthTexture = destinationTexture;
+            currentState.lightViewProjSignature =
+                makeStaticOnlyCascadeLightViewProjSignature(
+                    shadowFrameCpuData_.cascades[cascadeIndex]);
+            currentState.biasSignature = makeStaticOnlyCascadeBiasSignature(
+                settings.shadow.constantBias, settings.shadow.slopeBias);
+            currentState.casterSignature = previousState.casterSignature;
+            currentState.rasterSignature = previousState.rasterSignature;
+            currentState.staticDrawCount = previousState.staticDrawCount;
+            currentState.dynamicDrawCount = 0u;
+            staticOnlyCascadeContentSignatures_[cascadeIndex] =
+                previousState.rasterSignature;
+            staticOnlyScrollCopyPasses_[cascadeIndex] = scrollPass;
+
+            const uint32_t scrollDrawCount =
+                buildStaticOnlyScrollDirtyDrawItems(cascadeIndex, scrollPass,
+                                                    scrollEstimate);
+            cascadeDrawCounts_[cascadeIndex] = scrollDrawCount;
+            cascadeDebug.drawCount = scrollDrawCount;
+            const uint64_t dirtyRectMultiplier = std::max<uint64_t>(
+                static_cast<uint64_t>(scrollPass.dirtyRectCount), 1u);
+            cascadeIndexCountEstimates_[cascadeIndex] =
+                std::min<uint64_t>(std::numeric_limits<uint64_t>::max() /
+                                       dirtyRectMultiplier,
+                                   cascadeIndexCountEstimates_[cascadeIndex]) *
+                dirtyRectMultiplier;
+          }
+        }
+      } else {
+        switch (scrollEstimate.rejectReason) {
+        case StaticOnlyScrollCopyEstimate::RejectReason::Anchor:
+          ++staticOnlyScrollRejectAnchorCount;
+          break;
+        case StaticOnlyScrollCopyEstimate::RejectReason::Depth:
+          ++staticOnlyScrollRejectDepthCount;
+          break;
+        case StaticOnlyScrollCopyEstimate::RejectReason::Extent:
+          ++staticOnlyScrollRejectExtentCount;
+          break;
+        case StaticOnlyScrollCopyEstimate::RejectReason::Shift:
+          ++staticOnlyScrollRejectShiftCount;
+          break;
+        case StaticOnlyScrollCopyEstimate::RejectReason::None:
+          break;
+        }
+      }
     }
     cascadeDebug.staticOnlyReuseCandidate = staticOnlyCandidate;
     cascadeDebug.staticOnlyReusePreviousValid = previousValid;
@@ -7158,6 +7863,29 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       staticOnlyReuseMissRasterStateChangedCount;
   frame.metrics.shadow.staticOnlyReuseMissAdaptiveRefreshCount =
       staticOnlyReuseMissAdaptiveRefreshCount;
+  frame.metrics.shadow.staticOnlyScrollCandidateCount =
+      staticOnlyScrollCandidateCount;
+  frame.metrics.shadow.staticOnlyScrollCompatibleCount =
+      staticOnlyScrollCompatibleCount;
+  frame.metrics.shadow.staticOnlyScrollDirtyAreaBasisPoints =
+      staticOnlyScrollCompatibleTexels > 0u
+          ? static_cast<uint32_t>(
+                std::min<uint64_t>((staticOnlyScrollDirtyTexels * 10000u) /
+                                       staticOnlyScrollCompatibleTexels,
+                                   10000u))
+          : 0u;
+  frame.metrics.shadow.staticOnlyScrollDirtyCasterEstimate =
+      staticOnlyScrollDirtyCasterEstimate;
+  frame.metrics.shadow.staticOnlyScrollDirtyIndexEstimate =
+      staticOnlyScrollDirtyIndexEstimate;
+  frame.metrics.shadow.staticOnlyScrollRejectAnchorCount =
+      staticOnlyScrollRejectAnchorCount;
+  frame.metrics.shadow.staticOnlyScrollRejectDepthCount =
+      staticOnlyScrollRejectDepthCount;
+  frame.metrics.shadow.staticOnlyScrollRejectExtentCount =
+      staticOnlyScrollRejectExtentCount;
+  frame.metrics.shadow.staticOnlyScrollRejectShiftCount =
+      staticOnlyScrollRejectShiftCount;
   frame.metrics.shadow.cascadeTextureBytes =
       static_cast<uint64_t>(cascadeCount) * shadowMapSize_ * shadowMapSize_ *
       shadowDepthTextureBytesPerPixel(shadowDepthPipelineFormat_);
@@ -7259,6 +7987,12 @@ void ShadowRenderer::destroyShadowResources() {
       texture = {};
     }
   }
+  for (TextureHandle &texture : shadowDepthAlternateTextures_) {
+    if (nuri::isValid(texture)) {
+      gpu_.destroyTexture(texture);
+      texture = {};
+    }
+  }
   if (nuri::isValid(rawDepthSampler_)) {
     gpu_.destroySampler(rawDepthSampler_);
     rawDepthSampler_ = {};
@@ -7345,17 +8079,21 @@ void ShadowRenderer::destroyShaders() {
     gpu_.destroyShaderModule(shadowMeshletTaskShader_);
     shadowMeshletTaskShader_ = {};
   }
+  if (nuri::isValid(shadowMeshletDepthMeshShader_)) {
+    gpu_.destroyShaderModule(shadowMeshletDepthMeshShader_);
+    shadowMeshletDepthMeshShader_ = {};
+  }
   if (nuri::isValid(shadowMeshletMeshShader_)) {
     gpu_.destroyShaderModule(shadowMeshletMeshShader_);
     shadowMeshletMeshShader_ = {};
   }
-  if (nuri::isValid(shadowMeshletDepthFragmentShader_)) {
-    gpu_.destroyShaderModule(shadowMeshletDepthFragmentShader_);
-    shadowMeshletDepthFragmentShader_ = {};
-  }
   if (nuri::isValid(shadowMeshletDepthAlphaFragmentShader_)) {
     gpu_.destroyShaderModule(shadowMeshletDepthAlphaFragmentShader_);
     shadowMeshletDepthAlphaFragmentShader_ = {};
+  }
+  if (nuri::isValid(shadowDepthClearVertexShader_)) {
+    gpu_.destroyShaderModule(shadowDepthClearVertexShader_);
+    shadowDepthClearVertexShader_ = {};
   }
   if (nuri::isValid(depthFragmentShader_)) {
     gpu_.destroyShaderModule(depthFragmentShader_);
@@ -7377,6 +8115,7 @@ void ShadowRenderer::destroyShaders() {
   shadowOpaqueShader_.reset();
   shadowMeshletShader_.reset();
   depthShader_.reset();
+  depthClearShader_.reset();
   depthAlphaShader_.reset();
   sdsmReduceShader_.reset();
   sdsmHistogramReduceShader_.reset();
@@ -7385,6 +8124,10 @@ void ShadowRenderer::destroyShaders() {
 }
 
 void ShadowRenderer::destroyShadowDepthPipelineState() {
+  if (nuri::isValid(shadowDepthClearPipelineHandle_)) {
+    gpu_.destroyRenderPipeline(shadowDepthClearPipelineHandle_);
+    shadowDepthClearPipelineHandle_ = {};
+  }
   if (nuri::isValid(shadowDoubleSidedPipelineHandle_)) {
     gpu_.destroyRenderPipeline(shadowDoubleSidedPipelineHandle_);
     shadowDoubleSidedPipelineHandle_ = {};
@@ -7476,11 +8219,16 @@ void ShadowRenderer::resetFrameBuildState() {
   cascadeIndexCountEstimates_.fill(0u);
   staticOnlyCascadeContentSignatures_.fill(0u);
   reuseStaticOnlyCascadePass_.fill(false);
+  staticOnlyScrollCopyPasses_.fill(StaticOnlyScrollCopyPass{});
   currentRawShadowFits_ = {};
   for (uint32_t cascadeIndex = 0u; cascadeIndex < kMaxShadowCascades;
        ++cascadeIndex) {
     cascadePushConstants_[cascadeIndex].clear();
     cascadeDrawItems_[cascadeIndex].clear();
+    for (std::pmr::vector<DrawItem> &draws :
+         staticOnlyScrollDirtyDrawItems_[cascadeIndex]) {
+      draws.clear();
+    }
     cascadeMeshletPushConstants_[cascadeIndex].clear();
     cascadeMeshDispatchItems_[cascadeIndex].clear();
     cascadeMeshDispatchDependencyBuffers_[cascadeIndex].clear();
@@ -7998,6 +8746,40 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     }
   }
 
+  const auto publishStaticOnlyCascadeState = [&](uint32_t cascadeIndex,
+                                                 TextureHandle texture) {
+    if (cascadeDynamicDrawCounts_[cascadeIndex] == 0u) {
+      reusableStaticOnlyCascadeValid_[cascadeIndex] = true;
+      reusableStaticOnlyCascadeContentSignatures_[cascadeIndex] =
+          staticOnlyCascadeContentSignatures_[cascadeIndex];
+      reusableStaticOnlyCascadeStates_[cascadeIndex] =
+          StaticOnlyCascadeReuseState{
+              .renderedFit = makeDirectionalShadowFitFromDebugCascade(
+                  shadowDebugFrameData_.cascades[cascadeIndex]),
+              .rawFit = currentRawShadowFits_[cascadeIndex],
+              .shadowDepthTexture = texture,
+              .rasterSignature =
+                  staticOnlyCascadeContentSignatures_[cascadeIndex],
+              .lightViewProjSignature =
+                  shadowDebugFrameData_.cascades[cascadeIndex]
+                      .currentStaticOnlyLightViewProjSignature,
+              .biasSignature = shadowDebugFrameData_.cascades[cascadeIndex]
+                                   .currentStaticOnlyBiasSignature,
+              .casterSignature = shadowDebugFrameData_.cascades[cascadeIndex]
+                                     .currentStaticOnlyCasterSignature,
+              .staticDrawCount =
+                  shadowDebugFrameData_.cascades[cascadeIndex].staticDrawCount,
+              .dynamicDrawCount =
+                  shadowDebugFrameData_.cascades[cascadeIndex].dynamicDrawCount,
+          };
+    } else {
+      reusableStaticOnlyCascadeValid_[cascadeIndex] = false;
+      reusableStaticOnlyCascadeContentSignatures_[cascadeIndex] = 0u;
+      reusableStaticOnlyCascadeStates_[cascadeIndex] =
+          StaticOnlyCascadeReuseState{};
+    }
+  };
+
   for (uint32_t cascadeIndex = 0u; cascadeIndex < activeCascadeCount_;
        ++cascadeIndex) {
     const TextureHandle shadowDepthTexture = shadowDepthTextures_[cascadeIndex];
@@ -8029,56 +8811,188 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
         RenderCaptureValueKind::ShadowDepth,
         RenderCaptureLifetimeClass::FeaturePersistentTexture, "linear_depth",
         "shadow_depth", shadowCascadePassLabel(cascadeIndex));
+    if (reuseStaticOnlyCascade) {
+      publishStaticOnlyCascadeState(cascadeIndex, shadowDepthTexture);
+      continue;
+    }
 
     const std::string_view passLabel = shadowCascadePassLabel(cascadeIndex);
     const std::span<const ComputeDispatchItem> preDispatches =
-        reuseStaticOnlyCascade
-            ? std::span<const ComputeDispatchItem>()
-            : shadowCascadePreDispatches(animationSceneData, cascadeIndex);
+        shadowCascadePreDispatches(animationSceneData, cascadeIndex);
     const std::span<const BufferHandle> passDependencyBuffers =
-        reuseStaticOnlyCascade
-            ? std::span<const BufferHandle>()
-            : std::span<const BufferHandle>(passDependencyBuffers_.data(),
-                                            passDependencyBuffers_.size());
+        std::span<const BufferHandle>(passDependencyBuffers_.data(),
+                                      passDependencyBuffers_.size());
     const std::span<const RenderGraphAccessMode>
         passDependencyBufferAccessModes =
-            reuseStaticOnlyCascade
-                ? std::span<const RenderGraphAccessMode>()
-                : std::span<const RenderGraphAccessMode>(
-                      passDependencyBufferAccessModes_.data(),
-                      passDependencyBufferAccessModes_.size());
+            std::span<const RenderGraphAccessMode>(
+                passDependencyBufferAccessModes_.data(),
+                passDependencyBufferAccessModes_.size());
     const std::span<const TextureHandle> passDependencyTextures =
-        reuseStaticOnlyCascade
-            ? std::span<const TextureHandle>()
-            : std::span<const TextureHandle>(dependencyTextures.data(),
-                                             dependencyTextures.size());
+        std::span<const TextureHandle>(dependencyTextures.data(),
+                                       dependencyTextures.size());
     const std::span<const RenderGraphAccessMode>
         passDependencyTextureAccessModes =
-            reuseStaticOnlyCascade ? std::span<const RenderGraphAccessMode>()
-                                   : std::span<const RenderGraphAccessMode>(
-                                         dependencyTextureAccessModes.data(),
-                                         dependencyTextureAccessModes.size());
+            std::span<const RenderGraphAccessMode>(
+                dependencyTextureAccessModes.data(),
+                dependencyTextureAccessModes.size());
     const std::span<const DrawItem> passDraws =
-        reuseStaticOnlyCascade
-            ? std::span<const DrawItem>()
-            : std::span<const DrawItem>(cascadeDrawItems_[cascadeIndex].data(),
-                                        cascadeDrawItems_[cascadeIndex].size());
+        std::span<const DrawItem>(cascadeDrawItems_[cascadeIndex].data(),
+                                  cascadeDrawItems_[cascadeIndex].size());
     const std::span<const MeshDispatchItem> passMeshDispatches =
-        reuseStaticOnlyCascade
-            ? std::span<const MeshDispatchItem>()
-            : std::span<const MeshDispatchItem>(
-                  cascadeMeshDispatchItems_[cascadeIndex].data(),
-                  cascadeMeshDispatchItems_[cascadeIndex].size());
+        std::span<const MeshDispatchItem>(
+            cascadeMeshDispatchItems_[cascadeIndex].data(),
+            cascadeMeshDispatchItems_[cascadeIndex].size());
     const std::span<const BufferHandle> passPreResolvedDrawBuffers =
-        reuseStaticOnlyCascade
-            ? std::span<const BufferHandle>()
-            : std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
-                                            preResolvedDrawBuffers_.size());
+        std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
+                                      preResolvedDrawBuffers_.size());
     const std::span<const RenderGraphBufferId> passPreResolvedDrawBufferIds =
-        reuseStaticOnlyCascade ? std::span<const RenderGraphBufferId>()
-                               : std::span<const RenderGraphBufferId>(
-                                     preResolvedDrawBufferIds_.data(),
-                                     preResolvedDrawBufferIds_.size());
+        std::span<const RenderGraphBufferId>(preResolvedDrawBufferIds_.data(),
+                                             preResolvedDrawBufferIds_.size());
+    const StaticOnlyScrollCopyPass &scrollCopyPass =
+        staticOnlyScrollCopyPasses_[cascadeIndex];
+
+    if (scrollCopyPass.active) {
+      auto sourceImportResult = graph.importTexture(
+          scrollCopyPass.copy.sourceTexture, kShadowScrollCopyPassLabel);
+      if (sourceImportResult.hasError()) {
+        return Result<bool, std::string>::makeError(sourceImportResult.error());
+      }
+
+      const std::array<RenderGraphTextureCopyItem, 1u> copyItems{{
+          RenderGraphTextureCopyItem{
+              .sourceTexture = sourceImportResult.value(),
+              .destinationTexture = depthImportResult.value(),
+              .sourceX = scrollCopyPass.copy.sourceX,
+              .sourceY = scrollCopyPass.copy.sourceY,
+              .destinationX = scrollCopyPass.copy.destinationX,
+              .destinationY = scrollCopyPass.copy.destinationY,
+              .width = scrollCopyPass.copy.width,
+              .height = scrollCopyPass.copy.height,
+              .sourceMipLevel = scrollCopyPass.copy.sourceMipLevel,
+              .destinationMipLevel = scrollCopyPass.copy.destinationMipLevel,
+              .sourceLayer = scrollCopyPass.copy.sourceLayer,
+              .destinationLayer = scrollCopyPass.copy.destinationLayer,
+          },
+      }};
+      const RenderGraphTextureCopyPassDesc copyDesc{
+          .copies = std::span<const RenderGraphTextureCopyItem>(
+              copyItems.data(), copyItems.size()),
+          .gpuTimingScope = GpuTimingScope::ShadowDepth,
+          .debugLabel = kShadowScrollCopyPassLabel,
+          .debugColor = kShadowPassDebugColor,
+          .markImplicitOutputSideEffect = true,
+      };
+      auto copyPassResult = graph.addTextureCopyPass(copyDesc);
+      if (copyPassResult.hasError()) {
+        return Result<bool, std::string>::makeError(copyPassResult.error());
+      }
+
+      for (uint32_t dirtyIndex = 0u; dirtyIndex < scrollCopyPass.dirtyRectCount;
+           ++dirtyIndex) {
+        const auto &dirtyDrawItems =
+            staticOnlyScrollDirtyDrawItems_[cascadeIndex][dirtyIndex];
+        const std::span<const DrawItem> dirtyDraws = std::span<const DrawItem>(
+            dirtyDrawItems.data(), dirtyDrawItems.size());
+        Result<RenderGraphPassId, std::string> dirtyPassResult =
+            Result<RenderGraphPassId, std::string>::makeError(
+                "ShadowRenderer::appendShadowDepthPasses: scroll dirty pass "
+                "was not built");
+        const bool usePreDispatches =
+            dirtyIndex == 0u && !preDispatches.empty();
+        if (!usePreDispatches) {
+          const std::span<const RenderGraphPreparedDependencyBufferBinding>
+              preparedDependencyBufferBindings =
+                  std::span<const RenderGraphPreparedDependencyBufferBinding>(
+                      passDependencyBufferBindings_.data(),
+                      passDependencyBufferBindings_.size());
+          const std::span<const RenderGraphPreparedDependencyTextureBinding>
+              preparedDependencyTextureBindings =
+                  std::span<const RenderGraphPreparedDependencyTextureBinding>(
+                      passDependencyTextureBindings_.data(),
+                      passDependencyTextureBindings_.size());
+          const RenderGraphPreparedGraphicsPassDesc desc{
+              .color = {},
+              .colorTexture = {},
+              .hasColorAttachment = false,
+              .depth = {.loadOp = LoadOp::Load,
+                        .storeOp = StoreOp::Store,
+                        .clearDepth = 1.0f,
+                        .clearStencil = 0u},
+              .depthTexture = depthImportResult.value(),
+              .useViewport = true,
+              .viewport = {.x = 0.0f,
+                           .y = 0.0f,
+                           .width = shadowViewportWidth,
+                           .height = shadowViewportHeight,
+                           .minDepth = 0.0f,
+                           .maxDepth = 1.0f},
+              .preDispatches = {},
+              .dependencyBuffers = passDependencyBuffers,
+              .draws = dirtyDraws,
+              .meshDispatches = {},
+              .dependencyBufferBindings = preparedDependencyBufferBindings,
+              .dependencyTextureBindings = preparedDependencyTextureBindings,
+              .preDispatchDependencyBindings = {},
+              .drawBufferBindings = {},
+              .drawBuffersPreResolved = true,
+              .preResolvedDrawBuffers = {},
+              .preResolvedDrawBufferIds = passPreResolvedDrawBufferIds,
+              .gpuTimingScope = GpuTimingScope::ShadowDepth,
+              .debugLabel = kShadowScrollDirtyPassLabel,
+              .debugColor = kShadowPassDebugColor,
+              .markColorAsFrameOutput = false,
+              .markImplicitOutputSideEffect = false,
+              .borrowPayload = true,
+          };
+          dirtyPassResult = graph.addPreparedGraphicsPass(desc);
+        } else {
+          const RenderGraphGraphicsPassDesc desc{
+              .color = {},
+              .colorTexture = {},
+              .hasColorAttachment = false,
+              .depth = {.loadOp = LoadOp::Load,
+                        .storeOp = StoreOp::Store,
+                        .clearDepth = 1.0f,
+                        .clearStencil = 0u},
+              .depthTexture = depthImportResult.value(),
+              .useViewport = true,
+              .viewport = {.x = 0.0f,
+                           .y = 0.0f,
+                           .width = shadowViewportWidth,
+                           .height = shadowViewportHeight,
+                           .minDepth = 0.0f,
+                           .maxDepth = 1.0f},
+              .preDispatches = preDispatches,
+              .dependencyBuffers = passDependencyBuffers,
+              .dependencyBufferAccessModes = passDependencyBufferAccessModes,
+              .dependencyTextures = passDependencyTextures,
+              .dependencyTextureAccessModes = passDependencyTextureAccessModes,
+              .draws = dirtyDraws,
+              .meshDispatches = {},
+              .drawBuffersPreResolved = true,
+              .preResolvedDrawBuffers = passPreResolvedDrawBuffers,
+              .gpuTimingScope = GpuTimingScope::ShadowDepth,
+              .debugLabel = kShadowScrollDirtyPassLabel,
+              .debugColor = kShadowPassDebugColor,
+              .markColorAsFrameOutput = false,
+              .markImplicitOutputSideEffect = false,
+              .borrowPayload = false,
+          };
+          dirtyPassResult = graph.addGraphicsPass(desc);
+        }
+        if (dirtyPassResult.hasError()) {
+          return Result<bool, std::string>::makeError(dirtyPassResult.error());
+        }
+        auto dirtyMarkResult =
+            graph.markPassSideEffect(dirtyPassResult.value());
+        if (dirtyMarkResult.hasError()) {
+          return dirtyMarkResult;
+        }
+      }
+
+      publishStaticOnlyCascadeState(cascadeIndex, shadowDepthTexture);
+      continue;
+    }
 
     Result<RenderGraphPassId, std::string> passResult =
         Result<RenderGraphPassId, std::string>::makeError(
@@ -8086,27 +9000,19 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     if (preDispatches.empty()) {
       const std::span<const RenderGraphPreparedDependencyBufferBinding>
           preparedDependencyBufferBindings =
-              reuseStaticOnlyCascade
-                  ? std::span<
-                        const RenderGraphPreparedDependencyBufferBinding>()
-                  : std::span<const RenderGraphPreparedDependencyBufferBinding>(
-                        passDependencyBufferBindings_.data(),
-                        passDependencyBufferBindings_.size());
+              std::span<const RenderGraphPreparedDependencyBufferBinding>(
+                  passDependencyBufferBindings_.data(),
+                  passDependencyBufferBindings_.size());
       const std::span<const RenderGraphPreparedDependencyTextureBinding>
           preparedDependencyTextureBindings =
-              reuseStaticOnlyCascade
-                  ? std::span<
-                        const RenderGraphPreparedDependencyTextureBinding>()
-                  : std::span<
-                        const RenderGraphPreparedDependencyTextureBinding>(
-                        passDependencyTextureBindings_.data(),
-                        passDependencyTextureBindings_.size());
+              std::span<const RenderGraphPreparedDependencyTextureBinding>(
+                  passDependencyTextureBindings_.data(),
+                  passDependencyTextureBindings_.size());
       const RenderGraphPreparedGraphicsPassDesc desc{
           .color = {},
           .colorTexture = {},
           .hasColorAttachment = false,
-          .depth = {.loadOp =
-                        reuseStaticOnlyCascade ? LoadOp::Load : LoadOp::Clear,
+          .depth = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
                     .clearDepth = 1.0f,
                     .clearStencil = 0u},
@@ -8142,8 +9048,7 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
           .color = {},
           .colorTexture = {},
           .hasColorAttachment = false,
-          .depth = {.loadOp =
-                        reuseStaticOnlyCascade ? LoadOp::Load : LoadOp::Clear,
+          .depth = {.loadOp = LoadOp::Clear,
                     .storeOp = StoreOp::Store,
                     .clearDepth = 1.0f,
                     .clearStencil = 0u},
@@ -8182,36 +9087,7 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
       return markResult;
     }
 
-    if (cascadeDynamicDrawCounts_[cascadeIndex] == 0u) {
-      reusableStaticOnlyCascadeValid_[cascadeIndex] = true;
-      reusableStaticOnlyCascadeContentSignatures_[cascadeIndex] =
-          staticOnlyCascadeContentSignatures_[cascadeIndex];
-      reusableStaticOnlyCascadeStates_[cascadeIndex] =
-          StaticOnlyCascadeReuseState{
-              .renderedFit = makeDirectionalShadowFitFromDebugCascade(
-                  shadowDebugFrameData_.cascades[cascadeIndex]),
-              .rawFit = currentRawShadowFits_[cascadeIndex],
-              .shadowDepthTexture = shadowDepthTexture,
-              .rasterSignature =
-                  staticOnlyCascadeContentSignatures_[cascadeIndex],
-              .lightViewProjSignature =
-                  shadowDebugFrameData_.cascades[cascadeIndex]
-                      .currentStaticOnlyLightViewProjSignature,
-              .biasSignature = shadowDebugFrameData_.cascades[cascadeIndex]
-                                   .currentStaticOnlyBiasSignature,
-              .casterSignature = shadowDebugFrameData_.cascades[cascadeIndex]
-                                     .currentStaticOnlyCasterSignature,
-              .staticDrawCount =
-                  shadowDebugFrameData_.cascades[cascadeIndex].staticDrawCount,
-              .dynamicDrawCount =
-                  shadowDebugFrameData_.cascades[cascadeIndex].dynamicDrawCount,
-          };
-    } else {
-      reusableStaticOnlyCascadeValid_[cascadeIndex] = false;
-      reusableStaticOnlyCascadeContentSignatures_[cascadeIndex] = 0u;
-      reusableStaticOnlyCascadeStates_[cascadeIndex] =
-          StaticOnlyCascadeReuseState{};
-    }
+    publishStaticOnlyCascadeState(cascadeIndex, shadowDepthTexture);
   }
   for (uint32_t cascadeIndex = activeCascadeCount_;
        cascadeIndex < kMaxShadowCascades; ++cascadeIndex) {

@@ -1,10 +1,12 @@
 #extension GL_EXT_mesh_shader : require
 
+#define NURI_MESHLET_TASK_PAYLOAD_BATCHED 1
 #include "meshlet_common.sp"
 
-layout(local_size_x = 1) in;
+layout(local_size_x = 32) in;
 
 taskPayloadSharedEXT MeshletTaskPayload meshletPayload;
+shared uint meshletVisibleMask;
 
 const uint kShadowMeshletCounterFlagEnabled = 1u << 0u;
 
@@ -76,48 +78,67 @@ bool meshletOutsideShadowCascade(MeshletDescriptorGpuData meshlet,
 }
 
 void main() {
-  if (gl_WorkGroupID.x == 0u) {
-    markShadowMeshletCounterFrame();
+  const uint lane = gl_LocalInvocationIndex;
+  if (lane == 0u) {
+    meshletPayload.visibleCount = 0u;
+    meshletVisibleMask = 0u;
+    if (gl_WorkGroupID.x == 0u) {
+      markShadowMeshletCounterFrame();
+    }
   }
+  barrier();
 
   const SubmeshMeshletLodRangeGpuData lodRange =
       pc.meshletLodRanges.values[meshletSubmeshIndex()];
-  const uint candidateSpan = meshletCandidateSpan(lodRange);
-  if (candidateSpan == 0u || pc.instanceCount == 0u) {
-    EmitMeshTasksEXT(0u, 1u, 1u);
-    return;
-  }
-
-  const uint candidate = pc.candidateOffset + gl_WorkGroupID.x;
-  const uint instanceLocal = candidate / candidateSpan;
-  if (instanceLocal >= pc.instanceCount) {
-    EmitMeshTasksEXT(0u, 1u, 1u);
-    return;
-  }
-
-  const uint meshletLocal = candidate - instanceLocal * candidateSpan;
   const uint selectedLod =
       resolveAvailableMeshletLod(lodRange, meshletForcedLod());
   const uint selectedMeshletCount = lodRange.meshletCount[selectedLod];
-  if (meshletLocal >= selectedMeshletCount) {
-    EmitMeshTasksEXT(0u, 1u, 1u);
-    return;
+
+  bool acceptedMeshlet = false;
+  uint acceptedMeshletIndex = 0u;
+  uint acceptedGlobalInstanceId = 0u;
+  if (selectedMeshletCount != 0u && pc.instanceCount != 0u) {
+    const uint candidate =
+        pc.candidateOffset +
+        gl_WorkGroupID.x * kOpaqueMeshletTaskPayloadCapacity + lane;
+    const uint instanceLocal = candidate / selectedMeshletCount;
+    if (instanceLocal < pc.instanceCount) {
+      const uint meshletLocal =
+          candidate - instanceLocal * selectedMeshletCount;
+      const uint remapIndex = pc.firstInstance + instanceLocal;
+      const uint meshletIndex =
+          lodRange.meshletOffset[selectedLod] + meshletLocal;
+      const uint globalInstanceId = pc.instanceRemap.ids[remapIndex];
+      const MeshletDescriptorGpuData meshlet = pc.meshlets.values[meshletIndex];
+      const InstanceData inst = pc.instanceMatrices.instances[globalInstanceId];
+      if (meshletOutsideShadowCascade(meshlet, inst, pc.meshletFlags,
+                                      meshletCascadeIndex())) {
+        countShadowMeshletBoundsReject();
+      } else {
+        acceptedMeshlet = true;
+        acceptedMeshletIndex = meshletIndex;
+        acceptedGlobalInstanceId = globalInstanceId;
+        atomicOr(meshletVisibleMask, 1u << lane);
+      }
+    }
   }
 
-  const uint remapIndex = pc.firstInstance + instanceLocal;
-  const uint meshletIndex = lodRange.meshletOffset[selectedLod] + meshletLocal;
-  const uint globalInstanceId = pc.instanceRemap.ids[remapIndex];
-  const MeshletDescriptorGpuData meshlet = pc.meshlets.values[meshletIndex];
-  const InstanceData inst = pc.instanceMatrices.instances[globalInstanceId];
-  if (meshletOutsideShadowCascade(meshlet, inst, pc.meshletFlags,
-                                  meshletCascadeIndex())) {
-    countShadowMeshletBoundsReject();
-    EmitMeshTasksEXT(0u, 1u, 1u);
-    return;
+  barrier();
+  if (acceptedMeshlet) {
+    const uint payloadIndex =
+        bitCount(meshletVisibleMask & ((1u << lane) - 1u));
+    if (payloadIndex < kOpaqueMeshletTaskPayloadCapacity) {
+      meshletPayload.meshletIndex[payloadIndex] = acceptedMeshletIndex;
+      meshletPayload.globalInstanceId[payloadIndex] = acceptedGlobalInstanceId;
+      meshletPayload.selectedLod[payloadIndex] = selectedLod;
+    }
   }
 
-  meshletPayload.meshletIndex = meshletIndex;
-  meshletPayload.globalInstanceId = globalInstanceId;
-  meshletPayload.selectedLod = selectedLod;
-  EmitMeshTasksEXT(1u, 1u, 1u);
+  barrier();
+  if (lane == 0u) {
+    const uint emittedCount =
+        min(bitCount(meshletVisibleMask), kOpaqueMeshletTaskPayloadCapacity);
+    meshletPayload.visibleCount = emittedCount;
+    EmitMeshTasksEXT(emittedCount, 1u, 1u);
+  }
 }

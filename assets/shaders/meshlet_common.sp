@@ -19,7 +19,8 @@ float meshletInstanceMaxScale(mat4 model) {
 }
 
 struct MeshletTaskPayload {
-#ifdef NURI_OPAQUE_MESHLET_BATCHED
+#if defined(NURI_OPAQUE_MESHLET_BATCHED) ||                                   \
+    defined(NURI_MESHLET_TASK_PAYLOAD_BATCHED)
   uint visibleCount;
   uint meshletIndex[kOpaqueMeshletTaskPayloadCapacity];
   uint globalInstanceId[kOpaqueMeshletTaskPayloadCapacity];

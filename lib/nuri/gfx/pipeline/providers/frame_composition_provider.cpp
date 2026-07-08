@@ -52,6 +52,8 @@ uint32_t textureBytesPerPixel(Format format) {
   switch (format) {
   case Format::R8_UNORM:
     return 1u;
+  case Format::R16_UNORM:
+    return 2u;
   case Format::RG16_FLOAT:
     return sizeof(uint16_t) * 2u;
   case Format::RG32_FLOAT:

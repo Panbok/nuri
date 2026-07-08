@@ -195,6 +195,8 @@ allocateMonotonicHandleIndex(uint32_t &nextIndex, std::string_view context) {
     return nvrhi::Format::R32_UINT;
   case Format::R8_UNORM:
     return nvrhi::Format::R8_UNORM;
+  case Format::R16_UNORM:
+    return nvrhi::Format::R16_UNORM;
   case Format::R32_FLOAT:
     return nvrhi::Format::R32_FLOAT;
   case Format::RG32_FLOAT:
@@ -233,6 +235,8 @@ allocateMonotonicHandleIndex(uint32_t &nextIndex, std::string_view context) {
     return VK_FORMAT_R32_UINT;
   case Format::R8_UNORM:
     return VK_FORMAT_R8_UNORM;
+  case Format::R16_UNORM:
+    return VK_FORMAT_R16_UNORM;
   case Format::R32_FLOAT:
     return VK_FORMAT_R32_SFLOAT;
   case Format::RG32_FLOAT:
@@ -775,6 +779,8 @@ compileGlslToSpirv(ShaderStage stage, const char *code,
   switch (format) {
   case Format::R8_UNORM:
     return 1u;
+  case Format::R16_UNORM:
+    return 2u;
   case Format::R32_UINT:
   case Format::R32_FLOAT:
     return 4u;
@@ -821,6 +827,8 @@ compileGlslToSpirv(ShaderStage stage, const char *code,
   switch (format) {
   case Format::R8_UNORM:
     return 1u;
+  case Format::R16_UNORM:
+    return sizeof(uint16_t);
   case Format::R32_UINT:
   case Format::R32_FLOAT:
     return 4u;
@@ -3724,6 +3732,101 @@ recordRenderPass(Impl &impl,
                  nvrhi::ICommandList &commandList, const RenderPass &pass) {
   ScopedNvrhiPassTiming passTiming(impl, commandList, timingQueries,
                                    pass.gpuTimingScope);
+  const bool copyOnly = pass.executionMode == RenderPassExecutionMode::CopyOnly;
+  if (copyOnly) {
+    if (pass.hasColorAttachment || nuri::isValid(pass.colorTexture) ||
+        nuri::isValid(pass.colorResolveTexture) ||
+        nuri::isValid(pass.depthTexture) ||
+        nuri::isValid(pass.depthResolveTexture) ||
+        !pass.preDispatches.empty() || !pass.draws.empty() ||
+        !pass.meshDispatches.empty()) {
+      return Result<bool, std::string>::makeError(
+          "NvrhiGPUDevice::recordRenderPass: invalid copy-only pass payload");
+    }
+    if (pass.textureCopies.empty()) {
+      return Result<bool, std::string>::makeError(
+          "NvrhiGPUDevice::recordRenderPass: copy-only pass has no copies");
+    }
+
+    for (const TextureCopyItem &copy : pass.textureCopies) {
+      TextureResource *source = impl.textures.get(copy.sourceTexture);
+      TextureResource *destination = impl.textures.get(copy.destinationTexture);
+      if (source == nullptr || destination == nullptr || !source->texture ||
+          !destination->texture) {
+        return Result<bool, std::string>::makeError(
+            "NvrhiGPUDevice::recordRenderPass: invalid texture copy handle");
+      }
+      if (copy.sourceTexture.index == copy.destinationTexture.index &&
+          copy.sourceTexture.generation == copy.destinationTexture.generation) {
+        return Result<bool, std::string>::makeError(
+            "NvrhiGPUDevice::recordRenderPass: texture copy source and "
+            "destination match");
+      }
+      if (source->format != destination->format ||
+          source->desc.numSamples != 1u || destination->desc.numSamples != 1u ||
+          source->desc.type != TextureType::Texture2D ||
+          destination->desc.type != TextureType::Texture2D) {
+        return Result<bool, std::string>::makeError(
+            "NvrhiGPUDevice::recordRenderPass: incompatible texture copy "
+            "resources");
+      }
+      if (copy.width == 0u || copy.height == 0u ||
+          copy.sourceMipLevel >= source->desc.numMipLevels ||
+          copy.destinationMipLevel >= destination->desc.numMipLevels ||
+          copy.sourceLayer >= source->desc.numLayers ||
+          copy.destinationLayer >= destination->desc.numLayers) {
+        return Result<bool, std::string>::makeError(
+            "NvrhiGPUDevice::recordRenderPass: invalid texture copy region");
+      }
+      const uint32_t sourceWidth =
+          mipSize(source->desc.dimensions.width, copy.sourceMipLevel);
+      const uint32_t sourceHeight =
+          mipSize(source->desc.dimensions.height, copy.sourceMipLevel);
+      const uint32_t destinationWidth =
+          mipSize(destination->desc.dimensions.width, copy.destinationMipLevel);
+      const uint32_t destinationHeight = mipSize(
+          destination->desc.dimensions.height, copy.destinationMipLevel);
+      if (copy.sourceX >= sourceWidth || copy.sourceY >= sourceHeight ||
+          copy.width > sourceWidth - copy.sourceX ||
+          copy.height > sourceHeight - copy.sourceY ||
+          copy.destinationX >= destinationWidth ||
+          copy.destinationY >= destinationHeight ||
+          copy.width > destinationWidth - copy.destinationX ||
+          copy.height > destinationHeight - copy.destinationY) {
+        return Result<bool, std::string>::makeError(
+            "NvrhiGPUDevice::recordRenderPass: texture copy region out of "
+            "bounds");
+      }
+
+      commandList.setTextureState(source->texture.Get(), nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::CopySource);
+      commandList.setTextureState(destination->texture.Get(),
+                                  nvrhi::AllSubresources,
+                                  nvrhi::ResourceStates::CopyDest);
+      commandList.commitBarriers();
+
+      nvrhi::TextureSlice sourceSlice{};
+      sourceSlice.setOrigin(copy.sourceX, copy.sourceY, 0u)
+          .setSize(copy.width, copy.height, 1u)
+          .setMipLevel(copy.sourceMipLevel)
+          .setArraySlice(copy.sourceLayer);
+      nvrhi::TextureSlice destinationSlice{};
+      destinationSlice.setOrigin(copy.destinationX, copy.destinationY, 0u)
+          .setSize(copy.width, copy.height, 1u)
+          .setMipLevel(copy.destinationMipLevel)
+          .setArraySlice(copy.destinationLayer);
+      commandList.copyTexture(destination->texture.Get(), destinationSlice,
+                              source->texture.Get(), sourceSlice);
+    }
+
+    passTiming.commit();
+    return Result<bool, std::string>::makeResult(true);
+  }
+  if (!pass.textureCopies.empty()) {
+    return Result<bool, std::string>::makeError(
+        "NvrhiGPUDevice::recordRenderPass: non-copy pass contains texture "
+        "copies");
+  }
   auto preDispatchResult =
       recordComputeDispatches(impl, commandList, pass.preDispatches,
                               "NvrhiGPUDevice::recordRenderPass preDispatch");
@@ -4700,8 +4803,11 @@ NvrhiGPUDevice::createMeshletPipeline(const MeshletPipelineDesc &desc,
                                    ? impl_->shaders.get(desc.taskShader)
                                    : nullptr;
   ShaderResource *meshShader = impl_->shaders.get(desc.meshShader);
-  ShaderResource *fragmentShader = impl_->shaders.get(desc.fragmentShader);
-  if (meshShader == nullptr || fragmentShader == nullptr) {
+  ShaderResource *fragmentShader = nuri::isValid(desc.fragmentShader)
+                                       ? impl_->shaders.get(desc.fragmentShader)
+                                       : nullptr;
+  if (meshShader == nullptr ||
+      (nuri::isValid(desc.fragmentShader) && fragmentShader == nullptr)) {
     return Result<MeshletPipelineHandle, std::string>::makeError(
         "Invalid meshlet pipeline shader handle");
   }
@@ -4713,7 +4819,8 @@ NvrhiGPUDevice::createMeshletPipeline(const MeshletPipelineDesc &desc,
     return Result<MeshletPipelineHandle, std::string>::makeError(
         "Meshlet mesh shader handle has the wrong shader stage");
   }
-  if (fragmentShader->stage != ShaderStage::Fragment) {
+  if (fragmentShader != nullptr &&
+      fragmentShader->stage != ShaderStage::Fragment) {
     return Result<MeshletPipelineHandle, std::string>::makeError(
         "Meshlet fragment shader handle has the wrong shader stage");
   }
@@ -5077,6 +5184,7 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
 }
 
 Result<bool, std::string> NvrhiGPUDevice::prepareFrameOutput() {
+  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_WAIT);
   if (impl_ == nullptr || impl_->swapchain.handle == VK_NULL_HANDLE) {
     return Result<bool, std::string>::makeError("Swapchain is not initialized");
   }
@@ -5090,28 +5198,48 @@ Result<bool, std::string> NvrhiGPUDevice::prepareFrameOutput() {
       impl_->frameSemaphoreReuseWaitInstances.size()) {
     const uint64_t waitInstance =
         impl_->frameSemaphoreReuseWaitInstances[impl_->semaphoreFrameIndex];
-    auto waitResult = waitForGraphicsQueueInstance(
-        *impl_, waitInstance,
-        "NvrhiGPUDevice::prepareFrameOutput frame semaphore reuse");
+    Result<bool, std::string> waitResult =
+        Result<bool, std::string>::makeResult(true);
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.frame_semaphore_reuse_wait",
+                       NURI_PROFILER_COLOR_WAIT);
+    waitResult =
+        waitForGraphicsQueueInstance(*impl_, waitInstance,
+                                     "NvrhiGPUDevice::prepareFrameOutput "
+                                     "frame semaphore reuse");
+    NURI_PROFILER_ZONE_END();
     if (waitResult.hasError()) {
       return waitResult;
     }
     impl_->frameSemaphoreReuseWaitInstances[impl_->semaphoreFrameIndex] = 0u;
   }
 
-  VkResult result = vkAcquireNextImageKHR(
-      impl_->device, impl_->swapchain.handle, UINT64_MAX,
-      impl_->imageAvailableSemaphores[impl_->semaphoreFrameIndex],
-      VK_NULL_HANDLE, &impl_->preparedSwapchainImageIndex);
-  if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-    auto resizeResult = createSwapchain(*impl_);
-    if (resizeResult.hasError()) {
-      return Result<bool, std::string>::makeError(resizeResult.error());
-    }
+  VkResult result = VK_SUCCESS;
+  {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.acquire_swapchain_image",
+                       NURI_PROFILER_COLOR_WAIT);
     result = vkAcquireNextImageKHR(
         impl_->device, impl_->swapchain.handle, UINT64_MAX,
         impl_->imageAvailableSemaphores[impl_->semaphoreFrameIndex],
         VK_NULL_HANDLE, &impl_->preparedSwapchainImageIndex);
+    NURI_PROFILER_ZONE_END();
+  }
+  if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+    Result<bool, std::string> resizeResult =
+        Result<bool, std::string>::makeResult(true);
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.recreate_swapchain",
+                       NURI_PROFILER_COLOR_WAIT);
+    resizeResult = createSwapchain(*impl_);
+    NURI_PROFILER_ZONE_END();
+    if (resizeResult.hasError()) {
+      return Result<bool, std::string>::makeError(resizeResult.error());
+    }
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.acquire_swapchain_image_after_recreate",
+                       NURI_PROFILER_COLOR_WAIT);
+    result = vkAcquireNextImageKHR(
+        impl_->device, impl_->swapchain.handle, UINT64_MAX,
+        impl_->imageAvailableSemaphores[impl_->semaphoreFrameIndex],
+        VK_NULL_HANDLE, &impl_->preparedSwapchainImageIndex);
+    NURI_PROFILER_ZONE_END();
   }
   if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
     return Result<bool, std::string>::makeError(

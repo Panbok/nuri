@@ -107,6 +107,7 @@ enum class Format : uint8_t {
   D16_UNORM,
   RG16_FLOAT,
   R8_UNORM,
+  R16_UNORM,
   Count
 };
 
@@ -117,6 +118,7 @@ static_assert(static_cast<uint8_t>(Format::RG32_FLOAT) == 12u);
 static_assert(static_cast<uint8_t>(Format::D16_UNORM) == 13u);
 static_assert(static_cast<uint8_t>(Format::RG16_FLOAT) == 14u);
 static_assert(static_cast<uint8_t>(Format::R8_UNORM) == 15u);
+static_assert(static_cast<uint8_t>(Format::R16_UNORM) == 16u);
 
 enum class BufferUsage : uint8_t {
   None = 0,

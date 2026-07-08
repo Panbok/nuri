@@ -303,7 +303,7 @@ static constexpr Format kFrameCompositionMotionVectorFormat =
 static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R8_UNORM;
 static constexpr Format kFrameCompositionNormalFormat = Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionAmbientOcclusionFormat =
-    Format::R32_FLOAT;
+    Format::R16_UNORM;
 static constexpr Format kFrameCompositionExposureFormat = Format::R32_FLOAT;
 // Motion vectors are normalized UV-space history lookup offsets:
 // historyUv = currentUv + velocity. Current and previous jitter are excluded.
@@ -659,6 +659,7 @@ struct RenderSettings {
     uint32_t sdsmHistogramBucketCount = kDefaultShadowSdsmHistogramBucketCount;
     float sdsmHistogramTrimLowPercent = 0.5f;
     float sdsmHistogramTrimHighPercent = 1.0f;
+    bool enableMeshletDepth = false;
     bool enableMeshletCascadeCulling = true;
     ShadowDebugSettings debug{};
   };
@@ -1353,7 +1354,7 @@ inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
   case ShadowQualityPreset::Ultra:
     settings.cascadeCount = 4u;
     settings.shadowMapSize = 8192u;
-    settings.depthFormat = Format::D32_FLOAT;
+    settings.depthFormat = kDefaultShadowMapDepthFormat;
     settings.maxDistance = 220.0f;
     settings.maxDistanceFadeFraction = 0.0f;
     settings.splitLambda = 0.50f;
@@ -1364,7 +1365,7 @@ inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
     settings.pcfSampleCount = 32u;
     settings.pcssBlockerSampleCount = 16u;
     settings.pcssFilterSampleCount = 32u;
-    settings.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
+    settings.sdsmMode = ShadowSdsmMode::Histogram;
     settings.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
     settings.debug.fixedPoissonRotation = true;
     break;
@@ -2161,6 +2162,15 @@ struct ShadowFrameMetrics {
   uint32_t staticOnlyReuseMissNoPreviousCount = 0;
   uint32_t staticOnlyReuseMissRasterStateChangedCount = 0;
   uint32_t staticOnlyReuseMissAdaptiveRefreshCount = 0;
+  uint32_t staticOnlyScrollCandidateCount = 0;
+  uint32_t staticOnlyScrollCompatibleCount = 0;
+  uint32_t staticOnlyScrollDirtyAreaBasisPoints = 0;
+  uint32_t staticOnlyScrollDirtyCasterEstimate = 0;
+  uint64_t staticOnlyScrollDirtyIndexEstimate = 0;
+  uint32_t staticOnlyScrollRejectAnchorCount = 0;
+  uint32_t staticOnlyScrollRejectDepthCount = 0;
+  uint32_t staticOnlyScrollRejectExtentCount = 0;
+  uint32_t staticOnlyScrollRejectShiftCount = 0;
   uint64_t cascadeTextureBytes = 0;
   float minCascadeTexelWorldSize = 0.0f;
   float averageCascadeTexelWorldSize = 0.0f;
@@ -2257,6 +2267,7 @@ struct AntiAliasingFrameMetrics {
   uint32_t motionVectorReallocationCount = 0u;
   uint32_t motionVectorRg32FallbackCount = 0u;
   uint32_t motionVectorClearPassCount = 0u;
+  uint32_t motionVectorDepthReprojectionPassCount = 0u;
   uint32_t velocityPassCount = 0u;
   uint32_t velocityDrawCount = 0u;
   uint32_t velocityInstanceCount = 0u;
@@ -2333,6 +2344,7 @@ struct AntiAliasingFrameMetrics {
   uint64_t previousMotionVectorTextureBytes = 0u;
   uint64_t motionVectorTotalBytes = 0u;
   uint64_t motionVectorClearBytes = 0u;
+  uint64_t motionVectorDepthReprojectionBytes = 0u;
   uint64_t previousSceneDepthTextureBytes = 0u;
   uint64_t velocityPassBandwidthEstimateBytes = 0u;
   uint64_t velocityDebugBandwidthEstimateBytes = 0u;
@@ -2417,6 +2429,7 @@ struct AntiAliasingFrameMetrics {
   bool motionVectorGraphPublished = false;
   bool previousMotionVectorGraphPublished = false;
   bool previousSceneDepthGraphPublished = false;
+  bool motionVectorDepthReprojectionGenerated = false;
   bool reactiveMaskAllocated = false;
   bool reactiveMaskGraphPublished = false;
   bool reactiveMaskFormatSupported = false;

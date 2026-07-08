@@ -106,38 +106,18 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   const uint sheenRoughnessTexId =
       getMaterialTextureIndex(material, kMaterialTextureSlotSheenRoughness);
 
-  const vec2 uvBaseColor =
-      transformedUv(material, vtx, kMaterialTextureSlotBaseColor);
-  const vec2 uvMetallicRoughness =
-      transformedUv(material, vtx, kMaterialTextureSlotMetallicRoughness);
-  const vec2 uvNormal = transformedUv(material, vtx, kMaterialTextureSlotNormal);
-  const vec2 uvOcclusion =
-      transformedUv(material, vtx, kMaterialTextureSlotOcclusion);
-  const vec2 uvEmissive =
-      transformedUv(material, vtx, kMaterialTextureSlotEmissive);
-  const vec2 uvClearcoat =
-      transformedUv(material, vtx, kMaterialTextureSlotClearcoat);
-  const vec2 uvClearcoatRoughness =
-      transformedUv(material, vtx, kMaterialTextureSlotClearcoatRoughness);
-  const vec2 uvClearcoatNormal =
-      transformedUv(material, vtx, kMaterialTextureSlotClearcoatNormal);
-  const vec2 uvSpecular =
-      transformedUv(material, vtx, kMaterialTextureSlotSpecular);
-  const vec2 uvSpecularColor =
-      transformedUv(material, vtx, kMaterialTextureSlotSpecularColor);
-  const vec2 uvSheenColor =
-      transformedUv(material, vtx, kMaterialTextureSlotSheenColor);
-  const vec2 uvSheenRoughness =
-      transformedUv(material, vtx, kMaterialTextureSlotSheenRoughness);
-
   sm.baseColor = material.header.baseColorFactor;
   if (baseColorTexId != kInvalidTextureBindlessIndex) {
+    const vec2 uvBaseColor =
+        transformedUv(material, vtx, kMaterialTextureSlotBaseColor);
     sm.baseColor *=
         textureBindless2D(baseColorTexId, baseColorSampler, uvBaseColor);
   }
 
   vec4 mrSample = vec4(1.0);
   if (metallicRoughnessTexId != kInvalidTextureBindlessIndex) {
+    const vec2 uvMetallicRoughness =
+        transformedUv(material, vtx, kMaterialTextureSlotMetallicRoughness);
     mrSample = textureBindless2D(metallicRoughnessTexId, dataSampler,
                                  uvMetallicRoughness);
   }
@@ -147,11 +127,23 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   sm.f90 = vec3(0.0);
   sm.diffuseColor = vec3(0.0);
   sm.ior = materialIor(material);
+  const vec2 uvSpecular =
+      specularTexId != kInvalidTextureBindlessIndex
+          ? transformedUv(material, vtx, kMaterialTextureSlotSpecular)
+          : vec2(0.0);
+  const vec2 uvSpecularColor =
+      specularColorTexId != kInvalidTextureBindlessIndex
+          ? transformedUv(material, vtx, kMaterialTextureSlotSpecularColor)
+          : vec2(0.0);
   decodeMaterialBaseWorkflow(
       material, workflow, sm.baseColor, mrSample, uvSpecular, specularTexId,
       dataSampler, uvSpecularColor, specularColorTexId, matSampler, sm.ior,
       sm.metallic, sm.roughness, sm.f0, sm.f90, sm.diffuseColor);
 
+  const vec2 uvOcclusion =
+      occlusionTexId != kInvalidTextureBindlessIndex
+          ? transformedUv(material, vtx, kMaterialTextureSlotOcclusion)
+          : vec2(0.0);
   float occlusion = sampleMaterialOcclusion(
       material, workflow, mrSample, metallicRoughnessTexId, uvOcclusion,
       occlusionTexId, dataSampler);
@@ -174,12 +166,16 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
   if (sm.hasClearcoat) {
     sm.clearcoat = saturate(material.clearcoat.clearcoatFactors.x);
     if (clearcoatTexId != kInvalidTextureBindlessIndex) {
+      const vec2 uvClearcoat =
+          transformedUv(material, vtx, kMaterialTextureSlotClearcoat);
       sm.clearcoat *=
           textureBindless2D(clearcoatTexId, matSampler, uvClearcoat).r;
     }
     sm.clearcoatRoughness =
         clamp(material.clearcoat.clearcoatFactors.y, kBrdfMinRoughness, 1.0);
     if (clearcoatRoughnessTexId != kInvalidTextureBindlessIndex) {
+      const vec2 uvClearcoatRoughness = transformedUv(
+          material, vtx, kMaterialTextureSlotClearcoatRoughness);
       sm.clearcoatRoughness = clamp(
           sm.clearcoatRoughness *
               textureBindless2D(clearcoatRoughnessTexId, dataSampler,
@@ -190,6 +186,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
 
   sm.nBase = sm.nGeom;
   if (normalTexId != kInvalidTextureBindlessIndex) {
+    const vec2 uvNormal =
+        transformedUv(material, vtx, kMaterialTextureSlotNormal);
     vec3 n =
         textureBindless2D(normalTexId, dataSampler, uvNormal).xyz * 2.0 - 1.0;
     n.xy *= materialNormalScale(material);
@@ -232,6 +230,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
 
   sm.nClearcoat = sm.nGeom;
   if (sm.hasClearcoat && clearcoatNormalTexId != kInvalidTextureBindlessIndex) {
+    const vec2 uvClearcoatNormal =
+        transformedUv(material, vtx, kMaterialTextureSlotClearcoatNormal);
     vec3 n = textureBindless2D(clearcoatNormalTexId, dataSampler,
                                uvClearcoatNormal).xyz *
                  2.0 -
@@ -254,6 +254,8 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
 
   sm.emissive = material.header.emissiveFactorStrength.xyz;
   if (emissiveTexId != kInvalidTextureBindlessIndex) {
+    const vec2 uvEmissive =
+        transformedUv(material, vtx, kMaterialTextureSlotEmissive);
     sm.emissive *= textureBindless2D(emissiveTexId, matSampler, uvEmissive).rgb;
   }
   sm.emissive *= materialEmissiveStrength(material);
@@ -272,10 +274,14 @@ ShadedMaterial evaluateMaterial(MaterialData material, PerVertex vtx) {
                             kBrdfMinRoughness, 1.0);
   sm.sheenColor = material.sheen.sheenColorFactorWeight.xyz;
   if (sheenColorTexId != kInvalidTextureBindlessIndex) {
+    const vec2 uvSheenColor =
+        transformedUv(material, vtx, kMaterialTextureSlotSheenColor);
     sm.sheenColor *=
         textureBindless2D(sheenColorTexId, matSampler, uvSheenColor).rgb;
   }
   if (sheenRoughnessTexId != kInvalidTextureBindlessIndex) {
+    const vec2 uvSheenRoughness =
+        transformedUv(material, vtx, kMaterialTextureSlotSheenRoughness);
     sm.sheenRoughness = clamp(
         sm.sheenRoughness *
             textureBindless2D(sheenRoughnessTexId, dataSampler,

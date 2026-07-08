@@ -6,7 +6,7 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
-layout(set = 0, binding = 2, r32f) uniform image2D kImagesR32F[];
+layout(set = 0, binding = 2, r16) uniform image2D kImagesR16[];
 
 const uint kViewDepthMipCount = 5u;
 const float kPi = 3.14159265359;
@@ -180,7 +180,7 @@ void main() {
   vec3 viewNormal = normalSample.xyz * 2.0 - 1.0;
   float normalLenSq = dot(viewNormal, viewNormal);
   if (normalSample.a <= 0.0 || normalLenSq <= 1.0e-6 || centerDepth <= 1.0e-5) {
-    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+    imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
                vec4(1.0, 0.0, 0.0, 0.0));
     return;
   }
@@ -196,7 +196,7 @@ void main() {
                 max(float(pc.height), 1.0);
   float radiusPixels = min(effectRadius / max(viewUnitsPerPixel, 1.0e-4), 96.0);
   if (radiusPixels < kPixelTooCloseThreshold) {
-    imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+    imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
                vec4(1.0, 0.0, 0.0, 0.0));
     return;
   }
@@ -288,12 +288,15 @@ void main() {
           float contactVisibility =
               1.0 - smoothstep(kForegroundContactStartPixels,
                                kForegroundContactEndPixels, offsetLength);
-          float edgeSeparatedVisibility =
-              smoothstep(kForegroundSilhouetteEdgeThreshold, 1.0,
-                         pathEdgeVisibility(pos, signedOffset, size));
-          foregroundSilhouetteVisibility =
-              max(contactVisibility,
-                  min(depthSeparatedVisibility, edgeSeparatedVisibility));
+          foregroundSilhouetteVisibility = contactVisibility;
+          if (depthSeparatedVisibility > contactVisibility) {
+            float edgeSeparatedVisibility =
+                smoothstep(kForegroundSilhouetteEdgeThreshold, 1.0,
+                           pathEdgeVisibility(pos, signedOffset, size));
+            foregroundSilhouetteVisibility =
+                max(contactVisibility,
+                    min(depthSeparatedVisibility, edgeSeparatedVisibility));
+          }
         }
 
         vec3 samplePos = reconstructViewPosition(sampleUv, sampleDepth);
@@ -333,6 +336,6 @@ void main() {
   float strength = clamp(unpackFloat(pc.strengthBits), 0.0, 1.0);
   visibility = mix(1.0, rawVisibility, strength);
   visibility = max(visibility, 1.0 - kMaxVisibilityReduction);
-  imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+  imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
              vec4(visibility, 0.0, 0.0, 0.0));
 }

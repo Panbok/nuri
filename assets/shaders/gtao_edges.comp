@@ -6,7 +6,7 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform texture2D kTextures2D[];
-layout(set = 0, binding = 2, r32f) uniform image2D kImagesR32F[];
+layout(set = 0, binding = 2, r8) uniform image2D kImagesR8[];
 
 layout(push_constant) uniform constants {
   uint depthTexId;
@@ -51,6 +51,6 @@ void main() {
   float bottomZ = fetchViewDepth(clamp(pos + ivec2(0, 1), ivec2(0), maxPos));
   float packedEdges =
       packEdges(calculateEdges(centerZ, leftZ, rightZ, topZ, bottomZ));
-  imageStore(kImagesR32F[nonuniformEXT(pc.outputTexId)], pos,
+  imageStore(kImagesR8[nonuniformEXT(pc.outputTexId)], pos,
              vec4(packedEdges, 0.0, 0.0, 0.0));
 }

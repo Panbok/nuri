@@ -1,8 +1,8 @@
 #define NURI_OPAQUE_MESHLET_BATCHED 1
-#include "meshlet_common.sp"
 #include "BRDF.sp"
 #include "material_inputs.sp"
 #include "material_lighting.sp"
+#include "meshlet_common.sp"
 
 layout(location = 0) in PerVertex vtx;
 layout(location = 10) flat in uint meshletDebugId;

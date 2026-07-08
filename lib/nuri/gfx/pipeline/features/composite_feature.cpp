@@ -400,6 +400,8 @@ uint32_t bytesPerPixel(Format format) {
   switch (format) {
   case Format::R8_UNORM:
     return 1u;
+  case Format::R16_UNORM:
+    return 2u;
   case Format::R32_FLOAT:
   case Format::R32_UINT:
   case Format::RGBA8_UNORM:

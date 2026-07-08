@@ -413,9 +413,25 @@ struct MeshDispatchItem {
   uint32_t debugColor = 0xffffffffu;
 };
 
+struct TextureCopyItem {
+  TextureHandle sourceTexture{};
+  TextureHandle destinationTexture{};
+  uint32_t sourceX = 0;
+  uint32_t sourceY = 0;
+  uint32_t destinationX = 0;
+  uint32_t destinationY = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t sourceMipLevel = 0;
+  uint32_t destinationMipLevel = 0;
+  uint32_t sourceLayer = 0;
+  uint32_t destinationLayer = 0;
+};
+
 enum class RenderPassExecutionMode : uint8_t {
   Graphics = 0,
   ComputeOnly = 1,
+  CopyOnly = 2,
 };
 
 struct RenderPass {
@@ -434,6 +450,8 @@ struct RenderPass {
   std::span<const TextureHandle> dependencyTextures{};
   std::span<const DrawItem> draws{};
   std::span<const MeshDispatchItem> meshDispatches{};
+  std::span<const TextureCopyItem> textureCopies{};
+  bool payloadBorrowed = false;
   bool drawBuffersPreResolved = false;
   GpuTimingScope gpuTimingScope = GpuTimingScope::None;
   std::string_view debugLabel{};
