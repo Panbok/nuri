@@ -38,6 +38,7 @@ constexpr float kLogFilterWidth = 200.0f;
 constexpr float kPassListWidth = 140.0f;
 constexpr double kMetricGraphUpdateIntervalSeconds = 0.04;
 constexpr double kLogUpdateIntervalSeconds = 0.10;
+constexpr double kPassMetricsUpdateIntervalSeconds = 0.50;
 constexpr float kMetricGraphWindowWidth = 300.0f;
 constexpr float kMetricGraphWindowHeight = 280.0f;
 constexpr double kMetricSampleMinDeltaSeconds = 1.0e-6;
@@ -49,6 +50,9 @@ constexpr const char *kDockspaceRootId = "NuriDockspace##Root";
 constexpr const char *kLogWindowName = "Log";
 constexpr const char *kRenderGraphTelemetryWindowName =
     "Render Graph Telemetry";
+constexpr const char *kPassMetricsWindowName = "Passes Metrics";
+constexpr const char *kPassMetricsRecordingWindowName =
+    "Passes Metrics Recording";
 constexpr const char *kFontCompilerWindowName = "Font Compiler";
 constexpr const char *kBakeryWindowName = "Bakery";
 constexpr const char *kLightsWindowName = "Lights";
@@ -902,6 +906,43 @@ struct RenderGraphTelemetryUiState {
   std::string lastSuggestedPath{};
   FileDialogWidget fileDialog{};
   bool initializedOutputPath = false;
+};
+
+struct PassMetricsRow {
+  std::string name{};
+  float cpuTimeMs = 0.0f;
+  float gpuTimeMs = 0.0f;
+  bool hasCpuTiming = false;
+  bool hasGpuTiming = false;
+};
+
+struct PassMetricAggregate {
+  uint32_t orderedPassIndex = UINT32_MAX;
+  std::string name{};
+  float cpuMinMs = std::numeric_limits<float>::max();
+  float cpuMaxMs = 0.0f;
+  double cpuSumMs = 0.0;
+  uint32_t cpuSampleCount = 0u;
+  float gpuMinMs = std::numeric_limits<float>::max();
+  float gpuMaxMs = 0.0f;
+  double gpuSumMs = 0.0;
+  uint32_t gpuSampleCount = 0u;
+};
+
+struct PassMetricsUiState {
+  std::vector<PassMetricsRow> rows{};
+  std::vector<PassMetricAggregate> aggregates{};
+  double lastUpdateSeconds = -kPassMetricsUpdateIntervalSeconds;
+  uint64_t renderGraphFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t gpuFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t recordingStartFrameIndex = 0u;
+  uint64_t lastRecordedCpuFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t lastRecordedGpuFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint32_t gpuPassTimingCount = 0u;
+  uint32_t recordedCpuFrameCount = 0u;
+  uint32_t recordedGpuReportCount = 0u;
+  bool recording = false;
+  bool showRecordingWindow = false;
 };
 
 struct TelemetryOverlayUiState {
@@ -4469,6 +4510,434 @@ void drawTextView(std::string_view text) {
   ImGui::TextUnformatted(text.data(), text.data() + text.size());
 }
 
+[[nodiscard]] std::optional<float>
+findPassCpuTimingMs(const RenderGraphTelemetrySnapshot &snapshot,
+                    uint32_t orderedPassIndex) {
+  if (orderedPassIndex < snapshot.passTimings.size()) {
+    const RenderGraphPassExecutionTiming &timing =
+        snapshot.passTimings[orderedPassIndex];
+    if (timing.orderedPassIndex == orderedPassIndex) {
+      return timing.cpuTimeMs;
+    }
+  }
+  for (const RenderGraphPassExecutionTiming &timing : snapshot.passTimings) {
+    if (timing.orderedPassIndex == orderedPassIndex) {
+      return timing.cpuTimeMs;
+    }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] const GpuTimingReport::PassTiming *
+claimGpuPassTiming(const GpuTimingReport &report, std::vector<uint8_t> &claimed,
+                   std::string_view passName, uint32_t orderedPassIndex,
+                   uint32_t passCount) {
+  const auto matchesName = [passName](
+                               const GpuTimingReport::PassTiming &timing) {
+    return std::string_view(timing.debugName.data(), timing.debugName.size()) ==
+           passName;
+  };
+
+  if (orderedPassIndex < report.passTimings.size() &&
+      orderedPassIndex < claimed.size() && claimed[orderedPassIndex] == 0u &&
+      report.passTimings.size() == passCount &&
+      matchesName(report.passTimings[orderedPassIndex])) {
+    claimed[orderedPassIndex] = 1u;
+    return &report.passTimings[orderedPassIndex];
+  }
+
+  for (size_t i = 0u; i < report.passTimings.size() && i < claimed.size();
+       ++i) {
+    if (claimed[i] != 0u || !matchesName(report.passTimings[i])) {
+      continue;
+    }
+    claimed[i] = 1u;
+    return &report.passTimings[i];
+  }
+
+  return nullptr;
+}
+
+[[nodiscard]] PassMetricAggregate &
+ensurePassMetricAggregate(PassMetricsUiState &state, uint32_t orderedPassIndex,
+                          std::string_view passName) {
+  for (PassMetricAggregate &aggregate : state.aggregates) {
+    if (aggregate.name == passName) {
+      aggregate.orderedPassIndex =
+          std::min(aggregate.orderedPassIndex, orderedPassIndex);
+      return aggregate;
+    }
+  }
+
+  PassMetricAggregate aggregate{};
+  aggregate.orderedPassIndex = orderedPassIndex;
+  aggregate.name.assign(passName.data(), passName.size());
+  state.aggregates.push_back(std::move(aggregate));
+  return state.aggregates.back();
+}
+
+void addPassMetricCpuSample(PassMetricAggregate &aggregate, float timeMs) {
+  if (!std::isfinite(timeMs) || timeMs < 0.0f) {
+    return;
+  }
+  aggregate.cpuMinMs = std::min(aggregate.cpuMinMs, timeMs);
+  aggregate.cpuMaxMs = std::max(aggregate.cpuMaxMs, timeMs);
+  aggregate.cpuSumMs += static_cast<double>(timeMs);
+  ++aggregate.cpuSampleCount;
+}
+
+void addPassMetricGpuSample(PassMetricAggregate &aggregate, float timeMs) {
+  if (!std::isfinite(timeMs) || timeMs < 0.0f) {
+    return;
+  }
+  aggregate.gpuMinMs = std::min(aggregate.gpuMinMs, timeMs);
+  aggregate.gpuMaxMs = std::max(aggregate.gpuMaxMs, timeMs);
+  aggregate.gpuSumMs += static_cast<double>(timeMs);
+  ++aggregate.gpuSampleCount;
+}
+
+[[nodiscard]] float passMetricSortMax(const PassMetricAggregate &aggregate) {
+  float maxMs = 0.0f;
+  if (aggregate.cpuSampleCount > 0u) {
+    maxMs = std::max(maxMs, aggregate.cpuMaxMs);
+  }
+  if (aggregate.gpuSampleCount > 0u) {
+    maxMs = std::max(maxMs, aggregate.gpuMaxMs);
+  }
+  return maxMs;
+}
+
+[[nodiscard]] float passMetricAverage(double sum, uint32_t sampleCount) {
+  return sampleCount > 0u ? static_cast<float>(sum / sampleCount) : 0.0f;
+}
+
+void drawMetricValue(float value, uint32_t sampleCount) {
+  if (sampleCount == 0u) {
+    ImGui::TextUnformatted("--");
+    return;
+  }
+  ImGui::Text("%.3f", value);
+}
+
+void recordCpuPassMetricSamples(PassMetricsUiState &state,
+                                const RenderGraphTelemetrySnapshot &snapshot) {
+  const uint64_t frameIndex = snapshot.summary.frameIndex;
+  if (frameIndex < state.recordingStartFrameIndex ||
+      frameIndex == state.lastRecordedCpuFrameIndex) {
+    return;
+  }
+
+  const uint32_t passCount =
+      static_cast<uint32_t>(snapshot.orderedPassIndices.size());
+  for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passCount;
+       ++orderedPassIndex) {
+    const std::optional<float> cpuMs =
+        findPassCpuTimingMs(snapshot, orderedPassIndex);
+    if (!cpuMs.has_value()) {
+      continue;
+    }
+    const uint32_t declaredPassIndex =
+        snapshot.orderedPassIndices[orderedPassIndex];
+    const std::string_view passName =
+        resolveTelemetryPassName(snapshot, declaredPassIndex);
+    PassMetricAggregate &aggregate =
+        ensurePassMetricAggregate(state, orderedPassIndex, passName);
+    addPassMetricCpuSample(aggregate, *cpuMs);
+  }
+
+  state.lastRecordedCpuFrameIndex = frameIndex;
+  ++state.recordedCpuFrameCount;
+}
+
+void recordGpuPassMetricReport(PassMetricsUiState &state,
+                               const GpuTimingReport &report) {
+  if (report.passTimings.empty()) {
+    return;
+  }
+
+  const uint64_t frameIndex = report.passTimings.front().sourceFrameIndex;
+  if (frameIndex < state.recordingStartFrameIndex ||
+      frameIndex == state.lastRecordedGpuFrameIndex) {
+    return;
+  }
+
+  for (uint32_t orderedPassIndex = 0u;
+       orderedPassIndex < report.passTimings.size(); ++orderedPassIndex) {
+    const GpuTimingReport::PassTiming &timing =
+        report.passTimings[orderedPassIndex];
+    const std::string_view passName(timing.debugName.data(),
+                                    timing.debugName.size());
+    PassMetricAggregate &aggregate =
+        ensurePassMetricAggregate(state, orderedPassIndex, passName);
+    addPassMetricGpuSample(aggregate, timing.timeMs);
+  }
+
+  state.lastRecordedGpuFrameIndex = frameIndex;
+  ++state.recordedGpuReportCount;
+}
+
+void collectPassMetricRecordingSamples(
+    PassMetricsUiState &state, const RenderGraphTelemetryService *telemetry,
+    GPUDevice &gpu) {
+  const RenderGraphTelemetrySnapshot *snapshot =
+      telemetry != nullptr ? telemetry->latestSnapshot() : nullptr;
+  if (snapshot != nullptr) {
+    recordCpuPassMetricSamples(state, *snapshot);
+  }
+
+  std::array<GpuTimingReport, 64> reports{};
+  for (;;) {
+    const size_t reportCount =
+        gpu.drainCompletedGpuTimingReports(std::span<GpuTimingReport>(reports));
+    for (size_t i = 0u; i < reportCount; ++i) {
+      recordGpuPassMetricReport(state, reports[i]);
+      reports[i] = GpuTimingReport{};
+    }
+    if (reportCount < reports.size()) {
+      break;
+    }
+  }
+}
+
+void startPassMetricRecording(PassMetricsUiState &state,
+                              const RenderGraphTelemetryService *telemetry) {
+  state.aggregates.clear();
+  state.recordedCpuFrameCount = 0u;
+  state.recordedGpuReportCount = 0u;
+  state.lastRecordedCpuFrameIndex = std::numeric_limits<uint64_t>::max();
+  state.lastRecordedGpuFrameIndex = std::numeric_limits<uint64_t>::max();
+  state.showRecordingWindow = false;
+  if (const RenderGraphTelemetrySnapshot *snapshot =
+          telemetry != nullptr ? telemetry->latestSnapshot() : nullptr;
+      snapshot != nullptr) {
+    state.recordingStartFrameIndex = snapshot->summary.frameIndex;
+  } else {
+    state.recordingStartFrameIndex = 0u;
+  }
+  state.recording = true;
+}
+
+void stopPassMetricRecording(PassMetricsUiState &state) {
+  state.recording = false;
+  state.showRecordingWindow = !state.aggregates.empty();
+}
+
+void refreshPassMetrics(PassMetricsUiState &state,
+                        const RenderGraphTelemetryService *telemetry,
+                        GPUDevice &gpu) {
+  state.rows.clear();
+  state.renderGraphFrameIndex = std::numeric_limits<uint64_t>::max();
+  state.gpuFrameIndex = std::numeric_limits<uint64_t>::max();
+  state.gpuPassTimingCount = 0u;
+
+  const RenderGraphTelemetrySnapshot *snapshot =
+      telemetry != nullptr ? telemetry->latestSnapshot() : nullptr;
+  if (snapshot == nullptr) {
+    return;
+  }
+
+  const GpuTimingReport gpuReport = gpu.getLatestCompletedGpuTimingReport();
+  state.renderGraphFrameIndex = snapshot->summary.frameIndex;
+  state.gpuPassTimingCount =
+      static_cast<uint32_t>(gpuReport.passTimings.size());
+  if (!gpuReport.passTimings.empty()) {
+    state.gpuFrameIndex = gpuReport.passTimings.front().sourceFrameIndex;
+  }
+
+  const uint32_t passCount =
+      static_cast<uint32_t>(snapshot->orderedPassIndices.size());
+  std::vector<uint8_t> claimedGpuTimings(gpuReport.passTimings.size(), 0u);
+  state.rows.reserve(passCount);
+
+  for (uint32_t orderedPassIndex = 0u; orderedPassIndex < passCount;
+       ++orderedPassIndex) {
+    const uint32_t declaredPassIndex =
+        snapshot->orderedPassIndices[orderedPassIndex];
+    const std::string_view passName =
+        resolveTelemetryPassName(*snapshot, declaredPassIndex);
+
+    PassMetricsRow row{};
+    row.name.assign(passName.data(), passName.size());
+    if (const std::optional<float> cpuMs =
+            findPassCpuTimingMs(*snapshot, orderedPassIndex)) {
+      row.cpuTimeMs = *cpuMs;
+      row.hasCpuTiming = true;
+    }
+
+    if (const GpuTimingReport::PassTiming *gpuTiming =
+            claimGpuPassTiming(gpuReport, claimedGpuTimings, passName,
+                               orderedPassIndex, passCount);
+        gpuTiming != nullptr) {
+      row.gpuTimeMs = gpuTiming->timeMs;
+      row.hasGpuTiming = true;
+    }
+
+    state.rows.push_back(std::move(row));
+  }
+}
+
+void drawPassMetricRecordingWindow(PassMetricsUiState &state) {
+  ImGui::Text("CPU Frames: %u", state.recordedCpuFrameCount);
+  ImGui::SameLine();
+  ImGui::Text("GPU Reports: %u", state.recordedGpuReportCount);
+
+  if (state.aggregates.empty()) {
+    ImGui::TextUnformatted("<none>");
+    return;
+  }
+
+  std::vector<size_t> sortedIndices(state.aggregates.size());
+  std::iota(sortedIndices.begin(), sortedIndices.end(), size_t{0});
+  std::sort(sortedIndices.begin(), sortedIndices.end(),
+            [&](size_t lhs, size_t rhs) {
+              const PassMetricAggregate &a = state.aggregates[lhs];
+              const PassMetricAggregate &b = state.aggregates[rhs];
+              return passMetricSortMax(a) > passMetricSortMax(b);
+            });
+
+  if (!ImGui::BeginTable("PassesMetricsRecordingTable", 10,
+                         ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                             ImGuiTableFlags_Resizable |
+                             ImGuiTableFlags_ScrollY,
+                         ImVec2(0.0f, 520.0f))) {
+    return;
+  }
+
+  ImGui::TableSetupScrollFreeze(0, 1);
+  ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+  ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+  ImGui::TableSetupColumn("CPU Min", ImGuiTableColumnFlags_WidthFixed, 78.0f);
+  ImGui::TableSetupColumn("CPU Avg", ImGuiTableColumnFlags_WidthFixed, 78.0f);
+  ImGui::TableSetupColumn("CPU Max", ImGuiTableColumnFlags_WidthFixed, 78.0f);
+  ImGui::TableSetupColumn("GPU Min", ImGuiTableColumnFlags_WidthFixed, 78.0f);
+  ImGui::TableSetupColumn("GPU Avg", ImGuiTableColumnFlags_WidthFixed, 78.0f);
+  ImGui::TableSetupColumn("GPU Max", ImGuiTableColumnFlags_WidthFixed, 78.0f);
+  ImGui::TableSetupColumn("CPU N", ImGuiTableColumnFlags_WidthFixed, 62.0f);
+  ImGui::TableSetupColumn("GPU N", ImGuiTableColumnFlags_WidthFixed, 62.0f);
+  ImGui::TableHeadersRow();
+
+  for (const size_t aggregateIndex : sortedIndices) {
+    const PassMetricAggregate &aggregate = state.aggregates[aggregateIndex];
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::Text("%u", aggregate.orderedPassIndex);
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(aggregate.name.c_str());
+    ImGui::TableNextColumn();
+    drawMetricValue(aggregate.cpuMinMs, aggregate.cpuSampleCount);
+    ImGui::TableNextColumn();
+    drawMetricValue(
+        passMetricAverage(aggregate.cpuSumMs, aggregate.cpuSampleCount),
+        aggregate.cpuSampleCount);
+    ImGui::TableNextColumn();
+    drawMetricValue(aggregate.cpuMaxMs, aggregate.cpuSampleCount);
+    ImGui::TableNextColumn();
+    drawMetricValue(aggregate.gpuMinMs, aggregate.gpuSampleCount);
+    ImGui::TableNextColumn();
+    drawMetricValue(
+        passMetricAverage(aggregate.gpuSumMs, aggregate.gpuSampleCount),
+        aggregate.gpuSampleCount);
+    ImGui::TableNextColumn();
+    drawMetricValue(aggregate.gpuMaxMs, aggregate.gpuSampleCount);
+    ImGui::TableNextColumn();
+    ImGui::Text("%u", aggregate.cpuSampleCount);
+    ImGui::TableNextColumn();
+    ImGui::Text("%u", aggregate.gpuSampleCount);
+  }
+
+  ImGui::EndTable();
+}
+
+void drawPassMetricsWindow(PassMetricsUiState &state,
+                           const RenderGraphTelemetryService *telemetry,
+                           GPUDevice &gpu) {
+  if (state.recording) {
+    collectPassMetricRecordingSamples(state, telemetry, gpu);
+  }
+
+  const double nowSeconds = ImGui::GetTime();
+  if (state.rows.empty() || nowSeconds - state.lastUpdateSeconds >=
+                                kPassMetricsUpdateIntervalSeconds) {
+    refreshPassMetrics(state, telemetry, gpu);
+    state.lastUpdateSeconds = nowSeconds;
+  }
+
+  if (telemetry == nullptr || !telemetry->hasSnapshot()) {
+    ImGui::TextUnformatted("No render-graph telemetry has been captured yet.");
+    return;
+  }
+
+  if (state.recording) {
+    if (ImGui::Button("Stop Recording##PassMetrics")) {
+      stopPassMetricRecording(state);
+    }
+  } else {
+    if (ImGui::Button("Start Recording##PassMetrics")) {
+      startPassMetricRecording(state, telemetry);
+    }
+  }
+  if (!state.aggregates.empty()) {
+    ImGui::SameLine();
+    if (ImGui::Button("Open Recording##PassMetrics")) {
+      state.showRecordingWindow = true;
+    }
+  }
+  ImGui::SameLine();
+  ImGui::Text("CPU Frames: %u  GPU Reports: %u", state.recordedCpuFrameCount,
+              state.recordedGpuReportCount);
+
+  ImGui::Separator();
+  ImGui::Text("Render Graph Frame: %llu",
+              static_cast<unsigned long long>(state.renderGraphFrameIndex));
+  ImGui::SameLine();
+  if (state.gpuFrameIndex == std::numeric_limits<uint64_t>::max()) {
+    ImGui::TextUnformatted("GPU Frame: pending");
+  } else {
+    ImGui::Text("GPU Frame: %llu",
+                static_cast<unsigned long long>(state.gpuFrameIndex));
+  }
+  ImGui::SameLine();
+  ImGui::Text("GPU Passes: %u", state.gpuPassTimingCount);
+
+  if (state.rows.empty()) {
+    ImGui::TextUnformatted("<none>");
+    return;
+  }
+
+  if (!ImGui::BeginTable("PassesMetricsTable", 3,
+                         ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                             ImGuiTableFlags_Resizable |
+                             ImGuiTableFlags_ScrollY,
+                         ImVec2(0.0f, 420.0f))) {
+    return;
+  }
+
+  ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+  ImGui::TableSetupColumn("CPU", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+  ImGui::TableSetupColumn("GPU", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+  ImGui::TableHeadersRow();
+
+  for (const PassMetricsRow &row : state.rows) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(row.name.c_str());
+    ImGui::TableNextColumn();
+    if (row.hasCpuTiming) {
+      ImGui::Text("%.3f ms", row.cpuTimeMs);
+    } else {
+      ImGui::TextUnformatted("--");
+    }
+    ImGui::TableNextColumn();
+    if (row.hasGpuTiming) {
+      ImGui::Text("%.3f ms", row.gpuTimeMs);
+    } else {
+      ImGui::TextUnformatted("--");
+    }
+  }
+
+  ImGui::EndTable();
+}
+
 void drawTelemetrySummary(
     const RenderGraphTelemetrySnapshot::Summary &summary) {
   if (!ImGui::BeginTable("RenderGraphTelemetrySummary", 2,
@@ -5020,12 +5489,57 @@ void setLogWindowPlacementWithoutDock(const ImGuiViewport *viewport) {
   ImGui::SetNextWindowViewport(viewport->ID);
 }
 
+struct OverlayGpuFrameTime {
+  float milliseconds = 0.0f;
+  bool available = false;
+};
+
+[[nodiscard]] OverlayGpuFrameTime
+computeOverlayGpuFrameTime(const RenderFrameMetrics &metrics) {
+  OverlayGpuFrameTime frameTime{};
+  const auto addScope = [&frameTime](uint32_t timingAvailable,
+                                     float milliseconds) {
+    if (timingAvailable == 0u) {
+      return;
+    }
+
+    frameTime.available = true;
+    if (std::isfinite(milliseconds) && milliseconds > 0.0f) {
+      frameTime.milliseconds += milliseconds;
+    }
+  };
+
+  addScope(metrics.shadow.gpuTimingAvailable, metrics.shadow.gpuTimeMs);
+  addScope(metrics.shadow.depthGpuTimingAvailable,
+           metrics.shadow.depthGpuTimeMs);
+  addScope(metrics.shadow.sdsmGpuTimingAvailable, metrics.shadow.sdsmGpuTimeMs);
+  addScope(metrics.opaque.gpuTimingAvailable, metrics.opaque.gpuTimeMs);
+  addScope(metrics.ambientOcclusion.gpuTimingAvailable,
+           metrics.ambientOcclusion.gpuTimeMs);
+  addScope(metrics.antiAliasing.taaResolveGpuTimingAvailable,
+           metrics.antiAliasing.taaResolveGpuTimeMs);
+  addScope(metrics.antiAliasing.taaDebugGpuTimingAvailable,
+           metrics.antiAliasing.taaDebugGpuTimeMs);
+  addScope(metrics.antiAliasing.taaSceneColorDownsampleGpuTimingAvailable,
+           metrics.antiAliasing.taaSceneColorDownsampleGpuTimeMs);
+  addScope(metrics.antiAliasing.taaTransmissionGpuTimingAvailable,
+           metrics.antiAliasing.taaTransmissionGpuTimeMs);
+  addScope(metrics.antiAliasing.spatialAAGpuTimingAvailable,
+           metrics.antiAliasing.spatialAAGpuTimeMs);
+  addScope(metrics.antiAliasing.msaaResolveGpuTimingAvailable,
+           metrics.antiAliasing.msaaResolveGpuTimeMs);
+  addScope(metrics.hdrPostProcess.gpuTimingAvailable,
+           metrics.hdrPostProcess.gpuTimeMs);
+
+  return frameTime;
+}
+
 void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                     LinearGraph &frametimeGraph,
                     const RenderFrameMetrics &frameMetrics,
                     const RenderSettings &renderSettings,
                     const TelemetryOverlayUiState &telemetryState,
-                    float overlayRightBoundaryX) {
+                    double frameDeltaSeconds, float overlayRightBoundaryX) {
   if (!telemetryState.overlayEnabled) {
     return;
   }
@@ -5049,11 +5563,19 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
                        ImGuiWindowFlags_NoFocusOnAppearing |
                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove)) {
     const float fps = fpsCounter.getFPS();
-    const float milliseconds = fps > 0.0f ? 1000.0f / fps : 0.0f;
+    const float cpuMilliseconds =
+        sanitizeSample(static_cast<float>(frameDeltaSeconds * 1000.0));
+    const OverlayGpuFrameTime gpuFrameTime =
+        computeOverlayGpuFrameTime(frameMetrics);
     bool drewStats = false;
     if (telemetryState.showFpsMs) {
-      ImGui::Text("FPS : %i", static_cast<int>(fps));
-      ImGui::Text("Ms  : %.1f", milliseconds);
+      ImGui::Text("FPS   : %i", static_cast<int>(fps));
+      ImGui::Text("CPU ms: %.2f", cpuMilliseconds);
+      if (gpuFrameTime.available) {
+        ImGui::Text("GPU ms: %.2f", gpuFrameTime.milliseconds);
+      } else {
+        ImGui::TextUnformatted("GPU ms: pending");
+      }
       drewStats = true;
     }
     if (telemetryState.showInstanceStats) {
@@ -5127,7 +5649,7 @@ void drawFpsOverlay(const FPSCounter &fpsCounter, LinearGraph &fpsGraph,
       fpsGraph.draw("FPS Graph##Metrics", "FPS", graphStyle);
 
       graphStyle.lineColorRgba = IM_COL32(255, 160, 64, 255);
-      frametimeGraph.draw("Frametime Graph##Metrics", "Frametime (ms)",
+      frametimeGraph.draw("CPU Frametime Graph##Metrics", "CPU Frametime (ms)",
                           graphStyle);
       ImGui::PopStyleVar();
     }
@@ -6383,6 +6905,7 @@ struct ImGuiEditor::Impl {
     if (ImGui::BeginMenu("Debug")) {
       ImGui::MenuItem("Render Graph Telemetry", nullptr,
                       &showRenderGraphTelemetryWindow);
+      ImGui::MenuItem("Passes Metrics", nullptr, &showPassMetricsWindow);
       ImGui::MenuItem("Gizmo Controls", nullptr, &showGizmoControlsWindow);
       ImGui::MenuItem("Telemetry", nullptr, &showTelemetrySettingsWindow);
       ImGui::EndMenu();
@@ -6546,6 +7069,25 @@ struct ImGuiEditor::Impl {
       ImGui::End();
       NURI_PROFILER_ZONE_END();
     }
+    if (showPassMetricsWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawPassMetricsWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      if (ImGui::Begin(kPassMetricsWindowName, &showPassMetricsWindow)) {
+        drawPassMetricsWindow(passMetricsState, renderGraphTelemetry, gpu);
+      }
+      ImGui::End();
+      NURI_PROFILER_ZONE_END();
+    }
+    if (passMetricsState.showRecordingWindow) {
+      NURI_PROFILER_ZONE("ImGuiEditor::DrawPassMetricsRecordingWindow",
+                         NURI_PROFILER_COLOR_CMD_DRAW);
+      if (ImGui::Begin(kPassMetricsRecordingWindowName,
+                       &passMetricsState.showRecordingWindow)) {
+        drawPassMetricRecordingWindow(passMetricsState);
+      }
+      ImGui::End();
+      NURI_PROFILER_ZONE_END();
+    }
     if (showFontCompilerWindow) {
       NURI_PROFILER_ZONE("ImGuiEditor::DrawFontCompilerWindow",
                          NURI_PROFILER_COLOR_CMD_DRAW);
@@ -6669,7 +7211,7 @@ struct ImGuiEditor::Impl {
       }
     }
     drawFpsOverlay(fpsCounter, *fpsGraph, *frametimeGraph, frameMetrics,
-                   renderSettings, telemetryOverlayState,
+                   renderSettings, telemetryOverlayState, frameDeltaSeconds,
                    overlayRightBoundaryX);
     NURI_PROFILER_ZONE_END();
 
@@ -6750,6 +7292,7 @@ struct ImGuiEditor::Impl {
   bool showHDRPostProcessWindow = false;
   bool showShadowsWindow = false;
   bool showRenderGraphTelemetryWindow = false;
+  bool showPassMetricsWindow = false;
   bool showGizmoControlsWindow = false;
   bool showTelemetrySettingsWindow = false;
   bool showCameraControllerWindow = false;
@@ -6769,6 +7312,7 @@ struct ImGuiEditor::Impl {
   LogModel logModel;
   LogFilterState logFilterState;
   RenderGraphTelemetryUiState telemetryState;
+  PassMetricsUiState passMetricsState;
   TelemetryOverlayUiState telemetryOverlayState;
   FontCompilerUiState fontCompilerState;
   BakeryUiState bakeryState;

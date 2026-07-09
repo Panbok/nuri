@@ -94,12 +94,16 @@ private:
   std::unique_ptr<Shader> skyboxShader_;
   std::unique_ptr<Pipeline> skyboxPipeline_;
   std::unique_ptr<Pipeline> skyboxMsaaPipeline_;
+  std::unique_ptr<Pipeline> skyboxDepthPipeline_;
+  std::unique_ptr<Pipeline> skyboxMsaaDepthPipeline_;
   std::unique_ptr<Buffer> frameBuffer_;
 
   ShaderHandle skyboxVertexShader_{};
   ShaderHandle skyboxFragmentShader_{};
   RenderPipelineHandle skyboxPipelineHandle_{};
   RenderPipelineHandle skyboxMsaaPipelineHandle_{};
+  RenderPipelineHandle skyboxDepthPipelineHandle_{};
+  RenderPipelineHandle skyboxMsaaDepthPipelineHandle_{};
 
   size_t frameBufferCapacityBytes_ = 0;
   bool initialized_ = false;

@@ -6849,12 +6849,11 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
     sceneDepthPyramidSourceViewProj_.reset();
   }
 
-  const bool shouldLoadColor = settings.skybox.enabled;
   NURI_PROFILER_ZONE("OpaqueRenderer.main_pass_finalize",
                      NURI_PROFILER_COLOR_CMD_DRAW);
   PreparedGraphPass &pass =
       out.emplace_back(drawItems_.get_allocator().resource());
-  pass.desc.color = {.loadOp = shouldLoadColor ? LoadOp::Load : LoadOp::Clear,
+  pass.desc.color = {.loadOp = LoadOp::Clear,
                      .storeOp = StoreOp::Store,
                      .clearColor = {kClearColorWhite, kClearColorWhite,
                                     kClearColorWhite, kClearColorWhite}};
@@ -7999,6 +7998,9 @@ bool OpaqueRenderer::shouldPublishSceneDepthGraphTexture(
     return true;
   }
   if (settings.opaque.enableDepthPyramid) {
+    return true;
+  }
+  if (settings.skybox.enabled) {
     return true;
   }
   if (sanitizeVisibilityOcclusionMode(settings.visibility.occlusionMode) !=

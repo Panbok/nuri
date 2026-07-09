@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <limits>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace nuri {
 
@@ -86,6 +88,7 @@ enum class GpuTimingScope : uint8_t {
   MsaaResolve = 10,
   GTAO = 11,
   HDRPostProcess = 12,
+  Skybox = 13,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -119,6 +122,8 @@ constexpr uint32_t kGpuTimingScopeGTAOBit =
     gpuTimingScopeToBit(GpuTimingScope::GTAO);
 constexpr uint32_t kGpuTimingScopeHDRPostProcessBit =
     gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess);
+constexpr uint32_t kGpuTimingScopeSkyboxBit =
+    gpuTimingScopeToBit(GpuTimingScope::Skybox);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -137,6 +142,7 @@ struct GpuTimingReport {
   uint64_t gtaoSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t hdrPostProcessSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
+  uint64_t skyboxSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -149,7 +155,16 @@ struct GpuTimingReport {
   float msaaResolveTimeMs = 0.0f;
   float gtaoTimeMs = 0.0f;
   float hdrPostProcessTimeMs = 0.0f;
+  float skyboxTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
+
+  struct PassTiming {
+    std::string debugName{};
+    uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
+    float timeMs = 0.0f;
+  };
+
+  std::vector<PassTiming> passTimings{};
 };
 
 [[nodiscard]] constexpr bool hasGpuTimingScope(const GpuTimingReport &report,
@@ -216,6 +231,9 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
       {GpuTimingScope::HDRPostProcess, &GpuTimingReport::hdrPostProcessTimeMs,
        &GpuTimingReport::hdrPostProcessSourceFrameIndex,
        gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
+      {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
+       &GpuTimingReport::skyboxSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::Skybox)},
   });
   for (const GpuTimingScopeMergeDesc desc : kScopeDescs) {
     mergeGpuTimingReportScope(dst, src, desc);

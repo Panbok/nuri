@@ -30,13 +30,13 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
   pipeline.addProvider(std::make_unique<SceneLightingProvider>(gpu));
   pipeline.addFeature(
       std::make_unique<ShadowFeature>(gpu, shaderConfig.opaque, memory));
-  pipeline.addFeature(
-      std::make_unique<SkyboxFeature>(gpu, shaderConfig.skybox));
   auto opaqueRenderer =
       makeSharedOpaqueRenderer(gpu, shaderConfig.opaque, memory);
   pipeline.addFeature(std::make_unique<OpaquePrepassFeature>(opaqueRenderer));
   pipeline.addFeature(std::make_unique<GTAOFeature>(gpu, shaderConfig.opaque));
   pipeline.addFeature(std::make_unique<OpaqueMainFeature>(opaqueRenderer));
+  pipeline.addFeature(
+      std::make_unique<SkyboxFeature>(gpu, shaderConfig.skybox));
   pipeline.addFeature(std::make_unique<MsaaResolveFeature>(gpu));
   pipeline.addFeature(
       std::make_unique<TemporalAAFeature>(gpu, shaderConfig.composite));

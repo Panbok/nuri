@@ -7590,6 +7590,7 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
       metadata->recordedCommandBuffers.clear();
       metadata->submitBatches.clear();
       metadata->passRanges.clear();
+      metadata->passTimings.clear();
     }
     if (!executablePasses.empty()) {
       {
@@ -7636,6 +7637,13 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
         metadata->usedParallelRecording =
             supportsParallelRecording && ranges.size() > 1u;
         metadata->passRanges.reserve(ranges.size());
+        metadata->passTimings.resize(executablePasses.size());
+        for (uint32_t orderedPassIndex = 0u;
+             orderedPassIndex < metadata->passTimings.size();
+             ++orderedPassIndex) {
+          metadata->passTimings[orderedPassIndex].orderedPassIndex =
+              orderedPassIndex;
+        }
         for (uint32_t workerIndex = 0u; workerIndex < ranges.size();
              ++workerIndex) {
           metadata->passRanges.push_back(RenderGraphPassRange{
@@ -7711,9 +7719,18 @@ RenderGraphExecutor::executeInternal(RenderGraphRuntime *runtime,
               return;
             }
           }
+          const auto passRecordStart = std::chrono::steady_clock::now();
           auto recordResult =
               gpu.recordGraphicsPass(recordingContexts[workerIndex],
                                      executablePasses[orderedPassIndex]);
+          const auto passRecordEnd = std::chrono::steady_clock::now();
+          if (metadata != nullptr &&
+              orderedPassIndex < metadata->passTimings.size()) {
+            metadata->passTimings[orderedPassIndex].cpuTimeMs =
+                std::chrono::duration<float, std::milli>(passRecordEnd -
+                                                         passRecordStart)
+                    .count();
+          }
           if (recordResult.hasError()) {
             setRecordingFailure(makeExecutionStageError(
                 RenderGraphExecutionFailureStage::RecordGraphicsPasses,

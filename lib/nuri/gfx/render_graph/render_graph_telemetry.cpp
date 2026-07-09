@@ -260,6 +260,8 @@ buildSummary(const RenderGraphCompileResult &compiled,
         static_cast<uint32_t>(execution->submitBatches.size());
     summary.passRangeCount =
         static_cast<uint32_t>(execution->passRanges.size());
+    summary.passTimingCount =
+        static_cast<uint32_t>(execution->passTimings.size());
     summary.usedParallelRecording = execution->usedParallelRecording;
     summary.executionFingerprint = computeExecutionFingerprint(*execution);
   }
@@ -420,6 +422,7 @@ RenderGraphTelemetrySnapshot::RenderGraphTelemetrySnapshot(
       passBarrierRecords(ensureMemory(memory)),
       recordedCommandBuffers(ensureMemory(memory)),
       submitBatches(ensureMemory(memory)), passRanges(ensureMemory(memory)),
+      passTimings(ensureMemory(memory)),
       transientTextureLifetimes(ensureMemory(memory)),
       transientBufferLifetimes(ensureMemory(memory)),
       transientTextureAllocations(ensureMemory(memory)),
@@ -456,6 +459,7 @@ void RenderGraphTelemetrySnapshot::captureFrom(
   copyVector(recordedCommandBuffers, execution.recordedCommandBuffers);
   copyVector(submitBatches, execution.submitBatches);
   copyVector(passRanges, execution.passRanges);
+  copyVector(passTimings, execution.passTimings);
 }
 
 void RenderGraphTelemetrySnapshot::reset() {
@@ -470,6 +474,7 @@ void RenderGraphTelemetrySnapshot::reset() {
   recordedCommandBuffers.clear();
   submitBatches.clear();
   passRanges.clear();
+  passTimings.clear();
   transientTextureLifetimes.clear();
   transientBufferLifetimes.clear();
   transientTextureAllocations.clear();
@@ -574,6 +579,7 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
                 summary.recordedCommandBufferCount);
   writeKeyValue(file, "submit_batch_count", summary.submitBatchCount);
   writeKeyValue(file, "pass_range_count", summary.passRangeCount);
+  writeKeyValue(file, "pass_timing_count", summary.passTimingCount);
   writeKeyValue(file, "imported_textures", summary.importedTextures);
   writeKeyValue(file, "transient_textures", summary.transientTextures);
   writeKeyValue(file, "imported_buffers", summary.importedBuffers);
@@ -713,6 +719,22 @@ writeRenderGraphTelemetryTextDump(const RenderGraphTelemetrySnapshot &snapshot,
                  file << "  worker=" << range.workerIndex
                       << " first_pass=" << range.firstOrderedPassIndex
                       << " pass_count=" << range.passCount << "\n";
+                 return true;
+               });
+
+  writeSection(file, "Pass CPU Timings", std::span{snapshot.passTimings},
+               [&](const RenderGraphPassExecutionTiming &timing) {
+                 const uint32_t declaredPassIndex =
+                     timing.orderedPassIndex <
+                             snapshot.orderedPassIndices.size()
+                         ? snapshot.orderedPassIndices[timing.orderedPassIndex]
+                         : UINT32_MAX;
+                 file << "  pass_exec[" << timing.orderedPassIndex << "] ";
+                 if (declaredPassIndex != UINT32_MAX) {
+                   file << "[" << declaredPassIndex << "] "
+                        << resolvePassName(snapshot, declaredPassIndex) << " ";
+                 }
+                 file << "cpu_ms=" << timing.cpuTimeMs << "\n";
                  return true;
                });
 

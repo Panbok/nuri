@@ -26,12 +26,16 @@ SkyboxPass::SkyboxPass(GPUDevice &gpu, const SkyboxFeatureConfig &config)
 SkyboxPass::~SkyboxPass() {
   destroyFrameBuffer();
   skyboxShader_.reset();
+  skyboxMsaaDepthPipeline_.reset();
+  skyboxDepthPipeline_.reset();
   skyboxMsaaPipeline_.reset();
   skyboxPipeline_.reset();
   skyboxVertexShader_ = {};
   skyboxFragmentShader_ = {};
   skyboxPipelineHandle_ = {};
   skyboxMsaaPipelineHandle_ = {};
+  skyboxDepthPipelineHandle_ = {};
+  skyboxMsaaDepthPipelineHandle_ = {};
 }
 
 bool SkyboxPass::isEnabled(const FrameBuildContext &ctx) const {
@@ -46,35 +50,66 @@ Result<bool, std::string> SkyboxPass::prepare(FrameBuildContext &ctx) {
 Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
   NURI_PROFILER_FUNCTION();
 
+  if (!hasPreparedDraw_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
   RenderGraphGraphicsPassDesc passDesc{};
   const bool msaaSelected = isMsaa4xSelected(ctx.frame);
-  const bool usedMsaa =
-      msaaSelected && nuri::isValid(ctx.shared.msaaSceneColorTexture);
+  const bool usedMsaa = msaaSelected &&
+                        nuri::isValid(ctx.shared.msaaSceneColorTexture) &&
+                        nuri::isValid(ctx.shared.msaaSceneColorGraphTexture) &&
+                        nuri::isValid(ctx.shared.msaaSceneDepthTexture) &&
+                        nuri::isValid(ctx.shared.msaaSceneDepthGraphTexture);
   const TextureHandle sceneColorTexture = usedMsaa
                                               ? ctx.shared.msaaSceneColorTexture
                                               : ctx.shared.sceneColorTexture;
-  passDesc.color = {.loadOp = LoadOp::Clear,
+  RenderGraphTextureId sceneColorGraphTexture =
+      usedMsaa ? ctx.shared.msaaSceneColorGraphTexture
+               : ctx.shared.sceneColorGraphTexture;
+  const RenderGraphTextureId sceneDepthGraphTexture =
+      usedMsaa ? ctx.shared.msaaSceneDepthGraphTexture
+               : ctx.shared.sceneDepthGraphTexture;
+  const bool useDepthTest = nuri::isValid(sceneDepthGraphTexture);
+
+  passDesc.color = {.loadOp = useDepthTest ? LoadOp::Load : LoadOp::DontCare,
                     .storeOp = StoreOp::Store,
                     .clearColor = {1.0f, 1.0f, 1.0f, 1.0f}};
 
-  if (nuri::isValid(sceneColorTexture)) {
+  if (!nuri::isValid(sceneColorGraphTexture) &&
+      nuri::isValid(sceneColorTexture)) {
     auto sceneColorImport = ctx.graph.importTexture(
         sceneColorTexture,
-        msaaSelected ? "skybox_msaa_scene_color" : "skybox_scene_color");
+        usedMsaa ? "skybox_msaa_scene_color" : "skybox_scene_color");
     if (sceneColorImport.hasError()) {
       return Result<bool, std::string>::makeError(sceneColorImport.error());
     }
-    passDesc.colorTexture = sceneColorImport.value();
-    if (usedMsaa) {
-      ctx.shared.msaaSceneColorGraphTexture = sceneColorImport.value();
-      ctx.frame.metrics.antiAliasing.msaaColorGraphPublished = true;
-    } else {
-      ctx.shared.sceneColorGraphTexture = sceneColorImport.value();
-    }
+    sceneColorGraphTexture = sceneColorImport.value();
+  }
+  if (!nuri::isValid(sceneColorGraphTexture)) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+  passDesc.colorTexture = sceneColorGraphTexture;
+  if (useDepthTest) {
+    passDesc.depth = {.loadOp = LoadOp::Load,
+                      .storeOp = StoreOp::Store,
+                      .clearDepth = 1.0f,
+                      .clearStencil = 0u};
+    passDesc.depthTexture = sceneDepthGraphTexture;
+    drawItem_.pipeline =
+        usedMsaa ? skyboxMsaaDepthPipelineHandle_ : skyboxDepthPipelineHandle_;
+    drawItem_.useDepthState = true;
+    drawItem_.depthState = {.compareOp = CompareOp::LessEqual,
+                            .isDepthWriteEnabled = false};
+  } else {
+    drawItem_.pipeline =
+        usedMsaa ? skyboxMsaaPipelineHandle_ : skyboxPipelineHandle_;
+    drawItem_.useDepthState = false;
+    drawItem_.depthState = {};
   }
 
-  passDesc.draws = hasPreparedDraw_ ? std::span<const DrawItem>(&drawItem_, 1u)
-                                    : std::span<const DrawItem>{};
+  passDesc.draws = std::span<const DrawItem>(&drawItem_, 1u);
+  passDesc.gpuTimingScope = GpuTimingScope::Skybox;
   passDesc.debugLabel = "Skybox Pass";
   passDesc.debugColor = 0xff3366ff;
 
@@ -84,7 +119,14 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
   }
   const RenderGraphPassId passId = addResult.value();
 
-  if (hasPreparedDraw_ && frameBuffer_ && frameBuffer_->valid()) {
+  if (usedMsaa) {
+    ctx.shared.msaaSceneColorGraphTexture = sceneColorGraphTexture;
+    ctx.frame.metrics.antiAliasing.msaaColorGraphPublished = true;
+  } else {
+    ctx.shared.sceneColorGraphTexture = sceneColorGraphTexture;
+  }
+
+  if (frameBuffer_ && frameBuffer_->valid()) {
     auto frameBufferResult = ctx.graph.importBuffer(frameBuffer_->handle(),
                                                     "skybox_frame_data_buffer");
     if (frameBufferResult.hasError()) {
@@ -97,7 +139,7 @@ Result<bool, std::string> SkyboxPass::build(FrameBuildContext &ctx) {
     }
   }
 
-  if (hasPreparedDraw_ && ctx.frame.scene != nullptr) {
+  if (ctx.frame.scene != nullptr) {
     const TextureRecord *cubemap =
         ctx.resources.tryGet(ctx.frame.scene->environment().cubemap);
     if (cubemap != nullptr && nuri::isValid(cubemap->texture)) {
@@ -202,7 +244,10 @@ Result<bool, std::string> SkyboxPass::createShaders() {
 Result<bool, std::string> SkyboxPass::createPipeline() {
   skyboxPipeline_ = Pipeline::create(gpu_);
   skyboxMsaaPipeline_ = Pipeline::create(gpu_);
-  if (!skyboxPipeline_ || !skyboxMsaaPipeline_) {
+  skyboxDepthPipeline_ = Pipeline::create(gpu_);
+  skyboxMsaaDepthPipeline_ = Pipeline::create(gpu_);
+  if (!skyboxPipeline_ || !skyboxMsaaPipeline_ || !skyboxDepthPipeline_ ||
+      !skyboxMsaaDepthPipeline_) {
     return Result<bool, std::string>::makeError(
         "SkyboxPass::createPipeline: failed to create skybox pipeline");
   }
@@ -234,6 +279,26 @@ Result<bool, std::string> SkyboxPass::createPipeline() {
     return Result<bool, std::string>::makeError(msaaPipelineResult.error());
   }
   skyboxMsaaPipelineHandle_ = skyboxMsaaPipeline_->getRenderPipeline();
+
+  RenderPipelineDesc skyboxDepthDesc = skyboxDesc;
+  skyboxDepthDesc.depthFormat = kFrameCompositionDepthFormat;
+  auto depthPipelineResult = skyboxDepthPipeline_->createRenderPipeline(
+      skyboxDepthDesc, "skybox_depth_tested");
+  if (depthPipelineResult.hasError()) {
+    return Result<bool, std::string>::makeError(depthPipelineResult.error());
+  }
+  skyboxDepthPipelineHandle_ = skyboxDepthPipeline_->getRenderPipeline();
+
+  RenderPipelineDesc skyboxMsaaDepthDesc = skyboxDepthDesc;
+  skyboxMsaaDepthDesc.numSamples = kMsaa4xSampleCount;
+  auto msaaDepthPipelineResult = skyboxMsaaDepthPipeline_->createRenderPipeline(
+      skyboxMsaaDepthDesc, "skybox_msaa4x_depth_tested");
+  if (msaaDepthPipelineResult.hasError()) {
+    return Result<bool, std::string>::makeError(
+        msaaDepthPipelineResult.error());
+  }
+  skyboxMsaaDepthPipelineHandle_ =
+      skyboxMsaaDepthPipeline_->getRenderPipeline();
 
   return Result<bool, std::string>::makeResult(true);
 }

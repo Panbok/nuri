@@ -26,6 +26,7 @@ struct NURI_API RenderGraphTelemetrySnapshot {
     uint32_t recordedCommandBufferCount = 0;
     uint32_t submitBatchCount = 0;
     uint32_t passRangeCount = 0;
+    uint32_t passTimingCount = 0;
     uint32_t importedTextures = 0;
     uint32_t transientTextures = 0;
     uint32_t importedBuffers = 0;
@@ -70,6 +71,7 @@ struct NURI_API RenderGraphTelemetrySnapshot {
   std::pmr::vector<RecordedCommandBufferMeta> recordedCommandBuffers;
   std::pmr::vector<SubmitBatchMeta> submitBatches;
   std::pmr::vector<RenderGraphPassRange> passRanges;
+  std::pmr::vector<RenderGraphPassExecutionTiming> passTimings;
   std::pmr::vector<RenderGraphCompileResult::TransientLifetime>
       transientTextureLifetimes;
   std::pmr::vector<RenderGraphCompileResult::TransientLifetime>

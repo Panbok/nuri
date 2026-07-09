@@ -1326,6 +1326,7 @@ struct Swapchain {
 
 struct NvrhiTimingQuery {
   GpuTimingScope scope = GpuTimingScope::None;
+  std::string debugLabel;
   nvrhi::TimerQueryHandle query{};
 };
 
@@ -1533,6 +1534,9 @@ static constexpr auto kNvrhiTimingScopeDescs =
         {GpuTimingScope::HDRPostProcess, &GpuTimingReport::hdrPostProcessTimeMs,
          &GpuTimingReport::hdrPostProcessSourceFrameIndex,
          gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
+        {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
+         &GpuTimingReport::skyboxSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::Skybox)},
     });
 
 void accumulateGpuTimingScope(GpuTimingReport &report, GpuTimingScope scope,
@@ -1572,10 +1576,10 @@ class ScopedNvrhiPassTiming final {
 public:
   ScopedNvrhiPassTiming(Impl &impl, nvrhi::ICommandList &commandList,
                         std::vector<NvrhiTimingQuery> *outQueries,
-                        GpuTimingScope scope)
+                        GpuTimingScope scope, std::string_view debugLabel)
       : impl_(impl), commandList_(commandList), outQueries_(outQueries),
-        scope_(scope) {
-    if (scope_ == GpuTimingScope::None) {
+        scope_(scope), debugLabel_(debugLabel) {
+    if (outQueries_ == nullptr) {
       return;
     }
     query_ = createGpuTimerQuery(impl_);
@@ -1597,8 +1601,11 @@ public:
     }
     commandList_.endTimerQuery(query_.Get());
     if (outQueries_ != nullptr) {
-      outQueries_->push_back(
-          NvrhiTimingQuery{.scope = scope_, .query = std::move(query_)});
+      outQueries_->push_back(NvrhiTimingQuery{
+          .scope = scope_,
+          .debugLabel = std::string(debugLabel_),
+          .query = std::move(query_),
+      });
     }
     active_ = false;
   }
@@ -1617,6 +1624,7 @@ private:
   nvrhi::ICommandList &commandList_;
   std::vector<NvrhiTimingQuery> *outQueries_ = nullptr;
   GpuTimingScope scope_ = GpuTimingScope::None;
+  std::string_view debugLabel_{};
   nvrhi::TimerQueryHandle query_{};
   bool active_ = false;
 };
@@ -1648,6 +1656,7 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
     }
 
     GpuTimingReport completedReport{};
+    completedReport.passTimings.reserve(pending.timingQueries.size());
     bool collectedShadowSdsm = false;
     float collectedShadowSdsmTimeMs = 0.0f;
     for (const NvrhiTimingQuery &timingQuery : pending.timingQueries) {
@@ -1659,6 +1668,13 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
           1000.0f;
       accumulateGpuTimingScope(completedReport, timingQuery.scope, timeMs,
                                pending.frameIndex);
+      completedReport.passTimings.push_back(GpuTimingReport::PassTiming{
+          .debugName = timingQuery.debugLabel.empty()
+                           ? std::string("unnamed_pass")
+                           : timingQuery.debugLabel,
+          .sourceFrameIndex = pending.frameIndex,
+          .timeMs = timeMs,
+      });
       if (timingQuery.scope == GpuTimingScope::ShadowSdsm) {
         collectedShadowSdsm = true;
         collectedShadowSdsmTimeMs += timeMs;
@@ -1675,6 +1691,8 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
     }
     mergeGpuTimingReportScopes(impl.latestCompletedGpuTimingReport,
                                completedReport);
+    impl.latestCompletedGpuTimingReport.passTimings =
+        completedReport.passTimings;
     if (impl.completedGpuTimingReports.size() >= 256u) {
       impl.completedGpuTimingReports.pop_front();
       ++impl.droppedGpuTimingReports;
@@ -3731,7 +3749,7 @@ recordRenderPass(Impl &impl,
                  std::vector<NvrhiTimingQuery> *timingQueries,
                  nvrhi::ICommandList &commandList, const RenderPass &pass) {
   ScopedNvrhiPassTiming passTiming(impl, commandList, timingQueries,
-                                   pass.gpuTimingScope);
+                                   pass.gpuTimingScope, pass.debugLabel);
   const bool copyOnly = pass.executionMode == RenderPassExecutionMode::CopyOnly;
   if (copyOnly) {
     if (pass.hasColorAttachment || nuri::isValid(pass.colorTexture) ||
@@ -5160,9 +5178,14 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
           impl_->frameResourceReuseWaitInstances[frameResourceSlot];
     }
   }
-  auto waitResult = waitForGraphicsQueueInstance(
+  Result<bool, std::string> waitResult =
+      Result<bool, std::string>::makeResult(true);
+  NURI_PROFILER_ZONE("NvrhiGPUDevice.frame_resource_reuse_wait",
+                     NURI_PROFILER_COLOR_WAIT);
+  waitResult = waitForGraphicsQueueInstance(
       *impl_, frameResourceWaitInstance,
       "NvrhiGPUDevice::beginFrame frame resource reuse");
+  NURI_PROFILER_ZONE_END();
   if (waitResult.hasError()) {
     return waitResult;
   }
@@ -5173,12 +5196,27 @@ Result<bool, std::string> NvrhiGPUDevice::beginFrame(uint64_t frameIndex) {
             frameResourceWaitInstance) {
       impl_->frameResourceReuseWaitInstances[frameResourceSlot] = 0u;
     }
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.collect_background_copy_submissions",
+                       NURI_PROFILER_COLOR_CMD_COPY);
     collectCompletedBackgroundCopySubmissions(*impl_);
+    NURI_PROFILER_ZONE_END();
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.run_garbage_collection",
+                       NURI_PROFILER_COLOR_DESTROY);
     impl_->nvrhiDevice->runGarbageCollection();
+    NURI_PROFILER_ZONE_END();
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.collect_gpu_timing_submissions",
+                       NURI_PROFILER_COLOR_CMD_COPY);
     collectCompletedGpuTimingSubmissions(*impl_);
+    NURI_PROFILER_ZONE_END();
   }
   if (impl_->geometryPool != nullptr) {
-    return impl_->geometryPool->beginFrame(frameIndex);
+    Result<bool, std::string> geometryPoolResult =
+        Result<bool, std::string>::makeResult(true);
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.geometry_pool_begin_frame",
+                       NURI_PROFILER_COLOR_WAIT);
+    geometryPoolResult = impl_->geometryPool->beginFrame(frameIndex);
+    NURI_PROFILER_ZONE_END();
+    return geometryPoolResult;
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -5557,9 +5595,15 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
         nvrhi::CommandQueue::Graphics,
         impl_->renderFinishedSemaphores[impl_->semaphoreFrameIndex], 0u);
   }
-  const uint64_t instance = impl_->nvrhiDevice->executeCommandLists(
-      nvrhiCommandLists.data(), nvrhiCommandLists.size(),
-      nvrhi::CommandQueue::Graphics);
+  uint64_t instance = 0u;
+  {
+    NURI_PROFILER_ZONE("NvrhiGPUDevice.execute_command_lists",
+                       NURI_PROFILER_COLOR_SUBMIT);
+    instance = impl_->nvrhiDevice->executeCommandLists(
+        nvrhiCommandLists.data(), nvrhiCommandLists.size(),
+        nvrhi::CommandQueue::Graphics);
+    NURI_PROFILER_ZONE_END();
+  }
   ++impl_->submittedFrameCount;
   if (!impl_->frameResourceReuseWaitInstances.empty()) {
     const size_t frameResourceSlot =
@@ -5596,8 +5640,13 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
         .pSwapchains = &swapchain,
         .pImageIndices = &imageIndex,
     };
-    const VkResult result =
-        vkQueuePresentKHR(impl_->graphicsQueue, &presentInfo);
+    VkResult result = VK_SUCCESS;
+    {
+      NURI_PROFILER_ZONE("NvrhiGPUDevice.queue_present",
+                         NURI_PROFILER_COLOR_PRESENT);
+      result = vkQueuePresentKHR(impl_->graphicsQueue, &presentInfo);
+      NURI_PROFILER_ZONE_END();
+    }
     impl_->hasPreparedSwapchainImage = false;
     impl_->preparedSwapchainImageWaitInstance = 0u;
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {

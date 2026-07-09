@@ -225,6 +225,11 @@ struct NURI_API RecordedGraphicsPassMeta {
   uint32_t declaredPassIndex = UINT32_MAX;
 };
 
+struct NURI_API RenderGraphPassExecutionTiming {
+  uint32_t orderedPassIndex = UINT32_MAX;
+  float cpuTimeMs = 0.0f;
+};
+
 struct NURI_API RecordedCommandBufferMeta {
   uint32_t firstOrderedPassIndex = UINT32_MAX;
   uint32_t passCount = 0u;
@@ -290,13 +295,15 @@ struct NURI_API RenderGraphExecutionMetadata {
   std::pmr::vector<RecordedCommandBufferMeta> recordedCommandBuffers;
   std::pmr::vector<SubmitBatchMeta> submitBatches;
   std::pmr::vector<RenderGraphPassRange> passRanges;
+  std::pmr::vector<RenderGraphPassExecutionTiming> passTimings;
   bool usedParallelCompile = false;
   bool usedParallelRecording = false;
 
   explicit RenderGraphExecutionMetadata(
       std::pmr::memory_resource *memory = std::pmr::get_default_resource())
       : recordedCommandBuffers(ensureMemory(memory)),
-        submitBatches(ensureMemory(memory)), passRanges(ensureMemory(memory)) {}
+        submitBatches(ensureMemory(memory)), passRanges(ensureMemory(memory)),
+        passTimings(ensureMemory(memory)) {}
 
 private:
   static std::pmr::memory_resource *ensureMemory(std::pmr::memory_resource *m) {
