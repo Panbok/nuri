@@ -40,6 +40,11 @@ approveSnapshotBaselines(const SnapshotReport &report,
   metadata << "{\n"
            << "  \"case\": \"" << report.snapshotCase.id << "\",\n"
            << "  \"baselineProfile\": \"" << baselineProfile << "\",\n"
+           << "  \"backend\": \"" << report.snapshotCase.backend << "\",\n"
+           << "  \"resolvedBackend\": \"" << report.environment.gpuBackend
+           << "\",\n"
+           << "  \"gpuBackendSource\": \""
+           << report.environment.gpuBackendSource << "\",\n"
            << "  \"reason\": \"" << reason << "\",\n"
            << "  \"approvedAtUtc\": \"" << utcTimestampIso8601() << "\",\n"
            << "  \"sourceArtifactDir\": \""

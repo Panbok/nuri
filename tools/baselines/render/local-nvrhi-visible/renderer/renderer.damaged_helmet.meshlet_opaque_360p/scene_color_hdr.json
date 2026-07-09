@@ -1,0 +1,11 @@
+{
+  "target": "scene_color_hdr",
+  "format": 4,
+  "width": 640,
+  "height": 360,
+  "rowStride": 5120,
+  "origin": "top_left",
+  "colorSpace": "linear_hdr",
+  "payload": "scene_color_hdr.exr",
+  "hash": "fnv1a64:3edd081e86db6f3a"
+}

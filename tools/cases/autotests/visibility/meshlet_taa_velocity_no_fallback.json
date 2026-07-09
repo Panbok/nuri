@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 1,
+  "id": "visibility.meshlet_taa_velocity_no_fallback",
+  "suite": "visibility",
+  "description": "Meshlet rendering stays active under TAA and publishes motion vectors",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "DamagedHelmet/DamagedHelmet.gltf",
+    "importOptions": {
+      "mesh": {
+        "flipUVs": true,
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 12,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-0.25, 0.25, 3.2],
+    "target": [0.0, -0.05, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "meshlet_taa_pan",
+        "startFrame": 0,
+        "endFrame": 12,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-0.25, 0.25, 3.2],
+            "target": [0.0, -0.05, 0.0]
+          },
+          {
+            "frame": 12,
+            "position": [0.25, 0.25, 3.2],
+            "target": [0.0, -0.05, 0.0]
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "history_reset",
+      "frame": 0,
+      "captures": [
+        {
+          "target": "reactive_mask",
+          "profile": "mask",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "assertions": [
+        {
+          "id": "meshlet_mode_active",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_no_incompatible_fallback",
+          "metric": "renderer.opaque.meshlet_rejected_incompatible_frame",
+          "equals": 0
+        },
+        {
+          "id": "meshlet_reactive_pass_present",
+          "metric": "renderer.aa.reactive_mask_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_reactive_draws_present",
+          "metric": "renderer.aa.reactive_mask_draws",
+          "greaterOrEqual": 1
+        }
+      ]
+    },
+    {
+      "id": "end",
+      "frame": 12,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": false
+        },
+        {
+          "target": "motion_vectors",
+          "profile": "velocity",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "assertions": [
+        {
+          "id": "meshlet_mode_active",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_no_incompatible_fallback",
+          "metric": "renderer.opaque.meshlet_rejected_incompatible_frame",
+          "equals": 0
+        },
+        {
+          "id": "meshlet_candidates_present",
+          "metric": "renderer.opaque.meshlet_candidates",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "taa_resolve_present",
+          "metric": "renderer.aa.taa_resolve_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_velocity_pass_present",
+          "metric": "renderer.aa.velocity_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_velocity_draws_present",
+          "metric": "renderer.aa.velocity_draws",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "metricWindows": [
+    {
+      "id": "steady_taa",
+      "frames": [4, 12],
+      "assertions": [
+        {
+          "id": "history_valid_by_end_window",
+          "metric": "renderer.aa.history_valid",
+          "min": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:DamagedHelmet/DamagedHelmet.gltf"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

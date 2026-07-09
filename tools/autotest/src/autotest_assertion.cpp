@@ -37,6 +37,23 @@ void applyGpuScope(std::map<uint64_t, std::map<std::string, double>> &frames,
   frames[frameIndex][std::string(metricId)] = static_cast<double>(timeMs);
 }
 
+[[nodiscard]] bool
+shouldIncludeGpuScopeInSum(const std::map<std::string, double> &metrics,
+                           std::string_view id) {
+  if (id == "gpu.scopes_sum_ms") {
+    return false;
+  }
+  if (id.rfind("gpu.scopes.", 0u) != 0u) {
+    return false;
+  }
+  if (metrics.find("gpu.scopes.shadow_ms") != metrics.end() &&
+      (id == "gpu.scopes.shadow_depth_ms" ||
+       id == "gpu.scopes.shadow_sdsm_ms")) {
+    return false;
+  }
+  return true;
+}
+
 [[nodiscard]] double percentileR7(std::vector<double> sortedValues,
                                   double percentile) {
   if (sortedValues.empty()) {
@@ -87,6 +104,10 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             opaque.computeDispatches);
   addMetric(out, "renderer.opaque.depth_prepass_draws",
             opaque.depthPrepassDraws);
+  addMetric(out, "renderer.opaque.depth_prepass_enabled",
+            opaque.depthPrepassEnabled);
+  addMetric(out, "renderer.opaque.depth_pyramid_levels",
+            opaque.depthPyramidLevels);
   addMetric(out, "renderer.opaque.tessellated_draws", opaque.tessellatedDraws);
   addMetric(out, "renderer.opaque.meshlet_dispatches",
             opaque.meshletDispatches);
@@ -105,6 +126,93 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.opaque.meshlet_rejected_incompatible_frame",
             opaque.meshletRejectedIncompatibleFrame);
 
+  const VisibilityFrameMetrics &visibility = metrics.visibility;
+  addMetric(out, "renderer.visibility.cpu_main_candidates",
+            visibility.cpuMainCandidates);
+  addMetric(out, "renderer.visibility.cpu_main_visible_candidates",
+            visibility.cpuMainVisibleCandidates);
+  addMetric(out, "renderer.visibility.cpu_main_rejected",
+            visibility.cpuMainRejected);
+  addMetric(out, "renderer.visibility.gpu_main_candidates",
+            visibility.gpuMainCandidates);
+  addMetric(out, "renderer.visibility.gpu_main_visible_candidates",
+            visibility.gpuMainVisibleCandidates);
+  addMetric(out, "renderer.visibility.gpu_main_rejected_frustum",
+            visibility.gpuMainRejectedFrustum);
+  addMetric(out, "renderer.visibility.gpu_main_rejected_occlusion",
+            visibility.gpuMainRejectedOcclusion);
+  addMetric(out, "renderer.visibility.gpu_output_overflow_count",
+            visibility.gpuOutputOverflowCount);
+  addMetric(out, "renderer.visibility.gpu_main_readback_available",
+            visibility.gpuMainReadbackAvailable);
+  addMetric(out, "renderer.visibility.gpu_main_readback_source_frame",
+            visibility.gpuMainReadbackSourceFrame);
+  addMetric(out, "renderer.visibility.gpu_main_readback_stale_frame_count",
+            visibility.gpuMainReadbackStaleFrameCount);
+  addMetric(out, "renderer.visibility.gpu_main_readback_error_count",
+            visibility.gpuMainReadbackErrorCount);
+  addMetric(out, "renderer.visibility.gpu_main_readback_visible_candidates",
+            visibility.gpuMainReadbackVisibleCandidates);
+  addMetric(out, "renderer.visibility.gpu_main_visible_list_mismatches",
+            visibility.gpuMainVisibleListMismatches);
+  addMetric(out, "renderer.visibility.gpu_indirect_draw_used",
+            visibility.gpuIndirectDrawUsed);
+  addMetric(out, "renderer.visibility.gpu_indirect_draw_fallback",
+            visibility.gpuIndirectDrawFallback);
+  addMetric(out, "renderer.visibility.gpu_indirect_draw_commands",
+            visibility.gpuIndirectDrawCommands);
+  addMetric(out, "renderer.visibility.gpu_indirect_draw_readback_commands",
+            visibility.gpuIndirectDrawReadbackCommands);
+  addMetric(out, "renderer.visibility.gpu_indirect_draw_readback_tombstoned",
+            visibility.gpuIndirectDrawReadbackTombstoned);
+  addMetric(out, "renderer.visibility.gpu_indirect_draw_readback_visible",
+            visibility.gpuIndirectDrawReadbackVisible);
+  addMetric(out, "renderer.visibility.indirect_mesh_dispatch_count",
+            visibility.indirectMeshDispatchCount);
+  addMetric(out, "renderer.visibility.meshlet_rejected_frustum",
+            visibility.meshletRejectedFrustum);
+  addMetric(out, "renderer.visibility.meshlet_rejected_cone",
+            visibility.meshletRejectedCone);
+  addMetric(out, "renderer.visibility.meshlet_rejected_occlusion",
+            visibility.meshletRejectedOcclusion);
+  addMetric(out, "renderer.visibility.meshlet_occlusion_available",
+            visibility.meshletOcclusionAvailable);
+  addMetric(out, "renderer.visibility.meshlet_payload_overflow_count",
+            visibility.meshletPayloadOverflowCount);
+  addMetric(out, "renderer.visibility.meshlet_readback_available",
+            visibility.meshletReadbackAvailable);
+  addMetric(out, "renderer.visibility.meshlet_readback_source_frame",
+            visibility.meshletReadbackSourceFrame);
+  addMetric(out, "renderer.visibility.meshlet_readback_stale_frame_count",
+            visibility.meshletReadbackStaleFrameCount);
+  addMetric(out, "renderer.visibility.meshlet_readback_error_count",
+            visibility.meshletReadbackErrorCount);
+  addMetric(out, "renderer.visibility.meshlet_emitted",
+            visibility.meshletEmitted);
+  addMetric(out, "renderer.visibility.meshlet_task_groups_executed",
+            visibility.meshletTaskGroupsExecuted);
+  addMetric(out, "renderer.visibility.uncertain_visible",
+            visibility.uncertainVisible);
+  addMetric(out, "renderer.visibility.shadow_cpu_candidates",
+            visibility.shadowCpuCandidates);
+  addMetric(out, "renderer.visibility.shadow_cpu_rejected",
+            visibility.shadowCpuRejected);
+  addMetric(out, "renderer.visibility.shadow_meshlet_candidates",
+            visibility.shadowMeshletCandidates);
+  addMetric(out, "renderer.visibility.shadow_meshlet_readback_available",
+            visibility.shadowMeshletReadbackAvailable);
+  addMetric(out, "renderer.visibility.shadow_meshlet_readback_source_frame",
+            visibility.shadowMeshletReadbackSourceFrame);
+  addMetric(out,
+            "renderer.visibility.shadow_meshlet_readback_stale_frame_count",
+            visibility.shadowMeshletReadbackStaleFrameCount);
+  addMetric(out, "renderer.visibility.shadow_meshlet_readback_error_count",
+            visibility.shadowMeshletReadbackErrorCount);
+  addMetric(out, "renderer.visibility.shadow_meshlet_rejected_bounds",
+            visibility.shadowMeshletRejectedBounds);
+  addMetric(out, "renderer.visibility.occlusion_available",
+            visibility.occlusionAvailable);
+
   const ShadowFrameMetrics &shadow = metrics.shadow;
   addMetric(out, "renderer.shadow.cascades", shadow.cascadeCount);
   addMetric(out, "renderer.shadow.total_draws", shadow.totalDraws);
@@ -113,6 +221,59 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             shadow.staticCasterEntries);
   addMetric(out, "renderer.shadow.dynamic_caster_entries",
             shadow.dynamicCasterEntries);
+  addMetric(out, "renderer.shadow.static_cache_reused",
+            shadow.staticCacheReused);
+  addMetric(out, "renderer.shadow.static_batch_templates",
+            shadow.staticBatchTemplateCount);
+  addMetric(out, "renderer.shadow.batch_entries", shadow.shadowBatchEntryCount);
+  addMetric(out, "renderer.shadow.meshlet_dispatches",
+            shadow.shadowMeshletDispatchCount);
+  addMetric(out, "renderer.shadow.meshlet_task_groups",
+            shadow.shadowMeshletTaskGroupCount);
+  addMetric(out, "renderer.shadow.instance_remaps",
+            shadow.shadowInstanceRemapCount);
+  addMetric(out, "renderer.shadow.static_batch_full_emits",
+            shadow.staticBatchFullEmitCount);
+  addMetric(out, "renderer.shadow.static_light_grid_queries",
+            shadow.staticLightGridQueryCount);
+  addMetric(out, "renderer.shadow.static_light_grid_fallback_scans",
+            shadow.staticLightGridFallbackScanCount);
+  addMetric(out, "renderer.shadow.static_light_grid_query_cells",
+            shadow.staticLightGridQueryCellCount);
+  addMetric(out, "renderer.shadow.static_light_grid_candidates",
+            shadow.staticLightGridCandidateCount);
+  addMetric(out, "renderer.shadow.static_only_candidates",
+            shadow.staticOnlyCandidateCount);
+  addMetric(out, "renderer.shadow.static_only_reused_cascades",
+            shadow.reusedStaticOnlyCascadeCount);
+  addMetric(out, "renderer.shadow.static_only_miss_static_cache_rebuilt",
+            shadow.staticOnlyReuseMissStaticCacheRebuiltCount);
+  addMetric(out, "renderer.shadow.static_only_miss_dynamic_caster",
+            shadow.staticOnlyReuseMissDynamicCasterCount);
+  addMetric(out, "renderer.shadow.static_only_miss_no_previous",
+            shadow.staticOnlyReuseMissNoPreviousCount);
+  addMetric(out, "renderer.shadow.static_only_miss_raster_state_changed",
+            shadow.staticOnlyReuseMissRasterStateChangedCount);
+  addMetric(out, "renderer.shadow.static_only_miss_adaptive_refresh",
+            shadow.staticOnlyReuseMissAdaptiveRefreshCount);
+  addMetric(out, "renderer.shadow.static_only_scroll_candidates",
+            shadow.staticOnlyScrollCandidateCount);
+  addMetric(out, "renderer.shadow.static_only_scroll_compatible",
+            shadow.staticOnlyScrollCompatibleCount);
+  addMetric(out, "renderer.shadow.static_only_scroll_dirty_area_bp",
+            shadow.staticOnlyScrollDirtyAreaBasisPoints);
+  addMetric(out, "renderer.shadow.static_only_scroll_dirty_casters",
+            shadow.staticOnlyScrollDirtyCasterEstimate);
+  addMetric(out, "renderer.shadow.static_only_scroll_dirty_indices",
+            shadow.staticOnlyScrollDirtyIndexEstimate);
+  addMetric(out, "renderer.shadow.static_only_scroll_reject_anchor",
+            shadow.staticOnlyScrollRejectAnchorCount);
+  addMetric(out, "renderer.shadow.static_only_scroll_reject_depth",
+            shadow.staticOnlyScrollRejectDepthCount);
+  addMetric(out, "renderer.shadow.static_only_scroll_reject_extent",
+            shadow.staticOnlyScrollRejectExtentCount);
+  addMetric(out, "renderer.shadow.static_only_scroll_reject_shift",
+            shadow.staticOnlyScrollRejectShiftCount);
   addMetric(out, "renderer.shadow.filter_sample_budget",
             shadow.filterSampleBudget);
   addMetric(out, "renderer.shadow.sdsm_compute_passes",
@@ -134,6 +295,8 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             aa.motionVectorAllocationCount);
   addMetric(out, "renderer.aa.motion_vector_reallocations",
             aa.motionVectorReallocationCount);
+  addMetric(out, "renderer.aa.motion_vector_depth_reprojection_passes",
+            aa.motionVectorDepthReprojectionPassCount);
   addMetric(out, "renderer.aa.velocity_passes", aa.velocityPassCount);
   addMetric(out, "renderer.aa.velocity_draws", aa.velocityDrawCount);
   addMetric(out, "renderer.aa.velocity_instances", aa.velocityInstanceCount);
@@ -247,12 +410,15 @@ void applyAutotestGpuTimingReport(
   applyGpuScope(frames, report, GpuTimingScope::HDRPostProcess,
                 report.hdrPostProcessSourceFrameIndex,
                 "gpu.scopes.hdr_postprocess_ms", report.hdrPostProcessTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::Skybox,
+                report.skyboxSourceFrameIndex, "gpu.scopes.skybox_ms",
+                report.skyboxTimeMs);
 
   for (auto &[frameIndex, metrics] : frames) {
     double sum = 0.0;
     bool any = false;
     for (const auto &[id, value] : metrics) {
-      if (id.rfind("gpu.scopes.", 0u) == 0u && id != "gpu.scopes_sum_ms") {
+      if (shouldIncludeGpuScopeInSum(metrics, id)) {
         sum += value;
         any = true;
       }

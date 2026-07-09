@@ -1,0 +1,14 @@
+{
+  "case": "renderer.niagara_bistro.meshlet_360p",
+  "baselineProfile": "local-nvrhi-visible",
+  "backend": "nvrhi",
+  "resolvedBackend": "nvrhi",
+  "gpuBackendSource": "manifest",
+  "reason": "initial NVRHI render baseline",
+  "approvedAtUtc": "2026-07-08T12:18:17Z",
+  "sourceArtifactDir": "artifacts/baseline-generation/nvrhi-snapshots-20260708T142319/cases/renderer.niagara_bistro.meshlet_360p",
+  "captures": [
+    {"target": "final_color", "newHash": "fnv1a64:0947b7eef58472b9"},
+    {"target": "scene_depth", "newHash": "fnv1a64:735035a67e445026"}
+  ]
+}

@@ -51,6 +51,16 @@ constexpr double kBytesPerMiB = 1024.0 * 1024.0;
   return static_cast<double>(bytes) / kBytesPerMiB;
 }
 
+[[nodiscard]] bool shouldIncludeGpuScopeInSum(const GpuTimingReport &report,
+                                              GpuTimingScope scope) {
+  if ((scope == GpuTimingScope::ShadowDepth ||
+       scope == GpuTimingScope::ShadowSdsm) &&
+      hasGpuTimingScope(report, GpuTimingScope::Shadow)) {
+    return false;
+  }
+  return true;
+}
+
 class TrackingMemoryResource final : public std::pmr::memory_resource {
 public:
   explicit TrackingMemoryResource(
@@ -195,6 +205,108 @@ void addRendererFrameMetrics(std::map<std::string, double> &measurements,
   addIfNonzero(measurements, "renderer.opaque.tessellated_draws",
                opaque.tessellatedDraws);
 
+  const VisibilityFrameMetrics &visibility = metrics.visibility;
+  addIfNonzero(measurements, "renderer.visibility.cpu_main_candidates",
+               visibility.cpuMainCandidates);
+  addIfNonzero(measurements, "renderer.visibility.cpu_main_visible_candidates",
+               visibility.cpuMainVisibleCandidates);
+  addIfNonzero(measurements, "renderer.visibility.cpu_main_rejected",
+               visibility.cpuMainRejected);
+  addIfNonzero(measurements, "renderer.visibility.gpu_main_candidates",
+               visibility.gpuMainCandidates);
+  addIfNonzero(measurements, "renderer.visibility.gpu_main_visible_candidates",
+               visibility.gpuMainVisibleCandidates);
+  addIfNonzero(measurements, "renderer.visibility.gpu_main_rejected_frustum",
+               visibility.gpuMainRejectedFrustum);
+  addIfNonzero(measurements, "renderer.visibility.gpu_main_rejected_occlusion",
+               visibility.gpuMainRejectedOcclusion);
+  addIfNonzero(measurements, "renderer.visibility.gpu_output_overflow_count",
+               visibility.gpuOutputOverflowCount);
+  addIfNonzero(measurements, "renderer.visibility.gpu_main_readback_available",
+               visibility.gpuMainReadbackAvailable);
+  addIfNonzero(measurements,
+               "renderer.visibility.gpu_main_readback_source_frame",
+               visibility.gpuMainReadbackSourceFrame);
+  addIfNonzero(measurements,
+               "renderer.visibility.gpu_main_readback_stale_frame_count",
+               visibility.gpuMainReadbackStaleFrameCount);
+  addIfNonzero(measurements,
+               "renderer.visibility.gpu_main_readback_error_count",
+               visibility.gpuMainReadbackErrorCount);
+  addIfNonzero(measurements,
+               "renderer.visibility.gpu_main_readback_visible_candidates",
+               visibility.gpuMainReadbackVisibleCandidates);
+  addIfNonzero(measurements,
+               "renderer.visibility.gpu_main_visible_list_mismatches",
+               visibility.gpuMainVisibleListMismatches);
+  addIfNonzero(measurements, "renderer.visibility.gpu_indirect_draw_used",
+               visibility.gpuIndirectDrawUsed);
+  addIfNonzero(measurements, "renderer.visibility.gpu_indirect_draw_fallback",
+               visibility.gpuIndirectDrawFallback);
+  addIfNonzero(measurements, "renderer.visibility.gpu_indirect_draw_commands",
+               visibility.gpuIndirectDrawCommands);
+  addIfNonzero(measurements,
+               "renderer.visibility.gpu_indirect_draw_readback_commands",
+               visibility.gpuIndirectDrawReadbackCommands);
+  addIfNonzero(measurements,
+               "renderer.visibility.gpu_indirect_draw_readback_tombstoned",
+               visibility.gpuIndirectDrawReadbackTombstoned);
+  addIfNonzero(measurements,
+               "renderer.visibility.gpu_indirect_draw_readback_visible",
+               visibility.gpuIndirectDrawReadbackVisible);
+  addIfNonzero(measurements, "renderer.visibility.indirect_mesh_dispatch_count",
+               visibility.indirectMeshDispatchCount);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_rejected_frustum",
+               visibility.meshletRejectedFrustum);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_rejected_cone",
+               visibility.meshletRejectedCone);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_rejected_occlusion",
+               visibility.meshletRejectedOcclusion);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_occlusion_available",
+               visibility.meshletOcclusionAvailable);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_payload_overflow_count",
+               visibility.meshletPayloadOverflowCount);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_readback_available",
+               visibility.meshletReadbackAvailable);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_readback_source_frame",
+               visibility.meshletReadbackSourceFrame);
+  addIfNonzero(measurements,
+               "renderer.visibility.meshlet_readback_stale_frame_count",
+               visibility.meshletReadbackStaleFrameCount);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_readback_error_count",
+               visibility.meshletReadbackErrorCount);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_emitted",
+               visibility.meshletEmitted);
+  addIfNonzero(measurements, "renderer.visibility.meshlet_task_groups_executed",
+               visibility.meshletTaskGroupsExecuted);
+  addIfNonzero(measurements, "renderer.visibility.uncertain_visible",
+               visibility.uncertainVisible);
+  addIfNonzero(measurements, "renderer.visibility.shadow_cpu_candidates",
+               visibility.shadowCpuCandidates);
+  addIfNonzero(measurements, "renderer.visibility.shadow_cpu_rejected",
+               visibility.shadowCpuRejected);
+  addIfNonzero(measurements, "renderer.visibility.shadow_meshlet_candidates",
+               visibility.shadowMeshletCandidates);
+  addIfNonzero(measurements,
+               "renderer.visibility.shadow_meshlet_readback_available",
+               visibility.shadowMeshletReadbackAvailable);
+  addIfNonzero(measurements,
+               "renderer.visibility.shadow_meshlet_readback_source_frame",
+               visibility.shadowMeshletReadbackSourceFrame);
+  addIfNonzero(measurements,
+               "renderer.visibility.shadow_meshlet_readback_stale_frame_count",
+               visibility.shadowMeshletReadbackStaleFrameCount);
+  addIfNonzero(measurements,
+               "renderer.visibility.shadow_meshlet_readback_error_count",
+               visibility.shadowMeshletReadbackErrorCount);
+  addIfNonzero(measurements,
+               "renderer.visibility.shadow_meshlet_rejected_bounds",
+               visibility.shadowMeshletRejectedBounds);
+  addIfNonzero(measurements, "renderer.visibility.occlusion_available",
+               visibility.occlusionAvailable);
+
   const ShadowFrameMetrics &shadow = metrics.shadow;
   addIfNonzero(measurements, "renderer.shadow.cascades", shadow.cascadeCount);
   addIfNonzero(measurements, "renderer.shadow.total_draws", shadow.totalDraws);
@@ -218,6 +330,9 @@ void addRendererFrameMetrics(std::map<std::string, double> &measurements,
                aa.motionVectorAllocationCount);
   addIfNonzero(measurements, "renderer.aa.motion_vector_reallocations",
                aa.motionVectorReallocationCount);
+  addIfNonzero(measurements,
+               "renderer.aa.motion_vector_depth_reprojection_passes",
+               aa.motionVectorDepthReprojectionPassCount);
   addIfNonzero(measurements, "renderer.aa.velocity_passes",
                aa.velocityPassCount);
   addIfNonzero(measurements, "renderer.aa.velocity_draws",
@@ -437,7 +552,7 @@ void addGpuTimingMetric(std::map<std::string, double> &measurements,
 
 [[nodiscard]] uint64_t reportSourceFrameIndex(const GpuTimingReport &report) {
   static constexpr uint64_t kInvalid = std::numeric_limits<uint64_t>::max();
-  const std::array<uint64_t, 12> sources{
+  const std::array<uint64_t, 13> sources{
       report.shadowSourceFrameIndex,
       report.shadowDepthSourceFrameIndex,
       report.shadowSdsmSourceFrameIndex,
@@ -450,6 +565,7 @@ void addGpuTimingMetric(std::map<std::string, double> &measurements,
       report.msaaResolveSourceFrameIndex,
       report.gtaoSourceFrameIndex,
       report.hdrPostProcessSourceFrameIndex,
+      report.skyboxSourceFrameIndex,
   };
   for (const uint64_t source : sources) {
     if (source != kInvalid) {
@@ -471,7 +587,9 @@ void applyGpuTimingReport(BenchmarkReport &report,
   double sum = 0.0;
   const auto add = [&](std::string_view id, GpuTimingScope scope, float ms) {
     if (hasGpuTimingScope(timingReport, scope)) {
-      sum += static_cast<double>(ms);
+      if (shouldIncludeGpuScopeInSum(timingReport, scope)) {
+        sum += static_cast<double>(ms);
+      }
       frame.measurements.emplace(std::string(id), static_cast<double>(ms));
     }
   };
@@ -499,6 +617,8 @@ void applyGpuTimingReport(BenchmarkReport &report,
       timingReport.transmissionTimeMs);
   add("gpu.scopes.hdr_postprocess_ms", GpuTimingScope::HDRPostProcess,
       timingReport.hdrPostProcessTimeMs);
+  add("gpu.scopes.skybox_ms", GpuTimingScope::Skybox,
+      timingReport.skyboxTimeMs);
   if (sum > 0.0) {
     frame.measurements["gpu.scopes_sum_ms"] = sum;
   }

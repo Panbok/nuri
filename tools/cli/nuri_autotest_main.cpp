@@ -37,12 +37,13 @@ requireCase(const std::vector<AutotestCase> &cases, std::string_view id) {
   return *testCase;
 }
 
-[[nodiscard]] AutotestRunOptions makeOptions(
-    const std::filesystem::path &artifactDir,
-    const std::filesystem::path &jsonOut,
-    const std::filesystem::path &htmlOut, const std::string &baselineProfile,
-    const std::string &windowMode, bool dryRun, bool printEffectiveConfig,
-    bool verboseFrames, const std::string &command) {
+[[nodiscard]] AutotestRunOptions
+makeOptions(const std::filesystem::path &artifactDir,
+            const std::filesystem::path &jsonOut,
+            const std::filesystem::path &htmlOut,
+            const std::string &baselineProfile, const std::string &windowMode,
+            bool dryRun, bool printEffectiveConfig, bool verboseFrames,
+            const std::string &command) {
   return AutotestRunOptions{
       .jsonOut = jsonOut,
       .htmlOut = htmlOut,
@@ -107,7 +108,7 @@ int main(int argc, char **argv) {
   std::filesystem::path runArtifactDir;
   std::filesystem::path runJsonOut;
   std::filesystem::path runHtmlOut;
-  std::string runBaselineProfile = "local-lvk-visible";
+  std::string runBaselineProfile = "local-nvrhi-visible";
   std::string runWindowMode = "visible";
   bool runDry = false;
   bool runEffective = false;
@@ -116,8 +117,7 @@ int main(int argc, char **argv) {
   run->add_option("--case", runCase, "Case id");
   run->add_option("--suite", runSuite, "Suite name");
   run->add_option("--artifact-dir", runArtifactDir, "Artifact directory");
-  run->add_option("--baseline-profile", runBaselineProfile,
-                  "Baseline profile");
+  run->add_option("--baseline-profile", runBaselineProfile, "Baseline profile");
   run->add_option("--json-out", runJsonOut, "Report JSON path");
   run->add_option("--html-out", runHtmlOut, "Report HTML path");
   run->add_option("--window-mode", runWindowMode,
@@ -133,10 +133,9 @@ int main(int argc, char **argv) {
       std::exit(exitCode(AutotestExitCode::InvalidInput));
     }
     std::vector<AutotestCase> cases = loadCasesOrExit();
-    AutotestRunOptions options =
-        makeOptions(runArtifactDir, runJsonOut, runHtmlOut,
-                    runBaselineProfile, runWindowMode, runDry, runEffective,
-                    runVerboseFrames, command);
+    AutotestRunOptions options = makeOptions(
+        runArtifactDir, runJsonOut, runHtmlOut, runBaselineProfile,
+        runWindowMode, runDry, runEffective, runVerboseFrames, command);
     if (!runCase.empty()) {
       AutotestCase testCase = requireCase(cases, runCase);
       if (runEffective) {
@@ -146,16 +145,16 @@ int main(int argc, char **argv) {
         }
       }
       AutotestRunResult result = runAutotestCase(std::move(testCase), options);
-      std::cout << result.message << "\nreport: "
-                << result.reportPath.generic_string() << "\nhtml: "
-                << result.htmlPath.generic_string() << "\n";
+      std::cout << result.message
+                << "\nreport: " << result.reportPath.generic_string()
+                << "\nhtml: " << result.htmlPath.generic_string() << "\n";
       std::exit(exitCode(result.exitCode));
     }
     AutotestSuiteRunResult suiteResult =
         runAutotestSuite(std::move(cases), runSuite, options);
-    std::cout << suiteResult.message << "\nreport: "
-              << suiteResult.reportPath.generic_string() << "\nhtml: "
-              << suiteResult.htmlPath.generic_string() << "\n";
+    std::cout << suiteResult.message
+              << "\nreport: " << suiteResult.reportPath.generic_string()
+              << "\nhtml: " << suiteResult.htmlPath.generic_string() << "\n";
     std::exit(exitCode(suiteResult.exitCode));
   });
 
@@ -175,7 +174,7 @@ int main(int argc, char **argv) {
     std::vector<AutotestCase> cases = loadCasesOrExit();
     AutotestCase testCase = requireCase(cases, recordCase);
     AutotestRunOptions options =
-        makeOptions(recordOut, {}, {}, "local-lvk-visible", recordWindowMode,
+        makeOptions(recordOut, {}, {}, "local-nvrhi-visible", recordWindowMode,
                     false, recordEffective, false, command);
     if (recordEffective) {
       auto effective = formatAutotestEffectiveConfigJson(testCase, options);
@@ -184,9 +183,9 @@ int main(int argc, char **argv) {
       }
     }
     AutotestRunResult result = recordAutotestCase(std::move(testCase), options);
-    std::cout << result.message << "\nreport: "
-              << result.reportPath.generic_string() << "\nhtml: "
-              << result.htmlPath.generic_string() << "\n";
+    std::cout << result.message
+              << "\nreport: " << result.reportPath.generic_string()
+              << "\nhtml: " << result.htmlPath.generic_string() << "\n";
     std::exit(exitCode(result.exitCode));
   });
 

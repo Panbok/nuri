@@ -1,0 +1,16 @@
+{
+  "case": "renderer.damaged_helmet.post_360p",
+  "baselineProfile": "local-nvrhi-visible",
+  "backend": "default",
+  "resolvedBackend": "nvrhi",
+  "gpuBackendSource": "default",
+  "reason": "initial NVRHI render baseline",
+  "approvedAtUtc": "2026-07-08T12:18:09Z",
+  "sourceArtifactDir": "artifacts/baseline-generation/nvrhi-snapshots-20260708T142319/cases/renderer.damaged_helmet.post_360p",
+  "captures": [
+    {"target": "final_color", "newHash": "fnv1a64:467d65d2219fea5b"},
+    {"target": "ambient_occlusion", "newHash": "fnv1a64:04f0926711323251"},
+    {"target": "material_normals", "newHash": "fnv1a64:1e60302088e0c8f5"},
+    {"target": "motion_vectors", "newHash": "fnv1a64:b0fb4772dff4de77"}
+  ]
+}

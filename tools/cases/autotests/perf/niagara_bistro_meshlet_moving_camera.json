@@ -16,6 +16,39 @@
       }
     }
   },
+  "environment": {
+    "cubemap": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k.hdr",
+      "kind": "EquirectHdrCubemap",
+      "debugName": "tool_qwantani_cubemap",
+      "required": true
+    },
+    "irradiance": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k_irradiance.ktx2",
+      "kind": "Ktx2Cubemap",
+      "debugName": "tool_qwantani_irradiance"
+    },
+    "prefilteredGgx": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2",
+      "kind": "Ktx2Cubemap",
+      "debugName": "tool_qwantani_prefilter_ggx"
+    },
+    "prefilteredCharlie": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2",
+      "kind": "Ktx2Cubemap",
+      "debugName": "tool_qwantani_prefilter_charlie"
+    },
+    "brdfLut": {
+      "pathBase": "texturesRoot",
+      "path": "brdf_lut.ktx2",
+      "kind": "Ktx2Texture2D",
+      "debugName": "tool_brdf_lut"
+    }
+  },
   "backend": "nvrhi",
   "resolution": [640, 360],
   "fixedDeltaSeconds": 0.016666667,
@@ -40,8 +73,8 @@
     "opaque": {
       "enabled": true,
       "meshletMode": "Required",
-      "enableMeshletFrustumCulling": false,
-      "enableMeshletConeCulling": false,
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
       "enableDepthPrepass": false,
       "enableInstanceCompute": false,
       "enableInstanceAnimation": false,
@@ -50,16 +83,16 @@
       "forcedMeshLod": 0
     },
     "antiAliasing": {
-      "mode": "None",
-      "qualityPreset": "Balanced"
+      "mode": "TAA",
+      "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {
       "mode": "GTAO",
-      "preset": "Balanced"
+      "preset": "Ultra"
     },
     "shadow": {
-      "enabled": false,
-      "qualityPreset": "Low"
+      "enabled": true,
+      "qualityPreset": "Ultra"
     },
     "hdrPostProcess": {
       "bloomEnabled": false,
@@ -199,6 +232,31 @@
           "greaterOrEqual": 1
         },
         {
+          "id": "meshlet_counter_readback_fresh_end",
+          "metric": "renderer.visibility.meshlet_readback_stale_frame_count",
+          "lessOrEqual": 2
+        },
+        {
+          "id": "meshlet_counter_readback_no_errors_end",
+          "metric": "renderer.visibility.meshlet_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "gpu_counter_readback_fresh_end",
+          "metric": "renderer.visibility.gpu_main_readback_stale_frame_count",
+          "lessOrEqual": 2
+        },
+        {
+          "id": "gpu_counter_readback_no_errors_end",
+          "metric": "renderer.visibility.gpu_main_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "classic_indirect_draw_no_fallback_end",
+          "metric": "renderer.visibility.gpu_indirect_draw_fallback",
+          "equals": 0
+        },
+        {
           "id": "gtao_main_pass_end",
           "metric": "renderer.ao.main_passes",
           "greaterOrEqual": 1
@@ -227,6 +285,26 @@
           "medianMin": 1
         },
         {
+          "id": "meshlet_emitted_nonzero",
+          "metric": "renderer.visibility.meshlet_emitted",
+          "medianMin": 1
+        },
+        {
+          "id": "meshlet_counter_readback_no_errors",
+          "metric": "renderer.visibility.meshlet_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "gpu_counter_readback_no_errors",
+          "metric": "renderer.visibility.gpu_main_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "classic_indirect_draw_no_fallback",
+          "metric": "renderer.visibility.gpu_indirect_draw_fallback",
+          "equals": 0
+        },
+        {
           "id": "gtao_stays_active",
           "metric": "renderer.ao.active",
           "equals": 1
@@ -235,7 +313,14 @@
     }
   ],
   "requirements": {
-    "assets": ["modelsRoot:NiagaraBistro/bistrox.gltf"],
+    "assets": [
+      "modelsRoot:NiagaraBistro/bistrox.gltf",
+      "texturesRoot:qwantani_moon_noon_puresky_4k.hdr",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_irradiance.ktx2",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2",
+      "texturesRoot:brdf_lut.ktx2"
+    ],
     "backends": ["nvrhi"],
     "allowVisibleWindow": true
   }

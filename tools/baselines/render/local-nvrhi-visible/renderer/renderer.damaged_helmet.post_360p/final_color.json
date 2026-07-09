@@ -1,0 +1,11 @@
+{
+  "target": "final_color",
+  "format": 1,
+  "width": 640,
+  "height": 360,
+  "rowStride": 2560,
+  "origin": "top_left",
+  "colorSpace": "display_sdr",
+  "payload": "final_color.png",
+  "hash": "fnv1a64:467d65d2219fea5b"
+}

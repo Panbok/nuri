@@ -229,8 +229,13 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
                     std::string_view path) {
   static constexpr std::array keys{
       std::string_view("enabled"),
+      std::string_view("enableDepthPrepass"),
+      std::string_view("enableDepthPyramid"),
       std::string_view("enableInstanceCompute"),
+      std::string_view("enableIndirectDraw"),
+      std::string_view("enableInstancedDraw"),
       std::string_view("enableMeshLod"),
+      std::string_view("enableCpuFrustumCulling"),
       std::string_view("enableTessellation"),
       std::string_view("forcedMeshLod"),
   };
@@ -243,17 +248,47 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
     return Result<bool, std::string>::makeError(b.error());
   }
   settings.opaque.enabled = b.value();
+  b = readBool(object, "enableDepthPrepass", path,
+               settings.opaque.enableDepthPrepass);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.opaque.enableDepthPrepass = b.value();
+  b = readBool(object, "enableDepthPyramid", path,
+               settings.opaque.enableDepthPyramid);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.opaque.enableDepthPyramid = b.value();
   b = readBool(object, "enableInstanceCompute", path,
                settings.opaque.enableInstanceCompute);
   if (b.hasError()) {
     return Result<bool, std::string>::makeError(b.error());
   }
   settings.opaque.enableInstanceCompute = b.value();
+  b = readBool(object, "enableIndirectDraw", path,
+               settings.opaque.enableIndirectDraw);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.opaque.enableIndirectDraw = b.value();
+  b = readBool(object, "enableInstancedDraw", path,
+               settings.opaque.enableInstancedDraw);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.opaque.enableInstancedDraw = b.value();
   b = readBool(object, "enableMeshLod", path, settings.opaque.enableMeshLod);
   if (b.hasError()) {
     return Result<bool, std::string>::makeError(b.error());
   }
   settings.opaque.enableMeshLod = b.value();
+  b = readBool(object, "enableCpuFrustumCulling", path,
+               settings.opaque.enableCpuFrustumCulling);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.opaque.enableCpuFrustumCulling = b.value();
   b = readBool(object, "enableTessellation", path,
                settings.opaque.enableTessellation);
   if (b.hasError()) {
@@ -333,8 +368,10 @@ parseAmbientOcclusionSettings(yyjson_val *object, RenderSettings &settings,
 [[nodiscard]] Result<bool, std::string>
 parseShadowSettings(yyjson_val *object, RenderSettings &settings,
                     std::string_view path) {
-  static constexpr std::array keys{std::string_view("enabled"),
-                                   std::string_view("qualityPreset")};
+  static constexpr std::array keys{
+      std::string_view("enabled"), std::string_view("qualityPreset"),
+      std::string_view("enableMeshletDepth"),
+      std::string_view("enableMeshletCascadeCulling")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -357,6 +394,108 @@ parseShadowSettings(yyjson_val *object, RenderSettings &settings,
   if (optionalObject(object, "qualityPreset") != nullptr) {
     applyShadowQualityPreset(settings.shadow, preset);
   }
+  enabled = readBool(object, "enableMeshletDepth", path,
+                     settings.shadow.enableMeshletDepth);
+  if (enabled.hasError()) {
+    return Result<bool, std::string>::makeError(enabled.error());
+  }
+  settings.shadow.enableMeshletDepth = enabled.value();
+  enabled = readBool(object, "enableMeshletCascadeCulling", path,
+                     settings.shadow.enableMeshletCascadeCulling);
+  if (enabled.hasError()) {
+    return Result<bool, std::string>::makeError(enabled.error());
+  }
+  settings.shadow.enableMeshletCascadeCulling = enabled.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+parseVisibilitySettings(yyjson_val *object, RenderSettings &settings,
+                        std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("mainViewMode"),
+      std::string_view("shadowMode"),
+      std::string_view("occlusionMode"),
+      std::string_view("enableMeshletFrustumCulling"),
+      std::string_view("enableMeshletConeCulling"),
+      std::string_view("enableShadowMeshletCulling"),
+      std::string_view("enableGpuInstanceCulling"),
+      std::string_view("enableGpuIndirectDraw"),
+      std::string_view("enableIndirectMeshDispatch"),
+      std::string_view("visibleOnUncertain")};
+  auto keysResult = rejectUnknownKeys(object, keys, path);
+  if (keysResult.hasError()) {
+    return keysResult;
+  }
+  auto result = readEnumField(
+      object, "mainViewMode", path, settings.visibility.mainViewMode,
+      {{"Disabled", VisibilityCullingMode::Disabled},
+       {"CpuCoarse", VisibilityCullingMode::CpuCoarse},
+       {"Hybrid", VisibilityCullingMode::Hybrid},
+       {"GpuDriven", VisibilityCullingMode::GpuDriven}});
+  if (result.hasError()) {
+    return result;
+  }
+  result =
+      readEnumField(object, "shadowMode", path, settings.visibility.shadowMode,
+                    {{"Disabled", VisibilityCullingMode::Disabled},
+                     {"CpuCoarse", VisibilityCullingMode::CpuCoarse},
+                     {"Hybrid", VisibilityCullingMode::Hybrid},
+                     {"GpuDriven", VisibilityCullingMode::GpuDriven}});
+  if (result.hasError()) {
+    return result;
+  }
+  result = readEnumField(
+      object, "occlusionMode", path, settings.visibility.occlusionMode,
+      {{"Disabled", VisibilityOcclusionMode::Disabled},
+       {"PreviousFrameHiZ", VisibilityOcclusionMode::PreviousFrameHiZ},
+       {"CurrentFrameHiZExperimental",
+        VisibilityOcclusionMode::CurrentFrameHiZExperimental}});
+  if (result.hasError()) {
+    return result;
+  }
+  auto b = readBool(object, "enableMeshletFrustumCulling", path,
+                    settings.visibility.enableMeshletFrustumCulling);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.visibility.enableMeshletFrustumCulling = b.value();
+  b = readBool(object, "enableMeshletConeCulling", path,
+               settings.visibility.enableMeshletConeCulling);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.visibility.enableMeshletConeCulling = b.value();
+  b = readBool(object, "enableShadowMeshletCulling", path,
+               settings.visibility.enableShadowMeshletCulling);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.visibility.enableShadowMeshletCulling = b.value();
+  b = readBool(object, "enableGpuInstanceCulling", path,
+               settings.visibility.enableGpuInstanceCulling);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.visibility.enableGpuInstanceCulling = b.value();
+  b = readBool(object, "enableGpuIndirectDraw", path,
+               settings.visibility.enableGpuIndirectDraw);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.visibility.enableGpuIndirectDraw = b.value();
+  b = readBool(object, "enableIndirectMeshDispatch", path,
+               settings.visibility.enableIndirectMeshDispatch);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.visibility.enableIndirectMeshDispatch = b.value();
+  b = readBool(object, "visibleOnUncertain", path,
+               settings.visibility.visibleOnUncertain);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.visibility.visibleOnUncertain = b.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -437,6 +576,7 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       Parser{"antiAliasing", parseAntiAliasingSettings},
       Parser{"ambientOcclusion", parseAmbientOcclusionSettings},
       Parser{"shadow", parseShadowSettings},
+      Parser{"visibility", parseVisibilitySettings},
       Parser{"hdrPostProcess", parseHdrSettings},
       Parser{"textureFiltering", parseTextureFilteringSettings},
   };

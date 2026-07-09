@@ -47,6 +47,23 @@ struct ToolSceneDesc {
   std::string contentHash = "procedural-empty-v1";
 };
 
+struct ToolEnvironmentTextureDesc {
+  bool enabled = false;
+  bool required = false;
+  std::string pathBase{};
+  std::filesystem::path path{};
+  std::string kind = "Texture2D";
+  std::string debugName{};
+};
+
+struct ToolEnvironmentDesc {
+  ToolEnvironmentTextureDesc cubemap{};
+  ToolEnvironmentTextureDesc irradiance{};
+  ToolEnvironmentTextureDesc prefilteredGgx{};
+  ToolEnvironmentTextureDesc prefilteredCharlie{};
+  ToolEnvironmentTextureDesc brdfLut{};
+};
+
 struct ToolCameraDesc {
   glm::vec3 position{0.0f, 1.0f, 4.0f};
   glm::vec3 direction{0.0f, 0.0f, -1.0f};
@@ -73,6 +90,7 @@ struct ToolRuntimeDesc {
   std::array<uint32_t, 2> resolution{1280u, 720u};
   ToolRenderGraphDesc renderGraph{};
   ToolSceneDesc scene{};
+  ToolEnvironmentDesc environment{};
   ToolResolvePathFn resolvePath = nullptr;
 };
 

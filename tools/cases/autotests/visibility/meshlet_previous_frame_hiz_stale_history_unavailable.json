@@ -1,0 +1,222 @@
+{
+  "schemaVersion": 1,
+  "id": "visibility.meshlet_previous_frame_hiz_stale_history_unavailable",
+  "suite": "visibility",
+  "description": "Meshlet previous-frame Hi-Z reports unavailable after a frame without a fresh depth pyramid",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "DamagedHelmet/DamagedHelmet.gltf",
+    "importOptions": {
+      "mesh": {
+        "flipUVs": true,
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 6,
+  "endFrame": 10,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.25, 3.2],
+    "target": [0.0, -0.05, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableDepthPrepass": true,
+      "enableDepthPyramid": true,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "visibility": {
+      "occlusionMode": "PreviousFrameHiZ",
+      "enableGpuInstanceCulling": false,
+      "enableGpuIndirectDraw": false
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      },
+      {
+        "frame": 7,
+        "type": "setSettings",
+        "eventReason": "drop_depth_pyramid_source",
+        "settings": {
+          "opaque": {
+            "enableDepthPyramid": false
+          },
+          "visibility": {
+            "occlusionMode": "Disabled"
+          }
+        }
+      },
+      {
+        "frame": 8,
+        "type": "setSettings",
+        "eventReason": "restore_previous_frame_hiz",
+        "settings": {
+          "opaque": {
+            "enableDepthPyramid": true
+          },
+          "visibility": {
+            "occlusionMode": "PreviousFrameHiZ"
+          }
+        }
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "warm",
+      "frame": 6,
+      "assertions": [
+        {
+          "id": "warm_meshlet_mode_active",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "warm_no_incompatible_fallback",
+          "metric": "renderer.opaque.meshlet_rejected_incompatible_frame",
+          "equals": 0
+        },
+        {
+          "id": "warm_depth_pyramid_built",
+          "metric": "renderer.opaque.depth_pyramid_levels",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "warm_meshlet_hiz_available",
+          "metric": "renderer.visibility.meshlet_occlusion_available",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "id": "stale_source",
+      "frame": 8,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "assertions": [
+        {
+          "id": "stale_meshlet_mode_active",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "stale_no_incompatible_fallback",
+          "metric": "renderer.opaque.meshlet_rejected_incompatible_frame",
+          "equals": 0
+        },
+        {
+          "id": "stale_depth_pyramid_rebuilt",
+          "metric": "renderer.opaque.depth_pyramid_levels",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "stale_meshlet_hiz_unavailable",
+          "metric": "renderer.visibility.meshlet_occlusion_available",
+          "equals": 0
+        },
+        {
+          "id": "stale_meshlet_occlusion_rejects_not_reported",
+          "metric": "renderer.visibility.meshlet_rejected_occlusion",
+          "equals": 0
+        },
+        {
+          "id": "stale_meshlet_work_still_visible",
+          "metric": "renderer.opaque.meshlet_candidates",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "stale_meshlet_readback_no_errors",
+          "metric": "renderer.visibility.meshlet_readback_error_count",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "recovered",
+      "frame": 9,
+      "assertions": [
+        {
+          "id": "recovered_meshlet_hiz_available",
+          "metric": "renderer.visibility.meshlet_occlusion_available",
+          "equals": 1
+        },
+        {
+          "id": "recovered_meshlet_readback_fresh",
+          "metric": "renderer.visibility.meshlet_readback_stale_frame_count",
+          "lessOrEqual": 2
+        },
+        {
+          "id": "recovered_meshlet_readback_no_errors",
+          "metric": "renderer.visibility.meshlet_readback_error_count",
+          "equals": 0
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:DamagedHelmet/DamagedHelmet.gltf"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

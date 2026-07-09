@@ -39,12 +39,13 @@ requireCase(const std::vector<SnapshotCase> &cases, std::string_view id) {
   return *snapshotCase;
 }
 
-[[nodiscard]] SnapshotRunOptions makeOptions(
-    const std::filesystem::path &artifactDir,
-    const std::filesystem::path &jsonOut,
-    const std::filesystem::path &htmlOut, const std::string &baselineProfile,
-    const std::string &windowMode, bool dryRun, bool printEffectiveConfig,
-    bool force, const std::string &command) {
+[[nodiscard]] SnapshotRunOptions
+makeOptions(const std::filesystem::path &artifactDir,
+            const std::filesystem::path &jsonOut,
+            const std::filesystem::path &htmlOut,
+            const std::string &baselineProfile, const std::string &windowMode,
+            bool dryRun, bool printEffectiveConfig, bool force,
+            const std::string &command) {
   return SnapshotRunOptions{
       .jsonOut = jsonOut,
       .htmlOut = htmlOut,
@@ -108,7 +109,7 @@ int main(int argc, char **argv) {
   std::filesystem::path artifactDir;
   std::filesystem::path jsonOut;
   std::filesystem::path htmlOut;
-  std::string baselineProfile = "local-lvk-visible";
+  std::string baselineProfile = "local-nvrhi-visible";
   std::string windowMode = "visible";
   bool dryRun = false;
   bool printEffectiveConfig = false;
@@ -119,7 +120,8 @@ int main(int argc, char **argv) {
   capture->add_option("--html-out", htmlOut, "Report HTML path");
   capture->add_option("--window-mode", windowMode,
                       "visible, hidden, or headless");
-  capture->add_flag("--dry-run", dryRun, "Resolve config without renderer init");
+  capture->add_flag("--dry-run", dryRun,
+                    "Resolve config without renderer init");
   capture->add_flag("--print-effective-config", printEffectiveConfig,
                     "Print resolved config before running");
   capture->callback([&]() {
@@ -134,11 +136,11 @@ int main(int argc, char **argv) {
         std::cout << effective.value();
       }
     }
-    SnapshotRunResult result = captureSnapshotCase(std::move(snapshotCase),
-                                                   options);
-    std::cout << result.message << "\nreport: "
-              << result.reportPath.generic_string() << "\nhtml: "
-              << result.htmlPath.generic_string() << "\n";
+    SnapshotRunResult result =
+        captureSnapshotCase(std::move(snapshotCase), options);
+    std::cout << result.message
+              << "\nreport: " << result.reportPath.generic_string()
+              << "\nhtml: " << result.htmlPath.generic_string() << "\n";
     std::exit(exitCode(result.exitCode));
   });
 
@@ -146,28 +148,27 @@ int main(int argc, char **argv) {
   std::filesystem::path compareArtifactDir;
   std::filesystem::path compareJsonOut;
   std::filesystem::path compareHtmlOut;
-  std::string compareProfile = "local-lvk-visible";
+  std::string compareProfile = "local-nvrhi-visible";
   bool forceCompare = false;
   auto *compare = app.add_subcommand("compare", "Compare captured artifacts");
   compare->add_option("--case", compareCase, "Case id")->required();
-  compare->add_option("--artifact-dir", compareArtifactDir,
-                      "Artifact directory")->required();
-  compare->add_option("--baseline-profile", compareProfile,
-                      "Baseline profile");
+  compare
+      ->add_option("--artifact-dir", compareArtifactDir, "Artifact directory")
+      ->required();
+  compare->add_option("--baseline-profile", compareProfile, "Baseline profile");
   compare->add_option("--json-out", compareJsonOut, "Report JSON path");
   compare->add_option("--html-out", compareHtmlOut, "Report HTML path");
   compare->add_flag("--force", forceCompare, "Demote invalid preconditions");
   compare->callback([&]() {
     std::vector<SnapshotCase> cases = loadCasesOrExit();
     SnapshotCase snapshotCase = requireCase(cases, compareCase);
-    SnapshotRunOptions options =
-        makeOptions(compareArtifactDir, compareJsonOut, compareHtmlOut,
-                    compareProfile, "visible", false, false, forceCompare,
-                    command);
+    SnapshotRunOptions options = makeOptions(
+        compareArtifactDir, compareJsonOut, compareHtmlOut, compareProfile,
+        "visible", false, false, forceCompare, command);
     SnapshotRunResult result =
         compareSnapshotCase(std::move(snapshotCase), options);
-    std::cout << result.message << "\nreport: "
-              << result.reportPath.generic_string() << "\n";
+    std::cout << result.message
+              << "\nreport: " << result.reportPath.generic_string() << "\n";
     std::exit(exitCode(result.exitCode));
   });
 
@@ -176,7 +177,7 @@ int main(int argc, char **argv) {
   std::filesystem::path runArtifactDir;
   std::filesystem::path runJsonOut;
   std::filesystem::path runHtmlOut;
-  std::string runBaselineProfile = "local-lvk-visible";
+  std::string runBaselineProfile = "local-nvrhi-visible";
   std::string runWindowMode = "visible";
   bool runDry = false;
   bool runEffective = false;
@@ -184,8 +185,7 @@ int main(int argc, char **argv) {
   run->add_option("--case", runCase, "Case id");
   run->add_option("--suite", runSuite, "Suite name");
   run->add_option("--artifact-dir", runArtifactDir, "Artifact directory");
-  run->add_option("--baseline-profile", runBaselineProfile,
-                  "Baseline profile");
+  run->add_option("--baseline-profile", runBaselineProfile, "Baseline profile");
   run->add_option("--json-out", runJsonOut, "Report JSON path");
   run->add_option("--html-out", runHtmlOut, "Report HTML path");
   run->add_option("--window-mode", runWindowMode,
@@ -200,43 +200,43 @@ int main(int argc, char **argv) {
     }
     std::vector<SnapshotCase> cases = loadCasesOrExit();
     SnapshotRunOptions options =
-        makeOptions(runArtifactDir, runJsonOut, runHtmlOut,
-                    runBaselineProfile, runWindowMode, runDry, runEffective,
-                    false, command);
+        makeOptions(runArtifactDir, runJsonOut, runHtmlOut, runBaselineProfile,
+                    runWindowMode, runDry, runEffective, false, command);
     if (!runCase.empty()) {
       SnapshotCase snapshotCase = requireCase(cases, runCase);
       if (runEffective) {
-        auto effective = formatSnapshotEffectiveConfigJson(snapshotCase, options);
+        auto effective =
+            formatSnapshotEffectiveConfigJson(snapshotCase, options);
         if (!effective.hasError()) {
           std::cout << effective.value();
         }
       }
       SnapshotRunResult result =
           runSnapshotCase(std::move(snapshotCase), options);
-      std::cout << result.message << "\nreport: "
-                << result.reportPath.generic_string() << "\nhtml: "
-                << result.htmlPath.generic_string() << "\n";
+      std::cout << result.message
+                << "\nreport: " << result.reportPath.generic_string()
+                << "\nhtml: " << result.htmlPath.generic_string() << "\n";
       std::exit(exitCode(result.exitCode));
     }
     SnapshotSuiteRunResult suiteResult =
         runSnapshotSuite(std::move(cases), runSuite, options);
-    std::cout << suiteResult.message << "\nreport: "
-              << suiteResult.reportPath.generic_string() << "\nhtml: "
-              << suiteResult.htmlPath.generic_string() << "\n";
+    std::cout << suiteResult.message
+              << "\nreport: " << suiteResult.reportPath.generic_string()
+              << "\nhtml: " << suiteResult.htmlPath.generic_string() << "\n";
     std::exit(exitCode(suiteResult.exitCode));
   });
 
   std::string approveCase;
   std::string approveReason;
   std::filesystem::path approveArtifacts;
-  std::string approveProfile = "local-lvk-visible";
+  std::string approveProfile = "local-nvrhi-visible";
   auto *approve = app.add_subcommand("approve", "Approve captured baselines");
   approve->add_option("--case", approveCase, "Case id")->required();
   approve->add_option("--reason", approveReason, "Approval reason")->required();
-  approve->add_option("--from-artifacts", approveArtifacts,
-                      "Artifact directory")->required();
-  approve->add_option("--baseline-profile", approveProfile,
-                      "Baseline profile");
+  approve
+      ->add_option("--from-artifacts", approveArtifacts, "Artifact directory")
+      ->required();
+  approve->add_option("--baseline-profile", approveProfile, "Baseline profile");
   approve->callback([&]() {
     std::vector<SnapshotCase> cases = loadCasesOrExit();
     SnapshotCase snapshotCase = requireCase(cases, approveCase);
@@ -276,9 +276,9 @@ int main(int argc, char **argv) {
                 << "\n";
       std::exit(exitCode(SnapshotExitCode::InvalidInput));
     }
-    SnapshotCompareResult comparison = compareSnapshotImages(
-        actual.value(), expected.value(),
-        builtinSnapshotCompareProfile(diffProfile));
+    SnapshotCompareResult comparison =
+        compareSnapshotImages(actual.value(), expected.value(),
+                              builtinSnapshotCompareProfile(diffProfile));
     if (!diffOut.empty()) {
       auto written =
           writeSnapshotDiffPng(actual.value(), expected.value(), diffOut);

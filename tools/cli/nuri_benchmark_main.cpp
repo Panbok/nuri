@@ -6,13 +6,13 @@
 
 #include <CLI/CLI.hpp>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
 #include <vector>
-#include <cstdlib>
 
 using namespace nuri::tools::benchmark;
 using nuri::Result;
@@ -109,7 +109,8 @@ loadBenchmarkReports(const std::vector<std::filesystem::path> &reportPaths,
       return Result<std::vector<BenchmarkReport>, std::string>::makeError(
           "reports directory does not exist: " + dir.string());
     }
-    for (const auto &entry : std::filesystem::recursive_directory_iterator(dir)) {
+    for (const auto &entry :
+         std::filesystem::recursive_directory_iterator(dir)) {
       if (!entry.is_regular_file() || entry.path().extension() != ".json") {
         continue;
       }
@@ -223,24 +224,24 @@ int main(int argc, char **argv) {
           std::cout << effective.value();
         }
       }
-      BenchmarkRunResult result = runBenchmarkCase(std::move(benchmarkCase), options);
-      std::cout << result.message << "\nreport: "
-                << result.reportPath.generic_string() << "\n";
-      writeGraphOrExit({result.report}, runHtmlOut,
-                       makeGraphOptions(runHtmlMetrics, runHtmlStats,
-                                        "Nuri Benchmark Run"));
+      BenchmarkRunResult result =
+          runBenchmarkCase(std::move(benchmarkCase), options);
+      std::cout << result.message
+                << "\nreport: " << result.reportPath.generic_string() << "\n";
+      writeGraphOrExit(
+          {result.report}, runHtmlOut,
+          makeGraphOptions(runHtmlMetrics, runHtmlStats, "Nuri Benchmark Run"));
       std::exit(exitCode(result.exitCode));
     }
 
     BenchmarkSuiteRunResult suiteResult =
         runBenchmarkSuite(std::move(cases), runSuite, options);
     const std::filesystem::path suiteOut =
-        jsonOut.empty()
-            ? (artifactDir.empty()
-                   ? benchmarkRepoRoot() / "artifacts" / "bench" /
-                         utcTimestampForPath() / "run.json"
-                   : artifactDir / "run.json")
-            : jsonOut;
+        jsonOut.empty() ? (artifactDir.empty()
+                               ? benchmarkRepoRoot() / "artifacts" / "bench" /
+                                     utcTimestampForPath() / "run.json"
+                               : artifactDir / "run.json")
+                        : jsonOut;
     std::string json = "{\n  \"kind\": \"nuri.benchmark.suite_report\",\n"
                        "  \"caseReports\": [\n";
     bool first = true;
@@ -253,8 +254,8 @@ int main(int argc, char **argv) {
     }
     json += "\n  ]\n}\n";
     writeTextFile(suiteOut, json);
-    std::cout << suiteResult.message << "\nreport: "
-              << suiteOut.generic_string() << "\n";
+    std::cout << suiteResult.message
+              << "\nreport: " << suiteOut.generic_string() << "\n";
     if (!runHtmlOut.empty()) {
       std::vector<BenchmarkReport> reports;
       reports.reserve(suiteResult.caseResults.size());
@@ -338,7 +339,8 @@ int main(int argc, char **argv) {
   std::vector<std::string> summaryHtmlMetrics;
   std::vector<std::string> summaryHtmlStats;
   auto *summarize = app.add_subcommand("summarize", "Summarize report dir");
-  summarize->add_option("--reports", reportsDir, "Report directory")->required();
+  summarize->add_option("--reports", reportsDir, "Report directory")
+      ->required();
   summarize->add_option("--json-out", summaryOut, "Summary JSON path");
   summarize->add_option("--html-out", summaryHtmlOut, "Graph HTML output path");
   summarize
@@ -378,8 +380,8 @@ int main(int argc, char **argv) {
               "\", \"case\": \"" + reportValue.benchmarkCase.id + "\"}";
       reports.push_back(std::move(reportValue));
     }
-    json += "\n  ],\n  \"reportCount\": " + std::to_string(reportCount) +
-            "\n}\n";
+    json +=
+        "\n  ],\n  \"reportCount\": " + std::to_string(reportCount) + "\n}\n";
     if (!summaryOut.empty()) {
       writeTextFile(summaryOut, json);
     } else {

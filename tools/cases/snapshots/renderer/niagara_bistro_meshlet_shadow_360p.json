@@ -59,7 +59,8 @@
     },
     "shadow": {
       "enabled": true,
-      "qualityPreset": "Low"
+      "qualityPreset": "Low",
+      "enableMeshletDepth": true
     },
     "hdrPostProcess": {
       "bloomEnabled": false,

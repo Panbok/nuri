@@ -220,13 +220,10 @@ readEnumField(yyjson_val *object, std::string_view key, std::string_view path,
 [[nodiscard]] Result<bool, std::string>
 parseSettings(yyjson_val *object, RenderSettings &settings) {
   static constexpr std::array keys{
-      std::string_view("opaque"),
-      std::string_view("antiAliasing"),
-      std::string_view("ambientOcclusion"),
-      std::string_view("shadow"),
-      std::string_view("hdrPostProcess"),
-      std::string_view("transmission"),
-      std::string_view("transparent"),
+      std::string_view("opaque"),           std::string_view("antiAliasing"),
+      std::string_view("ambientOcclusion"), std::string_view("shadow"),
+      std::string_view("visibility"),       std::string_view("hdrPostProcess"),
+      std::string_view("transmission"),     std::string_view("transparent"),
       std::string_view("textureFiltering"),
   };
   auto result = rejectUnknownKeys(object, keys, "settings");
@@ -238,9 +235,13 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     static constexpr std::array opaqueKeys{
         std::string_view("enabled"),
         std::string_view("enableDepthPrepass"),
+        std::string_view("enableDepthPyramid"),
         std::string_view("enableInstanceCompute"),
         std::string_view("enableInstanceAnimation"),
+        std::string_view("enableIndirectDraw"),
+        std::string_view("enableInstancedDraw"),
         std::string_view("enableMeshLod"),
+        std::string_view("enableCpuFrustumCulling"),
         std::string_view("enableTessellation"),
         std::string_view("forcedMeshLod"),
         std::string_view("meshletMode"),
@@ -262,6 +263,12 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.opaque.enableDepthPrepass = boolean.value();
+    boolean = readBool(opaque, "enableDepthPyramid", "settings.opaque",
+                       settings.opaque.enableDepthPyramid);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableDepthPyramid = boolean.value();
     boolean = readBool(opaque, "enableInstanceCompute", "settings.opaque",
                        settings.opaque.enableInstanceCompute);
     if (boolean.hasError()) {
@@ -274,12 +281,30 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.opaque.enableInstanceAnimation = boolean.value();
+    boolean = readBool(opaque, "enableIndirectDraw", "settings.opaque",
+                       settings.opaque.enableIndirectDraw);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableIndirectDraw = boolean.value();
+    boolean = readBool(opaque, "enableInstancedDraw", "settings.opaque",
+                       settings.opaque.enableInstancedDraw);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableInstancedDraw = boolean.value();
     boolean = readBool(opaque, "enableMeshLod", "settings.opaque",
                        settings.opaque.enableMeshLod);
     if (boolean.hasError()) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.opaque.enableMeshLod = boolean.value();
+    boolean = readBool(opaque, "enableCpuFrustumCulling", "settings.opaque",
+                       settings.opaque.enableCpuFrustumCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableCpuFrustumCulling = boolean.value();
     boolean = readBool(opaque, "enableTessellation", "settings.opaque",
                        settings.opaque.enableTessellation);
     if (boolean.hasError()) {
@@ -321,6 +346,147 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.opaque.enableMeshletConeCulling = boolean.value();
+  }
+
+  if (yyjson_val *visibility = optionalObject(object, "visibility")) {
+    static constexpr std::array visibilityKeys{
+        std::string_view("mainViewMode"),
+        std::string_view("shadowMode"),
+        std::string_view("occlusionMode"),
+        std::string_view("enableMeshletFrustumCulling"),
+        std::string_view("enableMeshletConeCulling"),
+        std::string_view("enableShadowMeshletCulling"),
+        std::string_view("enableGpuInstanceCulling"),
+        std::string_view("enableGpuIndirectDraw"),
+        std::string_view("enableIndirectMeshDispatch"),
+        std::string_view("visibleOnUncertain"),
+        std::string_view("debug")};
+    result =
+        rejectUnknownKeys(visibility, visibilityKeys, "settings.visibility");
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(visibility, "mainViewMode", "settings.visibility",
+                           settings.visibility.mainViewMode,
+                           {{"Disabled", VisibilityCullingMode::Disabled},
+                            {"CpuCoarse", VisibilityCullingMode::CpuCoarse},
+                            {"Hybrid", VisibilityCullingMode::Hybrid},
+                            {"GpuDriven", VisibilityCullingMode::GpuDriven}});
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(visibility, "shadowMode", "settings.visibility",
+                           settings.visibility.shadowMode,
+                           {{"Disabled", VisibilityCullingMode::Disabled},
+                            {"CpuCoarse", VisibilityCullingMode::CpuCoarse},
+                            {"Hybrid", VisibilityCullingMode::Hybrid},
+                            {"GpuDriven", VisibilityCullingMode::GpuDriven}});
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(
+        visibility, "occlusionMode", "settings.visibility",
+        settings.visibility.occlusionMode,
+        {{"Disabled", VisibilityOcclusionMode::Disabled},
+         {"PreviousFrameHiZ", VisibilityOcclusionMode::PreviousFrameHiZ},
+         {"CurrentFrameHiZExperimental",
+          VisibilityOcclusionMode::CurrentFrameHiZExperimental}});
+    if (result.hasError()) {
+      return result;
+    }
+    auto boolean = readBool(visibility, "enableMeshletFrustumCulling",
+                            "settings.visibility",
+                            settings.visibility.enableMeshletFrustumCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableMeshletFrustumCulling = boolean.value();
+    boolean =
+        readBool(visibility, "enableMeshletConeCulling", "settings.visibility",
+                 settings.visibility.enableMeshletConeCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableMeshletConeCulling = boolean.value();
+    boolean = readBool(visibility, "enableShadowMeshletCulling",
+                       "settings.visibility",
+                       settings.visibility.enableShadowMeshletCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableShadowMeshletCulling = boolean.value();
+    boolean =
+        readBool(visibility, "enableGpuInstanceCulling", "settings.visibility",
+                 settings.visibility.enableGpuInstanceCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableGpuInstanceCulling = boolean.value();
+    boolean =
+        readBool(visibility, "enableGpuIndirectDraw", "settings.visibility",
+                 settings.visibility.enableGpuIndirectDraw);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableGpuIndirectDraw = boolean.value();
+    boolean = readBool(visibility, "enableIndirectMeshDispatch",
+                       "settings.visibility",
+                       settings.visibility.enableIndirectMeshDispatch);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableIndirectMeshDispatch = boolean.value();
+    boolean = readBool(visibility, "visibleOnUncertain", "settings.visibility",
+                       settings.visibility.visibleOnUncertain);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.visibleOnUncertain = boolean.value();
+    if (yyjson_val *debug = optionalObject(visibility, "debug")) {
+      static constexpr std::array debugKeys{
+          std::string_view("showObjectBounds"),
+          std::string_view("showMeshletBounds"),
+          std::string_view("visualizeCullReason"),
+          std::string_view("logCounters"),
+          std::string_view("forcedVisibleListCapacity")};
+      result = rejectUnknownKeys(debug, debugKeys, "settings.visibility.debug");
+      if (result.hasError()) {
+        return result;
+      }
+      boolean = readBool(debug, "showObjectBounds", "settings.visibility.debug",
+                         settings.visibility.debug.showObjectBounds);
+      if (boolean.hasError()) {
+        return Result<bool, std::string>::makeError(boolean.error());
+      }
+      settings.visibility.debug.showObjectBounds = boolean.value();
+      boolean =
+          readBool(debug, "showMeshletBounds", "settings.visibility.debug",
+                   settings.visibility.debug.showMeshletBounds);
+      if (boolean.hasError()) {
+        return Result<bool, std::string>::makeError(boolean.error());
+      }
+      settings.visibility.debug.showMeshletBounds = boolean.value();
+      boolean =
+          readBool(debug, "visualizeCullReason", "settings.visibility.debug",
+                   settings.visibility.debug.visualizeCullReason);
+      if (boolean.hasError()) {
+        return Result<bool, std::string>::makeError(boolean.error());
+      }
+      settings.visibility.debug.visualizeCullReason = boolean.value();
+      boolean = readBool(debug, "logCounters", "settings.visibility.debug",
+                         settings.visibility.debug.logCounters);
+      if (boolean.hasError()) {
+        return Result<bool, std::string>::makeError(boolean.error());
+      }
+      settings.visibility.debug.logCounters = boolean.value();
+      auto u32 = readU32(debug, "forcedVisibleListCapacity",
+                         "settings.visibility.debug",
+                         settings.visibility.debug.forcedVisibleListCapacity);
+      if (u32.hasError()) {
+        return Result<bool, std::string>::makeError(u32.error());
+      }
+      settings.visibility.debug.forcedVisibleListCapacity = u32.value();
+    }
   }
 
   if (yyjson_val *aa = optionalObject(object, "antiAliasing")) {
@@ -379,9 +545,11 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
   }
 
   if (yyjson_val *shadow = optionalObject(object, "shadow")) {
-    static constexpr std::array shadowKeys{std::string_view("enabled"),
-                                           std::string_view("qualityPreset"),
-                                           std::string_view("debug")};
+    static constexpr std::array shadowKeys{
+        std::string_view("enabled"), std::string_view("qualityPreset"),
+        std::string_view("enableMeshletDepth"),
+        std::string_view("enableMeshletCascadeCulling"),
+        std::string_view("debug")};
     result = rejectUnknownKeys(shadow, shadowKeys, "settings.shadow");
     if (result.hasError()) {
       return result;
@@ -405,6 +573,18 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     if (optionalObject(shadow, "qualityPreset") != nullptr) {
       applyShadowQualityPreset(settings.shadow, preset);
     }
+    boolean = readBool(shadow, "enableMeshletDepth", "settings.shadow",
+                       settings.shadow.enableMeshletDepth);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.shadow.enableMeshletDepth = boolean.value();
+    boolean = readBool(shadow, "enableMeshletCascadeCulling", "settings.shadow",
+                       settings.shadow.enableMeshletCascadeCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.shadow.enableMeshletCascadeCulling = boolean.value();
     if (yyjson_val *debug = optionalObject(shadow, "debug")) {
       static constexpr std::array debugKeys{
           std::string_view("showShadowMapViewport"),
@@ -634,6 +814,80 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
         return Result<bool, std::string>::makeError(real.error());
       }
       scene.meshletConeWeight = static_cast<float>(real.value());
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+parseEnvironmentTexture(yyjson_val *object,
+                        AutotestEnvironmentTextureConfig &texture,
+                        std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("pathBase"), std::string_view("path"),
+      std::string_view("kind"), std::string_view("debugName"),
+      std::string_view("required")};
+  auto result = rejectUnknownKeys(object, keys, path);
+  if (result.hasError()) {
+    return result;
+  }
+  texture.enabled = true;
+  auto text = readString(object, "pathBase", path, true);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  texture.pathBase = std::move(text.value());
+  text = readString(object, "path", path, true);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  texture.path = text.value();
+  text = readString(object, "kind", path, false, texture.kind);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  texture.kind = std::move(text.value());
+  text = readString(object, "debugName", path, false, texture.debugName);
+  if (text.hasError()) {
+    return Result<bool, std::string>::makeError(text.error());
+  }
+  texture.debugName = std::move(text.value());
+  auto required = readBool(object, "required", path, texture.required);
+  if (required.hasError()) {
+    return Result<bool, std::string>::makeError(required.error());
+  }
+  texture.required = required.value();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+parseEnvironment(yyjson_val *object, AutotestEnvironmentConfig &environment) {
+  static constexpr std::array keys{
+      std::string_view("cubemap"), std::string_view("irradiance"),
+      std::string_view("prefilteredGgx"),
+      std::string_view("prefilteredCharlie"), std::string_view("brdfLut")};
+  auto result = rejectUnknownKeys(object, keys, "environment");
+  if (result.hasError()) {
+    return result;
+  }
+  struct TextureField {
+    std::string_view key{};
+    AutotestEnvironmentTextureConfig *texture = nullptr;
+  };
+  const std::array fields{
+      TextureField{"cubemap", &environment.cubemap},
+      TextureField{"irradiance", &environment.irradiance},
+      TextureField{"prefilteredGgx", &environment.prefilteredGgx},
+      TextureField{"prefilteredCharlie", &environment.prefilteredCharlie},
+      TextureField{"brdfLut", &environment.brdfLut},
+  };
+  for (const TextureField &field : fields) {
+    if (yyjson_val *texture = optionalObject(object, field.key)) {
+      result = parseEnvironmentTexture(texture, *field.texture,
+                                       jsonPath("environment", field.key));
+      if (result.hasError()) {
+        return result;
+      }
     }
   }
   return Result<bool, std::string>::makeResult(true);
@@ -1496,16 +1750,27 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
   }
   yyjson_val *root = yyjson_doc_get_root(doc.get());
   static constexpr std::array rootKeys{
-      std::string_view("schemaVersion"), std::string_view("id"),
-      std::string_view("suite"),         std::string_view("description"),
-      std::string_view("scene"),         std::string_view("backend"),
-      std::string_view("resolution"),    std::string_view("fixedDeltaSeconds"),
-      std::string_view("warmupFrames"),  std::string_view("endFrame"),
-      std::string_view("authoritative"), std::string_view("presentMode"),
-      std::string_view("windowMode"),    std::string_view("renderGraph"),
-      std::string_view("camera"),        std::string_view("settings"),
-      std::string_view("requirements"),  std::string_view("timeline"),
-      std::string_view("checkpoints"),   std::string_view("metricWindows"),
+      std::string_view("schemaVersion"),
+      std::string_view("id"),
+      std::string_view("suite"),
+      std::string_view("description"),
+      std::string_view("scene"),
+      std::string_view("backend"),
+      std::string_view("environment"),
+      std::string_view("resolution"),
+      std::string_view("fixedDeltaSeconds"),
+      std::string_view("warmupFrames"),
+      std::string_view("endFrame"),
+      std::string_view("authoritative"),
+      std::string_view("presentMode"),
+      std::string_view("windowMode"),
+      std::string_view("renderGraph"),
+      std::string_view("camera"),
+      std::string_view("settings"),
+      std::string_view("requirements"),
+      std::string_view("timeline"),
+      std::string_view("checkpoints"),
+      std::string_view("metricWindows"),
   };
   auto keysResult = rejectUnknownKeys(root, rootKeys, "$");
   if (keysResult.hasError()) {
@@ -1593,6 +1858,12 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
 
   if (yyjson_val *scene = optionalObject(root, "scene")) {
     auto parsed = parseScene(scene, out.scene);
+    if (parsed.hasError()) {
+      return Result<AutotestCase, std::string>::makeError(parsed.error());
+    }
+  }
+  if (yyjson_val *environment = optionalObject(root, "environment")) {
+    auto parsed = parseEnvironment(environment, out.environment);
     if (parsed.hasError()) {
       return Result<AutotestCase, std::string>::makeError(parsed.error());
     }

@@ -1,0 +1,16 @@
+{
+  "case": "renderer.procedural.motion_reactive_360p",
+  "baselineProfile": "local-nvrhi-visible",
+  "backend": "default",
+  "resolvedBackend": "nvrhi",
+  "gpuBackendSource": "default",
+  "reason": "initial NVRHI render baseline",
+  "approvedAtUtc": "2026-07-08T12:18:46Z",
+  "sourceArtifactDir": "artifacts/baseline-generation/nvrhi-snapshots-20260708T142319/cases/renderer.procedural.motion_reactive_360p",
+  "captures": [
+    {"target": "final_color", "newHash": "fnv1a64:020bdc19df34e15e"},
+    {"target": "scene_depth", "newHash": "fnv1a64:62fceaba8cf709eb"},
+    {"target": "motion_vectors", "newHash": "fnv1a64:49ddd2ba20c5053b"},
+    {"target": "reactive_mask", "newHash": "fnv1a64:78bafc853311905b"}
+  ]
+}

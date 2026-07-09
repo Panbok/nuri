@@ -1,0 +1,13 @@
+{
+  "case": "smoke.procedural.final_color",
+  "baselineProfile": "local-nvrhi-visible",
+  "backend": "default",
+  "resolvedBackend": "nvrhi",
+  "gpuBackendSource": "default",
+  "reason": "initial NVRHI render baseline",
+  "approvedAtUtc": "2026-07-08T12:19:31Z",
+  "sourceArtifactDir": "artifacts/baseline-generation/nvrhi-snapshots-20260708T142319/cases/smoke.procedural.final_color",
+  "captures": [
+    {"target": "final_color", "newHash": "fnv1a64:07c661644e0df325"}
+  ]
+}

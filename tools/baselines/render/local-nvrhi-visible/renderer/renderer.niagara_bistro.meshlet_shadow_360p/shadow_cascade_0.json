@@ -1,0 +1,11 @@
+{
+  "target": "shadow_cascade_0",
+  "format": 13,
+  "width": 1024,
+  "height": 1024,
+  "rowStride": 2048,
+  "origin": "top_left",
+  "colorSpace": "linear_depth",
+  "payload": "shadow_cascade_0.exr",
+  "hash": "fnv1a64:3da815f5d6dcc202"
+}

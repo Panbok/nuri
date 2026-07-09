@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
+#include <chrono>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -20,11 +22,13 @@
 #include <memory>
 #include <set>
 #include <sstream>
+#include <thread>
 
 namespace nuri::tools::autotest {
 namespace {
 
 constexpr uint32_t kReadoutDrainFrameLimit = 4u;
+constexpr uint32_t kMaxPreFrameSleepMs = 60000u;
 
 struct PendingReadout {
   uint64_t requestId = 0u;
@@ -87,6 +91,24 @@ checkpointDirName(const AutotestCheckpoint &checkpoint) {
   }
   source = "default";
   return "nvrhi";
+}
+
+[[nodiscard]] uint32_t autotestPreFrameSleepMs() {
+  const std::string value =
+      readProcessEnvironment("NURI_AUTOTEST_PRE_FRAME_SLEEP_MS");
+  if (value.empty()) {
+    return 0u;
+  }
+
+  uint32_t milliseconds = 0u;
+  const char *begin = value.data();
+  const char *end = value.data() + value.size();
+  const std::from_chars_result parsed =
+      std::from_chars(begin, end, milliseconds);
+  if (parsed.ec != std::errc{} || parsed.ptr != end) {
+    return 0u;
+  }
+  return std::min(milliseconds, kMaxPreFrameSleepMs);
 }
 
 [[nodiscard]] std::string resolvePresentMode(const AutotestCase &testCase,
@@ -184,6 +206,32 @@ makeToolCameraDesc(const AutotestCameraConfig &camera) {
   };
 }
 
+[[nodiscard]] nuri::tools::runtime::ToolEnvironmentTextureDesc
+makeToolEnvironmentTextureDesc(
+    const AutotestEnvironmentTextureConfig &texture) {
+  return nuri::tools::runtime::ToolEnvironmentTextureDesc{
+      .enabled = texture.enabled,
+      .required = texture.required,
+      .pathBase = texture.pathBase,
+      .path = texture.path,
+      .kind = texture.kind,
+      .debugName = texture.debugName,
+  };
+}
+
+[[nodiscard]] nuri::tools::runtime::ToolEnvironmentDesc
+makeToolEnvironmentDesc(const AutotestEnvironmentConfig &environment) {
+  return nuri::tools::runtime::ToolEnvironmentDesc{
+      .cubemap = makeToolEnvironmentTextureDesc(environment.cubemap),
+      .irradiance = makeToolEnvironmentTextureDesc(environment.irradiance),
+      .prefilteredGgx =
+          makeToolEnvironmentTextureDesc(environment.prefilteredGgx),
+      .prefilteredCharlie =
+          makeToolEnvironmentTextureDesc(environment.prefilteredCharlie),
+      .brdfLut = makeToolEnvironmentTextureDesc(environment.brdfLut),
+  };
+}
+
 [[nodiscard]] nuri::tools::runtime::ToolRuntimeDesc
 makeToolRuntimeDesc(const AutotestCase &testCase, std::string_view backend,
                     std::string_view presentMode) {
@@ -196,6 +244,7 @@ makeToolRuntimeDesc(const AutotestCase &testCase, std::string_view backend,
   desc.renderGraph.parallelCompile = testCase.renderGraph.parallelCompile;
   desc.renderGraph.parallelRecording = testCase.renderGraph.parallelRecording;
   desc.scene = makeToolSceneDesc(testCase.scene);
+  desc.environment = makeToolEnvironmentDesc(testCase.environment);
   desc.resolvePath = resolveAutotestPath;
   return desc;
 }
@@ -889,6 +938,11 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
     std::unique_ptr<nuri::tools::runtime::ToolRendererRuntime> runtime =
         std::move(runtimeResult.value());
     report.environment.swapchainImageCount = runtime->swapchainImageCount();
+
+    if (const uint32_t preFrameSleepMs = autotestPreFrameSleepMs();
+        preFrameSleepMs > 0u) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(preFrameSleepMs));
+    }
 
     double timeSeconds = 0.0;
     for (const AutotestFramePlan &frame : frames) {

@@ -1,0 +1,11 @@
+{
+  "target": "scene_depth",
+  "format": 6,
+  "width": 640,
+  "height": 360,
+  "rowStride": 2560,
+  "origin": "top_left",
+  "colorSpace": "linear_depth",
+  "payload": "scene_depth.exr",
+  "hash": "fnv1a64:1efc5f3d7e20104c"
+}

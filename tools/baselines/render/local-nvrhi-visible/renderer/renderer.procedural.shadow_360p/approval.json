@@ -1,0 +1,18 @@
+{
+  "case": "renderer.procedural.shadow_360p",
+  "baselineProfile": "local-nvrhi-visible",
+  "backend": "default",
+  "resolvedBackend": "nvrhi",
+  "gpuBackendSource": "default",
+  "reason": "initial NVRHI render baseline",
+  "approvedAtUtc": "2026-07-08T12:18:54Z",
+  "sourceArtifactDir": "artifacts/baseline-generation/nvrhi-snapshots-20260708T142319/cases/renderer.procedural.shadow_360p",
+  "captures": [
+    {"target": "final_color", "newHash": "fnv1a64:7367319cc358692d"},
+    {"target": "scene_depth", "newHash": "fnv1a64:1bdc371e11ab6f20"},
+    {"target": "shadow_cascade_0", "newHash": "fnv1a64:2bee5a897e0135d6"},
+    {"target": "shadow_cascade_1", "newHash": "fnv1a64:9fc9cb9dd810910a"},
+    {"target": "shadow_cascade_2", "newHash": "fnv1a64:c8b786c1058a1257"},
+    {"target": "shadow_preview", "newHash": "fnv1a64:fdac66b548a86261"}
+  ]
+}

@@ -1,0 +1,367 @@
+{
+  "schemaVersion": 1,
+  "id": "perf.niagara_bistro.meshlet_rapid_camera",
+  "suite": "perf",
+  "description": "Niagara Bistro meshlet renderer rapid camera movement and turning perf coverage",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "environment": {
+    "cubemap": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k.hdr",
+      "kind": "EquirectHdrCubemap",
+      "debugName": "tool_qwantani_cubemap",
+      "required": true
+    },
+    "irradiance": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k_irradiance.ktx2",
+      "kind": "Ktx2Cubemap",
+      "debugName": "tool_qwantani_irradiance"
+    },
+    "prefilteredGgx": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2",
+      "kind": "Ktx2Cubemap",
+      "debugName": "tool_qwantani_prefilter_ggx"
+    },
+    "prefilteredCharlie": {
+      "pathBase": "texturesRoot",
+      "path": "qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2",
+      "kind": "Ktx2Cubemap",
+      "debugName": "tool_qwantani_prefilter_charlie"
+    },
+    "brdfLut": {
+      "pathBase": "texturesRoot",
+      "path": "brdf_lut.ktx2",
+      "kind": "Ktx2Texture2D",
+      "debugName": "tool_brdf_lut"
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 600,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-25.175787, 5.760150, 8.267586],
+    "target": [-34.294270, 2.883850, 5.338666],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "street_rapid_turns",
+        "startFrame": 0,
+        "endFrame": 600,
+        "interpolation": "linear",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-25.175787, 5.760150, 8.267586],
+            "target": [-34.294270, 2.883850, 5.338666]
+          },
+          {
+            "frame": 30,
+            "position": [-23.745787, 5.960150, 2.987586],
+            "target": [-14.950000, 3.050000, 5.400000]
+          },
+          {
+            "frame": 60,
+            "position": [-28.650000, 6.200000, 6.450000],
+            "target": [-39.000000, 2.300000, -2.000000]
+          },
+          {
+            "frame": 90,
+            "position": [-21.500000, 5.350000, -0.500000],
+            "target": [-31.750000, 8.850000, 11.750000]
+          },
+          {
+            "frame": 120,
+            "position": [-29.900000, 6.050000, 10.800000],
+            "target": [-19.250000, 2.650000, -5.250000]
+          },
+          {
+            "frame": 180,
+            "position": [-23.645787, 5.760150, 3.507586],
+            "target": [-32.764270, 2.883850, 0.578666]
+          },
+          {
+            "frame": 240,
+            "position": [-18.500000, 6.600000, 7.000000],
+            "target": [-39.750000, 3.000000, 9.000000]
+          },
+          {
+            "frame": 300,
+            "position": [-31.750000, 5.950000, 1.250000],
+            "target": [-21.250000, 2.400000, 14.500000]
+          },
+          {
+            "frame": 360,
+            "position": [-24.000000, 7.100000, 12.500000],
+            "target": [-35.500000, 1.850000, -4.500000]
+          },
+          {
+            "frame": 420,
+            "position": [-19.600000, 5.700000, -3.250000],
+            "target": [-30.200000, 7.600000, 12.250000]
+          },
+          {
+            "frame": 480,
+            "position": [-30.500000, 6.250000, 8.500000],
+            "target": [-16.750000, 2.750000, -2.750000]
+          },
+          {
+            "frame": 540,
+            "position": [-22.100000, 5.550000, 1.000000],
+            "target": [-37.500000, 3.200000, 8.250000]
+          },
+          {
+            "frame": 600,
+            "position": [-25.175787, 5.760150, 8.267586],
+            "target": [-34.294270, 2.883850, 5.338666]
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "warm",
+      "frame": 12,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {
+          "id": "meshlet_mode_active_warm",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches_warm",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_active_warm",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "id": "mid_turn",
+      "frame": 300,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {
+          "id": "meshlet_mode_active_mid_turn",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches_mid_turn",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_active_mid_turn",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "id": "end",
+      "frame": 600,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false},
+        {"target": "material_normals", "profile": "normal", "required": true, "compare": false},
+        {"target": "ambient_occlusion", "profile": "scalar", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {
+          "id": "frame_index_end",
+          "metric": "renderer.frame_index",
+          "equals": 600
+        },
+        {
+          "id": "meshlet_mode_active_end",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches_end",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_task_groups_end",
+          "metric": "renderer.opaque.meshlet_task_groups",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_counter_readback_fresh_end",
+          "metric": "renderer.visibility.meshlet_readback_stale_frame_count",
+          "lessOrEqual": 2
+        },
+        {
+          "id": "meshlet_counter_readback_no_errors_end",
+          "metric": "renderer.visibility.meshlet_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "gpu_counter_readback_fresh_end",
+          "metric": "renderer.visibility.gpu_main_readback_stale_frame_count",
+          "lessOrEqual": 2
+        },
+        {
+          "id": "gpu_counter_readback_no_errors_end",
+          "metric": "renderer.visibility.gpu_main_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "classic_indirect_draw_no_fallback_end",
+          "metric": "renderer.visibility.gpu_indirect_draw_fallback",
+          "equals": 0
+        },
+        {
+          "id": "gtao_main_pass_end",
+          "metric": "renderer.ao.main_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_normal_prepass_end",
+          "metric": "renderer.ao.normal_prepass_draws",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "metricWindows": [
+    {
+      "id": "rapid_camera",
+      "frames": [12, 600],
+      "assertions": [
+        {
+          "id": "meshlet_mode_stays_active",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches_nonzero",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "medianMin": 1
+        },
+        {
+          "id": "meshlet_emitted_nonzero",
+          "metric": "renderer.visibility.meshlet_emitted",
+          "medianMin": 1
+        },
+        {
+          "id": "meshlet_counter_readback_no_errors",
+          "metric": "renderer.visibility.meshlet_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "gpu_counter_readback_no_errors",
+          "metric": "renderer.visibility.gpu_main_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "classic_indirect_draw_no_fallback",
+          "metric": "renderer.visibility.gpu_indirect_draw_fallback",
+          "equals": 0
+        },
+        {
+          "id": "gtao_stays_active",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": [
+      "modelsRoot:NiagaraBistro/bistrox.gltf",
+      "texturesRoot:qwantani_moon_noon_puresky_4k.hdr",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_irradiance.ktx2",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_prefilter_ggx.ktx2",
+      "texturesRoot:qwantani_moon_noon_puresky_4k_prefilter_charlie.ktx2",
+      "texturesRoot:brdf_lut.ktx2"
+    ],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  }
+}

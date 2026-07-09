@@ -29,6 +29,7 @@ void sanitizeBenchmarkRenderSettings(RenderSettings &settings) {
   sanitizeAmbientOcclusionSettings(settings.ambientOcclusion, settings.opaque,
                                    settings.antiAliasing);
   sanitizeShadowSettings(settings.shadow);
+  sanitizeVisibilitySettings(settings.visibility);
 }
 
 } // namespace nuri::tools::benchmark

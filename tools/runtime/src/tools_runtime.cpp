@@ -3,6 +3,7 @@
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
+#include "nuri/resources/gpu/resource_manager.h"
 #include "nuri/resources/scene_importer.h"
 
 #include <cstdlib>
@@ -96,6 +97,115 @@ resolveToolPath(const ToolRuntimeDesc &runtime, std::string_view base,
   return runtime.resolvePath(base, path);
 }
 
+[[nodiscard]] Result<TextureRequestKind, std::string>
+parseToolTextureKind(std::string_view kind) {
+  if (kind == "Texture2D") {
+    return Result<TextureRequestKind, std::string>::makeResult(
+        TextureRequestKind::Texture2D);
+  }
+  if (kind == "Ktx2Texture2D") {
+    return Result<TextureRequestKind, std::string>::makeResult(
+        TextureRequestKind::Ktx2Texture2D);
+  }
+  if (kind == "Ktx2Cubemap") {
+    return Result<TextureRequestKind, std::string>::makeResult(
+        TextureRequestKind::Ktx2Cubemap);
+  }
+  if (kind == "EquirectHdrCubemap") {
+    return Result<TextureRequestKind, std::string>::makeResult(
+        TextureRequestKind::EquirectHdrCubemap);
+  }
+  return Result<TextureRequestKind, std::string>::makeError(
+      "unsupported tool environment texture kind '" + std::string(kind) + "'");
+}
+
+[[nodiscard]] Result<TextureRef, std::string>
+loadToolEnvironmentTexture(const ToolRuntimeDesc &runtime,
+                           ResourceManager &resources,
+                           const ToolEnvironmentTextureDesc &desc,
+                           std::string_view fallbackDebugName) {
+  if (!desc.enabled) {
+    return Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
+  }
+  auto path = resolveToolPath(runtime, desc.pathBase, desc.path);
+  if (path.hasError()) {
+    return Result<TextureRef, std::string>::makeError(path.error());
+  }
+  if (!std::filesystem::exists(path.value())) {
+    if (desc.required) {
+      return Result<TextureRef, std::string>::makeError(
+          "missing required environment texture: " + path.value().string());
+    }
+    return Result<TextureRef, std::string>::makeResult(kInvalidTextureRef);
+  }
+  auto kind = parseToolTextureKind(desc.kind);
+  if (kind.hasError()) {
+    return Result<TextureRef, std::string>::makeError(kind.error());
+  }
+  auto texture = resources.acquireTexture(TextureRequest{
+      .path = path.value().string(),
+      .kind = kind.value(),
+      .debugName = desc.debugName.empty() ? std::string(fallbackDebugName)
+                                          : desc.debugName,
+  });
+  if (texture.hasError()) {
+    return Result<TextureRef, std::string>::makeError(texture.error());
+  }
+  return Result<TextureRef, std::string>::makeResult(texture.value());
+}
+
+[[nodiscard]] Result<bool, std::string>
+loadToolEnvironment(const ToolRuntimeDesc &runtime, Renderer &renderer,
+                    RenderScene &scene) {
+  ResourceManager &resources = renderer.resources();
+  auto cubemap = loadToolEnvironmentTexture(runtime, resources,
+                                            runtime.environment.cubemap,
+                                            "tool_environment_cubemap");
+  if (cubemap.hasError()) {
+    return Result<bool, std::string>::makeError(cubemap.error());
+  }
+  auto irradiance = loadToolEnvironmentTexture(runtime, resources,
+                                               runtime.environment.irradiance,
+                                               "tool_environment_irradiance");
+  if (irradiance.hasError()) {
+    return Result<bool, std::string>::makeError(irradiance.error());
+  }
+  auto prefilteredGgx = loadToolEnvironmentTexture(
+      runtime, resources, runtime.environment.prefilteredGgx,
+      "tool_environment_prefiltered_ggx");
+  if (prefilteredGgx.hasError()) {
+    return Result<bool, std::string>::makeError(prefilteredGgx.error());
+  }
+  auto prefilteredCharlie = loadToolEnvironmentTexture(
+      runtime, resources, runtime.environment.prefilteredCharlie,
+      "tool_environment_prefiltered_charlie");
+  if (prefilteredCharlie.hasError()) {
+    return Result<bool, std::string>::makeError(prefilteredCharlie.error());
+  }
+  auto brdfLut = loadToolEnvironmentTexture(runtime, resources,
+                                            runtime.environment.brdfLut,
+                                            "tool_environment_brdf_lut");
+  if (brdfLut.hasError()) {
+    return Result<bool, std::string>::makeError(brdfLut.error());
+  }
+
+  scene.setEnvironment(EnvironmentHandles{
+      .cubemap = cubemap.value(),
+      .irradiance = irradiance.value(),
+      .prefilteredGgx = prefilteredGgx.value(),
+      .prefilteredCharlie = prefilteredCharlie.value(),
+      .brdfLut = brdfLut.value(),
+  });
+  for (const TextureRef texture :
+       {cubemap.value(), irradiance.value(), prefilteredGgx.value(),
+        prefilteredCharlie.value(), brdfLut.value()}) {
+    if (isValid(texture)) {
+      resources.release(texture);
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
 [[nodiscard]] Result<bool, std::string>
 populateTransmissionTransparencyScene(const ToolRuntimeDesc &runtime,
                                       Renderer &renderer, RenderScene &scene) {
@@ -104,8 +214,8 @@ populateTransmissionTransparencyScene(const ToolRuntimeDesc &runtime,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  auto planePath = resolveToolPath(runtime, "modelsRoot",
-                                   "common/flat_plane.obj");
+  auto planePath =
+      resolveToolPath(runtime, "modelsRoot", "common/flat_plane.obj");
   if (planePath.hasError()) {
     return Result<bool, std::string>::makeError(planePath.error());
   }
@@ -139,60 +249,52 @@ populateTransmissionTransparencyScene(const ToolRuntimeDesc &runtime,
     return renderer.resources().acquireMaterial(request);
   };
 
-  auto backgroundMaterial =
-      acquireMaterial("tool_transmission_background",
-                      glm::vec4(0.03f, 0.12f, 0.24f, 1.0f),
-                      MaterialAlphaMode::Opaque, 0.0f);
-  auto warmMaterial =
-      acquireMaterial("tool_transmission_warm_band",
-                      glm::vec4(1.0f, 0.34f, 0.10f, 1.0f),
-                      MaterialAlphaMode::Opaque, 0.0f);
-  auto coolMaterial =
-      acquireMaterial("tool_transmission_cool_band",
-                      glm::vec4(0.08f, 0.72f, 0.95f, 1.0f),
-                      MaterialAlphaMode::Opaque, 0.0f);
-  auto transparentMaterial =
-      acquireMaterial("tool_plain_transparent",
-                      glm::vec4(1.0f, 0.82f, 0.20f, 0.46f),
-                      MaterialAlphaMode::Blend, 0.0f);
-  auto transmissionMaterial =
-      acquireMaterial("tool_blended_transmission",
-                      glm::vec4(0.52f, 0.96f, 1.0f, 0.42f),
-                      MaterialAlphaMode::Blend, 1.0f);
+  auto backgroundMaterial = acquireMaterial(
+      "tool_transmission_background", glm::vec4(0.03f, 0.12f, 0.24f, 1.0f),
+      MaterialAlphaMode::Opaque, 0.0f);
+  auto warmMaterial = acquireMaterial("tool_transmission_warm_band",
+                                      glm::vec4(1.0f, 0.34f, 0.10f, 1.0f),
+                                      MaterialAlphaMode::Opaque, 0.0f);
+  auto coolMaterial = acquireMaterial("tool_transmission_cool_band",
+                                      glm::vec4(0.08f, 0.72f, 0.95f, 1.0f),
+                                      MaterialAlphaMode::Opaque, 0.0f);
+  auto transparentMaterial = acquireMaterial(
+      "tool_plain_transparent", glm::vec4(1.0f, 0.82f, 0.20f, 0.46f),
+      MaterialAlphaMode::Blend, 0.0f);
+  auto transmissionMaterial = acquireMaterial(
+      "tool_blended_transmission", glm::vec4(0.52f, 0.96f, 1.0f, 0.42f),
+      MaterialAlphaMode::Blend, 1.0f);
   for (const auto *material :
-       {&backgroundMaterial, &warmMaterial, &coolMaterial,
-        &transparentMaterial, &transmissionMaterial}) {
+       {&backgroundMaterial, &warmMaterial, &coolMaterial, &transparentMaterial,
+        &transmissionMaterial}) {
     if (material->hasError()) {
       return Result<bool, std::string>::makeError(material->error());
     }
   }
 
-  const glm::mat4 upright =
-      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
-                  glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
   auto addPlane = [&](std::string_view name, const glm::vec3 &translation,
                       const glm::vec3 &scale,
                       MaterialRef material) -> Result<bool, std::string> {
-    const glm::mat4 transform =
-        glm::translate(glm::mat4(1.0f), translation) * upright *
-        glm::scale(glm::mat4(1.0f), scale);
+    const glm::mat4 transform = glm::translate(glm::mat4(1.0f), translation) *
+                                upright * glm::scale(glm::mat4(1.0f), scale);
     auto nodeResult =
         scene.graph().createNode(scene.graph().rootNode(), name, transform);
     if (nodeResult.hasError()) {
       return Result<bool, std::string>::makeError(nodeResult.error());
     }
-    auto renderableResult =
-        scene.graph().addRenderable(nodeResult.value(), modelResult.value(),
-                                    material);
+    auto renderableResult = scene.graph().addRenderable(
+        nodeResult.value(), modelResult.value(), material);
     if (renderableResult.hasError()) {
       return Result<bool, std::string>::makeError(renderableResult.error());
     }
     return Result<bool, std::string>::makeResult(true);
   };
 
-  auto result = addPlane("OpaqueBackground", glm::vec3(0.0f, 0.0f, -0.80f),
-                         glm::vec3(5.0f, 3.0f, 1.0f),
-                         backgroundMaterial.value());
+  auto result =
+      addPlane("OpaqueBackground", glm::vec3(0.0f, 0.0f, -0.80f),
+               glm::vec3(5.0f, 3.0f, 1.0f), backgroundMaterial.value());
   if (result.hasError()) {
     return result;
   }
@@ -207,15 +309,12 @@ populateTransmissionTransparencyScene(const ToolRuntimeDesc &runtime,
     return result;
   }
   result = addPlane("PlainTransparentBehind", glm::vec3(-0.38f, 0.04f, 0.0f),
-                    glm::vec3(2.15f, 1.72f, 1.0f),
-                    transparentMaterial.value());
+                    glm::vec3(2.15f, 1.72f, 1.0f), transparentMaterial.value());
   if (result.hasError()) {
     return result;
   }
-  return addPlane("BlendedTransmissionInFront",
-                  glm::vec3(0.34f, -0.02f, 0.25f),
-                  glm::vec3(2.0f, 1.9f, 1.0f),
-                  transmissionMaterial.value());
+  return addPlane("BlendedTransmissionInFront", glm::vec3(0.34f, -0.02f, 0.25f),
+                  glm::vec3(2.0f, 1.9f, 1.0f), transmissionMaterial.value());
 }
 
 [[nodiscard]] Result<bool, std::string>
@@ -225,8 +324,8 @@ populateReactiveMaskScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  auto planePath = resolveToolPath(runtime, "modelsRoot",
-                                   "common/flat_plane.obj");
+  auto planePath =
+      resolveToolPath(runtime, "modelsRoot", "common/flat_plane.obj");
   if (planePath.hasError()) {
     return Result<bool, std::string>::makeError(planePath.error());
   }
@@ -254,14 +353,12 @@ populateReactiveMaskScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return renderer.resources().acquireMaterial(request);
   };
 
-  auto backgroundMaterial =
-      acquireMaterial("tool_reactive_background",
-                      glm::vec4(0.04f, 0.12f, 0.22f, 1.0f),
-                      MaterialAlphaMode::Opaque);
-  auto maskedMaterial =
-      acquireMaterial("tool_alpha_mask_reactive",
-                      glm::vec4(0.32f, 1.0f, 0.48f, 0.85f),
-                      MaterialAlphaMode::Mask);
+  auto backgroundMaterial = acquireMaterial(
+      "tool_reactive_background", glm::vec4(0.04f, 0.12f, 0.22f, 1.0f),
+      MaterialAlphaMode::Opaque);
+  auto maskedMaterial = acquireMaterial("tool_alpha_mask_reactive",
+                                        glm::vec4(0.32f, 1.0f, 0.48f, 0.85f),
+                                        MaterialAlphaMode::Mask);
   if (backgroundMaterial.hasError()) {
     return Result<bool, std::string>::makeError(backgroundMaterial.error());
   }
@@ -269,32 +366,29 @@ populateReactiveMaskScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return Result<bool, std::string>::makeError(maskedMaterial.error());
   }
 
-  const glm::mat4 upright =
-      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
-                  glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
   auto addPlane = [&](std::string_view name, const glm::vec3 &translation,
                       const glm::vec3 &scale,
                       MaterialRef material) -> Result<bool, std::string> {
-    const glm::mat4 transform =
-        glm::translate(glm::mat4(1.0f), translation) * upright *
-        glm::scale(glm::mat4(1.0f), scale);
+    const glm::mat4 transform = glm::translate(glm::mat4(1.0f), translation) *
+                                upright * glm::scale(glm::mat4(1.0f), scale);
     auto nodeResult =
         scene.graph().createNode(scene.graph().rootNode(), name, transform);
     if (nodeResult.hasError()) {
       return Result<bool, std::string>::makeError(nodeResult.error());
     }
-    auto renderableResult =
-        scene.graph().addRenderable(nodeResult.value(), modelResult.value(),
-                                    material);
+    auto renderableResult = scene.graph().addRenderable(
+        nodeResult.value(), modelResult.value(), material);
     if (renderableResult.hasError()) {
       return Result<bool, std::string>::makeError(renderableResult.error());
     }
     return Result<bool, std::string>::makeResult(true);
   };
 
-  auto result = addPlane("ReactiveBackground", glm::vec3(0.0f, 0.0f, -0.65f),
-                         glm::vec3(4.6f, 2.8f, 1.0f),
-                         backgroundMaterial.value());
+  auto result =
+      addPlane("ReactiveBackground", glm::vec3(0.0f, 0.0f, -0.65f),
+               glm::vec3(4.6f, 2.8f, 1.0f), backgroundMaterial.value());
   if (result.hasError()) {
     return result;
   }
@@ -304,8 +398,81 @@ populateReactiveMaskScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return result;
   }
   return addPlane("ReactiveMaskOffset", glm::vec3(0.54f, 0.22f, 0.08f),
-                  glm::vec3(0.95f, 0.95f, 1.0f),
-                  maskedMaterial.value());
+                  glm::vec3(0.95f, 0.95f, 1.0f), maskedMaterial.value());
+}
+
+[[nodiscard]] Result<bool, std::string>
+populateOcclusionWallScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
+                           RenderScene &scene) {
+  if (runtime.scene.generator != "nuri.procedural.occlusion_wall.v1") {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  auto planePath =
+      resolveToolPath(runtime, "modelsRoot", "common/flat_plane.obj");
+  if (planePath.hasError()) {
+    return Result<bool, std::string>::makeError(planePath.error());
+  }
+  auto modelResult = renderer.resources().acquireModel(ModelRequest{
+      .path = planePath.value().string(),
+      .debugName = "tool_occlusion_flat_plane",
+  });
+  if (modelResult.hasError()) {
+    return Result<bool, std::string>::makeError(modelResult.error());
+  }
+
+  auto acquireMaterial =
+      [&](std::string_view name,
+          const glm::vec4 &color) -> Result<MaterialRef, std::string> {
+    MaterialRequest request{};
+    request.debugName = std::string(name);
+    request.desc.baseColorFactor = color;
+    request.desc.emissiveFactor = glm::vec3(color) * 0.55f;
+    request.desc.emissiveStrength = 1.2f;
+    request.desc.metallicFactor = 0.0f;
+    request.desc.roughnessFactor = 0.6f;
+    request.desc.doubleSided = true;
+    return renderer.resources().acquireMaterial(request);
+  };
+
+  auto wallMaterial = acquireMaterial("tool_occlusion_wall",
+                                      glm::vec4(0.16f, 0.38f, 0.72f, 1.0f));
+  auto hiddenMaterial = acquireMaterial("tool_occlusion_hidden",
+                                        glm::vec4(1.0f, 0.24f, 0.10f, 1.0f));
+  if (wallMaterial.hasError()) {
+    return Result<bool, std::string>::makeError(wallMaterial.error());
+  }
+  if (hiddenMaterial.hasError()) {
+    return Result<bool, std::string>::makeError(hiddenMaterial.error());
+  }
+
+  const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
+  auto addPlane = [&](std::string_view name, const glm::vec3 &translation,
+                      const glm::vec3 &scale,
+                      MaterialRef material) -> Result<bool, std::string> {
+    const glm::mat4 transform = glm::translate(glm::mat4(1.0f), translation) *
+                                upright * glm::scale(glm::mat4(1.0f), scale);
+    auto nodeResult =
+        scene.graph().createNode(scene.graph().rootNode(), name, transform);
+    if (nodeResult.hasError()) {
+      return Result<bool, std::string>::makeError(nodeResult.error());
+    }
+    auto renderableResult = scene.graph().addRenderable(
+        nodeResult.value(), modelResult.value(), material);
+    if (renderableResult.hasError()) {
+      return Result<bool, std::string>::makeError(renderableResult.error());
+    }
+    return Result<bool, std::string>::makeResult(true);
+  };
+
+  auto result = addPlane("OcclusionHidden", glm::vec3(0.0f, 0.55f, -1.20f),
+                         glm::vec3(0.36f, 1.0f, 0.36f), hiddenMaterial.value());
+  if (result.hasError()) {
+    return result;
+  }
+  return addPlane("OcclusionWall", glm::vec3(0.0f, 0.55f, 0.0f),
+                  glm::vec3(20.0f, 1.0f, 20.0f), wallMaterial.value());
 }
 
 [[nodiscard]] Result<bool, std::string>
@@ -315,8 +482,8 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return Result<bool, std::string>::makeResult(true);
   }
 
-  auto planePath = resolveToolPath(runtime, "modelsRoot",
-                                   "common/flat_plane.obj");
+  auto planePath =
+      resolveToolPath(runtime, "modelsRoot", "common/flat_plane.obj");
   if (planePath.hasError()) {
     return Result<bool, std::string>::makeError(planePath.error());
   }
@@ -328,9 +495,9 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return Result<bool, std::string>::makeError(modelResult.error());
   }
 
-  auto acquireMaterial = [&](std::string_view name,
-                             const glm::vec4 &color)
-      -> Result<MaterialRef, std::string> {
+  auto acquireMaterial =
+      [&](std::string_view name,
+          const glm::vec4 &color) -> Result<MaterialRef, std::string> {
     MaterialRequest request{};
     request.debugName = std::string(name);
     request.desc.baseColorFactor = color;
@@ -342,51 +509,47 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return renderer.resources().acquireMaterial(request);
   };
 
-  auto floorMaterial = acquireMaterial(
-      "tool_shadow_floor", glm::vec4(0.72f, 0.70f, 0.64f, 1.0f));
-  auto wallMaterial = acquireMaterial(
-      "tool_shadow_wall", glm::vec4(0.58f, 0.68f, 0.78f, 1.0f));
-  auto redMaterial = acquireMaterial(
-      "tool_shadow_red", glm::vec4(0.86f, 0.18f, 0.12f, 1.0f));
-  auto blueMaterial = acquireMaterial(
-      "tool_shadow_blue", glm::vec4(0.12f, 0.36f, 0.88f, 1.0f));
-  auto greenMaterial = acquireMaterial(
-      "tool_shadow_green", glm::vec4(0.16f, 0.72f, 0.34f, 1.0f));
-  for (const auto *material :
-       {&floorMaterial, &wallMaterial, &redMaterial, &blueMaterial,
-        &greenMaterial}) {
+  auto floorMaterial = acquireMaterial("tool_shadow_floor",
+                                       glm::vec4(0.72f, 0.70f, 0.64f, 1.0f));
+  auto wallMaterial =
+      acquireMaterial("tool_shadow_wall", glm::vec4(0.58f, 0.68f, 0.78f, 1.0f));
+  auto redMaterial =
+      acquireMaterial("tool_shadow_red", glm::vec4(0.86f, 0.18f, 0.12f, 1.0f));
+  auto blueMaterial =
+      acquireMaterial("tool_shadow_blue", glm::vec4(0.12f, 0.36f, 0.88f, 1.0f));
+  auto greenMaterial = acquireMaterial("tool_shadow_green",
+                                       glm::vec4(0.16f, 0.72f, 0.34f, 1.0f));
+  for (const auto *material : {&floorMaterial, &wallMaterial, &redMaterial,
+                               &blueMaterial, &greenMaterial}) {
     if (material->hasError()) {
       return Result<bool, std::string>::makeError(material->error());
     }
   }
 
-  const glm::mat4 upright =
-      glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
-                  glm::vec3(1.0f, 0.0f, 0.0f));
+  const glm::mat4 upright = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f),
+                                        glm::vec3(1.0f, 0.0f, 0.0f));
   auto addPlane = [&](std::string_view name, const glm::mat4 &orientation,
                       const glm::vec3 &translation, const glm::vec3 &scale,
                       MaterialRef material) -> Result<bool, std::string> {
-    const glm::mat4 transform =
-        glm::translate(glm::mat4(1.0f), translation) * orientation *
-        glm::scale(glm::mat4(1.0f), scale);
+    const glm::mat4 transform = glm::translate(glm::mat4(1.0f), translation) *
+                                orientation *
+                                glm::scale(glm::mat4(1.0f), scale);
     auto nodeResult =
         scene.graph().createNode(scene.graph().rootNode(), name, transform);
     if (nodeResult.hasError()) {
       return Result<bool, std::string>::makeError(nodeResult.error());
     }
-    auto renderableResult =
-        scene.graph().addRenderable(nodeResult.value(), modelResult.value(),
-                                    material);
+    auto renderableResult = scene.graph().addRenderable(
+        nodeResult.value(), modelResult.value(), material);
     if (renderableResult.hasError()) {
       return Result<bool, std::string>::makeError(renderableResult.error());
     }
     return Result<bool, std::string>::makeResult(true);
   };
 
-  auto result = addPlane("ShadowFloor", glm::mat4(1.0f),
-                         glm::vec3(0.0f, -0.72f, 0.0f),
-                         glm::vec3(5.2f, 1.0f, 4.4f),
-                         floorMaterial.value());
+  auto result =
+      addPlane("ShadowFloor", glm::mat4(1.0f), glm::vec3(0.0f, -0.72f, 0.0f),
+               glm::vec3(5.2f, 1.0f, 4.4f), floorMaterial.value());
   if (result.hasError()) {
     return result;
   }
@@ -406,8 +569,7 @@ populateShadowPlanesScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     return result;
   }
   return addPlane("ShadowGreenCaster", upright, glm::vec3(1.16f, 0.06f, 0.35f),
-                  glm::vec3(0.82f, 1.34f, 1.0f),
-                  greenMaterial.value());
+                  glm::vec3(0.82f, 1.34f, 1.0f), greenMaterial.value());
 }
 
 [[nodiscard]] Result<bool, std::string>
@@ -422,13 +584,12 @@ populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
                      .intensity = 4.0f,
                      .enabled = true};
   if (runtime.scene.generator == "nuri.procedural.shadow_planes.v1") {
-    keyLight.rotation = glm::quatLookAt(
-        glm::normalize(glm::vec3(-0.45f, -0.78f, -0.44f)),
-        glm::vec3(0.0f, 1.0f, 0.0f));
+    keyLight.rotation =
+        glm::quatLookAt(glm::normalize(glm::vec3(-0.45f, -0.78f, -0.44f)),
+                        glm::vec3(0.0f, 1.0f, 0.0f));
     keyLight.intensity = 5.5f;
   }
-  auto lightResult =
-      scene.graph().addLight(scene.graph().rootNode(), keyLight);
+  auto lightResult = scene.graph().addLight(scene.graph().rootNode(), keyLight);
   if (lightResult.hasError()) {
     return Result<bool, std::string>::makeError(lightResult.error());
   }
@@ -438,14 +599,14 @@ populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
       return Result<bool, std::string>::makeError(
           "prefab scene requires pathBase and path");
     }
-    auto path = resolveToolPath(runtime, runtime.scene.pathBase,
-                                runtime.scene.path);
+    auto path =
+        resolveToolPath(runtime, runtime.scene.pathBase, runtime.scene.path);
     if (path.hasError()) {
       return Result<bool, std::string>::makeError(path.error());
     }
     if (!std::filesystem::exists(path.value())) {
-      return Result<bool, std::string>::makeError(
-          "missing scene asset: " + path.value().string());
+      return Result<bool, std::string>::makeError("missing scene asset: " +
+                                                  path.value().string());
     }
     SceneImportOptions importOptions{};
     importOptions.assetBuildOptions.flipUVs = runtime.scene.flipUVs;
@@ -483,10 +644,19 @@ populateToolScene(const ToolRuntimeDesc &runtime, Renderer &renderer,
     if (proceduralResult.hasError()) {
       return proceduralResult;
     }
+    proceduralResult = populateOcclusionWallScene(runtime, renderer, scene);
+    if (proceduralResult.hasError()) {
+      return proceduralResult;
+    }
     proceduralResult = populateShadowPlanesScene(runtime, renderer, scene);
     if (proceduralResult.hasError()) {
       return proceduralResult;
     }
+  }
+
+  auto environmentResult = loadToolEnvironment(runtime, renderer, scene);
+  if (environmentResult.hasError()) {
+    return environmentResult;
   }
 
   auto syncResult = scene.graph().syncWorldTransforms();
@@ -509,8 +679,8 @@ struct ToolRendererRuntime::Impl {
         "NURI_RENDER_GRAPH_DISABLE_PARALLEL_RECORDING",
         desc.renderGraph.parallelRecording ? "0" : "1"));
     if (desc.presentMode != "default") {
-      env.push_back(
-          std::make_unique<ScopedEnvVar>("NURI_PRESENT_MODE", desc.presentMode));
+      env.push_back(std::make_unique<ScopedEnvVar>("NURI_PRESENT_MODE",
+                                                   desc.presentMode));
     }
   }
 
@@ -589,9 +759,9 @@ createToolRendererRuntime(const ToolRuntimeDesc &desc) {
     return Result<std::unique_ptr<ToolRendererRuntime>, std::string>::makeError(
         pipelineResult.error());
   }
-  auto sceneResult = populateToolScene(desc, *impl->renderer, impl->scene,
-                                       &impl->sceneMemory, impl->prefab,
-                                       impl->prefabAssets);
+  auto sceneResult =
+      populateToolScene(desc, *impl->renderer, impl->scene, &impl->sceneMemory,
+                        impl->prefab, impl->prefabAssets);
   if (sceneResult.hasError()) {
     return Result<std::unique_ptr<ToolRendererRuntime>, std::string>::makeError(
         sceneResult.error());
@@ -637,10 +807,10 @@ void buildToolFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
   frameContext.camera = makeTemporalCameraFrameState(
       camera, static_cast<float>(desc.width) / static_cast<float>(desc.height),
       settings.antiAliasing,
-      TemporalCameraFrameDesc{.renderExtent = glm::uvec2(desc.width, desc.height),
+      TemporalCameraFrameDesc{.renderExtent =
+                                  glm::uvec2(desc.width, desc.height),
                               .sceneContent = sceneContent,
-                              .cameraCutRequested =
-                                  desc.cameraCutRequested},
+                              .cameraCutRequested = desc.cameraCutRequested},
       cameraHistory);
   settings.antiAliasing.debug.resetHistoryRequested = false;
   frameContext.settings = &settings;

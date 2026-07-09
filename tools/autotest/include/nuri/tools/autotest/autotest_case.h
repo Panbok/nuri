@@ -51,6 +51,23 @@ struct AutotestSceneConfig {
   std::string contentHash = "procedural-empty-v1";
 };
 
+struct AutotestEnvironmentTextureConfig {
+  bool enabled = false;
+  bool required = false;
+  std::string pathBase{};
+  std::filesystem::path path{};
+  std::string kind = "Texture2D";
+  std::string debugName{};
+};
+
+struct AutotestEnvironmentConfig {
+  AutotestEnvironmentTextureConfig cubemap{};
+  AutotestEnvironmentTextureConfig irradiance{};
+  AutotestEnvironmentTextureConfig prefilteredGgx{};
+  AutotestEnvironmentTextureConfig prefilteredCharlie{};
+  AutotestEnvironmentTextureConfig brdfLut{};
+};
+
 struct AutotestRequirements {
   std::vector<std::string> assets{};
   std::vector<std::string> backends{};
@@ -178,6 +195,7 @@ struct AutotestCase {
   std::string windowMode = "visible";
   AutotestRenderGraphConfig renderGraph{};
   AutotestCameraConfig camera{};
+  AutotestEnvironmentConfig environment{};
   RenderSettings settings{};
   AutotestRequirements requirements{};
   AutotestTimeline timeline{};

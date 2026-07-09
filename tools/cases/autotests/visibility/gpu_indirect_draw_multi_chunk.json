@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "id": "visibility.gpu_indirect_draw_multi_chunk",
+  "suite": "visibility",
+  "description": "GPU visibility indirect draw producer handles multiple CPU-packed indirect chunks",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 1,
+    "contentHash": "nuri.procedural.reactive_mask.v1:1"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 12,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.85, 3.6],
+    "target": [0.0, 0.55, 0.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableIndirectDraw": true,
+      "enableInstancedDraw": false,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "visibility": {
+      "enableGpuInstanceCulling": true,
+      "enableGpuIndirectDraw": true
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "end",
+      "frame": 12,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "assertions": [
+        {
+          "id": "opaque_indirect_chunks_present",
+          "metric": "renderer.opaque.indirect_draw_calls",
+          "greaterOrEqual": 2
+        },
+        {
+          "id": "opaque_indirect_commands_present",
+          "metric": "renderer.opaque.indirect_commands",
+          "greaterOrEqual": 3
+        },
+        {
+          "id": "gpu_indirect_selected",
+          "metric": "renderer.visibility.gpu_indirect_draw_used",
+          "equals": 1
+        },
+        {
+          "id": "gpu_indirect_no_fallback",
+          "metric": "renderer.visibility.gpu_indirect_draw_fallback",
+          "equals": 0
+        },
+        {
+          "id": "gpu_indirect_commands_present",
+          "metric": "renderer.visibility.gpu_indirect_draw_commands",
+          "greaterOrEqual": 3
+        },
+        {
+          "id": "gpu_indirect_readback_commands_present",
+          "metric": "renderer.visibility.gpu_indirect_draw_readback_commands",
+          "greaterOrEqual": 3
+        },
+        {
+          "id": "gpu_indirect_readback_visible",
+          "metric": "renderer.visibility.gpu_indirect_draw_readback_visible",
+          "greaterOrEqual": 3
+        },
+        {
+          "id": "gpu_indirect_readback_not_tombstoned",
+          "metric": "renderer.visibility.gpu_indirect_draw_readback_tombstoned",
+          "equals": 0
+        },
+        {
+          "id": "gpu_visible_list_matches",
+          "metric": "renderer.visibility.gpu_main_visible_list_mismatches",
+          "equals": 0
+        },
+        {
+          "id": "final_draws_visible",
+          "metric": "renderer.opaque.visible_instances",
+          "greaterOrEqual": 3
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

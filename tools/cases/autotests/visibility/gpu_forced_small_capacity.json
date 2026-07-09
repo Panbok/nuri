@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "id": "visibility.gpu_forced_small_capacity",
+  "suite": "visibility",
+  "description": "GPU visibility forced-small output capacity reports overflow without dropping CPU-rendered geometry",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "DamagedHelmet/DamagedHelmet.gltf",
+    "importOptions": {
+      "mesh": {
+        "flipUVs": true
+      }
+    }
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 12,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.25, 3.2],
+    "target": [0.0, -0.05, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "visibility": {
+      "enableGpuInstanceCulling": true,
+      "debug": {
+        "forcedVisibleListCapacity": 0
+      }
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "end",
+      "frame": 12,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "assertions": [
+        {
+          "id": "gpu_candidates_present",
+          "metric": "renderer.visibility.gpu_main_candidates",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gpu_readback_available",
+          "metric": "renderer.visibility.gpu_main_readback_available",
+          "equals": 1
+        },
+        {
+          "id": "gpu_output_overflowed",
+          "metric": "renderer.visibility.gpu_output_overflow_count",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gpu_visible_list_mismatch_reported",
+          "metric": "renderer.visibility.gpu_main_visible_list_mismatches",
+          "equals": 1
+        },
+        {
+          "id": "final_draws_visible",
+          "metric": "renderer.opaque.visible_instances",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:DamagedHelmet/DamagedHelmet.gltf"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

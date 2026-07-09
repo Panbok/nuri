@@ -1,0 +1,11 @@
+{
+  "target": "ambient_occlusion",
+  "format": 16,
+  "width": 640,
+  "height": 360,
+  "rowStride": 1280,
+  "origin": "top_left",
+  "colorSpace": "linear_scalar",
+  "payload": "ambient_occlusion.exr",
+  "hash": "fnv1a64:908342b291eab1b2"
+}

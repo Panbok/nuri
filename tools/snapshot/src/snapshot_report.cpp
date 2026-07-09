@@ -163,6 +163,104 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           opaque.meshletRejectedIncompatibleFrame);
   yyjson_mut_obj_add_val(doc, object, "opaque", opaqueObject);
 
+  const VisibilityFrameMetrics &visibility = metrics.visibility;
+  yyjson_mut_val *visibilityObject = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "cpuMainCandidates",
+                          visibility.cpuMainCandidates);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "cpuMainVisibleCandidates",
+                          visibility.cpuMainVisibleCandidates);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "cpuMainRejected",
+                          visibility.cpuMainRejected);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuMainCandidates",
+                          visibility.gpuMainCandidates);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuMainVisibleCandidates",
+                          visibility.gpuMainVisibleCandidates);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuMainRejectedFrustum",
+                          visibility.gpuMainRejectedFrustum);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuMainRejectedOcclusion",
+                          visibility.gpuMainRejectedOcclusion);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuOutputOverflowCount",
+                          visibility.gpuOutputOverflowCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuMainReadbackAvailable",
+                          visibility.gpuMainReadbackAvailable);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuMainReadbackSourceFrame",
+                          visibility.gpuMainReadbackSourceFrame);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "gpuMainReadbackStaleFrameCount",
+                          visibility.gpuMainReadbackStaleFrameCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuMainReadbackErrorCount",
+                          visibility.gpuMainReadbackErrorCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "gpuMainReadbackVisibleCandidates",
+                          visibility.gpuMainReadbackVisibleCandidates);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuMainVisibleListMismatches",
+                          visibility.gpuMainVisibleListMismatches);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuIndirectDrawUsed",
+                          visibility.gpuIndirectDrawUsed);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuIndirectDrawFallback",
+                          visibility.gpuIndirectDrawFallback);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "gpuIndirectDrawCommands",
+                          visibility.gpuIndirectDrawCommands);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "gpuIndirectDrawReadbackCommands",
+                          visibility.gpuIndirectDrawReadbackCommands);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "gpuIndirectDrawReadbackTombstoned",
+                          visibility.gpuIndirectDrawReadbackTombstoned);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "gpuIndirectDrawReadbackVisible",
+                          visibility.gpuIndirectDrawReadbackVisible);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "indirectMeshDispatchCount",
+                          visibility.indirectMeshDispatchCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletRejectedFrustum",
+                          visibility.meshletRejectedFrustum);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletRejectedCone",
+                          visibility.meshletRejectedCone);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletRejectedOcclusion",
+                          visibility.meshletRejectedOcclusion);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletOcclusionAvailable",
+                          visibility.meshletOcclusionAvailable);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletPayloadOverflowCount",
+                          visibility.meshletPayloadOverflowCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletReadbackAvailable",
+                          visibility.meshletReadbackAvailable);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletReadbackSourceFrame",
+                          visibility.meshletReadbackSourceFrame);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "meshletReadbackStaleFrameCount",
+                          visibility.meshletReadbackStaleFrameCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletReadbackErrorCount",
+                          visibility.meshletReadbackErrorCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletEmitted",
+                          visibility.meshletEmitted);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "meshletTaskGroupsExecuted",
+                          visibility.meshletTaskGroupsExecuted);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "uncertainVisible",
+                          visibility.uncertainVisible);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "shadowCpuCandidates",
+                          visibility.shadowCpuCandidates);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "shadowCpuRejected",
+                          visibility.shadowCpuRejected);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "shadowMeshletCandidates",
+                          visibility.shadowMeshletCandidates);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "shadowMeshletReadbackAvailable",
+                          visibility.shadowMeshletReadbackAvailable);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "shadowMeshletReadbackSourceFrame",
+                          visibility.shadowMeshletReadbackSourceFrame);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "shadowMeshletReadbackStaleFrameCount",
+                          visibility.shadowMeshletReadbackStaleFrameCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject,
+                          "shadowMeshletReadbackErrorCount",
+                          visibility.shadowMeshletReadbackErrorCount);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "shadowMeshletRejectedBounds",
+                          visibility.shadowMeshletRejectedBounds);
+  yyjson_mut_obj_add_uint(doc, visibilityObject, "occlusionAvailable",
+                          visibility.occlusionAvailable);
+  yyjson_mut_obj_add_val(doc, object, "visibility", visibilityObject);
+
   const ShadowFrameMetrics &shadow = metrics.shadow;
   yyjson_mut_val *shadowObject = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_uint(doc, shadowObject, "cascadeCount",
@@ -217,8 +315,14 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           aa.motionVectorTextureCount);
   yyjson_mut_obj_add_uint(doc, aaObject, "motionVectorClearPassCount",
                           aa.motionVectorClearPassCount);
+  yyjson_mut_obj_add_uint(doc, aaObject,
+                          "motionVectorDepthReprojectionPassCount",
+                          aa.motionVectorDepthReprojectionPassCount);
   yyjson_mut_obj_add_bool(doc, aaObject, "motionVectorGraphPublished",
                           aa.motionVectorGraphPublished);
+  yyjson_mut_obj_add_bool(doc, aaObject,
+                          "motionVectorDepthReprojectionGenerated",
+                          aa.motionVectorDepthReprojectionGenerated);
   yyjson_mut_obj_add_uint(doc, aaObject, "velocityPassCount",
                           aa.velocityPassCount);
   yyjson_mut_obj_add_uint(doc, aaObject, "velocityDrawCount",
@@ -419,6 +523,9 @@ yyjson_mut_val *makeCaptureObject(yyjson_mut_doc *doc,
   if (value == "R8_UNORM") {
     return Format::R8_UNORM;
   }
+  if (value == "R16_UNORM") {
+    return Format::R16_UNORM;
+  }
   if (value == "BC7_RGBA_UNORM") {
     return Format::BC7_RGBA_UNORM;
   }
@@ -509,6 +616,130 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
                 opaque.meshletRejectedIncompatibleFrame);
   }
 
+  yyjson_val *visibilityObject = yyjson_obj_get(object, "visibility");
+  if (yyjson_is_obj(visibilityObject)) {
+    VisibilityFrameMetrics &visibility = metrics.visibility;
+    visibility.cpuMainCandidates = readU32(
+        visibilityObject, "cpuMainCandidates", visibility.cpuMainCandidates);
+    visibility.cpuMainVisibleCandidates =
+        readU32(visibilityObject, "cpuMainVisibleCandidates",
+                visibility.cpuMainVisibleCandidates);
+    visibility.cpuMainRejected = readU32(visibilityObject, "cpuMainRejected",
+                                         visibility.cpuMainRejected);
+    visibility.gpuMainCandidates = readU32(
+        visibilityObject, "gpuMainCandidates", visibility.gpuMainCandidates);
+    visibility.gpuMainVisibleCandidates =
+        readU32(visibilityObject, "gpuMainVisibleCandidates",
+                visibility.gpuMainVisibleCandidates);
+    visibility.gpuMainRejectedFrustum =
+        readU32(visibilityObject, "gpuMainRejectedFrustum",
+                visibility.gpuMainRejectedFrustum);
+    visibility.gpuMainRejectedOcclusion =
+        readU32(visibilityObject, "gpuMainRejectedOcclusion",
+                visibility.gpuMainRejectedOcclusion);
+    visibility.gpuOutputOverflowCount =
+        readU32(visibilityObject, "gpuOutputOverflowCount",
+                visibility.gpuOutputOverflowCount);
+    visibility.gpuMainReadbackAvailable =
+        readU32(visibilityObject, "gpuMainReadbackAvailable",
+                visibility.gpuMainReadbackAvailable);
+    visibility.gpuMainReadbackSourceFrame =
+        readU32(visibilityObject, "gpuMainReadbackSourceFrame",
+                visibility.gpuMainReadbackSourceFrame);
+    visibility.gpuMainReadbackStaleFrameCount =
+        readU32(visibilityObject, "gpuMainReadbackStaleFrameCount",
+                visibility.gpuMainReadbackStaleFrameCount);
+    visibility.gpuMainReadbackErrorCount =
+        readU32(visibilityObject, "gpuMainReadbackErrorCount",
+                visibility.gpuMainReadbackErrorCount);
+    visibility.gpuMainReadbackVisibleCandidates =
+        readU32(visibilityObject, "gpuMainReadbackVisibleCandidates",
+                visibility.gpuMainReadbackVisibleCandidates);
+    visibility.gpuMainVisibleListMismatches =
+        readU32(visibilityObject, "gpuMainVisibleListMismatches",
+                visibility.gpuMainVisibleListMismatches);
+    visibility.gpuIndirectDrawUsed =
+        readU32(visibilityObject, "gpuIndirectDrawUsed",
+                visibility.gpuIndirectDrawUsed);
+    visibility.gpuIndirectDrawFallback =
+        readU32(visibilityObject, "gpuIndirectDrawFallback",
+                visibility.gpuIndirectDrawFallback);
+    visibility.gpuIndirectDrawCommands =
+        readU32(visibilityObject, "gpuIndirectDrawCommands",
+                visibility.gpuIndirectDrawCommands);
+    visibility.gpuIndirectDrawReadbackCommands =
+        readU32(visibilityObject, "gpuIndirectDrawReadbackCommands",
+                visibility.gpuIndirectDrawReadbackCommands);
+    visibility.gpuIndirectDrawReadbackTombstoned =
+        readU32(visibilityObject, "gpuIndirectDrawReadbackTombstoned",
+                visibility.gpuIndirectDrawReadbackTombstoned);
+    visibility.gpuIndirectDrawReadbackVisible =
+        readU32(visibilityObject, "gpuIndirectDrawReadbackVisible",
+                visibility.gpuIndirectDrawReadbackVisible);
+    visibility.indirectMeshDispatchCount =
+        readU32(visibilityObject, "indirectMeshDispatchCount",
+                visibility.indirectMeshDispatchCount);
+    visibility.meshletRejectedFrustum =
+        readU32(visibilityObject, "meshletRejectedFrustum",
+                visibility.meshletRejectedFrustum);
+    visibility.meshletRejectedCone =
+        readU32(visibilityObject, "meshletRejectedCone",
+                visibility.meshletRejectedCone);
+    visibility.meshletRejectedOcclusion =
+        readU32(visibilityObject, "meshletRejectedOcclusion",
+                visibility.meshletRejectedOcclusion);
+    visibility.meshletOcclusionAvailable =
+        readU32(visibilityObject, "meshletOcclusionAvailable",
+                visibility.meshletOcclusionAvailable);
+    visibility.meshletPayloadOverflowCount =
+        readU32(visibilityObject, "meshletPayloadOverflowCount",
+                visibility.meshletPayloadOverflowCount);
+    visibility.meshletReadbackAvailable =
+        readU32(visibilityObject, "meshletReadbackAvailable",
+                visibility.meshletReadbackAvailable);
+    visibility.meshletReadbackSourceFrame =
+        readU32(visibilityObject, "meshletReadbackSourceFrame",
+                visibility.meshletReadbackSourceFrame);
+    visibility.meshletReadbackStaleFrameCount =
+        readU32(visibilityObject, "meshletReadbackStaleFrameCount",
+                visibility.meshletReadbackStaleFrameCount);
+    visibility.meshletReadbackErrorCount =
+        readU32(visibilityObject, "meshletReadbackErrorCount",
+                visibility.meshletReadbackErrorCount);
+    visibility.meshletEmitted =
+        readU32(visibilityObject, "meshletEmitted", visibility.meshletEmitted);
+    visibility.meshletTaskGroupsExecuted =
+        readU32(visibilityObject, "meshletTaskGroupsExecuted",
+                visibility.meshletTaskGroupsExecuted);
+    visibility.uncertainVisible = readU32(visibilityObject, "uncertainVisible",
+                                          visibility.uncertainVisible);
+    visibility.shadowCpuCandidates =
+        readU32(visibilityObject, "shadowCpuCandidates",
+                visibility.shadowCpuCandidates);
+    visibility.shadowCpuRejected = readU32(
+        visibilityObject, "shadowCpuRejected", visibility.shadowCpuRejected);
+    visibility.shadowMeshletCandidates =
+        readU32(visibilityObject, "shadowMeshletCandidates",
+                visibility.shadowMeshletCandidates);
+    visibility.shadowMeshletReadbackAvailable =
+        readU32(visibilityObject, "shadowMeshletReadbackAvailable",
+                visibility.shadowMeshletReadbackAvailable);
+    visibility.shadowMeshletReadbackSourceFrame =
+        readU32(visibilityObject, "shadowMeshletReadbackSourceFrame",
+                visibility.shadowMeshletReadbackSourceFrame);
+    visibility.shadowMeshletReadbackStaleFrameCount =
+        readU32(visibilityObject, "shadowMeshletReadbackStaleFrameCount",
+                visibility.shadowMeshletReadbackStaleFrameCount);
+    visibility.shadowMeshletReadbackErrorCount =
+        readU32(visibilityObject, "shadowMeshletReadbackErrorCount",
+                visibility.shadowMeshletReadbackErrorCount);
+    visibility.shadowMeshletRejectedBounds =
+        readU32(visibilityObject, "shadowMeshletRejectedBounds",
+                visibility.shadowMeshletRejectedBounds);
+    visibility.occlusionAvailable = readU32(
+        visibilityObject, "occlusionAvailable", visibility.occlusionAvailable);
+  }
+
   yyjson_val *shadowObject = yyjson_obj_get(object, "shadow");
   if (yyjson_is_obj(shadowObject)) {
     ShadowFrameMetrics &shadow = metrics.shadow;
@@ -570,8 +801,14 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
                                           aa.motionVectorTextureCount);
     aa.motionVectorClearPassCount = readU32(
         aaObject, "motionVectorClearPassCount", aa.motionVectorClearPassCount);
+    aa.motionVectorDepthReprojectionPassCount =
+        readU32(aaObject, "motionVectorDepthReprojectionPassCount",
+                aa.motionVectorDepthReprojectionPassCount);
     aa.motionVectorGraphPublished = readBool(
         aaObject, "motionVectorGraphPublished", aa.motionVectorGraphPublished);
+    aa.motionVectorDepthReprojectionGenerated =
+        readBool(aaObject, "motionVectorDepthReprojectionGenerated",
+                 aa.motionVectorDepthReprojectionGenerated);
     aa.velocityPassCount =
         readU32(aaObject, "velocityPassCount", aa.velocityPassCount);
     aa.velocityDrawCount =
@@ -704,6 +941,8 @@ std::string snapshotFormatName(Format format) {
     return "RG16_FLOAT";
   case Format::R8_UNORM:
     return "R8_UNORM";
+  case Format::R16_UNORM:
+    return "R16_UNORM";
   case Format::BC7_RGBA_UNORM:
     return "BC7_RGBA_UNORM";
   case Format::BC7_RGBA_SRGB:
@@ -822,6 +1061,17 @@ readSnapshotReportFile(const std::filesystem::path &path) {
   report.kind = readString(root, "kind", report.kind);
   report.generatedAtUtc = readString(root, "generatedAtUtc");
   report.command = readString(root, "command");
+  yyjson_val *environment = yyjson_obj_get(root, "environment");
+  if (yyjson_is_obj(environment)) {
+    report.environment.gpuBackend = readString(environment, "gpuBackend");
+    report.environment.gpuBackendSource =
+        readString(environment, "gpuBackendSource");
+    report.environment.gpuDeviceName = readString(environment, "gpuDeviceName");
+    report.environment.resolvedPresentMode =
+        readString(environment, "resolvedPresentMode");
+    report.environment.resolvedWindowMode =
+        readString(environment, "resolvedWindowMode");
+  }
   yyjson_val *caseObject = yyjson_obj_get(root, "case");
   if (yyjson_is_obj(caseObject)) {
     report.snapshotCase.id = readString(caseObject, "id");

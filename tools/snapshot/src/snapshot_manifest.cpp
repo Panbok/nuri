@@ -217,13 +217,10 @@ readEnumField(yyjson_val *object, std::string_view key, std::string_view path,
 [[nodiscard]] Result<bool, std::string>
 parseSettings(yyjson_val *object, RenderSettings &settings) {
   static constexpr std::array keys{
-      std::string_view("opaque"),
-      std::string_view("antiAliasing"),
-      std::string_view("ambientOcclusion"),
-      std::string_view("shadow"),
-      std::string_view("hdrPostProcess"),
-      std::string_view("transmission"),
-      std::string_view("transparent"),
+      std::string_view("opaque"),           std::string_view("antiAliasing"),
+      std::string_view("ambientOcclusion"), std::string_view("shadow"),
+      std::string_view("visibility"),       std::string_view("hdrPostProcess"),
+      std::string_view("transmission"),     std::string_view("transparent"),
       std::string_view("textureFiltering"),
   };
   auto result = rejectUnknownKeys(object, keys, "settings");
@@ -235,9 +232,13 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     static constexpr std::array opaqueKeys{
         std::string_view("enabled"),
         std::string_view("enableDepthPrepass"),
+        std::string_view("enableDepthPyramid"),
         std::string_view("enableInstanceCompute"),
         std::string_view("enableInstanceAnimation"),
+        std::string_view("enableIndirectDraw"),
+        std::string_view("enableInstancedDraw"),
         std::string_view("enableMeshLod"),
+        std::string_view("enableCpuFrustumCulling"),
         std::string_view("enableTessellation"),
         std::string_view("forcedMeshLod"),
         std::string_view("meshletMode"),
@@ -259,6 +260,12 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.opaque.enableDepthPrepass = boolean.value();
+    boolean = readBool(opaque, "enableDepthPyramid", "settings.opaque",
+                       settings.opaque.enableDepthPyramid);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableDepthPyramid = boolean.value();
     boolean = readBool(opaque, "enableInstanceCompute", "settings.opaque",
                        settings.opaque.enableInstanceCompute);
     if (boolean.hasError()) {
@@ -271,12 +278,30 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.opaque.enableInstanceAnimation = boolean.value();
+    boolean = readBool(opaque, "enableIndirectDraw", "settings.opaque",
+                       settings.opaque.enableIndirectDraw);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableIndirectDraw = boolean.value();
+    boolean = readBool(opaque, "enableInstancedDraw", "settings.opaque",
+                       settings.opaque.enableInstancedDraw);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableInstancedDraw = boolean.value();
     boolean = readBool(opaque, "enableMeshLod", "settings.opaque",
                        settings.opaque.enableMeshLod);
     if (boolean.hasError()) {
       return Result<bool, std::string>::makeError(boolean.error());
     }
     settings.opaque.enableMeshLod = boolean.value();
+    boolean = readBool(opaque, "enableCpuFrustumCulling", "settings.opaque",
+                       settings.opaque.enableCpuFrustumCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.opaque.enableCpuFrustumCulling = boolean.value();
     result = readEnumField(opaque, "meshletMode", "settings.opaque",
                            settings.opaque.meshletMode,
                            {{"Disabled", MeshletRenderMode::Disabled},
@@ -317,6 +342,147 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
         return Result<bool, std::string>::makeError(
             "settings.opaque.forcedMeshLod must be an int32");
       }
+    }
+  }
+
+  if (yyjson_val *visibility = optionalObject(object, "visibility")) {
+    static constexpr std::array visibilityKeys{
+        std::string_view("mainViewMode"),
+        std::string_view("shadowMode"),
+        std::string_view("occlusionMode"),
+        std::string_view("enableMeshletFrustumCulling"),
+        std::string_view("enableMeshletConeCulling"),
+        std::string_view("enableShadowMeshletCulling"),
+        std::string_view("enableGpuInstanceCulling"),
+        std::string_view("enableGpuIndirectDraw"),
+        std::string_view("enableIndirectMeshDispatch"),
+        std::string_view("visibleOnUncertain"),
+        std::string_view("debug")};
+    result =
+        rejectUnknownKeys(visibility, visibilityKeys, "settings.visibility");
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(visibility, "mainViewMode", "settings.visibility",
+                           settings.visibility.mainViewMode,
+                           {{"Disabled", VisibilityCullingMode::Disabled},
+                            {"CpuCoarse", VisibilityCullingMode::CpuCoarse},
+                            {"Hybrid", VisibilityCullingMode::Hybrid},
+                            {"GpuDriven", VisibilityCullingMode::GpuDriven}});
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(visibility, "shadowMode", "settings.visibility",
+                           settings.visibility.shadowMode,
+                           {{"Disabled", VisibilityCullingMode::Disabled},
+                            {"CpuCoarse", VisibilityCullingMode::CpuCoarse},
+                            {"Hybrid", VisibilityCullingMode::Hybrid},
+                            {"GpuDriven", VisibilityCullingMode::GpuDriven}});
+    if (result.hasError()) {
+      return result;
+    }
+    result = readEnumField(
+        visibility, "occlusionMode", "settings.visibility",
+        settings.visibility.occlusionMode,
+        {{"Disabled", VisibilityOcclusionMode::Disabled},
+         {"PreviousFrameHiZ", VisibilityOcclusionMode::PreviousFrameHiZ},
+         {"CurrentFrameHiZExperimental",
+          VisibilityOcclusionMode::CurrentFrameHiZExperimental}});
+    if (result.hasError()) {
+      return result;
+    }
+    auto boolean = readBool(visibility, "enableMeshletFrustumCulling",
+                            "settings.visibility",
+                            settings.visibility.enableMeshletFrustumCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableMeshletFrustumCulling = boolean.value();
+    boolean =
+        readBool(visibility, "enableMeshletConeCulling", "settings.visibility",
+                 settings.visibility.enableMeshletConeCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableMeshletConeCulling = boolean.value();
+    boolean = readBool(visibility, "enableShadowMeshletCulling",
+                       "settings.visibility",
+                       settings.visibility.enableShadowMeshletCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableShadowMeshletCulling = boolean.value();
+    boolean =
+        readBool(visibility, "enableGpuInstanceCulling", "settings.visibility",
+                 settings.visibility.enableGpuInstanceCulling);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableGpuInstanceCulling = boolean.value();
+    boolean =
+        readBool(visibility, "enableGpuIndirectDraw", "settings.visibility",
+                 settings.visibility.enableGpuIndirectDraw);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableGpuIndirectDraw = boolean.value();
+    boolean = readBool(visibility, "enableIndirectMeshDispatch",
+                       "settings.visibility",
+                       settings.visibility.enableIndirectMeshDispatch);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.enableIndirectMeshDispatch = boolean.value();
+    boolean = readBool(visibility, "visibleOnUncertain", "settings.visibility",
+                       settings.visibility.visibleOnUncertain);
+    if (boolean.hasError()) {
+      return Result<bool, std::string>::makeError(boolean.error());
+    }
+    settings.visibility.visibleOnUncertain = boolean.value();
+    if (yyjson_val *debug = optionalObject(visibility, "debug")) {
+      static constexpr std::array debugKeys{
+          std::string_view("showObjectBounds"),
+          std::string_view("showMeshletBounds"),
+          std::string_view("visualizeCullReason"),
+          std::string_view("logCounters"),
+          std::string_view("forcedVisibleListCapacity")};
+      result = rejectUnknownKeys(debug, debugKeys, "settings.visibility.debug");
+      if (result.hasError()) {
+        return result;
+      }
+      boolean = readBool(debug, "showObjectBounds", "settings.visibility.debug",
+                         settings.visibility.debug.showObjectBounds);
+      if (boolean.hasError()) {
+        return Result<bool, std::string>::makeError(boolean.error());
+      }
+      settings.visibility.debug.showObjectBounds = boolean.value();
+      boolean =
+          readBool(debug, "showMeshletBounds", "settings.visibility.debug",
+                   settings.visibility.debug.showMeshletBounds);
+      if (boolean.hasError()) {
+        return Result<bool, std::string>::makeError(boolean.error());
+      }
+      settings.visibility.debug.showMeshletBounds = boolean.value();
+      boolean =
+          readBool(debug, "visualizeCullReason", "settings.visibility.debug",
+                   settings.visibility.debug.visualizeCullReason);
+      if (boolean.hasError()) {
+        return Result<bool, std::string>::makeError(boolean.error());
+      }
+      settings.visibility.debug.visualizeCullReason = boolean.value();
+      boolean = readBool(debug, "logCounters", "settings.visibility.debug",
+                         settings.visibility.debug.logCounters);
+      if (boolean.hasError()) {
+        return Result<bool, std::string>::makeError(boolean.error());
+      }
+      settings.visibility.debug.logCounters = boolean.value();
+      auto u32 = readU32(debug, "forcedVisibleListCapacity",
+                         "settings.visibility.debug",
+                         settings.visibility.debug.forcedVisibleListCapacity);
+      if (u32.hasError()) {
+        return Result<bool, std::string>::makeError(u32.error());
+      }
+      settings.visibility.debug.forcedVisibleListCapacity = u32.value();
     }
   }
 
@@ -376,9 +542,11 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
   }
 
   if (yyjson_val *shadow = optionalObject(object, "shadow")) {
-    static constexpr std::array shadowKeys{std::string_view("enabled"),
-                                           std::string_view("qualityPreset"),
-                                           std::string_view("debug")};
+    static constexpr std::array shadowKeys{
+        std::string_view("enabled"), std::string_view("qualityPreset"),
+        std::string_view("enableMeshletDepth"),
+        std::string_view("enableMeshletCascadeCulling"),
+        std::string_view("debug")};
     result = rejectUnknownKeys(shadow, shadowKeys, "settings.shadow");
     if (result.hasError()) {
       return result;
@@ -402,6 +570,18 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     if (optionalObject(shadow, "qualityPreset") != nullptr) {
       applyShadowQualityPreset(settings.shadow, preset);
     }
+    enabled = readBool(shadow, "enableMeshletDepth", "settings.shadow",
+                       settings.shadow.enableMeshletDepth);
+    if (enabled.hasError()) {
+      return Result<bool, std::string>::makeError(enabled.error());
+    }
+    settings.shadow.enableMeshletDepth = enabled.value();
+    enabled = readBool(shadow, "enableMeshletCascadeCulling", "settings.shadow",
+                       settings.shadow.enableMeshletCascadeCulling);
+    if (enabled.hasError()) {
+      return Result<bool, std::string>::makeError(enabled.error());
+    }
+    settings.shadow.enableMeshletCascadeCulling = enabled.value();
     if (yyjson_val *debug = optionalObject(shadow, "debug")) {
       static constexpr std::array debugKeys{
           std::string_view("showShadowMapViewport"),

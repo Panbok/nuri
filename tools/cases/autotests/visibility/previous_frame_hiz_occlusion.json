@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "id": "visibility.previous_frame_hiz_occlusion",
+  "suite": "visibility",
+  "description": "Previous-frame Hi-Z visibility culls a hidden procedural plane conservatively",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.occlusion_wall.v1",
+    "seed": 7,
+    "contentHash": "nuri.procedural.occlusion_wall.v1:9"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 6,
+  "endFrame": 16,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.65, 3.2],
+    "target": [0.0, 0.55, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableIndirectDraw": true,
+      "enableInstancedDraw": true,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "visibility": {
+      "occlusionMode": "PreviousFrameHiZ",
+      "enableGpuInstanceCulling": true,
+      "enableGpuIndirectDraw": true
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "end",
+      "frame": 16,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "assertions": [
+        {
+          "id": "gpu_readback_available",
+          "metric": "renderer.visibility.gpu_main_readback_available",
+          "equals": 1
+        },
+        {
+          "id": "occlusion_available",
+          "metric": "renderer.visibility.occlusion_available",
+          "equals": 1
+        },
+        {
+          "id": "occlusion_rejected_hidden_plane",
+          "metric": "renderer.visibility.gpu_main_rejected_occlusion",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "visible_list_no_cpu_parity_mismatch_when_occlusion_enabled",
+          "metric": "renderer.visibility.gpu_main_visible_list_mismatches",
+          "equals": 0
+        },
+        {
+          "id": "gpu_indirect_selected",
+          "metric": "renderer.visibility.gpu_indirect_draw_used",
+          "equals": 1
+        },
+        {
+          "id": "gpu_indirect_no_fallback",
+          "metric": "renderer.visibility.gpu_indirect_draw_fallback",
+          "equals": 0
+        },
+        {
+          "id": "gpu_indirect_tombstoned_hidden_command",
+          "metric": "renderer.visibility.gpu_indirect_draw_readback_tombstoned",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gpu_indirect_kept_visible_command",
+          "metric": "renderer.visibility.gpu_indirect_draw_readback_visible",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "final_cpu_visible_instances_unchanged",
+          "metric": "renderer.opaque.visible_instances",
+          "greaterOrEqual": 2
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

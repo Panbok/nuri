@@ -18,6 +18,7 @@ namespace {
 [[nodiscard]] uint32_t channelCountForFormat(Format format) noexcept {
   switch (format) {
   case Format::R8_UNORM:
+  case Format::R16_UNORM:
   case Format::R32_UINT:
   case Format::R32_FLOAT:
   case Format::D16_UNORM:
@@ -81,6 +82,8 @@ template <typename T>
   switch (format) {
   case Format::R8_UNORM:
     return static_cast<float>(static_cast<uint8_t>(bytes[0])) / 255.0f;
+  case Format::R16_UNORM:
+    return static_cast<float>(loadScalar<uint16_t>(bytes)) / 65535.0f;
   case Format::RGBA8_UNORM:
   case Format::RGBA8_SRGB:
     return static_cast<float>(static_cast<uint8_t>(bytes[channel])) / 255.0f;
@@ -244,6 +247,7 @@ payloadKindForFormat(Format format) noexcept {
   case Format::RGBA8_SRGB:
   case Format::RGBA8_UINT:
     return SnapshotArtifactPayloadKind::Png;
+  case Format::R16_UNORM:
   case Format::D16_UNORM:
   case Format::R32_FLOAT:
   case Format::D32_FLOAT:
@@ -348,6 +352,7 @@ size_t snapshotFormatBytesPerPixel(Format format) noexcept {
   switch (format) {
   case Format::R8_UNORM:
     return 1u;
+  case Format::R16_UNORM:
   case Format::D16_UNORM:
     return 2u;
   case Format::R32_UINT:

@@ -1,0 +1,177 @@
+{
+  "schemaVersion": 1,
+  "id": "visibility.meshlet_indirect_dispatch_args",
+  "suite": "visibility",
+  "description": "GPU visibility writes meshlet indirect dispatch arguments consumed by the opaque meshlet pass",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "DamagedHelmet/DamagedHelmet.gltf",
+    "importOptions": {
+      "mesh": {
+        "flipUVs": true,
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 12,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.25, 3.2],
+    "target": [0.0, -0.05, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "visibility": {
+      "enableGpuInstanceCulling": true,
+      "enableIndirectMeshDispatch": true
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "qualityPreset": "Balanced"
+    },
+    "ambientOcclusion": {
+      "mode": "Disabled",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": false,
+      "qualityPreset": "Low"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "scenario_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "end",
+      "frame": 12,
+      "captures": [
+        {
+          "target": "final_color",
+          "profile": "ldr_color",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "assertions": [
+        {
+          "id": "meshlet_mode_active",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_no_incompatible_fallback",
+          "metric": "renderer.opaque.meshlet_rejected_incompatible_frame",
+          "equals": 0
+        },
+        {
+          "id": "meshlet_dispatches_present",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_indirect_dispatch_selected",
+          "metric": "renderer.visibility.indirect_mesh_dispatch_count",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_counter_readback_available",
+          "metric": "renderer.visibility.meshlet_readback_available",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_counter_readback_fresh",
+          "metric": "renderer.visibility.meshlet_readback_stale_frame_count",
+          "lessOrEqual": 2
+        },
+        {
+          "id": "meshlet_counter_readback_no_errors",
+          "metric": "renderer.visibility.meshlet_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "gpu_counter_readback_fresh",
+          "metric": "renderer.visibility.gpu_main_readback_stale_frame_count",
+          "lessOrEqual": 2
+        },
+        {
+          "id": "gpu_counter_readback_no_errors",
+          "metric": "renderer.visibility.gpu_main_readback_error_count",
+          "equals": 0
+        },
+        {
+          "id": "meshlet_emitted_nonzero",
+          "metric": "renderer.visibility.meshlet_emitted",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "meshlet_task_groups_executed_nonzero",
+          "metric": "renderer.visibility.meshlet_task_groups_executed",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gpu_visible_list_matches",
+          "metric": "renderer.visibility.gpu_main_visible_list_mismatches",
+          "equals": 0
+        },
+        {
+          "id": "final_meshlet_work_visible",
+          "metric": "renderer.opaque.meshlet_task_groups",
+          "greaterOrEqual": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:DamagedHelmet/DamagedHelmet.gltf"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

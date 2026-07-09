@@ -38,6 +38,7 @@ void sanitizeSnapshotRenderSettings(RenderSettings &settings) {
       sanitizeTextureFilterMode(settings.textureFiltering.mode);
   settings.textureFiltering.anisotropy =
       sanitizeTextureFilterAnisotropy(settings.textureFiltering.anisotropy);
+  sanitizeVisibilitySettings(settings.visibility);
   sanitizeToneMapSettings(settings.toneMap);
   sanitizeHDRPostProcessSettings(settings.hdrPostProcess);
 }

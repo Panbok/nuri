@@ -41,8 +41,8 @@
     "opaque": {
       "enabled": true,
       "meshletMode": "Required",
-      "enableMeshletFrustumCulling": false,
-      "enableMeshletConeCulling": false,
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
       "enableDepthPrepass": false,
       "enableInstanceCompute": false,
       "enableInstanceAnimation": false,
@@ -51,16 +51,16 @@
       "forcedMeshLod": 0
     },
     "antiAliasing": {
-      "mode": "None",
-      "qualityPreset": "Balanced"
+      "mode": "TAA",
+      "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {
       "mode": "GTAO",
-      "preset": "Balanced"
+      "preset": "Ultra"
     },
     "shadow": {
-      "enabled": false,
-      "qualityPreset": "Low"
+      "enabled": true,
+      "qualityPreset": "Ultra"
     },
     "hdrPostProcess": {
       "bloomEnabled": false,

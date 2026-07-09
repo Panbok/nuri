@@ -1,0 +1,11 @@
+{
+  "target": "material_normals",
+  "format": 4,
+  "width": 640,
+  "height": 360,
+  "rowStride": 5120,
+  "origin": "top_left",
+  "colorSpace": "world_normal",
+  "payload": "material_normals.exr",
+  "hash": "fnv1a64:277a88bc4d5e54e7"
+}
