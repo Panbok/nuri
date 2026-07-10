@@ -22,6 +22,9 @@
   {                                                                            \
     ZoneScopedC(color);                                                        \
     ZoneName(name, strlen(name))
+#define NURI_PROFILER_ZONE_STATIC(name, color)                                 \
+  {                                                                            \
+    ZoneScopedNC(name, color)
 #define NURI_PROFILER_ZONE_END() }
 #define NURI_PROFILER_THREAD(name) tracy::SetThreadName(name)
 #define NURI_PROFILER_FRAME(name) FrameMarkNamed(name)
@@ -29,6 +32,7 @@
 #define NURI_PROFILER_FUNCTION()
 #define NURI_PROFILER_FUNCTION_COLOR(color)
 #define NURI_PROFILER_ZONE(name, color) {
+#define NURI_PROFILER_ZONE_STATIC(name, color) {
 #define NURI_PROFILER_ZONE_END() }
 #define NURI_PROFILER_THREAD(name)
 #define NURI_PROFILER_FRAME(name)

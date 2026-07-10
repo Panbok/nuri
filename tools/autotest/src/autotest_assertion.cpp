@@ -538,6 +538,14 @@ AutotestAssertionResult evaluateAutotestMetricWindowAssertion(
     result.statusReason = "invalid_metric_window_range";
     return result;
   }
+  const uint64_t expectedSampleCount =
+      static_cast<uint64_t>(endFrame) - startFrame + 1u;
+  if (expectedSampleCount > UINT32_MAX) {
+    result.status = AutotestAssertionStatus::Invalid;
+    result.statusReason = "metric_window_sample_count_overflow";
+    return result;
+  }
+  result.expectedSampleCount = static_cast<uint32_t>(expectedSampleCount);
 
   std::vector<double> samples;
   samples.reserve(static_cast<size_t>(endFrame - startFrame) + 1u);
@@ -550,12 +558,24 @@ AutotestAssertionResult evaluateAutotestMetricWindowAssertion(
     if (metricIt != frameIt->second.end()) {
       samples.push_back(metricIt->second);
     }
+    if (frame == UINT32_MAX) {
+      break;
+    }
   }
+  result.sampleCount = static_cast<uint32_t>(samples.size());
   if (samples.empty()) {
     result.status = assertion.optional ? AutotestAssertionStatus::Unavailable
                                        : AutotestAssertionStatus::Invalid;
     result.statusReason = assertion.optional ? "optional_metric_unavailable"
                                              : "required_metric_unavailable";
+    return result;
+  }
+  if (samples.size() != expectedSampleCount) {
+    result.status = assertion.optional ? AutotestAssertionStatus::Unavailable
+                                       : AutotestAssertionStatus::Invalid;
+    result.statusReason = assertion.optional
+                              ? "optional_metric_window_incomplete"
+                              : "required_metric_window_incomplete";
     return result;
   }
 

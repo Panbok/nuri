@@ -1388,6 +1388,7 @@ struct NvrhiGPUDeviceImpl {
   VkQueue graphicsQueue = VK_NULL_HANDLE;
   uint32_t graphicsQueueFamily = 0u;
   VkPhysicalDeviceProperties physicalDeviceProperties{};
+  GPUAdapterInfo adapterInfo{};
   VkPhysicalDeviceMemoryProperties memoryProperties{};
   std::vector<const char *> instanceExtensions;
   std::vector<const char *> deviceExtensions;
@@ -2146,6 +2147,13 @@ void destroyDebugMessenger(Impl &impl) {
 
   vkGetPhysicalDeviceProperties(impl.physicalDevice,
                                 &impl.physicalDeviceProperties);
+  impl.adapterInfo = GPUAdapterInfo{
+      .name = impl.physicalDeviceProperties.deviceName,
+      .vendorId = impl.physicalDeviceProperties.vendorID,
+      .deviceId = impl.physicalDeviceProperties.deviceID,
+      .driverVersion =
+          std::to_string(impl.physicalDeviceProperties.driverVersion),
+  };
   vkGetPhysicalDeviceMemoryProperties(impl.physicalDevice,
                                       &impl.memoryProperties);
   return Result<bool, std::string>::makeResult(true);
@@ -5027,6 +5035,10 @@ TextureDimensions NvrhiGPUDevice::getTextureDimensions(TextureHandle h) const {
 
 TextureCompressionCaps NvrhiGPUDevice::getTextureCompressionCaps() const {
   return impl_ != nullptr ? impl_->compressionCaps : TextureCompressionCaps{};
+}
+
+GPUAdapterInfo NvrhiGPUDevice::getAdapterInfo() const {
+  return impl_ != nullptr ? impl_->adapterInfo : GPUAdapterInfo{};
 }
 
 bool NvrhiGPUDevice::supportsFeature(GPUFeature feature) const {

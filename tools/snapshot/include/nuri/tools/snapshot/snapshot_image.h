@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace nuri::tools::snapshot {
@@ -32,6 +33,22 @@ struct SnapshotArtifactPaths {
   std::filesystem::path preview{};
 };
 
+struct SnapshotArtifactMetadata {
+  std::string target{};
+  uint32_t capturePointVersion = 0u;
+  std::string kind{};
+  std::string format{};
+  uint32_t width = 0u;
+  uint32_t height = 0u;
+  uint32_t mip = 0u;
+  uint32_t layer = 0u;
+  std::string colorSpace{};
+  std::string origin{};
+  std::string profile{};
+  std::string payload{};
+  std::string hash{};
+};
+
 [[nodiscard]] size_t snapshotFormatBytesPerPixel(Format format) noexcept;
 [[nodiscard]] Result<SnapshotReadbackImage, std::string>
 readSnapshotCapture(GPUDevice &gpu, const RenderCapturePoint &point);
@@ -41,11 +58,18 @@ decodeSnapshotImage(const SnapshotReadbackImage &image);
 [[nodiscard]] Result<bool, std::string>
 writeSnapshotArtifacts(const SnapshotReadbackImage &image,
                        const std::filesystem::path &artifactStem,
-                       SnapshotArtifactPaths &outPaths);
+                       SnapshotArtifactPaths &outPaths,
+                       std::string_view compareProfile = {});
 [[nodiscard]] Result<SnapshotImage, std::string>
 readSnapshotImageFile(const std::filesystem::path &path);
+[[nodiscard]] Result<SnapshotArtifactMetadata, std::string>
+readSnapshotArtifactMetadata(const std::filesystem::path &path);
 [[nodiscard]] Result<bool, std::string>
 writeSnapshotPreviewPng(const SnapshotImage &image,
                         const std::filesystem::path &path);
+[[nodiscard]] Result<bool, std::string> writeSnapshotComparisonPreviews(
+    const SnapshotImage &actual, const SnapshotImage &expected,
+    std::string_view profile, const std::filesystem::path &actualPath,
+    const std::filesystem::path &expectedPath);
 
 } // namespace nuri::tools::snapshot

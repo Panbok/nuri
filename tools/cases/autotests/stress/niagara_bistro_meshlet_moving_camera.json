@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "perf.niagara_bistro.meshlet_moving_camera",
-  "suite": "perf",
-  "description": "Niagara Bistro meshlet renderer moving-camera perf coverage",
+  "id": "stress.niagara_bistro.meshlet_moving_camera",
+  "suite": "stress",
+  "description": "Niagara Bistro meshlet renderer moving-camera stability and metric coverage",
   "scene": {
     "kind": "prefab",
     "pathBase": "modelsRoot",

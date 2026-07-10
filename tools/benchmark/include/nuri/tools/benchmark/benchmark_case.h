@@ -37,6 +37,8 @@ struct BenchmarkRenderGraphConfig {
 struct BenchmarkCameraConfig {
   glm::vec3 position{0.0f, 1.0f, 4.0f};
   glm::vec3 direction{0.0f, 0.0f, -1.0f};
+  glm::vec3 target{0.0f, 1.0f, 3.0f};
+  bool hasTarget = false;
   float verticalFovDegrees = 60.0f;
   float nearPlane = 0.05f;
   float farPlane = 500.0f;
@@ -47,6 +49,10 @@ struct BenchmarkSceneConfig {
   std::string pathBase{};
   std::filesystem::path path{};
   bool flipUVs = false;
+  bool generateMeshlets = false;
+  uint32_t meshletMaxVertices = 64u;
+  uint32_t meshletMaxPrimitives = 124u;
+  float meshletConeWeight = 0.0f;
   std::string baseModelKind{};
   double baseModelTargetRadius = 1.0;
   double baseModelMinScale = 0.0001;
@@ -54,6 +60,25 @@ struct BenchmarkSceneConfig {
   std::string generator = "nuri.procedural.v1";
   uint32_t seed = 1u;
   std::string contentHash = "procedural-empty-v1";
+};
+
+struct BenchmarkCameraKeyframe {
+  uint32_t frame = 0u;
+  glm::vec3 position{0.0f};
+  glm::vec3 target{0.0f};
+  bool hasTarget = false;
+};
+
+struct BenchmarkCameraPath {
+  std::string id{};
+  uint32_t startFrame = 0u;
+  uint32_t endFrame = 0u;
+  std::string interpolation = "linear";
+  std::vector<BenchmarkCameraKeyframe> keyframes{};
+};
+
+struct BenchmarkTimeline {
+  std::vector<BenchmarkCameraPath> cameraPaths{};
 };
 
 struct BenchmarkRequirements {
@@ -81,7 +106,10 @@ struct BenchmarkCase {
   std::string presentMode = "immediate";
   BenchmarkRenderGraphConfig renderGraph{};
   BenchmarkCameraConfig camera{};
+  BenchmarkTimeline timeline{};
   RenderSettings settings{};
+  std::string settingsSignature{};
+  std::string configSignature{};
   BenchmarkRequirements requirements{};
   BenchmarkThresholds thresholds{};
   std::vector<std::string> requiredMetrics{};

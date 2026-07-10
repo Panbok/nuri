@@ -1,11 +1,25 @@
 #include "nuri/tools/autotest/autotest_report.h"
 
+#include "nuri/tools/core/atomic_file.h"
+#include "nuri/tools/core/fingerprint.h"
+#include "nuri/tools/core/html_report.h"
+#include "nuri/tools/core/json_contract.h"
+#include "nuri/tools/core/result_envelope_v2.h"
+#include "nuri/tools/core/sha256.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <memory>
+#include <optional>
+#include <span>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
 #include <yyjson.h>
 
@@ -15,6 +29,65 @@ namespace {
 using JsonMutDocPtr =
     std::unique_ptr<yyjson_mut_doc, decltype(&yyjson_mut_doc_free)>;
 using JsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+using JsonField = nuri::tools::core::JsonFieldContract;
+using JsonType = nuri::tools::core::JsonFieldType;
+
+template <size_t Size>
+[[nodiscard]] Result<void, std::string>
+validateObject(yyjson_val *object, const std::array<JsonField, Size> &fields,
+               std::string_view path) {
+  return nuri::tools::core::validateJsonObject(object, fields, path);
+}
+
+[[nodiscard]] Result<void, std::string>
+validateStringArrayValue(yyjson_val *array, std::string_view path) {
+  if (!yyjson_is_arr(array)) {
+    return Result<void, std::string>::makeError(std::string(path) +
+                                                " must be an array");
+  }
+  yyjson_arr_iter iterator{};
+  yyjson_arr_iter_init(array, &iterator);
+  yyjson_val *entry = nullptr;
+  size_t index = 0u;
+  while ((entry = yyjson_arr_iter_next(&iterator)) != nullptr) {
+    if (!yyjson_is_str(entry)) {
+      return Result<void, std::string>::makeError(std::string(path) + "[" +
+                                                  std::to_string(index) +
+                                                  "] must be a string");
+    }
+    ++index;
+  }
+  return Result<void, std::string>::makeResult();
+}
+
+[[nodiscard]] Result<void, std::string>
+validateNumberMap(yyjson_val *object, std::string_view path) {
+  if (!yyjson_is_obj(object)) {
+    return Result<void, std::string>::makeError(std::string(path) +
+                                                " must be an object");
+  }
+  yyjson_obj_iter iterator{};
+  yyjson_obj_iter_init(object, &iterator);
+  yyjson_val *key = nullptr;
+  while ((key = yyjson_obj_iter_next(&iterator)) != nullptr) {
+    yyjson_val *value = yyjson_obj_iter_get_val(key);
+    if (!yyjson_is_num(value) && !yyjson_is_null(value)) {
+      return Result<void, std::string>::makeError(std::string(path) + "." +
+                                                  yyjson_get_str(key) +
+                                                  " must be a number or null");
+    }
+  }
+  return Result<void, std::string>::makeResult();
+}
+
+void addFiniteReal(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
+                   double value) {
+  if (std::isfinite(value)) {
+    yyjson_mut_obj_add_real(doc, object, key, value);
+  } else {
+    yyjson_mut_obj_add_null(doc, object, key);
+  }
+}
 
 void addString(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
                const std::string &value) {
@@ -23,7 +96,10 @@ void addString(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
 
 void addPath(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
              const std::filesystem::path &value) {
-  addString(doc, object, key, value.generic_string());
+  const std::u8string utf8 = value.generic_u8string();
+  addString(
+      doc, object, key,
+      std::string(reinterpret_cast<const char *>(utf8.data()), utf8.size()));
 }
 
 yyjson_mut_val *makeStringArray(yyjson_mut_doc *doc,
@@ -50,6 +126,9 @@ yyjson_mut_val *makeEnvironmentObject(yyjson_mut_doc *doc,
   addString(doc, object, "gpuBackend", env.gpuBackend);
   addString(doc, object, "gpuBackendSource", env.gpuBackendSource);
   addString(doc, object, "gpuDeviceName", env.gpuDeviceName);
+  yyjson_mut_obj_add_uint(doc, object, "gpuVendorId", env.gpuVendorId);
+  yyjson_mut_obj_add_uint(doc, object, "gpuDeviceId", env.gpuDeviceId);
+  addString(doc, object, "gpuDriverVersion", env.gpuDriverVersion);
   yyjson_mut_obj_add_uint(doc, object, "swapchainImageCount",
                           env.swapchainImageCount);
   addString(doc, object, "requestedPresentMode", env.requestedPresentMode);
@@ -93,8 +172,7 @@ yyjson_mut_val *makeCaseObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_val(doc, object, "resolution", resolution);
   yyjson_mut_obj_add_uint(doc, object, "warmupFrames", testCase.warmupFrames);
   yyjson_mut_obj_add_uint(doc, object, "endFrame", testCase.endFrame);
-  yyjson_mut_obj_add_real(doc, object, "fixedDeltaSeconds",
-                          testCase.fixedDeltaSeconds);
+  addFiniteReal(doc, object, "fixedDeltaSeconds", testCase.fixedDeltaSeconds);
   addString(doc, object, "presentMode", testCase.presentMode);
   addString(doc, object, "windowMode", testCase.windowMode);
   yyjson_mut_obj_add_bool(doc, object, "authoritative", testCase.authoritative);
@@ -104,18 +182,38 @@ yyjson_mut_val *makeCaseObject(yyjson_mut_doc *doc,
 yyjson_mut_val *makeRunObject(yyjson_mut_doc *doc,
                               const AutotestRunMetadata &run) {
   yyjson_mut_val *object = yyjson_mut_obj(doc);
-  yyjson_mut_obj_add_real(doc, object, "fixedDeltaSeconds",
-                          run.fixedDeltaSeconds);
+  addFiniteReal(doc, object, "fixedDeltaSeconds", run.fixedDeltaSeconds);
   yyjson_mut_obj_add_uint(doc, object, "warmupFrames", run.warmupFrames);
   yyjson_mut_obj_add_uint(doc, object, "endFrame", run.endFrame);
   yyjson_mut_obj_add_uint(doc, object, "renderedFrames", run.renderedFrames);
   yyjson_mut_obj_add_uint(doc, object, "readoutDrainFrames",
                           run.readoutDrainFrames);
+  yyjson_mut_obj_add_uint(doc, object, "readoutDrainFrameLimit",
+                          run.readoutDrainFrameLimit);
   yyjson_mut_obj_add_uint(doc, object, "readoutDrainTimeoutMs",
                           run.readoutDrainTimeoutMs);
+  yyjson_mut_obj_add_uint(doc, object, "readoutDrainElapsedMs",
+                          run.readoutDrainElapsedMs);
+  addString(doc, object, "requestedWindowMode", run.requestedWindowMode);
+  addString(doc, object, "resolvedWindowMode", run.resolvedWindowMode);
+  addString(doc, object, "windowModeSource", run.windowModeSource);
   addString(doc, object, "captureSynchronization", run.captureSynchronization);
   yyjson_mut_obj_add_bool(doc, object, "validForComparison",
                           run.validForComparison);
+  return object;
+}
+
+yyjson_mut_val *makeSelectionObject(yyjson_mut_doc *doc,
+                                    const AutotestSelectionSummary &selection) {
+  yyjson_mut_val *object = yyjson_mut_obj(doc);
+  addString(doc, object, "requested", selection.requested);
+  yyjson_mut_obj_add_uint(doc, object, "selected", selection.selected);
+  yyjson_mut_obj_add_uint(doc, object, "attempted", selection.attempted);
+  yyjson_mut_obj_add_uint(doc, object, "completed", selection.completed);
+  yyjson_mut_obj_add_uint(doc, object, "passed", selection.passed);
+  yyjson_mut_obj_add_uint(doc, object, "failed", selection.failed);
+  yyjson_mut_obj_add_uint(doc, object, "unavailable", selection.unavailable);
+  yyjson_mut_obj_add_uint(doc, object, "notRun", selection.notRun);
   return object;
 }
 
@@ -124,7 +222,7 @@ makeMeasurementsObject(yyjson_mut_doc *doc,
                        const std::map<std::string, double> &measurements) {
   yyjson_mut_val *object = yyjson_mut_obj(doc);
   for (const auto &[key, value] : measurements) {
-    yyjson_mut_obj_add_real(doc, object, key.c_str(), value);
+    addFiniteReal(doc, object, key.c_str(), value);
   }
   return object;
 }
@@ -142,11 +240,15 @@ yyjson_mut_val *makeSnapshotCaptureObject(
                           capture.capturePointVersion);
   yyjson_mut_obj_add_uint(doc, object, "captureFrameIndex",
                           capture.captureFrameIndex);
+  addString(doc, object, "kind", capture.kind);
   addString(doc, object, "lifetime", capture.lifetime);
   addString(doc, object, "format", capture.format);
   addString(doc, object, "colorSpace", capture.colorSpace);
+  addString(doc, object, "origin", capture.origin);
   yyjson_mut_obj_add_uint(doc, object, "width", capture.width);
   yyjson_mut_obj_add_uint(doc, object, "height", capture.height);
+  yyjson_mut_obj_add_uint(doc, object, "mip", capture.mip);
+  yyjson_mut_obj_add_uint(doc, object, "layer", capture.layer);
   addString(doc, object, "actualHash", capture.actualHash);
   addString(doc, object, "expectedHash", capture.expectedHash);
   addPath(doc, object, "actual", capture.actual);
@@ -155,18 +257,66 @@ yyjson_mut_val *makeSnapshotCaptureObject(
   addPath(doc, object, "expected", capture.expected);
   addPath(doc, object, "diff", capture.diff);
   yyjson_mut_val *metrics = yyjson_mut_obj(doc);
-  yyjson_mut_obj_add_real(doc, metrics, "meanAbsError",
-                          capture.metrics.meanAbsError);
-  yyjson_mut_obj_add_real(doc, metrics, "rmse", capture.metrics.rmse);
-  yyjson_mut_obj_add_real(doc, metrics, "maxAbsError",
-                          capture.metrics.maxAbsError);
-  yyjson_mut_obj_add_real(doc, metrics, "p99AbsError",
-                          capture.metrics.p99AbsError);
+  addFiniteReal(doc, metrics, "meanAbsError", capture.metrics.meanAbsError);
+  addFiniteReal(doc, metrics, "rmse", capture.metrics.rmse);
+  addFiniteReal(doc, metrics, "maxAbsError", capture.metrics.maxAbsError);
+  addFiniteReal(doc, metrics, "p99AbsError", capture.metrics.p99AbsError);
   yyjson_mut_obj_add_uint(doc, metrics, "failingValues",
                           capture.metrics.failingValues);
   yyjson_mut_obj_add_uint(doc, metrics, "comparedValues",
                           capture.metrics.comparedValues);
   yyjson_mut_obj_add_val(doc, object, "metrics", metrics);
+  yyjson_mut_val *semantic = yyjson_mut_obj(doc);
+  addString(doc, semantic, "unit", capture.semanticMetrics.unit);
+  addFiniteReal(doc, semantic, "meanError", capture.semanticMetrics.meanError);
+  addFiniteReal(doc, semantic, "maxError", capture.semanticMetrics.maxError);
+  addFiniteReal(doc, semantic, "rmse", capture.semanticMetrics.rmse);
+  addFiniteReal(doc, semantic, "p99Error", capture.semanticMetrics.p99Error);
+  yyjson_mut_obj_add_uint(doc, semantic, "failingPixels",
+                          capture.semanticMetrics.failingPixels);
+  yyjson_mut_obj_add_uint(doc, semantic, "validPixels",
+                          capture.semanticMetrics.validPixels);
+  yyjson_mut_obj_add_uint(doc, semantic, "ignoredPixels",
+                          capture.semanticMetrics.ignoredPixels);
+  yyjson_mut_obj_add_uint(doc, semantic, "changedPixels",
+                          capture.semanticMetrics.changedPixels);
+  yyjson_mut_obj_add_bool(doc, semantic, "changedBoundsValid",
+                          capture.semanticMetrics.changedBoundsValid);
+  yyjson_mut_obj_add_uint(doc, semantic, "minChangedX",
+                          capture.semanticMetrics.minChangedX);
+  yyjson_mut_obj_add_uint(doc, semantic, "minChangedY",
+                          capture.semanticMetrics.minChangedY);
+  yyjson_mut_obj_add_uint(doc, semantic, "maxChangedX",
+                          capture.semanticMetrics.maxChangedX);
+  yyjson_mut_obj_add_uint(doc, semantic, "maxChangedY",
+                          capture.semanticMetrics.maxChangedY);
+  yyjson_mut_obj_add_uint(doc, semantic, "maxErrorX",
+                          capture.semanticMetrics.maxErrorX);
+  yyjson_mut_obj_add_uint(doc, semantic, "maxErrorY",
+                          capture.semanticMetrics.maxErrorY);
+  addString(doc, semantic, "secondaryUnit",
+            capture.semanticMetrics.secondaryUnit);
+  addFiniteReal(doc, semantic, "meanSecondaryError",
+                capture.semanticMetrics.meanSecondaryError);
+  addFiniteReal(doc, semantic, "maxSecondaryError",
+                capture.semanticMetrics.maxSecondaryError);
+  addFiniteReal(doc, semantic, "secondaryRmse",
+                capture.semanticMetrics.secondaryRmse);
+  addFiniteReal(doc, semantic, "p99SecondaryError",
+                capture.semanticMetrics.p99SecondaryError);
+  yyjson_mut_obj_add_uint(doc, semantic, "secondaryFailingPixels",
+                          capture.semanticMetrics.secondaryFailingPixels);
+  yyjson_mut_obj_add_uint(doc, semantic, "truePositivePixels",
+                          capture.semanticMetrics.truePositivePixels);
+  yyjson_mut_obj_add_uint(doc, semantic, "trueNegativePixels",
+                          capture.semanticMetrics.trueNegativePixels);
+  yyjson_mut_obj_add_uint(doc, semantic, "falsePositivePixels",
+                          capture.semanticMetrics.falsePositivePixels);
+  yyjson_mut_obj_add_uint(doc, semantic, "falseNegativePixels",
+                          capture.semanticMetrics.falseNegativePixels);
+  addFiniteReal(doc, semantic, "intersectionOverUnion",
+                capture.semanticMetrics.intersectionOverUnion);
+  yyjson_mut_obj_add_val(doc, object, "semanticMetrics", semantic);
   yyjson_mut_obj_add_val(doc, object, "failedThresholds",
                          makeStringArray(doc, capture.failedThresholds));
   addString(doc, object, "producerPassLabel", capture.producerPassLabel);
@@ -204,8 +354,14 @@ yyjson_mut_val *makeAssertionObject(yyjson_mut_doc *doc,
             autotestAssertionStatusName(assertion.status));
   addString(doc, object, "statusReason", assertion.statusReason);
   yyjson_mut_obj_add_bool(doc, object, "hasActual", assertion.hasActual);
-  yyjson_mut_obj_add_real(doc, object, "actual", assertion.actual);
+  if (assertion.hasActual) {
+    addFiniteReal(doc, object, "actual", assertion.actual);
+  } else {
+    yyjson_mut_obj_add_null(doc, object, "actual");
+  }
   yyjson_mut_obj_add_uint(doc, object, "sampleCount", assertion.sampleCount);
+  yyjson_mut_obj_add_uint(doc, object, "expectedSampleCount",
+                          assertion.expectedSampleCount);
   return object;
 }
 
@@ -232,28 +388,35 @@ yyjson_mut_val *makeReadoutObject(yyjson_mut_doc *doc,
 }
 
 [[nodiscard]] std::string htmlEscape(std::string_view text) {
-  std::string out;
-  out.reserve(text.size());
-  for (char ch : text) {
-    switch (ch) {
-    case '&':
-      out += "&amp;";
-      break;
-    case '<':
-      out += "&lt;";
-      break;
-    case '>':
-      out += "&gt;";
-      break;
-    case '"':
-      out += "&quot;";
-      break;
-    default:
-      out += ch;
-      break;
-    }
+  return nuri::tools::core::htmlEscape(text);
+}
+
+[[nodiscard]] std::string pathToUtf8(const std::filesystem::path &path) {
+  const std::u8string encoded = path.generic_u8string();
+  return {reinterpret_cast<const char *>(encoded.data()), encoded.size()};
+}
+
+[[nodiscard]] std::string
+autotestArtifactHref(const AutotestReport &report,
+                     const std::filesystem::path &path) {
+  if (path.empty()) {
+    return {};
   }
-  return out;
+  const std::filesystem::path artifact =
+      path.is_absolute() ? path : report.artifacts.caseDir / path;
+  if (report.artifacts.caseHtml.empty()) {
+    return pathToUtf8(artifact);
+  }
+  std::error_code error;
+  const std::filesystem::path relative = std::filesystem::relative(
+      artifact, report.artifacts.caseHtml.parent_path(), error);
+  return pathToUtf8(error ? artifact : relative);
+}
+
+[[nodiscard]] std::string readableStatus(std::string_view status) {
+  std::string label(status);
+  std::replace(label.begin(), label.end(), '_', ' ');
+  return label;
 }
 
 [[nodiscard]] std::string readString(yyjson_val *object, const char *key,
@@ -291,6 +454,66 @@ yyjson_mut_val *makeReadoutObject(yyjson_mut_doc *doc,
   return yyjson_is_bool(value) ? yyjson_get_bool(value) : defaultValue;
 }
 
+[[nodiscard]] int readInt(yyjson_val *object, const char *key,
+                          int defaultValue = 0) {
+  yyjson_val *value = yyjson_obj_get(object, key);
+  if (yyjson_is_sint(value)) {
+    return static_cast<int>(yyjson_get_sint(value));
+  }
+  if (yyjson_is_uint(value)) {
+    return static_cast<int>(yyjson_get_uint(value));
+  }
+  return defaultValue;
+}
+
+void readStringArray(yyjson_val *object, const char *key,
+                     std::vector<std::string> &out) {
+  yyjson_val *array = yyjson_obj_get(object, key);
+  if (!yyjson_is_arr(array)) {
+    return;
+  }
+  yyjson_arr_iter iter;
+  yyjson_arr_iter_init(array, &iter);
+  yyjson_val *value = nullptr;
+  while ((value = yyjson_arr_iter_next(&iter)) != nullptr) {
+    if (yyjson_is_str(value)) {
+      out.emplace_back(yyjson_get_str(value), yyjson_get_len(value));
+    }
+  }
+}
+
+void readMeasurements(yyjson_val *object, const char *key,
+                      std::map<std::string, double> &out) {
+  yyjson_val *measurements = yyjson_obj_get(object, key);
+  if (!yyjson_is_obj(measurements)) {
+    return;
+  }
+  yyjson_obj_iter iter;
+  yyjson_obj_iter_init(measurements, &iter);
+  yyjson_val *name = nullptr;
+  while ((name = yyjson_obj_iter_next(&iter)) != nullptr) {
+    yyjson_val *value = yyjson_obj_iter_get_val(name);
+    if (yyjson_is_num(value)) {
+      out.emplace(std::string(yyjson_get_str(name), yyjson_get_len(name)),
+                  yyjson_get_num(value));
+    }
+  }
+}
+
+void readSelection(yyjson_val *object, AutotestSelectionSummary &selection) {
+  if (!yyjson_is_obj(object)) {
+    return;
+  }
+  selection.requested = readString(object, "requested");
+  selection.selected = readU32(object, "selected");
+  selection.attempted = readU32(object, "attempted");
+  selection.completed = readU32(object, "completed");
+  selection.passed = readU32(object, "passed");
+  selection.failed = readU32(object, "failed");
+  selection.unavailable = readU32(object, "unavailable");
+  selection.notRun = readU32(object, "notRun");
+}
+
 [[nodiscard]] AutotestAssertionStatus parseStatus(std::string_view value) {
   if (value == "warn") {
     return AutotestAssertionStatus::Warn;
@@ -319,13 +542,795 @@ readAssertionResult(yyjson_val *assertionValue) {
   assertion.actual = readDouble(assertionValue, "actual");
   assertion.sampleCount =
       readU32(assertionValue, "sampleCount", assertion.hasActual ? 1u : 0u);
+  assertion.expectedSampleCount =
+      readU32(assertionValue, "expectedSampleCount", assertion.sampleCount);
   return assertion;
+}
+
+[[nodiscard]] nuri::tools::snapshot::SnapshotCaptureReport
+readSnapshotCapture(yyjson_val *object) {
+  nuri::tools::snapshot::SnapshotCaptureReport capture{};
+  capture.target = readString(object, "target");
+  capture.artifactStem = readString(object, "artifactStem");
+  capture.profile = readString(object, "profile");
+  capture.required = readBool(object, "required", true);
+  capture.available = readBool(object, "available");
+  capture.capturePointVersion = readU32(object, "capturePointVersion");
+  capture.captureFrameIndex = readU64(object, "captureFrameIndex");
+  capture.kind = readString(object, "kind");
+  capture.lifetime = readString(object, "lifetime");
+  capture.format = readString(object, "format");
+  capture.colorSpace = readString(object, "colorSpace");
+  capture.origin = readString(object, "origin", capture.origin);
+  capture.width = readU32(object, "width");
+  capture.height = readU32(object, "height");
+  capture.mip = readU32(object, "mip");
+  capture.layer = readU32(object, "layer");
+  capture.actualHash = readString(object, "actualHash");
+  capture.expectedHash = readString(object, "expectedHash");
+  capture.actual = readString(object, "actual");
+  capture.actualMetadata = readString(object, "actualMetadata");
+  capture.preview = readString(object, "preview");
+  capture.expected = readString(object, "expected");
+  capture.diff = readString(object, "diff");
+  yyjson_val *metrics = yyjson_obj_get(object, "metrics");
+  if (yyjson_is_obj(metrics)) {
+    capture.metrics.meanAbsError = readDouble(metrics, "meanAbsError");
+    capture.metrics.rmse = readDouble(metrics, "rmse");
+    capture.metrics.maxAbsError = readDouble(metrics, "maxAbsError");
+    capture.metrics.p99AbsError = readDouble(metrics, "p99AbsError");
+    capture.metrics.failingValues = readU64(metrics, "failingValues");
+    capture.metrics.comparedValues = readU64(metrics, "comparedValues");
+  }
+  yyjson_val *semantic = yyjson_obj_get(object, "semanticMetrics");
+  if (yyjson_is_obj(semantic)) {
+    capture.semanticMetrics.unit = readString(semantic, "unit");
+    capture.semanticMetrics.meanError = readDouble(semantic, "meanError");
+    capture.semanticMetrics.maxError = readDouble(semantic, "maxError");
+    capture.semanticMetrics.rmse = readDouble(semantic, "rmse");
+    capture.semanticMetrics.p99Error = readDouble(semantic, "p99Error");
+    capture.semanticMetrics.failingPixels = readU64(semantic, "failingPixels");
+    capture.semanticMetrics.validPixels = readU64(semantic, "validPixels");
+    capture.semanticMetrics.ignoredPixels = readU64(semantic, "ignoredPixels");
+    capture.semanticMetrics.changedPixels = readU64(semantic, "changedPixels");
+    capture.semanticMetrics.changedBoundsValid =
+        readBool(semantic, "changedBoundsValid");
+    capture.semanticMetrics.minChangedX = readU32(semantic, "minChangedX");
+    capture.semanticMetrics.minChangedY = readU32(semantic, "minChangedY");
+    capture.semanticMetrics.maxChangedX = readU32(semantic, "maxChangedX");
+    capture.semanticMetrics.maxChangedY = readU32(semantic, "maxChangedY");
+    capture.semanticMetrics.maxErrorX = readU32(semantic, "maxErrorX");
+    capture.semanticMetrics.maxErrorY = readU32(semantic, "maxErrorY");
+    capture.semanticMetrics.secondaryUnit =
+        readString(semantic, "secondaryUnit");
+    capture.semanticMetrics.meanSecondaryError =
+        readDouble(semantic, "meanSecondaryError");
+    capture.semanticMetrics.maxSecondaryError =
+        readDouble(semantic, "maxSecondaryError");
+    capture.semanticMetrics.secondaryRmse =
+        readDouble(semantic, "secondaryRmse");
+    capture.semanticMetrics.p99SecondaryError =
+        readDouble(semantic, "p99SecondaryError");
+    capture.semanticMetrics.secondaryFailingPixels =
+        readU64(semantic, "secondaryFailingPixels");
+    capture.semanticMetrics.truePositivePixels =
+        readU64(semantic, "truePositivePixels");
+    capture.semanticMetrics.trueNegativePixels =
+        readU64(semantic, "trueNegativePixels");
+    capture.semanticMetrics.falsePositivePixels =
+        readU64(semantic, "falsePositivePixels");
+    capture.semanticMetrics.falseNegativePixels =
+        readU64(semantic, "falseNegativePixels");
+    capture.semanticMetrics.intersectionOverUnion =
+        readDouble(semantic, "intersectionOverUnion");
+  }
+  readStringArray(object, "failedThresholds", capture.failedThresholds);
+  capture.producerPassLabel = readString(object, "producerPassLabel");
+  capture.readbackError = readString(object, "readbackError");
+  capture.status = readString(object, "status", capture.status);
+  capture.statusReason =
+      readString(object, "statusReason", capture.statusReason);
+  return capture;
+}
+
+[[nodiscard]] Result<void, std::string>
+validateAssertionArray(yyjson_val *array, std::string_view path) {
+  if (!yyjson_is_arr(array)) {
+    return Result<void, std::string>::makeError(std::string(path) +
+                                                " must be an array");
+  }
+  static constexpr std::array fields{
+      JsonField{"id", JsonType::String},
+      JsonField{"metric", JsonType::String},
+      JsonField{"statistic", JsonType::String},
+      JsonField{"status", JsonType::String},
+      JsonField{"statusReason", JsonType::String},
+      JsonField{"hasActual", JsonType::Boolean},
+      JsonField{"actual", JsonType::NullOrNumber},
+      JsonField{"sampleCount", JsonType::Unsigned},
+      JsonField{"expectedSampleCount", JsonType::Unsigned},
+  };
+  yyjson_arr_iter iterator{};
+  yyjson_arr_iter_init(array, &iterator);
+  yyjson_val *entry = nullptr;
+  size_t index = 0u;
+  while ((entry = yyjson_arr_iter_next(&iterator)) != nullptr) {
+    auto valid = validateObject(
+        entry, fields, std::string(path) + "[" + std::to_string(index++) + "]");
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+  return Result<void, std::string>::makeResult();
+}
+
+[[nodiscard]] Result<void, std::string>
+validateSnapshotCaptureV1(yyjson_val *snapshot, std::string_view path) {
+  static constexpr std::array fields{
+      JsonField{"target", JsonType::String},
+      JsonField{"artifactStem", JsonType::String},
+      JsonField{"profile", JsonType::String},
+      JsonField{"required", JsonType::Boolean},
+      JsonField{"available", JsonType::Boolean},
+      JsonField{"capturePointVersion", JsonType::Unsigned},
+      JsonField{"captureFrameIndex", JsonType::Unsigned},
+      JsonField{"kind", JsonType::String, false},
+      JsonField{"lifetime", JsonType::String},
+      JsonField{"format", JsonType::String},
+      JsonField{"colorSpace", JsonType::String},
+      JsonField{"origin", JsonType::String},
+      JsonField{"width", JsonType::Unsigned},
+      JsonField{"height", JsonType::Unsigned},
+      JsonField{"mip", JsonType::Unsigned},
+      JsonField{"layer", JsonType::Unsigned},
+      JsonField{"actualHash", JsonType::String},
+      JsonField{"expectedHash", JsonType::String},
+      JsonField{"actual", JsonType::String},
+      JsonField{"actualMetadata", JsonType::String},
+      JsonField{"preview", JsonType::String},
+      JsonField{"expected", JsonType::String},
+      JsonField{"diff", JsonType::String},
+      JsonField{"metrics", JsonType::Object},
+      JsonField{"semanticMetrics", JsonType::Object, false},
+      JsonField{"failedThresholds", JsonType::Array},
+      JsonField{"producerPassLabel", JsonType::String},
+      JsonField{"readbackError", JsonType::String},
+      JsonField{"status", JsonType::String},
+      JsonField{"statusReason", JsonType::String},
+  };
+  auto valid = validateObject(snapshot, fields, path);
+  if (valid.hasError()) {
+    return valid;
+  }
+  for (std::string_view field :
+       {"actual", "actualMetadata", "preview", "expected", "diff"}) {
+    valid = nuri::tools::core::validateJsonArtifactPath(snapshot, field, path);
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+  static constexpr std::array metricFields{
+      JsonField{"meanAbsError", JsonType::NullOrNumber},
+      JsonField{"rmse", JsonType::NullOrNumber},
+      JsonField{"maxAbsError", JsonType::NullOrNumber},
+      JsonField{"p99AbsError", JsonType::NullOrNumber},
+      JsonField{"failingValues", JsonType::Unsigned},
+      JsonField{"comparedValues", JsonType::Unsigned},
+  };
+  valid = validateObject(yyjson_obj_get(snapshot, "metrics"), metricFields,
+                         std::string(path) + ".metrics");
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array semanticFields{
+      JsonField{"unit", JsonType::String},
+      JsonField{"meanError", JsonType::NullOrNumber},
+      JsonField{"maxError", JsonType::NullOrNumber},
+      JsonField{"rmse", JsonType::NullOrNumber},
+      JsonField{"p99Error", JsonType::NullOrNumber},
+      JsonField{"failingPixels", JsonType::Unsigned},
+      JsonField{"validPixels", JsonType::Unsigned},
+      JsonField{"ignoredPixels", JsonType::Unsigned},
+      JsonField{"changedPixels", JsonType::Unsigned},
+      JsonField{"changedBoundsValid", JsonType::Boolean},
+      JsonField{"minChangedX", JsonType::Unsigned},
+      JsonField{"minChangedY", JsonType::Unsigned},
+      JsonField{"maxChangedX", JsonType::Unsigned},
+      JsonField{"maxChangedY", JsonType::Unsigned},
+      JsonField{"maxErrorX", JsonType::Unsigned},
+      JsonField{"maxErrorY", JsonType::Unsigned},
+      JsonField{"secondaryUnit", JsonType::String},
+      JsonField{"meanSecondaryError", JsonType::NullOrNumber},
+      JsonField{"maxSecondaryError", JsonType::NullOrNumber},
+      JsonField{"secondaryRmse", JsonType::NullOrNumber},
+      JsonField{"p99SecondaryError", JsonType::NullOrNumber},
+      JsonField{"secondaryFailingPixels", JsonType::Unsigned},
+      JsonField{"truePositivePixels", JsonType::Unsigned},
+      JsonField{"trueNegativePixels", JsonType::Unsigned},
+      JsonField{"falsePositivePixels", JsonType::Unsigned},
+      JsonField{"falseNegativePixels", JsonType::Unsigned},
+      JsonField{"intersectionOverUnion", JsonType::NullOrNumber},
+  };
+  if (yyjson_val *semantic = yyjson_obj_get(snapshot, "semanticMetrics")) {
+    valid = validateObject(semantic, semanticFields,
+                           std::string(path) + ".semanticMetrics");
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+  return validateStringArrayValue(yyjson_obj_get(snapshot, "failedThresholds"),
+                                  std::string(path) + ".failedThresholds");
+}
+
+[[nodiscard]] Result<void, std::string>
+validateAutotestReportV1(yyjson_val *root) {
+  auto valid = nuri::tools::core::rejectDuplicateJsonFieldsRecursively(root);
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array rootFields{
+      JsonField{"schemaVersion", JsonType::Unsigned},
+      JsonField{"kind", JsonType::String},
+      JsonField{"baselineProfile", JsonType::String, false},
+      JsonField{"generatedAtUtc", JsonType::String},
+      JsonField{"command", JsonType::String},
+      JsonField{"status", JsonType::String},
+      JsonField{"exitCode", JsonType::Number},
+      JsonField{"selection", JsonType::Object},
+      JsonField{"environment", JsonType::Object},
+      JsonField{"case", JsonType::Object},
+      JsonField{"run", JsonType::Object},
+      JsonField{"artifacts", JsonType::Object},
+      JsonField{"checkpoints", JsonType::Array},
+      JsonField{"metricWindows", JsonType::Array},
+      JsonField{"frames", JsonType::Array},
+      JsonField{"unavailableMetrics", JsonType::Array},
+      JsonField{"warnings", JsonType::Array},
+      JsonField{"errors", JsonType::Array},
+      JsonField{"reproduceCommand", JsonType::String},
+  };
+  valid = validateObject(root, rootFields, "$");
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array selectionFields{
+      JsonField{"requested", JsonType::String},
+      JsonField{"selected", JsonType::Unsigned},
+      JsonField{"attempted", JsonType::Unsigned},
+      JsonField{"completed", JsonType::Unsigned},
+      JsonField{"passed", JsonType::Unsigned},
+      JsonField{"failed", JsonType::Unsigned},
+      JsonField{"unavailable", JsonType::Unsigned},
+      JsonField{"notRun", JsonType::Unsigned},
+  };
+  valid = validateObject(yyjson_obj_get(root, "selection"), selectionFields,
+                         "$.selection");
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array environmentFields{
+      JsonField{"repoRoot", JsonType::String},
+      JsonField{"commitHash", JsonType::String},
+      JsonField{"branchName", JsonType::String},
+      JsonField{"dirty", JsonType::Boolean},
+      JsonField{"osName", JsonType::String},
+      JsonField{"osVersion", JsonType::String},
+      JsonField{"cpuName", JsonType::String},
+      JsonField{"cpuLogicalThreadCount", JsonType::Unsigned},
+      JsonField{"gpuBackend", JsonType::String},
+      JsonField{"gpuBackendSource", JsonType::String},
+      JsonField{"gpuDeviceName", JsonType::String},
+      JsonField{"gpuVendorId", JsonType::Unsigned, false},
+      JsonField{"gpuDeviceId", JsonType::Unsigned, false},
+      JsonField{"gpuDriverVersion", JsonType::String, false},
+      JsonField{"swapchainImageCount", JsonType::Unsigned},
+      JsonField{"requestedPresentMode", JsonType::String},
+      JsonField{"resolvedPresentMode", JsonType::String},
+      JsonField{"presentModeSource", JsonType::String},
+      JsonField{"requestedWindowMode", JsonType::String},
+      JsonField{"resolvedWindowMode", JsonType::String},
+      JsonField{"windowVisible", JsonType::Boolean},
+      JsonField{"renderGraphWorkerCount", JsonType::Unsigned},
+      JsonField{"renderGraphParallelCompile", JsonType::Boolean},
+      JsonField{"renderGraphParallelRecording", JsonType::Boolean},
+      JsonField{"buildType", JsonType::String},
+      JsonField{"cmakeToolProfile", JsonType::String},
+      JsonField{"vcpkgManifestFeatures", JsonType::String},
+      JsonField{"NURI_BUILD_SHARED", JsonType::Boolean},
+      JsonField{"NURI_WITH_LOGGING", JsonType::Boolean},
+      JsonField{"NURI_WITH_ASSERTS", JsonType::Boolean},
+      JsonField{"NURI_WITH_TRACY", JsonType::Boolean},
+      JsonField{"NURI_WITH_TRACY_GPU", JsonType::Boolean},
+      JsonField{"NURI_WITH_TRACY_GPU_DRAW_ZONES", JsonType::Boolean},
+      JsonField{"devChecks", JsonType::Boolean},
+  };
+  valid = validateObject(yyjson_obj_get(root, "environment"), environmentFields,
+                         "$.environment");
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array caseFields{
+      JsonField{"schemaVersion", JsonType::Unsigned},
+      JsonField{"id", JsonType::String},
+      JsonField{"suite", JsonType::String},
+      JsonField{"description", JsonType::String},
+      JsonField{"backend", JsonType::String},
+      JsonField{"resolution", JsonType::Array},
+      JsonField{"warmupFrames", JsonType::Unsigned},
+      JsonField{"endFrame", JsonType::Unsigned},
+      JsonField{"fixedDeltaSeconds", JsonType::NullOrNumber},
+      JsonField{"presentMode", JsonType::String},
+      JsonField{"windowMode", JsonType::String},
+      JsonField{"authoritative", JsonType::Boolean},
+  };
+  yyjson_val *caseObject = yyjson_obj_get(root, "case");
+  valid = validateObject(caseObject, caseFields, "$.case");
+  if (valid.hasError()) {
+    return valid;
+  }
+  yyjson_val *resolution = yyjson_obj_get(caseObject, "resolution");
+  if (yyjson_arr_size(resolution) != 2u ||
+      !yyjson_is_uint(yyjson_arr_get(resolution, 0u)) ||
+      !yyjson_is_uint(yyjson_arr_get(resolution, 1u))) {
+    return Result<void, std::string>::makeError(
+        "$.case.resolution must contain two unsigned integers");
+  }
+  static constexpr std::array runFields{
+      JsonField{"fixedDeltaSeconds", JsonType::NullOrNumber},
+      JsonField{"warmupFrames", JsonType::Unsigned},
+      JsonField{"endFrame", JsonType::Unsigned},
+      JsonField{"renderedFrames", JsonType::Unsigned},
+      JsonField{"readoutDrainFrames", JsonType::Unsigned},
+      JsonField{"readoutDrainFrameLimit", JsonType::Unsigned},
+      JsonField{"readoutDrainTimeoutMs", JsonType::Unsigned},
+      JsonField{"readoutDrainElapsedMs", JsonType::Unsigned},
+      JsonField{"requestedWindowMode", JsonType::String},
+      JsonField{"resolvedWindowMode", JsonType::String},
+      JsonField{"windowModeSource", JsonType::String},
+      JsonField{"captureSynchronization", JsonType::String},
+      JsonField{"validForComparison", JsonType::Boolean},
+  };
+  valid = validateObject(yyjson_obj_get(root, "run"), runFields, "$.run");
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array artifactFields{
+      JsonField{"artifactDir", JsonType::String},
+      JsonField{"rootHtml", JsonType::String},
+      JsonField{"caseDir", JsonType::String},
+      JsonField{"caseHtml", JsonType::String},
+  };
+  yyjson_val *artifacts = yyjson_obj_get(root, "artifacts");
+  valid = validateObject(artifacts, artifactFields, "$.artifacts");
+  if (valid.hasError()) {
+    return valid;
+  }
+  for (std::string_view field :
+       {"artifactDir", "rootHtml", "caseDir", "caseHtml"}) {
+    valid = nuri::tools::core::validateJsonArtifactPath(artifacts, field,
+                                                        "$.artifacts");
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+  static constexpr std::array checkpointFields{
+      JsonField{"id", JsonType::String},
+      JsonField{"frame", JsonType::Unsigned},
+      JsonField{"measurements", JsonType::Object},
+      JsonField{"captures", JsonType::Array},
+      JsonField{"readouts", JsonType::Array},
+      JsonField{"assertions", JsonType::Array},
+      JsonField{"warnings", JsonType::Array},
+      JsonField{"errors", JsonType::Array},
+  };
+  static constexpr std::array captureFields{
+      JsonField{"checkpointId", JsonType::String},
+      JsonField{"checkpointFrame", JsonType::Unsigned},
+      JsonField{"target", JsonType::String},
+      JsonField{"profile", JsonType::String},
+      JsonField{"required", JsonType::Boolean},
+      JsonField{"compare", JsonType::Boolean},
+      JsonField{"snapshot", JsonType::Object},
+  };
+  static constexpr std::array readoutFields{
+      JsonField{"checkpointId", JsonType::String},
+      JsonField{"id", JsonType::String},
+      JsonField{"type", JsonType::String},
+      JsonField{"requestId", JsonType::Unsigned},
+      JsonField{"requestFrame", JsonType::Unsigned},
+      JsonField{"resultFrame", JsonType::Unsigned},
+      JsonField{"required", JsonType::Boolean},
+      JsonField{"status", JsonType::String},
+      JsonField{"statusReason", JsonType::String},
+      JsonField{"values", JsonType::Object},
+      JsonField{"assertions", JsonType::Array},
+  };
+  yyjson_arr_iter checkpointIterator{};
+  yyjson_arr_iter_init(yyjson_obj_get(root, "checkpoints"),
+                       &checkpointIterator);
+  yyjson_val *checkpoint = nullptr;
+  size_t checkpointIndex = 0u;
+  while ((checkpoint = yyjson_arr_iter_next(&checkpointIterator)) != nullptr) {
+    const std::string path =
+        "$.checkpoints[" + std::to_string(checkpointIndex++) + "]";
+    valid = validateObject(checkpoint, checkpointFields, path);
+    if (valid.hasError()) {
+      return valid;
+    }
+    valid = validateNumberMap(yyjson_obj_get(checkpoint, "measurements"),
+                              path + ".measurements");
+    if (valid.hasError()) {
+      return valid;
+    }
+    yyjson_arr_iter captureIterator{};
+    yyjson_arr_iter_init(yyjson_obj_get(checkpoint, "captures"),
+                         &captureIterator);
+    yyjson_val *capture = nullptr;
+    size_t captureIndex = 0u;
+    while ((capture = yyjson_arr_iter_next(&captureIterator)) != nullptr) {
+      const std::string capturePath =
+          path + ".captures[" + std::to_string(captureIndex++) + "]";
+      valid = validateObject(capture, captureFields, capturePath);
+      if (valid.hasError()) {
+        return valid;
+      }
+      valid = validateSnapshotCaptureV1(yyjson_obj_get(capture, "snapshot"),
+                                        capturePath + ".snapshot");
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+    yyjson_arr_iter readoutIterator{};
+    yyjson_arr_iter_init(yyjson_obj_get(checkpoint, "readouts"),
+                         &readoutIterator);
+    yyjson_val *readout = nullptr;
+    size_t readoutIndex = 0u;
+    while ((readout = yyjson_arr_iter_next(&readoutIterator)) != nullptr) {
+      const std::string readoutPath =
+          path + ".readouts[" + std::to_string(readoutIndex++) + "]";
+      valid = validateObject(readout, readoutFields, readoutPath);
+      if (valid.hasError()) {
+        return valid;
+      }
+      valid = validateNumberMap(yyjson_obj_get(readout, "values"),
+                                readoutPath + ".values");
+      if (valid.hasError()) {
+        return valid;
+      }
+      valid = validateAssertionArray(yyjson_obj_get(readout, "assertions"),
+                                     readoutPath + ".assertions");
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+    valid = validateAssertionArray(yyjson_obj_get(checkpoint, "assertions"),
+                                   path + ".assertions");
+    if (valid.hasError()) {
+      return valid;
+    }
+    for (std::string_view field : {"warnings", "errors"}) {
+      valid = validateStringArrayValue(
+          yyjson_obj_getn(checkpoint, field.data(), field.size()),
+          path + "." + std::string(field));
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+  }
+  static constexpr std::array windowFields{
+      JsonField{"id", JsonType::String},
+      JsonField{"startFrame", JsonType::Unsigned},
+      JsonField{"endFrame", JsonType::Unsigned},
+      JsonField{"assertions", JsonType::Array},
+      JsonField{"warnings", JsonType::Array},
+      JsonField{"errors", JsonType::Array},
+  };
+  yyjson_arr_iter windowIterator{};
+  yyjson_arr_iter_init(yyjson_obj_get(root, "metricWindows"), &windowIterator);
+  yyjson_val *window = nullptr;
+  size_t windowIndex = 0u;
+  while ((window = yyjson_arr_iter_next(&windowIterator)) != nullptr) {
+    const std::string path =
+        "$.metricWindows[" + std::to_string(windowIndex++) + "]";
+    valid = validateObject(window, windowFields, path);
+    if (valid.hasError()) {
+      return valid;
+    }
+    valid = validateAssertionArray(yyjson_obj_get(window, "assertions"),
+                                   path + ".assertions");
+    if (valid.hasError()) {
+      return valid;
+    }
+    for (std::string_view field : {"warnings", "errors"}) {
+      valid = validateStringArrayValue(
+          yyjson_obj_getn(window, field.data(), field.size()),
+          path + "." + std::string(field));
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+  }
+  static constexpr std::array frameFields{
+      JsonField{"frameIndex", JsonType::Unsigned},
+      JsonField{"measurements", JsonType::Object},
+      JsonField{"unavailableMetrics", JsonType::Array},
+  };
+  yyjson_arr_iter frameIterator{};
+  yyjson_arr_iter_init(yyjson_obj_get(root, "frames"), &frameIterator);
+  yyjson_val *frame = nullptr;
+  size_t frameIndex = 0u;
+  while ((frame = yyjson_arr_iter_next(&frameIterator)) != nullptr) {
+    const std::string path = "$.frames[" + std::to_string(frameIndex++) + "]";
+    valid = validateObject(frame, frameFields, path);
+    if (valid.hasError()) {
+      return valid;
+    }
+    valid = validateNumberMap(yyjson_obj_get(frame, "measurements"),
+                              path + ".measurements");
+    if (valid.hasError()) {
+      return valid;
+    }
+    valid =
+        validateStringArrayValue(yyjson_obj_get(frame, "unavailableMetrics"),
+                                 path + ".unavailableMetrics");
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+  for (std::string_view field : {"unavailableMetrics", "warnings", "errors"}) {
+    valid = validateStringArrayValue(
+        yyjson_obj_getn(root, field.data(), field.size()),
+        "$." + std::string(field));
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+  return Result<void, std::string>::makeResult();
+}
+
+[[nodiscard]] Result<void, std::string>
+validateAutotestSuiteReportV1(yyjson_val *root) {
+  auto valid = nuri::tools::core::rejectDuplicateJsonFieldsRecursively(root);
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array rootFields{
+      JsonField{"schemaVersion", JsonType::Unsigned},
+      JsonField{"kind", JsonType::String},
+      JsonField{"baselineProfile", JsonType::String},
+      JsonField{"investigative", JsonType::Boolean},
+      JsonField{"generatedAtUtc", JsonType::String},
+      JsonField{"command", JsonType::String},
+      JsonField{"suite", JsonType::String},
+      JsonField{"status", JsonType::String},
+      JsonField{"exitCode", JsonType::Number},
+      JsonField{"selection", JsonType::Object},
+      JsonField{"artifactDir", JsonType::String},
+      JsonField{"children", JsonType::Array},
+      JsonField{"diagnostics", JsonType::Array},
+  };
+  valid = validateObject(root, rootFields, "$");
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array selectionFields{
+      JsonField{"requested", JsonType::String},
+      JsonField{"selected", JsonType::Unsigned},
+      JsonField{"attempted", JsonType::Unsigned},
+      JsonField{"completed", JsonType::Unsigned},
+      JsonField{"passed", JsonType::Unsigned},
+      JsonField{"failed", JsonType::Unsigned},
+      JsonField{"unavailable", JsonType::Unsigned},
+      JsonField{"notRun", JsonType::Unsigned},
+  };
+  valid = validateObject(yyjson_obj_get(root, "selection"), selectionFields,
+                         "$.selection");
+  if (valid.hasError()) {
+    return valid;
+  }
+  valid = nuri::tools::core::validateJsonArtifactPath(root, "artifactDir", "$");
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array childFields{
+      JsonField{"id", JsonType::String},
+      JsonField{"status", JsonType::String},
+      JsonField{"exitCode", JsonType::Number},
+      JsonField{"report", JsonType::String},
+      JsonField{"html", JsonType::String},
+  };
+  yyjson_arr_iter iterator{};
+  yyjson_arr_iter_init(yyjson_obj_get(root, "children"), &iterator);
+  yyjson_val *child = nullptr;
+  size_t index = 0u;
+  while ((child = yyjson_arr_iter_next(&iterator)) != nullptr) {
+    const std::string path = "$.children[" + std::to_string(index++) + "]";
+    valid = validateObject(child, childFields, path);
+    if (valid.hasError()) {
+      return valid;
+    }
+    for (std::string_view field : {"report", "html"}) {
+      valid = nuri::tools::core::validateJsonArtifactPath(child, field, path);
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+  }
+  return validateStringArrayValue(yyjson_obj_get(root, "diagnostics"),
+                                  "$.diagnostics");
+}
+
+[[nodiscard]] nuri::tools::core::ToolOutcome
+autotestToolOutcome(AutotestExitCode exitCode,
+                    bool investigative = false) noexcept {
+  using nuri::tools::core::ToolOutcome;
+  if (investigative && exitCode == AutotestExitCode::Success) {
+    return ToolOutcome::Investigative;
+  }
+  switch (exitCode) {
+  case AutotestExitCode::Success:
+    return ToolOutcome::Pass;
+  case AutotestExitCode::ScenarioFailure:
+    return ToolOutcome::Failure;
+  case AutotestExitCode::InvalidInput:
+    return ToolOutcome::Invalid;
+  case AutotestExitCode::EnvironmentUnavailable:
+    return ToolOutcome::EnvironmentUnavailable;
+  case AutotestExitCode::RuntimeError:
+    return ToolOutcome::RuntimeError;
+  case AutotestExitCode::MissingBaseline:
+    return ToolOutcome::MissingBaseline;
+  }
+  return ToolOutcome::RuntimeError;
+}
+
+[[nodiscard]] std::string resultRunId(std::string_view generatedAtUtc,
+                                      std::string_view identity) {
+  std::string timestamp = "19700101T000000.000Z";
+  if (generatedAtUtc.size() >= 19u && generatedAtUtc[4] == '-' &&
+      generatedAtUtc[7] == '-' && generatedAtUtc[10] == 'T' &&
+      generatedAtUtc[13] == ':' && generatedAtUtc[16] == ':') {
+    timestamp = std::string(generatedAtUtc.substr(0u, 4u)) +
+                std::string(generatedAtUtc.substr(5u, 2u)) +
+                std::string(generatedAtUtc.substr(8u, 2u)) + "T" +
+                std::string(generatedAtUtc.substr(11u, 2u)) +
+                std::string(generatedAtUtc.substr(14u, 2u)) +
+                std::string(generatedAtUtc.substr(17u, 2u)) + ".000Z";
+  }
+  const std::string source =
+      std::string(generatedAtUtc) + "\n" + std::string(identity);
+  const std::string suffix = nuri::tools::core::sha256Hex(
+      std::as_bytes(std::span(source.data(), source.size())));
+  return timestamp + "-" + suffix.substr(0u, 16u);
+}
+
+[[nodiscard]] nuri::tools::core::ResultSelectionV2
+resultSelection(const AutotestSelectionSummary &selection,
+                nuri::tools::core::ToolOutcome outcome) {
+  const bool investigative =
+      outcome == nuri::tools::core::ToolOutcome::Investigative;
+  return {.requested = selection.requested,
+          .selected = selection.selected,
+          .attempted = selection.attempted,
+          .completed = selection.completed,
+          .passed = investigative ? 0u : selection.passed,
+          .warned = investigative ? selection.passed : 0u,
+          .failed = selection.failed,
+          .unavailable = selection.unavailable,
+          .notRun = selection.notRun};
+}
+
+[[nodiscard]] std::optional<std::string>
+autotestEnvironmentFingerprint(const AutotestEnvironment &environment) {
+  using nuri::tools::core::FingerprintField;
+  auto fingerprint = nuri::tools::core::makeSha256Fingerprint({
+      FingerprintField{"os.name", environment.osName},
+      FingerprintField{"os.version", environment.osVersion},
+      FingerprintField{"cpu.name", environment.cpuName},
+      FingerprintField{"cpu.threads",
+                       std::to_string(environment.cpuLogicalThreadCount)},
+      FingerprintField{"gpu.backend", environment.gpuBackend},
+      FingerprintField{"gpu.backendSource", environment.gpuBackendSource},
+      FingerprintField{"gpu.name", environment.gpuDeviceName},
+      FingerprintField{"gpu.vendor", std::to_string(environment.gpuVendorId)},
+      FingerprintField{"gpu.device", std::to_string(environment.gpuDeviceId)},
+      FingerprintField{"gpu.driver", environment.gpuDriverVersion},
+      FingerprintField{"present.mode", environment.resolvedPresentMode},
+      FingerprintField{"window.mode", environment.resolvedWindowMode},
+      FingerprintField{"window.visible",
+                       environment.windowVisible ? "true" : "false"},
+      FingerprintField{"build.type", environment.buildType},
+      FingerprintField{"build.profile", environment.cmakeToolProfile},
+      FingerprintField{"build.features", environment.vcpkgManifestFeatures},
+      FingerprintField{"build.shared",
+                       environment.buildShared ? "true" : "false"},
+      FingerprintField{"build.asserts",
+                       environment.assertsEnabled ? "true" : "false"},
+      FingerprintField{"build.devChecks",
+                       environment.devChecks ? "true" : "false"},
+      FingerprintField{"profiling.cpu",
+                       environment.tracyEnabled ? "true" : "false"},
+      FingerprintField{"profiling.gpu",
+                       environment.tracyGpuEnabled ? "true" : "false"},
+  });
+  return fingerprint.hasError()
+             ? std::nullopt
+             : std::optional<std::string>{std::move(fingerprint.value())};
+}
+
+[[nodiscard]] std::optional<std::string>
+autotestWorkloadFingerprint(const AutotestCase &testCase) {
+  using nuri::tools::core::FingerprintField;
+  std::string manifestDigest;
+  if (!testCase.manifestPath.empty() &&
+      std::filesystem::is_regular_file(testCase.manifestPath)) {
+    auto digest =
+        nuri::tools::core::makeSha256FileFingerprint(testCase.manifestPath);
+    if (!digest.hasError()) {
+      manifestDigest = std::move(digest.value());
+    }
+  }
+  auto fingerprint = nuri::tools::core::makeSha256Fingerprint({
+      FingerprintField{"case.id", testCase.id},
+      FingerprintField{"case.suite", testCase.suite},
+      FingerprintField{"manifest", std::move(manifestDigest)},
+      FingerprintField{"scene.kind", testCase.scene.kind},
+      FingerprintField{"scene.content", testCase.scene.contentHash},
+      FingerprintField{"resolution.width",
+                       std::to_string(testCase.resolution[0])},
+      FingerprintField{"resolution.height",
+                       std::to_string(testCase.resolution[1])},
+      FingerprintField{"fixedDelta",
+                       std::format("{:.17g}", testCase.fixedDeltaSeconds)},
+      FingerprintField{"frames.warmup", std::to_string(testCase.warmupFrames)},
+      FingerprintField{"frames.end", std::to_string(testCase.endFrame)},
+      FingerprintField{"checkpoint.count",
+                       std::to_string(testCase.checkpoints.size())},
+      FingerprintField{"metricWindow.count",
+                       std::to_string(testCase.metricWindows.size())},
+  });
+  return fingerprint.hasError()
+             ? std::nullopt
+             : std::optional<std::string>{std::move(fingerprint.value())};
+}
+
+[[nodiscard]] Result<std::string, std::string>
+compactJsonObject(std::string_view json) {
+  std::string mutableJson(json);
+  yyjson_read_err error{};
+  JsonDocPtr doc(yyjson_read_opts(mutableJson.data(), mutableJson.size(), 0u,
+                                  nullptr, &error),
+                 &yyjson_doc_free);
+  yyjson_val *root = doc ? yyjson_doc_get_root(doc.get()) : nullptr;
+  if (!yyjson_is_obj(root)) {
+    return Result<std::string, std::string>::makeError(
+        "autotest payload must be a JSON object");
+  }
+  size_t length = 0u;
+  char *text = yyjson_val_write(root, 0u, &length);
+  if (text == nullptr) {
+    return Result<std::string, std::string>::makeError(
+        "failed to normalize autotest payload JSON");
+  }
+  std::string normalized(text, length);
+  std::free(text);
+  return Result<std::string, std::string>::makeResult(std::move(normalized));
 }
 
 } // namespace
 
-Result<std::string, std::string>
-writeAutotestReportJson(const AutotestReport &report) {
+std::optional<std::string>
+makeAutotestEnvironmentFingerprint(const AutotestEnvironment &environment) {
+  return autotestEnvironmentFingerprint(environment);
+}
+
+std::optional<std::string>
+makeAutotestWorkloadFingerprint(const AutotestCase &testCase) {
+  return autotestWorkloadFingerprint(testCase);
+}
+
+static Result<std::string, std::string>
+writeAutotestReportPayloadV1(const AutotestReport &report) {
   JsonMutDocPtr doc(yyjson_mut_doc_new(nullptr), &yyjson_mut_doc_free);
   if (!doc) {
     return Result<std::string, std::string>::makeError(
@@ -336,8 +1341,14 @@ writeAutotestReportJson(const AutotestReport &report) {
   yyjson_mut_obj_add_uint(doc.get(), root, "schemaVersion",
                           report.schemaVersion);
   addString(doc.get(), root, "kind", report.kind);
+  addString(doc.get(), root, "baselineProfile", report.baselineProfile);
   addString(doc.get(), root, "generatedAtUtc", report.generatedAtUtc);
   addString(doc.get(), root, "command", report.command);
+  addString(doc.get(), root, "status", report.status);
+  yyjson_mut_obj_add_int(doc.get(), root, "exitCode",
+                         static_cast<int>(report.exitCode));
+  yyjson_mut_obj_add_val(doc.get(), root, "selection",
+                         makeSelectionObject(doc.get(), report.selection));
   yyjson_mut_obj_add_val(doc.get(), root, "environment",
                          makeEnvironmentObject(doc.get(), report.environment));
   yyjson_mut_obj_add_val(doc.get(), root, "case",
@@ -424,15 +1435,87 @@ writeAutotestReportJson(const AutotestReport &report) {
   addString(doc.get(), root, "reproduceCommand", report.reproduceCommand);
 
   size_t length = 0u;
-  char *json = yyjson_mut_write_opts(doc.get(), YYJSON_WRITE_PRETTY, nullptr,
-                                     &length, nullptr);
+  yyjson_write_err writeError{};
+  char *json = yyjson_mut_write_opts(
+      doc.get(), YYJSON_WRITE_PRETTY | YYJSON_WRITE_INF_AND_NAN_AS_NULL,
+      nullptr, &length, &writeError);
   if (json == nullptr) {
     return Result<std::string, std::string>::makeError(
-        "writeAutotestReportJson: failed to serialize JSON");
+        "writeAutotestReportJson: failed to serialize JSON: " +
+        std::string(writeError.msg != nullptr ? writeError.msg
+                                              : "unknown error"));
   }
   std::string out(json, length);
   std::free(json);
   return Result<std::string, std::string>::makeResult(std::move(out));
+}
+
+Result<std::string, std::string>
+writeAutotestReportJson(const AutotestReport &report) {
+  if (report.schemaVersion != 1u || report.kind != "nuri.autotest.report") {
+    return Result<std::string, std::string>::makeError(
+        "writeAutotestReportJson: unsupported payload schema or kind");
+  }
+  if (report.status != nuri::tools::core::toolOutcomeName(
+                           autotestToolOutcome(report.exitCode))) {
+    return Result<std::string, std::string>::makeError(
+        "writeAutotestReportJson: status and exitCode disagree");
+  }
+  auto payload = writeAutotestReportPayloadV1(report);
+  if (payload.hasError()) {
+    return Result<std::string, std::string>::makeError(payload.error());
+  }
+  const auto outcome = autotestToolOutcome(
+      report.exitCode, report.exitCode == AutotestExitCode::Success &&
+                           (!report.run.validForComparison ||
+                            !report.baselineProfileCompatible));
+  nuri::tools::core::ResultEnvelopeV2 envelope{};
+  envelope.tool = nuri::tools::core::ResultToolV2::Autotest;
+  envelope.runId = resultRunId(report.generatedAtUtc, report.testCase.id);
+  envelope.status = outcome;
+  envelope.exitCode = static_cast<int>(report.exitCode);
+  envelope.authoritative = false;
+  envelope.environmentFingerprint =
+      report.environmentFingerprint.empty()
+          ? autotestEnvironmentFingerprint(report.environment)
+          : std::optional<std::string>{report.environmentFingerprint};
+  envelope.workloadFingerprint =
+      report.workloadFingerprint.empty()
+          ? autotestWorkloadFingerprint(report.testCase)
+          : std::optional<std::string>{report.workloadFingerprint};
+  if (!report.generatedAtUtc.empty()) {
+    envelope.startedAtUtc = report.generatedAtUtc;
+  }
+  if (!report.command.empty()) {
+    envelope.command = std::vector<std::string>{report.command};
+  }
+  if (!report.reproduceCommand.empty()) {
+    envelope.reproduceCommand = report.reproduceCommand;
+  }
+  envelope.selection = resultSelection(report.selection, outcome);
+  envelope.profile = nuri::tools::core::ResultProfileV2{
+      .id = report.baselineProfile,
+      .compatible = report.baselineProfileCompatible,
+      .incompatibilityReasons = report.baselineProfileIncompatibilityReasons};
+  for (const std::string &warning : report.warnings) {
+    envelope.diagnostics.push_back(
+        {.code = "autotest.warning",
+         .severity = nuri::tools::core::ResultDiagnosticSeverityV2::Warning,
+         .message = warning});
+  }
+  for (const std::string &error : report.errors) {
+    envelope.diagnostics.push_back(
+        {.code = "autotest.error",
+         .severity = nuri::tools::core::ResultDiagnosticSeverityV2::Error,
+         .message = error});
+  }
+  envelope.payloadJson = std::move(payload.value());
+  auto serialized = nuri::tools::core::serializeResultEnvelopeV2(envelope);
+  if (serialized.hasError()) {
+    return Result<std::string, std::string>::makeError(
+        "writeAutotestReportJson: " + serialized.error());
+  }
+  return serialized;
 }
 
 Result<bool, std::string>
@@ -442,27 +1525,17 @@ writeAutotestReportFile(const AutotestReport &report,
   if (json.hasError()) {
     return Result<bool, std::string>::makeError(json.error());
   }
-  if (!path.parent_path().empty()) {
-    std::filesystem::create_directories(path.parent_path());
+  const auto written =
+      nuri::tools::core::atomicWriteTextFile(path, json.value());
+  if (written.hasError()) {
+    return Result<bool, std::string>::makeError("writeAutotestReportFile: " +
+                                                written.error());
   }
-  std::ofstream file(path, std::ios::binary);
-  if (!file) {
-    return Result<bool, std::string>::makeError(
-        "writeAutotestReportFile: failed to open " + path.string());
-  }
-  file << json.value();
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<AutotestReport, std::string>
-readAutotestReportFile(const std::filesystem::path &path) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file) {
-    return Result<AutotestReport, std::string>::makeError(
-        "readAutotestReportFile: failed to open " + path.string());
-  }
-  std::string json((std::istreambuf_iterator<char>(file)),
-                   std::istreambuf_iterator<char>());
+static Result<AutotestReport, std::string>
+readAutotestReportPayloadV1(std::string json) {
   yyjson_read_err error{};
   JsonDocPtr doc(yyjson_read_opts(json.data(), json.size(), 0, nullptr, &error),
                  &yyjson_doc_free);
@@ -477,16 +1550,117 @@ readAutotestReportFile(const std::filesystem::path &path) {
         "readAutotestReportFile: root must be an object");
   }
   AutotestReport report{};
-  report.kind = readString(root, "kind", report.kind);
+  yyjson_val *schemaVersion = yyjson_obj_get(root, "schemaVersion");
+  if (!yyjson_is_uint(schemaVersion) || yyjson_get_uint(schemaVersion) != 1u) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: unsupported or missing schemaVersion");
+  }
+  report.schemaVersion = 1u;
+  report.kind = readString(root, "kind");
+  if (report.kind != "nuri.autotest.report") {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: unexpected report kind '" + report.kind + "'");
+  }
+  auto contract = validateAutotestReportV1(root);
+  if (contract.hasError()) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: invalid v1 report: " + contract.error());
+  }
+  report.baselineProfile =
+      readString(root, "baselineProfile", report.baselineProfile);
   report.generatedAtUtc = readString(root, "generatedAtUtc");
   report.command = readString(root, "command");
+  report.status = readString(root, "status", report.status);
+  const int exitCode =
+      readInt(root, "exitCode", static_cast<int>(report.exitCode));
+  if (exitCode < static_cast<int>(AutotestExitCode::Success) ||
+      exitCode > static_cast<int>(AutotestExitCode::MissingBaseline)) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: invalid exitCode");
+  }
+  report.exitCode = static_cast<AutotestExitCode>(exitCode);
+  readSelection(yyjson_obj_get(root, "selection"), report.selection);
   report.reproduceCommand = readString(root, "reproduceCommand");
+  yyjson_val *environment = yyjson_obj_get(root, "environment");
+  if (yyjson_is_obj(environment)) {
+    report.environment.repoRoot = readString(environment, "repoRoot");
+    report.environment.commitHash = readString(environment, "commitHash");
+    report.environment.branchName = readString(environment, "branchName");
+    report.environment.dirty = readBool(environment, "dirty");
+    report.environment.osName = readString(environment, "osName");
+    report.environment.osVersion = readString(environment, "osVersion");
+    report.environment.cpuName = readString(environment, "cpuName");
+    report.environment.cpuLogicalThreadCount =
+        readU32(environment, "cpuLogicalThreadCount");
+    report.environment.gpuBackend = readString(environment, "gpuBackend");
+    report.environment.gpuBackendSource =
+        readString(environment, "gpuBackendSource");
+    report.environment.gpuDeviceName = readString(environment, "gpuDeviceName");
+    report.environment.gpuVendorId = readU32(environment, "gpuVendorId");
+    report.environment.gpuDeviceId = readU32(environment, "gpuDeviceId");
+    report.environment.gpuDriverVersion =
+        readString(environment, "gpuDriverVersion");
+    report.environment.swapchainImageCount =
+        readU32(environment, "swapchainImageCount");
+    report.environment.requestedPresentMode =
+        readString(environment, "requestedPresentMode");
+    report.environment.resolvedPresentMode =
+        readString(environment, "resolvedPresentMode");
+    report.environment.presentModeSource =
+        readString(environment, "presentModeSource");
+    report.environment.requestedWindowMode =
+        readString(environment, "requestedWindowMode");
+    report.environment.resolvedWindowMode =
+        readString(environment, "resolvedWindowMode");
+    report.environment.windowVisible = readBool(environment, "windowVisible");
+    report.environment.renderGraphWorkerCount =
+        readU32(environment, "renderGraphWorkerCount");
+    report.environment.renderGraphParallelCompile =
+        readBool(environment, "renderGraphParallelCompile");
+    report.environment.renderGraphParallelRecording =
+        readBool(environment, "renderGraphParallelRecording");
+    report.environment.buildType = readString(environment, "buildType");
+    report.environment.cmakeToolProfile =
+        readString(environment, "cmakeToolProfile");
+    report.environment.vcpkgManifestFeatures =
+        readString(environment, "vcpkgManifestFeatures");
+    report.environment.buildShared = readBool(environment, "NURI_BUILD_SHARED");
+    report.environment.loggingEnabled =
+        readBool(environment, "NURI_WITH_LOGGING");
+    report.environment.assertsEnabled =
+        readBool(environment, "NURI_WITH_ASSERTS");
+    report.environment.tracyEnabled = readBool(environment, "NURI_WITH_TRACY");
+    report.environment.tracyGpuEnabled =
+        readBool(environment, "NURI_WITH_TRACY_GPU");
+    report.environment.tracyGpuDrawZonesEnabled =
+        readBool(environment, "NURI_WITH_TRACY_GPU_DRAW_ZONES");
+    report.environment.devChecks = readBool(environment, "devChecks");
+  }
   yyjson_val *caseObject = yyjson_obj_get(root, "case");
   if (yyjson_is_obj(caseObject)) {
+    report.testCase.schemaVersion = readU32(caseObject, "schemaVersion", 1u);
     report.testCase.id = readString(caseObject, "id");
     report.testCase.suite = readString(caseObject, "suite");
     report.testCase.description = readString(caseObject, "description");
+    report.testCase.backend = readString(caseObject, "backend", "default");
+    yyjson_val *resolution = yyjson_obj_get(caseObject, "resolution");
+    if (yyjson_is_arr(resolution) && yyjson_arr_size(resolution) == 2u &&
+        yyjson_is_uint(yyjson_arr_get(resolution, 0u)) &&
+        yyjson_is_uint(yyjson_arr_get(resolution, 1u))) {
+      report.testCase.resolution[0] = static_cast<uint32_t>(
+          yyjson_get_uint(yyjson_arr_get(resolution, 0u)));
+      report.testCase.resolution[1] = static_cast<uint32_t>(
+          yyjson_get_uint(yyjson_arr_get(resolution, 1u)));
+    }
+    report.testCase.warmupFrames = readU32(caseObject, "warmupFrames");
     report.testCase.endFrame = readU32(caseObject, "endFrame");
+    report.testCase.fixedDeltaSeconds = readDouble(
+        caseObject, "fixedDeltaSeconds", report.testCase.fixedDeltaSeconds);
+    report.testCase.presentMode =
+        readString(caseObject, "presentMode", "immediate");
+    report.testCase.windowMode =
+        readString(caseObject, "windowMode", "visible");
+    report.testCase.authoritative = readBool(caseObject, "authoritative");
   }
   yyjson_val *run = yyjson_obj_get(root, "run");
   if (yyjson_is_obj(run)) {
@@ -496,8 +1670,15 @@ readAutotestReportFile(const std::filesystem::path &path) {
     report.run.endFrame = readU32(run, "endFrame");
     report.run.renderedFrames = readU32(run, "renderedFrames");
     report.run.readoutDrainFrames = readU32(run, "readoutDrainFrames");
+    report.run.readoutDrainFrameLimit = readU32(run, "readoutDrainFrameLimit");
     report.run.readoutDrainTimeoutMs =
         readU32(run, "readoutDrainTimeoutMs", report.run.readoutDrainTimeoutMs);
+    report.run.readoutDrainElapsedMs = readU32(run, "readoutDrainElapsedMs");
+    report.run.requestedWindowMode = readString(run, "requestedWindowMode");
+    report.run.resolvedWindowMode =
+        readString(run, "resolvedWindowMode", report.run.resolvedWindowMode);
+    report.run.windowModeSource =
+        readString(run, "windowModeSource", report.run.windowModeSource);
     report.run.captureSynchronization = readString(
         run, "captureSynchronization", report.run.captureSynchronization);
     report.run.validForComparison =
@@ -536,6 +1717,29 @@ readAutotestReportFile(const std::filesystem::path &path) {
                 std::string(yyjson_get_str(key), yyjson_get_len(key)),
                 yyjson_get_num(value));
           }
+        }
+      }
+      yyjson_val *captures = yyjson_obj_get(checkpointValue, "captures");
+      if (yyjson_is_arr(captures)) {
+        yyjson_arr_iter captureIter;
+        yyjson_arr_iter_init(captures, &captureIter);
+        yyjson_val *captureValue = nullptr;
+        while ((captureValue = yyjson_arr_iter_next(&captureIter)) != nullptr) {
+          if (!yyjson_is_obj(captureValue)) {
+            continue;
+          }
+          AutotestCaptureReport capture{};
+          capture.checkpointId = readString(captureValue, "checkpointId");
+          capture.checkpointFrame = readU32(captureValue, "checkpointFrame");
+          capture.target = readString(captureValue, "target");
+          capture.profile = readString(captureValue, "profile");
+          capture.required = readBool(captureValue, "required", true);
+          capture.compare = readBool(captureValue, "compare", true);
+          yyjson_val *snapshot = yyjson_obj_get(captureValue, "snapshot");
+          if (yyjson_is_obj(snapshot)) {
+            capture.snapshot = readSnapshotCapture(snapshot);
+          }
+          checkpoint.captures.push_back(std::move(capture));
         }
       }
       yyjson_val *assertions = yyjson_obj_get(checkpointValue, "assertions");
@@ -602,6 +1806,8 @@ readAutotestReportFile(const std::filesystem::path &path) {
           checkpoint.readouts.push_back(std::move(readout));
         }
       }
+      readStringArray(checkpointValue, "warnings", checkpoint.warnings);
+      readStringArray(checkpointValue, "errors", checkpoint.errors);
       report.checkpoints.push_back(std::move(checkpoint));
     }
   }
@@ -631,6 +1837,8 @@ readAutotestReportFile(const std::filesystem::path &path) {
           window.assertions.push_back(readAssertionResult(assertionValue));
         }
       }
+      readStringArray(windowValue, "warnings", window.warnings);
+      readStringArray(windowValue, "errors", window.errors);
       report.metricWindows.push_back(std::move(window));
     }
   }
@@ -675,159 +1883,922 @@ readAutotestReportFile(const std::filesystem::path &path) {
       report.frames.push_back(std::move(frame));
     }
   }
-  yyjson_val *unavailable = yyjson_obj_get(root, "unavailableMetrics");
-  if (yyjson_is_arr(unavailable)) {
-    yyjson_arr_iter unavailableIter;
-    yyjson_arr_iter_init(unavailable, &unavailableIter);
-    yyjson_val *value = nullptr;
-    while ((value = yyjson_arr_iter_next(&unavailableIter)) != nullptr) {
-      if (yyjson_is_str(value)) {
-        report.unavailableMetrics.emplace_back(yyjson_get_str(value),
-                                               yyjson_get_len(value));
-      }
-    }
-  }
+  readStringArray(root, "unavailableMetrics", report.unavailableMetrics);
+  readStringArray(root, "warnings", report.warnings);
+  readStringArray(root, "errors", report.errors);
   return Result<AutotestReport, std::string>::makeResult(std::move(report));
 }
 
+Result<AutotestReport, std::string>
+readAutotestReportFile(const std::filesystem::path &path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: failed to open " + path.string());
+  }
+  std::string json((std::istreambuf_iterator<char>(file)),
+                   std::istreambuf_iterator<char>());
+  std::string probeText = json;
+  yyjson_read_err error{};
+  JsonDocPtr probe(
+      yyjson_read_opts(probeText.data(), probeText.size(), 0u, nullptr, &error),
+      &yyjson_doc_free);
+  yyjson_val *root = probe ? yyjson_doc_get_root(probe.get()) : nullptr;
+  yyjson_val *schema =
+      yyjson_is_obj(root) ? yyjson_obj_get(root, "schemaVersion") : nullptr;
+  if (!yyjson_is_uint(schema)) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: unsupported or missing schemaVersion");
+  }
+  if (yyjson_get_uint(schema) == 1u) {
+    return readAutotestReportPayloadV1(std::move(json));
+  }
+  if (yyjson_get_uint(schema) != 2u) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: unsupported schemaVersion");
+  }
+  auto envelope = nuri::tools::core::readResultEnvelopeV2(json);
+  if (envelope.hasError() ||
+      envelope.value().tool != nuri::tools::core::ResultToolV2::Autotest) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: " +
+        (envelope.hasError() ? envelope.error()
+                             : "v2 envelope tool must be autotest"));
+  }
+  auto report = readAutotestReportPayloadV1(envelope.value().payloadJson);
+  if (report.hasError()) {
+    return report;
+  }
+  if (!envelope.value().profile.has_value()) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: v2 envelope profile is missing");
+  }
+  report.value().baselineProfileCompatible =
+      envelope.value().profile->compatible;
+  report.value().baselineProfileIncompatibilityReasons =
+      envelope.value().profile->incompatibilityReasons;
+  report.value().environmentFingerprint =
+      envelope.value().environmentFingerprint.value_or("");
+  report.value().workloadFingerprint =
+      envelope.value().workloadFingerprint.value_or("");
+  const auto expectedOutcome = autotestToolOutcome(
+      report.value().exitCode,
+      report.value().exitCode == AutotestExitCode::Success &&
+          (!report.value().run.validForComparison ||
+           !report.value().baselineProfileCompatible));
+  const auto expectedSelection =
+      resultSelection(report.value().selection, expectedOutcome);
+  const auto &actualSelection = envelope.value().selection;
+  const bool selectionMatches =
+      actualSelection.requested == expectedSelection.requested &&
+      actualSelection.selected == expectedSelection.selected &&
+      actualSelection.attempted == expectedSelection.attempted &&
+      actualSelection.completed == expectedSelection.completed &&
+      actualSelection.passed == expectedSelection.passed &&
+      actualSelection.warned == expectedSelection.warned &&
+      actualSelection.failed == expectedSelection.failed &&
+      actualSelection.skipped == expectedSelection.skipped &&
+      actualSelection.unavailable == expectedSelection.unavailable &&
+      actualSelection.notRun == expectedSelection.notRun;
+  auto canonicalPayload = writeAutotestReportPayloadV1(report.value());
+  auto actualPayload = compactJsonObject(envelope.value().payloadJson);
+  auto expectedPayload = canonicalPayload.hasError()
+                             ? Result<std::string, std::string>::makeError(
+                                   canonicalPayload.error())
+                             : compactJsonObject(canonicalPayload.value());
+  auto canonicalEnvelope = writeAutotestReportJson(report.value());
+  auto actualEnvelope = compactJsonObject(json);
+  auto expectedEnvelope = canonicalEnvelope.hasError()
+                              ? Result<std::string, std::string>::makeError(
+                                    canonicalEnvelope.error())
+                              : compactJsonObject(canonicalEnvelope.value());
+  const std::optional<std::string> expectedStartedAt =
+      report.value().generatedAtUtc.empty()
+          ? std::optional<std::string>{}
+          : std::optional<std::string>{report.value().generatedAtUtc};
+  const std::optional<std::string> expectedReproduce =
+      report.value().reproduceCommand.empty()
+          ? std::optional<std::string>{}
+          : std::optional<std::string>{report.value().reproduceCommand};
+  const std::optional<std::vector<std::string>> expectedCommand =
+      report.value().command.empty()
+          ? std::optional<std::vector<std::string>>{}
+          : std::optional<std::vector<std::string>>{
+                std::vector<std::string>{report.value().command}};
+  const bool profileMatches =
+      envelope.value().profile.has_value() &&
+      envelope.value().profile->id == report.value().baselineProfile &&
+      envelope.value().profile->compatible ==
+          report.value().baselineProfileCompatible &&
+      envelope.value().profile->incompatibilityReasons ==
+          report.value().baselineProfileIncompatibilityReasons;
+  if (report.value().status !=
+          nuri::tools::core::toolOutcomeName(
+              autotestToolOutcome(report.value().exitCode)) ||
+      envelope.value().status != expectedOutcome ||
+      envelope.value().exitCode != static_cast<int>(report.value().exitCode) ||
+      envelope.value().authoritative || !profileMatches || !selectionMatches ||
+      envelope.value().startedAtUtc != expectedStartedAt ||
+      envelope.value().reproduceCommand != expectedReproduce ||
+      envelope.value().command != expectedCommand ||
+      canonicalPayload.hasError() || actualPayload.hasError() ||
+      expectedPayload.hasError() ||
+      actualPayload.value() != expectedPayload.value() ||
+      canonicalEnvelope.hasError() || actualEnvelope.hasError() ||
+      expectedEnvelope.hasError() ||
+      actualEnvelope.value() != expectedEnvelope.value()) {
+    return Result<AutotestReport, std::string>::makeError(
+        "readAutotestReportFile: v2 envelope and autotest payload disagree");
+  }
+  return report;
+}
+
+static Result<std::string, std::string>
+writeAutotestSuiteReportPayloadV1(const AutotestSuiteReport &report) {
+  JsonMutDocPtr doc(yyjson_mut_doc_new(nullptr), &yyjson_mut_doc_free);
+  if (!doc) {
+    return Result<std::string, std::string>::makeError(
+        "writeAutotestSuiteReportJson: failed to allocate JSON document");
+  }
+  yyjson_mut_val *root = yyjson_mut_obj(doc.get());
+  yyjson_mut_doc_set_root(doc.get(), root);
+  yyjson_mut_obj_add_uint(doc.get(), root, "schemaVersion",
+                          report.schemaVersion);
+  addString(doc.get(), root, "kind", report.kind);
+  addString(doc.get(), root, "baselineProfile", report.baselineProfile);
+  yyjson_mut_obj_add_bool(doc.get(), root, "investigative",
+                          report.investigative);
+  addString(doc.get(), root, "generatedAtUtc", report.generatedAtUtc);
+  addString(doc.get(), root, "command", report.command);
+  addString(doc.get(), root, "suite", report.suite);
+  addString(doc.get(), root, "status", report.status);
+  yyjson_mut_obj_add_int(doc.get(), root, "exitCode",
+                         static_cast<int>(report.exitCode));
+  yyjson_mut_obj_add_val(doc.get(), root, "selection",
+                         makeSelectionObject(doc.get(), report.selection));
+  addPath(doc.get(), root, "artifactDir", report.artifactDir);
+  yyjson_mut_val *children = yyjson_mut_arr(doc.get());
+  for (const AutotestSuiteChildReport &child : report.children) {
+    yyjson_mut_val *object = yyjson_mut_obj(doc.get());
+    addString(doc.get(), object, "id", child.id);
+    addString(doc.get(), object, "status", child.status);
+    yyjson_mut_obj_add_int(doc.get(), object, "exitCode",
+                           static_cast<int>(child.exitCode));
+    addPath(doc.get(), object, "report", child.report);
+    addPath(doc.get(), object, "html", child.html);
+    yyjson_mut_arr_add_val(children, object);
+  }
+  yyjson_mut_obj_add_val(doc.get(), root, "children", children);
+  yyjson_mut_obj_add_val(doc.get(), root, "diagnostics",
+                         makeStringArray(doc.get(), report.diagnostics));
+
+  size_t length = 0u;
+  char *json = yyjson_mut_write_opts(doc.get(), YYJSON_WRITE_PRETTY, nullptr,
+                                     &length, nullptr);
+  if (json == nullptr) {
+    return Result<std::string, std::string>::makeError(
+        "writeAutotestSuiteReportJson: failed to serialize JSON");
+  }
+  std::string out(json, length);
+  std::free(json);
+  return Result<std::string, std::string>::makeResult(std::move(out));
+}
+
+static Result<AutotestSuiteReport, std::string>
+readAutotestSuiteReportPayloadV1(std::string json, bool directLegacy) {
+  yyjson_read_err error{};
+  JsonDocPtr doc(yyjson_read_opts(json.data(), json.size(), 0, nullptr, &error),
+                 &yyjson_doc_free);
+  if (!doc) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: JSON parse failed at byte " +
+        std::to_string(error.pos) + ": " + error.msg);
+  }
+  yyjson_val *root = yyjson_doc_get_root(doc.get());
+  if (!yyjson_is_obj(root)) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: root must be an object");
+  }
+  auto contract = validateAutotestSuiteReportV1(root);
+  if (contract.hasError()) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: invalid v1 suite report: " +
+        contract.error());
+  }
+  if (readU32(root, "schemaVersion") != 1u ||
+      readString(root, "kind") != "nuri.autotest.suite_report") {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: unsupported payload schema or kind");
+  }
+  AutotestSuiteReport report{};
+  report.baselineProfile =
+      readString(root, "baselineProfile", report.baselineProfile);
+  report.investigative = readBool(root, "investigative") || directLegacy;
+  report.generatedAtUtc = readString(root, "generatedAtUtc");
+  report.command = readString(root, "command");
+  report.suite = readString(root, "suite");
+  report.status = readString(root, "status");
+  const int exitCode = readInt(root, "exitCode", -1);
+  if (exitCode < static_cast<int>(AutotestExitCode::Success) ||
+      exitCode > static_cast<int>(AutotestExitCode::MissingBaseline)) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: invalid exitCode");
+  }
+  report.exitCode = static_cast<AutotestExitCode>(exitCode);
+  readSelection(yyjson_obj_get(root, "selection"), report.selection);
+  report.artifactDir = readString(root, "artifactDir");
+  yyjson_arr_iter iterator{};
+  yyjson_arr_iter_init(yyjson_obj_get(root, "children"), &iterator);
+  yyjson_val *entry = nullptr;
+  while ((entry = yyjson_arr_iter_next(&iterator)) != nullptr) {
+    const int childExit = readInt(entry, "exitCode", -1);
+    if (childExit < static_cast<int>(AutotestExitCode::Success) ||
+        childExit > static_cast<int>(AutotestExitCode::MissingBaseline)) {
+      return Result<AutotestSuiteReport, std::string>::makeError(
+          "readAutotestSuiteReportFile: invalid child exitCode");
+    }
+    report.children.push_back(
+        {.id = readString(entry, "id"),
+         .status = readString(entry, "status"),
+         .exitCode = static_cast<AutotestExitCode>(childExit),
+         .report = readString(entry, "report"),
+         .html = readString(entry, "html")});
+  }
+  readStringArray(root, "diagnostics", report.diagnostics);
+  if (report.status != nuri::tools::core::toolOutcomeName(
+                           autotestToolOutcome(report.exitCode))) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: status and exitCode disagree");
+  }
+  for (const AutotestSuiteChildReport &child : report.children) {
+    if (child.status != nuri::tools::core::toolOutcomeName(
+                            autotestToolOutcome(child.exitCode))) {
+      return Result<AutotestSuiteReport, std::string>::makeError(
+          "readAutotestSuiteReportFile: child status and exitCode disagree");
+    }
+  }
+  return Result<AutotestSuiteReport, std::string>::makeResult(
+      std::move(report));
+}
+
+Result<std::string, std::string>
+writeAutotestSuiteReportJson(const AutotestSuiteReport &report) {
+  if (report.schemaVersion != 1u ||
+      report.kind != "nuri.autotest.suite_report") {
+    return Result<std::string, std::string>::makeError(
+        "writeAutotestSuiteReportJson: unsupported payload schema or kind");
+  }
+  if (report.status != nuri::tools::core::toolOutcomeName(
+                           autotestToolOutcome(report.exitCode))) {
+    return Result<std::string, std::string>::makeError(
+        "writeAutotestSuiteReportJson: status and exitCode disagree");
+  }
+  for (const AutotestSuiteChildReport &child : report.children) {
+    if (child.status != nuri::tools::core::toolOutcomeName(
+                            autotestToolOutcome(child.exitCode))) {
+      return Result<std::string, std::string>::makeError(
+          "writeAutotestSuiteReportJson: child status and exitCode disagree");
+    }
+  }
+  auto payload = writeAutotestSuiteReportPayloadV1(report);
+  if (payload.hasError()) {
+    return Result<std::string, std::string>::makeError(payload.error());
+  }
+  const auto outcome = autotestToolOutcome(
+      report.exitCode,
+      report.investigative || !report.baselineProfileCompatible);
+  nuri::tools::core::ResultEnvelopeV2 envelope{};
+  envelope.tool = nuri::tools::core::ResultToolV2::Autotest;
+  envelope.runId = resultRunId(report.generatedAtUtc, report.suite);
+  envelope.status = outcome;
+  envelope.exitCode = static_cast<int>(report.exitCode);
+  envelope.authoritative = false;
+  if (!report.environmentFingerprint.empty()) {
+    envelope.environmentFingerprint = report.environmentFingerprint;
+  }
+  if (!report.workloadFingerprint.empty()) {
+    envelope.workloadFingerprint = report.workloadFingerprint;
+  }
+  if (!report.generatedAtUtc.empty()) {
+    envelope.startedAtUtc = report.generatedAtUtc;
+  }
+  if (!report.command.empty()) {
+    envelope.command = std::vector<std::string>{report.command};
+  }
+  envelope.selection = resultSelection(report.selection, outcome);
+  envelope.profile = nuri::tools::core::ResultProfileV2{
+      .id = report.baselineProfile,
+      .compatible = report.baselineProfileCompatible,
+      .incompatibilityReasons = report.baselineProfileIncompatibilityReasons};
+  for (const std::string &diagnostic : report.diagnostics) {
+    envelope.diagnostics.push_back(
+        {.code = "autotest.suite.summary",
+         .severity = report.exitCode == AutotestExitCode::Success
+                         ? nuri::tools::core::ResultDiagnosticSeverityV2::Info
+                         : nuri::tools::core::ResultDiagnosticSeverityV2::Error,
+         .message = diagnostic});
+  }
+  for (const AutotestSuiteChildReport &child : report.children) {
+    nuri::tools::core::ResultChildV2 resultChild{
+        .id = child.id,
+        .status = child.status,
+        .exitCode = static_cast<int>(child.exitCode)};
+    if (!child.report.empty()) {
+      resultChild.result = child.report;
+    }
+    envelope.children.push_back(std::move(resultChild));
+  }
+  envelope.payloadJson = std::move(payload.value());
+  auto serialized = nuri::tools::core::serializeResultEnvelopeV2(envelope);
+  if (serialized.hasError()) {
+    return Result<std::string, std::string>::makeError(
+        "writeAutotestSuiteReportJson: " + serialized.error());
+  }
+  return serialized;
+}
+
+Result<bool, std::string>
+writeAutotestSuiteReportFile(const AutotestSuiteReport &report,
+                             const std::filesystem::path &path) {
+  auto json = writeAutotestSuiteReportJson(report);
+  if (json.hasError()) {
+    return Result<bool, std::string>::makeError(json.error());
+  }
+  auto written = nuri::tools::core::atomicWriteTextFile(path, json.value());
+  if (written.hasError()) {
+    return Result<bool, std::string>::makeError(
+        "writeAutotestSuiteReportFile: " + written.error());
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<AutotestSuiteReport, std::string>
+readAutotestSuiteReportFile(const std::filesystem::path &path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: failed to open " + path.string());
+  }
+  std::string json((std::istreambuf_iterator<char>(file)),
+                   std::istreambuf_iterator<char>());
+  yyjson_read_err error{};
+  JsonDocPtr doc(yyjson_read_opts(json.data(), json.size(), 0, nullptr, &error),
+                 &yyjson_doc_free);
+  yyjson_val *root = doc ? yyjson_doc_get_root(doc.get()) : nullptr;
+  yyjson_val *schema =
+      yyjson_is_obj(root) ? yyjson_obj_get(root, "schemaVersion") : nullptr;
+  if (!yyjson_is_uint(schema)) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: unsupported or missing schemaVersion");
+  }
+  if (yyjson_get_uint(schema) == 1u) {
+    return readAutotestSuiteReportPayloadV1(std::move(json), true);
+  }
+  if (yyjson_get_uint(schema) != 2u) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: unsupported schemaVersion");
+  }
+  auto envelope = nuri::tools::core::readResultEnvelopeV2(json);
+  if (envelope.hasError() ||
+      envelope.value().tool != nuri::tools::core::ResultToolV2::Autotest) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: " +
+        (envelope.hasError() ? envelope.error()
+                             : "v2 envelope tool must be autotest"));
+  }
+  auto report =
+      readAutotestSuiteReportPayloadV1(envelope.value().payloadJson, false);
+  if (report.hasError()) {
+    return report;
+  }
+  if (!envelope.value().profile.has_value()) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: v2 envelope profile is missing");
+  }
+  report.value().baselineProfileCompatible =
+      envelope.value().profile->compatible;
+  report.value().baselineProfileIncompatibilityReasons =
+      envelope.value().profile->incompatibilityReasons;
+  report.value().environmentFingerprint =
+      envelope.value().environmentFingerprint.value_or("");
+  report.value().workloadFingerprint =
+      envelope.value().workloadFingerprint.value_or("");
+  const auto expectedOutcome = autotestToolOutcome(
+      report.value().exitCode, report.value().investigative ||
+                                   !report.value().baselineProfileCompatible);
+  const auto expectedSelection =
+      resultSelection(report.value().selection, expectedOutcome);
+  const auto &actualSelection = envelope.value().selection;
+  const bool selectionMatches =
+      actualSelection.requested == expectedSelection.requested &&
+      actualSelection.selected == expectedSelection.selected &&
+      actualSelection.attempted == expectedSelection.attempted &&
+      actualSelection.completed == expectedSelection.completed &&
+      actualSelection.passed == expectedSelection.passed &&
+      actualSelection.warned == expectedSelection.warned &&
+      actualSelection.failed == expectedSelection.failed &&
+      actualSelection.unavailable == expectedSelection.unavailable &&
+      actualSelection.notRun == expectedSelection.notRun;
+  bool childrenMatch =
+      envelope.value().children.size() == report.value().children.size();
+  for (size_t index = 0u;
+       childrenMatch && index < report.value().children.size(); ++index) {
+    const auto &actual = envelope.value().children[index];
+    const auto &expected = report.value().children[index];
+    childrenMatch =
+        actual.id == expected.id && actual.status == expected.status &&
+        actual.exitCode == static_cast<int>(expected.exitCode) &&
+        actual.result ==
+            (expected.report.empty()
+                 ? std::optional<std::filesystem::path>{}
+                 : std::optional<std::filesystem::path>{expected.report});
+  }
+  if (envelope.value().status != expectedOutcome ||
+      envelope.value().exitCode != static_cast<int>(report.value().exitCode) ||
+      envelope.value().authoritative ||
+      envelope.value().profile->id != report.value().baselineProfile ||
+      !selectionMatches || !childrenMatch) {
+    return Result<AutotestSuiteReport, std::string>::makeError(
+        "readAutotestSuiteReportFile: v2 envelope and suite payload disagree");
+  }
+  return report;
+}
+
+namespace {
+
+struct AutotestHtmlCounts {
+  size_t captures = 0u;
+  size_t readouts = 0u;
+  size_t assertions = 0u;
+  size_t passed = 0u;
+  size_t warned = 0u;
+  size_t failed = 0u;
+  size_t unavailable = 0u;
+};
+
+void countAssertion(const AutotestAssertionResult &assertion,
+                    AutotestHtmlCounts &counts) {
+  ++counts.assertions;
+  const std::string status = autotestAssertionStatusName(assertion.status);
+  if (status == "fail" || status == "invalid") {
+    ++counts.failed;
+  } else if (status == "warn") {
+    ++counts.warned;
+  } else if (status == "unavailable") {
+    ++counts.unavailable;
+  } else {
+    ++counts.passed;
+  }
+}
+
+[[nodiscard]] AutotestHtmlCounts
+autotestHtmlCounts(const AutotestReport &report) {
+  AutotestHtmlCounts counts{};
+  for (const AutotestCheckpointReport &checkpoint : report.checkpoints) {
+    counts.captures += checkpoint.captures.size();
+    counts.readouts += checkpoint.readouts.size();
+    for (const AutotestAssertionResult &assertion : checkpoint.assertions) {
+      countAssertion(assertion, counts);
+    }
+    for (const AutotestReadoutReport &readout : checkpoint.readouts) {
+      for (const AutotestAssertionResult &assertion : readout.assertions) {
+        countAssertion(assertion, counts);
+      }
+    }
+  }
+  for (const AutotestMetricWindowReport &window : report.metricWindows) {
+    for (const AutotestAssertionResult &assertion : window.assertions) {
+      countAssertion(assertion, counts);
+    }
+  }
+  return counts;
+}
+
+[[nodiscard]] std::string_view
+checkpointStatus(const AutotestCheckpointReport &checkpoint) {
+  if (!checkpoint.errors.empty()) {
+    return "error";
+  }
+  bool warned = !checkpoint.warnings.empty();
+  for (const AutotestAssertionResult &assertion : checkpoint.assertions) {
+    const std::string status = autotestAssertionStatusName(assertion.status);
+    if (status == "fail" || status == "invalid") {
+      return "fail";
+    }
+    warned = warned || status == "warn";
+  }
+  for (const AutotestCaptureReport &capture : checkpoint.captures) {
+    if (capture.snapshot.status == "fail" ||
+        capture.snapshot.status == "runtime_error" ||
+        capture.snapshot.status == "invalid") {
+      return "fail";
+    }
+    warned = warned || capture.snapshot.status == "investigative" ||
+             capture.snapshot.status == "missing_baseline" ||
+             capture.snapshot.status == "missing_capture_point" ||
+             capture.snapshot.status == "environment_unavailable";
+  }
+  for (const AutotestReadoutReport &readout : checkpoint.readouts) {
+    if (readout.status == "fail" || readout.status == "invalid" ||
+        readout.status == "error") {
+      return "fail";
+    }
+    warned = warned || readout.status == "warn";
+  }
+  return warned ? "warn" : "pass";
+}
+
+void writeStatusBadge(std::ostringstream &out, std::string_view status) {
+  out << "<span class=\"status-badge status-" << htmlEscape(status) << "\">"
+      << htmlEscape(readableStatus(status)) << "</span>";
+}
+
+void writeMessages(std::ostringstream &out, std::string_view title,
+                   const std::vector<std::string> &messages,
+                   std::string_view tone, std::string_view role) {
+  if (messages.empty()) {
+    return;
+  }
+  out << "<section class=\"diagnostics tone-" << tone << "\" role=\"" << role
+      << "\"><h3>" << htmlEscape(title) << "</h3><ul>";
+  for (const std::string &message : messages) {
+    out << "<li>" << htmlEscape(message) << "</li>";
+  }
+  out << "</ul></section>";
+}
+
+} // namespace
+
 Result<std::string, std::string>
 writeAutotestHtmlReport(const AutotestReport &report) {
+  const AutotestHtmlCounts counts = autotestHtmlCounts(report);
+  const std::string_view overallStatus =
+      report.status.empty() ? std::string_view{"invalid"} : report.status;
   std::ostringstream out;
-  out << "<!doctype html><html><head><meta charset=\"utf-8\">";
-  out << "<title>Nuri Autotest " << htmlEscape(report.testCase.id)
-      << "</title>";
-  out << "<style>body{font-family:Segoe UI,Arial,sans-serif;margin:24px;"
-         "color:#202124;background:#f7f8fa}table{border-collapse:collapse;"
-         "width:100%;background:#fff}td,th{border:1px solid #d8dce3;"
-         "padding:6px 8px;text-align:left}.status-fail,.status-invalid{"
-         "color:#a40000;font-weight:600}.status-warn{color:#8a5a00;"
-         "font-weight:600}.status-pass{color:#126b2e;font-weight:600}"
-         ".checkpoint{margin:18px 0;padding:14px;background:#fff;"
-         "border:1px solid #d8dce3;border-radius:6px}"
-         "img{max-width:320px;border:1px solid #d8dce3}</style></head><body>";
-  out << "<h1>" << htmlEscape(report.testCase.id) << "</h1>";
-  out << "<p>suite: " << htmlEscape(report.testCase.suite)
-      << " generated: " << htmlEscape(report.generatedAtUtc) << "</p>";
-  if (!report.warnings.empty()) {
-    out << "<h2>Warnings</h2><ul>";
-    for (const std::string &warning : report.warnings) {
-      out << "<li>" << htmlEscape(warning) << "</li>";
-    }
-    out << "</ul>";
+  nuri::tools::core::beginHtmlReport(out, "Nuri Autotest " + report.testCase.id,
+                                     R"CSS(
+.checkpoint{border-left-width:5px}.checkpoint.status-pass{border-left-color:var(--pass)}.checkpoint.status-warn{border-left-color:var(--warn)}.checkpoint.status-fail,.checkpoint.status-error{border-left-color:var(--fail)}
+.checkpoint-meta{display:flex;flex-wrap:wrap;gap:.45rem .8rem;margin:.45rem 0 0;color:var(--muted);font-size:.82rem}
+.checkpoint-content{display:grid;gap:1rem}.subsection{min-width:0;margin-top:1rem}.subsection-heading{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;margin-bottom:.55rem}
+.evidence-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,20rem),1fr));gap:.75rem}
+.evidence-card{min-width:0;padding:.85rem;border:1px solid var(--line);border-radius:var(--radius-small);background:var(--surface-soft)}
+.evidence-card .card-heading{align-items:flex-start}.evidence-card p{margin:.45rem 0;color:var(--muted);overflow-wrap:anywhere}
+.evidence-images{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem;margin-top:.7rem}.evidence-images figure{min-width:0;margin:0}.evidence-images figcaption{margin-bottom:.25rem;color:var(--muted);font-size:.75rem;font-weight:750}.evidence-images a{display:block;overflow:hidden;border:1px solid var(--line);border-radius:7px;background:#05080a}.evidence-images img{display:block;width:100%;height:auto}
+.readout-table{min-width:62rem}.assertion-table{min-width:48rem}.metric-table{min-width:55rem}.measurement-table{min-width:32rem}
+.status-cell{min-width:10rem}.status-cell .status-badge{margin-bottom:.3rem}.status-reason{display:block;color:var(--muted);font-size:.78rem;overflow-wrap:anywhere}
+.compact-list{margin:0;padding-left:1rem}.compact-list li{margin:.2rem 0}.value-list{margin:0;padding:0;list-style:none;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.8rem}
+.window-grid{display:grid;gap:.8rem}.metric-window{margin:0}.metric-window>summary{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.2rem;font-weight:800}.metric-window[open]>summary{margin-bottom:.7rem}
+@media(max-width:760px){.evidence-images{grid-template-columns:1fr}.subsection-heading{align-items:flex-start;flex-direction:column}}
+)CSS");
+  out << "<header class=\"report-header\"><p class=\"report-kicker\">"
+         "Deterministic renderer autotest</p><div class=\"title-row\"><h1>"
+      << htmlEscape(report.testCase.id) << "</h1>";
+  writeStatusBadge(out, overallStatus);
+  out << "</div><p class=\"lede\">Checkpoint captures, readouts, assertions, "
+         "and metric-window evidence in one failure-first report.</p><ul "
+         "class=\"meta-list\"><li><strong>Suite:</strong> "
+      << htmlEscape(report.testCase.suite)
+      << "</li><li><strong>Generated:</strong> "
+      << htmlEscape(report.generatedAtUtc)
+      << "</li><li><strong>Backend:</strong> "
+      << htmlEscape(report.environment.gpuBackend)
+      << "</li><li><strong>GPU:</strong> "
+      << htmlEscape(report.environment.gpuDeviceName)
+      << "</li><li><strong>Commit:</strong> <code>"
+      << htmlEscape(report.environment.commitHash)
+      << "</code></li></ul><nav class=\"report-nav\" aria-label=\"Report "
+         "sections\"><a href=\"#overview\">Overview</a>"
+         "<a href=\"#checkpoints\">Checkpoints</a><a href=\"#metric-windows\">"
+         "Metric windows</a><a href=\"#environment\">Environment</a>"
+         "<button type=\"button\" data-action=\"theme\" aria-pressed=\"false\">"
+         "Light theme</button></nav>";
+  if (!report.reproduceCommand.empty()) {
+    out << "<div class=\"command-box\"><code id=\"reproduce-command\">"
+        << htmlEscape(report.reproduceCommand)
+        << "</code><button type=\"button\" "
+           "data-copy-target=\"#reproduce-command\">"
+           "Copy command</button></div>";
   }
-  if (!report.errors.empty()) {
-    out << "<h2>Errors</h2><ul>";
-    for (const std::string &error : report.errors) {
-      out << "<li>" << htmlEscape(error) << "</li>";
-    }
-    out << "</ul>";
+  out << "</header><main id=\"main-content\" tabindex=\"-1\"><section "
+         "id=\"overview\" aria-labelledby=\"overview-title\"><div "
+         "class=\"section-heading\"><div><h2 id=\"overview-title\">Run overview"
+         "</h2><p>Evidence totals and assertion outcomes.</p></div></div>"
+         "<div class=\"summary-grid\"><div class=\"summary-card\"><strong>"
+      << report.checkpoints.size()
+      << "</strong><span>checkpoints</span></div><div class=\"summary-card\">"
+         "<strong>"
+      << counts.captures
+      << "</strong><span>captures</span></div><div class=\"summary-card\">"
+         "<strong>"
+      << counts.readouts
+      << "</strong><span>readouts</span></div><div class=\"summary-card\">"
+         "<strong class=\"tone-pass\">"
+      << counts.passed
+      << "</strong><span>assertions passed</span></div><div "
+         "class=\"summary-card\">"
+         "<strong class=\"tone-warn\">"
+      << counts.warned
+      << "</strong><span>assertions warned</span></div><div "
+         "class=\"summary-card\">"
+         "<strong class=\"tone-fail\">"
+      << counts.failed
+      << "</strong><span>assertions failed</span></div><div "
+         "class=\"summary-card\"><strong class=\"tone-warn\">"
+      << counts.unavailable
+      << "</strong><span>assertions unavailable</span></div></div></section>";
+  writeMessages(out, "Run errors", report.errors, "fail", "alert");
+  writeMessages(out, "Run warnings", report.warnings, "warn", "status");
+  out << "<details class=\"panel\" id=\"environment\"><summary><strong>Run "
+         "configuration, environment, and authority</strong></summary><div "
+         "class=\"detail-grid\"><dl><dt>Baseline profile</dt><dd>"
+      << htmlEscape(report.baselineProfile)
+      << "</dd><dt>Profile compatible</dt><dd>"
+      << (report.baselineProfileCompatible ? "yes" : "no")
+      << "</dd><dt>Resolution</dt><dd>" << report.testCase.resolution[0] << "×"
+      << report.testCase.resolution[1]
+      << "</dd><dt>Fixed delta</dt><dd class=\"mono\">"
+      << report.run.fixedDeltaSeconds
+      << " s</dd></dl><dl><dt>Rendered frames</dt><dd>"
+      << report.run.renderedFrames << "</dd><dt>Warmup frames</dt><dd>"
+      << report.run.warmupFrames << "</dd><dt>Readout drain</dt><dd>"
+      << report.run.readoutDrainFrames << " / "
+      << report.run.readoutDrainFrameLimit
+      << " frames</dd><dt>Window mode</dt><dd>"
+      << htmlEscape(report.run.resolvedWindowMode)
+      << "</dd></dl><dl><dt>Build</dt><dd>"
+      << htmlEscape(report.environment.buildType) << "</dd><dt>Driver</dt><dd>"
+      << htmlEscape(report.environment.gpuDriverVersion)
+      << "</dd><dt>Present mode</dt><dd>"
+      << htmlEscape(report.environment.resolvedPresentMode)
+      << "</dd><dt>Capture sync</dt><dd>"
+      << htmlEscape(report.run.captureSynchronization) << "</dd></dl></div>";
+  if (!report.baselineProfileIncompatibilityReasons.empty()) {
+    writeMessages(out, "Profile incompatibility reasons",
+                  report.baselineProfileIncompatibilityReasons, "warn",
+                  "status");
   }
-  for (const AutotestCheckpointReport &checkpoint : report.checkpoints) {
-    out << "<section class=\"checkpoint\"><h2>" << htmlEscape(checkpoint.id)
-        << " frame " << checkpoint.frame << "</h2>";
-    out << "<h3>Captures</h3><table><tr><th>Target</th><th>Status</th>"
-           "<th>Preview</th><th>Diff</th></tr>";
+  out << "</details><section id=\"checkpoints\" "
+         "aria-labelledby=\"checkpoints-title\"><div class=\"section-heading\">"
+         "<div><h2 id=\"checkpoints-title\">Checkpoints</h2><p>Captures and "
+         "assertions at deterministic frames, ordered by execution.</p></div>"
+         "<span class=\"section-count\">"
+      << report.checkpoints.size() << " total</span></div>";
+  if (!report.checkpoints.empty()) {
+    out << "<div class=\"toolbar\" role=\"search\" aria-label=\"Filter "
+           "checkpoints\"><div class=\"control-group\"><label "
+           "for=\"checkpoint-search\">Search checkpoint</label><input "
+           "id=\"checkpoint-search\" type=\"search\" placeholder=\"Checkpoint "
+           "id\"></div><div class=\"control-group\"><label "
+           "for=\"checkpoint-status\">Outcome</label><select "
+           "id=\"checkpoint-status\"><option value=\"\">All outcomes</option>"
+           "<option>error</option><option>fail</option><option>warn</option>"
+           "<option>pass</option></select></div><p id=\"checkpoint-results\" "
+           "class=\"results-count\" aria-live=\"polite\"></p></div>";
+  }
+  for (size_t checkpointIndex = 0u; checkpointIndex < report.checkpoints.size();
+       ++checkpointIndex) {
+    const AutotestCheckpointReport &checkpoint =
+        report.checkpoints[checkpointIndex];
+    const std::string_view outcome = checkpointStatus(checkpoint);
+    out << "<article class=\"checkpoint status-" << outcome
+        << "\" data-status=\"" << outcome << "\" data-checkpoint=\""
+        << htmlEscape(checkpoint.id) << "\" id=\"checkpoint-" << checkpointIndex
+        << "\"><div class=\"card-heading\"><div>"
+           "<p class=\"report-kicker\">Checkpoint "
+        << checkpointIndex + 1u << "</p><h2>" << htmlEscape(checkpoint.id)
+        << "</h2><p class=\"checkpoint-meta\"><span>Frame " << checkpoint.frame
+        << "</span><span>" << checkpoint.captures.size()
+        << " captures</span><span>" << checkpoint.readouts.size()
+        << " readouts</span><span>" << checkpoint.assertions.size()
+        << " direct assertions</span></p></div>";
+    writeStatusBadge(out, outcome);
+    out << "</div>";
+    writeMessages(out, "Checkpoint errors", checkpoint.errors, "fail", "alert");
+    writeMessages(out, "Checkpoint warnings", checkpoint.warnings, "warn",
+                  "status");
+    out << "<div class=\"checkpoint-content\"><section class=\"subsection\" "
+           "aria-labelledby=\"checkpoint-captures-"
+        << checkpointIndex
+        << "\"><div class=\"subsection-heading\"><h3 "
+           "id=\"checkpoint-captures-"
+        << checkpointIndex << "\">Captures</h3><span class=\"section-count\">"
+        << checkpoint.captures.size() << "</span></div>";
+    if (checkpoint.captures.empty()) {
+      out << "<p class=\"empty-state\">No captures requested at this "
+             "checkpoint.</p>";
+    } else {
+      out << "<div class=\"evidence-grid\">";
+    }
     for (const AutotestCaptureReport &capture : checkpoint.captures) {
-      out << "<tr><td>" << htmlEscape(capture.target) << "</td><td class=\""
-          << "status-" << htmlEscape(capture.snapshot.status) << "\">"
-          << htmlEscape(capture.snapshot.status) << " "
-          << htmlEscape(capture.snapshot.statusReason) << "</td><td>";
-      if (!capture.snapshot.preview.empty()) {
-        out << "<img src=\""
-            << htmlEscape(capture.snapshot.preview.generic_string())
-            << "\" alt=\"" << htmlEscape(capture.target) << "\">";
+      out << "<article class=\"evidence-card\"><div class=\"card-heading\">"
+             "<h3>"
+          << htmlEscape(capture.target) << "</h3>";
+      writeStatusBadge(out, capture.snapshot.status);
+      out << "</div><p>"
+          << htmlEscape(readableStatus(capture.snapshot.statusReason))
+          << "</p><dl><dt>Profile</dt><dd>" << htmlEscape(capture.profile)
+          << "</dd><dt>Required</dt><dd>" << (capture.required ? "yes" : "no")
+          << "</dd><dt>Compare</dt><dd>" << (capture.compare ? "yes" : "no")
+          << "</dd></dl>";
+      if (!capture.snapshot.preview.empty() || !capture.snapshot.diff.empty()) {
+        out << "<div class=\"evidence-images\">";
+        if (!capture.snapshot.preview.empty()) {
+          const std::string href =
+              autotestArtifactHref(report, capture.snapshot.preview);
+          out << "<figure><figcaption>Actual preview</figcaption><a href=\""
+              << htmlEscape(href) << "\" aria-label=\"Open actual preview for "
+              << htmlEscape(capture.target)
+              << "\"><img decoding=\"async\" src=\"" << htmlEscape(href)
+              << "\" alt=\"" << htmlEscape(capture.target)
+              << " actual preview\"></a></figure>";
+        }
+        if (!capture.snapshot.diff.empty()) {
+          const std::string href =
+              autotestArtifactHref(report, capture.snapshot.diff);
+          out << "<figure><figcaption>Semantic diff</figcaption><a href=\""
+              << htmlEscape(href) << "\" aria-label=\"Open semantic diff for "
+              << htmlEscape(capture.target)
+              << "\"><img decoding=\"async\" src=\"" << htmlEscape(href)
+              << "\" alt=\"" << htmlEscape(capture.target)
+              << " semantic difference\"></a></figure>";
+        }
+        out << "</div>";
       }
-      out << "</td><td>";
-      if (!capture.snapshot.diff.empty()) {
-        out << "<img src=\""
-            << htmlEscape(capture.snapshot.diff.generic_string())
-            << "\" alt=\"diff\">";
-      }
-      out << "</td></tr>";
+      out << "</article>";
     }
-    out << "</table>";
+    if (!checkpoint.captures.empty()) {
+      out << "</div>";
+    }
+    out << "</section>";
     if (!checkpoint.readouts.empty()) {
-      out << "<h3>Readouts</h3><table><tr><th>ID</th><th>Type</th>"
-             "<th>Status</th><th>Request</th><th>Result</th>"
-             "<th>Values</th><th>Assertions</th></tr>";
+      out << "<section class=\"subsection\"><div class=\"subsection-heading\">"
+             "<h3>Readouts</h3><span class=\"section-count\">"
+          << checkpoint.readouts.size()
+          << "</span></div><div class=\"table-wrap\"><table "
+             "class=\"readout-table\"><caption>Asynchronous readout requests, "
+             "results, values, and nested assertions</caption><thead><tr>"
+             "<th scope=\"col\">ID</th><th scope=\"col\">Type</th>"
+             "<th scope=\"col\">Status</th><th scope=\"col\">Request frame</th>"
+             "<th scope=\"col\">Result frame</th><th scope=\"col\">Values</th>"
+             "<th scope=\"col\">Assertions</th></tr></thead><tbody>";
       for (const AutotestReadoutReport &readout : checkpoint.readouts) {
         out << "<tr><td>" << htmlEscape(readout.id) << "</td><td>"
-            << htmlEscape(readout.type) << "</td><td class=\"status-"
-            << htmlEscape(readout.status) << "\">" << htmlEscape(readout.status)
-            << " " << htmlEscape(readout.statusReason) << "</td><td>"
-            << readout.requestFrame << "</td><td>";
+            << htmlEscape(readout.type) << "</td><td class=\"status-cell\">";
+        writeStatusBadge(out, readout.status);
+        out << "<span class=\"status-reason\">"
+            << htmlEscape(readableStatus(readout.statusReason))
+            << "</span></td><td class=\"numeric\">" << readout.requestFrame
+            << "</td><td class=\"numeric\">";
         if (readout.resultFrame != 0u || readout.status == "pass" ||
             readout.status == "fail" || readout.status == "warn") {
           out << readout.resultFrame;
         }
-        out << "</td><td>";
-        bool firstValue = true;
+        out << "</td><td><ul class=\"value-list\">";
         for (const auto &[key, value] : readout.values) {
-          if (!firstValue) {
-            out << ", ";
-          }
-          firstValue = false;
-          out << htmlEscape(key) << "=" << value;
+          out << "<li>" << htmlEscape(key) << " = " << value << "</li>";
         }
-        out << "</td><td>";
-        bool firstAssertion = true;
+        out << "</ul></td><td><ul class=\"compact-list\">";
         for (const AutotestAssertionResult &assertion : readout.assertions) {
           const std::string status =
               autotestAssertionStatusName(assertion.status);
-          if (!firstAssertion) {
-            out << "<br>";
-          }
-          firstAssertion = false;
-          out << htmlEscape(assertion.id) << ": "
-              << "<span class=\"status-" << htmlEscape(status) << "\">"
+          out << "<li>" << htmlEscape(assertion.id)
+              << " — <span class=\"status-" << htmlEscape(status) << "\">"
               << htmlEscape(status) << "</span>";
           if (assertion.hasActual) {
             out << " " << assertion.actual;
           }
+          out << "</li>";
+        }
+        out << "</ul></td></tr>";
+      }
+      out << "</tbody></table></div></section>";
+    }
+    out << "<section class=\"subsection\"><div class=\"subsection-heading\">"
+           "<h3>Direct assertions</h3><span class=\"section-count\">"
+        << checkpoint.assertions.size() << "</span></div>";
+    if (checkpoint.assertions.empty()) {
+      out << "<p class=\"empty-state\">No direct assertions at this checkpoint."
+             "</p>";
+    } else {
+      out << "<div class=\"table-wrap\"><table class=\"assertion-table\">"
+             "<caption>Checkpoint assertion outcomes</caption><thead><tr>"
+             "<th scope=\"col\">ID</th><th scope=\"col\">Metric</th>"
+             "<th scope=\"col\">Status</th><th scope=\"col\">Actual</th>"
+             "<th scope=\"col\">Samples</th></tr></thead><tbody>";
+      for (const AutotestAssertionResult &assertion : checkpoint.assertions) {
+        const std::string status =
+            autotestAssertionStatusName(assertion.status);
+        out << "<tr><td>" << htmlEscape(assertion.id) << "</td><td><code>"
+            << htmlEscape(assertion.metric)
+            << "</code></td><td class=\"status-cell\">";
+        writeStatusBadge(out, status);
+        out << "<span class=\"status-reason\">"
+            << htmlEscape(readableStatus(assertion.statusReason))
+            << "</span></td><td class=\"numeric\">";
+        if (assertion.hasActual) {
+          out << assertion.actual;
+        }
+        out << "</td><td class=\"numeric\">" << assertion.sampleCount;
+        if (assertion.expectedSampleCount != 0u) {
+          out << " / " << assertion.expectedSampleCount;
         }
         out << "</td></tr>";
       }
-      out << "</table>";
+      out << "</tbody></table></div>";
     }
-    out << "<h3>Assertions</h3><table><tr><th>ID</th><th>Metric</th>"
-           "<th>Status</th><th>Actual</th></tr>";
-    for (const AutotestAssertionResult &assertion : checkpoint.assertions) {
-      const std::string status = autotestAssertionStatusName(assertion.status);
-      out << "<tr><td>" << htmlEscape(assertion.id) << "</td><td>"
-          << htmlEscape(assertion.metric) << "</td><td class=\"status-"
-          << htmlEscape(status) << "\">" << htmlEscape(status) << " "
-          << htmlEscape(assertion.statusReason) << "</td><td>";
-      if (assertion.hasActual) {
-        out << assertion.actual;
+    out << "</section>";
+    if (!checkpoint.measurements.empty()) {
+      out << "<details class=\"subsection\"><summary><strong>Raw checkpoint "
+             "measurements ("
+          << checkpoint.measurements.size()
+          << ")</strong></summary><div class=\"table-wrap\"><table "
+             "class=\"measurement-table\"><caption>Recorded renderer metric "
+             "values</caption><thead><tr><th scope=\"col\">Metric</th>"
+             "<th scope=\"col\">Value</th></tr></thead><tbody>";
+      for (const auto &[metric, value] : checkpoint.measurements) {
+        out << "<tr><td><code>" << htmlEscape(metric)
+            << "</code></td><td class=\"numeric\">" << value << "</td></tr>";
       }
-      out << "</td></tr>";
+      out << "</tbody></table></div></details>";
     }
-    out << "</table></section>";
+    out << "</div></article>";
   }
+  if (report.checkpoints.empty()) {
+    out << "<p class=\"empty-state\">No checkpoints were completed.</p>";
+  }
+  out << "</section>";
   if (!report.metricWindows.empty()) {
-    out << "<h2>Metric Windows</h2>";
+    out << "<section id=\"metric-windows\" "
+           "aria-labelledby=\"metric-windows-title\">"
+           "<div class=\"section-heading\"><div><h2 "
+           "id=\"metric-windows-title\">"
+           "Metric windows</h2><p>Aggregate assertions across frame ranges.</p>"
+           "</div><span class=\"section-count\">"
+        << report.metricWindows.size()
+        << " total</span></div><div class=\"window-grid\">";
     for (const AutotestMetricWindowReport &window : report.metricWindows) {
-      out << "<section class=\"checkpoint\"><h3>" << htmlEscape(window.id)
-          << " frames " << window.startFrame << "-" << window.endFrame
-          << "</h3><table><tr><th>ID</th><th>Metric</th><th>Statistic</th>"
-             "<th>Status</th><th>Actual</th><th>Samples</th></tr>";
+      out << "<details class=\"panel metric-window\" open><summary><span>"
+          << htmlEscape(window.id) << "</span><span class=\"muted\">frames "
+          << window.startFrame << "–" << window.endFrame << "</span></summary>";
+      writeMessages(out, "Window errors", window.errors, "fail", "alert");
+      writeMessages(out, "Window warnings", window.warnings, "warn", "status");
+      out << "<div class=\"table-wrap\"><table class=\"metric-table\">"
+             "<caption>Metric-window assertion outcomes</caption><thead><tr>"
+             "<th scope=\"col\">ID</th><th scope=\"col\">Metric</th>"
+             "<th scope=\"col\">Statistic</th><th scope=\"col\">Status</th>"
+             "<th scope=\"col\">Actual</th><th scope=\"col\">Samples</th>"
+             "</tr></thead><tbody>";
       for (const AutotestAssertionResult &assertion : window.assertions) {
         const std::string status =
             autotestAssertionStatusName(assertion.status);
         out << "<tr><td>" << htmlEscape(assertion.id) << "</td><td>"
-            << htmlEscape(assertion.metric) << "</td><td>"
-            << htmlEscape(assertion.statistic) << "</td><td class=\"status-"
-            << htmlEscape(status) << "\">" << htmlEscape(status) << " "
-            << htmlEscape(assertion.statusReason) << "</td><td>";
+            << "<code>" << htmlEscape(assertion.metric) << "</code></td><td>"
+            << htmlEscape(assertion.statistic)
+            << "</td><td class=\"status-cell\">";
+        writeStatusBadge(out, status);
+        out << "<span class=\"status-reason\">"
+            << htmlEscape(readableStatus(assertion.statusReason))
+            << "</span></td><td class=\"numeric\">";
         if (assertion.hasActual) {
           out << assertion.actual;
         }
-        out << "</td><td>" << assertion.sampleCount << "</td></tr>";
+        out << "</td><td class=\"numeric\">" << assertion.sampleCount
+            << "</td></tr>";
       }
-      out << "</table></section>";
+      out << "</tbody></table></div></details>";
     }
+    out << "</div></section>";
+  } else {
+    out << "<section id=\"metric-windows\" "
+           "aria-labelledby=\"metric-windows-title\">"
+           "<h2 id=\"metric-windows-title\">Metric windows</h2>"
+           "<p class=\"empty-state\">No metric windows were "
+           "evaluated.</p></section>";
   }
-  out << "</body></html>";
+  out << "</main>";
+  nuri::tools::core::endHtmlReport(out, R"JS(
+(() => {
+  const search = document.querySelector('#checkpoint-search');
+  const status = document.querySelector('#checkpoint-status');
+  const checkpoints = [...document.querySelectorAll('.checkpoint')];
+  const results = document.querySelector('#checkpoint-results');
+  const filter = () => {
+    const query = (search?.value || '').trim().toLowerCase();
+    const selected = status?.value || '';
+    let visible = 0;
+    checkpoints.forEach((checkpoint) => {
+      const show = (!query || checkpoint.dataset.checkpoint.toLowerCase().includes(query)) &&
+        (!selected || checkpoint.dataset.status === selected);
+      checkpoint.hidden = !show;
+      if (show) visible += 1;
+    });
+    if (results) results.textContent = `${visible} of ${checkpoints.length} checkpoints shown`;
+  };
+  search?.addEventListener('input', filter);
+  status?.addEventListener('change', filter);
+  filter();
+})();
+)JS");
   return Result<std::string, std::string>::makeResult(out.str());
 }
 
@@ -853,17 +2824,126 @@ writeAutotestHtmlReportFile(const AutotestReport &report,
 Result<std::string, std::string>
 writeAutotestSuiteHtml(const std::vector<AutotestReport> &reports,
                        std::string_view suite) {
-  std::ostringstream out;
-  out << "<!doctype html><html><head><meta charset=\"utf-8\"><title>Nuri "
-         "Autotest Suite</title></head><body><h1>Autotest suite "
-      << htmlEscape(suite) << "</h1><ul>";
+  size_t passed = 0u;
+  size_t warned = 0u;
+  size_t failed = 0u;
+  size_t invalid = 0u;
   for (const AutotestReport &report : reports) {
-    out << "<li>" << htmlEscape(report.testCase.id)
-        << " checkpoints=" << report.checkpoints.size()
-        << " warnings=" << report.warnings.size()
-        << " errors=" << report.errors.size() << "</li>";
+    if (report.status == "pass") {
+      ++passed;
+    } else if (report.status == "warn" || report.status == "investigative" ||
+               report.status == "unavailable") {
+      ++warned;
+    } else if (report.status == "fail" || report.status == "error") {
+      ++failed;
+    } else {
+      ++invalid;
+    }
   }
-  out << "</ul></body></html>";
+  const std::string_view overallStatus =
+      invalid != 0u  ? std::string_view{"invalid"}
+      : failed != 0u ? std::string_view{"fail"}
+      : warned != 0u ? std::string_view{"warn"}
+                     : std::string_view{"pass"};
+  std::ostringstream out;
+  nuri::tools::core::beginHtmlReport(
+      out, "Nuri Autotest Suite " + std::string(suite),
+      R"CSS(
+.case-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr));gap:.8rem;margin:0;padding:0;list-style:none}
+.case-card{min-width:0;padding:1rem;border:1px solid var(--line);border-left-width:5px;border-radius:var(--radius);background:var(--surface)}
+.case-card.status-pass{border-left-color:var(--pass)}.case-card.status-warn,.case-card.status-investigative,.case-card.status-unavailable{border-left-color:var(--warn)}.case-card.status-fail,.case-card.status-error,.case-card.status-invalid{border-left-color:var(--fail)}
+.case-card h3{margin:.6rem 0 .35rem}.case-meta{display:flex;flex-wrap:wrap;gap:.35rem .75rem;margin:0;color:var(--muted);font-size:.82rem}
+)CSS");
+  out << "<header class=\"report-header\"><p class=\"report-kicker\">"
+         "Deterministic renderer autotest suite</p><div "
+         "class=\"title-row\"><h1>"
+      << htmlEscape(suite) << "</h1>";
+  writeStatusBadge(out, overallStatus);
+  out << "</div><p class=\"lede\">Suite-wide outcomes ranked for triage, with "
+         "checkpoint and diagnostic totals per case.</p><nav "
+         "class=\"report-nav\" "
+         "aria-label=\"Report actions\"><a href=\"#cases\">Cases</a>"
+         "<button type=\"button\" data-action=\"theme\" aria-pressed=\"false\">"
+         "Light theme</button></nav></header><main id=\"main-content\" "
+         "tabindex=\"-1\"><section aria-labelledby=\"suite-overview\">"
+         "<div class=\"section-heading\"><div><h2 id=\"suite-overview\">Suite "
+         "overview</h2><p>Selected autotest case outcomes.</p></div></div>"
+         "<div class=\"summary-grid\"><div class=\"summary-card\"><strong>"
+      << reports.size()
+      << "</strong><span>cases</span></div><div class=\"summary-card\">"
+         "<strong class=\"tone-pass\">"
+      << passed
+      << "</strong><span>passed</span></div><div class=\"summary-card\">"
+         "<strong class=\"tone-warn\">"
+      << warned
+      << "</strong><span>warn / investigative</span></div><div "
+         "class=\"summary-card\"><strong class=\"tone-fail\">"
+      << failed
+      << "</strong><span>failed</span></div><div class=\"summary-card\">"
+         "<strong class=\"tone-fail\">"
+      << invalid
+      << "</strong><span>invalid</span></div></div></section><section "
+         "id=\"cases\" aria-labelledby=\"cases-title\"><div "
+         "class=\"section-heading\"><div><h2 id=\"cases-title\">Cases</h2>"
+         "<p>Filter cases by identifier or outcome.</p></div><span "
+         "class=\"section-count\">"
+      << reports.size()
+      << " total</span></div><div class=\"toolbar\" role=\"search\" "
+         "aria-label=\"Filter autotest cases\"><div class=\"control-group\">"
+         "<label for=\"case-search\">Search cases</label><input "
+         "id=\"case-search\" "
+         "type=\"search\" placeholder=\"Case id\"></div><div "
+         "class=\"control-group\">"
+         "<label for=\"case-status\">Outcome</label><select id=\"case-status\">"
+         "<option value=\"\">All outcomes</option><option>invalid</option>"
+         "<option>fail</option><option>error</option><option>warn</option>"
+         "<option>investigative</option><option>unavailable</"
+         "option><option>pass</option>"
+         "</select></div><p id=\"case-results\" class=\"results-count\" "
+         "aria-live=\"polite\"></p></div><ul class=\"case-grid\">";
+  for (const AutotestReport &report : reports) {
+    const std::string_view status =
+        report.status.empty() ? std::string_view{"invalid"} : report.status;
+    const AutotestHtmlCounts counts = autotestHtmlCounts(report);
+    out << "<li class=\"case-card status-" << htmlEscape(status)
+        << "\" data-case=\"" << htmlEscape(report.testCase.id)
+        << "\" data-status=\"" << htmlEscape(status) << "\">";
+    writeStatusBadge(out, status);
+    out << "<h3>" << htmlEscape(report.testCase.id)
+        << "</h3><p class=\"case-meta\"><span>" << report.checkpoints.size()
+        << " checkpoints</span><span>" << counts.captures
+        << " captures</span><span>" << counts.assertions
+        << " assertions</span><span>" << report.warnings.size()
+        << " warnings</span><span>" << report.errors.size()
+        << " errors</span></p></li>";
+  }
+  if (reports.empty()) {
+    out << "<li class=\"empty-state\">No autotest cases were selected.</li>";
+  }
+  out << "</ul></section></main>";
+  nuri::tools::core::endHtmlReport(out, R"JS(
+(() => {
+  const search = document.querySelector('#case-search');
+  const status = document.querySelector('#case-status');
+  const cases = [...document.querySelectorAll('.case-card')];
+  const results = document.querySelector('#case-results');
+  const filter = () => {
+    const query = (search?.value || '').trim().toLowerCase();
+    const selected = status?.value || '';
+    let visible = 0;
+    cases.forEach((item) => {
+      const show = (!query || item.dataset.case.toLowerCase().includes(query)) &&
+        (!selected || item.dataset.status === selected);
+      item.hidden = !show;
+      if (show) visible += 1;
+    });
+    if (results) results.textContent = `${visible} of ${cases.length} cases shown`;
+  };
+  search?.addEventListener('input', filter);
+  status?.addEventListener('change', filter);
+  filter();
+})();
+)JS");
   return Result<std::string, std::string>::makeResult(out.str());
 }
 

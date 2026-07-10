@@ -45,8 +45,9 @@
 - Build/run scripts live in `scripts/`.
 
 ## Profiling (Tracy)
-- Prefer measuring before optimizing. Use the built-in Tracy hooks when investigating performance.
-- Enable profiling via CMake: `-DNURI_WITH_TRACY=ON` (Debug builds do this by default).
+- Prefer measuring before optimizing. Use the built-in Tracy hooks and runtime captures when investigating performance.
+- For renderer performance work, use `.codex/skills/nuri-benchmarks` and route diagnostic Tracy traces through `nuri-bench --tracy-diagnostic` so benchmark reports own both metric JSON and trace artifacts.
+- Enable profiling through the build scripts, not direct CMake: pass `cpu` or `cpu-gpu` to the relevant `scripts/build_*` or `scripts/run_*` wrapper. Debug builds enable Tracy by default; Release builds need an explicit Tracy mode.
 - Instrument code using `lib/nuri/core/profiling.h` macros:
   - `NURI_PROFILER_FUNCTION()` / `NURI_PROFILER_FUNCTION_COLOR(color)`
   - `NURI_PROFILER_ZONE(name, color)` / `NURI_PROFILER_ZONE_END()`

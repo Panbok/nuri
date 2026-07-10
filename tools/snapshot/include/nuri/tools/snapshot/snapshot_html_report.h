@@ -16,7 +16,8 @@ writeSnapshotHtmlReportFile(const SnapshotReport &report,
                             const std::filesystem::path &path);
 [[nodiscard]] Result<std::string, std::string>
 writeSnapshotSuiteHtml(std::span<const SnapshotReport> reports,
-                       std::string_view suite);
+                       std::string_view suite,
+                       const std::filesystem::path &htmlPath = {});
 [[nodiscard]] Result<bool, std::string>
 writeSnapshotSuiteHtmlFile(std::span<const SnapshotReport> reports,
                            std::string_view suite,

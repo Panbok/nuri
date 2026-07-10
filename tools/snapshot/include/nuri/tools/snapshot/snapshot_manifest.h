@@ -28,5 +28,11 @@ filterSnapshotCasesBySuite(const std::vector<SnapshotCase> &cases,
                            std::string_view suite);
 [[nodiscard]] Result<std::filesystem::path, std::string>
 resolveSnapshotPath(std::string_view base, const std::filesystem::path &path);
+[[nodiscard]] Result<bool, std::string>
+validateSnapshotIdentifier(std::string_view value, std::string_view field,
+                           bool allowDotted = true);
+[[nodiscard]] Result<std::filesystem::path, std::string>
+resolveSnapshotPathUnder(const std::filesystem::path &root,
+                         const std::filesystem::path &relative);
 
 } // namespace nuri::tools::snapshot

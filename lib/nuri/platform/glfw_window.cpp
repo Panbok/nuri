@@ -231,6 +231,7 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
   const bool wantExclusiveFullscreen = (mode == WindowMode::Fullscreen);
   const bool wantBorderlessMonitorWindow =
       (mode == WindowMode::BorderlessFullscreen);
+  const bool wantHiddenWindow = (mode == WindowMode::Hidden);
   const bool wantMaxCoverageWindow =
       (mode == WindowMode::Windowed && width == 0 && height == 0);
 
@@ -287,6 +288,7 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
   glfwWindowHint(GLFW_REFRESH_RATE, GLFW_DONT_CARE);
   glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
   glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+  glfwWindowHint(GLFW_VISIBLE, wantHiddenWindow ? GLFW_FALSE : GLFW_TRUE);
 
   if (wantExclusiveFullscreen) {
     glfwWindowHint(GLFW_REFRESH_RATE, primaryMode->refreshRate);
@@ -342,7 +344,8 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(std::string_view title,
   const char *modeStr = (mode == WindowMode::Fullscreen) ? " [fullscreen]"
                         : (mode == WindowMode::BorderlessFullscreen)
                             ? " [borderless fullscreen]"
-                            : "";
+                        : (mode == WindowMode::Hidden) ? " [hidden]"
+                                                       : "";
   NURI_LOG_DEBUG("Window::create: Creating window '%.*s' (%d x %d)%s",
                  static_cast<int>(title.size()), title.data(), createWidth,
                  createHeight, modeStr);

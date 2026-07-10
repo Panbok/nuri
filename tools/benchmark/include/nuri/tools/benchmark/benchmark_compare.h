@@ -5,6 +5,7 @@
 #include "nuri/tools/benchmark/benchmark_report.h"
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,14 +22,19 @@ struct BenchmarkMetricComparison {
   double current = 0.0;
   double delta = 0.0;
   double deltaPercent = 0.0;
+  bool deltaPercentAvailable = true;
   std::string status = "pass";
   bool required = false;
+  std::optional<RepeatComparisonStats> repeatComparison{};
+  std::string repeatObservationUnit{};
+  bool repeatObservationsIndependent = false;
 };
 
 struct BenchmarkComparisonReport {
   uint32_t schemaVersion = 1u;
   std::string kind = "nuri.benchmark.comparison";
   bool valid = true;
+  bool authoritative = false;
   bool regression = false;
   std::vector<std::string> errors{};
   std::vector<std::string> warnings{};
@@ -44,5 +50,7 @@ writeBenchmarkComparisonJson(const BenchmarkComparisonReport &report);
 [[nodiscard]] Result<bool, std::string>
 writeBenchmarkComparisonFile(const BenchmarkComparisonReport &report,
                              const std::filesystem::path &path);
+[[nodiscard]] Result<BenchmarkComparisonReport, std::string>
+readBenchmarkComparisonFile(const std::filesystem::path &path);
 
 } // namespace nuri::tools::benchmark

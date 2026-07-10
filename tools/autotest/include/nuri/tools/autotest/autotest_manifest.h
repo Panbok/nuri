@@ -18,6 +18,11 @@ struct AutotestManifestLoadOptions {
 [[nodiscard]] std::filesystem::path defaultAutotestCaseRoot();
 [[nodiscard]] Result<AutotestCase, std::string>
 loadAutotestCaseManifest(const std::filesystem::path &path);
+[[nodiscard]] Result<bool, std::string>
+validateAutotestCase(const AutotestCase &testCase);
+[[nodiscard]] Result<bool, std::string>
+validateAutotestIdentifier(std::string_view value, std::string_view path,
+                           bool allowDots = false);
 [[nodiscard]] Result<std::vector<AutotestCase>, std::string>
 discoverAutotestCases(const AutotestManifestLoadOptions &options = {});
 [[nodiscard]] const AutotestCase *

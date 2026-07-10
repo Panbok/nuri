@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include "nuri/core/result.h"
@@ -26,6 +27,13 @@ struct TextureCompressionCaps {
   bool bc7 = false;
   bool etc2 = false;
   bool astc = false;
+};
+
+struct GPUAdapterInfo {
+  std::string name = "unknown";
+  uint32_t vendorId = 0u;
+  uint32_t deviceId = 0u;
+  std::string driverVersion = "unknown";
 };
 
 class NURI_API GPUDevice {
@@ -92,6 +100,7 @@ public:
   virtual Format getTextureFormat(TextureHandle h) const = 0;
   virtual TextureDimensions getTextureDimensions(TextureHandle h) const = 0;
   virtual TextureCompressionCaps getTextureCompressionCaps() const = 0;
+  virtual GPUAdapterInfo getAdapterInfo() const { return {}; }
   virtual bool supportsFeature(GPUFeature feature) const {
     (void)feature;
     return false;

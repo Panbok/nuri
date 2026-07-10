@@ -19,6 +19,9 @@ struct SnapshotEnvironment {
   std::string gpuBackend{};
   std::string gpuBackendSource{};
   std::string gpuDeviceName{};
+  uint32_t gpuVendorId = 0u;
+  uint32_t gpuDeviceId = 0u;
+  std::string gpuDriverVersion{};
   uint32_t swapchainImageCount = 0u;
   std::string requestedPresentMode{};
   std::string resolvedPresentMode{};

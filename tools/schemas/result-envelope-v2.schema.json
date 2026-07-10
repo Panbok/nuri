@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nuri.dev/schemas/result-envelope-v2.schema.json",
+  "title": "Nuri renderer tool result envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "kind", "tool", "runId", "status", "exitCode",
+    "authoritative", "selection", "diagnostics", "artifacts", "children", "payload"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "kind": { "const": "nuri.tool.result" },
+    "tool": { "enum": ["benchmark", "snapshot", "autotest", "validate"] },
+    "toolVersion": { "type": "string" },
+    "runId": { "$ref": "#/$defs/runId" },
+    "status": {
+      "enum": ["pass", "warn", "fail", "invalid", "unavailable", "missing_baseline", "error", "cancelled", "incomplete", "investigative"]
+    },
+    "exitCode": { "type": "integer", "minimum": 0, "maximum": 5 },
+    "authoritative": { "type": "boolean" },
+    "startedAtUtc": { "type": "string", "format": "date-time" },
+    "durationMs": { "type": "number", "minimum": 0 },
+    "command": { "type": "array", "items": { "type": "string" } },
+    "reproduceCommand": { "type": "string" },
+    "selection": { "$ref": "#/$defs/selection" },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "compatible", "incompatibilityReasons"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "compatible": { "type": "boolean" },
+        "incompatibilityReasons": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "environmentFingerprint": { "$ref": "#/$defs/fingerprint" },
+    "workloadFingerprint": { "$ref": "#/$defs/fingerprint" },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+    "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
+    "children": { "type": "array", "items": { "$ref": "#/$defs/child" } },
+    "payload": { "type": "object" },
+    "extensions": { "type": "object" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(\\.[a-z0-9][a-z0-9_-]{0,63})*$" },
+    "runId": { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}\\.[0-9]{3,6}Z-[A-Za-z0-9_-]+$" },
+    "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected", "attempted", "completed", "passed", "warned", "failed", "skipped", "unavailable", "notRun"],
+      "properties": {
+        "requested": { "type": "string" },
+        "selected": { "type": "integer", "minimum": 0 },
+        "attempted": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "warned": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "unavailable": { "type": "integer", "minimum": 0 },
+        "notRun": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/id" },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "message": { "type": "string" },
+        "context": { "type": "object" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "mediaType", "digest", "status"],
+      "properties": {
+        "role": { "$ref": "#/$defs/id" },
+        "path": { "type": "string", "pattern": "^(?![A-Za-z]:|/|\\\\)(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$" },
+        "mediaType": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^(sha256|blake3):[0-9a-f]{64}$" },
+        "status": { "enum": ["complete", "missing", "invalid"] }
+      }
+    },
+    "child": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "exitCode"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "status": { "type": "string" },
+        "exitCode": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "result": { "type": "string" }
+      }
+    }
+  }
+}

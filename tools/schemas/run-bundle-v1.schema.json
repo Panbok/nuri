@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nuri.dev/schemas/run-bundle-v1.schema.json",
+  "title": "Nuri portable run bundle checksum manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "runId", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "nuri.run.bundle" },
+    "runId": { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}\\.[0-9]{3,6}Z-[A-Za-z0-9_-]+$" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size", "digest"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^(?![A-Za-z]:|/|\\\\)(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$" },
+          "size": { "type": "integer", "minimum": 0 },
+          "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nuri.dev/schemas/comparison-v2.schema.json",
+  "title": "Nuri tool comparison",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "tool", "status", "authoritative", "currentDigest", "baselineDigest", "compatibility", "metrics"],
+  "properties": {
+    "schemaVersion": { "const": 2 }, "kind": { "const": "nuri.tool.comparison" }, "tool": { "enum": ["benchmark", "snapshot", "autotest"] },
+    "status": { "enum": ["pass", "warn", "fail", "invalid", "missing_baseline", "investigative"] }, "authoritative": { "type": "boolean" },
+    "currentDigest": { "type": "string" }, "baselineDigest": { "type": "string" },
+    "compatibility": { "type": "object", "required": ["compatible", "reasons"], "properties": { "compatible": { "type": "boolean" }, "reasons": { "type": "array", "items": { "type": "string" } } } },
+    "metrics": { "type": "array", "items": { "type": "object" } }, "extensions": { "type": "object" }
+  }
+}

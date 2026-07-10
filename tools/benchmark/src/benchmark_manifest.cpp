@@ -2,15 +2,19 @@
 
 #include "nuri/core/runtime_config.h"
 #include "nuri/tools/benchmark/benchmark_environment.h"
+#include "nuri/tools/benchmark/benchmark_metric_registry.h"
+#include "nuri/tools/core/case_catalog.h"
 
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <span>
 #include <string_view>
 
@@ -20,6 +24,64 @@ namespace nuri::tools::benchmark {
 namespace {
 
 using JsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+
+[[nodiscard]] bool isLowerAsciiLetter(char value) {
+  return value >= 'a' && value <= 'z';
+}
+
+[[nodiscard]] bool isAsciiDigit(char value) {
+  return value >= '0' && value <= '9';
+}
+
+[[nodiscard]] bool isFiniteVec3(const glm::vec3 &value) {
+  return std::isfinite(value.x) && std::isfinite(value.y) &&
+         std::isfinite(value.z);
+}
+
+[[nodiscard]] bool isSafeIdentifierSegment(std::string_view segment) {
+  if (segment.empty() || segment.size() > 64u ||
+      (!isLowerAsciiLetter(segment.front()) &&
+       !isAsciiDigit(segment.front()))) {
+    return false;
+  }
+  for (const char value : segment) {
+    if (!isLowerAsciiLetter(value) && !isAsciiDigit(value) && value != '_' &&
+        value != '-') {
+      return false;
+    }
+  }
+  static constexpr std::array reserved{
+      std::string_view("con"),  std::string_view("prn"),
+      std::string_view("aux"),  std::string_view("nul"),
+      std::string_view("com1"), std::string_view("com2"),
+      std::string_view("com3"), std::string_view("com4"),
+      std::string_view("com5"), std::string_view("com6"),
+      std::string_view("com7"), std::string_view("com8"),
+      std::string_view("com9"), std::string_view("lpt1"),
+      std::string_view("lpt2"), std::string_view("lpt3"),
+      std::string_view("lpt4"), std::string_view("lpt5"),
+      std::string_view("lpt6"), std::string_view("lpt7"),
+      std::string_view("lpt8"), std::string_view("lpt9")};
+  return std::find(reserved.begin(), reserved.end(), segment) == reserved.end();
+}
+
+[[nodiscard]] bool isSafeDottedIdentifier(std::string_view identifier) {
+  size_t begin = 0u;
+  while (begin < identifier.size()) {
+    const size_t end = identifier.find('.', begin);
+    const std::string_view segment = identifier.substr(
+        begin, end == std::string_view::npos ? identifier.size() - begin
+                                             : end - begin);
+    if (!isSafeIdentifierSegment(segment)) {
+      return false;
+    }
+    if (end == std::string_view::npos) {
+      return true;
+    }
+    begin = end + 1u;
+  }
+  return false;
+}
 
 [[nodiscard]] std::string jsonPath(std::string_view path,
                                    std::string_view key) {
@@ -236,6 +298,10 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
       std::string_view("enableInstancedDraw"),
       std::string_view("enableMeshLod"),
       std::string_view("enableCpuFrustumCulling"),
+      std::string_view("meshletMode"),
+      std::string_view("enableMeshletFrustumCulling"),
+      std::string_view("enableMeshletConeCulling"),
+      std::string_view("enableInstanceAnimation"),
       std::string_view("enableTessellation"),
       std::string_view("forcedMeshLod"),
   };
@@ -289,6 +355,32 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
     return Result<bool, std::string>::makeError(b.error());
   }
   settings.opaque.enableCpuFrustumCulling = b.value();
+  auto enumResult =
+      readEnumField(object, "meshletMode", path, settings.opaque.meshletMode,
+                    {{"Disabled", MeshletRenderMode::Disabled},
+                     {"Opportunistic", MeshletRenderMode::Opportunistic},
+                     {"Required", MeshletRenderMode::Required}});
+  if (enumResult.hasError()) {
+    return enumResult;
+  }
+  b = readBool(object, "enableMeshletFrustumCulling", path,
+               settings.opaque.enableMeshletFrustumCulling);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.opaque.enableMeshletFrustumCulling = b.value();
+  b = readBool(object, "enableMeshletConeCulling", path,
+               settings.opaque.enableMeshletConeCulling);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.opaque.enableMeshletConeCulling = b.value();
+  b = readBool(object, "enableInstanceAnimation", path,
+               settings.opaque.enableInstanceAnimation);
+  if (b.hasError()) {
+    return Result<bool, std::string>::makeError(b.error());
+  }
+  settings.opaque.enableInstanceAnimation = b.value();
   b = readBool(object, "enableTessellation", path,
                settings.opaque.enableTessellation);
   if (b.hasError()) {
@@ -301,15 +393,14 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
         yyjson_get_uint(forced) <= static_cast<uint64_t>(INT32_MAX)) {
       settings.opaque.forcedMeshLod =
           static_cast<int32_t>(yyjson_get_uint(forced));
-      return Result<bool, std::string>::makeResult(true);
-    }
-    if (!yyjson_is_sint(forced) || yyjson_get_sint(forced) < INT32_MIN ||
-        yyjson_get_sint(forced) > INT32_MAX) {
+    } else if (!yyjson_is_sint(forced) || yyjson_get_sint(forced) < INT32_MIN ||
+               yyjson_get_sint(forced) > INT32_MAX) {
       return Result<bool, std::string>::makeError(
           jsonPath(path, "forcedMeshLod") + " must be an int32");
+    } else {
+      settings.opaque.forcedMeshLod =
+          static_cast<int32_t>(yyjson_get_sint(forced));
     }
-    settings.opaque.forcedMeshLod =
-        static_cast<int32_t>(yyjson_get_sint(forced));
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -553,13 +644,10 @@ parseTextureFilteringSettings(yyjson_val *object, RenderSettings &settings,
 [[nodiscard]] Result<bool, std::string>
 parseSettings(yyjson_val *object, RenderSettings &settings) {
   static constexpr std::array keys{
-      std::string_view("opaque"),
-      std::string_view("antiAliasing"),
-      std::string_view("ambientOcclusion"),
-      std::string_view("shadow"),
-      std::string_view("hdrPostProcess"),
-      std::string_view("transmission"),
-      std::string_view("transparent"),
+      std::string_view("opaque"),           std::string_view("antiAliasing"),
+      std::string_view("ambientOcclusion"), std::string_view("shadow"),
+      std::string_view("visibility"),       std::string_view("hdrPostProcess"),
+      std::string_view("transmission"),     std::string_view("transparent"),
       std::string_view("textureFiltering"),
   };
   auto keysResult = rejectUnknownKeys(object, keys, "settings");
@@ -641,11 +729,20 @@ parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
     return Result<bool, std::string>::makeError(text.error());
   }
   scene.kind = std::move(text.value());
+  if (scene.kind != "procedural" && scene.kind != "prefab") {
+    return Result<bool, std::string>::makeError(
+        "scene.kind must be procedural or prefab");
+  }
   text = readString(object, "pathBase", "scene", false, scene.pathBase);
   if (text.hasError()) {
     return Result<bool, std::string>::makeError(text.error());
   }
   scene.pathBase = std::move(text.value());
+  if (!scene.pathBase.empty() && scene.pathBase != "repoRoot" &&
+      scene.pathBase != "modelsRoot" && scene.pathBase != "texturesRoot") {
+    return Result<bool, std::string>::makeError(
+        "scene.pathBase must be repoRoot, modelsRoot, or texturesRoot");
+  }
   text = readString(object, "path", "scene", false, scene.path.string());
   if (text.hasError()) {
     return Result<bool, std::string>::makeError(text.error());
@@ -677,7 +774,11 @@ parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
     }
     yyjson_val *mesh = optionalObject(importOptions, "mesh");
     if (mesh != nullptr) {
-      static constexpr std::array meshKeys{std::string_view("flipUVs")};
+      static constexpr std::array meshKeys{
+          std::string_view("flipUVs"), std::string_view("generateMeshlets"),
+          std::string_view("meshletMaxVertices"),
+          std::string_view("meshletMaxPrimitives"),
+          std::string_view("meshletConeWeight")};
       result = rejectUnknownKeys(mesh, meshKeys, "scene.importOptions.mesh");
       if (result.hasError()) {
         return result;
@@ -688,6 +789,38 @@ parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
         return Result<bool, std::string>::makeError(flip.error());
       }
       scene.flipUVs = flip.value();
+      auto generateMeshlets =
+          readBool(mesh, "generateMeshlets", "scene.importOptions.mesh",
+                   scene.generateMeshlets);
+      if (generateMeshlets.hasError()) {
+        return Result<bool, std::string>::makeError(generateMeshlets.error());
+      }
+      scene.generateMeshlets = generateMeshlets.value();
+      auto u32 = readU32(mesh, "meshletMaxVertices", "scene.importOptions.mesh",
+                         scene.meshletMaxVertices);
+      if (u32.hasError()) {
+        return Result<bool, std::string>::makeError(u32.error());
+      }
+      scene.meshletMaxVertices = u32.value();
+      u32 = readU32(mesh, "meshletMaxPrimitives", "scene.importOptions.mesh",
+                    scene.meshletMaxPrimitives);
+      if (u32.hasError()) {
+        return Result<bool, std::string>::makeError(u32.error());
+      }
+      scene.meshletMaxPrimitives = u32.value();
+      auto real =
+          readDouble(mesh, "meshletConeWeight", "scene.importOptions.mesh",
+                     scene.meshletConeWeight);
+      if (real.hasError()) {
+        return Result<bool, std::string>::makeError(real.error());
+      }
+      scene.meshletConeWeight = static_cast<float>(real.value());
+      if (scene.meshletMaxVertices == 0u || scene.meshletMaxPrimitives == 0u ||
+          !std::isfinite(scene.meshletConeWeight) ||
+          scene.meshletConeWeight < 0.0f || scene.meshletConeWeight > 1.0f) {
+        return Result<bool, std::string>::makeError(
+            "scene.importOptions.mesh has invalid meshlet ranges");
+      }
     }
   }
 
@@ -706,6 +839,10 @@ parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
       return Result<bool, std::string>::makeError(text.error());
     }
     scene.baseModelKind = std::move(text.value());
+    if (!scene.baseModelKind.empty() && scene.baseModelKind != "fitRadius") {
+      return Result<bool, std::string>::makeError(
+          "scene.baseModel.kind must be fitRadius");
+    }
     auto number = readDouble(baseModel, "targetRadius", "scene.baseModel",
                              scene.baseModelTargetRadius);
     if (number.hasError()) {
@@ -724,6 +861,19 @@ parseScene(yyjson_val *object, BenchmarkSceneConfig &scene) {
       return Result<bool, std::string>::makeError(number.error());
     }
     scene.baseModelMaxScale = number.value();
+    if (!std::isfinite(scene.baseModelTargetRadius) ||
+        !std::isfinite(scene.baseModelMinScale) ||
+        !std::isfinite(scene.baseModelMaxScale) ||
+        scene.baseModelTargetRadius <= 0.0 || scene.baseModelMinScale <= 0.0 ||
+        scene.baseModelMinScale > scene.baseModelMaxScale) {
+      return Result<bool, std::string>::makeError(
+          "scene.baseModel has invalid scale ranges");
+    }
+  }
+  if (scene.kind == "prefab" &&
+      (scene.pathBase.empty() || scene.path.empty())) {
+    return Result<bool, std::string>::makeError(
+        "prefab scenes require scene.pathBase and scene.path");
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -743,19 +893,36 @@ parseCamera(yyjson_val *object, BenchmarkCameraConfig &camera) {
     return Result<bool, std::string>::makeError(vec.error());
   }
   camera.position = vec.value();
+  if (!isFiniteVec3(camera.position)) {
+    return Result<bool, std::string>::makeError(
+        "camera.position entries must be finite");
+  }
   if (optionalObject(object, "target") != nullptr) {
     vec = readVec3(object, "target", "camera",
                    camera.position + camera.direction);
     if (vec.hasError()) {
       return Result<bool, std::string>::makeError(vec.error());
     }
-    camera.direction = glm::normalize(vec.value() - camera.position);
+    camera.target = vec.value();
+    if (!isFiniteVec3(camera.target) ||
+        glm::length(camera.target - camera.position) <= 1.0e-6f) {
+      return Result<bool, std::string>::makeError(
+          "camera.target must be finite and differ from camera.position");
+    }
+    camera.hasTarget = true;
+    camera.direction = glm::normalize(camera.target - camera.position);
   } else {
     vec = readVec3(object, "direction", "camera", camera.direction);
     if (vec.hasError()) {
       return Result<bool, std::string>::makeError(vec.error());
     }
+    if (!isFiniteVec3(vec.value()) || glm::length(vec.value()) <= 1.0e-6f) {
+      return Result<bool, std::string>::makeError(
+          "camera.direction must be a finite non-zero vector");
+    }
     camera.direction = glm::normalize(vec.value());
+    camera.target = camera.position + camera.direction;
+    camera.hasTarget = false;
   }
   auto number = readDouble(object, "verticalFovDegrees", "camera",
                            camera.verticalFovDegrees);
@@ -773,7 +940,164 @@ parseCamera(yyjson_val *object, BenchmarkCameraConfig &camera) {
     return Result<bool, std::string>::makeError(number.error());
   }
   camera.farPlane = static_cast<float>(number.value());
+  if (!std::isfinite(camera.verticalFovDegrees) ||
+      camera.verticalFovDegrees <= 0.0f ||
+      camera.verticalFovDegrees >= 180.0f || !std::isfinite(camera.nearPlane) ||
+      camera.nearPlane <= 0.0f || !std::isfinite(camera.farPlane) ||
+      camera.farPlane <= camera.nearPlane) {
+    return Result<bool, std::string>::makeError(
+        "camera requires 0 < verticalFovDegrees < 180 and 0 < nearPlane < "
+        "farPlane");
+  }
   return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<BenchmarkTimeline, std::string>
+parseTimeline(yyjson_val *root, const BenchmarkCameraConfig &baseCamera,
+              uint32_t defaultEndFrame) {
+  BenchmarkTimeline timeline{};
+  yyjson_val *object = optionalObject(root, "timeline");
+  if (object == nullptr) {
+    return Result<BenchmarkTimeline, std::string>::makeResult(timeline);
+  }
+  static constexpr std::array keys{std::string_view("cameraPaths")};
+  auto result = rejectUnknownKeys(object, keys, "timeline");
+  if (result.hasError()) {
+    return Result<BenchmarkTimeline, std::string>::makeError(result.error());
+  }
+  yyjson_val *paths = optionalObject(object, "cameraPaths");
+  if (paths == nullptr) {
+    return Result<BenchmarkTimeline, std::string>::makeResult(timeline);
+  }
+  if (!yyjson_is_arr(paths)) {
+    return Result<BenchmarkTimeline, std::string>::makeError(
+        "timeline.cameraPaths must be an array");
+  }
+
+  yyjson_arr_iter pathIter;
+  yyjson_arr_iter_init(paths, &pathIter);
+  yyjson_val *pathValue = nullptr;
+  while ((pathValue = yyjson_arr_iter_next(&pathIter)) != nullptr) {
+    if (!yyjson_is_obj(pathValue)) {
+      return Result<BenchmarkTimeline, std::string>::makeError(
+          "timeline.cameraPaths entries must be objects");
+    }
+    static constexpr std::array pathKeys{
+        std::string_view("id"), std::string_view("startFrame"),
+        std::string_view("endFrame"), std::string_view("interpolation"),
+        std::string_view("keyframes")};
+    result = rejectUnknownKeys(pathValue, pathKeys, "timeline.cameraPaths[]");
+    if (result.hasError()) {
+      return Result<BenchmarkTimeline, std::string>::makeError(result.error());
+    }
+
+    BenchmarkCameraPath path{};
+    auto text = readString(pathValue, "id", "timeline.cameraPaths[]", true);
+    if (text.hasError()) {
+      return Result<BenchmarkTimeline, std::string>::makeError(text.error());
+    }
+    path.id = std::move(text.value());
+    if (!isSafeDottedIdentifier(path.id)) {
+      return Result<BenchmarkTimeline, std::string>::makeError(
+          "timeline.cameraPaths[].id must be a safe lowercase identifier");
+    }
+    auto u32 = readU32(pathValue, "startFrame", "timeline.cameraPaths[]", 0u);
+    if (u32.hasError()) {
+      return Result<BenchmarkTimeline, std::string>::makeError(u32.error());
+    }
+    path.startFrame = u32.value();
+    u32 = readU32(pathValue, "endFrame", "timeline.cameraPaths[]",
+                  defaultEndFrame);
+    if (u32.hasError()) {
+      return Result<BenchmarkTimeline, std::string>::makeError(u32.error());
+    }
+    path.endFrame = u32.value();
+    if (path.startFrame > path.endFrame) {
+      return Result<BenchmarkTimeline, std::string>::makeError(
+          "timeline.cameraPaths[] has invalid frame range");
+    }
+    text = readString(pathValue, "interpolation", "timeline.cameraPaths[]",
+                      false, path.interpolation);
+    if (text.hasError()) {
+      return Result<BenchmarkTimeline, std::string>::makeError(text.error());
+    }
+    path.interpolation = std::move(text.value());
+    if (path.interpolation != "linear" && path.interpolation != "smoothstep") {
+      return Result<BenchmarkTimeline, std::string>::makeError(
+          "timeline.cameraPaths[] interpolation must be linear or smoothstep");
+    }
+
+    yyjson_val *keyframes = optionalObject(pathValue, "keyframes");
+    if (!yyjson_is_arr(keyframes) || yyjson_arr_size(keyframes) == 0u) {
+      return Result<BenchmarkTimeline, std::string>::makeError(
+          "timeline.cameraPaths[].keyframes must be a non-empty array");
+    }
+    yyjson_arr_iter keyframeIter;
+    yyjson_arr_iter_init(keyframes, &keyframeIter);
+    yyjson_val *keyframeValue = nullptr;
+    while ((keyframeValue = yyjson_arr_iter_next(&keyframeIter)) != nullptr) {
+      if (!yyjson_is_obj(keyframeValue)) {
+        return Result<BenchmarkTimeline, std::string>::makeError(
+            "timeline.cameraPaths[].keyframes entries must be objects");
+      }
+      static constexpr std::array keyframeKeys{std::string_view("frame"),
+                                               std::string_view("position"),
+                                               std::string_view("target")};
+      result = rejectUnknownKeys(keyframeValue, keyframeKeys,
+                                 "timeline.cameraPaths[].keyframes[]");
+      if (result.hasError()) {
+        return Result<BenchmarkTimeline, std::string>::makeError(
+            result.error());
+      }
+      BenchmarkCameraKeyframe keyframe{};
+      u32 = readU32(keyframeValue, "frame",
+                    "timeline.cameraPaths[].keyframes[]", path.startFrame);
+      if (u32.hasError()) {
+        return Result<BenchmarkTimeline, std::string>::makeError(u32.error());
+      }
+      keyframe.frame = u32.value();
+      if (keyframe.frame < path.startFrame || keyframe.frame > path.endFrame) {
+        return Result<BenchmarkTimeline, std::string>::makeError(
+            "camera keyframe is outside its path range");
+      }
+      if (optionalObject(keyframeValue, "position") == nullptr) {
+        return Result<BenchmarkTimeline, std::string>::makeError(
+            "timeline.cameraPaths[].keyframes[].position is required");
+      }
+      auto vec =
+          readVec3(keyframeValue, "position",
+                   "timeline.cameraPaths[].keyframes[]", baseCamera.position);
+      if (vec.hasError()) {
+        return Result<BenchmarkTimeline, std::string>::makeError(vec.error());
+      }
+      keyframe.position = vec.value();
+      if (optionalObject(keyframeValue, "target") != nullptr) {
+        vec = readVec3(keyframeValue, "target",
+                       "timeline.cameraPaths[].keyframes[]", baseCamera.target);
+        if (vec.hasError()) {
+          return Result<BenchmarkTimeline, std::string>::makeError(vec.error());
+        }
+        keyframe.target = vec.value();
+        keyframe.hasTarget = true;
+      }
+      path.keyframes.push_back(keyframe);
+    }
+    std::sort(path.keyframes.begin(), path.keyframes.end(),
+              [](const BenchmarkCameraKeyframe &lhs,
+                 const BenchmarkCameraKeyframe &rhs) {
+                return lhs.frame < rhs.frame;
+              });
+    timeline.cameraPaths.push_back(std::move(path));
+  }
+  std::set<std::string> pathIds;
+  for (const BenchmarkCameraPath &path : timeline.cameraPaths) {
+    if (!pathIds.insert(path.id).second) {
+      return Result<BenchmarkTimeline, std::string>::makeError(
+          "duplicate timeline camera path id '" + path.id + "'");
+    }
+  }
+  return Result<BenchmarkTimeline, std::string>::makeResult(
+      std::move(timeline));
 }
 
 } // namespace
@@ -828,17 +1152,29 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
   }
   yyjson_val *root = yyjson_doc_get_root(doc.get());
   static constexpr std::array rootKeys{
-      std::string_view("schemaVersion"),  std::string_view("id"),
-      std::string_view("suite"),          std::string_view("description"),
-      std::string_view("scene"),          std::string_view("backend"),
-      std::string_view("resolution"),     std::string_view("fixedDeltaSeconds"),
-      std::string_view("warmupFrames"),   std::string_view("measurementFrames"),
-      std::string_view("cooldownFrames"), std::string_view("maxDrainFrames"),
-      std::string_view("drainTimeoutMs"), std::string_view("samples"),
-      std::string_view("authoritative"),  std::string_view("presentMode"),
-      std::string_view("renderGraph"),    std::string_view("camera"),
-      std::string_view("settings"),       std::string_view("requirements"),
-      std::string_view("thresholds"),     std::string_view("requiredMetrics"),
+      std::string_view("schemaVersion"),
+      std::string_view("id"),
+      std::string_view("suite"),
+      std::string_view("description"),
+      std::string_view("scene"),
+      std::string_view("backend"),
+      std::string_view("resolution"),
+      std::string_view("fixedDeltaSeconds"),
+      std::string_view("warmupFrames"),
+      std::string_view("measurementFrames"),
+      std::string_view("cooldownFrames"),
+      std::string_view("maxDrainFrames"),
+      std::string_view("drainTimeoutMs"),
+      std::string_view("samples"),
+      std::string_view("authoritative"),
+      std::string_view("presentMode"),
+      std::string_view("renderGraph"),
+      std::string_view("camera"),
+      std::string_view("timeline"),
+      std::string_view("settings"),
+      std::string_view("requirements"),
+      std::string_view("thresholds"),
+      std::string_view("requiredMetrics"),
   };
   auto keysResult = rejectUnknownKeys(root, rootKeys, "$");
   if (keysResult.hasError()) {
@@ -861,11 +1197,19 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     return Result<BenchmarkCase, std::string>::makeError(text.error());
   }
   out.id = std::move(text.value());
+  if (!isSafeDottedIdentifier(out.id)) {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "$.id must be a safe lowercase dotted identifier");
+  }
   text = readString(root, "suite", "$", true);
   if (text.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(text.error());
   }
   out.suite = std::move(text.value());
+  if (!isSafeDottedIdentifier(out.suite)) {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "$.suite must be a safe lowercase dotted identifier");
+  }
   text = readString(root, "description", "$", false, out.description);
   if (text.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(text.error());
@@ -876,11 +1220,21 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     return Result<BenchmarkCase, std::string>::makeError(text.error());
   }
   out.backend = std::move(text.value());
+  if (out.backend != "default" && out.backend != "lvk" &&
+      out.backend != "nvrhi") {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "$.backend must be default, lvk, or nvrhi");
+  }
   text = readString(root, "presentMode", "$", false, out.presentMode);
   if (text.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(text.error());
   }
   out.presentMode = std::move(text.value());
+  if (out.presentMode != "default" && out.presentMode != "immediate" &&
+      out.presentMode != "mailbox" && out.presentMode != "fifo") {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "$.presentMode must be default, immediate, mailbox, or fifo");
+  }
 
   yyjson_val *resolution = optionalObject(root, "resolution");
   if (resolution != nullptr) {
@@ -895,6 +1249,10 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
             "resolution entries must be uint32");
       }
       out.resolution[i] = static_cast<uint32_t>(yyjson_get_uint(entry));
+      if (out.resolution[i] == 0u) {
+        return Result<BenchmarkCase, std::string>::makeError(
+            "resolution entries must be greater than zero");
+      }
     }
   }
 
@@ -904,6 +1262,10 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     return Result<BenchmarkCase, std::string>::makeError(number.error());
   }
   out.fixedDeltaSeconds = number.value();
+  if (!std::isfinite(out.fixedDeltaSeconds) || out.fixedDeltaSeconds <= 0.0) {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "$.fixedDeltaSeconds must be finite and greater than zero");
+  }
   auto u32 = readU32(root, "warmupFrames", "$", out.warmupFrames);
   if (u32.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(u32.error());
@@ -914,6 +1276,10 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     return Result<BenchmarkCase, std::string>::makeError(u32.error());
   }
   out.measurementFrames = u32.value();
+  if (out.measurementFrames == 0u) {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "$.measurementFrames must be greater than zero");
+  }
   u32 = readU32(root, "cooldownFrames", "$", out.cooldownFrames);
   if (u32.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(u32.error());
@@ -933,7 +1299,11 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
   if (u32.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(u32.error());
   }
-  out.samples = std::max(1u, u32.value());
+  if (u32.value() == 0u) {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "$.samples must be greater than zero");
+  }
+  out.samples = u32.value();
   auto boolean = readBool(root, "authoritative", "$", out.authoritative);
   if (boolean.hasError()) {
     return Result<BenchmarkCase, std::string>::makeError(boolean.error());
@@ -954,6 +1324,16 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
       return Result<BenchmarkCase, std::string>::makeError(parsed.error());
     }
   }
+  const uint32_t defaultTimelineEndFrame =
+      out.warmupFrames + out.measurementFrames + out.cooldownFrames > 0u
+          ? out.warmupFrames + out.measurementFrames + out.cooldownFrames - 1u
+          : 0u;
+  auto timeline = parseTimeline(root, out.camera, defaultTimelineEndFrame);
+  if (timeline.hasError()) {
+    return Result<BenchmarkCase, std::string>::makeError(timeline.error());
+  }
+  out.timeline = std::move(timeline.value());
+
   yyjson_val *settings = optionalObject(root, "settings");
   if (settings != nullptr) {
     auto parsed = parseSettings(settings, out.settings);
@@ -976,7 +1356,11 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
     if (u32.hasError()) {
       return Result<BenchmarkCase, std::string>::makeError(u32.error());
     }
-    out.renderGraph.workerCount = std::max(1u, u32.value());
+    if (u32.value() == 0u) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "renderGraph.workerCount must be greater than zero");
+    }
+    out.renderGraph.workerCount = u32.value();
     boolean = readBool(renderGraph, "parallelCompile", "renderGraph",
                        out.renderGraph.parallelCompile);
     if (boolean.hasError()) {
@@ -1010,6 +1394,13 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
       return Result<BenchmarkCase, std::string>::makeError(array.error());
     }
     out.requirements.backends = std::move(array.value());
+    for (const std::string &backend : out.requirements.backends) {
+      if (backend != "default" && backend != "lvk" && backend != "nvrhi") {
+        return Result<BenchmarkCase, std::string>::makeError(
+            "requirements.backends contains unsupported backend '" + backend +
+            "'");
+      }
+    }
     boolean = readBool(requirements, "allowVisibleWindow", "requirements",
                        out.requirements.allowVisibleWindow);
     if (boolean.hasError()) {
@@ -1051,6 +1442,20 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
       return Result<BenchmarkCase, std::string>::makeError(number.error());
     }
     out.thresholds.warnAbsoluteMs = number.value();
+    if (!std::isfinite(out.thresholds.failPercent) ||
+        !std::isfinite(out.thresholds.failAbsoluteMs) ||
+        !std::isfinite(out.thresholds.warnPercent) ||
+        !std::isfinite(out.thresholds.warnAbsoluteMs) ||
+        out.thresholds.failPercent < 0.0 ||
+        out.thresholds.failAbsoluteMs < 0.0 ||
+        out.thresholds.warnPercent < 0.0 ||
+        out.thresholds.warnAbsoluteMs < 0.0 ||
+        out.thresholds.warnPercent > out.thresholds.failPercent ||
+        out.thresholds.warnAbsoluteMs > out.thresholds.failAbsoluteMs) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "thresholds must be finite, non-negative, and warn thresholds must "
+          "not exceed fail thresholds");
+    }
   }
 
   auto metrics = readStringArray(root, "requiredMetrics", "$");
@@ -1061,6 +1466,22 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
   if (out.requiredMetrics.empty()) {
     out.requiredMetrics.push_back("cpu.render_submit_ms");
   }
+  std::set<std::string> requiredMetricIds;
+  for (const std::string &metricId : out.requiredMetrics) {
+    if (!isSafeDottedIdentifier(metricId)) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "requiredMetrics contains invalid metric id '" + metricId + "'");
+    }
+    if (!requiredMetricIds.insert(metricId).second) {
+      return Result<BenchmarkCase, std::string>::makeError(
+          "duplicate required metric id '" + metricId + "'");
+    }
+    auto descriptor =
+        requireBenchmarkMetricDescriptor(metricId, "requiredMetrics");
+    if (descriptor.hasError()) {
+      return Result<BenchmarkCase, std::string>::makeError(descriptor.error());
+    }
+  }
   return Result<BenchmarkCase, std::string>::makeResult(std::move(out));
 }
 
@@ -1069,16 +1490,14 @@ discoverBenchmarkCases(const BenchmarkManifestLoadOptions &options) {
   const std::filesystem::path root =
       options.caseRoot.empty() ? defaultBenchmarkCaseRoot() : options.caseRoot;
   std::vector<BenchmarkCase> cases;
-  if (!std::filesystem::exists(root)) {
-    return Result<std::vector<BenchmarkCase>, std::string>::makeResult(
-        std::move(cases));
+  auto manifests = nuri::tools::core::discoverCaseManifestPaths(root);
+  if (manifests.hasError()) {
+    return Result<std::vector<BenchmarkCase>, std::string>::makeError(
+        manifests.error());
   }
-  for (const std::filesystem::directory_entry &entry :
-       std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file() || entry.path().extension() != ".json") {
-      continue;
-    }
-    auto loaded = loadBenchmarkCaseManifest(entry.path());
+  cases.reserve(manifests.value().size());
+  for (const std::filesystem::path &manifest : manifests.value()) {
+    auto loaded = loadBenchmarkCaseManifest(manifest);
     if (loaded.hasError()) {
       return Result<std::vector<BenchmarkCase>, std::string>::makeError(
           loaded.error());
@@ -1089,6 +1508,19 @@ discoverBenchmarkCases(const BenchmarkManifestLoadOptions &options) {
             [](const BenchmarkCase &lhs, const BenchmarkCase &rhs) {
               return lhs.id < rhs.id;
             });
+  std::vector<nuri::tools::core::CaseCatalogEntry> entries;
+  entries.reserve(cases.size());
+  for (const BenchmarkCase &benchmarkCase : cases) {
+    entries.push_back({.id = benchmarkCase.id,
+                       .suite = benchmarkCase.suite,
+                       .manifestPath = benchmarkCase.manifestPath});
+  }
+  auto validCatalog =
+      nuri::tools::core::validateCaseCatalog(entries, "benchmark");
+  if (validCatalog.hasError()) {
+    return Result<std::vector<BenchmarkCase>, std::string>::makeError(
+        validCatalog.error());
+  }
   return Result<std::vector<BenchmarkCase>, std::string>::makeResult(
       std::move(cases));
 }
@@ -1108,10 +1540,23 @@ std::vector<const BenchmarkCase *>
 filterBenchmarkCasesBySuite(const std::vector<BenchmarkCase> &cases,
                             std::string_view suite) {
   std::vector<const BenchmarkCase *> out;
+  std::vector<nuri::tools::core::CaseCatalogEntry> entries;
+  entries.reserve(cases.size());
   for (const BenchmarkCase &benchmarkCase : cases) {
-    if (suite.empty() || benchmarkCase.suite == suite) {
-      out.push_back(&benchmarkCase);
-    }
+    entries.push_back({.id = benchmarkCase.id,
+                       .suite = benchmarkCase.suite,
+                       .manifestPath = benchmarkCase.manifestPath});
+  }
+  auto selected = nuri::tools::core::selectCaseCatalog(
+      entries,
+      nuri::tools::core::CaseCatalogSelector{.suite = std::string(suite)},
+      nuri::tools::core::CaseCatalogZeroMatchPolicy::Allow, "benchmark");
+  if (selected.hasError()) {
+    return out;
+  }
+  out.reserve(selected.value().size());
+  for (const size_t index : selected.value()) {
+    out.push_back(&cases[index]);
   }
   return out;
 }

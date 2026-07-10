@@ -19,6 +19,7 @@ struct SnapshotCaptureArtifactResult {
   bool missingRequiredCapture = false;
   bool unsupportedRequiredCapture = false;
   bool readbackFailedRequiredCapture = false;
+  bool incompatibleRequiredCapture = false;
 };
 
 [[nodiscard]] Result<SnapshotCaptureArtifactResult, std::string>

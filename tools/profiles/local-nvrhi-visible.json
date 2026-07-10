@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "kind": "nuri.baseline.profile",
+  "id": "local-nvrhi-visible",
+  "description": "Local visible-window NVRHI development profile; never an authoritative gate.",
+  "authority": {
+    "authoritative": false,
+    "allowDirtyTree": true,
+    "reason": "Hardware, driver, power state, and independent repetitions are not pinned."
+  },
+  "environment": {
+    "os": "any",
+    "backend": "nvrhi-default",
+    "windowMode": "visible",
+    "gpuVendorId": null,
+    "gpuDeviceId": null,
+    "driver": null
+  },
+  "execution": {
+    "presentMode": "immediate",
+    "profiling": "off",
+    "devChecks": false
+  },
+  "benchmarkPolicy": {
+    "minimumRepetitions": 3,
+    "warmupStability": "investigative",
+    "warmupWindowFrames": 2,
+    "warmupMaxDriftPercent": 15.0,
+    "requiredMetrics": ["cpu.render_submit_ms"],
+    "thresholdOwnership": "baseline"
+  }
+}

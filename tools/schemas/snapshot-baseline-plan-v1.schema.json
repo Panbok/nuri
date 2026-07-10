@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nuri.dev/schemas/snapshot-baseline-plan-v1.schema.json",
+  "title": "Nuri snapshot baseline promotion plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "caseId", "suite", "profileId", "reason", "actor", "sourceCommit", "sourceReportDigest", "planDigest", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "nuri.snapshot.baseline_plan" },
+    "caseId": { "$ref": "#/$defs/id" },
+    "suite": { "$ref": "#/$defs/id" },
+    "profileId": { "$ref": "#/$defs/id" },
+    "reason": { "type": "string", "minLength": 1 },
+    "actor": { "type": "string", "minLength": 1 },
+    "sourceCommit": { "type": "string", "minLength": 1 },
+    "sourceReportDigest": { "$ref": "#/$defs/digest" },
+    "planDigest": { "$ref": "#/$defs/digest" },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "operation", "previousDigest", "sourceDigest"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^(?![A-Za-z]:|/|\\\\)(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$" },
+          "operation": { "enum": ["add", "replace", "keep", "remove"] },
+          "previousDigest": { "oneOf": [{ "const": "" }, { "$ref": "#/$defs/digest" }] },
+          "sourceDigest": { "oneOf": [{ "const": "" }, { "$ref": "#/$defs/digest" }] }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(\\.[a-z0-9][a-z0-9_-]{0,63})*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

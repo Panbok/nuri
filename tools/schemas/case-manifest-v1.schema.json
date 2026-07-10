@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nuri.dev/schemas/case-manifest-v1.schema.json",
+  "title": "Common Nuri renderer tool case fields",
+  "type": "object",
+  "required": ["schemaVersion", "id", "suite", "scene", "resolution", "requirements"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "$ref": "#/$defs/dottedId" },
+    "suite": { "$ref": "#/$defs/segment" },
+    "description": { "type": "string" },
+    "authoritative": { "type": "boolean" },
+    "resolution": {
+      "type": "array", "prefixItems": [{ "type": "integer", "minimum": 1 }, { "type": "integer", "minimum": 1 }], "minItems": 2, "maxItems": 2
+    },
+    "scene": { "type": "object" },
+    "requirements": { "type": "object" }
+  },
+  "$defs": {
+    "segment": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+    "dottedId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(\\.[a-z0-9][a-z0-9_-]{0,63})*$" }
+  }
+}

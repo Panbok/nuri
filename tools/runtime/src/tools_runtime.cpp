@@ -735,7 +735,8 @@ createToolRendererRuntime(const ToolRuntimeDesc &desc) {
   config.window.title = desc.title;
   config.window.width = static_cast<int32_t>(desc.resolution[0]);
   config.window.height = static_cast<int32_t>(desc.resolution[1]);
-  config.window.mode = WindowMode::Windowed;
+  config.window.mode =
+      desc.windowVisible ? WindowMode::Windowed : WindowMode::Hidden;
 
   auto impl = std::unique_ptr<ToolRendererRuntime::Impl>(
       new ToolRendererRuntime::Impl(desc));

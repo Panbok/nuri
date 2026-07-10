@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "smoke.procedural.default",
   "suite": "smoke",
-  "description": "Lightweight procedural renderer benchmark for CLI and report smoke checks",
+  "description": "Procedural renderer benchmark for CLI and report smoke checks with Ultra TAA, GTAO, and shadows",
   "scene": {
     "kind": "procedural",
     "generator": "nuri.procedural.v1",
@@ -41,16 +41,16 @@
       "forcedMeshLod": 0
     },
     "antiAliasing": {
-      "mode": "None",
-      "qualityPreset": "Balanced"
+      "mode": "TAA",
+      "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {
-      "mode": "Disabled",
-      "preset": "Balanced"
+      "mode": "GTAO",
+      "preset": "Ultra"
     },
     "shadow": {
-      "enabled": false,
-      "qualityPreset": "Low"
+      "enabled": true,
+      "qualityPreset": "Ultra"
     },
     "hdrPostProcess": {
       "bloomEnabled": false,

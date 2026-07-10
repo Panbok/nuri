@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "renderer.damaged_helmet.opaque_720p",
   "suite": "renderer",
-  "description": "DamagedHelmet glTF opaque renderer baseline at 1280x720",
+  "description": "DamagedHelmet glTF renderer baseline at 1280x720 with Ultra TAA, GTAO, and shadows",
   "scene": {
     "kind": "prefab",
     "pathBase": "modelsRoot",
@@ -45,16 +45,16 @@
       "forcedMeshLod": -1
     },
     "antiAliasing": {
-      "mode": "None",
-      "qualityPreset": "Balanced"
+      "mode": "TAA",
+      "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {
-      "mode": "Disabled",
-      "preset": "Balanced"
+      "mode": "GTAO",
+      "preset": "Ultra"
     },
     "shadow": {
-      "enabled": false,
-      "qualityPreset": "Low"
+      "enabled": true,
+      "qualityPreset": "Ultra"
     },
     "hdrPostProcess": {
       "bloomEnabled": false,
@@ -87,6 +87,9 @@
   "requiredMetrics": [
     "cpu.render_submit_ms",
     "gpu.scopes.opaque_ms",
+    "gpu.scopes.gtao_ms",
+    "gpu.scopes.shadow_ms",
+    "gpu.scopes.taa_resolve_ms",
     "gpu.scopes_sum_ms"
   ]
 }

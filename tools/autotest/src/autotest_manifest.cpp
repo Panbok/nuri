@@ -1,15 +1,18 @@
 #include "nuri/tools/autotest/autotest_manifest.h"
 
 #include "nuri/tools/autotest/autotest_environment.h"
+#include "nuri/tools/core/case_catalog.h"
 #include "nuri/tools/snapshot/snapshot_capture_point.h"
 #include "nuri/tools/snapshot/snapshot_manifest.h"
 
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <span>
 #include <string_view>
 #include <unordered_set>
@@ -20,6 +23,79 @@ namespace nuri::tools::autotest {
 namespace {
 
 using JsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+
+[[nodiscard]] bool isReservedWindowsSegment(std::string_view segment) {
+  if (segment == "con" || segment == "prn" || segment == "aux" ||
+      segment == "nul") {
+    return true;
+  }
+  if (segment.size() == 4u &&
+      (segment.starts_with("com") || segment.starts_with("lpt")) &&
+      segment[3] >= '1' && segment[3] <= '9') {
+    return true;
+  }
+  return false;
+}
+
+[[nodiscard]] Result<bool, std::string>
+validateIdentifier(std::string_view value, std::string_view path,
+                   bool allowDots) {
+  if (value.empty()) {
+    return Result<bool, std::string>::makeError(std::string(path) +
+                                                " must not be empty");
+  }
+  size_t segmentStart = 0u;
+  for (size_t i = 0u; i <= value.size(); ++i) {
+    if (i != value.size() && value[i] != '.') {
+      continue;
+    }
+    if (!allowDots && i != value.size()) {
+      return Result<bool, std::string>::makeError(
+          std::string(path) + " must be one safe identifier segment");
+    }
+    const std::string_view segment =
+        value.substr(segmentStart, i - segmentStart);
+    if (segment.empty() || segment.size() > 64u) {
+      return Result<bool, std::string>::makeError(
+          std::string(path) + " contains an empty or overlong segment");
+    }
+    const auto isLowerAlphaNumeric = [](char ch) {
+      return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+    };
+    if (!isLowerAlphaNumeric(segment.front())) {
+      return Result<bool, std::string>::makeError(
+          std::string(path) + " must start each segment with [a-z0-9]");
+    }
+    for (const char ch : segment) {
+      if (!isLowerAlphaNumeric(ch) && ch != '_' && ch != '-') {
+        return Result<bool, std::string>::makeError(
+            std::string(path) + " contains an unsafe character");
+      }
+    }
+    if (isReservedWindowsSegment(segment)) {
+      return Result<bool, std::string>::makeError(
+          std::string(path) + " contains a reserved device name");
+    }
+    segmentStart = i + 1u;
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] Result<bool, std::string>
+validateCamera(const AutotestCameraConfig &camera, std::string_view path) {
+  if (!std::isfinite(camera.verticalFovDegrees) ||
+      camera.verticalFovDegrees <= 0.0f ||
+      camera.verticalFovDegrees >= 180.0f) {
+    return Result<bool, std::string>::makeError(
+        std::string(path) + ".verticalFovDegrees must be between 0 and 180");
+  }
+  if (!std::isfinite(camera.nearPlane) || !std::isfinite(camera.farPlane) ||
+      camera.nearPlane <= 0.0f || camera.farPlane <= camera.nearPlane) {
+    return Result<bool, std::string>::makeError(
+        std::string(path) + " must have 0 < nearPlane < farPlane");
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
 
 [[nodiscard]] std::string jsonPath(std::string_view path,
                                    std::string_view key) {
@@ -1731,6 +1807,224 @@ resolveAutotestPath(std::string_view base, const std::filesystem::path &path) {
   return nuri::tools::snapshot::resolveSnapshotPath(base, path);
 }
 
+Result<bool, std::string> validateAutotestIdentifier(std::string_view value,
+                                                     std::string_view path,
+                                                     bool allowDots) {
+  return validateIdentifier(value, path, allowDots);
+}
+
+Result<bool, std::string> validateAutotestCase(const AutotestCase &testCase) {
+  auto valid = validateIdentifier(testCase.id, "id", true);
+  if (valid.hasError()) {
+    return valid;
+  }
+  valid = validateIdentifier(testCase.suite, "suite", false);
+  if (valid.hasError()) {
+    return valid;
+  }
+  if (testCase.resolution[0] == 0u || testCase.resolution[1] == 0u) {
+    return Result<bool, std::string>::makeError(
+        "resolution entries must be greater than zero");
+  }
+  if (!std::isfinite(testCase.fixedDeltaSeconds) ||
+      testCase.fixedDeltaSeconds <= 0.0) {
+    return Result<bool, std::string>::makeError(
+        "fixedDeltaSeconds must be finite and greater than zero");
+  }
+  if (testCase.warmupFrames > testCase.endFrame) {
+    return Result<bool, std::string>::makeError(
+        "warmupFrames must not exceed endFrame");
+  }
+  if (testCase.windowMode != "visible" && testCase.windowMode != "hidden" &&
+      testCase.windowMode != "headless") {
+    return Result<bool, std::string>::makeError(
+        "windowMode must be visible, hidden, or headless");
+  }
+  valid = validateCamera(testCase.camera, "camera");
+  if (valid.hasError()) {
+    return valid;
+  }
+
+  std::unordered_set<std::string> checkpointIds;
+  std::set<std::pair<uint32_t, std::string>> readoutChannels;
+  for (const AutotestCheckpoint &checkpoint : testCase.checkpoints) {
+    valid = validateIdentifier(checkpoint.id, "checkpoints[].id", false);
+    if (valid.hasError()) {
+      return valid;
+    }
+    if (!checkpointIds.insert(checkpoint.id).second) {
+      return Result<bool, std::string>::makeError("duplicate checkpoint id '" +
+                                                  checkpoint.id + "'");
+    }
+    if (checkpoint.frame > testCase.endFrame) {
+      return Result<bool, std::string>::makeError(
+          "checkpoint '" + checkpoint.id + "' frame is outside endFrame");
+    }
+    std::unordered_set<std::string> captureTargets;
+    for (const AutotestCaptureTarget &capture : checkpoint.captures) {
+      valid = validateIdentifier(capture.target,
+                                 "checkpoints[].captures[].target", false);
+      if (valid.hasError()) {
+        return valid;
+      }
+      valid = validateIdentifier(capture.profile,
+                                 "checkpoints[].captures[].profile", false);
+      if (valid.hasError()) {
+        return valid;
+      }
+      if (!captureTargets.insert(capture.target).second) {
+        return Result<bool, std::string>::makeError(
+            "duplicate capture target '" + capture.target +
+            "' in checkpoint '" + checkpoint.id + "'");
+      }
+    }
+    std::unordered_set<std::string> readoutIds;
+    for (const AutotestReadoutRequest &readout : checkpoint.readouts) {
+      valid =
+          validateIdentifier(readout.id, "checkpoints[].readouts[].id", false);
+      if (valid.hasError()) {
+        return valid;
+      }
+      if (!readoutIds.insert(readout.id).second) {
+        return Result<bool, std::string>::makeError("duplicate readout id '" +
+                                                    readout.id + "'");
+      }
+      if (readout.type != "shadowInspect" && readout.type != "opaquePick") {
+        return Result<bool, std::string>::makeError(
+            "readout '" + readout.id +
+            "' type must be shadowInspect or opaquePick");
+      }
+      if (readout.x >= testCase.resolution[0] ||
+          readout.y >= testCase.resolution[1]) {
+        return Result<bool, std::string>::makeError(
+            "readout '" + readout.id + "' coordinates are outside resolution");
+      }
+      if (!readoutChannels.emplace(checkpoint.frame, readout.type).second) {
+        return Result<bool, std::string>::makeError(
+            "readout channel '" + readout.type +
+            "' is scheduled more than once on frame " +
+            std::to_string(checkpoint.frame));
+      }
+      std::unordered_set<std::string> assertionIds;
+      for (const AutotestMetricAssertion &assertion : readout.assertions) {
+        valid = validateIdentifier(
+            assertion.id, "checkpoints[].readouts[].assertions[].id", false);
+        if (valid.hasError()) {
+          return valid;
+        }
+        if (!assertionIds.insert(assertion.id).second) {
+          return Result<bool, std::string>::makeError(
+              "duplicate assertion id '" + assertion.id + "'");
+        }
+      }
+    }
+    std::unordered_set<std::string> assertionIds;
+    for (const AutotestMetricAssertion &assertion : checkpoint.assertions) {
+      valid = validateIdentifier(assertion.id, "checkpoints[].assertions[].id",
+                                 false);
+      if (valid.hasError()) {
+        return valid;
+      }
+      if (!assertionIds.insert(assertion.id).second) {
+        return Result<bool, std::string>::makeError("duplicate assertion id '" +
+                                                    assertion.id + "'");
+      }
+    }
+  }
+
+  std::unordered_set<std::string> windowIds;
+  for (const AutotestMetricWindow &window : testCase.metricWindows) {
+    valid = validateIdentifier(window.id, "metricWindows[].id", false);
+    if (valid.hasError()) {
+      return valid;
+    }
+    if (!windowIds.insert(window.id).second) {
+      return Result<bool, std::string>::makeError(
+          "duplicate metric window id '" + window.id + "'");
+    }
+    if (window.startFrame > window.endFrame ||
+        window.endFrame > testCase.endFrame) {
+      return Result<bool, std::string>::makeError(
+          "metric window '" + window.id + "' has invalid frame range");
+    }
+    std::unordered_set<std::string> assertionIds;
+    for (const AutotestMetricWindowAssertion &assertion : window.assertions) {
+      valid = validateIdentifier(assertion.id,
+                                 "metricWindows[].assertions[].id", false);
+      if (valid.hasError()) {
+        return valid;
+      }
+      if (!assertionIds.insert(assertion.id).second) {
+        return Result<bool, std::string>::makeError("duplicate assertion id '" +
+                                                    assertion.id + "'");
+      }
+    }
+  }
+
+  std::unordered_set<std::string> cameraPathIds;
+  for (size_t i = 0u; i < testCase.timeline.cameraPaths.size(); ++i) {
+    const AutotestCameraPath &path = testCase.timeline.cameraPaths[i];
+    valid = validateIdentifier(path.id, "timeline.cameraPaths[].id", false);
+    if (valid.hasError()) {
+      return valid;
+    }
+    if (!cameraPathIds.insert(path.id).second) {
+      return Result<bool, std::string>::makeError("duplicate camera path id '" +
+                                                  path.id + "'");
+    }
+    if (path.startFrame > path.endFrame || path.endFrame > testCase.endFrame) {
+      return Result<bool, std::string>::makeError("camera path '" + path.id +
+                                                  "' has invalid frame range");
+    }
+    if (path.interpolation != "linear" && path.interpolation != "smoothstep") {
+      return Result<bool, std::string>::makeError(
+          "camera path '" + path.id + "' has unsupported interpolation");
+    }
+    if (path.keyframes.empty()) {
+      return Result<bool, std::string>::makeError("camera path '" + path.id +
+                                                  "' has no keyframes");
+    }
+    std::unordered_set<uint32_t> keyframeFrames;
+    for (const AutotestCameraKeyframe &keyframe : path.keyframes) {
+      if (keyframe.frame < path.startFrame || keyframe.frame > path.endFrame) {
+        return Result<bool, std::string>::makeError(
+            "camera path '" + path.id +
+            "' has a keyframe outside its frame range");
+      }
+      if (!keyframeFrames.insert(keyframe.frame).second) {
+        return Result<bool, std::string>::makeError(
+            "camera path '" + path.id + "' has duplicate keyframe frame " +
+            std::to_string(keyframe.frame));
+      }
+    }
+    for (size_t j = i + 1u; j < testCase.timeline.cameraPaths.size(); ++j) {
+      const AutotestCameraPath &other = testCase.timeline.cameraPaths[j];
+      if (path.startFrame <= other.endFrame &&
+          other.startFrame <= path.endFrame) {
+        return Result<bool, std::string>::makeError(
+            "camera paths '" + path.id + "' and '" + other.id +
+            "' overlap without explicit precedence");
+      }
+    }
+  }
+  for (const AutotestTimelineEvent &event : testCase.timeline.events) {
+    if (event.frame > testCase.endFrame) {
+      return Result<bool, std::string>::makeError(
+          "timeline event frame is outside endFrame");
+    }
+    if (event.type != "resetTemporalHistory" && event.type != "setCamera" &&
+        event.type != "setSettings") {
+      return Result<bool, std::string>::makeError(
+          "unsupported timeline event type '" + event.type + "'");
+    }
+    valid = validateCamera(event.camera, "timeline.events[].camera");
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
 Result<AutotestCase, std::string>
 loadAutotestCaseManifest(const std::filesystem::path &path) {
   std::ifstream file(path, std::ios::binary);
@@ -1849,7 +2143,7 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
   if (u32.hasError()) {
     return Result<AutotestCase, std::string>::makeError(u32.error());
   }
-  out.endFrame = std::max(out.warmupFrames, u32.value());
+  out.endFrame = u32.value();
   auto boolean = readBool(root, "authoritative", "$", out.authoritative);
   if (boolean.hasError()) {
     return Result<AutotestCase, std::string>::makeError(boolean.error());
@@ -1950,6 +2244,10 @@ loadAutotestCaseManifest(const std::filesystem::path &path) {
     return Result<AutotestCase, std::string>::makeError(metricWindows.error());
   }
   out.metricWindows = std::move(metricWindows.value());
+  auto validation = validateAutotestCase(out);
+  if (validation.hasError()) {
+    return Result<AutotestCase, std::string>::makeError(validation.error());
+  }
   return Result<AutotestCase, std::string>::makeResult(std::move(out));
 }
 
@@ -1958,16 +2256,14 @@ discoverAutotestCases(const AutotestManifestLoadOptions &options) {
   const std::filesystem::path root =
       options.caseRoot.empty() ? defaultAutotestCaseRoot() : options.caseRoot;
   std::vector<AutotestCase> cases;
-  if (!std::filesystem::exists(root)) {
-    return Result<std::vector<AutotestCase>, std::string>::makeResult(
-        std::move(cases));
+  auto manifests = nuri::tools::core::discoverCaseManifestPaths(root);
+  if (manifests.hasError()) {
+    return Result<std::vector<AutotestCase>, std::string>::makeError(
+        manifests.error());
   }
-  for (const std::filesystem::directory_entry &entry :
-       std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file() || entry.path().extension() != ".json") {
-      continue;
-    }
-    auto loaded = loadAutotestCaseManifest(entry.path());
+  cases.reserve(manifests.value().size());
+  for (const std::filesystem::path &manifest : manifests.value()) {
+    auto loaded = loadAutotestCaseManifest(manifest);
     if (loaded.hasError()) {
       return Result<std::vector<AutotestCase>, std::string>::makeError(
           loaded.error());
@@ -1978,6 +2274,19 @@ discoverAutotestCases(const AutotestManifestLoadOptions &options) {
             [](const AutotestCase &lhs, const AutotestCase &rhs) {
               return lhs.id < rhs.id;
             });
+  std::vector<nuri::tools::core::CaseCatalogEntry> entries;
+  entries.reserve(cases.size());
+  for (const AutotestCase &testCase : cases) {
+    entries.push_back({.id = testCase.id,
+                       .suite = testCase.suite,
+                       .manifestPath = testCase.manifestPath});
+  }
+  auto validCatalog =
+      nuri::tools::core::validateCaseCatalog(entries, "autotest");
+  if (validCatalog.hasError()) {
+    return Result<std::vector<AutotestCase>, std::string>::makeError(
+        validCatalog.error());
+  }
   return Result<std::vector<AutotestCase>, std::string>::makeResult(
       std::move(cases));
 }
@@ -1996,10 +2305,23 @@ std::vector<const AutotestCase *>
 filterAutotestCasesBySuite(const std::vector<AutotestCase> &cases,
                            std::string_view suite) {
   std::vector<const AutotestCase *> out;
+  std::vector<nuri::tools::core::CaseCatalogEntry> entries;
+  entries.reserve(cases.size());
   for (const AutotestCase &testCase : cases) {
-    if (suite.empty() || testCase.suite == suite) {
-      out.push_back(&testCase);
-    }
+    entries.push_back({.id = testCase.id,
+                       .suite = testCase.suite,
+                       .manifestPath = testCase.manifestPath});
+  }
+  auto selected = nuri::tools::core::selectCaseCatalog(
+      entries,
+      nuri::tools::core::CaseCatalogSelector{.suite = std::string(suite)},
+      nuri::tools::core::CaseCatalogZeroMatchPolicy::Allow, "autotest");
+  if (selected.hasError()) {
+    return out;
+  }
+  out.reserve(selected.value().size());
+  for (const size_t index : selected.value()) {
+    out.push_back(&cases[index]);
   }
   return out;
 }

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nuri.dev/schemas/baseline-profile-v1.schema.json",
+  "title": "Nuri baseline execution profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "id", "authority", "environment", "execution", "benchmarkPolicy"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "nuri.baseline.profile" },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+    "description": { "type": "string" },
+    "authority": {
+      "type": "object", "additionalProperties": false, "required": ["authoritative", "allowDirtyTree"],
+      "properties": { "authoritative": { "type": "boolean" }, "allowDirtyTree": { "type": "boolean" }, "reason": { "type": "string" } }
+    },
+    "environment": {
+      "type": "object", "additionalProperties": false, "required": ["os", "backend", "windowMode"],
+      "properties": {
+        "os": { "type": "string" }, "backend": { "type": "string" }, "windowMode": { "enum": ["visible", "hidden", "headless", "offscreen"] },
+        "gpuVendorId": { "type": ["integer", "null"] }, "gpuDeviceId": { "type": ["integer", "null"] }, "driver": { "type": ["string", "null"] }
+      }
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false, "required": ["presentMode", "profiling", "devChecks"],
+      "properties": { "presentMode": { "type": "string" }, "profiling": { "enum": ["off", "cpu", "cpu-gpu"] }, "devChecks": { "type": "boolean" } }
+    },
+    "benchmarkPolicy": {
+      "type": "object", "additionalProperties": false, "required": ["minimumRepetitions", "warmupStability", "warmupWindowFrames", "warmupMaxDriftPercent", "requiredMetrics", "thresholdOwnership"],
+      "properties": {
+        "minimumRepetitions": { "type": "integer", "minimum": 1 }, "warmupStability": { "enum": ["required", "investigative", "unknown"] },
+        "warmupWindowFrames": { "type": "integer", "minimum": 1 }, "warmupMaxDriftPercent": { "type": "number", "exclusiveMinimum": 0 },
+        "requiredMetrics": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }, "thresholdOwnership": { "const": "baseline" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "authority": {
+            "properties": { "authoritative": { "const": true } },
+            "required": ["authoritative"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "authority": {
+            "properties": { "allowDirtyTree": { "const": false } }
+          },
+          "environment": {
+            "required": ["gpuVendorId", "gpuDeviceId", "driver"],
+            "properties": {
+              "os": { "not": { "const": "any" } },
+              "gpuVendorId": { "type": "integer", "minimum": 1 },
+              "gpuDeviceId": { "type": "integer", "minimum": 1 },
+              "driver": { "type": "string", "minLength": 1 }
+            }
+          },
+          "benchmarkPolicy": {
+            "properties": {
+              "minimumRepetitions": { "minimum": 3 },
+              "warmupStability": { "const": "required" }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

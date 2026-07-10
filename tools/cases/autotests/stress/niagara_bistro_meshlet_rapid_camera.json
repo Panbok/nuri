@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "perf.niagara_bistro.meshlet_rapid_camera",
-  "suite": "perf",
-  "description": "Niagara Bistro meshlet renderer rapid camera movement and turning perf coverage",
+  "id": "stress.niagara_bistro.meshlet_rapid_camera",
+  "suite": "stress",
+  "description": "Niagara Bistro meshlet renderer rapid camera movement and turning stability coverage",
   "scene": {
     "kind": "prefab",
     "pathBase": "modelsRoot",

@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://nuri.dev/schemas/snapshot-suite-report-v1.schema.json", "title": "Nuri snapshot suite payload v1",
+  "$comment": "Snapshot suites currently carry all portable detail in the v2 envelope children and use an empty payload.",
+  "type": "object", "maxProperties": 0
+}

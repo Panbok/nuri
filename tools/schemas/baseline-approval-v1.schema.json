@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nuri.dev/schemas/baseline-approval-v1.schema.json",
+  "title": "Nuri reviewed baseline approval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "caseId", "suite", "profileId", "reason", "actor", "sourceCommit", "sourceDigest", "planDigest", "approvedAtUtc", "captures"],
+  "properties": {
+    "schemaVersion": { "const": 1 }, "kind": { "const": "nuri.baseline.approval" }, "caseId": { "type": "string" }, "suite": { "type": "string" }, "profileId": { "type": "string" },
+    "backend": { "type": "string" }, "resolvedBackend": { "type": "string" },
+    "reason": { "type": "string", "minLength": 1 }, "actor": { "type": "string", "minLength": 1 }, "sourceCommit": { "type": "string", "minLength": 1 },
+    "sourceDigest": { "type": "string", "pattern": "^(sha256|blake3):[0-9a-f]+$" }, "planDigest": { "type": "string", "pattern": "^(sha256|blake3):[0-9a-f]+$" },
+    "approvedAtUtc": { "type": "string", "format": "date-time" },
+    "captures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "newHash"],
+        "properties": {
+          "target": { "type": "string" },
+          "newHash": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

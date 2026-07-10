@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "renderer.sponza.cached_shadow_720p",
   "suite": "renderer",
-  "description": "Sponza glTF large-scene opaque workload with stable medium cascaded shadow cache reuse at 1280x720",
+  "description": "Sponza glTF large-scene workload with Ultra TAA, GTAO, and shadow cache reuse at 1280x720",
   "scene": {
     "kind": "prefab",
     "pathBase": "modelsRoot",
@@ -40,16 +40,16 @@
       "forcedMeshLod": -1
     },
     "antiAliasing": {
-      "mode": "None",
-      "qualityPreset": "Balanced"
+      "mode": "TAA",
+      "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {
-      "mode": "Disabled",
-      "preset": "Balanced"
+      "mode": "GTAO",
+      "preset": "Ultra"
     },
     "shadow": {
       "enabled": true,
-      "qualityPreset": "Medium"
+      "qualityPreset": "Ultra"
     },
     "hdrPostProcess": {
       "bloomEnabled": false,
@@ -82,8 +82,9 @@
   "requiredMetrics": [
     "cpu.render_submit_ms",
     "gpu.scopes.opaque_ms",
+    "gpu.scopes.gtao_ms",
     "gpu.scopes.shadow_ms",
-    "gpu.scopes.shadow_depth_ms",
+    "gpu.scopes.taa_resolve_ms",
     "gpu.scopes_sum_ms"
   ]
 }

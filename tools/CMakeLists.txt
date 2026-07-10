@@ -48,6 +48,45 @@ configure_file(
   @ONLY
 )
 
+find_package(yyjson CONFIG REQUIRED)
+find_package(Threads REQUIRED)
+
+add_library(nuri_tool_core STATIC
+  core/src/atomic_file.cpp
+  core/src/baseline_profile.cpp
+  core/src/case_catalog.cpp
+  core/src/environment_probe.cpp
+  core/src/fingerprint.cpp
+  core/src/html_report.cpp
+  core/src/identifier.cpp
+  core/src/json_contract.cpp
+  core/src/process.cpp
+  core/src/result_envelope_v2.cpp
+  core/src/result_protocol.cpp
+  core/src/run_workspace.cpp
+  core/src/safe_path.cpp
+  core/src/sha256.cpp
+)
+
+target_include_directories(nuri_tool_core
+  PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/core/include"
+    "${CMAKE_SOURCE_DIR}/lib"
+)
+
+target_compile_features(nuri_tool_core PUBLIC cxx_std_20)
+target_link_libraries(nuri_tool_core PRIVATE Threads::Threads)
+
+if(TARGET yyjson::yyjson)
+  target_link_libraries(nuri_tool_core PRIVATE yyjson::yyjson)
+elseif(TARGET yyjson)
+  target_link_libraries(nuri_tool_core PRIVATE yyjson)
+elseif(TARGET unofficial::yyjson::yyjson)
+  target_link_libraries(nuri_tool_core PRIVATE unofficial::yyjson::yyjson)
+else()
+  message(FATAL_ERROR "nuri_tool_core requires a yyjson package target")
+endif()
+
 add_library(nuri_tools_runtime STATIC
   runtime/src/tools_runtime.cpp
 )
@@ -65,11 +104,15 @@ target_link_libraries(nuri_tools_runtime
 target_compile_features(nuri_tools_runtime PUBLIC cxx_std_20)
 
 add_library(nuri_benchmarking STATIC
+  benchmark/src/benchmark_baseline.cpp
   benchmark/src/benchmark_case.cpp
+  benchmark/src/benchmark_check.cpp
   benchmark/src/benchmark_compare.cpp
   benchmark/src/benchmark_environment.cpp
   benchmark/src/benchmark_graph.cpp
   benchmark/src/benchmark_manifest.cpp
+  benchmark/src/benchmark_measurements.cpp
+  benchmark/src/benchmark_metric_registry.cpp
   benchmark/src/benchmark_report.cpp
   benchmark/src/benchmark_runner.cpp
   benchmark/src/benchmark_stats.cpp
@@ -84,6 +127,7 @@ target_include_directories(nuri_benchmarking
 target_link_libraries(nuri_benchmarking
   PUBLIC
     nuri_renderer
+    nuri_tool_core
 )
 
 target_compile_features(nuri_benchmarking PUBLIC cxx_std_20)
@@ -114,6 +158,7 @@ if(NURI_BUILD_SNAPSHOT_TESTING OR NURI_BUILD_SNAPSHOT_CLI OR NURI_BUILD_AUTOTEST
   target_link_libraries(nuri_snapshot_testing
     PUBLIC
       nuri_renderer
+      nuri_tool_core
     PRIVATE
       OpenImageIO::OpenImageIO
   )
@@ -143,6 +188,7 @@ if(NURI_BUILD_AUTOTESTING OR NURI_BUILD_AUTOTEST_CLI)
     PUBLIC
       nuri_renderer
       nuri_snapshot_testing
+      nuri_tool_core
     PRIVATE
       nuri_tools_runtime
   )

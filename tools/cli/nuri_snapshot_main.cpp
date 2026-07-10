@@ -6,6 +6,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -181,6 +182,7 @@ int main(int argc, char **argv) {
   std::string runWindowMode = "visible";
   bool runDry = false;
   bool runEffective = false;
+  bool runForce = false;
   auto *run = app.add_subcommand("run", "Capture and compare case or suite");
   run->add_option("--case", runCase, "Case id");
   run->add_option("--suite", runSuite, "Suite name");
@@ -193,6 +195,8 @@ int main(int argc, char **argv) {
   run->add_flag("--dry-run", runDry, "Resolve config without renderer init");
   run->add_flag("--print-effective-config", runEffective,
                 "Print resolved config before running");
+  run->add_flag("--force", runForce,
+                "Run incompatible comparisons as investigative");
   run->callback([&]() {
     if (runCase.empty() == runSuite.empty()) {
       std::cerr << "run requires exactly one of --case or --suite\n";
@@ -201,7 +205,7 @@ int main(int argc, char **argv) {
     std::vector<SnapshotCase> cases = loadCasesOrExit();
     SnapshotRunOptions options =
         makeOptions(runArtifactDir, runJsonOut, runHtmlOut, runBaselineProfile,
-                    runWindowMode, runDry, runEffective, false, command);
+                    runWindowMode, runDry, runEffective, runForce, command);
     if (!runCase.empty()) {
       SnapshotCase snapshotCase = requireCase(cases, runCase);
       if (runEffective) {
@@ -226,36 +230,168 @@ int main(int argc, char **argv) {
     std::exit(exitCode(suiteResult.exitCode));
   });
 
+  auto *baseline =
+      app.add_subcommand("baseline", "Inspect and verify snapshot baselines");
+  baseline->require_subcommand(1);
+  std::string baselineInspectCase;
+  std::string baselineInspectProfile = "local-nvrhi-visible";
+  auto *baselineInspect =
+      baseline->add_subcommand("inspect", "Inspect baseline files and hashes");
+  baselineInspect->add_option("--case", baselineInspectCase, "Case id")
+      ->required();
+  baselineInspect->add_option("--profile", baselineInspectProfile,
+                              "Baseline profile");
+  baselineInspect->callback([&]() {
+    std::vector<SnapshotCase> cases = loadCasesOrExit();
+    const SnapshotCase &snapshotCase = requireCase(cases, baselineInspectCase);
+    auto inspection =
+        inspectSnapshotBaseline(snapshotCase, baselineInspectProfile);
+    if (inspection.hasError()) {
+      std::cerr << inspection.error() << "\n";
+      std::exit(exitCode(SnapshotExitCode::InvalidInput));
+    }
+    std::cout << inspection.value() << "\n";
+  });
+
+  std::string baselineVerifyCase;
+  std::string baselineVerifyProfile = "local-nvrhi-visible";
+  auto *baselineVerify = baseline->add_subcommand(
+      "verify", "Verify a governed baseline against reviewed SHA-256 hashes");
+  baselineVerify->add_option("--case", baselineVerifyCase, "Case id")
+      ->required();
+  baselineVerify->add_option("--profile", baselineVerifyProfile,
+                             "Baseline profile");
+  baselineVerify->callback([&]() {
+    std::vector<SnapshotCase> cases = loadCasesOrExit();
+    const SnapshotCase &snapshotCase = requireCase(cases, baselineVerifyCase);
+    auto verified = verifySnapshotBaseline(snapshotCase, baselineVerifyProfile);
+    if (verified.hasError()) {
+      std::cerr << verified.error() << "\n";
+      const bool missing =
+          verified.error().find("missing") != std::string::npos;
+      std::exit(exitCode(missing ? SnapshotExitCode::MissingBaseline
+                                 : SnapshotExitCode::InvalidInput));
+    }
+    auto inspection =
+        inspectSnapshotBaseline(snapshotCase, baselineVerifyProfile);
+    if (inspection.hasError()) {
+      std::cerr << inspection.error() << "\n";
+      std::exit(exitCode(SnapshotExitCode::RuntimeError));
+    }
+    std::cout << inspection.value() << "\n";
+  });
+
   std::string approveCase;
   std::string approveReason;
+  std::string approveActor;
+  std::string approveConfirmPlan;
+  bool approveDryRun = false;
   std::filesystem::path approveArtifacts;
   std::string approveProfile = "local-nvrhi-visible";
   auto *approve = app.add_subcommand("approve", "Approve captured baselines");
   approve->add_option("--case", approveCase, "Case id")->required();
   approve->add_option("--reason", approveReason, "Approval reason")->required();
+  approve->add_option("--actor", approveActor, "Approval actor")->required();
   approve
-      ->add_option("--from-artifacts", approveArtifacts, "Artifact directory")
+      ->add_option("--from,--from-artifacts", approveArtifacts,
+                   "Artifact directory")
       ->required();
-  approve->add_option("--baseline-profile", approveProfile, "Baseline profile");
-  approve->callback([&]() {
+  approve->add_option("--profile,--baseline-profile", approveProfile,
+                      "Baseline profile");
+  approve->add_flag("--dry-run", approveDryRun,
+                    "Print the reviewed promotion plan without mutation");
+  approve->add_option("--confirm-plan", approveConfirmPlan,
+                      "Digest emitted by the reviewed dry-run plan");
+  const auto approveCallback = [&]() {
     std::vector<SnapshotCase> cases = loadCasesOrExit();
     SnapshotCase snapshotCase = requireCase(cases, approveCase);
-    const std::filesystem::path reportPath =
-        approveArtifacts / "cases" / snapshotCase.id / "report.json";
+    auto caseDir = resolveSnapshotPathUnder(
+        approveArtifacts, std::filesystem::path("cases") / snapshotCase.id);
+    if (caseDir.hasError()) {
+      std::cerr << caseDir.error() << "\n";
+      std::exit(exitCode(SnapshotExitCode::InvalidInput));
+    }
+    const std::filesystem::path reportPath = caseDir.value() / "report.json";
     auto report = readSnapshotReportFile(reportPath);
     if (report.hasError()) {
       std::cerr << report.error() << "\n";
       std::exit(exitCode(SnapshotExitCode::InvalidInput));
     }
-    report.value().snapshotCase = snapshotCase;
+    if (report.value().snapshotCase.id != snapshotCase.id ||
+        report.value().snapshotCase.suite != snapshotCase.suite) {
+      std::cerr
+          << "approval source report identity does not match requested case\n";
+      std::exit(exitCode(SnapshotExitCode::InvalidInput));
+    }
+    bool capturesMatch = report.value().snapshotCase.captures.size() ==
+                         snapshotCase.captures.size();
+    for (const SnapshotCaptureTarget &expected : snapshotCase.captures) {
+      const auto found =
+          std::find_if(report.value().snapshotCase.captures.begin(),
+                       report.value().snapshotCase.captures.end(),
+                       [&](const SnapshotCaptureTarget &actual) {
+                         return actual.name == expected.name &&
+                                actual.profile == expected.profile &&
+                                actual.required == expected.required;
+                       });
+      capturesMatch =
+          capturesMatch && found != report.value().snapshotCase.captures.end();
+    }
+    if (!capturesMatch) {
+      std::cerr << "approval source capture set does not match case manifest\n";
+      std::exit(exitCode(SnapshotExitCode::InvalidInput));
+    }
+    report.value().artifacts.caseDir = caseDir.value();
+    auto plan = planSnapshotBaselines(report.value(), approveProfile,
+                                      approveReason, approveActor);
+    if (plan.hasError()) {
+      std::cerr << plan.error() << "\n";
+      std::exit(exitCode(SnapshotExitCode::InvalidInput));
+    }
+    auto planJson = writeSnapshotBaselinePlanJson(plan.value());
+    if (planJson.hasError()) {
+      std::cerr << planJson.error() << "\n";
+      std::exit(exitCode(SnapshotExitCode::RuntimeError));
+    }
+    if (approveDryRun) {
+      std::cout << planJson.value() << "\n";
+      return;
+    }
+    if (approveConfirmPlan.empty()) {
+      std::cerr << "approval requires --confirm-plan " << plan.value().digest
+                << " after reviewing --dry-run\n";
+      std::exit(exitCode(SnapshotExitCode::InvalidInput));
+    }
     auto approved =
-        approveSnapshotBaselines(report.value(), approveProfile, approveReason);
+        approveSnapshotBaselines(report.value(), approveProfile, approveReason,
+                                 approveConfirmPlan, approveActor);
     if (approved.hasError()) {
       std::cerr << approved.error() << "\n";
       std::exit(exitCode(SnapshotExitCode::InvalidInput));
     }
     std::cout << "baselines approved\n";
-  });
+  };
+  approve->callback(approveCallback);
+
+  auto *baselineAccept = baseline->add_subcommand(
+      "accept", "Review and atomically accept a snapshot baseline");
+  baselineAccept->add_option("--case", approveCase, "Case id")->required();
+  baselineAccept->add_option("--reason", approveReason, "Approval reason")
+      ->required();
+  baselineAccept->add_option("--actor", approveActor, "Approval actor")
+      ->required();
+  baselineAccept
+      ->add_option("--from,--from-artifacts", approveArtifacts,
+                   "Artifact directory")
+      ->required();
+  baselineAccept->add_option("--profile,--baseline-profile", approveProfile,
+                             "Baseline profile");
+  baselineAccept->add_flag(
+      "--dry-run", approveDryRun,
+      "Print the reviewed promotion plan without mutation");
+  baselineAccept->add_option("--confirm-plan", approveConfirmPlan,
+                             "Digest emitted by the reviewed dry-run plan");
+  baselineAccept->callback(approveCallback);
 
   std::filesystem::path diffActual;
   std::filesystem::path diffExpected;
@@ -279,7 +415,7 @@ int main(int argc, char **argv) {
     SnapshotCompareResult comparison =
         compareSnapshotImages(actual.value(), expected.value(),
                               builtinSnapshotCompareProfile(diffProfile));
-    if (!diffOut.empty()) {
+    if (!diffOut.empty() && comparison.compatible) {
       auto written =
           writeSnapshotDiffPng(actual.value(), expected.value(), diffOut);
       if (written.hasError()) {
@@ -287,7 +423,14 @@ int main(int argc, char **argv) {
         std::exit(exitCode(SnapshotExitCode::RuntimeError));
       }
     }
-    (void)diffJsonOut;
+    if (!diffJsonOut.empty()) {
+      auto written =
+          writeSnapshotComparisonFile(comparison, diffProfile, diffJsonOut);
+      if (written.hasError()) {
+        std::cerr << written.error() << "\n";
+        std::exit(exitCode(SnapshotExitCode::RuntimeError));
+      }
+    }
     if (!comparison.compatible) {
       std::cout << "comparison invalid\n";
       std::exit(exitCode(SnapshotExitCode::InvalidInput));
@@ -302,7 +445,8 @@ int main(int argc, char **argv) {
   try {
     app.parse(argc, argv);
   } catch (const CLI::ParseError &e) {
-    return app.exit(e);
+    const int parserExit = app.exit(e);
+    return parserExit == 0 ? 0 : exitCode(SnapshotExitCode::InvalidInput);
   }
   return 0;
 }

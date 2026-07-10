@@ -29,6 +29,7 @@ struct AutotestAssertionResult {
   double actual = 0.0;
   bool hasActual = false;
   uint32_t sampleCount = 0u;
+  uint32_t expectedSampleCount = 0u;
 };
 
 struct AutotestMetricStats {

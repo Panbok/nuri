@@ -3,6 +3,10 @@
 #include "nuri/tools/autotest/autotest_manifest.h"
 #include "nuri/tools/autotest/autotest_record.h"
 #include "nuri/tools/autotest/autotest_timeline.h"
+#include "nuri/tools/core/baseline_profile.h"
+#include "nuri/tools/core/case_catalog.h"
+#include "nuri/tools/core/fingerprint.h"
+#include "nuri/tools/core/run_workspace.h"
 #include "nuri/tools/runtime/render_tool_runtime.h"
 #include "nuri/tools/snapshot/snapshot_baseline.h"
 #include "nuri/tools/snapshot/snapshot_capture_artifacts.h"
@@ -27,7 +31,6 @@
 namespace nuri::tools::autotest {
 namespace {
 
-constexpr uint32_t kReadoutDrainFrameLimit = 4u;
 constexpr uint32_t kMaxPreFrameSleepMs = 60000u;
 
 struct PendingReadout {
@@ -42,6 +45,43 @@ struct CheckpointFrameWork {
   const AutotestCheckpoint *checkpoint = nullptr;
   size_t reportIndex = 0u;
 };
+
+struct ResolvedWindowMode {
+  std::string value{};
+  std::string source{};
+};
+
+void evaluateAutotestBaselineProfile(AutotestReport &report) {
+  auto profile = nuri::tools::core::loadBaselineProfile(
+      autotestRepoRoot() / "tools" / "profiles", report.baselineProfile);
+  if (profile.hasError()) {
+    report.baselineProfileCompatible = false;
+    report.baselineProfileIncompatibilityReasons = {profile.error()};
+    return;
+  }
+  const std::string profiling =
+      report.environment.tracyGpuEnabled
+          ? "cpu-gpu"
+          : (report.environment.tracyEnabled ? "cpu" : "off");
+  const auto compatibility = nuri::tools::core::evaluateBaselineProfile(
+      profile.value(),
+      nuri::tools::core::BaselineProfileObservedEnvironment{
+          .os = report.environment.osName,
+          .backend = report.environment.gpuBackend,
+          .backendSource = report.environment.gpuBackendSource,
+          .windowMode = report.environment.resolvedWindowMode,
+          .windowVisible = report.environment.windowVisible,
+          .gpuVendorId = report.environment.gpuVendorId,
+          .gpuDeviceId = report.environment.gpuDeviceId,
+          .driver = report.environment.gpuDriverVersion,
+          .presentMode = report.environment.resolvedPresentMode,
+          .profiling = profiling,
+          .devChecks = report.environment.devChecks,
+          .dirtyTree = report.environment.dirty,
+      });
+  report.baselineProfileCompatible = compatibility.compatible;
+  report.baselineProfileIncompatibilityReasons = compatibility.reasons;
+}
 
 [[nodiscard]] std::string jsonEscape(std::string_view value) {
   std::string out;
@@ -126,17 +166,98 @@ checkpointDirName(const AutotestCheckpoint &checkpoint) {
   return "default";
 }
 
+[[nodiscard]] ResolvedWindowMode
+resolveWindowMode(const AutotestCase &testCase,
+                  const AutotestRunOptions &options) {
+  if (!options.windowMode.empty()) {
+    return ResolvedWindowMode{.value = options.windowMode, .source = "cli"};
+  }
+  return ResolvedWindowMode{.value = testCase.windowMode, .source = "manifest"};
+}
+
+[[nodiscard]] std::string outcomeForExitCode(AutotestExitCode code) {
+  switch (code) {
+  case AutotestExitCode::Success:
+    return "pass";
+  case AutotestExitCode::ScenarioFailure:
+    return "fail";
+  case AutotestExitCode::InvalidInput:
+    return "invalid";
+  case AutotestExitCode::EnvironmentUnavailable:
+    return "unavailable";
+  case AutotestExitCode::RuntimeError:
+    return "error";
+  case AutotestExitCode::MissingBaseline:
+    return "missing_baseline";
+  }
+  return "error";
+}
+
+[[nodiscard]] int aggregatePrecedence(AutotestExitCode code) {
+  switch (code) {
+  case AutotestExitCode::RuntimeError:
+    return 5;
+  case AutotestExitCode::InvalidInput:
+    return 4;
+  case AutotestExitCode::EnvironmentUnavailable:
+    return 3;
+  case AutotestExitCode::MissingBaseline:
+    return 2;
+  case AutotestExitCode::ScenarioFailure:
+    return 1;
+  case AutotestExitCode::Success:
+    return 0;
+  }
+  return 5;
+}
+
+[[nodiscard]] Result<std::filesystem::path, std::string>
+resolveOwnedPath(const std::filesystem::path &root,
+                 const std::filesystem::path &relative) {
+  if (root.empty() || relative.empty() || relative.is_absolute()) {
+    return Result<std::filesystem::path, std::string>::makeError(
+        "autotest owned path must be relative to a non-empty root");
+  }
+  std::error_code ec;
+  const std::filesystem::path canonicalRoot =
+      std::filesystem::weakly_canonical(root, ec);
+  if (ec) {
+    return Result<std::filesystem::path, std::string>::makeError(
+        "failed to resolve autotest artifact root: " + ec.message());
+  }
+  const std::filesystem::path candidate =
+      std::filesystem::weakly_canonical(canonicalRoot / relative, ec);
+  if (ec) {
+    return Result<std::filesystem::path, std::string>::makeError(
+        "failed to resolve autotest artifact path: " + ec.message());
+  }
+  auto rootIt = canonicalRoot.begin();
+  auto candidateIt = candidate.begin();
+  for (; rootIt != canonicalRoot.end() && candidateIt != candidate.end();
+       ++rootIt, ++candidateIt) {
+    if (*rootIt != *candidateIt) {
+      return Result<std::filesystem::path, std::string>::makeError(
+          "autotest artifact path escapes its root");
+    }
+  }
+  if (rootIt != canonicalRoot.end() || candidate == canonicalRoot) {
+    return Result<std::filesystem::path, std::string>::makeError(
+        "autotest artifact path escapes its root");
+  }
+  return Result<std::filesystem::path, std::string>::makeResult(candidate);
+}
+
 [[nodiscard]] Result<bool, AutotestExitCode>
 checkRequirements(const AutotestCase &testCase, std::string_view backend,
                   std::string_view windowMode,
                   std::vector<std::string> &warnings, std::string &message) {
-  if (windowMode != "visible") {
-    message = "only visible window mode is available";
+  if (windowMode == "headless") {
+    message = "true offscreen/headless mode is unavailable";
     return Result<bool, AutotestExitCode>::makeError(
         AutotestExitCode::EnvironmentUnavailable);
   }
-  if (!testCase.requirements.allowVisibleWindow) {
-    message = "case requires hidden/headless execution, which is unavailable";
+  if (windowMode == "visible" && !testCase.requirements.allowVisibleWindow) {
+    message = "case does not permit visible-window execution";
     return Result<bool, AutotestExitCode>::makeError(
         AutotestExitCode::EnvironmentUnavailable);
   }
@@ -234,11 +355,12 @@ makeToolEnvironmentDesc(const AutotestEnvironmentConfig &environment) {
 
 [[nodiscard]] nuri::tools::runtime::ToolRuntimeDesc
 makeToolRuntimeDesc(const AutotestCase &testCase, std::string_view backend,
-                    std::string_view presentMode) {
+                    std::string_view presentMode, std::string_view windowMode) {
   nuri::tools::runtime::ToolRuntimeDesc desc{};
   desc.title = "nuri-autotest " + testCase.id;
   desc.backend = std::string(backend);
   desc.presentMode = std::string(presentMode);
+  desc.windowVisible = windowMode == "visible";
   desc.resolution = testCase.resolution;
   desc.renderGraph.workerCount = testCase.renderGraph.workerCount;
   desc.renderGraph.parallelCompile = testCase.renderGraph.parallelCompile;
@@ -272,15 +394,6 @@ findAutotestCaptureTarget(const AutotestCheckpoint &checkpoint,
     }
   }
   return nullptr;
-}
-
-[[nodiscard]] bool caseHasReadouts(const AutotestCase &testCase) {
-  for (const AutotestCheckpoint &checkpoint : testCase.checkpoints) {
-    if (!checkpoint.readouts.empty()) {
-      return true;
-    }
-  }
-  return false;
 }
 
 void drainAutotestGpuTimings(
@@ -410,7 +523,7 @@ void markPendingReadoutsMissing(std::vector<PendingReadout> &pendingReadouts,
             .readouts[pending.readoutReportIndex];
     readoutReport.status = "missing_readout";
     readoutReport.statusReason = readoutReport.required
-                                     ? "readout_drain_limit_exceeded"
+                                     ? "readout_drain_frame_limit_exceeded"
                                      : "optional_readout_unavailable";
     if (readoutReport.required &&
         result.exitCode == AutotestExitCode::Success) {
@@ -548,22 +661,28 @@ void populateVerboseFrames(
     const std::filesystem::path &artifactDir,
     const std::filesystem::path &caseDir, const std::filesystem::path &htmlPath,
     std::string_view backend, std::string_view backendSource,
-    std::string_view presentMode, std::string_view presentSource) {
+    std::string_view presentMode, std::string_view presentSource,
+    const ResolvedWindowMode &windowMode) {
   AutotestReport report{};
+  report.baselineProfile = options.baselineProfile;
   report.generatedAtUtc = utcTimestampIso8601();
   report.command = options.command;
   report.testCase = testCase;
   report.run.fixedDeltaSeconds = testCase.fixedDeltaSeconds;
   report.run.warmupFrames = testCase.warmupFrames;
   report.run.endFrame = testCase.endFrame;
-  report.run.readoutDrainTimeoutMs = 1000u;
+  report.run.readoutDrainFrameLimit = kAutotestReadoutDrainFrameLimit;
+  report.run.readoutDrainTimeoutMs = 0u;
+  report.run.requestedWindowMode = windowMode.value;
+  report.run.resolvedWindowMode = windowMode.value;
+  report.run.windowModeSource = windowMode.source;
   report.run.captureSynchronization = "wait_idle";
   report.artifacts.artifactDir = artifactDir;
   report.artifacts.caseDir = caseDir;
   report.artifacts.caseHtml = htmlPath;
   report.environment = collectAutotestEnvironment(
-      backend, backendSource, presentMode, presentSource, options.windowMode,
-      options.windowMode);
+      backend, backendSource, presentMode, presentSource, windowMode.value,
+      windowMode.value);
   report.environment.renderGraphWorkerCount = testCase.renderGraph.workerCount;
   report.environment.renderGraphParallelCompile =
       testCase.renderGraph.parallelCompile;
@@ -571,6 +690,8 @@ void populateVerboseFrames(
       testCase.renderGraph.parallelRecording;
   report.reproduceCommand = "nuri-autotest run --case " + testCase.id +
                             " --baseline-profile " + options.baselineProfile;
+  report.selection.requested = testCase.id;
+  report.selection.selected = 1u;
   return report;
 }
 
@@ -632,25 +753,51 @@ void writeReports(AutotestRunResult &result, AutotestReport &report,
   result.reportPath = jsonPath;
   result.htmlPath = htmlPath;
   report.artifacts.caseHtml = htmlPath;
-  auto writeJson = writeAutotestReportFile(report, jsonPath);
-  if (writeJson.hasError() && result.exitCode == AutotestExitCode::Success) {
-    result.exitCode = AutotestExitCode::RuntimeError;
-    result.message = writeJson.error();
-  }
+  evaluateAutotestBaselineProfile(report);
+  const auto updateOutcome = [&]() {
+    report.status = outcomeForExitCode(result.exitCode);
+    report.exitCode = result.exitCode;
+    report.selection.attempted =
+        result.exitCode == AutotestExitCode::InvalidInput ? 0u : 1u;
+    report.selection.completed =
+        result.exitCode == AutotestExitCode::InvalidInput ? 0u : 1u;
+    report.selection.passed =
+        result.exitCode == AutotestExitCode::Success ? 1u : 0u;
+    report.selection.failed =
+        result.exitCode == AutotestExitCode::ScenarioFailure ||
+                result.exitCode == AutotestExitCode::RuntimeError ||
+                result.exitCode == AutotestExitCode::MissingBaseline
+            ? 1u
+            : 0u;
+    report.selection.unavailable =
+        result.exitCode == AutotestExitCode::EnvironmentUnavailable ? 1u : 0u;
+    report.selection.notRun =
+        result.exitCode == AutotestExitCode::InvalidInput ? 1u : 0u;
+  };
+  updateOutcome();
   auto writeHtml = writeAutotestHtmlReportFile(report, htmlPath);
-  if (writeHtml.hasError() && result.exitCode == AutotestExitCode::Success) {
+  if (writeHtml.hasError()) {
     result.exitCode = AutotestExitCode::RuntimeError;
     result.message = writeHtml.error();
+    report.errors.push_back(result.message);
+  }
+  updateOutcome();
+  auto writeJson = writeAutotestReportFile(report, jsonPath);
+  if (writeJson.hasError()) {
+    result.exitCode = AutotestExitCode::RuntimeError;
+    result.message = writeJson.error();
+    report.errors.push_back(result.message);
+    updateOutcome();
   }
 }
 
 [[nodiscard]] std::filesystem::path
 baselineCheckpointDir(const AutotestCase &testCase,
                       const AutotestCheckpoint &checkpoint,
-                      std::string_view baselineProfile) {
-  return nuri::tools::snapshot::defaultSnapshotBaselineRoot() /
-         baselineProfile / "autotests" / testCase.suite / testCase.id /
-         "checkpoints" / checkpointDirName(checkpoint);
+                      std::string_view baselineProfile,
+                      const std::filesystem::path &baselineRoot) {
+  return baselineRoot / baselineProfile / "autotests" / testCase.suite /
+         testCase.id / "checkpoints" / checkpointDirName(checkpoint);
 }
 
 [[nodiscard]] AutotestExitCode compareCheckpointCapture(
@@ -659,7 +806,8 @@ baselineCheckpointDir(const AutotestCase &testCase,
     nuri::tools::snapshot::SnapshotCaptureReport &capture,
     const std::filesystem::path &autotestCaseDir,
     const std::filesystem::path &checkpointDir,
-    std::string_view baselineProfile, std::string &message) {
+    std::string_view baselineProfile, const std::filesystem::path &baselineRoot,
+    std::string &message) {
   if (capture.actual.empty() || capture.status == "missing_capture_point" ||
       capture.status == "unsupported_format" ||
       capture.status == "readback_error") {
@@ -669,7 +817,8 @@ baselineCheckpointDir(const AutotestCase &testCase,
   const bool usePreview =
       actual.extension() == ".nuri_tex" || actual.extension().empty();
   const std::filesystem::path expected =
-      baselineCheckpointDir(testCase, checkpoint, baselineProfile) /
+      baselineCheckpointDir(testCase, checkpoint, baselineProfile,
+                            baselineRoot) /
       (usePreview ? capture.target + "_preview.png"
                   : capture.target + actual.extension().string());
   capture.expected = expected;
@@ -679,9 +828,9 @@ baselineCheckpointDir(const AutotestCase &testCase,
     message = "autotest baseline missing";
     return AutotestExitCode::MissingBaseline;
   }
-  const std::filesystem::path baselineCaseDir =
-      nuri::tools::snapshot::defaultSnapshotBaselineRoot() / baselineProfile /
-      "autotests" / testCase.suite / testCase.id;
+  const std::filesystem::path baselineCaseDir = baselineRoot / baselineProfile /
+                                                "autotests" / testCase.suite /
+                                                testCase.id;
   auto metadata = validateAutotestBaselineMetadataFile(
       testCase, environment, baselineCaseDir, baselineProfile);
   if (metadata.hasError()) {
@@ -747,18 +896,16 @@ formatAutotestCaseListJson(const std::vector<AutotestCase> &cases,
   std::ostringstream out;
   out << "{\n  \"cases\": [\n";
   bool first = true;
-  for (const AutotestCase &testCase : cases) {
-    if (!suite.empty() && testCase.suite != suite) {
-      continue;
-    }
+  for (const AutotestCase *testCase :
+       filterAutotestCasesBySuite(cases, suite)) {
     if (!first) {
       out << ",\n";
     }
     first = false;
-    out << "    {\"id\": \"" << jsonEscape(testCase.id) << "\", \"suite\": \""
-        << jsonEscape(testCase.suite) << "\", \"description\": \""
-        << jsonEscape(testCase.description)
-        << "\", \"checkpoints\": " << testCase.checkpoints.size() << "}";
+    out << "    {\"id\": \"" << jsonEscape(testCase->id) << "\", \"suite\": \""
+        << jsonEscape(testCase->suite) << "\", \"description\": \""
+        << jsonEscape(testCase->description)
+        << "\", \"checkpoints\": " << testCase->checkpoints.size() << "}";
   }
   out << "\n  ]\n}\n";
   return Result<std::string, std::string>::makeResult(out.str());
@@ -767,12 +914,10 @@ formatAutotestCaseListJson(const std::vector<AutotestCase> &cases,
 std::string formatAutotestCaseListText(const std::vector<AutotestCase> &cases,
                                        std::string_view suite) {
   std::ostringstream out;
-  for (const AutotestCase &testCase : cases) {
-    if (!suite.empty() && testCase.suite != suite) {
-      continue;
-    }
-    out << testCase.id << " [" << testCase.suite << "] " << testCase.description
-        << "\n";
+  for (const AutotestCase *testCase :
+       filterAutotestCasesBySuite(cases, suite)) {
+    out << testCase->id << " [" << testCase->suite << "] "
+        << testCase->description << "\n";
   }
   return out.str();
 }
@@ -831,6 +976,7 @@ formatAutotestEffectiveConfigJson(const AutotestCase &testCase,
   const std::string backend = resolveBackendName(testCase, backendSource);
   std::string presentSource;
   const std::string present = resolvePresentMode(testCase, presentSource);
+  const ResolvedWindowMode windowMode = resolveWindowMode(testCase, options);
   std::ostringstream out;
   out << "{\n"
       << "  \"case\": \"" << jsonEscape(testCase.id) << "\",\n"
@@ -838,7 +984,9 @@ formatAutotestEffectiveConfigJson(const AutotestCase &testCase,
       << "  \"backendSource\": \"" << jsonEscape(backendSource) << "\",\n"
       << "  \"presentMode\": \"" << jsonEscape(present) << "\",\n"
       << "  \"presentModeSource\": \"" << jsonEscape(presentSource) << "\",\n"
-      << "  \"windowMode\": \"" << jsonEscape(options.windowMode) << "\",\n"
+      << "  \"windowMode\": \"" << jsonEscape(windowMode.value) << "\",\n"
+      << "  \"windowModeSource\": \"" << jsonEscape(windowMode.source)
+      << "\",\n"
       << "  \"artifactDir\": \""
       << jsonEscape(options.artifactDir.generic_string()) << "\"\n"
       << "}\n";
@@ -848,22 +996,63 @@ formatAutotestEffectiveConfigJson(const AutotestCase &testCase,
 AutotestRunResult runAutotestCase(AutotestCase testCase,
                                   const AutotestRunOptions &options) {
   AutotestRunResult result{};
+  auto validation = validateAutotestCase(testCase);
+  if (validation.hasError()) {
+    result.exitCode = AutotestExitCode::InvalidInput;
+    result.message = validation.error();
+    return result;
+  }
+  validation = validateAutotestIdentifier(options.baselineProfile,
+                                          "baselineProfile", false);
+  if (validation.hasError()) {
+    result.exitCode = AutotestExitCode::InvalidInput;
+    result.message = validation.error();
+    return result;
+  }
+  auto configuredProfile = nuri::tools::core::loadBaselineProfile(
+      autotestRepoRoot() / "tools" / "profiles", options.baselineProfile);
+  if (configuredProfile.hasError()) {
+    result.exitCode = AutotestExitCode::InvalidInput;
+    result.message = configuredProfile.error();
+    return result;
+  }
+  const ResolvedWindowMode windowMode = resolveWindowMode(testCase, options);
+  if (windowMode.value != "visible" && windowMode.value != "hidden" &&
+      windowMode.value != "headless") {
+    result.exitCode = AutotestExitCode::InvalidInput;
+    result.message = "windowMode must be visible, hidden, or headless";
+    return result;
+  }
   std::string backendSource;
   const std::string backend = resolveBackendName(testCase, backendSource);
   std::string presentSource;
   const std::string presentMode = resolvePresentMode(testCase, presentSource);
-  const std::filesystem::path artifactDir =
-      options.artifactDir.empty() ? autotestRepoRoot() / "artifacts" /
-                                        "autotests" / utcTimestampForPath()
-                                  : options.artifactDir;
-  const std::filesystem::path caseDir = artifactDir / "cases" / testCase.id;
+  std::filesystem::path artifactDir = options.artifactDir;
+  if (artifactDir.empty()) {
+    auto workspace = nuri::tools::core::createRunWorkspace(
+        autotestRepoRoot() / "artifacts" / "autotests");
+    if (workspace.hasError()) {
+      result.exitCode = AutotestExitCode::RuntimeError;
+      result.message = workspace.error();
+      return result;
+    }
+    artifactDir = workspace.value().root;
+  }
+  auto ownedCaseDir = resolveOwnedPath(
+      artifactDir, std::filesystem::path("cases") / testCase.id);
+  if (ownedCaseDir.hasError()) {
+    result.exitCode = AutotestExitCode::InvalidInput;
+    result.message = ownedCaseDir.error();
+    return result;
+  }
+  const std::filesystem::path caseDir = ownedCaseDir.value();
   const std::filesystem::path reportPath =
       options.jsonOut.empty() ? caseDir / "report.json" : options.jsonOut;
   const std::filesystem::path htmlPath =
       options.htmlOut.empty() ? caseDir / "report.html" : options.htmlOut;
-  AutotestReport report =
-      makeInitialReport(testCase, options, artifactDir, caseDir, htmlPath,
-                        backend, backendSource, presentMode, presentSource);
+  AutotestReport report = makeInitialReport(
+      testCase, options, artifactDir, caseDir, htmlPath, backend, backendSource,
+      presentMode, presentSource, windowMode);
 
   auto plan = compileAutotestTimeline(testCase);
   if (plan.hasError()) {
@@ -876,7 +1065,7 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
   }
 
   std::string requirementMessage;
-  auto requirements = checkRequirements(testCase, backend, options.windowMode,
+  auto requirements = checkRequirements(testCase, backend, windowMode.value,
                                         report.warnings, requirementMessage);
   if (requirements.hasError()) {
     result.exitCode = requirements.error();
@@ -899,8 +1088,50 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
     return result;
   }
 
+  const bool comparesBaseline =
+      std::any_of(testCase.checkpoints.begin(), testCase.checkpoints.end(),
+                  [](const AutotestCheckpoint &checkpoint) {
+                    return std::any_of(
+                        checkpoint.captures.begin(), checkpoint.captures.end(),
+                        [](const AutotestCaptureTarget &capture) {
+                          return capture.compare;
+                        });
+                  });
+  const std::filesystem::path baselineRoot = options.baselineRoot.empty()
+                                                 ? defaultAutotestBaselineRoot()
+                                                 : options.baselineRoot;
+  if (comparesBaseline) {
+    auto governedBaseline =
+        verifyAutotestBaseline(testCase, options.baselineProfile, baselineRoot);
+    if (governedBaseline.hasError()) {
+      const std::filesystem::path baselineCase =
+          baselineRoot / options.baselineProfile / "autotests" /
+          testCase.suite / testCase.id;
+      result.exitCode = std::filesystem::is_directory(baselineCase)
+                            ? AutotestExitCode::InvalidInput
+                            : AutotestExitCode::MissingBaseline;
+      result.message = governedBaseline.error();
+      report.errors.push_back(result.message);
+      initializeDryRunCheckpoints(report);
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
+  }
+
   std::error_code cleanupError;
-  std::filesystem::remove_all(caseDir / "checkpoints", cleanupError);
+  auto checkpointsDir =
+      resolveOwnedPath(artifactDir, std::filesystem::path("cases") /
+                                        testCase.id / "checkpoints");
+  if (checkpointsDir.hasError()) {
+    result.exitCode = AutotestExitCode::RuntimeError;
+    result.message = checkpointsDir.error();
+    report.errors.push_back(result.message);
+    writeReports(result, report, reportPath, htmlPath);
+    result.report = std::move(report);
+    return result;
+  }
+  std::filesystem::remove_all(checkpointsDir.value(), cleanupError);
   if (cleanupError) {
     result.exitCode = AutotestExitCode::RuntimeError;
     result.message =
@@ -913,20 +1144,11 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
 
   std::map<uint64_t, std::map<std::string, double>> frameMeasurements;
   std::vector<AutotestFramePlan> frames = std::move(plan.value());
-  if (caseHasReadouts(testCase) && !frames.empty()) {
-    const AutotestFramePlan lastFrame = frames.back();
-    for (uint32_t i = 1u; i <= kReadoutDrainFrameLimit; ++i) {
-      frames.push_back(AutotestFramePlan{
-          .frame = lastFrame.frame + i,
-          .camera = lastFrame.camera,
-      });
-    }
-  }
   std::vector<PendingReadout> pendingReadouts;
   uint64_t nextReadoutRequestId = 1u;
   try {
     auto runtimeResult = nuri::tools::runtime::createToolRendererRuntime(
-        makeToolRuntimeDesc(testCase, backend, presentMode));
+        makeToolRuntimeDesc(testCase, backend, presentMode, windowMode.value));
     if (runtimeResult.hasError()) {
       result.exitCode = AutotestExitCode::EnvironmentUnavailable;
       result.message = runtimeResult.error();
@@ -938,6 +1160,22 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
     std::unique_ptr<nuri::tools::runtime::ToolRendererRuntime> runtime =
         std::move(runtimeResult.value());
     report.environment.swapchainImageCount = runtime->swapchainImageCount();
+    const GPUAdapterInfo adapter = runtime->gpu().getAdapterInfo();
+    report.environment.gpuDeviceName = adapter.name;
+    report.environment.gpuVendorId = adapter.vendorId;
+    report.environment.gpuDeviceId = adapter.deviceId;
+    report.environment.gpuDriverVersion = adapter.driverVersion;
+    evaluateAutotestBaselineProfile(report);
+    if (comparesBaseline && !report.baselineProfileCompatible) {
+      result.exitCode = AutotestExitCode::InvalidInput;
+      result.message = "autotest runtime does not match baseline profile";
+      report.errors.insert(report.errors.end(),
+                           report.baselineProfileIncompatibilityReasons.begin(),
+                           report.baselineProfileIncompatibilityReasons.end());
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
 
     if (const uint32_t preFrameSleepMs = autotestPreFrameSleepMs();
         preFrameSleepMs > 0u) {
@@ -945,10 +1183,16 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
     }
 
     double timeSeconds = 0.0;
+    bool drainStarted = false;
+    std::chrono::steady_clock::time_point drainStartedAt{};
     for (const AutotestFramePlan &frame : frames) {
       NURI_PROFILER_FRAME("AutotestFrame");
-      if (frame.frame > testCase.endFrame && pendingReadouts.empty()) {
+      if (frame.drainOnly && pendingReadouts.empty()) {
         break;
+      }
+      if (frame.drainOnly && !drainStarted) {
+        drainStarted = true;
+        drainStartedAt = std::chrono::steady_clock::now();
       }
       runtime->window().pollEvents();
       auto commitResult = runtime->commitScene();
@@ -998,8 +1242,12 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
         break;
       }
       ++report.run.renderedFrames;
-      if (frame.frame > testCase.endFrame) {
+      if (frame.drainOnly) {
         ++report.run.readoutDrainFrames;
+        report.run.readoutDrainElapsedMs = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - drainStartedAt)
+                .count());
       }
 
       std::map<std::string, double> measurements;
@@ -1055,9 +1303,10 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
             std::string compareMessage;
             const AutotestExitCode compareCode = compareCheckpointCapture(
                 testCase, *checkpoint, report.environment, capture, caseDir,
-                checkpointDir, options.baselineProfile, compareMessage);
-            if (static_cast<int>(compareCode) >
-                static_cast<int>(result.exitCode)) {
+                checkpointDir, options.baselineProfile, baselineRoot,
+                compareMessage);
+            if (aggregatePrecedence(compareCode) >
+                aggregatePrecedence(result.exitCode)) {
               result.exitCode = compareCode;
               result.message = compareMessage;
             }
@@ -1131,52 +1380,177 @@ AutotestSuiteRunResult runAutotestSuite(std::vector<AutotestCase> testCases,
                                         std::string_view suite,
                                         const AutotestRunOptions &options) {
   AutotestSuiteRunResult suiteResult{};
-  const std::filesystem::path artifactDir =
-      options.artifactDir.empty() ? autotestRepoRoot() / "artifacts" /
-                                        "autotests" / utcTimestampForPath()
-                                  : options.artifactDir;
-  for (AutotestCase &testCase : testCases) {
-    if (testCase.suite != suite) {
-      continue;
+  std::filesystem::path artifactDir = options.artifactDir;
+  if (artifactDir.empty()) {
+    auto workspace = nuri::tools::core::createRunWorkspace(
+        autotestRepoRoot() / "artifacts" / "autotests");
+    if (workspace.hasError()) {
+      suiteResult.exitCode = AutotestExitCode::RuntimeError;
+      suiteResult.message = workspace.error();
+      return suiteResult;
     }
-    AutotestRunOptions caseOptions = options;
-    caseOptions.artifactDir = artifactDir;
-    caseOptions.jsonOut.clear();
-    caseOptions.htmlOut.clear();
-    AutotestRunResult result =
-        runAutotestCase(std::move(testCase), caseOptions);
-    if (static_cast<int>(result.exitCode) >
-        static_cast<int>(suiteResult.exitCode)) {
-      suiteResult.exitCode = result.exitCode;
-    }
-    suiteResult.caseResults.push_back(std::move(result));
+    artifactDir = workspace.value().root;
   }
   suiteResult.reportPath =
       options.jsonOut.empty() ? artifactDir / "run.json" : options.jsonOut;
   suiteResult.htmlPath =
       options.htmlOut.empty() ? artifactDir / "index.html" : options.htmlOut;
-  if (!suiteResult.reportPath.parent_path().empty()) {
-    std::filesystem::create_directories(suiteResult.reportPath.parent_path());
+  AutotestSuiteReport suiteReport{};
+  suiteReport.baselineProfile = options.baselineProfile;
+  suiteReport.investigative = options.dryRun;
+  suiteReport.generatedAtUtc = utcTimestampIso8601();
+  suiteReport.command = options.command;
+  suiteReport.suite = std::string(suite);
+  suiteReport.selection.requested = std::string(suite);
+  suiteReport.artifactDir = ".";
+
+  auto suiteId = validateAutotestIdentifier(suite, "suite", false);
+  auto baselineProfile = validateAutotestIdentifier(options.baselineProfile,
+                                                    "baselineProfile", false);
+  const bool invalidWindowOverride =
+      !options.windowMode.empty() && options.windowMode != "visible" &&
+      options.windowMode != "hidden" && options.windowMode != "headless";
+  if (suiteId.hasError() || baselineProfile.hasError() ||
+      invalidWindowOverride) {
+    suiteResult.exitCode = AutotestExitCode::InvalidInput;
+    suiteResult.message =
+        suiteId.hasError() ? suiteId.error()
+        : baselineProfile.hasError()
+            ? baselineProfile.error()
+            : "windowMode must be visible, hidden, or headless";
+    suiteReport.diagnostics.push_back(suiteResult.message);
   }
-  std::ofstream json(suiteResult.reportPath, std::ios::binary);
-  json << "{\n  \"kind\": \"nuri.autotest.suite_report\",\n"
-          "  \"caseReports\": [\n";
-  for (size_t i = 0u; i < suiteResult.caseResults.size(); ++i) {
-    if (i != 0u) {
-      json << ",\n";
+
+  std::vector<size_t> selectedIndices;
+  if (suiteResult.exitCode == AutotestExitCode::Success) {
+    std::vector<nuri::tools::core::CaseCatalogEntry> catalog;
+    catalog.reserve(testCases.size());
+    for (const AutotestCase &testCase : testCases) {
+      catalog.push_back({.id = testCase.id,
+                         .suite = testCase.suite,
+                         .manifestPath = testCase.manifestPath});
     }
-    json << "    \""
-         << jsonEscape(suiteResult.caseResults[i].reportPath.generic_string())
-         << "\"";
+    auto selected = nuri::tools::core::selectCaseCatalog(
+        catalog,
+        nuri::tools::core::CaseCatalogSelector{.suite = std::string(suite)},
+        nuri::tools::core::CaseCatalogZeroMatchPolicy::Reject, "autotest");
+    if (selected.hasError()) {
+      suiteResult.exitCode = AutotestExitCode::InvalidInput;
+      suiteResult.message = selected.error();
+      suiteReport.diagnostics.push_back(suiteResult.message);
+    } else {
+      selectedIndices = std::move(selected.value());
+      suiteReport.selection.selected = selectedIndices.size();
+    }
   }
-  json << "\n  ]\n}\n";
+
+  if (suiteResult.exitCode == AutotestExitCode::Success) {
+    for (const size_t index : selectedIndices) {
+      AutotestCase &testCase = testCases[index];
+      AutotestRunOptions caseOptions = options;
+      caseOptions.artifactDir = artifactDir;
+      caseOptions.jsonOut.clear();
+      caseOptions.htmlOut.clear();
+      AutotestRunResult result =
+          runAutotestCase(std::move(testCase), caseOptions);
+      if (aggregatePrecedence(result.exitCode) >
+          aggregatePrecedence(suiteResult.exitCode)) {
+        suiteResult.exitCode = result.exitCode;
+      }
+      suiteResult.caseResults.push_back(std::move(result));
+    }
+  }
+
   std::vector<AutotestReport> reports;
   reports.reserve(suiteResult.caseResults.size());
   for (const AutotestRunResult &caseResult : suiteResult.caseResults) {
     reports.push_back(caseResult.report);
+    suiteReport.selection.attempted += caseResult.report.selection.attempted;
+    suiteReport.selection.completed += caseResult.report.selection.completed;
+    suiteReport.selection.passed += caseResult.report.selection.passed;
+    suiteReport.selection.failed += caseResult.report.selection.failed;
+    suiteReport.selection.unavailable +=
+        caseResult.report.selection.unavailable;
+    suiteReport.selection.notRun += caseResult.report.selection.notRun;
+    suiteReport.children.push_back(AutotestSuiteChildReport{
+        .id = caseResult.report.testCase.id,
+        .status = caseResult.report.status,
+        .exitCode = caseResult.exitCode,
+        .report = relativeToCaseDir(artifactDir, caseResult.reportPath),
+        .html = relativeToCaseDir(artifactDir, caseResult.htmlPath),
+    });
   }
-  (void)writeAutotestSuiteHtmlFile(reports, suite, suiteResult.htmlPath);
-  suiteResult.message = "suite run complete";
+  {
+    std::vector<nuri::tools::core::FingerprintField> environmentFields{
+        {"scope", "autotest.suite.environment"}};
+    std::vector<nuri::tools::core::FingerprintField> workloadFields{
+        {"scope", "autotest.suite.workload"}};
+    for (const AutotestRunResult &child : suiteResult.caseResults) {
+      if (auto fingerprint =
+              makeAutotestEnvironmentFingerprint(child.report.environment)) {
+        environmentFields.push_back(
+            {"child." + child.report.testCase.id, std::move(*fingerprint)});
+      }
+      if (auto fingerprint =
+              makeAutotestWorkloadFingerprint(child.report.testCase)) {
+        workloadFields.push_back(
+            {"child." + child.report.testCase.id, std::move(*fingerprint)});
+      }
+    }
+    auto environment =
+        nuri::tools::core::makeSha256Fingerprint(std::move(environmentFields));
+    auto workload =
+        nuri::tools::core::makeSha256Fingerprint(std::move(workloadFields));
+    if (!environment.hasError()) {
+      suiteReport.environmentFingerprint = std::move(environment.value());
+    }
+    if (!workload.hasError()) {
+      suiteReport.workloadFingerprint = std::move(workload.value());
+    }
+  }
+  suiteReport.baselineProfileCompatible = std::all_of(
+      suiteResult.caseResults.begin(), suiteResult.caseResults.end(),
+      [](const AutotestRunResult &child) {
+        return child.report.baselineProfileCompatible;
+      });
+  for (const AutotestRunResult &child : suiteResult.caseResults) {
+    suiteReport.baselineProfileIncompatibilityReasons.insert(
+        suiteReport.baselineProfileIncompatibilityReasons.end(),
+        child.report.baselineProfileIncompatibilityReasons.begin(),
+        child.report.baselineProfileIncompatibilityReasons.end());
+  }
+  std::sort(suiteReport.baselineProfileIncompatibilityReasons.begin(),
+            suiteReport.baselineProfileIncompatibilityReasons.end());
+  suiteReport.baselineProfileIncompatibilityReasons.erase(
+      std::unique(suiteReport.baselineProfileIncompatibilityReasons.begin(),
+                  suiteReport.baselineProfileIncompatibilityReasons.end()),
+      suiteReport.baselineProfileIncompatibilityReasons.end());
+  suiteReport.status = outcomeForExitCode(suiteResult.exitCode);
+  suiteReport.exitCode = suiteResult.exitCode;
+  auto htmlWritten =
+      writeAutotestSuiteHtmlFile(reports, suite, suiteResult.htmlPath);
+  if (htmlWritten.hasError()) {
+    suiteResult.exitCode = AutotestExitCode::RuntimeError;
+    suiteResult.message = htmlWritten.error();
+    suiteReport.diagnostics.push_back(suiteResult.message);
+  }
+  suiteReport.status = outcomeForExitCode(suiteResult.exitCode);
+  suiteReport.exitCode = suiteResult.exitCode;
+  auto jsonWritten =
+      writeAutotestSuiteReportFile(suiteReport, suiteResult.reportPath);
+  if (jsonWritten.hasError()) {
+    suiteResult.exitCode = AutotestExitCode::RuntimeError;
+    suiteResult.message = jsonWritten.error();
+    suiteReport.status = outcomeForExitCode(suiteResult.exitCode);
+    suiteReport.exitCode = suiteResult.exitCode;
+    suiteReport.diagnostics.push_back(suiteResult.message);
+  }
+  if (suiteResult.message.empty()) {
+    suiteResult.message = suiteResult.exitCode == AutotestExitCode::Success
+                              ? "suite run complete"
+                              : autotestExitCodeName(suiteResult.exitCode);
+  }
+  suiteResult.report = std::move(suiteReport);
   return suiteResult;
 }
 

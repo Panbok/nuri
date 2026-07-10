@@ -853,6 +853,7 @@ struct LvkGPUDevice::Impl {
   uint32_t preparedSwapchainImageCount = 0u;
   bool hasPreparedSwapchainImage = false;
   TextureCompressionCaps compressionCaps{};
+  GPUAdapterInfo adapterInfo{};
   ResourceTable<SamplerHandle, lvk::SamplerHandle> samplers;
   SamplerHandle cubemapSampler{};
   SamplerHandle bilinearSampler{};
@@ -1243,6 +1244,12 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
                                 &deviceFeatures);
     const VkPhysicalDeviceProperties &properties =
         vkContext->getVkPhysicalDeviceProperties();
+    device->impl_->adapterInfo = GPUAdapterInfo{
+        .name = properties.deviceName,
+        .vendorId = properties.vendorID,
+        .deviceId = properties.deviceID,
+        .driverVersion = std::to_string(properties.driverVersion),
+    };
     NURI_LOG_INFO(
         "LvkGPUDevice::create: Vulkan device='%s' vendor=0x%04x device=0x%04x "
         "api=%s driver='%s' driverInfo='%s'",
@@ -2282,6 +2289,10 @@ TextureDimensions LvkGPUDevice::getTextureDimensions(TextureHandle h) const {
 
 TextureCompressionCaps LvkGPUDevice::getTextureCompressionCaps() const {
   return impl_->compressionCaps;
+}
+
+GPUAdapterInfo LvkGPUDevice::getAdapterInfo() const {
+  return impl_ != nullptr ? impl_->adapterInfo : GPUAdapterInfo{};
 }
 
 bool LvkGPUDevice::supportsFeature(GPUFeature feature) const {

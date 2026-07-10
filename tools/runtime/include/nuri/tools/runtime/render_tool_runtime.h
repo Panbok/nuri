@@ -87,6 +87,7 @@ struct ToolRuntimeDesc {
   std::string title = "nuri-tool";
   std::string backend = "default";
   std::string presentMode = "default";
+  bool windowVisible = true;
   std::array<uint32_t, 2> resolution{1280u, 720u};
   ToolRenderGraphDesc renderGraph{};
   ToolSceneDesc scene{};

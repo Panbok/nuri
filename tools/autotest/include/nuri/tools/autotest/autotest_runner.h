@@ -14,8 +14,9 @@ struct AutotestRunOptions {
   std::filesystem::path jsonOut{};
   std::filesystem::path htmlOut{};
   std::filesystem::path artifactDir{};
+  std::filesystem::path baselineRoot{};
   std::string baselineProfile = "local-nvrhi-visible";
-  std::string windowMode = "visible";
+  std::string windowMode{};
   bool dryRun = false;
   bool printEffectiveConfig = false;
   bool verboseFrames = false;
@@ -32,6 +33,7 @@ struct AutotestRunResult {
 
 struct AutotestSuiteRunResult {
   AutotestExitCode exitCode = AutotestExitCode::Success;
+  AutotestSuiteReport report{};
   std::vector<AutotestRunResult> caseResults{};
   std::filesystem::path reportPath{};
   std::filesystem::path htmlPath{};

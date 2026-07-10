@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,9 +64,25 @@ struct AutotestRunMetadata {
   uint32_t endFrame = 0u;
   uint32_t renderedFrames = 0u;
   uint32_t readoutDrainFrames = 0u;
-  uint32_t readoutDrainTimeoutMs = 1000u;
+  uint32_t readoutDrainFrameLimit = 0u;
+  uint32_t readoutDrainTimeoutMs = 0u;
+  uint32_t readoutDrainElapsedMs = 0u;
+  std::string requestedWindowMode{};
+  std::string resolvedWindowMode = "visible";
+  std::string windowModeSource = "manifest";
   std::string captureSynchronization = "wait_idle";
   bool validForComparison = true;
+};
+
+struct AutotestSelectionSummary {
+  std::string requested{};
+  uint32_t selected = 0u;
+  uint32_t attempted = 0u;
+  uint32_t completed = 0u;
+  uint32_t passed = 0u;
+  uint32_t failed = 0u;
+  uint32_t unavailable = 0u;
+  uint32_t notRun = 0u;
 };
 
 struct AutotestFrameReport {
@@ -84,8 +101,14 @@ struct AutotestReportArtifacts {
 struct AutotestReport {
   uint32_t schemaVersion = 1u;
   std::string kind = "nuri.autotest.report";
+  std::string baselineProfile = "local-nvrhi-visible";
+  bool baselineProfileCompatible = false;
+  std::vector<std::string> baselineProfileIncompatibilityReasons{};
   std::string generatedAtUtc{};
   std::string command{};
+  std::string status = "invalid";
+  AutotestExitCode exitCode = AutotestExitCode::InvalidInput;
+  AutotestSelectionSummary selection{};
   AutotestEnvironment environment{};
   AutotestCase testCase{};
   AutotestRunMetadata run{};
@@ -97,7 +120,44 @@ struct AutotestReport {
   std::vector<std::string> warnings{};
   std::vector<std::string> errors{};
   std::string reproduceCommand{};
+  // Preserved when reading a v2 envelope so a read/write round trip does not
+  // recompute opaque evidence from the intentionally smaller v1 payload.
+  std::string environmentFingerprint{};
+  std::string workloadFingerprint{};
 };
+
+struct AutotestSuiteChildReport {
+  std::string id{};
+  std::string status{};
+  AutotestExitCode exitCode = AutotestExitCode::Success;
+  std::filesystem::path report{};
+  std::filesystem::path html{};
+};
+
+struct AutotestSuiteReport {
+  uint32_t schemaVersion = 1u;
+  std::string kind = "nuri.autotest.suite_report";
+  std::string baselineProfile = "local-nvrhi-visible";
+  bool baselineProfileCompatible = false;
+  std::vector<std::string> baselineProfileIncompatibilityReasons{};
+  bool investigative = false;
+  std::string generatedAtUtc{};
+  std::string command{};
+  std::string suite{};
+  std::string status = "invalid";
+  AutotestExitCode exitCode = AutotestExitCode::InvalidInput;
+  AutotestSelectionSummary selection{};
+  std::filesystem::path artifactDir{};
+  std::vector<AutotestSuiteChildReport> children{};
+  std::vector<std::string> diagnostics{};
+  std::string environmentFingerprint{};
+  std::string workloadFingerprint{};
+};
+
+[[nodiscard]] std::optional<std::string>
+makeAutotestEnvironmentFingerprint(const AutotestEnvironment &environment);
+[[nodiscard]] std::optional<std::string>
+makeAutotestWorkloadFingerprint(const AutotestCase &testCase);
 
 [[nodiscard]] Result<std::string, std::string>
 writeAutotestReportJson(const AutotestReport &report);
@@ -106,6 +166,13 @@ writeAutotestReportFile(const AutotestReport &report,
                         const std::filesystem::path &path);
 [[nodiscard]] Result<AutotestReport, std::string>
 readAutotestReportFile(const std::filesystem::path &path);
+[[nodiscard]] Result<std::string, std::string>
+writeAutotestSuiteReportJson(const AutotestSuiteReport &report);
+[[nodiscard]] Result<bool, std::string>
+writeAutotestSuiteReportFile(const AutotestSuiteReport &report,
+                             const std::filesystem::path &path);
+[[nodiscard]] Result<AutotestSuiteReport, std::string>
+readAutotestSuiteReportFile(const std::filesystem::path &path);
 [[nodiscard]] Result<std::string, std::string>
 writeAutotestHtmlReport(const AutotestReport &report);
 [[nodiscard]] Result<bool, std::string>

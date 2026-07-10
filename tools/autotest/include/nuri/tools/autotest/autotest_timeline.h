@@ -9,12 +9,15 @@
 
 namespace nuri::tools::autotest {
 
+inline constexpr uint32_t kAutotestReadoutDrainFrameLimit = 4u;
+
 struct AutotestFramePlan {
   uint32_t frame = 0u;
   AutotestCameraConfig camera{};
   RenderSettings settings{};
   bool resetTemporalHistory = false;
   bool cameraCut = false;
+  bool drainOnly = false;
   std::string resetReason{};
   std::vector<const AutotestCheckpoint *> checkpoints{};
 };

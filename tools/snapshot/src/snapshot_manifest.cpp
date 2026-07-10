@@ -1,18 +1,28 @@
 #include "nuri/tools/snapshot/snapshot_manifest.h"
 
 #include "nuri/core/runtime_config.h"
+#include "nuri/tools/core/case_catalog.h"
 #include "nuri/tools/snapshot/snapshot_capture_point.h"
+#include "nuri/tools/snapshot/snapshot_compare.h"
 #include "nuri/tools/snapshot/snapshot_environment.h"
 
 #include <algorithm>
 #include <array>
 #include <climits>
 #include <cstdint>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <span>
+#include <string>
 #include <string_view>
+#include <system_error>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #include <yyjson.h>
 
@@ -20,6 +30,63 @@ namespace nuri::tools::snapshot {
 namespace {
 
 using JsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+
+[[nodiscard]] bool isReservedWindowsSegment(std::string_view segment) {
+  static constexpr std::array names{
+      std::string_view("con"),  std::string_view("prn"),
+      std::string_view("aux"),  std::string_view("nul"),
+      std::string_view("com1"), std::string_view("com2"),
+      std::string_view("com3"), std::string_view("com4"),
+      std::string_view("com5"), std::string_view("com6"),
+      std::string_view("com7"), std::string_view("com8"),
+      std::string_view("com9"), std::string_view("lpt1"),
+      std::string_view("lpt2"), std::string_view("lpt3"),
+      std::string_view("lpt4"), std::string_view("lpt5"),
+      std::string_view("lpt6"), std::string_view("lpt7"),
+      std::string_view("lpt8"), std::string_view("lpt9")};
+  return std::find(names.begin(), names.end(), segment) != names.end();
+}
+
+[[nodiscard]] bool equalPathComponent(const std::filesystem::path &lhs,
+                                      const std::filesystem::path &rhs) {
+#if defined(_WIN32)
+  std::wstring left = lhs.native();
+  std::wstring right = rhs.native();
+  for (wchar_t &c : left) {
+    c = static_cast<wchar_t>(std::towlower(c));
+  }
+  for (wchar_t &c : right) {
+    c = static_cast<wchar_t>(std::towlower(c));
+  }
+  return left == right;
+#else
+  return lhs == rhs;
+#endif
+}
+
+[[nodiscard]] bool pathIsUnder(const std::filesystem::path &root,
+                               const std::filesystem::path &candidate) {
+  auto rootIt = root.begin();
+  auto candidateIt = candidate.begin();
+  for (; rootIt != root.end(); ++rootIt, ++candidateIt) {
+    if (candidateIt == candidate.end() ||
+        !equalPathComponent(*rootIt, *candidateIt)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool isReparsePoint(const std::filesystem::path &path) {
+#if defined(_WIN32)
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES &&
+         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0u;
+#else
+  std::error_code ec;
+  return std::filesystem::is_symlink(std::filesystem::symlink_status(path, ec));
+#endif
+}
 
 [[nodiscard]] std::string jsonPath(std::string_view path,
                                    std::string_view key) {
@@ -884,6 +951,7 @@ parseCaptures(yyjson_val *root) {
         "captures must be an array");
   }
   captures.reserve(yyjson_arr_size(array));
+  std::set<std::string> captureNames;
   yyjson_arr_iter iter;
   yyjson_arr_iter_init(array, &iter);
   yyjson_val *entry = nullptr;
@@ -935,8 +1003,27 @@ parseCaptures(yyjson_val *root) {
           "' is known but not capturable yet: " +
           std::string(catalog->diagnosticWork));
     }
+    if (!captureNames.insert(target.name).second) {
+      return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeError(
+          "duplicate capture target '" + target.name + "'");
+    }
     if (target.profile.empty()) {
       target.profile = std::string(catalog->defaultCompareProfile);
+    }
+    auto profileIdentifier =
+        validateSnapshotIdentifier(target.profile, "captures[].profile");
+    if (profileIdentifier.hasError()) {
+      return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeError(
+          profileIdentifier.error());
+    }
+    if (!isBuiltinSnapshotCompareProfile(target.profile)) {
+      return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeError(
+          "unknown compare profile '" + target.profile + "'");
+    }
+    if (!snapshotCompareProfileSupportsKind(target.profile, catalog->kind)) {
+      return Result<std::vector<SnapshotCaptureTarget>, std::string>::makeError(
+          "compare profile '" + target.profile +
+          "' is not compatible with capture target '" + target.name + "'");
     }
     captures.push_back(std::move(target));
   }
@@ -945,6 +1032,95 @@ parseCaptures(yyjson_val *root) {
 }
 
 } // namespace
+
+Result<bool, std::string> validateSnapshotIdentifier(std::string_view value,
+                                                     std::string_view field,
+                                                     bool allowDotted) {
+  if (value.empty()) {
+    return Result<bool, std::string>::makeError(std::string(field) +
+                                                " must not be empty");
+  }
+  size_t segmentStart = 0u;
+  while (segmentStart < value.size()) {
+    const size_t dot = value.find('.', segmentStart);
+    const size_t segmentEnd =
+        dot == std::string_view::npos ? value.size() : dot;
+    const std::string_view segment =
+        value.substr(segmentStart, segmentEnd - segmentStart);
+    if (segment.empty() || segment.size() > 64u) {
+      return Result<bool, std::string>::makeError(
+          std::string(field) + " contains an empty or overlong segment");
+    }
+    const auto isLowerAlphaNumeric = [](char c) {
+      return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    };
+    if (!isLowerAlphaNumeric(segment.front())) {
+      return Result<bool, std::string>::makeError(
+          std::string(field) + " must use lowercase ASCII identifier segments");
+    }
+    for (const char c : segment) {
+      if (!isLowerAlphaNumeric(c) && c != '_' && c != '-') {
+        return Result<bool, std::string>::makeError(
+            std::string(field) +
+            " must use lowercase ASCII identifier segments");
+      }
+    }
+    if (isReservedWindowsSegment(segment)) {
+      return Result<bool, std::string>::makeError(
+          std::string(field) + " contains a reserved device name");
+    }
+    if (dot == std::string_view::npos) {
+      break;
+    }
+    if (!allowDotted) {
+      return Result<bool, std::string>::makeError(std::string(field) +
+                                                  " must be one segment");
+    }
+    segmentStart = dot + 1u;
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<std::filesystem::path, std::string>
+resolveSnapshotPathUnder(const std::filesystem::path &root,
+                         const std::filesystem::path &relative) {
+  if (root.empty() || relative.empty() || relative.is_absolute() ||
+      relative.has_root_name() || relative.has_root_directory()) {
+    return Result<std::filesystem::path, std::string>::makeError(
+        "resolveSnapshotPathUnder: expected a non-empty relative path");
+  }
+  for (const std::filesystem::path &component : relative) {
+    if (component == "." || component == ".." || component.empty()) {
+      return Result<std::filesystem::path, std::string>::makeError(
+          "resolveSnapshotPathUnder: traversal is not allowed");
+    }
+  }
+
+  std::error_code ec;
+  const std::filesystem::path canonicalRoot =
+      std::filesystem::weakly_canonical(root, ec);
+  if (ec) {
+    return Result<std::filesystem::path, std::string>::makeError(
+        "resolveSnapshotPathUnder: failed to resolve root: " + ec.message());
+  }
+  const std::filesystem::path candidate =
+      std::filesystem::weakly_canonical(canonicalRoot / relative, ec);
+  if (ec || !pathIsUnder(canonicalRoot, candidate)) {
+    return Result<std::filesystem::path, std::string>::makeError(
+        "resolveSnapshotPathUnder: path escapes approved root");
+  }
+
+  std::filesystem::path current = canonicalRoot;
+  for (const std::filesystem::path &component : relative) {
+    current /= component;
+    if (isReparsePoint(current)) {
+      return Result<std::filesystem::path, std::string>::makeError(
+          "resolveSnapshotPathUnder: reparse/symlink components are not "
+          "allowed");
+    }
+  }
+  return Result<std::filesystem::path, std::string>::makeResult(candidate);
+}
 
 std::filesystem::path defaultSnapshotCaseRoot() {
   return snapshotRepoRoot() / "tools" / "cases" / "snapshots";
@@ -1027,11 +1203,19 @@ loadSnapshotCaseManifest(const std::filesystem::path &path) {
     return Result<SnapshotCase, std::string>::makeError(text.error());
   }
   out.id = std::move(text.value());
+  auto identifier = validateSnapshotIdentifier(out.id, "$.id");
+  if (identifier.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(identifier.error());
+  }
   text = readString(root, "suite", "$", true);
   if (text.hasError()) {
     return Result<SnapshotCase, std::string>::makeError(text.error());
   }
   out.suite = std::move(text.value());
+  identifier = validateSnapshotIdentifier(out.suite, "$.suite");
+  if (identifier.hasError()) {
+    return Result<SnapshotCase, std::string>::makeError(identifier.error());
+  }
   text = readString(root, "description", "$", false, out.description);
   if (text.hasError()) {
     return Result<SnapshotCase, std::string>::makeError(text.error());
@@ -1178,16 +1362,14 @@ discoverSnapshotCases(const SnapshotManifestLoadOptions &options) {
   const std::filesystem::path root =
       options.caseRoot.empty() ? defaultSnapshotCaseRoot() : options.caseRoot;
   std::vector<SnapshotCase> cases;
-  if (!std::filesystem::exists(root)) {
-    return Result<std::vector<SnapshotCase>, std::string>::makeResult(
-        std::move(cases));
+  auto manifests = nuri::tools::core::discoverCaseManifestPaths(root);
+  if (manifests.hasError()) {
+    return Result<std::vector<SnapshotCase>, std::string>::makeError(
+        manifests.error());
   }
-  for (const std::filesystem::directory_entry &entry :
-       std::filesystem::recursive_directory_iterator(root)) {
-    if (!entry.is_regular_file() || entry.path().extension() != ".json") {
-      continue;
-    }
-    auto loaded = loadSnapshotCaseManifest(entry.path());
+  cases.reserve(manifests.value().size());
+  for (const std::filesystem::path &manifest : manifests.value()) {
+    auto loaded = loadSnapshotCaseManifest(manifest);
     if (loaded.hasError()) {
       return Result<std::vector<SnapshotCase>, std::string>::makeError(
           loaded.error());
@@ -1198,6 +1380,19 @@ discoverSnapshotCases(const SnapshotManifestLoadOptions &options) {
             [](const SnapshotCase &lhs, const SnapshotCase &rhs) {
               return lhs.id < rhs.id;
             });
+  std::vector<nuri::tools::core::CaseCatalogEntry> entries;
+  entries.reserve(cases.size());
+  for (const SnapshotCase &snapshotCase : cases) {
+    entries.push_back({.id = snapshotCase.id,
+                       .suite = snapshotCase.suite,
+                       .manifestPath = snapshotCase.manifestPath});
+  }
+  auto validCatalog =
+      nuri::tools::core::validateCaseCatalog(entries, "snapshot");
+  if (validCatalog.hasError()) {
+    return Result<std::vector<SnapshotCase>, std::string>::makeError(
+        validCatalog.error());
+  }
   return Result<std::vector<SnapshotCase>, std::string>::makeResult(
       std::move(cases));
 }
@@ -1216,10 +1411,23 @@ std::vector<const SnapshotCase *>
 filterSnapshotCasesBySuite(const std::vector<SnapshotCase> &cases,
                            std::string_view suite) {
   std::vector<const SnapshotCase *> out;
+  std::vector<nuri::tools::core::CaseCatalogEntry> entries;
+  entries.reserve(cases.size());
   for (const SnapshotCase &snapshotCase : cases) {
-    if (suite.empty() || snapshotCase.suite == suite) {
-      out.push_back(&snapshotCase);
-    }
+    entries.push_back({.id = snapshotCase.id,
+                       .suite = snapshotCase.suite,
+                       .manifestPath = snapshotCase.manifestPath});
+  }
+  auto selected = nuri::tools::core::selectCaseCatalog(
+      entries,
+      nuri::tools::core::CaseCatalogSelector{.suite = std::string(suite)},
+      nuri::tools::core::CaseCatalogZeroMatchPolicy::Allow, "snapshot");
+  if (selected.hasError()) {
+    return out;
+  }
+  out.reserve(selected.value().size());
+  for (const size_t index : selected.value()) {
+    out.push_back(&cases[index]);
   }
   return out;
 }

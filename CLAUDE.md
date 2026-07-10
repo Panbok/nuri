@@ -43,10 +43,10 @@
 - Build/run scripts live in `scripts/`.
 
 ## Profiling (Tracy)
-- When working on performance-sensitive changes, enable Tracy and validate impact with a capture.
-- Enable profiling via CMake: `-DNURI_WITH_TRACY=ON` (Debug builds do this by default).
-- Use `lib/nuri/core/profiling.h` macros for instrumentation (`NURI_PROFILER_FUNCTION`, `NURI_PROFILER_ZONE`, `NURI_PROFILER_FRAME`, `NURI_PROFILER_THREAD`).
-- Prefer a few high-level zones first (frame loop, renderer submit, resource creation/loading), then add finer-grained zones only where needed.
+- Prefer measuring before optimizing. Use `nuri-bench` as the primary renderer performance oracle and Tracy as a benchmark-owned diagnostic artifact.
+- Enable profiling through the build/run scripts with `cpu` or `cpu-gpu`; do not invoke CMake directly.
+- Instrument with `lib/nuri/core/profiling.h` macros and keep zones coarse and meaningful before drilling down.
+- Per-draw Tracy GPU zones are diagnostic-only and must not be enabled for authoritative benchmark gates.
 
 ## Logging
 - `fatal`: use for paths that will crash or abort the app.

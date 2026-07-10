@@ -1,14 +1,22 @@
 #include "nuri/tools/snapshot/snapshot_report.h"
 
+#include "nuri/tools/core/json_contract.h"
 #include "nuri/tools/snapshot/snapshot_capture_point.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <span>
 #include <string_view>
 
 #include <yyjson.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace nuri::tools::snapshot {
 namespace {
@@ -16,6 +24,340 @@ namespace {
 using JsonMutDocPtr =
     std::unique_ptr<yyjson_mut_doc, decltype(&yyjson_mut_doc_free)>;
 using JsonDocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+using JsonField = nuri::tools::core::JsonFieldContract;
+using JsonType = nuri::tools::core::JsonFieldType;
+
+template <size_t Size>
+[[nodiscard]] Result<void, std::string>
+validateObject(yyjson_val *object, const std::array<JsonField, Size> &fields,
+               std::string_view path) {
+  return nuri::tools::core::validateJsonObject(object, fields, path);
+}
+
+[[nodiscard]] Result<void, std::string>
+validateStringArrayValue(yyjson_val *array, std::string_view path) {
+  if (!yyjson_is_arr(array)) {
+    return Result<void, std::string>::makeError(std::string(path) +
+                                                " must be an array");
+  }
+  yyjson_arr_iter iterator{};
+  yyjson_arr_iter_init(array, &iterator);
+  yyjson_val *entry = nullptr;
+  size_t index = 0u;
+  while ((entry = yyjson_arr_iter_next(&iterator)) != nullptr) {
+    if (!yyjson_is_str(entry)) {
+      return Result<void, std::string>::makeError(std::string(path) + "[" +
+                                                  std::to_string(index) +
+                                                  "] must be a string");
+    }
+    ++index;
+  }
+  return Result<void, std::string>::makeResult();
+}
+
+[[nodiscard]] Result<void, std::string>
+validateNumberMap(yyjson_val *object, std::string_view path) {
+  if (!yyjson_is_obj(object)) {
+    return Result<void, std::string>::makeError(std::string(path) +
+                                                " must be an object");
+  }
+  yyjson_obj_iter iterator{};
+  yyjson_obj_iter_init(object, &iterator);
+  yyjson_val *key = nullptr;
+  while ((key = yyjson_obj_iter_next(&iterator)) != nullptr) {
+    if (!yyjson_is_num(yyjson_obj_iter_get_val(key))) {
+      return Result<void, std::string>::makeError(
+          std::string(path) + "." + yyjson_get_str(key) + " must be a number");
+    }
+  }
+  return Result<void, std::string>::makeResult();
+}
+
+[[nodiscard]] Result<void, std::string>
+validateSnapshotReportV1(yyjson_val *root) {
+  auto valid = nuri::tools::core::rejectDuplicateJsonFieldsRecursively(root);
+  if (valid.hasError()) {
+    return valid;
+  }
+  static constexpr std::array rootFields{
+      JsonField{"schemaVersion", JsonType::Unsigned},
+      JsonField{"kind", JsonType::String},
+      JsonField{"generatedAtUtc", JsonType::String},
+      JsonField{"command", JsonType::String},
+      JsonField{"baselineProfile", JsonType::String, false},
+      JsonField{"baselineProfileCompatible", JsonType::Boolean, false},
+      JsonField{"baselineProfileIncompatibilityReasons", JsonType::Array,
+                false},
+      JsonField{"environment", JsonType::Object},
+      JsonField{"case", JsonType::Object},
+      JsonField{"artifacts", JsonType::Object},
+      JsonField{"captures", JsonType::Array},
+      JsonField{"availableCapturePoints", JsonType::Array},
+      JsonField{"captureSynchronization", JsonType::String},
+      JsonField{"rendererMetrics", JsonType::Object},
+      JsonField{"rendererMetricValues", JsonType::Object},
+      JsonField{"renderGraph", JsonType::Object, false},
+      JsonField{"reproduceCommand", JsonType::String},
+      JsonField{"warnings", JsonType::Array},
+      JsonField{"errors", JsonType::Array},
+  };
+  valid = validateObject(root, rootFields, "$");
+  if (valid.hasError()) {
+    return valid;
+  }
+  if (yyjson_val *reasons =
+          yyjson_obj_get(root, "baselineProfileIncompatibilityReasons")) {
+    valid = validateStringArrayValue(reasons,
+                                     "$.baselineProfileIncompatibilityReasons");
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+
+  static constexpr std::array environmentFields{
+      JsonField{"repoRoot", JsonType::String},
+      JsonField{"commitHash", JsonType::String},
+      JsonField{"branchName", JsonType::String},
+      JsonField{"dirty", JsonType::Boolean},
+      JsonField{"osName", JsonType::String},
+      JsonField{"osVersion", JsonType::String},
+      JsonField{"cpuName", JsonType::String},
+      JsonField{"cpuLogicalThreadCount", JsonType::Unsigned},
+      JsonField{"gpuBackend", JsonType::String},
+      JsonField{"gpuBackendSource", JsonType::String},
+      JsonField{"gpuDeviceName", JsonType::String},
+      JsonField{"gpuVendorId", JsonType::Unsigned, false},
+      JsonField{"gpuDeviceId", JsonType::Unsigned, false},
+      JsonField{"gpuDriverVersion", JsonType::String, false},
+      JsonField{"swapchainImageCount", JsonType::Unsigned},
+      JsonField{"requestedPresentMode", JsonType::String},
+      JsonField{"resolvedPresentMode", JsonType::String},
+      JsonField{"presentModeSource", JsonType::String},
+      JsonField{"requestedWindowMode", JsonType::String},
+      JsonField{"resolvedWindowMode", JsonType::String},
+      JsonField{"windowVisible", JsonType::Boolean},
+      JsonField{"renderGraphWorkerCount", JsonType::Unsigned},
+      JsonField{"renderGraphParallelCompile", JsonType::Boolean},
+      JsonField{"renderGraphParallelRecording", JsonType::Boolean},
+      JsonField{"buildType", JsonType::String},
+      JsonField{"cmakeToolProfile", JsonType::String},
+      JsonField{"vcpkgManifestFeatures", JsonType::String},
+      JsonField{"NURI_BUILD_SHARED", JsonType::Boolean},
+      JsonField{"NURI_WITH_LOGGING", JsonType::Boolean},
+      JsonField{"NURI_WITH_ASSERTS", JsonType::Boolean},
+      JsonField{"NURI_WITH_TRACY", JsonType::Boolean},
+      JsonField{"NURI_WITH_TRACY_GPU", JsonType::Boolean},
+      JsonField{"NURI_WITH_TRACY_GPU_DRAW_ZONES", JsonType::Boolean},
+      JsonField{"devChecks", JsonType::Boolean},
+  };
+  valid = validateObject(yyjson_obj_get(root, "environment"), environmentFields,
+                         "$.environment");
+  if (valid.hasError()) {
+    return valid;
+  }
+
+  static constexpr std::array caseFields{
+      JsonField{"schemaVersion", JsonType::Unsigned},
+      JsonField{"id", JsonType::String},
+      JsonField{"suite", JsonType::String},
+      JsonField{"description", JsonType::String},
+      JsonField{"backend", JsonType::String},
+      JsonField{"resolution", JsonType::Array},
+      JsonField{"presentMode", JsonType::String},
+      JsonField{"windowMode", JsonType::String},
+      JsonField{"warmupFrames", JsonType::Unsigned},
+      JsonField{"captureFrame", JsonType::Unsigned},
+      JsonField{"authoritative", JsonType::Boolean},
+      JsonField{"captures", JsonType::Array},
+  };
+  yyjson_val *caseObject = yyjson_obj_get(root, "case");
+  valid = validateObject(caseObject, caseFields, "$.case");
+  if (valid.hasError()) {
+    return valid;
+  }
+  yyjson_val *resolution = yyjson_obj_get(caseObject, "resolution");
+  if (yyjson_arr_size(resolution) != 2u ||
+      !yyjson_is_uint(yyjson_arr_get(resolution, 0u)) ||
+      !yyjson_is_uint(yyjson_arr_get(resolution, 1u))) {
+    return Result<void, std::string>::makeError(
+        "$.case.resolution must contain two unsigned integers");
+  }
+  static constexpr std::array captureTargetFields{
+      JsonField{"target", JsonType::String},
+      JsonField{"profile", JsonType::String},
+      JsonField{"required", JsonType::Boolean},
+  };
+  yyjson_arr_iter targetIterator{};
+  yyjson_arr_iter_init(yyjson_obj_get(caseObject, "captures"), &targetIterator);
+  yyjson_val *target = nullptr;
+  size_t targetIndex = 0u;
+  while ((target = yyjson_arr_iter_next(&targetIterator)) != nullptr) {
+    valid = validateObject(target, captureTargetFields,
+                           "$.case.captures[" + std::to_string(targetIndex++) +
+                               "]");
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+
+  static constexpr std::array artifactFields{
+      JsonField{"artifactDir", JsonType::String},
+      JsonField{"rootHtml", JsonType::String},
+      JsonField{"caseDir", JsonType::String},
+      JsonField{"caseHtml", JsonType::String},
+  };
+  yyjson_val *artifacts = yyjson_obj_get(root, "artifacts");
+  valid = validateObject(artifacts, artifactFields, "$.artifacts");
+  if (valid.hasError()) {
+    return valid;
+  }
+  for (std::string_view field :
+       {"artifactDir", "rootHtml", "caseDir", "caseHtml"}) {
+    valid = nuri::tools::core::validateJsonArtifactPath(artifacts, field,
+                                                        "$.artifacts");
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+
+  static constexpr std::array captureFields{
+      JsonField{"target", JsonType::String},
+      JsonField{"artifactStem", JsonType::String},
+      JsonField{"profile", JsonType::String},
+      JsonField{"required", JsonType::Boolean},
+      JsonField{"available", JsonType::Boolean},
+      JsonField{"capturePointVersion", JsonType::Unsigned},
+      JsonField{"captureFrameIndex", JsonType::Unsigned},
+      JsonField{"kind", JsonType::String},
+      JsonField{"lifetime", JsonType::String},
+      JsonField{"format", JsonType::String},
+      JsonField{"colorSpace", JsonType::String},
+      JsonField{"origin", JsonType::String},
+      JsonField{"width", JsonType::Unsigned},
+      JsonField{"height", JsonType::Unsigned},
+      JsonField{"mip", JsonType::Unsigned},
+      JsonField{"layer", JsonType::Unsigned},
+      JsonField{"actualHash", JsonType::String},
+      JsonField{"expectedHash", JsonType::String},
+      JsonField{"actual", JsonType::String},
+      JsonField{"actualMetadata", JsonType::String},
+      JsonField{"preview", JsonType::String},
+      JsonField{"expected", JsonType::String},
+      JsonField{"diff", JsonType::String},
+      JsonField{"metrics", JsonType::Object},
+      JsonField{"semanticMetrics", JsonType::Object, false},
+      JsonField{"failedThresholds", JsonType::Array, false},
+      JsonField{"producerPassLabel", JsonType::String},
+      JsonField{"readbackError", JsonType::String},
+      JsonField{"status", JsonType::String},
+      JsonField{"statusReason", JsonType::String},
+  };
+  static constexpr std::array metricFields{
+      JsonField{"meanAbsError", JsonType::Number},
+      JsonField{"rmse", JsonType::Number},
+      JsonField{"maxAbsError", JsonType::Number},
+      JsonField{"p99AbsError", JsonType::Number},
+      JsonField{"failingValues", JsonType::Unsigned},
+      JsonField{"comparedValues", JsonType::Unsigned},
+  };
+  static constexpr std::array semanticFields{
+      JsonField{"unit", JsonType::String},
+      JsonField{"meanError", JsonType::Number},
+      JsonField{"maxError", JsonType::Number},
+      JsonField{"rmse", JsonType::Number},
+      JsonField{"p99Error", JsonType::Number},
+      JsonField{"failingPixels", JsonType::Unsigned},
+      JsonField{"validPixels", JsonType::Unsigned},
+      JsonField{"ignoredPixels", JsonType::Unsigned},
+      JsonField{"changedPixels", JsonType::Unsigned},
+      JsonField{"changedBoundsValid", JsonType::Boolean},
+      JsonField{"minChangedX", JsonType::Unsigned},
+      JsonField{"minChangedY", JsonType::Unsigned},
+      JsonField{"maxChangedX", JsonType::Unsigned},
+      JsonField{"maxChangedY", JsonType::Unsigned},
+      JsonField{"maxErrorX", JsonType::Unsigned},
+      JsonField{"maxErrorY", JsonType::Unsigned},
+      JsonField{"secondaryUnit", JsonType::String},
+      JsonField{"meanSecondaryError", JsonType::Number},
+      JsonField{"maxSecondaryError", JsonType::Number},
+      JsonField{"secondaryRmse", JsonType::Number},
+      JsonField{"p99SecondaryError", JsonType::Number},
+      JsonField{"secondaryFailingPixels", JsonType::Unsigned},
+      JsonField{"truePositivePixels", JsonType::Unsigned},
+      JsonField{"trueNegativePixels", JsonType::Unsigned},
+      JsonField{"falsePositivePixels", JsonType::Unsigned},
+      JsonField{"falseNegativePixels", JsonType::Unsigned},
+      JsonField{"intersectionOverUnion", JsonType::Number},
+  };
+  yyjson_arr_iter captureIterator{};
+  yyjson_arr_iter_init(yyjson_obj_get(root, "captures"), &captureIterator);
+  yyjson_val *capture = nullptr;
+  size_t captureIndex = 0u;
+  while ((capture = yyjson_arr_iter_next(&captureIterator)) != nullptr) {
+    const std::string path =
+        "$.captures[" + std::to_string(captureIndex++) + "]";
+    valid = validateObject(capture, captureFields, path);
+    if (valid.hasError()) {
+      return valid;
+    }
+    for (std::string_view field :
+         {"actual", "actualMetadata", "preview", "expected", "diff"}) {
+      valid = nuri::tools::core::validateJsonArtifactPath(capture, field, path);
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+    valid = validateObject(yyjson_obj_get(capture, "metrics"), metricFields,
+                           path + ".metrics");
+    if (valid.hasError()) {
+      return valid;
+    }
+    if (yyjson_val *semantic = yyjson_obj_get(capture, "semanticMetrics")) {
+      valid =
+          validateObject(semantic, semanticFields, path + ".semanticMetrics");
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+    if (yyjson_val *thresholds = yyjson_obj_get(capture, "failedThresholds")) {
+      valid = validateStringArrayValue(thresholds, path + ".failedThresholds");
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+  }
+
+  static constexpr std::array rendererFields{
+      JsonField{"frameIndex", JsonType::Unsigned},
+      JsonField{"opaque", JsonType::Object},
+      JsonField{"visibility", JsonType::Object},
+      JsonField{"shadow", JsonType::Object},
+      JsonField{"antiAliasing", JsonType::Object},
+      JsonField{"ambientOcclusion", JsonType::Object},
+      JsonField{"hdrPostProcess", JsonType::Object},
+      JsonField{"transparent", JsonType::Object},
+  };
+  valid = validateObject(yyjson_obj_get(root, "rendererMetrics"),
+                         rendererFields, "$.rendererMetrics");
+  if (valid.hasError()) {
+    return valid;
+  }
+  valid = validateNumberMap(yyjson_obj_get(root, "rendererMetricValues"),
+                            "$.rendererMetricValues");
+  if (valid.hasError()) {
+    return valid;
+  }
+  for (std::string_view field :
+       {"availableCapturePoints", "warnings", "errors"}) {
+    valid = validateStringArrayValue(
+        yyjson_obj_getn(root, field.data(), field.size()),
+        "$." + std::string(field));
+    if (valid.hasError()) {
+      return valid;
+    }
+  }
+  return Result<void, std::string>::makeResult();
+}
 
 void addString(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
                const std::string &value) {
@@ -24,7 +366,10 @@ void addString(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
 
 void addPath(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
              const std::filesystem::path &value) {
-  addString(doc, object, key, value.generic_string());
+  const std::u8string utf8 = value.generic_u8string();
+  addString(
+      doc, object, key,
+      std::string(reinterpret_cast<const char *>(utf8.data()), utf8.size()));
 }
 
 yyjson_mut_val *makeStringArray(yyjson_mut_doc *doc,
@@ -34,6 +379,15 @@ yyjson_mut_val *makeStringArray(yyjson_mut_doc *doc,
     yyjson_mut_arr_add_strcpy(doc, array, value.c_str());
   }
   return array;
+}
+
+yyjson_mut_val *makeDoubleMap(yyjson_mut_doc *doc,
+                              const std::map<std::string, double> &values) {
+  yyjson_mut_val *object = yyjson_mut_obj(doc);
+  for (const auto &[name, value] : values) {
+    yyjson_mut_obj_add_real(doc, object, name.c_str(), value);
+  }
+  return object;
 }
 
 yyjson_mut_val *makeEnvironmentObject(yyjson_mut_doc *doc,
@@ -51,6 +405,9 @@ yyjson_mut_val *makeEnvironmentObject(yyjson_mut_doc *doc,
   addString(doc, object, "gpuBackend", env.gpuBackend);
   addString(doc, object, "gpuBackendSource", env.gpuBackendSource);
   addString(doc, object, "gpuDeviceName", env.gpuDeviceName);
+  yyjson_mut_obj_add_uint(doc, object, "gpuVendorId", env.gpuVendorId);
+  yyjson_mut_obj_add_uint(doc, object, "gpuDeviceId", env.gpuDeviceId);
+  addString(doc, object, "gpuDriverVersion", env.gpuDriverVersion);
   yyjson_mut_obj_add_uint(doc, object, "swapchainImageCount",
                           env.swapchainImageCount);
   addString(doc, object, "requestedPresentMode", env.requestedPresentMode);
@@ -123,6 +480,50 @@ yyjson_mut_val *makeMetricsObject(yyjson_mut_doc *doc,
   yyjson_mut_obj_add_uint(doc, object, "failingValues", metrics.failingValues);
   yyjson_mut_obj_add_uint(doc, object, "comparedValues",
                           metrics.comparedValues);
+  return object;
+}
+
+yyjson_mut_val *
+makeSemanticMetricsObject(yyjson_mut_doc *doc,
+                          const SnapshotSemanticMetrics &metrics) {
+  yyjson_mut_val *object = yyjson_mut_obj(doc);
+  addString(doc, object, "unit", metrics.unit);
+  yyjson_mut_obj_add_real(doc, object, "meanError", metrics.meanError);
+  yyjson_mut_obj_add_real(doc, object, "maxError", metrics.maxError);
+  yyjson_mut_obj_add_real(doc, object, "rmse", metrics.rmse);
+  yyjson_mut_obj_add_real(doc, object, "p99Error", metrics.p99Error);
+  yyjson_mut_obj_add_uint(doc, object, "failingPixels", metrics.failingPixels);
+  yyjson_mut_obj_add_uint(doc, object, "validPixels", metrics.validPixels);
+  yyjson_mut_obj_add_uint(doc, object, "ignoredPixels", metrics.ignoredPixels);
+  yyjson_mut_obj_add_uint(doc, object, "changedPixels", metrics.changedPixels);
+  yyjson_mut_obj_add_bool(doc, object, "changedBoundsValid",
+                          metrics.changedBoundsValid);
+  yyjson_mut_obj_add_uint(doc, object, "minChangedX", metrics.minChangedX);
+  yyjson_mut_obj_add_uint(doc, object, "minChangedY", metrics.minChangedY);
+  yyjson_mut_obj_add_uint(doc, object, "maxChangedX", metrics.maxChangedX);
+  yyjson_mut_obj_add_uint(doc, object, "maxChangedY", metrics.maxChangedY);
+  yyjson_mut_obj_add_uint(doc, object, "maxErrorX", metrics.maxErrorX);
+  yyjson_mut_obj_add_uint(doc, object, "maxErrorY", metrics.maxErrorY);
+  addString(doc, object, "secondaryUnit", metrics.secondaryUnit);
+  yyjson_mut_obj_add_real(doc, object, "meanSecondaryError",
+                          metrics.meanSecondaryError);
+  yyjson_mut_obj_add_real(doc, object, "maxSecondaryError",
+                          metrics.maxSecondaryError);
+  yyjson_mut_obj_add_real(doc, object, "secondaryRmse", metrics.secondaryRmse);
+  yyjson_mut_obj_add_real(doc, object, "p99SecondaryError",
+                          metrics.p99SecondaryError);
+  yyjson_mut_obj_add_uint(doc, object, "secondaryFailingPixels",
+                          metrics.secondaryFailingPixels);
+  yyjson_mut_obj_add_uint(doc, object, "truePositivePixels",
+                          metrics.truePositivePixels);
+  yyjson_mut_obj_add_uint(doc, object, "trueNegativePixels",
+                          metrics.trueNegativePixels);
+  yyjson_mut_obj_add_uint(doc, object, "falsePositivePixels",
+                          metrics.falsePositivePixels);
+  yyjson_mut_obj_add_uint(doc, object, "falseNegativePixels",
+                          metrics.falseNegativePixels);
+  yyjson_mut_obj_add_real(doc, object, "intersectionOverUnion",
+                          metrics.intersectionOverUnion);
   return object;
 }
 
@@ -425,6 +826,7 @@ yyjson_mut_val *makeCaptureObject(yyjson_mut_doc *doc,
                           capture.capturePointVersion);
   yyjson_mut_obj_add_uint(doc, object, "captureFrameIndex",
                           capture.captureFrameIndex);
+  addString(doc, object, "kind", capture.kind);
   addString(doc, object, "lifetime", capture.lifetime);
   addString(doc, object, "format", capture.format);
   addString(doc, object, "colorSpace", capture.colorSpace);
@@ -442,6 +844,9 @@ yyjson_mut_val *makeCaptureObject(yyjson_mut_doc *doc,
   addPath(doc, object, "diff", capture.diff);
   yyjson_mut_obj_add_val(doc, object, "metrics",
                          makeMetricsObject(doc, capture.metrics));
+  yyjson_mut_obj_add_val(
+      doc, object, "semanticMetrics",
+      makeSemanticMetricsObject(doc, capture.semanticMetrics));
   yyjson_mut_obj_add_val(doc, object, "failedThresholds",
                          makeStringArray(doc, capture.failedThresholds));
   addString(doc, object, "producerPassLabel", capture.producerPassLabel);
@@ -480,10 +885,51 @@ yyjson_mut_val *makeCaptureObject(yyjson_mut_doc *doc,
                               : defaultValue;
 }
 
+[[nodiscard]] double readF64(yyjson_val *object, const char *key,
+                             double defaultValue = 0.0) {
+  yyjson_val *value = yyjson_obj_get(object, key);
+  return yyjson_is_num(value) ? yyjson_get_num(value) : defaultValue;
+}
+
 [[nodiscard]] bool readBool(yyjson_val *object, const char *key,
                             bool defaultValue) {
   yyjson_val *value = yyjson_obj_get(object, key);
   return yyjson_is_bool(value) ? yyjson_get_bool(value) : defaultValue;
+}
+
+[[nodiscard]] std::vector<std::string> readStringArray(yyjson_val *object,
+                                                       const char *key) {
+  std::vector<std::string> out;
+  yyjson_val *array = yyjson_obj_get(object, key);
+  if (!yyjson_is_arr(array)) {
+    return out;
+  }
+  out.reserve(yyjson_arr_size(array));
+  yyjson_arr_iter iter;
+  yyjson_arr_iter_init(array, &iter);
+  yyjson_val *entry = nullptr;
+  while ((entry = yyjson_arr_iter_next(&iter)) != nullptr) {
+    if (yyjson_is_str(entry)) {
+      out.emplace_back(yyjson_get_str(entry), yyjson_get_len(entry));
+    }
+  }
+  return out;
+}
+
+[[nodiscard]] bool hasOnlyKeys(yyjson_val *object,
+                               std::span<const std::string_view> keys,
+                               std::string &unknown) {
+  yyjson_obj_iter iter;
+  yyjson_obj_iter_init(object, &iter);
+  yyjson_val *key = nullptr;
+  while ((key = yyjson_obj_iter_next(&iter)) != nullptr) {
+    const std::string_view name(yyjson_get_str(key), yyjson_get_len(key));
+    if (std::find(keys.begin(), keys.end(), name) == keys.end()) {
+      unknown = std::string(name);
+      return false;
+    }
+  }
+  return true;
 }
 
 [[nodiscard]] Format readFormatName(std::string_view value) {
@@ -971,6 +1417,12 @@ writeSnapshotReportJson(const SnapshotReport &report) {
   addString(doc.get(), root, "kind", report.kind);
   addString(doc.get(), root, "generatedAtUtc", report.generatedAtUtc);
   addString(doc.get(), root, "command", report.command);
+  addString(doc.get(), root, "baselineProfile", report.baselineProfile);
+  yyjson_mut_obj_add_bool(doc.get(), root, "baselineProfileCompatible",
+                          report.baselineProfileCompatible);
+  yyjson_mut_obj_add_val(
+      doc.get(), root, "baselineProfileIncompatibilityReasons",
+      makeStringArray(doc.get(), report.baselineProfileIncompatibilityReasons));
   yyjson_mut_obj_add_val(doc.get(), root, "environment",
                          makeEnvironmentObject(doc.get(), report.environment));
   yyjson_mut_obj_add_val(doc.get(), root, "case",
@@ -996,8 +1448,8 @@ writeSnapshotReportJson(const SnapshotReport &report) {
   yyjson_mut_obj_add_val(
       doc.get(), root, "rendererMetrics",
       makeRendererMetricsObject(doc.get(), report.rendererMetrics));
-  yyjson_mut_obj_add_val(doc.get(), root, "renderGraph",
-                         yyjson_mut_obj(doc.get()));
+  yyjson_mut_obj_add_val(doc.get(), root, "rendererMetricValues",
+                         makeDoubleMap(doc.get(), report.rendererMetricValues));
   addString(doc.get(), root, "reproduceCommand", report.reproduceCommand);
   yyjson_mut_obj_add_val(doc.get(), root, "warnings",
                          makeStringArray(doc.get(), report.warnings));
@@ -1026,12 +1478,42 @@ writeSnapshotReportFile(const SnapshotReport &report,
   if (!path.parent_path().empty()) {
     std::filesystem::create_directories(path.parent_path());
   }
-  std::ofstream file(path, std::ios::binary);
+  std::filesystem::path temporary = path;
+  temporary += ".tmp";
+  std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
   if (!file) {
     return Result<bool, std::string>::makeError(
-        "writeSnapshotReportFile: failed to open " + path.string());
+        "writeSnapshotReportFile: failed to open " + temporary.string());
   }
   file << json.value();
+  file.close();
+  if (!file) {
+    std::error_code removeError;
+    std::filesystem::remove(temporary, removeError);
+    return Result<bool, std::string>::makeError(
+        "writeSnapshotReportFile: failed to write " + temporary.string());
+  }
+#if defined(_WIN32)
+  if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    const DWORD error = GetLastError();
+    std::error_code removeError;
+    std::filesystem::remove(temporary, removeError);
+    return Result<bool, std::string>::makeError(
+        "writeSnapshotReportFile: failed to promote report (Windows error " +
+        std::to_string(error) + ")");
+  }
+#else
+  std::error_code renameError;
+  std::filesystem::rename(temporary, path, renameError);
+  if (renameError) {
+    std::error_code removeError;
+    std::filesystem::remove(temporary, removeError);
+    return Result<bool, std::string>::makeError(
+        "writeSnapshotReportFile: failed to promote report: " +
+        renameError.message());
+  }
+#endif
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -1057,25 +1539,168 @@ readSnapshotReportFile(const std::filesystem::path &path) {
     return Result<SnapshotReport, std::string>::makeError(
         "readSnapshotReportFile: root must be an object");
   }
+  static constexpr std::array rootKeys{
+      std::string_view("schemaVersion"),
+      std::string_view("kind"),
+      std::string_view("generatedAtUtc"),
+      std::string_view("command"),
+      std::string_view("baselineProfile"),
+      std::string_view("baselineProfileCompatible"),
+      std::string_view("baselineProfileIncompatibilityReasons"),
+      std::string_view("environment"),
+      std::string_view("case"),
+      std::string_view("artifacts"),
+      std::string_view("captures"),
+      std::string_view("availableCapturePoints"),
+      std::string_view("captureSynchronization"),
+      std::string_view("rendererMetrics"),
+      std::string_view("rendererMetricValues"),
+      std::string_view("renderGraph"),
+      std::string_view("reproduceCommand"),
+      std::string_view("warnings"),
+      std::string_view("errors")};
+  std::string unknown;
+  if (!hasOnlyKeys(root, rootKeys, unknown)) {
+    return Result<SnapshotReport, std::string>::makeError(
+        "readSnapshotReportFile: unknown root key '" + unknown + "'");
+  }
+  yyjson_val *schema = yyjson_obj_get(root, "schemaVersion");
+  yyjson_val *kind = yyjson_obj_get(root, "kind");
+  if (!yyjson_is_uint(schema) || yyjson_get_uint(schema) != 1u) {
+    return Result<SnapshotReport, std::string>::makeError(
+        "readSnapshotReportFile: schemaVersion must be 1");
+  }
+  if (!yyjson_is_str(kind) ||
+      std::string_view(yyjson_get_str(kind), yyjson_get_len(kind)) !=
+          "nuri.snapshot.report") {
+    return Result<SnapshotReport, std::string>::makeError(
+        "readSnapshotReportFile: kind must be nuri.snapshot.report");
+  }
+  auto contract = validateSnapshotReportV1(root);
+  if (contract.hasError()) {
+    return Result<SnapshotReport, std::string>::makeError(
+        "readSnapshotReportFile: invalid v1 report: " + contract.error());
+  }
   SnapshotReport report{};
+  report.schemaVersion = 1u;
   report.kind = readString(root, "kind", report.kind);
   report.generatedAtUtc = readString(root, "generatedAtUtc");
   report.command = readString(root, "command");
+  report.baselineProfile =
+      readString(root, "baselineProfile", report.baselineProfile);
+  report.baselineProfileCompatible = readBool(root, "baselineProfileCompatible",
+                                              report.baselineProfileCompatible);
+  report.baselineProfileIncompatibilityReasons =
+      readStringArray(root, "baselineProfileIncompatibilityReasons");
   yyjson_val *environment = yyjson_obj_get(root, "environment");
   if (yyjson_is_obj(environment)) {
+    report.environment.repoRoot = readString(environment, "repoRoot");
+    report.environment.commitHash = readString(environment, "commitHash");
+    report.environment.branchName = readString(environment, "branchName");
+    report.environment.dirty =
+        readBool(environment, "dirty", report.environment.dirty);
+    report.environment.osName = readString(environment, "osName");
+    report.environment.osVersion = readString(environment, "osVersion");
+    report.environment.cpuName = readString(environment, "cpuName");
+    report.environment.cpuLogicalThreadCount =
+        readU32(environment, "cpuLogicalThreadCount",
+                report.environment.cpuLogicalThreadCount);
     report.environment.gpuBackend = readString(environment, "gpuBackend");
     report.environment.gpuBackendSource =
         readString(environment, "gpuBackendSource");
     report.environment.gpuDeviceName = readString(environment, "gpuDeviceName");
+    report.environment.gpuVendorId =
+        readU32(environment, "gpuVendorId", report.environment.gpuVendorId);
+    report.environment.gpuDeviceId =
+        readU32(environment, "gpuDeviceId", report.environment.gpuDeviceId);
+    report.environment.gpuDriverVersion =
+        readString(environment, "gpuDriverVersion");
+    report.environment.swapchainImageCount =
+        readU32(environment, "swapchainImageCount",
+                report.environment.swapchainImageCount);
+    report.environment.requestedPresentMode =
+        readString(environment, "requestedPresentMode");
     report.environment.resolvedPresentMode =
         readString(environment, "resolvedPresentMode");
+    report.environment.presentModeSource =
+        readString(environment, "presentModeSource");
+    report.environment.requestedWindowMode =
+        readString(environment, "requestedWindowMode",
+                   report.environment.requestedWindowMode);
     report.environment.resolvedWindowMode =
         readString(environment, "resolvedWindowMode");
+    report.environment.windowVisible = readBool(
+        environment, "windowVisible", report.environment.windowVisible);
+    report.environment.renderGraphWorkerCount =
+        readU32(environment, "renderGraphWorkerCount",
+                report.environment.renderGraphWorkerCount);
+    report.environment.renderGraphParallelCompile =
+        readBool(environment, "renderGraphParallelCompile",
+                 report.environment.renderGraphParallelCompile);
+    report.environment.renderGraphParallelRecording =
+        readBool(environment, "renderGraphParallelRecording",
+                 report.environment.renderGraphParallelRecording);
+    report.environment.buildType = readString(environment, "buildType");
+    report.environment.cmakeToolProfile =
+        readString(environment, "cmakeToolProfile");
+    report.environment.vcpkgManifestFeatures =
+        readString(environment, "vcpkgManifestFeatures");
+    report.environment.buildShared = readBool(environment, "NURI_BUILD_SHARED",
+                                              report.environment.buildShared);
+    report.environment.loggingEnabled = readBool(
+        environment, "NURI_WITH_LOGGING", report.environment.loggingEnabled);
+    report.environment.assertsEnabled = readBool(
+        environment, "NURI_WITH_ASSERTS", report.environment.assertsEnabled);
+    report.environment.tracyEnabled = readBool(environment, "NURI_WITH_TRACY",
+                                               report.environment.tracyEnabled);
+    report.environment.tracyGpuEnabled = readBool(
+        environment, "NURI_WITH_TRACY_GPU", report.environment.tracyGpuEnabled);
+    report.environment.tracyGpuDrawZonesEnabled =
+        readBool(environment, "NURI_WITH_TRACY_GPU_DRAW_ZONES",
+                 report.environment.tracyGpuDrawZonesEnabled);
+    report.environment.devChecks =
+        readBool(environment, "devChecks", report.environment.devChecks);
   }
   yyjson_val *caseObject = yyjson_obj_get(root, "case");
   if (yyjson_is_obj(caseObject)) {
     report.snapshotCase.id = readString(caseObject, "id");
     report.snapshotCase.suite = readString(caseObject, "suite");
+    report.snapshotCase.schemaVersion =
+        readU32(caseObject, "schemaVersion", report.snapshotCase.schemaVersion);
+    report.snapshotCase.description = readString(caseObject, "description");
+    report.snapshotCase.backend = readString(caseObject, "backend");
+    yyjson_val *resolution = yyjson_obj_get(caseObject, "resolution");
+    if (yyjson_is_arr(resolution) && yyjson_arr_size(resolution) == 2u &&
+        yyjson_is_uint(yyjson_arr_get(resolution, 0u)) &&
+        yyjson_is_uint(yyjson_arr_get(resolution, 1u))) {
+      report.snapshotCase.resolution[0] = static_cast<uint32_t>(
+          yyjson_get_uint(yyjson_arr_get(resolution, 0u)));
+      report.snapshotCase.resolution[1] = static_cast<uint32_t>(
+          yyjson_get_uint(yyjson_arr_get(resolution, 1u)));
+    }
+    report.snapshotCase.presentMode = readString(caseObject, "presentMode");
+    report.snapshotCase.windowMode = readString(caseObject, "windowMode");
+    report.snapshotCase.warmupFrames =
+        readU32(caseObject, "warmupFrames", report.snapshotCase.warmupFrames);
+    report.snapshotCase.captureFrame =
+        readU32(caseObject, "captureFrame", report.snapshotCase.captureFrame);
+    report.snapshotCase.authoritative = readBool(
+        caseObject, "authoritative", report.snapshotCase.authoritative);
+    yyjson_val *caseCaptures = yyjson_obj_get(caseObject, "captures");
+    if (yyjson_is_arr(caseCaptures)) {
+      yyjson_arr_iter captureIter;
+      yyjson_arr_iter_init(caseCaptures, &captureIter);
+      yyjson_val *captureEntry = nullptr;
+      while ((captureEntry = yyjson_arr_iter_next(&captureIter)) != nullptr) {
+        if (!yyjson_is_obj(captureEntry)) {
+          continue;
+        }
+        report.snapshotCase.captures.push_back(SnapshotCaptureTarget{
+            .name = readString(captureEntry, "target"),
+            .profile = readString(captureEntry, "profile"),
+            .required = readBool(captureEntry, "required", true)});
+      }
+    }
   }
   yyjson_val *artifacts = yyjson_obj_get(root, "artifacts");
   if (yyjson_is_obj(artifacts)) {
@@ -1103,6 +1728,7 @@ readSnapshotReportFile(const std::filesystem::path &path) {
           readU32(entry, "capturePointVersion", capture.capturePointVersion);
       capture.captureFrameIndex =
           readU64(entry, "captureFrameIndex", capture.captureFrameIndex);
+      capture.kind = readString(entry, "kind");
       capture.lifetime = readString(entry, "lifetime");
       capture.format = readString(entry, "format");
       capture.colorSpace = readString(entry, "colorSpace");
@@ -1122,11 +1748,98 @@ readSnapshotReportFile(const std::filesystem::path &path) {
       capture.height = readU32(entry, "height");
       capture.producerPassLabel = readString(entry, "producerPassLabel");
       capture.readbackError = readString(entry, "readbackError");
+      yyjson_val *metrics = yyjson_obj_get(entry, "metrics");
+      if (yyjson_is_obj(metrics)) {
+        capture.metrics.meanAbsError = readF64(metrics, "meanAbsError");
+        capture.metrics.rmse = readF64(metrics, "rmse");
+        capture.metrics.maxAbsError = readF64(metrics, "maxAbsError");
+        capture.metrics.p99AbsError = readF64(metrics, "p99AbsError");
+        capture.metrics.failingValues = readU64(metrics, "failingValues");
+        capture.metrics.comparedValues = readU64(metrics, "comparedValues");
+      }
+      yyjson_val *semanticMetrics = yyjson_obj_get(entry, "semanticMetrics");
+      if (yyjson_is_obj(semanticMetrics)) {
+        capture.semanticMetrics.unit =
+            readString(semanticMetrics, "unit", capture.semanticMetrics.unit);
+        capture.semanticMetrics.meanError =
+            readF64(semanticMetrics, "meanError");
+        capture.semanticMetrics.maxError = readF64(semanticMetrics, "maxError");
+        capture.semanticMetrics.rmse = readF64(semanticMetrics, "rmse");
+        capture.semanticMetrics.p99Error = readF64(semanticMetrics, "p99Error");
+        capture.semanticMetrics.failingPixels =
+            readU64(semanticMetrics, "failingPixels");
+        capture.semanticMetrics.validPixels =
+            readU64(semanticMetrics, "validPixels");
+        capture.semanticMetrics.ignoredPixels =
+            readU64(semanticMetrics, "ignoredPixels");
+        capture.semanticMetrics.changedPixels =
+            readU64(semanticMetrics, "changedPixels");
+        capture.semanticMetrics.changedBoundsValid =
+            readBool(semanticMetrics, "changedBoundsValid", false);
+        capture.semanticMetrics.minChangedX =
+            readU32(semanticMetrics, "minChangedX");
+        capture.semanticMetrics.minChangedY =
+            readU32(semanticMetrics, "minChangedY");
+        capture.semanticMetrics.maxChangedX =
+            readU32(semanticMetrics, "maxChangedX");
+        capture.semanticMetrics.maxChangedY =
+            readU32(semanticMetrics, "maxChangedY");
+        capture.semanticMetrics.maxErrorX =
+            readU32(semanticMetrics, "maxErrorX");
+        capture.semanticMetrics.maxErrorY =
+            readU32(semanticMetrics, "maxErrorY");
+        capture.semanticMetrics.secondaryUnit =
+            readString(semanticMetrics, "secondaryUnit",
+                       capture.semanticMetrics.secondaryUnit);
+        capture.semanticMetrics.meanSecondaryError =
+            readF64(semanticMetrics, "meanSecondaryError");
+        capture.semanticMetrics.maxSecondaryError =
+            readF64(semanticMetrics, "maxSecondaryError");
+        capture.semanticMetrics.secondaryRmse =
+            readF64(semanticMetrics, "secondaryRmse");
+        capture.semanticMetrics.p99SecondaryError =
+            readF64(semanticMetrics, "p99SecondaryError");
+        capture.semanticMetrics.secondaryFailingPixels =
+            readU64(semanticMetrics, "secondaryFailingPixels");
+        capture.semanticMetrics.truePositivePixels =
+            readU64(semanticMetrics, "truePositivePixels");
+        capture.semanticMetrics.trueNegativePixels =
+            readU64(semanticMetrics, "trueNegativePixels");
+        capture.semanticMetrics.falsePositivePixels =
+            readU64(semanticMetrics, "falsePositivePixels");
+        capture.semanticMetrics.falseNegativePixels =
+            readU64(semanticMetrics, "falseNegativePixels");
+        capture.semanticMetrics.intersectionOverUnion =
+            readF64(semanticMetrics, "intersectionOverUnion",
+                    capture.semanticMetrics.intersectionOverUnion);
+      }
+      capture.failedThresholds = readStringArray(entry, "failedThresholds");
       report.captures.push_back(std::move(capture));
     }
   }
   readRendererMetrics(yyjson_obj_get(root, "rendererMetrics"),
                       report.rendererMetrics);
+  yyjson_val *metricValues = yyjson_obj_get(root, "rendererMetricValues");
+  if (yyjson_is_obj(metricValues)) {
+    yyjson_obj_iter iter;
+    yyjson_obj_iter_init(metricValues, &iter);
+    yyjson_val *keyValue = nullptr;
+    while ((keyValue = yyjson_obj_iter_next(&iter)) != nullptr) {
+      yyjson_val *value = yyjson_obj_iter_get_val(keyValue);
+      if (yyjson_is_num(value)) {
+        report.rendererMetricValues.emplace(
+            std::string(yyjson_get_str(keyValue), yyjson_get_len(keyValue)),
+            yyjson_get_num(value));
+      }
+    }
+  }
+  report.availableCapturePoints =
+      readStringArray(root, "availableCapturePoints");
+  report.captureSynchronization =
+      readString(root, "captureSynchronization", report.captureSynchronization);
+  report.reproduceCommand = readString(root, "reproduceCommand");
+  report.warnings = readStringArray(root, "warnings");
+  report.errors = readStringArray(root, "errors");
   return Result<SnapshotReport, std::string>::makeResult(std::move(report));
 }
 

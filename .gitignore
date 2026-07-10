@@ -1,5 +1,8 @@
 /build*/
+/artifacts/
 /.cache/
+__pycache__/
+*.py[cod]
 /vcpkg/
 .delete_test
 .cursor/
@@ -9,4 +12,12 @@
 !/assets/textures/tonemap_aces2_sdr_64.ktx2
 !/assets/textures/tonemap_agx_sdr_64.ktx2
 /logs/*.log
-.codex
+/.codex/*
+!/.codex/skills/
+/.codex/skills/*
+!/.codex/skills/nuri-benchmarks/
+!/.codex/skills/nuri-benchmarks/**
+!/.codex/skills/nuri-snapshots/
+!/.codex/skills/nuri-snapshots/**
+!/.codex/skills/nuri-autotests/
+!/.codex/skills/nuri-autotests/**

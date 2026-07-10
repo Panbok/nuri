@@ -3,6 +3,7 @@
 #include "nuri/tools/snapshot/snapshot_capture_point.h"
 #include "nuri/tools/snapshot/snapshot_image.h"
 
+#include <algorithm>
 #include <system_error>
 
 namespace nuri::tools::snapshot {
@@ -59,14 +60,30 @@ writeSnapshotCaptureArtifacts(GPUDevice &gpu,
     capture.available = true;
     capture.capturePointVersion = point->version;
     capture.captureFrameIndex = point->frameIndex;
+    capture.kind = std::string(renderCaptureValueKindName(point->kind));
     capture.lifetime = std::string(renderCaptureLifetimeName(point->lifetime));
     capture.format = snapshotFormatName(point->format);
     capture.colorSpace = std::string(point->colorSpace);
-    capture.width = point->dimensions.width;
-    capture.height = point->dimensions.height;
+    capture.width = point->mip >= 32u
+                        ? 1u
+                        : std::max(point->dimensions.width >> point->mip, 1u);
+    capture.height = point->mip >= 32u
+                         ? 1u
+                         : std::max(point->dimensions.height >> point->mip, 1u);
     capture.mip = point->mip;
     capture.layer = point->layer;
     capture.producerPassLabel = std::string(point->producerPassLabel);
+    const SnapshotCaptureCatalogEntry *catalog =
+        findSnapshotCaptureCatalogEntry(capture.target);
+    if (catalog == nullptr || point->version != catalog->version ||
+        point->kind != catalog->kind ||
+        !snapshotCompareProfileSupportsKind(capture.profile, point->kind)) {
+      capture.status = "invalid_descriptor";
+      capture.statusReason = "published_capture_descriptor_mismatch";
+      result.incompatibleRequiredCapture =
+          result.incompatibleRequiredCapture || capture.required;
+      continue;
+    }
     if (snapshotFormatBytesPerPixel(point->format) == 0u) {
       capture.status = "unsupported_format";
       capture.statusReason = "unsupported_readback_format";
@@ -84,8 +101,9 @@ writeSnapshotCaptureArtifacts(GPUDevice &gpu,
       continue;
     }
     SnapshotArtifactPaths paths{};
-    auto written = writeSnapshotArtifacts(
-        readback.value(), artifactStemDir / capture.target, paths);
+    auto written = writeSnapshotArtifacts(readback.value(),
+                                          artifactStemDir / capture.target,
+                                          paths, capture.profile);
     if (written.hasError()) {
       return Result<SnapshotCaptureArtifactResult, std::string>::makeError(
           written.error());

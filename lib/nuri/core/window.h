@@ -8,6 +8,7 @@ namespace nuri {
 
 enum class WindowMode : uint8_t {
   Windowed,
+  Hidden,
   Fullscreen,
   BorderlessFullscreen,
 };

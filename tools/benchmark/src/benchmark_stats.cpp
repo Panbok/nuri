@@ -70,4 +70,63 @@ computeMetricStats(std::vector<double> values) {
   return Result<MetricStats, std::string>::makeResult(stats);
 }
 
+Result<RepeatComparisonStats, std::string>
+computeRepeatComparison(std::vector<double> baselineRepetitions,
+                        std::vector<double> currentRepetitions,
+                        double nearZeroEpsilon) {
+  if (!std::isfinite(nearZeroEpsilon) || nearZeroEpsilon <= 0.0) {
+    return Result<RepeatComparisonStats, std::string>::makeError(
+        "computeRepeatComparison: near-zero epsilon must be finite and "
+        "positive");
+  }
+  auto baseline = computeMetricStats(baselineRepetitions);
+  if (baseline.hasError()) {
+    return Result<RepeatComparisonStats, std::string>::makeError(
+        "computeRepeatComparison: invalid baseline repetitions: " +
+        baseline.error());
+  }
+  auto current = computeMetricStats(currentRepetitions);
+  if (current.hasError()) {
+    return Result<RepeatComparisonStats, std::string>::makeError(
+        "computeRepeatComparison: invalid current repetitions: " +
+        current.error());
+  }
+
+  RepeatComparisonStats comparison{};
+  comparison.baselineRepetitions = baseline.value().count;
+  comparison.currentRepetitions = current.value().count;
+  comparison.baselineMedian = baseline.value().median;
+  comparison.currentMedian = current.value().median;
+  comparison.absoluteDelta =
+      comparison.currentMedian - comparison.baselineMedian;
+  comparison.percentDeltaDefined =
+      std::abs(comparison.baselineMedian) > nearZeroEpsilon;
+  if (comparison.percentDeltaDefined) {
+    comparison.percentDelta =
+        comparison.absoluteDelta / std::abs(comparison.baselineMedian) * 100.0;
+  }
+
+  const double baselineScale = 1.4826 * baseline.value().mad;
+  const double currentScale = 1.4826 * current.value().mad;
+  const double pooledRobustScale =
+      std::max(nearZeroEpsilon, 0.5 * (baselineScale + currentScale));
+  comparison.robustEffect = comparison.absoluteDelta / pooledRobustScale;
+  comparison.noiseScore = std::max(baseline.value().coefficientOfVariation,
+                                   current.value().coefficientOfVariation);
+
+  const double baselineVariance =
+      baseline.value().stddev * baseline.value().stddev;
+  const double currentVariance =
+      current.value().stddev * current.value().stddev;
+  const double standardError =
+      std::sqrt(baselineVariance / static_cast<double>(baseline.value().count) +
+                currentVariance / static_cast<double>(current.value().count));
+  const double margin = 1.96 * standardError;
+  comparison.confidenceLow = comparison.absoluteDelta - margin;
+  comparison.confidenceHigh = comparison.absoluteDelta + margin;
+  comparison.lowConfidence =
+      baseline.value().count < 3u || current.value().count < 3u;
+  return Result<RepeatComparisonStats, std::string>::makeResult(comparison);
+}
+
 } // namespace nuri::tools::benchmark

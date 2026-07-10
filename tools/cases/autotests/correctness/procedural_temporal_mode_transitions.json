@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.temporal_mode_transitions",
+  "suite": "correctness",
+  "description": "Camera-cut and temporal-history behavior across TAA, SpatialAA, MSAA, and TAA re-entry",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 53,
+    "contentHash": "nuri.procedural.reactive_mask.v1:53"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 2,
+  "endFrame": 18,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-0.45, 0.35, 3.25],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "antiAliasing": {
+      "mode": "None"
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 2,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {
+            "mode": "TAA",
+            "qualityPreset": "Quality"
+          }
+        }
+      },
+      {
+        "frame": 5,
+        "type": "setCamera",
+        "preserveHistory": false,
+        "eventReason": "procedural_disocclusion_cut",
+        "camera": {
+          "position": [0.65, 0.50, 2.85],
+          "target": [0.0, 0.20, 0.0],
+          "verticalFovDegrees": 55.0,
+          "nearPlane": 0.05,
+          "farPlane": 100.0
+        }
+      },
+      {
+        "frame": 6,
+        "type": "resetTemporalHistory",
+        "eventReason": "explicit_post_cut_reset"
+      },
+      {
+        "frame": 8,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {
+            "mode": "SpatialFallback"
+          }
+        }
+      },
+      {
+        "frame": 12,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {
+            "mode": "MSAA4x"
+          }
+        }
+      },
+      {
+        "frame": 16,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {
+            "mode": "TAA",
+            "qualityPreset": "Quality"
+          }
+        }
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "taa_before_cut",
+      "frame": 4,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
+        {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": true},
+        {"target": "reactive_mask", "profile": "mask", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {"id": "taa_before_cut_present", "metric": "renderer.aa.taa_resolve_passes", "greaterOrEqual": 1}
+      ]
+    },
+    {
+      "id": "camera_cut",
+      "frame": 5,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
+        {"target": "scene_depth", "profile": "depth", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {"id": "camera_cut_frame", "metric": "renderer.frame_index", "equals": 5}
+      ]
+    },
+    {
+      "id": "spatial",
+      "frame": 8,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {"id": "spatial_pass_present", "metric": "renderer.aa.spatial_aa_passes", "greaterOrEqual": 1}
+      ]
+    },
+    {
+      "id": "msaa",
+      "frame": 12,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {"id": "msaa_resolve_present", "metric": "renderer.aa.msaa_resolve_passes", "greaterOrEqual": 1}
+      ]
+    },
+    {
+      "id": "taa_reentry",
+      "frame": 18,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
+        {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": true},
+        {"target": "reactive_mask", "profile": "mask", "required": true, "compare": true}
+      ],
+      "assertions": [
+        {"id": "taa_reentry_present", "metric": "renderer.aa.taa_resolve_passes", "greaterOrEqual": 1}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

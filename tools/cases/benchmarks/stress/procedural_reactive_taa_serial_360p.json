@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.procedural.reactive_taa_serial_360p",
+  "suite": "stress",
+  "description": "Non-empty procedural TAA/GTAO/shadow workload with serial render-graph scheduling",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 41,
+    "contentHash": "nuri.procedural.reactive_mask.v1:41"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30,
+  "measurementFrames": 120,
+  "cooldownFrames": 0,
+  "maxDrainFrames": 30,
+  "drainTimeoutMs": 2500,
+  "samples": 1,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.35, 3.25],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "procedural_sweep",
+        "startFrame": 0,
+        "endFrame": 149,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {"frame": 0, "position": [-0.35, 0.35, 3.25], "target": [0.0, 0.25, 0.0]},
+          {"frame": 75, "position": [0.35, 0.42, 3.0], "target": [0.0, 0.22, 0.0]},
+          {"frame": 149, "position": [-0.35, 0.35, 3.25], "target": [0.0, 0.25, 0.0]}
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms"
+  ]
+}

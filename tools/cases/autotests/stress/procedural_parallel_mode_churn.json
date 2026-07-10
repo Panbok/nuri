@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.procedural.parallel_mode_churn",
+  "suite": "stress",
+  "description": "Parallel render-graph soak with camera motion, history resets, bloom churn, and AA mode transitions",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 59,
+    "contentHash": "nuri.procedural.reactive_mask.v1:59"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 12,
+  "endFrame": 240,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 4,
+    "parallelCompile": true,
+    "parallelRecording": true
+  },
+  "camera": {
+    "position": [-0.65, 0.35, 3.15],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "antiAliasing": {
+      "mode": "TAA",
+      "qualityPreset": "Quality"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Balanced"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Medium"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    }
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "procedural_sweep",
+        "startFrame": 0,
+        "endFrame": 240,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {"frame": 0, "position": [-0.65, 0.35, 3.15], "target": [0.0, 0.25, 0.0]},
+          {"frame": 60, "position": [0.65, 0.48, 2.85], "target": [0.0, 0.20, 0.0]},
+          {"frame": 120, "position": [-0.65, 0.35, 3.15], "target": [0.0, 0.25, 0.0]},
+          {"frame": 180, "position": [0.65, 0.48, 2.85], "target": [0.0, 0.20, 0.0]},
+          {"frame": 240, "position": [-0.65, 0.35, 3.15], "target": [0.0, 0.25, 0.0]}
+        ]
+      }
+    ],
+    "events": [
+      {"frame": 0, "type": "resetTemporalHistory", "eventReason": "scenario_start"},
+      {
+        "frame": 60,
+        "type": "setSettings",
+        "settings": {
+          "hdrPostProcess": {"bloomEnabled": true, "adaptationEnabled": false}
+        }
+      },
+      {"frame": 120, "type": "resetTemporalHistory", "eventReason": "mid_soak_reset"},
+      {
+        "frame": 120,
+        "type": "setSettings",
+        "settings": {
+          "hdrPostProcess": {"bloomEnabled": false, "adaptationEnabled": false}
+        }
+      },
+      {
+        "frame": 180,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {"mode": "SpatialFallback"}
+        }
+      },
+      {
+        "frame": 210,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {"mode": "MSAA4x"}
+        }
+      },
+      {
+        "frame": 230,
+        "type": "setSettings",
+        "settings": {
+          "antiAliasing": {"mode": "TAA", "qualityPreset": "Quality"}
+        }
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "bloom_churn",
+      "frame": 60,
+      "captures": [
+        {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "bloom_pass_present", "metric": "renderer.hdr.bloom_passes", "greaterOrEqual": 1}
+      ]
+    },
+    {
+      "id": "spatial_churn",
+      "frame": 180,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "spatial_pass_present", "metric": "renderer.aa.spatial_aa_passes", "greaterOrEqual": 1}
+      ]
+    },
+    {
+      "id": "msaa_churn",
+      "frame": 210,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "msaa_resolve_present", "metric": "renderer.aa.msaa_resolve_passes", "greaterOrEqual": 1}
+      ]
+    },
+    {
+      "id": "taa_end",
+      "frame": 240,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false},
+        {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": false},
+        {"target": "reactive_mask", "profile": "mask", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "frame_index_end", "metric": "renderer.frame_index", "equals": 240},
+        {"id": "taa_resolve_end", "metric": "renderer.aa.taa_resolve_passes", "greaterOrEqual": 1},
+        {"id": "visible_instances_end", "metric": "renderer.opaque.visible_instances", "greaterOrEqual": 1}
+      ]
+    }
+  ],
+  "metricWindows": [
+    {
+      "id": "initial_taa",
+      "frames": [12, 59],
+      "assertions": [
+        {"id": "taa_active_initial", "metric": "renderer.aa.taa_resolve_passes", "equals": 1},
+        {"id": "visible_initial", "metric": "renderer.opaque.visible_instances", "medianMin": 1}
+      ]
+    },
+    {
+      "id": "post_reset_taa",
+      "frames": [121, 179],
+      "assertions": [
+        {"id": "taa_active_post_reset", "metric": "renderer.aa.taa_resolve_passes", "equals": 1},
+        {"id": "visible_post_reset", "metric": "renderer.opaque.visible_instances", "medianMin": 1}
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

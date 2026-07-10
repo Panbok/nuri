@@ -21,6 +21,7 @@ struct SnapshotCaptureReport {
   bool available = false;
   uint32_t capturePointVersion = 0u;
   uint64_t captureFrameIndex = 0u;
+  std::string kind{};
   std::string lifetime{};
   std::string format{};
   std::string colorSpace{};
@@ -37,6 +38,7 @@ struct SnapshotCaptureReport {
   std::filesystem::path expected{};
   std::filesystem::path diff{};
   SnapshotCompareMetrics metrics{};
+  SnapshotSemanticMetrics semanticMetrics{};
   std::vector<std::string> failedThresholds{};
   std::string producerPassLabel{};
   std::string readbackError{};
@@ -56,6 +58,9 @@ struct SnapshotReport {
   std::string kind = "nuri.snapshot.report";
   std::string generatedAtUtc{};
   std::string command{};
+  std::string baselineProfile = "local-nvrhi-visible";
+  bool baselineProfileCompatible = false;
+  std::vector<std::string> baselineProfileIncompatibilityReasons{};
   SnapshotEnvironment environment{};
   SnapshotCase snapshotCase{};
   SnapshotReportArtifacts artifacts{};

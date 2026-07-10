@@ -11,6 +11,11 @@
 #include "nuri/resources/scene_importer.h"
 #include "nuri/scene/camera.h"
 #include "nuri/scene/render_scene.h"
+#include "nuri/tools/core/baseline_profile.h"
+#include "nuri/tools/core/case_catalog.h"
+#include "nuri/tools/core/fingerprint.h"
+#include "nuri/tools/core/result_envelope_v2.h"
+#include "nuri/tools/core/run_workspace.h"
 #include "nuri/tools/snapshot/snapshot_baseline.h"
 #include "nuri/tools/snapshot/snapshot_capture_artifacts.h"
 #include "nuri/tools/snapshot/snapshot_capture_point.h"
@@ -22,12 +27,14 @@
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <memory_resource>
 #include <optional>
 #include <sstream>
+#include <utility>
 
 #if defined(_WIN32)
 #include <stdlib.h>
@@ -38,6 +45,259 @@
 
 namespace nuri::tools::snapshot {
 namespace {
+
+[[nodiscard]] std::optional<std::string>
+snapshotEnvironmentFingerprint(const SnapshotEnvironment &environment) {
+  using nuri::tools::core::FingerprintField;
+  auto fingerprint = nuri::tools::core::makeSha256Fingerprint({
+      FingerprintField{"os.name", environment.osName},
+      FingerprintField{"os.version", environment.osVersion},
+      FingerprintField{"cpu.name", environment.cpuName},
+      FingerprintField{"cpu.threads",
+                       std::to_string(environment.cpuLogicalThreadCount)},
+      FingerprintField{"gpu.backend", environment.gpuBackend},
+      FingerprintField{"gpu.backendSource", environment.gpuBackendSource},
+      FingerprintField{"gpu.name", environment.gpuDeviceName},
+      FingerprintField{"gpu.vendor", std::to_string(environment.gpuVendorId)},
+      FingerprintField{"gpu.device", std::to_string(environment.gpuDeviceId)},
+      FingerprintField{"gpu.driver", environment.gpuDriverVersion},
+      FingerprintField{"present.mode", environment.resolvedPresentMode},
+      FingerprintField{"window.mode", environment.resolvedWindowMode},
+      FingerprintField{"window.visible",
+                       environment.windowVisible ? "true" : "false"},
+      FingerprintField{"build.type", environment.buildType},
+      FingerprintField{"build.profile", environment.cmakeToolProfile},
+      FingerprintField{"build.features", environment.vcpkgManifestFeatures},
+      FingerprintField{"build.shared",
+                       environment.buildShared ? "true" : "false"},
+      FingerprintField{"build.asserts",
+                       environment.assertsEnabled ? "true" : "false"},
+      FingerprintField{"build.devChecks",
+                       environment.devChecks ? "true" : "false"},
+      FingerprintField{"profiling.cpu",
+                       environment.tracyEnabled ? "true" : "false"},
+      FingerprintField{"profiling.gpu",
+                       environment.tracyGpuEnabled ? "true" : "false"},
+  });
+  return fingerprint.hasError()
+             ? std::nullopt
+             : std::optional<std::string>{std::move(fingerprint.value())};
+}
+
+[[nodiscard]] std::optional<std::string>
+snapshotWorkloadFingerprint(const SnapshotCase &snapshotCase) {
+  using nuri::tools::core::FingerprintField;
+  std::string manifestDigest;
+  if (!snapshotCase.manifestPath.empty() &&
+      std::filesystem::is_regular_file(snapshotCase.manifestPath)) {
+    auto digest =
+        nuri::tools::core::makeSha256FileFingerprint(snapshotCase.manifestPath);
+    if (!digest.hasError()) {
+      manifestDigest = std::move(digest.value());
+    }
+  }
+  std::vector<FingerprintField> fields{
+      {"case.id", snapshotCase.id},
+      {"case.suite", snapshotCase.suite},
+      {"manifest", std::move(manifestDigest)},
+      {"scene.kind", snapshotCase.scene.kind},
+      {"scene.content", snapshotCase.scene.contentHash},
+      {"resolution.width", std::to_string(snapshotCase.resolution[0])},
+      {"resolution.height", std::to_string(snapshotCase.resolution[1])},
+      {"fixedDelta", std::format("{:.17g}", snapshotCase.fixedDeltaSeconds)},
+      {"frames.warmup", std::to_string(snapshotCase.warmupFrames)},
+      {"frames.capture", std::to_string(snapshotCase.captureFrame)},
+  };
+  for (const SnapshotCaptureTarget &capture : snapshotCase.captures) {
+    fields.push_back({"capture." + capture.name + ".profile", capture.profile});
+    fields.push_back({"capture." + capture.name + ".required",
+                      capture.required ? "true" : "false"});
+  }
+  auto fingerprint =
+      nuri::tools::core::makeSha256Fingerprint(std::move(fields));
+  return fingerprint.hasError()
+             ? std::nullopt
+             : std::optional<std::string>{std::move(fingerprint.value())};
+}
+
+[[nodiscard]] std::optional<std::string> aggregateSnapshotFingerprint(
+    std::string_view scope,
+    const std::vector<std::pair<std::string, std::string>> &children) {
+  std::vector<nuri::tools::core::FingerprintField> fields;
+  fields.reserve(children.size() + 1u);
+  fields.push_back({"scope", std::string(scope)});
+  for (const auto &[id, fingerprint] : children) {
+    fields.push_back({"child." + id, fingerprint});
+  }
+  auto aggregate = nuri::tools::core::makeSha256Fingerprint(std::move(fields));
+  return aggregate.hasError()
+             ? std::nullopt
+             : std::optional<std::string>{std::move(aggregate.value())};
+}
+
+void evaluateSnapshotBaselineProfile(SnapshotReport &report) {
+  auto profile = nuri::tools::core::loadBaselineProfile(
+      snapshotRepoRoot() / "tools" / "profiles", report.baselineProfile);
+  if (profile.hasError()) {
+    report.baselineProfileCompatible = false;
+    report.baselineProfileIncompatibilityReasons = {profile.error()};
+    return;
+  }
+  const std::string profiling =
+      report.environment.tracyGpuEnabled
+          ? "cpu-gpu"
+          : (report.environment.tracyEnabled ? "cpu" : "off");
+  const auto compatibility = nuri::tools::core::evaluateBaselineProfile(
+      profile.value(),
+      nuri::tools::core::BaselineProfileObservedEnvironment{
+          .os = report.environment.osName,
+          .backend = report.environment.gpuBackend,
+          .backendSource = report.environment.gpuBackendSource,
+          .windowMode = report.environment.resolvedWindowMode,
+          .windowVisible = report.environment.windowVisible,
+          .gpuVendorId = report.environment.gpuVendorId,
+          .gpuDeviceId = report.environment.gpuDeviceId,
+          .driver = report.environment.gpuDriverVersion,
+          .presentMode = report.environment.resolvedPresentMode,
+          .profiling = profiling,
+          .devChecks = report.environment.devChecks,
+          .dirtyTree = report.environment.dirty,
+      });
+  report.baselineProfileCompatible = compatibility.compatible;
+  report.baselineProfileIncompatibilityReasons = compatibility.reasons;
+}
+
+[[nodiscard]] Result<bool, std::string>
+validateRunInputs(const SnapshotCase &snapshotCase,
+                  const SnapshotRunOptions &options) {
+  if (options.windowMode != "visible" && options.windowMode != "hidden" &&
+      options.windowMode != "headless") {
+    return Result<bool, std::string>::makeError(
+        "windowMode must be visible, hidden, or headless");
+  }
+  for (const auto &[value, field] :
+       {std::pair{std::string_view(snapshotCase.id),
+                  std::string_view("case id")},
+        std::pair{std::string_view(snapshotCase.suite),
+                  std::string_view("suite")},
+        std::pair{std::string_view(options.baselineProfile),
+                  std::string_view("baseline profile")}}) {
+    auto valid = validateSnapshotIdentifier(value, field);
+    if (valid.hasError()) {
+      return Result<bool, std::string>::makeError(valid.error());
+    }
+  }
+  for (const SnapshotCaptureTarget &capture : snapshotCase.captures) {
+    auto valid = validateSnapshotIdentifier(capture.name, "capture target");
+    if (valid.hasError()) {
+      return Result<bool, std::string>::makeError(valid.error());
+    }
+    const SnapshotCaptureCatalogEntry *catalog =
+        findSnapshotCaptureCatalogEntry(capture.name);
+    if (catalog == nullptr ||
+        !isBuiltinSnapshotCompareProfile(capture.profile) ||
+        !snapshotCompareProfileSupportsKind(capture.profile, catalog->kind)) {
+      return Result<bool, std::string>::makeError(
+          "invalid capture/profile descriptor for '" + capture.name + "'");
+    }
+  }
+  auto profile = nuri::tools::core::loadBaselineProfile(
+      snapshotRepoRoot() / "tools" / "profiles", options.baselineProfile);
+  if (profile.hasError()) {
+    return Result<bool, std::string>::makeError(profile.error());
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
+[[nodiscard]] int outcomePrecedence(SnapshotExitCode code) noexcept {
+  switch (code) {
+  case SnapshotExitCode::RuntimeError:
+    return 5;
+  case SnapshotExitCode::InvalidInput:
+    return 4;
+  case SnapshotExitCode::EnvironmentUnavailable:
+    return 3;
+  case SnapshotExitCode::MissingBaseline:
+    return 2;
+  case SnapshotExitCode::VisualMismatch:
+    return 1;
+  case SnapshotExitCode::Success:
+    return 0;
+  }
+  return 5;
+}
+
+[[nodiscard]] std::string_view outcomeStatus(SnapshotExitCode code) noexcept {
+  switch (code) {
+  case SnapshotExitCode::Success:
+    return "pass";
+  case SnapshotExitCode::VisualMismatch:
+    return "fail";
+  case SnapshotExitCode::InvalidInput:
+    return "invalid";
+  case SnapshotExitCode::EnvironmentUnavailable:
+    return "unavailable";
+  case SnapshotExitCode::RuntimeError:
+    return "error";
+  case SnapshotExitCode::MissingBaseline:
+    return "missing_baseline";
+  }
+  return "error";
+}
+
+[[nodiscard]] nuri::tools::core::ToolOutcome
+toolOutcome(SnapshotExitCode code, bool investigative = false) noexcept {
+  using nuri::tools::core::ToolOutcome;
+  if (investigative && code == SnapshotExitCode::Success) {
+    return ToolOutcome::Investigative;
+  }
+  switch (code) {
+  case SnapshotExitCode::Success:
+    return ToolOutcome::Pass;
+  case SnapshotExitCode::VisualMismatch:
+    return ToolOutcome::Failure;
+  case SnapshotExitCode::InvalidInput:
+    return ToolOutcome::Invalid;
+  case SnapshotExitCode::EnvironmentUnavailable:
+    return ToolOutcome::EnvironmentUnavailable;
+  case SnapshotExitCode::RuntimeError:
+    return ToolOutcome::RuntimeError;
+  case SnapshotExitCode::MissingBaseline:
+    return ToolOutcome::MissingBaseline;
+  }
+  return ToolOutcome::RuntimeError;
+}
+
+[[nodiscard]] std::string jsonEscape(std::string_view value) {
+  std::ostringstream out;
+  for (const unsigned char c : value) {
+    switch (c) {
+    case '"':
+      out << "\\\"";
+      break;
+    case '\\':
+      out << "\\\\";
+      break;
+    case '\n':
+      out << "\\n";
+      break;
+    case '\r':
+      out << "\\r";
+      break;
+    case '\t':
+      out << "\\t";
+      break;
+    default:
+      if (c < 0x20u) {
+        out << '?';
+      } else {
+        out << static_cast<char>(c);
+      }
+      break;
+    }
+  }
+  return out.str();
+}
 
 class ScopedEnvVar final {
 public:
@@ -78,12 +338,10 @@ private:
 
 class SnapshotLogGuard final {
 public:
-  SnapshotLogGuard() {
-    std::filesystem::create_directories("logs");
+  explicit SnapshotLogGuard(const std::filesystem::path &path) {
+    std::filesystem::create_directories(path.parent_path());
     LogConfig config{};
-    config.filePath = (std::filesystem::path("logs") /
-                       (utcTimestampForPath() + "_nuri_snapshot.log"))
-                          .string();
+    config.filePath = path.string();
     config.logLevel = LogLevel::Info;
     config.consoleLevel = LogLevel::Warning;
     config.threadNames = false;
@@ -136,9 +394,11 @@ public:
 
 [[nodiscard]] Result<bool, SnapshotExitCode>
 checkRequirements(const SnapshotCase &snapshotCase, std::string_view backend,
+                  std::string_view windowMode,
                   std::vector<std::string> &warnings, std::string &message) {
-  if (!snapshotCase.requirements.allowVisibleWindow) {
-    message = "case requires hidden/headless execution, which is unavailable";
+  if (windowMode == "visible" &&
+      !snapshotCase.requirements.allowVisibleWindow) {
+    message = "case does not permit visible-window execution";
     return Result<bool, SnapshotExitCode>::makeError(
         SnapshotExitCode::EnvironmentUnavailable);
   }
@@ -654,15 +914,103 @@ void writeReports(SnapshotRunResult &result, SnapshotReport &report,
   result.reportPath = jsonPath;
   result.htmlPath = htmlPath;
   report.artifacts.caseHtml = htmlPath;
+  evaluateSnapshotBaselineProfile(report);
   auto writeJson = writeSnapshotReportFile(report, jsonPath);
-  if (writeJson.hasError() && result.exitCode == SnapshotExitCode::Success) {
+  if (writeJson.hasError()) {
     result.exitCode = SnapshotExitCode::RuntimeError;
     result.message = writeJson.error();
+    report.errors.push_back(writeJson.error());
   }
   auto writeHtml = writeSnapshotHtmlReportFile(report, htmlPath);
-  if (writeHtml.hasError() && result.exitCode == SnapshotExitCode::Success) {
+  if (writeHtml.hasError()) {
     result.exitCode = SnapshotExitCode::RuntimeError;
     result.message = writeHtml.error();
+    report.errors.push_back(writeHtml.error());
+    if (!writeJson.hasError()) {
+      (void)writeSnapshotReportFile(report, jsonPath);
+    }
+  }
+
+  const bool investigative =
+      result.exitCode == SnapshotExitCode::Success &&
+      (result.message.find("dry run") != std::string::npos ||
+       !report.baselineProfileCompatible ||
+       std::any_of(report.captures.begin(), report.captures.end(),
+                   [](const SnapshotCaptureReport &capture) {
+                     return capture.status == "investigative";
+                   }));
+  const nuri::tools::core::ToolOutcome outcome =
+      toolOutcome(result.exitCode, investigative);
+  nuri::tools::core::ResultEnvelopeV2 envelope{};
+  envelope.tool = nuri::tools::core::ResultToolV2::Snapshot;
+  envelope.runId = nuri::tools::core::createRunId();
+  envelope.status = outcome;
+  envelope.exitCode = static_cast<int>(result.exitCode);
+  envelope.authoritative = false;
+  envelope.environmentFingerprint =
+      snapshotEnvironmentFingerprint(report.environment);
+  envelope.workloadFingerprint =
+      snapshotWorkloadFingerprint(report.snapshotCase);
+  envelope.profile = nuri::tools::core::ResultProfileV2{
+      .id = report.baselineProfile,
+      .compatible = report.baselineProfileCompatible,
+      .incompatibilityReasons = report.baselineProfileIncompatibilityReasons};
+  envelope.reproduceCommand = report.reproduceCommand;
+  envelope.selection = {
+      .requested = report.snapshotCase.id,
+      .selected = 1u,
+      .attempted = 1u,
+      .completed = 1u,
+      .passed = outcome == nuri::tools::core::ToolOutcome::Pass ? 1u : 0u,
+      .warned =
+          outcome == nuri::tools::core::ToolOutcome::Investigative ? 1u : 0u,
+      .failed =
+          outcome == nuri::tools::core::ToolOutcome::Failure ||
+                  outcome == nuri::tools::core::ToolOutcome::RuntimeError ||
+                  outcome == nuri::tools::core::ToolOutcome::Invalid ||
+                  outcome == nuri::tools::core::ToolOutcome::MissingBaseline
+              ? 1u
+              : 0u,
+      .unavailable =
+          outcome == nuri::tools::core::ToolOutcome::EnvironmentUnavailable
+              ? 1u
+              : 0u,
+  };
+  for (const std::string &warning : report.warnings) {
+    envelope.diagnostics.push_back(
+        {.code = "snapshot.warning",
+         .severity = nuri::tools::core::ResultDiagnosticSeverityV2::Warning,
+         .message = warning});
+  }
+  for (const std::string &error : report.errors) {
+    envelope.diagnostics.push_back(
+        {.code = "snapshot.error",
+         .severity = nuri::tools::core::ResultDiagnosticSeverityV2::Error,
+         .message = error});
+  }
+  nuri::tools::core::ResultChildV2 child{
+      .id = report.snapshotCase.id,
+      .status = std::string(nuri::tools::core::toolOutcomeName(outcome)),
+      .exitCode = static_cast<int>(result.exitCode)};
+  std::error_code relativeError;
+  const std::filesystem::path relativeReport = std::filesystem::relative(
+      jsonPath, report.artifacts.artifactDir, relativeError);
+  if (!relativeError && !relativeReport.empty() &&
+      *relativeReport.begin() != "..") {
+    child.result = relativeReport;
+  }
+  envelope.children.push_back(std::move(child));
+  const std::filesystem::path rootReport =
+      report.artifacts.artifactDir / "run.json";
+  auto rootWrite =
+      nuri::tools::core::writeResultEnvelopeV2(rootReport, envelope);
+  if (rootWrite.hasError()) {
+    result.exitCode = SnapshotExitCode::RuntimeError;
+    result.message = rootWrite.error();
+    report.errors.push_back(rootWrite.error());
+    if (!writeJson.hasError()) {
+      (void)writeSnapshotReportFile(report, jsonPath);
+    }
   }
 }
 
@@ -675,6 +1023,7 @@ void writeReports(SnapshotRunResult &result, SnapshotReport &report,
   SnapshotReport report{};
   report.generatedAtUtc = utcTimestampIso8601();
   report.command = options.command;
+  report.baselineProfile = options.baselineProfile;
   report.snapshotCase = snapshotCase;
   report.artifacts.artifactDir = artifactDir;
   report.artifacts.caseDir = caseDir;
@@ -702,22 +1051,20 @@ formatSnapshotCaseListJson(const std::vector<SnapshotCase> &cases,
   std::ostringstream out;
   out << "{\n  \"cases\": [\n";
   bool first = true;
-  for (const SnapshotCase &snapshotCase : cases) {
-    if (!suite.empty() && snapshotCase.suite != suite) {
-      continue;
-    }
+  for (const SnapshotCase *snapshotCase :
+       filterSnapshotCasesBySuite(cases, suite)) {
     if (!first) {
       out << ",\n";
     }
     first = false;
-    out << "    {\"id\": \"" << snapshotCase.id << "\", \"suite\": \""
-        << snapshotCase.suite << "\", \"description\": \""
-        << snapshotCase.description << "\", \"captures\": [";
-    for (size_t i = 0u; i < snapshotCase.captures.size(); ++i) {
+    out << "    {\"id\": \"" << snapshotCase->id << "\", \"suite\": \""
+        << snapshotCase->suite << "\", \"description\": \""
+        << snapshotCase->description << "\", \"captures\": [";
+    for (size_t i = 0u; i < snapshotCase->captures.size(); ++i) {
       if (i != 0u) {
         out << ", ";
       }
-      out << "\"" << snapshotCase.captures[i].name << "\"";
+      out << "\"" << snapshotCase->captures[i].name << "\"";
     }
     out << "]}";
   }
@@ -728,12 +1075,10 @@ formatSnapshotCaseListJson(const std::vector<SnapshotCase> &cases,
 std::string formatSnapshotCaseListText(const std::vector<SnapshotCase> &cases,
                                        std::string_view suite) {
   std::ostringstream out;
-  for (const SnapshotCase &snapshotCase : cases) {
-    if (!suite.empty() && snapshotCase.suite != suite) {
-      continue;
-    }
-    out << snapshotCase.id << " [" << snapshotCase.suite << "] "
-        << snapshotCase.description << "\n";
+  for (const SnapshotCase *snapshotCase :
+       filterSnapshotCasesBySuite(cases, suite)) {
+    out << snapshotCase->id << " [" << snapshotCase->suite << "] "
+        << snapshotCase->description << "\n";
   }
   return out.str();
 }
@@ -811,16 +1156,41 @@ formatSnapshotEffectiveConfigJson(const SnapshotCase &snapshotCase,
 SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
                                       const SnapshotRunOptions &options) {
   SnapshotRunResult result{};
+  auto validInputs = validateRunInputs(snapshotCase, options);
+  if (validInputs.hasError()) {
+    result.exitCode = SnapshotExitCode::InvalidInput;
+    result.message = validInputs.error();
+    return result;
+  }
   std::string backendSource;
   const std::string backend = resolveBackendName(snapshotCase, backendSource);
   std::string presentSource;
   const std::string presentMode =
       resolvePresentMode(snapshotCase, presentSource);
-  const std::filesystem::path artifactDir =
-      options.artifactDir.empty() ? snapshotRepoRoot() / "artifacts" /
-                                        "snapshots" / utcTimestampForPath()
-                                  : options.artifactDir;
-  const std::filesystem::path caseDir = artifactDir / "cases" / snapshotCase.id;
+  const std::filesystem::path artifactDir = [&]() -> std::filesystem::path {
+    if (!options.artifactDir.empty()) {
+      return options.artifactDir;
+    }
+    auto workspace = nuri::tools::core::createRunWorkspace(
+        snapshotRepoRoot() / "artifacts" / "snapshots");
+    if (workspace.hasError()) {
+      result.exitCode = SnapshotExitCode::RuntimeError;
+      result.message = workspace.error();
+      return {};
+    }
+    return workspace.value().root;
+  }();
+  if (artifactDir.empty()) {
+    return result;
+  }
+  auto caseDirResult = resolveSnapshotPathUnder(
+      artifactDir, std::filesystem::path("cases") / snapshotCase.id);
+  if (caseDirResult.hasError()) {
+    result.exitCode = SnapshotExitCode::InvalidInput;
+    result.message = caseDirResult.error();
+    return result;
+  }
+  const std::filesystem::path caseDir = caseDirResult.value();
   const std::filesystem::path reportPath =
       options.jsonOut.empty() ? caseDir / "report.json" : options.jsonOut;
   const std::filesystem::path htmlPath =
@@ -830,8 +1200,9 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
                         backend, backendSource, presentMode, presentSource);
 
   std::string requirementMessage;
-  auto requirements = checkRequirements(snapshotCase, backend, report.warnings,
-                                        requirementMessage);
+  auto requirements =
+      checkRequirements(snapshotCase, backend, options.windowMode,
+                        report.warnings, requirementMessage);
   if (requirements.hasError()) {
     result.exitCode = requirements.error();
     result.message = requirementMessage;
@@ -844,9 +1215,9 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     result.report = std::move(report);
     return result;
   }
-  if (options.windowMode != "visible") {
+  if (options.windowMode == "headless") {
     result.exitCode = SnapshotExitCode::EnvironmentUnavailable;
-    result.message = "only visible window mode is available";
+    result.message = "true offscreen/headless mode is unavailable";
     report.warnings.push_back(result.message);
     for (SnapshotCaptureReport &capture : report.captures) {
       capture.status = "environment_unavailable";
@@ -870,8 +1241,17 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
   }
 
   for (const char *generatedDir : {"actual", "diff"}) {
+    auto generatedPath = resolveSnapshotPathUnder(caseDir, generatedDir);
+    if (generatedPath.hasError()) {
+      result.exitCode = SnapshotExitCode::InvalidInput;
+      result.message = generatedPath.error();
+      report.errors.push_back(result.message);
+      writeReports(result, report, reportPath, htmlPath);
+      result.report = std::move(report);
+      return result;
+    }
     std::error_code cleanupError;
-    std::filesystem::remove_all(caseDir / generatedDir, cleanupError);
+    std::filesystem::remove_all(generatedPath.value(), cleanupError);
     if (cleanupError) {
       result.exitCode = SnapshotExitCode::RuntimeError;
       result.message = "failed to clean generated snapshot artifacts: " +
@@ -884,7 +1264,7 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
   }
 
   try {
-    SnapshotLogGuard logGuard;
+    SnapshotLogGuard logGuard(caseDir / "logs" / "snapshot.log");
     std::vector<std::unique_ptr<ScopedEnvVar>> env;
     env.push_back(std::make_unique<ScopedEnvVar>(
         "NURI_RENDER_GRAPH_WORKER_COUNT",
@@ -917,7 +1297,8 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     config.window.title = "nuri-snapshot " + snapshotCase.id;
     config.window.width = static_cast<int32_t>(snapshotCase.resolution[0]);
     config.window.height = static_cast<int32_t>(snapshotCase.resolution[1]);
-    config.window.mode = WindowMode::Windowed;
+    config.window.mode = options.windowMode == "hidden" ? WindowMode::Hidden
+                                                        : WindowMode::Windowed;
 
     std::unique_ptr<Window> window =
         Window::create(config.window.title, config.window.width,
@@ -942,6 +1323,11 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
       return result;
     }
     report.environment.swapchainImageCount = gpu->getSwapchainImageCount();
+    const GPUAdapterInfo adapter = gpu->getAdapterInfo();
+    report.environment.gpuDeviceName = adapter.name;
+    report.environment.gpuVendorId = adapter.vendorId;
+    report.environment.gpuDeviceId = adapter.deviceId;
+    report.environment.gpuDriverVersion = adapter.driverVersion;
 
     std::pmr::unsynchronized_pool_resource rendererMemory;
     std::pmr::unsynchronized_pool_resource pipelineMemory;
@@ -1054,6 +1440,9 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
       } else if (captureArtifacts.readbackFailedRequiredCapture) {
         result.exitCode = SnapshotExitCode::RuntimeError;
         result.message = "required capture readback failed";
+      } else if (captureArtifacts.incompatibleRequiredCapture) {
+        result.exitCode = SnapshotExitCode::InvalidInput;
+        result.message = "required capture descriptor is incompatible";
       }
     }
   } catch (const std::exception &ex) {
@@ -1073,11 +1462,24 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
 SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
                                       const SnapshotRunOptions &options) {
   SnapshotRunResult result{};
+  auto validInputs = validateRunInputs(snapshotCase, options);
+  if (validInputs.hasError()) {
+    result.exitCode = SnapshotExitCode::InvalidInput;
+    result.message = validInputs.error();
+    return result;
+  }
   const std::filesystem::path artifactDir =
       options.artifactDir.empty()
           ? snapshotRepoRoot() / "artifacts" / "snapshots"
           : options.artifactDir;
-  const std::filesystem::path caseDir = artifactDir / "cases" / snapshotCase.id;
+  auto caseDirResult = resolveSnapshotPathUnder(
+      artifactDir, std::filesystem::path("cases") / snapshotCase.id);
+  if (caseDirResult.hasError()) {
+    result.exitCode = SnapshotExitCode::InvalidInput;
+    result.message = caseDirResult.error();
+    return result;
+  }
+  const std::filesystem::path caseDir = caseDirResult.value();
   const std::filesystem::path reportPath =
       options.jsonOut.empty() ? caseDir / "report.json" : options.jsonOut;
   auto reportResult = readSnapshotReportFile(reportPath);
@@ -1087,11 +1489,78 @@ SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
     return result;
   }
   SnapshotReport report = std::move(reportResult.value());
+  report.baselineProfile = options.baselineProfile;
+  evaluateSnapshotBaselineProfile(report);
+  bool forcedInvestigative = options.force;
+  if (options.force) {
+    report.warnings.push_back(
+        "forced comparison is investigative and cannot be authoritative");
+  }
+  if (!report.baselineProfileCompatible) {
+    if (!options.force) {
+      result.exitCode = SnapshotExitCode::InvalidInput;
+      result.message = "snapshot runtime does not match baseline profile";
+      report.errors.insert(report.errors.end(),
+                           report.baselineProfileIncompatibilityReasons.begin(),
+                           report.baselineProfileIncompatibilityReasons.end());
+      writeReports(result, report, reportPath,
+                   options.htmlOut.empty() ? caseDir / "report.html"
+                                           : options.htmlOut);
+      result.report = std::move(report);
+      return result;
+    }
+    forcedInvestigative = true;
+    report.warnings.insert(report.warnings.end(),
+                           report.baselineProfileIncompatibilityReasons.begin(),
+                           report.baselineProfileIncompatibilityReasons.end());
+  }
+  if (report.snapshotCase.id != snapshotCase.id ||
+      report.snapshotCase.suite != snapshotCase.suite) {
+    if (!options.force) {
+      result.exitCode = SnapshotExitCode::InvalidInput;
+      result.message = "snapshot report identity does not match requested case";
+      result.report = std::move(report);
+      return result;
+    }
+    forcedInvestigative = true;
+    report.warnings.push_back(
+        "forced comparison: snapshot report identity mismatch");
+  }
   report.snapshotCase = snapshotCase;
   report.artifacts.caseDir = caseDir;
   report.artifacts.artifactDir = artifactDir;
-  const SnapshotBaselineLookup baseline =
-      snapshotBaselineLookup(snapshotCase, options.baselineProfile);
+  const std::filesystem::path baselineRoot = options.baselineRoot.empty()
+                                                 ? defaultSnapshotBaselineRoot()
+                                                 : options.baselineRoot;
+  auto baselineCaseDir = resolveSnapshotPathUnder(
+      baselineRoot, std::filesystem::path(options.baselineProfile) /
+                        snapshotCase.suite / snapshotCase.id);
+  if (baselineCaseDir.hasError()) {
+    result.exitCode = SnapshotExitCode::InvalidInput;
+    result.message = baselineCaseDir.error();
+    result.report = std::move(report);
+    return result;
+  }
+  auto governedBaseline = verifySnapshotBaseline(
+      snapshotCase, options.baselineProfile, baselineRoot);
+  if (governedBaseline.hasError()) {
+    if (!options.force) {
+      const bool baselineExists =
+          std::filesystem::is_directory(baselineCaseDir.value());
+      result.exitCode = baselineExists ? SnapshotExitCode::InvalidInput
+                                       : SnapshotExitCode::MissingBaseline;
+      result.message = governedBaseline.error();
+      report.errors.push_back(result.message);
+      writeReports(result, report, reportPath,
+                   options.htmlOut.empty() ? caseDir / "report.html"
+                                           : options.htmlOut);
+      result.report = std::move(report);
+      return result;
+    }
+    forcedInvestigative = true;
+    report.warnings.push_back("forced comparison with unverified baseline: " +
+                              governedBaseline.error());
+  }
   bool missingBaseline = false;
   bool mismatch = false;
   for (SnapshotCaptureReport &capture : report.captures) {
@@ -1100,14 +1569,58 @@ SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
         capture.status == "readback_error") {
       continue;
     }
-    const std::filesystem::path actual = caseDir / capture.actual;
+    capture.expectedHash.clear();
+    capture.diff.clear();
+    capture.metrics = {};
+    capture.failedThresholds.clear();
+    const auto manifestCapture =
+        std::find_if(snapshotCase.captures.begin(), snapshotCase.captures.end(),
+                     [&](const SnapshotCaptureTarget &target) {
+                       return target.name == capture.target;
+                     });
+    const SnapshotCaptureCatalogEntry *catalog =
+        findSnapshotCaptureCatalogEntry(capture.target);
+    const bool descriptorMatches =
+        manifestCapture != snapshotCase.captures.end() && catalog != nullptr &&
+        manifestCapture->profile == capture.profile &&
+        capture.capturePointVersion == catalog->version &&
+        capture.kind == renderCaptureValueKindName(catalog->kind) &&
+        snapshotCompareProfileSupportsKind(capture.profile, catalog->kind);
+    if (!descriptorMatches) {
+      if (!options.force) {
+        capture.status = "invalid";
+        capture.statusReason = "capture_descriptor_mismatch";
+        result.exitCode = SnapshotExitCode::InvalidInput;
+        continue;
+      }
+      forcedInvestigative = true;
+      report.warnings.push_back(
+          "forced comparison: capture descriptor mismatch for " +
+          capture.target);
+    }
+    auto actualResult = resolveSnapshotPathUnder(caseDir, capture.actual);
+    if (actualResult.hasError()) {
+      capture.status = "invalid";
+      capture.statusReason = "unsafe_actual_path";
+      result.exitCode = SnapshotExitCode::InvalidInput;
+      continue;
+    }
+    const std::filesystem::path actual = actualResult.value();
     const std::filesystem::path actualExtension = actual.extension();
     const bool usePreview =
         actualExtension == ".nuri_tex" || actualExtension.empty();
-    const std::filesystem::path expected =
+    auto expectedResult = resolveSnapshotPathUnder(
+        baselineCaseDir.value(),
         usePreview
-            ? baseline.caseDir / (capture.target + "_preview.png")
-            : baseline.caseDir / (capture.target + actualExtension.string());
+            ? std::filesystem::path(capture.target + "_preview.png")
+            : std::filesystem::path(capture.target + actualExtension.string()));
+    if (expectedResult.hasError()) {
+      capture.status = "invalid";
+      capture.statusReason = "unsafe_baseline_path";
+      result.exitCode = SnapshotExitCode::InvalidInput;
+      continue;
+    }
+    const std::filesystem::path expected = expectedResult.value();
     capture.expected = expected;
     if (!std::filesystem::exists(expected)) {
       capture.status = "missing_baseline";
@@ -1115,8 +1628,71 @@ SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
       missingBaseline = true;
       continue;
     }
-    auto actualImage =
-        readSnapshotImageFile(usePreview ? caseDir / capture.preview : actual);
+    auto actualMetadataPath =
+        resolveSnapshotPathUnder(caseDir, capture.actualMetadata);
+    auto expectedMetadataPath = resolveSnapshotPathUnder(
+        baselineCaseDir.value(), capture.target + ".json");
+    if (actualMetadataPath.hasError() || expectedMetadataPath.hasError()) {
+      capture.status = "invalid";
+      capture.statusReason = "unsafe_descriptor_path";
+      result.exitCode = SnapshotExitCode::InvalidInput;
+      continue;
+    }
+    auto actualMetadata =
+        readSnapshotArtifactMetadata(actualMetadataPath.value());
+    auto expectedMetadata =
+        readSnapshotArtifactMetadata(expectedMetadataPath.value());
+    const bool metadataMatches =
+        !actualMetadata.hasError() && !expectedMetadata.hasError() &&
+        actualMetadata.value().target == capture.target &&
+        expectedMetadata.value().target == capture.target &&
+        actualMetadata.value().capturePointVersion ==
+            capture.capturePointVersion &&
+        expectedMetadata.value().capturePointVersion ==
+            capture.capturePointVersion &&
+        actualMetadata.value().kind == capture.kind &&
+        expectedMetadata.value().kind == capture.kind &&
+        actualMetadata.value().profile == capture.profile &&
+        expectedMetadata.value().profile == capture.profile &&
+        actualMetadata.value().format == expectedMetadata.value().format &&
+        actualMetadata.value().width == capture.width &&
+        expectedMetadata.value().width == capture.width &&
+        actualMetadata.value().height == capture.height &&
+        expectedMetadata.value().height == capture.height &&
+        actualMetadata.value().mip == capture.mip &&
+        expectedMetadata.value().mip == capture.mip &&
+        actualMetadata.value().layer == capture.layer &&
+        expectedMetadata.value().layer == capture.layer &&
+        actualMetadata.value().colorSpace == capture.colorSpace &&
+        expectedMetadata.value().colorSpace == capture.colorSpace &&
+        actualMetadata.value().origin == capture.origin &&
+        expectedMetadata.value().origin == capture.origin &&
+        actualMetadata.value().hash == capture.actualHash;
+    if (!metadataMatches) {
+      if (!options.force) {
+        capture.status = "invalid";
+        capture.statusReason = "artifact_descriptor_mismatch";
+        result.exitCode = SnapshotExitCode::InvalidInput;
+        continue;
+      }
+      forcedInvestigative = true;
+      report.warnings.push_back(
+          "forced comparison: artifact descriptor mismatch for " +
+          capture.target);
+    } else {
+      capture.expectedHash = expectedMetadata.value().hash;
+    }
+    auto actualImagePath =
+        usePreview
+            ? resolveSnapshotPathUnder(caseDir, capture.preview)
+            : Result<std::filesystem::path, std::string>::makeResult(actual);
+    if (actualImagePath.hasError()) {
+      capture.status = "invalid";
+      capture.statusReason = "unsafe_preview_path";
+      result.exitCode = SnapshotExitCode::InvalidInput;
+      continue;
+    }
+    auto actualImage = readSnapshotImageFile(actualImagePath.value());
     auto expectedImage = readSnapshotImageFile(expected);
     if (actualImage.hasError() || expectedImage.hasError()) {
       capture.status = "runtime_error";
@@ -1124,11 +1700,33 @@ SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
       result.exitCode = SnapshotExitCode::RuntimeError;
       continue;
     }
+    auto expectedPreviewPath = resolveSnapshotPathUnder(
+        caseDir,
+        std::filesystem::path("expected") / (capture.target + "_expected.png"));
+    auto actualPreviewPath = resolveSnapshotPathUnder(caseDir, capture.preview);
+    if (expectedPreviewPath.hasError() || actualPreviewPath.hasError()) {
+      capture.status = "invalid";
+      capture.statusReason = "unsafe_comparison_preview_path";
+      result.exitCode = SnapshotExitCode::InvalidInput;
+      continue;
+    }
+    auto comparisonPreviews = writeSnapshotComparisonPreviews(
+        actualImage.value(), expectedImage.value(), capture.profile,
+        actualPreviewPath.value(), expectedPreviewPath.value());
+    if (comparisonPreviews.hasError()) {
+      capture.status = "runtime_error";
+      capture.statusReason = "failed_to_write_comparison_previews";
+      report.errors.push_back(comparisonPreviews.error());
+      result.exitCode = SnapshotExitCode::RuntimeError;
+      continue;
+    }
+    capture.expected = relativeToCaseDir(caseDir, expectedPreviewPath.value());
     const SnapshotCompareProfile profile =
         builtinSnapshotCompareProfile(capture.profile);
     SnapshotCompareResult comparison = compareSnapshotImages(
         actualImage.value(), expectedImage.value(), profile);
     capture.metrics = comparison.metrics;
+    capture.semanticMetrics = comparison.semantic;
     capture.failedThresholds = comparison.failedThresholds;
     if (!comparison.compatible) {
       capture.status = "runtime_error";
@@ -1137,8 +1735,10 @@ SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
       continue;
     }
     if (comparison.passed) {
-      capture.status = "pass";
-      capture.statusReason = "within_thresholds";
+      capture.status = forcedInvestigative ? "investigative" : "pass";
+      capture.statusReason = forcedInvestigative
+                                 ? "forced_incompatible_comparison"
+                                 : "within_thresholds";
     } else {
       capture.status = "fail";
       capture.statusReason = "thresholds_failed";
@@ -1152,18 +1752,32 @@ SnapshotRunResult compareSnapshotCase(SnapshotCase snapshotCase,
       }
     }
   }
+  if (forcedInvestigative) {
+    report.snapshotCase.authoritative = false;
+    for (SnapshotCaptureReport &capture : report.captures) {
+      if (capture.status == "pass") {
+        capture.status = "investigative";
+        capture.statusReason = "forced_incompatible_comparison";
+      }
+    }
+  }
   const std::filesystem::path htmlPath =
       options.htmlOut.empty() ? caseDir / "report.html" : options.htmlOut;
   if (result.exitCode == SnapshotExitCode::Success) {
-    if (mismatch) {
-      result.exitCode = SnapshotExitCode::VisualMismatch;
-      result.message = "snapshot mismatch";
-    } else if (missingBaseline) {
+    if (missingBaseline) {
       result.exitCode = SnapshotExitCode::MissingBaseline;
       result.message = "snapshot baseline missing";
+    } else if (mismatch) {
+      result.exitCode = SnapshotExitCode::VisualMismatch;
+      result.message = "snapshot mismatch";
     } else {
-      result.message = "snapshots matched";
+      result.message = forcedInvestigative ? "investigative comparison complete"
+                                           : "snapshots matched";
     }
+  } else if (result.message.empty()) {
+    result.message = result.exitCode == SnapshotExitCode::InvalidInput
+                         ? "snapshot comparison invalid"
+                         : "snapshot comparison failed";
   }
   writeReports(result, report, reportPath, htmlPath);
   result.report = std::move(report);
@@ -1186,17 +1800,54 @@ SnapshotSuiteRunResult runSnapshotSuite(std::vector<SnapshotCase> snapshotCases,
                                         std::string_view suite,
                                         const SnapshotRunOptions &options) {
   SnapshotSuiteRunResult suiteResult{};
-  for (SnapshotCase &snapshotCase : snapshotCases) {
-    if (snapshotCase.suite != suite) {
-      continue;
+  auto validSuite = validateSnapshotIdentifier(suite, "suite");
+  if (validSuite.hasError()) {
+    suiteResult.exitCode = SnapshotExitCode::InvalidInput;
+    suiteResult.message = validSuite.error();
+  }
+  std::string runId = nuri::tools::core::createRunId();
+  std::filesystem::path artifactDir = options.artifactDir;
+  if (artifactDir.empty()) {
+    auto workspace = nuri::tools::core::createRunWorkspace(
+        snapshotRepoRoot() / "artifacts" / "snapshots");
+    if (workspace.hasError()) {
+      suiteResult.exitCode = SnapshotExitCode::RuntimeError;
+      suiteResult.message = workspace.error();
+      return suiteResult;
     }
+    runId = workspace.value().runId;
+    artifactDir = workspace.value().root;
+  }
+  std::vector<size_t> selectedIndices;
+  if (suiteResult.exitCode == SnapshotExitCode::Success) {
+    std::vector<nuri::tools::core::CaseCatalogEntry> catalog;
+    catalog.reserve(snapshotCases.size());
+    for (const SnapshotCase &snapshotCase : snapshotCases) {
+      catalog.push_back({.id = snapshotCase.id,
+                         .suite = snapshotCase.suite,
+                         .manifestPath = snapshotCase.manifestPath});
+    }
+    auto selected = nuri::tools::core::selectCaseCatalog(
+        catalog,
+        nuri::tools::core::CaseCatalogSelector{.suite = std::string(suite)},
+        nuri::tools::core::CaseCatalogZeroMatchPolicy::Reject, "snapshot");
+    if (selected.hasError()) {
+      suiteResult.exitCode = SnapshotExitCode::InvalidInput;
+      suiteResult.message = selected.error();
+    } else {
+      selectedIndices = std::move(selected.value());
+    }
+  }
+  for (const size_t index : selectedIndices) {
+    SnapshotCase &snapshotCase = snapshotCases[index];
     SnapshotRunOptions caseOptions = options;
+    caseOptions.artifactDir = artifactDir;
     caseOptions.jsonOut.clear();
     caseOptions.htmlOut.clear();
     SnapshotRunResult result =
         runSnapshotCase(std::move(snapshotCase), caseOptions);
-    if (static_cast<int>(result.exitCode) >
-        static_cast<int>(suiteResult.exitCode)) {
+    if (outcomePrecedence(result.exitCode) >
+        outcomePrecedence(suiteResult.exitCode)) {
       suiteResult.exitCode = result.exitCode;
     }
     suiteResult.caseResults.push_back(std::move(result));
@@ -1206,28 +1857,125 @@ SnapshotSuiteRunResult runSnapshotSuite(std::vector<SnapshotCase> snapshotCases,
   for (const SnapshotRunResult &caseResult : suiteResult.caseResults) {
     reports.push_back(caseResult.report);
   }
-  const std::filesystem::path artifactDir =
-      options.artifactDir.empty() ? snapshotRepoRoot() / "artifacts" /
-                                        "snapshots" / utcTimestampForPath()
-                                  : options.artifactDir;
+  if (suiteResult.message.empty()) {
+    suiteResult.message = suiteResult.exitCode == SnapshotExitCode::Success
+                              ? "suite run complete"
+                              : "suite run completed with failures";
+  }
   suiteResult.reportPath =
       options.jsonOut.empty() ? artifactDir / "run.json" : options.jsonOut;
   suiteResult.htmlPath =
       options.htmlOut.empty() ? artifactDir / "index.html" : options.htmlOut;
-  std::filesystem::create_directories(suiteResult.reportPath.parent_path());
-  std::ofstream json(suiteResult.reportPath, std::ios::binary);
-  json << "{\n  \"kind\": \"nuri.snapshot.suite_report\",\n"
-          "  \"caseReports\": [\n";
-  for (size_t i = 0u; i < suiteResult.caseResults.size(); ++i) {
-    if (i != 0u) {
-      json << ",\n";
-    }
-    json << "    \"" << suiteResult.caseResults[i].reportPath.generic_string()
-         << "\"";
+  uint64_t passed = 0u;
+  uint64_t failed = 0u;
+  uint64_t unavailable = 0u;
+  uint64_t missingBaseline = 0u;
+  for (const SnapshotRunResult &caseResult : suiteResult.caseResults) {
+    passed += caseResult.exitCode == SnapshotExitCode::Success ? 1u : 0u;
+    failed += (caseResult.exitCode == SnapshotExitCode::VisualMismatch ||
+               caseResult.exitCode == SnapshotExitCode::RuntimeError ||
+               caseResult.exitCode == SnapshotExitCode::InvalidInput)
+                  ? 1u
+                  : 0u;
+    unavailable +=
+        caseResult.exitCode == SnapshotExitCode::EnvironmentUnavailable ? 1u
+                                                                        : 0u;
+    missingBaseline +=
+        caseResult.exitCode == SnapshotExitCode::MissingBaseline ? 1u : 0u;
   }
-  json << "\n  ]\n}\n";
-  (void)writeSnapshotSuiteHtmlFile(reports, suite, suiteResult.htmlPath);
-  suiteResult.message = "suite run complete";
+  nuri::tools::core::ResultEnvelopeV2 envelope{};
+  envelope.tool = nuri::tools::core::ResultToolV2::Snapshot;
+  envelope.runId = runId;
+  const bool suiteProfileCompatible = std::all_of(
+      suiteResult.caseResults.begin(), suiteResult.caseResults.end(),
+      [](const SnapshotRunResult &child) {
+        return child.report.baselineProfileCompatible;
+      });
+  envelope.status =
+      toolOutcome(suiteResult.exitCode,
+                  options.force || options.dryRun || !suiteProfileCompatible);
+  envelope.exitCode = static_cast<int>(suiteResult.exitCode);
+  envelope.authoritative = false;
+  std::vector<std::pair<std::string, std::string>> environmentFingerprints;
+  std::vector<std::pair<std::string, std::string>> workloadFingerprints;
+  for (const SnapshotRunResult &child : suiteResult.caseResults) {
+    if (auto fingerprint =
+            snapshotEnvironmentFingerprint(child.report.environment)) {
+      environmentFingerprints.emplace_back(child.report.snapshotCase.id,
+                                           std::move(*fingerprint));
+    }
+    if (auto fingerprint =
+            snapshotWorkloadFingerprint(child.report.snapshotCase)) {
+      workloadFingerprints.emplace_back(child.report.snapshotCase.id,
+                                        std::move(*fingerprint));
+    }
+  }
+  envelope.environmentFingerprint = aggregateSnapshotFingerprint(
+      "snapshot.suite.environment", environmentFingerprints);
+  envelope.workloadFingerprint = aggregateSnapshotFingerprint(
+      "snapshot.suite.workload", workloadFingerprints);
+  envelope.selection = {
+      .requested = std::string(suite),
+      .selected = suiteResult.caseResults.size(),
+      .attempted = suiteResult.caseResults.size(),
+      .completed = suiteResult.caseResults.size(),
+      .passed = options.force || options.dryRun || !suiteProfileCompatible
+                    ? 0u
+                    : passed,
+      .warned = options.force || options.dryRun || !suiteProfileCompatible
+                    ? passed
+                    : 0u,
+      .failed = failed + missingBaseline,
+      .unavailable = unavailable,
+  };
+  std::vector<std::string> suiteProfileReasons;
+  for (const SnapshotRunResult &child : suiteResult.caseResults) {
+    suiteProfileReasons.insert(
+        suiteProfileReasons.end(),
+        child.report.baselineProfileIncompatibilityReasons.begin(),
+        child.report.baselineProfileIncompatibilityReasons.end());
+  }
+  std::sort(suiteProfileReasons.begin(), suiteProfileReasons.end());
+  suiteProfileReasons.erase(
+      std::unique(suiteProfileReasons.begin(), suiteProfileReasons.end()),
+      suiteProfileReasons.end());
+  envelope.profile = nuri::tools::core::ResultProfileV2{
+      .id = options.baselineProfile,
+      .compatible = suiteProfileCompatible,
+      .incompatibilityReasons = std::move(suiteProfileReasons)};
+  envelope.diagnostics.push_back(
+      {.code = "snapshot.suite.summary",
+       .severity = suiteResult.exitCode == SnapshotExitCode::Success
+                       ? nuri::tools::core::ResultDiagnosticSeverityV2::Info
+                       : nuri::tools::core::ResultDiagnosticSeverityV2::Error,
+       .message = suiteResult.message});
+  for (const SnapshotRunResult &child : suiteResult.caseResults) {
+    std::error_code relativeError;
+    std::filesystem::path relativeReport =
+        std::filesystem::relative(child.reportPath, artifactDir, relativeError);
+    if (relativeError) {
+      relativeReport = std::filesystem::path("cases") /
+                       child.report.snapshotCase.id / "report.json";
+    }
+    envelope.children.push_back(
+        {.id = child.report.snapshotCase.id,
+         .status = std::string(outcomeStatus(child.exitCode)),
+         .exitCode = static_cast<int>(child.exitCode),
+         .result = relativeReport});
+  }
+  auto envelopeWrite = nuri::tools::core::writeResultEnvelopeV2(
+      suiteResult.reportPath, envelope);
+  if (envelopeWrite.hasError()) {
+    suiteResult.exitCode = SnapshotExitCode::RuntimeError;
+    suiteResult.message = envelopeWrite.error();
+    return suiteResult;
+  }
+  auto html = writeSnapshotSuiteHtmlFile(reports, suite, suiteResult.htmlPath);
+  if (html.hasError()) {
+    suiteResult.exitCode = SnapshotExitCode::RuntimeError;
+    suiteResult.message = html.error();
+    return suiteResult;
+  }
   return suiteResult;
 }
 

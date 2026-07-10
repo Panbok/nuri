@@ -148,10 +148,28 @@ compileAutotestTimeline(const AutotestCase &testCase) {
   }
 
   std::vector<AutotestFramePlan> out;
-  out.reserve(frames.size());
+  out.reserve(frames.size() + kAutotestReadoutDrainFrameLimit);
   for (auto &[frame, plan] : frames) {
     (void)frame;
     out.push_back(plan);
+  }
+  const bool hasReadouts =
+      std::any_of(testCase.checkpoints.begin(), testCase.checkpoints.end(),
+                  [](const AutotestCheckpoint &checkpoint) {
+                    return !checkpoint.readouts.empty();
+                  });
+  if (hasReadouts && !out.empty()) {
+    const AutotestFramePlan finalPlanned = out.back();
+    for (uint32_t i = 1u; i <= kAutotestReadoutDrainFrameLimit; ++i) {
+      AutotestFramePlan drain = finalPlanned;
+      drain.frame = finalPlanned.frame + i;
+      drain.resetTemporalHistory = false;
+      drain.cameraCut = false;
+      drain.drainOnly = true;
+      drain.resetReason.clear();
+      drain.checkpoints.clear();
+      out.push_back(std::move(drain));
+    }
   }
   return Result<std::vector<AutotestFramePlan>, std::string>::makeResult(
       std::move(out));

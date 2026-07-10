@@ -1,19 +1,25 @@
 #include "nuri/tools/snapshot/snapshot_image.h"
 
+#include "nuri/tools/core/sha256.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <limits>
-#include <sstream>
+#include <memory>
 
 #include <OpenImageIO/imageio.h>
+#include <yyjson.h>
 
 namespace nuri::tools::snapshot {
 namespace {
+
+[[nodiscard]] uint32_t mipDimension(uint32_t dimension, uint32_t mip) noexcept {
+  return mip >= 32u ? 1u : std::max(dimension >> mip, 1u);
+}
 
 [[nodiscard]] uint32_t channelCountForFormat(Format format) noexcept {
   switch (format) {
@@ -146,44 +152,82 @@ template <typename T>
   }
 }
 
-[[nodiscard]] std::vector<uint8_t> makePreviewRgba(const SnapshotImage &image) {
-  std::vector<uint8_t> rgba(static_cast<size_t>(image.width) * image.height *
-                            4u);
-  if (image.values.empty() || image.channelCount == 0u) {
-    return rgba;
-  }
+struct SnapshotPreviewScale {
   float minValue = std::numeric_limits<float>::max();
   float maxValue = std::numeric_limits<float>::lowest();
   float nonClearMinValue = std::numeric_limits<float>::max();
   float nonClearMaxValue = std::numeric_limits<float>::lowest();
   uint32_t nonClearValueCount = 0u;
+  float vectorMaxAbs = 0.0f;
+  float hdrMaxComponent = 0.0f;
+};
+
+void extendPreviewScale(const SnapshotImage &image,
+                        SnapshotPreviewScale &scale) {
   if (image.channelCount == 1u) {
     for (const float value : image.values) {
       if (std::isfinite(value)) {
-        minValue = std::min(minValue, value);
-        maxValue = std::max(maxValue, value);
+        scale.minValue = std::min(scale.minValue, value);
+        scale.maxValue = std::max(scale.maxValue, value);
         if (value < 0.9999f) {
-          nonClearMinValue = std::min(nonClearMinValue, value);
-          nonClearMaxValue = std::max(nonClearMaxValue, value);
-          ++nonClearValueCount;
+          scale.nonClearMinValue = std::min(scale.nonClearMinValue, value);
+          scale.nonClearMaxValue = std::max(scale.nonClearMaxValue, value);
+          ++scale.nonClearValueCount;
         }
       }
     }
   }
-  const bool useNonClearRange =
-      nonClearValueCount > 0u && nonClearMaxValue > nonClearMinValue;
-  const float scalarMin = useNonClearRange ? nonClearMinValue : minValue;
-  const float scalarMax = useNonClearRange ? nonClearMaxValue : maxValue;
-  const float range = scalarMax > scalarMin ? scalarMax - scalarMin : 1.0f;
-  float vectorMaxAbs = 0.0f;
   if (image.channelCount == 2u) {
     for (const float value : image.values) {
       if (std::isfinite(value)) {
-        vectorMaxAbs = std::max(vectorMaxAbs, std::abs(value));
+        scale.vectorMaxAbs = std::max(scale.vectorMaxAbs, std::abs(value));
       }
     }
   }
-  const float vectorScale = vectorMaxAbs > 1.0e-6f ? 0.5f / vectorMaxAbs : 1.0f;
+  if (image.channelCount >= 3u) {
+    const size_t pixelCount = static_cast<size_t>(image.width) * image.height;
+    for (size_t pixel = 0u; pixel < pixelCount; ++pixel) {
+      const size_t offset = pixel * image.channelCount;
+      for (uint32_t channel = 0u; channel < 3u; ++channel) {
+        const float value = image.values[offset + channel];
+        if (std::isfinite(value)) {
+          scale.hdrMaxComponent =
+              std::max(scale.hdrMaxComponent, std::max(0.0f, value));
+        }
+      }
+    }
+  }
+}
+
+[[nodiscard]] SnapshotPreviewScale
+makePreviewScale(const SnapshotImage &actual,
+                 const SnapshotImage *expected = nullptr) {
+  SnapshotPreviewScale scale{};
+  extendPreviewScale(actual, scale);
+  if (expected != nullptr) {
+    extendPreviewScale(*expected, scale);
+  }
+  return scale;
+}
+
+[[nodiscard]] std::vector<uint8_t>
+makePreviewRgba(const SnapshotImage &image, const SnapshotPreviewScale &scale,
+                std::string_view profile) {
+  std::vector<uint8_t> rgba(static_cast<size_t>(image.width) * image.height *
+                            4u);
+  if (image.values.empty() || image.channelCount == 0u) {
+    return rgba;
+  }
+  const bool useNonClearRange = scale.nonClearValueCount > 0u &&
+                                scale.nonClearMaxValue > scale.nonClearMinValue;
+  const float scalarMin =
+      useNonClearRange ? scale.nonClearMinValue : scale.minValue;
+  const float scalarMax =
+      useNonClearRange ? scale.nonClearMaxValue : scale.maxValue;
+  const float range = scalarMax > scalarMin ? scalarMax - scalarMin : 1.0f;
+  const float vectorScale =
+      scale.vectorMaxAbs > 1.0e-6f ? 0.5f / scale.vectorMaxAbs : 1.0f;
+  const float hdrDenominator = std::log1p(scale.hdrMaxComponent);
   const size_t pixelCount = static_cast<size_t>(image.width) * image.height;
   for (size_t i = 0u; i < pixelCount; ++i) {
     const size_t src = i * image.channelCount;
@@ -220,9 +264,18 @@ template <typename T>
       }
       rgba[dst + 3u] = 255u;
     } else {
-      const float r = image.values[src + 0u];
-      const float g = image.values[src + std::min(1u, image.channelCount - 1u)];
-      const float b = image.values[src + std::min(2u, image.channelCount - 1u)];
+      float r = image.values[src + 0u];
+      float g = image.values[src + std::min(1u, image.channelCount - 1u)];
+      float b = image.values[src + std::min(2u, image.channelCount - 1u)];
+      if (profile == "normal") {
+        r = r * 0.5f + 0.5f;
+        g = g * 0.5f + 0.5f;
+        b = b * 0.5f + 0.5f;
+      } else if (profile == "hdr_color" && hdrDenominator > 0.0f) {
+        r = std::log1p(std::max(0.0f, r)) / hdrDenominator;
+        g = std::log1p(std::max(0.0f, g)) / hdrDenominator;
+        b = std::log1p(std::max(0.0f, b)) / hdrDenominator;
+      }
       rgba[dst + 0u] = toU8(std::isfinite(r) ? r : 1.0f);
       rgba[dst + 1u] = toU8(std::isfinite(g) ? g : 0.0f);
       rgba[dst + 2u] = toU8(std::isfinite(b) ? b : 1.0f);
@@ -319,8 +372,10 @@ writeOiioU8Image(const SnapshotReadbackImage &image,
     return Result<bool, std::string>::makeError(
         "writeOiioU8Image: unsupported channel count");
   }
-  OIIO::ImageSpec spec(static_cast<int>(image.point.dimensions.width),
-                       static_cast<int>(image.point.dimensions.height),
+  OIIO::ImageSpec spec(static_cast<int>(mipDimension(
+                           image.point.dimensions.width, image.point.mip)),
+                       static_cast<int>(mipDimension(
+                           image.point.dimensions.height, image.point.mip)),
                        static_cast<int>(channels), OIIO::TypeUInt8);
   if (!image.point.colorSpace.empty()) {
     spec.set_colorspace(std::string(image.point.colorSpace));
@@ -385,8 +440,8 @@ readSnapshotCapture(GPUDevice &gpu, const RenderCapturePoint &point) {
     return Result<SnapshotReadbackImage, std::string>::makeError(
         "unsupported capture format");
   }
-  const uint32_t width = std::max(point.dimensions.width >> point.mip, 1u);
-  const uint32_t height = std::max(point.dimensions.height >> point.mip, 1u);
+  const uint32_t width = mipDimension(point.dimensions.width, point.mip);
+  const uint32_t height = mipDimension(point.dimensions.height, point.mip);
   const size_t rowStride = static_cast<size_t>(width) * bpp;
   std::vector<std::byte> bytes(rowStride * static_cast<size_t>(height));
   const TextureReadbackRegion region{
@@ -418,8 +473,17 @@ decodeSnapshotImage(const SnapshotReadbackImage &image) {
     return Result<SnapshotImage, std::string>::makeError(
         "decodeSnapshotImage: unsupported format");
   }
-  const uint32_t width = image.point.dimensions.width;
-  const uint32_t height = image.point.dimensions.height;
+  const uint32_t width =
+      mipDimension(image.point.dimensions.width, image.point.mip);
+  const uint32_t height =
+      mipDimension(image.point.dimensions.height, image.point.mip);
+  const size_t minimumRowStride = static_cast<size_t>(width) * bpp;
+  const size_t requiredBytes = image.rowStride * static_cast<size_t>(height);
+  if (image.rowStride < minimumRowStride ||
+      requiredBytes > image.bytes.size()) {
+    return Result<SnapshotImage, std::string>::makeError(
+        "decodeSnapshotImage: readback payload is smaller than mip dimensions");
+  }
   SnapshotImage out{};
   out.width = width;
   out.height = height;
@@ -441,20 +505,14 @@ decodeSnapshotImage(const SnapshotReadbackImage &image) {
 }
 
 std::string snapshotHashBytes(std::span<const std::byte> bytes) {
-  uint64_t hash = 14695981039346656037ull;
-  for (const std::byte byte : bytes) {
-    hash ^= static_cast<uint8_t>(byte);
-    hash *= 1099511628211ull;
-  }
-  std::ostringstream out;
-  out << "fnv1a64:" << std::hex << std::setw(16) << std::setfill('0') << hash;
-  return out.str();
+  return "sha256:" + nuri::tools::core::sha256Hex(bytes);
 }
 
 Result<bool, std::string>
 writeSnapshotArtifacts(const SnapshotReadbackImage &image,
                        const std::filesystem::path &artifactStem,
-                       SnapshotArtifactPaths &outPaths) {
+                       SnapshotArtifactPaths &outPaths,
+                       std::string_view compareProfile) {
   if (!artifactStem.parent_path().empty()) {
     std::filesystem::create_directories(artifactStem.parent_path());
   }
@@ -490,6 +548,11 @@ writeSnapshotArtifacts(const SnapshotReadbackImage &image,
     }
     file.write(reinterpret_cast<const char *>(image.bytes.data()),
                static_cast<std::streamsize>(image.bytes.size()));
+    file.close();
+    if (!file) {
+      return Result<bool, std::string>::makeError(
+          "writeSnapshotArtifacts: failed to write raw fallback artifact");
+    }
   }
   {
     std::ofstream file(outPaths.metadata, std::ios::binary);
@@ -499,23 +562,100 @@ writeSnapshotArtifacts(const SnapshotReadbackImage &image,
     }
     file << "{\n"
          << "  \"target\": \"" << image.point.name << "\",\n"
+         << "  \"capturePointVersion\": " << image.point.version << ",\n"
+         << "  \"kind\": \"" << renderCaptureValueKindName(image.point.kind)
+         << "\",\n"
          << "  \"format\": " << static_cast<uint32_t>(image.point.format)
          << ",\n"
-         << "  \"width\": " << image.point.dimensions.width << ",\n"
-         << "  \"height\": " << image.point.dimensions.height << ",\n"
+         << "  \"width\": "
+         << mipDimension(image.point.dimensions.width, image.point.mip) << ",\n"
+         << "  \"height\": "
+         << mipDimension(image.point.dimensions.height, image.point.mip)
+         << ",\n"
+         << "  \"mip\": " << image.point.mip << ",\n"
+         << "  \"layer\": " << image.point.layer << ",\n"
          << "  \"rowStride\": " << image.rowStride << ",\n"
          << "  \"origin\": \"top_left\",\n"
          << "  \"colorSpace\": \"" << image.point.colorSpace << "\",\n"
+         << "  \"profile\": \""
+         << (compareProfile.empty() ? image.point.defaultCompareProfile
+                                    : compareProfile)
+         << "\",\n"
          << "  \"payload\": \"" << outPaths.raw.filename().generic_string()
          << "\",\n"
          << "  \"hash\": \"" << image.hash << "\"\n"
          << "}\n";
+    file.close();
+    if (!file) {
+      return Result<bool, std::string>::makeError(
+          "writeSnapshotArtifacts: failed to write metadata artifact");
+    }
   }
   auto decoded = decodeSnapshotImage(image);
   if (decoded.hasError()) {
     return Result<bool, std::string>::makeError(decoded.error());
   }
   return writeSnapshotPreviewPng(decoded.value(), outPaths.preview);
+}
+
+Result<SnapshotArtifactMetadata, std::string>
+readSnapshotArtifactMetadata(const std::filesystem::path &path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return Result<SnapshotArtifactMetadata, std::string>::makeError(
+        "readSnapshotArtifactMetadata: failed to open " + path.string());
+  }
+  std::string json((std::istreambuf_iterator<char>(file)),
+                   std::istreambuf_iterator<char>());
+  using JsonDoc = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+  yyjson_read_err error{};
+  JsonDoc doc(yyjson_read_opts(json.data(), json.size(), 0, nullptr, &error),
+              &yyjson_doc_free);
+  if (!doc || !yyjson_is_obj(yyjson_doc_get_root(doc.get()))) {
+    return Result<SnapshotArtifactMetadata, std::string>::makeError(
+        "readSnapshotArtifactMetadata: invalid JSON in " + path.string());
+  }
+  yyjson_val *root = yyjson_doc_get_root(doc.get());
+  const auto stringValue = [&](const char *key) {
+    yyjson_val *value = yyjson_obj_get(root, key);
+    return yyjson_is_str(value)
+               ? std::string(yyjson_get_str(value), yyjson_get_len(value))
+               : std::string{};
+  };
+  const auto u32Value = [&](const char *key) {
+    yyjson_val *value = yyjson_obj_get(root, key);
+    return yyjson_is_uint(value) && yyjson_get_uint(value) <= UINT32_MAX
+               ? static_cast<uint32_t>(yyjson_get_uint(value))
+               : 0u;
+  };
+  SnapshotArtifactMetadata metadata{};
+  metadata.target = stringValue("target");
+  metadata.capturePointVersion = u32Value("capturePointVersion");
+  metadata.kind = stringValue("kind");
+  yyjson_val *format = yyjson_obj_get(root, "format");
+  if (yyjson_is_uint(format) && yyjson_get_uint(format) <= UINT32_MAX) {
+    metadata.format = std::to_string(yyjson_get_uint(format));
+  }
+  metadata.width = u32Value("width");
+  metadata.height = u32Value("height");
+  metadata.mip = u32Value("mip");
+  metadata.layer = u32Value("layer");
+  metadata.colorSpace = stringValue("colorSpace");
+  metadata.origin = stringValue("origin");
+  metadata.profile = stringValue("profile");
+  metadata.payload = stringValue("payload");
+  metadata.hash = stringValue("hash");
+  if (metadata.target.empty() || metadata.capturePointVersion == 0u ||
+      metadata.kind.empty() || metadata.format.empty() ||
+      metadata.width == 0u || metadata.height == 0u ||
+      metadata.origin.empty() || metadata.profile.empty() ||
+      metadata.payload.empty() || metadata.hash.empty()) {
+    return Result<SnapshotArtifactMetadata, std::string>::makeError(
+        "readSnapshotArtifactMetadata: incomplete descriptor in " +
+        path.string());
+  }
+  return Result<SnapshotArtifactMetadata, std::string>::makeResult(
+      std::move(metadata));
 }
 
 Result<SnapshotImage, std::string>
@@ -548,13 +688,14 @@ readSnapshotImageFile(const std::filesystem::path &path) {
   return Result<SnapshotImage, std::string>::makeResult(std::move(out));
 }
 
-Result<bool, std::string>
-writeSnapshotPreviewPng(const SnapshotImage &image,
-                        const std::filesystem::path &path) {
+Result<bool, std::string> writePreviewPng(const SnapshotImage &image,
+                                          const SnapshotPreviewScale &scale,
+                                          std::string_view profile,
+                                          const std::filesystem::path &path) {
   if (!path.parent_path().empty()) {
     std::filesystem::create_directories(path.parent_path());
   }
-  const std::vector<uint8_t> rgba = makePreviewRgba(image);
+  const std::vector<uint8_t> rgba = makePreviewRgba(image, scale, profile);
   OIIO::ImageSpec spec(static_cast<int>(image.width),
                        static_cast<int>(image.height), 4, OIIO::TypeUInt8);
   spec.set_colorspace("sRGB");
@@ -577,6 +718,33 @@ writeSnapshotPreviewPng(const SnapshotImage &image,
         output->geterror());
   }
   output->close();
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+writeSnapshotPreviewPng(const SnapshotImage &image,
+                        const std::filesystem::path &path) {
+  return writePreviewPng(image, makePreviewScale(image), {}, path);
+}
+
+Result<bool, std::string> writeSnapshotComparisonPreviews(
+    const SnapshotImage &actual, const SnapshotImage &expected,
+    std::string_view profile, const std::filesystem::path &actualPath,
+    const std::filesystem::path &expectedPath) {
+  if (actual.width != expected.width || actual.height != expected.height ||
+      actual.channelCount != expected.channelCount) {
+    return Result<bool, std::string>::makeError(
+        "writeSnapshotComparisonPreviews: incompatible images");
+  }
+  const SnapshotPreviewScale scale = makePreviewScale(actual, &expected);
+  auto written = writePreviewPng(actual, scale, profile, actualPath);
+  if (written.hasError()) {
+    return written;
+  }
+  written = writePreviewPng(expected, scale, profile, expectedPath);
+  if (written.hasError()) {
+    return written;
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 

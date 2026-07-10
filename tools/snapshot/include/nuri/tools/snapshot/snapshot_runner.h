@@ -14,6 +14,7 @@ struct SnapshotRunOptions {
   std::filesystem::path jsonOut{};
   std::filesystem::path htmlOut{};
   std::filesystem::path artifactDir{};
+  std::filesystem::path baselineRoot{};
   std::string baselineProfile = "local-nvrhi-visible";
   std::string windowMode = "visible";
   bool dryRun = false;

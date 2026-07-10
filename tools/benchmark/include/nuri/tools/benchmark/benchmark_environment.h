@@ -21,6 +21,9 @@ struct BenchmarkEnvironment {
   std::string gpuBackend = "unknown";
   std::string gpuBackendSource = "default";
   std::string gpuDeviceName = "unknown";
+  uint32_t gpuVendorId = 0u;
+  uint32_t gpuDeviceId = 0u;
+  std::string gpuDriverVersion = "unknown";
   uint32_t swapchainImageCount = 0u;
   std::string requestedPresentMode = "default";
   std::string resolvedPresentMode = "unknown";
