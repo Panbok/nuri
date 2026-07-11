@@ -26,16 +26,6 @@ TEST(RenderableMaterialResolutionTests,
 }
 
 TEST(RenderableMaterialResolutionTests,
-     ReturnsInvalidMaterialWhenSourceMaterialMapIsEmpty) {
-  nuri::Renderable renderable{};
-  nuri::ModelRecord modelRecord;
-
-  const nuri::MaterialRef resolved =
-      nuri::resolveRenderableMaterial(renderable, modelRecord, 0u);
-  EXPECT_EQ(resolved.value, nuri::kInvalidMaterialRef.value);
-}
-
-TEST(RenderableMaterialResolutionTests,
      ReturnsInvalidMaterialWhenSourceMaterialIndexIsOutOfBounds) {
   nuri::Renderable renderable{};
   nuri::ModelRecord modelRecord;

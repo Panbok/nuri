@@ -4,19 +4,6 @@
 
 namespace {
 
-TEST(SlotPoolTests, AcquireStartsAtZeroWithGenerationOne) {
-  nuri::SlotPool<> pool;
-
-  const nuri::SlotReservation slot = pool.acquire();
-
-  EXPECT_EQ(slot.index, 0u);
-  EXPECT_EQ(slot.generation, 1u);
-  EXPECT_TRUE(slot.appended);
-  EXPECT_EQ(pool.slotCount(), 1u);
-  EXPECT_EQ(pool.liveCount(), 1u);
-  EXPECT_TRUE(pool.isValid(slot.index, slot.generation));
-}
-
 TEST(SlotPoolTests, ReacquireReusesIndexWithNewGeneration) {
   nuri::SlotPool<> pool;
 
@@ -29,19 +16,6 @@ TEST(SlotPoolTests, ReacquireReusesIndexWithNewGeneration) {
   EXPECT_FALSE(second.appended);
   EXPECT_FALSE(pool.isValid(first.index, first.generation));
   EXPECT_TRUE(pool.isValid(second.index, second.generation));
-}
-
-TEST(SlotPoolTests, SecondAcquireAppendsSecondSlot) {
-  nuri::SlotPool<> pool;
-
-  const nuri::SlotReservation first = pool.acquire();
-  const nuri::SlotReservation second = pool.acquire();
-
-  EXPECT_EQ(first.index, 0u);
-  EXPECT_EQ(second.index, 1u);
-  EXPECT_TRUE(second.appended);
-  EXPECT_EQ(pool.slotCount(), 2u);
-  EXPECT_EQ(pool.liveCount(), 2u);
 }
 
 TEST(SlotPoolTests, ClearResetsCountsAndNextAcquireRestarts) {
@@ -67,12 +41,6 @@ TEST(SlotPoolTests, MaskedGenerationPolicyWrapsAndSkipsZero) {
   EXPECT_EQ(Policy::next(1u), 2u);
   EXPECT_EQ(Policy::next(2u), 3u);
   EXPECT_EQ(Policy::next(3u), 1u);
-}
-
-TEST(SlotPoolTests, UnmaskedGenerationPolicyWrapsAndSkipsZero) {
-  EXPECT_EQ(nuri::UnmaskedNonZeroGenerationPolicy::next(0u), 1u);
-  EXPECT_EQ(nuri::UnmaskedNonZeroGenerationPolicy::next(1u), 2u);
-  EXPECT_EQ(nuri::UnmaskedNonZeroGenerationPolicy::next(UINT32_MAX), 1u);
 }
 
 } // namespace

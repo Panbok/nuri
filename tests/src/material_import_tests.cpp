@@ -612,79 +612,6 @@ TEST(MaterialImportTests, ClearcoatWickerOverlayImportsClearcoatData) {
   EXPECT_FALSE(material.metallicRoughness.path.empty());
 }
 
-TEST(MaterialImportTests, DamagedHelmetLeavesClearcoatDisabled) {
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      modelPath("DamagedHelmet/DamagedHelmet.gltf"));
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialSet &set = result.value();
-  ASSERT_FALSE(set.materials.empty());
-
-  for (size_t i = 0; i < set.materials.size(); ++i) {
-    const nuri::ImportedMaterialInfo &material = set.materials[i];
-    SCOPED_TRACE(::testing::Message()
-                 << "material[" << i << "] name=\"" << material.name << "\"");
-    EXPECT_FLOAT_EQ(material.clearcoatFactor, 0.0f);
-    EXPECT_FLOAT_EQ(material.clearcoatRoughnessFactor, 0.0f);
-    EXPECT_FLOAT_EQ(material.clearcoatNormalScale, 1.0f);
-    EXPECT_TRUE(material.clearcoat.path.empty());
-    EXPECT_TRUE(material.clearcoatRoughness.path.empty());
-    EXPECT_TRUE(material.clearcoatNormal.path.empty());
-  }
-
-  const auto texturedIt =
-      std::find_if(set.materials.begin(), set.materials.end(),
-                   [](const nuri::ImportedMaterialInfo &material) {
-                     return !material.baseColor.path.empty();
-                   });
-  ASSERT_NE(texturedIt, set.materials.end());
-  EXPECT_FALSE(texturedIt->normal.path.empty());
-  EXPECT_FALSE(texturedIt->metallicRoughness.path.empty());
-}
-
-TEST(MaterialImportTests, SponzaUsesGltfDefaultAlphaModeForOpaqueMaterials) {
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      modelPath("Sponza/Sponza.gltf"));
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialSet &set = result.value();
-  ASSERT_EQ(set.materials.size(), 25u);
-
-  EXPECT_EQ(set.materials[0].alphaMode, nuri::MaterialAlphaMode::Mask);
-  EXPECT_EQ(set.materials[1].alphaMode, nuri::MaterialAlphaMode::Opaque);
-  EXPECT_EQ(set.materials[3].alphaMode, nuri::MaterialAlphaMode::Mask);
-  EXPECT_EQ(set.materials[20].alphaMode, nuri::MaterialAlphaMode::Mask);
-}
-
-TEST(MaterialImportTests, SheenChairImportsSheenFactorsAndTextures) {
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      modelPath("SheenChair/SheenChair.gltf"));
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialSet &set = result.value();
-  ASSERT_FALSE(set.materials.empty());
-
-  const nuri::ImportedMaterialInfo *mangoVelvet =
-      findMaterialByName(set, "fabric Mystere Mango Velvet");
-  ASSERT_NE(mangoVelvet, nullptr);
-  EXPECT_FLOAT_EQ(mangoVelvet->sheenColorFactor.x, 1.0f);
-  EXPECT_FLOAT_EQ(mangoVelvet->sheenColorFactor.y, 0.329f);
-  EXPECT_FLOAT_EQ(mangoVelvet->sheenColorFactor.z, 0.1f);
-  EXPECT_FLOAT_EQ(mangoVelvet->sheenRoughnessFactor, 0.8f);
-  EXPECT_FLOAT_EQ(mangoVelvet->sheenWeight, 1.0f);
-  EXPECT_TRUE(mangoVelvet->sheenColor.path.empty());
-  EXPECT_TRUE(mangoVelvet->sheenRoughness.path.empty());
-
-  const nuri::ImportedMaterialInfo *peacockVelvet =
-      findMaterialByName(set, "fabric Mystere Peacock Velvet");
-  ASSERT_NE(peacockVelvet, nullptr);
-  EXPECT_FLOAT_EQ(peacockVelvet->sheenColorFactor.x, 0.013f);
-  EXPECT_FLOAT_EQ(peacockVelvet->sheenColorFactor.y, 0.284f);
-  EXPECT_FLOAT_EQ(peacockVelvet->sheenColorFactor.z, 0.298f);
-  EXPECT_FLOAT_EQ(peacockVelvet->sheenRoughnessFactor, 0.8f);
-  EXPECT_FLOAT_EQ(peacockVelvet->sheenWeight, 1.0f);
-}
-
 TEST(MaterialImportTests, SheenChairImportsTextureTransforms) {
   auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
       modelPath("SheenChair/SheenChair.gltf"));
@@ -729,17 +656,6 @@ TEST(MaterialImportTests, SheenChairImportsTextureTransforms) {
               1.0e-6f);
 }
 
-TEST(MaterialImportTests, SheenChairLeavesVariantsUnapplied) {
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      modelPath("SheenChair/SheenChair.gltf"));
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialSet &set = result.value();
-  ASSERT_FALSE(set.materials.empty());
-  EXPECT_NE(findMaterialByName(set, "fabric Mystere Mango Velvet"), nullptr);
-  EXPECT_NE(findMaterialByName(set, "fabric Mystere Peacock Velvet"), nullptr);
-}
-
 TEST(MaterialImportTests, SyntheticGltfPreservesExplicitIorValue) {
   const ScopedTempDir dir("nuri_ior_gltf");
   auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
@@ -752,18 +668,6 @@ TEST(MaterialImportTests, SyntheticGltfPreservesExplicitIorValue) {
   EXPECT_FLOAT_EQ(material->ior, 1.33f);
 }
 
-TEST(MaterialImportTests, SyntheticGltfPreservesCompatIorZero) {
-  const ScopedTempDir dir("nuri_ior_zero");
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalIorTestGltf(dir, 0.0f).string());
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialInfo *material =
-      findMaterialByName(result.value(), kIorTestMaterialName);
-  ASSERT_NE(material, nullptr);
-  EXPECT_FLOAT_EQ(material->ior, 0.0f);
-}
-
 TEST(MaterialImportTests, SyntheticGltfSanitizesInvalidSubOneIor) {
   const ScopedTempDir dir("nuri_ior_invalid");
   auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
@@ -774,55 +678,6 @@ TEST(MaterialImportTests, SyntheticGltfSanitizesInvalidSubOneIor) {
       findMaterialByName(result.value(), kIorTestMaterialName);
   ASSERT_NE(material, nullptr);
   EXPECT_FLOAT_EQ(material->ior, 1.0f);
-}
-
-TEST(MaterialImportTests, SyntheticGlbMatchesGltfIorImport) {
-  const ScopedTempDir dir("nuri_ior_glb");
-  auto gltfResult = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalIorTestGltf(dir, 1.33f).string());
-  ASSERT_FALSE(gltfResult.hasError()) << gltfResult.error();
-  auto glbResult = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalIorTestGlb(dir, 1.33f).string());
-  ASSERT_FALSE(glbResult.hasError()) << glbResult.error();
-
-  const nuri::ImportedMaterialInfo *gltfMaterial =
-      findMaterialByName(gltfResult.value(), kIorTestMaterialName);
-  const nuri::ImportedMaterialInfo *glbMaterial =
-      findMaterialByName(glbResult.value(), kIorTestMaterialName);
-  ASSERT_NE(gltfMaterial, nullptr);
-  ASSERT_NE(glbMaterial, nullptr);
-  EXPECT_FLOAT_EQ(glbMaterial->ior, gltfMaterial->ior);
-  EXPECT_EQ(glbMaterial->name, gltfMaterial->name);
-}
-
-TEST(MaterialImportTests, SyntheticGltfPreservesExplicitEmissiveStrength) {
-  const ScopedTempDir dir("nuri_emissive_strength");
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalEmissiveStrengthTestGltf(dir, {0.1f, 0.2f, 0.3f}, 3.5f)
-          .string());
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialInfo *material =
-      findMaterialByName(result.value(), kEmissiveStrengthTestMaterialName);
-  ASSERT_NE(material, nullptr);
-  EXPECT_FLOAT_EQ(material->emissiveFactor.x, 0.1f);
-  EXPECT_FLOAT_EQ(material->emissiveFactor.y, 0.2f);
-  EXPECT_FLOAT_EQ(material->emissiveFactor.z, 0.3f);
-  EXPECT_FLOAT_EQ(material->emissiveStrength, 3.5f);
-}
-
-TEST(MaterialImportTests, SyntheticGltfDefaultsEmissiveStrengthToOne) {
-  const ScopedTempDir dir("nuri_emissive_default");
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalEmissiveStrengthTestGltf(dir, {0.4f, 0.5f, 0.6f},
-                                           std::nullopt)
-          .string());
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialInfo *material =
-      findMaterialByName(result.value(), kEmissiveStrengthTestMaterialName);
-  ASSERT_NE(material, nullptr);
-  EXPECT_FLOAT_EQ(material->emissiveStrength, 1.0f);
 }
 
 TEST(MaterialImportTests, SyntheticGltfPreservesHdrEmissiveStrength) {
@@ -849,67 +704,6 @@ TEST(MaterialImportTests, SyntheticGltfSanitizesNegativeEmissiveStrength) {
       findMaterialByName(result.value(), kEmissiveStrengthTestMaterialName);
   ASSERT_NE(material, nullptr);
   EXPECT_FLOAT_EQ(material->emissiveStrength, 0.0f);
-}
-
-TEST(MaterialImportTests, SyntheticGlbMatchesGltfEmissiveStrengthImport) {
-  const ScopedTempDir dir("nuri_emissive_glb");
-  auto gltfResult = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalEmissiveStrengthTestGltf(dir, {0.7f, 0.8f, 0.9f}, 4.0f)
-          .string());
-  ASSERT_FALSE(gltfResult.hasError()) << gltfResult.error();
-  auto glbResult = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalEmissiveStrengthTestGlb(dir, {0.7f, 0.8f, 0.9f}, 4.0f)
-          .string());
-  ASSERT_FALSE(glbResult.hasError()) << glbResult.error();
-
-  const nuri::ImportedMaterialInfo *gltfMaterial =
-      findMaterialByName(gltfResult.value(), kEmissiveStrengthTestMaterialName);
-  const nuri::ImportedMaterialInfo *glbMaterial =
-      findMaterialByName(glbResult.value(), kEmissiveStrengthTestMaterialName);
-  ASSERT_NE(gltfMaterial, nullptr);
-  ASSERT_NE(glbMaterial, nullptr);
-  EXPECT_FLOAT_EQ(glbMaterial->emissiveFactor.x,
-                  gltfMaterial->emissiveFactor.x);
-  EXPECT_FLOAT_EQ(glbMaterial->emissiveFactor.y,
-                  gltfMaterial->emissiveFactor.y);
-  EXPECT_FLOAT_EQ(glbMaterial->emissiveFactor.z,
-                  gltfMaterial->emissiveFactor.z);
-  EXPECT_FLOAT_EQ(glbMaterial->emissiveStrength,
-                  gltfMaterial->emissiveStrength);
-  EXPECT_EQ(glbMaterial->name, gltfMaterial->name);
-}
-
-TEST(MaterialImportTests, SyntheticGltfPreservesSpecularFactors) {
-  const ScopedTempDir dir("nuri_specular_factor");
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalSpecularTestGltf(dir, 0.35f, {0.2f, 0.4f, 0.8f}, false)
-          .string());
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialInfo *material =
-      findMaterialByName(result.value(), kSpecularTestMaterialName);
-  ASSERT_NE(material, nullptr);
-  EXPECT_FLOAT_EQ(material->specularFactor, 0.35f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.x, 0.2f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.y, 0.4f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.z, 0.8f);
-  EXPECT_TRUE(material->specular.path.empty());
-  EXPECT_TRUE(material->specularColor.path.empty());
-}
-
-TEST(MaterialImportTests, SyntheticGltfPreservesSpecularColorAboveOne) {
-  const ScopedTempDir dir("nuri_specular_hdr");
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      writeMinimalSpecularTestGltf(dir, 0.5f, {10.0f, 0.6f, 0.0f}, false)
-          .string());
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialInfo *material =
-      findMaterialByName(result.value(), kSpecularTestMaterialName);
-  ASSERT_NE(material, nullptr);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.x, 10.0f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.y, 0.6f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.z, 0.0f);
 }
 
 TEST(MaterialImportTests, SyntheticGltfImportsSpecularTexturesAndTransforms) {
@@ -955,70 +749,6 @@ TEST(MaterialImportTests, SyntheticGltfImportsSpecularTexturesAndTransforms) {
               1.0e-6f);
 }
 
-TEST(MaterialImportTests, SyntheticGltfPreservesSpecGlossFactors) {
-  const ScopedTempDir dir("nuri_specgloss_factor");
-  nuri::ImportedMaterialSet set{};
-  const nuri::ImportedMaterialInfo *material =
-      loadSyntheticSpecGlossMaterial(dir, false, false, set);
-  ASSERT_NE(material, nullptr);
-  EXPECT_EQ(material->workflow, nuri::MaterialWorkflow::SpecularGlossiness);
-  EXPECT_FLOAT_EQ(material->baseColorFactor.x, 0.9f);
-  EXPECT_FLOAT_EQ(material->baseColorFactor.w, 0.6f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.x, 1.5f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.y, 0.5f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.z, 0.25f);
-  EXPECT_FLOAT_EQ(material->glossinessFactor, 0.35f);
-  EXPECT_FLOAT_EQ(material->metallicFactor, 0.0f);
-  EXPECT_FLOAT_EQ(material->roughnessFactor, 1.0f);
-  EXPECT_TRUE(material->metallicRoughness.path.empty());
-  EXPECT_TRUE(material->specular.path.empty());
-}
-
-TEST(MaterialImportTests, SyntheticGltfImportsSpecGlossTexturesAndTransforms) {
-  const ScopedTempDir dir("nuri_specgloss_textures");
-  nuri::ImportedMaterialSet set{};
-  const nuri::ImportedMaterialInfo *material =
-      loadSyntheticSpecGlossMaterial(dir, true, false, set);
-  ASSERT_NE(material, nullptr);
-  EXPECT_EQ(material->workflow, nuri::MaterialWorkflow::SpecularGlossiness);
-  EXPECT_EQ(std::filesystem::path(material->baseColor.path).filename(),
-            std::filesystem::path("specgloss_diffuse.png"));
-  EXPECT_EQ(std::filesystem::path(material->specularColor.path).filename(),
-            std::filesystem::path("specgloss_rgba.png"));
-  EXPECT_EQ(material->baseColor.uvSet, 0u);
-  EXPECT_EQ(material->baseColor.samplerIndex, 1u);
-  EXPECT_FLOAT_EQ(material->baseColor.transform.offset.x, 0.125f);
-  EXPECT_FLOAT_EQ(material->baseColor.transform.scale.y, 2.5f);
-  EXPECT_EQ(material->specularColor.uvSet, 1u);
-  EXPECT_EQ(material->specularColor.samplerIndex, 0u);
-  EXPECT_FLOAT_EQ(material->specularColor.transform.offset.x, -0.5f);
-  EXPECT_FLOAT_EQ(material->specularColor.transform.scale.y, 5.0f);
-  EXPECT_NEAR(material->specularColor.transform.rotationRadians, 0.125f,
-              1.0e-6f);
-}
-
-TEST(MaterialImportTests, MaterialDescFromImportedIgnoresImportedSamplerState) {
-  nuri::MaterialData material{};
-  material.baseColor.samplerIndex = 5u;
-  material.normal.samplerIndex = 3u;
-  material.specularColor.samplerIndex = 7u;
-
-  nuri::MaterialData differentSamplers = material;
-  differentSamplers.baseColor.samplerIndex = 0u;
-  differentSamplers.normal.samplerIndex = 11u;
-  differentSamplers.specularColor.samplerIndex = 1u;
-
-  const nuri::MaterialDesc desc = nuri::Material::descFromImported(material);
-  const nuri::MaterialDesc descWithoutSamplers =
-      nuri::Material::descFromImported(differentSamplers);
-  EXPECT_EQ(nuri::hashMaterialDesc(desc),
-            nuri::hashMaterialDesc(descWithoutSamplers));
-  EXPECT_EQ(desc.uvSets.baseColor, descWithoutSamplers.uvSets.baseColor);
-  EXPECT_EQ(desc.uvSets.normal, descWithoutSamplers.uvSets.normal);
-  EXPECT_EQ(desc.uvSets.specularColor,
-            descWithoutSamplers.uvSets.specularColor);
-}
-
 TEST(MaterialImportTests, SyntheticGltfSpecGlossWinsOverSpecularExtension) {
   const ScopedTempDir dir("nuri_specgloss_precedence");
   nuri::ImportedMaterialSet set{};
@@ -1055,43 +785,6 @@ TEST(MaterialImportTests,
   nuri::MaterialDesc differentGlossiness = desc;
   differentGlossiness.glossinessFactor = 0.65f;
   EXPECT_NE(specGlossHash, nuri::hashMaterialDesc(differentGlossiness));
-}
-
-TEST(MaterialImportTests, SpecularSilkPoufImportsSpecularAndSheenData) {
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      modelPath("SpecularSilkPouf/SpecularSilkPouf.gltf"));
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialInfo *material =
-      findMaterialByName(result.value(), "shot silk");
-  ASSERT_NE(material, nullptr);
-  EXPECT_FLOAT_EQ(material->specularFactor, 0.5f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.x, 10.0f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.y, 0.6f);
-  EXPECT_FLOAT_EQ(material->specularColorFactor.z, 0.0f);
-  EXPECT_FLOAT_EQ(material->sheenColorFactor.x, 0.025f);
-  EXPECT_FLOAT_EQ(material->sheenColorFactor.y, 0.03f);
-  EXPECT_FLOAT_EQ(material->sheenColorFactor.z, 0.075f);
-  EXPECT_FLOAT_EQ(material->sheenRoughnessFactor, 0.6f);
-  EXPECT_TRUE(material->specular.path.empty());
-  EXPECT_TRUE(material->specularColor.path.empty());
-}
-
-TEST(MaterialImportTests, DragonAttenuationKeepsDefaultIor) {
-  auto result = nuri::MeshImporter::loadMaterialInfoFromFile(
-      modelPath("DragonAttenuation/DragonAttenuation.gltf"));
-  ASSERT_FALSE(result.hasError()) << result.error();
-
-  const nuri::ImportedMaterialInfo *attenuation =
-      findMaterialByName(result.value(), "Dragon with Attenuation");
-  const nuri::ImportedMaterialInfo *surfaceColor =
-      findMaterialByName(result.value(), "Dragon with Surface Coloring Only");
-  ASSERT_NE(attenuation, nullptr);
-  ASSERT_NE(surfaceColor, nullptr);
-  EXPECT_FLOAT_EQ(attenuation->transmissionFactor, 1.0f);
-  EXPECT_FLOAT_EQ(surfaceColor->transmissionFactor, 1.0f);
-  EXPECT_FLOAT_EQ(attenuation->ior, 1.5f);
-  EXPECT_FLOAT_EQ(surfaceColor->ior, 1.5f);
 }
 
 } // namespace

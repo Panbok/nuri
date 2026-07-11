@@ -76,9 +76,13 @@ public:
   Result<ComputePipelineHandle, std::string>
   createComputePipeline(const ComputePipelineDesc &desc,
                         std::string_view debugName) override;
+  Result<MeshletPipelineHandle, std::string>
+  createMeshletPipeline(const MeshletPipelineDesc &desc,
+                        std::string_view debugName) override;
 
   void destroyRenderPipeline(RenderPipelineHandle pipeline) override;
   void destroyComputePipeline(ComputePipelineHandle pipeline) override;
+  void destroyMeshletPipeline(MeshletPipelineHandle pipeline) override;
   void destroyBuffer(BufferHandle buffer) override;
   void destroyTexture(TextureHandle texture) override;
   void destroyShaderModule(ShaderHandle shader) override;
@@ -89,9 +93,13 @@ public:
   bool isValid(ShaderHandle h) const override;
   bool isValid(RenderPipelineHandle h) const override;
   bool isValid(ComputePipelineHandle h) const override;
+  bool isValid(MeshletPipelineHandle h) const override;
   Format getTextureFormat(TextureHandle h) const override;
   TextureDimensions getTextureDimensions(TextureHandle h) const override;
   TextureCompressionCaps getTextureCompressionCaps() const override;
+  GpuMultisampleCapabilities getMultisampleCapabilities() const override;
+  bool supportsFeature(GPUFeature feature) const override;
+  MeshletLimits getMeshletLimits() const override;
   uint32_t getTextureBindlessIndex(TextureHandle h) const override;
   Result<SamplerHandle, std::string>
   createSampler(const SamplerDesc &desc, std::string_view debugName) override;
@@ -106,6 +114,18 @@ public:
   bool resolveGeometry(GeometryAllocationHandle h,
                        GeometryAllocationView &out) const override;
   GpuTimingReport getLatestCompletedGpuTimingReport() const override;
+  size_t drainCompletedGpuTimingReports(
+      std::span<GpuTimingReport> outReports) override;
+  uint64_t droppedGpuTimingReportCount() const override;
+  GpuMultisampleCapabilities multisampleCapabilities{
+      .sample4Color = true,
+      .sample4Depth = true,
+      .depthResolveMin = true,
+      .alphaToCoverage = true,
+      .sampleRateShading = false,
+  };
+  void enqueueCompletedGpuTimingReport(const GpuTimingReport &report,
+                                       size_t queueCapacity = 256u);
 
   Result<bool, std::string> beginFrame(uint64_t frameIndex) override;
   Result<bool, std::string> prepareFrameOutput() override;
@@ -193,6 +213,8 @@ public:
   std::vector<std::vector<std::byte>> createdTextureData{};
   std::vector<SamplerDesc> createdSamplerDescs{};
   GpuTimingReport latestCompletedGpuTimingReport{};
+  std::vector<GpuTimingReport> completedGpuTimingReports{};
+  uint64_t droppedGpuTimingReports = 0u;
   bool rejectDeviceLocalReadBuffer = false;
 
 protected:
@@ -216,16 +238,22 @@ protected:
       std::span<const SubmitBatchMeta> batches = {});
 
 private:
+  Result<bool, std::string> copyTextureRegion(const TextureCopyItem &copy);
+
   struct RecordingContextState {
     RecordingContextHandle handle{};
     uint32_t workerIndex = 0u;
     bool finished = false;
     std::vector<RenderPass> passes{};
+    std::vector<std::vector<MeshDispatchItem>> meshDispatchStorage{};
+    std::vector<std::vector<TextureCopyItem>> textureCopyStorage{};
   };
 
   struct RecordedCommandBufferState {
     RecordedCommandBufferHandle handle{};
     std::vector<RenderPass> passes{};
+    std::vector<std::vector<MeshDispatchItem>> meshDispatchStorage{};
+    std::vector<std::vector<TextureCopyItem>> textureCopyStorage{};
   };
 
   struct SubmissionState {
@@ -258,11 +286,14 @@ private:
   uint32_t nextSubmissionIndex_ = 1u;
   uint32_t finishCallCount_ = 0u;
   uint64_t currentFrameIndex_ = 0u;
+  bool hasPreparedFrameOutput_ = false;
   std::vector<BufferState> buffers_{};
   std::vector<TextureState> textures_{};
   std::vector<RecordingContextState> activeRecordingContexts_{};
   std::vector<RecordedCommandBufferState> finishedCommandBuffers_{};
   std::vector<SubmissionState> submissions_{};
+  std::vector<std::vector<MeshDispatchItem>> recordedMeshDispatchStorage_{};
+  std::vector<std::vector<TextureCopyItem>> recordedTextureCopyStorage_{};
   mutable std::mutex recordingStateMutex_{};
 };
 

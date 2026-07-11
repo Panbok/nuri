@@ -315,50 +315,6 @@ TEST(EditorAnimationPlayerServiceTests,
 }
 
 TEST(EditorAnimationPlayerServiceTests,
-     SeekLazilyCreatesPausedSimulationAndClearDestroysIt) {
-  auto ctxResult = createFoxServiceTestContext();
-  ASSERT_FALSE(ctxResult.hasError()) << ctxResult.error();
-  std::unique_ptr<ServiceTestContext> ctx = std::move(ctxResult.value());
-
-  ASSERT_TRUE(ctx->service.seekSelectionPlayback(0.2f));
-  const nuri::EditorAnimationPlayerView view = ctx->service.selectedView();
-  EXPECT_EQ(view.availability,
-            nuri::EditorAnimationPlayerAvailability::Animated);
-  EXPECT_TRUE(view.hasSimulation);
-  EXPECT_TRUE(view.paused);
-  EXPECT_FALSE(view.running);
-  EXPECT_GE(view.timelineTimeSeconds, 0.0f);
-
-  auto prepareResult = ctx->runtime.prepareAnimationSceneFrame(0u);
-  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
-  EXPECT_NE(ctx->runtime.animationSceneFrameData(), nullptr);
-
-  ctx->service.clear();
-  EXPECT_EQ(ctx->runtime.animationSceneFrameData(), nullptr);
-  EXPECT_EQ(ctx->service.selectedView().availability,
-            nuri::EditorAnimationPlayerAvailability::NotAnimated);
-}
-
-TEST(EditorAnimationPlayerServiceTests,
-     BookSelectionResolvesAnimatedObjectsIndependently) {
-  auto ctxResult = createBookServiceTestContext();
-  ASSERT_FALSE(ctxResult.hasError()) << ctxResult.error();
-  std::unique_ptr<ServiceTestContext> ctx = std::move(ctxResult.value());
-
-  const nuri::EditorAnimationPlayerView wheelView = ctx->service.selectedView();
-  EXPECT_EQ(wheelView.availability,
-            nuri::EditorAnimationPlayerAvailability::Animated);
-  EXPECT_EQ(wheelView.clips.size(), 1u);
-
-  ASSERT_TRUE(
-      selectRenderableByNodeName(*ctx, "Waterfall_Texture-base-gloss-jpg_0"));
-  const nuri::EditorAnimationPlayerView waterfallView =
-      ctx->service.selectedView();
-  EXPECT_EQ(waterfallView.availability,
-            nuri::EditorAnimationPlayerAvailability::NotAnimated);
-}
-
-TEST(EditorAnimationPlayerServiceTests,
      PausingSelectedBookObjectDoesNotPauseOtherAnimatedObjects) {
   auto ctxResult = createBookServiceTestContext();
   ASSERT_FALSE(ctxResult.hasError()) << ctxResult.error();

@@ -102,6 +102,21 @@ foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
   )
 endforeach()
 
+function(nuri_test_properties target out_labels out_timeout)
+  set(_labels "contract")
+  set(_timeout 60)
+  if("${target}" MATCHES "(tool_core|benchmark|snapshot|autotest)")
+    string(APPEND _labels "+tool-core")
+  elseif("${target}" MATCHES "(import|cache)")
+    string(APPEND _labels "+asset")
+    set(_timeout 120)
+  elseif("${target}" MATCHES "(render|visibility|transmission|geometry)")
+    string(APPEND _labels "+renderer")
+  endif()
+  set(${out_labels} "${_labels}" PARENT_SCOPE)
+  set(${out_timeout} "${_timeout}" PARENT_SCOPE)
+endfunction()
+
 function(nuri_add_gtest_suite target source_file test_prefix)
   add_executable(${target}
     ${source_file}
@@ -127,10 +142,14 @@ function(nuri_add_gtest_suite target source_file test_prefix)
     )
   endforeach()
 
+  nuri_test_properties(${target} _nuri_labels _nuri_timeout)
   gtest_discover_tests(${target}
     TEST_PREFIX "${test_prefix}"
     DISCOVERY_MODE PRE_TEST
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    PROPERTIES
+      LABELS "${_nuri_labels}"
+      TIMEOUT "${_nuri_timeout}"
   )
 endfunction()
 
@@ -164,10 +183,14 @@ function(nuri_add_gtest_suite_with_sources target test_prefix)
     )
   endforeach()
 
+  nuri_test_properties(${target} _nuri_labels _nuri_timeout)
   gtest_discover_tests(${target}
     TEST_PREFIX "${test_prefix}"
     DISCOVERY_MODE PRE_TEST
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    PROPERTIES
+      LABELS "${_nuri_labels}"
+      TIMEOUT "${_nuri_timeout}"
   )
 endfunction()
 
@@ -194,6 +217,21 @@ nuri_add_gtest_suite(
   src/render_graph_renderer_tests.cpp
   "renderer::"
 )
+if(TARGET LVKLibrary)
+  target_link_libraries(nuri_render_graph_renderer_tests PRIVATE LVKLibrary)
+endif()
+
+nuri_add_gtest_suite(
+  nuri_render_temporal_frame_service_tests
+  src/temporal_frame_service_tests.cpp
+  "temporal_service::"
+)
+
+nuri_add_gtest_suite(
+  nuri_external_temporal_provider_tests
+  src/external_temporal_provider_tests.cpp
+  "external_temporal_provider::"
+)
 
 nuri_add_gtest_suite(
   nuri_transmission_renderer_tests
@@ -205,6 +243,12 @@ nuri_add_gtest_suite(
   nuri_render_graph_telemetry_tests
   src/render_graph_telemetry_tests.cpp
   "telemetry::"
+)
+
+nuri_add_gtest_suite(
+  nuri_visibility_math_tests
+  src/visibility_math_tests.cpp
+  "visibility::"
 )
 
 nuri_add_gtest_suite(
@@ -262,6 +306,12 @@ nuri_add_gtest_suite(
 )
 
 nuri_add_gtest_suite(
+  nuri_mesh_binary_cache_tests
+  src/mesh_binary_cache_tests.cpp
+  "mesh_binary_cache::"
+)
+
+nuri_add_gtest_suite(
   nuri_texture_cache_utils_tests
   src/texture_cache_utils_tests.cpp
   "texture_cache_utils::"
@@ -291,3 +341,162 @@ nuri_add_gtest_suite(
   src/simulation_runtime_tests.cpp
   "simulation_runtime::"
 )
+
+if(NURI_BUILD_TOOLS)
+  nuri_add_gtest_suite(
+    nuri_tool_core_baseline_profile_tests
+    src/nuri_baseline_profile_tests.cpp
+    "baseline_profile::"
+  )
+  target_link_libraries(nuri_tool_core_baseline_profile_tests
+    PRIVATE
+      nuri_tool_core
+  )
+
+  nuri_add_gtest_suite(
+    nuri_tool_core_tests
+    src/nuri_tool_core_tests.cpp
+    "tool_core::"
+  )
+  target_link_libraries(nuri_tool_core_tests PRIVATE nuri_tool_core)
+
+  add_executable(nuri_process_test_helper
+    helpers/nuri_process_test_helper.cpp
+  )
+  find_package(Threads REQUIRED)
+  target_link_libraries(nuri_process_test_helper PRIVATE Threads::Threads)
+  set_target_properties(nuri_process_test_helper PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  )
+  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${_cfg}" _cfg_upper)
+    set_target_properties(nuri_process_test_helper PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+    )
+  endforeach()
+
+  nuri_add_gtest_suite(
+    nuri_tool_core_process_tests
+    src/nuri_process_tests.cpp
+    "process::"
+  )
+  target_link_libraries(nuri_tool_core_process_tests PRIVATE nuri_tool_core)
+  file(GENERATE
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>/nuri_process_test_helper_path.h"
+    CONTENT "#pragma once\n#define NURI_PROCESS_TEST_HELPER_PATH R\"nuri($<TARGET_FILE:nuri_process_test_helper>)nuri\"\n"
+  )
+  target_include_directories(nuri_tool_core_process_tests PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>"
+  )
+  add_dependencies(nuri_tool_core_process_tests nuri_process_test_helper)
+
+  nuri_add_gtest_suite(
+    nuri_tool_core_result_envelope_v2_tests
+    src/nuri_result_envelope_v2_tests.cpp
+    "result_envelope_v2::"
+  )
+  target_link_libraries(nuri_tool_core_result_envelope_v2_tests
+    PRIVATE
+      nuri_tool_core
+  )
+
+  add_executable(nuri_benchmark_child_fixture
+    helpers/nuri_benchmark_child_fixture.cpp
+  )
+  target_link_libraries(nuri_benchmark_child_fixture
+    PRIVATE
+      nuri_benchmarking
+      Threads::Threads
+  )
+  set_target_properties(nuri_benchmark_child_fixture PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  )
+  foreach(_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${_cfg}" _cfg_upper)
+    set_target_properties(nuri_benchmark_child_fixture PROPERTIES
+      "RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper}" "${CMAKE_BINARY_DIR}/lib"
+    )
+  endforeach()
+
+  nuri_add_gtest_suite(
+    nuri_benchmarking_tests
+    src/nuri_benchmarking_tests.cpp
+    "benchmarking::"
+  )
+  target_link_libraries(nuri_benchmarking_tests PRIVATE nuri_benchmarking)
+  file(GENERATE
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>/nuri_benchmark_child_fixture_path.h"
+    CONTENT "#pragma once\n#define NURI_BENCHMARK_CHILD_FIXTURE_PATH R\"nuri($<TARGET_FILE:nuri_benchmark_child_fixture>)nuri\"\n"
+  )
+  target_include_directories(nuri_benchmarking_tests PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>"
+  )
+  add_dependencies(nuri_benchmarking_tests nuri_benchmark_child_fixture)
+
+  nuri_add_gtest_suite(
+    nuri_benchmark_metric_registry_tests
+    src/nuri_benchmark_metric_registry_tests.cpp
+    "benchmark_metric_registry::"
+  )
+  target_link_libraries(nuri_benchmark_metric_registry_tests
+    PRIVATE
+      nuri_benchmarking
+  )
+
+  nuri_add_gtest_suite(
+    nuri_benchmark_stats_tests
+    src/nuri_benchmark_stats_tests.cpp
+    "benchmark_stats::"
+  )
+  target_link_libraries(nuri_benchmark_stats_tests PRIVATE nuri_benchmarking)
+
+  if(TARGET nuri_snapshot_testing)
+    nuri_add_gtest_suite(
+      nuri_snapshot_testing_tests
+      src/nuri_snapshot_testing_tests.cpp
+      "snapshot_testing::"
+    )
+    target_link_libraries(nuri_snapshot_testing_tests
+      PRIVATE
+        nuri_snapshot_testing
+    )
+    nuri_add_gtest_suite(
+      nuri_snapshot_semantic_tests
+      src/nuri_snapshot_semantic_tests.cpp
+      "snapshot_semantic::"
+    )
+    target_link_libraries(nuri_snapshot_semantic_tests
+      PRIVATE
+        nuri_snapshot_testing
+    )
+  endif()
+  if(TARGET nuri_autotesting)
+    nuri_add_gtest_suite(
+      nuri_autotesting_tests
+      src/nuri_autotesting_tests.cpp
+      "autotesting::"
+    )
+    target_link_libraries(nuri_autotesting_tests
+      PRIVATE
+        nuri_autotesting
+    )
+    nuri_add_gtest_suite(
+      nuri_autotest_motion_oracle_tests
+      src/autotest_motion_oracle_tests.cpp
+      "autotest_motion_oracle::"
+    )
+    target_link_libraries(nuri_autotest_motion_oracle_tests
+      PRIVATE
+        nuri_autotesting
+    )
+    nuri_add_gtest_suite(
+      nuri_autotest_quality_oracle_tests
+      src/autotest_quality_oracle_tests.cpp
+      "autotest_quality_oracle::"
+    )
+    target_link_libraries(nuri_autotest_quality_oracle_tests
+      PRIVATE
+        nuri_autotesting
+    )
+  endif()
+endif()

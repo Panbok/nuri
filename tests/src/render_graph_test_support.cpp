@@ -1,5 +1,6 @@
 #include "render_graph_test_support.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace nuri::test_support {
@@ -67,6 +68,8 @@ TextureDesc makeTransientTextureDesc(Format format, uint32_t width,
   switch (format) {
   case Format::R8_UNORM:
     return 1u;
+  case Format::R16_UNORM:
+    return sizeof(uint16_t);
   case Format::R32_UINT:
     return sizeof(uint32_t);
   case Format::R32_FLOAT:
@@ -277,6 +280,68 @@ FakeGPUDeviceBase::createTextureImpl(const TextureDesc &desc) {
   return Result<TextureHandle, std::string>::makeResult(handle);
 }
 
+Result<bool, std::string>
+FakeGPUDeviceBase::copyTextureRegion(const TextureCopyItem &copy) {
+  if (!isValid(copy.sourceTexture) || !isValid(copy.destinationTexture)) {
+    return Result<bool, std::string>::makeError(
+        "fake texture copy: invalid texture handle");
+  }
+  if (sameHandle(copy.sourceTexture, copy.destinationTexture)) {
+    return Result<bool, std::string>::makeError(
+        "fake texture copy: source and destination match");
+  }
+  if (copy.sourceMipLevel != 0u || copy.destinationMipLevel != 0u ||
+      copy.sourceLayer != 0u || copy.destinationLayer != 0u) {
+    return Result<bool, std::string>::makeError(
+        "fake texture copy: unsupported mip or layer");
+  }
+  if (copy.width == 0u || copy.height == 0u) {
+    return Result<bool, std::string>::makeError(
+        "fake texture copy: empty region");
+  }
+
+  const TextureState &source = textures_[copy.sourceTexture.index - 1u];
+  TextureState &destination = textures_[copy.destinationTexture.index - 1u];
+  if (source.format != destination.format) {
+    return Result<bool, std::string>::makeError(
+        "fake texture copy: format mismatch");
+  }
+  if (copy.sourceX >= source.width || copy.sourceY >= source.height ||
+      copy.width > source.width - copy.sourceX ||
+      copy.height > source.height - copy.sourceY ||
+      copy.destinationX >= destination.width ||
+      copy.destinationY >= destination.height ||
+      copy.width > destination.width - copy.destinationX ||
+      copy.height > destination.height - copy.destinationY) {
+    return Result<bool, std::string>::makeError(
+        "fake texture copy: region out of bounds");
+  }
+
+  const size_t bytesPerPixel = fakeTextureBytesPerPixel(source.format);
+  if (bytesPerPixel == 0u) {
+    return Result<bool, std::string>::makeError(
+        "fake texture copy: unsupported texture format");
+  }
+  const size_t rowBytes = static_cast<size_t>(copy.width) * bytesPerPixel;
+  for (uint32_t row = 0u; row < copy.height; ++row) {
+    const size_t sourceOffset = (static_cast<size_t>(copy.sourceY + row) *
+                                     static_cast<size_t>(source.width) +
+                                 static_cast<size_t>(copy.sourceX)) *
+                                bytesPerPixel;
+    const size_t destinationOffset =
+        (static_cast<size_t>(copy.destinationY + row) *
+             static_cast<size_t>(destination.width) +
+         static_cast<size_t>(copy.destinationX)) *
+        bytesPerPixel;
+    std::copy_n(source.bytes.begin() +
+                    static_cast<std::ptrdiff_t>(sourceOffset),
+                rowBytes,
+                destination.bytes.begin() +
+                    static_cast<std::ptrdiff_t>(destinationOffset));
+  }
+  return Result<bool, std::string>::makeResult(true);
+}
+
 Result<BufferHandle, std::string>
 FakeExecutorGPUDevice::createBuffer(const BufferDesc &desc, std::string_view) {
   ++createBufferCallCount;
@@ -360,9 +425,18 @@ FakeGPUDeviceBase::createComputePipeline(const ComputePipelineDesc &,
       "not implemented in fake device");
 }
 
+Result<MeshletPipelineHandle, std::string>
+FakeGPUDeviceBase::createMeshletPipeline(const MeshletPipelineDesc &,
+                                         std::string_view) {
+  return Result<MeshletPipelineHandle, std::string>::makeError(
+      "meshlet pipelines are unsupported in fake device");
+}
+
 void FakeGPUDeviceBase::destroyRenderPipeline(RenderPipelineHandle) {}
 
 void FakeGPUDeviceBase::destroyComputePipeline(ComputePipelineHandle) {}
+
+void FakeGPUDeviceBase::destroyMeshletPipeline(MeshletPipelineHandle) {}
 
 void FakeGPUDeviceBase::destroyBuffer(BufferHandle buffer) {
   destroyBufferImpl(buffer);
@@ -432,6 +506,10 @@ bool FakeGPUDeviceBase::isValid(ComputePipelineHandle h) const {
   return nuri::isValid(h);
 }
 
+bool FakeGPUDeviceBase::isValid(MeshletPipelineHandle h) const {
+  return nuri::isValid(h);
+}
+
 Format FakeGPUDeviceBase::getTextureFormat(TextureHandle h) const {
   if (!nuri::isValid(h) || h.index == 0u || h.index > textures_.size()) {
     return Format::Count;
@@ -455,6 +533,18 @@ FakeGPUDeviceBase::getTextureDimensions(TextureHandle h) const {
 TextureCompressionCaps FakeGPUDeviceBase::getTextureCompressionCaps() const {
   return {};
 }
+
+GpuMultisampleCapabilities
+FakeGPUDeviceBase::getMultisampleCapabilities() const {
+  return multisampleCapabilities;
+}
+
+bool FakeGPUDeviceBase::supportsFeature(GPUFeature feature) const {
+  (void)feature;
+  return false;
+}
+
+MeshletLimits FakeGPUDeviceBase::getMeshletLimits() const { return {}; }
 
 uint32_t FakeGPUDeviceBase::getTextureBindlessIndex(TextureHandle) const {
   return 1u;
@@ -510,6 +600,35 @@ GpuTimingReport FakeGPUDeviceBase::getLatestCompletedGpuTimingReport() const {
   return latestCompletedGpuTimingReport;
 }
 
+size_t FakeGPUDeviceBase::drainCompletedGpuTimingReports(
+    std::span<GpuTimingReport> outReports) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  const size_t count =
+      std::min(outReports.size(), completedGpuTimingReports.size());
+  for (size_t i = 0u; i < count; ++i) {
+    outReports[i] = completedGpuTimingReports[i];
+  }
+  completedGpuTimingReports.erase(completedGpuTimingReports.begin(),
+                                  completedGpuTimingReports.begin() +
+                                      static_cast<std::ptrdiff_t>(count));
+  return count;
+}
+
+uint64_t FakeGPUDeviceBase::droppedGpuTimingReportCount() const {
+  return droppedGpuTimingReports;
+}
+
+void FakeGPUDeviceBase::enqueueCompletedGpuTimingReport(
+    const GpuTimingReport &report, size_t queueCapacity) {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  latestCompletedGpuTimingReport = report;
+  if (completedGpuTimingReports.size() >= queueCapacity) {
+    completedGpuTimingReports.erase(completedGpuTimingReports.begin());
+    ++droppedGpuTimingReports;
+  }
+  completedGpuTimingReports.push_back(report);
+}
+
 Result<bool, std::string> FakeGPUDeviceBase::beginFrame(uint64_t frameIndex) {
   const std::lock_guard<std::mutex> lock(recordingStateMutex_);
   currentFrameIndex_ = frameIndex;
@@ -517,12 +636,17 @@ Result<bool, std::string> FakeGPUDeviceBase::beginFrame(uint64_t frameIndex) {
   finishedCommandBuffers_.clear();
   finishCallCount_ = 0u;
   recordedPasses.clear();
+  recordedMeshDispatchStorage_.clear();
+  recordedTextureCopyStorage_.clear();
   submittedCommandBuffers.clear();
   submittedBatches.clear();
+  hasPreparedFrameOutput_ = false;
   return Result<bool, std::string>::makeResult(true);
 }
 
 Result<bool, std::string> FakeGPUDeviceBase::prepareFrameOutput() {
+  const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  hasPreparedFrameOutput_ = true;
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -582,7 +706,26 @@ FakeGPUDeviceBase::recordGraphicsPass(RecordingContextHandle ctx,
   }
   for (auto &state : activeRecordingContexts_) {
     if (sameHandle(state.handle, ctx)) {
-      state.passes.push_back(pass);
+      for (const TextureCopyItem &copy : pass.textureCopies) {
+        auto copyResult = copyTextureRegion(copy);
+        if (copyResult.hasError()) {
+          return copyResult;
+        }
+      }
+      RenderPass copiedPass = pass;
+      state.meshDispatchStorage.emplace_back(pass.meshDispatches.begin(),
+                                             pass.meshDispatches.end());
+      std::vector<MeshDispatchItem> &meshDispatches =
+          state.meshDispatchStorage.back();
+      copiedPass.meshDispatches = std::span<const MeshDispatchItem>(
+          meshDispatches.data(), meshDispatches.size());
+      state.textureCopyStorage.emplace_back(pass.textureCopies.begin(),
+                                            pass.textureCopies.end());
+      std::vector<TextureCopyItem> &textureCopies =
+          state.textureCopyStorage.back();
+      copiedPass.textureCopies = std::span<const TextureCopyItem>(
+          textureCopies.data(), textureCopies.size());
+      state.passes.push_back(copiedPass);
       return Result<bool, std::string>::makeResult(true);
     }
   }
@@ -607,6 +750,10 @@ FakeGPUDeviceBase::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
     finished.handle = RecordedCommandBufferHandle{
         .index = nextRecordedCommandBufferIndex_++, .generation = 1u};
     finished.passes = activeRecordingContexts_[i].passes;
+    finished.meshDispatchStorage =
+        std::move(activeRecordingContexts_[i].meshDispatchStorage);
+    finished.textureCopyStorage =
+        std::move(activeRecordingContexts_[i].textureCopyStorage);
     finishedCommandBuffers_.push_back(std::move(finished));
     activeRecordingContexts_.erase(activeRecordingContexts_.begin() + i);
     ++finishedRecordingContextCount;
@@ -653,6 +800,24 @@ void FakeGPUDeviceBase::recordSubmitFrame(
     std::span<const SubmitBatchMeta> batches) {
   ++submitCount;
   recordedPasses.assign(passes.begin(), passes.end());
+  recordedMeshDispatchStorage_.clear();
+  recordedTextureCopyStorage_.clear();
+  recordedMeshDispatchStorage_.reserve(recordedPasses.size());
+  recordedTextureCopyStorage_.reserve(recordedPasses.size());
+  for (RenderPass &pass : recordedPasses) {
+    recordedMeshDispatchStorage_.emplace_back(pass.meshDispatches.begin(),
+                                              pass.meshDispatches.end());
+    std::vector<MeshDispatchItem> &meshDispatches =
+        recordedMeshDispatchStorage_.back();
+    pass.meshDispatches = std::span<const MeshDispatchItem>(
+        meshDispatches.data(), meshDispatches.size());
+    recordedTextureCopyStorage_.emplace_back(pass.textureCopies.begin(),
+                                             pass.textureCopies.end());
+    std::vector<TextureCopyItem> &textureCopies =
+        recordedTextureCopyStorage_.back();
+    pass.textureCopies = std::span<const TextureCopyItem>(textureCopies.data(),
+                                                          textureCopies.size());
+  }
   submittedCommandBuffers.assign(commandBuffers.begin(), commandBuffers.end());
   submittedBatches.assign(batches.begin(), batches.end());
 }
@@ -662,6 +827,14 @@ FakeGPUDeviceBase::submitRecordedGraphicsFrame(
     std::span<const RecordedCommandBufferHandle> commandBuffers,
     std::span<const SubmitBatchMeta> batches) {
   const std::lock_guard<std::mutex> lock(recordingStateMutex_);
+  const bool wantsPresent =
+      std::any_of(batches.begin(), batches.end(), [](const SubmitBatchMeta &b) {
+        return b.presentsFrameOutput && b.commandBufferCount > 0u;
+      });
+  if (wantsPresent && !hasPreparedFrameOutput_) {
+    return Result<SubmissionHandle, std::string>::makeError(
+        "fake submitRecordedGraphicsFrame: frame output was not prepared");
+  }
   std::vector<RenderPass> submittedPasses{};
   for (const RecordedCommandBufferHandle handle : commandBuffers) {
     bool found = false;
@@ -688,6 +861,9 @@ FakeGPUDeviceBase::submitRecordedGraphicsFrame(
       .handle = lastSubmittedFrameHandle,
       .readyFrameIndex = currentFrameIndex_ + retireLag,
   });
+  if (wantsPresent) {
+    hasPreparedFrameOutput_ = false;
+  }
   return Result<SubmissionHandle, std::string>::makeResult(
       lastSubmittedFrameHandle);
 }

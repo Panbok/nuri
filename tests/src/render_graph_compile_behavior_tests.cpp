@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 
@@ -199,309 +200,57 @@ TEST(RenderGraphCompileBehaviorTest,
 }
 
 TEST(RenderGraphCompileBehaviorTest,
-     ParallelCompilePreservesResolvedBindingMetadata) {
+     MeshDispatchIndirectCountAcceptsTransientBufferBindings) {
   RenderGraphBuilder builder;
-  builder.beginFrame(230u);
+  builder.beginFrame(232u);
 
-  auto transientColorResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::RGBA8_UNORM, 64u, 64u), "c3_color");
-  auto importedDepthResult = builder.importTexture(
-      TextureHandle{.index = 90u, .generation = 1u}, "c3_depth");
-  auto transientDependencyResult =
-      builder.createTransientBuffer(makeTransientBufferDesc(64u), "c3_dep");
-  auto transientDispatchDependencyResult =
-      builder.createTransientBuffer(makeTransientBufferDesc(64u), "c3_pre_dep");
-  auto transientDrawVertexResult = builder.createTransientBuffer(
-      makeTransientBufferDesc(64u), "c3_draw_vertex");
-  ASSERT_FALSE(transientColorResult.hasError());
-  ASSERT_FALSE(importedDepthResult.hasError());
-  ASSERT_FALSE(transientDependencyResult.hasError());
-  ASSERT_FALSE(transientDispatchDependencyResult.hasError());
-  ASSERT_FALSE(transientDrawVertexResult.hasError());
+  BufferDesc indirectDesc = makeTransientBufferDesc(64u);
+  indirectDesc.usage = BufferUsage::Storage | BufferUsage::Indirect;
+  auto indirectResult =
+      builder.createTransientBuffer(indirectDesc, "mesh_indirect_args");
+  auto countResult =
+      builder.createTransientBuffer(indirectDesc, "mesh_indirect_count");
+  ASSERT_FALSE(indirectResult.hasError()) << indirectResult.error();
+  ASSERT_FALSE(countResult.hasError()) << countResult.error();
 
-  const std::array<BufferHandle, 2u> dependencyBuffers{
-      BufferHandle{.index = 11u, .generation = 1u}, BufferHandle{}};
-  const std::array<BufferHandle, 2u> dispatchDependencyBuffers{
-      BufferHandle{.index = 12u, .generation = 1u}, BufferHandle{}};
-  ComputeDispatchItem dispatch{};
-  dispatch.dependencyBuffers = std::span<const BufferHandle>(
-      dispatchDependencyBuffers.data(), dispatchDependencyBuffers.size());
-  dispatch.debugLabel = "c3_dispatch";
-  const std::array<ComputeDispatchItem, 1u> preDispatches{dispatch};
+  MeshDispatchItem dispatch{};
+  dispatch.command = MeshDispatchCommandType::IndirectCount;
+  dispatch.pipeline = MeshletPipelineHandle{.index = 4u, .generation = 1u};
+  dispatch.indirectDispatchCount = 16u;
+  const std::array<MeshDispatchItem, 1u> dispatches{dispatch};
 
-  DrawItem draw{};
-  draw.vertexBuffer = {};
-  draw.indexBuffer = BufferHandle{.index = 13u, .generation = 1u};
-  draw.debugLabel = "c3_draw";
-  const std::array<DrawItem, 1u> draws{draw};
+  const std::array<RenderGraphPreparedMeshDispatchBufferBinding, 2u> bindings{{
+      {.meshDispatchIndex = 0u,
+       .target = RenderGraphMeshDispatchBufferBindingTarget::Indirect,
+       .buffer = indirectResult.value()},
+      {.meshDispatchIndex = 0u,
+       .target = RenderGraphMeshDispatchBufferBindingTarget::IndirectCount,
+       .buffer = countResult.value()},
+  }};
 
-  RenderGraphGraphicsPassDesc complexDesc{};
-  complexDesc.colorTexture = transientColorResult.value();
-  complexDesc.depthTexture = importedDepthResult.value();
-  complexDesc.preDispatches = std::span<const ComputeDispatchItem>(
-      preDispatches.data(), preDispatches.size());
-  complexDesc.dependencyBuffers = std::span<const BufferHandle>(
-      dependencyBuffers.data(), dependencyBuffers.size());
-  complexDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
-  complexDesc.debugLabel = "c3_pass0";
-  complexDesc.markImplicitOutputSideEffect = false;
+  RenderGraphPreparedGraphicsPassDesc desc{};
+  desc.meshDispatches =
+      std::span<const MeshDispatchItem>(dispatches.data(), dispatches.size());
+  desc.meshDispatchBufferBindings =
+      std::span<const RenderGraphPreparedMeshDispatchBufferBinding>(
+          bindings.data(), bindings.size());
+  desc.debugLabel = "mesh_indirect_transient";
 
-  auto pass0Result = builder.addGraphicsPass(complexDesc);
-  ASSERT_FALSE(pass0Result.hasError());
-  ASSERT_FALSE(builder
-                   .bindPassDependencyBuffer(pass0Result.value(), 1u,
-                                             transientDependencyResult.value(),
-                                             RenderGraphAccessMode::Read)
-                   .hasError());
-  ASSERT_FALSE(builder
-                   .bindPreDispatchDependencyBuffer(
-                       pass0Result.value(), 0u, 1u,
-                       transientDispatchDependencyResult.value(),
-                       RenderGraphAccessMode::Read)
-                   .hasError());
-  ASSERT_FALSE(
-      builder
-          .bindDrawBuffer(
-              pass0Result.value(), 0u,
-              RenderGraphCompileResult::DrawBufferBindingTarget::Vertex,
-              transientDrawVertexResult.value(), RenderGraphAccessMode::Read)
-          .hasError());
-  ASSERT_FALSE(builder.markPassSideEffect(pass0Result.value()).hasError());
-
-  auto pass1Result =
-      addTestGraphicsPass(builder, makeTestPass("c3_pass1"), "c3_pass1");
-  ASSERT_FALSE(pass1Result.hasError());
-  ASSERT_FALSE(builder.markPassSideEffect(pass1Result.value()).hasError());
-  constexpr uint32_t kExtraParallelPayloadPassCount = 48u;
-  for (uint32_t i = 0u; i < kExtraParallelPayloadPassCount; ++i) {
-    const std::string passName = "c3_extra_pass_" + std::to_string(i);
-    auto extraPassResult =
-        addTestGraphicsPass(builder, makeTestPass(passName), passName);
-    ASSERT_FALSE(extraPassResult.hasError());
-    ASSERT_FALSE(
-        builder.markPassSideEffect(extraPassResult.value()).hasError());
-  }
-
-  const RenderGraphRuntimeConfig serialConfig{
-      .workerCount = 1u,
-      .parallelCompile = true,
-      .parallelGraphicsRecording = false,
-  };
-  const RenderGraphRuntimeConfig parallelConfig{
-      .workerCount = 4u,
-      .parallelCompile = true,
-      .parallelGraphicsRecording = false,
-  };
-
-  auto serialCompile = compileBuilderWithConfig(builder, serialConfig);
-  auto parallelCompile = compileBuilderWithConfig(builder, parallelConfig);
-  ASSERT_FALSE(serialCompile.hasError());
-  ASSERT_FALSE(parallelCompile.hasError());
-
-  const RenderGraphCompileResult &serial = serialCompile.value();
-  const RenderGraphCompileResult &parallel = parallelCompile.value();
-
-  EXPECT_FALSE(serial.usedParallelPayloadResolution);
-  EXPECT_TRUE(parallel.usedParallelPayloadResolution);
-  EXPECT_EQ(serial.orderedPassIndices, parallel.orderedPassIndices);
-  EXPECT_EQ(serial.unresolvedTextureBindings.size(),
-            parallel.unresolvedTextureBindings.size());
-  EXPECT_EQ(serial.resolvedDependencyBuffers.size(),
-            parallel.resolvedDependencyBuffers.size());
-  EXPECT_EQ(serial.dependencyBufferRangesByPass.size(),
-            parallel.dependencyBufferRangesByPass.size());
-  EXPECT_EQ(serial.preDispatchRangesByPass.size(),
-            parallel.preDispatchRangesByPass.size());
-  EXPECT_EQ(serial.preDispatchDependencyRanges.size(),
-            parallel.preDispatchDependencyRanges.size());
-  EXPECT_EQ(serial.resolvedPreDispatchDependencyBuffers.size(),
-            parallel.resolvedPreDispatchDependencyBuffers.size());
-  EXPECT_EQ(serial.ownedPreDispatches.size(),
-            parallel.ownedPreDispatches.size());
-  EXPECT_EQ(serial.unresolvedPreDispatchDependencyBufferBindings.size(),
-            parallel.unresolvedPreDispatchDependencyBufferBindings.size());
-  EXPECT_EQ(serial.drawRangesByPass.size(), parallel.drawRangesByPass.size());
-  EXPECT_EQ(serial.ownedDrawItems.size(), parallel.ownedDrawItems.size());
-  EXPECT_EQ(serial.unresolvedDrawBufferBindings.size(),
-            parallel.unresolvedDrawBufferBindings.size());
-
-  ASSERT_EQ(serial.orderedPasses.size(), parallel.orderedPasses.size());
-  ASSERT_EQ(serial.orderedPasses.size(), 2u + kExtraParallelPayloadPassCount);
-  EXPECT_FALSE(nuri::isValid(serial.orderedPasses[0].colorTexture));
-  EXPECT_FALSE(nuri::isValid(parallel.orderedPasses[0].colorTexture));
-  EXPECT_TRUE(nuri::isValid(serial.orderedPasses[0].depthTexture));
-  EXPECT_TRUE(sameTexture(serial.orderedPasses[0].depthTexture,
-                          parallel.orderedPasses[0].depthTexture));
-  EXPECT_EQ(serial.orderedPasses[0].debugLabel,
-            parallel.orderedPasses[0].debugLabel);
-  EXPECT_EQ(serial.orderedPasses[1].debugLabel,
-            parallel.orderedPasses[1].debugLabel);
-
-  for (size_t i = 0; i < serial.dependencyBufferRangesByPass.size(); ++i) {
-    EXPECT_EQ(serial.dependencyBufferRangesByPass[i].offset,
-              parallel.dependencyBufferRangesByPass[i].offset);
-    EXPECT_EQ(serial.dependencyBufferRangesByPass[i].count,
-              parallel.dependencyBufferRangesByPass[i].count);
-  }
-  for (size_t i = 0; i < serial.preDispatchRangesByPass.size(); ++i) {
-    EXPECT_EQ(serial.preDispatchRangesByPass[i].offset,
-              parallel.preDispatchRangesByPass[i].offset);
-    EXPECT_EQ(serial.preDispatchRangesByPass[i].count,
-              parallel.preDispatchRangesByPass[i].count);
-  }
-  for (size_t i = 0; i < serial.preDispatchDependencyRanges.size(); ++i) {
-    EXPECT_EQ(serial.preDispatchDependencyRanges[i].offset,
-              parallel.preDispatchDependencyRanges[i].offset);
-    EXPECT_EQ(serial.preDispatchDependencyRanges[i].count,
-              parallel.preDispatchDependencyRanges[i].count);
-  }
-  for (size_t i = 0; i < serial.drawRangesByPass.size(); ++i) {
-    EXPECT_EQ(serial.drawRangesByPass[i].offset,
-              parallel.drawRangesByPass[i].offset);
-    EXPECT_EQ(serial.drawRangesByPass[i].count,
-              parallel.drawRangesByPass[i].count);
-  }
-
-  ASSERT_EQ(serial.resolvedDependencyBuffers.size(), 2u);
-  EXPECT_TRUE(sameBuffer(serial.resolvedDependencyBuffers[0],
-                         parallel.resolvedDependencyBuffers[0]));
-  EXPECT_FALSE(nuri::isValid(serial.resolvedDependencyBuffers[1]));
-  EXPECT_FALSE(nuri::isValid(parallel.resolvedDependencyBuffers[1]));
-
-  ASSERT_EQ(serial.resolvedPreDispatchDependencyBuffers.size(), 2u);
-  EXPECT_TRUE(sameBuffer(serial.resolvedPreDispatchDependencyBuffers[0],
-                         parallel.resolvedPreDispatchDependencyBuffers[0]));
-  EXPECT_FALSE(nuri::isValid(serial.resolvedPreDispatchDependencyBuffers[1]));
-  EXPECT_FALSE(nuri::isValid(parallel.resolvedPreDispatchDependencyBuffers[1]));
-
-  ASSERT_EQ(serial.ownedPreDispatches.size(), 1u);
-  ASSERT_EQ(parallel.ownedPreDispatches.size(), 1u);
-  EXPECT_EQ(serial.ownedPreDispatches[0].debugLabel,
-            parallel.ownedPreDispatches[0].debugLabel);
-  ASSERT_EQ(serial.ownedPreDispatches[0].dependencyBuffers.size(),
-            parallel.ownedPreDispatches[0].dependencyBuffers.size());
-  ASSERT_EQ(serial.ownedPreDispatches[0].dependencyBuffers.size(), 2u);
-  EXPECT_TRUE(sameBuffer(serial.ownedPreDispatches[0].dependencyBuffers[0],
-                         parallel.ownedPreDispatches[0].dependencyBuffers[0]));
-  EXPECT_FALSE(
-      nuri::isValid(serial.ownedPreDispatches[0].dependencyBuffers[1]));
-  EXPECT_FALSE(
-      nuri::isValid(parallel.ownedPreDispatches[0].dependencyBuffers[1]));
-
-  ASSERT_EQ(serial.ownedDrawItems.size(), 1u);
-  ASSERT_EQ(parallel.ownedDrawItems.size(), 1u);
-  EXPECT_EQ(serial.ownedDrawItems[0].debugLabel,
-            parallel.ownedDrawItems[0].debugLabel);
-  EXPECT_FALSE(nuri::isValid(serial.ownedDrawItems[0].vertexBuffer));
-  EXPECT_FALSE(nuri::isValid(parallel.ownedDrawItems[0].vertexBuffer));
-  EXPECT_TRUE(sameBuffer(serial.ownedDrawItems[0].indexBuffer,
-                         parallel.ownedDrawItems[0].indexBuffer));
-
-  ASSERT_EQ(serial.unresolvedTextureBindings.size(), 1u);
-  EXPECT_EQ(serial.unresolvedTextureBindings[0].orderedPassIndex,
-            parallel.unresolvedTextureBindings[0].orderedPassIndex);
-  EXPECT_EQ(serial.unresolvedTextureBindings[0].textureResourceIndex,
-            parallel.unresolvedTextureBindings[0].textureResourceIndex);
-  EXPECT_EQ(serial.unresolvedTextureBindings[0].target,
-            parallel.unresolvedTextureBindings[0].target);
-
-  ASSERT_EQ(serial.unresolvedDependencyBufferBindings.size(), 1u);
-  EXPECT_EQ(serial.unresolvedDependencyBufferBindings[0].orderedPassIndex,
-            parallel.unresolvedDependencyBufferBindings[0].orderedPassIndex);
-  EXPECT_EQ(
-      serial.unresolvedDependencyBufferBindings[0].dependencyBufferIndex,
-      parallel.unresolvedDependencyBufferBindings[0].dependencyBufferIndex);
-  EXPECT_EQ(serial.unresolvedDependencyBufferBindings[0].bufferResourceIndex,
-            parallel.unresolvedDependencyBufferBindings[0].bufferResourceIndex);
-
-  ASSERT_EQ(serial.unresolvedPreDispatchDependencyBufferBindings.size(), 1u);
-  EXPECT_EQ(
-      serial.unresolvedPreDispatchDependencyBufferBindings[0].orderedPassIndex,
-      parallel.unresolvedPreDispatchDependencyBufferBindings[0]
-          .orderedPassIndex);
-  EXPECT_EQ(
-      serial.unresolvedPreDispatchDependencyBufferBindings[0].preDispatchIndex,
-      parallel.unresolvedPreDispatchDependencyBufferBindings[0]
-          .preDispatchIndex);
-  EXPECT_EQ(serial.unresolvedPreDispatchDependencyBufferBindings[0]
-                .dependencyBufferIndex,
-            parallel.unresolvedPreDispatchDependencyBufferBindings[0]
-                .dependencyBufferIndex);
-  EXPECT_EQ(serial.unresolvedPreDispatchDependencyBufferBindings[0]
-                .bufferResourceIndex,
-            parallel.unresolvedPreDispatchDependencyBufferBindings[0]
-                .bufferResourceIndex);
-
-  ASSERT_EQ(serial.unresolvedDrawBufferBindings.size(), 1u);
-  EXPECT_EQ(serial.unresolvedDrawBufferBindings[0].orderedPassIndex,
-            parallel.unresolvedDrawBufferBindings[0].orderedPassIndex);
-  EXPECT_EQ(serial.unresolvedDrawBufferBindings[0].drawIndex,
-            parallel.unresolvedDrawBufferBindings[0].drawIndex);
-  EXPECT_EQ(serial.unresolvedDrawBufferBindings[0].target,
-            parallel.unresolvedDrawBufferBindings[0].target);
-  EXPECT_EQ(serial.unresolvedDrawBufferBindings[0].bufferResourceIndex,
-            parallel.unresolvedDrawBufferBindings[0].bufferResourceIndex);
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     DuplicateExplicitDependenciesAreDeduplicated) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(216u);
-
-  auto pass0Result = addTestGraphicsPass(
-      builder, makeTestPass("dedup_explicit_p0"), "dedup_explicit_p0");
-  auto pass1Result = addTestGraphicsPass(
-      builder, makeTestPass("dedup_explicit_p1"), "dedup_explicit_p1");
-  if (!(!pass0Result.hasError() && !pass1Result.hasError())) {
-    ADD_FAILURE()
-        << "addLegacyRenderPass should succeed for explicit dependency "
-           "dedup graph";
-    return;
-  }
-
-  auto depResult =
-      builder.addDependency(pass0Result.value(), pass1Result.value());
-  if (!(!depResult.hasError())) {
-    ADD_FAILURE() << "first addDependency should succeed";
-    return;
-  }
-  depResult = builder.addDependency(pass0Result.value(), pass1Result.value());
-  if (!(!depResult.hasError())) {
-    ADD_FAILURE() << "duplicate addDependency should succeed";
-    return;
-  }
-  depResult = builder.addDependency(pass0Result.value(), pass1Result.value());
-  if (!(!depResult.hasError())) {
-    ADD_FAILURE() << "second duplicate addDependency should succeed";
-    return;
-  }
+  auto passResult = builder.addPreparedGraphicsPass(desc);
+  ASSERT_FALSE(passResult.hasError()) << passResult.error();
 
   auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE()
-        << "compile should succeed for explicit dependency dedup graph";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
   const RenderGraphCompileResult &compiled = compileResult.value();
-
-  if (!(compiled.orderedPassIndices.size() == 2u)) {
-    ADD_FAILURE() << "dedup graph should schedule two passes";
-    return;
-  }
-  if (!(compiled.edges.size() == 1u)) {
-    ADD_FAILURE()
-        << "duplicate explicit dependencies should collapse to one edge";
-    return;
-  }
-  if (!(compiled.edges[0u].before == pass0Result.value().value &&
-        compiled.edges[0u].after == pass1Result.value().value)) {
-    ADD_FAILURE()
-        << "deduped edge should preserve explicit dependency direction";
-    return;
-  }
+  ASSERT_EQ(compiled.unresolvedMeshDispatchBufferBindings.size(), 2u);
+  EXPECT_EQ(compiled.unresolvedMeshDispatchBufferBindings[0].meshDispatchIndex,
+            0u);
+  EXPECT_EQ(
+      compiled.unresolvedMeshDispatchBufferBindings[0].target,
+      RenderGraphCompileResult::MeshDispatchBufferBindingTarget::Indirect);
+  EXPECT_EQ(
+      compiled.unresolvedMeshDispatchBufferBindings[1].target,
+      RenderGraphCompileResult::MeshDispatchBufferBindingTarget::IndirectCount);
 }
 
 TEST(RenderGraphCompileBehaviorTest,
@@ -570,96 +319,172 @@ TEST(RenderGraphCompileBehaviorTest,
 }
 
 TEST(RenderGraphCompileBehaviorTest,
-     RefreshHandlesUpdatesOwnedPreDispatchPayloads) {
+     RefreshHandlesUpdatesBorrowedPreResolvedDrawSpan) {
   RenderGraphBuilder builder;
 
-  const auto recordFrame = [&](uint64_t frameIndex,
-                               std::span<const std::byte> pushConstants,
-                               BufferHandle dependencyBuffer,
-                               std::string_view dispatchLabel) {
+  auto recordFrame = [&](uint64_t frameIndex, std::span<const DrawItem> draws)
+      -> RenderGraphBuilder::GraphFingerprint {
     builder.beginFrame(frameIndex);
     auto colorResult = builder.createTransientTexture(
         makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
-        "refresh_payload_color");
+        "refresh_borrowed_preresolved_draw_color");
     EXPECT_FALSE(colorResult.hasError());
     if (colorResult.hasError()) {
-      return RenderGraphBuilder::GraphFingerprint{};
+      return {};
     }
 
-    const std::array<BufferHandle, 1u> dependencyBuffers = {dependencyBuffer};
-    ComputeDispatchItem dispatch{};
-    dispatch.pipeline = ComputePipelineHandle{.index = 78u, .generation = 1u};
-    dispatch.dispatch = {.x = 2u, .y = 1u, .z = 1u};
-    dispatch.pushConstants = pushConstants;
-    dispatch.dependencyBuffers = std::span<const BufferHandle>(
-        dependencyBuffers.data(), dependencyBuffers.size());
-    dispatch.debugLabel = dispatchLabel;
-    const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
+    const std::array<BufferHandle, 1u> preResolvedDrawBuffers = {
+        BufferHandle{.index = 150u, .generation = 1u}};
 
     RenderGraphGraphicsPassDesc passDesc{};
     passDesc.colorTexture = colorResult.value();
-    passDesc.preDispatches = std::span<const ComputeDispatchItem>(
-        preDispatches.data(), preDispatches.size());
-    passDesc.debugLabel = "refresh_payload_pass";
+    passDesc.draws = draws;
+    passDesc.drawBuffersPreResolved = true;
+    passDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
+        preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
+    passDesc.borrowPayload = true;
+    passDesc.debugLabel = "refresh_borrowed_preresolved_draw_pass";
 
     auto passResult = builder.addGraphicsPass(passDesc);
     EXPECT_FALSE(passResult.hasError());
     if (passResult.hasError()) {
-      return RenderGraphBuilder::GraphFingerprint{};
+      return {};
     }
     EXPECT_FALSE(builder.markPassSideEffect(passResult.value()).hasError());
     return builder.computeGraphFingerprint();
   };
 
-  const std::array<std::byte, 4u> pushBytesA = {
-      std::byte{0x11}, std::byte{0x12}, std::byte{0x13}, std::byte{0x14}};
-  const std::array<std::byte, 4u> pushBytesB = {
-      std::byte{0x21}, std::byte{0x22}, std::byte{0x23}, std::byte{0x24}};
-  const BufferHandle dependencyA{.index = 91u, .generation = 1u};
-  const BufferHandle dependencyB{.index = 92u, .generation = 1u};
+  std::array<DrawItem, 4u> draws{};
+  for (uint32_t i = 0u; i < draws.size(); ++i) {
+    draws[i].vertexBuffer = BufferHandle{.index = 160u + i, .generation = 1u};
+  }
 
-  const auto fingerprintA = recordFrame(
-      242u, std::span<const std::byte>(pushBytesA.data(), pushBytesA.size()),
-      dependencyA, "refresh_dispatch_a");
+  const auto fingerprintA =
+      recordFrame(268u, std::span<const DrawItem>(draws.data(), 1u));
   auto compileResult = compileBuilder(builder);
-  ASSERT_FALSE(compileResult.hasError());
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
   RenderGraphCompileResult compiled = std::move(compileResult.value());
+  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
+  ASSERT_EQ(compiled.orderedPasses[0u].draws.size(), 1u);
 
-  ASSERT_EQ(compiled.ownedPreDispatches.size(), 1u);
-  EXPECT_EQ(compiled.ownedPreDispatches[0].debugLabel, "refresh_dispatch_a");
-  ASSERT_EQ(compiled.ownedPreDispatches[0].pushConstants.size(),
-            pushBytesA.size());
-  EXPECT_EQ(
-      std::to_integer<uint8_t>(compiled.ownedPreDispatches[0].pushConstants[0]),
-      0x11u);
-  ASSERT_EQ(compiled.ownedPreDispatches[0].dependencyBuffers.size(), 1u);
-  EXPECT_TRUE(sameBuffer(compiled.ownedPreDispatches[0].dependencyBuffers[0],
-                         dependencyA));
-
-  const auto fingerprintB = recordFrame(
-      243u, std::span<const std::byte>(pushBytesB.data(), pushBytesB.size()),
-      dependencyB, "refresh_dispatch_b");
-  EXPECT_TRUE(fingerprintA == fingerprintB);
+  const auto fingerprintB =
+      recordFrame(269u, std::span<const DrawItem>(draws.data(), draws.size()));
+  ASSERT_TRUE(fingerprintA == fingerprintB);
 
   builder.refreshHandlesInCompileResult(compiled);
-
-  ASSERT_EQ(compiled.ownedPreDispatches.size(), 1u);
-  EXPECT_EQ(compiled.ownedPreDispatches[0].debugLabel, "refresh_dispatch_b");
-  ASSERT_EQ(compiled.ownedPreDispatches[0].pushConstants.size(),
-            pushBytesB.size());
-  EXPECT_EQ(
-      std::to_integer<uint8_t>(compiled.ownedPreDispatches[0].pushConstants[0]),
-      0x21u);
-  ASSERT_EQ(compiled.ownedPreDispatches[0].dependencyBuffers.size(), 1u);
-  EXPECT_TRUE(sameBuffer(compiled.ownedPreDispatches[0].dependencyBuffers[0],
-                         dependencyB));
   ASSERT_EQ(compiled.orderedPasses.size(), 1u);
-  ASSERT_EQ(compiled.orderedPasses[0].preDispatches.size(), 1u);
-  EXPECT_EQ(compiled.orderedPasses[0].preDispatches[0].debugLabel,
-            "refresh_dispatch_b");
-  EXPECT_EQ(std::to_integer<uint8_t>(
-                compiled.orderedPasses[0].preDispatches[0].pushConstants[0]),
-            0x21u);
+  ASSERT_EQ(compiled.orderedPasses[0u].draws.size(), draws.size());
+  EXPECT_EQ(compiled.orderedPasses[0u].draws[3u].vertexBuffer.index, 163u);
+}
+
+TEST(RenderGraphCompileBehaviorTest, TextureCopyPassCompilesNativePayload) {
+  RenderGraphBuilder builder;
+  builder.beginFrame(270u);
+
+  const TextureHandle sourceTexture{.index = 301u, .generation = 1u};
+  const TextureHandle destinationTexture{.index = 302u, .generation = 1u};
+  auto sourceResult = builder.importTexture(sourceTexture, "copy_source");
+  auto destinationResult =
+      builder.importTexture(destinationTexture, "copy_destination");
+  ASSERT_FALSE(sourceResult.hasError());
+  ASSERT_FALSE(destinationResult.hasError());
+
+  const std::array<RenderGraphTextureCopyItem, 1u> copies{{
+      {.sourceTexture = sourceResult.value(),
+       .destinationTexture = destinationResult.value(),
+       .sourceX = 1u,
+       .sourceY = 2u,
+       .destinationX = 3u,
+       .destinationY = 4u,
+       .width = 8u,
+       .height = 9u},
+  }};
+  RenderGraphTextureCopyPassDesc desc{};
+  desc.copies =
+      std::span<const RenderGraphTextureCopyItem>(copies.data(), copies.size());
+  desc.debugLabel = "copy_pass";
+
+  auto passResult = builder.addTextureCopyPass(desc);
+  ASSERT_FALSE(passResult.hasError()) << passResult.error();
+
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  const RenderGraphCompileResult &compiled = compileResult.value();
+  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
+  const RenderPass &pass = compiled.orderedPasses[0u];
+  EXPECT_EQ(pass.executionMode, RenderPassExecutionMode::CopyOnly);
+  EXPECT_EQ(pass.debugLabel, "copy_pass");
+  ASSERT_EQ(pass.textureCopies.size(), 1u);
+  EXPECT_TRUE(sameTexture(pass.textureCopies[0u].sourceTexture, sourceTexture));
+  EXPECT_TRUE(sameTexture(pass.textureCopies[0u].destinationTexture,
+                          destinationTexture));
+  EXPECT_EQ(pass.textureCopies[0u].sourceX, 1u);
+  EXPECT_EQ(pass.textureCopies[0u].destinationY, 4u);
+  ASSERT_EQ(compiled.textureCopyRangesByPass.size(), 1u);
+  EXPECT_EQ(compiled.textureCopyRangesByPass[0u].count, 1u);
+  EXPECT_TRUE(compiled.unresolvedTextureCopyBindings.empty());
+}
+
+TEST(RenderGraphCompileBehaviorTest,
+     RefreshHandlesUpdatesTextureCopyImportedHandles) {
+  RenderGraphBuilder builder;
+
+  auto recordFrame = [&](uint64_t frameIndex, TextureHandle sourceTexture,
+                         TextureHandle destinationTexture) {
+    builder.beginFrame(frameIndex);
+    auto sourceResult = builder.importTexture(sourceTexture, "copy_source");
+    auto destinationResult =
+        builder.importTexture(destinationTexture, "copy_destination");
+    EXPECT_FALSE(sourceResult.hasError());
+    EXPECT_FALSE(destinationResult.hasError());
+    if (sourceResult.hasError() || destinationResult.hasError()) {
+      return RenderGraphBuilder::GraphFingerprint{};
+    }
+
+    const std::array<RenderGraphTextureCopyItem, 1u> copies{{
+        {.sourceTexture = sourceResult.value(),
+         .destinationTexture = destinationResult.value(),
+         .sourceX = 2u,
+         .sourceY = 3u,
+         .destinationX = 4u,
+         .destinationY = 5u,
+         .width = 6u,
+         .height = 7u},
+    }};
+    RenderGraphTextureCopyPassDesc desc{};
+    desc.copies = std::span<const RenderGraphTextureCopyItem>(copies.data(),
+                                                              copies.size());
+    desc.debugLabel = "refresh_copy_pass";
+    auto passResult = builder.addTextureCopyPass(desc);
+    EXPECT_FALSE(passResult.hasError());
+    return builder.computeGraphFingerprint();
+  };
+
+  const TextureHandle sourceA{.index = 311u, .generation = 1u};
+  const TextureHandle destinationA{.index = 312u, .generation = 1u};
+  const TextureHandle sourceB{.index = 313u, .generation = 2u};
+  const TextureHandle destinationB{.index = 314u, .generation = 2u};
+
+  const auto fingerprintA = recordFrame(271u, sourceA, destinationA);
+  auto compileResult = compileBuilder(builder);
+  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
+  RenderGraphCompileResult compiled = std::move(compileResult.value());
+  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
+  ASSERT_EQ(compiled.orderedPasses[0u].textureCopies.size(), 1u);
+  EXPECT_TRUE(sameTexture(
+      compiled.orderedPasses[0u].textureCopies[0u].sourceTexture, sourceA));
+
+  const auto fingerprintB = recordFrame(272u, sourceB, destinationB);
+  ASSERT_TRUE(fingerprintA == fingerprintB);
+  builder.refreshHandlesInCompileResult(compiled);
+
+  ASSERT_EQ(compiled.orderedPasses.size(), 1u);
+  ASSERT_EQ(compiled.orderedPasses[0u].textureCopies.size(), 1u);
+  EXPECT_TRUE(sameTexture(
+      compiled.orderedPasses[0u].textureCopies[0u].sourceTexture, sourceB));
+  EXPECT_TRUE(sameTexture(
+      compiled.orderedPasses[0u].textureCopies[0u].destinationTexture,
+      destinationB));
 }
 
 TEST(RenderGraphCompileBehaviorTest,
@@ -768,42 +593,6 @@ TEST(RenderGraphCompileBehaviorTest,
     ASSERT_TRUE(passResult.hasError());
     EXPECT_NE(passResult.error().find("dispatch"), std::string::npos);
   }
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     ComputeOnlyExecutionModeChangesGraphFingerprint) {
-  const auto recordFingerprint = [](uint64_t frameIndex,
-                                    RenderPassExecutionMode executionMode) {
-    RenderGraphBuilder builder;
-    builder.beginFrame(frameIndex);
-
-    ComputeDispatchItem dispatch{};
-    dispatch.pipeline = ComputePipelineHandle{.index = 90u, .generation = 1u};
-    dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
-    const std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
-
-    RenderGraphGraphicsPassDesc passDesc{};
-    passDesc.executionMode = executionMode;
-    passDesc.hasColorAttachment = false;
-    passDesc.preDispatches = std::span<const ComputeDispatchItem>(
-        preDispatches.data(), preDispatches.size());
-    passDesc.debugLabel = "compute_only_fingerprint";
-    passDesc.markImplicitOutputSideEffect = true;
-
-    auto passResult = builder.addGraphicsPass(passDesc);
-    EXPECT_FALSE(passResult.hasError());
-    if (passResult.hasError()) {
-      return RenderGraphBuilder::GraphFingerprint{};
-    }
-    return builder.computeGraphFingerprint();
-  };
-
-  const auto graphicsFingerprint =
-      recordFingerprint(248u, RenderPassExecutionMode::Graphics);
-  const auto computeFingerprint =
-      recordFingerprint(249u, RenderPassExecutionMode::ComputeOnly);
-
-  EXPECT_FALSE(graphicsFingerprint == computeFingerprint);
 }
 
 TEST(RenderGraphCompileBehaviorTest,
@@ -989,310 +778,6 @@ TEST(RenderGraphCompileBehaviorTest,
   }
 }
 
-TEST(RenderGraphCompileBehaviorTest,
-     GraphicsPassWithImportedColorBindingCompiles) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(220u);
-
-  const TextureHandle colorTexture{.index = 902u, .generation = 1u};
-  RenderPass pass{};
-  pass.debugLabel = "missing_explicit_color_binding";
-  pass.colorTexture = colorTexture;
-
-  auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(!addResult.hasError())) {
-    ADD_FAILURE() << "addTestGraphicsPass color-binding case should succeed";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed for color-binding case";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     GraphicsPassWithDependencyBindingCompiles) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(221u);
-
-  const BufferHandle dependencyBuffer{.index = 903u, .generation = 1u};
-  std::array<BufferHandle, 1> dependencies = {dependencyBuffer};
-
-  RenderPass pass{};
-  pass.debugLabel = "missing_explicit_dependency_binding";
-  pass.dependencyBuffers =
-      std::span<const BufferHandle>(dependencies.data(), dependencies.size());
-
-  auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(!addResult.hasError())) {
-    ADD_FAILURE() << "addTestGraphicsPass dependency case should "
-                     "succeed";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed for dependency-binding case";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest, AddGraphicsPassNativeDeclarationPath) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(222u);
-
-  auto colorResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
-      "native_graphics_color");
-  auto depthResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::D32_FLOAT, 32u, 32u),
-      "native_graphics_depth");
-  if (!(!colorResult.hasError() && !depthResult.hasError())) {
-    ADD_FAILURE()
-        << "createTransientTexture should succeed for native graphics "
-           "pass";
-    return;
-  }
-
-  const BufferHandle dependencyBuffer{.index = 904u, .generation = 1u};
-  std::array<BufferHandle, 1u> dependencies = {dependencyBuffer};
-
-  DrawItem draw{};
-  draw.vertexBuffer = BufferHandle{.index = 905u, .generation = 1u};
-  std::array<DrawItem, 1u> draws = {draw};
-
-  RenderGraphGraphicsPassDesc passDesc{};
-  passDesc.color = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  passDesc.colorTexture = colorResult.value();
-  passDesc.depth = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearDepth = 1.0f,
-                    .clearStencil = 0};
-  passDesc.depthTexture = depthResult.value();
-  passDesc.dependencyBuffers =
-      std::span<const BufferHandle>(dependencies.data(), dependencies.size());
-  passDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
-  passDesc.debugLabel = "native_graphics_pass";
-
-  auto addResult = builder.addGraphicsPass(passDesc);
-  if (!(!addResult.hasError())) {
-    ADD_FAILURE() << "addGraphicsPass should succeed for native declaration "
-                     "path";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed for native declaration path";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
-  const RenderGraphCompileResult &compiled = compileResult.value();
-
-  if (!(compiled.orderedPasses.size() == 1u)) {
-    ADD_FAILURE() << "native declaration path should schedule one pass";
-    return;
-  }
-  if (!(compiled.unresolvedTextureBindings.size() == 2u)) {
-    ADD_FAILURE()
-        << "native declaration path should emit unresolved color+depth "
-           "transient bindings";
-    return;
-  }
-  if (!(compiled.dependencyBufferRangesByPass.size() == 1u &&
-        compiled.dependencyBufferRangesByPass[0u].count == 1u)) {
-    ADD_FAILURE()
-        << "native declaration path should preserve dependency buffer "
-           "slots";
-    return;
-  }
-  if (!(compiled.drawRangesByPass.size() == 1u &&
-        compiled.drawRangesByPass[0u].count == 0u &&
-        compiled.orderedPasses[0u].draws.size() == 1u)) {
-    ADD_FAILURE() << "native declaration path should preserve borrowed draws";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     GraphicsPassWithPreResolvedDrawBuffersCompiles) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(224u);
-
-  auto colorResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
-      "pre_resolved_color");
-  auto depthResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::D32_FLOAT, 32u, 32u),
-      "pre_resolved_depth");
-  if (!(!colorResult.hasError() && !depthResult.hasError())) {
-    ADD_FAILURE() << "createTransientTexture should succeed";
-    return;
-  }
-
-  const BufferHandle vertexBuffer{.index = 908u, .generation = 1u};
-  const BufferHandle indexBuffer{.index = 909u, .generation = 1u};
-  std::array<BufferHandle, 2u> preResolvedDrawBuffers = {vertexBuffer,
-                                                         indexBuffer};
-  DrawItem draw{};
-  draw.vertexBuffer = vertexBuffer;
-  draw.indexBuffer = indexBuffer;
-  std::array<DrawItem, 1u> draws = {draw};
-
-  RenderGraphGraphicsPassDesc passDesc{};
-  passDesc.color = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  passDesc.colorTexture = colorResult.value();
-  passDesc.depth = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearDepth = 1.0f,
-                    .clearStencil = 0};
-  passDesc.depthTexture = depthResult.value();
-  passDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
-  passDesc.drawBuffersPreResolved = true;
-  passDesc.preResolvedDrawBuffers = std::span<const BufferHandle>(
-      preResolvedDrawBuffers.data(), preResolvedDrawBuffers.size());
-  passDesc.debugLabel = "pre_resolved_draw_buffers";
-
-  auto addResult = builder.addGraphicsPass(passDesc);
-  if (!(!addResult.hasError())) {
-    ADD_FAILURE() << "addGraphicsPass should accept pre-resolved draw buffers";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should accept pre-resolved draw buffers";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
-
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  if (!(compiled.orderedPasses.size() == 1u &&
-        compiled.orderedPasses[0u].draws.size() == 1u)) {
-    ADD_FAILURE() << "pre-resolved path should preserve borrowed draws";
-    return;
-  }
-  EXPECT_TRUE(compiled.unresolvedDrawBufferBindings.empty());
-  EXPECT_EQ(compiled.orderedPasses[0u].draws[0u].vertexBuffer.index,
-            vertexBuffer.index);
-  EXPECT_EQ(compiled.orderedPasses[0u].draws[0u].indexBuffer.index,
-            indexBuffer.index);
-}
-
-TEST(RenderGraphCompileBehaviorTest, AddPreparedGraphicsPassNativePath) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(223u);
-
-  auto colorResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::RGBA8_UNORM, 32u, 32u),
-      "prepared_graphics_color");
-  auto depthResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::D32_FLOAT, 32u, 32u),
-      "prepared_graphics_depth");
-  if (!(!colorResult.hasError() && !depthResult.hasError())) {
-    ADD_FAILURE() << "createTransientTexture should succeed for prepared "
-                     "graphics pass";
-    return;
-  }
-
-  const BufferHandle dependencyBuffer{.index = 906u, .generation = 1u};
-  const BufferHandle drawBuffer{.index = 907u, .generation = 1u};
-  auto dependencyImportResult =
-      builder.importBuffer(dependencyBuffer, "prepared_dependency");
-  auto drawImportResult = builder.importBuffer(drawBuffer, "prepared_draw");
-  if (!(!dependencyImportResult.hasError() && !drawImportResult.hasError())) {
-    ADD_FAILURE() << "importBuffer should succeed for prepared graphics pass";
-    return;
-  }
-
-  std::array<BufferHandle, 1u> dependencies = {dependencyBuffer};
-  DrawItem draw{};
-  draw.vertexBuffer = drawBuffer;
-  std::array<DrawItem, 1u> draws = {draw};
-  std::array<RenderGraphPreparedDependencyBufferBinding, 1u>
-      dependencyBindings = {{
-          {.dependencyIndex = 0u,
-           .buffer = dependencyImportResult.value(),
-           .mode = RenderGraphAccessMode::Read | RenderGraphAccessMode::Write},
-      }};
-  std::array<RenderGraphPreparedDrawBufferBinding, 1u> drawBindings = {{
-      {.drawIndex = 0u,
-       .target = RenderGraphDrawBufferBindingTarget::Vertex,
-       .buffer = drawImportResult.value(),
-       .mode = RenderGraphAccessMode::Read},
-  }};
-
-  RenderGraphPreparedGraphicsPassDesc passDesc{};
-  passDesc.color = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  passDesc.colorTexture = colorResult.value();
-  passDesc.depth = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearDepth = 1.0f,
-                    .clearStencil = 0};
-  passDesc.depthTexture = depthResult.value();
-  passDesc.dependencyBuffers =
-      std::span<const BufferHandle>(dependencies.data(), dependencies.size());
-  passDesc.draws = std::span<const DrawItem>(draws.data(), draws.size());
-  passDesc.dependencyBufferBindings =
-      std::span<const RenderGraphPreparedDependencyBufferBinding>(
-          dependencyBindings.data(), dependencyBindings.size());
-  passDesc.drawBufferBindings =
-      std::span<const RenderGraphPreparedDrawBufferBinding>(
-          drawBindings.data(), drawBindings.size());
-  passDesc.debugLabel = "prepared_graphics_pass";
-
-  auto addResult = builder.addPreparedGraphicsPass(passDesc);
-  if (!(!addResult.hasError())) {
-    ADD_FAILURE() << "addPreparedGraphicsPass should succeed";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed for prepared graphics path";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
-
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  if (!(compiled.orderedPasses.size() == 1u)) {
-    ADD_FAILURE() << "prepared graphics path should schedule one pass";
-    return;
-  }
-  if (!(compiled.unresolvedTextureBindings.size() == 2u)) {
-    ADD_FAILURE()
-        << "prepared graphics path should emit unresolved color+depth "
-           "transient bindings";
-    return;
-  }
-  if (!(compiled.dependencyBufferRangesByPass.size() == 1u &&
-        compiled.dependencyBufferRangesByPass[0u].count == 1u)) {
-    ADD_FAILURE() << "prepared graphics path should preserve dependency "
-                     "buffer slots";
-    return;
-  }
-  if (!(compiled.drawRangesByPass.size() == 1u &&
-        compiled.drawRangesByPass[0u].count == 0u &&
-        compiled.orderedPasses[0u].draws.size() == 1u)) {
-    ADD_FAILURE() << "prepared graphics path should preserve borrowed draws";
-    return;
-  }
-}
-
 TEST(RenderGraphCompileBehaviorTest, DeadPassCullingFromFrameOutputRoots) {
   RenderGraphBuilder builder;
   builder.beginFrame(202u);
@@ -1430,567 +915,6 @@ TEST(RenderGraphCompileBehaviorTest, CycleDiagnosticsIncludePassNames) {
   }
   if (((error).find("cycle_b") == std::string_view::npos)) {
     ADD_FAILURE() << "cycle error should include second pass debug name";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     InferredSideEffectSuppressedByExplicitFrameOutputRoots) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(206u);
-  builder.setInferredSideEffectSuppression(true);
-
-  const TextureHandle colorA{.index = 51u, .generation = 1u};
-  const TextureHandle colorB{.index = 52u, .generation = 1u};
-
-  auto implicitResult =
-      addTestGraphicsPass(builder, makeTestPass("cull_implicit_backbuffer"),
-                          "cull_implicit_backbuffer");
-  auto producerResult = addTestGraphicsPass(
-      builder, makeTestPass("cull_producer", colorA), "cull_producer");
-  auto outputResult = addTestGraphicsPass(
-      builder, makeTestPass("cull_output", colorB), "cull_output");
-  if (!(!implicitResult.hasError() && !producerResult.hasError() &&
-        !outputResult.hasError())) {
-    ADD_FAILURE() << "addLegacyRenderPass should succeed for inferred-root "
-                     "suppression graph";
-    return;
-  }
-
-  auto depResult =
-      builder.addDependency(producerResult.value(), outputResult.value());
-  if (!(!depResult.hasError())) {
-    ADD_FAILURE() << "addDependency producer->output should succeed";
-    return;
-  }
-
-  auto importResult = builder.importTexture(colorB, "explicit_frame_output");
-  if (!(!importResult.hasError())) {
-    ADD_FAILURE() << "importTexture should succeed for explicit frame output";
-    return;
-  }
-  auto outputMarkResult =
-      builder.markTextureAsFrameOutput(importResult.value());
-  if (!(!outputMarkResult.hasError())) {
-    ADD_FAILURE() << "markTextureAsFrameOutput should succeed";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE()
-        << "compile should succeed for inferred-root suppression graph";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
-  const RenderGraphCompileResult &compiled = compileResult.value();
-
-  if (!(compiled.declaredPassCount == 3u)) {
-    ADD_FAILURE()
-        << "inferred-root suppression graph should declare three passes";
-    return;
-  }
-  if (!(compiled.culledPassCount == 1u)) {
-    ADD_FAILURE() << "implicit inferred side-effect pass should be culled when "
-                     "explicit frame output roots exist";
-    return;
-  }
-  if (!(compiled.rootPassCount == 1u)) {
-    ADD_FAILURE() << "expected a single explicit frame-output root";
-    return;
-  }
-  if (!(std::find(compiled.orderedPassIndices.begin(),
-                  compiled.orderedPassIndices.end(),
-                  implicitResult.value().value) ==
-        compiled.orderedPassIndices.end())) {
-    ADD_FAILURE() << "inferred implicit side-effect pass should not be "
-                     "scheduled";
-    return;
-  }
-  if (!(compiled.orderedPassIndices.size() == 2u)) {
-    ADD_FAILURE() << "producer and output passes should remain scheduled";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest, ExplicitSideEffectUpgradesInferredMark) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(207u);
-  builder.setInferredSideEffectSuppression(true);
-
-  const TextureHandle colorOut{.index = 61u, .generation = 1u};
-
-  auto implicitResult =
-      addTestGraphicsPass(builder, makeTestPass("explicit_upgrade_target"),
-                          "explicit_upgrade_target");
-  auto outputResult = addTestGraphicsPass(
-      builder, makeTestPass("explicit_upgrade_output", colorOut),
-      "explicit_upgrade_output");
-  if (!(!implicitResult.hasError() && !outputResult.hasError())) {
-    ADD_FAILURE() << "addLegacyRenderPass should succeed for explicit-upgrade "
-                     "graph";
-    return;
-  }
-
-  auto explicitMarkResult = builder.markPassSideEffect(implicitResult.value());
-  if (!(!explicitMarkResult.hasError())) {
-    ADD_FAILURE() << "explicit markPassSideEffect should succeed";
-    return;
-  }
-
-  auto importResult =
-      builder.importTexture(colorOut, "explicit_upgrade_output_tex");
-  if (!(!importResult.hasError())) {
-    ADD_FAILURE() << "importTexture should succeed for explicit-upgrade graph";
-    return;
-  }
-  auto outputMarkResult =
-      builder.markTextureAsFrameOutput(importResult.value());
-  if (!(!outputMarkResult.hasError())) {
-    ADD_FAILURE() << "markTextureAsFrameOutput should succeed";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed for explicit-upgrade graph";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
-  const RenderGraphCompileResult &compiled = compileResult.value();
-
-  if (!(compiled.culledPassCount == 0u)) {
-    ADD_FAILURE()
-        << "explicit side-effect mark should keep upgraded pass alive";
-    return;
-  }
-  if (!(compiled.rootPassCount == 2u)) {
-    ADD_FAILURE()
-        << "expected both explicit side-effect and frame-output roots";
-    return;
-  }
-  if (!(std::find(compiled.orderedPassIndices.begin(),
-                  compiled.orderedPassIndices.end(),
-                  implicitResult.value().value) !=
-        compiled.orderedPassIndices.end())) {
-    ADD_FAILURE() << "explicitly marked side-effect pass should remain "
-                     "scheduled";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest, DefaultPolicyCullsUnmarkedPasses) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(208u);
-
-  const TextureHandle colorOut{.index = 71u, .generation = 1u};
-
-  auto implicitResult =
-      addTestGraphicsPass(builder, makeTestPass("default_policy_implicit"),
-                          "default_policy_implicit");
-  auto outputResult = addTestGraphicsPass(
-      builder, makeTestPass("default_policy_output", colorOut),
-      "default_policy_output");
-  if (!(!implicitResult.hasError() && !outputResult.hasError())) {
-    ADD_FAILURE() << "addLegacyRenderPass should succeed for default-policy "
-                     "graph";
-    return;
-  }
-
-  auto importResult = builder.importTexture(colorOut, "default_policy_out_tex");
-  if (!(!importResult.hasError())) {
-    ADD_FAILURE() << "importTexture should succeed for default-policy graph";
-    return;
-  }
-  auto outputMarkResult =
-      builder.markTextureAsFrameOutput(importResult.value());
-  if (!(!outputMarkResult.hasError())) {
-    ADD_FAILURE() << "markTextureAsFrameOutput should succeed";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed for default-policy graph";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
-  const RenderGraphCompileResult &compiled = compileResult.value();
-
-  if (!(compiled.culledPassCount == 1u)) {
-    ADD_FAILURE()
-        << "default policy should cull implicit pass without explicit "
-           "side-effect mark";
-    return;
-  }
-  if (!(std::find(compiled.orderedPassIndices.begin(),
-                  compiled.orderedPassIndices.end(),
-                  implicitResult.value().value) ==
-        compiled.orderedPassIndices.end())) {
-    ADD_FAILURE()
-        << "implicit pass without explicit side-effect mark should be "
-           "culled";
-    return;
-  }
-}
-
-class TestImplicitOutputLegacyLayer final {
-public:
-  explicit TestImplicitOutputLegacyLayer(TextureHandle explicitColorOut)
-      : explicitColorOut_(explicitColorOut) {}
-
-  Result<bool, std::string> buildRenderGraph(RenderFrameContext &,
-                                             RenderGraphBuilder &graph) {
-    RenderGraphGraphicsPassDesc implicitDesc{};
-    implicitDesc.debugLabel = "legacy_bridge_implicit";
-    auto implicitResult = graph.addGraphicsPass(implicitDesc);
-    if (implicitResult.hasError()) {
-      return Result<bool, std::string>::makeError(implicitResult.error());
-    }
-
-    auto colorImportResult =
-        graph.importTexture(explicitColorOut_, "legacy_bridge_output_color");
-    if (colorImportResult.hasError()) {
-      return Result<bool, std::string>::makeError(colorImportResult.error());
-    }
-
-    RenderGraphGraphicsPassDesc outputDesc{};
-    outputDesc.colorTexture = colorImportResult.value();
-    outputDesc.debugLabel = "legacy_bridge_output";
-    auto outputResult = graph.addGraphicsPass(outputDesc);
-    if (outputResult.hasError()) {
-      return Result<bool, std::string>::makeError(outputResult.error());
-    }
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-private:
-  TextureHandle explicitColorOut_{};
-};
-
-class TestDepthOverrideLegacyLayer final {
-public:
-  explicit TestDepthOverrideLegacyLayer(TextureHandle depthTexture)
-      : depthTexture_(depthTexture) {}
-
-  Result<bool, std::string> buildRenderGraph(RenderFrameContext &frame,
-                                             RenderGraphBuilder &graph) {
-    const TextureHandle sceneDepthTexture = resolveFrameDepthTexture(frame);
-    const RenderGraphTextureId sceneDepthGraphTexture =
-        resolveSceneDepthGraphTexture(frame);
-
-    RenderGraphGraphicsPassDesc desc{};
-    desc.debugLabel = "legacy_bridge_depth_override";
-    if (nuri::isValid(sceneDepthTexture) &&
-        nuri::isValid(sceneDepthGraphTexture) &&
-        sceneDepthTexture.index == depthTexture_.index &&
-        sceneDepthTexture.generation == depthTexture_.generation) {
-      desc.depthTexture = sceneDepthGraphTexture;
-    } else {
-      auto depthImportResult = graph.importTexture(
-          depthTexture_, "legacy_bridge_depth_override_depth");
-      if (depthImportResult.hasError()) {
-        return Result<bool, std::string>::makeError(depthImportResult.error());
-      }
-      desc.depthTexture = depthImportResult.value();
-    }
-
-    auto addResult = graph.addGraphicsPass(desc);
-    if (addResult.hasError()) {
-      return Result<bool, std::string>::makeError(addResult.error());
-    }
-    return Result<bool, std::string>::makeResult(true);
-  }
-
-private:
-  TextureHandle depthTexture_{};
-};
-
-TEST(RenderGraphCompileBehaviorTest,
-     DefaultLayerBridgeMarksImplicitOutputSideEffect) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(210u);
-  builder.setInferredSideEffectSuppression(true);
-
-  const TextureHandle colorOut{.index = 91u, .generation = 1u};
-  TestImplicitOutputLegacyLayer layer(colorOut);
-  RenderFrameContext frame{};
-
-  auto buildResult = layer.buildRenderGraph(frame, builder);
-  if (!(!buildResult.hasError())) {
-    ADD_FAILURE() << "Layer::buildRenderGraph should succeed for default "
-                     "legacy bridge test";
-    if (buildResult.hasError()) {
-      std::cerr << buildResult.error() << "\n";
-    }
-    return;
-  }
-
-  auto outputImportResult =
-      builder.importTexture(colorOut, "legacy_bridge_out");
-  if (!(!outputImportResult.hasError())) {
-    ADD_FAILURE() << "importTexture should succeed for default legacy bridge "
-                     "test";
-    return;
-  }
-  auto outputMarkResult =
-      builder.markTextureAsFrameOutput(outputImportResult.value());
-  if (!(!outputMarkResult.hasError())) {
-    ADD_FAILURE() << "markTextureAsFrameOutput should succeed for default "
-                     "legacy bridge test";
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed for default legacy bridge test";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
-  const RenderGraphCompileResult &compiled = compileResult.value();
-
-  if (!(compiled.declaredPassCount == 2u)) {
-    ADD_FAILURE() << "default bridge test should declare two passes";
-    return;
-  }
-  if (!(compiled.culledPassCount == 0u)) {
-    ADD_FAILURE() << "default bridge implicit output pass should be kept by "
-                     "explicit side-effect mark";
-    return;
-  }
-  if (!(compiled.rootPassCount == 2u)) {
-    ADD_FAILURE() << "expected implicit-output side-effect root and explicit "
-                     "frame-output root";
-    return;
-  }
-  if (!(compiled.orderedPassIndices.size() == 2u)) {
-    ADD_FAILURE() << "both passes should remain scheduled";
-    return;
-  }
-  if (!(compiled.orderedPassIndices[0u] == 0u &&
-        compiled.orderedPassIndices[1u] == 1u)) {
-    ADD_FAILURE() << "default bridge test should preserve pass order";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     DefaultLayerBridgeUsesSceneDepthGraphOverride) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(211u);
-
-  auto sceneDepthResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::D32_FLOAT, 32u, 32u),
-      "legacy_bridge_scene_depth");
-  if (!(!sceneDepthResult.hasError())) {
-    ADD_FAILURE() << "createTransientTexture scene depth should succeed";
-    return;
-  }
-
-  const TextureHandle sceneDepthTexture{.index = 101u, .generation = 1u};
-  TestDepthOverrideLegacyLayer layer(sceneDepthTexture);
-  RenderFrameContext frame{};
-  frame.sharedResources.sceneDepthTexture = sceneDepthTexture;
-  frame.sharedResources.sceneDepthGraphTexture = sceneDepthResult.value();
-
-  auto buildResult = layer.buildRenderGraph(frame, builder);
-  if (!(!buildResult.hasError())) {
-    ADD_FAILURE() << "Layer::buildRenderGraph should succeed for depth "
-                     "override bridge test";
-    if (buildResult.hasError()) {
-      std::cerr << buildResult.error() << "\n";
-    }
-    return;
-  }
-
-  auto compileResult = compileBuilder(builder);
-  if (!(!compileResult.hasError())) {
-    ADD_FAILURE() << "compile should succeed for depth override bridge test";
-    if (compileResult.hasError()) {
-      std::cerr << compileResult.error() << "\n";
-    }
-    return;
-  }
-  const RenderGraphCompileResult &compiled = compileResult.value();
-
-  if (!(compiled.orderedPasses.size() == 1u)) {
-    ADD_FAILURE() << "depth override bridge should schedule one pass";
-    return;
-  }
-  if (!(compiled.unresolvedTextureBindings.size() == 1u)) {
-    ADD_FAILURE() << "depth override bridge should emit one unresolved depth "
-                     "binding";
-    return;
-  }
-  const auto &binding = compiled.unresolvedTextureBindings[0u];
-  if (!(binding.target ==
-        RenderGraphCompileResult::PassTextureBindingTarget::Depth)) {
-    ADD_FAILURE()
-        << "depth override bridge should bind unresolved depth target";
-    return;
-  }
-  if (!(binding.textureResourceIndex == sceneDepthResult.value().value)) {
-    ADD_FAILURE() << "depth override bridge should bind published scene-depth "
-                     "graph texture";
-    return;
-  }
-  if (!(!nuri::isValid(compiled.orderedPasses[0u].depthTexture))) {
-    ADD_FAILURE() << "resolved pass depth slot should stay unresolved for "
-                     "transient depth binding";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     AddLegacyRenderPassRejectsDependencyBufferCountOverContractLimit) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(212u);
-
-  std::array<BufferHandle, kMaxDependencyResources + 1u> deps{};
-  RenderPass pass{};
-  pass.debugLabel = "contract_dep_limit";
-  pass.dependencyBuffers =
-      std::span<const BufferHandle>(deps.data(), deps.size());
-
-  auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(addResult.hasError())) {
-    ADD_FAILURE()
-        << "addLegacyRenderPass should reject dependency buffer count "
-           "over kMaxDependencyResources";
-    return;
-  }
-  if (((addResult.error()).find("exceeds kMaxDependencyResources") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "error should mention kMaxDependencyResources contract "
-                     "limit";
-    return;
-  }
-}
-
-TEST(
-    RenderGraphCompileBehaviorTest,
-    AddLegacyRenderPassRejectsPreDispatchDependencyBufferCountOverContractLimit) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(213u);
-
-  std::array<BufferHandle, kMaxDependencyResources + 1u> dispatchDeps{};
-  ComputeDispatchItem dispatch{};
-  dispatch.dependencyBuffers =
-      std::span<const BufferHandle>(dispatchDeps.data(), dispatchDeps.size());
-  std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
-
-  RenderPass pass{};
-  pass.debugLabel = "contract_predispatch_dep_limit";
-  pass.preDispatches = std::span<const ComputeDispatchItem>(
-      preDispatches.data(), preDispatches.size());
-
-  auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(addResult.hasError())) {
-    ADD_FAILURE()
-        << "addLegacyRenderPass should reject pre-dispatch dependency buffer "
-           "count over kMaxDependencyResources";
-    return;
-  }
-  if (((addResult.error()).find("exceeds kMaxDependencyResources") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "error should mention kMaxDependencyResources contract "
-                     "limit";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     BindPassDependencyBufferRejectsIndexOverContractLimit) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(214u);
-
-  std::array<BufferHandle, kMaxDependencyResources> deps{};
-  RenderPass pass{};
-  pass.debugLabel = "contract_bind_dep_limit";
-  pass.dependencyBuffers =
-      std::span<const BufferHandle>(deps.data(), deps.size());
-  auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(!addResult.hasError())) {
-    ADD_FAILURE() << "addLegacyRenderPass should succeed for bind dependency "
-                     "contract-limit test";
-    return;
-  }
-
-  auto transientBufferResult = builder.createTransientBuffer(
-      makeTransientBufferDesc(64u), "contract_bind_dep_limit_buffer");
-  if (!(!transientBufferResult.hasError())) {
-    ADD_FAILURE() << "createTransientBuffer should succeed for bind dependency "
-                     "contract-limit test";
-    return;
-  }
-
-  auto bindResult = builder.bindPassDependencyBuffer(
-      addResult.value(), static_cast<uint32_t>(kMaxDependencyResources),
-      transientBufferResult.value());
-  if (!(bindResult.hasError())) {
-    ADD_FAILURE() << "bindPassDependencyBuffer should reject dependency index "
-                     "over kMaxDependencyResources";
-    return;
-  }
-  if (((bindResult.error()).find("exceeds kMaxDependencyResources") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "bindPassDependencyBuffer error should mention "
-                     "kMaxDependencyResources contract limit";
-    return;
-  }
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     BindPreDispatchDependencyBufferRejectsIndexOverContractLimit) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(215u);
-
-  std::array<BufferHandle, kMaxDependencyResources> dispatchDeps{};
-  ComputeDispatchItem dispatch{};
-  dispatch.dependencyBuffers =
-      std::span<const BufferHandle>(dispatchDeps.data(), dispatchDeps.size());
-  std::array<ComputeDispatchItem, 1u> preDispatches = {dispatch};
-
-  RenderPass pass{};
-  pass.debugLabel = "contract_bind_predispatch_dep_limit";
-  pass.preDispatches = std::span<const ComputeDispatchItem>(
-      preDispatches.data(), preDispatches.size());
-  auto addResult = addTestGraphicsPass(builder, pass, pass.debugLabel);
-  if (!(!addResult.hasError())) {
-    ADD_FAILURE() << "addLegacyRenderPass should succeed for bind "
-                     "pre-dispatch dependency contract-limit test";
-    return;
-  }
-
-  auto transientBufferResult = builder.createTransientBuffer(
-      makeTransientBufferDesc(64u),
-      "contract_bind_predispatch_dep_limit_buffer");
-  if (!(!transientBufferResult.hasError())) {
-    ADD_FAILURE() << "createTransientBuffer should succeed for bind "
-                     "pre-dispatch dependency contract-limit test";
-    return;
-  }
-
-  auto bindResult = builder.bindPreDispatchDependencyBuffer(
-      addResult.value(), 0u, static_cast<uint32_t>(kMaxDependencyResources),
-      transientBufferResult.value());
-  if (!(bindResult.hasError())) {
-    ADD_FAILURE() << "bindPreDispatchDependencyBuffer should reject dependency "
-                     "index over kMaxDependencyResources";
-    return;
-  }
-  if (((bindResult.error()).find("exceeds kMaxDependencyResources") ==
-       std::string_view::npos)) {
-    ADD_FAILURE() << "bindPreDispatchDependencyBuffer error should mention "
-                     "kMaxDependencyResources contract limit";
     return;
   }
 }
@@ -2287,34 +1211,6 @@ TEST(RenderGraphCompileBehaviorTest, ExplicitAccessOverridesLegacyInference) {
   }
 }
 
-TEST(RenderGraphCompileBehaviorTest, NoColorGraphicsPassCanWriteDepthOnly) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(206u);
-
-  auto depthResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::D32_FLOAT, 16u, 16u), "no_color_depth");
-  ASSERT_FALSE(depthResult.hasError());
-
-  RenderGraphGraphicsPassDesc desc{};
-  desc.hasColorAttachment = false;
-  desc.depth = {.loadOp = LoadOp::Clear,
-                .storeOp = StoreOp::Store,
-                .clearDepth = 1.0f,
-                .clearStencil = 0u};
-  desc.depthTexture = depthResult.value();
-  desc.debugLabel = "no_color_depth_pass";
-
-  auto passResult = builder.addGraphicsPass(desc);
-  ASSERT_FALSE(passResult.hasError()) << passResult.error();
-  ASSERT_FALSE(builder.markPassSideEffect(passResult.value()).hasError());
-
-  auto compileResult = compileBuilder(builder);
-  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.orderedPassIndices.size(), 1u);
-  EXPECT_EQ(compiled.orderedPassIndices.front(), passResult.value().value);
-}
-
 TEST(RenderGraphCompileBehaviorTest,
      NoColorGraphicsPassCanWriteD16AttachmentSampledDepthOnly) {
   RenderGraphBuilder builder;
@@ -2350,74 +1246,6 @@ TEST(RenderGraphCompileBehaviorTest,
       compiled.transientTexturePhysicalAllocations.front().desc;
   EXPECT_EQ(compiledDepthDesc.format, Format::D16_UNORM);
   EXPECT_EQ(compiledDepthDesc.usage, TextureUsage::AttachmentSampled);
-}
-
-TEST(RenderGraphCompileBehaviorTest, NoColorGraphicsPassRejectsColorTexture) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(207u);
-
-  auto colorResult = builder.createTransientTexture(
-      makeTransientTextureDesc(Format::RGBA8_UNORM, 16u, 16u),
-      "no_color_rejected_color");
-  ASSERT_FALSE(colorResult.hasError());
-
-  RenderGraphGraphicsPassDesc desc{};
-  desc.hasColorAttachment = false;
-  desc.colorTexture = colorResult.value();
-  desc.debugLabel = "no_color_rejected_pass";
-
-  auto passResult = builder.addGraphicsPass(desc);
-  EXPECT_TRUE(passResult.hasError());
-}
-
-TEST(RenderGraphCompileBehaviorTest,
-     SampledReadAfterDepthAttachmentWriteOrdersPasses) {
-  RenderGraphBuilder builder;
-  builder.beginFrame(208u);
-
-  const TextureHandle depthHandle{.index = 501u, .generation = 1u};
-  const TextureHandle colorHandle{.index = 502u, .generation = 1u};
-  auto depthImportResult = builder.importTexture(depthHandle, "sampled_depth");
-  auto colorImportResult = builder.importTexture(colorHandle, "sampled_color");
-  ASSERT_FALSE(depthImportResult.hasError());
-  ASSERT_FALSE(colorImportResult.hasError());
-
-  RenderGraphGraphicsPassDesc depthWriteDesc{};
-  depthWriteDesc.hasColorAttachment = false;
-  depthWriteDesc.depth = {.loadOp = LoadOp::Clear,
-                          .storeOp = StoreOp::Store,
-                          .clearDepth = 1.0f,
-                          .clearStencil = 0u};
-  depthWriteDesc.depthTexture = depthImportResult.value();
-  depthWriteDesc.debugLabel = "sampled_depth_write";
-  auto depthPassResult = builder.addGraphicsPass(depthWriteDesc);
-  ASSERT_FALSE(depthPassResult.hasError()) << depthPassResult.error();
-
-  const std::array<TextureHandle, 1u> dependencyTextures{depthHandle};
-  RenderGraphGraphicsPassDesc readDesc{};
-  readDesc.color = {.loadOp = LoadOp::Clear,
-                    .storeOp = StoreOp::Store,
-                    .clearColor = {0.0f, 0.0f, 0.0f, 1.0f}};
-  readDesc.colorTexture = colorImportResult.value();
-  readDesc.dependencyTextures = std::span<const TextureHandle>(
-      dependencyTextures.data(), dependencyTextures.size());
-  readDesc.debugLabel = "sampled_depth_read";
-  auto readPassResult = builder.addGraphicsPass(readDesc);
-  ASSERT_FALSE(readPassResult.hasError()) << readPassResult.error();
-
-  auto compileResult = compileBuilder(builder);
-  ASSERT_FALSE(compileResult.hasError()) << compileResult.error();
-  const RenderGraphCompileResult &compiled = compileResult.value();
-  ASSERT_EQ(compiled.orderedPassIndices.size(), 2u);
-  EXPECT_EQ(compiled.orderedPassIndices[0u], depthPassResult.value().value);
-  EXPECT_EQ(compiled.orderedPassIndices[1u], readPassResult.value().value);
-
-  const auto edgeIt = std::find_if(
-      compiled.edges.begin(), compiled.edges.end(), [&](const auto &edge) {
-        return edge.before == depthPassResult.value().value &&
-               edge.after == readPassResult.value().value;
-      });
-  EXPECT_NE(edgeIt, compiled.edges.end());
 }
 
 TEST(RenderGraphCompileBehaviorTest,

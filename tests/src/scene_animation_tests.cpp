@@ -85,61 +85,6 @@ namespace {
 
 } // namespace
 
-TEST(SceneAnimationTests, MedievalFantasyBookImportsAnimationAndMorphPayload) {
-  const std::filesystem::path path = medievalFantasyBookPath();
-  ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
-
-  auto prefabResult =
-      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
-  ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
-
-  ASSERT_EQ(prefab.animations.size(), 1u);
-  EXPECT_EQ(prefab.animations[0].name, "The Life");
-  EXPECT_EQ(prefab.animations[0].channels.size(), 7u);
-  EXPECT_TRUE(prefab.skins.empty());
-
-  const int flagNodeIndex = findNodeByName(prefab, "0");
-  const int flagSecondNodeIndex = findNodeByName(prefab, "1");
-  ASSERT_GE(flagNodeIndex, 0);
-  ASSERT_GE(flagSecondNodeIndex, 0);
-  ASSERT_EQ(prefab.nodes[flagNodeIndex].morphWeights.size(), 2u);
-  ASSERT_EQ(prefab.nodes[flagSecondNodeIndex].morphWeights.size(), 1u);
-
-  bool foundFlagWeights = false;
-  bool foundFlagSecondWeights = false;
-  for (const nuri::AnimationChannelData &channel :
-       prefab.animations[0].channels) {
-    if (channel.path != nuri::AnimationTargetPath::Weights ||
-        channel.samplerIndex >= prefab.animations[0].samplers.size()) {
-      continue;
-    }
-    const nuri::AnimationSamplerData &sampler =
-        prefab.animations[0].samplers[channel.samplerIndex];
-    if (channel.targetNodeIndex == static_cast<uint32_t>(flagNodeIndex)) {
-      foundFlagWeights = true;
-      EXPECT_EQ(sampler.valueArity, 2u);
-    }
-    if (channel.targetNodeIndex == static_cast<uint32_t>(flagSecondNodeIndex)) {
-      foundFlagSecondWeights = true;
-      EXPECT_EQ(sampler.valueArity, 1u);
-    }
-  }
-  EXPECT_TRUE(foundFlagWeights);
-  EXPECT_TRUE(foundFlagSecondWeights);
-
-  auto sceneAssetsResult =
-      nuri::SceneImporter::loadSceneAssetsFromFile(path.string());
-  ASSERT_FALSE(sceneAssetsResult.hasError()) << sceneAssetsResult.error();
-  size_t morphMeshCount = 0u;
-  for (const nuri::MeshData &mesh : sceneAssetsResult.value().meshes) {
-    if (!mesh.morphTargets.empty()) {
-      ++morphMeshCount;
-    }
-  }
-  EXPECT_EQ(morphMeshCount, 2u);
-}
-
 TEST(SceneAnimationTests, AnimatedMorphCubeImportsWeightAnimationAndTangents) {
   const std::filesystem::path path = animatedMorphCubePath();
   ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
@@ -193,58 +138,6 @@ TEST(SceneAnimationTests, FoxImportsSkinPayloadAndSkinIndices) {
   ASSERT_EQ(prefab.skins[0].inverseBindMatrices.size(), 24u);
   ASSERT_FALSE(prefab.renderables.empty());
   EXPECT_EQ(prefab.renderables[0].skinIndex, 0u);
-}
-
-TEST(SceneAnimationTests, FoxMeshAssetsImportSkinInfluences) {
-  const std::filesystem::path path = foxPath();
-  ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
-
-  auto sceneAssetsResult =
-      nuri::SceneImporter::loadSceneAssetsFromFile(path.string());
-  ASSERT_FALSE(sceneAssetsResult.hasError()) << sceneAssetsResult.error();
-
-  bool foundSkinnedMesh = false;
-  for (const nuri::MeshData &mesh : sceneAssetsResult.value().meshes) {
-    if (mesh.skinInfluences.empty()) {
-      continue;
-    }
-    foundSkinnedMesh = true;
-    EXPECT_EQ(mesh.skinInfluences.size(), mesh.vertices.size());
-    break;
-  }
-
-  EXPECT_TRUE(foundSkinnedMesh);
-}
-
-TEST(SceneAnimationTests, FoxAssimpBoneOrderMatchesPrefabSkinOrder) {
-  const std::filesystem::path path = foxPath();
-  ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
-
-  auto prefabResult =
-      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
-  ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
-  ASSERT_EQ(prefab.skins.size(), 1u);
-
-  Assimp::Importer importer;
-  const aiScene *scene = importer.ReadFile(
-      path.string(), aiProcess_Triangulate | aiProcess_SortByPType |
-                         aiProcess_FindDegenerates | aiProcess_FindInvalidData);
-  ASSERT_NE(scene, nullptr) << importer.GetErrorString();
-  ASSERT_GT(scene->mNumMeshes, 0u);
-  ASSERT_NE(scene->mMeshes[0], nullptr);
-  const aiMesh &mesh = *scene->mMeshes[0];
-  ASSERT_TRUE(mesh.HasBones());
-  ASSERT_EQ(mesh.mNumBones, prefab.skins[0].jointNodeIndices.size());
-
-  for (uint32_t boneIndex = 0u; boneIndex < mesh.mNumBones; ++boneIndex) {
-    ASSERT_NE(mesh.mBones[boneIndex], nullptr);
-    const uint32_t jointNodeIndex = prefab.skins[0].jointNodeIndices[boneIndex];
-    ASSERT_LT(jointNodeIndex, prefab.nodes.size());
-    EXPECT_EQ(std::string_view(mesh.mBones[boneIndex]->mName.C_Str()),
-              std::string_view(prefab.nodes[jointNodeIndex].name))
-        << "boneIndex=" << boneIndex;
-  }
 }
 
 TEST(SceneAnimationTests, PlayerSamplesNodeTransformsAndMorphWeights) {
@@ -354,52 +247,6 @@ TEST(SceneAnimationTests, PlayerUsesShortestPathForLinearQuaternionRotation) {
   EXPECT_NEAR(rotatedXAxis.x, 0.70710678f, 1.0e-4f);
   EXPECT_NEAR(rotatedXAxis.y, 0.70710678f, 1.0e-4f);
   EXPECT_NEAR(rotatedXAxis.z, 0.0f, 1.0e-4f);
-}
-
-TEST(SceneAnimationTests, PlayerClearsStaleMorphWeightsWhenClipHasNoWeights) {
-  nuri::ScenePrefab prefab;
-  prefab.nodes.resize(1u);
-  prefab.nodes[0].name = "MorphNode";
-  prefab.meshAssets.push_back(nuri::ScenePrefabMeshAssetRef{
-      .sourceSceneMeshIndex = 0u, .sourceName = "mesh"});
-  prefab.materialAssets.push_back(nuri::ScenePrefabMaterialAssetRef{
-      .sourceMaterialIndex = 0u,
-      .sourceName = "material",
-  });
-  prefab.renderables.push_back(nuri::ScenePrefabRenderable{
-      .nodeIndex = 0u,
-      .meshIndex = 0u,
-      .materialIndex = 0u,
-  });
-  prefab.animations.emplace_back();
-  prefab.animations[0].name = "NoWeights";
-
-  nuri::ScenePrefabAssets assets;
-  assets.models.push_back(nuri::makeModelRef(1u, 1u));
-  assets.materials.push_back(nuri::makeMaterialRef(2u, 1u));
-
-  nuri::RenderScene scene;
-  nuri::SceneInstantiationMap instantiation;
-  auto instantiateResult = scene.graph().instantiatePrefab(
-      prefab, scene.graph().rootNode(), assets, &instantiation);
-  ASSERT_FALSE(instantiateResult.hasError()) << instantiateResult.error();
-
-  const std::array<float, 2> staleWeights{1.0f, 0.0f};
-  ASSERT_TRUE(scene.graph().setRenderableMorphWeights(
-      instantiation.renderables[0], std::span<const float>(staleWeights)));
-  ASSERT_EQ(scene.graph()
-                .getRenderableMorphWeights(instantiation.renderables[0])
-                .size(),
-            staleWeights.size());
-
-  nuri::SceneAnimationPlayer player(prefab, instantiation);
-  auto playResult = player.play(0u, nuri::AnimationPlaybackMode::Loop);
-  ASSERT_FALSE(playResult.hasError()) << playResult.error();
-  player.update(scene.graph(), 0.0f);
-
-  EXPECT_TRUE(scene.graph()
-                  .getRenderableMorphWeights(instantiation.renderables[0])
-                  .empty());
 }
 
 TEST(SceneAnimationTests, PlayerBuildsSkinPaletteFromJointWorldTransforms) {

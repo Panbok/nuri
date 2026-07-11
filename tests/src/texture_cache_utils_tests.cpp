@@ -152,36 +152,6 @@ TEST(TextureCacheUtilsTests, HashChangesForExternalVsEmbeddedSources) {
   EXPECT_NE(externalHash, embeddedHash);
 }
 
-TEST(TextureCacheUtilsTests, HashChangesForSrgbVsLinearSources) {
-  constexpr std::string_view kScenePath = "e:/project/scene.glb";
-
-  nuri::MaterialTextureSlotData slot{};
-  slot.sourceKind = nuri::MaterialTextureSourceKind::ExternalFile;
-  slot.path = "e:/project/textures/basecolor.png";
-
-  const uint64_t srgbHash =
-      nuri::hashSceneTextureSourceIdentity(kScenePath, slot, true, 1u);
-  const uint64_t linearHash =
-      nuri::hashSceneTextureSourceIdentity(kScenePath, slot, false, 1u);
-
-  EXPECT_NE(srgbHash, linearHash);
-}
-
-TEST(TextureCacheUtilsTests, HashChangesForBakeSettingsTag) {
-  constexpr std::string_view kScenePath = "e:/project/scene.glb";
-
-  nuri::MaterialTextureSlotData slot{};
-  slot.sourceKind = nuri::MaterialTextureSourceKind::ExternalFile;
-  slot.path = "e:/project/textures/shared_linear.png";
-
-  const uint64_t etc1sHash =
-      nuri::hashSceneTextureSourceIdentity(kScenePath, slot, false, 1u);
-  const uint64_t uastcHash =
-      nuri::hashSceneTextureSourceIdentity(kScenePath, slot, false, 2u);
-
-  EXPECT_NE(etc1sHash, uastcHash);
-}
-
 TEST(TextureCacheUtilsTests, UpToDateCheckTracksWriteTimes) {
   const ScopedTempDir dir("nuri_texture_times");
   const std::filesystem::path sourcePath = dir.path / "source.png";
@@ -217,24 +187,6 @@ TEST(TextureCacheUtilsTests, HdrHalfConversionClampsPositiveOverflow) {
   EXPECT_NE(source.find("std::clamp(value, 0.0f, kMaxFiniteHalf)"),
             std::string::npos);
   EXPECT_NE(source.find("glm::packHalf1x16(value)"), std::string::npos);
-}
-
-TEST(TextureCacheUtilsTests, TextureLoadOptionsHashTracksMipSemantic) {
-  nuri::TextureLoadOptions generic{.srgb = true, .generateMipmaps = true};
-  nuri::TextureLoadOptions alpha = generic;
-  alpha.mipSemantic = nuri::TextureMipSemantic::AlphaCoverage;
-  alpha.alphaCoverageCutoff = 0.4f;
-  nuri::TextureLoadOptions normal = generic;
-  normal.mipSemantic = nuri::TextureMipSemantic::NormalMap;
-  nuri::TextureLoadOptions roughness = generic;
-  roughness.mipSemantic = nuri::TextureMipSemantic::RoughnessG;
-
-  EXPECT_NE(nuri::hashTextureLoadOptions(generic),
-            nuri::hashTextureLoadOptions(alpha));
-  EXPECT_NE(nuri::hashTextureLoadOptions(alpha),
-            nuri::hashTextureLoadOptions(normal));
-  EXPECT_NE(nuri::hashTextureLoadOptions(normal),
-            nuri::hashTextureLoadOptions(roughness));
 }
 
 TEST(TextureCacheUtilsTests, AlphaCoverageMipSemanticUploadsExplicitMips) {

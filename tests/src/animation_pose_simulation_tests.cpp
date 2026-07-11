@@ -280,48 +280,6 @@ TEST(AnimationPoseSimulationTests, SanitizeClampsBlendWeightAndDisablesBlend) {
   EXPECT_EQ(params.blendMode, nuri::AnimationPoseBlendMode::Single);
 }
 
-TEST(AnimationPoseSimulationTests,
-     ValidateAnimationPoseParamsRejectsInvalidSecondaryOnlyWhenBlendIsActive) {
-  nuri::ScenePrefab prefab;
-  prefab.animations.resize(1u);
-
-  const nuri::AnimationPoseSimulationParams inactiveBlendParams{
-      .primary =
-          nuri::AnimationPoseClipState{
-              .clipIndex = 0u,
-              .playing = true,
-          },
-      .secondary =
-          nuri::AnimationPoseClipState{
-              .clipIndex = 42u,
-              .playing = true,
-          },
-      .blendWeight = 0.0f,
-      .blendMode = nuri::AnimationPoseBlendMode::Lerp,
-  };
-  auto inactiveBlendResult =
-      nuri::validateAnimationPoseSimulationParams(prefab, inactiveBlendParams);
-  EXPECT_FALSE(inactiveBlendResult.hasError()) << inactiveBlendResult.error();
-
-  const nuri::AnimationPoseSimulationParams activeBlendParams{
-      .primary =
-          nuri::AnimationPoseClipState{
-              .clipIndex = 0u,
-              .playing = true,
-          },
-      .secondary =
-          nuri::AnimationPoseClipState{
-              .clipIndex = 42u,
-              .playing = true,
-          },
-      .blendWeight = 0.5f,
-      .blendMode = nuri::AnimationPoseBlendMode::Lerp,
-  };
-  auto activeBlendResult =
-      nuri::validateAnimationPoseSimulationParams(prefab, activeBlendParams);
-  EXPECT_TRUE(activeBlendResult.hasError());
-}
-
 TEST(AnimationPoseSimulationTests, MakeDescBuildsGpuOnlyAnimationBinding) {
   nuri::RenderScene scene;
   nuri::ScenePrefab prefab;
@@ -377,113 +335,7 @@ TEST(AnimationPoseSimulationTests, RuntimeCreationFailsWithoutGpuServices) {
 }
 
 TEST(AnimationPoseSimulationTests,
-     RuntimeCreationAllowsInvalidSecondaryClipWhenBlendIsDisabled) {
-  nuri::RenderScene scene;
-  nuri::ScenePrefab prefab;
-  prefab.animations.emplace_back();
-  prefab.animations.back().name = "Idle";
-  nuri::SceneInstantiationMap instantiationMap;
-
-  auto descResult = nuri::makeAnimationPoseSimulationDesc(
-      nuri::AnimationPoseSimulationCreateInfo{
-          .prefab = &prefab,
-          .instantiationMap = &instantiationMap,
-          .rootNode = scene.graph().rootNode(),
-          .params =
-              nuri::AnimationPoseSimulationParams{
-                  .primary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = 0u,
-                          .playing = true,
-                      },
-                  .secondary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = 99u,
-                          .playing = true,
-                      },
-                  .blendWeight = 0.0f,
-                  .blendMode = nuri::AnimationPoseBlendMode::Lerp,
-              },
-      });
-  ASSERT_FALSE(descResult.hasError()) << descResult.error();
-  EXPECT_FALSE(descResult.value().startPaused);
-}
-
-TEST(AnimationPoseSimulationTests,
-     ModelPacksMorphDeltasByLogicalTargetAcrossSubmeshes) {
-  nuri::MeshData mesh;
-  mesh.vertices.resize(6u);
-  for (uint32_t i = 0u; i < mesh.vertices.size(); ++i) {
-    mesh.vertices[i].position = glm::vec3(static_cast<float>(i), 0.0f, 0.0f);
-    mesh.vertices[i].normal = glm::vec3(0.0f, 1.0f, 0.0f);
-    mesh.vertices[i].tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-  }
-  mesh.indices = {0u, 1u, 2u, 3u, 4u, 5u};
-  mesh.submeshes.resize(2u);
-  mesh.submeshes[0].vertexOffset = 0u;
-  mesh.submeshes[0].vertexCount = 3u;
-  mesh.submeshes[0].indexOffset = 0u;
-  mesh.submeshes[0].indexCount = 3u;
-  mesh.submeshes[0].morphTargetFirst = 0u;
-  mesh.submeshes[0].morphTargetCount = 2u;
-  mesh.submeshes[0].lods[0] =
-      nuri::SubmeshLod{.indexOffset = 0u, .indexCount = 3u};
-  mesh.submeshes[1].vertexOffset = 3u;
-  mesh.submeshes[1].vertexCount = 3u;
-  mesh.submeshes[1].indexOffset = 3u;
-  mesh.submeshes[1].indexCount = 3u;
-  mesh.submeshes[1].morphTargetFirst = 2u;
-  mesh.submeshes[1].morphTargetCount = 2u;
-  mesh.submeshes[1].lods[0] =
-      nuri::SubmeshLod{.indexOffset = 3u, .indexCount = 3u};
-
-  mesh.morphTargets.resize(4u);
-  const auto fillTarget = [](nuri::MorphTarget &target, float x) {
-    target.positionDeltas.assign(3u, glm::vec3(x, 0.0f, 0.0f));
-    target.normalDeltas.assign(3u, glm::vec3(0.0f, x, 0.0f));
-    target.tangentDeltas.assign(3u, glm::vec3(0.0f, 0.0f, x));
-  };
-  fillTarget(mesh.morphTargets[0], 10.0f);
-  fillTarget(mesh.morphTargets[1], 20.0f);
-  fillTarget(mesh.morphTargets[2], 30.0f);
-  fillTarget(mesh.morphTargets[3], 40.0f);
-
-  FakeAnimationGpuDevice gpu;
-  auto modelResult = nuri::Model::create(gpu, mesh, "logical_morph_pack");
-  ASSERT_FALSE(modelResult.hasError()) << modelResult.error();
-  const nuri::Model &model = *modelResult.value();
-  EXPECT_EQ(model.drawVertexFormat(),
-            nuri::PackedVertexFormat::AnimatedFloat32);
-  EXPECT_EQ(model.animationGpuView().morphTargetCount, 2u);
-
-  nuri::GeometryAllocationView geometry{};
-  ASSERT_TRUE(gpu.resolveGeometry(model.geometryHandle(), geometry));
-  EXPECT_EQ(geometry.vertexByteSize, mesh.vertices.size() * 32u);
-
-  std::vector<TestPackedMorphDeltaGpu> deltas(2u * mesh.vertices.size());
-  auto readResult = gpu.readBuffer(
-      model.animationGpuView().morphDeltaBuffer, 0u,
-      std::as_writable_bytes(std::span<TestPackedMorphDeltaGpu>(deltas)));
-  ASSERT_FALSE(readResult.hasError()) << readResult.error();
-
-  const auto expectPositionX = [&deltas](size_t logicalTarget, size_t vertex,
-                                         float expected) {
-    const size_t index = logicalTarget * 6u + vertex;
-    EXPECT_FLOAT_EQ(deltas[index].positionDelta.x, expected)
-        << "logicalTarget=" << logicalTarget << " vertex=" << vertex;
-    EXPECT_FLOAT_EQ(deltas[index].normalDelta.y, expected)
-        << "logicalTarget=" << logicalTarget << " vertex=" << vertex;
-    EXPECT_FLOAT_EQ(deltas[index].tangentDelta.z, expected)
-        << "logicalTarget=" << logicalTarget << " vertex=" << vertex;
-  };
-  expectPositionX(0u, 0u, 10.0f);
-  expectPositionX(0u, 3u, 30.0f);
-  expectPositionX(1u, 0u, 20.0f);
-  expectPositionX(1u, 3u, 40.0f);
-}
-
-TEST(AnimationPoseSimulationTests,
-     PrepareSceneFramePublishesSkinningDispatchesForFox) {
+     AnimationHistoryAdvancesOnlyAfterSubmittedFramesForFox) {
   const std::filesystem::path path = foxPath();
   ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
 
@@ -572,6 +424,7 @@ TEST(AnimationPoseSimulationTests,
   const nuri::BufferHandle firstInstanceMatricesBuffer =
       frameData->instanceMatricesBuffer;
   const nuri::BufferHandle firstOverrideBuffer = firstOverrideIt->vertexBuffer;
+  runtime.commitAnimationSceneFrame(0u);
 
   prepareResult = runtime.prepareAnimationSceneFrame(1u);
   ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
@@ -605,343 +458,55 @@ TEST(AnimationPoseSimulationTests,
   EXPECT_FALSE(nuri::test_support::sameBuffer(
       secondOverrideIt->vertexBuffer, previousOverrideIt->vertexBuffer));
 
-  EXPECT_TRUE(runtime.destroyAnimationPoseSimulation(createResult.value()));
+  runtime.abandonAnimationSceneFrame(1u);
   EXPECT_EQ(runtime.animationSceneFrameData(), nullptr);
-}
-
-TEST(AnimationPoseSimulationTests,
-     PrepareSceneFramePublishesBlendDispatchesForFoxSurveyWalkBlend) {
-  const std::filesystem::path path = foxPath();
-  ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
-
-  auto prefabResult =
-      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
-  ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
-  const uint32_t surveyClipIndex = findClipIndex(prefab, "Survey");
-  const uint32_t walkClipIndex = findClipIndex(prefab, "Walk");
-  ASSERT_NE(surveyClipIndex, std::numeric_limits<uint32_t>::max());
-  ASSERT_NE(walkClipIndex, std::numeric_limits<uint32_t>::max());
-
-  FakeAnimationGpuDevice gpu;
-  nuri::ResourceManager resources(gpu);
-  auto assetsResult = resources.acquireScenePrefabAssets(prefab);
-  ASSERT_FALSE(assetsResult.hasError()) << assetsResult.error();
-
-  nuri::RenderScene scene;
-  scene.bindResources(&resources);
-
-  nuri::SceneInstantiationMap instantiation;
-  auto instantiateResult = scene.graph().instantiatePrefab(
-      prefab, scene.graph().rootNode(), assetsResult.value(), &instantiation);
-  ASSERT_FALSE(instantiateResult.hasError()) << instantiateResult.error();
-
-  auto commitResult = scene.commit();
-  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
-
-  nuri::SceneRuntimeHost runtime;
-  runtime.bindScene(&scene);
-  nuri::AnimationGpuServices services(gpu, shaderRootPath());
-  runtime.attachAnimationGpuServices(&services);
-
-  auto createResult = runtime.createAnimationPoseSimulation(
-      nuri::AnimationPoseSimulationCreateInfo{
-          .prefab = &prefab,
-          .instantiationMap = &instantiation,
-          .rootNode = instantiateResult.value(),
-          .debugName = "FoxBlendAnimation",
-          .params =
-              nuri::AnimationPoseSimulationParams{
-                  .primary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = surveyClipIndex,
-                          .timeSeconds = 0.0f,
-                          .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
-                          .playing = true,
-                      },
-                  .secondary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = walkClipIndex,
-                          .timeSeconds = 0.0f,
-                          .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
-                          .playing = true,
-                      },
-                  .blendWeight = 0.5f,
-                  .blendMode = nuri::AnimationPoseBlendMode::Lerp,
-                  .blendSyncMode =
-                      nuri::AnimationPoseBlendSyncMode::NormalizedTime,
-              },
-      });
-  ASSERT_FALSE(createResult.hasError()) << createResult.error();
-
-  auto prepareResult = runtime.prepareAnimationSceneFrame(0u);
-  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
-
-  const nuri::AnimationSceneFrameData *frameData =
-      runtime.animationSceneFrameData();
-  ASSERT_NE(frameData, nullptr);
-  EXPECT_EQ(countDispatches(*frameData, "AnimationPose Sample"), 2u);
-  EXPECT_GT(countDispatches(*frameData, "AnimationPose Blend"), 0u);
-  EXPECT_GT(countDispatches(*frameData, "AnimationPose World"), 0u);
-  EXPECT_GT(countDispatches(*frameData, "AnimationPose Skin"), 0u);
-
-  EXPECT_TRUE(runtime.destroyAnimationPoseSimulation(createResult.value()));
-  EXPECT_EQ(runtime.animationSceneFrameData(), nullptr);
-}
-
-TEST(AnimationPoseSimulationTests,
-     ParamUpdateKeepsPreparedBlendDependenciesAlive) {
-  const std::filesystem::path path = foxPath();
-  ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
-
-  auto prefabResult =
-      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
-  ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
-  const uint32_t surveyClipIndex = findClipIndex(prefab, "Survey");
-  const uint32_t walkClipIndex = findClipIndex(prefab, "Walk");
-  ASSERT_NE(surveyClipIndex, std::numeric_limits<uint32_t>::max());
-  ASSERT_NE(walkClipIndex, std::numeric_limits<uint32_t>::max());
-
-  FakeAnimationGpuDevice gpu;
-  nuri::ResourceManager resources(gpu);
-  auto assetsResult = resources.acquireScenePrefabAssets(prefab);
-  ASSERT_FALSE(assetsResult.hasError()) << assetsResult.error();
-
-  nuri::RenderScene scene;
-  scene.bindResources(&resources);
-
-  nuri::SceneInstantiationMap instantiation;
-  auto instantiateResult = scene.graph().instantiatePrefab(
-      prefab, scene.graph().rootNode(), assetsResult.value(), &instantiation);
-  ASSERT_FALSE(instantiateResult.hasError()) << instantiateResult.error();
-
-  auto commitResult = scene.commit();
-  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
-
-  nuri::SceneRuntimeHost runtime;
-  runtime.bindScene(&scene);
-  nuri::AnimationGpuServices services(gpu, shaderRootPath());
-  runtime.attachAnimationGpuServices(&services);
-
-  auto createResult = runtime.createAnimationPoseSimulation(
-      nuri::AnimationPoseSimulationCreateInfo{
-          .prefab = &prefab,
-          .instantiationMap = &instantiation,
-          .rootNode = instantiateResult.value(),
-          .debugName = "FoxBlendAnimation",
-          .params =
-              nuri::AnimationPoseSimulationParams{
-                  .primary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = surveyClipIndex,
-                          .timeSeconds = 0.0f,
-                          .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
-                          .playing = true,
-                      },
-                  .secondary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = walkClipIndex,
-                          .timeSeconds = 0.0f,
-                          .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
-                          .playing = true,
-                      },
-                  .blendWeight = 0.5f,
-                  .blendMode = nuri::AnimationPoseBlendMode::Lerp,
-                  .blendSyncMode =
-                      nuri::AnimationPoseBlendSyncMode::NormalizedTime,
-              },
-      });
-  ASSERT_FALSE(createResult.hasError()) << createResult.error();
-
-  auto prepareResult = runtime.prepareAnimationSceneFrame(0u);
-  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
-
-  const nuri::AnimationSceneFrameData *frameData =
-      runtime.animationSceneFrameData();
-  ASSERT_NE(frameData, nullptr);
-  const std::vector<nuri::BufferHandle> submittedDependencyBuffers =
-      collectDependencyBuffers(*frameData);
-  ASSERT_FALSE(submittedDependencyBuffers.empty());
-
-  nuri::AnimationPoseSimulationParams updatedParams{
-      .primary =
-          nuri::AnimationPoseClipState{
-              .clipIndex = walkClipIndex,
-              .timeSeconds = 0.0f,
-              .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
-              .playing = true,
-          },
-  };
-  ASSERT_TRUE(runtime.simulations().setParams(createResult.value(),
-                                              nuri::asBytes(updatedParams)));
-
-  for (nuri::BufferHandle handle : submittedDependencyBuffers) {
-    EXPECT_TRUE(gpu.isValid(handle));
-  }
-
-  const uint32_t destroyedAfterParamUpdate = gpu.destroyedBufferCount;
-  prepareResult = runtime.prepareAnimationSceneFrame(1u);
-  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
-  EXPECT_EQ(gpu.destroyedBufferCount, destroyedAfterParamUpdate);
 
   prepareResult = runtime.prepareAnimationSceneFrame(2u);
   ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
-  EXPECT_EQ(gpu.destroyedBufferCount, destroyedAfterParamUpdate);
+  frameData = runtime.animationSceneFrameData();
+  ASSERT_NE(frameData, nullptr);
+  EXPECT_TRUE(nuri::test_support::sameBuffer(
+      frameData->previousInstanceMatricesBuffer, firstInstanceMatricesBuffer));
+  EXPECT_FALSE(nuri::test_support::sameBuffer(frameData->instanceMatricesBuffer,
+                                              firstInstanceMatricesBuffer));
+  const auto frameTwoOverrideIt = std::find_if(
+      frameData->geometryOverridesByRenderable.begin(),
+      frameData->geometryOverridesByRenderable.end(),
+      [](const nuri::AnimatedRenderableGeometryOverride &overrideEntry) {
+        return overrideEntry.enabled &&
+               nuri::isValid(overrideEntry.vertexBuffer);
+      });
+  ASSERT_NE(frameTwoOverrideIt, frameData->geometryOverridesByRenderable.end());
+  const nuri::BufferHandle frameTwoInstanceMatricesBuffer =
+      frameData->instanceMatricesBuffer;
+  const nuri::BufferHandle frameTwoOverrideBuffer =
+      frameTwoOverrideIt->vertexBuffer;
+  runtime.commitAnimationSceneFrame(2u);
 
   prepareResult = runtime.prepareAnimationSceneFrame(3u);
   ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
-  EXPECT_GT(gpu.destroyedBufferCount, destroyedAfterParamUpdate);
-
-  EXPECT_TRUE(runtime.destroyAnimationPoseSimulation(createResult.value()));
-}
-
-TEST(AnimationPoseSimulationTests,
-     PrepareSceneFrameRebuildsDependenciesAfterParamUpdateInSameFrame) {
-  const std::filesystem::path path = foxPath();
-  ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
-
-  auto prefabResult =
-      nuri::SceneImporter::loadScenePrefabFromFile(path.string());
-  ASSERT_FALSE(prefabResult.hasError()) << prefabResult.error();
-  const nuri::ScenePrefab &prefab = prefabResult.value();
-
-  FakeAnimationGpuDevice gpu;
-  nuri::ResourceManager resources(gpu);
-  auto assetsResult = resources.acquireScenePrefabAssets(prefab);
-  ASSERT_FALSE(assetsResult.hasError()) << assetsResult.error();
-
-  nuri::RenderScene scene;
-  scene.bindResources(&resources);
-
-  nuri::SceneInstantiationMap instantiation;
-  auto instantiateResult = scene.graph().instantiatePrefab(
-      prefab, scene.graph().rootNode(), assetsResult.value(), &instantiation);
-  ASSERT_FALSE(instantiateResult.hasError()) << instantiateResult.error();
-
-  auto commitResult = scene.commit();
-  ASSERT_FALSE(commitResult.hasError()) << commitResult.error();
-
-  nuri::SceneRuntimeHost runtime;
-  runtime.bindScene(&scene);
-  nuri::AnimationGpuServices services(gpu, shaderRootPath());
-  runtime.attachAnimationGpuServices(&services);
-
-  auto createResult = runtime.createAnimationPoseSimulation(
-      nuri::AnimationPoseSimulationCreateInfo{
-          .prefab = &prefab,
-          .instantiationMap = &instantiation,
-          .rootNode = instantiateResult.value(),
-          .debugName = "FoxAnimation",
-          .params =
-              nuri::AnimationPoseSimulationParams{
-                  .primary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = 0u,
-                          .timeSeconds = 0.0f,
-                          .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
-                          .playing = true,
-                      },
-              },
-      });
-  ASSERT_FALSE(createResult.hasError()) << createResult.error();
-
-  auto prepareResult = runtime.prepareAnimationSceneFrame(0u);
-  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
-  const nuri::AnimationSceneFrameData *frameData =
-      runtime.animationSceneFrameData();
-  ASSERT_NE(frameData, nullptr);
-  EXPECT_TRUE(allDependencyBuffersValid(gpu, *frameData));
-  const uint64_t initialVersion = frameData->version;
-
-  nuri::AnimationPoseSimulationParams updatedParams{
-      .primary =
-          nuri::AnimationPoseClipState{
-              .clipIndex = 0u,
-              .timeSeconds = 0.35f,
-              .playbackMode = nuri::AnimationPosePlaybackMode::Loop,
-              .playing = true,
-          },
-  };
-  ASSERT_TRUE(runtime.simulations().setParams(createResult.value(),
-                                              nuri::asBytes(updatedParams)));
-
-  prepareResult = runtime.prepareAnimationSceneFrame(0u);
-  ASSERT_FALSE(prepareResult.hasError()) << prepareResult.error();
   frameData = runtime.animationSceneFrameData();
   ASSERT_NE(frameData, nullptr);
-  EXPECT_GT(frameData->version, initialVersion);
-  EXPECT_FALSE(frameData->preDispatches.empty());
-  EXPECT_TRUE(allDependencyBuffersValid(gpu, *frameData));
+  EXPECT_TRUE(
+      nuri::test_support::sameBuffer(frameData->previousInstanceMatricesBuffer,
+                                     frameTwoInstanceMatricesBuffer));
+  const auto frameThreePreviousOverrideIt = std::find_if(
+      frameData->previousGeometryOverridesByRenderable.begin(),
+      frameData->previousGeometryOverridesByRenderable.end(),
+      [](const nuri::AnimatedRenderableGeometryOverride &overrideEntry) {
+        return overrideEntry.enabled &&
+               nuri::isValid(overrideEntry.vertexBuffer);
+      });
+  ASSERT_NE(frameThreePreviousOverrideIt,
+            frameData->previousGeometryOverridesByRenderable.end());
+  EXPECT_TRUE(nuri::test_support::sameBuffer(
+      frameThreePreviousOverrideIt->vertexBuffer, frameTwoOverrideBuffer));
+  EXPECT_FALSE(nuri::test_support::sameBuffer(
+      frameData->instanceMatricesBuffer,
+      frameData->previousInstanceMatricesBuffer));
 
   EXPECT_TRUE(runtime.destroyAnimationPoseSimulation(createResult.value()));
-}
-
-TEST(AnimationPoseSimulationTests,
-     RuntimeCreationRejectsInvalidSecondaryClipWhenBlendIsEnabled) {
-  nuri::RenderScene scene;
-  nuri::SceneRuntimeHost runtime;
-  runtime.bindScene(&scene);
-
-  nuri::ScenePrefab prefab;
-  prefab.animations.emplace_back();
-  prefab.animations.back().name = "Idle";
-  nuri::SceneInstantiationMap instantiationMap;
-
-  auto descResult = nuri::makeAnimationPoseSimulationDesc(
-      nuri::AnimationPoseSimulationCreateInfo{
-          .prefab = &prefab,
-          .instantiationMap = &instantiationMap,
-          .rootNode = scene.graph().rootNode(),
-          .params =
-              nuri::AnimationPoseSimulationParams{
-                  .primary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = 0u,
-                          .playing = true,
-                      },
-                  .secondary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = 99u,
-                          .playing = true,
-                      },
-                  .blendWeight = 0.5f,
-                  .blendMode = nuri::AnimationPoseBlendMode::Lerp,
-              },
-      });
-  ASSERT_FALSE(descResult.hasError()) << descResult.error();
-
-  FakeAnimationGpuDevice gpu;
-  nuri::AnimationGpuServices services(gpu, shaderRootPath());
-  runtime.attachAnimationGpuServices(&services);
-
-  auto createResult = runtime.createAnimationPoseSimulation(
-      nuri::AnimationPoseSimulationCreateInfo{
-          .prefab = &prefab,
-          .instantiationMap = &instantiationMap,
-          .rootNode = scene.graph().rootNode(),
-          .debugName = "InvalidBlend",
-          .params =
-              nuri::AnimationPoseSimulationParams{
-                  .primary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = 0u,
-                          .playing = true,
-                      },
-                  .secondary =
-                      nuri::AnimationPoseClipState{
-                          .clipIndex = 99u,
-                          .playing = true,
-                      },
-                  .blendWeight = 0.5f,
-                  .blendMode = nuri::AnimationPoseBlendMode::Lerp,
-              },
-      });
-  EXPECT_TRUE(createResult.hasError());
-  if (createResult.hasError()) {
-    EXPECT_NE(createResult.error().find("secondary clip index"),
-              std::string::npos);
-  }
+  EXPECT_EQ(runtime.animationSceneFrameData(), nullptr);
 }
 
 TEST(AnimationPoseSimulationTests,

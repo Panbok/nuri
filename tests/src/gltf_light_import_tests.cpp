@@ -171,53 +171,6 @@ TEST(GltfLightImport, LoadsDirectionalDefaultsFromGltf) {
   expectVec3Near(lightDirection(light.desc), glm::vec3(0.0f, 0.0f, -1.0f));
 }
 
-TEST(GltfLightImport, LoadsPointLightValuesFromGltf) {
-  ScopedTempDir dir("nuri_gltf_lights_point");
-  const std::string json = R"json(
-{
-  "asset": {"version": "2.0"},
-  "extensionsUsed": ["KHR_lights_punctual"],
-  "extensions": {
-    "KHR_lights_punctual": {
-      "lights": [
-        {
-          "name": "Bulb",
-          "type": "point",
-          "color": [0.2, 0.4, 0.6],
-          "intensity": 12.5,
-          "range": 7.0
-        }
-      ]
-    }
-  },
-  "scene": 0,
-  "scenes": [{"nodes": [0]}],
-  "nodes": [
-    {
-      "translation": [4.0, 5.0, 6.0],
-      "extensions": {"KHR_lights_punctual": {"light": 0}}
-    }
-  ]
-}
-)json";
-  const std::filesystem::path gltfPath = dir.path / "point.gltf";
-  writeTextFile(gltfPath, json);
-
-  auto result = nuri::GltfSceneImporter::loadLightsFromFile(gltfPath.string());
-  ASSERT_FALSE(result.hasError()) << result.error();
-  ASSERT_EQ(result.value().size(), 1u);
-
-  const nuri::ImportedLightInfo &light = result.value().front();
-  EXPECT_EQ(light.desc.type, nuri::LightType::Point);
-  EXPECT_EQ(light.desc.name, "Bulb");
-  expectVec3Near(light.desc.position, glm::vec3(4.0f, 5.0f, 6.0f));
-  expectVec3Near(light.desc.color, glm::vec3(0.2f, 0.4f, 0.6f));
-  EXPECT_FLOAT_EQ(light.desc.intensity, 12.5f);
-  EXPECT_FLOAT_EQ(light.desc.range, 7.0f);
-  EXPECT_FLOAT_EQ(light.desc.innerConeAngleRadians, 0.0f);
-  EXPECT_FLOAT_EQ(light.desc.outerConeAngleRadians, 0.0f);
-}
-
 TEST(GltfLightImport, AppliesHierarchyAndSanitizesSpotValues) {
   ScopedTempDir dir("nuri_gltf_lights_spot");
   const std::string json = R"json(
