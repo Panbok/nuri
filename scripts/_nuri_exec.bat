@@ -38,8 +38,13 @@ for /f "delims=" %%i in ('where clang 2^>nul') do (
 :have_clang
 if defined CLANG_BIN set "PATH=%CLANG_BIN%;%PATH%"
 
+for /f "delims=" %%i in ('powershell -NoProfile -Command "(Get-Date).ToUniversalTime().ToString('o')"') do set "NURI_EXEC_START_UTC=%%i"
 "%APP%" %*
-exit /b %errorlevel%
+set "APP_EXIT=%errorlevel%"
+if not "%APP_EXIT%"=="0" exit /b %APP_EXIT%
+
+if errorlevel 1 exit /b %errorlevel%
+exit /b %APP_EXIT%
 
 :usage
 echo Usage: %~nx0 ^<debug^|release^> ^<app^|editor^> [args...]

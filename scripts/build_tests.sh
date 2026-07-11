@@ -1,14 +1,62 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mode="${1:-debug}"
-if [[ $# -gt 1 ]]; then
-  echo "Usage: $(basename "$0") [debug|release]"
-  exit 1
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mode="debug"
+profile="tests"
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    debug)
+      shift
+      ;;
+    release)
+      mode="release"
+      shift
+      ;;
+    bench-tests)
+      profile="bench-tests"
+      shift
+      ;;
+    snapshot-tests)
+      profile="snapshot-tests"
+      shift
+      ;;
+    autotest-tests)
+      profile="autotest-tests"
+      shift
+      ;;
+    *)
+      echo "Usage: $(basename "$0") [debug|release] [bench-tests|snapshot-tests|autotest-tests]"
+      exit 1
+      ;;
+  esac
 fi
-if [[ "${mode}" != "debug" && "${mode}" != "release" ]]; then
-  echo "Usage: $(basename "$0") [debug|release]"
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    bench-tests)
+      profile="bench-tests"
+      shift
+      ;;
+    snapshot-tests)
+      profile="snapshot-tests"
+      shift
+      ;;
+    autotest-tests)
+      profile="autotest-tests"
+      shift
+      ;;
+    *)
+      echo "Usage: $(basename "$0") [debug|release] [bench-tests|snapshot-tests|autotest-tests]"
+      exit 1
+      ;;
+  esac
+fi
+
+if [[ $# -ne 0 ]]; then
+  echo "Usage: $(basename "$0") [debug|release] [bench-tests|snapshot-tests|autotest-tests]"
   exit 1
 fi
 
-"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_nuri_build.sh" "${mode}" tests
+"${script_dir}/_nuri_build.sh" "${mode}" "${profile}"

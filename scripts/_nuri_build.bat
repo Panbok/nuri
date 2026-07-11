@@ -5,37 +5,153 @@ for %%i in ("%~f0") do set "SCRIPT_DIR=%%~dpi"
 set "MODE=%~1"
 set "PROFILE=%~2"
 set "TRACY_MODE="
-set "DEVCHECKS=OFF"
+set "DEVCHECKS=ON"
+set "FSR31_MODE=OFF"
+if /I "%NURI_WITH_FSR31%"=="ON" set "FSR31_MODE=ON"
 
 if "%MODE%"=="" goto usage
 if "%PROFILE%"=="" goto usage
+if /I not "%MODE%"=="debug" if /I not "%MODE%"=="release" goto usage
 
-set "BUILD_APP=ON"
-set "BUILD_EDITOR=ON"
-set "BUILD_TESTS=ON"
+set "BUILD_APP=OFF"
+set "BUILD_EDITOR=OFF"
+set "BUILD_TESTS=OFF"
+set "BUILD_TOOLS=OFF"
+set "BUILD_BENCHMARK_CLI=ON"
+set "BUILD_SNAPSHOT_CLI=ON"
+set "BUILD_SNAPSHOT_TESTING=OFF"
+set "BUILD_AUTOTEST_CLI=OFF"
+set "BUILD_AUTOTESTING=OFF"
 set "BUILD_TARGET="
+set "BUILD_DIR_SUFFIX=%MODE%"
 set "MANIFEST_FEATURES=%VCPKG_MANIFEST_FEATURES%"
-if "%MANIFEST_FEATURES%"=="" (
-  set "MANIFEST_FEATURES=editor"
-) else (
-  echo ;%MANIFEST_FEATURES%; | findstr /I /C:";editor;" >nul
-  if errorlevel 1 set "MANIFEST_FEATURES=%MANIFEST_FEATURES%;editor"
-)
-if "%MANIFEST_FEATURES%"=="" (
-  set "MANIFEST_FEATURES=tests"
-) else (
-  echo ;%MANIFEST_FEATURES%; | findstr /I /C:";tests;" >nul
-  if errorlevel 1 set "MANIFEST_FEATURES=%MANIFEST_FEATURES%;tests"
-)
 
 if /I "%PROFILE%"=="lib" (
   set "BUILD_TARGET=nuri_renderer"
 ) else if /I "%PROFILE%"=="app" (
+  set "BUILD_APP=ON"
   set "BUILD_TARGET=nuri"
 ) else if /I "%PROFILE%"=="editor" (
+  set "BUILD_EDITOR=ON"
   set "BUILD_TARGET=nuri_editor"
+  call :append_manifest_feature editor
 ) else if /I "%PROFILE%"=="tests" (
-  rem Build the full configured tree so all test executables stay current.
+  set "BUILD_TESTS=ON"
+  call :append_manifest_feature tests
+) else if /I "%PROFILE%"=="bench" (
+  set "BUILD_TOOLS=ON"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_TARGET=nuri-bench"
+  set "BUILD_DIR_SUFFIX=%MODE%-bench"
+  set "DEVCHECKS=OFF"
+  call :append_manifest_feature benchmark-tools
+) else if /I "%PROFILE%"=="benchmark" (
+  set "PROFILE=bench"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_TARGET=nuri-bench"
+  set "BUILD_DIR_SUFFIX=%MODE%-bench"
+  set "DEVCHECKS=OFF"
+  call :append_manifest_feature benchmark-tools
+) else if /I "%PROFILE%"=="snapshot" (
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_TESTING=ON"
+  set "BUILD_TARGET=nuri-snapshot"
+  set "BUILD_DIR_SUFFIX=%MODE%-snapshot"
+  set "DEVCHECKS=OFF"
+  call :append_manifest_feature snapshot-tools
+) else if /I "%PROFILE%"=="autotest" (
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_SNAPSHOT_TESTING=ON"
+  set "BUILD_AUTOTEST_CLI=ON"
+  set "BUILD_AUTOTESTING=ON"
+  set "BUILD_TARGET=nuri-autotest"
+  set "BUILD_DIR_SUFFIX=%MODE%-autotest"
+  set "DEVCHECKS=OFF"
+  call :append_manifest_feature autotest-tools
+) else if /I "%PROFILE%"=="autotests" (
+  set "PROFILE=autotest"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_SNAPSHOT_TESTING=ON"
+  set "BUILD_AUTOTEST_CLI=ON"
+  set "BUILD_AUTOTESTING=ON"
+  set "BUILD_TARGET=nuri-autotest"
+  set "BUILD_DIR_SUFFIX=%MODE%-autotest"
+  set "DEVCHECKS=OFF"
+  call :append_manifest_feature autotest-tools
+) else if /I "%PROFILE%"=="snapshots" (
+  set "PROFILE=snapshot"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_TESTING=ON"
+  set "BUILD_TARGET=nuri-snapshot"
+  set "BUILD_DIR_SUFFIX=%MODE%-snapshot"
+  set "DEVCHECKS=OFF"
+  call :append_manifest_feature snapshot-tools
+) else if /I "%PROFILE%"=="bench-tests" (
+  set "BUILD_TESTS=ON"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_DIR_SUFFIX=%MODE%-bench-tests"
+  call :append_manifest_feature benchmark-tools
+  call :append_manifest_feature tests
+) else if /I "%PROFILE%"=="benchmark-tests" (
+  set "PROFILE=bench-tests"
+  set "BUILD_TESTS=ON"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_DIR_SUFFIX=%MODE%-bench-tests"
+  call :append_manifest_feature benchmark-tools
+  call :append_manifest_feature tests
+) else if /I "%PROFILE%"=="snapshot-tests" (
+  set "BUILD_TESTS=ON"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_SNAPSHOT_TESTING=ON"
+  set "BUILD_DIR_SUFFIX=%MODE%-snapshot-tests"
+  call :append_manifest_feature snapshot-tools
+  call :append_manifest_feature tests
+) else if /I "%PROFILE%"=="autotest-tests" (
+  set "BUILD_TESTS=ON"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_SNAPSHOT_TESTING=ON"
+  set "BUILD_AUTOTEST_CLI=OFF"
+  set "BUILD_AUTOTESTING=ON"
+  set "BUILD_DIR_SUFFIX=%MODE%-autotest-tests"
+  call :append_manifest_feature autotest-tools
+  call :append_manifest_feature tests
+) else if /I "%PROFILE%"=="autotests-tests" (
+  set "PROFILE=autotest-tests"
+  set "BUILD_TESTS=ON"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_SNAPSHOT_TESTING=ON"
+  set "BUILD_AUTOTEST_CLI=OFF"
+  set "BUILD_AUTOTESTING=ON"
+  set "BUILD_DIR_SUFFIX=%MODE%-autotest-tests"
+  call :append_manifest_feature autotest-tools
+  call :append_manifest_feature tests
+) else if /I "%PROFILE%"=="snapshots-tests" (
+  set "PROFILE=snapshot-tests"
+  set "BUILD_TESTS=ON"
+  set "BUILD_TOOLS=ON"
+  set "BUILD_BENCHMARK_CLI=OFF"
+  set "BUILD_SNAPSHOT_CLI=OFF"
+  set "BUILD_SNAPSHOT_TESTING=ON"
+  set "BUILD_DIR_SUFFIX=%MODE%-snapshot-tests"
+  call :append_manifest_feature snapshot-tools
+  call :append_manifest_feature tests
 ) else (
   goto usage
 )
@@ -75,7 +191,7 @@ if /I "%MODE%"=="debug" (
   set "NURI_WITH_ASSERTS=ON"
   set "NURI_WITH_TRACY=ON"
   set "NURI_WITH_TRACY_GPU=ON"
-  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=ON"
+  set "NURI_WITH_TRACY_GPU_DRAW_ZONES=OFF"
 )
 
 if /I "%MODE%"=="release" if /I "%DEVCHECKS%"=="ON" (
@@ -124,11 +240,26 @@ if not defined NINJA_EXE (
   exit /b 1
 )
 
-if not exist "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\VsDevCmd.bat" (
-  echo Visual Studio developer command script not found.
+set "VSDEVCMD="
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if exist "%VSWHERE%" (
+  for /f "delims=" %%i in ('"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath') do (
+    if exist "%%i\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%%i\Common7\Tools\VsDevCmd.bat"
+  )
+)
+if not defined VSDEVCMD (
+  for %%v in (18 2022 2019) do (
+    for %%e in (BuildTools Community Professional Enterprise) do (
+      if not defined VSDEVCMD if exist "%ProgramFiles%\Microsoft Visual Studio\%%v\%%e\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%ProgramFiles%\Microsoft Visual Studio\%%v\%%e\Common7\Tools\VsDevCmd.bat"
+      if not defined VSDEVCMD if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\%%v\%%e\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%ProgramFiles(x86)%\Microsoft Visual Studio\%%v\%%e\Common7\Tools\VsDevCmd.bat"
+    )
+  )
+)
+if not defined VSDEVCMD (
+  echo Visual Studio developer command script not found. Install the C++ Build Tools workload.
   exit /b 1
 )
-call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+call "%VSDEVCMD%" -arch=x64 -host_arch=x64
 if errorlevel 1 exit /b 1
 set "VCPKG_ROOT=%NURI_VCPKG_ROOT%"
 
@@ -154,10 +285,10 @@ set "EXPECTED_LINKER=link.exe"
 :toolchain_ready
 
 for %%i in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fi"
-set "BUILD_DIR=%REPO_ROOT%\build\%MODE%"
+set "BUILD_DIR=%REPO_ROOT%\build\%BUILD_DIR_SUFFIX%"
 set "CONFIG_STAMP_FILE=%BUILD_DIR%\.nuri_config.txt"
 set "TOOLCHAIN_STAMP_FILE=%BUILD_DIR%\.nuri_toolchain.txt"
-set "DESIRED_CONFIG=mode=%MODE% profile=%PROFILE% tracy=%TRACY_MODE% devchecks=%DEVCHECKS% cc=%C_COMPILER_ARG% cxx=%CXX_COMPILER_ARG% linker=%LINKER_ARG% asan=%NURI_WITH_ASAN% logging=%NURI_WITH_LOGGING% asserts=%NURI_WITH_ASSERTS% tracy_cpu=%NURI_WITH_TRACY% tracy_gpu=%NURI_WITH_TRACY_GPU% tracy_gpu_draw=%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
+set "DESIRED_CONFIG=mode=%MODE% profile=%PROFILE% target=%BUILD_TARGET% app=%BUILD_APP% editor=%BUILD_EDITOR% tests=%BUILD_TESTS% tools=%BUILD_TOOLS% benchmark_cli=%BUILD_BENCHMARK_CLI% snapshot_cli=%BUILD_SNAPSHOT_CLI% snapshot_testing=%BUILD_SNAPSHOT_TESTING% autotest_cli=%BUILD_AUTOTEST_CLI% autotesting=%BUILD_AUTOTESTING% features=%MANIFEST_FEATURES% tracy=%TRACY_MODE% devchecks=%DEVCHECKS% fsr31=%FSR31_MODE% cc=%C_COMPILER_ARG% cxx=%CXX_COMPILER_ARG% linker=%LINKER_ARG% asan=%NURI_WITH_ASAN% logging=%NURI_WITH_LOGGING% asserts=%NURI_WITH_ASSERTS% tracy_cpu=%NURI_WITH_TRACY% tracy_gpu=%NURI_WITH_TRACY_GPU% tracy_gpu_draw=%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
 set "TOOLCHAIN_SIGNATURE=vs=%VisualStudioVersion% vc=%VCToolsVersion% sdk=%WindowsSDKVersion% cxx=%EXPECTED_CXX_COMPILER% linker=%EXPECTED_LINKER%"
 set "TOOLCHAIN=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake"
 set "MAKE_PROGRAM_ARG=-DCMAKE_MAKE_PROGRAM=%NINJA_EXE%"
@@ -208,13 +339,22 @@ cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G "%GENERATOR%" ^
   -DVCPKG_APPLOCAL_DEPS=OFF ^
   %MANIFEST_FEATURES_ARG% ^
   -DVCPKG_BUILD_TYPE=release ^
+  -DNURI_TOOL_PROFILE="%PROFILE%" ^
+  -DNURI_DEV_CHECKS="%DEVCHECKS%" ^
   -DNURI_BUILD_APP="%BUILD_APP%" ^
   -DNURI_BUILD_EDITOR="%BUILD_EDITOR%" ^
   -DNURI_BUILD_TESTS="%BUILD_TESTS%" ^
+  -DNURI_BUILD_TOOLS="%BUILD_TOOLS%" ^
+  -DNURI_BUILD_BENCHMARK_CLI="%BUILD_BENCHMARK_CLI%" ^
+  -DNURI_BUILD_SNAPSHOT_CLI="%BUILD_SNAPSHOT_CLI%" ^
+  -DNURI_BUILD_SNAPSHOT_TESTING="%BUILD_SNAPSHOT_TESTING%" ^
+  -DNURI_BUILD_AUTOTEST_CLI="%BUILD_AUTOTEST_CLI%" ^
+  -DNURI_BUILD_AUTOTESTING="%BUILD_AUTOTESTING%" ^
   -DNURI_BUILD_SHARED=ON ^
   -DNURI_WITH_ASAN="%NURI_WITH_ASAN%" ^
   -DNURI_WITH_LOGGING="%NURI_WITH_LOGGING%" ^
   -DNURI_WITH_ASSERTS="%NURI_WITH_ASSERTS%" ^
+  -DNURI_WITH_FSR31="%FSR31_MODE%" ^
   -DNURI_WITH_TRACY="%NURI_WITH_TRACY%" ^
   -DNURI_WITH_TRACY_GPU="%NURI_WITH_TRACY_GPU%" ^
   -DNURI_WITH_TRACY_GPU_DRAW_ZONES="%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
@@ -233,13 +373,22 @@ cmake -S "%REPO_ROOT%" -B "%BUILD_DIR%" -G "%GENERATOR%" ^
   -DVCPKG_TARGET_TRIPLET=x64-windows-static ^
   %MANIFEST_FEATURES_ARG% ^
   -DVCPKG_BUILD_TYPE=release ^
+  -DNURI_TOOL_PROFILE="%PROFILE%" ^
+  -DNURI_DEV_CHECKS="%DEVCHECKS%" ^
   -DNURI_BUILD_APP="%BUILD_APP%" ^
   -DNURI_BUILD_EDITOR="%BUILD_EDITOR%" ^
   -DNURI_BUILD_TESTS="%BUILD_TESTS%" ^
+  -DNURI_BUILD_TOOLS="%BUILD_TOOLS%" ^
+  -DNURI_BUILD_BENCHMARK_CLI="%BUILD_BENCHMARK_CLI%" ^
+  -DNURI_BUILD_SNAPSHOT_CLI="%BUILD_SNAPSHOT_CLI%" ^
+  -DNURI_BUILD_SNAPSHOT_TESTING="%BUILD_SNAPSHOT_TESTING%" ^
+  -DNURI_BUILD_AUTOTEST_CLI="%BUILD_AUTOTEST_CLI%" ^
+  -DNURI_BUILD_AUTOTESTING="%BUILD_AUTOTESTING%" ^
   -DNURI_BUILD_SHARED=OFF ^
   -DNURI_WITH_ASAN="%NURI_WITH_ASAN%" ^
   -DNURI_WITH_LOGGING="%NURI_WITH_LOGGING%" ^
   -DNURI_WITH_ASSERTS="%NURI_WITH_ASSERTS%" ^
+  -DNURI_WITH_FSR31="%FSR31_MODE%" ^
   -DNURI_WITH_TRACY="%NURI_WITH_TRACY%" ^
   -DNURI_WITH_TRACY_GPU="%NURI_WITH_TRACY_GPU%" ^
   -DNURI_WITH_TRACY_GPU_DRAW_ZONES="%NURI_WITH_TRACY_GPU_DRAW_ZONES%"
@@ -254,11 +403,24 @@ if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 :build_target
 if "%BUILD_TARGET%"=="" (
   cmake --build "%BUILD_DIR%"
+  set "BUILD_EXIT=!errorlevel!"
 ) else (
   cmake --build "%BUILD_DIR%" --target "%BUILD_TARGET%"
+  set "BUILD_EXIT=!errorlevel!"
 )
-exit /b %errorlevel%
+exit /b !BUILD_EXIT!
+
+:append_manifest_feature
+set "FEATURE_TO_APPEND=%~1"
+if "%FEATURE_TO_APPEND%"=="" exit /b 0
+if "%MANIFEST_FEATURES%"=="" (
+  set "MANIFEST_FEATURES=%FEATURE_TO_APPEND%"
+) else (
+  echo ;!MANIFEST_FEATURES!; | findstr /I /C:";%FEATURE_TO_APPEND%;" >nul
+  if errorlevel 1 set "MANIFEST_FEATURES=!MANIFEST_FEATURES!;%FEATURE_TO_APPEND%"
+)
+exit /b 0
 
 :usage
-echo Usage: %~nx0 ^<debug^|release^> ^<lib^|app^|editor^|tests^> [cpu^|cpu-gpu^|off] [devchecks]
+echo Usage: %~nx0 ^<debug^|release^> ^<lib^|app^|editor^|tests^|bench^|bench-tests^|snapshot^|snapshot-tests^|autotest^|autotest-tests^> [cpu^|cpu-gpu^|off] [devchecks]
 exit /b 1
