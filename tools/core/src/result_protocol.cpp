@@ -81,7 +81,7 @@ int toolOutcomeExitCode(ToolOutcome outcome) noexcept {
 ToolOutcome aggregateOutcome(ToolOutcome current,
                              ToolOutcome candidate) noexcept {
   return outcomePrecedence(candidate) > outcomePrecedence(current) ? candidate
-                                                                  : current;
+                                                                   : current;
 }
 
 bool selectionIsComplete(const SelectionCounts &counts) noexcept {

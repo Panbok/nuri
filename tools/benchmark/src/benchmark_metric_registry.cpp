@@ -19,37 +19,37 @@ using Gate = BenchmarkMetricGateRole;
 constexpr Aggregation kFrameDistribution =
     Aggregation::MedianAndP95AcrossMeasuredFrames;
 
-#define NURI_EXACT_METRIC(id, unit, numeric, direction, availability, phase, role) \
-  {id, Rule::Exact, unit, numeric, direction, kFrameDistribution, availability, \
-   phase, role}
+#define NURI_EXACT_METRIC(id, unit, numeric, direction, availability, phase,   \
+                          role)                                                \
+  {id,           Rule::Exact, unit, numeric, direction, kFrameDistribution,    \
+   availability, phase,       role}
 
-#define NURI_CPU_TIMING(id, role)                                                \
-  NURI_EXACT_METRIC(id, Unit::Milliseconds, Numeric::Float64,                    \
-                    Direction::LowerIsBetter, Availability::EveryMeasuredFrame, \
-                    Phase::CpuMeasuredRegion, role)
+#define NURI_CPU_TIMING(id, role)                                              \
+  NURI_EXACT_METRIC(                                                           \
+      id, Unit::Milliseconds, Numeric::Float64, Direction::LowerIsBetter,      \
+      Availability::EveryMeasuredFrame, Phase::CpuMeasuredRegion, role)
 
-#define NURI_GPU_TIMING(id, role)                                                \
-  NURI_EXACT_METRIC(id, Unit::Milliseconds, Numeric::Float64,                    \
-                    Direction::LowerIsBetter,                                    \
-                    Availability::WhenGpuTimingAvailable,                        \
-                    Phase::DelayedGpuReadback, role)
+#define NURI_GPU_TIMING(id, role)                                              \
+  NURI_EXACT_METRIC(                                                           \
+      id, Unit::Milliseconds, Numeric::Float64, Direction::LowerIsBetter,      \
+      Availability::WhenGpuTimingAvailable, Phase::DelayedGpuReadback, role)
 
-#define NURI_MEMORY(id, availability)                                            \
-  NURI_EXACT_METRIC(id, Unit::Mebibytes, Numeric::Float64,                       \
-                    Direction::LowerIsBetter, availability,                      \
+#define NURI_MEMORY(id, availability)                                          \
+  NURI_EXACT_METRIC(id, Unit::Mebibytes, Numeric::Float64,                     \
+                    Direction::LowerIsBetter, availability,                    \
                     Phase::PostRenderMeasuredFrame, Gate::Diagnostic)
 
-#define NURI_COUNTER(id)                                                         \
-  NURI_EXACT_METRIC(id, Unit::Count, Numeric::Uint64EncodedAsFloat64,            \
-                    Direction::Informational, Availability::EveryMeasuredFrame, \
-                    Phase::PostRenderMeasuredFrame,                              \
-                    Gate::WorkloadCharacterization)
+#define NURI_COUNTER(id)                                                       \
+  NURI_EXACT_METRIC(                                                           \
+      id, Unit::Count, Numeric::Uint64EncodedAsFloat64,                        \
+      Direction::Informational, Availability::EveryMeasuredFrame,              \
+      Phase::PostRenderMeasuredFrame, Gate::WorkloadCharacterization)
 
-#define NURI_RENDERGRAPH_COUNTER(id)                                             \
-  NURI_EXACT_METRIC(id, Unit::Count, Numeric::Uint64EncodedAsFloat64,            \
-                    Direction::Informational,                                    \
-                    Availability::WhenRenderGraphTelemetryAvailable,             \
-                    Phase::PostRenderMeasuredFrame,                              \
+#define NURI_RENDERGRAPH_COUNTER(id)                                           \
+  NURI_EXACT_METRIC(id, Unit::Count, Numeric::Uint64EncodedAsFloat64,          \
+                    Direction::Informational,                                  \
+                    Availability::WhenRenderGraphTelemetryAvailable,           \
+                    Phase::PostRenderMeasuredFrame,                            \
                     Gate::WorkloadCharacterization)
 
 constexpr BenchmarkMetricDescriptor kDescriptors[] = {
@@ -57,6 +57,10 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_CPU_TIMING("cpu.scene_commit_ms", Gate::Eligible),
     NURI_CPU_TIMING("cpu.render_submit_ms", Gate::Primary),
 
+    NURI_EXACT_METRIC("gpu.frame_ms", Unit::Milliseconds, Numeric::Float64,
+                      Direction::LowerIsBetter,
+                      Availability::WhenWholeFrameGpuTimingAvailable,
+                      Phase::DelayedGpuReadback, Gate::Primary),
     NURI_GPU_TIMING("gpu.scopes_sum_ms", Gate::Primary),
     NURI_GPU_TIMING("gpu.scopes.shadow_ms", Gate::Eligible),
     NURI_GPU_TIMING("gpu.scopes.shadow_depth_ms", Gate::Eligible),
@@ -71,18 +75,20 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_GPU_TIMING("gpu.scopes.transmission_ms", Gate::Eligible),
     NURI_GPU_TIMING("gpu.scopes.hdr_postprocess_ms", Gate::Eligible),
     NURI_GPU_TIMING("gpu.scopes.skybox_ms", Gate::Eligible),
+    NURI_GPU_TIMING("gpu.scopes.velocity_ms", Gate::Eligible),
+    NURI_GPU_TIMING("gpu.scopes.reactive_mask_ms", Gate::Eligible),
+    NURI_GPU_TIMING("gpu.scopes.taa_copy_back_ms", Gate::Eligible),
+    NURI_GPU_TIMING("gpu.scopes.gtao_temporal_ms", Gate::Eligible),
 
-    NURI_EXACT_METRIC("benchmark.camera.position_delta", Unit::WorldUnits,
-                      Numeric::Float64, Direction::Informational,
-                      Availability::EveryMeasuredFrame,
-                      Phase::PostRenderMeasuredFrame,
-                      Gate::WorkloadCharacterization),
-    NURI_EXACT_METRIC("benchmark.camera.direction_delta",
-                      Unit::NormalizedVectorDelta, Numeric::Float64,
-                      Direction::Informational,
-                      Availability::EveryMeasuredFrame,
-                      Phase::PostRenderMeasuredFrame,
-                      Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC(
+        "benchmark.camera.position_delta", Unit::WorldUnits, Numeric::Float64,
+        Direction::Informational, Availability::EveryMeasuredFrame,
+        Phase::PostRenderMeasuredFrame, Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC(
+        "benchmark.camera.direction_delta", Unit::NormalizedVectorDelta,
+        Numeric::Float64, Direction::Informational,
+        Availability::EveryMeasuredFrame, Phase::PostRenderMeasuredFrame,
+        Gate::WorkloadCharacterization),
 
     NURI_MEMORY("memory.process.working_set_mb",
                 Availability::WhenPlatformMemoryAvailable),
@@ -96,11 +102,14 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
                 Availability::WhenPlatformMemoryAvailable),
     NURI_MEMORY("memory.pmr.renderer_current_mb",
                 Availability::EveryMeasuredFrame),
-    NURI_MEMORY("memory.pmr.renderer_peak_mb", Availability::EveryMeasuredFrame),
+    NURI_MEMORY("memory.pmr.renderer_peak_mb",
+                Availability::EveryMeasuredFrame),
     NURI_MEMORY("memory.pmr.pipeline_current_mb",
                 Availability::EveryMeasuredFrame),
-    NURI_MEMORY("memory.pmr.pipeline_peak_mb", Availability::EveryMeasuredFrame),
-    NURI_MEMORY("memory.pmr.scene_current_mb", Availability::EveryMeasuredFrame),
+    NURI_MEMORY("memory.pmr.pipeline_peak_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("memory.pmr.scene_current_mb",
+                Availability::EveryMeasuredFrame),
     NURI_MEMORY("memory.pmr.scene_peak_mb", Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.shadow.cascade_texture_mb",
                 Availability::EveryMeasuredFrame),
@@ -108,9 +117,14 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
                 Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.aa.reactive_mask_total_mb",
                 Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.aa.motion_class_total_mb",
+                Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.aa.history_color_total_mb",
+                Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.aa.spatial_aa_total_mb",
                 Availability::EveryMeasuredFrame),
-    NURI_MEMORY("gpu.memory.aa.msaa_total_mb", Availability::EveryMeasuredFrame),
+    NURI_MEMORY("gpu.memory.aa.msaa_total_mb",
+                Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.ao.total_texture_mb",
                 Availability::EveryMeasuredFrame),
     NURI_MEMORY("gpu.memory.hdr.texture_mb", Availability::EveryMeasuredFrame),
@@ -163,7 +177,8 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.visibility.shadow_meshlet_candidates"),
     NURI_COUNTER("renderer.visibility.shadow_meshlet_readback_available"),
     NURI_COUNTER("renderer.visibility.shadow_meshlet_readback_source_frame"),
-    NURI_COUNTER("renderer.visibility.shadow_meshlet_readback_stale_frame_count"),
+    NURI_COUNTER(
+        "renderer.visibility.shadow_meshlet_readback_stale_frame_count"),
     NURI_COUNTER("renderer.visibility.shadow_meshlet_readback_error_count"),
     NURI_COUNTER("renderer.visibility.shadow_meshlet_rejected_bounds"),
     NURI_COUNTER("renderer.visibility.occlusion_available"),
@@ -187,10 +202,69 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_COUNTER("renderer.aa.taa_copy_back_passes"),
     NURI_COUNTER("renderer.aa.spatial_aa_passes"),
     NURI_COUNTER("renderer.aa.msaa_resolve_passes"),
+    NURI_COUNTER("renderer.aa.msaa_color_textures"),
+    NURI_COUNTER("renderer.aa.msaa_depth_textures"),
+    NURI_COUNTER("renderer.aa.msaa_sample4_color_supported"),
+    NURI_COUNTER("renderer.aa.msaa_sample4_depth_supported"),
+    NURI_COUNTER("renderer.aa.msaa_depth_resolve_min_supported"),
+    NURI_COUNTER("renderer.aa.msaa_alpha_to_coverage_supported"),
+    NURI_COUNTER("renderer.aa.msaa_sample_rate_shading_supported"),
+    NURI_COUNTER("renderer.aa.msaa_alpha_to_coverage_active"),
+    NURI_COUNTER("renderer.aa.msaa_sample_shading_active"),
+    NURI_COUNTER("renderer.aa.msaa_unsupported_reason"),
+    NURI_COUNTER("renderer.aa.msaa_alpha_coverage_policy"),
+    NURI_COUNTER("renderer.aa.msaa_transparency_policy"),
+    NURI_COUNTER("renderer.aa.motion_class_textures"),
+    NURI_COUNTER("renderer.aa.motion_class_coverage_available"),
+    NURI_EXACT_METRIC("renderer.aa.motion_class_invalid_pixels", Unit::Count,
+                      Numeric::Uint64EncodedAsFloat64, Direction::Informational,
+                      Availability::WhenMotionClassCoverageAvailable,
+                      Phase::DelayedGpuReadback,
+                      Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC(
+        "renderer.aa.motion_class_static_camera_only_pixels", Unit::Count,
+        Numeric::Uint64EncodedAsFloat64, Direction::Informational,
+        Availability::WhenMotionClassCoverageAvailable,
+        Phase::DelayedGpuReadback, Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC("renderer.aa.motion_class_full_pixels", Unit::Count,
+                      Numeric::Uint64EncodedAsFloat64, Direction::Informational,
+                      Availability::WhenMotionClassCoverageAvailable,
+                      Phase::DelayedGpuReadback,
+                      Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC(
+        "renderer.aa.motion_class_background_rotation_pixels", Unit::Count,
+        Numeric::Uint64EncodedAsFloat64, Direction::Informational,
+        Availability::WhenMotionClassCoverageAvailable,
+        Phase::DelayedGpuReadback, Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC("renderer.aa.motion_class_invalid_ratio", Unit::Ratio,
+                      Numeric::Float64, Direction::Informational,
+                      Availability::WhenMotionClassCoverageAvailable,
+                      Phase::DelayedGpuReadback,
+                      Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC("renderer.aa.motion_class_static_camera_only_ratio",
+                      Unit::Ratio, Numeric::Float64, Direction::Informational,
+                      Availability::WhenMotionClassCoverageAvailable,
+                      Phase::DelayedGpuReadback,
+                      Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC("renderer.aa.motion_class_full_ratio", Unit::Ratio,
+                      Numeric::Float64, Direction::Informational,
+                      Availability::WhenMotionClassCoverageAvailable,
+                      Phase::DelayedGpuReadback,
+                      Gate::WorkloadCharacterization),
+    NURI_EXACT_METRIC("renderer.aa.motion_class_background_rotation_ratio",
+                      Unit::Ratio, Numeric::Float64, Direction::Informational,
+                      Availability::WhenMotionClassCoverageAvailable,
+                      Phase::DelayedGpuReadback,
+                      Gate::WorkloadCharacterization),
+    NURI_COUNTER("renderer.aa.history_color_textures"),
+    NURI_COUNTER("renderer.ao.normal_texture_count"),
+    NURI_COUNTER("renderer.ao.history_texture_count"),
     NURI_COUNTER("renderer.ao.normal_prepass_draws"),
     NURI_COUNTER("renderer.ao.depth_prefilter_passes"),
     NURI_COUNTER("renderer.ao.main_passes"),
     NURI_COUNTER("renderer.ao.temporal_passes"),
+    NURI_COUNTER("renderer.ao.temporal_motion_class_consumed"),
+    NURI_COUNTER("renderer.ao.temporal_previous_depth_consumed"),
     NURI_COUNTER("renderer.ao.texture_count"),
     NURI_COUNTER("renderer.hdr.bloom_passes"),
     NURI_COUNTER("renderer.hdr.luminance_passes"),
@@ -206,11 +280,13 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.root_pass_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.pass_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.edge_count"),
-    NURI_RENDERGRAPH_COUNTER("rendergraph.summary.recorded_graphics_pass_count"),
+    NURI_RENDERGRAPH_COUNTER(
+        "rendergraph.summary.recorded_graphics_pass_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.pass_barrier_plan_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.final_barrier_record_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.pass_barrier_record_count"),
-    NURI_RENDERGRAPH_COUNTER("rendergraph.summary.recorded_command_buffer_count"),
+    NURI_RENDERGRAPH_COUNTER(
+        "rendergraph.summary.recorded_command_buffer_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.submit_batch_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.pass_range_count"),
     NURI_RENDERGRAPH_COUNTER("rendergraph.summary.pass_timing_count"),
@@ -245,24 +321,14 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
     NURI_RENDERGRAPH_COUNTER(
         "rendergraph.summary.owned_mesh_dispatch_item_count"),
 
-    {"rendergraph.pass.<index>.<pass>.cpu_ms",
-     Rule::RenderGraphPassCpuTiming,
-     Unit::Milliseconds,
-     Numeric::Float64,
-     Direction::LowerIsBetter,
-     kFrameDistribution,
-     Availability::WhenRenderGraphTelemetryAvailable,
-     Phase::PostRenderMeasuredFrame,
-     Gate::Eligible},
-    {"rendergraph.pass.<index>.<pass>.gpu_ms",
-     Rule::RenderGraphPassGpuTiming,
-     Unit::Milliseconds,
-     Numeric::Float64,
-     Direction::LowerIsBetter,
-     kFrameDistribution,
-     Availability::WhenGpuTimingAvailable,
-     Phase::DelayedGpuReadback,
-     Gate::Eligible},
+    {"rendergraph.pass.<index>.<pass>.cpu_ms", Rule::RenderGraphPassCpuTiming,
+     Unit::Milliseconds, Numeric::Float64, Direction::LowerIsBetter,
+     kFrameDistribution, Availability::WhenRenderGraphTelemetryAvailable,
+     Phase::PostRenderMeasuredFrame, Gate::Eligible},
+    {"rendergraph.pass.<index>.<pass>.gpu_ms", Rule::RenderGraphPassGpuTiming,
+     Unit::Milliseconds, Numeric::Float64, Direction::LowerIsBetter,
+     kFrameDistribution, Availability::WhenGpuTimingAvailable,
+     Phase::DelayedGpuReadback, Gate::Eligible},
 };
 
 #undef NURI_RENDERGRAPH_COUNTER
@@ -283,8 +349,9 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
   });
 }
 
-[[nodiscard]] bool matchesRenderGraphPassTiming(std::string_view metricId,
-                                                std::string_view suffix) noexcept {
+[[nodiscard]] bool
+matchesRenderGraphPassTiming(std::string_view metricId,
+                             std::string_view suffix) noexcept {
   constexpr std::string_view prefix = "rendergraph.pass.";
   if (!metricId.starts_with(prefix) || !metricId.ends_with(suffix) ||
       metricId.size() > 160u) {
@@ -298,9 +365,10 @@ constexpr BenchmarkMetricDescriptor kDescriptors[] = {
   }
   const std::string_view index = body.substr(0u, separator);
   const std::string_view pass = body.substr(separator + 1u);
-  return std::all_of(index.begin(), index.end(), [](char character) {
-           return character >= '0' && character <= '9';
-         }) &&
+  return std::all_of(index.begin(), index.end(),
+                     [](char character) {
+                       return character >= '0' && character <= '9';
+                     }) &&
          isLowerSlug(pass);
 }
 
@@ -356,11 +424,11 @@ benchmarkMetricDescriptor(BenchmarkMetricIndex index) noexcept {
 }
 
 size_t exactBenchmarkMetricCount() noexcept {
-  static const size_t count = static_cast<size_t>(std::count_if(
-      std::begin(kDescriptors), std::end(kDescriptors),
-      [](const BenchmarkMetricDescriptor &descriptor) {
-        return descriptor.idRule == Rule::Exact;
-      }));
+  static const size_t count = static_cast<size_t>(
+      std::count_if(std::begin(kDescriptors), std::end(kDescriptors),
+                    [](const BenchmarkMetricDescriptor &descriptor) {
+                      return descriptor.idRule == Rule::Exact;
+                    }));
   return count;
 }
 
@@ -378,7 +446,8 @@ requireBenchmarkMetricDescriptor(std::string_view metricId,
       descriptor);
 }
 
-std::string_view benchmarkMetricIdRuleName(BenchmarkMetricIdRule rule) noexcept {
+std::string_view
+benchmarkMetricIdRuleName(BenchmarkMetricIdRule rule) noexcept {
   switch (rule) {
   case Rule::Exact:
     return "exact";
@@ -398,6 +467,8 @@ std::string_view benchmarkMetricUnitName(BenchmarkMetricUnit unit) noexcept {
     return "MiB";
   case Unit::Count:
     return "count";
+  case Unit::Ratio:
+    return "ratio";
   case Unit::WorldUnits:
     return "world-units";
   case Unit::NormalizedVectorDelta:
@@ -432,9 +503,9 @@ std::string_view benchmarkMetricAggregationName(
     BenchmarkMetricAggregation aggregation) noexcept {
   switch (aggregation) {
   case Aggregation::MedianAndP95AcrossMeasuredFrames:
-    return "median-and-p95-across-measured-frames";
+    return "median-p95-p99-across-measured-frames";
   }
-  return "median-and-p95-across-measured-frames";
+  return "median-p95-p99-across-measured-frames";
 }
 
 std::string_view benchmarkMetricAvailabilityName(
@@ -444,16 +515,20 @@ std::string_view benchmarkMetricAvailabilityName(
     return "every-measured-frame";
   case Availability::WhenGpuTimingAvailable:
     return "when-gpu-timing-available";
+  case Availability::WhenWholeFrameGpuTimingAvailable:
+    return "when-whole-frame-gpu-timing-available";
   case Availability::WhenRenderGraphTelemetryAvailable:
     return "when-rendergraph-telemetry-available";
   case Availability::WhenPlatformMemoryAvailable:
     return "when-platform-memory-available";
+  case Availability::WhenMotionClassCoverageAvailable:
+    return "when-motion-class-coverage-available";
   }
   return "every-measured-frame";
 }
 
-std::string_view benchmarkMetricSamplingPhaseName(
-    BenchmarkMetricSamplingPhase phase) noexcept {
+std::string_view
+benchmarkMetricSamplingPhaseName(BenchmarkMetricSamplingPhase phase) noexcept {
   switch (phase) {
   case Phase::CpuMeasuredRegion:
     return "cpu-measured-region";

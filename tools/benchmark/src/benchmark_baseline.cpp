@@ -95,9 +95,10 @@ sha256FileLabel(const std::filesystem::path &path) {
 [[nodiscard]] bool finiteStats(const MetricStats &stats) {
   return stats.count > 0u && std::isfinite(stats.min) &&
          std::isfinite(stats.median) && std::isfinite(stats.p90) &&
-         std::isfinite(stats.p95) && std::isfinite(stats.max) &&
-         std::isfinite(stats.mean) && std::isfinite(stats.stddev) &&
-         std::isfinite(stats.mad) && std::isfinite(stats.iqr) &&
+         std::isfinite(stats.p95) && std::isfinite(stats.p99) &&
+         std::isfinite(stats.max) && std::isfinite(stats.mean) &&
+         std::isfinite(stats.stddev) && std::isfinite(stats.mad) &&
+         std::isfinite(stats.iqr) &&
          std::isfinite(stats.coefficientOfVariation);
 }
 

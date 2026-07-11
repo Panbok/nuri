@@ -3,6 +3,7 @@
 #include "nuri/core/log.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
+#include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
@@ -853,7 +854,7 @@ populateScene(const SnapshotCase &snapshotCase, Renderer &renderer,
 
 void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
                        Renderer &renderer, RenderSettings &settings,
-                       TemporalCameraHistoryState &cameraHistory,
+                       TemporalFrameService &temporalFrameService,
                        const Camera &camera, uint64_t frameIndex,
                        double timeSeconds, double deltaSeconds, uint32_t width,
                        uint32_t height) {
@@ -869,12 +870,21 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
       .materialTableVersion = materialSnapshot.version,
       .environmentVersion = scene.environmentVersion(),
   };
-  frameContext.camera = makeTemporalCameraFrameState(
+  auto planResult = buildPresentationAAPlan(
+      settings, {}, renderer.resources().gpuMultisampleCapabilities());
+  NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
+              planResult.error().c_str());
+  frameContext.presentationAA = planResult.value();
+  auto cameraResult = temporalFrameService.prepareFrame(
       camera, static_cast<float>(width) / static_cast<float>(height),
-      settings.antiAliasing,
+      settings.antiAliasing, frameContext.presentationAA,
       TemporalCameraFrameDesc{.renderExtent = glm::uvec2(width, height),
                               .sceneContent = sceneContent},
-      cameraHistory);
+      frameIndex, timeSeconds, deltaSeconds);
+  NURI_ASSERT(!cameraResult.hasError(), "Temporal frame prepare failed: %s",
+              cameraResult.error().c_str());
+  frameContext.camera = cameraResult.value();
+  frameContext.temporalFrameService = &temporalFrameService;
   settings.antiAliasing.debug.resetHistoryRequested = false;
   frameContext.settings = &settings;
   frameContext.metrics = {};
@@ -1360,7 +1370,7 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
     }
 
     RenderSettings settings = snapshotCase.settings;
-    TemporalCameraHistoryState cameraHistory{};
+    TemporalFrameService temporalFrameService{};
     RenderFrameContext frameContext{};
     uint64_t frameIndex = 0u;
     double timeSeconds = 0.0;
@@ -1373,8 +1383,8 @@ SnapshotRunResult captureSnapshotCase(SnapshotCase snapshotCase,
         return Result<bool, std::string>::makeError(commitResult.error());
       }
       const Camera camera = makeSnapshotCamera(snapshotCase, frameIndex);
-      buildFrameContext(frameContext, scene, *renderer, settings, cameraHistory,
-                        camera, frameIndex, timeSeconds,
+      buildFrameContext(frameContext, scene, *renderer, settings,
+                        temporalFrameService, camera, frameIndex, timeSeconds,
                         snapshotCase.fixedDeltaSeconds,
                         snapshotCase.resolution[0], snapshotCase.resolution[1]);
       frameContext.captureRequests.clear();

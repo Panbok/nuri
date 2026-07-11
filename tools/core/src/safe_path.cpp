@@ -47,11 +47,13 @@ namespace {
   const DWORD attributes = GetFileAttributesW(path.c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES) {
     const DWORD lastError = GetLastError();
-    if (lastError == ERROR_FILE_NOT_FOUND || lastError == ERROR_PATH_NOT_FOUND) {
+    if (lastError == ERROR_FILE_NOT_FOUND ||
+        lastError == ERROR_PATH_NOT_FOUND) {
       error.clear();
       return false;
     }
-    error = std::error_code(static_cast<int>(lastError), std::system_category());
+    error =
+        std::error_code(static_cast<int>(lastError), std::system_category());
     return false;
   }
   error.clear();
@@ -108,7 +110,8 @@ resolvePathUnder(const std::filesystem::path &root,
   }
 
   std::error_code error;
-  const std::filesystem::path absoluteRoot = std::filesystem::absolute(root, error);
+  const std::filesystem::path absoluteRoot =
+      std::filesystem::absolute(root, error);
   if (error) {
     return Result<std::filesystem::path, std::string>::makeError(
         "failed to resolve path root: " + error.message());
@@ -146,7 +149,8 @@ removeTreeUnder(const std::filesystem::path &root,
         "path changed during containment validation");
   }
   std::error_code error;
-  const uintmax_t removed = std::filesystem::remove_all(resolved.value(), error);
+  const uintmax_t removed =
+      std::filesystem::remove_all(resolved.value(), error);
   if (error) {
     return Result<uintmax_t, std::string>::makeError(
         "failed to remove confined tree: " + error.message());

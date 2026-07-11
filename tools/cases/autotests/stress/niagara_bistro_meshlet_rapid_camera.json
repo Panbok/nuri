@@ -84,6 +84,7 @@
     },
     "antiAliasing": {
       "mode": "TAA",
+      "temporalProvider": "Reference",
       "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {

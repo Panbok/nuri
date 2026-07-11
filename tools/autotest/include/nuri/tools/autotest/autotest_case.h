@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -141,12 +142,95 @@ struct AutotestMetricWindow {
   std::vector<AutotestMetricWindowAssertion> assertions{};
 };
 
+struct AutotestPixelRoi {
+  uint32_t x = 0u;
+  uint32_t y = 0u;
+  uint32_t width = 0u;
+  uint32_t height = 0u;
+};
+
+struct AutotestCoverageRange {
+  bool hasMin = false;
+  double min = 0.0;
+  bool hasMax = false;
+  double max = 0.0;
+};
+
+struct AutotestMotionClassCoverage {
+  bool configured = false;
+  AutotestCoverageRange invalid{};
+  AutotestCoverageRange staticCameraOnly{};
+  AutotestCoverageRange full{};
+};
+
+struct AutotestMotionOracle {
+  std::string motionTarget = "motion_vectors";
+  std::string motionClassTarget{};
+  AutotestPixelRoi roi{};
+  bool hasMask = false;
+  std::vector<std::array<uint32_t, 2>> mask{};
+  glm::vec2 expectedVelocityPixels{0.0f};
+  double p95ErrorMaxPixels = 0.0;
+  double maxErrorMaxPixels = 0.0;
+  AutotestMotionClassCoverage classCoverage{};
+};
+
+struct AutotestQualityOracleFile {
+  uint32_t version = 0u;
+  std::string pathBase = "repoRoot";
+  std::filesystem::path path{};
+  bool available = true;
+  std::string unavailableReason{};
+};
+
+struct AutotestQualityOracleMask {
+  uint32_t version = 0u;
+  std::string pathBase = "repoRoot";
+  std::filesystem::path path{};
+};
+
+struct AutotestQualityOracleBudgets {
+  double normalizedMaeMax = 0.0;
+  double normalizedRmseMax = 0.0;
+  double lumaSsimMin = 0.0;
+  double darkCollapsePercentMax = 0.0;
+  uint32_t darkCollapseComponentMaxPixels = 0u;
+  double relativeLumaEnergyDriftMax = 0.0;
+  double edgeWidthRatioMin = 0.0;
+  double edgeWidthRatioMax = 0.0;
+  double edgeOvershootMax = 0.0;
+  double edgeUndershootMax = 0.0;
+  double temporalErrorMax = 0.0;
+  double ghostEnergyMax = 0.0;
+  double recoveryRmseMax = 0.0;
+};
+
+struct AutotestQualityOracleTemporal {
+  std::string previousCheckpoint{};
+  std::string previousOutputTarget{};
+  AutotestQualityOracleFile previousReference{};
+  std::string motionTarget = "motion_vectors";
+  AutotestQualityOracleMask revealMask{};
+};
+
+struct AutotestQualityOracle {
+  uint32_t schemaVersion = 1u;
+  std::string outputTarget = "frame_color_hdr";
+  AutotestQualityOracleFile reference{};
+  std::optional<AutotestQualityOracleMask> mask{};
+  double lscale = 0.0;
+  AutotestQualityOracleBudgets budgets{};
+  std::optional<AutotestQualityOracleTemporal> temporal{};
+};
+
 struct AutotestCheckpoint {
   std::string id{};
   uint32_t frame = 0u;
   std::vector<AutotestCaptureTarget> captures{};
   std::vector<AutotestReadoutRequest> readouts{};
   std::vector<AutotestMetricAssertion> assertions{};
+  std::optional<AutotestMotionOracle> motionOracle{};
+  std::optional<AutotestQualityOracle> qualityOracle{};
 };
 
 struct AutotestCameraKeyframe {

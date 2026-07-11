@@ -4,6 +4,7 @@
 #include "nuri/core/profiling.h"
 #include "nuri/core/runtime_config.h"
 #include "nuri/core/window.h"
+#include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/default_render_pipeline.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
@@ -131,6 +132,8 @@ benchmarkWorkloadFingerprint(const BenchmarkCase &benchmarkCase) {
   auto fingerprint = nuri::tools::core::makeSha256Fingerprint({
       FingerprintField{"case.id", benchmarkCase.id},
       FingerprintField{"case.suite", benchmarkCase.suite},
+      FingerprintField{"case.comparisonGroup", benchmarkCase.comparisonGroup},
+      FingerprintField{"case.variant", benchmarkCase.variant},
       FingerprintField{"manifest", std::move(manifestDigest)},
       FingerprintField{"config", benchmarkCase.configSignature},
       FingerprintField{"settings", benchmarkCase.settingsSignature},
@@ -273,6 +276,51 @@ makeBenchmarkSuitePayload(const BenchmarkSuiteRunResult &result,
                           result.caseResults.size());
   yyjson_mut_obj_add_uint(document.get(), root, "executedCount",
                           result.caseResults.size());
+
+  std::map<std::string, std::vector<const BenchmarkRunResult *>>
+      experimentGroups;
+  for (const BenchmarkRunResult &child : result.caseResults) {
+    if (!child.report.benchmarkCase.comparisonGroup.empty()) {
+      experimentGroups[child.report.benchmarkCase.comparisonGroup].push_back(
+          &child);
+    }
+  }
+  yyjson_mut_val *groups = yyjson_mut_arr(document.get());
+  for (const auto &[groupName, variants] : experimentGroups) {
+    yyjson_mut_val *group = yyjson_mut_obj(document.get());
+    addJsonString(document.get(), group, "comparisonGroup", groupName);
+    yyjson_mut_obj_add_uint(document.get(), group, "variantCount",
+                            variants.size());
+    const bool complete =
+        std::all_of(variants.begin(), variants.end(), [](const auto *child) {
+          return child->exitCode == BenchmarkExitCode::Success;
+        });
+    yyjson_mut_obj_add_bool(document.get(), group, "complete", complete);
+    yyjson_mut_val *variantRows = yyjson_mut_arr(document.get());
+    for (const BenchmarkRunResult *child : variants) {
+      yyjson_mut_val *row = yyjson_mut_obj(document.get());
+      addJsonString(document.get(), row, "variant",
+                    child->report.benchmarkCase.variant);
+      addJsonString(document.get(), row, "caseId",
+                    child->report.benchmarkCase.id);
+      addJsonString(document.get(), row, "outcome",
+                    nuri::tools::core::toolOutcomeName(benchmarkOutcome(
+                        child->exitCode, child->report.profile.authoritative)));
+      yyjson_mut_obj_add_int(document.get(), row, "exitCode",
+                             static_cast<int>(child->exitCode));
+      const auto relative =
+          portableRelativePath(child->reportPath, artifactDir);
+      if (relative.has_value()) {
+        addJsonString(document.get(), row, "report", pathToUtf8(*relative));
+      } else {
+        yyjson_mut_obj_add_null(document.get(), row, "report");
+      }
+      yyjson_mut_arr_add_val(variantRows, row);
+    }
+    yyjson_mut_obj_add_val(document.get(), group, "variants", variantRows);
+    yyjson_mut_arr_add_val(groups, group);
+  }
+  yyjson_mut_obj_add_val(document.get(), root, "experimentGroups", groups);
 
   yyjson_mut_val *caseReports = yyjson_mut_arr(document.get());
   for (const BenchmarkRunResult &child : result.caseResults) {
@@ -1375,12 +1423,7 @@ resolveTelemetryPassName(const RenderGraphTelemetrySnapshot &snapshot,
 
 [[nodiscard]] bool shouldIncludeGpuScopeInSum(const GpuTimingReport &report,
                                               GpuTimingScope scope) {
-  if ((scope == GpuTimingScope::ShadowDepth ||
-       scope == GpuTimingScope::ShadowSdsm) &&
-      hasGpuTimingScope(report, GpuTimingScope::Shadow)) {
-    return false;
-  }
-  return true;
+  return gpuTimingScopeContributesToScopedSum(report, scope);
 }
 
 class TrackingMemoryResource final : public std::pmr::memory_resource {
@@ -1665,6 +1708,12 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   const AntiAliasingFrameMetrics &aa = metrics.antiAliasing;
   addIfNonzero(measurements, "renderer.aa.motion_vector_textures",
                aa.motionVectorTextureCount);
+  addIfNonzero(measurements, "renderer.aa.motion_class_textures",
+               aa.motionClassTextureCount);
+  addIfNonzero(measurements, "renderer.aa.motion_class_coverage_available",
+               aa.motionClassCoverageAvailable);
+  addIfNonzero(measurements, "renderer.aa.history_color_textures",
+               aa.historyColorTextureCount);
   addIfNonzero(measurements, "renderer.aa.motion_vector_allocations",
                aa.motionVectorAllocationCount);
   addIfNonzero(measurements, "renderer.aa.motion_vector_reallocations",
@@ -1690,10 +1739,38 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
                aa.spatialAAPassCount);
   addIfNonzero(measurements, "renderer.aa.msaa_resolve_passes",
                aa.msaaResolvePassCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_color_textures",
+               aa.msaaColorTextureCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_depth_textures",
+               aa.msaaDepthTextureCount);
+  addIfNonzero(measurements, "renderer.aa.msaa_sample4_color_supported",
+               aa.msaaSample4ColorSupported);
+  addIfNonzero(measurements, "renderer.aa.msaa_sample4_depth_supported",
+               aa.msaaSample4DepthSupported);
+  addIfNonzero(measurements, "renderer.aa.msaa_depth_resolve_min_supported",
+               aa.msaaDepthResolveMinSupported);
+  addIfNonzero(measurements, "renderer.aa.msaa_alpha_to_coverage_supported",
+               aa.msaaAlphaToCoverageSupported);
+  addIfNonzero(measurements, "renderer.aa.msaa_sample_rate_shading_supported",
+               aa.msaaSampleRateShadingSupported);
+  addIfNonzero(measurements, "renderer.aa.msaa_alpha_to_coverage_active",
+               aa.msaaAlphaToCoverageEnabled);
+  addIfNonzero(measurements, "renderer.aa.msaa_sample_shading_active",
+               aa.msaaSampleShadingEnabled);
+  addIfNonzero(measurements, "renderer.aa.msaa_unsupported_reason",
+               static_cast<uint32_t>(aa.msaaUnsupportedReason));
+  addIfNonzero(measurements, "renderer.aa.msaa_alpha_coverage_policy",
+               static_cast<uint32_t>(aa.msaaAlphaCoveragePolicy));
+  addIfNonzero(measurements, "renderer.aa.msaa_transparency_policy",
+               static_cast<uint32_t>(aa.msaaTransparencyPolicy));
   addBytesAsMiB(measurements, "gpu.memory.aa.motion_vector_total_mb",
                 aa.motionVectorTotalBytes);
   addBytesAsMiB(measurements, "gpu.memory.aa.reactive_mask_total_mb",
                 aa.reactiveMaskTotalBytes);
+  addBytesAsMiB(measurements, "gpu.memory.aa.motion_class_total_mb",
+                aa.motionClassTotalBytes);
+  addBytesAsMiB(measurements, "gpu.memory.aa.history_color_total_mb",
+                aa.historyColorTotalBytes);
   addBytesAsMiB(measurements, "gpu.memory.aa.spatial_aa_total_mb",
                 aa.spatialAATotalBytes);
   addBytesAsMiB(measurements, "gpu.memory.aa.msaa_total_mb", aa.msaaTotalBytes);
@@ -1706,7 +1783,15 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
   addIfNonzero(measurements, "renderer.ao.main_passes", ao.mainPassCount);
   addIfNonzero(measurements, "renderer.ao.temporal_passes",
                ao.temporalPassCount);
+  addIfNonzero(measurements, "renderer.ao.temporal_motion_class_consumed",
+               ao.temporalMotionClassConsumed);
+  addIfNonzero(measurements, "renderer.ao.temporal_previous_depth_consumed",
+               ao.temporalPreviousDepthConsumed);
   addIfNonzero(measurements, "renderer.ao.texture_count", ao.textureCount);
+  addIfNonzero(measurements, "renderer.ao.normal_texture_count",
+               ao.normalTextureCount);
+  addIfNonzero(measurements, "renderer.ao.history_texture_count",
+               ao.ambientOcclusionTextureCount);
   addBytesAsMiB(measurements, "gpu.memory.ao.total_texture_mb",
                 ao.totalTextureBytes);
 
@@ -1730,7 +1815,8 @@ void addRendererFrameMetrics(BenchmarkFrameMeasurements &measurements,
 
   const uint64_t estimatedFrameTextureBytes =
       shadow.cascadeTextureBytes + aa.motionVectorTotalBytes +
-      aa.reactiveMaskTotalBytes + aa.spatialAATotalBytes + aa.msaaTotalBytes +
+      aa.reactiveMaskTotalBytes + aa.motionClassTotalBytes +
+      aa.historyColorTotalBytes + aa.spatialAATotalBytes + aa.msaaTotalBytes +
       ao.totalTextureBytes + hdr.textureBytes;
   addBytesAsMiB(measurements, "gpu.memory.frame_textures_estimated_mb",
                 estimatedFrameTextureBytes);
@@ -1976,7 +2062,8 @@ void addGpuTimingMetric(BenchmarkFrameMeasurements &measurements,
 
 [[nodiscard]] uint64_t reportSourceFrameIndex(const GpuTimingReport &report) {
   static constexpr uint64_t kInvalid = std::numeric_limits<uint64_t>::max();
-  const std::array<uint64_t, 13> sources{
+  const std::array<uint64_t, 18> sources{
+      report.wholeFrameSourceFrameIndex,
       report.shadowSourceFrameIndex,
       report.shadowDepthSourceFrameIndex,
       report.shadowSdsmSourceFrameIndex,
@@ -1990,6 +2077,10 @@ void addGpuTimingMetric(BenchmarkFrameMeasurements &measurements,
       report.gtaoSourceFrameIndex,
       report.hdrPostProcessSourceFrameIndex,
       report.skyboxSourceFrameIndex,
+      report.velocitySourceFrameIndex,
+      report.reactiveMaskSourceFrameIndex,
+      report.temporalAACopyBackSourceFrameIndex,
+      report.gtaoTemporalSourceFrameIndex,
   };
   for (const uint64_t source : sources) {
     if (source != kInvalid) {
@@ -2020,6 +2111,8 @@ void applyGpuTimingReport(BenchmarkReport &report,
       frame.measurements.appendRegistered(index, static_cast<double>(ms));
     }
   };
+  add(NURI_BENCHMARK_METRIC("gpu.frame_ms"), GpuTimingScope::WholeFrame,
+      timingReport.wholeFrameTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_ms"), GpuTimingScope::Shadow,
       timingReport.shadowTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.shadow_depth_ms"),
@@ -2047,6 +2140,15 @@ void applyGpuTimingReport(BenchmarkReport &report,
       GpuTimingScope::HDRPostProcess, timingReport.hdrPostProcessTimeMs);
   add(NURI_BENCHMARK_METRIC("gpu.scopes.skybox_ms"), GpuTimingScope::Skybox,
       timingReport.skyboxTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.velocity_ms"), GpuTimingScope::Velocity,
+      timingReport.velocityTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.reactive_mask_ms"),
+      GpuTimingScope::ReactiveMask, timingReport.reactiveMaskTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.taa_copy_back_ms"),
+      GpuTimingScope::TemporalAACopyBack,
+      timingReport.temporalAACopyBackTimeMs);
+  add(NURI_BENCHMARK_METRIC("gpu.scopes.gtao_temporal_ms"),
+      GpuTimingScope::GTAOTemporal, timingReport.gtaoTemporalTimeMs);
   if (anyScopeAvailable) {
     frame.measurements.appendRegistered(
         NURI_BENCHMARK_METRIC("gpu.scopes_sum_ms"), sum);
@@ -2256,7 +2358,7 @@ void applyBenchmarkCamera(Camera &camera,
 
 void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
                        Renderer &renderer, RenderSettings &settings,
-                       TemporalCameraHistoryState &cameraHistory,
+                       TemporalFrameService &temporalFrameService,
                        const Camera &camera, uint64_t frameIndex,
                        double timeSeconds, double deltaSeconds, uint32_t width,
                        uint32_t height) {
@@ -2272,14 +2374,23 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
       .materialTableVersion = materialSnapshot.version,
       .environmentVersion = scene.environmentVersion(),
   };
-  frameContext.camera = makeTemporalCameraFrameState(
+  auto planResult = buildPresentationAAPlan(
+      settings, {}, renderer.resources().gpuMultisampleCapabilities());
+  NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
+              planResult.error().c_str());
+  frameContext.presentationAA = planResult.value();
+  auto cameraResult = temporalFrameService.prepareFrame(
       camera, static_cast<float>(width) / static_cast<float>(height),
-      settings.antiAliasing,
+      settings.antiAliasing, frameContext.presentationAA,
       TemporalCameraFrameDesc{
           .renderExtent = glm::uvec2(width, height),
           .sceneContent = sceneContent,
       },
-      cameraHistory);
+      frameIndex, timeSeconds, deltaSeconds);
+  NURI_ASSERT(!cameraResult.hasError(), "Temporal frame prepare failed: %s",
+              cameraResult.error().c_str());
+  frameContext.camera = cameraResult.value();
+  frameContext.temporalFrameService = &temporalFrameService;
   settings.antiAliasing.debug.resetHistoryRequested = false;
   frameContext.settings = &settings;
   frameContext.metrics = {};
@@ -2299,6 +2410,38 @@ void buildFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
 
 } // namespace
 
+Result<bool, BenchmarkExitCode>
+checkBenchmarkGpuRequirements(const BenchmarkRequirements &requirements,
+                              const GpuMultisampleCapabilities &capabilities,
+                              std::string &message) {
+  if (!requirements.msaa4x) {
+    return Result<bool, BenchmarkExitCode>::makeResult(true);
+  }
+  std::vector<std::string_view> missing;
+  if (!capabilities.sample4Color) {
+    missing.push_back("sample4_color");
+  }
+  if (!capabilities.sample4Depth) {
+    missing.push_back("sample4_depth");
+  }
+  if (!capabilities.depthResolveMin) {
+    missing.push_back("depth_resolve_min");
+  }
+  if (!capabilities.alphaToCoverage) {
+    missing.push_back("alpha_to_coverage");
+  }
+  if (missing.empty()) {
+    return Result<bool, BenchmarkExitCode>::makeResult(true);
+  }
+  message = "required MSAA4x capability unavailable:";
+  for (const std::string_view capability : missing) {
+    message += " ";
+    message += capability;
+  }
+  return Result<bool, BenchmarkExitCode>::makeError(
+      BenchmarkExitCode::EnvironmentUnavailable);
+}
+
 Result<std::string, std::string>
 formatBenchmarkCaseListJson(const std::vector<BenchmarkCase> &cases,
                             std::string_view suite) {
@@ -2314,7 +2457,9 @@ formatBenchmarkCaseListJson(const std::vector<BenchmarkCase> &cases,
     }
     first = false;
     out << "    {\"id\": \"" << benchmarkCase->id << "\", \"suite\": \""
-        << benchmarkCase->suite << "\", \"description\": \""
+        << benchmarkCase->suite << "\", \"comparisonGroup\": \""
+        << benchmarkCase->comparisonGroup << "\", \"variant\": \""
+        << benchmarkCase->variant << "\", \"description\": \""
         << benchmarkCase->description << "\"}";
   }
   out << "\n  ]\n}\n";
@@ -2338,6 +2483,8 @@ formatBenchmarkCaseExplanationJson(const BenchmarkCase &benchmarkCase) {
   out << "{\n"
       << "  \"id\": \"" << benchmarkCase.id << "\",\n"
       << "  \"suite\": \"" << benchmarkCase.suite << "\",\n"
+      << "  \"comparisonGroup\": \"" << benchmarkCase.comparisonGroup << "\",\n"
+      << "  \"variant\": \"" << benchmarkCase.variant << "\",\n"
       << "  \"description\": \"" << benchmarkCase.description << "\",\n"
       << "  \"sceneKind\": \"" << benchmarkCase.scene.kind << "\",\n"
       << "  \"backend\": \"" << benchmarkCase.backend << "\",\n"
@@ -2352,6 +2499,8 @@ formatBenchmarkCaseExplanationText(const BenchmarkCase &benchmarkCase) {
   std::ostringstream out;
   out << benchmarkCase.id << "\n"
       << "suite: " << benchmarkCase.suite << "\n"
+      << "comparison group: " << benchmarkCase.comparisonGroup << "\n"
+      << "variant: " << benchmarkCase.variant << "\n"
       << "description: " << benchmarkCase.description << "\n"
       << "scene: " << benchmarkCase.scene.kind << "\n"
       << "backend: " << benchmarkCase.backend << "\n"
@@ -2372,6 +2521,8 @@ formatEffectiveConfigJson(const BenchmarkCase &benchmarkCase,
   std::ostringstream out;
   out << "{\n"
       << "  \"case\": \"" << benchmarkCase.id << "\",\n"
+      << "  \"comparisonGroup\": \"" << benchmarkCase.comparisonGroup << "\",\n"
+      << "  \"variant\": \"" << benchmarkCase.variant << "\",\n"
       << "  \"baselineProfile\": \"" << options.baselineProfileId << "\",\n"
       << "  \"profileAuthoritative\": "
       << (options.baselineProfileAuthoritative ? "true" : "false") << ",\n"
@@ -2396,6 +2547,8 @@ formatEffectiveConfigJson(const BenchmarkCase &benchmarkCase,
       << "  \"backendSource\": \"" << backendSource << "\",\n"
       << "  \"presentMode\": \"" << present << "\",\n"
       << "  \"presentModeSource\": \"" << presentSource << "\",\n"
+      << "  \"requiresMsaa4x\": "
+      << (benchmarkCase.requirements.msaa4x ? "true" : "false") << ",\n"
       << "  \"artifactDir\": \"" << options.artifactDir.generic_string()
       << "\"\n"
       << "}\n";
@@ -3215,6 +3368,18 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     report.environment.gpuVendorId = adapter.vendorId;
     report.environment.gpuDeviceId = adapter.deviceId;
     report.environment.gpuDriverVersion = adapter.driverVersion;
+    std::string gpuRequirementMessage;
+    auto gpuRequirements = checkBenchmarkGpuRequirements(
+        benchmarkCase.requirements, gpu->getMultisampleCapabilities(),
+        gpuRequirementMessage);
+    if (gpuRequirements.hasError()) {
+      result.exitCode = gpuRequirements.error();
+      result.message = gpuRequirementMessage;
+      report.run.validForComparison = false;
+      report.warnings.push_back(result.message);
+      computeBenchmarkReportStats(report);
+      return finalizeResult();
+    }
 
     TrackingMemoryResource rendererMemoryTracker;
     TrackingMemoryResource pipelineMemoryTracker;
@@ -3253,7 +3418,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
 
     RenderSettings settings = benchmarkCase.settings;
     Camera camera = makeBenchmarkCamera(benchmarkCase);
-    TemporalCameraHistoryState cameraHistory{};
+    TemporalFrameService temporalFrameService{};
     RenderFrameContext frameContext{};
     uint64_t frameIndex = 0u;
     double timeSeconds = 0.0;
@@ -3303,8 +3468,8 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
       }
       const double sceneCommitMs = elapsedMs(commitBegin);
       buildFrameContext(
-          frameContext, scene, *renderer, settings, cameraHistory, camera,
-          frameIndex, timeSeconds, benchmarkCase.fixedDeltaSeconds,
+          frameContext, scene, *renderer, settings, temporalFrameService,
+          camera, frameIndex, timeSeconds, benchmarkCase.fixedDeltaSeconds,
           benchmarkCase.resolution[0], benchmarkCase.resolution[1]);
       const auto renderBegin = std::chrono::steady_clock::now();
       auto renderResult = renderer->render(pipeline, frameContext);
@@ -3353,7 +3518,7 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
     }
 
     for (uint32_t sampleIndex = 0u; sampleIndex < samples; ++sampleIndex) {
-      cameraHistory = {};
+      temporalFrameService.reset();
       settings.antiAliasing.debug.resetHistoryRequested = true;
       for (uint32_t i = 0u; i < benchmarkCase.warmupFrames; ++i) {
         auto frameResult = renderOneFrame(sampleIndex, i, false);
@@ -3432,13 +3597,24 @@ BenchmarkRunResult runBenchmarkCase(BenchmarkCase benchmarkCase,
   tracySession.finish(report);
 
   computeBenchmarkReportStats(report);
-  if (report.stats.find("gpu.scopes_sum_ms") == report.stats.end()) {
-    if (std::find(report.unavailableMetrics.begin(),
+  const auto markUnavailable = [&](std::string_view metric) {
+    if (report.stats.find(std::string(metric)) == report.stats.end() &&
+        std::find(report.unavailableMetrics.begin(),
                   report.unavailableMetrics.end(),
-                  "gpu.scopes_sum_ms") == report.unavailableMetrics.end()) {
-      report.unavailableMetrics.push_back("gpu.scopes_sum_ms");
+                  metric) == report.unavailableMetrics.end()) {
+      report.unavailableMetrics.emplace_back(metric);
     }
-  }
+  };
+  markUnavailable("gpu.frame_ms");
+  markUnavailable("gpu.scopes_sum_ms");
+  markUnavailable("renderer.aa.motion_class_invalid_pixels");
+  markUnavailable("renderer.aa.motion_class_static_camera_only_pixels");
+  markUnavailable("renderer.aa.motion_class_full_pixels");
+  markUnavailable("renderer.aa.motion_class_background_rotation_pixels");
+  markUnavailable("renderer.aa.motion_class_invalid_ratio");
+  markUnavailable("renderer.aa.motion_class_static_camera_only_ratio");
+  markUnavailable("renderer.aa.motion_class_full_ratio");
+  markUnavailable("renderer.aa.motion_class_background_rotation_ratio");
   if (result.exitCode == BenchmarkExitCode::Success) {
     result.message = "benchmark run complete";
   }

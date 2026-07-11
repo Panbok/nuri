@@ -704,6 +704,8 @@ yyjson_mut_val *makeRendererMetricsObject(yyjson_mut_doc *doc,
                           aa.framesSinceHistoryReset);
   yyjson_mut_obj_add_real(doc, aaObject, "cameraPositionDelta",
                           aa.cameraPositionDelta);
+  yyjson_mut_obj_add_real(doc, aaObject, "cameraDirectionDelta",
+                          aa.cameraDirectionDelta);
   yyjson_mut_obj_add_real(doc, aaObject, "jitterDeltaMagnitude",
                           aa.jitterDeltaMagnitude);
   addString(doc, aaObject, "motionVectorFormat",
@@ -1234,6 +1236,8 @@ void readRendererMetrics(yyjson_val *object, RenderFrameMetrics &metrics) {
                                          aa.framesSinceHistoryReset);
     aa.cameraPositionDelta =
         readF32(aaObject, "cameraPositionDelta", aa.cameraPositionDelta);
+    aa.cameraDirectionDelta =
+        readF32(aaObject, "cameraDirectionDelta", aa.cameraDirectionDelta);
     aa.jitterDeltaMagnitude =
         readF32(aaObject, "jitterDeltaMagnitude", aa.jitterDeltaMagnitude);
     aa.motionVectorFormat =

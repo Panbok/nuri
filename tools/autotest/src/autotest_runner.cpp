@@ -1,6 +1,8 @@
 #include "nuri/tools/autotest/autotest_runner.h"
 
 #include "nuri/tools/autotest/autotest_manifest.h"
+#include "nuri/tools/autotest/autotest_motion_oracle.h"
+#include "nuri/tools/autotest/autotest_quality_oracle.h"
 #include "nuri/tools/autotest/autotest_record.h"
 #include "nuri/tools/autotest/autotest_timeline.h"
 #include "nuri/tools/core/baseline_profile.h"
@@ -735,6 +737,36 @@ void initializeDryRunCheckpoints(AutotestReport &report) {
           .statusReason = "dry_run",
       });
     }
+    if (checkpoint.motionOracle.has_value()) {
+      const AutotestMotionOracle &oracle = *checkpoint.motionOracle;
+      checkpointReport.motionOracle = AutotestMotionOracleReport{
+          .status = "unavailable",
+          .statusReason = "dry_run",
+          .motionTarget = oracle.motionTarget,
+          .motionClassTarget = oracle.motionClassTarget,
+          .roi = oracle.roi,
+          .expectedVelocityPixels = {oracle.expectedVelocityPixels.x,
+                                     oracle.expectedVelocityPixels.y},
+          .p95ErrorMaxPixels = oracle.p95ErrorMaxPixels,
+          .maxErrorMaxPixels = oracle.maxErrorMaxPixels,
+      };
+    }
+    if (checkpoint.qualityOracle.has_value()) {
+      const AutotestQualityOracle &oracle = *checkpoint.qualityOracle;
+      checkpointReport.qualityOracle = AutotestQualityOracleReport{
+          .status = "unavailable",
+          .statusReason = oracle.reference.available
+                              ? "dry_run"
+                              : oracle.reference.unavailableReason,
+          .outputTarget = oracle.outputTarget,
+          .referencePath = oracle.reference.path.generic_string(),
+          .schemaVersion = oracle.schemaVersion,
+          .referenceVersion = oracle.reference.version,
+          .maskVersion = oracle.mask.has_value() ? oracle.mask->version : 0u,
+          .lscale = oracle.lscale,
+          .budgets = oracle.budgets,
+      };
+    }
     report.checkpoints.push_back(std::move(checkpointReport));
   }
   for (const AutotestMetricWindow &window : report.testCase.metricWindows) {
@@ -888,6 +920,314 @@ baselineCheckpointDir(const AutotestCase &testCase,
   return AutotestExitCode::ScenarioFailure;
 }
 
+[[nodiscard]] AutotestMotionOracleReport
+makeMotionOracleReport(const AutotestMotionOracle &oracle) {
+  AutotestMotionOracleReport report{};
+  report.motionTarget = oracle.motionTarget;
+  report.motionClassTarget = oracle.motionClassTarget;
+  report.roi = oracle.roi;
+  report.expectedVelocityPixels = {oracle.expectedVelocityPixels.x,
+                                   oracle.expectedVelocityPixels.y};
+  report.p95ErrorMaxPixels = oracle.p95ErrorMaxPixels;
+  report.maxErrorMaxPixels = oracle.maxErrorMaxPixels;
+  return report;
+}
+
+[[nodiscard]] AutotestQualityOracleReport
+makeQualityOracleReport(const AutotestQualityOracle &oracle) {
+  AutotestQualityOracleReport report{};
+  report.outputTarget = oracle.outputTarget;
+  report.referencePath = oracle.reference.path.generic_string();
+  report.schemaVersion = oracle.schemaVersion;
+  report.referenceVersion = oracle.reference.version;
+  report.maskVersion = oracle.mask.has_value() ? oracle.mask->version : 0u;
+  report.lscale = oracle.lscale;
+  report.budgets = oracle.budgets;
+  return report;
+}
+
+[[nodiscard]] const AutotestCaptureReport *
+findAutotestCaptureReport(const AutotestCheckpointReport &checkpoint,
+                          std::string_view target) {
+  const auto found =
+      std::find_if(checkpoint.captures.begin(), checkpoint.captures.end(),
+                   [&](const AutotestCaptureReport &capture) {
+                     return capture.target == target;
+                   });
+  return found == checkpoint.captures.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] AutotestExitCode evaluateCheckpointMotionOracle(
+    const AutotestCase &testCase, const AutotestCheckpoint &checkpoint,
+    const std::filesystem::path &caseDir,
+    AutotestCheckpointReport &checkpointReport, std::string &message) {
+  if (!checkpoint.motionOracle.has_value()) {
+    return AutotestExitCode::Success;
+  }
+  const AutotestMotionOracle &oracle = *checkpoint.motionOracle;
+  AutotestMotionOracleReport oracleReport = makeMotionOracleReport(oracle);
+  const AutotestCaptureReport *motionCapture =
+      findAutotestCaptureReport(checkpointReport, oracle.motionTarget);
+  if (motionCapture == nullptr || motionCapture->snapshot.actual.empty()) {
+    oracleReport.status = "unavailable";
+    oracleReport.statusReason = "motion_capture_unavailable";
+    checkpointReport.motionOracle = std::move(oracleReport);
+    message = "motion oracle capture unavailable";
+    return AutotestExitCode::EnvironmentUnavailable;
+  }
+  const std::filesystem::path motionPath =
+      caseDir / motionCapture->snapshot.actual;
+  if (motionPath.extension() != ".exr") {
+    oracleReport.status = "error";
+    oracleReport.statusReason = "motion_capture_not_exr";
+    checkpointReport.motionOracle = std::move(oracleReport);
+    message = "motion oracle requires a motion_vectors EXR artifact";
+    return AutotestExitCode::RuntimeError;
+  }
+  auto motionImage = nuri::tools::snapshot::readSnapshotImageFile(motionPath);
+  if (motionImage.hasError()) {
+    oracleReport.status = "error";
+    oracleReport.statusReason = "motion_capture_decode_failed";
+    checkpointReport.motionOracle = std::move(oracleReport);
+    message = motionImage.error();
+    return AutotestExitCode::RuntimeError;
+  }
+  if (motionImage.value().width != testCase.resolution[0] ||
+      motionImage.value().height != testCase.resolution[1]) {
+    oracleReport.status = "error";
+    oracleReport.statusReason = "motion_capture_resolution_mismatch";
+    checkpointReport.motionOracle = std::move(oracleReport);
+    message = "motion oracle capture resolution differs from the manifest";
+    return AutotestExitCode::RuntimeError;
+  }
+
+  std::optional<nuri::tools::snapshot::SnapshotImage> motionClassImage;
+  if (!oracle.motionClassTarget.empty()) {
+    const AutotestCaptureReport *classCapture =
+        findAutotestCaptureReport(checkpointReport, oracle.motionClassTarget);
+    if (classCapture == nullptr || classCapture->snapshot.actual.empty()) {
+      oracleReport.status = "unavailable";
+      oracleReport.statusReason = "motion_class_capture_unavailable";
+      checkpointReport.motionOracle = std::move(oracleReport);
+      message = "motion oracle class capture unavailable";
+      return AutotestExitCode::EnvironmentUnavailable;
+    }
+    auto loaded = nuri::tools::snapshot::readSnapshotImageFile(
+        caseDir / classCapture->snapshot.actual);
+    if (loaded.hasError()) {
+      oracleReport.status = "error";
+      oracleReport.statusReason = "motion_class_decode_failed";
+      checkpointReport.motionOracle = std::move(oracleReport);
+      message = loaded.error();
+      return AutotestExitCode::RuntimeError;
+    }
+    motionClassImage = std::move(loaded.value());
+  }
+
+  auto evaluated = evaluateAutotestMotionOracle(
+      oracle, motionImage.value(),
+      motionClassImage.has_value() ? &*motionClassImage : nullptr);
+  if (evaluated.hasError()) {
+    oracleReport.status = "error";
+    oracleReport.statusReason = "motion_oracle_evaluation_failed";
+    checkpointReport.motionOracle = std::move(oracleReport);
+    message = evaluated.error();
+    return AutotestExitCode::RuntimeError;
+  }
+  checkpointReport.motionOracle = std::move(evaluated.value());
+  if (checkpointReport.motionOracle->status == "fail") {
+    message = "motion oracle threshold failure";
+    return AutotestExitCode::ScenarioFailure;
+  }
+  return AutotestExitCode::Success;
+}
+
+[[nodiscard]] const AutotestCheckpointReport *
+findAutotestCheckpointReport(const AutotestReport &report,
+                             std::string_view id) {
+  const auto found =
+      std::find_if(report.checkpoints.begin(), report.checkpoints.end(),
+                   [&](const AutotestCheckpointReport &checkpoint) {
+                     return checkpoint.id == id;
+                   });
+  return found == report.checkpoints.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] AutotestExitCode evaluateCheckpointQualityOracle(
+    const AutotestCheckpoint &checkpoint, const std::filesystem::path &caseDir,
+    const AutotestReport &report, AutotestCheckpointReport &checkpointReport,
+    std::string &message) {
+  if (!checkpoint.qualityOracle.has_value()) {
+    return AutotestExitCode::Success;
+  }
+  const AutotestQualityOracle &oracle = *checkpoint.qualityOracle;
+  AutotestQualityOracleReport oracleReport = makeQualityOracleReport(oracle);
+  const auto unavailable = [&](std::string reason, std::string description) {
+    oracleReport.status = "unavailable";
+    oracleReport.statusReason = std::move(reason);
+    checkpointReport.qualityOracle = std::move(oracleReport);
+    message = std::move(description);
+    return AutotestExitCode::EnvironmentUnavailable;
+  };
+  const auto runtimeError = [&](std::string reason, std::string description) {
+    oracleReport.status = "error";
+    oracleReport.statusReason = std::move(reason);
+    checkpointReport.qualityOracle = std::move(oracleReport);
+    message = std::move(description);
+    return AutotestExitCode::RuntimeError;
+  };
+  if (!oracle.reference.available) {
+    return unavailable(oracle.reference.unavailableReason,
+                       "quality oracle reference is not generated");
+  }
+  const AutotestCaptureReport *outputCapture =
+      findAutotestCaptureReport(checkpointReport, oracle.outputTarget);
+  if (outputCapture == nullptr || outputCapture->snapshot.actual.empty()) {
+    return unavailable("output_capture_unavailable",
+                       "quality oracle output capture unavailable");
+  }
+  const std::filesystem::path outputPath =
+      caseDir / outputCapture->snapshot.actual;
+  if (outputPath.extension() != ".exr") {
+    return runtimeError("output_capture_not_exr",
+                        "quality oracle requires a linear HDR EXR output");
+  }
+  auto referencePath =
+      resolveAutotestPath(oracle.reference.pathBase, oracle.reference.path);
+  if (referencePath.hasError()) {
+    return unavailable("reference_path_unavailable", referencePath.error());
+  }
+  if (!std::filesystem::exists(referencePath.value())) {
+    oracleReport.status = "unavailable";
+    oracleReport.statusReason = "reference_missing";
+    checkpointReport.qualityOracle = std::move(oracleReport);
+    message = "quality oracle immutable reference is missing";
+    return AutotestExitCode::MissingBaseline;
+  }
+  auto outputImage = nuri::tools::snapshot::readSnapshotImageFile(outputPath);
+  auto referenceImage =
+      nuri::tools::snapshot::readSnapshotImageFile(referencePath.value());
+  if (outputImage.hasError() || referenceImage.hasError()) {
+    return runtimeError("hdr_decode_failed", outputImage.hasError()
+                                                 ? outputImage.error()
+                                                 : referenceImage.error());
+  }
+
+  std::optional<nuri::tools::snapshot::SnapshotImage> maskImage;
+  if (oracle.mask.has_value()) {
+    auto maskPath =
+        resolveAutotestPath(oracle.mask->pathBase, oracle.mask->path);
+    if (maskPath.hasError() || !std::filesystem::exists(maskPath.value())) {
+      return unavailable("mask_unavailable",
+                         maskPath.hasError() ? maskPath.error()
+                                             : "quality oracle mask missing");
+    }
+    auto loaded =
+        nuri::tools::snapshot::readSnapshotImageFile(maskPath.value());
+    if (loaded.hasError()) {
+      return runtimeError("mask_decode_failed", loaded.error());
+    }
+    maskImage = std::move(loaded.value());
+  }
+
+  std::optional<nuri::tools::snapshot::SnapshotImage> previousOutputImage;
+  std::optional<nuri::tools::snapshot::SnapshotImage> previousReferenceImage;
+  std::optional<nuri::tools::snapshot::SnapshotImage> analyticMotionImage;
+  std::optional<nuri::tools::snapshot::SnapshotImage> revealMaskImage;
+  if (oracle.temporal.has_value()) {
+    const AutotestQualityOracleTemporal &temporal = *oracle.temporal;
+    if (!temporal.previousReference.available) {
+      return unavailable(temporal.previousReference.unavailableReason,
+                         "quality oracle previous reference is not generated");
+    }
+    const AutotestCheckpointReport *previousCheckpoint =
+        findAutotestCheckpointReport(report, temporal.previousCheckpoint);
+    const AutotestCaptureReport *previousOutput =
+        previousCheckpoint != nullptr
+            ? findAutotestCaptureReport(*previousCheckpoint,
+                                        temporal.previousOutputTarget)
+            : nullptr;
+    if (previousOutput == nullptr || previousOutput->snapshot.actual.empty()) {
+      return unavailable("previous_output_unavailable",
+                         "quality oracle previous output unavailable");
+    }
+    const AutotestCaptureReport *motionCapture =
+        findAutotestCaptureReport(checkpointReport, temporal.motionTarget);
+    if (motionCapture == nullptr || motionCapture->snapshot.actual.empty()) {
+      return unavailable("analytic_motion_unavailable",
+                         "quality oracle analytic motion unavailable");
+    }
+    auto previousReferencePath = resolveAutotestPath(
+        temporal.previousReference.pathBase, temporal.previousReference.path);
+    auto revealPath = resolveAutotestPath(temporal.revealMask.pathBase,
+                                          temporal.revealMask.path);
+    if (previousReferencePath.hasError() || revealPath.hasError()) {
+      return unavailable("temporal_reference_path_unavailable",
+                         previousReferencePath.hasError()
+                             ? previousReferencePath.error()
+                             : revealPath.error());
+    }
+    if (!std::filesystem::exists(previousReferencePath.value())) {
+      oracleReport.status = "unavailable";
+      oracleReport.statusReason = "previous_reference_missing";
+      checkpointReport.qualityOracle = std::move(oracleReport);
+      message = "quality oracle previous immutable reference is missing";
+      return AutotestExitCode::MissingBaseline;
+    }
+    if (!std::filesystem::exists(revealPath.value())) {
+      return unavailable("reveal_mask_unavailable",
+                         "quality oracle reveal mask missing");
+    }
+    auto previousOutputLoaded = nuri::tools::snapshot::readSnapshotImageFile(
+        caseDir / previousOutput->snapshot.actual);
+    auto previousReferenceLoaded = nuri::tools::snapshot::readSnapshotImageFile(
+        previousReferencePath.value());
+    auto motionLoaded = nuri::tools::snapshot::readSnapshotImageFile(
+        caseDir / motionCapture->snapshot.actual);
+    auto revealLoaded =
+        nuri::tools::snapshot::readSnapshotImageFile(revealPath.value());
+    if (previousOutputLoaded.hasError() || previousReferenceLoaded.hasError() ||
+        motionLoaded.hasError() || revealLoaded.hasError()) {
+      const std::string error =
+          previousOutputLoaded.hasError()
+              ? previousOutputLoaded.error()
+              : (previousReferenceLoaded.hasError()
+                     ? previousReferenceLoaded.error()
+                     : (motionLoaded.hasError() ? motionLoaded.error()
+                                                : revealLoaded.error()));
+      return runtimeError("temporal_input_decode_failed", error);
+    }
+    previousOutputImage = std::move(previousOutputLoaded.value());
+    previousReferenceImage = std::move(previousReferenceLoaded.value());
+    analyticMotionImage = std::move(motionLoaded.value());
+    revealMaskImage = std::move(revealLoaded.value());
+  }
+
+  const AutotestQualityOracleInputs inputs{
+      .output = &outputImage.value(),
+      .reference = &referenceImage.value(),
+      .mask = maskImage.has_value() ? &*maskImage : nullptr,
+      .previousOutput =
+          previousOutputImage.has_value() ? &*previousOutputImage : nullptr,
+      .previousReference = previousReferenceImage.has_value()
+                               ? &*previousReferenceImage
+                               : nullptr,
+      .analyticMotion =
+          analyticMotionImage.has_value() ? &*analyticMotionImage : nullptr,
+      .revealMask = revealMaskImage.has_value() ? &*revealMaskImage : nullptr,
+  };
+  auto evaluated = evaluateAutotestQualityOracle(oracle, inputs);
+  if (evaluated.hasError()) {
+    return runtimeError("quality_oracle_evaluation_failed", evaluated.error());
+  }
+  checkpointReport.qualityOracle = std::move(evaluated.value());
+  if (checkpointReport.qualityOracle->status == "fail") {
+    message = "quality oracle threshold failure";
+    return AutotestExitCode::ScenarioFailure;
+  }
+  return AutotestExitCode::Success;
+}
+
 } // namespace
 
 Result<std::string, std::string>
@@ -942,7 +1282,9 @@ formatAutotestCaseExplanationJson(const AutotestCase &testCase) {
         << "\", \"frame\": " << checkpoint.frame
         << ", \"captures\": " << checkpoint.captures.size()
         << ", \"readouts\": " << checkpoint.readouts.size()
-        << ", \"assertions\": " << checkpoint.assertions.size() << "}";
+        << ", \"assertions\": " << checkpoint.assertions.size()
+        << ", \"motionOracle\": "
+        << (checkpoint.motionOracle.has_value() ? "true" : "false") << "}";
   }
   out << "\n  ]\n}\n";
   return Result<std::string, std::string>::makeResult(out.str());
@@ -964,7 +1306,8 @@ std::string formatAutotestCaseExplanationText(const AutotestCase &testCase) {
     out << "  " << checkpoint.id << " frame=" << checkpoint.frame
         << " captures=" << checkpoint.captures.size()
         << " readouts=" << checkpoint.readouts.size()
-        << " assertions=" << checkpoint.assertions.size() << "\n";
+        << " assertions=" << checkpoint.assertions.size() << " motionOracle="
+        << (checkpoint.motionOracle.has_value() ? "yes" : "no") << "\n";
   }
   return out.str();
 }
@@ -1211,7 +1554,7 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
           makeToolCameraDesc(frame.camera));
       nuri::tools::runtime::buildToolFrameContext(
           runtime->frameContext(), runtime->scene(), runtime->renderer(),
-          settings, runtime->cameraHistory(), camera,
+          settings, runtime->temporalFrameService(), camera,
           nuri::tools::runtime::ToolFrameDesc{
               .frameIndex = frame.frame,
               .timeSeconds = timeSeconds,
@@ -1320,6 +1663,26 @@ AutotestRunResult runAutotestCase(AutotestCase testCase,
               .compare = compare,
               .snapshot = std::move(capture),
           });
+        }
+        std::string motionOracleMessage;
+        const AutotestExitCode motionOracleCode =
+            evaluateCheckpointMotionOracle(testCase, *checkpoint, caseDir,
+                                           checkpointReport,
+                                           motionOracleMessage);
+        if (aggregatePrecedence(motionOracleCode) >
+            aggregatePrecedence(result.exitCode)) {
+          result.exitCode = motionOracleCode;
+          result.message = std::move(motionOracleMessage);
+        }
+        std::string qualityOracleMessage;
+        const AutotestExitCode qualityOracleCode =
+            evaluateCheckpointQualityOracle(*checkpoint, caseDir, report,
+                                            checkpointReport,
+                                            qualityOracleMessage);
+        if (aggregatePrecedence(qualityOracleCode) >
+            aggregatePrecedence(result.exitCode)) {
+          result.exitCode = qualityOracleCode;
+          result.message = std::move(qualityOracleMessage);
         }
         checkpointReport.assertions = evaluateAutotestAssertions(
             checkpoint->assertions, checkpointReport.measurements);

@@ -695,7 +695,7 @@ struct ToolRendererRuntime::Impl {
   RenderScene scene;
   std::optional<ScenePrefab> prefab{};
   std::optional<ScenePrefabAssets> prefabAssets{};
-  TemporalCameraHistoryState cameraHistory{};
+  TemporalFrameService temporalFrameService{};
   RenderFrameContext frameContext{};
 };
 
@@ -714,8 +714,8 @@ RenderScene &ToolRendererRuntime::scene() noexcept { return impl_->scene; }
 RenderFrameContext &ToolRendererRuntime::frameContext() noexcept {
   return impl_->frameContext;
 }
-TemporalCameraHistoryState &ToolRendererRuntime::cameraHistory() noexcept {
-  return impl_->cameraHistory;
+TemporalFrameService &ToolRendererRuntime::temporalFrameService() noexcept {
+  return impl_->temporalFrameService;
 }
 uint32_t ToolRendererRuntime::swapchainImageCount() const noexcept {
   return impl_->gpu != nullptr ? impl_->gpu->getSwapchainImageCount() : 0u;
@@ -792,7 +792,7 @@ Camera makeToolCamera(const ToolCameraDesc &desc) {
 
 void buildToolFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
                            Renderer &renderer, RenderSettings &settings,
-                           TemporalCameraHistoryState &cameraHistory,
+                           TemporalFrameService &temporalFrameService,
                            const Camera &camera, const ToolFrameDesc &desc) {
   frameContext.scene = &scene;
   frameContext.resources = &renderer.resources();
@@ -805,14 +805,23 @@ void buildToolFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
       .materialTableVersion = materialSnapshot.version,
       .environmentVersion = scene.environmentVersion(),
   };
-  frameContext.camera = makeTemporalCameraFrameState(
+  auto planResult = buildPresentationAAPlan(
+      settings, {}, renderer.resources().gpuMultisampleCapabilities());
+  NURI_ASSERT(!planResult.hasError(), "Invalid presentation AA plan: %s",
+              planResult.error().c_str());
+  frameContext.presentationAA = planResult.value();
+  auto cameraResult = temporalFrameService.prepareFrame(
       camera, static_cast<float>(desc.width) / static_cast<float>(desc.height),
-      settings.antiAliasing,
+      settings.antiAliasing, frameContext.presentationAA,
       TemporalCameraFrameDesc{.renderExtent =
                                   glm::uvec2(desc.width, desc.height),
                               .sceneContent = sceneContent,
                               .cameraCutRequested = desc.cameraCutRequested},
-      cameraHistory);
+      desc.frameIndex, desc.timeSeconds, desc.deltaSeconds);
+  NURI_ASSERT(!cameraResult.hasError(), "Temporal frame prepare failed: %s",
+              cameraResult.error().c_str());
+  frameContext.camera = cameraResult.value();
+  frameContext.temporalFrameService = &temporalFrameService;
   settings.antiAliasing.debug.resetHistoryRequested = false;
   frameContext.settings = &settings;
   frameContext.metrics = {};

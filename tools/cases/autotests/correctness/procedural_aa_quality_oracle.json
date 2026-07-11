@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.aa_quality_oracle",
+  "suite": "correctness",
+  "description": "Dry-run contract for deterministic scene-referred HDR AA quality evaluation",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 73,
+    "contentHash": "nuri.procedural.reactive_mask.v1:73"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 4,
+  "endFrame": 8,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [0.0, 0.85, 3.6],
+    "target": [0.0, 0.55, 0.0],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {
+      "enableInstanceAnimation": false
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "quality_oracle_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "converged",
+      "frame": 8,
+      "captures": [
+        {
+          "target": "frame_color_hdr",
+          "profile": "hdr_color",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "qualityOracle": {
+        "schemaVersion": 1,
+        "outputTarget": "frame_color_hdr",
+        "reference": {
+          "version": 1,
+          "pathBase": "repoRoot",
+          "path": "tools/references/aa/v1/correctness.procedural.aa_quality_oracle/converged_frame_color_hdr.exr",
+          "available": false,
+          "unavailableReason": "reference_not_generated"
+        },
+        "lscale": 0.0,
+        "budgets": {
+          "normalizedMaeMax": 0.02,
+          "normalizedRmseMax": 0.02,
+          "lumaSsimMin": 0.95,
+          "darkCollapsePercentMax": 0.1,
+          "darkCollapseComponentMaxPixels": 4,
+          "relativeLumaEnergyDriftMax": 0.05,
+          "edgeWidthRatioMin": 0.9,
+          "edgeWidthRatioMax": 1.1,
+          "edgeOvershootMax": 0.05,
+          "edgeUndershootMax": 0.05,
+          "temporalErrorMax": 0.02,
+          "ghostEnergyMax": 0.02,
+          "recoveryRmseMax": 0.02
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

@@ -648,9 +648,12 @@ validateApprovalCandidate(const AutotestCase &expectedCase,
     return Result<bool, std::string>::makeError(
         "autotest baseline candidate case is invalid: " + valid.error());
   }
+  valid = validateAutotestIdentifier(expectedCase.id, "case", true);
+  if (valid.hasError()) {
+    return Result<bool, std::string>::makeError(valid.error());
+  }
   for (const auto &[value, field] :
-       {std::pair{std::string_view(expectedCase.id), std::string_view("case")},
-        std::pair{std::string_view(expectedCase.suite),
+       {std::pair{std::string_view(expectedCase.suite),
                   std::string_view("suite")},
         std::pair{baselineProfile, std::string_view("baseline profile")}}) {
     valid = validateAutotestIdentifier(value, field, false);
@@ -853,9 +856,13 @@ verifyAutotestBaseline(const AutotestCase &expectedCase,
     return Result<bool, std::string>::makeError("verifyAutotestBaseline: " +
                                                 valid.error());
   }
+  valid = validateAutotestIdentifier(expectedCase.id, "case", true);
+  if (valid.hasError()) {
+    return Result<bool, std::string>::makeError("verifyAutotestBaseline: " +
+                                                valid.error());
+  }
   for (const auto &[value, field] :
-       {std::pair{std::string_view(expectedCase.id), std::string_view("case")},
-        std::pair{std::string_view(expectedCase.suite),
+       {std::pair{std::string_view(expectedCase.suite),
                   std::string_view("suite")},
         std::pair{baselineProfile, std::string_view("baseline profile")}}) {
     valid = validateAutotestIdentifier(value, field, false);
@@ -1230,9 +1237,13 @@ inspectAutotestBaseline(const AutotestCase &expectedCase,
     return Result<std::string, std::string>::makeError(
         "inspectAutotestBaseline: " + valid.error());
   }
+  valid = validateAutotestIdentifier(expectedCase.id, "case", true);
+  if (valid.hasError()) {
+    return Result<std::string, std::string>::makeError(
+        "inspectAutotestBaseline: " + valid.error());
+  }
   for (const auto &[value, field] :
-       {std::pair{std::string_view(expectedCase.id), std::string_view("case")},
-        std::pair{std::string_view(expectedCase.suite),
+       {std::pair{std::string_view(expectedCase.suite),
                   std::string_view("suite")},
         std::pair{baselineProfile, std::string_view("baseline profile")}}) {
     valid = validateAutotestIdentifier(value, field, false);

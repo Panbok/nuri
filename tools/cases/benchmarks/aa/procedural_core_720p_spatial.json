@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.procedural_core_720p.spatial",
+  "suite": "aa",
+  "comparisonGroup": "aa.procedural_core_720p",
+  "variant": "spatial",
+  "description": "AA-16 procedural core shadow-plane pan paired variant: Spatial",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.shadow_planes.v1",
+    "seed": 67,
+    "contentHash": "nuri.procedural.shadow_planes.v1:67"
+  },
+  "backend": "nvrhi",
+  "resolution": [
+    1280,
+    720
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30,
+  "measurementFrames": 300,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 5,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [
+      -0.85,
+      0.65,
+      3.8
+    ],
+    "target": [
+      0,
+      0,
+      -0.35
+    ],
+    "verticalFovDegrees": 58,
+    "nearPlane": 0.05,
+    "farPlane": 500
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "procedural_core_pan",
+        "startFrame": 0,
+        "endFrame": 329,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [
+              -0.85,
+              0.65,
+              3.8
+            ],
+            "target": [
+              0,
+              0,
+              -0.35
+            ]
+          },
+          {
+            "frame": 165,
+            "position": [
+              0.85,
+              0.72,
+              3.55
+            ],
+            "target": [
+              0,
+              0,
+              -0.35
+            ]
+          },
+          {
+            "frame": 329,
+            "position": [
+              -0.85,
+              0.65,
+              3.8
+            ],
+            "target": [
+              0,
+              0,
+              -0.35
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "SpatialFallback",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:common/flat_plane.obj"
+    ],
+    "backends": [
+      "nvrhi"
+    ],
+    "allowVisibleWindow": true,
+    "msaa4x": false
+  },
+  "thresholds": {
+    "failPercent": 12,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes.gtao_ms",
+    "gpu.scopes.shadow_ms",
+    "gpu.scopes_sum_ms"
+  ]
+}

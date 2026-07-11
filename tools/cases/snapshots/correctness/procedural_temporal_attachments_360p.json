@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "correctness.procedural.temporal_attachments_360p",
   "suite": "correctness",
-  "description": "Typed color, depth, normal, velocity, and mask captures from a moving non-empty procedural scene",
+  "description": "Typed full-stack temporal, GTAO, and shadow captures from a moving non-empty procedural scene",
   "scene": {
     "kind": "procedural",
     "generator": "nuri.procedural.reactive_mask.v1",
@@ -42,15 +42,16 @@
     },
     "antiAliasing": {
       "mode": "TAA",
-      "qualityPreset": "Quality"
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {
       "mode": "GTAO",
-      "preset": "Balanced"
+      "preset": "Ultra"
     },
     "shadow": {
-      "enabled": false,
-      "qualityPreset": "Low"
+      "enabled": true,
+      "qualityPreset": "Ultra"
     },
     "hdrPostProcess": {
       "bloomEnabled": false,
@@ -75,9 +76,17 @@
   "captures": [
     {"target": "final_color", "profile": "ldr_color", "required": true},
     {"target": "scene_color_hdr", "profile": "hdr_color", "required": true},
+    {"target": "frame_color_hdr", "profile": "hdr_color", "required": true},
     {"target": "scene_depth", "profile": "depth", "required": true},
     {"target": "material_normals", "profile": "normal", "required": true},
     {"target": "motion_vectors", "profile": "velocity", "required": true},
-    {"target": "reactive_mask", "profile": "mask", "required": true}
+    {"target": "reactive_mask", "profile": "mask", "required": true},
+    {"target": "motion_class", "profile": "mask", "required": true},
+    {"target": "ambient_occlusion", "profile": "scalar", "required": true},
+    {"target": "gtao_edges", "profile": "mask", "required": true},
+    {"target": "gtao_current", "profile": "scalar", "required": true},
+    {"target": "gtao_history", "profile": "scalar", "required": true},
+    {"target": "gtao_previous_depth", "profile": "depth", "required": true},
+    {"target": "shadow_cascade_0", "profile": "shadow_depth", "required": true}
   ]
 }

@@ -27,6 +27,9 @@ using JsonType = nuri::tools::core::JsonFieldType;
   if (statistic == "p95") {
     return stats.p95;
   }
+  if (statistic == "p99") {
+    return stats.p99;
+  }
   if (statistic == "p90") {
     return stats.p90;
   }
@@ -407,6 +410,8 @@ compareBenchmarkReports(const BenchmarkReport &current,
                            requireStatisticalAgreement);
     compareMetricStatistic(out, current, baseline, metric, "p95", true,
                            requireStatisticalAgreement);
+    compareMetricStatistic(out, current, baseline, metric, "p99", true,
+                           requireStatisticalAgreement);
   }
 
   std::set<std::string> optionalMetrics;
@@ -430,6 +435,8 @@ compareBenchmarkReports(const BenchmarkReport &current,
     compareMetricStatistic(out, current, baseline, metric, "median", false,
                            requireStatisticalAgreement);
     compareMetricStatistic(out, current, baseline, metric, "p95", false,
+                           requireStatisticalAgreement);
+    compareMetricStatistic(out, current, baseline, metric, "p99", false,
                            requireStatisticalAgreement);
   }
 

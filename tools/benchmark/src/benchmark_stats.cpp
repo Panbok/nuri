@@ -46,6 +46,7 @@ computeMetricStats(std::vector<double> values) {
   stats.median = percentileR7(values, 0.50);
   stats.p90 = percentileR7(values, 0.90);
   stats.p95 = percentileR7(values, 0.95);
+  stats.p99 = percentileR7(values, 0.99);
 
   if (values.size() >= 2u) {
     double variance = 0.0;

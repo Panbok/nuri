@@ -555,6 +555,7 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
 
   if (yyjson_val *aa = optionalObject(object, "antiAliasing")) {
     static constexpr std::array aaKeys{std::string_view("mode"),
+                                       std::string_view("temporalProvider"),
                                        std::string_view("qualityPreset")};
     result = rejectUnknownKeys(aa, aaKeys, "settings.antiAliasing");
     if (result.hasError()) {
@@ -566,6 +567,15 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
          {"TAA", AntiAliasingMode::TAA},
          {"SpatialFallback", AntiAliasingMode::SpatialFallback},
          {"MSAA4x", AntiAliasingMode::MSAA4x}});
+    if (result.hasError()) {
+      return result;
+    }
+    result =
+        readEnumField(aa, "temporalProvider", "settings.antiAliasing",
+                      settings.antiAliasing.temporalProvider,
+                      {{"Legacy", TemporalReconstructionProvider::Legacy},
+                       {"Reference", TemporalReconstructionProvider::Reference},
+                       {"External", TemporalReconstructionProvider::External}});
     if (result.hasError()) {
       return result;
     }

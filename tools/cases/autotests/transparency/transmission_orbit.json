@@ -33,7 +33,16 @@
     },
     "antiAliasing": {
       "mode": "TAA",
-      "qualityPreset": "Quality"
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
     }
   },
   "timeline": {

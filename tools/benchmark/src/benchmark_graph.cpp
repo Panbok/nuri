@@ -35,6 +35,9 @@ namespace {
   if (statistic == "p95") {
     return stats.p95;
   }
+  if (statistic == "p99") {
+    return stats.p99;
+  }
   if (statistic == "max") {
     return stats.max;
   }
@@ -58,17 +61,12 @@ namespace {
 
 [[nodiscard]] bool validStatistic(std::string_view statistic) {
   static constexpr std::array values{
-      std::string_view("min"),
-      std::string_view("median"),
-      std::string_view("p90"),
-      std::string_view("p95"),
-      std::string_view("max"),
-      std::string_view("mean"),
-      std::string_view("stddev"),
-      std::string_view("mad"),
-      std::string_view("iqr"),
-      std::string_view("cv"),
-      std::string_view("coefficientOfVariation"),
+      std::string_view("min"),  std::string_view("median"),
+      std::string_view("p90"),  std::string_view("p95"),
+      std::string_view("p99"),  std::string_view("max"),
+      std::string_view("mean"), std::string_view("stddev"),
+      std::string_view("mad"),  std::string_view("iqr"),
+      std::string_view("cv"),   std::string_view("coefficientOfVariation"),
   };
   return std::find(values.begin(), values.end(), statistic) != values.end();
 }
@@ -298,7 +296,7 @@ selectMetrics(std::span<const BenchmarkReport> reports,
 [[nodiscard]] std::vector<std::string>
 selectStatistics(const BenchmarkGraphOptions &options) {
   if (options.statistics.empty()) {
-    return {"median", "p95"};
+    return {"median", "p95", "p99"};
   }
   return options.statistics;
 }

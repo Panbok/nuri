@@ -52,7 +52,9 @@ public:
   [[nodiscard]] size_t ownedMetricIdCount() const noexcept;
 
   [[nodiscard]] iterator begin() noexcept { return values_.begin(); }
-  [[nodiscard]] const_iterator begin() const noexcept { return values_.begin(); }
+  [[nodiscard]] const_iterator begin() const noexcept {
+    return values_.begin();
+  }
   [[nodiscard]] iterator end() noexcept { return values_.end(); }
   [[nodiscard]] const_iterator end() const noexcept { return values_.end(); }
 

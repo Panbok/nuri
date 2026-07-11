@@ -14,6 +14,7 @@ struct MetricStats {
   double median = 0.0;
   double p90 = 0.0;
   double p95 = 0.0;
+  double p99 = 0.0;
   double max = 0.0;
   double mean = 0.0;
   double stddev = 0.0;

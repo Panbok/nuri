@@ -95,8 +95,8 @@ struct ResultEnvelopeV2 {
 };
 
 [[nodiscard]] std::string_view resultToolV2Name(ResultToolV2 tool) noexcept;
-[[nodiscard]] std::string_view resultDiagnosticSeverityV2Name(
-    ResultDiagnosticSeverityV2 severity) noexcept;
+[[nodiscard]] std::string_view
+resultDiagnosticSeverityV2Name(ResultDiagnosticSeverityV2 severity) noexcept;
 [[nodiscard]] std::string_view
 resultArtifactStatusV2Name(ResultArtifactStatusV2 status) noexcept;
 

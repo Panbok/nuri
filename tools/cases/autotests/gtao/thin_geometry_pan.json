@@ -13,7 +13,7 @@
   "resolution": [640, 360],
   "fixedDeltaSeconds": 0.016666667,
   "warmupFrames": 4,
-  "endFrame": 12,
+  "endFrame": 40,
   "authoritative": false,
   "presentMode": "immediate",
   "windowMode": "visible",
@@ -27,14 +27,16 @@
   "settings": {
     "antiAliasing": {
       "mode": "TAA",
-      "qualityPreset": "Quality"
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {
       "mode": "GTAO",
-      "preset": "High"
+      "preset": "Ultra"
     },
     "shadow": {
-      "enabled": false
+      "enabled": true,
+      "qualityPreset": "Ultra"
     }
   },
   "timeline": {
@@ -42,8 +44,8 @@
       {
         "id": "gtao_probe_pan",
         "startFrame": 0,
-        "endFrame": 12,
-        "interpolation": "smoothstep",
+        "endFrame": 40,
+        "interpolation": "linear",
         "keyframes": [
           {
             "frame": 0,
@@ -51,22 +53,54 @@
             "target": [0.0, 0.0, -0.35]
           },
           {
-            "frame": 12,
+            "frame": 8,
+            "position": [-0.75, 0.65, 3.6],
+            "target": [0.0, 0.0, -0.35]
+          },
+          {
+            "frame": 24,
+            "position": [0.75, 0.65, 3.6],
+            "target": [0.0, 0.0, -0.35]
+          },
+          {
+            "frame": 40,
             "position": [0.75, 0.65, 3.6],
             "target": [0.0, 0.0, -0.35]
           }
         ]
       }
+    ],
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "gtao_thin_pan_start"
+      }
     ]
   },
   "checkpoints": [
     {
+      "id": "static_converged",
+      "frame": 8,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false},
+        {"target": "ambient_occlusion", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_current", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_history", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_previous_depth", "profile": "depth", "required": true, "compare": false}
+      ]
+    },
+    {
       "id": "end_pan",
-      "frame": 12,
+      "frame": 24,
       "captures": [
         {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
         {"target": "ambient_occlusion", "profile": "scalar", "required": true, "compare": true},
-        {"target": "material_normals", "profile": "normal", "required": true, "compare": true}
+        {"target": "material_normals", "profile": "normal", "required": true, "compare": true},
+        {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": false},
+        {"target": "motion_class", "profile": "mask", "required": true, "compare": false},
+        {"target": "gtao_current", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_history", "profile": "scalar", "required": true, "compare": false}
       ],
       "assertions": [
         {
@@ -84,6 +118,20 @@
           "metric": "renderer.ao.normal_prepass_draws",
           "greaterOrEqual": 1
         }
+      ]
+    },
+    {
+      "id": "stop_reconverged",
+      "frame": 40,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false},
+        {"target": "ambient_occlusion", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_current", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_history", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_previous_depth", "profile": "depth", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {"id": "gtao_temporal_active_after_stop", "metric": "renderer.ao.temporal_passes", "greaterOrEqual": 1}
       ]
     }
   ],

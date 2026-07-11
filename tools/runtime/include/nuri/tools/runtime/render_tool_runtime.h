@@ -2,6 +2,7 @@
 
 #include "nuri/core/result.h"
 #include "nuri/gfx/frame/render_frame_context.h"
+#include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/render_pipeline.h"
 #include "nuri/gfx/renderer.h"
@@ -110,7 +111,7 @@ public:
   [[nodiscard]] RenderPipeline &pipeline() noexcept;
   [[nodiscard]] RenderScene &scene() noexcept;
   [[nodiscard]] RenderFrameContext &frameContext() noexcept;
-  [[nodiscard]] TemporalCameraHistoryState &cameraHistory() noexcept;
+  [[nodiscard]] TemporalFrameService &temporalFrameService() noexcept;
   [[nodiscard]] uint32_t swapchainImageCount() const noexcept;
   [[nodiscard]] Result<bool, std::string> commitScene();
 
@@ -129,7 +130,7 @@ createToolRendererRuntime(const ToolRuntimeDesc &desc);
 [[nodiscard]] Camera makeToolCamera(const ToolCameraDesc &desc);
 void buildToolFrameContext(RenderFrameContext &frameContext, RenderScene &scene,
                            Renderer &renderer, RenderSettings &settings,
-                           TemporalCameraHistoryState &cameraHistory,
+                           TemporalFrameService &temporalFrameService,
                            const Camera &camera, const ToolFrameDesc &desc);
 
 } // namespace nuri::tools::runtime

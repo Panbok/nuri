@@ -32,6 +32,14 @@
   "settings": {
     "antiAliasing": {
       "mode": "None"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
     }
   },
   "timeline": {
@@ -42,7 +50,8 @@
         "settings": {
           "antiAliasing": {
             "mode": "TAA",
-            "qualityPreset": "Quality"
+            "temporalProvider": "Reference",
+            "qualityPreset": "Ultra"
           }
         }
       },
@@ -88,7 +97,8 @@
         "settings": {
           "antiAliasing": {
             "mode": "TAA",
-            "qualityPreset": "Quality"
+            "temporalProvider": "Reference",
+            "qualityPreset": "Ultra"
           }
         }
       }

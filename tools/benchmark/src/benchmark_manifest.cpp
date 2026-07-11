@@ -409,7 +409,9 @@ parseOpaqueSettings(yyjson_val *object, RenderSettings &settings,
 parseAntiAliasingSettings(yyjson_val *object, RenderSettings &settings,
                           std::string_view path) {
   static constexpr std::array keys{std::string_view("mode"),
-                                   std::string_view("qualityPreset")};
+                                   std::string_view("temporalProvider"),
+                                   std::string_view("qualityPreset"),
+                                   std::string_view("spatialPostMsaaCleanup")};
   auto keysResult = rejectUnknownKeys(object, keys, path);
   if (keysResult.hasError()) {
     return keysResult;
@@ -423,13 +425,31 @@ parseAntiAliasingSettings(yyjson_val *object, RenderSettings &settings,
   if (result.hasError()) {
     return result;
   }
-  return readEnumField(object, "qualityPreset", path,
-                       settings.antiAliasing.qualityPreset,
-                       {{"Performance", TemporalAAQualityPreset::Performance},
-                        {"Balanced", TemporalAAQualityPreset::Balanced},
-                        {"Quality", TemporalAAQualityPreset::Quality},
-                        {"Ultra", TemporalAAQualityPreset::Ultra},
-                        {"Custom", TemporalAAQualityPreset::Custom}});
+  result = readEnumField(
+      object, "temporalProvider", path, settings.antiAliasing.temporalProvider,
+      {{"Legacy", TemporalReconstructionProvider::Legacy},
+       {"Reference", TemporalReconstructionProvider::Reference},
+       {"External", TemporalReconstructionProvider::External}});
+  if (result.hasError()) {
+    return result;
+  }
+  result = readEnumField(object, "qualityPreset", path,
+                         settings.antiAliasing.qualityPreset,
+                         {{"Performance", TemporalAAQualityPreset::Performance},
+                          {"Balanced", TemporalAAQualityPreset::Balanced},
+                          {"Quality", TemporalAAQualityPreset::Quality},
+                          {"Ultra", TemporalAAQualityPreset::Ultra},
+                          {"Custom", TemporalAAQualityPreset::Custom}});
+  if (result.hasError()) {
+    return result;
+  }
+  auto cleanup = readBool(object, "spatialPostMsaaCleanup", path,
+                          settings.antiAliasing.debug.spatialPostMsaaCleanup);
+  if (cleanup.hasError()) {
+    return Result<bool, std::string>::makeError(cleanup.error());
+  }
+  settings.antiAliasing.debug.spatialPostMsaaCleanup = cleanup.value();
+  return Result<bool, std::string>::makeResult(true);
 }
 
 [[nodiscard]] Result<bool, std::string>
@@ -1155,6 +1175,8 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
       std::string_view("schemaVersion"),
       std::string_view("id"),
       std::string_view("suite"),
+      std::string_view("comparisonGroup"),
+      std::string_view("variant"),
       std::string_view("description"),
       std::string_view("scene"),
       std::string_view("backend"),
@@ -1209,6 +1231,27 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
   if (!isSafeDottedIdentifier(out.suite)) {
     return Result<BenchmarkCase, std::string>::makeError(
         "$.suite must be a safe lowercase dotted identifier");
+  }
+  text = readString(root, "comparisonGroup", "$", false);
+  if (text.hasError()) {
+    return Result<BenchmarkCase, std::string>::makeError(text.error());
+  }
+  out.comparisonGroup = std::move(text.value());
+  text = readString(root, "variant", "$", false);
+  if (text.hasError()) {
+    return Result<BenchmarkCase, std::string>::makeError(text.error());
+  }
+  out.variant = std::move(text.value());
+  if (out.comparisonGroup.empty() != out.variant.empty()) {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "comparisonGroup and variant must be provided together");
+  }
+  if (!out.comparisonGroup.empty() &&
+      (!isSafeDottedIdentifier(out.comparisonGroup) ||
+       !isSafeDottedIdentifier(out.variant))) {
+    return Result<BenchmarkCase, std::string>::makeError(
+        "comparisonGroup and variant must be safe lowercase dotted "
+        "identifiers");
   }
   text = readString(root, "description", "$", false, out.description);
   if (text.hasError()) {
@@ -1377,9 +1420,9 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
 
   yyjson_val *requirements = optionalObject(root, "requirements");
   if (requirements != nullptr) {
-    static constexpr std::array keys{std::string_view("assets"),
-                                     std::string_view("backends"),
-                                     std::string_view("allowVisibleWindow")};
+    static constexpr std::array keys{
+        std::string_view("assets"), std::string_view("backends"),
+        std::string_view("allowVisibleWindow"), std::string_view("msaa4x")};
     auto parsed = rejectUnknownKeys(requirements, keys, "requirements");
     if (parsed.hasError()) {
       return Result<BenchmarkCase, std::string>::makeError(parsed.error());
@@ -1407,6 +1450,12 @@ loadBenchmarkCaseManifest(const std::filesystem::path &path) {
       return Result<BenchmarkCase, std::string>::makeError(boolean.error());
     }
     out.requirements.allowVisibleWindow = boolean.value();
+    boolean = readBool(requirements, "msaa4x", "requirements",
+                       out.requirements.msaa4x);
+    if (boolean.hasError()) {
+      return Result<BenchmarkCase, std::string>::makeError(boolean.error());
+    }
+    out.requirements.msaa4x = boolean.value();
   }
 
   yyjson_val *thresholds = optionalObject(root, "thresholds");
@@ -1520,6 +1569,19 @@ discoverBenchmarkCases(const BenchmarkManifestLoadOptions &options) {
   if (validCatalog.hasError()) {
     return Result<std::vector<BenchmarkCase>, std::string>::makeError(
         validCatalog.error());
+  }
+  std::set<std::string> experimentVariants;
+  for (const BenchmarkCase &benchmarkCase : cases) {
+    if (benchmarkCase.comparisonGroup.empty()) {
+      continue;
+    }
+    const std::string identity =
+        benchmarkCase.comparisonGroup + "\n" + benchmarkCase.variant;
+    if (!experimentVariants.insert(identity).second) {
+      return Result<std::vector<BenchmarkCase>, std::string>::makeError(
+          "duplicate benchmark experiment variant '" +
+          benchmarkCase.comparisonGroup + "/" + benchmarkCase.variant + "'");
+    }
   }
   return Result<std::vector<BenchmarkCase>, std::string>::makeResult(
       std::move(cases));

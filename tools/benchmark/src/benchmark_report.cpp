@@ -88,6 +88,7 @@ validateStatsMap(yyjson_val *value, std::string_view path) {
       JsonField{"median", JsonType::Number},
       JsonField{"p90", JsonType::Number},
       JsonField{"p95", JsonType::Number},
+      JsonField{"p99", JsonType::Number, false},
       JsonField{"max", JsonType::Number},
       JsonField{"mean", JsonType::Number},
       JsonField{"stddev", JsonType::Number},
@@ -190,6 +191,8 @@ validateBenchmarkReportV1(yyjson_val *root) {
       JsonField{"schemaVersion", JsonType::Unsigned},
       JsonField{"id", JsonType::String},
       JsonField{"suite", JsonType::String},
+      JsonField{"comparisonGroup", JsonType::String, false},
+      JsonField{"variant", JsonType::String, false},
       JsonField{"description", JsonType::String},
       JsonField{"manifestPath", JsonType::String},
       JsonField{"backend", JsonType::String},
@@ -470,6 +473,7 @@ yyjson_mut_val *makeStatsObject(yyjson_mut_doc *doc, const MetricStats &stats) {
   yyjson_mut_obj_add_real(doc, object, "median", stats.median);
   yyjson_mut_obj_add_real(doc, object, "p90", stats.p90);
   yyjson_mut_obj_add_real(doc, object, "p95", stats.p95);
+  yyjson_mut_obj_add_real(doc, object, "p99", stats.p99);
   yyjson_mut_obj_add_real(doc, object, "max", stats.max);
   yyjson_mut_obj_add_real(doc, object, "mean", stats.mean);
   yyjson_mut_obj_add_real(doc, object, "stddev", stats.stddev);
@@ -538,6 +542,19 @@ template <typename Enum> [[nodiscard]] uint32_t enumValue(Enum value) {
     return "SpatialFallback";
   case AntiAliasingMode::MSAA4x:
     return "MSAA4x";
+  }
+  return "Unknown";
+}
+
+[[nodiscard]] const char *
+temporalReconstructionProviderName(TemporalReconstructionProvider provider) {
+  switch (provider) {
+  case TemporalReconstructionProvider::Legacy:
+    return "Legacy";
+  case TemporalReconstructionProvider::Reference:
+    return "Reference";
+  case TemporalReconstructionProvider::External:
+    return "External";
   }
   return "Unknown";
 }
@@ -688,8 +705,12 @@ makeSettingsSignature(const RenderSettings &sourceSettings) {
   appendSignatureField(out, "opaque.forcedMeshLod",
                        settings.opaque.forcedMeshLod);
   appendSignatureField(out, "aa.mode", enumValue(settings.antiAliasing.mode));
+  appendSignatureField(out, "aa.temporalProvider",
+                       enumValue(settings.antiAliasing.temporalProvider));
   appendSignatureField(out, "aa.quality",
                        enumValue(settings.antiAliasing.qualityPreset));
+  appendSignatureField(out, "aa.spatialPostMsaaCleanup",
+                       settings.antiAliasing.debug.spatialPostMsaaCleanup);
   appendSignatureField(out, "ao.mode",
                        enumValue(settings.ambientOcclusion.mode));
   appendSignatureField(out, "ao.preset",
@@ -742,6 +763,8 @@ makeConfigSignature(const BenchmarkCase &benchmarkCase,
   std::ostringstream out;
   out << std::setprecision(9) << "config.v1";
   appendSignatureField(out, "suite", benchmarkCase.suite);
+  appendSignatureField(out, "comparisonGroup", benchmarkCase.comparisonGroup);
+  appendSignatureField(out, "variant", benchmarkCase.variant);
   appendSignatureField(out, "backend", benchmarkCase.backend);
   appendSignatureField(out, "width", benchmarkCase.resolution[0]);
   appendSignatureField(out, "height", benchmarkCase.resolution[1]);
@@ -824,6 +847,8 @@ makeConfigSignature(const BenchmarkCase &benchmarkCase,
                       benchmarkCase.requirements.backends);
   appendSignatureField(out, "requirements.allowVisibleWindow",
                        benchmarkCase.requirements.allowVisibleWindow);
+  appendSignatureField(out, "requirements.msaa4x",
+                       benchmarkCase.requirements.msaa4x);
   appendSignatureField(out, "settingsSignature",
                        std::string(settingsSignature));
   return out.str();
@@ -905,8 +930,13 @@ yyjson_mut_val *makeSettingsObject(yyjson_mut_doc *doc,
   yyjson_mut_val *antiAliasing = yyjson_mut_obj(doc);
   addString(doc, antiAliasing, "mode",
             antiAliasingModeName(settings.antiAliasing.mode));
+  addString(doc, antiAliasing, "temporalProvider",
+            temporalReconstructionProviderName(
+                settings.antiAliasing.temporalProvider));
   addString(doc, antiAliasing, "qualityPreset",
             temporalAAQualityPresetName(settings.antiAliasing.qualityPreset));
+  yyjson_mut_obj_add_bool(doc, antiAliasing, "spatialPostMsaaCleanup",
+                          settings.antiAliasing.debug.spatialPostMsaaCleanup);
   yyjson_mut_obj_add_val(doc, object, "antiAliasing", antiAliasing);
 
   yyjson_mut_val *ambientOcclusion = yyjson_mut_obj(doc);
@@ -1044,6 +1074,8 @@ yyjson_mut_val *makeCaseObject(yyjson_mut_doc *doc,
                           benchmarkCase.schemaVersion);
   addString(doc, object, "id", benchmarkCase.id);
   addString(doc, object, "suite", benchmarkCase.suite);
+  addString(doc, object, "comparisonGroup", benchmarkCase.comparisonGroup);
+  addString(doc, object, "variant", benchmarkCase.variant);
   addString(doc, object, "description", benchmarkCase.description);
   addPath(doc, object, "manifestPath", benchmarkCase.manifestPath);
   addString(doc, object, "backend", benchmarkCase.backend);
@@ -1145,6 +1177,8 @@ yyjson_mut_val *makeCaseObject(yyjson_mut_doc *doc,
       makeStringArray(doc, benchmarkCase.requirements.backends));
   yyjson_mut_obj_add_bool(doc, requirements, "allowVisibleWindow",
                           benchmarkCase.requirements.allowVisibleWindow);
+  yyjson_mut_obj_add_bool(doc, requirements, "msaa4x",
+                          benchmarkCase.requirements.msaa4x);
   yyjson_mut_obj_add_val(doc, object, "requirements", requirements);
   yyjson_mut_obj_add_val(doc, object, "settings",
                          makeSettingsObject(doc, benchmarkCase.settings));
@@ -1442,6 +1476,12 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
                        {"TAA", AntiAliasingMode::TAA},
                        {"SpatialFallback", AntiAliasingMode::SpatialFallback},
                        {"MSAA4x", AntiAliasingMode::MSAA4x}});
+    settings.antiAliasing.temporalProvider =
+        readEnumValue(antiAliasing, "temporalProvider",
+                      settings.antiAliasing.temporalProvider,
+                      {{"Legacy", TemporalReconstructionProvider::Legacy},
+                       {"Reference", TemporalReconstructionProvider::Reference},
+                       {"External", TemporalReconstructionProvider::External}});
     settings.antiAliasing.qualityPreset = readEnumValue(
         antiAliasing, "qualityPreset", settings.antiAliasing.qualityPreset,
         {{"Performance", TemporalAAQualityPreset::Performance},
@@ -1449,6 +1489,9 @@ readEnumValue(yyjson_val *object, const char *key, Enum defaultValue,
          {"Quality", TemporalAAQualityPreset::Quality},
          {"Ultra", TemporalAAQualityPreset::Ultra},
          {"Custom", TemporalAAQualityPreset::Custom}});
+    settings.antiAliasing.debug.spatialPostMsaaCleanup =
+        readBool(antiAliasing, "spatialPostMsaaCleanup",
+                 settings.antiAliasing.debug.spatialPostMsaaCleanup);
   }
 
   yyjson_val *ambientOcclusion = yyjson_obj_get(object, "ambientOcclusion");
@@ -1666,6 +1709,8 @@ readPathArray(yyjson_val *array) {
   stats.median = readReal(object, "median");
   stats.p90 = readReal(object, "p90");
   stats.p95 = readReal(object, "p95");
+  stats.p99 = yyjson_obj_get(object, "p99") != nullptr ? readReal(object, "p99")
+                                                       : stats.p95;
   stats.max = readReal(object, "max");
   stats.mean = readReal(object, "mean");
   stats.stddev = readReal(object, "stddev");
@@ -2261,6 +2306,9 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
         readU32(caseObject, "schemaVersion", 1u);
     report.benchmarkCase.id = readString(caseObject, "id");
     report.benchmarkCase.suite = readString(caseObject, "suite");
+    report.benchmarkCase.comparisonGroup =
+        readString(caseObject, "comparisonGroup");
+    report.benchmarkCase.variant = readString(caseObject, "variant");
     report.benchmarkCase.description = readString(caseObject, "description");
     report.benchmarkCase.backend = readString(caseObject, "backend", "default");
     report.benchmarkCase.manifestPath =
@@ -2391,6 +2439,8 @@ readBenchmarkReportFile(const std::filesystem::path &path) {
       report.benchmarkCase.requirements.allowVisibleWindow =
           readBool(requirements, "allowVisibleWindow",
                    report.benchmarkCase.requirements.allowVisibleWindow);
+      report.benchmarkCase.requirements.msaa4x = readBool(
+          requirements, "msaa4x", report.benchmarkCase.requirements.msaa4x);
     }
     report.benchmarkCase.settings =
         readSettingsObject(yyjson_obj_get(caseObject, "settings"));

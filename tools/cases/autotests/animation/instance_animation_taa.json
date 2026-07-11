@@ -30,7 +30,16 @@
     },
     "antiAliasing": {
       "mode": "TAA",
-      "qualityPreset": "Quality"
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
     }
   },
   "timeline": {
@@ -57,13 +66,18 @@
           "greaterOrEqual": 1
         },
         {
-          "id": "animated_responsive_present",
-          "metric": "renderer.aa.velocity_animated_responsive",
+          "id": "animated_velocity_has_previous_transform",
+          "metric": "renderer.aa.velocity_previous_transform_valid",
           "greaterOrEqual": 1
         },
         {
-          "id": "animated_velocity_discontinuity_seen",
-          "metric": "renderer.aa.velocity_edge_discontinuity_estimate",
+          "id": "animated_velocity_has_no_missing_previous_transform",
+          "metric": "renderer.aa.velocity_missing_previous_transform",
+          "equals": 0
+        },
+        {
+          "id": "animated_velocity_is_nonzero",
+          "metric": "renderer.aa.velocity_estimated_max_magnitude",
           "greaterThan": 0
         }
       ]
@@ -75,9 +89,19 @@
       "frames": [4, 12],
       "assertions": [
         {
-          "id": "animated_responsive_stable",
-          "metric": "renderer.aa.velocity_animated_responsive",
+          "id": "animated_previous_transform_stays_valid",
+          "metric": "renderer.aa.velocity_previous_transform_valid",
           "min": 1
+        },
+        {
+          "id": "animated_previous_transform_never_missing",
+          "metric": "renderer.aa.velocity_missing_previous_transform",
+          "max": 0
+        },
+        {
+          "id": "animated_velocity_stays_nonzero",
+          "metric": "renderer.aa.velocity_estimated_max_magnitude",
+          "min": 0.000001
         },
         {
           "id": "history_valid_during_animation",

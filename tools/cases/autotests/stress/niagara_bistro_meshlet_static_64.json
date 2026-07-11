@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 1,
+  "id": "stress.niagara_bistro.meshlet_static_64",
+  "suite": "stress",
+  "description": "Niagara Bistro static-camera 64-frame Reference TAA convergence and diagnostic coverage",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 0,
+  "endFrame": 64,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-25.175787, 5.760150, 8.267586],
+    "target": [-34.294270, 2.883850, 5.338666],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "timeline": {
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "bistro_static_convergence_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "static_64",
+      "frame": 64,
+      "captures": [
+        {"target": "final_color", "profile": "ldr_color", "required": true, "compare": false},
+        {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "scene_depth", "profile": "depth", "required": true, "compare": false},
+        {"target": "material_normals", "profile": "normal", "required": true, "compare": false},
+        {"target": "ambient_occlusion", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_edges", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_current", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_history", "profile": "scalar", "required": true, "compare": false},
+        {"target": "gtao_previous_depth", "profile": "depth", "required": true, "compare": false},
+        {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": false},
+        {"target": "motion_class", "profile": "mask", "required": true, "compare": false},
+        {"target": "reactive_mask", "profile": "mask", "required": true, "compare": false}
+      ],
+      "assertions": [
+        {
+          "id": "meshlet_mode_active",
+          "metric": "renderer.opaque.meshlet_mode_active",
+          "equals": 1
+        },
+        {
+          "id": "meshlet_dispatches",
+          "metric": "renderer.opaque.meshlet_dispatches",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "gtao_active",
+          "metric": "renderer.ao.active",
+          "equals": 1
+        },
+        {
+          "id": "reference_taa_present",
+          "metric": "renderer.aa.taa_resolve_passes",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "history_converged",
+          "metric": "renderer.aa.history_valid",
+          "equals": 1
+        }
+      ]
+    }
+  ],
+  "requirements": {
+    "assets": [
+      "modelsRoot:NiagaraBistro/bistrox.gltf"
+    ],
+    "backends": ["nvrhi"],
+    "allowVisibleWindow": true
+  }
+}

@@ -25,9 +25,21 @@
     "farPlane": 500.0
   },
   "settings": {
+    "opaque": {
+      "enableInstanceAnimation": false
+    },
     "antiAliasing": {
       "mode": "TAA",
-      "qualityPreset": "Quality"
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
     }
   },
   "timeline": {
@@ -65,6 +77,8 @@
       "frame": 16,
       "captures": [
         {"target": "final_color", "profile": "ldr_color", "required": true, "compare": true},
+        {"target": "scene_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+        {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
         {"target": "motion_vectors", "profile": "velocity", "required": true, "compare": true},
         {"target": "reactive_mask", "profile": "mask", "required": false, "compare": true}
       ],
@@ -73,6 +87,26 @@
           "id": "taa_resolve_present",
           "metric": "renderer.aa.taa_resolve_passes",
           "greaterOrEqual": 1
+        },
+        {
+          "id": "camera_moved_at_capture",
+          "metric": "renderer.aa.camera_position_delta",
+          "greaterThan": 0
+        },
+        {
+          "id": "static_velocity_has_previous_transform",
+          "metric": "renderer.aa.velocity_previous_transform_valid",
+          "greaterOrEqual": 1
+        },
+        {
+          "id": "static_velocity_has_no_missing_previous_transform",
+          "metric": "renderer.aa.velocity_missing_previous_transform",
+          "equals": 0
+        },
+        {
+          "id": "camera_velocity_is_nonzero",
+          "metric": "renderer.aa.velocity_estimated_max_magnitude",
+          "greaterThan": 0
         }
       ]
     }

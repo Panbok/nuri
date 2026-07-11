@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.niagara_bistro.rapid_720p.none",
+  "suite": "aa",
+  "comparisonGroup": "aa.niagara_bistro.rapid_720p",
+  "variant": "none",
+  "description": "AA-16 Niagara Bistro rapid-camera paired variant: 1x coverage with no color reconstruction",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "NiagaraBistro/bistrox.gltf",
+    "importOptions": {
+      "mesh": {
+        "generateMeshlets": true,
+        "meshletMaxVertices": 64,
+        "meshletMaxPrimitives": 124,
+        "meshletConeWeight": 0.0
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [
+    1280,
+    720
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30,
+  "measurementFrames": 600,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 5,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [
+      -25.175787,
+      5.76015,
+      8.267586
+    ],
+    "target": [
+      -34.29427,
+      2.88385,
+      5.338666
+    ],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 500.0
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "street_rapid_turns",
+        "startFrame": 0,
+        "endFrame": 631,
+        "interpolation": "linear",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [
+              -25.175787,
+              5.76015,
+              8.267586
+            ],
+            "target": [
+              -34.29427,
+              2.88385,
+              5.338666
+            ]
+          },
+          {
+            "frame": 120,
+            "position": [
+              -29.9,
+              6.05,
+              10.8
+            ],
+            "target": [
+              -19.25,
+              2.65,
+              -5.25
+            ]
+          },
+          {
+            "frame": 240,
+            "position": [
+              -18.5,
+              6.6,
+              7.0
+            ],
+            "target": [
+              -39.75,
+              3.0,
+              9.0
+            ]
+          },
+          {
+            "frame": 360,
+            "position": [
+              -24.0,
+              7.1,
+              12.5
+            ],
+            "target": [
+              -35.5,
+              1.85,
+              -4.5
+            ]
+          },
+          {
+            "frame": 480,
+            "position": [
+              -30.5,
+              6.25,
+              8.5
+            ],
+            "target": [
+              -16.75,
+              2.75,
+              -2.75
+            ]
+          },
+          {
+            "frame": 600,
+            "position": [
+              -25.175787,
+              5.76015,
+              8.267586
+            ],
+            "target": [
+              -34.29427,
+              2.88385,
+              5.338666
+            ]
+          },
+          {
+            "frame": 631,
+            "position": [
+              -25.175787,
+              5.76015,
+              8.267586
+            ],
+            "target": [
+              -34.29427,
+              2.88385,
+              5.338666
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "meshletMode": "Required",
+      "enableMeshletFrustumCulling": true,
+      "enableMeshletConeCulling": true,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": false,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": 0
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra",
+      "enableMeshletDepth": true,
+      "enableMeshletCascadeCulling": true
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:NiagaraBistro/bistrox.gltf"
+    ],
+    "backends": [
+      "nvrhi"
+    ],
+    "allowVisibleWindow": true,
+    "msaa4x": false
+  },
+  "thresholds": {
+    "failPercent": 12.0,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6.0,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes.gtao_ms",
+    "gpu.scopes.shadow_ms",
+    "gpu.scopes_sum_ms"
+  ]
+}

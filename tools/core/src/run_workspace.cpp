@@ -32,8 +32,9 @@ std::atomic<uint64_t> gRunSequence{0u};
 
 [[nodiscard]] std::string formatRunId(uint64_t sequence) {
   const auto now = std::chrono::system_clock::now();
-  const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-      now.time_since_epoch());
+  const auto milliseconds =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          now.time_since_epoch());
   const std::time_t time = std::chrono::system_clock::to_time_t(now);
   std::tm utc{};
 #if defined(_WIN32)
@@ -50,9 +51,7 @@ std::atomic<uint64_t> gRunSequence{0u};
 
 } // namespace
 
-std::string createRunId() {
-  return formatRunId(gRunSequence.fetch_add(1u));
-}
+std::string createRunId() { return formatRunId(gRunSequence.fetch_add(1u)); }
 
 Result<std::filesystem::path, std::string>
 RunWorkspace::caseDirectory(std::string_view caseId) const {
@@ -60,8 +59,8 @@ RunWorkspace::caseDirectory(std::string_view caseId) const {
   if (valid.hasError()) {
     return Result<std::filesystem::path, std::string>::makeError(valid.error());
   }
-  return resolvePathUnder(root, std::filesystem::path("cases") /
-                                   std::string(caseId));
+  return resolvePathUnder(root,
+                          std::filesystem::path("cases") / std::string(caseId));
 }
 
 Result<RunWorkspace, std::string>

@@ -110,15 +110,14 @@ validateJsonObject(yyjson_val *object,
   yyjson_val *key = nullptr;
   while ((key = yyjson_obj_iter_next(&iterator)) != nullptr) {
     const std::string_view name(yyjson_get_str(key), yyjson_get_len(key));
-    const auto field = std::find_if(
-        fields.begin(), fields.end(),
-        [name](const JsonFieldContract &candidate) {
-          return candidate.name == name;
-        });
+    const auto field = std::find_if(fields.begin(), fields.end(),
+                                    [name](const JsonFieldContract &candidate) {
+                                      return candidate.name == name;
+                                    });
     if (field == fields.end()) {
-      return Result<void, std::string>::makeError(
-          std::string(path) + " contains unknown field '" +
-          std::string(name) + "'");
+      return Result<void, std::string>::makeError(std::string(path) +
+                                                  " contains unknown field '" +
+                                                  std::string(name) + "'");
     }
   }
 
@@ -128,8 +127,7 @@ validateJsonObject(yyjson_val *object,
     if (value == nullptr) {
       if (field.required) {
         return Result<void, std::string>::makeError(
-            std::string(path) + "." + std::string(field.name) +
-            " is required");
+            std::string(path) + "." + std::string(field.name) + " is required");
       }
       continue;
     }
@@ -142,11 +140,11 @@ validateJsonObject(yyjson_val *object,
   return Result<void, std::string>::makeResult();
 }
 
-Result<void, std::string>
-validateJsonArtifactPath(yyjson_val *object, std::string_view field,
-                         std::string_view path, bool allowEmpty) {
-  yyjson_val *value =
-      yyjson_obj_getn(object, field.data(), field.size());
+Result<void, std::string> validateJsonArtifactPath(yyjson_val *object,
+                                                   std::string_view field,
+                                                   std::string_view path,
+                                                   bool allowEmpty) {
+  yyjson_val *value = yyjson_obj_getn(object, field.data(), field.size());
   if (!yyjson_is_str(value)) {
     return Result<void, std::string>::makeError(
         std::string(path) + "." + std::string(field) + " must be a string");
@@ -156,15 +154,15 @@ validateJsonArtifactPath(yyjson_val *object, std::string_view field,
       std::string(path) + "." + std::string(field), allowEmpty);
 }
 
-Result<void, std::string>
-validateJsonArtifactPath(std::string_view value, std::string_view path,
-                         bool allowEmpty) {
+Result<void, std::string> validateJsonArtifactPath(std::string_view value,
+                                                   std::string_view path,
+                                                   bool allowEmpty) {
   if (value.empty()) {
     if (allowEmpty) {
       return Result<void, std::string>::makeResult();
     }
-    return Result<void, std::string>::makeError(
-        std::string(path) + " must not be empty");
+    return Result<void, std::string>::makeError(std::string(path) +
+                                                " must not be empty");
   }
   const std::u8string utf8(reinterpret_cast<const char8_t *>(value.data()),
                            value.size());

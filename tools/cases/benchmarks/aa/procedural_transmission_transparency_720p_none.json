@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.procedural.transmission_transparency_720p.none",
+  "suite": "aa",
+  "comparisonGroup": "aa.procedural.transmission_transparency_720p",
+  "variant": "none",
+  "description": "AA-16 procedural transmission/transparency intersection orbit paired variant: None",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.transmission_transparency.v1",
+    "seed": 73,
+    "contentHash": "nuri.procedural.transmission_transparency.v1:73"
+  },
+  "backend": "nvrhi",
+  "resolution": [
+    1280,
+    720
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30,
+  "measurementFrames": 300,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 5,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [
+      -0.95,
+      0.35,
+      2.85
+    ],
+    "target": [
+      0,
+      0,
+      -0.25
+    ],
+    "verticalFovDegrees": 55,
+    "nearPlane": 0.05,
+    "farPlane": 500
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "transmission_transparency_orbit",
+        "startFrame": 0,
+        "endFrame": 329,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [
+              -0.95,
+              0.35,
+              2.85
+            ],
+            "target": [
+              0,
+              0,
+              -0.25
+            ]
+          },
+          {
+            "frame": 165,
+            "position": [
+              0.95,
+              0.4,
+              2.7
+            ],
+            "target": [
+              0,
+              0,
+              -0.25
+            ]
+          },
+          {
+            "frame": 329,
+            "position": [
+              -0.95,
+              0.35,
+              2.85
+            ],
+            "target": [
+              0,
+              0,
+              -0.25
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "None",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": true
+    },
+    "transparent": {
+      "enabled": true
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:common/flat_plane.obj"
+    ],
+    "backends": [
+      "nvrhi"
+    ],
+    "allowVisibleWindow": true,
+    "msaa4x": false
+  },
+  "thresholds": {
+    "failPercent": 12,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes.gtao_ms",
+    "gpu.scopes.shadow_ms",
+    "gpu.scopes.transmission_ms",
+    "gpu.scopes_sum_ms"
+  ]
+}

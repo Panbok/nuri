@@ -22,8 +22,7 @@ temporarySibling(const std::filesystem::path &path) {
       std::chrono::steady_clock::now().time_since_epoch().count());
   const uint64_t sequence = gTemporaryFileSequence.fetch_add(1u);
   std::filesystem::path temporary = path;
-  temporary += ".tmp." + std::to_string(tick) + "." +
-               std::to_string(sequence);
+  temporary += ".tmp." + std::to_string(tick) + "." + std::to_string(sequence);
   return temporary;
 }
 
@@ -51,8 +50,8 @@ extendedLengthPath(const std::filesystem::path &path) {
 
 } // namespace
 
-Result<void, std::string>
-atomicWriteTextFile(const std::filesystem::path &path, std::string_view text) {
+Result<void, std::string> atomicWriteTextFile(const std::filesystem::path &path,
+                                              std::string_view text) {
   if (path.empty()) {
     return Result<void, std::string>::makeError(
         "atomicWriteTextFile: path must not be empty");
@@ -71,9 +70,9 @@ atomicWriteTextFile(const std::filesystem::path &path, std::string_view text) {
   auto nativeTemporary = extendedLengthPath(temporary);
   auto nativeTarget = extendedLengthPath(path);
   if (nativeTemporary.hasError() || nativeTarget.hasError()) {
-    return Result<void, std::string>::makeError(
-        nativeTemporary.hasError() ? nativeTemporary.error()
-                                   : nativeTarget.error());
+    return Result<void, std::string>::makeError(nativeTemporary.hasError()
+                                                    ? nativeTemporary.error()
+                                                    : nativeTarget.error());
   }
 #endif
   {
@@ -102,7 +101,8 @@ atomicWriteTextFile(const std::filesystem::path &path, std::string_view text) {
   }
 
 #if defined(_WIN32)
-  if (!MoveFileExW(nativeTemporary.value().c_str(), nativeTarget.value().c_str(),
+  if (!MoveFileExW(nativeTemporary.value().c_str(),
+                   nativeTarget.value().c_str(),
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
     const DWORD lastError = GetLastError();
     DeleteFileW(nativeTemporary.value().c_str());

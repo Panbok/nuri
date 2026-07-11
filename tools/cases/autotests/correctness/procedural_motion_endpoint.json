@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "id": "correctness.procedural.motion_endpoint",
+  "suite": "correctness",
+  "description": "Analytic current-to-previous motion endpoint on a constant-depth plane",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 61,
+    "contentHash": "nuri.procedural.reactive_mask.v1:61"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 0,
+  "endFrame": 1,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [-0.1, 0.0, 3.35],
+    "target": [-0.1, 0.0, 2.35],
+    "verticalFovDegrees": 60.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {
+      "enableInstanceAnimation": false
+    },
+    "antiAliasing": {
+      "mode": "TAA",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra"
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    }
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "parallel_translation",
+        "startFrame": 0,
+        "endFrame": 1,
+        "interpolation": "linear",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [-0.1, 0.0, 3.35],
+            "target": [-0.1, 0.0, 2.35]
+          },
+          {
+            "frame": 1,
+            "position": [0.0, 0.0, 3.35],
+            "target": [0.0, 0.0, 2.35]
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "frame": 0,
+        "type": "resetTemporalHistory",
+        "eventReason": "analytic_motion_start"
+      }
+    ]
+  },
+  "checkpoints": [
+    {
+      "id": "analytic_endpoint",
+      "frame": 1,
+      "captures": [
+        {
+          "target": "motion_vectors",
+          "profile": "velocity",
+          "required": true,
+          "compare": false
+        },
+        {
+          "target": "motion_class",
+          "profile": "mask",
+          "required": true,
+          "compare": false
+        }
+      ],
+      "motionOracle": {
+        "motionTarget": "motion_vectors",
+        "motionClassTarget": "motion_class",
+        "roi": {"x": 440, "y": 170, "width": 16, "height": 16},
+        "mask": [
+          [2, 2], [5, 2], [8, 2], [11, 2],
+          [2, 5], [5, 5], [8, 5], [11, 5],
+          [2, 8], [5, 8], [8, 8], [11, 8],
+          [2, 11], [5, 11], [8, 11], [11, 11]
+        ],
+        "expectedVelocityPixels": [7.79422863, 0.0],
+        "p95ErrorMaxPixels": 0.05,
+        "maxErrorMaxPixels": 0.075,
+        "classCoverage": {
+          "invalid": {"max": 0.0},
+          "static": {"min": 1.0},
+          "full": {"max": 0.0}
+        }
+      }
+    }
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

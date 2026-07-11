@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.damaged_helmet.opaque_specular_1080p.msaa4x",
+  "suite": "aa",
+  "comparisonGroup": "aa.damaged_helmet.opaque_specular_1080p",
+  "variant": "msaa4x",
+  "description": "AA-16 Damaged Helmet opaque/specular orbit paired variant: MSAA4x",
+  "scene": {
+    "kind": "prefab",
+    "pathBase": "modelsRoot",
+    "path": "DamagedHelmet/DamagedHelmet.gltf",
+    "importOptions": {
+      "mesh": {
+        "flipUVs": true
+      }
+    }
+  },
+  "backend": "nvrhi",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30,
+  "measurementFrames": 600,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 5,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [
+      -0.35,
+      0.25,
+      3.2
+    ],
+    "target": [
+      0,
+      -0.05,
+      0
+    ],
+    "verticalFovDegrees": 55,
+    "nearPlane": 0.05,
+    "farPlane": 100
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "damaged_helmet_specular_orbit",
+        "startFrame": 0,
+        "endFrame": 629,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [
+              -0.35,
+              0.25,
+              3.2
+            ],
+            "target": [
+              0,
+              -0.05,
+              0
+            ]
+          },
+          {
+            "frame": 315,
+            "position": [
+              0.35,
+              0.32,
+              3.05
+            ],
+            "target": [
+              0,
+              -0.05,
+              0
+            ]
+          },
+          {
+            "frame": 629,
+            "position": [
+              -0.35,
+              0.25,
+              3.2
+            ],
+            "target": [
+              0,
+              -0.05,
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": false,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": true,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "MSAA4x",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra",
+      "spatialPostMsaaCleanup": false
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:DamagedHelmet/DamagedHelmet.gltf"
+    ],
+    "backends": [
+      "nvrhi"
+    ],
+    "allowVisibleWindow": true,
+    "msaa4x": true
+  },
+  "thresholds": {
+    "failPercent": 12,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes.gtao_ms",
+    "gpu.scopes.shadow_ms",
+    "gpu.scopes_sum_ms"
+  ]
+}

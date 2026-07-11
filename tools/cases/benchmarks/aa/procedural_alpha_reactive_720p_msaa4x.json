@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.procedural.alpha_reactive_720p.msaa4x",
+  "suite": "aa",
+  "comparisonGroup": "aa.procedural.alpha_reactive_720p",
+  "variant": "msaa4x",
+  "description": "AA-16 procedural alpha-mask/reactive coverage sweep paired variant: MSAA4x",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 71,
+    "contentHash": "nuri.procedural.reactive_mask.v1:71"
+  },
+  "backend": "nvrhi",
+  "resolution": [
+    1280,
+    720
+  ],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 30,
+  "measurementFrames": 300,
+  "cooldownFrames": 2,
+  "maxDrainFrames": 180,
+  "drainTimeoutMs": 8000,
+  "samples": 5,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "renderGraph": {
+    "workerCount": 1,
+    "parallelCompile": false,
+    "parallelRecording": false
+  },
+  "camera": {
+    "position": [
+      -0.65,
+      0.35,
+      3.25
+    ],
+    "target": [
+      0,
+      0.25,
+      0
+    ],
+    "verticalFovDegrees": 55,
+    "nearPlane": 0.05,
+    "farPlane": 100
+  },
+  "timeline": {
+    "cameraPaths": [
+      {
+        "id": "alpha_reactive_sweep",
+        "startFrame": 0,
+        "endFrame": 329,
+        "interpolation": "smoothstep",
+        "keyframes": [
+          {
+            "frame": 0,
+            "position": [
+              -0.65,
+              0.35,
+              3.25
+            ],
+            "target": [
+              0,
+              0.25,
+              0
+            ]
+          },
+          {
+            "frame": 165,
+            "position": [
+              0.65,
+              0.45,
+              3
+            ],
+            "target": [
+              0,
+              0.22,
+              0
+            ]
+          },
+          {
+            "frame": 329,
+            "position": [
+              -0.65,
+              0.35,
+              3.25
+            ],
+            "target": [
+              0,
+              0.25,
+              0
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "opaque": {
+      "enabled": true,
+      "enableDepthPrepass": true,
+      "enableInstanceCompute": true,
+      "enableInstanceAnimation": false,
+      "enableMeshLod": false,
+      "enableTessellation": false,
+      "forcedMeshLod": -1
+    },
+    "antiAliasing": {
+      "mode": "MSAA4x",
+      "temporalProvider": "Reference",
+      "qualityPreset": "Ultra",
+      "spatialPostMsaaCleanup": false
+    },
+    "ambientOcclusion": {
+      "mode": "GTAO",
+      "preset": "Ultra"
+    },
+    "shadow": {
+      "enabled": true,
+      "qualityPreset": "Ultra"
+    },
+    "hdrPostProcess": {
+      "bloomEnabled": false,
+      "adaptationEnabled": false
+    },
+    "transmission": {
+      "enabled": false
+    },
+    "transparent": {
+      "enabled": false
+    },
+    "textureFiltering": {
+      "mode": "Anisotropic",
+      "anisotropy": 8
+    }
+  },
+  "requirements": {
+    "assets": [
+      "modelsRoot:common/flat_plane.obj"
+    ],
+    "backends": [
+      "nvrhi"
+    ],
+    "allowVisibleWindow": true,
+    "msaa4x": true
+  },
+  "thresholds": {
+    "failPercent": 12,
+    "failAbsoluteMs": 0.35,
+    "warnPercent": 6,
+    "warnAbsoluteMs": 0.18
+  },
+  "requiredMetrics": [
+    "cpu.render_submit_ms",
+    "gpu.scopes.opaque_ms",
+    "gpu.scopes.gtao_ms",
+    "gpu.scopes.shadow_ms",
+    "gpu.scopes_sum_ms"
+  ]
+}

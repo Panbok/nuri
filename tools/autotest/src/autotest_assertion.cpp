@@ -51,6 +51,18 @@ shouldIncludeGpuScopeInSum(const std::map<std::string, double> &metrics,
        id == "gpu.scopes.shadow_sdsm_ms")) {
     return false;
   }
+  if (metrics.find("gpu.scopes.opaque_ms") != metrics.end() &&
+      (id == "gpu.scopes.velocity_ms" || id == "gpu.scopes.reactive_mask_ms")) {
+    return false;
+  }
+  if (metrics.find("gpu.scopes.taa_resolve_ms") != metrics.end() &&
+      id == "gpu.scopes.taa_copy_back_ms") {
+    return false;
+  }
+  if (metrics.find("gpu.scopes.gtao_ms") != metrics.end() &&
+      id == "gpu.scopes.gtao_temporal_ms") {
+    return false;
+  }
   return true;
 }
 
@@ -288,9 +300,16 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.aa.frames_since_history_reset",
             aa.framesSinceHistoryReset);
   addMetric(out, "renderer.aa.camera_position_delta", aa.cameraPositionDelta);
+  addMetric(out, "renderer.aa.camera_direction_delta", aa.cameraDirectionDelta);
   addMetric(out, "renderer.aa.jitter_delta_magnitude", aa.jitterDeltaMagnitude);
   addMetric(out, "renderer.aa.motion_vector_textures",
             aa.motionVectorTextureCount);
+  addMetric(out, "renderer.aa.motion_class_textures",
+            aa.motionClassTextureCount);
+  addBoolMetric(out, "renderer.aa.motion_class_coverage_available",
+                aa.motionClassCoverageAvailable);
+  addMetric(out, "renderer.aa.history_color_textures",
+            aa.historyColorTextureCount);
   addMetric(out, "renderer.aa.motion_vector_allocations",
             aa.motionVectorAllocationCount);
   addMetric(out, "renderer.aa.motion_vector_reallocations",
@@ -332,13 +351,39 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
   addMetric(out, "renderer.aa.taa_copy_back_passes", aa.taaCopyBackPassCount);
   addMetric(out, "renderer.aa.spatial_aa_passes", aa.spatialAAPassCount);
   addMetric(out, "renderer.aa.msaa_resolve_passes", aa.msaaResolvePassCount);
+  addBoolMetric(out, "renderer.aa.msaa_sample4_color_supported",
+                aa.msaaSample4ColorSupported);
+  addBoolMetric(out, "renderer.aa.msaa_sample4_depth_supported",
+                aa.msaaSample4DepthSupported);
+  addBoolMetric(out, "renderer.aa.msaa_depth_resolve_min_supported",
+                aa.msaaDepthResolveMinSupported);
+  addBoolMetric(out, "renderer.aa.msaa_alpha_to_coverage_supported",
+                aa.msaaAlphaToCoverageSupported);
+  addBoolMetric(out, "renderer.aa.msaa_sample_rate_shading_supported",
+                aa.msaaSampleRateShadingSupported);
+  addBoolMetric(out, "renderer.aa.msaa_alpha_to_coverage_active",
+                aa.msaaAlphaToCoverageEnabled);
+  addBoolMetric(out, "renderer.aa.msaa_sample_shading_active",
+                aa.msaaSampleShadingEnabled);
+  addMetric(out, "renderer.aa.msaa_unsupported_reason",
+            static_cast<uint32_t>(aa.msaaUnsupportedReason));
+  addMetric(out, "renderer.aa.msaa_alpha_coverage_policy",
+            static_cast<uint32_t>(aa.msaaAlphaCoveragePolicy));
+  addMetric(out, "renderer.aa.msaa_transparency_policy",
+            static_cast<uint32_t>(aa.msaaTransparencyPolicy));
   addBytesAsMiB(out, "gpu.memory.aa.motion_vector_total_mb",
                 aa.motionVectorTotalBytes);
+  addBytesAsMiB(out, "gpu.memory.aa.motion_class_total_mb",
+                aa.motionClassTotalBytes);
+  addBytesAsMiB(out, "gpu.memory.aa.history_color_total_mb",
+                aa.historyColorTotalBytes);
   addBytesAsMiB(out, "gpu.memory.aa.reactive_mask_total_mb",
                 aa.reactiveMaskTotalBytes);
   addBytesAsMiB(out, "gpu.memory.aa.spatial_aa_total_mb",
                 aa.spatialAATotalBytes);
   addBytesAsMiB(out, "gpu.memory.aa.msaa_total_mb", aa.msaaTotalBytes);
+  addMetric(out, "renderer.aa.msaa_color_textures", aa.msaaColorTextureCount);
+  addMetric(out, "renderer.aa.msaa_depth_textures", aa.msaaDepthTextureCount);
 
   const AmbientOcclusionFrameMetrics &ao = metrics.ambientOcclusion;
   addBoolMetric(out, "renderer.ao.enabled", ao.enabled);
@@ -348,6 +393,10 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
             ao.depthPrefilterPassCount);
   addMetric(out, "renderer.ao.main_passes", ao.mainPassCount);
   addMetric(out, "renderer.ao.temporal_passes", ao.temporalPassCount);
+  addBoolMetric(out, "renderer.ao.temporal_motion_class_consumed",
+                ao.temporalMotionClassConsumed);
+  addBoolMetric(out, "renderer.ao.temporal_previous_depth_consumed",
+                ao.temporalPreviousDepthConsumed);
   addMetric(out, "renderer.ao.texture_count", ao.textureCount);
   addBytesAsMiB(out, "gpu.memory.ao.total_texture_mb", ao.totalTextureBytes);
 
@@ -373,6 +422,9 @@ void flattenAutotestRendererMetrics(std::map<std::string, double> &out,
 void applyAutotestGpuTimingReport(
     std::map<uint64_t, std::map<std::string, double>> &frames,
     const GpuTimingReport &report) {
+  applyGpuScope(frames, report, GpuTimingScope::WholeFrame,
+                report.wholeFrameSourceFrameIndex, "gpu.frame_ms",
+                report.wholeFrameTimeMs);
   applyGpuScope(frames, report, GpuTimingScope::Shadow,
                 report.shadowSourceFrameIndex, "gpu.scopes.shadow_ms",
                 report.shadowTimeMs);
@@ -413,6 +465,18 @@ void applyAutotestGpuTimingReport(
   applyGpuScope(frames, report, GpuTimingScope::Skybox,
                 report.skyboxSourceFrameIndex, "gpu.scopes.skybox_ms",
                 report.skyboxTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::Velocity,
+                report.velocitySourceFrameIndex, "gpu.scopes.velocity_ms",
+                report.velocityTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::ReactiveMask,
+                report.reactiveMaskSourceFrameIndex,
+                "gpu.scopes.reactive_mask_ms", report.reactiveMaskTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::TemporalAACopyBack,
+                report.temporalAACopyBackSourceFrameIndex,
+                "gpu.scopes.taa_copy_back_ms", report.temporalAACopyBackTimeMs);
+  applyGpuScope(frames, report, GpuTimingScope::GTAOTemporal,
+                report.gtaoTemporalSourceFrameIndex,
+                "gpu.scopes.gtao_temporal_ms", report.gtaoTemporalTimeMs);
 
   for (auto &[frameIndex, metrics] : frames) {
     double sum = 0.0;

@@ -23,13 +23,13 @@ BenchmarkFrameMeasurements::BenchmarkFrameMeasurements(
 
 void BenchmarkFrameMeasurements::appendRegistered(BenchmarkMetricIndex index,
                                                   double value) {
-  values_.push_back(BenchmarkMeasurement{.registeredIndex = index,
-                                         .second = value});
+  values_.push_back(
+      BenchmarkMeasurement{.registeredIndex = index, .second = value});
 }
 
 void BenchmarkFrameMeasurements::appendOwned(std::string id, double value) {
-  values_.push_back(BenchmarkMeasurement{.ownedId = std::move(id),
-                                         .second = value});
+  values_.push_back(
+      BenchmarkMeasurement{.ownedId = std::move(id), .second = value});
 }
 
 std::pair<BenchmarkFrameMeasurements::iterator, bool>
@@ -61,18 +61,16 @@ double &BenchmarkFrameMeasurements::operator[](std::string_view id) {
 
 BenchmarkFrameMeasurements::iterator
 BenchmarkFrameMeasurements::find(std::string_view id) noexcept {
-  return std::find_if(values_.begin(), values_.end(),
-                      [id](const BenchmarkMeasurement &value) {
-                        return value.id() == id;
-                      });
+  return std::find_if(
+      values_.begin(), values_.end(),
+      [id](const BenchmarkMeasurement &value) { return value.id() == id; });
 }
 
 BenchmarkFrameMeasurements::const_iterator
 BenchmarkFrameMeasurements::find(std::string_view id) const noexcept {
-  return std::find_if(values_.begin(), values_.end(),
-                      [id](const BenchmarkMeasurement &value) {
-                        return value.id() == id;
-                      });
+  return std::find_if(
+      values_.begin(), values_.end(),
+      [id](const BenchmarkMeasurement &value) { return value.id() == id; });
 }
 
 size_t BenchmarkFrameMeasurements::count(std::string_view id) const noexcept {
@@ -80,11 +78,9 @@ size_t BenchmarkFrameMeasurements::count(std::string_view id) const noexcept {
 }
 
 size_t BenchmarkFrameMeasurements::registeredCount() const noexcept {
-  return static_cast<size_t>(
-      std::count_if(values_.begin(), values_.end(),
-                    [](const BenchmarkMeasurement &value) {
-                      return value.registered();
-                    }));
+  return static_cast<size_t>(std::count_if(
+      values_.begin(), values_.end(),
+      [](const BenchmarkMeasurement &value) { return value.registered(); }));
 }
 
 size_t BenchmarkFrameMeasurements::ownedMetricIdCount() const noexcept {

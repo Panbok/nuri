@@ -85,8 +85,7 @@ private:
       const uint32_t s1 = std::rotr(schedule[index - 2u], 17) ^
                           std::rotr(schedule[index - 2u], 19) ^
                           (schedule[index - 2u] >> 10u);
-      schedule[index] = schedule[index - 16u] + s0 +
-                        schedule[index - 7u] + s1;
+      schedule[index] = schedule[index - 16u] + s0 + schedule[index - 7u] + s1;
     }
 
     uint32_t a = state_[0];
@@ -98,13 +97,11 @@ private:
     uint32_t g = state_[6];
     uint32_t h = state_[7];
     for (uint32_t index = 0u; index < schedule.size(); ++index) {
-      const uint32_t s1 =
-          std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25);
+      const uint32_t s1 = std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25);
       const uint32_t choose = (e & f) ^ (~e & g);
-      const uint32_t temporary1 = h + s1 + choose + kRoundConstants[index] +
-                                  schedule[index];
-      const uint32_t s0 =
-          std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
+      const uint32_t temporary1 =
+          h + s1 + choose + kRoundConstants[index] + schedule[index];
+      const uint32_t s0 = std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
       const uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
       const uint32_t temporary2 = s0 + majority;
       h = g;
@@ -156,8 +153,7 @@ std::string sha256Hex(std::span<const std::byte> data) {
   return digestHex(hash.finish());
 }
 
-Result<std::string, std::string>
-sha256File(const std::filesystem::path &path) {
+Result<std::string, std::string> sha256File(const std::filesystem::path &path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
     return Result<std::string, std::string>::makeError(
@@ -177,8 +173,7 @@ sha256File(const std::filesystem::path &path) {
     return Result<std::string, std::string>::makeError(
         "sha256File: failed to read " + pathToUtf8(path));
   }
-  return Result<std::string, std::string>::makeResult(
-      digestHex(hash.finish()));
+  return Result<std::string, std::string>::makeResult(digestHex(hash.finish()));
 }
 
 } // namespace nuri::tools::core

@@ -85,12 +85,15 @@ struct BenchmarkRequirements {
   std::vector<std::string> assets{};
   std::vector<std::string> backends{};
   bool allowVisibleWindow = true;
+  bool msaa4x = false;
 };
 
 struct BenchmarkCase {
   uint32_t schemaVersion = 1u;
   std::string id{};
   std::string suite{};
+  std::string comparisonGroup{};
+  std::string variant{};
   std::string description{};
   BenchmarkSceneConfig scene{};
   std::string backend = "default";

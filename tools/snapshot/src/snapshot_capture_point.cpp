@@ -50,6 +50,13 @@ constexpr std::array kCatalog{
         .coverageArea = "motion vectors",
     },
     SnapshotCaptureCatalogEntry{
+        .name = "motion_class",
+        .kind = RenderCaptureValueKind::Mask,
+        .defaultCompareProfile = "mask",
+        .producer = "TAA motion-class path",
+        .coverageArea = "temporal motion validity classes",
+    },
+    SnapshotCaptureCatalogEntry{
         .name = "reactive_mask",
         .kind = RenderCaptureValueKind::Mask,
         .defaultCompareProfile = "mask",
@@ -138,11 +145,32 @@ constexpr std::array kCatalog{
     SnapshotCaptureCatalogEntry{
         .name = "gtao_edges",
         .kind = RenderCaptureValueKind::Mask,
+        .lifetime = RenderCaptureLifetimeClass::FeaturePersistentTexture,
         .defaultCompareProfile = "mask",
         .producer = "GTAO",
-        .availability = SnapshotCaptureAvailability::KnownNotCapturable,
         .coverageArea = "GTAO edge mask",
-        .diagnosticWork = "requires explicit transient capture copy",
+    },
+    SnapshotCaptureCatalogEntry{
+        .name = "gtao_current",
+        .kind = RenderCaptureValueKind::Scalar,
+        .lifetime = RenderCaptureLifetimeClass::FeaturePersistentTexture,
+        .defaultCompareProfile = "scalar",
+        .producer = "GTAO denoise",
+        .coverageArea = "current-frame denoised GTAO visibility",
+    },
+    SnapshotCaptureCatalogEntry{
+        .name = "gtao_history",
+        .kind = RenderCaptureValueKind::Scalar,
+        .defaultCompareProfile = "scalar",
+        .producer = "GTAO temporal accumulation",
+        .coverageArea = "committed previous-frame GTAO visibility",
+    },
+    SnapshotCaptureCatalogEntry{
+        .name = "gtao_previous_depth",
+        .kind = RenderCaptureValueKind::Depth,
+        .defaultCompareProfile = "depth",
+        .producer = "Frame composition history registry",
+        .coverageArea = "committed previous-frame device depth used by GTAO",
     },
     SnapshotCaptureCatalogEntry{
         .name = "gtao_raw",

@@ -4,6 +4,8 @@
 #include "nuri/tools/autotest/autotest_assertion.h"
 #include "nuri/tools/autotest/autotest_case.h"
 #include "nuri/tools/autotest/autotest_environment.h"
+#include "nuri/tools/autotest/autotest_motion_oracle.h"
+#include "nuri/tools/autotest/autotest_quality_oracle.h"
 #include "nuri/tools/snapshot/snapshot_report.h"
 
 #include <filesystem>
@@ -45,6 +47,8 @@ struct AutotestCheckpointReport {
   std::vector<AutotestReadoutReport> readouts{};
   std::map<std::string, double> measurements{};
   std::vector<AutotestAssertionResult> assertions{};
+  std::optional<AutotestMotionOracleReport> motionOracle{};
+  std::optional<AutotestQualityOracleReport> qualityOracle{};
   std::vector<std::string> warnings{};
   std::vector<std::string> errors{};
 };

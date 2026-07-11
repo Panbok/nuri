@@ -69,6 +69,11 @@ struct BenchmarkSuiteRunResult {
   std::string message{};
 };
 
+[[nodiscard]] Result<bool, BenchmarkExitCode>
+checkBenchmarkGpuRequirements(const BenchmarkRequirements &requirements,
+                              const GpuMultisampleCapabilities &capabilities,
+                              std::string &message);
+
 [[nodiscard]] Result<std::string, std::string>
 formatBenchmarkCaseListJson(const std::vector<BenchmarkCase> &cases,
                             std::string_view suite = {});

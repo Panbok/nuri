@@ -256,6 +256,33 @@ readVec3(yyjson_val *object, std::string_view key, std::string_view path,
   return Result<glm::vec3, std::string>::makeResult(out);
 }
 
+[[nodiscard]] Result<glm::vec2, std::string>
+readVec2(yyjson_val *object, std::string_view key, std::string_view path,
+         glm::vec2 defaultValue, bool required = false) {
+  yyjson_val *value = optionalObject(object, key);
+  if (value == nullptr) {
+    if (required) {
+      return Result<glm::vec2, std::string>::makeError(jsonPath(path, key) +
+                                                       " is required");
+    }
+    return Result<glm::vec2, std::string>::makeResult(defaultValue);
+  }
+  if (!yyjson_is_arr(value) || yyjson_arr_size(value) != 2u) {
+    return Result<glm::vec2, std::string>::makeError(jsonPath(path, key) +
+                                                     " must be a vec2 array");
+  }
+  glm::vec2 out{};
+  for (uint32_t i = 0u; i < 2u; ++i) {
+    yyjson_val *entry = yyjson_arr_get(value, i);
+    if (!yyjson_is_num(entry)) {
+      return Result<glm::vec2, std::string>::makeError(
+          jsonPath(path, key) + " entries must be numbers");
+    }
+    out[i] = static_cast<float>(yyjson_get_num(entry));
+  }
+  return Result<glm::vec2, std::string>::makeResult(out);
+}
+
 template <typename Enum>
 [[nodiscard]] Result<Enum, std::string>
 parseEnum(std::string_view text,
@@ -566,8 +593,10 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
   }
 
   if (yyjson_val *aa = optionalObject(object, "antiAliasing")) {
-    static constexpr std::array aaKeys{std::string_view("mode"),
-                                       std::string_view("qualityPreset")};
+    static constexpr std::array aaKeys{
+        std::string_view("mode"), std::string_view("temporalProvider"),
+        std::string_view("qualityPreset"),
+        std::string_view("spatialPostMsaaCleanup")};
     result = rejectUnknownKeys(aa, aaKeys, "settings.antiAliasing");
     if (result.hasError()) {
       return result;
@@ -582,6 +611,15 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
       return result;
     }
     result =
+        readEnumField(aa, "temporalProvider", "settings.antiAliasing",
+                      settings.antiAliasing.temporalProvider,
+                      {{"Legacy", TemporalReconstructionProvider::Legacy},
+                       {"Reference", TemporalReconstructionProvider::Reference},
+                       {"External", TemporalReconstructionProvider::External}});
+    if (result.hasError()) {
+      return result;
+    }
+    result =
         readEnumField(aa, "qualityPreset", "settings.antiAliasing",
                       settings.antiAliasing.qualityPreset,
                       {{"Performance", TemporalAAQualityPreset::Performance},
@@ -592,6 +630,13 @@ parseSettings(yyjson_val *object, RenderSettings &settings) {
     if (result.hasError()) {
       return result;
     }
+    auto cleanup =
+        readBool(aa, "spatialPostMsaaCleanup", "settings.antiAliasing",
+                 settings.antiAliasing.debug.spatialPostMsaaCleanup);
+    if (cleanup.hasError()) {
+      return Result<bool, std::string>::makeError(cleanup.error());
+    }
+    settings.antiAliasing.debug.spatialPostMsaaCleanup = cleanup.value();
   }
 
   if (yyjson_val *ao = optionalObject(object, "ambientOcclusion")) {
@@ -1087,6 +1132,483 @@ parseCapture(yyjson_val *entry, std::string_view path) {
       std::move(target));
 }
 
+[[nodiscard]] Result<AutotestCoverageRange, std::string>
+parseCoverageRange(yyjson_val *object, std::string_view path) {
+  static constexpr std::array keys{std::string_view("min"),
+                                   std::string_view("max")};
+  auto valid = rejectUnknownKeys(object, keys, path);
+  if (valid.hasError()) {
+    return Result<AutotestCoverageRange, std::string>::makeError(valid.error());
+  }
+  AutotestCoverageRange range{};
+  range.hasMin = optionalObject(object, "min") != nullptr;
+  range.hasMax = optionalObject(object, "max") != nullptr;
+  if (!range.hasMin && !range.hasMax) {
+    return Result<AutotestCoverageRange, std::string>::makeError(
+        std::string(path) + " must contain min or max");
+  }
+  if (range.hasMin) {
+    auto value = readDouble(object, "min", path);
+    if (value.hasError()) {
+      return Result<AutotestCoverageRange, std::string>::makeError(
+          value.error());
+    }
+    range.min = value.value();
+  }
+  if (range.hasMax) {
+    auto value = readDouble(object, "max", path);
+    if (value.hasError()) {
+      return Result<AutotestCoverageRange, std::string>::makeError(
+          value.error());
+    }
+    range.max = value.value();
+  }
+  return Result<AutotestCoverageRange, std::string>::makeResult(range);
+}
+
+[[nodiscard]] Result<AutotestMotionOracle, std::string>
+parseMotionOracle(yyjson_val *object, std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("motionTarget"),
+      std::string_view("motionClassTarget"),
+      std::string_view("roi"),
+      std::string_view("mask"),
+      std::string_view("expectedVelocityPixels"),
+      std::string_view("p95ErrorMaxPixels"),
+      std::string_view("maxErrorMaxPixels"),
+      std::string_view("classCoverage"),
+  };
+  auto valid = rejectUnknownKeys(object, keys, path);
+  if (valid.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(valid.error());
+  }
+
+  AutotestMotionOracle oracle{};
+  auto text =
+      readString(object, "motionTarget", path, false, oracle.motionTarget);
+  if (text.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(text.error());
+  }
+  oracle.motionTarget = std::move(text.value());
+  text = readString(object, "motionClassTarget", path, false);
+  if (text.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(text.error());
+  }
+  oracle.motionClassTarget = std::move(text.value());
+
+  yyjson_val *roi = optionalObject(object, "roi");
+  if (!yyjson_is_obj(roi)) {
+    return Result<AutotestMotionOracle, std::string>::makeError(
+        jsonPath(path, "roi") + " is required and must be an object");
+  }
+  static constexpr std::array roiKeys{
+      std::string_view("x"), std::string_view("y"), std::string_view("width"),
+      std::string_view("height")};
+  valid = rejectUnknownKeys(roi, roiKeys, jsonPath(path, "roi"));
+  if (valid.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(valid.error());
+  }
+  for (std::string_view key : roiKeys) {
+    if (optionalObject(roi, key) == nullptr) {
+      return Result<AutotestMotionOracle, std::string>::makeError(
+          jsonPath(jsonPath(path, "roi"), key) + " is required");
+    }
+  }
+  auto u32 = readU32(roi, "x", jsonPath(path, "roi"));
+  if (u32.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(u32.error());
+  }
+  oracle.roi.x = u32.value();
+  u32 = readU32(roi, "y", jsonPath(path, "roi"));
+  if (u32.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(u32.error());
+  }
+  oracle.roi.y = u32.value();
+  u32 = readU32(roi, "width", jsonPath(path, "roi"));
+  if (u32.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(u32.error());
+  }
+  oracle.roi.width = u32.value();
+  u32 = readU32(roi, "height", jsonPath(path, "roi"));
+  if (u32.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(u32.error());
+  }
+  oracle.roi.height = u32.value();
+
+  if (yyjson_val *mask = optionalObject(object, "mask")) {
+    oracle.hasMask = true;
+    if (!yyjson_is_arr(mask) || yyjson_arr_size(mask) == 0u) {
+      return Result<AutotestMotionOracle, std::string>::makeError(
+          jsonPath(path, "mask") + " must be a non-empty array");
+    }
+    oracle.mask.reserve(yyjson_arr_size(mask));
+    yyjson_arr_iter iter;
+    yyjson_arr_iter_init(mask, &iter);
+    yyjson_val *pixel = nullptr;
+    while ((pixel = yyjson_arr_iter_next(&iter)) != nullptr) {
+      if (!yyjson_is_arr(pixel) || yyjson_arr_size(pixel) != 2u ||
+          !yyjson_is_uint(yyjson_arr_get(pixel, 0u)) ||
+          !yyjson_is_uint(yyjson_arr_get(pixel, 1u)) ||
+          yyjson_get_uint(yyjson_arr_get(pixel, 0u)) > UINT32_MAX ||
+          yyjson_get_uint(yyjson_arr_get(pixel, 1u)) > UINT32_MAX) {
+        return Result<AutotestMotionOracle, std::string>::makeError(
+            jsonPath(path, "mask") +
+            " entries must be [localX, localY] uint32 pairs");
+      }
+      oracle.mask.push_back(
+          {static_cast<uint32_t>(yyjson_get_uint(yyjson_arr_get(pixel, 0u))),
+           static_cast<uint32_t>(yyjson_get_uint(yyjson_arr_get(pixel, 1u)))});
+    }
+  }
+
+  auto expected =
+      readVec2(object, "expectedVelocityPixels", path, glm::vec2(0.0f), true);
+  if (expected.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(
+        expected.error());
+  }
+  oracle.expectedVelocityPixels = expected.value();
+  for (std::string_view key : {std::string_view("p95ErrorMaxPixels"),
+                               std::string_view("maxErrorMaxPixels")}) {
+    if (optionalObject(object, key) == nullptr) {
+      return Result<AutotestMotionOracle, std::string>::makeError(
+          jsonPath(path, key) + " is required");
+    }
+  }
+  auto number = readDouble(object, "p95ErrorMaxPixels", path);
+  if (number.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(number.error());
+  }
+  oracle.p95ErrorMaxPixels = number.value();
+  number = readDouble(object, "maxErrorMaxPixels", path);
+  if (number.hasError()) {
+    return Result<AutotestMotionOracle, std::string>::makeError(number.error());
+  }
+  oracle.maxErrorMaxPixels = number.value();
+
+  if (yyjson_val *coverage = optionalObject(object, "classCoverage")) {
+    static constexpr std::array coverageKeys{std::string_view("invalid"),
+                                             std::string_view("static"),
+                                             std::string_view("full")};
+    valid = rejectUnknownKeys(coverage, coverageKeys,
+                              jsonPath(path, "classCoverage"));
+    if (valid.hasError()) {
+      return Result<AutotestMotionOracle, std::string>::makeError(
+          valid.error());
+    }
+    oracle.classCoverage.configured = true;
+    bool parsedAny = false;
+    for (const auto &[name, destination] :
+         std::array<std::pair<std::string_view, AutotestCoverageRange *>, 3>{
+             std::pair{std::string_view("invalid"),
+                       &oracle.classCoverage.invalid},
+             std::pair{std::string_view("static"),
+                       &oracle.classCoverage.staticCameraOnly},
+             std::pair{std::string_view("full"), &oracle.classCoverage.full}}) {
+      yyjson_val *range = optionalObject(coverage, name);
+      if (range == nullptr) {
+        continue;
+      }
+      parsedAny = true;
+      auto parsed = parseCoverageRange(
+          range, jsonPath(jsonPath(path, "classCoverage"), name));
+      if (parsed.hasError()) {
+        return Result<AutotestMotionOracle, std::string>::makeError(
+            parsed.error());
+      }
+      *destination = parsed.value();
+    }
+    if (!parsedAny) {
+      return Result<AutotestMotionOracle, std::string>::makeError(
+          jsonPath(path, "classCoverage") +
+          " must contain invalid, static, or full coverage bounds");
+    }
+  }
+  return Result<AutotestMotionOracle, std::string>::makeResult(
+      std::move(oracle));
+}
+
+[[nodiscard]] Result<AutotestQualityOracleFile, std::string>
+parseQualityOracleFile(yyjson_val *object, std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("version"), std::string_view("pathBase"),
+      std::string_view("path"), std::string_view("available"),
+      std::string_view("unavailableReason")};
+  auto valid = rejectUnknownKeys(object, keys, path);
+  if (valid.hasError()) {
+    return Result<AutotestQualityOracleFile, std::string>::makeError(
+        valid.error());
+  }
+  for (std::string_view key :
+       {std::string_view("version"), std::string_view("pathBase"),
+        std::string_view("path")}) {
+    if (optionalObject(object, key) == nullptr) {
+      return Result<AutotestQualityOracleFile, std::string>::makeError(
+          jsonPath(path, key) + " is required");
+    }
+  }
+  AutotestQualityOracleFile file{};
+  auto version = readU32(object, "version", path);
+  if (version.hasError()) {
+    return Result<AutotestQualityOracleFile, std::string>::makeError(
+        version.error());
+  }
+  file.version = version.value();
+  auto text = readString(object, "pathBase", path, true);
+  if (text.hasError()) {
+    return Result<AutotestQualityOracleFile, std::string>::makeError(
+        text.error());
+  }
+  file.pathBase = std::move(text.value());
+  text = readString(object, "path", path, true);
+  if (text.hasError()) {
+    return Result<AutotestQualityOracleFile, std::string>::makeError(
+        text.error());
+  }
+  file.path = std::filesystem::path(text.value());
+  auto available = readBool(object, "available", path, true);
+  if (available.hasError()) {
+    return Result<AutotestQualityOracleFile, std::string>::makeError(
+        available.error());
+  }
+  file.available = available.value();
+  text = readString(object, "unavailableReason", path, false);
+  if (text.hasError()) {
+    return Result<AutotestQualityOracleFile, std::string>::makeError(
+        text.error());
+  }
+  file.unavailableReason = std::move(text.value());
+  return Result<AutotestQualityOracleFile, std::string>::makeResult(
+      std::move(file));
+}
+
+[[nodiscard]] Result<AutotestQualityOracleMask, std::string>
+parseQualityOracleMask(yyjson_val *object, std::string_view path) {
+  static constexpr std::array keys{std::string_view("version"),
+                                   std::string_view("pathBase"),
+                                   std::string_view("path")};
+  auto valid = rejectUnknownKeys(object, keys, path);
+  if (valid.hasError()) {
+    return Result<AutotestQualityOracleMask, std::string>::makeError(
+        valid.error());
+  }
+  for (std::string_view key : keys) {
+    if (optionalObject(object, key) == nullptr) {
+      return Result<AutotestQualityOracleMask, std::string>::makeError(
+          jsonPath(path, key) + " is required");
+    }
+  }
+  AutotestQualityOracleMask mask{};
+  auto version = readU32(object, "version", path);
+  if (version.hasError()) {
+    return Result<AutotestQualityOracleMask, std::string>::makeError(
+        version.error());
+  }
+  mask.version = version.value();
+  auto text = readString(object, "pathBase", path, true);
+  if (text.hasError()) {
+    return Result<AutotestQualityOracleMask, std::string>::makeError(
+        text.error());
+  }
+  mask.pathBase = std::move(text.value());
+  text = readString(object, "path", path, true);
+  if (text.hasError()) {
+    return Result<AutotestQualityOracleMask, std::string>::makeError(
+        text.error());
+  }
+  mask.path = std::filesystem::path(text.value());
+  return Result<AutotestQualityOracleMask, std::string>::makeResult(
+      std::move(mask));
+}
+
+[[nodiscard]] Result<AutotestQualityOracleBudgets, std::string>
+parseQualityOracleBudgets(yyjson_val *object, std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("normalizedMaeMax"),
+      std::string_view("normalizedRmseMax"),
+      std::string_view("lumaSsimMin"),
+      std::string_view("darkCollapsePercentMax"),
+      std::string_view("darkCollapseComponentMaxPixels"),
+      std::string_view("relativeLumaEnergyDriftMax"),
+      std::string_view("edgeWidthRatioMin"),
+      std::string_view("edgeWidthRatioMax"),
+      std::string_view("edgeOvershootMax"),
+      std::string_view("edgeUndershootMax"),
+      std::string_view("temporalErrorMax"),
+      std::string_view("ghostEnergyMax"),
+      std::string_view("recoveryRmseMax")};
+  auto valid = rejectUnknownKeys(object, keys, path);
+  if (valid.hasError()) {
+    return Result<AutotestQualityOracleBudgets, std::string>::makeError(
+        valid.error());
+  }
+  for (std::string_view key : keys) {
+    if (optionalObject(object, key) == nullptr) {
+      return Result<AutotestQualityOracleBudgets, std::string>::makeError(
+          jsonPath(path, key) + " is required");
+    }
+  }
+  AutotestQualityOracleBudgets budgets{};
+  auto readBudget = [&](std::string_view key,
+                        double &destination) -> Result<bool, std::string> {
+    auto value = readDouble(object, key, path);
+    if (value.hasError()) {
+      return Result<bool, std::string>::makeError(value.error());
+    }
+    destination = value.value();
+    return Result<bool, std::string>::makeResult(true);
+  };
+  for (auto parsed : {
+           readBudget("normalizedMaeMax", budgets.normalizedMaeMax),
+           readBudget("normalizedRmseMax", budgets.normalizedRmseMax),
+           readBudget("lumaSsimMin", budgets.lumaSsimMin),
+           readBudget("darkCollapsePercentMax", budgets.darkCollapsePercentMax),
+           readBudget("relativeLumaEnergyDriftMax",
+                      budgets.relativeLumaEnergyDriftMax),
+           readBudget("edgeWidthRatioMin", budgets.edgeWidthRatioMin),
+           readBudget("edgeWidthRatioMax", budgets.edgeWidthRatioMax),
+           readBudget("edgeOvershootMax", budgets.edgeOvershootMax),
+           readBudget("edgeUndershootMax", budgets.edgeUndershootMax),
+           readBudget("temporalErrorMax", budgets.temporalErrorMax),
+           readBudget("ghostEnergyMax", budgets.ghostEnergyMax),
+           readBudget("recoveryRmseMax", budgets.recoveryRmseMax),
+       }) {
+    if (parsed.hasError()) {
+      return Result<AutotestQualityOracleBudgets, std::string>::makeError(
+          parsed.error());
+    }
+  }
+  auto component = readU32(object, "darkCollapseComponentMaxPixels", path);
+  if (component.hasError()) {
+    return Result<AutotestQualityOracleBudgets, std::string>::makeError(
+        component.error());
+  }
+  budgets.darkCollapseComponentMaxPixels = component.value();
+  return Result<AutotestQualityOracleBudgets, std::string>::makeResult(budgets);
+}
+
+[[nodiscard]] Result<AutotestQualityOracle, std::string>
+parseQualityOracle(yyjson_val *object, std::string_view path) {
+  static constexpr std::array keys{
+      std::string_view("schemaVersion"), std::string_view("outputTarget"),
+      std::string_view("reference"),     std::string_view("mask"),
+      std::string_view("lscale"),        std::string_view("budgets"),
+      std::string_view("temporal")};
+  auto valid = rejectUnknownKeys(object, keys, path);
+  if (valid.hasError()) {
+    return Result<AutotestQualityOracle, std::string>::makeError(valid.error());
+  }
+  for (std::string_view key :
+       {std::string_view("schemaVersion"), std::string_view("outputTarget"),
+        std::string_view("reference"), std::string_view("lscale"),
+        std::string_view("budgets")}) {
+    if (optionalObject(object, key) == nullptr) {
+      return Result<AutotestQualityOracle, std::string>::makeError(
+          jsonPath(path, key) + " is required");
+    }
+  }
+  AutotestQualityOracle oracle{};
+  auto version = readU32(object, "schemaVersion", path);
+  if (version.hasError()) {
+    return Result<AutotestQualityOracle, std::string>::makeError(
+        version.error());
+  }
+  oracle.schemaVersion = version.value();
+  auto text = readString(object, "outputTarget", path, true);
+  if (text.hasError()) {
+    return Result<AutotestQualityOracle, std::string>::makeError(text.error());
+  }
+  oracle.outputTarget = std::move(text.value());
+  auto reference = parseQualityOracleFile(optionalObject(object, "reference"),
+                                          jsonPath(path, "reference"));
+  if (reference.hasError()) {
+    return Result<AutotestQualityOracle, std::string>::makeError(
+        reference.error());
+  }
+  oracle.reference = std::move(reference.value());
+  if (yyjson_val *mask = optionalObject(object, "mask")) {
+    auto parsed = parseQualityOracleMask(mask, jsonPath(path, "mask"));
+    if (parsed.hasError()) {
+      return Result<AutotestQualityOracle, std::string>::makeError(
+          parsed.error());
+    }
+    oracle.mask = std::move(parsed.value());
+  }
+  auto lscale = readDouble(object, "lscale", path);
+  if (lscale.hasError()) {
+    return Result<AutotestQualityOracle, std::string>::makeError(
+        lscale.error());
+  }
+  oracle.lscale = lscale.value();
+  auto budgets = parseQualityOracleBudgets(optionalObject(object, "budgets"),
+                                           jsonPath(path, "budgets"));
+  if (budgets.hasError()) {
+    return Result<AutotestQualityOracle, std::string>::makeError(
+        budgets.error());
+  }
+  oracle.budgets = budgets.value();
+  if (yyjson_val *temporal = optionalObject(object, "temporal")) {
+    static constexpr std::array temporalKeys{
+        std::string_view("previousCheckpoint"),
+        std::string_view("previousOutputTarget"),
+        std::string_view("previousReference"), std::string_view("motionTarget"),
+        std::string_view("revealMask")};
+    valid =
+        rejectUnknownKeys(temporal, temporalKeys, jsonPath(path, "temporal"));
+    if (valid.hasError()) {
+      return Result<AutotestQualityOracle, std::string>::makeError(
+          valid.error());
+    }
+    for (std::string_view key : temporalKeys) {
+      if (optionalObject(temporal, key) == nullptr) {
+        return Result<AutotestQualityOracle, std::string>::makeError(
+            jsonPath(jsonPath(path, "temporal"), key) + " is required");
+      }
+    }
+    AutotestQualityOracleTemporal parsed{};
+    text = readString(temporal, "previousCheckpoint",
+                      jsonPath(path, "temporal"), true);
+    if (text.hasError()) {
+      return Result<AutotestQualityOracle, std::string>::makeError(
+          text.error());
+    }
+    parsed.previousCheckpoint = std::move(text.value());
+    text = readString(temporal, "previousOutputTarget",
+                      jsonPath(path, "temporal"), true);
+    if (text.hasError()) {
+      return Result<AutotestQualityOracle, std::string>::makeError(
+          text.error());
+    }
+    parsed.previousOutputTarget = std::move(text.value());
+    auto previousReference = parseQualityOracleFile(
+        optionalObject(temporal, "previousReference"),
+        jsonPath(jsonPath(path, "temporal"), "previousReference"));
+    if (previousReference.hasError()) {
+      return Result<AutotestQualityOracle, std::string>::makeError(
+          previousReference.error());
+    }
+    parsed.previousReference = std::move(previousReference.value());
+    text =
+        readString(temporal, "motionTarget", jsonPath(path, "temporal"), true);
+    if (text.hasError()) {
+      return Result<AutotestQualityOracle, std::string>::makeError(
+          text.error());
+    }
+    parsed.motionTarget = std::move(text.value());
+    auto reveal = parseQualityOracleMask(
+        optionalObject(temporal, "revealMask"),
+        jsonPath(jsonPath(path, "temporal"), "revealMask"));
+    if (reveal.hasError()) {
+      return Result<AutotestQualityOracle, std::string>::makeError(
+          reveal.error());
+    }
+    parsed.revealMask = std::move(reveal.value());
+    oracle.temporal = std::move(parsed);
+  }
+  return Result<AutotestQualityOracle, std::string>::makeResult(
+      std::move(oracle));
+}
+
 [[nodiscard]] Result<std::vector<AutotestMetricAssertion>, std::string>
 parseAssertions(yyjson_val *array, std::string_view path) {
   std::vector<AutotestMetricAssertion> assertions;
@@ -1498,9 +2020,10 @@ parseCheckpoints(yyjson_val *root, uint32_t endFrame) {
           "checkpoints entries must be objects");
     }
     static constexpr std::array keys{
-        std::string_view("id"), std::string_view("frame"),
-        std::string_view("captures"), std::string_view("readouts"),
-        std::string_view("assertions")};
+        std::string_view("id"),           std::string_view("frame"),
+        std::string_view("captures"),     std::string_view("readouts"),
+        std::string_view("assertions"),   std::string_view("motionOracle"),
+        std::string_view("qualityOracle")};
     auto result = rejectUnknownKeys(entry, keys, "checkpoints[]");
     if (result.hasError()) {
       return Result<std::vector<AutotestCheckpoint>, std::string>::makeError(
@@ -1559,6 +2082,24 @@ parseCheckpoints(yyjson_val *root, uint32_t endFrame) {
           assertions.error());
     }
     checkpoint.assertions = std::move(assertions.value());
+    if (yyjson_val *motionOracle = optionalObject(entry, "motionOracle")) {
+      auto parsed =
+          parseMotionOracle(motionOracle, "checkpoints[].motionOracle");
+      if (parsed.hasError()) {
+        return Result<std::vector<AutotestCheckpoint>, std::string>::makeError(
+            parsed.error());
+      }
+      checkpoint.motionOracle = std::move(parsed.value());
+    }
+    if (yyjson_val *qualityOracle = optionalObject(entry, "qualityOracle")) {
+      auto parsed =
+          parseQualityOracle(qualityOracle, "checkpoints[].qualityOracle");
+      if (parsed.hasError()) {
+        return Result<std::vector<AutotestCheckpoint>, std::string>::makeError(
+            parsed.error());
+      }
+      checkpoint.qualityOracle = std::move(parsed.value());
+    }
     checkpoints.push_back(std::move(checkpoint));
   }
   if (checkpoints.empty()) {
@@ -1876,6 +2417,246 @@ Result<bool, std::string> validateAutotestCase(const AutotestCase &testCase) {
         return Result<bool, std::string>::makeError(
             "duplicate capture target '" + capture.target +
             "' in checkpoint '" + checkpoint.id + "'");
+      }
+    }
+    if (checkpoint.motionOracle.has_value()) {
+      const AutotestMotionOracle &oracle = *checkpoint.motionOracle;
+      if (oracle.motionTarget != "motion_vectors") {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' motionOracle.motionTarget must be motion_vectors");
+      }
+      const auto motionCapture =
+          std::find_if(checkpoint.captures.begin(), checkpoint.captures.end(),
+                       [&](const AutotestCaptureTarget &capture) {
+                         return capture.target == oracle.motionTarget;
+                       });
+      if (motionCapture == checkpoint.captures.end() ||
+          !motionCapture->required) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' motion oracle requires a required motion_vectors capture");
+      }
+      if (oracle.roi.width == 0u || oracle.roi.height == 0u ||
+          oracle.roi.x >= testCase.resolution[0] ||
+          oracle.roi.y >= testCase.resolution[1] ||
+          oracle.roi.width > testCase.resolution[0] - oracle.roi.x ||
+          oracle.roi.height > testCase.resolution[1] - oracle.roi.y) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' motion oracle ROI is outside resolution");
+      }
+      if (!std::isfinite(oracle.expectedVelocityPixels.x) ||
+          !std::isfinite(oracle.expectedVelocityPixels.y)) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' motion oracle expected velocity must be finite");
+      }
+      if (!std::isfinite(oracle.p95ErrorMaxPixels) ||
+          !std::isfinite(oracle.maxErrorMaxPixels) ||
+          oracle.p95ErrorMaxPixels < 0.0 || oracle.maxErrorMaxPixels < 0.0 ||
+          oracle.p95ErrorMaxPixels > oracle.maxErrorMaxPixels) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' motion oracle thresholds must satisfy 0 <= p95 <= max");
+      }
+      if (oracle.hasMask) {
+        if (oracle.mask.empty()) {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' motion oracle mask must not be empty");
+        }
+        std::unordered_set<uint64_t> maskPixels;
+        for (const std::array<uint32_t, 2> &pixel : oracle.mask) {
+          if (pixel[0] >= oracle.roi.width || pixel[1] >= oracle.roi.height) {
+            return Result<bool, std::string>::makeError(
+                "checkpoint '" + checkpoint.id +
+                "' motion oracle mask pixel is outside the ROI");
+          }
+          const uint64_t key = (static_cast<uint64_t>(pixel[1]) << 32u) |
+                               static_cast<uint64_t>(pixel[0]);
+          if (!maskPixels.insert(key).second) {
+            return Result<bool, std::string>::makeError(
+                "checkpoint '" + checkpoint.id +
+                "' motion oracle mask contains a duplicate pixel");
+          }
+        }
+      }
+
+      const auto validCoverageRange = [](const AutotestCoverageRange &range) {
+        return (!range.hasMin || (std::isfinite(range.min) &&
+                                  range.min >= 0.0 && range.min <= 1.0)) &&
+               (!range.hasMax || (std::isfinite(range.max) &&
+                                  range.max >= 0.0 && range.max <= 1.0)) &&
+               (!range.hasMin || !range.hasMax || range.min <= range.max);
+      };
+      if (oracle.motionClassTarget.empty()) {
+        if (oracle.classCoverage.configured) {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' motion oracle classCoverage requires motionClassTarget");
+        }
+      } else {
+        if (oracle.motionClassTarget != "motion_class") {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' motionOracle.motionClassTarget must be motion_class");
+        }
+        const auto classCapture =
+            std::find_if(checkpoint.captures.begin(), checkpoint.captures.end(),
+                         [&](const AutotestCaptureTarget &capture) {
+                           return capture.target == oracle.motionClassTarget;
+                         });
+        if (classCapture == checkpoint.captures.end() ||
+            !classCapture->required) {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' motion oracle requires a required motion_class capture");
+        }
+        if (!validCoverageRange(oracle.classCoverage.invalid) ||
+            !validCoverageRange(oracle.classCoverage.staticCameraOnly) ||
+            !validCoverageRange(oracle.classCoverage.full)) {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' motion oracle class coverage bounds must be within [0, 1]");
+        }
+      }
+    }
+    if (checkpoint.qualityOracle.has_value()) {
+      const AutotestQualityOracle &oracle = *checkpoint.qualityOracle;
+      const auto validRelativeRepoPath = [](std::string_view base,
+                                            const std::filesystem::path &path) {
+        if (base != "repoRoot" || path.empty() || path.is_absolute() ||
+            path.has_root_name() || path.has_root_directory()) {
+          return false;
+        }
+        for (const std::filesystem::path &component : path) {
+          if (component.empty() || component == "." || component == "..") {
+            return false;
+          }
+        }
+        return true;
+      };
+      const auto validFile = [&](const AutotestQualityOracleFile &file) {
+        return file.version > 0u &&
+               validRelativeRepoPath(file.pathBase, file.path) &&
+               file.path.extension() == ".exr" &&
+               (file.available || !file.unavailableReason.empty());
+      };
+      const auto validMask = [&](const AutotestQualityOracleMask &mask) {
+        return mask.version > 0u &&
+               validRelativeRepoPath(mask.pathBase, mask.path);
+      };
+      const auto findRequiredCapture = [](const AutotestCheckpoint &owner,
+                                          std::string_view target) {
+        return std::find_if(owner.captures.begin(), owner.captures.end(),
+                            [&](const AutotestCaptureTarget &capture) {
+                              return capture.target == target &&
+                                     capture.required;
+                            });
+      };
+      if (oracle.schemaVersion != 1u) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' qualityOracle.schemaVersion must be 1");
+      }
+      const auto outputCapture =
+          findRequiredCapture(checkpoint, oracle.outputTarget);
+      const nuri::tools::snapshot::SnapshotCaptureCatalogEntry *outputCatalog =
+          nuri::tools::snapshot::findSnapshotCaptureCatalogEntry(
+              oracle.outputTarget);
+      if (outputCapture == checkpoint.captures.end() ||
+          outputCatalog == nullptr ||
+          outputCatalog->kind != RenderCaptureValueKind::LinearHdrColor) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' quality oracle requires a required linear HDR output capture");
+      }
+      if (!validFile(oracle.reference)) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' quality oracle reference must be a versioned repoRoot EXR");
+      }
+      if (oracle.mask.has_value() && !validMask(*oracle.mask)) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' quality oracle mask must be a versioned repoRoot image");
+      }
+      const AutotestQualityOracleBudgets &budgets = oracle.budgets;
+      const auto finiteNonNegative = [](double value) {
+        return std::isfinite(value) && value >= 0.0;
+      };
+      const bool validLscale =
+          std::isfinite(oracle.lscale) &&
+          (oracle.reference.available ? oracle.lscale > 0.0
+                                      : oracle.lscale == 0.0);
+      if (!validLscale || !finiteNonNegative(budgets.normalizedMaeMax) ||
+          !finiteNonNegative(budgets.normalizedRmseMax) ||
+          !std::isfinite(budgets.lumaSsimMin) || budgets.lumaSsimMin < 0.0 ||
+          budgets.lumaSsimMin > 1.0 ||
+          !finiteNonNegative(budgets.darkCollapsePercentMax) ||
+          budgets.darkCollapsePercentMax > 100.0 ||
+          budgets.darkCollapseComponentMaxPixels == 0u ||
+          !finiteNonNegative(budgets.relativeLumaEnergyDriftMax) ||
+          !finiteNonNegative(budgets.edgeWidthRatioMin) ||
+          !finiteNonNegative(budgets.edgeWidthRatioMax) ||
+          budgets.edgeWidthRatioMin > budgets.edgeWidthRatioMax ||
+          !finiteNonNegative(budgets.edgeOvershootMax) ||
+          !finiteNonNegative(budgets.edgeUndershootMax) ||
+          !finiteNonNegative(budgets.temporalErrorMax) ||
+          !finiteNonNegative(budgets.ghostEnergyMax) ||
+          !finiteNonNegative(budgets.recoveryRmseMax)) {
+        return Result<bool, std::string>::makeError(
+            "checkpoint '" + checkpoint.id +
+            "' quality oracle Lscale/budgets are invalid");
+      }
+      if (oracle.temporal.has_value()) {
+        const AutotestQualityOracleTemporal &temporal = *oracle.temporal;
+        const auto previousCheckpoint = std::find_if(
+            testCase.checkpoints.begin(), testCase.checkpoints.end(),
+            [&](const AutotestCheckpoint &candidate) {
+              return candidate.id == temporal.previousCheckpoint;
+            });
+        if (previousCheckpoint == testCase.checkpoints.end() ||
+            previousCheckpoint->frame >= checkpoint.frame) {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' quality oracle previousCheckpoint must name an earlier "
+              "checkpoint");
+        }
+        const auto previousOutput = findRequiredCapture(
+            *previousCheckpoint, temporal.previousOutputTarget);
+        const nuri::tools::snapshot::SnapshotCaptureCatalogEntry
+            *previousCatalog =
+                nuri::tools::snapshot::findSnapshotCaptureCatalogEntry(
+                    temporal.previousOutputTarget);
+        if (previousOutput == previousCheckpoint->captures.end() ||
+            previousCatalog == nullptr ||
+            previousCatalog->kind != RenderCaptureValueKind::LinearHdrColor) {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' quality oracle requires an earlier required HDR output "
+              "capture");
+        }
+        const auto motionCapture =
+            findRequiredCapture(checkpoint, temporal.motionTarget);
+        const nuri::tools::snapshot::SnapshotCaptureCatalogEntry
+            *motionCatalog =
+                nuri::tools::snapshot::findSnapshotCaptureCatalogEntry(
+                    temporal.motionTarget);
+        if (motionCapture == checkpoint.captures.end() ||
+            motionCatalog == nullptr ||
+            motionCatalog->kind != RenderCaptureValueKind::Velocity) {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' quality oracle requires a required analytic motion capture");
+        }
+        if (!validFile(temporal.previousReference) ||
+            !validMask(temporal.revealMask)) {
+          return Result<bool, std::string>::makeError(
+              "checkpoint '" + checkpoint.id +
+              "' quality oracle temporal references/masks are invalid");
+        }
       }
     }
     std::unordered_set<std::string> readoutIds;

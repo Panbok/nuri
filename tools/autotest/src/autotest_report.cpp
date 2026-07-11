@@ -341,6 +341,143 @@ yyjson_mut_val *makeCaptureObject(yyjson_mut_doc *doc,
   return object;
 }
 
+yyjson_mut_val *
+makeMotionOracleObject(yyjson_mut_doc *doc,
+                       const AutotestMotionOracleReport &motionOracle) {
+  yyjson_mut_val *object = yyjson_mut_obj(doc);
+  addString(doc, object, "status", motionOracle.status);
+  addString(doc, object, "statusReason", motionOracle.statusReason);
+  addString(doc, object, "motionTarget", motionOracle.motionTarget);
+  addString(doc, object, "motionClassTarget", motionOracle.motionClassTarget);
+  yyjson_mut_val *roi = yyjson_mut_obj(doc);
+  yyjson_mut_obj_add_uint(doc, roi, "x", motionOracle.roi.x);
+  yyjson_mut_obj_add_uint(doc, roi, "y", motionOracle.roi.y);
+  yyjson_mut_obj_add_uint(doc, roi, "width", motionOracle.roi.width);
+  yyjson_mut_obj_add_uint(doc, roi, "height", motionOracle.roi.height);
+  yyjson_mut_obj_add_val(doc, object, "roi", roi);
+  yyjson_mut_obj_add_uint(doc, object, "selectedPixelCount",
+                          motionOracle.selectedPixelCount);
+  yyjson_mut_val *expected = yyjson_mut_arr(doc);
+  yyjson_mut_arr_add_real(doc, expected,
+                          motionOracle.expectedVelocityPixels[0]);
+  yyjson_mut_arr_add_real(doc, expected,
+                          motionOracle.expectedVelocityPixels[1]);
+  yyjson_mut_obj_add_val(doc, object, "expectedVelocityPixels", expected);
+  yyjson_mut_val *mean = yyjson_mut_arr(doc);
+  yyjson_mut_arr_add_real(doc, mean, motionOracle.meanVelocityPixels[0]);
+  yyjson_mut_arr_add_real(doc, mean, motionOracle.meanVelocityPixels[1]);
+  yyjson_mut_obj_add_val(doc, object, "meanVelocityPixels", mean);
+  addFiniteReal(doc, object, "meanErrorPixels", motionOracle.meanErrorPixels);
+  addFiniteReal(doc, object, "p95ErrorPixels", motionOracle.p95ErrorPixels);
+  addFiniteReal(doc, object, "maxErrorPixels", motionOracle.maxErrorPixels);
+  addFiniteReal(doc, object, "p95ScaleErrorPixels",
+                motionOracle.p95ScaleErrorPixels);
+  addFiniteReal(doc, object, "maxScaleErrorPixels",
+                motionOracle.maxScaleErrorPixels);
+  yyjson_mut_obj_add_uint(doc, object, "wrongSignPixelCount",
+                          motionOracle.wrongSignPixelCount);
+  yyjson_mut_obj_add_bool(doc, object, "classCoverageAvailable",
+                          motionOracle.classCoverageAvailable);
+  yyjson_mut_obj_add_uint(doc, object, "classSampleCount",
+                          motionOracle.classSampleCount);
+  addFiniteReal(doc, object, "invalidClassCoverage",
+                motionOracle.invalidClassCoverage);
+  addFiniteReal(doc, object, "staticClassCoverage",
+                motionOracle.staticClassCoverage);
+  addFiniteReal(doc, object, "fullClassCoverage",
+                motionOracle.fullClassCoverage);
+  addFiniteReal(doc, object, "p95ErrorMaxPixels",
+                motionOracle.p95ErrorMaxPixels);
+  addFiniteReal(doc, object, "maxErrorMaxPixels",
+                motionOracle.maxErrorMaxPixels);
+  yyjson_mut_obj_add_val(doc, object, "failedThresholds",
+                         makeStringArray(doc, motionOracle.failedThresholds));
+  return object;
+}
+
+yyjson_mut_val *
+makeQualityOracleObject(yyjson_mut_doc *doc,
+                        const AutotestQualityOracleReport &quality) {
+  yyjson_mut_val *object = yyjson_mut_obj(doc);
+  addString(doc, object, "status", quality.status);
+  addString(doc, object, "statusReason", quality.statusReason);
+  addString(doc, object, "outputTarget", quality.outputTarget);
+  addString(doc, object, "referencePath", quality.referencePath);
+  yyjson_mut_obj_add_uint(doc, object, "schemaVersion", quality.schemaVersion);
+  yyjson_mut_obj_add_uint(doc, object, "referenceVersion",
+                          quality.referenceVersion);
+  yyjson_mut_obj_add_uint(doc, object, "maskVersion", quality.maskVersion);
+  addFiniteReal(doc, object, "lscale", quality.lscale);
+  yyjson_mut_obj_add_uint(doc, object, "selectedPixelCount",
+                          quality.selectedPixelCount);
+  yyjson_mut_obj_add_uint(doc, object, "finitePixelCount",
+                          quality.finitePixelCount);
+  yyjson_mut_obj_add_uint(doc, object, "nonFiniteValueCount",
+                          quality.nonFiniteValueCount);
+  addFiniteReal(doc, object, "normalizedHdrMae", quality.normalizedHdrMae);
+  addFiniteReal(doc, object, "normalizedHdrRmse", quality.normalizedHdrRmse);
+  addFiniteReal(doc, object, "lumaSsim", quality.lumaSsim);
+  yyjson_mut_obj_add_uint(doc, object, "darkCollapsePixelCount",
+                          quality.darkCollapsePixelCount);
+  addFiniteReal(doc, object, "darkCollapsePercent",
+                quality.darkCollapsePercent);
+  yyjson_mut_obj_add_uint(doc, object, "darkCollapseMaxComponentPixels",
+                          quality.darkCollapseMaxComponentPixels);
+  addFiniteReal(doc, object, "relativeLumaEnergyDrift",
+                quality.relativeLumaEnergyDrift);
+  yyjson_mut_obj_add_bool(doc, object, "edgeAvailable", quality.edgeAvailable);
+  addString(doc, object, "edgeAxis", quality.edgeAxis);
+  yyjson_mut_obj_add_uint(doc, object, "edgeProfileCount",
+                          quality.edgeProfileCount);
+  yyjson_mut_obj_add_uint(doc, object, "edgeUnresolvedProfileCount",
+                          quality.edgeUnresolvedProfileCount);
+  addFiniteReal(doc, object, "referenceEdgeWidth10To90",
+                quality.referenceEdgeWidth10To90);
+  addFiniteReal(doc, object, "outputEdgeWidth10To90",
+                quality.outputEdgeWidth10To90);
+  addFiniteReal(doc, object, "edgeWidthRatio", quality.edgeWidthRatio);
+  addFiniteReal(doc, object, "edgeOvershoot", quality.edgeOvershoot);
+  addFiniteReal(doc, object, "edgeUndershoot", quality.edgeUndershoot);
+  yyjson_mut_obj_add_bool(doc, object, "temporalAvailable",
+                          quality.temporalAvailable);
+  yyjson_mut_obj_add_uint(doc, object, "temporalSampleCount",
+                          quality.temporalSampleCount);
+  addFiniteReal(doc, object, "temporalError", quality.temporalError);
+  yyjson_mut_obj_add_bool(doc, object, "revealAvailable",
+                          quality.revealAvailable);
+  yyjson_mut_obj_add_uint(doc, object, "revealPixelCount",
+                          quality.revealPixelCount);
+  addFiniteReal(doc, object, "ghostEnergy", quality.ghostEnergy);
+  addFiniteReal(doc, object, "recoveryRmse", quality.recoveryRmse);
+  addFiniteReal(doc, object, "normalizedMaeMax",
+                quality.budgets.normalizedMaeMax);
+  addFiniteReal(doc, object, "normalizedRmseMax",
+                quality.budgets.normalizedRmseMax);
+  addFiniteReal(doc, object, "lumaSsimMin", quality.budgets.lumaSsimMin);
+  addFiniteReal(doc, object, "darkCollapsePercentMax",
+                quality.budgets.darkCollapsePercentMax);
+  yyjson_mut_obj_add_uint(doc, object, "darkCollapseComponentMaxPixels",
+                          quality.budgets.darkCollapseComponentMaxPixels);
+  addFiniteReal(doc, object, "relativeLumaEnergyDriftMax",
+                quality.budgets.relativeLumaEnergyDriftMax);
+  addFiniteReal(doc, object, "edgeWidthRatioMin",
+                quality.budgets.edgeWidthRatioMin);
+  addFiniteReal(doc, object, "edgeWidthRatioMax",
+                quality.budgets.edgeWidthRatioMax);
+  addFiniteReal(doc, object, "edgeOvershootMax",
+                quality.budgets.edgeOvershootMax);
+  addFiniteReal(doc, object, "edgeUndershootMax",
+                quality.budgets.edgeUndershootMax);
+  addFiniteReal(doc, object, "temporalErrorMax",
+                quality.budgets.temporalErrorMax);
+  addFiniteReal(doc, object, "ghostEnergyMax", quality.budgets.ghostEnergyMax);
+  addFiniteReal(doc, object, "recoveryRmseMax",
+                quality.budgets.recoveryRmseMax);
+  yyjson_mut_obj_add_val(doc, object, "failedThresholds",
+                         makeStringArray(doc, quality.failedThresholds));
+  return object;
+}
+
 yyjson_mut_val *makeReadoutObject(yyjson_mut_doc *doc,
                                   const AutotestReadoutReport &readout);
 
@@ -920,6 +1057,8 @@ validateAutotestReportV1(yyjson_val *root) {
       JsonField{"captures", JsonType::Array},
       JsonField{"readouts", JsonType::Array},
       JsonField{"assertions", JsonType::Array},
+      JsonField{"motionOracle", JsonType::Object, false},
+      JsonField{"qualityOracle", JsonType::Object, false},
       JsonField{"warnings", JsonType::Array},
       JsonField{"errors", JsonType::Array},
   };
@@ -944,6 +1083,86 @@ validateAutotestReportV1(yyjson_val *root) {
       JsonField{"statusReason", JsonType::String},
       JsonField{"values", JsonType::Object},
       JsonField{"assertions", JsonType::Array},
+  };
+  static constexpr std::array motionOracleFields{
+      JsonField{"status", JsonType::String},
+      JsonField{"statusReason", JsonType::String},
+      JsonField{"motionTarget", JsonType::String},
+      JsonField{"motionClassTarget", JsonType::String},
+      JsonField{"roi", JsonType::Object},
+      JsonField{"selectedPixelCount", JsonType::Unsigned},
+      JsonField{"expectedVelocityPixels", JsonType::Array},
+      JsonField{"meanVelocityPixels", JsonType::Array},
+      JsonField{"meanErrorPixels", JsonType::NullOrNumber},
+      JsonField{"p95ErrorPixels", JsonType::NullOrNumber},
+      JsonField{"maxErrorPixels", JsonType::NullOrNumber},
+      JsonField{"p95ScaleErrorPixels", JsonType::NullOrNumber},
+      JsonField{"maxScaleErrorPixels", JsonType::NullOrNumber},
+      JsonField{"wrongSignPixelCount", JsonType::Unsigned},
+      JsonField{"classCoverageAvailable", JsonType::Boolean},
+      JsonField{"classSampleCount", JsonType::Unsigned},
+      JsonField{"invalidClassCoverage", JsonType::NullOrNumber},
+      JsonField{"staticClassCoverage", JsonType::NullOrNumber},
+      JsonField{"fullClassCoverage", JsonType::NullOrNumber},
+      JsonField{"p95ErrorMaxPixels", JsonType::NullOrNumber},
+      JsonField{"maxErrorMaxPixels", JsonType::NullOrNumber},
+      JsonField{"failedThresholds", JsonType::Array},
+  };
+  static constexpr std::array motionRoiFields{
+      JsonField{"x", JsonType::Unsigned},
+      JsonField{"y", JsonType::Unsigned},
+      JsonField{"width", JsonType::Unsigned},
+      JsonField{"height", JsonType::Unsigned},
+  };
+  static constexpr std::array qualityOracleFields{
+      JsonField{"status", JsonType::String},
+      JsonField{"statusReason", JsonType::String},
+      JsonField{"outputTarget", JsonType::String},
+      JsonField{"referencePath", JsonType::String},
+      JsonField{"schemaVersion", JsonType::Unsigned},
+      JsonField{"referenceVersion", JsonType::Unsigned},
+      JsonField{"maskVersion", JsonType::Unsigned},
+      JsonField{"lscale", JsonType::NullOrNumber},
+      JsonField{"selectedPixelCount", JsonType::Unsigned},
+      JsonField{"finitePixelCount", JsonType::Unsigned},
+      JsonField{"nonFiniteValueCount", JsonType::Unsigned},
+      JsonField{"normalizedHdrMae", JsonType::NullOrNumber},
+      JsonField{"normalizedHdrRmse", JsonType::NullOrNumber},
+      JsonField{"lumaSsim", JsonType::NullOrNumber},
+      JsonField{"darkCollapsePixelCount", JsonType::Unsigned},
+      JsonField{"darkCollapsePercent", JsonType::NullOrNumber},
+      JsonField{"darkCollapseMaxComponentPixels", JsonType::Unsigned},
+      JsonField{"relativeLumaEnergyDrift", JsonType::NullOrNumber},
+      JsonField{"edgeAvailable", JsonType::Boolean},
+      JsonField{"edgeAxis", JsonType::String},
+      JsonField{"edgeProfileCount", JsonType::Unsigned},
+      JsonField{"edgeUnresolvedProfileCount", JsonType::Unsigned},
+      JsonField{"referenceEdgeWidth10To90", JsonType::NullOrNumber},
+      JsonField{"outputEdgeWidth10To90", JsonType::NullOrNumber},
+      JsonField{"edgeWidthRatio", JsonType::NullOrNumber},
+      JsonField{"edgeOvershoot", JsonType::NullOrNumber},
+      JsonField{"edgeUndershoot", JsonType::NullOrNumber},
+      JsonField{"temporalAvailable", JsonType::Boolean},
+      JsonField{"temporalSampleCount", JsonType::Unsigned},
+      JsonField{"temporalError", JsonType::NullOrNumber},
+      JsonField{"revealAvailable", JsonType::Boolean},
+      JsonField{"revealPixelCount", JsonType::Unsigned},
+      JsonField{"ghostEnergy", JsonType::NullOrNumber},
+      JsonField{"recoveryRmse", JsonType::NullOrNumber},
+      JsonField{"normalizedMaeMax", JsonType::NullOrNumber},
+      JsonField{"normalizedRmseMax", JsonType::NullOrNumber},
+      JsonField{"lumaSsimMin", JsonType::NullOrNumber},
+      JsonField{"darkCollapsePercentMax", JsonType::NullOrNumber},
+      JsonField{"darkCollapseComponentMaxPixels", JsonType::Unsigned},
+      JsonField{"relativeLumaEnergyDriftMax", JsonType::NullOrNumber},
+      JsonField{"edgeWidthRatioMin", JsonType::NullOrNumber},
+      JsonField{"edgeWidthRatioMax", JsonType::NullOrNumber},
+      JsonField{"edgeOvershootMax", JsonType::NullOrNumber},
+      JsonField{"edgeUndershootMax", JsonType::NullOrNumber},
+      JsonField{"temporalErrorMax", JsonType::NullOrNumber},
+      JsonField{"ghostEnergyMax", JsonType::NullOrNumber},
+      JsonField{"recoveryRmseMax", JsonType::NullOrNumber},
+      JsonField{"failedThresholds", JsonType::Array},
   };
   yyjson_arr_iter checkpointIterator{};
   yyjson_arr_iter_init(yyjson_obj_get(root, "checkpoints"),
@@ -1007,6 +1226,50 @@ validateAutotestReportV1(yyjson_val *root) {
                                    path + ".assertions");
     if (valid.hasError()) {
       return valid;
+    }
+    if (yyjson_val *motionOracle = yyjson_obj_get(checkpoint, "motionOracle")) {
+      valid = validateObject(motionOracle, motionOracleFields,
+                             path + ".motionOracle");
+      if (valid.hasError()) {
+        return valid;
+      }
+      valid = validateObject(yyjson_obj_get(motionOracle, "roi"),
+                             motionRoiFields, path + ".motionOracle.roi");
+      if (valid.hasError()) {
+        return valid;
+      }
+      for (std::string_view field : {std::string_view("expectedVelocityPixels"),
+                                     std::string_view("meanVelocityPixels")}) {
+        yyjson_val *values =
+            yyjson_obj_getn(motionOracle, field.data(), field.size());
+        if (!yyjson_is_arr(values) || yyjson_arr_size(values) != 2u ||
+            !yyjson_is_num(yyjson_arr_get(values, 0u)) ||
+            !yyjson_is_num(yyjson_arr_get(values, 1u))) {
+          return Result<void, std::string>::makeError(
+              path + ".motionOracle." + std::string(field) +
+              " must contain two numbers");
+        }
+      }
+      valid = validateStringArrayValue(
+          yyjson_obj_get(motionOracle, "failedThresholds"),
+          path + ".motionOracle.failedThresholds");
+      if (valid.hasError()) {
+        return valid;
+      }
+    }
+    if (yyjson_val *qualityOracle =
+            yyjson_obj_get(checkpoint, "qualityOracle")) {
+      valid = validateObject(qualityOracle, qualityOracleFields,
+                             path + ".qualityOracle");
+      if (valid.hasError()) {
+        return valid;
+      }
+      valid = validateStringArrayValue(
+          yyjson_obj_get(qualityOracle, "failedThresholds"),
+          path + ".qualityOracle.failedThresholds");
+      if (valid.hasError()) {
+        return valid;
+      }
     }
     for (std::string_view field : {"warnings", "errors"}) {
       valid = validateStringArrayValue(
@@ -1387,6 +1650,16 @@ writeAutotestReportPayloadV1(const AutotestReport &report) {
                              makeAssertionObject(doc.get(), assertion));
     }
     yyjson_mut_obj_add_val(doc.get(), object, "assertions", assertions);
+    if (checkpoint.motionOracle.has_value()) {
+      yyjson_mut_obj_add_val(
+          doc.get(), object, "motionOracle",
+          makeMotionOracleObject(doc.get(), *checkpoint.motionOracle));
+    }
+    if (checkpoint.qualityOracle.has_value()) {
+      yyjson_mut_obj_add_val(
+          doc.get(), object, "qualityOracle",
+          makeQualityOracleObject(doc.get(), *checkpoint.qualityOracle));
+    }
     yyjson_mut_obj_add_val(doc.get(), object, "warnings",
                            makeStringArray(doc.get(), checkpoint.warnings));
     yyjson_mut_obj_add_val(doc.get(), object, "errors",
@@ -1805,6 +2078,159 @@ readAutotestReportPayloadV1(std::string json) {
           }
           checkpoint.readouts.push_back(std::move(readout));
         }
+      }
+      yyjson_val *motionOracleValue =
+          yyjson_obj_get(checkpointValue, "motionOracle");
+      if (yyjson_is_obj(motionOracleValue)) {
+        AutotestMotionOracleReport motionOracle{};
+        motionOracle.status = readString(motionOracleValue, "status");
+        motionOracle.statusReason =
+            readString(motionOracleValue, "statusReason");
+        motionOracle.motionTarget =
+            readString(motionOracleValue, "motionTarget");
+        motionOracle.motionClassTarget =
+            readString(motionOracleValue, "motionClassTarget");
+        yyjson_val *roi = yyjson_obj_get(motionOracleValue, "roi");
+        if (yyjson_is_obj(roi)) {
+          motionOracle.roi.x = readU32(roi, "x");
+          motionOracle.roi.y = readU32(roi, "y");
+          motionOracle.roi.width = readU32(roi, "width");
+          motionOracle.roi.height = readU32(roi, "height");
+        }
+        motionOracle.selectedPixelCount =
+            readU32(motionOracleValue, "selectedPixelCount");
+        const auto readVec2Array = [](yyjson_val *object, const char *key,
+                                      std::array<double, 2> &out) {
+          yyjson_val *values = yyjson_obj_get(object, key);
+          if (yyjson_is_arr(values) && yyjson_arr_size(values) == 2u &&
+              yyjson_is_num(yyjson_arr_get(values, 0u)) &&
+              yyjson_is_num(yyjson_arr_get(values, 1u))) {
+            out[0] = yyjson_get_num(yyjson_arr_get(values, 0u));
+            out[1] = yyjson_get_num(yyjson_arr_get(values, 1u));
+          }
+        };
+        readVec2Array(motionOracleValue, "expectedVelocityPixels",
+                      motionOracle.expectedVelocityPixels);
+        readVec2Array(motionOracleValue, "meanVelocityPixels",
+                      motionOracle.meanVelocityPixels);
+        motionOracle.meanErrorPixels =
+            readDouble(motionOracleValue, "meanErrorPixels");
+        motionOracle.p95ErrorPixels =
+            readDouble(motionOracleValue, "p95ErrorPixels");
+        motionOracle.maxErrorPixels =
+            readDouble(motionOracleValue, "maxErrorPixels");
+        motionOracle.p95ScaleErrorPixels =
+            readDouble(motionOracleValue, "p95ScaleErrorPixels");
+        motionOracle.maxScaleErrorPixels =
+            readDouble(motionOracleValue, "maxScaleErrorPixels");
+        motionOracle.wrongSignPixelCount =
+            readU32(motionOracleValue, "wrongSignPixelCount");
+        motionOracle.classCoverageAvailable =
+            readBool(motionOracleValue, "classCoverageAvailable");
+        motionOracle.classSampleCount =
+            readU32(motionOracleValue, "classSampleCount");
+        motionOracle.invalidClassCoverage =
+            readDouble(motionOracleValue, "invalidClassCoverage");
+        motionOracle.staticClassCoverage =
+            readDouble(motionOracleValue, "staticClassCoverage");
+        motionOracle.fullClassCoverage =
+            readDouble(motionOracleValue, "fullClassCoverage");
+        motionOracle.p95ErrorMaxPixels =
+            readDouble(motionOracleValue, "p95ErrorMaxPixels");
+        motionOracle.maxErrorMaxPixels =
+            readDouble(motionOracleValue, "maxErrorMaxPixels");
+        readStringArray(motionOracleValue, "failedThresholds",
+                        motionOracle.failedThresholds);
+        checkpoint.motionOracle = std::move(motionOracle);
+      }
+      yyjson_val *qualityOracleValue =
+          yyjson_obj_get(checkpointValue, "qualityOracle");
+      if (yyjson_is_obj(qualityOracleValue)) {
+        AutotestQualityOracleReport quality{};
+        quality.status = readString(qualityOracleValue, "status");
+        quality.statusReason = readString(qualityOracleValue, "statusReason");
+        quality.outputTarget = readString(qualityOracleValue, "outputTarget");
+        quality.referencePath = readString(qualityOracleValue, "referencePath");
+        quality.schemaVersion =
+            readU32(qualityOracleValue, "schemaVersion", 1u);
+        quality.referenceVersion =
+            readU32(qualityOracleValue, "referenceVersion");
+        quality.maskVersion = readU32(qualityOracleValue, "maskVersion");
+        quality.lscale = readDouble(qualityOracleValue, "lscale");
+        quality.selectedPixelCount =
+            readU32(qualityOracleValue, "selectedPixelCount");
+        quality.finitePixelCount =
+            readU32(qualityOracleValue, "finitePixelCount");
+        quality.nonFiniteValueCount =
+            readU64(qualityOracleValue, "nonFiniteValueCount");
+        quality.normalizedHdrMae =
+            readDouble(qualityOracleValue, "normalizedHdrMae");
+        quality.normalizedHdrRmse =
+            readDouble(qualityOracleValue, "normalizedHdrRmse");
+        quality.lumaSsim = readDouble(qualityOracleValue, "lumaSsim");
+        quality.darkCollapsePixelCount =
+            readU32(qualityOracleValue, "darkCollapsePixelCount");
+        quality.darkCollapsePercent =
+            readDouble(qualityOracleValue, "darkCollapsePercent");
+        quality.darkCollapseMaxComponentPixels =
+            readU32(qualityOracleValue, "darkCollapseMaxComponentPixels");
+        quality.relativeLumaEnergyDrift =
+            readDouble(qualityOracleValue, "relativeLumaEnergyDrift");
+        quality.edgeAvailable = readBool(qualityOracleValue, "edgeAvailable");
+        quality.edgeAxis = readString(qualityOracleValue, "edgeAxis");
+        quality.edgeProfileCount =
+            readU32(qualityOracleValue, "edgeProfileCount");
+        quality.edgeUnresolvedProfileCount =
+            readU32(qualityOracleValue, "edgeUnresolvedProfileCount");
+        quality.referenceEdgeWidth10To90 =
+            readDouble(qualityOracleValue, "referenceEdgeWidth10To90");
+        quality.outputEdgeWidth10To90 =
+            readDouble(qualityOracleValue, "outputEdgeWidth10To90");
+        quality.edgeWidthRatio =
+            readDouble(qualityOracleValue, "edgeWidthRatio");
+        quality.edgeOvershoot = readDouble(qualityOracleValue, "edgeOvershoot");
+        quality.edgeUndershoot =
+            readDouble(qualityOracleValue, "edgeUndershoot");
+        quality.temporalAvailable =
+            readBool(qualityOracleValue, "temporalAvailable");
+        quality.temporalSampleCount =
+            readU32(qualityOracleValue, "temporalSampleCount");
+        quality.temporalError = readDouble(qualityOracleValue, "temporalError");
+        quality.revealAvailable =
+            readBool(qualityOracleValue, "revealAvailable");
+        quality.revealPixelCount =
+            readU32(qualityOracleValue, "revealPixelCount");
+        quality.ghostEnergy = readDouble(qualityOracleValue, "ghostEnergy");
+        quality.recoveryRmse = readDouble(qualityOracleValue, "recoveryRmse");
+        quality.budgets.normalizedMaeMax =
+            readDouble(qualityOracleValue, "normalizedMaeMax");
+        quality.budgets.normalizedRmseMax =
+            readDouble(qualityOracleValue, "normalizedRmseMax");
+        quality.budgets.lumaSsimMin =
+            readDouble(qualityOracleValue, "lumaSsimMin");
+        quality.budgets.darkCollapsePercentMax =
+            readDouble(qualityOracleValue, "darkCollapsePercentMax");
+        quality.budgets.darkCollapseComponentMaxPixels =
+            readU32(qualityOracleValue, "darkCollapseComponentMaxPixels");
+        quality.budgets.relativeLumaEnergyDriftMax =
+            readDouble(qualityOracleValue, "relativeLumaEnergyDriftMax");
+        quality.budgets.edgeWidthRatioMin =
+            readDouble(qualityOracleValue, "edgeWidthRatioMin");
+        quality.budgets.edgeWidthRatioMax =
+            readDouble(qualityOracleValue, "edgeWidthRatioMax");
+        quality.budgets.edgeOvershootMax =
+            readDouble(qualityOracleValue, "edgeOvershootMax");
+        quality.budgets.edgeUndershootMax =
+            readDouble(qualityOracleValue, "edgeUndershootMax");
+        quality.budgets.temporalErrorMax =
+            readDouble(qualityOracleValue, "temporalErrorMax");
+        quality.budgets.ghostEnergyMax =
+            readDouble(qualityOracleValue, "ghostEnergyMax");
+        quality.budgets.recoveryRmseMax =
+            readDouble(qualityOracleValue, "recoveryRmseMax");
+        readStringArray(qualityOracleValue, "failedThresholds",
+                        quality.failedThresholds);
+        checkpoint.qualityOracle = std::move(quality);
       }
       readStringArray(checkpointValue, "warnings", checkpoint.warnings);
       readStringArray(checkpointValue, "errors", checkpoint.errors);
@@ -2380,6 +2806,26 @@ checkpointStatus(const AutotestCheckpointReport &checkpoint) {
     return "error";
   }
   bool warned = !checkpoint.warnings.empty();
+  if (checkpoint.motionOracle.has_value()) {
+    if (checkpoint.motionOracle->status == "error") {
+      return "error";
+    }
+    if (checkpoint.motionOracle->status == "fail") {
+      return "fail";
+    }
+    warned = warned || checkpoint.motionOracle->status == "unavailable" ||
+             checkpoint.motionOracle->status == "not_run";
+  }
+  if (checkpoint.qualityOracle.has_value()) {
+    if (checkpoint.qualityOracle->status == "error") {
+      return "error";
+    }
+    if (checkpoint.qualityOracle->status == "fail") {
+      return "fail";
+    }
+    warned = warned || checkpoint.qualityOracle->status == "unavailable" ||
+             checkpoint.qualityOracle->status == "not_run";
+  }
   for (const AutotestAssertionResult &assertion : checkpoint.assertions) {
     const std::string status = autotestAssertionStatusName(assertion.status);
     if (status == "fail" || status == "invalid") {
@@ -2630,6 +3076,131 @@ writeAutotestHtmlReport(const AutotestReport &report) {
       out << "</div>";
     }
     out << "</section>";
+    if (checkpoint.motionOracle.has_value()) {
+      const AutotestMotionOracleReport &motion = *checkpoint.motionOracle;
+      out << "<section class=\"subsection\"><div class=\"subsection-heading\">"
+             "<h3>Motion endpoint oracle</h3>";
+      writeStatusBadge(out, motion.status);
+      out << "</div><p>" << htmlEscape(readableStatus(motion.statusReason))
+          << "</p><div class=\"table-wrap\"><table>"
+             "<caption>Analytic current-to-previous motion-vector endpoint "
+             "metrics in pixels</caption><thead><tr>"
+             "<th scope=\"col\">Samples</th><th scope=\"col\">Expected</th>"
+             "<th scope=\"col\">Mean</th><th scope=\"col\">P95 error</th>"
+             "<th scope=\"col\">Max error</th>"
+             "<th scope=\"col\">P95 scale error</th>"
+             "<th scope=\"col\">Wrong sign</th></tr></thead><tbody><tr>"
+          << "<td class=\"numeric\">" << motion.selectedPixelCount
+          << "</td><td class=\"numeric\">(" << motion.expectedVelocityPixels[0]
+          << ", " << motion.expectedVelocityPixels[1]
+          << ")</td><td class=\"numeric\">(" << motion.meanVelocityPixels[0]
+          << ", " << motion.meanVelocityPixels[1]
+          << ")</td><td class=\"numeric\">" << motion.p95ErrorPixels << " / "
+          << motion.p95ErrorMaxPixels << "</td><td class=\"numeric\">"
+          << motion.maxErrorPixels << " / " << motion.maxErrorMaxPixels
+          << "</td><td class=\"numeric\">" << motion.p95ScaleErrorPixels
+          << "</td><td class=\"numeric\">" << motion.wrongSignPixelCount
+          << "</td></tr></tbody></table></div>";
+      if (motion.classCoverageAvailable) {
+        out << "<p>Motion classes: invalid=" << motion.invalidClassCoverage
+            << ", static=" << motion.staticClassCoverage
+            << ", full=" << motion.fullClassCoverage << ".</p>";
+      }
+      if (!motion.failedThresholds.empty()) {
+        out << "<p>Failed thresholds: ";
+        for (size_t i = 0u; i < motion.failedThresholds.size(); ++i) {
+          if (i != 0u) {
+            out << ", ";
+          }
+          out << htmlEscape(motion.failedThresholds[i]);
+        }
+        out << ".</p>";
+      }
+      out << "</section>";
+    }
+    if (checkpoint.qualityOracle.has_value()) {
+      const AutotestQualityOracleReport &quality = *checkpoint.qualityOracle;
+      out << "<section class=\"subsection\"><div class=\"subsection-heading\">"
+             "<h3>Deterministic AA quality oracle</h3>";
+      writeStatusBadge(out, quality.status);
+      out << "</div><p>" << htmlEscape(readableStatus(quality.statusReason))
+          << "</p><div class=\"table-wrap\"><table>"
+             "<caption>Scene-referred linear HDR and temporal quality "
+             "metrics</caption><thead><tr>"
+             "<th scope=\"col\">Metric</th><th scope=\"col\">Actual</th>"
+             "<th scope=\"col\">Budget</th></tr></thead><tbody>"
+          << "<tr><td>Normalized HDR MAE</td><td class=\"numeric\">"
+          << quality.normalizedHdrMae << "</td><td class=\"numeric\">&le; "
+          << quality.budgets.normalizedMaeMax << "</td></tr>"
+          << "<tr><td>Normalized HDR RMSE</td><td class=\"numeric\">"
+          << quality.normalizedHdrRmse << "</td><td class=\"numeric\">&le; "
+          << quality.budgets.normalizedRmseMax << "</td></tr>"
+          << "<tr><td>Rec.709 luma SSIM</td><td class=\"numeric\">"
+          << quality.lumaSsim << "</td><td class=\"numeric\">&ge; "
+          << quality.budgets.lumaSsimMin << "</td></tr>"
+          << "<tr><td>Dark-collapse pixels</td><td class=\"numeric\">"
+          << quality.darkCollapsePercent << "% / component "
+          << quality.darkCollapseMaxComponentPixels
+          << "</td><td class=\"numeric\">&le; "
+          << quality.budgets.darkCollapsePercentMax << "% / component "
+          << quality.budgets.darkCollapseComponentMaxPixels << "</td></tr>"
+          << "<tr><td>Relative luma energy drift</td><td class=\"numeric\">"
+          << quality.relativeLumaEnergyDrift
+          << "</td><td class=\"numeric\">&le; "
+          << quality.budgets.relativeLumaEnergyDriftMax << "</td></tr>"
+          << "<tr><td>Non-finite values</td><td class=\"numeric\">"
+          << quality.nonFiniteValueCount
+          << "</td><td class=\"numeric\">0</td></tr>";
+      if (quality.edgeAvailable) {
+        out << "<tr><td>Edge 10-90% width ratio ("
+            << htmlEscape(quality.edgeAxis) << ")</td><td class=\"numeric\">"
+            << quality.edgeWidthRatio << " (" << quality.outputEdgeWidth10To90
+            << " / " << quality.referenceEdgeWidth10To90
+            << ")</td><td class=\"numeric\">"
+            << quality.budgets.edgeWidthRatioMin << " - "
+            << quality.budgets.edgeWidthRatioMax << "</td></tr>"
+            << "<tr><td>Edge overshoot / undershoot</td>"
+               "<td class=\"numeric\">"
+            << quality.edgeOvershoot << " / " << quality.edgeUndershoot
+            << "</td><td class=\"numeric\">&le; "
+            << quality.budgets.edgeOvershootMax << " / &le; "
+            << quality.budgets.edgeUndershootMax << "</td></tr>";
+      }
+      if (quality.temporalAvailable) {
+        out << "<tr><td>Motion-compensated temporal error</td>"
+               "<td class=\"numeric\">"
+            << quality.temporalError << "</td><td class=\"numeric\">&le; "
+            << quality.budgets.temporalErrorMax << "</td></tr>";
+      }
+      if (quality.revealAvailable) {
+        out << "<tr><td>Reveal ghost energy</td><td class=\"numeric\">"
+            << quality.ghostEnergy << "</td><td class=\"numeric\">&le; "
+            << quality.budgets.ghostEnergyMax << "</td></tr>"
+            << "<tr><td>Reveal recovery RMSE</td><td class=\"numeric\">"
+            << quality.recoveryRmse << "</td><td class=\"numeric\">&le; "
+            << quality.budgets.recoveryRmseMax << "</td></tr>";
+      }
+      out << "</tbody></table></div><p>Selected pixels: "
+          << quality.selectedPixelCount
+          << "; finite pixels: " << quality.finitePixelCount
+          << "; Lscale: " << quality.lscale << "; reference v"
+          << quality.referenceVersion;
+      if (quality.maskVersion != 0u) {
+        out << "; mask v" << quality.maskVersion;
+      }
+      out << ".</p>";
+      if (!quality.failedThresholds.empty()) {
+        out << "<p>Failed thresholds: ";
+        for (size_t i = 0u; i < quality.failedThresholds.size(); ++i) {
+          if (i != 0u) {
+            out << ", ";
+          }
+          out << htmlEscape(quality.failedThresholds[i]);
+        }
+        out << ".</p>";
+      }
+      out << "</section>";
+    }
     if (!checkpoint.readouts.empty()) {
       out << "<section class=\"subsection\"><div class=\"subsection-heading\">"
              "<h3>Readouts</h3><span class=\"section-count\">"

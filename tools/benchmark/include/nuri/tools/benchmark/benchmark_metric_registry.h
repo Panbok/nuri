@@ -20,6 +20,7 @@ enum class BenchmarkMetricUnit : uint8_t {
   Milliseconds,
   Mebibytes,
   Count,
+  Ratio,
   WorldUnits,
   NormalizedVectorDelta,
 };
@@ -41,8 +42,10 @@ enum class BenchmarkMetricAggregation : uint8_t {
 enum class BenchmarkMetricAvailability : uint8_t {
   EveryMeasuredFrame,
   WhenGpuTimingAvailable,
+  WhenWholeFrameGpuTimingAvailable,
   WhenRenderGraphTelemetryAvailable,
   WhenPlatformMemoryAvailable,
+  WhenMotionClassCoverageAvailable,
 };
 
 enum class BenchmarkMetricSamplingPhase : uint8_t {
@@ -107,12 +110,12 @@ benchmarkMetricUnitName(BenchmarkMetricUnit unit) noexcept;
 benchmarkMetricNumericTypeName(BenchmarkMetricNumericType type) noexcept;
 [[nodiscard]] std::string_view
 benchmarkMetricDirectionName(BenchmarkMetricDirection direction) noexcept;
-[[nodiscard]] std::string_view benchmarkMetricAggregationName(
-    BenchmarkMetricAggregation aggregation) noexcept;
+[[nodiscard]] std::string_view
+benchmarkMetricAggregationName(BenchmarkMetricAggregation aggregation) noexcept;
 [[nodiscard]] std::string_view benchmarkMetricAvailabilityName(
     BenchmarkMetricAvailability availability) noexcept;
-[[nodiscard]] std::string_view benchmarkMetricSamplingPhaseName(
-    BenchmarkMetricSamplingPhase phase) noexcept;
+[[nodiscard]] std::string_view
+benchmarkMetricSamplingPhaseName(BenchmarkMetricSamplingPhase phase) noexcept;
 [[nodiscard]] std::string_view
 benchmarkMetricGateRoleName(BenchmarkMetricGateRole role) noexcept;
 

@@ -172,6 +172,8 @@ if(NURI_BUILD_AUTOTESTING OR NURI_BUILD_AUTOTEST_CLI)
     autotest/src/autotest_case.cpp
     autotest/src/autotest_environment.cpp
     autotest/src/autotest_manifest.cpp
+    autotest/src/autotest_motion_oracle.cpp
+    autotest/src/autotest_quality_oracle.cpp
     autotest/src/autotest_record.cpp
     autotest/src/autotest_report.cpp
     autotest/src/autotest_runner.cpp

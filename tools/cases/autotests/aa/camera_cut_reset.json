@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "id": "aa.procedural.camera_cut_reset",
+  "suite": "aa",
+  "description": "Converge for 32 frames, perform an explicit hard camera cut, and capture recovery through frame 48",
+  "scene": {
+    "kind": "procedural",
+    "generator": "nuri.procedural.reactive_mask.v1",
+    "seed": 53,
+    "contentHash": "nuri.procedural.reactive_mask.v1:53"
+  },
+  "backend": "default",
+  "resolution": [640, 360],
+  "fixedDeltaSeconds": 0.016666667,
+  "warmupFrames": 0,
+  "endFrame": 48,
+  "authoritative": false,
+  "presentMode": "immediate",
+  "windowMode": "visible",
+  "renderGraph": {"workerCount": 1, "parallelCompile": false, "parallelRecording": false},
+  "camera": {
+    "position": [-0.45, 0.35, 3.25],
+    "target": [0.0, 0.25, 0.0],
+    "verticalFovDegrees": 55.0,
+    "nearPlane": 0.05,
+    "farPlane": 100.0
+  },
+  "settings": {
+    "opaque": {"enableInstanceAnimation": false},
+    "antiAliasing": {"mode": "TAA", "temporalProvider": "Reference", "qualityPreset": "Ultra"},
+    "ambientOcclusion": {"mode": "GTAO", "preset": "Ultra"},
+    "shadow": {"enabled": true, "qualityPreset": "Ultra"}
+  },
+  "timeline": {
+    "events": [
+      {"frame": 0, "type": "resetTemporalHistory", "eventReason": "camera_cut_convergence_start"},
+      {
+        "frame": 32,
+        "type": "setCamera",
+        "preserveHistory": false,
+        "eventReason": "section_11_2_hard_cut",
+        "camera": {
+          "position": [0.65, 0.50, 2.85],
+          "target": [0.0, 0.20, 0.0],
+          "verticalFovDegrees": 55.0,
+          "nearPlane": 0.05,
+          "farPlane": 100.0
+        }
+      }
+    ]
+  },
+  "checkpoints": [
+    {"id": "pre_cut", "frame": 31, "captures": [
+      {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+      {"target": "motion_class", "profile": "mask", "required": true, "compare": false}
+    ]},
+    {"id": "cut", "frame": 32, "captures": [
+      {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+      {"target": "scene_depth", "profile": "depth", "required": true, "compare": false},
+      {"target": "motion_class", "profile": "mask", "required": true, "compare": false}
+    ]},
+    {"id": "recovery_1", "frame": 33, "captures": [
+      {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}
+    ]},
+    {"id": "recovery_2", "frame": 34, "captures": [
+      {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}
+    ]},
+    {"id": "recovery_4", "frame": 36, "captures": [
+      {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}
+    ]},
+    {"id": "recovery_8", "frame": 40, "captures": [
+      {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false}
+    ]},
+    {"id": "recovery_16", "frame": 48, "captures": [
+      {"target": "frame_color_hdr", "profile": "hdr_color", "required": true, "compare": false},
+      {"target": "motion_class", "profile": "mask", "required": true, "compare": false}
+    ], "assertions": [
+      {"id": "history_recovers", "metric": "renderer.aa.history_valid", "equals": 1}
+    ]}
+  ],
+  "requirements": {
+    "assets": ["modelsRoot:common/flat_plane.obj"],
+    "backends": [],
+    "allowVisibleWindow": true
+  }
+}

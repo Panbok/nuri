@@ -19,12 +19,12 @@
   "backend": "nvrhi",
   "resolution": [1280, 720],
   "fixedDeltaSeconds": 0.016666667,
-  "warmupFrames": 12,
+  "warmupFrames": 30,
   "measurementFrames": 600,
   "cooldownFrames": 2,
   "maxDrainFrames": 180,
   "drainTimeoutMs": 8000,
-  "samples": 1,
+  "samples": 5,
   "authoritative": false,
   "presentMode": "immediate",
   "renderGraph": {
@@ -91,6 +91,7 @@
     },
     "antiAliasing": {
       "mode": "TAA",
+      "temporalProvider": "Reference",
       "qualityPreset": "Ultra"
     },
     "ambientOcclusion": {

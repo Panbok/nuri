@@ -46,8 +46,8 @@ Result<void, std::string> validateIdentifier(std::string_view value,
   for (const char valueCharacter : value) {
     const unsigned char byte = static_cast<unsigned char>(valueCharacter);
     if (byte < 0x20u || byte == 0x7fu) {
-      return Result<void, std::string>::makeError(std::string(field) +
-                                                  " contains a control character");
+      return Result<void, std::string>::makeError(
+          std::string(field) + " contains a control character");
     }
     if (valueCharacter == '.') {
       if (shape != IdentifierShape::Dotted || atSegmentStart) {
@@ -55,8 +55,8 @@ Result<void, std::string> validateIdentifier(std::string_view value,
                                                     " contains an invalid dot");
       }
       if (isReservedWindowsName(value.substr(segmentStart, segmentLength))) {
-        return Result<void, std::string>::makeError(std::string(field) +
-                                                    " contains a reserved device name");
+        return Result<void, std::string>::makeError(
+            std::string(field) + " contains a reserved device name");
       }
       atSegmentStart = true;
       segmentLength = 0u;
@@ -66,17 +66,18 @@ Result<void, std::string> validateIdentifier(std::string_view value,
     }
     if (atSegmentStart && !isLowerAlphaNumeric(valueCharacter)) {
       return Result<void, std::string>::makeError(
-          std::string(field) + " segments must start with a lowercase letter or digit");
+          std::string(field) +
+          " segments must start with a lowercase letter or digit");
     }
     if (!isSegmentCharacter(valueCharacter)) {
-      return Result<void, std::string>::makeError(std::string(field) +
-                                                  " contains an invalid character");
+      return Result<void, std::string>::makeError(
+          std::string(field) + " contains an invalid character");
     }
     atSegmentStart = false;
     ++segmentLength;
     if (segmentLength > 64u) {
-      return Result<void, std::string>::makeError(std::string(field) +
-                                                  " contains a segment longer than 64 characters");
+      return Result<void, std::string>::makeError(
+          std::string(field) + " contains a segment longer than 64 characters");
     }
     ++index;
   }
@@ -85,8 +86,8 @@ Result<void, std::string> validateIdentifier(std::string_view value,
                                                 " must not end with a dot");
   }
   if (isReservedWindowsName(value.substr(segmentStart, segmentLength))) {
-    return Result<void, std::string>::makeError(std::string(field) +
-                                                " contains a reserved device name");
+    return Result<void, std::string>::makeError(
+        std::string(field) + " contains a reserved device name");
   }
   return Result<void, std::string>::makeResult();
 }
