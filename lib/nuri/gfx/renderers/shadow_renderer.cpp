@@ -1,5 +1,4 @@
 #include "nuri/pch.h"
-
 #include "nuri/gfx/renderers/shadow_renderer.h"
 
 #include "nuri/core/containers/hash_map.h"
@@ -16,10 +15,8 @@ namespace nuri {
 namespace {
 
 constexpr uint32_t kShadowPassDebugColor = 0xff5a7dffu;
-constexpr uint32_t kShadowMeshDebugColor = 0xff5aff9du;
 constexpr uint32_t kShadowPreviewPassDebugColor = 0xff7d5affu;
 constexpr std::string_view kShadowPassLabel = "ShadowDepthPass";
-constexpr std::string_view kShadowMeshLabel = "ShadowCasterMesh";
 constexpr std::string_view kShadowPreviewPassLabel = "ShadowDepthPreviewPass";
 constexpr std::string_view kShadowPreviewDrawLabel = "ShadowDepthPreview";
 constexpr std::string_view kShadowPassDependencyBufferLabel =
@@ -34,7 +31,6 @@ constexpr std::string_view kShadowScrollDirtyPassLabel =
 constexpr std::string_view kShadowScrollDirtyClearLabel =
     "ShadowDepthScrollDirtyClear";
 constexpr bool kEnableStaticOnlyScrollCopy = false;
-constexpr uint32_t kShadowMeshletTaskCandidatesPerGroup = 32u;
 constexpr uint64_t kFnvOffsetBasis64 = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime64 = 1099511628211ull;
 constexpr uint32_t kShadowPreviewFlagInvert = 1u << 0u;
@@ -45,7 +41,7 @@ constexpr uint32_t kStaticCasterLightGridResolution = 64u;
 constexpr uint32_t kStaticCasterLightGridDepthResolution = 16u;
 constexpr uint32_t kStaticCasterLightGridMaxCellsPerCaster = 128u;
 constexpr size_t kStaticCasterLightGridSortedCandidateLimit = 1024u;
-constexpr uint32_t kStaticBatchOverlapEmitMaxInstances = 0u;
+constexpr uint32_t kStaticBatchOverlapEmitMinInstances = 4u;
 constexpr float kStaticOnlyGuardBandShadowMapFraction = 1.0f / 8.0f;
 constexpr float kStaticOnlyGuardBandMaxTexels = 1536.0f;
 constexpr float kStaticOnlyGuardBandMinTexels = 8.0f;
@@ -61,16 +57,9 @@ constexpr float kStaticOnlyPredictiveExtentGrowthFraction = 0.5f;
 constexpr float kStaticOnlyPredictiveTrailingGuardFraction = 0.5f;
 constexpr float kStaticOnlyPredictiveMotionEpsilonTexels = 0.5f;
 constexpr uint32_t kStaticOnlyAdaptiveRefreshBudgetPerFrame = 1u;
-constexpr uint32_t kSdsmHistogramSourceMaxTexelCount = 4096u;
 constexpr uint64_t kSdsmDiagnosticRefreshFrames = 120u;
-constexpr float kSdsmHistogramClearDepthEpsilon = 1.0e-4f;
 constexpr uint32_t kMinSdsmReduceResultRingCount = 16u;
 constexpr uint32_t kSdsmGpuWarmupGraceMissFrames = 2u;
-constexpr uint32_t kMeshletFlagDoubleSided = 1u << 2u;
-constexpr uint32_t kMeshletFlagShadowCascadeCulling = 1u << 6u;
-constexpr uint32_t kMeshletFlagForcedLodShift = 8u;
-constexpr uint32_t kMeshletFlagForcedLodMask = 0x3u;
-constexpr uint32_t kShadowMeshletCounterFlagEnabled = 1u << 0u;
 
 [[nodiscard]] constexpr Format
 sanitizeShadowDepthFormat(Format format) noexcept {
@@ -151,17 +140,9 @@ void logShadowVisibilityCounters(const RenderFrameContext &frame) {
   const VisibilityFrameMetrics &visibility = frame.metrics.visibility;
   NURI_LOG_INFO(
       "ShadowRenderer::visibility counters frame=%llu "
-      "meshlet(candidates=%u readback=%u source=%u stale=%u errors=%u "
-      "rejectedBounds=%u) "
       "cpu(candidates=%u rejected=%u)",
       static_cast<unsigned long long>(frame.frameIndex),
-      visibility.shadowMeshletCandidates,
-      visibility.shadowMeshletReadbackAvailable,
-      visibility.shadowMeshletReadbackSourceFrame,
-      visibility.shadowMeshletReadbackStaleFrameCount,
-      visibility.shadowMeshletReadbackErrorCount,
-      visibility.shadowMeshletRejectedBounds, visibility.shadowCpuCandidates,
-      visibility.shadowCpuRejected);
+      visibility.shadowCpuCandidates, visibility.shadowCpuRejected);
 }
 
 void publishRequestedCapture(RenderFrameContext &frame, GPUDevice &gpu,
@@ -318,40 +299,10 @@ template <typename T>
   return lhs.index == rhs.index && lhs.generation == rhs.generation;
 }
 
-[[nodiscard]] bool isSameMeshletPipelineHandle(MeshletPipelineHandle lhs,
-                                               MeshletPipelineHandle rhs) {
-  return lhs.index == rhs.index && lhs.generation == rhs.generation;
-}
-
-[[nodiscard]] uint32_t maxMeshletCountForSubmesh(const Submesh &submesh) {
-  uint32_t maxMeshletCount = 0u;
-  const uint32_t lodCount =
-      std::clamp(submesh.lodCount, 0u, Submesh::kMaxLodCount);
-  for (uint32_t lodIndex = 0u; lodIndex < lodCount; ++lodIndex) {
-    maxMeshletCount =
-        std::max(maxMeshletCount, submesh.lods[lodIndex].meshletCount);
-  }
-  return maxMeshletCount;
-}
-
-[[nodiscard]] bool canUseShadowMeshlets(const Model::ModelMeshletGpuView *view,
-                                        uint32_t submeshIndex,
-                                        uint32_t meshletMaxCount,
-                                        uint32_t selectedMeshletCount) {
-  return view != nullptr && selectedMeshletCount != 0u &&
-         meshletMaxCount != 0u && submeshIndex < view->lodRangeCount &&
-         nuri::isValid(view->meshletBuffer) &&
-         nuri::isValid(view->meshletVertexIndexBuffer) &&
-         nuri::isValid(view->meshletPrimitiveIndexBuffer) &&
-         nuri::isValid(view->lodRangeBuffer);
-}
-
 struct ShadowBatchKey {
   uint32_t cascadeIndex = 0u;
   bool dynamicCaster = false;
-  bool useMeshlets = false;
   RenderPipelineHandle pipeline{};
-  MeshletPipelineHandle meshletPipeline{};
   BufferHandle vertexBuffer{};
   BufferHandle vertexDecodeBuffer{};
   BufferHandle indexBuffer{};
@@ -364,23 +315,10 @@ struct ShadowBatchKey {
   uint32_t vertexDecodeIndex = 0u;
   uint32_t packedVertexFormat = 0u;
   uint32_t materialIndex = 0u;
-  BufferHandle meshletBuffer{};
-  BufferHandle meshletVertexIndexBuffer{};
-  BufferHandle meshletPrimitiveIndexBuffer{};
-  BufferHandle meshletLodRangeBuffer{};
-  uint32_t submeshIndex = 0u;
-  uint32_t meshletMaxCount = 0u;
-  uint32_t meshletCount = 0u;
-  uint32_t vertexOffset = 0u;
-  bool enableMeshletCascadeCulling = false;
-
   bool operator==(const ShadowBatchKey &other) const noexcept {
     return cascadeIndex == other.cascadeIndex &&
            dynamicCaster == other.dynamicCaster &&
-           useMeshlets == other.useMeshlets &&
            isSamePipelineHandle(pipeline, other.pipeline) &&
-           isSameMeshletPipelineHandle(meshletPipeline,
-                                       other.meshletPipeline) &&
            isSameBufferHandle(vertexBuffer, other.vertexBuffer) &&
            isSameBufferHandle(vertexDecodeBuffer, other.vertexDecodeBuffer) &&
            isSameBufferHandle(indexBuffer, other.indexBuffer) &&
@@ -391,19 +329,7 @@ struct ShadowBatchKey {
            vertexDecodeBufferAddress == other.vertexDecodeBufferAddress &&
            vertexDecodeIndex == other.vertexDecodeIndex &&
            packedVertexFormat == other.packedVertexFormat &&
-           materialIndex == other.materialIndex &&
-           isSameBufferHandle(meshletBuffer, other.meshletBuffer) &&
-           isSameBufferHandle(meshletVertexIndexBuffer,
-                              other.meshletVertexIndexBuffer) &&
-           isSameBufferHandle(meshletPrimitiveIndexBuffer,
-                              other.meshletPrimitiveIndexBuffer) &&
-           isSameBufferHandle(meshletLodRangeBuffer,
-                              other.meshletLodRangeBuffer) &&
-           submeshIndex == other.submeshIndex &&
-           meshletMaxCount == other.meshletMaxCount &&
-           meshletCount == other.meshletCount &&
-           vertexOffset == other.vertexOffset &&
-           enableMeshletCascadeCulling == other.enableMeshletCascadeCulling;
+           materialIndex == other.materialIndex;
   }
 };
 
@@ -412,11 +338,8 @@ struct ShadowBatchKeyHash {
     uint64_t hash = kFnvOffsetBasis64;
     hash = hashCombine64(hash, key.cascadeIndex);
     hash = hashCombine64(hash, key.dynamicCaster ? 1ull : 0ull);
-    hash = hashCombine64(hash, key.useMeshlets ? 1ull : 0ull);
     hash = hashCombine64(
         hash, foldHandle(key.pipeline.index, key.pipeline.generation));
-    hash = hashCombine64(hash, foldHandle(key.meshletPipeline.index,
-                                          key.meshletPipeline.generation));
     hash = hashCombine64(
         hash, foldHandle(key.vertexBuffer.index, key.vertexBuffer.generation));
     hash = hashCombine64(hash, foldHandle(key.vertexDecodeBuffer.index,
@@ -433,24 +356,6 @@ struct ShadowBatchKeyHash {
                          (static_cast<uint64_t>(key.vertexDecodeIndex) << 32u) |
                              key.packedVertexFormat);
     hash = hashCombine64(hash, key.materialIndex);
-    hash = hashCombine64(hash, foldHandle(key.meshletBuffer.index,
-                                          key.meshletBuffer.generation));
-    hash = hashCombine64(hash,
-                         foldHandle(key.meshletVertexIndexBuffer.index,
-                                    key.meshletVertexIndexBuffer.generation));
-    hash = hashCombine64(
-        hash, foldHandle(key.meshletPrimitiveIndexBuffer.index,
-                         key.meshletPrimitiveIndexBuffer.generation));
-    hash =
-        hashCombine64(hash, foldHandle(key.meshletLodRangeBuffer.index,
-                                       key.meshletLodRangeBuffer.generation));
-    hash =
-        hashCombine64(hash, (static_cast<uint64_t>(key.submeshIndex) << 32u) |
-                                key.meshletMaxCount);
-    hash =
-        hashCombine64(hash, (static_cast<uint64_t>(key.meshletCount) << 32u) |
-                                key.vertexOffset);
-    hash = hashCombine64(hash, key.enableMeshletCascadeCulling ? 1ull : 0ull);
     return static_cast<size_t>(hash);
   }
 };
@@ -528,18 +433,6 @@ struct ShadowBatchEntry {
   }
 };
 
-[[nodiscard]] std::string_view shadowSdsmModeName(ShadowSdsmMode mode) {
-  switch (mode) {
-  case ShadowSdsmMode::Disabled:
-    return "Disabled";
-  case ShadowSdsmMode::PreviousFrameMinMax:
-    return "PreviousFrameMinMax";
-  case ShadowSdsmMode::Histogram:
-    return "Histogram";
-  }
-  return "Unknown";
-}
-
 [[nodiscard]] std::string_view shadowSdsmStatusName(ShadowSdsmStatus status) {
   switch (status) {
   case ShadowSdsmStatus::Disabled:
@@ -560,40 +453,11 @@ struct ShadowBatchEntry {
 
 [[nodiscard]] std::string_view
 shadowSdsmReductionBackendName(ShadowSdsmReductionBackend backend) {
-  switch (sanitizeShadowSdsmReductionBackend(backend)) {
-  case ShadowSdsmReductionBackend::Auto:
-    return "Auto";
+  switch (backend) {
   case ShadowSdsmReductionBackend::Cpu:
     return "Cpu";
   case ShadowSdsmReductionBackend::Gpu:
     return "Gpu";
-  }
-  return "Unknown";
-}
-
-[[nodiscard]] std::string_view shadowFilterModeName(ShadowFilterMode mode) {
-  switch (sanitizeShadowFilterMode(mode)) {
-  case ShadowFilterMode::Hard:
-    return "Hard";
-  case ShadowFilterMode::PCF3x3:
-    return "PCF3x3";
-  case ShadowFilterMode::PoissonPCF:
-    return "PoissonPCF";
-  case ShadowFilterMode::PCSS:
-    return "PCSS";
-  }
-  return "Unknown";
-}
-
-[[nodiscard]] std::string_view
-shadowCascadeSplitModeName(ShadowCascadeSplitMode mode) {
-  switch (sanitizeShadowCascadeSplitMode(mode)) {
-  case ShadowCascadeSplitMode::Uniform:
-    return "Uniform";
-  case ShadowCascadeSplitMode::Logarithmic:
-    return "Logarithmic";
-  case ShadowCascadeSplitMode::Practical:
-    return "Practical";
   }
   return "Unknown";
 }
@@ -649,28 +513,13 @@ hashShadowSettings(uint64_t hash,
   hash = hashCombineValue(hash, settings.depthFormat);
   hash = hashCombineValue(hash, settings.maxDistance);
   hash = hashCombineValue(hash, settings.maxDistanceFadeFraction);
-  hash = hashCombineValue(hash, settings.splitMode);
   hash = hashCombineValue(hash, settings.splitLambda);
-  hash = hashCombineValue(hash, settings.stabilizeCascades);
   hash = hashCombineValue(hash, settings.cascadeBlendFraction);
   hash = hashCombineValue(hash, settings.constantBias);
   hash = hashCombineValue(hash, settings.slopeBias);
   hash = hashCombineValue(hash, settings.normalBias);
-  hash = hashCombineValue(hash, settings.filterMode);
   hash = hashCombineValue(hash, settings.pcfSampleCount);
-  hash = hashCombineValue(hash, settings.pcssBlockerSampleCount);
-  hash = hashCombineValue(hash, settings.pcssFilterSampleCount);
-  hash = hashCombineValue(hash, settings.pcssLightRadiusScale);
-  hash = hashCombineValue(hash, settings.pcssSearchRadiusClampTexels);
-  hash = hashCombineValue(hash, settings.pcssFilterRadiusClampTexels);
-  hash = hashCombineValue(hash, settings.sdsmMode);
-  hash = hashCombineValue(hash, settings.sdsmReductionBackend);
   hash = hashCombineValue(hash, settings.sdsmTemporalBlend);
-  hash = hashCombineValue(hash, settings.sdsmHistogramBucketCount);
-  hash = hashCombineValue(hash, settings.sdsmHistogramTrimLowPercent);
-  hash = hashCombineValue(hash, settings.sdsmHistogramTrimHighPercent);
-  hash = hashCombineValue(hash, settings.enableMeshletDepth);
-  hash = hashCombineValue(hash, settings.enableMeshletCascadeCulling);
   hash = hashCombineValue(hash, settings.debug.freezeCascades);
   hash = hashCombineValue(hash, settings.debug.freezeLightView);
   hash = hashCombineValue(hash, settings.debug.enableCascadeCasterCulling);
@@ -709,22 +558,14 @@ hashShadowDebugSelection(uint64_t hash,
 
 [[nodiscard]] uint64_t hashSdsmState(uint64_t hash,
                                      const ShadowSdsmDebugFrameData &sdsm) {
-  hash = hashCombineValue(hash, sdsm.mode);
-  hash = hashCombineValue(hash, sdsm.requestedReductionBackend);
   hash = hashCombineValue(hash, sdsm.activeReductionBackend);
   hash = hashCombineValue(hash, sdsm.status);
   hash = hashCombineValue(hash, sdsm.reductionFallbackActive);
   hash = hashCombineValue(hash, sdsm.fixedFallbackActive);
   hash = hashCombineValue(hash, sdsm.sourceFrameIndex);
-  hash = hashCombineValue(hash, sdsm.histogramSourceLevel);
-  hash = hashCombineBytes(hash, std::as_bytes(std::span<const glm::uvec2>(
-                                    &sdsm.histogramSourceDimensions, 1u)));
-  hash = hashCombineValue(hash, sdsm.histogramBucketCount);
-  hash = hashCombineValue(hash, sdsm.histogramValidTileCount);
   hash = hashCombineValue(hash, sdsm.gpuResultRingSlotCount);
   hash = hashCombineValue(hash, sdsm.gpuResultSelectedSlot);
   hash = hashCombineValue(hash, sdsm.gpuReductionResultAvailable);
-  hash = hashCombineValue(hash, sdsm.gpuSplitPayloadValid);
   hash = hashCombineValue(hash, sdsm.gpuResultSourceFrameIndex);
   hash = hashCombineValue(hash, sdsm.splitCount);
   hash = hashCombineValue(hash, sdsm.fixedRangeNear);
@@ -735,11 +576,6 @@ hashShadowDebugSelection(uint64_t hash,
   hash = hashCombineValue(hash, sdsm.rawLinearMax);
   hash = hashCombineValue(hash, sdsm.smoothedLinearMin);
   hash = hashCombineValue(hash, sdsm.smoothedLinearMax);
-  hash = hashCombineValue(hash, sdsm.histogramTotalWeight);
-  hash = hashCombineValue(hash, sdsm.histogramTrimLowPercent);
-  hash = hashCombineValue(hash, sdsm.histogramTrimHighPercent);
-  hash = hashCombineValue(hash, sdsm.histogramTrimmedRangeNear);
-  hash = hashCombineValue(hash, sdsm.histogramTrimmedRangeFar);
   hash = hashCombineValue(hash, sdsm.effectiveRangeNear);
   hash = hashCombineValue(hash, sdsm.effectiveRangeFar);
   hash = hashCombineBytes(
@@ -749,18 +585,8 @@ hashShadowDebugSelection(uint64_t hash,
       hash, std::as_bytes(std::span<const float>(
                 sdsm.minMaxSplitDepths.data(), sdsm.minMaxSplitDepths.size())));
   hash = hashCombineBytes(hash, std::as_bytes(std::span<const float>(
-                                    sdsm.histogramSplitDepths.data(),
-                                    sdsm.histogramSplitDepths.size())));
-  hash = hashCombineBytes(hash, std::as_bytes(std::span<const float>(
                                     sdsm.effectiveSplitDepths.data(),
                                     sdsm.effectiveSplitDepths.size())));
-  if (sdsm.histogramBucketCount > 0u) {
-    const size_t histogramWeightCount = std::min<size_t>(
-        sdsm.histogramBucketCount, sdsm.histogramBucketWeights.size());
-    hash = hashCombineBytes(
-        hash, std::as_bytes(std::span<const float>(
-                  sdsm.histogramBucketWeights.data(), histogramWeightCount)));
-  }
   return hash;
 }
 
@@ -814,6 +640,7 @@ hashCascadeState(uint64_t hash, const ShadowCascadeDebugFrameData &cascade,
                                          const ShadowFrameMetrics &metrics) {
   hash = hashCombineValue(hash, metrics.cascadeCount);
   hash = hashCombineValue(hash, metrics.shadowMapSize);
+  hash = hashCombineValue(hash, metrics.frameGpuBytes);
   hash = hashCombineValue(hash, metrics.totalDraws);
   hash = hashCombineValue(hash, metrics.totalCulledDraws);
   hash = hashCombineValue(hash, metrics.totalIndexCountEstimate);
@@ -822,8 +649,6 @@ hashCascadeState(uint64_t hash, const ShadowCascadeDebugFrameData &cascade,
   hash = hashCombineValue(hash, metrics.staticCacheReused);
   hash = hashCombineValue(hash, metrics.staticBatchTemplateCount);
   hash = hashCombineValue(hash, metrics.shadowBatchEntryCount);
-  hash = hashCombineValue(hash, metrics.shadowMeshletDispatchCount);
-  hash = hashCombineValue(hash, metrics.shadowMeshletTaskGroupCount);
   hash = hashCombineValue(hash, metrics.shadowInstanceRemapCount);
   hash = hashCombineValue(hash, metrics.staticBatchFullEmitCount);
   hash = hashCombineValue(hash, metrics.staticLightGridQueryCount);
@@ -855,20 +680,14 @@ hashCascadeState(uint64_t hash, const ShadowCascadeDebugFrameData &cascade,
   hash = hashCombineValue(hash, metrics.maxCascadeTexelWorldSize);
   hash = hashCombineValue(hash, metrics.farCascadeTexelWorldSize);
   hash = hashCombineValue(hash, metrics.filterSampleBudget);
-  hash = hashCombineValue(hash, metrics.pcssBlockerSampleBudget);
-  hash = hashCombineValue(hash, metrics.pcssFilterSampleBudget);
-  hash = hashCombineValue(hash, metrics.pcssMaxSamplesPerReceiver);
-  hash = hashCombineValue(hash, metrics.pcssMaxSamplesPerBlendedReceiver);
   hash = hashCombineValue(hash, metrics.sdsmComputePassCount);
   hash = hashCombineValue(hash, metrics.sdsmReadbackBytes);
   hash = hashCombineValue(hash, metrics.sdsmReductionSourceSamples);
-  hash = hashCombineValue(hash, metrics.sdsmHistogramSourceSamples);
   hash = hashCombineValue(hash, metrics.sdsmActiveReductionBackend);
   hash = hashCombineValue(hash, metrics.gpuTimeMs);
   hash = hashCombineValue(hash, metrics.depthGpuTimeMs);
   hash = hashCombineValue(hash, metrics.sdsmGpuTimeMs);
   hash = hashCombineValue(hash, metrics.sdsmCpuReductionTimeMs);
-  hash = hashCombineValue(hash, metrics.sdsmCpuHistogramTimeMs);
   hash = hashCombineValue(hash, metrics.gpuTimingSourceFrameIndex);
   hash = hashCombineValue(hash, metrics.depthGpuTimingSourceFrameIndex);
   hash = hashCombineValue(hash, metrics.sdsmGpuTimingSourceFrameIndex);
@@ -983,192 +802,6 @@ struct SdsmLogDiagnostics {
   bool historyTexelValid = false;
 };
 
-struct SdsmHistogramAnalysis {
-  bool valid = false;
-  bool clearOnlySource = false;
-  uint32_t sourceLevel = 0u;
-  glm::uvec2 sourceDimensions{0u};
-  uint32_t validTileCount = 0u;
-  float totalWeight = 0.0f;
-  float rawDeviceMin = 0.0f;
-  float rawDeviceMax = 0.0f;
-  float rawLinearMin = 0.0f;
-  float rawLinearMax = 0.0f;
-  float trimmedNear = 0.0f;
-  float trimmedFar = 0.0f;
-  std::array<float, kMaxShadowCascades + 1u> rawSplitDepths{};
-  std::array<float, kMaxShadowSdsmHistogramBucketCount> bucketWeights{};
-};
-
-struct CachedSdsmHistogramTile {
-  float rawDeviceMin = 0.0f;
-  float rawDeviceMax = 0.0f;
-  float rawLinearMin = 0.0f;
-  float rawLinearMax = 0.0f;
-  bool valid = false;
-  bool clearOnly = false;
-  bool clearMax = false;
-};
-
-[[nodiscard]] SdsmHistogramAnalysis buildSdsmHistogramAnalysis(
-    const CameraFrameState &camera, ShadowSplitRange fixedSplitRange,
-    uint32_t cascadeCount, uint32_t bucketCount, float trimLowPercent,
-    float trimHighPercent, uint32_t sourceLevel, glm::uvec2 sourceDimensions,
-    std::span<const float> minMaxPairs, std::pmr::memory_resource *memory) {
-  SdsmHistogramAnalysis analysis{};
-  analysis.sourceLevel = sourceLevel;
-  analysis.sourceDimensions = sourceDimensions;
-
-  const uint32_t safeBucketCount =
-      std::clamp(bucketCount, kMinShadowSdsmHistogramBucketCount,
-                 kMaxShadowSdsmHistogramBucketCount);
-  if (minMaxPairs.size() < 2u || (minMaxPairs.size() % 2u) != 0u) {
-    return analysis;
-  }
-
-  analysis.rawDeviceMin = 1.0f;
-  analysis.rawDeviceMax = 0.0f;
-  analysis.rawLinearMin = fixedSplitRange.farDepth;
-  analysis.rawLinearMax = fixedSplitRange.nearDepth;
-  bool hasNonClearLinearMax = false;
-  float maxNonClearLinearMax = fixedSplitRange.nearDepth;
-  uint32_t rawValidTileCount = 0u;
-  uint32_t clearOnlyTileCount = 0u;
-  bool malformedTile = false;
-  std::pmr::vector<CachedSdsmHistogramTile> cachedTiles(
-      minMaxPairs.size() / 2u, resolveMemoryResource(memory));
-  const auto isClearDepthSample = [](float rawDeviceDepth) {
-    return rawDeviceDepth >= (1.0f - kSdsmHistogramClearDepthEpsilon);
-  };
-
-  for (size_t tileIndex = 0u; tileIndex < cachedTiles.size(); ++tileIndex) {
-    CachedSdsmHistogramTile &cachedTile = cachedTiles[tileIndex];
-    cachedTile.rawDeviceMin = minMaxPairs[tileIndex * 2u];
-    cachedTile.rawDeviceMax = minMaxPairs[tileIndex * 2u + 1u];
-    const bool rawDepthsValid =
-        std::isfinite(cachedTile.rawDeviceMin) &&
-        std::isfinite(cachedTile.rawDeviceMax) &&
-        cachedTile.rawDeviceMin >= -1.0e-4f &&
-        cachedTile.rawDeviceMax <= (1.0f + 1.0e-4f) &&
-        cachedTile.rawDeviceMax >= cachedTile.rawDeviceMin;
-    if (!rawDepthsValid) {
-      malformedTile = true;
-      continue;
-    }
-
-    cachedTile.rawLinearMin = shadow_detail::linearizeDeviceDepthToViewDepth(
-        cachedTile.rawDeviceMin, camera);
-    cachedTile.rawLinearMax = shadow_detail::linearizeDeviceDepthToViewDepth(
-        cachedTile.rawDeviceMax, camera);
-    if (!std::isfinite(cachedTile.rawLinearMin) ||
-        !std::isfinite(cachedTile.rawLinearMax) ||
-        cachedTile.rawLinearMax < cachedTile.rawLinearMin) {
-      malformedTile = true;
-      continue;
-    }
-
-    const bool clearMin = isClearDepthSample(cachedTile.rawDeviceMin);
-    cachedTile.clearMax = isClearDepthSample(cachedTile.rawDeviceMax);
-    cachedTile.clearOnly = clearMin && cachedTile.clearMax;
-    cachedTile.valid = true;
-    ++rawValidTileCount;
-    if (cachedTile.clearOnly) {
-      ++clearOnlyTileCount;
-      continue;
-    }
-
-    analysis.rawDeviceMin =
-        std::min(analysis.rawDeviceMin, cachedTile.rawDeviceMin);
-    analysis.rawDeviceMax =
-        std::max(analysis.rawDeviceMax, cachedTile.rawDeviceMax);
-    analysis.rawLinearMin =
-        std::min(analysis.rawLinearMin, cachedTile.rawLinearMin);
-    analysis.rawLinearMax =
-        std::max(analysis.rawLinearMax, cachedTile.rawLinearMax);
-    if (!cachedTile.clearMax) {
-      maxNonClearLinearMax =
-          std::max(maxNonClearLinearMax, cachedTile.rawLinearMax);
-      hasNonClearLinearMax = true;
-    }
-  }
-
-  for (const CachedSdsmHistogramTile &cachedTile : cachedTiles) {
-    if (!cachedTile.valid || cachedTile.clearOnly) {
-      continue;
-    }
-
-    float histogramLinearMax = cachedTile.rawLinearMax;
-    if (cachedTile.clearMax) {
-      // A tile that touches clear depth does not prove geometry extends all
-      // the way to the camera far plane. Cap it to the deepest non-clear
-      // sample seen in this mip so histogram trimming does not jump on sky
-      // contamination.
-      histogramLinearMax =
-          hasNonClearLinearMax
-              ? std::max(cachedTile.rawLinearMin, maxNonClearLinearMax)
-              : cachedTile.rawLinearMin;
-    }
-
-    shadow_detail::accumulateSdsmHistogramInterval(
-        std::span<float>(analysis.bucketWeights.data(), safeBucketCount),
-        fixedSplitRange.nearDepth, fixedSplitRange.farDepth,
-        cachedTile.rawLinearMin, histogramLinearMax, 1.0f);
-    ++analysis.validTileCount;
-    analysis.totalWeight += 1.0f;
-  }
-
-  if (analysis.validTileCount == 0u || analysis.totalWeight <= 1.0e-6f) {
-    const bool clearOnlySource = !malformedTile && rawValidTileCount > 0u &&
-                                 clearOnlyTileCount == rawValidTileCount;
-    if (clearOnlySource) {
-      const float clearLinearDepth =
-          shadow_detail::linearizeDeviceDepthToViewDepth(1.0f, camera);
-      if (std::isfinite(clearLinearDepth)) {
-        analysis.valid = true;
-        analysis.clearOnlySource = true;
-        analysis.validTileCount = clearOnlyTileCount;
-        analysis.rawDeviceMin = 1.0f;
-        analysis.rawDeviceMax = 1.0f;
-        analysis.rawLinearMin = clearLinearDepth;
-        analysis.rawLinearMax = clearLinearDepth;
-        analysis.trimmedNear = fixedSplitRange.farDepth;
-        analysis.trimmedFar = fixedSplitRange.farDepth;
-        analysis.rawSplitDepths.fill(fixedSplitRange.farDepth);
-        analysis.rawSplitDepths[0] = fixedSplitRange.nearDepth;
-      }
-    }
-    return analysis;
-  }
-
-  const float lowPercentile = std::clamp(trimLowPercent / 100.0f, 0.0f, 0.95f);
-  const float highPercentile = std::clamp(1.0f - trimHighPercent / 100.0f,
-                                          lowPercentile + 1.0e-3f, 1.0f);
-  analysis.trimmedNear = shadow_detail::sdsmHistogramPercentileDepth(
-      std::span<const float>(analysis.bucketWeights.data(), safeBucketCount),
-      fixedSplitRange.nearDepth, fixedSplitRange.farDepth, lowPercentile);
-  analysis.trimmedFar = shadow_detail::sdsmHistogramPercentileDepth(
-      std::span<const float>(analysis.bucketWeights.data(), safeBucketCount),
-      fixedSplitRange.nearDepth, fixedSplitRange.farDepth, highPercentile);
-
-  analysis.rawSplitDepths.fill(fixedSplitRange.farDepth);
-  analysis.rawSplitDepths[0] = fixedSplitRange.nearDepth;
-  for (uint32_t i = 1u; i < std::clamp(cascadeCount, 1u, kMaxShadowCascades);
-       ++i) {
-    const float t = static_cast<float>(i) / static_cast<float>(cascadeCount);
-    const float percentile = glm::mix(lowPercentile, highPercentile, t);
-    analysis.rawSplitDepths[i] = shadow_detail::sdsmHistogramPercentileDepth(
-        std::span<const float>(analysis.bucketWeights.data(), safeBucketCount),
-        fixedSplitRange.nearDepth, fixedSplitRange.farDepth, percentile);
-  }
-  analysis.rawSplitDepths[cascadeCount] = analysis.trimmedFar;
-  shadow_detail::enforceMonotonicShadowSplitDepths(
-      analysis.rawSplitDepths, cascadeCount, fixedSplitRange.nearDepth,
-      std::max(analysis.trimmedFar, fixedSplitRange.nearDepth + 1.0e-4f));
-  analysis.valid = std::isfinite(analysis.trimmedNear) &&
-                   std::isfinite(analysis.trimmedFar) &&
-                   analysis.trimmedFar >= analysis.trimmedNear;
-  return analysis;
-}
 
 [[nodiscard]] ShadowSplitRange
 computeFixedShadowSplitRange(const CameraFrameState &camera,
@@ -1785,14 +1418,6 @@ makeStaticOnlyScrollFitForCurrentFrame(
   return fit;
 }
 
-[[nodiscard]] float
-pcssReceiverDepthWorldScale(const shadow_detail::DirectionalShadowFit &fit) {
-  const float splitDepthSpan = std::max(fit.splitFar - fit.splitNear, 1.0e-6f);
-  const float lightDepthSpan =
-      std::max(fit.lightSpaceBoundsMax.z - fit.lightSpaceBoundsMin.z, 1.0e-6f);
-  return std::min(lightDepthSpan, splitDepthSpan * 2.0f);
-}
-
 [[nodiscard]] glm::vec3 paddedLightSpaceCullingMin(
     const shadow_detail::DirectionalShadowFit &fit) noexcept {
   const float padding =
@@ -1811,30 +1436,16 @@ pcssReceiverDepthWorldScale(const shadow_detail::DirectionalShadowFit &fit) {
 
 void writeShadowCascadeFit(const shadow_detail::DirectionalShadowFit &fit,
                            uint32_t cascadeIndex,
-                           const RenderSettings::ShadowSettings &settings,
-                           uint32_t compareSamplerId, uint32_t rawSamplerId,
                            TextureHandle shadowDepthTexture, GPUDevice &gpu,
                            ShadowFrameGpuData &shadowFrameGpuData,
                            ShadowDebugFrameData &shadowDebugFrameData) {
-  const glm::vec3 cullingBoundsMin = paddedLightSpaceCullingMin(fit);
-  const glm::vec3 cullingBoundsMax = paddedLightSpaceCullingMax(fit);
   shadowFrameGpuData.cascades[cascadeIndex] = ShadowCascadeGpuData{
       .lightViewProj = fit.lightViewProj,
-      .lightView = fit.lightView,
       .splitDepthTexelSize =
           glm::vec4(fit.splitNear, fit.splitFar, fit.texelWorldSize, 0.0f),
-      .uvScaleBias = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f),
-      .biasParams = glm::vec4(settings.constantBias, settings.slopeBias,
-                              settings.normalBias, 0.0f),
-      .pcssParams = glm::vec4(pcssReceiverDepthWorldScale(fit),
-                              settings.pcssSearchRadiusClampTexels,
-                              settings.pcssFilterRadiusClampTexels, 0.0f),
-      .textureSampler =
-          glm::uvec4(gpu.getTextureBindlessIndex(shadowDepthTexture),
-                     compareSamplerId, rawSamplerId, settings.shadowMapSize),
-      .cullingBoundsMin = glm::vec4(cullingBoundsMin, 1.0f),
-      .cullingBoundsMax = glm::vec4(cullingBoundsMax, 1.0f),
   };
+  shadowFrameGpuData.cascadeTextureIds[cascadeIndex] =
+      gpu.getTextureBindlessIndex(shadowDepthTexture);
 
   ShadowCascadeDebugFrameData &cascadeDebug =
       shadowDebugFrameData.cascades[cascadeIndex];
@@ -1962,23 +1573,6 @@ shadowDepthPipelineDesc(ShaderHandle vertexShader, ShaderHandle fragmentShader,
   };
 }
 
-[[nodiscard]] MeshletPipelineDesc
-shadowMeshletPipelineDesc(ShaderHandle taskShader, ShaderHandle meshShader,
-                          ShaderHandle fragmentShader, CullMode cullMode,
-                          Format depthFormat) {
-  return MeshletPipelineDesc{
-      .taskShader = taskShader,
-      .meshShader = meshShader,
-      .fragmentShader = fragmentShader,
-      .colorFormats = {Format::RGBA8_UNORM},
-      .colorAttachmentCount = 0u,
-      .depthFormat = sanitizeShadowDepthFormat(depthFormat),
-      .cullMode = cullMode,
-      .polygonMode = PolygonMode::Fill,
-      .blendEnabled = false,
-  };
-}
-
 [[nodiscard]] RenderPipelineDesc
 shadowPreviewPipelineDesc(ShaderHandle vertexShader,
                           ShaderHandle fragmentShader) {
@@ -2091,7 +1685,6 @@ hashStaticShadowCasterRasterSignature(uint64_t signature, const Entry &entry) {
       hashCombine64(signature, static_cast<uint64_t>(entry.templateIndex));
   signature =
       hashCombine64(signature, static_cast<uint64_t>(entry.instanceIndex));
-  signature = hashCombine64(signature, entry.useMeshlets ? 1ull : 0ull);
   signature =
       hashCombine64(signature, foldHandle(entry.indexBuffer.index,
                                           entry.indexBuffer.generation));
@@ -2114,30 +1707,6 @@ hashStaticShadowCasterRasterSignature(uint64_t signature, const Entry &entry) {
       hashCombine64(signature, static_cast<uint64_t>(entry.materialIndex));
   signature = hashCombine64(signature, static_cast<uint64_t>(entry.indexCount));
   signature = hashCombine64(signature, static_cast<uint64_t>(entry.firstIndex));
-  if (entry.meshletView != nullptr) {
-    signature = hashCombine64(
-        signature, foldHandle(entry.meshletView->meshletBuffer.index,
-                              entry.meshletView->meshletBuffer.generation));
-    signature = hashCombine64(
-        signature,
-        foldHandle(entry.meshletView->meshletVertexIndexBuffer.index,
-                   entry.meshletView->meshletVertexIndexBuffer.generation));
-    signature = hashCombine64(
-        signature,
-        foldHandle(entry.meshletView->meshletPrimitiveIndexBuffer.index,
-                   entry.meshletView->meshletPrimitiveIndexBuffer.generation));
-    signature = hashCombine64(
-        signature, foldHandle(entry.meshletView->lodRangeBuffer.index,
-                              entry.meshletView->lodRangeBuffer.generation));
-  }
-  signature =
-      hashCombine64(signature, static_cast<uint64_t>(entry.submeshIndex));
-  signature =
-      hashCombine64(signature, static_cast<uint64_t>(entry.meshletMaxCount));
-  signature =
-      hashCombine64(signature, static_cast<uint64_t>(entry.meshletCount));
-  signature =
-      hashCombine64(signature, static_cast<uint64_t>(entry.vertexOffset));
   signature = hashCombine64(signature, entry.doubleSided ? 1ull : 0ull);
   signature = hashCombine64(signature, entry.alphaMasked ? 1ull : 0ull);
   return signature;
@@ -2154,13 +1723,11 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
                                std::pmr::memory_resource *memory)
     : gpu_(gpu), config_(config), memory_(resolveMemoryResource(memory)),
       instanceMatricesRing_(memory_), instanceRemapRing_(memory_),
-      shadowFrameRing_(memory_), shadowMeshletCounterRing_(memory_),
-      sdsmReduceResultRing_(memory_), instanceDataRingUploadVersions_(memory_),
+      shadowFrameRing_(memory_), sdsmReduceResultRing_(memory_),
+      instanceDataRingUploadVersions_(memory_),
       instanceRemapUploadSignatures_(memory_),
       shadowFrameUploadSignatures_(memory_),
-      shadowMeshletCounterRingPublishedFrames_(memory_),
-      sdsmReduceResultRingPublishedFrames_(memory_),
-      shadowMeshletCounterClear_(memory_), meshDrawTemplates_(memory_),
+      sdsmReduceResultRingPublishedFrames_(memory_), meshDrawTemplates_(memory_),
       batchBuildScratchArena_(memory_), staticShadowTemplateIndices_(memory_),
       dynamicShadowTemplateIndices_(memory_), staticShadowCasterCache_(memory_),
       staticShadowBatchTemplates_(memory_), staticShadowBatchIndexMap_(memory_),
@@ -2183,10 +1750,7 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
       passDependencyBufferBindings_(memory_),
       passDependencyTextureBindings_(memory_), preResolvedDrawBuffers_(memory_),
       preResolvedDrawBufferIds_(memory_), passTextureDependencies_(memory_),
-      previewTextureDependencies_(memory_), sdsmReadbackBuffer_(memory_) {
-  sdsmReadbackBuffer_.resize(
-      static_cast<size_t>(kSdsmHistogramSourceMaxTexelCount) * sizeof(float) *
-      2u);
+      previewTextureDependencies_(memory_) {
   for (uint32_t cascadeIndex = 0u; cascadeIndex < kMaxShadowCascades;
        ++cascadeIndex) {
     cascadePushConstants_[cascadeIndex] =
@@ -2196,12 +1760,6 @@ ShadowRenderer::ShadowRenderer(GPUDevice &gpu,
          staticOnlyScrollDirtyDrawItems_[cascadeIndex]) {
       draws = std::pmr::vector<DrawItem>(memory_);
     }
-    cascadeMeshletPushConstants_[cascadeIndex] =
-        std::pmr::vector<MeshletPushConstants>(memory_);
-    cascadeMeshDispatchItems_[cascadeIndex] =
-        std::pmr::vector<MeshDispatchItem>(memory_);
-    cascadeMeshDispatchDependencyBuffers_[cascadeIndex] =
-        std::pmr::vector<ShadowMeshDispatchDependencyBuffers>(memory_);
   }
 }
 
@@ -2283,78 +1841,6 @@ Result<bool, std::string> ShadowRenderer::createShaders() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> ShadowRenderer::createShadowMeshletShaders() {
-  if (nuri::isValid(shadowMeshletTaskShader_) &&
-      nuri::isValid(shadowMeshletDepthMeshShader_) &&
-      nuri::isValid(shadowMeshletMeshShader_) &&
-      nuri::isValid(shadowMeshletDepthAlphaFragmentShader_)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  if (!gpu_.supportsFeature(GPUFeature::Meshlets)) {
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::createShadowMeshletShaders: GPU meshlets are "
-        "unsupported");
-  }
-  if (config_.shaderBasePath.empty()) {
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::createShadowMeshletShaders: shader base path is not "
-        "configured");
-  }
-
-  shadowMeshletShader_ = Shader::create("shadow_meshlet", gpu_);
-  if (!shadowMeshletShader_) {
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::createShadowMeshletShaders: failed to create shader "
-        "wrapper");
-  }
-
-  const std::filesystem::path taskPath =
-      config_.shaderBasePath / "shadow_meshlet.task.glsl";
-  const std::filesystem::path depthMeshPath =
-      config_.shaderBasePath / "shadow_meshlet_depth.mesh.glsl";
-  const std::filesystem::path meshPath =
-      config_.shaderBasePath / "shadow_meshlet.mesh.glsl";
-  const std::filesystem::path depthAlphaFragmentPath =
-      config_.shaderBasePath / "shadow_meshlet_depth_alpha.frag";
-
-  auto taskResult = shadowMeshletShader_->compileFromFile(taskPath.string(),
-                                                          ShaderStage::Task);
-  if (taskResult.hasError()) {
-    shadowMeshletShader_.reset();
-    return Result<bool, std::string>::makeError(taskResult.error());
-  }
-  auto depthMeshResult = shadowMeshletShader_->compileFromFile(
-      depthMeshPath.string(), ShaderStage::Mesh);
-  if (depthMeshResult.hasError()) {
-    gpu_.destroyShaderModule(taskResult.value());
-    shadowMeshletShader_.reset();
-    return Result<bool, std::string>::makeError(depthMeshResult.error());
-  }
-  auto meshResult = shadowMeshletShader_->compileFromFile(meshPath.string(),
-                                                          ShaderStage::Mesh);
-  if (meshResult.hasError()) {
-    gpu_.destroyShaderModule(depthMeshResult.value());
-    gpu_.destroyShaderModule(taskResult.value());
-    shadowMeshletShader_.reset();
-    return Result<bool, std::string>::makeError(meshResult.error());
-  }
-  auto alphaFragmentResult = shadowMeshletShader_->compileFromFile(
-      depthAlphaFragmentPath.string(), ShaderStage::Fragment);
-  if (alphaFragmentResult.hasError()) {
-    gpu_.destroyShaderModule(meshResult.value());
-    gpu_.destroyShaderModule(depthMeshResult.value());
-    gpu_.destroyShaderModule(taskResult.value());
-    shadowMeshletShader_.reset();
-    return Result<bool, std::string>::makeError(alphaFragmentResult.error());
-  }
-
-  shadowMeshletTaskShader_ = taskResult.value();
-  shadowMeshletDepthMeshShader_ = depthMeshResult.value();
-  shadowMeshletMeshShader_ = meshResult.value();
-  shadowMeshletDepthAlphaFragmentShader_ = alphaFragmentResult.value();
-  return Result<bool, std::string>::makeResult(true);
-}
-
 Result<bool, std::string> ShadowRenderer::createPreviewShaders() {
   if (nuri::isValid(previewVertexShader_)) {
     gpu_.destroyShaderModule(previewVertexShader_);
@@ -2417,35 +1903,6 @@ Result<bool, std::string> ShadowRenderer::createSdsmReduceShaders() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> ShadowRenderer::createSdsmHistogramReduceShaders() {
-  if (sdsmHistogramReduceShader_) {
-    sdsmHistogramReduceShader_.reset();
-  }
-  sdsmHistogramReduceComputeShader_ = {};
-
-  if (config_.shaderBasePath.empty()) {
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::createSdsmHistogramReduceShaders: shader base path "
-        "is not configured");
-  }
-
-  sdsmHistogramReduceShader_ = Shader::create("shadow_sdsm_histogram", gpu_);
-  if (!sdsmHistogramReduceShader_) {
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::createSdsmHistogramReduceShaders: failed to create "
-        "shader wrapper");
-  }
-
-  const std::filesystem::path computePath =
-      config_.shaderBasePath / "shadow_sdsm_histogram.comp";
-  auto computeResult = sdsmHistogramReduceShader_->compileFromFile(
-      computePath.string(), ShaderStage::Compute);
-  if (computeResult.hasError()) {
-    return Result<bool, std::string>::makeError(computeResult.error());
-  }
-  sdsmHistogramReduceComputeShader_ = computeResult.value();
-  return Result<bool, std::string>::makeResult(true);
-}
 
 Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
   const Format targetDepthFormat = sanitizeShadowDepthFormat(depthFormat);
@@ -2539,110 +1996,6 @@ Result<bool, std::string> ShadowRenderer::createPipelines(Format depthFormat) {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string>
-ShadowRenderer::ensureShadowMeshletPipelineState(Format depthFormat) {
-  const Format targetDepthFormat = sanitizeShadowDepthFormat(depthFormat);
-  if (nuri::isValid(shadowMeshletPipelineHandle_) &&
-      nuri::isValid(shadowMeshletDoubleSidedPipelineHandle_) &&
-      nuri::isValid(shadowMeshletAlphaPipelineHandle_) &&
-      nuri::isValid(shadowMeshletAlphaDoubleSidedPipelineHandle_) &&
-      shadowMeshletDepthPipelineFormat_ == targetDepthFormat) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  if (shadowMeshletPipelineUnsupported_) {
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::ensureShadowMeshletPipelineState: meshlet shadow "
-        "pipeline is unsupported");
-  }
-  if (!gpu_.supportsFeature(GPUFeature::Meshlets)) {
-    shadowMeshletPipelineUnsupported_ = true;
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::ensureShadowMeshletPipelineState: GPU meshlets are "
-        "unsupported");
-  }
-
-  auto shaderResult = createShadowMeshletShaders();
-  if (shaderResult.hasError()) {
-    shadowMeshletPipelineUnsupported_ = true;
-    return shaderResult;
-  }
-  if (!nuri::isValid(shadowMeshletTaskShader_) ||
-      !nuri::isValid(shadowMeshletDepthMeshShader_) ||
-      !nuri::isValid(shadowMeshletMeshShader_) ||
-      !nuri::isValid(shadowMeshletDepthAlphaFragmentShader_)) {
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::ensureShadowMeshletPipelineState: invalid shadow "
-        "meshlet shaders");
-  }
-
-  destroyShadowMeshletPipelineState();
-  const auto destroyPipelineIfValid = [this](MeshletPipelineHandle pipeline) {
-    if (nuri::isValid(pipeline)) {
-      gpu_.destroyMeshletPipeline(pipeline);
-    }
-  };
-
-  auto shadowResult = gpu_.createMeshletPipeline(
-      shadowMeshletPipelineDesc(shadowMeshletTaskShader_,
-                                shadowMeshletDepthMeshShader_, ShaderHandle{},
-                                CullMode::Back, targetDepthFormat),
-      "shadow_meshlet_depth");
-  if (shadowResult.hasError()) {
-    shadowMeshletPipelineUnsupported_ = true;
-    return Result<bool, std::string>::makeError(shadowResult.error());
-  }
-  MeshletPipelineHandle newShadowPipeline = shadowResult.value();
-
-  auto doubleSidedResult = gpu_.createMeshletPipeline(
-      shadowMeshletPipelineDesc(shadowMeshletTaskShader_,
-                                shadowMeshletDepthMeshShader_, ShaderHandle{},
-                                CullMode::None, targetDepthFormat),
-      "shadow_meshlet_depth_double_sided");
-  if (doubleSidedResult.hasError()) {
-    destroyPipelineIfValid(newShadowPipeline);
-    shadowMeshletPipelineUnsupported_ = true;
-    return Result<bool, std::string>::makeError(doubleSidedResult.error());
-  }
-  MeshletPipelineHandle newShadowDoubleSidedPipeline =
-      doubleSidedResult.value();
-
-  auto alphaResult = gpu_.createMeshletPipeline(
-      shadowMeshletPipelineDesc(shadowMeshletTaskShader_,
-                                shadowMeshletMeshShader_,
-                                shadowMeshletDepthAlphaFragmentShader_,
-                                CullMode::Back, targetDepthFormat),
-      "shadow_meshlet_depth_alpha");
-  if (alphaResult.hasError()) {
-    destroyPipelineIfValid(newShadowDoubleSidedPipeline);
-    destroyPipelineIfValid(newShadowPipeline);
-    shadowMeshletPipelineUnsupported_ = true;
-    return Result<bool, std::string>::makeError(alphaResult.error());
-  }
-  MeshletPipelineHandle newShadowAlphaPipeline = alphaResult.value();
-
-  auto alphaDoubleSidedResult = gpu_.createMeshletPipeline(
-      shadowMeshletPipelineDesc(shadowMeshletTaskShader_,
-                                shadowMeshletMeshShader_,
-                                shadowMeshletDepthAlphaFragmentShader_,
-                                CullMode::None, targetDepthFormat),
-      "shadow_meshlet_depth_alpha_double_sided");
-  if (alphaDoubleSidedResult.hasError()) {
-    destroyPipelineIfValid(newShadowAlphaPipeline);
-    destroyPipelineIfValid(newShadowDoubleSidedPipeline);
-    destroyPipelineIfValid(newShadowPipeline);
-    shadowMeshletPipelineUnsupported_ = true;
-    return Result<bool, std::string>::makeError(alphaDoubleSidedResult.error());
-  }
-
-  shadowMeshletPipelineHandle_ = newShadowPipeline;
-  shadowMeshletDoubleSidedPipelineHandle_ = newShadowDoubleSidedPipeline;
-  shadowMeshletAlphaPipelineHandle_ = newShadowAlphaPipeline;
-  shadowMeshletAlphaDoubleSidedPipelineHandle_ = alphaDoubleSidedResult.value();
-  shadowMeshletDepthPipelineFormat_ = targetDepthFormat;
-  shadowMeshletPipelineUnsupported_ = false;
-  return Result<bool, std::string>::makeResult(true);
-}
-
 Result<bool, std::string> ShadowRenderer::createPreviewPipeline() {
   if (nuri::isValid(previewPipelineHandle_)) {
     return Result<bool, std::string>::makeResult(true);
@@ -2680,24 +2033,6 @@ Result<bool, std::string> ShadowRenderer::createSdsmReducePipeline() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> ShadowRenderer::createSdsmHistogramReducePipeline() {
-  if (nuri::isValid(sdsmHistogramReducePipelineHandle_)) {
-    return Result<bool, std::string>::makeResult(true);
-  }
-  if (!nuri::isValid(sdsmHistogramReduceComputeShader_)) {
-    return Result<bool, std::string>::makeError(
-        "ShadowRenderer::createSdsmHistogramReducePipeline: invalid compute "
-        "shader");
-  }
-  auto pipelineResult = gpu_.createComputePipeline(
-      ComputePipelineDesc{.computeShader = sdsmHistogramReduceComputeShader_},
-      "shadow_sdsm_histogram");
-  if (pipelineResult.hasError()) {
-    return Result<bool, std::string>::makeError(pipelineResult.error());
-  }
-  sdsmHistogramReducePipelineHandle_ = pipelineResult.value();
-  return Result<bool, std::string>::makeResult(true);
-}
 
 Result<bool, std::string> ShadowRenderer::ensureSdsmReduceResources() {
   if (!nuri::isValid(sdsmReduceComputeShader_)) {
@@ -2715,21 +2050,6 @@ Result<bool, std::string> ShadowRenderer::ensureSdsmReduceResources() {
   return Result<bool, std::string>::makeResult(true);
 }
 
-Result<bool, std::string> ShadowRenderer::ensureSdsmHistogramReduceResources() {
-  if (!nuri::isValid(sdsmHistogramReduceComputeShader_)) {
-    auto shaderResult = createSdsmHistogramReduceShaders();
-    if (shaderResult.hasError()) {
-      return shaderResult;
-    }
-  }
-  if (!nuri::isValid(sdsmHistogramReducePipelineHandle_)) {
-    auto pipelineResult = createSdsmHistogramReducePipeline();
-    if (pipelineResult.hasError()) {
-      return pipelineResult;
-    }
-  }
-  return Result<bool, std::string>::makeResult(true);
-}
 
 Result<bool, std::string> ShadowRenderer::ensureInitialized() {
   if (initialized_) {
@@ -3017,17 +2337,12 @@ ShadowRenderer::ensureRingBufferCount(uint32_t requiredCount) {
   while (shadowFrameRing_.size() < safeCount) {
     shadowFrameRing_.push_back(DynamicBufferSlot{});
   }
-  while (shadowMeshletCounterRing_.size() < safeCount) {
-    shadowMeshletCounterRing_.push_back(DynamicBufferSlot{});
-  }
   instanceDataRingUploadVersions_.resize(safeCount,
                                          std::numeric_limits<uint64_t>::max());
   instanceRemapUploadSignatures_.resize(safeCount,
                                         std::numeric_limits<uint64_t>::max());
   shadowFrameUploadSignatures_.resize(safeCount,
                                       std::numeric_limits<uint64_t>::max());
-  shadowMeshletCounterRingPublishedFrames_.resize(
-      safeCount, std::numeric_limits<uint64_t>::max());
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -3097,123 +2412,6 @@ ShadowRenderer::ensureShadowFrameRingCapacity(size_t requiredBytes) {
   return ensureRingCapacity(shadowFrameRing_, requiredBytes,
                             "shadow_frame_gpu_data",
                             shadowFrameUploadSignatures_, Storage::HostVisible);
-}
-
-Result<bool, std::string>
-ShadowRenderer::ensureShadowMeshletCounterRingCapacity(size_t requiredBytes) {
-  const size_t requested =
-      std::max(requiredBytes, sizeof(VisibilityCounterGpuData));
-  bool needsGrowth = false;
-  for (const DynamicBufferSlot &slot : shadowMeshletCounterRing_) {
-    if (slot.buffer && slot.buffer->valid() && slot.capacityBytes < requested) {
-      needsGrowth = true;
-      break;
-    }
-  }
-  if (needsGrowth) {
-    gpu_.waitIdle();
-  }
-  for (size_t i = 0u; i < shadowMeshletCounterRing_.size(); ++i) {
-    DynamicBufferSlot &slot = shadowMeshletCounterRing_[i];
-    if (slot.buffer && slot.buffer->valid() &&
-        slot.capacityBytes >= requested) {
-      continue;
-    }
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0u;
-
-    const BufferDesc desc{
-        .usage = BufferUsage::Storage,
-        .storage = Storage::HostVisible,
-        .size = requested,
-    };
-    std::string debugName("shadow_meshlet_counter_buffer_");
-    debugName += std::to_string(i);
-    auto bufferResult = Buffer::create(gpu_, desc, debugName);
-    if (bufferResult.hasError()) {
-      return Result<bool, std::string>::makeError(bufferResult.error());
-    }
-    slot.buffer = std::move(bufferResult.value());
-    slot.capacityBytes = requested;
-    if (i < shadowMeshletCounterRingPublishedFrames_.size()) {
-      shadowMeshletCounterRingPublishedFrames_[i] =
-          std::numeric_limits<uint64_t>::max();
-    }
-  }
-  return Result<bool, std::string>::makeResult(true);
-}
-
-void ShadowRenderer::readLatestShadowMeshletCounterReadback(
-    RenderFrameContext &frame) {
-  NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
-  VisibilityFrameMetrics &metrics = frame.metrics.visibility;
-  std::optional<VisibilityCounterGpuData> selectedCounter;
-  uint32_t selectedSourceFrame = 0u;
-  uint32_t readbackErrorCount = 0u;
-  const auto readCounterSlot = [&](size_t slotIndex) {
-    if (slotIndex >= shadowMeshletCounterRing_.size()) {
-      return;
-    }
-    const DynamicBufferSlot &slot = shadowMeshletCounterRing_[slotIndex];
-    if (!slot.buffer || !slot.buffer->valid()) {
-      return;
-    }
-    const uint64_t expectedFrame =
-        slotIndex < shadowMeshletCounterRingPublishedFrames_.size()
-            ? shadowMeshletCounterRingPublishedFrames_[slotIndex]
-            : std::numeric_limits<uint64_t>::max();
-    if (expectedFrame == std::numeric_limits<uint64_t>::max()) {
-      return;
-    }
-
-    VisibilityCounterGpuData counter{};
-    auto readResult =
-        gpu_.readBuffer(slot.buffer->handle(), 0u,
-                        std::as_writable_bytes(
-                            std::span<VisibilityCounterGpuData>(&counter, 1u)));
-    if (readResult.hasError()) {
-      ++readbackErrorCount;
-      return;
-    }
-    const uint32_t valid = counter.status.w;
-    const uint32_t sourceFrame = counter.status.z;
-    if (valid == 0u || static_cast<uint64_t>(sourceFrame) >= frame.frameIndex ||
-        sourceFrame != static_cast<uint32_t>(expectedFrame)) {
-      return;
-    }
-    if (!selectedCounter.has_value() || sourceFrame > selectedSourceFrame) {
-      selectedCounter = counter;
-      selectedSourceFrame = sourceFrame;
-    }
-  };
-
-  const size_t preferredSlotIndex =
-      frame.frameIndex > 0u && !shadowMeshletCounterRing_.empty()
-          ? static_cast<size_t>((frame.frameIndex - 1u) %
-                                shadowMeshletCounterRing_.size())
-          : std::numeric_limits<size_t>::max();
-  readCounterSlot(preferredSlotIndex);
-  if (!selectedCounter.has_value()) {
-    for (size_t slotIndex = 0u; slotIndex < shadowMeshletCounterRing_.size();
-         ++slotIndex) {
-      if (slotIndex == preferredSlotIndex) {
-        continue;
-      }
-      readCounterSlot(slotIndex);
-    }
-  }
-
-  metrics.shadowMeshletReadbackErrorCount = readbackErrorCount;
-  if (selectedCounter.has_value()) {
-    metrics.shadowMeshletReadbackAvailable = 1u;
-    metrics.shadowMeshletReadbackSourceFrame = selectedSourceFrame;
-    metrics.shadowMeshletReadbackStaleFrameCount =
-        visibilityReadbackAge(frame.frameIndex, selectedSourceFrame);
-    metrics.shadowMeshletRejectedBounds = selectedCounter->meshlet.x;
-  }
 }
 
 Result<bool, std::string>
@@ -3324,11 +2522,6 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
       return Result<bool, std::string>::makeError(
           "ShadowRenderer::rebuildSceneCache: invalid vertex buffer address");
     }
-    const Model::ModelMeshletGpuView *meshletView =
-        modelRecord->model->hasMeshlets()
-            ? &modelRecord->model->meshletGpuView()
-            : nullptr;
-
     const std::span<const Submesh> submeshes = modelRecord->model->submeshes();
     for (uint32_t submeshIndex = 0u;
          submeshIndex < static_cast<uint32_t>(submeshes.size());
@@ -3373,8 +2566,6 @@ ShadowRenderer::rebuildSceneCache(const RenderScene &scene,
           .materialIndex = materialRecord != nullptr
                                ? resources.materialTableIndex(resolvedMaterial)
                                : 0u,
-          .meshletView = meshletView,
-          .meshletMaxCount = maxMeshletCountForSubmesh(submesh),
           .doubleSided = materialRecord != nullptr
                              ? materialRecord->desc.doubleSided
                              : false,
@@ -3456,32 +2647,10 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
                ? shadowDoubleSidedPipelineHandle_
                : shadowPipelineHandle_;
   };
-  const bool shadowMeshletAvailable =
-      settings.shadow.enableMeshletDepth &&
-      nuri::isValid(shadowMeshletPipelineHandle_) &&
-      nuri::isValid(shadowMeshletDoubleSidedPipelineHandle_) &&
-      nuri::isValid(shadowMeshletAlphaPipelineHandle_) &&
-      nuri::isValid(shadowMeshletAlphaDoubleSidedPipelineHandle_);
-  const auto selectShadowMeshletPipeline =
-      [&](bool doubleSided, bool alphaMasked) -> MeshletPipelineHandle {
-    if (alphaMasked) {
-      return doubleSided &&
-                     nuri::isValid(shadowMeshletAlphaDoubleSidedPipelineHandle_)
-                 ? shadowMeshletAlphaDoubleSidedPipelineHandle_
-                 : shadowMeshletAlphaPipelineHandle_;
-    }
-    return doubleSided && nuri::isValid(shadowMeshletDoubleSidedPipelineHandle_)
-               ? shadowMeshletDoubleSidedPipelineHandle_
-               : shadowMeshletPipelineHandle_;
-  };
   const auto makeStaticShadowBatchKey =
       [](const StaticShadowBatchTemplate &batchTemplate) {
-        const Model::ModelMeshletGpuView *meshletView =
-            batchTemplate.meshletView;
         return StaticShadowBatchKey{
-            .useMeshlets = batchTemplate.useMeshlets,
             .pipeline = batchTemplate.pipeline,
-            .meshletPipeline = batchTemplate.meshletPipeline,
             .vertexBuffer = batchTemplate.vertexBuffer,
             .vertexDecodeBuffer = batchTemplate.vertexDecodeBuffer,
             .indexBuffer = batchTemplate.indexBuffer,
@@ -3495,24 +2664,6 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
             .vertexDecodeIndex = batchTemplate.vertexDecodeIndex,
             .packedVertexFormat = batchTemplate.packedVertexFormat,
             .materialIndex = batchTemplate.materialIndex,
-            .meshletBuffer = meshletView != nullptr ? meshletView->meshletBuffer
-                                                    : BufferHandle{},
-            .meshletVertexIndexBuffer =
-                meshletView != nullptr ? meshletView->meshletVertexIndexBuffer
-                                       : BufferHandle{},
-            .meshletPrimitiveIndexBuffer =
-                meshletView != nullptr
-                    ? meshletView->meshletPrimitiveIndexBuffer
-                    : BufferHandle{},
-            .meshletLodRangeBuffer = meshletView != nullptr
-                                         ? meshletView->lodRangeBuffer
-                                         : BufferHandle{},
-            .submeshIndex = batchTemplate.submeshIndex,
-            .meshletMaxCount = batchTemplate.meshletMaxCount,
-            .meshletCount = batchTemplate.meshletCount,
-            .vertexOffset = batchTemplate.vertexOffset,
-            .enableMeshletCascadeCulling =
-                batchTemplate.enableMeshletCascadeCulling,
         };
       };
   const auto resolveStaticBatchIndex =
@@ -3546,11 +2697,6 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
     if (!lod.has_value()) {
       continue;
     }
-    const bool useMeshlets =
-        shadowMeshletAvailable &&
-        canUseShadowMeshlets(entry.meshletView, entry.submeshIndex,
-                             entry.meshletMaxCount, lod->meshletCount);
-
     StaticShadowCasterCacheEntry cachedEntry{
         .templateIndex = templateIndex,
         .instanceIndex = entry.instanceIndex,
@@ -3566,16 +2712,8 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
         .materialIndex = entry.materialIndex,
         .indexCount = lod->indexCount,
         .firstIndex = lod->indexOffset,
-        .meshletView = entry.meshletView,
-        .submeshIndex = entry.submeshIndex,
-        .meshletMaxCount = entry.meshletMaxCount,
-        .meshletCount = lod->meshletCount,
-        .vertexOffset = entry.submesh->vertexOffset,
-        .enableMeshletCascadeCulling =
-            useMeshlets && settings.shadow.enableMeshletCascadeCulling,
         .doubleSided = entry.doubleSided,
         .alphaMasked = entry.alphaMasked,
-        .useMeshlets = useMeshlets,
         .hasCasterCullingBounds = false,
         .casterWorldCorners = {},
     };
@@ -3586,12 +2724,7 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
         cachedEntry.rasterSignature,
         hashBytes(std::as_bytes(std::span<const glm::mat4>(&modelMatrix, 1u))));
     const StaticShadowBatchTemplate batchTemplate{
-        .useMeshlets = useMeshlets,
         .pipeline = selectShadowPipeline(entry.doubleSided, entry.alphaMasked),
-        .meshletPipeline = useMeshlets
-                               ? selectShadowMeshletPipeline(entry.doubleSided,
-                                                             entry.alphaMasked)
-                               : MeshletPipelineHandle{},
         .vertexBuffer = cachedEntry.vertexBuffer,
         .vertexDecodeBuffer = cachedEntry.vertexDecodeBuffer,
         .indexBuffer = cachedEntry.indexBuffer,
@@ -3604,12 +2737,6 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
         .vertexDecodeIndex = cachedEntry.vertexDecodeIndex,
         .packedVertexFormat = cachedEntry.packedVertexFormat,
         .materialIndex = cachedEntry.materialIndex,
-        .meshletView = cachedEntry.meshletView,
-        .submeshIndex = cachedEntry.submeshIndex,
-        .meshletMaxCount = cachedEntry.meshletMaxCount,
-        .meshletCount = cachedEntry.meshletCount,
-        .vertexOffset = cachedEntry.vertexOffset,
-        .enableMeshletCascadeCulling = cachedEntry.enableMeshletCascadeCulling,
         .firstInstanceIndex = 0u,
         .instanceCount = 0u,
         .rasterSignature = kFnvOffsetBasis64,
@@ -3639,12 +2766,10 @@ ShadowRenderer::rebuildStaticShadowCasterCache(const RenderScene &scene,
     staticShadowCasterCacheContentSignature_ = hashCombine64(
         staticShadowCasterCacheContentSignature_, cachedEntry.rasterSignature);
     staticShadowCasterCacheIndexCountEstimate_ += cachedEntry.indexCount;
-    if (!cachedEntry.useMeshlets) {
-      appendUniqueBufferHandle(staticShadowCasterDrawBuffers_,
-                               cachedEntry.vertexBuffer);
-      appendUniqueBufferHandle(staticShadowCasterDrawBuffers_,
-                               cachedEntry.indexBuffer);
-    }
+    appendUniqueBufferHandle(staticShadowCasterDrawBuffers_,
+                             cachedEntry.vertexBuffer);
+    appendUniqueBufferHandle(staticShadowCasterDrawBuffers_,
+                             cachedEntry.indexBuffer);
   }
 
   staticShadowBatchInstanceIndices_.resize(staticShadowCasterCache_.size());
@@ -3679,9 +2804,6 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   shadowDebugFrameData_ = {};
   currentRawShadowFits_ = {};
   hasActiveShadowLightForFrame_ = false;
-  const ShadowSdsmMode sdsmMode = sanitizeShadowSdsmMode(settings.sdsmMode);
-  const ShadowSdsmReductionBackend requestedReductionBackend =
-      sanitizeShadowSdsmReductionBackend(settings.sdsmReductionBackend);
   const uint32_t cascadeCount =
       std::clamp(activeCascadeCount_, 1u, kMaxShadowCascades);
   const ShadowSplitRange fixedSplitRange =
@@ -3689,39 +2811,27 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   const std::array<float, kMaxShadowCascades + 1u> fixedSplitDepths =
       shadow_detail::computeCascadeSplitDepthsForRange(
           fixedSplitRange.nearDepth, fixedSplitRange.farDepth, cascadeCount,
-          settings.splitMode, settings.splitLambda);
+          settings.splitLambda);
   const float minimumFarDepth = cascadeCount > 1u
                                     ? fixedSplitDepths[cascadeCount - 1u]
                                     : fixedSplitRange.farDepth;
   std::array<float, kMaxShadowCascades + 1u> minMaxSplitDepths =
       fixedSplitDepths;
-  std::array<float, kMaxShadowCascades + 1u> histogramSplitDepths =
+  ShadowSplitRange effectiveSplitRange = fixedSplitRange;
+  std::array<float, kMaxShadowCascades + 1u> effectiveSplitDepths =
       fixedSplitDepths;
+
   shadowDebugFrameData_.rawSamplerId = frame.sharedResources.shadowRawSamplerId;
   shadowDebugFrameData_.compareSamplerId =
       frame.sharedResources.shadowCompareSamplerId;
-  shadowDebugFrameData_.sdsm.mode = sdsmMode;
-  shadowDebugFrameData_.sdsm.requestedReductionBackend =
-      requestedReductionBackend;
+  shadowDebugFrameData_.sdsm.status = ShadowSdsmStatus::FallbackFixed;
   shadowDebugFrameData_.sdsm.activeReductionBackend =
       ShadowSdsmReductionBackend::Cpu;
-  shadowDebugFrameData_.sdsm.status = sdsmMode == ShadowSdsmMode::Disabled
-                                          ? ShadowSdsmStatus::Disabled
-                                          : ShadowSdsmStatus::FallbackFixed;
-  shadowDebugFrameData_.sdsm.reductionFallbackActive = false;
   shadowDebugFrameData_.sdsm.sourceFrameIndex =
       frame.sharedResources.sceneDepthPyramidSourceFrameIndex.value_or(
           std::numeric_limits<uint64_t>::max());
-  shadowDebugFrameData_.sdsm.histogramBucketCount =
-      settings.sdsmHistogramBucketCount;
-  shadowDebugFrameData_.sdsm.histogramTrimLowPercent =
-      settings.sdsmHistogramTrimLowPercent;
-  shadowDebugFrameData_.sdsm.histogramTrimHighPercent =
-      settings.sdsmHistogramTrimHighPercent;
   shadowDebugFrameData_.sdsm.gpuResultSelectedSlot =
       std::numeric_limits<uint32_t>::max();
-  shadowDebugFrameData_.sdsm.gpuReductionResultAvailable = false;
-  shadowDebugFrameData_.sdsm.gpuSplitPayloadValid = false;
   shadowDebugFrameData_.sdsm.gpuResultSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   shadowDebugFrameData_.sdsm.splitCount = cascadeCount;
@@ -3729,36 +2839,25 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   shadowDebugFrameData_.sdsm.fixedRangeFar = fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.smoothedLinearMin = fixedSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.smoothedLinearMax = fixedSplitRange.farDepth;
-  shadowDebugFrameData_.sdsm.histogramTrimmedRangeNear =
-      fixedSplitRange.nearDepth;
-  shadowDebugFrameData_.sdsm.histogramTrimmedRangeFar =
-      fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeNear = fixedSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeFar = fixedSplitRange.farDepth;
   shadowDebugFrameData_.sdsm.fixedSplitDepths = fixedSplitDepths;
   shadowDebugFrameData_.sdsm.minMaxSplitDepths = fixedSplitDepths;
-  shadowDebugFrameData_.sdsm.histogramSplitDepths = fixedSplitDepths;
   shadowDebugFrameData_.sdsm.effectiveSplitDepths = fixedSplitDepths;
-  shadowDebugFrameData_.sdsm.fixedFallbackActive =
-      sdsmMode == ShadowSdsmMode::Histogram;
-  frame.metrics.shadow.sdsmActiveReductionBackend =
-      ShadowSdsmReductionBackend::Cpu;
   frame.metrics.shadow.sdsmReadbackBytes = 0u;
+
   SdsmLogDiagnostics sdsmLog{};
   bool suppressGpuWarmupWarning = false;
-  sdsmLog.reason = sdsmMode == ShadowSdsmMode::Disabled
-                       ? "sdsm_disabled"
-                       : "initial_fallback_state";
+  sdsmLog.reason = "initial_fallback_state";
   sdsmLog.sourceLevelCount = frame.sharedResources.sceneDepthPyramidLevelCount;
   sdsmLog.sourceFrameAvailable =
       frame.sharedResources.sceneDepthPyramidSourceFrameIndex.has_value();
   sdsmLog.historyRangeValid = sdsmState_.hasValidSdsmRange_;
   sdsmLog.historyTexelValid = sdsmState_.hasValidSdsmFarCascadeTexelSize_;
+
   const auto publishGpuReductionResultDebug = [&](uint32_t selectedSlot,
-                                                  uint64_t sourceFrameIndex,
-                                                  bool splitPayloadValid) {
+                                                  uint64_t sourceFrameIndex) {
     shadowDebugFrameData_.sdsm.gpuReductionResultAvailable = true;
-    shadowDebugFrameData_.sdsm.gpuSplitPayloadValid = splitPayloadValid;
     shadowDebugFrameData_.sdsm.gpuResultSelectedSlot = selectedSlot;
     shadowDebugFrameData_.sdsm.gpuResultSourceFrameIndex = sourceFrameIndex;
   };
@@ -3778,9 +2877,6 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   const auto invalidateSdsmRange = [&]() {
     sdsmState_.hasValidSdsmRange_ = false;
     sdsmState_.hasValidSdsmFarCascadeTexelSize_ = false;
-    sdsmState_.hasValidSdsmHistogramSplits_ = false;
-    sdsmState_.sdsmHistogramCascadeCount_ = 0u;
-    sdsmState_.sdsmSmoothedHistogramSplitDepths_ = {};
     sdsmState_.lastValidSdsmSourceFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
   };
@@ -3794,87 +2890,33 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     return (frame.frameIndex - sdsmState_.lastValidSdsmSourceFrameIndex_) <=
            kSdsmMaxCachedSourceFrameLag;
   };
-  const auto applyCachedSdsmRange = [&]() {
-    NURI_ASSERT(sdsmState_.hasValidSdsmRange_,
-                "Cached SDSM range requested without valid history");
-    shadowDebugFrameData_.sdsm.smoothedLinearMin =
-        sdsmState_.sdsmSmoothedMinDepth_;
-    shadowDebugFrameData_.sdsm.smoothedLinearMax =
-        sdsmState_.sdsmSmoothedMaxDepth_;
-    return fixedSplitRange;
+  const auto applySdsmSplitDistribution = [&]() {
+    const float visibleFar =
+        std::clamp(std::max(sdsmState_.sdsmSmoothedMaxDepth_, minimumFarDepth),
+                   fixedSplitRange.nearDepth + 1.0e-4f,
+                   fixedSplitRange.farDepth);
+    minMaxSplitDepths = shadow_detail::computeCascadeSplitDepthsForRange(
+        fixedSplitRange.nearDepth, visibleFar, cascadeCount,
+        settings.splitLambda);
+    minMaxSplitDepths[cascadeCount] = fixedSplitRange.farDepth;
+    shadow_detail::enforceMonotonicShadowSplitDepths(
+        minMaxSplitDepths, cascadeCount, fixedSplitRange.nearDepth,
+        fixedSplitRange.farDepth);
+    effectiveSplitDepths = minMaxSplitDepths;
   };
-  ShadowSplitRange effectiveSplitRange = fixedSplitRange;
-  std::array<float, kMaxShadowCascades + 1u> effectiveSplitDepths =
-      fixedSplitDepths;
-  const auto updateEffectiveSplitRange = [&](ShadowSplitRange range) {
-    effectiveSplitRange = range;
-    effectiveSplitDepths = shadow_detail::computeCascadeSplitDepthsForRange(
-        effectiveSplitRange.nearDepth, effectiveSplitRange.farDepth,
-        cascadeCount, settings.splitMode, settings.splitLambda);
-  };
-  const auto updateHistogramEffectiveSplitDepths =
-      [&](const std::array<float, kMaxShadowCascades + 1u> &rawSplitDepths,
-          bool allowSmoothing) {
-        if (!allowSmoothing || !sdsmState_.hasValidSdsmHistogramSplits_ ||
-            sdsmState_.sdsmHistogramCascadeCount_ != cascadeCount) {
-          sdsmState_.sdsmSmoothedHistogramSplitDepths_ = rawSplitDepths;
-        } else {
-          const float historyWeight =
-              std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
-          const float sampleWeight = 1.0f - historyWeight;
-          for (uint32_t i = 1u; i < cascadeCount; ++i) {
-            sdsmState_.sdsmSmoothedHistogramSplitDepths_[i] =
-                rawSplitDepths[i] * sampleWeight +
-                sdsmState_.sdsmSmoothedHistogramSplitDepths_[i] * historyWeight;
-          }
-        }
-        sdsmState_.sdsmSmoothedHistogramSplitDepths_[0] = rawSplitDepths[0];
-        sdsmState_.sdsmSmoothedHistogramSplitDepths_[cascadeCount] =
-            rawSplitDepths[cascadeCount];
-        shadow_detail::enforceMonotonicShadowSplitDepths(
-            sdsmState_.sdsmSmoothedHistogramSplitDepths_, cascadeCount,
-            rawSplitDepths[0],
-            std::max(rawSplitDepths[cascadeCount],
-                     rawSplitDepths[0] + 1.0e-4f));
-        sdsmState_.hasValidSdsmHistogramSplits_ = true;
-        sdsmState_.sdsmHistogramCascadeCount_ = cascadeCount;
-      };
-  const bool histogramSdsm = sdsmMode == ShadowSdsmMode::Histogram;
-  const bool supportsGpuReductionRequest =
-      requestedReductionBackend != ShadowSdsmReductionBackend::Cpu &&
-      (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
-       sdsmMode == ShadowSdsmMode::Histogram);
-  const bool gpuReductionPipelineAvailable =
-      sdsmMode == ShadowSdsmMode::Histogram
-          ? nuri::isValid(sdsmHistogramReducePipelineHandle_)
-          : nuri::isValid(sdsmReducePipelineHandle_);
   const bool gpuReductionResourcesAvailable =
-      supportsGpuReductionRequest && gpuReductionPipelineAvailable &&
+      nuri::isValid(sdsmReducePipelineHandle_) &&
       !sdsmReduceResultRing_.empty() &&
       std::all_of(sdsmReduceResultRing_.begin(), sdsmReduceResultRing_.end(),
                   [](const DynamicBufferSlot &slot) {
                     return slot.buffer && slot.buffer->valid();
                   });
-  ShadowSdsmReductionBackend activeReductionBackend =
-      supportsGpuReductionRequest && gpuReductionResourcesAvailable
-          ? ShadowSdsmReductionBackend::Gpu
-          : ShadowSdsmReductionBackend::Cpu;
-  const auto activateReductionFallback = [&](std::string_view warningReason) {
+  const ShadowSdsmReductionBackend activeReductionBackend =
+      gpuReductionResourcesAvailable ? ShadowSdsmReductionBackend::Gpu
+                                     : ShadowSdsmReductionBackend::Cpu;
+  const auto activateReductionFallback = [&](std::string_view) {
     shadowDebugFrameData_.sdsm.reductionFallbackActive = true;
-    if (requestedReductionBackend != ShadowSdsmReductionBackend::Gpu ||
-        sdsmState_.loggedGpuReductionFallbackWarning_) {
-      return;
-    }
-    NURI_LOG_WARNING(
-        "ShadowRenderer::updateShadowFrameData: requested GPU SDSM "
-        "reduction fell back to CPU path (%s)",
-        std::string(warningReason).c_str());
-    sdsmState_.loggedGpuReductionFallbackWarning_ = true;
   };
-  if (requestedReductionBackend == ShadowSdsmReductionBackend::Gpu &&
-      !gpuReductionResourcesAvailable) {
-    activateReductionFallback("gpu_reduction_unavailable");
-  }
   if (activeReductionBackend != ShadowSdsmReductionBackend::Gpu) {
     sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
   }
@@ -3884,40 +2926,11 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
           ? saturateToU32(sdsmReduceResultRing_.size())
           : 0u;
   frame.metrics.shadow.sdsmActiveReductionBackend = activeReductionBackend;
-  if (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax) {
-    frame.metrics.shadow.sdsmReadbackBytes =
-        activeReductionBackend == ShadowSdsmReductionBackend::Gpu
-            ? static_cast<uint32_t>(sizeof(SdsmGpuMinMaxResult))
-            : static_cast<uint32_t>(sizeof(float) * 2u);
-  }
-  const auto buildHistogramSplitDepthsForRange =
-      [&](const std::array<float, kMaxShadowCascades + 1u> &histogramDepths,
-          ShadowSplitRange range) {
-        std::array<float, kMaxShadowCascades + 1u> mappedSplitDepths =
-            histogramDepths;
-        const float mappedNear = std::max(range.nearDepth, 0.01f);
-        const float mappedFar = std::max(mappedNear + 1.0e-4f, range.farDepth);
-        mappedSplitDepths[0] = mappedNear;
-        if (cascadeCount == 1u) {
-          mappedSplitDepths[1] = mappedFar;
-          return mappedSplitDepths;
-        }
+  frame.metrics.shadow.sdsmReadbackBytes =
+      activeReductionBackend == ShadowSdsmReductionBackend::Gpu
+          ? static_cast<uint32_t>(sizeof(SdsmGpuMinMaxResult))
+          : static_cast<uint32_t>(sizeof(float) * 2u);
 
-        const float histogramFar = std::max(histogramDepths[cascadeCount],
-                                            histogramDepths[0] + 1.0e-4f);
-        const float histogramSpan =
-            std::max(histogramFar - histogramDepths[0], 1.0e-4f);
-        const float mappedSpan = mappedFar - mappedNear;
-        for (uint32_t i = 1u; i < cascadeCount; ++i) {
-          const float normalized = std::clamp(
-              (histogramDepths[i] - histogramDepths[0]) / histogramSpan, 0.0f,
-              1.0f);
-          mappedSplitDepths[i] = mappedNear + normalized * mappedSpan;
-        }
-        shadow_detail::enforceMonotonicShadowSplitDepths(
-            mappedSplitDepths, cascadeCount, mappedNear, mappedFar);
-        return mappedSplitDepths;
-      };
   const auto reuseCachedSdsmRangeOrFallback = [&](ShadowSdsmStatus status,
                                                   std::string_view reason) {
     shadowDebugFrameData_.sdsm.status = status;
@@ -3925,14 +2938,11 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     if (canReuseCachedSdsmRange()) {
       sdsmLog.reusedCachedRange = true;
       shadowDebugFrameData_.sdsm.fixedFallbackActive = false;
-      const ShadowSplitRange cachedRange = applyCachedSdsmRange();
-      effectiveSplitRange = cachedRange;
-      if (sdsmMode == ShadowSdsmMode::Histogram &&
-          sdsmState_.hasValidSdsmHistogramSplits_ &&
-          sdsmState_.sdsmHistogramCascadeCount_ == cascadeCount) {
-        histogramSplitDepths = sdsmState_.sdsmSmoothedHistogramSplitDepths_;
-      }
-      updateEffectiveSplitRange(cachedRange);
+      shadowDebugFrameData_.sdsm.smoothedLinearMin =
+          sdsmState_.sdsmSmoothedMinDepth_;
+      shadowDebugFrameData_.sdsm.smoothedLinearMax =
+          sdsmState_.sdsmSmoothedMaxDepth_;
+      applySdsmSplitDistribution();
       return;
     }
     invalidateSdsmRange();
@@ -3976,16 +2986,14 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   if (!freezeShadowFits) {
     resetFrozenShadowFit();
   }
-  if (!settings.stabilizeCascades) {
-    resetCascadeStabilizationHistory();
-  } else if (cascadeStabilizationHistory_.valid &&
-             (cascadeStabilizationHistory_.lightId != selectedLightId ||
-              cascadeStabilizationHistory_.shadowMapSize != shadowMapSize ||
-              cascadeStabilizationHistory_.cascadeCount != cascadeCount)) {
+  if (cascadeStabilizationHistory_.valid &&
+      (cascadeStabilizationHistory_.lightId != selectedLightId ||
+       cascadeStabilizationHistory_.shadowMapSize != shadowMapSize ||
+       cascadeStabilizationHistory_.cascadeCount != cascadeCount)) {
     resetCascadeStabilizationHistory();
   }
   const bool canReuseCascadeStabilizationHistory =
-      settings.stabilizeCascades && cascadeStabilizationHistory_.valid;
+      cascadeStabilizationHistory_.valid;
   hasActiveShadowLightForFrame_ = true;
 
   const DirectionalLightGpuData &light = directionalLights[selectedLightIndex];
@@ -4124,555 +3132,237 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     NURI_PROFILER_ZONE_END();
   }
   shadowDebugFrameData_.cascadeCount = cascadeCount;
-  if (sdsmMode == ShadowSdsmMode::Disabled) {
-    sdsmLog.reason = "sdsm_disabled";
-    invalidateSdsmRange();
-  } else {
-    TextureHandle latestSdsmPyramidTexture{};
-    bool hasValidSdsmSource =
+  TextureHandle latestSdsmPyramidTexture{};
+  bool hasValidSdsmSource =
+      frame.sharedResources.sceneDepthPyramidSourceFrameIndex.has_value() &&
+      frame.frameIndex > 0u &&
+      *frame.sharedResources.sceneDepthPyramidSourceFrameIndex ==
+          (frame.frameIndex - 1u) &&
+      frame.sharedResources.sceneDepthPyramidLevelCount > 0u;
+  if (frame.sharedResources.sceneDepthPyramidLevelCount > 0u) {
+    latestSdsmPyramidTexture =
+        frame.sharedResources.sceneDepthPyramidTextures
+            [frame.sharedResources.sceneDepthPyramidLevelCount - 1u];
+    sdsmLog.sourceTextureValid = nuri::isValid(latestSdsmPyramidTexture);
+    hasValidSdsmSource = hasValidSdsmSource && sdsmLog.sourceTextureValid;
+  }
+  sdsmLog.hasValidSource = hasValidSdsmSource;
+  if (!hasValidSdsmSource) {
+    sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
+    const ShadowSdsmStatus sourceStatus =
         frame.sharedResources.sceneDepthPyramidSourceFrameIndex.has_value() &&
-        frame.frameIndex > 0u &&
-        *frame.sharedResources.sceneDepthPyramidSourceFrameIndex ==
-            (frame.frameIndex - 1u) &&
-        frame.sharedResources.sceneDepthPyramidLevelCount > 0u;
-    if (frame.sharedResources.sceneDepthPyramidLevelCount > 0u) {
-      latestSdsmPyramidTexture =
-          frame.sharedResources.sceneDepthPyramidTextures
-              [frame.sharedResources.sceneDepthPyramidLevelCount - 1u];
-      sdsmLog.sourceTextureValid = nuri::isValid(latestSdsmPyramidTexture);
-      hasValidSdsmSource = hasValidSdsmSource && sdsmLog.sourceTextureValid;
-    }
-    sdsmLog.hasValidSource = hasValidSdsmSource;
-    if (!hasValidSdsmSource) {
-      sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
-      const ShadowSdsmStatus sourceStatus =
-          frame.sharedResources.sceneDepthPyramidSourceFrameIndex.has_value() &&
-                  frame.frameIndex > 0u
-              ? ShadowSdsmStatus::Stale
-              : ShadowSdsmStatus::Unavailable;
-      reuseCachedSdsmRangeOrFallback(sourceStatus,
-                                     sourceStatus == ShadowSdsmStatus::Stale
-                                         ? "stale_source_frame"
-                                         : "missing_previous_frame_data");
-    } else {
-      const float effectiveNear = fixedSplitRange.nearDepth;
-      const auto activateStableSdsmCoverage = [&]() {
-        sdsmLog.reason = "valid_previous_frame_data";
-        shadowDebugFrameData_.sdsm.status = ShadowSdsmStatus::Active;
-        shadowDebugFrameData_.sdsm.fixedFallbackActive = false;
-        shadowDebugFrameData_.sdsm.smoothedLinearMin =
-            sdsmState_.sdsmSmoothedMinDepth_;
-        shadowDebugFrameData_.sdsm.smoothedLinearMax =
-            sdsmState_.sdsmSmoothedMaxDepth_;
-        // Keep full shadow coverage stable. SDSM still tracks visible depth
-        // distribution for debug and, in histogram mode, can redistribute
-        // internal split placement, but it no longer contracts the overall
-        // shadow distance and then snaps back as camera zoom/dolly changes.
-        effectiveSplitRange = fixedSplitRange;
-      };
-      const auto consumeRawDeviceMinMax =
-          [&](float rawDeviceMin, float rawDeviceMax,
-              std::string_view invalidDepthReason,
-              std::string_view invalidLinearReason) {
-            shadowDebugFrameData_.sdsm.rawDeviceMin = rawDeviceMin;
-            shadowDebugFrameData_.sdsm.rawDeviceMax = rawDeviceMax;
+                frame.frameIndex > 0u
+            ? ShadowSdsmStatus::Stale
+            : ShadowSdsmStatus::Unavailable;
+    reuseCachedSdsmRangeOrFallback(sourceStatus,
+                                   sourceStatus == ShadowSdsmStatus::Stale
+                                       ? "stale_source_frame"
+                                       : "missing_previous_frame_data");
+  } else {
+    const auto activateStableSdsmCoverage = [&]() {
+      sdsmLog.reason = "valid_previous_frame_data";
+      shadowDebugFrameData_.sdsm.status = ShadowSdsmStatus::Active;
+      shadowDebugFrameData_.sdsm.fixedFallbackActive = false;
+      shadowDebugFrameData_.sdsm.smoothedLinearMin =
+          sdsmState_.sdsmSmoothedMinDepth_;
+      shadowDebugFrameData_.sdsm.smoothedLinearMax =
+          sdsmState_.sdsmSmoothedMaxDepth_;
+      // Preserve the declared near/far coverage while using the previous
+      // frame's visible far depth to redistribute internal cascade splits.
+      effectiveSplitRange = fixedSplitRange;
+      applySdsmSplitDistribution();
+    };
+    const auto consumeRawDeviceMinMax =
+        [&](float rawDeviceMin, float rawDeviceMax,
+            std::string_view invalidDepthReason,
+            std::string_view invalidLinearReason) {
+          shadowDebugFrameData_.sdsm.rawDeviceMin = rawDeviceMin;
+          shadowDebugFrameData_.sdsm.rawDeviceMax = rawDeviceMax;
 
-            const bool rawDepthsValid =
-                std::isfinite(rawDeviceMin) && std::isfinite(rawDeviceMax) &&
-                rawDeviceMin >= -1.0e-4f && rawDeviceMax <= (1.0f + 1.0e-4f) &&
-                rawDeviceMax >= rawDeviceMin;
-            sdsmLog.rawDepthsValid = rawDepthsValid;
-            if (!rawDepthsValid) {
-              reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                             invalidDepthReason);
-              return;
-            }
-
-            const float rawLinearMin =
-                shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMin,
-                                                               frame.camera);
-            const float rawLinearMax =
-                shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMax,
-                                                               frame.camera);
-            shadowDebugFrameData_.sdsm.rawLinearMin = rawLinearMin;
-            shadowDebugFrameData_.sdsm.rawLinearMax = rawLinearMax;
-            const bool rawLinearValid = std::isfinite(rawLinearMin) &&
-                                        std::isfinite(rawLinearMax) &&
-                                        rawLinearMax >= rawLinearMin;
-            sdsmLog.rawLinearValid = rawLinearValid;
-            if (!rawLinearValid) {
-              reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                             invalidLinearReason);
-              return;
-            }
-
-            if (!sdsmState_.hasValidSdsmRange_) {
-              sdsmState_.sdsmSmoothedMinDepth_ = rawLinearMin;
-              sdsmState_.sdsmSmoothedMaxDepth_ = rawLinearMax;
-            } else {
-              const float historyWeight =
-                  std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
-              const float sampleWeight = 1.0f - historyWeight;
-              sdsmState_.sdsmSmoothedMinDepth_ =
-                  rawLinearMin * sampleWeight +
-                  sdsmState_.sdsmSmoothedMinDepth_ * historyWeight;
-              sdsmState_.sdsmSmoothedMaxDepth_ =
-                  rawLinearMax * sampleWeight +
-                  sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
-            }
-            sdsmState_.hasValidSdsmRange_ = true;
-            sdsmState_.lastValidSdsmSourceFrameIndex_ =
-                *frame.sharedResources.sceneDepthPyramidSourceFrameIndex;
-            activateStableSdsmCoverage();
-            updateEffectiveSplitRange(effectiveSplitRange);
-            minMaxSplitDepths = effectiveSplitDepths;
-          };
-      const auto consumeCpuMinMaxSource = [&]() -> bool {
-        const TextureHandle sdsmTexture =
-            frame.sharedResources.sceneDepthPyramidTextures
-                [frame.sharedResources.sceneDepthPyramidLevelCount - 1u];
-        sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
-        if (!nuri::isValid(sdsmTexture)) {
-          reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
-                                         "invalid_source_texture");
-          return false;
-        }
-
-        std::array<std::byte, sizeof(float) * 2u> sdsmBytes{};
-        const TextureReadbackRegion readbackRegion{
-            .x = 0u,
-            .y = 0u,
-            .width = 1u,
-            .height = 1u,
-            .mipLevel = 0u,
-            .layer = 0u,
-        };
-        auto readResult =
-            gpu_.readTexture(sdsmTexture, readbackRegion, sdsmBytes);
-        if (readResult.hasError()) {
-          sdsmLog.readbackError = true;
-          reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                         "source_readback_error");
-          return false;
-        }
-
-        sdsmLog.readbackError = false;
-        std::array<float, 2u> rawDeviceDepths{};
-        std::memcpy(rawDeviceDepths.data(), sdsmBytes.data(),
-                    sizeof(rawDeviceDepths));
-        consumeRawDeviceMinMax(rawDeviceDepths[0], rawDeviceDepths[1],
-                               "invalid_raw_device_depths",
-                               "invalid_raw_linear_depths");
-        return shadowDebugFrameData_.sdsm.status == ShadowSdsmStatus::Active;
-      };
-
-      if (sdsmMode == ShadowSdsmMode::Histogram) {
-        std::array<glm::uvec2, kMaxSceneDepthPyramidLevels> levelDimensions{};
-        for (uint32_t level = 0u;
-             level < frame.sharedResources.sceneDepthPyramidLevelCount;
-             ++level) {
-          const TextureHandle texture =
-              frame.sharedResources.sceneDepthPyramidTextures[level];
-          if (!nuri::isValid(texture)) {
-            levelDimensions[level] = glm::uvec2(1u);
-            continue;
+          const bool rawDepthsValid =
+              std::isfinite(rawDeviceMin) && std::isfinite(rawDeviceMax) &&
+              rawDeviceMin >= -1.0e-4f && rawDeviceMax <= (1.0f + 1.0e-4f) &&
+              rawDeviceMax >= rawDeviceMin;
+          sdsmLog.rawDepthsValid = rawDepthsValid;
+          if (!rawDepthsValid) {
+            reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
+                                           invalidDepthReason);
+            return;
           }
-          const TextureDimensions dimensions =
-              gpu_.getTextureDimensions(texture);
-          levelDimensions[level] = glm::uvec2(std::max(dimensions.width, 1u),
-                                              std::max(dimensions.height, 1u));
-        }
-        const shadow_detail::ShadowSdsmHistogramSourceSelection
-            sourceSelection = shadow_detail::selectSdsmHistogramSourceLevel(
-                std::span<const glm::uvec2>(
-                    levelDimensions.data(),
-                    frame.sharedResources.sceneDepthPyramidLevelCount),
-                frame.sharedResources.sceneDepthPyramidLevelCount,
-                kSdsmHistogramSourceMaxTexelCount);
-        shadowDebugFrameData_.sdsm.histogramSourceLevel = sourceSelection.level;
-        shadowDebugFrameData_.sdsm.histogramSourceDimensions =
-            sourceSelection.dimensions;
-        TextureHandle sdsmTexture =
-            frame.sharedResources
-                .sceneDepthPyramidTextures[sourceSelection.level];
-        sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
-        if (!nuri::isValid(sdsmTexture)) {
-          reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
-                                         "invalid_source_texture");
-        } else {
-          const uint32_t width = std::max(sourceSelection.dimensions.x, 1u);
-          const uint32_t height = std::max(sourceSelection.dimensions.y, 1u);
-          frame.metrics.shadow.sdsmReductionSourceSamples = width * height;
-          frame.metrics.shadow.sdsmHistogramSourceSamples = width * height;
-          const auto histogramStart = std::chrono::steady_clock::now();
-          const auto consumeCpuHistogramSource = [&]() -> bool {
-            const size_t requiredBytes =
-                static_cast<size_t>(width) * height * sizeof(float) * 2u;
-            if (sdsmReadbackBuffer_.capacity() < requiredBytes) {
-              sdsmReadbackBuffer_.reserve(requiredBytes);
-            }
-            if (sdsmReadbackBuffer_.size() < requiredBytes) {
-              sdsmReadbackBuffer_.resize(requiredBytes);
-            }
-            std::span<std::byte> sdsmBytes(sdsmReadbackBuffer_.data(),
-                                           requiredBytes);
-            const TextureReadbackRegion readbackRegion{
-                .x = 0u,
-                .y = 0u,
-                .width = width,
-                .height = height,
-                .mipLevel = 0u,
-                .layer = 0u,
-            };
-            auto readResult =
-                gpu_.readTexture(sdsmTexture, readbackRegion, sdsmBytes);
-            if (readResult.hasError()) {
-              sdsmLog.readbackError = true;
-              reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                             "source_readback_error");
-              return false;
-            }
-            sdsmLog.readbackError = false;
 
-            const float *sdsmValues =
-                reinterpret_cast<const float *>(sdsmBytes.data());
-            const std::span<const float> minMaxPairs(
-                sdsmValues, sdsmBytes.size() / sizeof(float));
-            const SdsmHistogramAnalysis analysis = buildSdsmHistogramAnalysis(
-                frame.camera, fixedSplitRange, cascadeCount,
-                settings.sdsmHistogramBucketCount,
-                settings.sdsmHistogramTrimLowPercent,
-                settings.sdsmHistogramTrimHighPercent, sourceSelection.level,
-                sourceSelection.dimensions, minMaxPairs, memory_);
-            shadowDebugFrameData_.sdsm.histogramValidTileCount =
-                analysis.validTileCount;
-            shadowDebugFrameData_.sdsm.histogramTotalWeight =
-                analysis.totalWeight;
-            shadowDebugFrameData_.sdsm.histogramTrimmedRangeNear =
-                analysis.trimmedNear;
-            shadowDebugFrameData_.sdsm.histogramTrimmedRangeFar =
-                analysis.trimmedFar;
-            shadowDebugFrameData_.sdsm.histogramBucketWeights =
-                analysis.bucketWeights;
-            shadowDebugFrameData_.sdsm.rawDeviceMin = analysis.rawDeviceMin;
-            shadowDebugFrameData_.sdsm.rawDeviceMax = analysis.rawDeviceMax;
-            shadowDebugFrameData_.sdsm.rawLinearMin = analysis.rawLinearMin;
-            shadowDebugFrameData_.sdsm.rawLinearMax = analysis.rawLinearMax;
-            sdsmLog.rawDepthsValid = analysis.validTileCount > 0u;
-            sdsmLog.rawLinearValid = analysis.valid;
-            if (!analysis.valid) {
-              reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
-                                             "invalid_histogram_source_data");
-              return false;
-            }
+          const float rawLinearMin =
+              shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMin,
+                                                             frame.camera);
+          const float rawLinearMax =
+              shadow_detail::linearizeDeviceDepthToViewDepth(rawDeviceMax,
+                                                             frame.camera);
+          shadowDebugFrameData_.sdsm.rawLinearMin = rawLinearMin;
+          shadowDebugFrameData_.sdsm.rawLinearMax = rawLinearMax;
+          const bool rawLinearValid = std::isfinite(rawLinearMin) &&
+                                      std::isfinite(rawLinearMax) &&
+                                      rawLinearMax >= rawLinearMin;
+          sdsmLog.rawLinearValid = rawLinearValid;
+          if (!rawLinearValid) {
+            reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
+                                           invalidLinearReason);
+            return;
+          }
 
-            const float sdsmSampleNear = analysis.clearOnlySource
-                                             ? analysis.rawLinearMin
-                                             : analysis.trimmedNear;
-            const float sdsmSampleFar = analysis.clearOnlySource
-                                            ? analysis.rawLinearMax
-                                            : analysis.trimmedFar;
+          if (!sdsmState_.hasValidSdsmRange_) {
+            sdsmState_.sdsmSmoothedMinDepth_ = rawLinearMin;
+            sdsmState_.sdsmSmoothedMaxDepth_ = rawLinearMax;
+          } else {
             const float historyWeight =
                 std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
             const float sampleWeight = 1.0f - historyWeight;
-            if (!sdsmState_.hasValidSdsmRange_) {
-              sdsmState_.sdsmSmoothedMinDepth_ = sdsmSampleNear;
-              sdsmState_.sdsmSmoothedMaxDepth_ = sdsmSampleFar;
-            } else {
-              sdsmState_.sdsmSmoothedMinDepth_ =
-                  sdsmSampleNear * sampleWeight +
-                  sdsmState_.sdsmSmoothedMinDepth_ * historyWeight;
-              sdsmState_.sdsmSmoothedMaxDepth_ =
-                  sdsmSampleFar * sampleWeight +
-                  sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
-            }
-            sdsmState_.hasValidSdsmRange_ = true;
-            sdsmState_.lastValidSdsmSourceFrameIndex_ =
-                *frame.sharedResources.sceneDepthPyramidSourceFrameIndex;
-
-            const float comparisonFar =
-                analysis.clearOnlySource
-                    ? fixedSplitRange.farDepth
-                    : std::clamp(std::max(analysis.trimmedFar, minimumFarDepth),
-                                 effectiveNear + 1.0e-4f,
-                                 fixedSplitRange.farDepth);
-            minMaxSplitDepths =
-                shadow_detail::computeCascadeSplitDepthsForRange(
-                    effectiveNear, comparisonFar, cascadeCount,
-                    settings.splitMode, settings.splitLambda);
-            histogramSplitDepths = analysis.clearOnlySource
-                                       ? fixedSplitDepths
-                                       : analysis.rawSplitDepths;
-            activateStableSdsmCoverage();
-            updateHistogramEffectiveSplitDepths(
-                histogramSplitDepths,
-                !analysis.clearOnlySource &&
-                    sdsmState_.hasValidSdsmHistogramSplits_);
-            histogramSplitDepths = sdsmState_.sdsmSmoothedHistogramSplitDepths_;
-            updateEffectiveSplitRange(effectiveSplitRange);
-            return true;
-          };
-          if (activeReductionBackend == ShadowSdsmReductionBackend::Gpu) {
-            bool anyReadbackError = false;
-            std::optional<SdsmGpuHistogramResult> selectedGpuResult;
-            uint32_t selectedGpuResultSlot =
-                std::numeric_limits<uint32_t>::max();
-            for (size_t slotIndex = 0u;
-                 slotIndex < sdsmReduceResultRing_.size(); ++slotIndex) {
-              const DynamicBufferSlot &slot = sdsmReduceResultRing_[slotIndex];
-              if (!slot.buffer || !slot.buffer->valid()) {
-                continue;
-              }
-              const uint64_t expectedPublishedFrame =
-                  slotIndex < sdsmReduceResultRingPublishedFrames_.size()
-                      ? sdsmReduceResultRingPublishedFrames_[slotIndex]
-                      : std::numeric_limits<uint64_t>::max();
-              if (expectedPublishedFrame ==
-                  std::numeric_limits<uint64_t>::max()) {
-                continue;
-              }
-
-              SdsmGpuHistogramResult gpuResult{};
-              auto readResult = gpu_.readBuffer(
-                  slot.buffer->handle(), 0u,
-                  std::as_writable_bytes(
-                      std::span<SdsmGpuHistogramResult>(&gpuResult, 1u)));
-              if (readResult.hasError()) {
-                anyReadbackError = true;
-                continue;
-              }
-              const uint32_t valid = gpuResult.metadata.y;
-              const uint32_t sourceFrameIndex = gpuResult.metadata.x;
-              if (valid == 0u ||
-                  static_cast<uint64_t>(sourceFrameIndex) >= frame.frameIndex) {
-                continue;
-              }
-              if (static_cast<uint64_t>(sourceFrameIndex) !=
-                  expectedPublishedFrame) {
-                continue;
-              }
-              if (!selectedGpuResult.has_value() ||
-                  sourceFrameIndex > selectedGpuResult->metadata.x) {
-                selectedGpuResult = gpuResult;
-                selectedGpuResultSlot = saturateToU32(slotIndex);
-              }
-            }
-
-            if (!selectedGpuResult.has_value()) {
-              const std::string_view fallbackReason =
-                  anyReadbackError ? "gpu_histogram_readback_error"
-                                   : "gpu_histogram_invalid_or_stale";
-              sdsmLog.readbackError = anyReadbackError;
-              if (!anyReadbackError) {
-                ++sdsmState_.gpuReductionConsecutiveMissingResultFrames_;
-                suppressGpuWarmupWarning =
-                    sdsmState_.gpuReductionConsecutiveMissingResultFrames_ <=
-                    kSdsmGpuWarmupGraceMissFrames;
-              } else {
-                sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
-                suppressGpuWarmupWarning = false;
-              }
-              if (!suppressGpuWarmupWarning &&
-                  !sdsmState_.loggedGpuResultRingDiagnosticWarning_) {
-                sdsmState_.loggedGpuResultRingDiagnosticWarning_ = true;
-                const uint64_t requestedSourceFrameIndex =
-                    frame.sharedResources.sceneDepthPyramidSourceFrameIndex
-                        .value_or(std::numeric_limits<uint64_t>::max());
-                NURI_LOG_WARNING(
-                    "ShadowRenderer::updateShadowFrameData: GPU SDSM "
-                    "histogram ring diagnostics frame=%llu "
-                    "requestedSourceFrame=%llu slotCount=%zu reason=%s",
-                    static_cast<unsigned long long>(frame.frameIndex),
-                    static_cast<unsigned long long>(
-                        requestedSourceFrameIndex ==
-                                std::numeric_limits<uint64_t>::max()
-                            ? 0u
-                            : requestedSourceFrameIndex),
-                    sdsmReduceResultRing_.size(), fallbackReason.data());
-                for (size_t slotIndex = 0u;
-                     slotIndex < sdsmReduceResultRing_.size(); ++slotIndex) {
-                  const DynamicBufferSlot &slot =
-                      sdsmReduceResultRing_[slotIndex];
-                  const uint64_t expectedPublishedFrame =
-                      slotIndex < sdsmReduceResultRingPublishedFrames_.size()
-                          ? sdsmReduceResultRingPublishedFrames_[slotIndex]
-                          : std::numeric_limits<uint64_t>::max();
-                  if (!slot.buffer || !slot.buffer->valid()) {
-                    NURI_LOG_WARNING(
-                        "ShadowRenderer::updateShadowFrameData: GPU SDSM "
-                        "histogram ring slot=%zu bufferValid=0 "
-                        "expectedFrame=%llu readOk=0 valid=0 sourceFrame=0 "
-                        "validTiles=0 bucketCount=0 rawDeviceMinMax=(0.000000, "
-                        "0.000000) histogramRange=(0.000000, 0.000000) "
-                        "totalWeight=0.000000 clear=0.000000",
-                        slotIndex,
-                        static_cast<unsigned long long>(
-                            expectedPublishedFrame ==
-                                    std::numeric_limits<uint64_t>::max()
-                                ? 0u
-                                : expectedPublishedFrame));
-                    continue;
-                  }
-
-                  SdsmGpuHistogramResult gpuResult{};
-                  auto readResult = gpu_.readBuffer(
-                      slot.buffer->handle(), 0u,
-                      std::as_writable_bytes(
-                          std::span<SdsmGpuHistogramResult>(&gpuResult, 1u)));
-                  const bool readOk = !readResult.hasError();
-                  NURI_LOG_WARNING(
-                      "ShadowRenderer::updateShadowFrameData: GPU SDSM "
-                      "histogram ring slot=%zu bufferValid=1 "
-                      "expectedFrame=%llu readOk=%u valid=%u sourceFrame=%u "
-                      "validTiles=%u bucketCount=%u rawDeviceMinMax=(%.6f, "
-                      "%.6f) histogramRange=(%.6f, %.6f) totalWeight=%.6f "
-                      "clear=%.6f",
-                      slotIndex,
-                      static_cast<unsigned long long>(
-                          expectedPublishedFrame ==
-                                  std::numeric_limits<uint64_t>::max()
-                              ? 0u
-                              : expectedPublishedFrame),
-                      readOk ? 1u : 0u, gpuResult.metadata.y,
-                      gpuResult.metadata.x, gpuResult.metadata.z,
-                      gpuResult.metadata.w,
-                      gpuResult.rawDeviceMinMaxLinearMinMax.x,
-                      gpuResult.rawDeviceMinMaxLinearMinMax.y,
-                      gpuResult.histogramRangeWeightClear.x,
-                      gpuResult.histogramRangeWeightClear.y,
-                      gpuResult.histogramRangeWeightClear.z,
-                      gpuResult.histogramRangeWeightClear.w);
-                }
-              }
-              if (!suppressGpuWarmupWarning) {
-                activateReductionFallback(fallbackReason);
-              }
-              reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Stale,
-                                             fallbackReason);
-            } else {
-              sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
-              sdsmState_.loggedGpuReductionFallbackWarning_ = false;
-              sdsmState_.loggedGpuResultRingDiagnosticWarning_ = false;
-              const SdsmGpuHistogramResult &result = *selectedGpuResult;
-              const uint32_t resultBucketCount = std::clamp(
-                  result.metadata.w, kMinShadowSdsmHistogramBucketCount,
-                  kMaxShadowSdsmHistogramBucketCount);
-              shadowDebugFrameData_.sdsm.sourceFrameIndex = result.metadata.x;
-              publishGpuReductionResultDebug(selectedGpuResultSlot,
-                                             result.metadata.x, true);
-              shadowDebugFrameData_.sdsm.histogramValidTileCount =
-                  result.metadata.z;
-              shadowDebugFrameData_.sdsm.histogramTotalWeight =
-                  result.histogramRangeWeightClear.z;
-              shadowDebugFrameData_.sdsm.histogramTrimmedRangeNear =
-                  result.histogramRangeWeightClear.x;
-              shadowDebugFrameData_.sdsm.histogramTrimmedRangeFar =
-                  result.histogramRangeWeightClear.y;
-              shadowDebugFrameData_.sdsm.histogramBucketWeights =
-                  result.bucketWeights;
-              shadowDebugFrameData_.sdsm.rawDeviceMin =
-                  result.rawDeviceMinMaxLinearMinMax.x;
-              shadowDebugFrameData_.sdsm.rawDeviceMax =
-                  result.rawDeviceMinMaxLinearMinMax.y;
-              shadowDebugFrameData_.sdsm.rawLinearMin =
-                  result.rawDeviceMinMaxLinearMinMax.z;
-              shadowDebugFrameData_.sdsm.rawLinearMax =
-                  result.rawDeviceMinMaxLinearMinMax.w;
-              shadowDebugFrameData_.sdsm.histogramBucketCount =
-                  resultBucketCount;
-              sdsmLog.rawDepthsValid = result.metadata.z > 0u;
-              sdsmLog.rawLinearValid = true;
-
-              const bool clearOnlySource =
-                  result.histogramRangeWeightClear.w > 0.5f;
-              const float sdsmSampleNear =
-                  clearOnlySource ? result.rawDeviceMinMaxLinearMinMax.z
-                                  : result.histogramRangeWeightClear.x;
-              const float sdsmSampleFar =
-                  clearOnlySource ? result.rawDeviceMinMaxLinearMinMax.w
-                                  : result.histogramRangeWeightClear.y;
-              const float historyWeight =
-                  std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
-              const float sampleWeight = 1.0f - historyWeight;
-              if (!sdsmState_.hasValidSdsmRange_) {
-                sdsmState_.sdsmSmoothedMinDepth_ = sdsmSampleNear;
-                sdsmState_.sdsmSmoothedMaxDepth_ = sdsmSampleFar;
-              } else {
-                sdsmState_.sdsmSmoothedMinDepth_ =
-                    sdsmSampleNear * sampleWeight +
-                    sdsmState_.sdsmSmoothedMinDepth_ * historyWeight;
-                sdsmState_.sdsmSmoothedMaxDepth_ =
-                    sdsmSampleFar * sampleWeight +
-                    sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
-              }
-              sdsmState_.hasValidSdsmRange_ = true;
-              sdsmState_.lastValidSdsmSourceFrameIndex_ = result.metadata.x;
-
-              const float comparisonFar =
-                  clearOnlySource
-                      ? fixedSplitRange.farDepth
-                      : std::clamp(std::max(result.histogramRangeWeightClear.y,
-                                            minimumFarDepth),
-                                   effectiveNear + 1.0e-4f,
-                                   fixedSplitRange.farDepth);
-              minMaxSplitDepths =
-                  shadow_detail::computeCascadeSplitDepthsForRange(
-                      effectiveNear, comparisonFar, cascadeCount,
-                      settings.splitMode, settings.splitLambda);
-              histogramSplitDepths = fixedSplitDepths;
-              if (!clearOnlySource) {
-                histogramSplitDepths[0] = result.splitDepths0.x;
-                if (cascadeCount >= 1u) {
-                  histogramSplitDepths[1] = result.splitDepths0.y;
-                }
-                if (cascadeCount >= 2u) {
-                  histogramSplitDepths[2] = result.splitDepths0.z;
-                }
-                if (cascadeCount >= 3u) {
-                  histogramSplitDepths[3] = result.splitDepths0.w;
-                }
-                if (cascadeCount >= 4u) {
-                  histogramSplitDepths[4] = result.splitDepths1.x;
-                }
-                shadow_detail::enforceMonotonicShadowSplitDepths(
-                    histogramSplitDepths, cascadeCount, histogramSplitDepths[0],
-                    std::max(histogramSplitDepths[cascadeCount],
-                             histogramSplitDepths[0] + 1.0e-4f));
-              }
-              activateStableSdsmCoverage();
-              updateHistogramEffectiveSplitDepths(
-                  histogramSplitDepths,
-                  !clearOnlySource && sdsmState_.hasValidSdsmHistogramSplits_);
-              histogramSplitDepths =
-                  sdsmState_.sdsmSmoothedHistogramSplitDepths_;
-              updateEffectiveSplitRange(effectiveSplitRange);
-            }
-          } else {
-            (void)consumeCpuHistogramSource();
+            sdsmState_.sdsmSmoothedMinDepth_ =
+                rawLinearMin * sampleWeight +
+                sdsmState_.sdsmSmoothedMinDepth_ * historyWeight;
+            sdsmState_.sdsmSmoothedMaxDepth_ =
+                rawLinearMax * sampleWeight +
+                sdsmState_.sdsmSmoothedMaxDepth_ * historyWeight;
           }
-          const float histogramElapsedMs = elapsedMilliseconds(
-              histogramStart, std::chrono::steady_clock::now());
-          frame.metrics.shadow.sdsmCpuReductionTimeMs = histogramElapsedMs;
-          frame.metrics.shadow.sdsmCpuHistogramTimeMs = histogramElapsedMs;
+          sdsmState_.hasValidSdsmRange_ = true;
+          sdsmState_.lastValidSdsmSourceFrameIndex_ =
+              *frame.sharedResources.sceneDepthPyramidSourceFrameIndex;
+          activateStableSdsmCoverage();
+        };
+    const auto consumeCpuMinMaxSource = [&]() -> bool {
+      const TextureHandle sdsmTexture =
+          frame.sharedResources.sceneDepthPyramidTextures
+              [frame.sharedResources.sceneDepthPyramidLevelCount - 1u];
+      sdsmLog.sourceTextureValid = nuri::isValid(sdsmTexture);
+      if (!nuri::isValid(sdsmTexture)) {
+        reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Unavailable,
+                                       "invalid_source_texture");
+        return false;
+      }
+
+      std::array<std::byte, sizeof(float) * 2u> sdsmBytes{};
+      const TextureReadbackRegion readbackRegion{
+          .x = 0u,
+          .y = 0u,
+          .width = 1u,
+          .height = 1u,
+          .mipLevel = 0u,
+          .layer = 0u,
+      };
+      auto readResult =
+          gpu_.readTexture(sdsmTexture, readbackRegion, sdsmBytes);
+      if (readResult.hasError()) {
+        sdsmLog.readbackError = true;
+        reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Invalid,
+                                       "source_readback_error");
+        return false;
+      }
+
+      sdsmLog.readbackError = false;
+      std::array<float, 2u> rawDeviceDepths{};
+      std::memcpy(rawDeviceDepths.data(), sdsmBytes.data(),
+                  sizeof(rawDeviceDepths));
+      consumeRawDeviceMinMax(rawDeviceDepths[0], rawDeviceDepths[1],
+                             "invalid_raw_device_depths",
+                             "invalid_raw_linear_depths");
+      return shadowDebugFrameData_.sdsm.status == ShadowSdsmStatus::Active;
+    };
+
+    if (activeReductionBackend == ShadowSdsmReductionBackend::Gpu) {
+      const auto reductionStart = std::chrono::steady_clock::now();
+      bool anyReadbackError = false;
+      std::optional<SdsmGpuMinMaxResult> selectedGpuResult;
+      uint32_t selectedGpuResultSlot = std::numeric_limits<uint32_t>::max();
+      for (size_t slotIndex = 0u; slotIndex < sdsmReduceResultRing_.size();
+           ++slotIndex) {
+        const DynamicBufferSlot &slot = sdsmReduceResultRing_[slotIndex];
+        if (!slot.buffer || !slot.buffer->valid()) {
+          continue;
         }
-      } else {
-        if (activeReductionBackend == ShadowSdsmReductionBackend::Gpu) {
-          const auto reductionStart = std::chrono::steady_clock::now();
-          bool anyReadbackError = false;
-          std::optional<SdsmGpuMinMaxResult> selectedGpuResult;
-          uint32_t selectedGpuResultSlot = std::numeric_limits<uint32_t>::max();
-          for (size_t slotIndex = 0u; slotIndex < sdsmReduceResultRing_.size();
-               ++slotIndex) {
-            const DynamicBufferSlot &slot = sdsmReduceResultRing_[slotIndex];
-            if (!slot.buffer || !slot.buffer->valid()) {
-              continue;
-            }
+        const uint64_t expectedPublishedFrame =
+            slotIndex < sdsmReduceResultRingPublishedFrames_.size()
+                ? sdsmReduceResultRingPublishedFrames_[slotIndex]
+                : std::numeric_limits<uint64_t>::max();
+        if (expectedPublishedFrame ==
+            std::numeric_limits<uint64_t>::max()) {
+          continue;
+        }
+
+        SdsmGpuMinMaxResult gpuResult{};
+        auto readResult = gpu_.readBuffer(
+            slot.buffer->handle(), 0u,
+            std::as_writable_bytes(
+                std::span<SdsmGpuMinMaxResult>(&gpuResult, 1u)));
+        if (readResult.hasError()) {
+          anyReadbackError = true;
+          continue;
+        }
+        if (gpuResult.valid == 0u ||
+            static_cast<uint64_t>(gpuResult.sourceFrameIndex) >=
+                frame.frameIndex) {
+          continue;
+        }
+        if (static_cast<uint64_t>(gpuResult.sourceFrameIndex) !=
+            expectedPublishedFrame) {
+          continue;
+        }
+        if (!selectedGpuResult.has_value() ||
+            gpuResult.sourceFrameIndex >
+                selectedGpuResult->sourceFrameIndex) {
+          selectedGpuResult = gpuResult;
+          selectedGpuResultSlot = saturateToU32(slotIndex);
+        }
+      }
+
+      if (!selectedGpuResult.has_value()) {
+        const std::string_view fallbackReason =
+            anyReadbackError ? "gpu_result_readback_error"
+                             : "gpu_result_invalid_or_stale";
+        sdsmLog.readbackError = anyReadbackError;
+        if (!anyReadbackError) {
+          ++sdsmState_.gpuReductionConsecutiveMissingResultFrames_;
+          suppressGpuWarmupWarning =
+              sdsmState_.gpuReductionConsecutiveMissingResultFrames_ <=
+              kSdsmGpuWarmupGraceMissFrames;
+        } else {
+          sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
+          suppressGpuWarmupWarning = false;
+        }
+        if (!suppressGpuWarmupWarning &&
+            !sdsmState_.loggedGpuResultRingDiagnosticWarning_) {
+          sdsmState_.loggedGpuResultRingDiagnosticWarning_ = true;
+          const uint64_t requestedSourceFrameIndex =
+              frame.sharedResources.sceneDepthPyramidSourceFrameIndex
+                  .value_or(std::numeric_limits<uint64_t>::max());
+          NURI_LOG_WARNING(
+              "ShadowRenderer::updateShadowFrameData: GPU SDSM ring "
+              "diagnostics frame=%llu requestedSourceFrame=%llu "
+              "slotCount=%zu reason=%s",
+              static_cast<unsigned long long>(frame.frameIndex),
+              static_cast<unsigned long long>(
+                  requestedSourceFrameIndex ==
+                          std::numeric_limits<uint64_t>::max()
+                      ? 0u
+                      : requestedSourceFrameIndex),
+              sdsmReduceResultRing_.size(), fallbackReason.data());
+          for (size_t slotIndex = 0u;
+               slotIndex < sdsmReduceResultRing_.size(); ++slotIndex) {
+            const DynamicBufferSlot &slot =
+                sdsmReduceResultRing_[slotIndex];
             const uint64_t expectedPublishedFrame =
                 slotIndex < sdsmReduceResultRingPublishedFrames_.size()
                     ? sdsmReduceResultRingPublishedFrames_[slotIndex]
                     : std::numeric_limits<uint64_t>::max();
-            if (expectedPublishedFrame ==
-                std::numeric_limits<uint64_t>::max()) {
+            if (!slot.buffer || !slot.buffer->valid()) {
+              NURI_LOG_WARNING(
+                  "ShadowRenderer::updateShadowFrameData: GPU SDSM ring "
+                  "slot=%zu bufferValid=0 expectedFrame=%llu readOk=0 "
+                  "valid=0 sourceFrame=0 rawDeviceMinMax=(0.000000, "
+                  "0.000000)",
+                  slotIndex,
+                  static_cast<unsigned long long>(
+                      expectedPublishedFrame ==
+                              std::numeric_limits<uint64_t>::max()
+                          ? 0u
+                          : expectedPublishedFrame));
               continue;
             }
 
@@ -4681,161 +3371,55 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                 slot.buffer->handle(), 0u,
                 std::as_writable_bytes(
                     std::span<SdsmGpuMinMaxResult>(&gpuResult, 1u)));
-            if (readResult.hasError()) {
-              anyReadbackError = true;
-              continue;
-            }
-            if (gpuResult.valid == 0u ||
-                static_cast<uint64_t>(gpuResult.sourceFrameIndex) >=
-                    frame.frameIndex) {
-              continue;
-            }
-            if (static_cast<uint64_t>(gpuResult.sourceFrameIndex) !=
-                expectedPublishedFrame) {
-              continue;
-            }
-            if (!selectedGpuResult.has_value() ||
-                gpuResult.sourceFrameIndex >
-                    selectedGpuResult->sourceFrameIndex) {
-              selectedGpuResult = gpuResult;
-              selectedGpuResultSlot = saturateToU32(slotIndex);
-            }
+            const bool readOk = !readResult.hasError();
+            NURI_LOG_WARNING(
+                "ShadowRenderer::updateShadowFrameData: GPU SDSM ring "
+                "slot=%zu bufferValid=1 expectedFrame=%llu readOk=%u "
+                "valid=%u sourceFrame=%u rawDeviceMinMax=(%.6f, %.6f)",
+                slotIndex,
+                static_cast<unsigned long long>(
+                    expectedPublishedFrame ==
+                            std::numeric_limits<uint64_t>::max()
+                        ? 0u
+                        : expectedPublishedFrame),
+                readOk ? 1u : 0u, gpuResult.valid,
+                gpuResult.sourceFrameIndex, gpuResult.rawDeviceMinMax.x,
+                gpuResult.rawDeviceMinMax.y);
           }
-
-          if (!selectedGpuResult.has_value()) {
-            const std::string_view fallbackReason =
-                anyReadbackError ? "gpu_result_readback_error"
-                                 : "gpu_result_invalid_or_stale";
-            sdsmLog.readbackError = anyReadbackError;
-            if (!anyReadbackError) {
-              ++sdsmState_.gpuReductionConsecutiveMissingResultFrames_;
-              suppressGpuWarmupWarning =
-                  sdsmState_.gpuReductionConsecutiveMissingResultFrames_ <=
-                  kSdsmGpuWarmupGraceMissFrames;
-            } else {
-              sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
-              suppressGpuWarmupWarning = false;
-            }
-            if (!suppressGpuWarmupWarning &&
-                !sdsmState_.loggedGpuResultRingDiagnosticWarning_) {
-              sdsmState_.loggedGpuResultRingDiagnosticWarning_ = true;
-              const uint64_t requestedSourceFrameIndex =
-                  frame.sharedResources.sceneDepthPyramidSourceFrameIndex
-                      .value_or(std::numeric_limits<uint64_t>::max());
-              NURI_LOG_WARNING(
-                  "ShadowRenderer::updateShadowFrameData: GPU SDSM ring "
-                  "diagnostics frame=%llu requestedSourceFrame=%llu "
-                  "slotCount=%zu reason=%s",
-                  static_cast<unsigned long long>(frame.frameIndex),
-                  static_cast<unsigned long long>(
-                      requestedSourceFrameIndex ==
-                              std::numeric_limits<uint64_t>::max()
-                          ? 0u
-                          : requestedSourceFrameIndex),
-                  sdsmReduceResultRing_.size(), fallbackReason.data());
-              for (size_t slotIndex = 0u;
-                   slotIndex < sdsmReduceResultRing_.size(); ++slotIndex) {
-                const DynamicBufferSlot &slot =
-                    sdsmReduceResultRing_[slotIndex];
-                const uint64_t expectedPublishedFrame =
-                    slotIndex < sdsmReduceResultRingPublishedFrames_.size()
-                        ? sdsmReduceResultRingPublishedFrames_[slotIndex]
-                        : std::numeric_limits<uint64_t>::max();
-                if (!slot.buffer || !slot.buffer->valid()) {
-                  NURI_LOG_WARNING(
-                      "ShadowRenderer::updateShadowFrameData: GPU SDSM ring "
-                      "slot=%zu bufferValid=0 expectedFrame=%llu readOk=0 "
-                      "valid=0 sourceFrame=0 rawDeviceMinMax=(0.000000, "
-                      "0.000000)",
-                      slotIndex,
-                      static_cast<unsigned long long>(
-                          expectedPublishedFrame ==
-                                  std::numeric_limits<uint64_t>::max()
-                              ? 0u
-                              : expectedPublishedFrame));
-                  continue;
-                }
-
-                SdsmGpuMinMaxResult gpuResult{};
-                auto readResult = gpu_.readBuffer(
-                    slot.buffer->handle(), 0u,
-                    std::as_writable_bytes(
-                        std::span<SdsmGpuMinMaxResult>(&gpuResult, 1u)));
-                const bool readOk = !readResult.hasError();
-                NURI_LOG_WARNING(
-                    "ShadowRenderer::updateShadowFrameData: GPU SDSM ring "
-                    "slot=%zu bufferValid=1 expectedFrame=%llu readOk=%u "
-                    "valid=%u sourceFrame=%u rawDeviceMinMax=(%.6f, %.6f)",
-                    slotIndex,
-                    static_cast<unsigned long long>(
-                        expectedPublishedFrame ==
-                                std::numeric_limits<uint64_t>::max()
-                            ? 0u
-                            : expectedPublishedFrame),
-                    readOk ? 1u : 0u, gpuResult.valid,
-                    gpuResult.sourceFrameIndex, gpuResult.rawDeviceMinMax.x,
-                    gpuResult.rawDeviceMinMax.y);
-              }
-            }
-            if (!suppressGpuWarmupWarning) {
-              activateReductionFallback(fallbackReason);
-            }
-            reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Stale,
-                                           fallbackReason);
-          } else {
-            sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
-            sdsmState_.loggedGpuReductionFallbackWarning_ = false;
-            sdsmState_.loggedGpuResultRingDiagnosticWarning_ = false;
-            shadowDebugFrameData_.sdsm.sourceFrameIndex =
-                selectedGpuResult->sourceFrameIndex;
-            publishGpuReductionResultDebug(selectedGpuResultSlot,
-                                           selectedGpuResult->sourceFrameIndex,
-                                           false);
-            consumeRawDeviceMinMax(selectedGpuResult->rawDeviceMinMax.x,
-                                   selectedGpuResult->rawDeviceMinMax.y,
-                                   "invalid_raw_device_depths",
-                                   "invalid_raw_linear_depths");
-          }
-          frame.metrics.shadow.sdsmReductionSourceSamples = 1u;
-          frame.metrics.shadow.sdsmCpuReductionTimeMs = elapsedMilliseconds(
-              reductionStart, std::chrono::steady_clock::now());
-        } else {
-          const auto reductionStart = std::chrono::steady_clock::now();
-          sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
-          (void)consumeCpuMinMaxSource();
-          frame.metrics.shadow.sdsmReductionSourceSamples = 1u;
-          frame.metrics.shadow.sdsmCpuReductionTimeMs = elapsedMilliseconds(
-              reductionStart, std::chrono::steady_clock::now());
         }
+        if (!suppressGpuWarmupWarning) {
+          activateReductionFallback(fallbackReason);
+        }
+        reuseCachedSdsmRangeOrFallback(ShadowSdsmStatus::Stale,
+                                       fallbackReason);
+      } else {
+        sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
+        sdsmState_.loggedGpuReductionFallbackWarning_ = false;
+        sdsmState_.loggedGpuResultRingDiagnosticWarning_ = false;
+        shadowDebugFrameData_.sdsm.sourceFrameIndex =
+            selectedGpuResult->sourceFrameIndex;
+        publishGpuReductionResultDebug(selectedGpuResultSlot,
+                                       selectedGpuResult->sourceFrameIndex);
+        consumeRawDeviceMinMax(selectedGpuResult->rawDeviceMinMax.x,
+                               selectedGpuResult->rawDeviceMinMax.y,
+                               "invalid_raw_device_depths",
+                               "invalid_raw_linear_depths");
       }
+      frame.metrics.shadow.sdsmReductionSourceSamples = 1u;
+      frame.metrics.shadow.sdsmCpuReductionTimeMs = elapsedMilliseconds(
+          reductionStart, std::chrono::steady_clock::now());
+    } else {
+      const auto reductionStart = std::chrono::steady_clock::now();
+      sdsmState_.gpuReductionConsecutiveMissingResultFrames_ = 0u;
+      (void)consumeCpuMinMaxSource();
+      frame.metrics.shadow.sdsmReductionSourceSamples = 1u;
+      frame.metrics.shadow.sdsmCpuReductionTimeMs = elapsedMilliseconds(
+          reductionStart, std::chrono::steady_clock::now());
     }
   }
   shadowDebugFrameData_.sdsm.effectiveRangeNear = effectiveSplitRange.nearDepth;
   shadowDebugFrameData_.sdsm.effectiveRangeFar = effectiveSplitRange.farDepth;
-  const bool hasHistogramEffectiveSplitSource =
-      sdsmMode == ShadowSdsmMode::Histogram &&
-      !shadowDebugFrameData_.sdsm.fixedFallbackActive &&
-      sdsmState_.hasValidSdsmHistogramSplits_ &&
-      sdsmState_.sdsmHistogramCascadeCount_ == cascadeCount;
-  if (hasHistogramEffectiveSplitSource) {
-    const float histogramDistributionActivationDepth =
-        computeSdsmFarUpdateThreshold(
-            sdsmState_.hasValidSdsmFarCascadeTexelSize_
-                ? sdsmState_.sdsmFarCascadeTexelWorldSize_
-                : 0.0f);
-    const float histogramDistributionFar = std::max(
-        histogramSplitDepths[cascadeCount], histogramSplitDepths[0] + 1.0e-4f);
-    // When histogram coverage no longer extends meaningfully into the far
-    // cascade, keep the fixed split layout stable. This avoids churn from
-    // redistributing internal splits based on near-only histogram content.
-    if (histogramDistributionFar >
-        minimumFarDepth + histogramDistributionActivationDepth) {
-      effectiveSplitDepths = buildHistogramSplitDepthsForRange(
-          histogramSplitDepths, effectiveSplitRange);
-    }
-  }
   shadowDebugFrameData_.sdsm.minMaxSplitDepths = minMaxSplitDepths;
-  shadowDebugFrameData_.sdsm.histogramSplitDepths = histogramSplitDepths;
   shadowDebugFrameData_.sdsm.effectiveSplitDepths = effectiveSplitDepths;
   const bool reuseFrozenFit = freezeShadowFits && hasFrozenShadowFit_ &&
                               frozenShadowLightId_ == selectedLightId &&
@@ -4850,14 +3434,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         const shadow_detail::DirectionalShadowFit &fit =
             frozenShadowFits_[cascadeIndex];
         currentRawShadowFits_[cascadeIndex] = fit;
-        writeShadowCascadeFit(fit, cascadeIndex, settings,
-                              frame.sharedResources.shadowCompareSamplerId,
-                              frame.sharedResources.shadowRawSamplerId,
+        writeShadowCascadeFit(fit, cascadeIndex,
                               shadowDepthTextures_[cascadeIndex], gpu_,
                               shadowFrameCpuData_, shadowDebugFrameData_);
-        if (settings.stabilizeCascades) {
-          cascadeStabilizationHistory_.fits[cascadeIndex] = fit;
-        }
+        cascadeStabilizationHistory_.fits[cascadeIndex] = fit;
       }
     } else {
       for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
@@ -4866,7 +3446,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         if (cascadeCount == 1u) {
           fit = fitSingleShadowMapForRange(
               frame.camera, effectiveSplitRange, lightDirection, shadowMapSize,
-              settings.stabilizeCascades, hasCasterBounds,
+              true, hasCasterBounds,
               hasAnimatedGeometryOverrides, casterBounds.min_,
               casterBounds.max_);
         } else {
@@ -4876,7 +3456,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
                   effectiveSplitDepths[cascadeIndex + 1u], casterLightView,
                   shadowMapSize,
                   !hasAnimatedGeometryOverrides && hasCasterLightDepthBounds,
-                  casterLightDepthBounds, settings.stabilizeCascades);
+                  casterLightDepthBounds, true);
         }
         if (canReuseCascadeStabilizationHistory) {
           shadow_detail::applyDirectionalShadowFitHysteresis(
@@ -4885,14 +3465,10 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         }
         frozenShadowFits_[cascadeIndex] = fit;
         currentRawShadowFits_[cascadeIndex] = fit;
-        writeShadowCascadeFit(fit, cascadeIndex, settings,
-                              frame.sharedResources.shadowCompareSamplerId,
-                              frame.sharedResources.shadowRawSamplerId,
+        writeShadowCascadeFit(fit, cascadeIndex,
                               shadowDepthTextures_[cascadeIndex], gpu_,
                               shadowFrameCpuData_, shadowDebugFrameData_);
-        if (settings.stabilizeCascades) {
-          cascadeStabilizationHistory_.fits[cascadeIndex] = fit;
-        }
+        cascadeStabilizationHistory_.fits[cascadeIndex] = fit;
       }
       if (freezeShadowFits) {
         hasFrozenShadowFit_ = true;
@@ -4903,19 +3479,15 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     }
     NURI_PROFILER_ZONE_END();
   }
-  if (settings.stabilizeCascades) {
-    cascadeStabilizationHistory_.valid = true;
-    cascadeStabilizationHistory_.lightId = selectedLightId;
-    cascadeStabilizationHistory_.shadowMapSize = shadowMapSize;
-    cascadeStabilizationHistory_.cascadeCount = cascadeCount;
-    for (uint32_t cascadeIndex = cascadeCount;
-         cascadeIndex < kMaxShadowCascades; ++cascadeIndex) {
-      cascadeStabilizationHistory_.fits[cascadeIndex] = {};
-    }
+  cascadeStabilizationHistory_.valid = true;
+  cascadeStabilizationHistory_.lightId = selectedLightId;
+  cascadeStabilizationHistory_.shadowMapSize = shadowMapSize;
+  cascadeStabilizationHistory_.cascadeCount = cascadeCount;
+  for (uint32_t cascadeIndex = cascadeCount;
+       cascadeIndex < kMaxShadowCascades; ++cascadeIndex) {
+    cascadeStabilizationHistory_.fits[cascadeIndex] = {};
   }
-  if ((sdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
-       sdsmMode == ShadowSdsmMode::Histogram) &&
-      shadowDebugFrameData_.sdsm.status == ShadowSdsmStatus::Active &&
+  if (shadowDebugFrameData_.sdsm.status == ShadowSdsmStatus::Active &&
       cascadeCount > 0u) {
     const float farCascadeTexelWorldSize =
         shadowDebugFrameData_.cascades[cascadeCount - 1u].texelWorldSize;
@@ -4929,7 +3501,6 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
     }
   }
   const ShadowSdsmDebugFrameData &sdsm = shadowDebugFrameData_.sdsm;
-  const std::string_view sdsmModeName = shadowSdsmModeName(sdsm.mode);
   const std::string_view sdsmStatusName = shadowSdsmStatusName(sdsm.status);
   const uint64_t sourceFrameIndex = sdsm.sourceFrameIndex;
   const uint64_t sourceLag =
@@ -4942,7 +3513,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   const auto logSdsmSnapshot = [&](LogLevel logLevel, const char *label) {
     logMessagef(
         logLevel,
-        "ShadowRenderer::updateShadowFrameData: %s frame=%llu mode=%s "
+        "ShadowRenderer::updateShadowFrameData: %s frame=%llu "
         "status=%s reason=%s fixedFallback=%u reusedCached=%u "
         "opaqueDepthPyramid=%u sourceFrameAvailable=%u sourceFrame=%llu "
         "sourceLag=%llu sourceLevels=%u hasValidSource=%u "
@@ -4957,7 +3528,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
         "fixedSplits=(%.6f, %.6f, %.6f, %.6f, %.6f) "
         "effectiveSplits=(%.6f, %.6f, %.6f, %.6f, %.6f)]",
         label, static_cast<unsigned long long>(frame.frameIndex),
-        sdsmModeName.data(), sdsmStatusName.data(), sdsmLog.reason.data(),
+        sdsmStatusName.data(), sdsmLog.reason.data(),
         sdsm.fixedFallbackActive ? 1u : 0u, sdsmLog.reusedCachedRange ? 1u : 0u,
         opaqueDepthPyramidEnabled ? 1u : 0u,
         sdsmLog.sourceFrameAvailable ? 1u : 0u,
@@ -4992,8 +3563,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       !sdsmState_.hasValidSdsmRange_;
   const bool warmupGpuResultMissing =
       sdsm.status == ShadowSdsmStatus::Stale &&
-      (sdsmLog.reason == "gpu_result_invalid_or_stale" ||
-       sdsmLog.reason == "gpu_histogram_invalid_or_stale") &&
+      sdsmLog.reason == "gpu_result_invalid_or_stale" &&
       !sdsmLog.readbackError && suppressGpuWarmupWarning;
   const bool warningStatus = !benignMissingPreviousFrame &&
                              (sdsm.status == ShadowSdsmStatus::Unavailable ||
@@ -5034,11 +3604,12 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       kShadowFrameFlagEnabled | shadowDebugFrameFlags(settings.debug);
 
   shadowFrameCpuData_.flagsCascadeCountLightIndex = glm::uvec4(
-      shadowFlags, cascadeCount, selectedLightIndex,
-      static_cast<uint32_t>(sanitizeShadowFilterMode(settings.filterMode)));
-  shadowFrameCpuData_.filterParams = glm::uvec4(
-      settings.pcfSampleCount, settings.pcssBlockerSampleCount,
-      settings.pcssFilterSampleCount, settings.debug.poissonRotationSeed);
+      shadowFlags, cascadeCount, selectedLightIndex, settings.pcfSampleCount);
+  shadowFrameCpuData_.sharedBiasParams = glm::vec4(
+      settings.constantBias, settings.slopeBias, settings.normalBias, 0.0f);
+  shadowFrameCpuData_.sharedSamplerMapSize = glm::uvec4(
+      frame.sharedResources.shadowCompareSamplerId,
+      frame.sharedResources.shadowRawSamplerId, settings.shadowMapSize, 0u);
   const float fadeEnd =
       shadowDebugFrameData_.cascades[cascadeCount - 1u].splitFar;
   const float fadeNear = shadowDebugFrameData_.cascades[0].splitNear;
@@ -5046,8 +3617,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
       std::max(fadeEnd - fadeNear, 0.0f) * settings.maxDistanceFadeFraction;
   const float fadeStart = std::max(fadeNear, fadeEnd - fadeWidth);
   shadowFrameCpuData_.fadeParams =
-      glm::vec4(fadeStart, fadeEnd, settings.cascadeBlendFraction,
-                settings.pcssLightRadiusScale);
+      glm::vec4(fadeStart, fadeEnd, settings.cascadeBlendFraction, 0.0f);
   shadowDebugFrameData_.maxDistanceFadeStart = fadeStart;
   shadowDebugFrameData_.maxDistanceFadeEnd = fadeEnd;
 
@@ -5075,6 +3645,7 @@ Result<bool, std::string> ShadowRenderer::updateShadowFrameData(
   }
   frame.metrics.shadow.cascadeCount = cascadeCount;
   frame.metrics.shadow.shadowMapSize = shadowMapSize;
+  frame.metrics.shadow.frameGpuBytes = sizeof(ShadowFrameGpuData);
   frame.metrics.shadow.cascadeTextureBytes =
       static_cast<uint64_t>(cascadeCount) * shadowMapSize * shadowMapSize *
       shadowDepthTextureBytesPerPixel(settings.depthFormat);
@@ -5155,113 +3726,34 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     const glm::vec3 cameraPos = glm::vec3(frame.camera.cameraPos);
     logMessagef(
         logLevel,
-        "ShadowRenderer::buildShadowDraws: Shadow diagnostics summary "
-        "frame=%llu prepared=[depth=%u preview=%u] activeShadowLight=%u "
-        "selectedLight=%llu camera=[pos=(%.3f, %.3f, %.3f) near=%.3f "
-        "far=%.3f aspect=%.3f projection=%s] settings=[split=%s filter=%s "
-        "stabilize=%u freeze=(%u,%u) casterCull=%u map=%u cascades=%u "
-        "maxDistance=%.3f lambda=%.3f blend=%.3f bias=(%.6f, %.3f, %.3f) "
-        "pcf=%u pcss=(%u,%u,%.3f,%.3f,%.3f)] metrics=[draws=%u culled=%u "
-        "indices=%u staticDynamic=(%u,%u) staticCacheReused=%u "
-        "staticOnly=(candidates=%u reused=%u misses=%u/%u/%u/%u/%u) "
-        "staticBatch=(templates=%u full=%u graph=%u remap=%u) "
-        "grid=(queries=%u fallback=%u cells=%u candidates=%u) "
-        "cascadeBytes=%llu filterBudget=%u pcssCost=(%u,%u) "
-        "sdsmCompute=%u sdsmReadback=%u sdsmSamples=(%u,%u) "
-        "sdsmCpuMs=(%.3f, %.3f) gpuMs=(%.3f, %.3f, %.3f) "
-        "gpuFrames=(%llu, %llu, %llu)] "
-        "sdsm=[mode=%s requested=%s active=%s status=%s fixedFallback=%u "
-        "reductionFallback=%u sourceFrame=%llu sourceLag=%llu "
-        "rawDevice=(%.6f, %.6f) rawLinear=(%.6f, %.6f) "
-        "smoothed=(%.6f, %.6f) fixedRange=(%.6f, %.6f) "
-        "histogramRange=(%.6f, %.6f) effectiveRange=(%.6f, %.6f)]",
+        "ShadowRenderer::buildShadowDraws: summary frame=%llu "
+        "prepared=(%u,%u) activeLight=%u selectedLight=%llu "
+        "camera=(%.3f,%.3f,%.3f) map=%u cascades=%u distance=%.3f "
+        "lambda=%.3f blend=%.3f bias=(%.6f,%.3f,%.3f) taps=%u "
+        "draws=(%u,%u) cacheReused=%u cascadeBytes=%llu "
+        "sdsm=(active=%s status=%s source=%llu lag=%llu "
+        "fixed=(%.3f,%.3f) effective=(%.3f,%.3f))",
         static_cast<unsigned long long>(frame.frameIndex),
         hasPreparedShadowDepthPasses_ ? 1u : 0u,
         hasPreparedShadowPreviewPass_ ? 1u : 0u,
         hasActiveShadowLightForFrame_ ? 1u : 0u,
         static_cast<unsigned long long>(selectedLightValue), cameraPos.x,
-        cameraPos.y, cameraPos.z, frame.camera.nearPlane, frame.camera.farPlane,
-        frame.camera.aspectRatio,
-        projectionTypeName(frame.camera.projectionType).data(),
-        shadowCascadeSplitModeName(shadowSettings.splitMode).data(),
-        shadowFilterModeName(shadowSettings.filterMode).data(),
-        shadowSettings.stabilizeCascades ? 1u : 0u,
-        shadowSettings.debug.freezeCascades ? 1u : 0u,
-        shadowSettings.debug.freezeLightView ? 1u : 0u,
-        shadowSettings.debug.enableCascadeCasterCulling ? 1u : 0u,
-        shadowSettings.shadowMapSize, shadowSettings.cascadeCount,
-        shadowSettings.maxDistance, shadowSettings.splitLambda,
-        shadowSettings.cascadeBlendFraction, shadowSettings.constantBias,
-        shadowSettings.slopeBias, shadowSettings.normalBias,
-        shadowSettings.pcfSampleCount, shadowSettings.pcssBlockerSampleCount,
-        shadowSettings.pcssFilterSampleCount,
-        shadowSettings.pcssLightRadiusScale,
-        shadowSettings.pcssSearchRadiusClampTexels,
-        shadowSettings.pcssFilterRadiusClampTexels,
+        cameraPos.y, cameraPos.z, shadowSettings.shadowMapSize,
+        shadowSettings.cascadeCount, shadowSettings.maxDistance,
+        shadowSettings.splitLambda, shadowSettings.cascadeBlendFraction,
+        shadowSettings.constantBias, shadowSettings.slopeBias,
+        shadowSettings.normalBias, shadowSettings.pcfSampleCount,
         frame.metrics.shadow.totalDraws, frame.metrics.shadow.totalCulledDraws,
-        frame.metrics.shadow.totalIndexCountEstimate,
-        frame.metrics.shadow.staticCasterEntries,
-        frame.metrics.shadow.dynamicCasterEntries,
         frame.metrics.shadow.staticCacheReused,
-        frame.metrics.shadow.staticOnlyCandidateCount,
-        frame.metrics.shadow.reusedStaticOnlyCascadeCount,
-        frame.metrics.shadow.staticOnlyReuseMissStaticCacheRebuiltCount,
-        frame.metrics.shadow.staticOnlyReuseMissDynamicCasterCount,
-        frame.metrics.shadow.staticOnlyReuseMissNoPreviousCount,
-        frame.metrics.shadow.staticOnlyReuseMissRasterStateChangedCount,
-        frame.metrics.shadow.staticOnlyReuseMissAdaptiveRefreshCount,
-        frame.metrics.shadow.staticBatchTemplateCount,
-        frame.metrics.shadow.staticBatchFullEmitCount,
-        frame.metrics.shadow.shadowBatchEntryCount,
-        frame.metrics.shadow.shadowInstanceRemapCount,
-        frame.metrics.shadow.staticLightGridQueryCount,
-        frame.metrics.shadow.staticLightGridFallbackScanCount,
-        frame.metrics.shadow.staticLightGridQueryCellCount,
-        frame.metrics.shadow.staticLightGridCandidateCount,
-        static_cast<unsigned long long>(
-            frame.metrics.shadow.cascadeTextureBytes),
-        frame.metrics.shadow.filterSampleBudget,
-        frame.metrics.shadow.pcssMaxSamplesPerReceiver,
-        frame.metrics.shadow.pcssMaxSamplesPerBlendedReceiver,
-        frame.metrics.shadow.sdsmComputePassCount,
-        frame.metrics.shadow.sdsmReadbackBytes,
-        frame.metrics.shadow.sdsmReductionSourceSamples,
-        frame.metrics.shadow.sdsmHistogramSourceSamples,
-        frame.metrics.shadow.sdsmCpuReductionTimeMs,
-        frame.metrics.shadow.sdsmCpuHistogramTimeMs,
-        frame.metrics.shadow.gpuTimeMs, frame.metrics.shadow.depthGpuTimeMs,
-        frame.metrics.shadow.sdsmGpuTimeMs,
-        static_cast<unsigned long long>(
-            frame.metrics.shadow.gpuTimingSourceFrameIndex ==
-                    std::numeric_limits<uint64_t>::max()
-                ? 0u
-                : frame.metrics.shadow.gpuTimingSourceFrameIndex),
-        static_cast<unsigned long long>(
-            frame.metrics.shadow.depthGpuTimingSourceFrameIndex ==
-                    std::numeric_limits<uint64_t>::max()
-                ? 0u
-                : frame.metrics.shadow.depthGpuTimingSourceFrameIndex),
-        static_cast<unsigned long long>(
-            frame.metrics.shadow.sdsmGpuTimingSourceFrameIndex ==
-                    std::numeric_limits<uint64_t>::max()
-                ? 0u
-                : frame.metrics.shadow.sdsmGpuTimingSourceFrameIndex),
-        shadowSdsmModeName(sdsm.mode).data(),
-        shadowSdsmReductionBackendName(sdsm.requestedReductionBackend).data(),
+        static_cast<unsigned long long>(frame.metrics.shadow.cascadeTextureBytes),
         shadowSdsmReductionBackendName(sdsm.activeReductionBackend).data(),
         shadowSdsmStatusName(sdsm.status).data(),
-        sdsm.fixedFallbackActive ? 1u : 0u,
-        sdsm.reductionFallbackActive ? 1u : 0u,
         static_cast<unsigned long long>(
             sourceFrameIndex == std::numeric_limits<uint64_t>::max()
                 ? 0u
                 : sourceFrameIndex),
-        static_cast<unsigned long long>(sourceLag), sdsm.rawDeviceMin,
-        sdsm.rawDeviceMax, sdsm.rawLinearMin, sdsm.rawLinearMax,
-        sdsm.smoothedLinearMin, sdsm.smoothedLinearMax, sdsm.fixedRangeNear,
-        sdsm.fixedRangeFar, sdsm.histogramTrimmedRangeNear,
-        sdsm.histogramTrimmedRangeFar, sdsm.effectiveRangeNear,
-        sdsm.effectiveRangeFar);
+        static_cast<unsigned long long>(sourceLag), sdsm.fixedRangeNear,
+        sdsm.fixedRangeFar, sdsm.effectiveRangeNear, sdsm.effectiveRangeFar);
 
     const uint32_t cascadeCount =
         std::min(shadowDebugFrameData_.cascadeCount, kMaxShadowCascades);
@@ -5439,21 +3931,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       return pipelineResult;
     }
   }
-  bool shadowMeshletActive = false;
-  if (shadowSettings.enableMeshletDepth &&
-      gpu_.supportsFeature(GPUFeature::Meshlets)) {
-    auto meshletPipelineResult =
-        ensureShadowMeshletPipelineState(targetDepthFormat);
-    if (!meshletPipelineResult.hasError()) {
-      shadowMeshletActive = true;
-    } else if (!loggedShadowMeshletFallbackWarning_) {
-      loggedShadowMeshletFallbackWarning_ = true;
-      NURI_LOG_WARNING(
-          "ShadowRenderer::buildShadowDraws: meshlet shadows disabled: %s",
-          meshletPipelineResult.error().c_str());
-    }
-  }
-
   const std::span<const Renderable> renderables = frame.scene->renderables();
   const AnimationSceneFrameData *animationSceneData =
       resolveAnimationSceneFrameData(frame);
@@ -5513,42 +3990,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         "ShadowRenderer::buildShadowDraws: invalid GPU buffer address");
   }
 
-  BufferHandle shadowMeshletCounterBuffer{};
-  uint64_t shadowMeshletCounterBufferAddress = 0u;
-  uint32_t shadowMeshletCounterFlags = 0u;
-  if (shadowMeshletActive) {
-    auto counterResult = ensureShadowMeshletCounterRingCapacity(
-        sizeof(VisibilityCounterGpuData));
-    if (counterResult.hasError()) {
-      return counterResult;
-    }
-    if (frameSlot < shadowMeshletCounterRing_.size() &&
-        shadowMeshletCounterRing_[frameSlot].buffer &&
-        shadowMeshletCounterRing_[frameSlot].buffer->valid()) {
-      shadowMeshletCounterBuffer =
-          shadowMeshletCounterRing_[frameSlot].buffer->handle();
-      shadowMeshletCounterClear_.clear();
-      shadowMeshletCounterClear_.push_back(VisibilityCounterGpuData{});
-      auto clearCounterResult = gpu_.updateBuffer(
-          shadowMeshletCounterBuffer,
-          std::as_bytes(std::span<const VisibilityCounterGpuData>(
-              shadowMeshletCounterClear_.data(),
-              shadowMeshletCounterClear_.size())),
-          0u);
-      if (clearCounterResult.hasError()) {
-        return clearCounterResult;
-      }
-      if (frameSlot < shadowMeshletCounterRingPublishedFrames_.size()) {
-        shadowMeshletCounterRingPublishedFrames_[frameSlot] = frame.frameIndex;
-      }
-      shadowMeshletCounterBufferAddress =
-          gpu_.getBufferDeviceAddress(shadowMeshletCounterBuffer);
-      if (shadowMeshletCounterBufferAddress != 0u) {
-        shadowMeshletCounterFlags |= kShadowMeshletCounterFlagEnabled;
-      }
-    }
-  }
-
   const uint32_t cascadeCount =
       std::clamp(shadowFrameCpuData_.flagsCascadeCountLightIndex.y, 1u,
                  activeCascadeCount_);
@@ -5556,9 +3997,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
        ++cascadeIndex) {
     cascadePushConstants_[cascadeIndex].clear();
     cascadeDrawItems_[cascadeIndex].clear();
-    cascadeMeshletPushConstants_[cascadeIndex].clear();
-    cascadeMeshDispatchItems_[cascadeIndex].clear();
-    cascadeMeshDispatchDependencyBuffers_[cascadeIndex].clear();
     cascadePushConstants_[cascadeIndex].reserve(meshDrawTemplates_.size());
     cascadeDrawItems_[cascadeIndex].reserve(meshDrawTemplates_.size());
   }
@@ -5710,18 +4148,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                ? shadowDoubleSidedPipelineHandle_
                : shadowPipelineHandle_;
   };
-  const auto selectShadowMeshletPipeline =
-      [&](bool doubleSided, bool alphaMasked) -> MeshletPipelineHandle {
-    if (alphaMasked) {
-      return doubleSided &&
-                     nuri::isValid(shadowMeshletAlphaDoubleSidedPipelineHandle_)
-                 ? shadowMeshletAlphaDoubleSidedPipelineHandle_
-                 : shadowMeshletAlphaPipelineHandle_;
-    }
-    return doubleSided && nuri::isValid(shadowMeshletDoubleSidedPipelineHandle_)
-               ? shadowMeshletDoubleSidedPipelineHandle_
-               : shadowMeshletPipelineHandle_;
-  };
   const auto appendShadowDraw =
       [&](uint32_t cascadeIndex, BufferHandle vertexBuffer,
           BufferHandle indexBuffer, uint64_t indexBufferOffset,
@@ -5730,15 +4156,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           BufferHandle vertexDecodeBuffer, uint64_t vertexDecodeBufferAddress,
           uint32_t vertexDecodeIndex, uint32_t packedVertexFormat,
           uint32_t materialIndex, bool doubleSided, bool alphaMasked,
-          const Model::ModelMeshletGpuView *meshletView, uint32_t submeshIndex,
-          uint32_t meshletMaxCount, uint32_t meshletCount,
-          uint32_t vertexOffset, bool dynamicCaster,
-          bool enableMeshletCascadeCulling, bool buffersAlreadyPreResolved) {
-        const bool useMeshlets =
-            shadowMeshletActive &&
-            canUseShadowMeshlets(meshletView, submeshIndex, meshletMaxCount,
-                                 meshletCount);
-        if (!useMeshlets && !buffersAlreadyPreResolved) {
+          bool dynamicCaster, bool buffersAlreadyPreResolved) {
+        if (!buffersAlreadyPreResolved) {
           appendUniqueBufferHandle(preResolvedDrawBuffers_, vertexBuffer);
           appendUniqueBufferHandle(preResolvedDrawBuffers_, indexBuffer);
         }
@@ -5746,11 +4165,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         const ShadowBatchKey key{
             .cascadeIndex = cascadeIndex,
             .dynamicCaster = dynamicCaster,
-            .useMeshlets = useMeshlets,
             .pipeline = selectShadowPipeline(doubleSided, alphaMasked),
-            .meshletPipeline = useMeshlets ? selectShadowMeshletPipeline(
-                                                 doubleSided, alphaMasked)
-                                           : MeshletPipelineHandle{},
             .vertexBuffer = vertexBuffer,
             .vertexDecodeBuffer = vertexDecodeBuffer,
             .indexBuffer = indexBuffer,
@@ -5763,24 +4178,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
             .vertexDecodeIndex = vertexDecodeIndex,
             .packedVertexFormat = packedVertexFormat,
             .materialIndex = materialIndex,
-            .meshletBuffer = meshletView != nullptr ? meshletView->meshletBuffer
-                                                    : BufferHandle{},
-            .meshletVertexIndexBuffer =
-                meshletView != nullptr ? meshletView->meshletVertexIndexBuffer
-                                       : BufferHandle{},
-            .meshletPrimitiveIndexBuffer =
-                meshletView != nullptr
-                    ? meshletView->meshletPrimitiveIndexBuffer
-                    : BufferHandle{},
-            .meshletLodRangeBuffer = meshletView != nullptr
-                                         ? meshletView->lodRangeBuffer
-                                         : BufferHandle{},
-            .submeshIndex = submeshIndex,
-            .meshletMaxCount = meshletMaxCount,
-            .meshletCount = meshletCount,
-            .vertexOffset = vertexOffset,
-            .enableMeshletCascadeCulling =
-                useMeshlets && enableMeshletCascadeCulling,
         };
         auto it = shadowBatchLookup.find(key);
         if (it == shadowBatchLookup.end()) {
@@ -5803,14 +4200,10 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   const auto makeStaticShadowBatchKey =
       [](const StaticShadowBatchTemplate &batchTemplate,
          uint32_t cascadeIndex) {
-        const Model::ModelMeshletGpuView *meshletView =
-            batchTemplate.meshletView;
         return ShadowBatchKey{
             .cascadeIndex = cascadeIndex,
             .dynamicCaster = false,
-            .useMeshlets = batchTemplate.useMeshlets,
             .pipeline = batchTemplate.pipeline,
-            .meshletPipeline = batchTemplate.meshletPipeline,
             .vertexBuffer = batchTemplate.vertexBuffer,
             .vertexDecodeBuffer = batchTemplate.vertexDecodeBuffer,
             .indexBuffer = batchTemplate.indexBuffer,
@@ -5824,24 +4217,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
             .vertexDecodeIndex = batchTemplate.vertexDecodeIndex,
             .packedVertexFormat = batchTemplate.packedVertexFormat,
             .materialIndex = batchTemplate.materialIndex,
-            .meshletBuffer = meshletView != nullptr ? meshletView->meshletBuffer
-                                                    : BufferHandle{},
-            .meshletVertexIndexBuffer =
-                meshletView != nullptr ? meshletView->meshletVertexIndexBuffer
-                                       : BufferHandle{},
-            .meshletPrimitiveIndexBuffer =
-                meshletView != nullptr
-                    ? meshletView->meshletPrimitiveIndexBuffer
-                    : BufferHandle{},
-            .meshletLodRangeBuffer = meshletView != nullptr
-                                         ? meshletView->lodRangeBuffer
-                                         : BufferHandle{},
-            .submeshIndex = batchTemplate.submeshIndex,
-            .meshletMaxCount = batchTemplate.meshletMaxCount,
-            .meshletCount = batchTemplate.meshletCount,
-            .vertexOffset = batchTemplate.vertexOffset,
-            .enableMeshletCascadeCulling =
-                batchTemplate.enableMeshletCascadeCulling,
         };
       };
 
@@ -5926,9 +4301,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       const shadow_detail::DirectionalShadowFit &renderedFit =
           useGuardedStaticOnlyFit ? guardedStaticOnlyFits[cascadeIndex]
                                   : currentRawShadowFits_[cascadeIndex];
-      writeShadowCascadeFit(renderedFit, cascadeIndex, settings.shadow,
-                            frame.sharedResources.shadowCompareSamplerId,
-                            frame.sharedResources.shadowRawSamplerId,
+      writeShadowCascadeFit(renderedFit, cascadeIndex,
                             shadowDepthTextures_[cascadeIndex], gpu_,
                             shadowFrameCpuData_, shadowDebugFrameData_);
 
@@ -6139,8 +4512,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
            batchIndex < staticShadowBatchLightSpaceBounds_.size();
            ++batchIndex) {
         if (batchIndex >= staticShadowBatchTemplates_.size() ||
-            staticShadowBatchTemplates_[batchIndex].instanceCount >
-                kStaticBatchOverlapEmitMaxInstances) {
+            staticShadowBatchTemplates_[batchIndex].instanceCount <
+                kStaticBatchOverlapEmitMinInstances) {
           continue;
         }
         const StaticCasterLightGridRange range =
@@ -6221,8 +4594,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
            batchIndex < staticShadowBatchLightSpaceBounds_.size();
            ++batchIndex) {
         if (batchIndex >= staticShadowBatchTemplates_.size() ||
-            staticShadowBatchTemplates_[batchIndex].instanceCount >
-                kStaticBatchOverlapEmitMaxInstances) {
+            staticShadowBatchTemplates_[batchIndex].instanceCount <
+                kStaticBatchOverlapEmitMinInstances) {
           continue;
         }
         const StaticCasterLightGridRange range =
@@ -6483,7 +4856,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     }
     const StaticShadowBatchTemplate &batchTemplate =
         staticShadowBatchTemplates_[batchIndex];
-    if (batchTemplate.instanceCount > kStaticBatchOverlapEmitMaxInstances) {
+    if (batchTemplate.instanceCount < kStaticBatchOverlapEmitMinInstances) {
       return;
     }
     const StaticShadowCasterLightSpaceBounds &batchBounds =
@@ -6577,8 +4950,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
     const auto appendCandidate = [&](uint32_t batchIndex) {
       if (batchIndex >= staticShadowBatchTemplates_.size() ||
           batchIndex >= staticBatchLightGridQueryMarks.size() ||
-          staticShadowBatchTemplates_[batchIndex].instanceCount >
-              kStaticBatchOverlapEmitMaxInstances) {
+          staticShadowBatchTemplates_[batchIndex].instanceCount <
+              kStaticBatchOverlapEmitMinInstances) {
         return;
       }
       uint32_t &mark = staticBatchLightGridQueryMarks[batchIndex];
@@ -6887,22 +5260,14 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
           }
         }
 
-        const bool deformedRenderable =
-            !entry.renderable->morphWeights.empty() ||
-            !entry.renderable->skinPalette.empty();
-        const bool enableMeshletCascadeCulling =
-            settings.shadow.enableMeshletCascadeCulling &&
-            !usesAnimatedOverride && !deformedRenderable;
         appendShadowDraw(
             cascadeIndex, resolvedVertexBuffer, entry.indexBuffer,
             entry.indexBufferOffset, entry.indexFormat, lod->indexCount,
             lod->indexOffset, entry.instanceIndex, resolvedVertexBufferAddress,
             entry.vertexDecodeBuffer, resolvedVertexDecodeBufferAddress,
             resolvedVertexDecodeIndex, resolvedPackedVertexFormat,
-            entry.materialIndex, entry.doubleSided, entry.alphaMasked,
-            entry.meshletView, entry.submeshIndex, entry.meshletMaxCount,
-            lod->meshletCount, entry.submesh->vertexOffset, true,
-            enableMeshletCascadeCulling, false);
+            entry.materialIndex, entry.doubleSided, entry.alphaMasked, true,
+            false);
         cascadeIndexCountEstimates_[cascadeIndex] += lod->indexCount;
       }
     }
@@ -6910,28 +5275,11 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   }
 
   uint32_t emittedShadowBatchEntryCount = 0u;
-  uint32_t emittedShadowMeshletDispatchCount = 0u;
-  uint32_t emittedShadowMeshletTaskGroupCount = 0u;
-  uint64_t emittedShadowMeshletCandidateCount = 0u;
   uint32_t emittedShadowInstanceRemapCount = 0u;
   {
     NURI_PROFILER_ZONE("ShadowRenderer.batch_emit",
                        NURI_PROFILER_COLOR_CMD_DRAW);
     std::array<uint32_t, kMaxShadowCascades> cascadeBatchCounts{};
-    std::array<size_t, kMaxShadowCascades> cascadeMeshDispatchCounts{};
-    const MeshletLimits meshletLimits = gpu_.getMeshletLimits();
-    uint32_t maxTaskGroupsX = meshletLimits.maxTaskWorkGroupCountX != 0u
-                                  ? meshletLimits.maxTaskWorkGroupCountX
-                                  : std::numeric_limits<uint32_t>::max();
-    if (meshletLimits.maxTaskWorkGroupTotalCount != 0u) {
-      maxTaskGroupsX =
-          std::min(maxTaskGroupsX, meshletLimits.maxTaskWorkGroupTotalCount);
-    }
-    maxTaskGroupsX = std::max(maxTaskGroupsX, 1u);
-    const uint64_t maxCandidatesPerMeshletDispatch =
-        std::max<uint64_t>(1u, static_cast<uint64_t>(maxTaskGroupsX) *
-                                   kShadowMeshletTaskCandidatesPerGroup);
-
     size_t emittedInstanceRemapCount = 0u;
     for (const ShadowBatchEntry &batch : shadowBatchEntries) {
       if (batch.instanceCount == 0u) {
@@ -6941,16 +5289,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       emittedInstanceRemapCount += batch.instanceCount;
       if (batch.key.cascadeIndex < cascadeBatchCounts.size()) {
         ++cascadeBatchCounts[batch.key.cascadeIndex];
-        if (batch.key.useMeshlets && batch.key.meshletCount != 0u) {
-          const uint64_t candidateCount =
-              static_cast<uint64_t>(batch.key.meshletCount) *
-              batch.instanceCount;
-          const uint64_t dispatchCount =
-              (candidateCount + maxCandidatesPerMeshletDispatch - 1u) /
-              maxCandidatesPerMeshletDispatch;
-          cascadeMeshDispatchCounts[batch.key.cascadeIndex] +=
-              static_cast<size_t>(dispatchCount);
-        }
       }
     }
     for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
@@ -6958,33 +5296,9 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       cascadePushConstants_[cascadeIndex].reserve(
           cascadeBatchCounts[cascadeIndex]);
       cascadeDrawItems_[cascadeIndex].reserve(cascadeBatchCounts[cascadeIndex]);
-      cascadeMeshletPushConstants_[cascadeIndex].reserve(
-          cascadeMeshDispatchCounts[cascadeIndex]);
-      cascadeMeshDispatchItems_[cascadeIndex].reserve(
-          cascadeMeshDispatchCounts[cascadeIndex]);
-      cascadeMeshDispatchDependencyBuffers_[cascadeIndex].reserve(
-          cascadeMeshDispatchCounts[cascadeIndex]);
     }
     instanceRemap_.resize(emittedInstanceRemapCount);
     uint32_t *remapWrite = instanceRemap_.data();
-    const auto appendMeshDispatchDependency =
-        [](ShadowMeshDispatchDependencyBuffers &dependencies,
-           BufferHandle handle) {
-          if (!nuri::isValid(handle)) {
-            return;
-          }
-          for (uint32_t i = 0u; i < dependencies.count; ++i) {
-            if (isSameBufferHandle(dependencies.buffers[i], handle)) {
-              return;
-            }
-          }
-          NURI_ASSERT(dependencies.count < dependencies.buffers.size(),
-                      "Shadow mesh dispatch dependency buffer list overflow");
-          if (dependencies.count < dependencies.buffers.size()) {
-            dependencies.buffers[dependencies.count++] = handle;
-          }
-        };
-
     for (ShadowBatchEntry &batch : shadowBatchEntries) {
       if (batch.instanceCount == 0u) {
         continue;
@@ -7011,129 +5325,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
         NURI_ASSERT(batch.instanceCount == 1u,
                     "Inline shadow batch stores exactly one instance");
         *remapWrite++ = batch.inlineInstanceIndex;
-      }
-
-      if (key.useMeshlets) {
-        const uint64_t meshletBufferAddress =
-            gpu_.getBufferDeviceAddress(key.meshletBuffer);
-        const uint64_t meshletVertexIndexAddress =
-            gpu_.getBufferDeviceAddress(key.meshletVertexIndexBuffer);
-        const uint64_t meshletPrimitiveIndexAddress =
-            gpu_.getBufferDeviceAddress(key.meshletPrimitiveIndexBuffer);
-        const uint64_t meshletLodRangeAddress =
-            gpu_.getBufferDeviceAddress(key.meshletLodRangeBuffer);
-        if (meshletBufferAddress == 0u || meshletVertexIndexAddress == 0u ||
-            meshletPrimitiveIndexAddress == 0u ||
-            meshletLodRangeAddress == 0u) {
-          return Result<bool, std::string>::makeError(
-              "ShadowRenderer::buildShadowDraws: invalid shadow meshlet "
-              "buffer address");
-        }
-
-        const uint64_t candidateCount64 =
-            static_cast<uint64_t>(key.meshletCount) * batch.instanceCount;
-        if (candidateCount64 > std::numeric_limits<uint32_t>::max()) {
-          return Result<bool, std::string>::makeError(
-              "ShadowRenderer::buildShadowDraws: shadow meshlet candidate "
-              "count exceeds UINT32_MAX");
-        }
-        const uint32_t candidateCount = static_cast<uint32_t>(candidateCount64);
-        emittedShadowMeshletCandidateCount += candidateCount;
-        const uint32_t forcedMeshLod =
-            settings.opaque.forcedMeshLod >= 0
-                ? std::min(static_cast<uint32_t>(settings.opaque.forcedMeshLod),
-                           Submesh::kMaxLodCount - 1u)
-                : 0u;
-        uint32_t meshletFlags = (forcedMeshLod & kMeshletFlagForcedLodMask)
-                                << kMeshletFlagForcedLodShift;
-        const bool doubleSidedMeshlet =
-            isSameMeshletPipelineHandle(
-                key.meshletPipeline, shadowMeshletDoubleSidedPipelineHandle_) ||
-            isSameMeshletPipelineHandle(
-                key.meshletPipeline,
-                shadowMeshletAlphaDoubleSidedPipelineHandle_);
-        meshletFlags |= doubleSidedMeshlet ? kMeshletFlagDoubleSided : 0u;
-        meshletFlags |= key.enableMeshletCascadeCulling
-                            ? kMeshletFlagShadowCascadeCulling
-                            : 0u;
-        uint32_t candidateOffset = 0u;
-        while (candidateOffset < candidateCount) {
-          const uint32_t remainingCandidates = candidateCount - candidateOffset;
-          const uint32_t requiredGroups =
-              (remainingCandidates + kShadowMeshletTaskCandidatesPerGroup -
-               1u) /
-              kShadowMeshletTaskCandidatesPerGroup;
-          const uint32_t groupCount = std::min(maxTaskGroupsX, requiredGroups);
-          MeshletPushConstants &pc =
-              cascadeMeshletPushConstants_[key.cascadeIndex].emplace_back();
-          pc = MeshletPushConstants{
-              .frameDataAddress = sceneGpu.frameDataAddress,
-              .vertexBufferAddress = key.vertexBufferAddress,
-              .vertexDecodeBufferAddress = key.vertexDecodeBufferAddress,
-              .instanceMatricesAddress = instanceMatricesAddress,
-              .instanceRemapAddress = instanceRemapAddress,
-              .visibilityCounterAddress = shadowMeshletCounterBufferAddress,
-              .meshletBufferAddress = meshletBufferAddress,
-              .meshletVertexIndexBufferAddress = meshletVertexIndexAddress,
-              .meshletPrimitiveIndexBufferAddress =
-                  meshletPrimitiveIndexAddress,
-              .meshletLodRangeBufferAddress = meshletLodRangeAddress,
-              .instanceCount = batch.instanceCount,
-              .materialIndex = key.materialIndex,
-              .vertexDecodeIndex = key.vertexDecodeIndex,
-              .packedVertexFormat = key.packedVertexFormat,
-              .firstInstance = batch.firstInstance,
-              .candidateOffset = candidateOffset,
-              .meshletFlags = meshletFlags,
-              .vertexOffset = key.vertexOffset,
-              .lodThresholds = glm::vec4(
-                  std::bit_cast<float>(static_cast<uint32_t>(frame.frameIndex)),
-                  std::bit_cast<float>(shadowMeshletCounterFlags),
-                  std::bit_cast<float>(key.cascadeIndex),
-                  std::bit_cast<float>(key.submeshIndex)),
-          };
-
-          MeshDispatchItem &dispatch =
-              cascadeMeshDispatchItems_[key.cascadeIndex].emplace_back();
-          dispatch = MeshDispatchItem{};
-          dispatch.command = MeshDispatchCommandType::Direct;
-          dispatch.pipeline = key.meshletPipeline;
-          dispatch.groupsX = groupCount;
-          dispatch.groupsY = 1u;
-          dispatch.groupsZ = 1u;
-          dispatch.useDepthState = true;
-          dispatch.depthState = {.compareOp = CompareOp::Less,
-                                 .isDepthWriteEnabled = true};
-          dispatch.depthBiasEnable = true;
-          dispatch.depthBiasConstant = settings.shadow.constantBias;
-          dispatch.depthBiasSlope = settings.shadow.slopeBias;
-          dispatch.depthBiasClamp = 0.0f;
-          dispatch.pushConstants = std::span<const std::byte>(
-              reinterpret_cast<const std::byte *>(&pc),
-              sizeof(MeshletPushConstants));
-
-          ShadowMeshDispatchDependencyBuffers &dependencies =
-              cascadeMeshDispatchDependencyBuffers_[key.cascadeIndex]
-                  .emplace_back();
-          dependencies = {};
-          appendMeshDispatchDependency(dependencies, key.vertexBuffer);
-          appendMeshDispatchDependency(dependencies, key.vertexDecodeBuffer);
-          appendMeshDispatchDependency(dependencies, key.meshletBuffer);
-          appendMeshDispatchDependency(dependencies,
-                                       key.meshletVertexIndexBuffer);
-          appendMeshDispatchDependency(dependencies,
-                                       key.meshletPrimitiveIndexBuffer);
-          appendMeshDispatchDependency(dependencies, key.meshletLodRangeBuffer);
-          dispatch.debugLabel = kShadowMeshLabel;
-          dispatch.debugColor = kShadowMeshDebugColor;
-          ++emittedShadowMeshletDispatchCount;
-          emittedShadowMeshletTaskGroupCount += groupCount;
-          candidateOffset = static_cast<uint32_t>(std::min<uint64_t>(
-              candidateCount, static_cast<uint64_t>(candidateOffset) +
-                                  static_cast<uint64_t>(groupCount) *
-                                      kShadowMeshletTaskCandidatesPerGroup));
-        }
-        continue;
       }
 
       PushConstants &pc =
@@ -7179,26 +5370,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       draw.depthBiasClamp = 0.0f;
       draw.pushConstants = std::span<const std::byte>(
           reinterpret_cast<const std::byte *>(&pc), sizeof(PushConstants));
-      draw.debugLabel = kShadowMeshLabel;
-      draw.debugColor = kShadowMeshDebugColor;
-    }
-    for (uint32_t cascadeIndex = 0u; cascadeIndex < cascadeCount;
-         ++cascadeIndex) {
-      auto &dispatches = cascadeMeshDispatchItems_[cascadeIndex];
-      auto &dependencyBuffers =
-          cascadeMeshDispatchDependencyBuffers_[cascadeIndex];
-      NURI_ASSERT(dispatches.size() == dependencyBuffers.size(),
-                  "Shadow mesh dispatch dependency count mismatch");
-      const size_t dispatchCount =
-          std::min(dispatches.size(), dependencyBuffers.size());
-      for (size_t dispatchIndex = 0u; dispatchIndex < dispatchCount;
-           ++dispatchIndex) {
-        const ShadowMeshDispatchDependencyBuffers &dependencies =
-            dependencyBuffers[dispatchIndex];
-        dispatches[dispatchIndex].dependencyBuffers =
-            std::span<const BufferHandle>(dependencies.buffers.data(),
-                                          dependencies.count);
-      }
+      draw.debugLabel = kShadowPassLabel;
+      draw.debugColor = kShadowPassDebugColor;
     }
     emittedShadowInstanceRemapCount = saturateToU32(emittedInstanceRemapCount);
     if (!instanceRemap_.empty()) {
@@ -7233,9 +5406,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   appendUniqueBufferDependency(passBufferDependencies_, instanceRemapBuffer);
   appendAnimatedGeometryDependencies(passBufferDependencies_,
                                      animationSceneData);
-  appendUniqueBufferDependency(
-      passBufferDependencies_, shadowMeshletCounterBuffer,
-      RenderGraphAccessMode::Read | RenderGraphAccessMode::Write);
   if (frame.sharedResources.shadowFrameGpuData.has_value()) {
     appendUniqueBufferDependency(
         passBufferDependencies_,
@@ -7601,9 +5771,7 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       const shadow_detail::DirectionalShadowFit reuseFit =
           makeStaticOnlyReuseFitForCurrentFrame(previousState.renderedFit,
                                                 rawFit);
-      writeShadowCascadeFit(reuseFit, cascadeIndex, settings.shadow,
-                            frame.sharedResources.shadowCompareSamplerId,
-                            frame.sharedResources.shadowRawSamplerId,
+      writeShadowCascadeFit(reuseFit, cascadeIndex,
                             shadowDepthTextures_[cascadeIndex], gpu_,
                             shadowFrameCpuData_, shadowDebugFrameData_);
       currentState = previousState;
@@ -7615,10 +5783,10 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
       staticOnlyCascadeContentSignatures_[cascadeIndex] =
           currentState.rasterSignature;
     }
-    const bool scrollCandidate = !reuseStaticOnlyCascadePass_[cascadeIndex] &&
-                                 staticOnlyCandidate && previousValid &&
-                                 staticCacheReused && !biasChanged &&
-                                 !settings.shadow.enableMeshletDepth;
+    const bool scrollCandidate =
+        kEnableStaticOnlyScrollCopy &&
+        !reuseStaticOnlyCascadePass_[cascadeIndex] && staticOnlyCandidate &&
+        previousValid && staticCacheReused && !biasChanged;
     if (scrollCandidate) {
       ++staticOnlyScrollCandidateCount;
       const StaticOnlyScrollCopyEstimate scrollEstimate =
@@ -7663,10 +5831,8 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                 makeStaticOnlyScrollFitForCurrentFrame(
                     previousState.renderedFit, rawFit, scrollEstimate,
                     settings.shadow.shadowMapSize);
-            writeShadowCascadeFit(scrollFit, cascadeIndex, settings.shadow,
-                                  frame.sharedResources.shadowCompareSamplerId,
-                                  frame.sharedResources.shadowRawSamplerId,
-                                  destinationTexture, gpu_, shadowFrameCpuData_,
+            writeShadowCascadeFit(scrollFit, cascadeIndex, destinationTexture,
+                                  gpu_, shadowFrameCpuData_,
                                   shadowDebugFrameData_);
 
             shadowDepthTextures_[cascadeIndex] = destinationTexture;
@@ -7834,12 +6000,6 @@ ShadowRenderer::buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
   frame.metrics.shadow.staticBatchTemplateCount =
       saturateToU32(staticShadowBatchTemplates_.size());
   frame.metrics.shadow.shadowBatchEntryCount = emittedShadowBatchEntryCount;
-  frame.metrics.shadow.shadowMeshletDispatchCount =
-      emittedShadowMeshletDispatchCount;
-  frame.metrics.shadow.shadowMeshletTaskGroupCount =
-      emittedShadowMeshletTaskGroupCount;
-  frame.metrics.visibility.shadowMeshletCandidates =
-      saturateToU32(emittedShadowMeshletCandidateCount);
   frame.metrics.shadow.shadowInstanceRemapCount =
       emittedShadowInstanceRemapCount;
   frame.metrics.shadow.staticBatchFullEmitCount = totalStaticBatchFullEmitCount;
@@ -7911,21 +6071,11 @@ uint64_t ShadowRenderer::shadowPipelineSignature() const noexcept {
     RenderPipelineHandle shadowDoubleSidedPipeline{};
     RenderPipelineHandle shadowAlphaPipeline{};
     RenderPipelineHandle shadowAlphaDoubleSidedPipeline{};
-    MeshletPipelineHandle shadowMeshletPipeline{};
-    MeshletPipelineHandle shadowMeshletDoubleSidedPipeline{};
-    MeshletPipelineHandle shadowMeshletAlphaPipeline{};
-    MeshletPipelineHandle shadowMeshletAlphaDoubleSidedPipeline{};
   } signatureData{
       .shadowPipeline = shadowPipelineHandle_,
       .shadowDoubleSidedPipeline = shadowDoubleSidedPipelineHandle_,
       .shadowAlphaPipeline = shadowAlphaPipelineHandle_,
       .shadowAlphaDoubleSidedPipeline = shadowAlphaDoubleSidedPipelineHandle_,
-      .shadowMeshletPipeline = shadowMeshletPipelineHandle_,
-      .shadowMeshletDoubleSidedPipeline =
-          shadowMeshletDoubleSidedPipelineHandle_,
-      .shadowMeshletAlphaPipeline = shadowMeshletAlphaPipelineHandle_,
-      .shadowMeshletAlphaDoubleSidedPipeline =
-          shadowMeshletAlphaDoubleSidedPipelineHandle_,
   };
   return hashBytes(
       std::as_bytes(std::span<const SignatureData>(&signatureData, 1u)));
@@ -8031,13 +6181,6 @@ void ShadowRenderer::destroyBuffers() {
     slot.buffer.reset();
     slot.capacityBytes = 0u;
   }
-  for (DynamicBufferSlot &slot : shadowMeshletCounterRing_) {
-    if (slot.buffer && slot.buffer->valid()) {
-      gpu_.destroyBuffer(slot.buffer->handle());
-    }
-    slot.buffer.reset();
-    slot.capacityBytes = 0u;
-  }
   for (DynamicBufferSlot &slot : sdsmReduceResultRing_) {
     if (slot.buffer && slot.buffer->valid()) {
       gpu_.destroyBuffer(slot.buffer->handle());
@@ -8048,13 +6191,10 @@ void ShadowRenderer::destroyBuffers() {
   instanceMatricesRing_.clear();
   instanceRemapRing_.clear();
   shadowFrameRing_.clear();
-  shadowMeshletCounterRing_.clear();
   sdsmReduceResultRing_.clear();
   instanceDataRingUploadVersions_.clear();
   instanceRemapUploadSignatures_.clear();
   shadowFrameUploadSignatures_.clear();
-  shadowMeshletCounterRingPublishedFrames_.clear();
-  shadowMeshletCounterClear_.clear();
   sdsmReduceResultRingPublishedFrames_.clear();
 }
 
@@ -8075,22 +6215,6 @@ void ShadowRenderer::destroyShaders() {
     gpu_.destroyShaderModule(shadowOpaqueVertexShader_);
     shadowOpaqueVertexShader_ = {};
   }
-  if (nuri::isValid(shadowMeshletTaskShader_)) {
-    gpu_.destroyShaderModule(shadowMeshletTaskShader_);
-    shadowMeshletTaskShader_ = {};
-  }
-  if (nuri::isValid(shadowMeshletDepthMeshShader_)) {
-    gpu_.destroyShaderModule(shadowMeshletDepthMeshShader_);
-    shadowMeshletDepthMeshShader_ = {};
-  }
-  if (nuri::isValid(shadowMeshletMeshShader_)) {
-    gpu_.destroyShaderModule(shadowMeshletMeshShader_);
-    shadowMeshletMeshShader_ = {};
-  }
-  if (nuri::isValid(shadowMeshletDepthAlphaFragmentShader_)) {
-    gpu_.destroyShaderModule(shadowMeshletDepthAlphaFragmentShader_);
-    shadowMeshletDepthAlphaFragmentShader_ = {};
-  }
   if (nuri::isValid(shadowDepthClearVertexShader_)) {
     gpu_.destroyShaderModule(shadowDepthClearVertexShader_);
     shadowDepthClearVertexShader_ = {};
@@ -8107,20 +6231,13 @@ void ShadowRenderer::destroyShaders() {
     gpu_.destroyShaderModule(sdsmReduceComputeShader_);
     sdsmReduceComputeShader_ = {};
   }
-  if (nuri::isValid(sdsmHistogramReduceComputeShader_)) {
-    gpu_.destroyShaderModule(sdsmHistogramReduceComputeShader_);
-    sdsmHistogramReduceComputeShader_ = {};
-  }
   shadowShader_.reset();
   shadowOpaqueShader_.reset();
-  shadowMeshletShader_.reset();
   depthShader_.reset();
   depthClearShader_.reset();
   depthAlphaShader_.reset();
   sdsmReduceShader_.reset();
-  sdsmHistogramReduceShader_.reset();
   initialized_ = false;
-  shadowMeshletPipelineUnsupported_ = false;
 }
 
 void ShadowRenderer::destroyShadowDepthPipelineState() {
@@ -8144,28 +6261,7 @@ void ShadowRenderer::destroyShadowDepthPipelineState() {
     gpu_.destroyRenderPipeline(shadowPipelineHandle_);
     shadowPipelineHandle_ = {};
   }
-  destroyShadowMeshletPipelineState();
   shadowDepthPipelineFormat_ = Format::Count;
-}
-
-void ShadowRenderer::destroyShadowMeshletPipelineState() {
-  if (nuri::isValid(shadowMeshletAlphaDoubleSidedPipelineHandle_)) {
-    gpu_.destroyMeshletPipeline(shadowMeshletAlphaDoubleSidedPipelineHandle_);
-    shadowMeshletAlphaDoubleSidedPipelineHandle_ = {};
-  }
-  if (nuri::isValid(shadowMeshletAlphaPipelineHandle_)) {
-    gpu_.destroyMeshletPipeline(shadowMeshletAlphaPipelineHandle_);
-    shadowMeshletAlphaPipelineHandle_ = {};
-  }
-  if (nuri::isValid(shadowMeshletDoubleSidedPipelineHandle_)) {
-    gpu_.destroyMeshletPipeline(shadowMeshletDoubleSidedPipelineHandle_);
-    shadowMeshletDoubleSidedPipelineHandle_ = {};
-  }
-  if (nuri::isValid(shadowMeshletPipelineHandle_)) {
-    gpu_.destroyMeshletPipeline(shadowMeshletPipelineHandle_);
-    shadowMeshletPipelineHandle_ = {};
-  }
-  shadowMeshletDepthPipelineFormat_ = Format::Count;
 }
 
 void ShadowRenderer::destroyPipelineState() {
@@ -8177,10 +6273,6 @@ void ShadowRenderer::destroyPipelineState() {
   if (nuri::isValid(sdsmReducePipelineHandle_)) {
     gpu_.destroyComputePipeline(sdsmReducePipelineHandle_);
     sdsmReducePipelineHandle_ = {};
-  }
-  if (nuri::isValid(sdsmHistogramReducePipelineHandle_)) {
-    gpu_.destroyComputePipeline(sdsmHistogramReducePipelineHandle_);
-    sdsmHistogramReducePipelineHandle_ = {};
   }
   initialized_ = false;
 }
@@ -8229,9 +6321,6 @@ void ShadowRenderer::resetFrameBuildState() {
          staticOnlyScrollDirtyDrawItems_[cascadeIndex]) {
       draws.clear();
     }
-    cascadeMeshletPushConstants_[cascadeIndex].clear();
-    cascadeMeshDispatchItems_[cascadeIndex].clear();
-    cascadeMeshDispatchDependencyBuffers_[cascadeIndex].clear();
   }
   passBufferDependencies_.clear();
   passDependencyBuffers_.clear();
@@ -8278,21 +6367,8 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
   RenderSettings::ShadowSettings settings = frameSettings.shadow;
   sanitizeShadowSettings(settings);
   if (settings.enabled) {
-    frame.metrics.shadow.filterSampleBudget = shadowFilterSampleBudget(
-        settings.filterMode, settings.pcfSampleCount,
-        settings.pcssBlockerSampleCount, settings.pcssFilterSampleCount);
-    if (settings.filterMode == ShadowFilterMode::PCSS) {
-      frame.metrics.shadow.pcssBlockerSampleBudget =
-          settings.pcssBlockerSampleCount;
-      frame.metrics.shadow.pcssFilterSampleBudget =
-          settings.pcssFilterSampleCount;
-      frame.metrics.shadow.pcssMaxSamplesPerReceiver =
-          settings.pcssBlockerSampleCount + settings.pcssFilterSampleCount;
-      frame.metrics.shadow.pcssMaxSamplesPerBlendedReceiver =
-          settings.cascadeCount > 1u && settings.cascadeBlendFraction > 0.0f
-              ? frame.metrics.shadow.pcssMaxSamplesPerReceiver * 2u
-              : frame.metrics.shadow.pcssMaxSamplesPerReceiver;
-    }
+    frame.metrics.shadow.filterSampleBudget =
+        shadowFilterSampleBudget(settings.pcfSampleCount);
     const GpuTimingReport timingReport =
         gpu_.getLatestCompletedGpuTimingReport();
     if (hasGpuTimingScope(timingReport, GpuTimingScope::Shadow)) {
@@ -8357,28 +6433,18 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
       .bufferAddress = shadowFrameAddress,
   };
 
-  const ShadowSdsmMode publishSdsmMode =
-      sanitizeShadowSdsmMode(settings.sdsmMode);
-  if (settings.enabled &&
-      (publishSdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
-       publishSdsmMode == ShadowSdsmMode::Histogram) &&
-      sanitizeShadowSdsmReductionBackend(settings.sdsmReductionBackend) !=
-          ShadowSdsmReductionBackend::Cpu) {
-    auto sdsmResourceResult = publishSdsmMode == ShadowSdsmMode::Histogram
-                                  ? ensureSdsmHistogramReduceResources()
-                                  : ensureSdsmReduceResources();
+  if (settings.enabled) {
+    auto sdsmResourceResult = ensureSdsmReduceResources();
     if (!sdsmResourceResult.hasError()) {
       auto sdsmRingCountResult = ensureSdsmReduceResultRingCount(std::max(
           kMinSdsmReduceResultRingCount, gpu_.getSwapchainImageCount() + 1u));
       if (!sdsmRingCountResult.hasError()) {
-        const size_t resultBytes = publishSdsmMode == ShadowSdsmMode::Histogram
-                                       ? sizeof(SdsmGpuHistogramResult)
-                                       : sizeof(SdsmGpuMinMaxResult);
+        constexpr size_t resultBytes = sizeof(SdsmGpuMinMaxResult);
         auto sdsmRingResult = ensureSdsmReduceResultRingCapacity(resultBytes);
         if (!sdsmRingResult.hasError() && !sdsmReduceResultRing_.empty()) {
           const uint32_t sdsmFrameSlot = static_cast<uint32_t>(
               frame.frameIndex % sdsmReduceResultRing_.size());
-          std::array<std::byte, sizeof(SdsmGpuHistogramResult)> clearedResult{};
+          std::array<std::byte, sizeof(SdsmGpuMinMaxResult)> clearedResult{};
           auto clearResult = gpu_.updateBuffer(
               sdsmReduceResultRing_[sdsmFrameSlot].buffer->handle(),
               std::span<const std::byte>(clearedResult.data(), resultBytes),
@@ -8399,22 +6465,11 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
                       .bufferAddress = sdsmBufferAddress,
                   };
               frame.sharedResources.shadowSdsmGpuReducePipeline =
-                  publishSdsmMode == ShadowSdsmMode::Histogram
-                      ? sdsmHistogramReducePipelineHandle_
-                      : sdsmReducePipelineHandle_;
+                  sdsmReducePipelineHandle_;
             }
           }
         }
       }
-    }
-    if (!frame.sharedResources.shadowSdsmGpuReduceTarget.has_value() &&
-        sanitizeShadowSdsmReductionBackend(settings.sdsmReductionBackend) ==
-            ShadowSdsmReductionBackend::Gpu &&
-        !sdsmState_.loggedGpuReductionUnavailableWarning_) {
-      NURI_LOG_WARNING(
-          "ShadowRenderer::publishFrameData: requested GPU SDSM reduction is "
-          "unavailable; using CPU fallback");
-      sdsmState_.loggedGpuReductionUnavailableWarning_ = true;
     }
   }
 
@@ -8437,11 +6492,12 @@ ShadowRenderer::publishFrameData(RenderFrameContext &frame) {
     resetCascadeStabilizationHistory();
     resetSdsmState();
     shadowFrameCpuData_ = {};
+    shadowFrameCpuData_.sharedSamplerMapSize =
+        glm::uvec4(compareSamplerId, rawSamplerId, 0u, 0u);
     for (uint32_t cascadeIndex = 0u; cascadeIndex < activeCascadeCount_;
          ++cascadeIndex) {
-      shadowFrameCpuData_.cascades[cascadeIndex].textureSampler = glm::uvec4(
-          gpu_.getTextureBindlessIndex(shadowDepthTextures_[cascadeIndex]),
-          compareSamplerId, rawSamplerId, 0u);
+      shadowFrameCpuData_.cascadeTextureIds[cascadeIndex] =
+          gpu_.getTextureBindlessIndex(shadowDepthTextures_[cascadeIndex]);
     }
     const std::span<const std::byte> shadowFrameBytes = std::as_bytes(
         std::span<const ShadowFrameGpuData>(&shadowFrameCpuData_, 1u));
@@ -8464,12 +6520,6 @@ Result<bool, std::string>
 ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   NURI_PROFILER_FUNCTION_COLOR(NURI_PROFILER_COLOR_CMD_COPY);
   resetFrameBuildState();
-  frame.metrics.visibility.shadowMeshletCandidates = 0u;
-  frame.metrics.visibility.shadowMeshletReadbackAvailable = 0u;
-  frame.metrics.visibility.shadowMeshletReadbackSourceFrame = 0u;
-  frame.metrics.visibility.shadowMeshletReadbackStaleFrameCount = 0u;
-  frame.metrics.visibility.shadowMeshletReadbackErrorCount = 0u;
-  frame.metrics.visibility.shadowMeshletRejectedBounds = 0u;
   frame.metrics.visibility.shadowCpuCandidates = 0u;
   frame.metrics.visibility.shadowCpuRejected = 0u;
 
@@ -8492,7 +6542,6 @@ ShadowRenderer::prepareShadowGraphPasses(RenderFrameContext &frame) {
   if (ringCountResult.hasError()) {
     return ringCountResult;
   }
-  readLatestShadowMeshletCounterReadback(frame);
   auto shadowFrameResult =
       ensureShadowFrameRingCapacity(sizeof(ShadowFrameGpuData));
   if (shadowFrameResult.hasError()) {
@@ -8838,10 +6887,6 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
     const std::span<const DrawItem> passDraws =
         std::span<const DrawItem>(cascadeDrawItems_[cascadeIndex].data(),
                                   cascadeDrawItems_[cascadeIndex].size());
-    const std::span<const MeshDispatchItem> passMeshDispatches =
-        std::span<const MeshDispatchItem>(
-            cascadeMeshDispatchItems_[cascadeIndex].data(),
-            cascadeMeshDispatchItems_[cascadeIndex].size());
     const std::span<const BufferHandle> passPreResolvedDrawBuffers =
         std::span<const BufferHandle>(preResolvedDrawBuffers_.data(),
                                       preResolvedDrawBuffers_.size());
@@ -9027,7 +7072,7 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
           .preDispatches = {},
           .dependencyBuffers = passDependencyBuffers,
           .draws = passDraws,
-          .meshDispatches = passMeshDispatches,
+          .meshDispatches = {},
           .dependencyBufferBindings = preparedDependencyBufferBindings,
           .dependencyTextureBindings = preparedDependencyTextureBindings,
           .preDispatchDependencyBindings = {},
@@ -9066,7 +7111,7 @@ ShadowRenderer::appendShadowDepthPasses(RenderFrameContext &frame,
           .dependencyTextures = passDependencyTextures,
           .dependencyTextureAccessModes = passDependencyTextureAccessModes,
           .draws = passDraws,
-          .meshDispatches = passMeshDispatches,
+          .meshDispatches = {},
           .drawBuffersPreResolved = true,
           .preResolvedDrawBuffers = passPreResolvedDrawBuffers,
           .gpuTimingScope = GpuTimingScope::ShadowDepth,

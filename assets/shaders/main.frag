@@ -65,19 +65,6 @@ void main() {
     out_FragColor = shadowDebugScalar(direct.shadowMapDepthDebug);
     return;
   }
-  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSBlockers)) {
-    out_FragColor = shadowDebugScalar(direct.shadowPcssBlockerRatioDebug);
-    return;
-  }
-  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSAverageBlockerDepth)) {
-    out_FragColor =
-        shadowDebugScalar(direct.shadowPcssAverageBlockerDepthDebug);
-    return;
-  }
-  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSFilterRadius)) {
-    out_FragColor = shadowDebugScalar(direct.shadowPcssFilterRadiusDebug);
-    return;
-  }
   if (shadowDebugFlag(kShadowFrameFlagVisualizeShadowFactor)) {
     out_FragColor = shadowDebugScalar(direct.shadowFactorDebug);
     return;

@@ -1,8 +1,8 @@
 #define NURI_OPAQUE_MESHLET_BATCHED 1
+#include "meshlet_common.sp"
 #include "BRDF.sp"
 #include "material_inputs.sp"
 #include "material_lighting.sp"
-#include "meshlet_common.sp"
 
 layout(location = 0) in PerVertex vtx;
 layout(location = 10) flat in uint meshletDebugId;
@@ -94,19 +94,6 @@ void main() {
   }
   if (shadowDebugFlag(kShadowFrameFlagVisualizeShadowMapDepth)) {
     out_FragColor = shadowDebugScalar(direct.shadowMapDepthDebug);
-    return;
-  }
-  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSBlockers)) {
-    out_FragColor = shadowDebugScalar(direct.shadowPcssBlockerRatioDebug);
-    return;
-  }
-  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSAverageBlockerDepth)) {
-    out_FragColor =
-        shadowDebugScalar(direct.shadowPcssAverageBlockerDepthDebug);
-    return;
-  }
-  if (shadowDebugFlag(kShadowFrameFlagVisualizePCSSFilterRadius)) {
-    out_FragColor = shadowDebugScalar(direct.shadowPcssFilterRadiusDebug);
     return;
   }
   if (shadowDebugFlag(kShadowFrameFlagVisualizeShadowFactor)) {

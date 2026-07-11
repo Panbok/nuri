@@ -162,26 +162,6 @@ private:
                 "OpaqueRenderer::ShadowSdsmReducePushConstants layout "
                 "changed");
 
-  struct alignas(16) ShadowSdsmHistogramReducePushConstants {
-    uint64_t resultBufferAddress = 0u;
-    uint64_t resultBufferAddressPadding = 0u;
-    glm::uvec4 sourceParams{0u};
-    glm::uvec4 histogramParams{0u};
-    glm::vec4 cameraParams{0.0f};
-    glm::vec4 trimParams{0.0f};
-  };
-  static_assert(sizeof(ShadowSdsmHistogramReducePushConstants) == 80u,
-                "OpaqueRenderer::ShadowSdsmHistogramReducePushConstants "
-                "layout changed");
-  static_assert(offsetof(ShadowSdsmHistogramReducePushConstants,
-                         sourceParams) == 16u);
-  static_assert(offsetof(ShadowSdsmHistogramReducePushConstants,
-                         histogramParams) == 32u);
-  static_assert(offsetof(ShadowSdsmHistogramReducePushConstants,
-                         cameraParams) == 48u);
-  static_assert(offsetof(ShadowSdsmHistogramReducePushConstants, trimParams) ==
-                64u);
-
   // These templates hold non-owning borrowed pointers. Callers must ensure the
   // referenced scene/model data outlives the cached template usage.
   struct RenderableTemplate {
@@ -534,7 +514,7 @@ private:
   buildOpaquePasses(RenderFrameContext &frame,
                     std::pmr::vector<PreparedGraphPass> &out);
   Result<bool, std::string>
-  ensureDepthPyramidTextures(const RenderSettings &settings);
+  ensureDepthPyramidTextures();
   [[nodiscard]] bool requiresDepthPyramid(const RenderSettings &settings) const;
   [[nodiscard]] bool
   shouldBuildTransmissionVisibilityDepth(const RenderFrameContext &frame,
@@ -962,8 +942,6 @@ private:
   std::pmr::vector<TextureHandle> depthPyramidDependencyTextures_;
   std::pmr::vector<ShadowSdsmReducePushConstants>
       shadowSdsmReducePushConstants_;
-  std::pmr::vector<ShadowSdsmHistogramReducePushConstants>
-      shadowSdsmHistogramReducePushConstants_;
   std::pmr::vector<ComputeDispatchItem> shadowSdsmReduceDispatches_;
   std::pmr::vector<BufferHandle> shadowSdsmReduceDependencyBuffers_;
   std::pmr::vector<TextureHandle> shadowSdsmReduceDependencyTextures_;

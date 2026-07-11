@@ -99,31 +99,6 @@ private:
   static_assert(offsetof(PushConstants, instanceCount) == 80u);
   static_assert(offsetof(PushConstants, shadowCascadeIndex) == 120u);
 
-  struct MeshletPushConstants {
-    uint64_t frameDataAddress = 0;
-    uint64_t vertexBufferAddress = 0;
-    uint64_t vertexDecodeBufferAddress = 0;
-    uint64_t instanceMatricesAddress = 0;
-    uint64_t instanceRemapAddress = 0;
-    uint64_t visibilityCounterAddress = 0;
-    uint64_t meshletBufferAddress = 0;
-    uint64_t meshletVertexIndexBufferAddress = 0;
-    uint64_t meshletPrimitiveIndexBufferAddress = 0;
-    uint64_t meshletLodRangeBufferAddress = 0;
-    uint32_t instanceCount = 0;
-    uint32_t materialIndex = 0;
-    uint32_t vertexDecodeIndex = 0;
-    uint32_t packedVertexFormat = 0;
-    uint32_t firstInstance = 0;
-    uint32_t candidateOffset = 0;
-    uint32_t meshletFlags = 0;
-    uint32_t vertexOffset = 0;
-    glm::vec4 lodThresholds{0.0f};
-  };
-  static_assert(sizeof(MeshletPushConstants) == 128,
-                "ShadowRenderer::MeshletPushConstants must match shader "
-                "layout");
-
   struct MeshDrawTemplate {
     const Renderable *renderable = nullptr;
     const Submesh *submesh = nullptr;
@@ -140,8 +115,6 @@ private:
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = 0;
-    const Model::ModelMeshletGpuView *meshletView = nullptr;
-    uint32_t meshletMaxCount = 0;
     bool doubleSided = false;
     bool alphaMasked = false;
     bool dynamicCaster = false;
@@ -166,23 +139,14 @@ private:
     uint64_t rasterSignature = 0;
     uint32_t indexCount = 0;
     uint32_t firstIndex = 0;
-    const Model::ModelMeshletGpuView *meshletView = nullptr;
-    uint32_t submeshIndex = 0;
-    uint32_t meshletMaxCount = 0;
-    uint32_t meshletCount = 0;
-    uint32_t vertexOffset = 0;
-    bool enableMeshletCascadeCulling = false;
     bool doubleSided = false;
     bool alphaMasked = false;
-    bool useMeshlets = false;
     bool hasCasterCullingBounds = false;
     std::array<glm::vec3, 8> casterWorldCorners{};
   };
 
   struct StaticShadowBatchTemplate {
-    bool useMeshlets = false;
     RenderPipelineHandle pipeline{};
-    MeshletPipelineHandle meshletPipeline{};
     BufferHandle vertexBuffer{};
     BufferHandle vertexDecodeBuffer{};
     BufferHandle indexBuffer{};
@@ -195,12 +159,6 @@ private:
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = 0;
-    const Model::ModelMeshletGpuView *meshletView = nullptr;
-    uint32_t submeshIndex = 0;
-    uint32_t meshletMaxCount = 0;
-    uint32_t meshletCount = 0;
-    uint32_t vertexOffset = 0;
-    bool enableMeshletCascadeCulling = false;
     uint32_t firstInstanceIndex = 0;
     uint32_t instanceCount = 0;
     uint64_t rasterSignature = 0;
@@ -208,9 +166,7 @@ private:
   };
 
   struct StaticShadowBatchKey {
-    bool useMeshlets = false;
     RenderPipelineHandle pipeline{};
-    MeshletPipelineHandle meshletPipeline{};
     BufferHandle vertexBuffer{};
     BufferHandle vertexDecodeBuffer{};
     BufferHandle indexBuffer{};
@@ -223,23 +179,9 @@ private:
     uint32_t vertexDecodeIndex = 0;
     uint32_t packedVertexFormat = 0;
     uint32_t materialIndex = 0;
-    BufferHandle meshletBuffer{};
-    BufferHandle meshletVertexIndexBuffer{};
-    BufferHandle meshletPrimitiveIndexBuffer{};
-    BufferHandle meshletLodRangeBuffer{};
-    uint32_t submeshIndex = 0;
-    uint32_t meshletMaxCount = 0;
-    uint32_t meshletCount = 0;
-    uint32_t vertexOffset = 0;
-    bool enableMeshletCascadeCulling = false;
-
     bool operator==(const StaticShadowBatchKey &other) const noexcept {
-      return useMeshlets == other.useMeshlets &&
-             enableMeshletCascadeCulling == other.enableMeshletCascadeCulling &&
-             pipeline.index == other.pipeline.index &&
+      return pipeline.index == other.pipeline.index &&
              pipeline.generation == other.pipeline.generation &&
-             meshletPipeline.index == other.meshletPipeline.index &&
-             meshletPipeline.generation == other.meshletPipeline.generation &&
              vertexBuffer.index == other.vertexBuffer.index &&
              vertexBuffer.generation == other.vertexBuffer.generation &&
              vertexDecodeBuffer.index == other.vertexDecodeBuffer.index &&
@@ -254,24 +196,7 @@ private:
              vertexDecodeBufferAddress == other.vertexDecodeBufferAddress &&
              vertexDecodeIndex == other.vertexDecodeIndex &&
              packedVertexFormat == other.packedVertexFormat &&
-             materialIndex == other.materialIndex &&
-             meshletBuffer.index == other.meshletBuffer.index &&
-             meshletBuffer.generation == other.meshletBuffer.generation &&
-             meshletVertexIndexBuffer.index ==
-                 other.meshletVertexIndexBuffer.index &&
-             meshletVertexIndexBuffer.generation ==
-                 other.meshletVertexIndexBuffer.generation &&
-             meshletPrimitiveIndexBuffer.index ==
-                 other.meshletPrimitiveIndexBuffer.index &&
-             meshletPrimitiveIndexBuffer.generation ==
-                 other.meshletPrimitiveIndexBuffer.generation &&
-             meshletLodRangeBuffer.index == other.meshletLodRangeBuffer.index &&
-             meshletLodRangeBuffer.generation ==
-                 other.meshletLodRangeBuffer.generation &&
-             submeshIndex == other.submeshIndex &&
-             meshletMaxCount == other.meshletMaxCount &&
-             meshletCount == other.meshletCount &&
-             vertexOffset == other.vertexOffset;
+             materialIndex == other.materialIndex;
     }
   };
 
@@ -289,11 +214,7 @@ private:
       };
 
       uint64_t hash = kOffsetBasis;
-      hash = combine(hash, key.useMeshlets ? 1ull : 0ull);
-      hash = combine(hash, key.enableMeshletCascadeCulling ? 1ull : 0ull);
       hash = combine(hash, fold(key.pipeline.index, key.pipeline.generation));
-      hash = combine(hash, fold(key.meshletPipeline.index,
-                                key.meshletPipeline.generation));
       hash = combine(hash,
                      fold(key.vertexBuffer.index, key.vertexBuffer.generation));
       hash = combine(hash, fold(key.vertexDecodeBuffer.index,
@@ -310,18 +231,6 @@ private:
           combine(hash, (static_cast<uint64_t>(key.vertexDecodeIndex) << 32u) |
                             key.packedVertexFormat);
       hash = combine(hash, key.materialIndex);
-      hash = combine(
-          hash, fold(key.meshletBuffer.index, key.meshletBuffer.generation));
-      hash = combine(hash, fold(key.meshletVertexIndexBuffer.index,
-                                key.meshletVertexIndexBuffer.generation));
-      hash = combine(hash, fold(key.meshletPrimitiveIndexBuffer.index,
-                                key.meshletPrimitiveIndexBuffer.generation));
-      hash = combine(hash, fold(key.meshletLodRangeBuffer.index,
-                                key.meshletLodRangeBuffer.generation));
-      hash = combine(hash, (static_cast<uint64_t>(key.submeshIndex) << 32u) |
-                               key.meshletMaxCount);
-      hash = combine(hash, (static_cast<uint64_t>(key.meshletCount) << 32u) |
-                               key.vertexOffset);
       return static_cast<size_t>(hash);
     }
   };
@@ -381,17 +290,6 @@ private:
   static_assert(sizeof(SdsmGpuMinMaxResult) == 16u,
                 "ShadowRenderer::SdsmGpuMinMaxResult layout changed");
 
-  struct alignas(16) SdsmGpuHistogramResult {
-    glm::vec4 rawDeviceMinMaxLinearMinMax{1.0f, 0.0f, 0.0f, 0.0f};
-    glm::vec4 histogramRangeWeightClear{0.0f};
-    glm::uvec4 metadata{0u};
-    glm::vec4 splitDepths0{0.0f};
-    glm::vec4 splitDepths1{0.0f};
-    std::array<float, kMaxShadowSdsmHistogramBucketCount> bucketWeights{};
-  };
-  static_assert(sizeof(SdsmGpuHistogramResult) == 592u,
-                "ShadowRenderer::SdsmGpuHistogramResult layout changed");
-
   struct StaticOnlyCascadeReuseState {
     shadow_detail::DirectionalShadowFit renderedFit{};
     shadow_detail::DirectionalShadowFit rawFit{};
@@ -411,11 +309,6 @@ private:
     uint32_t dirtyRectCount = 0u;
   };
 
-  struct ShadowMeshDispatchDependencyBuffers {
-    std::array<BufferHandle, 6> buffers{};
-    uint32_t count = 0u;
-  };
-
   struct CascadeStabilizationHistory {
     bool valid = false;
     LightId lightId = kInvalidLightId;
@@ -427,14 +320,10 @@ private:
   struct SdsmState {
     bool hasValidSdsmRange_ = false;
     bool hasValidSdsmFarCascadeTexelSize_ = false;
-    bool hasValidSdsmHistogramSplits_ = false;
     uint32_t gpuReductionConsecutiveMissingResultFrames_ = 0u;
     float sdsmSmoothedMinDepth_ = 0.0f;
     float sdsmSmoothedMaxDepth_ = 0.0f;
     float sdsmFarCascadeTexelWorldSize_ = 0.0f;
-    uint32_t sdsmHistogramCascadeCount_ = 0u;
-    std::array<float, kMaxShadowCascades + 1u>
-        sdsmSmoothedHistogramSplitDepths_{};
     uint64_t lastValidSdsmSourceFrameIndex_ =
         std::numeric_limits<uint64_t>::max();
     ShadowSdsmStatus lastLoggedSdsmWarningStatus_ = ShadowSdsmStatus::Disabled;
@@ -468,18 +357,12 @@ private:
 
   Result<bool, std::string> ensureInitialized();
   Result<bool, std::string> createShaders();
-  Result<bool, std::string> createShadowMeshletShaders();
   Result<bool, std::string> createPreviewShaders();
   Result<bool, std::string> createSdsmReduceShaders();
-  Result<bool, std::string> createSdsmHistogramReduceShaders();
   Result<bool, std::string> createPipelines(Format depthFormat);
-  Result<bool, std::string>
-  ensureShadowMeshletPipelineState(Format depthFormat);
   Result<bool, std::string> createPreviewPipeline();
   Result<bool, std::string> createSdsmReducePipeline();
-  Result<bool, std::string> createSdsmHistogramReducePipeline();
   Result<bool, std::string> ensureSdsmReduceResources();
-  Result<bool, std::string> ensureSdsmHistogramReduceResources();
   Result<bool, std::string>
   ensureShadowResources(const RenderSettings::ShadowSettings &settings);
   Result<bool, std::string> ensureRingBufferCount(uint32_t requiredCount);
@@ -488,8 +371,6 @@ private:
   Result<bool, std::string>
   ensureInstanceRemapRingCapacity(size_t requiredBytes);
   Result<bool, std::string> ensureShadowFrameRingCapacity(size_t requiredBytes);
-  Result<bool, std::string>
-  ensureShadowMeshletCounterRingCapacity(size_t requiredBytes);
   Result<bool, std::string>
   ensureSdsmReduceResultRingCount(uint32_t requiredCount);
   Result<bool, std::string>
@@ -512,7 +393,6 @@ private:
   Result<bool, std::string>
   buildShadowDraws(RenderFrameContext &frame, uint32_t frameSlot,
                    const ForwardSceneGpuData &sceneGpu);
-  void readLatestShadowMeshletCounterReadback(RenderFrameContext &frame);
   [[nodiscard]] uint64_t shadowPipelineSignature() const noexcept;
   void invalidateStaticShadowCasterCache() noexcept;
   void invalidateReusableStaticOnlyCascadeCache() noexcept;
@@ -520,7 +400,6 @@ private:
   void destroyBuffers();
   void destroyShaders();
   void destroyShadowDepthPipelineState();
-  void destroyShadowMeshletPipelineState();
   void destroyPipelineState();
   void resetCachedState();
   void resetFrameBuildState();
@@ -533,23 +412,18 @@ private:
   std::pmr::memory_resource *memory_ = std::pmr::get_default_resource();
   std::unique_ptr<Shader> shadowShader_;
   std::unique_ptr<Shader> shadowOpaqueShader_;
-  std::unique_ptr<Shader> shadowMeshletShader_;
   std::unique_ptr<Shader> depthShader_;
   std::unique_ptr<Shader> depthClearShader_;
   std::unique_ptr<Shader> depthAlphaShader_;
   std::unique_ptr<Shader> sdsmReduceShader_;
-  std::unique_ptr<Shader> sdsmHistogramReduceShader_;
   std::pmr::vector<DynamicBufferSlot> instanceMatricesRing_;
   std::pmr::vector<DynamicBufferSlot> instanceRemapRing_;
   std::pmr::vector<DynamicBufferSlot> shadowFrameRing_;
-  std::pmr::vector<DynamicBufferSlot> shadowMeshletCounterRing_;
   std::pmr::vector<DynamicBufferSlot> sdsmReduceResultRing_;
   std::pmr::vector<uint64_t> instanceDataRingUploadVersions_;
   std::pmr::vector<uint64_t> instanceRemapUploadSignatures_;
   std::pmr::vector<uint64_t> shadowFrameUploadSignatures_;
-  std::pmr::vector<uint64_t> shadowMeshletCounterRingPublishedFrames_;
   std::pmr::vector<uint64_t> sdsmReduceResultRingPublishedFrames_;
-  std::pmr::vector<VisibilityCounterGpuData> shadowMeshletCounterClear_;
   std::pmr::vector<MeshDrawTemplate> meshDrawTemplates_;
   ScratchArena batchBuildScratchArena_;
   std::pmr::vector<uint32_t> staticShadowTemplateIndices_;
@@ -583,13 +457,6 @@ private:
       cascadeDrawItems_{};
   std::array<std::array<std::pmr::vector<DrawItem>, 2u>, kMaxShadowCascades>
       staticOnlyScrollDirtyDrawItems_{};
-  std::array<std::pmr::vector<MeshletPushConstants>, kMaxShadowCascades>
-      cascadeMeshletPushConstants_{};
-  std::array<std::pmr::vector<MeshDispatchItem>, kMaxShadowCascades>
-      cascadeMeshDispatchItems_{};
-  std::array<std::pmr::vector<ShadowMeshDispatchDependencyBuffers>,
-             kMaxShadowCascades>
-      cascadeMeshDispatchDependencyBuffers_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDrawCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeCulledCounts_{};
   std::array<uint32_t, kMaxShadowCascades> cascadeDynamicDrawCounts_{};
@@ -615,19 +482,13 @@ private:
   std::pmr::vector<RenderGraphBufferId> preResolvedDrawBufferIds_;
   std::pmr::vector<TextureDependency> passTextureDependencies_;
   std::pmr::vector<TextureDependency> previewTextureDependencies_;
-  std::pmr::vector<std::byte> sdsmReadbackBuffer_;
 
   ShaderHandle shadowVertexShader_{};
   ShaderHandle shadowOpaqueVertexShader_{};
-  ShaderHandle shadowMeshletTaskShader_{};
-  ShaderHandle shadowMeshletDepthMeshShader_{};
-  ShaderHandle shadowMeshletMeshShader_{};
-  ShaderHandle shadowMeshletDepthAlphaFragmentShader_{};
   ShaderHandle shadowDepthClearVertexShader_{};
   ShaderHandle depthFragmentShader_{};
   ShaderHandle depthAlphaFragmentShader_{};
   ShaderHandle sdsmReduceComputeShader_{};
-  ShaderHandle sdsmHistogramReduceComputeShader_{};
   ShaderHandle previewVertexShader_{};
   ShaderHandle previewFragmentShader_{};
   RenderPipelineHandle shadowPipelineHandle_{};
@@ -636,13 +497,7 @@ private:
   RenderPipelineHandle shadowAlphaDoubleSidedPipelineHandle_{};
   RenderPipelineHandle shadowDepthClearPipelineHandle_{};
   Format shadowDepthPipelineFormat_ = Format::Count;
-  MeshletPipelineHandle shadowMeshletPipelineHandle_{};
-  MeshletPipelineHandle shadowMeshletDoubleSidedPipelineHandle_{};
-  MeshletPipelineHandle shadowMeshletAlphaPipelineHandle_{};
-  MeshletPipelineHandle shadowMeshletAlphaDoubleSidedPipelineHandle_{};
-  Format shadowMeshletDepthPipelineFormat_ = Format::Count;
   ComputePipelineHandle sdsmReducePipelineHandle_{};
-  ComputePipelineHandle sdsmHistogramReducePipelineHandle_{};
   RenderPipelineHandle previewPipelineHandle_{};
   std::array<TextureHandle, kMaxShadowCascades> shadowDepthTextures_{};
   std::array<TextureHandle, kMaxShadowCascades> shadowDepthAlternateTextures_{};
@@ -655,8 +510,6 @@ private:
   bool hasPreparedShadowDepthPasses_ = false;
   bool hasPreparedShadowPreviewPass_ = false;
   bool hasActiveShadowLightForFrame_ = false;
-  bool shadowMeshletPipelineUnsupported_ = false;
-  bool loggedShadowMeshletFallbackWarning_ = false;
   PreviewPushConstants previewPushConstants_{};
   DrawItem previewDraw_{};
 

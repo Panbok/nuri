@@ -37,17 +37,9 @@ const uint kMaxShadowPcfSamples = 64u;
 const uint kShadowFrameFlagEnabled = 1u << 0u;
 const uint kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
 const uint kShadowFrameFlagVisualizeCascadeIndex = 1u << 2u;
-const uint kShadowFrameFlagVisualizePCSSBlockers = 1u << 3u;
-const uint kShadowFrameFlagFixedPoissonRotation = 1u << 4u;
-const uint kShadowFrameFlagVisualizePCFResult = 1u << 5u;
-const uint kShadowFrameFlagVisualizeReceiverDepth = 1u << 6u;
-const uint kShadowFrameFlagVisualizeShadowMapDepth = 1u << 7u;
-const uint kShadowFrameFlagVisualizePCSSAverageBlockerDepth = 1u << 8u;
-const uint kShadowFrameFlagVisualizePCSSFilterRadius = 1u << 9u;
-const uint kShadowFilterModeHard = 0u;
-const uint kShadowFilterModePCF3x3 = 1u;
-const uint kShadowFilterModePoissonPCF = 2u;
-const uint kShadowFilterModePCSS = 3u;
+const uint kShadowFrameFlagVisualizePCFResult = 1u << 3u;
+const uint kShadowFrameFlagVisualizeReceiverDepth = 1u << 4u;
+const uint kShadowFrameFlagVisualizeShadowMapDepth = 1u << 5u;
 
 const uint kMaterialFeatureMetallicRoughness = 1u << 0u;
 const uint kMaterialFeatureSheen = 1u << 1u;
@@ -190,16 +182,7 @@ struct LocalLightGpuData {
 
 struct ShadowCascadeGpuData {
   mat4 lightViewProj;
-  mat4 lightView;
   vec4 splitDepthTexelSize;
-  vec4 uvScaleBias;
-  vec4 biasParams;
-  // x: PCSS receiver-depth world scale, y/z: search/filter radius clamps.
-  vec4 pcssParams;
-  // x: depth texture, y: compare sampler, z: raw sampler, w: square map size.
-  uvec4 textureSampler;
-  vec4 cullingBoundsMin;
-  vec4 cullingBoundsMax;
 };
 
 layout(std430, buffer_reference) readonly buffer DirectionalLightBuffer {
@@ -213,7 +196,10 @@ layout(std430, buffer_reference) readonly buffer LocalLightBuffer {
 layout(std430, buffer_reference) readonly buffer ShadowFrameBuffer {
   uvec4 flagsCascadeCountLightIndex;
   vec4 fadeParams;
-  uvec4 filterParams;
+  vec4 sharedBiasParams;
+  // x: compare sampler, y: raw sampler, z: square map size, w: reserved.
+  uvec4 sharedSamplerMapSize;
+  uvec4 cascadeTextureIds;
   ShadowCascadeGpuData cascades[kMaxShadowCascades];
 };
 

@@ -39,7 +39,6 @@ constexpr uint32_t kOpaqueMeshletTaskCandidatesPerGroup = 32u;
 constexpr uint32_t kOpaqueMeshletTaskPayloadBytes =
     sizeof(uint32_t) * (1u + 4u * kOpaqueMeshletTaskCandidatesPerGroup);
 constexpr size_t kMeshletNormalDepthMergeMinVisibleInstances = 1u;
-constexpr uint32_t kSdsmHistogramDepthPyramidMaxTexels = 4096u;
 constexpr uint32_t kTessellationPatchControlPoints = 3;
 constexpr size_t kIndirectCountHeaderBytes = sizeof(uint32_t);
 constexpr uint32_t kMaxIndirectCommandsPerDraw = 1024u;
@@ -185,40 +184,6 @@ bool previousDepthPyramidCameraStable(const RenderFrameContext &frame) {
     ++levelCount;
   }
   return levelCount;
-}
-
-[[nodiscard]] uint32_t
-histogramDepthPyramidLevelCount(uint32_t width, uint32_t height) noexcept {
-  uint32_t levelCount = 1u;
-  uint64_t texelCount = static_cast<uint64_t>(width) * height;
-  while (texelCount > kSdsmHistogramDepthPyramidMaxTexels &&
-         levelCount < kMaxSceneDepthPyramidLevels) {
-    width = std::max(1u, (width + 1u) >> 1u);
-    height = std::max(1u, (height + 1u) >> 1u);
-    texelCount = static_cast<uint64_t>(width) * height;
-    ++levelCount;
-  }
-  return levelCount;
-}
-
-[[nodiscard]] uint32_t
-requiredDepthPyramidLevelCount(const RenderSettings &settings, uint32_t width,
-                               uint32_t height) noexcept {
-  const uint32_t fullLevelCount = fullDepthPyramidLevelCount(width, height);
-  const VisibilityOcclusionMode occlusionMode =
-      sanitizeVisibilityOcclusionMode(settings.visibility.occlusionMode);
-  if (settings.opaque.enableDepthPyramid ||
-      occlusionMode == VisibilityOcclusionMode::PreviousFrameHiZ ||
-      occlusionMode == VisibilityOcclusionMode::CurrentFrameHiZExperimental) {
-    return fullLevelCount;
-  }
-
-  const ShadowSdsmMode sdsmMode =
-      sanitizeShadowSdsmMode(settings.shadow.sdsmMode);
-  if (settings.shadow.enabled && sdsmMode == ShadowSdsmMode::Histogram) {
-    return histogramDepthPyramidLevelCount(width, height);
-  }
-  return fullLevelCount;
 }
 
 void logOpaqueVisibilityCounters(const RenderFrameContext &frame) {
@@ -936,7 +901,6 @@ OpaqueRenderer::OpaqueRenderer(GPUDevice &gpu, OpaqueRendererConfig config,
           resolveMemoryResource(memory)),
       depthPyramidDependencyTextures_(resolveMemoryResource(memory)),
       shadowSdsmReducePushConstants_(resolveMemoryResource(memory)),
-      shadowSdsmHistogramReducePushConstants_(resolveMemoryResource(memory)),
       shadowSdsmReduceDispatches_(resolveMemoryResource(memory)),
       shadowSdsmReduceDependencyBuffers_(resolveMemoryResource(memory)),
       shadowSdsmReduceDependencyTextures_(resolveMemoryResource(memory)),
@@ -1330,7 +1294,7 @@ void OpaqueRenderer::publishFrameData(RenderFrameContext &frame) {
     if (!nuri::isValid(depthPyramidPipelineHandle_)) {
       return;
     }
-    auto pyramidResult = ensureDepthPyramidTextures(settings);
+    auto pyramidResult = ensureDepthPyramidTextures();
     if (pyramidResult.hasError()) {
       if (!loggedDepthPyramidUnsupported_) {
         loggedDepthPyramidUnsupported_ = true;
@@ -6783,102 +6747,33 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
       sceneDepthPyramidSourceFrameIndex_.reset();
       sceneDepthPyramidSourceViewProj_.reset();
     }
-    const ShadowSdsmMode sdsmMode =
-        sanitizeShadowSdsmMode(settings.shadow.sdsmMode);
     if (settings.shadow.enabled &&
-        (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
-         sdsmMode == ShadowSdsmMode::Histogram) &&
         builtPyramidLevelCount > 0u &&
         frame.sharedResources.shadowSdsmGpuReduceTarget.has_value() &&
         nuri::isValid(frame.sharedResources.shadowSdsmGpuReducePipeline)) {
-      uint32_t reduceSourceLevel = builtPyramidLevelCount - 1u;
-      glm::uvec2 histogramSourceDimensions{1u};
-      if (sdsmMode == ShadowSdsmMode::Histogram) {
-        std::array<glm::uvec2, kMaxSceneDepthPyramidLevels> levelDimensions{};
-        for (uint32_t level = 0u; level < builtPyramidLevelCount; ++level) {
-          const TextureDimensions dimensions =
-              gpu_.getTextureDimensions(sceneDepthPyramidTextures_[level]);
-          levelDimensions[level] = glm::uvec2(std::max(dimensions.width, 1u),
-                                              std::max(dimensions.height, 1u));
-        }
-        const shadow_detail::ShadowSdsmHistogramSourceSelection selection =
-            shadow_detail::selectSdsmHistogramSourceLevel(
-                std::span<const glm::uvec2>(levelDimensions.data(),
-                                            builtPyramidLevelCount),
-                builtPyramidLevelCount, 4096u);
-        reduceSourceLevel = selection.level;
-        histogramSourceDimensions = selection.dimensions;
-      }
       const TextureHandle reduceSourceTexture =
-          sceneDepthPyramidTextures_[reduceSourceLevel];
+          sceneDepthPyramidTextures_[builtPyramidLevelCount - 1u];
       const uint32_t reduceSourceTexId =
           gpu_.getTextureBindlessIndex(reduceSourceTexture);
       if (nuri::isValid(reduceSourceTexture) &&
           reduceSourceTexId != kInvalidTextureBindlessIndex) {
         shadowSdsmReducePushConstants_.clear();
-        shadowSdsmHistogramReducePushConstants_.clear();
         shadowSdsmReduceDispatches_.clear();
         shadowSdsmReduceDependencyBuffers_.clear();
         shadowSdsmReduceDependencyTextures_.clear();
         shadowSdsmReducePushConstants_.reserve(1u);
-        shadowSdsmHistogramReducePushConstants_.reserve(1u);
         shadowSdsmReduceDispatches_.reserve(1u);
         shadowSdsmReduceDependencyBuffers_.reserve(1u);
         shadowSdsmReduceDependencyTextures_.reserve(1u);
 
-        std::span<const std::byte> reducePushConstants;
-        if (sdsmMode == ShadowSdsmMode::Histogram) {
-          const float fixedNear = std::max(frame.camera.nearPlane, 0.01f);
-          const float fixedFar = std::max(
-              fixedNear + 0.01f,
-              std::min(std::max(settings.shadow.maxDistance, fixedNear + 0.01f),
-                       std::max(frame.camera.farPlane, fixedNear + 0.01f)));
-          shadowSdsmHistogramReducePushConstants_.push_back(
-              ShadowSdsmHistogramReducePushConstants{
-                  .resultBufferAddress =
-                      frame.sharedResources.shadowSdsmGpuReduceTarget
-                          ->bufferAddress,
-                  .sourceParams = glm::uvec4(
-                      reduceSourceTexId,
-                      static_cast<uint32_t>(frame.frameIndex),
-                      histogramSourceDimensions.x, histogramSourceDimensions.y),
-                  .histogramParams = glm::uvec4(
-                      std::clamp(settings.shadow.sdsmHistogramBucketCount,
-                                 kMinShadowSdsmHistogramBucketCount,
-                                 kMaxShadowSdsmHistogramBucketCount),
-                      std::clamp(settings.shadow.cascadeCount, 1u,
-                                 kMaxShadowCascades),
-                      frame.camera.projectionType ==
-                              ProjectionType::Orthographic
-                          ? 1u
-                          : 0u,
-                      0u),
-                  .cameraParams =
-                      glm::vec4(frame.camera.nearPlane, frame.camera.farPlane,
-                                fixedNear, fixedFar),
-                  .trimParams =
-                      glm::vec4(settings.shadow.sdsmHistogramTrimLowPercent,
-                                settings.shadow.sdsmHistogramTrimHighPercent,
-                                1.0e-4f, 0.0f),
-              });
-          reducePushConstants = std::span<const std::byte>(
-              reinterpret_cast<const std::byte *>(
-                  &shadowSdsmHistogramReducePushConstants_.back()),
-              sizeof(ShadowSdsmHistogramReducePushConstants));
-        } else {
-          shadowSdsmReducePushConstants_.push_back(
-              ShadowSdsmReducePushConstants{
-                  .resultBufferAddress =
-                      frame.sharedResources.shadowSdsmGpuReduceTarget
-                          ->bufferAddress,
-                  .sourceTexId = reduceSourceTexId,
-                  .sourceFrameIndex = static_cast<uint32_t>(frame.frameIndex),
-              });
-          reducePushConstants = std::span<const std::byte>(
-              reinterpret_cast<const std::byte *>(
-                  &shadowSdsmReducePushConstants_.back()),
-              sizeof(ShadowSdsmReducePushConstants));
-        }
+        shadowSdsmReducePushConstants_.push_back(
+            ShadowSdsmReducePushConstants{
+                .resultBufferAddress =
+                    frame.sharedResources.shadowSdsmGpuReduceTarget
+                        ->bufferAddress,
+                .sourceTexId = reduceSourceTexId,
+                .sourceFrameIndex = static_cast<uint32_t>(frame.frameIndex),
+            });
         shadowSdsmReduceDependencyBuffers_.push_back(
             frame.sharedResources.shadowSdsmGpuReduceTarget->buffer);
         shadowSdsmReduceDependencyTextures_.push_back(reduceSourceTexture);
@@ -6886,16 +6781,17 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
         ComputeDispatchItem dispatch{};
         dispatch.pipeline = frame.sharedResources.shadowSdsmGpuReducePipeline;
         dispatch.dispatch = {.x = 1u, .y = 1u, .z = 1u};
-        dispatch.pushConstants = reducePushConstants;
+        dispatch.pushConstants = std::span<const std::byte>(
+            reinterpret_cast<const std::byte *>(
+                &shadowSdsmReducePushConstants_.back()),
+            sizeof(ShadowSdsmReducePushConstants));
         dispatch.dependencyBuffers = std::span<const BufferHandle>(
             shadowSdsmReduceDependencyBuffers_.data(),
             shadowSdsmReduceDependencyBuffers_.size());
         dispatch.dependencyTextures = std::span<const TextureHandle>(
             shadowSdsmReduceDependencyTextures_.data(),
             shadowSdsmReduceDependencyTextures_.size());
-        dispatch.debugLabel = sdsmMode == ShadowSdsmMode::Histogram
-                                  ? "Shadow SDSM Histogram Reduce"
-                                  : "Shadow SDSM Reduce";
+        dispatch.debugLabel = "Shadow SDSM Reduce";
         dispatch.debugColor = kComputeDispatchColor;
         shadowSdsmReduceDispatches_.push_back(dispatch);
 
@@ -6927,8 +6823,6 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
             sceneDepthPyramidLevelCount_);
       }
     } else if (settings.shadow.enabled &&
-               (sdsmMode == ShadowSdsmMode::PreviousFrameMinMax ||
-                sdsmMode == ShadowSdsmMode::Histogram) &&
                !loggedShadowSdsmReduceSkipWarning_) {
       loggedShadowSdsmReduceSkipWarning_ = true;
       NURI_LOG_WARNING(
@@ -8000,17 +7894,13 @@ OpaqueRenderer::buildOpaquePasses(RenderFrameContext &frame,
 
 bool OpaqueRenderer::requiresDepthPyramid(
     const RenderSettings &settings) const {
-  const ShadowSdsmMode sanitizedSdsm =
-      sanitizeShadowSdsmMode(settings.shadow.sdsmMode);
   const VisibilityOcclusionMode visibilityOcclusionMode =
       sanitizeVisibilityOcclusionMode(settings.visibility.occlusionMode);
   return settings.opaque.enableDepthPyramid ||
          visibilityOcclusionMode == VisibilityOcclusionMode::PreviousFrameHiZ ||
          visibilityOcclusionMode ==
              VisibilityOcclusionMode::CurrentFrameHiZExperimental ||
-         (settings.shadow.enabled &&
-          (sanitizedSdsm == ShadowSdsmMode::PreviousFrameMinMax ||
-           sanitizedSdsm == ShadowSdsmMode::Histogram));
+         settings.shadow.enabled;
 }
 
 bool OpaqueRenderer::shouldBuildTransmissionVisibilityDepth(
@@ -8435,6 +8325,14 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
             RenderCaptureValueKind::LinearHdrColor,
             RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_hdr",
             "hdr_color", pass.desc.debugLabel);
+        if (settingsOrDefault(frame).shadow.debug.visualizeShadowFactor) {
+          publishRequestedCapture(
+              frame, gpu_, "shadow_factor",
+              frame.sharedResources.sceneColorTexture,
+              RenderCaptureValueKind::Scalar,
+              RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear",
+              "scalar", pass.desc.debugLabel);
+        }
       }
     } else {
       frame.sharedResources.sceneColorGraphTexture = passDesc.colorTexture;
@@ -8444,6 +8342,14 @@ Result<bool, std::string> OpaqueRenderer::appendPreparedGraphPass(
           RenderCaptureValueKind::LinearHdrColor,
           RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear_hdr",
           "hdr_color", pass.desc.debugLabel);
+      if (settingsOrDefault(frame).shadow.debug.visualizeShadowFactor) {
+        publishRequestedCapture(
+            frame, gpu_, "shadow_factor",
+            frame.sharedResources.sceneColorTexture,
+            RenderCaptureValueKind::Scalar,
+            RenderCaptureLifetimeClass::FrameSharedRingTexture, "linear",
+            "scalar", pass.desc.debugLabel);
+      }
     }
   }
   if (pass.isVelocityPass && nuri::isValid(pass.colorTextureHandle)) {
@@ -9338,7 +9244,7 @@ Result<bool, std::string> OpaqueRenderer::ensureSceneDepthSampler() {
 }
 
 Result<bool, std::string>
-OpaqueRenderer::ensureDepthPyramidTextures(const RenderSettings &settings) {
+OpaqueRenderer::ensureDepthPyramidTextures() {
   int32_t framebufferWidth = 0;
   int32_t framebufferHeight = 0;
   gpu_.getFramebufferSize(framebufferWidth, framebufferHeight);
@@ -9348,7 +9254,7 @@ OpaqueRenderer::ensureDepthPyramidTextures(const RenderSettings &settings) {
       static_cast<uint32_t>(std::max(framebufferHeight, 1));
 
   const uint32_t levelCount =
-      requiredDepthPyramidLevelCount(settings, safeWidth, safeHeight);
+      fullDepthPyramidLevelCount(safeWidth, safeHeight);
 
   auto samplerResult = ensureSceneDepthSampler();
   if (samplerResult.hasError()) {

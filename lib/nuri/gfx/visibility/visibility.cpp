@@ -94,9 +94,6 @@ visibilitySettingsFromRenderSettings(const RenderSettings &settings) noexcept {
           settings.visibility.enableMeshletFrustumCulling,
       .enableMeshletConeCulling = settings.opaque.enableMeshletConeCulling ||
                                   settings.visibility.enableMeshletConeCulling,
-      .enableShadowMeshletCulling =
-          settings.shadow.enableMeshletCascadeCulling ||
-          settings.visibility.enableShadowMeshletCulling,
       .enableIndirectMeshDispatch =
           settings.visibility.enableIndirectMeshDispatch ||
           mainViewMode == VisibilityCullingMode::GpuDriven,

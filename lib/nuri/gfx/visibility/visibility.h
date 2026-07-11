@@ -47,7 +47,6 @@ struct VisibilityResolvedSettings {
   bool enableGpuInstanceCulling = true;
   bool enableMeshletFrustumCulling = true;
   bool enableMeshletConeCulling = true;
-  bool enableShadowMeshletCulling = true;
   bool enableIndirectMeshDispatch = true;
   bool enableGpuIndirectDraw = true;
   bool enableOcclusionCulling = false;

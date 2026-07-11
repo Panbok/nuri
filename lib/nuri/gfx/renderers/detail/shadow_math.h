@@ -31,11 +31,6 @@ struct DirectionalShadowFit {
   std::array<glm::vec3, 8> frustumCorners{};
 };
 
-struct ShadowSdsmHistogramSourceSelection {
-  uint32_t level = 0u;
-  glm::uvec2 dimensions{0u};
-};
-
 [[nodiscard]] inline glm::vec3 normalizeSafe(glm::vec3 value,
                                              glm::vec3 fallback) {
   const float length = glm::length(value);
@@ -575,9 +570,7 @@ linearizeDeviceDepthToViewDepth(float deviceDepth,
 
 [[nodiscard]] inline std::array<float, kMaxShadowCascades + 1u>
 computeCascadeSplitDepthsForRange(float nearDepth, float farDepth,
-                                  uint32_t cascadeCount,
-                                  ShadowCascadeSplitMode splitMode,
-                                  float lambda) {
+                                  uint32_t cascadeCount, float lambda) {
   const uint32_t safeCascadeCount =
       std::clamp(cascadeCount, 1u, kMaxShadowCascades);
   const float effectiveNear = std::max(nearDepth, 0.01f);
@@ -594,18 +587,7 @@ computeCascadeSplitDepthsForRange(float nearDepth, float farDepth,
         effectiveNear + (effectiveFar - effectiveNear) * t;
     const float logSplit =
         effectiveNear * std::pow(effectiveFar / effectiveNear, t);
-    switch (sanitizeShadowCascadeSplitMode(splitMode)) {
-    case ShadowCascadeSplitMode::Uniform:
-      splits[i] = uniformSplit;
-      break;
-    case ShadowCascadeSplitMode::Logarithmic:
-      splits[i] = logSplit;
-      break;
-    case ShadowCascadeSplitMode::Practical:
-    default:
-      splits[i] = glm::mix(uniformSplit, logSplit, clampedLambda);
-      break;
-    }
+    splits[i] = glm::mix(uniformSplit, logSplit, clampedLambda);
   }
   splits[safeCascadeCount] = effectiveFar;
   return splits;
@@ -613,145 +595,14 @@ computeCascadeSplitDepthsForRange(float nearDepth, float farDepth,
 
 [[nodiscard]] inline std::array<float, kMaxShadowCascades + 1u>
 computeCascadeSplitDepths(const CameraFrameState &camera, float maxDistance,
-                          uint32_t cascadeCount,
-                          ShadowCascadeSplitMode splitMode, float lambda) {
+                          uint32_t cascadeCount, float lambda) {
   const float effectiveNear = std::max(camera.nearPlane, 0.01f);
   const float requestedFar =
       std::min(std::max(maxDistance, effectiveNear + 0.01f),
                std::max(camera.farPlane, effectiveNear + 0.01f));
   const float effectiveFar = std::max(effectiveNear + 0.01f, requestedFar);
   return computeCascadeSplitDepthsForRange(effectiveNear, effectiveFar,
-                                           cascadeCount, splitMode, lambda);
-}
-
-[[nodiscard]] inline ShadowSdsmHistogramSourceSelection
-selectSdsmHistogramSourceLevel(std::span<const glm::uvec2> levelDimensions,
-                               uint32_t levelCount,
-                               uint32_t maxTexelCount = 4096u) {
-  const uint32_t safeLevelCount =
-      std::min(levelCount, static_cast<uint32_t>(levelDimensions.size()));
-  if (safeLevelCount == 0u) {
-    return {};
-  }
-  for (uint32_t level = 0u; level < safeLevelCount; ++level) {
-    const glm::uvec2 dimensions =
-        glm::max(levelDimensions[level], glm::uvec2(1u));
-    const uint64_t texelCount = static_cast<uint64_t>(dimensions.x) *
-                                static_cast<uint64_t>(dimensions.y);
-    if (texelCount <= static_cast<uint64_t>(std::max(maxTexelCount, 1u))) {
-      return ShadowSdsmHistogramSourceSelection{
-          .level = level,
-          .dimensions = dimensions,
-      };
-    }
-  }
-  return ShadowSdsmHistogramSourceSelection{
-      .level = safeLevelCount - 1u,
-      .dimensions =
-          glm::max(levelDimensions[safeLevelCount - 1u], glm::uvec2(1u)),
-  };
-}
-
-inline void accumulateSdsmHistogramInterval(std::span<float> histogramBuckets,
-                                            float rangeNear, float rangeFar,
-                                            float intervalMin,
-                                            float intervalMax,
-                                            float weight = 1.0f) {
-  if (histogramBuckets.empty() || !std::isfinite(rangeNear) ||
-      !std::isfinite(rangeFar) || !std::isfinite(intervalMin) ||
-      !std::isfinite(intervalMax) || !std::isfinite(weight) || weight <= 0.0f) {
-    return;
-  }
-
-  const float clampedNear = std::max(rangeNear, 0.0f);
-  const float clampedFar = std::max(clampedNear + 1.0e-4f, rangeFar);
-  const float clampedMin =
-      std::clamp(std::min(intervalMin, intervalMax), clampedNear, clampedFar);
-  const float clampedMax =
-      std::clamp(std::max(intervalMin, intervalMax), clampedNear, clampedFar);
-  const float rangeSpan = clampedFar - clampedNear;
-  if (rangeSpan <= 1.0e-6f) {
-    histogramBuckets.front() += weight;
-    return;
-  }
-
-  const size_t bucketCount = histogramBuckets.size();
-  if (clampedMax <= clampedMin + 1.0e-6f) {
-    const float normalized =
-        std::clamp((clampedMin - clampedNear) / rangeSpan, 0.0f, 0.99999994f);
-    const size_t bucketIndex = std::min(
-        static_cast<size_t>(normalized * static_cast<float>(bucketCount)),
-        bucketCount - 1u);
-    histogramBuckets[bucketIndex] += weight;
-    return;
-  }
-
-  const float bucketWidth = rangeSpan / static_cast<float>(bucketCount);
-  const size_t startBucket = std::min(
-      static_cast<size_t>(std::floor((clampedMin - clampedNear) / bucketWidth)),
-      bucketCount - 1u);
-  const size_t endBucket = std::min(
-      static_cast<size_t>(std::floor((clampedMax - clampedNear) / bucketWidth)),
-      bucketCount - 1u);
-  const float intervalSpan = clampedMax - clampedMin;
-  for (size_t bucketIndex = startBucket; bucketIndex <= endBucket;
-       ++bucketIndex) {
-    const float bucketStart =
-        clampedNear + bucketWidth * static_cast<float>(bucketIndex);
-    const float bucketEnd = std::min(bucketStart + bucketWidth, clampedFar);
-    const float overlap = std::max(std::min(clampedMax, bucketEnd) -
-                                       std::max(clampedMin, bucketStart),
-                                   0.0f);
-    if (overlap > 0.0f) {
-      histogramBuckets[bucketIndex] += weight * (overlap / intervalSpan);
-    }
-  }
-}
-
-[[nodiscard]] inline float
-sdsmHistogramPercentileDepth(std::span<const float> histogramBuckets,
-                             float rangeNear, float rangeFar,
-                             float percentile) {
-  if (histogramBuckets.empty() || !std::isfinite(rangeNear) ||
-      !std::isfinite(rangeFar) || !std::isfinite(percentile)) {
-    return rangeNear;
-  }
-  const float clampedNear = std::max(rangeNear, 0.0f);
-  const float clampedFar = std::max(clampedNear + 1.0e-4f, rangeFar);
-  const float clampedPercentile = std::clamp(percentile, 0.0f, 1.0f);
-  const float bucketWidth =
-      (clampedFar - clampedNear) / static_cast<float>(histogramBuckets.size());
-  float totalWeight = 0.0f;
-  for (const float weight : histogramBuckets) {
-    if (std::isfinite(weight) && weight > 0.0f) {
-      totalWeight += weight;
-    }
-  }
-  if (totalWeight <= 1.0e-6f) {
-    return clampedNear;
-  }
-  const float targetWeight = clampedPercentile * totalWeight;
-  float accumulatedWeight = 0.0f;
-  for (size_t bucketIndex = 0u; bucketIndex < histogramBuckets.size();
-       ++bucketIndex) {
-    const float bucketWeight = std::isfinite(histogramBuckets[bucketIndex]) &&
-                                       histogramBuckets[bucketIndex] > 0.0f
-                                   ? histogramBuckets[bucketIndex]
-                                   : 0.0f;
-    if (accumulatedWeight + bucketWeight >= targetWeight) {
-      const float localWeight =
-          bucketWeight > 1.0e-6f
-              ? std::clamp((targetWeight - accumulatedWeight) / bucketWeight,
-                           0.0f, 1.0f)
-              : 0.0f;
-      return std::clamp(clampedNear +
-                            (static_cast<float>(bucketIndex) + localWeight) *
-                                bucketWidth,
-                        clampedNear, clampedFar);
-    }
-    accumulatedWeight += bucketWeight;
-  }
-  return clampedFar;
+                                           cascadeCount, lambda);
 }
 
 inline void enforceMonotonicShadowSplitDepths(

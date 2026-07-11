@@ -281,9 +281,6 @@ DirectLightingResult evaluateTransmissionDirectLighting(ShadedMaterial sm,
   direct.shadowPcfFactorDebug = 1.0;
   direct.shadowReceiverDepthDebug = 0.0;
   direct.shadowMapDepthDebug = 0.0;
-  direct.shadowPcssBlockerRatioDebug = 0.0;
-  direct.shadowPcssAverageBlockerDepthDebug = 0.0;
-  direct.shadowPcssFilterRadiusDebug = 0.0;
 
   for (uint i = 0u; i < pc.frameData.directionalLightCount; ++i) {
     DirectionalLightGpuData light =

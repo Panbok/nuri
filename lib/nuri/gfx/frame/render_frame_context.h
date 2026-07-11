@@ -256,13 +256,6 @@ enum class TemporalHistoryResetReason : uint8_t {
   SceneContentChanged = 9,
 };
 
-enum class ShadowFilterMode : uint8_t {
-  Hard = 0,
-  PCF3x3 = 1,
-  PoissonPCF = 2,
-  PCSS = 3,
-};
-
 enum class ShadowQualityPreset : uint8_t {
   Custom = 0,
   Low = 1,
@@ -271,22 +264,9 @@ enum class ShadowQualityPreset : uint8_t {
   Ultra = 4,
 };
 
-enum class ShadowCascadeSplitMode : uint8_t {
-  Uniform = 0,
-  Logarithmic = 1,
-  Practical = 2,
-};
-
-enum class ShadowSdsmMode : uint8_t {
-  Disabled = 0,
-  PreviousFrameMinMax = 1,
-  Histogram = 2,
-};
-
 enum class ShadowSdsmReductionBackend : uint8_t {
-  Auto = 0,
-  Cpu = 1,
-  Gpu = 2,
+  Cpu = 0,
+  Gpu = 1,
 };
 
 enum class ShadowSdsmStatus : uint8_t {
@@ -330,7 +310,6 @@ struct VisibilitySettings {
   VisibilityOcclusionMode occlusionMode = VisibilityOcclusionMode::Disabled;
   bool enableMeshletFrustumCulling = false;
   bool enableMeshletConeCulling = false;
-  bool enableShadowMeshletCulling = false;
   bool enableGpuInstanceCulling = true;
   bool enableGpuIndirectDraw = true;
   bool enableIndirectMeshDispatch = true;
@@ -412,25 +391,14 @@ static constexpr uint32_t kAmbientOcclusionDebugViewMask = 0xffu;
 static constexpr uint32_t kTemporalJitterSequenceLength = 8u;
 static constexpr Format kDefaultShadowMapDepthFormat = Format::D16_UNORM;
 static constexpr uint32_t kMaxShadowCascades = 4u;
-static constexpr uint32_t kDefaultShadowSdsmHistogramBucketCount = 64u;
-static constexpr uint32_t kMinShadowSdsmHistogramBucketCount = 8u;
-static constexpr uint32_t kMaxShadowSdsmHistogramBucketCount = 128u;
 static constexpr uint32_t kInvalidShadowBindlessIndex = 0xFFFFFFFFu;
 static constexpr uint32_t kInvalidSamplerBindlessIndex = 0xFFFFFFFFu;
 static constexpr uint32_t kShadowFrameFlagEnabled = 1u << 0u;
 static constexpr uint32_t kShadowFrameFlagVisualizeShadowFactor = 1u << 1u;
 static constexpr uint32_t kShadowFrameFlagVisualizeCascadeIndex = 1u << 2u;
-static constexpr uint32_t kShadowFrameFlagVisualizePCSSBlockers = 1u << 3u;
-static constexpr uint32_t kShadowFrameFlagFixedPoissonRotation = 1u << 4u;
-static constexpr uint32_t kShadowFrameFlagVisualizePCFResult = 1u << 5u;
-static constexpr uint32_t kShadowFrameFlagVisualizeReceiverDepth = 1u << 6u;
-static constexpr uint32_t kShadowFrameFlagVisualizeShadowMapDepth = 1u << 7u;
-static constexpr uint32_t kShadowFrameFlagVisualizePCSSAverageBlockerDepth =
-    1u << 8u;
-static constexpr uint32_t kShadowFrameFlagVisualizePCSSFilterRadius = 1u << 9u;
-static constexpr float kDefaultPcssLightRadiusScale = 0.35f;
-static constexpr float kDefaultPcssSearchRadiusClampTexels = 12.0f;
-static constexpr float kDefaultPcssFilterRadiusClampTexels = 18.0f;
+static constexpr uint32_t kShadowFrameFlagVisualizePCFResult = 1u << 3u;
+static constexpr uint32_t kShadowFrameFlagVisualizeReceiverDepth = 1u << 4u;
+static constexpr uint32_t kShadowFrameFlagVisualizeShadowMapDepth = 1u << 5u;
 
 [[nodiscard]] constexpr uint8_t
 sanitizeTextureFilterAnisotropy(uint8_t anisotropy) noexcept {
@@ -691,7 +659,6 @@ struct RenderSettings {
     bool showLightViewBounds = false;
     bool showTexelGridSnap = false;
     bool showShadowMapViewport = false;
-    bool showLightPerspectiveViewport = false;
     uint32_t debugCascadeIndex = 0;
     bool freezeCascades = false;
     bool freezeLightView = false;
@@ -700,12 +667,6 @@ struct RenderSettings {
     bool visualizePCFResult = false;
     bool visualizeReceiverDepth = false;
     bool visualizeShadowMapDepth = false;
-    bool visualizePCSSBlockers = false;
-    bool visualizePCSSAverageBlockerDepth = false;
-    bool visualizePCSSFilterRadius = false;
-    bool fixedPoissonRotation = false;
-    uint32_t poissonRotationSeed = 0u;
-    bool visualizeSDSMHistogram = false;
     bool logDiagnostics = false;
     LogLevel diagnosticLogLevel = LogLevel::Trace;
     uint32_t diagnosticLogIntervalFrames = 1u;
@@ -726,29 +687,13 @@ struct RenderSettings {
     Format depthFormat = kDefaultShadowMapDepthFormat;
     float maxDistance = 150.0f;
     float maxDistanceFadeFraction = 0.0f;
-    ShadowCascadeSplitMode splitMode = ShadowCascadeSplitMode::Practical;
     float splitLambda = 0.75f;
-    bool stabilizeCascades = true;
     float cascadeBlendFraction = 0.08f;
     float constantBias = 0.0005f;
     float slopeBias = 1.5f;
     float normalBias = 0.0f;
-    ShadowFilterMode filterMode = ShadowFilterMode::Hard;
     uint32_t pcfSampleCount = 9;
-    uint32_t pcssBlockerSampleCount = 16;
-    uint32_t pcssFilterSampleCount = 32;
-    float pcssLightRadiusScale = kDefaultPcssLightRadiusScale;
-    float pcssSearchRadiusClampTexels = kDefaultPcssSearchRadiusClampTexels;
-    float pcssFilterRadiusClampTexels = kDefaultPcssFilterRadiusClampTexels;
-    ShadowSdsmMode sdsmMode = ShadowSdsmMode::Disabled;
-    ShadowSdsmReductionBackend sdsmReductionBackend =
-        ShadowSdsmReductionBackend::Auto;
     float sdsmTemporalBlend = 0.85f;
-    uint32_t sdsmHistogramBucketCount = kDefaultShadowSdsmHistogramBucketCount;
-    float sdsmHistogramTrimLowPercent = 0.5f;
-    float sdsmHistogramTrimHighPercent = 1.0f;
-    bool enableMeshletDepth = false;
-    bool enableMeshletCascadeCulling = true;
     ShadowDebugSettings debug{};
   };
 
@@ -972,18 +917,6 @@ shadowDebugFrameFlags(const RenderSettings::ShadowDebugSettings &debug) {
   }
   if (debug.visualizeShadowMapDepth) {
     flags |= kShadowFrameFlagVisualizeShadowMapDepth;
-  }
-  if (debug.visualizePCSSBlockers) {
-    flags |= kShadowFrameFlagVisualizePCSSBlockers;
-  }
-  if (debug.visualizePCSSAverageBlockerDepth) {
-    flags |= kShadowFrameFlagVisualizePCSSAverageBlockerDepth;
-  }
-  if (debug.visualizePCSSFilterRadius) {
-    flags |= kShadowFrameFlagVisualizePCSSFilterRadius;
-  }
-  if (debug.fixedPoissonRotation) {
-    flags |= kShadowFrameFlagFixedPoissonRotation;
   }
   return flags;
 }
@@ -1308,19 +1241,6 @@ inline void copyTemporalAAQualityPresetToCustom(
   settings.qualityPreset = TemporalAAQualityPreset::Custom;
 }
 
-[[nodiscard]] constexpr ShadowFilterMode
-sanitizeShadowFilterMode(ShadowFilterMode mode) noexcept {
-  switch (mode) {
-  case ShadowFilterMode::Hard:
-  case ShadowFilterMode::PCF3x3:
-  case ShadowFilterMode::PoissonPCF:
-  case ShadowFilterMode::PCSS:
-    return mode;
-  default:
-    return ShadowFilterMode::Hard;
-  }
-}
-
 [[nodiscard]] constexpr ShadowQualityPreset
 sanitizeShadowQualityPreset(ShadowQualityPreset preset) noexcept {
   switch (preset) {
@@ -1335,31 +1255,6 @@ sanitizeShadowQualityPreset(ShadowQualityPreset preset) noexcept {
   }
 }
 
-[[nodiscard]] constexpr ShadowSdsmMode
-sanitizeShadowSdsmMode(ShadowSdsmMode mode) noexcept {
-  switch (mode) {
-  case ShadowSdsmMode::Disabled:
-  case ShadowSdsmMode::PreviousFrameMinMax:
-  case ShadowSdsmMode::Histogram:
-    return mode;
-  default:
-    return ShadowSdsmMode::Disabled;
-  }
-}
-
-[[nodiscard]] constexpr ShadowSdsmReductionBackend
-sanitizeShadowSdsmReductionBackend(
-    ShadowSdsmReductionBackend backend) noexcept {
-  switch (backend) {
-  case ShadowSdsmReductionBackend::Auto:
-  case ShadowSdsmReductionBackend::Cpu:
-  case ShadowSdsmReductionBackend::Gpu:
-    return backend;
-  default:
-    return ShadowSdsmReductionBackend::Auto;
-  }
-}
-
 [[nodiscard]] constexpr ShadowPreviewMode
 sanitizeShadowPreviewMode(ShadowPreviewMode mode) noexcept {
   switch (mode) {
@@ -1371,23 +1266,15 @@ sanitizeShadowPreviewMode(ShadowPreviewMode mode) noexcept {
   }
 }
 
-[[nodiscard]] constexpr ShadowCascadeSplitMode
-sanitizeShadowCascadeSplitMode(ShadowCascadeSplitMode mode) noexcept {
-  switch (mode) {
-  case ShadowCascadeSplitMode::Uniform:
-  case ShadowCascadeSplitMode::Logarithmic:
-  case ShadowCascadeSplitMode::Practical:
-    return mode;
-  default:
-    return ShadowCascadeSplitMode::Practical;
-  }
-}
-
 inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings);
 
 inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
                                      ShadowQualityPreset preset) {
   settings.qualityPreset = sanitizeShadowQualityPreset(preset);
+  if (settings.qualityPreset != ShadowQualityPreset::Custom) {
+    settings.cascadeBlendFraction = 0.08f;
+    settings.sdsmTemporalBlend = 0.85f;
+  }
   switch (settings.qualityPreset) {
   case ShadowQualityPreset::Custom:
     break;
@@ -1396,65 +1283,48 @@ inline void applyShadowQualityPreset(RenderSettings::ShadowSettings &settings,
     settings.shadowMapSize = 1024u;
     settings.depthFormat = kDefaultShadowMapDepthFormat;
     settings.maxDistance = 80.0f;
-    settings.maxDistanceFadeFraction = 0.0f;
+    settings.maxDistanceFadeFraction = 0.15f;
     settings.splitLambda = 0.35f;
     settings.constantBias = 0.0008f;
     settings.slopeBias = 2.0f;
     settings.normalBias = 0.25f;
-    settings.filterMode = ShadowFilterMode::PCF3x3;
     settings.pcfSampleCount = 9u;
-    settings.sdsmMode = ShadowSdsmMode::Disabled;
-    settings.debug.fixedPoissonRotation = false;
     break;
   case ShadowQualityPreset::Medium:
     settings.cascadeCount = 3u;
     settings.shadowMapSize = 2048u;
     settings.depthFormat = kDefaultShadowMapDepthFormat;
     settings.maxDistance = 120.0f;
-    settings.maxDistanceFadeFraction = 0.0f;
+    settings.maxDistanceFadeFraction = 0.12f;
     settings.splitLambda = 0.30f;
     settings.constantBias = 0.0006f;
     settings.slopeBias = 1.75f;
     settings.normalBias = 0.35f;
-    settings.filterMode = ShadowFilterMode::PoissonPCF;
     settings.pcfSampleCount = 16u;
-    settings.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
-    settings.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
-    settings.debug.fixedPoissonRotation = true;
     break;
   case ShadowQualityPreset::High:
     settings.cascadeCount = 4u;
     settings.shadowMapSize = 4096u;
     settings.depthFormat = kDefaultShadowMapDepthFormat;
     settings.maxDistance = 150.0f;
-    settings.maxDistanceFadeFraction = 0.0f;
+    settings.maxDistanceFadeFraction = 0.10f;
     settings.splitLambda = 0.25f;
     settings.constantBias = 0.0005f;
     settings.slopeBias = 1.5f;
     settings.normalBias = 0.50f;
-    settings.filterMode = ShadowFilterMode::PoissonPCF;
     settings.pcfSampleCount = 24u;
-    settings.sdsmMode = ShadowSdsmMode::PreviousFrameMinMax;
-    settings.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
-    settings.debug.fixedPoissonRotation = true;
     break;
   case ShadowQualityPreset::Ultra:
     settings.cascadeCount = 4u;
     settings.shadowMapSize = 8192u;
-    settings.depthFormat = kDefaultShadowMapDepthFormat;
+    settings.depthFormat = Format::D32_FLOAT;
     settings.maxDistance = 220.0f;
-    settings.maxDistanceFadeFraction = 0.0f;
+    settings.maxDistanceFadeFraction = 0.08f;
     settings.splitLambda = 0.50f;
     settings.constantBias = 0.00035f;
     settings.slopeBias = 1.15f;
     settings.normalBias = 0.40f;
-    settings.filterMode = ShadowFilterMode::PoissonPCF;
     settings.pcfSampleCount = 32u;
-    settings.pcssBlockerSampleCount = 16u;
-    settings.pcssFilterSampleCount = 32u;
-    settings.sdsmMode = ShadowSdsmMode::Histogram;
-    settings.sdsmReductionBackend = ShadowSdsmReductionBackend::Auto;
-    settings.debug.fixedPoissonRotation = true;
     break;
   }
   sanitizeShadowSettings(settings);
@@ -1492,47 +1362,12 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
   settings.normalBias = std::isfinite(settings.normalBias)
                             ? std::max(settings.normalBias, 0.0f)
                             : 0.0f;
-  settings.filterMode = sanitizeShadowFilterMode(settings.filterMode);
-  settings.splitMode = sanitizeShadowCascadeSplitMode(settings.splitMode);
-  settings.sdsmMode = sanitizeShadowSdsmMode(settings.sdsmMode);
-  settings.sdsmReductionBackend =
-      sanitizeShadowSdsmReductionBackend(settings.sdsmReductionBackend);
   settings.debug.previewMode =
       sanitizeShadowPreviewMode(settings.debug.previewMode);
-  // Light-perspective shadow preview is kept in settings but has no renderer
-  // path yet, so sanitize it off instead of accepting a no-op debug flag.
-  settings.debug.showLightPerspectiveViewport = false;
   settings.pcfSampleCount =
       std::clamp(settings.pcfSampleCount, 1u, kMaxShadowPcfSamples);
-  settings.pcssBlockerSampleCount =
-      std::clamp(settings.pcssBlockerSampleCount, 1u, kMaxShadowPcfSamples);
-  settings.pcssFilterSampleCount =
-      std::clamp(settings.pcssFilterSampleCount, 1u, kMaxShadowPcfSamples);
-  settings.pcssLightRadiusScale =
-      std::isfinite(settings.pcssLightRadiusScale)
-          ? std::max(settings.pcssLightRadiusScale, 0.0f)
-          : kDefaultPcssLightRadiusScale;
-  settings.pcssSearchRadiusClampTexels =
-      std::isfinite(settings.pcssSearchRadiusClampTexels)
-          ? std::max(settings.pcssSearchRadiusClampTexels, 0.0f)
-          : kDefaultPcssSearchRadiusClampTexels;
-  settings.pcssFilterRadiusClampTexels =
-      std::isfinite(settings.pcssFilterRadiusClampTexels)
-          ? std::max(settings.pcssFilterRadiusClampTexels, 0.0f)
-          : kDefaultPcssFilterRadiusClampTexels;
   settings.sdsmTemporalBlend =
       std::clamp(settings.sdsmTemporalBlend, 0.0f, 1.0f);
-  settings.sdsmHistogramBucketCount = std::clamp(
-      settings.sdsmHistogramBucketCount, kMinShadowSdsmHistogramBucketCount,
-      kMaxShadowSdsmHistogramBucketCount);
-  settings.sdsmHistogramTrimLowPercent =
-      std::isfinite(settings.sdsmHistogramTrimLowPercent)
-          ? std::clamp(settings.sdsmHistogramTrimLowPercent, 0.0f, 20.0f)
-          : 0.5f;
-  settings.sdsmHistogramTrimHighPercent =
-      std::isfinite(settings.sdsmHistogramTrimHighPercent)
-          ? std::clamp(settings.sdsmHistogramTrimHighPercent, 0.0f, 20.0f)
-          : 1.0f;
   switch (settings.debug.diagnosticLogLevel) {
   case LogLevel::Trace:
   case LogLevel::Debug:
@@ -1568,28 +1403,8 @@ inline void sanitizeShadowSettings(RenderSettings::ShadowSettings &settings) {
 }
 
 [[nodiscard]] inline uint32_t
-shadowFilterSampleBudget(ShadowFilterMode filterMode, uint32_t pcfSampleCount,
-                         uint32_t pcssBlockerSampleCount,
-                         uint32_t pcssFilterSampleCount) noexcept {
-  switch (sanitizeShadowFilterMode(filterMode)) {
-  case ShadowFilterMode::Hard:
-    return 1u;
-  case ShadowFilterMode::PCF3x3:
-  case ShadowFilterMode::PoissonPCF:
-    return std::clamp(pcfSampleCount, 1u, kMaxShadowPcfSamples);
-  case ShadowFilterMode::PCSS:
-    return std::clamp(pcssBlockerSampleCount, 1u, kMaxShadowPcfSamples) +
-           std::clamp(pcssFilterSampleCount, 1u, kMaxShadowPcfSamples);
-  default:
-    // sanitizeShadowFilterMode normalizes all values; this is only defensive.
-#if defined(_MSC_VER)
-    __assume(false);
-#elif defined(__GNUC__) || defined(__clang__)
-    __builtin_unreachable();
-#else
-    return 1u;
-#endif
-  }
+shadowFilterSampleBudget(uint32_t pcfSampleCount) noexcept {
+  return std::clamp(pcfSampleCount, 1u, kMaxShadowPcfSamples);
 }
 
 [[nodiscard]] inline TextureFilterMode effectiveTextureFilterMode(
@@ -1952,27 +1767,35 @@ temporalHistoryResetReasonName(TemporalHistoryResetReason reason) noexcept {
 
 struct alignas(16) ShadowCascadeGpuData {
   glm::mat4 lightViewProj{1.0f};
-  glm::mat4 lightView{1.0f};
   glm::vec4 splitDepthTexelSize{0.0f};
-  glm::vec4 uvScaleBias{1.0f, 1.0f, 0.0f, 0.0f};
-  glm::vec4 biasParams{0.0f};
-  // x: PCSS receiver-depth world scale, y/z: search/filter radius clamps.
-  glm::vec4 pcssParams{0.0f};
-  glm::uvec4 textureSampler{kInvalidShadowBindlessIndex,
-                            kInvalidShadowBindlessIndex, 0u, 0u};
-  glm::vec4 cullingBoundsMin{0.0f};
-  glm::vec4 cullingBoundsMax{0.0f};
 };
-static_assert(sizeof(ShadowCascadeGpuData) == 240u,
+static_assert(std::is_standard_layout_v<ShadowCascadeGpuData>);
+static_assert(offsetof(ShadowCascadeGpuData, lightViewProj) == 0u);
+static_assert(offsetof(ShadowCascadeGpuData, splitDepthTexelSize) == 64u);
+static_assert(sizeof(ShadowCascadeGpuData) == 80u,
               "ShadowCascadeGpuData must match shader layout");
 
 struct alignas(16) ShadowFrameGpuData {
   glm::uvec4 flagsCascadeCountLightIndex{0u};
   glm::vec4 fadeParams{0.0f};
-  glm::uvec4 filterParams{0u};
+  glm::vec4 sharedBiasParams{0.0f};
+  // x: compare sampler, y: raw sampler, z: square map size, w: reserved.
+  glm::uvec4 sharedSamplerMapSize{kInvalidShadowBindlessIndex,
+                                  kInvalidShadowBindlessIndex, 0u, 0u};
+  glm::uvec4 cascadeTextureIds{kInvalidShadowBindlessIndex,
+                               kInvalidShadowBindlessIndex,
+                               kInvalidShadowBindlessIndex,
+                               kInvalidShadowBindlessIndex};
   std::array<ShadowCascadeGpuData, kMaxShadowCascades> cascades{};
 };
-static_assert(sizeof(ShadowFrameGpuData) == 1008u,
+static_assert(std::is_standard_layout_v<ShadowFrameGpuData>);
+static_assert(offsetof(ShadowFrameGpuData, flagsCascadeCountLightIndex) == 0u);
+static_assert(offsetof(ShadowFrameGpuData, fadeParams) == 16u);
+static_assert(offsetof(ShadowFrameGpuData, sharedBiasParams) == 32u);
+static_assert(offsetof(ShadowFrameGpuData, sharedSamplerMapSize) == 48u);
+static_assert(offsetof(ShadowFrameGpuData, cascadeTextureIds) == 64u);
+static_assert(offsetof(ShadowFrameGpuData, cascades) == 80u);
+static_assert(sizeof(ShadowFrameGpuData) == 400u,
               "ShadowFrameGpuData must match shader layout");
 
 struct ShadowFrameGpuDataHandle {
@@ -2036,23 +1859,15 @@ struct ShadowCascadeDebugFrameData {
 };
 
 struct ShadowSdsmDebugFrameData {
-  ShadowSdsmMode mode = ShadowSdsmMode::Disabled;
-  ShadowSdsmReductionBackend requestedReductionBackend =
-      ShadowSdsmReductionBackend::Auto;
   ShadowSdsmReductionBackend activeReductionBackend =
       ShadowSdsmReductionBackend::Cpu;
   ShadowSdsmStatus status = ShadowSdsmStatus::Disabled;
   bool reductionFallbackActive = false;
   bool fixedFallbackActive = false;
   uint64_t sourceFrameIndex = std::numeric_limits<uint64_t>::max();
-  uint32_t histogramSourceLevel = 0u;
-  glm::uvec2 histogramSourceDimensions{0u};
-  uint32_t histogramBucketCount = 0u;
-  uint32_t histogramValidTileCount = 0u;
   uint32_t gpuResultRingSlotCount = 0u;
   uint32_t gpuResultSelectedSlot = std::numeric_limits<uint32_t>::max();
   bool gpuReductionResultAvailable = false;
-  bool gpuSplitPayloadValid = false;
   uint64_t gpuResultSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint32_t splitCount = 0u;
   float fixedRangeNear = 0.0f;
@@ -2063,19 +1878,11 @@ struct ShadowSdsmDebugFrameData {
   float rawLinearMax = 0.0f;
   float smoothedLinearMin = 0.0f;
   float smoothedLinearMax = 0.0f;
-  float histogramTotalWeight = 0.0f;
-  float histogramTrimLowPercent = 0.0f;
-  float histogramTrimHighPercent = 0.0f;
-  float histogramTrimmedRangeNear = 0.0f;
-  float histogramTrimmedRangeFar = 0.0f;
   float effectiveRangeNear = 0.0f;
   float effectiveRangeFar = 0.0f;
   std::array<float, kMaxShadowCascades + 1u> fixedSplitDepths{};
   std::array<float, kMaxShadowCascades + 1u> minMaxSplitDepths{};
-  std::array<float, kMaxShadowCascades + 1u> histogramSplitDepths{};
   std::array<float, kMaxShadowCascades + 1u> effectiveSplitDepths{};
-  std::array<float, kMaxShadowSdsmHistogramBucketCount>
-      histogramBucketWeights{};
 };
 
 struct ShadowDebugFrameData {
@@ -2250,6 +2057,7 @@ struct OpaqueFrameMetrics {
 struct ShadowFrameMetrics {
   uint32_t cascadeCount = 0;
   uint32_t shadowMapSize = 0;
+  uint32_t frameGpuBytes = 0;
   uint32_t totalDraws = 0;
   uint32_t totalCulledDraws = 0;
   uint32_t totalIndexCountEstimate = 0;
@@ -2258,8 +2066,6 @@ struct ShadowFrameMetrics {
   uint32_t staticCacheReused = 0;
   uint32_t staticBatchTemplateCount = 0;
   uint32_t shadowBatchEntryCount = 0;
-  uint32_t shadowMeshletDispatchCount = 0;
-  uint32_t shadowMeshletTaskGroupCount = 0;
   uint32_t shadowInstanceRemapCount = 0;
   uint32_t staticBatchFullEmitCount = 0;
   uint32_t staticLightGridQueryCount = 0;
@@ -2288,21 +2094,15 @@ struct ShadowFrameMetrics {
   float maxCascadeTexelWorldSize = 0.0f;
   float farCascadeTexelWorldSize = 0.0f;
   uint32_t filterSampleBudget = 0;
-  uint32_t pcssBlockerSampleBudget = 0;
-  uint32_t pcssFilterSampleBudget = 0;
-  uint32_t pcssMaxSamplesPerReceiver = 0;
-  uint32_t pcssMaxSamplesPerBlendedReceiver = 0;
   uint32_t sdsmComputePassCount = 0;
   uint32_t sdsmReadbackBytes = 0;
   uint32_t sdsmReductionSourceSamples = 0;
-  uint32_t sdsmHistogramSourceSamples = 0;
   ShadowSdsmReductionBackend sdsmActiveReductionBackend =
       ShadowSdsmReductionBackend::Cpu;
   float gpuTimeMs = 0.0f;
   float depthGpuTimeMs = 0.0f;
   float sdsmGpuTimeMs = 0.0f;
   float sdsmCpuReductionTimeMs = 0.0f;
-  float sdsmCpuHistogramTimeMs = 0.0f;
   uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   uint64_t depthGpuTimingSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
@@ -2347,12 +2147,6 @@ struct VisibilityFrameMetrics {
   uint32_t meshletTaskGroupsExecuted = 0;
   uint32_t shadowCpuCandidates = 0;
   uint32_t shadowCpuRejected = 0;
-  uint32_t shadowMeshletCandidates = 0;
-  uint32_t shadowMeshletReadbackAvailable = 0;
-  uint32_t shadowMeshletReadbackSourceFrame = 0;
-  uint32_t shadowMeshletReadbackStaleFrameCount = 0;
-  uint32_t shadowMeshletReadbackErrorCount = 0;
-  uint32_t shadowMeshletRejectedBounds = 0;
   uint32_t indirectDrawCount = 0;
   uint32_t indirectMeshDispatchCount = 0;
   uint32_t uncertainVisible = 0;
