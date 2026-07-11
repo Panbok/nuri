@@ -112,6 +112,7 @@ resolveResourceDebugName(std::string_view name, std::string_view fallback) {
             : quantizeToNextPow2(static_cast<uint64_t>(pass.draws.size())));
     mix(static_cast<uint64_t>(pass.meshDispatches.size()));
     mix(static_cast<uint64_t>(pass.textureCopies.size()));
+    mix(pass.externalTemporalDispatch.provider != nullptr ? 1u : 0u);
     for (const ComputeDispatchItem &dispatch : pass.preDispatches) {
       mix(static_cast<uint64_t>(dispatch.dependencyBuffers.size()));
       mix(static_cast<uint64_t>(dispatch.dependencyTextures.size()));
@@ -135,6 +136,11 @@ isCopyOnlyExecutionMode(RenderPassExecutionMode mode) noexcept {
   return mode == RenderPassExecutionMode::CopyOnly;
 }
 
+[[nodiscard]] bool
+isExternalTemporalExecutionMode(RenderPassExecutionMode mode) noexcept {
+  return mode == RenderPassExecutionMode::ExternalTemporal;
+}
+
 [[nodiscard]] RenderGraphTextureId
 graphicsPassRootColorTexture(const RenderGraphGraphicsPassDesc &desc) noexcept {
   return nuri::isValid(desc.colorResolveTexture) ? desc.colorResolveTexture
@@ -155,60 +161,83 @@ validatePassExecutionMode(const RenderGraphGraphicsPassDesc &desc,
                                                 ": copy-only pass must use "
                                                 "addTextureCopyPass");
   }
-  if (!isComputeOnlyExecutionMode(desc.executionMode)) {
+  const bool computeOnly = isComputeOnlyExecutionMode(desc.executionMode);
+  const bool externalTemporal =
+      isExternalTemporalExecutionMode(desc.executionMode);
+  if (!computeOnly && !externalTemporal) {
+    if (desc.externalTemporalDispatch.provider != nullptr) {
+      return Result<bool, std::string>::makeError(
+          std::string(caller) +
+          ": graphics pass cannot contain an external temporal dispatch");
+    }
     return Result<bool, std::string>::makeResult(true);
   }
 
   if (desc.hasColorAttachment) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "have a color attachment");
   }
   if (nuri::isValid(desc.colorTexture)) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "bind a color texture");
   }
   if (nuri::isValid(desc.colorResolveTexture)) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "bind a color resolve texture");
   }
   if (nuri::isValid(desc.depthTexture)) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "bind a depth texture");
   }
   if (nuri::isValid(desc.depthResolveTexture)) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "bind a depth resolve texture");
   }
   if (!desc.draws.empty()) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "contain draws");
   }
   if (!desc.meshDispatches.empty()) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "contain mesh dispatches");
   }
   if (desc.drawBuffersPreResolved) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "use pre-resolved draw "
                                                 "buffers");
   }
   if (desc.markColorAsFrameOutput) {
     return Result<bool, std::string>::makeError(std::string(caller) +
-                                                ": compute-only pass cannot "
+                                                ": compute pass cannot "
                                                 "mark frame output");
   }
-  if (desc.preDispatches.empty()) {
+  if (computeOnly && desc.preDispatches.empty()) {
     return Result<bool, std::string>::makeError(std::string(caller) +
                                                 ": compute-only pass requires "
                                                 "at least one dispatch");
+  }
+  if (computeOnly && desc.externalTemporalDispatch.provider != nullptr) {
+    return Result<bool, std::string>::makeError(
+        std::string(caller) +
+        ": compute-only pass cannot contain an external temporal dispatch");
+  }
+  if (externalTemporal && !desc.preDispatches.empty()) {
+    return Result<bool, std::string>::makeError(
+        std::string(caller) +
+        ": external temporal pass cannot contain native compute dispatches");
+  }
+  if (externalTemporal && desc.externalTemporalDispatch.provider == nullptr) {
+    return Result<bool, std::string>::makeError(
+        std::string(caller) +
+        ": external temporal pass requires a typed provider dispatch");
   }
   return Result<bool, std::string>::makeResult(true);
 }

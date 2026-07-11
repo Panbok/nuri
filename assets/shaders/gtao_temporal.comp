@@ -13,7 +13,10 @@ layout(push_constant) uniform constants {
   uint currentTexId;
   uint historyTexId;
   uint motionVectorTexId;
+  uint motionClassTexId;
   uint sceneDepthTexId;
+  uint currentViewDepthTexId;
+  uint previousSceneDepthTexId;
   uint edgeTexId;
   uint outputTexId;
   uint pointSamplerId;
@@ -23,13 +26,20 @@ layout(push_constant) uniform constants {
   uint flags;
   uint baseCurrentWeightBits;
   uint rejectedCurrentWeightBits;
+  uint projectionType;
+  float nearPlane;
+  float farPlane;
 }
 pc;
 
 const uint kTemporalFlagHistoryValid = 1u << 0u;
+const uint kMotionClassStaticCameraOnly = 1u;
+const uint kMotionClassFull = 2u;
 const float kMaxVisibilityReduction = 0.45;
 const float kVelocityRejectPixels = 2.0;
 const float kDepthEdgeRejectThreshold = 0.35;
+const float kPreviousDepthAbsoluteThreshold = 0.05;
+const float kPreviousDepthRelativeThreshold = 0.02;
 
 float pushFloat(uint bits) { return uintBitsToFloat(bits); }
 
@@ -62,6 +72,37 @@ float sampleSceneDepth(vec2 uv) {
                                          kSamplers[pc.pointSamplerId])),
                  uv)
       .r;
+}
+
+uint sampleMotionClass(ivec2 pos) {
+  float encoded =
+      texelFetch(kTextures2D[nonuniformEXT(pc.motionClassTexId)], pos, 0).r;
+  return uint(round(clamp(encoded, 0.0, 1.0) * 255.0));
+}
+
+float sampleCurrentViewDepth(ivec2 pos) {
+  return texelFetch(kTextures2D[nonuniformEXT(pc.currentViewDepthTexId)], pos,
+                    0)
+      .r;
+}
+
+float samplePreviousSceneDepth(vec2 uv) {
+  return texture(
+             nonuniformEXT(sampler2D(kTextures2D[pc.previousSceneDepthTexId],
+                                     kSamplers[pc.pointSamplerId])),
+             uv)
+      .r;
+}
+
+float linearizeDepth(float deviceDepth) {
+  float nearPlane = max(pc.nearPlane, 1.0e-4);
+  float farPlane = max(pc.farPlane, nearPlane + 1.0e-3);
+  float clampedDeviceDepth = clamp(deviceDepth, 0.0, 1.0);
+  if (pc.projectionType != 0u) {
+    return mix(nearPlane, farPlane, clampedDeviceDepth);
+  }
+  return (nearPlane * farPlane) /
+         max(farPlane - clampedDeviceDepth * (farPlane - nearPlane), 1.0e-4);
 }
 
 float samplePackedEdges(ivec2 pos) {
@@ -109,8 +150,21 @@ void main() {
   vec2 velocity = sampleVelocity(uv);
   vec2 historyUv = uv + velocity;
   float sceneDepth = sampleSceneDepth(uv);
-  bool validHistory =
-      historyValid() && uvInBounds(historyUv) && sceneDepth < 0.999999;
+  uint motionClass = sampleMotionClass(pos);
+  bool validMotionClass = motionClass == kMotionClassStaticCameraOnly ||
+                          motionClass == kMotionClassFull;
+  bool validHistory = historyValid() && validMotionClass &&
+                      uvInBounds(historyUv) && sceneDepth < 0.999999;
+  if (validHistory) {
+    float previousDeviceDepth = samplePreviousSceneDepth(historyUv);
+    float currentViewDepth = sampleCurrentViewDepth(pos);
+    float previousViewDepth = linearizeDepth(previousDeviceDepth);
+    float depthThreshold = max(kPreviousDepthAbsoluteThreshold,
+                               kPreviousDepthRelativeThreshold *
+                                   max(currentViewDepth, previousViewDepth));
+    validHistory = previousDeviceDepth < 0.999999 &&
+                   abs(currentViewDepth - previousViewDepth) <= depthThreshold;
+  }
   if (!validHistory) {
     imageStore(kImagesR16[nonuniformEXT(pc.outputTexId)], pos,
                vec4(currentVisibility, 0.0, 0.0, 0.0));

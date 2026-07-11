@@ -79,6 +79,14 @@ OpaqueFeature::publishFrameData(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
+void OpaqueFeature::onFrameSubmitted(const RenderFrameContext &frame) noexcept {
+  renderer_->commitSubmittedFrame(frame.frameIndex);
+}
+
+void OpaqueFeature::onFrameAbandoned(const RenderFrameContext &frame) noexcept {
+  renderer_->abandonPreparedFrame(frame.frameIndex);
+}
+
 std::span<RenderFeaturePass *const> OpaqueFeature::passes() noexcept {
   return passes_;
 }
@@ -104,6 +112,16 @@ Result<bool, std::string>
 OpaquePrepassFeature::publishFrameData(FrameBuildContext &ctx) {
   renderer_->publishFrameData(ctx.frame);
   return Result<bool, std::string>::makeResult(true);
+}
+
+void OpaquePrepassFeature::onFrameSubmitted(
+    const RenderFrameContext &frame) noexcept {
+  renderer_->commitSubmittedFrame(frame.frameIndex);
+}
+
+void OpaquePrepassFeature::onFrameAbandoned(
+    const RenderFrameContext &frame) noexcept {
+  renderer_->abandonPreparedFrame(frame.frameIndex);
 }
 
 std::span<RenderFeaturePass *const> OpaquePrepassFeature::passes() noexcept {

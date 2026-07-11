@@ -93,6 +93,7 @@ struct NURI_API RenderGraphGraphicsPassDesc {
   std::span<const RenderGraphAccessMode> dependencyTextureAccessModes{};
   std::span<const DrawItem> draws{};
   std::span<const MeshDispatchItem> meshDispatches{};
+  ExternalTemporalDispatchItem externalTemporalDispatch{};
   bool drawBuffersPreResolved = false;
   // Explicit extra draw-buffer dependencies; draw items are not scanned when
   // drawBuffersPreResolved is true.
@@ -196,6 +197,7 @@ struct NURI_API RenderGraphPreparedGraphicsPassDesc {
   std::span<const BufferHandle> dependencyBuffers{};
   std::span<const DrawItem> draws{};
   std::span<const MeshDispatchItem> meshDispatches{};
+  ExternalTemporalDispatchItem externalTemporalDispatch{};
   std::span<const RenderGraphPreparedDependencyBufferBinding>
       dependencyBufferBindings{};
   std::span<const RenderGraphPreparedDependencyTextureBinding>

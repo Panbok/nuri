@@ -14,6 +14,9 @@ set(NURI_RENDERER_SOURCES
   nuri/core/log.cpp
   nuri/core/runtime_config.cpp
   nuri/gfx/debug_draw_3d.cpp
+  nuri/gfx/frame/external_temporal_provider.cpp
+  nuri/gfx/frame/temporal_frame_service.cpp
+  nuri/gfx/frame/history_registry.cpp
   nuri/gfx/renderers/debug_renderer.cpp
   nuri/gfx/renderers/opaque_renderer.cpp
   nuri/gfx/renderers/shadow_renderer.cpp
@@ -26,6 +29,7 @@ set(NURI_RENDERER_SOURCES
   nuri/gfx/pipeline/features/spatial_aa_feature.cpp
   nuri/gfx/pipeline/features/skybox_feature.cpp
   nuri/gfx/pipeline/features/temporal_aa_feature.cpp
+  nuri/gfx/pipeline/features/reference_taa_feature.cpp
   nuri/gfx/pipeline/features/text_feature.cpp
   nuri/gfx/pipeline/features/transmission_feature.cpp
   nuri/gfx/pipeline/features/transparent_feature.cpp
@@ -98,6 +102,35 @@ set(NURI_RENDERER_SOURCES
 add_library(nuri_renderer ${NURI_LIBRARY_TYPE}
   ${NURI_RENDERER_SOURCES}
 )
+
+set(NURI_FIDELITYFX_SDK_DIR "${CMAKE_SOURCE_DIR}/external/fidelityfx-sdk")
+set(NURI_FIDELITYFX_REQUIRED_FILES
+  ffx-api/include/ffx_api/ffx_api.h
+  ffx-api/include/ffx_api/ffx_upscale.h
+  ffx-api/include/ffx_api/vk/ffx_api_vk.h
+  PrebuiltSignedDLL/amd_fidelityfx_vk.dll
+  PrebuiltSignedDLL/amd_fidelityfx_vk.lib
+  sdk/LICENSE.txt
+)
+if(NURI_WITH_FSR31)
+  foreach(_required_file IN LISTS NURI_FIDELITYFX_REQUIRED_FILES)
+    if(NOT EXISTS "${NURI_FIDELITYFX_SDK_DIR}/${_required_file}")
+      message(FATAL_ERROR
+        "NURI_WITH_FSR31 requires the pinned FidelityFX SDK v1.1.4 at "
+        "${NURI_FIDELITYFX_SDK_DIR}; missing ${_required_file}. "
+        "See external/fidelityfx-sdk.pin.json.")
+    endif()
+  endforeach()
+  target_compile_definitions(nuri_renderer PRIVATE
+    NURI_WITH_FSR31=1
+    NURI_FSR31_DEPENDENCY_PRESENT=1
+  )
+else()
+  target_compile_definitions(nuri_renderer PRIVATE
+    NURI_WITH_FSR31=0
+    NURI_FSR31_DEPENDENCY_PRESENT=0
+  )
+endif()
 
 if(MSVC)
   target_compile_options(nuri_renderer PRIVATE /arch:AVX2)

@@ -262,6 +262,9 @@ public:
   [[nodiscard]] uint64_t materialVersion() const noexcept {
     return materialTableVersion_;
   }
+  [[nodiscard]] GpuMultisampleCapabilities gpuMultisampleCapabilities() const {
+    return gpu_.getMultisampleCapabilities();
+  }
 
   void beginFrame(uint64_t frameIndex);
   void collectGarbage(uint64_t completedFrameIndex);

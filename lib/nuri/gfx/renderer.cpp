@@ -4,6 +4,7 @@
 
 #include "nuri/core/log.h"
 #include "nuri/core/profiling.h"
+#include "nuri/gfx/frame/temporal_frame_service.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/render_graph/render_graph_telemetry.h"
 #include "nuri/utils/env_utils.h"
@@ -67,6 +68,9 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
   Result<bool, std::string> frameResult =
       beginFrameSequence(frameContext.frameIndex);
   if (frameResult.hasError()) {
+    if (frameContext.temporalFrameService != nullptr) {
+      frameContext.temporalFrameService->abandonFrame(frameContext.frameIndex);
+    }
     return frameResult;
   }
 
@@ -74,9 +78,31 @@ Result<bool, std::string> Renderer::render(RenderPipeline &pipeline,
   auto pipelineResult =
       pipeline.buildRenderGraph(frameContext, resources_, renderGraphBuilder_);
   if (pipelineResult.hasError()) {
+    pipeline.onFrameAbandoned(frameContext);
+    if (frameContext.temporalFrameService != nullptr) {
+      frameContext.temporalFrameService->abandonFrame(frameContext.frameIndex);
+    }
     return Result<bool, std::string>::makeError(pipelineResult.error());
   }
-  return endFrameSequence(frameContext.frameIndex);
+  Result<bool, std::string> submitResult =
+      endFrameSequence(frameContext.frameIndex);
+  if (frameContext.temporalFrameService != nullptr) {
+    if (submitResult.hasError()) {
+      pipeline.onFrameAbandoned(frameContext);
+      frameContext.temporalFrameService->abandonFrame(frameContext.frameIndex);
+    } else {
+      pipeline.onFrameSubmitted(frameContext);
+      const bool committed = frameContext.temporalFrameService->commitFrame(
+          frameContext.frameIndex);
+      NURI_ASSERT(committed,
+                  "Temporal frame commit did not match submitted frame");
+    }
+  } else if (submitResult.hasError()) {
+    pipeline.onFrameAbandoned(frameContext);
+  } else {
+    pipeline.onFrameSubmitted(frameContext);
+  }
+  return submitResult;
 }
 
 Result<bool, std::string> Renderer::beginFrameSequence(uint64_t frameIndex) {

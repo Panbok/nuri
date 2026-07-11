@@ -50,6 +50,8 @@ public:
   void onResize(uint32_t width, uint32_t height);
   void publishFrameData(RenderFrameContext &frame);
   Result<bool, std::string> prepareOpaqueGraphPasses(RenderFrameContext &frame);
+  void commitSubmittedFrame(uint64_t frameIndex) noexcept;
+  void abandonPreparedFrame(uint64_t frameIndex) noexcept;
   [[nodiscard]] bool hasPreparedOpaqueMainPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaquePrepassPasses() const noexcept;
   [[nodiscard]] bool hasPreparedOpaqueMainLightingPasses() const noexcept;
@@ -395,6 +397,7 @@ private:
     bool isVelocityPass = false;
     bool isEarlyVelocityPass = false;
     bool isReactiveMaskPass = false;
+    bool isEarlyReactiveMaskPass = false;
     bool isVisibilityComputePass = false;
     uint32_t depthPyramidLevel = UINT32_MAX;
 
@@ -586,7 +589,7 @@ private:
   void invalidateSingleInstanceBatchCache();
   void invalidateIndirectPackCache();
   void resetPickState();
-  void capturePreviousTransforms(const RenderScene &scene, uint64_t frameIndex);
+  void stagePreviousTransforms(const RenderScene &scene, uint64_t frameIndex);
   void destroyMeshletPipelineState();
   void destroyMeshPipelineState();
   void resetMeshletPipelineState();
@@ -770,10 +773,16 @@ private:
   ComputePipelineHandle visibilityIndirectMeshDispatchPipelineHandle_{};
   MeshletPipelineHandle meshletPipelineHandle_{};
   MeshletPipelineHandle meshletDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletMsaaPipelineHandle_{};
+  MeshletPipelineHandle meshletMsaaDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletDepthPipelineHandle_{};
   MeshletPipelineHandle meshletDepthDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletDepthAlphaPipelineHandle_{};
   MeshletPipelineHandle meshletDepthAlphaDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletMsaaDepthPipelineHandle_{};
+  MeshletPipelineHandle meshletMsaaDepthDoubleSidedPipelineHandle_{};
+  MeshletPipelineHandle meshletMsaaDepthAlphaPipelineHandle_{};
+  MeshletPipelineHandle meshletMsaaDepthAlphaDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletSimpleNormalPipelineHandle_{};
   MeshletPipelineHandle meshletSimpleNormalDoubleSidedPipelineHandle_{};
   MeshletPipelineHandle meshletNormalPipelineHandle_{};
@@ -998,6 +1007,8 @@ private:
   std::pmr::vector<RenderGraphAccessMode>
       reactivePassDependencyBufferAccessModes_;
   std::pmr::unordered_map<RenderableId, glm::mat4> previousTransformById_;
+  std::pmr::unordered_map<RenderableId, glm::mat4>
+      pendingPreviousTransformById_;
   std::pmr::vector<InstanceData> previousInstanceMatricesCpuCache_;
   std::pmr::vector<uint32_t> velocityInstanceFlagsCpuCache_;
   std::pmr::vector<VelocityRenderableGeometryGpuData> velocityGeometryCpuCache_;
@@ -1027,6 +1038,14 @@ private:
       std::numeric_limits<uint64_t>::max();
   uint64_t previousTransformCaptureTransformVersion_ =
       std::numeric_limits<uint64_t>::max();
+  uint64_t pendingPreviousTransformSceneId_ = 0u;
+  uint64_t pendingPreviousTransformFrameIndex_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t pendingPreviousTransformTopologyVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t pendingPreviousTransformTransformVersion_ =
+      std::numeric_limits<uint64_t>::max();
+  bool pendingPreviousTransformDataChanged_ = false;
   std::optional<OpaquePickRequest> pendingPickRequest_{};
   std::optional<ShadowInspectRequest> pendingShadowInspectRequest_{};
 

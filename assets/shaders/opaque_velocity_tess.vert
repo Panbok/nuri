@@ -32,6 +32,7 @@ void main() {
     const bool currentDrawAnimated =
         pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
         pc.packedVertexFormat == kPackedVertexFormatAnimatedFloat32;
+    bool hasTrustworthyPreviousPosition = !currentDrawAnimated;
     if (currentDrawAnimated &&
         globalInstanceId < pc.velocityFrameData.data.previousGeometryInfo.x) {
       VelocityRenderableGeometryData previousGeometry =
@@ -40,12 +41,16 @@ void main() {
           (previousGeometry.metadata.x &
            kVelocityGeometryFlagPreviousVertexBuffer) != 0u;
       const uint previousVertexCount = previousGeometry.metadata.z;
-      if (hasPreviousVertexBuffer &&
-          uint(gl_VertexIndex) < previousVertexCount) {
+      hasTrustworthyPreviousPosition =
+          hasPreviousVertexBuffer && uint(gl_VertexIndex) < previousVertexCount;
+      if (hasTrustworthyPreviousPosition) {
         previousPos = decodeAnimatedPositionFrom(
             previousGeometry.previousVertexBuffer, uint(gl_VertexIndex),
             previousGeometry.metadata.y);
       }
+    }
+    if (!hasTrustworthyPreviousPosition) {
+      velocityFlags = 0u;
     }
   }
 

@@ -1094,6 +1094,7 @@ Result<bool, std::string> HDRExposureAdaptPass::build(FrameBuildContext &ctx) {
       return Result<bool, std::string>::makeError(previousRead.error());
     }
   }
+  ctx.shared.historyWriteRequirements |= FrameTextureRequirementFlags::Exposure;
 
   HDRPostProcessFrameMetrics &metrics = ctx.frame.metrics.hdrPostProcess;
   metrics.adaptationActive = true;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nuri/gfx/frame/external_temporal_provider.h"
 #include "nuri/gfx/gpu_types.h"
 
 #include <array>
@@ -89,6 +90,11 @@ enum class GpuTimingScope : uint8_t {
   GTAO = 11,
   HDRPostProcess = 12,
   Skybox = 13,
+  Velocity = 14,
+  ReactiveMask = 15,
+  TemporalAACopyBack = 16,
+  GTAOTemporal = 17,
+  WholeFrame = 18,
 };
 
 [[nodiscard]] constexpr uint32_t
@@ -96,6 +102,24 @@ gpuTimingScopeToBit(GpuTimingScope scope) noexcept {
   return scope == GpuTimingScope::None
              ? 0u
              : (1u << (static_cast<uint8_t>(scope) - 1u));
+}
+
+[[nodiscard]] constexpr GpuTimingScope
+gpuTimingParentScope(GpuTimingScope scope) noexcept {
+  switch (scope) {
+  case GpuTimingScope::ShadowDepth:
+  case GpuTimingScope::ShadowSdsm:
+    return GpuTimingScope::Shadow;
+  case GpuTimingScope::Velocity:
+  case GpuTimingScope::ReactiveMask:
+    return GpuTimingScope::Opaque;
+  case GpuTimingScope::TemporalAACopyBack:
+    return GpuTimingScope::TemporalAAResolve;
+  case GpuTimingScope::GTAOTemporal:
+    return GpuTimingScope::GTAO;
+  default:
+    return GpuTimingScope::None;
+  }
 }
 
 constexpr uint32_t kGpuTimingScopeShadowBit =
@@ -124,6 +148,16 @@ constexpr uint32_t kGpuTimingScopeHDRPostProcessBit =
     gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess);
 constexpr uint32_t kGpuTimingScopeSkyboxBit =
     gpuTimingScopeToBit(GpuTimingScope::Skybox);
+constexpr uint32_t kGpuTimingScopeVelocityBit =
+    gpuTimingScopeToBit(GpuTimingScope::Velocity);
+constexpr uint32_t kGpuTimingScopeReactiveMaskBit =
+    gpuTimingScopeToBit(GpuTimingScope::ReactiveMask);
+constexpr uint32_t kGpuTimingScopeTemporalAACopyBackBit =
+    gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack);
+constexpr uint32_t kGpuTimingScopeGTAOTemporalBit =
+    gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal);
+constexpr uint32_t kGpuTimingScopeWholeFrameBit =
+    gpuTimingScopeToBit(GpuTimingScope::WholeFrame);
 
 struct GpuTimingReport {
   uint64_t shadowSourceFrameIndex = std::numeric_limits<uint64_t>::max();
@@ -143,6 +177,14 @@ struct GpuTimingReport {
   uint64_t hdrPostProcessSourceFrameIndex =
       std::numeric_limits<uint64_t>::max();
   uint64_t skyboxSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t velocitySourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t reactiveMaskSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t temporalAACopyBackSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
+  uint64_t gtaoTemporalSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  // Remains unavailable unless a backend brackets the complete frame's queue
+  // work, including every submission, rather than summing pass timers.
+  uint64_t wholeFrameSourceFrameIndex = std::numeric_limits<uint64_t>::max();
   float shadowTimeMs = 0.0f;
   float shadowDepthTimeMs = 0.0f;
   float shadowSdsmTimeMs = 0.0f;
@@ -156,6 +198,11 @@ struct GpuTimingReport {
   float gtaoTimeMs = 0.0f;
   float hdrPostProcessTimeMs = 0.0f;
   float skyboxTimeMs = 0.0f;
+  float velocityTimeMs = 0.0f;
+  float reactiveMaskTimeMs = 0.0f;
+  float temporalAACopyBackTimeMs = 0.0f;
+  float gtaoTemporalTimeMs = 0.0f;
+  float wholeFrameTimeMs = 0.0f;
   uint32_t availableScopeMask = 0u;
 
   struct PassTiming {
@@ -170,6 +217,16 @@ struct GpuTimingReport {
 [[nodiscard]] constexpr bool hasGpuTimingScope(const GpuTimingReport &report,
                                                GpuTimingScope scope) noexcept {
   return (report.availableScopeMask & gpuTimingScopeToBit(scope)) != 0u;
+}
+
+[[nodiscard]] constexpr bool
+gpuTimingScopeContributesToScopedSum(const GpuTimingReport &report,
+                                     GpuTimingScope scope) noexcept {
+  if (scope == GpuTimingScope::WholeFrame) {
+    return false;
+  }
+  const GpuTimingScope parent = gpuTimingParentScope(scope);
+  return parent == GpuTimingScope::None || !hasGpuTimingScope(report, parent);
 }
 
 struct GpuTimingScopeMergeDesc {
@@ -234,6 +291,22 @@ inline void mergeGpuTimingReportScopes(GpuTimingReport &dst,
       {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
        &GpuTimingReport::skyboxSourceFrameIndex,
        gpuTimingScopeToBit(GpuTimingScope::Skybox)},
+      {GpuTimingScope::Velocity, &GpuTimingReport::velocityTimeMs,
+       &GpuTimingReport::velocitySourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::Velocity)},
+      {GpuTimingScope::ReactiveMask, &GpuTimingReport::reactiveMaskTimeMs,
+       &GpuTimingReport::reactiveMaskSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::ReactiveMask)},
+      {GpuTimingScope::TemporalAACopyBack,
+       &GpuTimingReport::temporalAACopyBackTimeMs,
+       &GpuTimingReport::temporalAACopyBackSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack)},
+      {GpuTimingScope::GTAOTemporal, &GpuTimingReport::gtaoTemporalTimeMs,
+       &GpuTimingReport::gtaoTemporalSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal)},
+      {GpuTimingScope::WholeFrame, &GpuTimingReport::wholeFrameTimeMs,
+       &GpuTimingReport::wholeFrameSourceFrameIndex,
+       gpuTimingScopeToBit(GpuTimingScope::WholeFrame)},
   });
   for (const GpuTimingScopeMergeDesc desc : kScopeDescs) {
     mergeGpuTimingReportScope(dst, src, desc);
@@ -450,6 +523,7 @@ enum class RenderPassExecutionMode : uint8_t {
   Graphics = 0,
   ComputeOnly = 1,
   CopyOnly = 2,
+  ExternalTemporal = 3,
 };
 
 struct RenderPass {
@@ -469,6 +543,7 @@ struct RenderPass {
   std::span<const DrawItem> draws{};
   std::span<const MeshDispatchItem> meshDispatches{};
   std::span<const TextureCopyItem> textureCopies{};
+  ExternalTemporalDispatchItem externalTemporalDispatch{};
   bool payloadBorrowed = false;
   bool drawBuffersPreResolved = false;
   GpuTimingScope gpuTimingScope = GpuTimingScope::None;

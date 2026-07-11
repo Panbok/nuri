@@ -70,6 +70,7 @@ public:
   TextureDimensions getTextureDimensions(TextureHandle h) const override;
   TextureCompressionCaps getTextureCompressionCaps() const override;
   GPUAdapterInfo getAdapterInfo() const override;
+  GpuMultisampleCapabilities getMultisampleCapabilities() const override;
   bool supportsFeature(GPUFeature feature) const override;
   MeshletLimits getMeshletLimits() const override;
   bool supportsSampledImageLinearFiltering(Format format) const override;

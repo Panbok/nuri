@@ -85,8 +85,8 @@ private:
   std::array<TextureHandle, 3> denoiseDependencies_{};
   std::array<RenderGraphAccessMode, 3> denoiseAccessModes_{};
   std::array<ComputeDispatchItem, 1> denoiseDispatches_{};
-  std::array<TextureHandle, 6> temporalDependencies_{};
-  std::array<RenderGraphAccessMode, 6> temporalAccessModes_{};
+  std::array<TextureHandle, 9> temporalDependencies_{};
+  std::array<RenderGraphAccessMode, 9> temporalAccessModes_{};
   std::array<ComputeDispatchItem, 1> temporalDispatches_{};
   std::array<std::byte, kPushConstantBufferSize> depthPrefilterPushBytes_{};
   std::array<std::byte, kPushConstantBufferSize> edgePushBytes_{};

@@ -245,6 +245,14 @@ enum class GPUFeature : uint8_t {
   RayTracingClusters,
 };
 
+struct GpuMultisampleCapabilities {
+  bool sample4Color = false;
+  bool sample4Depth = false;
+  bool depthResolveMin = false;
+  bool alphaToCoverage = false;
+  bool sampleRateShading = false;
+};
+
 constexpr const char *ShaderStageToString(ShaderStage stage) {
   switch (stage) {
   case ShaderStage::Vertex:

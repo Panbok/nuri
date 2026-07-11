@@ -2,6 +2,8 @@
 
 #include "nuri/gfx/visibility/visibility.h"
 
+#include "nuri/gfx/frame/presentation_aa_plan.h"
+
 #include <limits>
 
 namespace nuri {
@@ -147,8 +149,9 @@ VisibilityPassGpuData makeMainViewVisibilityPassGpuData(
   out.view = camera.view;
   out.proj = cameraCurrentUnjitteredProjection(camera);
   out.viewProj = cameraCurrentUnjitteredViewProjection(camera);
-  out.previousViewProj =
-      camera.historyValid ? camera.previousUnjitteredViewProj : out.viewProj;
+  out.previousViewProj = hasTemporalCameraContinuity(camera)
+                             ? camera.previousUnjitteredViewProj
+                             : out.viewProj;
   for (size_t i = 0; i < request.frustum.planes.size(); ++i) {
     out.planes[i] = request.frustum.planes[i];
   }

@@ -9,6 +9,8 @@ layout(location = 13) flat in uint meshletMaterialIndex;
 
 layout(location = 0) out vec2 out_FragVelocity;
 
+const vec2 kInvalidMotionVector = vec2(16.0);
+
 vec2 clipNdcToTaaScreenUv(vec2 ndc) {
   return vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 }
@@ -36,7 +38,7 @@ void main() {
 
   if (inVelocityFlags == 0u || inCurrentClipNoJitter.w == 0.0 ||
       inPreviousClipNoJitter.w == 0.0) {
-    out_FragVelocity = vec2(0.0);
+    out_FragVelocity = kInvalidMotionVector;
     return;
   }
 

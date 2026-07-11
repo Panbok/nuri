@@ -101,6 +101,16 @@ public:
   virtual TextureDimensions getTextureDimensions(TextureHandle h) const = 0;
   virtual TextureCompressionCaps getTextureCompressionCaps() const = 0;
   virtual GPUAdapterInfo getAdapterInfo() const { return {}; }
+  virtual GpuMultisampleCapabilities getMultisampleCapabilities() const {
+    return {};
+  }
+  virtual ExternalTemporalProviderBackend *externalTemporalProviderBackend() {
+    return nullptr;
+  }
+  virtual ExternalTemporalProviderCapabilities
+  getExternalTemporalProviderCapabilities() const {
+    return {};
+  }
   virtual bool supportsFeature(GPUFeature feature) const {
     (void)feature;
     return false;
@@ -156,6 +166,16 @@ public:
                          std::span<const GraphicsBarrierRecord> barriers) = 0;
   virtual Result<bool, std::string>
   recordGraphicsPass(RecordingContextHandle ctx, const RenderPass &pass) = 0;
+  virtual Result<bool, std::string> recordExternalTemporalDispatch(
+      RecordingContextHandle ctx, const ExternalTemporalDispatchItem &dispatch,
+      GpuTimingScope timingScope, std::string_view debugLabel) {
+    (void)ctx;
+    (void)dispatch;
+    (void)timingScope;
+    (void)debugLabel;
+    return Result<bool, std::string>::makeError(
+        "external temporal dispatch is unsupported by this GPU backend");
+  }
   virtual Result<RecordedCommandBufferHandle, std::string>
   finishGraphicsRecordingContext(RecordingContextHandle ctx) = 0;
   virtual Result<bool, std::string>

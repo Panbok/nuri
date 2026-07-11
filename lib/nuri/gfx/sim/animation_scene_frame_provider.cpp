@@ -36,4 +36,14 @@ AnimationSceneFrameProvider::prepare(FrameBuildContext &ctx) {
   return Result<bool, std::string>::makeResult(true);
 }
 
+void AnimationSceneFrameProvider::onFrameSubmitted(
+    const RenderFrameContext &frame) noexcept {
+  runtime_.commitAnimationSceneFrame(frame.frameIndex);
+}
+
+void AnimationSceneFrameProvider::onFrameAbandoned(
+    const RenderFrameContext &frame) noexcept {
+  runtime_.abandonAnimationSceneFrame(frame.frameIndex);
+}
+
 } // namespace nuri

@@ -2,6 +2,7 @@
 
 #include "nuri/gfx/pipeline/features/spatial_aa_feature.h"
 
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 
 #include <algorithm>
@@ -104,9 +105,13 @@ shouldRunSpatialAA(const RenderFrameContext &frame) noexcept {
     return true;
   }
   if (mode == AntiAliasingMode::MSAA4x) {
-    return aaDebug.spatialPostMsaaCleanup && !isTaaDebugView(debugView);
+    return false;
   }
   if (mode != AntiAliasingMode::TAA || isTaaDebugView(debugView)) {
+    return false;
+  }
+  if (presentationAAPlanForFrame(frame).reconstruction ==
+      ColorReconstruction::ReferenceTAA) {
     return false;
   }
   const bool fallbackWindow =
@@ -125,6 +130,12 @@ shouldRunPostTransparentSpatialAA(const RenderFrameContext &frame) noexcept {
       effectiveTemporalAADebugSettings(settings.antiAliasing);
   const AntiAliasingDebugView debugView =
       sanitizeAntiAliasingDebugView(aaDebug.view);
+  const PresentationAAPlan presentationAA = presentationAAPlanForFrame(frame);
+  if (presentationAA.coverage == CoverageMode::Sample4) {
+    return presentationAA.spatialCleanup ==
+               SpatialCleanupPoint::PostTransparency &&
+           !isAADebugOutputView(debugView);
+  }
   const bool jitteredTaaFrame = frame.camera.jitterEnabled;
   return mode == AntiAliasingMode::TAA && settings.transparent.enabled &&
          aaDebug.transparentPostTaaSpatialCleanup && !jitteredTaaFrame &&
@@ -140,6 +151,10 @@ isSpatialFallbackActive(const RenderFrameContext &frame) noexcept {
       sanitizeAntiAliasingMode(settings.antiAliasing.mode);
   if (mode == AntiAliasingMode::SpatialFallback) {
     return true;
+  }
+  if (presentationAAPlanForFrame(frame).reconstruction ==
+      ColorReconstruction::ReferenceTAA) {
+    return false;
   }
   return mode == AntiAliasingMode::TAA &&
          (!frame.camera.historyValid || frame.camera.framesSinceHistoryReset <
@@ -651,8 +666,15 @@ Result<bool, std::string> SpatialAAPass::prepare(FrameBuildContext &ctx) {
     const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
     const RenderSettings::AntiAliasingDebugSettings aaDebug =
         effectiveTemporalAADebugSettings(settings.antiAliasing);
-    ctx.frame.metrics.antiAliasing.taaTransparentPostSpatialCleanupEnabled =
-        aaDebug.transparentPostTaaSpatialCleanup;
+    if (presentationAAPlanForFrame(ctx.frame).coverage ==
+        CoverageMode::Sample4) {
+      ctx.frame.metrics.antiAliasing.msaaSpatialCleanupEnabled =
+          presentationAAPlanForFrame(ctx.frame).spatialCleanup ==
+          SpatialCleanupPoint::PostTransparency;
+    } else {
+      ctx.frame.metrics.antiAliasing.taaTransparentPostSpatialCleanupEnabled =
+          aaDebug.transparentPostTaaSpatialCleanup;
+    }
   }
   if (!isEnabled(ctx)) {
     return Result<bool, std::string>::makeResult(true);
@@ -746,7 +768,7 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
   const bool cleanupActive =
       postTransparent ? true : isSpatialCleanupActive(ctx.frame);
   const SpatialAAProfile profile =
-      postTransparent
+      postTransparent && aaMode != AntiAliasingMode::MSAA4x
           ? SpatialAAProfile{
                 .edgeThreshold = kSpatialAATaaCleanupEdgeThreshold,
                 .resolveStrength = kSpatialAATaaCleanupResolveStrength,
@@ -812,6 +834,14 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     if (cleanupActive) {
       ++aaMetrics.spatialAACleanupFrameCount;
     }
+  } else if (aaMode == AntiAliasingMode::MSAA4x) {
+    aaMetrics.spatialAAEnabled = true;
+    aaMetrics.spatialAACleanupActive = true;
+    aaMetrics.msaaSpatialCleanupEnabled = true;
+    aaMetrics.msaaSpatialCleanupActive = true;
+    aaMetrics.spatialAAWidth = dimensions.width;
+    aaMetrics.spatialAAHeight = dimensions.height;
+    ++aaMetrics.spatialAACleanupFrameCount;
   } else {
     aaMetrics.taaTransparentPostSpatialCleanupActive = true;
   }
@@ -840,7 +870,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addEdge.error());
   }
   if (postTransparent) {
-    ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+    if (aaMode == AntiAliasingMode::MSAA4x) {
+      ++aaMetrics.spatialAAPassCount;
+      ++aaMetrics.spatialAAEdgePassCount;
+    } else {
+      ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+    }
   } else {
     ++aaMetrics.spatialAAPassCount;
     ++aaMetrics.spatialAAEdgePassCount;
@@ -878,7 +913,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
       return Result<bool, std::string>::makeError(addBlend.error());
     }
     if (postTransparent) {
-      ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+      if (aaMode == AntiAliasingMode::MSAA4x) {
+        ++aaMetrics.spatialAAPassCount;
+        ++aaMetrics.spatialAABlendPassCount;
+      } else {
+        ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+      }
     } else {
       ++aaMetrics.spatialAAPassCount;
       ++aaMetrics.spatialAABlendPassCount;
@@ -945,7 +985,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addOutput.error());
   }
   if (postTransparent) {
-    ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+    if (aaMode == AntiAliasingMode::MSAA4x) {
+      ++aaMetrics.spatialAAPassCount;
+      ++aaMetrics.spatialAANeighborhoodPassCount;
+    } else {
+      ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+    }
   } else {
     ++aaMetrics.spatialAAPassCount;
     ++aaMetrics.spatialAANeighborhoodPassCount;
@@ -982,7 +1027,12 @@ Result<bool, std::string> SpatialAAPass::build(FrameBuildContext &ctx) {
     return Result<bool, std::string>::makeError(addCopy.error());
   }
   if (postTransparent) {
-    ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+    if (aaMode == AntiAliasingMode::MSAA4x) {
+      ++aaMetrics.spatialAAPassCount;
+      ++aaMetrics.spatialAACopyBackPassCount;
+    } else {
+      ++aaMetrics.taaTransparentPostSpatialAAPassCount;
+    }
   } else {
     ++aaMetrics.spatialAAPassCount;
     ++aaMetrics.spatialAACopyBackPassCount;

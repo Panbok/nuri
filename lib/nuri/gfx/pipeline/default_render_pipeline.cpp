@@ -8,6 +8,7 @@
 #include "nuri/gfx/pipeline/features/gtao_feature.h"
 #include "nuri/gfx/pipeline/features/msaa_resolve_feature.h"
 #include "nuri/gfx/pipeline/features/opaque_feature.h"
+#include "nuri/gfx/pipeline/features/reference_taa_feature.h"
 #include "nuri/gfx/pipeline/features/shadow_feature.h"
 #include "nuri/gfx/pipeline/features/skybox_feature.h"
 #include "nuri/gfx/pipeline/features/spatial_aa_feature.h"
@@ -33,6 +34,8 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
   auto opaqueRenderer =
       makeSharedOpaqueRenderer(gpu, shaderConfig.opaque, memory);
   pipeline.addFeature(std::make_unique<OpaquePrepassFeature>(opaqueRenderer));
+  pipeline.addFeature(
+      std::make_unique<TemporalInputFeature>(gpu, shaderConfig.composite));
   pipeline.addFeature(std::make_unique<GTAOFeature>(gpu, shaderConfig.opaque));
   pipeline.addFeature(std::make_unique<OpaqueMainFeature>(opaqueRenderer));
   pipeline.addFeature(
@@ -48,6 +51,8 @@ registerDefaultRenderPipeline(RenderPipeline &pipeline, GPUDevice &gpu,
       std::make_unique<TransmissionFeature>(gpu, shaderConfig.opaque, memory));
   pipeline.addFeature(
       std::make_unique<TransparentFeature>(gpu, shaderConfig.opaque, memory));
+  pipeline.addFeature(
+      std::make_unique<ReferenceTAAFeature>(gpu, shaderConfig.composite));
   pipeline.addFeature(std::make_unique<SpatialAAFeature>(
       gpu, shaderConfig.composite, SpatialAAPlacement::PostTransparent));
   pipeline.addFeature(

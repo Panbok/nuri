@@ -628,7 +628,9 @@ constexpr uint32_t kGpuTimingIntervalsPerContext = 16u;
 constexpr uint32_t kGpuTimingQueriesPerContext =
     kGpuTimingIntervalsPerContext * 2u;
 constexpr uint32_t kGpuTimingQueryPoolSize =
-    kMaxGraphicsRecordingContexts * kGpuTimingQueriesPerContext;
+    2u + kMaxGraphicsRecordingContexts * kGpuTimingQueriesPerContext;
+constexpr uint32_t kWholeFrameTimingBeginQuery = 0u;
+constexpr uint32_t kWholeFrameTimingEndQuery = 1u;
 constexpr uint32_t kInvalidTimingQueryIndex = UINT32_MAX;
 
 [[nodiscard]] Result<bool, std::string>
@@ -832,6 +834,7 @@ struct ActiveGraphicsRecordingContext {
   std::vector<PendingTimingQueryRange> timingRanges{};
   bool hadShadowSdsmPass = false;
   bool timingQuerySliceReset = false;
+  bool wholeFrameTimingStarted = false;
 };
 
 struct RecordedGraphicsCommandBuffer {
@@ -839,7 +842,52 @@ struct RecordedGraphicsCommandBuffer {
   lvk::ICommandBuffer *commandBuffer = nullptr;
   std::vector<PendingTimingQueryRange> timingRanges{};
   bool hadShadowSdsmPass = false;
+  bool wholeFrameTimingStarted = false;
 };
+
+[[nodiscard]] GpuMultisampleCapabilities
+queryMultisampleCapabilities(lvk::IContext *context,
+                             bool sampleRateShadingEnabled) {
+#if NURI_LVK_HAS_VULKAN_COMMAND_BUFFER
+  auto *vkContext = dynamic_cast<lvk::VulkanContext *>(context);
+  if (vkContext == nullptr) {
+    return {};
+  }
+  const VkPhysicalDevice device = vkContext->getVkPhysicalDevice();
+  const auto supports4x = [device](VkFormat format, VkImageUsageFlags usage) {
+    VkImageFormatProperties properties{};
+    return vkGetPhysicalDeviceImageFormatProperties(
+               device, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage,
+               0u, &properties) == VK_SUCCESS &&
+           (properties.sampleCounts & VK_SAMPLE_COUNT_4_BIT) != 0u;
+  };
+  VkPhysicalDeviceDepthStencilResolveProperties resolveProperties{
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES,
+  };
+  VkPhysicalDeviceProperties2 properties{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+      .pNext = &resolveProperties,
+  };
+  vkGetPhysicalDeviceProperties2(device, &properties);
+
+  const bool sample4Color = supports4x(VK_FORMAT_R16G16B16A16_SFLOAT,
+                                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+  return GpuMultisampleCapabilities{
+      .sample4Color = sample4Color,
+      .sample4Depth = supports4x(VK_FORMAT_D32_SFLOAT,
+                                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT),
+      .depthResolveMin = (resolveProperties.supportedDepthResolveModes &
+                          VK_RESOLVE_MODE_MIN_BIT) != 0u,
+      .alphaToCoverage = sample4Color,
+      .sampleRateShading = sampleRateShadingEnabled,
+  };
+#else
+  (void)context;
+  (void)sampleRateShadingEnabled;
+  return {};
+#endif
+}
 
 struct LvkGPUDevice::Impl {
   Window *window = nullptr;
@@ -853,6 +901,7 @@ struct LvkGPUDevice::Impl {
   uint32_t preparedSwapchainImageCount = 0u;
   bool hasPreparedSwapchainImage = false;
   TextureCompressionCaps compressionCaps{};
+  GpuMultisampleCapabilities multisampleCapabilities{};
   GPUAdapterInfo adapterInfo{};
   ResourceTable<SamplerHandle, lvk::SamplerHandle> samplers;
   SamplerHandle cubemapSampler{};
@@ -1074,6 +1123,25 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
              &GpuTimingReport::hdrPostProcessTimeMs,
              &GpuTimingReport::hdrPostProcessSourceFrameIndex,
              gpuTimingScopeToBit(GpuTimingScope::HDRPostProcess)},
+            {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
+             &GpuTimingReport::skyboxSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::Skybox)},
+            {GpuTimingScope::Velocity, &GpuTimingReport::velocityTimeMs,
+             &GpuTimingReport::velocitySourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::Velocity)},
+            {GpuTimingScope::ReactiveMask, &GpuTimingReport::reactiveMaskTimeMs,
+             &GpuTimingReport::reactiveMaskSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::ReactiveMask)},
+            {GpuTimingScope::TemporalAACopyBack,
+             &GpuTimingReport::temporalAACopyBackTimeMs,
+             &GpuTimingReport::temporalAACopyBackSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack)},
+            {GpuTimingScope::GTAOTemporal, &GpuTimingReport::gtaoTemporalTimeMs,
+             &GpuTimingReport::gtaoTemporalSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal)},
+            {GpuTimingScope::WholeFrame, &GpuTimingReport::wholeFrameTimeMs,
+             &GpuTimingReport::wholeFrameSourceFrameIndex,
+             gpuTimingScopeToBit(GpuTimingScope::WholeFrame)},
         });
     constexpr size_t kTimingScopeCount = kTimingCollectionDescs.size();
     std::array<double, kTimingScopeCount> timingMs{};
@@ -1086,7 +1154,6 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
       }
       return kTimingCollectionDescs.size();
     };
-    const size_t shadowTimingIndex = findTimingIndex(GpuTimingScope::Shadow);
     const size_t shadowSdsmTimingIndex =
         findTimingIndex(GpuTimingScope::ShadowSdsm);
     bool hadShadowSdsmRange = false;
@@ -1121,10 +1188,11 @@ template <typename Impl> void collectCompletedGpuTimingSubmissions(Impl &impl) {
         }
         timingMs[timingIndex] += intervalTimeMs;
         timingAvailable[timingIndex] = true;
-        if ((range.scope == GpuTimingScope::ShadowDepth ||
-             range.scope == GpuTimingScope::ShadowSdsm) &&
-            shadowTimingIndex != kTimingScopeCount) {
-          timingAvailable[shadowTimingIndex] = true;
+        const size_t parentTimingIndex =
+            findTimingIndex(gpuTimingParentScope(range.scope));
+        if (parentTimingIndex != kTimingScopeCount) {
+          timingMs[parentTimingIndex] += intervalTimeMs;
+          timingAvailable[parentTimingIndex] = true;
         }
       }
     }
@@ -1265,6 +1333,9 @@ LvkGPUDevice::create(Window &window, const GPUDeviceCreateDesc &desc) {
         deviceFeatures.textureCompressionETC2 == VK_TRUE;
     device->impl_->compressionCaps.astc =
         deviceFeatures.textureCompressionASTC_LDR == VK_TRUE;
+    device->impl_->multisampleCapabilities = queryMultisampleCapabilities(
+        device->impl_->context.get(),
+        deviceFeatures.sampleRateShading == VK_TRUE);
     device->impl_->maxSamplerLodBias = properties.limits.maxSamplerLodBias;
     if (deviceFeatures.samplerAnisotropy == VK_TRUE &&
         properties.limits.maxSamplerAnisotropy > 1.0f) {
@@ -2295,6 +2366,11 @@ GPUAdapterInfo LvkGPUDevice::getAdapterInfo() const {
   return impl_ != nullptr ? impl_->adapterInfo : GPUAdapterInfo{};
 }
 
+GpuMultisampleCapabilities LvkGPUDevice::getMultisampleCapabilities() const {
+  return impl_ != nullptr ? impl_->multisampleCapabilities
+                          : GpuMultisampleCapabilities{};
+}
+
 bool LvkGPUDevice::supportsFeature(GPUFeature feature) const {
   switch (feature) {
   case GPUFeature::Meshlets:
@@ -3134,15 +3210,27 @@ LvkGPUDevice::acquireGraphicsRecordingContext(uint32_t workerIndex) {
     impl_->activeGraphicsContextOccupied.resize(static_cast<size_t>(index) + 1u,
                                                 0u);
   }
+  const bool wholeFrameTimingStarted =
+      workerIndex == 0u && impl_->currentFrameTimingCapture.has_value() &&
+      impl_->currentFrameTimingCapture->pool.handle.valid();
+  if (wholeFrameTimingStarted) {
+    commandBuffer.cmdResetQueryPool(
+        impl_->currentFrameTimingCapture->pool.handle, 0u,
+        kGpuTimingQueryPoolSize);
+    commandBuffer.cmdWriteTimestamp(
+        impl_->currentFrameTimingCapture->pool.handle,
+        kWholeFrameTimingBeginQuery);
+  }
   impl_->activeGraphicsContexts[index] = ActiveGraphicsRecordingContext{
       .handle = handle,
       .commandBuffer = &commandBuffer,
       .workerIndex = workerIndex,
-      .timingQueryBase = workerIndex * kGpuTimingQueriesPerContext,
+      .timingQueryBase = 2u + workerIndex * kGpuTimingQueriesPerContext,
       .timingQueryCursor = 0u,
       .timingRanges = {},
       .hadShadowSdsmPass = false,
-      .timingQuerySliceReset = false,
+      .timingQuerySliceReset = wholeFrameTimingStarted,
+      .wholeFrameTimingStarted = wholeFrameTimingStarted,
   };
   impl_->activeGraphicsContextOccupied[index] = 1u;
   return Result<RecordingContextHandle, std::string>::makeResult(handle);
@@ -3362,6 +3450,7 @@ LvkGPUDevice::finishGraphicsRecordingContext(RecordingContextHandle ctx) {
       .commandBuffer = activeContext->commandBuffer,
       .timingRanges = std::move(activeContext->timingRanges),
       .hadShadowSdsmPass = activeContext->hadShadowSdsmPass,
+      .wholeFrameTimingStarted = activeContext->wholeFrameTimingStarted,
   });
   impl_->activeGraphicsContexts[ctx.index] = ActiveGraphicsRecordingContext{};
   impl_->activeGraphicsContextOccupied[ctx.index] = 0u;
@@ -3481,6 +3570,7 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
 
   std::vector<PendingTimingQueryRange> timingRanges{};
   bool hadShadowSdsmPass = false;
+  bool wholeFrameTimingStarted = false;
   if (impl_->currentFrameTimingCapture.has_value()) {
     size_t timingRangeCount = 0u;
     for (const size_t matchedIndex : matchedRecordedIndices) {
@@ -3492,7 +3582,13 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
       hadShadowSdsmPass = hadShadowSdsmPass || recorded.hadShadowSdsmPass;
       timingRangeCount += recorded.timingRanges.size();
     }
-    timingRanges.reserve(timingRangeCount);
+    if (!matchedRecordedIndices.empty()) {
+      wholeFrameTimingStarted =
+          impl_->recordedGraphicsCommandBuffers[matchedRecordedIndices.front()]
+              .wholeFrameTimingStarted;
+    }
+    timingRanges.reserve(timingRangeCount +
+                         (wholeFrameTimingStarted ? 1u : 0u));
     for (const size_t matchedIndex : matchedRecordedIndices) {
       if (matchedIndex >= impl_->recordedGraphicsCommandBuffers.size()) {
         continue;
@@ -3504,6 +3600,21 @@ Result<SubmissionHandle, std::string> LvkGPUDevice::submitRecordedGraphicsFrame(
       }
       timingRanges.insert(timingRanges.end(), recorded.timingRanges.begin(),
                           recorded.timingRanges.end());
+    }
+    if (wholeFrameTimingStarted && !matchedRecordedIndices.empty()) {
+      lvk::ICommandBuffer *lastCommandBuffer =
+          impl_->recordedGraphicsCommandBuffers[matchedRecordedIndices.back()]
+              .commandBuffer;
+      if (lastCommandBuffer != nullptr) {
+        lastCommandBuffer->cmdWriteTimestamp(
+            impl_->currentFrameTimingCapture->pool.handle,
+            kWholeFrameTimingEndQuery);
+        timingRanges.push_back(PendingTimingQueryRange{
+            .scope = GpuTimingScope::WholeFrame,
+            .firstQuery = kWholeFrameTimingBeginQuery,
+            .intervalCount = 1u,
+        });
+      }
     }
   }
   if (hadShadowSdsmPass && !impl_->loggedShadowSdsmTimingSubmissionWarning) {

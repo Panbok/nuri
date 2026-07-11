@@ -37,6 +37,12 @@ public:
   [[nodiscard]] virtual bool isTerminalFeature() const noexcept {
     return false;
   }
+  virtual void onFrameSubmitted(const RenderFrameContext &frame) noexcept {
+    (void)frame;
+  }
+  virtual void onFrameAbandoned(const RenderFrameContext &frame) noexcept {
+    (void)frame;
+  }
   [[nodiscard]] virtual std::span<RenderFeaturePass *const>
   passes() noexcept = 0;
 };

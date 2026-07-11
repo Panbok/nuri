@@ -65,7 +65,10 @@ void main() {
                            vec4(currentWorldPos, 1.0);
   outPreviousClipNoJitter = pc.velocityFrameData.data.previousViewProjNoJitter *
                             vec4(previousWorldPos, 1.0);
-  outVelocityFlags = inVelocityFlags[0];
+  // Any control point without stable previous identity invalidates the whole
+  // generated patch; interpolating a current-position fallback is not motion.
+  outVelocityFlags =
+      inVelocityFlags[0] & inVelocityFlags[1] & inVelocityFlags[2];
   gl_Position =
       pc.frameData.proj * pc.frameData.view * vec4(currentWorldPos, 1.0);
 }

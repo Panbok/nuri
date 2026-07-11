@@ -55,6 +55,7 @@ constexpr uint32_t kMaxGraphicsRecordingContexts = 1u;
 constexpr uint32_t kSwapchainFramesInFlight = 2u;
 constexpr uint32_t kBindlessCapacity = 4096u;
 constexpr uint32_t kMaxNvrhiGpuTimerQueries = 2048u;
+constexpr uint32_t kWholeFrameTimingSlotCount = kSwapchainFramesInFlight + 1u;
 constexpr size_t kPushConstantByteSize = 128u;
 constexpr uint32_t kDefaultMeshletMaxVertices = 64u;
 constexpr uint32_t kDefaultMeshletMaxPrimitives = 124u;
@@ -1330,6 +1331,11 @@ struct NvrhiTimingQuery {
   nvrhi::TimerQueryHandle query{};
 };
 
+struct NvrhiWholeFrameTimingSlot {
+  VkQueryPool queryPool = VK_NULL_HANDLE;
+  std::array<nvrhi::CommandListHandle, 2> commandLists{};
+};
+
 struct ActiveGraphicsRecordingContext {
   RecordingContextHandle handle{};
   nvrhi::CommandListHandle commandList{};
@@ -1349,6 +1355,7 @@ struct PendingGpuTimingSubmission {
   uint64_t frameIndex = 0u;
   uint64_t submissionInstance = 0u;
   std::vector<NvrhiTimingQuery> timingQueries;
+  NvrhiWholeFrameTimingSlot wholeFrameTiming{};
 };
 
 struct PendingBackgroundCopySubmission {
@@ -1365,6 +1372,42 @@ struct QueueFamilySelection {
   uint32_t graphics = std::numeric_limits<uint32_t>::max();
   bool hasGraphics = false;
 };
+
+[[nodiscard]] GpuMultisampleCapabilities
+queryMultisampleCapabilities(VkPhysicalDevice device,
+                             bool sampleRateShadingEnabled) {
+  if (device == VK_NULL_HANDLE) {
+    return {};
+  }
+  const auto supports4x = [device](VkFormat format, VkImageUsageFlags usage) {
+    VkImageFormatProperties properties{};
+    return vkGetPhysicalDeviceImageFormatProperties(
+               device, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage,
+               0u, &properties) == VK_SUCCESS &&
+           (properties.sampleCounts & VK_SAMPLE_COUNT_4_BIT) != 0u;
+  };
+  VkPhysicalDeviceDepthStencilResolveProperties resolveProperties{
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES,
+  };
+  VkPhysicalDeviceProperties2 properties{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+      .pNext = &resolveProperties,
+  };
+  vkGetPhysicalDeviceProperties2(device, &properties);
+
+  const bool sample4Color = supports4x(VK_FORMAT_R16G16B16A16_SFLOAT,
+                                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+  return GpuMultisampleCapabilities{
+      .sample4Color = sample4Color,
+      .sample4Depth = supports4x(VK_FORMAT_D32_SFLOAT,
+                                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT),
+      .depthResolveMin = (resolveProperties.supportedDepthResolveModes &
+                          VK_RESOLVE_MODE_MIN_BIT) != 0u,
+      .alphaToCoverage = sample4Color,
+      .sampleRateShading = sampleRateShadingEnabled,
+  };
+}
 
 } // namespace
 
@@ -1387,6 +1430,7 @@ struct NvrhiGPUDeviceImpl {
   VkDevice device = VK_NULL_HANDLE;
   VkQueue graphicsQueue = VK_NULL_HANDLE;
   uint32_t graphicsQueueFamily = 0u;
+  bool graphicsQueueTimestampsSupported = false;
   VkPhysicalDeviceProperties physicalDeviceProperties{};
   GPUAdapterInfo adapterInfo{};
   VkPhysicalDeviceMemoryProperties memoryProperties{};
@@ -1415,6 +1459,7 @@ struct NvrhiGPUDeviceImpl {
   nvrhi::BindingSetHandle pushConstantsSet{};
 
   TextureCompressionCaps compressionCaps{};
+  GpuMultisampleCapabilities multisampleCapabilities{};
   uint8_t maxSamplerAnisotropy = 1u;
   float maxSamplerLodBias = 0.0f;
   bool supportsDrawIndirectCount = false;
@@ -1445,6 +1490,7 @@ struct NvrhiGPUDeviceImpl {
   std::vector<uint8_t> activeGraphicsContextOccupied;
   std::vector<RecordedGraphicsCommandBuffer> recordedGraphicsCommandBuffers;
   std::vector<PendingGpuTimingSubmission> pendingGpuTimingSubmissions;
+  std::vector<NvrhiWholeFrameTimingSlot> availableWholeFrameTimingSlots;
   std::vector<PendingBackgroundCopySubmission> pendingBackgroundCopySubmissions;
   std::deque<GpuTimingReport> completedGpuTimingReports;
   GpuTimingReport latestCompletedGpuTimingReport{};
@@ -1458,6 +1504,7 @@ struct NvrhiGPUDeviceImpl {
   uint32_t nextSubmissionIndex = 1u;
   std::unique_ptr<GeometryPool> geometryPool;
   bool loggedGpuTimingQueryWarning = false;
+  bool loggedWholeFrameTimingQueryWarning = false;
   bool loggedShadowSdsmTimingCollectionDiagnostic = false;
 };
 
@@ -1538,6 +1585,19 @@ static constexpr auto kNvrhiTimingScopeDescs =
         {GpuTimingScope::Skybox, &GpuTimingReport::skyboxTimeMs,
          &GpuTimingReport::skyboxSourceFrameIndex,
          gpuTimingScopeToBit(GpuTimingScope::Skybox)},
+        {GpuTimingScope::Velocity, &GpuTimingReport::velocityTimeMs,
+         &GpuTimingReport::velocitySourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::Velocity)},
+        {GpuTimingScope::ReactiveMask, &GpuTimingReport::reactiveMaskTimeMs,
+         &GpuTimingReport::reactiveMaskSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::ReactiveMask)},
+        {GpuTimingScope::TemporalAACopyBack,
+         &GpuTimingReport::temporalAACopyBackTimeMs,
+         &GpuTimingReport::temporalAACopyBackSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::TemporalAACopyBack)},
+        {GpuTimingScope::GTAOTemporal, &GpuTimingReport::gtaoTemporalTimeMs,
+         &GpuTimingReport::gtaoTemporalSourceFrameIndex,
+         gpuTimingScopeToBit(GpuTimingScope::GTAOTemporal)},
     });
 
 void accumulateGpuTimingScope(GpuTimingReport &report, GpuTimingScope scope,
@@ -1552,10 +1612,9 @@ void accumulateGpuTimingScope(GpuTimingReport &report, GpuTimingScope scope,
     break;
   }
 
-  if (scope == GpuTimingScope::ShadowDepth ||
-      scope == GpuTimingScope::ShadowSdsm) {
-    accumulateGpuTimingScope(report, GpuTimingScope::Shadow, timeMs,
-                             frameIndex);
+  const GpuTimingScope parent = gpuTimingParentScope(scope);
+  if (parent != GpuTimingScope::None) {
+    accumulateGpuTimingScope(report, parent, timeMs, frameIndex);
   }
 }
 
@@ -1571,6 +1630,91 @@ nvrhi::TimerQueryHandle createGpuTimerQuery(Impl &impl) {
         "some passes will be unavailable");
   }
   return query;
+}
+
+void destroyWholeFrameTimingSlot(Impl &impl, NvrhiWholeFrameTimingSlot &slot) {
+  slot.commandLists = {};
+  if (slot.queryPool != VK_NULL_HANDLE && impl.device != VK_NULL_HANDLE) {
+    vkDestroyQueryPool(impl.device, slot.queryPool, nullptr);
+  }
+  slot.queryPool = VK_NULL_HANDLE;
+}
+
+[[nodiscard]] bool initializeWholeFrameTimingSlots(Impl &impl) {
+  if (!impl.graphicsQueueTimestampsSupported || impl.device == VK_NULL_HANDLE ||
+      !impl.nvrhiDevice) {
+    return false;
+  }
+  impl.availableWholeFrameTimingSlots.reserve(kWholeFrameTimingSlotCount);
+  const auto fail = [&impl]() {
+    for (NvrhiWholeFrameTimingSlot &created :
+         impl.availableWholeFrameTimingSlots) {
+      destroyWholeFrameTimingSlot(impl, created);
+    }
+    impl.availableWholeFrameTimingSlots.clear();
+    return false;
+  };
+  const VkQueryPoolCreateInfo poolInfo{
+      .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+      .queryType = VK_QUERY_TYPE_TIMESTAMP,
+      .queryCount = 2u,
+  };
+  for (uint32_t i = 0u; i < kWholeFrameTimingSlotCount; ++i) {
+    NvrhiWholeFrameTimingSlot slot{};
+    if (vkCreateQueryPool(impl.device, &poolInfo, nullptr, &slot.queryPool) !=
+        VK_SUCCESS) {
+      destroyWholeFrameTimingSlot(impl, slot);
+      return fail();
+    }
+    slot.commandLists[0] = impl.nvrhiDevice->createCommandList();
+    slot.commandLists[1] = impl.nvrhiDevice->createCommandList();
+    if (!slot.commandLists[0] || !slot.commandLists[1]) {
+      destroyWholeFrameTimingSlot(impl, slot);
+      return fail();
+    }
+    impl.availableWholeFrameTimingSlots.push_back(std::move(slot));
+  }
+  return true;
+}
+
+[[nodiscard]] NvrhiWholeFrameTimingSlot
+acquireWholeFrameTimingSlot(Impl &impl) {
+  if (impl.availableWholeFrameTimingSlots.empty()) {
+    return {};
+  }
+  NvrhiWholeFrameTimingSlot result =
+      std::move(impl.availableWholeFrameTimingSlots.back());
+  impl.availableWholeFrameTimingSlots.pop_back();
+
+  result.commandLists[0]->open();
+  const nvrhi::Object beginNative = result.commandLists[0]->getNativeObject(
+      nvrhi::ObjectTypes::VK_CommandBuffer);
+  const VkCommandBuffer beginCommandBuffer =
+      static_cast<VkCommandBuffer>(beginNative);
+  if (beginCommandBuffer == VK_NULL_HANDLE) {
+    result.commandLists[0]->close();
+    impl.availableWholeFrameTimingSlots.push_back(std::move(result));
+    return {};
+  }
+  vkCmdResetQueryPool(beginCommandBuffer, result.queryPool, 0u, 2u);
+  vkCmdWriteTimestamp2(beginCommandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                       result.queryPool, 0u);
+  result.commandLists[0]->close();
+
+  result.commandLists[1]->open();
+  const nvrhi::Object endNative = result.commandLists[1]->getNativeObject(
+      nvrhi::ObjectTypes::VK_CommandBuffer);
+  const VkCommandBuffer endCommandBuffer =
+      static_cast<VkCommandBuffer>(endNative);
+  if (endCommandBuffer == VK_NULL_HANDLE) {
+    result.commandLists[1]->close();
+    impl.availableWholeFrameTimingSlots.push_back(std::move(result));
+    return {};
+  }
+  vkCmdWriteTimestamp2(endCommandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                       result.queryPool, 1u);
+  result.commandLists[1]->close();
+  return result;
 }
 
 class ScopedNvrhiPassTiming final {
@@ -1635,12 +1779,17 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
     return;
   }
 
+  const uint64_t completedInstance =
+      impl.nvrhiDevice->queueGetCompletedInstance(
+          nvrhi::CommandQueue::Graphics);
   size_t writeIndex = 0u;
   for (size_t readIndex = 0u;
        readIndex < impl.pendingGpuTimingSubmissions.size(); ++readIndex) {
     PendingGpuTimingSubmission &pending =
         impl.pendingGpuTimingSubmissions[readIndex];
-    bool allQueriesReady = true;
+    bool allQueriesReady =
+        pending.wholeFrameTiming.queryPool == VK_NULL_HANDLE ||
+        pending.submissionInstance <= completedInstance;
     for (const NvrhiTimingQuery &timingQuery : pending.timingQueries) {
       if (!timingQuery.query ||
           !impl.nvrhiDevice->pollTimerQuery(timingQuery.query.Get())) {
@@ -1680,6 +1829,31 @@ void collectCompletedGpuTimingSubmissions(Impl &impl) {
         collectedShadowSdsm = true;
         collectedShadowSdsmTimeMs += timeMs;
       }
+    }
+    if (pending.wholeFrameTiming.queryPool != VK_NULL_HANDLE) {
+      std::array<uint64_t, 2> timestamps{};
+      const VkResult timingResult =
+          vkGetQueryPoolResults(impl.device, pending.wholeFrameTiming.queryPool,
+                                0u, 2u, sizeof(timestamps), timestamps.data(),
+                                sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+      if (timingResult == VK_SUCCESS && timestamps[1] >= timestamps[0]) {
+        const double elapsedMs =
+            static_cast<double>(timestamps[1] - timestamps[0]) *
+            static_cast<double>(
+                impl.physicalDeviceProperties.limits.timestampPeriod) /
+            1'000'000.0;
+        completedReport.wholeFrameTimeMs = static_cast<float>(elapsedMs);
+        completedReport.wholeFrameSourceFrameIndex = pending.frameIndex;
+        completedReport.availableScopeMask |= kGpuTimingScopeWholeFrameBit;
+      } else if (!impl.loggedWholeFrameTimingQueryWarning) {
+        impl.loggedWholeFrameTimingQueryWarning = true;
+        NURI_LOG_WARNING(
+            "NvrhiGPUDevice: whole-frame timestamp query readback failed");
+      }
+      NvrhiWholeFrameTimingSlot completedSlot =
+          std::move(pending.wholeFrameTiming);
+      pending.wholeFrameTiming = {};
+      impl.availableWholeFrameTimingSlots.push_back(std::move(completedSlot));
     }
     if (collectedShadowSdsm &&
         !impl.loggedShadowSdsmTimingCollectionDiagnostic) {
@@ -2147,6 +2321,17 @@ void destroyDebugMessenger(Impl &impl) {
 
   vkGetPhysicalDeviceProperties(impl.physicalDevice,
                                 &impl.physicalDeviceProperties);
+  uint32_t queueFamilyCount = 0u;
+  vkGetPhysicalDeviceQueueFamilyProperties(impl.physicalDevice,
+                                           &queueFamilyCount, nullptr);
+  std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+  vkGetPhysicalDeviceQueueFamilyProperties(
+      impl.physicalDevice, &queueFamilyCount, queueFamilies.data());
+  impl.graphicsQueueTimestampsSupported =
+      impl.graphicsQueueFamily < queueFamilies.size() &&
+      queueFamilies[impl.graphicsQueueFamily].timestampValidBits != 0u;
+  impl.multisampleCapabilities =
+      queryMultisampleCapabilities(impl.physicalDevice, false);
   impl.adapterInfo = GPUAdapterInfo{
       .name = impl.physicalDeviceProperties.deviceName,
       .vendorId = impl.physicalDeviceProperties.vendorID,
@@ -2373,6 +2558,13 @@ void destroyDebugMessenger(Impl &impl) {
     return Result<bool, std::string>::makeError(
         "NvrhiGPUDevice::createNvrhiDevice: failed to create immediate "
         "command list");
+  }
+  if (impl.graphicsQueueTimestampsSupported &&
+      !initializeWholeFrameTimingSlots(impl)) {
+    impl.loggedWholeFrameTimingQueryWarning = true;
+    NURI_LOG_WARNING(
+        "NvrhiGPUDevice: whole-frame GPU timing disabled because its fixed "
+        "query ring could not be created");
   }
   return Result<bool, std::string>::makeResult(true);
 }
@@ -2695,6 +2887,13 @@ void destroyVulkan(Impl &impl) {
     impl.nvrhiDevice->runGarbageCollection();
     collectCompletedGpuTimingSubmissions(impl);
   }
+  for (PendingGpuTimingSubmission &pending : impl.pendingGpuTimingSubmissions) {
+    destroyWholeFrameTimingSlot(impl, pending.wholeFrameTiming);
+  }
+  for (NvrhiWholeFrameTimingSlot &slot : impl.availableWholeFrameTimingSlots) {
+    destroyWholeFrameTimingSlot(impl, slot);
+  }
+  impl.availableWholeFrameTimingSlots.clear();
   impl.pendingGpuTimingSubmissions.clear();
   impl.pendingBackgroundCopySubmissions.clear();
   impl.activeGraphicsContexts.clear();
@@ -5041,6 +5240,11 @@ GPUAdapterInfo NvrhiGPUDevice::getAdapterInfo() const {
   return impl_ != nullptr ? impl_->adapterInfo : GPUAdapterInfo{};
 }
 
+GpuMultisampleCapabilities NvrhiGPUDevice::getMultisampleCapabilities() const {
+  return impl_ != nullptr ? impl_->multisampleCapabilities
+                          : GpuMultisampleCapabilities{};
+}
+
 bool NvrhiGPUDevice::supportsFeature(GPUFeature feature) const {
   if (impl_ == nullptr || !impl_->nvrhiDevice) {
     return false;
@@ -5554,7 +5758,7 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
 
   std::vector<size_t> matchedIndices(commandBuffers.size());
   std::vector<nvrhi::ICommandList *> nvrhiCommandLists;
-  nvrhiCommandLists.reserve(commandBuffers.size());
+  nvrhiCommandLists.reserve(commandBuffers.size() + 2u);
   for (size_t i = 0u; i < commandBuffers.size(); ++i) {
     const auto found =
         recordedIndexByHandle.find(foldHandle(commandBuffers[i]));
@@ -5585,6 +5789,14 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
           std::make_move_iterator(recorded.timingQueries.end()));
       recorded.timingQueries.clear();
     }
+  }
+
+  NvrhiWholeFrameTimingSlot wholeFrameTiming =
+      acquireWholeFrameTimingSlot(*impl_);
+  if (wholeFrameTiming.queryPool != VK_NULL_HANDLE) {
+    nvrhiCommandLists.insert(nvrhiCommandLists.begin(),
+                             wholeFrameTiming.commandLists[0].Get());
+    nvrhiCommandLists.push_back(wholeFrameTiming.commandLists[1].Get());
   }
 
   if (wantsPresent) {
@@ -5623,11 +5835,12 @@ NvrhiGPUDevice::submitRecordedGraphicsFrame(
                             impl_->frameResourceReuseWaitInstances.size());
     impl_->frameResourceReuseWaitInstances[frameResourceSlot] = instance;
   }
-  if (!timingQueries.empty()) {
+  if (!timingQueries.empty() || wholeFrameTiming.queryPool != VK_NULL_HANDLE) {
     impl_->pendingGpuTimingSubmissions.push_back(PendingGpuTimingSubmission{
         .frameIndex = impl_->currentFrameIndex,
         .submissionInstance = instance,
         .timingQueries = std::move(timingQueries),
+        .wholeFrameTiming = std::move(wholeFrameTiming),
     });
   }
 

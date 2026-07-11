@@ -43,6 +43,8 @@ public:
                const SimulationExecutionContext &context) override;
   [[nodiscard]] Result<bool, std::string>
   prepareSceneFrame(SceneRuntimeHost &host, uint64_t frameIndex);
+  void commitSceneFrame(uint64_t frameIndex) noexcept;
+  void abandonSceneFrame(uint64_t frameIndex) noexcept;
 
   void reset();
   void attachGpuServices(AnimationGpuServices *services) noexcept {

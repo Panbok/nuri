@@ -28,14 +28,18 @@ uint meshletVelocityFlags(uint globalInstanceId) {
   return 0u;
 }
 
-vec3 meshletPreviousPosition(vec3 currentPosition, uint vertexIndex,
-                             uint globalInstanceId, uint packedVertexFormat) {
+bool meshletPreviousPosition(vec3 currentPosition, uint vertexIndex,
+                             uint globalInstanceId, uint packedVertexFormat,
+                             out vec3 previousPosition) {
+  previousPosition = currentPosition;
   const bool currentDrawAnimated =
       packedVertexFormat == kPackedVertexFormatAnimatedFloat24 ||
       packedVertexFormat == kPackedVertexFormatAnimatedFloat32;
-  if (!currentDrawAnimated ||
-      globalInstanceId >= pc.velocityFrameData.data.previousGeometryInfo.x) {
-    return currentPosition;
+  if (!currentDrawAnimated) {
+    return true;
+  }
+  if (globalInstanceId >= pc.velocityFrameData.data.previousGeometryInfo.x) {
+    return false;
   }
 
   VelocityRenderableGeometryData previousGeometry =
@@ -45,11 +49,13 @@ vec3 meshletPreviousPosition(vec3 currentPosition, uint vertexIndex,
        kVelocityGeometryFlagPreviousVertexBuffer) != 0u;
   const uint previousVertexCount = previousGeometry.metadata.z;
   if (!hasPreviousVertexBuffer || vertexIndex >= previousVertexCount) {
-    return currentPosition;
+    return false;
   }
 
-  return decodeAnimatedPositionFrom(previousGeometry.previousVertexBuffer,
-                                    vertexIndex, previousGeometry.metadata.y);
+  previousPosition =
+      decodeAnimatedPositionFrom(previousGeometry.previousVertexBuffer,
+                                 vertexIndex, previousGeometry.metadata.y);
+  return true;
 }
 
 void writeMeshletVelocityVertex(uint outputIndex, uint vertexIndex,
@@ -69,15 +75,20 @@ void writeMeshletVelocityVertex(uint outputIndex, uint vertexIndex,
   const vec4 currentClipNoJitter =
       pc.velocityFrameData.data.currentViewProjNoJitter * worldPos4;
 
-  const uint velocityFlags = meshletVelocityFlags(globalInstanceId);
+  uint velocityFlags = meshletVelocityFlags(globalInstanceId);
   vec4 previousClipNoJitter = currentClipNoJitter;
   if (velocityFlags != 0u) {
-    const vec3 previousPos = meshletPreviousPosition(
-        pos, vertexIndex, globalInstanceId, packedVertexFormat);
-    const InstanceData previousInst =
-        pc.previousInstanceMatrices.instances[globalInstanceId];
-    previousClipNoJitter = pc.velocityFrameData.data.previousViewProjNoJitter *
-                           previousInst.modelMatrix * vec4(previousPos, 1.0);
+    vec3 previousPos;
+    if (!meshletPreviousPosition(pos, vertexIndex, globalInstanceId,
+                                 packedVertexFormat, previousPos)) {
+      velocityFlags = 0u;
+    } else {
+      const InstanceData previousInst =
+          pc.previousInstanceMatrices.instances[globalInstanceId];
+      previousClipNoJitter =
+          pc.velocityFrameData.data.previousViewProjNoJitter *
+          previousInst.modelMatrix * vec4(previousPos, 1.0);
+    }
   }
 
   gl_MeshVerticesEXT[outputIndex].gl_Position =

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nuri/defines.h"
+#include "nuri/gfx/frame/history_registry.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 #include "nuri/gfx/gpu_device.h"
 #include "nuri/gfx/pipeline/frame_data_provider.h"
@@ -32,6 +33,8 @@ public:
   }
   [[nodiscard]] Result<bool, std::string>
   prepare(FrameBuildContext &ctx) override;
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept override;
+  void onFrameAbandoned(const RenderFrameContext &frame) noexcept override;
 
 private:
   using TextureRing = std::pmr::vector<TextureHandle>;
@@ -49,6 +52,7 @@ private:
   Result<bool, std::string> recreateMsaaSceneTextures();
   Result<bool, std::string> recreateMotionVectorTextures();
   Result<bool, std::string> recreateReactiveMaskTextures();
+  Result<bool, std::string> recreateMotionClassTextures();
   Result<bool, std::string> recreateNormalTextures();
   Result<bool, std::string> recreateAmbientOcclusionTextures();
   Result<bool, std::string> recreateExposureTextures();
@@ -59,6 +63,7 @@ private:
   void destroyMsaaSceneTextures();
   void destroyMotionVectorTextures();
   void destroyReactiveMaskTextures();
+  void destroyMotionClassTextures();
   void destroyNormalTextures();
   void destroyAmbientOcclusionTextures();
   void destroyExposureTextures();
@@ -80,6 +85,7 @@ private:
   TextureRing msaaSceneDepthTextures_;
   TextureRing motionVectorTextures_;
   TextureRing reactiveMaskTextures_;
+  TextureRing motionClassTextures_;
   TextureRing normalTextures_;
   TextureRing ambientOcclusionTextures_;
   TextureRing exposureTextures_;
@@ -106,6 +112,11 @@ private:
   uint32_t textureRingCount_ = 0u;
   uint32_t framebufferWidth_ = 0u;
   uint32_t framebufferHeight_ = 0u;
+  HistoryRegistry historyRegistry_{};
+  FrameTextureRequirementFlags pendingHistoryRequirements_ =
+      FrameTextureRequirementFlags::None;
+  FrameTextureRequirementFlags committedHistoryRequirements_ =
+      FrameTextureRequirementFlags::None;
 };
 
 } // namespace nuri

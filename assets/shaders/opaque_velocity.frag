@@ -7,6 +7,8 @@ layout(location = 12) flat in uint inVelocityFlags;
 
 layout(location = 0) out vec2 out_FragVelocity;
 
+const vec2 kInvalidMotionVector = vec2(16.0);
+
 vec2 clipNdcToTaaScreenUv(vec2 ndc) {
   // Must match taa_resolve.frag::taaScreenUv(). fullscreen_copy.vert feeds TAA
   // with the render-target UV space where Y is flipped relative to clip NDC.
@@ -36,7 +38,9 @@ void main() {
 
   if (inVelocityFlags == 0u || inCurrentClipNoJitter.w == 0.0 ||
       inPreviousClipNoJitter.w == 0.0) {
-    out_FragVelocity = vec2(0.0);
+    // Zero is valid static motion. Emit an out-of-domain sentinel so the
+    // motion-class pass can distinguish missing previous state per pixel.
+    out_FragVelocity = kInvalidMotionVector;
     return;
   }
 

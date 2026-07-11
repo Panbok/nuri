@@ -19,6 +19,12 @@ public:
   // on failure.
   [[nodiscard]] virtual Result<bool, std::string>
   prepare(FrameBuildContext &ctx) = 0;
+  virtual void onFrameSubmitted(const RenderFrameContext &frame) noexcept {
+    (void)frame;
+  }
+  virtual void onFrameAbandoned(const RenderFrameContext &frame) noexcept {
+    (void)frame;
+  }
 };
 
 } // namespace nuri

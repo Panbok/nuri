@@ -27,6 +27,7 @@ namespace nuri {
 
 class RenderScene;
 class ResourceManager;
+class TemporalFrameService;
 struct RenderFrameContext;
 
 enum class OpaqueDebugVisualization : uint8_t {
@@ -60,6 +61,75 @@ enum class AntiAliasingMode : uint8_t {
   TAA = 1,
   SpatialFallback = 2,
   MSAA4x = 3,
+};
+
+enum class TemporalReconstructionProvider : uint8_t {
+  Legacy = 0,
+  Reference = 1,
+  External = 2,
+};
+
+enum class CoverageMode : uint8_t {
+  Sample1 = 0,
+  Sample4 = 1,
+};
+
+enum class ColorReconstruction : uint8_t {
+  Off = 0,
+  ReferenceTAA = 1,
+  LegacyTAA = 2,
+  ExternalTemporal = 3,
+};
+
+enum class SpatialCleanupPoint : uint8_t {
+  Off = 0,
+  PreComposition = 1,
+  PostTransparency = 2,
+};
+
+enum class AlphaCoveragePolicy : uint8_t {
+  Off = 0,
+  ThresholdedAlphaToCoverage = 1,
+};
+
+enum class TransparencyAAPolicy : uint8_t {
+  InheritCoverage = 0,
+  SingleSamplePostResolve = 1,
+};
+
+enum class PresentationAAUnsupportedReason : uint8_t {
+  None = 0,
+  Sample4Color = 1,
+  Sample4Depth = 2,
+  DepthResolveMin = 3,
+  AlphaToCoverage = 4,
+};
+
+struct PresentationAAProviderCapabilities {
+  bool referenceTemporal = true;
+  bool externalTemporal = false;
+  bool reactiveMask = true;
+  bool compositionMask = false;
+};
+
+using PresentationAAGpuCapabilities = GpuMultisampleCapabilities;
+
+struct PresentationAAPlan {
+  CoverageMode coverage = CoverageMode::Sample1;
+  ColorReconstruction reconstruction = ColorReconstruction::Off;
+  SpatialCleanupPoint spatialCleanup = SpatialCleanupPoint::Off;
+  AlphaCoveragePolicy alphaCoverage = AlphaCoveragePolicy::Off;
+  TransparencyAAPolicy transparency = TransparencyAAPolicy::InheritCoverage;
+  bool sampleShadingSupported = false;
+  bool sampleShadingEnabled = false;
+  bool jitterScene = false;
+  bool needsMotion = false;
+  bool needsReactiveMask = false;
+  bool needsCompositionMask = false;
+  bool needsMotionClass = false;
+  bool gtaoTemporal = false;
+  bool valid = false;
+  bool operator==(const PresentationAAPlan &) const = default;
 };
 
 enum class AntiAliasingDebugView : uint8_t {
@@ -301,6 +371,7 @@ static constexpr uint32_t kMsaa4xSampleCount = 4u;
 static constexpr Format kFrameCompositionMotionVectorFormat =
     Format::RG16_FLOAT;
 static constexpr Format kFrameCompositionReactiveMaskFormat = Format::R8_UNORM;
+static constexpr Format kFrameCompositionMotionClassFormat = Format::R8_UNORM;
 static constexpr Format kFrameCompositionNormalFormat = Format::RGBA16_FLOAT;
 static constexpr Format kFrameCompositionAmbientOcclusionFormat =
     Format::R16_UNORM;
@@ -311,6 +382,23 @@ static constexpr ClearColor kFrameCompositionMotionVectorClearValue{
     .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
 static constexpr ClearColor kFrameCompositionReactiveMaskClearValue{
     .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.0f};
+
+enum class MotionClass : uint8_t {
+  Invalid = 0u,
+  ProvenStaticCameraOnly = 1u,
+  Full = 2u,
+  BackgroundRotation = 3u,
+};
+
+[[nodiscard]] constexpr float encodeMotionClass(MotionClass value) noexcept {
+  return static_cast<float>(value) / 255.0f;
+}
+
+static constexpr ClearColor kFrameCompositionMotionClassClearValue{
+    .r = encodeMotionClass(MotionClass::Invalid),
+    .g = 0.0f,
+    .b = 0.0f,
+    .a = 0.0f};
 static constexpr ClearColor kFrameCompositionNormalClearValue{
     .r = 0.0f, .g = 0.0f, .b = 1.0f, .a = 0.0f};
 // Ambient occlusion stores scalar visibility in R when
@@ -724,7 +812,7 @@ struct RenderSettings {
     bool resetHistoryRequested = false;
     bool logDiagnostics = false;
     bool spatialPostTaaCleanup = true;
-    bool spatialPostMsaaCleanup = true;
+    bool spatialPostMsaaCleanup = false;
     bool taaSharpenEnabled = true;
     bool taaMaterialMipBiasEnabled = false;
     bool transparentPostTaaSpatialCleanup = true;
@@ -758,6 +846,8 @@ struct RenderSettings {
 
   struct AntiAliasingSettings {
     AntiAliasingMode mode = AntiAliasingMode::None;
+    TemporalReconstructionProvider temporalProvider =
+        TemporalReconstructionProvider::Legacy;
     TemporalAAQualityPreset qualityPreset = TemporalAAQualityPreset::Quality;
     AntiAliasingDebugSettings debug{};
   };
@@ -827,9 +917,6 @@ inline void sanitizeAmbientOcclusionSettings(
     settings.disabledReason = AmbientOcclusionDisabledReason::ModeDisabled;
   } else if (!opaque.enabled) {
     settings.disabledReason = AmbientOcclusionDisabledReason::OpaqueDisabled;
-  } else if (sanitizeAntiAliasingMode(antiAliasing.mode) ==
-             AntiAliasingMode::MSAA4x) {
-    settings.disabledReason = AmbientOcclusionDisabledReason::Msaa4x;
   } else {
     settings.active = true;
     settings.temporalAccumulation = temporalAccumulationRequested;
@@ -1548,8 +1635,31 @@ struct CameraFrameState {
   bool jitterEnabled = false;
   bool jitterFrozen = false;
   bool jitterOutOfBounds = false;
+  bool cameraContinuityValid = false;
   bool historyValid = false;
 };
+
+// Reprojects a current jittered background ray into the previous unjittered
+// view while deliberately removing both camera translations. Background/sky
+// motion is defined at infinite depth, so only camera rotation is meaningful.
+// Projection changes invalidate temporal history before this is consumed.
+[[nodiscard]] inline glm::mat4
+makeBackgroundRotationReprojection(const CameraFrameState &camera) {
+  if (!camera.historyValid) {
+    return glm::mat4(1.0f);
+  }
+
+  const glm::mat4 previousView = glm::inverse(camera.currentUnjitteredProj) *
+                                 camera.previousUnjitteredViewProj;
+  const glm::mat4 currentRotation = glm::mat4(glm::mat3(camera.view));
+  const glm::mat4 previousRotation = glm::mat4(glm::mat3(previousView));
+  const glm::mat4 currentJitteredRotationViewProj =
+      camera.proj * currentRotation;
+  const glm::mat4 previousUnjitteredRotationViewProj =
+      camera.currentUnjitteredProj * previousRotation;
+  return previousUnjitteredRotationViewProj *
+         glm::inverse(currentJitteredRotationViewProj);
+}
 
 struct TemporalSceneContentState {
   uint64_t lightTopologyVersion = 0u;
@@ -1759,6 +1869,7 @@ temporalRenderScaleChanged(const TemporalCameraHistoryState &history,
   state.currentJitteredViewProj = state.proj * state.view;
 
   const bool resetHistory = resetReason != TemporalHistoryResetReason::None;
+  state.cameraContinuityValid = history.initialized && !resetHistory;
   state.historyValid = taaSelected && history.initialized && !resetHistory;
   state.previousUnjitteredViewProj = state.historyValid
                                          ? history.previousUnjitteredViewProj
@@ -2287,6 +2398,9 @@ struct AntiAliasingFrameMetrics {
   uint32_t reactiveAlphaMaskedDrawCount = 0u;
   uint32_t reactiveMotionUncertainDrawCount = 0u;
   uint32_t reactiveSkippedTessellatedDrawCount = 0u;
+  uint32_t motionClassPassCount = 0u;
+  uint32_t motionClassTextureCount = 0u;
+  uint32_t historyColorTextureCount = 0u;
   uint32_t taaResolvePassCount = 0u;
   uint32_t taaCopyBackPassCount = 0u;
   uint32_t taaPostResolveSceneColorMipPassCount = 0u;
@@ -2324,6 +2438,8 @@ struct AntiAliasingFrameMetrics {
   uint32_t msaaSampleCount = 1u;
   uint32_t msaaWidth = 0u;
   uint32_t msaaHeight = 0u;
+  uint32_t msaaColorTextureCount = 0u;
+  uint32_t msaaDepthTextureCount = 0u;
   uint32_t msaaResolvePassCount = 0u;
   uint32_t msaaAlphaMaskedDrawCount = 0u;
   uint32_t msaaResolveGpuTimingAvailable = 0u;
@@ -2351,6 +2467,11 @@ struct AntiAliasingFrameMetrics {
   uint64_t reactiveMaskTextureBytes = 0u;
   uint64_t reactiveMaskTotalBytes = 0u;
   uint64_t reactiveMaskPassBandwidthEstimateBytes = 0u;
+  uint64_t motionClassTextureBytes = 0u;
+  uint64_t motionClassTotalBytes = 0u;
+  uint64_t motionClassPassBandwidthEstimateBytes = 0u;
+  uint64_t historyColorTextureBytes = 0u;
+  uint64_t historyColorTotalBytes = 0u;
   uint64_t taaHistoryBandwidthEstimateBytes = 0u;
   uint64_t spatialAATextureBytes = 0u;
   uint64_t spatialAATotalBytes = 0u;
@@ -2358,6 +2479,7 @@ struct AntiAliasingFrameMetrics {
   uint64_t spatialAABandwidthEstimateBytes = 0u;
   uint64_t msaaColorTextureBytes = 0u;
   uint64_t msaaDepthTextureBytes = 0u;
+  // Total resident bytes across every swapchain/history ring slot.
   uint64_t msaaTotalBytes = 0u;
   uint64_t msaaResolveBandwidthEstimateBytes = 0u;
   float velocityAverageObjectMotion = 0.0f;
@@ -2367,6 +2489,7 @@ struct AntiAliasingFrameMetrics {
   float velocityStaticResidualEstimate = 0.0f;
   float velocityCameraMatrixDelta = 0.0f;
   float cameraPositionDelta = 0.0f;
+  float cameraDirectionDelta = 0.0f;
   float jitterDeltaMagnitude = 0.0f;
   float velocityMissingPreviousRatio = 0.0f;
   float velocityEdgeDiscontinuityEstimate = 0.0f;
@@ -2420,6 +2543,7 @@ struct AntiAliasingFrameMetrics {
   bool jitterFrozen = false;
   bool taaQualityValidationInvalidatedByFrozenJitter = false;
   bool jitterOutOfBounds = false;
+  bool cameraContinuityValid = false;
   bool historyValid = false;
   bool temporalDataValid = false;
   bool motionVectorAllocated = false;
@@ -2433,6 +2557,11 @@ struct AntiAliasingFrameMetrics {
   bool reactiveMaskAllocated = false;
   bool reactiveMaskGraphPublished = false;
   bool reactiveMaskFormatSupported = false;
+  bool motionClassAllocated = false;
+  bool motionClassGraphPublished = false;
+  // Pixel-class coverage requires an asynchronous GPU reduction/readback.
+  // Keep false until a backend-independent, non-stalling path publishes it.
+  bool motionClassCoverageAvailable = false;
   bool opaqueVelocityGenerated = false;
   bool velocityDebugViewRendered = false;
   bool previousTransformCacheValid = false;
@@ -2487,8 +2616,18 @@ struct AntiAliasingFrameMetrics {
   bool msaaDepthResolveTargetBound = false;
   bool msaaAlphaToCoverageEnabled = false;
   bool msaaSampleShadingEnabled = false;
+  bool msaaSample4ColorSupported = false;
+  bool msaaSample4DepthSupported = false;
+  bool msaaDepthResolveMinSupported = false;
+  bool msaaAlphaToCoverageSupported = false;
+  bool msaaSampleRateShadingSupported = false;
   bool msaaSpatialCleanupEnabled = false;
   bool msaaSpatialCleanupActive = false;
+  PresentationAAUnsupportedReason msaaUnsupportedReason =
+      PresentationAAUnsupportedReason::None;
+  AlphaCoveragePolicy msaaAlphaCoveragePolicy = AlphaCoveragePolicy::Off;
+  TransparencyAAPolicy msaaTransparencyPolicy =
+      TransparencyAAPolicy::InheritCoverage;
   bool spatialAAEdgesDebugViewRendered = false;
   bool spatialAABlendWeightsDebugViewRendered = false;
   bool spatialAACleanupMaskDebugViewRendered = false;
@@ -2522,6 +2661,8 @@ struct AmbientOcclusionFrameMetrics {
   uint32_t stepCount = 0u;
   uint32_t denoisePassCount = 0u;
   uint32_t textureCount = 0u;
+  uint32_t normalTextureCount = 0u;
+  uint32_t ambientOcclusionTextureCount = 0u;
   uint32_t normalTextureAllocationCount = 0u;
   uint32_t normalTextureReallocationCount = 0u;
   uint32_t ambientOcclusionTextureAllocationCount = 0u;
@@ -2534,8 +2675,12 @@ struct AmbientOcclusionFrameMetrics {
   uint64_t totalTextureBytes = 0u;
   float strength = 1.0f;
   float gpuTimeMs = 0.0f;
+  float temporalGpuTimeMs = 0.0f;
   uint64_t gpuTimingSourceFrameIndex = std::numeric_limits<uint64_t>::max();
+  uint64_t temporalGpuTimingSourceFrameIndex =
+      std::numeric_limits<uint64_t>::max();
   uint32_t gpuTimingAvailable = 0u;
+  uint32_t temporalGpuTimingAvailable = 0u;
   bool enabled = false;
   bool active = false;
   bool normalsAllocated = false;
@@ -2547,6 +2692,8 @@ struct AmbientOcclusionFrameMetrics {
   bool temporalHistoryInvalidated = false;
   bool temporalHistoryValid = false;
   bool temporalMotionVectorsConsumed = false;
+  bool temporalMotionClassConsumed = false;
+  bool temporalPreviousDepthConsumed = false;
   bool scalarAoAvailable = false;
   bool bentNormalAvailable = false;
 };
@@ -2581,6 +2728,12 @@ struct HDRPostProcessFrameMetrics {
 makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
   const glm::vec2 jitterDelta =
       camera.jitterPixelOffset - camera.previousJitterPixelOffset;
+  const glm::mat4 previousView = glm::inverse(camera.currentUnjitteredProj) *
+                                 camera.previousUnjitteredViewProj;
+  const glm::vec3 currentForward = -glm::normalize(
+      glm::vec3(camera.view[0][2], camera.view[1][2], camera.view[2][2]));
+  const glm::vec3 previousForward = -glm::normalize(
+      glm::vec3(previousView[0][2], previousView[1][2], previousView[2][2]));
   return AntiAliasingFrameMetrics{
       .jitterPixelOffset = camera.jitterPixelOffset,
       .previousJitterPixelOffset = camera.previousJitterPixelOffset,
@@ -2594,12 +2747,17 @@ makeAntiAliasingFrameMetrics(const CameraFrameState &camera) noexcept {
       .framesSinceHistoryReset = camera.framesSinceHistoryReset,
       .cameraPositionDelta = glm::length(glm::vec3(camera.cameraPos) -
                                          glm::vec3(camera.previousCameraPos)),
+      .cameraDirectionDelta =
+          camera.cameraContinuityValid
+              ? glm::length(currentForward - previousForward)
+              : 0.0f,
       .jitterDeltaMagnitude = glm::length(jitterDelta),
       .historyResetReason = camera.historyResetReason,
       .jitterEnabled = camera.jitterEnabled,
       .jitterFrozen = camera.jitterFrozen,
       .taaQualityValidationInvalidatedByFrozenJitter = camera.jitterFrozen,
       .jitterOutOfBounds = camera.jitterOutOfBounds,
+      .cameraContinuityValid = camera.cameraContinuityValid,
       .historyValid = camera.historyValid,
       .temporalDataValid = camera.temporalDataValid,
   };
@@ -2775,6 +2933,7 @@ enum class FrameTextureRequirementFlags : uint32_t {
   MsaaSceneDepth = 1u << 10u,
   AmbientOcclusion = 1u << 11u,
   PresentCapture = 1u << 12u,
+  MotionClass = 1u << 13u,
 };
 
 [[nodiscard]] constexpr FrameTextureRequirementFlags
@@ -2814,8 +2973,7 @@ static constexpr FrameTextureRequirementFlags
         FrameTextureRequirementFlags::SceneColor |
         FrameTextureRequirementFlags::FrameColor |
         FrameTextureRequirementFlags::SceneDepth |
-        FrameTextureRequirementFlags::SceneColorMipChain |
-        FrameTextureRequirementFlags::HistoryColor;
+        FrameTextureRequirementFlags::SceneColorMipChain;
 
 struct FrameSharedResources {
   std::optional<ForwardSceneGpuData> forwardSceneGpuData{};
@@ -2827,6 +2985,10 @@ struct FrameSharedResources {
   std::optional<ShadowDebugFrameData> shadowDebugFrameData{};
   FrameTextureRequirementFlags textureRequirements =
       kBaselineFrameTextureRequirements;
+  // Requested allocation and an actual completed graph write are separate.
+  // Providers commit only the intersection on successful frame submission.
+  FrameTextureRequirementFlags historyWriteRequirements =
+      FrameTextureRequirementFlags::None;
   TextureHandle sceneDepthTexture{};
   TextureHandle previousSceneDepthTexture{};
   TextureHandle transmissionVisibilityDepthTexture{};
@@ -2870,6 +3032,7 @@ struct FrameSharedResources {
   RenderGraphTextureId presentCaptureGraphTexture{};
   TextureHandle historyColorReadTexture{};
   TextureHandle historyColorWriteTexture{};
+  bool historyColorReadValid = false;
   TextureHandle exposureReadTexture{};
   TextureHandle exposureWriteTexture{};
   RenderGraphTextureId exposureReadGraphTexture{};
@@ -2877,9 +3040,11 @@ struct FrameSharedResources {
   TextureHandle motionVectorTexture{};
   TextureHandle previousMotionVectorTexture{};
   TextureHandle reactiveMaskTexture{};
+  TextureHandle motionClassTexture{};
   RenderGraphTextureId motionVectorGraphTexture{};
   RenderGraphTextureId previousMotionVectorGraphTexture{};
   RenderGraphTextureId reactiveMaskGraphTexture{};
+  RenderGraphTextureId motionClassGraphTexture{};
   RenderGraphTextureId opaquePickGraphTexture{};
   RenderGraphTextureId opaquePickDepthGraphTexture{};
   std::optional<LightId> selectedLightId{};
@@ -2955,6 +3120,8 @@ private:
 struct RenderFrameContext {
   const RenderScene *scene = nullptr;
   CameraFrameState camera{};
+  PresentationAAPlan presentationAA{};
+  TemporalFrameService *temporalFrameService = nullptr;
   RenderSettings *settings = nullptr;
   RenderFrameMetrics metrics{};
   // Frame-scoped one-shot opaque pick request/result channel.

@@ -442,6 +442,12 @@ struct SceneFrameState {
   const RenderScene *scene = nullptr;
   uint64_t sceneTopologyVersion = 0u;
   size_t renderableCount = 0u;
+  uint64_t committedFrameIndex = std::numeric_limits<uint64_t>::max();
+  size_t committedHistorySlot = 0u;
+  const RenderScene *committedScene = nullptr;
+  uint64_t committedSceneTopologyVersion = 0u;
+  size_t committedRenderableCount = 0u;
+  bool committedFrameValid = false;
   mutable AnimationSceneFrameData publishedData{};
 
   void resetTransientDispatchState() noexcept {
@@ -471,10 +477,14 @@ struct SceneFrameState {
 [[nodiscard]] uint64_t
 retireAfterPreparedFrame(const GPUDevice &gpu,
                          const SceneFrameState &sceneFrame) noexcept {
-  if (sceneFrame.preparedFrameIndex == std::numeric_limits<uint64_t>::max()) {
+  const uint64_t latestFrameIndex =
+      sceneFrame.preparedFrameIndex != std::numeric_limits<uint64_t>::max()
+          ? sceneFrame.preparedFrameIndex
+          : sceneFrame.committedFrameIndex;
+  if (latestFrameIndex == std::numeric_limits<uint64_t>::max()) {
     return 0u;
   }
-  return sceneFrame.preparedFrameIndex + bufferRetireLagFrames(gpu);
+  return latestFrameIndex + bufferRetireLagFrames(gpu);
 }
 
 void destroyOwnedBuffer(GPUDevice &gpu, std::unique_ptr<Buffer> &buffer,
@@ -537,6 +547,12 @@ void invalidatePreparedSceneFrame(SceneFrameState &sceneFrame) noexcept {
   sceneFrame.scene = nullptr;
   sceneFrame.sceneTopologyVersion = 0u;
   sceneFrame.renderableCount = 0u;
+  sceneFrame.committedFrameIndex = std::numeric_limits<uint64_t>::max();
+  sceneFrame.committedHistorySlot = 0u;
+  sceneFrame.committedScene = nullptr;
+  sceneFrame.committedSceneTopologyVersion = 0u;
+  sceneFrame.committedRenderableCount = 0u;
+  sceneFrame.committedFrameValid = false;
 }
 
 void destroyAnimatedRenderableBuffers(
@@ -1335,13 +1351,8 @@ AnimationPoseSimulationBackend::destroyInstance(SceneRuntimeHost &,
           services_->gpu(), impl_->sceneFrame,
           retireAfterPreparedFrame(services_->gpu(), impl_->sceneFrame));
     }
-    impl_->sceneFrame.publishedData = {};
     impl_->sceneFrame.version = 0u;
-    impl_->sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
-    impl_->sceneFrame.previousFrameValid = false;
-    impl_->sceneFrame.scene = nullptr;
-    impl_->sceneFrame.sceneTopologyVersion = 0u;
-    impl_->sceneFrame.renderableCount = 0u;
+    invalidatePreparedSceneFrame(impl_->sceneFrame);
   } else {
     invalidatePreparedSceneFrame(impl_->sceneFrame);
   }
@@ -1479,6 +1490,10 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   if (impl_->sceneFrame.preparedFrameIndex == frameIndex) {
     return Result<bool, std::string>::makeResult(true);
   }
+  if (impl_->sceneFrame.preparedFrameIndex !=
+      std::numeric_limits<uint64_t>::max()) {
+    abandonSceneFrame(impl_->sceneFrame.preparedFrameIndex);
+  }
 
   auto initResult = services_->ensureInitialized();
   if (initResult.hasError()) {
@@ -1503,15 +1518,27 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   }
 
   const RenderScene &scene = *host.scene();
+  const uint64_t geometryMutationVersion =
+      services_->gpu().geometryMutationVersion();
+  const bool renderableBindingsValid = std::all_of(
+      impl_->instances.begin(), impl_->instances.end(),
+      [&scene, geometryMutationVersion](const auto &entry) {
+        const AnimationPoseInstance &instance = entry.second;
+        return instance.cachedSceneTopologyVersion == scene.topologyVersion() &&
+               instance.cachedGeometryMutationVersion ==
+                   geometryMutationVersion;
+      });
   const bool previousFrameValid =
-      sceneFrame.preparedFrameIndex != std::numeric_limits<uint64_t>::max() &&
-      sceneFrame.preparedFrameIndex + 1u == frameIndex &&
-      sceneFrame.scene == &scene &&
-      sceneFrame.sceneTopologyVersion == scene.topologyVersion() &&
-      sceneFrame.renderableCount == scene.renderables().size();
-  const size_t previousHistorySlot = sceneFrame.currentHistorySlot;
+      sceneFrame.committedFrameValid && sceneFrame.committedScene == &scene &&
+      sceneFrame.committedSceneTopologyVersion == scene.topologyVersion() &&
+      sceneFrame.committedRenderableCount == scene.renderables().size() &&
+      renderableBindingsValid;
+  const size_t previousHistorySlot = sceneFrame.committedHistorySlot;
   const size_t currentHistorySlot =
-      static_cast<size_t>(frameIndex % kAnimationSceneFrameHistorySlots);
+      sceneFrame.committedFrameValid
+          ? (sceneFrame.committedHistorySlot + 1u) %
+                kAnimationSceneFrameHistorySlots
+          : static_cast<size_t>(frameIndex % kAnimationSceneFrameHistorySlots);
   auto frameResult =
       ensureSceneFrameBuffer(*services_, scene, sceneFrame, currentHistorySlot);
   if (frameResult.hasError()) {
@@ -2071,6 +2098,53 @@ AnimationPoseSimulationBackend::prepareSceneFrame(SceneRuntimeHost &host,
   sceneFrame.version = ++impl_->sceneFrameVersionCounter;
   sceneFrame.preparedFrameIndex = frameIndex;
   return Result<bool, std::string>::makeResult(true);
+}
+
+void AnimationPoseSimulationBackend::commitSceneFrame(
+    uint64_t frameIndex) noexcept {
+  if (impl_ == nullptr || impl_->sceneFrame.preparedFrameIndex != frameIndex) {
+    return;
+  }
+  SceneFrameState &sceneFrame = impl_->sceneFrame;
+  sceneFrame.committedFrameValid =
+      sceneFrame.version != 0u && sceneFrame.scene != nullptr &&
+      sceneFrame.currentHistorySlot <
+          sceneFrame.instanceMatricesBuffers.size() &&
+      sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot] &&
+      sceneFrame.instanceMatricesBuffers[sceneFrame.currentHistorySlot]
+          ->valid();
+  if (sceneFrame.committedFrameValid) {
+    sceneFrame.committedFrameIndex = frameIndex;
+    sceneFrame.committedHistorySlot = sceneFrame.currentHistorySlot;
+    sceneFrame.committedScene = sceneFrame.scene;
+    sceneFrame.committedSceneTopologyVersion = sceneFrame.sceneTopologyVersion;
+    sceneFrame.committedRenderableCount = sceneFrame.renderableCount;
+  } else {
+    sceneFrame.committedFrameIndex = std::numeric_limits<uint64_t>::max();
+    sceneFrame.committedHistorySlot = 0u;
+    sceneFrame.committedScene = nullptr;
+    sceneFrame.committedSceneTopologyVersion = 0u;
+    sceneFrame.committedRenderableCount = 0u;
+  }
+  sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
+}
+
+void AnimationPoseSimulationBackend::abandonSceneFrame(
+    uint64_t frameIndex) noexcept {
+  if (impl_ == nullptr || impl_->sceneFrame.preparedFrameIndex != frameIndex) {
+    return;
+  }
+  SceneFrameState &sceneFrame = impl_->sceneFrame;
+  sceneFrame.resetTransientDispatchState();
+  sceneFrame.geometryOverrides.clear();
+  sceneFrame.previousGeometryOverrides.clear();
+  sceneFrame.publishedData = {};
+  sceneFrame.version = 0u;
+  sceneFrame.preparedFrameIndex = std::numeric_limits<uint64_t>::max();
+  sceneFrame.previousFrameValid = false;
+  sceneFrame.scene = nullptr;
+  sceneFrame.sceneTopologyVersion = 0u;
+  sceneFrame.renderableCount = 0u;
 }
 
 void AnimationPoseSimulationBackend::reset() {

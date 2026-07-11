@@ -2,6 +2,7 @@
 
 #include "nuri/gfx/pipeline/features/temporal_aa_feature.h"
 
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/gfx/frame/render_frame_context.h"
 
 #include <algorithm>
@@ -109,9 +110,13 @@ struct TAAResolvePushConstants {
 static_assert(sizeof(TAAResolvePushConstants) <= 128);
 
 [[nodiscard]] inline bool
-isTAAEnabled(const RenderSettings &settings) noexcept {
-  return sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-         AntiAliasingMode::TAA;
+isLegacyTAAEnabled(const RenderFrameContext &frame) noexcept {
+  return frame.presentationAA.valid
+             ? frame.presentationAA.reconstruction ==
+                   ColorReconstruction::LegacyTAA
+             : sanitizeAntiAliasingMode(
+                   renderSettingsOrDefault(frame).antiAliasing.mode) ==
+                   AntiAliasingMode::TAA;
 }
 
 [[nodiscard]] inline bool
@@ -474,10 +479,22 @@ makeFullscreenDraw(RenderPipelineHandle pipeline,
 
 } // namespace
 
+namespace {
+
+[[nodiscard]] bool
+temporalInputPlacementEnabled(const FrameBuildContext &ctx,
+                              TemporalInputPlacement placement) {
+  const PresentationAAPlan plan = presentationAAPlanForFrame(ctx.frame);
+  return placement == TemporalInputPlacement::EarlyGtao
+             ? plan.gtaoTemporal
+             : usesTemporalColorReconstruction(plan);
+}
+
+} // namespace
+
 bool TemporalAAMotionVectorClearPass::isEnabled(
     const FrameBuildContext &ctx) const {
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  return isTAAEnabled(settings);
+  return temporalInputPlacementEnabled(ctx, placement_);
 }
 
 Result<bool, std::string>
@@ -509,6 +526,7 @@ TemporalAAMotionVectorClearPass::build(FrameBuildContext &ctx) {
                       .storeOp = StoreOp::Store,
                       .clearColor = kFrameCompositionMotionVectorClearValue};
   passDesc.colorTexture = ctx.shared.motionVectorGraphTexture;
+  passDesc.gpuTimingScope = GpuTimingScope::Velocity;
   passDesc.debugLabel = "Temporal AA Motion Vector Clear";
   passDesc.debugColor = 0xff44aaff;
 
@@ -516,6 +534,8 @@ TemporalAAMotionVectorClearPass::build(FrameBuildContext &ctx) {
   if (addResult.hasError()) {
     return Result<bool, std::string>::makeError(addResult.error());
   }
+  ctx.shared.historyWriteRequirements |=
+      FrameTextureRequirementFlags::MotionVectors;
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   aaMetrics.motionVectorClearPassCount = 1u;
   aaMetrics.motionVectorClearBytes = aaMetrics.motionVectorTextureBytes;
@@ -524,8 +544,7 @@ TemporalAAMotionVectorClearPass::build(FrameBuildContext &ctx) {
 
 bool TemporalAAReactiveMaskClearPass::isEnabled(
     const FrameBuildContext &ctx) const {
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  return isTAAEnabled(settings);
+  return temporalInputPlacementEnabled(ctx, placement_);
 }
 
 Result<bool, std::string>
@@ -557,6 +576,7 @@ TemporalAAReactiveMaskClearPass::build(FrameBuildContext &ctx) {
                       .storeOp = StoreOp::Store,
                       .clearColor = kFrameCompositionReactiveMaskClearValue};
   passDesc.colorTexture = ctx.shared.reactiveMaskGraphTexture;
+  passDesc.gpuTimingScope = GpuTimingScope::ReactiveMask;
   passDesc.debugLabel = "Temporal AA Reactive Mask Clear";
   passDesc.debugColor = 0xff33cc88;
 
@@ -567,6 +587,349 @@ TemporalAAReactiveMaskClearPass::build(FrameBuildContext &ctx) {
   AntiAliasingFrameMetrics &aaMetrics = ctx.frame.metrics.antiAliasing;
   aaMetrics.reactiveMaskPassBandwidthEstimateBytes =
       aaMetrics.reactiveMaskTextureBytes;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+namespace {
+
+struct BackgroundMotionPushConstants {
+  glm::mat4 previousFromCurrentJitteredRotationClip{1.0f};
+  uint32_t currentJitterUvXBits = 0u;
+  uint32_t currentJitterUvYBits = 0u;
+  uint32_t historyValid = 0u;
+};
+static_assert(sizeof(BackgroundMotionPushConstants) <= 128u);
+static_assert(offsetof(BackgroundMotionPushConstants, currentJitterUvXBits) ==
+              sizeof(glm::mat4));
+
+} // namespace
+
+TemporalAABackgroundMotionPass::TemporalAABackgroundMotionPass(
+    GPUDevice &gpu, RuntimeCompositeConfig config,
+    TemporalInputPlacement placement)
+    : gpu_(gpu), placement_(placement) {
+  const std::filesystem::path basePath = resolveShaderBasePath(config);
+  vertexPath_ = basePath / "taa_background_motion.vert";
+  fragmentPath_ = basePath / "taa_background_motion.frag";
+}
+
+TemporalAABackgroundMotionPass::~TemporalAABackgroundMotionPass() {
+  if (nuri::isValid(pipeline_)) {
+    gpu_.destroyRenderPipeline(pipeline_);
+  }
+  if (nuri::isValid(vertexShader_)) {
+    gpu_.destroyShaderModule(vertexShader_);
+  }
+  if (nuri::isValid(fragmentShader_)) {
+    gpu_.destroyShaderModule(fragmentShader_);
+  }
+}
+
+bool TemporalAABackgroundMotionPass::isEnabled(
+    const FrameBuildContext &ctx) const {
+  const PresentationAAPlan plan = presentationAAPlanForFrame(ctx.frame);
+  return temporalInputPlacementEnabled(ctx, placement_) &&
+         plan.reconstruction == ColorReconstruction::ReferenceTAA &&
+         plan.needsMotion;
+}
+
+Result<bool, std::string>
+TemporalAABackgroundMotionPass::prepare(FrameBuildContext &ctx) {
+  if (!isEnabled(ctx)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (initialized_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  shader_ = Shader::create("taa_background_motion", gpu_);
+  if (!shader_) {
+    return Result<bool, std::string>::makeError(
+        "TemporalAABackgroundMotionPass::prepare: failed to create shader");
+  }
+  auto vertexResult =
+      shader_->compileFromFile(vertexPath_.string(), ShaderStage::Vertex);
+  if (vertexResult.hasError()) {
+    return Result<bool, std::string>::makeError(vertexResult.error());
+  }
+  auto fragmentResult =
+      shader_->compileFromFile(fragmentPath_.string(), ShaderStage::Fragment);
+  if (fragmentResult.hasError()) {
+    gpu_.destroyShaderModule(vertexResult.value());
+    return Result<bool, std::string>::makeError(fragmentResult.error());
+  }
+  vertexShader_ = vertexResult.value();
+  fragmentShader_ = fragmentResult.value();
+  RenderPipelineDesc pipelineDesc = fullscreenPipelineDesc(
+      kFrameCompositionMotionVectorFormat, vertexShader_, fragmentShader_);
+  pipelineDesc.depthFormat = kFrameCompositionDepthFormat;
+  auto pipelineResult =
+      gpu_.createRenderPipeline(pipelineDesc, "taa_background_motion");
+  if (pipelineResult.hasError()) {
+    return Result<bool, std::string>::makeError(pipelineResult.error());
+  }
+  pipeline_ = pipelineResult.value();
+  initialized_ = true;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+TemporalAABackgroundMotionPass::build(FrameBuildContext &ctx) {
+  // The early GTAO boundary and later color boundary share one canonical
+  // motion/class pair. A published class proves the earlier boundary already
+  // produced background motion this frame.
+  if (nuri::isValid(ctx.shared.motionClassGraphTexture)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!isEnabled(ctx) || !nuri::isValid(pipeline_) ||
+      !nuri::isValid(ctx.shared.motionVectorTexture) ||
+      !nuri::isValid(ctx.shared.motionVectorGraphTexture) ||
+      !nuri::isValid(ctx.shared.sceneDepthTexture)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  if (!nuri::isValid(ctx.shared.sceneDepthGraphTexture)) {
+    auto depthImport =
+        ctx.graph.importTexture(ctx.shared.sceneDepthTexture, "scene_depth");
+    if (depthImport.hasError()) {
+      return Result<bool, std::string>::makeError(depthImport.error());
+    }
+    ctx.shared.sceneDepthGraphTexture = depthImport.value();
+  }
+
+  const TextureDimensions dimensions =
+      gpu_.getTextureDimensions(ctx.shared.motionVectorTexture);
+  const float inverseWidth =
+      1.0f / static_cast<float>(std::max(dimensions.width, 1u));
+  const float inverseHeight =
+      1.0f / static_cast<float>(std::max(dimensions.height, 1u));
+  const glm::vec2 currentJitterUv{
+      ctx.frame.camera.jitterPixelOffset.x * inverseWidth,
+      -ctx.frame.camera.jitterPixelOffset.y * inverseHeight,
+  };
+  const BackgroundMotionPushConstants constants{
+      .previousFromCurrentJitteredRotationClip =
+          makeBackgroundRotationReprojection(ctx.frame.camera),
+      .currentJitterUvXBits = std::bit_cast<uint32_t>(currentJitterUv.x),
+      .currentJitterUvYBits = std::bit_cast<uint32_t>(currentJitterUv.y),
+      .historyValid = ctx.frame.camera.historyValid ? 1u : 0u,
+  };
+  DrawItem draw = makeFullscreenDraw(
+      pipeline_,
+      std::span<const std::byte>(
+          reinterpret_cast<const std::byte *>(&constants), sizeof(constants)),
+      "TaaBackgroundMotion");
+  draw.useDepthState = true;
+  draw.depthState = {
+      .compareOp = CompareOp::Equal,
+      .isDepthWriteEnabled = false,
+  };
+
+  RenderGraphGraphicsPassDesc pass{};
+  pass.color = {.loadOp = LoadOp::Load, .storeOp = StoreOp::Store};
+  pass.colorTexture = ctx.shared.motionVectorGraphTexture;
+  pass.depth = {.loadOp = LoadOp::Load,
+                .storeOp = StoreOp::Store,
+                .clearDepth = 1.0f,
+                .clearStencil = 0u};
+  pass.depthTexture = ctx.shared.sceneDepthGraphTexture;
+  pass.draws = std::span<const DrawItem>(&draw, 1u);
+  pass.debugLabel = "TAA Background Motion Pass";
+  pass.debugColor = 0xff4488ff;
+  auto addResult = ctx.graph.addGraphicsPass(pass);
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
+  ctx.shared.historyWriteRequirements |=
+      FrameTextureRequirementFlags::MotionVectors;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+namespace {
+
+struct MotionClassPushConstants {
+  uint32_t depthTexId = 0u;
+  uint32_t motionTexId = 0u;
+  uint32_t reactiveTexId = 0u;
+  uint32_t pointSamplerId = 0u;
+  uint32_t forceInvalidGeometry = 0u;
+  uint32_t provenStaticCameraOnly = 0u;
+};
+static_assert(sizeof(MotionClassPushConstants) == 24u);
+
+} // namespace
+
+TemporalAAMotionClassPass::TemporalAAMotionClassPass(
+    GPUDevice &gpu, RuntimeCompositeConfig config,
+    TemporalInputPlacement placement)
+    : gpu_(gpu), placement_(placement) {
+  const std::filesystem::path basePath = resolveShaderBasePath(config);
+  vertexPath_ = config.fullscreenVertex.empty()
+                    ? basePath / "fullscreen_copy.vert"
+                    : config.fullscreenVertex;
+  fragmentPath_ = basePath / "taa_motion_class.frag";
+}
+
+TemporalAAMotionClassPass::~TemporalAAMotionClassPass() {
+  if (nuri::isValid(pipeline_)) {
+    gpu_.destroyRenderPipeline(pipeline_);
+  }
+  if (nuri::isValid(vertexShader_)) {
+    gpu_.destroyShaderModule(vertexShader_);
+  }
+  if (nuri::isValid(fragmentShader_)) {
+    gpu_.destroyShaderModule(fragmentShader_);
+  }
+}
+
+bool TemporalAAMotionClassPass::isEnabled(const FrameBuildContext &ctx) const {
+  return temporalInputPlacementEnabled(ctx, placement_) &&
+         presentationAAPlanForFrame(ctx.frame).needsMotionClass;
+}
+
+Result<bool, std::string>
+TemporalAAMotionClassPass::prepare(FrameBuildContext &ctx) {
+  if (!isEnabled(ctx)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (initialized_) {
+    return Result<bool, std::string>::makeResult(true);
+  }
+
+  shader_ = Shader::create("taa_motion_class", gpu_);
+  if (!shader_) {
+    return Result<bool, std::string>::makeError(
+        "TemporalAAMotionClassPass::prepare: failed to create shader");
+  }
+  auto vertexResult =
+      shader_->compileFromFile(vertexPath_.string(), ShaderStage::Vertex);
+  if (vertexResult.hasError()) {
+    return Result<bool, std::string>::makeError(vertexResult.error());
+  }
+  auto fragmentResult =
+      shader_->compileFromFile(fragmentPath_.string(), ShaderStage::Fragment);
+  if (fragmentResult.hasError()) {
+    gpu_.destroyShaderModule(vertexResult.value());
+    return Result<bool, std::string>::makeError(fragmentResult.error());
+  }
+  vertexShader_ = vertexResult.value();
+  fragmentShader_ = fragmentResult.value();
+  auto pipelineResult = gpu_.createRenderPipeline(
+      fullscreenPipelineDesc(kFrameCompositionMotionClassFormat, vertexShader_,
+                             fragmentShader_),
+      "taa_motion_class");
+  if (pipelineResult.hasError()) {
+    return Result<bool, std::string>::makeError(pipelineResult.error());
+  }
+  pipeline_ = pipelineResult.value();
+  initialized_ = true;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+Result<bool, std::string>
+TemporalAAMotionClassPass::build(FrameBuildContext &ctx) {
+  // The early GTAO input feature and the later color feature share one
+  // canonical classification. Whichever boundary publishes it first is the
+  // sole writer for the frame.
+  if (nuri::isValid(ctx.shared.motionClassGraphTexture)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  if (!isEnabled(ctx) || !nuri::isValid(pipeline_) ||
+      !nuri::isValid(ctx.shared.motionClassTexture) ||
+      !nuri::isValid(ctx.shared.sceneDepthTexture) ||
+      !nuri::isValid(ctx.shared.motionVectorTexture) ||
+      !nuri::isValid(ctx.shared.reactiveMaskTexture)) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+
+  const uint32_t depthTexId =
+      gpu_.getTextureBindlessIndex(ctx.shared.sceneDepthTexture);
+  const uint32_t motionTexId =
+      gpu_.getTextureBindlessIndex(ctx.shared.motionVectorTexture);
+  const uint32_t reactiveTexId =
+      gpu_.getTextureBindlessIndex(ctx.shared.reactiveMaskTexture);
+  const uint32_t pointSamplerId = gpu_.getDefaultSamplerBindlessIndex();
+  if (depthTexId == kInvalidTextureBindlessIndex ||
+      motionTexId == kInvalidTextureBindlessIndex ||
+      reactiveTexId == kInvalidTextureBindlessIndex ||
+      pointSamplerId == kInvalidTextureBindlessIndex) {
+    return Result<bool, std::string>::makeError(
+        "TemporalAAMotionClassPass::build: invalid bindless resource");
+  }
+
+  auto output = ctx.graph.importTexture(ctx.shared.motionClassTexture,
+                                        "taa_motion_class");
+  if (output.hasError()) {
+    return Result<bool, std::string>::makeError(output.error());
+  }
+  ctx.shared.motionClassGraphTexture = output.value();
+
+  const bool forceInvalidGeometry =
+      !ctx.frame.metrics.antiAliasing.opaqueVelocityGenerated ||
+      ctx.frame.metrics.antiAliasing.velocityTessellatedSkippedDrawCount > 0u;
+  const MotionClassPushConstants constants{
+      .depthTexId = depthTexId,
+      .motionTexId = motionTexId,
+      .reactiveTexId = reactiveTexId,
+      .pointSamplerId = pointSamplerId,
+      .forceInvalidGeometry = forceInvalidGeometry ? 1u : 0u,
+      .provenStaticCameraOnly =
+          ctx.frame.metrics.antiAliasing.motionVectorDepthReprojectionGenerated
+              ? 1u
+              : 0u,
+  };
+  const DrawItem draw = makeFullscreenDraw(
+      pipeline_,
+      std::span<const std::byte>(
+          reinterpret_cast<const std::byte *>(&constants), sizeof(constants)),
+      "TaaMotionClass");
+  const std::array<TextureHandle, 3> reads{
+      ctx.shared.sceneDepthTexture,
+      ctx.shared.motionVectorTexture,
+      ctx.shared.reactiveMaskTexture,
+  };
+  RenderGraphGraphicsPassDesc pass{};
+  pass.color = {.loadOp = LoadOp::Clear,
+                .storeOp = StoreOp::Store,
+                .clearColor = kFrameCompositionMotionClassClearValue};
+  pass.colorTexture = output.value();
+  pass.dependencyTextures = reads;
+  pass.draws = std::span<const DrawItem>(&draw, 1u);
+  pass.debugLabel = "TAA Motion Class Pass";
+  pass.debugColor = 0xff55aaff;
+  auto addResult = ctx.graph.addGraphicsPass(pass);
+  if (addResult.hasError()) {
+    return Result<bool, std::string>::makeError(addResult.error());
+  }
+
+  AntiAliasingFrameMetrics &metrics = ctx.frame.metrics.antiAliasing;
+  ctx.shared.historyWriteRequirements |=
+      FrameTextureRequirementFlags::MotionClass;
+  metrics.motionClassPassCount = 1u;
+  metrics.motionClassGraphPublished = true;
+  metrics.motionClassPassBandwidthEstimateBytes =
+      textureStorageBytes(gpu_, ctx.shared.sceneDepthTexture) +
+      textureStorageBytes(gpu_, ctx.shared.motionVectorTexture) +
+      textureStorageBytes(gpu_, ctx.shared.reactiveMaskTexture) +
+      textureStorageBytes(gpu_, ctx.shared.motionClassTexture);
+  if (isRenderCaptureRequested(ctx.frame, "motion_class")) {
+    ctx.frame.captureRegistry.publish(RenderCapturePoint{
+        .name = "motion_class",
+        .version = 1u,
+        .texture = ctx.shared.motionClassTexture,
+        .format = gpu_.getTextureFormat(ctx.shared.motionClassTexture),
+        .dimensions = gpu_.getTextureDimensions(ctx.shared.motionClassTexture),
+        .frameIndex = ctx.frame.frameIndex,
+        .mip = 0u,
+        .layer = 0u,
+        .kind = RenderCaptureValueKind::Mask,
+        .lifetime = RenderCaptureLifetimeClass::FrameSharedRingTexture,
+        .colorSpace = "motion_class_u8",
+        .defaultCompareProfile = "mask",
+        .producerPassLabel = "TAA Motion Class Pass",
+        .debugLabel = "motion_class",
+    });
+  }
   return Result<bool, std::string>::makeResult(true);
 }
 
@@ -596,8 +959,7 @@ TemporalAAResolvePass::~TemporalAAResolvePass() {
 }
 
 bool TemporalAAResolvePass::isEnabled(const FrameBuildContext &ctx) const {
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  return isTAAEnabled(settings);
+  return isLegacyTAAEnabled(ctx.frame);
 }
 
 Result<bool, std::string>
@@ -710,7 +1072,8 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   const uint32_t reactiveMaskTexId =
       gpu_.getTextureBindlessIndex(ctx.shared.reactiveMaskTexture);
   const TAAResolveTuning tuning = sanitizedResolveTuning(settings.antiAliasing);
-  const bool temporalHistoryValid = ctx.frame.camera.historyValid;
+  const bool temporalHistoryValid =
+      ctx.frame.camera.historyValid && ctx.shared.historyColorReadValid;
   const bool usePreviousDepth =
       temporalHistoryValid &&
       nuri::isValid(ctx.shared.previousSceneDepthTexture);
@@ -1006,6 +1369,8 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
   if (addResolve.hasError()) {
     return Result<bool, std::string>::makeError(addResolve.error());
   }
+  ctx.shared.historyWriteRequirements |=
+      FrameTextureRequirementFlags::HistoryColor;
 
   ++aaMetrics.taaResolvePassCount;
   if (!ctx.frame.camera.historyValid) {
@@ -1211,7 +1576,7 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
         std::span<const TextureHandle>(copyReads.data(), copyReadCount);
     copyPass.draws = std::span<const DrawItem>(&copyDraw, 1u);
     copyPass.gpuTimingScope = debugDisplay ? GpuTimingScope::TemporalAADebug
-                                           : GpuTimingScope::TemporalAAResolve;
+                                           : GpuTimingScope::TemporalAACopyBack;
     copyPass.debugLabel = displayLabel;
     copyPass.debugColor = displayColor;
     auto addCopy = ctx.graph.addGraphicsPass(copyPass);
@@ -1292,15 +1657,52 @@ Result<bool, std::string> TemporalAAResolvePass::build(FrameBuildContext &ctx) {
 
 TemporalAAFeature::TemporalAAFeature(GPUDevice &gpu,
                                      RuntimeCompositeConfig config)
-    : resolvePass_(gpu, std::move(config)) {}
+    : backgroundMotionPass_(gpu, config,
+                            TemporalInputPlacement::ColorReconstruction),
+      motionClassPass_(gpu, config,
+                       TemporalInputPlacement::ColorReconstruction),
+      resolvePass_(gpu, std::move(config)) {}
+
+TemporalInputFeature::TemporalInputFeature(GPUDevice &gpu,
+                                           RuntimeCompositeConfig config)
+    : backgroundMotionPass_(gpu, config, TemporalInputPlacement::EarlyGtao),
+      motionClassPass_(gpu, std::move(config),
+                       TemporalInputPlacement::EarlyGtao) {}
+
+Result<bool, std::string>
+TemporalInputFeature::publishFrameData(FrameBuildContext &ctx) {
+  const PresentationAAPlan plan = presentationAAPlanForFrame(ctx.frame);
+  if (!plan.gtaoTemporal) {
+    return Result<bool, std::string>::makeResult(false);
+  }
+  ctx.shared.textureRequirements |=
+      FrameTextureRequirementFlags::MotionVectors |
+      FrameTextureRequirementFlags::ReactiveMask |
+      FrameTextureRequirementFlags::MotionClass;
+  return Result<bool, std::string>::makeResult(true);
+}
+
+std::span<RenderFeaturePass *const> TemporalInputFeature::passes() noexcept {
+  return passes_;
+}
 
 Result<bool, std::string>
 TemporalAAFeature::publishFrameData(FrameBuildContext &ctx) {
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  if (isTAAEnabled(settings)) {
+  const PresentationAAPlan plan = presentationAAPlanForFrame(ctx.frame);
+  if (plan.needsMotion) {
     ctx.shared.textureRequirements |=
-        FrameTextureRequirementFlags::MotionVectors |
+        FrameTextureRequirementFlags::MotionVectors;
+  }
+  if (plan.needsReactiveMask) {
+    ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::ReactiveMask;
+  }
+  if (plan.needsMotionClass) {
+    ctx.shared.textureRequirements |= FrameTextureRequirementFlags::MotionClass;
+  }
+  if (isLegacyTAAEnabled(ctx.frame)) {
+    ctx.shared.textureRequirements |=
+        FrameTextureRequirementFlags::HistoryColor;
   }
   return Result<bool, std::string>::makeResult(true);
 }

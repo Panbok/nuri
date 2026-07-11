@@ -3,6 +3,7 @@
 #include "nuri/gfx/pipeline/features/gtao_feature.h"
 
 #include "nuri/core/profiling.h"
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 
 #include <bit>
 #include <cmath>
@@ -72,7 +73,10 @@ struct TemporalPushConstants {
   uint32_t currentTexId = kInvalidTextureBindlessIndex;
   uint32_t historyTexId = kInvalidTextureBindlessIndex;
   uint32_t motionVectorTexId = kInvalidTextureBindlessIndex;
+  uint32_t motionClassTexId = kInvalidTextureBindlessIndex;
   uint32_t sceneDepthTexId = kInvalidTextureBindlessIndex;
+  uint32_t currentViewDepthTexId = kInvalidTextureBindlessIndex;
+  uint32_t previousSceneDepthTexId = kInvalidTextureBindlessIndex;
   uint32_t edgeTexId = kInvalidTextureBindlessIndex;
   uint32_t outputTexId = kInvalidTextureBindlessIndex;
   uint32_t pointSamplerId = 0u;
@@ -82,6 +86,9 @@ struct TemporalPushConstants {
   uint32_t flags = 0u;
   uint32_t baseCurrentWeightBits = 0u;
   uint32_t rejectedCurrentWeightBits = 0u;
+  uint32_t projectionType = 0u;
+  float nearPlane = 0.01f;
+  float farPlane = 1000.0f;
 };
 static_assert(sizeof(TemporalPushConstants) <= 128u);
 
@@ -571,10 +578,6 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
 
   const RenderSettings::AmbientOcclusionSettings ao =
       resolvedAmbientOcclusionSettings(ctx.frame);
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  const bool taaSelected =
-      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-      AntiAliasingMode::TAA;
   const TextureDimensions dimensions =
       gpu_.getTextureDimensions(ctx.shared.sceneDepthTexture);
   const uint32_t width = std::max(dimensions.width, 1u);
@@ -589,6 +592,12 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     metrics.gpuTimeMs = timingReport.gtaoTimeMs;
     metrics.gpuTimingSourceFrameIndex = timingReport.gtaoSourceFrameIndex;
     metrics.gpuTimingAvailable = 1u;
+  }
+  if (hasGpuTimingScope(timingReport, GpuTimingScope::GTAOTemporal)) {
+    metrics.temporalGpuTimeMs = timingReport.gtaoTemporalTimeMs;
+    metrics.temporalGpuTimingSourceFrameIndex =
+        timingReport.gtaoTemporalSourceFrameIndex;
+    metrics.temporalGpuTimingAvailable = 1u;
   }
   metrics.enabled = true;
   metrics.active = true;
@@ -644,13 +653,19 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   }
 
   bool temporalActive =
-      ao.temporalAccumulation && taaSelected && ctx.frame.camera.historyValid &&
+      presentationAAPlanForFrame(ctx.frame).gtaoTemporal &&
+      hasTemporalCameraContinuity(ctx.frame.camera) &&
       ctx.frame.camera.temporalDataValid &&
       nuri::isValid(ctx.shared.previousAmbientOcclusionTexture) &&
       nuri::isValid(ctx.shared.motionVectorTexture) &&
-      nuri::isValid(ctx.shared.motionVectorGraphTexture);
+      nuri::isValid(ctx.shared.motionVectorGraphTexture) &&
+      nuri::isValid(ctx.shared.motionClassTexture) &&
+      nuri::isValid(ctx.shared.motionClassGraphTexture) &&
+      nuri::isValid(ctx.shared.previousSceneDepthTexture);
   uint32_t previousAoTexId = kInvalidTextureBindlessIndex;
   uint32_t motionVectorTexId = kInvalidTextureBindlessIndex;
+  uint32_t motionClassTexId = kInvalidTextureBindlessIndex;
+  uint32_t previousSceneDepthTexId = kInvalidTextureBindlessIndex;
   uint32_t pointSamplerId = kInvalidTextureBindlessIndex;
   uint32_t linearSamplerId = kInvalidTextureBindlessIndex;
   if (temporalActive) {
@@ -658,10 +673,16 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
         ctx.shared.previousAmbientOcclusionTexture);
     motionVectorTexId =
         gpu_.getTextureBindlessIndex(ctx.shared.motionVectorTexture);
+    motionClassTexId =
+        gpu_.getTextureBindlessIndex(ctx.shared.motionClassTexture);
+    previousSceneDepthTexId =
+        gpu_.getTextureBindlessIndex(ctx.shared.previousSceneDepthTexture);
     pointSamplerId = gpu_.getSamplerBindlessIndex(pointClampSampler_);
     linearSamplerId = gpu_.getSamplerBindlessIndex(linearClampSampler_);
     temporalActive = previousAoTexId != kInvalidTextureBindlessIndex &&
                      motionVectorTexId != kInvalidTextureBindlessIndex &&
+                     motionClassTexId != kInvalidTextureBindlessIndex &&
+                     previousSceneDepthTexId != kInvalidTextureBindlessIndex &&
                      pointSamplerId != kInvalidTextureBindlessIndex &&
                      linearSamplerId != kInvalidTextureBindlessIndex;
   }
@@ -686,6 +707,8 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
       nuri::isValid(ctx.shared.previousAmbientOcclusionTexture);
   metrics.temporalAccumulationActive = temporalActive;
   metrics.temporalMotionVectorsConsumed = temporalActive;
+  metrics.temporalMotionClassConsumed = temporalActive;
+  metrics.temporalPreviousDepthConsumed = temporalActive;
   metrics.temporalPassCount = temporalActive ? 1u : 0u;
 
   DepthPrefilterPushConstants depthPc{
@@ -902,7 +925,10 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
         .currentTexId = denoiseSourceTexId,
         .historyTexId = previousAoTexId,
         .motionVectorTexId = motionVectorTexId,
+        .motionClassTexId = motionClassTexId,
         .sceneDepthTexId = sourceDepthTexId,
+        .currentViewDepthTexId = depthTexIds[0],
+        .previousSceneDepthTexId = previousSceneDepthTexId,
         .edgeTexId = edgeTexId,
         .outputTexId = finalTexId,
         .pointSamplerId = pointSamplerId,
@@ -914,23 +940,30 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
             std::bit_cast<uint32_t>(kTemporalBaseCurrentWeight),
         .rejectedCurrentWeightBits =
             std::bit_cast<uint32_t>(kTemporalRejectedCurrentWeight),
+        .projectionType =
+            static_cast<uint32_t>(ctx.frame.camera.projectionType),
+        .nearPlane = ctx.frame.camera.nearPlane,
+        .farPlane = ctx.frame.camera.farPlane,
     };
     temporalDependencies_[0] = denoiseSource;
     temporalDependencies_[1] = ctx.shared.previousAmbientOcclusionTexture;
     temporalDependencies_[2] = ctx.shared.motionVectorTexture;
-    temporalDependencies_[3] = ctx.shared.sceneDepthTexture;
-    temporalDependencies_[4] = scratch->edges;
-    temporalDependencies_[5] = ctx.shared.ambientOcclusionTexture;
-    for (uint32_t i = 0u; i < 5u; ++i) {
+    temporalDependencies_[3] = ctx.shared.motionClassTexture;
+    temporalDependencies_[4] = ctx.shared.sceneDepthTexture;
+    temporalDependencies_[5] = scratch->viewDepthMips[0];
+    temporalDependencies_[6] = ctx.shared.previousSceneDepthTexture;
+    temporalDependencies_[7] = scratch->edges;
+    temporalDependencies_[8] = ctx.shared.ambientOcclusionTexture;
+    for (uint32_t i = 0u; i < 8u; ++i) {
       temporalAccessModes_[i] = RenderGraphAccessMode::Read;
     }
-    temporalAccessModes_[5] = RenderGraphAccessMode::Write;
+    temporalAccessModes_[8] = RenderGraphAccessMode::Write;
     temporalDispatches_[0] = ComputeDispatchItem{
         .pipeline = temporalPipeline_,
         .dispatch = dispatch,
         .pushConstants = copyPushConstants(temporalPushBytes_, temporalPc),
         .dependencyTextures =
-            std::span<const TextureHandle>(temporalDependencies_.data(), 6u),
+            std::span<const TextureHandle>(temporalDependencies_.data(), 9u),
         .debugLabel = "GTAO Temporal",
         .debugColor = kGTAODebugColor,
     };
@@ -941,10 +974,10 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     temporalPass.preDispatches = std::span<const ComputeDispatchItem>(
         temporalDispatches_.data(), temporalDispatches_.size());
     temporalPass.dependencyTextures =
-        std::span<const TextureHandle>(temporalDependencies_.data(), 6u);
+        std::span<const TextureHandle>(temporalDependencies_.data(), 9u);
     temporalPass.dependencyTextureAccessModes =
-        std::span<const RenderGraphAccessMode>(temporalAccessModes_.data(), 6u);
-    temporalPass.gpuTimingScope = GpuTimingScope::GTAO;
+        std::span<const RenderGraphAccessMode>(temporalAccessModes_.data(), 9u);
+    temporalPass.gpuTimingScope = GpuTimingScope::GTAOTemporal;
     temporalPass.debugLabel = "GTAO Temporal Pass";
     temporalPass.debugColor = kGTAODebugColor;
     auto addTemporal = ctx.graph.addGraphicsPass(temporalPass);
@@ -953,6 +986,25 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
     }
   }
 
+  publishRequestedCapture(ctx.frame, gpu_, "gtao_edges", scratch->edges,
+                          RenderCaptureValueKind::Mask,
+                          RenderCaptureLifetimeClass::FeaturePersistentTexture,
+                          "packed_edge_mask_u8", "mask", "GTAO Edge Pass");
+  publishRequestedCapture(ctx.frame, gpu_, "gtao_current", denoiseSource,
+                          RenderCaptureValueKind::Scalar,
+                          RenderCaptureLifetimeClass::FeaturePersistentTexture,
+                          "linear_scalar", "scalar", "GTAO Denoise Pass");
+  publishRequestedCapture(ctx.frame, gpu_, "gtao_history",
+                          ctx.shared.previousAmbientOcclusionTexture,
+                          RenderCaptureValueKind::Scalar,
+                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                          "linear_scalar", "scalar", "GTAO Temporal Pass");
+  publishRequestedCapture(ctx.frame, gpu_, "gtao_previous_depth",
+                          ctx.shared.previousSceneDepthTexture,
+                          RenderCaptureValueKind::Depth,
+                          RenderCaptureLifetimeClass::FrameSharedRingTexture,
+                          "device_depth", "depth", "GTAO Temporal Pass");
+
   auto importFinal = ctx.graph.importTexture(ctx.shared.ambientOcclusionTexture,
                                              "gtao_final_ambient_occlusion");
   if (importFinal.hasError()) {
@@ -960,6 +1012,8 @@ Result<bool, std::string> GTAOPass::build(FrameBuildContext &ctx) {
   }
   ctx.shared.ambientOcclusionGraphTexture = importFinal.value();
   ctx.frame.sharedResources.ambientOcclusionGraphTexture = importFinal.value();
+  ctx.shared.historyWriteRequirements |=
+      FrameTextureRequirementFlags::AmbientOcclusion;
   ctx.frame.metrics.ambientOcclusion.ambientOcclusionGraphPublished = true;
   publishRequestedCapture(ctx.frame, gpu_, "ambient_occlusion",
                           ctx.shared.ambientOcclusionTexture,
@@ -976,10 +1030,6 @@ Result<bool, std::string>
 GTAOFeature::publishFrameData(FrameBuildContext &ctx) {
   const RenderSettings::AmbientOcclusionSettings ao =
       resolvedAmbientOcclusionSettings(ctx.frame);
-  const RenderSettings &settings = renderSettingsOrDefault(ctx.frame);
-  const bool taaSelected =
-      sanitizeAntiAliasingMode(settings.antiAliasing.mode) ==
-      AntiAliasingMode::TAA;
   AmbientOcclusionFrameMetrics &metrics = ctx.frame.metrics.ambientOcclusion;
   metrics.enabled = ao.mode != AmbientOcclusionMode::Disabled;
   metrics.active = ao.active;
@@ -998,10 +1048,11 @@ GTAOFeature::publishFrameData(FrameBuildContext &ctx) {
     ctx.shared.textureRequirements |=
         FrameTextureRequirementFlags::Normals |
         FrameTextureRequirementFlags::AmbientOcclusion;
-    if (ao.temporalAccumulation && taaSelected &&
-        ctx.frame.camera.historyValid && ctx.frame.camera.temporalDataValid) {
+    if (presentationAAPlanForFrame(ctx.frame).gtaoTemporal) {
       ctx.shared.textureRequirements |=
-          FrameTextureRequirementFlags::MotionVectors;
+          FrameTextureRequirementFlags::MotionVectors |
+          FrameTextureRequirementFlags::ReactiveMask |
+          FrameTextureRequirementFlags::MotionClass;
     }
   }
   return Result<bool, std::string>::makeResult(true);

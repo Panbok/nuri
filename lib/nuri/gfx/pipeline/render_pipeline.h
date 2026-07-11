@@ -39,6 +39,8 @@ public:
   [[nodiscard]] Result<bool, std::string>
   buildRenderGraph(RenderFrameContext &frame, ResourceManager &resources,
                    RenderGraphBuilder &graph);
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept;
+  void onFrameAbandoned(const RenderFrameContext &frame) noexcept;
 
   [[nodiscard]] bool empty() const noexcept {
     return providers_.empty() && features_.empty() && passes_.empty();

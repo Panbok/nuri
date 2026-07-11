@@ -26,6 +26,8 @@ public:
     return "AnimationSceneFrameProvider";
   }
   Result<bool, std::string> prepare(FrameBuildContext &ctx) override;
+  void onFrameSubmitted(const RenderFrameContext &frame) noexcept override;
+  void onFrameAbandoned(const RenderFrameContext &frame) noexcept override;
 
 private:
   SceneRuntimeHost &runtime_;

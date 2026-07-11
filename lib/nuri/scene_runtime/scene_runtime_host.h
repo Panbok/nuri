@@ -45,6 +45,8 @@ public:
   void attachAnimationGpuServices(AnimationGpuServices *services) noexcept;
   [[nodiscard]] Result<bool, std::string>
   prepareAnimationSceneFrame(uint64_t frameIndex);
+  void commitAnimationSceneFrame(uint64_t frameIndex) noexcept;
+  void abandonAnimationSceneFrame(uint64_t frameIndex) noexcept;
   [[nodiscard]] Result<SimulationHandle, std::string>
   createAnimationPoseSimulation(
       const AnimationPoseSimulationCreateInfo &createInfo);

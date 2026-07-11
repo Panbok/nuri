@@ -3,6 +3,7 @@
 #include "nuri/gfx/pipeline/render_pipeline.h"
 
 #include "nuri/core/profiling.h"
+#include "nuri/gfx/frame/presentation_aa_plan.h"
 #include "nuri/resources/gpu/resource_manager.h"
 
 namespace nuri {
@@ -90,6 +91,29 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
                                  RenderGraphBuilder &graph) {
   NURI_PROFILER_FUNCTION();
 
+  const PresentationAAGpuCapabilities gpuCapabilities =
+      resources.gpuMultisampleCapabilities();
+  AntiAliasingFrameMetrics &aaMetrics = frame.metrics.antiAliasing;
+  aaMetrics.msaaSample4ColorSupported = gpuCapabilities.sample4Color;
+  aaMetrics.msaaSample4DepthSupported = gpuCapabilities.sample4Depth;
+  aaMetrics.msaaDepthResolveMinSupported = gpuCapabilities.depthResolveMin;
+  aaMetrics.msaaAlphaToCoverageSupported = gpuCapabilities.alphaToCoverage;
+  aaMetrics.msaaSampleRateShadingSupported = gpuCapabilities.sampleRateShading;
+  aaMetrics.msaaUnsupportedReason =
+      sanitizeAntiAliasingMode(
+          renderSettingsOrDefault(frame).antiAliasing.mode) ==
+              AntiAliasingMode::MSAA4x
+          ? msaa4xUnsupportedReason(gpuCapabilities)
+          : PresentationAAUnsupportedReason::None;
+  auto presentationPlan = buildPresentationAAPlan(
+      renderSettingsOrDefault(frame), {}, gpuCapabilities);
+  if (presentationPlan.hasError()) {
+    return Result<bool, std::string>::makeError(presentationPlan.error());
+  }
+  frame.presentationAA = presentationPlan.value();
+  aaMetrics.msaaAlphaCoveragePolicy = frame.presentationAA.alphaCoverage;
+  aaMetrics.msaaTransparencyPolicy = frame.presentationAA.transparency;
+
   FrameBuildContext ctx{
       .frame = frame,
       .graph = graph,
@@ -176,6 +200,34 @@ RenderPipeline::buildRenderGraph(RenderFrameContext &frame,
   }
 
   return Result<bool, std::string>::makeResult(true);
+}
+
+void RenderPipeline::onFrameSubmitted(
+    const RenderFrameContext &frame) noexcept {
+  for (const std::unique_ptr<FrameDataProvider> &provider : providers_) {
+    if (provider) {
+      provider->onFrameSubmitted(frame);
+    }
+  }
+  for (const std::unique_ptr<RenderFeature> &feature : features_) {
+    if (feature) {
+      feature->onFrameSubmitted(frame);
+    }
+  }
+}
+
+void RenderPipeline::onFrameAbandoned(
+    const RenderFrameContext &frame) noexcept {
+  for (const std::unique_ptr<FrameDataProvider> &provider : providers_) {
+    if (provider) {
+      provider->onFrameAbandoned(frame);
+    }
+  }
+  for (const std::unique_ptr<RenderFeature> &feature : features_) {
+    if (feature) {
+      feature->onFrameAbandoned(frame);
+    }
+  }
 }
 
 } // namespace nuri

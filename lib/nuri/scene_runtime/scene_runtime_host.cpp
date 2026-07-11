@@ -79,6 +79,19 @@ SceneRuntimeHost::prepareAnimationSceneFrame(uint64_t frameIndex) {
   return animationPoseBackend_->prepareSceneFrame(*this, frameIndex);
 }
 
+void SceneRuntimeHost::commitAnimationSceneFrame(uint64_t frameIndex) noexcept {
+  if (animationPoseBackend_) {
+    animationPoseBackend_->commitSceneFrame(frameIndex);
+  }
+}
+
+void SceneRuntimeHost::abandonAnimationSceneFrame(
+    uint64_t frameIndex) noexcept {
+  if (animationPoseBackend_) {
+    animationPoseBackend_->abandonSceneFrame(frameIndex);
+  }
+}
+
 Result<SimulationHandle, std::string>
 SceneRuntimeHost::createAnimationPoseSimulation(
     const AnimationPoseSimulationCreateInfo &createInfo) {
